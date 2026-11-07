@@ -1,0 +1,31 @@
+name: image
+on:
+  workflow_dispatch:
+    inputs:
+      size:
+        description: The exact size of the SD partition you made in hekate (the image must fit it exactly).
+        required: true
+        default: "48G"
+
+permissions:
+  contents: read
+
+jobs:
+  image:
+    runs-on: xcode-27
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: ./.github/actions/bazel
+        with:
+          cache: image
+      - name: Build the image
+        run: |
+          bazel run //:image -- --size "${{ github.event.inputs.size }}" --out "$RUNNER_TEMP/sd"
+          du -sh "$RUNNER_TEMP/sd"
+          ls -lh "$RUNNER_TEMP/sd"
+      - uses: actions/upload-artifact@v7.0.2
+        with:
+          name: ios-sd
+          path: ${{ runner.temp }}/sd
+          if-no-files-found: error
