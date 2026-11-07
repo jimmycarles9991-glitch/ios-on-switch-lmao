@@ -1,6 +1,11 @@
 name: image
 on:
   workflow_dispatch:
+    inputs:
+      runner:
+        description: The hosted macOS runner label to build on.
+        required: false
+        default: xcode-27
 
 # Creates a release, so it may write.
 permissions:
@@ -12,7 +17,7 @@ env:
 
 jobs:
   image:
-    runs-on: xcode-27
+    runs-on: ${{ github.event.inputs.runner || 'xcode-27' }}
     timeout-minutes: 360
     steps:
       - uses: actions/checkout@v7.0.1
@@ -33,6 +38,46 @@ jobs:
           rm -rf ~/Library/Caches/switch-ios-bazel/repository ~/Library/Caches/switch-ios-bazel/disk
           echo "after freeing the build's local caches:"
           df -h / 2>/dev/null || df -h
+
+      - name: Free disk for the compose stage
+        run: |
+          # image.py's own space rule: composing wants ~27 GiB free (13 besides the 14 GiB floor), and
+          # translating again wants ~22 GiB inside the same volume. A finished build leaves a hosted
+          # runner's 180 GiB disk with 12. The repository cache is hardlinked into the extracted
+          # externals (.bazelrc), so removing it frees nothing; the extracted externals the image run
+          # does not consume do free real bytes once their last hardlink link dies with them.
+          ob="$(bazel info output_base 2>/dev/null | tail -1)"
+          echo "== disk hogs, whole =="
+          du -xsh "$ob/external" "$ob/bazel-out" ~/Library/Caches/switch-ios* 2>/dev/null | sort -h || true
+          echo "== extracted externals, biggest first =="
+          du -xsh "$ob"/external/* 2>/dev/null | sort -h | tail -20 || true
+          echo "== simulator runtimes (useless to this build) =="
+          xcrun simctl list runtimes --json 2>/dev/null | python3 -c "
+          import json, sys
+          try:
+              for r in json.load(sys.stdin).get('runtimes', []):
+                  print(r.get('runtimeIdentifier') or r.get('identifier'))
+          except Exception as e:
+              print('simctl json did not parse:', e)
+          " || true
+          xcrun simctl runtime delete --all 2>/dev/null || {
+            sudo rm -rf /Library/Developer/CoreSimulator/Profiles/Runtimes/* 2>/dev/null || true
+          }
+          # The image run's runfiles reach out to: the pip hub, the Xcode repo, the IPSW mods, the Apple
+          # crosstool, Mesa. Everything else (LLVM, Rust, arm gcc, Apple OSS tarballs, ...) only fed
+          # build actions that are already done; drop their last remaining extraction.
+          for d in "$ob"/external/*; do
+            n="$(basename "$d")"
+            case "$n" in
+              *switch_pypi*|*python*|*xcode*|*ipsw*|*rules_python*|*apple_support*|*mesa*|*metal*) continue ;;
+            esac
+            rm -rf "$d" "$ob/external/@$n.marker"
+          done
+          echo "== after freeing =="
+          df -h /
+
+      - name: Compose, populate and pack the image
+        run: |
           bazel run //:image -- --out "$RUNNER_TEMP/sd"
           du -sh "$RUNNER_TEMP/sd"
           find "$RUNNER_TEMP/sd" -type f -exec du -h {} +
