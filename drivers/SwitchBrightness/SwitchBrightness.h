@@ -52,9 +52,6 @@ void switch_als_supply(bool on);
 // MobileGestalt's cache when this differs from the last boot's). Any context.
 bool switch_als_published(void);
 
-// For TegraPanel's frame-end filter (primary interrupt context), at every DC A FRAME_END: the sensor's sample clock.
-void switch_als_frame_end(void);
-
 // The backlight tells the sensor when the panel goes dark or lights up: the sensor stops converting while it is dark.
 // Thread context.
 void switch_als_set_active(bool active);

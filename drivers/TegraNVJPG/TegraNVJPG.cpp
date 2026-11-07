@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BSD-2-Clause-Patent
 // Tegra210 NVJPG (JPEG codec 1.0, a falcon behind host1x): bring-up, its SMMU domain, the job engine and sleep.
 // tegra_nvjpg_probe() runs the whole bring-up by default on its own thread:
-//   J0  NVDEC's bring-up has ended (its 48 MiB arena goes first, and NVJPG's MBIST workaround runs on NVDEC's clock),
+//   J0  NVDEC's bring-up has ended (NVJPG's MBIST workaround runs on NVDEC's clock),
 //       host1x is up, and NVJPG's kernel buffers are allocated: the firmware image, an arena (the setup and status
 //       slots, the self-test's pictures) and the SMMU page directory with its tables
 //   J1  NVJPG's SMMU domain (ASID 125 for the "nvjpg" swgroup, through TegraSMMU: the kernel buffers 1:1, two empty
@@ -375,8 +375,8 @@ void giveBack()
 
 void bringUp(void *, wait_result_t)
 {
-    // NVDEC first, whatever it decides: its 48 MiB arena is reserved while memory is least fragmented, and its clock
-    // is NVJPG's MBIST workaround clock (powerUp leaves NVDEC's clock as it finds it).
+    // NVDEC first, whatever it decides: its clock is NVJPG's MBIST workaround clock (powerUp leaves NVDEC's clock as it
+    // finds it).
     (void)tegra_nvdec_await(kNvdecWaitMs);
     if (tegra_host1x_start()) {
         IOLog("TegraNVJPG: J0 FAIL host1x is not up (see the TegraHost1x line)\n");

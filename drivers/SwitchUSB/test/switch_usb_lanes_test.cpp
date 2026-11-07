@@ -1,6 +1,7 @@
-// XusbLanes.h (//drivers/SwitchUSB:superspeed) on the host: when SS port 0's lane is up across DisplayPort alt mode's
-// decisions and the role, what bringing it up and down writes (against the Linux sequences it follows, and never a bit of
-// USB2 pad 0, its port or another lane), the falcon's SuperSpeed mailbox messages, and which AppleUSBXHCI writes
+// XusbLanes.h on the host: when SS port 0's lane is up across DisplayPort alt mode's decisions, the role and PCIe's PLL
+// calibrations, what bringing it up and down writes (against the Linux sequences it follows, and never a bit of USB2
+// pad 0, its port or another lane), what its root port does as the lane and the cable come and go (SC7 included), the
+// falcon's SuperSpeed mailbox messages, the SMMU state the host's bring-up accepts, and which AppleUSBXHCI writes
 // SwitchXHCI adjusts.
 #include <gtest/gtest.h>
 
@@ -62,10 +63,197 @@ TEST(SwitchUsbLanes, LaneOnlyForAHostWhosePairIsFree)
 {
     for (bool host : {false, true}) {
         for (auto lanes : {SWITCH_USB3_LANES_PENDING, SWITCH_USB3_LANES_FREE, SWITCH_USB3_LANES_TAKEN}) {
-            for (bool pll : {false, true})
-                EXPECT_EQ(xusb_ss_lane_wanted(host, lanes, pll), host && pll && lanes == SWITCH_USB3_LANES_FREE);
+            for (bool uphy : {false, true})
+                EXPECT_EQ(xusb_ss_lane_wanted(host, lanes, uphy), host && uphy && lanes == SWITCH_USB3_LANES_FREE);
         }
     }
+}
+
+// The lane and SS port 0's root port across one host session, as SwitchUSB.cpp's role thread, PCIe's thread
+// (SwitchUPHY.h) and SC7 move them: the lane follows xusb_ss_lane_wanted under the UPHY announcement, the root port
+// follows xusb_ss_port_follow. The model's device is a USB 3 stick: it links at SuperSpeed only when the lane is up as
+// its port powers on, and once it has settled at USB 2.0 it comes back to SuperSpeed only after a USB 2.0 bus reset.
+struct Session {
+    bool host = false, cable = false, uphyReady = false, laneUp = false, held = false;
+    bool usb2Connected = false, superSpeed = false;
+    unsigned resets = 0, usb2Cycles = 0, releases = 0;
+    switch_usb3_lanes lanes = SWITCH_USB3_LANES_FREE;
+
+    void follow()
+    {
+        const bool want = xusb_ss_lane_wanted(host, lanes, uphyReady);
+        laneUp = want;  // switch_usb_ss_lane: up only while the PLL is announced ready
+        const xusb_ss_port_step step = xusb_ss_port_follow(cable, laneUp, held, usb2Connected);
+        EXPECT_FALSE(step.power_on && step.power_off);
+        if (step.power_off) {
+            held = false;
+            superSpeed = false;
+            ++releases;
+            if (cable && host)
+                usb2Connected = true;  // the stick drops to its USB 2.0 pair
+        }
+        if (step.power_on) {
+            held = true;
+            ++resets;
+            if (step.usb2_cycle) {
+                ++usb2Cycles;
+                usb2Connected = false;
+            }
+            superSpeed = !usb2Connected;
+        }
+    }
+
+    // The host role starts: the lane first, then the cable (SuperSpeed, then USB 2.0).
+    void hostRole()
+    {
+        host = true;
+        follow();
+        cable = true;
+        follow();
+        if (!superSpeed)
+            usb2Connected = true;
+    }
+
+    void deviceRole()
+    {
+        cable = false;
+        follow();
+        host = false;
+        follow();
+        usb2Connected = false;
+    }
+
+    // PCIe's calibration: "not ready" clamps the lane on PCIe's thread before it resets the UPHY.
+    void calibrate()
+    {
+        uphyReady = false;
+        laneUp = false;
+        follow();
+        uphyReady = true;
+        follow();
+    }
+
+    // SC7: the PLL and the lane are lost (no write, no listener); after the wake AppleUSBXHCI resets the port, the stick
+    // settles at USB 2.0 because the lane is down, and PCIe calibrates later on its own worker.
+    void sleepAndWake()
+    {
+        uphyReady = false;
+        laneUp = false;
+        superSpeed = false;
+        usb2Connected = true;
+        follow();
+        calibrate();
+    }
+};
+
+TEST(SwitchUsbLanes, StickSessionLinksAtSuperSpeed)
+{
+    Session s;
+    s.uphyReady = true;
+    s.hostRole();
+    EXPECT_TRUE(s.laneUp && s.held && s.superSpeed);
+    EXPECT_EQ(s.resets, 1u) << "PP off, RESET_SSPI, PP on once";
+    EXPECT_EQ(s.usb2Cycles, 0u) << "the lane was up before the USB 2.0 port powered";
+    s.deviceRole();
+    EXPECT_FALSE(s.laneUp || s.held);
+    EXPECT_EQ(s.releases, 1u);
+}
+
+// At boot the host role can come before PCIe has calibrated the PLL: USB 2.0 until "ready", then SuperSpeed, with the
+// stick's USB 2.0 port cycled so it tries again.
+TEST(SwitchUsbLanes, LaneWaitsForPcie)
+{
+    Session s;
+    s.hostRole();
+    EXPECT_FALSE(s.laneUp || s.held || s.superSpeed);
+    EXPECT_TRUE(s.usb2Connected);
+    s.calibrate();
+    EXPECT_TRUE(s.laneUp && s.held && s.superSpeed);
+    EXPECT_EQ(s.usb2Cycles, 1u);
+}
+
+TEST(SwitchUsbLanes, SuperSpeedComesBackAfterSc7)
+{
+    Session s;
+    s.uphyReady = true;
+    s.hostRole();
+    for (int wake = 0; wake < 3; ++wake) {
+        s.sleepAndWake();
+        EXPECT_TRUE(s.laneUp && s.held && s.superSpeed) << wake;
+    }
+    EXPECT_EQ(s.resets, 4u);
+    EXPECT_EQ(s.usb2Cycles, 3u);
+}
+
+// WLAN's retry after a failed post-wake bring-up recalibrates under a live lane: the lane is clamped first, the root
+// port released, and both come back once the PLL is ready again.
+TEST(SwitchUsbLanes, RecalibrationUnderALiveLane)
+{
+    Session s;
+    s.uphyReady = true;
+    s.hostRole();
+    s.calibrate();
+    EXPECT_EQ(s.releases, 1u);
+    EXPECT_TRUE(s.laneUp && s.held && s.superSpeed);
+}
+
+// Pin C: the pairs are DisplayPort's, the root port is never held On; pin D or no DisplayPort: SuperSpeed.
+TEST(SwitchUsbLanes, PinAssignmentDecidesTheRootPort)
+{
+    Session c;
+    c.uphyReady = true;
+    c.lanes = SWITCH_USB3_LANES_PENDING;
+    c.hostRole();
+    c.lanes = SWITCH_USB3_LANES_TAKEN;
+    c.follow();
+    EXPECT_FALSE(c.laneUp || c.held);
+    EXPECT_EQ(c.resets, 0u);
+    Session d;
+    d.uphyReady = true;
+    d.lanes = SWITCH_USB3_LANES_PENDING;
+    d.hostRole();
+    d.usb2Connected = false;  // the dock's hub is still off until HUB_ENABLE
+    d.lanes = SWITCH_USB3_LANES_FREE;
+    d.follow();
+    EXPECT_TRUE(d.laneUp && d.held);
+    EXPECT_EQ(d.usb2Cycles, 0u);
+}
+
+TEST(SwitchUsbLanes, RootPortFollowTable)
+{
+    for (bool cable : {false, true}) {
+        for (bool lane : {false, true}) {
+            for (bool held : {false, true}) {
+                for (bool usb2 : {false, true}) {
+                    const xusb_ss_port_step step = xusb_ss_port_follow(cable, lane, held, usb2);
+                    EXPECT_EQ(step.power_on, cable && lane && !held);
+                    EXPECT_EQ(step.power_off, !(cable && lane) && held);
+                    EXPECT_EQ(step.usb2_cycle, step.power_on && usb2);
+                }
+            }
+        }
+    }
+}
+
+// Tegra XUSB: USB 3 ports 1-4 first in the Supported Protocol capabilities; SS port 0 is xHCI port 1.
+TEST(SwitchUsbLanes, SuperSpeedRootPortNumber)
+{
+    EXPECT_EQ(xusb_ss_xhci_port(1, 4), 1u);
+    EXPECT_EQ(xusb_ss_xhci_port(1, 0), 0u) << "no USB 3 capability";
+    EXPECT_EQ(XUSB_MBOX_RESET_SSPI, 16u);
+    EXPECT_EQ(XUSB_MBOX_RESET_SSPI_DATA, 1u) << "xhci-tegra.c usb3_otg_port_base_1";
+}
+
+// The host's bring-up after SC7 finds XUSB_HOST translated by its own ASID (TegraSMMU restored it): accepted. Bypass is
+// accepted; any other ASID is not.
+TEST(SwitchUsbLanes, HostAsidAsTheBringUpFindsIt)
+{
+    constexpr uint32_t kOurs = 124;
+    EXPECT_TRUE(xusb_host_asid_usable(0, kOurs));
+    EXPECT_TRUE(xusb_host_asid_usable(kOurs, kOurs)) << "an ASID without ENABLE is bypass";
+    EXPECT_TRUE(xusb_host_asid_usable(0x80000000u | kOurs, kOurs));
+    EXPECT_FALSE(xusb_host_asid_usable(0x80000000u | 125u, kOurs));
+    EXPECT_FALSE(xusb_host_asid_usable(0x80000000u, kOurs));
 }
 
 // r24-dpalt's sequencer as agreed: PENDING at attach, FREE for pin D (or no DisplayPort), TAKEN for pin C, hub enable as

@@ -51,7 +51,7 @@ def fsck(store: str, what: str, log: host.Log) -> None:
     log(f'fsck_apfs {store} ({what}): {tail[0]}')
 
 
-APFS_CONTENT = '41504653-0000-11AA-AA11-00306543ECAC'  # 'APFS': how hdiutil hints a bare container
+APFS_CONTAINER = 'EF57347C-0000-11AA-AA11-00306543ECAC'  # hdiutil's hint for the container macOS synthesizes
 
 
 def _attach_os(os_dmg: str, log: host.Log) -> tuple[str, str]:
@@ -59,20 +59,17 @@ def _attach_os(os_dmg: str, log: host.Log) -> tuple[str, str]:
         'hdiutil', 'attach', '-plist', '-readonly', '-nomount', '-noverify', '-noautofsck', os_dmg, log=log
     )
     # The APFS physical store, never a volume: a GPT image's Apple_APFS partition (21H461), or the image itself when
-    # it is a bare container (24B119's OS dmg), which hdiutil hints as APFS content, as it does the volumes.
-    hints = {str(gpt.APFS).upper(), APFS_CONTENT}
-    apfs_part = [
-        e['dev-entry']
-        for e in out['system-entities']
-        if 'volume-kind' not in e
-        and hints & {e.get('content-hint', '').upper(), e.get('unmapped-content-hint', '').upper()}
-    ]
-    if len(apfs_part) != 1:
+    # it is a bare container (24B119's OS dmg). How hdiutil hints the image itself differs between macOS releases
+    # (none at all on macOS 27), so the store is the one diskutil names for the synthesized container.
+    containers = [e['dev-entry'] for e in out['system-entities'] if e.get('content-hint', '').upper() == APFS_CONTAINER]
+    info = host.disk_info(containers[0]) if len(containers) == 1 else None
+    stores = (info or {}).get('APFSPhysicalStores', [])
+    if len(stores) != 1:
         for d in (e.get('dev-entry', '') for e in out['system-entities']):
             if d.startswith('/dev/disk') and 's' not in d[len('/dev/disk') :]:
                 subprocess.run([host.TOOLS['hdiutil'], 'detach', d], capture_output=True, check=False)
-        raise host.HostError(f'{os_dmg}: expected one APFS partition, got {out}')
-    store = apfs_part[0]
+        raise host.HostError(f'{os_dmg}: expected one APFS container on one physical store, got {out}')
+    store = '/dev/' + stores[0]['APFSPhysicalStore']
     slice_at = store.rfind('s', len('/dev/disk'))
     return (store[:slice_at] if slice_at > 0 else store), store
 

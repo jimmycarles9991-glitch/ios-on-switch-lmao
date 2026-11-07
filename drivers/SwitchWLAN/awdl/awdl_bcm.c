@@ -134,6 +134,40 @@ size_t bcm_monitor_probe_request(unsigned item, uint8_t *out, size_t size)
     return n;
 }
 
+size_t bcm_actframe_request(uint8_t *out, size_t size, const uint8_t *frame, size_t len, uint16_t chanspec,
+                            uint32_t dwell_ms, uint32_t packet_id)
+{
+    static const char name[] = "actframe";
+    if (len <= BCM_80211_MGMT_HDR_LEN || len - BCM_80211_MGMT_HDR_LEN > BCM_AF_BODY_MAX)
+        return 0;
+    const uint16_t fc = (uint16_t)(frame[0] | frame[1] << 8);
+    if ((fc & 0x00fc) != 0x00d0)  // type management, subtype action
+        return 0;
+    const size_t body = len - BCM_80211_MGMT_HDR_LEN, total = sizeof(name) + BCM_AF_PARAMS_HDR_LEN + body;
+    if (total > size)
+        return 0;
+    uint8_t *p = out;
+    memcpy(p, name, sizeof(name));
+    p += sizeof(name);
+    const uint32_t words[2] = {chanspec, dwell_ms};
+    for (unsigned w = 0; w < 2; ++w) {
+        for (unsigned i = 0; i < 4; ++i)
+            *p++ = (uint8_t)(words[w] >> (8 * i));
+    }
+    memcpy(p, frame + 16, 6);  // addr3, the BSSID
+    p += 6;
+    *p++ = 0;
+    *p++ = 0;
+    memcpy(p, frame + 4, 6);  // addr1, the destination
+    p += 6;
+    *p++ = (uint8_t)body;
+    *p++ = (uint8_t)(body >> 8);
+    for (unsigned i = 0; i < 4; ++i)
+        *p++ = (uint8_t)(packet_id >> (8 * i));
+    memcpy(p, frame + BCM_80211_MGMT_HDR_LEN, body);
+    return total;
+}
+
 void bcm_probe_record(struct bcm_awdl_probe *p, unsigned item, int status, const uint8_t *reply, size_t length)
 {
     if (item >= BCM_PROBE_COUNT)

@@ -142,9 +142,13 @@ filegroup(
         "//kits/SwitchCRC:all_files",
         "//kits/SwitchDMA:all_files",
         "//kits/SwitchFalcon:all_files",
+        "//kits/SwitchIdle:all_files",
         "//kits/SwitchMMIO:all_files",
         "//kits/SwitchMath:all_files",
+        "//kits/SwitchRefusal:all_files",
         "//kits/SwitchRing:all_files",
+        "//kits/SwitchScratch:all_files",
+        "//kits/SwitchSysctl:all_files",
         "//kits/SwitchTime:all_files",
         "//kits/VerifiedRoot:all_files",
         "//kits/qemu:all_files",
@@ -265,7 +269,7 @@ tool_output(
         "@corecrypto//:all",
     ],
     outs = [
-        "build/corecrypto-2023/libcorecrypto_kernel_noasm-namespaced.a",
+        "build/corecrypto-2023/libcorecrypto_kernel-namespaced.a",
         "build/corecrypto-2023/namespace.h",
     ],
     args = [
@@ -348,16 +352,12 @@ kernel_archive(
         "//drivers/TegraVIC:TegraVIC",
         "//drivers/TegraNVJPG:TegraNVJPG",
         "//drivers/SwitchUSB:SwitchUSB",
+        "//drivers/SwitchDisplayPort:SwitchPDAltMode",
         "//kits/SwitchCAR:SwitchCAR",
         "//kits/SwitchDMA:SwitchDMA",
         "//kits/SwitchFalcon:SwitchFalcon",
+        "//kits/SwitchScratch:SwitchScratch",
     ] + select({
-        "//drivers/SwitchUSB:superspeed_on": ["//drivers/SwitchUSB:SwitchUSBSuperSpeed"],
-        "//conditions:default": [],
-    }) + select({
-        "//drivers/SwitchDisplayPort:alt_mode": ["//drivers/SwitchDisplayPort:SwitchPDAltMode"],
-        "//conditions:default": [],
-    }) + select({
         "//drivers/SwitchDisplayPort:on": ["//drivers/SwitchDisplayPort:SwitchDisplayPort"],
         "//conditions:default": [],
     }),
@@ -443,6 +443,12 @@ kernel_archive(
 )
 
 kernel_archive(
+    name = "libSwitchRefusal",
+    out = "build/switch-refusal/libSwitchRefusal.a",
+    members = ["//kits/SwitchRefusal:SwitchRefusal"],
+)
+
+kernel_archive(
     name = "libLinkStubs",
     out = "build/link-stubs/libLinkStubs.a",
     members = ["//kits/qemu:LinkStubs"],
@@ -466,6 +472,7 @@ xnu_kernel(
         ":libmockfs_fixture",
         ":libShengPlatformPower",
         ":libSwitchDiag",
+        ":libSwitchRefusal",
         ":libLinkStubs",
     ],
     modes = [
@@ -476,6 +483,7 @@ xnu_kernel(
         "force_load",
         "force_load",
         "plain",
+        "force_load",
         "force_load",
         "force_load",
         "force_load",
@@ -502,6 +510,7 @@ xnu_kernel_12377(
         ":libmockfs_fixture",
         ":libShengPlatformPower",
         ":libSwitchDiag",
+        ":libSwitchRefusal",
         ":libLinkStubs",
     ],
     modes = [
@@ -512,6 +521,7 @@ xnu_kernel_12377(
         "force_load",
         "force_load",
         "plain",
+        "force_load",
         "force_load",
         "force_load",
         "force_load",
@@ -541,6 +551,16 @@ alias(
     }),
 )
 
+# The selected kind's prelink report (components, and on iOS 27 the kernel imports left unnamed), for tests.
+filegroup(
+    name = "prelink_report",
+    srcs = select({
+        ":xnu_12377_121_6": [":kernel_12377"],
+        "//conditions:default": [":kernel"],
+    }),
+    output_group = "report",
+)
+
 # --- Prelink: Apple's original kexts (the V20 roots, plus every driver's prelink list) --------------------------------
 tool_output(
     name = "dma_prelink_report",
@@ -552,6 +572,7 @@ tool_output(
         "012162a73b3cb2c8306e7e0a98bae2bdfb4f6cf91d7698feac787939d0c5ffd0",
     ],
     tool = "unxz.py",
+    xcode = False,
 )
 
 kernel_prelink_switch(

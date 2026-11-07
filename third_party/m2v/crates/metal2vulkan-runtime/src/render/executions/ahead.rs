@@ -202,8 +202,12 @@ fn backed(
         let own = crate::render::instance_layout(&layout, bare.as_ref(), &instance.shape);
         let (runs, objects) = run_passes(device, own, instance)?;
         // One framebuffer serves every run: their passes differ only in their operations.
-        let framebuffer =
-            render_target::framebuffer(device, &objects[0], own, ViewSetup::default())?;
+        let framebuffer = render_target::framebuffer(
+            device,
+            &objects[0],
+            (own, &instance.shape),
+            ViewSetup::default(),
+        )?;
         instances.push(Some((runs, framebuffer.raw)));
         held.0.extend(objects);
         held.1.push(framebuffer);

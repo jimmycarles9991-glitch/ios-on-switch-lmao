@@ -1,6 +1,6 @@
 # SwitchDisplayPort: TV output over the USB-C port, as the dock does it (DisplayPort alternate mode into the dock's
-# DisplayPort-to-HDMI converter). Built and host-tested, linked only with --//drivers/SwitchDisplayPort:enabled.
-load("@bazel_skylib//lib:selects.bzl", "selects")
+# DisplayPort-to-HDMI converter). Built and host-tested, linked only with --//drivers/SwitchDisplayPort:enabled. The
+# alternate-mode engine (the dock's mode, its hub, the SuperSpeed pair's fate) is always linked.
 load("@bazel_skylib//rules:common_settings.bzl", "bool_flag")
 load("@rules_cc//cc:cc_library.bzl", "cc_library")
 load("//bazel/lint:defs.bzl", "lint_files")
@@ -33,15 +33,6 @@ config_setting(
     flag_values = {":enabled": "True"},
 )
 
-# The BM92T36 alternate-mode engine runs when any feature behind the dock needs it.
-selects.config_setting_group(
-    name = "alt_mode",
-    match_any = [
-        ":on",
-        "//drivers/SwitchUSB:superspeed_on",
-    ],
-)
-
 # kernel_headers() by hand: the same headers, plus SWITCH_DISPLAYPORT=1 for every driver that names this directory in
 # its hdr_deps (SwitchUSB's SwitchPD.cpp), only with the setting on.
 filegroup(
@@ -60,8 +51,7 @@ cc_library(
     target_compatible_with = ["//bazel/platforms:kernel"],
 )
 
-# The BM92T36 alternate-mode engine: SwitchPD (drivers/SwitchUSB) calls it under SWITCH_DISPLAYPORT or
-# SWITCH_USB_SUPERSPEED; kernel/BUILD.bazel links it with :alt_mode.
+# The BM92T36 alternate-mode engine: SwitchPD (drivers/SwitchUSB) calls it after every ALERT.
 kernel_driver(
     name = "SwitchPDAltMode",
     srcs = ["SwitchPDAltMode.cpp"],

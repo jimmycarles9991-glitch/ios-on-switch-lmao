@@ -172,13 +172,24 @@ static inline const char *tegra_nvjpg_plan(const TegraNVJPGDecodeRequest *r, con
     case 0x20:
         format = TEGRA_NVJPG_OUT_ARGB, planes = 1;
         break;  // kCVPixelFormatType_32ARGB
+    case TEGRA_NVJPG_FOURCC('4', '2', '2', 'f'):
+        format = TEGRA_NVJPG_OUT_NV16, planes = 2;
+        break;
+    case TEGRA_NVJPG_FOURCC('4', '4', '4', 'f'):
+        format = TEGRA_NVJPG_OUT_NV24, planes = 2;
+        break;
+    case TEGRA_NVJPG_FOURCC('y', 'u', 'v', 'f'):
+        format = TEGRA_NVJPG_OUT_YUY2, planes = 1;
+        break;
     default:
-        return "destination pixel format (NVJPG writes 420f, BGRA, RGBA, ARGB)";
+        return "destination pixel format (NVJPG writes 420f, 422f, 444f, yuvf, BGRA, RGBA, ARGB)";
     }
     if (!(a->formats >> format & 1))
         return "output format not proven on this unit";
     if (grey && format != TEGRA_NVJPG_OUT_GREY && !a->greyRgb)
         return "grey to RGB not proven on this unit";
+    if (grey && format != TEGRA_NVJPG_OUT_GREY && tegra_nvjpg_is_yuv(format))
+        return "grey file into a 4:2:2 or 4:4:4 destination";
     *kind = TEGRA_NVJPG_PLAN_BAD;
     if ((d->planes ? d->planes : 1) != planes)
         return "destination plane count";
@@ -202,13 +213,21 @@ static inline const char *tegra_nvjpg_plan(const TegraNVJPGDecodeRequest *r, con
     if (why)
         return why;
     // Where each engine plane starts: the destination's plane plus the picture's offset in it.
-    const uint32_t bpp = format == TEGRA_NVJPG_OUT_NV12 || format == TEGRA_NVJPG_OUT_GREY ? 1 : 4;
-    if (planes == 2 && ((r->x_offset | r->y_offset) & 1))
+    const uint32_t bpp = format == TEGRA_NVJPG_OUT_YUY2                                 ? 2
+                         : tegra_nvjpg_is_yuv(format) || format == TEGRA_NVJPG_OUT_GREY ? 1
+                                                                                        : 4;
+    if (format == TEGRA_NVJPG_OUT_NV12 && ((r->x_offset | r->y_offset) & 1))
         return "odd offset into 4:2:0";
+    if ((format == TEGRA_NVJPG_OUT_NV16 || format == TEGRA_NVJPG_OUT_YUY2) && (r->x_offset & 1))
+        return "odd offset into 4:2:2";
     p->planes = p->extent.planes;
     p->planeStart[0] = d->planeOffset[0] + (uint64_t)r->y_offset * t->pitch[0] + (uint64_t)r->x_offset * bpp;
     if (format == TEGRA_NVJPG_OUT_NV12)
         p->planeStart[1] = d->planeOffset[1] + (uint64_t)(r->y_offset / 2) * t->pitch[1] + r->x_offset;
+    else if (format == TEGRA_NVJPG_OUT_NV16)
+        p->planeStart[1] = d->planeOffset[1] + (uint64_t)r->y_offset * t->pitch[1] + r->x_offset;
+    else if (format == TEGRA_NVJPG_OUT_NV24)
+        p->planeStart[1] = d->planeOffset[1] + (uint64_t)r->y_offset * t->pitch[1] + 2ull * r->x_offset;
     for (uint32_t i = 0; i < p->planes; i++)
         if (p->planeStart[i] & 0xff)
             return "a plane does not start on 256 bytes (NVJPG takes address >> 8)";
@@ -227,9 +246,13 @@ static inline const char *tegra_nvjpg_plan(const TegraNVJPGDecodeRequest *r, con
     }
     // The picture itself lies inside the surface; only the MCU padding past its last row may reach the sink.
     for (uint32_t i = 0; i < p->planes; i++) {
-        const uint64_t rows = i ? (r->out_height + 1) / 2 : r->out_height;
-        const uint64_t bytes =
-            format == TEGRA_NVJPG_OUT_NV12 && i ? 2 * (((uint64_t)r->out_width + 1) / 2) : (uint64_t)r->out_width * bpp;
+        const uint64_t rows = i && format == TEGRA_NVJPG_OUT_NV12 ? (r->out_height + 1) / 2 : r->out_height;
+        const uint64_t pairs = 2 * (((uint64_t)r->out_width + 1) / 2);
+        const uint64_t bytes = format == TEGRA_NVJPG_OUT_YUY2        ? 2 * pairs
+                               : i && format == TEGRA_NVJPG_OUT_NV24 ? 2ull * r->out_width
+                               : i && (format == TEGRA_NVJPG_OUT_NV12 || format == TEGRA_NVJPG_OUT_NV16)
+                                   ? pairs
+                                   : (uint64_t)r->out_width * bpp;
         if (p->planeStart[i] + (rows - 1) * t->pitch[i] + bytes > d->length) {
             *kind = TEGRA_NVJPG_PLAN_BAD;
             return "picture runs past the destination";

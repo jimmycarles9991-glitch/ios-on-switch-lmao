@@ -38,7 +38,6 @@ struct switch_frames_client {
 struct switch_frames_cadence {
     struct switch_frames_client client[SWITCH_FRAMES_CLIENTS];
     uint32_t used;
-    uint32_t dropped; /* messages of clients past a full table */
 };
 
 struct switch_frames_delivery {
@@ -56,6 +55,28 @@ static inline unsigned int switch_frames_bin(uint64_t gap_us, uint64_t period_us
     return periods >= SWITCH_FRAMES_BINS - 1 ? SWITCH_FRAMES_BINS - 1 : (unsigned int)periods;
 }
 
+/* A new client's entry: a free one, else the one whose last message is the oldest (a client gone idle). */
+static inline struct switch_frames_client *switch_frames_new_client(struct switch_frames_cadence *c)
+{
+    uint32_t oldest = 0;
+
+    if (c->used < SWITCH_FRAMES_CLIENTS) {
+        return &c->client[c->used++];
+    }
+    for (uint32_t i = 1; i < SWITCH_FRAMES_CLIENTS; i++) {
+        if (c->client[i].last_us < c->client[oldest].last_us) {
+            oldest = i;
+        }
+    }
+    struct switch_frames_client *e = &c->client[oldest];
+    e->last_us = e->start_us = 0;
+    e->commits = 0;
+    for (unsigned int b = 0; b < SWITCH_FRAMES_BINS; b++) {
+        e->gaps[b] = 0;
+    }
+    return e;
+}
+
 /* A message from pid at now_us (microseconds of mach time). */
 static inline void switch_frames_note_message(struct switch_frames_cadence *c, int32_t pid, const char *name,
                                               uint64_t now_us, uint64_t period_us)
@@ -70,11 +91,7 @@ static inline void switch_frames_note_message(struct switch_frames_cadence *c, i
         }
     }
     if (e == NULL) {
-        if (c->used == SWITCH_FRAMES_CLIENTS) {
-            c->dropped++;
-            return;
-        }
-        e = &c->client[c->used++];
+        e = switch_frames_new_client(c);
         e->pid = pid;
         for (i = 0; i + 1 < SWITCH_FRAMES_NAME && name && name[i]; i++) {
             e->name[i] = name[i];
@@ -100,7 +117,6 @@ static inline void switch_frames_cadence_restart(struct switch_frames_cadence *c
             c->client[i].gaps[b] = 0;
         }
     }
-    c->dropped = 0;
 }
 
 static inline void switch_frames_note_report(struct switch_frames_delivery *d, uint64_t stamp_us)

@@ -148,6 +148,14 @@ class Bl33StageTests(unittest.TestCase):
         with self.assertRaises(SystemExit):
             bl33_patch(image)  # already patched: refuse rather than guess
 
+    def test_a_loader_built_for_another_window_is_refused(self):
+        built_for = {'STAGE_ID': stage_id(self.staged), 'PACKED_BYTES': len(self.staged), 'BLOCKS': [[0, 4096, 0, 64]]}
+        bl33.check_loader_constants(built_for, dict(built_for))
+        for other in ({'STAGE_ID': 1}, {'BLOCKS': [[4096, 4096, 0, 64]]}, {'EXTRA': 0}):
+            with self.assertRaises(SystemExit) as refused:
+                bl33.check_loader_constants(built_for, built_for | other)
+            self.assertIn(next(iter(other)), str(refused.exception))
+
 
 if __name__ == '__main__':
     unittest.main()

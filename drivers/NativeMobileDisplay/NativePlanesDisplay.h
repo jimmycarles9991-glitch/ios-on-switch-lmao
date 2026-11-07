@@ -422,7 +422,7 @@ void kickPlaneOnly(const OriginalLegacySwapRequest *request, const PlaneDecision
         else if (ring.pending != kNoBuffer)
             entrySeq[ring.pending] = seq;
         else
-            retireThrough(seq);
+            retireThrough(seq, mach_absolute_time());
     }
     if (!latchRetire) {
         transferred = true;
@@ -461,7 +461,7 @@ void planeFrameEnd()
             if (now.on && now.image.yuv &&
                 (planeCsc[0] != (int)now.image.matrix || planeCsc[1] != (now.image.fullRange ? 1 : 0)))
                 planeWriteCsc(now.image);
-            retireThrough(now.seq);
+            retireThrough(now.seq, __atomic_load_n(&feStamp, __ATOMIC_ACQUIRE));
             if (planeHeldSet && planeLatch.mayWrite()) {
                 planeHeldSet = false;
                 planeFlipOnly(planeHeld);

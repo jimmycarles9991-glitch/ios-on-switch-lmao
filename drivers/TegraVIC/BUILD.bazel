@@ -31,6 +31,8 @@ kernel_driver(
     name = "TegraVIC",
     srcs = [
         "TegraVIC.cpp",
+        "TegraVICBounce.cpp",
+        "TegraVICPresent.cpp",
         "TegraVICSelfTest.cpp",
         "TegraVICSurface.cpp",
         "TegraVICUserClient.cpp",
@@ -39,6 +41,7 @@ kernel_driver(
     ],
     abi = ["IOSurface"],
     hdr_deps = [
+        "drivers/TegraGM20B",
         "drivers/TegraHost1x",
         "drivers/TegraSMMU",
         "kits/SwitchCAR",
@@ -46,6 +49,7 @@ kernel_driver(
         "kits/SwitchFalcon",
         "kits/SwitchMMIO",
         "kits/SwitchMath",
+        "kits/SwitchRefusal",
         "kits/SwitchTime",
     ],
     stems = {
@@ -55,7 +59,8 @@ kernel_driver(
 )
 
 # The IOSurface kext's functions every driver calls by address: TegraVIC's, the display's surface accessors and its
-# hardware planes' (one bindings file, since each table address is bound once in the kernel).
+# hardware planes', and the GPU driver's prefault of new surfaces (one bindings file, since each table address is bound
+# once in the kernel).
 switch_abi_bindings(
     name = "original_bindings",
     out = "original-bindings.S",
@@ -63,5 +68,6 @@ switch_abi_bindings(
     objects = [
         ":TegraVIC_cc",
         "//drivers/NativeMobileDisplay:NativeLegacyDisplay_cc",
+        "//drivers/TegraGM20B:TegraGM20B_cc",
     ],
 )

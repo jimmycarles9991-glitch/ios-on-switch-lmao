@@ -1,4 +1,4 @@
-// osfmk/kern/switch_stall.h, the decisions of XNU's UI stall reports: which samples of SpringBoard's or backboardd's
+// kernel/switch/diag/stall.h, the decisions of XNU's UI stall reports: which samples of SpringBoard's or backboardd's
 // main thread are a stall, that a stall is reported once and its end once, how waits and user addresses are named.
 #include <gtest/gtest.h>
 

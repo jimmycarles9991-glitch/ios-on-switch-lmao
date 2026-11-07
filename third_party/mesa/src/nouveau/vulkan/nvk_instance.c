@@ -16,6 +16,10 @@
 #include "util/os_misc.h"
 #include "util/u_debug.h"
 
+#if DETECT_OS_APPLE
+#include <TargetConditionals.h>
+#endif
+
 VKAPI_ATTR VkResult VKAPI_CALL
 nvk_EnumerateInstanceVersion(uint32_t *pApiVersion)
 {
@@ -93,6 +97,13 @@ nvk_init_debug_flags(struct nvk_instance *instance)
       { "gart", NVK_DEBUG_FORCE_GART },
       { "coherent", NVK_DEBUG_FORCE_COHERENT },
       { "no_compression", NVK_DEBUG_NO_COMPRESSION },
+#if !DETECT_OS_APPLE || !TARGET_OS_IPHONE
+      /* The raw GM20B pack's second probe, on the macOS twin, records
+       * metal2vulkan's framebuffer fetch without the interlock; the iOS
+       * driver never reads it.
+       */
+      { "no_fsi", NVK_DEBUG_NO_FSI },
+#endif
       { NULL, 0 },
    };
 

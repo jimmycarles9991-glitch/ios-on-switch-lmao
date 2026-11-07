@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: GPL-2.0-only
-// SuperSpeed on the USB-C port (//drivers/SwitchUSB:superspeed) in plain C: when SS port 0's UPHY lane is up, the
-// register values that bring it up and down, what the falcon's SuperSpeed mailbox messages ask for, and the xHCI register
-// writes SwitchXHCI adjusts. test/switch_usb_lanes_test.cpp checks this same header (C11, -Wconversion).
+// SuperSpeed on the USB-C port in plain C: when SS port 0's UPHY lane is up, the register values that bring it up and
+// down, what its root port does when the lane comes and goes, what the falcon's SuperSpeed mailbox messages ask for,
+// and the xHCI register writes SwitchXHCI adjusts. test/switch_usb_lanes_test.cpp checks this same header (C11,
+// -Wconversion).
 //
 // The port's two SuperSpeed pairs are shared with DisplayPort alt mode (drivers/SwitchDisplayPort, which calls
 // switch_usb_set_alt_lanes): USB3 runs on one pair without alt mode or in pin assignment D, and has none in pin C. The
@@ -13,8 +14,9 @@
 // usb3_lane_data (the B01 xusb lane defaults through UPHY_MISC_PAD_P5_CTL8), tegra210_pcie_phy_power_on/off for an
 // xusb lane (SS_PORT_MAP, ECTL1-6, ELPG_PROGRAM_1's VCORE_DOWN/CLAMP_EN_EARLY/CLAMP_EN order and delays),
 // tegra210_uphy_init (FORCE_PCIE_PAD_IDDQ_DISABLE), tegra210_usb3_set_lfps_detect; drivers/usb/host/xhci-tegra.c
-// tegra210b01_soc (scale_ss_clock false, lpm_support false) and tegra_xusb_mbox_handle (LFPS ports from bit 1, no DFE/CTLE
-// context save on T210: NAK); CTCaer l4t-hardware-soc-t210 tegra210b01-soc-prods.dtsi prod_c_ss0 (ECTL1 asic and char);
+// tegra210b01_soc (scale_ss_clock false, lpm_support false), tegra_xusb_mbox_handle (LFPS ports from bit 1, no DFE/CTLE
+// context save on T210: NAK) and tegra_xhci_set_host_mode (T210's OTG SS port: PP off, RESET_SSPI, PP on, before the
+// USB2 port); CTCaer l4t-hardware-soc-t210 tegra210b01-soc-prods.dtsi prod_c_ss0 (ECTL1 asic and char);
 // switch-l4t-platform-t210-nx tegra210b01-nx-common.dtsi (usb3-0: lane pcie-5, companion usb2-0).
 #ifndef XUSB_LANES_H
 #define XUSB_LANES_H
@@ -38,10 +40,11 @@ enum switch_usb3_lanes {
 void switch_usb_set_alt_lanes(enum switch_usb3_lanes lanes, bool dock_hub_enabled);
 
 // The lane goes up for a host whose pair is free once the UPHY PLL runs. PLLE and PLL0 belong to the PCIe controller
-// (drivers/SwitchWLAN TegraPCIe brings them up at boot); this never programs or powers them down.
-static inline bool xusb_ss_lane_wanted(bool host, enum switch_usb3_lanes lanes, bool pll_locked)
+// (drivers/SwitchWLAN TegraPCIe calibrates them at boot and after SC7, kits/SwitchCAR/SwitchUPHY.h); this never
+// programs or powers them down.
+static inline bool xusb_ss_lane_wanted(bool host, enum switch_usb3_lanes lanes, bool uphy_ready)
 {
-    return host && lanes == SWITCH_USB3_LANES_FREE && pll_locked;
+    return host && lanes == SWITCH_USB3_LANES_FREE && uphy_ready;
 }
 
 static inline const char *xusb_lanes_name(enum switch_usb3_lanes lanes)
@@ -84,7 +87,8 @@ static inline const char *xusb_lanes_name(enum switch_usb3_lanes lanes)
 #define XUSB_AUX_RX_TERM_EN      (1u << 18)
 #define XUSB_AUX_RX_IDLE_MODE(x) (((x) & 3u) << 20)
 
-// The lane's register-file writes (UPHY_MISC_PAD_PX_CTL8: address, data, reset, write strobe).
+// The lane's register-file writes (UPHY_MISC_PAD_PX_CTL8: address, data, reset, write strobe). Linux writes them
+// whenever it calibrates the PLL (tegra210_pex_uphy_enable), so they go in at every lane-up, with the lane clamped.
 static inline uint32_t xusb_uphy_cfg(uint32_t address, uint32_t data)
 {
     return ((address & 0xffu) << 16) | (data & 0xffffu) | (1u << 27) | (1u << 24);
@@ -169,12 +173,51 @@ static inline uint32_t xusb_lfps_detect(uint32_t ctl1, bool enable)
     return enable ? v : v | XUSB_AUX_RX_IDLE_MODE(1u) | XUSB_AUX_RX_TERM_EN | XUSB_AUX_RX_MODE_OVRD;
 }
 
+// --- SS port 0's root port --------------------------------------------------------------------------------------------
+// The xHCI port of SS port 0: the first USB 3 port of the Supported Protocol capabilities (Tegra XUSB: 1), 0 when none.
+static inline unsigned xusb_ss_xhci_port(unsigned usb3_first, unsigned usb3_count)
+{
+    return usb3_count > XUSB_SS_PORT ? usb3_first + XUSB_SS_PORT : 0u;
+}
+
+// What the root port does as the lane and the cable come and go (SwitchXHCIEvents.cpp). It is held On only with the
+// cable in and the lane up. Going On it is reset first as tegra_xhci_set_host_mode does on T210: PP off, the falcon's
+// RESET_SSPI, PP on. A USB 3 device that came up on its USB 2.0 pair while the lane was down (after SC7, or a lane that
+// waited for PCIe's PLL) has given up on SuperSpeed (its upstream port sits in eSS.Disabled) and tries again only after
+// a USB 2.0 bus reset, so its USB2 port's power is cycled and AppleUSBXHCI resets it when it comes back.
+struct xusb_ss_port_step {
+    bool power_on;    // PP off, RESET_SSPI, PP on, then held On (UsbForcePower)
+    bool power_off;   // released Off (UsbForcePower)
+    bool usb2_cycle;  // after power_on: the USB2 port's PP off and on
+};
+
+static inline struct xusb_ss_port_step xusb_ss_port_follow(bool cable, bool lane_up, bool held_on, bool usb2_connected)
+{
+    const bool want = cable && lane_up;
+    struct xusb_ss_port_step step = {want && !held_on, !want && held_on, false};
+    step.usb2_cycle = step.power_on && usb2_connected;
+    return step;
+}
+
+// --- XUSB_HOST through the SMMU ---------------------------------------------------------------------------------------
+// The swgroup's ASID register (MC 0x288, ENABLE 31 | ASID 6:0) as the host's bring-up may find it: in bypass, or
+// translated by the host's own mapper (UsbSmmuMapper.cpp, attached at the first start and restored by TegraSMMU after
+// SC7). Translation by any other ASID would send the falcon's firmware fetch to someone else's tables.
+static inline bool xusb_host_asid_usable(uint32_t asid_reg, uint32_t ours)
+{
+    return !(asid_reg & 0x80000000u) || (asid_reg & 0x7fu) == ours;
+}
+
 // --- Falcon mailbox: the SuperSpeed messages ---------------------------------------------------------------------------
 #define XUSB_MBOX_SAVE_DFE_CTLE_CTX         9u
+#define XUSB_MBOX_RESET_SSPI                16u
 #define XUSB_MBOX_DISABLE_SS_LFPS_DETECTION 17u
 #define XUSB_MBOX_ENABLE_SS_LFPS_DETECTION  18u
 #define XUSB_MBOX_ACK                       128u
 #define XUSB_MBOX_NAK                       129u
+
+// RESET_SSPI's data: the SS port, counted from 1 (xhci-tegra.c usb3_otg_port_base_1).
+#define XUSB_MBOX_RESET_SSPI_DATA (XUSB_SS_PORT + 1u)
 
 struct xusb_mbox_ss {
     bool handled;    // a SuperSpeed message this decides

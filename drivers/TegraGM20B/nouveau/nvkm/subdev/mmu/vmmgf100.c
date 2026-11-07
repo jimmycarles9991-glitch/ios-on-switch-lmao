@@ -28,6 +28,8 @@
 #include <nvif/if900d.h>
 #include <nvif/unpack.h>
 
+#include "TegraGM20BComp.h"
+
 static inline void
 gf100_vmm_pgt_pte(struct nvkm_vmm *vmm, struct nvkm_mmu_pt *pt,
 		  u32 ptei, u32 ptes, struct nvkm_vmm_map *map, u64 addr)
@@ -77,7 +79,14 @@ gf100_vmm_pgt_dma(struct nvkm_vmm *vmm, struct nvkm_mmu_pt *pt,
 		return;
 	}
 
-	VMM_MAP_ITER_DMA(vmm, pt, ptei, ptes, map, gf100_vmm_pgt_pte);
+	/* A big page over a DMA array: nvkm_mem's page says each run of 1 << shift is contiguous, so its first entry
+	 * addresses it. */
+	nvkm_kmap(pt->memory);
+	while (ptes--) {
+		gf100_vmm_pgt_pte(vmm, pt, ptei++, 1, map, *map->dma);
+		map->dma += 1 << (map->page->shift - PAGE_SHIFT);
+	}
+	nvkm_done(pt->memory);
 }
 
 void
@@ -305,14 +314,18 @@ gf100_vmm_valid(struct nvkm_vmm *vmm, void *argv, u32 argc,
 		}
 
 		if (!map->no_comp && map->tags->mn) {
-			u64 tags = map->tags->mn->offset + (map->offset >> 17);
+			u64 tags = tgm_comp_line(map->tags->mn->offset, map->offset);
 			if (page->shift == 17 || !gm20x) {
-				map->type |= tags << 44;
-				map->ctag |= 1ULL << 44;
-				map->next |= 1ULL << 44;
+				map->type |= tgm_pte_comptagline(tags);
+				map->ctag |= tgm_pte_comptagline(1);
+				map->next |= tgm_pte_comptagline(1);
 			} else {
 				map->ctag |= tags << 1 | 1;
 			}
+		} else if (!map->no_comp) {
+			/* Out of comptags, for good for this memory: the caller asked for compression and gets an answer
+			 * rather than an uncompressed kind it would still clear and resolve as compressed. */
+			return -ENOSPC;
 		} else {
 			kind = kindm[kind];
 		}
@@ -323,7 +336,7 @@ gf100_vmm_valid(struct nvkm_vmm *vmm, void *argv, u32 argc,
 	map->type |= (u64)  ro << 2;
 	map->type |= (u64) vol << 32;
 	map->type |= (u64)aper << 33;
-	map->type |= (u64)kind << 36;
+	map->type |= tgm_pte_kind(kind);
 	return 0;
 }
 

@@ -5,6 +5,8 @@
 #                        one fallback to double buffering against a controller that ignores a replaced START_ADDR
 #   direct_policy_test   direct scanout's replace/retire policy against Core Animation's three framebuffers
 #                        and their recycling on swap completion; retire-at-offer is caught as the hazard
+#   switch_deferred_scale_test   SwitchDeferredScale.h against surfaces, a decoder pool, a scaler and a display: every
+#                        read of a deferred destination and every scanned frame shows the copy's bytes, holds balance
 # NativeLegacyDisplay's use of both is guarded in drivers/NativeMobileDisplay/test.
 load("//bazel/lint:defs.bzl", "lint_files")
 load("//bazel/testing:defs.bzl", "host_test")
@@ -29,4 +31,12 @@ host_test(
         RING,
     ],
     copts = ["-Wno-unused-parameter"],
+)
+
+host_test(
+    name = "switch_deferred_scale_test",
+    srcs = [
+        "switch_deferred_scale_test.cpp",
+        "//drivers/TegraDisplayFlip:SwitchDeferredScale.h",
+    ],
 )

@@ -2,7 +2,8 @@
 // Every step of a system sleep and its wake, as one power-trail code (diagnostics/switch/SwitchPowerTrail.h: the
 // durable mark's sleep, SC7 entry, SC7 exit and wake phases), in the order they run. Debug kernels write each before
 // its step runs, so the step a hang stopped in is the last one written:
-//   * switch_power_trail_mark while TegraI2C is up (thread context): the durable mark, which a forced power-off keeps;
+//   * switch_sleep_mark while TegraI2C is up (thread context): the durable mark, which a forced power-off keeps, in
+//     the RTC before the step runs;
 //   * switch_power_trail_mark_now for the SC7 entry and the first steps out of it, which run with interrupts off on
 //     the boot CPU alone (SWITCH_STEP_SYSTEM_SUSPEND, SWITCH_STEP_RESUME);
 //   * a trail line only between those, where TegraI2C is down and other cores may run.
@@ -13,6 +14,21 @@
 #ifdef __cplusplus
 extern "C" {
 #endif
+
+// Inside the sleep action's hooks (0x01-0x0f): the watchdog armed, then the display's and the GPU's own steps.
+enum {
+    SWITCH_STEP_SLEEP_WATCHDOG = 0x01,
+    SWITCH_STEP_DISPLAY_QUIESCED,
+    SWITCH_STEP_DISPLAY_DC_OFF,
+    SWITCH_STEP_DISPLAY_DSI_OFF,
+    SWITCH_STEP_DISPLAY_CLOCKS_OFF,
+    SWITCH_STEP_GPU_GATE,
+    SWITCH_STEP_GPU_FENCES,
+    SWITCH_STEP_GPU_IDLE_OFF,
+    SWITCH_STEP_GPU_NVKM,
+    SWITCH_STEP_GPU_POWER_DOWN,
+    SWITCH_STEP_GPU_DOWN,
+};
 
 // Sleep action (SwitchSuspend::sleepDevices): thread context, every core up.
 enum {
@@ -89,6 +105,13 @@ enum {
     SWITCH_STEP_AWAKE = 0x5f,
 };
 
+#if DEVELOPMENT || DEBUG
+// The durable mark for `step`, in the RTC on return (switch_power_trail_mark and _flush): thread context, TegraI2C up.
+void switch_sleep_mark(unsigned step);
+#else
+#define switch_sleep_mark(step) ((void)sizeof(step))
+#endif
+
 // The trail line alone (SwitchPowerTrail.h included).
 #define switch_sleep_trail(step) switch_power_trail("step %#04x %s", (unsigned)(step), switch_sleep_step_name(step))
 
@@ -161,6 +184,14 @@ static inline const char *switch_sleep_step_name(unsigned step)
         0,
         "awake",
     };
+    static const char *const inner[] = {
+        "sleep watchdog armed", "display quiesced",   "display DC off",
+        "display DSI off",      "display clocks off", "gpu gate",
+        "gpu fences",           "gpu idle off",       "gpu nvkm",
+        "gpu power down",       "gpu down",
+    };
+    if (step >= SWITCH_STEP_SLEEP_WATCHDOG && step < SWITCH_STEP_SLEEP_WATCHDOG + sizeof(inner) / sizeof(inner[0]))
+        return inner[step - SWITCH_STEP_SLEEP_WATCHDOG];
     return step >= SWITCH_STEP_SLEEP && step < SWITCH_STEP_SLEEP + 0x40u ? names[step - SWITCH_STEP_SLEEP] : 0;
 }
 

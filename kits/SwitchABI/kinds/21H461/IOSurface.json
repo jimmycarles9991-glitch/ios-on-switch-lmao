@@ -7,6 +7,11 @@
   "slide": "-0x1000000",
   "layout": {},
   "fields": {},
+  "constants": {
+    "baseOffset": "0x168",
+    "clientMemory": "0x150",
+    "clientTask": "0x170"
+  },
   "addresses": {
     "protection": "0xfffffff005b9d2fc",
     "memory": "0xfffffff005b9ead0",
@@ -106,6 +111,26 @@
         "at": "0xfffffff005ba0fc8",
         "body": "a9be4ff4 a9017bfd 910043fd aa0103f4 aa0003f3 f9402800 94005ca0 37000174 f940be68 b9400d09 11000529 b9000d09 b943b269 321e0929 b903b269 b9401109 11000529 b9001109",
         "why": "the device write end (surface, options): under the surface's IOLock (+0x50), unless options bit 0 (read), the seed (+0xc of the root entry at +0x178) and the write count (+0x10) go up and the cache flags (+0x3b0) get 0x1c; returns 0. AppleM2ScalerCSCDriver's GOT holds it at 0xfffffff006e5ea88: what Apple's media engines call on a job's destination"
+      }
+    },
+    "constants": {
+      "baseOffset": {
+        "value": "0x168",
+        "at": "0xfffffff005b9ec34",
+        "word": "f940b400",
+        "why": "ldr x0, [x0, #0x168]: the accessor the map-into-task adds to the map's address; IOGPUFamily's newResourceWithIOSurface imports it"
+      },
+      "clientMemory": {
+        "value": "0x150",
+        "at": "0xfffffff005ba5a34",
+        "word": "f940a808",
+        "why": "ldr x8, [x0, #0x150] in the client's map-into-task: when set and the surface's +0x170 is the client's task, the client takes this address and maps nothing"
+      },
+      "clientTask": {
+        "value": "0x170",
+        "at": "0xfffffff005ba5a3c",
+        "word": "f940b809",
+        "why": "ldr x9, [x0, #0x170] in the map-into-task, compared with the client's task"
       }
     }
   }

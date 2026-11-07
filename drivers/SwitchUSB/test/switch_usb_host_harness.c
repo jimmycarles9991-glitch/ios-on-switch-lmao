@@ -60,6 +60,11 @@ const char *pd_phase_name(int phase)
     return switch_pd_phase_name((enum switch_pd_phase)phase);
 }
 
+int pd_usb_host(int sourcing, uint16_t status1)
+{
+    return switch_pd_usb_host(sourcing != 0, status1);
+}
+
 // --- XusbPorts.h ---
 static uint32_t fake_space[0x2000 / 4];
 
@@ -156,4 +161,14 @@ int xhci_pending(uint32_t iman, uint32_t usbsts)
 int xhci_deliverable(uint32_t iman, uint32_t usbcmd)
 {
     return xusb_xhci_deliverable(iman, usbcmd);
+}
+
+const char *portsc_link_name(uint32_t portsc)
+{
+    return xhci_portsc_link_name(portsc);
+}
+
+const char *portsc_speed_name(uint32_t portsc)
+{
+    return xhci_portsc_speed_name(portsc);
 }

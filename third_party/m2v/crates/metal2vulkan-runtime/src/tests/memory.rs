@@ -1,5 +1,6 @@
 use crate::memory::{
-    candidates, host_cached, host_cached_placement, host_incoherent, spare_fits, MemoryClass, Pool,
+    candidates, first_block_bytes, host_cached, host_cached_placement, host_incoherent, spare_fits,
+    Backings, Memory, MemoryClass, MemorylessKey, Pool,
 };
 use ash::vk;
 
@@ -355,4 +356,124 @@ fn short_buffers_are_placed_without_gaps() {
         assert_eq!((at, offset), (block, end), "{length} bytes");
         end = offset + requirements.size;
     }
+}
+
+fn memoryless_info(
+    format: vk::Format,
+    width: u32,
+    samples: vk::SampleCountFlags,
+) -> vk::ImageCreateInfo<'static> {
+    vk::ImageCreateInfo::default()
+        .image_type(vk::ImageType::TYPE_2D)
+        .format(format)
+        .extent(vk::Extent3D {
+            width,
+            height: 800,
+            depth: 1,
+        })
+        .mip_levels(1)
+        .array_layers(1)
+        .samples(samples)
+        .usage(
+            vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT
+                | vk::ImageUsageFlags::TRANSIENT_ATTACHMENT,
+        )
+}
+
+/// Memoryless images of one shape (format, size and samples, so one memory requirement) hold
+/// one backing, freed as the last of them lets go; another shape holds its own.
+#[test]
+fn memoryless_images_of_one_shape_share_one_backing() {
+    let requirements = vk::MemoryRequirements {
+        size: 0x560000,
+        alignment: 0x4000,
+        memory_type_bits: 0b11,
+    };
+    let depth = vk::Format::D32_SFLOAT_S8_UINT;
+    let one = vk::SampleCountFlags::TYPE_1;
+    let key = |format, width, samples| {
+        MemorylessKey::of(&memoryless_info(format, width, samples), &requirements)
+    };
+    let shape = key(depth, 520, one);
+    assert_eq!(shape, key(depth, 520, one));
+    let wider = key(depth, 640, one);
+    let color = key(vk::Format::B8G8R8A8_UNORM, 520, one);
+    let four = key(depth, 520, vk::SampleCountFlags::TYPE_4);
+    assert!(shape != wider && shape != color && shape != four);
+
+    let mut backings: Backings<&str> = Backings::default();
+    assert_eq!(backings.hold(&shape), None, "no backing yet");
+    assert_eq!(*backings.add(shape, "depth"), "depth");
+    for _ in 0..3 {
+        assert_eq!(backings.hold(&shape), Some(&"depth"), "the shape's backing, once more");
+    }
+    assert_eq!(backings.hold(&wider), None, "another shape has its own");
+    backings.add(wider, "wider");
+    assert_eq!(backings.len(), 2);
+    for _ in 0..3 {
+        assert_eq!(backings.release(&shape), None, "still held");
+    }
+    assert_eq!(backings.release(&shape), Some("depth"), "the last hold frees it");
+    assert_eq!(backings.release(&wider), Some("wider"));
+    assert_eq!(backings.len(), 0);
+}
+
+/// Only a device that runs its passes in submission order on one channel shares backings, and
+/// only for memoryless images whose memory is not lazily allocated (a tiler's costs nothing).
+#[test]
+fn memoryless_images_share_a_backing_where_their_memory_is_real() {
+    use vk::MemoryPropertyFlags as F;
+    let memory = |flags: &[F], shares: bool| {
+        let mut properties = vk::PhysicalDeviceMemoryProperties {
+            memory_type_count: flags.len() as u32,
+            ..Default::default()
+        };
+        for (slot, &property_flags) in properties.memory_types.iter_mut().zip(flags) {
+            *slot = vk::MemoryType {
+                property_flags,
+                heap_index: 0,
+            };
+        }
+        Memory::new(&properties, 1 << 32, true, true, vec![0], shares)
+    };
+    // NVK on Tegra: cached and coherent system memory, both device-local.
+    let tegra = [
+        F::DEVICE_LOCAL | F::HOST_VISIBLE | F::HOST_CACHED,
+        F::DEVICE_LOCAL | F::HOST_VISIBLE | F::HOST_COHERENT,
+    ];
+    assert!(memory(&tegra, true).shares_backing(0b11));
+    assert!(!memory(&tegra, false).shares_backing(0b11), "passes may overlap");
+    let tiler = [F::DEVICE_LOCAL, F::DEVICE_LOCAL | F::LAZILY_ALLOCATED];
+    assert!(!memory(&tiler, true).shares_backing(0b11), "lazily allocated");
+    assert!(memory(&tiler, true).shares_backing(0b01), "the image allows no lazy type");
+}
+
+/// A client of small blocks starts its pools small: a quarter of its largest block, from 1 MiB
+/// (`M2V_BLOCK_MIB=4` outside TegraGM20B's render server) to 4 MiB (the render server's 16 MiB
+/// and every other device's 64 MiB).
+#[test]
+fn a_pool_starts_at_a_quarter_of_its_largest_block() {
+    assert_eq!(first_block_bytes(4 << 20), 1 << 20);
+    assert_eq!(first_block_bytes(8 << 20), 2 << 20);
+    assert_eq!(first_block_bytes(16 << 20), 4 << 20);
+    assert_eq!(first_block_bytes(64 << 20), 4 << 20);
+    assert_eq!(first_block_bytes(1 << 20), 1 << 20, "never below 1 MiB");
+}
+
+/// The idle blocks are the pooled blocks with no placement, the empty one a pool keeps for the
+/// next placement among them; a block with a placement and a dedicated block are not.
+#[test]
+fn the_idle_blocks_are_the_empty_pooled_ones() {
+    let mut pool: Pool<&str> = Pool::default();
+    let used = pool.add(4 << 20, false, "used", 100);
+    let kept = pool.add(4 << 20, false, "kept", 100);
+    pool.add(9 << 20, true, "dedicated", 9 << 20);
+    assert_eq!(pool.release(kept, 0, 100), None, "kept for the next placement");
+    assert_eq!(pool.take_empty(), [("kept", 4 << 20)]);
+    assert_eq!(pool.blocks(), 2);
+    assert!(pool.take_empty().is_empty(), "taken once");
+    assert_eq!(pool.release(used, 0, 100), None, "kept again, the only empty block");
+    assert_eq!(pool.take_empty(), [("used", 4 << 20)]);
+    assert_eq!(pool.blocks(), 1, "the dedicated block stays with its resource");
+    assert_eq!(pool.place(16, 16), None, "no pooled block left: the next placement makes one");
 }

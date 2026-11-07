@@ -136,6 +136,8 @@
 #include <miscfs/devfs/devfs.h>
 #include <string.h>
 #include "SwitchBluetooth.h"
+#include "SwitchBluetoothLeFilter.h"
+#include "../../kits/SwitchRefusal/SwitchRefusal.h"
 #include "SwitchBluetoothLinks.h"
 #include "SwitchBluetoothRxDma.h"
 #include "SwitchCoex.h"
@@ -576,9 +578,14 @@ class SwitchBluetooth : public IOService {
     // the stats line.
     uint8_t hciVersion = 0;      // Read Local Version's HCI version at the last bring-up (0 unknown)
     uint8_t lastCredits = 1;     // the controller's Num_HCI_Command_Packets in its last completion (work loop)
-    uint8_t answers[4][7] = {};  // Command Complete events made here, not yet passed on (cmdLock)
+    uint8_t answers[4][8] = {};  // Command Complete events made here, not yet passed on (cmdLock)
     uint32_t answerHead = 0, answerTail = 0;
-    bool advFixLogged = false;
+    // bluetoothd's LE filtering in the controller's APCF filters (SwitchBluetoothLeFilter.h), client thread; leApcf
+    // from the last bring-up's capability probe, until a refused APCF command turns it off for the boot.
+    switch_le_filter leFilter = {};
+    bool leApcf = false, leDirty = false, leScanning = false, leCapsLogged = false;
+    bool answer(uint16_t opcode, uint8_t status, int sub);
+    bool programLeFilter();
 
     struct Traced {
         uint16_t opcode;
@@ -640,6 +647,7 @@ class SwitchBluetooth : public IOService {
     // for (0: every channel usable, as after a reset), when to read the links' maps back, and whether it refused.
     uint16_t injectOp = 0;
     uint8_t injectStatus = 0, injectLength = 0, injectRet[16] = {};
+    static constexpr uint8_t kInjectMax = sizeof(switch_le_command::params);
     // Air-time evidence for the stats lines: Flush Occurred events (packets the controller dropped after the flush
     // timeout, A2DP's 60 or 200 ms) and the controller's ACL buffers (Read Buffer Size), against which a link's most
     // held packets in a window is read.
@@ -837,6 +845,19 @@ OSDefineMetaClassAndStructors(SwitchBluetooth, IOService)
         OSSafeReleaseNULL(chosen);
         OSSafeReleaseNULL(node);
         OSSafeReleaseNULL(value);
+    }
+
+    // The rails pair seated Joy-Cons to the address bluetoothd reads at its start, before backboardd and
+    // gamecontrollerd open their HID devices: pairing replaces a running Joy-Con's device, and done at bluetoothd's
+    // first connect it took away both devices gamecontrollerd had just prepared. That connect then finds the same
+    // address and pairs nothing.
+    void announceAddressToRails()
+    {
+        IORegistryEntry *node = IORegistryEntry::fromPath("/arm-io/bluetooth", gIODTPlane);
+        const OSData *data = node ? OSDynamicCast(OSData, node->getProperty("local-mac-address")) : nullptr;
+        if (data && data->getLength() == 6)
+            switch_joycon_bluetooth_address(static_cast<const uint8_t *>(data->getBytesNoCopy()));
+        OSSafeReleaseNULL(node);
     }
 
     // The unit's own BD address, as U-Boot derives device_bt_mac (switchroot board/nintendo/switch/nintendo-switch.c
@@ -1743,7 +1764,7 @@ bool SwitchBluetooth::clientRoom(size_t need)
 //   ~140 times a second: 23,608 of those and 2,951 refusals in 21 s, the SwitchBluetooth thread at the top of kprof.
 //   So on a controller older than 5.0 (HCI version from Read Local Version), the interval of 0xFD4A and of LE Set
 //   Advertising Parameters (0x2006) for those two types is raised to the floor (fixAdvertising): the fastest this
-//   controller can advertise them at all, one line the first time and a count in the stats.
+//   controller can advertise them at all, one SwitchRefusal line and a count in the stats.
 // - Scanning. bluetoothd filters adverts in the controller with two Broadcom LE meta (0xFCE9) features together: the
 //   packet content filter (sub-operations 5 feature selection and 7 service UUID, status 0 here) holding the
 //   service UUIDs some sessions scan for, and Apple's matching rules (0x32/0x33/0x1E/0x35: Unknown HCI Command here,
@@ -1755,6 +1776,10 @@ bool SwitchBluetooth::clientRoom(size_t need)
 //   in the host; so 0xFCE9 sub-operations 1, 5 and 7 (and the UUID filter's later forms 0x50, 0x61) are answered here
 //   with that status and never reach the controller, which keeps its default of reporting every advert
 //   (answerHere: a Command Complete with the controller's last credit count, passed on between its packets).
+//   A controller that has Android's APCF (0xFD53 at bring-up) takes the filtering after all: bluetoothd's UUIDs,
+//   Apple matching rules, address list and duplicate bypass become three APCF filters (SwitchBluetoothLeFilter.h),
+//   programmed by injected commands before the scan that uses them, and each of those commands is answered here
+//   with success and its sub-operation; the rest stay refused, one SwitchRefusal line per sub-operation.
 // - The stats line (logStats, os_log only: at most every kStatsMs and only after traffic, and when the client goes)
 //   counts the controller's packets and events by type, LE meta events by sub-event with the advertising reports
 //   they carry, the client's commands, those answered here, intervals raised, scan enables, and the completions
@@ -1771,7 +1796,10 @@ void SwitchBluetooth::resetClientFraming()
     sentCount = 0;
     sentOverflow = false;
     answerHead = answerTail = 0;
-    links = {};              // a new client: the controller has no links (a used one was brought up again)
+    links = {};  // a new client: the controller has no links (a used one was brought up again)
+    leFilter = {};
+    leFilter.apcf = __atomic_load_n(&leApcf, __ATOMIC_RELAXED);
+    leDirty = leScanning = false;
     switch_wake_bt_reset();  // nor any controller's buttons held
     requests = {};
     role = SWITCH_BT_ROLE_UNKNOWN;
@@ -2054,6 +2082,12 @@ errno_t SwitchBluetooth::clientCommand(uint8_t *packet, size_t size)
         __atomic_fetch_add(&st.vendorCommands, 1, __ATOMIC_RELAXED);
     if (opcode == OP_LE_SET_SCAN_ENABLE && length)
         __atomic_fetch_add(params[0] ? &st.scanOn : &st.scanOff, 1, __ATOMIC_RELAXED);
+    if (opcode == OP_LE_SET_SCAN_ENABLE && length) {
+        leScanning = params[0] != 0;
+        if (leScanning && leDirty && leFilter.apcf)
+            programLeFilter();
+        switch_le_filter_scan_enable(&leFilter, params, length);
+    }
     if (answerHere(opcode, params, length)) {
 #if DEVELOPMENT || DEBUG
         traceCommand(opcode, params, length, true);
@@ -2083,29 +2117,91 @@ errno_t SwitchBluetooth::clientCommand(uint8_t *packet, size_t size)
 // with the queue full (bluetoothd has one command out at a time): the controller answers those.
 bool SwitchBluetooth::answerHere(uint16_t opcode, const uint8_t *params, uint8_t length)
 {
-    if (opcode != OP_BCM_LE_META || !length || __atomic_load_n(&framingLost, __ATOMIC_RELAXED))
+    if (!length || __atomic_load_n(&framingLost, __ATOMIC_RELAXED))
+        return false;
+    uint8_t sub = 0;
+    if (switch_le_filter_take(&leFilter, opcode, params, length, &sub)) {
+        leDirty = true;
+        if (leScanning && !programLeFilter())
+            return answer(opcode, kUnknownCommand, -1);
+        return answer(opcode, 0, sub);
+    }
+    if (opcode != OP_BCM_LE_META)
         return false;
     bool refused = false;
-    for (const uint8_t sub : kRefusedLeMeta)
-        refused |= params[0] == sub;
+    for (const uint8_t refusedSub : kRefusedLeMeta)
+        refused |= params[0] == refusedSub;
     if (!refused)
         return false;
+    switch_refusal_k(switch_refusal_key_with(switch_refusal_key("bluetooth", "le-meta"), params[0]), "bluetooth",
+                     "le-meta", "0xFCE9 sub-operation %#x refused: %s", params[0],
+                     leFilter.apcf ? "not expressible in APCF"
+                                   : "no APCF in this controller, adverts filter in the host");
+    return answer(opcode, kUnknownCommand, -1);
+}
+
+// Client thread: a Command Complete made here, for deliver() to pass on between the controller's packets: the status,
+// and for a filtering command the sub-operation bluetoothd's vendor-command handler reads back (sub < 0: none). False
+// with the queue full (bluetoothd has one command out at a time): the controller answers.
+bool SwitchBluetooth::answer(uint16_t opcode, uint8_t status, int sub)
+{
     const IOInterruptState s = IOSimpleLockLockDisableInterrupt(cmdLock);
     const bool room = answerHead - answerTail < sizeof(answers) / sizeof(answers[0]);
     if (room) {
         uint8_t *const e = answers[answerHead++ % (sizeof(answers) / sizeof(answers[0]))];
         e[0] = H4_EVENT;
         e[1] = EV_COMMAND_COMPLETE;
-        e[2] = 4;  // credits, opcode, status
+        e[2] = sub < 0 ? 4 : 5;  // credits, opcode, status[, sub-operation]
         e[3] = lastCredits ? lastCredits : 1;
         e[4] = (uint8_t)opcode;
         e[5] = (uint8_t)(opcode >> 8);
-        e[6] = kUnknownCommand;
+        e[6] = status;
+        e[7] = (uint8_t)sub;
     }
     IOSimpleLockUnlockEnableInterrupt(cmdLock, s);
     if (room)
         __atomic_fetch_add(&st.answered, 1, __ATOMIC_RELAXED);
     return room;
+}
+
+// Client thread: leFilter into the controller's APCF filters, injected between bluetoothd's commands, before the scan
+// that uses them starts. A refused APCF command turns the translation off for the boot: APCF disabled, the controller
+// passes every advert as before, and bluetoothd's filtering commands are refused again. An injection that could not
+// go now (another command outstanding, no answer in time) is not a refusal: the state stays dirty and the next scan
+// enable programs it again (the program starts by disabling APCF, so a part-done one leaves every advert passing).
+bool SwitchBluetooth::programLeFilter()
+{
+    constexpr uint8_t kInjectBusy = 0xfe, kInjectNotSent = 0xfd, kInjectNoAnswer = 0xff;
+    switch_le_command commands[SWITCH_LE_MAX_COMMANDS];
+    const unsigned n = switch_le_filter_program(&leFilter, commands, SWITCH_LE_MAX_COMMANDS);
+    for (unsigned i = 0; i < n; ++i) {
+        uint8_t ret[8];
+        uint8_t retLength = sizeof(ret);
+        const uint8_t status = inject(commands[i].opcode, commands[i].params, commands[i].length, ret, &retLength);
+        if (!status)
+            continue;
+        if (status == kInjectBusy || status == kInjectNotSent || status == kInjectNoAnswer) {
+            switch_refusal_k(switch_refusal_key_with(switch_refusal_key("bluetooth", "apcf-deferred"), status),
+                             "bluetooth", "apcf-deferred",
+                             "APCF programming deferred to the next scan (%s): the controller keeps its previous "
+                             "filters (or none) until then",
+                             status == kInjectBusy      ? "a command outstanding"
+                             : status == kInjectNotSent ? "not sent"
+                                                        : "no answer in time");
+            leDirty = true;
+            return true;
+        }
+        IOLog("SwitchBluetooth: APCF sub-code %#x action %#x refused (status %#x): LE adverts filter in the host this "
+              "boot\n",
+              commands[i].params[0], commands[i].length > 1 ? commands[i].params[1] : 0, status);
+        __atomic_store_n(&leApcf, false, __ATOMIC_RELAXED);
+        leFilter.apcf = false;
+        const uint8_t off[2] = {SWITCH_APCF_ENABLE, 0};
+        inject(SWITCH_LE_OP_APCF, off, sizeof(off), nullptr, nullptr);
+        return false;
+    }
+    leDirty = false;
+    return true;
 }
 
 // Work loop, client mode, at a packet boundary of the controller's stream: the completions answerHere made, passed on.
@@ -2122,10 +2218,11 @@ bool SwitchBluetooth::passAnswers()
         IOSimpleLockUnlockEnableInterrupt(cmdLock, s);
         if (!any)
             return true;
-        if (!clientRoom(sizeof(e)))
+        const size_t length = 3u + e[2];
+        if (!clientRoom(length))
             return false;
-        if (ctl_enqueuedata(control, client, e, sizeof(e), 0) != 0)
-            dropped += sizeof(e);
+        if (ctl_enqueuedata(control, client, e, length, 0) != 0)
+            dropped += length;
         s = IOSimpleLockLockDisableInterrupt(cmdLock);
         ++answerTail;
         IOSimpleLockUnlockEnableInterrupt(cmdLock, s);
@@ -2158,12 +2255,11 @@ bool SwitchBluetooth::fixAdvertising(uint16_t opcode, uint8_t *params, uint8_t l
     interval[1] = (uint8_t)(kAdvIntervalMinNonConnectable >> 8);
     interval[2] = (uint8_t)newMax;
     interval[3] = (uint8_t)(newMax >> 8);
-    if (!__atomic_exchange_n(&advFixLogged, true, __ATOMIC_RELAXED)) {
-        IOLog("SwitchBluetooth: %s advertising interval %u-%u (%u ms) raised to %u-%u (%#06x): this controller (HCI "
-              "version %u, older than 5.0) refuses it below 100 ms\n",
-              type == 3 ? "non-connectable" : "scannable", min, max, min * 5 / 8, kAdvIntervalMinNonConnectable, newMax,
-              opcode, version);
-    }
+    switch_refusal("bluetooth", "adv-interval",
+                   "%s advertising interval %u-%u (%u ms) raised to %u-%u (%#06x): this controller (HCI version %u, "
+                   "older than 5.0) refuses it below 100 ms",
+                   type == 3 ? "non-connectable" : "scannable", min, max, min * 5 / 8, kAdvIntervalMinNonConnectable,
+                   newMax, opcode, version);
     return true;
 }
 
@@ -2332,8 +2428,8 @@ uint8_t SwitchBluetooth::inject(uint16_t opcode, const uint8_t *params, uint8_t 
                                 uint8_t *retLength)
 {
     constexpr uint32_t kInjectMs = 100;
-    uint8_t packet[4 + 16];
-    if (length > 16)
+    uint8_t packet[4 + kInjectMax];
+    if (length > kInjectMax)
         return 0xfd;
     packet[0] = H4_COMMAND;
     packet[1] = (uint8_t)opcode;
@@ -3265,6 +3361,17 @@ bool SwitchBluetooth::bringUp(uint32_t offMs, char *why, size_t whySize)
         if (command(OP_READ_LOCAL_NAME, nullptr, 0, kCommandMs, name, &n) || n < 2)
             strlcpy((char *)name + 1, "unnamed", 16);
         name[sizeof(name) - 1] = 0;
+        uint8_t caps[255] = {}, capsLength = 0;
+        const int capsError = command(SWITCH_LE_OP_VENDOR_CAPS, nullptr, 0, kCommandMs, caps, &capsLength);
+        const bool apcf = !capsError && switch_le_filter_capabilities(caps, capsLength);
+        __atomic_store_n(&leApcf, apcf, __ATOMIC_RELAXED);
+        if (!leCapsLogged) {
+            leCapsLogged = true;
+            IOLog("SwitchBluetooth: LE vendor capabilities (0xFD53): %s, filter support %u, %u filters: LE adverts "
+                  "filter in the %s\n",
+                  capsError ? "refused" : "answered", capsLength > 6 ? caps[6] : 0, capsLength > 7 ? caps[7] : 0,
+                  apcf ? "controller" : "host");
+        }
 
         // Sleep mode off (12 zero bytes, nxk): BT_WAKE stays asserted and host wake is unused. bluetoothd may
         // configure its own later.
@@ -3925,14 +4032,15 @@ extern "C" void switch_bluetooth_data_mounted(void)
     if (bluetoothDisabled())
         return;
     uint8_t staged[6];
-    if (!readStagedAddress(staged)) {
+    if (readStagedAddress(staged)) {
+        memcpy(gStaged, staged, sizeof(gStaged));
+        __atomic_store_n(&gStagedState, kStagedFound, __ATOMIC_RELEASE);
+        publishAddressBytes(staged);
+        IOLog("SwitchBluetooth: BD %02x:%02x:%02x:%02x:%02x:%02x from the staged Joy-Con pairing (Horizon's), in "
+              "place before launchd\n",
+              staged[0], staged[1], staged[2], staged[3], staged[4], staged[5]);
+    } else {
         __atomic_store_n(&gStagedState, kStagedNone, __ATOMIC_RELEASE);
-        return;
     }
-    memcpy(gStaged, staged, sizeof(gStaged));
-    __atomic_store_n(&gStagedState, kStagedFound, __ATOMIC_RELEASE);
-    publishAddressBytes(staged);
-    IOLog("SwitchBluetooth: BD %02x:%02x:%02x:%02x:%02x:%02x from the staged Joy-Con pairing (Horizon's), in place "
-          "before launchd\n",
-          staged[0], staged[1], staged[2], staged[3], staged[4], staged[5]);
+    announceAddressToRails();
 }

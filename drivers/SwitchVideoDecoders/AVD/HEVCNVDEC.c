@@ -179,7 +179,7 @@ int hevc_decoder_configure(HEVCDecoder *d)
     const int ret = configure(d, sps);
     if (ret)
         return ret;
-    // Surfaces for the DPB the SPS declares (the current picture included), so the arena is known to hold them.
+    // Surfaces for the DPB the SPS declares (the current picture included), so NVDEC's memory is known to hold them.
     for (unsigned i = 0; i < sps->max_dec_pic_buffering && i < SLOTS; i++) {
         Entry *e = &d->dpb[i];
         void *va = NULL;

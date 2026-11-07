@@ -448,10 +448,10 @@ static inline void tegra_nvjpg_setup_image(const TegraNVJPGImage *img, uint32_t 
     s->stream_chroma_mode = (int)img->chroma;
 }
 
-// Targets NVJPG writes (output_pixel_format, memory_mode): NV12 (YUV, semi-planar: a luma plane and an interleaved
-// CbCr plane at 4:2:0, whatever the file's sampling), planar YUV 4:2:0 (three planes), and 32-bit RGB in its byte
-// orders (planar memory mode, as oss-nvjpg drives RGB surfaces), each optionally downscaled by 2, 4 or 8 (DCT scaling,
-// power2_downscale). Pitch linear only (the T210's NVJPG has no tiled output, averne's FFmpeg note). Strides are
+// Targets NVJPG writes (output_pixel_format, output_chroma_mode, memory_mode): semi-planar YUV (a luma plane and an
+// interleaved CbCr plane) at 4:2:0, 4:2:2 or 4:4:4 whatever the file's sampling, planar YUV 4:2:0 (three planes),
+// packed 4:2:2 (YUY2: Y0 Cb Y1 Cr, CoreVideo's 'yuvf' order), and 32-bit RGB in its byte orders (planar memory mode,
+// as oss-nvjpg drives RGB surfaces), each optionally downscaled by 2, 4 or 8 (DCT scaling, power2_downscale). Pitch linear only (the T210's NVJPG has no tiled output, averne's FFmpeg note). Strides are
 // 64-byte multiples and plane addresses 256-byte multiples (the methods take address >> 8).
 enum {
     TEGRA_NVJPG_OUT_NV12 = 0,  // '420f': Y plane, CbCr plane (Cb first)
@@ -460,7 +460,10 @@ enum {
     TEGRA_NVJPG_OUT_RGBA = 3,  // bytes R, G, B, A ('RGBA')
     TEGRA_NVJPG_OUT_ARGB = 4,  // bytes A, R, G, B ('ARGB')
     TEGRA_NVJPG_OUT_GREY = 5,  // Y plane only ('L008'), grey files only
-    TEGRA_NVJPG_OUT_COUNT = 6,
+    TEGRA_NVJPG_OUT_NV16 = 6,  // '422f': Y plane, CbCr plane at half width, full height
+    TEGRA_NVJPG_OUT_NV24 = 7,  // '444f': Y plane, CbCr plane at full width and height
+    TEGRA_NVJPG_OUT_YUY2 = 8,  // 'yuvf': one plane, Y0 Cb Y1 Cr
+    TEGRA_NVJPG_OUT_COUNT = 9,
 };
 
 // nvjpg_drv.h output_pixel_format and memory_mode values.
@@ -473,6 +476,7 @@ enum {
 
 enum {
     TEGRA_NVJPG_MEMORY_NV12 = 0,
+    TEGRA_NVJPG_MEMORY_YUY2 = 2,
     TEGRA_NVJPG_MEMORY_PLANAR = 3
 };
 
@@ -494,7 +498,22 @@ typedef struct {
 
 static inline uint32_t tegra_nvjpg_planes(uint32_t format)
 {
-    return format == TEGRA_NVJPG_OUT_NV12 ? 2 : format == TEGRA_NVJPG_OUT_I420 ? 3 : 1;
+    switch (format) {
+    case TEGRA_NVJPG_OUT_NV12:
+    case TEGRA_NVJPG_OUT_NV16:
+    case TEGRA_NVJPG_OUT_NV24:
+        return 2;
+    case TEGRA_NVJPG_OUT_I420:
+        return 3;
+    default:
+        return 1;
+    }
+}
+
+static inline int tegra_nvjpg_is_yuv(uint32_t format)
+{
+    return format == TEGRA_NVJPG_OUT_NV12 || format == TEGRA_NVJPG_OUT_I420 || format == TEGRA_NVJPG_OUT_NV16 ||
+           format == TEGRA_NVJPG_OUT_NV24 || format == TEGRA_NVJPG_OUT_YUY2;
 }
 
 static inline uint32_t tegra_nvjpg_shr_up(uint32_t value, uint32_t shift)
@@ -518,8 +537,8 @@ static inline const char *tegra_nvjpg_setup_output(const TegraNVJPGImage *img, c
         return "scale";
     if (t->format == TEGRA_NVJPG_OUT_GREY && img->components != 1)
         return "grey output from a colour file";
-    if (img->components == 1 && (t->format == TEGRA_NVJPG_OUT_NV12 || t->format == TEGRA_NVJPG_OUT_I420))
-        return "YUV 4:2:0 output from a grey file";  // the service writes grey, then fills the chroma itself
+    if (img->components == 1 && tegra_nvjpg_is_yuv(t->format))
+        return "YUV output from a grey file";  // the service writes grey, then fills the chroma itself
     const uint32_t gridW = img->mcusX * img->mcuW, gridH = img->mcusY * img->mcuH;
     e->width = tegra_nvjpg_shr_up(img->width, t->scale);
     e->height = tegra_nvjpg_shr_up(img->height, t->scale);
@@ -535,6 +554,17 @@ static inline const char *tegra_nvjpg_setup_output(const TegraNVJPGImage *img, c
         e->rows[0] = h, e->rowBytes[0] = w;
         e->rows[1] = e->rows[2] = ch;
         e->rowBytes[1] = e->rowBytes[2] = cw;
+        break;
+    case TEGRA_NVJPG_OUT_NV16:
+        e->rows[0] = e->rows[1] = h;
+        e->rowBytes[0] = w, e->rowBytes[1] = 2 * cw;
+        break;
+    case TEGRA_NVJPG_OUT_NV24:
+        e->rows[0] = e->rows[1] = h;
+        e->rowBytes[0] = w, e->rowBytes[1] = 2 * w;
+        break;
+    case TEGRA_NVJPG_OUT_YUY2:
+        e->rows[0] = h, e->rowBytes[0] = 4 * cw;
         break;
     case TEGRA_NVJPG_OUT_GREY:
         e->rows[0] = h, e->rowBytes[0] = w;
@@ -564,6 +594,17 @@ static inline const char *tegra_nvjpg_setup_output(const TegraNVJPGImage *img, c
         s->output_pixel_format = TEGRA_NVJPG_PIXEL_YUV;
         s->output_chroma_mode = TEGRA_NVJPG_CHROMA_420;
         s->memory_mode = t->format == TEGRA_NVJPG_OUT_NV12 ? TEGRA_NVJPG_MEMORY_NV12 : TEGRA_NVJPG_MEMORY_PLANAR;
+        break;
+    case TEGRA_NVJPG_OUT_NV16:
+    case TEGRA_NVJPG_OUT_YUY2:
+        s->output_pixel_format = TEGRA_NVJPG_PIXEL_YUV;
+        s->output_chroma_mode = TEGRA_NVJPG_CHROMA_422H;
+        s->memory_mode = t->format == TEGRA_NVJPG_OUT_NV16 ? TEGRA_NVJPG_MEMORY_NV12 : TEGRA_NVJPG_MEMORY_YUY2;
+        break;
+    case TEGRA_NVJPG_OUT_NV24:
+        s->output_pixel_format = TEGRA_NVJPG_PIXEL_YUV;
+        s->output_chroma_mode = TEGRA_NVJPG_CHROMA_444;
+        s->memory_mode = TEGRA_NVJPG_MEMORY_NV12;
         break;
     case TEGRA_NVJPG_OUT_GREY:
         s->output_pixel_format = TEGRA_NVJPG_PIXEL_YUV;

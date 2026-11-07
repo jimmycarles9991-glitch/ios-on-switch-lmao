@@ -1,24 +1,33 @@
 // SPDX-License-Identifier: MIT
-// raw GM20B path (r8-rawca): a two-plane 4:2:0 YCbCr surface's texture as Metal reads it, drawn into the image the raw path
-// samples in its place, one texel a fragment. The arithmetic is m2v's (metal2vulkan bind/ycbcr_convert.rs, its kernel and
-// `ycbcr_read`), which reproduces an Apple M4's measured reads exactly:
-//  - chroma: the four nearest chroma texels weighted 9/3/3/1 (column x/2 and the next for an odd x, the one before for an even x,
-//    each clamped to the plane, rows alike), the sum S rounded to a code, C = (S + 8) >> 4;
-//  - converted (YCBCR8_420_2P, 500): with Cb' = 4 Cb - 512, Cr' = 4 Cr - 512 and the luma term L (video range 9576 (4 Y - 64),
-//    full range 256 floor((32768 Y + 127) / 255)), each channel v = clamp((L + kb Cb' + kr Cr' + 2048) >> 12, 0, 2048) of its
-//    (kb, kr), read as v / 2048 (an RGBA16Float image holds it exactly), alpha 1;
-//  - sRGB (YCBCR8_420_2P_sRGB, 520): q = clamp((T + 512) >> 10, 0, 8192) of the same sum T through the knots of the sRGB curve,
-//    read as step / 8192 (RGBA32Float), alpha 1;
-//  - codes (RGB8_420_2P, 540): red Cr, green Y, blue Cb of the filtered codes, each code / 255 (RGBA8Unorm), alpha 1.
-// Texture 0 is the luma plane (R8Unorm, a code a texel), texture 1 the chroma plane (RG8Unorm, Cb then Cr a texel), buffer 0 the
-// shape; the vertex function draws the image's rectangle as a 4-vertex strip.
+// raw GM20B path (r8-rawca): a two-plane YCbCr surface's texture as Metal reads it, drawn into the image the raw path samples in
+// its place, one texel a fragment. The arithmetic is m2v's (metal2vulkan bind/ycbcr_convert.rs, its kernel and `ycbcr_read`),
+// which reproduces an Apple M4's measured reads exactly:
+//  - codes: a byte, or the high 10 bits of a 16-bit word;
+//  - chroma along a halved axis: the two nearest chroma texels weighted 3/1 (column x/2 and the next for an odd x, the one before
+//    for an even x, each clamped to the plane), along a whole one its own texel weighted 4; the 2x2 sum S of weight 16 rounds
+//    to a code, C = (S + 8) >> 4 (4:2:0's 9/3/3/1, 4:2:2's (S' + 2) >> 2, 4:4:4's own pair alike);
+//  - converted (YCBCR*_2P): with u = 10 - bits, Cb' = (Cb << u) - 512, Cr' = (Cr << u) - 512 and the luma term L (video range
+//    9576 ((Y << u) - 64), full range 256 floor((32768 Y + max / 2) / max), max = 2^bits - 1), each channel
+//    v = clamp((L + kb Cb' + kr Cr' + 2048) >> 12, 0, 2048) of its (kb, kr), read as v / 2048 (an RGBA16Float image holds it
+//    exactly), alpha 1;
+//  - sRGB (YCBCR*_2P_sRGB): q = clamp((T + 512) >> 10, 0, 8192) of the same sum T through the knots of the sRGB curve, read as
+//    step / 8192 (RGBA32Float), alpha 1;
+//  - codes (RGB*_2P): red Cr, green Y, blue Cb, each code / max (RGBA8Unorm, RGB10A2Unorm), alpha 1.
+// Texture 0 is the luma plane (R8Unorm or R16Unorm, a code a texel), texture 1 the chroma plane (RG8Unorm or RG16Unorm, Cb then
+// Cr a texel), buffer 0 the shape (raw_ycbcr.h); the vertex function draws the image's rectangle as a 4-vertex strip.
 #include <metal_stdlib>
 using namespace metal;
 
 struct Shape {
     uint width, height;  // the texture's, in luma texels
-    int full;            // full range (420f), else video range (420v)
+    int full;            // full range, else video range
     int k[6];            // red's kb, kr, then green's and blue's (m2v's `coefficients` of the range and matrix)
+    uint unit;           // a texel's largest value read as a whole number: 255 or 65535
+    uint drop;           // the low bits under a code
+    uint up;             // 10 - bits
+    uint max;            // the largest code
+    uint halved;         // bit 0 across, bit 1 down
+    uint chroma;         // 0: Cb and Cr codes 0 (a texture over plane 1)
 };
 
 struct Out {
@@ -32,14 +41,16 @@ vertex Out ycbcr_vert(uint vid [[vertex_id]])
     return o;
 }
 
-static uint code8(float v)
+static uint code(float v, constant Shape &s)
 {
-    return uint(rint(v * 255.0f));
+    return uint(rint(v * float(s.unit))) >> s.drop;
 }
 
 // the two chroma texels of luma column (or row) p of a plane n across, and the first one's weight (the second's is 4 less it)
-static uint3 taps(uint p, uint n)
+static uint3 taps(uint p, uint n, bool halved)
 {
+    if (!halved)
+        return uint3(p, p, 4);
     const uint c = p >> 1, odd = p & 1, a = c + odd, last = n - 1;
     const uint second = a > last ? last : a;
     const uint first = a == 0 ? 0 : a - 1;
@@ -49,9 +60,12 @@ static uint3 taps(uint p, uint n)
 // the texel's luma code and its filtered chroma codes (Cb, Cr)
 static uint3 codes(texture2d<float, access::read> luma, texture2d<float, access::read> chroma, constant Shape &s, uint2 at)
 {
-    const uint y = code8(luma.read(at).r);
-    const uint across = (s.width + 1) >> 1, down = (s.height + 1) >> 1;
-    const uint3 tx = taps(at.x, across), ty = taps(at.y, down);
+    const uint y = code(luma.read(at).r, s);
+    if (!s.chroma)
+        return uint3(y, 0, 0);
+    const bool across = s.halved & 1, down = s.halved & 2;
+    const uint3 tx = taps(at.x, across ? (s.width + 1) >> 1 : s.width, across);
+    const uint3 ty = taps(at.y, down ? (s.height + 1) >> 1 : s.height, down);
     const uint wx[2] = {tx.z, 4 - tx.z}, wy[2] = {ty.z, 4 - ty.z};
     const uint cx[2] = {tx.x, tx.y}, cy[2] = {ty.x, ty.y};
     uint cb = 0, cr = 0;
@@ -59,8 +73,8 @@ static uint3 codes(texture2d<float, access::read> luma, texture2d<float, access:
         for (uint i = 0; i < 2; i++) {
             const float2 pair = chroma.read(uint2(cx[i], cy[j])).rg;
             const uint w = wx[i] * wy[j];
-            cb += w * code8(pair.x);
-            cr += w * code8(pair.y);
+            cb += w * code(pair.x, s);
+            cr += w * code(pair.y, s);
         }
     return uint3(y, (cb + 8) >> 4, (cr + 8) >> 4);
 }
@@ -68,8 +82,8 @@ static uint3 codes(texture2d<float, access::read> luma, texture2d<float, access:
 // T = L + kb Cb' + kr Cr' for each channel
 static int3 sums(uint3 c, constant Shape &s)
 {
-    const int luma = s.full ? 256 * int((c.x * 32768 + 127) / 255) : 9576 * (int(c.x << 2) - 64);
-    const int cb = int(c.y << 2) - 512, cr = int(c.z << 2) - 512;
+    const int luma = s.full ? 256 * int((c.x * 32768 + s.max / 2) / s.max) : 9576 * (int(c.x << s.up) - 64);
+    const int cb = int(c.y << s.up) - 512, cr = int(c.z << s.up) - 512;
     return int3(luma + s.k[0] * cb + s.k[1] * cr, luma + s.k[2] * cb + s.k[3] * cr, luma + s.k[4] * cb + s.k[5] * cr);
 }
 
@@ -102,9 +116,23 @@ fragment float4 ycbcr_srgb_frag(Out in [[stage_in]], texture2d<float, access::re
     return float4(srgbStep(t.x), srgbStep(t.y), srgbStep(t.z), 1.0f);
 }
 
+static float4 codesTexel(texture2d<float, access::read> luma, texture2d<float, access::read> chroma, constant Shape &s,
+                         uint2 at)
+{
+    const float3 c = float3(codes(luma, chroma, s, at)) / float(s.max);
+    return float4(c.z, c.x, c.y, 1.0f);
+}
+
+// RGBA8Unorm's image (8-bit codes)
 fragment float4 ycbcr_codes_frag(Out in [[stage_in]], texture2d<float, access::read> luma [[texture(0)]],
                                  texture2d<float, access::read> chroma [[texture(1)]], constant Shape &s [[buffer(0)]])
 {
-    const uint3 c = codes(luma, chroma, s, uint2(in.position.xy));
-    return float4(float(c.z) / 255.0f, float(c.x) / 255.0f, float(c.y) / 255.0f, 1.0f);
+    return codesTexel(luma, chroma, s, uint2(in.position.xy));
+}
+
+// RGB10A2Unorm's image (10-bit codes): its own state, the pack keying the raw path's states by fragment function
+fragment float4 ycbcr_codes10_frag(Out in [[stage_in]], texture2d<float, access::read> luma [[texture(0)]],
+                                   texture2d<float, access::read> chroma [[texture(1)]], constant Shape &s [[buffer(0)]])
+{
+    return codesTexel(luma, chroma, s, uint2(in.position.xy));
 }

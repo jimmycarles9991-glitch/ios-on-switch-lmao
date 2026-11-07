@@ -42,4 +42,19 @@ TEST(SwitchBluetoothSource, DmaModeUsesTheHeaderAsModelled)
     EXPECT_THAT(source, HasSubstr("tegra_apbdma_start_rx_words(rxDma"));
 }
 
+// The rails learn the address bluetoothd reads before launchd starts it, so pairing a seated Joy-Con never replaces a
+// HID device gamecontrollerd has already prepared.
+TEST(SwitchBluetoothSource, RailsLearnTheAddressBeforeLaunchd)
+{
+    const std::string source = SourceText("../SwitchBluetooth.cpp");
+    const size_t hook = source.find("extern \"C\" void switch_bluetooth_data_mounted(void)");
+    ASSERT_NE(hook, std::string::npos);
+    const std::string body = source.substr(hook, source.find("\n}\n", hook) - hook);
+    const size_t staged = body.find("publishAddressBytes(staged);"), announce = body.find("announceAddressToRails();");
+    ASSERT_NE(staged, std::string::npos);
+    ASSERT_NE(announce, std::string::npos);
+    EXPECT_LT(staged, announce);
+    EXPECT_EQ(body.find("return;"), body.rfind("return;")) << "only the switch-no-bt return";
+}
+
 }  // namespace

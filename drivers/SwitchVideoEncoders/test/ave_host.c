@@ -18,6 +18,7 @@
 // Prints "PASS ave ..." (test:ave_host_test).
 #include "../AVE/AVEEncoder.c"
 #include <stdio.h>
+#include "EncodeCheck.h"
 #include "../../SwitchVideoDecoders/AVD/H264Syntax.h"
 #include "../../TegraNVENC/TegraNVENCCheck.h"
 
@@ -58,12 +59,6 @@ void nvenc_close(NVENCClient *c)
     for (int i = 0; i < MAX_HANDLES; i++)
         free(c->va[i]);
     free(c);
-}
-
-bool nvenc_claim_self_test(NVENCClient *c)
-{
-    (void)c;
-    return false;
 }
 
 bool nvenc_info(NVENCClient *c, TegraNVENCInfo *info)
@@ -443,8 +438,9 @@ static void driverControls(void)
     H264EncLayout l;
     h264enc_layout(&c, &l);
     EXPECT(l.history_bytes == 706560, "history at 1280x720 is %u bytes, NVIDIA's driver gives 706560", l.history_bytes);
-    const H264EncHandles h = {1, 2, 3, 4, 5};
-    const uint64_t sizes[6] = {0, l.input.bytes, l.recon.bytes, l.recon.bytes, l.bitstream_bytes, l.aux_bytes};
+    const H264EncHandles h = {1, 2, 3, 4, 5, {6, 7}};
+    const uint64_t sizes[8] = {0,           l.input.bytes,  l.recon.bytes, l.recon.bytes, l.bitstream_bytes,
+                               l.aux_bytes, l.mepred_bytes, l.mepred_bytes};
     for (int k = 0; k < 2; k++) {
         const H264EncPicture pic = {.type = k ? H264ENC_P : H264ENC_IDR, .qp = 24, .frame_num = (uint32_t)k};
         static TegraNVENCSubmit s;
@@ -486,6 +482,43 @@ static void driverControls(void)
                 avail[i] = sizes[s.entries[i].value] - s.entries[i].offset;
         const char *why = tegra_nvenc_check(&s, avail);
         EXPECT(!why, "%s at 1280x720: the checker refuses it: %s", name, why ? why : "");
+        // The methods of NVIDIA's T210 driver's jobs (switch-frame-tap m79-runE, a P picture): the plug-in's, plus the
+        // two the kernel adds (the setup slot, the RC process state); the kernel writes 0 in every other address
+        // method, as that driver leaves them.
+        static const uint16_t kDriverMethods[] = {
+            NVC5B7_SET_APPLICATION_ID,      NVC5B7_SET_CONTROL_PARAMS,   NVC5B7_SET_PICTURE_INDEX,
+            NVC5B7_SET_IN_DRV_PIC_SETUP,    NVC5B7_SET_OUT_ENC_STATUS,   NVC5B7_SET_IO_RC_PROCESS,
+            NVC5B7_SET_OUT_BITSTREAM,       NVC5B7_SET_IOHISTORY,        NVC5B7_SET_IN_CUR_PIC,
+            NVC5B7_SET_IN_CUR_PIC_CHROMA_U, NVC5B7_SET_OUT_REF_PIC_LUMA, NVC5B7_SET_IN_MEPRED_DATA,
+            NVC5B7_SET_OUT_MEPRED_DATA,     NVC5B7_SET_IN_REF_PIC0_LUMA, NVC5B7_EXECUTE,
+        };
+        const uint32_t driverCount = sizeof(kDriverMethods) / sizeof(kDriverMethods[0]) - (k ? 0 : 1);
+        uint32_t matched = 2;  // the kernel's two
+        bool extra = false;
+        for (uint32_t i = 0; i < s.entry_count; i++) {
+            bool found = false;
+            for (uint32_t j = 0; j < sizeof(kDriverMethods) / sizeof(kDriverMethods[0]); j++)
+                found |= s.entries[i].method == kDriverMethods[j];
+            matched += found;
+            extra |= !found;
+        }
+        EXPECT(!extra && matched == driverCount, "%s: methods differ from NVIDIA's T210 driver's (%u of %u, extra %d)",
+               name, matched, driverCount, extra);
+        uint32_t control = 0;
+        for (uint32_t i = 0; i < s.entry_count; i++)
+            if (s.entries[i].method == NVC5B7_SET_CONTROL_PARAMS)
+                control = s.entries[i].value;
+        EXPECT((control & 0xffff) == 0x1103, "%s: control params %#x, NVIDIA's driver sends 0x1103 below its RC mode",
+               name, control);
+        // The predictors alternate: this picture reads the buffer the one before wrote.
+        uint32_t in = 0, out = 0;
+        for (uint32_t i = 0; i < s.entry_count; i++) {
+            if (s.entries[i].method == NVC5B7_SET_IN_MEPRED_DATA)
+                in = s.entries[i].value;
+            if (s.entries[i].method == NVC5B7_SET_OUT_MEPRED_DATA)
+                out = s.entries[i].value;
+        }
+        EXPECT(in && out && in != out, "%s: ME predictors in %u out %u", name, in, out);
     }
     // The history the checker asks for: one row of 128-byte records (nvenc_drv.h 2.3) below NVIDIA's T210 size, which
     // is 192 bytes a macroblock and a row more; never less than the row.
@@ -537,6 +570,8 @@ static void refusals(void)
         {"unused list-0 entry -1 instead of the driver's -2", "list 0 length"},
         {"history of one 128-byte row (nvenc_drv.h 2.3), below the T210 driver's size", "history"},
         {"direct prediction", "mode decision"},
+        {"ME predictors in without out", "ME predictors in without out, or out without in"},
+        {"ME predictor buffer too small", "ME predictor buffers"},
     };
 
     for (unsigned k = 0; k < sizeof(cases) / sizeof(cases[0]); k++) {
@@ -627,6 +662,16 @@ static void refusals(void)
         }
         case 20:
             ((nvenc_h264_md_control_s *)(s.setup + pc->md_control_offset))->bdirect_mode = 1;
+            break;
+        case 21:
+            for (uint32_t i = 0; i < s.entry_count; i++)  // to an unused reference slot
+                if (s.entries[i].method == NVC5B7_SET_OUT_MEPRED_DATA)
+                    s.entries[i].method = NVC5B7_SET_IN_REF_PIC0_LUMA + 4 * 6;
+            break;
+        case 22:
+            for (uint32_t i = 0; i < s.entry_count; i++)
+                if (s.entries[i].method == NVC5B7_SET_IN_MEPRED_DATA)
+                    avail[i] = 256;
             break;
         }
         const char *why = tegra_nvenc_check(&s, avail);

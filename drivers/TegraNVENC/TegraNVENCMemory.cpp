@@ -1,99 +1,28 @@
 // SPDX-License-Identifier: BSD-2-Clause-Patent
-// NVENC's buffer arena. With the SMMU bypassed the engine addresses physical memory, so every buffer it touches must be
-// physically contiguous and below 4 GiB. Unlike NVDEC's one region reserved at boot, this arena starts with one small
-// chunk (E0: 2 MiB, which holds E3's buffers and then the setup slots and scratch) and grows by contiguous chunks
-// when a session's buffers do not fit, up to kMaxChunks / kMaxBytes. Chunks are kept once added: a session that ends
-// leaves its memory for the next, and nothing is re-fragmented. Allocation is first fit in 64 KiB granules across
-// the chunks.
+// NVENC's memory, behind the MC SMMU (ASID 122, drivers/TegraSMMU/TegraSMMUEngine.h), as NVDEC's: every buffer a session
+// asks for is any RAM pages, wired and mapped into NVENC's window when allocated and unmapped when freed; the firmware,
+// the setup slots and the scratch buffer are identity-mapped, since the driver points methods at them by physical
+// address. What all sessions together may wire is capped (kWiredLimit).
 #include <IOKit/IOLib.h>
-#include <IOKit/IOLocks.h>
-#include <IOKit/IOBufferMemoryDescriptor.h>
-#include <string.h>
 #include "TegraNVENC.h"
+#include "../TegraSMMU/TegraSMMU.h"
+#include "../TegraSMMU/TegraSMMUEngine.h"
+#include "../../kits/SwitchDMA/SwitchDMABuffer.h"
 #include "../../kits/SwitchDMA/SwitchDcache.h"
 
 namespace {
-constexpr uint64_t kGranule = 64 * 1024, kGrowChunk = 8ull << 20, kMaxBytes = 96ull << 20;
-constexpr uint32_t kMaxChunks = 16;
+constexpr uint64_t kWindowBase = 1ull << 30, kWindowBytes = 1ull << 30;
+constexpr uint32_t kIdentityTables = 6;  // the firmware, setup slots and scratch: at most two 4 MiB sections each
+constexpr uint64_t kWiredLimit = 256ull << 20;
 
-struct Chunk {
-    IOBufferMemoryDescriptor *md;
-    uint64_t pa;
-    uint8_t *va;
-    uint32_t granules, free;
-    uint32_t *used;  // one bit per granule
+// The swgroup's one ASID register; its two clients' translation bits sit in two registers (nvencsrd, nvencswr).
+const TegraSMMUSwgroup kGroups[] = {
+    {TEGRA_SMMU_NVENC_ASID, TEGRA_SMMU_TRANSLATION_ENABLE_0, 1u << 28},
+    {TEGRA_SMMU_NVENC_ASID, TEGRA_SMMU_TRANSLATION_ENABLE_1, 1u << 11},
 };
 
-Chunk gChunks[kMaxChunks];
-uint32_t gCount;
-uint64_t gTotal;
-IOLock *gLock;
-
-bool used(const Chunk &c, uint32_t i)
-{
-    return c.used[i / 32] & (1u << (i % 32));
-}
-
-void setUsed(Chunk &c, uint32_t first, uint32_t count, bool on)
-{
-    for (uint32_t i = first; i < first + count; i++) {
-        if (on)
-            c.used[i / 32] |= 1u << (i % 32);
-        else
-            c.used[i / 32] &= ~(1u << (i % 32));
-    }
-}
-
-// One more chunk (gLock held). Fails quietly; the caller reports.
-bool addChunk(uint64_t bytes)
-{
-    bytes = (bytes + kGranule - 1) & ~(kGranule - 1);
-    if (gCount == kMaxChunks || gTotal + bytes > kMaxBytes)
-        return false;
-    const IOOptionBits options = (IOOptionBits)kIODirectionInOut | (IOOptionBits)kIOMemoryPhysicallyContiguous |
-                                 (IOOptionBits)kIOMemoryMapperNone | (IOOptionBits)kIOMemoryKernelUserShared;
-    IOBufferMemoryDescriptor *md =
-        IOBufferMemoryDescriptor::inTaskWithPhysicalMask(kernel_task, options, bytes, 0xffff0000ULL);
-    IOByteCount contiguous = 0;
-    uint64_t pa = 0;
-    if (md && md->prepare() == kIOReturnSuccess)
-        pa = md->getPhysicalSegment(0, &contiguous, kIOMemoryMapperNone);
-    if (!pa || contiguous < bytes || pa + bytes > (1ULL << 32)) {
-        if (md)
-            md->release();
-        return false;
-    }
-    Chunk &c = gChunks[gCount];
-    c.granules = (uint32_t)(bytes / kGranule);
-    c.used = IONewZero(uint32_t, (c.granules + 31) / 32);
-    if (!c.used) {
-        md->release();
-        return false;
-    }
-    c.md = md;
-    c.pa = pa;
-    c.va = (uint8_t *)md->getBytesNoCopy();
-    c.free = c.granules;
-    gTotal += bytes;
-    gCount++;
-    return true;
-}
-
-bool fit(uint32_t chunk, uint32_t count, uint32_t *first)
-{
-    const Chunk &c = gChunks[chunk];
-    uint32_t run = 0;
-    for (uint32_t i = 0; i < c.granules && run < count; i++) {
-        if (used(c, i)) {
-            run = 0;
-        } else {
-            if (!run)
-                *first = i;
-            run++;
-        }
-    }
-    return run == count;
-}
+TegraSMMUEngine gSpace;
+uint64_t gWired;  // atomic: bytes of every live buffer
 }  // namespace
 
 extern "C" void tegra_nvenc_cache_clean(const void *va, size_t size)
@@ -106,94 +35,81 @@ extern "C" void tegra_nvenc_cache_flush(const void *va, size_t size)
     switch_dcache_clean_invalidate(va, size);
 }
 
-extern "C" int tegra_nvenc_arena_init(uint64_t bytes)
+extern "C" int tegra_nvenc_memory_init(const switch_dma_buffer *firmware, const switch_dma_buffer *setup,
+                                       const switch_dma_buffer *scratch, char *line, size_t size)
 {
-    if (!gLock && !(gLock = IOLockAlloc()))
-        return -12;
-    IOLockLock(gLock);
-    const bool ok = gCount || addChunk(bytes);
-    IOLockUnlock(gLock);
-    return ok ? 0 : -12;
+    if (!gSpace.init(TEGRA_SMMU_ASID_NVENC, kWindowBase, kWindowBytes, kIdentityTables)) {
+        snprintf(line, size, "E1 FAIL no contiguous memory below 4 GiB for NVENC's SMMU tables");
+        return -1;
+    }
+    if (!gSpace.identity(firmware->pa, firmware->size, false) || !gSpace.identity(setup->pa, setup->size, false) ||
+        !gSpace.identity(scratch->pa, scratch->size, true)) {
+        snprintf(line, size, "E1 FAIL the kernel's buffers need more than %u identity tables", kIdentityTables);
+        gSpace.release();
+        return -1;
+    }
+    return tegra_nvenc_memory_attach(line, size);
 }
 
-extern "C" void tegra_nvenc_arena_release(void)
+extern "C" int tegra_nvenc_memory_attach(char *line, size_t size)
 {
-    if (!gLock)
-        return;
-    IOLockLock(gLock);
-    for (uint32_t i = 0; i < gCount; i++) {
-        gChunks[i].md->complete();
-        gChunks[i].md->release();
-        IODelete(gChunks[i].used, uint32_t, (gChunks[i].granules + 31) / 32);
-        gChunks[i] = Chunk{};
+    char why[160];
+    if (gSpace.attach(kGroups, sizeof(kGroups) / sizeof(kGroups[0]), why, sizeof(why))) {
+        snprintf(line, size, "E1 FAIL nvenc swgroup: %s", why);
+        return -1;
     }
-    gCount = 0;
-    gTotal = 0;
-    IOLockUnlock(gLock);
-}
-
-extern "C" int tegra_nvenc_arena_alloc(uint64_t size, TegraNVENCBlock *block)
-{
-    if (!gLock || !size || size > kMaxBytes)
-        return -12;
-    const uint32_t count = (uint32_t)((size + kGranule - 1) / kGranule);
-    IOLockLock(gLock);
-    uint32_t chunk = 0, first = 0;
-    while (chunk < gCount && !fit(chunk, count, &first))
-        chunk++;
-    if (chunk == gCount) {  // a new chunk, at least the usual size and big enough for this buffer
-        const uint64_t bytes = (uint64_t)count * kGranule > kGrowChunk ? (uint64_t)count * kGranule : kGrowChunk;
-        if (!gCount || !addChunk(bytes) || !fit(chunk, count, &first)) {
-            IOLockUnlock(gLock);
-            return -12;
-        }
-    }
-    Chunk &c = gChunks[chunk];
-    setUsed(c, first, count, true);
-    c.free -= count;
-    IOLockUnlock(gLock);
-    block->chunk = chunk;
-    block->first = first;
-    block->count = count;
-    block->size = (uint64_t)count * kGranule;
-    block->pa = c.pa + (uint64_t)first * kGranule;
-    block->va = c.va + (uint64_t)first * kGranule;
-    // Zero through the cacheable kernel mapping and push it out, so no dirty line can later land on engine output.
-    bzero(block->va, block->size);
-    tegra_nvenc_cache_flush(block->va, block->size);
     return 0;
 }
 
-extern "C" void tegra_nvenc_arena_free(const TegraNVENCBlock *block)
+extern "C" void tegra_nvenc_memory_detach(void)
 {
-    if (!gLock || !block->count)
-        return;
-    IOLockLock(gLock);
-    if (block->chunk < gCount) {
-        setUsed(gChunks[block->chunk], block->first, block->count, false);
-        gChunks[block->chunk].free += block->count;
+    gSpace.detach();
+}
+
+extern "C" void tegra_nvenc_memory_release(void)
+{
+    gSpace.detach();
+    gSpace.release();
+}
+
+extern "C" int tegra_nvenc_buffer_alloc(uint64_t size, TegraNVENCBlock *block)
+{
+    *block = {};
+    const uint64_t bytes = TegraSMMUSpace::round(size);
+    if (!size || !gSpace.lock)
+        return -12;
+    if (__atomic_add_fetch(&gWired, bytes, __ATOMIC_RELAXED) > kWiredLimit) {
+        __atomic_sub_fetch(&gWired, bytes, __ATOMIC_RELAXED);
+        return -12;
     }
-    IOLockUnlock(gLock);
+    if (!switch_dma_pages_alloc(&block->pages, (size_t)bytes, kIOMemoryKernelUserShared)) {
+        __atomic_sub_fetch(&gWired, bytes, __ATOMIC_RELAXED);
+        return -12;
+    }
+    block->iova = gSpace.map(block->pages.pages, block->pages.count, true);
+    if (!block->iova) {
+        switch_dma_pages_free(&block->pages);
+        __atomic_sub_fetch(&gWired, bytes, __ATOMIC_RELAXED);
+        return -12;
+    }
+    block->size = bytes;
+    block->va = block->pages.va;
+    return 0;
 }
 
-// A physical-range descriptor, as TegraNVDEC hands out its arena; on RAM the default cache mode maps it cacheable.
-extern "C" IOMemoryDescriptor *tegra_nvenc_arena_descriptor(const TegraNVENCBlock *block)
+extern "C" void tegra_nvenc_buffer_free(TegraNVENCBlock *block)
 {
-    IOAddressRange range = {block->pa, block->size};
-    return gCount ? IOMemoryDescriptor::withAddressRanges(
-                        &range, 1, (IOOptionBits)kIODirectionInOut | (IOOptionBits)kIOMemoryTypePhysical64, TASK_NULL)
-                  : nullptr;
+    if (!block->iova)
+        return;
+    gSpace.unmap(block->iova, block->pages.count);
+    switch_dma_pages_free(&block->pages);
+    __atomic_sub_fetch(&gWired, block->size, __ATOMIC_RELAXED);
+    *block = {};
 }
 
-extern "C" void tegra_nvenc_arena_usage(uint64_t *total, uint64_t *free)
+extern "C" void tegra_nvenc_memory_usage(uint64_t *limit, uint64_t *free)
 {
-    uint64_t f = 0;
-    if (gLock)
-        IOLockLock(gLock);
-    for (uint32_t i = 0; i < gCount; i++)
-        f += (uint64_t)gChunks[i].free * kGranule;
-    *total = gTotal;
-    if (gLock)
-        IOLockUnlock(gLock);
-    *free = f;
+    const uint64_t wired = __atomic_load_n(&gWired, __ATOMIC_RELAXED);
+    *limit = kWiredLimit;
+    *free = wired < kWiredLimit ? kWiredLimit - wired : 0;
 }

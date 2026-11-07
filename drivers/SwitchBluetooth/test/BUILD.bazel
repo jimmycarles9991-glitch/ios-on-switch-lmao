@@ -5,6 +5,7 @@
 # - switch_bluetooth_rx_dma_test: RX by APB DMA (SwitchBluetoothRxDma.h's framing and transfer lengths) at the peak
 #   load, against the PIO model.
 # - switch_coex_test: Wi-Fi/Bluetooth coexistence (SwitchCoex.h with SwitchWLAN's SwitchWLANCoex.h and NVRAM).
+# - switch_bluetooth_le_filter_test: bluetoothd's LE filtering commands into APCF filters (SwitchBluetoothLeFilter.h).
 # - switch_bluetooth_source_test: guards that SwitchBluetooth.cpp programs the UART as both models assume.
 #
 #   bazel test //drivers/SwitchBluetooth/test:all
@@ -86,4 +87,20 @@ host_test(
     name = "switch_bluetooth_source_test",
     srcs = ["switch_bluetooth_source_test.cpp"],
     data = ["//drivers/SwitchBluetooth:SwitchBluetooth.cpp"],
+)
+
+host_library(
+    name = "le_filter_harness",
+    srcs = [
+        "switch_bluetooth_le_filter_harness.c",
+        "//drivers/SwitchBluetooth:SwitchBluetoothLeFilter.h",
+    ],
+    hdrs = ["switch_bluetooth_le_filter_harness.h"],
+    copts = C_FLAGS,
+)
+
+host_test(
+    name = "switch_bluetooth_le_filter_test",
+    srcs = ["switch_bluetooth_le_filter_test.cpp"],
+    deps = [":le_filter_harness"],
 )

@@ -168,8 +168,12 @@ host_library(
     name = "avd_host",
     srcs = [
         "avd_host.c",
+        "//drivers/SwitchVideoDecoders:AVD/AVDDecoder.h",
+        "//drivers/SwitchVideoDecoders:AVD/AVDTiles.c",
         "//drivers/SwitchVideoDecoders:AVD/NVDECClient.h",
         "//drivers/SwitchVideoDecoders:AVD/VTDecoderSPI.h",
+        "//kits/SwitchRefusal:SwitchRefusal.c",
+        "//kits/SwitchRefusal:SwitchRefusal.h",
     ],
     copts = ["-O1"],
     defines = ["main=avd_host_main"],

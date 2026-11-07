@@ -26,11 +26,14 @@
 // the spawn); it touches nothing but its XPC listener and that one spawn. Children are not waited for (SIGCHLD
 // ignored): joyconpaird runs for the boot and keeps a single instance itself.
 #include <dispatch/dispatch.h>
+#include <errno.h>
+#include <notify.h>
 #include <os/log.h>
 #include <signal.h>
 #include <spawn.h>
 #include <stdint.h>
 #include <string.h>
+#include <sys/sysctl.h>
 #include <unistd.h>
 #include <xpc/xpc.h>
 
@@ -58,6 +61,79 @@ static void startPairingAgent(void)
     if (error)
         os_log_error(OS_LOG_DEFAULT, "BlueTool: %{public}s not started: %d", kPairingAgent, error);
 }
+
+#if SWITCH_DEBUG
+// Debug builds: the GPU context-switch stress (drivers/TegraGM20BMetal/raw/test/fetchform.cpp), once per Darwin notification
+// the Mac posts (`idevicenotificationproxy -u <udid> post com.brunostjohn.switch.debug.ctxsw-stress`). Nothing else starts
+// it; it runs a bounded time and exits.
+static const char kStress[] = "/usr/bin/switch-fetchform";
+
+static void watchStress(void)
+{
+    int token;
+    notify_register_dispatch("com.brunostjohn.switch.debug.ctxsw-stress", &token, dispatch_get_main_queue(), ^(int t) {
+        (void)t;
+        os_log(OS_LOG_DEFAULT, "BlueTool: ctxsw-stress posted, %{public}s %{public}s", kStress,
+               access(kStress, X_OK) ? "missing" : "starting");
+        if (access(kStress, X_OK))
+            return;
+        char *argv[] = {(char *)kStress, NULL};
+        pid_t pid;
+        const int error = posix_spawn(&pid, kStress, NULL, NULL, argv, environ);
+        if (error)
+            os_log_error(OS_LOG_DEFAULT, "BlueTool: %{public}s not started: %d", kStress, error);
+    });
+}
+
+// Debug builds: the SoC watchdog bench (kernel/switch/shutdown/shutdown.c), once per Darwin notification the Mac posts
+// (`idevicenotificationproxy -u <udid> post com.brunostjohn.switch.debug.watchdog-bench`): the watchdog armed for 20 s
+// and never petted. Nothing else arms it.
+static void watchWatchdogBench(void)
+{
+    int token;
+    notify_register_dispatch(
+        "com.brunostjohn.switch.debug.watchdog-bench", &token, dispatch_get_main_queue(), ^(int t) {
+            (void)t;
+            int seconds = 20;
+            const int error =
+                sysctlbyname("debug.switch_watchdog_bench", NULL, NULL, &seconds, sizeof(seconds)) ? errno : 0;
+            os_log(OS_LOG_DEFAULT, "BlueTool: watchdog-bench posted: SoC watchdog %d s, %{public}s", seconds,
+                   error ? strerror(error) : "armed");
+        });
+}
+
+// Debug builds: window A's column-scan experiment (drivers/NativeMobileDisplay/NativeColumnScan.h), once per Darwin
+// notification the Mac posts: com.brunostjohn.switch.debug.column-scan scans the 4K test frame in the UI's 16-GOB
+// blocks, ...column-scan-nvdec in NVDEC's 2-GOB ones. The kernel logs the result.
+static void watchColumnScan(const char *name, int blockHeightLog2)
+{
+    int token;
+    notify_register_dispatch(name, &token, dispatch_get_main_queue(), ^(int t) {
+        (void)t;
+        int value = blockHeightLog2;
+        const int error =
+            sysctlbyname("debug.switch_display_column_scan", NULL, NULL, &value, sizeof(value)) ? errno : 0;
+        os_log(OS_LOG_DEFAULT, "BlueTool: %{public}s posted: %{public}s", name, error ? strerror(error) : "started");
+    });
+}
+#endif
+
+#if SWITCH_DEBUG
+// Debug builds: the GPU's clock gating off and on again for a frame-time A/B within one boot (drivers/TegraGM20B
+// debug.switch_gpu_clkgate), once per Darwin notification the Mac posts
+// (`idevicenotificationproxy -u <udid> post com.brunostjohn.switch.debug.gpu-clkgate-off` / `-on`).
+static void watchClkgate(const char *name, int on)
+{
+    int token;
+    notify_register_dispatch(name, &token, dispatch_get_main_queue(), ^(int t) {
+        (void)t;
+        int value = on;
+        const int error = sysctlbyname("debug.switch_gpu_clkgate", NULL, NULL, &value, sizeof(value)) ? errno : 0;
+        os_log(OS_LOG_DEFAULT, "BlueTool: %{public}s posted: GPU clock gating %{public}s, %{public}s", name,
+               on ? "on" : "off", error ? strerror(error) : "done");
+    });
+}
+#endif
 
 static void answer(xpc_connection_t peer, xpc_object_t message)
 {
@@ -94,5 +170,13 @@ int main(void)
         xpc_connection_resume(connection);
     });
     xpc_connection_resume(listener);
+#if SWITCH_DEBUG
+    watchStress();
+    watchWatchdogBench();
+    watchColumnScan("com.brunostjohn.switch.debug.column-scan", 4);
+    watchColumnScan("com.brunostjohn.switch.debug.column-scan-nvdec", 1);
+    watchClkgate("com.brunostjohn.switch.debug.gpu-clkgate-off", 0);
+    watchClkgate("com.brunostjohn.switch.debug.gpu-clkgate-on", 1);
+#endif
     dispatch_main();
 }

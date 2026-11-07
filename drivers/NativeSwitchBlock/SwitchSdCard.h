@@ -155,6 +155,10 @@ struct SwitchSdStatus {
     uint8_t appClass;    // 0 none, 1 A1, 2 A2
     uint8_t cqDepth;     // PERFORMANCE_ENHANCE b[335:331]: 0 none, else the queue depth (field + 1)
     bool cache, hostMaintenance, cardMaintenance, discard, fule;
+    uint32_t auSectors;    // AU_SIZE b[431:428] in 512-byte sectors, 0 when the card names none
+    uint16_t eraseSize;    // ERASE_SIZE b[423:408]: AUs that ERASE_TIMEOUT covers, 0 when unspecified
+    uint8_t eraseTimeout;  // ERASE_TIMEOUT b[407:402], seconds
+    uint8_t eraseOffset;   // ERASE_OFFSET b[401:400], seconds
 };
 
 inline SwitchSdStatus switchSdParseStatus(const uint8_t ssr[64])
@@ -174,7 +178,33 @@ inline SwitchSdStatus switchSdParseStatus(const uint8_t ssr[64])
     s.cardMaintenance = switchSdBits(ssr, 512, 328, 328);
     s.discard = switchSdBits(ssr, 512, 313, 313);
     s.fule = switchSdBits(ssr, 512, 312, 312);
+    // 16 KiB to 4 MiB in powers of two, then 8, 12, 16, 24, 32 and 64 MiB (Table 4-47).
+    static const uint32_t kAuKiB[] = {0,    16,   32,   64,    128,   256,   512,   1024,
+                                      2048, 4096, 8192, 12288, 16384, 24576, 32768, 65536};
+    s.auSectors = kAuKiB[switchSdBits(ssr, 512, 431, 428)] * 2;
+    s.eraseSize = static_cast<uint16_t>(switchSdBits(ssr, 512, 423, 408));
+    s.eraseTimeout = static_cast<uint8_t>(switchSdBits(ssr, 512, 407, 402));
+    s.eraseOffset = static_cast<uint8_t>(switchSdBits(ssr, 512, 401, 400));
     return s;
+}
+
+// The busy an erase of `aus` allocation units may take (ms): ERASE_OFFSET plus ERASE_TIMEOUT per ERASE_SIZE AUs, else
+// 250 ms an AU, never under a second (Linux mmc_sd_erase_timeout).
+inline uint64_t switchSdEraseTimeoutMs(const SwitchSdStatus &s, uint64_t aus)
+{
+    const uint64_t ms = s.eraseSize && s.eraseTimeout
+                            ? uint64_t(s.eraseTimeout) * 1000 * aus / s.eraseSize + uint64_t(s.eraseOffset) * 1000
+                            : 250 * aus;
+    return ms < 1000 ? 1000 : ms;
+}
+
+// The most AUs one erase may cover while its specified busy stays within budgetMs (at least one).
+inline uint32_t switchSdEraseAus(const SwitchSdStatus &s, uint64_t budgetMs)
+{
+    uint32_t aus = 1;
+    while (aus < 1024 && switchSdEraseTimeoutMs(s, aus + 1) <= budgetMs)
+        ++aus;
+    return aus;
 }
 
 // ---- Extension registers (5.7) -------------------------------------------------------------------------------------

@@ -299,6 +299,27 @@ impl Owners {
             .extend(owners.filter(|owner| owner.reached()).cloned());
     }
 
+    /// The buffers over the caller's host pages that own the memory under `uses`, each with its
+    /// use's access; upgraded outside the lock, as no owner is let go under it.
+    pub(super) fn host_buffers(
+        &self,
+        uses: impl IntoIterator<Item = (ResourceKey, u8)>,
+    ) -> Vec<(Buffer, u8)> {
+        let found: Vec<(WeakBuffer, u8)> = {
+            let registry = lock(&self.inner);
+            uses.into_iter()
+                .filter_map(|(key, access)| match registry.owners.get(&key) {
+                    Some(Owner::Buffer(buffer, true)) => Some((buffer.clone(), access)),
+                    _ => None,
+                })
+                .collect()
+        };
+        found
+            .into_iter()
+            .filter_map(|(buffer, access)| Some((buffer.upgrade()?, access)))
+            .collect()
+    }
+
     /// Add the owners of `keys` to `used`.
     fn list(&self, keys: &BTreeSet<ResourceKey>, used: &mut Listing) {
         let owners: Vec<Owner> = {

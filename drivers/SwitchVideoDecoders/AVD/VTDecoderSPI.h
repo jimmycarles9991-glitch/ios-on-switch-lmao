@@ -17,6 +17,7 @@ typedef struct OpaqueCMBaseClass *CMBaseClassID;
 typedef struct OpaqueVTVideoDecoderSession *VTVideoDecoderSession;
 typedef struct OpaqueVTVideoDecoderFrame *VTVideoDecoderFrame;
 typedef CMBaseObjectRef VTVideoDecoderRef;
+typedef struct OpaqueVTTileDecoderSession *VTTileDecoderSession;
 
 typedef struct {
     uint32_t version;
@@ -41,7 +42,13 @@ typedef struct {
     OSStatus (*copySerializableProperties)(VTVideoDecoderRef, CFAllocatorRef, CFDictionaryRef *);
     Boolean (*canAcceptFormatDescription)(VTVideoDecoderRef, CMVideoFormatDescriptionRef);
     OSStatus (*finishDelayedFrames)(VTVideoDecoderRef);
-    void *reserved[3];
+    // Version 3 (Apple's A10X HEVC decoder, H264H8 0x231f34028, fills these two): a tile session's start, and one tile
+    // decoded into `destination` with its top-left at `offset`. VideoToolbox passes the tile's place in the image and
+    // its size as well; Apple's decoder uses neither.
+    OSStatus (*startTileSession)(VTVideoDecoderRef, VTTileDecoderSession, CMVideoFormatDescriptionRef);
+    OSStatus (*decodeTile)(VTVideoDecoderRef, int64_t frameID, CMSampleBufferRef, VTInt32Point tile, VTInt32Size size,
+                           CVPixelBufferRef destination, VTInt32Point offset, VTDecodeFrameFlags, VTDecodeInfoFlags *);
+    OSStatus (*finishDelayedTiles)(VTVideoDecoderRef);
 } VTPluginDecoderClass;
 
 typedef struct {
@@ -55,6 +62,10 @@ _Static_assert(offsetof(VTPluginBaseClass, finalize) == 0x20, "CMBaseClass");
 _Static_assert(offsetof(VTPluginBaseClass, setProperty) == 0x38, "CMBaseClass");
 _Static_assert(offsetof(VTPluginDecoderClass, decodeFrame) == 0x10, "VTVideoDecoderClass");
 _Static_assert(offsetof(VTPluginDecoderClass, canAcceptFormatDescription) == 0x30, "VTVideoDecoderClass");
+_Static_assert(offsetof(VTPluginDecoderClass, startTileSession) == 0x40, "VTVideoDecoderClass v3");
+_Static_assert(offsetof(VTPluginDecoderClass, decodeTile) == 0x48, "VTVideoDecoderClass v3");
+_Static_assert(offsetof(VTPluginDecoderClass, finishDelayedTiles) == 0x50, "VTVideoDecoderClass v3");
+_Static_assert(sizeof(VTInt32Point) == 8 && sizeof(VTInt32Size) == 8, "VTBase.h's, one register each by value");
 
 typedef OSStatus (*VTDecoderCreateInstance)(FourCharCode codecType, CFAllocatorRef allocator, VTVideoDecoderRef *out);
 
@@ -85,5 +96,25 @@ extern OSStatus VTDecoderSessionSetPixelBufferAttributes(VTVideoDecoderSession s
 extern CVPixelBufferPoolRef VTDecoderSessionGetPixelBufferPool(VTVideoDecoderSession session);
 extern OSStatus VTDecoderSessionEmitDecodedFrame(VTVideoDecoderSession session, VTVideoDecoderFrame frame,
                                                  OSStatus status, VTDecodeInfoFlags flags, CVImageBufferRef image);
+// A tile session's answer for frameID; a NULL image means the destination the tile was decoded into.
+extern OSStatus VTDecoderSessionEmitDecodedTile(VTTileDecoderSession session, int64_t frameID, OSStatus status,
+                                                VTDecodeInfoFlags flags, CVImageBufferRef image);
+// What the caller must make the destination canvas like (pixel buffer attributes) and the tiles it may send.
+extern OSStatus VTTileDecoderSessionSetTileDecodeRequirements(VTTileDecoderSession session,
+                                                              CFDictionaryRef pixelBufferAttributes,
+                                                              CFDictionaryRef requirements);
+extern const CFStringRef kVTTileDecoderRequirement_TileByteAlignment;
+extern const CFStringRef kVTTileDecoderRequirement_MinimumTileWidth;
+extern const CFStringRef kVTTileDecoderRequirement_MaximumTileWidth;
+extern const CFStringRef kVTTileDecoderRequirement_MinimumTileHeight;
+extern const CFStringRef kVTTileDecoderRequirement_MaximumTileHeight;
+extern const CFStringRef kVTTileDecoderRequirement_MaximumCanvasRowBytes;
+extern const CFStringRef kVTTileDecoderRequirement_MinimumDecodableWidth;
+extern const CFStringRef kVTTileDecoderRequirement_MinimumDecodableHeight;
+extern const CFStringRef kVTTileDecoderRequirement_TileWidthPixelAlignment;
+extern const CFStringRef kVTTileDecoderRequirement_TileHeightPixelAlignment;
+extern const CFStringRef kVTTileDecoderRequirement_MaximumCanvasWidth;
+extern const CFStringRef kVTTileDecoderRequirement_MaximumCanvasHeight;
+extern const CFStringRef kVTTileDecoderRequirement_DecoderCanClipEdges;
 
 #endif

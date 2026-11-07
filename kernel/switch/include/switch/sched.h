@@ -26,6 +26,13 @@ void switch_sched_limit_asked(uint8_t percentage, uint64_t interval_ns, bool lif
 void switch_sched_tick(uint64_t now);
 void switch_sched_boot_complete(void);
 
+/* render.c: Core Animation's display thread from each vsync to its swap (sched/render.h). The display and the GPU driver
+ * declare the last three themselves, with weak empty definitions for a release kernel. */
+void switch_sched_render_on_core(thread_t thread, uint64_t now);
+void switch_sched_render_vsync(uint64_t stamp, uint64_t period);
+void switch_sched_render_submitted(void);
+void switch_sched_render_swapped(void);
+
 /* thread_invoke, under the incoming thread's lock: the scheduler's hot path, so one load while nothing is watched. */
 static inline void switch_sched_on_core(thread_t thread, uint64_t now)
 {

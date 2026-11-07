@@ -1989,7 +1989,7 @@ workq_sched_callback(int type, thread_t thread)
 #pragma mark workq lifecycle
 
 #if DEVELOPMENT || DEBUG
-/* Switch stall reports (switch_stall.c): the process of a workqueue a locked turnstile holds as its inheritor. */
+/* Switch stall reports (kernel/switch/diag/stall.c): the process of a workqueue a locked turnstile holds as its inheritor. */
 int switch_workq_pid(void *workq);
 int
 switch_workq_pid(void *workq)

@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: BSD-2-Clause-Patent
 // SwitchDMAMapper: identity IOMapper with cache maintenance and bouncing; see UsbDmaMapper.h.
 #include "UsbDmaMapper.h"
+#include "UsbSmmuMapper.h"
 #include <IOKit/IOBufferMemoryDescriptor.h>
 #include <IOKit/IODMACommand.h>
 #include <IOKit/IOLib.h>
@@ -75,7 +76,7 @@ public:
 
     uint64_t mapToPhysicalAddress(uint64_t mappedAddress) override
     {
-        return SWITCH_USB_DMA_TO_PHYSICAL(mappedAddress);
+        return switch_usb_smmu_to_physical(mappedAddress);
     }
 };
 
@@ -104,13 +105,11 @@ void SwitchDMAMapper::free()
     IOMapper::free();
 }
 
-#if SWITCH_USB_SUPERSPEED
 namespace {
 // UsbSmmuMapper.h: buffers at IOVAs; what it cannot take is bounced (the pool is identity-mapped). Below the IONew and
 // IODelete sites above, whose kalloc_type views XNU names by __LINE__.
 bool gSmmu;
 }  // namespace
-#endif
 
 int SwitchDMAMapper::allocatePages(uint32_t count, uint64_t alignment)
 {
@@ -151,7 +150,6 @@ IOReturn SwitchDMAMapper::iovmMapMemory(IOMemoryDescriptor *memory, uint64_t off
     if (!memory || !length || !mapAddress || !mapLength)
         return kIOReturnBadArgument;
     const uint64_t alignment = spec && spec->alignment > 1 ? spec->alignment : 1;
-#if SWITCH_USB_SUPERSPEED
     uint64_t translated = 0;
     if (gSmmu &&
         switch_usb_smmu_map(memory, offset, length, mapOptions & kIODMAMapWriteAccess, alignment, &translated)) {
@@ -162,15 +160,10 @@ IOReturn SwitchDMAMapper::iovmMapMemory(IOMemoryDescriptor *memory, uint64_t off
         *mapLength = length;
         return kIOReturnSuccess;
     }
-#endif
     IOByteCount segment = 0;
     const uint64_t physical = memory->getPhysicalSegment(offset, &segment, kIOMemoryMapperNone);
-#if SWITCH_USB_SUPERSPEED
     const bool direct =
         !gSmmu && physical && segment >= length && !(physical & (alignment - 1)) && physical + length <= reach;
-#else
-    const bool direct = physical && segment >= length && !(physical & (alignment - 1)) && physical + length <= reach;
-#endif
     const bool cached = direct && cacheable(memory);
     const bool writable = mapOptions & kIODMAMapWriteAccess;
 
@@ -208,7 +201,6 @@ IOReturn SwitchDMAMapper::iovmMapMemory(IOMemoryDescriptor *memory, uint64_t off
 
 IOReturn SwitchDMAMapper::iovmUnmapMemory(IOMemoryDescriptor *memory, IODMACommand *, uint64_t mapAddress, uint64_t)
 {
-#if SWITCH_USB_SUPERSPEED
     uint64_t translatedOffset = 0, translatedLength = 0;
     bool translatedWritable = false;
     if (gSmmu && switch_usb_smmu_unmap(memory, mapAddress, &translatedOffset, &translatedLength, &translatedWritable)) {
@@ -217,7 +209,6 @@ IOReturn SwitchDMAMapper::iovmUnmapMemory(IOMemoryDescriptor *memory, IODMAComma
         memory->release();
         return kIOReturnSuccess;
     }
-#endif
     IOLockLock(lock);
     Mapping *m = find(mapAddress);
     if (!m || m->memory != memory) {
@@ -280,7 +271,6 @@ IOMapper *switch_usb_dma_mapper(uint64_t reach)
         return nullptr;
     }
     candidate->setName("SwitchDMAMapper");
-#if SWITCH_USB_SUPERSPEED
     uint64_t firmwarePa = 0, firmwareBytes = 0;
     char why[160] = "";
     const uint64_t poolPa = gPool ? gPool->getPhysicalSegment(0, nullptr, kIOMemoryMapperNone) : 0;
@@ -289,7 +279,6 @@ IOMapper *switch_usb_dma_mapper(uint64_t reach)
     if (!gSmmu)
         IOLog("SwitchUSB: host DMA by physical address with bounces (SMMU off: %s)\n",
               why[0] ? why : "no firmware image");
-#endif
     mapper = candidate;
     return mapper;
 }

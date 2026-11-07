@@ -294,6 +294,8 @@ void gf100_gr_ctxctl_debug(struct gf100_gr *);
 
 u64  gf100_gr_units(struct nvkm_gr *);
 void gf100_gr_zbc_init(struct gf100_gr *);
+int gf100_gr_zbc_color_get(struct gf100_gr *, int format, const u32 ds[4], const u32 l2[4]);
+int gf100_gr_zbc_depth_get(struct gf100_gr *, int format, const u32 ds, const u32 l2);
 
 extern const struct nvkm_object_func gf100_fermi;
 

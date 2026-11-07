@@ -1,9 +1,10 @@
 # The charging path on the host: drivers/SwitchBattery/SwitchChargePolicy.h (PDO choice, the input limit, the RDO,
 # BQ24193 register encodings, temperature zones, the gauge's temperature window) and the real SwitchBattery and SwitchPD
-# drivers, each its own translation unit over switch_charging_stubs.h, behind the register-level BQ24193, MAX17050 and
-# BM92T36 models in switch_charging_test.cpp, one process per scenario: boot with Nintendo's charger, temperature zones,
-# hot-plug (PD, plain Type-C, USB host with Hi-Z, a Mac), a refused or unanswered request, a re-balancing charger, a
-# contract that is ours already, a charger that loses or refuses its settings, a boost left on by an earlier boot. Plus
+# drivers (with SwitchPD's alternate-mode engine), each its own translation unit over switch_charging_stubs.h, behind
+# the register-level BQ24193, MAX17050 and BM92T36 models in switch_charging_test.cpp, one process per scenario: boot
+# with Nintendo's charger, temperature zones, hot-plug (PD, plain Type-C, USB host with Hi-Z, a Mac), a refused or
+# unanswered request, a re-balancing charger, a contract that is ours already, a charger that loses or refuses its
+# settings, a boost left on by an earlier boot, the dock's data role swap and a dock that never answers its VDMs. Plus
 # the policy's cited limits (switch_charge_policy_test, at compile time) and guards on what the models cannot see
 # (switch_charging_source_test).
 load("//bazel/lint:defs.bzl", "lint_files")
@@ -43,6 +44,10 @@ host_library(
         "//drivers/SwitchSuspend:SwitchWakeSources.h",
         "//drivers/SwitchUSB:SwitchPD.h",
         "//drivers/SwitchUSB:SwitchPDPolicy.h",
+        "//drivers/SwitchUSB:XusbLanes.h",
+        "//drivers/SwitchDisplayPort:SwitchPDAltMode.h",
+        "//drivers/SwitchDisplayPort:SwitchPDAltModeHook.h",
+        "//drivers/SwitchDisplayPort:SwitchPDAltModeSteps.h",
         "//drivers/TegraGPIO:TegraGPIO.h",
         "//drivers/TegraI2C:TegraI2C.h",
     ],
@@ -68,6 +73,18 @@ host_library(
     ],
 )
 
+# The BM92T36 alternate-mode engine SwitchPD runs after every ALERT (the dock's data role swap and its VDMs), so the
+# charging scenarios run with it as the kernel does.
+host_library(
+    name = "switch_pd_alt_mode",
+    srcs = ["//drivers/SwitchDisplayPort:SwitchPDAltMode.cpp"],
+    copts = ["-Wno-unused-parameter"],
+    deps = [
+        ":headers",
+        ":kernel",
+    ],
+)
+
 host_test(
     name = "switch_charging_test",
     srcs = ["switch_charging_test.cpp"],
@@ -77,6 +94,7 @@ host_test(
         ":kernel",
         ":switch_battery",
         ":switch_pd",
+        ":switch_pd_alt_mode",
     ],
 )
 

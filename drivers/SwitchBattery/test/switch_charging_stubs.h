@@ -180,7 +180,7 @@ class OSString : public OSObject {
 public:
     std::string text;
 
-    static const OSString *withCString(const char *s)
+    static OSString *withCString(const char *s)
     {
         auto *o = new OSString;
         o->text = s;
@@ -312,6 +312,7 @@ public:
 #define kIOPMFullyChargedKey                "FullyCharged"
 #define kIOPMPSBatteryTemperatureKey        "Temperature"
 #define kIOPMPSDesignCapacityKey            "DesignCapacity"
+#define kIOPMPSSerialKey                    "Serial"
 #define kIOPMPSAdapterDetailsKey            "AdapterDetails"
 #define kIOPMPSAdapterDetailsFamilyKey      "FamilyCode"
 #define kIOPMPSAdapterDetailsWattsKey       "Watts"
@@ -326,6 +327,7 @@ constexpr int kIOPSFamilyCodeUSBCPD = (int)0xe000400a;
 class IOPMPowerSource : public IOService {
 public:
     std::map<std::string, long long> ps;
+    std::map<std::string, std::string> strings;
     OSDictionary adapter;
     std::map<std::string, OSDictionary> dicts;  // every dictionary property by key (AdapterDetails, ChargerData)
     bool charging = false, external = false;
@@ -390,6 +392,8 @@ public:
             ps[key->text] = (long long)(int32_t)n->value;
         if (auto *b = dynamic_cast<OSBoolean *>(value))
             ps[key->text] = b->value;
+        if (auto *t = dynamic_cast<OSString *>(value))
+            strings[key->text] = t->text;
         if (auto *d = dynamic_cast<OSDictionary *>(value)) {
             dicts[key->text] = *d;
             if (key->text == kIOPMPSAdapterDetailsKey)

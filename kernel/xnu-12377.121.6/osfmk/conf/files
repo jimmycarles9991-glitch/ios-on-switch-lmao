@@ -210,7 +210,6 @@ osfmk/kern/timer.c			standard
 osfmk/kern/timer_call.c		standard
 osfmk/kern/switch_kprof.c	standard
 osfmk/kern/switch_boot_band.c	standard
-osfmk/kern/switch_stall.c	standard
 osfmk/kern/turnstile.c  	standard
 osfmk/kern/ux_handler.c		standard
 osfmk/kern/waitq.c			standard

@@ -92,6 +92,7 @@
 #if HIBERNATION
 #include <IOKit/IOPlatformExpert.h>
 #endif /* HIBERNATION */
+#include <switch/idle.h>
 
 extern void     patch_low_glo(void);
 extern int      serial_init(void);
@@ -876,5 +877,6 @@ arm_init_idle_cpu(
 
 	fiq_context_init(FALSE);
 
+	switch_idle_resumed(cpu_data_ptr);
 	cpu_idle_exit(TRUE);
 }

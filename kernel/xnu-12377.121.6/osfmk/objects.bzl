@@ -146,7 +146,6 @@ DEVELOPMENT = struct(
         "osfmk/kern/timer_call.c",
         "osfmk/kern/switch_kprof.c",
         "osfmk/kern/switch_boot_band.c",
-        "osfmk/kern/switch_stall.c",
         "osfmk/kern/turnstile.c",
         "osfmk/kern/ux_handler.c",
         "osfmk/kern/waitq.c",

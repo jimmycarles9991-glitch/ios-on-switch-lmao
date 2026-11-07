@@ -54,6 +54,10 @@ bool nmb_device_shader_cache_stats(const NmbDevice *, struct NmbShaderCacheStats
 /* Device memory allocated, pooled/dedicated/imported blocks live, timeline waits, variant pipelines made, linked, fragment
    libraries made, shadowed textures, 0. */
 bool nmb_device_counts(const NmbDevice *, uint64_t out[10]);
+/* Device memory held now (live blocks and spares), allocated so far, and memoryless backings live. */
+bool nmb_device_memory(const NmbDevice *, uint64_t out[3]);
+/* Free the device memory no resource holds (empty blocks, spares): the bytes freed. */
+uint64_t nmb_device_release_idle_memory(const NmbDevice *);
 /* Host texel copies by route (m2v 0116): replaceRegion bytes/host/deferred/waited, then getBytes bytes/host/waited. */
 bool nmb_device_texel_copy_routes(const NmbDevice *, uint64_t out[7]);
 // Host calls that waited for the GPU: staging-queue submissions, internal submissions, host texel copies (no wait), and the
@@ -125,6 +129,9 @@ NmbTexture *nmb_texture_new_on_surface_planes(NmbBuffer *, const struct NmbTextu
                                               const char *matrix);
 NmbTexture *nmb_texture_new_linear(NmbBuffer *, const struct NmbTextureDescriptor *, uint64_t offset,
                                    uint64_t bytes_per_row, uint64_t bytes_per_image);
+/* The device's optimal image of the descriptor bound at offset in the buffer's memory, holding the bytes there: optimal-tiled
+ * texels another driver of the process lays out as the device does (drivers/TegraGM20B/TegraGM20BLayout.h). A view. */
+NmbTexture *nmb_texture_new_tiled_in_place(NmbBuffer *, const struct NmbTextureDescriptor *, uint64_t offset);
 /* whole: a view of every level and slice as format; else levels and slices are {start, count} and kind the view's texture type. */
 NmbTexture *nmb_texture_new_view(NmbTexture *, uint64_t format, uint64_t kind, const uint64_t levels[2],
                                  const uint64_t slices[2], bool whole);

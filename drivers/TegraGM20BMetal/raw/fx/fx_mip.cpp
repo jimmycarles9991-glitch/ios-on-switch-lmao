@@ -62,14 +62,6 @@ enum : uint32_t {
 
 constexpr uint32_t kSubc2D = SUBC_2D, kSubc3D = SUBC_3D;
 
-uint32_t log2Ceil(uint32_t v)
-{
-    uint32_t l = 0;
-    while ((1u << l) < v)
-        l++;
-    return l;
-}
-
 // bits [lo, hi] of the 256-bit header (raw_gpu.cpp setField)
 void setField(uint32_t *w, unsigned hi, unsigned lo, uint64_t v)
 {
@@ -151,17 +143,13 @@ bool mipChainLayout(uint32_t width, uint32_t height, uint32_t levels, uint32_t b
 {
     out = MipChain();
     if (!width || !height || width > 16384 || height > 16384 || !levels || levels > kMaxLevels ||
-        levels > fullLevels(width, height) || !(bpp == 1 || bpp == 2 || bpp == 4 || bpp == 8 || bpp == 16))
+        levels > fullLevels(width, height) || !tgm_layout_tiles_bpp(bpp))
         return false;
     out.width = width;
     out.height = height;
     out.levels = levels;
     out.bpp = bpp;
-    // Tiling::choose, 2D: the block height from level 0's height in pixels (the proprietary driver's heuristic NIL copies), then
-    // Tiling::clamp to level 0's extent: below 2x the extent in GOBs (y_log2 <= ceil_log2(height in GOBs)); x_log2 stays 0
-    const uint32_t h = height;
-    uint32_t y = h >= 86 ? 4 : h >= 43 ? 3 : h >= 22 ? 2 : h >= 11 ? 1 : 0;
-    y = std::min(y, log2Ceil((h + 7) / 8));
+    const uint32_t y = tgm_layout_y_log2(height);
     out.yLog2 = uint8_t(y);
     uint64_t at = 0;
     for (uint32_t l = 0; l < levels; l++) {
@@ -169,7 +157,7 @@ bool mipChainLayout(uint32_t width, uint32_t height, uint32_t levels, uint32_t b
         lv.width = std::max(1u, width >> l);
         lv.height = std::max(1u, height >> l);
         // the level's tiling: level 0's clamped to the level (Tiling::clamp; the hardware does the same at each LOD)
-        lv.yLog2 = uint8_t(std::min(y, log2Ceil((lv.height + 7) / 8)));
+        lv.yLog2 = uint8_t(std::min(y, tgm_layout_log2_ceil((lv.height + 7) / 8)));
         lv.rowBytes = (lv.width * bpp + 63) & ~63u;  // GOB width 64 B, one GOB a tile
         const uint32_t tileRows = 8u << lv.yLog2;
         lv.rows = (lv.height + tileRows - 1) / tileRows * tileRows;

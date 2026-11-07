@@ -108,5 +108,10 @@ filegroup(
 
 ipsw_free_tests(
     name = "ipsw_free_test",
+    declassified = [
+        "//boot:loader",
+        "//boot:loader_constants",
+    ],
     member = "//ipsw:app_cryptex_trust_cache",
+    window = "//boot:kernel_window",
 )

@@ -36,9 +36,17 @@ void switch_audio_suspend(void);  // SwitchAudio
 void switch_audio_resume(void);
 }
 
-void switch_sleep_timed(uint8_t step, void (*hook)(void))
+#if DEVELOPMENT || DEBUG
+extern "C" void switch_sleep_mark(unsigned step)
 {
     switch_power_trail_mark(step);
+    switch_power_trail_mark_flush();
+}
+#endif
+
+void switch_sleep_timed(uint8_t step, void (*hook)(void))
+{
+    switch_sleep_mark(step);
     const uint64_t start = mach_absolute_time();
     hook();
     const uint64_t us = switch_sleep_ns_since(start) / 1000;
@@ -55,7 +63,7 @@ bool switch_sleep_devices(void)
     switch_sleep_timed(SWITCH_STEP_SLEEP_MOTION, switch_motion_suspend);  // IMU off, SPI4 clock off
     switch_sleep_timed(SWITCH_STEP_SLEEP_JOYCON, switch_joycon_suspend);
     switch_sleep_timed(SWITCH_STEP_SLEEP_USB, switch_usb_suspend);
-    switch_power_trail_mark(SWITCH_STEP_SLEEP_BLUETOOTH);
+    switch_sleep_mark(SWITCH_STEP_SLEEP_BLUETOOTH);
     const uint64_t at = mach_absolute_time();
     const bool btWake = switch_bluetooth_suspend();
     switch_power_journal("SwitchSuspend: sleep bluetooth: %llu us", switch_sleep_ns_since(at) / 1000);

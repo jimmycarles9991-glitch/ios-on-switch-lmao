@@ -37,3 +37,18 @@ py_test(
         "//tools/package:kernel_window",
     ],
 )
+
+# adt_edit.py's ipad_adt over a minimal Switch tree: J120's answers on /arm-io, the root and /product, which
+# VideoToolbox and MobileGestalt read before iOS uses a feature.
+py_test(
+    name = "adt_media_test",
+    size = "small",
+    srcs = ["adt_media_test.py"],
+    data = ["//tools/package:adt_edit.py"],
+    deps = [
+        "//tools/package:boot_config",
+        "//tools/package:loader_abi",
+        "//tools/package:native_xnu_layout",
+        "@rules_python//python/runfiles",
+    ],
+)

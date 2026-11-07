@@ -1,8 +1,10 @@
 """The kernel's corecrypto provider archive.
 
 As tree/scripts/build-corecrypto-14.py made it, run plain then --namespace, in one action: the corecrypto_kext target's
-C sources, compiled for the iOS 17 kernel without assembly; the names the plain archive shares with XNU are renamed
-cc14_<name> (namespace.h) in the namespaced archive the kernel links.
+C and assembly sources, compiled for the iOS 17 kernel as Apple's kext is, so SHA-1/SHA-2, AES, GHASH and the bignum
+routines run on the A57's crypto and NEON instructions (the kernel's exception entry saves the NEON registers); the
+names the plain archive shares with XNU are renamed cc14_<name> (namespace.h) in the namespaced archive the kernel
+links.
 
 usage: corecrypto.py --xcode-env F --source DIR --sdkroot DIR --kernel-names NAMES.txt --out A.a --namespace-header H
                      --path-root P [--jobs N]
@@ -45,7 +47,7 @@ def kext_sources(project: dict[str, dict[str, dict[str, object]]], source: Path)
     return [
         resolve(objects[k]['fileRef'])
         for k in phase['files']
-        if objects[objects[k]['fileRef']].get('path', '').endswith('.c')
+        if objects[objects[k]['fileRef']].get('path', '').endswith(('.c', '.s'))
     ]
 
 
@@ -82,7 +84,6 @@ def clang_command(iphoneos_sdk: str, include: Path, framework: Path, source: Pat
         '-DKERNEL=1',
         '-DKERNEL_PRIVATE=1',
         '-DBUILDKERNEL=1',
-        '-DCC_USE_ASM=0',
         '-DNDEBUG=1',
         '-DCC_DISABLE_RSAKEYGEN=1',
         '-Wno-deprecated-declarations',
@@ -96,6 +97,11 @@ def clang_command(iphoneos_sdk: str, include: Path, framework: Path, source: Pat
     return command
 
 
+def language(path: Path) -> list[str]:
+    """Xcode's language for corecrypto's .s files: they use #if and #include."""
+    return ['-x', 'assembler-with-cpp'] if path.suffix == '.s' else []
+
+
 @dataclasses.dataclass
 class Archiver:
     command: list[str]
@@ -104,6 +110,7 @@ class Archiver:
     out: Path
     env: dict[str, str]
     jobs: int
+    objects: dict[Path, Path] = dataclasses.field(default_factory=dict)
 
     def build(self, variant: str, extra: list[str]) -> Path:
         object_dir = self.out / ('objects' + variant)
@@ -114,7 +121,7 @@ class Archiver:
             name = hashlib.sha256(relative.encode()).hexdigest()[:12] + '-' + path.stem
             destination = object_dir / (name + '.o')
             result = subprocess.run(
-                [*self.command, *extra, '-c', str(path), '-o', str(destination)],
+                [*self.command, *extra, *language(path), '-c', str(path), '-o', str(destination)],
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
                 text=True,
@@ -125,6 +132,7 @@ class Archiver:
 
         with concurrent.futures.ThreadPoolExecutor(max_workers=self.jobs) as pool:
             results = list(pool.map(compile_one, self.sources))
+        self.objects = {path: destination for path, (destination, _) in zip(self.sources, results, strict=True)}
         failed = [(d, r.stdout[-2500:]) for d, r in results if r.returncode]
         if failed:
             sys.exit(f'{len(failed)} corecrypto sources failed:\n{failed[0][1]}')
@@ -132,7 +140,7 @@ class Archiver:
             data = destination.read_bytes()
             if struct.unpack_from('<4I', data) != (0xFEEDFACF, 0x100000C, 0, 1):
                 sys.exit('Wrong object architecture: ' + destination.name)
-        archive = self.out / ('libcorecrypto_kernel_noasm' + variant + '.a')
+        archive = self.out / ('libcorecrypto_kernel' + variant + '.a')
         subprocess.run(['xcrun', 'ar', 'rcs', str(archive), *[str(d) for d, _ in results]], check=True, env=self.env)
         return archive
 
@@ -177,12 +185,25 @@ def main() -> None:
         plain = archiver.build('', [])
         # XNU's global names (xnu_symbols.py's list): the only part of XNU this archive depends on.
         kernel = {line[2:] for line in Path(args.kernel_names).read_text().splitlines() if line.startswith('g ')}
-        collisions = sorted(archive_names(plain, '-U', env) & kernel)
+        # XNU links Apple's own copies of some AccelerateCrypto routines (osfmk/arm64/corecrypto); namespace.h cannot
+        # rename assembly, so those sources are left out and corecrypto's C calls XNU's copy.
+        duplicates = set()
+        for path, obj in archiver.objects.items():
+            names = archive_names(obj, '-U', env) if path.suffix == '.s' else set()
+            if names & kernel:
+                if not names <= kernel:
+                    sys.exit(f'{path.name} defines names XNU also defines and names it does not')
+                duplicates |= names
+                archiver.sources.remove(path)
+        collisions = sorted((archive_names(plain, '-U', env) & kernel) - duplicates)
         if any(not name[1:].isidentifier() for name in collisions):
             sys.exit('A colliding symbol cannot be namespaced with a C identifier')
         header = out / 'namespace.h'
         header.write_text(''.join(f'#define {n[1:]} cc14_{n[1:]}\n' for n in collisions))
         namespaced = archiver.build('-namespaced', ['-include', str(header)])
+        shared = sorted(archive_names(namespaced, '-U', env) & kernel)
+        if shared:
+            sys.exit('Defined by both XNU and the namespaced archive (assembly is not renamed): ' + ' '.join(shared))
         Path(args.out).write_bytes(namespaced.read_bytes())
         Path(args.namespace_header).write_text(header.read_text())
 

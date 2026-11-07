@@ -779,9 +779,20 @@ fn last_use(metadata: &fs::Metadata) -> SystemTime {
         .unwrap_or(SystemTime::UNIX_EPOCH)
 }
 
+/// How stale an entry's last use may get before a hit writes it again: the sweep only orders
+/// entries by it, and each write is a file system metadata transaction on the hit's thread (five
+/// per pipeline state made from the cache).
+const TOUCH_RESOLUTION: Duration = Duration::from_secs(3600);
+
 /// Refresh `file`'s access time: a hit makes its entry the most recently used. Best effort.
 fn touch(file: &fs::File) {
-    let _ = file.set_times(fs::FileTimes::new().set_accessed(SystemTime::now()));
+    let now = SystemTime::now();
+    if let Ok(metadata) = file.metadata() {
+        if now.duration_since(last_use(&metadata)).is_ok_and(|age| age < TOUCH_RESOLUTION) {
+            return;
+        }
+    }
+    let _ = file.set_times(fs::FileTimes::new().set_accessed(now));
 }
 
 /// A writer that fails past `limit` bytes.

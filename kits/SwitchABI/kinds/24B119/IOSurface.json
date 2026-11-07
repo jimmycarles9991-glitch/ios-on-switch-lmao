@@ -7,6 +7,11 @@
   "slide": "-0x4088000",
   "layout": {},
   "fields": {},
+  "constants": {
+    "baseOffset": "0x168",
+    "clientMemory": "0x150",
+    "clientTask": "0x170"
+  },
   "addresses": {
     "alloc_size": "0xfffffff009aeb438",
     "bytes_per_row": "0xfffffff009aee61c",
@@ -27,7 +32,10 @@
   },
   "found": {
     "alloc_size": "ldr x0, [x0, #0x90] as in 21H461",
+    "baseOffset": "value shown by f940b400 at 0xfffffff009aee6a4",
     "bytes_per_row": "ldr x0, [x0, #0x68]: the field the plane-bytes-per-row accessor falls back to",
+    "clientMemory": "value shown by f940a808 at 0xfffffff009af7f44",
+    "clientTask": "value shown by f940b810 at 0xfffffff009af7f4c",
     "complete": "IOSurface::complete(): the lock at +0x398, the wire count at +0x22c dropped, the rest only when it reaches 0 (21H461: +0x380, +0x20c); the GOT entry right after prepare's in both kexts, as in 21H461",
     "device_unlock": "the device write end (surface, options), as in 21H461: under the lock at +0x50, unless options bit 0, the seed (+0xc of the root entry, now a signed pointer at +0x178) and the write count (+0x10) go up and the cache flags (+0x3d0, 21H461 +0x3b0) get 0x1c; the 7th and 10th __ZN9IOSurface GOT entries of AppleM2ScalerCSCDriver and IOMobileGraphicsFamily, as in 21H461",
     "format": "ldr w0, [x0, #0x80] as in 21H461",
@@ -124,6 +132,26 @@
         "at": "0xfffffff009af1a38",
         "body": "d503237f a9be4ff4 a9017bfd 910043fd aa0103f4 aa0003f3 f9402800 94008f7b 37000274 f940be70 9105e271 f2f47371 dac11a30 aa1003f1 dac147f1 eb11021f 54000040 d4388e40 b9400e08 11000508 b9000e08 b943d268 321e0908 b903d268 b9401208 11000508 b9001208 f9402a60",
         "why": "the device write end (surface, options), as in 21H461: under the lock at +0x50, unless options bit 0, the seed (+0xc of the root entry, now a signed pointer at +0x178) and the write count (+0x10) go up and the cache flags (+0x3d0, 21H461 +0x3b0) get 0x1c; the 7th and 10th __ZN9IOSurface GOT entries of AppleM2ScalerCSCDriver and IOMobileGraphicsFamily, as in 21H461"
+      }
+    },
+    "constants": {
+      "baseOffset": {
+        "value": "0x168",
+        "at": "0xfffffff009aee6a4",
+        "word": "f940b400",
+        "why": "ldr x0, [x0, #0x168]: the accessor mapInTask adds to the map's address, as in 21H461"
+      },
+      "clientMemory": {
+        "value": "0x150",
+        "at": "0xfffffff009af7f44",
+        "word": "f940a808",
+        "why": "ldr x8, [x0, #0x150] in mapInTask, as in 21H461"
+      },
+      "clientTask": {
+        "value": "0x170",
+        "at": "0xfffffff009af7f4c",
+        "word": "f940b810",
+        "why": "ldr x16, [x0, #0x170] in mapInTask, as in 21H461: signed in Apple's binary (autda, its address blended with 0xf19c), plain under our prelink"
       }
     }
   }

@@ -76,7 +76,10 @@ TEST(SdCqSource, DriverGuards)
     // r18-sdcq (r8d): not after a command error, where RESPONSE is still the previous command's.
     EXPECT_THAT(command,
                 HasSubstr("if ((s & INT_COMMAND) && !(s & 0x000f0000u))\n            *response = r32(RESPONSE);"));
-    EXPECT_THAT(command, HasSubstr("limit = 1500000000ull"));
+    // An erase-based trim passes the longer busy its SD Status specifies; every other command keeps the default.
+    EXPECT_THAT(command, HasSubstr("limit = limitNs"));
+    EXPECT_THAT(source, HasSubstr("int data,\n                  uint64_t limitNs = 1500000000ull);"));
+    EXPECT_EQ(Count(source, "kRegNone, limitNs)"), 1u);
     EXPECT_THAT(body("Batch *NativeSwitchBlock::runGroup("), Not(HasSubstr("13, ")));  // no CMD13 task-status polling
     EXPECT_EQ(Count(engine(), "bus.settle()"), 2u);
     EXPECT_EQ(Count(member("bool readBack(Bus &bus,"), "bus.settle()"), 1u);

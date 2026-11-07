@@ -6,6 +6,8 @@ load(":common.bzl", "KERNEL_TOOL_ATTRS", "run_tool", "setting")
 def _tool_output_impl(ctx):
     if bool(ctx.attr.tool) == bool(ctx.attr.binary):
         fail("{}: give exactly one of tool and binary".format(ctx.label))
+    if not ctx.attr.xcode and [a for a in ctx.attr.args if "{xcode_env}" in a]:
+        fail("{}: {{xcode_env}} needs xcode = True".format(ctx.label))
     outs = [ctx.actions.declare_file(o) for o in ctx.attr.outs] + [ctx.actions.declare_directory(d) for d in ctx.attr.out_dirs]
     args = []
     for a in ctx.attr.args:
@@ -24,6 +26,7 @@ def _tool_output_impl(ctx):
         ctx.attr.mnemonic,
         ctx.attr.message or ("Making " + ", ".join(ctx.attr.outs + ctx.attr.out_dirs)),
         execution_requirements = {r: "" for r in ctx.attr.requirements} if ctx.attr.requirements else None,
+        xcode = ctx.attr.xcode,
     )
     return [DefaultInfo(files = depset(outs))]
 
@@ -41,5 +44,6 @@ tool_output = rule(
         "mnemonic": attr.string(default = "KernelTool"),
         "message": attr.string(),
         "requirements": attr.string_list(),
+        "xcode": attr.bool(default = True, doc = "False for a tool that runs nothing of Xcode's (no Xcode input)"),
     }),
 )

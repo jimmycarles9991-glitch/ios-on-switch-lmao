@@ -12,6 +12,13 @@
 #include "TegraNVJPGJpeg.h"
 #include "../../kits/SwitchDMA/SwitchDcache.h"
 
+// The periodic decode line: debug kernels only, so a release kernel has none of its code or strings.
+#if (defined(DEVELOPMENT) && DEVELOPMENT) || (defined(DEBUG) && DEBUG)
+#define TEGRA_NVJPG_STATS 1
+#else
+#define TEGRA_NVJPG_STATS 0
+#endif
+
 // A physically contiguous kernel buffer below 4 GiB, mapped 1:1 in NVJPG's address space (IOVA = PA).
 struct TegraNVJPGBuffer {
     uint64_t pa, size;

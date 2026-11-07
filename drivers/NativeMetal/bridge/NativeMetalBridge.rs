@@ -10,6 +10,8 @@
 
 #[path = "NativeMetalObjects.rs"]
 pub mod objects;
+#[path = "NativeMetalTarget.rs"]
+mod target;
 
 use metal2vulkan::metal::{PixelFormat, PrimitiveType, TextureUsage};
 use metal2vulkan::pipeline::{ColorAttachmentDescriptor, RenderPipelineDescriptor, StageSource};

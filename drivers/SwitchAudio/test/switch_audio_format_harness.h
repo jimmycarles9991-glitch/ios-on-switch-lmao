@@ -28,6 +28,13 @@
                                            uint64_t out0_x2, uint64_t pllaout0_per_fs);                                \
     uint64_t prefix##h_rate_millihz(uint64_t ref_hz, uint64_t m, uint64_t p, uint64_t n_eff, uint64_t out0_x2,         \
                                     uint64_t pllaout0_per_fs);                                                         \
+    void prefix##h_clock(uint32_t index, uint32_t fields[7]);                                                          \
+    uint64_t prefix##h_clock_n_eff(uint32_t index);                                                                    \
+    uint64_t prefix##h_clock_ticks_per_frame_q32(uint64_t host_hz, uint64_t ref_hz, uint32_t index);                   \
+    uint64_t prefix##h_clock_millihz(uint64_t ref_hz, uint32_t index);                                                 \
+    uint32_t prefix##h_extern1_divider(uint32_t pllaout0_per_fs);                                                      \
+    uint32_t prefix##h_transition(uint32_t was, uint32_t now);                                                         \
+    int64_t prefix##h_capture_frame(uint64_t t, uint64_t anchor, uint64_t in_frames, uint32_t ring_frames);            \
     void prefix##h_mix(int32_t *dst, const float *src, uint32_t samples, float gain);                                  \
     uint32_t prefix##h_ring_mix(int32_t *ring, uint32_t ring_frames, uint32_t channels, uint64_t first,                \
                                 const float *src, uint32_t frames, float gain);                                        \

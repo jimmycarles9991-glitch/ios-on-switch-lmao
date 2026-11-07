@@ -1,23 +1,24 @@
 // SPDX-License-Identifier: BSD-2-Clause-Patent
 // Tegra210 NVENC (video encoder 5.0, a falcon behind host1x): bring-up, the job engine and sleep. tegra_nvenc_probe()
 // runs the whole bring-up by default on its own thread:
-//   E0  NVDEC's bring-up has ended with NVDEC decoding (an event wait), then host1x (drivers/TegraHost1x, shared with
-//       NVDEC, already up) and the arena's boot chunk (2 MiB)
-//   E1  power partition, clock, reset, falcon firmware loaded and started
+//   E0  host1x (drivers/TegraHost1x, shared with NVDEC)
+//   E1  NVENC's SMMU address space (TegraNVENCMemory.cpp), power partition, clock, reset, falcon firmware loaded and
+//       started
 //   E2  proof of life through host1x channel 0 in NVENC's class: an IMMEDIATE syncpoint increment (the engine's host
 //       interface answers) then an OP_DONE one (the falcon firmware answers), each completed by interrupt
-//   E3  a 64x64 H.264 IDR encoded and decoded back by NVDEC, then a P picture predicted from NVENC's own
-//       reconstruction (TegraNVENCSelfTest.cpp); it also finds the input layout the firmware reads
-//   E4  the TegraNVENC service and its user client published (TegraNVENCUserClient.cpp)
-// One line per stage ("TegraNVENC: E1 ok ..."), or the failing stage's FAIL line and nothing after it. Until E4
-// publishes, every failure is that one line: the engine is put back in reset with its clock off, the arena is given
-// back and nothing is published, so VideoToolbox has no hardware encoder. From E4 on the
-// engine is proven: a job past its bound panics with one line, and a lost syncpoint interrupt panics in TegraHost1x.
-// switch-no-nvdec turns NVENC off too (E3 decodes through NVDEC); there is no boot-arg of NVENC's own.
+//   E3  the TegraNVENC service and its user client published (TegraNVENCUserClient.cpp)
+// One line per stage ("TegraNVENC: E1 ok ..."), or the failing stage's FAIL line and nothing after it. Until E3
+// publishes, every failure is that one line: the engine is put back in reset with its clock off, its address space is
+// given back and nothing is published, so VideoToolbox has no hardware encoder. From E3 on a job past its bound panics with
+// one line, and a lost syncpoint interrupt panics in TegraHost1x. switch-no-nvdec turns it off.
+//
+// Input pictures are 16x16 tiles with chroma at the surface config's offset (TegraNVENCInfo): the layout and chroma
+// reading the unit encoded IPCM and IDR pictures from exactly on every boot of 11-06 (r30 archives, "E3 IPCM ok input
+// layout tiled 16x16, chroma offset").
 //
 // Jobs (tegra_nvenc_run): host1x channel 0 in NVENC's class (0x21), each method written through the engine's THI
 // METHOD0/METHOD1 pair as NVDEC's, the picture setup from a kernel-only slot, then an OP_DONE increment of NVENC's
-// syncpoint: the job's fence. Every address method the firmware knows is written on every job (the submit's own, or
+// syncpoint: the job's fence. Every address method the firmware knows is written on every job (the submit's own, 0, or
 // the scratch buffer), so no job inherits an address from another client's. At most 4 jobs are queued, which bounds
 // the push buffer NVENC shares with NVDEC (8 x 197 + 4 x 190 words < 4096) and the 8 setup slots. Every job runs with
 // the GP timer on (the checker requires it, 1 << 27 cycles at most, 329 ms at 408 MHz); waits are bounded by
@@ -44,9 +45,10 @@
 #include <kern/thread.h>
 #include <string.h>
 #include "../TegraHost1x/TegraHost1x.h"
+#include "../TegraSMMU/TegraSMMU.h"
+#include "../../kits/SwitchBootArgs/SwitchBootArgs.h"
 #include "TegraNVENC.h"
 #include "TegraNVENCCheck.h"
-#include "../../kits/SwitchBootArgs/SwitchBootArgs.h"
 #include "../../kits/SwitchCAR/SwitchCAR.h"
 #include "../../kits/SwitchCAR/SwitchPMC.h"
 #include "../../kits/SwitchDMA/SwitchDMABuffer.h"
@@ -67,8 +69,6 @@ constexpr uint32_t kThiMethod0 = 0x40;  // THI METHOD0 (offset) then METHOD1 (da
 constexpr uint64_t kMcPA = 0x70019000;
 constexpr uint32_t kPartition = 6;  // TEGRA_POWERGATE_MPE
 constexpr unsigned kClock = 219;    // TEGRA210_CLK_NVENC: CAR bank Y bit 27, also its reset
-constexpr uint64_t kBootChunk = 2ull << 20;
-constexpr uint32_t kNvdecWaitMs = 20000;  // NVDEC's whole bring-up (arena, N1..N4) takes well under a second
 
 enum : uint32_t {  // clock and reset controller
     CLK_OUT_ENB_Y = 0x298,
@@ -88,8 +88,6 @@ enum : uint32_t {
 enum : uint32_t {
     MC_HOTRESET_CTRL = 0x200,
     MC_HOTRESET_NVENC = 1u << 11,
-    MC_SMMU_NVENC_ASID = 0x264,
-    SMMU_ENABLE = 1u << 31,
 };
 
 enum : uint32_t {
@@ -102,11 +100,12 @@ switch_dma_buffer gFirmware;  // stays: the falcon OS loads its apps from it thr
 switch_falcon_image gImage;
 char gLine[256];
 
-// Address methods no submit may set (features the checker keeps off): every job points them at the scratch buffer,
-// so the firmware never keeps an address from another client's job in them.
-constexpr uint16_t kSinkMethods[] = {
-    NVC5B7_SET_IN_RCDATA,      NVC5B7_SET_IN_CEAHINTS_DATA, NVC5B7_SET_IO_RC_PROCESS, NVC5B7_SET_IN_COLOC_DATA,
-    NVC5B7_SET_IN_MEPRED_DATA, NVC5B7_SET_OUT_MEPRED_DATA,  NVC5B7_SET_IN_QP_MAP,     NVC5B7_SET_IN_PARTITION_BUF,
+// Address methods of features no submit turns on, written 0 on every job: the value an instance starts with and the
+// one NVIDIA's own T210 driver leaves them at (its captured streams set none of them). The firmware takes a non-zero
+// address as the feature's data being there; 0 also means no job keeps another client's address in them.
+constexpr uint16_t kUnusedMethods[] = {
+    NVC5B7_SET_IN_RCDATA, NVC5B7_SET_IN_CEAHINTS_DATA, NVC5B7_SET_IN_COLOC_DATA,
+    NVC5B7_SET_IN_QP_MAP, NVC5B7_SET_IN_PARTITION_BUF,
 };
 
 // The job engine. kJobBoundUs: the GP timer's 329 ms plus margin; a wait covers at most kInFlight queued jobs.
@@ -115,10 +114,8 @@ constexpr uint32_t kJobBoundUs = 500000, kWaitBoundUs = kInFlight * kJobBoundUs;
 IOLock *gEngineLock;
 uint32_t gSyncpt, gBase, gIssued;  // job n's fence is gBase + n
 bool gUp, gWedged, gSuspended, gPublished;
-volatile int gSelfTestClaimed;
-uint64_t gArenaUs;
-TegraNVENCBlock gSetup, gSink;  // setup slots and the scratch buffer, never mapped into a client
-TegraNVENCProven gProven;
+switch_dma_buffer gSetup, gSink;  // setup slots and the scratch buffer, never mapped into a client
+const TegraNVENCProven gProven = {TEGRA_NVENC_LAYOUT_TILED16, TEGRA_NVENC_CHROMA_OFFSET, 1};
 
 const char *falconState()
 {
@@ -174,11 +171,6 @@ const char *falconDump(bool debugger)
 // from scratch.
 bool powerUp(bool *wasOn)
 {
-    if (switch_mmio_read32(gMc, MC_SMMU_NVENC_ASID) & SMMU_ENABLE) {
-        snprintf(gLine, sizeof(gLine), "E1 FAIL SMMU translation is on for NVENC (MC 0x264 = %#x)",
-                 switch_mmio_read32(gMc, MC_SMMU_NVENC_ASID));
-        return false;
-    }
     *wasOn = switch_pmc_partition_is_on(kPartition);
     switch_car_reset_assert(kClock);
     IODelay(10);
@@ -303,8 +295,8 @@ bool proofOfLife(uint64_t *us, uint32_t *id, uint32_t *from)
 void engineSuspend();
 void engineResume();
 
-// A fence past its bound. Once published, the engine is proven and this is a hardware fault: one-line panic. Before
-// that (the E3 self-test) the engine is refused and the bring-up ends with its FAIL line.
+// A fence past its bound. Once published this is a hardware fault: one-line panic. Before that the engine is refused
+// and the bring-up ends with its FAIL line.
 void timedOut(uint32_t fence)
 {
     char host[200];
@@ -329,29 +321,17 @@ void park()
 
 void bringUp(void *, wait_result_t)
 {
-    // A failed bring-up leaves nothing behind: the engine back in reset with its clock off (once it was touched), and
-    // the arena returned.
+    // A failed bring-up leaves nothing behind: the engine back in reset with its clock off (once it was touched), then
+    // its address space and kernel buffers returned.
     auto giveUp = [](bool touched) {
         if (touched)
             park();
-        tegra_nvenc_arena_release();
+        tegra_nvenc_memory_release();
+        switch_dma_free(&gSetup);
+        switch_dma_free(&gSink);
     };
-    // NVDEC first: its 48 MiB arena is reserved while memory is least fragmented, and this chunk must not land in the
-    // run it needs; E3 decodes on NVDEC anyway. With NVDEC off or failed, NVENC allocates nothing.
-    if (!tegra_nvdec_await(kNvdecWaitMs)) {
-        IOLog("TegraNVENC: E0 FAIL NVDEC is not decoding (its N lines, or switch-no-nvdec): nothing to check NVENC "
-              "with\n");
-        return;
-    }
-    const uint64_t arenaStart = switch_now_us();
-    if (tegra_nvenc_arena_init(kBootChunk)) {
-        IOLog("TegraNVENC: E0 FAIL no contiguous %llu MiB arena chunk below 4 GiB\n", kBootChunk >> 20);
-        return;
-    }
-    gArenaUs = switch_now_us() - arenaStart;
     if (tegra_host1x_start()) {
         IOLog("TegraNVENC: E0 FAIL host1x is not up (see the TegraHost1x line)\n");
-        giveUp(false);
         return;
     }
     gNvenc = switch_mmio_map(kNvencPA, kNvencSize);
@@ -359,6 +339,17 @@ void bringUp(void *, wait_result_t)
     gEngineLock = IOLockAlloc();
     if (!gNvenc || !gMc || !gEngineLock) {
         IOLog("TegraNVENC: E1 FAIL no mapping\n");
+        return;
+    }
+    gLine[0] = 0;
+    if (!switch_dma_alloc(&gSetup, kSetupSlots * kSetupSlotBytes) || !switch_dma_alloc(&gSink, kSinkBytes) ||
+        !loadImage()) {
+        IOLog("TegraNVENC: %s\n", gLine[0] ? gLine : "E1 FAIL no contiguous setup slots or scratch below 4 GiB");
+        giveUp(false);
+        return;
+    }
+    if (tegra_nvenc_memory_init(&gFirmware, &gSetup, &gSink, gLine, sizeof(gLine))) {
+        IOLog("TegraNVENC: %s\n", gLine);
         giveUp(false);
         return;
     }
@@ -381,24 +372,12 @@ void bringUp(void *, wait_result_t)
     }
     IOLog("TegraNVENC: E2 ok host interface and falcon incremented syncpoint %u %u->%u by interrupt in %llu us; %s\n",
           id, from, tegra_host1x_syncpt_read(id), us, falconState());
-    if (tegra_nvenc_arena_alloc(kSetupSlots * kSetupSlotBytes, &gSetup) ||
-        tegra_nvenc_arena_alloc(kSinkBytes, &gSink)) {
-        IOLog("TegraNVENC: E3 FAIL no setup slots or scratch in the arena\n");
-        giveUp(true);
-        return;
-    }
     gSyncpt = id;
     gBase = tegra_host1x_syncpt_read(id);
     gUp = true;
-    if (tegra_nvenc_self_test(&gProven)) {  // its FAIL line is out
-        gUp = false;
-        giveUp(true);
-        return;
-    }
     tegra_host1x_set_sleep_client(engineSuspend, engineResume);
-    // Proven: from here a job past its bound panics (TegraNVENC.h).
     gPublished = true;
-    tegra_nvenc_publish(gArenaUs);
+    tegra_nvenc_publish();
 }
 }  // namespace
 
@@ -413,11 +392,7 @@ extern "C" const TegraNVENCProven *tegra_nvenc_proven(void)
 }
 
 namespace {
-// tegra_nvenc_run; `probeMagic` (E3's first job only) replaces the checked setup's magic in the kernel copy, so the
-// firmware's own magic check answers: the rest of the setup is the checked one, so whatever the firmware does with it
-// stays inside the checked buffers.
-int run(const TegraNVENCSubmit *s, TegraNVENCResolve resolve, void *context, uint32_t *fence, const char **why,
-        bool probeMagic)
+int run(const TegraNVENCSubmit *s, TegraNVENCResolve resolve, void *context, uint32_t *fence, const char **why)
 {
     *why = nullptr;
     if (!gUp)
@@ -452,11 +427,14 @@ int run(const TegraNVENCSubmit *s, TegraNVENCResolve resolve, void *context, uin
     }
 
     // SETCLASS; the submit's methods, SET_APPLICATION_ID first (the checker requires it: the OS selects the app before
-    // anything is stored for it), then just before EXECUTE the scratch buffer in every method of kSinkMethods (the
-    // checker admits none of them from a submit) and the setup slot (INCR METHOD0 x2: method, value, each); OP_DONE
-    // increment.
-    constexpr uint32_t kSinks = sizeof(kSinkMethods) / sizeof(kSinkMethods[0]);
-    uint32_t words[1 + 3 * (kSinks + TEGRA_NVENC_MAX_ENTRIES + 1) + 1], n = 0;
+    // anything is stored for it), then just before EXECUTE: 0 in every method of kUnusedMethods, and in the ME
+    // predictor pair when the submit has none; the scratch buffer as the RC process state (NVIDIA's driver gives every
+    // job one; constant QP leaves it unread); the setup slot (INCR METHOD0 x2: method, value, each); OP_DONE increment.
+    constexpr uint32_t kUnused = sizeof(kUnusedMethods) / sizeof(kUnusedMethods[0]);
+    uint32_t words[1 + 3 * (kUnused + 4 + TEGRA_NVENC_MAX_ENTRIES) + 1], n = 0;
+    bool predictors = false;
+    for (uint32_t i = 0; i < s->entry_count; i++)
+        predictors |= s->entries[i].method == NVC5B7_SET_IN_MEPRED_DATA;
     words[n++] = tegra_host1x_op_setclass(kClass, 0, 0);
     auto method = [&](uint32_t offset, uint32_t value) {
         words[n++] = tegra_host1x_op_incr(kThiMethod0 / 4, 2);
@@ -482,17 +460,21 @@ int run(const TegraNVENCSubmit *s, TegraNVENCResolve resolve, void *context, uin
     }
     const uint32_t slot = job % kSetupSlots;
     memcpy(gSetup.va + slot * kSetupSlotBytes, s->setup, s->setup_bytes);
-    if (probeMagic)
-        ((nvenc_h264_drv_pic_setup_s *)(gSetup.va + slot * kSetupSlotBytes))->magic = 0;
     tegra_nvenc_cache_clean(gSetup.va + slot * kSetupSlotBytes, s->setup_bytes);
     for (uint32_t i = 0; i < s->entry_count; i++) {
         const TegraNVENCEntry *e = &s->entries[i];
         if (i == s->entry_count - 1) {  // EXECUTE, last by the check
-            for (uint32_t k = 0; k < kSinks; k++)
-                method(kSinkMethods[k], (uint32_t)(gSink.pa >> 8));
+            for (uint32_t k = 0; k < kUnused; k++)
+                method(kUnusedMethods[k], 0);
+            if (!predictors) {
+                method(NVC5B7_SET_IN_MEPRED_DATA, 0);
+                method(NVC5B7_SET_OUT_MEPRED_DATA, 0);
+            }
+            method(NVC5B7_SET_IO_RC_PROCESS, (uint32_t)(gSink.pa >> 8));
             method(NVC5B7_SET_IN_DRV_PIC_SETUP, (uint32_t)((gSetup.pa + slot * kSetupSlotBytes) >> 8));
         }
-        method(e->method, e->kind == TEGRA_NVENC_ENTRY_RELOC ? (uint32_t)((blocks[i].pa + e->offset) >> 8) : e->value);
+        method(e->method,
+               e->kind == TEGRA_NVENC_ENTRY_RELOC ? (uint32_t)((blocks[i].iova + e->offset) >> 8) : e->value);
     }
     words[n++] = tegra_host1x_op_incr_syncpt(TEGRA_HOST1X_COND_OP_DONE, gSyncpt);
     const int ret = tegra_host1x_submit(words, n);
@@ -508,13 +490,7 @@ int run(const TegraNVENCSubmit *s, TegraNVENCResolve resolve, void *context, uin
 extern "C" int tegra_nvenc_run(const TegraNVENCSubmit *s, TegraNVENCResolve resolve, void *context, uint32_t *fence,
                                const char **why)
 {
-    return run(s, resolve, context, fence, why, false);
-}
-
-extern "C" int tegra_nvenc_run_magic_probe(const TegraNVENCSubmit *s, TegraNVENCResolve resolve, void *context,
-                                           uint32_t *fence, const char **why)
-{
-    return gPublished ? -1 : run(s, resolve, context, fence, why, true);
+    return run(s, resolve, context, fence, why);
 }
 
 extern "C" const char *tegra_nvenc_falcon_dump(void)
@@ -538,11 +514,6 @@ extern "C" int tegra_nvenc_wait(uint32_t fence)
     return ret;
 }
 
-extern "C" bool tegra_nvenc_claim_self_test(void)
-{
-    return !__atomic_exchange_n(&gSelfTestClaimed, 1, __ATOMIC_SEQ_CST);
-}
-
 // Sleep (SC7), through TegraHost1x's sleep clients. Suspend lets the queued jobs finish (interrupt waits) and parks
 // the engine in reset before host1x saves its syncpoints; new jobs block until resume. Resume runs after host1x is
 // back: the partition is powered, the falcon reloaded from the kept image and proven with an IMMEDIATE and an OP_DONE
@@ -554,9 +525,8 @@ void engineSuspend()
     gSuspended = true;
     if (!gWedged && tegra_host1x_syncpt_wait(gSyncpt, gBase + gIssued, kWaitBoundUs) == TEGRA_HOST1X_ETIMEDOUT)
         timedOut(gBase + gIssued);
-    switch_car_reset_assert(kClock);
-    IODelay(2);
-    switch_car_clock_disable(kClock);
+    park();
+    tegra_nvenc_memory_detach();
     IOLockUnlock(gEngineLock);
 }
 
@@ -566,7 +536,7 @@ void engineResume()
     bool wasOn = false;
     gLine[0] = 0;
     gWedged = true;
-    if (powerUp(&wasOn) && bootFalcon()) {
+    if (!tegra_nvenc_memory_attach(gLine, sizeof(gLine)) && powerUp(&wasOn) && bootFalcon()) {
         const uint32_t from = tegra_host1x_syncpt_read(gSyncpt);
         const char *stage = nullptr;
         const int ret = answer(gSyncpt, from, &stage);
@@ -587,8 +557,7 @@ void engineResume()
 }
 }  // namespace
 
-// On with NVDEC (off with switch-no-nvdec): E3 decodes NVENC's picture on NVDEC, so with NVDEC off there is nothing to
-// prove NVENC with, and it stays off.
+// switch-no-nvdec turns hardware video encoding off as well as decoding.
 extern "C" int tegra_nvenc_probe(void)
 {
     static volatile int started;

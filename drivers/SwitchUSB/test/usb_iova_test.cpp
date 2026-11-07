@@ -1,4 +1,4 @@
-// UsbIova.h (UsbSmmuMapper.cpp, //drivers/SwitchUSB:superspeed) on the host: the IOVA window never hands a page out
+// UsbIova.h (UsbSmmuMapper.cpp) on the host: the IOVA window never hands a page out
 // twice, respects alignment and finds room after wrapping; a scattered buffer whose pieces meet on page boundaries maps
 // so that every byte's IOVA translates to that byte's physical address; one whose pieces break inside a page is refused
 // (UsbDmaMapper.cpp bounces it).

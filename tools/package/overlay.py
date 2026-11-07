@@ -5,7 +5,7 @@ They are kept on Data under /private/var/Switch/overlay (the deploy copies the b
 
 Three steps of //boot:package, so that each overlay edit reruns only what reads it:
 
-    overlay.py plan --manifest M --portrait-header H [--given SOURCE]... --out PLAN
+    overlay.py plan --manifest M --portrait-header H [--given SOURCE]... [--release] --out PLAN
         overlay/manifest.json, filtered and checked: the files to stage and the directories the kernel unions
         (each with the switch-no-<feature> boot-arg that hides it), which the ADT carries. Reads no overlay file.
     overlay.py trust --plan PLAN [--file SOURCE=PATH]... --out MODULE
@@ -16,7 +16,7 @@ Three steps of //boot:package, so that each overlay edit reruns only what reads 
 manifest.json: {"files": [{"path": absolute, "source": relative to the tree, "trust": bool, "mode": "0755",
 "boot-arg": name, "union": absolute}]}. The union directory is the file's own unless "union" names an existing
 ancestor (XNU unions are deep, so a new bundle directory can appear inside a sealed one). "portrait": true stages the
-file only for a portrait-native kernel.
+file only for a portrait-native kernel, "debug": true only in a debug boot package (not with --release).
 """
 
 import argparse
@@ -36,21 +36,22 @@ from tools.trustcache.trustcache import trust_module
 OVERLAY_ROOT = '/private/var/Switch/overlay'
 
 
-def plan(manifest: dict, portrait: bool, given: Iterable[str] | None = None) -> dict:
+def plan(manifest: dict, portrait: bool, given: Iterable[str] | None = None, release: bool = False) -> dict:
     """Return the manifest's files for this kernel.
 
     The plan: {"files": [{path, source, trust, mode, directory}], "dirs": [[d, gate]]}. `given`: the sources the build
-    gives; a manifest entry it lacks is an error, not a silent omission.
+    gives; a manifest entry it lacks is an error, not a silent omission. `release`: debug entries are left out.
     """
+    entries = [entry for entry in manifest['files'] if not (release and entry.get('debug'))]
     if given is not None:
-        missing = sorted({entry['source'] for entry in manifest['files']} - set(given))
+        missing = sorted({entry['source'] for entry in entries} - set(given))
         if missing:
             raise SystemExit(
                 f'overlay/manifest.json lists {", ".join(missing)} but //boot:package does not give them: '
                 'add them to boot/BUILD.bazel'
             )
     files, gates = [], {}
-    for entry in manifest['files']:
+    for entry in entries:
         if entry.get('portrait') and not portrait:
             continue
         path = entry['path']
@@ -129,6 +130,7 @@ def main() -> None:
     for name in ('manifest', 'portrait-header', 'out'):
         p.add_argument('--' + name, required=True, type=Path)
     p.add_argument('--given', action='append', default=[])
+    p.add_argument('--release', action='store_true')
     for name in ('trust', 'tree'):
         p = step.add_parser(name)
         p.add_argument('--plan', required=True, type=Path)
@@ -140,6 +142,7 @@ def main() -> None:
             json.loads(args.manifest.read_text()),
             portrait_native(args.portrait_header),
             args.given,
+            args.release,
         )
         args.out.write_text(json.dumps(result, indent=1) + '\n')
         return

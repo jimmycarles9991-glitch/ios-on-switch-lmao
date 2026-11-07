@@ -125,10 +125,10 @@ impl GpuPools {
         }
     }
 
-    /// Release the spares as the device is destroyed.
-    pub(super) fn destroy(&self, device: &ash::Device, memory: &mut Memory) {
+    /// Release the spares, as the device is destroyed or releases its idle memory.
+    pub(super) fn release_spares(&self, device: &ash::Device, memory: &mut Memory) {
         for kind in [PoolKind::Index, PoolKind::MeshRecords] {
-            lock(self.spare(kind)).destroy(device, memory);
+            lock(self.spare(kind)).release(device, memory);
         }
     }
 }

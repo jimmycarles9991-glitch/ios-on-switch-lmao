@@ -22,6 +22,7 @@ MESA_TREE = "615cfd2ddf8c8970ee518f7930bad06c16dd1db8"
 
 [nvk_dylib(
     name = name,
+    build_id = "//third_party/mesa/src/nouveau/vulkan:nvk_build_id_text",
     dylib = "//third_party/mesa/src/nouveau/vulkan:vulkan_nouveau",
     mesa_tree = MESA_TREE,
     platform = platform,

@@ -25,6 +25,9 @@ So an overlay plist edit reruns the overlay tree and the final copy; a driver ed
 layout on (the shards it changed, four loader objects, the link, the boot script, the bl33 stage and the copy); a
 built-in boot-arg edit reruns from the layout on, but compresses only the window's tail. The Python steps run on the
 hermetic interpreter and need nothing of Xcode; the loader's compiles do (Xcode's clang, the declared host input).
+
+Under --//install:prebuilt=release the release's loader takes the place of the compiles and the link, and bl33 stage
+refuses it unless this window's constants.json (everything the loader compiles in) equals the one it was built for.
 """
 
 load("@bazel_skylib//rules:common_settings.bzl", "BuildSettingInfo")
@@ -104,14 +107,62 @@ def _one(target, what):
         fail("{} {} must be one file, not {}".format(what, target.label, len(files)))
     return files[0]
 
+def _compile_loader(ctx, out, profile, layout_h, runs_h, constants):
+    """The loader for this window: a compile per source (only those including layout.h/runs.h see it), linked."""
+    includes = []
+    for marker in ctx.files.loader_include_markers:
+        includes += ["-I", marker.dirname]
+    windowed = {f.path: True for f in ctx.files.loader_window_srcs}
+    objects = []
+    for i, src in enumerate(ctx.files.loader_srcs):
+        obj = out("loader/part-%d.o" % i)
+        reads_window = src.path in windowed
+        _xcode(
+            ctx,
+            "/usr/bin/clang",
+            LOADER_COPTS + [_VERBOSE_CONSOLE[profile]] + (["-I", layout_h.dirname] if reads_window else []) + includes +
+            ["-c", src.path, "-o", obj.path],
+            [src] + ctx.files.loader_hdrs + ([layout_h, runs_h] if reads_window else []),
+            [obj],
+            "LoaderCompile",
+            "Compiling the loader's %s" % src.short_path,
+        )
+        objects.append(obj)
+    for src in ctx.files.loader_window_srcs:
+        if src not in ctx.files.loader_srcs:
+            fail("loader_window_srcs {} is not in loader_srcs".format(src.short_path))
+
+    loader = out("loader.uboot.bin")
+    args = ctx.actions.args()
+    args.add("--ld-lld", ctx.file._ld_lld)
+    args.add("--objcopy", ctx.file._objcopy)
+    args.add("--readelf", ctx.file._readelf)
+    args.add("--linker-script", ctx.file.linker_script)
+    args.add("--constants", constants)
+    args.add("--out", loader)
+    args.add_all(objects)
+    ctx.actions.run(
+        executable = ctx.executable._loader_link,
+        arguments = [args],
+        inputs = objects + [ctx.file.linker_script, constants],
+        tools = [ctx.file._ld_lld, ctx.file._objcopy, ctx.file._readelf],
+        outputs = [loader],
+        mnemonic = "LoaderLink",
+        progress_message = "Linking the native loader",
+    )
+    return loader
+
 def _boot_package_impl(ctx):
     name = ctx.attr.name
 
     def out(path):
         return ctx.actions.declare_file(name + "_work/" + path)
 
-    smp = ctx.attr._smp[BuildSettingInfo].value
-    profile = ctx.attr._profile[BuildSettingInfo].value
+    prebuilt = bool(ctx.attr.prebuilt_loader)
+    if prebuilt != bool(ctx.attr.prebuilt_loader_constants):
+        fail("prebuilt_loader and prebuilt_loader_constants go together")
+    smp = ctx.attr.smp[BuildSettingInfo].value
+    profile = "release" if prebuilt else ctx.attr._profile[BuildSettingInfo].value
     release = profile == "release"
 
     # --- boot-args, overlay plan, ADT ------------------------------------------------------------------------------
@@ -139,6 +190,8 @@ def _boot_package_impl(ctx):
     args.add("--manifest", ctx.file.overlay_manifest)
     args.add("--portrait-header", ctx.file.portrait_header)
     args.add_all(sorted(files.keys()), before_each = "--given")
+    if release:
+        args.add("--release")
     args.add("--out", plan)
     _run(ctx, ctx.executable._overlay, [args], [ctx.file.overlay_manifest, ctx.file.portrait_header], [plan], "OverlayPlan", "Planning the userland overlay")
 
@@ -209,9 +262,9 @@ def _boot_package_impl(ctx):
         lz4 = ctx.actions.declare_directory(name + "_work/window/lz4/" + _two_digits(i))
         ctx.actions.run_shell(
             command = _COMPRESS_SHARD,
-            arguments = [ctx.file._lz4.path, shard.path, lz4.path],
+            arguments = [ctx.file.lz4.path, shard.path, lz4.path],
             inputs = [shard],
-            tools = [ctx.file._lz4],
+            tools = [ctx.file.lz4],
             outputs = [lz4],
             env = {"LC_ALL": "C", "PATH": "/usr/bin:/bin"},
             mnemonic = "KernelCompress",
@@ -230,47 +283,10 @@ def _boot_package_impl(ctx):
     args.add("--constants", constants)
     _run(ctx, ctx.executable._window, [args], [window_plan] + compressed, [layout_h, runs_h, window, constants], "KernelWindow", "Staging the kernel window")
 
-    includes = []
-    for marker in ctx.files.loader_include_markers:
-        includes += ["-I", marker.dirname]
-    windowed = {f.path: True for f in ctx.files.loader_window_srcs}
-    objects = []
-    for i, src in enumerate(ctx.files.loader_srcs):
-        obj = out("loader/part-%d.o" % i)
-        reads_window = src.path in windowed
-        _xcode(
-            ctx,
-            "/usr/bin/clang",
-            LOADER_COPTS + [_VERBOSE_CONSOLE[profile]] + (["-I", layout_h.dirname] if reads_window else []) + includes +
-            ["-c", src.path, "-o", obj.path],
-            [src] + ctx.files.loader_hdrs + ([layout_h, runs_h] if reads_window else []),
-            [obj],
-            "LoaderCompile",
-            "Compiling the loader's %s" % src.short_path,
-        )
-        objects.append(obj)
-    for src in ctx.files.loader_window_srcs:
-        if src not in ctx.files.loader_srcs:
-            fail("loader_window_srcs {} is not in loader_srcs".format(src.short_path))
-
-    loader = out("loader.uboot.bin")
-    args = ctx.actions.args()
-    args.add("--ld-lld", ctx.file._ld_lld)
-    args.add("--objcopy", ctx.file._objcopy)
-    args.add("--readelf", ctx.file._readelf)
-    args.add("--linker-script", ctx.file.linker_script)
-    args.add("--constants", constants)
-    args.add("--out", loader)
-    args.add_all(objects)
-    ctx.actions.run(
-        executable = ctx.executable._loader_link,
-        arguments = [args],
-        inputs = objects + [ctx.file.linker_script, constants],
-        tools = [ctx.file._ld_lld, ctx.file._objcopy, ctx.file._readelf],
-        outputs = [loader],
-        mnemonic = "LoaderLink",
-        progress_message = "Linking the native loader",
-    )
+    if prebuilt:
+        loader, loader_constants = ctx.file.prebuilt_loader, [ctx.file.prebuilt_loader_constants]
+    else:
+        loader, loader_constants = _compile_loader(ctx, out, profile, layout_h, runs_h, constants), []
 
     # --- U-Boot and its script ------------------------------------------------------------------------------------
     script_text, script = out("boot-script.txt"), out("boot-script.img")
@@ -294,8 +310,9 @@ def _boot_package_impl(ctx):
     args.add("--loader", loader)
     args.add("--exporter", ctx.file.exporter)
     args.add("--dtb", ctx.file.dtb)
+    args.add_all(loader_constants, before_each = "--loader-constants")
     args.add("--out", bl33)
-    _run(ctx, ctx.executable._bl33, [args], [u_boot, window, constants, script, loader, ctx.file.exporter, ctx.file.dtb], [bl33], "BootBl33", "Staging the boot files and the kernel window in bl33.bin")
+    _run(ctx, ctx.executable._bl33, [args], [u_boot, window, constants, script, loader, ctx.file.exporter, ctx.file.dtb] + loader_constants, [bl33], "BootBl33", "Staging the boot files and the kernel window in bl33.bin")
 
     # --- the overlay and the directory -----------------------------------------------------------------------------
     overlay = ctx.actions.declare_directory(name + "_work/overlay")
@@ -335,6 +352,7 @@ def _boot_package_impl(ctx):
         OutputGroupInfo(
             adt = depset([adt]),
             boot_script = depset([script_text]),
+            constants = depset([constants]),
             kernel_window = depset([window, layout_h, runs_h, constants, window_plan]),
             loader = depset([loader]),
             overlay = depset([plan, overlay_trust, overlay]),
@@ -376,6 +394,23 @@ boot_package = rule(
         "loader_hdrs": attr.label_list(allow_files = True),
         "loader_include_markers": attr.label_list(allow_files = True, doc = "one file per -I directory, in order"),
         "linker_script": attr.label(mandatory = True, allow_single_file = True),
+        "prebuilt_loader": attr.label(
+            allow_single_file = True,
+            doc = "the release's loader.uboot.bin (--//install:prebuilt=release), staged instead of compiling one; " +
+                  "the release's parts are release builds, so the package is composed as release whatever " +
+                  "//bazel:profile is",
+        ),
+        "prebuilt_loader_constants": attr.label(
+            allow_single_file = True,
+            doc = "the constants.json it was built for: bl33 stage refuses a window whose constants differ",
+        ),
+        "lz4": attr.label(
+            default = "//tools:lz4",
+            cfg = "exec",
+            allow_single_file = True,
+            doc = "the kernel window's compressor (lz4 -12, one action per shard): //tools:lz4 or the release's build of it",
+        ),
+        "smp": attr.label(default = "//boot:smp", providers = [BuildSettingInfo]),
         "pretranslated": attr.label(
             default = "//ipsw:pretranslated",
             providers = [PretranslatedPinsInfo],
@@ -384,7 +419,6 @@ boot_package = rule(
         "_gpu_trustcache": attr.label(default = "//boot:gpu_trustcache"),
         "_kind": attr.label(default = "//ipsw:kind"),
         "_profile": attr.label(default = "//bazel:profile"),
-        "_smp": attr.label(default = "//boot:smp"),
         "_xcode_env": attr.label(default = "@xcode//:xcode.env", allow_single_file = True),
         "_xcode_identity": attr.label(default = "@xcode//:identity", allow_single_file = True),
         "_boot_args": _tool("//tools/package:boot_args"),
@@ -395,9 +429,7 @@ boot_package = rule(
         "_loader_link": _tool("//tools/package:loader_link"),
         "_boot_script": _tool("//tools/package:boot_script"),
         "_bl33": _tool("//tools/package:bl33"),
-        # The kernel window's compressor (lz4 -12, one action per shard), built from pinned source; LLVM 23.1.4's
-        # linker and binutils.
-        "_lz4": attr.label(default = "//tools:lz4", cfg = "exec", allow_single_file = True),
+        # LLVM 23.1.4's linker and binutils.
         "_ld_lld": attr.label(default = "@llvm//:bin/ld.lld", cfg = "exec", allow_single_file = True),
         "_objcopy": attr.label(default = "@llvm//:bin/llvm-objcopy", cfg = "exec", allow_single_file = True),
         "_readelf": attr.label(default = "@llvm//:bin/llvm-readelf", cfg = "exec", allow_single_file = True),

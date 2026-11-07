@@ -7,9 +7,12 @@
 #include "nvk_buffer.h"
 #include "nvk_cmd_buffer.h"
 #include "nvk_device.h"
+#include "nvk_device_memory.h"
 #include "nvk_image.h"
 #include "nvk_physical_device.h"
+#include "nvk_entrypoints.h"
 #include "nvk_rust.h"
+#include "vk_common_entrypoints.h"
 #include "nv_push.h"
 
 #include "nv_push_cl9039.h"
@@ -17,6 +20,7 @@
 #include "nv_push_cl90b5.h"
 #include "nv_push_cla0c0.h"
 #include "cla1c0.h"
+#include "clb197.h"
 #include "nv_push_clc3c0.h"
 #include "nv_push_clc397.h"
 
@@ -378,6 +382,51 @@ nvk_queue_submit_exec(struct nvk_queue *queue,
    return VK_SUCCESS;
 }
 
+#ifdef NVK_HAS_DARWIN
+/* ios-on-switch-lmao: the host memory the caller's next vkQueueSubmit on
+ * `queue` from this thread reads and writes (access: 1 read, 2 write, 3 both),
+ * so the kernel orders that work after other processes' GPU writes to it, on
+ * the GPU (nvkmd.h nvkmd_darwin_hint_surfaces). The metal2vulkan runtime calls
+ * it before each of its submissions (found with dlsym: the Vulkan loader opens
+ * this library RTLD_LOCAL). A submission it named none for runs as before.
+ */
+__attribute__((visibility("default"))) void
+switch_nvk_submit_surfaces(VkQueue _queue, const VkDeviceMemory *mems,
+                           const uint8_t *access, uint32_t count)
+{
+   VK_FROM_HANDLE(vk_queue, vk_queue, _queue);
+   nvkmd_darwin_hint_surfaces(container_of(vk_queue, struct nvk_queue, vk));
+   for (uint32_t i = 0; i < count; i++) {
+      VK_FROM_HANDLE(nvk_device_memory, mem, mems[i]);
+      if (mem != NULL && mem->mem != NULL)
+         nvkmd_darwin_hint_surface(mem->mem, access[i]);
+   }
+}
+
+/* One vkQueueSubmit can make several driver submissions (Mesa merges its
+ * VkSubmitInfos only where no signal comes between): the hint is the call's,
+ * for each of them, wherever it runs (nvk_queue_submit_data).
+ */
+VKAPI_ATTR VkResult VKAPI_CALL
+nvk_QueueSubmit2(VkQueue _queue, uint32_t submitCount,
+                 const VkSubmitInfo2 *pSubmits, VkFence fence)
+{
+   VK_FROM_HANDLE(vk_queue, vk_queue, _queue);
+   struct nvk_queue *queue = container_of(vk_queue, struct nvk_queue, vk);
+   nvkmd_darwin_submit_call(queue, true);
+   VkResult result =
+      vk_common_QueueSubmit2(_queue, submitCount, pSubmits, fence);
+   nvkmd_darwin_submit_call(queue, false);
+   return result;
+}
+
+static void *
+nvk_queue_submit_data(struct vk_queue *vk_queue)
+{
+   return nvkmd_darwin_submit_data(container_of(vk_queue, struct nvk_queue, vk));
+}
+#endif
+
 static VkResult
 nvk_queue_submit(struct vk_queue *vk_queue,
                  struct vk_queue_submit *submit)
@@ -396,7 +445,13 @@ nvk_queue_submit(struct vk_queue *vk_queue,
       if (result != VK_SUCCESS)
          return vk_queue_set_lost(&queue->vk, "Bind operation failed");
    } else {
+#ifdef NVK_HAS_DARWIN
+      nvkmd_darwin_submit_surfaces(queue->exec_ctx, submit->driver_data);
+#endif
       result = nvk_queue_submit_exec(queue, submit);
+#ifdef NVK_HAS_DARWIN
+      nvkmd_darwin_submit_surfaces_end(queue->exec_ctx);
+#endif
       if (result != VK_SUCCESS)
          return vk_queue_set_lost(&queue->vk, "Submit failed");
    }
@@ -536,13 +591,31 @@ nvk_queue_create(struct nvk_device *dev,
                                    &queue->draw_cb0);
       if (result != VK_SUCCESS)
          goto fail_exec_ctx;
+
+      if (pdev->info.cls_eng3d >= MAXWELL_B &&
+          (queue->engines & NVKMD_ENGINE_3D) &&
+          nvk_device_fragment_interlock(dev)) {
+         uint32_t interlock_buffer_size =
+            pdev->info.gpc_count * 0x100 * sizeof(uint32_t);
+         result = nvkmd_dev_alloc_mem(dev->nvkmd, &dev->vk.base,
+                                      interlock_buffer_size, 0, NVKMD_MEM_LOCAL,
+                                      &queue->fsi_memory);
+         if (result != VK_SUCCESS)
+            goto fail_draw_cb0;
+
+         result = nvk_upload_queue_fill(dev, &dev->upload,
+                                        queue->fsi_memory->va->addr, 0,
+                                        queue->fsi_memory->size_B);
+         if (result != VK_SUCCESS)
+            goto fail_fsi;
+      }
    }
 
    if (queue_family->queue_flags & VK_QUEUE_SPARSE_BINDING_BIT) {
       result = nvkmd_dev_create_ctx(dev->nvkmd, &dev->vk.base,
                                     NVKMD_ENGINE_BIND, &queue->bind_ctx);
       if (result != VK_SUCCESS)
-         goto fail_draw_cb0;
+         goto fail_fsi;
    }
 
    result = nvk_mem_stream_init(dev, &queue->push_stream);
@@ -554,6 +627,10 @@ nvk_queue_create(struct nvk_device *dev,
       goto fail_push_stream;
 
    queue->vk.driver_submit = nvk_queue_submit;
+#ifdef NVK_HAS_DARWIN
+   queue->vk.driver_submit_data = nvk_queue_submit_data;
+   queue->vk.driver_submit_data_free = nvkmd_darwin_submit_data_free;
+#endif
 
    return VK_SUCCESS;
 
@@ -563,6 +640,9 @@ fail_push_stream:
 fail_bind_ctx:
    if (queue->bind_ctx != NULL)
       nvkmd_ctx_destroy(queue->bind_ctx);
+fail_fsi:
+   if (queue->fsi_memory != NULL)
+      nvkmd_mem_unref(queue->fsi_memory);
 fail_draw_cb0:
    if (queue->draw_cb0 != NULL)
       nvkmd_mem_unref(queue->draw_cb0);
@@ -584,6 +664,10 @@ nvk_queue_destroy(struct nvk_device *dev, struct nvk_queue *queue)
 {
    nvk_mem_stream_sync(dev, &queue->push_stream, queue->exec_ctx);
    nvk_mem_stream_finish(dev, &queue->push_stream);
+   if (queue->fsi_memory != NULL) {
+      nvk_upload_queue_sync(dev, &dev->upload);
+      nvkmd_mem_unref(queue->fsi_memory);
+   }
    if (queue->draw_cb0 != NULL) {
       nvk_upload_queue_sync(dev, &dev->upload);
       nvkmd_mem_unref(queue->draw_cb0);

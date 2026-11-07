@@ -89,6 +89,10 @@ void switch_pd_check_delivery(const char *who);
 // sink-only. Thread context; 0, or -1 without the controller.
 int switch_pd_allow_source(bool allow);
 
+// SC7, from switch_usb_suspend/resume: an empty port is sink-only while asleep, so attaching a sink (a keyboard) does
+// not wake the console and attaching a source (a charger, a dock, a powered display) does. Thread context.
+void switch_pd_sleep(bool entering);
+
 // One line for the role report (SwitchUSB.cpp): the phase, STATUS1/STATUS2/CONFIG1/VENDOR_CONFIG as read now, and the
 // GPIOs behind VBUS: v_vdd5v3 (PX3), VCONN (PK5) and the BQ24193's PSEL/OTG inputs (PJ5, PL0; read, never driven).
 // Thread context (I2C on the PD work loop); 0, or -1 without the controller (the buffer then says so).

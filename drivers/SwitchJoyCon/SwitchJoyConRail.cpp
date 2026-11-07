@@ -88,10 +88,11 @@
 // Pairing (unless switch-no-bt): the address to pair to is the one SwitchBluetooth programs
 // into the controller for bluetoothd: the unit's own (fuses, as switchroot's U-Boot derives it) or, when deploy staged
 // hekate's "Dump Joy-Con BT" (switchroot/joycon_mac.ini), Horizon's, as switchroot's U-Boot takes it from joycon_mac.bin
-// (SwitchBluetooth.cpp). SwitchBluetooth knows it only when bluetoothd first connects, well after the rails handshake
-// the Joy-Cons seated at boot, so a Joy-Con that attaches before it runs unpaired and is paired the moment it arrives
-// (switch_joycon_bluetooth_address: its HID device goes away for the pairing, about 0.1 s, and comes back); later
-// attaches pair before the HID device is published. Pairing reads the Joy-Con's pairing log (SPI 0x2000, 0x26-byte
+// (SwitchBluetooth.cpp). SwitchBluetooth announces it once Data is mounted, before launchd (and again, unchanged, at
+// bluetoothd's first connect), after the rails handshake the Joy-Cons seated at boot, so a Joy-Con that attaches before
+// it runs unpaired and is paired the moment it arrives (switch_joycon_bluetooth_address: its HID device goes away for
+// the pairing, about 0.1 s, and comes back, before anything has opened it); later attaches pair before the HID device
+// is published. Pairing reads the Joy-Con's pairing log (SPI 0x2000, 0x26-byte
 // slots: magic, size 0x22, checksum, host BD_ADDR display order, LTK; hekate 1084-1245, deku spi_flash_notes.md 44-76):
 // earlier pairings have magic 0x00, the one in use 0x95, erased flash ends it. If the slot in use names this address,
 // its key is reused and nothing is written (a Joy-Con paired in Horizon to the address SwitchBluetooth adopted); else

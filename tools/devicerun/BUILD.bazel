@@ -1,0 +1,33 @@
+load("@rules_python//python:py_binary.bzl", "py_binary")
+load("@rules_python//python:py_library.bzl", "py_library")
+load("@rules_python//python:py_test.bzl", "py_test")
+load("//bazel/lint:defs.bzl", "lint_files")
+
+lint_files()
+
+py_library(
+    name = "lib",
+    srcs = [
+        "checks.py",
+        "devicerun.py",
+        "morning.py",
+        "reports.py",
+        "rules.py",
+    ],
+    deps = ["//tools/frames:lib"],
+)
+
+# bazel run //tools/devicerun -- <absolute .logarchive> [--crashes <dir>] [--tsv <file>]: the morning device table.
+py_binary(
+    name = "devicerun",
+    srcs = ["devicerun.py"],
+    deps = [":lib"],
+)
+
+py_test(
+    name = "devicerun_test",
+    size = "small",
+    srcs = ["devicerun_test.py"],
+    data = glob(["test/**"]),
+    deps = [":lib"],
+)

@@ -95,13 +95,6 @@ bool nvenc_info(NVENCClient *c, TegraNVENCInfo *info)
     return call(c, c->selector, TegraNVENCMethodGetInfo, NULL, 0, info, sizeof(*info)) == KERN_SUCCESS;
 }
 
-bool nvenc_claim_self_test(NVENCClient *c)
-{
-    TegraNVENCClaim reply = {0, 0};
-    return call(c, c->selector, TegraNVENCMethodClaimSelfTest, NULL, 0, &reply, sizeof(reply)) == KERN_SUCCESS &&
-           reply.claimed;
-}
-
 void nvenc_close(NVENCClient *c)
 {
     if (!c)
@@ -110,7 +103,7 @@ void nvenc_close(NVENCClient *c)
     free(c);
 }
 
-// The first failure of each kind is logged, to tell an arena too small for the stream from a mapping the kernel
+// The first failure of each kind is logged, to tell NVENC's memory running out from a mapping the kernel
 // refused.
 static void logOnce(int *flag, const char *what, kern_return_t kr, uint64_t size)
 {

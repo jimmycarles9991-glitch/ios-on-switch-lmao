@@ -91,6 +91,7 @@ use crate::retained::Retained;
 use crate::scheduler;
 use crate::sparse::bind::{bind_batch, BindFailure, Bound};
 use crate::sparse::encoder::SparseUpdate;
+use crate::submission_memory;
 use crate::texture::wrapped::Transition;
 use crate::texture::Texture;
 use crate::tracker::{Barrier, EncoderUses, Point, Summary};
@@ -550,7 +551,12 @@ impl CommandBufferShared {
         // transition is of a live image of the caller's in the layout it is in (its contract,
         // `new_texture_with_vk_image`); the fence is unsignaled and in no pending submission;
         // the `VkQueue` is used under its lock.
+        let host_uses = submission_memory::wanted(shared)
+            .then(|| submission_memory::batch(shared, &state.recorded[start..end], &state.ended));
         let submitted = shared.submit_logged(queue, fence, &self.relayed, |vk_queue| unsafe {
+            if let Some(host_uses) = &host_uses {
+                host_uses.tell(shared, vk_queue);
+            }
             shared.counts.queue_submitted(buffers);
             raw.queue_submit(vk_queue, &submits, fence.unwrap_or(vk::Fence::null()))
         });

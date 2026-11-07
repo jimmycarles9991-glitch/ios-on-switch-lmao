@@ -36,6 +36,7 @@ constexpr unsigned kConversionUS = kIntegrationUS + 2000;
 constexpr unsigned kFramesPerSample = 7, kFramesToFirstSample = kFramesPerSample + 1;
 constexpr unsigned kFrameUS = 1000000 / 60, kSetUpUS = 1000, kFirstSampleTimeoutUS = 250000;
 constexpr unsigned kSampleUS = kFramesPerSample * kFrameUS;
+constexpr unsigned kFirstSampleUS = kFramesToFirstSample * kFrameUS;
 constexpr unsigned kLuxMultiplier = 3600, kLuxMax = 100000;
 constexpr unsigned kGains = 4;
 constexpr unsigned kGainFactor[kGains] = {1, 2, 64, 128};  // GAIN register 0..3

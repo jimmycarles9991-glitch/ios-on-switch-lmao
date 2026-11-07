@@ -2,6 +2,7 @@
 // nvdec (r7-raw): see nvdec.h. Method numbers are NVIDIA's (Mesa src/nouveau/headers/nvidia/classes/cl9097.h, clb197.h, MIT).
 // Macros run through Mesa's Fermi MME simulator (src/nouveau/mme/mme_fermi_sim.c, MIT; third_party/mesa/libnouveau_mme.a).
 #include "nvdec.h"
+#include "TegraGM20BLayout.h"
 #ifdef NVDEC_TWOD
 #include "../fx/test/twod_sim.h"
 #endif
@@ -44,8 +45,11 @@ enum : uint32_t {
     VERTEX_ARRAY_START = 0x0d74,
     DRAW_VERTEX_ARRAY = 0x0d78,
     COLOR_CLEAR_VALUE = 0x0d80,
+    Z_CLEAR_VALUE = 0x0d90,
+    STENCIL_CLEAR_VALUE = 0x0da0,
     INVALIDATE_SHADER_CACHES_NO_WFI = 0x0da4,
     PIXEL_SHADER_BARRIER = 0x0de0,
+    NO_OPERATION = 0x0100,
     INVALIDATE_TEXTURE_DATA_CACHE_PIXEL_ORDERED = 0x0f74,
     ZT_A = 0x0fe0,
     ZT_B = 0x0fe4,
@@ -366,6 +370,13 @@ void Decoder::method(uint32_t subc, uint32_t mthd, uint32_t data, bool fromMme)
     case PIXEL_SHADER_BARRIER:
         barrier("PSB");
         break;
+    case NO_OPERATION:
+        // raw_gpu.cpp's marks (SWITCH_RAW_HARNESS_MARKS builds): a fetch barrier left out, a draw's run after its first
+        if (data == 0x0e11de)
+            barrier("ELIDED");
+        else if (data == 0x5b1175)
+            barrier("SPLIT");
+        break;
     case INVALIDATE_TEXTURE_DATA_CACHE:
     case INVALIDATE_TEXTURE_DATA_CACHE_NO_WFI:
     case INVALIDATE_TEXTURE_DATA_CACHE_PIXEL_ORDERED:
@@ -445,9 +456,11 @@ void Decoder::method(uint32_t subc, uint32_t mthd, uint32_t data, bool fromMme)
     reg_[0][mthd >> 2] = data;
 }
 
-// MAXWELL_DMA_COPY_A LAUNCH_DMA, pitch to pitch: a copy (NVK's upload queue puts shaders and data in place with these) or, with
-// REMAP to constant A, a fill. The GPU's writes land in the same overlay as LOAD_CONSTANT_BUFFER's. Block-linear sides are
-// not modelled (Core Animation's paths copy no images on this channel).
+// MAXWELL_DMA_COPY_A LAUNCH_DMA: a copy (NVK's upload queue puts shaders and data in place with these; the raw path's
+// copies) or, with REMAP to constant A, a fill. Either side may be block-linear (SET_SRC/DST_BLOCK_SIZE: one GOB wide, its
+// block height, the surface's width in elements and height, the copy's origin), addressed as TegraGM20BLayout.h lays the
+// GPU's tiled memory out; NVK's optimal images and the raw path's block-linear textures are. The GPU's writes land in the
+// same overlay as LOAD_CONSTANT_BUFFER's.
 void Decoder::copyEngine(uint32_t launch)
 {
     const uint32_t *r = reg_[4];
@@ -455,10 +468,7 @@ void Decoder::copyEngine(uint32_t launch)
                    dst = (uint64_t(r[0x408 / 4] & 0xff) << 32) | r[0x40c / 4];
     const uint32_t pitchIn = r[0x410 / 4], pitchOut = r[0x414 / 4], length = r[0x418 / 4];
     const uint32_t lines = (launch & (1u << 9)) ? r[0x41c / 4] : 1;
-    if (!(launch & (1u << 7)) || !(launch & (1u << 8))) {
-        barrier("CE_BLOCKLINEAR");
-        return;
-    }
+    const bool srcPitch = launch & (1u << 7), dstPitch = launch & (1u << 8);
     // remap: each destination component of COMPONENT_SIZE bytes from a source component (SRC_X..W of the source element of
     // NUM_SRC_COMPONENTS), constant A or B, or left as it was (NO_WRITE); the line length counts elements (nouveau_copy_rect).
     // NVK's two uses: DST_X CONST_A, the fill (vkCmdFillBuffer), and DST_X..W = SRC_X..W, an image copy; the raw path's planar
@@ -478,53 +488,93 @@ void Decoder::copyEngine(uint32_t launch)
             plain = plain && ((comp >> (4 * c)) & 7) == c && c < nsrc;
         plain = plain && nsrc == ndst;
     }
-    const uint64_t bytes = uint64_t(length) * elem;
-    std::vector<uint8_t> line(bytes), from(uint64_t(length) * srcElem);
-    for (uint32_t y = 0; y < lines; y++) {
-        if (remap && !plain) {  // component by component, over what the destination holds
-            read(dst + uint64_t(y) * pitchOut, line.data(), bytes);
-            bool reads = false;
-            for (uint32_t c = 0; c < ndst; c++)
-                reads = reads || ((comp >> (4 * c)) & 7) < 4;
-            if (reads)
-                read(src + uint64_t(y) * pitchIn, from.data(), from.size());
-            for (uint32_t e = 0; e < length; e++)
-                for (uint32_t c = 0; c < ndst; c++) {
-                    const uint32_t sel = (comp >> (4 * c)) & 7;
-                    uint8_t *out = &line[uint64_t(e) * elem + c * csize];
-                    if (sel < 4 && sel < nsrc)
-                        memcpy(out, &from[uint64_t(e) * srcElem + sel * csize], csize);
-                    else if (sel == 4 || sel == 5)
-                        for (uint32_t k = 0; k < csize; k++)
-                            out[k] = uint8_t(consts[sel - 4] >> (8 * k));
-                }
-        } else {
-            read(src + uint64_t(y) * pitchIn, line.data(), bytes);
+    bool reads = !remap || plain;
+    for (uint32_t c = 0; remap && c < ndst; c++)
+        reads = reads || ((comp >> (4 * c)) & 7) < 4;
+
+    // where element e of line y lies: rows `pitch` apart from `base`, or a block-linear surface (its six block words at `at`)
+    struct Side {
+        bool tiled;
+        uint64_t base;
+        uint32_t pitch, yLog2, rowBytes, ox, oy;
+    };
+
+    auto side = [&](bool isPitch, uint64_t base, uint32_t pitch, uint32_t at, uint32_t elemBytes) {
+        Side d{!isPitch, base, pitch, 0, 0, 0, 0};
+        if (d.tiled) {
+            d.yLog2 = (r[at / 4] >> 4) & 0xf;
+            d.rowBytes = r[at / 4 + 1] * elemBytes;
+            d.ox = r[at / 4 + 5] & 0xffff;
+            d.oy = r[at / 4 + 5] >> 16;
         }
-        // NVDEC_WRITETHROUGH: the copy lands in the memory behind the destination too, as the GPU's would, so a host test reads
-        // its result back on the CPU (pack/cap.cpp maps every BO)
-        // (and not in the overlay: the CPU may rewrite that memory later, which the overlay would hide from the next read)
-        static const bool through = getenv("NVDEC_WRITETHROUGH") != nullptr;
+        return d;
+    };
+    const Side in = side(srcPitch, src, pitchIn, 0x728, srcElem), out = side(dstPitch, dst, pitchOut, 0x70c, elem);
+    auto addr = [](const Side &d, uint32_t e, uint32_t y, uint32_t elemBytes) {
+        if (!d.tiled)
+            return d.base + uint64_t(y) * d.pitch + uint64_t(e) * elemBytes;
+        return d.base + tgm_layout_offset_of(d.rowBytes, uint8_t(d.yLog2), (d.ox + e) * elemBytes, d.oy + y);
+    };
+    // NVDEC_WRITETHROUGH: the copy lands in the memory behind the destination too, as the GPU's would, so a host test reads
+    // its result back on the CPU (pack/cap.cpp maps every BO)
+    // (and not in the overlay: the CPU may rewrite that memory later, which the overlay would hide from the next read)
+    static const bool through = getenv("NVDEC_WRITETHROUGH") != nullptr;
+    auto store = [&](uint64_t at, const uint8_t *bytes, uint64_t n) {
         if (through && map_)
-            if (const uint8_t *h = map_(dst + uint64_t(y) * pitchOut, bytes)) {
-                memcpy(const_cast<uint8_t *>(h), line.data(), bytes);
-                continue;
+            if (const uint8_t *h = map_(at, n)) {
+                memcpy(const_cast<uint8_t *>(h), bytes, n);
+                return;
             }
-        const uint64_t at = dst + uint64_t(y) * pitchOut;
-        for (uint64_t k = 0; k < bytes; k += 4) {
+        for (uint64_t k = 0; k < n; k += 4) {
             uint32_t w = 0;
-            if (k + 4 <= bytes && ((at + k) & 3) == 0)
-                memcpy(&w, &line[k], 4);
+            if (k + 4 <= n && ((at + k) & 3) == 0)
+                memcpy(&w, &bytes[k], 4);
             else {  // an unaligned edge: merge into the word
                 const uint64_t a = (at + k) & ~3ull;
                 read(a, &w, 4);
-                for (uint64_t b = 0; b < 4 && k + b < bytes; b++)
-                    reinterpret_cast<uint8_t *>(&w)[((at + k) & 3) + b < 4 ? ((at + k) & 3) + b : 3] = line[k + b];
+                for (uint64_t b = 0; b < 4 && k + b < n; b++)
+                    reinterpret_cast<uint8_t *>(&w)[((at + k) & 3) + b < 4 ? ((at + k) & 3) + b : 3] = bytes[k + b];
                 cbufWrites_[a] = w;
                 continue;
             }
             cbufWrites_[at + k] = w;
         }
+    };
+    const uint64_t bytes = uint64_t(length) * elem;
+    std::vector<uint8_t> line(bytes), from(uint64_t(length) * srcElem);
+    for (uint32_t y = 0; y < lines; y++) {
+        // gather: the line's source elements, and the destination's where components are left or merged
+        if (reads) {
+            if (in.tiled)
+                for (uint32_t e = 0; e < length; e++)
+                    read(addr(in, e, y, srcElem), &from[uint64_t(e) * srcElem], srcElem);
+            else
+                read(addr(in, 0, y, srcElem), from.data(), from.size());
+        }
+        if (remap && !plain) {
+            if (out.tiled)
+                for (uint32_t e = 0; e < length; e++)
+                    read(addr(out, e, y, elem), &line[uint64_t(e) * elem], elem);
+            else
+                read(addr(out, 0, y, elem), line.data(), bytes);
+            for (uint32_t e = 0; e < length; e++)
+                for (uint32_t c = 0; c < ndst; c++) {
+                    const uint32_t sel = (comp >> (4 * c)) & 7;
+                    uint8_t *o = &line[uint64_t(e) * elem + c * csize];
+                    if (sel < 4 && sel < nsrc)
+                        memcpy(o, &from[uint64_t(e) * srcElem + sel * csize], csize);
+                    else if (sel == 4 || sel == 5)
+                        for (uint32_t k = 0; k < csize; k++)
+                            o[k] = uint8_t(consts[sel - 4] >> (8 * k));
+                }
+        } else {
+            line.assign(from.begin(), from.begin() + bytes);
+        }
+        if (out.tiled)
+            for (uint32_t e = 0; e < length; e++)
+                store(addr(out, e, y, elem), &line[uint64_t(e) * elem], elem);
+        else
+            store(addr(out, 0, y, elem), line.data(), bytes);
     }
 }
 
@@ -799,25 +849,29 @@ bool Decoder::loadPrograms(const char *path)
     while ((n = fread(chunk, 1, sizeof chunk, f)) > 0)
         b.insert(b.end(), chunk, chunk + n);
     fclose(f);
-    for (size_t at = 0; at + 12 <= b.size();) {
-        uint32_t code, count;
+    for (size_t at = 0; at + 16 <= b.size();) {
+        uint32_t code, count, data;
         if (memcmp(&b[at], "NVPG", 4))
             return false;
         memcpy(&code, &b[at + 4], 4);
         memcpy(&count, &b[at + 8], 4);
-        at += 12;
+        memcpy(&data, &b[at + 12], 4);
+        at += 16;
         ProgramInfo p;
         p.cbufTypes.assign(b.begin() + at, b.begin() + at + count);
         at += count;
         p.image.assign(b.begin() + at, b.begin() + at + 80 + code);
         at += 80 + code;
+        p.data.assign(b.begin() + at, b.begin() + at + data);
+        at += data;
         programs.emplace(fnv(p.image.data(), 80), p);
     }
     return true;
 }
 
-// The program a stage runs (pre-Volta: at SET_PIPELINE_PROGRAM bytes into SET_PROGRAM_REGION): a known one when its header and
-// code match exactly, named by the hash of both; else the hash of its header and first 256 bytes of code, marked unknown.
+// The program a stage runs (pre-Volta: at SET_PIPELINE_PROGRAM bytes into SET_PROGRAM_REGION): a known one when its header,
+// code and shader data match exactly, named by the hash of all three; else the hash of its header and first 256 bytes of code,
+// marked unknown. The header sits 0x30 bytes into its upload and the data 256-aligned after the code (nvk_shader_upload).
 const ProgramInfo *Decoder::program(int stage, std::string &id)
 {
     const uint64_t at = addr3(PROGRAM_REGION_A, PROGRAM_REGION_B) + r3(PIPELINE + 0x40 * stage + 4);
@@ -828,11 +882,13 @@ const ProgramInfo *Decoder::program(int stage, std::string &id)
     }
     auto range = programs.equal_range(fnv(head, 80));
     for (auto it = range.first; it != range.second; ++it) {
-        std::vector<uint8_t> b(it->second.image.size());
+        const ProgramInfo &p = it->second;
+        std::vector<uint8_t> b(p.image.size()), data(p.data.size());
         read(at, b.data(), b.size());
-        if (b == it->second.image) {
-            id = hex(fnv(b.data(), b.size()));
-            return &it->second;
+        const uint64_t dataAt = at - 0x30 + ((0x30 + b.size() + 0xff) & ~uint64_t(0xff));
+        if (b == p.image && (data.empty() || (read(dataAt, data.data(), data.size()) && data == p.data))) {
+            id = hex(fnv(data.data(), data.size(), fnv(b.data(), b.size())));
+            return &p;
         }
     }
     id = "unknown:" + hex(fnv(head, sizeof head));
@@ -862,11 +918,17 @@ void Decoder::clear(uint32_t data)
     pendingBarriers_.clear();
     const uint32_t rt = (data >> 6) & 0xf;
     const uint32_t m = COLOR_TARGET + 0x40 * rt;
-    fprintf(out_,
-            "CLEAR data=%08x rt=%s,%ux%u,fmt=%x,mem=%x color=%08x,%08x,%08x,%08x rect=%08x,%08x ctl=%08x barriers=%s\n",
-            data, name(addr3(m, m + 4)).c_str(), r3(m + 8), r3(m + 0xc), r3(m + 0x10), r3(m + 0x14),
-            r3(COLOR_CLEAR_VALUE), r3(COLOR_CLEAR_VALUE + 4), r3(COLOR_CLEAR_VALUE + 8), r3(COLOR_CLEAR_VALUE + 0xc),
-            r3(CLEAR_RECT_H), r3(CLEAR_RECT_V), r3(CLEAR_SURFACE_CONTROL), bar.c_str());
+    // depth (Z_ENABLE) or stencil (STENCIL_ENABLE): their clear values and the depth target too
+    char zs[96] = "";
+    if (data & 3)
+        snprintf(zs, sizeof zs, " zs=%08x,%02x,%s", r3(Z_CLEAR_VALUE), r3(STENCIL_CLEAR_VALUE) & 0xff,
+                 name(addr3(ZT_A, ZT_B)).c_str());
+    fprintf(
+        out_,
+        "CLEAR data=%08x rt=%s,%ux%u,fmt=%x,mem=%x color=%08x,%08x,%08x,%08x rect=%08x,%08x ctl=%08x%s barriers=%s\n",
+        data, name(addr3(m, m + 4)).c_str(), r3(m + 8), r3(m + 0xc), r3(m + 0x10), r3(m + 0x14), r3(COLOR_CLEAR_VALUE),
+        r3(COLOR_CLEAR_VALUE + 4), r3(COLOR_CLEAR_VALUE + 8), r3(COLOR_CLEAR_VALUE + 0xc), r3(CLEAR_RECT_H),
+        r3(CLEAR_RECT_V), r3(CLEAR_SURFACE_CONTROL), zs, bar.c_str());
 }
 
 // Raw facts of a draw for the pack generator (tools/mkpack.py): every non-zero 3D register, the root table's words, set 0's
@@ -1019,9 +1081,32 @@ void Decoder::probeDump(uint32_t first, uint32_t count)
     }
 }
 
+bool Decoder::bound(int group, int slot, uint64_t &addr, uint32_t &bytes) const
+{
+    if (group < 0 || group > 4 || slot < 0 || slot >= 18 || !binds_[group][slot].valid)
+        return false;
+    addr = binds_[group][slot].addr;
+    bytes = binds_[group][slot].size;
+    return true;
+}
+
+void Decoder::pushWords(uint32_t &mask, uint32_t words[32]) const
+{
+    mask = 0;
+    const uint64_t root = binds_[4][0].valid ? binds_[4][0].addr : binds_[0][0].addr;
+    for (auto it = writtenThisSubmit_.lower_bound(root + 0x700); it != writtenThisSubmit_.end() && *it < root + 0x780;
+         ++it) {
+        const uint32_t k = uint32_t(*it - root - 0x700) / 4;
+        mask |= 1u << k;
+        words[k] = cbufWrites_.at(*it);
+    }
+}
+
 void Decoder::draw(const char *kind, uint32_t first, uint32_t count)
 {
     draws++;
+    if (onDraw)
+        onDraw(*this);
     std::string bar;
     for (auto &b : pendingBarriers_)
         bar += (bar.empty() ? "" : ",") + b;

@@ -94,6 +94,18 @@ bool keyKek(uint32_t keybag, uint32_t keyClass, Kek *kek)
 }
 }  // namespace
 
+// A per-console value for identifiers that must stay the same across boots without revealing the device key (an HMAC of
+// `label` under it); false until AppleKeyStore has started.
+extern "C" bool native_aks_device_digest(const char *label, uint8_t out[32])
+{
+    if (!gDeviceKeyReady)
+        return false;
+    const void *parts[1] = {label};
+    const size_t lengths[1] = {strlen(label)};
+    aks::hmacSha256(sha256Parts, gDeviceKey, 32, parts, lengths, 1, out);
+    return true;
+}
+
 // From AppleKeyStore::start, once, before the service is registered and any user client exists.
 extern "C" void native_aks_device_key_start(void)
 {

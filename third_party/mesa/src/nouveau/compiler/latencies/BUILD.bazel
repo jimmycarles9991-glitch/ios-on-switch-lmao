@@ -4,6 +4,7 @@
 load("@rules_python//python:py_binary.bzl", "py_binary")
 load("//bazel/lint:defs.bzl", "lint_files")
 load("//third_party/mesa/bazel:defs.bzl", "MESA_LINT_EXCLUDE", "MESA_PY_DEPS", "mesa_genrule")
+load("//third_party/mesa/bazel:identity.bzl", "mesa_identity_files")
 load("//third_party/mesa/bazel:rust.bzl", "RUST_GLOBAL_ARGS", "mesa_rust_library")
 
 package(default_visibility = ["//visibility:public"])
@@ -17,6 +18,8 @@ exports_files(glob(
     ["**"],
     exclude = ["BUILD.bazel"],
 ))
+
+mesa_identity_files()
 
 # Every header of this package, its generated ones included: //third_party/mesa:headers gathers them.
 filegroup(

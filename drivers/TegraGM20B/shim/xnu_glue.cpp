@@ -27,6 +27,7 @@ vm_offset_t phystokv(uint64_t pa);  // physical aperture (osfmk/arm64/arm_vm_ini
 vm_offset_t ml_io_map(vm_offset_t phys_addr, vm_size_t size);
 vm_offset_t ml_io_map_wcomb(vm_offset_t phys_addr, vm_size_t size);
 boolean_t ml_set_interrupts_enabled(boolean_t enable);
+boolean_t ml_get_interrupts_enabled(void);
 boolean_t switch_ram_gpu_pool(uint64_t *start, uint64_t *end);
 void pmap_set_cache_attributes(ppnum_t pn, unsigned int cacheattr);
 boolean_t pmap_valid_page(ppnum_t pn);
@@ -57,12 +58,24 @@ extern "C" void nvxnu_stats(const char *fmt, ...)
 	os_log(OS_LOG_DEFAULT, "%s", line);
 }
 
+// nvkm's interrupt handler runs under spin_lock_irqsave, as in a Linux hard IRQ, and IOLog asserts with interrupts off.
+// os_log queues a line from any context, without the console copy.
+static void nvxnu_report(const char *line)
+{
+	if (ml_get_interrupts_enabled())
+		IOLog("%s", line);
+	else
+		os_log_error(OS_LOG_DEFAULT, "%{public}s", line);
+}
+
 extern "C" void nvxnu_log(const char *fmt, ...)
 {
+	char line[512];
 	va_list ap;
 	va_start(ap, fmt);
-	IOLogv(fmt, ap);
+	vsnprintf(line, sizeof(line), fmt, ap);
 	va_end(ap);
+	nvxnu_report(line);
 }
 
 // Bring-up step trace (M1/M2/CLK steps): only with kTracePaced, set in source for a bring-up test, which also gives the
@@ -93,7 +106,7 @@ extern "C" int nvxnu_vsnprintf(char *buf, unsigned long size, const char *fmt, v
 
 extern "C" void nvxnu_panic(const char *fmt, ...)
 {
-	char line[512];
+	char line[1024];
 	va_list ap;
 	va_start(ap, fmt);
 	vsnprintf(line, sizeof(line), fmt, ap);
@@ -137,7 +150,9 @@ extern "C" void nvxnu_error(const char *dev, const char *fmt, ...)
 	va_start(ap, fmt);
 	vsnprintf(line, sizeof(line), fmt, ap);
 	va_end(ap);
-	IOLog("tegra-gm20b %s: %s", dev, line);
+	char report[sizeof(line) + 64];
+	snprintf(report, sizeof(report), "tegra-gm20b %s: %s", dev, line);
+	nvxnu_report(report);
 	if (current_thread() != __atomic_load_n(&gIrqThread, __ATOMIC_RELAXED))
 		return;
 	size_t n = strnlen(line, sizeof(line));
@@ -278,6 +293,13 @@ extern "C" nvxnu_u64 nvxnu_nanotime(void)
 {
 	uint64_t ns;
 	absolutetime_to_nanoseconds(mach_absolute_time(), &ns);
+	return ns;
+}
+
+extern "C" nvxnu_u64 nvxnu_abstime_to_ns(nvxnu_u64 abstime)
+{
+	uint64_t ns;
+	absolutetime_to_nanoseconds(abstime, &ns);
 	return ns;
 }
 
@@ -722,6 +744,41 @@ extern "C" int nvxnu_pool_init(int *zeroed)
 extern "C" nvxnu_u32 nvxnu_vm_page_size(void)
 {
 	return PAGE_SIZE;
+}
+
+extern "C" nvxnu_u64 nvxnu_ram_bytes(void)
+{
+	return max_mem;
+}
+
+// The descriptor stays wired for the kext's life: nothing gives such memory back.
+extern "C" int nvxnu_contig_alloc(nvxnu_u64 bytes, nvxnu_u64 *pa)
+{
+	IOBufferMemoryDescriptor *md = IOBufferMemoryDescriptor::inTaskWithPhysicalMask(
+		kernel_task,
+		static_cast<IOOptionBits>(kIODirectionInOut) |
+			static_cast<IOOptionBits>(kIOMemoryMapperNone) |
+			kIOMemoryPhysicallyContiguous,
+		bytes, 0xffffffffffULL & ~static_cast<uint64_t>(PAGE_MASK));
+	if (!md)
+		return -12;
+	if (md->prepare() != kIOReturnSuccess) {
+		md->release();
+		return -12;
+	}
+	IOByteCount len = 0;
+	const addr64_t first = md->getPhysicalSegment(0, &len, kIOMemoryMapperNone);
+	void *va = md->getBytesNoCopy();
+	if (!first || !va || len < bytes) {
+		md->complete();
+		md->release();
+		return -12;
+	}
+	// The zero fill went through the cacheable aperture: no dirty line of it may land over what the GPU writes later.
+	memset(va, 0, bytes);
+	dcache_op(va, bytes, true);
+	*pa = first;
+	return 0;
 }
 
 extern "C" nvxnu_u64 nvxnu_pool_base_pa(void)

@@ -202,11 +202,13 @@ nvk_mem_arena_copy_to_gpu(struct nvk_mem_arena *arena,
       const size_t copy_size_B = MIN2(size_B, mem_size_B - mem_offset_B);
 
       memcpy(mem->mem->map + mem_offset_B, src, copy_size_B);
+      /* The copied range only: marking the arena dirty had the next queue submit (a render thread) clean the whole
+       * shader heap after each upload, a DC CVAC per line on Tegra's cached maps, under the arena's mutex.
+       */
+      nvkmd_mem_sync_map_to_gpu(mem->mem, mem_offset_B, copy_size_B);
 
       dst_addr += copy_size_B;
       src += copy_size_B;
       size_B -= copy_size_B;
    }
-
-   nvk_mem_arena_set_map_dirty(arena);
 }

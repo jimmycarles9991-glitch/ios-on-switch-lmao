@@ -14,7 +14,8 @@
 //     TX_DRV_AMP) replace the T210 ECTL table nxk applies; only the DT-enabled port (pci@2,0 = port 1) is enabled.
 //   * PLLE: clk_plle_tegra210_enable with the B01 spread-spectrum coefficients (clk-tegra210b01.c:448-454).
 // Like nxk, the UPHY PLL and PLLE stay under software control: neither the XUSBIO PLL nor the PLLE hardware
-// sequencer is started (XUSB SuperSpeed, their other user, is unused here), which is the path proven on silicon.
+// sequencer is started, which is the path proven on silicon. SuperSpeed USB's lane runs on the same PLL: every
+// calibration is announced to it (kits/SwitchCAR/SwitchUPHY.h), so its lane is clamped while the PLL is redone.
 //
 // Board (switchroot tegra210b01-nx-common.dtsi:366-428, -fric-pinmux.dtsi, -fric-gpio.dtsi): pcie@1003000 port 1
 // (pci@2,0) on UPHY lane pcie-0 (function pcie-x1), rails max77620 ldo1 (1.05 V) and sd3 (1.8 V, always on).
@@ -28,6 +29,7 @@
 #include "SwitchWLANPrivate.h"
 #include "../TegraI2C/TegraI2C.h"
 #include "../../kits/SwitchCAR/SwitchPMC.h"
+#include "../../kits/SwitchCAR/SwitchUPHY.h"
 
 namespace swlan {
 namespace {
@@ -451,6 +453,7 @@ bool TegraPcie::uphy(char *why, size_t whyLength)
         p.modify(PADCTL_ELPG_PROGRAM1, bit, 0);
         IODelay(200);
     }
+    switch_uphy_announce(true);
     return true;
 }
 
@@ -698,6 +701,8 @@ bool TegraPcie::bringUp(Endpoint &ep, char *why, size_t whyLength)
         snprintf(why, whyLength, "register mapping failed");
         return false;
     }
+    // powerUp holds the UPHY in reset and uphy() recalibrates its PLL: SuperSpeed's lane is clamped first.
+    switch_uphy_announce(false);
     if (!rail(why, whyLength))
         return false;
     // MSELECT: wrap transactions for normal non-cacheable/GRE mappings, no error responses (tegra_pcie_enable_wrap;

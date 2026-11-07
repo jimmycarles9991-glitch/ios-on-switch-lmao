@@ -399,6 +399,27 @@ VkResult MUST_CHECK
 nvkmd_darwin_try_create_pdev(struct vk_object_base *log_obj,
                              enum nvk_debug debug_flags,
                              struct nvkmd_pdev **pdev_out);
+
+/* ios-on-switch-lmao: the host imports a queue submission reads and writes,
+ * for the kernel's order with other processes' GPU work on them
+ * (TegraGM20BABI.h method 17). switch_nvk_submit_surfaces (nvk_queue.c) makes
+ * a hint for the caller's next vkQueueSubmit on `queue` from this thread:
+ * hint_surfaces starts it, hint_surface adds one memory (access: 1 read,
+ * 2 write, 3 both; memory that is not a host import is passed over). That
+ * call takes it (submit_call, which drops a hint for another queue), each
+ * submission it queues carries a copy (submit_data, as vk_queue_submit's
+ * driver_data, freed by submit_data_free) to whichever thread runs it, and
+ * there it goes into the queue's exec context (submit_surfaces; NULL: none)
+ * for that submission's Execs until submit_surfaces_end. A submission without
+ * one names none, and runs as before.
+ */
+void nvkmd_darwin_hint_surfaces(const void *queue);
+void nvkmd_darwin_hint_surface(struct nvkmd_mem *mem, uint8_t access);
+void nvkmd_darwin_submit_call(const void *queue, bool begin);
+void *nvkmd_darwin_submit_data(const void *queue);
+void nvkmd_darwin_submit_data_free(void *data);
+void nvkmd_darwin_submit_surfaces(struct nvkmd_ctx *ctx, const void *data);
+void nvkmd_darwin_submit_surfaces_end(struct nvkmd_ctx *ctx);
 #endif
 
 static inline void

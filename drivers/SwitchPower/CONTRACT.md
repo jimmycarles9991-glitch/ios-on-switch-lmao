@@ -151,10 +151,14 @@ How each is read, on thermalmonitord's own 5 s cadence (it calls in; no timer of
   `tegra210b01_tsensors`); SOC_THERM (peripheral 78) under reset, clock 51 MHz from PLLP (CLK_SOURCE_SOC_THERM
   0x644 = 0x4000000e), TSENSOR (peripheral 100) 400 kHz from CLK_M (0x3b8 = 0x8000005e), out of reset; CONFIG0/1/2 per
   sensor, SENSOR_PDIV and HOTSPOT_OFF (cpu 10, gpu 5). A read is `TS_x_STATUS1` (valid bit 31, readback 15:0 =
-  degrees, +0.5, negate) at the moment of the call. No SOC_THERM interrupt, throttle or THERMTRIP is programmed (the
-  fan curve stays the safety net). **[HW]** never run on hardware before.
-- **TMP451**: SwitchThermal's last good reading (taken on every ALERT, the window around the fan levels, and at least
-  every 5 s); older than 15 s it is a read failure. SwitchThermal stays the chip's only reader.
+  degrees, +0.5, negate) at the moment of the call. Once up, SwitchSocTherm.cpp keeps a one-degree LVL0 window on the
+  CPU, GPU and PLLX groups (THERMCTL_INTR, INTID 80). Past L4T's software limits (SoC diode 92.5 C, PLLX 94.5 C,
+  SwitchThermalLimits.h) SwitchThermal shuts the console down in order with a record in the RTC that the next boot files
+  (SwitchResetCause.h); THERMTRIP with the PMC's reset (PLLX 96 C, CPU and GPU 127 C) is only the backstop above that.
+  No hardware throttle is programmed.
+- **TMP451**: SwitchThermal's last good reading, taken on every ALERT (the window around the fan levels and the DFLL's
+  limits) and every time a SOC_THERM group moves a degree; it fails only once SwitchThermal has lost the sensor.
+  SwitchThermal stays the chip's only reader.
 - **MAX17050**: SwitchBattery's last reading, kept current by the gauge's **temperature alert window** (TAlrtTh, one
   degree either side of the last reading rounded; ALRT on PY0, which SwitchBattery already handles), besides its other
   alerts and the 120 s re-read. Before r15 the window was wide open.

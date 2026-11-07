@@ -5,13 +5,15 @@
 #
 # Boot-args (COMMAND_LINE) live in tools/package/boot_args.py; the ADT edits, USB_HOST and DISPLAY_GAMUT in
 # tools/package/adt_edit.py; the steps and what each reads in boot/defs.bzl.
-load("@bazel_skylib//rules:common_settings.bzl", "bool_flag")
+load("@bazel_skylib//lib:selects.bzl", "selects")
+load("@bazel_skylib//rules:common_settings.bzl", "bool_flag", "bool_setting")
 load("@bazel_skylib//rules:write_file.bzl", "write_file")
 load("@rules_python//python:py_binary.bzl", "py_binary")
 load("@rules_python//python:py_test.bzl", "py_test")
 load("//bazel/lint:defs.bzl", "lint_files")
 load("//kernel/rules:inputs.bzl", "tool_output")
 load(":defs.bzl", "boot_package")
+load(":overlay.bzl", "OVERLAY_BINARIES")
 
 package(default_visibility = ["//visibility:public"])
 
@@ -23,16 +25,41 @@ exports_files(glob(
 ))
 
 # Four cores: adt_edit.py --smp's four-A57 ADT.
+SMP = True
+
 bool_flag(
     name = "smp",
-    build_setting_default = True,
+    build_setting_default = SMP,
+)
+
+# What the release is built with (its CI sets no --//boot:smp), and so what a package composed from it has.
+bool_setting(
+    name = "release_smp",
+    build_setting_default = SMP,
 )
 
 # The GPU bundle's trust cache module, appended to the kernel's static trust cache so the plugin and NVK may run.
 # --//boot:gpu_trustcache=//boot:no_gpu packages without it (what the CMake flow did when out/gpu was absent).
 label_flag(
     name = "gpu_trustcache",
-    build_setting_default = "//gpu:trustcache",
+    build_setting_default = ":default_gpu_trustcache",
+)
+
+alias(
+    name = "default_gpu_trustcache",
+    actual = select({
+        "//install:from_release": "@switch_release//:gpu_trustcache",
+        "//conditions:default": "//gpu:trustcache",
+    }),
+)
+
+# fetchform is a debug build's, so never in a package composed from the release (release builds).
+selects.config_setting_group(
+    name = "local_debug",
+    match_all = [
+        "//bazel:debug",
+        "//install:from_local",
+    ],
 )
 
 filegroup(
@@ -50,6 +77,7 @@ tool_output(
     ],
     binary = "//tools/package:adt",
     message = "Generating the native OLED ADT",
+    xcode = False,
 )
 
 # hekate passes every key to U-Boot's environment too. bootwait=0: no wait on hekate's logo when launched from Nyx.
@@ -72,6 +100,8 @@ write_file(
     newline = "unix",
 )
 
+# --//install:prebuilt=release: the GitHub release's kernel (prelinked here), overlay Mach-Os, GPU trust cache, lz4 and
+# loader, with the release's --//boot:smp.
 boot_package(
     name = "package",
     adt = ":adt",
@@ -85,7 +115,10 @@ boot_package(
     exporter = "//bazel/pinned:firmware/exporter.uimg",
     icon = "//boot/logo:icon_ios_hue.bmp",
     ini = ":ios_ini",
-    kernel = "//kernel:prelinked",
+    kernel = select({
+        "//install:from_release": "//install:release_kernel",
+        "//conditions:default": "//kernel:prelinked",
+    }),
     linker_script = ":loader/link.ld",
     loader_hdrs = [
         ":loader/boot_args.h",
@@ -126,16 +159,19 @@ boot_package(
         ":loader/copy.c",
         ":loader/copy.S",
     ],
+    lz4 = select({
+        "//install:from_release": "@switch_release//:lz4",
+        "//conditions:default": "//tools:lz4",
+    }),
     # The overlay's Mach-Os (the trust module hashes those the manifest trusts) and its other files, each by the
     # source tree/overlay/manifest.json names it by.
-    overlay_binaries = {
-        "//drivers/SwitchBluetooth:BlueTool": "build/switch-bluetooth/BlueTool",
-        "//drivers/SwitchAudio:SwitchAudioHAL": "build/switch-audio/SwitchAudio.driver/SwitchAudio",
-        "//drivers/SwitchJoyCon:joyconpaird": "build/switch-joycon/joyconpaird",
-        "//drivers/SwitchVideoDecoders:HEVCH8": "build/switch-video/HEVCH8.videodecoder",
-        "//drivers/SwitchVideoDecoders:AVD": "build/switch-video/AVD.videodecoder",
-        "//drivers/SwitchVideoEncoders:AVE": "build/switch-video/H264H7.videoencoder",
-    },
+    overlay_binaries = select({
+        "//install:from_release": {"@switch_release//:overlay/" + source: source for source in OVERLAY_BINARIES.values()},
+        "//conditions:default": OVERLAY_BINARIES,
+    }) | select({
+        ":local_debug": {"//drivers/TegraGM20BMetal:fetchform": "build/switch-gpu/fetchform"},
+        "//conditions:default": {},
+    }),
     overlay_data = {
         "//boot/logo:apple-logo~ipad.png": "build/progressui/apple-logo~ipad.png",
         "//bazel/pinned:overlay/wallpaper-1x/7570.iPadOS_17_Flat.plist": "build/wallpaper-1x/7570.iPadOS_17_Flat.plist",
@@ -144,8 +180,34 @@ boot_package(
     overlay_files = ["//overlay:overlay_sources"],
     overlay_manifest = "//overlay:manifest.json",
     portrait_header = "//drivers/NativeMobileDisplay:SwitchPortrait.h",
+    prebuilt_loader = select({
+        "//install:from_release": "@switch_release//:loader",
+        "//conditions:default": None,
+    }),
+    prebuilt_loader_constants = select({
+        "//install:from_release": "@switch_release//:loader_constants",
+        "//conditions:default": None,
+    }),
     script_template = ":u-boot-script.txt",
+    smp = select({
+        "//install:from_release": ":release_smp",
+        "//conditions:default": ":smp",
+    }),
     static_trust = "//ipsw:static_system_trust",
+)
+
+# The loader and the window constants it was compiled for (constants.json: layout.h's and runs.h's), which the release
+# ships (//install:release_inputs) though they were made from the IPSW's kernelcache: release/ipsw_free.bzl DECLASSIFIED.
+filegroup(
+    name = "loader",
+    srcs = [":package"],
+    output_group = "loader",
+)
+
+filegroup(
+    name = "loader_constants",
+    srcs = [":package"],
+    output_group = "constants",
 )
 
 # The staged kernel window decodes (lz4 -d, block by block from the table the loader compiles in) to exactly the image

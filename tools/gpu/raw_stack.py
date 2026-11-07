@@ -31,6 +31,7 @@ def main() -> None:
     sources = [
         metal / 'bridge/NativeMetalBridge.rs',
         metal / 'bridge/NativeMetalObjects.rs',
+        metal / 'bridge/NativeMetalTarget.rs',
         metal / 'NativeBridgeMetalFrontend.mm',
     ]
     raw_files = sorted(p for p in raw.rglob('*') if p.is_file() and p.suffix in SUFFIXES)

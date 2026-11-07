@@ -26,14 +26,19 @@ writes <out>/pack.bin, pack.json, layouts.txt, report.txt and keeps the probe lo
 reruns the probes).
 --stack: the build's stack key (the plugin is compiled with the same value), stamped into the pack header: the runtime
 refuses a pack of another build.
+A bucket's states that its run drew in metal2vulkan's storage form (the pixel interlock on: framebuffer fetch, whatever
+library) are probed once more in <bucket>/barrier with NVK's interlock hidden (NVK_DEBUG=no_fsi, the macOS twin's
+alone), so the pack holds their barrier form too (input attachments, barriers between draws).
 The same work in three steps, for a build that caches each bucket's probe runs (they depend on the bucket's state lines
 and the tools alone):
        rawpack.py --split --qc <default.metallib> --corpus <corpus.log> --out <dir>
            writes <dir>/work/bucket0 .. bucket15, each a corpus.log of its states
        rawpack.py --probe-bucket <bucket dir> --prebuilt <dir> --nvk <host twin dylib> --qc <default.metallib>
-           probes one bucket in place: programs.bin, probe{256,16,4096}.{out,log}
+           probes one bucket in place: programs.bin, probe{256,16,4096}.{out,log}, and its barrier/ the same
        rawpack.py --link --out <dir> [--stack <hex key>] <bucket dir>...
            mkpack.py over the buckets: <dir>/pack.bin and the rest, as the one-step form writes them
+       rawpack.py --stamp <pack.bin> --stack <hex key>
+           the stack key into a linked pack's header, so a build stamps a pack it linked without one
 """
 
 import concurrent.futures
@@ -41,6 +46,7 @@ import contextlib
 import hashlib
 import json
 import os
+import re
 import shutil
 import struct
 import subprocess
@@ -82,6 +88,20 @@ def option(name: str, required: bool = True) -> str | None:
 
 
 BUILT = ('probe', 'libmock_iokit.dylib', 'ycbcr.metallib')
+# Another framework's states (their lines keep lib=, tools/gpu/rawpack.py): the probe loads that library from the
+# crawl's root
+FRAMEWORK = re.compile(r' lib=/System/Library/(?:Private)?Frameworks/\w+\.framework/default\.metallib ')
+QC_PATH = 'System/Library/Frameworks/QuartzCore.framework/default.metallib'
+
+
+def library_root(qc: Path) -> str:
+    """Give the crawl root that QuartzCore's default.metallib lies in.
+
+    Other frameworks' libraries are under the same root.
+    """
+    return str(qc)[: -len(QC_PATH) - 1] if str(qc).endswith(QC_PATH) else ''
+
+
 # The Core Animation states the pack holds (ca/caset.py's tiers): every one. The runtime makes a state and places its
 # programs in the shader heap at its first lookup (raw_gpu.cpp Device::pipeline), so the pack's size is file size only.
 CA_TIERS = ('corpus', 'manifest', 'blend', 'fetch')
@@ -130,6 +150,10 @@ def build(work: Path, bridge: Path) -> None:
     run(['xcrun', 'clang', *cflags, '-c', HERE / 'mock_iokit.c', '-o', work / 'mock_iokit.o'])
     run(['xcrun', 'clang++', *cflags, '-std=c++17', '-c', HERE / 'cap.cpp', '-o', work / 'cap.o'])
     run(['xcrun', 'clang++', *cflags, '-std=c++17', '-c', HERE / 'nvdec.cpp', '-o', work / 'nvdec.o'])
+    for src in ('raw_capture.cpp', 'raw_pack.cpp'):  # the mock's RAWCAP_CAPTURE (cap.cpp)
+        obj = work / Path(src).with_suffix('.o')
+        run(['xcrun', 'clang++', *cflags, '-std=c++17', '-c', RAW / 'runtime' / src, '-o', obj])
+        objs.append(obj)
     run(
         [
             'xcrun',
@@ -180,6 +204,8 @@ def build(work: Path, bridge: Path) -> None:
             'IOSurface',
             '-framework',
             'IOKit',
+            '-framework',
+            'CoreVideo',
             '-o',
             work / 'probe',
         ]
@@ -206,7 +232,7 @@ def split_buckets(corpus: Path, work: Path, count: int) -> list[Path]:
     warm = ''
     with open(corpus) as f:
         for line in f:
-            if line.startswith('R ') and ' label=com.apple.coreanimation.' in line:
+            if line.startswith('R ') and (' label=com.apple.coreanimation.' in line or FRAMEWORK.search(line)):
                 lines[fnv(line.split(' ', 3)[3].encode()) % count].append(line)
                 warm = warm or (line if 'f downsample_4_frag' in line else '')
     dirs = []
@@ -225,12 +251,55 @@ def fnv(b: bytes) -> int:
     return h
 
 
+def state_key(line: str) -> str:
+    """Give an R line's state key as probe.mm prints it: every descriptor field but the label, then its functions."""
+    bar1, bar2 = line.find(' | v '), line.find(' | f ')
+    if bar1 < 0 or bar2 < 0:
+        return ''
+    bar3 = line.find(' | ', bar2 + 5)
+    fields = [
+        h
+        for h in line[:bar1].split()
+        if h.startswith(('samples=', 'topo=', 'ds=')) or (len(h) > 1 and h[0] in 'ca' and h[1].isdigit())
+    ]
+    return (' '.join(fields) + ' ' + line[bar1 : bar3 if bar3 >= 0 else len(line)]).strip()
+
+
+def barrier_set(d: Path) -> Path | None:
+    """Write <d>/barrier/corpus.log: the warm-up line and the lines of the states d's run drew with the interlock on."""
+    sys.path.insert(0, str(HERE))
+    import probelog  # noqa: PLC0415  the pack directory's module, on the path only now
+
+    keys = {
+        p['key']
+        for p in probelog.load(str(d / 'probe256.out'), str(d / 'probe256.log'))
+        if p['records'] and p['records'][0]['regs'].get(0x1224, 0) & 3
+    }
+    lines = (d / 'corpus.log').read_text().splitlines(keepends=True)
+    chosen = [line for line in lines[1:] if state_key(line.rstrip('\n')) in keys]
+    if not chosen:
+        return None
+    barrier = d / 'barrier'
+    barrier.mkdir(exist_ok=True)
+    (barrier / 'corpus.log').write_text(lines[0] + ''.join(chosen))
+    return barrier
+
+
 def probe_bucket(tools: Path, d: Path, nvk: Path, qc: Path, env: dict[str, str]) -> str:
-    """Probe one bucket's states.
+    """Probe one bucket's states, then its storage-form states again with the interlock hidden (barrier_set).
 
     A run that only fills its m2v cache with NVK's driver records (NAK's programs), then the three decoded runs, which
     name each bound program by those records (RAWCAP_PROGRAMS) and hit the same cache.
     """
+    said = [probe_runs(tools, d, nvk, qc, env)]
+    barrier = barrier_set(d)
+    if barrier:
+        said.append(probe_runs(tools, barrier, nvk, qc, dict(env, NVK_DEBUG='no_fsi')))
+    return '; '.join(said)
+
+
+def probe_runs(tools: Path, d: Path, nvk: Path, qc: Path, env: dict[str, str]) -> str:
+    """Run the warm-up and the three decoded probe runs over d's corpus."""
     if d.name == 'bucket0':
         env = dict(env, PROBE_YCBCR_LIB=str(tools / 'ycbcr.metallib'))
     said = []
@@ -239,7 +308,7 @@ def probe_bucket(tools: Path, d: Path, nvk: Path, qc: Path, env: dict[str, str])
         with open(d / f'{name}.out', 'w') as out:
             r = subprocess.run(
                 [str(tools / 'probe'), str(nvk), str(d / 'cache'), str(qc), str(d / 'corpus.log')],
-                env=dict(env, **extra),
+                env=dict(env, PROBE_LIB_ROOT=library_root(qc), **extra),
                 stdout=out,
                 stderr=subprocess.PIPE,
                 text=True,
@@ -264,7 +333,7 @@ def probe_bucket(tools: Path, d: Path, nvk: Path, qc: Path, env: dict[str, str])
             },
         )
     shutil.rmtree(d / 'cache')
-    return f'rawpack: {d.name}: ' + '; '.join(said)
+    return f'rawpack: {d.parent.name + "/" if d.name == "barrier" else ""}{d.name}: ' + '; '.join(said)
 
 
 def probe_env() -> dict[str, str]:
@@ -290,15 +359,34 @@ def probe_env() -> dict[str, str]:
     return env
 
 
+def stamp(pack_bin: Path, stack: int) -> None:
+    """Write the stack key into pack.bin's header."""
+    pack = bytearray(pack_bin.read_bytes())
+    struct.pack_into('<Q', pack, 8 + 16 + 8 * 2 * 8, stack)  # PackHeader.stack (after the section table)
+    pack_bin.write_bytes(pack)
+
+
 def link(out: Path, buckets: list[Path], stack: int, programs: Path) -> None:
     """mkpack.py over the buckets' probe runs: out/pack.bin, stamped with the stack key."""
     out.mkdir(parents=True, exist_ok=True)
     report = run([sys.executable, HERE / 'mkpack.py', programs, out, *buckets])
     if stack:
-        pack = bytearray((out / 'pack.bin').read_bytes())
-        struct.pack_into('<Q', pack, 8 + 16 + 8 * 2 * 8, stack)  # PackHeader.stack (after the section table)
-        (out / 'pack.bin').write_bytes(pack)
+        stamp(out / 'pack.bin', stack)
     print(report.rstrip())
+
+
+def stamp_or_link(stack: int) -> bool:
+    """Run the --stamp or --link step where the command line names one; return whether it did."""
+    if '--stamp' in sys.argv[1:]:  # --stamp <pack.bin> --stack <key>
+        stamp(Path(option('--stamp')), stack)
+        return True
+    if '--link' in sys.argv[1:]:  # --link --out <dir> [--stack <key>] <bucket dir>...
+        out = Path(option('--out')).resolve()
+        buckets = [Path(a).resolve() for a in sys.argv[sys.argv.index('--link') + 1 :] if Path(a).is_dir()]
+        buckets = [b for b in buckets if b != out]
+        link(out, buckets, stack, out / 'programs.bin')
+        return True
+    return False
 
 
 def main() -> None:
@@ -312,11 +400,7 @@ def main() -> None:
                 (out / name).chmod(0o755)
         return
     stack = int(option('--stack', False) or '0', 16)
-    if '--link' in sys.argv[1:]:  # --link --out <dir> [--stack <key>] <bucket dir>...
-        out = Path(option('--out')).resolve()
-        buckets = [Path(a).resolve() for a in sys.argv[sys.argv.index('--link') + 1 :] if Path(a).is_dir()]
-        buckets = [b for b in buckets if b != out]
-        link(out, buckets, stack, out / 'programs.bin')
+    if stamp_or_link(stack):
         return
     qc = Path(option('--qc')).resolve()
     nvk = Path(option('--nvk')).resolve() if '--split' not in sys.argv[1:] else qc

@@ -9,6 +9,9 @@
 // MOCK_GPU_LOG=<file>: every submission run, "ch seqno kick_us start_us end_us acquires", and the WaitFence calls by thread.
 // MOCK_IGNORE_ACQUIRES=1: the GPU runs submissions without their acquires (ordercheck.py's negative control).
 // MOCK_IMPORT_US=<n>: BoImport takes n us per 16 MiB (the kext's wiring; selcheck's pool test).
+// SurfaceLayout (method 16; MOCK_NO_SURFACE_LAYOUT=1 hides it) decides a surface's layout as the kext does: at its first asking
+// import, block-linear when that import writes it, is the surface's only import and its shape tiles, its rows then tiled in
+// place (TegraGM20BLayout.h); pitch for good otherwise.
 #include <IOKit/IOKitLib.h>
 #include <fcntl.h>
 #include <pthread.h>
@@ -20,6 +23,7 @@
 #include <time.h>
 #include <unistd.h>
 #include "TegraGM20BABI.h"
+#include "TegraGM20BLayout.h"
 void pushcount_bind(uint64_t va, uint64_t range, int fd, void *import, uint64_t offset, uint64_t bytes);
 void pushcount_exec(const struct TegraGM20BAbiExec *e);
 
@@ -41,12 +45,28 @@ struct bo {
     int fd;
     uint64_t bytes;
     void *import;
+    uint32_t surface;
 };
 static struct bo bos[kMaxBo];
 static atomic_uint nbo = 1;
 static uint32_t submitted[16];
 static uint32_t *fence; /* the fence page, one uint32 per channel at slot*16 */
 static atomic_ulong calls[16];
+static atomic_ulong import_maps;    /* VmBind map ops onto imported pages */
+static atomic_ulong kind_maps[256]; /* VmBind map ops by PTE kind */
+
+/* Surfaces' layouts (method 16), by surface ID */
+enum {
+    kSurfaces = 256
+};
+
+static struct surface_layout {
+    uint32_t id;
+    int tiled;
+    struct tgm_layout layout;
+} surfaces[kSurfaces];
+
+static pthread_mutex_t surfaces_lock = PTHREAD_MUTEX_INITIALIZER;
 
 /* Order and the asynchronous GPU (gpu_lock) */
 enum {
@@ -243,6 +263,42 @@ static kern_return_t mock_map(io_connect_t c, uint32_t type, task_port_t t, mach
                               mach_vm_size_t *size, IOOptionBits opt);
 static kern_return_t mock_unmap(io_connect_t c, uint32_t type, task_port_t t, mach_vm_address_t addr);
 
+/* The layout of the surface `bo` imports, decided at its first ask */
+static uint32_t surface_layout(const struct bo *bo, const struct TegraGM20BAbiSurfaceLayout *a)
+{
+    pthread_mutex_lock(&surfaces_lock);
+    struct surface_layout *s = NULL;
+    for (unsigned i = 0; i < kSurfaces && !s; i++)
+        if (surfaces[i].id == bo->surface)
+            s = &surfaces[i];
+    if (!s) {
+        for (unsigned i = 0; i < kSurfaces && !s; i++)
+            if (!surfaces[i].id)
+                s = &surfaces[i];
+        unsigned imports = 0;
+        for (unsigned h = 1; h < kMaxBo; h++)
+            imports += bos[h].surface == bo->surface;
+        struct tgm_layout l = {0};
+        const int tiles = (a->flags & TegraGM20BLayoutWrites) && imports == 1 &&
+                          tgm_layout_tiled(a->width, a->height, a->bpp, &l) && l.bytes <= bo->bytes &&
+                          (uint64_t)a->bytes_per_row * a->height <= bo->bytes && a->bytes_per_row >= a->width * a->bpp;
+        *s = (struct surface_layout){bo->surface, tiles, l};
+        if (tiles) { /* the rows tiled in place, as the kext's copy-engine move does */
+            uint8_t *rows = malloc((size_t)a->bytes_per_row * a->height);
+            memcpy(rows, bo->import, (size_t)a->bytes_per_row * a->height);
+            memset(bo->import, 0, l.bytes);
+            tgm_layout_write(&l, bo->import, 0, 0, a->width, a->height, rows, a->bytes_per_row);
+            free(rows);
+        }
+    }
+    const uint32_t layout = !s->tiled ? 0
+                            : s->layout.width == a->width && s->layout.height == a->height && s->layout.bpp == a->bpp
+                                ? TegraGM20BLayoutTiled
+                                : TegraGM20BLayoutOtherShape;
+    pthread_mutex_unlock(&surfaces_lock);
+    return layout;
+}
+
 static kern_return_t mock_call(mach_port_t c, uint32_t sel, const void *in, size_t insz, void *out, size_t *outsz)
 {
     static atomic_int logged;
@@ -266,7 +322,8 @@ static kern_return_t mock_call(mach_port_t c, uint32_t sel, const void *in, size
         struct TegraGM20BAbiInfo i = {.abi_version = TegraGM20BAbiVersion,
                                       .flags = TegraGM20BInfoHostImport |
                                                (getenv("MOCK_NO_KERNEL_MAP") ? 0 : TegraGM20BInfoKernelMap) |
-                                               (getenv("MOCK_NO_ORDER") ? 0 : TegraGM20BInfoOrder),
+                                               (getenv("MOCK_NO_ORDER") ? 0 : TegraGM20BInfoOrder) |
+                                               (getenv("MOCK_NO_SURFACE_LAYOUT") ? 0 : TegraGM20BInfoSurfaceLayout),
                                       .chipset = 0x12e,
                                       .gpc_count = 1,
                                       .tpc_count = 2,
@@ -313,8 +370,16 @@ static kern_return_t mock_call(mach_port_t c, uint32_t sel, const void *in, size
         if (*slow)
             usleep((useconds_t)((uint64_t)atoi(slow) * a->bytes / (16u << 20)));
         unsigned h = atomic_fetch_add(&nbo, 1);
-        bos[h] = (struct bo){-1, a->bytes, (void *)(uintptr_t)a->address};
+        bos[h] = (struct bo){-1, a->bytes, (void *)(uintptr_t)a->address, a->surface_id};
         struct TegraGM20BAbiBoAllocReply r = {.handle = h, .map_token = 0};
+        memcpy(out, &r, sizeof(r));
+        return KERN_SUCCESS;
+    }
+    case TegraGM20BMethodSurfaceLayout: {
+        const struct TegraGM20BAbiSurfaceLayout *a = in;
+        if (getenv("MOCK_NO_SURFACE_LAYOUT") || a->handle >= kMaxBo || !bos[a->handle].surface)
+            return kIOReturnBadArgument;
+        struct TegraGM20BAbiSurfaceLayoutReply r = {.layout = surface_layout(&bos[a->handle], a)};
         memcpy(out, &r, sizeof(r));
         return KERN_SUCCESS;
     }
@@ -331,6 +396,10 @@ static kern_return_t mock_call(mach_port_t c, uint32_t sel, const void *in, size
         for (uint32_t i = 0; i < b->count && i < TegraGM20BMaxBindOps; i++) {
             const struct TegraGM20BAbiBindOp *op = &b->ops[i];
             const struct bo *o = (op->op == TegraGM20BBindMap && op->handle < kMaxBo) ? &bos[op->handle] : NULL;
+            if (o && o->import)
+                atomic_fetch_add(&import_maps, 1);
+            if (op->op == TegraGM20BBindMap)
+                atomic_fetch_add(&kind_maps[op->kind & 255], 1);
             pushcount_bind(op->va, op->range, o ? o->fd : -1, o ? o->import : NULL, op->bo_offset, o ? o->bytes : 0);
         }
         return KERN_SUCCESS;
@@ -508,6 +577,21 @@ static kern_return_t mock_unmap(io_connect_t c, uint32_t type, task_port_t t, ma
         return KERN_SUCCESS;
     munmap((void *)addr, bytes);
     return KERN_SUCCESS;
+}
+
+unsigned long mock_iokit_calls(unsigned method)
+{
+    return method < 16 ? calls[method] : 0;
+}
+
+unsigned long mock_iokit_import_maps(void)
+{
+    return import_maps;
+}
+
+unsigned long mock_iokit_kind_maps(unsigned kind)
+{
+    return kind < 256 ? kind_maps[kind] : 0;
 }
 
 void mock_iokit_report(void)

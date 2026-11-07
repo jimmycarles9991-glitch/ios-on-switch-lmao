@@ -1,0 +1,139 @@
+{
+  "class": "IOEthernetInterface",
+  "doc": "The original IOEthernetInterface (com.apple.iokit.IONetworkingFamily 3.4): the en interface IONetworkStack attaches to the BSD stack, which owns the ifnet (its output queue and start thread, the input queue, the packet taps, the counters). SwitchWLAN's IO80211Interface subclasses it to take the Apple80211 and media ioctls. Declared on IOService: IONetworkInterface's slots are opaque unless named.",
+  "superclass": "IOService",
+  "kext": "com.apple.iokit.IONetworkingFamily",
+  "structors": "default",
+  "includes": [
+    "IOKit/IOService.h",
+    "sys/kernel_types.h"
+  ],
+  "declarations": [
+    "#ifndef SWITCH_ABI_NETWORKING_TYPES",
+    "#define SWITCH_ABI_NETWORKING_TYPES",
+    "class IONetworkController;",
+    "class IONetworkInterface;",
+    "class IONetworkMedium;",
+    "struct IOMbufQueue;",
+    "typedef struct {",
+    "    UInt8 bytes[6];",
+    "} IOEthernetAddress;",
+    "#endif"
+  ],
+  "functions": {
+    "setInterfaceSubType": {
+      "symbols": [
+        "_ZN19IOEthernetInterface19setInterfaceSubTypeEj"
+      ],
+      "doc": "IONetworkInterface::setInterfaceSubType: the ifnet subfamily IONetworkStack's attach passes to ifnet_allocate_extended (IFNET_SUBFAMILY_WIFI for Wi-Fi); false once attached."
+    }
+  },
+  "members": [
+    "using IOService::init",
+    "bool setInterfaceSubType(uint32_t subType)"
+  ],
+  "methods": {
+    "free": {
+      "decl": "void free() override",
+      "mangled": "__ZN19IOEthernetInterface4freeEv",
+      "pac": "_ZN8OSObject4freeEv"
+    },
+    "serializeProperties": {
+      "decl": "bool serializeProperties(OSSerialize *serialize) const override",
+      "mangled": "__ZNK19IOEthernetInterface19serializePropertiesEP11OSSerialize",
+      "pac": "_ZNK15IORegistryEntry19serializePropertiesEP11OSSerialize"
+    },
+    "requestTerminate": {
+      "decl": "bool requestTerminate(IOService *provider, IOOptionBits options) override",
+      "mangled": "__ZN19IOEthernetInterface16requestTerminateEP9IOServicej",
+      "pac": "_ZN9IOService16requestTerminateEPS_j"
+    },
+    "willTerminate": {
+      "decl": "bool willTerminate(IOService *provider, IOOptionBits options) override",
+      "mangled": "__ZN19IOEthernetInterface13willTerminateEP9IOServicej",
+      "pac": "_ZN9IOService13willTerminateEPS_j"
+    },
+    "handleOpen": {
+      "decl": "bool handleOpen(IOService *client, IOOptionBits options, void *argument) override",
+      "mangled": "__ZN19IOEthernetInterface10handleOpenEP9IOServicejPv",
+      "pac": "_ZN9IOService10handleOpenEPS_jPv"
+    },
+    "handleClose": {
+      "decl": "void handleClose(IOService *client, IOOptionBits options) override",
+      "mangled": "__ZN19IOEthernetInterface11handleCloseEP9IOServicej",
+      "pac": "_ZN9IOService11handleCloseEPS_j"
+    },
+    "handleIsOpen": {
+      "decl": "bool handleIsOpen(const IOService *client) const override",
+      "mangled": "__ZNK19IOEthernetInterface12handleIsOpenEPK9IOService",
+      "pac": "_ZNK9IOService12handleIsOpenEPKS_"
+    },
+    "message": {
+      "decl": "IOReturn message(UInt32 type, IOService *provider, void *argument = nullptr) override",
+      "mangled": "__ZN19IOEthernetInterface7messageEjP9IOServicePv",
+      "pac": "_ZN9IOService7messageEjPS_Pv"
+    },
+    "newUserClient": {
+      "decl": "IOReturn newUserClient(task_t owningTask, void *securityID, UInt32 type, IOUserClient **handler) override",
+      "mangled": "__ZN19IOEthernetInterface13newUserClientEP4taskPvjPP12IOUserClient",
+      "pac": "_ZN9IOService13newUserClientEP4taskPvjPP12IOUserClient"
+    },
+    "powerStateWillChangeTo": {
+      "decl": "IOReturn powerStateWillChangeTo(IOPMPowerFlags flags, unsigned long stateNumber, IOService *whatDevice) override",
+      "mangled": "__ZN19IOEthernetInterface22powerStateWillChangeToEmmP9IOService",
+      "pac": "_ZN9IOService22powerStateWillChangeToEmmPS_"
+    },
+    "powerStateDidChangeTo": {
+      "decl": "IOReturn powerStateDidChangeTo(IOPMPowerFlags flags, unsigned long stateNumber, IOService *whatDevice) override",
+      "mangled": "__ZN19IOEthernetInterface21powerStateDidChangeToEmmP9IOService",
+      "pac": "_ZN9IOService21powerStateDidChangeToEmmPS_"
+    },
+    "initWithController": {
+      "decl": "virtual bool init(IONetworkController *controller)",
+      "mangled": "__ZN19IOEthernetInterface4initEP19IONetworkController",
+      "pac": "_ZN18IONetworkInterface4initEP19IONetworkController"
+    },
+    "flushInputQueue": {
+      "decl": "virtual UInt32 flushInputQueue()",
+      "mangled": "__ZN19IOEthernetInterface15flushInputQueueEv",
+      "pac": "_ZN18IONetworkInterface15flushInputQueueEv",
+      "doc": "Hands the frames enqueueInputPacket gathered to the stack in one ifnet_input_extended."
+    },
+    "performCommand": {
+      "decl": "virtual SInt32 performCommand(IONetworkController *controller, unsigned long cmd, void *arg0, void *arg1)",
+      "mangled": "__ZN19IOEthernetInterface14performCommandEP19IONetworkControllermPvS2_",
+      "pac": "_ZN18IONetworkInterface14performCommandEP19IONetworkControllermPvS2_",
+      "doc": "Every ioctl on the interface's ifnet (arg0 the ifnet, arg1 the request). IOEthernetInterface's takes the address, flags, multicast and MTU ones, IONetworkInterface's the media ones; the rest answer EOPNOTSUPP."
+    },
+    "getIfnet": {
+      "decl": "virtual ifnet_t getIfnet() const",
+      "mangled": "__ZNK19IOEthernetInterface8getIfnetEv",
+      "pac": "_ZNK18IONetworkInterface8getIfnetEv",
+      "doc": "The ifnet once IONetworkStack attached the interface, else NULL."
+    },
+    "configureOutputPullModel": {
+      "decl": "virtual IOReturn configureOutputPullModel(uint32_t driverQueueSize, IOOptionBits options = 0, uint32_t outputQueueSize = 0, uint32_t outputSchedulingModel = 0, uint32_t outputTargetQdelay = 0)",
+      "mangled": "__ZN19IOEthernetInterface24configureOutputPullModelEjjjjj",
+      "pac": "_ZN18IONetworkInterface24configureOutputPullModelEjjjjj",
+      "doc": "The stack's output queue and a start thread calling the controller's outputStart (from configureInterface, before the attach)."
+    },
+    "reportDataTransferRates": {
+      "decl": "virtual void reportDataTransferRates(uint64_t outputRateMax, uint64_t inputRateMax, uint64_t outputRateEffective = 0, uint64_t inputRateEffective = 0)",
+      "mangled": "__ZN19IOEthernetInterface23reportDataTransferRatesEyyyy",
+      "pac": "_ZN18IONetworkInterface23reportDataTransferRatesEyyyy",
+      "doc": "The link's rates in bit/s, to the ifnet's bandwidths."
+    },
+    "dequeueOutputPackets": {
+      "decl": "virtual IOReturn dequeueOutputPackets(uint32_t maxCount, mbuf_t *packetHead, mbuf_t *packetTail = nullptr, uint32_t *packetCount = nullptr, uint64_t *packetBytes = nullptr)",
+      "mangled": "__ZN19IOEthernetInterface20dequeueOutputPacketsEjPP6__mbufS2_PjPy",
+      "pac": "_ZN18IONetworkInterface20dequeueOutputPacketsEjPP6__mbufS2_PjPy",
+      "doc": "Up to maxCount frames from the output queue, chained by nextpkt; the output tap and counters are the family's. kIOReturnNoFrames when it is empty."
+    },
+    "enqueueInputPacket": {
+      "decl": "virtual IOReturn enqueueInputPacket(mbuf_t packet, IOMbufQueue *queue = nullptr, IOOptionBits options = 0)",
+      "mangled": "__ZN19IOEthernetInterface18enqueueInputPacketEP6__mbufP11IOMbufQueuej",
+      "pac": "_ZN18IONetworkInterface18enqueueInputPacketEP6__mbufP11IOMbufQueuej",
+      "doc": "One received frame (Ethernet header at its data, packet header length set) onto the input queue: rcvif, the input tap and the header are the family's. It owns the mbuf whatever it returns."
+    }
+  }
+}

@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """programs.bin for nvdec from NVK driver records under m2v cache dirs.
 
-Per nvk_shader: 'NVPG', code_size, cbuf count, the cbuf types, the 80-byte shader header (the hdr NVK uploads before the
-code on pre-Turing), then the code.
+Per nvk_shader: 'NVPG', code_size, cbuf count, data_size, the cbuf types, the 80-byte shader header (the hdr NVK
+uploads before the code on pre-Turing), the code, then NAK's shader data (the constant buffer of type shader_data; NVK
+uploads it after the code, 256-aligned).
 usage: mkprograms.py <out programs.bin> <cache dir>...
 """
 
@@ -30,12 +31,13 @@ def main() -> None:
                     s = nvkshader.shader(data)
                     if not s:
                         continue
-                    key = s['hdr'][:80] + s['code']
+                    key = s['hdr'][:80] + s['code'] + s['data']
                     if key in seen:
                         continue
                     seen.add(key)
                     types = bytes(TYPES.get(c[0], c[0]) if isinstance(c[0], str) else c[0] for c in s['cbufs'])
-                    out += b'NVPG' + struct.pack('<II', len(s['code']), len(types)) + types + s['hdr'][:80] + s['code']
+                    out += b'NVPG' + struct.pack('<III', len(s['code']), len(types), len(s['data'])) + types
+                    out += s['hdr'][:80] + s['code'] + s['data']
     with open(sys.argv[1], 'wb') as programs:
         programs.write(out)
     print(f'{sys.argv[1]}: {len(seen)} programs')

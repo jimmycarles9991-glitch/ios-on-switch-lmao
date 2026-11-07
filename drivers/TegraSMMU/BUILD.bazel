@@ -30,9 +30,9 @@ kernel_headers()
 # TegraVIC: the VIC falcon (Video Image Compositor 4.0) as the system's IOSurfaceAccelerator (AppleM2ScalerCSCDriver and
 # its IOSurfaceAcceleratorClient): its SMMU domain, job engine, boot self-test (V0..V5) and user client; firmware by
 # .incbin; the IOSurface kext's accessors by address, from kits/SwitchABI's IOSurface tables.
-# TegraSMMU: the memory controller's SMMU registers under one lock, and the page-table layout (TegraSMMUDomain.h) every
-# translated swgroup uses (VIC today, the display's direct scanout next).
+# TegraSMMU: the memory controller's SMMU registers under one lock, the page-table layout (TegraSMMUDomain.h) every
+# translated swgroup uses, and an engine's whole address space (TegraSMMUEngine.h: NVDEC's and NVENC's).
 kernel_driver(
     name = "TegraSMMU",
-    hdr_deps = [],
+    hdr_deps = ["kits/SwitchDMA"],
 )

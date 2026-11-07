@@ -5,8 +5,7 @@ from kcinfo import KC, ROOTS, decode8
 import paths
 CUTS = {("com.apple.iokit.IOUSBHostFamily", "com.apple.driver.AppleSMC"),
         ("com.apple.iokit.IOUSBHostFamily", "com.apple.driver.usb.AppleUSBHostPlatformProperties"),
-        ("com.apple.iokit.IOAccessoryManager", "com.apple.driver.AppleOnboardSerial"),
-        ("com.apple.iokit.IOAccessoryManager", "com.apple.iokit.IOSerialFamily")}
+        ("com.apple.iokit.IOAccessoryManager", "com.apple.driver.AppleOnboardSerial")}
 kc = KC(sys.argv[1])
 roots = [r for r in ROOTS if r in kc.plist]
 sel, ifaces, codeless = kc.closure(roots, CUTS)

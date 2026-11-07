@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BSD-2-Clause-Patent
 // The boundary between the Switch's Wi-Fi radio (SwitchWLAN.cpp: Tegra PCIe, BCM4356A3 FullMAC firmware over
-// msgbuf rings, the WPA2 supplicant) and the network side (SwitchWLANNet.cpp: en0, the IO80211 registry entries
-// and the Apple80211 requests wifid sends). Its shape is UniXNU-sheng's nw_abi.h station half (the WifiNet.cpp
+// msgbuf rings, the WPA2 supplicant) and the network side (SwitchWLANNet.h: en0 on IONetworkingFamily and the
+// Apple80211 requests wifid sends). Its shape is UniXNU-sheng's nw_abi.h station half (the WifiNet.cpp
 // this network side is ported from calls exactly these), with the key passed as what wifid hands over.
 // Plain C types only.
 #ifndef SWITCH_WLAN_STATION_H
@@ -114,11 +114,10 @@ void switch_wlan_multicast(const uint8_t (*groups)[6], unsigned count, int all);
 
 // SwitchWLANNet.cpp: what en0 did with the frames, for the radio's stats line.
 struct swlan_net_counters {
-    uint32_t rx_input, rx_no_mbuf, rx_input_errors;  // handed to the stack, dropped for want of an mbuf, refused by it
-    uint32_t tx_oversize, tx_refused;                // dropped by if_output: larger than a frame, or not queued
-    uint32_t tx_starts, tx_batches;                  // en0's start routine runs, and the batches it handed over
-    uint32_t rx_batches;                             // frame batches handed to the stack (one ifnet_input each)
-    uint8_t start_model;                             // 1: en0 runs the stack's output queue (0: legacy if_output)
+    uint32_t rx_input, rx_no_mbuf, rx_input_errors;  // onto the input queue, no mbuf for them, refused by the family
+    uint32_t tx_oversize;                            // dequeued but larger than a transmit buffer
+    uint32_t tx_starts, tx_batches;                  // outputStart runs, and the batches it handed to the radio
+    uint32_t rx_batches;                             // input queue flushes (one ifnet input each)
 };
 
 void switch_wlan_net_counters(struct swlan_net_counters *out);
@@ -128,9 +127,6 @@ void switch_wlan_net_rate(uint64_t bps);
 // SwitchWLAN.cpp: the radio driver (publishes the fuse MAC in the device tree, then brings the chip up on its own
 // thread). Returns 0 when boot-arg switch-no-wlan is set or the driver started. Thread context, IOKit up, before userland.
 int switch_wlan_publish(void);
-
-// SwitchWLANNet.cpp: en0 and the IO80211 registry entries, once the radio is up with its address.
-void switch_wlan_net_start(const uint8_t mac[6]);
 
 // SwitchWLANProbe.cpp
 void switch_wlan_probe(void);                         // read-only state report

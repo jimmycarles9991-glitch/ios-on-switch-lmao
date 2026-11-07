@@ -146,6 +146,9 @@ TEST(SwitchALSMath, FirstSampleAfterDisplayOnInTime)
     }
     // Seven frame ends for the first tick too would read the pre-sleep registers at an early phase.
     EXPECT_LT(1 + (kFramesPerSample - 1) * kFrameUS, kSetUpUS + kConversionUS);
+    EXPECT_GE(kFirstSampleUS, kSetUpUS + kConversionUS)
+        << "the timer's first tick reads a conversion the set-up started";
+    EXPECT_LT(kSampleUS, kFirstSampleTimeoutUS) << "a display-on between ticks still sees one in time";
     // 11-06 (the old order): the sensor was set up at the panel's wake end, 69 ms after CoreBrightness's display-on, and
     // its first result came a set-up tick, a skipped tick and a sample tick later: 424 ms, past the timeout.
     EXPECT_GT(69000 + 3 * kSampleUS, kFirstSampleTimeoutUS);
@@ -398,6 +401,25 @@ float interpolate(double x0, double y0, double x1, double y1, double x)
     return f32(y0 + (x - x0) * (y1 - y0) / (x1 - x0));
 }
 }  // namespace
+
+TEST(SwitchBacklightMath, MilliNitsAsThermalmonitordReadsThem)
+{
+    using namespace switch_backlight;
+    EXPECT_EQ(kMilliNitsMax, 400000u);
+    EXPECT_EQ(rawToMilliNits(kPanelMax), kMilliNitsMax);
+    EXPECT_EQ(rawToMilliNits(0), 0u);
+    EXPECT_NEAR(rawToMilliNits(kFloorRaw), 12506.0, 1.0);
+    unsigned previous = 0;
+    for (unsigned raw = 0; raw <= kPanelMax; ++raw) {
+        const uint32_t milli = rawToMilliNits(raw);
+        EXPECT_LE(std::fabs(milli - rawToNits(raw) * 1000.0 / 65536), 0.5) << raw;
+        EXPECT_GE(milli, previous) << raw;
+        EXPECT_LE(milli, (uint32_t)INT32_MAX) << "a CFNumber SInt32";
+        // thermalmonitord's percentage: (value * 100 + max / 2) / max
+        EXPECT_LE((milli * 100 + kMilliNitsMax / 2) / kMilliNitsMax, 100u);
+        previous = milli;
+    }
+}
 
 TEST(SwitchBacklightMath, MarketingTableAsDisplayCreateWithIDReadsIt)
 {

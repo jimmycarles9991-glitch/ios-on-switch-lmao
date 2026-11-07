@@ -31,9 +31,14 @@ enum {
 	TegraGM20BMethodUnmap = 13,         /* with TegraGM20BInfoKernelMap */
 	TegraGM20BMethodOrder = 14,         /* with TegraGM20BInfoOrder */
 	TegraGM20BMethodSurfaceWrites = 15, /* with TegraGM20BInfoSurfaceWrites */
+	TegraGM20BMethodSurfaceLayout = 16, /* with TegraGM20BInfoSurfaceLayout */
+	TegraGM20BMethodExecSurfaces = 17,  /* with TegraGM20BInfoExecSurfaces */
+	TegraGM20BMethodPriority = 18,      /* with TegraGM20BInfoPriority */
+	TegraGM20BMethodZbc = 19,           /* with TegraGM20BInfoCompression */
 
 	TegraGM20BMaxBindOps = 100,
 	TegraGM20BMaxPushes = 255,
+	TegraGM20BMaxExecSurfaces = 64,
 };
 
 /* TegraGM20BAbiInfo.flags */
@@ -45,6 +50,10 @@ enum {
 	TegraGM20BInfoOrder = 1u << 4,      /* Order (method 14) is implemented */
 	TegraGM20BInfoSurfaceWrites = 1u
 		<< 5, /* BoImport takes TegraGM20BImportGpuReads; method 15 is implemented */
+	TegraGM20BInfoSurfaceLayout = 1u << 6, /* method 16 is implemented */
+	TegraGM20BInfoExecSurfaces = 1u << 7,  /* ExecSurfaces (method 17) is implemented */
+	TegraGM20BInfoPriority = 1u << 8,      /* Priority (method 18) is implemented */
+	TegraGM20BInfoCompression = 1u << 9, /* compressible kinds bind; method 19 is implemented */
 };
 
 /* Method 1, output only. Everything NVK's struct nv_device_info needs that the client cannot derive. */
@@ -122,6 +131,35 @@ struct TegraGM20BAbiSurfaceWrites {
 	uint32_t reserved;
 };
 
+/* Method 16. The layout of the IOSurface whose import `handle` is (its BoImport named the surface), decided once for every
+ * process at its first GPU import that asks, by the shared rule (TegraGM20BLayout.h): block-linear when that importer will
+ * write it (TegraGM20BLayoutWrites: a render target, a store, a blit destination), its texels are width x height of bpp
+ * bytes from the surface's first byte in rows bytes_per_row apart, the shape tiles, and no other import of it exists;
+ * pitch otherwise, for good. A surface becoming block-linear has what it holds tiled before the reply. A later call (any
+ * process, any flags) answers the decision. Block-linear surfaces are bound with TGM_LAYOUT_KIND and read as
+ * TegraGM20BLayout.h lays them out by the GPU and the display; a CPU lock sees their texels as rows bytes_per_row apart.
+ * Reply: TegraGM20BLayoutTiled at the asked shape; 0 pitch; TegraGM20BLayoutOtherShape tiled at another shape. */
+enum {
+	TegraGM20BLayoutWrites = 1u << 0,
+};
+
+enum {
+	TegraGM20BLayoutTiled = 1,
+	TegraGM20BLayoutOtherShape = 2,
+};
+
+struct TegraGM20BAbiSurfaceLayout {
+	uint64_t handle;
+	uint32_t width, height, bpp, bytes_per_row;
+	uint32_t flags; /* TegraGM20BLayout* */
+	uint32_t reserved;
+};
+
+struct TegraGM20BAbiSurfaceLayoutReply {
+	uint32_t layout; /* 0, TegraGM20BLayoutTiled or TegraGM20BLayoutOtherShape */
+	uint32_t reserved;
+};
+
 /* Method 4. The handle dies now; its pages are released only after every channel of the connection has completed what it had
  * submitted at the time of this call. Any VA still bound to it is unbound first. */
 struct TegraGM20BAbiBoFree {
@@ -138,6 +176,14 @@ enum {
 		3, /* [va, va+range) -> sparse (reads 0, writes dropped); needs InfoSparse */
 };
 
+/* Compression (TegraGM20BInfoCompression): a Map with a compressible kind (one the GMMU kind table maps to another, e.g.
+ * C32_2C 0xdb, Z24S8_2CZ) compresses through the GPU's L2; every GPU engine reading or writing through such a mapping
+ * sees plain data, the CPU and the display read the compressed bytes. It needs a BO from BoAlloc (never an import)
+ * whose memory is in physically contiguous, 128 KiB-aligned runs (Contiguous, Coherent or not, with align_log2 >= 17
+ * and bytes a 128 KiB multiple), and va, bo_offset and range 128 KiB multiples; else kIOReturnBadArgument. The BO's
+ * compression lines are its own from its first compressed Map until it is freed, shared by every Map of it: map it with
+ * one compressible kind only, since an uncompressed alias reads compressed bytes. kIOReturnNoResources: none were left
+ * when it first needed them, and no Map of that BO will compress; bind it uncompressed. */
 struct TegraGM20BAbiBindOp {
 	uint32_t op;        /* TegraGM20BBind* */
 	uint32_t kind;      /* GMMU PTE kind (NVK's pte_kind); 0 = pitch/generic */
@@ -210,6 +256,42 @@ struct TegraGM20BAbiExecReply {
 	uint32_t reserved;
 };
 
+/* TegraGM20BAbiSurfaceUse.access: one or both */
+enum {
+	TegraGM20BSurfaceRead = 1u << 0,
+	TegraGM20BSurfaceWrite = 1u << 1, /* renders, blits or stores into it */
+};
+
+/* TegraGM20BAbiExecSurfaces.flags */
+enum {
+	TegraGM20BExecSurfacesAll = 1u
+		<< 0, /* it touches more imports than it lists: the Exec runs as one with no list */
+};
+
+/* Method 17. The host imports (BoImport handles) the channel's next Exec touches, as an Apple command buffer carries its
+ * resource list. That Exec starts with a semaphore acquire, as Order's (method 14), on each submission of another channel,
+ * in any process, whose own list named a listed import as written and that may still be running, so it reads and writes
+ * the surface after them on the GPU, with no CPU wait; and it counts as a GPU write (TegraGM20BImportGpuReads, the
+ * IOSurfaceLock wait) of the imports it lists with TegraGM20BSurfaceWrite only. An Exec with no list, or with
+ * TegraGM20BExecSurfacesAll, waits for nothing and counts as a write of every writable import of the connection for the
+ * IOSurfaceLock wait alone: no Exec waits for it on the GPU. A client's surfaces are fenced from the point it sends lists.
+ * The channel's next Exec takes the list whether it succeeds or not: a retry after kIOReturnBusy sends it again. The record
+ * may end after its `count` uses, as Exec's after its pushes. A handle that is not a live import is passed over. A channel
+ * queues at most TegraGM20BMaxOrderWaits acquires: the writers of more channels than that go unwaited for (logged once). */
+struct TegraGM20BAbiSurfaceUse {
+	uint64_t handle;
+	uint32_t access; /* TegraGM20BSurface* */
+	uint32_t reserved;
+};
+
+struct TegraGM20BAbiExecSurfaces {
+	uint32_t channel;
+	uint32_t count; /* 0..TegraGM20BMaxExecSurfaces */
+	uint32_t flags; /* TegraGM20BExecSurfaces* */
+	uint32_t reserved;
+	struct TegraGM20BAbiSurfaceUse uses[TegraGM20BMaxExecSurfaces];
+};
+
 /* Method 9. Returns kIOReturnSuccess once completed seqno has passed `seqno`, kIOReturnTimeout after timeout_ns (0 = poll once),
  * kIOReturnNotResponding if the channel is dead. */
 struct TegraGM20BAbiWaitFence {
@@ -223,7 +305,10 @@ struct TegraGM20BAbiTimestamp {
 	uint64_t ns; /* PTIMER, nanoseconds; same clock the GPU writes in timestamp queries */
 };
 
-/* Method 11. Input TegraGM20BAbiChannel; error 0 means healthy, anything else means the channel is dead (device lost). */
+/* Method 11. Input TegraGM20BAbiChannel; error 0 means healthy, anything else means the kext killed the channel (its fence
+ * word was moved past every seqno it gave out, so no acquire or wait stays on it). Only that channel is dead: Exec, Order
+ * and WaitFence on it answer kIOReturnNotResponding, while the connection's BOs, binds and other channels go on, and
+ * ChannelDestroy then ChannelCreate (whose reply names the new channel and fence word) gives the client a new one. */
 struct TegraGM20BAbiStatus {
 	uint32_t completed;
 	uint32_t submitted;
@@ -283,7 +368,8 @@ enum {
  * Every acquire names work submitted before the call, so no two submissions can wait for each other. A channel the task makes
  * after the call is not ordered by it; work that completed already queues nothing. reply.waits: the acquires queued.
  * kIOReturnNotReady: an address space has no view of the fence pages; kIOReturnNoResources: a channel has
- * TegraGM20BMaxOrderWaits acquires from other channels queued. Either way the caller orders that switch itself. */
+ * TegraGM20BMaxOrderWaits acquires from other channels queued. Either way the caller orders that switch itself.
+ * kIOReturnNotResponding: `channel` was killed (method 11); killed channels of the task are left out. */
 struct TegraGM20BAbiOrder {
 	uint32_t channel;
 	uint32_t flags; /* TegraGM20BOrder* */
@@ -291,8 +377,49 @@ struct TegraGM20BAbiOrder {
 	uint32_t reserved;
 };
 
+/* Method 18. The GPU priority the process's Metal command queues asked for (-[MTLCommandQueue setGPUPriority:] and
+ * setBackgroundGPUPriority:), Metal's values, the lower the more urgent: Core Animation's render server asks for 0 (its
+ * window server renderer: CA::OGL::new_metal_context's MetalPriority 4), its asynchronous dispatcher 1, its other
+ * contexts 2 and 4. It sets the runlist level of every channel of the connection, made before the call or after:
+  * 0 the compositor's, the highest, 1 and 2 an app's, 3 and above background. background_priority is the one for while
+ * runningboardd denies the process the GPU (task_is_gpu_denied, IOKit's "foreground" privilege). Values above
+ * TegraGM20BMaxPriority are refused. */
+enum {
+	TegraGM20BMaxPriority = 5,
+};
+
+struct TegraGM20BAbiPriority {
+	uint32_t priority;
+	uint32_t background_priority;
+};
+
 struct TegraGM20BAbiOrderReply {
 	uint32_t waits;
+	uint32_t reserved;
+};
+
+/* Method 19. A zero-bandwidth-clear entry: a full-tile clear (CLEAR_SURFACE) of a compressed surface to a value in the
+ * table writes the tiles' compression state instead of their pixels. The table is the GPU's, shared by every process,
+ * 15 colour and 15 depth entries, never emptied: transparent black, opaque white, RGBA32F 0 and 1, opaque black as
+ * A8B8G8R8 and A8R8G8B8, and depth 0.0 and 1.0 are in it from boot. Adding an entry that is there answers its index;
+ * kIOReturnNoResources: the table is full (clears to that value are ordinary clears).
+ * format: the NV9097 ZBC colour format (FERMI_A_ZBC_COLOR_V0_FMT_*), or 1 (FP32) for depth. ds: the value as
+ * SET_COLOR_CLEAR_VALUE(0..3) takes it, or SET_Z_CLEAR_VALUE in ds[0]. l2: the value as the surface stores it, the packed
+ * pixel or the depth word (l2[0]). */
+enum {
+	TegraGM20BZbcColor = 1,
+	TegraGM20BZbcDepth = 2,
+};
+
+struct TegraGM20BAbiZbc {
+	uint32_t type; /* TegraGM20BZbc* */
+	uint32_t format;
+	uint32_t ds[4];
+	uint32_t l2[4];
+};
+
+struct TegraGM20BAbiZbcReply {
+	uint32_t index; /* 1..15 */
 	uint32_t reserved;
 };
 
@@ -306,6 +433,8 @@ TEGRA_GM20B_ASSERT(TegraGM20BAbiBoAlloc, 16);
 TEGRA_GM20B_ASSERT(TegraGM20BAbiBoAllocReply, 16);
 TEGRA_GM20B_ASSERT(TegraGM20BAbiBoImport, 24);
 TEGRA_GM20B_ASSERT(TegraGM20BAbiSurfaceWrites, 8);
+TEGRA_GM20B_ASSERT(TegraGM20BAbiSurfaceLayout, 32);
+TEGRA_GM20B_ASSERT(TegraGM20BAbiSurfaceLayoutReply, 8);
 TEGRA_GM20B_ASSERT(TegraGM20BAbiBoFree, 8);
 TEGRA_GM20B_ASSERT(TegraGM20BAbiBindOp, 40);
 TEGRA_GM20B_ASSERT(TegraGM20BAbiVmBind, 4008);
@@ -315,6 +444,8 @@ TEGRA_GM20B_ASSERT(TegraGM20BAbiChannel, 8);
 TEGRA_GM20B_ASSERT(TegraGM20BAbiPush, 16);
 TEGRA_GM20B_ASSERT(TegraGM20BAbiExec, 4088);
 TEGRA_GM20B_ASSERT(TegraGM20BAbiExecReply, 8);
+TEGRA_GM20B_ASSERT(TegraGM20BAbiSurfaceUse, 16);
+TEGRA_GM20B_ASSERT(TegraGM20BAbiExecSurfaces, 1040);
 TEGRA_GM20B_ASSERT(TegraGM20BAbiWaitFence, 16);
 TEGRA_GM20B_ASSERT(TegraGM20BAbiTimestamp, 8);
 TEGRA_GM20B_ASSERT(TegraGM20BAbiStatus, 24);
@@ -323,5 +454,8 @@ TEGRA_GM20B_ASSERT(TegraGM20BAbiMapReply, 16);
 TEGRA_GM20B_ASSERT(TegraGM20BAbiUnmap, 16);
 TEGRA_GM20B_ASSERT(TegraGM20BAbiOrder, 16);
 TEGRA_GM20B_ASSERT(TegraGM20BAbiOrderReply, 8);
+TEGRA_GM20B_ASSERT(TegraGM20BAbiPriority, 8);
+TEGRA_GM20B_ASSERT(TegraGM20BAbiZbc, 40);
+TEGRA_GM20B_ASSERT(TegraGM20BAbiZbcReply, 8);
 #undef TEGRA_GM20B_ASSERT
 #endif

@@ -784,6 +784,12 @@ pub struct WorkCounts {
     pub spare_block_reuses: u64,
     /// Bytes of the spare dedicated blocks kept now (`memory.rs`, ios-on-switch-lmao).
     pub spare_block_bytes: u64,
+    /// Bytes of `VkDeviceMemory` the runtime holds now for memory of its own: its live blocks,
+    /// pooled, empty or dedicated, and its spares (`memory.rs`, ios-on-switch-lmao).
+    pub device_memory_live: u64,
+    /// The memoryless backings live now, each shared by the memoryless textures of its shape
+    /// (`memory::allocate_memoryless`, ios-on-switch-lmao).
+    pub memoryless_backings_live: u64,
     /// `replace_region` calls by route (ios-on-switch-lmao): into the texture's bytes on the CPU, on the
     /// host into its image, staged for the next submission, and by a submission waited for.
     pub replace_region_routes: [u64; 4],
@@ -1021,9 +1027,15 @@ impl Device {
     #[doc(hidden)]
     pub fn work_counts(&self) -> WorkCounts {
         let counters = &self.shared().counts;
-        let (allocated, census, spares) = {
+        let (allocated, census, spares, backings) = {
             let memory = lock(&self.shared().memory);
-            (memory.allocated(), memory.census(), memory.spares())
+            let backings = memory.memoryless_backings() as u64;
+            (
+                memory.allocated(),
+                memory.census(),
+                memory.spares(),
+                backings,
+            )
         };
         WorkCounts {
             command_pools_made: counters.command_pools_made.load(Ordering::Relaxed),
@@ -1075,6 +1087,8 @@ impl Device {
             host_imports_live: census.imported,
             spare_block_reuses: spares.0,
             spare_block_bytes: spares.1,
+            device_memory_live: census.bytes + spares.1,
+            memoryless_backings_live: backings,
             replace_region_routes: std::array::from_fn(|i| {
                 counters.texel_copy_routes[i].load(Ordering::Relaxed)
             }),

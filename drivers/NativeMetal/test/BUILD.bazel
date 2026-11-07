@@ -1,0 +1,17 @@
+# drivers/NativeMetal on the host:
+#   queue_priority_test   QueuePriority.h: the process's GPU priority from its Metal queues' (Core Animation's)
+#
+#   bazel test //drivers/NativeMetal/test:all
+load("//bazel/lint:defs.bzl", "lint_files")
+load("//bazel/testing:defs.bzl", "host_test")
+
+lint_files()
+
+host_test(
+    name = "queue_priority_test",
+    srcs = [
+        "queue_priority_test.cpp",
+        "//drivers/NativeMetal:QueuePriority.h",
+    ],
+    cxx_std = "c++17",
+)

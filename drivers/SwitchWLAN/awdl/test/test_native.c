@@ -233,6 +233,22 @@ static void test_encoders(void)
     NCHECK(bcm_chanspec_of((struct awdl_chan){6, 81}) == 0x1006);
     NCHECK(bcm_chanspec_of((struct awdl_chan){155, 0x80}) == 0xe09b);
     NCHECK(bcm_chanspec_of((struct awdl_chan){36, 115}) == 0xd024 && bcm_chanspec_of((struct awdl_chan){0, 0}) == 0);
+
+    // actframe: chanspec and dwell, the frame's BSSID (addr3), pad, its destination (addr1), body length, packet id,
+    // then the body from the category byte (AWDL: 127, Apple OUI, type 8).
+    {
+        uint8_t af[24 + 6] = {0xd0, 0x00, 0x00, 0x00, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x02, 0xaa, 0xbb, 0xcc, 0xdd,
+                              0xee, 0x00, 0x25, 0x00, 0xff, 0x94, 0x73, 0x00, 0x00, 0x7f, 0x00, 0x17, 0xf2, 0x08, 0x10};
+        uint8_t req[64];
+        const size_t n = bcm_actframe_request(req, sizeof req, af, sizeof af, 0xd095, 0, 7);
+        NCHECK(n == 9 + 28 + 6 && !memcmp(req, "actframe", 9) &&
+               bytes_eq(req + 9, 28, "95d00000 00000000 002500ff9473 0000 ffffffffffff 0600 07000000") &&
+               bytes_eq(req + 37, 6, "7f0017f20810"));
+        NCHECK(bcm_actframe_request(req, 42, af, sizeof af, 0xd095, 0, 7) == 0);  // no room
+        af[0] = 0x08;                                                             // a data frame
+        NCHECK(bcm_actframe_request(req, sizeof req, af, sizeof af, 0xd095, 0, 7) == 0);
+        NCHECK(bcm_actframe_request(req, sizeof req, af, 24, 0xd095, 0, 7) == 0);  // no body
+    }
     NCHECK(bcm_chanspec_primary(0xe22a) == 44 && bcm_chanspec_primary(0x1006) == 6 &&
            bcm_chanspec_primary(0xe09b) == 149);
     const uint16_t cs44 = bcm_chanspec_of((struct awdl_chan){42, 0x80}),

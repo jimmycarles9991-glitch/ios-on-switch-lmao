@@ -11,6 +11,11 @@ KERNEL = (
     'cpu 1785 MHz at vsync 1785 at swap; imp 2 340 us, bind 3 90 us, alloc 1 20 us, free 0, clean 7200 KiB 610 us'
 )
 USER = 'backboardd: SwitchFrameUser: backboardd cb 42 commit 191100000 replay 191100100 191200000 fence 0'
+RENDER = (
+    'kernel: SwitchFrameRender: vsync 191040000: woke 40 us after it; first submit 4000 us (cpu 3800, blocked 120 us '
+    'in 2); swap 6500 us (cpu 6100, blocked 300 us in 3, waiting for a core 20 us); longest block 180 us, user pc dsc '
+    '0x1cb780b58 lr dsc 0x1cb784224, kernel continuation 0x0; dropped 0'
+)
 
 
 INTERACTION = (
@@ -50,6 +55,13 @@ class FramesTest(unittest.TestCase):
         self.assertEqual(stages['offer->gpu done'], 24400)
         self.assertEqual(stages['flip->latch'], 18800)
         self.assertEqual(frame.user[0][2], 42)
+
+    def test_render_thread_joins_by_vsync(self):
+        frame = frames.collect([RENDER, KERNEL])[0]
+        self.assertTrue(frame.render.startswith('woke 40 us after it; first submit 4000 us (cpu 3800'))
+        self.assertIn('  render thread: woke 40 us', '\n'.join(frames.describe(frame)))
+        other = RENDER.replace('vsync 191040000', 'vsync 191000000')
+        self.assertEqual(frames.collect([other, KERNEL])[0].render, '')
 
     def test_new_surface_work(self):
         frame = frames.collect([KERNEL])[0]

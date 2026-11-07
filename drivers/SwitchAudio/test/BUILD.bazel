@@ -53,9 +53,11 @@ host_test(
         "switch_audio_source_test.cpp",
         "switch_audio_words.h",
         "//drivers/SwitchAudio:SwitchAudioAbi.h",
+        "//drivers/SwitchAudio:SwitchAudioFormat.h",
     ],
     data = [
         "//drivers/SwitchAudio:SwitchAudio.cpp",
+        "//drivers/SwitchAudio:SwitchRT5639.cpp",
         "//drivers/SwitchAudio:hal/SwitchAudioPlugIn.c",
     ],
     deps = [":neon_harness"],

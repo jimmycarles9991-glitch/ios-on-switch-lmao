@@ -27,6 +27,9 @@
 // - **Workers.** NMB_ASYNC_PSO_THREADS (3 in the render server, 2 elsewhere) threads at the user-initiated class, below the
 //   render threads. A set that waits without a bound runs a creation no worker took yet itself; a set that waits for a
 //   worker's creation lends that worker its own class meanwhile (a QoS override).
+// - **Lazy creations** (startLazy: TegraGM20BMetal's m2v twins of the states its raw path draws, which only a command
+//   buffer that falls back to m2v sets) are made at their first set: a pass that skips hands it to the workers, one that
+//   waits makes it on the setting thread.
 // - **The asynchronous API** (newRenderPipelineStateWithDescriptor:completionHandler: and the compute forms) makes the state
 //   on a global queue of the caller's class (not these workers) and calls back there, in every process (NMB_ASYNC_PSO_API=0:
 //   on the caller's thread).
@@ -128,6 +131,7 @@ struct Counters {
     std::atomic<uint64_t> readyN{0}, readyUs{0}, readyMaxUs{0};  // asked to made (worker creations)
     std::atomic<uint64_t> waitedUs{0}, waitedMaxUs{0};           // bounded waits' time on the asking thread
     std::atomic<uint64_t> redraws{0};
+    std::atomic<uint64_t> lazy{0}, lazySet{0};  // lazy creations handed out, and of them asked for by a set
 };
 
 inline Counters &counters()
@@ -157,9 +161,11 @@ struct Making {
     std::condition_variable finished;
     State state = Queued;
     bool skipped = false;  // a draw was skipped for it: draw the displays again once it is made
+    bool lazy = false;     // startLazy's, not asked for by a set yet
     uint64_t asked = 0;
     pthread_t runner = nullptr;  // the thread making it, once one does
-    __strong id result = nil;    // the state the synchronous path made
+    qos_class_t runnerClass = QOS_CLASS_UNSPECIFIED;
+    __strong id result = nil;  // the state the synchronous path made
     std::function<id(NSString **failure)> work;
     std::string label;
 
@@ -181,6 +187,7 @@ inline bool run(const std::shared_ptr<Making> &m)
             return false;
         m->state = Making::Running;
         m->runner = pthread_self();
+        m->runnerClass = qos_class_self();
         work.swap(m->work);
     }
     id made = nil;
@@ -267,6 +274,28 @@ inline void start(const std::shared_ptr<Making> &m)
     });
 }
 
+// Hand out `m` without making it: its first set does (wanted()).
+inline void startLazy(const std::shared_ptr<Making> &m)
+{
+    m->lazy = true;
+    counters().started++;
+    counters().lazy++;
+}
+
+// A set of `m` (under m->lock): a lazy creation is asked for from now, and a pass that skips hands it to the workers.
+inline void wanted(const std::shared_ptr<Making> &m, bool skips)
+{
+    if (!m->lazy)
+        return;
+    m->lazy = false;
+    m->asked = usNow();
+    counters().lazySet++;
+    if (skips)
+        workers().submit([m] {
+            run(m);
+        });
+}
+
 // This thread's waits in the current frame (16.7 ms of its time from its first wait).
 struct FrameWaits {
     uint64_t start = 0, waited = 0;
@@ -290,7 +319,8 @@ struct Lend {
         qos_class_t mine = qos_class_self();
         if (mine == QOS_CLASS_UNSPECIFIED)
             mine = QOS_CLASS_USER_INTERACTIVE;
-        if (mine > QOS_CLASS_USER_INITIATED)
+        const qos_class_t runner = m.runnerClass == QOS_CLASS_UNSPECIFIED ? QOS_CLASS_DEFAULT : m.runnerClass;
+        if (mine > runner)
             override = pthread_override_qos_class_start_np(m.runner, mine, 0);
     }
 
@@ -320,6 +350,7 @@ inline bool ready(const std::shared_ptr<Making> &m, bool skips)
             counters().skippedSets++;
             return false;
         }
+        wanted(m, skips);
     }
     Counters &c = counters();
     c.pending++;
@@ -410,7 +441,8 @@ inline void scheduleRedraw()
 
 // The rates line's part (taken: each window's own): apso=<handed>/<made>/<refused> set=<found being made>/<made in the
 // bounded wait> wait=<total>/<max>ms skip=<sets given up>/<draws skipped> off=<waited out>/<ms> rdy=<mean>/<max>ms
-// redraw=<n>. Nothing while no creation was handed and no set found one being made.
+// redraw=<n> lazy=<lazy creations handed out>/<lazy creations a set asked for>. Nothing while no creation was handed and
+// no set found one being made.
 inline size_t appendRates(char *out, size_t size)
 {
     Counters &c = counters();
@@ -419,18 +451,19 @@ inline size_t appendRates(char *out, size_t size)
     const uint64_t draws = c.skippedDraws.exchange(0), off = c.offWaits.exchange(0), offUs = c.offWaitUs.exchange(0);
     const uint64_t readyN = c.readyN.exchange(0), readyUs = c.readyUs.exchange(0), readyMax = c.readyMaxUs.exchange(0);
     const uint64_t waited = c.waitedUs.exchange(0), waitedMax = c.waitedMaxUs.exchange(0),
-                   redraws = c.redraws.exchange(0);
+                   redraws = c.redraws.exchange(0), lazy = c.lazy.exchange(0), lazySet = c.lazySet.exchange(0);
     if (!size || (!started && !pending && !draws && !made && !failed))
         return 0;
-    const int n = snprintf(out, size,
-                           " apso=%llu/%llu/%llu set=%llu/%llu wait=%llu/%llums skip=%llu/%llu off=%llu/%llums "
-                           "rdy=%llu/%llums redraw=%llu",
-                           (unsigned long long)started, (unsigned long long)made, (unsigned long long)failed,
-                           (unsigned long long)pending, (unsigned long long)caught, (unsigned long long)(waited / 1000),
-                           (unsigned long long)(waitedMax / 1000), (unsigned long long)sets, (unsigned long long)draws,
-                           (unsigned long long)off, (unsigned long long)(offUs / 1000),
-                           (unsigned long long)(readyN ? readyUs / readyN / 1000 : 0),
-                           (unsigned long long)(readyMax / 1000), (unsigned long long)redraws);
+    const int n =
+        snprintf(out, size,
+                 " apso=%llu/%llu/%llu set=%llu/%llu wait=%llu/%llums skip=%llu/%llu off=%llu/%llums "
+                 "rdy=%llu/%llums redraw=%llu lazy=%llu/%llu",
+                 (unsigned long long)started, (unsigned long long)made, (unsigned long long)failed,
+                 (unsigned long long)pending, (unsigned long long)caught, (unsigned long long)(waited / 1000),
+                 (unsigned long long)(waitedMax / 1000), (unsigned long long)sets, (unsigned long long)draws,
+                 (unsigned long long)off, (unsigned long long)(offUs / 1000),
+                 (unsigned long long)(readyN ? readyUs / readyN / 1000 : 0), (unsigned long long)(readyMax / 1000),
+                 (unsigned long long)redraws, (unsigned long long)lazy, (unsigned long long)lazySet);
     return n > 0 ? std::min<size_t>((size_t)n, size - 1) : 0;
 }
 

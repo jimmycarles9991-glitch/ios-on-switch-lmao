@@ -164,6 +164,19 @@ static inline struct switch_pd_step switch_pd_decide(enum switch_pd_phase phase,
     return none;
 }
 
+// The data role SwitchUSB takes: USB host for our own sink-only partner (we source it), or for a partner that sources
+// and left us the data role DFP (the dock after its data role swap, a hub with power in), as its device otherwise. A
+// partner that came up as our sink while we still classify it is neither: it presents Rd (SRC_MODE), we are DFP by
+// default, and it may yet turn out to be a dual-role host such as a Mac.
+static inline bool switch_pd_usb_host(bool sourcing, uint16_t status1)
+{
+    const bool plugged = (status1 & SWITCH_PD_STATUS1_INSERT) != 0;
+    const bool vbus = (status1 & SWITCH_PD_STATUS1_VSAFE) != 0;
+    const bool partner_sources = plugged && vbus && !(status1 & SWITCH_PD_STATUS1_SRC_MODE);
+    const bool dfp = ((status1 >> SWITCH_PD_STATUS1_DR_SHIFT) & 3u) == SWITCH_PD_DATA_ROLE_DFP;
+    return sourcing || (partner_sources && dfp);
+}
+
 // A Classify or Reattach window ran out (status1 read at its end). Other phases: nothing (a stale timer).
 static inline struct switch_pd_step switch_pd_window_end(enum switch_pd_phase phase, bool saw_detach, uint16_t status1)
 {

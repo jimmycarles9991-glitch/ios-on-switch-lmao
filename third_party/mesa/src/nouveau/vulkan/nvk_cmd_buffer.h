@@ -63,8 +63,11 @@ struct nvk_root_descriptor_table {
 
    uint64_t printf_buffer_addr;
 
+   /* Fragment shader interlock's ticket buffer: 256 tickets per GPC */
+   uint64_t interlock_ticket_buffer;
+
    /* enfore total structure alignment to 0x100 as needed pre pascal */
-   uint8_t __padding[0xa0];
+   uint8_t __padding[0x98];
 
    /*
     * Arrays with dynamic (shader-provided) indices need to fit in a single
@@ -265,6 +268,9 @@ struct nvk_cmd_buffer {
    /** Array of struct nvk_cmd_mem* */
    struct util_dynarray copy_memory_indirect_temps;
 
+   /* Copies and fills take the copy engine whatever the queue (nvk_copies_on_ce_now when the buffer began) */
+   bool copies_on_ce;
+
    struct nvk_cmd_mem *push_mem;
    uint32_t *push_mem_limit;
    struct nv_push push;
@@ -396,6 +402,7 @@ nvk_cmd_buffer_last_subchannel(const struct nvk_cmd_buffer *cmd)
 }
 
 VkQueueFlags nvk_cmd_buffer_queue_flags(struct nvk_cmd_buffer *cmd);
+bool nvk_copies_on_ce_now(void);
 
 VkResult nvk_cmd_buffer_alloc_mem(struct nvk_cmd_buffer *cmd,
                                   bool force_gart,

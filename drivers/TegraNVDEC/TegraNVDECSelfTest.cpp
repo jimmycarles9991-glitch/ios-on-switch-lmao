@@ -66,8 +66,8 @@ int run(char *line, size_t size)
     const uint32_t width = kTestWidthMbs * 16, height = kTestHeightMbs * 16, pitch = setup->pitch_luma;
     const uint32_t lumaBytes = pitch * ((height + 31) & ~31u);
     for (int i = kInput; i <= kSurface; i++) {
-        if (tegra_nvdec_arena_alloc(64 * 1024, &gBlocks[i])) {
-            snprintf(line, size, "N3 FAIL no arena memory");
+        if (tegra_nvdec_buffer_alloc(64 * 1024, &gBlocks[i])) {
+            snprintf(line, size, "N3 FAIL no NVDEC memory");
             return -12;
         }
     }
@@ -149,8 +149,8 @@ bool resolveVP9(void *, uint32_t handle, TegraNVDECBlock *block)
 int runVP9(char *line, size_t size)
 {
     for (int i = 1; i <= 3; i++) {
-        if (tegra_nvdec_arena_alloc(kVP9TestBytes[i], &gVP9Blocks[i])) {
-            snprintf(line, size, "N3 VP9 FAIL no arena memory");
+        if (tegra_nvdec_buffer_alloc(kVP9TestBytes[i], &gVP9Blocks[i])) {
+            snprintf(line, size, "N3 VP9 FAIL no NVDEC memory");
             return -12;
         }
     }
@@ -225,8 +225,8 @@ bool resolveHEVC(void *, uint32_t handle, TegraNVDECBlock *block)
 int runHEVC(char *line, size_t size)
 {
     for (int i = 1; i <= 3; i++) {
-        if (tegra_nvdec_arena_alloc(kHEVCTestBytes[i], &gHEVCBlocks[i])) {
-            snprintf(line, size, "N3 HEVC FAIL no arena memory");
+        if (tegra_nvdec_buffer_alloc(kHEVCTestBytes[i], &gHEVCBlocks[i])) {
+            snprintf(line, size, "N3 HEVC FAIL no NVDEC memory");
             return -12;
         }
     }
@@ -287,7 +287,7 @@ extern "C" int tegra_nvdec_self_test_hevc(void)
     IOLog("TegraNVDEC: %s\n", line);
     if (ret != -60)
         for (int i = 1; i <= 3; i++)
-            tegra_nvdec_arena_free(&gHEVCBlocks[i]);
+            tegra_nvdec_buffer_free(&gHEVCBlocks[i]);
     return ret;
 }
 
@@ -299,7 +299,7 @@ extern "C" int tegra_nvdec_self_test_vp9(void)
     IOLog("TegraNVDEC: %s\n", line);
     if (ret != -60)
         for (int i = 1; i <= 3; i++)
-            tegra_nvdec_arena_free(&gVP9Blocks[i]);
+            tegra_nvdec_buffer_free(&gVP9Blocks[i]);
     return ret;
 }
 
@@ -311,6 +311,6 @@ extern "C" int tegra_nvdec_self_test(void)
     IOLog("TegraNVDEC: %s\n", line);
     if (ret != -60)  // a job still in the engine keeps its buffers
         for (int i = kInput; i <= kSurface; i++)
-            tegra_nvdec_arena_free(&gBlocks[i]);
+            tegra_nvdec_buffer_free(&gBlocks[i]);
     return ret;
 }

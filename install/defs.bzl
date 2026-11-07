@@ -134,6 +134,48 @@ prelink_options = rule(
     doc = "The linked kernel before the prelink, and what the prelink takes besides it (prelink.json).",
 )
 
+def _release_prelink_impl(ctx):
+    plan = ctx.actions.declare_file(ctx.label.name + "/kernel.prelink-plan")
+    out = ctx.actions.declare_file(ctx.label.name + "/kernel.macho")
+    args = ctx.actions.args()
+    args.add("plan")
+    args.add("--prelinked", ctx.file.kernelcache)
+    args.add("--inherit-original-report", ctx.file.inherit_report)
+    args.add("--previous", ctx.file.previous)
+    args.add("--options", ctx.file.options)
+    args.add("--plan-output", plan)
+    ctx.actions.run(
+        executable = ctx.executable._emit_prelink,
+        arguments = [args],
+        inputs = [ctx.file.kernelcache, ctx.file.inherit_report, ctx.file.previous, ctx.file.options],
+        outputs = [plan],
+        mnemonic = "KernelPrelinkPlan",
+        progress_message = "Planning the prelink of the original kexts",
+    )
+    ctx.actions.run(
+        executable = ctx.executable._emit_prelink,
+        arguments = ["apply", "--plan", plan.path, "--kernel", ctx.file.kernel.path, "--output", out.path],
+        inputs = [plan, ctx.file.kernel],
+        outputs = [out],
+        mnemonic = "KernelPrelink",
+        progress_message = "Prelinking the original kexts into the release's kernel",
+    )
+    return [DefaultInfo(files = depset([out]))]
+
+release_prelink = rule(
+    implementation = _release_prelink_impl,
+    doc = "prelink_options' kernel with Apple's original kexts prelinked: kernel_prelink's two steps, its options " +
+          "from prelink.json. Python only, so a Mac without Xcode can run it.",
+    attrs = {
+        "kernel": attr.label(mandatory = True, allow_single_file = True, doc = "the linked kernel (kernel.macho)"),
+        "options": attr.label(mandatory = True, allow_single_file = True, doc = "its prelink.json"),
+        "kernelcache": attr.label(default = "//ipsw:kernelcache", allow_single_file = True),
+        "inherit_report": attr.label(mandatory = True, allow_single_file = True),
+        "previous": attr.label(mandatory = True, allow_single_file = True),
+        "_emit_prelink": attr.label(default = "//tools/prelink:emit_prelink", executable = True, cfg = "exec"),
+    },
+)
+
 def _release_tree_impl(ctx):
     out = ctx.actions.declare_directory(ctx.label.name)
     commands, inputs = [], []

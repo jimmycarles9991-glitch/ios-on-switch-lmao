@@ -233,6 +233,8 @@ static void
 vk_queue_submit_free(struct vk_queue *queue,
                      struct vk_queue_submit *submit)
 {
+   if (submit->driver_data != NULL)
+      queue->driver_submit_data_free(submit->driver_data);
    vk_free(&queue->base.device->alloc, submit);
 }
 
@@ -1058,6 +1060,9 @@ vk_queue_submit(struct vk_queue *queue,
 {
    struct vk_device *device = queue->base.device;
    VkResult result;
+
+   if (queue->driver_submit_data != NULL && submit->driver_data == NULL)
+      submit->driver_data = queue->driver_submit_data(queue);
 
    /* If this device supports threaded submit, we can't rely on the client
     * ordering requirements to ensure submits happen in the right order.  Even

@@ -43,6 +43,7 @@ kernel_driver(
         "drivers/TegraGPIO",
         "drivers/TegraI2C",
         "kits/SwitchMath",
+        "kits/SwitchRefusal",
     ],
     late = ["SwitchHIDDevice.cpp"],
 )

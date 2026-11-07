@@ -45,8 +45,11 @@ KERNEL_TOOL_ATTRS = {
     "_builder": attr.label(default = "//kernel/rules:builder"),
 }
 
-def run_tool(ctx, tool, arguments, inputs, outputs, mnemonic, progress, execution_requirements = None, env = None):
-    """Runs a tool: a tools/kernel name ("corecrypto", or "corecrypto.py") or any executable target (a py_binary)."""
+def run_tool(ctx, tool, arguments, inputs, outputs, mnemonic, progress, execution_requirements = None, env = None, xcode = True):
+    """Runs a tool: a tools/kernel name ("corecrypto", or "corecrypto.py") or any executable target (a py_binary).
+
+    xcode = False for a tool that runs nothing of Xcode's: its action then takes no Xcode input and runs without one.
+    """
     if type(tool) == "string":
         name = tool[:-3] if tool.endswith(".py") else tool
         found = [t for t in ctx.attr._tools if t.label.name == name]
@@ -56,10 +59,10 @@ def run_tool(ctx, tool, arguments, inputs, outputs, mnemonic, progress, executio
     ctx.actions.run(
         executable = tool[DefaultInfo].files_to_run,
         arguments = arguments,
-        inputs = depset([ctx.file._xcode_env, ctx.file._xcode_identity], transitive = [inputs]),
+        inputs = depset([ctx.file._xcode_env, ctx.file._xcode_identity], transitive = [inputs]) if xcode else inputs,
         outputs = outputs,
         mnemonic = mnemonic,
         progress_message = progress,
-        execution_requirements = execution_requirements or XCODE_EXECUTION,
+        execution_requirements = execution_requirements or (XCODE_EXECUTION if xcode else {}),
         env = env or {},
     )

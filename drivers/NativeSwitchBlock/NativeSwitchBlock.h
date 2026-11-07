@@ -1,5 +1,6 @@
 #ifndef NATIVE_SWITCH_BLOCK_H
 #define NATIVE_SWITCH_BLOCK_H
+#include <stdbool.h>
 #include <stdint.h>
 #include <stddef.h>
 #include <sys/types.h>
@@ -20,6 +21,9 @@ int switch_data_volume_status(const char *, dev_t *, char *, size_t, uint64_t *)
 int switch_raw_volume_status(const char *, dev_t *, char *, size_t, uint64_t *);
 /* Failure-only raw root registry/counter snapshot; never submits storage I/O. */
 void switch_raw_root_wait_diagnostic(void);
+/* Erase-based trim since boot (cards without discard): erases, sectors freed and the card's busy time for them, for the
+ * debug power line; false while there is no SD service. Any context. */
+bool switch_sd_trim_stats(uint64_t *erases, uint64_t *sectors, uint64_t *busy_ns);
 #ifdef __cplusplus
 }
 #endif

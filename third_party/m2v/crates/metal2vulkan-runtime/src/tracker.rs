@@ -1475,6 +1475,13 @@ impl<K: Copy + Ord> Summary<K> {
         self.uses.iter().map(|used| used.key)
     }
 
+    /// Each tracked use's resource, with whether it reads and whether it writes.
+    pub(super) fn accesses(&self) -> impl Iterator<Item = (K, bool, bool)> + '_ {
+        self.uses
+            .iter()
+            .map(|used| (used.key, !used.read.is_empty(), !used.write.is_empty()))
+    }
+
     /// Join `other`, the summary of work recorded apart that runs inside the same encoder (an
     /// indirect command buffer's commands, recorded at commit): its stages, fences and tracked
     /// uses, one per resource and range. A resource past [`ENTRIES_PER_KEY`] ranges takes a new

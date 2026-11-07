@@ -332,6 +332,9 @@ static const struct switch_wake_pmc_event switch_wake_pmc_events[] = {
     {35, SWITCH_WAKE_LOW, 0, "sd-cd"},     // gpio_pz1: SD card detect (both edges in the DTB)
     {52, SWITCH_WAKE_LOW, 0, "bt"},        // bt_wake_ap (PH5): SwitchBluetooth's sleep mode (switch_bluetooth_suspend)
     {8, SWITCH_WAKE_HIGH, 0, "wifi"},      // WiFi Wake Ap (PH2): SwitchWLAN's wake-on-WLAN
+    {39, SWITCH_WAKE_HIGH, 0, "usb"},      // UTMIP port 0: a USB device's remote wake through the PMC's sleepwalk
+                                           // (SwitchUSB XusbSleepwalk.h), armed when a device is on the host port;
+                                           // after usb-c, so an unplug (its ALERT) is never taken for a key press
 };
 #define SWITCH_WAKE_PMC_EVENTS (sizeof(switch_wake_pmc_events) / sizeof(switch_wake_pmc_events[0]))
 
@@ -357,8 +360,8 @@ static inline void switch_wake_pmc_registers(uint64_t events, uint32_t mask[2], 
 // The armed events, as a bit set; usbHigh / gaugeHigh: the USB-PD ALERT / gauge ALRT line reads high (a level-low line
 // already low would wake at once, and both are stuck low when their chip misbehaves); btWake / wifiWake: the radio was
 // set up to wake the host. A host-wake line already asserted is armed anyway: the radio has something for the host,
-// so the console wakes at once.
-static inline uint64_t switch_wake_pmc_armed(bool usbHigh, bool gaugeHigh, bool btWake, bool wifiWake)
+// so the console wakes at once. usbDevice: a USB device on the host port has the PMC's sleepwalk for its remote wake.
+static inline uint64_t switch_wake_pmc_armed(bool usbHigh, bool gaugeHigh, bool btWake, bool wifiWake, bool usbDevice)
 {
     uint64_t events = 0;
     for (size_t i = 0; i < SWITCH_WAKE_PMC_EVENTS; ++i) {
@@ -366,6 +369,7 @@ static inline uint64_t switch_wake_pmc_armed(bool usbHigh, bool gaugeHigh, bool 
         const bool wanted = switch_wake_pmc_events[i].armed ? (e != 14 || usbHigh) && (e != 27 || gaugeHigh)
                             : e == 52                       ? btWake
                             : e == 8                        ? wifiWake
+                            : e == 39                       ? usbDevice
                                                             : false;
         if (wanted)
             events |= (uint64_t)1 << e;

@@ -1,9 +1,10 @@
 # drivers/SwitchUSB on the host: the XUDC's device-mode transfer planner and OUT residue protocol (XudcTransfer.h,
 # xudc_transfer_test), its completion accounting against a model controller (XudcTransfer.h TdRing,
-# xudc_completion_test), and USB2 host mode's power-role policy and register arithmetic (SwitchPDPolicy.h, XusbPorts.h,
-# switch_usb_host_test).
+# xudc_completion_test), isochronous endpoints (XudcIsoch.h, xudc_isoch_test), host mode's power and data roles and register arithmetic (SwitchPDPolicy.h, XusbPorts.h,
+# switch_usb_host_test), and SuperSpeed's lane and root port (XusbLanes.h, switch_usb_lanes_test).
 #
 #   bazel test //drivers/SwitchUSB/test:all
+load("@rules_python//python:py_test.bzl", "py_test")
 load("//bazel/lint:defs.bzl", "lint_files")
 load("//bazel/testing:defs.bzl", "host_library", "host_test")
 
@@ -28,6 +29,19 @@ host_test(
     name = "xudc_completion_test",
     srcs = [
         "xudc_completion_test.cpp",
+        "//drivers/SwitchUSB:XudcTransfer.h",
+    ],
+    copts = ["-O1"],
+)
+
+# XudcIsoch.h: the family's frame list layout, service intervals and stamps, one TRB per frame (direct or one bounce
+# page), and the isochronous ring's accounting against a model controller: last-frame and short-frame events, missed
+# frames, later events settling earlier requests, starved rings, cancels, a long stream around the ring.
+host_test(
+    name = "xudc_isoch_test",
+    srcs = [
+        "xudc_isoch_test.cpp",
+        "//drivers/SwitchUSB:XudcIsoch.h",
         "//drivers/SwitchUSB:XudcTransfer.h",
     ],
     copts = ["-O1"],
@@ -82,7 +96,8 @@ host_test(
 )
 
 # What the headers cannot show: the interrupt routing (DT SPI 39/40 level-high, the LIC, IPFS as tegra_xusb_config,
-# checkFired's one panic) and that the kernel files use the tested headers in the order the model assumes.
+# checkFired's one panic), that the kernel files use the tested headers in the order the model assumes, and the
+# SuperSpeed lane's handshake with PCIe's UPHY PLL calibration.
 host_test(
     name = "switch_usb_host_source_test",
     srcs = ["switch_usb_host_source_test.cpp"],
@@ -93,15 +108,19 @@ host_test(
         "//drivers/SwitchUSB:SwitchXHCI.cpp",
         "//drivers/SwitchUSB:SwitchXHCIEvents.cpp",
         "//drivers/SwitchUSB:SwitchXHCIServices.cpp",
+        "//drivers/SwitchUSB:UsbSmmuMapper.cpp",
         "//drivers/SwitchUSB:XusbHost.cpp",
         "//drivers/SwitchUSB:XusbHost.h",
+        "//drivers/SwitchUSB:XusbSuperSpeed.cpp",
+        "//drivers/SwitchWLAN:TegraPCIe.cpp",
     ],
 )
 
-# --- SuperSpeed: SS port 0's lane, the falcon's SuperSpeed messages, SwitchXHCI's write adjustments ---
-# XusbLanes.h (//drivers/SwitchUSB:superspeed) compiled as C11 with -Wconversion -Wsign-conversion, and its decisions:
-# the lane across DisplayPort alt mode's pin assignments and the role, the register writes against the Linux sequences
-# (never a bit of USB2 pad 0 or another lane), LFPS and DFE/CTLE messages, U1/U2 off and the moderation floor.
+# --- SuperSpeed: SS port 0's lane and root port, the falcon's SuperSpeed messages, SwitchXHCI's write adjustments ---
+# XusbLanes.h compiled as C11 with -Wconversion -Wsign-conversion, and its decisions: the lane across DisplayPort alt
+# mode's pin assignments, the role and PCIe's PLL calibrations, the root port across sessions and SC7, the register
+# writes against the Linux sequences (never a bit of USB2 pad 0 or another lane), LFPS, DFE/CTLE and RESET_SSPI
+# messages, the SMMU state the host accepts, U1/U2 off and the moderation floor.
 host_library(
     name = "switch_usb_lanes_c",
     srcs = ["switch_usb_lanes_c.c"],
@@ -123,6 +142,16 @@ host_test(
     deps = [":switch_usb_lanes_c"],
 )
 
+# XusbSleepwalk.h (XusbSleepwalk.cpp): pad 0's PMC sleepwalk values for a USB device's remote wake across SC7.
+host_test(
+    name = "xusb_sleepwalk_test",
+    srcs = [
+        "xusb_sleepwalk_test.cpp",
+        "//drivers/SwitchUSB:XusbSleepwalk.h",
+    ],
+    copts = ["-O1"],
+)
+
 # UsbIova.h (UsbSmmuMapper.cpp): the XUSB host's SMMU window and the page layout of a scattered buffer at one IOVA range.
 host_test(
     name = "usb_iova_test",
@@ -131,4 +160,12 @@ host_test(
         "//drivers/SwitchUSB:UsbIova.h",
     ],
     copts = ["-O1"],
+)
+
+# The selected kind's prelink report: every host-side USB class kext prelinked, and on iOS 27 no new unnamed import.
+py_test(
+    name = "usb_prelink_test",
+    srcs = ["usb_prelink_test.py"],
+    data = ["//kernel:prelink_report"],
+    deps = ["@rules_python//python/runfiles"],
 )

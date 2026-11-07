@@ -1,0 +1,25 @@
+# CPU idle states: the interface between XNU's idle path (kernel/switch/idle, through //kernel/switch:headers) and the
+# drivers (ArmCpu, ArmGIC), and the state choice the host tests in test/ run.
+#
+#   bazel test //kits/SwitchIdle/test:all
+load("//bazel/lint:defs.bzl", "lint_files")
+load("//kernel/rules:kernel.bzl", "kernel_headers")
+
+package(default_visibility = ["//visibility:public"])
+
+lint_files()
+
+exports_files(glob(
+    ["**"],
+    exclude = ["BUILD.bazel"],
+))
+
+filegroup(
+    name = "all_files",
+    srcs = glob(
+        ["**"],
+        exclude = ["BUILD.bazel"],
+    ),
+)
+
+kernel_headers()

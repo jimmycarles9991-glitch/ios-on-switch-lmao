@@ -30,12 +30,12 @@ py_binary(
     deps = [":nvk_twin"],
 )
 
-# Runs the pack generator (--generator, the //out/.../TegraGM20BMetal:raw_pack library's rawpack.py) with the twin
-# seed.py twin made.
+# Runs the pack generator (--generator: drivers/TegraGM20BMetal/raw/pack/rawpack.py, by path) with the twin seed.py
+# made. The generator's modules are each step's own inputs, not this tool's runfiles: a module edit reruns only the
+# steps that run it.
 py_binary(
     name = "rawpack",
     srcs = ["rawpack.py"],
-    deps = ["//drivers/TegraGM20BMetal:raw_pack"],
 )
 
 py_binary(

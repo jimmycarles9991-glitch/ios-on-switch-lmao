@@ -305,6 +305,8 @@ calls! {
     ResetFences => c"vkResetFences",
     // A command pool given back reset (`spares.rs`), on the completion thread.
     ResetCommandPool => c"vkResetCommandPool",
+    // The spare command pools trimmed as the device releases its idle memory (`spares.rs`).
+    TrimCommandPool => c"vkTrimCommandPool",
     DestroyCommandPool => c"vkDestroyCommandPool",
     DestroyFence => c"vkDestroyFence",
     DestroySemaphore => c"vkDestroySemaphore",

@@ -3,21 +3,33 @@
   "doc": "IOSurface's accessors and IOSurfaceRoot's lookup, which the drivers call by address under their own C names (TegraVIC, NativeMobileDisplay's planes and legacy display).",
   "superclass": "OSObject",
   "kext": "com.apple.iokit.IOSurface",
-  "header": false,
   "functions_only": true,
   "methods": {},
+  "constants": {
+    "clientMemory": {
+      "doc": "The creating task's address of a surface made over that task's memory (0 otherwise). That task gets no map: its IOSurfaceClient's base is this address."
+    },
+    "clientTask": {
+      "doc": "The task_t that created the surface, compared with a client's task when clientMemory is set."
+    },
+    "baseOffset": {
+      "doc": "The surface's byte offset in its memory descriptor, added to a client map's address for its base."
+    }
+  },
   "functions": {
     "lookup": {
       "doc": "IOSurfaceRoot::lookupSurface(id, task): find_surface, then a try-retain",
       "symbols": [
-        "tegra_vic_ios_lookup"
+        "tegra_vic_ios_lookup",
+        "tegra_gm20b_ios_lookup"
       ]
     },
     "memory": {
       "doc": "the surface's memory descriptor",
       "symbols": [
         "tegra_vic_ios_memory",
-        "native_legacy_surface_descriptor"
+        "native_legacy_surface_descriptor",
+        "tegra_gm20b_ios_memory"
       ]
     },
     "format": {
@@ -59,7 +71,8 @@
       "doc": "allocation size",
       "symbols": [
         "tegra_vic_ios_alloc_size",
-        "native_legacy_surface_allocation"
+        "native_legacy_surface_allocation",
+        "tegra_gm20b_ios_alloc_size"
       ]
     },
     "protection": {

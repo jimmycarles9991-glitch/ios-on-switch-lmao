@@ -140,8 +140,32 @@ enum bcm_monitor_probe_item {
 };
 
 enum {
-    BCM_WLC_GET_MONITOR = 107
+    BCM_WLC_GET_MONITOR = 107,
+    BCM_WLC_SET_MONITOR = 108,  // 1: the radio delivers 802.11 frames (msgbuf rx flag BCM_MSGBUF_RX_FRAME_802_11)
 };
+
+// A msgbuf rx completion's flags (brcmfmac msgbuf.c BRCMF_MSGBUF_PKT_FLAGS_*): the frame is 802.11, not 802.3.
+enum {
+    BCM_MSGBUF_RX_FRAME_802_11 = 0x01,
+    BCM_MSGBUF_RX_FRAME_MASK = 0x07,
+};
+
+// The soft backend's transmit path on firmware without injection: one action frame through the "actframe" iovar on a
+// channel for a dwell (brcmfmac p2p.c brcmf_p2p_tx_action_frame, fwil_types.h brcmf_fil_af_params_le: channel and
+// dwell as le32, BSSID, 2 pad, then brcmf_fil_action_frame_le {DA, le16 length, le32 packet id, body}). The body is
+// the frame after its 24-byte management header, from the category byte: AWDL's vendor-specific action (127, Apple
+// OUI 00:17:f2, type 8). `frame` is the whole 802.11 action frame the stack built (swlan_tx_req.frame).
+enum {
+    BCM_AF_PARAMS_HDR_LEN = 28,  // channel, dwell, BSSID, pad, DA, length, packet id
+    BCM_AF_BODY_MAX = 1800,      // BRCMF_FIL_ACTION_FRAME_SIZE
+    BCM_80211_MGMT_HDR_LEN = 24,
+};
+
+// The iovar request "actframe\0<params>" into `out`: its length, or 0 when the frame is not a management action frame,
+// its body is over BCM_AF_BODY_MAX, or `size` is too small. `chanspec` is the channel to send on (bcm_chanspec_of),
+// `dwell_ms` how long the radio stays there for an answer (0 for none).
+size_t bcm_actframe_request(uint8_t *out, size_t size, const uint8_t *frame, size_t len, uint16_t chanspec,
+                            uint32_t dwell_ms, uint32_t packet_id);
 
 extern const char *const bcm_monitor_probe_names[BCM_MONITOR_PROBE_COUNT];
 // The GET_VAR request for a variable item; 0 for the ioctl item, past the table or when `size` is too small.

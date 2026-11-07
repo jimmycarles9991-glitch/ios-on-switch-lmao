@@ -1,8 +1,9 @@
 # drivers/TegraVIC on the host: vic_host.c, the configuration packing against libdrm's vic40.h bitfields, the colour
 # matrices through the engine's arithmetic against the float BT.601/BT.709 conversions, the jobs for Screen Recording's
 # and AirPlay's clone requests and Core Animation's border clears, IOSurfaceAccelerator requests (0x1b0 bytes)
-# translated, and every refusal of the request translator and the checker (tegra_vic_test); the vendored firmware is
-# the file firmware/SOURCE names, with the falcon and FCE headers TegraVIC.cpp parses (tegra_vic_firmware_test); a
+# translated, and every refusal of the request translator and the checker (tegra_vic_test); the rows a placed picture
+# covers (tegra_vic_band_test); the copy-engine bounce's scratch geometry and engine ordering (tegra_vic_bounce_test); the vendored firmware is the file firmware/SOURCE names, with the falcon and FCE
+# headers TegraVIC.cpp parses (tegra_vic_firmware_test); a
 # TransformSurface destination's seed moves when its job is done, through a pinned binding (tegra_vic_seed_source_test);
 # transposed jobs on vic_model.h, the output layout model pinned to the unit's V4 diag lines and hekate's rotation, with
 # V4's own probes (TegraVICProbe.h) run on it (tegra_vic_transpose_test).
@@ -31,6 +32,25 @@ host_test(
     name = "tegra_vic_test",
     srcs = ["tegra_vic_test.cpp"],
     deps = [":vic_host"],
+)
+
+host_test(
+    name = "tegra_vic_band_test",
+    srcs = [
+        "tegra_vic_band_test.cpp",
+        "//drivers/TegraVIC:TegraVICBand.h",
+    ],
+)
+
+host_test(
+    name = "tegra_vic_bounce_test",
+    srcs = [
+        "tegra_vic_bounce_test.cpp",
+        "//drivers/TegraHost1x:TegraHost1x.h",
+        "//drivers/TegraVIC:TegraVICBounce.h",
+        "//drivers/TegraVIC:TegraVICConfig.h",
+        "//drivers/TegraVIC:TegraVICRequest.h",
+    ],
 )
 
 host_test(

@@ -300,7 +300,8 @@ extern "C" void switch_watchdogd_crashed(int pid, int signal)
 // The primary PMU watchdogd requires (IOService with IOPropertyMatch {IOPMUPrimary: 1}, else os_crash()). The Switch's
 // PMIC (MAX77620) keeps no boot stage across a reset, so this only holds what watchdogd writes: IOPMUBootStage and
 // IOPMUBootAppName (the foreground app), readable with ioreg. Its name is not AppleDialogSPMIPMU, which bluetoothd looks
-// for; DumpPanic finds it and reads no IOPMUBootError* fault data from it.
+// for; DumpPanic finds it, reads no IOPMUBootError* fault data from it, then writes IOPMUBootErrorClear as it does on
+// J120's PMU: with no fault record here there is nothing to clear, so the write is taken as done.
 class NativeSwitchPMU : public IOService {
 OSDeclareDefaultStructors(NativeSwitchPMU)
 
@@ -315,7 +316,8 @@ OSDefineMetaClassAndStructors(NativeSwitchPMU, IOService)
     if (!IOService::start(provider))
         return false;
     setProperty("IOPMUPrimary", 1ULL, 32);  // an OSNumber: watchdogd matches @1, which a boolean would not equal
-    setProperty("NativeSandboxGrantProcess", "watchdogd");  // its property writes, as for the watchdog's open
+    // Their property writes: the sandbox profiles name J120's PMU class, not this one.
+    setProperty("NativeSandboxGrantProcess", "watchdogd,DumpPanic");
     registerService();
     return true;
 }
@@ -326,7 +328,7 @@ IOReturn NativeSwitchPMU::setProperties(OSObject *properties)
     if (!dict)
         return kIOReturnBadArgument;
     static const char *const keys[] = {"IOPMUBootStage", "IOPMUBootAppName"};
-    unsigned taken = 0;
+    unsigned taken = dict->getObject("IOPMUBootErrorClear") ? 1 : 0;
     for (const char *key : keys) {
         OSObject *value = dict->getObject(key);
         if (!value)

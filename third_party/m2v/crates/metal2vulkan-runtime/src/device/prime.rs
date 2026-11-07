@@ -419,6 +419,9 @@ impl Primer<'_> {
         // SAFETY: the pool was just made, and nothing of it is pending.
         unsafe { device.reset_command_pool(pool, vk::CommandPoolResetFlags::empty()) }.map_err(vulkan)?;
         self.made(Call::ResetCommandPool);
+        // SAFETY: as above.
+        unsafe { device.trim_command_pool(pool, vk::CommandPoolTrimFlags::empty()) };
+        self.made(Call::TrimCommandPool);
         let allocate = vk::CommandBufferAllocateInfo::default()
             .command_pool(pool)
             .level(vk::CommandBufferLevel::PRIMARY)

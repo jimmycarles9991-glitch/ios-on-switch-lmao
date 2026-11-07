@@ -10,6 +10,7 @@ The 26.5.2 kernelcache is fully stripped. Sources, strongest first:
      names that the same kext imported in iOS 17 in that interval, or the 26.5.2 KPI names (symbol sets) there,
      when the count matches exactly. Iterated over every kext until nothing changes.
   3. ipsw/symbolicator string signatures (Darwin 25.5): seeds for C functions, and a hold-out check of 1-2.
+  4. pinned_names.py: functions identified by hand for one kernelcache, before the GOT pass; any disagreement fails.
 Output: prelink26/kernel-names.json {address: name}, with per-source counts and conflicts.
 """
 import bisect, collections, itertools, json, os, struct, sys
@@ -20,6 +21,7 @@ from kcinfo import KC, decode8
 from fileset import Fileset
 import kc17
 import paths
+import pinned_names
 
 KCPATH = paths.KERNELCACHE
 OURS = paths.OURS
@@ -196,6 +198,22 @@ def main():
     seed_all = bool(os.environ.get("NAMES_SEED_ALL"))
     for j, a in enumerate(seeds):
         if j % 2 == 0 or seed_all: assign(a, holdout[a], "symbolicator")
+    for a, n in pinned_names.names_for(KCPATH).items():
+        assign(a, n, "pinned")
+        if n not in oname or oname.get(names[a]) != oname[n]:
+            raise SystemExit("pinned name %s for %#x: not in our kernel, or named %s by %s" % (n, a, names[a], source[a]))
+    # vnode operation descriptors (struct vnodeop_desc, vnode_internal.h) carry their own name at +8: "vnop_<op>" for
+    # vnop_<op>_desc, "default" for vnop_default_desc. File systems point their operation vectors at them.
+    for a in sorted(set(t for t, f in fix.values() if in_kernel(t) and t not in names)):
+        target = fix.get(a + 8)
+        if not target: continue
+        at = kc.va2off(target[0])
+        end = kc.d.find(b"\0", at, at + 64) if at is not None else -1
+        if end < 0: continue
+        op = kc.d[at:end].decode(errors="replace")
+        n = "_vnop_default_desc" if op == "default" else "_%s_desc" % op if op.startswith("vnop_") else None
+        if n and n in oname and not ofunc(oname[n]):
+            assign(a, n, "vnodeop_desc")
     # 2. GOT order
     d17, kn17, names17, kexts17, gots17 = kc17.load()
     universe = set(l.strip() for l in open(paths.work("symbolsets26.txt")))
@@ -226,6 +244,21 @@ def main():
         out = {n} | alias17.get(n, set())
         if n in oname: out |= oaddr[oname[n]]
         return out
+    def bounds(lo, hi):
+        """The gap (lo, hi) between two named GOT entries, as the aliases that keep them ascending: lo's highest alias
+        below hi's highest, hi's lowest above that. 24B119's kexts import IOLockLock as lck_mtx_lock (one function,
+        one address), so an interval bounded by the name the entry got can come out empty or reversed."""
+        la, ha = aliases(lo) if lo else {""}, aliases(hi) if hi != "\x7f" else {"\x7f"}
+        top = max(ha)
+        below = [x for x in la if x < top]
+        if not below:
+            return lo, hi
+        x = max(below)
+        return x, min(y for y in ha if y > x)
+    def neighbours(ks, j):
+        lo = next((names[ks[i]] for i in range(j - 1, -1, -1) if ks[i] in names), "")
+        hi = next((names[ks[i]] for i in range(j + 1, len(ks)) if ks[i] in names), "\x7f")
+        return bounds(lo, hi)
     def fits(a, n):
         """some alias of n lies between some aliases of a's named neighbours, in every section that holds a"""
         na = aliases(n)
@@ -247,8 +280,9 @@ def main():
                       (lambda n: n in oname and not ofunc(oname[n]))
             # the gap bounds use the alias that keeps the section ascending: lowest after, highest before
             known = [(j, names[a]) for j, a in enumerate(ks) if a in names]
-            bounds = [(-1, "")] + known + [(len(ks), "\x7f")]
-            for (j0, lo), (j1, hi) in zip(bounds, bounds[1:]):
+            edges = [(-1, "")] + known + [(len(ks), "\x7f")]
+            for (j0, lo), (j1, hi) in zip(edges, edges[1:]):
+                lo, hi = bounds(lo, hi)
                 gap = [ks[j] for j in range(j0 + 1, j1) if ks[j] not in names]
                 if not gap or len(set(gap)) != len(gap): continue
                 for cand_src, pool in (("got17", imp), ("got17-any", union17),
@@ -338,6 +372,8 @@ def main():
                 # hold-out: right for 93% of internal functions but only 5 of 8 exported ones (inlining differs most
                 # around KPI wrappers), so the call graph never names a KPI symbol; it only extends the graph
                 if any(x in universe for x in oaddr[b0]): continue
+                # an address some kext imports has its name's place in that kext's GOT
+                if apple in occ and not fits(apple, nm): continue
                 if assign(apple, nm, "callgraph"): added += 1; used.add(b0)
         return added
     while True:
@@ -364,9 +400,8 @@ def main():
             L, H = "", "\x7f"
             for key, j in occ[a]:
                 ks = secs_k[key]
-                lo = next((names[ks[i]] for i in range(j - 1, -1, -1) if ks[i] in names), "")
-                hi = next((names[ks[i]] for i in range(j + 1, len(ks)) if ks[i] in names), "\x7f")
-                L, H = max(L, max(aliases(lo)) if lo else ""), min(H, min(aliases(hi)) if hi != "\x7f" else H)
+                lo, hi = neighbours(ks, j)
+                L, H = max(L, lo), min(H, hi)
             pool = func_pool if "__auth_got" in kind_of[a] else data_pool
             c = [n for n in pool[bisect.bisect_right(pool, L):bisect.bisect_left(pool, H)] if n not in taken]
             if len(c) == 1 and fits(a, c[0]):
@@ -383,8 +418,7 @@ def main():
             L, H = "", "\x7f"; nb = []
             for key, j in occ[a]:
                 ks = secs_k[key]
-                lo = next((names[ks[i]] for i in range(j - 1, -1, -1) if ks[i] in names), "")
-                hi = next((names[ks[i]] for i in range(j + 1, len(ks)) if ks[i] in names), "\x7f")
+                lo, hi = neighbours(ks, j)
                 nb.append((key[0].split(".")[-1], key[1], lo, hi))
                 L, H = max(L, lo), min(H, hi)
             pool = func_pool if "__auth_got" in kind_of[a] else data_pool

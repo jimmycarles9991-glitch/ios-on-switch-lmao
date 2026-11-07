@@ -142,7 +142,7 @@ def main() -> None:
         fmin, fmax = struct.unpack('<Q', img.read(e + 16, 8))[0], struct.unpack('<Q', img.read(e + 32, 8))[0]
         t['manifest'].append([img.cstr(img.ptr(e)), fmin if has_min else 0, fmax if has_max else 0])
     with open(out, 'w') as f:
-        json.dump(t, f, indent=1, sort_keys=True)
+        json.dump(t, f, indent=2, sort_keys=True)  # dprint's JSON layout (//:format_test)
         f.write('\n')
 
 

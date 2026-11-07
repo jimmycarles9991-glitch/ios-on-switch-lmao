@@ -6,3 +6,6 @@ _switch_prelink_cut_null
 # The ABI markers emit_prelink.py checks the native kernel for (kits/NativePrelink's XNU patches).
 _kalloc_sparse_prelink_index_version
 _native_prelink_security_init_version
+# kits/SwitchIdle (kernel/switch/idle/idle.c) for the EMC governor (drivers/SwitchPower/SwitchEMC.cpp).
+_switch_idle_last_frame
+_switch_idle_set_frames_started

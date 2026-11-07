@@ -12,7 +12,8 @@
 load("@bazel_skylib//rules:common_settings.bzl", "string_flag")
 load("@rules_python//python:py_binary.bzl", "py_binary")
 load("//bazel/lint:defs.bzl", "lint_files")
-load(":defs.bzl", "fake_boot_package", "image_inputs", "install_artifacts", "install_spec", "ipsw_pins", "prelink_options", "release_tree", "test_member")
+load("//boot:overlay.bzl", "OVERLAY_BINARIES")
+load(":defs.bzl", "fake_boot_package", "image_inputs", "install_artifacts", "install_spec", "ipsw_pins", "prelink_options", "release_prelink", "release_tree", "test_member")
 
 package(default_visibility = ["//visibility:public"])
 
@@ -112,6 +113,8 @@ filegroup(
 string_flag(
     name = "prebuilt",
     build_setting_default = "local",
+    # Tools too: under release, nothing resolves a C/C++ toolchain (bazel/toolchains/none).
+    scope = "universal",
     values = [
         "local",
         "release",
@@ -121,6 +124,31 @@ string_flag(
 config_setting(
     name = "from_release",
     flag_values = {":prebuilt": "release"},
+)
+
+config_setting(
+    name = "from_local",
+    flag_values = {":prebuilt": "local"},
+)
+
+# The kernel //boot:package takes from the release: its linked kernel, with Apple's kexts prelinked here from this Mac's
+# kernelcache by the options it carries (prelink.json), as //kernel:kernel prelinks them. The release's is iOS 17's.
+release_prelink(
+    name = "release_kernel_10063",
+    inherit_report = "//kernel:dma_prelink_report",
+    kernel = "@switch_release//:kernel",
+    options = "@switch_release//:prelink_options",
+    previous = "//bazel/pinned:prelink/dma-prelink.json",
+    tags = ["manual"],
+)
+
+alias(
+    name = "release_kernel",
+    actual = select(
+        {"//kernel:xnu_10063_141_1": ":release_kernel_10063"},
+        no_match_error = "the release carries iOS 17's kernel only: build this iOS's with --//install:prebuilt=local",
+    ),
+    tags = ["manual"],
 )
 
 alias(
@@ -270,7 +298,8 @@ py_binary(
 )
 
 # The release's image-builder inputs (ios-on-switch-lmao-<version>-image-inputs.tar, r22-ci): this project's built
-# parts the Mac composes with the IPSW, none of them made from it.
+# parts the Mac composes with the IPSW, none of them made from it but the loader and its window constants (no Apple
+# bytes; release/ipsw_free.bzl DECLASSIFIED).
 prelink_options(
     name = "kernel_inputs",
     kernel = "//kernel:kernel_unprelinked",
@@ -282,13 +311,9 @@ release_tree(
     files = {
         ":kernel_inputs": "kernel",
         "//gpu:base": "gpu",
-        "//drivers/SwitchBluetooth:BlueTool": "overlay/build/switch-bluetooth/BlueTool",
-        "//drivers/SwitchAudio:SwitchAudioHAL": "overlay/build/switch-audio/SwitchAudio.driver/SwitchAudio",
-        "//drivers/SwitchJoyCon:joyconpaird": "overlay/build/switch-joycon/joyconpaird",
-        "//drivers/SwitchVideoDecoders:HEVCH8": "overlay/build/switch-video/HEVCH8.videodecoder",
-        "//drivers/SwitchVideoDecoders:AVD": "overlay/build/switch-video/AVD.videodecoder",
-        "//drivers/SwitchVideoEncoders:AVE": "overlay/build/switch-video/H264H7.videoencoder",
-    },
+        "//boot:loader": "loader/loader.uboot.bin",
+        "//boot:loader_constants": "loader/constants.json",
+    } | {target: "overlay/" + source for target, source in OVERLAY_BINARIES.items()},
     tags = ["manual"],
 )
 

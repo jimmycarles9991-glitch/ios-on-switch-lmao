@@ -617,8 +617,9 @@ void Hardware::resetRing(uint32_t dci)
 }
 
 // hekate xusb_ep_ctx_t / Linux tegra_xudc_ep_context_setup: state running, CErr/CEC 3, dequeue = ring start with
-// DCS 1, Linux's average TRB length per type (control 8, interrupt 1024, bulk 3072), the max burst (SuperSpeed); EP0
-// keeps the current device address.
+// DCS 1, Linux's average TRB length per type (control 8, interrupt 1024, bulk and isochronous 3072), the max burst
+// (SuperSpeed; at high speed a periodic endpoint's extra transactions per microframe); EP0 keeps the current device
+// address.
 bool Hardware::initEndpoint(uint32_t dci, uint32_t type, uint32_t maxPacket, uint32_t interval, uint32_t maxBurst)
 {
     Ring &ring = rings[dci];
@@ -633,8 +634,9 @@ bool Hardware::initEndpoint(uint32_t dci, uint32_t type, uint32_t maxPacket, uin
     volatile uint32_t *c = context(dci);
     uint32_t address = dci == 0 ? (xr(CTRL) >> 24) & 0x7f : 0;
     const bool interrupt = type == EP_INTR_IN || type == EP_INTR_OUT;
+    const bool periodic = interrupt || type == EP_ISOCH_IN || type == EP_ISOCH_OUT;
     uint32_t average = type == EP_CONTROL ? 8 : interrupt ? 1024 : 3072;
-    uint32_t esit = interrupt ? maxPacket * (maxBurst + 1) : 0;
+    uint32_t esit = periodic ? maxPacket * (maxBurst + 1) : 0;
     for (uint32_t i = 0; i < 16; ++i)
         c[i] = 0;
     c[0] = 1 | interval << 16;
@@ -671,6 +673,11 @@ void Hardware::toggleBit(uint32_t reg, uint32_t dci, bool set)
 void Hardware::setHalt(uint32_t dci, bool halt)
 {
     toggleBit(EP_HALT, dci, halt);
+}
+
+void Hardware::setPause(uint32_t dci, bool pause)
+{
+    toggleBit(EP_PAUSE, dci, pause);
 }
 
 bool Hardware::halted(uint32_t dci)

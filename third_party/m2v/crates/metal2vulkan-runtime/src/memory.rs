@@ -15,6 +15,18 @@
 //!   upload past half a 4 MiB block at nearly every command buffer (r7j: 492 MB of blocks in 5 s,
 //!   15 pooled and 4 dedicated live): each a `vkAllocateMemory`, a kernel BO mapped whole into the
 //!   process and faulted in page by page, then unmapped and freed.
+//! - **Idle blocks** (ios-on-switch-lmao). [`Memory::release_idle`] frees the empty pooled blocks
+//!   and the spares, which hold no placement: what Metal's driver marks volatile and so stops
+//!   charging the process for (`Device::release_idle_memory`). On TegraGM20B each such block
+//!   is a cached BO mapped whole into the process and charged to its footprint as
+//!   `iokit_mapped`, while one given back waits uncharged among the kernel's spares.
+//! - **Memoryless backings** (ios-on-switch-lmao). Where the device has no lazily allocated memory, a
+//!   memoryless texture's image is bound to a backing all the device's memoryless images of its
+//!   shape share ([`allocate_memoryless`], [`MemorylessKey`]), freed with the last of them, where
+//!   the device runs every render pass in submission order ([`Memory::new`]'s
+//!   `shares_memoryless`): Metal neither loads nor stores a memoryless attachment, so only the
+//!   pass that renders one reads what it holds, and no two such passes overlap on the GPU. Two
+//!   attachments of one pass never share one (`attachment_stand_in::apart_shared_backings`).
 //! - **Entry point.** [`allocate`] with the resource's memory requirements and its
 //!   [`MemoryClass`]; [`Memory::free`] with the placement it gave. Buffers use it in step 1;
 //!   textures and heaps add their classes and callers in their own steps. Imported host memory
@@ -104,12 +116,104 @@ struct Spare {
     since: std::time::Instant,
 }
 
+/// The shape a memoryless image's backing serves (the module docs): its image's create info and
+/// memory requirements, which Vulkan gives alike to images of alike create info.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct MemorylessKey {
+    format: i32,
+    extent: [u32; 3],
+    samples: u32,
+    levels: u32,
+    layers: u32,
+    usage: u32,
+    flags: u32,
+    size: u64,
+    alignment: u64,
+    types: u32,
+}
+
+impl MemorylessKey {
+    /// The key of an image of `info` that requires `requirements`.
+    pub(super) fn of(
+        info: &vk::ImageCreateInfo<'_>,
+        requirements: &vk::MemoryRequirements,
+    ) -> Self {
+        let extent = info.extent;
+        MemorylessKey {
+            format: info.format.as_raw(),
+            extent: [extent.width, extent.height, extent.depth],
+            samples: info.samples.as_raw(),
+            levels: info.mip_levels,
+            layers: info.array_layers,
+            usage: info.usage.as_raw(),
+            flags: info.flags.as_raw(),
+            size: requirements.size,
+            alignment: requirements.alignment,
+            types: requirements.memory_type_bits,
+        }
+    }
+}
+
+/// The memoryless images' shared backings, each with the count of images bound to it: pure, so
+/// the CPU tests cover it. `P` is the backing's placement.
+#[derive(Debug)]
+pub(super) struct Backings<P> {
+    held: Vec<(MemorylessKey, P, u32)>,
+}
+
+impl<P> Default for Backings<P> {
+    fn default() -> Backings<P> {
+        Backings { held: Vec::new() }
+    }
+}
+
+impl<P> Backings<P> {
+    /// The backing of `key`, held once more, where there is one.
+    pub(super) fn hold(&mut self, key: &MemorylessKey) -> Option<&P> {
+        let (_, backing, holders) = self.held.iter_mut().find(|(held, ..)| held == key)?;
+        *holders += 1;
+        Some(backing)
+    }
+
+    /// `backing` as the backing of `key`, held once.
+    pub(super) fn add(&mut self, key: MemorylessKey, backing: P) -> &P {
+        self.held.push((key, backing, 1));
+        &self.held.last().expect("just pushed").1
+    }
+
+    /// Let go of one hold on `key`'s backing: the backing, to free, once no image holds it.
+    pub(super) fn release(&mut self, key: &MemorylessKey) -> Option<P> {
+        let at = self.held.iter().position(|(held, ..)| held == key)?;
+        let holders = &mut self.held[at].2;
+        *holders -= 1;
+        (*holders == 0).then(|| self.held.swap_remove(at).1)
+    }
+
+    /// The backings held now.
+    pub(super) fn len(&self) -> usize {
+        self.held.len()
+    }
+}
+
 /// The first pooled block of a pool: later ones grow with the pool ([`Memory::next_block_bytes`]),
 /// doubling it up to [`BLOCK_BYTES`]. Where device memory is the system's own and every block is
 /// wired as it is made (a guest whose GPU imports its pages), a process with a few small resources
 /// otherwise held a 64 MiB block in each of its pools: 256-640 MiB each, 2 GiB in all at an iPadOS
 /// guest's home screen.
 pub(super) const FIRST_BLOCK_BYTES: u64 = 4 << 20;
+
+/// The first pooled block of a device whose blocks are at most `block_bytes` long
+/// (ios-on-switch-lmao): a quarter of that, from [`MIN_FIRST_BLOCK_BYTES`] up to
+/// [`FIRST_BLOCK_BYTES`]. Every process keeps room in three pools from its first queue on
+/// ([`keep_room`]), each a block mapped whole and, on TegraGM20B, charged to it: with 4 MiB
+/// blocks (`M2V_BLOCK_MIB` outside the render server) a daemon that placed nothing held 8 MiB of
+/// its own and 4 MiB of the shared pool.
+pub(super) fn first_block_bytes(block_bytes: u64) -> u64 {
+    (block_bytes / 4).clamp(MIN_FIRST_BLOCK_BYTES, FIRST_BLOCK_BYTES)
+}
+
+/// The smallest first block ([`first_block_bytes`]).
+const MIN_FIRST_BLOCK_BYTES: u64 = 1 << 20;
 
 /// What memory a resource needs.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -462,6 +566,20 @@ impl<T> Pool<T> {
         self.blocks.drain(..).flatten().map(|block| block.payload)
     }
 
+    /// The payloads of its pooled blocks with no placement, taken out of the pool, with their
+    /// sizes.
+    pub(super) fn take_empty(&mut self) -> Vec<(T, u64)> {
+        let empty = |block: &PoolBlock<T>| !block.dedicated && block.ranges.is_empty();
+        (self.blocks.iter_mut())
+            .filter(|block| block.as_ref().is_some_and(empty))
+            .filter_map(Option::take)
+            .map(|block| {
+                let size = block.ranges.len();
+                (block.payload, size)
+            })
+            .collect()
+    }
+
     /// The number of live blocks.
     #[cfg(test)]
     pub(super) fn blocks(&self) -> usize {
@@ -472,13 +590,17 @@ impl<T> Pool<T> {
     /// imports, whatever else they are.
     fn count_into(&self, census: &mut Census, imported: impl Fn(&T) -> bool) {
         for block in self.blocks.iter().flatten() {
-            let count = match (imported(&block.payload), block.dedicated) {
+            let imported = imported(&block.payload);
+            let count = match (imported, block.dedicated) {
                 (true, _) => &mut census.imported,
                 (false, true) => &mut census.dedicated,
                 (false, false) if block.ranges.is_empty() => &mut census.empty,
                 (false, false) => &mut census.pooled,
             };
             *count += 1;
+            if !imported {
+                census.bytes += block.ranges.len();
+            }
         }
     }
 }
@@ -495,6 +617,9 @@ pub(super) struct Census {
     pub(super) dedicated: u64,
     /// The caller's host memory imported ([`Memory::import_host`]), a block each.
     pub(super) imported: u64,
+    /// The bytes of the live blocks of the runtime's own memory, pooled, empty or dedicated: what
+    /// the device holds now, but its spares and imports (ios-on-switch-lmao).
+    pub(super) bytes: u64,
 }
 
 /// A host pointer the runtime may send between threads: the mapping of a block it owns.
@@ -618,6 +743,9 @@ pub(super) struct Placement {
     /// (zero where the kernel zeroes new memory, as TegraGM20B does). False for memory the runtime
     /// did not allocate (the caller's, imports) and for any range placed before.
     pub(super) fresh: bool,
+    /// The shape of the memoryless backing it is, which other memoryless images of the shape
+    /// share ([`allocate_memoryless`]); freeing it lets go of one hold.
+    pub(super) backing: Option<MemorylessKey>,
     /// The imports of the caller's dma-bufs the placement lies in, with the source that made them
     /// (`dma_buf.rs`), which no block of the runtime's holds: kept until the placement goes, and
     /// freed, the source dropped, when their last holder goes.
@@ -646,6 +774,7 @@ impl Placement {
             mapped: mapped.map(Mapped),
             address: None,
             fresh: false,
+            backing: None,
             #[cfg(unix)]
             dma_buf: None,
         }
@@ -675,6 +804,7 @@ impl Placement {
             mapped: Some(Mapped(mapped)),
             address: None,
             fresh: false,
+            backing: None,
             dma_buf: Some(pages),
         }
     }
@@ -734,6 +864,7 @@ impl Placement {
             mapped: self.mapped,
             address: self.address,
             fresh: self.fresh,
+            backing: self.backing,
             #[cfg(unix)]
             dma_buf: self.dma_buf.clone(),
         }
@@ -746,6 +877,8 @@ pub(super) struct Memory {
     /// The buffers' pools by memory type, then the images' ([`Memory::pool`]).
     pools: Vec<Pool<Block>>,
     block_bytes: u64,
+    /// A pool's first pooled block ([`first_block_bytes`]).
+    first_block_bytes: u64,
     /// Blocks are allocated with `VK_MEMORY_ALLOCATE_DEVICE_ADDRESS_BIT`: the device enabled
     /// `bufferDeviceAddress`, so buffers carry device addresses.
     device_address: bool,
@@ -767,27 +900,36 @@ pub(super) struct Memory {
     spares: Vec<Spare>,
     /// Dedicated requests a spare served, and the bytes of spares kept now.
     spare_reuses: u64,
+    /// Memoryless images share a backing per shape where the memory has no lazily allocated type
+    /// for them (the module docs).
+    shares_memoryless: bool,
+    backings: Backings<Placement>,
 }
 
 impl Memory {
     /// The memory of a device with `properties`, whose largest allocation is
     /// `max_allocation` bytes, with unified memory or without (`unified`), whose queue families
-    /// are `families`.
+    /// are `families`. `shares_memoryless` where the device runs its render passes in submission
+    /// order, one after another, so that its memoryless images may share backings (the module
+    /// docs).
     pub(super) fn new(
         properties: &vk::PhysicalDeviceMemoryProperties,
         max_allocation: u64,
         device_address: bool,
         unified: bool,
         families: Vec<u32>,
+        shares_memoryless: bool,
     ) -> Memory {
         let count = properties.memory_type_count as usize;
         let types = properties.memory_types[..count.min(vk::MAX_MEMORY_TYPES)].to_vec();
+        let block_bytes = block_cap().min(max_allocation.max(1));
         Memory {
             pools: (types.iter().chain(&types))
                 .map(|_| Pool::default())
                 .collect(),
             types,
-            block_bytes: block_cap().min(max_allocation.max(1)),
+            block_bytes,
+            first_block_bytes: first_block_bytes(block_bytes),
             device_address,
             address_types: None,
             kept: None,
@@ -796,7 +938,56 @@ impl Memory {
             allocated: 0,
             spares: Vec::new(),
             spare_reuses: 0,
+            shares_memoryless,
+            backings: Backings::default(),
         }
+    }
+
+    /// Whether a memoryless image whose requirements allow the types `allowed` names takes a
+    /// shared backing: on a device that shares them, where its best memory is not lazily
+    /// allocated.
+    pub(super) fn shares_backing(&self, allowed: u32) -> bool {
+        let best = candidates(&self.types, allowed, MemoryClass::Memoryless, self.unified)
+            .first()
+            .and_then(|&index| self.type_flags(index));
+        self.shares_memoryless
+            && best.is_some_and(|flags| !flags.contains(vk::MemoryPropertyFlags::LAZILY_ALLOCATED))
+    }
+
+    /// `key`'s backing, held once more by a new image, where there is one: not fresh, as an image
+    /// before it may have rendered there.
+    fn hold_backing(&mut self, key: &MemorylessKey) -> Option<Placement> {
+        let backing = self.backings.hold(key)?.handed_over();
+        Some(Placement {
+            backing: Some(*key),
+            fresh: false,
+            ..backing
+        })
+    }
+
+    /// The memoryless backings held now (`Device::work_counts`).
+    pub(super) fn memoryless_backings(&self) -> usize {
+        self.backings.len()
+    }
+
+    /// Free every block no placement holds, the empty pooled blocks and the spares (the module
+    /// docs): the bytes freed.
+    pub(super) fn release_idle(&mut self, device: &ash::Device) -> u64 {
+        let mut freed = 0;
+        for spare in self.spares.drain(..) {
+            freed += spare.size;
+            // SAFETY: nothing is placed in a spare, and no command reads it.
+            unsafe { spare.block.release(device) };
+        }
+        for pool in &mut self.pools {
+            for (block, size) in pool.take_empty() {
+                freed += size;
+                // SAFETY: nothing is placed in the block, so no pending command reads it: a
+                // placement is freed once the command buffers that used it completed.
+                unsafe { block.release(device) };
+            }
+        }
+        freed
     }
 
     /// Dedicated requests a spare served so far, and the bytes of spares kept now (the module
@@ -973,12 +1164,12 @@ impl Memory {
     }
 
     /// The size of the next pooled block of `pool` for a placement of `size` bytes: as many bytes
-    /// as its pooled blocks have (the pool doubles), at least [`FIRST_BLOCK_BYTES`] and the
-    /// placement's next power of two, at most [`BLOCK_BYTES`] (or the device's largest
-    /// allocation).
+    /// as its pooled blocks have (the pool doubles), at least the first block's
+    /// ([`first_block_bytes`]) and the placement's next power of two, at most [`BLOCK_BYTES`] (or
+    /// the device's largest allocation).
     fn next_block_bytes(&self, pool: (Holds, u32), size: u64) -> u64 {
         let have = self.pool_ref(pool.0, pool.1).pooled_bytes();
-        (have.max(FIRST_BLOCK_BYTES).max(size.next_power_of_two()))
+        (have.max(self.first_block_bytes).max(size.next_power_of_two()))
             .min(self.block_bytes)
             .max(size)
     }
@@ -1068,6 +1259,7 @@ impl Memory {
                 .filter(|_| addressed)
                 .map(|addresses| addresses.address + offset),
             fresh,
+            backing: None,
             #[cfg(unix)]
             dma_buf: None,
         }
@@ -1264,8 +1456,16 @@ impl Memory {
             .is_some_and(|flags| flags.contains(vk::MemoryPropertyFlags::DEVICE_LOCAL))
     }
 
-    /// Return `placement`'s memory, freeing its block when it empties.
+    /// Return `placement`'s memory, freeing its block when it empties; a memoryless backing's once
+    /// no image holds it.
     pub(super) fn free(&mut self, device: &ash::Device, placement: &Placement) {
+        if let Some(key) = &placement.backing {
+            // The backing itself, as `place` made it, has no key.
+            if let Some(backing) = self.backings.release(key) {
+                self.free(device, &backing);
+            }
+            return;
+        }
         // The caller's memory is the caller's to free.
         let Some(index) = placement.block else {
             return;
@@ -1496,6 +1696,54 @@ pub(super) fn allocate_image_apart(
         Holds::Images,
         Fit::Apart,
     )
+}
+
+/// [`allocate_image`] for a memoryless image of the shape `key`, on a device that shares their
+/// backings (the module docs): the backing of its shape, made now where there is none, else as
+/// `allocate_image`. A backing is made with `memory`'s lock released, as any block; one another
+/// thread made meanwhile is taken, and this one freed.
+///
+/// Why sharing is safe there: Metal neither loads nor stores a memoryless attachment, so its
+/// texels live only inside the pass that renders it (and the runtime's commands recorded inside
+/// that pass's span: a split's instances, its resolve), and a pass neither reads nor leaves
+/// anything another pass sees. Two passes that share a backing must still not overlap on the
+/// GPU: one would test against or blend into the other's texels mid-pass. They never do where the
+/// memory shares: every pass of the device runs on its one `VkQueue`, so on its one GPU channel,
+/// and a memoryless image has attachment usage alone (no transfer, sampled or storage usage,
+/// `image_plan.rs`), so only that channel's graphics engine touches it: its clears and draws write
+/// each pixel in submission order, whatever logical queue or command buffer recorded them, and
+/// its input attachment reads and resolves read the pixel being written. Two attachments of one
+/// pass, which are live at once, never share a backing
+/// (`attachment_stand_in::apart_shared_backings`). No barrier orders such passes, and none is
+/// needed: hazard tracking sees each texture apart.
+pub(super) fn allocate_memoryless(
+    memory: &Mutex<Memory>,
+    device: &ash::Device,
+    requirements: &vk::MemoryRequirements,
+    key: MemorylessKey,
+) -> Result<Placement, Error> {
+    let shares = {
+        let mut locked = lock(memory);
+        let shares = locked.shares_backing(requirements.memory_type_bits);
+        if let Some(placement) = shares.then(|| locked.hold_backing(&key)).flatten() {
+            return Ok(placement);
+        }
+        shares
+    };
+    let made = allocate_image(memory, device, requirements, MemoryClass::Memoryless)?;
+    if !shares {
+        return Ok(made);
+    }
+    let mut locked = lock(memory);
+    if let Some(placement) = locked.hold_backing(&key) {
+        locked.free(device, &made);
+        return Ok(placement);
+    }
+    let backing = locked.backings.add(key, made).handed_over();
+    Ok(Placement {
+        backing: Some(key),
+        ..backing
+    })
 }
 
 /// [`allocate`] for a buffer made without the device-address usage that needs a device address

@@ -1,0 +1,55 @@
+# Refusal logging, one C ABI for the kernel (the SwitchRefusal driver objects) and user space (SwitchRefusal.c and .h
+# compiled into the binary; switch_refusal for a Bazel-linked image, once per image). C++ and Objective-C++ sites take
+# SwitchRefusalSite.h.
+#
+#   bazel test //kits/SwitchRefusal/test:all
+load("@rules_cc//cc:cc_library.bzl", "cc_library")
+load("@rules_rust//rust:defs.bzl", "rust_library")
+load("//bazel/lint:defs.bzl", "lint_files")
+load("//kernel/rules:kernel.bzl", "kernel_driver", "kernel_headers")
+
+package(default_visibility = ["//visibility:public"])
+
+lint_files()
+
+exports_files(glob(
+    ["**"],
+    exclude = ["BUILD.bazel"],
+))
+
+filegroup(
+    name = "all_files",
+    srcs = glob(
+        ["**"],
+        exclude = ["BUILD.bazel"],
+    ),
+)
+
+kernel_headers()
+
+# User space. The Metal plugin's copy rides in the bridge's static library (//gpu:bridge), which every image that links
+# the frontend or the raw path also links.
+cc_library(
+    name = "switch_refusal",
+    srcs = ["SwitchRefusal.c"],
+    hdrs = [
+        "SwitchRefusal.h",
+        "SwitchRefusalSite.h",
+    ],
+)
+
+kernel_driver(
+    name = "SwitchRefusal",
+    srcs = ["SwitchRefusal.c"],
+    c_recipe = ":bsd_c",
+    hdr_deps = [],
+)
+
+# The Rust side (SwitchRefusal.rs): the keys as const fns and the C calls, for the Metal bridge (gpu:bridge), whose archive
+# carries SwitchRefusal.o.
+rust_library(
+    name = "switch_refusal_rs",
+    srcs = ["SwitchRefusal.rs"],
+    crate_name = "switch_refusal",
+    edition = "2024",
+)

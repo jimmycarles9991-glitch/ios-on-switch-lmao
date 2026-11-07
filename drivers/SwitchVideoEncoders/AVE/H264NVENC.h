@@ -47,8 +47,9 @@ typedef struct {
 typedef struct {
     H264EncSurface input, recon;
     uint32_t bitstream_bytes;  // one picture's output; 64 KiB multiple
-    uint32_t history_bytes, coloc_bytes, status_bytes;
-    uint32_t aux_bytes, history_offset, coloc_offset;  // status at 0 of the aux buffer, then history, then coloc
+    uint32_t history_bytes, status_bytes;
+    uint32_t aux_bytes, history_offset;  // status at 0 of the aux buffer, then history
+    uint32_t mepred_bytes;               // each of the two ME predictor buffers
 } H264EncLayout;
 
 typedef struct {
@@ -57,9 +58,10 @@ typedef struct {
     uint32_t frame_num, idr_pic_id, poc_lsb, picture_index;
 } H264EncPicture;
 
-// Arena handles of a session's buffers. A P picture reads `ref` and writes `recon`; the next swaps them.
+// Handles of a session's buffers. A P picture reads `ref` and writes `recon`; the next swaps them. The ME predictors
+// alternate the same way, by picture index: a picture reads what the one before it wrote.
 typedef struct {
-    uint32_t input, recon, ref, bitstream, aux;
+    uint32_t input, recon, ref, bitstream, aux, mepred[2];
 } H264EncHandles;
 
 // An RBSP bit writer (no emulation prevention: h264enc_nal adds it).

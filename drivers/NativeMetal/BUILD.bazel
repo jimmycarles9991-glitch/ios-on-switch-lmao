@@ -16,7 +16,10 @@ filegroup(
     name = "frontend_headers",
     srcs = [
         "AsyncPipelines.h",
+        "GpuMemoryRelease.h",
         "NativeBridgeMetalFrontend.h",
+        "QueuePriority.h",
+        "SurfaceLayout.h",
         "SwitchFrameTimeline.h",
         "TwoPlaneStandIn.h",
         "bridge/NativeMetalBridge.h",
@@ -29,5 +32,6 @@ filegroup(
     srcs = [
         "bridge/NativeMetalBridge.rs",
         "bridge/NativeMetalObjects.rs",
+        "bridge/NativeMetalTarget.rs",
     ],
 )

@@ -911,7 +911,10 @@ void native_legacy_display_late_probe(void)
         bool nubAttached = false, nubStarted = false, attached = false, started = false;
         IORegistryEntry *displayTreeParent = nullptr;
         bool dtAttached = false;
-        IOService *parent = IOService::getResourceService();
+        // An IOPlatformDevice calls its provider as an IOPlatformExpert (compareName, getResources), and this nub also
+        // sits in the device-tree plane, where launchd's _LimitLoadToDeviceTree and IODTFindMatchingEntries compare
+        // names against it: its provider must be the platform expert.
+        IOService *parent = IOService::getPlatform();
         IODeviceMemory *memory = IODeviceMemory::withRange(video.v_baseAddr, video.v_rowBytes * video.v_height);
         OSArray *ranges = OSArray::withCapacity(1);
         if (nub && memory && ranges && parent && nub->init()) {

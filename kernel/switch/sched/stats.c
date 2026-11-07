@@ -14,6 +14,7 @@
 
 #include <kern/misc_protos.h>
 #include <switch/sched.h>
+#include <switch/stall.h>
 #include <switch/xnu.h>
 
 #include "stats.h"
@@ -143,6 +144,9 @@ void switch_sched_dispatched(thread_t thread, uint64_t now)
                     (uint64_t)thread->base_pri | (uint64_t)thread->sched_pri << 8 | (uint64_t)thread->sched_mode << 16 |
                         (uint64_t)thread->effective_policy.thep_qos << 24 | (uint64_t)thread->th_sched_bucket << 32,
                     relaxed);
+    if (i == CA_DISPLAY) {
+        switch_sched_render_on_core(thread, now);
+    }
 }
 
 static void watch(enum slot_id id, uint64_t tid, int pid, const char *label, bool replace_same_pid)
@@ -186,6 +190,7 @@ void switch_sched_role(task_t task, int role)
     char label[LABEL];
     uint64_t tid;
 
+    switch_stall_frame_role(task, role);
     if (role != TASK_FOREGROUND_APPLICATION || (tid = main_thread_id(task)) == 0) {
         return;
     }
@@ -218,6 +223,9 @@ void switch_sched_named(thread_t thread, const char *name)
         }
         /* A pool's threads share a name: the first of a process stands for them. */
         watch(render_server_threads[i].slot, thread_tid(thread), task_pid(task), render_server_threads[i].label, false);
+        if (render_server_threads[i].slot == CA_RENDER) {
+            switch_stall_frame_render_server(thread);
+        }
         if ((main_tid = main_thread_id(task)) != 0) {
             watch(BB_MAIN, main_tid, task_pid(task), "backboardd.main", true);
         }

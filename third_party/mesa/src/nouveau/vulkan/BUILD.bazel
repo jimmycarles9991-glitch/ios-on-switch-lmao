@@ -4,6 +4,7 @@
 load("@rules_python//python:py_binary.bzl", "py_binary")
 load("//bazel/lint:defs.bzl", "lint_files")
 load("//third_party/mesa/bazel:defs.bzl", "MESA_LINT_EXCLUDE", "MESA_PY_DEPS", "mesa_archive", "mesa_args", "mesa_cc_library", "mesa_file", "mesa_genrule")
+load("//third_party/mesa/bazel:identity.bzl", "mesa_identity_files", "nvk_compiler_identity")
 load("//third_party/mesa/bazel:link.bzl", "mesa_dylib")
 load("//third_party/mesa/bazel:rust.bzl", "NOUVEAU_RUST_ARGS", "mesa_rust_library")
 
@@ -18,6 +19,8 @@ exports_files(glob(
     ["**"],
     exclude = ["BUILD.bazel"],
 ))
+
+mesa_identity_files()
 
 # Every header of this package, its generated ones included: //third_party/mesa:headers gathers them.
 filegroup(
@@ -202,54 +205,61 @@ mesa_cc_library(
     ],
 )
 
+# nvk_sources' arguments, which nvk_physical_device's and nvk_sources_tail's objects share.
+NVK_C_ARGS = mesa_args(
+    "c",
+    extra = [
+        "-DXXH_FORCE_ALIGN_CHECK=0",
+        "-DXXH_FORCE_MEMORY_ACCESS=0",
+        "-Wno-override-init",
+        "-Wno-initializer-overrides",
+        "-DNVK_HAS_DARWIN",
+    ],
+    include_dirs = [
+        "gen:src/nouveau/vulkan",
+        "src/nouveau/vulkan",
+        "gen:",
+        "gen:include",
+        "include",
+        "gen:src",
+        "src",
+        "gen:abi",
+        "gen:src/nouveau/compiler",
+        "src/nouveau/compiler",
+        "gen:src/nouveau/nil",
+        "src/nouveau/nil",
+        "gen:src/compiler/nir",
+        "src/compiler/nir",
+        "gen:src/compiler",
+        "src/compiler",
+        "gen:src/nouveau/cubin",
+        "src/nouveau/cubin",
+        "gen:src/nouveau/mme",
+        "src/nouveau/mme",
+        "src/nouveau/winsys",
+        "gen:src/nouveau/headers",
+        "src/nouveau/headers",
+        "src/nouveau/headers/nvidia/classes",
+        "gen:src/vulkan/runtime",
+        "src/vulkan/runtime",
+        "src/vulkan/runtime/bvh",
+        "gen:src/vulkan/util",
+        "src/vulkan/util",
+        "gen:src/vulkan/wsi",
+        "src/vulkan/wsi",
+        "gen:src/util",
+        "gen:src/util/format",
+        "gen:src/compiler/spirv",
+    ],
+) + select({
+    # nvk_cmd_meta.c's copy-engine A/B switch, debug builds only
+    "//bazel:release": ["-DSWITCH_DEBUG=0"],
+    "//conditions:default": ["-DSWITCH_DEBUG=1"],
+})
+
 mesa_cc_library(
     name = "nvk_sources",
-    c_args = mesa_args(
-        "c",
-        extra = [
-            "-DXXH_FORCE_ALIGN_CHECK=0",
-            "-DXXH_FORCE_MEMORY_ACCESS=0",
-            "-Wno-override-init",
-            "-Wno-initializer-overrides",
-            "-DNVK_HAS_DARWIN",
-        ],
-        include_dirs = [
-            "gen:src/nouveau/vulkan",
-            "src/nouveau/vulkan",
-            "gen:",
-            "gen:include",
-            "include",
-            "gen:src",
-            "src",
-            "gen:abi",
-            "gen:src/nouveau/compiler",
-            "src/nouveau/compiler",
-            "gen:src/nouveau/nil",
-            "src/nouveau/nil",
-            "gen:src/compiler/nir",
-            "src/compiler/nir",
-            "gen:src/compiler",
-            "src/compiler",
-            "gen:src/nouveau/cubin",
-            "src/nouveau/cubin",
-            "gen:src/nouveau/mme",
-            "src/nouveau/mme",
-            "src/nouveau/winsys",
-            "gen:src/nouveau/headers",
-            "src/nouveau/headers",
-            "src/nouveau/headers/nvidia/classes",
-            "gen:src/vulkan/runtime",
-            "src/vulkan/runtime",
-            "src/vulkan/runtime/bvh",
-            "gen:src/vulkan/util",
-            "src/vulkan/util",
-            "gen:src/vulkan/wsi",
-            "src/vulkan/wsi",
-            "gen:src/util",
-            "gen:src/util/format",
-            "gen:src/compiler/spirv",
-        ],
-    ),
+    c_args = NVK_C_ARGS,
     sources = [
         "nvk_acceleration_structure.c",
         "nvk_buffer.c",
@@ -283,7 +293,24 @@ mesa_cc_library(
         "nvk_mme.c",
         "nvk_nir_lower_descriptors.c",
         "nvk_nir_lower_mesh_shader.c",
+    ],
+)
+
+# nvk_physical_device.c in its place in the archive, a library of its own: the one object nvk_build_id.h
+# (NVK_BUILD_ID_OVERRIDE) reaches, so a compiler edit recompiles it alone.
+mesa_cc_library(
+    name = "nvk_physical_device",
+    c_args = NVK_C_ARGS,
+    sources = [
         "nvk_physical_device.c",
+        ":nvk_build_id",
+    ],
+)
+
+mesa_cc_library(
+    name = "nvk_sources_tail",
+    c_args = NVK_C_ARGS,
+    sources = [
         "nvk_query_pool.c",
         "nvk_queue.c",
         "nvk_sampler.c",
@@ -296,6 +323,38 @@ mesa_cc_library(
         "nvkmd/darwin/nvkmd_darwin.c",
         "//third_party/mesa/src/nouveau/headers:nv_push.c",
     ],
+)
+
+# NVK's compiler identity (third_party/mesa/bazel/compiler_identity.py), which its pipeline cache UUID hashes in place
+# of the dylib's build ID: the iOS dylib and the macOS twin get the same one.
+nvk_compiler_identity(
+    name = "nvk_build_id",
+    srcs = [
+        "//third_party/mesa:identity_files",
+        "//third_party/mesa/bazel:identity_files",
+        "//third_party/mesa/src:identity_files",
+        "//third_party/mesa/src/compiler:identity_files",
+        "//third_party/mesa/src/compiler/nir:identity_files",
+        "//third_party/mesa/src/compiler/rust:identity_files",
+        "//third_party/mesa/src/compiler/spirv:identity_files",
+        "//third_party/mesa/src/nouveau/compiler:identity_files",
+        "//third_party/mesa/src/nouveau/compiler/latencies:identity_files",
+        "//third_party/mesa/src/nouveau/headers:identity_files",
+        "//third_party/mesa/src/util:identity_files",
+        "//third_party/mesa/src/util/blake3:identity_files",
+        "//third_party/mesa/src/util/format:identity_files",
+        "//third_party/mesa/src/util/rust:identity_files",
+        "//third_party/mesa/src/vulkan/runtime:identity_files",
+        "//third_party/mesa/src/vulkan/util:identity_files",
+        ":identity_files",
+    ],
+    header = "nvk_build_id.h",
+)
+
+filegroup(
+    name = "nvk_build_id_text",
+    srcs = [":nvk_build_id"],
+    output_group = "text",
 )
 
 # meson archives a library's generated sources first, then what it links whole, then the rest.
@@ -482,6 +541,8 @@ mesa_archive(
         "//third_party/mesa/src/vulkan/runtime:vulkan_instance",
         "//third_party/mesa/src/vulkan/wsi:vulkan_wsi",
         ":nvk_sources",
+        ":nvk_physical_device",
+        ":nvk_sources_tail",
     ],
 )
 

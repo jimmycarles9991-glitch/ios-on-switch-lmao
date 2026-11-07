@@ -21,6 +21,7 @@
 #include <os/log.h>
 #include "../SwitchBattery/SwitchBattery.h"
 #include "../SwitchBattery/SwitchChargePolicy.h"
+#include "../SwitchDisplayPort/SwitchPDAltModeHook.h"
 #include "../TegraGPIO/TegraGPIO.h"
 #include "../TegraI2C/TegraI2C.h"
 #include "SwitchPDPolicy.h"
@@ -172,6 +173,7 @@ class SwitchPD : public IOService {
     switch_pd_phase phase = SWITCH_PD_EMPTY;
     bool allowSource = false, switchesOn = false, railsOn = false, sawDetach = false, stuck = false;
     bool reportedReadFailure = false, reportedSwitchFailure = false;
+    bool asleepSinkOnly = false;  // systemSleep took the empty port's source switches off for this SC7
     unsigned alertCount = 0;
     uint64_t alertWindow = 0;
     // The USB-PD request (SwitchPD.h).
@@ -211,6 +213,7 @@ public:
     bool begin(uint16_t &type, uint16_t &revision, uint16_t &config, bool &turnedOff);
     IOReturn addListener(Listener listener);
     void setAllowSource(bool allow);
+    void systemSleep(bool entering);
     void describe(char *buffer, size_t size);
 };
 
@@ -295,11 +298,6 @@ bool SwitchPD::readStatus(uint16_t &status1, uint16_t &status2)
 
 // Work loop: an ALERT (the pin is masked while this runs and unmasked after, TegraGPIO level pins, so the
 // ALERT_STATUS read here is what keeps it from firing again), a classify window's end, or a listener's first call.
-#if SWITCH_DISPLAYPORT || SWITCH_USB_SUPERSPEED
-// Below begin(): XNU's panic() carries its line, so nothing built in only with these settings may sit above it.
-#include "../SwitchDisplayPort/SwitchPDAltModeHook.h"
-#endif
-
 void SwitchPD::handle(uint16_t alertBits, uint16_t status1, uint16_t status2)
 {
     state.alert = alertBits;
@@ -310,7 +308,6 @@ void SwitchPD::handle(uint16_t alertBits, uint16_t status1, uint16_t status2)
     state.dataHost = state.plugged && ((status1 >> SWITCH_PD_STATUS1_DR_SHIFT) & 3) == SWITCH_PD_DATA_ROLE_DFP;
     apply(switch_pd_decide(phase, alertBits, status1, status2, allowSource));
     negotiate(alertBits);
-#if SWITCH_DISPLAYPORT || SWITCH_USB_SUPERSPEED
     const auto atRest = [](const void *pd) -> bool {
         const Nego n = static_cast<const SwitchPD *>(pd)->nego;
         return n == Nego::Settling || n == Nego::Done || n == Nego::Failed;
@@ -319,7 +316,6 @@ void SwitchPD::handle(uint16_t alertBits, uint16_t status1, uint16_t status2)
     switch_pd_alt_alert(this, loop, atRest, alertBits, status1,
                         phase == SWITCH_PD_SINK && state.plugged && !(status1 & SWITCH_PD_STATUS1_SRC_MODE),
                         contractOurs && choice.dock);
-#endif
     notify();
 }
 
@@ -544,6 +540,23 @@ void SwitchPD::setAllowSource(bool allow)
         notify();
     } else if (phase == SWITCH_PD_EMPTY || phase == SWITCH_PD_HELD) {
         setSwitches(allow);
+    }
+}
+
+// SC7 (switch_usb_suspend/resume). An empty port goes sink-only for the sleep, as a port that only takes power while
+// asleep: a sink (a keyboard, a trackpad) then meets no source, nothing attaches and nothing raises ALERT, so it does
+// not wake the console; a charger, a dock or a display that powers the port is a source, attaches, and its ALERT wakes
+// it (SwitchSuspend's USB-PD wake event). A partner already on the port keeps what it has: a keyboard we source stays
+// powered so that its key press can wake the console. After the wake the switches follow the phase again.
+void SwitchPD::systemSleep(bool entering)
+{
+    if (entering) {
+        asleepSinkOnly = phase == SWITCH_PD_EMPTY && switchesOn;
+        if (asleepSinkOnly)
+            setSwitches(false);
+    } else if (asleepSinkOnly) {
+        asleepSinkOnly = false;
+        setSwitches(switch_pd_switches_on(phase, allowSource));
     }
 }
 
@@ -856,6 +869,19 @@ extern "C" int switch_pd_allow_source(bool allow)
         },
         pd, allow ? pd : nullptr);
     return 0;
+}
+
+extern "C" void switch_pd_sleep(bool entering)
+{
+    SwitchPD *pd = __atomic_load_n(&gPDStage, __ATOMIC_ACQUIRE) == 2 ? gPD : nullptr;
+    if (!pd)
+        return;
+    pd->getWorkLoop()->runAction(
+        [](OSObject *owner, void *down, void *, void *, void *) -> IOReturn {
+            static_cast<SwitchPD *>(owner)->systemSleep(down != nullptr);
+            return kIOReturnSuccess;
+        },
+        pd, entering ? pd : nullptr);
 }
 
 #if DEVELOPMENT || DEBUG

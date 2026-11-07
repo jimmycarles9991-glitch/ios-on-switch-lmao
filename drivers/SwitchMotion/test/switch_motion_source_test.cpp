@@ -52,3 +52,19 @@ TEST(SwitchMotionSource, BacklightFollowsPanelPower)
     // The weak default, off and on.
     EXPECT_EQ(Count(SourceText("../../SwitchBrightness/SwitchBacklight.cpp"), "switch_motion_display_power("), 3u);
 }
+
+// CoreMotion's orientation notifier opens the orientation device with AppleSPULib's AppleSPUHIDDevice plug-in and asks
+// LastOrientation through its 'ashd' user client: a 10-byte reply of the echo, the orientation and the sample time.
+TEST(SwitchMotionSource, OrientationDeviceAnswersTheAopPlugIn)
+{
+    const std::string hid = SourceText("../../SwitchTouch/SwitchHIDDevice.cpp");
+    EXPECT_THAT(hid, HasSubstr("types->setObject(\"7ACF5332-1A35-4893-87CB-BA64E1887FAE\", plugIn)"));
+    EXPECT_THAT(hid, HasSubstr("return switch_motion_orientation_client(this, task, security, type, handler);"));
+    EXPECT_THAT(hid, HasSubstr("return IOHIDDevice::newUserClient(task, security, type, properties, handler);"));
+    const std::string client = SourceText("../SwitchOrientationClient.cpp");
+    EXPECT_THAT(client, HasSubstr("kSelectorReset = 0, kSelectorOpen = 4, kSelectorClose = 5, kSelectorCommand = 6"));
+    EXPECT_THAT(client, HasSubstr("constexpr uint32_t kLastSize = 10"));
+    EXPECT_THAT(client, HasSubstr("switch_motion_last_orientation(&orientation, &stamp);"));
+    const std::string motion = SourceText("../SwitchMotion.cpp");
+    EXPECT_THAT(Body(motion, "void SwitchMotion::announce("), HasSubstr("__atomic_store_n(&gLastOrientation,"));
+}

@@ -2,9 +2,28 @@
 #   raw_target_test   raw/runtime/raw_target.h: the raw path's color target words, pitch as before and a mip chain's level as
 #                     NVK's block-linear target, addressing every texel where raw/fx's layout (the texture header's and
 #                     the 2D engine's view of the chain) has it
+#   raw_layout_test   drivers/TegraGM20B/TegraGM20BLayout.h: the block-linear layout every GPU user takes is NIL's (its
+#                     answers for one-level images of every texel size), raw/fx's level 0 and the display's tiled scan
+#   nvk_wait_any_test nvkmd_darwin's WAIT_ANY (nvkmd_darwin_wait_any.h) over a model of the kext's WaitFence: it returns
+#                     once one sync of the set resolves (a host signal, a fence's interrupt), sleeps until then, keeps
+#                     its deadline, and calls a passed fence whose wake never came a lost interrupt
+#   nvk_surfaces_test nvkmd_darwin's ExecSurfaces record (nvkmd_darwin_surfaces.h): each BO once with its accesses merged,
+#                     past its room the all-imports flag, its length
+#   raw_events_source_test  how a command buffer with a plain or shared Metal event stays raw (frontend, bridge, m2v,
+#                     RawMetal), and the cross-process shared event refusal line
 #   raw_follow_test   raw/runtime/raw_follow.h: the raw path's threads take a fixed-priority committer's policy, never a
 #                     lower one, and keep their own for a timeshare committer
 #   stage_test        stage-tegra-gm20b-metal.py on a directory standing in for the Data volume
+#   raw_ycbcr_test    raw/runtime/raw_ycbcr.cpp: the two-plane YCbCr textures the raw path converts (m2v's rules) and the
+#                     conversion's shape; its texels against Metal's reads are raw/test/ycbcroracle.mm's (this Mac's GPU)
+#   raw_cache_test    raw/runtime/raw_cache.h: the records the runtime makes for states the pack lacks, kept on disk and
+#                     made once per process (raw/test/cachecheck: the same checks on a bucket's real records), and
+#                     raw_metallib.h: the functions' AIR hashes that key them
+#   raw_bounds_test   raw/runtime/raw_bounds.h: a Core Animation draw's pixel box and rectangle from its vertices (against
+#                     a GPU's coverage it is raw/test/boundsoracle.mm's, this Mac's GPU), and raw_region.h: the fetch
+#                     barrier's region test over such draws, and which covers a render area (a clear it makes redundant)
+#   raw_overlap_test  raw/runtime/raw_overlap.h: a fetching draw's triangles in runs that share no pixel (against a GPU's
+#                     coverage it is raw/test/overlaporacle.mm's, this Mac's GPU)
 #
 #   bazel test //drivers/TegraGM20BMetal/test:all
 load("@rules_python//python:py_test.bzl", "py_test")
@@ -17,12 +36,69 @@ host_test(
     name = "raw_target_test",
     srcs = [
         "raw_target_test.cpp",
+        "//drivers/TegraGM20B:TegraGM20BLayout.h",
         "//drivers/TegraGM20BMetal:raw/fx/fx_mip.cpp",
         "//drivers/TegraGM20BMetal:raw/fx/fx_mip.h",
         "//drivers/TegraGM20BMetal:raw/runtime/raw_push.h",
         "//drivers/TegraGM20BMetal:raw/runtime/raw_target.h",
     ],
+    copts = [
+        "-I",
+        "drivers/TegraGM20B",
+    ],
     cxx_std = "c++17",
+)
+
+host_test(
+    name = "raw_layout_test",
+    srcs = [
+        "raw_layout_test.cpp",
+        "//drivers/TegraDisplayFlip:TegraScanoutCopy.h",
+        "//drivers/TegraGM20B:TegraGM20BLayout.h",
+        "//drivers/TegraGM20BMetal:raw/fx/fx_mip.cpp",
+        "//drivers/TegraGM20BMetal:raw/fx/fx_mip.h",
+        "//drivers/TegraGM20BMetal:raw/runtime/raw_push.h",
+    ],
+    copts = [
+        "-I",
+        "drivers/TegraGM20B",
+    ],
+    cxx_std = "c++17",
+)
+
+host_test(
+    name = "nvk_wait_any_test",
+    srcs = [
+        "nvk_wait_any_test.cpp",
+        "//third_party/mesa/src/nouveau/vulkan:nvkmd/darwin/nvkmd_darwin_wait_any.h",
+    ],
+    cxx_std = "c++17",
+)
+
+host_test(
+    name = "nvk_surfaces_test",
+    srcs = [
+        "nvk_surfaces_test.cpp",
+        "//drivers/TegraGM20B:TegraGM20BABI.h",
+        "//third_party/mesa/src/nouveau/vulkan:nvkmd/darwin/nvkmd_darwin_surfaces.h",
+    ],
+    copts = [
+        "-I",
+        "drivers/TegraGM20B",
+    ],
+    cxx_std = "c++17",
+)
+
+host_test(
+    name = "raw_events_source_test",
+    srcs = ["raw_events_source_test.cpp"],
+    data = [
+        "//drivers/NativeMetal:NativeBridgeMetalFrontend.mm",
+        "//drivers/NativeMetal:bridge/NativeMetalObjects.rs",
+        "//drivers/TegraGM20BMetal:TegraGM20BMetalPlugin.mm",
+        "//drivers/TegraGM20BMetal:raw/runtime/RawMetal.mm",
+        "//third_party/m2v/crates/metal2vulkan-runtime:sources",
+    ],
 )
 
 host_test(
@@ -38,4 +114,53 @@ py_test(
     name = "stage_test",
     srcs = ["stage_test.py"],
     data = ["//drivers/TegraGM20BMetal:stage-tegra-gm20b-metal.py"],
+)
+
+host_test(
+    name = "raw_ycbcr_test",
+    srcs = [
+        "raw_ycbcr_test.cpp",
+        "//drivers/TegraGM20BMetal:raw/runtime/raw_ycbcr.cpp",
+        "//drivers/TegraGM20BMetal:raw/runtime/raw_ycbcr.h",
+    ],
+    cxx_std = "c++17",
+)
+
+host_test(
+    name = "raw_bounds_test",
+    srcs = [
+        "raw_bounds_test.cpp",
+        "//drivers/TegraGM20BMetal:raw/runtime/raw_bounds.h",
+        "//drivers/TegraGM20BMetal:raw/runtime/raw_region.h",
+    ],
+    cxx_std = "c++17",
+)
+
+host_test(
+    name = "raw_overlap_test",
+    srcs = [
+        "raw_overlap_test.cpp",
+        "//drivers/TegraGM20BMetal:raw/runtime/raw_bounds.h",
+        "//drivers/TegraGM20BMetal:raw/runtime/raw_overlap.h",
+        "//drivers/TegraGM20BMetal:raw/runtime/raw_region.h",
+    ],
+    cxx_std = "c++17",
+)
+
+host_test(
+    name = "raw_cache_test",
+    srcs = [
+        "raw_cache_test.cpp",
+        "//drivers/TegraGM20BMetal:raw/pack/probe_record.h",
+        "//drivers/TegraGM20BMetal:raw/runtime/raw_cache.cpp",
+        "//drivers/TegraGM20BMetal:raw/runtime/raw_cache.h",
+        "//drivers/TegraGM20BMetal:raw/runtime/raw_capture.h",
+        "//drivers/TegraGM20BMetal:raw/runtime/raw_metallib.cpp",
+        "//drivers/TegraGM20BMetal:raw/runtime/raw_metallib.h",
+        "//drivers/TegraGM20BMetal:raw/runtime/raw_pack.cpp",
+        "//drivers/TegraGM20BMetal:raw/runtime/raw_pack.h",
+        "//drivers/TegraGM20BMetal:raw/runtime/raw_record.h",
+        "//drivers/TegraGM20BMetal:raw/test/cache_checks.h",
+    ],
+    cxx_std = "c++17",
 )

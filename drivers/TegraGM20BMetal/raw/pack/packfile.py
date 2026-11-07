@@ -4,7 +4,10 @@ import struct
 from dataclasses import dataclass
 
 MAGIC = b'GM20BPK1'
-VERSION = 2  # 2: the header's stack key (rawpack.py --stack) after the section table
+# 2: the header's stack key (rawpack.py --stack) after the section table; 3: barrier-form records; 4: programs' shader
+# data and constant buffer types
+VERSION = 4
+PROGRAM_CBUFS = 11  # PackProgram.cbufType's length (runtime/raw_pack.h)
 
 
 def fnv(b: bytes, h: int = 0xCBF29CE484222325) -> int:
@@ -51,7 +54,7 @@ def pipeline_bytes(rec: dict, key_offset: int, blob_off: int) -> bytes:
     # the raw path's own states (probe.mm PROBE_YCBCR_LIB) by the name the runtime asks for (raw_gpu.cpp ycbcrPipeline)
     own = re.search(r'\| f (ycbcr_\w+)', rec['key'])
     keyhash = fnv(('raw.ycbcr.' + own.group(1)).encode() if own else rec['key'].encode())
-    flags = 1 if rec['fetch'] else 0
+    flags = (1 if rec['fetch'] else 0) | (2 if rec.get('form') == 'barrier' else 0)  # PackPipelineFlags
     head = struct.pack(
         '<QIHHIIBBBBHHI',
         keyhash,
@@ -105,7 +108,19 @@ def pack_bytes(pack: Pack) -> tuple[bytes, list[int]]:
     pipe_bin, blob, strings = pipeline_sections(pack.pipes)
     prog_bin = bytearray()
     for pr in pack.programs:
-        prog_bin += struct.pack('<IIII', pr['heap_offset'], pr['program'], pr['bytes'], len(pr['cbufs']))
+        types = bytes(pr['cbufs']) + bytes(PROGRAM_CBUFS - len(pr['cbufs']))
+        prog_bin += (
+            struct.pack(
+                '<IIIIIB',
+                pr['heap_offset'],
+                pr['program'],
+                pr['bytes'],
+                pr['data_offset'],
+                pr['data_bytes'],
+                len(pr['cbufs']),
+            )
+            + types
+        )
     tsc_bin = b''.join(struct.pack('<8I', *w) for w in pack.constexpr_tsc)
     base_bin = b''.join(struct.pack('<II', m, v) for m, v in sorted(pack.baseline.items()))
     init_bin = b''.join(struct.pack('<HHII', sc, m, d, rc) for sc, m, d, rc in pack.init)

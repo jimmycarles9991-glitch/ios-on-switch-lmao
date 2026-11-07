@@ -210,7 +210,7 @@ turnstile_get_type(struct turnstile *turnstile)
 	return (turnstile_type_t) type_and_gencount.ts_type;
 }
 
-/* Switch stall reports (switch_stall.c): whether a turnstile's proprietor is a port. */
+/* Switch stall reports (kernel/switch/diag/stall.c): whether a turnstile's proprietor is a port. */
 turnstile_type_t switch_turnstile_type(struct turnstile *turnstile);
 turnstile_type_t
 switch_turnstile_type(struct turnstile *turnstile)

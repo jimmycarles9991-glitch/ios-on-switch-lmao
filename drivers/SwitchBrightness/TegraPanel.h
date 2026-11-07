@@ -7,13 +7,14 @@
 // duty * 2047 / 255). The panel is in video mode once hekate's display_init() has run, so a command packet rides the video
 // stream: hekate display_dsi_vblank_write() (enable command packets in video on line 4, wait for a frame end, queue the
 // packet, wait for the next frame end, reset the DSI syncpoint block, return to plain video). Every DSI write of that
-// sequence is made at a fixed offset after a DC A frame end, in primary interrupt context, as hekate makes them; a
-// command takes four frames (67 ms). TegraPanel.cpp has the steps and the timing.
+// sequence is made at a fixed offset after a DC A frame end, in primary interrupt context (the frame-end filter or a
+// timer callout), as hekate makes them; a command takes four frames (67 ms). TegraPanel.cpp has the steps and the timing.
 //
 // Frame ends come only from the display controller's interrupt (DC A, GIC SPI 73 = INTID 105), which the display driver
 // owns (NativeLegacyDisplay's vblank source); its interrupt filter calls tegra_panel_frame_end_filter() for every
-// FRAME_END. There is no polled mode: a command issued before the display reports frame ends, or while FRAME_END is
-// masked, or a frame end that does not come within 50 ms, panics with the DC interrupt registers and the GIC state.
+// FRAME_END; each command holds FRAME_END unmasked (native_legacy_frame_end_hold) until it is done. There is no polled
+// mode: a command issued before the display reports frame ends, or whose hold leaves FRAME_END masked, or a frame end
+// that does not come within 50 ms, panics with the DC interrupt registers and the GIC state.
 //
 // The functions below are for thread context only, never an interrupt filter or with a spinlock held. Commands are
 // serialized internally. They return 0 on success and -1 if the display is not running (clocks gated, DSI off, not in
@@ -43,6 +44,10 @@ int tegra_panel_power_off(void);
 // sleep mode (it is not reset), so L4T's level-2 register writes are not repeated. About 0.5 s.
 int tegra_panel_power_on(int level);
 
+// True: TegraPanel takes native_legacy_frame_end_hold for each command and nothing else of SwitchBrightness needs DC A
+// frame ends, so the display may mask FRAME_END while it has no holder. Any context.
+bool tegra_panel_holds_frame_end(void);
+
 // The level the boot chain left, from DC_COM_SCRATCH_REGISTER_B where hekate keeps its 0..255 duty (di.h
 // DC_DCS_BACKLIGHT_LEVEL), scaled to 0..TEGRA_PANEL_BRIGHTNESS_MAX; -1 if the display is not running or the register
 // holds no plausible value.
@@ -52,9 +57,8 @@ int tegra_panel_boot_brightness(void);
 int tegra_panel_brightness(void);
 
 // For the owner of the DC A interrupt: call from its primary interrupt filter at every FRAME_END (DC_CMD_INT_STATUS
-// bit 1, which that owner enables, unmasks and clears), after clearing it. Returns at once unless a command is out; the
-// last step of a command spends about 620 us here (hekate's syncpoint reset and its settle delays). It also clocks the
-// ambient light sensor (switch_als_frame_end).
+// bit 1, which that owner enables, unmasks and clears), after clearing it. Returns at once unless a command is out, and
+// never waits: the last step's settle delays run on a timer callout.
 void tegra_panel_frame_end_filter(void);
 
 #ifdef __cplusplus

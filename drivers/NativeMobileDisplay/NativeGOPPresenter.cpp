@@ -9,6 +9,7 @@
 #include <kern/clock.h>
 #include <pexpert/pexpert.h>
 #include "NativeGOPWire.h"
+#include "../TegraGM20B/TegraGM20BLayout.h"
 extern "C" {
 volatile uint32_t native_gop_ready, native_gop_failures;
 volatile uint64_t native_gop_transfers, native_gop_bytes, native_gop_physical, native_gop_virtual;
@@ -193,10 +194,23 @@ IOReturn NativeGOPPresenter::transfer(task_t task, const NGPPresent &q, NGPTrans
         return kIOReturnNoMemory;
     IOReturn status = input->prepare(kIODirectionIn);
     if (status == kIOReturnSuccess) {
+        // A range inside a block-linear surface holds its texels tiled: the rows come from the GPU driver's scratch, taken
+        // before the gate since that call sleeps. Past the surface's end the range is read as it is.
+        void *rows = nullptr, *rowsMemory = nullptr;
+        uint64_t rowsOffset = 0, fromRows = 0;
+        const addr64_t pa = input->getPhysicalSegment(0, nullptr, kIOMemoryMapperNone);
+        const int tiled = pa ? tegra_gm20b_surface_rows(pa, &rows, &rowsMemory, &rowsOffset) : 0;
+        IOMemoryDescriptor *rowsSource = static_cast<IOMemoryDescriptor *>(rowsMemory);
+        if (rows && rowsSource->getLength() > rowsOffset)
+            fromRows = rowsSource->getLength() - rowsOffset < q.bytes ? rowsSource->getLength() - rowsOffset : q.bytes;
+        uint8_t *frame = reinterpret_cast<uint8_t *>(mapping->getVirtualAddress());
         IOLockLock(gate);
         if (!online)
             status = kIOReturnNotReady;
-        else if (input->readBytes(0, reinterpret_cast<void *>(mapping->getVirtualAddress()), q.bytes) != q.bytes)
+        else if (tiled < 0)
+            status = kIOReturnNoMemory;
+        else if ((fromRows && rowsSource->readBytes(rowsOffset, frame, fromRows) != fromRows) ||
+                 input->readBytes(fromRows, frame + fromRows, q.bytes - fromRows) != q.bytes - fromRows)
             status = kIOReturnUnderrun;
         else {
             __asm__ volatile("dsb oshst" ::: "memory");
@@ -206,6 +220,8 @@ IOReturn NativeGOPPresenter::transfer(task_t task, const NGPPresent &q, NGPTrans
             native_gop_bytes = native_gop_bytes + q.bytes;
         }
         IOLockUnlock(gate);
+        if (rows)
+            tegra_gm20b_surface_rows_done(rows);
         IOReturn completion = input->complete(kIODirectionIn);
         if (status == kIOReturnSuccess)
             status = completion;

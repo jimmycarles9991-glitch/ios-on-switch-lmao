@@ -9,6 +9,7 @@
 #define SWITCH_MAX77620_H
 #include <stdint.h>
 #include "../TegraI2C/TegraI2C.h"
+#include "../../diagnostics/switch/SwitchResetCause.h"
 
 namespace max77620 {
 constexpr unsigned kBus = 5;
@@ -60,5 +61,11 @@ void rtcUpdated();
 // logged, and this boot's first replaces it.
 extern "C" void switch_pmic_mark_start(void);
 #endif
+
+// SwitchPowerMark.cpp, thread context, I2C5 up (SwitchThermalRecord.h). record: a software thermal shutdown writes its
+// sensor and temperature into ALARM2 and holds it there against debug marks; 0 or the I2C error. take: switch_pmic_start,
+// before the debug marks start: the last boot's record, cleared once read; SWITCH_THERMAL_NONE when there is none.
+extern "C" int switch_pmic_thermal_record(enum switch_thermal_sensor sensor, int millic);
+extern "C" enum switch_thermal_sensor switch_pmic_thermal_take(int *millic);
 
 #endif

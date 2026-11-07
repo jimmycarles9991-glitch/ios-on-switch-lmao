@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
 // The BM92T36 alternate-mode engine on SwitchPD's work loop: SwitchPDAltModeSteps.h decides, this file does the I2C,
-// the step timer and the hand-offs. DisplayPort's lanes go to SwitchDisplayPort; the SuperSpeed pair's fate and the
-// dock's hub go to SwitchUSB's USB 3 side (r24-usb3's XusbLanes.h) when that is built in.
+// the step timer and the hand-offs. DisplayPort's lanes go to SwitchDisplayPort when it is built in; the SuperSpeed
+// pair's fate and the dock's hub go to SwitchUSB (XusbLanes.h switch_usb_set_alt_lanes).
 #include <IOKit/IOLib.h>
 #include <IOKit/IOService.h>
 #include <IOKit/IOTimerEventSource.h>
@@ -13,9 +13,7 @@
 #if SWITCH_DISPLAYPORT
 #include "SwitchDisplayPort.h"
 #endif
-#if SWITCH_USB_SUPERSPEED
 #include "../SwitchUSB/XusbLanes.h"
-#endif
 
 namespace {
 constexpr unsigned kBus = 1;
@@ -45,14 +43,12 @@ unsigned gToldDisplayPort;
 
 void hand_off()
 {
-#if SWITCH_USB_SUPERSPEED
     if (gAlt.lanes != gToldLanes || gAlt.hub_enabled != gToldHub) {
         switch_usb_set_alt_lanes(gAlt.lanes == SWITCH_PD_ALT_LANES_PENDING ? SWITCH_USB3_LANES_PENDING
                                  : gAlt.lanes == SWITCH_PD_ALT_LANES_TAKEN ? SWITCH_USB3_LANES_TAKEN
                                                                            : SWITCH_USB3_LANES_FREE,
                                  gAlt.hub_enabled);
     }
-#endif
     gToldLanes = gAlt.lanes;
     gToldHub = gAlt.hub_enabled;
 #if SWITCH_DISPLAYPORT

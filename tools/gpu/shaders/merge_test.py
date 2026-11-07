@@ -83,7 +83,6 @@ class JoinTest(unittest.TestCase):
         records.mkdir(parents=True)
         (records / ('dd' + 'd' * 62)).write_bytes(record(b'the device made this one'))
         for name, value in (
-            ('manifest.json', {'stack': 's', 'nvk_uuid': 'u', 'arch': 'arm64'}),
             ('plan.json', {}),
             (
                 'inventory.json',
@@ -97,7 +96,6 @@ class JoinTest(unittest.TestCase):
                 index=[b[1] for b in buckets],
                 report=[b[2] for b in buckets],
                 records=self.root / 'records',
-                tools_manifest=self.root / 'manifest.json',
                 ipsw='21H461',
                 plan=self.root / 'plan.json',
                 inventory=self.root / 'inventory.json',

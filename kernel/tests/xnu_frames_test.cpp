@@ -71,17 +71,40 @@ TEST(Frames, StillClientsAndRestartsMeasureNoGap)
     EXPECT_EQ(line(c, nullptr), "Widget[5] 1 commits <1:0 1:0 2:0 3:1 4+:0");
 }
 
-TEST(Frames, MostCommitsFirstAndAFullTable)
+TEST(Frames, MostCommitsFirst)
 {
     switch_frames_cadence c = {};
     uint64_t t = 1000000;
-    for (int pid = 1; pid <= SWITCH_FRAMES_CLIENTS + 2; pid++)
+    for (int pid = 1; pid <= SWITCH_FRAMES_CLIENTS; pid++)
         for (int i = 0; i < pid; i++)
             commit(c, pid, "p", t + uint64_t(i) * 20000, 1);
     EXPECT_EQ(c.used, uint32_t(SWITCH_FRAMES_CLIENTS));
-    EXPECT_EQ(c.dropped, 9u + 10u);
     EXPECT_EQ(line(c, nullptr), "p[8] 8 commits <1:0 1:7 2:0 3:0 4+:0, p[7] 7 commits <1:0 1:6 2:0 3:0 4+:0, "
                                 "p[6] 6 commits <1:0 1:5 2:0 3:0 4+:0, p[5] 5 commits <1:0 1:4 2:0 3:0 4+:0");
+}
+
+// The first senders after boot (launchd, notifyd, ...) go quiet; a client that starts drawing later takes the place of
+// the one quiet the longest, and the others keep their counts.
+TEST(Frames, ANinthClientDisplacesTheIdlest)
+{
+    switch_frames_cadence c = {};
+    uint64_t t = 1000000;
+    for (int pid = 1; pid <= SWITCH_FRAMES_CLIENTS; pid++)
+        commit(c, pid, "boot", t + uint64_t(pid) * 1000, 1);
+    t += 100000;
+    for (int frame = 0; frame < 3; frame++, t += kPeriod)
+        for (int pid = 1; pid <= SWITCH_FRAMES_CLIENTS; pid++)
+            if (pid != 3)
+                commit(c, pid, "boot", t + uint64_t(pid) * 10, 1);
+    for (int frame = 0; frame < 4; frame++, t += kPeriod)
+        commit(c, 27, "SpringBoard", t);
+    EXPECT_EQ(c.used, uint32_t(SWITCH_FRAMES_CLIENTS));
+    EXPECT_EQ(c.client[2].pid, 27);
+    EXPECT_EQ(c.client[2].commits, 4u);
+    EXPECT_EQ(c.client[0].commits, 4u);
+    EXPECT_THAT(line(c, nullptr), HasSubstr("SpringBoard[27] 4 commits <1:0 1:3 2:0 3:0 4+:0"));
+    for (const switch_frames_client &e : c.client)
+        EXPECT_NE(e.pid, 3);
 }
 
 TEST(Frames, DeliveryIsTheOldestPendingReportToTheNextEventMessage)
@@ -117,8 +140,8 @@ TEST(FramesSource, BothTreesFeedItUnderThePortLock)
         const std::string s = source(path);
         EXPECT_THAT(s, HasSubstr("#include <switch/frames.h>"));
         EXPECT_THAT(
-            s,
-            HasSubstr("\tlck_spin_unlock(&switch_render_senders_lock);\n\tswitch_frames_render_message(task, id);\n"));
+            s, HasSubstr("\tlck_spin_unlock(&switch_render_senders_lock);\n\tswitch_frames_render_message(task, id, "
+                         "task->itk_space == switch_render_server_space);\n"));
         const size_t send = s.find("\nipc_kmsg_send(\n");
         ASSERT_NE(send, std::string::npos);
         const std::string body = s.substr(send, s.find("\n}\n", send) - send);

@@ -184,8 +184,9 @@ are generated in its encoding (`tegra_vic_matrix_*`) and checked on the host aga
   -> 420f pass-through is checked too, as a trait (`yccIn`): not proven, such jobs are refused (callers fall back);
   not a gate.
 - **Shared events** are refused. If Core Animation sends them on the clone path, each frame's transform fails with
-  kIOReturnUnsupported (no crash; CA force-completes the events). The device log says so once ("transform refused
-  ... shared events"). Supporting them needs the IOSurface kext's IOSurfaceSharedEvent lookup/listener/signal
+  kIOReturnUnsupported (no crash; CA force-completes the events). The device log says so once per process
+  (kits/SwitchRefusal, category TegraVIC: "shared events: IOSurfaceAccelerator transform refused (not on VIC), the
+  caller falls back"). Supporting them needs the IOSurface kext's IOSurfaceSharedEvent lookup/listener/signal
   (0x5b974d8, 0x5b97400, 0x5b97718, 0x5b96c88 [V], semantics [I]).
 - Colour standard by size, not by the surfaces' YCbCrMatrix attachment.
 - 4:2:2, 4:4:4, L565, l10r, RGhA, 10-bit: refused (VideoToolbox falls back per call).
@@ -207,15 +208,15 @@ are generated in its encoding (`tegra_vic_matrix_*`) and checked on the host aga
 
 ## 10. NVDEC's pictures (not IOSurfaceAccelerator)
 
-TegraNVDEC's Present method (ABI v6) hands each decoded picture to `tegra_vic_present` (`TegraVICPresent.h`): NVDEC's
+TegraNVDEC's Present method (ABI v7) hands each decoded picture to `tegra_vic_present` (`TegraVICPresent.h`): NVDEC's
 NV12 in Tegra block linear (16Bx2 sectors, GOB height 2, the layout `SwitchVideoDecoders/AVD/BlockLinear.h` reads) in
-its contiguous arena, copied 1:1 by the 4:2:0 pass-through into the decoder's pool IOSurface (pitch linear, '420v' or
-'420f', rows and planes on 256 bytes), looked up in the calling task. The source's pages go into the source window
-read-only; it needs no cache maintenance (NVDEC wrote DRAM, no CPU writes the arena); the destination is cleaned and
-invalidated before and invalidated after, as for every job, so a GPU that does not snoop the CPU's caches reads what
-VIC wrote. Synchronous on the decoder's thread under the engine lock, with page lists of its own (32 MiB a side).
-Block-linear input is a V4 trait (`blockLinearIn`: a 128x64 picture written in block linear by the CPU must copy
-exactly, to a step); without it the service still publishes, `tegra_vic_present_ready` is false, TegraNVDECInfo has
-no present feature and the decoders copy on the CPU. Refusals (odd sizes, unaddressable surfaces) are one line per
-kind per boot and leave the picture invalidated for the decoder's CPU copy. Stats: "TegraVIC: Ns present=..." per 5 s
-window with pictures.
+one of its buffers, with that buffer's page list, copied 1:1 by the 4:2:0 pass-through into the decoder's pool IOSurface
+(pitch linear, '420v' or '420f', rows and planes on 256 bytes), looked up in the calling task. The picture's pages go
+into the source window read-only; it needs no cache maintenance (NVDEC wrote DRAM, no CPU writes its buffers); the
+destination is cleaned and invalidated before and invalidated after, as for every job, so a GPU that does not snoop the
+CPU's caches reads what VIC wrote. Synchronous on the decoder's thread under the engine lock, with page lists of its own
+(32 MiB a side). Block-linear input is a V4 trait (`blockLinearIn`: a 128x64 picture written in block linear by the CPU
+must copy exactly, to a step); without it the service still publishes, `tegra_vic_present_ready` is false,
+TegraNVDECInfo has no present feature and the decoders copy on the CPU. Refusals (odd sizes, unaddressable surfaces) are
+one line per kind per boot and leave the picture invalidated for the decoder's CPU copy. Stats: "TegraVIC: Ns
+present=..." per 5 s window with pictures.

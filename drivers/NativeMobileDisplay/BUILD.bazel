@@ -33,6 +33,7 @@ kernel_driver(
     name = "NativeLegacyDisplay",
     srcs = [
         "NativeLegacyDisplay.cpp",
+        "TegraDisplayColor.cpp",
         # The display across SC7 (tegra_display_suspend/resume): hekate's cold display init/power-down.
         "TegraDisplayPower.cpp",
         "original-bindings.S",
@@ -45,11 +46,16 @@ kernel_driver(
     hdr_deps = [
         "drivers/ArmGIC",
         "drivers/SwitchPower",
+        "drivers/SwitchSuspend",
         "drivers/TegraDisplayFlip",
+        # TegraGM20BLayout.h: the column-scan experiment's block-linear surfaces (NativeColumnScan.h).
+        "drivers/TegraGM20B",
         "drivers/TegraGPIO",
         "drivers/TegraSMMU",
         # TegraVICConfig.h: the traits the detach gate reads (r18-planes).
         "drivers/TegraVIC",
+        "kits/SwitchRefusal",
+        "kits/SwitchSysctl",
     ],
     late = ["NativeLegacyDisplay.cpp"],
 )
@@ -64,6 +70,7 @@ switch_abi_bindings(
 kernel_driver(
     name = "NativeGOPPresenter",
     srcs = ["NativeGOPPresenter.cpp"],
-    hdr_deps = [],
+    # TegraGM20BLayout.h: a block-linear surface's rows for the CPU read.
+    hdr_deps = ["drivers/TegraGM20B"],
     late = ["NativeGOPPresenter.cpp"],
 )

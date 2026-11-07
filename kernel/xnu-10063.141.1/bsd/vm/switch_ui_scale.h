@@ -57,6 +57,14 @@ switch_ui_scale_is_unit(const struct switch_ui_scale *scale)
 	return scale->num == scale->den;
 }
 
+/* switch_ui_scales is static, so every file that includes this has its own copy: compare scales by value, never by
+ * address. */
+static inline bool
+switch_ui_scale_same(const struct switch_ui_scale *a, const struct switch_ui_scale *b)
+{
+	return a->num == b->num && a->den == b->den;
+}
+
 /* The scale for the boot-arg's value (NULL: no switch-ui-scale), or NULL for a value that names none. */
 static inline const struct switch_ui_scale *
 switch_ui_scale_named(const char *value)

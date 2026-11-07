@@ -15,7 +15,7 @@
 //     is not ours yet, see SwitchUSB.h) the port always reports a cable: the pull-up goes on once the functions are
 //     ready, and a host plugged in later simply resets the bus.
 // This file implements the 18 pure-virtual hardware methods the in-cache reference backend (AppleUSBXDCI, a DWC3
-// driver) implements, on top of XudcHardware. USB2 high/full speed; bulk and interrupt endpoints; no isochronous. Data
+// driver) implements, on top of XudcHardware. USB2 high/full speed; bulk, interrupt and isochronous endpoints. Data
 // moves between the controller and the functions' own buffers, scatter-gather, many requests in flight (section "Data
 // endpoints").
 //
@@ -38,6 +38,7 @@
 #include "OriginalIOUSBDeviceFamily.h"
 #include "XudcHardware.h"
 #include "XudcTransfer.h"
+#include "XudcIsoch.h"
 #include <IOKit/IOLib.h>
 #include <IOKit/IOFilterInterruptEventSource.h>
 #include <IOKit/IOTimerEventSource.h>
@@ -51,6 +52,7 @@
 #include <os/log.h>
 #include <string.h>
 #include "../ArmGIC/SwitchInterrupts.h"
+#include "../../kits/SwitchRefusal/SwitchRefusal.h"
 #include "SwitchUSB.h"
 
 using namespace xudc;
@@ -63,6 +65,9 @@ void switchxudc_static_init(void) __asm__("__GLOBAL__sub_I_SwitchXUDC.cpp");
 namespace {
 // _IOUSBDeviceIORequestTag fields (IOUSBDeviceController::io, completeEndpointIO; the same in every kind so far).
 constexpr size_t kReqEndpoint = 0, kReqBuffer = 8, kReqStatus = 40, kReqIsoc = 48, kReqLength = 64, kReqActual = 72;
+// An isochronous request's frame count and IOUSBDeviceIsocFrame list in place of length and actual (21H461's
+// IOUSBDeviceController isochronous io; completeEndpointIO hands the list back to the client).
+constexpr size_t kReqFrameCount = kReqLength, kReqFrames = kReqActual;
 
 template <typename T> T get(const _IOUSBDeviceIORequestTag *r, size_t off)
 {
@@ -86,6 +91,7 @@ enum : int {
 
 // USB transfer types as passed to activateEndpoint.
 enum : int {
+    kTypeIsochronous = 1,
     kTypeBulk = 2,
     kTypeInterrupt = 3
 };
@@ -102,6 +108,10 @@ constexpr uint32_t kQueueDepth = 64;
 constexpr uint32_t kMaxRuns = 128;
 constexpr uint32_t kMaxPieces = kDataRingTrbs - 3;
 using Tds = TdRing<kDataRingTrbs - 1, kQueueDepth>;
+// Isochronous endpoints (section "Isochronous endpoints"): requests on the ring at once, frames per request.
+constexpr uint32_t kIsocRequests = 16, kIsocFrames = 64;
+using IsocTds = IsocRing<kDataRingTrbs - 1, kIsocRequests, kIsocFrames>;
+static_assert(kIsocFrames <= kMaxPieces, "a request's frames plan into scratchPieces");
 static_assert(kMaxPieces < kDataRingTrbs - 2, "a serial TRB fits beside the largest tail");
 constexpr uint32_t kPoolBytes = 512 * 1024, kPoolPages = kPoolBytes / kBouncePageBytes;
 constexpr uint32_t kSerialBytes = 0x10000;
@@ -143,10 +153,12 @@ class SwitchXUDC : public IOUSBDeviceController {
     // allocated at the first activation: SwitchXUDC itself is capped at 16 KiB. serial: the head request runs alone one
     // TRB at a time through `serial` (its one-TRB TD in tds, serialLength in flight).
     struct Endpoint {
-        bool active, in, serialBusy;
+        bool active, in, serialBusy, isoch, bulk;
         uint32_t mps, head, count, serialLength;
+        uint64_t isocInterval;  // one service interval, absolute time
         Request *queue;
         Tds *tds;
+        IsocTds *iso;
         DmaBuffer serial;
     };
 
@@ -189,6 +201,7 @@ class SwitchXUDC : public IOUSBDeviceController {
     uint32_t interruptsLogged;
     uint32_t mostTrbs[2];                // the most TRBs one request took per direction since the last stats line
     uint8_t secondLogged, eventsLogged;  // one-shot lines: the first second event; events for no request, errors
+    uint8_t starvedLogged;               // one-shot line: an isochronous ring ran dry
     bool draining;                       // serviceEvents is reading the event ring
     volatile uint64_t filterTicks;
     Stage stage;
@@ -236,6 +249,15 @@ class SwitchXUDC : public IOUSBDeviceController {
     void complete(uint32_t dci, IOReturn status, uint32_t actual, const Decision *event);
     void releaseTrbs(uint32_t dci, const Tds::Td &td, Request &r, bool copyBack, uint32_t actual);
     void lostEvent(uint32_t dci, const Event &e, uint32_t index, const Decision &d);
+    IOReturn isocIo(uint32_t dci, _IOUSBDeviceIORequestTag *request);
+    void kickIsoc(uint32_t dci);
+    Admit admitIsoc(uint32_t dci, Request &r);
+    void isocEvent(uint32_t dci, const Event &e, uint32_t index);
+    void completeIsoc(uint32_t dci, uint64_t now);
+    void failHeadIsoc(uint32_t dci, IOReturn status);
+    void finishIsoc(_IOUSBDeviceIORequestTag *request, IOReturn status);
+    void cancelIsoc(uint32_t dci, IOReturn status);
+    bool runsOf(Request &r, uint32_t *runCount, uint32_t *covered);
     void oddEvent(uint32_t dci, const Event &e, uint32_t index, const char *what);
     int poolTake();
     void poolGive(uint64_t pa);
@@ -309,6 +331,7 @@ public:
 
     IOReturn doRemoteWakeGated() override
     {
+        switch_refusal("usb-device", "remote-wake", "remote wake of the USB host refused: not implemented on the XUDC");
         return kIOReturnUnsupported;
     }
 
@@ -474,9 +497,13 @@ void SwitchXUDC::serviceEvents()
     if (emptied) {
         uint32_t lifted = 0;
         for (uint32_t dci = 2; dci < kMaxDci; ++dci) {
-            if (!endpoints[dci].tds || !endpoints[dci].tds->fenced())
+            Endpoint &ep = endpoints[dci];
+            if (ep.tds && ep.tds->fenced())
+                ep.tds->liftFence();
+            else if (ep.iso && ep.iso->fenced())
+                ep.iso->liftFence();
+            else
                 continue;
-            endpoints[dci].tds->liftFence();
             lifted |= 1u << dci;
         }
         for (uint32_t dci = 2; dci < kMaxDci; ++dci)
@@ -815,8 +842,8 @@ IOReturn SwitchXUDC::ioGated(_IOUSBDeviceIORequestTag *request)
     if (dci >= kMaxDci || !endpoints[dci].active)
         return kIOReturnNotReady;
     Endpoint &ep = endpoints[dci];
-    if (get<uint8_t>(request, kReqIsoc))
-        return kIOReturnUnsupported;
+    if (get<uint8_t>(request, kReqIsoc) || ep.isoch)
+        return isocIo(dci, request);
     if (get<uint64_t>(request, kReqLength) > UINT32_MAX || ep.count == kQueueDepth)
         return kIOReturnNoResources;
     const uint64_t entered = mach_absolute_time();
@@ -834,6 +861,8 @@ IOReturn SwitchXUDC::ioGated(_IOUSBDeviceIORequestTag *request)
 void SwitchXUDC::kick(uint32_t dci)
 {
     Endpoint &ep = endpoints[dci];
+    if (ep.isoch)
+        return kickIsoc(dci);
     bool queued = false;
     while (ep.active && !ep.serialBusy && !ep.tds->fenced() && ep.tds->onRing() < ep.count && !hw.halted(dci)) {
         Request &r = ep.queue[(ep.head + ep.tds->onRing()) % kQueueDepth];
@@ -854,6 +883,34 @@ void SwitchXUDC::kick(uint32_t dci)
         hw.doorbell(dci);
 }
 
+// The request's physical runs into scratchRuns, prepare()d first unless it goes direct. False if it cannot be prepared
+// or has a hole; *covered falls short of its length when it has more runs than kMaxRuns.
+bool SwitchXUDC::runsOf(Request &r, uint32_t *runCount, uint32_t *covered)
+{
+    if (!r.prepared && !requestDirect(r, scratchRuns, kMaxRuns)) {
+        if (r.md->prepare() != kIOReturnSuccess)
+            return false;
+        r.prepared = true;
+    }
+    Run *const runs = scratchRuns;
+    uint32_t n = directRunCount(r), offset = directOffset(r);
+    while (offset < r.length && n < kMaxRuns) {
+        IOByteCount segment = 0;
+        const addr64_t pa = r.md->getPhysicalSegment(offset, &segment, kIOMemoryMapperNone);
+        if (!pa || !segment)
+            return false;
+        const uint32_t take = segment < r.length - offset ? (uint32_t)segment : r.length - offset;
+        if (n && runs[n - 1].pa + runs[n - 1].length == pa)
+            runs[n - 1].length += take;
+        else
+            runs[n++] = {pa, take};
+        offset += take;
+    }
+    *runCount = n;
+    *covered = offset;
+    return true;
+}
+
 // One request onto the ring (see the section comment). Queued, or why not.
 SwitchXUDC::Admit SwitchXUDC::admit(uint32_t dci, Request &r)
 {
@@ -861,26 +918,11 @@ SwitchXUDC::Admit SwitchXUDC::admit(uint32_t dci, Request &r)
     const bool out = !ep.in;
     if (!r.md)
         return r.length ? Admit::Failed : Admit::Serial;
-    if (!r.prepared && !requestDirect(r, scratchRuns, kMaxRuns)) {
-        if (r.md->prepare() != kIOReturnSuccess)
-            return Admit::Failed;
-        r.prepared = true;
-    }
     Run *const runs = scratchRuns;
-    uint32_t runCount = directRunCount(r), offset = directOffset(r);
-    while (offset < r.length && runCount < kMaxRuns) {
-        IOByteCount segment = 0;
-        const addr64_t pa = r.md->getPhysicalSegment(offset, &segment, kIOMemoryMapperNone);
-        if (!pa || !segment)
-            return Admit::Failed;
-        const uint32_t take = segment < r.length - offset ? (uint32_t)segment : r.length - offset;
-        if (runCount && runs[runCount - 1].pa + runs[runCount - 1].length == pa)
-            runs[runCount - 1].length += take;
-        else
-            runs[runCount++] = {pa, take};
-        offset += take;
-    }
-    if (offset < r.length)
+    uint32_t runCount = 0, covered = 0;
+    if (!runsOf(r, &runCount, &covered))
+        return Admit::Failed;
+    if (covered < r.length)
         return Admit::Serial;
     const bool probe = out && residue == kResidueUnknown && r.length >= 2 * ep.mps;
     const uint32_t room = ep.tds->room();
@@ -1065,6 +1107,8 @@ void SwitchXUDC::transferEvent(const Event &e)
         ++st.unexplained;
         return oddEvent(dci, e, index, "for an endpoint never configured");
     }
+    if (ep.isoch)
+        return isocEvent(dci, e, index);
     const Decision d = ep.tds->decide(index, e.code(), e.residue(), ep.in, residue, [this, dci](uint32_t t) {
         return hw.trbLength(dci, t);
     });
@@ -1145,6 +1189,8 @@ void SwitchXUDC::cancel(uint32_t dci, IOReturn status)
     Endpoint &ep = endpoints[dci];
     if (!ep.queue || !ep.tds)
         return;
+    if (ep.isoch)
+        return cancelIsoc(dci, status);
     if (ep.tds->busy())
         hw.dropQueued(dci);
 
@@ -1175,8 +1221,236 @@ void SwitchXUDC::cancel(uint32_t dci, IOReturn status)
 void SwitchXUDC::finish(_IOUSBDeviceIORequestTag *request, IOReturn status, uint32_t actual)
 {
     put<int32_t>(request, kReqStatus, status);
-    put<uint64_t>(request, kReqActual, actual);  // read as 32 bits for bulk, 64 for isochronous
+    put<uint64_t>(request, kReqActual, actual);  // the family reads 32 bits; isochronous: finishIsoc
     completeEndpointIO(request);
+}
+
+// ---------------------------------------------------------------------------
+// Isochronous endpoints (XudcIsoch.h): AppleUSBMike's USB audio and the USB Audio 2 / IDAM functions. Each frame of a
+// request is one Isoch TRB, sent or taken in the first service interval the controller can give it (Start Isoch ASAP:
+// the client's frame numbers are its own bookkeeping). Requests complete in order, at their last frame's event or a
+// later request's; every frame then gets its status, the bytes it moved and the time of its interval. Nothing halts: a
+// frame the host never serviced fails alone, and an empty ring when the host asks costs that interval only.
+IOReturn SwitchXUDC::isocIo(uint32_t dci, _IOUSBDeviceIORequestTag *request)
+{
+    Endpoint &ep = endpoints[dci];
+    const uint64_t count = get<uint64_t>(request, kReqFrameCount);
+    const IsocFrame *frames = get<IsocFrame *>(request, kReqFrames);
+    if (!ep.isoch || !get<uint8_t>(request, kReqIsoc) || !frames || !count)
+        return kIOReturnBadArgument;
+    if (count > kIsocFrames) {
+        switch_refusal("usb-device", "isochronous-frames",
+                       "isochronous request of %llu frames on endpoint %#x refused: at most %u per request", count,
+                       (unsigned)get<int32_t>(request, kReqEndpoint), kIsocFrames);
+        return kIOReturnNoResources;
+    }
+    if (ep.count == kQueueDepth)
+        return kIOReturnNoResources;
+    uint32_t total = 0;
+    for (uint32_t i = 0; i < count; ++i)
+        total += frames[i].requestCount;
+    Request &r = ep.queue[(ep.head + ep.count++) % kQueueDepth];
+    r = {{}, request, get<IOMemoryDescriptor *>(request, kReqBuffer), total, 0, false};
+    kickIsoc(dci);
+    return kIOReturnSuccess;
+}
+
+void SwitchXUDC::kickIsoc(uint32_t dci)
+{
+    Endpoint &ep = endpoints[dci];
+    bool queued = false;
+    while (ep.active && !ep.iso->fenced() && ep.iso->onRing() < ep.count && ep.iso->onRing() < kIsocRequests) {
+        const Admit a = admitIsoc(dci, ep.queue[(ep.head + ep.iso->onRing()) % kQueueDepth]);
+        if (a == Admit::Queued) {
+            queued = true;
+            continue;
+        }
+        if (a == Admit::Wait || ep.iso->onRing())
+            break;
+        failHeadIsoc(dci, kIOReturnDMAError);
+    }
+    if (queued)
+        hw.doorbell(dci);
+}
+
+SwitchXUDC::Admit SwitchXUDC::admitIsoc(uint32_t dci, Request &r)
+{
+    Endpoint &ep = endpoints[dci];
+    const bool out = !ep.in;
+    const IsocFrame *frames = get<IsocFrame *>(r.tag, kReqFrames);
+    const uint32_t count = (uint32_t)get<uint64_t>(r.tag, kReqFrameCount);
+    if (count > ep.iso->room())
+        return Admit::Wait;
+    uint32_t runCount = 0, covered = 0;
+    if (r.length && (!r.md || !runsOf(r, &runCount, &covered) || covered < r.length))
+        return Admit::Failed;
+    Piece *const pieces = scratchPieces;
+    uint16_t lengths[kIsocFrames];
+    uint32_t bounces = 0;
+    for (uint32_t i = 0, offset = 0; i < count; offset += lengths[i++]) {
+        lengths[i] = frames[i].requestCount;
+        if (!planFrame(scratchRuns, runCount, offset, lengths[i], out, kReach, &pieces[i]))
+            return Admit::Failed;
+        bounces += pieces[i].bounce;
+    }
+    if (bounces > poolFree)
+        return bounces > (pool.va ? kPoolPages : 0) ? Admit::Failed : Admit::Wait;
+    for (uint32_t i = 0; i < count; ++i) {
+        Piece &piece = pieces[i];
+        if (!piece.bounce)
+            continue;
+        const uint32_t page = (uint32_t)poolTake();
+        uint8_t *va = pool.va + page * kBouncePageBytes;
+        piece.pa = pool.pa + page * kBouncePageBytes;
+        if (!out)
+            requestRead(r, r.md, piece.offset, va, piece.length);
+        cacheFlush(va, piece.length);
+    }
+    if (r.length)
+        requestSync(r, r.md, 0, r.length, out);
+    uint32_t first = 0;
+    for (uint32_t i = 0; i < count; ++i) {
+        const uint32_t flags = trbType(TRB_ISOCH) | TRB_SIA | (out ? TRB_ISP : 0) | (i + 1 == count ? TRB_IOC : 0);
+        const uint32_t index = hw.pushData(dci, pieces[i].pa, pieces[i].length, 0, flags);
+        if (!i)
+            first = index;
+    }
+    ep.iso->push((uint16_t)first, lengths, (uint16_t)count);
+    return Admit::Queued;
+}
+
+void SwitchXUDC::isocEvent(uint32_t dci, const Event &e, uint32_t index)
+{
+    Endpoint &ep = endpoints[dci];
+    switch (ep.iso->event(index, e.code(), e.residue())) {
+    case IsocVerdict::Recorded:
+        break;
+    case IsocVerdict::Stale:
+        ++st.stale;
+        return;
+    case IsocVerdict::Starved:
+        if (!starvedLogged) {
+            starvedLogged = 1;
+            IOLog("SwitchUSB: isochronous DCI %u: the host asked for a frame with none queued (code %u); the function "
+                  "queues its frames late\n",
+                  dci, e.code());
+        }
+        return;
+    case IsocVerdict::Unexplained:
+        ++st.unexplained;
+        return oddEvent(dci, e, index, "for no isochronous frame on the ring");
+    }
+    const uint64_t now = mach_absolute_time();
+    while (ep.iso->complete())
+        completeIsoc(dci, now);
+    kickIsoc(dci);
+}
+
+// The head request, its frames all known: bounce pages copied out (OUT) and freed, every frame's status, length and
+// time written into the client's list. The request leaves the queue before the completion, which may queue its next.
+void SwitchXUDC::completeIsoc(uint32_t dci, uint64_t now)
+{
+    Endpoint &ep = endpoints[dci];
+    Request r = ep.queue[ep.head];
+    IsocFrame *frames = get<IsocFrame *>(r.tag, kReqFrames);
+    const IsocTds::Request &q = ep.iso->request(0);
+    if (!ep.in && r.length)
+        requestSync(r, r.md, 0, r.length, true);
+    IOReturn status = kIOReturnSuccess;
+    uint32_t moved = 0;
+    for (uint32_t i = 0, offset = 0; i < q.frames; offset += q.frame[i++].length) {
+        const IsocTds::Frame &f = q.frame[i];
+        const uint64_t pa = hw.trbBuffer(dci, (q.first + i) % (kDataRingTrbs - 1));
+        if (f.length && inPool(pa)) {
+            uint8_t *va = pool.va + (pa - pool.pa);
+            if (!ep.in && f.actual) {
+                cacheFlush(va, f.actual);
+                requestWrite(r, r.md, offset, va, f.actual);
+            }
+            poolGive(pa);
+        }
+        const bool done = f.state == IsocTds::kDone;
+        frames[i].status = done ? kIOReturnSuccess : kIsocFrameError;
+        frames[i].actualCount = f.actual;
+        moved += f.actual;
+        if (!done)
+            status = kIsocFrameError;
+    }
+    isocStamp(frames, q.frames, now, ep.isocInterval);
+    ep.iso->pop();
+    if (r.prepared)
+        r.md->complete();
+    ep.head = (ep.head + 1) % kQueueDepth;
+    ep.count--;
+    const uint32_t d = ep.in ? 1 : 0;
+    st.bytes[d] += moved;
+    ++st.requests[d];
+    if (status != kIOReturnSuccess)
+        ++st.failed[d];
+    put<int32_t>(r.tag, kReqStatus, status);
+    completeEndpointIO(r.tag);
+}
+
+// The head request was never on the ring (it could not be prepared or planned).
+void SwitchXUDC::failHeadIsoc(uint32_t dci, IOReturn status)
+{
+    Endpoint &ep = endpoints[dci];
+    Request r = ep.queue[ep.head];
+    if (r.prepared)
+        r.md->complete();
+    ep.head = (ep.head + 1) % kQueueDepth;
+    ep.count--;
+    ++st.failed[ep.in ? 1 : 0];
+    finishIsoc(r.tag, status);
+}
+
+void SwitchXUDC::finishIsoc(_IOUSBDeviceIORequestTag *request, IOReturn status)
+{
+    IsocFrame *frames = get<IsocFrame *>(request, kReqFrames);
+    const uint64_t count = get<uint64_t>(request, kReqFrameCount);
+    for (uint64_t i = 0; i < count; ++i) {
+        frames[i].status = status;
+        frames[i].actualCount = 0;
+    }
+    put<int32_t>(request, kReqStatus, status);
+    completeEndpointIO(request);
+}
+
+// As cancel(): everything off the ring and out of the queue before any completion runs, the ring fenced until the
+// event ring holds nothing for it.
+void SwitchXUDC::cancelIsoc(uint32_t dci, IOReturn status)
+{
+    Endpoint &ep = endpoints[dci];
+    if (ep.iso->busy())
+        hw.dropQueued(dci);
+    for (uint32_t k = 0; k < ep.iso->onRing(); ++k) {
+        const IsocTds::Request &q = ep.iso->request(k);
+        for (uint32_t i = 0; i < q.frames; ++i) {
+            const uint64_t pa = hw.trbBuffer(dci, (q.first + i) % (kDataRingTrbs - 1));
+            if (q.frame[i].length && inPool(pa))
+                poolGive(pa);
+        }
+    }
+
+    struct {
+        _IOUSBDeviceIORequestTag *tag;
+        IOMemoryDescriptor *prepared;
+    } pending[kQueueDepth];
+
+    const uint32_t count = ep.count;
+    for (uint32_t i = 0; i < count; ++i) {
+        const Request &r = ep.queue[(ep.head + i) % kQueueDepth];
+        pending[i] = {r.tag, r.prepared ? r.md : nullptr};
+    }
+    ep.head = ep.count = 0;
+    if (ep.iso->cancel() && !draining && !hw.eventPending())
+        ep.iso->liftFence();
+    for (uint32_t i = 0; i < count; ++i) {
+        if (pending[i].prepared)
+            pending[i].prepared->complete();
+        finishIsoc(pending[i].tag, status);
+    }
+    kickWaiting();
 }
 
 bool SwitchXUDC::copy(_IOUSBDeviceIORequestTag *request, uint32_t offset, uint8_t *bytes, uint32_t length,
@@ -1385,6 +1659,12 @@ IOReturn SwitchXUDC::handleStallEndpoint(int address, bool stall)
         if (stall)
             ep0Cancel(kIOReturnAborted);
         hw.setHalt(0, stall);
+    } else if (endpoints[dci].isoch) {
+        switch_refusal("usb-device", "isochronous-halt",
+                       "halt of isochronous endpoint %#x refused: isochronous "
+                       "endpoints have no halt (USB 2.0 9.4.5)",
+                       (unsigned)address);
+        return kIOReturnUnsupported;
     } else if (stall) {
         hw.setHalt(dci, true);
     } else {
@@ -1416,7 +1696,7 @@ IOReturn SwitchXUDC::handleSetAddressPreStatusPhase(int address)
 IOReturn SwitchXUDC::resetEndpointDataToggle(int address)
 {
     uint32_t dci = dciFor(address);
-    if (!dci || dci >= kMaxDci)
+    if (!dci || dci >= kMaxDci || endpoints[dci].isoch)
         return kIOReturnSuccess;
     hw.resetSequence(dci);
     kick(dci);
@@ -1471,16 +1751,37 @@ IOReturn SwitchXUDC::activateEndpoint(int address, int type, int maxPacketSize, 
     if (dci >= kMaxDci || maxPacketSize <= 0)
         return kIOReturnBadArgument;
     bool in = address & 0x80;
-    uint32_t kind, period = 0;
+    const bool isoch = type == kTypeIsochronous;
+    uint32_t kind, period = 0, packet = (uint32_t)maxPacketSize, burst = 0;
     if (type == kTypeBulk) {
         kind = in ? EP_BULK_IN : EP_BULK_OUT;
     } else if (type == kTypeInterrupt) {
         kind = in ? EP_INTR_IN : EP_INTR_OUT;
         uint32_t value = interval < 1 ? 1 : (uint32_t)interval;
         period = speed == kSpeedFull ? log2Floor(value * 8) : (value > 16 ? 16 : value) - 1;  // 2^n x 125 us
+    } else if (isoch) {
+        uint32_t others = 0;
+        for (uint32_t d = 2; d < kMaxDci; ++d)
+            others += d != dci && endpoints[d].active && endpoints[d].isoch;
+        if (others >= kMaxIsochEndpoints) {
+            switch_refusal("usb-device", "isochronous-endpoints",
+                           "isochronous endpoint %#x refused: the XUDC runs at most %u at once", (unsigned)address,
+                           kMaxIsochEndpoints);
+            return kIOReturnNoResources;
+        }
+        kind = in ? EP_ISOCH_IN : EP_ISOCH_OUT;
+        period = interval < 1 ? 1 : interval > 16 ? 16 : (uint32_t)interval;  // bInterval as Linux tegra-xudc sets it
+        packet = (uint32_t)maxPacketSize & 0x7ff;
+        const uint32_t extra = ((uint32_t)maxPacketSize >> 11) & 3;  // high-bandwidth: transactions per microframe - 1
+        burst = speed == kSpeedFull ? 0 : extra > 2 ? 2 : extra;
     } else {
+        switch_refusal_k(switch_refusal_key_with(switch_refusal_key("usb-device", "endpoint-type"), (uint64_t)type),
+                         "usb-device", "endpoint-type", "endpoint %#x of type %u refused: not a data endpoint type",
+                         (unsigned)address, (unsigned)type);
         return kIOReturnUnsupported;
     }
+    if (!packet)
+        return kIOReturnBadArgument;
     Endpoint &ep = endpoints[dci];
     if (ep.queue && ep.tds && (ep.count || ep.tds->busy()))
         cancel(dci, kIOReturnAborted);  // activated without a deactivation
@@ -1488,17 +1789,36 @@ IOReturn SwitchXUDC::activateEndpoint(int address, int type, int maxPacketSize, 
         ep.queue = IONewZero(Request, kQueueDepth);
     if (!ep.tds)
         ep.tds = IONewZero(Tds, 1);  // zeroed: empty, unfenced
-    if (!ep.queue || !ep.tds)
+    if (isoch && !ep.iso)
+        ep.iso = IONewZero(IsocTds, 1);
+    if (!ep.queue || !ep.tds || (isoch && !ep.iso))
         return kIOReturnNoMemory;
     ep.head = ep.count = 0;
     ep.serialBusy = false;
     ep.in = in;
-    ep.mps = (uint32_t)maxPacketSize;
-    if (!hw.initEndpoint(dci, kind, (uint32_t)maxPacketSize, period)) {
+    ep.isoch = isoch;
+    ep.bulk = type == kTypeBulk;
+    ep.mps = packet;
+    if (isoch)
+        nanoseconds_to_absolutetime(isocIntervalNs(speed == kSpeedFull, period), &ep.isocInterval);
+    // Linux tegra-xudc pauses the bulk endpoints while an isochronous one is set up, so that it gets its bandwidth.
+    uint32_t paused = 0;
+    for (uint32_t d = 2; isoch && d < kMaxDci; ++d) {
+        if (d != dci && endpoints[d].active && endpoints[d].bulk) {
+            hw.setPause(d, true);
+            paused |= 1u << d;
+        }
+    }
+    const bool ready = hw.initEndpoint(dci, kind, packet, period, burst);
+    const bool reloaded = ready && hw.reloadEndpoint(dci);
+    for (uint32_t d = 2; d < kMaxDci; ++d)
+        if (paused & (1u << d))
+            hw.setPause(d, false);
+    if (!ready) {
         IOLog("SwitchUSB: endpoint %#x (DCI %u) not activated: no memory for its transfer ring\n", address, dci);
         return kIOReturnNoMemory;
     }
-    if (!hw.reloadEndpoint(dci)) {
+    if (!reloaded) {
         IOLog("SwitchUSB: endpoint %#x (DCI %u) not activated: EP_RELOAD did not clear\n", address, dci);
         return kIOReturnTimeout;
     }

@@ -5,6 +5,9 @@
 #   switch_thermal_sensors_test      SwitchSensors.h, thermalmonitord's sensors: the J120AP plist's table, nearest
 #                                    measurements, unit conversions, SOC_THERM fuse calibration against L4T's, CLTM
 #   switch_sensors_hid_source_test   the HID descriptor and IOHIDFamily vtable slots the sensors are published through
+#   switch_emc_governor_test         SwitchEMCGovernor.h: the EMC rates used, ACTMON's watermarks and the governor's moves
+#   switch_soctherm_window_test      SwitchSocThermWindow.h: SOC_THERM's one-degree LVL0 window and the groups' registers
+#   switch_thermal_shutdown_test     software shutdown below the hardware trip, its RTC record, the reset cause decoding
 # The headers are C: each is compiled as C11 with -Wconversion -Wsign-conversion in a harness (its static inline
 # functions as exported ones) and driven by a GoogleTest test.
 #
@@ -65,5 +68,33 @@ host_test(
     data = [
         "//drivers/SwitchBrightness:SwitchALS.cpp",
         "//drivers/SwitchTouch:SwitchHIDDevice.cpp",
+    ],
+)
+
+host_test(
+    name = "switch_emc_governor_test",
+    srcs = [
+        "switch_emc_governor_test.cpp",
+        "//drivers/SwitchPower:SwitchEMCGovernor.h",
+    ],
+)
+
+host_test(
+    name = "switch_soctherm_window_test",
+    srcs = [
+        "switch_soctherm_window_test.cpp",
+        "//drivers/SwitchPower:SwitchSocThermWindow.h",
+        "//drivers/SwitchPower:SwitchThermalLimits.h",
+    ],
+)
+
+host_test(
+    name = "switch_thermal_shutdown_test",
+    srcs = [
+        "switch_thermal_shutdown_test.cpp",
+        "//diagnostics/switch:SwitchResetCause.h",
+        "//drivers/SwitchPower:SwitchSocThermWindow.h",
+        "//drivers/SwitchPower:SwitchThermalLimits.h",
+        "//drivers/SwitchPower:SwitchThermalRecord.h",
     ],
 )

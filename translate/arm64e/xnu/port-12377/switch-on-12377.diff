@@ -1690,8 +1690,8 @@ diff -uN a/bsd/kern/kern_exec.c b/bsd/kern/kern_exec.c
 +		    SWITCH_PLIST("<key>LockdownActivationIndicatesCloudConfigurationAvailable</key><false/>"), false},
 +		{"com.apple.springboard", SWITCH_PLIST("<key>BKNoWatchdogs</key><true/>"
 +		    "<key>FBLaunchWatchdogExceptions</key><dict><key>com.apple.purplebuddy</key><real>100</real></dict>"
-+		    "<key>MCForceShowCloudConfigurationUI</key><false/><key>SBDisableAutoDim</key><true/>"
-+		    "<key>SBDontDimOrLockOnAC</key><true/><key>SBDisableIdleSleep</key><true/>"
++		    "<key>MCForceShowCloudConfigurationUI</key><false/>"
++		    "<key>SBDisableIdleSleep</key><true/>"
 +		    /* The 7" panel shows 1280x720 points at scale 1 (UIScreen.scale is an integer all the way down,
 +		     * so no fractional zoom): large icons and the text size below keep things legible and crisp. */
 +		    "<key>SBHomeLargeIcons</key><true/>"), false},

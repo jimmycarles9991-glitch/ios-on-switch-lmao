@@ -355,6 +355,9 @@ typedef struct {
     // plane's rows whole blocks, `rows` the plane's aligned height (the engine reads whole blocks). Destinations are
     // always pitch linear.
     uint32_t blockLinear, blockHeightLog2;
+    // A destination that is a rectangle of a larger surface: its last row ends at its width, and the bytes after it
+    // (another rectangle's) are not mapped. VIC writes only the surface's width of each row.
+    uint32_t lastRowExact;
 } TegraVICImage;
 
 // Reading 4:2:0 (TegraVICTraits.yccIn): to RGB through the slot matrix (within a few steps of the float conversion),
@@ -458,7 +461,10 @@ static inline const char *tegra_vic_check_image(const TegraVICImage *im, const T
             return "plane shorter than the surface";
         // The engine reads or writes (LumaHeight + 1) rows of (LumaWidth + 1) elements: h rows of pitch bytes (a
         // block-linear plane: all its rows, whole blocks).
-        if ((uint64_t)im->pitch[p] * (im->blockLinear ? im->rows[p] : h) > im->span[p])
+        const uint64_t extent = im->blockLinear    ? (uint64_t)im->pitch[p] * im->rows[p]
+                                : im->lastRowExact ? (uint64_t)im->pitch[p] * (h - 1) + (uint64_t)w * f->bpe[p]
+                                                   : (uint64_t)im->pitch[p] * h;
+        if (extent > im->span[p])
             return "plane extends past its mapping";
     }
     return 0;

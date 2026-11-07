@@ -166,16 +166,10 @@ pub(super) struct PassShape {
 impl PassShape {
     /// The shape of `layout`.
     pub(super) fn of(layout: &PassLayout) -> Result<PassShape, Error> {
-        let mut no_inputs = Vec::new();
-        if layout.fetch_inputs {
-            for (index, color) in layout.colors.iter().enumerate() {
-                if let Some(color) = color {
-                    if !takes_input(&color.target)? {
-                        no_inputs.push(index as u32);
-                    }
-                }
-            }
-        }
+        let no_inputs = match layout.fetch_inputs {
+            true => without_inputs(layout)?,
+            false => Vec::new(),
+        };
         Ok(PassShape {
             colors: layout
                 .colors
@@ -204,6 +198,23 @@ impl PassShape {
         PassShape {
             storage,
             ..self.clone()
+        }
+    }
+
+    /// This shape with its draws' subpass reading every color as an input attachment, but those of
+    /// `no_inputs` (ascending: their images take no such usage): the instance of a pipeline
+    /// fetching through input attachments beside the interlock
+    /// (`framebuffer_fetch::inputs_beside_interlock`), as a pass whose fetch reads them has. It
+    /// leaves no color out for the interlocked storage form.
+    pub(super) fn with_inputs(self, no_inputs: Vec<u32>) -> PassShape {
+        if self.fetch_inputs {
+            return self;
+        }
+        PassShape {
+            fetch_inputs: true,
+            no_inputs,
+            storage: Vec::new(),
+            ..self
         }
     }
 
@@ -1448,9 +1459,10 @@ fn create(
     let mut draws = graphics().color_attachments(&references);
     if shape.fetch_inputs {
         draws = draws.input_attachments(&inputs);
-        // Without rasterization order (`framebuffer_fetch::unordered_inputs`) a fetching draw
-        // records after a barrier of the subpass's self-dependency instead.
-        if !super::framebuffer_fetch::unordered_inputs(device.compile_device().profile()) {
+        // Without rasterization order (`framebuffer_fetch::unordered_inputs`, or beside the
+        // interlock) a fetching draw records after a barrier of the subpass's self-dependency
+        // instead.
+        if super::framebuffer_fetch::inputs_in_raster_order(device.compile_device().profile()) {
             draws = draws.flags(
                 vk::SubpassDescriptionFlags::RASTERIZATION_ORDER_ATTACHMENT_COLOR_ACCESS_EXT,
             );
@@ -1512,6 +1524,20 @@ pub(super) fn color_view(target: &Target, fetch_inputs: bool) -> Result<vk::Imag
 pub(super) fn takes_input(target: &Target) -> Result<bool, Error> {
     let usage = target.texture.image_plan()?.usage;
     Ok(usage.contains(metal2vulkan::vk::ImageUsageFlags::INPUT_ATTACHMENT))
+}
+
+/// The color indices of `layout`, ascending, whose images take no input attachment usage
+/// (`PassShape::no_inputs`).
+pub(super) fn without_inputs(layout: &PassLayout) -> Result<Vec<u32>, Error> {
+    let mut indices = Vec::new();
+    for (index, color) in layout.colors.iter().enumerate() {
+        if let Some(color) = color {
+            if !takes_input(&color.target)? {
+                indices.push(index as u32);
+            }
+        }
+    }
+    Ok(indices)
 }
 
 /// The storage view of color attachment `target`, which a draw reads and writes in the pixel
@@ -1596,8 +1622,9 @@ pub(super) fn covers(views: ViewSetup, layers: u32) -> bool {
     viewed_layers(views, layers) == (0..layers)
 }
 
-/// The framebuffer of `layout` for `pass` (its final pass) of an instance of `views`: the color
-/// attachments' views in index order, then the depth/stencil attachment's, then the resolve
+/// The framebuffer of `layout` for `pass` (its final pass) of an instance of `shape` and `views`:
+/// the color attachments' views in index order (input attachments too where `shape`'s subpass
+/// reads them so), then the depth/stencil attachment's, then the resolve
 /// attachments' in the same order, over the render area and the layers the instance renders
 /// ([`viewed`]), of the pass's, which every attachment renders (`render_pass.rs` refuses what
 /// would make an image of fewer in a layered pass). A multiview instance's framebuffer has one
@@ -1606,7 +1633,7 @@ pub(super) fn covers(views: ViewSetup, layers: u32) -> bool {
 pub(super) fn framebuffer(
     device: &Device,
     pass: &RenderPassObject,
-    layout: &PassLayout,
+    (layout, shape): (&PassLayout, &PassShape),
     views: ViewSetup,
 ) -> Result<FramebufferObject, Error> {
     let colors = layout.colors.iter().flatten();
@@ -1626,7 +1653,7 @@ pub(super) fn framebuffer(
     let viewed = |target: &Target| viewed(target, views);
     let mut attachments = Vec::new();
     for color in colors {
-        attachments.push(color_view(&viewed(&color.target), layout.fetch_inputs)?);
+        attachments.push(color_view(&viewed(&color.target), shape.fetch_inputs)?);
     }
     if let Some(ds) = &layout.depth_stencil {
         attachments.push(attachment_view(

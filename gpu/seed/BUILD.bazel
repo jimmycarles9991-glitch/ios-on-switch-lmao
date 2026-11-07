@@ -49,7 +49,11 @@ string_flag(
 
 seed_tools(
     name = "local_tools",
-    hdrs = [METAL + ":frontend_headers"],
+    hdrs = [
+        METAL + ":frontend_headers",
+        "//kits/SwitchRefusal:SwitchRefusal.h",
+        "//kits/SwitchRefusal:SwitchRefusalSite.h",
+    ],
     abi_header = "//drivers/TegraGM20B:TegraGM20BABI.h",
     frontend = METAL + ":NativeBridgeMetalFrontend.mm",
     host_bridge = "//gpu:bridge_host",
@@ -67,6 +71,9 @@ seed_tools(
         METAL + ":NativeBridgeMetalFrontend.mm",
         METAL + ":frontend_headers",
         "//drivers/TegraGM20B:TegraGM20BABI.h",
+        "//drivers/TegraGM20B:TegraGM20BLayout.h",
+        "//kits/SwitchRefusal:SwitchRefusal.h",
+        "//kits/SwitchRefusal:SwitchRefusalSite.h",
     ],
     stack = "//gpu:raw_stack",
     twin = "//gpu/nvk:twin",
@@ -79,12 +86,10 @@ tools_archive(
 
 shader_crawl(
     name = "crawl",
-    images = [
-        "@ipsw//:os",
-        "@ipsw//:system_cryptex",
-        "@ipsw//:app_cryptex",
-    ],
+    inventory = "@ipsw//:crawl_inventory",
+    qc = "@ipsw//:crawl_qc",
     tags = ["manual"],
+    tree = "@ipsw//:crawl_tree",
 )
 
 metal_seed(

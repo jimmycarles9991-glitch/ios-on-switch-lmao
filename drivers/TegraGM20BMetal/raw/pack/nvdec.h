@@ -26,6 +26,7 @@ using MapFn = std::function<const uint8_t *(uint64_t va, uint64_t bytes)>;
 struct ProgramInfo {
     std::vector<uint8_t> image;  // header + code, as uploaded to the shader heap
     std::vector<uint8_t> cbufTypes;
+    std::vector<uint8_t> data;  // NAK's shader data, uploaded 256-aligned after the code (NVK nvk_shader_upload)
 };
 
 class Decoder {
@@ -50,6 +51,26 @@ public:
     std::map<std::string, Layout> layouts;
     bool loadLayouts(const char *path);
     bool fullStateAtFirstDraw = true;  // one STATE record of every non-address register at the first draw
+
+    // Called at every draw with the decoder in the draw's state (raw/runtime/raw_capture.cpp reads a state off it)
+    std::function<void(Decoder &)> onDraw;
+
+    uint32_t reg3d(uint32_t mthd) const
+    {
+        return reg_[0][mthd >> 2];
+    }
+
+    // Constant buffer `slot` of shader group `group` (0 vertex .. 4 pixel), as bound now; false: not bound
+    bool bound(int group, int slot, uint64_t &addr, uint32_t &bytes) const;
+    // The root-table words [0x700, 0x780) this submission wrote (m2v's push ranges as NVK wrote them): mask bit k, word k
+    void pushWords(uint32_t &mask, uint32_t words[32]) const;
+
+    // The bound program of stage `stage` (1 vertex, 5 pixel) among the known ones, or null; `id` names it either way
+    const ProgramInfo *boundProgram(int stage, std::string &id)
+    {
+        return program(stage, id);
+    }
+
     uint64_t draws = 0, clears = 0, submits = 0, macroCalls = 0, unknownMacros = 0, badHeaders = 0;
 
     static uint64_t fnv(const void *p, size_t n, uint64_t h = 0xcbf29ce484222325ull);

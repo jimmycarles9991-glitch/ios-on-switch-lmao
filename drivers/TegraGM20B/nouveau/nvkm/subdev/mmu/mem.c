@@ -31,6 +31,7 @@ struct nvkm_mem {
 	struct nvkm_memory memory;
 	enum nvkm_memory_target target;
 	struct nvkm_mmu *mmu;
+	u8 page;
 	u64 pages;
 	struct page **mem;
 	union {
@@ -48,7 +49,7 @@ nvkm_mem_target(struct nvkm_memory *memory)
 static u8
 nvkm_mem_page(struct nvkm_memory *memory)
 {
-	return PAGE_SHIFT;
+	return nvkm_mem(memory)->page;
 }
 
 static u64
@@ -83,6 +84,12 @@ static void *
 nvkm_mem_dtor(struct nvkm_memory *memory)
 {
 	struct nvkm_mem *mem = nvkm_mem(memory);
+
+	/* Comptags belong to the memory from its first compressed raw map (uvmm.c) until now, whatever maps left on them. */
+	if (mem->memory.tags) {
+		refcount_set(&mem->memory.tags->refcount, 1);
+		nvkm_memory_tags_put(&mem->memory, mem->mmu->subdev.device, &mem->memory.tags);
+	}
 	if (mem->mem) {
 		while (mem->pages--) {
 			dma_unmap_page(mem->mmu->subdev.device->dev,
@@ -160,25 +167,30 @@ nvkm_mem_new_host(struct nvkm_mmu *mmu, int type, u8 page, u64 size,
 	else
 		target = NVKM_MEM_TARGET_NCOH;
 
-	if (page != PAGE_SHIFT)
+	if (page < PAGE_SHIFT)
 		return -EINVAL;
 
 	if (!(mem = kzalloc_obj(*mem)))
 		return -ENOMEM;
 	mem->target = target;
 	mem->mmu = mmu;
+	mem->page = PAGE_SHIFT;
 	*pmemory = &mem->memory;
 
 	if (!(ret = nvif_unpack(ret, &argv, &argc, args->v0, 0, 0, false))) {
 		if (args->v0.dma) {
 			nvkm_memory_ctor(&nvkm_mem_dma, &mem->memory);
 			mem->dma = args->v0.dma;
+			/* The caller's array: every 1 << page of it is one aligned physical run (TegraGM20BComp.h). */
+			mem->page = page;
 		} else {
 			nvkm_memory_ctor(&nvkm_mem_sgl, &mem->memory);
 			mem->sgl = args->v0.sgl;
+			if (page != PAGE_SHIFT)
+				return -EINVAL;
 		}
 
-		if (!IS_ALIGNED(size, PAGE_SIZE))
+		if (!IS_ALIGNED(size, 1ULL << mem->page))
 			return -EINVAL;
 		mem->pages = size >> PAGE_SHIFT;
 		return 0;
@@ -189,6 +201,8 @@ nvkm_mem_new_host(struct nvkm_mmu *mmu, int type, u8 page, u64 size,
 	}
 
 	nvkm_memory_ctor(&nvkm_mem_dma, &mem->memory);
+	if (page != PAGE_SHIFT)
+		return -EINVAL;
 	size = ALIGN(size, PAGE_SIZE) >> PAGE_SHIFT;
 
 	if (!(mem->mem = kvmalloc_objs(*mem->mem, size)))

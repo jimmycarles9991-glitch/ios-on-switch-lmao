@@ -74,12 +74,28 @@ fn init_info_from_nir(
             }),
             MESA_SHADER_FRAGMENT => {
                 let info_fs = unsafe { &nir.info.__bindgen_anon_1.fs };
+                let has_interlock = info_fs.pixel_interlock_ordered()
+                    || info_fs.sample_interlock_ordered()
+                    || info_fs.pixel_interlock_unordered()
+                    || info_fs.sample_interlock_unordered();
+                let interlock_mode = match (
+                    has_interlock,
+                    info_fs.sample_interlock_ordered()
+                        || info_fs.sample_interlock_unordered(),
+                ) {
+                    (true, false) => FragmentInterlockMode::Pixel,
+                    (true, true) => FragmentInterlockMode::Sample,
+                    (false, _) => FragmentInterlockMode::Disabled,
+                };
                 ShaderStageInfo::Fragment(FragmentShaderInfo {
                     uses_kill: false,
                     reads_interlock_ticket: false,
                     post_depth_coverage: info_fs.post_depth_coverage(),
                     early_fragment_tests: info_fs.early_fragment_tests(),
                     uses_sample_shading: info_fs.uses_sample_shading(),
+                    interlock_mode,
+                    interlock_unordered: info_fs.pixel_interlock_unordered()
+                        || info_fs.sample_interlock_unordered(),
                 })
             }
             MESA_SHADER_GEOMETRY => {
@@ -2188,6 +2204,31 @@ impl<'a> ShaderFromNir<'a> {
         }
     }
 
+    fn get_load_mem_order(&self, access: gl_access_qualifier) -> MemOrder {
+        let interlocked = matches!(
+            &self.info.stage,
+            ShaderStageInfo::Fragment(fs)
+                if !matches!(fs.interlock_mode, FragmentInterlockMode::Disabled)
+        );
+        if access & ACCESS_CAN_REORDER != 0 {
+            MemOrder::Constant
+        } else if self.sm.sm() >= 50
+            && self.sm.sm() < 70
+            && (access & ACCESS_COHERENT != 0 || interlocked)
+        {
+            // Maxwell and Pascal load global memory and images through the
+            // SM's L1 (LdCacheOp::CacheAll), which other SMs' writes do not
+            // invalidate, and an acquire there invalidates only L1's global
+            // lines: a coherent load, or any load of a shader in the fragment
+            // interlock (whose critical section may read what another
+            // invocation's wrote, made visible by a barrier on images alone
+            // under the Vulkan memory model), reads L2 (.CV).
+            MemOrder::Strong(MemScope::System)
+        } else {
+            MemOrder::Strong(MemScope::GPU)
+        }
+    }
+
     fn get_image_dim(&mut self, intrin: &nir_intrinsic_instr) -> ImageDim {
         let is_array = intrin.image_array();
         let image_dim = intrin.image_dim();
@@ -2835,11 +2876,7 @@ impl<'a> ShaderFromNir<'a> {
                     _ => panic!("Invalid suldga flags"),
                 };
 
-                let mem_order = if (intrin.access() & ACCESS_CAN_REORDER) != 0 {
-                    MemOrder::Constant
-                } else {
-                    MemOrder::Strong(MemScope::GPU)
-                };
+                let mem_order = self.get_load_mem_order(intrin.access());
                 let cache_op = LdCacheOp::select(
                     self.sm,
                     MemSpace::Global(MemAddrType::A64),
@@ -2865,11 +2902,7 @@ impl<'a> ShaderFromNir<'a> {
                 let coord = self.get_image_coord(intrin, dim);
                 // let sample = self.get_src(&srcs[2]);
 
-                let mem_order = if (intrin.access() & ACCESS_CAN_REORDER) != 0 {
-                    MemOrder::Constant
-                } else {
-                    MemOrder::Strong(MemScope::GPU)
-                };
+                let mem_order = self.get_load_mem_order(intrin.access());
 
                 let comps = intrin.num_components;
                 assert!(intrin.def.bit_size() == 32);
@@ -2898,11 +2931,7 @@ impl<'a> ShaderFromNir<'a> {
                 let coord = self.get_image_coord(intrin, dim);
                 // let sample = self.get_src(&srcs[2]);
 
-                let mem_order = if (intrin.access() & ACCESS_CAN_REORDER) != 0 {
-                    MemOrder::Constant
-                } else {
-                    MemOrder::Strong(MemScope::GPU)
-                };
+                let mem_order = self.get_load_mem_order(intrin.access());
 
                 let comps = intrin.num_components;
                 assert!(intrin.def.bit_size() == 32);
@@ -3308,11 +3337,7 @@ impl<'a> ShaderFromNir<'a> {
                 let size_B =
                     (intrin.def.bit_size() / 8) * intrin.def.num_components();
                 assert!(u32::from(size_B) <= intrin.align());
-                let order = if intrin.access() & ACCESS_CAN_REORDER != 0 {
-                    MemOrder::Constant
-                } else {
-                    MemOrder::Strong(MemScope::GPU)
-                };
+                let order = self.get_load_mem_order(intrin.access());
                 let access = MemAccess {
                     mem_type: MemType::from_size(size_B, false),
                     space: MemSpace::Global(MemAddrType::A64),

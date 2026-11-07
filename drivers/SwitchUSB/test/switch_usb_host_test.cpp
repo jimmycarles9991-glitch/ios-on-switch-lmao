@@ -1,6 +1,6 @@
-// USB2 host mode on the USB-C port: SwitchPD's power-role decisions (drivers/SwitchUSB/SwitchPDPolicy.h) and the host
-// role's register arithmetic (drivers/SwitchUSB/XusbPorts.h), compiled from the same headers the kernel uses
-// (switch_usb_host_harness.c).
+// Host mode on the USB-C port: SwitchPD's power-role decisions and SwitchUSB's data role (drivers/SwitchUSB/
+// SwitchPDPolicy.h) and the host role's register arithmetic (drivers/SwitchUSB/XusbPorts.h), compiled from the same
+// headers the kernel uses (switch_usb_host_harness.c).
 //
 // The power role runs the BM92T36 traces r7w recorded on hardware (11-05 12:47: a keyboard, mouse and trackpad through
 // a USB-C adapter, then the Mac) through a model of SwitchPD.cpp's apply/enter, and checks: the source rails (OCP,
@@ -315,6 +315,23 @@ TEST(SwitchUsbHostPowerRole, MacIsDualRole)
     EXPECT_THAT(port.lines.back(), testing::HasSubstr("dual-role"));
 }
 
+// SwitchUSB's data role: host for the partner we source and for a source that left us DFP (the dock after its data role
+// swap, a hub with power in); never for a partner still being classified, which presents Rd while we are DFP by
+// default (r7w's attach, before the Mac turned out to be dual-role), nor for the Mac or a charger, which leave us UFP.
+TEST(SwitchUsbHostDataRole, HostForOurSinkOrASourceThatMadeUsDfp)
+{
+    EXPECT_FALSE(pd_usb_host(0, R7W_SINK_ATTACH.first)) << "classifying the keyboard's adapter";
+    EXPECT_FALSE(pd_usb_host(0, R7W_SINK_ATTACH_CC2.first)) << "classifying the Mac";
+    EXPECT_TRUE(pd_usb_host(1, REATTACH_RAILS_UP.first)) << "sourcing";
+    EXPECT_FALSE(pd_usb_host(0, R7W_MAC_SOURCES.first)) << "the Mac is our host";
+    EXPECT_FALSE(pd_usb_host(0, R7W_CHARGER_AT_BOOT.first)) << "a charger leaves us UFP";
+    constexpr uint16_t kDockAfterSwap = SPDSNK | VSAFE | DFP | INSERT;
+    EXPECT_TRUE(pd_usb_host(0, kDockAfterSwap));
+    EXPECT_TRUE(pd_usb_host(0, kDockAfterSwap | CSIDE));
+    EXPECT_FALSE(pd_usb_host(0, kDockAfterSwap & ~VSAFE)) << "no VBUS from it";
+    EXPECT_FALSE(pd_usb_host(0, kDockAfterSwap & ~INSERT)) << "unplugged";
+}
+
 TEST(SwitchUsbHostPowerRole, ChargerAtBootAndNoHostMode)
 {
     Port port;
@@ -464,6 +481,20 @@ TEST_F(SwitchUsbHostRole, BrokenLists)
     const auto [result, reads] = find(2);          // the walk stops after 64
     EXPECT_EQ(result, Range(0, 0));
     EXPECT_LE(reads, 1u + 64);
+}
+
+// The role line's words for a port (PORTSC CCS 0, PLS 8:5, PP 9, speed 13:10).
+TEST(SwitchUsbHostPortWords, LinkAndSpeed)
+{
+    constexpr uint32_t kPp = 1u << 9, kCcs = 1u;
+    EXPECT_STREQ(portsc_link_name(kPp | kCcs | 4u << 10), "U0");
+    EXPECT_STREQ(portsc_speed_name(kPp | kCcs | 4u << 10), "SuperSpeed 5 Gb/s");
+    EXPECT_STREQ(portsc_speed_name(kPp | kCcs | 3u << 10), "high speed");
+    EXPECT_STREQ(portsc_speed_name(kPp | 4u << 10), "nothing") << "no device connected";
+    EXPECT_STREQ(portsc_link_name(kPp | 5u << 5), "RxDetect");
+    EXPECT_STREQ(portsc_link_name(kPp | kCcs | 3u << 5), "U3");
+    EXPECT_STREQ(portsc_link_name(4u << 5), "Disabled");
+    EXPECT_STREQ(portsc_link_name(15u << 5), "Resume");
 }
 
 TEST_F(SwitchUsbHostRole, PortscWrites)

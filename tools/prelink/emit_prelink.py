@@ -16,6 +16,8 @@ The work splits by what it reads (kernel/rules/kernel.bzl kernel_prelink runs ea
 
 ORIGINAL-ARGS: --prelinked, --root, --new-root, --cut, --defer, --slide, --early-security-init,
 --inherit-original-report, --previous. emit() = apply(prepare()): the same bytes, whichever way it runs.
+--options PRELINK_JSON stands for --root through --early-security-init: the prelink.json //install:kernel_inputs puts in
+the release, read the way kernel_prelink passes its flags.
 """
 
 import argparse
@@ -818,11 +820,12 @@ def emit(native_data: bytes, original: Original) -> tuple[bytes, dict[str, objec
 
 def original_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument('--prelinked', required=True, type=Path)
-    parser.add_argument('--root', required=True, action='append')
+    parser.add_argument('--options', type=Path, metavar='PRELINK_JSON')
+    parser.add_argument('--root', action='append', default=[])
     parser.add_argument('--new-root', action='append', default=[])
     parser.add_argument('--cut', action='append', default=[], metavar='COMPONENT=DEPENDENCY=SITES')
     parser.add_argument('--defer', action='append', default=[], metavar='COMPONENT=PERSONALITY')
-    parser.add_argument('--slide', required=True, type=lambda value: int(value, 0))
+    parser.add_argument('--slide', type=lambda value: int(value, 0))
     parser.add_argument(
         '--early-security-init',
         action='append',
@@ -839,10 +842,29 @@ def original_arguments(parser: argparse.ArgumentParser) -> None:
     )
 
 
+def take_options(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None:
+    """Fill the original arguments from --options's prelink.json, or check they were given as flags."""
+    flags = (args.root, args.new_root, args.cut, args.defer, args.early_security_init)
+    if not args.options:
+        if not args.root or args.slide is None:
+            parser.error('--root and --slide, or --options, are required')
+        return
+    if any(flags) or args.slide is not None:
+        parser.error('--options stands for --root, --new-root, --cut, --defer, --slide and --early-security-init')
+    options = json.loads(args.options.read_text())
+    args.root = options['base_roots'] + options['new_roots']
+    args.new_root = options['new_roots']
+    args.cut = options['cuts']
+    args.defer = options['defers']
+    args.slide = int(options['slide'], 0)
+    args.early_security_init = options['early_security_init']
+
+
 def original_inputs(
     parser: argparse.ArgumentParser, args: argparse.Namespace
 ) -> tuple[bytes, dict[str, object], dict[str, int], dict[str, object]]:
     """Return the checked original inputs: (kernelcache bytes, inherited report, early initializers, previous)."""
+    take_options(parser, args)
     NEW_ORIGINAL_COMPONENTS.update(args.new_root)
     for cut in args.cut:
         component, dependency, sites = cut.split('=')

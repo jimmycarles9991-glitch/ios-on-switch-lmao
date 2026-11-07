@@ -25,6 +25,8 @@ GM20B_METAL = "//drivers/TegraGM20BMetal"
 
 GM20B_ABI = "//drivers/TegraGM20B:TegraGM20BABI.h"
 
+GM20B_LAYOUT = "//drivers/TegraGM20B:TegraGM20BLayout.h"
+
 NVK = "//gpu/nvk:dylib"
 
 # The runtime's AIR fixtures, which the bridge compiles in (include_bytes!).
@@ -48,6 +50,7 @@ rust_static_library(
     srcs = [
         METAL + ":bridge/NativeMetalBridge.rs",
         METAL + ":bridge/NativeMetalObjects.rs",
+        METAL + ":bridge/NativeMetalTarget.rs",
     ],
     # The AIR fixtures it compiles in (include_bytes!(env!(...)); rules_rust makes $(execpath) absolute).
     compile_data = [
@@ -65,7 +68,11 @@ rust_static_library(
     # takes no extra-filename: the archive's own object is named without cargo's suffix (no shipped byte depends on it).
     rustc_flags = cargo_ids("0cd6ef7afe7b4328", "943b498a20400856")[:1],
     version = "0.1.0",
+    # kits/SwitchRefusal's C, bundled into the archive by rustc (a static native library of a staticlib): the plugin
+    # image's one copy, which the frontend and the raw path call too
     deps = [
+        "//kits/SwitchRefusal:switch_refusal",
+        "//kits/SwitchRefusal:switch_refusal_rs",
         "//third_party/m2v/crates/metal2vulkan",
         "//third_party/m2v/crates/metal2vulkan-runtime",
         "@rust_crates//:libc",
@@ -102,6 +109,7 @@ raw_stack(
     srcs = [
         METAL + ":bridge/NativeMetalBridge.rs",
         METAL + ":bridge/NativeMetalObjects.rs",
+        METAL + ":bridge/NativeMetalTarget.rs",
         METAL + ":NativeBridgeMetalFrontend.mm",
         GM20B_METAL + ":raw_stack_sources",
     ],
@@ -120,18 +128,25 @@ metal_plugin(
         GM20B_METAL + ":TegraGM20BMetalPlugin.mm",
         METAL + ":NativeBridgeMetalFrontend.mm",
         GM20B_METAL + ":raw/runtime/RawMetal.mm",
+        GM20B_METAL + ":raw/runtime/RawAlias.mm",
     ],
     hdrs = [
         METAL + ":frontend_headers",
         GM20B_METAL + ":raw_runtime_headers",
         GM20B_ABI,
+        GM20B_LAYOUT,
+        "//kits/SwitchRefusal:SwitchRefusal.h",
+        "//kits/SwitchRefusal:SwitchRefusalSite.h",
     ],
     bridge = ":bridge_ios",
     cc_srcs = [
         GM20B_METAL + ":raw/runtime/raw_gpu.cpp",
+        GM20B_METAL + ":raw/runtime/raw_alias.cpp",
         GM20B_METAL + ":raw/fx/fx_mip.cpp",
         GM20B_METAL + ":raw/runtime/raw_kernel.cpp",
         GM20B_METAL + ":raw/runtime/raw_pack.cpp",
+        GM20B_METAL + ":raw/runtime/raw_ycbcr.cpp",
+        GM20B_METAL + ":raw/runtime/raw_zeta.cpp",
     ],
     frameworks = [
         "Foundation",
@@ -143,6 +158,7 @@ metal_plugin(
         METAL + ":NativeBridgeMetalFrontend.h",
         GM20B_METAL + ":raw/runtime/RawMetal.h",
         GM20B_ABI,
+        "//kits/SwitchRefusal:SwitchRefusal.h",
     ],
     stack = ":raw_stack",
 )

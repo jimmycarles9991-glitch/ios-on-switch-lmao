@@ -71,6 +71,14 @@ struct vk_queue {
    VkResult (*driver_submit)(struct vk_queue *queue,
                              struct vk_queue_submit *submit);
 
+   /* ios-on-switch-lmao: optional. The data the driver attaches to each
+    * submit as it is queued, on the client's thread, which driver_submit
+    * then finds in vk_queue_submit::driver_data on whichever thread runs
+    * it; freed with the submit.
+    */
+   void *(*driver_submit_data)(struct vk_queue *queue);
+   void (*driver_submit_data_free)(void *data);
+
    struct {
       /** Current submit mode
        *
@@ -294,6 +302,8 @@ struct vk_queue_submit {
    uint32_t _image_bind_entry_count;
    VkSparseMemoryBind *_bind_entries;
    VkSparseImageMemoryBind *_image_bind_entries;
+
+   void *driver_data; /* vk_queue::driver_submit_data's */
 
    bool _has_binary_permanent_semaphore_wait;
    struct vk_sync **_wait_temps;

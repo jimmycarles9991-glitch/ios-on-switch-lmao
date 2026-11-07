@@ -7,6 +7,14 @@ edges, so a check that reads the kernelcache and writes only a validation output
 
 _APPLE_REPOS = ["gpu_apple_libs", "gpu_device_data"]
 
+# The one exception, by owner and path: files made from the IPSW that hold none of its bytes and ship on purpose. The
+# native loader compiles in the layout of a kernel window that holds Apple's kexts (sizes, offsets, a hash), which a Mac
+# without Xcode cannot compile, so the release carries the loader and constants.json, everything it compiles in; the Mac
+# refuses to stage a window whose constants differ (tools/package/bl33.py). Every other output stays Apple's.
+DECLASSIFIED = {
+    Label("//boot:package"): ["boot/package_work/loader.uboot.bin", "boot/package_work/constants.json"],
+}
+
 def is_apple_label(label):
     name = label.repo_name.rpartition("+")[2]
     return name == "ipsw" or name.startswith("ipsw_") or name in _APPLE_REPOS
@@ -47,6 +55,7 @@ def _apple_bytes_aspect_impl(target, ctx):
         return []
 
     apple = {f: True for f in depset(direct.keys(), transitive = transitive_files).to_list()}
+    declassified = DECLASSIFIED.get(target.label, [])
     pending = list(getattr(target, "actions", []))
 
     # Actions are not registered in dependency order, so repeat until no new output turns out to be Apple's.
@@ -58,7 +67,7 @@ def _apple_bytes_aspect_impl(target, ctx):
                 remaining.append(action)
                 continue
             for out in action.outputs.to_list():
-                if out not in apple:
+                if out not in apple and out.short_path not in declassified:
                     apple[out] = True
                     direct[out] = "{} in {} read {}".format(action.mnemonic, target.label, read[0].path)
         if len(remaining) == len(pending):

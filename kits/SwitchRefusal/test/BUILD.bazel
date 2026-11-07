@@ -1,0 +1,35 @@
+# kits/SwitchRefusal's user-space build on the host, through the host's own os_log.
+#
+#   bazel test //kits/SwitchRefusal/test:all
+load("@rules_cc//cc:cc_library.bzl", "cc_library")
+load("@rules_rust//rust:defs.bzl", "rust_test")
+load("//bazel/lint:defs.bzl", "lint_files")
+load("//bazel/testing:defs.bzl", "host_test")
+
+lint_files()
+
+host_test(
+    name = "switch_refusal_test",
+    srcs = [
+        "switch_refusal_test.cpp",
+        "//kits/SwitchRefusal:SwitchRefusal.c",
+        "//kits/SwitchRefusal:SwitchRefusal.h",
+    ],
+)
+
+# SwitchRefusal.rs against the header: its keys, and one line per key (`bazel test //kits/SwitchRefusal/test:key_test`).
+cc_library(
+    name = "key_shim",
+    srcs = ["key_shim.c"],
+    deps = ["//kits/SwitchRefusal:switch_refusal"],
+)
+
+rust_test(
+    name = "key_test",
+    srcs = ["key_test.rs"],
+    edition = "2024",
+    deps = [
+        ":key_shim",
+        "//kits/SwitchRefusal:switch_refusal_rs",
+    ],
+)

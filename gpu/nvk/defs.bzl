@@ -19,8 +19,16 @@ def _nvk_dylib_impl(ctx):
         progress_message = "Copying %{output}",
     )
 
-    # No -Dnvk-build-id: the pipeline cache UUID hashes the dylib's LC_UUID (tools/gpu/nvk_twin.py reads this line).
-    ctx.actions.write(source, "mesa-tree {}\nnvk-build-id \n".format(ctx.attr.mesa_tree))
+    # nvk-build-id: NVK's compiler identity, which its pipeline cache UUID hashes (NVK_BUILD_ID_OVERRIDE); the seed's
+    # buckets are keyed on this file (gpu/seed, tools/gpu/nvk_twin.py).
+    ctx.actions.run_shell(
+        command = 'printf "mesa-tree %s\\nnvk-build-id %s\\n" "$1" "$(cat "$2")" > "$3"',
+        arguments = [ctx.attr.mesa_tree, ctx.file.build_id.path, source.path],
+        inputs = [ctx.file.build_id],
+        outputs = [source],
+        mnemonic = "NvkSource",
+        progress_message = "Writing %{output}",
+    )
     return [
         DefaultInfo(files = depset([dylib, source])),
         OutputGroupInfo(dylib = depset([dylib]), source = depset([source])),
@@ -35,6 +43,12 @@ nvk_dylib = rule(
             allow_single_file = True,
             cfg = mesa_platform,
             doc = "the mesa_dylib target, built in NVK's configuration for `platform`",
+        ),
+        "build_id": attr.label(
+            mandatory = True,
+            allow_single_file = True,
+            cfg = mesa_platform,
+            doc = "NVK's compiler identity, as text (the .source file's nvk-build-id line)",
         ),
         "mesa_tree": attr.string(mandatory = True, doc = "the .source file's mesa-tree line"),
         "platform": attr.string(mandatory = True, values = MESA_PLATFORMS.keys()),

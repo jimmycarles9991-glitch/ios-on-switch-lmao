@@ -78,3 +78,37 @@ fn a_routed_subpass_references_the_color_each_location_names() {
         [true, false]
     );
 }
+
+/// On a device that fetches through the pixel interlock alone, a render pass with a draw that
+/// fetches its `BGRA8Unorm` color in the interlocked storage form and one whose pipeline the
+/// compile layer left on input attachments (the color blended by the device, which the storage
+/// form cannot keep exact) records the two in instances of different shapes: the interlocked
+/// draw's subpass leaves the color out, the input fetch's references it as a color attachment and
+/// reads it as its input attachment, leaving nothing out. A pass whose fetch reads input
+/// attachments already keeps its shape.
+#[test]
+fn an_input_fetch_beside_the_interlock_records_in_an_instance_of_its_own() {
+    let bgra = Some(Format::B8G8R8A8_UNORM);
+    let interlocked = shape(1, &[bgra, bgra], false, &[0]);
+    let inputs = shape(1, &[bgra, bgra], false, &[0]).with_inputs(vec![1]);
+    assert!(!interlocked.fetch_inputs);
+    assert!(inputs.fetch_inputs);
+    assert!(inputs.storage.is_empty());
+    assert_eq!(inputs.no_inputs, [1]);
+    assert_ne!(interlocked, inputs);
+    assert_eq!(
+        (0..2)
+            .map(|l| interlocked.references(l))
+            .collect::<Vec<_>>(),
+        [false, true]
+    );
+    assert_eq!(
+        (0..2).map(|l| inputs.references(l)).collect::<Vec<_>>(),
+        [true, true]
+    );
+    let already = PassShape {
+        fetch_inputs: true,
+        ..shape(1, &[bgra], false, &[])
+    };
+    assert_eq!(already.clone().with_inputs(vec![0]), already);
+}

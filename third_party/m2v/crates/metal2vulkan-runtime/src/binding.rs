@@ -1119,9 +1119,11 @@ fn image_descriptor(
             vk::DescriptorImageInfo::default().sampler(neutral_sampler(kind)?)
         }
         WriteSource::Attachment { color_index } if ty == vk::DescriptorType::INPUT_ATTACHMENT => {
+            // A pass whose fetch reads input attachments, or an instance of one beside the
+            // interlock (`framebuffer_fetch::inputs_beside_interlock`): the target's image takes
+            // the usage either way.
             let (pass, views) = tables
                 .pass
-                .filter(|(pass, _)| pass.fetch_inputs)
                 .ok_or_else(|| internal("an input attachment outside a pass that reads them"))?;
             let color = pass
                 .colors
@@ -1132,6 +1134,9 @@ fn image_descriptor(
                 })?;
             // The framebuffer's view of the layers the draw renders.
             let target = render_target::viewed(&color.target, views);
+            if !render_target::takes_input(&target)? {
+                return Err(internal("an input attachment without its usage"));
+            }
             image(render_target::color_view(&target, true)?)
         }
         // A tile dispatch's scratch, viewed in the staging format.

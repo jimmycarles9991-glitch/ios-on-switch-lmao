@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: BSD-2-Clause-Patent
-// UsbSmmuMapper.cpp (//drivers/SwitchUSB:superspeed): the XUSB host's IOVA window through the MC SMMU, for UsbDmaMapper.cpp.
+// UsbSmmuMapper.cpp: the XUSB host's IOVA window through the MC SMMU, for UsbDmaMapper.cpp.
 // A buffer whose physical pieces meet on page boundaries (contiguous, or scattered pages: what large I/O is) maps as
 // one IOVA range over its own pages; anything else (pieces that break inside a page, as mbuf chains do) is the caller's
 // to bounce. Thread context (IODMACommand prepare and complete).

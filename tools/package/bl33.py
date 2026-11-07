@@ -6,6 +6,7 @@ Its default environment edited, the boot script, the loader, the exporter and th
 
     bl33.py patch BL33 OUT                                   the environment edit (once: it never reads the kernel)
     bl33.py stage --u-boot PATCHED --window W --constants C --script S --loader L --exporter E --dtb D --out OUT
+                  [--loader-constants LC]                     a loader built elsewhere, for the window LC describes
 """
 
 import argparse
@@ -76,6 +77,16 @@ def bl33_patch(bl33: bytes) -> bytes:
     return bl33[:start] + block.ljust(end + 1 - start, b'\0') + bl33[end + 1 :]
 
 
+def check_loader_constants(built_for: dict, window: dict) -> None:
+    """Refuse a window other than the one a loader built elsewhere (the release's) was compiled for."""
+    differ = sorted(k for k in built_for.keys() | window.keys() if built_for.get(k) != window.get(k))
+    if differ:
+        raise SystemExit(
+            f"the release's loader was built for another kernel window ({', '.join(differ)} differ): compose from "
+            "the release's own source (MODULE.bazel's version), or build the loader with --//install:prebuilt=local"
+        )
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     step = parser.add_subparsers(dest='step', required=True)
@@ -85,11 +96,14 @@ def main() -> None:
     p = step.add_parser('stage')
     for name in ('u-boot', 'window', 'constants', 'script', 'loader', 'exporter', 'dtb', 'out'):
         p.add_argument('--' + name, required=True, type=Path)
+    p.add_argument('--loader-constants', type=Path)
     args = parser.parse_args()
     if args.step == 'patch':
         args.out.write_bytes(bl33_patch(args.bl33.read_bytes()))
         return
     window, constants = args.window.read_bytes(), json.loads(args.constants.read_text())
+    if args.loader_constants:
+        check_loader_constants(json.loads(args.loader_constants.read_text()), constants)
     if constants['SOURCE'] != STAGE_SOURCE or constants['PACKED_BYTES'] != len(window):
         raise SystemExit('loader was not built for the bl33-staged window')
     data_bytes, load, entry = struct.unpack_from('>3I', args.exporter.read_bytes(), 12)

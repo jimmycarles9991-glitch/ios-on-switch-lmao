@@ -2,6 +2,7 @@ load("//bazel/lint:defs.bzl", "lint_files")
 
 # drivers/SwitchWLAN: moved from out/native-a57/root-v1/tree/drivers/SwitchWLAN by the layout move.
 load("//kernel/rules:kernel.bzl", "kernel_driver", "kernel_headers")
+load("//kits/SwitchABI:defs.bzl", "switch_abi_bindings")
 
 package(default_visibility = ["//visibility:public"])
 
@@ -27,7 +28,9 @@ filegroup(
 # This package's headers (kernel_headers): what other drivers' hdr_deps name.
 kernel_headers()
 
-# SwitchWLAN: BCM4356A3 Wi-Fi on PCIe port 1; firmware.S .incbins drivers/SwitchWLAN/firmware.
+# SwitchWLAN: BCM4356A3 Wi-Fi on PCIe port 1; firmware.S .incbins drivers/SwitchWLAN/firmware. en0 is an
+# IONetworkingFamily driver: SwitchWLANFamily.cpp subclasses the original IOEthernetController and IOEthernetInterface
+# (a late object), and the family bindings check both vtables against the selected kind's tables on every build.
 kernel_driver(
     name = "SwitchWLAN",
     srcs = [
@@ -39,6 +42,10 @@ kernel_driver(
         "SwitchWLANCrypto.cpp",
         "SwitchWLANWpa.cpp",
         "SwitchWLANNet.cpp",
+        "SwitchWLANFamily.cpp",
+        "SwitchWLANApple80211.cpp",
+        "family-controller-bindings.S",
+        "family-interface-bindings.S",
         "SwitchWLANAwdl.cpp",
         "awdl/awdl_wire.c",
         "awdl/awdl_core.c",
@@ -46,6 +53,10 @@ kernel_driver(
         "awdl/awdl_bcm_trace.c",
         "awdl/awdl_apple80211.c",
         "firmware.S",
+    ],
+    abi = [
+        "IOEthernetController",
+        "IOEthernetInterface",
     ],
     c_copts = [
         "-mgeneral-regs-only",
@@ -66,4 +77,38 @@ kernel_driver(
         "kits/SwitchMMIO",
         "kits/SwitchRing",
     ],
+    late = ["SwitchWLANFamily.cpp"],
+    prelink = ["com.apple.iokit.IONetworkingFamily"],
+)
+
+switch_abi_bindings(
+    name = "family_controller_bindings",
+    out = "family-controller-bindings.S",
+    classes = ["//kits/SwitchABI:IOEthernetController"],
+    objects = [":SwitchWLAN_cc"],
+    own = [
+        "configureInterface",
+        "createInterface",
+        "disable",
+        "disablePacketFilter",
+        "enable",
+        "enablePacketFilter",
+        "getHardwareAddress",
+        "getPacketFilters",
+        "getWorkLoop",
+        "outputStart",
+        "setMulticastList",
+        "setMulticastMode",
+        "setPromiscuousMode",
+    ],
+    subclass = "IO80211Controller",
+)
+
+switch_abi_bindings(
+    name = "family_interface_bindings",
+    out = "family-interface-bindings.S",
+    classes = ["//kits/SwitchABI:IOEthernetInterface"],
+    objects = [":SwitchWLAN_cc"],
+    own = ["performCommand"],
+    subclass = "IO80211Interface",
 )

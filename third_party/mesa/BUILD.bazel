@@ -6,6 +6,7 @@ load("@rules_cc//cc:cc_library.bzl", "cc_library")
 load("@rules_python//python:py_binary.bzl", "py_binary")
 load("//bazel/lint:defs.bzl", "lint_files")
 load("//third_party/mesa/bazel:defs.bzl", "MESA_LINT_EXCLUDE", "MESA_ONLY", "MESA_PY_DEPS", "mesa_file")
+load("//third_party/mesa/bazel:identity.bzl", "mesa_identity_files")
 
 package(default_visibility = ["//visibility:public"])
 
@@ -18,6 +19,8 @@ exports_files(glob(
     ["**"],
     exclude = ["BUILD.bazel"],
 ))
+
+mesa_identity_files()
 
 # Every header a Mesa compile may include: include/, each package's own and generated headers, and TegraGM20B's ABI
 # (meson's -Dnvk-darwin-abi-dir), at $(BINDIR)/third_party/mesa/abi. Compiles depend on all of them; each object's

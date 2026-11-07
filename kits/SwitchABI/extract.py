@@ -239,26 +239,32 @@ def constants(fs: kernelcache.Fileset, table: dict) -> tuple[dict, dict]:
     return out, found
 
 
+def functions_only_table(fs: kernelcache.Fileset, cls: str, table: JsonObject, kind: str) -> str:
+    info = fs.inheritance[cls]
+    addresses, found = fileset_functions(fs, info['bundle'], table)
+    values, value_found = constants(fs, table)
+    found.update(value_found)
+    out = {
+        'class': cls,
+        'kind': kind,
+        'size': hex(info['size']),
+        'first_slot': 0,
+        'slots': len(fs.slots(cls)),
+        'slide': table['slide'],
+        'layout': {},
+        'fields': {},
+    }
+    if values:
+        out['constants'] = values
+    out.update(addresses=addresses, found=dict(sorted(found.items())), hints=table.get('hints', {}))
+    return dump(out)
+
+
 def extract(fs: kernelcache.Fileset, interface: JsonObject, table: JsonObject, kind: str, pure: int) -> str:
     cls = interface['class']
     info = fs.inheritance[cls]
     if interface.get('functions_only'):
-        addresses, found = fileset_functions(fs, info['bundle'], table)
-        return dump(
-            {
-                'class': cls,
-                'kind': kind,
-                'size': hex(info['size']),
-                'first_slot': 0,
-                'slots': len(fs.slots(cls)),
-                'slide': table['slide'],
-                'layout': {},
-                'fields': {},
-                'addresses': addresses,
-                'found': found,
-                'hints': table.get('hints', {}),
-            }
-        )
+        return functions_only_table(fs, cls, table, kind)
     if interface.get('metaclass_only'):
         addresses, found = fileset_functions(fs, info['bundle'], table)
         addresses['gMetaClass'], found['gMetaClass'] = hex(info['meta']), 'metaclass initialiser'
@@ -345,6 +351,7 @@ def check_plain(path: Path, interface: dict, table: dict) -> None:
     if 'vtable' in addresses:
         code = [(g['va'], g['va'] + g['size']) for g in segments if g['initprot'] & 4]
         errors += plain_vtable_errors(read, code, addresses, table)
+    errors += plain_constant_errors(lambda va: read(va, 4), table)
     if errors:
         joined = '\n  '.join(errors)
         raise SystemExit(f'{interface["class"]} ({table["kind"]}):\n  {joined}')
@@ -366,6 +373,18 @@ def plain_vtable_errors(
             errors.append(f'slot {slot} holds {entries[int(slot)]:#x}, the table binds {key} at {addresses[key]:#x}')
     if getter_target(read, entries[7]) != addresses['gMetaClass']:
         errors.append("getMetaClass does not return the table's gMetaClass")
+    return errors
+
+
+def plain_constant_errors(word: Callable[[int], int], table: dict) -> list[str]:
+    """Check each hints.constants entry: the instruction word at its address and the value the table holds."""
+    errors, values = [], table.get('constants', {})
+    for key, hint in sorted(table.get('hints', {}).get('constants', {}).items()):
+        at, want = int(hint['at'], 16), int(hint['word'], 16)
+        if word(at) != want:
+            errors.append(f'constant {key}: the word at {at:#x} is {word(at):08x}, not {want:08x}')
+        if values.get(key) != hint['value']:
+            errors.append(f'constant {key}: the hint shows {hint["value"]}, the table holds {values.get(key)}')
     return errors
 
 

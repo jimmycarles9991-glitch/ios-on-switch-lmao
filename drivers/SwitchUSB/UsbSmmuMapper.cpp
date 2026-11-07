@@ -1,12 +1,13 @@
 // SPDX-License-Identifier: BSD-2-Clause-Patent
-// The XUSB host's DMA through the MC SMMU (//drivers/SwitchUSB:superspeed): AppleUSBXHCI's scatter-gather buffers get
-// one contiguous IOVA range over their own pages, so large transfers need no bounce copy. See UsbSmmuMapper.h.
+// The XUSB host's DMA through the MC SMMU: AppleUSBXHCI's scatter-gather buffers get one contiguous IOVA range over
+// their own pages, so large transfers need no bounce copy. See UsbSmmuMapper.h.
 //
-// The swgroup XUSB_HOST (ASID register 0x288; clients xusb_hostr/xusb_hostw, TRANSLATION_ENABLE_2 bits 10/11: Linux
-// drivers/memory/tegra/tegra210.c) goes from bypass to translation once, when the mapper starts, after the falcon
-// firmware runs and before AppleUSBXHCI maps anything. What the controller reached by physical address until then
-// stays where it was, identity-mapped: the firmware image (the falcon keeps reading it at ILOAD_BASE) and the bounce
-// pool (UsbDmaMapper.cpp keeps physical addresses for what it bounces). The SMMU does not snoop the CPU's caches:
+// The swgroup XUSB_HOST (TegraSMMU.h; Linux drivers/memory/tegra/tegra210.c) goes from bypass to translation once, when
+// the mapper starts, after the falcon firmware runs and before AppleUSBXHCI maps anything; TegraSMMU programs it again
+// after every SC7, before the host comes back (XusbHost.cpp powerOn accepts its own ASID). What the controller reached
+// by physical address until then stays where it was, identity-mapped: the firmware image (the falcon reads it at
+// ILOAD_BASE again after every SC7) and the bounce pool (UsbDmaMapper.cpp keeps physical addresses for what it
+// bounces). The SMMU does not snoop the CPU's caches:
 // table entries are cleaned to memory, then the ASID's PTC and TLB entries flushed (TegraSMMU.h), before an address is
 // handed out and after one is taken back.
 #include "UsbSmmuMapper.h"
@@ -18,8 +19,8 @@
 #include "XudcHardware.h"
 
 namespace {
-constexpr uint32_t kAsid = 124;  // TegraSMMU.h holds 125-127
-constexpr uint32_t kAsidReg = 0x288, kTranslationReg = 0x230, kTranslationBits = (1u << 10) | (1u << 11);
+constexpr uint32_t kAsid = TEGRA_SMMU_ASID_XUSB_HOST;
+constexpr uint32_t kTranslationBits = (1u << 10) | (1u << 11);
 // 64 MiB of transfers in flight from 1 MiB up: below every RAM physical address (0x80000000 on), so the identity maps
 // never meet it.
 constexpr uint64_t kWindowBase = 1ull << 20, kWindowBytes = 64ull << 20;
@@ -83,7 +84,8 @@ bool switch_usb_smmu_start(uint64_t firmwarePa, uint64_t firmwareBytes, uint64_t
     xudc::cacheFlush(gTables.va, gTables.size);
     uintptr_t low, high;
     (void)gDomain.takeDirty(&low, &high);
-    if (tegra_smmu_attach(kAsid, gDomain.ptb(), kAsidReg, kTranslationReg, kTranslationBits, why, whySize))
+    if (tegra_smmu_attach(kAsid, gDomain.ptb(), TEGRA_SMMU_XUSB_HOST_ASID, TEGRA_SMMU_TRANSLATION_ENABLE_2,
+                          kTranslationBits, why, whySize))
         return false;
     gAttached = true;
     return true;

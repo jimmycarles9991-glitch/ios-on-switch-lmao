@@ -115,6 +115,19 @@ class HeaderTest(unittest.TestCase):
         with self.assertRaises(SystemExit):
             gen.header(interface, TABLE, 'kinds/TEST/Base.json')
 
+    def test_a_functions_only_class_is_a_struct_of_its_constants(self):
+        interface = {
+            'class': 'Table',
+            'functions_only': True,
+            'methods': {},
+            'constants': {'entries': {'doc': 'the entry array'}},
+            'functions': {'switch_table_find': {'decl': 'void *switch_table_find(unsigned id)'}},
+        }
+        text = gen.header(interface, {'kind': 'TEST', 'constants': {'entries': '0x100'}}, 'kinds/TEST/Table.json')
+        body = text[text.index('struct OriginalTable {') : text.index('};')]
+        self.assertIn('    static constexpr unsigned long entries = 0x100;', body)
+        self.assertIn('void *switch_table_find(unsigned id);', text[text.index('extern "C"') :])
+
     def test_a_function_without_a_declaration_is_not_declared(self):
         text = gen.header(INTERFACE, TABLE, 'kinds/TEST/Base.json')
         self.assertIn('void switch_base_check(Base *base);', text)

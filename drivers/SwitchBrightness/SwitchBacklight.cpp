@@ -9,7 +9,8 @@
 //     external-display module instead.
 //   * The module reads IODisplayParameters.brightness {min, max, value} (32-bit integers) and fails without it. Apple's
 //     AppleARMBacklight publishes brightness 0..65536 (value 32768 at start), rawBrightness 0..2047, BrightnessMicroAmps
-//     and BrightnessMilliNits.
+//     and BrightnessMilliNits. thermalmonitord reads brightness and BrightnessMilliNits {value, max} from the backlight
+//     ("Failed to find nit params" without the latter).
 //   * DisplayCreateWithID also reads backlight-calibration-parameters, the panel's luminance range in nits (16.16 fixed
 //     point; publishCalibration below). Without it the display's physical range is the slider's 0..1, read as nits:
 //     every nits value CoreBrightness computes is clamped to 1 ("Lmax=1.000000 Lmin=0.000000"), and
@@ -89,6 +90,7 @@
 #include "SwitchBacklightMath.h"
 #include "SwitchBrightness.h"
 #include "../SwitchSuspend/SwitchWake.h"
+#include "../TegraGM20B/TegraGM20BSleep.h"
 
 // The original AppleARMBacklight::gMetaClass (original-bindings.S), declared with a concrete type so that its address is
 // a constant initializer. Nothing here constructs or calls it.
@@ -279,15 +281,18 @@ OSMetaClassConstructorInit(SwitchBacklight, IOService, ) OSDefineDefaultStructor
 
 void SwitchBacklight::publishParameters()
 {
-    OSDictionary *parameters = OSDictionary::withCapacity(2);
+    OSDictionary *parameters = OSDictionary::withCapacity(3);
     OSDictionary *brightness = range(kMax, current);
     OSDictionary *raw = range(TEGRA_PANEL_BRIGHTNESS_MAX, toRaw(current));
-    if (parameters && brightness && raw) {
+    OSDictionary *milliNits = range(kMilliNitsMax, rawToMilliNits(toRaw(current)));
+    if (parameters && brightness && raw && milliNits) {
         parameters->setObject("brightness", brightness);
         parameters->setObject("rawBrightness", raw);
+        parameters->setObject("BrightnessMilliNits", milliNits);
         setProperty("IODisplayParameters", parameters);
     }
     setProperty("brightness-nits", rawToNits(toRaw(current)), 32);  // what the panel shows, nits * 65536
+    OSSafeReleaseNULL(milliNits);
     OSSafeReleaseNULL(raw);
     OSSafeReleaseNULL(brightness);
     OSSafeReleaseNULL(parameters);
@@ -336,6 +341,7 @@ void SwitchBacklight::powerOff()
         IOLog("SwitchBacklight: panel off failed (%d): the display is not running\n", err);
     const uint64_t panel = mach_absolute_time();
     scanoutStopped = native_legacy_display_set_scanout(false);
+    tegra_gm20b_display_power(false);
     panelOn = false;
     sentRaw = ~0u;
     switch_power_journal(
@@ -349,6 +355,7 @@ void SwitchBacklight::powerOff()
 void SwitchBacklight::powerOn()
 {
     const uint64_t start = mach_absolute_time();
+    tegra_gm20b_display_power(true);   // the GPU's rail comes up on its own thread call while the panel wakes
     switch_touch_display_power(true);  // the controller comes up on its own work loop while the panel wakes
     const uint64_t touch = mach_absolute_time();
     if (scanoutStopped && !native_legacy_display_set_scanout(true)) {
@@ -552,8 +559,10 @@ void SwitchBacklight::expectWake(unsigned source)
     IOLockLock(requestLock);
     const bool armed = switch_wake_guard_arm(&guard, source, mach_absolute_time(), guardTimeout, gDisplayOn || wantOn);
     IOLockUnlock(requestLock);
-    if (armed)
+    if (armed) {
         guardTimer->setTimeoutMS(SWITCH_WAKE_GUARD_MS);
+        tegra_gm20b_display_expected();
+    }
 }
 
 bool SwitchBacklight::start(IOService *provider)

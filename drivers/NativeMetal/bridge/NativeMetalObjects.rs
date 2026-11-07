@@ -25,8 +25,8 @@ use metal2vulkan_runtime::{
     MessageSink, MetalLevel, MultisampleDepthResolveFilter, MultisampleStencilResolveFilter, Origin, PipelineOption,
     PipelineOptions, PrivateCount, PrivateFlag, PrivateProperties, PurgeableState, Region, RenderCommandEncoder,
     RenderPassDescriptor, RenderPipelineState, ResourceOptions, ResourceRef, RowState, SamplerState, ScissorRect,
-    SharedEvent, SharedEventListener, Size, StoreAction, SurfaceYCbCrMatrix, Texture, TextureDescriptor, Viewport,
-    VisibilityResultMode,
+    SharedEvent, SharedEventListener, Size, StoreAction, SubmissionMemoryHook, SurfaceYCbCrMatrix, Texture,
+    TextureDescriptor, Viewport, VisibilityResultMode,
 };
 use std::cell::RefCell;
 use std::ffi::{CStr, c_char, c_void};
@@ -106,8 +106,24 @@ where
         .ok_or_else(|| format!("{what} {value} is not a Metal value"))
 }
 
+/// The error of `what` as the caller's text, and m2v's refusal of work iPadOS sent, logged once per call and kind of error
+/// in the process (kits/SwitchRefusal: an error line, kept in release). The kind is the error's variant and first field
+/// (`NotImplemented(Format`, `Unsupported(Unsupported { feature: FramebufferFetch`) without digits, so a value that varies
+/// per call makes no line of its own.
 fn e<E: std::fmt::Debug>(what: &'static str) -> impl FnOnce(E) -> String {
-    move |error| format!("{what}: {error:?}")
+    move |error| {
+        let text = format!("{what}: {error:?}");
+        let kind: String = text[what.len() + 2..]
+            .split([',', ')'])
+            .next()
+            .unwrap_or_default()
+            .chars()
+            .filter(|c| !c.is_ascii_digit())
+            .collect();
+        let key = switch_refusal::key_with(switch_refusal::key("m2v", what), switch_refusal::key("", &kind));
+        switch_refusal::refuse(c"m2v", what, key, || text.clone());
+        text
+    }
 }
 
 fn options(value: u64) -> Result<ResourceOptions, String> {
@@ -226,12 +242,35 @@ pub unsafe extern "C" fn nmb_device_open(loader: *const c_char, cache: *const c_
             let _ = SHADOW_LOG.set(cache.join("shadow.log"));
         }
         options.messages = Some(MessageSink::new(observe_message));
+        let device = Device::system_default_with(&options).map_err(e("device"))?;
+        tell_nvk_submission_memory(&device, loader);
         Ok(boxed(NmbDevice(
-            Device::system_default_with(&options).map_err(e("device"))?,
+            device,
             std::sync::OnceLock::new(),
             std::sync::Mutex::new(()),
         )))
     })
+}
+
+/// NVK's switch_nvk_submit_surfaces, where the loaded NVK has it: each submission's host memory, so the kernel orders other
+/// processes' GPU work on those imports (ExecSurfaces) and CPU locks wait only for writers.
+fn tell_nvk_submission_memory(device: &Device, loader: &CStr) {
+    // SAFETY: a NUL-terminated path; RTLD_NOLOAD loads nothing, and the device's open loaded NVK from this path.
+    let nvk = unsafe { libc::dlopen(loader.as_ptr(), libc::RTLD_LAZY | libc::RTLD_NOLOAD) };
+    if nvk.is_null() {
+        return;
+    }
+    // SAFETY: a handle dlopen returned and a NUL-terminated name.
+    let hook = unsafe { libc::dlsym(nvk, c"switch_nvk_submit_surfaces".as_ptr()) };
+    if !hook.is_null() {
+        // SAFETY: NVK exports it with SubmissionMemoryHook's signature; it is thread-safe, lives as long as NVK (never
+        // unloaded while a device is open) and calls nothing of the runtime's.
+        unsafe {
+            device.set_submission_memory_hook(std::mem::transmute::<*mut c_void, SubmissionMemoryHook>(hook));
+        }
+    }
+    // SAFETY: the reference RTLD_NOLOAD took.
+    unsafe { libc::dlclose(nvk) };
 }
 
 // What the runtime says through the device's sink, kept as numbers for the plugin's telemetry: each render VkPipeline making the
@@ -354,6 +393,32 @@ pub extern "C" fn nmb_device_counts(device: *const NmbDevice, out: *mut u64) -> 
         ]);
         Ok(true)
     })
+}
+
+/// The runtime's device memory into the caller's three words: the bytes it holds now (its live blocks and spares), the
+/// bytes it allocated so far, and the memoryless backings live (`memory.rs`).
+#[unsafe(no_mangle)]
+pub extern "C" fn nmb_device_memory(device: *const NmbDevice, out: *mut u64) -> bool {
+    guard(false, || {
+        if out.is_null() {
+            return Err("null memory".into());
+        }
+        let c = get(device)?.0.work_counts();
+        // SAFETY: the header's three words.
+        let out = unsafe { std::slice::from_raw_parts_mut(out, 3) };
+        out.copy_from_slice(&[
+            c.device_memory_live,
+            c.device_memory_allocated,
+            c.memoryless_backings_live,
+        ]);
+        Ok(true)
+    })
+}
+
+/// Free the device memory no resource holds (`Device::release_idle_memory`): the bytes freed.
+#[unsafe(no_mangle)]
+pub extern "C" fn nmb_device_release_idle_memory(device: *const NmbDevice) -> u64 {
+    guard(0, || Ok(get(device)?.0.release_idle_memory()))
 }
 
 /// The runtime's host texel copies by route, into the caller's seven words (ios-on-switch-lmao m2v 0116): `replaceRegion` into the texture's
@@ -522,9 +587,13 @@ fn answer_selectors() -> &'static [(std::ffi::CString, u32)] {
     ALL.get_or_init(|| {
         let counts = PrivateCount::ALL.into_iter().map(|c| (c.selector(), 0));
         let flags = PrivateFlag::ALL.into_iter().map(|f| (f.selector(), 1));
-        counts
-            .chain(flags)
-            .chain(PUBLIC_ANSWERS.iter().copied())
+        let mut all: Vec<(&str, u32)> = counts.chain(flags).chain(PUBLIC_ANSWERS.iter().copied()).collect();
+        for selector in crate::target::count_selectors() {
+            if !all.iter().any(|&(s, _)| s == selector) {
+                all.push((selector, 0));
+            }
+        }
+        all.into_iter()
             .map(|(s, kind)| (std::ffi::CString::new(s).expect("selector"), kind))
             .collect()
     })
@@ -591,7 +660,23 @@ pub extern "C" fn nmb_device_family_waivers(device: *const NmbDevice, out: *mut 
     })
 }
 
+/// The device's answer: the runtime's, never above the target hardware's (NativeMetalTarget.rs).
 fn device_answer(device: &NmbDevice, selector: &str, arg: u64) -> Result<u64, String> {
+    if crate::target::says_no(selector) {
+        return Ok(0);
+    }
+    let own = runtime_answer(device, selector, arg);
+    let Some(target) = crate::target::count(selector) else {
+        return own;
+    };
+    let own = own.or_else(|reason| {
+        let color_attachments = runtime_answer(device, "maxColorAttachments", 0)?;
+        crate::target::device_bound(&device.0, selector, color_attachments).ok_or(reason)
+    })?;
+    Ok(own.min(target))
+}
+
+fn runtime_answer(device: &NmbDevice, selector: &str, arg: u64) -> Result<u64, String> {
     let d = &device.0;
     let p = d.properties();
     let none = || format!("the device has no answer for {selector}");
@@ -1083,6 +1168,21 @@ pub extern "C" fn nmb_texture_new_linear(
             .0
             .new_linear_texture(&descriptor, offset, bytes_per_row, bytes_per_image);
         Ok(boxed(NmbTexture(texture.map_err(e("linear texture"))?)))
+    })
+}
+
+/// The device's optimal image of `descriptor` bound `offset` bytes into `buffer`'s memory, holding the bytes there
+/// (`Buffer::new_tiled_texture_in_place`): optimal-tiled texels another driver of the process lays out as the device does.
+#[unsafe(no_mangle)]
+pub extern "C" fn nmb_texture_new_tiled_in_place(
+    buffer: *mut NmbBuffer,
+    descriptor: *const NmbTextureDescriptor,
+    offset: u64,
+) -> *mut NmbTexture {
+    guard(std::ptr::null_mut(), || {
+        let descriptor = texture_descriptor(descriptor)?;
+        let texture = get(buffer)?.0.new_tiled_texture_in_place(&descriptor, offset);
+        Ok(boxed(NmbTexture(texture.map_err(e("tiled texture in place"))?)))
     })
 }
 
@@ -2188,10 +2288,11 @@ impl NmbEvent {
     }
 }
 
-fn shared<'a>(event: *const NmbEvent) -> Result<&'a SharedEvent, String> {
+// A plain event's host view too (Event::host_view): the raw GM20B path signals and waits for both kinds through it.
+fn shared(event: *const NmbEvent) -> Result<SharedEvent, String> {
     match get(event)? {
-        NmbEvent::Shared(s) => Ok(s),
-        NmbEvent::Event(_) => Err("not a shared event".into()),
+        NmbEvent::Shared(s) => Ok(s.clone()),
+        NmbEvent::Event(e) => Ok(e.host_view()),
     }
 }
 

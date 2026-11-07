@@ -82,5 +82,14 @@ inline uint32_t rawToNits(unsigned raw)
         raw = kPanelMax;
     return (uint32_t)(((uint64_t)raw * kNitsMax + kPanelMax / 2) / kPanelMax);
 }
+
+// IODisplayParameters.BrightnessMilliNits {min, max, value}, as AppleARMBacklight publishes it (J120: max 600000) and
+// thermalmonitord reads value and max as SInt32: the panel's luminance in thousandths of a nit.
+constexpr uint32_t kMilliNitsMax = (uint32_t)(((uint64_t)kNitsMax * 1000 + 32768) >> 16);
+
+inline uint32_t rawToMilliNits(unsigned raw)
+{
+    return (uint32_t)(((uint64_t)rawToNits(raw) * 1000 + 32768) >> 16);
+}
 }  // namespace switch_backlight
 #endif

@@ -5,12 +5,24 @@
 //   SwitchDiag.c switch_diag_panic         switch_panic_begin     (panic entry, other CPUs still running)
 //   debug.c handle_debugger_trap               switch_panic_halted    (other CPUs halted)
 //   debug.c, after SavePanicInfo               switch_panic_logged    (XNU's panic log written; may not return)
+//   SwitchPMIC.cpp's start                     switch_panic_save_thermal
 //   kern_exec.c, once Data is mounted          switch_panic_save_pending, _pending_stackshot, switch_panic_save_done
 #ifndef SWITCH_PANIC_SAVE_H
 #define SWITCH_PANIC_SAVE_H
 #include <stdarg.h>
 #include <stddef.h>
 #include <stdint.h>
+#ifdef __cplusplus
+extern "C" {
+#endif
+// SwitchPMIC.cpp at its start, thread context: the last boot's software thermal shutdown record (SwitchResetCause.h's
+// switch_thermal_sensor, 0 for none, and its temperature), filed with the PMC's reset cause by
+// switch_panic_save_pending. A no-op in kernels without the panic record.
+void switch_panic_save_thermal(int sensor, int millic);
+#ifdef __cplusplus
+}
+#endif
+
 #if defined(SWITCH_XNU_DIAGNOSTICS) && SWITCH_XNU_DIAGNOSTICS
 void switch_panic_save_init(void);
 int switch_panic_save_xnu_buffer(uintptr_t *base, unsigned int *bytes);

@@ -17,6 +17,65 @@
 #include "nv_push_cl90c0.h"
 #include "nv_push_clb197.h"
 
+#if defined(__APPLE__) && SWITCH_DEBUG
+#include <dispatch/dispatch.h>
+#include <notify.h>
+#include <os/log.h>
+#include <pthread.h>
+#include <stdatomic.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+/* ios-on-switch-lmao, debug builds: where copies and fills run, switched within one boot from the Mac for an A/B
+ * (idevicenotificationproxy -u <udid> post com.brunostjohn.switch.debug.nvk-copies-<meta|ce>): upstream's meta draws
+ * and dispatches on a graphics or compute queue, or the copy engine, which on GM20B is the GRCE on GR's runlist (it
+ * waits for the 3D engine at each switch to it, and nothing overlaps). Each switch logs one line, which splits the
+ * kernel's gpuprof windows by way. Measurement only: the losing way's switch goes once it is known. */
+static atomic_bool nvk_copies_ce;
+
+static void
+nvk_copies_watch(void)
+{
+   /* NVK_COPIES=ce: from the start (a host GPU model that runs no shaders, drivers/TegraGM20BMetal/raw/pack/cap.cpp) */
+   const char *start = getenv("NVK_COPIES");
+   atomic_store_explicit(&nvk_copies_ce, start && !strcmp(start, "ce"), memory_order_relaxed);
+   static const char *const ways[] = {"meta", "ce"};
+   for (unsigned i = 0; i < 2; i++) {
+      char name[64];
+      int token;
+      snprintf(name, sizeof(name), "com.brunostjohn.switch.debug.nvk-copies-%s", ways[i]);
+      notify_register_dispatch(name, &token, dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^(int t) {
+         (void)t;
+         atomic_store_explicit(&nvk_copies_ce, i == 1, memory_order_relaxed);
+         os_log(OS_LOG_DEFAULT, "nvk: copies and fills on %{public}s (debug notification)", ways[i]);
+      });
+   }
+}
+
+bool
+nvk_copies_on_ce_now(void)
+{
+   static pthread_once_t once = PTHREAD_ONCE_INIT;
+   pthread_once(&once, nvk_copies_watch);
+   return atomic_load_explicit(&nvk_copies_ce, memory_order_relaxed);
+}
+#else
+bool
+nvk_copies_on_ce_now(void)
+{
+   return false;
+}
+#endif
+
+/* The queue flags the copy and fill entry points route on: none (the copy engine's branch) in a command buffer that
+ * began with copies on the copy engine. */
+static VkQueueFlags
+nvk_copy_route_flags(struct nvk_cmd_buffer *cmd)
+{
+   return cmd->copies_on_ce ? 0 : nvk_cmd_buffer_queue_flags(cmd);
+}
+
 static VkResult
 nvk_cmd_bind_map_buffer(struct vk_command_buffer *vk_cmd,
                         struct vk_meta_device *meta,
@@ -429,7 +488,7 @@ nvk_CmdCopyImageToMemoryKHR(VkCommandBuffer commandBuffer,
    VK_FROM_HANDLE(nvk_cmd_buffer, cmd, commandBuffer);
    VK_FROM_HANDLE(nvk_image, src, pCopyMemoryInfo->image);
 
-   VkQueueFlags queue_flags = nvk_cmd_buffer_queue_flags(cmd);
+   VkQueueFlags queue_flags = nvk_copy_route_flags(cmd);
    if ((queue_flags & VK_QUEUE_COMPUTE_BIT) &&
        nvk_meta_image_copy_compute_supported(src)) {
       nvk_cmd_copy_image_to_memory_meta(cmd, pCopyMemoryInfo);
@@ -463,7 +522,7 @@ nvk_CmdCopyMemoryToImageKHR(VkCommandBuffer commandBuffer,
    VK_FROM_HANDLE(nvk_cmd_buffer, cmd, commandBuffer);
    VK_FROM_HANDLE(nvk_image, dst, pCopyMemoryInfo->image);
 
-   VkQueueFlags queue_flags = nvk_cmd_buffer_queue_flags(cmd);
+   VkQueueFlags queue_flags = nvk_copy_route_flags(cmd);
    if ((queue_flags & VK_QUEUE_GRAPHICS_BIT) &&
        nvk_meta_image_copy_gfx_supported(dst)) {
       nvk_cmd_copy_memory_to_image_meta(cmd, pCopyMemoryInfo,
@@ -520,7 +579,7 @@ nvk_CmdCopyImage2(VkCommandBuffer commandBuffer,
 
    bool is_depth_to_color = !vk_format_is_depth_or_stencil(dst->vk.format) &&
                             vk_format_is_depth_or_stencil(src->vk.format);
-   VkQueueFlags queue_flags = nvk_cmd_buffer_queue_flags(cmd);
+   VkQueueFlags queue_flags = nvk_copy_route_flags(cmd);
    if ((queue_flags & VK_QUEUE_GRAPHICS_BIT) &&
        nvk_meta_image_copy_gfx_supported(src) &&
        nvk_meta_image_copy_gfx_supported(dst) && !is_depth_to_color) {
@@ -600,7 +659,7 @@ nvk_CmdCopyMemoryKHR(VkCommandBuffer commandBuffer,
       info.pRegions = regions;
    }
 
-   VkQueueFlags queue_flags = nvk_cmd_buffer_queue_flags(cmd);
+   VkQueueFlags queue_flags = nvk_copy_route_flags(cmd);
    if (queue_flags & VK_QUEUE_COMPUTE_BIT) {
       nvk_cmd_copy_memory_meta(cmd, &info);
    } else {
@@ -631,7 +690,7 @@ nvk_CmdFillMemoryKHR(VkCommandBuffer commandBuffer,
 {
    VK_FROM_HANDLE(nvk_cmd_buffer, cmd, commandBuffer);
 
-   VkQueueFlags queue_flags = nvk_cmd_buffer_queue_flags(cmd);
+   VkQueueFlags queue_flags = nvk_copy_route_flags(cmd);
    if (queue_flags & VK_QUEUE_COMPUTE_BIT) {
       nvk_cmd_fill_memory_meta(cmd, pDstRange, dstFlags, data);
    } else {

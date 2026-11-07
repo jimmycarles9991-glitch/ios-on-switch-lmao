@@ -1,39 +1,29 @@
 // SPDX-License-Identifier: BSD-2-Clause-Patent
-// NVDEC's buffer arena. With the SMMU bypassed the engine addresses physical memory, so every buffer it touches
-// (bitstream, surfaces, colocated motion, history, status) must be physically contiguous and below 4 GiB. A 3 MiB
-// contiguous allocation late in boot fails intermittently once memory is fragmented, so one region is reserved when
-// NVDEC comes up (stage 2 on) and handed out in 64 KiB granules, first fit.
+// NVDEC's memory, behind the MC SMMU (ASID 123, drivers/TegraSMMU/TegraSMMUEngine.h). Every buffer a session asks for is
+// any RAM pages, wired and mapped into NVDEC's 1 GiB window when allocated and unmapped when freed, so a 4K stream's
+// pictures (12.5 MB each, as many as its DPB declares) need no contiguous memory. The firmware and the kernel's setup
+// slots are identity-mapped: the falcon fetches its apps and the driver points SET_DRV_PIC_SETUP_OFFSET by physical
+// address. What all sessions together may wire is capped (kWiredLimit), as the arena this replaces capped it.
 #include <IOKit/IOLib.h>
-#include <IOKit/IOLocks.h>
-#include <IOKit/IOBufferMemoryDescriptor.h>
-#include <string.h>
 #include "TegraNVDEC.h"
+#include "../TegraSMMU/TegraSMMU.h"
+#include "../TegraSMMU/TegraSMMUEngine.h"
+#include "../../kits/SwitchDMA/SwitchDMABuffer.h"
 #include "../../kits/SwitchDMA/SwitchDcache.h"
 
 namespace {
-constexpr uint64_t kGranule = 64 * 1024;
-IOBufferMemoryDescriptor *gArena;
-uint64_t gArenaPA;
-uint8_t *gArenaVA;
-uint32_t gGranules, gFree;
-uint32_t *gUsed;  // one bit per granule
-IOLock *gLock;
+constexpr uint64_t kWindowBase = 1ull << 30, kWindowBytes = 1ull << 30;
+constexpr uint32_t kIdentityTables = 4;  // the firmware and the setup slots: at most two 4 MiB sections each
+constexpr uint64_t kWiredLimit = 512ull << 20;
+constexpr uint32_t kTranslation = (1u << 24) | (1u << 25);  // nvdecsrd, nvdecswr
 
-bool used(uint32_t i)
-{
-    return gUsed[i / 32] & (1u << (i % 32));
-}
+const TegraSMMUSwgroup kGroups[] = {
+    {TEGRA_SMMU_NVDEC_ASID, TEGRA_SMMU_TRANSLATION_ENABLE_3, kTranslation},
+    {TEGRA_SMMU_NVDEC1_ASID, TEGRA_SMMU_TRANSLATION_ENABLE_3, 0},
+};
 
-void setUsed(uint32_t first, uint32_t count, bool on)
-{
-    for (uint32_t i = first; i < first + count; i++) {
-        if (on)
-            gUsed[i / 32] |= 1u << (i % 32);
-        else
-            gUsed[i / 32] &= ~(1u << (i % 32));
-    }
-}
-
+TegraSMMUEngine gSpace;
+uint64_t gWired;  // atomic: bytes of every live buffer
 }  // namespace
 
 extern "C" void tegra_nvdec_cache_clean(const void *va, size_t size)
@@ -46,106 +36,80 @@ extern "C" void tegra_nvdec_cache_flush(const void *va, size_t size)
     switch_dcache_clean_invalidate(va, size);
 }
 
-extern "C" int tegra_nvdec_arena_init(uint64_t bytes)
+extern "C" int tegra_nvdec_memory_init(const switch_dma_buffer *firmware, const switch_dma_buffer *setup, char *line,
+                                       size_t size)
 {
-    if (gArena)
-        return 0;
-    bytes = (bytes + kGranule - 1) & ~(kGranule - 1);
-    gLock = IOLockAlloc();
-    const IOOptionBits options = (IOOptionBits)kIODirectionInOut | (IOOptionBits)kIOMemoryPhysicallyContiguous |
-                                 (IOOptionBits)kIOMemoryMapperNone | (IOOptionBits)kIOMemoryKernelUserShared;
-    IOBufferMemoryDescriptor *arena =
-        gLock ? IOBufferMemoryDescriptor::inTaskWithPhysicalMask(kernel_task, options, bytes, 0xffff0000ULL) : nullptr;
-    IOByteCount contiguous = 0;
-    uint64_t pa = 0;
-    if (arena && arena->prepare() == kIOReturnSuccess)
-        pa = arena->getPhysicalSegment(0, &contiguous, kIOMemoryMapperNone);
-    if (!pa || contiguous < bytes || pa + bytes > (1ULL << 32)) {
-        if (arena)
-            arena->release();
-        return -12;
+    if (!gSpace.init(TEGRA_SMMU_ASID_NVDEC, kWindowBase, kWindowBytes, kIdentityTables)) {
+        snprintf(line, size, "N1 FAIL no contiguous memory below 4 GiB for NVDEC's SMMU tables");
+        return -1;
     }
-    gGranules = (uint32_t)(bytes / kGranule);
-    gUsed = IONewZero(uint32_t, (gGranules + 31) / 32);
-    if (!gUsed) {
-        arena->release();
-        return -12;
+    if (!gSpace.identity(firmware->pa, firmware->size, false) || !gSpace.identity(setup->pa, setup->size, false)) {
+        snprintf(line, size, "N1 FAIL the firmware and setup slots need more than %u identity tables", kIdentityTables);
+        gSpace.release();
+        return -1;
     }
-    gArenaPA = pa;
-    gArenaVA = (uint8_t *)arena->getBytesNoCopy();
-    gFree = gGranules;
-    gArena = arena;
+    return tegra_nvdec_memory_attach(line, size);
+}
+
+extern "C" int tegra_nvdec_memory_attach(char *line, size_t size)
+{
+    char why[160];
+    if (gSpace.attach(kGroups, sizeof(kGroups) / sizeof(kGroups[0]), why, sizeof(why))) {
+        snprintf(line, size, "N1 FAIL nvdec swgroup: %s", why);
+        return -1;
+    }
     return 0;
 }
 
-extern "C" void tegra_nvdec_arena_release(void)
+extern "C" void tegra_nvdec_memory_detach(void)
 {
-    if (!gArena)
-        return;
-    gArena->complete();
-    gArena->release();
-    gArena = nullptr;
-    IODelete(gUsed, uint32_t, (gGranules + 31) / 32);
-    gUsed = nullptr;
-    gGranules = gFree = 0;
+    gSpace.detach();
 }
 
-extern "C" int tegra_nvdec_arena_alloc(uint64_t size, TegraNVDECBlock *block)
+extern "C" void tegra_nvdec_memory_release(void)
 {
-    if (!gArena || !size || size > (uint64_t)gGranules * kGranule)
+    gSpace.detach();
+    gSpace.release();
+}
+
+extern "C" int tegra_nvdec_buffer_alloc(uint64_t size, TegraNVDECBlock *block)
+{
+    *block = {};
+    const uint64_t bytes = TegraSMMUSpace::round(size);
+    if (!size || !gSpace.lock)
         return -12;
-    const uint32_t count = (uint32_t)((size + kGranule - 1) / kGranule);
-    IOLockLock(gLock);
-    uint32_t run = 0, first = 0;
-    for (uint32_t i = 0; i < gGranules && run < count; i++) {
-        if (used(i)) {
-            run = 0;
-        } else {
-            if (!run)
-                first = i;
-            run++;
-        }
-    }
-    if (run < count) {
-        IOLockUnlock(gLock);
+    if (__atomic_add_fetch(&gWired, bytes, __ATOMIC_RELAXED) > kWiredLimit) {
+        __atomic_sub_fetch(&gWired, bytes, __ATOMIC_RELAXED);
         return -12;
     }
-    setUsed(first, count, true);
-    gFree -= count;
-    IOLockUnlock(gLock);
-    block->first = first;
-    block->count = count;
-    block->size = (uint64_t)count * kGranule;
-    block->pa = gArenaPA + (uint64_t)first * kGranule;
-    block->va = gArenaVA + (uint64_t)first * kGranule;
-    // Zero through the cacheable kernel mapping and push it out, so no dirty line can later land on engine output.
-    bzero(block->va, block->size);
-    tegra_nvdec_cache_flush(block->va, block->size);
+    if (!switch_dma_pages_alloc(&block->pages, (size_t)bytes, kIOMemoryKernelUserShared)) {
+        __atomic_sub_fetch(&gWired, bytes, __ATOMIC_RELAXED);
+        return -12;
+    }
+    block->iova = gSpace.map(block->pages.pages, block->pages.count, true);
+    if (!block->iova) {
+        switch_dma_pages_free(&block->pages);
+        __atomic_sub_fetch(&gWired, bytes, __ATOMIC_RELAXED);
+        return -12;
+    }
+    block->size = bytes;
+    block->va = block->pages.va;
     return 0;
 }
 
-extern "C" void tegra_nvdec_arena_free(const TegraNVDECBlock *block)
+extern "C" void tegra_nvdec_buffer_free(TegraNVDECBlock *block)
 {
-    if (!gArena || !block->count)
+    if (!block->iova)
         return;
-    IOLockLock(gLock);
-    setUsed(block->first, block->count, false);
-    gFree += block->count;
-    IOLockUnlock(gLock);
+    gSpace.unmap(block->iova, block->pages.count);
+    switch_dma_pages_free(&block->pages);
+    __atomic_sub_fetch(&gWired, block->size, __ATOMIC_RELAXED);
+    *block = {};
 }
 
-// A physical-range descriptor, as TegraGM20B hands its pool memory to clients; on RAM the default cache mode maps it
-// cacheable.
-extern "C" IOMemoryDescriptor *tegra_nvdec_arena_descriptor(const TegraNVDECBlock *block)
+extern "C" void tegra_nvdec_memory_usage(uint64_t *limit, uint64_t *free)
 {
-    IOAddressRange range = {block->pa, block->size};
-    return gArena ? IOMemoryDescriptor::withAddressRanges(
-                        &range, 1, (IOOptionBits)kIODirectionInOut | (IOOptionBits)kIOMemoryTypePhysical64, TASK_NULL)
-                  : nullptr;
-}
-
-extern "C" void tegra_nvdec_arena_usage(uint64_t *total, uint64_t *free)
-{
-    *total = (uint64_t)gGranules * kGranule;
-    *free = (uint64_t)gFree * kGranule;
+    const uint64_t wired = __atomic_load_n(&gWired, __ATOMIC_RELAXED);
+    *limit = kWiredLimit;
+    *free = wired < kWiredLimit ? kWiredLimit - wired : 0;
 }

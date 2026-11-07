@@ -6,7 +6,7 @@
 #                            loops, exhaustively to 80 bytes at every alignment and over random inputs, guard pages
 #                            after both buffers
 #   xnu_memcmp_source_test   subrs.c uses it on arm64 only, through the two bodies the harness copies
-#   xnu_stall_test           osfmk/kern/switch_stall.h's decisions: which samples of a UI main thread are a stall,
+#   xnu_stall_test           kernel/switch/diag/stall.h's decisions: which samples of a UI main thread are a stall,
 #                            one report and one end per episode, wait names by block_hint.h value, user addresses
 #   xnu_render_senders_test  osfmk/ipc/switch_render_senders.h's table and line: the render server's senders by
 #                            process, largest first, with their rates and top ids, the rest as others
@@ -19,6 +19,8 @@
 #   xnu_sched_stats_test     kernel/switch/sched/stats.h's latency histogram, percentiles and line entry; that
 #                            thread_invoke feeds it in both dispatch paths under the incoming thread's lock, and that
 #                            a release kernel compiles every hook to nothing
+#   xnu_sched_render_test    kernel/switch/sched/render.h: the display thread's dispatches split its time from a vsync
+#                            to its swap into running, blocked and waiting for a core
 #   xnu_ui_scale_test        bsd/vm/switch_ui_scale.h's scales (whole-point screens, exact floats, boot-arg values)
 #                            and the cache text they write, against the assembler and the bytes the 1.6-only sites
 #                            shipped; the status bar battery's fill in whole pixels with equal gaps at 1.25; the
@@ -39,6 +41,11 @@
 #                            change is setting the Access flag
 #   switch_cpulimit_test     <switch/cpulimit.h>: a blocking per-thread CPU limit's share scaled to this CPU, lifted at
 #                            a whole core, and its hook in both trees' thread_set_cpulimit
+#   switch_commpage_test     <switch/commpage.h>: the ARMv8 crypto features from ID_AA64ISAR0_EL1 into the commpage and
+#                            hw.optional.arm.FEAT_*, and its hook in both trees' commpage_init_arm_optional_features_isar0
+#   switch_prefs_test        kernel/switch/boot/prefs.c takes keys out of plists CoreFoundation wrote and reads back
+#                            (binary, both count forms, wide references, damaged files; XML as the setup wrote it); no
+#                            boot-time setup in either tree or the 12377 port record sets SpringBoard's never-dim keys
 #
 #   bazel test //kernel/tests:all
 load("@bazel_skylib//rules:copy_file.bzl", "copy_file")
@@ -152,7 +159,7 @@ host_test(
 
 copy_file(
     name = "switch_stall",
-    src = "//kernel/xnu-10063.141.1/osfmk:kern/switch_stall.h",
+    src = "//kernel/switch:diag/stall.h",
     out = "switch_stall.h",
 )
 
@@ -209,6 +216,22 @@ host_test(
         "//kernel/switch:sched/stats.c",
     ],
     deps = [":sched_stats"],
+)
+
+# --- kernel/switch/sched/render.h -----------------------------------------------------------------------------------------
+copy_file(
+    name = "switch_sched_render",
+    src = "//kernel/switch:sched/render.h",
+    out = "sched/render.h",
+)
+
+host_test(
+    name = "xnu_sched_render_test",
+    srcs = [
+        "sched/render.h",
+        "xnu_sched_render_test.cpp",
+    ],
+    includes = ["."],
 )
 
 # --- kernel/switch/diag/frames.h ----------------------------------------------------------------------------------------
@@ -429,4 +452,56 @@ host_test(
         'THREAD_12377=\\"$(rootpath //kernel/xnu-12377.121.6/osfmk:kern/thread.c)\\"',
     ],
     includes = ["."],
+)
+
+copy_file(
+    name = "switch_commpage",
+    src = "//kernel/switch:include/switch/commpage.h",
+    out = "switch/commpage.h",
+)
+
+host_test(
+    name = "switch_commpage_test",
+    srcs = [
+        "switch/commpage.h",
+        "switch_commpage_test.cpp",
+    ],
+    data = [
+        "//kernel/xnu-10063.141.1/osfmk:arm/commpage/commpage.c",
+        "//kernel/xnu-12377.121.6/osfmk:arm/commpage/commpage.c",
+    ],
+    defines = [
+        'COMMPAGE_10063=\\"$(rootpath //kernel/xnu-10063.141.1/osfmk:arm/commpage/commpage.c)\\"',
+        'COMMPAGE_12377=\\"$(rootpath //kernel/xnu-12377.121.6/osfmk:arm/commpage/commpage.c)\\"',
+    ],
+    includes = ["."],
+)
+
+# --- kernel/switch/boot/prefs.c ----------------------------------------------------------------------------------------
+copy_file(
+    name = "switch_prefs_header",
+    src = "//kernel/switch:include/switch/prefs.h",
+    out = "switch/prefs.h",
+)
+
+host_library(
+    name = "prefs",
+    srcs = ["//kernel/switch:boot/prefs.c"],
+    hdrs = ["switch/prefs.h"],
+    includes = ["."],
+)
+
+host_test(
+    name = "switch_prefs_test",
+    srcs = ["switch_prefs_test.cpp"],
+    data = [
+        "//kernel/xnu-10063.141.1/bsd:kern/kern_exec.c",
+        "//kernel/xnu-12377.121.6/bsd:kern/kern_exec.c",
+        "//translate/arm64e:xnu/port-12377/switch-on-12377.diff",
+    ],
+    linkopts = [
+        "-framework",
+        "CoreFoundation",
+    ],
+    deps = [":prefs"],
 )

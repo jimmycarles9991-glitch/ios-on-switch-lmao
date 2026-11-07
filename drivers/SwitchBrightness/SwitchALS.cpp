@@ -21,17 +21,15 @@
 //     Modin/Vali/Fric"; Atmosphere gpio_internal_pad_map_combination.inc DeviceCode_Vdd5V3En = Port_X_3), with its
 //     input buffer off (tegra210b01-fric-pinmux.dtsi; Atmosphere pinmux_initial_pad_config_aula.inc AlsProxInt 0x4),
 //     and Horizon has no GPIO for the sensor at all. L4T, Android, hekate and Horizon all read it on demand.
-//   * The clock: the sensor converts continuously on its own ADC clock (102.6 ms, 38 cycles, + 2 ms), and every
-//     kFramesPerSample-th frame end of display controller A takes the result. It is set up as soon as it may sample (the
-//     DC restarted for a wake, LDO6 on), so the first result is one sample period later, while the panel still wakes:
-//     CoreBrightness waits only 250 ms after display-on for a first sample and otherwise takes 450 lux
-//     (AABC::FirstALSSampleTimeout; a wake on 11-06 lit at 141 nits in a 3 lux room). Samples it takes for stale (stamped
-//     before its display-on) or gets with the display off cost nothing. FRAME_END stays unmasked while the panel
-//     scans out (NativeLegacyDisplay feeds TegraPanel's DSI commands with it), so these interrupts arrive anyway;
-//     tegra_panel_frame_end_filter() hands each to switch_als_frame_end() (primary interrupt context: a count and, every
-//     seventh, a signal to this work loop, where the I2C read runs). When the scanout stops (display power off, SC7)
-//     the sampling stops with it, which is when CoreBrightness ignores ALS events anyway ("ALS event arrived when
-//     display OFF"). A clock that stops while the panel is lit panics after kClockDeadlineMS. A sensor that does not
+//   * The clock: the sensor converts continuously on its own ADC clock (102.6 ms, 38 cycles, + 2 ms), and this work
+//     loop's timer takes the result every kSampleUS (SwitchALSMath.h) while it samples; the reading needs no frame
+//     sync, so the display's FRAME_END interrupt can stay masked while nothing else needs it. It is set up as soon as it
+//     may sample (the DC restarted for a wake, LDO6 on), so the first result is one sample period later, while the panel
+//     still wakes: CoreBrightness waits only 250 ms after display-on for a first sample and otherwise takes 450 lux
+//     (AABC::FirstALSSampleTimeout; a wake on 11-06 lit at 141 nits in a 3 lux room). Samples it takes for stale
+//     (stamped before its display-on) or gets with the display off cost nothing. When the panel goes dark or the
+//     console sleeps the timer stops, which is when CoreBrightness ignores ALS events anyway ("ALS event arrived when
+//     display OFF"). A sensor that does not
 //     answer for kErrorLimit samples, a supply that never comes, a part that is not a BH1730 and a HID path nobody
 //     takes each log one line and turn the sensor off for the boot.
 //   * Seen on hardware: every transfer to 0x29 NACKed with LDO6 on (POK), while TegraI2C's bus clears completed and the
@@ -53,8 +51,8 @@
 //   * AABC::HandleALSEvent reads IOHIDEventGetFloatValue(event, 0xc0000) (kIOHIDEventFieldAmbientLightSensorLevel, lux)
 //     from kIOHIDEventTypeAmbientLightSensor (12) events; colour only when field 0xc0006 (colour space) is set.
 //   * CoreBrightness also sets ReportInterval, ALSIntegrationMode, IOHIDALSContinuousMode and IOHIDBacklightLevel on the
-//     service. IOHIDEventDriver forwards only ReportInterval (to the descriptor's Report Interval feature), which this
-//     device does not take (IOHIDFamily logs "setValue failed"); the rate here is the sensor's.
+//     service. IOHIDEventDriver forwards only ReportInterval (to the descriptor's Report Interval feature), which sets
+//     the sample period here (reportIntervalSet), never shorter than a whole conversion (kSampleUS).
 // The HID service is a SwitchHIDDevice (kSwitchHIDLight) and its IOHIDEventDriver. IOHIDEventDriver has no ambient light
 // element of its own, so the events are made here and handed to that driver's dispatchEvent (switch_hid_dispatch_event).
 //
@@ -74,6 +72,7 @@
 #include "../TegraGPIO/TegraGPIO.h"
 #include "../TegraI2C/TegraI2C.h"
 #include "../SwitchTouch/SwitchHID.h"
+#include "../../kits/SwitchRefusal/SwitchRefusal.h"
 #include "SwitchALSMath.h"
 #include "SwitchBrightness.h"
 #include "TegraPanel.h"
@@ -98,7 +97,6 @@ enum : uint8_t {
 constexpr uint8_t kCommand = 0x80, kSoftwareReset = 0xe4;
 constexpr uint8_t kPowerOn = 1u << 0, kAdcEnable = 1u << 1;
 
-constexpr unsigned kClockDeadlineMS = 2000;
 constexpr unsigned kSupplyDeadlineMS = 20000;  // from start to SwitchTouch's first LDO6 (it powers up in ~60 ms)
 constexpr unsigned kErrorLimit = 20;           // samples in a row the sensor did not answer (about 2.3 s)
 constexpr unsigned kUnclaimedLimit = 300;      // samples with no IOHIDEventDriver on the HID device (about 35 s)
@@ -195,8 +193,7 @@ void describeBus(char *buffer, size_t size)
 
 class SwitchALS : public IOService {
     OSDeclareDefaultStructors(SwitchALS) IOWorkLoop *loop = nullptr;
-    IOInterruptEventSource *clock = nullptr;    // signalled from the DC A frame-end filter
-    IOTimerEventSource *deadline = nullptr;     // the clock's kClockDeadlineMS
+    IOTimerEventSource *clock = nullptr;        // every sampleUS while running
     IOTimerEventSource *supplyCheck = nullptr;  // kSupplyDeadlineMS for SwitchTouch's first LDO6
     IOService *hid = nullptr;
     unsigned gain = 2;  // 64x, as bh1730_init_config and hekate
@@ -205,18 +202,14 @@ class SwitchALS : public IOService {
     bool supplied = false;  // LDO6 has come on at least once
     bool broken = false;    // a sensor or HID path that is not as expected: logged once, sampling off for this boot
     uint64_t supplyAt = 0;  // when LDO6 last came on (switch_als_supply)
-    uint64_t ticksSeen = 0;
-    // Frame-end filter state: `running` gates it; `frames` and `due` (frame ends to the next signal) are the filter's
-    // own once running; `ticks` counts its signals.
     bool running = false;
-    unsigned frames = 0, due = kFramesPerSample;
-    uint64_t ticks = 0;
+    uint32_t sampleUS = kSampleUS;  // CoreBrightness's report interval, at least kSampleUS (reportIntervalSet)
     unsigned samples = 0, luxMin = ~0u, luxMax = 0;
     unsigned loggedLux = 0, loggedGain = ~0u;  // the last line's (noteStats); ~0u: none yet
     int loggedPanel = -1;
 
-    static void ticked(OSObject *owner, IOInterruptEventSource *sender, int count);
-    static void deadlinePassed(OSObject *owner, IOTimerEventSource *sender);
+    static void ticked(OSObject *owner, IOTimerEventSource *sender);
+    static void reportIntervalSet(void *context, const uint8_t *report, size_t length);
     static void supplyLate(OSObject *owner, IOTimerEventSource *sender);
     void update();
     void giveUp();
@@ -230,7 +223,6 @@ class SwitchALS : public IOService {
 public:
     bool start(IOService *provider) override;
     void free() override;
-    void frameEnd();
 
     void setLit(bool on)
     {
@@ -258,33 +250,20 @@ OSDefineMetaClassAndStructors(SwitchALS, IOService)
     static SwitchALS *volatile gALS;
 static volatile bool gSupply;  // LDO6 as SwitchTouch last reported it, for a report that comes before start
 
-// Primary interrupt context (TegraPanel's frame-end filter), every DC A FRAME_END.
-void SwitchALS::frameEnd()
-{
-    if (!__atomic_load_n(&running, __ATOMIC_ACQUIRE) || ++frames < due)
-        return;
-    frames = 0;
-    due = kFramesPerSample;
-    __atomic_fetch_add(&ticks, 1, __ATOMIC_RELAXED);
-    clock->interruptOccurred(nullptr, nullptr, 0);
-}
-
 // Work loop. The sensor samples while the panel is lit (or waking), the console awake and LDO6 on; otherwise it is
-// powered down (it keeps its registers while LDO6 stays on) and the frame ends are ignored. Starting sets it up at
-// once; the first tick is a frame later than the rest, because starting falls anywhere in a frame and the sensor's
-// registers still hold the last conversion from before it powered down.
+// powered down (it keeps its registers while LDO6 stays on) and its timer is off. Starting sets it up at once; the
+// first tick is kFirstSampleUS later, a whole conversion after the set-up, because the sensor's registers still hold
+// the last conversion from before it powered down.
 void SwitchALS::update()
 {
     const bool want = lit && !suspended && supply && !broken;
     if (want == __atomic_load_n(&running, __ATOMIC_RELAXED))
         return;
     if (want) {
-        frames = 0;
-        due = kFramesToFirstSample;
         errors = 0;
         configured = false;  // the sensor may have lost power
-        ticksSeen = __atomic_load_n(&ticks, __ATOMIC_RELAXED);
         __atomic_store_n(&running, true, __ATOMIC_RELEASE);
+        clock->setTimeoutUS(kFirstSampleUS);
         const int err = configure();
         if (err)
             failed(err);  // the first tick tries again
@@ -293,7 +272,7 @@ void SwitchALS::update()
         return;
     }
     __atomic_store_n(&running, false, __ATOMIC_RELEASE);
-    deadline->cancelTimeout();
+    clock->cancelTimeout();
     if (configured)
         (void)writeRegister(RegControl, 0);  // power down; a sensor that is gone shows on the next start
     configured = false;
@@ -332,9 +311,8 @@ int SwitchALS::configure()
         if ((err = tegra_i2c_write(kBus, kSensor, kSoftwareReset, nullptr, 0)))
             return err;
         identified = true;
-        IOLog("SwitchALS: started (BH1730 id %#x after %u failed tries, LDO6 on for %llu ms; a sample every %u frame "
-              "ends)\n",
-              id, errors, msSince(supplyAt), kFramesPerSample);
+        IOLog("SwitchALS: started (BH1730 id %#x after %u failed tries, LDO6 on for %llu ms; a sample every %u us)\n",
+              id, errors, msSince(supplyAt), kSampleUS);
     }
     err = writeRegister(RegGain, (uint8_t)gain);
     if (!err)
@@ -431,11 +409,9 @@ void SwitchALS::failed(int err)
     IOLog("SwitchALS: probe: %s\n", line);
 }
 
-// Work loop, every kFramesPerSample frame ends while running. A sensor update() could not set up is set up here.
+// Work loop, every kSampleUS while running. A sensor update() could not set up is set up here.
 void SwitchALS::sample()
 {
-    ticksSeen = __atomic_load_n(&ticks, __ATOMIC_RELAXED);
-    deadline->setTimeoutMS(kClockDeadlineMS);
     uint8_t data[4] = {};  // DATA0 (visible) and DATA1 (infrared), little endian, in one auto-increment read
     const int err = configured ? tegra_i2c_read(kBus, kSensor, kCommand | RegData0, data, sizeof(data)) : configure();
     if (err) {
@@ -469,25 +445,30 @@ void SwitchALS::sample()
     skip = 1;  // the conversion in flight finishes at the old gain
 }
 
-void SwitchALS::ticked(OSObject *owner, IOInterruptEventSource *, int)
-{
-    auto *self = static_cast<SwitchALS *>(owner);
-    if (__atomic_load_n(&self->running, __ATOMIC_ACQUIRE))
-        self->sample();
-}
-
-// The frame ends stopped while the panel is lit: the display lost its interrupt. A tick this work loop has not taken
-// yet only means the loop was late.
-void SwitchALS::deadlinePassed(OSObject *owner, IOTimerEventSource *sender)
+void SwitchALS::ticked(OSObject *owner, IOTimerEventSource *sender)
 {
     auto *self = static_cast<SwitchALS *>(owner);
     if (!__atomic_load_n(&self->running, __ATOMIC_ACQUIRE))
         return;
-    if (__atomic_load_n(&self->ticks, __ATOMIC_RELAXED) != self->ticksSeen) {
-        sender->setTimeoutMS(kClockDeadlineMS);
+    sender->setTimeoutUS(__atomic_load_n(&self->sampleUS, __ATOMIC_RELAXED));
+    self->sample();
+}
+
+// The Report Interval feature (report 1: a 32-bit microsecond count), on IOHIDEventDriver's thread: the next tick
+// takes it. The sensor converts no faster than kSampleUS, so a shorter interval is held there, logged once.
+void SwitchALS::reportIntervalSet(void *context, const uint8_t *report, size_t length)
+{
+    auto *self = static_cast<SwitchALS *>(context);
+    if (length < 5)
         return;
+    const uint32_t asked =
+        (uint32_t)report[1] | (uint32_t)report[2] << 8 | (uint32_t)report[3] << 16 | (uint32_t)report[4] << 24;
+    if (asked && asked < kSampleUS) {
+        switch_refusal("als", "interval-below-conversion",
+                       "report interval %u us asked; the BH1730 converts every %u us, so it reports at that", asked,
+                       kSampleUS);
     }
-    panic("SwitchALS: no DC A frame end in %u ms with the panel lit (display interrupt lost)", kClockDeadlineMS);
+    __atomic_store_n(&self->sampleUS, asked > kSampleUS ? asked : kSampleUS, __ATOMIC_RELAXED);
 }
 
 // Work loop: SwitchTouch never turned LDO6 on (it did not start, or the panel never came up).
@@ -532,14 +513,14 @@ bool SwitchALS::start(IOService *provider)
     if (!IOService::start(provider))
         return false;
     loop = IOWorkLoop::workLoop();
-    clock = IOInterruptEventSource::interruptEventSource(this, &SwitchALS::ticked);
-    deadline = IOTimerEventSource::timerEventSource(this, &SwitchALS::deadlinePassed);
+    clock = IOTimerEventSource::timerEventSource(this, &SwitchALS::ticked);
     supplyCheck = IOTimerEventSource::timerEventSource(this, &SwitchALS::supplyLate);
-    if (!loop || !clock || !deadline || !supplyCheck || loop->addEventSource(clock) != kIOReturnSuccess ||
-        loop->addEventSource(deadline) != kIOReturnSuccess || loop->addEventSource(supplyCheck) != kIOReturnSuccess) {
+    if (!loop || !clock || !supplyCheck || loop->addEventSource(clock) != kIOReturnSuccess ||
+        loop->addEventSource(supplyCheck) != kIOReturnSuccess) {
         panic("SwitchALS: work loop setup failed");
     }
     hid = switch_hid_create(kSwitchHIDLight);
+    switch_hid_set_feature_handler(hid, &SwitchALS::reportIntervalSet, this);
     registerService();
     supplyCheck->setTimeoutMS(kSupplyDeadlineMS);
     setLit(switch_display_is_on());
@@ -551,13 +532,10 @@ void SwitchALS::free()
     if (loop) {
         if (clock)
             loop->removeEventSource(clock);
-        if (deadline)
-            loop->removeEventSource(deadline);
         if (supplyCheck)
             loop->removeEventSource(supplyCheck);
     }
     OSSafeReleaseNULL(clock);
-    OSSafeReleaseNULL(deadline);
     OSSafeReleaseNULL(supplyCheck);
     OSSafeReleaseNULL(loop);
     IOService::free();
@@ -585,12 +563,6 @@ extern "C" bool switch_als_published(void)
 {
     SwitchALS *als = __atomic_load_n(&gALS, __ATOMIC_ACQUIRE);
     return als && als->published();
-}
-
-extern "C" void switch_als_frame_end(void)
-{
-    if (SwitchALS *als = __atomic_load_n(&gALS, __ATOMIC_ACQUIRE))
-        als->frameEnd();
 }
 
 extern "C" void switch_als_set_active(bool active)

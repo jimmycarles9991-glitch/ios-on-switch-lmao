@@ -25,7 +25,7 @@ void hevc_decoder_destroy(HEVCDecoder *decoder);
 int hevc_decoder_parameter_set(HEVCDecoder *decoder, const uint8_t *nal, size_t size);
 // The first SPS (after the hvcC sets): the stream's geometry and profile, NULL before one parsed.
 const HEVCSPS *hevc_decoder_sps(const HEVCDecoder *decoder);
-// Buffers for the stream's first SPS (the session start, so a full arena sends the session to software at once).
+// Buffers for the stream's first SPS (the session start, so a session NVDEC has no memory for goes to software now).
 // 0, -1 without an SPS, -3 when NVDEC buffers could not be allocated.
 int hevc_decoder_configure(HEVCDecoder *decoder);
 // Whether Main 10 pictures are decoded (the clip check proved NVDEC's 10-to-8-bit output); 8-bit only when false.

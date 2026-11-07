@@ -1,0 +1,32 @@
+# kits/SwitchSysctl on the host (a stand-in <sys/sysctl.h> with XNU's values), and a guard over every kernel source of
+# the tree: hand-built oids go through switch_sysctl_oid.
+#
+#   bazel test //kits/SwitchSysctl/test:all
+load("//bazel/lint:defs.bzl", "lint_files")
+load("//bazel/testing:defs.bzl", "host_shims", "host_test")
+
+lint_files()
+
+host_shims(
+    name = "kernel",
+    headers = ["sys/sysctl.h"],
+    stubs = "switch_sysctl_stubs.h",
+)
+
+host_test(
+    name = "switch_sysctl_test",
+    srcs = [
+        "switch_sysctl_test.cpp",
+        "//kits/SwitchSysctl:SwitchSysctl.h",
+    ],
+    deps = [":kernel"],
+)
+
+host_test(
+    name = "switch_sysctl_source_test",
+    srcs = ["switch_sysctl_source_test.cpp"],
+    data = [
+        "//kernel:lint_sources",
+        "//kernel/switch:srcs",
+    ],
+)

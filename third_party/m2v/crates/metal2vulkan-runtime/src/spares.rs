@@ -35,6 +35,8 @@
 //!   (`CommandBufferStatus::Completed`) gives back its command pool and its descriptor pools; one
 //!   that failed, once its work ended, gives back its command pool and releases its descriptor
 //!   pools; one dropped unsubmitted gives back its command pool.
+//! - **Trimmed when the device is idle** (ios-on-switch-lmao, [`Spares::trim`]): the command pools
+//!   give back the memory they keep, and the descriptor pools go.
 //! - **Released with the device**, as its teardown begins (`DeviceShared`'s drop, after
 //!   `vkDeviceWaitIdle`): every command buffer holds the device, so none is left to give one
 //!   back.
@@ -214,6 +216,30 @@ impl Spares {
             // SAFETY: nothing uses the pool's sets (the caller's, or a spare's), and nothing else
             // holds it.
             unsafe { release_in_section(device, raw) };
+        }
+    }
+
+    /// Give back the memory the spares keep for the next command buffers (ios-on-switch-lmao,
+    /// `Device::release_idle_memory`): each spare command pool trimmed, its command buffers kept
+    /// (NVK keeps a pool's recorded command memory for its next commands, 64 KiB pieces of a cached
+    /// BO each), and every spare descriptor pool released, in a section as the completion
+    /// thread's resets are.
+    pub(super) fn trim(&self, device: &DeviceShared) {
+        let Some(_busy) = exit_guard::enter() else {
+            return;
+        };
+        for pool in lock(&self.command_pools).iter() {
+            // SAFETY: nothing of a spare is pending, and none is taken while the lock is held.
+            unsafe {
+                device
+                    .vk()
+                    .trim_command_pool(pool.raw, vk::CommandPoolTrimFlags::empty())
+            };
+            exit_guard::called(exit_guard::Call::TrimCommandPool);
+        }
+        for pool in lock(&self.descriptor_pools).drain(..) {
+            // SAFETY: nothing uses a spare's sets: a command buffer that completed gave it back.
+            unsafe { release::object(device.vk(), pool.raw) };
         }
     }
 

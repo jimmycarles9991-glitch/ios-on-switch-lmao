@@ -48,6 +48,7 @@ kernel_driver(
         "kits/SwitchFalcon",
         "kits/SwitchMMIO",
         "kits/SwitchMath",
+        "kits/SwitchRefusal",
         "kits/SwitchTime",
     ],
     stems = {"firmware.S": "nvjpg_firmware"},

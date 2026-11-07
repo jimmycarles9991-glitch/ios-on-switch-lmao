@@ -2,7 +2,8 @@
 // Tegra210 NVDEC (video decoder 2.0, a falcon behind host1x): bring-up, the job engine and sleep. tegra_nvdec_probe()
 // runs the whole bring-up (stage 3, stages in TegraNVDEC.h; boot-arg switch-no-nvdec turns it off) on its own thread:
 //   N0  host1x up (drivers/TegraHost1x: clock adopted, syncpoint interrupt, channel 0, self-test)
-//   N1  power partition, clock, reset, falcon firmware loaded and started
+//   N1  NVDEC's SMMU address space (TegraNVDECMemory.cpp), power partition, clock, reset, falcon firmware loaded and
+//       started
 //   N2  proof of life through host1x channel 0 in NVDEC's class: an IMMEDIATE syncpoint increment (the engine's host
 //       interface answers) then an OP_DONE one (the falcon firmware answers), each completed by interrupt
 //   N3  (stage 2) an embedded H.264 picture decoded and checked, then a VP9 key frame (TegraNVDECSelfTest.cpp); a VP9
@@ -46,6 +47,7 @@
 #include <kern/thread.h>
 #include <string.h>
 #include "../TegraHost1x/TegraHost1x.h"
+#include "../TegraSMMU/TegraSMMU.h"
 #include "TegraNVDEC.h"
 #include "TegraNVDECCheck.h"
 #include "../../kits/SwitchBootArgs/SwitchBootArgs.h"
@@ -88,8 +90,6 @@ enum : uint32_t {
 enum : uint32_t {
     MC_HOTRESET_CTRL_1 = 0x970,
     MC_HOTRESET_NVDEC = 1u << 5,
-    MC_SMMU_NVDEC_ASID = 0xab4,
-    SMMU_ENABLE = 1u << 31,
 };
 
 volatile uint8_t *gNvdec, *gMc;
@@ -108,8 +108,7 @@ uint32_t gCodecs;    // proven at N3 (tegra_nvdec_codecs)
 IOLock *gCheckLock;  // the userland clip check (tegra_nvdec_check_*): its state and owning connection
 uint32_t gCheckState;
 const void *gCheckOwner;
-uint64_t gArenaUs;
-TegraNVDECBlock gSetup;  // kSetupSlots picture setups, never mapped into a client
+switch_dma_buffer gSetup;  // kSetupSlots picture setups, never mapped into a client
 
 const char *falconState()
 {
@@ -121,11 +120,6 @@ const char *falconState()
 // engine is still reset and re-clocked so the falcon starts from scratch.
 bool powerUp(bool *wasOn)
 {
-    if (switch_mmio_read32(gMc, MC_SMMU_NVDEC_ASID) & SMMU_ENABLE) {
-        snprintf(gLine, sizeof(gLine), "N1 FAIL SMMU translation is on for NVDEC (MC 0xab4 = %#x)",
-                 switch_mmio_read32(gMc, MC_SMMU_NVDEC_ASID));
-        return false;
-    }
     *wasOn = switch_pmc_partition_is_on(kPartition);
     switch_car_reset_assert(kClock);
     IODelay(10);
@@ -167,8 +161,8 @@ bool powerUp(bool *wasOn)
     return true;
 }
 
-// The whole image goes into one contiguous buffer below 4 GiB, cleaned to DRAM: the falcon fetches it by physical
-// address (SMMU bypassed), now for its OS and later for the apps.
+// The whole image goes into one contiguous buffer below 4 GiB, cleaned to DRAM and identity-mapped in NVDEC's address
+// space: the falcon fetches it by physical address, now for its OS and later for the apps.
 bool loadImage()
 {
     const size_t length = (size_t)(tegra_nvdec_fw_end - tegra_nvdec_fw_start);
@@ -265,7 +259,8 @@ void timedOut(uint32_t fence)
           gSyncpt, tegra_host1x_syncpt_read(gSyncpt), falconState(), host);
 }
 
-// Back to reset with the clock off after a failed bring-up: nothing will use the engine this boot.
+// Back to reset with the clock off after a failed bring-up: nothing will use the engine this boot. The engine is in
+// reset before its swgroups go back to bypass, where an IOVA would reach the physical address of the same number.
 void park()
 {
     switch_car_reset_assert(kClock);
@@ -298,24 +293,16 @@ void settle(int how)
 
 void bringUpStages(uint32_t stage)
 {
-    // A failed bring-up leaves nothing behind: the engine back in reset with its clock off (once it was touched), and
-    // the arena returned.
+    // A failed bring-up leaves nothing behind: the engine back in reset with its clock off (once it was touched), then
+    // its address space and setup slots returned.
     auto giveUp = [](bool touched) {
         if (touched)
             park();
-        tegra_nvdec_arena_release();
+        tegra_nvdec_memory_release();
+        switch_dma_free(&gSetup);
     };
-    // The arena first, while physical memory is least fragmented.
-    constexpr uint32_t mib = 48;
-    const uint64_t arenaStart = switch_now_us();
-    if (stage >= 2 && tegra_nvdec_arena_init((uint64_t)mib << 20)) {
-        IOLog("TegraNVDEC: N0 FAIL no contiguous %u MiB arena below 4 GiB\n", mib);
-        return;
-    }
-    gArenaUs = switch_now_us() - arenaStart;
     if (tegra_host1x_start()) {
         IOLog("TegraNVDEC: N0 FAIL host1x is not up (see the TegraHost1x line)\n");
-        giveUp(false);
         return;
     }
     gNvdec = switch_mmio_map(kNvdecPA, kNvdecSize);
@@ -329,14 +316,25 @@ void bringUpStages(uint32_t stage)
     }
     bool wasOn = false;
     gLine[0] = 0;
+    if (!switch_dma_alloc(&gSetup, kSetupSlots * kSetupSlotBytes) || !loadImage()) {
+        IOLog("TegraNVDEC: %s\n", gLine[0] ? gLine : "N1 FAIL no contiguous setup slots below 4 GiB");
+        giveUp(false);
+        return;
+    }
+    if (tegra_nvdec_memory_init(&gFirmware, &gSetup, gLine, sizeof(gLine))) {
+        IOLog("TegraNVDEC: %s\n", gLine);
+        giveUp(false);
+        return;
+    }
     if (!powerUp(&wasOn) || !bootFalcon()) {
         IOLog("TegraNVDEC: %s\n", gLine[0] ? gLine : "N1 FAIL");
         giveUp(true);
         return;
     }
-    IOLog("TegraNVDEC: N1 ok partition %u %s, 408 MHz, falcon started (OS code %#x+%#x data %#x+%#x, %u apps)\n",
-          kPartition, wasOn ? "already on" : "powered here", gImage.code, gImage.code_size, gImage.data,
-          gImage.data_size, gImage.apps);
+    IOLog("TegraNVDEC: N1 ok SMMU ASID %u, partition %u %s, 408 MHz, falcon started (OS code %#x+%#x data %#x+%#x, %u "
+          "apps)\n",
+          (unsigned)TEGRA_SMMU_ASID_NVDEC, kPartition, wasOn ? "already on" : "powered here", gImage.code,
+          gImage.code_size, gImage.data, gImage.data_size, gImage.apps);
     uint64_t us = 0;
     uint32_t id = 0, from = 0;
     if (!proofOfLife(&us, &id, &from)) {
@@ -348,11 +346,6 @@ void bringUpStages(uint32_t stage)
           id, from, tegra_host1x_syncpt_read(id), us, falconState());
     if (stage < 2)
         return;
-    if (tegra_nvdec_arena_alloc(kSetupSlots * kSetupSlotBytes, &gSetup)) {
-        IOLog("TegraNVDEC: N3 FAIL no setup slots in the arena\n");
-        giveUp(true);
-        return;
-    }
     gSyncpt = id;
     gBase = tegra_host1x_syncpt_read(id);
     gUp = true;
@@ -388,7 +381,7 @@ void bringUpStages(uint32_t stage)
     // Proven: from here a lost interrupt or a job past its bound panics (TegraNVDEC.h).
     gPublished = true;
     tegra_host1x_set_strict();
-    tegra_nvdec_publish(gArenaUs);
+    tegra_nvdec_publish();
 }
 
 void bringUp(void *stageArg, wait_result_t)
@@ -488,7 +481,8 @@ extern "C" int tegra_nvdec_run(const TegraNVDECSubmit *s, TegraNVDECResolve reso
         const TegraNVDECEntry *e = &s->entries[i];
         if (i == s->entry_count - 1)  // EXECUTE, last by the check
             method(NVC5B0_SET_DRV_PIC_SETUP_OFFSET, (uint32_t)((gSetup.pa + slot * kSetupSlotBytes) >> 8));
-        method(e->method, e->kind == TEGRA_NVDEC_ENTRY_RELOC ? (uint32_t)((blocks[i].pa + e->offset) >> 8) : e->value);
+        method(e->method,
+               e->kind == TEGRA_NVDEC_ENTRY_RELOC ? (uint32_t)((blocks[i].iova + e->offset) >> 8) : e->value);
     }
     words[n++] = tegra_host1x_op_incr_syncpt(TEGRA_HOST1X_COND_OP_DONE, gSyncpt);
     const int ret = tegra_host1x_submit(words, n);
@@ -598,9 +592,8 @@ void engineSuspend()
     gSuspended = true;
     if (!gWedged && tegra_host1x_syncpt_wait(gSyncpt, gBase + gIssued, kWaitBoundUs) == TEGRA_HOST1X_ETIMEDOUT)
         timedOut(gBase + gIssued);
-    switch_car_reset_assert(kClock);
-    IODelay(2);
-    switch_car_clock_disable(kClock);
+    park();
+    tegra_nvdec_memory_detach();
     IOLockUnlock(gEngineLock);
 }
 
@@ -610,7 +603,7 @@ void engineResume()
     bool wasOn = false;
     gLine[0] = 0;
     gWedged = true;
-    if (powerUp(&wasOn) && bootFalcon()) {
+    if (!tegra_nvdec_memory_attach(gLine, sizeof(gLine)) && powerUp(&wasOn) && bootFalcon()) {
         const uint32_t from = tegra_host1x_syncpt_read(gSyncpt);
         const uint32_t stream[] = {
             tegra_host1x_op_setclass(TEGRA_HOST1X_CLASS_NVDEC, 0, 0),

@@ -5,6 +5,8 @@ The version, not git, names the release: a Mac with only Bazelisk has no git, an
 SHA256SUMS from a local directory instead (CI, before the release is published).
 """
 
+load("//boot:overlay.bzl", "OVERLAY_BINARIES")
+
 REPO = "brunostjohn/ios-on-switch-lmao"
 ASSETS = {
     "host_tools": "host-tools-darwin-arm64.tar",
@@ -12,24 +14,31 @@ ASSETS = {
     "sd": "sd.zip",
 }
 
-_BUILD = """package(default_visibility = ["//visibility:public"])
+# The targets //install and //boot take, by name: a directory's files, or one file.
+_GROUPS = {
+    "sd": "sd/**",
+    "inputs": "inputs/**",
+    "host_tools": "host_tools/**",
+    "shader_tools": "host_tools/shader/**",
+}
+_FILES = {
+    "gpu_base": "inputs/gpu/trust.json",
+    "gpu_trustcache": "inputs/gpu/TegraGM20BMetal.trustcache",
+    "kernel": "inputs/kernel/kernel.macho",
+    "prelink_options": "inputs/kernel/prelink.json",
+    "loader": "inputs/loader/loader.uboot.bin",
+    "loader_constants": "inputs/loader/constants.json",
+    "install_payload": "sd/bootloader/payloads/install-ios.bin",
+    "apfs_tool": "host_tools/apfs_tool",
+    "lz4": "host_tools/lz4",
+} | {"overlay/" + source: "inputs/overlay/" + source for source in OVERLAY_BINARIES.values()}
 
-filegroup(name = "sd", srcs = glob(["sd/**"]))
-
-filegroup(name = "inputs", srcs = glob(["inputs/**"]))
-
-filegroup(name = "host_tools", srcs = glob(["host_tools/**"]))
-
-filegroup(name = "shader_tools", srcs = glob(["host_tools/shader/**"]))
-
-filegroup(name = "gpu_base", srcs = ["inputs/gpu/trust.json"])
-
-filegroup(name = "install_payload", srcs = ["sd/bootloader/payloads/install-ios.bin"])
-
-filegroup(name = "apfs_tool", srcs = ["host_tools/apfs_tool"])
-
-exports_files(glob(["sd/**", "inputs/**", "host_tools/**"]))
-"""
+_BUILD = "\n\n".join(
+    ['package(default_visibility = ["//visibility:public"])'] +
+    ["filegroup(name = {}, srcs = glob([{}]))".format(repr(name), repr(files)) for name, files in _GROUPS.items()] +
+    ["filegroup(name = {}, srcs = [{}])".format(repr(name), repr(path)) for name, path in _FILES.items()] +
+    ['exports_files(glob(["sd/**", "inputs/**", "host_tools/**"]))'],
+) + "\n"
 
 def _sums(text):
     sums = {}
@@ -39,12 +48,12 @@ def _sums(text):
             sums[fields[1].lstrip("*")] = fields[0]
     return sums
 
-_MISSING = """package(default_visibility = ["//visibility:public"])
+_MISSING = """load(":missing.bzl", "missing")
 
-load(":missing.bzl", "missing")
+package(default_visibility = ["//visibility:public"])
 
-[missing(name = name) for name in ["sd", "inputs", "host_tools", "shader_tools", "gpu_base", "install_payload", "apfs_tool"]]
-"""
+[missing(name = name) for name in {names}]
+""".format(names = repr(list(_GROUPS) + list(_FILES)))
 
 _MISSING_RULE = """def _impl(ctx):
     fail({message})

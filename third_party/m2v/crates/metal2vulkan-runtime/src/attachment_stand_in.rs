@@ -83,7 +83,7 @@ use super::error::{internal, Error, RuntimeGap};
 use super::framebuffer_fetch;
 use super::image_plan::{sample_count, ImagePlan};
 use super::nan_clear;
-use super::render_pass::{PassLayout, Target};
+use super::render_pass::{PassLayout, Target, MAX_COLOR_ATTACHMENTS};
 use super::resource::ResourceKey;
 use super::sample_positions;
 use super::texture_descriptor::TextureDescriptor;
@@ -138,13 +138,54 @@ pub(super) enum Cause {
     /// buffer keeps its bytes (`kept_bytes.rs`, which announces it, `dont-care-stand-in`): copied
     /// into where the pass loads it, and never back.
     KeptBytes,
+    /// A memoryless texture whose shared backing an earlier attachment of the pass renders into
+    /// ([`apart_shared_backings`], ios-on-switch-lmao): a backing as `Backing`'s, announced by
+    /// nothing, as the texture took memory of its own before backings were shared.
+    Apart,
 }
 
 impl StandIn {
     /// Whether it is copied to and from its attachment: all but a backing.
     pub(super) fn copies(&self) -> bool {
-        self.cause != Cause::Backing
+        !matches!(self.cause, Cause::Backing | Cause::Apart)
     }
+}
+
+/// Render each memoryless color attachment of the pass of `layout` whose backing another texture
+/// among its earlier ones shares (`memory::allocate_memoryless`) into the backing its texture
+/// keeps for the queue instead ([`kept_backing`]): one pass's attachments are live at once, so no
+/// two textures of it may share memory (two subresources of one texture lie apart in its image).
+/// Made as the pass opens, before any draw takes a view of an attachment.
+pub(super) fn apart_shared_backings(
+    maker: &CommandBuffer,
+    layout: &mut PassLayout,
+) -> Result<(), Error> {
+    let mut backings = [None; MAX_COLOR_ATTACHMENTS];
+    for (backing, color) in backings.iter_mut().zip(&layout.colors) {
+        *backing = color
+            .as_ref()
+            .and_then(|c| c.target.texture.shared_backing());
+    }
+    for at in 1..backings.len().min(layout.colors.len()) {
+        let Some(backing) = backings[at] else {
+            continue;
+        };
+        let texture = |index: usize| layout.colors[index].as_ref().map(|c| &c.target.texture);
+        let shared = (0..at)
+            .any(|earlier| backings[earlier] == Some(backing) && texture(earlier) != texture(at));
+        let Some(color) = layout.colors[at].as_mut().filter(|_| shared) else {
+            continue;
+        };
+        let own = color.target.clone();
+        color.target = kept_backing(maker, &own, maker.command_queue().id(), false)?;
+        color.stand_in = Some(StandIn {
+            own,
+            cause: Cause::Apart,
+            area: None,
+        });
+        backings[at] = None;
+    }
+    Ok(())
 }
 
 /// A memoryless attachment's backing that its texture keeps ([`kept_backing`]): for the passes
@@ -405,7 +446,7 @@ pub(super) fn stand_in_as(
     // The exact color resolve reads a multisampled color attachment as an input attachment
     // (`color_resolve.rs`).
     let resolved = multisampled && color_resolve::exact(device, format, target.samples).is_some();
-    if color && (framebuffer_fetch::through_inputs(profile) || resolved) {
+    if color && (framebuffer_fetch::targets_take_inputs(profile) || resolved) {
         usage |= ImageUsageFlags::INPUT_ATTACHMENT;
     }
     // A color stand-in may be cleared before the pass (`render.rs`), and a scratch is copied. A

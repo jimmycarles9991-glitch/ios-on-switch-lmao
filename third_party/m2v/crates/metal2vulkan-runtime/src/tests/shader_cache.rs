@@ -201,6 +201,21 @@ fn a_hit_refreshes_the_access_time() {
     assert!(accessed > old + Duration::from_secs(24 * 60 * 60));
 }
 
+/// A hit on an entry used within the hour writes nothing: the sweep needs no finer order.
+#[test]
+fn a_recent_hit_leaves_the_access_time() {
+    let scratch = Scratch::new();
+    let store = store(scratch.path(), BUILD, 1 << 20);
+    let wanted = name(&BUILD, 1);
+    put(&store, &wanted, 1, b"data");
+    let path = store.directory().entry_path(&wanted);
+    let recent = SystemTime::now() - Duration::from_secs(10 * 60);
+    set_times(&path, recent);
+    assert!(matches!(get(&store, &wanted, 1), Lookup::Hit(_)));
+    let accessed = fs::metadata(&path).unwrap().accessed().unwrap();
+    assert!(accessed < recent + Duration::from_secs(1));
+}
+
 /// Every file under `root` with its bytes and modification time, in path order.
 fn files(root: &Path) -> Vec<(PathBuf, Vec<u8>, SystemTime)> {
     let mut found = Vec::new();

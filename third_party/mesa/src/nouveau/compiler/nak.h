@@ -97,6 +97,18 @@ struct nak_constant_offset_info {
     * The offset into printf_cb for the printf buffer pointer.
     */
    uint32_t printf_buffer_offset;
+
+   /**
+    * The constant buffer index at which the interlock ticket buffer pointer
+    * lives.
+    */
+   uint8_t interlock_ticket_buffer_cb;
+
+   /**
+    * The offset into interlock_ticket_buffer_cb for the interlock ticket buffer
+    * pointer.
+    */
+   uint32_t interlock_ticket_buffer_offset;
 };
 const extern struct nak_constant_offset_info nak_const_offsets_base;
 const extern struct nak_constant_offset_info nak_const_offsets_turing_graphics;
@@ -131,6 +143,12 @@ enum PACKED nak_mesh_topology {
    NAK_MESH_TOPOLOGY_POINTS = 0,
    NAK_MESH_TOPOLOGY_LINES = 1,
    NAK_MESH_TOPOLOGY_TRIANGLES = 4,
+};
+
+enum ENUM_PACKED nak_fs_interlock_mode {
+   NAK_FS_INTERLOCK_MODE_DISABLED = 0,
+   NAK_FS_INTERLOCK_MODE_SAMPLE = 1,
+   NAK_FS_INTERLOCK_MODE_PIXEL = 2,
 };
 
 struct nak_xfb_info {
@@ -209,8 +227,10 @@ struct nak_shader_info {
          bool post_depth_coverage;
          bool uses_sample_shading;
          bool early_fragment_tests;
+         enum nak_fs_interlock_mode interlock_mode;
+         bool interlock_unordered;
 
-         uint8_t _pad[135];
+         uint8_t _pad[133];
       } fs;
 
       struct {

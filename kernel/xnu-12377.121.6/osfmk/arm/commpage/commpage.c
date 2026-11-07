@@ -75,6 +75,7 @@ static int commpage_cpus( void );
 #include <pexpert/arm64/apt_msg.h>
 #endif
 
+#include <switch/commpage.h>
 
 static void commpage_init_cpu_capabilities( void );
 
@@ -455,6 +456,7 @@ commpage_init_arm_optional_features_isar0(uint64_t *commpage_bits)
 	gARM_FEAT_SHA256 = 1;
 	bits |= kHasARMv8Crypto;
 #endif /* __ARM_V8_CRYPTO_EXTENSIONS__ */
+	bits |= switch_commpage_crypto_bits(isar0);
 
 	*commpage_bits |= bits;
 }

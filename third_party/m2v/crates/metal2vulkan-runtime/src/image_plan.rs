@@ -1031,7 +1031,7 @@ pub(super) fn cube_compatible(layout: &TextureLayout) -> bool {
 fn attachment_flag(depth_stencil: bool, profile: &DeviceProfile) -> ImageUsageFlags {
     if depth_stencil {
         ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT
-    } else if framebuffer_fetch::through_inputs(profile) {
+    } else if framebuffer_fetch::targets_take_inputs(profile) {
         // Any pass may fetch the attachment, which the texture cannot foresee.
         ImageUsageFlags::COLOR_ATTACHMENT | ImageUsageFlags::INPUT_ATTACHMENT
     } else {

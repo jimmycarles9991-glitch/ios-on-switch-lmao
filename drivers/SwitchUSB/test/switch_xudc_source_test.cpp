@@ -43,7 +43,8 @@ TEST(SwitchXudcSource, FreedPoolPagesKickEveryWaitingEndpoint)
 {
     const std::string source = SourceText("../SwitchXUDC.cpp");
     EXPECT_THAT(source, HasSubstr("poolFreed = true;"));
-    EXPECT_EQ(Count(source, "    kickWaiting();"), 2u) << "after the event drain and after a cancel";
+    EXPECT_EQ(Count(source, "    kickWaiting();"), 3u)
+        << "after the event drain and after a cancel, bulk or isochronous";
 }
 
 TEST(SwitchXudcSource, InterruptModerationOn)
@@ -160,4 +161,22 @@ TEST(SwitchXudcSource, AttachedHostHoldsIdleSleep)
     EXPECT_THAT(hold, HasSubstr("kIOPMDriverAssertionPreventSystemIdleSleepBit"));
     EXPECT_THAT(hold, HasSubstr("releasePMAssertion(self->idleHold);"));
     EXPECT_THAT(hold, Not(HasSubstr("kIOPMDriverAssertionCPUBit")));
+}
+
+// Isochronous requests keep their frame list where the family put it (completeEndpointIO hands it to the client): no
+// isochronous completion writes the bulk actual length over it, and every frame goes on the ring as an Isoch TRB the
+// controller starts as soon as it can.
+TEST(SwitchXudcSource, IsochronousCompletionKeepsTheFrameList)
+{
+    const std::string source = SourceText("../SwitchXUDC.cpp");
+    for (const char *function : {"void SwitchXUDC::completeIsoc(", "void SwitchXUDC::finishIsoc(",
+                                 "void SwitchXUDC::failHeadIsoc(", "void SwitchXUDC::cancelIsoc("}) {
+        const std::string body = switch_ios::test::Body(source, function);
+        ASSERT_FALSE(body.empty()) << function;
+        EXPECT_THAT(body, Not(HasSubstr("kReqActual"))) << function;
+        EXPECT_THAT(body, Not(HasSubstr("finish("))) << function;
+    }
+    EXPECT_THAT(source,
+                HasSubstr("trbType(TRB_ISOCH) | TRB_SIA | (out ? TRB_ISP : 0) | (i + 1 == count ? TRB_IOC : 0)"));
+    EXPECT_THAT(source, HasSubstr("ep.iso->event(index, e.code(), e.residue())"));
 }

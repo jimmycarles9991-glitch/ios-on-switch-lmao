@@ -3659,8 +3659,12 @@ impl Device {
                         ),
                     )
                 });
-            } else if matches!(stand_in.cause, Cause::Linear | Cause::KeptBytes) {
-                // Announced where `linear_attachment.rs` or `kept_bytes.rs` chose the kept image.
+            } else if matches!(
+                stand_in.cause,
+                Cause::Linear | Cause::KeptBytes | Cause::Apart
+            ) {
+                // Announced where `linear_attachment.rs` or `kept_bytes.rs` chose the kept image;
+                // a texture apart from a shared backing costs what it did before backings shared.
             } else if memoryless
                 && (index.is_some_and(fetched) || (index.is_none() && shadow) || !chosen)
             {

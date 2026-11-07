@@ -17,12 +17,12 @@
 __BEGIN_DECLS
 
 #if DEVELOPMENT || DEBUG
-/* ipc_kmsg_send, under the destination port's lock: a client's message (its id) to the render server, and the render
- * server's own message to a port of another task. */
-void switch_frames_render_message(task_t sender, mach_msg_id_t id);
+/* ipc_kmsg_send, under the destination port's lock: a message (its id) to the render server, `own` when the render
+ * server sent it itself (not a client's), and the render server's own message to a port of another task. */
+void switch_frames_render_message(task_t sender, mach_msg_id_t id, bool own);
 void switch_frames_render_server_sent(ipc_port_t port);
 #else
-static inline void switch_frames_render_message(__unused task_t sender, __unused mach_msg_id_t id)
+static inline void switch_frames_render_message(__unused task_t sender, __unused mach_msg_id_t id, __unused bool own)
 {}
 
 static inline void switch_frames_render_server_sent(__unused ipc_port_t port)

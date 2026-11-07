@@ -28,10 +28,13 @@ filegroup(
 # This package's headers (kernel_headers): what other drivers' hdr_deps name.
 kernel_headers()
 
-# SwitchAudio: kernel service + Tegra I2S1/ADMA/RT5639 backend.
+# SwitchAudio: kernel service + Tegra I2S1/ADMA backend, and the RT5639 codec (SwitchRT5639).
 kernel_driver(
     name = "SwitchAudio",
-    srcs = ["SwitchAudio.cpp"],
+    srcs = [
+        "SwitchAudio.cpp",
+        "SwitchRT5639.cpp",
+    ],
     hdr_deps = [
         "drivers/ArmGIC",
         "drivers/TegraGPIO",
@@ -39,6 +42,7 @@ kernel_driver(
         "kits/SwitchCAR",
         "kits/SwitchDMA",
         "kits/SwitchMMIO",
+        "kits/SwitchRefusal",
     ],
 )
 
@@ -46,11 +50,16 @@ kernel_driver(
 # the same interface, come first on the include path).
 ios_binary(
     name = "SwitchAudioHAL",
-    srcs = ["hal/SwitchAudioPlugIn.c"],
+    srcs = [
+        "hal/SwitchAudioPlugIn.c",
+        "//kits/SwitchRefusal:SwitchRefusal.c",
+    ],
     out = "build/switch-audio/SwitchAudio.driver/SwitchAudio",
     hdrs = [
         "SwitchAudioAbi.h",
+        "SwitchAudioFormat.h",
         "hal/SwitchAudioConvert.h",
+        "//kits/SwitchRefusal:SwitchRefusal.h",
     ],
     copts = [
         "-I",

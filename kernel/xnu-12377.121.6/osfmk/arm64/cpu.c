@@ -48,6 +48,7 @@
 #include <arm/misc_protos.h>
 #include <arm/machine_cpu.h>
 #include <arm/rtclock.h>
+#include <switch/idle.h>
 #include <arm64/proc_reg.h>
 #include <mach/processor_info.h>
 #include <vm/pmap.h>
@@ -678,7 +679,7 @@ cpu_idle(void)
 #if HAS_RETENTION_STATE
 		arm64_retention_wfi();
 #else
-		__builtin_arm_wfi();
+		switch_idle_wfi(cpu_data_ptr);
 #endif
 
 #if defined(APPLETYPHOON)

@@ -1,19 +1,25 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /*
  * Shut down and restart (<switch/shutdown.h>). Debug kernels: reboot(2)'s start and every step reboot_kernel and the
- * IOKit halt path finish go to the power trail, as lines and as durable marks (SwitchPowerTrail.h), the SoC watchdog
- * is armed, and a shutdown still running DEADLINE_S after reboot(2) panics, naming the last step that ended. The
- * panic's record (kernel log, a stackshot of every thread) and the trail survive the warm reset that follows
- * (SwitchPanicSave.c resets a shutdown's panic at once); the watchdog's reset keeps the trail when not even the panic
- * runs; the durable mark survives POWER held. XNU's own halt timeout ("Halt/Restart Timed Out") starts only at
- * PEHaltRestart. A healthy shutdown is over in a few seconds.
+ * IOKit halt path finish go to the power trail, as lines and as durable marks (SwitchPowerTrail.h), each mark in the
+ * RTC before the next step starts; then the SoC watchdog is armed, and a shutdown still running DEADLINE_S after
+ * reboot(2) flags that on the mark of the step it is stuck after and panics, naming that step. The durable mark
+ * survives POWER held; the panic's record and the trail survive only a warm reset that gets back to iPadOS. XNU's own
+ * halt timeout ("Halt/Restart Timed Out") starts only at PEHaltRestart. A healthy shutdown is over in a few seconds.
+ *
+ * debug.switch_watchdog_bench (debug kernels, written by BlueTool when the Mac posts
+ * com.brunostjohn.switch.debug.watchdog-bench): the SoC watchdog armed for that many seconds and never petted, with a
+ * durable mark first. A console back in hekate shows a watchdog and a warm reset that work; one left dark, a reset
+ * that does not come back; one still running, a watchdog that never fires.
  */
 #include <kern/clock.h>
 #include <kern/debug.h>
 #include <kern/thread_call.h>
 #include <mach/vm_param.h>
 #include <string.h>
+#include <sys/errno.h>
 #include <sys/reboot.h>
+#include <sys/sysctl.h>
 #include <switch/shutdown.h>
 #include "SwitchPowerTrail.h"
 
@@ -25,8 +31,16 @@ static int shutdown_howto;
 static const char *volatile last_step = "none";
 static unsigned procs_done, unmounts_done;
 
+/* A mark in the RTC before the caller's next step. */
+static void switch_shutdown_mark_sync(unsigned code)
+{
+    switch_power_trail_mark(code);
+    switch_power_trail_mark_flush();
+}
+
 static void switch_shutdown_stalled(thread_call_param_t p0 __unused, thread_call_param_t p1 __unused)
 {
+    switch_power_trail_flag_now(SWITCH_MARK_FLAG_DEADLINE);
     panic("SwitchShutdown: reboot(%#x) still running %u s after it began; last step done: %s", shutdown_howto,
           DEADLINE_S, last_step);
 }
@@ -40,8 +54,6 @@ static unsigned switch_shutdown_mark(const char *what)
     } steps[] = {
         {"IOPMRootDomainWillShutdown", SWITCH_MARK_HALT_NOTIFIED},
         {"PagingOff", SWITCH_MARK_HALT_NOTIFIED},
-        {"audit_shutdown", SWITCH_MARK_HALT_AUDIT},
-        {"shutdown.trace", SWITCH_MARK_HALT_TRACE},
         {"bufferclean", SWITCH_MARK_HALT_BUFFERS},
         {"if_down_all", SWITCH_MARK_HALT_INTERFACES},
         {"PowerOff/Restart still waiting on handler", SWITCH_MARK_HALT_DRIVER_SLOW},
@@ -65,7 +77,7 @@ void switch_shutdown_begin(int howto)
 {
     shutdown_howto = howto;
     switch_power_trail("reboot(%#x) began", howto);
-    switch_power_trail_mark(SWITCH_MARK_HALT_BEGAN);
+    switch_shutdown_mark_sync(SWITCH_MARK_HALT_BEGAN);
     switch_power_trail_watch(WATCHDOG_S, "shutdown");
     thread_call_t call = thread_call_allocate_with_options(switch_shutdown_stalled, NULL,
                                                            THREAD_CALL_PRIORITY_KERNEL_HIGH, THREAD_CALL_OPTIONS_ONCE);
@@ -89,8 +101,28 @@ void switch_shutdown_step(const char *what, const void *pc, uint64_t elapsed)
         switch_power_trail("%s %llu ms at %#lx", what, ns / NSEC_PER_MSEC, (unsigned long)VM_KERNEL_UNSLIDE(pc));
     else
         switch_power_trail("%s %llu ms", what, ns / NSEC_PER_MSEC);
-    switch_power_trail_mark(switch_shutdown_mark(what));
+    switch_shutdown_mark_sync(switch_shutdown_mark(what));
 }
+
+static int switch_watchdog_bench SYSCTL_HANDLER_ARGS
+{
+#pragma unused(oidp, arg1, arg2)
+    int seconds = 0;
+    int changed = 0;
+    const int error = sysctl_io_number(req, 0, sizeof(seconds), &seconds, &changed);
+    if (error || !changed)
+        return error;
+    if (seconds < 5 || seconds > 255)
+        return EINVAL;
+    switch_power_trail("watchdog bench: %d s, never petted", seconds);
+    switch_power_trail_mark(SWITCH_MARK_WATCHDOG_BENCH);
+    switch_power_trail_mark_flush();
+    switch_power_trail_watch((unsigned)seconds, "bench");
+    return 0;
+}
+
+SYSCTL_PROC(_debug, OID_AUTO, switch_watchdog_bench, CTLTYPE_INT | CTLFLAG_WR | CTLFLAG_ANYBODY | CTLFLAG_LOCKED, NULL,
+            0, switch_watchdog_bench, "I", "SoC watchdog bench: seconds to a reset, never petted");
 #else
 void switch_shutdown_begin(int howto __unused)
 {}

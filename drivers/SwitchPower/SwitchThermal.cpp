@@ -2,10 +2,10 @@
 // Thermal safety for the Nintendo Switch OLED (T210B01, "Aula"): SoC and PCB temperature from the
 // TMP451 on I2C1 and the fan on PWM1, on this service's own work loop. The fan curve is evaluated
 // when the TMP451 ALERT line fires (temperature left the window programmed around the current fan
-// level), and re-read every 5 s. That re-read is a staleness bound for the curve (a reading inside
-// the window can still drift toward a trip by less than a degree per conversion), not a substitute
-// for the interrupt: the ALERT interrupt is required, and each re-read also checks that a pending
-// ALERT reached the CPU (tegra_gpio_check_delivery panics when it did not).
+// level and the DFLL's limits) and whenever SOC_THERM's CPU, GPU or PLLX group moves a degree
+// (SwitchSocTherm.h, its own threshold interrupt), which keeps the TMP451 reading thermalmonitord
+// sees current; nothing re-reads on a timer. Each evaluation also checks that a pending ALERT reached
+// the CPU (tegra_gpio_check_delivery panics when it did not).
 //
 // Hardware:
 //   * TMP451 at 0x4C on I2C1 (switchroot tegra210b01-nx-common.dtsi temp-sensor@4c; hekate
@@ -142,7 +142,9 @@
 #include <libkern/c++/OSNumber.h>
 #include <pexpert/pexpert.h>
 #include <kern/clock.h>
+#include <kern/thread.h>
 #include <machine/machine_routines.h>
+#include <sys/reboot.h>
 #include "../TegraGPIO/TegraGPIO.h"
 #include "../TegraI2C/TegraI2C.h"
 #include "../SwitchSuspend/SwitchWake.h"
@@ -151,11 +153,17 @@
 #include "SwitchGovernor.h"
 #include "SwitchPerfGovernor.h"
 #include "SwitchPower.h"
+#include "SwitchEMC.h"
+#include "SwitchPowerStats.h"
+#include "SwitchMAX77620.h"
+#include "SwitchSocTherm.h"
+#include "SwitchThermalLimits.h"
 #include <os/log.h>
 
 extern "C" vm_offset_t ml_io_map(vm_offset_t phys_addr, vm_size_t size);
 
-extern "C" int tegra_gm20b_bringup_busy(void);  // drivers/TegraGM20B/TegraGM20B.cpp
+extern "C" int tegra_gm20b_bringup_busy(void);           // drivers/TegraGM20B/TegraGM20B.cpp
+extern "C" int reboot_kernel(int howto, char *message);  // bsd/kern/kern_shutdown.c, reboot(2)'s kernel half
 
 namespace {
 constexpr vm_offset_t kCarPA = 0x60006000, kGpioPA = 0x6000D000, kPinmuxPA = 0x70003000;
@@ -249,7 +257,6 @@ constexpr uint8_t kConfigShutdown = 0x40, kStatusOpen = 0x04;
 constexpr uint8_t kTexasInstruments = 0x55;
 constexpr uint8_t kRateFourPerSecond = 6;
 
-constexpr uint32_t kStaleMS = 5000;      // re-read bound for the fan curve (see the top of the file)
 constexpr uint32_t kRetryMS = 1000;      // re-initialize a failed sensor (fan at full speed meanwhile)
 constexpr uint32_t kConversionMS = 300;  // > one conversion at 4/s: the status then reflects new limits
 constexpr unsigned kAlertBurst = 10;
@@ -423,6 +430,7 @@ class SwitchThermal : public IOService {
     unsigned level = 0, drive = ~0u, alertCount = 0;
     uint64_t alertWindowStart = 0;
     bool alertArmed = false, sensorReady = false, announced = false, reportedFailure = false;
+    bool asleep = false;  // from suspend to resume: SOC_THERM's events start no evaluation
     bool reportedCritical = false;
     // CPU operating point: wanted, raised now (VDD_CPU above the boot value), or settled for this boot (sensor
     // lost, a raise refused or stopped by perfSteps: never raised again). A
@@ -447,6 +455,8 @@ class SwitchThermal : public IOService {
     uint32_t keptOutb = 0;                  // PLLP_OUTB with OUT4 running, the cluster's park clock
 
     static void timerFired(OSObject *owner, IOTimerEventSource *sender);
+    static void socThermMoved(void *ctx, enum switch_soctherm_group group, int millic);
+    static void thermalShutdown(enum switch_thermal_sensor sensor, int millic);
     static void alertFired(OSObject *owner, IOInterruptEventSource *sender, int count);
     bool mapRegisters();
     void gpioMasked(uint32_t port, uint32_t reg, unsigned pin, bool value);
@@ -667,8 +677,9 @@ bool SwitchThermal::armAlert(int soc, int pcb)
     const int up = level + 1 < kLevels ? profile->trip[level + 1] : INT32_MAX / 2;
     const int down = level ? profile->trip[level] - profile->hysteresis[level] : -1000000;
     int socUp = up < INT32_MAX / 2 ? sensorFor(profile->soc, up) : 127000;
-    if (socUp > kCriticalMilliC)
-        socUp = kCriticalMilliC;
+    const int socCap = soc < kCriticalMilliC ? kCriticalMilliC : SWITCH_THERMAL_SHUTDOWN_DIODE_MILLIC;
+    if (socUp > socCap)
+        socUp = socCap;
     int socDown = level ? sensorFor(profile->soc, down) : -1000;
     if (perfRaised && dfllMode) {
         // The next DFLL floor/cap boundary either way, so each index change comes by interrupt.
@@ -712,6 +723,8 @@ bool SwitchThermal::evaluate()
     int soc = 0, pcb = 0;
     if (!readTemperatures(&soc, &pcb))
         return false;
+    if (soc >= SWITCH_THERMAL_SHUTDOWN_DIODE_MILLIC)
+        thermalShutdown(SWITCH_THERMAL_SOC_DIODE, soc);
     reportedFailure = false;
     storeReading(true, soc, pcb);
 
@@ -1323,6 +1336,7 @@ void SwitchThermal::governorFired(OSObject *owner, IOInterruptEventSource *, int
         if (onDfll && n + 32 < sizeof(line))
             snprintf(line + n, sizeof(line) - n, "; probe %u MHz", measured / 1000);
         os_log(OS_LOG_DEFAULT, "%s", line);  // log only, never the boot console
+        switch_power_stats_tick();
 #endif
         // Then rows held down whose wait is over go back on trial as the ceiling (not a row this check just held: its
         // wait is a line at least): the governor gets there from below at its next window, and that move to the
@@ -1398,6 +1412,7 @@ void SwitchThermal::suspend()
     loop->runAction(
         [](OSObject *owner, void *, void *, void *, void *) -> IOReturn {
             auto *self = static_cast<SwitchThermal *>(owner);
+            __atomic_store_n(&self->asleep, true, __ATOMIC_RELEASE);
             self->timer->cancelTimeout();
             if (self->alertArmed) {
                 self->alert->disable();
@@ -1433,6 +1448,7 @@ void SwitchThermal::resume()
             self->perfRelocked = self->perfLimited = false;
             self->perfRung = 0;
             self->perfHoldUntil = 0;
+            __atomic_store_n(&self->asleep, false, __ATOMIC_RELEASE);
             self->timer->setTimeoutMS(1);
             return kIOReturnSuccess;
         },
@@ -1449,14 +1465,12 @@ uint32_t SwitchThermal::holdRemainingMS() const
     return (uint32_t)(ns / 1000000) + 1;
 }
 
-// The timer's next shot: the staleness bound, or sooner for a sensor being (re)initialized, or for
-// the end of a CPU hold-off.
+// The timer's next shot, 0 for none: a sensor being (re)initialized, or the end of a CPU hold-off.
 uint32_t SwitchThermal::nextTickMS(bool ok) const
 {
     if (!ok)
         return sensorReady ? kConversionMS : kRetryMS;
-    const uint32_t hold = perfPending() ? holdRemainingMS() : 0;
-    return hold && hold < kStaleMS ? hold : kStaleMS;
+    return perfPending() ? holdRemainingMS() : 0;
 }
 
 // Back to the inherited clocks: the frequency first, then VDD_CPU, with one log line. `forGood`
@@ -1597,10 +1611,67 @@ void SwitchThermal::timerFired(OSObject *owner, IOTimerEventSource *sender)
     auto *self = OSDynamicCast(SwitchThermal, owner);
     if (!self)
         return;
+    if (__atomic_load_n(&self->asleep, __ATOMIC_ACQUIRE))
+        return;
     if (self->alertArmed)
         tegra_gpio_check_delivery(TEGRA_GPIO_TEMP_ALERT, "SwitchThermal TMP451 ALERT");
     const bool ok = self->evaluate();
-    sender->setTimeoutMS(self->nextTickMS(ok));
+    if (const uint32_t ms = self->nextTickMS(ok))
+        sender->setTimeoutMS(ms);
+}
+
+// SOC_THERM's work loop: a die group moved a degree, so the curve is evaluated again on this service's loop.
+void SwitchThermal::socThermMoved(void *ctx, enum switch_soctherm_group group, int millic)
+{
+    auto *self = static_cast<SwitchThermal *>(ctx);
+    if (group == SWITCH_SOCTHERM_PLLX && millic >= SWITCH_THERMAL_SHUTDOWN_PLLX_MILLIC)
+        thermalShutdown(SWITCH_THERMAL_PLLX, millic);
+    if (!__atomic_load_n(&self->asleep, __ATOMIC_ACQUIRE))
+        self->timer->setTimeoutMS(1);
+}
+
+namespace {
+struct ThermalShutdown {
+    enum switch_thermal_sensor sensor;
+    int millic;
+};
+
+ThermalShutdown gShutdown;
+uint32_t gShutdownStarted;
+
+// Its own thread: the record in the RTC first (the next boot files it), then reboot(2)'s own path, as Shut Down takes:
+// processes ended, file systems synced and unmounted, the drivers told, the MAX77620 off (SwitchPMIC.cpp).
+void shutdownThread(void *, wait_result_t)
+{
+    const int err = switch_pmic_thermal_record(gShutdown.sensor, gShutdown.millic);
+    if (err)
+        IOLog("SwitchThermal: thermal shutdown record not written (I2C5 %d); the next boot will not know why\n", err);
+    char message[] = "thermal shutdown";
+    reboot_kernel(RB_HALT, message);
+    IOLog("SwitchThermal: thermal shutdown: a shut down was already under way\n");
+}
+}  // namespace
+
+// Once per boot, from any thread: past the software shutdown threshold, the console shuts down in order before
+// SOC_THERM's hardware trip would reset it.
+void SwitchThermal::thermalShutdown(enum switch_thermal_sensor sensor, int millic)
+{
+    if (__atomic_exchange_n(&gShutdownStarted, 1u, __ATOMIC_ACQ_REL))
+        return;
+    gShutdown = {sensor, millic};
+    const int limit =
+        sensor == SWITCH_THERMAL_PLLX ? SWITCH_THERMAL_SHUTDOWN_PLLX_MILLIC : SWITCH_THERMAL_SHUTDOWN_DIODE_MILLIC;
+    os_log_error(OS_LOG_DEFAULT,
+                 "SwitchThermal: thermal shutdown %s %d.%d C, past its %d.%d C limit (hardware trip PLLX %d.%d C): "
+                 "shutting down",
+                 switch_thermal_sensor_name(sensor), millic / 1000, millic % 1000 / 100, limit / 1000,
+                 limit % 1000 / 100, SWITCH_THERMAL_THERMTRIP_PLLX_MILLIC / 1000,
+                 SWITCH_THERMAL_THERMTRIP_PLLX_MILLIC % 1000 / 100);
+    thread_t thread;
+    if (kernel_thread_start(shutdownThread, nullptr, &thread) != KERN_SUCCESS)
+        panic("SwitchThermal: thermal shutdown %s %d mC: no thread to shut down on", switch_thermal_sensor_name(sensor),
+              millic);
+    thread_deallocate(thread);
 }
 
 // ALERT asserted (level low on PX4; the GPIO line stays masked while this runs). Re-evaluate and
@@ -1674,6 +1745,8 @@ bool SwitchThermal::start(IOService *provider)
     publish("FanDrive", drive);
     registerService();
     timer->setTimeoutMS(1);
+    if (switch_soctherm_listen(&SwitchThermal::socThermMoved, this))
+        IOLog("SwitchThermal: no SOC_THERM events; the fan curve follows the TMP451 ALERT alone\n");
     return true;
 }
 
@@ -1757,6 +1830,7 @@ extern "C" void switch_thermal_cpu_quiesce(void)
 
 extern "C" void switch_thermal_suspend(void)
 {
+    switch_emc_suspend();
     if (gThermal)
         gThermal->suspend();
 }
@@ -1765,4 +1839,5 @@ extern "C" void switch_thermal_resume(void)
 {
     if (gThermal)
         gThermal->resume();
+    switch_emc_resume();
 }

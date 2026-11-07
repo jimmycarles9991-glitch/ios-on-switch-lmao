@@ -1,4 +1,5 @@
-# kits/SwitchCAR on the host, against a model of the CAR banks and the PMC's toggle handshake.
+# kits/SwitchCAR on the host, against a model of the CAR banks and the PMC's toggle handshake, and the UPHY PLL's
+# announcements (SwitchUPHY.h).
 #
 #   bazel test //kits/SwitchCAR/test:all
 load("//bazel/lint:defs.bzl", "lint_files")
@@ -38,5 +39,15 @@ host_test(
     deps = [
         ":car",
         ":kernel",
+    ],
+)
+
+# SwitchUPHY.h: the UPHY PLL's calibration announcements and the lane protocol on top of them.
+host_test(
+    name = "switch_uphy_test",
+    srcs = [
+        "switch_uphy_test.cpp",
+        "//kits/SwitchCAR:SwitchUPHY.cpp",
+        "//kits/SwitchCAR:SwitchUPHY.h",
     ],
 )

@@ -67,12 +67,15 @@
 #include <kern/clock.h>
 #include <os/log.h>
 #include <pexpert/pexpert.h>
+#include "../../diagnostics/switch/SwitchPanicSave.h"
 #include "../../diagnostics/switch/SwitchPowerTrail.h"
 #include "../SwitchBrightness/TegraPanel.h"
 #include "../TegraBPMP/TegraBPMP.h"
 #include "../TegraI2C/TegraI2C.h"
 #include "SwitchClocks.h"
+#include "SwitchEMC.h"
 #include "SwitchMAX77620.h"
+#include "SwitchMonotonicClock.h"
 #include "SwitchPower.h"
 
 extern "C" vm_offset_t ml_io_map(vm_offset_t phys_addr, vm_size_t size);
@@ -326,24 +329,27 @@ int haltRestart(unsigned int type)
         return -1;
     const bool restart = type == kPERestartCPU;
     switch_power_trail("PE_halt_restart(%u)", type);
-    switch_power_trail_mark(SWITCH_MARK_HALT_PLATFORM);
     // Storage needs nothing more: reboot_kernel() synced and unmounted every file system and waited out the dirty
     // buffers before halt_all_cpus(), and NativeSwitchBlock completes a write only once the card has it.
     bool dark = false;
-    // XNU's path is thread context; both steps below sleep (the panel's commands ride DC frame ends).
+    // XNU's path is thread context; the steps below sleep (the panel's commands ride DC frame ends). Each durable mark
+    // is in the RTC before its step, the last one before the soft reset takes I2C5 for good.
     if (preemption_enabled()) {
+        switch_power_trail_mark(SWITCH_MARK_HALT_PLATFORM);
+        switch_power_trail_mark_flush();
         switch_thermal_cpu_quiesce();  // the DFLL, if the CPU runs on it, must not share I2C5 with what follows
-        switch_power_trail("CPU quiesced for the halt");
+        switch_power_trail_mark(SWITCH_MARK_HALT_CPU);
+        switch_power_trail_mark_flush();
         dark = tegra_panel_power_off() == 0;
         switch_power_trail("panel %s", dark ? "dark" : "not running");
-        switch_power_trail_mark(SWITCH_MARK_HALT_PANEL);
         switch_power_trail_mark(SWITCH_MARK_HALT_PMIC);
-        switch_power_trail_mark_flush();  // before the soft reset takes I2C5 for good
+        switch_power_trail_mark_flush();
     }
     const int err = pmicSoftReset(restart);
     switch_power_trail("MAX77620 soft reset written: %d", err);
     if (!err)
         IODelay(kPowerDownUS);  // busy: interrupts may be off here
+    switch_power_trail_mark_now(SWITCH_MARK_HALT_NOT_OFF);
     if (restart) {
         psciSystemReset();
         if (gPmc)
@@ -378,6 +384,8 @@ public:
     void getUTCTimeOfDay(clock_sec_t *secs, clock_nsec_t *nsecs) override;
     void setUTCTimeOfDay(clock_sec_t secs, clock_nsec_t nsecs) override;
     void setAlarmEnable(IOOptionBits message) override;
+    IOReturn getMonotonicClockAndTimestamp(uint64_t *usecs, uint64_t *machTime) override;
+    IOReturn getMonotonicClockOffset(int64_t *usecs) override;
     // System sleep (SwitchSuspend): powerd's next scheduled wake as ALARM1 before SC7; after it, the wall clock is read
     // from the RTC again (mach time stood still while the SoC was off) and the alarm is turned off.
     void registerWakeSettings();
@@ -463,6 +471,16 @@ long SwitchRTC::getGMTTimeOfDay()
 void SwitchRTC::setGMTTimeOfDay(long secs)
 {
     setUTCTimeOfDay((clock_sec_t)secs, 0);
+}
+
+IOReturn SwitchRTC::getMonotonicClockAndTimestamp(uint64_t *usecs, uint64_t *machTime)
+{
+    return switch_monotonic_clock_read(usecs, machTime) ? kIOReturnSuccess : kIOReturnUnsupported;
+}
+
+IOReturn SwitchRTC::getMonotonicClockOffset(int64_t *usecs)
+{
+    return switch_monotonic_clock_offset(usecs) ? kIOReturnSuccess : kIOReturnUnsupported;
 }
 
 // No IORTC alarm messages: scheduled wakes come through the root domain's PM settings (registerWakeSettings), and
@@ -654,6 +672,17 @@ extern "C" void switch_rtc_suspend(void)
         gRTC->suspend();
 }
 
+extern "C" IOReturn switch_rtc_utc_usec(uint64_t *usec)
+{
+    if (!gRTC)
+        return kIOReturnNotReady;
+    clock_sec_t secs = 0;
+    clock_nsec_t nsecs = 0;
+    gRTC->getUTCTimeOfDay(&secs, &nsecs);
+    *usec = (uint64_t)secs * USEC_PER_SEC + nsecs / NSEC_PER_USEC;
+    return kIOReturnSuccess;
+}
+
 extern "C" int switch_rtc_resume(void)
 {
     return gRTC ? gRTC->resume() : 0;
@@ -692,6 +721,7 @@ extern "C" int switch_pmic_start(void)
         return 0;
     started = true;
     reportClocks("at boot");
+    (void)switch_monotonic_clock_start();
 
     // Read-only: Horizon keeps its clock in the same RTC, and writing ours would shift it.
     constexpr unsigned rtcMode = 1;
@@ -705,6 +735,9 @@ extern "C" int switch_pmic_start(void)
             IOLog("SwitchPMIC: Wi-Fi/Bluetooth 32 kHz clock not set (%d): Bluetooth will not come up\n", clockErr);
         }
         gRTC = publishRTC(rtcMode);
+        int recordMillic = 0;
+        const enum switch_thermal_sensor recorded = switch_pmic_thermal_take(&recordMillic);
+        switch_panic_save_thermal(recorded, recordMillic);
 #if DEVELOPMENT || DEBUG
         switch_pmic_mark_start();
 #endif
@@ -716,8 +749,10 @@ extern "C" int switch_pmic_start(void)
         char line[256];
         const int emcErr = tegra_bpmp_emc_boot(emcKHz, line, sizeof(line));
         IOLog("SwitchEMC: %s\n", line);
-        if (!emcErr)
+        if (!emcErr) {
             reportClocks("after EMC");
+            switch_emc_start();
+        }
     }
     if (switch_thermal_start())
         IOLog("SwitchPMIC: SwitchThermal did not start, the board thread retries\n");

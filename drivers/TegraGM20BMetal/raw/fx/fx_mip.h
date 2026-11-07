@@ -26,13 +26,14 @@
 #include <cstdint>
 #include <initializer_list>  // raw_push.h uses it without including it
 #include "../runtime/raw_push.h"
+#include "TegraGM20BLayout.h"
 
 namespace raw {
 namespace fx {
 
-constexpr uint32_t kMaxLevels = 15;          // TEXHEAD_BL MAX_MIP_LEVEL is 4 bits; 16384 needs 15
-constexpr uint32_t kBlockLinearKind = 0xfe;  // GMMU PTE kind GENERIC_16BX2 for the chain's memory
-constexpr uint32_t kChainAlign = 4096;       // NIL Image::new_tiled: align_B = max(level-0 tile bytes, 4096)
+constexpr uint32_t kMaxLevels = 15;                     // TEXHEAD_BL MAX_MIP_LEVEL is 4 bits; 16384 needs 15
+constexpr uint32_t kBlockLinearKind = TGM_LAYOUT_KIND;  // GMMU PTE kind GENERIC_16BX2 for the chain's memory
+constexpr uint32_t kChainAlign = 4096;                  // NIL Image::new_tiled: align_B = max(level-0 tile bytes, 4096)
 
 struct MipLevel {
     uint64_t offset = 0;             // from the chain's base
@@ -70,7 +71,7 @@ void readLevel(const MipChain &c, const uint8_t *chainCpu, uint32_t l, uint32_t 
 // Byte offset inside one GOB (64 B x 8 rows) of byte xB % 64 of row y % 8, TegraColor (nil/copy.rs CopyGOBTegra)
 inline uint32_t gobOffset(uint32_t xB, uint32_t y)
 {
-    return ((xB % 64) / 32) * 256 + ((y % 8) / 2) * 64 + ((xB % 32) / 16) * 32 + (y % 2) * 16 + (xB % 16);
+    return tgm_layout_gob_offset(xB, y);
 }
 
 // The same for FermiColor GOBs (nil/copy.rs CopyGOBFermi: the desktop parts' sector order)

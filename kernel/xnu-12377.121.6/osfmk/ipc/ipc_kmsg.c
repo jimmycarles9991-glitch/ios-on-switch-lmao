@@ -5146,7 +5146,7 @@ switch_render_sender_note(mach_msg_id_t id)
 	lck_spin_lock(&switch_render_senders_lock);
 	switch_render_senders_note(&switch_render_senders, task_pid(task), id, name);
 	lck_spin_unlock(&switch_render_senders_lock);
-	switch_frames_render_message(task, id);
+	switch_frames_render_message(task, id, task->itk_space == switch_render_server_space);
 }
 
 /*

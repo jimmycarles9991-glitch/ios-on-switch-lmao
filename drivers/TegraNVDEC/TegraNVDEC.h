@@ -1,35 +1,41 @@
 // SPDX-License-Identifier: BSD-2-Clause-Patent
-// Inside TegraNVDEC: the engine (TegraNVDEC.cpp), the buffer arena (TegraNVDECMemory.cpp), the user client
-// (TegraNVDECUserClient.cpp) and the boot self-test (TegraNVDECSelfTest.cpp).
+// Inside TegraNVDEC: the engine (TegraNVDEC.cpp), its SMMU address space and buffers (TegraNVDECMemory.cpp), the user
+// client (TegraNVDECUserClient.cpp) and the boot self-test (TegraNVDECSelfTest.cpp).
 //
-// On (stage 3) unless boot-arg switch-no-nvdec. Stage 1 brings NVDEC up (N0 host1x, N1 power and falcon, N2 syncpoint
-// proof of life); 2 also reserves the 48 MiB arena and decodes an embedded H.264 picture (N3); 3 also publishes the
-// TegraNVDEC service and its user client (N4).
+// On (stage 3) unless boot-arg switch-no-nvdec. Stage 1 brings NVDEC up (N0 host1x, N1 SMMU, power and falcon, N2
+// syncpoint proof of life); 2 also decodes embedded pictures (N3); 3 also publishes the TegraNVDEC service and its user
+// client (N4).
 #ifndef TEGRA_NVDEC_H
 #define TEGRA_NVDEC_H
 #include <stddef.h>
 #include <stdint.h>
 #include "TegraNVDECABI.h"
+#include "../../kits/SwitchDMA/SwitchDMAPages.h"
 
-class IOMemoryDescriptor;
+struct switch_dma_buffer;
 
-// One arena allocation: physically contiguous, below 4 GiB, 64 KiB granular, zeroed and clean in the caches.
+// One buffer NVDEC reads or writes: any RAM pages, mapped at `iova` in NVDEC's address space, 64 KiB granular, zeroed
+// and clean in the caches when allocated.
 struct TegraNVDECBlock {
-    uint64_t pa, size;
+    uint64_t iova, size;
     uint8_t *va;
-    uint32_t first, count;  // arena granules
+    switch_dma_pages pages;  // the memory a client maps, and its page list (VIC maps a picture's)
 };
 
 // Resolves a submit's buffer handle; the self-test and every user client supply their own.
 typedef bool (*TegraNVDECResolve)(void *context, uint32_t handle, TegraNVDECBlock *block);
 
 extern "C" {
-int tegra_nvdec_arena_init(uint64_t bytes);
-void tegra_nvdec_arena_release(void);  // a failed bring-up gives the whole arena back (engine in reset first)
-int tegra_nvdec_arena_alloc(uint64_t size, TegraNVDECBlock *block);
-void tegra_nvdec_arena_free(const TegraNVDECBlock *block);
-IOMemoryDescriptor *tegra_nvdec_arena_descriptor(const TegraNVDECBlock *block);  // for mapping into a client
-void tegra_nvdec_arena_usage(uint64_t *total, uint64_t *free);
+// NVDEC's address space (N1): its tables, the firmware and setup slots identity-mapped, the swgroups translated. 0, or
+// -1 with one line in `line`. Detach puts the swgroups back in bypass (sleep, a failed bring-up); attach undoes it.
+int tegra_nvdec_memory_init(const switch_dma_buffer *firmware, const switch_dma_buffer *setup, char *line, size_t size);
+int tegra_nvdec_memory_attach(char *line, size_t size);
+void tegra_nvdec_memory_detach(void);
+void tegra_nvdec_memory_release(void);  // a failed bring-up gives the tables back (swgroups detached first)
+// -12 when the wired-memory ceiling or the address window has no room.
+int tegra_nvdec_buffer_alloc(uint64_t size, TegraNVDECBlock *block);
+void tegra_nvdec_buffer_free(TegraNVDECBlock *block);  // only once no job can touch it
+void tegra_nvdec_memory_usage(uint64_t *limit, uint64_t *free);
 void tegra_nvdec_cache_clean(const void *va, size_t size);  // dc cvac: the CPU's writes reach DRAM
 void tegra_nvdec_cache_flush(const void *va, size_t size);  // dc civac: the next CPU read comes from DRAM
 
@@ -52,11 +58,11 @@ void tegra_nvdec_check_release(const void *owner);
 // TegraNVENC's E3 decodes its picture here.
 int tegra_nvdec_await(uint32_t timeoutMs);
 
-int tegra_nvdec_self_test(void);            // N3 H.264: NVDEC itself
-int tegra_nvdec_self_test_vp9(void);        // N3 VP9: decides the VP9 bit of tegra_nvdec_codecs()
-int tegra_nvdec_self_test_hevc(void);       // N3 HEVC: decides the HEVC (and Main 10) bits
-uint32_t tegra_nvdec_codecs(void);          // bit n: TEGRA_NVDEC_CODEC_* n proven at N3 and accepted by Submit
-int tegra_nvdec_publish(uint64_t arenaUs);  // N4
+int tegra_nvdec_self_test(void);       // N3 H.264: NVDEC itself
+int tegra_nvdec_self_test_vp9(void);   // N3 VP9: decides the VP9 bit of tegra_nvdec_codecs()
+int tegra_nvdec_self_test_hevc(void);  // N3 HEVC: decides the HEVC (and Main 10) bits
+uint32_t tegra_nvdec_codecs(void);     // bit n: TEGRA_NVDEC_CODEC_* n proven at N3 and accepted by Submit
+int tegra_nvdec_publish(void);         // N4
 }
 
 #endif

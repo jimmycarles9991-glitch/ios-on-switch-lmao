@@ -321,6 +321,8 @@ pub(super) struct DeviceShared {
     pub(super) fresh: super::fresh_unwritten::FreshUnwritten,
     /// The program's resources by key, with what owns their memory (`used_resources.rs`).
     pub(super) owners: super::used_resources::Owners,
+    /// The consumer's hook told of each batch's host memory (`submission_memory.rs`).
+    pub(super) submission_memory: OnceLock<super::submission_memory::SubmissionMemoryHook>,
     /// The program's live buffers of their own, and their resident set (`live_buffers.rs`).
     pub(super) live_buffers: super::live_buffers::LiveBuffers,
     /// How its command buffers are timed on the GPU (`gpu_time.rs`).
@@ -503,8 +505,9 @@ impl Drop for DeviceShared {
         (self.textures.first_moves).destroy(self.vk(), &mut lock(&self.memory));
         lock(&self.heaps).destroy(self.vk(), &mut lock(&self.memory));
         lock(&self.owned_kernels).destroy(self.vk());
-        lock(&self.mipmap_scratch).destroy(self.vk(), &mut lock(&self.memory));
-        self.gpu_pools.destroy(self.vk(), &mut lock(&self.memory));
+        lock(&self.mipmap_scratch).release(self.vk(), &mut lock(&self.memory));
+        self.gpu_pools
+            .release_spares(self.vk(), &mut lock(&self.memory));
         lock(&self.planes).destroy(self.vk());
         lock(&self.interleave).destroy(self.vk());
         lock(&self.color_resolves).destroy(self.vk());
@@ -653,6 +656,24 @@ impl Device {
         }
         let shared = self.shared();
         crate::memory::keep_room(&shared.memory, shared.vk(), &shared.counts);
+    }
+
+    /// Free the device memory no resource holds (ios-on-switch-lmao): the empty pooled blocks and
+    /// spare dedicated blocks (`Memory::release_idle`), the spare blocks of the command buffers'
+    /// pools and of the mipmap scratch, and what the spare command and descriptor pools keep
+    /// (`Spares::trim`): the bytes of blocks freed. Metal's driver stops charging a process for
+    /// such memory by marking it purgeable; a consumer calls this where the system asks a process
+    /// to give memory back (a memory warning) or once the process stopped rendering. Placing a
+    /// resource afterwards makes a block again.
+    pub fn release_idle_memory(&self) -> u64 {
+        let shared = self.shared();
+        shared.spares.trim(shared);
+        let vk = shared.vk();
+        lock(&shared.mipmap_scratch).release(vk, &mut lock(&shared.memory));
+        shared
+            .gpu_pools
+            .release_spares(vk, &mut lock(&shared.memory));
+        lock(&shared.memory).release_idle(vk)
     }
 
     /// Whether `other` is this device (the same handle, not merely the same physical device).
@@ -1031,12 +1052,18 @@ impl Device {
         // SAFETY: as above.
         let memory_properties =
             unsafe { instance.raw.get_physical_device_memory_properties(physical) };
+        // Memoryless images share backings only where every render pass runs on one GPU channel
+        // whose attachment writes land in submission order (`memory::allocate_memoryless`): NVK
+        // on one `VkQueue` (its one channel's 3D engine; clears go through that engine too).
+        let shares_memoryless =
+            properties.description.driver_id == Some(DriverId::MESA_NVK) && queues.len() == 1;
         let memory = Memory::new(
             &memory_properties,
             max_allocation,
             device_address,
             properties.has_unified_memory,
             queue_families.clone(),
+            shares_memoryless,
         );
         // SAFETY: as above.
         let physical_properties = unsafe { instance.raw.get_physical_device_properties(physical) };
@@ -1306,6 +1333,7 @@ impl Device {
             aliases: Default::default(),
             fresh: Default::default(),
             owners: Default::default(),
+            submission_memory: OnceLock::new(),
             live_buffers: Default::default(),
             timing,
             view_reinterpretation,

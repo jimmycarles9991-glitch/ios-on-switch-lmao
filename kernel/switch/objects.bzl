@@ -13,6 +13,7 @@ SWITCH_ROOT = "kernel/switch"
 SWITCH_OBJECTS = {
     "bsd": [
         ("bsd/kern/bsd_init.c", "boot/bsd_init.c", []),
+        ("bsd/kern/kern_exec.c", "boot/prefs.c", []),
         ("bsd/kern/kern_shutdown.c", "shutdown/shutdown.c", []),
         ("bsd/vfs/vfs_lookup.c", "vfs/pretranslated.c", []),
         # The translator's core is //translate/arm64e's (its host tools and tests build the same files).
@@ -28,7 +29,12 @@ SWITCH_OBJECTS = {
         ("osfmk/arm/model_dep.c", "diag/threads.c", []),
         ("osfmk/ipc/ipc_kmsg.c", "diag/frames.c", []),
         ("osfmk/arm64/arm_vm_init.c", "ram/ram.c", []),
+        ("osfmk/arm64/cpu.c", "idle/idle.c", []),
         ("osfmk/kern/timer_call.c", "sched/stats.c", []),
+        ("osfmk/kern/timer_call.c", "sched/render.c", []),
+        ("osfmk/kern/sched_prim.c", "diag/stall.c", []),
+        ("osfmk/kern/sched_prim.c", "diag/stall_snapshot.c", []),
+        ("osfmk/kern/sched_prim.c", "diag/stall_frame.c", []),
     ],
 }
 

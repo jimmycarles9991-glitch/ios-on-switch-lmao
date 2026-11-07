@@ -42,6 +42,9 @@ python.toolchain(
     python_version = "3.13",
 )
 
+# The interpreter a repository rule runs (the shader crawl's, gpu/seed/crawl.bzl).
+use_repo(python, "python_3_13_host")
+
 pip = use_extension("@rules_python//python/extensions:pip.bzl", "pip")
 pip.parse(
     hub_name = "switch_pypi",
@@ -88,6 +91,9 @@ single_version_override(
 )
 
 # --- C/C++ toolchains, by target platform (bazel/platforms): the kernel's Apple clang with XNU's recipes ----------
+# First: none at all under --//install:prebuilt=release (bazel/toolchains/none).
+register_toolchains("//bazel/toolchains/none:cc")
+
 register_toolchains("//bazel/toolchains/kernel:toolchain")
 
 # iOS user space and the macOS twins of iOS code (NVK's): Xcode's Apple clang, no flags of its own

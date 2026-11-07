@@ -111,12 +111,17 @@ void pmc_registers(uint64_t events, uint32_t out[6])
 
 uint64_t pmc_armed(int usbHigh, int gaugeHigh)
 {
-    return switch_wake_pmc_armed(usbHigh != 0, gaugeHigh != 0, false, false);
+    return switch_wake_pmc_armed(usbHigh != 0, gaugeHigh != 0, false, false, false);
 }
 
 uint64_t pmc_armed_radios(int usbHigh, int gaugeHigh, int btWake, int wifiWake)
 {
-    return switch_wake_pmc_armed(usbHigh != 0, gaugeHigh != 0, btWake != 0, wifiWake != 0);
+    return switch_wake_pmc_armed(usbHigh != 0, gaugeHigh != 0, btWake != 0, wifiWake != 0, false);
+}
+
+uint64_t pmc_armed_usb_device(int usbHigh, int usbDevice)
+{
+    return switch_wake_pmc_armed(usbHigh != 0, false, false, false, usbDevice != 0);
 }
 
 const char *pmc_reason(uint32_t status0, uint32_t status1, uint64_t armed)

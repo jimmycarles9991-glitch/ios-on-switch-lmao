@@ -29,7 +29,10 @@ COPTS = [
     "-Werror",
 ]
 
-exports_files(glob(["a64x/*"]))
+exports_files(glob(["a64x/*"]) + [
+    # kernel/tests' guard that the port record sets none of SpringBoard's never-dim keys
+    "xnu/port-12377/switch-on-12377.diff",
+])
 
 filegroup(
     name = "a64x_srcs",

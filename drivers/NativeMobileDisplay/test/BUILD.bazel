@@ -3,6 +3,9 @@
 #                                       windows, periodic and rare stalls, a 20 Hz client, a copying compositor, one too
 #                                       slow for any phase
 #   switch_interaction_test             SwitchInteraction.h: the presents of a touch interaction window, its line
+#   switch_frame_stall_test             SwitchFrameStall.h: the frame ends at which the screen stopped mid-animation
+#   switch_frame_info_test              SwitchFrameInfo.h: the frame-info keys, each present's entry decoded as
+#                                       IOMobileFramebuffer.framework decodes it, the client and pending-swap tables
 #   display_probe_test                  DisplaySmmuProbe.h against a model of DC A, its CRC unit and the SMMU: passing
 #                                       on a working unit and failing at its own stage, undone, for each fault
 #   request_state_test                  NativeLegacyRequest.h: which swaps the legacy backend shows itself, the fill,
@@ -15,6 +18,14 @@
 #                                       published limits accepted (200000 swaps), the refusals, window B's registers
 #                                       against drm/tegra's formulas, the CSC table, the layer roles, PlaneLatch
 #                                       against a model of DC A with the ARM copy
+#   tegra_display_color_test            TegraDisplayColorMath.h against a model of DC A's CMU: the sRGB tables, bit-exact
+#                                       passthrough, and what each IOMobileFramebuffer colour input programs
+#   display_blend_test                  the blend registers window A and B get while a layer is detached, decoded
+#                                       with the gen2 blender's factor fields: the UI premultiplied over the layer over
+#                                       black, Core Animation's own composite, within half a step at every 8-bit alpha
+#   display_column_scan_test            NativeColumnScan.h: window A's column-scan registers against a fetch model held
+#                                       to the landscape UI's hardware rotation; the 4K test surface and the reference
+#                                       frame showing the same panel; the run's decisions for a pass and each failure
 #   display_planes_source_test          the driver and XNU follow those rules (validateSwap, the kick, one
 #                                       STATE_CONTROL pair, retire at the latch, the panic hook, the published limits,
 #                                       backboardd's CA_DISABLE_DETACHED gate), and the plane accessors are TegraVIC's
@@ -42,6 +53,22 @@ host_test(
 )
 
 host_test(
+    name = "switch_frame_stall_test",
+    srcs = [
+        "switch_frame_stall_test.cpp",
+        "//drivers/NativeMobileDisplay:SwitchFrameStall.h",
+    ],
+)
+
+host_test(
+    name = "switch_frame_info_test",
+    srcs = [
+        "switch_frame_info_test.cpp",
+        "//drivers/NativeMobileDisplay:SwitchFrameInfo.h",
+    ],
+)
+
+host_test(
     name = "display_probe_test",
     srcs = [
         "display_probe_test.cpp",
@@ -56,6 +83,15 @@ host_test(
     srcs = [
         "request_state_test.cpp",
         "//drivers/NativeMobileDisplay:NativeLegacyRequest.h",
+    ],
+)
+
+host_test(
+    name = "tegra_display_color_test",
+    srcs = [
+        "tegra_display_color_test.cpp",
+        "//drivers/NativeMobileDisplay:TegraDisplayColorMath.h",
+        "//drivers/NativeMobileDisplay:TegraDisplayColorTables.h",
     ],
 )
 
@@ -83,6 +119,15 @@ host_test(
 )
 
 host_test(
+    name = "display_blend_test",
+    srcs = [
+        "display_blend_test.cpp",
+        "//drivers/NativeMobileDisplay:NativePlanes.h",
+    ],
+    data = ["//drivers/NativeMobileDisplay:NativePlanesDisplay.h"],
+)
+
+host_test(
     name = "display_planes_source_test",
     srcs = ["display_planes_source_test.cpp"],
     data = [
@@ -92,4 +137,15 @@ host_test(
         "//kits/SwitchABI:interface/IOSurface.json",
     ],
     defines = ['XNU_KERN_EXEC=\\"$(rootpath //kernel/xnu-10063.141.1/bsd:kern/kern_exec.c)\\"'],
+)
+
+host_test(
+    name = "display_column_scan_test",
+    srcs = [
+        "display_column_scan_test.cpp",
+        "//drivers/NativeMobileDisplay:NativeColumnScan.h",
+        "//drivers/NativeMobileDisplay:NativePlanes.h",
+        "//drivers/TegraGM20B:TegraGM20BLayout.h",
+    ],
+    copts = ["-O1"],
 )

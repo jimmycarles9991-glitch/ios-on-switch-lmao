@@ -1,9 +1,13 @@
 // Host mock of the TegraGM20B user client (CONTRACT.md v1) for NVK's nvkmd_darwin, interposed over IOKit: a "GM20B" that
-// accepts every call and completes every submission at once (its fence page shows the seqno as soon as Exec returns).
-// Enough for vkCreateDevice, metal2vulkan's device open and shader/pipeline creation (NAK SM53); nothing is executed.
+// completes every submission at once (its fence page shows the seqno as soon as Exec returns). Enough for vkCreateDevice,
+// metal2vulkan's device open and shader/pipeline creation (NAK SM53); nothing is executed. VmBind refuses what the kernel
+// refuses (TegraGM20BUserClient.cpp's run() and vmBind()), so a bind past the end of a BO fails here as on the device.
 #include <IOKit/IOKitLib.h>
 #include <fcntl.h>
+#include <pthread.h>
 #include <stdatomic.h>
+#include <stdbool.h>
+#include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -11,6 +15,7 @@
 #include <time.h>
 #include <unistd.h>
 #include "TegraGM20BABI.h"
+#include "mock_iokit.h"
 
 #define DYLD_INTERPOSE(_replacement, _replacee)                                 \
     __attribute__((used)) static struct {                                       \
@@ -26,16 +31,24 @@ enum {
     kMaxBo = 65536
 };
 
+// The kernel's user VA window (TegraGM20BGpu.h's TGM_USER_VA_START and TGM_KERNEL_VA), which GetInfo reports.
+static const uint64_t kVaStart = 0x1000, kVaEnd = 1ull << 39;
+
 struct bo {
     int fd;
     uint64_t bytes;
     void *import;
+    bool coherent;
+    uint32_t maps;
 };
 static struct bo bos[kMaxBo];
 static atomic_uint nbo = 1;
+static struct mock_memory memory;
 static uint32_t submitted[16];
 static uint32_t *fence; /* the fence page, one uint32 per channel at slot*16 */
 static atomic_ulong calls[16];
+static struct mock_exec_surfaces exec_surfaces;
+static pthread_mutex_t exec_surfaces_lock = PTHREAD_MUTEX_INITIALIZER;
 
 static io_service_t mock_get(mach_port_t main, CFDictionaryRef matching)
 {
@@ -69,11 +82,58 @@ static void *backing(uint32_t token, uint64_t *bytes, int *fd)
         *fd = -1;
         return fence;
     }
-    if (!token || token >= kMaxBo || !bos[token].bytes)
+    if (!token || token >= kMaxBo || !bos[token].bytes || (bos[token].fd < 0 && !bos[token].import))
         return NULL;
     *bytes = bos[token].bytes;
     *fd = bos[token].fd;
     return bos[token].import ? bos[token].import : (void *)1;
+}
+
+static void account(struct mock_memory_kind *kind, bool coherent, int64_t bytes)
+{
+    uint64_t *now = coherent ? &kind->coherent : &kind->cached;
+    uint64_t *peak = coherent ? &kind->coherent_peak : &kind->cached_peak;
+    *now += (uint64_t)bytes;
+    if (*now > *peak)
+        *peak = *now;
+}
+
+// The kernel's VmBind: run()'s size and reserved checks, then vmBind()'s checks of each op.
+static kern_return_t vm_bind(const void *in, size_t insz)
+{
+    const struct TegraGM20BAbiVmBind *b = in;
+    if (insz < offsetof(struct TegraGM20BAbiVmBind, ops) || !b->count || b->count > TegraGM20BMaxBindOps)
+        return kIOReturnBadArgument;
+    const size_t want = insz == sizeof(*b)
+                            ? insz
+                            : offsetof(struct TegraGM20BAbiVmBind, ops) + b->count * sizeof(struct TegraGM20BAbiBindOp);
+    if (insz != want || b->reserved)
+        return kIOReturnBadArgument;
+    for (uint32_t i = 0; i < b->count; i++) {
+        const struct TegraGM20BAbiBindOp *op = &b->ops[i];
+        if (((op->va | op->range | op->bo_offset) & 0xfff) || !op->range || op->va < kVaStart || op->range > kVaEnd ||
+            op->va > kVaEnd - op->range || op->kind > 0xff) {
+            memory.bind_refusals++;
+            return kIOReturnBadArgument;
+        }
+        if (op->op == TegraGM20BBindMapSparse)
+            return kIOReturnUnsupported;
+        if (op->op == TegraGM20BBindUnmap)
+            continue;
+        if (op->op != TegraGM20BBindMap)
+            return kIOReturnBadArgument;
+        const struct bo *bo = op->handle && op->handle < kMaxBo ? &bos[op->handle] : NULL;
+        if (bo && bo->fd < 0 && !bo->import)
+            bo = NULL;
+        if (!bo || !bo->bytes || op->bo_offset > bo->bytes || op->range > bo->bytes - op->bo_offset) {
+            memory.bind_refusals++;
+            fprintf(stderr, "mock: VmBind refused: handle %llu offset %#llx range %#llx past its %#llx bytes\n",
+                    (unsigned long long)op->handle, (unsigned long long)op->bo_offset, (unsigned long long)op->range,
+                    (unsigned long long)(bo ? bo->bytes : 0));
+            return kIOReturnBadArgument;
+        }
+    }
+    return KERN_SUCCESS;
 }
 
 static kern_return_t mock_call(mach_port_t c, uint32_t sel, const void *in, size_t insz, void *out, size_t *outsz)
@@ -92,7 +152,7 @@ static kern_return_t mock_call(mach_port_t c, uint32_t sel, const void *in, size
     switch (sel) {
     case TegraGM20BMethodGetInfo: {
         struct TegraGM20BAbiInfo i = {.abi_version = TegraGM20BAbiVersion,
-                                      .flags = TegraGM20BInfoHostImport,
+                                      .flags = TegraGM20BInfoHostImport | TegraGM20BInfoExecSurfaces,
                                       .chipset = 0x12b,
                                       .gpc_count = 1,
                                       .tpc_count = 2,
@@ -102,8 +162,8 @@ static kern_return_t mock_call(mach_port_t c, uint32_t sel, const void *in, size
                                       .cls_m2mf = 0xa140,
                                       .cls_compute = 0xb1c0,
                                       .cls_gpfifo = 0xb06f,
-                                      .va_start = 0x1000,
-                                      .va_end = 1ull << 39,
+                                      .va_start = kVaStart,
+                                      .va_end = kVaEnd,
                                       .page_size = 4096,
                                       .big_page_size = 0x20000,
                                       .max_bo_bytes = 256ull << 20};
@@ -123,7 +183,10 @@ static kern_return_t mock_call(mach_port_t c, uint32_t sel, const void *in, size
         shm_unlink(name);
         if (fd < 0 || ftruncate(fd, (off_t)a->bytes))
             return kIOReturnNoMemory;
-        bos[h] = (struct bo){fd, a->bytes, NULL};
+        const bool coherent = a->flags & TegraGM20BBoCoherent;
+        bos[h] = (struct bo){fd, a->bytes, NULL, coherent, 0};
+        account(&memory.live, coherent, (int64_t)a->bytes);
+        memory.allocs[coherent]++;
         struct TegraGM20BAbiBoAllocReply r = {.handle = h, .map_token = h};
         memcpy(out, &r, sizeof(r));
         return KERN_SUCCESS;
@@ -133,20 +196,30 @@ static kern_return_t mock_call(mach_port_t c, uint32_t sel, const void *in, size
     case TegraGM20BMethodBoImport: {
         const struct TegraGM20BAbiBoImport *a = in;
         unsigned h = atomic_fetch_add(&nbo, 1);
-        bos[h] = (struct bo){-1, a->bytes, (void *)(uintptr_t)a->address};
+        bos[h] = (struct bo){-1, a->bytes, (void *)(uintptr_t)a->address, false, 0};
         struct TegraGM20BAbiBoAllocReply r = {.handle = h, .map_token = 0};
         memcpy(out, &r, sizeof(r));
         return KERN_SUCCESS;
     }
     case TegraGM20BMethodBoFree: {
         const struct TegraGM20BAbiBoFree *a = in;
-        if (a->handle < kMaxBo && bos[a->handle].fd >= 0)
-            close(bos[a->handle].fd);
-        if (a->handle < kMaxBo)
-            bos[a->handle] = (struct bo){0};
+        if (a->handle >= kMaxBo || !bos[a->handle].bytes)
+            return kIOReturnBadArgument;
+        struct bo *b = &bos[a->handle];
+        if (b->fd >= 0) {
+            close(b->fd);
+            account(&memory.live, b->coherent, -(int64_t)b->bytes);
+        }
+        if (b->maps) {
+            b->fd = -1;
+            b->import = NULL;
+        } else {
+            *b = (struct bo){0};
+        }
         return KERN_SUCCESS;
     }
     case TegraGM20BMethodVmBind:
+        return vm_bind(in, insz);
     case TegraGM20BMethodChannelDestroy:
         return KERN_SUCCESS;
     case TegraGM20BMethodChannelCreate: {
@@ -166,6 +239,23 @@ static kern_return_t mock_call(mach_port_t c, uint32_t sel, const void *in, size
         fence[ch * 4] = submitted[ch];
         struct TegraGM20BAbiExecReply r = {.seqno = submitted[ch]};
         memcpy(out, &r, sizeof(r));
+        return KERN_SUCCESS;
+    }
+    case TegraGM20BMethodExecSurfaces: {
+        const struct TegraGM20BAbiExecSurfaces *e = in;
+        const size_t head = offsetof(struct TegraGM20BAbiExecSurfaces, uses);
+        if (insz < head || e->count > TegraGM20BMaxExecSurfaces ||
+            insz < head + e->count * sizeof(struct TegraGM20BAbiSurfaceUse))
+            return kIOReturnBadArgument;
+        pthread_mutex_lock(&exec_surfaces_lock);
+        exec_surfaces.lists++;
+        exec_surfaces.count = e->count;
+        exec_surfaces.flags = e->flags;
+        for (uint32_t i = 0; i < e->count; i++) {
+            exec_surfaces.uses[i].handle = e->uses[i].handle;
+            exec_surfaces.uses[i].access = e->uses[i].access;
+        }
+        pthread_mutex_unlock(&exec_surfaces_lock);
         return KERN_SUCCESS;
     }
     case TegraGM20BMethodWaitFence:
@@ -205,19 +295,42 @@ static kern_return_t mock_map(io_connect_t c, uint32_t type, task_port_t t, mach
         return kIOReturnNoMemory;
     *addr = (mach_vm_address_t)m;
     *size = bytes;
+    bos[type].maps++;
+    account(&memory.mapped, bos[type].coherent, (int64_t)bytes);
     return KERN_SUCCESS;
 }
 
+// A mapping outlives its BO's free until the task unmaps it (IOKit keeps a task's mappings), and so does its charge.
 static kern_return_t mock_unmap(io_connect_t c, uint32_t type, task_port_t t, mach_vm_address_t addr)
 {
-    uint64_t bytes;
-    int fd;
-    if (type == kFenceToken)
+    if (type == kFenceToken || !type || type >= kMaxBo || !bos[type].maps)
         return KERN_SUCCESS;
-    if (!backing(type, &bytes, &fd))
-        return KERN_SUCCESS;
-    munmap((void *)addr, bytes);
+    struct bo *b = &bos[type];
+    munmap((void *)addr, b->bytes);
+    account(&memory.mapped, b->coherent, -(int64_t)b->bytes);
+    if (!--b->maps && b->fd < 0 && !b->import)
+        *b = (struct bo){0};
     return KERN_SUCCESS;
+}
+
+void mock_iokit_memory(struct mock_memory *out)
+{
+    *out = memory;
+}
+
+void mock_iokit_exec_surfaces(struct mock_exec_surfaces *out)
+{
+    pthread_mutex_lock(&exec_surfaces_lock);
+    *out = exec_surfaces;
+    pthread_mutex_unlock(&exec_surfaces_lock);
+}
+
+uint64_t mock_iokit_import_handle(const void *address)
+{
+    for (unsigned h = atomic_load(&nbo); h-- > 1;)
+        if (bos[h].import == address && bos[h].bytes)
+            return h;
+    return 0;
 }
 
 void mock_iokit_report(void)
@@ -228,6 +341,14 @@ void mock_iokit_report(void)
     for (int i = 1; i < 12; i++)
         if (calls[i])
             fprintf(stderr, "mock: %s x%lu\n", names[i], (unsigned long)calls[i]);
+    fprintf(
+        stderr,
+        "mock: BOs live %llu KiB cached (mapped, iokit_mapped: %llu KiB, peak %llu) + %llu KiB coherent (peak %llu); "
+        "BoAllocs %llu cached + %llu coherent; %llu binds refused\n",
+        (unsigned long long)(memory.live.cached >> 10), (unsigned long long)(memory.mapped.cached >> 10),
+        (unsigned long long)(memory.mapped.cached_peak >> 10), (unsigned long long)(memory.live.coherent >> 10),
+        (unsigned long long)(memory.live.coherent_peak >> 10), (unsigned long long)memory.allocs[0],
+        (unsigned long long)memory.allocs[1], (unsigned long long)memory.bind_refusals);
 }
 
 DYLD_INTERPOSE(mock_get, IOServiceGetMatchingService)

@@ -1,4 +1,4 @@
-// xnu_stall_harness.c: osfmk/kern/switch_stall.h's decisions, compiled as the kernel compiles them (C), for
+// xnu_stall_harness.c: kernel/switch/diag/stall.h's decisions, compiled as the kernel compiles them (C), for
 // xnu_stall_test.cpp.
 #ifndef SWITCH_XNU_STALL_HARNESS_H
 #define SWITCH_XNU_STALL_HARNESS_H

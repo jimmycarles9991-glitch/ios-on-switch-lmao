@@ -196,6 +196,7 @@ impl RenderCommandEncoder {
             || !current.recorded
             || !kept
             || self.layout.fetch_inputs
+            || current.shape.fetch_inputs
             || self.layout.samples != 1
             || self.dispatched
             || self.barrier
@@ -216,13 +217,14 @@ impl RenderCommandEncoder {
         // leave out). The draws recorded again then record into it as their current one.
         self.rerouting = true;
         let made = self.next_instance(
-            (&colors, Some(by)),
+            (&colors, &[], Some(by)),
             (false, false),
             ViewSetup::default(),
             true,
             None,
             &locations,
             &[],
+            false,
         );
         let (instance, stood) = match made {
             Ok((

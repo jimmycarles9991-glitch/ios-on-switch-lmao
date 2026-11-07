@@ -357,7 +357,7 @@ class SwitchTouch : public IOService {
     void handle(const uint8_t *event);
     void position(const uint8_t *event, int &x, int &y) const;
     void begin(Contact &contact, int x, int y, unsigned z, uint64_t now);
-    bool track(Contact &contact, int x, int y, unsigned z, uint64_t now);
+    void track(Contact &contact, int x, int y, unsigned z, uint64_t now);
     void noteDrift(Contact &contact);
     void ended(Contact &contact, uint64_t now);
     void report(Contact &contact, int x, int y);
@@ -773,8 +773,8 @@ void SwitchTouch::noteDrift(Contact &contact)
     stats.settle.add(contact.drift);
 }
 
-// A motion to raw (x, y) at strength z: true if the reported position changed (SwitchTouchFilter.h).
-bool SwitchTouch::track(Contact &contact, int x, int y, unsigned z, uint64_t now)
+// A motion to raw (x, y) at strength z: the contact's reported position (SwitchTouchFilter.h) and its stats.
+void SwitchTouch::track(Contact &contact, int x, int y, unsigned z, uint64_t now)
 {
     const int fromStart = distance(x - contact.startX, y - contact.startY);
     if (fromStart > contact.rawTravel)
@@ -797,16 +797,15 @@ bool SwitchTouch::track(Contact &contact, int x, int y, unsigned z, uint64_t now
     contact.trace.add((unsigned)ms, x - contact.startX, y - contact.startY, z);
 #endif
     if (!contact.filter.sample(x, y, z, ticksToUs(now)))
-        return false;
+        return;
     const uint16_t wasX = contact.x, wasY = contact.y;
     report(contact, contact.filter.x.pixel(), contact.filter.y.pixel());
     if (contact.x == wasX && contact.y == wasY)
-        return false;
+        return;
     contact.moved = true;
     const int reported = distance(contact.x - contact.startX, contact.y - contact.startY);
     if (reported > contact.reportedTravel)
         contact.reportedTravel = (uint16_t)reported;
-    return true;
 }
 
 // A contact lifted (or rejected): its drift, tap and re-touch stats.
@@ -902,8 +901,13 @@ void SwitchTouch::handle(const uint8_t *event)
         dirty = true;
         return;
     }
-    if (track(contact, x, y, z, now))
-        dirty = true;
+    track(contact, x, y, z, now);
+    // Every scan of a contact is a report, moved or not: iOS assumes a digitizer that reports each frame while touched,
+    // and IOHIDEventDriver dispatches an unchanged report of a down contact as a stationary touch. Without them
+    // SpringBoard's touch history (averaged over the last 42 ms by the clock) never saw a pause, so the app switcher's
+    // swipe and pause went home, and UIKit's velocity (the last motion over the time since) flung content after a
+    // finger had stopped.
+    dirty = true;
 }
 
 void SwitchTouch::flush()

@@ -43,31 +43,51 @@
 #include <mach/kmod.h>
 #include "SwitchHID.h"
 #include "../SwitchPower/SwitchPower.h"
+#include "../../kits/SwitchRefusal/SwitchRefusal.h"
 
 extern kmod_info_t g_kernel_kmod_info;
+
+// SwitchMotion (SwitchOrientationClient.cpp): the orientation device's AOP user client. Weak, so this archive links
+// without it.
+extern "C" __attribute__((weak)) IOReturn switch_motion_orientation_client(IOService *, task_t, void *, uint32_t,
+                                                                           IOUserClient **)
+{
+    return kIOReturnUnsupported;
+}
+
 extern "C" void switch_hid_static_init(void) __asm__("__GLOBAL__sub_I_SwitchHIDDevice.cpp");
 
 namespace {
 constexpr uint32_t kVendorID = 0x057e;   // Nintendo
 constexpr uint32_t kProbeScore = 10000;  // over AppleUserHIDEventDriver's 1 and IOHIDEventDriver's own 0
 
-// Logical maxima of X and Y, little endian: the report frame (SwitchHID.h kSwitchTouchReportWidth/Height).
+// Logical maxima of X and Y, little endian: the report frame (SwitchHID.h kSwitchTouchReportWidth/Height). Physical
+// maxima: the panel's 87 x 155 mm in hundredths of a centimetre (Unit 0x11, SI length in cm; Unit Exponent -2).
+// IOHIDEventDriver publishes them as the service's SurfaceDimensions in millimetres (IOHIDFamily getFixedValue), and
+// backboardd hands them on as each touch event's digitizer surface size; without a unit it published the logical
+// ranges as raw 16.16 millimetres, 0.011 x 0.020 mm.
 #if SWITCH_PORTRAIT_NATIVE
-#define TOUCH_X_MAX 0xcf, 0x02 /* 719 */
-#define TOUCH_Y_MAX 0xff, 0x04 /* 1279 */
+#define TOUCH_X_MAX  0xcf, 0x02 /* 719 */
+#define TOUCH_Y_MAX  0xff, 0x04 /* 1279 */
+#define TOUCH_X_SIZE 0x66, 0x03 /* 870: 87.0 mm */
+#define TOUCH_Y_SIZE 0x0e, 0x06 /* 1550: 155.0 mm */
 #else
-#define TOUCH_X_MAX 0xff, 0x04 /* 1279 */
-#define TOUCH_Y_MAX 0xcf, 0x02 /* 719 */
+#define TOUCH_X_MAX  0xff, 0x04 /* 1279 */
+#define TOUCH_Y_MAX  0xcf, 0x02 /* 719 */
+#define TOUCH_X_SIZE 0x0e, 0x06 /* 1550: 155.0 mm */
+#define TOUCH_Y_SIZE 0x66, 0x03 /* 870: 87.0 mm */
 #endif
 static_assert(kSwitchTouchReportWidth == (SWITCH_PORTRAIT_NATIVE ? 720 : 1280), "touch descriptor X range");
-#define FINGER                                                                                                    \
-    0x05, 0x0d, 0x09, 0x22, 0xa1, 0x02,                             /* Digitizer: Finger, Collection (Logical) */ \
-        0x09, 0x42, 0x09, 0x47, 0x09, 0x34,                         /* Tip Switch, Touch Valid, Untouch */        \
-        0x15, 0x00, 0x25, 0x01, 0x75, 0x01, 0x95, 0x03, 0x81, 0x02, /* 3 x 1 bit, Input (Data, Var, Abs) */       \
-        0x95, 0x05, 0x81, 0x03,                                     /* 5 bits padding */                          \
-        0x09, 0x51, 0x25, 0x09, 0x75, 0x08, 0x95, 0x01, 0x81, 0x02, /* Contact Identifier, 0..9 */                \
-        0x05, 0x01, 0x09, 0x30, 0x26, TOUCH_X_MAX, 0x75, 0x10, 0x81, 0x02, /* Generic Desktop X */                \
-        0x09, 0x31, 0x26, TOUCH_Y_MAX, 0x81, 0x02,                         /* Y */                                \
+#define FINGER                                                                                                       \
+    0x05, 0x0d, 0x09, 0x22, 0xa1, 0x02,                                /* Digitizer: Finger, Collection (Logical) */ \
+        0x09, 0x42, 0x09, 0x47, 0x09, 0x34,                            /* Tip Switch, Touch Valid, Untouch */        \
+        0x15, 0x00, 0x25, 0x01, 0x75, 0x01, 0x95, 0x03, 0x81, 0x02,    /* 3 x 1 bit, Input (Data, Var, Abs) */       \
+        0x95, 0x05, 0x81, 0x03,                                        /* 5 bits padding */                          \
+        0x09, 0x51, 0x25, 0x09, 0x75, 0x08, 0x95, 0x01, 0x81, 0x02,    /* Contact Identifier, 0..9 */                \
+        0x05, 0x01, 0x09, 0x30, 0x26, TOUCH_X_MAX, 0x75, 0x10,         /* Generic Desktop X, 16 bits */              \
+        0x46, TOUCH_X_SIZE, 0x65, 0x11, 0x55, 0x0e, 0x81, 0x02,        /* 0 .. its millimetres, Input */             \
+        0x09, 0x31, 0x26, TOUCH_Y_MAX, 0x46, TOUCH_Y_SIZE, 0x81, 0x02, /* Y */                                       \
+        0x45, 0x00, 0x65, 0x00, 0x55, 0x00,                            /* the next finger's items: no unit */        \
         0xc0
 const uint8_t kTouchDescriptor[] = {
     0x05,   0x0d,   0x09,   0x04,   0xa1,   0x01,   0x85,   0x01,  // Digitizer: Touch Screen, Collection (Application), Report ID 1
@@ -76,6 +96,8 @@ const uint8_t kTouchDescriptor[] = {
 #undef FINGER
 #undef TOUCH_X_MAX
 #undef TOUCH_Y_MAX
+#undef TOUCH_X_SIZE
+#undef TOUCH_Y_SIZE
 static_assert(sizeof(SwitchTouchReport) == 1 + kSwitchTouchSlots * 6, "touch report layout");
 
 const uint8_t kButtonsDescriptor[] = {
@@ -450,8 +472,33 @@ public:
         setProperty("ProductID", (unsigned long long)profile->productID, 32);
         setProperty("Manufacturer", "Nintendo");
         setProperty("Built-In", true);
+        if (profile == &kProfiles[kSwitchHIDOrientation])
+            addAopPlugIn();
         timed = timestamps();
         return IOHIDDevice::start(provider);
+    }
+
+    // CoreMotion's orientation notifier opens this device, the event service's grandparent, with AppleSPULib's
+    // AppleSPUHIDDevice plug-in type (J120's AppleSPUHIDDevice personality) to ask the current orientation; the
+    // plug-in's user client type is 'ashd' (newUserClient). Its processes' profiles name no class of ours.
+    void addAopPlugIn()
+    {
+        OSDictionary *types = OSDictionary::withCapacity(1);
+        OSString *plugIn = OSString::withCString("AppleSPU.kext/PlugIns/AppleSPULib.plugin");
+        if (types && plugIn && types->setObject("7ACF5332-1A35-4893-87CB-BA64E1887FAE", plugIn))
+            setProperty("IOCFPlugInTypes", types);
+        OSSafeReleaseNULL(types);
+        OSSafeReleaseNULL(plugIn);
+        setProperty("NativeSandboxGrantProcess", "backboardd,SpringBoard,locationd,audiomxd");
+    }
+
+    IOReturn newUserClient(task_t task, void *security, UInt32 type, OSDictionary *properties,
+                           IOUserClient **handler) override
+    {
+        constexpr UInt32 kAopUserClient = 0x61736864;  // 'ashd'
+        if (type == kAopUserClient && profile == &kProfiles[kSwitchHIDOrientation])
+            return switch_motion_orientation_client(this, task, security, type, handler);
+        return IOHIDDevice::newUserClient(task, security, type, properties, handler);
     }
 
     void stop(IOService *provider) override
@@ -547,8 +594,16 @@ public:
     IOReturn setReport(IOMemoryDescriptor *report, uint32_t type, IOOptionBits options)
     {
         const SwitchHIDFeatureHandler handler = __atomic_load_n(&featureHandler, __ATOMIC_ACQUIRE);
-        if (!handler || type != 2 /* kIOHIDReportTypeFeature */)
+        constexpr uint32_t kFeature = 2;  // kIOHIDReportTypeFeature
+        // A temperature sensor streams nothing (thermalmonitord copies its value), so its Report Interval has nothing
+        // to pace.
+        if (!handler && type == kFeature && isTemperature())
+            return kIOReturnSuccess;
+        if (!handler || type != kFeature) {
+            switch_refusal_k(switch_refusal_key_with(switch_refusal_key("hid", "set-report"), profile->productID),
+                             "hid", "set-report", "%s refuses a type %u report: it takes none", profile->product, type);
             return kIOReturnUnsupported;
+        }
         uint8_t bytes[16];
         const size_t length = report ? report->getLength() : 0;
         if (!length || length > sizeof(bytes) || report->readBytes(0, bytes, length) != length) {

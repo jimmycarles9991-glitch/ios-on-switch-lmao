@@ -181,8 +181,12 @@ impl GraphicsState {
             Some(pf) => Some(attachment(pf, FormatUsage::DepthStencilAttachment)?),
             None => None,
         };
-        let fetch_inputs =
-            colors.iter().any(Option::is_some) && framebuffer_fetch::through_inputs(profile);
+        // A pipeline the compile layer left on input attachments beside the interlock draws in an
+        // instance of that shape (`framebuffer_fetch::inputs_beside_interlock`).
+        let fetch_inputs = colors.iter().any(Option::is_some)
+            && (framebuffer_fetch::through_inputs(profile)
+                || (framebuffer_fetch::inputs_beside_interlock(profile)
+                    && !graphics.input_attachments.is_empty()));
         let mut storage = Vec::new();
         if !fetch_inputs {
             for s in &graphics.storage_attachments {

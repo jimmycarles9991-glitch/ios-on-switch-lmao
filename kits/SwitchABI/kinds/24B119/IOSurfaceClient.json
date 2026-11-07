@@ -1,0 +1,43 @@
+{
+  "class": "IOSurfaceClient",
+  "kind": "24B119",
+  "size": "0x98",
+  "first_slot": 0,
+  "slots": 16,
+  "slide": "-0x4088000",
+  "layout": {},
+  "fields": {},
+  "constants": {
+    "base": "0x50",
+    "map": "0x48",
+    "sharedClient": "0x10"
+  },
+  "addresses": {},
+  "found": {
+    "base": "value shown by f9002a68 at 0xfffffff009af8064",
+    "map": "value shown by f9002675 at 0xfffffff009af7fcc",
+    "sharedClient": "value shown by f9400a08 at 0xfffffff009b0b384"
+  },
+  "hints": {
+    "constants": {
+      "base": {
+        "value": "0x50",
+        "at": "0xfffffff009af8064",
+        "word": "f9002a68",
+        "why": "str x8, [x19, #0x50] in mapInTask: the map's address plus the surface's +0x168, as in 21H461"
+      },
+      "map": {
+        "value": "0x48",
+        "at": "0xfffffff009af7fcc",
+        "word": "f9002675",
+        "why": "str x21, [x19, #0x48] in IOSurfaceClient::mapInTask (0xfffffff009af7ecc, \"%s: createMappingInTask() failed\"), as in 21H461"
+      },
+      "sharedClient": {
+        "value": "0x10",
+        "at": "0xfffffff009b0b384",
+        "word": "f9400a08",
+        "why": "ldr x8, [x16, #0x10] in get_surface_client, as in 21H461"
+      }
+    }
+  }
+}

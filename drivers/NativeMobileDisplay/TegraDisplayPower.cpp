@@ -5,6 +5,7 @@
 // bdk/display/di.inl, T210B01 variants, in the same order.
 #include <IOKit/IOLib.h>
 #include "TegraDisplayPower.h"
+#include "../SwitchSuspend/SwitchSleepSteps.h"
 #include "../TegraGPIO/TegraGPIO.h"
 
 extern "C" vm_offset_t ml_io_map(vm_offset_t phys_addr, vm_size_t size);
@@ -411,6 +412,7 @@ extern "C" void tegra_display_power_down(void)
 {
     map();
     write(gDc, kDcDisable);
+    switch_sleep_mark(SWITCH_STEP_DISPLAY_DC_OFF);
     // DSI off (hekate _display_dsi_soft_reset) and its pads powered down, while its clock still runs: a gated block stalls the bus.
     gDsi[DSI_VIDEO_MODE_CONTROL] = 0;
     gDsi[DSI_POWER_CONTROL] = 0;
@@ -418,10 +420,12 @@ extern "C" void tegra_display_power_down(void)
     gDsi[DSI_PAD_CONTROL_0] = kDsiPadsDown;
     tegra_gpio_output(kPanelReset, 0);
     IOSleep(10);
+    switch_sleep_mark(SWITCH_STEP_DISPLAY_DSI_OFF);
     car(RST_DEV_H_SET) = kMipiCal | kDsi;
     car(CLK_ENB_H_CLR) = kMipiCal | kDsi;
     car(RST_DEV_L_SET) = kDisp1;
     car(CLK_ENB_L_CLR) = kDisp1;
+    switch_sleep_mark(SWITCH_STEP_DISPLAY_CLOCKS_OFF);
 }
 
 extern "C" void tegra_display_power_up(void)

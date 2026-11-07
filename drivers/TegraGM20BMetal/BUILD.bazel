@@ -4,6 +4,7 @@ load("@rules_python//python:py_binary.bzl", "py_binary")
 load("@rules_python//python:py_library.bzl", "py_library")
 load("@rules_python//python:py_test.bzl", "py_test")
 load("//bazel/lint:defs.bzl", "lint_files")
+load("//kernel/rules:package.bzl", "ios_binary")
 
 package(default_visibility = ["//visibility:public"])
 
@@ -33,18 +34,61 @@ filegroup(
 filegroup(
     name = "raw_pack_generator",
     srcs = glob(
-        ["raw/pack/**"],
+        [
+            "raw/pack/**",
+            # the mock's capture mode (pack/cap.cpp) and the methods the raw path owns (pack/mkpack.py)
+            "raw/runtime/raw_capture.*",
+            "raw/runtime/raw_pack.*",
+        ],
         exclude = [
             "**/__pycache__/**",
             "**/*.pyc",
             "**/.DS_Store",
         ],
-    ),
+    ) + ["raw/runtime/raw_owned.h"],
 )
 
 filegroup(
     name = "raw_stack_sources",
     srcs = glob(["raw/**/*.%s" % suffix for suffix in ("h", "c", "cpp", "mm", "py")]),
+)
+
+# The GPU context-switch stress and fetch readback (raw/test/fetchform.cpp): debug boot packages stage it at
+# /usr/bin/switch-fetchform, and the BlueTool stand-in runs it when the Mac posts
+# com.brunostjohn.switch.debug.ctxsw-stress (`idevicenotificationproxy -u <udid> post com.brunostjohn.switch.debug.ctxsw-stress`);
+# its lines are the "fetchform" category of com.brunostjohn.switch.TegraGM20BMetal (`idevicesyslog -u <udid> -m fetchform`).
+ios_binary(
+    name = "fetchform",
+    srcs = [
+        "raw/fx/fx_mip.cpp",
+        "raw/runtime/raw_alias.cpp",
+        "raw/runtime/raw_gpu.cpp",
+        "raw/runtime/raw_kernel.cpp",
+        "raw/runtime/raw_pack.cpp",
+        "raw/runtime/raw_zeta.cpp",
+        "raw/test/fetchform.cpp",
+    ],
+    out = "build/switch-gpu/fetchform",
+    hdrs = [
+        ":raw_runtime_headers",
+        "//drivers/TegraGM20B:TegraGM20BABI.h",
+        "//drivers/TegraGM20B:TegraGM20BLayout.h",
+    ],
+    copts = [
+        "-O2",
+        "-std=c++17",
+        "-Wall",
+        "-Wextra",
+        "-I",
+        "drivers/TegraGM20B",
+        "-lc++",
+        "-framework",
+        "CoreFoundation",
+        "-framework",
+        "IOKit",
+    ],
+    # debug builds only (Device::fetchBarrier): //boot:package depends on it in the debug profile
+    tags = ["manual"],
 )
 
 # The pack generator (raw/pack/rawpack.py and the modules it imports); //tools/gpu:rawpack runs it.

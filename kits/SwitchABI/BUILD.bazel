@@ -157,15 +157,20 @@ switch_abi_class(
     header_name = "OriginalHidDeviceABI.h",
 )
 
-switch_abi_class(
-    name = "IOSurface",
-    header = False,
-)
+switch_abi_class(name = "IOSurface")
+
+switch_abi_class(name = "IOSurfaceClient")
+
+switch_abi_class(name = "IOSurfaceRootUserClient")
 
 switch_abi_class(
     name = "IOMobileFramebufferLegacy",
     header_name = "OriginalLegacyFramebufferABI.h",
 )
+
+switch_abi_class(name = "IOEthernetController")
+
+switch_abi_class(name = "IOEthernetInterface")
 
 switch_abi_class(name = "IOUSBDeviceController")
 

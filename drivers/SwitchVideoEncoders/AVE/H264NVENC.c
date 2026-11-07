@@ -176,10 +176,9 @@ void h264enc_layout(const H264EncConfig *c, H264EncLayout *l)
     l->bitstream_bytes = ALIGN(mbs * 400 + 4096, 65536);
     l->status_bytes = 4096;
     l->history_bytes = ALIGN(tegra_nvenc_history_bytes(c->width, c->height), 256);
-    l->coloc_bytes = ALIGN(mbs * (uint32_t)sizeof(nvenc_h264_coloc_mb_s), 256);
     l->history_offset = l->status_bytes;
-    l->coloc_offset = l->history_offset + l->history_bytes;
-    l->aux_bytes = l->coloc_offset + l->coloc_bytes;
+    l->aux_bytes = l->history_offset + l->history_bytes;
+    l->mepred_bytes = ALIGN(mbs * TEGRA_NVENC_MEPRED_BYTES_PER_MB, 65536);
 }
 
 static size_t finish(H264Bits *b, uint8_t header, uint8_t *out, size_t cap)
@@ -571,20 +570,27 @@ void h264enc_fill_submit(const H264EncConfig *c, const H264EncLayout *l, const H
 #define VALUE(m, v)              e[n++] = (TegraNVENCEntry){(uint16_t)(m), TEGRA_NVENC_ENTRY_VALUE, (v), 0}
 #define RELOC(m, handle, offset) e[n++] = (TegraNVENCEntry){(uint16_t)(m), TEGRA_NVENC_ENTRY_RELOC, (handle), (offset)}
     VALUE(NVC5B7_SET_APPLICATION_ID, NVC5B7_SET_APPLICATION_ID_ID_NVENC_H264);
-    VALUE(NVC5B7_SET_CONTROL_PARAMS, NVC5B7_SET_CONTROL_PARAMS_CODEC_TYPE_H264 | (1u << 12) /* GPTIMER_ON */);
+    // NVIDIA's T210 driver's stream (switch-frame-tap m79-runE): FORCE_OUTPIC with the GP timer, the ME predictor
+    // pair every picture, the reference's chroma at its config offset (no chroma methods in that reading), no
+    // colocated data (B pictures only); every address method it leaves unset the kernel writes 0.
+    VALUE(NVC5B7_SET_CONTROL_PARAMS,
+          NVC5B7_SET_CONTROL_PARAMS_CODEC_TYPE_H264 | (1u << 8) /* FORCE_OUTPIC */ | (1u << 12) /* GPTIMER_ON */);
     VALUE(NVC5B7_SET_PICTURE_INDEX, p->picture_index);
     RELOC(NVC5B7_SET_IN_CUR_PIC, h->input, 0);
     RELOC(NVC5B7_SET_IN_CUR_PIC_CHROMA_U, h->input, inChroma);
     RELOC(NVC5B7_SET_OUT_REF_PIC_LUMA, h->recon, 0);
-    RELOC(NVC5B7_SET_OUT_REF_PIC_CHROMA, h->recon, refChroma);
+    if (method)
+        RELOC(NVC5B7_SET_OUT_REF_PIC_CHROMA, h->recon, refChroma);
+    RELOC(NVC5B7_SET_IN_MEPRED_DATA, h->mepred[p->picture_index & 1], 0);
+    RELOC(NVC5B7_SET_OUT_MEPRED_DATA, h->mepred[~p->picture_index & 1], 0);
     if (pPicture) {
         RELOC(NVC5B7_SET_IN_REF_PIC0_LUMA, h->ref, 0);
-        RELOC(NVC5B7_SET_IN_REF_PIC0_CHROMA, h->ref, refChroma);
+        if (method)
+            RELOC(NVC5B7_SET_IN_REF_PIC0_CHROMA, h->ref, refChroma);
     }
     RELOC(NVC5B7_SET_OUT_BITSTREAM, h->bitstream, 0);
     RELOC(NVC5B7_SET_OUT_ENC_STATUS, h->aux, 0);
     RELOC(NVC5B7_SET_IOHISTORY, h->aux, l->history_offset);
-    RELOC(NVC5B7_SET_OUT_COLOC_DATA, h->aux, l->coloc_offset);
     VALUE(NVC5B7_EXECUTE, 1u << 8 /* AWAKEN */);
 #undef VALUE
 #undef RELOC

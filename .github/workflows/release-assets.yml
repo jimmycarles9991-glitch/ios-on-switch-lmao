@@ -101,5 +101,20 @@ jobs:
             - third_party/mesa/bazel/repos.bzl
           cache-save: false
           bazelrc: build --show_progress_rate_limit=30
+      # The action graph, before anything runs: a regression is named by its actions, not by the first one to fail.
+      - name: Check the image builder runs no compiler and nothing of Xcode
+        env:
+          ASSETS: ${{ runner.temp }}/assets
+        run: |
+          flags=(--repo_env=SWITCH_RELEASE_DIR="$ASSETS" --//install:prebuilt=release --output=text --include_commandline=false)
+          graph='deps(//:image_dry_run)'
+          xcode="$(bazel aquery "${flags[@]}" "inputs('.*external/(\+xcode_host\+xcode|apple_support\+|[^/]*local_config_[^/]*cc[^/]*)/.*', $graph)")"
+          compiles="$(bazel aquery "${flags[@]}" "mnemonic('(Cpp|Objc|Swift|Rustc).*', $graph)")"
+          found="$(printf '%s\n%s\n' "$xcode" "$compiles")"
+          if grep -q '^action ' <<<"$found"; then
+            grep -E "^action |^  (Mnemonic|Target):" <<<"$found"
+            echo "::error:://:image_dry_run's graph has actions that need Xcode or a compiler."
+            exit 1
+          fi
       - name: Dry-run the image builder on this build's assets
         run: bazel run --repo_env=SWITCH_RELEASE_DIR="$RUNNER_TEMP/assets" --//install:prebuilt=release //:image_dry_run

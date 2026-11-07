@@ -1,5 +1,6 @@
 load("@rules_python//python:py_binary.bzl", "py_binary")
 load("@rules_python//python:py_library.bzl", "py_library")
+load("@rules_python//python:py_test.bzl", "py_test")
 load("//bazel/lint:defs.bzl", "lint_files")
 
 package(default_visibility = ["//visibility:public"])
@@ -17,5 +18,15 @@ py_library(
 py_binary(
     name = "emit_prelink",
     srcs = ["emit_prelink.py"],
+    deps = [":native_prelink"],
+)
+
+py_test(
+    name = "emit_prelink_options_test",
+    size = "small",
+    srcs = [
+        "emit_prelink.py",
+        "emit_prelink_options_test.py",
+    ],
     deps = [":native_prelink"],
 )

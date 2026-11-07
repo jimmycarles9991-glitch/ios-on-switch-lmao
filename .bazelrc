@@ -7,23 +7,26 @@
 # Rust, ...) is handed to a fresh output base already extracted, instead of re-extracting (the LLVM tarball alone
 # took 136 s per output base, three times over).
 common --repository_cache=~/Library/Caches/switch-ios-bazel/repository
-# Hardlink cached downloads into the external repositories instead of copying them (a multi-GB IPSW member once).
+# Hardlink a cached archive into the repository that extracts it instead of copying it. Only download_and_extract
+# (http_archive) hardlinks: a repository rule's download() always copies, which APFS makes a clone (ipsw/ipsw.bzl).
 common --experimental_repository_cache_hardlinks
 # Repository contents cache entries nobody used for a day are deleted (default 14 days): every change to a repository
 # rule's definition leaves its previous extraction behind (0.6-0.7 GB for Rust/LLVM-sized repositories).
 common --repo_contents_cache_gc_max_age=1d
 # Action results by action key: a fresh output base, a new worktree or `bazel clean` reuses them. With a disk cache
-# Bazel builds without the bytes: only top-level outputs land in the output base (one is ~1 GB, not 5).
+# Bazel builds without the bytes: only top-level outputs land in the output base (one is ~1 GB, not 5), each an APFS
+# clone of its cache entry: du counts them again, the disk does not.
 common --disk_cache=~/Library/Caches/switch-ios-bazel/disk
 # No py rule invents __init__.py files, in any repository: MODULE.bazel's explicit_init_py covers only this module, and
 # rules_pkg's zip and tar builders still asked for them (rules_python#2945: implicit ones make stray directories
 # importable and can empty a real __init__.py).
 common --incompatible_default_to_explicit_init_py
 # The cap the least recently used entries are deleted above, once Bazel has been idle for gc_idle_delay. One full
-# working set (//:boot //:gpu and the tests) is ~4.5 GB and each agent branch adds 0.3-1 GB of its own (an XNU object
-# root, a kernel, a package): 16G holds main and about ten branches in flight, where 10G evicted one agent's work per
-# build. (The disk is the limit: raise it when there is room.)
-common --experimental_disk_cache_gc_max_size=8G
+# working set is ~8 GB: //:boot //:gpu and the tests ~4.5 GB, //gpu:bundle's seed buckets 1.7 GB and the raw pack's
+# probe runs. Each agent branch adds 0.3-1 GB of its own (an XNU object root, a kernel, a package). 8G evicted the
+# seed and the raw pack between two deploys, so a raw/ or NVK edit recompiled them from nothing; 24G holds main and
+# about a dozen branches. The IPSW's images no longer count: the daily graph reads only its crawl (gpu/seed/crawl.bzl).
+common --experimental_disk_cache_gc_max_size=24G
 common --experimental_disk_cache_gc_max_age=30d
 common --experimental_disk_cache_gc_idle_delay=2m
 

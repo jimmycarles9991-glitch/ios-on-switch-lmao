@@ -15,6 +15,7 @@
 #include <IOKit/IOBufferMemoryDescriptor.h>
 #include <libkern/c++/OSObject.h>
 #include "XudcTransfer.h"
+#include "XudcIsoch.h"
 
 namespace xudc {
 
@@ -103,6 +104,7 @@ public:
     void disableEndpoint(uint32_t dci);
     bool reloadEndpoint(uint32_t dci);
     void setHalt(uint32_t dci, bool halt);
+    void setPause(uint32_t dci, bool pause);
     bool halted(uint32_t dci);
     void resetSequence(uint32_t dci);  // CLEAR_FEATURE(HALT): data toggle 0, ring position kept
     void dropQueued(uint32_t dci);     // discard every TRB not yet completed, keep the toggle

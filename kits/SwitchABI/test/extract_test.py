@@ -46,5 +46,23 @@ class FunctionsTest(unittest.TestCase):
         self.assertEqual(plain(0x2000, 2), [0xB9401C00, 0xD65F03C0])
 
 
+CONSTANT_HINT = {'value': '0x1c', 'at': '0x2000', 'word': 'b9401c00', 'why': 'ldr w0, [x0, #0x1c]'}
+
+
+class PlainConstantsTest(unittest.TestCase):
+    def errors(self, table_value: str, word: int = 0xB9401C00) -> list[str]:
+        table = {'constants': {'count': table_value}, 'hints': {'constants': {'count': CONSTANT_HINT}}}
+        return extract.plain_constant_errors({0x2000: word}.__getitem__, table)
+
+    def test_a_matching_word_and_value_pass(self):
+        self.assertEqual(self.errors('0x1c'), [])
+
+    def test_another_word_is_refused(self):
+        self.assertEqual(len(self.errors('0x1c', word=0xB9402000)), 1)
+
+    def test_a_value_the_hint_does_not_show_is_refused(self):
+        self.assertEqual(len(self.errors('0x20')), 1)
+
+
 if __name__ == '__main__':
     unittest.main()

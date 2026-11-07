@@ -28,16 +28,26 @@ enum PackSectionId {
 
 struct PackHeader {
     char magic[8];                                    // "GM20BPK1"
-    uint32_t version, programs, pipelines, samplers;  // version 2
+    uint32_t version, programs, pipelines, samplers;  // version 4
     PackSection section[PackSectionCount];
     uint64_t stack;  // the build's stack key (build-tegra-gm20b-metal.py: the plugin is compiled with the same one)
+};
+
+// NVK's constant buffer types (nvk_shader.h nvk_cbuf_type) a raw draw binds
+enum PackCbufType : uint8_t {
+    CbufRoot = 1,
+    CbufShaderData = 2,
+    CbufSet = 3
 };
 
 struct PackProgram {
     uint32_t heapOffset;  // slot start in the heap image
     uint32_t program;     // SET_PIPELINE_PROGRAM value (header at heapOffset + 0x30, code at + 0x80)
     uint32_t bytes;       // slot size
-    uint32_t cbufs;       // constant buffer slots it uses (root table, then set 0)
+    // NAK's shader data in the slot (where NVK uploads it: 256-aligned after the code) and its size, a multiple of 256; 0: none
+    uint32_t dataOffset, dataBytes;
+    uint8_t cbufs;         // constant buffer slots it uses
+    uint8_t cbufType[11];  // each slot's PackCbufType: the root table at 0
 };
 
 enum PackEntryKind : uint8_t {
@@ -64,7 +74,16 @@ struct PackEntry {
 };
 
 enum PackPipelineFlags : uint32_t {
-    PipelineFetches = 1
+    PipelineFetches = 1,
+    // metal2vulkan's barrier form of a state whose first record fetches in the storage form (the pixel interlock): its
+    // fetches read input attachments, ordered by barriers (pack/rawpack.py's probe with NVK's interlock hidden)
+    PipelineBarrierForm = 2
+};
+
+// Which of a state's records: its first (the storage form where it has both), or its barrier form
+enum class PackForm : uint8_t {
+    Default,
+    Barrier
 };
 
 struct PackPipeline {
@@ -104,6 +123,7 @@ enum PackReloc : uint32_t {
 
 #pragma pack(pop)
 static_assert(sizeof(PackPipeline) == 36 + 16 * 8 + 4 + 32 * 4, "pack layout");
+static_assert(sizeof(PackProgram) == 32, "pack layout");
 
 class Pack {
 public:
@@ -126,7 +146,7 @@ public:
         return hdr_->section[s].bytes;
     }
 
-    const PackPipeline *find(uint64_t keyHash) const;  // nullptr: not in the pack
+    const PackPipeline *find(uint64_t keyHash, PackForm form = PackForm::Default) const;  // nullptr: not in the pack
 
     const char *string(uint32_t off) const
     {

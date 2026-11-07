@@ -4,11 +4,10 @@
 #include "XudcHardware.h"
 #include "XusbPorts.h"
 #include <IOKit/IOLib.h>
-#if SWITCH_USB_SUPERSPEED
+#include "../TegraSMMU/TegraSMMU.h"
+#include "UsbSmmuMapper.h"
 #include "XusbLanes.h"
 #include "XusbSuperSpeed.h"
-#include "UsbSmmuMapper.h"
-#endif
 
 extern "C" vm_offset_t ml_io_map(vm_offset_t phys_addr, vm_size_t size);
 
@@ -48,10 +47,6 @@ enum : uint32_t {  // PMC (from 0x7000E400)
     PART_XUSBA = 20,
     PART_XUSBC = 22,
 };
-
-enum : uint32_t {
-    MC_SMMU_XUSB_HOST_ASID = 0x288
-};  // next to XUSB_DEV's 0x28c (XudcHardware.cpp)
 
 enum : uint32_t {  // FPCI configuration space of the host (xhci-tegra.c)
     XUSB_CFG_1 = 0x004,
@@ -121,6 +116,12 @@ enum : uint32_t {  // XUSB pad controller (xusb-tegra210.c); port 0's role regis
     OTG_PAD_PD = 1u << 26,
     OTG_PAD_PD_ZI = 1u << 29,
 };
+
+static_assert(MBOX_SAVE_DFE_CTLE_CTX == XUSB_MBOX_SAVE_DFE_CTLE_CTX && MBOX_RESET_SSPI == XUSB_MBOX_RESET_SSPI &&
+                  MBOX_DISABLE_SS_LFPS_DETECTION == XUSB_MBOX_DISABLE_SS_LFPS_DETECTION &&
+                  MBOX_ENABLE_SS_LFPS_DETECTION == XUSB_MBOX_ENABLE_SS_LFPS_DETECTION && MBOX_ACK == XUSB_MBOX_ACK &&
+                  MBOX_NAK == XUSB_MBOX_NAK,
+              "XusbLanes.h's mailbox numbers are xhci-tegra.c's");
 
 // Firmware header (xhci-tegra.c struct tegra_xusb_fw_header, 256 bytes before the image proper).
 constexpr size_t kFwHeader = 256, kFwCodeTag = 8, kFwCodeSize = 12, kFwCreated = 44, kFwVersion = 72, kFwLength = 100,
@@ -208,8 +209,10 @@ bool Controller::powerUp(uint32_t partition, uint32_t clockSet, uint32_t resetSe
 // released, never asserted.
 bool Controller::powerOn(char *why, size_t whySize)
 {
-    if (r(mc, MC_SMMU_XUSB_HOST_ASID) & 0x80000000u) {
-        snprintf(why, whySize, "SMMU translation is on for XUSB_HOST (ASID %#x)", r(mc, MC_SMMU_XUSB_HOST_ASID));
+    const uint32_t asid = r(mc, TEGRA_SMMU_XUSB_HOST_ASID);
+    if (!xusb_host_asid_usable(asid, TEGRA_SMMU_ASID_XUSB_HOST)) {
+        snprintf(why, whySize, "XUSB_HOST is translated by another SMMU ASID (MC %#x = %#x)", TEGRA_SMMU_XUSB_HOST_ASID,
+                 asid);
         return false;
     }
     padctlUp();
@@ -370,25 +373,46 @@ unsigned Controller::otgPort()
     return usb2First;
 }
 
-bool Controller::cyclePortPower(unsigned port, uint32_t trace[3])
+unsigned Controller::ssPort()
+{
+    if (!isPowered)
+        return 0;
+    if (!usb3Count) {
+        const xhci_port_range usb3 = xhci_find_ports(&readCapability, (void *)regs, (uint32_t)kXhciBytes, 3);
+        usb3First = usb3.first;
+        usb3Count = usb3.count;
+    }
+    return xusb_ss_xhci_port(usb3First, usb3Count);
+}
+
+uint32_t Controller::portsc(unsigned port) const
+{
+    return xhci(xhci_portsc_offset(capLength(), port));
+}
+
+bool Controller::setPortPower(unsigned port, bool on, uint32_t trace[2])
 {
     const uint32_t at = xhci_portsc_offset(capLength(), port);
     trace[0] = xhci(at);
-    w(regs, at, xhci_portsc_power(trace[0], false));
-    bool off = false, on = false;
-    for (int i = 0; i < 100 && !off; ++i) {
-        off = !(xhci(at) & XHCI_PORTSC_PP);
-        if (!off)
+    w(regs, at, xhci_portsc_power(trace[0], on));
+    bool followed = false;
+    for (int i = 0; i < 100 && !followed; ++i) {
+        followed = ((xhci(at) & XHCI_PORTSC_PP) != 0) == on;
+        if (!followed)
             IODelay(10);
     }
     trace[1] = xhci(at);
-    w(regs, at, xhci_portsc_power(trace[1], true));
-    for (int i = 0; i < 100 && !on; ++i) {
-        on = xhci(at) & XHCI_PORTSC_PP;
-        if (!on)
-            IODelay(10);
-    }
-    trace[2] = xhci(at);
+    return followed;
+}
+
+bool Controller::cyclePortPower(unsigned port, uint32_t trace[3])
+{
+    uint32_t offTrace[2], onTrace[2];
+    const bool off = setPortPower(port, false, offTrace);
+    const bool on = setPortPower(port, true, onTrace);
+    trace[0] = offTrace[0];
+    trace[1] = offTrace[1];
+    trace[2] = onTrace[1];
     return off && on;
 }
 
@@ -417,9 +441,14 @@ void Controller::describePorts(char *buffer, size_t size)
         return;
     }
     const uint32_t op = capLength();
-    const unsigned ports = xhci(4) >> 24, pad = otgPort();
-    int n = snprintf(buffer, size, "xHCI USBCMD %#x USBSTS %#x, pad 0 = port %u (USB2 %u+%u); PORTSC", xhci(op),
-                     xhci(op + 4), pad, usb2First, usb2Count);
+    const unsigned ports = xhci(4) >> 24, pad = otgPort(), ss = ssPort();
+    const uint32_t padPortsc = pad ? portsc(pad) : 0, ssPortsc = ss ? portsc(ss) : 0;
+    int n = snprintf(buffer, size,
+                     "xHCI USBCMD %#x USBSTS %#x, pad 0 = port %u (USB2 %u+%u): %s %s, SS port 0 = port %u (USB3 "
+                     "%u+%u): %s %s; PORTSC",
+                     xhci(op), xhci(op + 4), pad, usb2First, usb2Count, xhci_portsc_link_name(padPortsc),
+                     xhci_portsc_speed_name(padPortsc), ss, usb3First, usb3Count, xhci_portsc_link_name(ssPortsc),
+                     xhci_portsc_speed_name(ssPortsc));
     for (unsigned port = 1; port <= ports && port <= 16 && n > 0 && (size_t)n < size; ++port) {
         n += snprintf(buffer + n, size - (size_t)n, " %u:%#x", port, xhci(xhci_portsc_offset(op, port)));
     }
@@ -466,9 +495,9 @@ bool Controller::sendMailbox(uint32_t cmd, uint32_t data)
     return false;
 }
 
-// tegra_xusb_mbox_thread + tegra_xusb_mbox_handle for T210B01 with USB 2.0 only (no SS clock scaling, no HSIC, no
-// SuperSpeed lane): the falcon clock is fixed (ACK only when it asks for the rate it has), SSPI scaling, DFE/CTLE
-// context and LFPS detection are acknowledged as is, SET_BW needs no answer.
+// tegra_xusb_mbox_thread + tegra_xusb_mbox_handle for T210B01 (no SS clock scaling, no HSIC): the falcon clock is
+// fixed (ACK only when it asks for the rate it has), SSPI scaling is acknowledged as is, SET_BW needs no answer, and
+// the SuperSpeed messages (SS port 0's LFPS detection, the DFE/CTLE context T210 cannot save) are XusbLanes.h's.
 bool Controller::serviceMailbox()
 {
     if (mailboxHang)
@@ -479,7 +508,6 @@ bool Controller::serviceMailbox()
         w(fpci, XUSB_CFG_ARU_MBOX_OWNER, MBOX_OWNER_NONE);
         return true;
     }
-#if SWITCH_USB_SUPERSPEED
     const xusb_mbox_ss ss = xusb_mbox_ss_decide(cmd, data);
     if (ss.handled) {
         if (ss.lfps)
@@ -490,7 +518,6 @@ bool Controller::serviceMailbox()
             IOLog("SwitchUSB: falcon mailbox reply %u to %u failed\n", ss.reply, cmd);
         return true;
     }
-#endif
     uint32_t reply = MBOX_ACK, replyData = data;
     switch (cmd) {
     case MBOX_INC_FALC_CLOCK:
@@ -500,11 +527,8 @@ bool Controller::serviceMailbox()
         break;
     case MBOX_INC_SSPI_CLOCK:
     case MBOX_DEC_SSPI_CLOCK:
-    case MBOX_SAVE_DFE_CTLE_CTX:
     case MBOX_START_HSIC_IDLE:
     case MBOX_STOP_HSIC_IDLE:
-    case MBOX_DISABLE_SS_LFPS_DETECTION:
-    case MBOX_ENABLE_SS_LFPS_DETECTION:
         break;
     default:
         IOLog("SwitchUSB: unknown XUSB falcon mailbox message %#x\n", message);
@@ -549,7 +573,6 @@ bool Controller::interruptSample(uint32_t &iman, uint32_t &usbcmd, uint32_t &usb
 
 }  // namespace xhost
 
-#if SWITCH_USB_SUPERSPEED
 bool switch_xusb_firmware_range(uint64_t *pa, uint64_t *bytes)
 {
     if (!xhost::gFirmware.va)
@@ -558,4 +581,3 @@ bool switch_xusb_firmware_range(uint64_t *pa, uint64_t *bytes)
     *bytes = xhost::gFirmware.size;
     return true;
 }
-#endif

@@ -29,21 +29,24 @@ filegroup(
 kernel_headers()
 
 # H264H7.videoencoder: AVE's stand-in, H.264 on NVENC as VideoToolbox's hardware 'avc1' encoder (registered once the
-# kernel published TegraNVENC; sessions open it where the process may), with the once-per-boot encode check
-# (EncodeCheck.c). The path is a slot of 21H461's VTLoadVideoEncoders list that the dyld cache does not fill.
+# kernel published TegraNVENC; sessions open it where the process may). The path is a slot of 21H461's VTLoadVideoEncoders list that the dyld cache does not fill.
 ios_binary(
     name = "AVE",
     srcs = [
         "AVE/AVEEncoder.c",
         "AVE/H264NVENC.c",
         "AVE/NVENCClient.c",
-        "AVE/EncodeCheck.c",
+        "//kits/SwitchRefusal:SwitchRefusal.c",
     ],
     out = "build/switch-video/H264H7.videoencoder",
     hdrs = glob(
         ["AVE/*.h"],
         allow_empty = True,
-    ) + ["//drivers/TegraNVENC:headers"] + ["//drivers/SwitchVideoDecoders:AVD/VTDecoderSPI.h"],
+    ) + [
+        "//drivers/SwitchVideoDecoders:AVD/VTDecoderSPI.h",
+        "//drivers/TegraNVENC:headers",
+        "//kits/SwitchRefusal:SwitchRefusal.h",
+    ],
     copts = [
         "-O2",
         "-Wall",

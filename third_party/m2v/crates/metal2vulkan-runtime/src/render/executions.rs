@@ -532,13 +532,14 @@ impl RenderCommandEncoder {
         // views: the current one where it is such an instance and no tile dispatch or memory
         // barrier follows it, else a new one, as a draw of such a pipeline records.
         let (next, stood) = self.next_instance(
-            (&[], None),
+            (&[], &[], None),
             (false, false),
             ViewSetup::default(),
             false,
             hidden,
             &[],
             &[],
+            false,
         )?;
         let continuation = match &next {
             Next::New { split: true, .. } => self.visibility.continuation(&device)?,
@@ -1596,10 +1597,7 @@ impl RenderCommandEncoder {
         let _ = crate::binding::make_neutrals(self.core.device(), &plan);
         let graphics = &variant.pipeline().graphics;
         let storage = self.storage_attachments(graphics)?;
-        let fetches = match self.layout.fetch_inputs {
-            true => !graphics.input_attachments.is_empty(),
-            false => !storage.is_empty(),
-        };
+        let fetches = !graphics.input_attachments.is_empty() || !storage.is_empty();
         let dynamic_strides = graphics
             .dynamic_states
             .contains(&metal2vulkan::vk::DynamicState::VERTEX_INPUT_BINDING_STRIDE);
@@ -2642,7 +2640,8 @@ impl DeferredPass {
                         let framed = framed_layout(own, framed);
                         let own = &*framed;
                         let pass = render_target::final_pass(device, own, shape, position)?;
-                        let framebuffer = render_target::framebuffer(device, &pass, own, views)?;
+                        let framebuffer =
+                            render_target::framebuffer(device, &pass, (own, shape), views)?;
                         let raw = (pass.raw, framebuffer.raw);
                         made.0.push(pass);
                         made.1.push(framebuffer);

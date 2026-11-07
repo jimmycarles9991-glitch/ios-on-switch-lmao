@@ -28,24 +28,36 @@ filegroup(
 kernel_headers()
 
 # SwitchThermal: fan curve, CPU operating point; SwitchPerfGovernor: the CPU's on-demand governor (perfcontrol callouts);
-# SwitchSensors: SOC_THERM and thermalmonitord's HID temperature sensors (drivers/SwitchPower/CONTRACT.md).
+# SwitchEMC: the EMC clock on demand (ACTMON); SwitchSensors: SOC_THERM and thermalmonitord's HID temperature sensors
+# (drivers/SwitchPower/CONTRACT.md); SwitchSocTherm: SOC_THERM's die groups and their threshold interrupt.
 kernel_driver(
     name = "SwitchThermal",
     srcs = [
         "SwitchThermal.cpp",
+        "SwitchEMC.cpp",
         "SwitchPerfGovernor.cpp",
+        "SwitchPowerStats.cpp",
         "SwitchSensors.cpp",
+        "SwitchSocTherm.cpp",
+        "SwitchVirtualTemps.cpp",
     ],
     hdr_deps = [
+        "diagnostics/switch",
+        "drivers/ArmGIC",
         "drivers/NativeMobileDisplay",
         "drivers/NativeSwitchBlock",
         "drivers/SwitchBattery",
         "drivers/SwitchSuspend",
         "drivers/SwitchTouch",
+        "drivers/TegraBPMP",
         "drivers/TegraDFLL",
         "drivers/TegraGM20B",
         "drivers/TegraGPIO",
         "drivers/TegraI2C",
+        "kits/SwitchCAR",
+        "kits/SwitchIdle",
+        "kits/SwitchMMIO",
+        "kits/SwitchRefusal",
     ],
 )
 
@@ -55,11 +67,15 @@ kernel_driver(
     srcs = [
         "SwitchPMIC.cpp",
         "SwitchPowerMark.cpp",
+        "SwitchMonotonicClock.cpp",
     ],
     hdr_deps = [
         "diagnostics/switch",
         "drivers/SwitchBrightness",
         "drivers/TegraBPMP",
         "drivers/TegraI2C",
+        "kits/SwitchCAR",
+        "kits/SwitchMMIO",
+        "kits/SwitchSysctl",
     ],
 )

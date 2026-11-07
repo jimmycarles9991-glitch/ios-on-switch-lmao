@@ -4,6 +4,7 @@
 #                    DisplayCreateWithID use them, a logged auto-brightness hold, the gain's steps through saturation
 #   als_source_test  TegraI2C.cpp's I2C2 row and pads, SwitchALS.cpp's BH1730FVC commands, the properties CoreBrightness
 #                    reads from SwitchHIDDevice.cpp and SwitchBacklight.cpp, SwitchBacklight::start's publishing order
+#   panel_steps_test TegraPanelSteps.h: a DCS command's frame-end and step-timer order, its deferrals and its settle times
 #
 #   bazel test //drivers/SwitchBrightness/test:all
 load("//bazel/lint:defs.bzl", "lint_files")
@@ -28,5 +29,13 @@ host_test(
         "//drivers/SwitchBrightness:SwitchBacklight.cpp",
         "//drivers/SwitchTouch:SwitchHIDDevice.cpp",
         "//drivers/TegraI2C:TegraI2C.cpp",
+    ],
+)
+
+host_test(
+    name = "panel_steps_test",
+    srcs = [
+        "panel_steps_test.cpp",
+        "//drivers/SwitchBrightness:TegraPanelSteps.h",
     ],
 )

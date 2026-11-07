@@ -1,0 +1,27 @@
+# kits/SwitchIdle's state choice over a 19.2 MHz model clock, and its hooks in both XNU trees.
+#
+#   bazel test //kits/SwitchIdle/test:all
+load("//bazel/lint:defs.bzl", "lint_files")
+load("//bazel/testing:defs.bzl", "host_test")
+
+lint_files()
+
+host_test(
+    name = "switch_idle_governor_test",
+    srcs = [
+        "switch_idle_governor_test.cpp",
+        "//kits/SwitchIdle:switch_idle_governor.h",
+    ],
+    data = [
+        "//kernel/xnu-10063.141.1/osfmk:arm/arm_init.c",
+        "//kernel/xnu-10063.141.1/osfmk:arm64/cpu.c",
+        "//kernel/xnu-12377.121.6/osfmk:arm/arm_init.c",
+        "//kernel/xnu-12377.121.6/osfmk:arm64/cpu.c",
+    ],
+    defines = [
+        'CPU_10063=\\"$(rootpath //kernel/xnu-10063.141.1/osfmk:arm64/cpu.c)\\"',
+        'INIT_10063=\\"$(rootpath //kernel/xnu-10063.141.1/osfmk:arm/arm_init.c)\\"',
+        'CPU_12377=\\"$(rootpath //kernel/xnu-12377.121.6/osfmk:arm64/cpu.c)\\"',
+        'INIT_12377=\\"$(rootpath //kernel/xnu-12377.121.6/osfmk:arm/arm_init.c)\\"',
+    ],
+)

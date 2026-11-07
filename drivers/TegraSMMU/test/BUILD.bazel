@@ -3,6 +3,7 @@
 #                             byte for byte against TegraVIC's original algorithm
 #   smmu_owner_source_test    only TegraSMMU.cpp programs the MC's global SMMU registers (reads every driver's C++)
 #   smmu_attachments_test     the swgroups tegra_smmu_resume programs again after SC7 (TegraSMMUAttachments.h)
+#   smmu_space_test           an engine's IOVA allocation (TegraSMMUSpace.h)
 load("//bazel/lint:defs.bzl", "lint_files")
 load("//bazel/testing:defs.bzl", "host_test")
 
@@ -15,6 +16,14 @@ host_test(
         "//drivers/TegraSMMU:TegraSMMUDomain.h",
     ],
     copts = ["-Wno-unused-parameter"],
+)
+
+host_test(
+    name = "smmu_space_test",
+    srcs = [
+        "smmu_space_test.cpp",
+        "//drivers/TegraSMMU:TegraSMMUSpace.h",
+    ],
 )
 
 host_test(

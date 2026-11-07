@@ -1,0 +1,99 @@
+{
+  "class": "IOSurfaceRootUserClient",
+  "kind": "24B119",
+  "size": "0x148",
+  "first_slot": 0,
+  "slots": 188,
+  "slide": "-0x4088000",
+  "layout": {},
+  "fields": {},
+  "constants": {
+    "clientCapacity": "0x110",
+    "clientTable": "0x108",
+    "clientTableLock": "0xd8",
+    "createOutputAllocSize": "0x20",
+    "createOutputSize": "0xc68",
+    "createOutputSurfaceID": "0x18",
+    "createSurfaceClientMemorySelector": "0x7",
+    "createSurfaceFastPathSelector": "0x6",
+    "createSurfaceSelector": "0x0",
+    "sharedClient": "0x118"
+  },
+  "addresses": {},
+  "found": {
+    "clientCapacity": "value shown by b9411009 at 0xfffffff009b0b2e8",
+    "clientTable": "value shown by f9408408 at 0xfffffff009b0b2f4",
+    "clientTableLock": "value shown by f9406c00 at 0xfffffff009b0b3f8",
+    "createOutputAllocSize": "value shown by f9001268 at 0xfffffff009af84ac",
+    "createOutputSize": "value shown by 52818d01 at 0xfffffff009af8488",
+    "createOutputSurfaceID": "value shown by b9001a68 at 0xfffffff009af84a4",
+    "createSurfaceClientMemorySelector": "value shown by 02b00d6c at 0xfffffff008040338",
+    "createSurfaceFastPathSelector": "value shown by 02b00d5c at 0xfffffff008040310",
+    "createSurfaceSelector": "value shown by 02b00b1c at 0xfffffff008040220",
+    "sharedClient": "value shown by f9408c09 at 0xfffffff009b0b388"
+  },
+  "hints": {
+    "constants": {
+      "clientCapacity": {
+        "value": "0x110",
+        "at": "0xfffffff009b0b2e8",
+        "word": "b9411009",
+        "why": "ldr w9, [x0, #0x110] in get_surface_client, 21H461 +0x108"
+      },
+      "clientTable": {
+        "value": "0x108",
+        "at": "0xfffffff009b0b2f4",
+        "word": "f9408408",
+        "why": "ldr x8, [x0, #0x108] in get_surface_client (0xfffffff009b0b2d4), 21H461 +0x100: entries are signed in Apple's binary (autda, the slot's address blended with 0xf69b), plain under our prelink; set_surface_handle (\"set_surface_handle\") stores into the same slot"
+      },
+      "clientTableLock": {
+        "value": "0xd8",
+        "at": "0xfffffff009b0b3f8",
+        "word": "f9406c00",
+        "why": "ldr x0, [x0, #0xd8] and then the lock call before get_surface_client, as in 21H461"
+      },
+      "createOutputAllocSize": {
+        "value": "0x20",
+        "at": "0xfffffff009af84ac",
+        "word": "f9001268",
+        "why": "str x8, [x19, #0x20] in the reply fill, x8 the surface's +0x90, as in 21H461"
+      },
+      "createOutputSize": {
+        "value": "0xc68",
+        "at": "0xfffffff009af8488",
+        "word": "52818d01",
+        "why": "mov w1, #0xc68: the reply fill (0xfffffff009af841c) zeroes the reply, as in 21H461"
+      },
+      "createOutputSurfaceID": {
+        "value": "0x18",
+        "at": "0xfffffff009af84a4",
+        "word": "b9001a68",
+        "why": "str w8, [x19, #0x18] in the reply fill, w8 the IOSurfaceClient's +0x38, as in 21H461"
+      },
+      "createSurfaceClientMemorySelector": {
+        "value": "0x7",
+        "at": "0xfffffff008040338",
+        "word": "02b00d6c",
+        "why": "entry 7, a chained pointer to 0xfffffff009b04d6c (2 scalars in, 0xc68 out) into 0xfffffff009b081d4 (IOSurfaceAddress, IOSurfaceAllocSize), which calls the reply fill, as in 21H461"
+      },
+      "createSurfaceFastPathSelector": {
+        "value": "0x6",
+        "at": "0xfffffff008040310",
+        "word": "02b00d5c",
+        "why": "entry 6, a chained pointer to 0xfffffff009b04d5c (a 0x20-byte structure in, 0xc68 out) into 0xfffffff009b07db0 (IOSurfaceAddress), which calls the reply fill, as in 21H461"
+      },
+      "createSurfaceSelector": {
+        "value": "0x0",
+        "at": "0xfffffff008040220",
+        "word": "02b00b1c",
+        "why": "entry 0 of the IOExternalMethodDispatch2022 table (0xfffffff008040220, 40-byte entries), a chained pointer to s_create_surface 0xfffffff009b04b1c (1 scalar, a variable structure in, 0xc68 out), which reaches the create core 0xfffffff009b06e1c and the reply fill 0xfffffff009af841c, as in 21H461"
+      },
+      "sharedClient": {
+        "value": "0x118",
+        "at": "0xfffffff009b0b388",
+        "word": "f9408c09",
+        "why": "ldr x9, [x0, #0x118] in get_surface_client, 21H461 +0x110: compared with the client's +0x10"
+      }
+    }
+  }
+}

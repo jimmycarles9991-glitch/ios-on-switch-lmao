@@ -660,6 +660,11 @@ def layout(args: argparse.Namespace) -> None:
 
 
 def join(args: argparse.Namespace) -> None:
+    """Stage the window and write what the loader compiles in.
+
+    constants.json holds all of it, layout.h's constants and runs.h's table (BLOCKS): a loader built elsewhere (the
+    release's) fits this window exactly when its constants.json is equal.
+    """
     plan = json.loads(args.plan.read_text())
     compressed = []
     for at, length in plan['blocks']:
@@ -676,7 +681,7 @@ def join(args: argparse.Namespace) -> None:
     args.layout_h.write_text(layout_header(constants))
     args.runs_h.write_text(runs_header(table))
     args.window.write_bytes(staged)
-    args.constants.write_text(json.dumps(constants, indent=1) + '\n')
+    args.constants.write_text(json.dumps(constants | {'BLOCKS': table}, indent=1) + '\n')
     print(f'kernel window {len(staged)} bytes in {len(table)} blocks, entry {plan["entry_pa"]:#x}')
 
 

@@ -315,7 +315,9 @@ impl ShaderBin {
                             post_depth_coverage: fs_info.post_depth_coverage,
                             uses_sample_shading: fs_info.uses_sample_shading,
                             early_fragment_tests: fs_info.early_fragment_tests,
-                            _pad: [0; 135],
+                            interlock_mode: fs_info.interlock_mode as u8,
+                            interlock_unordered: fs_info.interlock_unordered,
+                            _pad: [0; 133],
                         },
                     }
                 }

@@ -29,5 +29,5 @@ kernel_headers()
 
 kernel_driver(
     name = "ArmGIC",
-    hdr_deps = [],
+    hdr_deps = ["kits/SwitchIdle"],
 )

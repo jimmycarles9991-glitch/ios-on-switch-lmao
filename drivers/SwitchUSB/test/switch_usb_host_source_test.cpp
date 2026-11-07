@@ -127,3 +127,36 @@ TEST(SwitchUsbHostSource, HostFollowsSc7)
     EXPECT_LT(at(sleep, "gHost.powerOn("), at(sleep, "gHost.loadFirmware("));
     EXPECT_LT(at(sleep, "gHost.loadFirmware("), at(sleep, "xhost::MBOX_MSG_ENABLED"));
 }
+
+// SuperSpeed's lane and PCIe's UPHY PLL (kits/SwitchCAR/SwitchUPHY.h): PCIe announces "not ready" before powerUp holds
+// the UPHY in reset and "ready" only once its PLL has locked; SwitchUSB clamps on "not ready", reads the announcement
+// under its lane lock, marks the PLL lost before the lane at suspend and takes the lane up before the cable's root
+// ports, whose SuperSpeed one goes on before and off before the USB 2.0 one.
+TEST(SwitchUsbHostSource, SuperSpeedFollowsThePll)
+{
+    const std::string pcie = SourceText("../../SwitchWLAN/TegraPCIe.cpp");
+    const std::string bringUp = Body(pcie, "bool TegraPcie::bringUp(");
+    EXPECT_LT(at(bringUp, "switch_uphy_announce(false)"), at(bringUp, "powerUp(why, whyLength)"));
+    const std::string uphy = Body(pcie, "bool TegraPcie::uphy(");
+    EXPECT_EQ(Count(uphy, "switch_uphy_announce(true)"), 1u);
+    EXPECT_LT(at(uphy, "kCtl1Lockdet"), at(uphy, "switch_uphy_announce(true)"));
+    const std::string usb = SourceText("../SwitchUSB.cpp");
+    EXPECT_THAT(Body(usb, "void uphyChanged("), HasSubstr("switch_usb_ss_clamp()"));
+    const std::string suspend = Body(usb, "void switch_usb_suspend(");
+    EXPECT_LT(at(suspend, "switch_uphy_lost()"), at(suspend, "switch_usb_ss_lost()"));
+    const std::string apply = Body(usb, "void applyRole(");
+    const size_t start = at(apply, "switchxhci_start(");
+    EXPECT_LT(apply.find("followLane()", start), apply.find("switchxhci_cable(true)", start));
+    const std::string lane = Body(SourceText("../XusbSuperSpeed.cpp"), "bool switch_usb_ss_lane(");
+    EXPECT_LT(at(lane, "IOLockLock(gLock)"), at(lane, "switch_uphy_ready()"));
+    const std::string cable = Body(SourceText("../SwitchXHCIEvents.cpp"), "void switchxhci_cable(");
+    EXPECT_LT(at(cable, "followSuperSpeed(controller)"), at(cable, "xhost::forcePower(port, connected)"));
+}
+
+// After SC7 TegraSMMU has restored the host's own translation before the host comes back: the bring-up accepts it.
+TEST(SwitchUsbHostSource, BringUpAcceptsItsOwnSmmuAsid)
+{
+    const std::string power = Body(SourceText("../XusbHost.cpp"), "bool Controller::powerOn(");
+    EXPECT_THAT(power, HasSubstr("xusb_host_asid_usable(asid, TEGRA_SMMU_ASID_XUSB_HOST)"));
+    EXPECT_THAT(SourceText("../UsbSmmuMapper.cpp"), HasSubstr("kAsid = TEGRA_SMMU_ASID_XUSB_HOST"));
+}

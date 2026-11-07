@@ -59,6 +59,16 @@ static inline uint32_t tegra_host1x_op_imm(uint32_t offset, uint32_t value)
     return (4u << 28) | (offset << 16) | (value & 0xffff);
 }
 
+// WAIT_SYNCPT (host1x class method 8, Linux hw_host1x05_uclass.h host1x_uclass_wait_syncpt_r): the channel stalls until
+// syncpoint `id` reaches `threshold` (low 24 bits), so an engine's stream starts only after another engine's work.
+// Writes two words; the stream's next SETCLASS returns it to its engine.
+static inline uint32_t tegra_host1x_op_wait_syncpt(uint32_t *w, uint32_t id, uint32_t threshold)
+{
+    w[0] = tegra_host1x_op_setclass(TEGRA_HOST1X_CLASS_HOST1X, 8, 1);
+    w[1] = ((id & 0xff) << 24) | (threshold & 0xffffff);
+    return 2;
+}
+
 // INCR_SYNCPT (method 0 of every class: the engine's THI implements the host methods) with a condition.
 static inline uint32_t tegra_host1x_op_incr_syncpt(uint32_t cond, uint32_t syncpt)
 {
@@ -81,8 +91,18 @@ uint32_t tegra_host1x_syncpt_read(uint32_t id);
 int tegra_host1x_syncpt_wait(uint32_t id, uint32_t threshold, uint32_t timeoutUs);
 void tegra_host1x_set_strict(void);
 
-// Copies `count` opcode words into channel 0's push buffer and starts them. The stream must leave its syncpoint
+// Command DMA channels: VIC has its own, so a stream that waits for another engine (WAIT_SYNCPT) holds up only VIC;
+// the other engines share the default one.
+enum {
+    TEGRA_HOST1X_CHANNEL_DEFAULT = 0,
+    TEGRA_HOST1X_CHANNEL_VIC = 1,
+    TEGRA_HOST1X_CHANNELS = 2
+};
+
+// Copies `count` opcode words into a channel's push buffer and starts them. The stream must leave its syncpoint
 // increments to the caller's wait; `count` must be below 4096. Serialised; returns at once.
+int tegra_host1x_submit_on(uint32_t channel, const uint32_t *words, uint32_t count);
+// The same on the default channel.
 int tegra_host1x_submit(const uint32_t *words, uint32_t count);
 
 // Sleep (called through tegra_nvdec_suspend/resume below, after NVDEC has quiesced). Suspend saves the
@@ -101,7 +121,9 @@ void tegra_host1x_set_sleep_client(void (*suspend)(void), void (*resume)(void));
 void tegra_nvdec_suspend(void);
 void tegra_nvdec_resume(void);
 
-// Channel 0 state for a failure line: DMAGET, DMAPUT, CBSTAT (class and offset), CBREAD (last word).
+// A channel's state for a failure line: DMAGET, DMAPUT, CBSTAT (class and offset), CBREAD (last word).
+void tegra_host1x_describe_channel(uint32_t channel, char *buffer, size_t size);
+// The default channel's.
 void tegra_host1x_describe(char *buffer, size_t size);
 
 #ifdef __cplusplus

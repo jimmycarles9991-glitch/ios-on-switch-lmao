@@ -439,3 +439,25 @@ TEST(DisplayPlanes, LatchAgainstDcAModel)
 {
     testLatch();
 }
+
+// The alignment the display publishes suits every engine that reads a surface sized by it: window B's validation
+// (Limits), the GPU's in-place linear rows (128) and VIC's pitch (256). Core Animation's portrait UI at those rows is
+// accepted as the UI layer.
+TEST(DisplayPlanes, PublishedAlignmentSuitsEveryReader)
+{
+    const Limits limits;
+    EXPECT_EQ(kPublishedRowAlignment % limits.strideAlignment, 0u);
+    EXPECT_EQ(kPublishedBaseAlignment % limits.planeBaseAlignment, 0u);
+    EXPECT_EQ(kPublishedRowAlignment % 128, 0u);
+    EXPECT_EQ(kPublishedRowAlignment % 256, 0u);
+    EXPECT_EQ(kPublishedBaseAlignment % 256, 0u);
+    Layer layers[kLayers];
+    bool has[kLayers] = {};
+    layers[1] = uiLayer();
+    layers[1].surface.stride[0] = roundUp(W * 4, kPublishedRowAlignment);
+    layers[1].surface.allocation = (uint64_t)layers[1].surface.stride[0] * H;
+    layers[1].surface.descriptorBytes = (layers[1].surface.allocation + 16383) & ~16383ull;
+    has[1] = true;
+    EXPECT_EQ(layers[1].surface.stride[0], 3072u);
+    EXPECT_EQ(checkUpdated(2u | kBackgroundBit, kOpaqueBlack, has, layers, W, H, limits), (unsigned)kAccepted);
+}

@@ -2,7 +2,7 @@
 # unit over switch_wlan_msgbuf_stubs.h, against switch_wlan_msgbuf_test.cpp's model of the BCM4356's msgbuf firmware
 # (rings in the DMA area, indices in the chip's RAM, the mailbox interrupt), one process per scenario: a download's
 # every frame intact with its buffer back, one doorbell and about one chip-RAM index read per batch, an upload of 4000
-# frames with no drop, the handshake path, the 512 KiB fallback; and SwitchWLANLink.h's decoders.
+# frames with no drop, the handshake path, the 512 KiB fallback; SwitchWLANLink.h's decoders; and en0's data path.
 #
 #   bazel test //drivers/SwitchWLAN/test:all
 load("//bazel/lint:defs.bzl", "lint_files")
@@ -62,4 +62,53 @@ host_test(
     name = "switch_wlan_trace_test",
     srcs = ["switch_wlan_trace_test.cpp"],
     deps = [":trace"],
+)
+
+# en0's data path (SwitchWLANNet.cpp) against models of the radio's transmit buffers and IONetworkingFamily's queues.
+host_shims(
+    name = "net_kernel",
+    headers = [
+        "IOKit/IOLib.h",
+        "IOKit/IOLocks.h",
+        "IOKit/IOService.h",
+        "IOKit/IOWorkLoop.h",
+        "OriginalIOEthernetController.h",
+        "OriginalIOEthernetInterface.h",
+        "kern/clock.h",
+        "net/if.h",
+        "net/kpi_interface.h",
+        "sys/kernel_types.h",
+        "sys/mbuf.h",
+    ],
+    stubs = "switch_wlan_net_stubs.h",
+)
+
+host_library(
+    name = "net_headers",
+    hdrs = [
+        "//drivers/SwitchWLAN:SwitchWLANNet.h",
+        "//drivers/SwitchWLAN:SwitchWLANStation.h",
+        "//drivers/SwitchWLAN:SwitchWLANTrace.h",
+    ],
+)
+
+host_library(
+    name = "switch_wlan_net",
+    srcs = ["//drivers/SwitchWLAN:SwitchWLANNet.cpp"],
+    copts = ["-Wno-unused-parameter"],
+    deps = [
+        ":net_headers",
+        ":net_kernel",
+    ],
+)
+
+host_test(
+    name = "switch_wlan_net_test",
+    srcs = ["switch_wlan_net_test.cpp"],
+    copts = ["-Wno-unused-parameter"],
+    deps = [
+        ":net_headers",
+        ":net_kernel",
+        ":switch_wlan_net",
+    ],
 )

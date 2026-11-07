@@ -294,7 +294,10 @@ static id deviceForPort(unsigned port)
         // The render server compresses its framebuffer (an Apple/AGX layout this GPU does not write) unless told not to; the display driver takes plain rows.
         setenv("CA_DISABLE_FRAMEBUFFER_COMPRESSION", "1", 1);
         // The runtime's creation log reports each VkPipeline making's time to the device's sink, which the telemetry's V row sums.
+        // Debug builds only: it hashes each new variant's SPIR-V on a thread made for it.
+#if !defined(SWITCH_DEBUG) || SWITCH_DEBUG
         setenv("METAL2VULKAN_LOG_PIPELINES", "1", 0);
+#endif
         CFPreferencesSetAppValue(CFSTR("CAEnableFramebufferCompression"), kCFBooleanFalse,
                                  kCFPreferencesCurrentApplication);
         CFPreferencesSetAppValue(CFSTR("CAEnableIOSurfaceCompression"), kCFBooleanFalse,

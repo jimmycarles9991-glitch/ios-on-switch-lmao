@@ -6982,7 +6982,7 @@ sched_timeshare_maintenance_continue(void)
 	    sched_pri_shifts[TH_BUCKET_SHARE_UT], sched_pri_shifts[TH_BUCKET_SHARE_DF], 0);
 
 #if DEVELOPMENT || DEBUG
-	/* Switch: UI main thread stall reports (switch_stall.c) sample on this tick. */
+	/* Switch: UI main thread stall reports (kernel/switch/diag/stall.c) sample on this tick. */
 	extern void switch_stall_tick(uint64_t now);
 	switch_stall_tick(sched_tick_ctime);
 #endif

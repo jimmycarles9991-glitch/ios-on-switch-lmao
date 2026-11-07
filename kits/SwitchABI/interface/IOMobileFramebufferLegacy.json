@@ -121,10 +121,76 @@
       "mangled": "__ZN25IOMobileFramebufferLegacy20setDisplayPowerStateEPvb",
       "doc": "The power-state setter: change is {skipRequested, requested, skipPowered, powered, changed} (four uint32 and a byte); a word not skipped that differs is stored and the change is announced."
     },
-    "platformPipeForward": {
-      "decl": "virtual void platformPipeForward() = 0",
-      "pac": "_ZN25IOMobileFramebufferLegacy19platformPipeForwardEv",
-      "doc": "Apple's platform driver (UnifiedPipeline) forwards it to its display pipe backend. Only a platform display driver implements it, and nothing here should reach it."
+    "getGammaTable": {
+      "decl": "virtual IOReturn getGammaTable(void *table)",
+      "pac": "_ZN25IOMobileFramebufferLegacy13getGammaTableEPv",
+      "mangled": "__ZN25IOMobileFramebufferLegacy13getGammaTableEPv",
+      "doc": "Selector 27: the 3x257 gamma table out (0xc0c bytes). The family answers kIOReturnUnsupported."
+    },
+    "setGammaTable": {
+      "decl": "virtual IOReturn setGammaTable(const void *table)",
+      "pac": "_ZN25IOMobileFramebufferLegacy13setGammaTableEPKv",
+      "mangled": "__ZN25IOMobileFramebufferLegacy13setGammaTableEPKv",
+      "doc": "Selector 17: a 3x257 gamma table in (0xc0c bytes). The family answers kIOReturnUnsupported."
+    },
+    "getMatrix": {
+      "decl": "virtual IOReturn getMatrix(uint32_t location, void *matrix)",
+      "pac": "_ZN25IOMobileFramebufferLegacy9getMatrixEjPv",
+      "mangled": "__ZN25IOMobileFramebufferLegacy9getMatrixEjPv",
+      "doc": "Selector 54: a 3x3 S31.32 matrix out (0x48 bytes) for a pipe location; QuartzCore asks for 0x100 and takes identity when refused. The family answers kIOReturnUnsupported."
+    },
+    "setMatrix": {
+      "decl": "virtual IOReturn setMatrix(uint32_t location, const void *matrix)",
+      "pac": "_ZN25IOMobileFramebufferLegacy9setMatrixEjPKv",
+      "mangled": "__ZN25IOMobileFramebufferLegacy9setMatrixEjPKv",
+      "doc": "Selector 55: a 3x3 S31.32 matrix (0x48 bytes) for a pipe location; QuartzCore sends True Tone and Night Shift at location 9. The family answers kIOReturnUnsupported."
+    },
+    "setContrast": {
+      "decl": "virtual IOReturn setContrast(const void *contrast)",
+      "pac": "_ZN25IOMobileFramebufferLegacy11setContrastEPKv",
+      "mangled": "__ZN25IOMobileFramebufferLegacy11setContrastEPKv",
+      "doc": "Selector 84: a float (the 4-byte structure input), CADisplay's contrast. The family answers kIOReturnUnsupported; AppleCLCD always succeeds."
+    },
+    "setColorRemapMode": {
+      "decl": "virtual IOReturn setColorRemapMode(uint32_t mode)",
+      "pac": "_ZN25IOMobileFramebufferLegacy17setColorRemapModeEj",
+      "mangled": "__ZN25IOMobileFramebufferLegacy17setColorRemapModeEj",
+      "doc": "Selector 51, and the family's white-on-black (selector 19: 1 or 0): QuartzCore sends grayscale ? (inverted ? 4 : 3) : inverted. The family answers kIOReturnUnsupported; AppleCLCD takes 0-4 and refuses the rest with kIOReturnBadArgument."
+    },
+    "getColorRemapMode": {
+      "decl": "virtual IOReturn getColorRemapMode(uint32_t *mode)",
+      "pac": "_ZN25IOMobileFramebufferLegacy17getColorRemapModeEPj",
+      "mangled": "__ZN25IOMobileFramebufferLegacy17getColorRemapModeEPj",
+      "doc": "Selector 57. The family writes 6 and answers kIOReturnUnsupported; AppleCLCD gives the current mode."
+    },
+    "setBrightnessCorrection": {
+      "decl": "virtual IOReturn setBrightnessCorrection(uint32_t correction)",
+      "pac": "_ZN25IOMobileFramebufferLegacy23setBrightnessCorrectionEj",
+      "mangled": "__ZN25IOMobileFramebufferLegacy23setBrightnessCorrectionEj",
+      "doc": "Selector 50's first scalar: a 16.16 luminance factor QuartzCore sends with each True Tone matrix. The family answers kIOReturnUnsupported."
+    },
+    "swapSetColorMatrix": {
+      "decl": "virtual IOReturn swapSetColorMatrix(const void *matrix, uint32_t location, uint32_t flags)",
+      "pac": "_ZN25IOMobileFramebufferLegacy18swapSetColorMatrixEPKvjj",
+      "mangled": "__ZN25IOMobileFramebufferLegacy18swapSetColorMatrixEPKvjj",
+      "doc": "Selector 69: pre-offsets, 3x3, post-offsets (15 S31.32 words) or null for identity; QuartzCore sends the accessibility matrix at location 2, flags 0, offsets 0. The family answers kIOReturnUnsupported."
+    },
+    "setAccessibilityScale": {
+      "decl": "virtual IOReturn setAccessibilityScale(uint32_t scale)",
+      "pac": "_ZN25IOMobileFramebufferLegacy21setAccessibilityScaleEj",
+      "mangled": "__ZN25IOMobileFramebufferLegacy21setAccessibilityScaleEj",
+      "doc": "SetParameter 3 (selector 68), which QuartzCore sends after its accessibility matrix: a 16.16 scale, Reduce White Point's. The family answers kIOReturnUnsupported."
+    },
+    "setDisplayTemperature": {
+      "decl": "virtual IOReturn setDisplayTemperature(const uint32_t *temperatures)",
+      "pac": "_ZN25IOMobileFramebufferLegacy21setDisplayTemperatureEPKj",
+      "mangled": "__ZN25IOMobileFramebufferLegacy21setDisplayTemperatureEPKj",
+      "doc": "SetParameter 0 (selector 68, four values), run on the work-loop gate: thermalmonitord's TSFD, the display's temperature in 16.16 degrees C four times (the family keeps each value's low 32 bits). J120's AppleCLCD averages them into its LCD's temperature compensation and pixel response compensation. The family answers kIOReturnUnsupported."
+    },
+    "changeFrameInfo": {
+      "decl": "virtual IOReturn changeFrameInfo(uint32_t type, void *client, uint32_t mask) = 0",
+      "pac": "_ZN25IOMobileFramebufferLegacy15changeFrameInfoEjPvj",
+      "doc": "ChangeFrameInfo (selector 73: the notification type, 3, and the keys a client wants, one bit per supportedFrameInfo index), under the work-loop gate; client is the family's notification record. J120's AppleCLCD forwards it to its pipe, which keeps the client's mask and answers kIOReturnBadArgument for any other type."
     },
     "platformInternalPlug": {
       "decl": "virtual void platformInternalPlug() = 0",
@@ -136,15 +202,15 @@
       "pac": "_ZN25IOMobileFramebufferLegacy22platformInternalUnplugEv",
       "doc": "The internal display plug pair's second; UnifiedPipeline answers kIOReturnUnsupported. Only a platform display driver implements it, and nothing here should reach it."
     },
-    "platformColorRemap": {
-      "decl": "virtual void platformColorRemap() = 0",
-      "pac": "_ZN25IOMobileFramebufferLegacy18platformColorRemapEv",
-      "doc": "Reached with get_color_remap_mode; UnifiedPipeline forwards it to its display pipe backend. Only a platform display driver implements it, and nothing here should reach it."
+    "platformFrameInfoNotify": {
+      "decl": "virtual void platformFrameInfoNotify(void *client, bool enable) = 0",
+      "pac": "_ZN25IOMobileFramebufferLegacy23platformFrameInfoNotifyEPvb",
+      "doc": "The frame-info notification (EnableNotifications type 3, selector 72) of one client turning on, and off again when it is disabled or the client goes away; the caller ignores what it returns. UnifiedPipeline forwards it to its display pipe, which then sends the client the keys supportedFrameInfo published at each frame."
     },
-    "platformHotPlug": {
-      "decl": "virtual void platformHotPlug() = 0",
-      "pac": "_ZN25IOMobileFramebufferLegacy15platformHotPlugEv",
-      "doc": "Reached from hotPlug_notify_gated; UnifiedPipeline forwards it to its display pipe backend. Only a platform display driver implements it, and nothing here should reach it."
+    "sendFrameInfo": {
+      "decl": "virtual IOReturn sendFrameInfo(void *client, const void *frame) = 0",
+      "pac": "_ZN25IOMobileFramebufferLegacy13sendFrameInfoEPvPKv",
+      "doc": "One frame-info client's entry for a present: native_legacy_frame_info_notify calls it, gated, for every record on the type 3 list with the frame it was given. 21H461's caller logs a nonzero return as a dropped message; J120's AppleCLCD sends nothing to a client with no keys."
     },
     "platformRefreshRates": {
       "decl": "virtual void platformRefreshRates() = 0",
@@ -226,12 +292,29 @@
     },
     "vsyncClientList": {
       "doc": "The framebuffer's vsync client list head (a pointer): set while a client wants vsync messages; native_legacy_vsync_notify walks it."
+    },
+    "swapId": {
+      "doc": "A request's swap id (uint32), the one SwapBegin gave the client: the completion path stores it in swapsCompleted."
+    },
+    "swapRequestedPresentation": {
+      "doc": "A request's presentation target (uint64 mach time): SwapSetTimestamps type 1, which QuartzCore sets to the vsync it renders for (the IOSurface display-presentation time)."
+    },
+    "frameInfoClientOwner": {
+      "doc": "A notification record's user client (a pointer): its shared data queue for type 3 is what native_legacy_frame_info_enqueue fills."
     }
   },
   "functions": {
     "native_legacy_vsync_notify": {
       "decl": "void native_legacy_vsync_notify(void *display, uint64_t timestamp, uint64_t continuousTime, uint64_t interval)",
       "doc": "The family's vsync message sender (IOMobileFramebufferLegacy's own): every client on vsyncClients gets the vsync message; a 0 continuous time or interval is filled in from the framebuffer."
+    },
+    "native_legacy_frame_info_notify": {
+      "decl": "void native_legacy_frame_info_notify(void *display, const void *frame)",
+      "doc": "The family's frameInfo_notify: under the work-loop gate (recursive from the work loop), sendFrameInfo(record, frame) for every client on the type 3 notification list, then a hook that does nothing in the family."
+    },
+    "native_legacy_frame_info_enqueue": {
+      "decl": "IOReturn native_legacy_frame_info_enqueue(void *userClient, const void *entry, uint32_t bytes)",
+      "doc": "IOMobileFramebufferUserClient's frame-info enqueue: one entry on the client's type 3 IOSharedDataQueue (0x1040 bytes, made for every client), which notifies the client's port when it was empty; kIOReturnNoSpace when full (24B119 panics instead if the client asked for that). 0 without a queue."
     }
   }
 }

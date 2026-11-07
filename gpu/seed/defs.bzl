@@ -1,7 +1,7 @@
 """The shader cache seed: what the host tools (tools.bzl) make from the IPSW's Metal libraries on the Mac that composes
 the image.
 
-  shader_crawl   every Metal library of the IPSW kind's volume images (crawl.py)
+  shader_crawl   the IPSW kind's crawled libraries (crawl.bzl crawls them once, in a repository) and their names
   metal_seed     resolve the corpus, plan the buckets, one precompile action per bucket, join their indexes
   seed_raw_pack  the raw GM20B path's pipeline pack, from Core Animation's corpus lines
   seed_tree      the seed and the raw pack laid out as the Data volume holds them (the image builder's)
@@ -12,6 +12,7 @@ switching --config=ios27 on and off reuses both instead of overwriting one with 
 
 load("@bazel_skylib//rules:common_settings.bzl", "BuildSettingInfo")
 load("//ipsw:ipsw.bzl", "IpswInfo")
+load(":crawl.bzl", "QUARTZCORE")
 load(":tools.bzl", "seed_tool_files")
 
 _DARWIN = {"no-remote-exec": "1", "requires-darwin": ""}
@@ -26,7 +27,11 @@ def _repo_root(files):
 
 CrawlInfo = provider(
     doc = "A crawl of the IPSW's images: the library tree (root/, data/) and the QuartzCore library in it.",
-    fields = {"tree": "the directory artifact", "qc": "QuartzCore's default.metallib, as a path below the tree"},
+    fields = {
+        "files": "depset: every file of the tree",
+        "root": "the tree's directory, which holds root/ and data/",
+        "qc": "QuartzCore's default.metallib",
+    },
 )
 
 SeedInfo = provider(
@@ -37,45 +42,34 @@ SeedInfo = provider(
     },
 )
 
-_QC = "root/System/Library/Frameworks/QuartzCore.framework/default.metallib"
-
 def _shader_crawl_impl(ctx):
-    tree = ctx.actions.declare_directory(_named(ctx, ""))
-    inventory = ctx.actions.declare_file(_named(ctx, ".inventory.json"))
+    qc = ctx.file.qc
+    if not qc.path.endswith("/" + QUARTZCORE):
+        fail("qc must be the tree's " + QUARTZCORE)
+    root = qc.path.removesuffix("/" + QUARTZCORE)
+    files = depset(ctx.files.tree)
     names = ctx.actions.declare_file(_named(ctx, ".names.json"))
-    args = ctx.actions.args()
-    args.add_all(ctx.files.images, before_each = "--image")
-    args.add("--out", tree.path)
-    args.add("--inventory", inventory)
-    ctx.actions.run(
-        executable = ctx.executable._crawl,
-        arguments = [args],
-        inputs = ctx.files.images,
-        outputs = [tree, inventory],
-        mnemonic = "ShaderCrawl",
-        progress_message = "Crawling the IPSW's images for Metal libraries",
-        execution_requirements = _DARWIN,
-    )
     ctx.actions.run(
         executable = ctx.executable._libraries,
-        arguments = ["names", tree.path + "/root", names.path],
-        inputs = [tree],
+        arguments = ["names", root + "/root", names.path],
+        inputs = files,
         outputs = [names],
         mnemonic = "M2vLibraryNames",
         progress_message = "Indexing the crawled libraries' function names",
     )
     return [
-        DefaultInfo(files = depset([tree, inventory])),
-        CrawlInfo(tree = tree, qc = _QC),
-        OutputGroupInfo(names = depset([names]), inventory = depset([inventory])),
+        DefaultInfo(files = depset([ctx.file.inventory], transitive = [files])),
+        CrawlInfo(files = files, root = root, qc = qc),
+        OutputGroupInfo(names = depset([names]), inventory = depset([ctx.file.inventory])),
     ]
 
 shader_crawl = rule(
     implementation = _shader_crawl_impl,
-    doc = "Every Metal library of the images (the OS volume, then the cryptexes grafted over it), and an inventory.",
+    doc = "The IPSW kind's crawled Metal libraries (@ipsw//:crawl_*, crawl.bzl), and the names of their functions.",
     attrs = _IPSW | {
-        "images": attr.label_list(mandatory = True, allow_files = True, doc = "@ipsw//:os, :system_cryptex, :app_cryptex"),
-        "_crawl": attr.label(default = "//tools/gpu/shaders:crawl", executable = True, cfg = "exec"),
+        "tree": attr.label(mandatory = True, allow_files = True, doc = "every file below the tree (root/, data/)"),
+        "qc": attr.label(mandatory = True, allow_single_file = True, doc = "the tree's QuartzCore default.metallib"),
+        "inventory": attr.label(mandatory = True, allow_single_file = [".json"], doc = "the crawl's inventory.json"),
         "_libraries": attr.label(default = "//drivers/TegraGM20BMetal:libraries", executable = True, cfg = "exec"),
     },
 )
@@ -87,10 +81,10 @@ def _plan(ctx, crawl, corpus):
     report = ctx.actions.declare_file(_named(ctx, "_plan/plan.json"))
     args = ctx.actions.args()
     args.add("--corpus", corpus)
-    args.add("--root", crawl.tree.path + "/root")
-    args.add("--data-dir", crawl.tree.path + "/data")
+    args.add("--root", crawl.root + "/root")
+    args.add("--data-dir", crawl.root + "/data")
     args.add_all(ctx.files.device_libraries, before_each = "--data")
-    args.add("--qc", crawl.tree.path + "/" + crawl.qc)
+    args.add("--qc", crawl.qc)
     args.add("--qc-sha256", ctx.attr.ipsw[IpswInfo].derived["quartzcore_metallib_sha256"])
     args.add("--depth", ctx.attr.depth[BuildSettingInfo].value)
     args.add("--buckets", buckets[0].dirname)
@@ -100,7 +94,7 @@ def _plan(ctx, crawl, corpus):
     ctx.actions.run(
         executable = ctx.executable._plan,
         arguments = [args],
-        inputs = depset([corpus, crawl.tree] + ctx.files.device_libraries),
+        inputs = depset([corpus] + ctx.files.device_libraries, transitive = [crawl.files]),
         outputs = buckets + [store, report],
         mnemonic = "MetalSeedPlan",
         progress_message = "Planning the shader seed's buckets",
@@ -112,13 +106,47 @@ def _precompile_args(ctx, tools, crawl, store, lines, out):
     args.add("--precompile", tools.precompile)
     args.add("--mock", tools.mock)
     args.add("--nvk", tools.twin)
-    args.add("--root", crawl.tree.path + "/root")
+    args.add("--root", crawl.root + "/root")
     args.add("--store", store)
     args.add_all(ctx.files.embedded, before_each = "--embedded")
-    args.add("--qc", crawl.tree.path + "/" + crawl.qc)
+    args.add("--qc", crawl.qc)
     args.add("--lines", lines)
     args.add("--out", out)
     return args
+
+def _bucket(ctx, number, tools, crawl, store, lines, inputs):
+    """One bucket's compile; returns its pack, index and report."""
+    out = ctx.actions.declare_file(_named(ctx, "_buckets/{}.pack".format(_three(number))))
+    index = ctx.actions.declare_file(_named(ctx, "_buckets/{}.index".format(_three(number))))
+    report = ctx.actions.declare_file(_named(ctx, "_buckets/{}.json".format(_three(number))))
+    outputs = [out, index, report]
+    args = _precompile_args(ctx, tools, crawl, store, lines, out)
+    if ctx.attr.depth[BuildSettingInfo].value == "deep":
+        args.add("--guess-dispatch")
+    args.add("--index", index)
+    args.add("--report", report)
+
+    # What NAK and NVK make of a bucket's programs is a function of NVK's compiler identity, which the twin's .source
+    # names (gpu/nvk: the hash NVK puts in its pipeline cache UUID): the action is keyed on that, and the twin, whose
+    # bytes every NVK edit changes, is an input it reports unused, so an edit outside the compiler reruns no bucket.
+    unused = None
+    if tools.nvk_identity:
+        unused = ctx.actions.declare_file(_named(ctx, "_buckets/{}.unused".format(_three(number))))
+        args.add("--unused-list", unused)
+        args.add("--unused", tools.twin)
+        outputs.append(unused)
+    ctx.actions.run(
+        executable = ctx.executable._precompile,
+        arguments = [args],
+        inputs = inputs,
+        outputs = outputs,
+        unused_inputs_list = unused,
+        mnemonic = "MetalSeedBucket",
+        progress_message = "Precompiling shader seed bucket {} of {}".format(number + 1, ctx.attr.buckets),
+        execution_requirements = _DARWIN,
+        resource_set = _bucket_resources,
+    )
+    return out, index, report
 
 def _metal_seed_impl(ctx):
     crawl = ctx.attr.crawl[CrawlInfo]
@@ -138,26 +166,18 @@ def _metal_seed_impl(ctx):
 
     # A bucket's compile reads its lines, the libraries and the three tools that make code (the precompile tool with
     # the frontend and m2v in it, its mock IOKit, the NVK twin): never the plugin, the corpus or the rest of the tools.
-    compile_inputs = [store, crawl.tree, tools.precompile, tools.mock, tools.twin] + ctx.files.device_libraries + ctx.files.embedded
+    tool_files = [store, tools.precompile, tools.mock, tools.twin] + ([tools.nvk_identity] if tools.nvk_identity else [])
+    compile_inputs = depset(tool_files + ctx.files.device_libraries + ctx.files.embedded, transitive = [crawl.files])
     packs, indexes, reports = [], [], []
     for i, bucket_lines in enumerate(lines):
-        out = ctx.actions.declare_file(_named(ctx, "_buckets/{}.pack".format(_three(i))))
-        index = ctx.actions.declare_file(_named(ctx, "_buckets/{}.index".format(_three(i))))
-        bucket_report = ctx.actions.declare_file(_named(ctx, "_buckets/{}.json".format(_three(i))))
-        args = _precompile_args(ctx, tools, crawl, store, bucket_lines, out)
-        if ctx.attr.depth[BuildSettingInfo].value == "deep":
-            args.add("--guess-dispatch")
-        args.add("--index", index)
-        args.add("--report", bucket_report)
-        ctx.actions.run(
-            executable = ctx.executable._precompile,
-            arguments = [args],
-            inputs = depset([bucket_lines] + compile_inputs),
-            outputs = [out, index, bucket_report],
-            mnemonic = "MetalSeedBucket",
-            progress_message = "Precompiling shader seed bucket {} of {}".format(i + 1, len(lines)),
-            execution_requirements = _DARWIN,
-            resource_set = _bucket_resources,
+        out, index, bucket_report = _bucket(
+            ctx,
+            i,
+            tools,
+            crawl,
+            store,
+            bucket_lines,
+            depset([bucket_lines], transitive = [compile_inputs]),
         )
         packs.append(out)
         indexes.append(index)
@@ -170,7 +190,6 @@ def _metal_seed_impl(ctx):
     args.add_all(reports, before_each = "--report")
     if ctx.files.records:
         args.add("--records", _repo_root(ctx.files.records) + "/records")
-    args.add("--tools-manifest", tools.manifest)
     args.add("--ipsw", ctx.attr.ipsw[IpswInfo].build)
     args.add("--plan", report)
     args.add("--inventory", inventory)
@@ -178,7 +197,7 @@ def _metal_seed_impl(ctx):
     ctx.actions.run(
         executable = ctx.executable._merge,
         arguments = [args],
-        inputs = depset(indexes + reports + [tools.manifest, report, inventory] + ctx.files.records),
+        inputs = depset(indexes + reports + [report, inventory] + ctx.files.records),
         outputs = [meta],
         mnemonic = "MetalSeedJoin",
         progress_message = "Joining the shader seed's bucket indexes",
@@ -213,7 +232,7 @@ def _metal_seed_impl(ctx):
     ctx.actions.run(
         executable = ctx.executable._precompile,
         arguments = [args],
-        inputs = depset([corpus, meta] + packs + compile_inputs),
+        inputs = depset([corpus, meta] + packs, transitive = [compile_inputs]),
         outputs = [verify, verify_index, verify_report],
         mnemonic = "MetalSeedVerify",
         progress_message = "Replaying the shader corpus over the seed",
@@ -256,11 +275,26 @@ metal_seed = rule(
     },
 )
 
+# rawpack.py's BUCKETS: the split writes this many bucket corpora, each probed by its own action.
+_RAW_BUCKETS = 16
+
+# The generator's modules each step runs (rawpack.py imports or runs them by path, beside it).
+_RAW_SPLIT = ["rawpack.py", "ca/caset.py", "ca/caspec.py"]
+_RAW_PROBE = ["rawpack.py", "mkprograms.py", "nvkshader.py", "probelog.py"]
+_RAW_LINK = ["rawpack.py", "mkpack.py", "layouts.py", "packfile.py", "probelog.py"]
+
+def _generator_files(ctx, names):
+    here = ctx.file.generator.dirname + "/"
+    files = [f for f in ctx.files.srcs if f.path.removeprefix(here) in names]
+    if len(files) != len(names):
+        fail("the raw pack generator's srcs lack some of " + ", ".join(names))
+    return files
+
 def _seed_raw_pack_impl(ctx):
-    tree = ctx.file.generator.dirname.partition("drivers/TegraGM20BMetal/")[0].rstrip("/") or "."
     tools = seed_tool_files(ctx.attr.tools)
     crawl = ctx.attr.crawl[CrawlInfo]
-    lines = ctx.actions.declare_file(_named(ctx, "_corpus.log"))
+    qc = [crawl.qc]
+    lines = ctx.actions.declare_file(_named(ctx, "_work/corpus.log"))
     ctx.actions.run(
         executable = ctx.executable._tool,
         arguments = ["corpus", "--corpus", ctx.file.corpus.path, "--out", lines.path],
@@ -269,37 +303,93 @@ def _seed_raw_pack_impl(ctx):
         mnemonic = "MetalRawCorpus",
         progress_message = "Picking the raw pack's corpus lines",
     )
+
+    # QuartzCore's tables (ca/qc-<build>.json) make Core Animation's states from their names.
+    tables = [f for f in ctx.files.srcs if f.dirname.endswith("/ca") and f.extension == "json"]
+    corpora = [ctx.actions.declare_file(_named(ctx, "_work/split/bucket{}.log".format(i))) for i in range(_RAW_BUCKETS)]
+    args = ctx.actions.args()
+    args.add("split")
+    args.add("--generator", ctx.file.generator)
+    args.add("--qc", crawl.qc)
+    args.add("--corpus", lines)
+    args.add_all("--out", corpora)
+    ctx.actions.run(
+        executable = ctx.executable._tool,
+        arguments = [args],
+        inputs = depset([lines] + qc + tables + _generator_files(ctx, _RAW_SPLIT)),
+        outputs = corpora,
+        mnemonic = "MetalRawSplit",
+        progress_message = "Splitting the raw pack's states into buckets",
+    )
+
+    probe_inputs = [tools.twin] + tools.raw + qc + _generator_files(ctx, _RAW_PROBE)
+    buckets = []
+    for i, bucket_corpus in enumerate(corpora):
+        # rawpack.py knows a bucket by its directory's name (bucket0 also draws the raw path's own states).
+        bucket = ctx.actions.declare_directory(_named(ctx, "_work/bucket{}".format(i)))
+        args = ctx.actions.args()
+        args.add("probe")
+        args.add("--generator", ctx.file.generator)
+        args.add("--raw", tools.raw_dir)
+        args.add("--nvk", tools.twin)
+        args.add("--qc", crawl.qc)
+        args.add("--lines", bucket_corpus)
+        args.add("--out", bucket.path)
+        ctx.actions.run(
+            executable = ctx.executable._tool,
+            arguments = [args],
+            inputs = depset([bucket_corpus] + probe_inputs),
+            outputs = [bucket],
+            mnemonic = "MetalRawProbe",
+            progress_message = "Probing the raw pack's bucket {} of {}".format(i + 1, _RAW_BUCKETS),
+            execution_requirements = _DARWIN,
+        )
+        buckets.append(bucket)
+
+    linked = ctx.actions.declare_directory(_named(ctx, "_work/linked"))
+    args = ctx.actions.args()
+    args.add("link")
+    args.add("--generator", ctx.file.generator)
+    args.add("--out", linked.path)
+    args.add_all(buckets, expand_directories = False)
+    ctx.actions.run(
+        executable = ctx.executable._tool,
+        arguments = [args],
+        inputs = depset(buckets + _generator_files(ctx, _RAW_LINK)),
+        outputs = [linked],
+        mnemonic = "MetalRawLink",
+        progress_message = "Linking the raw GM20B path's pipeline pack",
+    )
+
     out = ctx.actions.declare_directory(_named(ctx, ""))
     args = ctx.actions.args()
-    args.add("run")
-    args.add("--nvk", tools.twin)
-    args.add("--raw", tools.raw_dir)
-    args.add("--manifest", tools.manifest)
-    args.add("--qc", crawl.tree.path + "/" + crawl.qc)
-    args.add("--corpus", lines)
+    args.add("stamp")
     args.add("--generator", ctx.file.generator)
-    args.add("--tree", tree)
+    args.add("--pack", linked.path + "/pack.bin")
+    args.add("--manifest", tools.manifest)
     args.add("--out", out.path)
     ctx.actions.run(
         executable = ctx.executable._tool,
         arguments = [args],
-        inputs = depset([crawl.tree, lines, ctx.file.generator, tools.twin, tools.manifest] + tools.raw + ctx.files.srcs),
+        inputs = [linked, tools.manifest, ctx.file.generator],
         outputs = [out],
-        mnemonic = "MetalRawPack",
-        progress_message = "Making the raw GM20B path's pipeline pack",
-        execution_requirements = _DARWIN,
+        mnemonic = "MetalRawStamp",
+        progress_message = "Stamping the raw pack with the tools' stack key",
     )
-    return [DefaultInfo(files = depset([out]))]
+    return [
+        DefaultInfo(files = depset([out])),
+        OutputGroupInfo(report = depset([linked]), buckets = depset(buckets)),
+    ]
 
 seed_raw_pack = rule(
     implementation = _seed_raw_pack_impl,
-    doc = "The raw GM20B path's pipeline pack: Core Animation's corpus states through the tools' probe over the mock GM20B.",
+    doc = "The raw GM20B path's pipeline pack: Core Animation's corpus states probed per bucket over the mock GM20B, linked, stamped.",
     attrs = _IPSW | {
         "tools": attr.label(mandatory = True),
         "crawl": attr.label(mandatory = True, providers = [CrawlInfo]),
         "corpus": attr.label(mandatory = True, allow_single_file = True),
         "generator": attr.label(mandatory = True, allow_single_file = True, doc = "raw/pack/rawpack.py"),
-        "srcs": attr.label_list(allow_files = True, doc = "the generator's Python modules"),
+        "srcs": attr.label_list(allow_files = True, doc = "the generator's modules and QuartzCore tables (raw/pack)"),
         "_tool": attr.label(default = "//tools/gpu:rawpack", executable = True, cfg = "exec"),
     },
 )

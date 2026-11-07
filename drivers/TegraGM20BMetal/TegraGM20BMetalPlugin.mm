@@ -26,14 +26,18 @@
 //   TEGRA_M2V_CACHE_DIR       the shader cache directory instead of the search below; "memory" for none
 //   NMB_MEMO_MB=<MiB>         the runtime's memo of compiled pipelines (default 32 outside backboardd, the runtime's 256 in it)
 //   M2V_BLOCK_MIB=<MiB>       the largest pooled memory block (default 4 outside backboardd, 16 in it: each process keeps one
-//                             in three pools, mapped whole and charged to it; each block is one BoAlloc on the thread that ran
-//                             out of room)
+//                             in three pools, the first a quarter of it, at least 1 MiB, mapped whole and charged to it; each
+//                             block is one BoAlloc on the thread that ran out of room, and goes back to the kernel once empty
+//                             and the GPU idle, or on a memory warning: GpuMemoryRelease.h)
+//   NMB_IDLE_RELEASE_MS=<ms>  idle GPU memory goes back to the kernel once the GPU idled this long (default 1000 outside
+//                             backboardd, 0 in it: on memory warnings alone)
 //   NMB_CACHE_MB=<MiB>        the shader cache directory's cap (default 256; the runtime's is 25 GiB)
 //   NMB_ANSWER_CACHE=0        ask the runtime every device question again (default: keep each answer)
 //   NMB_REFUSE_REBINDS=0      encoders log their calls for rebinds again (default: nothing rebinds)
 //   NMB_PADDED_ALIAS=1        textures over padded rows rendered in place (default off: untried on NVK)
 //   M2V_YCBCR_MEMO=<N>        skip unchanged two-plane YCbCr conversions (N sampled chunks; default off)
-//   M2V_YCBCR_FILTER=device   the device's filter for converted YCbCr (default: Metal's, exact)
+//   M2V_YCBCR_FILTER=device   the device's filter for converted YCbCr on any device (default: as every texture's sample,
+//                             the device's own here)
 //   M2V_ZERO_FRESH=1          zero fresh memory and upload staging on the CPU again (default off)
 //   TEGRA_M2V_SEED=0          no shared shader cache seed (default 1)
 //   NMB_SYSTEM_COMPILER       Metal source and stitched libraries compiled in-process (default 1 outside backboardd, 0 in it)
@@ -52,6 +56,7 @@
 #include <initializer_list>
 #include <mutex>
 #include <dlfcn.h>
+#include <notify.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <objc/runtime.h>
@@ -61,6 +66,7 @@
 #include <unistd.h>
 #include "NativeBridgeMetalFrontend.h"
 #include "RawMetal.h"
+#include "SwitchRefusal.h"
 #include "bridge/NativeMetalObjects.h"
 
 // The build's stack key (build-tegra-gm20b-metal.py); 0 takes a pack of any build (never shipped so).
@@ -400,6 +406,152 @@ void observeDisplayLinkRates()
     }
 }
 
+// r31-rawds: what makes WidgetRenderer redraw (a steady 20 commits/s on the Home Screen, each a Core Animation transaction
+// displaying a RenderBox layer: CA::Layer::layout_and_display_if_needed in the commit stack, with no display link rate asked
+// for). In WidgetRenderer_* processes, each distinct caller (image+offset) of -[CALayer setNeedsDisplay] with the layer's class,
+// and each display link made with the target's class and selector, once, up to 8 lines in all.
+using SetNeedsDisplay = void (*)(id, SEL);
+using MakeDisplayLink = id (*)(id, SEL, id, SEL);
+SetNeedsDisplay gSetNeedsDisplay;
+MakeDisplayLink gMakeDisplayLink;
+
+bool firstRedrawCause(uint64_t key)
+{
+    static std::mutex lock;
+    static uint64_t seen[8];
+    static unsigned count;
+    std::lock_guard<std::mutex> guard(lock);
+    for (unsigned i = 0; i < count; i++)
+        if (seen[i] == key)
+            return false;
+    if (count == 8)
+        return false;
+    seen[count++] = key;
+    return true;
+}
+
+void observedSetNeedsDisplay(id layer, SEL cmd)
+{
+    const void *pc = __builtin_return_address(0);
+    Class cls = object_getClass(layer);
+    if (firstRedrawCause((uint64_t)(uintptr_t)pc ^ ((uint64_t)(uintptr_t)cls << 1))) {
+        char who[128];
+        callerName(pc, who, sizeof who);
+        os_log(logger(), "TegraGM20BMetal: %{public}s setNeedsDisplay of a %{public}s from %{public}s", getprogname(),
+               class_getName(cls), who);
+    }
+    gSetNeedsDisplay(layer, cmd);
+}
+
+id observedMakeDisplayLink(id cls, SEL cmd, id target, SEL selector)
+{
+    const void *pc = __builtin_return_address(0);
+    if (firstRedrawCause((uint64_t)(uintptr_t)selector ^ ((uint64_t)(uintptr_t)object_getClass(target) << 1) ^ 1)) {
+        char who[128];
+        callerName(pc, who, sizeof who);
+        os_log(logger(), "TegraGM20BMetal: %{public}s display link to -[%{public}s %{public}s] from %{public}s",
+               getprogname(), class_getName(object_getClass(target)), sel_getName(selector), who);
+    }
+    return gMakeDisplayLink(cls, cmd, target, selector);
+}
+
+void observeRedrawCauses()
+{
+    static std::atomic<bool> done;
+    if (strncmp(getprogname(), "WidgetRenderer", 14) || done.exchange(true))
+        return;
+    if (Method m = class_getInstanceMethod(objc_getClass("CALayer"), sel_registerName("setNeedsDisplay"))) {
+        gSetNeedsDisplay = (SetNeedsDisplay)method_getImplementation(m);
+        method_setImplementation(m, (IMP)observedSetNeedsDisplay);
+    }
+    if (Method m =
+            class_getClassMethod(objc_getClass("CADisplayLink"), sel_registerName("displayLinkWithTarget:selector:"))) {
+        gMakeDisplayLink = (MakeDisplayLink)method_getImplementation(m);
+        method_setImplementation(m, (IMP)observedMakeDisplayLink);
+    }
+}
+
+// r31-rawds: how this GPU rounds a float fragment into an RGBA16Float target (the frontend's RGB8_444_2P stand-in, whose store
+// takes Metal's round-to-nearest-even half of each channel). On com.brunostjohn.switch.debug.rf16-rounding a WidgetRenderer_*
+// process draws four floats into a 4x1 RGBA16Float target through its device and logs the halves it holds ("rf16" category):
+// just above, on and just below the midpoint of 0x37ff and 0x3800, and on the midpoint of 0x3800 and 0x3801. Nearest even:
+// 3800 3800 37ff 3800; toward zero: 37ff 37ff 37ff 3800; ties away: 3800 3800 37ff 3801.
+void checkRf16Rounding()
+{
+    static os_log_t log = os_log_create("com.brunostjohn.switch.TegraGM20BMetal", "rf16");
+    id<MTLDevice> device = MTLCreateSystemDefaultDevice();
+    NSString *source = @"#include <metal_stdlib>\nusing namespace metal;\n"
+                       @"struct V { float4 p [[position]]; };\n"
+                       @"vertex V cover(uint i [[vertex_id]]) { float2 c = float2((i << 1) & 2, i & 2); V v;"
+                       @" v.p = float4(c * 2 - 1, 0, 1); return v; }\n"
+                       @"fragment float4 values(V in [[stage_in]], constant float4 *k [[buffer(0)]]) {"
+                       @" return k[uint(in.p.x)]; }\n";
+    NSError *error = nil;
+    id<MTLLibrary> library = [device newLibraryWithSource:source options:nil error:&error];
+    MTLRenderPipelineDescriptor *d = [MTLRenderPipelineDescriptor new];
+    d.vertexFunction = [library newFunctionWithName:@"cover"];
+    d.fragmentFunction = [library newFunctionWithName:@"values"];
+    d.colorAttachments[0].pixelFormat = MTLPixelFormatRGBA16Float;
+    id<MTLRenderPipelineState> state = library ? [device newRenderPipelineStateWithDescriptor:d error:&error] : nil;
+    MTLTextureDescriptor *td = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA16Float
+                                                                                  width:4
+                                                                                 height:1
+                                                                              mipmapped:NO];
+    td.usage = MTLTextureUsageRenderTarget;
+    td.storageMode = MTLStorageModePrivate;
+    id<MTLTexture> target = [device newTextureWithDescriptor:td];
+    id<MTLBuffer> out = [device newBufferWithLength:32 options:MTLResourceStorageModeShared];
+    if (!state || !target || !out) {
+        os_log_error(log, "TegraGM20BMetal: %{public}s rf16 rounding: no state or target (%{public}@)", getprogname(),
+                     error.localizedDescription);
+        return;
+    }
+    const uint32_t bits[4] = {0x3efff001u, 0x3efff000u, 0x3effefffu, 0x3f001000u};
+    float values[16] = {};
+    for (int i = 0; i < 4; i++)
+        for (int c = 0; c < 4; c++)
+            memcpy(&values[4 * i + c], &bits[i], 4);
+    id<MTLCommandQueue> queue = [device newCommandQueue];
+    id<MTLCommandBuffer> cb = [queue commandBuffer];
+    MTLRenderPassDescriptor *pass = [MTLRenderPassDescriptor renderPassDescriptor];
+    pass.colorAttachments[0].texture = target;
+    pass.colorAttachments[0].loadAction = MTLLoadActionClear;
+    pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+    id<MTLRenderCommandEncoder> render = [cb renderCommandEncoderWithDescriptor:pass];
+    [render setRenderPipelineState:state];
+    [render setFragmentBytes:values length:sizeof values atIndex:0];
+    [render drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+    [render endEncoding];
+    id<MTLBlitCommandEncoder> blit = [cb blitCommandEncoder];
+    [blit copyFromTexture:target
+                     sourceSlice:0
+                     sourceLevel:0
+                    sourceOrigin:MTLOriginMake(0, 0, 0)
+                      sourceSize:MTLSizeMake(4, 1, 1)
+                        toBuffer:out
+               destinationOffset:0
+          destinationBytesPerRow:32
+        destinationBytesPerImage:32];
+    [blit endEncoding];
+    [cb commit];
+    [cb waitUntilCompleted];
+    const uint16_t *h = static_cast<const uint16_t *>(out.contents);
+    os_log(log, "TegraGM20BMetal: %{public}s rf16 rounding: %04x %04x %04x %04x (nearest even 3800 3800 37ff 3800)",
+           getprogname(), h[0], h[4], h[8], h[12]);
+}
+
+void observeRf16Request()
+{
+    static std::atomic<bool> done;
+    if (strncmp(getprogname(), "WidgetRenderer", 14) || done.exchange(true))
+        return;
+    int token;
+    notify_register_dispatch("com.brunostjohn.switch.debug.rf16-rounding", &token,
+                             dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^(int) {
+                                 checkRf16Rounding();
+                             });
+}
+
 // The frontend's rates line, every 5 s while the device works (it says nothing when idle). r16-idle: with a whole
 // interval of leeway, so the timer rides a wakeup the process or the kernel takes anyway instead of waking every
 // Metal process every 5 s; both rates functions measure their own window, so a late tick only makes a longer one.
@@ -408,6 +560,8 @@ void startRates()
     if (!knobOn("TEGRA_M2V_TELEMETRY", true))
         return;
     observeDisplayLinkRates();
+    observeRedrawCauses();
+    observeRf16Request();
     static dispatch_source_t timer;
     timer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, dispatch_get_global_queue(QOS_CLASS_UTILITY, 0));
     dispatch_source_set_timer(timer, dispatch_time(DISPATCH_TIME_NOW, 5 * NSEC_PER_SEC), 5 * NSEC_PER_SEC,
@@ -428,9 +582,19 @@ void startRates()
 }
 #endif
 
+// A shared event for another process (a handle to send, or one received): no kernel-backed event exists for one yet, so
+// the log says who asks before anything is built for it.
+static void crossProcessEvent(const char *cls, const char *selector)
+{
+    if (!strncmp(selector, "newSharedEventHandle", strlen("newSharedEventHandle")) ||
+        !strcmp(selector, "newSharedEventWithHandle:"))
+        switch_refusal("frontend", "sharedevent.handle", "-[%s %s]: no cross-process shared events", cls, selector);
+}
+
 // A Metal selector the frontend does not implement (the frontend's own report, made before it raises).
 void missing(const char *cls, const char *selector)
 {
+    crossProcessEvent(cls, selector);
     os_log_error(logger(), "TegraGM20BMetal: unimplemented -[%{public}s %{public}s]", cls, selector);
 }
 
@@ -442,6 +606,7 @@ void missing(const char *cls, const char *selector)
 // is the frontend's, once per selector (r14-maps: here it ran per call, Maps' setDepthClipMode: lag).
 void answeredZero(const char *cls, const char *selector)
 {
+    crossProcessEvent(cls, selector);
     os_log_error(logger(), "TegraGM20BMetal: unimplemented -[%{public}s %{public}s] answered zero", cls, selector);
 }
 
@@ -458,6 +623,10 @@ id openDevice(unsigned port)
         if (!renderServer && strcmp(getprogname(), "iconservicesagent") != 0 &&
             strcmp(getprogname(), "ScreenshotServicesService") != 0 && !knobOn("TEGRA_GPU_ALL_CLIENTS", true))
             return nil;
+        // NVK opens the first service of this class (nvkmd_darwin.c darwin_open): ours, never the IOAcceleratorES stub
+        // (drivers/SwitchAccelStub) that only ends QuartzCore's accelerator poll. Set before the raw path's setup below, which
+        // may be the first to open NVK's connection.
+        setenv("NVK_DARWIN_SERVICE", "AGXAccelerator", 0);
         // The raw GM20B path's own setup (its pack, channel and context, the first pool chunk) starts now, beside the m2v device's
         // open below; raw_metal_device_open takes what it made, so the render server's first frame waits for neither twice.
         if (renderServer && !(getenv("TEGRA_RAW_METAL") && strcmp(getenv("TEGRA_RAW_METAL"), "0") == 0)) {
@@ -472,6 +641,8 @@ id openDevice(unsigned port)
         // for cached memory a 64 MiB block stalled it ~100 ms (r5c: 66 MB of BoAllocs, 103 ms, in the 5 s Settings opened);
         // 16 MiB blocks bound that to a quarter and still pool any 720p texture, half a block being the dedicated limit.
         setenv("M2V_BLOCK_MIB", renderServer ? "16" : "4", 0);
+        if (renderServer)
+            setenv("NMB_IDLE_RELEASE_MS", "0", 0);  // read by the frontend (GpuMemoryRelease.h)
         if (!renderServer)
             setenv("NMB_SYSTEM_COMPILER", "1", 0);  // read by the frontend: Core Image's kernels are compiled here
         if (const char *zero = getenv("M2V_ZERO_FRESH"); zero && !strcmp(zero, "0"))
@@ -486,9 +657,6 @@ id openDevice(unsigned port)
             if (auto entryID = (int (*)(unsigned, uint64_t *))dlsym(iokit, "IORegistryEntryGetRegistryEntryID"))
                 entryID(port, &registryID);
         }
-        // NVK opens the first service of this class (nvkmd_darwin.c darwin_open): ours, never the IOAcceleratorES stub
-        // (drivers/SwitchAccelStub) that only ends QuartzCore's accelerator poll.
-        setenv("NVK_DARWIN_SERVICE", "AGXAccelerator", 0);
         // The render server compresses its framebuffer and surfaces in an Apple GPU layout unless told not to; this GPU and the
         // display driver take plain rows. The kernel also writes these as backboardd's preferences (read before this code runs).
         if (renderServer) {

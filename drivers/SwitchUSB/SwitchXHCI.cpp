@@ -16,6 +16,7 @@
 #include "SwitchXHCI.h"
 #include "SwitchUSB.h"
 #include "SwitchXHCIServices.h"
+#include "XusbLanes.h"
 #include <IOKit/IOLib.h>
 #include <libkern/c++/OSKext.h>
 #include <mach/kmod.h>
@@ -103,7 +104,6 @@ uint32_t *SwitchXHCI::shadowFor(uint64_t address)
     return &shadow[at / 32][(at % 32) / 4];
 }
 
-#if SWITCH_USB_SUPERSPEED
 namespace {
 // XusbLanes.h's adjustments to AppleUSBXHCI's register writes: U1/U2 off on the SuperSpeed ports, an interrupt
 // moderation floor. AppleUSBXHCI writes from its work loop and its interrupt filter: arithmetic only.
@@ -134,7 +134,6 @@ uint32_t adjustWrite(uint32_t offset, uint32_t value, uint32_t runtime, uint32_t
 }
 }  // namespace
 
-#endif
 uint32_t SwitchXHCI::regRead32(uint64_t base, uint32_t offset)
 {
     if (!capBase && offset == 4)
@@ -161,10 +160,8 @@ void SwitchXHCI::regWrite32(uint64_t base, uint32_t offset, uint32_t value)
         *s = value;
         return;
     }
-#if SWITCH_USB_SUPERSPEED
     if (capBase && base + offset >= capBase && base + offset - capBase < xhost::kXhciBytes)
         value = adjustWrite((uint32_t)(base + offset - capBase), value, runtimeOffset, hardwareInterrupters);
-#endif
     // xhci-tegra.c tegra_xusb_probe_finish: USBCMD.EU3S (MFINDEX stops in U3), on every write so that a reset or a
     // controller AppleUSBXHCI reinitializes after SC7 keeps it.
     if (capBase && base + offset == capBase + operationalOffset)
@@ -196,11 +193,17 @@ bool switchxhci_start(char *why, size_t whySize)
         return false;
     // The host stack's IOResources personalities, kept out of the boot-time catalogue (emit_prelink.py
     // DEFERRED_PERSONALITIES): AppleUSBHostResources (AppleUSBHostController::start waits for it) and
-    // IOUSBMassStorageResource, as their kexts' Info.plist has them.
-    if (!xhost::addResourcePersonality("AppleUSBHostResources", "AppleUSBHostResources",
-                                       "com.apple.iokit.IOUSBHostFamily") ||
-        !xhost::addResourcePersonality("IOUSBMassStorageResource", "IOUSBMassStorageResource",
-                                       "com.apple.iokit.IOUSBMassStorageDriver")) {
+    // IOUSBMassStorageResource, as their kexts' Info.plist has them. iOS 27's packet capture matches IOResources too
+    // (iOS 17's matches AppleUSBHostResources, so it follows that one).
+    bool resources = xhost::addResourcePersonality("AppleUSBHostResources", "AppleUSBHostResources",
+                                                   "com.apple.iokit.IOUSBHostFamily") &&
+                     xhost::addResourcePersonality("IOUSBMassStorageResource", "IOUSBMassStorageResource",
+                                                   "com.apple.iokit.IOUSBMassStorageDriver");
+#if XNU_12377_121_6
+    resources = resources && xhost::addResourcePersonality("AppleUSBHostPacketFilter", "AppleUSBHostPacketFilter",
+                                                           "com.apple.driver.usb.AppleUSBHostPacketFilter", "IOBSD");
+#endif
+    if (!resources) {
         snprintf(why, whySize, "IOCatalogue refused the USB host resource personalities");
         return false;
     }

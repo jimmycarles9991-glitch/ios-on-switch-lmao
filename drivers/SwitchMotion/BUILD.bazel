@@ -36,5 +36,6 @@ kernel_driver(
         "drivers/SwitchTouch",
         "drivers/TegraGPIO",
         "drivers/TegraSPI",
+        "kits/SwitchRefusal",
     ],
 )

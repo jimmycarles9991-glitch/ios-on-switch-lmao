@@ -1,4 +1,5 @@
-"""Analysis tests of ipsw_free: a copy of an IPSW member is refused, packaged or not; a check that only reads one passes."""
+"""Analysis tests of ipsw_free: a copy of an IPSW member is refused, packaged or not; a check that only reads one passes;
+of the files made from the IPSW, only the declassified ones pass."""
 
 load("@bazel_skylib//lib:unittest.bzl", "analysistest", "asserts")
 load("@rules_pkg//pkg:mappings.bzl", "pkg_files")
@@ -38,12 +39,30 @@ def _passed_impl(ctx):
 
 _passed_test = analysistest.make(_passed_impl)
 
-def ipsw_free_tests(name, member):
+def _window_refused_impl(ctx):
+    env = analysistest.begin(ctx)
+    asserts.expect_failure(env, "would ship Apple's bytes")
+    asserts.expect_failure(env, "kernel-window.bin")
+    return analysistest.end(env)
+
+_window_refused_test = analysistest.make(_window_refused_impl, expect_failure = True)
+
+def _declassified_impl(ctx):
+    env = analysistest.begin(ctx)
+    files = analysistest.target_under_test(env)[DefaultInfo].files.to_list()
+    asserts.equals(env, ["constants.json", "loader.uboot.bin"], sorted([f.basename for f in files]))
+    return analysistest.end(env)
+
+_declassified_test = analysistest.make(_declassified_impl)
+
+def ipsw_free_tests(name, member, declassified, window):
     """The tests, as one test_suite.
 
     Args:
         name: the test_suite's name.
         member: the label of a small IPSW member's file.
+        declassified: the targets of ipsw_free.bzl's DECLASSIFIED files (the loader and its constants).
+        window: a target whose files were made beside them from the IPSW (the kernel window), which stay refused.
     """
     native.genrule(
         name = "member_copy",
@@ -104,6 +123,29 @@ def ipsw_free_tests(name, member):
         name = name + "_passes_a_validation",
         target_under_test = ":validation_only_checked",
     )
+    native.filegroup(
+        name = "declassified_files",
+        srcs = declassified,
+        tags = ["manual"],
+    )
+    ipsw_free(
+        name = "declassified_checked",
+        src = ":declassified_files",
+        tags = ["manual"],
+    )
+    _declassified_test(
+        name = name + "_passes_the_declassified",
+        target_under_test = ":declassified_checked",
+    )
+    ipsw_free(
+        name = "window_checked",
+        src = window,
+        tags = ["manual"],
+    )
+    _window_refused_test(
+        name = name + "_refuses_the_window",
+        target_under_test = ":window_checked",
+    )
     native.test_suite(
         name = name,
         tests = [
@@ -111,5 +153,7 @@ def ipsw_free_tests(name, member):
             name + "_refuses_a_copy_named_by_file",
             name + "_refuses_a_zip_holding_a_copy",
             name + "_passes_a_validation",
+            name + "_passes_the_declassified",
+            name + "_refuses_the_window",
         ],
     )

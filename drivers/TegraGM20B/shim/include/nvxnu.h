@@ -62,6 +62,8 @@ void nvxnu_rw_lock_exclusive(void *rw);
 void nvxnu_rw_unlock_exclusive(void *rw);
 
 nvxnu_u64 nvxnu_nanotime(void);
+/* mach_absolute_time units to nvxnu_nanotime's */
+nvxnu_u64 nvxnu_abstime_to_ns(nvxnu_u64 abstime);
 void nvxnu_udelay(nvxnu_u32 us); /* busy wait */
 void nvxnu_usleep(nvxnu_u32 us); /* may block */
 void nvxnu_yield(void);
@@ -87,6 +89,10 @@ void nvxnu_iounmap(volatile void *va, nvxnu_u64 size);
 int nvxnu_pool_init(int *zeroed);
 /* XNU's VM page: what a CPU mapping covers, 16 KiB over the A57's 4 KiB granule. Pool and GPU pages stay 4 KiB. */
 nvxnu_u32 nvxnu_vm_page_size(void);
+/* the memory XNU manages (max_mem): what the GPU's compression covers, as nvgpu covers Linux's RAM */
+nvxnu_u64 nvxnu_ram_bytes(void);
+/* Wired, physically contiguous, zeroed memory for the GPU alone (no CPU view is kept), never freed; 0 on success */
+int nvxnu_contig_alloc(nvxnu_u64 bytes, nvxnu_u64 *pa);
 nvxnu_u64 nvxnu_pool_base_pa(void);
 nvxnu_u64 nvxnu_pool_size(void);
 void *nvxnu_pool_base_va(void);

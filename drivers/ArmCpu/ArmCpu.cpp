@@ -14,6 +14,7 @@
 #include "../../kits/SwitchDMA/SwitchHwPage.h"
 #include "../../diagnostics/switch/SwitchPowerTrail.h"
 #include "../SwitchSuspend/SwitchSleepSteps.h"
+#include "ArmCpuIdle.h"
 
 // Exact private entry from Darwin 23 arm/rtclock.h. Its full data header is
 // not exported to IOKit; the IRQ path calls the real kernel implementation.
@@ -501,6 +502,19 @@ void ArmCpu::configureBankedV2(void)
     __asm__ volatile("dsb sy\nisb" ::: "memory");
 }
 
+// This core's banked GIC state back from a C7 power-down (ArmCpuIdle.cpp): what configureBankedV2 and enableGic set
+// and ATF's warm boot (tegra_gic_pcpu_init) reset, with nothing pending cleared: the IPI that woke the core may be.
+void armcpu::restoreBankedGic(void)
+{
+    *reinterpret_cast<volatile uint8_t *>(gDist + 0x400) = 0x80;
+    *reinterpret_cast<volatile uint8_t *>(gDist + 0x400 + 27) = 0x80;
+    write32(gV2CpuIf, 4, 0xff);
+    write32(gV2CpuIf, 8, 0);
+    write32(gV2CpuIf, 0, (read32(gV2CpuIf, 0) & 0x1e0U) | 1U);
+    write32(gDist, 0x100, (1U << 27) | 1U);
+    __asm__ volatile("dsb sy\nisb" ::: "memory");
+}
+
 bool ArmCpu::prepareGic(void)
 {
     if (!mapGic()) {
@@ -812,6 +826,7 @@ void ArmCpu::observeAllThread(void *, wait_result_t)
         }
         if (ready) {
             IOLog("ArmCpu: %u of %u secondary cores running\n", SWITCH_SMP_CORE_COUNT - 1, SWITCH_SMP_CORE_COUNT - 1);
+            armcpu_idle_start();
             thread_terminate(current_thread());
             return;
         }
@@ -1382,15 +1397,7 @@ static void psciSleep(boolean_t)
             }
         }
     }
-    switch_smp_record *record = &switch_secondary_records[0];
-    memset(record, 0, sizeof(*record));
-    record->magic = SWITCH_SMP_MAGIC;
-    record->mpidr = 0;
-    record->logical = 0;
-    record->cntfrq = UINT64_C(19200000);
-    record->cntvoff = 0;
-    record->reset_pa = ml_static_vtop(reinterpret_cast<vm_offset_t>(LowResetVectorBase));
-    cleanToMemory(record, sizeof(*record));
+    armcpu::fillBootRecord();
 #if DEVELOPMENT || DEBUG
     // ATF's SYSTEM_SUSPEND returns at once, without suspending, while an interrupt is pending here (psci_suspend.c).
     uint64_t pending;
@@ -1413,6 +1420,42 @@ static void sc7Exit(void)
     switch_power_trail_watch(kSleepWatchSeconds, "SC7 exit");
 }
 #endif
+
+// The boot CPU's PSCI entry record, which only system sleep and C7 use (secondaries get theirs at CPU_ON).
+void armcpu::fillBootRecord(void)
+{
+    switch_smp_record *record = &switch_secondary_records[0];
+    memset(record, 0, sizeof(*record));
+    record->magic = SWITCH_SMP_MAGIC;
+    record->mpidr = 0;
+    record->logical = 0;
+    record->cntfrq = UINT64_C(19200000);
+    record->cntvoff = 0;
+    record->reset_pa = ml_static_vtop(reinterpret_cast<vm_offset_t>(LowResetVectorBase));
+    cleanToMemory(record, sizeof(*record));
+}
+
+int64_t armcpu::psciSmc(uint64_t function, uint64_t a, uint64_t b, uint64_t c)
+{
+    return psciCall(false, function, a, b, c);
+}
+
+bool armcpu::psciSmcConduit(void)
+{
+    bool hvc = false;
+    return psciConduit(&hvc) && !hvc;
+}
+
+bool armcpu::nativeGicV2Smp(void)
+{
+    return gSharedGicV2 && gNativeSmp && armcpu_gic_ready &&
+           __atomic_load_n(&armcpu_smp_running, __ATOMIC_ACQUIRE) == SWITCH_SMP_CORE_COUNT - 1;
+}
+
+uintptr_t armcpu::gicDistributor(void)
+{
+    return gDist;
+}
 
 // SwitchSuspend's start: system sleep is possible when native GICv2 SMP (or the boot CPU alone) runs on switchroot
 // ATF's PSCI with CPU_OFF, AFFINITY_INFO and SYSTEM_SUSPEND, and the kernel has the sleep hook. Returns 0 and turns

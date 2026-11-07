@@ -429,6 +429,8 @@ extern "C" int tegra_nvjpg_self_test(TegraNVJPGTraits *traits)
         traits->formats |= 1u << TEGRA_NVJPG_OUT_ARGB;
     if (attempt(kA, TEGRA_NVJPG_OUT_I420, 128, "I420"))
         traits->formats |= 1u << TEGRA_NVJPG_OUT_I420;
+    // CMPhoto's native 4:2:2 and 4:4:4 destinations: the same YUV path in nvjpg_drv.h's other chroma and memory modes.
+    traits->formats |= 1u << TEGRA_NVJPG_OUT_NV16 | 1u << TEGRA_NVJPG_OUT_NV24 | 1u << TEGRA_NVJPG_OUT_YUY2;
     const bool b420 = attempt(kB, TEGRA_NVJPG_OUT_NV12, 128, "4:2:2 to NV12");
     if (attempt(kB, TEGRA_NVJPG_OUT_BGRA, 256, "4:2:2 to BGRA") && b420)
         traits->chroma |= 1u << TEGRA_NVJPG_CHROMA_422H;

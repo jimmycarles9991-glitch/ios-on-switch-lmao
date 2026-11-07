@@ -1,8 +1,7 @@
 """Join the buckets into the packed seed, check the tools against the GPU bundle, and lay the seed out for an image.
 
 usage: merge.py join --index <bucket index>... --report <bucket report>... [--records <driver record store>]
-                     --tools-manifest <MANIFEST.json> --ipsw <build> --plan <plan.json> --inventory <inventory.json>
-                     --out <dir>
+                     --ipsw <build> --plan <plan.json> --inventory <inventory.json> --out <dir>
        merge.py check --tools-manifest <MANIFEST.json> --twin <tools' libvulkan_nouveau.dylib> --base <path>... --out F
        merge.py tree --seed <join's dir> --pack <bucket pack>... [--raw <raw pack dir>] --out <tree dir> --size F
 
@@ -10,12 +9,13 @@ join: the seed is every bucket's cache directory laid over one another (an entry
 buckets' entries of one name are the same bytes), the device's driver records of the tools' NVK identity beside them,
 SEED (the line the plugin logs) and MANIFEST.json. It is packed (m2v's shader_cache/seed.rs): bucket N's pack is
 packs/<NNN> as the bucket wrote it, the merged records are the last pack, and `index` names every entry's pack, offset
-and length. The join reads only the buckets' indexes and reports, never their packs, and writes SEED, MANIFEST.json,
+and length. The join reads only the buckets' indexes and reports, never their packs or the tools (the records name
+NVK's identity; the stack key, which every raw/ edit changes, is no part of the seed), and writes SEED, MANIFEST.json,
 index and packs/<the records' pack> into <out>.
 check: refuses tools that are not the GPU bundle's (--base: its tree or files): their NVK twin must have the bundle
-NVK's LC_UUID, which its pipeline cache UUID hashes, and the bundle's Info.plist must name the tools' stack key (NVK,
-m2v, the bridge and the frontend); a seed of other tools would never be hit. A validation action: the seed does not
-wait for it.
+NVK's LC_UUID (nvk_twin.py gives the twin the iOS dylib's), and the bundle's Info.plist must name the tools' stack key
+(NVK, m2v, the bridge and the frontend); a seed of other tools would never be hit. A validation action: the seed does
+not wait for it.
 tree: ngpu/addons/TegraGM20BMetal.m2v-seed/shared (the join's files and packs/<NNN>) and
 ngpu/addons/TegraGM20BMetal.raw, directories 0755 and files 0644 (APFS clones of the sources), and size.json (bytes,
 files, blocks4k: what the tree takes on APFS) beside it.
@@ -180,14 +180,12 @@ def join(args: argparse.Namespace) -> None:
     for relative in sorted(entries):
         digest.update(f'{relative}\0{entries[relative][0]}\n'.encode())
     line = f'generated m2v-build {build[:8]} nvk {identity[12:28].hex()[:8]} content {digest.hexdigest()[:8]}'
-    manifest = json.loads(args.tools_manifest.read_text())
     meta = {
         'SEED': line + '\n',
         'MANIFEST.json': json.dumps(
             {
                 'seed': line,
                 'ipsw': args.ipsw,
-                'tools': {k: manifest[k] for k in ('stack', 'nvk_uuid', 'arch')},
                 'plan': json.loads(args.plan.read_text()),
                 'crawl': crawled(json.loads(args.inventory.read_text())),
                 'device_records': device,
@@ -259,7 +257,7 @@ def main() -> None:
     j.add_argument('--index', type=Path, action='append', required=True)
     j.add_argument('--report', type=Path, action='append', required=True)
     j.add_argument('--records', type=Path)
-    for name in ('tools-manifest', 'plan', 'inventory', 'out'):
+    for name in ('plan', 'inventory', 'out'):
         j.add_argument('--' + name, type=Path, required=True)
     j.add_argument('--ipsw', required=True)
     c = steps.add_parser('check')

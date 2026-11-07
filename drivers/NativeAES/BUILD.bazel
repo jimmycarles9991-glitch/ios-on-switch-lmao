@@ -38,6 +38,7 @@ kernel_driver(
     abi = ["IOAESAccelerator"],
     hdr_deps = [
         "drivers/TegraSE",
+        "kits/SwitchRefusal",
     ],
 )
 

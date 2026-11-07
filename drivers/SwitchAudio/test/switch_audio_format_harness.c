@@ -88,6 +88,50 @@ uint64_t SWITCH_AUDIO_HARNESS(h_rate_millihz)(uint64_t ref_hz, uint64_t m, uint6
     return switch_audio_rate_millihz(ref_hz, m, p, n_eff, out0_x2, pllaout0_per_fs);
 }
 
+static switch_audio_clock clock_at(uint32_t index)
+{
+    const switch_audio_clock clocks[] = {SWITCH_AUDIO_CLOCK_48000, SWITCH_AUDIO_CLOCK_44100};
+    return clocks[index];
+}
+
+void SWITCH_AUDIO_HARNESS(h_clock)(uint32_t index, uint32_t fields[7])
+{
+    const switch_audio_clock c = clock_at(index);
+    const uint32_t values[7] = {c.rate, c.m, c.n, c.p, c.sdm, c.out0_x2, c.out0_per_fs};
+    for (uint32_t i = 0; i < 7; ++i)
+        fields[i] = values[i];
+}
+
+uint64_t SWITCH_AUDIO_HARNESS(h_clock_n_eff)(uint32_t index)
+{
+    return switch_audio_clock_n_eff(clock_at(index));
+}
+
+uint64_t SWITCH_AUDIO_HARNESS(h_clock_ticks_per_frame_q32)(uint64_t host_hz, uint64_t ref_hz, uint32_t index)
+{
+    return switch_audio_clock_ticks_per_frame_q32(host_hz, ref_hz, clock_at(index));
+}
+
+uint64_t SWITCH_AUDIO_HARNESS(h_clock_millihz)(uint64_t ref_hz, uint32_t index)
+{
+    return switch_audio_clock_millihz(ref_hz, clock_at(index));
+}
+
+uint32_t SWITCH_AUDIO_HARNESS(h_extern1_divider)(uint32_t pllaout0_per_fs)
+{
+    return switch_audio_extern1_divider(pllaout0_per_fs);
+}
+
+uint32_t SWITCH_AUDIO_HARNESS(h_transition)(uint32_t was, uint32_t now)
+{
+    return switch_audio_transition(was, now);
+}
+
+int64_t SWITCH_AUDIO_HARNESS(h_capture_frame)(uint64_t t, uint64_t anchor, uint64_t in_frames, uint32_t ring_frames)
+{
+    return switch_audio_capture_frame(t, anchor, in_frames, ring_frames);
+}
+
 void SWITCH_AUDIO_HARNESS(h_mix)(int32_t *dst, const float *src, uint32_t samples, float gain)
 {
     switch_audio_mix_s32(dst, src, samples, gain);

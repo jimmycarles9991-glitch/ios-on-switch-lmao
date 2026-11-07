@@ -62,6 +62,7 @@ ios_binary(
     name = "AVD",
     srcs = [
         "AVD/AVDDecoder.c",
+        "AVD/AVDTiles.c",
         "AVD/H264NVDEC.c",
         "AVD/H264Syntax.c",
         "AVD/NVDECClient.c",
@@ -72,6 +73,7 @@ ios_binary(
         "AVD/VP9Probs.c",
         "AVD/HEVCNVDEC.c",
         "AVD/HEVCSyntax.c",
+        "//kits/SwitchRefusal:SwitchRefusal.c",
     ],
     out = "build/switch-video/AVD.videodecoder",
     hdrs = glob(
@@ -82,6 +84,7 @@ ios_binary(
     ) + [
         "//drivers/TegraNVDEC:headers",
         "//kits/SwitchCRC:headers",
+        "//kits/SwitchRefusal:SwitchRefusal.h",
     ] + [
         "test/VDECClip.h",
         "test/VP9Clip.h",

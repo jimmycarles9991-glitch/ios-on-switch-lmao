@@ -41,6 +41,7 @@
 #include "SwitchWLANCoex.h"
 #include "SwitchWLANCrypto.h"
 #include "SwitchWLANLink.h"
+#include "SwitchWLANNet.h"
 #include "SwitchWLANPrivate.h"
 #include "SwitchWLANStation.h"
 #include "SwitchWLANTrace.h"
@@ -1776,7 +1777,7 @@ void SwitchWLAN::run()
     locked([&] {
         workerRunning_ = true;
     });
-    switch_wlan_net_start(mac_);
+    switch_wlan_net_start(this, loop_, mac_);
     netStarted_ = true;
     switch_wlan_awdl_capable();  // a radio without AWDL gets its down awdl0 before userspace asks for it
     IOLog("SwitchWLAN: en0 ready, %u MSIs so far\n", static_cast<unsigned>(interrupts_));
@@ -1984,8 +1985,8 @@ void SwitchWLAN::logStats()
     // failed: beacons' broadcasts, mDNS, a keepalive) is carried over to one line a minute, with the firmware queries
     // below; real traffic or any trouble is logged every kStatsMs as before.
     const bool trouble = now.refused != was.refused || now.failed != was.failed ||
-                         now.net.tx_oversize != was.net.tx_oversize || now.net.tx_refused != was.net.tx_refused ||
-                         now.net.rx_no_mbuf != was.net.rx_no_mbuf || now.net.rx_input_errors != was.net.rx_input_errors;
+                         now.net.tx_oversize != was.net.tx_oversize || now.net.rx_no_mbuf != was.net.rx_no_mbuf ||
+                         now.net.rx_input_errors != was.net.rx_input_errors;
     // A Bluetooth link up is coexistence's case (Wi-Fi quiet while the shared antenna serves Bluetooth): never carried
     // over. SwitchBluetooth's snapshot reads "N ACL[, M LE][, active ...]", the rest only with links: so a link is a
     // count that is not 0 or anything after it.
@@ -2014,13 +2015,13 @@ void SwitchWLAN::logStats()
     int n = snprintf(
         out, sizeof(out),
         "SwitchWLAN: stats %u ms: rx %u (en0 %u: unicast %u group %u, %llu KB, no mbuf %u, input refused %u), "
-        "tx %u (%llu KB) done %u failed %u refused %u, if_output dropped %u oversize %u, %llu MSIs, %d dBm",
+        "tx %u (%llu KB) done %u failed %u refused %u, oversize %u, %llu MSIs, %d dBm",
         windowMs, now.rx - was.rx, now.net.rx_input - was.net.rx_input, now.rxUnicast - was.rxUnicast,
         now.rxGroup - was.rxGroup, static_cast<unsigned long long>((now.rxBytes - was.rxBytes) / 1024),
         now.net.rx_no_mbuf - was.net.rx_no_mbuf, now.net.rx_input_errors - was.net.rx_input_errors, now.tx - was.tx,
         static_cast<unsigned long long>((now.txBytes - was.txBytes) / 1024), now.done - was.done,
-        now.failed - was.failed, now.refused - was.refused, now.net.tx_refused - was.net.tx_refused,
-        now.net.tx_oversize - was.net.tx_oversize, static_cast<unsigned long long>(now.msis - was.msis), signal);
+        now.failed - was.failed, now.refused - was.refused, now.net.tx_oversize - was.net.tx_oversize,
+        static_cast<unsigned long long>(now.msis - was.msis), signal);
     size_t at = n > 0 ? static_cast<size_t>(n) : 0;
     auto advance = [&](int k) {
         at += k > 0 ? static_cast<size_t>(k) : 0;
@@ -2047,13 +2048,13 @@ void SwitchWLAN::logStats()
         ampduWindow(ampdu, sizeof(ampdu));
         snprintf(data, sizeof(data),
                  "SwitchWLAN: data %u ms: rx %s tx %s Mb/s, %s frames/MSI, per 100 frames %s doorbells %s index reads, "
-                 "RX %u/%u posted (%llu reposted), TX %u in flight (peak %u of %u, ran out %llu), en0 %s "
+                 "RX %u/%u posted (%llu reposted), TX %u in flight (peak %u of %u, ran out %llu), en0 "
                  "%u starts %u batches, %u input batches, %s",
                  windowMs, rxMbps, txMbps, perMsi, bells, reads, d.rxPosted, mb_.rxBufferCount(),
                  static_cast<unsigned long long>(d.rxReposted - e.rxReposted), d.txInFlight, d.txPeak,
                  mb_.txBufferCount(), static_cast<unsigned long long>(d.txFull - e.txFull),
-                 now.net.start_model ? "queue" : "legacy", now.net.tx_starts - was.net.tx_starts,
-                 now.net.tx_batches - was.net.tx_batches, now.net.rx_batches - was.net.rx_batches, ampdu);
+                 now.net.tx_starts - was.net.tx_starts, now.net.tx_batches - was.net.tx_batches,
+                 now.net.rx_batches - was.net.rx_batches, ampdu);
     }
     // The access point's view of the same window (sta_info): what it acknowledged and what it sent us.
     swlan_sta sta;
@@ -2448,8 +2449,8 @@ void SwitchWLAN::coexBringUp()
     os_log(OS_LOG_DEFAULT, "%s", text);
 }
 
-// Any thread: what wifid says Bluetooth is doing (SwitchWLANNet.cpp, APPLE80211_IOC_BT_COEX_FLAGS / BT_POWER); one
-// line per change, then the worker applies it (coexApply).
+// Any thread: what wifid says Bluetooth is doing (SwitchWLANApple80211.cpp, APPLE80211_IOC_BT_COEX_FLAGS / BT_POWER);
+// one line per change, then the worker applies it (coexApply).
 void SwitchWLAN::btState(uint32_t flags, bool power)
 {
     bool changed = false;

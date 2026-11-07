@@ -7265,6 +7265,7 @@ native_owner_cache_checkpoint(int status, int authorized)
 #if defined(XNU_SWITCH_VERIFIED_ROOT) && XNU_SWITCH_VERIFIED_ROOT
 #include "SwitchRawMount.h"
 #include "SwitchPanicSave.h"
+#include <switch/prefs.h>
 #endif
 
 static int
@@ -7975,6 +7976,43 @@ native_switch_portrait(void)
 	return rotation == 270 ? 4 : rotation == 90 ? 3 : 0;
 }
 
+/* A regular file of at most 1 MiB on data_mount, read whole into *bytes (kalloc_data, *length bytes; NULL when empty). */
+static int
+native_switch_read_data_file(proc_t p, const char *path, mount_t data_mount, char **bytes, int *length)
+{
+	vfs_context_t context = vfs_context_current();
+	vnode_t vp = NULLVP;
+	*bytes = NULL;
+	*length = 0;
+	int error = vnode_open(path, FREAD | O_NOFOLLOW_ANY, 0, 0, &vp, context);
+	if (error) return error;
+	struct vnode_attr attributes;
+	VATTR_INIT(&attributes);
+	VATTR_WANTED(&attributes, va_data_size);
+	if (vnode_mount(vp) != data_mount || !vnode_isreg(vp) || VNOP_GETATTR(vp, &attributes, context) ||
+	    !VATTR_IS_SUPPORTED(&attributes, va_data_size) || attributes.va_data_size > 1024 * 1024) {
+		error = EINVAL;
+	} else if (attributes.va_data_size) {
+		const int size = (int)attributes.va_data_size;
+		int residual = size;
+		char *data = kalloc_data((vm_size_t)size, Z_WAITOK);
+		if (!data) {
+			error = ENOMEM;
+		} else {
+			error = vn_rdwr(UIO_READ, vp, data, size, 0, UIO_SYSSPACE, 0, vfs_context_ucred(context), &residual, p);
+			if (!error && residual) error = EIO;
+			if (error) {
+				kfree_data(data, (vm_size_t)size);
+			} else {
+				*bytes = data;
+				*length = size;
+			}
+		}
+	}
+	(void)vnode_close(vp, FREAD, context);
+	return error;
+}
+
 /* The rotation lock earlier builds made (native_switch_portrait), released once: SpringBoard's own
  * SBLastRotationLockedOrientation[iPad] in its user plist still hold it (SpringBoard saves the lock it restored), and
  * it restores every lock it finds at startup. Each key is renamed in place to SWLastRotationLockedOrientation[iPad] (the
@@ -7995,29 +8033,8 @@ native_switch_rotation_lock_release(proc_t p, user_addr_t scratch, mount_t data_
 		return;
 	}
 	unsigned int renamed = 0;
-	int length = 0, error = vnode_open(plist, FREAD | O_NOFOLLOW_ANY, 0, 0, &vp, context);
 	char *bytes = NULL;
-	if (!error) {
-		struct vnode_attr attributes;
-		VATTR_INIT(&attributes);
-		VATTR_WANTED(&attributes, va_data_size);
-		if (vnode_mount(vp) != data_mount || !vnode_isreg(vp) || VNOP_GETATTR(vp, &attributes, context) ||
-		    !VATTR_IS_SUPPORTED(&attributes, va_data_size) || attributes.va_data_size > 1024 * 1024) {
-			error = EINVAL;
-		} else {
-			length = (int)attributes.va_data_size;
-			bytes = length ? kalloc_data((vm_size_t)length, Z_WAITOK) : NULL;
-			int residual = length;
-			if (length && !bytes) {
-				error = ENOMEM;
-			} else if (length) {
-				error = vn_rdwr(UIO_READ, vp, bytes, length, 0, UIO_SYSSPACE, 0, vfs_context_ucred(context),
-				    &residual, p);
-			}
-			if (!error && residual) error = EIO;
-		}
-		(void)vnode_close(vp, FREAD, context);
-	}
+	int length = 0, error = native_switch_read_data_file(p, plist, data_mount, &bytes, &length);
 	for (unsigned int k = 0; !error && bytes && k < sizeof(keys) / sizeof(keys[0]); ++k) {
 		const size_t size = strlen(keys[k]);
 		char binary[48], xml[64];
@@ -8045,6 +8062,47 @@ native_switch_rotation_lock_release(proc_t p, user_addr_t scratch, mount_t data_
 	if (!error) error = native_switch_watchdog_file(p, scratch, marker, "", 0, data_mount, 0, 0, 0644);
 	printf("SwitchRawBoot: rotation lock of earlier builds released once: %u key%s renamed (%d)\n", renamed,
 	    renamed == 1 ? "" : "s", error);
+}
+
+/* SpringBoard's never-dim keys, SBDisableAutoDim and SBDontDimOrLockOnAC, are not ours to set: the user's Auto-Lock
+ * decides, as on an iPad. With them the panel stayed lit after powerd had reported the user gone (no HID event for
+ * 300 s), and DAS ran its heavy maintenance under a user who was still looking. Kernels before the managed plist, and
+ * the first image builder, wrote them into the user's own com.apple.springboard plist, which SpringBoard has kept and
+ * rewritten since: they come out of it once, everything else in it untouched (the file goes if they were all it held).
+ * Then the marker. Before cfprefsd runs (launchd's exec). An I/O failure or a plist this cannot edit is logged, and
+ * without the marker the next boot tries again. */
+static void
+native_switch_never_dim_release(proc_t p, user_addr_t scratch, mount_t data_mount)
+{
+	static const char plist[] = "/private/var/mobile/Library/Preferences/com.apple.springboard.plist",
+	    marker[] = "/private/var/Switch/never-dim-released";
+	static const char *const keys[] = {"SBDisableAutoDim", "SBDontDimOrLockOnAC"};
+	static const char *const results[] = {"none there", "removed", "removed with the file", "plist unreadable"};
+	vnode_t vp = NULLVP;
+	if (!vnode_lookup(marker, 0, &vp, vfs_context_current())) {
+		vnode_put(vp);
+		return;
+	}
+	char *bytes = NULL;
+	int length = 0, error = native_switch_read_data_file(p, plist, data_mount, &bytes, &length);
+	size_t edited = (size_t)length;
+	enum switch_prefs_result result = SWITCH_PREFS_UNCHANGED;
+	if (bytes) result = switch_prefs_drop_keys((uint8_t *)bytes, &edited, keys, sizeof(keys) / sizeof(keys[0]));
+	if (result == SWITCH_PREFS_DROPPED) {
+		error = native_switch_watchdog_file(p, scratch, plist, bytes, (int)edited, data_mount, 501, 501, 0600);
+	} else if (result == SWITCH_PREFS_EMPTY) {
+		struct unlink_args request = {.path = scratch + 0x900};
+		int32_t unlinked = 0;
+		error = copyout(plist, request.path, sizeof(plist));
+		if (!error) error = native_switch_unlink(p, &request, &unlinked);
+	}
+	if (bytes) kfree_data(bytes, (vm_size_t)length);
+	if (error == ENOENT) error = 0;  /* no SpringBoard plist yet */
+	if (!error && result != SWITCH_PREFS_UNREADABLE) {
+		error = native_switch_mkdir(p, scratch, "/private/var/Switch", 0, 0755);
+		if (!error) error = native_switch_watchdog_file(p, scratch, marker, "", 0, data_mount, 0, 0, 0644);
+	}
+	printf("SwitchRawBoot: never-dim keys of earlier builds: %s (%d)\n", results[result], error);
 }
 
 /* MobileGestalt caches its answers (DisplayBootRotation among them) keyed by the OS build alone, so an answer from the
@@ -8119,6 +8177,48 @@ native_switch_gamut_cache(proc_t p, user_addr_t scratch, mount_t data_mount)
 	printf("SwitchRawBoot: display gamut %s: MobileGestalt cache dropped (%d)\n", srgb ? "sRGB" : "not sRGB", error);
 }
 
+/* MobileGestalt answers what it reads of /product (GraphicsFeatureSetClass and its fallbacks, the memory class, the
+ * artwork traits), of /arm-io (soc-generation, which gates its codec answers) and of the root (platform-name, its
+ * HardwarePlatform) from the same build-keyed cache, so an answer made before a package changed one of them outlives the
+ * change. A digest of the three nodes' own properties is kept in a marker, and the cache is dropped once whenever it
+ * differs. Failures are logged only; the next boot tries again. */
+static void
+native_switch_identity_cache(proc_t p, user_addr_t scratch, mount_t data_mount)
+{
+	static const char cache[] = "/private/var/containers/Shared/SystemGroup/systemgroup.com.apple.mobilegestaltcache/"
+	    "Library/Caches/com.apple.MobileGestalt.plist", marker[] = "/private/var/Switch/mobilegestalt-identity";
+	static const char *const nodes[] = {"/", "/product", "/arm-io"};
+	uint64_t digest = 0xcbf29ce484222325ULL;
+	for (unsigned int n = 0; n < sizeof(nodes) / sizeof(nodes[0]); ++n) {
+		DTEntry node;
+		OpaqueDTPropertyIterator properties;
+		if (SecureDTLookupEntry(0, nodes[n], &node) != kSuccess ||
+		    SecureDTInitPropertyIterator(node, &properties) != kSuccess) continue;
+		char const *name = NULL;
+		while (SecureDTIterateProperties(&properties, &name) == kSuccess) {
+			void const *value = NULL;
+			unsigned int size = 0;
+			if (SecureDTGetProperty(node, name, &value, &size) != kSuccess) continue;
+			const uint8_t *bytes[2] = {(const uint8_t *)name, value};
+			const size_t lengths[2] = {strlen(name) + 1, size};
+			for (unsigned int part = 0; part < 2; ++part) {
+				for (size_t i = 0; i < lengths[part]; ++i) digest = (digest ^ bytes[part][i]) * 0x100000001b3ULL;
+			}
+		}
+	}
+	char text[24];
+	const int length = snprintf(text, sizeof(text), "%016llx\n", digest);
+	if (native_switch_file_unchanged(marker, text, length, data_mount, 0, 0, 0644)) return;
+	struct unlink_args request = {.path = scratch + 0x900};
+	int32_t result = 0;
+	int error = copyout(cache, request.path, sizeof(cache));
+	if (!error) error = native_switch_unlink(p, &request, &result);
+	if (error == ENOENT) error = 0;
+	if (!error) error = native_switch_mkdir(p, scratch, "/private/var/Switch", 0, 0755);
+	if (!error) error = native_switch_watchdog_file(p, scratch, marker, text, length, data_mount, 0, 0, 0644);
+	printf("SwitchRawBoot: identity %016llx: MobileGestalt cache dropped (%d)\n", digest, error);
+}
+
 /* The ambient light sensor (drivers/SwitchBrightness/SwitchALS.cpp): MobileGestalt's ambient-light-sensor is an
  * IOServiceGetMatchingService on {PrimaryUsagePage 0xff00, PrimaryUsage 4}, which the sensor's HID service answers, and
  * Settings' Auto-Brightness switch and CoreBrightness's DisplayBrightnessAuto both gate on it. The answer is precacheable
@@ -8175,7 +8275,7 @@ native_switch_ui_scale_cache(proc_t p, user_addr_t scratch, mount_t data_mount)
 			continue;
 		}
 		vnode_put(vp);
-		if (each == scale) current = true;
+		if (switch_ui_scale_same(each, scale)) current = true;
 		else other = true;
 	}
 	if (switch_ui_scale_is_unit(scale) ? !other : current) return;
@@ -8185,7 +8285,7 @@ native_switch_ui_scale_cache(proc_t p, user_addr_t scratch, mount_t data_mount)
 	if (!error) error = native_switch_unlink(p, &request, &result);
 	if (error == ENOENT) error = 0;
 	for (unsigned i = 0; i < SWITCH_UI_SCALES && !error; i++) {
-		if (markers[i][0] == '\0' || &switch_ui_scales[i] == scale) continue;
+		if (markers[i][0] == '\0' || switch_ui_scale_same(&switch_ui_scales[i], scale)) continue;
 		error = copyout(markers[i], request.path, strlen(markers[i]) + 1);
 		if (!error) error = native_switch_unlink(p, &request, &result);
 	}
@@ -8283,8 +8383,7 @@ native_switch_setup_state(proc_t p, user_addr_t scratch, mount_t data_mount)
  * interface orientation the Switch rotates to. */
 #define SWITCH_SPRINGBOARD "<key>BKNoWatchdogs</key><true/>" \
 	"<key>FBLaunchWatchdogExceptions</key><dict><key>com.apple.purplebuddy</key><real>100</real></dict>" \
-	"<key>MCForceShowCloudConfigurationUI</key><false/><key>SBDisableAutoDim</key><true/>" \
-	"<key>SBDontDimOrLockOnAC</key><true/><key>SBDisableIdleSleep</key><false/>" \
+	"<key>MCForceShowCloudConfigurationUI</key><false/><key>SBDisableIdleSleep</key><false/>" \
 	"<key>SBDisableNaturalVolumeButtonArrangement</key><true/>"
 	static const struct {
 		const char *name, *body;
@@ -8369,7 +8468,9 @@ native_switch_setup_state(proc_t p, user_addr_t scratch, mount_t data_mount)
 	else {
 		native_switch_portrait_cache(p, scratch, data_mount);
 		native_switch_rotation_lock_release(p, scratch, data_mount);
+		native_switch_never_dim_release(p, scratch, data_mount);
 		native_switch_gamut_cache(p, scratch, data_mount);
+		native_switch_identity_cache(p, scratch, data_mount);
 		native_switch_als_cache(p, scratch, data_mount);
 		native_switch_ui_scale_cache(p, scratch, data_mount);
 		native_switch_portrait_display(p, scratch, data_mount);
@@ -8425,14 +8526,13 @@ native_switch_watchdog_policy(proc_t p, user_addr_t scratch)
 	 * with them: there the three deadlocked each other). locationd runs since r17: third-party apps' CoreMotion
 	 * (CMMotionManager accelerometer, gyroscope and device motion) is served by it over XPC from the console IMU's
 	 * HID services (drivers/SwitchMotion), and r8a's bluetoothd already asked for it ("failed lookup:
-	 * com.apple.locationd.registration"). With identityservicesd off, its lookups of it fail at once (a disabled job is
-	 * refused at import), as bluetoothd's do. CommCenter runs: a device tree without a baseband node loads
-	 * com.apple.CommCenter-noncellular.plist, as on a Wi-Fi iPad, and SpringBoard's SBTelephonyManager expects it
-	 * (without it, it retried com.apple.commcenter.xpc on its main thread once a second). */
+	 * com.apple.locationd.registration"). identityservicesd runs too: imagent, homed, wifid, sharingd, bluetoothd and
+	 * WirelessRadioManager look it up at every boot, as on any iPad. CommCenter runs: a device tree without a baseband
+	 * node loads com.apple.CommCenter-noncellular.plist, as on a Wi-Fi iPad, and SpringBoard's SBTelephonyManager
+	 * expects it (without it, it retried com.apple.commcenter.xpc on its main thread once a second). */
 #define NATIVE_SWITCH_POLICY_HEAD "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n" \
 	    "<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n" \
-	    "<plist version=\"1.0\"><dict>" \
-	    "<key>com.apple.identityservicesd</key><true/>"
+	    "<plist version=\"1.0\"><dict>"
 	/* Bluetooth needs drivers/SwitchBluetooth, which boot-arg switch-no-bt keeps off (the BlueTool stand-in in the
 	 * overlay and bluetoothd's transport, native_switch_exec_environment, follow it). Without it bluetoothd has no
 	 * controller and stays disabled, and so does audiomxd: its Bluetooth plug-in would retry bluetoothd's
@@ -8446,49 +8546,25 @@ native_switch_watchdog_policy(proc_t p, user_addr_t scratch)
 	 * _PanicOnCrash relaunch panicked. A crash of watchdogd now takes no panic (kern_exit.c). */
 #define NATIVE_SWITCH_POLICY_WATCHDOGD "<key>com.apple.watchdogd</key><true/>"
 #define NATIVE_SWITCH_POLICY_AUDIO "<key>com.apple.audiomxd</key><true/>"
-#define NATIVE_SWITCH_POLICY_TAIL "<key>com.apple.photoanalysisd</key><true/>" \
-	    "<key>com.apple.mediaanalysisd</key><true/>" \
-	    "<key>com.apple.mediastream.mstreamd</key><true/>" \
-	    "<key>com.apple.icloud.searchpartyd</key><true/>" \
-	    "<key>com.apple.findmy.findmybeaconingd</key><true/>" \
-	    "<key>com.apple.familycircled</key><true/>" \
-	    "<key>com.apple.financed</key><true/>" \
-	    "<key>com.apple.softwareupdateservicesd</key><true/>" \
-	    "<key>com.apple.ndoagent</key><true/>" \
-	    "<key>com.apple.biomesyncd</key><true/>" \
-	    "<key>com.apple.email.maild</key><true/>" \
-	    "<key>com.apple.amsengagementd</key><true/>" \
-	    "<key>com.apple.adid</key><true/>" \
-	    "<key>com.apple.eyereliefd</key><true/>" \
+	/* maild and financed are not here, as on a Wi-Fi iPad with no account: without maild, Mail retries it about 460
+	 * times a second for minutes after every launch, and without financed FinanceKit traps destinationd at each boot.
+	 * Every other job J120 loads runs as it does there (11-07); one that spins here is a contract of ours to fix, not
+	 * a job to turn off. softwareupdateservicesd stays off: an OTA must never replace this system. FairPlay is out of
+	 * scope (FairPlayIOKit is not prelinked), so fairplayd stays off with the FairPlay daemons that start on their own:
+	 * adid (CoreADI) and lskdd. lskdd's daily XPC activity launches it, it exits (92) before completing the activity,
+	 * and launchd respawns it once a second. Jobs limited to device-tree nodes J120 has not (SepUpdateTimer and
+	 * iomfb_bics_daemon on "hilo", biometrickitd.mesa on "mesa") are refused by launchd itself, as on J120. */
+#define NATIVE_SWITCH_POLICY_TAIL "<key>com.apple.softwareupdateservicesd</key><true/>" \
 	    "<key>com.apple.fairplayd.A2</key><true/>" \
-	    "<key>com.apple.passd</key><true/>" \
-	    "<key>com.apple.mobile.obliteration</key><true/>" \
-	    "<key>com.apple.coreduetd</key><true/>" \
-	    NATIVE_SWITCH_POLICY_NO_HARDWARE \
+	    "<key>com.apple.adid</key><true/>" \
+	    "<key>com.apple.lskdd</key><true/>" \
 	    "</dict></plist>\n"
-	/* No such hardware on the Switch (approved 11-04): NFC, secure element, Tap to Pay, ID wallet, Face ID, UWB,
-	 * multitouch calibration, hotspot, cellular helper, smart charging, Apple display FDR/BICS; and tailspind (always-on
-	 * kdebug tracing) and accessoryupdaterd. This file is the only override database 21H461 launchd reads: no
-	 * disabled.<uid>.plist exists. launchd reads it once, between its finish-demo-restore and sysstatuscheck boot tasks.
-	 * The user/501 domain shares the system domain's dictionary, so one bare-label key covers both domains. A job disabled
-	 * here is refused at import (error 119), so nothing spawns it, whether speculative, xpc event or mach lookup.
-	 * Not here: ptpd and atc (USB), and WebBookmarks.webbookmarksd (Safari needs it; the cryptex launch-constraint
-	 * fix ended its respawn loop). */
-#define NATIVE_SWITCH_POLICY_NO_HARDWARE "<key>com.apple.nfcd</key><true/>" \
-	    "<key>com.apple.seld</key><true/>" \
-	    "<key>com.apple.seserviced</key><true/>" \
-	    "<key>com.apple.softposreaderd</key><true/>" \
-	    "<key>com.apple.coreidvd</key><true/>" \
-	    "<key>com.apple.biometrickitd.mesa</key><true/>" \
-	    "<key>com.apple.nearbyd</key><true/>" \
-	    "<key>com.apple.mtmergeprops</key><true/>" \
-	    "<key>com.apple.MobileInternetSharing</key><true/>" \
-	    "<key>com.apple.CommCenterMobileHelper</key><true/>" \
-	    "<key>com.apple.PowerUIAgent</key><true/>" \
-	    "<key>com.apple.iomfb_fdr_loader</key><true/>" \
-	    "<key>com.apple.iomfb_bics_daemon</key><true/>" \
-	    "<key>com.apple.tailspind</key><true/>" \
-	    "<key>com.apple.accessoryupdaterd</key><true/>"
+	/* This file is the only override database 21H461 launchd reads: no disabled.<uid>.plist exists. launchd reads it
+	 * once, between its finish-demo-restore and sysstatuscheck boot tasks. The user/501 domain shares the system
+	 * domain's dictionary, so one bare-label key covers both domains. A job disabled here is refused at import (error
+	 * 119), so nothing spawns it, whether speculative, xpc event or mach lookup. Jobs for hardware the Switch lacks
+	 * (NFC, secure element, Face ID, UWB, hotspot...) run as on J120, which loads them too: their plists carry no
+	 * hardware gate, and each idles there without its hardware. */
 	static const char head[] = NATIVE_SWITCH_POLICY_HEAD, bluetooth_off[] = NATIVE_SWITCH_POLICY_BLUETOOTH,
 	    audio_off[] = NATIVE_SWITCH_POLICY_AUDIO, watchdogd_off[] = NATIVE_SWITCH_POLICY_WATCHDOGD,
 	    tail[] = NATIVE_SWITCH_POLICY_TAIL;
@@ -8498,7 +8574,6 @@ native_switch_watchdog_policy(proc_t p, user_addr_t scratch)
 #undef NATIVE_SWITCH_POLICY_WATCHDOGD
 #undef NATIVE_SWITCH_POLICY_AUDIO
 #undef NATIVE_SWITCH_POLICY_TAIL
-#undef NATIVE_SWITCH_POLICY_NO_HARDWARE
 	const int with_bluetooth = !native_switch_disabled("switch-no-bt");
 	int policy_size = 0;
 	static const char *const paths[] = {

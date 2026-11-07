@@ -59,6 +59,14 @@ inline bool a3()
     return getenv("FRAME_A3") != nullptr;
 }
 
+// FRAME_DS: the main pass draws Depth32Float_Stencil8 states (ds=260/260) beside a memoryless attachment of that format, cleared,
+// under the depth/stencil states of dsSpec and changing stencil references; its first color is memoryless too (the raw path
+// renders no pitch color beside a depth/stencil attachment)
+inline bool depthStencil()
+{
+    return getenv("FRAME_DS") != nullptr;
+}
+
 struct State {
     std::string line, key;
     bool uber, blur, extra = false;
@@ -91,6 +99,9 @@ inline std::vector<State> states(const char *corpusPath)
             continue;
         State s{l, key(l), l.find("v fixed_vert_lph_spc") != std::string::npos,
                 l.find("v downsample_blur_vert_lph") != std::string::npos};
+        // the blur passes' states have no depth/stencil formats, the main pass's those of FRAME_DS
+        if (l.find(s.blur || !depthStencil() ? " ds=0/0 " : " ds=260/260 ") == std::string::npos)
+            continue;
         // FRAME_ALL_STATES: every state that is not a blur goes in the main pass's rotation (else only the uber states)
         if (getenv("FRAME_ALL_STATES") && !s.blur)
             s.uber = true;
@@ -142,6 +153,8 @@ enum Tex : int {
     IMAGE2,
     IMAGE3,
     A3TARGET,
+    DS_COLOR,
+    ZETA,
     TEX_COUNT
 };
 
@@ -177,6 +190,10 @@ inline TexDesc texture(int t)
         return {1280, 720, true, false, false};
     case A3TARGET:
         return {1280, 720, false, false, true, 55};
+    case DS_COLOR:
+        return {1280, 720, false, true, true};
+    case ZETA:
+        return {1280, 720, false, true, true, 260};
     default:
         return {t == IMAGE2 && pitchShapes("image") ? 132 : 128, 128, t == IMAGE2, false, false};
     }
@@ -203,6 +220,32 @@ struct Bytes {
     uint32_t length;
 };
 
+// An MTLDepthStencilDescriptor, enums as Metal numbers them: the depth compare and write, then per face (front, back) the stencil
+// compare, failure, depth failure and pass operations and the read and write masks
+struct DsSpec {
+    uint8_t depthCompare;
+    bool depthWrite;
+    uint8_t face[2][4];
+    uint32_t readMask[2], writeMask[2];
+};
+
+constexpr unsigned kDsSpecs = 4;
+
+inline DsSpec dsSpec(unsigned i)
+{
+    static const DsSpec specs[kDsSpecs] = {
+        {7, false, {{7, 0, 0, 0}, {7, 0, 0, 0}}, {~0u, ~0u}, {~0u, ~0u}},     // Metal's default
+        {1, true, {{7, 0, 0, 2}, {7, 0, 0, 2}}, {0xff, 0xff}, {0xff, 0xff}},  // depth Less, stencil writes ref
+        {7,
+         false,
+         {{2, 0, 0, 3}, {5, 1, 5, 7}},
+         {0x0f, 0x3c},
+         {0x1f0, 0xf00f}},                                                 // stencil tests, masks wider than 8 bits
+        {6, false, {{0, 2, 0, 0}, {7, 0, 0, 0}}, {~0u, ~0u}, {~0u, ~0u}},  // depth GreaterEqual, front stencil Never
+    };
+    return specs[i % kDsSpecs];
+}
+
 struct Draw {
     int state;  // index into the uber or blur list
     bool blur;
@@ -211,13 +254,28 @@ struct Draw {
     int textures[16];                                             // Tex or -1
     int samplers[16];                                             // sampler spec index or -1
     uint32_t primitive = 4, first = 0, count = 4, instances = 1;  // MTLPrimitiveType (4 triangle strip)
+    int ds = -1;                                                  // dsSpec index set before it (-1: none set)
+    uint32_t stencilRef[2] = {};                                  // set before it where ds >= 0
+    // set before it where raster: MTLCullMode, MTLWinding, MTLTriangleFillMode
+    bool raster = false;
+    uint8_t cull = 0, winding = 0, fill = 0;
 };
+
+// FRAME_RASTER: the main pass's draws cull no face, the front or the back, wind clockwise or counter-clockwise, and some fill
+// with lines (Core Animation culls a layer that is not doubleSided)
+inline bool rasterState()
+{
+    return getenv("FRAME_RASTER") != nullptr;
+}
 
 struct Pass {
     int color[3];  // Tex (-1: none)
     int load[3];   // 0 dontCare 1 load 2 clear
     float clear[4];
     std::vector<Draw> draws;
+    int depth = -1;  // Tex of the depth/stencil attachment, both aspects cleared to clearDepth and clearStencil
+    double clearDepth = 1;
+    uint32_t clearStencil = 0;
 };
 
 struct Shape {
@@ -264,6 +322,12 @@ inline std::vector<Pass> passes(unsigned frameIndex, const Shape &s, size_t blur
         out.push_back(bp);
     }
     Pass mp{{frameIndex & 1 ? FB1 : FB0, MEMORYLESS, a3() ? A3TARGET : -1}, {2, 0, 2}, {0, 0, 0, 1}, {}};
+    if (depthStencil()) {
+        mp.color[0] = DS_COLOR;
+        mp.depth = ZETA;
+        mp.clearDepth = 0.75 + 0.125 * (frameIndex & 1);
+        mp.clearStencil = 0x1a5 + frameIndex;  // (Metal keeps the low 8 bits)
+    }
     for (unsigned i = 0; i < s.draws && uberCount; i++) {
         Draw d{int((i / 3) % std::min<size_t>(s.mainStates, uberCount)),
                false,
@@ -297,6 +361,17 @@ inline std::vector<Pass> passes(unsigned frameIndex, const Shape &s, size_t blur
         d.textures[4] = IMAGE2;
         d.textures[9] = IMAGE3;
         d.samplers[1] = 1;
+        if (rasterState()) {
+            d.raster = true;
+            d.cull = uint8_t(i % 3);
+            d.winding = uint8_t((i / 3) % 2);
+            d.fill = uint8_t(i % 7 == 3);
+        }
+        if (depthStencil() && i % 3 != 2) {
+            d.ds = int((i / 3) % kDsSpecs);
+            d.stencilRef[0] = (i * 37 + frameIndex) % 300;
+            d.stencilRef[1] = (i * 11) % 300;
+        }
         mp.draws.push_back(d);
     }
     out.push_back(mp);

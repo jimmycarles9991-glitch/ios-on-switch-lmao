@@ -9380,6 +9380,8 @@ pub struct FragmentShaderInfo {
     pub post_depth_coverage: bool,
     pub early_fragment_tests: bool,
     pub uses_sample_shading: bool,
+    pub interlock_mode: FragmentInterlockMode,
+    pub interlock_unordered: bool,
 }
 
 #[derive(Debug)]
@@ -9431,6 +9433,14 @@ pub struct TessellationInitShaderInfo {
     pub per_patch_attribute_count: u8,
     pub threads_per_patch: u8,
     pub common: TesselationCommonShaderInfo,
+}
+
+#[repr(u8)]
+#[derive(Clone, Copy, Debug)]
+pub enum FragmentInterlockMode {
+    Disabled = NAK_FS_INTERLOCK_MODE_DISABLED,
+    Pixel = NAK_FS_INTERLOCK_MODE_PIXEL,
+    Sample = NAK_FS_INTERLOCK_MODE_SAMPLE,
 }
 
 #[derive(Debug)]

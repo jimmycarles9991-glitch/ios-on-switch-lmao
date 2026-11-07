@@ -46,6 +46,8 @@ const struct nak_constant_offset_info nak_const_offsets_base = {
    .sample_masks_offset = nvk_root_descriptor_offset(draw.sample_masks),
    .printf_cb = 0,
    .printf_buffer_offset = nvk_root_descriptor_offset(printf_buffer_addr),
+   .interlock_ticket_buffer_cb = 0,
+   .interlock_ticket_buffer_offset = nvk_root_descriptor_offset(interlock_ticket_buffer),
 };
 
 const struct nak_constant_offset_info nak_const_offsets_turing_graphics = {
@@ -56,6 +58,9 @@ const struct nak_constant_offset_info nak_const_offsets_turing_graphics = {
    .printf_cb = NVK_HW_ROOT_TABLE_FIRST_CB +
                 nvk_hw_root_table_index(printf_buffer_addr),
    .printf_buffer_offset = nvk_hw_root_table_offset(printf_buffer_addr),
+   .interlock_ticket_buffer_cb = NVK_HW_ROOT_TABLE_FIRST_CB +
+                                 nvk_hw_root_table_index(interlock_ticket_buffer),
+   .interlock_ticket_buffer_offset = nvk_hw_root_table_offset(interlock_ticket_buffer),
 };
 static_assert(nvk_hw_root_table_index(draw.sample_locations) ==
               nvk_hw_root_table_index(draw.sample_masks),
@@ -764,6 +769,18 @@ mesa_to_nv9097_shader_type(mesa_shader_stage stage, bool has_task_shader)
    return mesa_to_nv9097[stage];
 }
 
+static uint32_t
+mesa_to_nvb197_interlock_mode(enum nak_fs_interlock_mode mode)
+{
+   STATIC_ASSERT(NAK_FS_INTERLOCK_MODE_DISABLED ==
+                 NVB197_SET_PIXEL_SHADER_INTERLOCK_CONTROL_TILE_COALESCER_MODE_NO_CONFLICT_DETECT);
+   STATIC_ASSERT(NAK_FS_INTERLOCK_MODE_SAMPLE ==
+                 NVB197_SET_PIXEL_SHADER_INTERLOCK_CONTROL_TILE_COALESCER_MODE_CONFLICT_DETECT_SAMPLE);
+   STATIC_ASSERT(NAK_FS_INTERLOCK_MODE_PIXEL ==
+                 NVB197_SET_PIXEL_SHADER_INTERLOCK_CONTROL_TILE_COALESCER_MODE_CONFLICT_DETECT_PIXEL);
+   return mode;
+}
+
 uint32_t
 nvk_pipeline_bind_group(mesa_shader_stage stage, bool has_task_shader)
 {
@@ -794,7 +811,7 @@ nvk_max_shader_push_dw(const struct nvk_physical_device *pdev,
       max_dw_count += 2;
 
    if (stage == MESA_SHADER_FRAGMENT)
-      max_dw_count += 13;
+      max_dw_count += 15;
 
    if (stage == MESA_SHADER_TASK)
       max_dw_count += 2;
@@ -969,6 +986,24 @@ nvk_shader_fill_push(struct nvk_device *dev,
          .z_min_unbounded_enable = shader->info.fs.writes_depth,
          .z_max_unbounded_enable = shader->info.fs.writes_depth,
       });
+
+      if (pdev->info.cls_eng3d >= MAXWELL_B &&
+          nvk_device_fragment_interlock(dev)) {
+         max_dw_count += 2;
+
+         int coalescer_mode = shader->info.fs.interlock_mode;
+         if (shader->sample_shading_enable && coalescer_mode == NAK_FS_INTERLOCK_MODE_PIXEL) {
+            /* Force sample interlock even for pixel locks when
+             * sample_shading is enabled (otherwise the GPU faults?)
+             */
+            coalescer_mode = NAK_FS_INTERLOCK_MODE_SAMPLE;
+         }
+         P_IMMD(p, NVB197, SET_PIXEL_SHADER_INTERLOCK_CONTROL, {
+            .tile_coalescer_mode = mesa_to_nvb197_interlock_mode(coalescer_mode),
+            .tile_coalescer_tile_size = TILE_COALESCER_TILE_SIZE_TC_TILE_SIZE_16X16,
+            .tile_coalescer_fragment_order = shader->info.fs.interlock_unordered,
+         });
+      }
 
       if (pdev->info.cls_eng3d >= TURING_A) {
          /* From the Vulkan 1.3.297 spec:

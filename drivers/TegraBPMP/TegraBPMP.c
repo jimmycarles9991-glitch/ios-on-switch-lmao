@@ -292,6 +292,8 @@ int tegra_bpmp_emc_boot(unsigned int khz, char *line, unsigned long size)
  */
 #define EMC_SUSPEND_HZ 204000000LL
 static s64 emc_resume_hz;
+/* From SC7 entry to its resume: the governor's rate changes are refused, so SC7 enters and leaves at the rates above. */
+static int emc_frozen;
 
 int tegra_bpmp_sc7_suspend(char *line, unsigned long size)
 {
@@ -301,6 +303,7 @@ int tegra_bpmp_sc7_suspend(char *line, unsigned long size)
 	int err;
 
 	emc_resume_hz = 0;
+	__atomic_store_n(&emc_frozen, 1, __ATOMIC_RELEASE);
 	err = mailbox_up(line, size);
 	if (err)
 		return err;
@@ -339,6 +342,7 @@ int tegra_bpmp_sc7_resume(char *line, unsigned long size)
 	int err;
 
 	if (mailbox_state) {
+		__atomic_store_n(&emc_frozen, 0, __ATOMIC_RELEASE);
 		snprintf(line, size, "BPMP mailbox not up");
 		return 0;
 	}
@@ -348,7 +352,55 @@ int tegra_bpmp_sc7_resume(char *line, unsigned long size)
 		err = clk_rate(CMD_CLK_SET_RATE, emc_resume_hz, &after);
 	if (!err)
 		err = clk_get_rate(&after);
+	__atomic_store_n(&emc_frozen, 0, __ATOMIC_RELEASE);
 	snprintf(line, size, "EMC %lld -> %lld MHz after SC7 (MRQ_CLK %d)", now / 1000000,
 		 after / 1000000, err);
+	return err;
+}
+
+int tegra_bpmp_emc_rates(unsigned int *khz, unsigned int max)
+{
+	struct mrq_emc_dvfs_table_response table;
+	unsigned int i, n = 0;
+	int err;
+
+	if (mailbox_state)
+		return mailbox_state < 0 ? mailbox_state : -ENODEV;
+	memset(&table, 0, sizeof(table));
+	err = tegra_bpmp_send_receive(MRQ_EMC_DVFS_TABLE, NULL, 0, &table, sizeof(table));
+	if (err)
+		return err;
+	if (table.num_pairs == 0 || table.num_pairs > EMC_DVFS_TABLE_MAX_SIZE)
+		return -EINVAL;
+	for (i = 0; i < table.num_pairs && n < max; i++)
+		khz[n++] = table.pairs[i].freq;
+	return (int)n;
+}
+
+int tegra_bpmp_emc_get(unsigned int *khz)
+{
+	s64 now = 0;
+	int err;
+
+	if (mailbox_state)
+		return mailbox_state < 0 ? mailbox_state : -ENODEV;
+	err = clk_get_rate(&now);
+	if (!err)
+		*khz = (unsigned int)(now / 1000);
+	return err;
+}
+
+int tegra_bpmp_emc_set(unsigned int khz, unsigned int *now_khz)
+{
+	s64 after = 0;
+	int err;
+
+	if (mailbox_state)
+		return mailbox_state < 0 ? mailbox_state : -ENODEV;
+	if (__atomic_load_n(&emc_frozen, __ATOMIC_ACQUIRE))
+		return -EBUSY;
+	err = clk_rate(CMD_CLK_SET_RATE, (s64)khz * 1000, &after);
+	if (!err)
+		*now_khz = (unsigned int)(after / 1000);
 	return err;
 }

@@ -1161,9 +1161,10 @@ static void expectCoreMotionTakesEvery(const std::string &what)
 }
 
 // The orientation detector (SwitchMotion.cpp file comment): with the panel lit the accelerometer runs at 25 Hz for it
-// alone, in 5-record FIFO batches. A stable orientation is announced, again once the console comes to rest after
-// moving, and a new one as soon as it has held 0.4 s; with a client at 200 Hz the detector still sees 25 Hz. Panel off:
-// nothing converts. Panel on: the detector starts afresh and announces its first stable orientation.
+// alone, in 5-record FIFO batches. The first sample's orientation is announced at once, again once the console comes
+// to rest after moving, and a new one as soon as it has held 0.4 s; with a client at 200 Hz the detector still sees
+// 25 Hz. Panel off: nothing converts. Panel on: the detector starts afresh and announces its first sample's
+// orientation.
 static void icm42607Orientation()
 {
     const unsigned landscapeRight = 1u << 4, landscapeLeft = 1u << 3, portrait = 1u << 1;
@@ -1196,10 +1197,11 @@ static void icm42607Orientation()
     const int16_t handheld[3] = {4096, 0, 0}, upright[3] = {0, -4096, 0}, flipped[3] = {-4096, 0, 0};
     const int16_t jolt[3] = {4096, 2048, 0};
     run(handheld, 5);
-    check(announced.empty(), "orientation: nothing before the filter settles and 0.4 s agree");
-    run(handheld, 15);
-    check(announced == std::vector<uint8_t>({(uint8_t)landscapeRight}), "orientation: landscape right announced once");
+    check(announced == std::vector<uint8_t>({(uint8_t)landscapeRight}),
+          "orientation: the first sample's orientation announced at once (the filter seeded from it)");
     expectLog("os_log: SwitchMotion: orientation landscape right (4), was unknown", "orientation first");
+    run(handheld, 15);
+    check(announced.size() == 1, "orientation: landscape right announced once");
     run(handheld, 25);
     check(announced.size() == 1, "orientation: nothing more while it stays still");
     run(jolt, 1);
@@ -1240,7 +1242,7 @@ static void icm42607Orientation()
     expectLog("os_log: SwitchMotion: off", "orientation panel off");
     check(!dataReady()->enabled && !IOTimerEventSource::last->armed,
           "orientation: panel off, no interrupt, no watchdog");
-    // Panel on: afresh, the first stable orientation announced although it did not change.
+    // Panel on: afresh, the first sample's orientation announced although it did not change.
     switch_motion_display_power(true);
     gChip->ops.clear();
     gNow += 30000000;

@@ -1,0 +1,87 @@
+{
+  "class": "IOSurfaceRootUserClient",
+  "kind": "21H461",
+  "size": "0x0",
+  "first_slot": 0,
+  "slots": 0,
+  "slide": "-0x1000000",
+  "layout": {},
+  "fields": {},
+  "constants": {
+    "clientCapacity": "0x108",
+    "clientTable": "0x100",
+    "clientTableLock": "0xd8",
+    "createOutputAllocSize": "0x20",
+    "createOutputSize": "0xc68",
+    "createOutputSurfaceID": "0x18",
+    "createSurfaceClientMemorySelector": "0x7",
+    "createSurfaceFastPathSelector": "0x6",
+    "createSurfaceSelector": "0x0",
+    "sharedClient": "0x110"
+  },
+  "addresses": {},
+  "hints": {
+    "constants": {
+      "clientCapacity": {
+        "value": "0x108",
+        "at": "0xfffffff005bb1d18",
+        "word": "b9410809",
+        "why": "ldr w9, [x0, #0x108] in get_surface_client: the id must be below it"
+      },
+      "clientTable": {
+        "value": "0x100",
+        "at": "0xfffffff005bb1d24",
+        "word": "f9408008",
+        "why": "ldr x8, [x0, #0x100] in get_surface_client(user client, id, &client) (0xfffffff005bb1d0c), then ldr x8, [x8 + id * 8]; set_surface_handle (\"IOSurfaceRootUserClient::set_surface_handle asked to set handle %08x that was not free: %p\") stores into the same slot"
+      },
+      "clientTableLock": {
+        "value": "0xd8",
+        "at": "0xfffffff005bb1e00",
+        "word": "f9406c00",
+        "why": "ldr x0, [x0, #0xd8] and then lck_mtx_lock(x0): copy_surface_client(user client, id) takes the table lock before get_surface_client"
+      },
+      "createOutputAllocSize": {
+        "value": "0x20",
+        "at": "0xfffffff005ba5d0c",
+        "word": "f90012c8",
+        "why": "str x8, [x22, #0x20] in the reply fill, x8 the surface's +0x90 (the allocation size); IOSurfaceClientGetAllocSize reads +0x88 of the framework's client"
+      },
+      "createOutputSize": {
+        "value": "0xc68",
+        "at": "0xfffffff005ba5ce8",
+        "word": "52818d01",
+        "why": "mov w1, #0xc68: the reply fill (0xfffffff005ba5cb4) zeroes the reply; the dispatch entries check 0xc68 as the structure output size, and IOSurface.framework copies 0xc68 bytes into its client"
+      },
+      "createOutputSurfaceID": {
+        "value": "0x18",
+        "at": "0xfffffff005ba5d04",
+        "word": "b9001ac8",
+        "why": "str w8, [x22, #0x18] in the reply fill, w8 the IOSurfaceClient's +0x38 (the surface ID); IOSurface.framework keeps the reply at +0x68 of its client and IOSurfaceClientGetID reads +0x80"
+      },
+      "createSurfaceClientMemorySelector": {
+        "value": "0x7",
+        "at": "0xfffffff006d3c0b0",
+        "word": "05bade18",
+        "why": "the low word of entry 7: 0xfffffff005bade18 (2 scalars in, 0xc68 out) into 0xfffffff005baff84 (IOSurfaceAddress and IOSurfaceAllocSize from the scalars), the same reply fill; IOSurface.framework's IOSurfaceClientWrapClientMemory calls selector 7"
+      },
+      "createSurfaceFastPathSelector": {
+        "value": "0x6",
+        "at": "0xfffffff006d3c088",
+        "word": "05bade0c",
+        "why": "the low word of entry 6: 0xfffffff005bade0c (a 0x20-byte structure in, 0xc68 out) into 0xfffffff005bafd90, which builds the properties (IOSurfaceAddress among them), creates the surface and calls the same reply fill; IOSurface.framework's IOSurfaceClientWrapClientImage calls selector 6"
+      },
+      "createSurfaceSelector": {
+        "value": "0x0",
+        "at": "0xfffffff006d3bf98",
+        "word": "05badcd0",
+        "why": "the low word of entry 0 of the IOExternalMethodDispatch2022 table (0xfffffff006d3bf98, 40-byte entries): s_create_surface at 0xfffffff005badcd0 (1 scalar, a variable structure in, 0xc68 out), which reaches the create core 0xfffffff005baf3f4 and the reply fill 0xfffffff005ba5cb4; IOSurface.framework's IOSurfaceClientCreateChild calls IOConnectCallMethod with selector 0"
+      },
+      "sharedClient": {
+        "value": "0x110",
+        "at": "0xfffffff005bb1d88",
+        "word": "f940880a",
+        "why": "ldr x10, [x0, #0x110] in get_surface_client, compared with the found client's +0x10 (a panic when they differ); IOSurfaceClient's factory takes it at create and lookup"
+      }
+    }
+  }
+}

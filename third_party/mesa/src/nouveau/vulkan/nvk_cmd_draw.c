@@ -695,6 +695,23 @@ nvk_push_draw_state_init(struct nvk_queue *queue, struct nv_push *p)
    for (uint32_t dw = 0; dw < NVK_DRAW_CB0_SIZE / 4; dw++)
       P_INLINE_DATA(p, 0);
 
+   if (queue->fsi_memory != NULL) {
+      const uint64_t ticket_buffer = queue->fsi_memory->va->addr;
+      if (nvk_use_hw_root_table(&pdev->info, true)) {
+         P_1INC(p, NVC597, SET_ROOT_TABLE_SELECTOR);
+         P_NVC597_SET_ROOT_TABLE_SELECTOR(p, {
+            .root_table = nvk_hw_root_table_index(interlock_ticket_buffer),
+            .offset = nvk_hw_root_table_offset(interlock_ticket_buffer),
+         });
+      } else {
+         P_1INC(p, NV9097, LOAD_CONSTANT_BUFFER_OFFSET);
+         P_NV9097_LOAD_CONSTANT_BUFFER_OFFSET(
+            p, nvk_root_descriptor_offset(interlock_ticket_buffer));
+      }
+      P_INLINE_DATA(p, ticket_buffer);
+      P_INLINE_DATA(p, ticket_buffer >> 32);
+   }
+
    /* These are shadowed in cb0 so they need to be zeroed as well for
     * consistency.
     */

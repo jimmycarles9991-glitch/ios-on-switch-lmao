@@ -136,6 +136,13 @@ struct Limits {
     uint32_t maxLayers = 2;
 };
 
+// The row and plane-base alignment published for every surface iPadOS sizes for this display (Core Animation's
+// framebuffers through update_display_limits, VideoToolbox's and MediaToolbox's outputs through
+// FigGetAlignmentForIOSurfaceOutput): VIC's 256-byte pitch, so any of them goes to VIC or window B as allocated. Multiples
+// of Limits' strideAlignment and planeBaseAlignment, so everything validateSwap takes stays taken, and of the 128 the GPU
+// renders linear rows in place at. Fixed from start: Core Animation and VideoToolbox read them once.
+constexpr uint32_t kPublishedRowAlignment = 256, kPublishedBaseAlignment = 256;
+
 // --- Validation ---------------------------------------------------------------------------------------------------------
 // The reasons a swap is refused (the stats' "rejected ... (reason N)"; 2-4 as before r18).
 enum Reason : unsigned {

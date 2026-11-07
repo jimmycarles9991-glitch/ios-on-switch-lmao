@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: BSD-2-Clause-Patent
-// The direct-scanout gate's first stages (DESIGN-direct-scanout.md, D1-D2): does DC A read through the SMMU, and read the
+// The direct-scanout gate: does DC A read through the SMMU, and read the
 // right bytes? Run once at boot on the frame window A scans anyway, then everything goes back: the swgroup to bypass, window A
 // to the buffer's physical address, the CRC unit off, the one pixel it changed restored. Nothing switches to direct scanout
 // here; the line it logs is the proof (or the step that failed) the next stage needs.

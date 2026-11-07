@@ -4,6 +4,9 @@
  */
 
 #include "nvkmd_darwin.h"
+#define DARWIN_ANY_CONN struct nvkmd_darwin_conn
+#include "nvkmd_darwin_wait_any.h"
+#include "nvkmd_darwin_surfaces.h"
 
 #include "nv_device_info.h"
 #include "util/bitscan.h"
@@ -121,6 +124,7 @@ darwin_open(struct vk_object_base *log_obj, struct nvkmd_darwin_conn *c,
                        kr, kr == KERN_SUCCESS ? info->abi_version : 0);
    }
    c->kernel_map = (info->flags & TegraGM20BInfoKernelMap) != 0;
+   c->exec_surfaces = (info->flags & TegraGM20BInfoExecSurfaces) != 0;
 
    return VK_SUCCESS;
 }
@@ -175,6 +179,75 @@ darwin_unmap(const struct nvkmd_darwin_conn *c, uint32_t token,
       return;
    }
    IOConnectUnmapMemory64(c->conn, token, mach_task_self(), addr);
+}
+
+/* The process's connection: NVK's first device and the plugin's raw GM20B
+ * path share it (switch_nvk_connection), whichever opens it first.
+ */
+static struct {
+   pthread_mutex_t lock;
+   uint32_t refs;
+   bool dev_claimed;
+   struct nvkmd_darwin_conn conn;
+   struct TegraGM20BAbiInfo info;
+} darwin_shared = { .lock = PTHREAD_MUTEX_INITIALIZER };
+
+static VkResult
+darwin_shared_open(struct vk_object_base *log_obj, struct nvkmd_darwin_conn *c,
+                   struct TegraGM20BAbiInfo *info)
+{
+   VkResult result = VK_SUCCESS;
+   pthread_mutex_lock(&darwin_shared.lock);
+   if (darwin_shared.refs == 0)
+      result = darwin_open(log_obj, &darwin_shared.conn, &darwin_shared.info);
+   if (result == VK_SUCCESS) {
+      darwin_shared.refs++;
+      *c = darwin_shared.conn;
+      *info = darwin_shared.info;
+   }
+   pthread_mutex_unlock(&darwin_shared.lock);
+   return result;
+}
+
+static void
+darwin_shared_close(void)
+{
+   pthread_mutex_lock(&darwin_shared.lock);
+   if (--darwin_shared.refs == 0)
+      darwin_close(&darwin_shared.conn);
+   pthread_mutex_unlock(&darwin_shared.lock);
+}
+
+/* The top quarter of the client VAs: NVK's heaps never hand it out, so the
+ * other driver of the shared connection binds its own memory there.
+ */
+static uint64_t
+darwin_foreign_va_start(const struct TegraGM20BAbiInfo *info)
+{
+   return align64(info->va_start + (info->va_end - info->va_start) / 4 * 3,
+                  1 << 16);
+}
+
+__attribute__((visibility("default"))) bool
+switch_nvk_connection(uint32_t *conn, bool *tunnel, uint32_t *selector,
+                      uint64_t *va_start, uint64_t *va_end)
+{
+   struct nvkmd_darwin_conn c;
+   struct TegraGM20BAbiInfo info;
+   if (darwin_shared_open(NULL, &c, &info) != VK_SUCCESS)
+      return false;
+   *conn = c.conn;
+   *tunnel = c.tunnel;
+   *selector = c.selector;
+   *va_start = darwin_foreign_va_start(&info);
+   *va_end = info.va_end;
+   return true;
+}
+
+__attribute__((visibility("default"))) void
+switch_nvk_connection_release(void)
+{
+   darwin_shared_close();
 }
 
 static VkResult
@@ -510,6 +583,91 @@ darwin_sync_wait_one(struct nvkmd_darwin_sync *s, enum vk_sync_wait_flags flags,
    return darwin_wait_seqno(dev, channel, seqno, abs_timeout_ns);
 }
 
+struct darwin_any_waits {
+   const struct vk_sync_wait *waits;
+   enum vk_sync_wait_flags flags;
+};
+
+/* darwin_sync_lock held */
+static enum darwin_any_status
+darwin_any_status(void *ctx, uint32_t i, struct darwin_any_fence *fence)
+{
+   const struct darwin_any_waits *w = ctx;
+   struct nvkmd_darwin_sync *s = to_darwin_sync(w->waits[i].sync);
+   struct nvkmd_darwin_sync_point point = { 0 };
+   if (darwin_is_timeline(s)) {
+      darwin_timeline_update_locked(s);
+      if (s->value >= w->waits[i].wait_value)
+         return DARWIN_ANY_DONE;
+      if (!darwin_timeline_point_locked(s, w->waits[i].wait_value, &point))
+         return DARWIN_ANY_WAITING;
+   } else {
+      if (s->state == NVKMD_DARWIN_SYNC_UNSIGNALED)
+         return DARWIN_ANY_WAITING;
+      if (s->state != NVKMD_DARWIN_SYNC_FENCE)
+         return DARWIN_ANY_DONE;
+      point.dev = s->dev;
+      point.channel = s->channel;
+      point.seqno = s->seqno;
+   }
+   if ((w->flags & VK_SYNC_WAIT_PENDING) || darwin_point_done(&point))
+      return DARWIN_ANY_DONE;
+   fence->conn = point.dev->conn;
+   fence->dev = point.dev;
+   fence->channel = point.channel;
+   fence->seqno = point.seqno;
+   return DARWIN_ANY_FENCE;
+}
+
+static bool
+darwin_any_fence_done(const struct darwin_any_fence *fence)
+{
+   const struct nvkmd_darwin_sync_point point = {
+      .dev = fence->dev, .channel = fence->channel, .seqno = fence->seqno,
+   };
+   return darwin_point_done(&point);
+}
+
+static int
+darwin_any_wait_fence(const struct darwin_any_fence *fence, uint64_t timeout_ns)
+{
+   struct TegraGM20BAbiWaitFence wait = {
+      .channel = fence->channel,
+      .seqno = fence->seqno,
+      .timeout_ns = timeout_ns,
+   };
+   const kern_return_t kr = darwin_call(&fence->conn, TegraGM20BMethodWaitFence,
+                                        &wait, sizeof(wait), NULL, 0);
+   return kr == KERN_SUCCESS ? 0 : kr == kIOReturnTimeout ? ETIMEDOUT : EIO;
+}
+
+static void
+darwin_any_lost(const struct darwin_any_fence *fence)
+{
+   os_log_fault(OS_LOG_DEFAULT,
+                "nvk darwin: channel %u passed seqno %u with no wake from its "
+                "WaitFence (a lost fence interrupt): abort() for the stack",
+                fence->channel, fence->seqno);
+   abort();
+}
+
+static uint64_t
+darwin_any_now_ns(void)
+{
+   return (uint64_t)os_time_get_nano();
+}
+
+static const struct darwin_any_ops darwin_any_ops = {
+   .lock = &darwin_sync_lock,
+   .cond = &darwin_sync_cond,
+   .status = darwin_any_status,
+   .fence_done = darwin_any_fence_done,
+   .wait_fence = darwin_any_wait_fence,
+   .cond_wait = darwin_sync_cond_wait_locked,
+   .now_ns = darwin_any_now_ns,
+   .lost = darwin_any_lost,
+};
+
 static VkResult
 darwin_sync_wait_many(struct vk_device *device, uint32_t wait_count,
                       const struct vk_sync_wait *waits,
@@ -529,19 +687,24 @@ darwin_sync_wait_many(struct vk_device *device, uint32_t wait_count,
       return VK_SUCCESS;
    }
 
-   /* Any: poll each in turn (no interrupts on this GPU anyway). */
-   for (;;) {
-      for (uint32_t i = 0; i < wait_count; i++) {
-         struct nvkmd_darwin_sync *s = to_darwin_sync(waits[i].sync);
-         VkResult result = darwin_is_timeline(s) ?
-            darwin_timeline_wait(s, waits[i].wait_value, wait_flags, 0, 0) :
-            darwin_sync_wait_one(s, wait_flags, 0);
-         if (result != VK_TIMEOUT)
-            return result;
-      }
-      if (abs_timeout_ns != UINT64_MAX && os_time_get_nano() >= abs_timeout_ns)
-         return VK_TIMEOUT;
-      usleep(100);
+   /* Any: asleep until one resolves (nvkmd_darwin_wait_any.h): host signals
+    * and submissions on the sync condition, GPU fences on their interrupts
+    * through WaitFence.
+    */
+   struct darwin_any_waits ctx = { .waits = waits, .flags = wait_flags };
+   pthread_mutex_lock(&darwin_sync_lock);
+   const int err = darwin_wait_any_locked(&darwin_any_ops, &ctx, wait_count,
+                                          abs_timeout_ns);
+   pthread_mutex_unlock(&darwin_sync_lock);
+   switch (err) {
+   case 0:
+      return VK_SUCCESS;
+   case ETIMEDOUT:
+      return VK_TIMEOUT;
+   case ENOMEM:
+      return vk_error(device, VK_ERROR_OUT_OF_HOST_MEMORY);
+   default:
+      return vk_error(device, VK_ERROR_DEVICE_LOST);
    }
 }
 
@@ -711,7 +874,8 @@ nvkmd_darwin_create_pdev(struct vk_object_base *log_obj,
  * Device
  */
 
-/* The device SurfaceWrites goes through: the process's first. The kernel's record is per surface, not per connection. */
+/* The device SurfaceWrites and Priority go through: the process's first. The kernel's record of the one is per surface,
+ * of the other per connection, which is the process's (switch_nvk_connection). */
 static struct nvkmd_darwin_dev *surface_writes_dev;
 /* A SurfaceWrites could not be delivered: imports no longer say the GPU only samples them, and every submission tells
  * the kernel to count its connection's imports as written (TegraGM20BPushImportsWritten). */
@@ -729,7 +893,14 @@ nvkmd_darwin_dev_destroy(struct nvkmd_dev *_dev)
    simple_mtx_destroy(&dev->heap_mutex);
    simple_mtx_destroy(&dev->channels_mutex);
    simple_mtx_destroy(&dev->base.mems_mutex);
-   darwin_close(&dev->conn);
+   if (dev->shared_conn) {
+      pthread_mutex_lock(&darwin_shared.lock);
+      darwin_shared.dev_claimed = false;
+      pthread_mutex_unlock(&darwin_shared.lock);
+      darwin_shared_close();
+   } else {
+      darwin_close(&dev->conn);
+   }
    FREE(dev);
 }
 
@@ -794,9 +965,22 @@ nvkmd_darwin_create_dev(struct nvkmd_pdev *_pdev,
    if (dev == NULL)
       return vk_error(log_obj, VK_ERROR_OUT_OF_HOST_MEMORY);
 
-   /* Each device gets its own connection, hence its own GPU address space. */
+   /* The first device takes the process's connection, which the raw GM20B
+    * path shares; any other gets its own, hence its own GPU address space.
+    */
+   pthread_mutex_lock(&darwin_shared.lock);
+   dev->shared_conn = !darwin_shared.dev_claimed;
+   darwin_shared.dev_claimed = true;
+   pthread_mutex_unlock(&darwin_shared.lock);
    struct TegraGM20BAbiInfo info;
-   VkResult result = darwin_open(log_obj, &dev->conn, &info);
+   VkResult result = dev->shared_conn ?
+                     darwin_shared_open(log_obj, &dev->conn, &info) :
+                     darwin_open(log_obj, &dev->conn, &info);
+   if (result != VK_SUCCESS && dev->shared_conn) {
+      pthread_mutex_lock(&darwin_shared.lock);
+      darwin_shared.dev_claimed = false;
+      pthread_mutex_unlock(&darwin_shared.lock);
+   }
    if (result != VK_SUCCESS) {
       FREE(dev);
       return result == VK_ERROR_INCOMPATIBLE_DRIVER ?
@@ -811,15 +995,17 @@ nvkmd_darwin_create_dev(struct nvkmd_pdev *_pdev,
    simple_mtx_init(&dev->base.mems_mutex, mtx_plain);
    simple_mtx_init(&dev->channels_mutex, mtx_plain);
 
-   /* Same split as nvkmd_nouveau: ordinary VAs below, capture/replay VAs in
-    * the upper half of the client window.
+   /* As nvkmd_nouveau: ordinary VAs in the lower half of the client window,
+    * capture/replay VAs above them, up to the quarter the other driver of the
+    * shared connection binds in.
     */
    const uint64_t start = MAX2(info.va_start, 4096);
+   const uint64_t foreign_start = darwin_foreign_va_start(&info);
    dev->replay_start = start + (info.va_end - start) / 2;
    simple_mtx_init(&dev->heap_mutex, mtx_plain);
    util_vma_heap_init(&dev->heap, start, dev->replay_start - start);
    util_vma_heap_init(&dev->replay_heap, dev->replay_start,
-                      info.va_end - dev->replay_start);
+                      foreign_start - dev->replay_start);
 
    p_atomic_cmpxchg(&surface_writes_dev, NULL, dev);
    *dev_out = &dev->base;
@@ -935,12 +1121,21 @@ nvkmd_darwin_import_dma_buf(struct nvkmd_dev *dev,
 }
 
 /* The BoImport an IOSurface's import leads to names the surface, so the kernel keeps it coherent at every process's
- * IOSurfaceLock/Unlock of it. */
+ * IOSurfaceLock/Unlock of it. With a shape, the import asks the surface's layout (method 16) and binds its VA with the
+ * kind a block-linear surface is written under, so an optimal image of that shape over it takes that VA as it is
+ * (nvk_image_plane_bind). The import's handle and the answer stay for the caller. */
 static __thread struct {
    uint32_t id;
    uintptr_t base;
    uint64_t bytes;
+   bool asks;
+   struct TegraGM20BAbiSurfaceLayout ask;
+   uint64_t handle;
+   uint32_t layout;
 } import_surface;
+
+/* TegraGM20BLayout.h TGM_LAYOUT_KIND: NIL's kind for uncompressed colour */
+#define DARWIN_LAYOUT_KIND 0xfe
 
 __attribute__((visibility("default"))) void
 switch_nvk_import_surface(uint32_t surface_id, const void *base, uint64_t bytes)
@@ -948,6 +1143,63 @@ switch_nvk_import_surface(uint32_t surface_id, const void *base, uint64_t bytes)
    import_surface.id = surface_id;
    import_surface.base = (uintptr_t)base;
    import_surface.bytes = bytes;
+   import_surface.asks = false;
+   import_surface.handle = 0;
+   import_surface.layout = UINT32_MAX;
+}
+
+__attribute__((visibility("default"))) void
+switch_nvk_import_surface_shape(uint32_t width, uint32_t height, uint32_t bpp,
+                                uint32_t bytes_per_row, uint32_t flags)
+{
+   import_surface.asks = true;
+   import_surface.ask = (struct TegraGM20BAbiSurfaceLayout) {
+      .width = width,
+      .height = height,
+      .bpp = bpp,
+      .bytes_per_row = bytes_per_row,
+      .flags = flags,
+   };
+}
+
+__attribute__((visibility("default"))) uint32_t
+switch_nvk_import_surface_layout(uint64_t *handle)
+{
+   *handle = import_surface.handle;
+   return import_surface.layout;
+}
+
+static uint32_t
+darwin_surface_layout(const struct nvkmd_darwin_conn *conn, uint32_t info_flags,
+                      const struct TegraGM20BAbiSurfaceLayout *ask)
+{
+   if (!(info_flags & TegraGM20BInfoSurfaceLayout))
+      return 0;
+   struct TegraGM20BAbiSurfaceLayoutReply reply = { 0 };
+   if (darwin_call(conn, TegraGM20BMethodSurfaceLayout, ask, sizeof(*ask),
+                   &reply, sizeof(reply)) != KERN_SUCCESS)
+      return UINT32_MAX;
+   return reply.layout;
+}
+
+__attribute__((visibility("default"))) uint32_t
+switch_nvk_surface_layout(uint64_t handle, uint32_t width, uint32_t height,
+                          uint32_t bpp, uint32_t bytes_per_row, uint32_t flags)
+{
+   const struct TegraGM20BAbiSurfaceLayout ask = {
+      .handle = handle,
+      .width = width,
+      .height = height,
+      .bpp = bpp,
+      .bytes_per_row = bytes_per_row,
+      .flags = flags,
+   };
+   pthread_mutex_lock(&darwin_shared.lock);
+   const bool open = darwin_shared.refs > 0;
+   const struct nvkmd_darwin_conn conn = darwin_shared.conn;
+   const uint32_t info_flags = darwin_shared.info.flags;
+   pthread_mutex_unlock(&darwin_shared.lock);
+   return open ? darwin_surface_layout(&conn, info_flags, &ask) : UINT32_MAX;
 }
 
 /* Exported, as switch_nvk_import_surface is: the Metal frontend finds both with dlsym. */
@@ -964,6 +1216,20 @@ switch_nvk_surface_gpu_writes(uint32_t surface_id)
    return false;
 }
 
+/* Exported: the Metal frontend's queues' GPU priority (method 18), for the process's connection. */
+__attribute__((visibility("default"))) bool
+switch_nvk_gpu_priority(uint32_t priority, uint32_t background_priority)
+{
+   struct nvkmd_darwin_dev *dev = p_atomic_read(&surface_writes_dev);
+   struct TegraGM20BAbiPriority req = {
+      .priority = priority,
+      .background_priority = background_priority,
+   };
+
+   return dev && darwin_call(&dev->conn, TegraGM20BMethodPriority, &req, sizeof(req), NULL, 0) ==
+                    KERN_SUCCESS;
+}
+
 static uint32_t
 import_surface_id(const void *host_ptr, uint64_t size_B)
 {
@@ -974,6 +1240,109 @@ import_surface_id(const void *host_ptr, uint64_t size_B)
    return import_surface.id;
 }
 
+static __thread struct {
+   uintptr_t cpu;
+   uint64_t bytes, handle, va;
+   uint32_t kind;
+   void (*hold)(void *lease);
+   void (*drop)(void *lease);
+   void *lease;
+} import_foreign;
+
+__attribute__((visibility("default"))) void
+switch_nvk_import_foreign(const void *cpu, uint64_t bytes, uint64_t handle,
+                          uint64_t va, uint32_t kind, void (*hold)(void *),
+                          void (*drop)(void *), void *lease)
+{
+   import_foreign.cpu = (uintptr_t)cpu;
+   import_foreign.bytes = bytes;
+   import_foreign.handle = handle;
+   import_foreign.va = va;
+   import_foreign.kind = kind;
+   import_foreign.hold = hold;
+   import_foreign.drop = drop;
+   import_foreign.lease = lease;
+}
+
+static bool
+import_is_foreign(const void *host_ptr, uint64_t size_B)
+{
+   const uintptr_t start = (uintptr_t)host_ptr;
+   return import_foreign.cpu && start >= import_foreign.cpu &&
+          start + size_B <= import_foreign.cpu + import_foreign.bytes;
+}
+
+static void
+nvkmd_darwin_foreign_va_free(struct nvkmd_va *va)
+{
+   FREE(va);
+}
+
+static VkResult
+nvkmd_darwin_foreign_va_bind_mem(struct nvkmd_va *va,
+                                 struct vk_object_base *log_obj,
+                                 uint64_t va_offset_B, struct nvkmd_mem *mem,
+                                 uint64_t mem_offset_B, uint64_t range_B)
+{
+   return vk_error(log_obj, VK_ERROR_FEATURE_NOT_PRESENT);
+}
+
+static VkResult
+nvkmd_darwin_foreign_va_unbind(struct nvkmd_va *va,
+                               struct vk_object_base *log_obj,
+                               uint64_t va_offset_B, uint64_t range_B)
+{
+   return vk_error(log_obj, VK_ERROR_FEATURE_NOT_PRESENT);
+}
+
+/* The VA of foreign memory: its owner's binding, never bound or unbound here. */
+static const struct nvkmd_va_ops nvkmd_darwin_foreign_va_ops = {
+   .free = nvkmd_darwin_foreign_va_free,
+   .bind_mem = nvkmd_darwin_foreign_va_bind_mem,
+   .unbind = nvkmd_darwin_foreign_va_unbind,
+};
+
+/* The host import the foreign hint covers: memory the other driver of the
+ * shared connection keeps bound, made with no kernel call. The hint is taken.
+ */
+static VkResult
+darwin_import_foreign(struct nvkmd_darwin_dev *dev,
+                      struct vk_object_base *log_obj,
+                      void *host_ptr, uint64_t size_B,
+                      struct nvkmd_mem **mem_out)
+{
+   struct nvkmd_darwin_mem *mem = CALLOC_STRUCT(nvkmd_darwin_mem);
+   struct nvkmd_va *va = CALLOC_STRUCT(nvkmd_va);
+   if (mem == NULL || va == NULL) {
+      FREE(mem);
+      FREE(va);
+      return vk_error(log_obj, VK_ERROR_OUT_OF_HOST_MEMORY);
+   }
+
+   const uint64_t offset_B = (uintptr_t)host_ptr - import_foreign.cpu;
+   mem->handle = import_foreign.handle;
+   mem->bo_offset_B = offset_B;
+   mem->host_ptr = host_ptr;
+   mem->drop = import_foreign.drop;
+   mem->lease = import_foreign.lease;
+   nvkmd_mem_init(&dev->base, &mem->base, &nvkmd_darwin_mem_ops,
+                  NVKMD_MEM_LOCAL | NVKMD_MEM_CAN_MAP | NVKMD_MEM_SHARED,
+                  size_B, dev->base.pdev->bind_align_B);
+   *va = (struct nvkmd_va) {
+      .ops = &nvkmd_darwin_foreign_va_ops,
+      .dev = &dev->base,
+      .pte_kind = import_foreign.kind,
+      .addr = import_foreign.va + offset_B,
+      .size_B = size_B,
+   };
+   mem->base.va = va;
+
+   import_foreign.hold(import_foreign.lease);
+   import_foreign.cpu = 0;
+   *mem_out = &mem->base;
+   return VK_SUCCESS;
+}
+
 static VkResult
 nvkmd_darwin_import_host_mem(struct nvkmd_dev *_dev,
                              struct vk_object_base *log_obj,
@@ -981,6 +1350,9 @@ nvkmd_darwin_import_host_mem(struct nvkmd_dev *_dev,
                              struct nvkmd_mem **mem_out)
 {
    struct nvkmd_darwin_dev *dev = nvkmd_darwin_dev(_dev);
+
+   if (dev->shared_conn && import_is_foreign(host_ptr, size_B))
+      return darwin_import_foreign(dev, log_obj, host_ptr, size_B, mem_out);
 
    struct TegraGM20BAbiBoImport req = {
       .address = (uintptr_t)host_ptr,
@@ -1003,12 +1375,27 @@ nvkmd_darwin_import_host_mem(struct nvkmd_dev *_dev,
    }
    mem->handle = reply.handle;
    mem->host_ptr = host_ptr;
+   mem->surface_id = req.surface_id;
+
+   uint8_t pte_kind = 0;
+   if (req.surface_id) {
+      import_surface.handle = reply.handle;
+      if (import_surface.asks) {
+         struct TegraGM20BAbiSurfaceLayout ask = import_surface.ask;
+         ask.handle = reply.handle;
+         import_surface.layout = darwin_surface_layout(
+            &dev->conn, nvkmd_darwin_pdev(dev->base.pdev)->info.flags, &ask);
+         if (import_surface.layout == TegraGM20BLayoutTiled ||
+             import_surface.layout == TegraGM20BLayoutOtherShape)
+            pte_kind = DARWIN_LAYOUT_KIND;
+      }
+   }
 
    /* The owner's mapping is cacheable: not coherent with the GPU. */
    const enum nvkmd_mem_flags flags =
       NVKMD_MEM_LOCAL | NVKMD_MEM_CAN_MAP | NVKMD_MEM_SHARED;
    VkResult result = darwin_mem_finish_create(dev, log_obj, mem, flags, size_B,
-                                              0, 0, mem_out);
+                                              0, pte_kind, mem_out);
    if (result != VK_SUCCESS) {
       darwin_bo_free(dev, reply.handle);
       FREE(mem);
@@ -1023,8 +1410,12 @@ nvkmd_darwin_mem_free(struct nvkmd_mem *_mem)
    struct nvkmd_darwin_dev *dev = nvkmd_darwin_dev(_mem->dev);
 
    nvkmd_va_free(mem->base.va);
-   /* The kernel keeps the pages until in-flight work is done (CONTRACT.md §4). */
-   darwin_bo_free(dev, mem->handle);
+   if (mem->drop != NULL) {
+      mem->drop(mem->lease);
+   } else {
+      /* The kernel keeps the pages until in-flight work is done (CONTRACT.md §4). */
+      darwin_bo_free(dev, mem->handle);
+   }
    FREE(mem);
 }
 
@@ -1261,7 +1652,7 @@ nvkmd_darwin_va_bind_mem(struct nvkmd_va *va, struct vk_object_base *log_obj,
       .op = TegraGM20BBindMap,
       .kind = va->pte_kind,
       .handle = nvkmd_darwin_mem(_mem)->handle,
-      .bo_offset = mem_offset_B,
+      .bo_offset = nvkmd_darwin_mem(_mem)->bo_offset_B + mem_offset_B,
       .va = va->addr + va_offset_B,
       .range = range_B,
    };
@@ -1453,6 +1844,68 @@ nvkmd_darwin_exec_ctx_wait(struct nvkmd_ctx *_ctx,
    return darwin_ctx_wait(ctx->channel, log_obj, wait_count, waits);
 }
 
+/* the hint made for the next vkQueueSubmit, and the one that call took */
+static __thread struct darwin_submit_hint submit_hint, submit_taken;
+
+void
+nvkmd_darwin_hint_surfaces(const void *queue)
+{
+   darwin_hint_begin(&submit_hint, queue);
+}
+
+void
+nvkmd_darwin_hint_surface(struct nvkmd_mem *_mem, uint8_t access)
+{
+   const struct nvkmd_darwin_mem *mem = nvkmd_darwin_mem(_mem);
+   if (submit_hint.queue != NULL && mem->host_ptr != NULL)
+      darwin_surfaces_add(&submit_hint.list, mem->handle, access);
+}
+
+void
+nvkmd_darwin_submit_call(const void *queue, bool begin)
+{
+   if (begin)
+      darwin_hint_take(&submit_hint, &submit_taken, queue);
+   else
+      submit_taken.queue = NULL;
+}
+
+void *
+nvkmd_darwin_submit_data(const void *queue)
+{
+   return darwin_hint_copy(&submit_taken, queue);
+}
+
+void
+nvkmd_darwin_submit_data_free(void *data)
+{
+   free(data);
+}
+
+void
+nvkmd_darwin_submit_surfaces(struct nvkmd_ctx *_ctx, const void *data)
+{
+   struct nvkmd_darwin_exec_ctx *ctx = nvkmd_darwin_exec_ctx(_ctx);
+   ctx->surfaces_given = data != NULL;
+   if (ctx->surfaces_given)
+      ctx->surfaces = *(const struct TegraGM20BAbiExecSurfaces *)data;
+}
+
+void
+nvkmd_darwin_submit_surfaces_end(struct nvkmd_ctx *_ctx)
+{
+   nvkmd_darwin_exec_ctx(_ctx)->surfaces_given = false;
+}
+
+static void
+darwin_exec_busy_unsubmitted(uint32_t channel)
+{
+   os_log_fault(OS_LOG_DEFAULT, "nvk darwin: Exec on channel %u found its "
+                "GPFIFO full with nothing submitted on it: abort() for the "
+                "stack", channel);
+   abort();
+}
+
 static VkResult
 nvkmd_darwin_exec_ctx_flush(struct nvkmd_ctx *_ctx,
                             struct vk_object_base *log_obj)
@@ -1468,21 +1921,33 @@ nvkmd_darwin_exec_ctx_flush(struct nvkmd_ctx *_ctx,
    const size_t in_size = offsetof(struct TegraGM20BAbiExec, pushes) +
                           ctx->req.count * sizeof(ctx->req.pushes[0]);
    for (;;) {
+      /* The kernel's next Exec of the channel takes the list, a refused one
+       * included: once more before every retry.
+       */
+      if (ctx->surfaces_given && dev->conn.exec_surfaces) {
+         ctx->surfaces.channel = ctx->channel;
+         darwin_call(&dev->conn, TegraGM20BMethodExecSurfaces, &ctx->surfaces,
+                     darwin_surfaces_bytes(&ctx->surfaces), NULL, 0);
+      }
       struct TegraGM20BAbiExecReply reply = { 0 };
       kern_return_t kr = darwin_call(&dev->conn, TegraGM20BMethodExec,
                                      &ctx->req, in_size, &reply, sizeof(reply));
       if (kr == KERN_SUCCESS) {
          ctx->last_seqno = reply.seqno;
+         ctx->submitted = true;
          break;
       }
       if (kr != kIOReturnBusy)
          return darwin_result(log_obj, kr, "Exec");
 
-      /* GPFIFO full: let the work already queued drain. */
-      if (ctx->last_seqno == 0) {
-         usleep(100);
-         continue;
-      }
+      /* GPFIFO full for 1 s (the kernel's chan_wait_room): asleep in
+       * WaitFence until what this channel submitted completes. A channel with
+       * nothing submitted has room for any one Exec: its 1024-entry GPFIFO
+       * (gpu.c CHAN_GPFIFO_BYTES) takes at most 255 pushes and the kernel's
+       * own entries, under 400.
+       */
+      if (!ctx->submitted)
+         darwin_exec_busy_unsubmitted(ctx->channel);
       VkResult result = darwin_wait_seqno(dev, ctx->channel, ctx->last_seqno,
                                           NVKMD_DARWIN_FOREVER_NS);
       if (result != VK_SUCCESS)
@@ -1645,7 +2110,8 @@ nvkmd_darwin_bind_ctx_bind(struct nvkmd_ctx *_ctx,
       if (binds[i].op == NVKMD_BIND_OP_BIND) {
          op.op = TegraGM20BBindMap;
          op.handle = nvkmd_darwin_mem(binds[i].mem)->handle;
-         op.bo_offset = binds[i].mem_offset_B;
+         op.bo_offset = nvkmd_darwin_mem(binds[i].mem)->bo_offset_B +
+                        binds[i].mem_offset_B;
       } else {
          op.op = (binds[i].va->flags & NVKMD_VA_SPARSE) ?
                  TegraGM20BBindMapSparse : TegraGM20BBindUnmap;

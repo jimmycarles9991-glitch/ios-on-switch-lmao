@@ -32,6 +32,39 @@
 #define XHCI_PORTSC_KEEP \
     ((1u << 0) | (1u << 3) | (0xfu << 10) | (1u << 30) | (0xfu << 5) | (1u << 9) | (3u << 14) | (7u << 25))
 
+#define XHCI_PORTSC_PLS(portsc)   (((portsc) >> XHCI_PORTSC_PLS_SHIFT) & 0xfu)
+#define XHCI_PORTSC_SPEED(portsc) (((portsc) >> XHCI_PORTSC_SPEED_SHIFT) & 0xfu)
+#define XHCI_SPEED_SUPER          4u
+
+// The link state and speed of a PORTSC in words, for the role line (xHCI 1.2 5.4.8, 7.2.2.1.1 default speed IDs).
+static inline const char *xhci_portsc_link_name(uint32_t portsc)
+{
+    static const char *const names[16] = {"U0",       "U1",      "U2",       "U3",       "Disabled",   "RxDetect",
+                                          "Inactive", "Polling", "Recovery", "HotReset", "Compliance", "Test",
+                                          "PLS12",    "PLS13",   "PLS14",    "Resume"};
+    return names[XHCI_PORTSC_PLS(portsc)];
+}
+
+static inline const char *xhci_portsc_speed_name(uint32_t portsc)
+{
+    if (!(portsc & XHCI_PORTSC_CCS))
+        return "nothing";
+    switch (XHCI_PORTSC_SPEED(portsc)) {
+    case 1:
+        return "full speed";
+    case 2:
+        return "low speed";
+    case 3:
+        return "high speed";
+    case XHCI_SPEED_SUPER:
+        return "SuperSpeed 5 Gb/s";
+    case 5:
+        return "SuperSpeedPlus";
+    default:
+        return "unknown speed";
+    }
+}
+
 static inline uint32_t xhci_portsc_offset(uint32_t cap_length, unsigned port)
 {
     return cap_length + XHCI_PORTSC_BASE + 0x10u * (port - 1u);
@@ -207,9 +240,5 @@ static inline bool xusb_xhci_deliverable(uint32_t iman, uint32_t usbcmd)
 {
     return (iman & XHCI_IMAN_IE) && (usbcmd & XHCI_USBCMD_INTE);
 }
-
-#if SWITCH_USB_SUPERSPEED
-#include "XusbLanes.h"
-#endif
 
 #endif

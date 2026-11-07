@@ -68,11 +68,23 @@ TEST(DirectScanoutSource, FenceOnlyPresentNoRetireAtTheOffer)
 
 TEST(DirectScanoutSource, RetireAtTheLatchInQueueOrder)
 {
-    const std::string retire = method(display(), "    void retireThrough(uint64_t seq)\n");
+    const std::string retire = method(display(), "    void retireThrough(uint64_t seq, uint64_t shownAt)\n");
     EXPECT_THAT(retire, HasSubstr("at > seq"));
     EXPECT_THAT(retire, HasSubstr("head == gpuRequest"));
-    EXPECT_THAT(display(), HasSubstr("retireThrough(entrySeq[asked])"));
-    EXPECT_THAT(display(), HasSubstr("retireThrough(entrySeq[replaced])"));
+    EXPECT_THAT(display(), HasSubstr("retireThrough(entrySeq[asked], stamp)"));
+    EXPECT_THAT(display(), HasSubstr("retireThrough(entrySeq[replaced], stamp)"));
+}
+
+// Every present of a swap reaches its frame-info clients (the swap's entry first, at the latch's stamp), in both
+// retire modes: frameShown comes before retireThrough's latchRetire check.
+TEST(DirectScanoutSource, FrameInfoAtEveryPresent)
+{
+    const std::string retire = method(display(), "    void retireThrough(uint64_t seq, uint64_t shownAt)\n");
+    EXPECT_LT(retire.find("frameShown(seq, shownAt);"), retire.find("if (!latchRetire || !seq)"));
+    EXPECT_THAT(method(display(), "    void noteTaken("), HasSubstr("noteFrameInfoTaken(request)"));
+    EXPECT_THAT(method(display(), "    void frameShown("), HasSubstr("native_legacy_frame_info_notify(this, &frame)"));
+    EXPECT_THAT(method(display(), "    IOReturn sendFrameInfo("),
+                HasSubstr("native_legacy_frame_info_enqueue(owner, words, n * sizeof(words[0]))"));
 }
 
 TEST(DirectScanoutSource, NoEarlyRetireOrCollapseOnceRetiringAtTheLatch)
@@ -239,6 +251,37 @@ TEST(DisplayStatsSource, QuietDisplayWindowsAreLogged)
     expectBefore(stats, "SwitchDisplay: quiet display: ", "if (logged)\n            os_log(");
 }
 
+// An idle display wakes no core: FRAME_END reaches the CPU only while something waits for a frame end. Holders outside the
+// gate (TegraPanel, the colour unit) write INT_MASK too, so every INT_MASK write is one of the three under its lock; a kick
+// unmasks it before any work that waits for a frame end; the last frame end with nothing waiting masks it.
+TEST(FrameEndSource, MaskedWhileNothingWaits)
+{
+    const std::string &source = display();
+    size_t writes = 0;
+    for (size_t at = source.find("dc[kDcIntMask] ="); at != std::string::npos;
+         at = source.find("dc[kDcIntMask] =", at + 1))
+        ++writes;
+    EXPECT_EQ(writes, 3u);
+    for (const char *helper : {"    void writeIntMask(uint32_t clear, uint32_t set)", "    void unmaskFrameEnd()",
+                               "    void maskIdleFrameEnd()"})
+        EXPECT_THAT(method(source, helper), HasSubstr("IOSimpleLockLockDisableInterrupt(intMaskLock)")) << helper;
+    EXPECT_THAT(method(source, "    void kickSwapQueue() override"), HasSubstr("{\n        unmaskFrameEnd();"));
+    EXPECT_THAT(method(source, "    void vblankTick()"),
+                testing::EndsWith("if ((status & kFrameEndInt) && !frameEndNeeded() && tegra_panel_holds_frame_end())\n"
+                                  "            maskIdleFrameEnd();"));
+    EXPECT_THAT(method(source, "    void maskIdleFrameEnd()"), HasSubstr("if (!__atomic_load_n(&gFrameEndHolds"));
+}
+
+// A blank swap blacks the head through the colour unit only while no flip is out, and the first flip latched after it
+// ends the black: an older flip's latch must never show a frame the blank swap replaced.
+TEST(BlankSource, ColourBlankEndsAtTheNextLatch)
+{
+    EXPECT_THAT(display(), HasSubstr("rotated && rotationLatched && doubleBuffer && ring.pending == kNoBuffer &&"));
+    EXPECT_THAT(
+        method(display(), "    void flipLatched()"),
+        HasSubstr("{\n        if (blanked) {\n            blanked = false;\n            color->setBlank(false);"));
+}
+
 // iOS 17's layout of the original framebuffer is the one this driver always ran on: its table must keep these values, or
 // an iOS 17 kernel would read the swap queue and the swap requests somewhere else.
 TEST(LegacyFramebufferTable, Ios17ValuesStayPut)
@@ -259,4 +302,23 @@ TEST(LegacyFramebufferTable, Ios17ValuesStayPut)
     EXPECT_THAT(fields, HasSubstr("\"displayHeight\": \"0x16b4\""));
     EXPECT_THAT(table, HasSubstr("\"size\": \"0x18a0\""));
     EXPECT_THAT(table, HasSubstr("\"slots\": 358"));
+}
+
+// The slots iPadOS reaches through IOMobileFramebuffer that this display answers as J120's AppleCLCD does (21H461
+// kernelcache: AppleCLCD's vtable at 0xfffffff006fd1358; the family's callers named in the interface).
+TEST(LegacyFramebufferTable, ContractSlotsOverridden)
+{
+    const std::string table = SourceText("../../../kits/SwitchABI/kinds/21H461/IOMobileFramebufferLegacy.json");
+    const std::string layout = Between(table, "\"layout\": {", "}");
+    for (const char *entry :
+         {"\"211\": \"changeFrameInfo\"", "\"213\": \"supportedFrameInfo\"", "\"274\": \"setDisplayTemperature\"",
+          "\"306\": \"platformFrameInfoNotify\"", "\"307\": \"sendFrameInfo\""})
+        EXPECT_THAT(layout, HasSubstr(entry));
+    const std::string source = SourceText("../NativeLegacyDisplay.cpp");
+    for (const char *method : {"    IOReturn changeFrameInfo(uint32_t type, void *client, uint32_t mask) override",
+                               "    IOReturn sendFrameInfo(void *client, const void *frame) override",
+                               "    IOReturn setDisplayTemperature(const uint32_t *temperatures) override"})
+        EXPECT_THAT(source, HasSubstr(method));
+    EXPECT_THAT(Between(source, "    IOReturn setDisplayTemperature(", "\n    }\n"),
+                HasSubstr("return kIOReturnSuccess;"));
 }

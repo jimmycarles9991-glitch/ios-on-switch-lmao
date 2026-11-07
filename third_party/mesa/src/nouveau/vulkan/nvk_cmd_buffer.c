@@ -383,6 +383,7 @@ nvk_BeginCommandBuffer(VkCommandBuffer commandBuffer,
    VkQueueFlags queue_flags = nvk_cmd_buffer_queue_flags(cmd);
 
    nvk_reset_cmd_buffer(&cmd->vk, 0);
+   cmd->copies_on_ce = nvk_copies_on_ce_now();
 
    if (cmd->vk.level == VK_COMMAND_BUFFER_LEVEL_SECONDARY)
       cmd->state.inherited_pipeline_statistics =

@@ -87,6 +87,17 @@ nvk_device_physical_mut(struct nvk_device *dev)
    return (struct nvk_physical_device *)dev->vk.physical;
 }
 
+/* The interlock's ticket buffer and SET_PIXEL_SHADER_INTERLOCK_CONTROL are
+ * written only where the device enabled the interlock, so a device without it
+ * records what it did before.
+ */
+static inline bool
+nvk_device_fragment_interlock(const struct nvk_device *dev)
+{
+   return dev->vk.enabled_features.fragmentShaderPixelInterlock ||
+          dev->vk.enabled_features.fragmentShaderSampleInterlock;
+}
+
 VkResult nvk_device_init_meta(struct nvk_device *dev);
 void nvk_device_finish_meta(struct nvk_device *dev);
 

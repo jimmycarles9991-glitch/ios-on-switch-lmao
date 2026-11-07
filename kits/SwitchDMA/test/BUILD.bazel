@@ -1,5 +1,5 @@
-# kits/SwitchDMA on the host: the cache operations against a model of which lines each one owes, and the buffer
-# allocator against a stand-in IOBufferMemoryDescriptor (its DC instructions recorded, not run).
+# kits/SwitchDMA on the host: the cache operations against a model of which lines each one owes, and the contiguous
+# and scattered allocators against stand-in descriptors (their DC instructions recorded, not run).
 #
 #   bazel test //kits/SwitchDMA/test:all
 load("//bazel/lint:defs.bzl", "lint_files")
@@ -48,5 +48,36 @@ host_test(
     deps = [
         ":buffer",
         ":kernel",
+    ],
+)
+
+host_shims(
+    name = "pages_kernel",
+    headers = [
+        "IOKit/IOBufferMemoryDescriptor.h",
+        "IOKit/IOLib.h",
+    ],
+    stubs = "switch_dma_pages_stubs.h",
+    deps = [":dcache_recorder"],
+)
+
+host_library(
+    name = "pages",
+    srcs = [
+        "//kits/SwitchDMA:SwitchDMAPages.cpp",
+        "//kits/SwitchDMA:SwitchDcache.h",
+        "//kits/SwitchDMA:SwitchHwPage.h",
+    ],
+    hdrs = ["//kits/SwitchDMA:SwitchDMAPages.h"],
+    force_includes = ["dcache_recorder.h"],
+    deps = [":pages_kernel"],
+)
+
+host_test(
+    name = "switch_dma_pages_test",
+    srcs = ["switch_dma_pages_test.cpp"],
+    deps = [
+        ":pages",
+        ":pages_kernel",
     ],
 )

@@ -20,6 +20,7 @@
 #include <IOKit/IOBufferMemoryDescriptor.h>
 #include <IOKit/IOFilterInterruptEventSource.h>
 #include <IOKit/IOLib.h>
+#include <IOKit/IOPlatformExpert.h>
 #include <os/log.h>
 #include <IOKit/IOWorkLoop.h>
 #include <libkern/c++/OSKext.h>
@@ -36,6 +37,7 @@
 #include <kern/clock.h>
 #include <kern/sched_prim.h>
 #include <kern/thread.h>
+#include <kern/thread_call.h>
 #include <machine/machine_routines.h>
 #include <sys/types.h>
 #include <sys/param.h>
@@ -44,12 +46,16 @@
 #include "../ArmGIC/SwitchInterrupts.h"
 #include "../TegraI2C/TegraI2C.h"
 #include "../TegraGPIO/TegraGPIO.h"
+#include "../../kits/SwitchRefusal/SwitchRefusal.h"
+#include "../SwitchBrightness/SwitchBrightness.h"
+#include "../SwitchPower/SwitchPower.h"
 #include "block_backend.h"
 #include "NativeSwitchBlock.h"
 #include "SwitchClientCopy.h"
 #include "SwitchAdma.h"
 #include "SwitchQueue.h"
 #include "SwitchSdCard.h"
+#include "SwitchSdTrim.h"
 #include "SwitchCq.h"
 
 extern "C" {
@@ -131,6 +137,25 @@ enum : int {
 
 // r12-sdio: what a read that proves ADMA2 above 4 GiB fills those pages with first (prepareDirect, proveHigh).
 constexpr uint8_t kPoison = 0x5a;
+// Unmap (stepUnmap): SD discard (CMD38 argument 1, SD 4.3.5) frees any range with a short busy (Linux allows 250 ms
+// whatever its length, mmc_sd_erase_timeout): 1 GiB a command. A discard waits for an idle queue, or for
+// kUnmapEveryChains chains if reads and writes keep coming: APFS trims its free space from a thread at every mount.
+constexpr uint64_t kDiscardSectors = 1u << 21;
+constexpr uint32_t kSdDiscardArgument = 1;
+constexpr uint64_t kDiscardLimitNs = 1500000000ull;
+constexpr unsigned kUnmapEveryChains = 8;
+constexpr uint64_t kUnmapRefusal = switch_refusal_key("SwitchSD", "discard");
+// A card without discard (SwitchSdTrim.h): the AUs APFS unmapped are erased later, one command of at most kTrimRunMs of
+// specified busy at a time, only once System Boot Complete has come and the queue has been quiet for kTrimQuietNs
+// (kTrimQuietLitNs with the display on), and kTrimBootSectors a boot at most. A request waits behind at most that one
+// erase. The cursor survives reboots in NVRAM, so successive boots' budgets cover the whole card.
+constexpr uint64_t kTrimRunMs = 1100, kTrimMarginNs = 500000000ull;
+constexpr uint64_t kTrimQuietNs = 10000000000ull, kTrimQuietLitNs = 60000000000ull;
+constexpr uint64_t kTrimBootSectors = 8ull << 21;
+constexpr uint64_t kTrimCursorEveryAus = 64;
+constexpr uint32_t kSdEraseArgument = 0;
+constexpr uint64_t kEraseRefusal = switch_refusal_key("SwitchSD", "erase");
+constexpr char kTrimCursorVariable[] = "switch-sd-trim-cursor";
 // r12-sdio: the most separate stretches of a read chain staged through the bounce buffer (SwitchAdmaStaging; consecutive
 // segments of one request make one): one per page of a 1 MiB chain of 4 KiB pages. More: the whole chain bounces.
 constexpr uint32_t kStages = 256;
@@ -353,6 +378,18 @@ struct Request {
     bool chained;  // r12-sdio: taken into the chain being picked (SwitchQueue.h), under queueLock
 };
 
+// One doUnmap call's extents (device blocks), discarded by the worker one command at a time between chains
+// (stepUnmap) while its caller waits.
+struct Unmap {
+    Unmap *next;
+    const IOBlockStorageDeviceExtent *extents;
+    uint32_t count;
+    uint32_t index;    // the next extent to start
+    uint64_t at, end;  // what is left of the current one, card LBAs
+    IOReturn result;
+    bool finished;
+};
+
 // r12-sdio: one chain's way through the worker (worker()): picked, begun (beginBatch: the table built and, when the chain is
 // one ADMA2 command, its pages synced and the command issued), ended (endBatch: that command waited for, retried and
 // checked; or the whole bounce path), then completed (completeBatch). The worker begins the next chain before it completes
@@ -409,6 +446,8 @@ struct Stats {
     // r16-sdcq: writes flushed because the card's cache would not go off (commitWrite), those whose flush failed, and
     // their worker time.
     uint64_t flushes, flushErrors, flushNs;
+    // Erase-based trim: erase commands, the sectors they freed and the time the card was busy with them.
+    uint64_t trimErases, trimSectors, trimNs;
 };
 }
 
@@ -436,10 +475,7 @@ public:
         return 0;
     }
 
-    IOReturn doUnmap(IOBlockStorageDeviceExtent *, UInt32, IOStorageUnmapOptions) override
-    {
-        return kIOReturnUnsupported;
-    }
+    IOReturn doUnmap(IOBlockStorageDeviceExtent *extents, UInt32 count, IOStorageUnmapOptions) override;
 
     char *getVendorString() override
     {
@@ -536,6 +572,15 @@ class NativeSwitchBlock : public IOService {
     uint64_t bouncePA = 0;
     IOLock *queueLock = nullptr;
     Request *head = nullptr, *tail = nullptr;
+    Unmap *unmaps = nullptr;  // under queueLock, oldest first
+    // Erase-based trim (cards without discard): the map and the quiet-period timer, under queueLock.
+    SwitchSdTrimMap trim;
+    uint64_t *trimBits = nullptr;
+    size_t trimBytes = 0;
+    thread_call_t trimCall = nullptr;
+    uint64_t lastIoNs = 0, trimBootSectors = 0, trimSinceSave = 0;
+    bool trimCursorLoaded = false, trimFailed = false;
+    unsigned chainsSinceUnmap = 0;         // under queueLock: chains picked while a discard waited
     uint32_t queued = 0;                   // requests waiting, under queueLock
     uint32_t queuedReads[kClasses] = {};   // r6-lows: reads waiting per class, under queueLock
     ClassWait waits[kClasses] = {};        // r6-lows: per class since the last throughput line, under queueLock
@@ -751,8 +796,16 @@ class NativeSwitchBlock : public IOService {
     Batch *runGroup(Batch *group, unsigned n, Batch *pending, bool queue);
     void beginTask(Batch &, uint32_t argument);
     int endTask(Batch &, uint32_t *r1);
-    int cqCommand(uint32_t index, uint32_t argument, uint32_t flags, uint32_t *response, int data);
+    int cqCommand(uint32_t index, uint32_t argument, uint32_t flags, uint32_t *response, int data,
+                  uint64_t limitNs = 1500000000ull);
     void cqLeave();
+    bool stepUnmap(Unmap &job);
+    int erase(uint64_t first, uint64_t last, uint32_t argument, uint64_t limitNs);
+    bool trimRunnable() const;
+    uint64_t trimQuietUntil() const;
+    void trimStep();
+    void saveTrimCursor(uint64_t cursor);
+    static void trimFired(thread_call_param_t owner, thread_call_param_t);
     // r18-sdcq: one line per recovered error (rate-limited), the power cycle of a card that stays in CQ mode, and the
     // stop's one IOLog line.
     void cqRecovered(const SwitchCqError &e);
@@ -829,6 +882,24 @@ public:
     bool setup();
     int transfer(uint64_t lba, uint32_t sectors, bool write, uint8_t *bytes);
     void submit(Request *);
+    IOReturn unmap(const IOBlockStorageDeviceExtent *extents, uint32_t count, uint64_t blocks);
+
+    void prepareTrim();
+
+    void trimStats(uint64_t *erases, uint64_t *sectors, uint64_t *busyNs) const
+    {
+        *erases = __atomic_load_n(&stats.trimErases, __ATOMIC_RELAXED);
+        *sectors = __atomic_load_n(&stats.trimSectors, __ATOMIC_RELAXED);
+        *busyNs = __atomic_load_n(&stats.trimNs, __ATOMIC_RELAXED);
+    }
+
+    // SD 5.1 Discard (SD Status DISCARD_SUPPORT) frees blocks without defining what they then read, which is what an
+    // unmap asks. A card without it erases the unmapped AUs later, in idle time (SwitchSdTrim.h).
+    bool canUnmap() const
+    {
+        return haveSsr && irqMode && (sdStatus.discard || trimBits);
+    }
+
     void reportState(const char *why);
 };
 
@@ -852,6 +923,14 @@ extern "C" void switch_block_prefetch_thread(thread_t thread)
     __atomic_store_n(&gPrefetchThread, thread, __ATOMIC_RELEASE);
 }
 
+extern "C" bool switch_sd_trim_stats(uint64_t *erases, uint64_t *sectors, uint64_t *busy_ns)
+{
+    if (!gOwner)
+        return false;
+    gOwner->trimStats(erases, sectors, busy_ns);
+    return true;
+}
+
 bool NativeSwitchBlockDevice::configure(NativeSwitchBlock *provider, uint64_t sectors)
 {
     owner = provider;
@@ -871,6 +950,14 @@ bool NativeSwitchBlockDevice::configure(NativeSwitchBlock *provider, uint64_t se
         device->setObject(kIOPropertyMediumTypeKey, OSString::withCStringNoCopy(kIOPropertyMediumTypeSolidStateKey));
         setProperty(kIOPropertyDeviceCharacteristicsKey, device);
         device->release();
+    }
+    // Force Unit Access: every write completes only once it is on flash (doSynchronize). Unmap: SD discard.
+    if (OSDictionary *features = OSDictionary::withCapacity(2)) {
+        features->setObject(kIOStorageFeatureForceUnitAccess, kOSBooleanTrue);
+        if (provider->canUnmap())
+            features->setObject(kIOStorageFeatureUnmap, kOSBooleanTrue);
+        setProperty(kIOStorageFeaturesKey, features);
+        features->release();
     }
     setName("SwitchSD");
     return true;
@@ -1213,6 +1300,9 @@ void NativeSwitchBlock::submit(Request *request)
 {
     request->queuedNs = nowNs();
     IOLockLock(queueLock);
+    lastIoNs = request->queuedNs;
+    if (request->write)
+        switchSdTrimClear(&trim, request->lba, request->sectors);
     if (tail)
         tail->next = request;
     else
@@ -1227,6 +1317,186 @@ void NativeSwitchBlock::submit(Request *request)
     __atomic_fetch_add(&submitted, 1, __ATOMIC_RELAXED);
     IOLockWakeup(queueLock, &head, true);
     IOLockUnlock(queueLock);
+}
+
+IOReturn NativeSwitchBlockDevice::doUnmap(IOBlockStorageDeviceExtent *extents, UInt32 count, IOStorageUnmapOptions)
+{
+    return owner->unmap(extents, count, blocks);
+}
+
+// Thread context: queues the extents for the worker and sleeps until it has run them, so the controller keeps one
+// thread and an unmap never lands between a chain's commands.
+IOReturn NativeSwitchBlock::unmap(const IOBlockStorageDeviceExtent *extents, uint32_t count, uint64_t blocks)
+{
+    if (!canUnmap())
+        return kIOReturnUnsupported;
+    if (!extents || !count)
+        return kIOReturnBadArgument;
+    for (uint32_t i = 0; i < count; ++i) {
+        if (!extents[i].blockCount || extents[i].blockStart >= blocks ||
+            extents[i].blockCount > blocks - extents[i].blockStart)
+            return kIOReturnBadArgument;
+    }
+    if (!sdStatus.discard) {
+        // Marked now, erased in idle time: a write queued before then cancels its AUs (submit).
+        IOLockLock(queueLock);
+        for (uint32_t i = 0; i < count; ++i)
+            switchSdTrimMark(&trim, firstSector + extents[i].blockStart, extents[i].blockCount);
+        IOLockWakeup(queueLock, &head, true);
+        IOLockUnlock(queueLock);
+        return kIOReturnSuccess;
+    }
+    Unmap job = {nullptr, extents, count, 0, 0, 0, kIOReturnSuccess, false};
+    IOLockLock(queueLock);
+    Unmap **last = &unmaps;
+    while (*last)
+        last = &(*last)->next;
+    *last = &job;
+    IOLockWakeup(queueLock, &head, true);
+    while (!job.finished)
+        IOLockSleep(queueLock, &unmaps, THREAD_UNINT);
+    IOLockUnlock(queueLock);
+    return job.result;
+}
+
+// Worker thread, no chain in flight: the job's next discard. Extents are the APFS partition's blocks: firstSector maps
+// them onto the card. True once the job is finished (result set).
+bool NativeSwitchBlock::stepUnmap(Unmap &job)
+{
+    if (job.at == job.end) {
+        const IOBlockStorageDeviceExtent &extent = job.extents[job.index++];
+        job.at = firstSector + extent.blockStart;
+        job.end = job.at + extent.blockCount;
+    }
+    const uint64_t length = job.end - job.at < kDiscardSectors ? job.end - job.at : kDiscardSectors;
+    cqLeave();
+    if (int step = erase(job.at, job.at + length - 1, kSdDiscardArgument, kDiscardLimitNs)) {
+        switch_refusal_k(switch_refusal_key_with(kUnmapRefusal, static_cast<uint64_t>(step)), "SwitchSD", "discard",
+                         "the card failed to discard LBA %llu-%llu (step %d, irq %#x)", job.at, job.at + length - 1,
+                         step, cardLastIrq);
+        job.result = kIOReturnIOError;
+        return true;
+    }
+    job.at += length;
+    return job.at == job.end && job.index == job.count;
+}
+
+// CMD32/CMD33 bound the range (block addresses, SDHC/SDXC), CMD38 discards or erases it; nothing may come between them
+// (ERASE_SEQ). Busy after CMD38 ends in transfer complete, an interrupt like any other command's.
+int NativeSwitchBlock::erase(uint64_t first, uint64_t last, uint32_t argument, uint64_t limitNs)
+{
+    uint32_t r1 = 0;
+    int step = cqCommand(32, static_cast<uint32_t>(first), RSP_R1, &r1, kRegNone);
+    if (!step && !(r1 & R1_ERRORS))
+        step = cqCommand(33, static_cast<uint32_t>(last), RSP_R1, &r1, kRegNone);
+    if (!step && !(r1 & R1_ERRORS))
+        step = cqCommand(38, argument, RSP_R1B, &r1, kRegNone, limitNs);
+    if (!step && (r1 & R1_ERRORS))
+        step = 20;
+    if (step)
+        recover(false);
+    return step;
+}
+
+// After setup(), with the SD Status known: a card without discard keeps its unmapped AUs for idle-time erases.
+void NativeSwitchBlock::prepareTrim()
+{
+    if (!haveSsr || !irqMode || sdStatus.discard || !sdStatus.auSectors)
+        return;
+    const uint64_t words = switchSdTrimWords(firstSector, sectorCount, sdStatus.auSectors);
+    trimBytes = words * sizeof(uint64_t);
+    trimBits = words ? static_cast<uint64_t *>(IOMallocZero(trimBytes)) : nullptr;
+    trimCall = trimBits ? thread_call_allocate_with_options(&NativeSwitchBlock::trimFired, this,
+                                                            THREAD_CALL_PRIORITY_LOW, THREAD_CALL_OPTIONS_ONCE)
+                        : nullptr;
+    if (!trimCall) {
+        if (trimBits)
+            IOFree(trimBits, trimBytes);
+        trimBits = nullptr;
+        return;
+    }
+    switchSdTrimInit(&trim, trimBits, firstSector, sectorCount, sdStatus.auSectors);
+}
+
+void NativeSwitchBlock::trimFired(thread_call_param_t owner, thread_call_param_t)
+{
+    auto *self = static_cast<NativeSwitchBlock *>(owner);
+    IOLockLock(self->queueLock);
+    IOLockWakeup(self->queueLock, &self->head, true);
+    IOLockUnlock(self->queueLock);
+}
+
+// Under queueLock: there is something to erase and this boot may still erase it.
+bool NativeSwitchBlock::trimRunnable() const
+{
+    return trim.pending && !trimFailed && trimBootSectors < kTrimBootSectors && switch_perf_boot_done();
+}
+
+// Under queueLock: when the queue will have been quiet long enough for an erase.
+uint64_t NativeSwitchBlock::trimQuietUntil() const
+{
+    return lastIoNs + (switch_display_is_on() ? kTrimQuietLitNs : kTrimQuietNs);
+}
+
+void NativeSwitchBlock::saveTrimCursor(uint64_t cursor)
+{
+    if (!PEWriteNVRAMProperty(kTrimCursorVariable, &cursor, sizeof(cursor)))
+        switch_refusal("SwitchSD", "trim cursor", "the erase cursor could not be kept in NVRAM");
+}
+
+// Worker thread, queueLock held on entry and on return, no chain in flight, the queue quiet: one erase of the next due
+// run. The run's bits are cleared before the lock is dropped; a write queued while the card erases runs after it.
+void NativeSwitchBlock::trimStep()
+{
+    if (!trimCursorLoaded) {
+        // NVRAM's saved variables are back once the Data volume is mounted, long before System Boot Complete.
+        IOLockUnlock(queueLock);
+        uint64_t cursor = 0;
+        unsigned int length = sizeof(cursor);
+        const bool found = PEReadNVRAMProperty(kTrimCursorVariable, &cursor, &length) && length == sizeof(cursor);
+        IOLockLock(queueLock);
+        trim.cursor = found ? cursor : 0;
+        trimCursorLoaded = true;
+        if (head || unmaps || suspended || nowNs() < trimQuietUntil())
+            return;  // I/O came while NVRAM was read
+    }
+    uint64_t lba = 0;
+    uint32_t aus = 0;
+    if (!switchSdTrimNext(&trim, switchSdEraseAus(sdStatus, kTrimRunMs), &lba, &aus))
+        return;
+    const uint64_t sectors = uint64_t(aus) * trim.auSectors;
+    working = true;
+    IOLockUnlock(queueLock);
+    cqLeave();
+    const uint64_t began = nowNs();
+    const int step = erase(lba, lba + sectors - 1, kSdEraseArgument,
+                           switchSdEraseTimeoutMs(sdStatus, aus) * 1000000ull + kTrimMarginNs);
+    const uint64_t busy = nowNs() - began;
+    IOLockLock(queueLock);
+    if (step) {
+        trimFailed = true;
+        switch_refusal_k(switch_refusal_key_with(kEraseRefusal, static_cast<uint64_t>(step)), "SwitchSD", "erase",
+                         "the card failed to erase LBA %llu-%llu (step %d, irq %#x): no more erases this boot", lba,
+                         lba + sectors - 1, step, cardLastIrq);
+    } else {
+        __atomic_fetch_add(&stats.trimErases, 1, __ATOMIC_RELAXED);
+        __atomic_fetch_add(&stats.trimSectors, sectors, __ATOMIC_RELAXED);
+        __atomic_fetch_add(&stats.trimNs, busy, __ATOMIC_RELAXED);
+        trimBootSectors += sectors;
+        trimSinceSave += aus;
+    }
+    const bool save = trimSinceSave >= kTrimCursorEveryAus || trimBootSectors >= kTrimBootSectors || !trim.pending;
+    const uint64_t cursor = trim.cursor;
+    if (save)
+        trimSinceSave = 0;
+    working = false;
+    if (suspended)
+        IOLockWakeup(queueLock, &working, false);
+    if (save) {
+        IOLockUnlock(queueLock);
+        saveTrimCursor(cursor);
+        IOLockLock(queueLock);
+    }
 }
 
 // A page the ADMA2 path may DMA to or from and maintain by line through the kernel's physical aperture: managed RAM with
@@ -1777,7 +2047,8 @@ void NativeSwitchBlock::completeBatch(Batch &b)
 // the R1. r18-sdcq: also on a failure, when the command's response came (command complete seen: steps 3, 6 and 10), so
 // the error line has it; DAT0 is confirmed after an R1b's transfer complete too (CMD43: "not assign another task until
 // CMD43 is completed", 9.10 4.19.8); the interrupt status each command ended with is kept for the line (cardLastIrq).
-int NativeSwitchBlock::cqCommand(uint32_t index, uint32_t argument, uint32_t flags, uint32_t *response, int data)
+int NativeSwitchBlock::cqCommand(uint32_t index, uint32_t argument, uint32_t flags, uint32_t *response, int data,
+                                 uint64_t limitNs)
 {
     *response = 0;
     if (!waitIdle(false, 100000000))
@@ -1800,7 +2071,7 @@ int NativeSwitchBlock::cqCommand(uint32_t index, uint32_t argument, uint32_t fla
     noteCommand(static_cast<uint8_t>(index));
     const uint32_t done = data != kRegNone || (flags & 3) == 3 ? INT_TRANSFER : INT_COMMAND;
     const uint32_t awaited = done | ERROR_SIGNALS;
-    const uint64_t start = nowNs(), limit = 1500000000ull;
+    const uint64_t start = nowNs(), limit = limitNs;
     int step = 0;
     uint32_t s = 0;
     for (;;) {
@@ -2455,12 +2726,55 @@ void NativeSwitchBlock::worker(void *context, wait_result_t)
             IOLockUnlock(self->queueLock);
             continue;
         }
-        while (!pending && (!self->head || self->suspended))
+        // Idle: an erase-based trim once the queue has been quiet long enough, else a timer for when it will have been.
+        bool trimNow = false;
+        while (!pending && ((!self->head && !self->unmaps) || self->suspended)) {
+            if (!self->suspended && self->trimRunnable()) {
+                const uint64_t now = nowNs(), until = self->trimQuietUntil();
+                if (now >= until) {
+                    trimNow = true;
+                    break;
+                }
+                uint64_t wait = 0, leeway = 0;
+                nanoseconds_to_absolutetime(until - now, &wait);
+                nanoseconds_to_absolutetime(kTrimMarginNs, &leeway);
+                thread_call_enter_delayed_with_leeway(self->trimCall, nullptr, mach_absolute_time() + wait, leeway,
+                                                      THREAD_CALL_DELAY_LEEWAY);
+            }
             IOLockSleep(self->queueLock, &self->head, THREAD_UNINT);
+        }
+        if (trimNow) {
+            self->trimStep();
+            IOLockUnlock(self->queueLock);
+            continue;
+        }
+        // A discard needs no chain in flight: on its turn no chain is picked, so the pending one completes first.
+        const bool discardTurn =
+            self->unmaps && !self->suspended && (!self->head || self->chainsSinceUnmap >= kUnmapEveryChains);
+        if (discardTurn && !pending) {
+            Unmap *job = self->unmaps;
+            self->working = true;
+            self->chainsSinceUnmap = 0;
+            IOLockUnlock(self->queueLock);
+            const bool finished = self->stepUnmap(*job);
+            IOLockLock(self->queueLock);
+            if (finished) {
+                self->unmaps = job->next;
+                job->finished = true;
+                IOLockWakeup(self->queueLock, &self->unmaps, false);
+            }
+            self->working = false;
+            if (self->suspended)
+                IOLockWakeup(self->queueLock, &self->working, false);
+            IOLockUnlock(self->queueLock);
+            continue;
+        }
         Batch *next = nullptr, *group = nullptr;
         unsigned tasks = 0;
         bool queue = false;
-        if (self->head && !self->suspended) {
+        if (self->head && !self->suspended && !discardTurn) {
+            if (self->unmaps)
+                ++self->chainsSinceUnmap;
             next = &batches[turn];
             turn ^= 1;
             next->first = self->pickLocked(&next->sectors, &next->count);
@@ -2604,6 +2918,12 @@ void NativeSwitchBlock::logThroughput()
         const size_t at = strlen(cqState);
         snprintf(cqState + at, sizeof(cqState) - at, " wflush %llu/%llu %llums", stats.flushes, stats.flushErrors,
                  stats.flushNs / 1000000);
+    }
+    // Erase-based trim: erases, MiB freed and the card's busy ms for them (since boot), and AUs still due.
+    if (stats.trimErases || trim.pending) {
+        const size_t at = strlen(cqState);
+        snprintf(cqState + at, sizeof(cqState) - at, " trim %llu/%lluM/%llums due %llu", stats.trimErases,
+                 stats.trimSectors >> 11, stats.trimNs / 1000000, trim.pending);
     }
     // r12-sdio: ADMA2 above 4 GiB: on, off, or proofs done/needed.
     char highState[16];
@@ -4103,6 +4423,7 @@ extern "C" int switch_block_publish(void)
         IOLog("SwitchSD: publish failed\n");
         return gPublishStatus;
     }
+    owner->prepareTrim();
     auto *device = OSTypeAlloc(NativeSwitchBlockDevice);
     if (!device || !device->init(static_cast<OSDictionary *>(nullptr)) ||
         !device->configure(owner, owner->sectorCount) || !device->attach(owner) || !device->start(owner)) {

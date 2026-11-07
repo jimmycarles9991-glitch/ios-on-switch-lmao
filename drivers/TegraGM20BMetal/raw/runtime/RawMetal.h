@@ -20,7 +20,8 @@ void raw_metal_prepare(const char *packPath, uint64_t stack);
 // A raw device over the pack at `packPath` (its stack key must be `stack`; 0: any, for host tests), wrapping the m2v device
 // `fallback` (nil on a host benchmark: nothing can fall back then), or nil (the reason in *error).
 id<MTLDevice> raw_metal_device_open(const char *packPath, uint64_t stack, id<MTLDevice> fallback, NSString **error);
-// The pack key of a render pipeline descriptor whose functions are this facade's (the frontend journal's R-line fields but the label).
+// The pack key of a render pipeline descriptor whose functions are this facade's (the frontend journal's R-line fields but the label,
+// then " | l <framework>" for functions of a framework's default library other than QuartzCore's).
 NSString *raw_metal_pipeline_key(MTLRenderPipelineDescriptor *descriptor);
 // One rates line since the previous call (0 when the device did nothing): command buffers on each path and why, encode time,
 // draws, passes, copies, waits, memory. The plugin logs it every 5 s with the m2v line (TEGRA_M2V_TELEMETRY).

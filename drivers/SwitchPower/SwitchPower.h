@@ -44,6 +44,9 @@ void switch_perf_hint(unsigned int hint);
 // context (one atomic load): kprof prints it next to its measured per-core clock.
 unsigned int switch_perf_cpu_khz(void);
 
+// System Boot Complete has come (or the boot window's fallback passed). Any context (one atomic load).
+bool switch_perf_boot_done(void);
+
 // The thermal service's last good TMP451 reading: the SoC diode and the PCB (m C) and when it was taken (mach absolute
 // time). 0 before the first one or after the sensor was lost. Any context.
 int switch_thermal_tmp451(int *soc_millic, int *pcb_millic, unsigned long long *at);
@@ -59,6 +62,8 @@ unsigned int switch_perf_cltm_ceiling(unsigned int fraction16);
 // to what it measures. Board thread, after SwitchThermal and SwitchBattery; 0, or -1 (one log line) when nothing could
 // be published (thermalmonitord then stays unhealthy and the userspace watchdog stays off, see below).
 int switch_sensors_start(void);
+// AppleVTempDispatcher, where thermalmonitord sets its virtual temperatures (SwitchVirtualTemps.cpp).
+int switch_virtual_temps_start(void);
 // Whether every sensor thermalmonitord checks can answer now: all HID services hooked, SOC_THERM's readings valid, a
 // TMP451 and a battery reading. Waits up to wait_ms for that, woken by switch_sensors_note(); false with the missing
 // parts in `why` once the time is up. Thread context. NativeSwitchWatchdog asks once, at watchdogd's first open.

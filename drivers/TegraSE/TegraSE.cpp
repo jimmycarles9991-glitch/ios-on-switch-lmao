@@ -58,6 +58,7 @@
 #include "../ArmGIC/SwitchInterrupts.h"
 #include "../../kits/SwitchCAR/SwitchCAR.h"
 #include "../../kits/SwitchDMA/SwitchDMABuffer.h"
+#include "../../kits/SwitchRefusal/SwitchRefusal.h"
 #include "../../kits/SwitchDMA/SwitchDcache.h"
 #include "../../kits/SwitchMMIO/SwitchMMIOKernel.h"
 #include "../../kits/SwitchTime/SwitchTime.h"
@@ -227,14 +228,19 @@ void forceOnly(Engine *only)
 volatile uint64_t gUnreachable, gUnsleepable;  // bytes left to the CPU: not mappable / caller cannot sleep
 bool gStateLoad;                               // SHA compress from a loaded state works (the hook is installed)
 
-// The traffic counters: only a debug kernel's traffic line reads them.
+// Work the engines declined for a reason of the caller's, done on the CPU instead: one error line per process and reason
+// (kits/SwitchRefusal), and the traffic counters only a debug kernel's traffic line reads. The size cutovers are not
+// counted here: below them the CPU is measured faster.
 void tally(volatile uint64_t &counter, uint64_t bytes)
 {
+    if (&counter == &gUnsleepable)
+        switch_refusal("TegraSE", "cannot sleep", "%llu bytes done on the CPU: the caller cannot wait for an engine",
+                       bytes);
+    else
+        switch_refusal("TegraSE", "unreachable buffer", "%llu bytes done on the CPU: a buffer the engines cannot map",
+                       bytes);
 #if DEVELOPMENT || DEBUG
     __atomic_fetch_add(&counter, bytes, __ATOMIC_RELAXED);
-#else
-    (void)counter;
-    (void)bytes;
 #endif
 }
 

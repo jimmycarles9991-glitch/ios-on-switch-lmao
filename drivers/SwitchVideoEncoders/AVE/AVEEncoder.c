@@ -23,16 +23,16 @@
 // screen captures) before EncodeFrame.
 //
 // Per picture (synchronous, on VideoToolbox's encode thread): the picture is copied into the session's input buffer in
-// the layout E3 proved (TegraNVENCInfo.input_layout: a memcpy per row for pitch linear, 16-byte runs for block linear),
+// the layout NVENC reads (TegraNVENCInfo.input_layout: a memcpy per row for pitch linear, 16-byte runs otherwise),
 // the setup built (H264NVENC.c) with the QP the rate control picked (RateControl.h), the job queued on host1x channel 0,
 // and the thread sleeps on the syncpoint interrupt; then NVENC's Annex B slice becomes a length-prefixed sample with
 // the format description of this plug-in's own SPS/PPS, and goes out at once (no reordering: no B pictures). A P
-// picture predicts from the previous picture's reconstruction (two buffers in turn); a key frame is an IDR. When E3
-// could not prove P pictures (TegraNVENCInfo.p_frames 0), every picture is an IDR.
+// picture predicts from the previous picture's reconstruction (two buffers in turn); a key frame is an IDR. A P picture
+// NVENC refuses (its status says why, one error line) leaves the session intra only, so the stream goes on.
 //
-// Log (subsystem com.brunostjohn.switch.ave, category encoder): per process, a refusal by TegraNVENC; per session, one line when
-// it starts and one when it ends (frames, bytes, mean copy and encode time); once per boot, the encode check
-// (EncodeCheck.c) in the first process that may open NVENC, category selftest.
+// Log (subsystem com.brunostjohn.switch.ave, category encoder): per session, one line when it starts and one when it ends
+// (frames, bytes, mean copy and encode time). Refusals (a size, TegraNVENC refusing the process, a property) are
+// kits/SwitchRefusal's, category AVE: one error line per process and reason.
 #include <CoreFoundation/CoreFoundation.h>
 #include <dispatch/dispatch.h>
 #include <mach/mach_time.h>
@@ -40,11 +40,11 @@
 #include <pthread.h>
 #include <stdlib.h>
 #include <string.h>
-#include "EncodeCheck.h"
 #include "H264NVENC.h"
 #include "NVENCClient.h"
 #include "RateControl.h"
 #include "VTEncoderSPI.h"
+#include "../../../kits/SwitchRefusal/SwitchRefusal.h"
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wunused-const-variable"
 #pragma clang diagnostic ignored "-Wunused-variable"
@@ -67,7 +67,7 @@ typedef struct {
     H264EncLayout layout;
     H264EncHandles handles;
     uint8_t *inputVA, *bitstreamVA, *auxVA;
-    uint32_t buffers[5];
+    uint32_t buffers[sizeof(H264EncHandles) / sizeof(uint32_t)];  // one per handle
     unsigned bufferCount;
     CMVideoFormatDescriptionRef format;
     uint8_t *avcc;  // AVCC scratch for one picture
@@ -246,7 +246,9 @@ static OSStatus startStream(Encoder *e, CFTypeRef primaries, CFTypeRef transfer,
         allocBuffer(e, l->recon.bytes, &e->handles.recon, &ignored) ||
         allocBuffer(e, l->recon.bytes, &e->handles.ref, &ignored) ||
         allocBuffer(e, l->bitstream_bytes, &e->handles.bitstream, &e->bitstreamVA) ||
-        allocBuffer(e, l->aux_bytes, &e->handles.aux, &e->auxVA)) {
+        allocBuffer(e, l->aux_bytes, &e->handles.aux, &e->auxVA) ||
+        allocBuffer(e, l->mepred_bytes, &e->handles.mepred[0], &ignored) ||
+        allocBuffer(e, l->mepred_bytes, &e->handles.mepred[1], &ignored)) {
         releaseBuffers(e);
         return kVTAllocationFailedErr;
     }
@@ -387,11 +389,15 @@ static OSStatus encodePicture(Encoder *e, VTVideoEncoderFrame frame, CVPixelBuff
     if (stat->error_status || stat->ucode_error_status || !produced || produced > e->layout.bitstream_bytes) {
         static int logged;
         if (!__atomic_exchange_n(&logged, 1, __ATOMIC_RELAXED))
-            os_log_error(gLog, "AVE: NVENC picture failed: error_status %u ucode %#x, %u bits", stat->error_status,
-                         stat->ucode_error_status, stat->total_bit_count);
+            os_log_error(gLog, "AVE: NVENC %{public}s picture failed: error_status %u ucode %#x, %u bits%{public}s",
+                         key ? "IDR" : "P", stat->error_status, stat->ucode_error_status, stat->total_bit_count,
+                         key ? "" : "; this session encodes intra only");
         e->errors++;
         e->keyPending = true;
-        return kVTVideoEncoderMalfunctionErr;
+        if (key)
+            return kVTVideoEncoderMalfunctionErr;
+        e->info.p_frames = 0;
+        return encodePicture(e, frame, image, pts, duration, options);  // the same picture again, as an IDR
     }
     TegraNVENCWait bits = {.fence = wait.fence, .timeout_us = 1000000, .invalidate_count = 1};
     bits.invalidate[0] = (TegraNVENCRange){e->handles.bitstream, 0, produced, 0};
@@ -440,13 +446,13 @@ static OSStatus startSession(VTVideoEncoderRef ref, VTVideoEncoderSession sessio
     OSStatus status = noErr;
     int error = 0;
     if (h264enc_configure(&probe)) {
-        os_log(gLog, "AVE: %dx%d in %{public}s refused: NVENC encodes 32..4096 a side, even sizes, up to 4096x2304",
-               size.width, size.height, getprogname());
+        switch_refusal_k(switch_refusal_key_with(switch_refusal_key("AVE", "size outside NVENC's range"),
+                                                 (uint64_t)(uint32_t)size.width << 32 | (uint32_t)size.height),
+                         "AVE", "size outside NVENC's range",
+                         "%dx%d: NVENC encodes 32..4096 a side, even sizes, up to 4096x2304", size.width, size.height);
         status = kVTCouldNotFindVideoEncoderErr;
     } else if (!(e->client = nvenc_open(&error)) || !nvenc_info(e->client, &e->info)) {
-        static int logged;
-        if (!__atomic_exchange_n(&logged, 1, __ATOMIC_RELAXED))
-            os_log_error(gLog, "AVE: TegraNVENC refused %{public}s (%#x): no H.264 encoder here", getprogname(), error);
+        switch_refusal("AVE", "TegraNVENC refused the process", "error %#x: no H.264 encoder here", error);
         status = kVTCouldNotFindVideoEncoderErr;
     }
     if (!status) {
@@ -653,10 +659,10 @@ static OSStatus setProperty(CMBaseObjectRef ref, CFStringRef key, CFTypeRef valu
         // that change no slice (progressive, square-sample 8-bit streams only).
     } else {
         status = kVTPropertyNotSupportedErr;
-        static int logged;
-        if (!__atomic_exchange_n(&logged, 1, __ATOMIC_RELAXED))
-            os_log(gLog, "AVE: %{public}s set %{public}@, which this encoder does not support (first refusal only)",
-                   getprogname(), key);
+        char name[96] = "";
+        CFStringGetCString(key, name, sizeof(name), kCFStringEncodingUTF8);
+        switch_refusal_k(switch_refusal_key_with(switch_refusal_key("AVE", "property not supported"), CFHash(key)),
+                         "AVE", "property not supported", "%s", name);
     }
     pthread_mutex_unlock(&e->lock);
     return status;
@@ -766,18 +772,6 @@ static OSStatus createInstance(FourCharCode codec, CFAllocatorRef allocator, VTV
     return noErr;
 }
 
-static void selfTest(void *context)
-{
-    (void)context;
-    char line[512];
-    const bool ok = encode_check(NULL, NULL, 30.0, line, sizeof(line));
-    os_log_t log = os_log_create("com.brunostjohn.switch.ave", "selftest");
-    if (ok)
-        os_log(log, "vetest: %{public}s (in %{public}s)", line, getprogname());
-    else
-        os_log_error(log, "vetest: %{public}s (in %{public}s)", line, getprogname());
-}
-
 static OSStatus registerEncoder(void)
 {
     const void *keys[] = {CFSTR("CMClassImplementationID"), kVTVideoEncoder_IsHardwareAccelerated,
@@ -802,12 +796,4 @@ void H264H7EncoderRegister(void)
         os_log_error(gLog, "AVE: VTRegisterVideoEncoderWithInfo('avc1') failed: %d", (int)status);
         return;
     }
-    // The once-per-boot check runs in the first process that may open NVENC (the media server, in practice).
-    int error = 0;
-    NVENCClient *probe = nvenc_open(&error);
-    const bool claimed = probe && nvenc_claim_self_test(probe);
-    nvenc_close(probe);
-    // Off the registry's thread: the check's own session looks the registry up once this registration returns.
-    if (claimed)
-        dispatch_async_f(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), NULL, selfTest);
 }

@@ -3,10 +3,26 @@
 #   bazel test //gpu/seed/test:all
 load("@bazel_skylib//rules:write_file.bzl", "write_file")
 load("//bazel/lint:defs.bzl", "lint_files")
-load("//gpu/seed:defs.bzl", "metal_seed", "shader_crawl")
+load("//gpu/seed:crawl.bzl", "QUARTZCORE")
+load("//gpu/seed:defs.bzl", "metal_seed", "seed_raw_pack", "shader_crawl")
 load(":inputs_test.bzl", "seed_inputs_tests")
 
 lint_files()
+
+RAW = [
+    "rawpack.py",
+    "mkpack.py",
+    "mkprograms.py",
+    "nvkshader.py",
+    "probelog.py",
+    "layouts.py",
+    "packfile.py",
+    "eqcheck.py",
+    "probe.mm",
+    "ca/caset.py",
+    "ca/caspec.py",
+    "ca/qc-21H461.json",
+]
 
 [write_file(
     name = path.replace("/", "_"),
@@ -14,17 +30,18 @@ lint_files()
     content = [],
     tags = ["manual"],
 ) for path in [
-    "images/os.dmg",
-    "images/system.dmg",
-    "images/app.dmg",
+    "crawl/tree/" + QUARTZCORE,
+    "crawl/tree/data/0.metallib",
+    "crawl/inventory.json",
     "base/TegraGM20BMetal.bundle/Info.plist",
     "tools/precompile",
     "tools/libmock_iokit.dylib",
     "tools/libvulkan_nouveau.dylib",
+    "tools/libvulkan_nouveau.dylib.source",
     "tools/MANIFEST.json",
     "tools/raw/probe",
     "corpus/corpus.log",
-]]
+] + ["raw/" + name for name in RAW]]
 
 filegroup(
     name = "base",
@@ -38,20 +55,28 @@ filegroup(
         ":tools/MANIFEST.json",
         ":tools/libmock_iokit.dylib",
         ":tools/libvulkan_nouveau.dylib",
+        ":tools/libvulkan_nouveau.dylib.source",
         ":tools/precompile",
         ":tools/raw/probe",
     ],
     tags = ["manual"],
 )
 
-shader_crawl(
-    name = "crawl",
-    images = [
-        ":images/os.dmg",
-        ":images/system.dmg",
-        ":images/app.dmg",
+filegroup(
+    name = "tree",
+    srcs = [
+        ":crawl/tree/" + QUARTZCORE,
+        ":crawl/tree/data/0.metallib",
     ],
     tags = ["manual"],
+)
+
+shader_crawl(
+    name = "crawl",
+    inventory = ":crawl/inventory.json",
+    qc = ":crawl/tree/" + QUARTZCORE,
+    tags = ["manual"],
+    tree = ":tree",
 )
 
 metal_seed(
@@ -65,9 +90,19 @@ metal_seed(
     tools = ":tools",
 )
 
+seed_raw_pack(
+    name = "raw_pack",
+    srcs = [":raw/" + name for name in RAW],
+    corpus = ":corpus/corpus.log",
+    crawl = ":crawl",
+    generator = ":raw/rawpack.py",
+    tags = ["manual"],
+    tools = ":tools",
+)
+
 seed_inputs_tests(
     name = "inputs_test",
     crawl = ":crawl",
-    crawler = "//tools/gpu/shaders:crawl",
+    raw_pack = ":raw_pack",
     seed = ":seed",
 )

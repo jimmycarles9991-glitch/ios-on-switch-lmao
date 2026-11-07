@@ -187,9 +187,11 @@ static void count(const std::string &file, char kind, Outcome outcome, const std
         c.skipped++;
     if (outcome == Refused) {
         c.refused++;
-        gQuartzCoreRefused = gQuartzCoreRefused || (file == gQuartzCore && !derived);
-        fprintf(stderr, "REFUSED %c %s (%s): %s\n", kind, what.c_str(), file.c_str(),
-                error.localizedDescription.UTF8String ?: "a function");
+        // A corpus state of QuartzCore's library is one the render server made: the device refuses it too.
+        const bool corpusQuartzCore = file == gQuartzCore && !derived;
+        gQuartzCoreRefused = gQuartzCoreRefused || corpusQuartzCore;
+        fprintf(stderr, "%s %c %s (%s): %s\n", corpusQuartzCore ? "REFUSED-CORPUS" : "REFUSED", kind, what.c_str(),
+                file.c_str(), error.localizedDescription.UTF8String ?: "a function");
     }
 }
 

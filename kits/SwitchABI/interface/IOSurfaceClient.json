@@ -1,0 +1,20 @@
+{
+  "class": "IOSurfaceClient",
+  "doc": "The original IOSurfaceClient (com.apple.iokit.IOSurface): one per surface per IOSurfaceRootUserClient, holding the task's CPU mapping of the surface.",
+  "superclass": "OSObject",
+  "kext": "com.apple.iokit.IOSurface",
+  "functions_only": true,
+  "methods": {},
+  "constants": {
+    "sharedClient": {
+      "doc": "The shared-client object of the user client whose table holds it."
+    },
+    "map": {
+      "doc": "The IOMemoryMap of the surface's memory in the client task (createMappingInTask with kIOMapAnywhere and the surface's cache mode). Null when the task created the surface over its own memory or the surface has no CPU mapping."
+    },
+    "base": {
+      "doc": "The base address the create and lookup replies carry, which IOSurface.framework caches for IOSurfaceGetBaseAddress: the map's address plus OriginalIOSurface::baseOffset, the creator's own address for a client-memory surface, or 0 without a CPU mapping."
+    }
+  },
+  "functions": {}
+}

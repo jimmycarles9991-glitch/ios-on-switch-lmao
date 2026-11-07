@@ -352,6 +352,14 @@ impl Event {
     pub fn label(&self) -> Option<String> {
         lock(&self.0.label).clone()
     }
+
+    /// The host's view of this event, which Metal gives a plain event none of: its value, a host
+    /// set (a floor, as a shared event's), its notifications. For a driver beside the runtime that
+    /// runs some of the event's signals and waits itself (the ios-on-switch-lmao raw GM20B path):
+    /// it sets the value its own signals reach, and waits for the runtime's through the value.
+    pub fn host_view(&self) -> SharedEvent {
+        SharedEvent(Arc::clone(&self.0))
+    }
 }
 
 impl std::fmt::Debug for SharedEvent {

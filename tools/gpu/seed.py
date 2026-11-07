@@ -10,11 +10,11 @@
                    --nvk-source <the iOS dylib's .source> --out <dir> --manifest <a copy of its MANIFEST.json>
     seed.py archive --tools <dir> --out <tar>
 
-layout: the tools directory the seed runs (precompile, libmock_iokit.dylib beside it, the twin, raw/ with the raw pack's
-probe, mock and ycbcr.metallib) and MANIFEST.json: the raw path's stack key (the plugin is built with it), the twin's
-LC_UUID (the iOS dylib's: NVK hashes it into the pipeline cache UUID), the Mesa tree and the architecture. The seed
-refuses tools whose manifest is not the GPU bundle's. Only mock, tool and the raw pack's build need Xcode; running the
-tools needs nothing but macOS.
+layout: the tools directory the seed runs (precompile, libmock_iokit.dylib beside it, the twin with its .source, raw/
+with the raw pack's probe, mock and ycbcr.metallib) and MANIFEST.json: the raw path's stack key (the plugin is built
+with it), the twin's LC_UUID (the iOS dylib's), NVK's compiler identity (which NVK hashes into its pipeline cache UUID),
+the Mesa tree and the architecture. The seed refuses tools whose manifest is not the GPU bundle's. Only mock, tool and
+the raw pack's build need Xcode; running the tools needs nothing but macOS.
 """
 
 import argparse
@@ -146,16 +146,16 @@ def layout(args: argparse.Namespace, _root: Path, _work: Path) -> None:
     for path in sorted(Path(args.raw).iterdir()):
         shutil.copyfile(path, out / 'raw' / path.name)
         (out / 'raw' / path.name).chmod(0o755)
+    shutil.copyfile(args.nvk_source, out / 'libvulkan_nouveau.dylib.source')
     (cpu,) = struct.unpack_from('<I', (out / 'precompile').read_bytes(), 4)
-    mesa = next(
-        line.split()[1] for line in Path(args.nvk_source).read_text().splitlines() if line.startswith('mesa-tree')
-    )
+    source = dict(line.split(' ', 1) for line in Path(args.nvk_source).read_text().splitlines() if ' ' in line)
     manifest = {
         'format': 1,
         'arch': ARCHES.get(cpu, hex(cpu)),
         'stack': Path(args.stack).read_text().strip(),
         'nvk_uuid': lc_uuid(out / 'libvulkan_nouveau.dylib').hex(),
-        'mesa_tree': mesa,
+        'nvk_build_id': source['nvk-build-id'],
+        'mesa_tree': source['mesa-tree'],
     }
     text = json.dumps(manifest, indent=1, sort_keys=True) + '\n'
     (out / 'MANIFEST.json').write_text(text)
@@ -169,7 +169,7 @@ def archive(args: argparse.Namespace, _root: Path, _work: Path) -> None:
         for path in sorted(p for p in tools.rglob('*') if p.is_file()):
             info = tarfile.TarInfo(str(path.relative_to(tools)))
             info.size, info.mtime = path.stat().st_size, 0
-            info.mode = 0o644 if path.suffix in ('.json', '.metallib') else 0o755
+            info.mode = 0o644 if path.suffix in ('.json', '.metallib', '.source') else 0o755
             with path.open('rb') as f:
                 tar.addfile(info, f)
     Path(args.out).write_bytes(data.getvalue())

@@ -1,9 +1,8 @@
 // SPDX-License-Identifier: BSD-2-Clause-Patent
 // Tegra210 VIC (Video Image Compositor 4.0, a falcon behind host1x): bring-up, its SMMU domain, the job engine and
 // sleep. tegra_vic_probe() runs the whole bring-up by default on its own thread:
-//   V0  NVDEC's bring-up has ended (its 48 MiB arena goes first), host1x is up, and VIC's kernel buffers are allocated:
-//       the firmware image, an arena for the configuration slot, the filter structure and the self-test surfaces, and
-//       the SMMU page directory with its page tables
+//   V0  host1x is up, and VIC's kernel buffers are allocated: the firmware image, an arena for the configuration slot,
+//       the filter structure and the self-test surfaces, and the SMMU page directory with its page tables
 //   V1  VIC's SMMU domain (ASID 127 for the "vic" swgroup: the kernel buffers 1:1, two empty surface windows), power
 //       partition 23, clock (PLLP, 408 MHz), reset, the VIC MBIST workaround, falcon firmware loaded and started
 //   V2  proof of life through host1x channel 0 in VIC's class: an IMMEDIATE syncpoint increment (the engine's host
@@ -60,7 +59,6 @@
 #include "../../kits/SwitchTime/SwitchTime.h"
 
 extern "C" {
-int tegra_nvdec_await(uint32_t timeoutMs);
 extern const uint8_t tegra_vic_fw_start[] __asm__("_tegra_vic_fw_start");
 extern const uint8_t tegra_vic_fw_end[] __asm__("_tegra_vic_fw_end");
 }
@@ -73,7 +71,6 @@ constexpr uint64_t kMcPA = 0x70019000;
 constexpr uint32_t kPartition = 23;  // TEGRA_POWERGATE_VIC
 constexpr unsigned kClock = 178;     // TEGRA210_CLK_VIC03: CAR bank X bit 18, also its reset
 constexpr uint64_t kArenaBytes = 1ull << 20;
-constexpr uint32_t kNvdecWaitMs = 20000;
 constexpr uint32_t kAsid = TEGRA_SMMU_ASID_VIC;
 
 enum : uint32_t {  // clock and reset controller
@@ -121,10 +118,10 @@ constexpr uint32_t kTables = 1 + TEGRA_VIC_WINDOWS * kWindowTables + kIdentityTa
 TegraSMMUDomain gDomain;  // directory = page 0, the windows' tables pages 1.., then the identity tables
 uint32_t gWindowMapped[TEGRA_VIC_WINDOWS];  // pages mapped from each window's start
 
-// The job engine. A job's wait is bounded by kQueueUs (VIC shares host1x channel 0 with NVDEC and NVENC, whose queued
-// jobs may run first: up to 2 s by their own bounds) plus one microsecond per 8 pixels read and written (VIC does
-// several per clock at 408 MHz), at most kMaxBoundUs: only a hung engine gets there.
-constexpr uint64_t kQueueUs = 2000000, kMaxBoundUs = 30000000;
+// The job engine. A job's wait is bounded by kQueueUs plus one microsecond per 8 pixels read and written (VIC does
+// several per clock at 408 MHz), at most kMaxBoundUs: only a hung engine gets there. A job that first waits for the
+// copy engine (an acquire) gets kAcquireBoundUs more, a whole 128 MiB window's copy several times over.
+constexpr uint64_t kQueueUs = 2000000, kMaxBoundUs = 30000000, kAcquireBoundUs = 2000000;
 
 inline uint32_t jobBoundUs(const TegraVICJob *job)
 {
@@ -327,7 +324,7 @@ int answer(uint32_t id, uint32_t from, const char **stage)
         (uint32_t)((gFirmware.pa + gImage.fce_data) >> 8),
         tegra_host1x_op_incr_syncpt(TEGRA_HOST1X_COND_OP_DONE, id),
     };
-    int ret = tegra_host1x_submit(stream, sizeof(stream) / sizeof(stream[0]));
+    int ret = tegra_host1x_submit_on(TEGRA_HOST1X_CHANNEL_VIC, stream, sizeof(stream) / sizeof(stream[0]));
     *stage = "submit";
     if (!ret) {
         *stage = "host interface (IMMEDIATE)";
@@ -352,7 +349,7 @@ void park()
 void timedOut(uint32_t fence, uint64_t us)
 {
     char host[200];
-    tegra_host1x_describe(host, sizeof(host));
+    tegra_host1x_describe_channel(TEGRA_HOST1X_CHANNEL_VIC, host, sizeof(host));
     if (gPublished)
         panic("TegraVIC: job fence %u not reached in %llu ms (syncpoint %u at %u); %s; %s", fence, us / 1000, gSyncpt,
               tegra_host1x_syncpt_read(gSyncpt), falconState(), host);
@@ -394,8 +391,6 @@ void giveBack()
 
 void bringUp(void *, wait_result_t)
 {
-    // NVDEC first, whatever it decides: its 48 MiB arena is reserved while memory is least fragmented.
-    (void)tegra_nvdec_await(kNvdecWaitMs);
     if (tegra_host1x_start()) {
         IOLog("TegraVIC: V0 FAIL host1x is not up (see the TegraHost1x line)\n");
         return;
@@ -443,7 +438,7 @@ void bringUp(void *, wait_result_t)
     const int ret = answer(id, from, &stage);
     if (ret) {
         char host[200];
-        tegra_host1x_describe(host, sizeof(host));
+        tegra_host1x_describe_channel(TEGRA_HOST1X_CHANNEL_VIC, host, sizeof(host));
         IOLog("TegraVIC: V2 FAIL %s %s syncpoint %u (%u->%u, %d); %s; %s\n", stage,
               ret == TEGRA_HOST1X_ELOST ? "incremented, but no interrupt came for" : "did not increment", id, from,
               tegra_host1x_syncpt_read(id), ret, falconState(), host);
@@ -569,8 +564,10 @@ extern "C" void tegra_vic_identity_override(uint64_t iova, uint64_t pa)
 }
 
 // Job lock held. The configuration slot is the kernel's (no client maps it); the stream is SETCLASS, the job's methods
-// through THI METHOD0/METHOD1, then an OP_DONE increment of VIC's syncpoint, waited for by interrupt.
-extern "C" int tegra_vic_run(const TegraVICJob *job, uint64_t *busyUs)
+// through THI METHOD0/METHOD1, then an OP_DONE increment of VIC's syncpoint, waited for by interrupt. With an acquire,
+// VIC's channel first waits on the hardware for another engine's syncpoint (the copy engine filling a bounce scratch).
+extern "C" int tegra_vic_run_after(const TegraVICJob *job, const TegraVICAcquire *acquire, uint64_t *busyUs,
+                                   uint32_t *fence)
 {
     if (!gUp || job->count > TEGRA_VIC_MAX_METHODS)
         return -19;
@@ -583,7 +580,9 @@ extern "C" int tegra_vic_run(const TegraVICJob *job, uint64_t *busyUs)
     }
     memcpy(gConfig.va, job->config, TEGRA_VIC_CONFIG_BYTES);
     switch_dcache_clean(gConfig.va, TEGRA_VIC_CONFIG_BYTES);
-    uint32_t words[1 + 3 * TEGRA_VIC_MAX_METHODS + 1], n = 0;
+    uint32_t words[2 + 1 + 3 * TEGRA_VIC_MAX_METHODS + 1], n = 0;
+    if (acquire)
+        n += tegra_host1x_op_wait_syncpt(words, acquire->syncpt, acquire->threshold);
     words[n++] = tegra_host1x_op_setclass(kClass, 0, 0);
     for (uint32_t i = 0; i < job->count; i++) {
         words[n++] = tegra_host1x_op_incr(kThiMethod0 / 4, 2);
@@ -591,19 +590,31 @@ extern "C" int tegra_vic_run(const TegraVICJob *job, uint64_t *busyUs)
         words[n++] = job->value[i];
     }
     words[n++] = tegra_host1x_op_incr_syncpt(TEGRA_HOST1X_COND_OP_DONE, gSyncpt);
-    const uint32_t fence = gNext + 1;
+    const uint32_t next = gNext + 1;
     const uint64_t start = switch_now_us();
-    int ret = tegra_host1x_submit(words, n);
+    int ret = tegra_host1x_submit_on(TEGRA_HOST1X_CHANNEL_VIC, words, n);
     if (!ret) {
-        gNext = fence;
-        ret = tegra_host1x_syncpt_wait(gSyncpt, fence, jobBoundUs(job));
+        gNext = next;
+        ret = tegra_host1x_syncpt_wait(gSyncpt, next, (uint32_t)(jobBoundUs(job) + (acquire ? kAcquireBoundUs : 0)));
         if (ret == TEGRA_HOST1X_ETIMEDOUT)
-            timedOut(fence, switch_now_us() - start);
+            timedOut(next, switch_now_us() - start);
     }
     if (busyUs)
         *busyUs = switch_now_us() - start;
+    if (fence)
+        *fence = next;
     IOLockUnlock(gStateLock);
     return ret;
+}
+
+extern "C" int tegra_vic_run(const TegraVICJob *job, uint64_t *busyUs)
+{
+    return tegra_vic_run_after(job, nullptr, busyUs, nullptr);
+}
+
+extern "C" uint32_t tegra_vic_syncpt(void)
+{
+    return gSyncpt;
 }
 
 // Sleep (SC7), through TegraHost1x's sleep clients. Suspend waits for the job lock (no job runs), parks the engine

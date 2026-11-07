@@ -328,12 +328,18 @@ fn device_ycbcr_filter() -> bool {
 pub(crate) fn ycbcr_variant(
     dependencies: &[RuntimeDependency],
     shape: &BindShape,
+    profile: &DeviceProfile,
 ) -> std::collections::BTreeSet<SlotRef> {
-    // `M2V_YCBCR_FILTER=device` (EVB10: Mali-G610, the shadow image of a converted texture is an ordinary R16G16B16A16_SFLOAT image):
-    // no slot is in the YCbCr variant, so a linear sample of a converted texture is the device's own filter of the shadow's texels like
-    // every other texture's on a device that samples natively, not Metal's filter emulated exactly in the fragment function (about 570
-    // instructions a sample: 16 of the 22 ms of a full-screen pass over a 3416 x 3416 wallpaper at 750 MHz).
-    if device_ycbcr_filter() {
+    // No slot is in the YCbCr variant on a device that samples natively (`SamplingPolicy::NativeDevice`): a linear sample of a
+    // converted texture is then the device's own filter of its shadow's texels (an ordinary R16G16B16A16_SFLOAT image of Metal's
+    // texels), as every other texture's sample is, not Metal's filter emulated exactly in the fragment function (about 570
+    // instructions a sample: 16 of the 22 ms of a full-screen pass over a 3416 x 3416 wallpaper on a Mali-G610 at 750 MHz, and on a
+    // GM20B 144 ms a pass over a 2500 x 1500 video). `M2V_YCBCR_FILTER=device` takes the device's filter on any device.
+    use crate::device::requirements::VkProperty;
+    let properties = &profile.enabled().properties;
+    let native = properties.contains(&VkProperty::DeviceSampling)
+        && !properties.contains(&VkProperty::MetalSampler);
+    if native || device_ycbcr_filter() {
         return std::collections::BTreeSet::new();
     }
     dependencies

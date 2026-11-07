@@ -15,13 +15,13 @@
     "ProgressUI's boot logo (backboardd's Apple logo overlay) is boot/logo's, the same pixels hekate's bootlogo.bmp puts",
     "on the panel, under each name ProgressUI looks for at a truncated main-screen-scale of 1 or 2 (iPadOS 17 and 27).",
     "portrait (optional): staged only for a portrait-native kernel (drivers/NativeMobileDisplay/SwitchPortrait.h).",
+    "debug (optional): staged only in debug boot packages (switch-fetchform, which the BlueTool stand-in runs on request).",
     "J120's speaker strips give the presets and bypass flags of VirtualAudio's built-in DSP chain for the speaker port",
     "(nine AUs tuned for J120's four MAX98723 drivers). drivers/SwitchAudio/tunings has same-named ones, gated like the",
     "plug-in, that bypass every AU of those chains except the volume (see hal/SwitchAudioPlugIn.c).",
     "The VideoDecoders union (HEVCH8, AVD) has no gate: AVD registers only in processes that may open the TegraNVDEC",
     "service, which the kernel publishes once NVDEC proves itself at boot.",
-    "H264H7.videoencoder (AVE on NVENC) has no gate either: it registers only once the kernel published TegraNVENC (E4,",
-    "after NVENC's picture decoded back on NVDEC at boot).",
+    "H264H7.videoencoder (AVE on NVENC) has no gate either: it registers only once the kernel published TegraNVENC (E3).",
     "The J120 iPadOS 17 and Lake wallpapers (WallpaperKit loads a bundle only at the device's logical screen class, which",
     "follows switch-ui-scale, or at 'any'; 21H461 ships @2x only): each bundle directory is its own union, showing an 'any'",
     "Wallpaper.plist (tools/package/wallpaper_1x.py, pinned) over the sealed one, with the sealed .ca and HEIC beneath.",
@@ -46,6 +46,13 @@
       "source": "drivers/SwitchAudio/hal/Info.plist",
       "union": "/System/Library/Audio/Plug-Ins/HAL",
       "boot-arg": "switch-no-audio"
+    },
+    {
+      "path": "/usr/bin/switch-fetchform",
+      "source": "build/switch-gpu/fetchform",
+      "trust": true,
+      "debug": true,
+      "boot-arg": "switch-no-bt"
     },
     {
       "path": "/usr/libexec/joyconpaird",

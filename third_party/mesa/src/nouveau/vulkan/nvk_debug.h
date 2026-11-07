@@ -45,6 +45,9 @@ enum nvk_debug {
 
    /* Disable image compression */
    NVK_DEBUG_NO_COMPRESSION = 1ull << 9,
+
+   /* Hide VK_EXT_fragment_shader_interlock (macOS builds only) */
+   NVK_DEBUG_NO_FSI = 1ull << 10,
 };
 
 enum nvk_experimental {

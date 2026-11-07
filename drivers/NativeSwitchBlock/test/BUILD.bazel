@@ -30,6 +30,14 @@ host_test(
     ],
 )
 
+host_test(
+    name = "sd_trim_test",
+    srcs = [
+        "sd_trim_test.cpp",
+        "//drivers/NativeSwitchBlock:SwitchSdTrim.h",
+    ],
+)
+
 # copypv's flag values, from the XNU the driver links against (its osfmk/vm/pmap.h): the seven the helper and the test
 # use, each required.
 genrule(

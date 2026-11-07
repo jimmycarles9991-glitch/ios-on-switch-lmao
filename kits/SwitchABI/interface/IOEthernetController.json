@@ -1,0 +1,164 @@
+{
+  "class": "IOEthernetController",
+  "doc": "The original IOEthernetController (com.apple.iokit.IONetworkingFamily 3.4), which SwitchWLAN's IO80211Controller subclasses so IONetworkStack attaches its interface as it does every iPad's. Declared on IOService: IONetworkController's slots and IOEthernetController's are one flat range, unnamed ones opaque. Abstract: getHardwareAddress(IOEthernetAddress *) is pure.",
+  "superclass": "IOService",
+  "kext": "com.apple.iokit.IONetworkingFamily",
+  "structors": "abstract",
+  "includes": [
+    "IOKit/IOService.h",
+    "sys/kernel_types.h"
+  ],
+  "declarations": [
+    "#ifndef SWITCH_ABI_NETWORKING_TYPES",
+    "#define SWITCH_ABI_NETWORKING_TYPES",
+    "class IONetworkController;",
+    "class IONetworkInterface;",
+    "class IONetworkMedium;",
+    "struct IOMbufQueue;",
+    "typedef struct {",
+    "    UInt8 bytes[6];",
+    "} IOEthernetAddress;",
+    "#endif"
+  ],
+  "members": [],
+  "methods": {
+    "free": {
+      "decl": "void free() override",
+      "mangled": "__ZN20IOEthernetController4freeEv",
+      "pac": "_ZN8OSObject4freeEv"
+    },
+    "init": {
+      "decl": "bool init(OSDictionary *properties) override",
+      "mangled": "__ZN20IOEthernetController4initEP12OSDictionary",
+      "pac": "_ZN15IORegistryEntry4initEP12OSDictionary"
+    },
+    "systemWillShutdown": {
+      "decl": "void systemWillShutdown(IOOptionBits specifier) override",
+      "mangled": "__ZN20IOEthernetController18systemWillShutdownEj",
+      "pac": "_ZN9IOService18systemWillShutdownEj"
+    },
+    "start": {
+      "decl": "bool start(IOService *provider) override",
+      "mangled": "__ZN20IOEthernetController5startEP9IOService",
+      "pac": "_ZN9IOService5startEPS_",
+      "doc": "IONetworkController::start: waits for IOBSD, then the link status properties, the command gate on getWorkLoop()'s loop, and the packet buffer constraints."
+    },
+    "stop": {
+      "decl": "void stop(IOService *provider) override",
+      "mangled": "__ZN20IOEthernetController4stopEP9IOService",
+      "pac": "_ZN9IOService4stopEPS_"
+    },
+    "handleOpen": {
+      "decl": "bool handleOpen(IOService *client, IOOptionBits options, void *argument) override",
+      "mangled": "__ZN20IOEthernetController10handleOpenEP9IOServicejPv",
+      "pac": "_ZN9IOService10handleOpenEPS_jPv"
+    },
+    "handleClose": {
+      "decl": "void handleClose(IOService *client, IOOptionBits options) override",
+      "mangled": "__ZN20IOEthernetController11handleCloseEP9IOServicej",
+      "pac": "_ZN9IOService11handleCloseEPS_j"
+    },
+    "handleIsOpen": {
+      "decl": "bool handleIsOpen(const IOService *client) const override",
+      "mangled": "__ZNK20IOEthernetController12handleIsOpenEPK9IOService",
+      "pac": "_ZNK9IOService12handleIsOpenEPKS_"
+    },
+    "message": {
+      "decl": "IOReturn message(UInt32 type, IOService *provider, void *argument = nullptr) override",
+      "mangled": "__ZN20IOEthernetController7messageEjP9IOServicePv",
+      "pac": "_ZN9IOService7messageEjPS_Pv"
+    },
+    "setAggressiveness": {
+      "decl": "IOReturn setAggressiveness(unsigned long type, unsigned long newLevel) override",
+      "mangled": "__ZN20IOEthernetController17setAggressivenessEmm",
+      "pac": "_ZN9IOService17setAggressivenessEmm"
+    },
+    "newVendorString": {
+      "decl": "virtual const OSString *newVendorString() const",
+      "mangled": "__ZNK20IOEthernetController15newVendorStringEv",
+      "pac": "_ZNK19IONetworkController15newVendorStringEv"
+    },
+    "newModelString": {
+      "decl": "virtual const OSString *newModelString() const",
+      "mangled": "__ZNK20IOEthernetController14newModelStringEv",
+      "pac": "_ZNK19IONetworkController14newModelStringEv"
+    },
+    "getPacketFilters": {
+      "decl": "virtual IOReturn getPacketFilters(const OSSymbol *group, UInt32 *filters) const",
+      "mangled": "__ZNK20IOEthernetController16getPacketFiltersEPK8OSSymbolPj",
+      "pac": "_ZNK19IONetworkController16getPacketFiltersEPK8OSSymbolPj",
+      "doc": "The filters of a group (IONetworkFilterGroup: unicast, broadcast, multicast, promiscuous) the controller can apply."
+    },
+    "enablePacketFilter": {
+      "decl": "virtual IOReturn enablePacketFilter(const OSSymbol *group, UInt32 filter, UInt32 enabledFilters, IOOptionBits options = 0)",
+      "mangled": "__ZN20IOEthernetController18enablePacketFilterEPK8OSSymboljjj",
+      "pac": "_ZN19IONetworkController18enablePacketFilterEPK8OSSymboljjj",
+      "doc": "One filter on (IFF_ALLMULTI is IONetworkFilterGroup's multicast-all); IOEthernetController's turns multicast and promiscuous into setMulticastMode and setPromiscuousMode."
+    },
+    "disablePacketFilter": {
+      "decl": "virtual IOReturn disablePacketFilter(const OSSymbol *group, UInt32 filter, UInt32 enabledFilters, IOOptionBits options = 0)",
+      "mangled": "__ZN20IOEthernetController19disablePacketFilterEPK8OSSymboljjj",
+      "pac": "_ZN19IONetworkController19disablePacketFilterEPK8OSSymboljjj"
+    },
+    "setLinkStatus": {
+      "decl": "virtual bool setLinkStatus(UInt32 status, const IONetworkMedium *activeMedium = nullptr, UInt64 speed = 0, OSData *data = nullptr)",
+      "mangled": "__ZN20IOEthernetController13setLinkStatusEjPK15IONetworkMediumyP6OSData",
+      "pac": "_ZN19IONetworkController13setLinkStatusEjPK15IONetworkMediumyP6OSData",
+      "doc": "Publishes IOLinkStatus/IOLinkSpeed and, on a change, sends the attached interfaces the link up or down event (the KEV_DL_LINK_ON/OFF the stack posts)."
+    },
+    "enableInterface": {
+      "decl": "virtual IOReturn enable(IONetworkInterface *interface)",
+      "mangled": "__ZN20IOEthernetController6enableEP18IONetworkInterface",
+      "pac": "_ZN19IONetworkController6enableEP18IONetworkInterface",
+      "doc": "The interface is opened by the stack (its BSD attach, ifconfig up): bring the data path up."
+    },
+    "disableInterface": {
+      "decl": "virtual IOReturn disable(IONetworkInterface *interface)",
+      "mangled": "__ZN20IOEthernetController7disableEP18IONetworkInterface",
+      "pac": "_ZN19IONetworkController7disableEP18IONetworkInterface"
+    },
+    "attachInterface": {
+      "decl": "virtual bool attachInterface(IONetworkInterface **interface, bool doRegister = true)",
+      "mangled": "__ZN20IOEthernetController15attachInterfaceEPP18IONetworkInterfaceb",
+      "pac": "_ZN19IONetworkController15attachInterfaceEPP18IONetworkInterfaceb",
+      "doc": "createInterface(), configureInterface(), attach below the controller and (doRegister) registerService(): IONetworkStack names and attaches it from there."
+    },
+    "createInterface": {
+      "decl": "virtual IONetworkInterface *createInterface()",
+      "mangled": "__ZN20IOEthernetController15createInterfaceEv",
+      "pac": "_ZN19IONetworkController15createInterfaceEv"
+    },
+    "configureInterface": {
+      "decl": "virtual bool configureInterface(IONetworkInterface *interface)",
+      "mangled": "__ZN20IOEthernetController18configureInterfaceEP18IONetworkInterface",
+      "pac": "_ZN19IONetworkController18configureInterfaceEP18IONetworkInterface",
+      "doc": "Called by attachInterface before the interface is attached: the controller's features, the packet filters and the MTU go to the interface. A pull-model driver calls configureOutputPullModel here."
+    },
+    "outputStart": {
+      "decl": "virtual IOReturn outputStart(IONetworkInterface *interface, IOOptionBits options)",
+      "mangled": "__ZN20IOEthernetController11outputStartEP18IONetworkInterfacej",
+      "pac": "_ZN19IONetworkController11outputStartEP18IONetworkInterfacej",
+      "doc": "The interface's output thread: dequeue what the transmit ring has room for, or kIOReturnNoResources when it has none (then ifnet_start once there is room again)."
+    },
+    "getHardwareAddress": {
+      "decl": "virtual IOReturn getHardwareAddress(IOEthernetAddress *address) = 0",
+      "mangled": "__ZN20IOEthernetController18getHardwareAddressEP17IOEthernetAddress",
+      "pac": "_ZN20IOEthernetController18getHardwareAddressEP17IOEthernetAddress"
+    },
+    "setMulticastMode": {
+      "decl": "virtual IOReturn setMulticastMode(bool active)",
+      "mangled": "__ZN20IOEthernetController16setMulticastModeEb",
+      "pac": "_ZN20IOEthernetController16setMulticastModeEb"
+    },
+    "setMulticastList": {
+      "decl": "virtual IOReturn setMulticastList(IOEthernetAddress *addresses, UInt32 count)",
+      "mangled": "__ZN20IOEthernetController16setMulticastListEP17IOEthernetAddressj",
+      "pac": "_ZN20IOEthernetController16setMulticastListEP17IOEthernetAddressj"
+    },
+    "setPromiscuousMode": {
+      "decl": "virtual IOReturn setPromiscuousMode(bool active)",
+      "mangled": "__ZN20IOEthernetController18setPromiscuousModeEb",
+      "pac": "_ZN20IOEthernetController18setPromiscuousModeEb"
+    }
+  }
+}

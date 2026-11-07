@@ -147,6 +147,22 @@ static void identity()
     REQUIRE(switchSdParseStatus(ssr).cqDepth == 2);
 }
 
+// The erase fields of the 1 TB card the console boots from (SSR as SwitchSD logged it, 11-06): no DISCARD_SUPPORT, 4 MiB
+// AUs, 1 s per 15 AUs plus 1 s. Its erases go 15 AUs a command within a 2 s budget.
+TEST(SdCard, EraseTiming)
+{
+    uint8_t ssr[64] = {0x80, 0x00, 0x00, 0x00, 0x08, 0x00, 0x00, 0x00, 0x04, 0x00, 0x90, 0x00, 0x0f,
+                       0x05, 0x39, 0x1e, 0x00, 0x08, 0x00, 0x00, 0x00, 0x02, 0xfc, 0x00, 0x01};
+    const SwitchSdStatus st = switchSdParseStatus(ssr);
+    REQUIRE(!st.discard && st.fule);
+    REQUIRE(st.auSectors == 8192 && st.eraseSize == 15 && st.eraseTimeout == 1 && st.eraseOffset == 1);
+    REQUIRE(switchSdEraseTimeoutMs(st, 15) == 2000);
+    REQUIRE(switchSdEraseAus(st, 2000) == 15);
+    SwitchSdStatus unspecified = {};
+    REQUIRE(switchSdEraseTimeoutMs(unspecified, 1) == 1000 && switchSdEraseTimeoutMs(unspecified, 8) == 2000);
+    REQUIRE(switchSdEraseAus(unspecified, 2000) == 8);
+}
+
 static void put16(uint8_t *p, uint16_t v)
 {
     p[0] = uint8_t(v);

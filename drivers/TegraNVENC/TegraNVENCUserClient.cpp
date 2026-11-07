@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: BSD-2-Clause-Patent
-// E4 (on by default with NVDEC): the TegraNVENC service and its user client (ABI in TegraNVENCABI.h).
+// E3 (on by default): the TegraNVENC service and its user client (ABI in TegraNVENCABI.h).
 //
 // The client class is named AppleAVE2UserClient, the name of iPad7,1's own encoder client (AppleAVE2Driver, the AVE
 // kext, not loaded here), which 21H461's media sandbox profiles admit. The service is not called AppleAVE2Driver:
@@ -52,7 +52,6 @@ class AppleAVE2UserClient : public IOUserClient {
         struct Buffer {
         uint32_t handle;  // 0: slot free
         TegraNVENCBlock block;
-        IOMemoryDescriptor *view;  // what clientMemoryForType hands out for this handle
     };
 
     IOLock *lock_ = nullptr;
@@ -111,18 +110,18 @@ bool AppleAVE2UserClient::quiesce()
     return ret == 0 || !tegra_nvenc_ready();
 }
 
-// The client's mappings of the buffer are revoked before its granules can go to anyone else.
+// The client's mappings of the buffer are revoked before its pages can go to anyone else. A buffer a wedged job may
+// still write stays wired and mapped in NVENC's address space for good.
 void AppleAVE2UserClient::drop(Buffer *b, bool returnMemory)
 {
-    while (IOMemoryMap *map = removeMappingForDescriptor(b->view)) {
+    while (IOMemoryMap *map = removeMappingForDescriptor(b->block.pages.memory)) {
         map->unmap();
         map->release();
     }
-    b->view->release();
     if (returnMemory)
-        tegra_nvenc_arena_free(&b->block);
+        tegra_nvenc_buffer_free(&b->block);
     b->handle = 0;
-    b->view = nullptr;
+    b->block = {};
 }
 
 IOReturn AppleAVE2UserClient::clientClose()
@@ -130,7 +129,7 @@ IOReturn AppleAVE2UserClient::clientClose()
     IOLockLock(lock_);
     const bool idle = quiesce();
     if (!idle)
-        IOLog("TegraNVENC: a closing client's job never finished; its buffers stay out of the arena\n");
+        IOLog("TegraNVENC: a closing client's job never finished; its buffers stay wired\n");
     for (uint32_t i = 0; i < kMaxBuffers; i++)
         if (buffers_[i].handle)
             drop(&buffers_[i], idle);
@@ -158,8 +157,8 @@ IOReturn AppleAVE2UserClient::clientMemoryForType(UInt32 type, IOOptionBits *opt
     IOLockLock(lock_);
     Buffer *b = find(type);
     if (b) {
-        b->view->retain();
-        *memory = b->view;
+        b->block.pages.memory->retain();
+        *memory = b->block.pages.memory;
         *options = kIOMapAnywhere | kIOMapDefaultCache;
     }
     IOLockUnlock(lock_);
@@ -177,10 +176,9 @@ IOReturn AppleAVE2UserClient::run(uint32_t method, const void *in, uint32_t inSi
         {sizeof(TegraNVENCBuffer), 0},
         {sizeof(TegraNVENCSubmit), sizeof(TegraNVENCFence)},
         {sizeof(TegraNVENCWait), 0},
-        {0, sizeof(TegraNVENCClaim)},
     };
 
-    if (method < TegraNVENCMethodGetInfo || method > TegraNVENCMethodClaimSelfTest || inSize != kSizes[method].in ||
+    if (method < TegraNVENCMethodGetInfo || method > TegraNVENCMethodWait || inSize != kSizes[method].in ||
         *outSize < kSizes[method].out)
         return kIOReturnBadArgument;
     *outSize = kSizes[method].out;
@@ -222,7 +220,7 @@ IOReturn AppleAVE2UserClient::run(uint32_t method, const void *in, uint32_t inSi
         info->input_layout = proven->inputLayout;
         info->chroma_mode = proven->chromaMode;
         info->p_frames = proven->pFrames;
-        tegra_nvenc_arena_usage(&info->arena_bytes, &info->arena_free);
+        tegra_nvenc_memory_usage(&info->memory_limit, &info->memory_free);
         break;
     }
     case TegraNVENCMethodBufferAlloc: {
@@ -235,13 +233,8 @@ IOReturn AppleAVE2UserClient::run(uint32_t method, const void *in, uint32_t inSi
             ret = slot ? kIOReturnBadArgument : kIOReturnNoResources;
             break;
         }
-        if ((ret = ioreturn(tegra_nvenc_arena_alloc(size, &slot->block))))
+        if ((ret = ioreturn(tegra_nvenc_buffer_alloc(size, &slot->block))))
             break;
-        if (!(slot->view = tegra_nvenc_arena_descriptor(&slot->block))) {
-            tegra_nvenc_arena_free(&slot->block);
-            ret = kIOReturnNoMemory;
-            break;
-        }
         slot->handle = nextHandle_++;
         if (!nextHandle_)
             nextHandle_ = 1;
@@ -276,12 +269,6 @@ IOReturn AppleAVE2UserClient::run(uint32_t method, const void *in, uint32_t inSi
         lastFence_ = fence;
         TegraNVENCFence *reply = static_cast<TegraNVENCFence *>(out);
         reply->fence = fence;
-        reply->reserved = 0;
-        break;
-    }
-    case TegraNVENCMethodClaimSelfTest: {
-        TegraNVENCClaim *reply = static_cast<TegraNVENCClaim *>(out);
-        reply->claimed = tegra_nvenc_claim_self_test();
         reply->reserved = 0;
         break;
     }
@@ -363,13 +350,13 @@ IOReturn TegraNVENC::newUserClient(task_t task, void *securityID, UInt32 type, O
     return kIOReturnSuccess;
 }
 
-extern "C" int tegra_nvenc_publish(uint64_t arenaUs)
+extern "C" int tegra_nvenc_publish(void)
 {
     IOService *resources = IOService::getResourceService();
     TegraNVENC *service = OSTypeAlloc(TegraNVENC);
     if (!resources || !service || !service->init()) {
         OSSafeReleaseNULL(service);
-        IOLog("TegraNVENC: E4 FAIL could not create the service\n");
+        IOLog("TegraNVENC: E3 FAIL could not create the service\n");
         return -12;
     }
     service->setProperty("IOUserClientClass", "AppleAVE2UserClient");
@@ -378,23 +365,23 @@ extern "C" int tegra_nvenc_publish(uint64_t arenaUs)
     service->setProperty("TegraNVENCABIVersion", (unsigned long long)TEGRA_NVENC_ABI_VERSION, 32);
     if (!service->attach(resources)) {
         service->release();
-        IOLog("TegraNVENC: E4 FAIL could not attach the service\n");
+        IOLog("TegraNVENC: E3 FAIL could not attach the service\n");
         return -12;
     }
     if (!service->start(resources)) {
         service->detach(resources);
         service->release();
-        IOLog("TegraNVENC: E4 FAIL could not start the service\n");
+        IOLog("TegraNVENC: E3 FAIL could not start the service\n");
         return -12;
     }
     service->registerService();
-    uint64_t total = 0, free = 0;
-    tegra_nvenc_arena_usage(&total, &free);
+    uint64_t limit = 0, free = 0;
+    tegra_nvenc_memory_usage(&limit, &free);
     const TegraNVENCProven *proven = tegra_nvenc_proven();
-    IOLog("TegraNVENC: E4 ok service published (user client AppleAVE2UserClient, ABI %u, input layout %u, chroma mode "
-          "%u, %s; arena %llu MiB, boot chunk in %llu us)\n",
+    IOLog("TegraNVENC: E3 ok service published (user client AppleAVE2UserClient, ABI %u, input layout %u, chroma mode "
+          "%u, %s; buffers of any pages behind the SMMU, %llu MiB at most)\n",
           TEGRA_NVENC_ABI_VERSION, proven->inputLayout, proven->chromaMode,
-          proven->pFrames ? "P pictures" : "intra only", total >> 20, arenaUs);
+          proven->pFrames ? "P pictures" : "intra only", limit >> 20);
     service->release();  // the attachment keeps it
     return 0;
 }

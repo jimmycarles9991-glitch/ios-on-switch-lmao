@@ -3,7 +3,8 @@
 Each member of each pinned kind is its own repository (@ipsw_<kind>_<role>), so building something that needs the
 16 MB kernelcache never fetches the 5 GB OS image. Bazel downloads exactly the member's stored bytes with a `Range`
 header and checks them against the pinned sha256, which puts them in the repository cache (content-addressed, shared
-by every output base).
+by every output base). The member repositories are reproducible, so the repository contents cache keeps each one once
+and every output base's external/ holds a symlink to it.
 
 A stored member (the OS dmg) is used as fetched. A deflated one is inflated by a build action (ipsw_inflate,
 //ipsw:inflate) that checks the content against its pin; only the deflated bytes live in the repository cache. An Apple
@@ -13,10 +14,15 @@ its pinned aea_key.
 @ipsw is the hub the build names members by: @ipsw//:<role> (kernelcache, os, system_cryptex, ...) is the member of
 the kind --//ipsw:kind selects (a select() over //ipsw:<kind>). //ipsw:current gives rules the
 selected kind's identity and derived pins (IpswInfo). Nothing outside pins.bzl names a build or a member file.
+
+@ipsw//:crawl_tree, :crawl_inventory and :crawl_qc are the selected kind's Metal libraries, crawled once per pin by a
+repository (@ipsw_<kind>_crawl, gpu/seed/crawl.bzl) that keeps the crawl and not the images: the shader seed reads
+them, so building it never needs the OS image or the cryptexes.
 """
 
 load("@bazel_skylib//lib:selects.bzl", "selects")
 load("@bazel_skylib//rules:common_settings.bzl", "BuildSettingInfo", "string_flag")
+load("//gpu/seed:crawl.bzl", "QUARTZCORE", "shader_crawl_repository")
 load(":pins.bzl", "DEFAULT_KIND", "IPSWS")
 
 # Members above this are inflated only on demand (the SD install): they stay out of `bazel build //...`, out of the
@@ -26,6 +32,14 @@ _LARGE = 256 << 20
 _STORED_BUILD = """\
 exports_files([{name}], visibility = ["//visibility:public"])
 """
+
+# The members a crawl reads, and what the hub names of a crawl repository.
+_CRAWLED = ("os", "system_cryptex", "app_cryptex")
+_CRAWL_TARGETS = {
+    "crawl_inventory": ":inventory.json",
+    "crawl_qc": ":tree/" + QUARTZCORE,
+    "crawl_tree": ":tree",
+}
 
 def pinned_kinds():
     return [kind for kind, ipsw in IPSWS.items() if ipsw.get("members")]
@@ -43,6 +57,11 @@ def _ipsw_member_impl(rctx):
         headers = {"Range": ["bytes={}-{}".format(first, last)]},
     )
     rctx.file("BUILD.bazel", _STORED_BUILD.format(name = repr(rctx.attr.output)))
+
+    # download() copies the cached member into the repository (only download_and_extract hardlinks). On APFS the copy is
+    # a clone, but a clone per output base stops sharing blocks once its repository cache entry is replaced; the
+    # contents cache holds one clone, and every output base links to it.
+    return rctx.repo_metadata(reproducible = True)
 
 ipsw_member = repository_rule(
     implementation = _ipsw_member_impl,
@@ -70,6 +89,16 @@ def _ipsw_hub_impl(rctx):
     # The deflated members' stored bytes, by kind, for //ipsw's inflate actions.
     for name, actual in sorted(rctx.attr.stored.items()):
         lines.append('alias(name = "{}", actual = "{}")'.format(name, actual))
+    for name, target in sorted(_CRAWL_TARGETS.items()):
+        lines.append("")
+        lines.append("alias(")
+        lines.append('    name = "{}",'.format(name))
+        lines.append("    actual = select({")
+        for kind, repo in sorted(rctx.attr.crawls.items()):
+            actual = "@{}//{}".format(repo, target) if repo else "@@//ipsw:{}_unpinned".format(kind)
+            lines.append('        "@@//ipsw:{}": "{}",'.format(kind, actual))
+        lines.append("    }),")
+        lines.append(")")
     rctx.file("BUILD.bazel", "\n".join(lines) + "\n")
 
 _ipsw_hub = repository_rule(
@@ -77,6 +106,7 @@ _ipsw_hub = repository_rule(
     attrs = {
         "members": attr.string(doc = "JSON: role -> {kind -> label of its file}"),
         "stored": attr.string_dict(doc = "stored_<kind>_<role> -> the deflated member's stored bytes"),
+        "crawls": attr.string_dict(doc = "kind -> its crawl repository, or empty where the kind lacks a crawled member"),
     },
 )
 
@@ -110,7 +140,19 @@ def _ipsw_extension_impl(module_ctx):
                 stored["stored_{}_{}".format(kind, role)] = "@{}//:{}".format(repo, _filename(pin))
             else:
                 roles[role][kind] = "@{}//:{}".format(repo, _filename(pin))
-    _ipsw_hub(name = "ipsw", members = json.encode(roles), stored = stored)
+    crawls = {}
+    for kind, ipsw in IPSWS.items():
+        members = ipsw.get("members", {})
+        crawls[kind] = ""
+        if [role for role in _CRAWLED if not members.get(role)]:
+            continue
+        crawls[kind] = "ipsw_{}_crawl".format(kind)
+        shader_crawl_repository(
+            name = crawls[kind],
+            url = ipsw["url"],
+            pins = json.encode({role: members[role] for role in _CRAWLED}),
+        )
+    _ipsw_hub(name = "ipsw", members = json.encode(roles), stored = stored, crawls = crawls)
     return module_ctx.extension_metadata(reproducible = True)
 
 ipsw = module_extension(implementation = _ipsw_extension_impl)

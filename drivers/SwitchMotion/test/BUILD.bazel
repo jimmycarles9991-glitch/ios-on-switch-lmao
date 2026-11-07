@@ -73,6 +73,7 @@ host_test(
     data = [
         "//drivers/SwitchBrightness:SwitchBacklight.cpp",
         "//drivers/SwitchMotion:SwitchMotion.cpp",
+        "//drivers/SwitchMotion:SwitchOrientationClient.cpp",
         "//drivers/SwitchTouch:SwitchHIDDevice.cpp",
     ],
 )

@@ -20,9 +20,10 @@
 // flags: the source is block-linear (tegra_gm20b_surface_tiled): GOBs of 64 bytes x 8 lines, blocks 1 GOB wide and
 // 2^TEGRA_SCANOUT_TILED_BLOCK_HEIGHT_LOG2 GOBs high, width x 4 bytes (whole GOBs) across.
 #define TEGRA_SCANOUT_COPY_SOURCE_BLOCK 2u
-// Tiled IOSurfaces (the GPU renders them block-linear, the display scans them as such): bound by the GPU client with the
-// generic 16Bx2 PTE kind, blocks of 16 GOBs, rows of width x bytes per pixel (only surfaces whose rows are whole GOBs and
-// whose height is whole blocks are tiled, so the block-linear frame fits the pitch allocation; bytes per row is ignored).
+// Tiled IOSurfaces (the GPU renders them block-linear, the display scans them as such): laid out by the GPU driver's one
+// rule (drivers/TegraGM20B/TegraGM20BLayout.h, NIL's) in the surface's own pages, under the generic 16Bx2 PTE kind; a
+// frame of 86 lines or more has blocks of 16 GOBs, rows of width x bytes per pixel rounded up to whole GOBs, and fits its
+// allocation (bytes per row is ignored).
 #define TEGRA_SCANOUT_TILED_KIND              0xfeu
 #define TEGRA_SCANOUT_TILED_BLOCK_HEIGHT_LOG2 4u
 
@@ -63,8 +64,13 @@ int tegra_gm20b_scanout_copy(const struct TegraScanoutCopy *copy);
 // and signals the display's work loop. The display panics if an accepted copy is not completed within 1 s.
 void native_legacy_gpu_complete(void *display, int status);
 // Provided by the GPU driver (weak in NativeLegacyDisplay): whether the IOSurface whose first page is `pa` holds
-// block-linear pixels: a bind of the whole surface with TEGRA_SCANOUT_TILED_KIND lives. Thread context.
+// block-linear pixels. A surface's layout is decided once, at its first GPU import, and holds while any GPU client
+// imports it; a CPU lock never changes what its pages hold. Thread context; never waits for the GPU.
 int tegra_gm20b_surface_tiled(uint64_t pa);
+// Each vsync the display sends the compositor (only while it has vsync on), from the display's work loop: its stamp and
+// interval (mach absolute time) and lead, the microseconds from the stamp to the frame end (0: sent at V_BLANK). The GPU
+// holds app work off the GPU ahead of the vblank the frame started there aims for.
+void tegra_gm20b_compositor_vsync(uint64_t stamp, uint32_t lead_us, uint64_t interval);
 #ifdef __cplusplus
 }
 #endif

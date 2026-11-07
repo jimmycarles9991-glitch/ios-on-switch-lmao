@@ -1,6 +1,7 @@
 Vendored verbatim (MIT, see each file header) from torvalds/linux d89e1d1 drivers/gpu/drm/nouveau by scratchpad tools/vendor.py.
 Exceptions: nvkm/engine/device/base.c is trimmed to the nv12b (GM20B) chipset only;
 include/nvif/os.h is not vendored (../shim/include/nvif/os.h replaces it).
+nvkm/subdev/ltc/gm20b.c is not upstream: GM20B's compbit backing store after nvgpu's ltc_gm20b.c.
 
 include/nvfw/acr.h
 include/nvfw/flcn.h

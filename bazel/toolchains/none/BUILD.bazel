@@ -1,0 +1,19 @@
+# No C/C++ toolchain under --//install:prebuilt=release (registered first in MODULE.bazel): the image builder compiles
+# nothing, so a cc rule there fails analysis. rules_python's py_binary asks for one without using it; resolved to
+# apple_support's, it configures Xcode (@local_config_xcode runs xcrun, which on a Mac without the Command Line Tools
+# offers to install them). //install:prebuilt's scope is universal, so tools in the exec configuration resolve here too.
+load("//bazel/lint:defs.bzl", "lint_files")
+load(":defs.bzl", "none_toolchain")
+
+package(default_visibility = ["//visibility:public"])
+
+lint_files()
+
+none_toolchain(name = "none")
+
+toolchain(
+    name = "cc",
+    target_settings = ["//install:from_release"],
+    toolchain = ":none",
+    toolchain_type = "@bazel_tools//tools/cpp:toolchain_type",
+)

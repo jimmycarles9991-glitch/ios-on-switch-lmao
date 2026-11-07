@@ -23,7 +23,10 @@ RULES = [  # (category, regex on phase+detail)
     ('crash (NVK/NAK abort)', r'^crash'),
     ('hang', r'^hang'),
     ('ray tracing (A10 has none)', r'RayTracing|air\.intersection|acceleration_structure|Intersection\)'),
-    ('framebuffer fetch / raster order (no ROAA/interlock on Maxwell)', r'FramebufferFetch|RasterOrderGroups'),
+    (
+        'framebuffer fetch / raster order (GM20B: pixel interlock, no ROAA; NVK without fragment shader interlock)',
+        r'FramebufferFetch|RasterOrderGroups',
+    ),
     ('Core Image kernel ABI (air.ci) / stitchable', r'_ci_|ci_kernel|air\.ci\b|CoreImage'),
     (
         'linked/visible functions not supplied (harness)',

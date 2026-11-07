@@ -8,6 +8,7 @@
 #include <stdint.h>
 
 #ifdef __cplusplus
+#include <IOKit/IOReturn.h>
 #include <mach/kern_return.h>
 
 /*
@@ -32,16 +33,52 @@ class IOUserClient;
 enum {
     kSwitchIOSurfaceTrapLock = 2,
     kSwitchIOSurfaceTrapUnlock = 3,
+    kSwitchIOSurfaceLockReadOnly = 1, /* kIOSurfaceLockReadOnly, in the lock options */
 };
 
 void switch_iokit_iosurface_trap(IOUserClient *client, uint32_t index, void *p1, void *p2);
+kern_return_t switch_iokit_iosurface_lock_will(IOUserClient *client, void *p1, void *p2);
+void switch_iokit_iosurface_lock_failed(IOUserClient *client, void *p1, void *p2);
+void switch_iokit_iosurface_method_done(IOUserClient *client, uint32_t selector,
+                                        const struct IOExternalMethodArguments *args);
 
-/* iokit_user_client_trap, after the client's trap ran: an IOSurface lock or unlock gets the cache op it needs. */
+/* is_io_connect_method, after the client's method ran: an IOSurface create hands the new surface to the GPU driver,
+ * which faults its pages in off the creating thread (tegra_gm20b_iosurface_method_done). */
+static inline void switch_iokit_method_done(IOUserClient *client, uint32_t selector,
+                                            const struct IOExternalMethodArguments *args, kern_return_t result)
+{
+    if (result == KERN_SUCCESS) {
+        switch_iokit_iosurface_method_done(client, selector, args);
+    }
+}
+
+/* iokit_user_client_trap, before the client's trap runs (result: the filter's so far): an IOSurface lock first waits
+ * for the GPU writes it must see, or fails as Apple's does when kIOSurfaceLockAvoidSync forbids that wait; an unlock
+ * cleans what the CPU wrote while the surface is still locked, so whoever sees the seed the unlock moves (Core Animation
+ * reads a surface again when its seed moved) reads memory the GPU sees too. */
+static inline kern_return_t switch_iokit_trap_will(IOUserClient *client, uint32_t index, void *p1, void *p2,
+                                                   kern_return_t result)
+{
+    if (result == KERN_SUCCESS && index == kSwitchIOSurfaceTrapLock) {
+        return switch_iokit_iosurface_lock_will(client, p1, p2);
+    }
+    if (result == KERN_SUCCESS && index == kSwitchIOSurfaceTrapUnlock) {
+        switch_iokit_iosurface_trap(client, index, p1, p2);
+    }
+    return result;
+}
+
+/* iokit_user_client_trap, after the client's trap ran: a lock invalidates what the GPU wrote; a lock that failed after
+ * the driver prepared it takes that back. kIOReturnCannotLock is the driver's own refusal (switch_iokit_trap_will),
+ * which prepared nothing; IOSurface gives it only for kIOSurfaceLockAvoidSync on a surface whose use count says the GPU
+ * uses it, which no driver here raises. */
 static inline void switch_iokit_trap_done(IOUserClient *client, uint32_t index, void *p1, void *p2,
                                           kern_return_t result)
 {
-    if (result == KERN_SUCCESS && (index == kSwitchIOSurfaceTrapLock || index == kSwitchIOSurfaceTrapUnlock)) {
+    if (result == KERN_SUCCESS && index == kSwitchIOSurfaceTrapLock) {
         switch_iokit_iosurface_trap(client, index, p1, p2);
+    } else if (index == kSwitchIOSurfaceTrapLock && result != kIOReturnCannotLock) {
+        switch_iokit_iosurface_lock_failed(client, p1, p2);
     }
 }
 #endif

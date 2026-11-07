@@ -92,7 +92,12 @@ static MTLRenderPipelineDescriptor *descriptor(id<MTLLibrary> qc, const std::str
             d.rasterSampleCount = strtoul(h.c_str() + 8, nullptr, 10);
         else if (h.rfind("topo=", 0) == 0)
             d.inputPrimitiveTopology = (MTLPrimitiveTopologyClass)strtoul(h.c_str() + 5, nullptr, 10);
-        else if (h[0] == 'c' && isdigit(h[1])) {
+        else if (h.rfind("ds=", 0) == 0) {
+            unsigned depth = 0, stencil = 0;
+            sscanf(h.c_str() + 3, "%u/%u", &depth, &stencil);
+            d.depthAttachmentPixelFormat = MTLPixelFormat(depth);
+            d.stencilAttachmentPixelFormat = MTLPixelFormat(stencil);
+        } else if (h[0] == 'c' && isdigit(h[1])) {
             unsigned i, x[9] = {};
             if (sscanf(h.c_str(), "c%u=%u:%u:%u:%u:%u:%u:%u:%u:%u", &i, x, x + 1, x + 2, x + 3, x + 4, x + 5, x + 6,
                        x + 7, x + 8) != 10)
@@ -347,6 +352,25 @@ int main(int argc, char **argv)
                 tex[t] = [dev newTextureWithDescriptor:d];
             }
         }
+        id<MTLDepthStencilState> dss[frame::kDsSpecs];
+        for (unsigned i = 0; i < frame::kDsSpecs; i++) {
+            const frame::DsSpec spec = frame::dsSpec(i);
+            MTLDepthStencilDescriptor *dd = [MTLDepthStencilDescriptor new];
+            dd.depthCompareFunction = MTLCompareFunction(spec.depthCompare);
+            dd.depthWriteEnabled = spec.depthWrite;
+            MTLStencilDescriptor *faces[2] = {[MTLStencilDescriptor new], [MTLStencilDescriptor new]};
+            for (int k = 0; k < 2; k++) {
+                faces[k].stencilCompareFunction = MTLCompareFunction(spec.face[k][0]);
+                faces[k].stencilFailureOperation = MTLStencilOperation(spec.face[k][1]);
+                faces[k].depthFailureOperation = MTLStencilOperation(spec.face[k][2]);
+                faces[k].depthStencilPassOperation = MTLStencilOperation(spec.face[k][3]);
+                faces[k].readMask = spec.readMask[k];
+                faces[k].writeMask = spec.writeMask[k];
+            }
+            dd.frontFaceStencil = faces[0];
+            dd.backFaceStencil = faces[1];
+            dss[i] = [dev newDepthStencilStateWithDescriptor:dd];
+        }
         id<MTLSamplerState> smp[2];
         for (int s = 0; s < 2; s++) {
             frame::SamplerSpec sp = frame::sampler(s);
@@ -476,6 +500,13 @@ int main(int argc, char **argv)
                         rp.renderTargetWidth = frame::texture(pass.color[0]).w - frame::kRtShortW;
                         rp.renderTargetHeight = frame::texture(pass.color[0]).h - frame::kRtShortH;
                     }
+                    if (pass.depth >= 0) {
+                        rp.depthAttachment.texture = rp.stencilAttachment.texture = tex[pass.depth];
+                        rp.depthAttachment.loadAction = rp.stencilAttachment.loadAction = MTLLoadActionClear;
+                        rp.depthAttachment.storeAction = rp.stencilAttachment.storeAction = MTLStoreActionDontCare;
+                        rp.depthAttachment.clearDepth = pass.clearDepth;
+                        rp.stencilAttachment.clearStencil = pass.clearStencil;
+                    }
                     id<MTLRenderCommandEncoder> e = [cb renderCommandEncoderWithDescriptor:rp];
                     bool bound[3][31] = {};
                     for (const frame::Draw &d : pass.draws) {
@@ -517,6 +548,15 @@ int main(int argc, char **argv)
                         if (getenv("FRAME_SAMPLER_SLOT"))
                             [e setFragmentSamplerState:smp[0] atIndex:atoi(getenv("FRAME_SAMPLER_SLOT"))];
                         [e setScissorRect:(MTLScissorRect){d.scissor[0], d.scissor[1], d.scissor[2], d.scissor[3]}];
+                        if (d.ds >= 0) {
+                            [e setDepthStencilState:dss[d.ds]];
+                            [e setStencilFrontReferenceValue:d.stencilRef[0] backReferenceValue:d.stencilRef[1]];
+                        }
+                        if (d.raster) {
+                            [e setCullMode:MTLCullMode(d.cull)];
+                            [e setFrontFacingWinding:MTLWinding(d.winding)];
+                            [e setTriangleFillMode:MTLTriangleFillMode(d.fill)];
+                        }
                         // FRAME_INDEXED: every third main draw indexed as Core Animation's meshes are (CA::OGL::MetalContext::draw:
                         // 16-bit indices written into its buffer pool at 4-byte alignment, drawIndexedPrimitives on triangles)
                         if (getenv("FRAME_INDEXED") && !d.blur && drawIndex % 3 == 1) {

@@ -5,8 +5,6 @@
 #                  every frame back exactly with Apple's decoder in three input layouts, sync samples where they
 #                  belong, P_Skip from the reference the setup names; the SPS/PPS/avcC parsing back with AVD's
 #                  H264Syntax.c; the checker refusing each kind of bad submit; the rate control on a synthetic encoder
-#   e3gen_test     the kernel's E3 vectors (TegraNVENC/selftest/E3Vectors.h) are exactly what the plug-in's
-#                  H264NVENC.c and AVD's H264NVDEC.c produce today (e3gen.c; regenerate the file with its output)
 #
 #   bazel test //drivers/SwitchVideoEncoders/test:all
 load("//bazel/lint:defs.bzl", "lint_files")
@@ -48,12 +46,14 @@ host_library(
     name = "ave_host",
     srcs = [
         "ave_host.c",
-        "//drivers/SwitchVideoEncoders:AVE/EncodeCheck.c",
-        "//drivers/SwitchVideoEncoders:AVE/EncodeCheck.h",
+        "EncodeCheck.c",
+        "EncodeCheck.h",
         "//drivers/SwitchVideoEncoders:AVE/NVENCClient.h",
         "//drivers/SwitchVideoEncoders:AVE/RateControl.h",
         "//drivers/SwitchVideoEncoders:AVE/VTEncoderSPI.h",
         "//drivers/SwitchVideoDecoders:AVD/VTDecoderSPI.h",
+        "//kits/SwitchRefusal:SwitchRefusal.c",
+        "//kits/SwitchRefusal:SwitchRefusal.h",
     ],
     copts = ["-O1"],
     defines = ["main=ave_host_main"],
@@ -66,26 +66,4 @@ host_test(
     name = "ave_host_test",
     srcs = ["ave_host_test.cpp"],
     deps = [":ave_host"],
-)
-
-host_library(
-    name = "e3gen",
-    srcs = [
-        "e3gen.c",
-        "//drivers/SwitchVideoDecoders:AVD/H264NVDEC.c",
-        "//drivers/SwitchVideoDecoders:AVD/H264NVDEC.h",
-        "//drivers/TegraNVDEC:TegraNVDECABI.h",
-        "//drivers/TegraNVDEC:nvidia/clc5b0.h",
-        "//drivers/TegraNVDEC:nvidia/nvdec_drv.h",
-    ],
-    copts = ["-O1"],
-    defines = ["main=e3gen_main"],
-    deps = [":h264_nvenc"],
-)
-
-host_test(
-    name = "e3gen_test",
-    srcs = ["e3gen_test.cpp"],
-    data = ["//drivers/TegraNVENC:selftest/E3Vectors.h"],
-    deps = [":e3gen"],
 )

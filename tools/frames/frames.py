@@ -1,8 +1,9 @@
 """Where each slow frame's time went, from a debug boot's pulled log archive.
 
 Reads NativeLegacyDisplay's "SwitchFrame:" lines (one per present that came 1.5 refresh periods or more after the one
-before) and, when the GPU user side logs them, "SwitchFrameUser:" lines, then prints every slow frame's stages and a
-summary of which stage cost the most.
+before), the kernel's "SwitchFrameRender:" lines (Core Animation's display thread from the vsync to its swap: on a
+core, blocked, waiting for one) and, when the GPU user side logs them, "SwitchFrameUser:" lines, then prints every slow
+frame's stages and a summary of which stage cost the most.
 """
 
 import argparse
@@ -26,6 +27,7 @@ FRAME = re.compile(
     r'clean (?P<clean_kib>\d+) KiB (?P<clean_us>\d+) us)?'
 )
 USER = re.compile(r'SwitchFrameUser: (?P<proc>\S+) cb (?P<cb>\d+) (?P<rest>.*)')
+RENDER = re.compile(r'SwitchFrameRender: vsync (?P<vsync>\d+): (?P<rest>.*)$')
 INTERACTION = re.compile(
     r'^(?P<time>\S+ \S+).*SwitchFrames interaction: (?P<ms>\d+) ms \(touch (?P<touch>\d+) ms\), (?P<presents>\d+) '
     r'presents: 1:(?P<f1>\d+) 2:(?P<f2>\d+) 3:(?P<f3>\d+) 4\+:(?P<f4>\d+), (?P<lost>\d+) periods lost, '
@@ -68,6 +70,7 @@ class Frame:
     khz: tuple
     surfaces: dict = field(default_factory=dict)
     user: list = field(default_factory=list)
+    render: str = ''
 
     def stages(self) -> list[tuple[str, int, str]]:
         """Return (name, microseconds, meaning) for each stage whose two ends were seen."""
@@ -134,11 +137,15 @@ def read_lines(path: str) -> list[str]:
 
 def collect(lines: list[str]) -> list[Frame]:
     """Return the slow frames, each with the user lines of the commits that preceded its swap."""
-    frames, users = [], defaultdict(list)
+    frames, users, renders = [], defaultdict(list), {}
     for line in lines:
         m = FRAME.search(line)
         if m:
             frames.append(parse_frame(m))
+            continue
+        m = RENDER.search(line)
+        if m:
+            renders[int(m.group('vsync'))] = m.group('rest')
             continue
         m = USER.search(line)
         if m:
@@ -149,14 +156,21 @@ def collect(lines: list[str]) -> list[Frame]:
     for entries in users.values():
         entries.sort()
     for frame in frames:
-        if frame.points['swap'] < 0:
-            continue
-        swap_ticks = frame.origin + frame.points['swap'] * 1000 / TICK_NS
-        for proc, entries in users.items():
-            before = [e for e in entries if e[0] <= swap_ticks]
-            if before:
-                frame.user.append((proc, *before[-1]))
+        join(frame, users, renders)
     return frames
+
+
+def join(frame: Frame, users: dict, renders: dict) -> None:
+    """Give the frame its render thread's line (same vsync) and each process's last commit before its swap."""
+    if frame.origin_kind == 'vsync':
+        frame.render = renders.get(frame.origin, '')
+    if frame.points['swap'] < 0:
+        return
+    swap_ticks = frame.origin + frame.points['swap'] * 1000 / TICK_NS
+    for proc, entries in users.items():
+        before = [e for e in entries if e[0] <= swap_ticks]
+        if before:
+            frame.user.append((proc, *before[-1]))
 
 
 def interactions(lines: list[str]) -> list[str]:
@@ -199,6 +213,8 @@ def describe(frame: Frame) -> list[str]:
         f'  compositor submits {frame.submits} (kernel exec {frame.exec_us} us), '
         f"other processes' submits {frame.others}"
     )
+    if frame.render:
+        out.append(f'  render thread: {frame.render}')
     base, sched, mode, qos = frame.thread
     out.append(
         f'  swap thread base {base} sched {sched} {MODES.get(mode, mode)} QoS {QOS.get(qos, qos)}; '

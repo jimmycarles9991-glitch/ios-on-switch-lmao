@@ -12,7 +12,8 @@ bazel test //drivers/SwitchDisplayPort/test:all
 
 The setting reaches `SwitchPD.cpp` through `defines` on this package's `hdrs`. Kernel compiles only see those once the
 kernel toolchain has the `preprocessor_defines` feature (r24-usb3's change to `bazel/toolchains/kernel/config.bzl`).
-With the setting off, nothing here is linked and `SwitchPD.cpp` preprocesses to what it was.
+The alternate-mode engine (`SwitchPDAltMode.cpp`) is always linked, because the dock's hub and USB 3 need it. With the
+setting off it skips the DisplayPort steps.
 
 ## How it works
 
@@ -97,8 +98,8 @@ device mode ends in the dock, and from the SD card's log archive after.
    the dock's LED on and the USB hub enumerating with a keyboard on it.
 2. In the dock, the 15 V contract and the charging current hold through plugging, unplugging and re-plugging the HDMI
    cable, and the battery keeps charging for 10 minutes.
-3. `SwitchDisplayPort: DisplayPort on 2 lanes (pin assignment D …)`. With r24-usb3's side on, USB 3 still works on the
-   dock's rear port.
+3. `SwitchDisplayPort: DisplayPort on 2 lanes (pin assignment D …)`. USB 3 still works on the dock's rear port
+   (`SwitchUSB: SuperSpeed lane up (pairs free, …)`).
 4. Plugging the TV gives `link up at 2700 Mb/s x2` with no clock-recovery failure. If clock recovery fails on one lane,
    check L4T's two-lane PADCTL0 bits first.
 5. The 4K TV gives `external screen 1920x1080 at 60.000 Hz`, a 1080p50-only input 1080p50, and a monitor that takes

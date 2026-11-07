@@ -13,6 +13,11 @@ import probelog
 STAGES = {1: 'v', 2: 'f'}
 
 
+# TEXHEAD's TEXTURE_TYPE (word 4 bits 26:23): the probe binds 2D textures, so a 3D one is m2v's stand-in for a texture3d
+# argument (Core Animation's colour cubes and LUTs)
+TEXTURE_TYPE_3D = 2
+
+
 def tic_kind(tic: tuple[str, list[int]], rts: dict[str, int]) -> tuple[str, int | str]:
     name, w = tic
     width, height = (w[4] & 0xFFFF) + 1, (w[5] & 0xFFFF) + 1
@@ -20,6 +25,8 @@ def tic_kind(tic: tuple[str, list[int]], rts: dict[str, int]) -> tuple[str, int 
         return ('tex', width - 16)
     if name in rts:
         return ('fetch', rts[name])
+    if (w[4] >> 23) & 0xF == TEXTURE_TYPE_3D:
+        return ('tex3d', name)
     return ('tic?', f'{name}:{width}x{height}')
 
 

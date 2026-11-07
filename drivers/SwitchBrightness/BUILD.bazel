@@ -42,8 +42,10 @@ kernel_driver(
         "drivers/NativeMobileDisplay",
         "drivers/SwitchSuspend",
         "drivers/SwitchTouch",
+        "drivers/TegraGM20B",
         "drivers/TegraGPIO",
         "drivers/TegraI2C",
+        "kits/SwitchRefusal",
     ],
 )
 

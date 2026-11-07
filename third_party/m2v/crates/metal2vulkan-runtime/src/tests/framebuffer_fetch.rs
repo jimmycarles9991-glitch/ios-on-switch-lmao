@@ -16,9 +16,10 @@ use super::image_plan::{committed, facts};
 use super::texture_descriptor::APPLE;
 use crate::error::Error;
 use crate::framebuffer_fetch::{
-    fetch_candidate, ordered, planes_candidate, planes_copies, planes_copies_gap,
-    storage_candidate, stores_samples, through_inputs, through_multisampled_storage,
-    through_planes, through_storage, unordered_inputs, UsageAnswers,
+    fetch_candidate, inputs_beside_interlock, inputs_in_raster_order, ordered, planes_candidate,
+    planes_copies, planes_copies_gap, storage_candidate, stores_samples, targets_take_inputs,
+    through_inputs, through_multisampled_storage, through_planes, through_storage,
+    unordered_inputs, UsageAnswers,
 };
 use crate::image_plan::{plan_image, ImagePlan};
 use crate::texture_descriptor::{TextureDescriptor, TextureLayout};
@@ -115,6 +116,42 @@ fn unordered_fetch_is_made_where_neither_ordered_form_exists() {
         }
     }
     assert!(neither > 0, "a committed profile has neither ordered form");
+}
+
+/// Under `AcceptUnordered`, a device that orders fetch through the pixel interlock alone keeps the
+/// interlocked storage form and also makes the unordered input attachment form, which the compile
+/// layer leaves a fetched attachment the device blends on: its color targets take input attachment
+/// usage beside `STORAGE`, and its input attachments are read without rasterization order. Under
+/// the default policy it makes the storage form alone.
+#[test]
+fn unordered_fetch_is_made_beside_the_interlock() {
+    let mut policy = DevicePolicy::default();
+    policy.framebuffer_fetch = FramebufferFetchPolicy::AcceptUnordered;
+    let mut beside = 0;
+    for (name, desc, strict) in committed() {
+        let device = Device::new(desc.clone(), policy.clone()).expect("derives");
+        let profile = device.profile();
+        let interlock = through_storage(profile);
+        assert_eq!(inputs_beside_interlock(profile), interlock, "{name}");
+        assert!(!inputs_beside_interlock(strict.profile()), "{name}");
+        if !interlock {
+            continue;
+        }
+        beside += 1;
+        assert!(!through_inputs(profile), "{name}");
+        assert!(targets_take_inputs(profile), "{name}");
+        assert!(!inputs_in_raster_order(profile), "{name}");
+        assert_eq!(ordered(&fetching(true, false), profile), Ok(()), "{name}");
+        assert_eq!(ordered(&fetching(false, false), profile), Ok(()), "{name}");
+        assert!(
+            ordered(&fetching(true, false), strict.profile()).is_err(),
+            "{name}"
+        );
+    }
+    assert!(
+        beside > 0,
+        "a committed profile orders fetch through the interlock alone"
+    );
 }
 
 /// A checked layout of a 2D texture of `pf`, `width` by 8, with `samples` (a multisample type

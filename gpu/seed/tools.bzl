@@ -18,7 +18,8 @@ SeedToolsInfo = provider(
         "precompile": "the precompile tool",
         "mock": "libmock_iokit.dylib (the tool's @rpath)",
         "twin": "the NVK twin, libvulkan_nouveau.dylib",
-        "manifest": "MANIFEST.json (the stack key, the twin's LC_UUID)",
+        "manifest": "MANIFEST.json (the stack key, the twin's LC_UUID and compiler identity)",
+        "nvk_identity": "the twin's .source (its Mesa tree and compiler identity), or None: what a bucket is keyed on",
         "raw": "the raw pack's probe, mock and ycbcr.metallib (files, or one directory)",
         "raw_dir": "the directory holding them",
     },
@@ -49,6 +50,7 @@ def seed_tool_files(target):
         mock = top["libmock_iokit.dylib"],
         twin = top["libvulkan_nouveau.dylib"],
         manifest = top["MANIFEST.json"],
+        nvk_identity = top.get("libvulkan_nouveau.dylib.source"),
         raw = [f for f in files if f.dirname == root + "/raw"],
         raw_dir = root + "/raw",
     )
@@ -121,6 +123,7 @@ def _seed_tools_impl(ctx):
 
     out = ctx.actions.declare_directory(ctx.attr.name)
     manifest = ctx.actions.declare_file(ctx.attr.name + "_manifest/MANIFEST.json")
+    nvk_source = [f for f in ctx.files.nvk_sources if f.basename.endswith(".source")][0]
     args = ctx.actions.args()
     args.add("layout")
     args.add("--precompile", precompile)
@@ -128,7 +131,7 @@ def _seed_tools_impl(ctx):
     args.add("--twin-dylib", steps["twin"])
     args.add("--raw", raw.path)
     args.add("--stack", ctx.file.stack)
-    args.add("--nvk-source", [f for f in ctx.files.nvk_sources if f.basename.endswith(".source")][0])
+    args.add("--nvk-source", nvk_source)
     args.add("--out", out.path)
     args.add("--manifest", manifest)
     ctx.actions.run(
@@ -146,6 +149,7 @@ def _seed_tools_impl(ctx):
             mock = steps["mock"],
             twin = steps["twin"],
             manifest = manifest,
+            nvk_identity = nvk_source,
             raw = [raw],
             raw_dir = raw.path,
         ),

@@ -1,0 +1,41 @@
+{
+  "class": "IOSurfaceRootUserClient",
+  "doc": "The original IOSurfaceRootUserClient (com.apple.iokit.IOSurface), the user client every IOSurface.framework process opens: its per-task surface-client table, which leads from a surface ID to the task's IOSurfaceClient, and the external methods that create a surface with the reply they fill.",
+  "superclass": "IOUserClient2022",
+  "kext": "com.apple.iokit.IOSurface",
+  "functions_only": true,
+  "methods": {},
+  "constants": {
+    "clientTableLock": {
+      "doc": "A lck_mtx_t pointer (not an embedded mutex): IOSurface loads it and locks the mutex it points to around every table access."
+    },
+    "clientTable": {
+      "doc": "A pointer to the table: an array of IOSurfaceClient pointers indexed by global surface ID, null for an ID this user client has not created or looked up."
+    },
+    "clientCapacity": {
+      "doc": "The table's entry count, a uint32: an ID at or past it has no client."
+    },
+    "sharedClient": {
+      "doc": "This user client's shared-client object. Every IOSurfaceClient in its table points back to it (OriginalIOSurfaceClient::sharedClient); IOSurface panics on a mismatch."
+    },
+    "createSurfaceSelector": {
+      "doc": "s_create_surface: one scalar (the parent surface's ID, or 0) and the serialised properties in, the create reply (createOutputSize bytes) out."
+    },
+    "createSurfaceFastPathSelector": {
+      "doc": "The fixed-struct create: 0x20 bytes of arguments in (the client image's address first), the same reply out; IOSurface.framework's IOSurfaceClientWrapClientImage calls it."
+    },
+    "createSurfaceClientMemorySelector": {
+      "doc": "The create over client memory: two scalars (address, allocation size) in, the same reply out; IOSurface.framework's IOSurfaceClientWrapClientMemory calls it."
+    },
+    "createOutputSize": {
+      "doc": "The create reply's size in bytes, which the external method checks as the structure output size."
+    },
+    "createOutputSurfaceID": {
+      "doc": "The new surface's ID (uint32) in the create reply."
+    },
+    "createOutputAllocSize": {
+      "doc": "The new surface's allocation size (uint64) in the create reply."
+    }
+  },
+  "functions": {}
+}

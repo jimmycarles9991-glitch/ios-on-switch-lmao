@@ -97,12 +97,12 @@ TEST(DisplayPlanesSource, DriverFollowsTheRules)
     EXPECT_THAT(Method(source, "    void presentEntry(int i)\n"), HasSubstr("entryPlane[i].seq = entrySeq[i]"));
     // A latched window B set retires its swaps in queue order; a stuck one or an underflow run turns planes off.
     const std::string frame = Function(planes, "void planeFrameEnd()\n");
-    EXPECT_THAT(frame, HasSubstr("retireThrough(now.seq)"));
+    EXPECT_THAT(frame, HasSubstr("retireThrough(now.seq, __atomic_load_n(&feStamp, __ATOMIC_ACQUIRE))"));
     EXPECT_THAT(frame, HasSubstr("planesOff("));
     EXPECT_THAT(source, HasSubstr("if (status & kFrameEndInt)\n            planeFrameEnd();"));
     // The first client frame's swap retires at its own latch (latchRetire is on from the plane probe, before it).
     EXPECT_THAT(Method(source, "    void startRotation()\n"), HasSubstr("entrySeq[target] = seqOf(flipRequest);"));
-    EXPECT_THAT(Method(source, "    void checkRotation()\n"), HasSubstr("retireThrough(entrySeq[asked]);"));
+    EXPECT_THAT(Method(source, "    void checkRotation()\n"), HasSubstr("retireThrough(entrySeq[asked], stamp);"));
     // Swaps wait while the plane probe covers the screen; a window B set out after planes went off never panics.
     EXPECT_THAT(kick, HasSubstr("if (planeProbe.active()) {"));
     EXPECT_THAT(Method(source, "    void checkFlipDeadline()\n"), HasSubstr("!(planesOn && planeLatch.requested())"));
@@ -120,11 +120,19 @@ TEST(DisplayPlanesSource, DriverFollowsTheRules)
     const std::string gate = Function(source, "extern \"C\" bool native_legacy_detach_ready(void)\n");
     EXPECT_THAT(gate, HasSubstr("planesReady()"));
     EXPECT_THAT(gate, HasSubstr("(vic->rotations & 0x90) == 0x90"));
-    // And VIC's proven row pitch: the alignment Core Animation sizes surfaces by follows it before backboardd reads it.
+    // And a VIC row pitch the published alignment is a multiple of; the alignment itself is VIC's from start, never raised
+    // later (Core Animation and VideoToolbox read it once).
     EXPECT_THAT(gate, HasSubstr("vic->pitchAlign"));
     EXPECT_THAT(gate, HasSubstr("const bool ok = planes && turns && pitched;"));
-    EXPECT_THAT(gate, HasSubstr("if (ok)\n        display->publishDetachAlignment(rows, bases);"));
-    ExpectBefore(gate, "publishDetachAlignment", "return ok;");
+    EXPECT_THAT(source, Not(HasSubstr("publishDetachAlignment")));
+    EXPECT_THAT(Method(source, "    void publishStrideRequirements()\n"),
+                HasSubstr("OSNumber::withNumber(NativePlanes::kPublishedRowAlignment, 32)"));
+    EXPECT_THAT(Method(source, "    void publishPlaneLimits()\n"),
+                HasSubstr("{\"PlaneBaseAlignmentLinear\", NativePlanes::kPublishedBaseAlignment}"));
+    // The service is found as J120's: IOServiceMatching("AppleCLCD").
+    EXPECT_THAT(
+        source,
+        HasSubstr(": OSMetaClass(\"AppleCLCD\", NativeLegacyDisplay::superClass, sizeof(NativeLegacyDisplay))"));
 }
 
 TEST(DisplayPlanesSource, BackboarddDetachesOnlyWhenTheDisplaySaysSo)

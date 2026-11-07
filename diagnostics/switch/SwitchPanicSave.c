@@ -58,6 +58,7 @@
 #include <pexpert/pexpert.h>
 #include <sys/msgbuf.h>
 #include "SwitchDiag.h"
+#include "SwitchResetCause.h"
 #include "SwitchDiagDisplay.h"
 #include "SwitchPanicSave.h"
 #include "SwitchPowerTrail.h"
@@ -142,8 +143,11 @@ static const unsigned reboot_arg = 0;         /* a fixed reboot delay: it would 
 static volatile uint8_t *region;              /* write-combined */
 static volatile uint32_t *pmc, *tmr, *screen;
 static const char *save_off_reason = "not armed";
-static uint32_t last_reset = 0xffffffffu;
+static uint32_t last_reset = 0xffffffffu, last_reset_status;
 static int pending, pending_damaged;
+/* The last boot's end when no panic tells it (SwitchResetCause.h): filed as reset-<UTC>.log by kern_exec.c. */
+static int thermal_sensor, thermal_millic, report_pending;
+static char report_text[512];
 static volatile uint32_t begun;
 static int screen_taken;
 static unsigned panic_cpu;
@@ -513,13 +517,15 @@ void switch_panic_save_init(void)
 {
     if (switch_native_profile_active())
         screen = (volatile uint32_t *)ml_io_map_wcomb((vm_offset_t)SWITCH_FB_PA, (vm_size_t)SWITCH_FB_BYTES);
+    pmc = (volatile uint32_t *)ml_io_map((vm_offset_t)PMC_PA, 4096);
+    if (pmc)
+        last_reset_status = pmc[PMC_RST_STATUS / 4];
     save_on = 1;
     for (uint64_t pa = REGION_PA; pa < REGION_PA + REGION_BYTES; pa += PAGE_SIZE)
         if (!switch_ram_reserved((ppnum_t)atop_64(pa))) {
             save_off_reason = "0xb0000000 is not reserved RAM";
             return;
         }
-    pmc = (volatile uint32_t *)ml_io_map((vm_offset_t)PMC_PA, 4096);
     /* Always: a watchdog panic resets even with the panic screen held. */
     tmr = (volatile uint32_t *)ml_io_map((vm_offset_t)TMR_PA, 4096);
     region = (volatile uint8_t *)ml_io_map_wcomb((vm_offset_t)REGION_PA, REGION_BYTES);
@@ -529,7 +535,7 @@ void switch_panic_save_init(void)
         return;
     }
     switch_power_trail_init(region + TRAIL_OFFSET, TRAIL_BYTES);
-    last_reset = pmc[PMC_RST_STATUS / 4] & 7;
+    last_reset = last_reset_status & 7;
     if (pmc[PMC_SCRATCH37 / 4] == TPAN)
         pmc[PMC_SCRATCH37 / 4] = 0; /* hekate clears it; never leave it for later */
     /* The last boot's record, checked now; written to Data by kern_exec.c (switch_panic_save_pending). */
@@ -666,7 +672,55 @@ void switch_panic_logged(void)
     deadline += panic_at;
     while (mach_absolute_time() < deadline)
         __asm__ volatile("isb" ::: "memory");
+    switch_power_trail_flag_now(SWITCH_MARK_FLAG_PANIC_RESET);
     pmc_reset();
+}
+
+void switch_panic_save_thermal(int sensor, int millic)
+{
+    thermal_sensor = sensor;
+    thermal_millic = millic;
+}
+
+/* One line for every boot, as an error when the last boot did not end by a shut down, a restart or a panic it saved;
+ * and the report kern_exec.c files for those ends. */
+static const char *reset_report(char *path, size_t path_bytes)
+{
+    const enum switch_reset_cause cause = switch_reset_cause(last_reset_status);
+    const enum switch_thermal_sensor thermal = (enum switch_thermal_sensor)thermal_sensor;
+    char thermal_text[96] = "";
+    if (thermal != SWITCH_THERMAL_NONE)
+        snprintf(thermal_text, sizeof(thermal_text), "; thermal shutdown %s %d.%d C",
+                 switch_thermal_sensor_name(thermal), thermal_millic / 1000, thermal_millic % 1000 / 100);
+    const int report = switch_reset_files_report(cause, pending, thermal);
+    if (report)
+        os_log_error(OS_LOG_DEFAULT, "SwitchReset: last boot ended by %s (PMC_RST_STATUS %#x)%s%s",
+                     switch_reset_cause_name(cause), last_reset_status, thermal_text,
+                     pending ? "; its panic is filed" : "");
+    else
+        os_log(OS_LOG_DEFAULT, "SwitchReset: last boot ended by %s (PMC_RST_STATUS %#x)%s%s",
+               switch_reset_cause_name(cause), last_reset_status, thermal_text, pending ? "; its panic is filed" : "");
+    if (!report)
+        return NULL;
+    char when[32];
+    clock_sec_t secs = 0;
+    clock_usec_t usecs = 0;
+    clock_get_calendar_microtime(&secs, &usecs);
+    format_time(when, sizeof(when), (uint64_t)secs);
+    snprintf(path, path_bytes, "/private/var/Switch/reset-%s.log", when);
+    snprintf(report_text, sizeof(report_text),
+             "Switch reset report, filed %s UTC at the next boot\n"
+             "The last boot ended by: %s (PMC_RST_STATUS %#x)%s\n"
+             "%s\n",
+             when, switch_reset_cause_name(cause), last_reset_status, thermal_text,
+             thermal != SWITCH_THERMAL_NONE ? "SwitchThermal shut the console down in order: it crossed its software "
+                                              "thermal shutdown threshold (SwitchThermalLimits.h)."
+             : cause == SWITCH_RESET_THERMTRIP
+                 ? "SOC_THERM's hardware thermal trip reset the SoC: the software thermal "
+                   "shutdown below it did not get there first."
+                 : "The SoC watchdog reset a hung console before any panic was recorded.");
+    report_pending = 1;
+    return report_text;
 }
 
 const char *switch_panic_save_pending(uint32_t *bytes, char *path, size_t path_bytes)
@@ -674,6 +728,15 @@ const char *switch_panic_save_pending(uint32_t *bytes, char *path, size_t path_b
     switch_power_trail_report();
     static const char *const resets[8] = {"power-on", "watchdog", "thermal sensor", "software (PMC)",
                                           "LP0 wake", "AOTAG",    "unknown 6",      "unknown 7"};
+    if (!pending && pmc) {
+        const char *report = reset_report(path, path_bytes);
+        if (report) {
+            *bytes = (uint32_t)strnlen(report, sizeof(report_text));
+            return report;
+        }
+    } else if (pmc) {
+        (void)reset_report(path, path_bytes);
+    }
     if (!save_on || !region) {
         if (save_on)
             os_log(OS_LOG_DEFAULT, "SwitchPanicSave: off: %s", save_off_reason);
@@ -698,7 +761,7 @@ const char *switch_panic_save_pending(uint32_t *bytes, char *path, size_t path_b
 
 const void *switch_panic_save_pending_stackshot(uint32_t *bytes)
 {
-    if (!save_on || !region || !pending)
+    if (!save_on || !region || !pending || report_pending)
         return NULL;
     const volatile struct switch_panic_stackshot *k = shot();
     if (k->magic != SHOT_MAGIC || k->header_crc != crc_of(k, offsetof(struct switch_panic_stackshot, header_crc)) ||
@@ -716,6 +779,11 @@ const void *switch_panic_save_pending_stackshot(uint32_t *bytes)
 
 void switch_panic_save_done(int error, const char *path)
 {
+    if (report_pending) {
+        report_pending = 0;
+        os_log(OS_LOG_DEFAULT, "SwitchReset: %s %s", path, error ? "not written" : "written");
+        return;
+    }
     if (!pending)
         return;
     if (error) {

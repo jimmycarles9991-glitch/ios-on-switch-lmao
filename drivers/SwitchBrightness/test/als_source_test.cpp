@@ -146,12 +146,16 @@ TEST(SwitchALSSource, WakeSamplesFromTheDcRestart)
     ASSERT_NE(scanout, std::string::npos);
     ASSERT_NE(als, std::string::npos);
     ASSERT_NE(panel, std::string::npos);
-    EXPECT_LT(scanout, als) << "frame ends run before the sensor's clock starts";
+    EXPECT_LT(scanout, als) << "the sensor starts once the panel's DC scans out again";
     EXPECT_LT(als, panel) << "the sensor samples through the panel's wake";
     EXPECT_EQ(Count(on, "switch_als_set_active"), 1u);
 
     const std::string sensor = SourceText("../SwitchALS.cpp");
-    EXPECT_THAT(Body(sensor, "void SwitchALS::update()"), HasSubstr("const int err = configure();"));
+    const std::string update = Body(sensor, "void SwitchALS::update()");
+    EXPECT_THAT(update, HasSubstr("const int err = configure();"));
+    EXPECT_LT(update.find("clock->setTimeoutUS(kFirstSampleUS);"), update.find("const int err = configure();"))
+        << "the first sample's period counts from the set-up";
+    EXPECT_THAT(update, HasSubstr("clock->cancelTimeout();"));
     const std::string configure = Body(sensor, "int SwitchALS::configure()");
     EXPECT_THAT(configure, HasSubstr("skip = 0;"));
     EXPECT_LT(configure.find("RegTiming"), configure.find("RegControl, kPowerOn | kAdcEnable"))
@@ -194,6 +198,18 @@ TEST(SwitchALSSource, WhatCoreBrightnessReads)
                 HasSubstr("OSNumber *nits = OSDynamicCast(OSNumber, dict->getObject(\"brightness-nits\"));"));
     EXPECT_THAT(backlight, HasSubstr("value = nitsToBrightness(requested);"));
     EXPECT_THAT(backlight, HasSubstr("setProperty(\"new-backlight-architecture\", kOSBooleanTrue);"));
+}
+
+// CoreBrightness's ReportInterval reaches the light device's Report Interval feature: the sensor takes it as its sample
+// period, held at a whole conversion, and the device no longer refuses the report.
+TEST(SwitchALSSource, ReportIntervalPacesTheSamples)
+{
+    const std::string als = SourceText("../SwitchALS.cpp");
+    EXPECT_THAT(als, HasSubstr("switch_hid_set_feature_handler(hid, &SwitchALS::reportIntervalSet, this);"));
+    EXPECT_THAT(als, HasSubstr("sender->setTimeoutUS(__atomic_load_n(&self->sampleUS, __ATOMIC_RELAXED));"));
+    EXPECT_THAT(als, HasSubstr("asked > kSampleUS ? asked : kSampleUS"));
+    const std::string hid = SourceText("../../SwitchTouch/SwitchHIDDevice.cpp");
+    EXPECT_THAT(hid, HasSubstr("switch_refusal_k(switch_refusal_key_with(switch_refusal_key(\"hid\", \"set-report\")"));
 }
 
 TEST(SwitchALSSource, DisplayCreateWithIDHasWhatItNeedsBeforeBacklightControl)

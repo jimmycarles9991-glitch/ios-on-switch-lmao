@@ -8,6 +8,7 @@ lint_files()
 py_library(
     name = "lib",
     srcs = ["frames.py"],
+    visibility = ["//tools/devicerun:__pkg__"],
 )
 
 # bazel run //tools/frames -- <pulled .logarchive or log text> [--summary]: every slow frame's stages (debug kernels).

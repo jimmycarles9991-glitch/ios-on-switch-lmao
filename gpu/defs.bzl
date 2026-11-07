@@ -99,16 +99,21 @@ def _metal_plugin_impl(ctx):
         defines.append("-DTEGRA_RAW_STACK=0x@FILE:%s@ull" % ctx.file.stack.path)
     headers = ctx.files.hdrs + ctx.files.include_markers + ctx.files.stack
     objects = []
-    for language, sources in (("objective-c++", ctx.files.srcs), ("c++", ctx.files.cc_srcs)):
-        # Plain C++ sends no Objective-C messages (clang calls the flag unused there, an error under -Werror).
+    for language, sources in (("objective-c++", ctx.files.srcs), ("c++", ctx.files.cc_srcs), ("c", ctx.files.c_srcs)):
+        # Plain C++ sends no Objective-C messages (clang calls the flag unused there, an error under -Werror); C takes
+        # neither the C++ standard nor ARC.
         cflags = [f for f in _PLUGIN_CFLAGS if language == "objective-c++" or f != "-fno-objc-msgsend-selector-stubs"]
+        compiler = "clang++"
+        if language == "c":
+            cflags = [f for f in cflags if f not in ("-std=c++17", "-fobjc-arc")] + ["-std=c11"]
+            compiler = "clang"
         for src in sources:
             obj = ctx.actions.declare_file("%s_objs/%s.o" % (ctx.attr.name, src.basename))
             _xcode_run(
                 ctx,
                 "ObjcxxCompile",
                 "Compiling %s" % src.short_path,
-                ["clang++"] + _IOS + cflags + includes + defines + ["-x", language, "-c", src.path, "-o", obj.path],
+                [compiler] + _IOS + cflags + includes + defines + ["-x", language, "-c", src.path, "-o", obj.path],
                 [src] + headers,
                 [obj],
             )
@@ -147,6 +152,7 @@ metal_plugin = rule(
     attrs = _XCODE | PROFILE_ATTR | {
         "srcs": attr.label_list(mandatory = True, allow_files = [".mm"], doc = "Objective-C++ units, in link order"),
         "cc_srcs": attr.label_list(allow_files = [".cpp"], doc = "C++ units, linked after srcs"),
+        "c_srcs": attr.label_list(allow_files = [".c"], doc = "C units, linked after cc_srcs"),
         "hdrs": attr.label_list(allow_files = True),
         "include_markers": attr.label_list(allow_files = True, doc = "one file per -I directory, in order"),
         "stack": attr.label(allow_single_file = True, doc = "the raw path's stack key (TEGRA_RAW_STACK)"),

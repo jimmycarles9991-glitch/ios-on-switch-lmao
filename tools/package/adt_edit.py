@@ -143,6 +143,16 @@ def _product(tree: list) -> None:
         ('compatible-device-fallback', b'iPad6,7\0'),
         ('thin-bezel', u32(1)),
         ('product-id', bytes.fromhex('e9fefef6e6f9d12a5ba1a2551866cbbd749f0ec3')),
+        # MobileGestalt's GraphicsFeatureSetClass and GraphicsFeatureSetFallbacks, by which CoreUI picks asset catalog
+        # renditions (without them every CUICatalog logs that kMGArtworkGraphicsFeatureSetClass has no answer).
+        ('graphics-featureset-class', b'APPLE3\0'),
+        ('graphics-featureset-fallbacks', b'APPLE3v1:APPLE2:APPLE1:GLES2,0\0'),
+        ('device-perf-memory-class', u32(3)),
+        ('app-macho-architecture', b'arm64\0'),
+        ('framebuffer-identifier', b'0\0'),
+        ('display-mirroring', u32(1)),
+        ('ui-background-quality', u32(100)),
+        ('ui-weather-quality', u32(100)),
     ):
         put(product, key, value)
     put(child(product, 'audio'), 'wireless-splitter', u32(1))  # as UniXNU's 21H461 profile
@@ -199,6 +209,66 @@ def _usb(tree: list) -> None:
         xhci = child(child(tree, 'arm-io'), 'usb-xhci')
         for key, value in (('compatible', b'usb-xhci,tegra210\0'), ('device_type', b'usb-xhci\0')):
             put(xhci, key, value)
+
+
+def _media_accel(tree: list) -> None:
+    """The keys iOS's media frameworks read before they pick a hardware path."""
+    # J120 has iommu-present (empty) on /arm-io. Its one reader in 21H461's dyld cache, VideoToolbox's
+    # FigCreateIOSurfacePropertiesDictionary, otherwise asks every IOSurface it makes (decoder and pixel-transfer pools)
+    # for the PurpleGfxMem carveout, which this tree does not have. The engines that touch those surfaces reach
+    # scattered pages through their own MMUs: VIC, NVJPG and the display through the MC SMMU, the GPU through its GMMU.
+    arm_io = child(tree, 'arm-io')
+    put(arm_io, 'iommu-present', b'')
+    # J120's A10X generation. MobileGestalt compares it in about 25 answers, among them HEVCDecoder8bitSupported (H8)
+    # and HEVCDecoder10bitSupported (H9): absent, both answer false although NVDEC decodes HEVC. Its other reader in the
+    # dyld cache is DeviceIdentity; the kernel only lists it as sandbox-readable.
+    put(arm_io, 'soc-generation', b'H9\0')
+
+
+def _capabilities(tree: list) -> None:
+    """J120's own answers to what MobileGestalt reads before iOS offers a feature (libMobileGestalt, 21H461)."""
+    # IOPlatformExpertDevice carries the root's properties; MobileGestalt's HardwarePlatform is its platform-name, which
+    # iBoot sets to the SoC. Without it CoreVideo, AMS and the store's user agent read NULL.
+    put(tree, 'platform-name', b't8011\0')
+    put(tree, 'target-sub-type', b'J120AP\0')
+    put(child(tree, 'chosen'), 'display-corner-radius', u32(0))
+    product = child(tree, 'product')
+    for key, value in (
+        ('bluetooth-le', u32(1)),
+        ('ui-pip', b''),
+        ('ui-pinned-app', b''),
+        ('ui-floating-live-app', b''),
+        ('ui-overlay-app', b''),
+        ('hearingaid-audio-equalization', u32(1)),
+        ('hearingaid-low-energy-audio', u32(1)),
+        ('iap2-protocol-supported', u32(1)),
+        ('allow-32bit-apps', u32(1)),
+        ('partition-style', b'iOS\0'),
+        ('ephemeral-data-mode', u32(0)),
+        ('multiuser-sessions', u32(0)),
+        ('has-applelpm', u32(0)),
+        ('has-boot-chime', u32(0)),
+        ('udid-version', u32(1)),
+        ('chrome-identifier', b'com.apple.dt.devicekit.chrome.tablet\0'),
+        ('device-color-policy', u32(0)),
+        ('itunes-min-ver', u32(0xC0500)),
+        ('mobiledevice-min-ver', b'1600\0'),
+        ('ptp-large-files', u32(1)),
+        ('RF-exposure-separation-distance', u32(5)),
+        ('disable-globe-map', b''),
+        ('sandman-support', u32(1)),
+        ('supports-avatars', b''),
+        ('wifi-chipset', b'4355\0'),
+    ):
+        put(product, key, value)
+    # MobileGestalt's volume-buttons answer is whether /buttons has function-button_volup; nothing here resolves the
+    # function (SwitchButtons owns the buttons; AppleM68Buttons, which would, is not prelinked). J120's bytes.
+    buttons = child(tree, 'buttons')
+    put(buttons, 'function-button_volup', bytes.fromhex('240000004f4950472800000000000000'))
+    put(buttons, 'function-button_voldown', bytes.fromhex('240000004f4950472b00000000000000'))
+    maps = child(product, 'maps')
+    put(maps, '3d-imagery', u32(0))
+    put(maps, '3d-maps', u32(0))
 
 
 def _boot_slots(tree: list, chosen: list, overlay_dirs: Sequence[tuple[str, str]]) -> None:
@@ -264,6 +334,8 @@ def ipad_adt(
     put(chosen, 'chip-id', u32(0x8011))
     put(chosen, 'unique-chip-id', struct.pack('<Q', 0x001D5A0000000001))
     _usb(tree)
+    _media_accel(tree)
+    _capabilities(tree)
     _boot_slots(tree, chosen, overlay_dirs)
     if smp:
         four_cores(tree)

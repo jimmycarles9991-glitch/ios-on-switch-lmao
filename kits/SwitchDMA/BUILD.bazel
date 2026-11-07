@@ -1,4 +1,5 @@
-# Cache maintenance by VA and physically contiguous buffers for DMA masters that do not snoop the CPU caches.
+# Cache maintenance by VA, physically contiguous buffers, and scattered buffers with their page lists (for masters
+# behind an SMMU), for DMA masters that do not snoop the CPU caches.
 #
 #   bazel test //kits/SwitchDMA/test:all
 load("//bazel/lint:defs.bzl", "lint_files")
@@ -25,6 +26,9 @@ kernel_headers()
 
 kernel_driver(
     name = "SwitchDMA",
-    srcs = ["SwitchDMABuffer.cpp"],
+    srcs = [
+        "SwitchDMABuffer.cpp",
+        "SwitchDMAPages.cpp",
+    ],
     hdr_deps = [],
 )

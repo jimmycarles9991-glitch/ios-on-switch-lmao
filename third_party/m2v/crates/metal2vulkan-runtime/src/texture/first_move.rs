@@ -104,9 +104,11 @@ pub(crate) struct FirstMove {
     /// Metal's pattern over the image's first levels, which the zeros then leave
     /// ([`FirstMove::patterned`]).
     pattern: Option<Patterned>,
-    /// The queue family the move acquires the image for from `VK_QUEUE_FAMILY_FOREIGN_EXT`, an
-    /// image over dma-buf pages the CPU writes ([`FirstMove::acquired`]).
-    acquire: Option<u32>,
+    /// The queue family the move acquires the image from and the one it acquires it for: from
+    /// `VK_QUEUE_FAMILY_FOREIGN_EXT` for an image over dma-buf pages the CPU writes
+    /// ([`FirstMove::acquired`]), from `VK_QUEUE_FAMILY_EXTERNAL` for an image over host memory
+    /// another driver of the process writes ([`FirstMove::acquired_external`]).
+    acquire: Option<(u32, u32)>,
 }
 
 /// How a first move writes Metal's pattern into the first `levels` levels of its image, of
@@ -231,7 +233,18 @@ impl FirstMove {
     /// image without one.
     pub(crate) fn acquired(mut self, family: u32) -> FirstMove {
         self.old = vk::ImageLayout::GENERAL;
-        self.acquire = Some(family);
+        self.acquire = Some((vk::QUEUE_FAMILY_FOREIGN_EXT, family));
+        self
+    }
+
+    /// The move, an acquire of the image from `VK_QUEUE_FAMILY_EXTERNAL` for `family` (as
+    /// [`FirstMove::acquired`] names it): an optimal image made for host allocations over memory
+    /// another driver of the process lays out as the device does and writes
+    /// (`texture/tiled_in_place.rs`). It moves from `GENERAL`, which keeps the bytes as they lie,
+    /// and needs no extension.
+    pub(crate) fn acquired_external(mut self, family: u32) -> FirstMove {
+        self.old = vk::ImageLayout::GENERAL;
+        self.acquire = Some((vk::QUEUE_FAMILY_EXTERNAL, family));
         self
     }
 
@@ -510,12 +523,11 @@ impl FirstMove {
         exit_guard::called(Call::CmdPipelineBarrier);
     }
 
-    /// The barrier of the move: an acquire from `VK_QUEUE_FAMILY_FOREIGN_EXT` where it is one.
+    /// The barrier of the move: an acquire from another queue family where it is one.
     fn barrier(&self) -> vk::ImageMemoryBarrier<'static> {
-        let (source, target) = match self.acquire {
-            Some(family) => (vk::QUEUE_FAMILY_FOREIGN_EXT, family),
-            None => (vk::QUEUE_FAMILY_IGNORED, vk::QUEUE_FAMILY_IGNORED),
-        };
+        let (source, target) = self
+            .acquire
+            .unwrap_or((vk::QUEUE_FAMILY_IGNORED, vk::QUEUE_FAMILY_IGNORED));
         vk::ImageMemoryBarrier::default()
             .src_access_mask(vk::AccessFlags::MEMORY_WRITE)
             .dst_access_mask(vk::AccessFlags::MEMORY_READ | vk::AccessFlags::MEMORY_WRITE)
@@ -611,6 +623,9 @@ pub(crate) struct TexelCopy {
     /// The decode of what the copies wrote into the image's decoded twin, after them
     /// (`texture/decoded_twin.rs`).
     decode: Option<DecodePass>,
+    /// Whether every image the copies write is in memory of its own, which no other image
+    /// aliases ([`TexelCopy::alone`]).
+    alone: bool,
 }
 
 impl TexelCopy {
@@ -627,7 +642,15 @@ impl TexelCopy {
             staging,
             bytes,
             decode: None,
+            alone: false,
         }
+    }
+
+    /// The copies' images are in memory of their own: no image of another texture aliases them,
+    /// so only a copy into the same image can meet theirs ([`staged_barriers`]).
+    pub(crate) fn alone(mut self) -> TexelCopy {
+        self.alone = true;
+        self
     }
 
     /// The copies, then `pass`, their decode into the image's decoded twin (its scratch counted
@@ -643,6 +666,82 @@ impl TexelCopy {
     pub(crate) fn decode_only(pass: DecodePass) -> TexelCopy {
         TexelCopy::new(vk::Buffer::null(), 0, Vec::new(), Box::new(())).decoding(pass)
     }
+}
+
+/// Which of `staged`, recorded in order, take a barrier before their copies: the first (after the
+/// first work and every earlier submission's writes), one whose copies write texels a copy since
+/// the last barrier wrote (the later `replace_region` wins, as Metal's synchronous call order
+/// does), and the one after a copy that ran a decode pass (which reads what its copies wrote and
+/// writes the decoded twin). Each copy reads only its own staging bytes, which the host wrote
+/// before the submission, so no copy reads what another writes. Copies into disjoint texels, or
+/// into images no other image aliases, run without one between them: the Vulkan memory model
+/// orders only accesses to the same memory. On NVK each barrier here is a wait for idle, a
+/// shader data flush and texture and shader invalidates; a texture's many regions, one
+/// `replace_region` each, paid one per region.
+pub(crate) fn staged_barriers(staged: &[&TexelCopy]) -> Vec<bool> {
+    let mut since: Vec<(vk::Image, &vk::BufferImageCopy, bool)> = Vec::new();
+    let mut decoded = false;
+    staged
+        .iter()
+        .enumerate()
+        .map(|(at, copy)| {
+            let meets = copy.copies.iter().any(|(image, region)| {
+                since.iter().any(|&(earlier, written, alone)| {
+                    if earlier == *image {
+                        regions_meet(written, region)
+                    } else {
+                        !alone && !copy.alone
+                    }
+                })
+            });
+            let barrier = at == 0 || decoded || meets;
+            if barrier {
+                since.clear();
+            }
+            since.extend(
+                copy.copies
+                    .iter()
+                    .map(|(image, region)| (*image, region, copy.alone)),
+            );
+            decoded = copy.decode.is_some();
+            barrier
+        })
+        .collect()
+}
+
+/// Whether two copies into one image write a texel in common: the same level, a layer and an
+/// aspect in common, and boxes that meet.
+fn regions_meet(a: &vk::BufferImageCopy, b: &vk::BufferImageCopy) -> bool {
+    let (sa, sb) = (&a.image_subresource, &b.image_subresource);
+    let spans = |from: i64, length: u64, other_from: i64, other_length: u64| {
+        from < other_from + other_length as i64 && other_from < from + length as i64
+    };
+    sa.mip_level == sb.mip_level
+        && sa.aspect_mask.intersects(sb.aspect_mask)
+        && spans(
+            sa.base_array_layer.into(),
+            sa.layer_count.into(),
+            sb.base_array_layer.into(),
+            sb.layer_count.into(),
+        )
+        && spans(
+            a.image_offset.x.into(),
+            a.image_extent.width.into(),
+            b.image_offset.x.into(),
+            b.image_extent.width.into(),
+        )
+        && spans(
+            a.image_offset.y.into(),
+            a.image_extent.height.into(),
+            b.image_offset.y.into(),
+            b.image_extent.height.into(),
+        )
+        && spans(
+            a.image_offset.z.into(),
+            a.image_extent.depth.into(),
+            b.image_offset.z.into(),
+            b.image_extent.depth.into(),
+        )
 }
 
 /// What holds first moves not yet made: an image of the runtime's, or a stand-in.
@@ -1225,10 +1324,11 @@ impl Taken<'_> {
     }
 
     /// Record the host calls' staged copies it took into `command_buffer`, each after every
-    /// write before it (the first work, which a `VkSubmitInfo` of its own submitted before; the
-    /// copy before), then the barrier that makes them visible to every command after and to the
-    /// host. Apart from [`record`](Self::record)'s work: MoltenVK lost a copy into a new image
-    /// recorded in the same Metal command buffer as the image's move.
+    /// write before it that it meets (the first work, which a `VkSubmitInfo` of its own
+    /// submitted before; an earlier copy into the same texels: [`staged_barriers`]), then the
+    /// barrier that makes them visible to every command after and to the host. Apart from
+    /// [`record`](Self::record)'s work: MoltenVK lost a copy into a new image recorded in the
+    /// same Metal command buffer as the image's move.
     ///
     /// # Safety
     ///
@@ -1242,10 +1342,14 @@ impl Taken<'_> {
             Held::Texels(_, copy) => Some(copy),
             Held::Moves(..) | Held::Fill(..) => None,
         });
+        let staged: Vec<&TexelCopy> = staged.collect();
+        let barriers = staged_barriers(&staged);
         let mut copied = false;
-        for copy in staged {
-            transfer_barrier(device, command_buffer, true);
-            exit_guard::called(Call::CmdPipelineBarrier);
+        for (copy, barrier) in staged.into_iter().zip(barriers) {
+            if barrier {
+                transfer_barrier(device, command_buffer, true);
+                exit_guard::called(Call::CmdPipelineBarrier);
+            }
             for (image, region) in &copy.copies {
                 // SAFETY: the caller's contract; the image is live (held), in `GENERAL` (its
                 // move was made before) and has `TRANSFER_DST` usage; the copy reads within the

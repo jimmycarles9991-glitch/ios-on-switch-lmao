@@ -9,10 +9,11 @@
 //     L4T's soctherm.c does for "nvidia,tegra210b01-soctherm" (tegra210-soctherm.c tegra210b01_tsensors, fuse
 //     calibration from tsensor-fuse.c; clocks 51 MHz from PLLP and 400 kHz from CLK_M, tegra210-soc-base.dtsi). The
 //     hardware converts continuously; a read is the TS_*_STATUS1 register at the moment thermalmonitord asks (its own
-//     5 s cadence, through its read path: no timer here). No SOC_THERM interrupt, throttle or THERMTRIP is set up.
+//     5 s cadence, through its read path: no timer here). Once up, SOC_THERM's group thresholds and their interrupt
+//     belong to SwitchSocTherm.cpp; no throttle or THERMTRIP is set up.
 //   * TMP451 (SwitchThermal): SwitchThermal's last good reading of the SoC diode and the PCB, which it takes on every
-//     ALERT (the sensor's window around the fan levels) and at least every 5 s; older than kTmp451StaleMS (SwitchThermal
-//     lost the sensor) it is a read failure. One reader of the chip, the fan's.
+//     ALERT (the sensor's window around the fan levels) and every degree SOC_THERM's die groups move; once SwitchThermal
+//     loses the sensor it is a read failure. One reader of the chip, the fan's.
 //   * MAX17050 (SwitchBattery): the battery thermistor, kept current by the gauge's temperature alert window (a degree
 //     either way, SwitchBattery.cpp) besides its other alerts.
 //   * PMU tcal: the iPad PMU's calibration channel, reported as 0 C: thermalmonitord adds (its default, 0) minus this
@@ -38,6 +39,7 @@
 #include "../SwitchBattery/SwitchBattery.h"
 #include "SwitchPower.h"
 #include "SwitchSensors.h"
+#include "SwitchSocTherm.h"
 
 extern "C" vm_offset_t ml_io_map(vm_offset_t phys_addr, vm_size_t size);
 
@@ -82,8 +84,7 @@ constexpr uint32_t kPdivCpuShift = 12, kPdivGpuShift = 8, kPdivPllxShift = 0;  /
 constexpr uint32_t kHotspotCpuShift = 16, kHotspotGpuShift = 8;                // 8 bits each
 constexpr uint32_t kHotspotCpu = 10, kHotspotGpu = 5;                          // pllx_hotspot_diff
 
-constexpr uint32_t kTmp451StaleMS = 15000;  // SwitchThermal re-reads every 5 s
-constexpr uint32_t kHookQuietMS = 10000;    // for all 38 devices together
+constexpr uint32_t kHookQuietMS = 10000;  // for all 38 devices together
 static_assert(kHookQuietMS < 41000, "IOService::waitQuiet reports (and may panic on) busy services from 41 s on");
 
 inline uint32_t rd(volatile uint8_t *base, uint32_t offset)
@@ -124,13 +125,6 @@ IOLock *sensorsLock()
         return fresh;
     IOLockFree(fresh);
     return none;
-}
-
-uint64_t msToAbs(uint32_t ms)
-{
-    uint64_t abs = 0;
-    clock_interval_to_absolutetime_interval(ms, kMillisecondScale, &abs);
-    return abs;
 }
 
 // SOC_THERM bring-up. SC7 resets the block and its clocks, so this runs again at wake. False (one line) if a part is
@@ -198,6 +192,7 @@ bool socThermStart()
     wr(regs, HOTSPOT_OFF, hotspot);
     (void)rd(regs, HOTSPOT_OFF);
     __atomic_store_n(&gSocTherm, regs, __ATOMIC_RELEASE);
+    switch_soctherm_armed(regs);
     IOLog(
         "SwitchSensors: SOC_THERM up (fuse common %#x; CONFIG2 cpu0 %#x cpu1 %#x cpu2 %#x cpu3 %#x gpu %#x pllx %#x)\n",
         common, calib[0], calib[1], calib[2], calib[3], calib[4], calib[5]);
@@ -229,9 +224,6 @@ bool read(switch_sensor_source source, int32_t *milliC, uint64_t *at)
     case SWITCH_SRC_TMP451_SOC:
     case SWITCH_SRC_TMP451_PCB: {
         if (!switch_thermal_tmp451(&soc, &pcb, &when))
-            return false;
-        const uint64_t now = mach_absolute_time();
-        if (now > when && now - when > msToAbs(kTmp451StaleMS))
             return false;
         *milliC = source == SWITCH_SRC_TMP451_SOC ? soc : pcb;
         *at = when;
@@ -439,6 +431,7 @@ extern "C" int switch_sensors_start(void)
             ++published;
     }
     switch_sensors_note();  // a waiting watchdogd re-checks now that the services exist
+    (void)switch_virtual_temps_start();
     if (published != SWITCH_SENSOR_COUNT)
         IOLog("SwitchSensors: %u of %u thermalmonitord sensors published\n", published, SWITCH_SENSOR_COUNT);
     if (!published)
@@ -458,5 +451,6 @@ extern "C" void switch_sensors_resume(void)
     if (!gStarted || !__atomic_load_n(&gSocTherm, __ATOMIC_ACQUIRE))
         return;
     __atomic_store_n(&gSocTherm, (volatile uint8_t *)nullptr, __ATOMIC_RELEASE);  // reads fail until reprogrammed
+    switch_soctherm_armed(nullptr);
     (void)socThermStart();
 }

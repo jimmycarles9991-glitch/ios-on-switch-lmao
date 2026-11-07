@@ -406,6 +406,16 @@ TEST_F(Wake, PmcRadioWakeEvents)
     EXPECT_STREQ(pmc_reason(1u << 8, 1u << 19, armed), "pwrbtn");  // the power key first
 }
 
+TEST_F(Wake, PmcUsbDeviceWakeEvent)
+{
+    // UTMIP port 0's sleepwalk (39, active high), only with a USB device on the host port for this sleep.
+    EXPECT_EQ(pmc_armed_usb_device(1, 0), pmc_armed(1, 0));
+    EXPECT_EQ(pmc_armed_usb_device(1, 1), pmc_armed(1, 0) | (1ull << 39));
+    EXPECT_EQ(registers(1ull << 39), (std::vector<uint32_t>{0, 1u << 7, 0, 1u << 7, 0, 0}));
+    EXPECT_STREQ(pmc_reason(0, 1u << 7, pmc_armed_usb_device(1, 1)), "usb");
+    EXPECT_STREQ(pmc_reason(0, 1u << 7, pmc_armed_usb_device(1, 0)), "unknown");  // not armed
+}
+
 TEST_F(Wake, BluetoothSleepModeParameters)
 {
     uint8_t on[12], off[12];

@@ -16,26 +16,44 @@
 //      gone out by the reset as well
 //   4  14 us (L4T tegra_dsi_wait_frame_end: v_ref_to_sync lines), the DSI syncpoint block soft reset, 300 us, clear,
 //      300 us, DSI_VIDEO_MODE_CONTROL = 0 (hekate _display_dsi_wait_vblank(false), L4T tegra_dsi_syncpt_reset)
-// DC_DISP_DISPLAY_DBG_TIMING (L4T dc_reg.h, its tegra_dc_get_v_count) shows whether the raster is still in vertical
-// blanking at step 4; if interrupt latency let it leave, the step waits for the next frame end, at most twice, and then
-// goes ahead (the first command that had to logs one line).
-// The OLED's 1000 x 1300 pixel frame at 78 MHz has 20 blanking lines of 12.8 us (256 us); hekate's step 4 lasts 614 us,
-// so its reset is released and the video mode restored in the first active lines, here as in hekate. A command takes
-// four frames (67 ms).
+// Step 4's waits are hardware-timer callouts (timer_call, SYS_CRITICAL: no coalescing), not spins in the filter, so no
+// CPU sits with interrupts off for them. Each wait is a minimum: a late callout only holds the syncpoint reset, or the
+// command packets' video mode with no packet queued, a little longer. DC_DISP_DISPLAY_DBG_TIMING (L4T dc_reg.h, its
+// tegra_dc_get_v_count) shows whether the raster is still in vertical blanking 14 us after the frame end; if latency let
+// it leave, the step waits for the next frame end, at most twice, and then goes ahead (the first command that had to
+// logs one line). The OLED's 1000 x 1300 pixel frame at 78 MHz has 20 blanking lines of 12.8 us (256 us), so a callout
+// some tens of microseconds late still reads blanking; step 4 lasts about 614 us, so the reset is released and the
+// video mode restored in the first active lines, as in hekate. A command takes four frames (67 ms).
+// TegraPanelSteps.h has the order of the steps.
 #include <IOKit/IOLib.h>
 #include <IOKit/IOLocks.h>
 #include <libkern/OSAtomic.h>
 #include <kern/clock.h>
 #include <kern/sched_prim.h>
 #include <kern/thread.h>
+extern "C" {
+#include <kern/timer_call.h>  // no C linkage of its own
+}
 #include <pexpert/pexpert.h>
 #include "../ArmGIC/SwitchInterrupts.h"
 #include "SwitchBrightness.h"
 #include "TegraPanel.h"
+#include "TegraPanelSteps.h"
 
 extern "C" vm_offset_t ml_io_map(vm_offset_t phys_addr, vm_size_t size);
 
+// The DC A interrupt's owner (NativeLegacyDisplay) keeps FRAME_END unmasked while any holder has it; any context. These
+// defaults stand for a display that never masks it.
+extern "C" __attribute__((weak)) void native_legacy_frame_end_hold(void)
+{}
+
+extern "C" __attribute__((weak)) void native_legacy_frame_end_release(void)
+{}
+
+extern "C" bool native_legacy_frame_end_held(void);
+
 namespace {
+using namespace tegra_panel;
 constexpr vm_offset_t kCarPA = 0x60006000, kDisplayAPA = 0x54200000, kDsiPA = 0x54300000;
 constexpr vm_size_t kDcMapBytes = 0x2000;  // through DC_DISP_DISPLAY_DBG_TIMING
 constexpr uint32_t kDisplayAInterrupt =
@@ -84,20 +102,11 @@ constexpr uint32_t kEnterSleep = 0x10, kExitSleep = 0x11, kDisplayOff = 0x28, kD
 constexpr uint32_t kSetBrightness = 0x51, kControlDisplay = 0x53;
 constexpr uint32_t kBrightnessControl = 1u << 5, kDimmingControl = 1u << 3;  // 0x28, as hekate and L4T send it
 
-constexpr unsigned kFrameTimeoutUS = 50000;  // per frame end: three frames at 60 Hz
-constexpr unsigned kResetDeferrals = 2;      // frame ends step 4 may wait for vertical blanking
+constexpr unsigned kFrameTimeoutUS = 50000;  // per frame end, and per step-4 callout: three frames at 60 Hz
 
-// The one command out, shared with the filter. The thread fills it and publishes step = kQueued; from then on only the
-// filter writes it until it publishes kDone.
-enum : uint32_t {
-    kIdle,
-    kQueued,
-    kEnabled,
-    kWritten,
-    kSettled,
-    kDone
-};
-
+// The one command out, shared with the filter and the step timer. The thread fills it and publishes step = kQueued;
+// from then on only the filter and the timer write it, one at a time (a step moves at a frame end or at the timer,
+// never both), until one of them publishes kDone.
 struct Command {
     uint32_t step;
     uint32_t words[2];
@@ -110,6 +119,8 @@ struct Command {
 Command gCommand;
 uint64_t gFrames;       // frame ends the filter took while a command was out (atomic)
 bool gFrameEndsDriven;  // the display calls the filter (atomic)
+timer_call_data_t gStepTimer;
+uint64_t gStepDeadline;  // mach absolute time the step timer was last armed for
 
 IOLock *volatile gLock;  // serializes commands
 volatile uint32_t *gCar, *gDc, *gDsi;
@@ -126,11 +137,27 @@ IOLock *makeLock(IOLock *volatile *slot)
     return *slot;
 }
 
+void stepTimerFired(timer_call_param_t, timer_call_param_t);
+
+// Primary interrupt context (the DC A filter or the step timer). Publishes the step, then arms its timer: a callout
+// that fires at once still reads the step it is for.
+void advance(Move move)
+{
+    __atomic_store_n(&gCommand.step, move.next, __ATOMIC_RELEASE);
+    if (!move.timerUS)
+        return;
+    uint64_t deadline;
+    clock_interval_to_deadline(move.timerUS, kMicrosecondScale, &deadline);
+    __atomic_store_n(&gStepDeadline, deadline, __ATOMIC_RELAXED);
+    timer_call_enter(&gStepTimer, deadline, TIMER_CALL_SYS_CRITICAL | TIMER_CALL_LOCAL);
+}
+
 // Under the lock. Reading a gated or reset block would stall the bus, so the clocks come first. A stopped DC
 // (NativeLegacyDisplay's display power off) sends no stream for a packet to ride.
 bool displayRunning()
 {
     if (!gCar) {
+        timer_call_setup(&gStepTimer, stepTimerFired, nullptr);
         gDc = (volatile uint32_t *)ml_io_map(kDisplayAPA, kDcMapBytes);
         gDsi = (volatile uint32_t *)ml_io_map(kDsiPA, 0x1000);
         gCar = (volatile uint32_t *)ml_io_map(kCarPA, 0x1000);
@@ -145,9 +172,9 @@ bool displayRunning()
            (gDc[DC_CMD_DISPLAY_COMMAND] & kDisplayModeMask);
 }
 
-uint32_t step()
+Step step()
 {
-    return __atomic_load_n(&gCommand.step, __ATOMIC_ACQUIRE);
+    return static_cast<Step>(__atomic_load_n(&gCommand.step, __ATOMIC_ACQUIRE));
 }
 
 uint64_t frames()
@@ -164,11 +191,16 @@ uint64_t frameDeadline()
 
 [[noreturn]] void lostFrameEnd(const char *what)
 {
+    const Step now = step();
+    if (movesAtTimer(now)) {
+        panic("TegraPanel: %s: step %u's timer callout, due at %llu, had not run 50 ms later (now %llu)", what,
+              static_cast<unsigned>(now), __atomic_load_n(&gStepDeadline, __ATOMIC_RELAXED), mach_absolute_time());
+    }
     char gic[192];
     switch_interrupt_describe(kDisplayAInterrupt, gic, sizeof(gic));
     panic("TegraPanel: %s: no DC A frame end in 50 ms (step %u): INT_STATUS %#x MASK %#x ENABLE %#x CMD %#x DBG_TIMING "
           "%#x, %s",
-          what, step(), gDc[DC_CMD_INT_STATUS], gDc[DC_CMD_INT_MASK], gDc[DC_CMD_INT_ENABLE],
+          what, static_cast<unsigned>(now), gDc[DC_CMD_INT_STATUS], gDc[DC_CMD_INT_MASK], gDc[DC_CMD_INT_ENABLE],
           gDc[DC_CMD_DISPLAY_COMMAND], gDc[DC_DISP_DISPLAY_DBG_TIMING], gic);
 }
 
@@ -181,10 +213,10 @@ void play(const uint32_t *words, unsigned count, const char *what)
         panic("TegraPanel: %s: the display reports no DC A frame ends (it does not call tegra_panel_frame_end_filter)",
               what);
     }
-    const uint32_t enable = gDc[DC_CMD_INT_ENABLE], mask = gDc[DC_CMD_INT_MASK];
-    if (!(enable & mask & kFrameEndInt)) {
-        panic("TegraPanel: %s: DC A FRAME_END is not enabled and unmasked (INT_ENABLE %#x MASK %#x)", what, enable,
-              mask);
+    native_legacy_frame_end_hold();
+    if (!native_legacy_frame_end_held()) {
+        panic("TegraPanel: %s: DC A FRAME_END is not enabled and unmasked (INT_ENABLE %#x MASK %#x)", what,
+              gDc[DC_CMD_INT_ENABLE], gDc[DC_CMD_INT_MASK]);
     }
     for (unsigned i = 0; i < count; ++i)
         gCommand.words[i] = words[i];
@@ -211,6 +243,7 @@ void play(const uint32_t *words, unsigned count, const char *what)
         }
     }
     __atomic_store_n(&gCommand.step, kIdle, __ATOMIC_RELAXED);
+    native_legacy_frame_end_release();
     if (!count)
         return;
     static bool lateReset, lineBuffer;
@@ -368,49 +401,67 @@ extern "C" int tegra_panel_brightness(void)
     return __atomic_load_n(&gHaveLevel, __ATOMIC_RELAXED) ? (int)__atomic_load_n(&gLevel, __ATOMIC_RELAXED) : -1;
 }
 
+extern "C" bool tegra_panel_holds_frame_end(void)
+{
+    return true;
+}
+
+extern "C" __attribute__((weak)) bool native_legacy_frame_end_held(void)
+{
+    return (gDc[DC_CMD_INT_ENABLE] & gDc[DC_CMD_INT_MASK] & kFrameEndInt) != 0;
+}
+
 // Primary interrupt context, at every DC A FRAME_END; one step of the command out, if any (see the top of this file).
 extern "C" void tegra_panel_frame_end_filter(void)
 {
     if (!__atomic_load_n(&gFrameEndsDriven, __ATOMIC_RELAXED))
         __atomic_store_n(&gFrameEndsDriven, true, __ATOMIC_RELEASE);
-    switch_als_frame_end();
-    uint32_t next = step();
-    switch (next) {
-    case kQueued:
-        if (!gCommand.count) {
-            next = kDone;
-            break;
-        }
+    const Step now = step();
+    if (now == kIdle || now == kDone || movesAtTimer(now))
+        return;
+    if (now == kQueued && gCommand.count) {
         gDsi[DSI_VIDEO_MODE_CONTROL] = kCommandsInVideo | kOnLine4;
-        next = kEnabled;
-        break;
-    case kEnabled:
+    } else if (now == kEnabled) {
         for (unsigned i = 0; i < gCommand.count; ++i)
             gDsi[DSI_WR_DATA] = gCommand.words[i];
-        next = kWritten;
-        break;
-    case kWritten:
-        next = kSettled;
-        break;
-    case kSettled:
-        IODelay(14);
-        gCommand.timing = gDc[DC_DISP_DISPLAY_DBG_TIMING];
-        if (!(gCommand.timing & kDbgVBlank) && gCommand.deferrals < kResetDeferrals) {
-            ++gCommand.deferrals;
-            break;
-        }
-        gCommand.status = gDsi[DSI_STATUS];
-        gDsi[DSI_INCR_SYNCPT_CNTRL] = kSyncptSoftReset;
-        IODelay(300);
-        gDsi[DSI_INCR_SYNCPT_CNTRL] = 0;
-        IODelay(300);
-        gDsi[DSI_VIDEO_MODE_CONTROL] = 0;
-        next = kDone;
-        break;
-    default:  // idle, or done and not yet taken back
-        return;
     }
     __atomic_fetch_add(&gFrames, 1, __ATOMIC_RELEASE);
-    __atomic_store_n(&gCommand.step, next, __ATOMIC_RELEASE);
+    advance(atFrameEnd(now, gCommand.count));
     thread_wakeup((event_t)&gCommand);
 }
+
+namespace {
+// Primary interrupt context, the step timer's callout: the rest of step 4.
+void stepTimerFired(timer_call_param_t, timer_call_param_t)
+{
+    const Step now = step();
+    if (!movesAtTimer(now))
+        return;
+    bool inBlanking = false;
+    if (now == kBlankCheck) {
+        gCommand.timing = gDc[DC_DISP_DISPLAY_DBG_TIMING];
+        inBlanking = (gCommand.timing & kDbgVBlank) != 0;
+    }
+    const Move move = atTimer(now, inBlanking, gCommand.deferrals);
+    switch (move.next) {
+    case kSettled:
+        ++gCommand.deferrals;
+        break;
+    case kResetHeld:
+        gCommand.status = gDsi[DSI_STATUS];
+        gDsi[DSI_INCR_SYNCPT_CNTRL] = kSyncptSoftReset;
+        break;
+    case kResetReleased:
+        gDsi[DSI_INCR_SYNCPT_CNTRL] = 0;
+        break;
+    case kDone:
+        gDsi[DSI_VIDEO_MODE_CONTROL] = 0;
+        break;
+    default:
+        return;
+    }
+    advance(move);
+    if (move.next == kDone)
+        thread_wakeup((event_t)&gCommand);
+}
+}  // namespace

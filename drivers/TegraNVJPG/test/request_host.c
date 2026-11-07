@@ -20,7 +20,7 @@ static int failures;
     } while (0)
 
 static const uint64_t kSink = 1ull << 20;
-static const TegraNVJPGAbility kAll = {0x3f, 0x1f, 0xf, 0, 1};  // everything proven, writes whole MCUs
+static const TegraNVJPGAbility kAll = {0x1ff, 0x1f, 0xf, 0, 1};  // everything proven, writes whole MCUs
 
 static TegraNVJPGImage image(uint32_t w, uint32_t h, uint32_t chroma)
 {
@@ -45,15 +45,19 @@ static TegraNVJPGSurface surface(uint32_t fourcc, uint32_t w, uint32_t h)
     TegraNVJPGSurface s;
     memset(&s, 0, sizeof(s));
     s.fourcc = fourcc, s.width = w, s.height = h;
-    if (fourcc == TEGRA_NVJPG_FOURCC('4', '2', '0', 'f')) {
+    const int f422 = fourcc == TEGRA_NVJPG_FOURCC('4', '2', '2', 'f'),
+              f444 = fourcc == TEGRA_NVJPG_FOURCC('4', '4', '4', 'f');
+    if (fourcc == TEGRA_NVJPG_FOURCC('4', '2', '0', 'f') || f422 || f444) {
         s.planes = 2;
-        s.planeBytesPerRow[0] = s.planeBytesPerRow[1] = align(w, 64);
-        s.planeHeight[0] = h, s.planeHeight[1] = (h + 1) / 2;
+        s.planeBytesPerRow[0] = align(w, 64);
+        s.planeBytesPerRow[1] = align(f444 ? 2ull * w : w, 64);
+        s.planeHeight[0] = h, s.planeHeight[1] = f422 || f444 ? h : (h + 1) / 2;
         s.planeOffset[1] = align(s.planeBytesPerRow[0] * h, 16384);
         s.length = align(s.planeOffset[1] + s.planeBytesPerRow[1] * s.planeHeight[1], 16384);
     } else {
+        const uint64_t bpp = fourcc == TEGRA_NVJPG_FOURCC('y', 'u', 'v', 'f') ? 2 : 4;
         s.planes = 0;
-        s.planeBytesPerRow[0] = align(4ull * w, 64);
+        s.planeBytesPerRow[0] = align(bpp * w, 64);
         s.planeHeight[0] = h;
         s.length = align(s.planeBytesPerRow[0] * h, 16384);
     }
@@ -131,8 +135,8 @@ int main(void)
 
     d = surface(TEGRA_NVJPG_FOURCC('4', '2', '0', 'v'), 1920, 1080);
     expect("420v", &r, &img, &d, &kAll, TEGRA_NVJPG_PLAN_UNSUPPORTED, "pixel format", &p);
-    d = surface(TEGRA_NVJPG_FOURCC('4', '2', '2', 'f'), 1920, 1080);
-    expect("422f", &r, &img, &d, &kAll, TEGRA_NVJPG_PLAN_UNSUPPORTED, "pixel format", &p);
+    d = surface(TEGRA_NVJPG_FOURCC('L', '0', '0', '8'), 1920, 1080);
+    expect("L008", &r, &img, &d, &kAll, TEGRA_NVJPG_PLAN_UNSUPPORTED, "pixel format", &p);
     d = surface(TEGRA_NVJPG_FOURCC('R', 'G', 'B', 'A'), 1920, 1080);
     expect("RGBA", &r, &img, &d, &kAll, TEGRA_NVJPG_PLAN_OK, NULL, &p);
     CHECK(p.target.format == TEGRA_NVJPG_OUT_RGBA, "RGBA format");
@@ -154,6 +158,41 @@ int main(void)
     expect("422 unproven", &r, &img, &d, &no422, TEGRA_NVJPG_PLAN_UNSUPPORTED, "sampling not proven", &p);
     img = image(1600, 1200, TEGRA_NVJPG_CHROMA_422V);
     expect("440", &r, &img, &d, &kAll, TEGRA_NVJPG_PLAN_UNSUPPORTED, "4:4:0", &p);
+
+    // CMPhoto's native formats under the interchange formats: 4:2:2 files into 'yuvf' (or '422f'), 4:4:4 into '444f'.
+    img = image(1600, 1200, TEGRA_NVJPG_CHROMA_422H);
+    r = request(1600, 1200, TEGRA_NVJPG_SUB_422, 0);
+    d = surface(TEGRA_NVJPG_FOURCC('y', 'u', 'v', 'f'), 1600, 1200);
+    expect("422 to yuvf", &r, &img, &d, &kAll, TEGRA_NVJPG_PLAN_OK, NULL, &p);
+    CHECK(p.target.format == TEGRA_NVJPG_OUT_YUY2 && p.planes == 1 && p.extent.rowBytes[0] == 3200 &&
+              p.extent.rows[0] == 1200 && p.target.pitch[0] == 3200,
+          "422 to yuvf: plan");
+    d = surface(TEGRA_NVJPG_FOURCC('4', '2', '2', 'f'), 1600, 1200);
+    expect("422 to 422f", &r, &img, &d, &kAll, TEGRA_NVJPG_PLAN_OK, NULL, &p);
+    CHECK(p.target.format == TEGRA_NVJPG_OUT_NV16 && p.planes == 2 && p.extent.rows[1] == 1200 &&
+              p.extent.rowBytes[1] == 1600 && p.planeStart[1] == d.planeOffset[1],
+          "422 to 422f: plan");
+    img = image(1600, 1200, TEGRA_NVJPG_CHROMA_444);
+    r = request(1600, 1200, TEGRA_NVJPG_SUB_444, 0);
+    d = surface(TEGRA_NVJPG_FOURCC('4', '4', '4', 'f'), 1600, 1200);
+    expect("444 to 444f", &r, &img, &d, &kAll, TEGRA_NVJPG_PLAN_OK, NULL, &p);
+    CHECK(p.target.format == TEGRA_NVJPG_OUT_NV24 && p.planes == 2 && p.extent.rows[1] == 1200 &&
+              p.extent.rowBytes[1] == 3200 && p.target.pitch[1] == 3200,
+          "444 to 444f: plan");
+    r.x_offset = 256, r.y_offset = 2;
+    d = surface(TEGRA_NVJPG_FOURCC('4', '4', '4', 'f'), 2048, 1600);
+    expect("444f offset", &r, &img, &d, &kAll, TEGRA_NVJPG_PLAN_OK, NULL, &p);
+    CHECK(p.planeStart[0] == 2 * 2048 + 256 && p.planeStart[1] == d.planeOffset[1] + 2 * 4096 + 512,
+          "444f offset: starts");
+    img = image(1600, 1200, TEGRA_NVJPG_CHROMA_422H);
+    r = request(1600, 1200, TEGRA_NVJPG_SUB_422, 0);
+    r.x_offset = 1;
+    d = surface(TEGRA_NVJPG_FOURCC('y', 'u', 'v', 'f'), 2048, 1200);
+    expect("odd 422 offset", &r, &img, &d, &kAll, TEGRA_NVJPG_PLAN_UNSUPPORTED, "odd offset into 4:2:2", &p);
+    img = image(1600, 1200, TEGRA_NVJPG_CHROMA_MONO);
+    r = request(1600, 1200, TEGRA_NVJPG_SUB_GREY, 0);
+    d = surface(TEGRA_NVJPG_FOURCC('4', '4', '4', 'f'), 1600, 1200);
+    expect("grey to 444f", &r, &img, &d, &kAll, TEGRA_NVJPG_PLAN_UNSUPPORTED, "grey file", &p);
 
     // Grey: into '420f' the chroma is the CPU's; into BGRA only once proven.
     img = image(1000, 750, TEGRA_NVJPG_CHROMA_MONO);

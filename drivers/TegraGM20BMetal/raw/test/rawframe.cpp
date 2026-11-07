@@ -100,6 +100,17 @@ int main(int argc, char **argv)
             return 1;
         }
     }
+    raw::DepthStencilDesc dss[frame::kDsSpecs];
+    for (unsigned i = 0; i < frame::kDsSpecs; i++) {
+        const frame::DsSpec spec = frame::dsSpec(i);
+        dss[i].depthCompare = spec.depthCompare;
+        dss[i].depthWrite = spec.depthWrite;
+        raw::StencilFace *faces[2] = {&dss[i].front, &dss[i].back};
+        for (int k = 0; k < 2; k++) {
+            *faces[k] = {spec.face[k][0], spec.face[k][1],  spec.face[k][2],
+                         spec.face[k][3], spec.readMask[k], spec.writeMask[k]};
+        }
+    }
     raw::Sampler smp[2];
     for (int s = 0; s < 2; s++) {
         frame::SamplerSpec sp = frame::sampler(s);
@@ -146,7 +157,17 @@ int main(int argc, char **argv)
                 pd.width = frame::texture(pass.color[0]).w - frame::kRtShortW;
                 pd.height = frame::texture(pass.color[0]).h - frame::kRtShortH;
             }
+            if (pass.depth >= 0) {
+                pd.depthStencil.texture = &tex[pass.depth];
+                pd.depthStencil.clearDepth = pd.depthStencil.clearStencil = true;
+                pd.depthStencil.depth = float(pass.clearDepth);
+                pd.depthStencil.stencil = pass.clearStencil;
+            }
             raw::RenderEncoder *e = cb->render(pd);
+            if (!e) {
+                fprintf(stderr, "pass refused\n");
+                return 1;
+            }
             bool bound[3][31] = {};
             for (const frame::Draw &d : pass.draws) {
                 e->setPipeline(d.blur ? blur[d.state] : uber[d.state]);
@@ -173,6 +194,15 @@ int main(int argc, char **argv)
                     if (d.samplers[s] >= 0)
                         e->setSampler(s, &smp[d.samplers[s]]);
                 e->setScissor(d.scissor[0], d.scissor[1], d.scissor[2], d.scissor[3]);
+                if (d.ds >= 0) {
+                    e->setDepthStencil(&dss[d.ds]);
+                    e->setStencilReference(d.stencilRef[0], d.stencilRef[1]);
+                }
+                if (d.raster) {
+                    e->setCullMode(d.cull);
+                    e->setWinding(d.winding);
+                    e->setFillMode(d.fill);
+                }
                 const char *why = nullptr;
                 if (!e->draw(d.primitive, d.first, d.count, d.instances, 0, &why)) {
                     fprintf(stderr, "draw refused: %s\n", why);

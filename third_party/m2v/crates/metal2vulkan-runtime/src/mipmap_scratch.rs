@@ -109,10 +109,12 @@ impl Block {
 pub(super) type MipmapScratch = Spare<Block>;
 
 impl Spare<Block> {
-    /// Release the spare as the device is destroyed.
-    pub(super) fn destroy(&mut self, device: &ash::Device, memory: &mut Memory) {
+    /// Release the spare, as the device is destroyed or releases its idle memory
+    /// (`Device::release_idle_memory`).
+    pub(super) fn release(&mut self, device: &ash::Device, memory: &mut Memory) {
         if let Some((block, _)) = self.idle.take() {
-            // SAFETY: the device is idle, so no command uses the block.
+            // SAFETY: no command uses a spare: its last lease ended once its command buffer
+            // completed, or was dropped unsubmitted.
             unsafe { block.release(device, memory) };
         }
     }

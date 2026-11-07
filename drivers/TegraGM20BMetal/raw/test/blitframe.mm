@@ -144,6 +144,76 @@ int main(int argc, char **argv)
             snprintf(what, sizeof what, "format %lu: texture-to-buffer copy", (unsigned long)c.f);
             failed += check(what, (const uint8_t *)down.contents, wantDown.data(), wantDown.size());
         }
+
+        // Buffer layouts off Metal's rules (rows or an offset that are not whole texels): placed as Apple's GPUs place them
+        // (m2v blit_plan.rs placed_rows, measured), each row at offset + y * bytesPerRow rounded down to the texel's component
+        // (at most 4 bytes); into a texture, a bytesPerRow that rounds down to the texel at a multiple of 16, from offset 0,
+        // puts its rows at that rounded pitch.
+        struct Layout {
+            unsigned off, extra;  // the offset, and bytesPerRow past the rounded pitch
+            bool aligned;         // that rounded pitch a multiple of 16 (the offset 0)
+        };
+
+        for (Case c : {Case{MTLPixelFormatBGRA8Unorm, 4}, Case{MTLPixelFormatRGBA16Float, 8}})
+            for (Layout l : {Layout{5, 3, false}, Layout{0, 3, true}}) {
+                const unsigned w = 37, h = 9, tw = 64, th = 16, word = c.bpp < 4 ? c.bpp : 4;
+                const unsigned pitch = l.aligned ? (w * c.bpp + 15) / 16 * 16 : w * c.bpp, row = pitch + l.extra;
+                auto placed = [&](unsigned y, bool intoTexture) {
+                    if (intoTexture && l.aligned)
+                        return y * pitch;
+                    const unsigned at = l.off + y * row;
+                    return at - at % word;
+                };
+                const unsigned bytes = l.off + row * h + 16;
+                id<MTLTexture> t = texture(c.f, tw, th);
+                std::vector<uint8_t> zero(tw * th * c.bpp, 0), want = zero;
+                [t replaceRegion:MTLRegionMake2D(0, 0, tw, th)
+                     mipmapLevel:0
+                       withBytes:zero.data()
+                     bytesPerRow:tw * c.bpp];
+                id<MTLBuffer> up = [dev newBufferWithLength:bytes options:MTLResourceStorageModeShared];
+                for (unsigned i = 0; i < bytes; i++)
+                    ((uint8_t *)up.contents)[i] = pattern(i + 31);
+                for (unsigned y = 0; y < h; y++)
+                    memcpy(&want[((2 + y) * tw + 9) * c.bpp], (uint8_t *)up.contents + placed(y, true), w * c.bpp);
+                id<MTLBuffer> down = [dev newBufferWithLength:bytes options:MTLResourceStorageModeShared];
+                memset(down.contents, 0xee, bytes);
+                std::vector<uint8_t> wantDown(bytes, 0xee);
+                for (unsigned y = 0; y < h; y++)
+                    memcpy(&wantDown[placed(y, false)], &want[((2 + y) * tw + 9) * c.bpp], w * c.bpp);
+                id<MTLCommandBuffer> cb = [q commandBuffer];
+                id<MTLBlitCommandEncoder> b = [cb blitCommandEncoder];
+                [b copyFromBuffer:up
+                           sourceOffset:l.off
+                      sourceBytesPerRow:row
+                    sourceBytesPerImage:row * h
+                             sourceSize:MTLSizeMake(w, h, 1)
+                              toTexture:t
+                       destinationSlice:0
+                       destinationLevel:0
+                      destinationOrigin:MTLOriginMake(9, 2, 0)];
+                [b copyFromTexture:t
+                                 sourceSlice:0
+                                 sourceLevel:0
+                                sourceOrigin:MTLOriginMake(9, 2, 0)
+                                  sourceSize:MTLSizeMake(w, h, 1)
+                                    toBuffer:down
+                           destinationOffset:l.off
+                      destinationBytesPerRow:row
+                    destinationBytesPerImage:row * h];
+                [b endEncoding];
+                [cb commit];
+                [cb waitUntilCompleted];
+                std::vector<uint8_t> got(tw * th * c.bpp);
+                [t getBytes:got.data() bytesPerRow:tw * c.bpp fromRegion:MTLRegionMake2D(0, 0, tw, th) mipmapLevel:0];
+                char what[128];
+                snprintf(what, sizeof what, "format %lu: buffer-to-texture copy, rows off the texel (offset %u, %u)",
+                         (unsigned long)c.f, l.off, row);
+                failed += check(what, got.data(), want.data(), got.size());
+                snprintf(what, sizeof what, "format %lu: texture-to-buffer copy, rows off the texel (offset %u, %u)",
+                         (unsigned long)c.f, l.off, row);
+                failed += check(what, (const uint8_t *)down.contents, wantDown.data(), wantDown.size());
+            }
         {
             // buffer to buffer, over 128 KiB (NVK's launch size) and at odd offsets
             const unsigned n = 300000;

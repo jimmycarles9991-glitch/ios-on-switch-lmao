@@ -1229,6 +1229,18 @@ static std::pair<int, int> reported(unsigned rx, unsigned ry)
     return {ly, 1279 - lx};
 }
 
+// Every scan of a down contact is reported, the lift too, and none of them moves the slot from where it landed.
+static bool stillAndEveryScan(const std::vector<SwitchTouchReport> &r, unsigned slot, size_t scans)
+{
+    if (r.size() != scans + 1)
+        return false;
+    for (const SwitchTouchReport &rep : r) {
+        if (rep.slot[slot].x != r[0].slot[slot].x || rep.slot[slot].y != r[0].slot[slot].y)
+            return false;
+    }
+    return (r.back().slot[slot].flags & kSwitchTouchTip) == 0;
+}
+
 static void scenarioFilter()
 {
     bringUp();
@@ -1238,10 +1250,8 @@ static void scenarioFilter()
         for (unsigned i = 0; i < 10; ++i)
             p.push_back({600, 400 + std::min(i, 2u)});
         const auto r = scans(0, p);
-        check(r.size() == 2, format("tap inside the hysteresis: down and up only (%zu reports)", r.size()));
-        if (r.size() == 2)
-            check(r[0].slot[0].x == r[1].slot[0].x && r[0].slot[0].y == r[1].slot[0].y,
-                  "tap inside the hysteresis: no travel");
+        check(stillAndEveryScan(r, 0, p.size()),
+              format("tap inside the hysteresis: every scan reported, none moved (%zu reports)", r.size()));
     }
     // One whose centroid creeps 8 raw px at a steady strength once settled, as the FTM4's do for the first ~50 ms: it
     // stays inside the still radius (0.8 mm), so the tap lifts within a pixel of where it landed.
@@ -1261,25 +1271,28 @@ static void scenarioFilter()
         const std::vector<std::pair<unsigned, unsigned>> p = {{700, 500}, {700, 506}, {700, 512}, {700, 512},
                                                               {700, 512}, {700, 521}, {700, 530}};
         const auto r = scans(5, p, 16, {12, 35, 70, 72, 71, 40, 15});
-        check(r.size() == 2, format("pressed and lifted tap: down and up only (%zu reports)", r.size()));
+        check(stillAndEveryScan(r, 5, p.size()),
+              format("pressed and lifted tap: every scan reported, none moved (%zu reports)", r.size()));
     }
-    // A finger held still with 1-2 px of jitter: nothing after touch-down until the lift.
+    // A finger held still with 1-2 px of jitter: a stationary touch, reported every scan (iOS's digitizer contract:
+    // SpringBoard sees the pause, UIKit's velocity falls to nothing) at the point where it landed.
     {
         std::vector<std::pair<unsigned, unsigned>> p;
         for (unsigned i = 0; i < 20; ++i)
             p.push_back({700 + (i % 3), 300 + ((i * 7) % 2)});
         const auto r = scans(2, p);
-        check(r.size() == 2, format("jittering hold: down and up only (%zu reports)", r.size()));
+        check(stillAndEveryScan(r, 2, p.size()),
+              format("jittering hold: every scan reported, none moved (%zu reports)", r.size()));
     }
-    // A slow drag (3 raw px a scan) from touch-down: its first scans are inside the still radius, then every scan is
-    // reported in steps of at most 1.5 of the finger's (3 px, so 5 once rounded), and it ends within the hysteresis of
-    // the finger.
+    // A slow drag (3 raw px a scan) from touch-down: every scan reported, the first ones from inside the still radius
+    // where it landed, then in steps of at most 1.5 of the finger's (3 px, so 5 once rounded); it ends within the
+    // hysteresis of the finger.
     {
         std::vector<std::pair<unsigned, unsigned>> p;
         for (unsigned i = 0; i < 30; ++i)
             p.push_back({800, 300 + 3 * i});
         const auto r = scans(3, p);
-        check(r.size() == 29, format("slow drag: every scan from the third reported (%zu reports)", r.size()));
+        check(r.size() == p.size() + 1, format("slow drag: every scan and the lift reported (%zu reports)", r.size()));
         int last = r.empty() ? 0 : r[0].slot[3].x, worst = 0;
         for (const auto &rep : r) {
             worst = std::max(worst, std::abs((int)rep.slot[3].x - last));

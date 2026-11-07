@@ -18,6 +18,7 @@ int pd_switches_on(int phase, int allow);
 int pd_rails_on(int phase);
 int pd_vbus_ours(uint16_t status1);
 const char *pd_phase_name(int phase);
+int pd_usb_host(int sourcing, uint16_t status1);
 
 // --- XusbPorts.h ---
 void fake_reset(void);
@@ -39,6 +40,8 @@ int irq_judge(uint32_t armed_count, uint32_t armed_erdp, int armed_pending, int 
               uint32_t now_erdp, int now_pending, int now_deliverable, int first, unsigned stage);
 int xhci_pending(uint32_t iman, uint32_t usbsts);
 int xhci_deliverable(uint32_t iman, uint32_t usbcmd);
+const char *portsc_link_name(uint32_t portsc);
+const char *portsc_speed_name(uint32_t portsc);
 
 #ifdef __cplusplus
 }

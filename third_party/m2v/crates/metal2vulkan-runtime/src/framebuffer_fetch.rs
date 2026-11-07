@@ -22,8 +22,12 @@
 //! instance (`render.rs`, `InterlockedStorage::inputs`). So a fetch reads what earlier draws
 //! wrote, as Metal's does; within one draw, a fragment reading a pixel that an earlier primitive
 //! of the same draw covered reads either value (Vulkan's feedback loop without rasterization
-//! order). Elsewhere the runtime runs only the ordered forms, which are Metal's, and refuses such
-//! a pipeline where it makes it ([`ordered`]).
+//! order). On a device that orders fetch through the interlock alone, under the same policy, the
+//! runtime runs that form for the pipelines the compile layer leaves on input attachments, each in
+//! render pass instances of its own shape ([`inputs_beside_interlock`]): NVK on Maxwell B, where a
+//! fetched attachment the device also blends has no exact storage form. Elsewhere the runtime runs
+//! only the ordered forms, which are Metal's, and refuses such a pipeline where it makes it
+//! ([`ordered`]).
 //!
 //! The input attachment form ([`through_inputs`]): a pass cannot foresee which of its draws
 //! fetch, so on such a device every color render target is also an input attachment
@@ -119,6 +123,32 @@ pub(crate) fn unordered_inputs(profile: &DeviceProfile) -> bool {
     profile.framebuffer_fetch() == FramebufferFetchPolicy::AcceptUnordered
         && !fragment.rasterization_order_color_access
         && !fragment.pixel_interlock
+}
+
+/// Whether `profile` also runs, per pipeline, the unordered input attachment form beside the
+/// pixel interlock: its policy accepts the unordered fetch and it orders fetch through the
+/// interlock alone ([`through_storage`]). The compile layer leaves on input attachments, unordered,
+/// the attachments the storage form cannot keep exact (a fetched attachment the device also
+/// blends, `lower::fragment::fetch::plan`); the runtime draws such a pipeline in a render pass
+/// instance of its own shape (`PassShape::fetch_inputs`), whose subpass reads every color as an
+/// input attachment, after a barrier from the earlier draws of the instance, as on a device with
+/// neither ordered form. Every other fetch keeps the interlock.
+pub(crate) fn inputs_beside_interlock(profile: &DeviceProfile) -> bool {
+    profile.framebuffer_fetch() == FramebufferFetchPolicy::AcceptUnordered
+        && through_storage(profile)
+}
+
+/// Whether a color render target of `profile` may be read as an input attachment, which a texture
+/// cannot foresee: its fetch reads input attachments ([`through_inputs`]), or some of its
+/// pipelines' do ([`inputs_beside_interlock`]).
+pub(crate) fn targets_take_inputs(profile: &DeviceProfile) -> bool {
+    through_inputs(profile) || inputs_beside_interlock(profile)
+}
+
+/// Whether `profile` reads input attachments in rasterization order: its subpasses and pipelines
+/// that read them state that access. Elsewhere a fetching draw records after a barrier.
+pub(crate) fn inputs_in_raster_order(profile: &DeviceProfile) -> bool {
+    profile.fragment().rasterization_order_color_access
 }
 
 /// Whether the compile layer reads `profile`'s fetched color attachments as storage images in the
@@ -366,12 +396,14 @@ impl Device {
 
 /// Refuse a pipeline of `graphics` whose framebuffer fetch the compile layer left unordered:
 /// input attachments without rasterization-order attachment access, unless `profile` runs that
-/// form ([`unordered_inputs`]). The refusal names that access, with which the compile layer
-/// orders every fetch; compiling under `RequireOrdered` names each alternative the device lacks.
+/// form ([`unordered_inputs`], or per pipeline beside the interlock, [`inputs_beside_interlock`]).
+/// The refusal names that access, with which the compile layer orders every fetch; compiling under
+/// `RequireOrdered` names each alternative the device lacks.
 pub(crate) fn ordered(graphics: &GraphicsState, profile: &DeviceProfile) -> Result<(), Error> {
     if graphics.input_attachments.is_empty()
         || graphics.rasterization_order_attachment_access
         || unordered_inputs(profile)
+        || inputs_beside_interlock(profile)
     {
         return Ok(());
     }

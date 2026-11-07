@@ -54,11 +54,14 @@ static uint64_t abs_to_us(uint64_t abs)
 static LCK_GRP_DECLARE(frames_grp, "switch_frames");
 static LCK_SPIN_DECLARE(frames_lock, &frames_grp);
 
-void switch_frames_render_message(task_t sender, mach_msg_id_t id)
+void switch_frames_render_message(task_t sender, mach_msg_id_t id, bool own)
 {
     char name[SWITCH_FRAMES_NAME];
-    const uint64_t now = abs_to_us(mach_absolute_time());
 
+    if (own || sender == kernel_task) {
+        return;
+    }
+    const uint64_t now = abs_to_us(mach_absolute_time());
     switch_task_name(sender, name, sizeof(name));
     lck_spin_lock(&frames_lock);
     for (int w = 0; w < WINDOWS; w++) {

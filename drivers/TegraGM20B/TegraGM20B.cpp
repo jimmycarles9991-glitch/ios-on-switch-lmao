@@ -16,9 +16,14 @@
 #include <kern/clock.h>
 #include <kern/sched_prim.h>
 #include <kern/thread.h>
+#include <kern/thread_call.h>
 #include <stdarg.h>
+#include <sys/errno.h>
+#include <sys/sysctl.h>
+#include "../../kits/SwitchSysctl/SwitchSysctl.h"
 #include "../SwitchSuspend/SwitchWake.h"
 #include "TegraGM20BGpu.h"
+#include "TegraGM20BRail.h"
 #include "TegraGM20BSleep.h"
 
 extern "C" {
@@ -47,6 +52,20 @@ volatile int gStarted, gBringupDone;
 // From tegra_gm20b_suspend() to the end of tegra_gm20b_resume(): the wake's power-up, GPCPLL raise and GR init are the
 // bring-up's again, so SwitchThermal holds its CPU raise for them as it does at boot (tegra_gm20b_bringup_busy()).
 volatile int gSleeping;
+
+// Rail-gating with the display off (TegraGM20BRail.h). gRailLock orders the worker's moves against system sleep, which
+// holds gpu.lock across SC7 with the GPU already down (gRailSC7Held). gRailMoving counts the moves under way (the
+// worker's rail-down and a caller's rail-up can overlap) and holds SwitchThermal's CPU raise as gSleeping does across
+// SC7; a rail-up made under some caller's gpu.lock leaves gRailMoved for the worker, which lets the raise go.
+// gRailExpected: a wake source fired with the panel off, so the worker brings the GPU up once ahead of the panel
+// (consumed by that move; the display stays off as far as the rail knows). gRailDemands counts the wakes by work since
+// the display went off, the last at gRailDemandAt (mach time), for the hold; gRailHoldCall looks again when it ends
+// (its own call: entering gRailCall delayed could turn an immediate entry already pending into a late one).
+IOLock *gRailLock;
+thread_call_t gRailCall, gRailHoldCall;
+volatile int gRailDisplayOn = 1, gRailExpected, gRailMoving, gRailMoved, gRailSC7Held;
+volatile uint32_t gRailDemands;
+volatile uint64_t gRailDemandAt;
 
 // The bring-up has ended (done or failed): SwitchThermal's CPU raise, which waits for it on the shared MAX77812, goes
 // ahead at once, and a system sleep waiting for it goes on.
@@ -114,6 +133,9 @@ IOReturn publish()
 	}
 	accelerator->setProperty("MetalPluginName", "TegraGM20BMetal");
 	accelerator->setProperty("MetalPluginClassName", "TegraGM20BMetalDevice");
+	// OpenGL ES (libGFXShared's _gfxInitializeLibrary) loads the renderer this names, as on J120's AGXG9G: Apple's
+	// GLES over Metal, which runs on the Metal device above. Without it every EAGLContext is nil.
+	accelerator->setProperty("IOGLESBundleName", "AppleMetalGLRenderer");
 	// backboardd is the render server. iconservicesagent: with no Metal device Core Image 21H461 falls back to OpenGL ES,
 	// which has no driver here, and the agent crash-loops on every SF Symbol (Settings then waits on it forever).
 	// ScreenshotServicesService (the screenshot thumbnail and markup): PencilKit's -[PKMetalResourceHandler
@@ -134,6 +156,38 @@ IOReturn publish()
 	accelerator->release();
 	return kIOReturnSuccess;
 }
+
+#if TGM_STATS
+// debug.switch_gpu_clkgate (debug kernels): 1 clock gating on, 0 off, for a frame-time A/B within one boot; BlueTool
+// writes it when the Mac posts com.brunostjohn.switch.debug.gpu-clkgate-on / -off.
+int gClkgateOn = 1;
+
+int clkgateSysctl SYSCTL_HANDLER_ARGS
+{
+	int on = gClkgateOn;
+	int error = SYSCTL_OUT(req, &on, sizeof(on));
+	if (error || !req->newptr)
+		return error;
+	error = SYSCTL_IN(req, &on, sizeof(on));
+	if (error)
+		return error;
+	if (tgm_clkgate_switch(on != 0))
+		return EBUSY;
+	gClkgateOn = on != 0;
+	return 0;
+}
+
+struct sysctl_oid gClkgateOid;
+
+void registerClkgateSysctl()
+{
+	switch_sysctl_oid(
+		&gClkgateOid, &sysctl__debug_children, "switch_gpu_clkgate",
+		static_cast<int>(CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_KERN | CTLFLAG_LOCKED),
+		clkgateSysctl, "I", "GPU clock gating on (1) or off (0), debug A/B");
+	sysctl_register_oid(&gClkgateOid);
+}
+#endif
 
 void bringup(void *arg, wait_result_t)
 {
@@ -158,6 +212,9 @@ void bringup(void *arg, wait_result_t)
 			IOLog("tegra-gm20b: M4 ok published AGXAccelerator (MetalPluginName "
 			      "TegraGM20BMetal)\n");
 	}
+#if TGM_STATS
+	registerClkgateSysctl();
+#endif
 	bringupDone();
 }
 
@@ -177,7 +234,8 @@ extern "C" int tegra_gm20b_bringup_busy(void)
 	if (wanted < 0)
 		wanted = !gpuDisabled();
 	return wanted && (!__atomic_load_n(&gBringupDone, __ATOMIC_ACQUIRE) ||
-			  __atomic_load_n(&gSleeping, __ATOMIC_ACQUIRE));
+			  __atomic_load_n(&gSleeping, __ATOMIC_ACQUIRE) ||
+			  __atomic_load_n(&gRailMoving, __ATOMIC_ACQUIRE) > 0);
 }
 
 extern "C" void tgm_journal(const char *fmt, ...)
@@ -195,17 +253,108 @@ extern "C" void tegra_gm20b_suspend(void)
 	if (!__atomic_load_n(&gStarted, __ATOMIC_ACQUIRE))
 		return;
 	waitBringup();
+	IOLockLock(gRailLock);
 	__atomic_store_n(&gSleeping, 1, __ATOMIC_RELEASE);
-	tgm_sleep();
+	gRailSC7Held = tgm_rail_sc7_hold();
+	if (!gRailSC7Held)
+		tgm_sleep();
+	IOLockUnlock(gRailLock);
 }
 
 extern "C" void tegra_gm20b_resume(void)
 {
 	if (!__atomic_load_n(&gSleeping, __ATOMIC_ACQUIRE))
 		return;
-	tgm_wake();
+	IOLockLock(gRailLock);
+	if (gRailSC7Held)
+		tgm_rail_sc7_release();
+	else
+		tgm_wake();
+	gRailSC7Held = 0;
 	__atomic_store_n(&gSleeping, 0, __ATOMIC_RELEASE);
+	IOLockUnlock(gRailLock);
 	switch_thermal_gpu_ready();
+	thread_call_enter(gRailCall);
+}
+
+namespace
+{
+// The rail's thread call: at most one move per call, under gRailLock; anything that changes meanwhile enters the call
+// again, and it decides afresh. A GPU that is idle and held up only by a demand's hold looks again when the hold ends.
+void railMove(thread_call_param_t, thread_call_param_t)
+{
+	IOLockLock(gRailLock);
+	const bool up = !tgm_railed();
+	const bool expected = __atomic_exchange_n(&gRailExpected, 0, __ATOMIC_ACQ_REL);
+	const bool displayOn = __atomic_load_n(&gRailDisplayOn, __ATOMIC_ACQUIRE);
+	const bool idle = tgm_idle_now();
+	uint64_t heldUntil = 0;
+	const uint64_t hold = tgm_rail_hold_ns(__atomic_load_n(&gRailDemands, __ATOMIC_ACQUIRE));
+	if (hold) {
+		nanoseconds_to_absolutetime(hold, &heldUntil);
+		heldUntil += __atomic_load_n(&gRailDemandAt, __ATOMIC_ACQUIRE);
+	}
+	const bool held = heldUntil > mach_absolute_time();
+	const enum tgm_rail_move move =
+		tgm_rail_next(up, displayOn || expected, idle, held,
+			      __atomic_load_n(&gSleeping, __ATOMIC_ACQUIRE) ||
+				      !__atomic_load_n(&gBringupDone, __ATOMIC_ACQUIRE));
+	if (move == TGM_RAIL_DOWN) {
+		__atomic_add_fetch(&gRailMoving, 1, __ATOMIC_ACQ_REL);
+		tgm_rail_down();
+		__atomic_sub_fetch(&gRailMoving, 1, __ATOMIC_ACQ_REL);
+		__atomic_store_n(&gRailMoved, 1, __ATOMIC_RELEASE);
+	} else if (move == TGM_RAIL_UP) {
+		tgm_rail_up();
+	}
+	IOLockUnlock(gRailLock);
+	if (__atomic_exchange_n(&gRailMoved, 0, __ATOMIC_ACQ_REL))
+		switch_thermal_gpu_ready();
+	if (move == TGM_RAIL_STAY && up && !displayOn && idle && held)
+		thread_call_enter_delayed(gRailHoldCall, heldUntil);
+}
+}  // namespace
+
+extern "C" void tegra_gm20b_display_power(bool on)
+{
+	if (!on)
+		__atomic_store_n(&gRailDemands, 0, __ATOMIC_RELEASE);
+	__atomic_store_n(&gRailDisplayOn, on ? 1 : 0, __ATOMIC_RELEASE);
+	if (gRailCall)
+		thread_call_enter(gRailCall);
+}
+
+// SwitchWake: a wake source fired with the panel off (power key, Joy-Con Home, ...). The panel's half-second power-up
+// follows only if iOS decides to wake; a GPU brought up for nothing goes back down once idle.
+extern "C" void tegra_gm20b_display_expected(void)
+{
+	if (!gRailCall || __atomic_load_n(&gRailDisplayOn, __ATOMIC_ACQUIRE))
+		return;
+	__atomic_store_n(&gRailExpected, 1, __ATOMIC_RELEASE);
+	thread_call_enter(gRailCall);
+}
+
+extern "C" void tgm_rail_moving(void)
+{
+	__atomic_add_fetch(&gRailMoving, 1, __ATOMIC_ACQ_REL);
+}
+
+extern "C" void tgm_rail_moved(int demand)
+{
+	if (demand) {
+		__atomic_store_n(&gRailDemandAt, mach_absolute_time(), __ATOMIC_RELEASE);
+		__atomic_add_fetch(&gRailDemands, 1, __ATOMIC_ACQ_REL);
+	}
+	__atomic_sub_fetch(&gRailMoving, 1, __ATOMIC_ACQ_REL);
+	__atomic_store_n(&gRailMoved, 1, __ATOMIC_RELEASE);
+	if (gRailCall)
+		thread_call_enter(gRailCall);
+}
+
+extern "C" void tgm_rail_idle(void)
+{
+	if (gRailCall && !__atomic_load_n(&gRailDisplayOn, __ATOMIC_ACQUIRE))
+		thread_call_enter(gRailCall);
 }
 
 extern "C" int tegra_gm20b_probe(void)
@@ -215,6 +364,13 @@ extern "C" int tegra_gm20b_probe(void)
 		return 0;
 	if (__atomic_exchange_n(&gStarted, 1, __ATOMIC_SEQ_CST))
 		return 0;
+	gRailLock = IOLockAlloc();
+	gRailCall = thread_call_allocate_with_options(
+		railMove, nullptr, THREAD_CALL_PRIORITY_KERNEL, THREAD_CALL_OPTIONS_ONCE);
+	gRailHoldCall = thread_call_allocate_with_options(
+		railMove, nullptr, THREAD_CALL_PRIORITY_KERNEL, THREAD_CALL_OPTIONS_ONCE);
+	if (!gRailLock || !gRailCall || !gRailHoldCall)
+		panic("tegra-gm20b: no memory for the rail-gate's lock and thread calls at boot");
 	thread_t thread;
 	if (kernel_thread_start(bringup, reinterpret_cast<void *>(static_cast<intptr_t>(kStage)),
 				&thread) != KERN_SUCCESS) {

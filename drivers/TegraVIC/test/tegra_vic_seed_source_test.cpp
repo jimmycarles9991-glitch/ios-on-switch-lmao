@@ -1,5 +1,5 @@
 // A TransformSurface destination's seed moves when its job is done (r18-planes), as Apple's AppleM2ScalerCSCDriver moves
-// it: TegraVIC's engine thread calls the IOSurface kext's device write end on the destination after the job and before
+// it: TegraVIC's finishJob calls the IOSurface kext's device write end on the destination after the job and before
 // the caller hears back, through the kits/SwitchABI IOSurface binding, whose tables pin the function by its words (the
 // seed's own loads and stores among them).
 #include <gmock/gmock.h>
@@ -25,11 +25,14 @@ void ExpectBefore(const std::string &text, const std::string &a, const std::stri
 
 TEST(TegraVICSeed, DestinationSeedMovesBeforeTheReply)
 {
-    const std::string engine =
-        Between(SourceText("../TegraVICUserClient.cpp"), "void engineThread(void *, wait_result_t)", "\n}\n");
-    ExpectBefore(engine, "runJob(job)", "tegra_vic_surface_written(&job->dst);");
-    ExpectBefore(engine, "tegra_vic_surface_written(&job->dst);", "tegra_vic_surface_release(&job->dst);");
-    ExpectBefore(engine, "tegra_vic_surface_written(&job->dst);", "iouc_send_async_result64");
+    const std::string source = SourceText("../TegraVICUserClient.cpp");
+    const std::string engine = Between(source, "void engineThread(void *, wait_result_t)", "\n}\n");
+    ExpectBefore(engine, "runJob(job, &status)", "finishJob(job, status);");
+    // finishJob runs on the engine thread, or on a bounced job's copy-back completion
+    const std::string finish = Between(source, "void finishJob(Job *job, IOReturn status)\n{", "\n}\n");
+    ExpectBefore(finish, "tegra_vic_surface_written(&job->dst);", "tegra_vic_surface_release(&job->dst);");
+    ExpectBefore(finish, "tegra_vic_surface_written(&job->dst);", "iouc_send_async_result64");
+    ExpectBefore(finish, "tegra_vic_surface_written(&job->dst);", "job->done = true;");
     EXPECT_THAT(SourceText("../TegraVICSurface.cpp"), HasSubstr("tegra_vic_ios_device_unlock(s->surface, 0)"));
 }
 

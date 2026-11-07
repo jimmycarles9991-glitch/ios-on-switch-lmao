@@ -33,6 +33,7 @@
 #include <libkern/c++/OSSymbol.h>
 #include "ArmGIC.h"
 #include "SwitchInterrupts.h"
+#include "../../kits/SwitchIdle/switch_idle.h"
 
 // ArmCpu's GIC state (drivers/ArmCpu/ArmCpu.cpp): version, distributor/CPU interface enabled, and each logical
 // CPU's GICv2 target mask (its GICD_ITARGETSR0 byte), written once that CPU's interface is up.
@@ -81,6 +82,10 @@ constexpr SteeredSpi kSteered[] = {
     {32 + 44, 2},  // XUDC (SwitchXUDC)
     {32 + 39, 2},  // XUSB host (SwitchXHCI)
     {32 + 40, 2},  // XUSB mailbox (SwitchXHCI)
+    // The C7 wake timers (ArmCpuIdle.cpp) on the core each one wakes; CPU0's TMR10 stays on CPU0.
+    {32 + 177, 1},  // TMR11
+    {32 + 178, 2},  // TMR12
+    {32 + 179, 3},  // TMR13
 };
 
 // Tegra210 legacy interrupt controller: one bank of 32 SPIs per 0x100, six banks (mainline tegra210.dtsi
@@ -467,6 +472,8 @@ IOReturn ArmGIC::handleInterrupt(void *, IOService *, int source)
     if (!vector->interruptRegistered)
         return kIOReturnNoInterrupt;
     __atomic_fetch_add(&fired[intid], 1U, __ATOMIC_RELAXED);
+    if (isFrame(intid))
+        switch_idle_note_frame();
     vector->interruptActive = 1;
     OSMemoryBarrier();
     if (!vector->interruptDisabledSoft) {

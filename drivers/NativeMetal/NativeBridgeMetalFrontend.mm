@@ -34,11 +34,17 @@
 #include "bridge/NativeMetalObjects.h"
 #include "NativeBridgeMetalFrontend.h"
 #include "AsyncPipelines.h"
+#include "GpuMemoryRelease.h"
+#include "QueuePriority.h"
+#include "SurfaceLayout.h"
 #include "SwitchFrameTimeline.h"
+#include "../../kits/SwitchRefusal/SwitchRefusalSite.h"
 // The two-plane render targets' load and store functions (TwoPlaneStandIn.metal).
 #include "TwoPlaneStandIn.h"
 
 static NmbDevice *gDevice;
+// Never destroyed: its dispatch sources' handlers may still run while the process exits.
+static GpuMemoryRelease &gMemoryRelease = *new GpuMemoryRelease;
 static id gDeviceObject;
 static uint64_t gRegistryID;
 static NSString *gName;
@@ -237,7 +243,6 @@ static char gLastProblems[2][200];
 
 static void noteProblem(NSString *what)
 {
-    gProblems++;
     std::lock_guard<std::mutex> lock(gProblemLock);
     memcpy(gLastProblems[1], gLastProblems[0], sizeof gLastProblems[0]);
     strlcpy(gLastProblems[0], what.UTF8String ?: "?", sizeof gLastProblems[0]);
@@ -247,7 +252,19 @@ static void noteProblem(NSString *what)
     do {                                                            \
         NSString *nbText = [NSString stringWithFormat:__VA_ARGS__]; \
         NSLog(@"%@", nbText);                                       \
+        gProblems++;                                                \
         noteProblem(nbText);                                        \
+    } while (0)
+// Work iPadOS sent the frontend that it refuses or answers with nothing: counted every time, its line (kits/SwitchRefusal,
+// domain "frontend") once per process and reason, or reason and detail
+#define NBREFUSE(reason, detail, ...)                                                                                  \
+    do {                                                                                                               \
+        gProblems++;                                                                                                   \
+        if (switch_refusal_first(switch_refusal_key_with(SWITCH_REFUSAL_KEY("frontend", reason), uint64_t(detail)))) { \
+            NSString *nbText = [NSString stringWithFormat:__VA_ARGS__];                                                \
+            noteProblem(nbText);                                                                                       \
+            switch_refusal_log("frontend", reason, nbText.UTF8String);                                                 \
+        }                                                                                                              \
     } while (0)
 // The pixel formats textures were asked for (first eight distinct), with how many were refused: native_bridge_metal_formats.
 static uint32_t gFormats[8];
@@ -344,8 +361,7 @@ static void journal(const std::string &line)
 static void (*gAnsweredZero)(const char *, const char *);
 static std::mutex gForwardLock;
 static std::unordered_map<SEL, NSMethodSignature *> *gForwardSignatures;  // under gForwardLock; never shrinks
-static std::vector<std::pair<Class, SEL>> *gForwardReported;  // under gForwardLock: one line per class and selector
-static std::atomic<uint64_t> gForwardCalls, gForwardUs;       // the rates line's fwd=
+static std::atomic<uint64_t> gForwardCalls, gForwardUs;                   // the rates line's fwd=
 static thread_local uint64_t tForwardBegan;
 
 // The types of `selector` as the first MTL* protocol that declares it has them (required methods before optional ones), or null.
@@ -398,19 +414,15 @@ static void forwardZero(id self, SEL, NSInvocation *invocation)
 {
     const SEL selector = invocation.selector;
     Class cls = object_getClass(self);
-    bool first = false;
-    {
-        std::lock_guard<std::mutex> lock(gForwardLock);
-        if (!gForwardReported)
-            gForwardReported = new std::vector<std::pair<Class, SEL>>;
-        const std::pair<Class, SEL> key(cls, selector);
-        if (std::find(gForwardReported->begin(), gForwardReported->end(), key) == gForwardReported->end()) {
-            gForwardReported->push_back(key);
-            first = true;
-        }
+    const uint64_t key = switch_refusal_key_with(
+        switch_refusal_key_with(SWITCH_REFUSAL_KEY("frontend", "selector.zero"), uintptr_t(cls)), uintptr_t(selector));
+    if (switch_refusal_first(key)) {
+        char text[256];
+        snprintf(text, sizeof text, "-[%s %s] answered zero", class_getName(cls), sel_getName(selector));
+        switch_refusal_log("frontend", "selector.zero", text);
+        if (gAnsweredZero)
+            gAnsweredZero(class_getName(cls), sel_getName(selector));
     }
-    if (first && gAnsweredZero)
-        gAnsweredZero(class_getName(cls), sel_getName(selector));
     if (const NSUInteger length = invocation.methodSignature.methodReturnLength) {
         uint64_t small[8] = {};
         void *zero = length <= sizeof small ? small : calloc(1, length);
@@ -513,7 +525,8 @@ static void waitForResource(id resource);
 @property (nonatomic) MTLResourceOptions options;
 @property (nonatomic, copy) void (^deallocator)(void *, NSUInteger);
 @property (nonatomic) void *wrapped;
-@property (nonatomic) IOSurfaceRef surfaceOwner;  // keeps a shared import's CPU mapping alive
+@property (nonatomic) IOSurfaceRef surfaceOwner;      // keeps a shared import's CPU mapping alive
+@property (nonatomic) surface_layout::Import layout;  // a surface import's layout (SurfaceLayout.h)
 @property (nonatomic)
     uint32_t gpuDirty;  // the GPU wrote this host import since its lines were last invalidated (invalidateForCpu)
 @property (nonatomic, strong) id<MTLHeap> parentHeap;  // the heap that made the buffer, nil otherwise
@@ -528,7 +541,8 @@ static void waitForResource(id resource);
 // code round(h * 255), green into the luma plane and blue and red as the chroma plane's pairs (an M4 under macOS 27.0.1: clears,
 // source-over blends and loads into '_RB4' beside RGBA8Unorm, which rounds its float tile and lands up to 1 off). So a pass renders
 // such an attachment into the texture's RGBA16Float stand-in (made at its first pass and kept with it), the pipelines target
-// RGBA16Float in its place (renderDescriptor), a pass that loads it first moves the planes' codes into the stand-in, and the
+// RGBA16Float in its place (renderDescriptor), a pass that loads it (or stores a DontCare load) first moves the planes' codes into
+// the stand-in, and the
 // encoder's end stores the stand-in into the planes through R8Unorm and RG8Unorm textures over them (TwoPlaneStandIn.metal): one
 // full-target draw each, ordered on the GPU like any pass, no CPU wait. Samples, blits and CPU copies of the texture read and
 // write its planes directly.
@@ -703,11 +717,23 @@ static std::mutex gSurfaceImportLock;
 // association is never the one dropped: a lookup that missed it would import the same surface a second time.
 static constexpr NSUInteger kSurfaceImportKeys = 1024;
 
-// A symbol of NVK (libvulkan_nouveau.dylib, beside this image), which the Vulkan loader opened RTLD_LOCAL: looked up
-// through that image rather than RTLD_DEFAULT.
+// The NVK the device was opened over (native_bridge_metal_open's loader), whatever its file is named (rawpack's twin copy).
+static std::string gNvkPath;
+
+// A symbol of NVK (the one the device opened, else libvulkan_nouveau.dylib: the one this process loaded, else the one beside
+// this image), which the Vulkan loader opened RTLD_LOCAL: looked up through that image rather than RTLD_DEFAULT.
 static void *nvkSymbol(const char *name)
 {
     static void *const nvk = []() -> void * {
+        if (void *opened = gNvkPath.empty() ? nullptr : dlopen(gNvkPath.c_str(), RTLD_LAZY | RTLD_NOLOAD))
+            return opened;
+        static const char kNvk[] = "/libvulkan_nouveau.dylib";
+        for (uint32_t i = 0, n = _dyld_image_count(); i < n; i++) {
+            const char *image = _dyld_get_image_name(i);
+            const size_t length = image ? strlen(image) : 0;
+            if (length > sizeof kNvk - 1 && !strcmp(image + length - (sizeof kNvk - 1), kNvk))
+                return dlopen(image, RTLD_LAZY | RTLD_NOLOAD);
+        }
         Dl_info info = {};
         if (!dladdr(reinterpret_cast<const void *>(&nvkSymbol), &info) || !info.dli_fname)
             return nullptr;
@@ -745,12 +771,104 @@ static void declareGpuWrites(IOSurfaceRef surface)
               IOSurfaceGetID(surface));
 }
 
+static NmbBuffer *bufferOverForeign(const struct switch_foreign_memory *memory, void *bytes, uint64_t length,
+                                    uint64_t options)
+{
+    using Foreign =
+        void (*)(const void *, uint64_t, uint64_t, uint64_t, uint32_t, void (*)(void *), void (*)(void *), void *);
+    static const Foreign foreign = reinterpret_cast<Foreign>(nvkSymbol("switch_nvk_import_foreign"));
+    if (!foreign || !gDevice)
+        return nullptr;
+    foreign(memory->cpu, memory->bytes, memory->handle, memory->va, memory->kind, memory->hold, memory->drop,
+            memory->lease);
+    NmbBuffer *handle = nmb_buffer_new_no_copy(gDevice, bytes, length, options);
+    foreign(nullptr, 0, 0, 0, 0, nullptr, nullptr, nullptr);
+    return handle;
+}
+
+extern "C" id native_bridge_metal_buffer_over_foreign(const struct switch_foreign_memory *memory, void *bytes,
+                                                      NSUInteger length, NSUInteger options)
+{
+    NmbBuffer *handle = memory ? bufferOverForeign(memory, bytes, length, options) : nullptr;
+    if (!handle) {
+        NBLOG(@"native-metal: buffer over foreign memory refused: %@", lastError());
+        return nil;
+    }
+    NBBuffer *buffer = [NBBuffer new];
+    buffer.handle = handle;
+    buffer.options = options;
+    buffer.wrapped = bytes;
+    return (id<MTLBuffer>)buffer;
+}
+
+static std::atomic<switch_surface_importer> gSurfaceImporter{nullptr};
+
+extern "C" void native_bridge_metal_set_surface_importer(switch_surface_importer importer)
+{
+    gSurfaceImporter.store(importer);
+}
+
+// The layouts surface imports were answered, by surface and mapping: what an import the runtime joins to a live one of the same
+// bytes (no BoImport, so no answer of its own) was bound as. Bounded: past the cap it starts again, and a join it no longer knows
+// takes no layout (its textures that would need one are refused).
+static std::unordered_map<std::string, surface_layout::Import> gSurfaceLayouts;
+static constexpr size_t kSurfaceLayouts = 4096;
+
+static std::string surfaceLayoutKey(IOSurfaceRef surface, void *base, size_t bytes)
+{
+    char key[64];
+    snprintf(key, sizeof key, "%u/%lx/%zx", IOSurfaceGetID(surface), (unsigned long)(uintptr_t)base, bytes);
+    return key;
+}
+
+// The surface's import, the layout asked by `ask`'s shape (the raw GM20B path's import in the render server: it asked; another
+// process: this import asks at its BoImport, NVK binding a block-linear surface under the kind its texels are written in).
+static NmbBuffer *importSurface(IOSurfaceRef surface, void *base, size_t bytes, const surface_layout::Shape &ask,
+                                surface_layout::Import &layout)
+{
+    const surface_layout::Nvk &nvk = surface_layout::nvk(nvkSymbol);
+    const switch_surface_importer importer = gSurfaceImporter.load();
+    struct switch_foreign_memory memory = {};
+    if (importer && importer(IOSurfaceGetID(surface), surface, base, bytes, &memory)) {
+        layout.handle = memory.handle;
+        if (memory.kind == surface_layout::kKind) {
+            layout.layout = surface_layout::kTiled;
+        } else {  // pitch, or a surface the raw path took as rows without asking: never decided block-linear from here
+            layout.asked = ask;
+            layout.asked.flags &= ~surface_layout::kWrites;
+            layout.layout =
+                nvk.layout ? nvk.layout(memory.handle, ask.width, ask.height, ask.bpp, ask.rowBytes, layout.asked.flags)
+                           : surface_layout::kPitch;
+        }
+        NmbBuffer *handle = bufferOverForeign(&memory, base, bytes, MTLResourceStorageModeShared);
+        memory.drop(memory.lease);
+        return handle;
+    }
+    noteImportSurface(IOSurfaceGetID(surface), base, bytes);
+    if (nvk.importShape)
+        nvk.importShape(ask.width, ask.height, ask.bpp, ask.rowBytes, ask.flags);
+    NmbBuffer *handle = nmb_buffer_new_no_copy(gDevice, base, bytes, MTLResourceStorageModeShared);
+    layout.layout = nvk.importLayout ? nvk.importLayout(&layout.handle) : surface_layout::kPitch;
+    layout.asked = ask;
+    noteImportSurface(0, nullptr, 0);
+    const std::string key = surfaceLayoutKey(surface, base, bytes);
+    if (layout.handle) {
+        if (gSurfaceLayouts.size() >= kSurfaceLayouts)
+            gSurfaceLayouts.clear();
+        gSurfaceLayouts[key] = layout;
+    } else if (handle) {
+        const auto known = gSurfaceLayouts.find(key);
+        layout = known != gSurfaceLayouts.end() ? known->second : surface_layout::Import{};
+    }
+    return handle;
+}
+
 static bool usageWrites(MTLTextureUsage usage)
 {
     return usage == MTLTextureUsageUnknown || (usage & (MTLTextureUsageRenderTarget | MTLTextureUsageShaderWrite));
 }
 
-static NBBuffer *surfaceBuffer(IOSurfaceRef surface, void *base, size_t bytes)
+static NBBuffer *surfaceBuffer(IOSurfaceRef surface, void *base, size_t bytes, const surface_layout::Shape &ask)
 {
     struct Key {
         uint64_t identity, address, bytes;
@@ -767,9 +885,8 @@ static NBBuffer *surfaceBuffer(IOSurfaceRef surface, void *base, size_t bytes)
         return buffer;
     }
     const uint64_t began = nowUs();
-    noteImportSurface(IOSurfaceGetID(surface), base, bytes);
-    NmbBuffer *handle = nmb_buffer_new_no_copy(gDevice, base, bytes, MTLResourceStorageModeShared);
-    noteImportSurface(0, nullptr, 0);
+    surface_layout::Import layout;
+    NmbBuffer *handle = importSurface(surface, base, bytes, ask, layout);
     gTimeSurfaceImport.add(began);
     if (!handle) {
         NBLOG(@"native-metal: surface import refused: %@", lastError());
@@ -779,6 +896,7 @@ static NBBuffer *surfaceBuffer(IOSurfaceRef surface, void *base, size_t bytes)
     buffer.handle = handle;
     buffer.options = MTLResourceStorageModeShared;
     buffer.surfaceOwner = (IOSurfaceRef)CFRetain(surface);
+    buffer.layout = layout;
     if (key) {
         // Bound metadata without retaining old frames. Evicting an association is
         // harmless: its owners still retain the actual import until their own end.
@@ -1178,6 +1296,56 @@ static NBTexture *textureOnBuffer(NBBuffer *buffer, MTLTextureDescriptor *d, NSU
     return texture;
 }
 
+// The device's optimal image of `d` over `buffer`'s memory from `offset`: texels another driver of the process, or the kernel's
+// block-linear surface layout, lays out as the device does (SurfaceLayout.h).
+static NBTexture *tiledTextureOnBuffer(NBBuffer *buffer, MTLTextureDescriptor *d, NSUInteger offset)
+{
+    NmbTextureDescriptor descriptor;
+    if (!buffer || !textureDescriptor(d, &descriptor))
+        return nil;
+    const uint64_t began = nowUs();
+    NmbTexture *handle = nmb_texture_new_tiled_in_place(buffer.handle, &descriptor, offset);
+    gTimeSurfaceTexture.add(began);
+    if (!handle) {
+        NBLOG(@"native-metal: tiled texture over buffer refused: %@", lastError());
+        return nil;
+    }
+    NBTexture *texture = [NBTexture new];
+    texture.handle = handle;
+    nmb_texture_describe(handle, &descriptor);
+    texture.descriptor = descriptor;
+    texture.buffer = buffer;
+    texture.offset = offset;
+    return texture;
+}
+
+// A surface use refused because its layout does not fit (a texture of another shape or type over a block-linear surface, a
+// buffer or a planar texture over one, no answer): once per surface's shape, use and answer.
+static void refuseLayout(IOSurfaceRef surface, const char *use, uint32_t layout)
+{
+    static NSMutableSet *said = [NSMutableSet set];
+    NSString *why = [NSString stringWithFormat:@"%s over a %zux%zu surface of %zu-byte texels: layout %u", use,
+                                               IOSurfaceGetWidth(surface), IOSurfaceGetHeight(surface),
+                                               IOSurfaceGetBytesPerElement(surface), layout];
+    @synchronized(said) {
+        if ([said containsObject:why])
+            return;
+        [said addObject:why];
+    }
+    NBLOG(@"native-metal: refused for its surface's layout: %@", why);
+}
+
+// The shape a surface's own texels (its first plane's) ask, sampled
+static surface_layout::Shape surfaceShape(IOSurfaceRef surface)
+{
+    if (!IOSurfaceGetPlaneCount(surface))
+        return {uint32_t(IOSurfaceGetWidth(surface)), uint32_t(IOSurfaceGetHeight(surface)),
+                uint32_t(IOSurfaceGetBytesPerElement(surface)), uint32_t(IOSurfaceGetBytesPerRow(surface)), 0};
+    return {uint32_t(IOSurfaceGetWidthOfPlane(surface, 0)), uint32_t(IOSurfaceGetHeightOfPlane(surface, 0)),
+            uint32_t(IOSurfaceGetBytesPerElementOfPlane(surface, 0)),
+            uint32_t(IOSurfaceGetBytesPerRowOfPlane(surface, 0)), 0};
+}
+
 // A texture over plane `plane` of a planar surface, made by the runtime over the surface's whole allocation with the surface's facts
 // (its OSType, plane 0's size, plane 1's place, its kIOSurfaceYCbCrMatrix): Metal's two-plane formats over plane 0 and plain
 // formats over either plane, as the runtime holds them (`new_texture_with_iosurface_plane`):
@@ -1200,10 +1368,15 @@ static NBTexture *planarSurfaceTexture(MTLTextureDescriptor *d, IOSurfaceRef sur
     if (!base || (base & (page - 1)) || at < base || (planes > 1 && chroma < base) || !allocation ||
         allocation > SIZE_MAX - (page - 1))
         return nil;
-    NBBuffer *buffer = surfaceBuffer(surface, (void *)base, (allocation + page - 1) & ~(page - 1));
+    NBBuffer *buffer =
+        surfaceBuffer(surface, (void *)base, (allocation + page - 1) & ~(page - 1), surfaceShape(surface));
     NmbTextureDescriptor descriptor;
     if (!buffer || !textureDescriptor(d, &descriptor))
         return nil;
+    if (buffer.layout.layout != surface_layout::kPitch) {
+        refuseLayout(surface, "a planar texture", buffer.layout.layout);
+        return nil;
+    }
     // kIOSurfaceYCbCrMatrix: the CoreVideo attachment's string ("ITU_R_709_2", ...), which the converted formats read.
     char matrix[32] = {};
     if (CFTypeRef value = IOSurfaceCopyValue(surface, CFSTR("IOSurfaceYCbCrMatrix"))) {
@@ -1290,6 +1463,13 @@ extern "C" id native_bridge_metal_texture_in_place(id buffer, id descriptor, NSU
     if (![buffer isKindOfClass:[NBBuffer class]] || ![descriptor isKindOfClass:[MTLTextureDescriptor class]])
         return nil;
     return textureOnBuffer((NBBuffer *)buffer, (MTLTextureDescriptor *)descriptor, offset, row, true);
+}
+
+extern "C" id native_bridge_metal_texture_tiled_in_place(id buffer, id descriptor, NSUInteger offset)
+{
+    if (![buffer isKindOfClass:[NBBuffer class]] || ![descriptor isKindOfClass:[MTLTextureDescriptor class]])
+        return nil;
+    return tiledTextureOnBuffer((NBBuffer *)buffer, (MTLTextureDescriptor *)descriptor, offset);
 }
 
 // ---- libraries, functions, states ----
@@ -1626,6 +1806,20 @@ static bool systemCompiler();
     return function;
 }
 
+// A pipeline library holds an Apple GPU's compiled functions, none for this device (newPipelineLibraryWithFilePath: refuses
+// each), so the function is made from this library as without one.
+- (id<MTLFunction>)newFunctionWithName:(NSString *)name
+                        constantValues:(MTLFunctionConstantValues *)values
+                       pipelineLibrary:(id)pipelineLibrary
+                                 error:(NSError **)error
+{
+    (void)pipelineLibrary;
+    MTLFunctionDescriptor *d = [MTLFunctionDescriptor functionDescriptor];
+    d.name = name;
+    d.constantValues = values;
+    return [self newFunctionWithDescriptor:d error:error];
+}
+
 - (void)newFunctionWithDescriptor:(MTLFunctionDescriptor *)d
                 completionHandler:(void (^)(id<MTLFunction>, NSError *))handler
 {
@@ -1857,9 +2051,10 @@ static bool asyncRenderPipelineWanted(MTLRenderPipelineDescriptor *d, MTLPipelin
     return !d.fragmentFunction || [(id)d.fragmentFunction isKindOfClass:[NBFunction class]];
 }
 
-// A state of `d` made on a worker by the synchronous path (the call returns at once; AsyncPipelines.h).
+// A state of `d` made on a worker by the synchronous path (the call returns at once; AsyncPipelines.h), or at its first
+// set when `lazy`.
 static id<MTLRenderPipelineState> asyncRenderPipeline(id device, MTLRenderPipelineDescriptor *d,
-                                                      MTLPipelineOption options)
+                                                      MTLPipelineOption options, bool lazy = false)
 {
     MTLRenderPipelineDescriptor *copy = [d copy];
     auto making = std::make_shared<nbasync::Making>();
@@ -1879,8 +2074,24 @@ static id<MTLRenderPipelineState> asyncRenderPipeline(id device, MTLRenderPipeli
     };
     NBRenderPipeline *state = [NBRenderPipeline new];
     state.making = making;
-    nbasync::start(making);
+    if (lazy)
+        nbasync::startLazy(making);
+    else
+        nbasync::start(making);
     return (id<MTLRenderPipelineState>)state;
+}
+
+// TegraGM20BMetal: the m2v twin of a state its raw path draws, made at its first set (AsyncPipelines.h startLazy); made
+// here when this process makes its states on the asking thread.
+extern "C" id native_bridge_metal_render_pipeline_lazy(id device, id descriptor, NSUInteger options)
+{
+    MTLRenderPipelineDescriptor *d = descriptor;
+    if (!asyncRenderPipelineWanted(d, (MTLPipelineOption)options))
+        return [(id<MTLDevice>)device newRenderPipelineStateWithDescriptor:d
+                                                                   options:(MTLPipelineOption)options
+                                                                reflection:nil
+                                                                     error:nil];
+    return asyncRenderPipeline(device, d, (MTLPipelineOption)options, true);
 }
 
 // `call` on a global queue of the caller's class (the completion-handler API, which calls back there; not the workers, whose
@@ -2058,18 +2269,15 @@ static void asyncCall(void (^call)(void))
 @interface NBEvent : NBObject
 @property (nonatomic) NmbEvent *handle;
 @end
+static void notified(void *context, uint64_t value);
+// A plain event answers a shared event's value, set and notifications too, which Metal gives it none of: the raw GM20B
+// path (RawMetal.mm) signals and waits for both kinds through them, so a command buffer with a plain event stays raw.
 @implementation NBEvent
 
 - (void)dealloc
 {
     nmb_event_release(_handle);
 }
-
-@end
-@interface NBSharedEvent : NBEvent
-@end
-static void notified(void *context, uint64_t value);
-@implementation NBSharedEvent
 
 - (uint64_t)signaledValue
 {
@@ -2079,11 +2287,6 @@ static void notified(void *context, uint64_t value);
 - (void)setSignaledValue:(uint64_t)value
 {
     nmb_shared_event_set_value(self.handle, value);
-}
-
-- (BOOL)waitUntilSignaledValue:(uint64_t)value timeoutMS:(uint64_t)milliseconds
-{
-    return nmb_shared_event_wait(self.handle, value, milliseconds);
 }
 
 // The block runs on the listener's dispatch queue (Metal's contract); the bridge's listener thread only forwards it there.
@@ -2099,6 +2302,16 @@ static void notified(void *context, uint64_t value);
         (void)(__bridge_transfer NSArray *)(__bridge void *)job;
         NBLOG(@"native-metal: notifyListener refused: %@", lastError());
     }
+}
+
+@end
+@interface NBSharedEvent : NBEvent
+@end
+@implementation NBSharedEvent
+
+- (BOOL)waitUntilSignaledValue:(uint64_t)value timeoutMS:(uint64_t)milliseconds
+{
+    return nmb_shared_event_wait(self.handle, value, milliseconds);
 }
 
 // A handle for another process needs a kernel-backed event this bridge does not have yet: refused, never a handle that could not work.
@@ -2139,11 +2352,83 @@ static void notified(void *context, uint64_t value)
 @property (nonatomic) MTLResourceOptions options;
 @property (nonatomic) MTLHeapType heapType;
 @end
-@interface NBQueue : NBObject
+@interface NBQueue : NBObject {
+@public
+    uint32_t gpuPriority, backgroundGpuPriority;  // what it asked for (QueuePriority.h), counted in gQueuePriorities
+}
 @property (nonatomic) NmbQueue *handle;
 @property (atomic, strong)
     dispatch_queue_t completionQueue;  // SPI: where command buffers' handlers run (nil: the runtime's thread)
 @end
+
+// The process's queues' GPU priorities; the GPU driver gets the most urgent of each (method 18) whenever it changes. Core
+// Animation sets a queue's once and never looks again, so one the driver could not take yet (no NVK device) is sent
+// again at the next queue made or command buffer committed (gQueuePriorityPending).
+static std::mutex gQueuePriorityLock;
+static switch_metal::QueuePriorities gQueuePriorities;
+static uint32_t gAppliedPriority = switch_metal::QueuePriorities::kDefault,
+                gAppliedBackground = switch_metal::QueuePriorities::kDefaultBackground;
+static std::atomic<bool> gQueuePriorityPending{false};
+
+using ApplyPriority = bool (*)(uint32_t, uint32_t);
+
+static ApplyPriority priorityCall()
+{
+    static const ApplyPriority apply = reinterpret_cast<ApplyPriority>(nvkSymbol("switch_nvk_gpu_priority"));
+    return apply;
+}
+
+// gQueuePriorityLock held
+static void applyQueuePriorities()
+{
+    const uint32_t priority = gQueuePriorities.priority(), background = gQueuePriorities.backgroundPriority();
+
+    if (priority == gAppliedPriority && background == gAppliedBackground) {
+        gQueuePriorityPending.store(false, std::memory_order_relaxed);
+        return;
+    }
+    const bool applied = priorityCall()(priority, background);
+    if (applied) {
+        gAppliedPriority = priority;
+        gAppliedBackground = background;
+    }
+    gQueuePriorityPending.store(!applied, std::memory_order_relaxed);
+}
+
+static void applyPendingQueuePriorities()
+{
+    if (!gQueuePriorityPending.load(std::memory_order_relaxed))
+        return;
+    std::lock_guard<std::mutex> lock(gQueuePriorityLock);
+    applyQueuePriorities();
+}
+
+static void addQueuePriority(NBQueue *queue)
+{
+    std::lock_guard<std::mutex> lock(gQueuePriorityLock);
+    queue->gpuPriority = switch_metal::QueuePriorities::kDefault;
+    queue->backgroundGpuPriority = switch_metal::QueuePriorities::kDefaultBackground;
+    gQueuePriorities.add(queue->gpuPriority, queue->backgroundGpuPriority);
+    if (priorityCall())
+        applyQueuePriorities();
+}
+
+// A queue's priority (or its background one): kept, and sent to the driver now or (pending) later. NO only without the
+// driver call (not the GM20B's NVK) or for a value Metal does not have.
+static bool setQueuePriority(NBQueue *queue, NSUInteger priority, bool background)
+{
+    if (priority > switch_metal::QueuePriorities::kMax || !priorityCall())
+        return false;
+    std::lock_guard<std::mutex> lock(gQueuePriorityLock);
+    gQueuePriorities.remove(queue->gpuPriority, queue->backgroundGpuPriority);
+    if (background)
+        queue->backgroundGpuPriority = uint32_t(priority);
+    else
+        queue->gpuPriority = uint32_t(priority);
+    gQueuePriorities.add(queue->gpuPriority, queue->backgroundGpuPriority);
+    applyQueuePriorities();
+    return true;
+}
 
 // A render encoder's attachments as the next one compares them (joinable passes, the rates line): texture, level, slice, depth
 // plane, load and store action of each color, the depth and the stencil.
@@ -3203,8 +3488,8 @@ static bool standInStates()
         gStandInStore = gStandInLoad ? [device newRenderPipelineStateWithDescriptor:d error:&error] : nil;
         tAsyncWorker = was;
         if (!gStandInLoad || !gStandInStore)
-            NBLOG(@"native-metal: two-plane render targets refused: their load/store states: %@",
-                  error.localizedDescription);
+            NBREFUSE("standin.states", 0, @"two-plane render targets refused: their load/store states: %@",
+                     error.localizedDescription);
     });
     return gStandInLoad && gStandInStore;
 }
@@ -3241,11 +3526,10 @@ static NBTwoPlaneStandIn *standInOf(id texture)
         d.pixelFormat = MTLPixelFormatRG8Unorm;
         standIn.chroma = [device newTextureWithDescriptor:d iosurface:planes.surface plane:1];
         if (!standIn.texture || !standIn.luma || !standIn.chroma) {
-            static std::atomic<bool> said{false};
-            if (!said.exchange(true))
-                NBLOG(@"native-metal: two-plane render target refused: no stand-in for a %lux%lu texture (%d%d%d)",
-                      (unsigned long)width, (unsigned long)height, standIn.texture != nil, standIn.luma != nil,
-                      standIn.chroma != nil);
+            NBREFUSE("standin.texture", 0,
+                     @"two-plane render target refused: no stand-in for a %lux%lu texture (%d%d%d)",
+                     (unsigned long)width, (unsigned long)height, standIn.texture != nil, standIn.luma != nil,
+                     standIn.chroma != nil);
             return nil;
         }
         planes.standIn = standIn;
@@ -3504,7 +3788,10 @@ static void scheduled(void *context);
         if (!c.texture || c.level || c.slice || c.depthPlane || c.resolveTexture ||
             !(standIns[i] = standInOf(c.texture)))
             continue;
-        if (c.loadAction == MTLLoadActionLoad)
+        // A DontCare load keeps the planes' codes in every 32x32 tile no draw touches (an M4 under macOS 27.0.1, raw/test/
+        // standinoracle.mm), and the store writes every texel: the stand-in holds the codes there too
+        if (c.loadAction == MTLLoadActionLoad ||
+            (c.loadAction == MTLLoadActionDontCare && c.storeAction != MTLStoreActionDontCare))
             [self loadStandIn:standIns[i] from:c.texture];
         if (c.storeAction != MTLStoreActionDontCare) {
             if (!storeBacks)
@@ -3784,6 +4071,8 @@ static void scheduled(void *context);
     [_resourceOwners removeAllObjects];
     @synchronized(gInFlight) {
         [gInFlight removeObject:self];
+        if (!gInFlight.count)
+            gMemoryRelease.drained();
     }
     NSArray *completedHandlers;
     @synchronized(self) {
@@ -3885,6 +4174,7 @@ extern "C" size_t native_bridge_metal_commit_origin(char *out, size_t size)
     switch_frame::trace(switch_frame::kM2vCommit, switch_frame::kPoint, frame.seq);
 #endif
     const uint64_t began = apiTiming() ? mach_absolute_time() : 0;
+    applyPendingQueuePriorities();
     [self commitNow];
     if (began) {
         gApiUs += ticksToUs(tApiTicks + mach_absolute_time() - began);
@@ -4063,6 +4353,12 @@ static void completed(void *context)
 
 - (void)dealloc
 {
+    {
+        std::lock_guard<std::mutex> lock(gQueuePriorityLock);
+        gQueuePriorities.remove(gpuPriority, backgroundGpuPriority);
+        if (priorityCall())
+            applyQueuePriorities();
+    }
     nmb_queue_release(_handle);
 }
 
@@ -4131,23 +4427,28 @@ static void completed(void *context)
 }  // submission happens on the caller's thread here
 
 // setCompletionQueue: is the property's setter.
-// GPU priorities are not applied (one hardware queue): reported as not applied.
+// The GPU driver runs the process's channels at the most urgent priority its queues asked for (QueuePriority.h).
 - (BOOL)setGPUPriority:(NSUInteger)priority
 {
-    (void)priority;
-    return NO;
+    return setQueuePriority(self, priority, false);
 }
 
 - (BOOL)setBackgroundGPUPriority:(NSUInteger)priority
 {
-    (void)priority;
-    return NO;
+    return setQueuePriority(self, priority, true);
 }
 
 - (NSUInteger)getGPUPriority
 {
-    return 0;
-}  // none was applied (above)
+    std::lock_guard<std::mutex> lock(gQueuePriorityLock);
+    return gpuPriority;
+}
+
+- (NSUInteger)getBackgroundGPUPriority
+{
+    std::lock_guard<std::mutex> lock(gQueuePriorityLock);
+    return backgroundGpuPriority;
+}
 
 - (id<MTLCommandBuffer>)commandBufferWithDescriptor:(MTLCommandBufferDescriptor *)d
 {
@@ -5305,7 +5606,8 @@ static void fillLimits(id device)
             continue;
         const uint64_t value = ((NSUInteger (*)(id, SEL))method_getImplementation(own))(device, sel);
         if (value > UINT32_MAX) {
-            NBLOG(@"native-metal: limits: %s %llu does not fit the table", field.selector, (unsigned long long)value);
+            NBREFUSE("limits.overflow", uintptr_t(field.selector), @"limits: %s %llu does not fit the table",
+                     field.selector, (unsigned long long)value);
             continue;
         }
         uint32_t was;
@@ -5314,8 +5616,9 @@ static void fillLimits(id device)
         memcpy(table + field.offset, &word, 4);
         if (((NSUInteger (*)(id, SEL))method_getImplementation(original))(device, sel) != value) {
             memcpy(table + field.offset, &was, 4);
-            NBLOG(@"native-metal: limits: the base class does not read %s at 0x%x; the fields from there stay 0",
-                  field.selector, field.offset);
+            NBREFUSE("limits.layout", field.offset,
+                     @"limits: the base class does not read %s at 0x%x; the fields from there stay 0", field.selector,
+                     field.offset);
             return;
         }
     }
@@ -5323,7 +5626,8 @@ static void fillLimits(id device)
     memcpy(&width, table + 0x84, 4);
     memcpy(&height, table + 0x88, 4);
     if (!width || !height)
-        NBLOG(@"native-metal: limits: no 2D texture size from the device (PhotosUICore refuses every image)");
+        NBREFUSE("limits.texture2d", 0,
+                 @"limits: no 2D texture size from the device (PhotosUICore refuses every image)");
 }
 #else
 static void fillLimits(id)
@@ -5651,7 +5955,11 @@ static void fillLimits(id)
     const size_t page = vm_page_size, allocation = IOSurfaceGetAllocSize(surface);
     if (!base || ((uintptr_t)base & (page - 1)) || !allocation || allocation > SIZE_MAX - (page - 1))
         return nil;
-    NBBuffer *buffer = surfaceBuffer(surface, base, (allocation + page - 1) & ~(page - 1));
+    NBBuffer *buffer = surfaceBuffer(surface, base, (allocation + page - 1) & ~(page - 1), surfaceShape(surface));
+    if (buffer && buffer.layout.layout != surface_layout::kPitch) {
+        refuseLayout(surface, "a buffer", buffer.layout.layout);
+        return nil;
+    }
     if (buffer)
         declareGpuWrites(surface);
     return (id<MTLBuffer>)buffer;
@@ -5781,6 +6089,7 @@ static void fillLimits(id)
         return nil;
     NBQueue *queue = [NBQueue new];
     queue.handle = handle;
+    addQueuePriority(queue);
     return (id<MTLCommandQueue>)queue;
 }
 
@@ -5823,8 +6132,9 @@ static void fillLimits(id)
     (void)length;
     (void)d;
     (void)deallocator;
-    NBLOG(@"native-metal: newTextureWithBytesNoCopy:length:descriptor:deallocator: is not implemented (Apple's texture "
-          @"layout of raw memory is not known)");
+    NBREFUSE("texture.bytesnocopy", 0,
+             @"newTextureWithBytesNoCopy:length:descriptor:deallocator: is not implemented (Apple's texture layout of "
+             @"raw memory is not known)");
     return nil;
 }
 
@@ -5893,7 +6203,23 @@ static void fillLimits(id)
 {
     NmbBuffer *handle = nmb_buffer_new_no_copy(gDevice, pointer, length, options);
     if (!handle) {
-        NBLOG(@"native-metal: no-copy buffer refused: %@", lastError());
+        // Each refusal sends the caller to a CPU copy (QuartzCore's copy_image_to_texture uploads the image instead), so the
+        // line names the memory: where it sits in its page, and the VM region's protection, sharing and tag.
+        static constexpr uint64_t kRefusal = switch_refusal_key("frontend", "buffer.nocopy");
+        if (switch_refusal_first(kRefusal)) {
+            vm_address_t region = (vm_address_t)pointer;
+            vm_size_t regionSize = 0;
+            vm_region_extended_info_data_t info = {};
+            mach_msg_type_number_t count = VM_REGION_EXTENDED_INFO_COUNT;
+            mach_port_t object = MACH_PORT_NULL;
+            const kern_return_t kr = vm_region_64(mach_task_self(), &region, &regionSize, VM_REGION_EXTENDED_INFO,
+                                                  (vm_region_info_t)&info, &count, &object);
+            NSString *text = [NSString
+                stringWithFormat:@"%lu bytes at page offset 0x%lx (region %d: prot %d share %d tag %u): %@",
+                                 (unsigned long)length, (unsigned long)((uintptr_t)pointer & (vm_page_size - 1)), kr,
+                                 info.protection, info.share_mode, info.user_tag, lastError()];
+            switch_refusal_log("frontend", "buffer.nocopy", text.UTF8String);
+        }
         return nil;
     }
     NBBuffer *buffer = [NBBuffer new];
@@ -5948,11 +6274,23 @@ static void fillLimits(id)
     if (!page || (page & (page - 1)) || !base || ((uintptr_t)base & (page - 1)) || !allocation ||
         allocation > SIZE_MAX - (page - 1))
         return nil;
-    const size_t bytes = (allocation + page - 1) & ~(page - 1);
-    NBBuffer *buffer = surfaceBuffer(surface, base, bytes);
+    const size_t bytes = (allocation + page - 1) & ~(page - 1), row = IOSurfaceGetBytesPerRow(surface);
+    // A single 2D image of the surface asks the layout with its shape and use; another texture the surface's own, sampled
+    surface_layout::Shape shape = surfaceShape(surface);
+    const bool image =
+        d.textureType == MTLTextureType2D && d.mipmapLevelCount == 1 && d.sampleCount == 1 && d.arrayLength == 1 &&
+        surface_layout::shapeOf(gDevice, d.pixelFormat, d.width, d.height, row, usageWrites(d.usage), shape);
+    NBBuffer *buffer = surfaceBuffer(surface, base, bytes, shape);
     if (!buffer)
         return nil;
-    NBTexture *texture = textureOnBuffer(buffer, d, 0, IOSurfaceGetBytesPerRow(surface), true);
+    const uint32_t layout = surface_layout::layoutFor(surface_layout::nvk(nvkSymbol), buffer.layout, shape);
+    NBTexture *texture = nil;
+    if (layout == surface_layout::kPitch)
+        texture = textureOnBuffer(buffer, d, 0, row, true);
+    else if (layout == surface_layout::kTiled && image)
+        texture = tiledTextureOnBuffer(buffer, d, 0);
+    else
+        refuseLayout(surface, "a texture", layout);
     if (!texture)
         return nil;
     texture.surface = (IOSurfaceRef)CFRetain(surface);
@@ -6318,7 +6656,8 @@ static uint64_t askAnswer(SEL cmd, NSUInteger arg)
     gAnswersAsked++;
     uint64_t value = 0;
     if (!nmb_device_answer(gDevice, sel_getName(cmd), arg, &value)) {
-        NBLOG(@"native-metal: %s(%lu): %@", sel_getName(cmd), (unsigned long)arg, lastError());
+        NBREFUSE("device.answer", uintptr_t(cmd) ^ uint64_t(arg) << 48, @"no device answer for %s(%lu): %@",
+                 sel_getName(cmd), (unsigned long)arg, lastError());
         value = 0;
     }
     if (keep) {
@@ -6379,7 +6718,7 @@ static void installAnswers(Class cls)
         case NMB_ANSWER_COUNT:
         case NMB_ANSWER_FLAG:
             if (!nmb_device_answer(gDevice, name, 0, &value)) {
-                NBLOG(@"native-metal: no device answer: %@", lastError());
+                NBREFUSE("device.answer", uintptr_t(sel), @"no device answer for %s: %@", name, lastError());
                 continue;
             }
             // Extended-range 10-bit (XR10) framebuffers are withheld from the render server: this display chain presents 8-bit BGRX scanout
@@ -6415,11 +6754,13 @@ extern "C" id native_bridge_metal_open(const char *loader, const char *cache, ui
         return gDeviceObject;
     gMissing = missing;
     gInFlight = [NSMutableSet set];
+    gNvkPath = loader ? loader : "";
     gDevice = nmb_device_open(loader, cache);
     if (!gDevice) {
         NBLOG(@"native-metal: device refused: %s", nmb_last_error());
         return nil;
     }
+    gMemoryRelease.start(gDevice);
     if (cache) {
         gCompileCache = std::string(cache) + "/msl";
     }
@@ -6508,6 +6849,16 @@ extern "C" bool native_bridge_metal_shader_cache_stats(NmbShaderCacheStats *out)
 extern "C" bool native_bridge_metal_work_stats(uint64_t out[10])
 {
     return gDevice && nmb_device_work_stats(gDevice, out);
+}
+
+extern "C" void native_bridge_metal_release_idle_memory(void)
+{
+    gMemoryRelease.release();
+}
+
+extern "C" bool native_bridge_metal_memory(uint64_t out[3])
+{
+    return gDevice && nmb_device_memory(gDevice, out);
 }
 
 extern "C" size_t native_bridge_metal_status(char *out, size_t size)
@@ -6676,7 +7027,7 @@ extern "C" size_t native_bridge_metal_rates(char *out, size_t size)
         uint64_t at, cpu, sys, faults, commits, encode, submitN, submitUs, waitN, waitUs, gpuN, gpuUs, draws, passes,
             apiUs, joinable, psoN, psoUs, texN, texUs, asked, kept, planar, rb, rbBytes, rbUs, impN, impUs, impHits,
             stxN, stxUs, fwdN, fwdUs;
-        uint64_t work[10], counts[10], waits[4], routes[7];
+        uint64_t work[10], counts[10], waits[4], routes[7], memory[3];
         NmbShaderCacheStats cache;
     };
 
@@ -6723,6 +7074,7 @@ extern "C" size_t native_bridge_metal_rates(char *out, size_t size)
         nmb_device_work_stats(gDevice, now.work);
         nmb_device_shader_cache_stats(gDevice, &now.cache);
         nmb_device_counts(gDevice, now.counts);
+        nmb_device_memory(gDevice, now.memory);
         nmb_device_texel_copy_routes(gDevice, now.routes);
         nmb_device_wait_counts(gDevice, now.waits);
     }
@@ -6767,7 +7119,7 @@ extern "C" size_t native_bridge_metal_rates(char *out, size_t size)
         (unsigned long long)(now.cache.driver_hits - was.cache.driver_hits),
         (unsigned long long)(now.cache.driver_misses - was.cache.driver_misses),
         (unsigned long long)(now.asked - was.asked), (unsigned long long)(now.kept - was.kept),
-        (unsigned long long)(now.planar - was.planar), (unsigned long long)(now.counts[0] >> 20),
+        (unsigned long long)(now.planar - was.planar), (unsigned long long)(now.memory[0] >> 20),
         (unsigned long long)now.counts[1], (unsigned long long)now.counts[2], (unsigned long long)now.counts[3],
         (unsigned long long)(now.counts[4] - was.counts[4]), (unsigned long long)(now.counts[5] - was.counts[5]),
         (unsigned long long)(now.counts[6] - was.counts[6]), (unsigned long long)(now.counts[7] - was.counts[7]),

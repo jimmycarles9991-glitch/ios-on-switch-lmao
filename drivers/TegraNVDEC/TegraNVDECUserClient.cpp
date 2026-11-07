@@ -51,7 +51,6 @@ class AppleD5500UserClient : public IOUserClient {
         struct Buffer {
         uint32_t handle;  // 0: slot free
         TegraNVDECBlock block;
-        IOMemoryDescriptor *view;  // what clientMemoryForType hands out for this handle
     };
 
     IOLock *lock_ = nullptr;
@@ -110,18 +109,18 @@ bool AppleD5500UserClient::quiesce()
     return ret == 0 || !tegra_nvdec_ready();
 }
 
-// The client's mappings of the buffer are revoked before its granules can go to anyone else.
+// The client's mappings of the buffer are revoked before its pages can go to anyone else. A buffer a wedged job may
+// still write stays wired and mapped in NVDEC's address space for good.
 void AppleD5500UserClient::drop(Buffer *b, bool returnMemory)
 {
-    while (IOMemoryMap *map = removeMappingForDescriptor(b->view)) {
+    while (IOMemoryMap *map = removeMappingForDescriptor(b->block.pages.memory)) {
         map->unmap();
         map->release();
     }
-    b->view->release();
     if (returnMemory)
-        tegra_nvdec_arena_free(&b->block);
+        tegra_nvdec_buffer_free(&b->block);
     b->handle = 0;
-    b->view = nullptr;
+    b->block = {};
 }
 
 IOReturn AppleD5500UserClient::clientClose()
@@ -130,7 +129,7 @@ IOReturn AppleD5500UserClient::clientClose()
     IOLockLock(lock_);
     const bool idle = quiesce();
     if (!idle)
-        IOLog("TegraNVDEC: a closing client's job never finished; its buffers stay out of the arena\n");
+        IOLog("TegraNVDEC: a closing client's job never finished; its buffers stay wired\n");
     for (uint32_t i = 0; i < kMaxBuffers; i++)
         if (buffers_[i].handle)
             drop(&buffers_[i], idle);
@@ -159,8 +158,8 @@ IOReturn AppleD5500UserClient::clientMemoryForType(UInt32 type, IOOptionBits *op
     IOLockLock(lock_);
     Buffer *b = find(type);
     if (b) {
-        b->view->retain();
-        *memory = b->view;
+        b->block.pages.memory->retain();
+        *memory = b->block.pages.memory;
         *options = kIOMapAnywhere | kIOMapDefaultCache;
     }
     IOLockUnlock(lock_);
@@ -228,7 +227,7 @@ IOReturn AppleD5500UserClient::run(uint32_t method, const void *in, uint32_t inS
         info->codecs = tegra_nvdec_codecs();
         info->max_width = info->max_height = 4096;
         info->features = tegra_vic_present_ready() ? TEGRA_NVDEC_FEATURE_PRESENT : 0;
-        tegra_nvdec_arena_usage(&info->arena_bytes, &info->arena_free);
+        tegra_nvdec_memory_usage(&info->memory_limit, &info->memory_free);
         break;
     }
     case TegraNVDECMethodBufferAlloc: {
@@ -241,13 +240,8 @@ IOReturn AppleD5500UserClient::run(uint32_t method, const void *in, uint32_t inS
             ret = slot ? kIOReturnBadArgument : kIOReturnNoResources;
             break;
         }
-        if ((ret = ioreturn(tegra_nvdec_arena_alloc(size, &slot->block))))
+        if ((ret = ioreturn(tegra_nvdec_buffer_alloc(size, &slot->block))))
             break;
-        if (!(slot->view = tegra_nvdec_arena_descriptor(&slot->block))) {
-            tegra_nvdec_arena_free(&slot->block);
-            ret = kIOReturnNoMemory;
-            break;
-        }
         slot->handle = nextHandle_++;
         if (!nextHandle_)
             nextHandle_ = 1;
@@ -310,9 +304,21 @@ IOReturn AppleD5500UserClient::run(uint32_t method, const void *in, uint32_t inS
             ret = kIOReturnBadArgument;
             break;
         }
-        const TegraVICPicture vic = {b->block.pa,          picture,   p->pitch,  p->rows,  p->chroma_offset,
-                                     p->block_height_log2, p->crop_x, p->crop_y, p->width, p->height,
-                                     p->surface_id};
+        TegraVICPicture vic;
+        vic.pages = b->block.pages.pages;
+        vic.pageCount = b->block.pages.count;
+        vic.bytes = picture;
+        vic.pitch = p->pitch;
+        vic.rows = p->rows;
+        vic.chromaOffset = p->chroma_offset;
+        vic.blockHeightLog2 = p->block_height_log2;
+        vic.cropX = p->crop_x;
+        vic.cropY = p->crop_y;
+        vic.width = p->width;
+        vic.height = p->height;
+        vic.dstX = p->dst_x;
+        vic.dstY = p->dst_y;
+        vic.surfaceID = p->surface_id;
         const char *why = nullptr;
         const int err = tegra_vic_present(&vic, current_task(), &why);
         if (err) {
@@ -413,7 +419,7 @@ IOReturn TegraNVDEC::newUserClient(task_t task, void *securityID, UInt32 type, O
     return kIOReturnSuccess;
 }
 
-extern "C" int tegra_nvdec_publish(uint64_t arenaUs)
+extern "C" int tegra_nvdec_publish(void)
 {
     IOService *resources = IOService::getResourceService();
     TegraNVDEC *service = OSTypeAlloc(TegraNVDEC);
@@ -438,11 +444,11 @@ extern "C" int tegra_nvdec_publish(uint64_t arenaUs)
         return -12;
     }
     service->registerService();
-    uint64_t total = 0, free = 0;
-    tegra_nvdec_arena_usage(&total, &free);
-    IOLog("TegraNVDEC: N4 ok service published (user client AppleD5500UserClient, ABI %u, arena %llu MiB reserved in "
-          "%llu ms)\n",
-          TEGRA_NVDEC_ABI_VERSION, total >> 20, arenaUs / 1000);
+    uint64_t limit = 0, free = 0;
+    tegra_nvdec_memory_usage(&limit, &free);
+    IOLog("TegraNVDEC: N4 ok service published (user client AppleD5500UserClient, ABI %u, buffers of any pages behind "
+          "the SMMU, %llu MiB at most)\n",
+          TEGRA_NVDEC_ABI_VERSION, limit >> 20);
     service->release();  // the attachment keeps it
     return 0;
 }

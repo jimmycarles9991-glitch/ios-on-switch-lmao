@@ -177,10 +177,11 @@ uint16_t halfBits(uint16_t h)  // half to the v of v / 2048 it holds
 }
 }  // namespace
 
-struct Shape {
+struct Shape {  // pack/ycbcr.metal's, of 8-bit 4:2:0 codes
     uint32_t width, height;
     int32_t full;
     int32_t k[6];
+    uint32_t unit = 255, drop = 0, up = 2, max = 255, halved = 3, chroma = 1;
 };
 
 int main(int argc, char **argv)
@@ -250,6 +251,7 @@ int main(int argc, char **argv)
             od.storageMode = MTLStorageModeShared;
             id<MTLTexture> ot = [dev newTextureWithDescriptor:od];
             Shape s = {c.w, c.h, c.full, {}};
+            static_assert(sizeof s == 15 * 4, "raw_ycbcr.h kYcbcrShapeWords");
             coefficients(c.full, c.matrix, s.k);
             MTLRenderPassDescriptor *rp = [MTLRenderPassDescriptor renderPassDescriptor];
             rp.colorAttachments[0].texture = ot;

@@ -19,7 +19,10 @@ bazel build //gpu/seed:tools_archive                          # the host tools, 
 
 The crawl reads every Metal library on the IPSW's OS volume and cryptexes, including the ones embedded in the dyld
 shared cache. Its inventory also lists what it leaves out (GPU binary archives and pipeline libraries, which the
-frontend refuses) and anything that doesn't parse.
+frontend refuses) and anything that doesn't parse. It runs once per IPSW, in a repository (`crawl.bzl`): Bazel downloads
+the OS image and cryptexes, crawls them, deletes them and keeps the crawl (about 233 MB) in its repository contents
+cache. Building the seed never needs the images, so they stay off the Mac until an image build (`//install`) fetches
+them. Editing `crawl.py` or `metallib.py` downloads and crawls again.
 
 - `corpus`: every pipeline in `drivers/TegraGM20BMetal/precompile/corpus.log`, the journal harvested from real boots.
   That includes the dispatch shapes (D lines) compute states were seen taking: a compute kernel's GM20B code depends
@@ -43,3 +46,12 @@ hit.
 The work is split into shards by program, one action per shard, so it runs in parallel and a corpus edit only redoes
 the shards it touches. A derived pipeline that crashes the tool is skipped and counted. One from the corpus fails the
 build, because it would crash the device too.
+
+NVK names its pipeline cache by a hash of its compiler's sources and flags
+(`third_party/mesa/bazel/compiler_identity.py`) rather than by the dylib, and each shard is keyed on that hash. An NVK
+edit outside the compiler (images, memory, command buffers) reruns no shard and keeps the device's own shader caches.
+Bazel's action cache does this through the shard's unused inputs list, so it holds within one output base; a fresh
+output base still misses the disk cache.
+
+The raw pack is probed in buckets too, one action each. Only the last step, which stamps the stack key into the pack,
+reads the key that every `raw/` edit changes, so such an edit restamps the pack instead of probing again.
