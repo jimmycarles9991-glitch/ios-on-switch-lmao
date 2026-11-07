@@ -1,14 +1,14 @@
 name: image
 on:
   workflow_dispatch:
-    inputs:
-      size:
-        description: The exact size of the SD partition you made in hekate (the image must fit it exactly).
-        required: true
-        default: "48G"
 
+# Creates a release, so it may write.
 permissions:
-  contents: read
+  contents: write
+
+env:
+  # One GitHub release asset may be at most 2 GiB; pack splits anything bigger.
+  SPLIT_BYTES: "1572864000" # 1500 MiB
 
 jobs:
   image:
@@ -19,13 +19,93 @@ jobs:
       - uses: ./.github/actions/bazel
         with:
           cache: image
+          upload: true
+      # The container is composed for 1 TiB (sparse) and install-ios.bin fits it to the card's partition on the
+      # Switch: out/sd's parts are split only because FAT32 caps a file at 4 GiB. No size input anywhere.
       - name: Build the image
         run: |
-          bazel run //:image -- --size "${{ github.event.inputs.size }}" --out "$RUNNER_TEMP/sd"
+          bazel run //:image -- --out "$RUNNER_TEMP/sd"
           du -sh "$RUNNER_TEMP/sd"
-          ls -lh "$RUNNER_TEMP/sd"
-      - uses: actions/upload-artifact@v7.0.2
-        with:
-          name: ios-sd
-          path: ${{ runner.temp }}/sd
-          if-no-files-found: error
+          find "$RUNNER_TEMP/sd" -type f -exec du -h {} +
+          if [ -z "$(find "$RUNNER_TEMP/sd" -name '*.SII.001')" ]; then
+            echo "::error::out/sd holds no *.SII.001: nothing to install"
+            exit 1
+          fi
+
+      - name: Package the output
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/bundle"
+          cd "$RUNNER_TEMP/sd"
+          find . -type f | LC_ALL=C sort | xargs shasum -a 256 > "$RUNNER_TEMP/bundle/SHA256SUMS"
+
+          files="$(find . -type f)"
+          while IFS= read -r f; do
+            rel="${f#./}"
+            # Escape an underscore first ('_' -> '_5F'), then encode each '/' as '__': decoding reverses these
+            # in the other order, so a literal '__' in a name can never decode into a directory separator.
+            encoded="$(printf '%s' "$rel" | sed -e 's/_/_5F/g' -e 's#/#__#g')"
+            size="$(stat -f %z "$f")"
+            if [ "$size" -gt "$SPLIT_BYTES" ]; then
+              split -a 3 -b 1500m "$f" "$RUNNER_TEMP/bundle/$encoded.part-"
+            else
+              cp "$f" "$RUNNER_TEMP/bundle/$encoded"
+            fi
+          done <<EOF
+          $files
+          EOF
+
+      - name: Bundle reassembly script
+        run: |
+          cat > "$RUNNER_TEMP/bundle/reassemble.sh" <<'EOS'
+          #!/usr/bin/env bash
+          # Rebuild the SD tree (out/sd) from this bundle, then optionally merge it onto the card's FAT32 root:
+          #   sh reassemble.sh /media/tom/THEDRIVE
+          # Nothing here deletes anything already on the card.
+          set -eu
+          here="$(cd "$(dirname "$0")" && pwd)"
+          # The item list is captured before ./sd exists, so the output folder can't join its own copy list.
+          items="$(find "$here" -maxdepth 1 -mindepth 1 -type f | LC_ALL=C sort)"
+          out="$here/sd"
+          mkdir -p "$out"
+          while IFS= read -r f; do
+            base="$(basename "$f")"
+            case "$base" in SHA256SUMS|reassemble.sh) continue ;; esac
+            if [[ "$base" =~ ^(.+\.part-)([a-z]{3})$ ]]; then
+              stem="${BASH_REMATCH[1]%.part-}" # the pattern's split marker leaves the encoded name
+              dest="$(printf '%s' "$stem" | sed -e 's#__#/#g' -e 's/_5F/_/g')"
+              dest="$out/$dest"
+            else
+              stem=""
+              dest="$out/$(printf '%s' "$base" | sed -e 's#__#/#g' -e 's/_5F/_/g')"
+            fi
+            [ -e "$dest" ] && continue
+            mkdir -p "$(dirname "$dest")"
+            if [ -n "$stem" ]; then
+              cat "$here/$stem.part-"[a-z][a-z][a-z] > "$dest"
+            else
+              cp "$f" "$dest"
+            fi
+          done <<< "$items"
+          (cd "$out" && sha256sum -c "$here/SHA256SUMS")
+          if [ $# -gt 0 ]; then
+            cp -a "$out/." "$1/"
+          fi
+          EOS
+
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ios-sd-${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          gh release create "$TAG" --target "$GITHUB_SHA" --prerelease \
+            --title "iOS SD image ($TAG)" \
+            --notes "Run ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}: \`bazel run //:image\`. Extract this whole bundle together, run \`sh reassemble.sh <card-mount>\`, then copy \`sd/\`'s contents onto the card's FAT32 root alongside hekate's bootloader." \
+            "$RUNNER_TEMP/bundle/reassemble.sh" "$RUNNER_TEMP/bundle/SHA256SUMS"
+          for f in "$RUNNER_TEMP/bundle"/*; do
+            for i in 1 2 3; do
+              gh release upload "$TAG" "$f" --clobber && break || sleep 30
+            done
+          done
+          gh release view "$TAG" --json assets --jq '.assets[] | [.name, .size] | @tsv'
