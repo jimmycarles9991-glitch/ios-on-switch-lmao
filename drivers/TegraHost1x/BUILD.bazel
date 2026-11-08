@@ -36,6 +36,5 @@ kernel_driver(
         "kits/SwitchCAR",
         "kits/SwitchDMA",
         "kits/SwitchMMIO",
-        "kits/SwitchTime",
     ],
 )

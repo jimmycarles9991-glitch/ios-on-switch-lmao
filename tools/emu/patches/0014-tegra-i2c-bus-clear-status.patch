@@ -1,0 +1,13 @@
+diff --git a/hw/arm/tegra2/apb/i2c/i2c.c b/hw/arm/tegra2/apb/i2c/i2c.c
+index f071feb..f495ea0 100644
+--- a/hw/arm/tegra2/apb/i2c/i2c.c
++++ b/hw/arm/tegra2/apb/i2c/i2c.c
+@@ -482,6 +482,8 @@ static void tegra_i2c_write(void *opaque, hwaddr offset,
+         if (tegra_board >= TEGRAX1_BOARD) {
+             if (value & BIT(0)) { // BC_ENABLE, bus clear operation
+                 value &= ~BIT(0);
++                /* No device in the model holds SDA, so every clear succeeds: BC_STATUS reads 1 (bus cleared). */
++                s->bus_clear_status = BIT(0);
+                 tegra_i2c_update(s, I2C_INT_BUS_CLEAR_DONE, 1);
+             }
+             s->bus_clear_config = value;

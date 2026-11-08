@@ -9,7 +9,9 @@
 // of __mod_init_func and run by SwitchAccelStubPublish.cpp once IOGPUFamily has loaded.
 #include "../NativeMetal/OriginalAcceleratorABI.h"
 
+// NOLINTNEXTLINE(misc-use-internal-linkage): OSDefineMetaClassAndStructors needs the class's external linkage
 class SwitchAccelStub : public IOAcceleratorES {
+    // NOLINTNEXTLINE(misc-explicit-constructor): IOKit's structors macro declares the metaclass constructor
     OSDeclareDefaultStructors(SwitchAccelStub)
 };
 

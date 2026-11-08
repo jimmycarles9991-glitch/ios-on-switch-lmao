@@ -223,7 +223,9 @@ static inline enum xusb_irq_verdict xusb_irq_judge(struct xusb_irq_sample armed,
 {
     const bool delivered = now.count != armed.count;
     const bool waiting = now.pending && now.erdp == armed.erdp && !delivered;
-    const enum xusb_irq_verdict act = stage >= 2 ? (now.count ? XUSB_IRQ_PANIC : XUSB_IRQ_OFF) : XUSB_IRQ_CONFIRM;
+    enum xusb_irq_verdict act = XUSB_IRQ_CONFIRM;
+    if (stage >= 2)
+        act = now.count ? XUSB_IRQ_PANIC : XUSB_IRQ_OFF;
     if (now.count)
         return waiting && now.deliverable ? act : XUSB_IRQ_FINE;
     if (waiting || (first && !delivered))
@@ -233,12 +235,12 @@ static inline enum xusb_irq_verdict xusb_irq_judge(struct xusb_irq_sample armed,
 
 static inline bool xusb_xhci_pending(uint32_t iman, uint32_t usbsts)
 {
-    return (iman & XHCI_IMAN_IP) || (usbsts & XHCI_USBSTS_EINT);
+    return ((iman & XHCI_IMAN_IP) != 0u) || ((usbsts & XHCI_USBSTS_EINT) != 0u);
 }
 
 static inline bool xusb_xhci_deliverable(uint32_t iman, uint32_t usbcmd)
 {
-    return (iman & XHCI_IMAN_IE) && (usbcmd & XHCI_USBCMD_INTE);
+    return ((iman & XHCI_IMAN_IE) != 0u) && ((usbcmd & XHCI_USBCMD_INTE) != 0u);
 }
 
 #endif

@@ -97,7 +97,7 @@ int a80211_ring_take(struct a80211_ring *r, uint32_t *event, char ifname[16], vo
             return 0;
         if (rd >= r->size || (rd & 3))
             return -1;
-        uint32_t magic;
+        uint32_t magic = 0;
         memcpy(&magic, r->buf + rd, 4);
         if (r->size - rd < A80211_RING_HEADER || magic == A80211_RING_MAGIC_PAD) {
             r->state[0] = (rd + 4) % r->size;
@@ -143,7 +143,7 @@ static void flog(struct a80211_awdl *f, const char *fmt, ...)
     if (!f->ops.log)
         return;
     char line[160];
-    va_list ap;
+    va_list ap;  // NOLINT(cppcoreguidelines-init-variables): va_start initializes it
     va_start(ap, fmt);
     vsnprintf(line, sizeof line, fmt, ap);
     va_end(ap);
@@ -176,7 +176,7 @@ static void fill_channel(struct a80211_channel *ch, struct awdl_chan c)
     ch->version = 1;
     ch->channel = p;
     // APPLE80211_C_FLAG_*: 20 MHz 0x2, 40 MHz 0x4, 2.4 GHz 0x8, 5 GHz 0x10, 80 MHz 0x400
-    ch->flags = p <= 14 ? 0x2 | 0x8 : (c.opclass == 0x80 ? 0x400 : 0x2) | 0x10;
+    ch->flags = p <= 14 ? 0x2u | 0x8u : (c.opclass == 0x80 ? 0x400u : 0x2u) | 0x10u;
 }
 
 int a80211_awdl_request(struct a80211_awdl *f, int set, int32_t type, int32_t *val, void *data, uint32_t *len,

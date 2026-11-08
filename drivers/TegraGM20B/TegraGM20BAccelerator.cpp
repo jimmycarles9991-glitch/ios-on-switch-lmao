@@ -18,8 +18,10 @@
 extern "C" IOReturn tegra_gm20b_new_user_client(IOService *, task_t, void *, UInt32, OSDictionary *,
 						IOUserClient **);
 
+// NOLINTNEXTLINE(misc-use-internal-linkage): OSDefineMetaClassAndStructors needs the class's external linkage
 class AGXAccelerator : public IOAcceleratorES
 {
+	// NOLINTNEXTLINE(misc-explicit-constructor): IOKit's structors macro declares the metaclass constructor
 OSDeclareDefaultStructors(AGXAccelerator) public
     : IOReturn newUserClient(task_t owningTask, void *securityID, UInt32 type,
 			     OSDictionary *properties, IOUserClient **handler) APPLE_KEXT_OVERRIDE;

@@ -86,6 +86,7 @@
 #include <sys/time.h>
 #include <sys/disk.h>
 #include <sys/vnode_internal.h>
+#include <switch/auth_fs.h>
 #include <sys/stat.h>
 #include <sys/namei.h>
 #include <sys/ucred.h>
@@ -4161,6 +4162,9 @@ VNOP_IOCTL(vnode_t vp, u_long command, caddr_t data, int fflag, vfs_context_t ct
 
 	if ((command == DKIOCISSOLIDSTATE) && (vp == rootvp) && rootvp_is_ssd && data) {
 		*data = 1;
+		return 0;
+	}
+	if (switch_auth_fs_answers(vp, command, data)) {
 		return 0;
 	}
 

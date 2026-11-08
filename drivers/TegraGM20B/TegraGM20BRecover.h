@@ -12,6 +12,8 @@ void tgm_recover_init(struct nvkm_device *device);
 /* PFIFO's engine context-switch timeout, after every FIFO init (bring-up and each wake): each period an engine's switch
  * stays pending raises SCHED_ERROR CTXSW_TIMEOUT. */
 void tgm_recover_arm(struct nvkm_device *device);
+/* Power-down, once the GPU's interrupts are off: no tick's work runs until the next one. */
+void tgm_recover_suspend(void);
 /* gpu.c, from a tick (thread context): 1 if hardware channel chid is stuck and now being killed (a kernel channel's
  * panics), or is not one of gpu.c's; 0 to wait for the next tick. */
 int tgm_ctxsw_stuck(int chid);
@@ -57,7 +59,7 @@ struct tgm_hang_candidate {
 static inline enum tgm_hang tgm_hang_blame(const struct tgm_hang_candidate *c, int n, int late_dead,
 					   int late_kernel, int any_progress, int *blame)
 {
-	int i;
+	int i = 0;
 
 	*blame = -1;
 	for (i = 0; i < n; i++) {
@@ -73,4 +75,40 @@ static inline enum tgm_hang tgm_hang_blame(const struct tgm_hang_candidate *c, i
 	if (late_kernel && !any_progress)
 		return TGM_HANG_STUCK;
 	return TGM_HANG_PROGRESSING;
+}
+
+/* The faulting VA of nvkm's MMU fault report ("fault %02x [%s] at %016llx engine ... on channel %d [...]",
+ * gf100_fifo_mmu_fault_recover) among a pass's reports (" | " apart): the one naming hardware channel chid, else one naming
+ * no channel nvkm knew (-1). 0: neither. */
+static inline uint64_t tgm_fault_va(const char *reports, int chid)
+{
+	uint64_t unnamed = 0;
+	const char *p = reports;
+
+	for (;;) {
+		const char *end = __builtin_strstr(p, " | ");
+		const char *fault = __builtin_strstr(p, "fault ");
+		const char *at = __builtin_strstr(p, "] at ");
+		const char *on = __builtin_strstr(p, "on channel ");
+		uint64_t va = 0;
+		int chan = 0;
+
+		if (fault && at && on && fault < at && at < on && (!end || on < end)) {
+			for (at += 5; (*at >= '0' && *at <= '9') || (*at >= 'a' && *at <= 'f');
+			     at++)
+				va = va << 4 | (uint64_t)(*at <= '9' ? *at - '0' : *at - 'a' + 10);
+			on += 11;
+			if (*on == '-') {
+				unnamed = unnamed ? unnamed : va;
+			} else {
+				for (; *on >= '0' && *on <= '9'; on++)
+					chan = chan * 10 + (*on - '0');
+				if (chan == chid)
+					return va;
+			}
+		}
+		if (!end)
+			return unnamed;
+		p = end + 3;
+	}
 }

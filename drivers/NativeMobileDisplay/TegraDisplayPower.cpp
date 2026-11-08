@@ -7,8 +7,10 @@
 #include "TegraDisplayPower.h"
 #include "../SwitchSuspend/SwitchSleepSteps.h"
 #include "../TegraGPIO/TegraGPIO.h"
-
-extern "C" vm_offset_t ml_io_map(vm_offset_t phys_addr, vm_size_t size);
+#include "../../kits/SwitchCAR/SwitchCAR.h"
+#include "../../kits/SwitchCAR/SwitchPMC.h"
+#include "../../kits/SwitchMMIO/SwitchMMIOKernel.h"
+#include "../../kits/SwitchMMIO/SwitchMMIOWords.h"
 
 namespace {
 constexpr vm_offset_t kCarPA = 0x60006000, kDisplayAPA = 0x54200000, kDsiPA = 0x54300000, kMipiCalPA = 0x700E3000;
@@ -48,14 +50,12 @@ constexpr uint32_t kPllEnable = 1u << 30, kPllLock = 1u << 27;
 
 // PMC (bytes from 0x7000E400). IO_DPD*_REQ code 1 = DPD off; DSI is DPD bit 2, DSIB DPD2 bit 7 (Linux tegra210_io_pads).
 enum : uint32_t {
-    IO_DPD_REQ = 0x1B8,
     IO_DPD_STATUS = 0x1BC,
-    IO_DPD2_REQ = 0x1C0,
     IO_DPD2_STATUS = 0x1C4,
     SECURE_SCRATCH113 = 0xB1C
 };
 
-constexpr uint32_t kDpdOff = 1u << 30, kDpdDsi = 1u << 2, kDpdDsib = 1u << 7;
+constexpr unsigned kDpdDsiPad = 2, kDpdDsibPad = 32 + 7;  // Linux tegra210 io_pads dsi, dsib .dpd
 
 // APB_MISC (bytes): GP_DSI_PAD_CONTROL (T210B01 only), PINMUX_AUX_LCD_RST (pull-down, function 0).
 constexpr uint32_t kGpDsiPadControl = 0xAC0, kPinmuxLcdRst = 0x3000 + 0x204, kPinmuxPullDown = 1u << 2;
@@ -337,20 +337,20 @@ constexpr Reg kDcDisable[] = {
     {DC_CMD_INT_STATUS, 0xFFFFFFFF},
 };
 
-volatile uint32_t *gCar, *gDc, *gDsi, *gMipiCal, *gApbMisc, *gPmc;
+SwitchMMIOWords gCar, gDc, gDsi, gMipiCal, gApbMisc, gPmc;
 
-template <size_t N> void write(volatile uint32_t *base, const Reg (&table)[N])
+template <size_t N> void write(SwitchMMIOWords base, const Reg (&table)[N])
 {
     for (const Reg &reg : table)
         base[reg.index] = reg.value;
 }
 
-volatile uint32_t &car(uint32_t offset)
+SwitchMMIOWord car(uint32_t offset)
 {
     return gCar[offset / 4];
 }
 
-volatile uint32_t &pmc(uint32_t offset)
+SwitchMMIOWord pmc(uint32_t offset)
 {
     return gPmc[(0x400 + offset) / 4];
 }
@@ -359,12 +359,12 @@ void map()
 {
     if (gCar)
         return;
-    gCar = (volatile uint32_t *)ml_io_map(kCarPA, 0x1000);
-    gDc = (volatile uint32_t *)ml_io_map(kDisplayAPA, 0x4000);
-    gDsi = (volatile uint32_t *)ml_io_map(kDsiPA, 0x1000);
-    gMipiCal = (volatile uint32_t *)ml_io_map(kMipiCalPA, 0x1000);
-    gApbMisc = (volatile uint32_t *)ml_io_map(kApbMiscPA, 0x4000);
-    gPmc = (volatile uint32_t *)ml_io_map(kPmcPagePA, 0x1000);
+    gCar = SwitchMMIOWords(switch_mmio_map(kCarPA, 0x1000));
+    gDc = SwitchMMIOWords(switch_mmio_map(kDisplayAPA, 0x4000));
+    gDsi = SwitchMMIOWords(switch_mmio_map(kDsiPA, 0x1000));
+    gMipiCal = SwitchMMIOWords(switch_mmio_map(kMipiCalPA, 0x1000));
+    gApbMisc = SwitchMMIOWords(switch_mmio_map(kApbMiscPA, 0x4000));
+    gPmc = SwitchMMIOWords(switch_mmio_map(kPmcPagePA, 0x1000));
     if (!gCar || !gDc || !gDsi || !gMipiCal || !gApbMisc || !gPmc)
         panic("TegraDisplay: cannot map the display registers");
 }
@@ -376,11 +376,9 @@ void setPlld(uint32_t divp, uint32_t divn)
     car(PLLD_BASE) = kPllEnable | kPllLock | (divp << 20) | (divn << 11) | 1;
     car(PLLD_MISC1) = 0;
     car(PLLD_MISC) = (1u << 21) | (1u << 19) | (1u << 18) | (1u << 16) | 0xFC00;
-    for (unsigned us = 0; !(car(PLLD_BASE) & kPllLock); ++us) {
-        if (us == 1000)
-            panic("TegraDisplay: PLLD (P %u N %u) did not lock: BASE %#x MISC %#x", divp, divn, car(PLLD_BASE),
-                  car(PLLD_MISC));
-        IODelay(1);
+    if (!switch_car_wait(PLLD_BASE, kPllLock, kPllLock, 1000)) {
+        panic("TegraDisplay: PLLD (P %u N %u) did not lock: BASE %#x MISC %#x", divp, divn,
+              static_cast<uint32_t>(car(PLLD_BASE)), static_cast<uint32_t>(car(PLLD_MISC)));
     }
     IODelay(2);
 }
@@ -451,13 +449,9 @@ extern "C" void tegra_display_power_up(void)
     car(CLK_ENB_W_SET) = kDsiaLp;
     car(CLK_SOURCE_DSIA_LP) = kDiv6;
     // The DSI A pads (DSI and DSIB, 4 lanes) out of deep power down; a bounded handshake, as Linux tegra_io_pad_power_enable.
-    pmc(IO_DPD_REQ) = kDpdOff | kDpdDsi;
-    pmc(IO_DPD2_REQ) = kDpdOff | kDpdDsib;
-    for (unsigned us = 0; (pmc(IO_DPD_STATUS) & kDpdDsi) || (pmc(IO_DPD2_STATUS) & kDpdDsib); ++us) {
-        if (us == 250)
-            panic("TegraDisplay: DSI pads stay in deep power down: DPD_STATUS %#x DPD2_STATUS %#x", pmc(IO_DPD_STATUS),
-                  pmc(IO_DPD2_STATUS));
-        IODelay(1);
+    if (!switch_pmc_io_pad_on(kDpdDsiPad) || !switch_pmc_io_pad_on(kDpdDsibPad)) {
+        panic("TegraDisplay: DSI pads stay in deep power down: DPD_STATUS %#x DPD2_STATUS %#x",
+              static_cast<uint32_t>(pmc(IO_DPD_STATUS)), static_cast<uint32_t>(pmc(IO_DPD2_STATUS)));
     }
     // Panel reset held (the OLED has no LCD AVDD/WLED pins), pad regulators up, T210B01 DSI pad control cleared.
     gApbMisc[kPinmuxLcdRst / 4] = kPinmuxPullDown;

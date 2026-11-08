@@ -27,7 +27,7 @@ inline uint32_t tegra_gm20b_created_surface(const TegraGM20BSurfaceCreateAbi &ab
 	if (!create || !output || abi.idOffset > outputSize ||
 	    outputSize - abi.idOffset < sizeof(uint32_t))
 		return 0;
-	uint32_t id;
+	uint32_t id = 0;
 	memcpy(&id, static_cast<const uint8_t *>(output) + abi.idOffset, sizeof(id));
 	return id;
 }

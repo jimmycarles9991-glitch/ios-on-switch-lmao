@@ -1,10 +1,9 @@
 // SPDX-License-Identifier: BSD-2-Clause-Patent
 // Inside TegraNVDEC: the engine (TegraNVDEC.cpp), its SMMU address space and buffers (TegraNVDECMemory.cpp), the user
-// client (TegraNVDECUserClient.cpp) and the boot self-test (TegraNVDECSelfTest.cpp).
+// client (TegraNVDECUserClient.cpp).
 //
-// On (stage 3) unless boot-arg switch-no-nvdec. Stage 1 brings NVDEC up (N0 host1x, N1 SMMU, power and falcon, N2
-// syncpoint proof of life); 2 also decodes embedded pictures (N3); 3 also publishes the TegraNVDEC service and its user
-// client (N4).
+// On unless boot-arg switch-no-nvdec: N0 host1x, N1 SMMU, power and falcon, N2 syncpoint proof of life, N3 the
+// TegraNVDEC service and its user client.
 #ifndef TEGRA_NVDEC_H
 #define TEGRA_NVDEC_H
 #include <stddef.h>
@@ -22,7 +21,7 @@ struct TegraNVDECBlock {
     switch_dma_pages pages;  // the memory a client maps, and its page list (VIC maps a picture's)
 };
 
-// Resolves a submit's buffer handle; the self-test and every user client supply their own.
+// Resolves a submit's buffer handle; every user client supplies its own.
 typedef bool (*TegraNVDECResolve)(void *context, uint32_t handle, TegraNVDECBlock *block);
 
 extern "C" {
@@ -36,33 +35,20 @@ void tegra_nvdec_memory_release(void);  // a failed bring-up gives the tables ba
 int tegra_nvdec_buffer_alloc(uint64_t size, TegraNVDECBlock *block);
 void tegra_nvdec_buffer_free(TegraNVDECBlock *block);  // only once no job can touch it
 void tegra_nvdec_memory_usage(uint64_t *limit, uint64_t *free);
-void tegra_nvdec_cache_clean(const void *va, size_t size);  // dc cvac: the CPU's writes reach DRAM
-void tegra_nvdec_cache_flush(const void *va, size_t size);  // dc civac: the next CPU read comes from DRAM
 
 // Checks a submit (TegraNVDECCheck.h), cleans its CPU-written ranges, copies its picture setup into kernel memory
 // and queues it on host1x channel 0. Returns 0 and the job's fence, or a negative errno-style value.
 int tegra_nvdec_run(const TegraNVDECSubmit *submit, TegraNVDECResolve resolve, void *context, uint32_t *fence,
                     const char **why);
 // Sleeps until the fence is reached (syncpoint interrupt), bounded by the engine's own GP timer per queued job. Past
-// that bound: a one-line panic once published (N4); during the N3 self-test, -60 and the engine refuses work.
+// that bound: a one-line panic.
 int tegra_nvdec_wait(uint32_t fence);
 bool tegra_nvdec_ready(void);
-// The userland clip check's verdict (TegraNVDECABI.h): claim (returns the state; *claimed for the one owner), the
-// owner's report (a failure clears that codec's bit: VP9, HEVC, HEVC Main 10), a bounded wait while it runs, and the owner's release.
-uint32_t tegra_nvdec_check_claim(const void *owner, bool *claimed);
-int tegra_nvdec_check_report(const void *owner, bool vp9Ok, bool hevcOk, bool hevc10Ok);
-uint32_t tegra_nvdec_check_wait(void);
-void tegra_nvdec_check_release(const void *owner);
-
-// The bring-up has ended: 1 when NVDEC decodes (N4 published), 0 when it does not or `timeoutMs` passed first.
-// TegraNVENC's E3 decodes its picture here.
+// The bring-up has ended: 1 when NVDEC decodes (N3 published), 0 when it does not or `timeoutMs` passed first.
 int tegra_nvdec_await(uint32_t timeoutMs);
 
-int tegra_nvdec_self_test(void);       // N3 H.264: NVDEC itself
-int tegra_nvdec_self_test_vp9(void);   // N3 VP9: decides the VP9 bit of tegra_nvdec_codecs()
-int tegra_nvdec_self_test_hevc(void);  // N3 HEVC: decides the HEVC (and Main 10) bits
-uint32_t tegra_nvdec_codecs(void);     // bit n: TEGRA_NVDEC_CODEC_* n proven at N3 and accepted by Submit
-int tegra_nvdec_publish(void);         // N4
+uint32_t tegra_nvdec_codecs(void);  // bit n: TEGRA_NVDEC_CODEC_* n, accepted by Submit
+int tegra_nvdec_publish(void);      // N3
 }
 
 #endif

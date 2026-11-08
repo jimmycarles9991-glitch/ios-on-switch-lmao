@@ -20,15 +20,17 @@ constexpr uint8_t kRequestConfigure = 0x04, kRequestLast = 0x02;
 constexpr uint32_t kLastSize = 10, kConfigureSize = 3;
 }  // namespace
 
+// NOLINTNEXTLINE(misc-use-internal-linkage): OSDefineMetaClassAndStructors needs the class's external linkage
 class SwitchOrientationClient : public IOUserClient {
+    // NOLINTNEXTLINE(misc-explicit-constructor): IOKit's structors macro declares the metaclass constructor
     OSDeclareDefaultStructors(SwitchOrientationClient)
 
         static IOReturn refuse(uint32_t selector, uint64_t command, uint8_t request)
     {
-        const uint64_t detail = (uint64_t)selector << 32 | command << 8 | request;
+        const uint64_t detail = static_cast<uint64_t>(selector) << 32 | command << 8 | request;
         switch_refusal_k(switch_refusal_key_with(switch_refusal_key("orientation", "aop-call"), detail), "orientation",
                          "aop-call", "selector %u command %#llx request %#x has no answer here", selector,
-                         (unsigned long long)command, request);
+                         static_cast<unsigned long long>(command), request);
         return kIOReturnUnsupported;
     }
 
@@ -58,7 +60,7 @@ class SwitchOrientationClient : public IOUserClient {
         out[0] = kRequestLast;
         out[1] = orientation;
         for (unsigned i = 0; i < 8; ++i)
-            out[2 + i] = (uint8_t)(stamp >> (8 * i));
+            out[2 + i] = static_cast<uint8_t>(stamp >> (8 * i));
         args->structureOutputSize = kLastSize;
         return kIOReturnSuccess;
     }

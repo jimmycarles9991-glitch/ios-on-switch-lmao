@@ -22,6 +22,10 @@
 
 #include <stdint.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 #define SWITCH_GOV_MAX_OPPS 24u
 
 struct switch_gov_tunables {
@@ -68,7 +72,7 @@ static inline void switch_gov_account(struct switch_gov *g, uint64_t now)
 static inline void switch_gov_init(struct switch_gov *g, const uint32_t *khz, unsigned count, unsigned start,
                                    struct switch_gov_tunables t, uint64_t now)
 {
-    unsigned i;
+    unsigned i = 0;
     if (count > SWITCH_GOV_MAX_OPPS)
         count = SWITCH_GOV_MAX_OPPS;
     if (!count)
@@ -95,7 +99,7 @@ static inline void switch_gov_init(struct switch_gov *g, const uint32_t *khz, un
 // wins, as the DFLL's own voltage cap does. Returns the index now in force.
 static inline unsigned switch_gov_limit(struct switch_gov *g, unsigned lo, unsigned hi, uint64_t now)
 {
-    unsigned before = g->cur;
+    const unsigned before = g->cur;
     switch_gov_account(g, now);
     if (hi >= g->count)
         hi = g->count - 1;
@@ -118,10 +122,8 @@ static inline unsigned switch_gov_boost(struct switch_gov *g, unsigned index, ui
     switch_gov_account(g, now);
     if (index >= g->count)
         index = g->count - 1;
-    if (now >= g->boost_until)
-        g->boost = index;  // the last one expired: this one alone
-    else if (index > g->boost)
-        g->boost = index;
+    if (now >= g->boost_until || index > g->boost)
+        g->boost = index;  // the last one expired (this one alone), or this floor is higher
     if (until > g->boost_until)
         g->boost_until = until;
     index = switch_gov_clamp(g, g->boost);
@@ -138,7 +140,7 @@ static inline unsigned switch_gov_boost(struct switch_gov *g, unsigned index, ui
 // The target for one window that was `busy_permille` busy (0..1000) at the clock in force, before hysteresis.
 static inline unsigned switch_gov_target(const struct switch_gov *g, uint32_t busy_permille, uint64_t now)
 {
-    unsigned want;
+    unsigned want = 0;
     if (busy_permille > 1000)
         busy_permille = 1000;
     if (busy_permille >= g->t.up_permille) {
@@ -200,7 +202,7 @@ static inline unsigned switch_gov_index_at_mv(const uint32_t *mv, unsigned count
 // the top clock, 0 if even the first point is above it.
 static inline unsigned switch_gov_index_at_fraction(const uint32_t *khz, unsigned count, uint32_t fraction16)
 {
-    uint64_t limit;
+    uint64_t limit = 0;
     unsigned i = 0;
     if (!count)
         return 0;
@@ -222,7 +224,9 @@ static inline unsigned switch_gov_index_at_fraction(const uint32_t *khz, unsigne
 static inline unsigned switch_gov_cpu_table(const uint32_t *khz, const uint32_t *mv, unsigned rows, uint32_t max_khz,
                                             uint32_t vmin_mv, uint32_t *khz_out, uint32_t *mv_out, unsigned cap)
 {
-    unsigned first = 0, i, n = 0;
+    unsigned first = 0;
+    unsigned i = 0;
+    unsigned n = 0;
     for (i = 0; i < rows; ++i) {
         if (khz[i] > max_khz)
             break;
@@ -241,7 +245,7 @@ static inline unsigned switch_gov_cpu_table(const uint32_t *khz, const uint32_t 
 // with it: 1785 MHz is kept only while it measures at or under 1785 + half a step.
 static inline int switch_gov_over_step(uint32_t measured_khz, uint32_t asked_khz, uint32_t step_khz)
 {
-    return measured_khz > asked_khz + step_khz / 2;
+    return measured_khz > asked_khz + step_khz / 2 ? 1 : 0;
 }
 
 // Rows held down: a ceiling row that measured high with the clock on it (switch_gov_over_step, even when re-asked
@@ -267,7 +271,7 @@ struct switch_gov_rows {
 // `held` rows held from the start (the top the DFLL did not measure right at enable): on trial at the first line.
 static inline void switch_gov_rows_init(struct switch_gov_rows *r, uint32_t held)
 {
-    unsigned i;
+    unsigned i = 0;
     r->held = held;
     r->trial = 0;
     r->window = 0;
@@ -291,7 +295,7 @@ static inline unsigned switch_gov_rows_ceiling(const struct switch_gov_rows *r, 
 // trial (1 for a row that was not on trial, else twice the last wait, at most 8).
 static inline uint32_t switch_gov_rows_hold(struct switch_gov_rows *r, unsigned row)
 {
-    uint32_t wait;
+    uint32_t wait = 0;
     if (row >= SWITCH_GOV_MAX_OPPS)
         return 0;
     if ((r->trial >> row & 1u) && r->misses[row] < SWITCH_GOV_HOLD_MAX_MISSES)
@@ -324,13 +328,17 @@ static inline void switch_gov_rows_tick(struct switch_gov_rows *r)
 static inline uint32_t switch_gov_rows_retry(struct switch_gov_rows *r, unsigned hi)
 {
     uint32_t back = 0;
-    unsigned i;
-    for (i = 0; i <= hi && i < SWITCH_GOV_MAX_OPPS; ++i)
+    unsigned i = 0;
+    for (i = 0; i <= hi && i < SWITCH_GOV_MAX_OPPS; ++i) {
         if ((r->held >> i & 1u) && (int32_t)(r->window - r->due[i]) >= 0)
             back |= 1u << i;
+    }
     r->held &= ~back;
     r->trial |= back;
     return back;
 }
 
+#ifdef __cplusplus
+}
+#endif
 #endif

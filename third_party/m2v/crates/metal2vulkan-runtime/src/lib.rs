@@ -177,6 +177,7 @@ mod sorted_chunks;
 mod spares;
 mod sparse;
 mod stencil_copy;
+mod submission_failure;
 mod submission_memory;
 mod tessellation;
 mod texture;
@@ -304,6 +305,7 @@ pub use shader_cache::{
 pub use sparse::device::SparseFeatures;
 pub use sparse::encoder::ResourceStateCommandEncoder;
 pub use sparse::{SparsePageSize, SparseProblem, SparseTextureRegionAlignmentMode};
+pub use submission_failure::SubmissionFailureHook;
 pub use submission_memory::SubmissionMemoryHook;
 pub use texture::{SharedTextureHandle, Texture, VkImageLayouts, WrappedImageProblem};
 pub use texture_descriptor::{TextureDescriptor, TextureProblem, TextureSwizzleChannels};

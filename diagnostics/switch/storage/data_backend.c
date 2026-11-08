@@ -2,7 +2,7 @@
 #include "../SwitchWritableData.h"
 #include <string.h>
 #define DATA_MAGIC     UINT64_C(0x5357434844415441)
-#define DATA_MAP_LIMIT (16u * 1024u * 1024u)
+#define DATA_MAP_LIMIT (16u << 20)
 
 struct switch_data_backend {
     uint64_t magic;
@@ -19,13 +19,15 @@ struct switch_data_backend {
 
 static int contains(const uint32_t *a, uint32_t n, uint32_t key)
 {
-    uint32_t lo = 0, hi = n;
+    uint32_t lo = 0;
+    uint32_t hi = n;
     while (lo < hi) {
         uint32_t mid = lo + (hi - lo) / 2;
-        if (a[mid] < key)
+        if (a[mid] < key) {
             lo = mid + 1;
-        else
+        } else {
             hi = mid;
+        }
     }
     return lo < n && a[lo] == key;
 }
@@ -86,14 +88,16 @@ static int permit(void *ctx, uint64_t lba, uint32_t count)
     const struct switch_fat_volume *v = b->source.volume;
     if (lba < v->data_start || lba - v->data_start >= (uint64_t)v->cluster_count * v->sectors_per_cluster)
         return 0;
-    uint64_t first = lba - v->data_start, limit = (uint64_t)v->cluster_count * v->sectors_per_cluster;
+    uint64_t first = lba - v->data_start;
+    uint64_t limit = (uint64_t)v->cluster_count * v->sectors_per_cluster;
     if (count > limit - first)
         return 0;
     uint32_t a = (uint32_t)(first / v->sectors_per_cluster) + 2;
     uint32_t z = (uint32_t)((first + count - 1) / v->sectors_per_cluster) + 2;
-    for (uint32_t c = a; c <= z; c++)
+    for (uint32_t c = a; c <= z; c++) {
         if (!contains(b->sorted, b->count, c))
             return 0;
+    }
     return 1;
 }
 
@@ -131,9 +135,10 @@ int switch_data_create(const struct switch_block_allocator *a, struct switch_blo
     if (SWITCH_WRITABLE_DATA_PART_COUNT != 8 || SWITCH_WRITABLE_DATA_BYTES != UINT64_C(17179869184))
         return SWITCH_BLOCK_CORRUPT;
     struct switch_split_part parts[SWITCH_WRITABLE_DATA_PART_COUNT];
-    for (unsigned p = 0; p < SWITCH_WRITABLE_DATA_PART_COUNT; p++)
+    for (unsigned p = 0; p < SWITCH_WRITABLE_DATA_PART_COUNT; p++) {
         parts[p] = (struct switch_split_part){switch_writable_data_parts[p].path, switch_writable_data_parts[p].offset,
                                               switch_writable_data_parts[p].size};
+    }
     uint32_t count = 0;
     if (switch_split_index_count(s.volume, parts, SWITCH_WRITABLE_DATA_PART_COUNT, SWITCH_WRITABLE_DATA_BYTES,
                                  &count) ||
@@ -169,7 +174,7 @@ int switch_data_create(const struct switch_block_allocator *a, struct switch_blo
                                           SWITCH_WRITABLE_DATA_BYTES, b->map, count);
     int end = s.end(s.context);
     if (error || end) {
-        status = end ? end : error == SWITCH_FAT_IO ? SWITCH_BLOCK_IO : SWITCH_BLOCK_CORRUPT;
+        status = end ? end : switch_block_fat_status(error);
         goto failure;
     }
     memcpy(b->sorted, b->map, b->map_bytes);
@@ -248,7 +253,7 @@ int switch_data_read(struct switch_data_backend *b, uint64_t offset, void *bytes
     if (status)
         return status;
     int error = switch_split_read_indexed(&b->disk, offset, bytes, length);
-    return finish(b, error == SWITCH_FAT_IO ? SWITCH_BLOCK_IO : error ? SWITCH_BLOCK_CORRUPT : SWITCH_BLOCK_OK);
+    return finish(b, switch_block_fat_status(error));
 }
 
 int switch_data_write(struct switch_data_backend *b, uint64_t offset, const void *bytes, uint32_t length)
@@ -275,7 +280,8 @@ int switch_data_write(struct switch_data_backend *b, uint64_t offset, const void
         }
         uint32_t within = (uint32_t)(at % cluster_bytes) / 512;
         uint64_t lba = v->data_start + (uint64_t)(f->clusters[index] - 2) * v->sectors_per_cluster + within;
-        uint32_t sectors = v->sectors_per_cluster - within, available = length / 512;
+        uint32_t sectors = v->sectors_per_cluster - within;
+        uint32_t available = length / 512;
         uint32_t file_remaining = (uint32_t)((f->file.size - at) / 512);
         if (available > file_remaining)
             available = file_remaining;

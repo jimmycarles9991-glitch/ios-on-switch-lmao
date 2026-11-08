@@ -2,12 +2,6 @@
 """Read capture/probe.out + probe.log (nvdec NVDEC_PROBE records) into per-probe dicts."""
 
 
-def fnv(b: bytes, h: int = 0xCBF29CE484222325) -> int:
-    for x in b:
-        h = ((h ^ x) * 0x100000001B3) & 0xFFFFFFFFFFFFFFFF
-    return h
-
-
 def load(out_path: str, log_path: str) -> list[dict]:
     """Give each PROBE line of probe.out with its submission's decoded draw (probe.mm: one command buffer per state).
 

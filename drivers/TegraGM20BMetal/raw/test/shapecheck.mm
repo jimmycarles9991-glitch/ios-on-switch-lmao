@@ -100,6 +100,17 @@ int main(int argc, char **argv)
                                                   : "776x24 mipmapped, memoryless (a chain)",
                     [dev newTextureWithDescriptor:d], raw_metal_chains_on());
         }
+        for (MTLPixelFormat format : {MTLPixelFormat(43), MTLPixelFormatBGRA8Unorm_sRGB}) {
+            MTLTextureDescriptor *d = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:format
+                                                                                         width:776
+                                                                                        height:24
+                                                                                     mipmapped:YES];
+            d.usage = MTLTextureUsageShaderRead | MTLTextureUsageRenderTarget;
+            d.storageMode = MTLStorageModePrivate;
+            verdict(format == MTLPixelFormat(43) ? "776x24 mipmapped BGR5A1Unorm (a chain)"
+                                                 : "776x24 mipmapped BGRA8Unorm_sRGB (a chain)",
+                    [dev newTextureWithDescriptor:d], true);
+        }
         MTLTextureDescriptor *d3 = [MTLTextureDescriptor new];
         d3.textureType = MTLTextureType3D;
         d3.pixelFormat = MTLPixelFormatRGBA16Float;

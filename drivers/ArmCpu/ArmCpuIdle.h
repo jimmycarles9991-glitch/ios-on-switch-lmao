@@ -4,15 +4,15 @@
 #include <stdint.h>
 
 namespace armcpu {
-bool nativeGicV2Smp(void);
-bool psciSmcConduit(void);
+bool nativeGicV2Smp();
+bool psciSmcConduit();
 int64_t psciSmc(uint64_t function, uint64_t a, uint64_t b, uint64_t c);
-uintptr_t gicDistributor(void);
-void fillBootRecord(void);
+uintptr_t gicDistributor();
+void fillBootRecord();
 // On the core back from C7, interrupts masked.
-void restoreBankedGic(void);
+void restoreBankedGic();
 }  // namespace armcpu
 
 // The all-cores observer, once every secondary runs: C7 on after its checks, or one line saying which failed. Thread
 // context.
-void armcpu_idle_start(void);
+void armcpu_idle_start();

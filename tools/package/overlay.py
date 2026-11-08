@@ -5,7 +5,7 @@ They are kept on Data under /private/var/Switch/overlay (the deploy copies the b
 
 Three steps of //boot:package, so that each overlay edit reruns only what reads it:
 
-    overlay.py plan --manifest M --portrait-header H [--given SOURCE]... [--release] --out PLAN
+    overlay.py plan --manifest M --portrait-header H --kind KIND [--given SOURCE]... [--release] --out PLAN
         overlay/manifest.json, filtered and checked: the files to stage and the directories the kernel unions
         (each with the switch-no-<feature> boot-arg that hides it), which the ADT carries. Reads no overlay file.
     overlay.py trust --plan PLAN [--file SOURCE=PATH]... --out MODULE
@@ -16,7 +16,10 @@ Three steps of //boot:package, so that each overlay edit reruns only what reads 
 manifest.json: {"files": [{"path": absolute, "source": relative to the tree, "trust": bool, "mode": "0755",
 "boot-arg": name, "union": absolute}]}. The union directory is the file's own unless "union" names an existing
 ancestor (XNU unions are deep, so a new bundle directory can appear inside a sealed one). "portrait": true stages the
-file only for a portrait-native kernel, "debug": true only in a debug boot package (not with --release).
+file only for a portrait-native kernel, "debug": true only in a debug boot package (not with --release), "kind" only for
+that IPSW kind (a union over a directory the System volume lacks fails at boot).
+"bundle": true makes the entry a whole bundle directory: its source is a rules_apple .ipa, whose Payload/<the path's
+name>/ becomes the directory at path, and "trust" covers every Mach-O inside it.
 """
 
 import argparse
@@ -26,23 +29,27 @@ import posixpath
 import shutil
 import struct
 import sys
+import zipfile
 from collections.abc import Iterable
 from pathlib import Path
 
 from boot_config import portrait_native
 
+from tools.common import macho
 from tools.trustcache.trustcache import trust_module
 
 OVERLAY_ROOT = '/private/var/Switch/overlay'
 
 
-def plan(manifest: dict, portrait: bool, given: Iterable[str] | None = None, release: bool = False) -> dict:
-    """Return the manifest's files for this kernel.
+def plan(manifest: dict, portrait: bool, kind: str, given: Iterable[str] | None = None, release: bool = False) -> dict:
+    """Return the manifest's files for this kernel and IPSW kind.
 
     The plan: {"files": [{path, source, trust, mode, directory}], "dirs": [[d, gate]]}. `given`: the sources the build
     gives; a manifest entry it lacks is an error, not a silent omission. `release`: debug entries are left out.
     """
-    entries = [entry for entry in manifest['files'] if not (release and entry.get('debug'))]
+    entries = [
+        entry for entry in manifest['files'] if not (release and entry.get('debug')) and entry.get('kind', kind) == kind
+    ]
     if given is not None:
         missing = sorted({entry['source'] for entry in entries} - set(given))
         if missing:
@@ -74,6 +81,7 @@ def plan(manifest: dict, portrait: bool, given: Iterable[str] | None = None, rel
                 'trust': trust,
                 'mode': int(entry.get('mode', '0755' if trust else '0644'), 8),
                 'directory': directory,
+                'bundle': bool(entry.get('bundle')),
             }
         )
     used = {f['directory'] for f in files}
@@ -86,27 +94,48 @@ def cdhash(image: bytes) -> bytes:
     The first 20 bytes of the SHA-256 of its SHA-256 CodeDirectory (what codesign -dvvv prints as CDHash and what a
     trust cache entry holds).
     """
-    magic, _, _, _, ncmds = struct.unpack_from('<IiiII', image)
-    if magic != 0xFEEDFACF:
-        raise SystemExit('overlay: not a thin 64-bit Mach-O')
-    at = 32
-    for _ in range(ncmds):
-        cmd, size = struct.unpack_from('<II', image, at)
-        if cmd == 0x1D:  # LC_CODE_SIGNATURE
-            offset = struct.unpack_from('<I', image, at + 8)[0]
-            blob_magic, _, count = struct.unpack_from('>III', image, offset)
-            if blob_magic != 0xFADE0CC0:  # embedded signature SuperBlob
-                break
-            for index in range(count):
-                slot, start = struct.unpack_from('>II', image, offset + 12 + 8 * index)
-                if slot != 0 and not 0x1000 <= slot < 0x1005:  # CodeDirectory and its alternates
-                    continue
-                directory = offset + start
-                cd_magic, length = struct.unpack_from('>II', image, directory)
-                if cd_magic == 0xFADE0C02 and image[directory + 37] == 2:  # hashType SHA-256
-                    return hashlib.sha256(image[directory : directory + length]).digest()[:20]
-        at += size
+    try:
+        parsed = macho.macho(image, subtypes=None)
+    except ValueError as error:
+        raise SystemExit(f'overlay: not a thin 64-bit ARM64 Mach-O ({error})') from None
+    for at, _ in macho.commands_of(parsed, macho.LC_CODE_SIGNATURE)[:1]:
+        offset = struct.unpack_from('<I', image, at + 8)[0]
+        blob_magic, _, count = struct.unpack_from('>III', image, offset)
+        if blob_magic != 0xFADE0CC0:  # embedded signature SuperBlob
+            break
+        for index in range(count):
+            slot, start = struct.unpack_from('>II', image, offset + 12 + 8 * index)
+            if slot != 0 and not 0x1000 <= slot < 0x1005:  # CodeDirectory and its alternates
+                continue
+            directory = offset + start
+            cd_magic, length = struct.unpack_from('>II', image, directory)
+            if cd_magic == 0xFADE0C02 and image[directory + 37] == 2:  # hashType SHA-256
+                return hashlib.sha256(image[directory : directory + length]).digest()[:20]
     raise SystemExit('overlay: no SHA-256 CodeDirectory (sign it with codesign -s -)')
+
+
+MACHO_64 = b'\xcf\xfa\xed\xfe'
+
+
+def bundle_files(ipa: Path, path: str) -> list[tuple[str, bytes]]:
+    """Return the files of the .app an .ipa carries for `path` (Payload/<its name>/), by path inside the bundle."""
+    prefix = f'Payload/{posixpath.basename(path)}/'
+    with zipfile.ZipFile(ipa) as archive:
+        files = [
+            (info.filename[len(prefix) :], archive.read(info))
+            for info in sorted(archive.infolist(), key=lambda info: info.filename)
+            if info.filename.startswith(prefix) and not info.is_dir()
+        ]
+    if not files:
+        raise SystemExit(f'overlay: {ipa.name} has no {prefix}')
+    return files
+
+
+def code_of(entry: dict, source: Path) -> list[bytes]:
+    """Return the Mach-O images a trusted entry puts in the overlay: the file itself, or a bundle's Mach-Os."""
+    if not entry['bundle']:
+        return [source.read_bytes()]
+    return [data for _, data in bundle_files(source, entry['path']) if data[:4] == MACHO_64]
 
 
 def _files(specs: Iterable[str]) -> dict[str, Path]:
@@ -129,6 +158,7 @@ def main() -> None:
     p = step.add_parser('plan')
     for name in ('manifest', 'portrait-header', 'out'):
         p.add_argument('--' + name, required=True, type=Path)
+    p.add_argument('--kind', required=True)
     p.add_argument('--given', action='append', default=[])
     p.add_argument('--release', action='store_true')
     for name in ('trust', 'tree'):
@@ -141,6 +171,7 @@ def main() -> None:
         result = plan(
             json.loads(args.manifest.read_text()),
             portrait_native(args.portrait_header),
+            args.kind,
             args.given,
             args.release,
         )
@@ -149,7 +180,7 @@ def main() -> None:
     files = _files(args.file)
     entries = json.loads(args.plan.read_text())['files']
     if args.step == 'trust':
-        hashes = [cdhash(_need(files, e).read_bytes()) for e in entries if e['trust']]
+        hashes = [cdhash(image) for e in entries if e['trust'] for image in code_of(e, _need(files, e))]
         # Flags and launch-constraint category 0: overlay code lives on Data, where the system categories' volume
         # constraints would refuse it.
         args.out.write_bytes(trust_module(hashes) if hashes else b'')
@@ -158,6 +189,13 @@ def main() -> None:
     args.out.mkdir(parents=True, exist_ok=True)
     for entry in entries:
         target = args.out / entry['path'].lstrip('/')
+        if entry['bundle']:
+            for name, data in bundle_files(_need(files, entry), entry['path']):
+                member = target / name
+                member.parent.mkdir(parents=True, exist_ok=True)
+                member.write_bytes(data)
+                member.chmod(0o755 if data[:4] == MACHO_64 else 0o644)
+            continue
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(_need(files, entry), target)
         target.chmod(entry['mode'])

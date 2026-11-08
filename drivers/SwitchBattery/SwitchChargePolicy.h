@@ -113,29 +113,29 @@ enum : uint8_t {
     VendorPart = 0x0a,
 };
 
-constexpr uint8_t kHiZ = 0x80, kVindpmMask = 0x78, kIinlimMask = 0x07;  // REG00
-constexpr uint8_t kChgConfigMask = 0x30, kChgConfigOff = 0x00, kChgConfigCharge = 0x10, kChgConfigOtg = 0x20,
-                  kSysMinMask = 0x0e, kBoostLim1300 = 0x01, kWatchdogReset = 0x40;             // REG01
-constexpr uint8_t kIchgMask = 0xfc, kForce20Pct = 0x01;                                        // REG02
-constexpr uint8_t kVregMask = 0xfc;                                                            // REG04
-constexpr uint8_t kEnTerm = 0x80, kWatchdogMask = 0x30, kEnTimer = 0x08;                       // REG05
-constexpr uint8_t kBatCompMask = 0xe0, kVclampMask = 0x1c, kTregMask = 0x03, kTreg120 = 0x03;  // REG06
-constexpr uint8_t kPowerGood = 0x04, kDpm = 0x08, kThermalReg = 0x02;                          // REG08
-constexpr uint8_t kFaultWatchdog = 0x80;                                                       // REG09: default mode
+constexpr unsigned kHiZ = 0x80, kVindpmMask = 0x78, kIinlimMask = 0x07;  // REG00
+constexpr unsigned kChgConfigMask = 0x30, kChgConfigOff = 0x00, kChgConfigCharge = 0x10, kChgConfigOtg = 0x20,
+                   kSysMinMask = 0x0e, kBoostLim1300 = 0x01, kWatchdogReset = 0x40;             // REG01
+constexpr unsigned kIchgMask = 0xfc, kForce20Pct = 0x01;                                        // REG02
+constexpr unsigned kVregMask = 0xfc;                                                            // REG04
+constexpr unsigned kEnTerm = 0x80, kWatchdogMask = 0x30, kEnTimer = 0x08;                       // REG05
+constexpr unsigned kBatCompMask = 0xe0, kVclampMask = 0x1c, kTregMask = 0x03, kTreg120 = 0x03;  // REG06
+constexpr unsigned kPowerGood = 0x04, kDpm = 0x08, kThermalReg = 0x02;                          // REG08
+constexpr unsigned kFaultWatchdog = 0x80;                                                       // REG09: default mode
 
 // REG08 VBUS_STAT: 0 none, 1 USB host, 2 adapter, 3 OTG; CHRG_STAT: 0 off, 1 pre-charge, 2 fast charge, 3 done.
-inline constexpr unsigned vbusStat(uint8_t reg08)
+constexpr unsigned vbusStat(uint8_t reg08)
 {
     return reg08 >> 6;
 }
 
-inline constexpr unsigned chargeStat(uint8_t reg08)
+constexpr unsigned chargeStat(uint8_t reg08)
 {
-    return (reg08 >> 4) & 3;
+    return (static_cast<unsigned>(reg08) >> 4) & 3;
 }
 
 // [AMS-INIT] EncodeInputCurrentLimit: the highest step at or below ma (100 mA below the first).
-inline constexpr uint8_t encodeInputLimit(unsigned ma)
+constexpr uint8_t encodeInputLimit(unsigned ma)
 {
     uint8_t step = 0;
     while (step < 7 && kInputSteps[step + 1] <= ma)
@@ -143,63 +143,70 @@ inline constexpr uint8_t encodeInputLimit(unsigned ma)
     return step;
 }
 
-inline constexpr unsigned decodeInputLimit(uint8_t reg)
+constexpr unsigned decodeInputLimit(uint8_t reg)
 {
     return kInputSteps[reg & kIinlimMask];
 }
 
-// [AMS-INIT] EncodeFastChargeCurrentLimit (512..4544 mA, 64 mA steps, rounded down), capped at our maximum.
-inline constexpr uint8_t encodeChargeCurrent(unsigned ma)
+constexpr unsigned clampTo(unsigned v, unsigned lo, unsigned hi)
 {
-    ma = ma > kChargeCurrentMaxMA ? kChargeCurrentMaxMA : ma < 512 ? 512 : ma;
-    return (uint8_t)(((ma - 512) >> 6) << 2);
+    if (v < lo)
+        return lo;
+    return v > hi ? hi : v;
 }
 
-inline constexpr unsigned decodeChargeCurrent(uint8_t reg)
+// [AMS-INIT] EncodeFastChargeCurrentLimit (512..4544 mA, 64 mA steps, rounded down), capped at our maximum.
+constexpr uint8_t encodeChargeCurrent(unsigned ma)
 {
-    return 512 + ((unsigned)(reg & kIchgMask) << 4);
+    ma = clampTo(ma, 512, kChargeCurrentMaxMA);
+    return static_cast<uint8_t>(((ma - 512) >> 6) << 2);
+}
+
+constexpr unsigned decodeChargeCurrent(uint8_t reg)
+{
+    return 512 + (static_cast<unsigned>(reg & kIchgMask) << 4);
 }
 
 // [AMS-INIT] EncodeChargeVoltageLimit (3504..4400 mV, 16 mV steps, rounded down), capped at our maximum.
-inline constexpr uint8_t encodeChargeVoltage(unsigned mv)
+constexpr uint8_t encodeChargeVoltage(unsigned mv)
 {
-    mv = mv > kChargeVoltageMaxMV ? kChargeVoltageMaxMV : mv < 3504 ? 3504 : mv;
-    return (uint8_t)(((mv - 3504) >> 4) << 2);
+    mv = clampTo(mv, 3504, kChargeVoltageMaxMV);
+    return static_cast<uint8_t>(((mv - 3504) >> 4) << 2);
 }
 
-inline constexpr unsigned decodeChargeVoltage(uint8_t reg)
+constexpr unsigned decodeChargeVoltage(uint8_t reg)
 {
-    return 3504 + ((unsigned)(reg & kVregMask) << 2);
+    return 3504 + (static_cast<unsigned>(reg & kVregMask) << 2);
 }
 
 // [AMS-INIT] EncodeInputVoltageLimit (VINDPM 3880..5080 mV, 80 mV steps).
-inline constexpr uint8_t encodeInputVoltage(unsigned mv)
+constexpr uint8_t encodeInputVoltage(unsigned mv)
 {
-    mv = mv > 5080 ? 5080 : mv < 3880 ? 3880 : mv;
-    return (uint8_t)((((mv - 3880) / 80) & 0xf) << 3);
+    mv = clampTo(mv, 3880, 5080);
+    return static_cast<uint8_t>((((mv - 3880) / 80) & 0xf) << 3);
 }
 
-inline constexpr unsigned decodeInputVoltage(uint8_t reg)
+constexpr unsigned decodeInputVoltage(uint8_t reg)
 {
     return 3880 + ((reg & kVindpmMask) >> 3) * 80;
 }
 
 // [AMS-INIT] EncodePreChargeCurrentLimit / EncodeTerminationCurrentLimit (128..2048 mA, 128 mA steps).
-inline constexpr uint8_t encodePreChargeTermination(unsigned preMA, unsigned termMA)
+constexpr uint8_t encodePreChargeTermination(unsigned preMA, unsigned termMA)
 {
-    preMA = preMA < 128 ? 128 : preMA > 2048 ? 2048 : preMA;
-    termMA = termMA < 128 ? 128 : termMA > 2048 ? 2048 : termMA;
-    return (uint8_t)(((preMA - 128) >> 7) << 4 | ((termMA - 128) >> 7));
+    preMA = clampTo(preMA, 128, 2048);
+    termMA = clampTo(termMA, 128, 2048);
+    return static_cast<uint8_t>(((preMA - 128) >> 7) << 4 | ((termMA - 128) >> 7));
 }
 
 // [AMS-INIT] EncodeMinimumSystemVoltageLimit (3000..3700 mV, 100 mV steps) into REG01 bits 3:1.
-inline constexpr uint8_t encodeSystemMinimum(unsigned mv)
+constexpr uint8_t encodeSystemMinimum(unsigned mv)
 {
-    mv = mv < 3000 ? 3000 : mv > 3700 ? 3700 : mv;
-    return (uint8_t)(((mv - 3000) / 100) << 1);
+    mv = clampTo(mv, 3000, 3700);
+    return static_cast<uint8_t>(((mv - 3000) / 100) << 1);
 }
 
-inline constexpr unsigned watchdogSeconds(uint8_t reg05)
+constexpr unsigned watchdogSeconds(uint8_t reg05)
 {
     return ((reg05 & kWatchdogMask) >> 4) == 0 ? 0 : 40u << (((reg05 & kWatchdogMask) >> 4) - 1);
 }
@@ -228,48 +235,73 @@ enum class Zone : uint8_t {
     Hot
 };
 
-inline constexpr const char *zoneName(Zone z)
+constexpr const char *zoneName(Zone z)
 {
-    return z == Zone::Cold ? "cold" : z == Zone::Cool ? "cool" : z == Zone::Normal ? "normal" : "hot";
+    switch (z) {
+    case Zone::Cold:
+        return "cold";
+    case Zone::Cool:
+        return "cool";
+    case Zone::Normal:
+        return "normal";
+    default:
+        return "hot";
+    }
 }
 
-inline constexpr bool zoneCharges(Zone z)
+constexpr bool zoneCharges(Zone z)
 {
     return z == Zone::Cool || z == Zone::Normal;
 }
 
-inline constexpr unsigned zoneChargeCurrent(Zone z)
+constexpr unsigned zoneChargeCurrent(Zone z)
 {
-    return z == Zone::Normal ? kChargeCurrentMaxMA : z == Zone::Cool ? kCoolChargeCurrentMA : kOffChargeCurrentMA;
+    switch (z) {
+    case Zone::Normal:
+        return kChargeCurrentMaxMA;
+    case Zone::Cool:
+        return kCoolChargeCurrentMA;
+    default:
+        return kOffChargeCurrentMA;
+    }
 }
 
-inline constexpr unsigned zoneChargeVoltage(Zone)
+constexpr unsigned zoneChargeVoltage(Zone)
 {
     return kChargeVoltageMaxMV;
 }
 
-inline constexpr unsigned zoneRank(Zone z)
+constexpr unsigned zoneRank(Zone z)
 {
-    return z == Zone::Normal ? 2 : z == Zone::Cool ? 1 : 0;
+    switch (z) {
+    case Zone::Normal:
+        return 2;
+    case Zone::Cool:
+        return 1;
+    default:
+        return 0;
+    }
 }
 
 // The zone of a temperature (centi-degrees C) without hysteresis.
-inline constexpr Zone rawZone(int centiC)
+constexpr Zone rawZone(int centiC)
 {
-    return centiC < kColdBelowC * 100   ? Zone::Cold
-           : centiC < kCoolBelowC * 100 ? Zone::Cool
-           : centiC < kHotFromC * 100   ? Zone::Normal
-                                        : Zone::Hot;
+    if (centiC < kColdBelowC * 100)
+        return Zone::Cold;
+    if (centiC < kCoolBelowC * 100)
+        return Zone::Cool;
+    return centiC < kHotFromC * 100 ? Zone::Normal : Zone::Hot;
 }
 
 // Next zone from the current one: toward less charge current at once; toward more only when the temperature is
 // kHysteresisCentiC inside the new zone on both sides (the least-current zone within +-1 C).
-inline constexpr Zone nextZone(Zone current, int centiC)
+constexpr Zone nextZone(Zone current, int centiC)
 {
     const Zone raw = rawZone(centiC);
     if (zoneRank(raw) <= zoneRank(current))
         return raw;
-    const Zone below = rawZone(centiC - kHysteresisCentiC), above = rawZone(centiC + kHysteresisCentiC);
+    const Zone below = rawZone(centiC - kHysteresisCentiC);
+    const Zone above = rawZone(centiC + kHysteresisCentiC);
     Zone safe = raw;
     if (zoneRank(below) < zoneRank(safe))
         safe = below;
@@ -278,7 +310,7 @@ inline constexpr Zone nextZone(Zone current, int centiC)
     return zoneRank(safe) > zoneRank(current) ? safe : current;
 }
 
-inline constexpr ChargerSetting chargerSetting(Zone z)
+constexpr ChargerSetting chargerSetting(Zone z)
 {
     return ChargerSetting{bq::encodeChargeCurrent(zoneChargeCurrent(z)), kReg03Value,
                           bq::encodeChargeVoltage(zoneChargeVoltage(z)), kReg05Value, kReg06Value};
@@ -310,7 +342,7 @@ struct Decision {
 
 // The fast-charge current for a zone under a thermal limit index: a percentage of the zone's, rounded down to the
 // BQ24193's 64 mA step, never below its 512 mA minimum nor above the zone's own.
-inline constexpr unsigned limitedChargeCurrent(Zone z, unsigned thermalLimitIndex)
+constexpr unsigned limitedChargeCurrent(Zone z, unsigned thermalLimitIndex)
 {
     const unsigned zoneMA = zoneChargeCurrent(z);
     const unsigned percent = kThermalRatePercent[thermalLimitIndex > 3 ? 3 : thermalLimitIndex];
@@ -321,7 +353,7 @@ inline constexpr unsigned limitedChargeCurrent(Zone z, unsigned thermalLimitInde
 
 // Every input in one place: the temperature zone and each request only ever take charge away (lower current, charging
 // off, input off); nothing here can exceed the zone's own setting.
-inline constexpr Decision decide(Zone z, const Requests &q)
+constexpr Decision decide(Zone z, const Requests &q)
 {
     const bool zoneOk = zoneCharges(z);
     const bool charge = zoneOk && !q.osInhibit && !q.predictiveInhibit && !q.inflowDisabled;
@@ -334,13 +366,13 @@ inline constexpr Decision decide(Zone z, const Requests &q)
                     q.predictiveInhibit ? kChargingOverridePredictive : 0u};
 }
 
-inline constexpr ChargerSetting chargerSetting(const Decision &d)
+constexpr ChargerSetting chargerSetting(const Decision &d)
 {
     return ChargerSetting{bq::encodeChargeCurrent(d.chargeCurrentMA), kReg03Value,
                           bq::encodeChargeVoltage(d.chargeVoltageMV), kReg05Value, kReg06Value};
 }
 
-inline constexpr bool sameDecision(const Decision &a, const Decision &b)
+constexpr bool sameDecision(const Decision &a, const Decision &b)
 {
     return a.zone == b.zone && a.charge == b.charge && a.hiZ == b.hiZ && a.chargeCurrentMA == b.chargeCurrentMA &&
            a.chargeVoltageMV == b.chargeVoltageMV && a.notChargingReason == b.notChargingReason &&
@@ -348,19 +380,26 @@ inline constexpr bool sameDecision(const Decision &a, const Decision &b)
 }
 
 // More charge current or voltage than before (the order a change is written in: less first).
-inline constexpr bool raises(const Decision &from, const Decision &to)
+constexpr bool raises(const Decision &from, const Decision &to)
 {
     return (to.charge && !from.charge) || to.chargeCurrentMA > from.chargeCurrentMA ||
            to.chargeVoltageMV > from.chargeVoltageMV;
+}
+
+// A TALRT_Th window: the high and low edges (whole degrees C, -128..127) as two's-complement bytes.
+constexpr uint16_t packWindow(int hi, int lo)
+{
+    return static_cast<uint16_t>((static_cast<unsigned>(hi) & 0xffu) << 8 | (static_cast<unsigned>(lo) & 0xffu));
 }
 
 // The MAX17050 TALRT_Th (0x02) window that holds while the zone stays: high byte TMAX, low byte TMIN, signed degrees C
 // (Linux max17042_battery.c POWER_SUPPLY_PROP_TEMP_ALERT_MIN/MAX; 0x7f80 = off). The gauge alerts when TEMP leaves
 // [TMIN, TMAX]; the reading that follows decides with nextZone(). A temperature already outside its zone's window (only
 // after a jump across two zones) gets a 1 C window around itself.
-inline constexpr uint16_t temperatureWindow(Zone z, int centiC)
+constexpr uint16_t temperatureWindow(Zone z, int centiC)
 {
-    int lo = -128, hi = 127;
+    int lo = -128;
+    int hi = 127;
     switch (z) {
     case Zone::Cold:
         hi = kColdBelowC + 1;
@@ -382,50 +421,53 @@ inline constexpr uint16_t temperatureWindow(Zone z, int centiC)
         lo = -128;
     if (hi > 127)
         hi = 127;
-    return (uint16_t)((uint8_t)(int8_t)hi << 8 | (uint8_t)(int8_t)lo);
+    return packWindow(hi, lo);
 }
 
 // Two TALRT_Th windows at once (the narrower edges of each): for a gauge alert that serves another reader too, e.g. a
 // window of about a degree around the reading for thermalmonitord's battery sensors (switch_max17050_talrt). Both
 // windows hold the current reading, so their intersection does; if they do not overlap, the zone window `zone` is kept.
-inline constexpr uint16_t intersectWindows(uint16_t zone, uint16_t other)
+constexpr uint16_t intersectWindows(uint16_t zone, uint16_t other)
 {
-    const int zoneHi = (int8_t)(zone >> 8), zoneLo = (int8_t)(zone & 0xff);
-    const int otherHi = (int8_t)(other >> 8), otherLo = (int8_t)(other & 0xff);
-    const int hi = zoneHi < otherHi ? zoneHi : otherHi, lo = zoneLo > otherLo ? zoneLo : otherLo;
+    const int zoneHi = static_cast<int8_t>(zone >> 8);
+    const int zoneLo = static_cast<int8_t>(zone & 0xff);
+    const int otherHi = static_cast<int8_t>(other >> 8);
+    const int otherLo = static_cast<int8_t>(other & 0xff);
+    const int hi = zoneHi < otherHi ? zoneHi : otherHi;
+    const int lo = zoneLo > otherLo ? zoneLo : otherLo;
     if (lo > hi)
         return zone;
-    return (uint16_t)((uint8_t)(int8_t)hi << 8 | (uint8_t)(int8_t)lo);
+    return packWindow(hi, lo);
 }
 
 // USB-PD objects (BM92T36 READ_PDOS_SRC / CURRENT_PDO / CURRENT_RDO / SET_RDO; USB PD R3.0 6.4.1.2.2 and 6.4.2).
 // PDO type (0 fixed, 1 battery, 2 variable, 3 augmented), current (10 mA) and voltage (50 mV) of a fixed PDO.
-inline constexpr unsigned pdoType(uint32_t p)
+constexpr unsigned pdoType(uint32_t p)
 {
     return p >> 30;
 }
 
-inline constexpr unsigned pdoMilliamps(uint32_t p)
+constexpr unsigned pdoMilliamps(uint32_t p)
 {
     return (p & 0x3ff) * 10;
 }
 
-inline constexpr unsigned pdoMillivolts(uint32_t p)
+constexpr unsigned pdoMillivolts(uint32_t p)
 {
     return ((p >> 10) & 0x3ff) * 50;
 }
 
-inline constexpr unsigned rdoPosition(uint32_t r)
+constexpr unsigned rdoPosition(uint32_t r)
 {
     return (r >> 28) & 7;
 }
 
-inline constexpr unsigned rdoOperatingMilliamps(uint32_t r)
+constexpr unsigned rdoOperatingMilliamps(uint32_t r)
 {
     return ((r >> 10) & 0x3ff) * 10;
 }
 
-inline constexpr unsigned rdoMaxMilliamps(uint32_t r)
+constexpr unsigned rdoMaxMilliamps(uint32_t r)
 {
     return (r & 0x3ff) * 10;
 }
@@ -439,13 +481,17 @@ constexpr uint32_t kRdoNoUsbSuspend = 1u << 24, kRdoUsbCommunications = 1u << 25
 // the reserve, a MacBook's port (5 V 1.5 A PDO) gave 0.9 A taken, 0.83 A on the meter, the input limit binding (DPM)
 // and the battery barely charging. Unlike bm92txx, a PDO with less current than the reserve gives 0 (its unsigned
 // subtraction wrapped to the cap), and 0 means "no usable contract".
-inline constexpr unsigned pdInputLimit(unsigned millivolts, unsigned milliamps, bool dock = false)
+constexpr unsigned pdInputLimit(unsigned millivolts, unsigned milliamps, bool dock = false)
 {
     if (!millivolts)
         return 0;
     const unsigned reserve = dock ? (millivolts > 5000 ? 4500000u : 2500000u) / millivolts : 0;
     unsigned limit = milliamps > reserve ? milliamps - reserve : 0;
-    const unsigned cap = millivolts == 5000 ? 2000 : millivolts == 9000 ? 2000 : millivolts == 12000 ? 1500 : 1200;
+    unsigned cap = 1200;
+    if (millivolts == 5000 || millivolts == 9000)
+        cap = 2000;
+    if (millivolts == 12000)
+        cap = 1500;
     if (limit > cap)
         limit = cap;
     if (limit < kInputSteps[0])
@@ -467,7 +513,7 @@ struct PdChoice {
 // PDO's own power; here by the power the charger will take from it (voltage x pdInputLimit), which is what charges:
 // for 9 V 2 A and 12 V 1.5 A (both 18 W) bm92txx takes 12 V at 900 mA (10.8 W), this 9 V at 1500 mA (13.5 W). A PDO
 // whose input limit is below the 500 mA the charger gets without a contract (kUnknownSourceMA) is never chosen.
-inline constexpr PdChoice choosePdo(const uint32_t *pdos, unsigned count)
+constexpr PdChoice choosePdo(const uint32_t *pdos, unsigned count)
 {
     PdChoice choice{0, 0, 0, 0, 0, false, "no source PDOs (not USB-PD)"};
     if (count > 7)
@@ -486,7 +532,8 @@ inline constexpr PdChoice choosePdo(const uint32_t *pdos, unsigned count)
     choice.refusal = "no fixed 5/9/12/15 V PDO up to 3 A that gives 500 mA or more";
     for (unsigned i = 0; i < count; ++i) {
         const uint32_t p = pdos[i];
-        const unsigned mv = pdoMillivolts(p), ma = pdoMilliamps(p);
+        const unsigned mv = pdoMillivolts(p);
+        const unsigned ma = pdoMilliamps(p);
         if (pdoType(p) != 0 || ma > kPdMaxMilliamps)
             continue;
         if (mv != 5000 && mv != 9000 && mv != 12000 && mv != kPdMaxMillivolts)
@@ -510,18 +557,19 @@ inline constexpr PdChoice choosePdo(const uint32_t *pdos, unsigned count)
 // bus), no capability mismatch, no give-back. bm92txx's rd_object puts usb_comms on bit 26, which the specification
 // names Capability Mismatch; this follows the specification (if a source refuses the request, bm92txx's layout is
 // the first thing to try).
-inline constexpr uint32_t encodeRdo(const PdChoice &c)
+constexpr uint32_t encodeRdo(const PdChoice &c)
 {
-    return (uint32_t)(c.position & 7) << 28 | kRdoUsbCommunications | kRdoNoUsbSuspend |
-           (uint32_t)(c.inputLimit / 10) << 10 | (uint32_t)(c.milliamps / 10);
+    return static_cast<uint32_t>(c.position & 7) << 28 | kRdoUsbCommunications | kRdoNoUsbSuspend |
+           static_cast<uint32_t>(c.inputLimit / 10) << 10 | static_cast<uint32_t>(c.milliamps / 10);
 }
 
 // A contract matches the request when the controller's CURRENT_RDO is ours and CURRENT_PDO is the PDO we chose.
-inline constexpr bool contractMatches(const PdChoice &c, uint32_t currentPdo, uint32_t currentRdo)
+constexpr bool contractMatches(const PdChoice &c, uint32_t currentPdo, uint32_t currentRdo)
 {
-    return c.position && rdoPosition(currentRdo) == c.position && rdoOperatingMilliamps(currentRdo) == c.inputLimit &&
-           rdoMaxMilliamps(currentRdo) == c.milliamps && pdoType(currentPdo) == 0 &&
-           pdoMillivolts(currentPdo) == c.millivolts && pdoMilliamps(currentPdo) == c.milliamps;
+    return (c.position != 0u) && rdoPosition(currentRdo) == c.position &&
+           rdoOperatingMilliamps(currentRdo) == c.inputLimit && rdoMaxMilliamps(currentRdo) == c.milliamps &&
+           pdoType(currentPdo) == 0 && pdoMillivolts(currentPdo) == c.millivolts &&
+           pdoMilliamps(currentPdo) == c.milliamps;
 }
 
 static_assert(bq::decodeChargeCurrent(bq::encodeChargeCurrent(2048)) == 2048, "ICHG 2048");
@@ -542,7 +590,8 @@ static_assert(limitedChargeCurrent(Zone::Normal, 0) == 2048 && limitedChargeCurr
 static_assert(!decide(Zone::Normal, Requests{false, true, false, 0}).charge &&
                   decide(Zone::Normal, Requests{false, true, false, 0}).chargingOverride == kChargingOverridePredictive,
               "OBC hold");
-static_assert((decide(Zone::Hot, Requests{}).notChargingReason & kTlcMask) && !decide(Zone::Hot, Requests{}).charge,
+static_assert(((decide(Zone::Hot, Requests{}).notChargingReason & kTlcMask) != 0u) &&
+                  !decide(Zone::Hot, Requests{}).charge,
               "hot: TLC");
 
 }  // namespace charge

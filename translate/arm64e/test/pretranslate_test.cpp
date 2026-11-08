@@ -2,13 +2,16 @@
 // dead PAC checks, the marker, re-signing, the fallbacks, and the verifier catching what it must.
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <cstdint>
 #include <cstring>
+#include <string>
 #include <vector>
 
 extern "C" {
 #include "../macho/codesign.h"
 #include "../macho/pretranslate.h"
+#include "../macho/stub_split.h"
 }
 
 namespace {
@@ -33,7 +36,10 @@ struct Spec {
     uint32_t text_words = 0;            // __text size in words (0: code.size())
     bool sign = true;
     uint32_t reserved = 0;
+    int fips = 0;  // 1: __TEXT,__fips_hmacs holds the MAC of __text (macho/fips.h); 2: a stale one
 };
+
+constexpr uint32_t kFipsOff = 0x800;
 
 void put32(std::vector<uint8_t> &b, size_t at, uint32_t v)
 {
@@ -63,10 +69,12 @@ void name16(std::vector<uint8_t> &b, size_t at, const char *n)
     memcpy(&b[at], n, strlen(n));
 }
 
-// __TEXT (0x4000, one __text section), __LINKEDIT (function starts, then an ad hoc SHA-256 signature).
+// __TEXT (0x4000: __text, and __fips_hmacs before it with s.fips), __LINKEDIT (function starts, then an ad hoc
+// SHA-256 signature).
 std::vector<uint8_t> build(const Spec &s)
 {
-    const uint32_t ncmds = s.sign ? 4 : 3, sizeofcmds = 152 + 72 + 16 + (s.sign ? 16 : 0);
+    const uint32_t text_cmd = s.fips ? 232 : 152;
+    const uint32_t ncmds = s.sign ? 4 : 3, sizeofcmds = text_cmd + 72 + 16 + (s.sign ? 16 : 0);
     const uint32_t fs_off = kSeg, sig_off = kSeg + 0x100, ident_off = 88, hash_off = ident_off + 2;
     const uint32_t pages = (sig_off + 4095) / 4096, cd_len = hash_off + 32 * pages, sig_len = 20 + cd_len;
     std::vector<uint8_t> b(sig_off + (s.sign ? sig_len : 0), 0);
@@ -79,14 +87,22 @@ std::vector<uint8_t> build(const Spec &s)
     put32(b, 28, s.reserved);
     size_t at = 32;
     put32(b, at, 0x19);
-    put32(b, at + 4, 152);
+    put32(b, at + 4, text_cmd);
     name16(b, at + 8, "__TEXT");
     put64(b, at + 24, kBase);
     put64(b, at + 32, kSeg);
     put64(b, at + 48, kSeg);
     put32(b, at + 56, 5);
     put32(b, at + 60, 5);
-    put32(b, at + 64, 1);
+    put32(b, at + 64, s.fips ? 2 : 1);
+    if (s.fips) {
+        name16(b, at + 72, "__fips_hmacs");
+        name16(b, at + 88, "__TEXT");
+        put64(b, at + 104, kBase + kFipsOff);
+        put64(b, at + 112, A64X_FIPS_MAC_SIZE);
+        put32(b, at + 120, kFipsOff);
+        at += 80;
+    }
     name16(b, at + 72, "__text");
     name16(b, at + 88, "__TEXT");
     const uint32_t words = s.text_words ? s.text_words : static_cast<uint32_t>(s.code.size());
@@ -125,6 +141,10 @@ std::vector<uint8_t> build(const Spec &s)
     at += 16;
     for (size_t i = 0; i < s.code.size(); i++)
         put32(b, kTextOff + 4 * i, s.code[i]);
+    if (s.fips)
+        a64x_fips_mac(&b[kTextOff], 4ull * words, &b[kFipsOff]);
+    if (s.fips == 2)
+        b[kFipsOff] ^= 1;
     if (!s.sign)
         return b;
     put32(b, at, 0x1D);
@@ -267,6 +287,76 @@ TEST(Pretranslate, NoRoomLeavesTheSliceForTheLoader)
     EXPECT_EQ(x.out, x.in);
 }
 
+// No tail, only 3-word holes: a CASAL with x30 live needs its own stub, longer than any hole, so it is split.
+TEST(Pretranslate, AStubLongerThanEveryHoleIsSplitOverSeveral)
+{
+    Spec s;
+    s.code.assign((kSeg - kTextOff) / 4, kAdd);
+    s.code[0] = kCasal;
+    s.code[1] = kRet;
+    s.starts = {0, 2};
+    const uint32_t lr_check[] = {kAutibsp, 0xCA1E07D0, 0xB6F00050, 0xD4388E20, kRet};
+    for (uint32_t f = 2; f + 5 <= s.code.size(); f += 5)
+        memcpy(&s.code[f], lr_check, sizeof(lr_check));
+    s.code.back() = kRet;
+    Result x;
+    run(s, x);
+    ASSERT_EQ(x.r.status, A64X_PT_TRANSLATED) << x.r.why;
+    EXPECT_EQ(x.verified, 1) << x.err;
+    EXPECT_EQ(x.r.tail_words, 0u);
+    const uint64_t site = kTextOff;
+    ASSERT_EQ(text(x, 0) & 0xFC000000u, 0x14000000u) << "x30 live: B to its own stub";
+    uint64_t pc = target(text(x, 0), site), holes = 1;
+    for (int words = 0; words < 64; words++, pc += 4) {
+        const uint32_t w = get32(x.out.data() + pc);
+        if ((w & 0xFC000000u) != 0x14000000u)
+            continue;
+        if (target(w, pc) == site + 4)
+            break;
+        pc = target(w, pc) - 4;
+        holes++;
+    }
+    EXPECT_GT(holes, 1u) << "the stub spans several holes";
+}
+
+// Every branch of a split stub reaches the new place of the word it reached before; one out of the stub keeps its target.
+TEST(StubSplit, BranchesFollowTheWordsTheyTarget)
+{
+    const uint64_t laid = 0x10000, site = 0x8000;
+    uint32_t st[A64X_STUB_MAX];
+    const int n = a64x_stub_v(kCasal, site, laid, (1u << 16) | (1u << 17), 0, st, A64X_STUB_MAX);
+    ASSERT_GT(n, 5);
+    std::vector<uint64_t> addr(n), links;
+    for (int j = 0; j < n; j++) {
+        addr[j] = 0x40000 + 0x100 * static_cast<uint64_t>(j / 2) + 4 * static_cast<uint64_t>(j % 2);
+        if (j % 2 == 1 && j + 1 < n)
+            links.push_back(addr[j] + 4);
+    }
+    std::vector<a64x_placed> out(n + links.size());
+    const int np = a64x_stub_split(st, n, laid, addr.data(), links.data(), static_cast<int>(links.size()), out.data());
+    ASSERT_EQ(np, n + static_cast<int>(links.size()));
+    int checked = 0;
+    for (const a64x_placed &w : out) {
+        bool is;
+        const int64_t off = a64x_branch_offset(w.word, &is);
+        const auto j = std::find(addr.begin(), addr.end(), w.at);
+        if (j == addr.end()) {
+            EXPECT_TRUE(is && w.at + off == *(std::find(addr.begin(), addr.end(), w.at - 4) + 1)) << "a link";
+            continue;
+        }
+        bool was;
+        const int64_t old = a64x_branch_offset(st[j - addr.begin()], &was);
+        ASSERT_EQ(is, was);
+        if (!is)
+            continue;
+        const uint64_t before = laid + 4 * static_cast<uint64_t>(j - addr.begin()) + old;
+        const uint64_t after = before >= laid && before < laid + 4ull * n ? addr[(before - laid) / 4] : before;
+        EXPECT_EQ(w.at + off, after);
+        checked++;
+    }
+    EXPECT_GE(checked, 3) << "the loop, the failure branch and the return";
+}
+
 TEST(Pretranslate, UnsignedSlicesAreLeftAlone)
 {
     Spec s = typical();
@@ -298,6 +388,45 @@ TEST(Pretranslate, MarkedSlicesStayAsTheyAre)
     run(s, x);
     EXPECT_EQ(x.r.status, A64X_PT_UNCHANGED);
     EXPECT_EQ(x.out, x.in);
+}
+
+TEST(Pretranslate, AFipsMacThatHeldIsThatOfTheTranslatedText)
+{
+    Spec s = typical();
+    s.fips = 1;
+    Result x;
+    run(s, x);
+    ASSERT_EQ(x.r.status, A64X_PT_TRANSLATED) << x.r.why;
+    EXPECT_EQ(x.r.fips_mac, 1);
+    uint8_t mac[A64X_FIPS_MAC_SIZE];
+    a64x_fips_mac(x.out.data() + kTextOff, 4 * s.code.size(), mac);
+    EXPECT_EQ(memcmp(mac, x.out.data() + kFipsOff, sizeof(mac)), 0);
+    EXPECT_GE(x.verified, 0) << x.err;
+}
+
+TEST(Pretranslate, AStaleFipsMacStays)
+{
+    Spec s = typical();
+    s.fips = 2;
+    Result x;
+    run(s, x);
+    ASSERT_EQ(x.r.status, A64X_PT_TRANSLATED) << x.r.why;
+    EXPECT_EQ(x.r.fips_mac, 0);
+    EXPECT_EQ(memcmp(x.out.data() + kFipsOff, x.in.data() + kFipsOff, A64X_FIPS_MAC_SIZE), 0);
+    EXPECT_GE(x.verified, 0) << x.err;
+}
+
+TEST(Pretranslate, TheVerifierCatchesAFipsMacLeftAsItWas)
+{
+    Spec s = typical();
+    s.fips = 1;
+    Result x;
+    run(s, x);
+    ASSERT_EQ(x.r.status, A64X_PT_TRANSLATED) << x.r.why;
+    memcpy(x.out.data() + kFipsOff, x.in.data() + kFipsOff, A64X_FIPS_MAC_SIZE);
+    a64x_pt_check v;
+    EXPECT_LT(a64x_pt_verify(&x.m, x.out.data(), &v, x.err, sizeof(x.err)), 0);
+    EXPECT_NE(std::string(x.err).find("FIPS"), std::string::npos) << x.err;
 }
 
 }  // namespace

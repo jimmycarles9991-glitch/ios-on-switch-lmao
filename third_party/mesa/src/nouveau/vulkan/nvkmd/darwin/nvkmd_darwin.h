@@ -19,6 +19,7 @@
 #include "util/vma.h"
 
 #include "TegraGM20BABI.h"
+#include "nvkmd_darwin_kill.h"
 
 #include <IOKit/IOKitLib.h>
 
@@ -28,6 +29,7 @@ struct nvkmd_darwin_conn {
    uint32_t selector;
    bool kernel_map; /* TegraGM20BInfoKernelMap: map through methods 12, 13 */
    bool exec_surfaces; /* TegraGM20BInfoExecSurfaces: method 17 */
+   bool kill_record; /* TegraGM20BInfoKillRecord */
 };
 
 struct nvkmd_darwin_pdev {
@@ -67,6 +69,7 @@ struct nvkmd_darwin_dev {
 
    simple_mtx_t channels_mutex;
    struct nvkmd_darwin_channel channels[NVKMD_DARWIN_MAX_CHANNELS];
+   struct darwin_kills kills; /* channels_mutex */
 };
 
 NVKMD_DECL_SUBCLASS(dev, darwin);
@@ -99,8 +102,16 @@ struct nvkmd_darwin_exec_ctx {
    struct nvkmd_ctx base;
 
    uint32_t channel;
+   enum nvkmd_engines engines;
    uint32_t last_seqno;  /* last submitted; 0 before the first submission */
    bool submitted;       /* an Exec of it went through (a seqno may wrap to 0) */
+
+   /* The kernel killed the channel: method 11's error, 0 while it lives. Its
+    * Execs are refused until nvkmd_darwin_ctx_reopen; `refused` is the error
+    * of the pushes given since the last signal that never ran.
+    */
+   uint32_t dead;
+   uint32_t refused;
 
    struct TegraGM20BAbiExec req;
 
@@ -144,6 +155,7 @@ struct nvkmd_darwin_sync {
     */
    uint64_t value;
    struct util_dynarray points; /* struct nvkmd_darwin_sync_point */
+   struct darwin_failures *failures; /* values whose signals failed, NULL: none */
 };
 
 struct nvkmd_darwin_sync_point {

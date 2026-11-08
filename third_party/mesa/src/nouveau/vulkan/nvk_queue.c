@@ -13,6 +13,7 @@
 #include "nvk_entrypoints.h"
 #include "nvk_rust.h"
 #include "vk_common_entrypoints.h"
+#include "vk_semaphore.h"
 #include "nv_push.h"
 
 #include "nv_push_cl9039.h"
@@ -26,6 +27,9 @@
 
 static VkResult
 nvk_queue_push(struct nvk_queue *queue, const struct nv_push *push);
+
+static VkResult
+nvk_queue_init_context_state(struct nvk_queue *queue);
 
 static void
 nvk_queue_heap_state_init(struct nvk_queue_heap_state *qhs)
@@ -403,6 +407,58 @@ switch_nvk_submit_surfaces(VkQueue _queue, const VkDeviceMemory *mems,
    }
 }
 
+/* The kernel killed the queue's channel (a GPU fault or hang): a new one, with
+ * the context a new queue starts with. Only between vkQueueSubmit calls, so
+ * a call's later work never runs on the new channel after its earlier work
+ * failed on the old one.
+ */
+static VkResult
+nvk_queue_reopen_if_lost(struct nvk_queue *queue)
+{
+   struct nvk_device *dev = nvk_queue_device(queue);
+   if (queue->exec_ctx == NULL || !nvkmd_darwin_ctx_lost(queue->exec_ctx))
+      return VK_SUCCESS;
+
+   VkResult result = nvkmd_darwin_ctx_reopen(queue->exec_ctx, &queue->vk.base);
+   if (result != VK_SUCCESS)
+      return vk_queue_set_lost(&queue->vk, "no channel after a channel kill");
+
+   nvk_queue_heap_state_init(&queue->heap_state);
+   nvk_queue_slm_state_finish(dev, &queue->slm_state);
+   nvk_queue_slm_state_init(&queue->slm_state);
+   /* Warps of the killed channel may have held interlock tickets: the new
+    * context's ticket dispensers start at zero, and so must the buffer.
+    */
+   if (queue->fsi_memory != NULL) {
+      result = nvk_upload_queue_fill(dev, &dev->upload,
+                                     queue->fsi_memory->va->addr, 0,
+                                     queue->fsi_memory->size_B);
+      if (result != VK_SUCCESS)
+         return vk_queue_set_lost(&queue->vk,
+                                  "interlock reset after a channel kill");
+   }
+   result = nvk_queue_init_context_state(queue);
+   if (result != VK_SUCCESS)
+      return vk_queue_set_lost(&queue->vk,
+                               "context setup after a channel kill");
+   return VK_SUCCESS;
+}
+
+/* What the last vkQueueSubmit2 signalling `semaphore` at `value` came to once
+ * the semaphore reached it: 0, or the kernel's error (TegraGM20BABI.h method
+ * 11) when the kernel killed the channel with that work in flight. Metal's
+ * command buffer fails with it, and the queue goes on.
+ */
+__attribute__((visibility("default"))) uint32_t
+switch_nvk_semaphore_failure(VkSemaphore _semaphore, uint64_t value)
+{
+   VK_FROM_HANDLE(vk_semaphore, semaphore, _semaphore);
+   if (semaphore == NULL)
+      return 0;
+   return nvkmd_darwin_sync_failure(vk_semaphore_get_active_sync(semaphore),
+                                    value);
+}
+
 /* One vkQueueSubmit can make several driver submissions (Mesa merges its
  * VkSubmitInfos only where no signal comes between): the hint is the call's,
  * for each of them, wherever it runs (nvk_queue_submit_data).
@@ -413,6 +469,9 @@ nvk_QueueSubmit2(VkQueue _queue, uint32_t submitCount,
 {
    VK_FROM_HANDLE(vk_queue, vk_queue, _queue);
    struct nvk_queue *queue = container_of(vk_queue, struct nvk_queue, vk);
+   VkResult reopened = nvk_queue_reopen_if_lost(queue);
+   if (reopened != VK_SUCCESS)
+      return reopened;
    nvkmd_darwin_submit_call(queue, true);
    VkResult result =
       vk_common_QueueSubmit2(_queue, submitCount, pSubmits, fence);

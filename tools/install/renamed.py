@@ -54,12 +54,16 @@ def remove_older_boot_entries(fat_root: Path, ini: str, entry: str, dry_run: boo
     return removed
 
 
+def _has_overlay(folder: Path) -> bool:
+    # Data mounted with owners keeps root's 0700 folders (audit/, ...) closed to the user: not one of ours
+    try:
+        return folder.is_dir() and not folder.is_symlink() and (folder / 'overlay').is_dir()
+    except PermissionError:
+        return False
+
+
 def _older_data_folder(data_root: Path) -> Path | None:
-    found = [
-        p
-        for p in Path(data_root).iterdir()
-        if p.name != DATA_FOLDER and p.is_dir() and not p.is_symlink() and (p / 'overlay').is_dir()
-    ]
+    found = [p for p in Path(data_root).iterdir() if p.name != DATA_FOLDER and _has_overlay(p)]
     return found[0] if len(found) == 1 else None
 
 

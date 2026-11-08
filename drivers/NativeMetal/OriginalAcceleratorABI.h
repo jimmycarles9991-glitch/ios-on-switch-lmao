@@ -7,6 +7,7 @@
 #include <IOKit/IOService.h>
 
 class IOAcceleratorES : public IOService {
+    // NOLINTNEXTLINE(misc-explicit-constructor): IOKit's structors macro declares the metaclass constructor
     OSDeclareAbstractStructors(IOAcceleratorES)
 };
 

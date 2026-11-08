@@ -1,0 +1,206 @@
+import Foundation
+import HWTestCore
+import Metal
+import QuartzCore
+import UIKit
+
+/// Frame pacing per scene: a CADisplayLink at 60 Hz animates the scene every frame for five seconds after a half
+/// second's warm-up, while a probe CAMetalLayer presents a cleared drawable each frame and collects when the display
+/// actually showed it (presentedTime). link_* fields are the display link's intervals (frames the app's main thread
+/// missed), present_* the probe's (frames the compositor and display missed), late= the callbacks that began after
+/// their frame's target time; hist= counts intervals of 1, 2, 3 and 4+ periods.
+@MainActor
+final class PacingRun: NSObject {
+    let probe = CAMetalLayer()
+    private let queue: MTLCommandQueue?
+    private let animate: (Int) -> Void
+    private let done: Waiter<Bool>
+    private let shown = ShownTimes()
+    private var link: CADisplayLink?
+    private var started: CFTimeInterval = 0
+    private var frame = 0
+    private(set) var linkTimes: [CFTimeInterval] = []
+    private(set) var late = 0
+    let seconds: Double
+
+    init(seconds: Double, animate: @escaping (Int) -> Void, done: Waiter<Bool>) {
+        let device = MTLCreateSystemDefaultDevice()
+        queue = device?.makeCommandQueue()
+        probe.device = device
+        probe.pixelFormat = .bgra8Unorm
+        probe.framebufferOnly = true
+        self.seconds = seconds
+        self.animate = animate
+        self.done = done
+    }
+
+    var presented: [Double] { shown.measured }
+
+    /// When the display showed the probe's first drawable (0 until it has).
+    var firstPresented: Double { shown.first }
+
+    func start() {
+        let link = CADisplayLink(target: self, selector: #selector(tick))
+        link.preferredFrameRateRange = CAFrameRateRange(minimum: 60, maximum: 60, preferred: 60)
+        link.add(to: .main, forMode: .common)
+        self.link = link
+        started = CACurrentMediaTime()
+    }
+
+    @objc private func tick(_ link: CADisplayLink) {
+        frame += 1
+        let measuring = link.timestamp - started > 0.5
+        if measuring {
+            linkTimes.append(link.timestamp)
+            if CACurrentMediaTime() > link.targetTimestamp { late += 1 }
+        }
+        animate(frame)
+        present(measuring)
+        if link.timestamp - started >= seconds + 0.5 {
+            link.invalidate()
+            self.link = nil
+            done.resume(true)
+        }
+    }
+
+    private func present(_ measuring: Bool) {
+        guard let queue, let drawable = probe.nextDrawable(), let commands = queue.makeCommandBuffer() else { return }
+        let pass = MTLRenderPassDescriptor()
+        pass.colorAttachments[0].texture = drawable.texture
+        pass.colorAttachments[0].loadAction = .clear
+        let level = Double(frame % 60) / 60
+        pass.colorAttachments[0].clearColor = MTLClearColor(red: level, green: 0.3, blue: 1 - level, alpha: 1)
+        pass.colorAttachments[0].storeAction = .store
+        commands.makeRenderCommandEncoder(descriptor: pass)?.endEncoding()
+        let shown = shown
+        drawable.addPresentedHandler { shown.add($0.presentedTime, measured: measuring) }
+        commands.present(drawable)
+        commands.commit()
+    }
+}
+
+/// Presented times, written on whatever thread Metal reports them.
+final class ShownTimes: @unchecked Sendable {
+    private let lock = NSLock()
+    private var times: [Double] = []
+    private var firstTime: Double = 0
+
+    func add(_ time: Double, measured: Bool) {
+        lock.lock()
+        defer { lock.unlock() }
+        if measured { times.append(time) }
+        if firstTime == 0 && time > 0 { firstTime = time }
+    }
+
+    var measured: [Double] {
+        lock.lock()
+        defer { lock.unlock() }
+        return times
+    }
+
+    var first: Double {
+        lock.lock()
+        defer { lock.unlock() }
+        return firstTime
+    }
+}
+
+struct PacingTest: HWTest {
+    let id: String
+    let name: String
+    let subsystem = Subsystem.compositor
+    let probeSize: CGFloat?
+    let build: @MainActor @Sendable (UIView, CGRect) -> (Int) -> Void
+
+    var timeout: TimeInterval { 20 }
+
+    func run(_ context: TestContext) async throws -> Outcome {
+        let done = Waiter<Bool>()
+        let recorder = await context.onStage(fullScreen: true) { stage -> PacingRun in
+            let screen = UIScreen.main.bounds
+            let animate = build(stage, screen)
+            let recorder = PacingRun(seconds: 5, animate: animate, done: done)
+            let side = probeSize ?? 0
+            recorder.probe.frame =
+                side > 0 ? CGRect(x: screen.width - side - 10, y: 10, width: side, height: side) : screen
+            recorder.probe.contentsScale = UIScreen.main.scale
+            stage.layer.addSublayer(recorder.probe)
+            return recorder
+        }
+        await MainActor.run { recorder.start() }
+        _ = await done.wait(timeout: 15)
+        try await Task.sleep(nanoseconds: 200_000_000)
+        let (linkTimes, presented, late) = await MainActor.run {
+            (recorder.linkTimes, recorder.presented, recorder.late)
+        }
+        let link = Pacing(times: linkTimes, period: 1.0 / 60)
+        let shown = Pacing(times: presented.sorted(), period: 1.0 / 60)
+        var metrics = Metrics()
+        metrics.merge(link.metrics(prefix: "link_"))
+        metrics.set("late", late)
+        metrics.merge(shown.metrics(prefix: "present_"))
+        metrics.set("unshown", presented.filter { $0 <= 0 }.count)
+        return .judged(
+            [
+                ("5 s of display-link frames", link.frames >= 290),
+                ("the app missed no frame (link_missed 0)", link.missed == 0),
+                ("most probe frames presented with a time", shown.frames >= link.frames / 2),
+                ("the display missed no frame (present_missed 0)", shown.missed == 0),
+            ], metrics)
+    }
+}
+
+enum PacingTests {
+    static let all: [any HWTest] = [metal, text, blurOver, blurUnder, list]
+
+    static let metal = PacingTest(
+        id: "pacing.metal_layer", name: "Pacing: a full-screen Metal layer alone", probeSize: nil
+    ) { _, _ in { _ in } }
+
+    static let text = PacingTest(id: "pacing.text", name: "Pacing: labels redrawn every frame", probeSize: 48) {
+        stage, screen in
+        let labels = UITextTest.styles.enumerated().map { line, style -> UILabel in
+            let label = UILabel(frame: CGRect(x: 10, y: 10 + CGFloat(line) * 38, width: screen.width - 80, height: 36))
+            label.font = UIFont.preferredFont(forTextStyle: style)
+            stage.addSubview(label)
+            return label
+        }
+        stage.backgroundColor = .white
+        return { frame in for (line, label) in labels.enumerated() { label.text = "Wi-Fi \(frame * (line + 1))" } }
+    }
+
+    /// r45-render's (d): a full-screen layer animated over a blurred (still) backdrop.
+    static let blurOver = PacingTest(
+        id: "pacing.blur_over", name: "Pacing: a full-screen layer animated over a blur", probeSize: 48
+    ) { stage, screen in
+        stage.addSubview(BackdropStripes(frame: screen))
+        let blur = UIVisualEffectView(effect: UIBlurEffect(style: .regular))
+        blur.frame = screen
+        stage.addSubview(blur)
+        let veil = UIView(frame: screen)
+        stage.addSubview(veil)
+        return { frame in
+            veil.backgroundColor = UIColor(
+                hue: CGFloat(frame % 120) / 120, saturation: 0.7, brightness: 0.9, alpha: 0.35)
+            veil.transform = CGAffineTransform(translationX: CGFloat(frame % 40) - 20, y: 0)
+        }
+    }
+
+    static let blurUnder = PacingTest(
+        id: "pacing.blur_under", name: "Pacing: a backdrop moving under a full-screen blur", probeSize: 48
+    ) { stage, screen in
+        let stripes = BackdropStripes(frame: screen.insetBy(dx: -64, dy: 0))
+        stage.addSubview(stripes)
+        let blur = UIVisualEffectView(effect: UIBlurEffect(style: .regular))
+        blur.frame = screen
+        stage.addSubview(blur)
+        return { frame in stripes.transform = CGAffineTransform(translationX: CGFloat(frame % 32) * 2 - 32, y: 0) }
+    }
+
+    static let list = PacingTest(id: "pacing.list", name: "Pacing: a list scrolled every frame", probeSize: 48) {
+        stage, screen in
+        let table = SettingsList.make(screen)
+        stage.addSubview(table)
+        return { frame in table.contentOffset = CGPoint(x: 0, y: CGFloat(frame % 300) * 4) }
+    }
+}

@@ -9,6 +9,7 @@
 #include "nvk_device.h"
 #include "nvk_entrypoints.h"
 #include "nvk_mme.h"
+#include "nvk_tiled_cache.h"
 
 #include "vk_synchronization.h"
 
@@ -180,6 +181,7 @@ nvk_event_report_semaphore(struct nvk_cmd_buffer *cmd,
          .pipeline_location = vk_stage_flags_to_nv9097_pipeline_location(stages),
          .structure_size = STRUCTURE_SIZE_ONE_WORD,
       });
+      nvk_cmd_flush_tiled_cache(cmd);
    } else if (subc == SUBC_NV90C0) {
       struct nv_push *p = nvk_cmd_buffer_push(cmd, 5);
       P_MTHD(p, NV90C0, SET_REPORT_SEMAPHORE_A);

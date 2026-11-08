@@ -2,8 +2,10 @@
 # Translated from the compile, archive and generator commands of the meson builds that reproduce main's NVK dylibs.
 
 load("@rules_python//python:py_binary.bzl", "py_binary")
+load("@rules_python//python:py_test.bzl", "py_test")
+load("@rules_rust//rust:defs.bzl", "rust_test")
 load("//bazel/lint:defs.bzl", "lint_files")
-load("//third_party/mesa/bazel:defs.bzl", "MESA_LINT_EXCLUDE", "MESA_PY_DEPS", "mesa_args", "mesa_cc_library", "mesa_genrule")
+load("//third_party/mesa/bazel:defs.bzl", "MESA_LINT_EXCLUDE", "MESA_PY_DEPS", "mesa_args", "mesa_cc_library", "mesa_files", "mesa_genrule")
 load("//third_party/mesa/bazel:identity.bzl", "mesa_identity_files")
 load("//third_party/mesa/bazel:rust.bzl", "NOUVEAU_RUST_ARGS", "RUST_GLOBAL_ARGS", "mesa_rust_library")
 
@@ -260,4 +262,45 @@ mesa_rust_library(
         "//third_party/mesa/src/util/rust:mesa_util",
         "//third_party/mesa/subprojects/rustc-hash-2.1.1:rustc_hash",
     ],
+)
+
+# ios-on-switch-lmao: NAK's SM53 half-op encodings against Ryujinx's decoder (nak/sm50.rs sm53_half_tests), on the host. The
+# crate's C (NIR, the hardware runner's) is left to dynamic lookup: no test run here calls into it. The test binary is
+# built in NVK's configuration and run by sm53_half_test from the default one, as no test runner exists in NVK's.
+rust_test(
+    name = "nak_sm53_half_test",
+    args = ["sm53_half_tests"],
+    crate = ":nak_rs_rlib",
+    rustc_flags = [
+        "--cfg=nak_host_tests",
+        "-Clink-arg=-Wl,-undefined,dynamic_lookup",
+    ],
+    tags = ["manual"],
+    deps = [
+        "//third_party/mesa/src/c11/impl:mesa_util_c11",
+        "//third_party/mesa/src/compiler/rust:compiler_bindings",
+        "//third_party/mesa/src/compiler/rust:compiler_c_helpers",
+        "//third_party/mesa/src/util:mesa_util",
+        "//third_party/mesa/src/util:mesa_util_simd",
+        "//third_party/mesa/src/util/blake3",
+    ],
+)
+
+mesa_files(
+    name = "nak_sm53_half_test_bin",
+    testonly = True,
+    srcs = [":nak_sm53_half_test"],
+    platform = "macos",
+)
+
+py_test(
+    name = "sm53_half_test",
+    size = "small",
+    srcs = ["run_host_test.py"],
+    args = [
+        "$(rootpath :nak_sm53_half_test_bin)",
+        "sm53_half_tests",
+    ],
+    data = [":nak_sm53_half_test_bin"],
+    main = "run_host_test.py",
 )

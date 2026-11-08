@@ -1,0 +1,17 @@
+Round-robin TCG (icount) gives each vCPU at most a quarter of the time to the next virtual timer deadline, and the
+round-robin kick timer bounds that at 100 ms. A guest thread on one vCPU (a lock holder, a work loop an interrupt woke)
+could then sit for up to 75 ms of virtual time while the other three run, longer than a driver's interrupt deadline
+(TegraI2C: the transfer's budget plus 50 ms). With a 1 ms kick no vCPU waits more than about 0.75 ms.
+
+diff --git a/accel/tcg/tcg-accel-ops-rr.h b/accel/tcg/tcg-accel-ops-rr.h
+--- a/accel/tcg/tcg-accel-ops-rr.h
++++ b/accel/tcg/tcg-accel-ops-rr.h
+@@ -10,7 +10,7 @@
+ #ifndef TCG_ACCEL_OPS_RR_H
+ #define TCG_ACCEL_OPS_RR_H
+ 
+-#define TCG_KICK_PERIOD (NANOSECONDS_PER_SECOND / 10)
++#define TCG_KICK_PERIOD (NANOSECONDS_PER_SECOND / 1000)
+ 
+ /* Kick all RR vCPUs. */
+ void rr_kick_vcpu_thread(CPUState *unused);

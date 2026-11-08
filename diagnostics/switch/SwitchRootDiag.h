@@ -10,9 +10,10 @@ static void root_screen(void)
     boolean_t previous = ml_set_interrupts_enabled(FALSE);
     if (switch_diag_console_active()) {
         char line[105];
-        for (unsigned y = 120; y < 180; y++)
+        for (unsigned y = 120; y < 180; y++) {
             for (unsigned x = 16; x < 1264; x++)
                 switch_diag_pixel(framebuffer, x, y, SWITCH_BACKGROUND);
+        }
         (void)snprintf(line, sizeof(line), "ROOT %llu ERROR %llx AUTH %llu OWNER %llu CACHE %llx DATA %llx",
                        switch_root_record[2], switch_root_record[3], switch_root_record[8], switch_root_record[9],
                        switch_root_record[11], switch_root_record[12]);
@@ -28,26 +29,34 @@ static void root_screen(void)
         (void)ml_set_interrupts_enabled(previous);
         return;
     }
-    for (unsigned y = 340; y < 660; y++)
+    for (unsigned y = 340; y < 660; y++) {
         for (unsigned x = 16; x < 1264; x++)
             switch_diag_pixel(framebuffer, x, y, SWITCH_BACKGROUND);
+    }
     const uint64_t stage = switch_root_record[2];
-    const char *message = switch_root_record[3] ? "NATIVE ROOT BOOT REFUSED OR FAILED"
-                          : stage == 1          ? "QUALIFYING NATIVE READ ONLY STORAGE"
-                          : stage == 2          ? "LOADING SIGNED ROOT POLICY"
-                          : stage == 3          ? "AUTHENTICATING ROOT POLICY"
-                          : stage == 4          ? "ROOT POLICIES AUTHENTICATED - PUBLISHING"
-                          : stage == 5          ? "VERIFIED STORAGE READY - FINDING ROOT"
-                          : stage == 6          ? "MOUNTING ORIGINAL APFS ROOT"
-                          : stage == 7          ? "ORIGINAL APFS ROOT MOUNTED"
-                          : stage == 8          ? "OWNER ROOT POLICY DECISION RECORDED"
-                          : stage == 9          ? "PREPARING ORIGINAL SYSTEMOS CACHE"
-                          : stage == 10         ? "SYSTEMOS CACHE PREPARATION RETURNED"
-                          : stage == 11         ? "MOUNTING DISPOSABLE RAM DATA"
-                          : stage == 12         ? "RAM DATA PREPARATION RETURNED"
-                          : stage == 13         ? "ORIGINAL LAUNCHD EXEC RETURNED"
-                          : stage == 14         ? "ORIGINAL PID1 SYSCALL OBSERVED"
-                                                : "NATIVE ROOT BOOT IN PROGRESS";
+    static const char *const stages[] = {
+        "NATIVE ROOT BOOT IN PROGRESS",
+        "QUALIFYING NATIVE READ ONLY STORAGE",
+        "LOADING SIGNED ROOT POLICY",
+        "AUTHENTICATING ROOT POLICY",
+        "ROOT POLICIES AUTHENTICATED - PUBLISHING",
+        "VERIFIED STORAGE READY - FINDING ROOT",
+        "MOUNTING ORIGINAL APFS ROOT",
+        "ORIGINAL APFS ROOT MOUNTED",
+        "OWNER ROOT POLICY DECISION RECORDED",
+        "PREPARING ORIGINAL SYSTEMOS CACHE",
+        "SYSTEMOS CACHE PREPARATION RETURNED",
+        "MOUNTING DISPOSABLE RAM DATA",
+        "RAM DATA PREPARATION RETURNED",
+        "ORIGINAL LAUNCHD EXEC RETURNED",
+        "ORIGINAL PID1 SYSCALL OBSERVED",
+    };
+    const char *message = stages[0];
+    if (switch_root_record[3]) {
+        message = "NATIVE ROOT BOOT REFUSED OR FAILED";
+    } else if (stage < sizeof(stages) / sizeof(stages[0])) {
+        message = stages[stage];
+    }
     text(360, message, 104, switch_root_record[3] ? SWITCH_RED : SWITCH_GREEN);
     hex_line(400, "ROOT STAGE / ERROR=", (stage << 32) | switch_root_record[3]);
     hex_line(420, "POLICY DISK=", switch_root_record[4]);
@@ -74,10 +83,11 @@ static void root_screen(void)
 
 void switch_root_progress(unsigned stage, unsigned disk, uint64_t done, uint64_t total)
 {
-    if (stage & 0x80000000u)
+    if (stage & 0x80000000u) {
         switch_root_record[3] = stage & 0x7fffffffu;
-    else
+    } else {
         switch_root_record[2] = stage;
+    }
     switch_root_record[4] = disk;
     switch_root_record[5] = done;
     switch_root_record[6] = total;
@@ -89,7 +99,8 @@ void switch_root_io_progress(uint64_t bytes, unsigned error)
     switch_root_record[7] = bytes;
     if (error && !switch_root_record[3])
         switch_root_record[3] = 500 + error;
-    uint64_t now, freq;
+    uint64_t now = 0;
+    uint64_t freq = 0;
     __asm__ volatile("mrs %0,cntpct_el0" : "=r"(now));
     __asm__ volatile("mrs %0,cntfrq_el0" : "=r"(freq));
     if (error || (freq && now - root_last_draw >= freq)) {
@@ -228,7 +239,7 @@ static void switch_board_thread(void *parameter __unused, wait_result_t result _
 
 static void switch_board_start(void)
 {
-    thread_t thread;
+    thread_t thread = NULL;
     if (kernel_thread_start(switch_board_thread, NULL, &thread) != KERN_SUCCESS)
         panic("Switch: cannot start the board driver thread");
     thread_deallocate(thread);

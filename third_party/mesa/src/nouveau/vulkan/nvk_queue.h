@@ -124,6 +124,7 @@ VkResult nvk_push_dispatch_state_init(struct nvk_queue *queue,
 #ifdef NVK_HAS_DARWIN
 void switch_nvk_submit_surfaces(VkQueue queue, const VkDeviceMemory *mems,
                                 const uint8_t *access, uint32_t count);
+uint32_t switch_nvk_semaphore_failure(VkSemaphore semaphore, uint64_t value);
 #endif
 
 #endif

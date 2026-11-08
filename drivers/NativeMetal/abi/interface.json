@@ -1,0 +1,53 @@
+{
+  "device": {
+    "class": "_MTLDevice",
+    "limits_ivar": "_limits"
+  },
+  "classes": {
+    "_MTLCommandBuffer": [],
+    "_MTLCommandEncoder": [],
+    "_MTLCommandQueue": [],
+    "_MTLFunction": [],
+    "_MTLLibrary": [],
+    "_MTLObjectWithLabel": [],
+    "_MTLParallelRenderCommandEncoder": [],
+    "MTLFunctionConstantValuesInternal": ["newIndexedConstantArray", "newNamedConstantArray"],
+    "MTLFunctionStitchingGraph": [],
+    "MTLIndexedConstantValue": ["data", "dataType", "index"],
+    "MTLNamedConstantValue": ["data", "dataType", "name"]
+  },
+  "objects": {
+    "MTLArgumentEncoder": ["MTLArgumentEncoder"],
+    "MTLBinaryArchive": ["MTLBinaryArchive", "MTLBinaryArchiveSPI"],
+    "MTLBlitCommandEncoder": ["MTLBlitCommandEncoder", "MTLBlitCommandEncoderSPI"],
+    "MTLBuffer": ["MTLBuffer", "MTLBufferSPI"],
+    "MTLCommandBuffer": ["MTLCommandBuffer", "MTLCommandBufferSPI"],
+    "MTLCommandQueue": ["MTLCommandQueue", "MTLCommandQueueSPI"],
+    "MTLComputeCommandEncoder": ["MTLComputeCommandEncoder", "MTLComputeCommandEncoderSPI"],
+    "MTLComputePipelineState": ["MTLComputePipelineState", "MTLComputePipelineStateSPI"],
+    "MTLDepthStencilState": ["MTLDepthStencilState", "MTLDepthStencilStateSPI"],
+    "MTLDevice": ["MTLDevice", "MTLDeviceSPI"],
+    "MTLFence": ["MTLFence", "MTLFenceSPI"],
+    "MTLFunction": ["MTLFunction", "MTLFunctionSPI"],
+    "MTLHeap": ["MTLHeap", "MTLHeapSPI"],
+    "MTLLibrary": ["MTLLibrary", "MTLLibrarySPI"],
+    "MTLRenderCommandEncoder": ["MTLRenderCommandEncoder", "MTLRenderCommandEncoderSPI"],
+    "MTLRenderPipelineState": ["MTLRenderPipelineState", "MTLRenderPipelineStateSPI"],
+    "MTLSamplerState": ["MTLSamplerState", "MTLSamplerStateSPI"],
+    "MTLSharedEvent": ["MTLSharedEvent", "MTLSharedEventSPI"],
+    "MTLTexture": ["MTLTexture", "MTLTextureSPI"]
+  },
+  "not_senders": [
+    "/System/Library/Extensions/AGX",
+    "/System/Library/Frameworks/Metal.framework/",
+    "/System/Library/PrivateFrameworks/AGX",
+    "/System/Library/PrivateFrameworks/GPUCompiler.framework/",
+    "/System/Library/PrivateFrameworks/GPURawCounter.framework/",
+    "/System/Library/PrivateFrameworks/GPUTools",
+    "/System/Library/PrivateFrameworks/IOGPU.framework/",
+    "/System/Library/PrivateFrameworks/MTLCompiler.framework/",
+    "/System/Library/PrivateFrameworks/MTLToolsDeviceSupport.framework/",
+    "/System/Library/PrivateFrameworks/MetalMetrics.framework/",
+    "/System/Library/PrivateFrameworks/MetalTools.framework/"
+  ]
+}

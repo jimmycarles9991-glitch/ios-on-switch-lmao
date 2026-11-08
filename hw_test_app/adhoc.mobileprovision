@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>AppIDName</key>
+	<string>Switch hardware test</string>
+	<key>ApplicationIdentifierPrefix</key>
+	<array>
+		<string>SWITCH</string>
+	</array>
+	<key>CreationDate</key>
+	<date>2026-11-07T00:00:00Z</date>
+	<key>Entitlements</key>
+	<dict>
+		<key>application-identifier</key>
+		<string>SWITCH.com.brunostjohn.switch.hwtest</string>
+	</dict>
+	<key>ExpirationDate</key>
+	<date>2099-01-01T00:00:00Z</date>
+	<key>Name</key>
+	<string>Switch ad hoc stand-in</string>
+	<key>Platform</key>
+	<array>
+		<string>iOS</string>
+	</array>
+	<key>TeamIdentifier</key>
+	<array>
+		<string>SWITCH</string>
+	</array>
+	<key>TeamName</key>
+	<string>Switch</string>
+	<key>TimeToLive</key>
+	<integer>26663</integer>
+	<key>UUID</key>
+	<string>5d1c0a52-0000-4000-8000-000000005ea7</string>
+	<key>Version</key>
+	<integer>1</integer>
+</dict>
+</plist>

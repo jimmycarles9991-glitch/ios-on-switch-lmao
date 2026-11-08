@@ -20,12 +20,12 @@ import os
 import plistlib
 import re
 import shutil
-import struct
 import subprocess
 import sys
 import uuid
 from pathlib import Path
 
+from tools.common import macho
 from tools.trustcache import trustcache
 
 NAME = 'TegraGM20BMetal'
@@ -53,8 +53,11 @@ class Xcode:
 
 
 def arm64(path: Path) -> None:
-    magic, cputype, subtype = struct.unpack_from('<3I', Path(path).read_bytes())
-    if (magic, cputype, subtype & 0xFFFFFF) != (0xFEEDFACF, 0x100000C, 0):
+    try:
+        plain = macho.macho(Path(path).read_bytes(), subtypes=None)['cpusubtype'] & 0xFFFFFF == 0
+    except ValueError:
+        plain = False
+    if not plain:
         sys.exit(f'{path}: expected a plain arm64 (subtype 0) Mach-O')
 
 

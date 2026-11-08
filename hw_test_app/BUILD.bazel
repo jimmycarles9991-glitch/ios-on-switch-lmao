@@ -1,0 +1,200 @@
+# The hardware test app (README.md): SwiftUI on iOS 17 and 27, its test media made at build time on the Mac.
+load("@rules_apple//apple:ios.bzl", "ios_application")
+load("@rules_apple//apple:macos.bzl", "macos_command_line_application")
+load("@rules_apple//apple:resources.bzl", "apple_resource_group")
+load("@rules_cc//cc:cc_library.bzl", "cc_library")
+load("@rules_swift//swift:swift_interop_hint.bzl", "swift_interop_hint")
+load("@rules_swift//swift:swift_library.bzl", "swift_library")
+load("@rules_swift//swift:swift_test.bzl", "swift_test")
+load("//bazel/lint:defs.bzl", "lint_files")
+
+package(default_visibility = ["//visibility:public"])
+
+lint_files()
+
+# Benchmarks and the pattern code run optimised in every profile; Swift 5 mode keeps strict concurrency checking out
+# of test code that hands buffers between VideoToolbox's and Metal's callback threads.
+SWIFT_COPTS = [
+    "-O",
+    "-swift-version",
+    "5",
+]
+
+swift_library(
+    name = "core",
+    srcs = glob(["core/*.swift"]),
+    copts = SWIFT_COPTS,
+    module_name = "HWTestCore",
+)
+
+swift_library(
+    name = "video",
+    srcs = glob(["video/*.swift"]),
+    copts = SWIFT_COPTS,
+    module_name = "HWTestVideo",
+    deps = [":core"],
+)
+
+# The GPU scenes (Metal, MPS, Core Image, IOSurface; no UIKit), so the host test runs them on the Mac's GPU too.
+swift_library(
+    name = "gpu",
+    srcs = glob([
+        "gpu/*.swift",
+        "gpu/scenes/*.swift",
+    ]),
+    copts = SWIFT_COPTS,
+    module_name = "HWTestGPU",
+    deps = [":core"],
+)
+
+# Every GPU scene on this Mac's GPU against its CPU reference, the shaders compiled from source. Manual: it needs a Mac
+# whose GPU runs Metal, which CI's runners may not have.
+swift_test(
+    name = "gpu_test",
+    size = "small",
+    srcs = glob(["host_gpu_tests/*.swift"]),
+    copts = SWIFT_COPTS,
+    data = glob(["shaders/*.metal"]),
+    tags = ["manual"],
+    deps = [
+        ":core",
+        ":gpu",
+    ],
+)
+
+# Every clip and still image of core/Media.swift's tables, pinned in bazel/pinned/hw_test_app/media; core_test checks
+# the list against the tables.
+MEDIA = [
+    "{}_{}.{}".format(
+        codec,
+        size,
+        "ivf" if codec == "vp9" else "mp4",
+    )
+    for codec in [
+        "h264",
+        "hevc",
+        "hevc_main10",
+        "vp9",
+    ]
+    for size in [
+        "720p",
+        "1080p",
+        "4k",
+    ]
+] + [
+    "jpeg_420.jpg",
+    "jpeg_422.jpg",
+    "jpeg_444.jpg",
+    "png.png",
+    "heic.heic",
+    "heic_grid.heic",
+]
+
+swift_test(
+    name = "core_test",
+    size = "small",
+    srcs = glob(["host_tests/*.swift"]),
+    copts = SWIFT_COPTS,
+    env = {"HWTEST_MEDIA": " ".join(MEDIA)},
+    deps = [":core"],
+)
+
+# --- The media generator --------------------------------------------------------------------------------------------
+# Run by hand (README.md); manual, so no build needs the Mac's encoders, libvpx or libjpeg-turbo.
+swift_interop_hint(
+    name = "vpx_module",
+    module_name = "SwitchVPX",
+)
+
+cc_library(
+    name = "vpx",
+    hdrs = ["media/switch_vpx.h"],
+    aspect_hints = [":vpx_module"],
+    tags = ["manual"],
+    deps = ["@libvpx//:vpx"],
+)
+
+swift_interop_hint(
+    name = "turbojpeg_module",
+    module_name = "SwitchTurboJPEG",
+)
+
+cc_library(
+    name = "turbojpeg",
+    hdrs = ["media/switch_turbojpeg.h"],
+    aspect_hints = [":turbojpeg_module"],
+    tags = ["manual"],
+    deps = ["@libjpeg_turbo//:turbojpeg"],
+)
+
+swift_library(
+    name = "media_lib",
+    srcs = glob(["media/*.swift"]),
+    copts = SWIFT_COPTS,
+    module_name = "MediaTool",
+    tags = ["manual"],
+    deps = [
+        ":core",
+        ":turbojpeg",
+        ":video",
+        ":vpx",
+    ],
+)
+
+macos_command_line_application(
+    name = "media_tool",
+    minimum_os_version = "14.0",
+    tags = ["manual"],
+    deps = [":media_lib"],
+)
+
+apple_resource_group(
+    name = "media_resources",
+    strip_structured_resources_prefixes = ["hw_test_app"],
+    structured_resources = ["@pinned//:hw_test_app/media/" + name for name in MEDIA],
+)
+
+# --- The app -------------------------------------------------------------------------------------------------------
+# tools/devicerun:hwtest_test reads the test IDs out of these.
+filegroup(
+    name = "test_sources",
+    srcs = glob([
+        "gpu/scenes/*.swift",
+        "tests/*.swift",
+    ]),
+)
+
+swift_library(
+    name = "app_lib",
+    srcs = glob([
+        "app/*.swift",
+        "tests/*.swift",
+    ]),
+    copts = SWIFT_COPTS,
+    data = [":media_resources"],
+    module_name = "SwitchHWTest",
+    # UIKit: built only under ios_application's transition, never for the host by `bazel build //hw_test_app/...`.
+    target_compatible_with = ["@platforms//os:ios"],
+    deps = [
+        ":core",
+        ":gpu",
+        ":video",
+    ],
+)
+
+# Ad hoc signed like the overlay's other code (--@rules_apple//apple/build_settings:signing_certificate_name=- in
+# .bazelrc), so its CDHashes go in the boot package's trust cache. rules_apple wants a profile for any device build:
+# adhoc.mobileprovision is a plain-XML stand-in. It lands in the bundle as embedded.mobileprovision, which nothing reads
+# for a trust-cached platform app.
+ios_application(
+    name = "SwitchHWTest",
+    bundle_id = "com.brunostjohn.switch.hwtest",
+    entitlements = "SwitchHWTest.entitlements",
+    entitlements_validation = "skip",
+    families = ["ipad"],
+    infoplists = ["Info.plist"],
+    minimum_os_version = "17.4",
+    provisioning_profile = "adhoc.mobileprovision",
+    resources = glob(["shaders/*.metal"]),
+    deps = [":app_lib"],
+)

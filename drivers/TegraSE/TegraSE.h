@@ -47,8 +47,8 @@ int tegra_se_aes(enum tegra_se_mode mode, bool encrypt, const uint8_t *key, unsi
                  const void *in, void *out, size_t len);
 // AES-CMAC (RFC 4493 / NIST SP 800-38B) of len bytes.
 int tegra_se_cmac(const uint8_t *key, unsigned keyBytes, const void *in, size_t len, uint8_t mac[16]);
-// One-shot digest: alg 1 (SHA-1), 224, 256, 384, 512.
-int tegra_se_digest(unsigned alg, const void *in, size_t len, uint8_t *out);
+// One-shot digest: which is 1 (SHA-1), 224, 256, 384 or 512.
+int tegra_se_digest(unsigned which, const void *in, size_t len, uint8_t *out);
 
 #ifdef __cplusplus
 }

@@ -25,6 +25,7 @@ void switch_mmio_model_write32(uintptr_t address, uint32_t value);
 uint16_t switch_mmio_model_read16(uintptr_t address);
 void switch_mmio_model_write16(uintptr_t address, uint16_t value);
 uint8_t switch_mmio_model_read8(uintptr_t address);
+void switch_mmio_model_write8(uintptr_t address, uint8_t value);
 #endif
 
 static inline uint32_t switch_mmio_read32(const volatile uint8_t *base, uint32_t offset)
@@ -32,7 +33,8 @@ static inline uint32_t switch_mmio_read32(const volatile uint8_t *base, uint32_t
 #ifdef SWITCH_MMIO_HOST_MODEL
     return switch_mmio_model_read32((uintptr_t)(base + offset));
 #else
-    uint32_t value;
+    // NOLINTNEXTLINE(misc-const-correctness): written by the asm below
+    uint32_t value = 0;
     __asm__ volatile("ldar %w0, [%1]" : "=r"(value) : "r"(base + offset) : "memory");
     return value;
 #endif
@@ -53,7 +55,8 @@ static inline uint16_t switch_mmio_read16(const volatile uint8_t *base, uint32_t
 #ifdef SWITCH_MMIO_HOST_MODEL
     return switch_mmio_model_read16((uintptr_t)(base + offset));
 #else
-    uint32_t value;
+    // NOLINTNEXTLINE(misc-const-correctness): written by the asm below
+    uint32_t value = 0;
     __asm__ volatile("ldarh %w0, [%1]" : "=r"(value) : "r"(base + offset) : "memory");
     return (uint16_t)value;
 #endif
@@ -73,9 +76,19 @@ static inline uint8_t switch_mmio_read8(const volatile uint8_t *base, uint32_t o
 #ifdef SWITCH_MMIO_HOST_MODEL
     return switch_mmio_model_read8((uintptr_t)(base + offset));
 #else
-    uint32_t value;
+    // NOLINTNEXTLINE(misc-const-correctness): written by the asm below
+    uint32_t value = 0;
     __asm__ volatile("ldarb %w0, [%1]" : "=r"(value) : "r"(base + offset) : "memory");
     return (uint8_t)value;
+#endif
+}
+
+static inline void switch_mmio_write8(volatile uint8_t *base, uint32_t offset, uint8_t value)
+{
+#ifdef SWITCH_MMIO_HOST_MODEL
+    switch_mmio_model_write8((uintptr_t)(base + offset), value);
+#else
+    *(base + offset) = value;
 #endif
 }
 
@@ -85,6 +98,14 @@ static inline void switch_mmio_write32_publish(volatile uint8_t *base, uint32_t 
     __asm__ volatile("dmb oshst" ::: "memory");
 #endif
     switch_mmio_write32(base, offset, value);
+}
+
+// A published write that has reached its device on return (L4T's fence_udelay): the read-back of the same register
+// cannot complete before it, so a delay that follows starts after the write took effect.
+static inline void switch_mmio_write32_flush(volatile uint8_t *base, uint32_t offset, uint32_t value)
+{
+    switch_mmio_write32_publish(base, offset, value);
+    (void)switch_mmio_read32(base, offset);
 }
 
 static inline void switch_mmio_rmw32(volatile uint8_t *base, uint32_t offset, uint32_t clear, uint32_t set)

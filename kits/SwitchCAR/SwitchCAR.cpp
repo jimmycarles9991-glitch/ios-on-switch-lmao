@@ -185,7 +185,7 @@ void switch_pmc_remove_clamping(unsigned partition)
     switch_mmio_write32(pmc(), REMOVE_CLAMPING, 1u << partition);
 }
 
-bool switch_pmc_power_up(unsigned partition, unsigned clock_id, unsigned reset_id)
+bool switch_pmc_power_up_in_reset(unsigned partition, unsigned clock_id, unsigned reset_id)
 {
     switch_car_reset_assert(reset_id);
     if (!switch_pmc_partition_on(partition))
@@ -195,6 +195,13 @@ bool switch_pmc_power_up(unsigned partition, unsigned clock_id, unsigned reset_i
     IODelay(kSequenceStepUs);
     switch_pmc_remove_clamping(partition);
     IODelay(kSequenceStepUs);
+    return true;
+}
+
+bool switch_pmc_power_up(unsigned partition, unsigned clock_id, unsigned reset_id)
+{
+    if (!switch_pmc_power_up_in_reset(partition, clock_id, reset_id))
+        return false;
     switch_car_reset_deassert(reset_id);
     IODelay(kSequenceStepUs);
     return true;
@@ -229,4 +236,11 @@ uint32_t switch_pmc_read(uint32_t offset)
 void switch_pmc_write(uint32_t offset, uint32_t value)
 {
     switch_mmio_write32(pmc(), offset, value);
+}
+
+void switch_pmc_rmw(uint32_t offset, uint32_t clear, uint32_t set)
+{
+    IOLockLock(lock());
+    switch_mmio_rmw32(pmc(), offset, clear, set);
+    IOLockUnlock(lock());
 }

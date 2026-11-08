@@ -48,17 +48,17 @@ TEST(SwitchUsbHostSource, IpfsAsTegraXusbConfig)
     const std::string source = SourceText("../XusbHost.cpp");
     const std::string power = Body(source, "bool Controller::powerOn(");
     const std::vector<std::string> order = {
-        "rmw(ipfs, IPFS_CONFIGURATION, 0, IPFS_EN_FPCI)", "rmw(fpci, XUSB_CFG_4, CFG_4_BASE_MASK",
-        "rmw(fpci, XUSB_CFG_1, 0, CFG_1_ENABLES)", "rmw(ipfs, IPFS_INTR_MASK, 0, IPFS_IP_INT_MASK)",
-        "w(ipfs, IPFS_CLKGATE_HYSTERESIS, 0x80)"};
+        "rmw32(ipfs, IPFS_CONFIGURATION, 0, IPFS_EN_FPCI)", "rmw32(fpci, XUSB_CFG_4, CFG_4_BASE_MASK",
+        "rmw32(fpci, XUSB_CFG_1, 0, CFG_1_ENABLES)", "rmw32(ipfs, IPFS_INTR_MASK, 0, IPFS_IP_INT_MASK)",
+        "write32(ipfs, IPFS_CLKGATE_HYSTERESIS, 0x80)"};
     for (size_t i = 0; i + 1 < order.size(); ++i)
         EXPECT_LT(at(power, order[i]), at(power, order[i + 1])) << order[i] << " before " << order[i + 1];
     EXPECT_THAT(source, HasSubstr("IPFS_CONFIGURATION = 0x180"));
     EXPECT_THAT(source, HasSubstr("IPFS_INTR_MASK = 0x188"));
     EXPECT_THAT(source, HasSubstr("IPFS_IP_INT_MASK = 1u << 16"));
     EXPECT_THAT(source, HasSubstr("IPFS_INTR_ENABLE = 0x198"));
-    EXPECT_THAT(source, Not(HasSubstr("w(ipfs, IPFS_INTR_ENABLE")));  // Linux never writes it
-    EXPECT_THAT(source, Not(HasSubstr("rmw(ipfs, IPFS_INTR_ENABLE")));
+    EXPECT_THAT(source, Not(HasSubstr("write32(ipfs, IPFS_INTR_ENABLE")));  // Linux never writes it
+    EXPECT_THAT(source, Not(HasSubstr("rmw32(ipfs, IPFS_INTR_ENABLE")));
 }
 
 TEST(SwitchUsbHostSource, GicLevelSpiWithLic)

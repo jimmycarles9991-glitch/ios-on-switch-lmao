@@ -23,9 +23,9 @@ constexpr uint32_t kAsid = TEGRA_SMMU_ASID_XUSB_HOST;
 constexpr uint32_t kTranslationBits = (1u << 10) | (1u << 11);
 // 64 MiB of transfers in flight from 1 MiB up: below every RAM physical address (0x80000000 on), so the identity maps
 // never meet it.
-constexpr uint64_t kWindowBase = 1ull << 20, kWindowBytes = 64ull << 20;
-constexpr uint32_t kWindowPages = (uint32_t)(kWindowBytes / UsbIovaWindow::kPage);
-constexpr uint32_t kTablePages = 1 + (uint32_t)(kWindowBytes / TegraSMMUDomain::kSpan) + 8;
+constexpr uint64_t kWindowBase = 1ULL << 20, kWindowBytes = 64ULL << 20;
+constexpr uint32_t kWindowPages = static_cast<uint32_t>(kWindowBytes / UsbIovaWindow::kPage);
+constexpr uint32_t kTablePages = 1 + static_cast<uint32_t>(kWindowBytes / TegraSMMUDomain::kSpan) + 8;
 
 struct Slot {
     IOMemoryDescriptor *memory;
@@ -44,9 +44,10 @@ bool gAttached;
 
 void publishTables()
 {
-    uintptr_t low, high;
+    uintptr_t low = 0;
+    uintptr_t high = 0;
     if (gDomain.takeDirty(&low, &high))
-        xudc::cacheFlush(reinterpret_cast<const void *>(low), high - low);
+        switch_dcache_clean_invalidate(reinterpret_cast<const void *>(low), high - low);
     tegra_smmu_flush(kAsid);
 }
 
@@ -69,7 +70,7 @@ bool switch_usb_smmu_start(uint64_t firmwarePa, uint64_t firmwareBytes, uint64_t
     gLock = IOLockAlloc();
     gUsed = IONewZero(uint8_t, kWindowPages);
     gSlots = IONewZero(Slot, kWindowPages);
-    if (!gLock || !gUsed || !gSlots || !gTables.allocate(kTablePages * (uint32_t)TegraSMMUDomain::kPage) ||
+    if (!gLock || !gUsed || !gSlots || !gTables.allocate(kTablePages * static_cast<uint32_t>(TegraSMMUDomain::kPage)) ||
         !gDomain.init(gTables.va, gTables.pa, kTablePages)) {
         snprintf(why, whySize, "no memory for the SMMU tables");
         return false;
@@ -81,8 +82,9 @@ bool switch_usb_smmu_start(uint64_t firmwarePa, uint64_t firmwareBytes, uint64_t
         snprintf(why, whySize, "the SMMU tables cannot hold the window and the identity maps");
         return false;
     }
-    xudc::cacheFlush(gTables.va, gTables.size);
-    uintptr_t low, high;
+    switch_dcache_clean_invalidate(gTables.va, gTables.size);
+    uintptr_t low = 0;
+    uintptr_t high = 0;
     (void)gDomain.takeDirty(&low, &high);
     if (tegra_smmu_attach(kAsid, gDomain.ptb(), TEGRA_SMMU_XUSB_HOST_ASID, TEGRA_SMMU_TRANSLATION_ENABLE_2,
                           kTranslationBits, why, whySize))
@@ -102,29 +104,30 @@ bool switch_usb_smmu_map(IOMemoryDescriptor *memory, uint64_t offset, uint64_t l
     if (alignment > 1 && (inPage & (alignment - 1)))
         return false;
     const uint32_t pages = UsbIovaWindow::pagesFor(inPage, length);
-    const uint32_t alignPages = alignment > UsbIovaWindow::kPage ? (uint32_t)(alignment / UsbIovaWindow::kPage) : 1;
+    const uint32_t alignPages =
+        alignment > UsbIovaWindow::kPage ? static_cast<uint32_t>(alignment / UsbIovaWindow::kPage) : 1;
     IOLockLock(gLock);
     const int64_t index = gWindow.take(pages, alignPages);
     if (index < 0) {
         IOLockUnlock(gLock);
         return false;
     }
-    const uint64_t iova = gWindow.iova((uint32_t)index);
+    const uint64_t iova = gWindow.iova(static_cast<uint32_t>(index));
     uint32_t page = 0;
     const bool ok = usb_iova_map_pages(
         segments(memory, offset), length, pages,
         [iova](uint32_t index, uint64_t pa) {
-            return gDomain.map(iova + (uint64_t)index * UsbIovaWindow::kPage, &pa, 1, true);
+            return gDomain.map(iova + static_cast<uint64_t>(index) * UsbIovaWindow::kPage, &pa, 1, true);
         },
         &page);
     if (!ok) {
         gDomain.unmap(iova, page);
-        gWindow.give((uint32_t)index, pages);
+        gWindow.give(static_cast<uint32_t>(index), pages);
         IOLockUnlock(gLock);
         return false;
     }
     publishTables();
-    gSlots[index] = {memory, offset, (uint32_t)length, pages, writable};
+    gSlots[index] = {memory, offset, static_cast<uint32_t>(length), pages, writable};
     IOLockUnlock(gLock);
     *address = iova + inPage;
     return true;
@@ -135,7 +138,7 @@ bool switch_usb_smmu_owns(uint64_t address)
     return gAttached && gWindow.contains(address);
 }
 
-bool switch_usb_smmu_unmap(IOMemoryDescriptor *memory, uint64_t address, uint64_t *offset, uint64_t *length,
+bool switch_usb_smmu_unmap(const IOMemoryDescriptor *memory, uint64_t address, uint64_t *offset, uint64_t *length,
                            bool *writable)
 {
     if (!switch_usb_smmu_owns(address))

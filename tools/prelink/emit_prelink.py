@@ -36,7 +36,9 @@ from pathlib import Path
 from typing import NamedTuple, Self
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from native_prelink import backed_offset, macho, native_bindings, plan_original, prelink_info
+from native_prelink import native_bindings, plan_original, prelink_info
+
+from tools.common.macho import backed_offset, macho
 
 # Standard SHA-256 round constants, stored as 64 little-endian words. Some
 # assemblers embed these data in executable sections; do not decode as code.

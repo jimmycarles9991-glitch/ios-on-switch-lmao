@@ -57,7 +57,7 @@ static inline bool swlan_chanspec_decode(uint16_t cs, int iotype, struct swlan_c
         }
     }
     out->five_ghz = (cs & 0xC000) == 0xC000;
-    const unsigned sb = (cs & 0x0700) >> 8;
+    const unsigned sb = (cs & 0x0700u) >> 8;
     switch (cs & 0x3800) {
     case 0x1000:
         out->bw_mhz = 20;
@@ -98,29 +98,37 @@ static inline void swlan_peer_parse(const uint8_t *ie, size_t length, struct swl
 {
     memset(out, 0, sizeof(*out));
     for (size_t at = 0; at + 2 <= length && at + 2 + ie[at + 1] <= length; at += 2 + (size_t)ie[at + 1]) {
-        const uint8_t id = ie[at], n = ie[at + 1];
+        const uint8_t id = ie[at];
+        const uint8_t n = ie[at + 1];
         const uint8_t *v = ie + at + 2;
         if (id == 45 && n >= 7) {  // HT Capabilities: info (2), A-MPDU (1), MCS set (16)
-            const uint16_t info = (uint16_t)(v[0] | v[1] << 8);
+            const uint16_t info = (uint16_t)(v[0] | (unsigned)v[1] << 8);
             out->ht = true;
             out->sgi20 = (info & 0x20) != 0;
             out->sgi40 = (info & 0x40) != 0;
-            for (unsigned s = 0; s < 4; ++s)
+            for (unsigned s = 0; s < 4; ++s) {
                 if (v[3 + s])
                     out->ht_nss = (uint8_t)(s + 1);
+            }
         } else if (id == 61 && n >= 2) {  // HT Operation: primary channel, then the secondary offset and STA width
             out->primary = v[0];
             out->ht_width = ((v[1] & 0x03) && (v[1] & 0x04)) ? 40 : 20;
         } else if (id == 191 && n >= 12) {  // VHT Capabilities: info (4), RX MCS map (2), ...
             const uint32_t info = (uint32_t)v[0] | (uint32_t)v[1] << 8 | (uint32_t)v[2] << 16 | (uint32_t)v[3] << 24;
-            const uint16_t map = (uint16_t)(v[4] | v[5] << 8);
+            const uint16_t map = (uint16_t)(v[4] | (unsigned)v[5] << 8);
             out->vht = true;
             out->sgi80 = (info & 0x20) != 0;
-            for (unsigned s = 0; s < 8; ++s)
-                if (((map >> (2 * s)) & 3) != 3)
+            for (unsigned s = 0; s < 8; ++s) {
+                if ((((unsigned)map >> (2 * s)) & 3) != 3)
                     out->vht_nss = (uint8_t)(s + 1);
+            }
         } else if (id == 192 && n >= 3) {  // VHT Operation: width 0 (20/40 as HT), 1 (80, or 160/80+80 by seg 1)
-            out->vht_width = v[0] == 0 ? 40 : (v[0] == 1 ? (v[2] ? 160 : 80) : 160);
+            out->vht_width = 160;
+            if (v[0] == 0) {
+                out->vht_width = 40;
+            } else if (v[0] == 1 && !v[2]) {
+                out->vht_width = 80;
+            }
         } else if (id == 255 && n >= 1 && v[0] == 35) {  // HE Capabilities (element id extension 35)
             out->he = true;
         }
@@ -137,20 +145,32 @@ enum {
 static inline uint32_t swlan_link_best_kbps(const struct swlan_peer *ap, uint16_t bw_mhz)
 {
     // kb/s per stream, long and short guard interval: HT MCS 7 at 20/40, VHT MCS 8 at 20, MCS 9 at 40/80/160
-    static const uint32_t ht20[2] = {65000, 72200}, ht40[2] = {135000, 150000};
-    static const uint32_t vht20[2] = {78000, 86700}, vht40[2] = {180000, 200000}, vht80[2] = {390000, 433300},
-                          vht160[2] = {780000, 866700};
+    static const uint32_t ht20[2] = {65000, 72200};
+    static const uint32_t ht40[2] = {135000, 150000};
+    static const uint32_t vht20[2] = {78000, 86700};
+    static const uint32_t vht40[2] = {180000, 200000};
+    static const uint32_t vht80[2] = {390000, 433300};
+    static const uint32_t vht160[2] = {780000, 866700};
     const unsigned nss = ap->vht && ap->vht_nss ? ap->vht_nss : ap->ht_nss;
     const unsigned streams = nss < SWLAN_OUR_NSS ? nss : SWLAN_OUR_NSS;
     if (!streams || !ap->ht)
         return 0;
-    const unsigned sgi = bw_mhz >= 80 ? ap->sgi80 : (bw_mhz >= 40 ? ap->sgi40 : ap->sgi20);
-    const uint32_t *row;
-    if (ap->vht)
-        row = bw_mhz >= 160 ? vht160 : bw_mhz >= 80 ? vht80 : bw_mhz >= 40 ? vht40 : vht20;
-    else
-        row = bw_mhz >= 40 ? ht40 : ht20;
-    return row[sgi] * streams;
+    bool sgi = ap->sgi20;
+    if (bw_mhz >= 40)
+        sgi = ap->sgi40;
+    if (bw_mhz >= 80)
+        sgi = ap->sgi80;
+    const uint32_t *row = bw_mhz >= 40 ? ht40 : ht20;
+    if (ap->vht) {
+        row = vht20;
+        if (bw_mhz >= 40)
+            row = vht40;
+        if (bw_mhz >= 80)
+            row = vht80;
+        if (bw_mhz >= 160)
+            row = vht160;
+    }
+    return row[sgi ? 1 : 0] * streams;
 }
 
 static inline int swlan_peer_describe(const struct swlan_peer *ap, char *out, size_t size)
@@ -159,12 +179,13 @@ static inline int swlan_peer_describe(const struct swlan_peer *ap, char *out, si
         return 0;
     if (!ap->ht)
         return snprintf(out, size, "legacy (no HT)");
-    int n = snprintf(out, size, "HT %u SS %u MHz%s", ap->ht_nss, ap->ht_width ? ap->ht_width : 20,
-                     (ap->ht_width >= 40 ? ap->sgi40 : ap->sgi20) ? " SGI" : "");
+    const bool htSgi = ap->ht_width >= 40 ? ap->sgi40 : ap->sgi20;
+    const unsigned htWidth = ap->ht_width ? ap->ht_width : 20;
+    int n = snprintf(out, size, "HT %u SS %u MHz%s", ap->ht_nss, htWidth, htSgi ? " SGI" : "");
     size_t at = n > 0 ? (size_t)n : 0;
     if (ap->vht && at < size) {
-        n = snprintf(out + at, size - at, ", VHT %u SS %u MHz%s", ap->vht_nss,
-                     ap->vht_width ? ap->vht_width : (ap->ht_width ? ap->ht_width : 20), ap->sgi80 ? " SGI" : "");
+        const unsigned vhtWidth = ap->vht_width ? ap->vht_width : htWidth;
+        n = snprintf(out + at, size - at, ", VHT %u SS %u MHz%s", ap->vht_nss, vhtWidth, ap->sgi80 ? " SGI" : "");
         at += n > 0 ? (size_t)n : 0;
     }
     if (ap->he && at < size) {

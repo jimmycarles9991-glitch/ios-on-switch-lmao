@@ -147,6 +147,46 @@ TEST(Relayout, RoundTripIsIdentity)
 	}
 }
 
+// A tiling move follows the surface's running writers in its own push: a connection's channel and the copy engine's (whose
+// fence is in every space's fence view, gpu.c tgm_fence_kernel) are semaphore acquires ahead of its copies; its own
+// channel's work needs none; a writer with no fence in the view, or past the push's acquires, is refused, never waited for.
+TEST(Relayout, TheMovesPushCarriesItsWritersAcquires)
+{
+	constexpr uint32_t kSelf = 3;
+	constexpr uint64_t kUserFence = 0x8000001040, kCopyEngineFence = 0x8000100000;
+	const tgm_relayout_writer writers[] = {{kSelf, 9}, {5, 7}, {6, 2}, {8, 4}};
+	const uint64_t fenceVa[] = {0x8000003000, kUserFence, kCopyEngineFence, 0};
+	tgm_relayout_wait waits[TGM_RELAYOUT_MAX_WAITS];
+	uint32_t refused = 0;
+	const uint32_t n = tgm_relayout_follow(kSelf, writers, fenceVa, 4, waits, 0, &refused);
+	ASSERT_EQ(n, 2u);
+	EXPECT_EQ(refused, 1u);
+	Surface s(kCases[2]);
+	s.move(TGM_RELAYOUT_TILE_IN_PLACE, {waits, waits + n});
+	EXPECT_EQ(waits[0].va, kUserFence);
+	EXPECT_EQ(waits[0].seqno, 7u);
+	EXPECT_EQ(waits[1].va, kCopyEngineFence);
+	EXPECT_EQ(waits[1].seqno, 2u);
+}
+
+TEST(Relayout, WritersPastThePushsAcquiresAreRefused)
+{
+	tgm_relayout_writer writers[TGM_RELAYOUT_MAX_WAITS + 2];
+	uint64_t fenceVa[TGM_RELAYOUT_MAX_WAITS + 2];
+	for (uint32_t i = 0; i < TGM_RELAYOUT_MAX_WAITS + 2; i++) {
+		writers[i] = {10 + i, i};
+		fenceVa[i] = 0x9000000000 + 16 * i;
+	}
+	tgm_relayout_wait waits[TGM_RELAYOUT_MAX_WAITS];
+	uint32_t refused = 0;
+	const uint32_t n = tgm_relayout_follow(1, writers, fenceVa, TGM_RELAYOUT_MAX_WAITS + 2,
+					       waits, 0, &refused);
+	EXPECT_EQ(n, TGM_RELAYOUT_MAX_WAITS);
+	EXPECT_EQ(refused, 2u);
+	Surface s(kCases[2]);
+	s.move(TGM_RELAYOUT_TO_ROWS, {waits, waits + n});
+}
+
 TEST(Relayout, WaitsForEveryWriterFirst)
 {
 	Surface s(kCases[2]);

@@ -50,8 +50,7 @@ enum slot_id {
     CA_RENDER,
     CA_DISPLAY,
     APP_MAIN,
-    FIRST_GPU,
-    RAW_SUBMIT = FIRST_GPU,
+    RAW_SUBMIT,
     RAW_COMPLETION,
     RAW_POOL,
     M2V_SCHEDULER,
@@ -59,6 +58,10 @@ enum slot_id {
     M2V_COMPLETION,
     M2V_HANDLERS,
     SLOTS,
+};
+
+enum {
+    FIRST_GPU = RAW_SUBMIT
 };
 
 /* backboardd's threads by the names they give themselves: Core Animation's, and our Metal driver's. */
@@ -101,7 +104,7 @@ static struct {
     uint64_t tid, cpu;
 } kernel_seen[KERNEL_SEEN];
 
-void switch_sched_report(thread_call_param_t p0, thread_call_param_t p1);
+static void switch_sched_report(thread_call_param_t p0, thread_call_param_t p1);
 
 static int slot_for(uint64_t tid)
 {
@@ -115,7 +118,7 @@ static int slot_for(uint64_t tid)
 
 static uint64_t abs_to_us(uint64_t abs)
 {
-    uint64_t ns;
+    uint64_t ns = 0;
 
     absolutetime_to_nanoseconds(abs, &ns);
     return ns / NSEC_PER_USEC;
@@ -124,8 +127,9 @@ static uint64_t abs_to_us(uint64_t abs)
 void switch_sched_dispatched(thread_t thread, uint64_t now)
 {
     int i = slot_for(thread->thread_id);
-    struct slot *s;
-    uint64_t made = thread->last_made_runnable_time, us = 0;
+    struct slot *s = NULL;
+    uint64_t made = thread->last_made_runnable_time;
+    uint64_t us = 0;
 
     if (i < 0) {
         return;
@@ -188,10 +192,14 @@ void switch_sched_role(task_t task, int role)
 {
     char name[32];
     char label[LABEL];
-    uint64_t tid;
+    uint64_t tid = 0;
 
     switch_stall_frame_role(task, role);
-    if (role != TASK_FOREGROUND_APPLICATION || (tid = main_thread_id(task)) == 0) {
+    if (role != TASK_FOREGROUND_APPLICATION) {
+        return;
+    }
+    tid = main_thread_id(task);
+    if (tid == 0) {
         return;
     }
     switch_task_name(task, name, sizeof(name));
@@ -208,7 +216,7 @@ void switch_sched_named(thread_t thread, const char *name)
 {
     task_t task = get_threadtask(thread);
     char process[16];
-    uint64_t main_tid;
+    uint64_t main_tid = 0;
 
     if (task == kernel_task || name == NULL) {
         return;
@@ -226,7 +234,8 @@ void switch_sched_named(thread_t thread, const char *name)
         if (render_server_threads[i].slot == CA_RENDER) {
             switch_stall_frame_render_server(thread);
         }
-        if ((main_tid = main_thread_id(task)) != 0) {
+        main_tid = main_thread_id(task);
+        if (main_tid != 0) {
             watch(BB_MAIN, main_tid, task_pid(task), "backboardd.main", true);
         }
         return;
@@ -262,7 +271,7 @@ void switch_sched_limit_asked(uint8_t percentage, uint64_t interval_ns, bool lif
 {
     char process[16];
     uint32_t interval_ms = (uint32_t)(interval_ns / NSEC_PER_MSEC);
-    unsigned int i;
+    unsigned int i = 0;
 
     switch_task_name(current_task(), process, sizeof(process));
     simple_lock(&asked_lock, LCK_GRP_NULL);
@@ -290,7 +299,7 @@ void switch_sched_limit_asked(uint8_t percentage, uint64_t interval_ns, bool lif
 static void report_asked(char *line)
 {
     size_t at = (size_t)snprintf(line, LINE, "SwitchSched CPU limits asked (process percent/refill ms x requests):");
-    bool fresh;
+    bool fresh = false;
 
     simple_lock(&asked_lock, LCK_GRP_NULL);
     fresh = asked_requests != asked_reported;
@@ -301,8 +310,7 @@ static void report_asked(char *line)
         at = n < 0 ? at : MIN(at + (size_t)n, LINE - 1);
     }
     if (fresh && asked_dropped != 0 && at < LINE - 1) {
-        int n = snprintf(line + at, LINE - at, " %u more in no row", asked_dropped);
-        at = n < 0 ? at : MIN(at + (size_t)n, LINE - 1);
+        (void)snprintf(line + at, LINE - at, " %u more in no row", asked_dropped);
     }
     simple_unlock(&asked_lock);
     if (fresh) {
@@ -313,7 +321,7 @@ static void report_asked(char *line)
 /* IOPMrootDomain: backboardd set System Boot Complete, about 3 s after SpringBoard dismissed the boot logo. */
 void switch_sched_boot_complete(void)
 {
-    uint64_t ns;
+    uint64_t ns = 0;
 
     absolutetime_to_nanoseconds(mach_absolute_time(), &ns);
     if (os_atomic_cmpxchg(&boot_complete_ns, 0, ns, relaxed)) {
@@ -335,7 +343,8 @@ void switch_sched_tick(uint64_t now)
 
 static struct switch_sched_window take_window(struct slot *s)
 {
-    struct switch_sched_window now = {0}, w = {0};
+    struct switch_sched_window now = {0};
+    struct switch_sched_window w = {0};
 
     for (unsigned int b = 0; b < SWITCH_SCHED_BUCKETS; b++) {
         now.hist[b] = os_atomic_load(&s->hist[b], relaxed);
@@ -377,7 +386,7 @@ static size_t append_slots(char *line, size_t at, int first, int last)
     for (int i = first; i < last && at < LINE - 1; i++) {
         struct switch_sched_window w;
         char label[LABEL];
-        int pid;
+        int pid = 0;
 
         if (os_atomic_load(&watched[i], relaxed) == 0) {
             continue;
@@ -402,13 +411,14 @@ static size_t append_kernel_top(char *line, size_t at)
         uint64_t cpu;
     } top[KERNEL_TOP] = {0};
 
-    thread_t t;
+    thread_t t = NULL;
 
     task_lock(kernel_task);
     queue_iterate(&kernel_task->threads, t, thread_t, task_threads)
     {
-        uint64_t cpu = recount_thread_time_mach(t), delta;
-        unsigned int k;
+        uint64_t cpu = recount_thread_time_mach(t);
+        uint64_t delta = 0;
+        unsigned int k = 0;
 
         if (t->base_pri == IDLEPRI) {
             continue;
@@ -433,7 +443,7 @@ static size_t append_kernel_top(char *line, size_t at)
     at = put(line, at, "; kernel:");
     for (unsigned int j = 0; j < KERNEL_TOP && top[j].thread != THREAD_NULL && at < LINE - 1; j++) {
         char name[MAXTHREADNAMESIZE];
-        int n;
+        int n = 0;
 
         t = top[j].thread;
         thread_get_thread_name(t, name);
@@ -453,12 +463,14 @@ static size_t append_kernel_top(char *line, size_t at)
     return at;
 }
 
-void switch_sched_report(__unused thread_call_param_t p0, __unused thread_call_param_t p1)
+static void switch_sched_report(__unused thread_call_param_t p0, __unused thread_call_param_t p1)
 {
     static uint64_t last_ns;
     static char line[LINE];
-    uint64_t now_ns, window_ms, boot_ns = os_atomic_load(&boot_complete_ns, relaxed);
-    size_t at;
+    uint64_t now_ns = 0;
+    uint64_t window_ms = 0;
+    uint64_t boot_ns = os_atomic_load(&boot_complete_ns, relaxed);
+    size_t at = 0;
 
     absolutetime_to_nanoseconds(mach_absolute_time(), &now_ns);
     window_ms = (now_ns - last_ns) / NSEC_PER_MSEC;

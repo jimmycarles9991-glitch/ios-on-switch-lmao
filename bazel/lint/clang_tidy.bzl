@@ -11,6 +11,9 @@ target's copts, defines and include paths. Two toolchain features are left out o
 transition and so no second configuration of anything: apple_clang_only (options only Apple's clang knows, or that
 only matter for code generation; upstream clang-tidy rejects them) and kernel_warnings (the drivers' -W/-Werror set:
 -Werror would turn any Apple-vs-upstream diagnostic difference into a failure; clang-tidy's own checks are the lint).
+XNU's include directories (its sources, exported headers and SDK root, all below kernel/xnu-<version>) are passed as
+-isystem instead of -I, so a finding inside one of Apple's macros (kIOReturn*'s signed shifts, IONew's sizeof * n) is
+Apple's, not the unit's. The build itself keeps -I.
 
 Units of targets tagged "no-lint" (vendored code: nouveau, Linux ports, ...) and of other repositories are skipped.
 """
@@ -98,6 +101,15 @@ def _flags(cc_toolchain, feature_configuration, compilation_context, action, use
         variables = variables,
     )
 
+def _apple_headers_as_system(flags):
+    out = list(flags)
+    for i, flag in enumerate(out):
+        if flag == "-I" and i + 1 < len(out) and "kernel/xnu-" in out[i + 1]:
+            out[i] = "-isystem"
+        elif flag.startswith("-I") and "kernel/xnu-" in flag:
+            out[i] = "-isystem" + flag[2:]
+    return out
+
 def _make_variables(ctx):
     """The make variables a target's copts use: Bazel's own ($(BINDIR), ...) and its toolchains' ($(KERNEL_XNU), ...)."""
     variables = dict(ctx.var)
@@ -136,15 +148,22 @@ def _tidy_units(target, ctx):
             lang_flags = ctx.fragments.cpp.conlyopts + _expand(getattr(ctx.rule.attr, "conlyopts", []), variables)
         else:
             lang_flags = ctx.fragments.cpp.cxxopts + _expand(getattr(ctx.rule.attr, "cxxopts", []), variables)
-        flags = _flags(
+        flags = _apple_headers_as_system(_flags(
             cc_toolchain,
             feature_configuration,
             compilation_context,
             action,
             ctx.fragments.cpp.copts + copts + lang_flags,
-        )
+        ))
         report = ctx.actions.declare_file("{}.clang_tidy/{}.report".format(target.label.name, src.short_path))
-        reachable = [c for c in configs if not c.dirname or src.path.startswith(c.dirname + "/")]
+
+        # The root .clang-tidy included: without it in the sandbox, clang-tidy walks up out of the sandbox and reads
+        # whatever .clang-tidy lies above the output base, or none.
+        reachable = [
+            c
+            for c in configs
+            if "/" not in c.short_path or src.short_path.startswith(c.short_path.rpartition("/")[0] + "/")
+        ]
         args = ctx.actions.args()
         args.add(report)
         args.add(src.short_path)

@@ -27,6 +27,16 @@ using switch_ios::test::SourceText;
 using testing::HasSubstr;
 using testing::Not;
 
+// The driver as one text: SwitchAudio's members are defined across its files.
+std::string Driver()
+{
+    std::string text;
+    for (const char *file : {"../SwitchAudioRegisters.h", "../SwitchAudioDriver.h", "../SwitchAudio.cpp",
+                             "../SwitchAudioClocks.cpp", "../SwitchAudioStream.cpp", "../SwitchAudioCodec.cpp"})
+        text += SourceText(file);
+    return text;
+}
+
 // The ABI: version 6 is S32_LE samples at one of rates[]; periods stay whole ADMA buffers and the rings DMA-able
 // (playback 65536 frames of stereo S32: 512 KiB; capture 16384 mono: 64 KiB).
 static_assert(SWITCH_AUDIO_VERSION == 7u);
@@ -74,7 +84,7 @@ TEST(SwitchAudioSource, ClockFamiliesDivideToTheirRates)
 
 TEST(SwitchAudioSource, DriverRunsTheClockTable)
 {
-    const std::string driver = SourceText("../SwitchAudio.cpp");
+    const std::string driver = Driver();
     for (const char *line :
          {"constexpr switch_audio_clock kClocks[SWITCH_AUDIO_MAX_RATES] = {SWITCH_AUDIO_CLOCK_48000, "
           "SWITCH_AUDIO_CLOCK_44100};",
@@ -86,17 +96,17 @@ TEST(SwitchAudioSource, DriverRunsTheClockTable)
     for (const char *gone : {"kPllaM", "kPllaN =", "kPllaSdm", "kI2sDiv", "kExtern1Div", "kWatchdogMS"})
         EXPECT_THAT(driver, Not(HasSubstr(gone)));
     // A rate change powers the codec down before its MCLK changes, and only between streams.
-    const std::string setRate = Between(driver, "IOReturn setRate(uint32_t rate)", "\n    }\n");
+    const std::string setRate = Between(driver, "IOReturn SwitchAudio::setRate(uint32_t rate)", "\n}\n");
     const size_t idle = setRate.find("codecStep(kCodecIdleNow)"), change = setRate.find("&SwitchAudio::rateGated");
     ASSERT_NE(idle, std::string::npos);
     ASSERT_NE(change, std::string::npos);
     EXPECT_LT(idle, change);
-    EXPECT_THAT(Between(driver, "static IOReturn rateGated(", "\n    }\n"), HasSubstr("if (self->control->state) {"));
+    EXPECT_THAT(Between(driver, "IOReturn SwitchAudio::rateGated(", "\n}\n"), HasSubstr("if (self->control->state) {"));
 }
 
 TEST(SwitchAudioSource, DriverProgramsTheHeaderWords)
 {
-    const std::string d = SourceText("../SwitchAudio.cpp");
+    const std::string d = Driver();
     for (const char *line :
          {"switch_mmio_write32(ahub, ADMAIF_TX_CIF, switch_audio_admaif_cif(SWITCH_AUDIO_OUT_CHANNELS));",
           "switch_mmio_write32(ahub, ADMAIF_RX_CIF, switch_audio_admaif_cif(SWITCH_AUDIO_IN_CHANNELS));",
@@ -120,8 +130,8 @@ TEST(SwitchAudioSource, DriverProgramsTheHeaderWords)
 // and stop and at system sleep (ASoC's order): its amplifiers never carry the frame clock starting or stopping.
 TEST(SwitchAudioSource, CodecUnmutedOnlyWhileTheI2sClocks)
 {
-    const std::string d = SourceText("../SwitchAudio.cpp");
-    const std::string request = Between(d, "IOReturn request(uint32_t selector)", "\n    }\n");
+    const std::string d = Driver();
+    const std::string request = Between(d, "IOReturn SwitchAudio::request(uint32_t selector)", "\n}\n");
     const size_t powerUp = request.find("codecStep(kCodecPowerUp)"), pause = request.find("codecStep(kCodecPause)");
     const size_t hardware = request.find("const IOReturn result = gate->runAction(&SwitchAudio::requestGated");
     const size_t unmute = request.find("codecStep(kCodecUnmute)");
@@ -130,14 +140,14 @@ TEST(SwitchAudioSource, CodecUnmutedOnlyWhileTheI2sClocks)
     EXPECT_LT(pause, hardware);
     EXPECT_NE(unmute, std::string::npos);
     EXPECT_GT(unmute, hardware);
-    EXPECT_THAT(Between(d, "void codecPowerUp()", "\n    }\n"), Not(HasSubstr("mute(false)")));
-    const std::string sleep = Between(d, "void systemSleep(bool entering)", "} else {");
+    EXPECT_THAT(Between(d, "void SwitchAudio::codecPowerUp()", "\n}\n"), Not(HasSubstr("mute(false)")));
+    const std::string sleep = Between(d, "void SwitchAudio::systemSleep(bool entering)", "} else {");
     EXPECT_LT(sleep.find("codecStep(kCodecMute)"), sleep.find("&SwitchAudio::sleepGated"));
 }
 
 TEST(SwitchAudioSource, AbiIsS32)
 {
-    const std::string driver = SourceText("../SwitchAudio.cpp");
+    const std::string driver = Driver();
     const std::string plugin = SourceText("../hal/SwitchAudioPlugIn.c");
     EXPECT_THAT(driver, HasSubstr("sizeof(switch_audio_sample_t)"));
     EXPECT_THAT(plugin, Not(HasSubstr("int16_t")));
@@ -169,14 +179,14 @@ TEST(SwitchAudioSource, JackIsTheCodecDevice)
     EXPECT_THAT(plugin, Not(HasSubstr("SwitchAudioMic")));
     EXPECT_THAT(plugin, Not(HasSubstr("kAudioDevicePropertyDataSources")));  // no built-in microphone
 
-    const std::string driver = SourceText("../SwitchAudio.cpp");
+    const std::string driver = Driver();
     EXPECT_THAT(driver, HasSubstr("tegraCapture = tegra;"));
-    EXPECT_THAT(Between(driver, "void publishJack()", "\n    }\n"),
+    EXPECT_THAT(Between(driver, "void SwitchAudio::publishJack()", "\n}\n"),
                 HasSubstr("messageClients(kIOMessageServicePropertyChange);"));
-    const std::string capture = Between(driver, "void captureOff()", "\n    }\n");
+    const std::string capture = Between(driver, "void SwitchAudio::captureOff()", "\n}\n");
     EXPECT_THAT(capture, Not(HasSubstr("panic(")));
     EXPECT_THAT(capture, HasSubstr("tegraCapture = false;"));
-    EXPECT_THAT(driver, HasSubstr("if (!captureProven && played > 2 * kOutPeriodFrames) {"));
+    EXPECT_THAT(driver, HasSubstr("if (!captureProven && played > 2 * static_cast<uint64_t>(kOutPeriodFrames)) {"));
 
     const std::string codec = SourceText("../SwitchRT5639.cpp");
     EXPECT_THAT(codec, HasSubstr("write(DAC1_DIG_VOL, headphoneDac());"));
@@ -187,7 +197,7 @@ TEST(SwitchAudioSource, JackIsTheCodecDevice)
 // capture's stays short, the microphone's latency.
 TEST(SwitchAudioSource, LongPlaybackShortCapturePeriods)
 {
-    const std::string d = SourceText("../SwitchAudio.cpp");
+    const std::string d = Driver();
     EXPECT_THAT(d, HasSubstr("constexpr unsigned kOutPeriods = 4, kInPeriods = 8;"));
     EXPECT_THAT(d, HasSubstr("((kOutPeriods - 1) << 28) | (5u << 20) | 1u"));
     EXPECT_THAT(d, HasSubstr("control->period_frames = kInPeriodFrames;"));
@@ -224,18 +234,18 @@ TEST(SwitchAudioSource, CapturePathFollowsInput)
                                    SWITCH_AUDIO_IN_RING_FRAMES),
               7);
 
-    const std::string d = SourceText("../SwitchAudio.cpp");
-    const std::string start = Between(d, "    void tegraStart()", "\n    }\n");
+    const std::string d = Driver();
+    const std::string start = Between(d, "void SwitchAudio::tegraStart()", "\n}\n");
     for (const char *capture : {"ADMAIF_RX_ENABLE", "I2S_TX_ENABLE", "programChannel(kChIn)"})
         EXPECT_THAT(start, Not(HasSubstr(capture))) << "playback start powers no capture: " << capture;
-    EXPECT_THAT(Between(d, "    void codecPowerUp()", "\n    }\n"), Not(HasSubstr("powerCapture")));
-    EXPECT_THAT(Between(d, "    void captureStart()", "\n    }\n"), HasSubstr("programChannel(kChIn);"));
-    EXPECT_THAT(Between(d, "    void tegraStop()", "\n    }\n"), HasSubstr("captureStop();"));
-    const std::string request = Between(d, "IOReturn request(uint32_t selector)", "\n    }\n");
+    EXPECT_THAT(Between(d, "void SwitchAudio::codecPowerUp()", "\n}\n"), Not(HasSubstr("powerCapture")));
+    EXPECT_THAT(Between(d, "void SwitchAudio::captureStart()", "\n}\n"), HasSubstr("programChannel(kChIn);"));
+    EXPECT_THAT(Between(d, "void SwitchAudio::tegraStop()", "\n}\n"), HasSubstr("captureStop();"));
+    const std::string request = Between(d, "IOReturn SwitchAudio::request(uint32_t selector)", "\n}\n");
     EXPECT_THAT(request, HasSubstr("codecStep(kCodecCaptureOn)"));
     EXPECT_THAT(request, HasSubstr("codecStep(kCodecCaptureOff)"));
     EXPECT_THAT(d, HasSubstr("const uint32_t actions = switch_audio_transition(was, c->state);"));
-    EXPECT_THAT(Between(d, "    void noteJack()", "\n    }\n"), HasSubstr("if (!captureCodecOn || !headset)"));
+    EXPECT_THAT(Between(d, "void SwitchAudio::noteJack()", "\n}\n"), HasSubstr("if (!captureCodecOn || !headset)"));
 
     const std::string plugin = SourceText("../hal/SwitchAudioPlugIn.c");
     EXPECT_THAT(plugin, HasSubstr("const Boolean want = gCodecUsers > 0 && gCodecInActive && gControl;"));

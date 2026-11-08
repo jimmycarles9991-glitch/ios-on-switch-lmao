@@ -9,19 +9,20 @@ ca/qc-<build>.json): the corpus's names, QuartzCore's offline compilation manife
 puts in the pipeline and over the blend it leaves in the fragment (CA_TIERS). With no tables of this QuartzCore (another
 IPSW's), the corpus's states as they are.
 
-  1. probe (pack/probe.mm) makes every state and draws it once with tagged inputs, three times: payloads of 256, 16 and
+  1. probe (pack/probe.mm) makes every state and draws it once with tagged inputs, four times: payloads of 256, 16 and
      4096 bytes (a uniform buffer's range is NVK's 256-byte rounding of the payload; the 4096-byte run gives the
-     function's window);
+     function's window), and of 256 bytes bound at an offset of each slot's own (the push word of its residual);
   2. mkprograms.py reads NAK's programs out of the NVK driver records the run left in its m2v cache directory;
   3. mkpack.py reads the probe logs and writes pack.bin: per state its programs, registers, push words and descriptor
      layout, plus NVK's context init with the addresses to relocate. States m2v draws with more than one draw or with
-     dispatches (the extended-range formats' shadow images and merges) are left out: the raw path hands them to m2v.
+     dispatches are left out: the raw path hands them to m2v. (An extended-range attachment is loaded and stored
+     DontCare, so its state's draw is the pass's only one: probe.mm.)
 
-usage: rawpack.py --bridge <host libnative_metal_bridge.a> --nvk <host twin dylib> --qc <default.metallib>
-                  --corpus <corpus.log> --out <dir> [--stack <hex key>] [--prebuilt <dir>]
-       rawpack.py --build-only --bridge <host libnative_metal_bridge.a> --out <dir>
+usage: rawpack.py --bridge <host libnative_metal_bridge.a> --metal-abi <MetalABI.h> --nvk <host twin dylib>
+                  --qc <default.metallib> --corpus <corpus.log> --out <dir> [--stack <hex key>] [--prebuilt <dir>]
+       rawpack.py --build-only --bridge <host libnative_metal_bridge.a> --metal-abi <MetalABI.h> --out <dir>
 writes <out>/pack.bin, pack.json, layouts.txt, report.txt and keeps the probe logs in <out>/work (deleted with --clean).
---build-only compiles the probe, the mock GPU (libmock_iokit.dylib) and ycbcr.metallib into <dir> and stops; --prebuilt
+--build-only compiles the probe, the mock GPU (libmock_iokit.dylib) and own.metallib into <dir> and stops; --prebuilt
 <dir> runs those instead of compiling them (//gpu/seed:local_tools makes them its own action, so a corpus edit only
 reruns the probes).
 --stack: the build's stack key (the plugin is compiled with the same value), stamped into the pack header: the runtime
@@ -53,6 +54,9 @@ import subprocess
 import sys
 import tempfile
 from pathlib import Path
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import packfile
 
 HERE = Path(__file__).resolve().parent  # drivers/TegraGM20BMetal/raw/pack
 RAW = HERE.parent
@@ -87,11 +91,12 @@ def option(name: str, required: bool = True) -> str | None:
     return None
 
 
-BUILT = ('probe', 'libmock_iokit.dylib', 'ycbcr.metallib')
+BUILT = ('probe', 'libmock_iokit.dylib', 'own.metallib')
 # Another framework's states (their lines keep lib=, tools/gpu/rawpack.py): the probe loads that library from the
 # crawl's root
 FRAMEWORK = re.compile(r' lib=/System/Library/(?:Private)?Frameworks/\w+\.framework/default\.metallib ')
 QC_PATH = 'System/Library/Frameworks/QuartzCore.framework/default.metallib'
+LIBRARY = re.compile(r' lib=(\S+)')
 
 
 def library_root(qc: Path) -> str:
@@ -104,7 +109,7 @@ def library_root(qc: Path) -> str:
 
 # The Core Animation states the pack holds (ca/caset.py's tiers): every one. The runtime makes a state and places its
 # programs in the shader heap at its first lookup (raw_gpu.cpp Device::pipeline), so the pack's size is file size only.
-CA_TIERS = ('corpus', 'manifest', 'blend', 'fetch')
+CA_TIERS = ('corpus', 'manifest', 'variants', 'blend', 'fetch')
 
 
 def ca_corpus(qc: Path, corpus: Path, work: Path) -> Path:
@@ -125,18 +130,18 @@ def ca_corpus(qc: Path, corpus: Path, work: Path) -> Path:
     out = work / 'corpus.ca.log'
     with open(corpus) as src, open(out, 'w') as dst:
         dst.writelines(line for line in src if not caspec.corpus_fields(line)[0])
-        for tier, names in caset.labels(tables, caset.corpus_names(str(corpus)), CA_TIERS).items():
+        for tier, names in caset.labels(tables, caset.corpus_names(str(corpus), tables), CA_TIERS).items():
             dst.writelines(caspec.state_line(tables, n) + '\n' for n in names)
             print(f'rawpack: Core Animation states, {tier}: {len(names)}')
     return out
 
 
-def build(work: Path, bridge: Path) -> None:
+def build(work: Path, bridge: Path, metal_abi: Path) -> None:
     """Build the mock GPU, the probe and the raw path's own states into `work`.
 
     The mock GPU with nvdec on every submission, the probe through the frontend + host bridge (beside it: rpath
-    @executable_path) and the raw path's own states: the 4:2:0 YCbCr conversions (ycbcr.metal), an iOS library like
-    QuartzCore's, drawn after Core Animation's (probe.mm PROBE_YCBCR_LIB).
+    @executable_path) and the raw path's own states: the YCbCr conversions (ycbcr.metal) and the extended-range
+    stand-ins (xr.metal), an iOS library like QuartzCore's, drawn after Core Animation's (probe.mm PROBE_OWN_LIB).
     """
     # Source paths (Mesa's asserts' __FILE__) as /switch-ios/..., whichever checkout or sandbox this runs in: the probe
     # and the mock are an action's outputs, and the run's cache key is their bytes.
@@ -150,10 +155,6 @@ def build(work: Path, bridge: Path) -> None:
     run(['xcrun', 'clang', *cflags, '-c', HERE / 'mock_iokit.c', '-o', work / 'mock_iokit.o'])
     run(['xcrun', 'clang++', *cflags, '-std=c++17', '-c', HERE / 'cap.cpp', '-o', work / 'cap.o'])
     run(['xcrun', 'clang++', *cflags, '-std=c++17', '-c', HERE / 'nvdec.cpp', '-o', work / 'nvdec.o'])
-    for src in ('raw_capture.cpp', 'raw_pack.cpp'):  # the mock's RAWCAP_CAPTURE (cap.cpp)
-        obj = work / Path(src).with_suffix('.o')
-        run(['xcrun', 'clang++', *cflags, '-std=c++17', '-c', RAW / 'runtime' / src, '-o', obj])
-        objs.append(obj)
     run(
         [
             'xcrun',
@@ -184,6 +185,8 @@ def build(work: Path, bridge: Path) -> None:
             *maps,
             '-I',
             METAL,
+            '-I',
+            metal_abi.parent,
             '-x',
             'objective-c++',
             HERE / 'probe.mm',
@@ -210,14 +213,18 @@ def build(work: Path, bridge: Path) -> None:
             work / 'probe',
         ]
     )
-    run(['xcrun', '-sdk', 'iphoneos', 'metal', '-c', HERE / 'ycbcr.metal', '-I', HERE, '-o', work / 'ycbcr.air'])
-    run(['xcrun', '-sdk', 'iphoneos', 'metallib', work / 'ycbcr.air', '-o', work / 'ycbcr.metallib'])
+    own = ('ycbcr', 'xr')
+    for name in own:
+        run(
+            ['xcrun', '-sdk', 'iphoneos', 'metal', '-c', HERE / f'{name}.metal', '-I', HERE, '-o', work / f'{name}.air']
+        )
+    run(['xcrun', '-sdk', 'iphoneos', 'metallib', *(work / f'{name}.air' for name in own), '-o', work / 'own.metallib'])
 
 
 # The states are probed in buckets, each its own probe processes over a share of the states (fnv64 of the state's line,
 # so a state stays in its bucket whatever else changes), all at once: a bucket's outputs are a function of its states
 # and the tools alone (what a cache of probe runs can key by). Bucket 0 also draws the raw path's own states
-# (PROBE_YCBCR_LIB).
+# (PROBE_OWN_LIB).
 BUCKETS = 16
 
 
@@ -233,7 +240,7 @@ def split_buckets(corpus: Path, work: Path, count: int) -> list[Path]:
     with open(corpus) as f:
         for line in f:
             if line.startswith('R ') and (' label=com.apple.coreanimation.' in line or FRAMEWORK.search(line)):
-                lines[fnv(line.split(' ', 3)[3].encode()) % count].append(line)
+                lines[packfile.fnv(line.split(' ', 3)[3].encode()) % count].append(line)
                 warm = warm or (line if 'f downsample_4_frag' in line else '')
     dirs = []
     for i, part in enumerate(lines):
@@ -244,15 +251,17 @@ def split_buckets(corpus: Path, work: Path, count: int) -> list[Path]:
     return dirs
 
 
-def fnv(b: bytes) -> int:
-    h = 0xCBF29CE484222325
-    for x in b:
-        h = ((h ^ x) * 0x100000001B3) & 0xFFFFFFFFFFFFFFFF
-    return h
-
-
 def state_key(line: str) -> str:
-    """Give an R line's state key as probe.mm prints it: every descriptor field but the label, then its functions."""
+    """Give an R line's state key as probe.mm prints it: every descriptor field but the label, then its functions.
+
+    No lib= field is in it; a line whose first library is another framework's default.metallib than QuartzCore's ends
+    with " | l <framework>" (probe.mm libraryPath, frameworkName).
+    """
+    libs = LIBRARY.findall(line)
+    framework = ''
+    if libs and libs[0].endswith('.framework/default.metallib') and '/QuartzCore.framework/' not in libs[0]:
+        framework = libs[0].rsplit('.framework/', 1)[0].rsplit('/', 1)[-1]
+    line = LIBRARY.sub('', line)
     bar1, bar2 = line.find(' | v '), line.find(' | f ')
     if bar1 < 0 or bar2 < 0:
         return ''
@@ -262,7 +271,8 @@ def state_key(line: str) -> str:
         for h in line[:bar1].split()
         if h.startswith(('samples=', 'topo=', 'ds=')) or (len(h) > 1 and h[0] in 'ca' and h[1].isdigit())
     ]
-    return (' '.join(fields) + ' ' + line[bar1 : bar3 if bar3 >= 0 else len(line)]).strip()
+    key = (' '.join(fields) + ' ' + line[bar1 : bar3 if bar3 >= 0 else len(line)]).strip()
+    return f'{key} | l {framework}' if framework else key
 
 
 def barrier_set(d: Path) -> Path | None:
@@ -270,10 +280,12 @@ def barrier_set(d: Path) -> Path | None:
     sys.path.insert(0, str(HERE))
     import probelog  # noqa: PLC0415  the pack directory's module, on the path only now
 
+    # the interlock on in any of a probe's draws: a fetched color whose texture lacks STORAGE is drawn in a scratch
+    # between m2v's copy in and copy out (mkpack.py interlocked)
     keys = {
         p['key']
         for p in probelog.load(str(d / 'probe256.out'), str(d / 'probe256.log'))
-        if p['records'] and p['records'][0]['regs'].get(0x1224, 0) & 3
+        if any(r and r.get('regs', {}).get(0x1224, 0) & 3 for r in p['records'])
     }
     lines = (d / 'corpus.log').read_text().splitlines(keepends=True)
     chosen = [line for line in lines[1:] if state_key(line.rstrip('\n')) in keys]
@@ -288,7 +300,7 @@ def barrier_set(d: Path) -> Path | None:
 def probe_bucket(tools: Path, d: Path, nvk: Path, qc: Path, env: dict[str, str]) -> str:
     """Probe one bucket's states, then its storage-form states again with the interlock hidden (barrier_set).
 
-    A run that only fills its m2v cache with NVK's driver records (NAK's programs), then the three decoded runs, which
+    A run that only fills its m2v cache with NVK's driver records (NAK's programs), then the four decoded runs, which
     name each bound program by those records (RAWCAP_PROGRAMS) and hit the same cache.
     """
     said = [probe_runs(tools, d, nvk, qc, env)]
@@ -299,9 +311,9 @@ def probe_bucket(tools: Path, d: Path, nvk: Path, qc: Path, env: dict[str, str])
 
 
 def probe_runs(tools: Path, d: Path, nvk: Path, qc: Path, env: dict[str, str]) -> str:
-    """Run the warm-up and the three decoded probe runs over d's corpus."""
+    """Run the warm-up and the four decoded probe runs over d's corpus."""
     if d.name == 'bucket0':
-        env = dict(env, PROBE_YCBCR_LIB=str(tools / 'ycbcr.metallib'))
+        env = dict(env, PROBE_OWN_LIB=str(tools / 'own.metallib'))
     said = []
 
     def probe(name: str, extra: dict[str, str]) -> None:
@@ -332,6 +344,15 @@ def probe_runs(tools: Path, d: Path, nvk: Path, qc: Path, env: dict[str, str]) -
                 'RAWCAP_PROGRAMS': str(d / 'programs.bin'),
             },
         )
+    probe(
+        'probeoff',
+        {
+            'PROBE_BYTES': '256',
+            'PROBE_BIND_OFFSET': '1',
+            'RAWCAP_LOG': str(d / 'probeoff.log'),
+            'RAWCAP_PROGRAMS': str(d / 'programs.bin'),
+        },
+    )
     shutil.rmtree(d / 'cache')
     return f'rawpack: {d.parent.name + "/" if d.name == "barrier" else ""}{d.name}: ' + '; '.join(said)
 
@@ -394,7 +415,7 @@ def main() -> None:
         out = Path(option('--out')).resolve()
         out.mkdir(parents=True, exist_ok=True)
         with tempfile.TemporaryDirectory() as scratch:
-            build(Path(scratch), Path(option('--bridge')).resolve())
+            build(Path(scratch), Path(option('--bridge')).resolve(), Path(option('--metal-abi')).resolve())
             for name in BUILT:
                 shutil.copyfile(Path(scratch) / name, out / name)
                 (out / name).chmod(0o755)
@@ -426,7 +447,7 @@ def main() -> None:
             shutil.copyfile(Path(prebuilt) / name, work / name)
             (work / name).chmod(0o755)
     else:
-        build(work, Path(option('--bridge')).resolve())
+        build(work, Path(option('--bridge')).resolve(), Path(option('--metal-abi')).resolve())
     env = probe_env()
     buckets = split_buckets(corpus, work, BUCKETS)
     with concurrent.futures.ThreadPoolExecutor(max_workers=os.cpu_count() or 1) as pool:

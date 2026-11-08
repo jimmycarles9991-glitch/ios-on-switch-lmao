@@ -55,6 +55,8 @@ SWITCH_COPTS = {
         "XNU_OWNER_CACHE_CARRIER=0",
         "-D",
         "XNU_OWNER_CACHE_CARRIER_WRONG_UUID=0",
+        "-include",
+        "{owner_header}",
     ],
     "iokit/Kernel/IOUserClient.cpp": [
         "-D",

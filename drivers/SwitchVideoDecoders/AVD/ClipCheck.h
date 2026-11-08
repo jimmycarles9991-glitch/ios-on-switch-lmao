@@ -3,12 +3,9 @@
 // test/VP9Clip.h's VP9 clip, decoded through VideoToolbox, every output frame's luma CRC compared with the reference
 // encoder's reconstruction (x264) or decoder's output (libvpx).
 //
-// On the Switch, AVD.videodecoder runs it once per boot (the first process that may open TegraNVDEC claims it from the
-// kernel), requiring the hardware decoder: that proves the whole path, VideoToolbox -> this plug-in -> TegraNVDEC ->
-// NVDEC -> the de-swizzle, against an independent reference. launchd cannot start a job of ours for it: 21H461's
-// launchd reads its signed cache (/System/Library/xpc/launchd.plist), not the LaunchDaemons the overlay could show.
-// test/vdectest runs the same check on a Mac against Apple's decoders, and the host tests drive it through this
-// plug-in's VideoToolbox plumbing.
+// On the Switch, test/vdectest runs it requiring the hardware decoder: that proves the whole path, VideoToolbox -> this
+// plug-in -> TegraNVDEC -> NVDEC -> the de-swizzle, against an independent reference. On a Mac the same command checks
+// the clips against Apple's decoders, and the host tests drive it through this plug-in's VideoToolbox plumbing.
 #ifndef CLIP_CHECK_H
 #define CLIP_CHECK_H
 #include <CoreFoundation/CoreFoundation.h>

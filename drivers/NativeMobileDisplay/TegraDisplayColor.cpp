@@ -20,9 +20,10 @@ bool TegraDisplayColor::init()
 {
     inputs = Inputs();
     identityGamma(inputs.gamma);
-    for (unsigned point = 0; point < kGammaPoints; ++point)
+    for (unsigned point = 0; point < kGammaPoints; ++point) {
         for (unsigned channel = 0; channel < 3; ++channel)
             gammaTable[channel * kGammaPoints + point] = gammaIdentity(point);
+    }
     build(inputs, pending);
     lock = IOSimpleLockAlloc();
     return lock != nullptr;
@@ -35,7 +36,7 @@ void TegraDisplayColor::free()
     lock = nullptr;
 }
 
-void TegraDisplayColor::attach(volatile uint32_t *registers)
+void TegraDisplayColor::attach(SwitchMMIOWords registers)
 {
     colorControl = registers[kDcDispColorControl] & ~kCmuEnable;
     const IOInterruptState state = IOSimpleLockLockDisableInterrupt(lock);
@@ -50,7 +51,7 @@ void TegraDisplayColor::detach()
     const IOInterruptState state = IOSimpleLockLockDisableInterrupt(lock);
     if (dc && hwEnabled)
         writeEnable(false);
-    dc = nullptr;
+    dc = SwitchMMIOWords();
     activeValid = hwEnabled = false;
     const bool held = holding;
     holding = false;
@@ -71,7 +72,8 @@ void TegraDisplayColor::commit()
         IOSimpleLockUnlockEnableInterrupt(lock, state);
         build(snapshot, tables);
         state = IOSimpleLockLockDisableInterrupt(lock);
-        const bool current = seen == generation, hold = current && dc && !holding;
+        const bool current = seen == generation;
+        const bool hold = current && static_cast<bool>(dc) && !holding;
         if (current) {
             pending = tables;
             pendingDirty = true;
@@ -107,7 +109,7 @@ IOReturn TegraDisplayColor::getGammaTable(void *table)
 
 static uint32_t gammaWord(const void *table, unsigned index)
 {
-    uint32_t word;
+    uint32_t word = 0;
     memcpy(&word, static_cast<const uint8_t *>(table) + index * sizeof(word), sizeof(word));
     return word;
 }
@@ -124,8 +126,9 @@ IOReturn TegraDisplayColor::setGammaTable(const void *table)
     }
     uint8_t curve[256];
     for (unsigned i = 0; i < 256; ++i) {
-        const uint32_t word = gammaWord(table, i), value = (word > kGammaMax ? kGammaMax : word) + 2;
-        curve[i] = uint8_t(value >> 2 > 255 ? 255 : value >> 2);
+        const uint32_t word = gammaWord(table, i);
+        const uint32_t value = (word > kGammaMax ? kGammaMax : word) + 2;
+        curve[i] = static_cast<uint8_t>(value >> 2 > 255 ? 255 : value >> 2);
     }
     const IOReturn status = change(lock, generation, [&] {
         memcpy(gammaTable, table, sizeof(gammaTable));
@@ -162,7 +165,8 @@ IOReturn TegraDisplayColor::setMatrix(uint32_t location, const void *matrix)
 
 IOReturn TegraDisplayColor::setContrast(const void *contrast)
 {
-    uint32_t bits = 0, value = 0;
+    uint32_t bits = 0;
+    uint32_t value = 0;
     if (!contrast)
         return kIOReturnBadArgument;
     memcpy(&bits, contrast, sizeof(bits));
@@ -258,15 +262,18 @@ IOReturn TegraDisplayColor::setAccessibilityScale(uint32_t scale)
 
 void TegraDisplayColor::writeTables(const Tables &tables, const Tables *written)
 {
-    for (unsigned i = 0; i < kLut1Entries; ++i)
+    for (unsigned i = 0; i < kLut1Entries; ++i) {
         if (!written || written->lut1[i] != tables.lut1[i])
-            dc[kDcCmuLut1] = i | uint32_t(tables.lut1[i]) << 16;
-    for (unsigned i = 0; i < kCscWords; ++i)
+            dc[kDcCmuLut1] = i | static_cast<uint32_t>(tables.lut1[i]) << 16;
+    }
+    for (unsigned i = 0; i < kCscWords; ++i) {
         if (!written || written->csc[i] != tables.csc[i])
             dc[kDcCmuCsc + i] = tables.csc[i];
-    for (unsigned k = 0; k < kLut2Entries; ++k)
+    }
+    for (unsigned k = 0; k < kLut2Entries; ++k) {
         if (!written || written->lut2[k] != tables.lut2[k])
-            dc[kDcCmuLut2] = k | uint32_t(tables.lut2[k]) << 16;
+            dc[kDcCmuLut2] = k | static_cast<uint32_t>(tables.lut2[k]) << 16;
+    }
 }
 
 void TegraDisplayColor::writeEnable(bool enable)
@@ -295,10 +302,13 @@ void TegraDisplayColor::frameEndFilter()
 // it; the enable waits for a frame end with none out.
 void TegraDisplayColor::frameEndAction(bool mayRequest)
 {
-    IOInterruptState state = IOSimpleLockLockDisableInterrupt(lock);
-    const bool want = pending.enabled, ready = !pendingDirty && activeValid, attached = dc != nullptr;
+    const IOInterruptState state = IOSimpleLockLockDisableInterrupt(lock);
+    const bool want = pending.enabled;
+    const bool ready = !pendingDirty && activeValid;
+    const bool attached = static_cast<bool>(dc);
     const uint32_t reasons = pending.reasons;
-    const bool settled = !pendingDirty && want == hwEnabled, release = holding && settled;
+    const bool settled = !pendingDirty && want == hwEnabled;
+    const bool release = holding && settled;
     holding = holding && !settled;
     IOSimpleLockUnlockEnableInterrupt(lock, state);
     if (release)
@@ -313,7 +323,7 @@ void TegraDisplayColor::frameEndAction(bool mayRequest)
         announced = false;
         return;
     }
-    announced = reasons & ~kReasonBlank;
+    announced = ((reasons & ~kReasonBlank) != 0u);
     if (!announced)
         return;
     IOLog("SwitchDisplay: colour CMU on:%s%s%s%s%s\n", reasons & kReasonMatrix ? " matrix" : "",
@@ -335,7 +345,7 @@ void TegraDisplayColor::restoreAfterPowerUp()
     IOSimpleLockUnlockEnableInterrupt(lock, state);
 }
 
-void TegraDisplayColor::bypassForPanic(volatile uint32_t *registers)
+void TegraDisplayColor::bypassForPanic(SwitchMMIOWords registers)
 {
     registers[kDcDispColorControl] = registers[kDcDispColorControl] & ~kCmuEnable;
 }

@@ -6,7 +6,7 @@ One action per step (gpu/seed/tools.bzl seed_tools builds, gpu/seed/defs.bzl see
     rawpack.py build --xcode-env F --host-bridge <darwin bridge .a> --generator <raw/pack/rawpack.py> --tree <tree>
                      --out <dir>
         the generator's host tools (the probe through this build's frontend and host bridge, the mock GM20B, the raw
-        path's ycbcr.metallib) into <dir>
+        path's own.metallib) into <dir>
     rawpack.py corpus --corpus corpus.log --out <file>
         the corpus lines the probe makes (raw/pack/probe.mm: Core Animation's render states, without lib=), so an edit
         to any other line leaves the run's input as it was
@@ -14,7 +14,7 @@ One action per step (gpu/seed/tools.bzl seed_tools builds, gpu/seed/defs.bzl see
         the states of each of the generator's buckets
     rawpack.py probe --generator <rawpack.py> --raw <dir> --nvk <twin dylib> --qc default.metallib
                      --lines <bucket corpus> --out <dir named bucket<i>>
-        one bucket's states made through the shader tools (raw/ holds the probe, the mock and ycbcr.metallib; the NVK
+        one bucket's states made through the shader tools (raw/ holds the probe, the mock and own.metallib; the NVK
         twin) over the mock GM20B and read off the decoded push stream, its storage-form states again in <out>/barrier
     rawpack.py link --generator <rawpack.py> --out <dir> <bucket dir>...
         the pack made from the buckets' probe runs, unstamped: <out>/pack.bin and report.txt
@@ -38,7 +38,17 @@ from pathlib import Path
 PROBE_LABEL = ' label=com.apple.coreanimation.'
 LIBRARY = re.compile(r' lib=\S+')
 # What the link reads of a bucket's probe runs (mkpack.py), and of its barrier/.
-KEPT = ('programs.bin', 'probe256.out', 'probe256.log', 'probe16.out', 'probe16.log', 'probe4096.out', 'probe4096.log')
+KEPT = (
+    'programs.bin',
+    'probe256.out',
+    'probe256.log',
+    'probe16.out',
+    'probe16.log',
+    'probe4096.out',
+    'probe4096.log',
+    'probeoff.out',
+    'probeoff.log',
+)
 # The frameworks other than QuartzCore whose states the pack holds: their lines keep lib=, which the probe loads
 # them from
 FRAMEWORKS = ('RenderBox',)
@@ -81,7 +91,8 @@ def fresh(path: Path) -> Path:
 def build(args: argparse.Namespace, generator: list[str], env: dict[str, str], root: Path) -> None:
     xcode = dict(line.split('=', 1) for line in Path(args.xcode_env).read_text().splitlines() if '=' in line)
     env['DEVELOPER_DIR'] = xcode['DEVELOPER_DIR']
-    arguments = ['--build-only', '--bridge', root / args.host_bridge, '--out', root / args.out]
+    arguments = ['--build-only', '--bridge', root / args.host_bridge, '--metal-abi', root / args.metal_abi]
+    arguments += ['--out', root / args.out]
     generate(generator, arguments, env, "the pack generator's tools")
 
 
@@ -133,7 +144,7 @@ def stamp(args: argparse.Namespace, generator: list[str], env: dict[str, str], _
 
 
 STEPS = {
-    'build': ('xcode-env', 'host-bridge', 'generator', 'tree', 'out'),
+    'build': ('xcode-env', 'host-bridge', 'metal-abi', 'generator', 'tree', 'out'),
     'split': ('generator', 'qc', 'corpus'),
     'probe': ('generator', 'raw', 'nvk', 'qc', 'lines', 'out'),
     'link': ('generator', 'out'),

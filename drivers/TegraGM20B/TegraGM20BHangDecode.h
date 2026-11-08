@@ -47,9 +47,12 @@ static inline void tgm_hang_note(const struct tgm_hang_log *log, uint32_t hung, 
 				 uint64_t kernel_va, uint64_t kernel_bytes, const void *client,
 				 char *buf, unsigned long len)
 {
-	uint64_t va[TGM_HANG_PUSHES], interlocks = 0;
-	uint32_t dwords[TGM_HANG_PUSHES], n = 0, i;
-	int read;
+	uint64_t va[TGM_HANG_PUSHES];
+	uint64_t interlocks = 0;
+	uint32_t dwords[TGM_HANG_PUSHES];
+	uint32_t n = 0;
+	uint32_t i = 0;
+	int read = 0;
 
 	buf[0] = 0;
 	if (!client || !gpfifo || (int32_t)(submitted - hung) < 0 ||
@@ -57,22 +60,24 @@ static inline void tgm_hang_note(const struct tgm_hang_log *log, uint32_t hung, 
 		return;
 	for (i = log->sub[hung % TGM_HANG_SUBS].first;
 	     i != log->sub[hung % TGM_HANG_SUBS].end && n < TGM_HANG_PUSHES; i = (i + 1) & gpmask) {
-		const uint64_t at = gpfifo[2 * i] | (uint64_t)(gpfifo[2 * i + 1] & 0xff) << 32;
+		const uint64_t at =
+			gpfifo[2 * (size_t)i] | (uint64_t)(gpfifo[2 * (size_t)i + 1] & 0xff) << 32;
 		if (at >= kernel_va && at < kernel_va + kernel_bytes)
 			continue;
 		va[n] = at;
 		dwords[n++] = (gpfifo[2 * i + 1] >> 10) & 0x1fffff;
 	}
 	read = tgm_client_interlocks(client, va, dwords, n, &interlocks);
-	if (read < 0)
+	if (read < 0) {
 		snprintf(buf, len, " (hung submit %u not read: its connection is busy)", hung);
-	else if (interlocks)
+	} else if (interlocks) {
 		snprintf(buf, len,
 			 " (interlock ticket wait: %llu interlocked states in the hung submit %u,"
 			 " %d/%u pushes read)",
 			 (unsigned long long)interlocks, hung, read, n);
-	else if ((uint32_t)read < n)
+	} else if ((uint32_t)read < n) {
 		snprintf(buf, len, " (hung submit %u: %d of %u pushes read, no interlocked state)",
 			 hung, read, n);
+	}
 }
 #endif

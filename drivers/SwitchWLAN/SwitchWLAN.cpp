@@ -47,6 +47,7 @@
 #include "SwitchWLANTrace.h"
 #include "SwitchWLANWpa.h"
 #include "../SwitchSuspend/SwitchWake.h"
+#include "SwitchWLANAwdlSoft.h"
 #include "awdl/awdl_bcm.h"
 
 // firmware.S
@@ -104,7 +105,8 @@ constexpr uint32_t E_ACTION_FRAME_RX = 75;
 
 bool isAwdlEvent(uint32_t type)
 {
-    return (type >= 96 && type <= 98) || (type >= 111 && type <= 120);
+    return (type >= 96 && type <= 98) || (type >= 111 && type <= 120) || type == BCM_E_ACTION_FRAME_COMPLETE ||
+           type == BCM_E_ACTION_FRAME_OFF_CHAN_COMPLETE;
 }
 
 constexpr uint32_t kStatusPartial = 8, kLinkUp = 1;
@@ -136,6 +138,29 @@ void randomBytes(uint8_t *out, size_t length)
     read_random(out, static_cast<u_int>(length));
 }
 
+int8_t clampDbm(int32_t dbm)
+{
+    if (dbm < -128)
+        return -128;
+    return static_cast<int8_t>(dbm > 0 ? 0 : dbm);
+}
+
+const char *linkDownCause(uint32_t type)
+{
+    switch (type) {
+    case E_DEAUTH_IND:
+        return "deauthenticated by the access point";
+    case E_DISASSOC_IND:
+        return "disassociated by the access point";
+    case E_DEAUTH:
+        return "deauthentication sent";
+    case E_DISASSOC:
+        return "disassociation sent";
+    default:
+        return "link down";
+    }
+}
+
 // One brcmf_bss_info_le (nxk parse_bss), as escan results and WLC_GET_BSS_INFO give them: its own length, then the
 // BSSID, beacon interval, capabilities, SSID, channel (the control channel, else the chanspec's), the width its
 // chanspec (in the firmware's `iotype` layout) says, RSSI and the information elements. False if the record does not
@@ -161,8 +186,9 @@ bool parseBss(const uint8_t *b, size_t room, swlan_bss &s, int iotype)
         s.center = cs.center;
     }
     const int16_t rssi = static_cast<int16_t>(swlan::le16(b + 78));
-    s.signal_dbm = static_cast<int8_t>(rssi < -128 ? -128 : (rssi > 0 ? 0 : rssi));
-    const uint32_t ieOffset = swlan::le16(b + 116), ieLength = swlan::le32(b + 120);
+    s.signal_dbm = clampDbm(rssi);
+    const uint32_t ieOffset = swlan::le16(b + 116);
+    const uint32_t ieLength = swlan::le32(b + 120);
     if (ieOffset + ieLength <= length) {
         s.ie_len = static_cast<uint16_t>(ieLength < sizeof(s.ie) ? ieLength : sizeof(s.ie));
         memcpy(s.ie, b + ieOffset, s.ie_len);
@@ -179,7 +205,9 @@ uint64_t deadlineIn(uint32_t ms)
 
 }  // namespace
 
+// NOLINTNEXTLINE(misc-use-internal-linkage): OSDefineMetaClassAndStructors needs the class's external linkage (its kalloc type view)
 class SwitchWLAN : public IOService {
+    // NOLINTNEXTLINE(misc-explicit-constructor): IOKit's structors macro declares the metaclass constructor
 OSDeclareDefaultStructors(SwitchWLAN)
 
     public : bool start(IOService *provider) override;
@@ -222,6 +250,13 @@ OSDeclareDefaultStructors(SwitchWLAN)
     int awdlVar(bool set, uint8_t ifidx, const char *name, const void *in, size_t inLength, void *out, size_t outLength,
                 size_t *returned);
     int awdlTransmit(const uint8_t *eth, size_t length);
+    int awdlIoctlSet(uint32_t cmd, const void *buf, size_t length);  // the soft backend's actframe and monitor mode
+
+    int awdlD11n() const
+    {
+        return iotype_ == SWLAN_IOTYPE_D11N ? 1 : 0;
+    }
+
     void awdlCallbacks(swlan_fw_event_fn events, void *eventsContext, swlan_eth_rx_fn rx, void *rxContext,
                        swlan_evt_fn loss, void *lossContext);
 
@@ -403,7 +438,7 @@ private:
     void attachInterrupt();
     static void msiFired(OSObject *owner, IOInterruptEventSource *sender, int count);
     static void onEvent(void *context, const swlan::Event &event);
-    static void onFrame(void *context, const uint8_t *frame, size_t length, uint8_t ifidx);
+    static void onFrame(void *context, const uint8_t *frame, size_t length, uint8_t ifidx, uint8_t kind);
     void escanResult(const swlan::Event &event);
     void keepBss(const swlan_bss &bss, uint64_t now);
     void pushEapol(const uint8_t *frame, size_t length);
@@ -419,7 +454,7 @@ private:
         int16_t fwStatus;  // the firmware's BCME code when it answered with an error, 0 otherwise
     };
 
-    static IOReturn ioctlGated(OSObject *owner, void *call, void *, void *, void *);
+    static IOReturn ioctlGated(OSObject *owner, void *argument, void *, void *, void *);
     bool ioctl(uint32_t cmd, const uint8_t *data, size_t length, size_t outLength, uint8_t *out, size_t *outReturned);
     // The same on firmware interface `ifidx`; *fwStatus gets the firmware's BCME code when it refused (0 when the
     // request did not reach it or succeeded).
@@ -483,6 +518,7 @@ OSDefineMetaClassAndStructors(SwitchWLAN, IOService)
 
 // A short AWDL suffix for the stats line, written by SwitchWLANAwdl.cpp (empty when AWDL is off); weak so the driver
 // links without the AWDL unit.
+// NOLINTNEXTLINE(misc-const-correctness,readability-non-const-parameter): the strong definition writes buf
 extern "C" __attribute__((weak)) int switch_wlan_awdl_stat(char *buf, size_t size)
 {
     (void)buf;
@@ -491,6 +527,7 @@ extern "C" __attribute__((weak)) int switch_wlan_awdl_stat(char *buf, size_t siz
 }
 
 // SwitchBluetooth's coexistence snapshot (SwitchCoex.h); weak so the driver links without the Bluetooth unit.
+// NOLINTNEXTLINE(misc-const-correctness): the strong definition (SwitchBluetooth.cpp) fills state
 extern "C" __attribute__((weak)) bool switch_bluetooth_coex(struct switch_coex_bt *state, char *links, size_t size)
 {
     (void)state;
@@ -610,19 +647,20 @@ void SwitchWLAN::onEvent(void *context, const swlan::Event &event)
 {
     auto *self = static_cast<SwitchWLAN *>(context);
     // WLC_E_IF about any interface but the station's (in the header or in wl_event_data_if_t's ifidx/bssidx)
-    const bool otherIf = event.type == E_IF &&
-                         (event.ifidx || event.bsscfgidx || (event.length >= 5 && (event.data[0] || event.data[3])));
+    const bool otherIf =
+        event.type == E_IF && ((event.ifidx != 0u) || (event.bsscfgidx != 0u) ||
+                               (event.length >= 5 && ((event.data[0] != 0u) || (event.data[3] != 0u))));
     // received action frames on the AWDL interface (brcmfmac finds the interface by the header's bsscfgidx, we take
     // either field), or any whose body is an AWDL action frame (en0 uses no action frames): the first of those not
     // on the AWDL interface's indices names the fields this firmware fills, once
     bool awdlFrame = false;
     if (event.type == E_ACTION_FRAME_RX && self->awdlOpen_) {
-        const bool onAwdl = (event.ifidx && event.ifidx == self->awdlIfidx_) ||
-                            (event.bsscfgidx && event.bsscfgidx == self->awdlBssidx_);
+        const bool onAwdl = ((event.ifidx != 0u) && event.ifidx == self->awdlIfidx_) ||
+                            ((event.bsscfgidx != 0u) && event.bsscfgidx == self->awdlBssidx_);
         bcm_rx_frame meta;
         const uint8_t *body = nullptr;
         size_t n = 0;
-        const bool isAwdl = !bcm_awdl_rx_af(event.data, event.length, &meta, &body, &n);
+        const bool isAwdl = bcm_awdl_rx_af(event.data, event.length, &meta, &body, &n) == 0;
         awdlFrame = onAwdl || isAwdl;
         if (isAwdl && !onAwdl && !self->awdlStrayFrameSaid_) {
             self->awdlStrayFrameSaid_ = true;
@@ -661,10 +699,11 @@ void SwitchWLAN::onEvent(void *context, const swlan::Event &event)
     case E_DISASSOC_IND:
     case E_LINK: {
         FwEvent &e = self->fwEvents_[(self->fwHead_ + self->fwCount_) % 16];
-        if (self->fwCount_ == 16)
+        if (self->fwCount_ == 16) {
             self->fwHead_ = (self->fwHead_ + 1) % 16;  // oldest dropped
-        else
+        } else {
             ++self->fwCount_;
+        }
         e = {event.type, event.status, event.reason, event.flags, {}};
         memcpy(e.addr, event.addr, 6);
         self->kick();
@@ -691,21 +730,30 @@ void SwitchWLAN::pushEapol(const uint8_t *frame, size_t length)
 
 // Work loop: a received frame. EAPOL to the supplicant, the rest to en0 once joined (a station has no carrier
 // before that).
-void SwitchWLAN::onFrame(void *context, const uint8_t *frame, size_t length, uint8_t ifidx)
+void SwitchWLAN::onFrame(void *context, const uint8_t *frame, size_t length, uint8_t ifidx, uint8_t kind)
 {
     auto *self = static_cast<SwitchWLAN *>(context);
-    if (ifidx) {  // another firmware interface: AWDL's, while it is open
-        if (self->awdlOpen_ && self->awdlRxFn_ && static_cast<int>(ifidx) == self->awdlIfidx_)
-            self->awdlRxFn_(self->awdlRxCtx_, frame, length);
-        else
+    if (kind == BCM_MSGBUF_RX_FRAME_802_11) {  // monitor mode's: only the soft AWDL backend asks for it
+        if (self->awdlOpen_) {
+            switch_wlan_soft_frame(frame, length);
+        } else {
             ++self->awdlRxDropped_;
+        }
+        return;
+    }
+    if (ifidx) {  // another firmware interface: AWDL's, while it is open
+        if (self->awdlOpen_ && self->awdlRxFn_ && static_cast<int>(ifidx) == self->awdlIfidx_) {
+            self->awdlRxFn_(self->awdlRxCtx_, frame, length);
+        } else {
+            ++self->awdlRxDropped_;
+        }
         return;
     }
     if (swlan::wpa::isEapol(frame, length)) {
         self->pushEapol(frame, length);
         return;
     }
-    if (((frame[12] << 8) | frame[13]) == kEthPLinkCtl)
+    if (((static_cast<unsigned>(frame[12]) << 8) | frame[13]) == kEthPLinkCtl)
         return;  // firmware event frames take the event path
     if (self->status_.state == SWLAN_STA_UP && self->events_ && self->events_->rx) {
         ++self->rxToStack_;
@@ -753,9 +801,10 @@ void SwitchWLAN::keepBss(const swlan_bss &s, uint64_t now)
         ++bssCount_;
     } else if (k == bssCount_) {
         k = 0;
-        for (unsigned i = 1; i < kBssMax; ++i)
+        for (unsigned i = 1; i < kBssMax; ++i) {
             if (bss_[i].signal_dbm < bss_[k].signal_dbm)
                 k = i;
+        }
         if (bss_[k].signal_dbm >= s.signal_dbm)
             return;
     } else if (bss_[k].signal_dbm > s.signal_dbm && now - bssSeenNs_[k] <= 1000000000ULL) {
@@ -776,10 +825,10 @@ IOReturn SwitchWLAN::ioctlGated(OSObject *owner, void *argument, void *, void *,
     auto *call = static_cast<Call *>(argument);
     call->ok = false;
     if (!self->up_ || self->gone_ || self->halted_) {
-        snprintf(self->why_, sizeof(self->why_), "chip %s",
-                 self->gone_     ? "gone from the bus"
-                 : self->halted_ ? "firmware halted"
-                                 : "not up");
+        const char *state = self->halted_ ? "firmware halted" : "not up";
+        if (self->gone_)
+            state = "gone from the bus";
+        snprintf(self->why_, sizeof(self->why_), "chip %s", state);
         return kIOReturnNotReady;
     }
     if (!self->mb_.ioctlSubmit(call->cmd, call->ifidx, call->data, call->length, call->outLength, self->why_,
@@ -791,7 +840,8 @@ IOReturn SwitchWLAN::ioctlGated(OSObject *owner, void *argument, void *, void *,
             break;
     }
     if (!self->mb_.replyReady()) {
-        uint32_t mailboxInt = 0, mailboxMask = 0;
+        uint32_t mailboxInt = 0;
+        uint32_t mailboxMask = 0;
         if (!self->gone_ && !self->halted_ &&
             (self->mb_.chipSignalling(&mailboxInt, &mailboxMask) || self->pcie_.msiPending())) {
             deadline = deadlineIn(kRecheckMs);
@@ -800,7 +850,8 @@ IOReturn SwitchWLAN::ioctlGated(OSObject *owner, void *argument, void *, void *,
             }
             if (!self->mb_.replyReady() &&
                 (self->mb_.chipSignalling(&mailboxInt, &mailboxMask) || self->pcie_.msiPending())) {
-                char gic[160], state[200];
+                char gic[160];
+                char state[200];
                 switch_interrupt_describe(kMsiIntid, gic, sizeof(gic));
                 self->pcie_.describe(state, sizeof(state));
                 panic(
@@ -916,7 +967,8 @@ bool SwitchWLAN::radioInit()
     coexConfigure();
     uint8_t country[12] = {};
     size_t n = 0;
-    char abbrev[5] = "?", code[5] = "?";
+    char abbrev[5] = "?";
+    char code[5] = "?";
     if (getVar("country", country, sizeof(country), &n) && n >= 12) {
         memcpy(abbrev, country, 4);
         abbrev[4] = 0;
@@ -1008,9 +1060,10 @@ bool SwitchWLAN::bootChip(const char **stage)
         IOLog("SwitchWLAN: firmware capabilities: %s\n", reinterpret_cast<const char *>(cap));
         // the firmware's own AWDL (r7p8: present on 7.35.252.108); its iovars are probed after the bring-up
         capAwdl_ = false;
-        for (size_t i = 0; i + 4 <= capLength && cap[i]; ++i)
+        for (size_t i = 0; i + 4 <= capLength && cap[i]; ++i) {
             if (!memcmp(cap + i, "awdl", 4) && (i == 0 || cap[i - 1] == ' ') && (cap[i + 4] == ' ' || !cap[i + 4]))
                 capAwdl_ = true;
+        }
         __atomic_store_n(&capRead_, true, __ATOMIC_RELEASE);
     } else {
         IOLog("SwitchWLAN: firmware capabilities not read: %s\n", why_);
@@ -1058,7 +1111,8 @@ void SwitchWLAN::watchdog()
         if (flags == 0xFFFFFFFF) {
             snprintf(why, sizeof(why), "chip reads all ones");
         } else if (halted_ || (flags & swlan::Chip::kSharedDied)) {
-            char crash[200], console[160];
+            char crash[200];
+            char console[160];
             chip_.crash(crash, sizeof(crash));
             chip_.consoleTail(console, sizeof(console));
             snprintf(why, sizeof(why), "firmware died (%s); console: %s", crash, console);
@@ -1166,9 +1220,10 @@ void SwitchWLAN::systemSleep()
         }
         parked = sleep_ == kParked;
     });
-    switch_power_journal("SwitchWLAN: sleep: %s", parked           ? "chip let go, worker parked"
-                                                  : workerRunning_ ? "the worker did not park in 3 s"
-                                                                   : "not running");
+    const char *outcome = workerRunning_ ? "the worker did not park in 3 s" : "not running";
+    if (parked)
+        outcome = "chip let go, worker parked";
+    switch_power_journal("SwitchWLAN: sleep: %s", outcome);
 }
 
 void SwitchWLAN::systemWake()
@@ -1303,15 +1358,17 @@ bool SwitchWLAN::readJoinedBss(swlan_bss &out)
     // The access point's HT/VHT/HE from every element it sent (the table keeps only the first 384 bytes of them).
     peer_ = {};
     if (ok) {
-        const uint32_t ieOffset = swlan::le16(info + 4 + 116), ieLength = swlan::le32(info + 4 + 120);
+        const uint32_t ieOffset = swlan::le16(info + 4 + 116);
+        const uint32_t ieLength = swlan::le32(info + 4 + 120);
         if (4 + ieOffset + ieLength <= n)
             swlan_peer_parse(info + 4 + ieOffset, ieLength, &peer_);
     }
     IOFreeData(info, kRoom);
-    if (ok)
+    if (ok) {
         locked([&] {
             keepBss(out, swlan::nowNs());
         });
+    }
     return ok;
 }
 
@@ -1400,10 +1457,11 @@ bool SwitchWLAN::addKey(uint32_t index, const uint8_t key[16], const uint8_t *pe
     swlan::put32(k + 4, 16);
     memcpy(k + 8, key, 16);
     swlan::put32(k + kKeyAlgo, kAlgoAesCcm);
-    if (peer)
+    if (peer) {
         memcpy(k + kKeyEa, peer, 6);
-    else
+    } else {
         swlan::put32(k + kKeyFlags, kPrimaryKey);
+    }
     if (rsc) {
         // Receive IV: bits 16-47 of the packet number, then bits 0-15.
         memcpy(k + kKeyRxIv, rsc + 2, 4);
@@ -1431,10 +1489,11 @@ bool SwitchWLAN::handleEapol(const uint8_t *frame, size_t length)
     }
     if (step.replyLength) {
         const uint32_t id = sendFrame(step.reply, step.replyLength);
-        if (!id)
+        if (!id) {
             IOLog("SwitchWLAN: handshake reply not sent\n");
-        else if (step.hasPtk || step.hasGtk)
+        } else if (step.hasPtk || step.hasGtk) {
             waitSent(id);
+        }
     }
     if (step.hasPtk)
         addKey(0, step.tk, sup_.aa(), nullptr);
@@ -1463,11 +1522,7 @@ void SwitchWLAN::leave()
 // 2 disassociated, 6 reassociation for a roam failed).
 void SwitchWLAN::linkDown(const FwEvent &e)
 {
-    const char *what = e.type == E_DEAUTH_IND     ? "deauthenticated by the access point"
-                       : e.type == E_DISASSOC_IND ? "disassociated by the access point"
-                       : e.type == E_DEAUTH       ? "deauthentication sent"
-                       : e.type == E_DISASSOC     ? "disassociation sent"
-                                                  : "link down";
+    const char *what = linkDownCause(e.type);
     char counts[200];
     counters(counts, sizeof(counts));
     IOLog("SwitchWLAN: link lost: %s, reason %u (status %u, flags %#x); %s\n", what, e.reason, e.status, e.flags,
@@ -1487,7 +1542,7 @@ int SwitchWLAN::joinOnce(const JoinParams &p, char *ssidText)
     // The network in the last scan, or a directed scan for it (a hidden network answers only by name).
     swlan_bss target = {};
     bool found = false;
-    auto lookup = [&] {
+    const auto lookup = [&] {
         locked([&] {
             int best = -1;
             for (unsigned i = 0; i < bssCount_; ++i) {
@@ -1522,7 +1577,7 @@ int SwitchWLAN::joinOnce(const JoinParams &p, char *ssidText)
             target.ie[at + 3] == 0x50 && target.ie[at + 4] == 0xF2 && target.ie[at + 5] == 0x01)
             wpa1 = true;
     }
-    const bool privacy = target.caps & (1u << 4);
+    const bool privacy = (target.caps & (1u << 4)) != 0u;
     const bool secured = rsn != nullptr;
     if (!secured && (wpa1 || privacy)) {
         IOLog("SwitchWLAN: join '%s': %s networks are not supported\n", ssidText, wpa1 ? "WPA (TKIP)" : "WEP");
@@ -1555,7 +1610,9 @@ int SwitchWLAN::joinOnce(const JoinParams &p, char *ssidText)
         fwCount_ = eapolCount_ = 0;
         status_.state = SWLAN_STA_AUTH;
     });
-    const uint32_t wpaAuth = secured ? kWpa2AuthPsk : 0, wsec = secured ? kAesEnabled : 0, zero = 0;
+    const uint32_t wpaAuth = secured ? kWpa2AuthPsk : 0;
+    const uint32_t wsec = secured ? kAesEnabled : 0;
+    const uint32_t zero = 0;
     uint8_t le[4];
     bool ok = setVar("wpaie", secured ? swlan::wpa::kRsnIe : nullptr, secured ? sizeof(swlan::wpa::kRsnIe) : 0);
     if (!ok)
@@ -1572,31 +1629,39 @@ int SwitchWLAN::joinOnce(const JoinParams &p, char *ssidText)
     memcpy(joinParams + 4, p.ssid, p.ssidLength);
     joinParams[36] = 0xFF;  // scan type: default
     for (int i = 0; i < 4; ++i)
-        swlan::put32(joinParams + 40 + 4 * i, 0xFFFFFFFF);
-    if (p.hasBssid)
+        swlan::put32(joinParams + 40 + static_cast<ptrdiff_t>(4) * i, 0xFFFFFFFF);
+    if (p.hasBssid) {
         memcpy(joinParams + 56, p.bssid, 6);
-    else
+    } else {
         memset(joinParams + 56, 0xFF, 6);
+    }
     ok = ok && setVar("join", joinParams, sizeof(joinParams));
     if (!ok) {
         IOLog("SwitchWLAN: join '%s' not started: %s\n", ssidText, why_);
         return SWLAN_RES_FAILED;
     }
 
-    bool associated = false, link = false, keyed = !secured, ieRead = false, announced = false;
+    bool associated = false;
+    bool link = false;
+    bool keyed = !secured;
+    bool ieRead = false;
+    bool announced = false;
     uint8_t bssid[6] = {};
     const uint64_t end = swlan::nowNs() + kJoinTimeoutMs * 1000000ULL;
     while (swlan::nowNs() < end) {
         FwEvent e;
         while (popEvent(e)) {
-            const bool hasAddr = e.addr[0] | e.addr[1] | e.addr[2] | e.addr[3] | e.addr[4] | e.addr[5];
+            const bool hasAddr =
+                (static_cast<unsigned>(e.addr[0]) | e.addr[1] | e.addr[2] | e.addr[3] | e.addr[4] | e.addr[5]) != 0;
             switch (e.type) {
             case E_SET_SSID:
                 if (e.status) {
                     static const char *const failures[] = {"", "failed", "timed out", "no such network", "aborted"};
                     IOLog("SwitchWLAN: join '%s' %s (status %u)\n", ssidText,
                           e.status < 5 ? failures[e.status] : "failed", e.status);
-                    return e.status == 3 ? SWLAN_RES_NOT_FOUND : e.status == 2 ? SWLAN_RES_TIMEOUT : SWLAN_RES_FAILED;
+                    if (e.status == 3)
+                        return SWLAN_RES_NOT_FOUND;
+                    return e.status == 2 ? SWLAN_RES_TIMEOUT : SWLAN_RES_FAILED;
                 }
                 associated = true;
                 if (hasAddr)
@@ -1607,7 +1672,7 @@ int SwitchWLAN::joinOnce(const JoinParams &p, char *ssidText)
                     memcpy(bssid, e.addr, 6);
                 break;
             case E_LINK:
-                link = e.flags & kLinkUp;
+                link = ((e.flags & kLinkUp) != 0u);
                 if (link && hasAddr)
                     memcpy(bssid, e.addr, 6);
                 break;
@@ -1633,7 +1698,7 @@ int SwitchWLAN::joinOnce(const JoinParams &p, char *ssidText)
             swlan_bss joined = target;
             if (!readJoinedBss(joined)) {
                 IOLog("SwitchWLAN: join '%s': the joined access point's record is unreadable: %s\n", ssidText, why_);
-                if (bssid[0] | bssid[1] | bssid[2] | bssid[3] | bssid[4] | bssid[5])
+                if (static_cast<unsigned>(bssid[0]) | bssid[1] | bssid[2] | bssid[3] | bssid[4] | bssid[5])
                     memcpy(joined.bssid, bssid, 6);
             }
             locked([&] {
@@ -1657,8 +1722,10 @@ int SwitchWLAN::joinOnce(const JoinParams &p, char *ssidText)
             // (brcmf_get_assoc_ies: assoc_info gives the request's IE length, assoc_req_ies the IEs).
             if (!ieRead) {
                 ieRead = true;
-                uint8_t info[64] = {}, ies[512] = {};
-                size_t infoLength = 0, iesLength = 0;
+                uint8_t info[64] = {};
+                uint8_t ies[512] = {};
+                size_t infoLength = 0;
+                size_t iesLength = 0;
                 if (getVar("assoc_info", info, sizeof(info), &infoLength) && infoLength >= 4 &&
                     getVar("assoc_req_ies", ies, sizeof(ies), &iesLength)) {
                     size_t used = swlan::le32(info);
@@ -1691,7 +1758,7 @@ int SwitchWLAN::joinOnce(const JoinParams &p, char *ssidText)
             locked([&] {
                 if (fresh) {
                     const int32_t r = static_cast<int32_t>(swlan::le32(answer));
-                    status_.signal_dbm = current_->signal_dbm = static_cast<int8_t>(r < -128 ? -128 : (r > 0 ? 0 : r));
+                    status_.signal_dbm = current_->signal_dbm = clampDbm(r);
                 }
                 mhz = status_.freq_mhz;
                 rssi = status_.signal_dbm;
@@ -1720,8 +1787,11 @@ int SwitchWLAN::joinOnce(const JoinParams &p, char *ssidText)
         IOLog("SwitchWLAN: join '%s': no message 3, wrong password?\n", ssidText);
         return SWLAN_RES_BAD_KEY;
     }
-    IOLog("SwitchWLAN: join '%s' timed out (associated %d, link %d, keyed %d, handshake %s)\n", ssidText, associated,
-          link, keyed, secured ? (sup_.hasAa() ? "started" : "not started") : "none");
+    const char *handshake = "none";
+    if (secured)
+        handshake = sup_.hasAa() ? "started" : "not started";
+    IOLog("SwitchWLAN: join '%s' timed out (associated %d, link %d, keyed %d, handshake %s)\n", ssidText,
+          static_cast<int>(associated), static_cast<int>(link), static_cast<int>(keyed), handshake);
     return SWLAN_RES_TIMEOUT;
 }
 
@@ -1746,11 +1816,10 @@ void SwitchWLAN::join(const JoinParams &p)
             abortScan();
         finishScan();
     }
-    IOLog("SwitchWLAN: joining '%s'%s\n", ssidText,
-          p.hasKey ? (p.keyIsPmk ? " with the PMK wifid gave"
-                                 : " with a "
-                                   "passphrase")
-                   : "");
+    const char *with = "";
+    if (p.hasKey)
+        with = p.keyIsPmk ? " with the PMK wifid gave" : " with a passphrase";
+    IOLog("SwitchWLAN: joining '%s'%s\n", ssidText, with);
     const int result = joinOnce(p, ssidText);
     if (result != SWLAN_RES_OK) {
         uint8_t scb[12] = {};
@@ -1782,8 +1851,10 @@ void SwitchWLAN::run()
     switch_wlan_awdl_capable();  // a radio without AWDL gets its down awdl0 before userspace asks for it
     IOLog("SwitchWLAN: en0 ready, %u MSIs so far\n", static_cast<unsigned>(interrupts_));
 
-    uint64_t nextWatchdog = 0, retryAt = 0;
-    uint32_t backoff = kRetryFirstMs, tickMs = kWatchdogMs;
+    uint64_t nextWatchdog = 0;
+    uint64_t retryAt = 0;
+    uint32_t backoff = kRetryFirstMs;
+    uint32_t tickMs = kWatchdogMs;
     for (;;) {
         waitWork(tickMs);
         uint8_t sleeping = kAwake;
@@ -1798,7 +1869,8 @@ void SwitchWLAN::run()
             continue;
         }
         const uint64_t now = swlan::nowNs();
-        bool chipUp = false, scanning = false;
+        bool chipUp = false;
+        bool scanning = false;
         locked([&] {
             chipUp = up_;
             scanning = scanning_ || scanRequested_;
@@ -1831,7 +1903,12 @@ void SwitchWLAN::run()
         }
 
         // Requests from the network side.
-        bool scan = false, doJoin = false, doLeave = false, doPower = false, powerOn = true, scanFinished = false;
+        bool scan = false;
+        bool doJoin = false;
+        bool doLeave = false;
+        bool doPower = false;
+        bool powerOn = true;
+        bool scanFinished = false;
         bool scanOverdue = false;
         uint8_t scanSsid[32];
         size_t scanSsidLength = 0;
@@ -1908,7 +1985,7 @@ void SwitchWLAN::run()
         while (popEvent(e)) {
             if (state != SWLAN_STA_UP)
                 continue;
-            const bool down = (e.type == E_LINK && !(e.flags & kLinkUp)) || e.type == E_DEAUTH ||
+            const bool down = (e.type == E_LINK && ((e.flags & kLinkUp) == 0u)) || e.type == E_DEAUTH ||
                               e.type == E_DEAUTH_IND || e.type == E_DISASSOC || e.type == E_DISASSOC_IND;
             if (down) {
                 linkDown(e);
@@ -1930,13 +2007,13 @@ void SwitchWLAN::run()
         }
         if (state == SWLAN_STA_UP && swlan::nowNs() >= nextRssiNs_) {
             nextRssiNs_ = swlan::nowNs() + kRssiRefreshMs * 1000000ULL;
-            uint8_t scb[12] = {}, answer[4] = {};
+            uint8_t scb[12] = {};
+            uint8_t answer[4] = {};
             size_t n = 0;
             if (ioctl(WLC_GET_RSSI, scb, sizeof(scb), sizeof(answer), answer, &n) && n >= 4) {
                 const int32_t rssi = static_cast<int32_t>(swlan::le32(answer));
                 locked([&] {
-                    status_.signal_dbm = current_->signal_dbm =
-                        static_cast<int8_t>(rssi < -128 ? -128 : (rssi > 0 ? 0 : rssi));
+                    status_.signal_dbm = current_->signal_dbm = clampDbm(rssi);
                 });
             }
         }
@@ -2012,7 +2089,7 @@ void SwitchWLAN::logStats()
         btPower = btPower_;
     });
     char out[1024];  // periodic: to the log only (os_log), never the boot console
-    int n = snprintf(
+    const int n = snprintf(
         out, sizeof(out),
         "SwitchWLAN: stats %u ms: rx %u (en0 %u: unicast %u group %u, %llu KB, no mbuf %u, input refused %u), "
         "tx %u (%llu KB) done %u failed %u refused %u, oversize %u, %llu MSIs, %d dBm",
@@ -2023,7 +2100,7 @@ void SwitchWLAN::logStats()
         now.failed - was.failed, now.refused - was.refused, now.net.tx_oversize - was.net.tx_oversize,
         static_cast<unsigned long long>(now.msis - was.msis), signal);
     size_t at = n > 0 ? static_cast<size_t>(n) : 0;
-    auto advance = [&](int k) {
+    const auto advance = [&](int k) {
         at += k > 0 ? static_cast<size_t>(k) : 0;
     };
     if (at < sizeof(out) && now.failed != was.failed)
@@ -2035,11 +2112,18 @@ void SwitchWLAN::logStats()
     // batches and its input batches, and the firmware's MPDUs per A-MPDU each way.
     char data[400];
     {
-        const swlan::DataCounters &d = now.data, &e = was.data;
-        const uint64_t rxB = d.rxBytes - e.rxBytes, txB = d.txBytes - e.txBytes;
+        const swlan::DataCounters &d = now.data;
+        const swlan::DataCounters &e = was.data;
+        const uint64_t rxB = d.rxBytes - e.rxBytes;
+        const uint64_t txB = d.txBytes - e.txBytes;
         const uint64_t frames = (d.rxFrames - e.rxFrames) + (d.txDone - e.txDone);
         const uint64_t ms = windowMs ? windowMs : 1;
-        char rxMbps[16], txMbps[16], perMsi[16], bells[16], reads[16], ampdu[64];
+        char rxMbps[16];
+        char txMbps[16];
+        char perMsi[16];
+        char bells[16];
+        char reads[16];
+        char ampdu[64];
         swlan_tenths(rxB * 8, ms * 1000, rxMbps, sizeof(rxMbps));
         swlan_tenths(txB * 8, ms * 1000, txMbps, sizeof(txMbps));
         swlan_tenths(frames, now.msis - was.msis, perMsi, sizeof(perMsi));
@@ -2077,9 +2161,10 @@ void SwitchWLAN::logStats()
         size_t got = 0;
         if (getVar("pm_dur", v, sizeof(v), &got) && got >= 4) {
             const uint32_t pm = swlan::le32(v);
-            if (pmDurHave_ && at < sizeof(out))
+            if (pmDurHave_ && at < sizeof(out)) {
                 advance(snprintf(out + at, sizeof(out) - at, "; PS pm_dur %u (+%d ms)", pm,
                                  static_cast<int>(pm - pmDurLast_)));
+            }
             pmDurLast_ = pm;
             pmDurHave_ = true;
         } else {
@@ -2103,7 +2188,9 @@ void SwitchWLAN::logStats()
         }
     }
     // Bluetooth: what wifid says and what the controller was asked to do (SwitchBluetooth).
-    char flags[48], bt[200], links[96];
+    char flags[48];
+    char bt[200];
+    char links[96];
     swlan_bt_flags_describe(btFlags, flags, sizeof(flags));
     switch_coex_bt state;
     if (switch_bluetooth_coex(&state, links, sizeof(links))) {
@@ -2127,36 +2214,41 @@ void SwitchWLAN::logStats()
 void SwitchWLAN::logProbe(const Counts &now, const Counts &was, uint32_t windowMs)
 {
     char out[1024];
-    int n = snprintf(out, sizeof(out), "SwitchWLAN: probe %u ms: ", windowMs);
+    const int n = snprintf(out, sizeof(out), "SwitchWLAN: probe %u ms: ", windowMs);
     size_t at = n > 0 ? static_cast<size_t>(n) : 0;
-    auto advance = [&](int k) {
+    const auto advance = [&](int k) {
         at += k > 0 ? static_cast<size_t>(k) : 0;
     };
     if (at < sizeof(out))
         advance(swlan_trace_describe(&now.trace, &was.trace, out + at, sizeof(out) - at));
-    const swlan::DataCounters &d = now.data, &e = was.data;
-    if (at < sizeof(out))
+    const swlan::DataCounters &d = now.data;
+    const swlan::DataCounters &e = was.data;
+    if (at < sizeof(out)) {
         advance(snprintf(out + at, sizeof(out) - at, "; TX buffers read back %llu, %llu differ",
                          static_cast<unsigned long long>(d.txReread - e.txReread),
                          static_cast<unsigned long long>(d.txRereadDiffer - e.txRereadDiffer)));
+    }
     if (at < sizeof(out) && d.txRereadDiffer != e.txRereadDiffer)
         advance(snprintf(out + at, sizeof(out) - at, " (first at byte %u)", d.txRereadAt));
     uint8_t v[24] = {};
     size_t got = 0;
     int pm = -1;
     if (!pmReadRefused_) {
-        if (ioctl(WLC_GET_PM, nullptr, 0, 4, v, &got) && got >= 4)
+        if (ioctl(WLC_GET_PM, nullptr, 0, 4, v, &got) && got >= 4) {
             pm = static_cast<int>(swlan::le32(v));
-        else
+        } else {
             pmReadRefused_ = true;
+        }
     }
-    int low = -1, high = -1, logic = -1;
+    int low = -1;
+    int high = -1;
+    int logic = -1;
     if (!sleepRetReadRefused_) {
         got = 0;
         if (getVar("pm2_sleep_ret_ext", v, sizeof(v), &got) && got >= 6) {
             logic = v[0];
-            low = v[2] | (v[3] << 8);
-            high = v[4] | (v[5] << 8);
+            low = v[2] | (static_cast<unsigned>(v[3]) << 8);
+            high = v[4] | (static_cast<unsigned>(v[5]) << 8);
         } else {
             sleepRetReadRefused_ = true;
         }
@@ -2166,10 +2258,11 @@ void SwitchWLAN::logProbe(const Counts &now, const Counts &was, uint32_t windowM
     uint8_t profile[64] = {};
     if (getVar("btc_dynctl", profile, sizeof(profile), &got) && got >= 2 && profile[0] == 1)
         btcdyn = profile[1];
-    if (at < sizeof(out))
+    if (at < sizeof(out)) {
         advance(snprintf(out + at, sizeof(out) - at,
                          "; firmware PM %d, sleep return logic %d %d/%d ms, btcdyn flags %d", pm, logic, low, high,
                          btcdyn));
+    }
     os_log(OS_LOG_DEFAULT, "%s", out);
 
     if (fwCountersRefused_)
@@ -2245,7 +2338,8 @@ bool SwitchWLAN::varInt(const char *name, uint32_t &value)
 
 bool SwitchWLAN::varIntWith(const char *name, uint32_t param, uint32_t &value)
 {
-    uint8_t p[4], v[4] = {};
+    uint8_t p[4];
+    uint8_t v[4] = {};
     swlan::put32(p, param);
     size_t n = 0;
     if (!getVarWith(name, p, sizeof(p), v, sizeof(v), &n) || n < 4)
@@ -2267,13 +2361,14 @@ void SwitchWLAN::logLink()
     auto room = [&] {
         return at < sizeof(text) ? sizeof(text) - at : 0;
     };
-    auto num = [&](const char *label, bool ok, uint32_t v, bool hex) {
+    const auto num = [&](const char *label, bool ok, uint32_t v, bool hex) {
         if (!room())
             return;
-        if (!ok)
+        if (!ok) {
             add(snprintf(text + at, room(), "%s -", label));
-        else
+        } else {
             add(snprintf(text + at, room(), hex ? "%s %#x" : "%s %u", label, v));
+        }
     };
     uint32_t v = 0;
     swlan_chanspec cs = {};
@@ -2281,28 +2376,31 @@ void SwitchWLAN::logLink()
     uint8_t rate[4] = {};
     size_t n = 0;
     // 500 kb/s units; anything past 10 Gb/s (the firmware's -1 for "auto", say) is no rate
-    const bool haveRate = ioctl(WLC_GET_RATE, nullptr, 0, sizeof(rate), rate, &n) && n >= 4 && swlan::le32(rate) &&
-                          swlan::le32(rate) <= 20000;
+    const bool haveRate = ioctl(WLC_GET_RATE, nullptr, 0, sizeof(rate), rate, &n) && n >= 4 &&
+                          (swlan::le32(rate) != 0u) && swlan::le32(rate) <= 20000;
     const uint32_t rateKbps = haveRate ? swlan::le32(rate) * 500 : 0;
-    if (haveRate)
+    if (haveRate) {
         locked([&] {
             status_.tx_rate_kbps = rateKbps;
         });
+    }
     if (haveRate)
         switch_wlan_net_rate(static_cast<uint64_t>(rateKbps) * 1000);
-    swlan_peer ap = peer_;
+    const swlan_peer ap = peer_;
     char peer[120];
     swlan_peer_describe(&ap, peer, sizeof(peer));
-    if (haveCs)
+    if (haveCs) {
         add(snprintf(text, sizeof(text), "SwitchWLAN: link: %s channel %u, %u MHz (centre %u), ",
                      cs.five_ghz ? "5 GHz" : "2.4 GHz", cs.control, cs.bw_mhz, cs.center));
-    else
+    } else {
         add(snprintf(text, sizeof(text), "SwitchWLAN: link: chanspec %s, ", why_));
+    }
     if (room()) {
-        if (haveRate)
+        if (haveRate) {
             add(snprintf(text + at, room(), "rate %u.%u Mb/s", rateKbps / 1000, (rateKbps % 1000) / 100));
-        else
+        } else {
             add(snprintf(text + at, room(), "rate -"));
+        }
     }
     const uint32_t best = swlan_link_best_kbps(&ap, haveCs ? cs.bw_mhz : 20);
     if (room())
@@ -2354,15 +2452,17 @@ void SwitchWLAN::ampduWindow(char *out, size_t size)
         found = swlan_dump_value(text, n, names[i], &v[i]);
     if (!found) {
         ampduRefused_ = true;
-        for (size_t i = 0; i < n && i < 120; ++i)
+        for (size_t i = 0; i < n && i < 120; ++i) {
             if (text[i] && (text[i] < 0x20 || text[i] >= 0x7F))
                 text[i] = ' ';
+        }
         text[n < 120 ? n : 120] = 0;
         os_log(OS_LOG_DEFAULT, "SwitchWLAN: dump ampdu %s: %s", ok ? "has no txampdu/txmpdu/rxampdu/rxmpdu" : "refused",
                ok ? text : why_);
     } else {
         if (ampduHave_) {
-            char tx[16], rx[16];
+            char tx[16];
+            char rx[16];
             swlan_tenths(v[1] - ampdu_[1], v[0] - ampdu_[0], tx, sizeof(tx));
             swlan_tenths(v[3] - ampdu_[3], v[2] - ampdu_[2], rx, sizeof(rx));
             snprintf(out, size, "A-MPDU tx %s rx %s MPDUs", tx, rx);
@@ -2390,40 +2490,43 @@ void SwitchWLAN::coexBringUp()
 {
     char text[640];
     size_t at = 0;
-    auto add = [&](int k) {
+    const auto add = [&](int k) {
         at += k > 0 ? static_cast<size_t>(k) : 0;
     };
     uint8_t v[64] = {};
     size_t n = 0;
     add(snprintf(text, sizeof(text), "SwitchWLAN: coex: firmware btc_mode "));
-    if (getVar("btc_mode", v, sizeof(v), &n) && n >= 4)
+    if (getVar("btc_mode", v, sizeof(v), &n) && n >= 4) {
         add(snprintf(text + at, sizeof(text) - at, "%u", swlan::le32(v)));
-    else
+    } else {
         add(snprintf(text + at, sizeof(text) - at, "-"));
+    }
     // btc_params by index ("name\0" + le32 index -> le32): the NVRAM's two, SCO detection (27), the DHCP window's
     // (41, 66, 68) and eSCO's (50, 51) as brcmfmac and bcmdhd use them; btc_flags 0-8.
     static const uint32_t params[] = {27, 41, 50, 51, 66, 68, 84, 95};
     if (at < sizeof(text))
         add(snprintf(text + at, sizeof(text) - at, ", btc_params"));
-    for (uint32_t index : params) {
+    for (const uint32_t index : params) {
         uint8_t le[4];
         swlan::put32(le, index);
         if (at >= sizeof(text))
             break;
-        if (getVarWith("btc_params", le, sizeof(le), v, sizeof(v), &n) && n >= 4)
+        if (getVarWith("btc_params", le, sizeof(le), v, sizeof(v), &n) && n >= 4) {
             add(snprintf(text + at, sizeof(text) - at, " %u=%#x", index, swlan::le32(v)));
-        else
+        } else {
             add(snprintf(text + at, sizeof(text) - at, " %u=-", index));
+        }
     }
     if (at < sizeof(text))
         add(snprintf(text + at, sizeof(text) - at, ", btc_flags 0-8"));
     for (uint32_t index = 0; index <= 8 && at < sizeof(text); ++index) {
         uint8_t le[4];
         swlan::put32(le, index);
-        if (getVarWith("btc_flags", le, sizeof(le), v, sizeof(v), &n) && n >= 4)
+        if (getVarWith("btc_flags", le, sizeof(le), v, sizeof(v), &n) && n >= 4) {
             add(snprintf(text + at, sizeof(text) - at, " %u", swlan::le32(v)));
-        else
+        } else {
             add(snprintf(text + at, sizeof(text) - at, " -"));
+        }
     }
     // The dynamic coexistence profile (btc_dynctl, 50 bytes): the NVRAM's btcdyn_* as the firmware holds them.
     char profile[200] = "";
@@ -2434,11 +2537,13 @@ void SwitchWLAN::coexBringUp()
     // The board's wiring as the NVRAM we loaded claims it (no SECI/GCI iovar exists: the link is on the die).
     const char *nvram = reinterpret_cast<const char *>(switch_wlan_fw_nvram);
     const size_t nvramLength = static_cast<size_t>(switch_wlan_fw_nvram_size);
-    uint32_t flags = 0, flags2 = 0, mux = 0;
+    uint32_t flags = 0;
+    uint32_t flags2 = 0;
+    uint32_t mux = 0;
     const bool haveFlags = swlan_nvram_value(nvram, nvramLength, "boardflags", &flags);
     const bool haveFlags2 = swlan_nvram_value(nvram, nvramLength, "boardflags2", &flags2);
     const bool haveMux = swlan_nvram_value(nvram, nvramLength, "muxenab", &mux);
-    if (at < sizeof(text))
+    if (at < sizeof(text)) {
         add(snprintf(text + at, sizeof(text) - at,
                      "; NVRAM boardflags %#x (BTCOEX %u, FEM_BT shared antenna %u) boardflags2 %#x (BT_SHARE_ANT0 %u, "
                      "BTCLEGACY %u: %s) muxenab %#x (SECI pins %u)",
@@ -2446,6 +2551,7 @@ void SwitchWLAN::coexBringUp()
                      haveFlags2 ? flags2 : 0, (flags2 & 0x800000) ? 1u : 0u, (flags2 & 0x80) ? 1u : 0u,
                      (flags2 & 0x80) ? "legacy wires" : "GCI/SECI on the die", haveMux ? mux : 0,
                      (mux & 0x1000) ? 1u : 0u));
+    }
     os_log(OS_LOG_DEFAULT, "%s", text);
 }
 
@@ -2511,7 +2617,7 @@ void SwitchWLAN::multicastApply()
     locked([&] {
         count = mcastCount_;
         all = mcastAll_;
-        memcpy(list + 4, mcast_, count * 6);
+        memcpy(list + 4, mcast_, static_cast<size_t>(count) * 6);
         mcastChanged_ = false;
     });
     swlan::put32(list, count);
@@ -2728,7 +2834,7 @@ int SwitchWLAN::requestJoin(const uint8_t *ssid, size_t ssidLength, const uint8_
         memset(&p, 0, sizeof(p));
         memcpy(p.ssid, ssid, ssidLength);
         p.ssidLength = ssidLength;
-        p.hasBssid = bssid && (bssid[0] | bssid[1] | bssid[2] | bssid[3] | bssid[4] | bssid[5]);
+        p.hasBssid = bssid && (static_cast<unsigned>(bssid[0]) | bssid[1] | bssid[2] | bssid[3] | bssid[4] | bssid[5]);
         if (p.hasBssid)
             memcpy(p.bssid, bssid, 6);
         p.hasKey = key && keyLength;
@@ -2859,11 +2965,12 @@ void SwitchWLAN::counters(char *text, size_t size)
 bool SwitchWLAN::setEventMask(bool awdl)
 {
     uint8_t mask[16] = {};
-    for (uint32_t e : kEventsWanted)
+    for (const uint32_t e : kEventsWanted)
         mask[e / 8] |= static_cast<uint8_t>(1u << (e % 8));
-    if (awdl)
+    if (awdl) {
         for (unsigned i = 0; i < bcm_awdl_event_count; ++i)
-            mask[bcm_awdl_events[i] / 8] |= static_cast<uint8_t>(1u << (bcm_awdl_events[i] % 8));
+            mask[bcm_awdl_events[i] / 8] |= static_cast<uint8_t>(1u << (bcm_awdl_events[i] % 8u));
+    }
     return setVar("event_msgs", mask, sizeof(mask));
 }
 
@@ -2873,7 +2980,8 @@ void SwitchWLAN::awdlEvent(const swlan::Event &event)
 {
     ++awdlEventsIn_;
     if (event.type == E_IF && event.length >= 5) {
-        const uint8_t ifidx = event.data[0], opcode = event.data[1];
+        const uint8_t ifidx = event.data[0];
+        const uint8_t opcode = event.data[1];
         if (opcode == 1 && ifidx) {
             if (awdlIfidx_ >= 0 && awdlIfidx_ != ifidx)
                 mb_.awdlClose();  // a stale interface's rings go first
@@ -2883,12 +2991,14 @@ void SwitchWLAN::awdlEvent(const swlan::Event &event)
             awdlIfidx_ = awdlBssidx_ = -1;
             mb_.awdlClose();
         }
-        IOLog("SwitchWLAN: AWDL: firmware interface %u %s (bsscfg %u, role %u)\n", ifidx,
-              opcode == 1   ? "added"
-              : opcode == 2 ? "removed"
-                            : "changed",
-              event.data[3], event.data[4]);
+        const char *change = opcode == 2 ? "removed" : "changed";
+        if (opcode == 1)
+            change = "added";
+        IOLog("SwitchWLAN: AWDL: firmware interface %u %s (bsscfg %u, role %u)\n", ifidx, change, event.data[3],
+              event.data[4]);
     }
+    if (switch_wlan_soft_event(event.type, event.status, event.addr, event.data, event.length))
+        return;
     if (!awdlEventFn_)
         return;
     swlan_fw_event e = {event.type, event.status, event.reason, {}, event.ifidx, event.bsscfgidx};
@@ -2911,9 +3021,11 @@ int SwitchWLAN::awdlQuery(const swlan_awdl_caps **caps)
     memset(&c, 0, sizeof(c));
     c.abi_version = SWLAN_AWDL_ABI_VERSION;
     c.has_native_awdl = 1;
+    switch_wlan_soft_caps(&c);
     memcpy(c.self_mac, mac_, 6);
     c.probe = &gAwdlProbe;
-    *caps = &c;
+    if (caps)
+        *caps = &c;
     return 0;
 }
 
@@ -2921,7 +3033,8 @@ int SwitchWLAN::awdlOpen(const swlan_awdl_caps **caps)
 {
     if (loop_->onThread())
         return -EDEADLK;
-    bool up = false, open = false;
+    bool up = false;
+    bool open = false;
     locked([&] {
         up = up_;
         open = awdlOpen_;
@@ -2952,12 +3065,15 @@ int SwitchWLAN::awdlOpen(const swlan_awdl_caps **caps)
         }
         IOLog("SwitchWLAN: AWDL: firmware AWDL opened (AWDL events on, %u AWDL flow rings)\n", mb_.awdlRingCount());
     }
+    switch_wlan_soft_init();
     memset(&c, 0, sizeof(c));
     c.abi_version = SWLAN_AWDL_ABI_VERSION;
     c.has_native_awdl = 1;
+    switch_wlan_soft_caps(&c);
     memcpy(c.self_mac, mac_, 6);
     c.probe = gAwdlProbe.done ? &gAwdlProbe : nullptr;
-    *caps = &c;
+    if (caps)
+        *caps = &c;
     return 0;
 }
 
@@ -2973,14 +3089,17 @@ void SwitchWLAN::monitorProbe()
         return;
     tried = true;
     for (unsigned i = 0; i < BCM_MONITOR_PROBE_COUNT; ++i) {
-        uint8_t request[32], reply[64] = {};
+        uint8_t request[32];
+        uint8_t reply[64] = {};
         size_t got = 0;
         int16_t fw = 0;
         const size_t n = bcm_monitor_probe_request(i, request, sizeof(request));
         const bool ok = i == BCM_MONITOR_PROBE_GET_MONITOR
                             ? ioctlOn(0, BCM_WLC_GET_MONITOR, nullptr, 0, 4, reply, &got, &fw)
                             : n && ioctlOn(0, WLC_GET_VAR, request, n, sizeof(reply), reply, &got, &fw);
-        const int status = ok ? 0 : fw ? fw : BCM_PROBE_NO_ANSWER;
+        int status = fw ? fw : BCM_PROBE_NO_ANSWER;
+        if (ok)
+            status = 0;
         os_log(OS_LOG_DEFAULT, "SwitchWLAN: monitor probe: %s: %d %s, %u bytes, first word %u",
                bcm_monitor_probe_names[i], status, bcme_name(status), static_cast<unsigned>(ok ? got : 0),
                static_cast<unsigned>(ok && got >= 4 ? swlan::le32(reply) : 0));
@@ -2998,12 +3117,15 @@ void SwitchWLAN::awdlProbe()
     os_log(OS_LOG_DEFAULT, "SwitchWLAN: AWDL probe: %u variables, GET only", static_cast<unsigned>(BCM_PROBE_COUNT));
 #endif
     for (unsigned i = 0; i < BCM_PROBE_COUNT; ++i) {
-        uint8_t request[64], reply[256] = {};
+        uint8_t request[64];
+        uint8_t reply[256] = {};
         const size_t n = bcm_probe_request(i, request, sizeof(request));
         size_t got = 0;
         int16_t fw = 0;
-        const bool ok = n && ioctlOn(0, WLC_GET_VAR, request, n, sizeof(reply), reply, &got, &fw);
-        const int status = ok ? 0 : fw ? fw : BCM_PROBE_NO_ANSWER;
+        const bool ok = (n != 0u) && ioctlOn(0, WLC_GET_VAR, request, n, sizeof(reply), reply, &got, &fw);
+        int status = fw ? fw : BCM_PROBE_NO_ANSWER;
+        if (ok)
+            status = 0;
         bcm_probe_record(&gAwdlProbe, i, status, ok ? reply : nullptr, ok ? got : 0);
 #if DEVELOPMENT || DEBUG
         char hex[3 * 16 + 1] = {};
@@ -3070,6 +3192,16 @@ int SwitchWLAN::awdlVar(bool set, uint8_t ifidx, const char *name, const void *i
     if (said++ < 8)
         IOLog("SwitchWLAN: AWDL: %s %s (ifidx %u): %s\n", set ? "set" : "get", name, ifidx, why_);
     return -EIO;
+}
+
+int SwitchWLAN::awdlIoctlSet(uint32_t cmd, const void *buf, size_t length)
+{
+    if (loop_->onThread())
+        return -EDEADLK;
+    int16_t fw = 0;
+    if (ioctlOn(0, cmd, static_cast<const uint8_t *>(buf), length, 0, nullptr, nullptr, &fw))
+        return 0;
+    return fw ? SWLAN_FWERR(fw) : -EIO;
 }
 
 int SwitchWLAN::awdlTransmit(const uint8_t *eth, size_t length)
@@ -3167,10 +3299,11 @@ extern "C" unsigned switch_wlan_tx_frames(swlan_tx_fill_fn fill, void *context, 
 
 extern "C" void switch_wlan_status_get(struct swlan_status *out)
 {
-    if (gDriver)
+    if (gDriver) {
         gDriver->status(out);
-    else
+    } else {
         memset(out, 0, sizeof(*out));
+    }
 }
 
 extern "C" void switch_wlan_bt_links(unsigned links)
@@ -3193,14 +3326,14 @@ extern "C" void switch_wlan_multicast(const uint8_t (*groups)[6], unsigned count
 
 extern "C" void switch_wlan_counters(char *text, size_t size)
 {
-    if (gDriver)
+    if (gDriver) {
         gDriver->counters(text, size);
-    else if (size)
+    } else if (size) {
         text[0] = 0;
+    }
 }
 
-// SwitchWLANAwdlRadio.h §6, the firmware's own AWDL. The monitor+inject calls (§2-§5) keep SwitchWLANAwdl.cpp's
-// weak "unavailable" definitions: this firmware has no monitor or injection.
+// SwitchWLANAwdlRadio.h §6, the firmware's own AWDL; the soft backend's calls (§2-§5) are SwitchWLANAwdlSoft.cpp's.
 extern "C" int swlan_awdl_open(const struct swlan_awdl_caps **caps_out)
 {
     if (caps_out)
@@ -3256,18 +3389,36 @@ extern "C" int swlan_awdl_eth_tx(const uint8_t *eth, size_t len)
     return gDriver ? gDriver->awdlTransmit(eth, len) : -ENXIO;
 }
 
+extern "C" int switch_wlan_ioctl_set(uint32_t cmd, const void *buf, size_t length)
+{
+    return gDriver ? gDriver->awdlIoctlSet(cmd, buf, length) : -ENXIO;
+}
+
+extern "C" int switch_wlan_d11n(void)
+{
+    return gDriver ? gDriver->awdlD11n() : 0;
+}
+
 // The radio's address where the system reads it, before userland starts: /chosen mac-address-wifi0 (MobileGestalt's
 // WifiAddress; wifid derives every network's private address from it and aborts a join without it, UniXNU-sheng
 // WifiProbe.cpp) and /arm-io/wlan local-mac-address (as J120's device tree has it). The packager's placeholders are
 // replaced with the fuse address the chip is given.
+static void setBytes(IORegistryEntry *entry, const char *key, const uint8_t *bytes, unsigned length)
+{
+    if (OSData *data = OSData::withBytes(bytes, length)) {
+        entry->setProperty(key, data);
+        data->release();
+    }
+}
+
 static void publishMac(const uint8_t mac[6])
 {
     if (IORegistryEntry *chosen = IORegistryEntry::fromPath("/chosen", gIODTPlane)) {
-        chosen->setProperty("mac-address-wifi0", const_cast<uint8_t *>(mac), 6);
+        setBytes(chosen, "mac-address-wifi0", mac, 6);
         chosen->release();
     }
     if (IORegistryEntry *wlan = IORegistryEntry::fromPath("/arm-io/wlan", gIODTPlane)) {
-        wlan->setProperty("local-mac-address", const_cast<uint8_t *>(mac), 6);
+        setBytes(wlan, "local-mac-address", mac, 6);
         wlan->release();
     }
 }
@@ -3293,10 +3444,11 @@ extern "C" int switch_wlan_publish(void)
     publishMac(mac);
     // Without a platform UUID (made from /chosen unique-chip-id and chip-id) gethostuuid() waits for ever, and configd's
     // IPConfiguration start() calls it: configd never lists en0 and wifid never makes a Wi-Fi device.
-    IOService *platform = IOService::getPlatform();
-    if (!platform || !platform->getProvider() || !platform->getProvider()->getProperty(kIOPlatformUUIDKey))
+    const IOService *platform = IOService::getPlatform();
+    if (!platform || !platform->getProvider() || !platform->getProvider()->getProperty(kIOPlatformUUIDKey)) {
         IOLog("SwitchWLAN: no IOPlatformUUID (ADT /chosen unique-chip-id, chip-id): configd will stall, no Wi-Fi in "
               "Settings\n");
+    }
     IOService *resources = IOService::getResourceService();
     SwitchWLAN *candidate = OSTypeAlloc(SwitchWLAN);
     if (!resources || !candidate || !candidate->init() || !candidate->attach(resources)) {

@@ -41,14 +41,16 @@
 //   M2V_ZERO_FRESH=1          zero fresh memory and upload staging on the CPU again (default off)
 //   TEGRA_M2V_SEED=0          no shared shader cache seed (default 1)
 //   NMB_SYSTEM_COMPILER       Metal source and stitched libraries compiled in-process (default 1 outside backboardd, 0 in it)
-//   TEGRA_RAW_METAL=0         the render server keeps the m2v device even with a raw pack staged
+//   TEGRA_RAW_METAL=0         this process keeps the m2v device even with a raw pack staged
 //
-// The render server's raw GM20B path (raw/runtime/RawMetal.h): in backboardd, when the build's pipeline pack is staged beside the
-// bundle (<Extensions>/TegraGM20BMetal.raw/pack.bin, build-tegra-gm20b-metal.py makes it, stage-tegra-gm20b-metal.py copies it),
-// the device Core Animation gets is the raw facade over the m2v device: its command buffers go straight to MAXWELL_B methods, and
-// any the raw path cannot draw exactly as m2v (a state not in the pack, an extended-range format, compute, mipmaps...) are
-// replayed on m2v whole. A pack of another build is refused (its stack key, TEGRA_RAW_STACK, differs). Off for a boot: remove or
-// rename <Data>/ngpu/addons/TegraGM20BMetal.raw (stage-tegra-gm20b-metal.py --no-raw does), or TEGRA_RAW_METAL=0 in backboardd.
+// The raw GM20B path (raw/runtime/RawMetal.h): when the build's pipeline pack is staged beside the bundle
+// (<Extensions>/TegraGM20BMetal.raw/pack.bin, build-tegra-gm20b-metal.py makes it, stage-tegra-gm20b-metal.py copies it) and the
+// process's sandbox lets it read it, the device every process gets is the raw facade over the m2v device: its command buffers go
+// straight to MAXWELL_B methods, and any the raw path cannot draw exactly as m2v (a state not in the pack, an extended-range
+// format, compute, mipmaps...) are replayed on m2v whole. The render server's raw device is made beside the m2v device's open,
+// every other process's memory, channel and shader heap at their first use (raw_gpu.h Device::Role). A pack of another build is
+// refused (its stack key, TEGRA_RAW_STACK, differs). Off for a boot: remove or rename <Data>/ngpu/addons/TegraGM20BMetal.raw
+// (stage-tegra-gm20b-metal.py --no-raw does); for a process: TEGRA_RAW_METAL=0 in its environment.
 #import <Foundation/Foundation.h>
 #import <Metal/Metal.h>
 #include <algorithm>
@@ -300,21 +302,24 @@ bool sharedSeed(char *name, size_t size)
     return true;
 }
 
-// <Extensions>/TegraGM20BMetal.raw/pack.bin, beside the bundle (and the seed): the raw path's pipeline pack, if staged and readable.
-bool rawPack(char *path, size_t size)
+// <Extensions>/TegraGM20BMetal.raw/pack.bin, beside the bundle (and the seed): the raw path's pipeline pack. Null if this process
+// may read it, else why not (a process whose sandbox may not read it never tries: asked without a report).
+const char *rawPackRefusal(char *path, size_t size)
 {
     Dl_info info = {};
-    if (!dladdr(reinterpret_cast<const void *>(&rawPack), &info) || !info.dli_fname)
-        return false;
+    if (!dladdr(reinterpret_cast<const void *>(&rawPackRefusal), &info) || !info.dli_fname)
+        return "the plugin's path is unknown";
     strlcpy(path, info.dli_fname, size);
     for (int i = 0; i < 2; ++i)  // <Extensions>/TegraGM20BMetal.bundle/TegraGM20BMetal -> <Extensions>
         if (char *slash = strrchr(path, '/'))
             *slash = 0;
     strlcat(path, "/TegraGM20BMetal.raw/pack.bin", size);
-    return access(path, R_OK) == 0;
+    if (!sandboxAllows("file-read-data", kSandboxFilterPath, path))
+        return "its sandbox does not let it read the pack";
+    return access(path, R_OK) == 0 ? nullptr : "no pack staged";
 }
 
-bool gRaw;  // the render server's device is the raw facade
+bool gRaw;  // this process's device is the raw facade
 
 #if SWITCH_DEBUG
 // r17-widgets: the frame rates this process's display links are asked for. Each distinct request (a CAFrameRateRange or a
@@ -552,6 +557,21 @@ void observeRf16Request()
                              });
 }
 
+// This process's name as one word for the rates lines (an app's executable may have spaces), which tools/devicerun reads per
+// process
+const char *processWord()
+{
+    static char word[128];
+    static std::once_flag made;
+    std::call_once(made, [] {
+        strlcpy(word, getprogname(), sizeof word);
+        for (char *c = word; *c; c++)
+            if (*c == ' ')
+                *c = '_';
+    });
+    return word;
+}
+
 // The frontend's rates line, every 5 s while the device works (it says nothing when idle). r16-idle: with a whole
 // interval of leeway, so the timer rides a wakeup the process or the kernel takes anyway instead of waking every
 // Metal process every 5 s; both rates functions measure their own window, so a late tick only makes a longer one.
@@ -567,16 +587,16 @@ void startRates()
     dispatch_source_set_timer(timer, dispatch_time(DISPATCH_TIME_NOW, 5 * NSEC_PER_SEC), 5 * NSEC_PER_SEC,
                               5 * NSEC_PER_SEC);
     dispatch_source_set_event_handler(timer, ^{
-        // 768: the rates line passed 512 with r6-lows' frame distributions (encp= cgap= swait= gpuq= psomax=).
-        char line[768];
+        // 1024: the raw rates line passed 768 with its replay parts (rsplit= rdraw= tw=).
+        char line[1024];
         if (native_bridge_metal_rates(line, sizeof line))
-            os_log(logger(), "TegraGM20BMetal: %{public}s %{public}s", getprogname(), line);
+            os_log(logger(), "TegraGM20BMetal: %{public}s %{public}s", processWord(), line);
         // r17-widgets: the stack of one commit per 30 s (what drives this process's commit rate).
         if (native_bridge_metal_commit_origin(line, sizeof line))
-            os_log(logger(), "TegraGM20BMetal: %{public}s %{public}s", getprogname(), line);
-        // The raw path's own: command buffers on each path, encode, draws.
+            os_log(logger(), "TegraGM20BMetal: %{public}s %{public}s", processWord(), line);
+        // The raw path's own: command buffers on each path and why, encode, draws, memory.
         if (gRaw && raw_metal_rates(line, sizeof line))
-            os_log(logger(), "TegraGM20BMetal: %{public}s %{public}s", getprogname(), line);
+            os_log(logger(), "TegraGM20BMetal: %{public}s %{public}s", processWord(), line);
     });
     dispatch_resume(timer);
 }
@@ -627,13 +647,13 @@ id openDevice(unsigned port)
         // (drivers/SwitchAccelStub) that only ends QuartzCore's accelerator poll. Set before the raw path's setup below, which
         // may be the first to open NVK's connection.
         setenv("NVK_DARWIN_SERVICE", "AGXAccelerator", 0);
-        // The raw GM20B path's own setup (its pack, channel and context, the first pool chunk) starts now, beside the m2v device's
-        // open below; raw_metal_device_open takes what it made, so the render server's first frame waits for neither twice.
-        if (renderServer && !(getenv("TEGRA_RAW_METAL") && strcmp(getenv("TEGRA_RAW_METAL"), "0") == 0)) {
-            char pack[1100] = "";
-            if (rawPack(pack, sizeof pack))
-                raw_metal_prepare(pack, uint64_t(TEGRA_RAW_STACK));
-        }
+        // The render server's raw GM20B path's own setup (its pack, channel and context, the first pool chunk) starts now, beside
+        // the m2v device's open below; raw_metal_device_open takes what it made, so its first frame waits for neither twice.
+        const bool rawWanted = knobOn("TEGRA_RAW_METAL", true);
+        char pack[1100] = "";
+        const char *packRefusal = rawWanted ? rawPackRefusal(pack, sizeof pack) : nullptr;
+        if (renderServer && rawWanted && !packRefusal)
+            raw_metal_prepare(pack, uint64_t(TEGRA_RAW_STACK));
         if (!renderServer)
             setenv("NMB_MEMO_MB", "32", 0);  // read by the bridge
         // Read by the runtime. In the render server too: its pools double their blocks, and each block is one BoAlloc on the
@@ -740,28 +760,28 @@ id openDevice(unsigned port)
         // Every frontend object (NBObject), then the device.
         native_bridge_metal_answer_unimplemented(NSClassFromString(@"NBObject"), answeredZero);
         native_bridge_metal_answer_unimplemented(object_getClass(device), answeredZero);
-        // The render server draws through the raw GM20B path when the build's pack is staged (above); the m2v device stays
-        // inside it for every answer, object and command buffer the raw path has no own for.
-        // One line either way, so a boot shows which device Core Animation got.
-        if (renderServer) {
-            char pack[1100] = "";
-            const char *knob = getenv("TEGRA_RAW_METAL");
-            if (knob && strcmp(knob, "0") == 0) {
-                os_log(logger(), "TegraGM20BMetal: raw GM20B path off (TEGRA_RAW_METAL=0): m2v device kept");
-            } else if (!rawPack(pack, sizeof pack)) {
-                os_log(logger(), "TegraGM20BMetal: raw GM20B path off (no pack staged at %{public}s): m2v device kept",
-                       pack);
+        // Every process draws through the raw GM20B path when the build's pack is staged and readable (above); the m2v device
+        // stays inside it for every answer, object and command buffer the raw path has no own for.
+        // One line either way, so a boot shows which device each process got.
+        if (!rawWanted) {
+            os_log(logger(), "TegraGM20BMetal: raw GM20B path off in %{public}s (TEGRA_RAW_METAL=0): m2v device kept",
+                   getprogname());
+        } else if (packRefusal) {
+            os_log(logger(),
+                   "TegraGM20BMetal: raw GM20B path off in %{public}s (%{public}s at %{public}s): m2v device kept",
+                   getprogname(), packRefusal, pack);
+        } else {
+            NSString *why = nil;
+            if (id raw = raw_metal_device_open(pack, uint64_t(TEGRA_RAW_STACK), (id<MTLDevice>)device, &why)) {
+                os_log(logger(), "TegraGM20BMetal: raw GM20B path on in %{public}s (pack %{public}s, stack %016llx)",
+                       getprogname(), pack, (unsigned long long)TEGRA_RAW_STACK);
+                device = raw;
+                gRaw = true;
+                raw_metal_complete_states(cache);
             } else {
-                NSString *why = nil;
-                if (id raw = raw_metal_device_open(pack, uint64_t(TEGRA_RAW_STACK), (id<MTLDevice>)device, &why)) {
-                    os_log(logger(),
-                           "TegraGM20BMetal: raw GM20B path on in backboardd (pack %{public}s, stack %016llx)", pack,
-                           (unsigned long long)TEGRA_RAW_STACK);
-                    device = raw;
-                    gRaw = true;
-                } else {
-                    os_log_error(logger(), "TegraGM20BMetal: raw GM20B path off (%{public}@): m2v device kept", why);
-                }
+                os_log_error(logger(),
+                             "TegraGM20BMetal: raw GM20B path off in %{public}s (%{public}@): m2v device kept",
+                             getprogname(), why);
             }
         }
         // seed: "shared (<its SEED line>)" (the runtime reads the shared seed beneath the cache), "none" (no readable seed, or off)

@@ -125,9 +125,11 @@ inline uint32_t plan(const Run *runs, uint32_t runCount, uint32_t total, uint32_
     const uint32_t bounceMax = kBouncePageBytes >= mps ? kBouncePageBytes / mps * mps : 0;
     if (!bounceMax)
         return 0;
-    uint32_t count = 0, run = 0, runStart = 0;  // the run holding `offset`, and its first offset
-    Piece *open = nullptr;                      // the piece the next packet may join
-    if (!total) {                               // a zero-length transfer: one empty TRB
+    uint32_t count = 0;
+    uint32_t run = 0;
+    uint32_t runStart = 0;  // the run holding `offset`, and its first offset
+    Piece *open = nullptr;  // the piece the next packet may join
+    if (!total) {           // a zero-length transfer: one empty TRB
         if (!max)
             return 0;
         pieces[0] = {0, 0, 0, false};
@@ -143,24 +145,25 @@ inline uint32_t plan(const Run *runs, uint32_t runCount, uint32_t total, uint32_
         const bool inRun = offset + packet <= runStart + runs[run].length;
         const bool crosses = (pa >> 16) != ((pa + packet - 1) >> 16);
         const bool high = pa + packet > reach;
-        const uint64_t lineMask = ~(uint64_t)(kCacheLine - 1);
+        const uint64_t lineMask = ~static_cast<uint64_t>(kCacheLine - 1);
         const bool edge = out && inRun &&
                           ((pa & lineMask) < runs[run].pa ||
                            ((pa + packet + kCacheLine - 1) & lineMask) > runs[run].pa + runs[run].length);
         const bool bounce = !inRun || crosses || high || edge;
         if (bounce) {
             stats->bounceBytes += packet;
-            if (!inRun)
+            if (!inRun) {
                 ++stats->discontinuity;
-            else if (high)
+            } else if (high) {
                 ++stats->high;
-            else if (crosses)
+            } else if (crosses) {
                 ++stats->boundary;
-            else
+            } else {
                 ++stats->edge;
+            }
         }
         const bool probeCut = firstPacket && offset == mps;  // the probe packet stands alone
-        const bool joins = open && !probeCut && open->bounce == bounce &&
+        const bool joins = (open != nullptr) && !probeCut && open->bounce == bounce &&
                            (bounce ? open->length + packet <= bounceMax
                                    : open->pa + open->length == pa && open->length + packet <= directMax &&
                                          (pa & (kTrbMaxBytes - 1)) != 0);
@@ -190,7 +193,10 @@ template <class LengthOf>
 inline OutResult outEventAt(uint8_t known, LengthOf lengthOf, uint32_t count, uint32_t index, uint32_t residue,
                             bool shortPacket)
 {
-    uint32_t before = 0, after = 0, total = 0, length = 0;
+    uint32_t before = 0;
+    uint32_t after = 0;
+    uint32_t total = 0;
+    uint32_t length = 0;
     for (uint32_t i = 0; i < count; ++i) {
         const uint32_t l = lengthOf(i);
         total += l;
@@ -213,13 +219,19 @@ inline OutResult outEventAt(uint8_t known, LengthOf lengthOf, uint32_t count, ui
     }
     if (!shortPacket) {  // a full TRB in the middle: only the probe asks for one
         r.done = false;
-        r.learned = residue == 0 ? kResiduePerTrb : residue == after ? kResiduePerTd : kResidueBroken;
+        r.learned = residue == after ? kResiduePerTd : kResidueBroken;
+        if (residue == 0)
+            r.learned = kResiduePerTrb;
         return r;
     }
-    const bool perTrb = residue <= length, perTd = residue > after && residue <= length + after;
+    const bool perTrb = residue <= length;
+    const bool perTd = residue > after && residue <= length + after;
     uint8_t reading = known;
-    if (known == kResidueUnknown)
-        reading = perTrb && !perTd ? kResiduePerTrb : perTd && !perTrb ? kResiduePerTd : 0;
+    if (known == kResidueUnknown) {
+        reading = perTd && !perTrb ? kResiduePerTd : 0;
+        if (perTrb && !perTd)
+            reading = kResiduePerTrb;
+    }
     if ((reading == kResiduePerTrb && perTrb) || (reading == kResiduePerTd && perTd)) {
         r.actual = reading == kResiduePerTrb ? before + length - residue : total - residue;
         if (known == kResidueUnknown)
@@ -367,7 +379,8 @@ public:
             d.verdict = Verdict::SecondEvent;
             return d;
         }
-        uint32_t k = 0, pos = 0;
+        uint32_t k = 0;
+        uint32_t pos = 0;
         for (; k < count_; ++k) {
             const Td &t = td(k);
             pos = index >= t.first ? index - t.first : index + Slots - t.first;
@@ -383,7 +396,8 @@ public:
             return d;
         }
         const Td &t = td(0);
-        const bool last = pos + 1u == t.trbs, shortPacket = code == COMP_SHORT_PACKET;
+        const bool last = pos + 1u == t.trbs;
+        const bool shortPacket = code == COMP_SHORT_PACKET;
         if (code != COMP_SUCCESS && !shortPacket) {
             d.verdict = Verdict::Head;
             d.outcome = code == COMP_STALL ? Outcome::Stall : Outcome::Error;

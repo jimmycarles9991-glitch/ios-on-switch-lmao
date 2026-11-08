@@ -1,7 +1,7 @@
 # drivers/TegraNVJPG (NVJPG 1.0 as the AppleJPEGDriver hardware JPEG codec) on the host:
 #   nvjpg_host_test     TegraNVJPGJpeg.h's parser against libjpeg-turbo's own parse (BCR @libjpeg_turbo, pinned in
 #                       MODULE.bazel) over a matrix of files libjpeg-turbo writes, every refusal, the output targets and
-#                       the JFIF matrix, and the boot self-test's vectors against libjpeg-turbo's decode (nvjpg_host.c)
+#                       the JFIF matrix (nvjpg_host.c)
 #   request_host_test   the AppleJPEGDriver decode request's translation and refusals (request_host.c)
 #   tegra_nvjpg_vendored_test  the vendored firmware and NVIDIA headers are the files their SOURCE files name
 load("//bazel/lint:defs.bzl", "lint_files")
@@ -15,7 +15,6 @@ host_library(
         "nvjpg_host.c",
         "//drivers/TegraNVJPG:TegraNVJPGJpeg.h",
         "//drivers/TegraNVJPG:nvidia/nvjpg_drv.h",
-        "//drivers/TegraNVJPG:selftest/J3Vectors.h",
     ],
     copts = ["-O1"],
     defines = [

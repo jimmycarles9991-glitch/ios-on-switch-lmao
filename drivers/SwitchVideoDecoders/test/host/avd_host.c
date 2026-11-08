@@ -6,23 +6,20 @@
 //           nothing, so pictures come out black: the test wants all 30 out of a session that says hardware.
 //   full:   the fake client refuses every buffer, so the instance runs Apple's software decoder: the test wants 30/30
 //           frames matching x264 from a session that says software.
-//   vp9:    VP9Clip.h as 'vp09' (kVTVideoDecoderSpecification_AllowVP9Decode) on AVD's private check registration
-//           (registerCheckDecoder: not flagged hardware, named com.brunostjohn.switch.avd.check.vp09, as the device's boot check
-//           uses it) and the fake engine: every superframe and frame through VP9NVDEC and the kernel's checker, all 16
-//           shown frames out of a session that says hardware.
+//   vp9:    VP9Clip.h as 'vp09' (kVTVideoDecoderSpecification_AllowVP9Decode) on the fake engine: every superframe and
+//           frame through VP9NVDEC and the kernel's checker, all 16 shown frames out of a session that says hardware.
 //   present: the engine session again with TegraNVDECPresent on: every picture handed to the fake VIC, whose pool
 //           buffer must be one VIC addresses (rows and the chroma plane on 256 bytes) and which copies it as VIC would;
 //           no wait invalidates the surface, and the CPU path's pictures come out.
-//   gate:   the private registration outside an open check (gCheckOpen false): no instance, so no session by its name.
 //   tiles:  clip A's first picture as four tiles of one canvas through VTTileDecompressionSession (AVDTiles.c): the
 //           canvas made from the tile requirements, each tile presented at its offset, each answered; with VIC off the
 //           tile session is refused and VideoToolbox finds no other decoder by that name.
-//   hevc:   HEVCClip.h's Main clips A and V and Main 10 clip T as 'hvc1' on the private check registration (named
-//           com.brunostjohn.switch.avd.check.hvc1) and the fake engine: every picture through HEVCNVDEC and the kernel's checker,
-//           all out of a hardware session; then with every buffer refused, Apple's software HEVC decoder in it,
-//           matching FFmpeg.
+//   hevc:   HEVCClip.h's Main clips A and V and Main 10 clip T as 'hvc1' on the fake engine: every picture through
+//           HEVCNVDEC and the kernel's checker, all out of a hardware session; then with every buffer refused, Apple's
+//           software HEVC decoder in it, matching FFmpeg.
 // Prints "PASS avd ..." when all hold (avd_host_test).
 #include "../../AVD/AVDDecoder.c"
+#include "../../AVD/ClipCheck.h"
 #include <stdio.h>
 #include "../HEVCClip.h"
 #include "../../../TegraNVDEC/TegraNVDECCheck.h"
@@ -62,11 +59,6 @@ uint32_t nvdec_codecs(const NVDECClient *c)
     (void)c;
     return 1u << TEGRA_NVDEC_CODEC_H264 | 1u << TEGRA_NVDEC_CODEC_VP9 | 1u << TEGRA_NVDEC_CODEC_HEVC |
            TEGRA_NVDEC_HEVC_MAIN10;
-}
-
-uint32_t nvdec_codecs_now(NVDECClient *c)
-{
-    return nvdec_codecs(c);
 }
 
 bool nvdec_can_present(const NVDECClient *c)
@@ -112,25 +104,6 @@ int nvdec_present(NVDECClient *c, const TegraNVDECPresent *p)
     if (s)
         CFRelease(s);
     return ok ? 0 : kIOReturnUnsupported;
-}
-
-uint32_t nvdec_check_claim(NVDECClient *c, bool *claimed)
-{
-    (void)c;
-    *claimed = false;
-    return TEGRA_NVDEC_CHECK_PASSED;
-}
-
-int nvdec_check_report(NVDECClient *c, bool vp9Ok, bool hevcOk, bool hevc10Ok)
-{
-    (void)c, (void)vp9Ok, (void)hevcOk, (void)hevc10Ok;
-    return 0;
-}
-
-uint32_t nvdec_check_wait(NVDECClient *c)
-{
-    (void)c;
-    return TEGRA_NVDEC_CHECK_PASSED;
 }
 
 int nvdec_alloc(void *ctx, uint64_t size, uint32_t *handle, void **va)
@@ -323,18 +296,15 @@ int main(void)
 {
     gAVDLog = os_log_create("com.brunostjohn.switch.avd", "host-test");
     setvbuf(stdout, NULL, _IONBF, 0);  // a hung session still shows how far it got
-    // A class ID of our own makes the registry entry "com.brunostjohn.switch.avd-host.avc1", which the sessions name below: the
-    // Mac's own H.264 decoders would otherwise win the selection.
+    // A class ID of our own makes the registry entries "com.brunostjohn.switch.avd-host.avc1" (.vp09, .hvc1), which the
+    // sessions name below: the Mac's own decoders would otherwise win the selection.
     const void *keys[] = {CFSTR("CMClassImplementationID")}, *values[] = {CFSTR("com.brunostjohn.switch.avd-host")};
     CFDictionaryRef info =
         CFDictionaryCreate(NULL, keys, values, 1, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
     const OSStatus registered = VTRegisterVideoDecoderWithInfo(kCMVideoCodecType_H264, info, createInstance) ||
-                                registerCheckDecoder(kCMVideoCodecType_VP9) ||
-                                registerCheckDecoder(kCMVideoCodecType_HEVC);
+                                VTRegisterVideoDecoderWithInfo(kCMVideoCodecType_VP9, info, createInstance) ||
+                                VTRegisterVideoDecoderWithInfo(kCMVideoCodecType_HEVC, info, createInstance);
     CFRelease(info);
-    // This process is the check (its private registration makes instances only while one is open).
-    __atomic_store_n(&gClaimer, true, __ATOMIC_RELEASE);
-    __atomic_store_n(&gCheckOpen, true, __ATOMIC_RELEASE);
     if (registered) {
         printf("FAIL avd: VTRegisterVideoDecoderWithInfo %d\n", (int)registered);
         return 1;
@@ -362,26 +332,20 @@ int main(void)
     gFull = false;
     char vp9[512];
     const int vp9Submits = gSubmits;
-    const void *vp9Keys[] = {kVTVideoDecoderSpecification_DecoderID}, *vp9Values[] = {kCheckDecoderID};
+    const void *vp9Keys[] = {kVTVideoDecoderSpecification_DecoderID},
+               *vp9Values[] = {CFSTR("com.brunostjohn.switch.avd-host.vp09")};
     CFDictionaryRef vp9Spec = CFDictionaryCreate(NULL, vp9Keys, vp9Values, 1, &kCFTypeDictionaryKeyCallBacks,
                                                  &kCFTypeDictionaryValueCallBacks);
     clip_check(ClipCheckVP9, vp9Spec, vp9, sizeof(vp9));
     printf("vp9: %s (submits %d)\n", vp9, gSubmits - vp9Submits);
-    // Outside an open check the private registration makes no instance: VideoToolbox finds no decoder by that name.
-    char closed[512];
-    __atomic_store_n(&gCheckOpen, false, __ATOMIC_RELEASE);
-    const int closedSubmits = gSubmits;
-    clip_check(ClipCheckVP9, vp9Spec, closed, sizeof(closed));
-    const bool gated = strstr(closed, "VTDecompressionSessionCreate failed") && gSubmits == closedSubmits;
-    printf("vp9 outside the check: %s\n", closed);
-    __atomic_store_n(&gCheckOpen, true, __ATOMIC_RELEASE);
     CFRelease(vp9Spec);
-    // HEVC on the private check registration: clips A and V, then the Main 10 clip T, through HEVCNVDEC and the kernel
+    // HEVC: clips A and V, then the Main 10 clip T, through HEVCNVDEC and the kernel
     // checker (the fake engine writes nothing, so no frame matches: all must come out, from a hardware session); then
     // with every buffer refused, Apple's software HEVC decoder inside the instance, which must match FFmpeg.
     char hevc[512], hevc10[512], hevcFull[512];
     const int hevcSubmits = gSubmits;
-    const void *hevcKeys[] = {kVTVideoDecoderSpecification_DecoderID}, *hevcValues[] = {kCheckHEVCDecoderID};
+    const void *hevcKeys[] = {kVTVideoDecoderSpecification_DecoderID},
+               *hevcValues[] = {CFSTR("com.brunostjohn.switch.avd-host.hvc1")};
     CFDictionaryRef hevcSpec = CFDictionaryCreate(NULL, hevcKeys, hevcValues, 1, &kCFTypeDictionaryKeyCallBacks,
                                                   &kCFTypeDictionaryValueCallBacks);
     clip_check(ClipCheckHEVC, hevcSpec, hevc, sizeof(hevc));
@@ -411,7 +375,7 @@ int main(void)
                     strstr(engine, "hardware: hardware decoder") && strstr(engine, " 30 out (") &&
                     gOpens > engineOpens && strstr(full, "hardware: software decoder, 30/30 frames match x264") &&
                     strstr(vp9, "vp9: hardware decoder") && strstr(vp9, " 16 out (") &&
-                    hevcSubmits - vp9Submits == 18 && gated && presentOk && hevcOk && tilesOk;
+                    hevcSubmits - vp9Submits == 18 && presentOk && hevcOk && tilesOk;
     printf("%s avd: plug-in on VideoToolbox (H.264, VP9 and HEVC on a fake NVDEC, then Apple's software H.264 and "
            "HEVC in the instance)\n",
            ok ? "PASS" : "FAIL");

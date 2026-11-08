@@ -37,16 +37,17 @@ TEST(SdQueueSource, ReadsOnly)
     const std::string pick = body("Request *NativeSwitchBlock::pickLocked(");
     EXPECT_THAT(pick, HasSubstr("if (merge && mergeAnywhere && !first->write) {"));
     EXPECT_THAT(pick, HasSubstr("switchGatherReads(head, first, maxSectors, kMaxChain, kMergeScan, &start, &sectors, "
-                                "gap, budget)"));
+                                "maxGap, gapBudget)"));
     // r14-sdcq: gaps only while gap reads are on, within the cost model's bounds.
-    EXPECT_THAT(pick, HasSubstr("const uint32_t gap = gapsOn ? kGapSectors : 0, budget = gapsOn ? kGapBudget : 0;"));
+    EXPECT_THAT(pick, HasSubstr("const uint32_t maxGap = gapsOn ? kGapSectors : 0;"));
+    EXPECT_THAT(pick, HasSubstr("const uint32_t gapBudget = gapsOn ? kGapBudget : 0;"));
     EXPECT_TRUE(
         Search(source, R"(constexpr uint32_t kGapSectors = 32 \* 1024 / kSector, kGapBudget = 64 \* 1024 / kSector)"));
     // The scan reaches as far as a chain can hold: never fewer than the old rule's queue-adjacent reads.
     EXPECT_THAT(source, HasSubstr("constexpr unsigned kMergeScan = kMaxChain;"));
     // The chain is checked before it is unlinked; one that fails stays queued, the boot falls back to the old rule
     // with one line, and nothing panics.
-    EXPECT_LT(Index(pick, "switchChainFits(head, start, sectors, count, gap, budget)"),
+    EXPECT_LT(Index(pick, "switchChainFits(head, start, sectors, count, maxGap, gapBudget)"),
               Index(pick, "switchUnlinkChain("));
     EXPECT_THAT(pick, HasSubstr("switchClearChain(head);"));
     EXPECT_THAT(pick, HasSubstr("mergeAnywhere = false;"));
@@ -68,7 +69,7 @@ TEST(SdQueueSource, GapChains)
     const std::string table = body("SwitchAdmaRefusal NativeSwitchBlock::buildTable(");
     EXPECT_EQ(Count(table, "staging.addSink(sinkPA, gap(r))"), 1u);
     EXPECT_EQ(Count(table, "table.addSealed(sinkPA, gap(r))"), 1u);
-    EXPECT_EQ(Count(table, "gap(r) > uint64_t(kGapSectors) * kSector || !sinkPA"), 2u);
+    EXPECT_EQ(Count(table, "gap(r) > static_cast<uint64_t>(kGapSectors) * kSector || !sinkPA"), 2u);
     EXPECT_THAT(body("void NativeSwitchBlock::endBatch("), HasSubstr("} else if (b.gapSectors && gapProofs) {"));
     const std::string prove = body("bool NativeSwitchBlock::proveGaps(");
     EXPECT_THAT(prove, HasSubstr("gapsOn = false;"));

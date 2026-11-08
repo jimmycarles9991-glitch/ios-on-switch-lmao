@@ -2,7 +2,7 @@
 // NVDEC's pictures into VideoToolbox's buffers on VIC (TegraVICPresent.cpp), for TegraNVDEC's Present method.
 //
 // NVDEC writes NV12 in Tegra block linear (16Bx2 sectors, GOB height 2) into its own buffers; VideoToolbox's clients
-// want pitch-linear '420v'/'420f' IOSurfaces. VIC copies one into the other (the 4:2:0 pass-through V4 proves,
+// want pitch-linear '420v'/'420f' IOSurfaces. VIC copies one into the other (the 4:2:0 pass-through,
 // read as block linear: TegraVICTraits.blockLinearIn), so the CPU neither de-swizzles nor touches either buffer, and
 // the IOSurface is in DRAM, with no CPU line of it left dirty or stale, when the call returns: a GPU that does not
 // snoop the CPU's caches reads what VIC wrote.
@@ -32,9 +32,9 @@ typedef struct {
 #ifdef __cplusplus
 extern "C" {
 #endif
-// VIC is published (V5) and copies block-linear 4:2:0 exactly (V4).
+// VIC is published (V3) and copies block-linear 4:2:0 exactly (kTegraVICTraits).
 bool tegra_vic_present_ready(void);
-void tegra_vic_present_start(void);  // V5, once block-linear input is proven: presents are taken from here on
+void tegra_vic_present_start(void);  // V3: presents are taken from here on
 // 0 when the picture is in the IOSurface; -19 VIC not ready, -22 bad surface ID, -95 a shape VIC does not take, -12 no
 // memory, -60 the job did not finish; `why` says which (static text).
 int tegra_vic_present(const TegraVICPicture *picture, task_t task, const char **why);

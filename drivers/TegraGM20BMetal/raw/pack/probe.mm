@@ -9,7 +9,7 @@
 // BGRA8 texture, fragment sampler slot s (0..15) has max LOD clamp 1+s/2 (mip filter nearest; r8-rawca: 1+s made slot 14 look like any sampler with the default clamp, 15), linear min/mag when s&1, repeat U
 // when s&2. A sampler made before them takes NVK's sampler index 0. One command buffer (one submission) per state; stdout lines "PROBE <i> <state key>".
 // The corpus's lib= fields (the journal names each function's library since 11-04) are not part of the state key: the raw path
-// keys QuartzCore's functions by name and constants (RawMetal.mm raw_metal_pipeline_key). PROBE_LABEL (default
+// keys QuartzCore's functions by name and constants (RawMetalLibrary.mm raw_metal_pipeline_key). PROBE_LABEL (default
 // com.apple.coreanimation.): only R lines whose label starts with it (the render server's states; "" for every line), and the
 // lines that keep a lib= field (rawpack.py keeps it on another framework's states): their functions come from that library
 // under PROBE_LIB_ROOT (the crawl's root), and their key ends with " | l <framework>", as the raw path keys them.
@@ -18,12 +18,16 @@
 #import <Foundation/Foundation.h>
 #import <IOSurface/IOSurface.h>
 #import <Metal/Metal.h>
+#include <map>
 #include <set>
 #include <stdio.h>
 #include <string>
 #include <vector>
 #include "NativeBridgeMetalFrontend.h"
+#include "TwoPlaneStandIn.h"
 #include "bridge/NativeMetalObjects.h"
+#include "probe_states.h"
+using namespace probe;
 extern "C" void mock_iokit_report(void);
 extern "C" void pushcount_report(const char *what);
 static uint32_t gSlots = getenv("PROBE_SLOTS") ? atoi(getenv("PROBE_SLOTS")) : 31;
@@ -31,133 +35,6 @@ static uint32_t gSlots = getenv("PROBE_SLOTS") ? atoi(getenv("PROBE_SLOTS")) : 3
 static void missing(const char *cls, const char *sel)
 {
     fprintf(stderr, "MISSING -[%s %s]\n", cls, sel);
-}
-
-static std::vector<std::string> split(const std::string &s)
-{
-    std::vector<std::string> out;
-    size_t at = 0;
-    while (at < s.size()) {
-        size_t e = s.find(' ', at);
-        if (e == std::string::npos)
-            e = s.size();
-        if (e > at)
-            out.push_back(s.substr(at, e - at));
-        at = e + 1;
-    }
-    return out;
-}
-
-static MTLFunctionConstantValues *constants(const std::vector<std::string> &items)
-{
-    MTLFunctionConstantValues *v = [MTLFunctionConstantValues new];
-    for (const std::string &item : items) {
-        size_t a = item.rfind(':'), b = a == std::string::npos ? a : item.rfind(':', a - 1);
-        if (a == std::string::npos || b == std::string::npos)
-            continue;
-        std::string name = item.substr(0, b), type = item.substr(b + 1, a - b - 1), hex = item.substr(a + 1);
-        uint8_t bytes[64] = {};
-        for (size_t i = 0; i + 1 < hex.size() && i / 2 < sizeof bytes; i += 2)
-            bytes[i / 2] = (uint8_t)strtoul(hex.substr(i, 2).c_str(), nullptr, 16);
-        if (name[0] == '#')
-            [v setConstantValue:bytes
-                           type:(MTLDataType)atoi(type.c_str())
-                        atIndex:strtoul(name.c_str() + 1, nullptr, 10)];
-        else
-            [v setConstantValue:bytes type:(MTLDataType)atoi(type.c_str()) withName:@(name.c_str())];
-    }
-    return v;
-}
-
-static id<MTLFunction> function(id<MTLLibrary> qc, const std::vector<std::string> &stage)
-{
-    if (stage.empty() || stage[0] == "-")
-        return nil;
-    if (stage.size() == 1)
-        return [qc newFunctionWithName:@(stage[0].c_str())];
-    NSError *e = nil;
-    return [qc newFunctionWithName:@(stage[0].c_str())
-                    constantValues:constants(std::vector<std::string>(stage.begin() + 1, stage.end()))
-                             error:&e];
-}
-
-struct State {
-    std::string key, label;
-    MTLRenderPipelineDescriptor *d;
-    unsigned vertexBuffer = 99, vertexStride = 0;
-};
-
-// precompile.mm's R-line parser (the frontend's journal format), key = every descriptor field but the label.
-static bool parseState(id<MTLLibrary> qc, const std::string &line, State &s)
-{
-    size_t bar1 = line.find(" | v "), bar2 = line.find(" | f "), bar3 = line.find(" | ", bar2 + 5);
-    if (bar1 == std::string::npos || bar2 == std::string::npos)
-        return false;
-    std::vector<std::string> head = split(line.substr(0, bar1));
-    std::vector<std::string> v = split(line.substr(bar1 + 5, bar2 - bar1 - 5));
-    std::vector<std::string> f =
-        split(line.substr(bar2 + 5, (bar3 == std::string::npos ? line.size() : bar3) - bar2 - 5));
-    MTLRenderPipelineDescriptor *d = [MTLRenderPipelineDescriptor new];
-    MTLVertexDescriptor *vd = nil;
-    std::string key;
-    for (const std::string &h : head) {
-        if (h.rfind("label=", 0) == 0) {
-            s.label = h.substr(6);
-            if (s.label != "-")
-                d.label = @(s.label.c_str());
-        } else if (h.rfind("samples=", 0) == 0)
-            d.rasterSampleCount = strtoul(h.c_str() + 8, nullptr, 10);
-        else if (h.rfind("topo=", 0) == 0)
-            d.inputPrimitiveTopology = (MTLPrimitiveTopologyClass)strtoul(h.c_str() + 5, nullptr, 10);
-        else if (h.rfind("ds=", 0) == 0) {
-            unsigned a = 0, b = 0;
-            sscanf(h.c_str() + 3, "%u/%u", &a, &b);
-            d.depthAttachmentPixelFormat = (MTLPixelFormat)a;
-            d.stencilAttachmentPixelFormat = (MTLPixelFormat)b;
-        } else if (h[0] == 'c' && isdigit(h[1])) {
-            unsigned i, x[9] = {};
-            if (sscanf(h.c_str(), "c%u=%u:%u:%u:%u:%u:%u:%u:%u:%u", &i, x, x + 1, x + 2, x + 3, x + 4, x + 5, x + 6,
-                       x + 7, x + 8) != 10 ||
-                i >= 8)
-                continue;
-            MTLRenderPipelineColorAttachmentDescriptor *c = d.colorAttachments[i];
-            c.pixelFormat = (MTLPixelFormat)x[0];
-            c.writeMask = x[1];
-            c.blendingEnabled = x[2];
-            c.sourceRGBBlendFactor = (MTLBlendFactor)x[3];
-            c.destinationRGBBlendFactor = (MTLBlendFactor)x[4];
-            c.rgbBlendOperation = (MTLBlendOperation)x[5];
-            c.sourceAlphaBlendFactor = (MTLBlendFactor)x[6];
-            c.destinationAlphaBlendFactor = (MTLBlendFactor)x[7];
-            c.alphaBlendOperation = (MTLBlendOperation)x[8];
-        } else if (h[0] == 'a' && isdigit(h[1])) {
-            unsigned i, x[6] = {};
-            if (sscanf(h.c_str(), "a%u=%u:%u:%u:%u:%u:%u", &i, x, x + 1, x + 2, x + 3, x + 4, x + 5) != 7 || i >= 31 ||
-                x[2] >= 31)
-                continue;
-            if (!vd)
-                vd = [MTLVertexDescriptor vertexDescriptor];
-            vd.attributes[i].format = (MTLVertexFormat)x[0];
-            vd.attributes[i].offset = x[1];
-            vd.attributes[i].bufferIndex = x[2];
-            vd.layouts[x[2]].stride = x[3];
-            vd.layouts[x[2]].stepFunction = (MTLVertexStepFunction)x[4];
-            vd.layouts[x[2]].stepRate = x[5];
-            s.vertexBuffer = x[2];
-            s.vertexStride = x[3];
-        } else
-            continue;
-        if (h.rfind("label=", 0) != 0)
-            key += h + " ";
-    }
-    d.vertexDescriptor = vd;
-    d.vertexFunction = function(qc, v);
-    d.fragmentFunction = function(qc, f);
-    if (!d.vertexFunction || (!d.fragmentFunction && !f.empty() && f[0] != "-"))
-        return false;
-    s.key = key + line.substr(bar1, (bar3 == std::string::npos ? line.size() : bar3) - bar1);
-    s.d = d;
-    return true;
 }
 
 // The pixel formats of the color attachments the lines' states write (writeMask not 0), from their "c<i>=<format>:<mask>:"
@@ -212,6 +89,14 @@ static id<MTLLibrary> frameworkLibrary(id<MTLDevice> dev, const std::string &pat
 }
 
 constexpr MTLPixelFormat kRGB8_444_2P = MTLPixelFormat(542);
+
+// RGB10A8_2P_XR10, BGRA10_XR, BGR10_XR and their _sRGB twins (550 to 555). m2v holds such an attachment as its raw codes and
+// the function's draw writes them; a loaded attachment adds m2v's own passes (its unused bits made Metal's), so the state's
+// draw would not be the pass's only one. The raw path loads and stores such an attachment in place.
+static bool extendedRange(MTLPixelFormat f)
+{
+    return f >= MTLPixelFormat(550) && f <= MTLPixelFormat(555);
+}
 
 // RGB8_444_2P over plane 0 of a two-plane 4:4:4 surface (RenderBox's widget snapshots): the only texture of the format Metal makes
 static id<MTLTexture> planarTarget(id<MTLDevice> dev, unsigned w, unsigned h)
@@ -284,37 +169,64 @@ int main(int argc, char **argv)
                                                        withTemplate:@""];
             lines.push_back(plain.UTF8String);
         }
-        // PROBE_YCBCR_LIB=<metallib>: the raw path's own states after Core Animation's, drawn and read alike: the conversions of
-        // YCbCr textures (pack/ycbcr.metal), lines marked "@Y " (their functions are that library's); mkpack.py keys
-        // them by name ("raw.ycbcr.<fragment function>"), which the runtime asks for
-        id<MTLLibrary> ycbcr = nil;
-        if (const char *path = getenv("PROBE_YCBCR_LIB")) {
-            ycbcr = [dev newLibraryWithURL:[NSURL fileURLWithPath:@(path)] error:&error];
-            if (!ycbcr) {
-                fprintf(stderr, "ycbcr library: %s\n", error.localizedDescription.UTF8String);
+        // PROBE_OWN_LIB=<metallib>: the raw path's own states after Core Animation's, drawn and read alike, lines marked "@O ":
+        // the conversions of YCbCr textures (pack/ycbcr.metal) and the extended-range stand-ins (pack/xr.metal), that library's,
+        // and the moves between an RGB8_444_2P target's planes and its RGBA16Float stand-in, the frontend's own library's
+        // (TwoPlaneStandIn.metal: the bytes m2v draws them from); mkpack.py keys them by name ("raw.<ycbcr|xr|two_plane>.<fragment
+        // function>"), which the runtime asks for
+        id<MTLLibrary> own = nil, standIn = nil;
+        if (const char *path = getenv("PROBE_OWN_LIB")) {
+            own = [dev newLibraryWithURL:[NSURL fileURLWithPath:@(path)] error:&error];
+            dispatch_data_t data = dispatch_data_create(kTwoPlaneStandInLibrary, sizeof kTwoPlaneStandInLibrary,
+                                                        nullptr, DISPATCH_DATA_DESTRUCTOR_DEFAULT);
+            standIn = own ? [dev newLibraryWithData:data error:&error] : nil;
+            if (!own || !standIn) {
+                fprintf(stderr, "own library: %s\n", error.localizedDescription.UTF8String);
                 return 1;
             }
-            for (const char *out :
-                 {"115 | v ycbcr_vert | f ycbcr_converted_frag", "125 | v ycbcr_vert | f ycbcr_srgb_frag",
-                  "70 | v ycbcr_vert | f ycbcr_codes_frag", "90 | v ycbcr_vert | f ycbcr_codes10_frag"}) {
+            for (const char *out : {"115 | v ycbcr_vert | f ycbcr_converted_frag",
+                                    "125 | v ycbcr_vert | f ycbcr_srgb_frag", "70 | v ycbcr_vert | f ycbcr_codes_frag",
+                                    "90 | v ycbcr_vert | f ycbcr_codes10_frag", "115 | v xr_vert | f xr_bgr10_frag",
+                                    "115 | v xr_vert | f xr_bgra10_frag", "115 | v xr_vert | f xr_planes_frag"}) {
                 std::string o = out;
                 const size_t bar = o.find(' ');
-                lines.push_back("@Y R ok=1 label=raw.ycbcr samples=1 topo=0 ds=0/0 c0=" + o.substr(0, bar) +
+                lines.push_back("@O R ok=1 label=raw.own samples=1 topo=0 ds=0/0 c0=" + o.substr(0, bar) +
                                 ":15:0:1:0:0:1:0:0" + o.substr(bar));
             }
+            for (const char *out :
+                 {"c0=115:15:0:1:0:0:1:0:0 | v two_plane_cover | f two_plane_load",
+                  "c0=10:15:0:1:0:0:1:0:0 c1=30:15:0:1:0:0:1:0:0 | v two_plane_cover | f two_plane_store"})
+                lines.push_back(std::string("@O R ok=1 label=raw.own samples=1 topo=0 ds=0/0 ") + out);
         }
         id<MTLCommandQueue> queue = [dev newCommandQueue];
-        // tagged textures and samplers
-        std::vector<id<MTLTexture>> textures;
-        for (unsigned t = 0; t < 16; t++) {
-            MTLTextureDescriptor *td = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatBGRA8Unorm
-                                                                                          width:16 + t
-                                                                                         height:8 + t
-                                                                                      mipmapped:NO];
-            td.usage = MTLTextureUsageShaderRead;
-            td.storageMode = MTLStorageModePrivate;
-            textures.push_back([dev newTextureWithDescriptor:td]);
-        }
+        // tagged textures and samplers: BGRA8, for the stand-ins' conversions the integer formats they read codes as
+        // (pack/xr.metal), and for the two-plane store the RGBA16Float stand-in it reads (the texture's class decides the push
+        // words of its read), tagged alike by their sizes
+        auto tagged = [&](MTLPixelFormat f) {
+            std::vector<id<MTLTexture>> out;
+            for (unsigned t = 0; t < 16; t++) {
+                MTLTextureDescriptor *td = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:f
+                                                                                              width:16 + t
+                                                                                             height:8 + t
+                                                                                          mipmapped:NO];
+                td.usage = MTLTextureUsageShaderRead;
+                td.storageMode = MTLStorageModePrivate;
+                out.push_back([dev newTextureWithDescriptor:td]);
+            }
+            return out;
+        };
+        const std::vector<id<MTLTexture>> textures = tagged(MTLPixelFormatBGRA8Unorm);
+        const std::map<std::string, std::vector<id<MTLTexture>>> codeTextures = {
+            {"f xr_bgr10_frag", tagged(MTLPixelFormatR32Uint)},
+            {"f xr_bgra10_frag", tagged(MTLPixelFormatRGBA16Uint)},
+            {"f xr_planes_frag", tagged(MTLPixelFormatRG32Uint)},
+            {"f two_plane_store", tagged(MTLPixelFormatRGBA16Float)}};
+        auto texturesOf = [&](const std::string &line) -> const std::vector<id<MTLTexture>> & {
+            for (const auto &[fragment, set] : codeTextures)
+                if (line.find("| " + fragment) != std::string::npos)
+                    return set;
+            return textures;
+        };
         std::vector<id<MTLSamplerState>> samplers;
         // a sampler made first takes NVK's sampler index 0, so a handle naming index 0 means "no sampler" below
         static id<MTLSamplerState> dummySampler;  // kept: a released sampler gives its index back
@@ -368,7 +280,7 @@ int main(int argc, char **argv)
             return targets[k];
         };
         // PROBE_SAMPLERS: one textured uber state drawn once per sampler descriptor Core Animation may make (CA::OGL::MetalContext::
-        // draw: min/mag nearest or linear, mip not/nearest/linear, the address modes, max anisotropy 1 or 8, LOD clamps), every
+        // draw: min/mag nearest or linear, mip not/nearest/linear, the address modes, max anisotropy 1, 2, 8 or 16, LOD clamps), every
         // fragment sampler slot bound to it; mksamplers.py reads NVK's sampler header for each, raw/test/samplercheck compares.
         if (getenv("PROBE_SAMPLERS")) {
             State st;
@@ -388,7 +300,7 @@ int main(int argc, char **argv)
             for (unsigned minmag = 0; minmag < 4; minmag++)
                 for (unsigned mip = 0; mip < 3; mip++)
                     for (unsigned addr : {0u, 1u, 2u, 3u, 4u})
-                        for (unsigned aniso : {1u, 8u})
+                        for (unsigned aniso : {1u, 2u, 8u, 16u})
                             for (unsigned lod = 0; lod < 2; lod++, i++) {
                                 MTLSamplerDescriptor *sd = [MTLSamplerDescriptor new];
                                 sd.minFilter = (MTLSamplerMinMagFilter)(minmag & 1);
@@ -523,6 +435,75 @@ int main(int argc, char **argv)
             pushcount_report("probe");
             return 0;
         }
+        // PROBE_TARGETS: the textured uber state drawn once into a private 64x64 target of each format the raw path may render to,
+        // as its first color attachment; NVK's color target format for each is the draw's rt0 (raw/test/targetcheck.py).
+        if (getenv("PROBE_TARGETS")) {
+            static const MTLPixelFormat formats[] = {MTLPixelFormatA8Unorm,         MTLPixelFormatR8Unorm,
+                                                     MTLPixelFormatR8Unorm_sRGB,    MTLPixelFormatRG8Unorm,
+                                                     MTLPixelFormatR16Unorm,        MTLPixelFormatR16Float,
+                                                     MTLPixelFormatRG16Unorm,       MTLPixelFormatRG16Float,
+                                                     MTLPixelFormatR32Float,        MTLPixelFormatRGBA8Unorm,
+                                                     MTLPixelFormatRGBA8Unorm_sRGB, MTLPixelFormatBGRA8Unorm,
+                                                     MTLPixelFormatBGRA8Unorm_sRGB, MTLPixelFormatRGB10A2Unorm,
+                                                     MTLPixelFormatBGR10A2Unorm,    MTLPixelFormatRG11B10Float,
+                                                     MTLPixelFormatRGB9E5Float,     MTLPixelFormatRGBA16Unorm,
+                                                     MTLPixelFormatRGBA16Float,     MTLPixelFormatRG32Float,
+                                                     MTLPixelFormatRGBA32Float,     MTLPixelFormatB5G6R5Unorm,
+                                                     MTLPixelFormatA1BGR5Unorm,     MTLPixelFormatABGR4Unorm,
+                                                     MTLPixelFormatBGR5A1Unorm,     MTLPixelFormat(550),
+                                                     MTLPixelFormat(552),           MTLPixelFormat(554)};
+            State st;
+            bool found = false;
+            for (const std::string &line : lines)
+                if (line.find("f fixed_frag_lph_cph") != std::string::npos &&
+                    line.find("fc_texture_function:49:01") != std::string::npos && parseState(qc, line, st)) {
+                    found = true;
+                    break;
+                }
+            if (!found) {
+                fprintf(stderr, "PROBE_TARGETS: no textured uber state\n");
+                return 1;
+            }
+            for (unsigned i = 0; i < sizeof formats / sizeof formats[0]; i++) {
+                MTLRenderPipelineDescriptor *d = [st.d copy];
+                d.colorAttachments[0].pixelFormat = formats[i];
+                // with blending on, m2v's draw has no color target for an extended-range attachment (rt0 null)
+                if (extendedRange(formats[i]))
+                    d.colorAttachments[0].blendingEnabled = NO;
+                id<MTLRenderPipelineState> state = [dev newRenderPipelineStateWithDescriptor:d error:&error];
+                id<MTLTexture> t = target(formats[i], false);
+                if (!state || !t) {
+                    printf("TARGET %u %lu refused\n", i, (unsigned long)formats[i]);
+                    continue;
+                }
+                MTLRenderPassDescriptor *pass = [MTLRenderPassDescriptor renderPassDescriptor];
+                for (NSUInteger c = 0; c < 8; c++) {
+                    MTLRenderPipelineColorAttachmentDescriptor *ca = d.colorAttachments[c];
+                    if (ca.pixelFormat == MTLPixelFormatInvalid)
+                        continue;
+                    pass.colorAttachments[c].texture = c ? target(ca.pixelFormat, ca.writeMask == 0) : t;
+                    pass.colorAttachments[c].loadAction = MTLLoadActionDontCare;
+                    pass.colorAttachments[c].storeAction =
+                        c || extendedRange(ca.pixelFormat) ? MTLStoreActionDontCare : MTLStoreActionStore;
+                }
+                id<MTLCommandBuffer> cb = [queue commandBuffer];
+                id<MTLRenderCommandEncoder> enc = [cb renderCommandEncoderWithDescriptor:pass];
+                [enc setRenderPipelineState:state];
+                uint32_t zero[64] = {};
+                for (uint32_t slot = 0; slot < 8; slot++) {
+                    [enc setVertexBytes:zero length:sizeof zero atIndex:slot];
+                    [enc setFragmentBytes:zero length:sizeof zero atIndex:slot];
+                }
+                [enc drawPrimitives:MTLPrimitiveTypeTriangleStrip vertexStart:0 vertexCount:4];
+                [enc endEncoding];
+                printf("TARGET %u %lu\n", i, (unsigned long)formats[i]);
+                fflush(stdout);
+                [cb commit];
+                [cb waitUntilCompleted];
+            }
+            pushcount_report("probe");
+            return 0;
+        }
         std::set<std::string> seen;
         unsigned index = 0, made = 0, refused = 0, failed = 0;
         // warm-up: one draw of a state that samples, with the dummy sampler in every slot, so NVK (m2v makes samplers at first
@@ -577,10 +558,10 @@ int main(int argc, char **argv)
         }
         for (const std::string &marked : lines) {
             State s;
-            const bool own = marked.rfind("@Y ", 0) == 0, framework = marked.rfind("@L ", 0) == 0;
+            const bool ours = marked.rfind("@O ", 0) == 0, framework = marked.rfind("@L ", 0) == 0;
             const size_t pathEnd = framework ? marked.find(' ', 3) : 0;
-            const std::string line = own ? marked.substr(3) : framework ? marked.substr(pathEnd + 1) : marked;
-            id<MTLLibrary> library = own ? ycbcr : qc;
+            const std::string line = ours ? marked.substr(3) : framework ? marked.substr(pathEnd + 1) : marked;
+            id<MTLLibrary> library = !ours ? qc : line.find("| f two_plane_") != std::string::npos ? standIn : own;
             if (framework && !(library = frameworkLibrary(dev, marked.substr(3, pathEnd - 3)))) {
                 fprintf(stderr, "LIBRARY %s\n", marked.substr(3, pathEnd - 3).c_str());
                 refused++;
@@ -624,9 +605,9 @@ int main(int argc, char **argv)
                 // a 542 snapshot renders into the frontend's RGBA16Float stand-in, which a load or store would draw from or
                 // into: neither, so the state's draw is the pass's one
                 const bool planes = ca.pixelFormat == kRGB8_444_2P;
-                pass.colorAttachments[c].loadAction = memoryless || planes ? MTLLoadActionDontCare : MTLLoadActionLoad;
-                pass.colorAttachments[c].storeAction =
-                    memoryless || planes ? MTLStoreActionDontCare : MTLStoreActionStore;
+                const bool loose = memoryless || planes || extendedRange(ca.pixelFormat);
+                pass.colorAttachments[c].loadAction = loose ? MTLLoadActionDontCare : MTLLoadActionLoad;
+                pass.colorAttachments[c].storeAction = loose ? MTLStoreActionDontCare : MTLStoreActionStore;
             }
             // a state with depth or stencil formats draws into a memoryless attachment of them (Metal's default Clear load and
             // DontCare store, its default depth/stencil state), so its registers are those NVK writes beside one
@@ -640,6 +621,13 @@ int main(int argc, char **argv)
             // PROBE_BYTES (default 256): the tagged payloads' length; 16 and 4096 tell a uniform from a storage buffer (NVK rounds
             // a uniform buffer's range up to 256) and the function's proven window on each slot (m2v binds at most that)
             static const uint32_t bytes = getenv("PROBE_BYTES") ? atoi(getenv("PROBE_BYTES")) : 256;
+            // PROBE_BIND_OFFSET: each slot's payload in a buffer of its own at an offset of its own below 256, 4 x (1 + slot +
+            // 31 x (stage - 1)): the push word of a uniform slot's SlotBindOffset residual holds that offset (mkpack.py)
+            static const bool bindOffset = getenv("PROBE_BIND_OFFSET") != nullptr;
+            static std::vector<id<MTLBuffer>> payloads;
+            if (bindOffset && payloads.empty())
+                for (uint32_t k = 0; k < 2 * gSlots; k++)
+                    payloads.push_back([dev newBufferWithLength:256 + bytes options:MTLResourceStorageModeShared]);
             std::vector<uint32_t> tag(bytes / 4);
             for (uint32_t stage = 1; stage <= 2; stage++)
                 for (uint32_t slot = 0; slot < gSlots; slot++) {
@@ -647,13 +635,22 @@ int main(int argc, char **argv)
                     tag[1] = i;
                     for (uint32_t k = 2; k < tag.size(); k++)
                         tag[k] = 0xA0000000u | stage << 20 | slot << 16 | k;
-                    if (stage == 1)
+                    if (bindOffset) {
+                        const NSUInteger at = 4 * (1 + slot + 31 * (stage - 1));
+                        id<MTLBuffer> b = payloads[(stage - 1) * gSlots + slot];
+                        memcpy((uint8_t *)b.contents + at, tag.data(), bytes);
+                        if (stage == 1)
+                            [enc setVertexBuffer:b offset:at atIndex:slot];
+                        else
+                            [enc setFragmentBuffer:b offset:at atIndex:slot];
+                    } else if (stage == 1) {
                         [enc setVertexBytes:tag.data() length:bytes atIndex:slot];
-                    else
+                    } else {
                         [enc setFragmentBytes:tag.data() length:bytes atIndex:slot];
+                    }
                 }
             for (unsigned t = 0; t < 16; t++)
-                [enc setFragmentTexture:textures[t] atIndex:t];
+                [enc setFragmentTexture:texturesOf(line)[t] atIndex:t];
             for (unsigned t = 0; t < 16; t++)
                 [enc setFragmentSamplerState:samplers[t] atIndex:t];
             [enc drawPrimitives:MTLPrimitiveTypeTriangleStrip vertexStart:0 vertexCount:4];

@@ -11,7 +11,7 @@
 #include <mach/kmod.h>
 extern kmod_info_t g_kernel_kmod_info;
 extern "C" {
-extern kern_return_t OSKextLoadKextWithIdentifier(const char *);
+
 volatile uint32_t native_hid_stage, native_hid_resource_found;
 volatile int native_hid_load_status = -1;
 volatile int native_hid_matching_load_status = -1;
@@ -35,20 +35,21 @@ bool native_hid_input_requested(void)
     return true;
 }
 
-static void describeInput(IORegistryEntry *entry, unsigned depth, size_t &used)
+// NOLINTNEXTLINE(misc-no-recursion): bounded by depth
+static void describeInput(const IORegistryEntry *entry, unsigned depth, size_t &used)
 {
     if (depth > 4 || used >= sizeof(native_hid_input_registry) - 128)
         return;
-    int count = snprintf(native_hid_input_registry + used, sizeof(native_hid_input_registry) - used, "%u %s [%s]\n",
-                         depth, entry->getName(), entry->getMetaClass()->getClassName());
+    const int count = snprintf(native_hid_input_registry + used, sizeof(native_hid_input_registry) - used,
+                               "%u %s [%s]\n", depth, entry->getName(), entry->getMetaClass()->getClassName());
     if (count <= 0 || (size_t)count >= sizeof(native_hid_input_registry) - used)
         return;
     used += count;
     OSIterator *it = entry->getChildIterator(gIOServicePlane);
     if (!it)
         return;
-    while (OSObject *child = it->getNextObject()) {
-        IORegistryEntry *next = OSDynamicCast(IORegistryEntry, child);
+    while (const OSObject *child = it->getNextObject()) {
+        const IORegistryEntry *next = OSDynamicCast(IORegistryEntry, child);
         if (next)
             describeInput(next, depth + 1, used);
     }
@@ -56,7 +57,8 @@ static void describeInput(IORegistryEntry *entry, unsigned depth, size_t &used)
 }
 
 // Compact one property of the first IOHIDEventDriver below entry: XML tags dropped, key end -> '=', value end -> ' '.
-static IORegistryEntry *findEventDriver(IORegistryEntry *parent, unsigned depth)
+// NOLINTNEXTLINE(misc-no-recursion): bounded by depth
+static LIBKERN_RETURNS_NOT_RETAINED IORegistryEntry *findEventDriver(const IORegistryEntry *parent, unsigned depth)
 {
     if (!depth)
         return nullptr;
@@ -64,7 +66,7 @@ static IORegistryEntry *findEventDriver(IORegistryEntry *parent, unsigned depth)
     if (!it)
         return nullptr;
     IORegistryEntry *found = nullptr;
-    while (OSObject *child = it->getNextObject()) {
+    while (const OSObject *child = it->getNextObject()) {
         IORegistryEntry *entry = OSDynamicCast(IORegistryEntry, child);
         if (!entry)
             continue;
@@ -72,17 +74,18 @@ static IORegistryEntry *findEventDriver(IORegistryEntry *parent, unsigned depth)
             found = entry;
             break;
         }
-        if ((found = findEventDriver(entry, depth - 1)))
+        found = findEventDriver(entry, depth - 1);
+        if (found)
             break;
     }
     it->release();
     return found;
 }
 
-static void appendProperty(IORegistryEntry *driver, const char *key, const char *label, size_t &used)
+static void appendProperty(const IORegistryEntry *driver, const char *key, const char *label, size_t &used)
 {
-    OSObject *value = driver->copyProperty(key);
-    int n = snprintf(native_hid_input_props + used, sizeof(native_hid_input_props) - used, "%s:", label);
+    const OSObject *value = driver->copyProperty(key);
+    const int n = snprintf(native_hid_input_props + used, sizeof(native_hid_input_props) - used, "%s:", label);
     if (n > 0)
         used += n;
     if (value) {
@@ -93,7 +96,7 @@ static void appendProperty(IORegistryEntry *driver, const char *key, const char 
             char name[16];
             unsigned nameLen = 0;
             for (unsigned i = 0; in && in[i] && used < sizeof(native_hid_input_props) - 2; ++i) {
-                char c = in[i];
+                const char c = in[i];
                 if (c == '<') {
                     tag = true;
                     nameLen = 0;
@@ -103,16 +106,17 @@ static void appendProperty(IORegistryEntry *driver, const char *key, const char 
                     if (c == '>') {
                         tag = false;
                         name[nameLen] = 0;
-                        if (!strcmp(name, "/key"))
+                        if (!strcmp(name, "/key")) {
                             native_hid_input_props[used++] = '=';
-                        else if (name[0] == '/')
+                        } else if (name[0] == '/') {
                             native_hid_input_props[used++] = ' ';
-                        else if (!strcmp(name, "true/") || !strcmp(name, "false/")) {
+                        } else if (!strcmp(name, "true/") || !strcmp(name, "false/")) {
                             used += snprintf(native_hid_input_props + used, sizeof(native_hid_input_props) - used,
                                              "%s ", name[0] == 't' ? "T" : "F");
                         }
-                    } else if (nameLen < sizeof(name) - 1)
+                    } else if (nameLen < sizeof(name) - 1) {
                         name[nameLen++] = c;
+                    }
                     continue;
                 }
                 if (c == '\n' || c == '\t')
@@ -129,7 +133,7 @@ static void appendProperty(IORegistryEntry *driver, const char *key, const char 
     native_hid_input_props[used] = 0;
 }
 
-__attribute__((noinline)) void native_hid_live_checkpoint(IOService *device)
+__attribute__((noinline)) void native_hid_live_checkpoint(const IOService *device)
 {
     size_t used = 0;
     native_hid_input_registry[0] = 0;

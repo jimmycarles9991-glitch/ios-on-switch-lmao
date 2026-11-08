@@ -20,30 +20,7 @@ import shutil
 import sys
 from pathlib import Path
 
-
-def state_dir() -> Path:
-    """Where the tools keep what is not the repository's: ~/Library/Application Support/switch-ios, or $SWITCH_HOME."""
-    return Path(os.environ.get('SWITCH_HOME') or Path.home() / 'Library/Application Support/switch-ios')
-
-
-def located(path: str) -> Path:
-    if path and not os.path.isabs(path):
-        try:
-            from python.runfiles import runfiles  # noqa: PLC0415  only under Bazel, and only for a relative path
-
-            path = runfiles.Create().Rlocation(path) or path
-        except ImportError:
-            pass
-    return Path(path).resolve()
-
-
-def runfile(path: str) -> str:
-    """Return a runfiles path as it sits in the runfiles tree (not resolved: the manifest names its root from it)."""
-    if not os.path.isabs(path):
-        from python.runfiles import runfiles  # noqa: PLC0415  only under Bazel
-
-        path = runfiles.Create().Rlocation(path) or path
-    return path
+from tools.common import paths
 
 
 def materialize(manifest: Path, out: Path) -> None:
@@ -68,19 +45,20 @@ def main() -> None:
     args = parser.parse_args()
     if '/' in args.name or args.name.startswith('.'):
         sys.exit('snapshot name must be a plain directory name')
-    target = state_dir() / 'lkg' / args.name
+    target = paths.state_dir() / 'lkg' / args.name
     if target.exists():
         sys.exit(f'{target} exists: pick another name')
-    boot = located(args.boot)
+    boot = paths.located(args.boot)
     target.parent.mkdir(parents=True, exist_ok=True)
     shutil.copytree(boot, target, symlinks=False)
     # copytree keeps bazel-bin's read-only modes; the snapshot root must take gpu/ and kernel.macho.
     target.chmod(0o755)
     if args.gpu and not args.no_gpu:
-        shutil.copytree(located(args.gpu_base), target / 'gpu', symlinks=False)
-        materialize(Path(os.path.abspath(runfile(args.gpu))), target / 'gpu')
+        shutil.copytree(paths.located(args.gpu_base), target / 'gpu', symlinks=False)
+        # Located, not resolved: the manifest names the runfiles root from where it sits in the tree.
+        materialize(Path(paths.located(args.gpu)), target / 'gpu')
     if args.kernel:
-        shutil.copyfile(located(args.kernel), target / 'kernel.macho')
+        shutil.copyfile(paths.located(args.kernel), target / 'kernel.macho')
     for path in target.rglob('*'):
         path.chmod(0o755 if path.is_dir() or os.access(path, os.X_OK) else 0o644)
     print(target)

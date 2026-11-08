@@ -3,9 +3,11 @@
 // TegraGM20BRecover.h's
 // tgm_stuck (when a context-switch timeout tick or a late wait may kill a channel) and tgm_hang_blame (which channel a
 // late wait kills), over the registers and channels of deploy-2045's hang: GR stuck switching from backboardd's channel 3
-// to Maps' 26, PBDMA0 on 26.
+// to Maps' 26, PBDMA0 on 26; and tgm_fault_va (the VA a killed channel's GetStatus reports) over nvkm's MMU fault lines.
 #include <algorithm>
 #include <cstdint>
+#include <cstdio>
+#include <string>
 #include <vector>
 #include <gtest/gtest.h>
 #include "drivers/TegraGM20B/TegraGM20BRecover.h"
@@ -331,6 +333,20 @@ TEST(Deadline, HeldTimeNeverCountsTowardAStall)
 	EXPECT_EQ(tgm_unheld_ns(900 * kMs, 1000 * kMs, 0, 0), 0u);  // progress after now was read
 }
 
+// nvkm_chan_error's preempt runs in the interrupt pass with interrupts off: with another preempt in flight it never waits
+// (up to the FIFO's 10 s channel timeout with interrupts masked), the channel's group goes to nvkm's recovery instead.
+TEST(Preempt, NothingInFlightGoesOutAtOnce)
+{
+	EXPECT_EQ(tgm_preempt_how(0, 0), TGM_PREEMPT_NOW);
+	EXPECT_EQ(tgm_preempt_how(1, 0), TGM_PREEMPT_NOW);
+}
+
+TEST(Preempt, OneInFlightIsWaitedForOnlyByAThread)
+{
+	EXPECT_EQ(tgm_preempt_how(0, 1), TGM_PREEMPT_AFTER_WAIT);
+	EXPECT_EQ(tgm_preempt_how(1, 1), TGM_PREEMPT_RECOVER);
+}
+
 constexpr uint64_t kTick = 250 * kMs;  // recover.c's CTXSW_TIMEOUT_US
 
 TEST(Stuck, ALongDrainOfTheOutgoingChannelIsWaitedOut)
@@ -442,4 +458,43 @@ TEST(HangBlame, ALateChannelAlreadyKilledIsRecovering)
 	EXPECT_EQ(k.verdict(blame), TGM_HANG_RECOVERING);
 	EXPECT_EQ(blame, -1);
 }
+
+// nvkm's MMU fault line as gf100_fifo_mmu_fault_recover formats it, behind the device name nvkm_error puts in front
+std::string FaultLine(uint64_t va, int chid)
+{
+	char line[256];
+	std::snprintf(line, sizeof line,
+		      "tegra-gm20b 57000000.gpu: fifo: fault %02x [%s] at %016llx engine %02x [%s] "
+		      "client %02x "
+		      "[%s%s] reason %02x [%s] on channel %d [%010llx %s]",
+		      1, "WRITE", static_cast<unsigned long long>(va), 0, "GR", 0x0f, "GPC0/",
+		      "PROP_0", 2, "PTE", chid, 0x2004a000ULL, "backboardd");
+	return line;
+}
+
+TEST(FaultVa, TheMmuFaultLineNamesIt)
+{
+	EXPECT_EQ(tgm_fault_va(FaultLine(0x6000090040ULL, 7).c_str(), 7), 0x6000090040ULL);
+}
+
+TEST(FaultVa, TheKilledChannelsOwnAmongAPassesReports)
+{
+	const std::string pass = FaultLine(0x1000, 3) + " | " + FaultLine(0x6002450500ULL, 9);
+	EXPECT_EQ(tgm_fault_va(pass.c_str(), 9), 0x6002450500ULL);
+	EXPECT_EQ(tgm_fault_va(pass.c_str(), 3), 0x1000u);
+	EXPECT_EQ(tgm_fault_va(pass.c_str(), 5), 0u) << "another channel's fault is not its own";
+	EXPECT_EQ(tgm_fault_va(FaultLine(0x2000, -1).c_str(), 1), 0x2000u)
+		<< "one nvkm could not place";
+}
+
+TEST(FaultVa, NoneWithoutAFaultLine)
+{
+	EXPECT_EQ(
+		tgm_fault_va("tegra-gm20b 57000000.gpu: gr: TRAP ch 7 [002004a000 backboardd]", 7),
+		0u);
+	EXPECT_EQ(tgm_fault_va("gr: DATA_ERROR 0000000c [] ch 7 | fifo: CHSW_ERROR 00000001", 7),
+		  0u);
+	EXPECT_EQ(tgm_fault_va("", 7), 0u);
+}
+
 }  // namespace

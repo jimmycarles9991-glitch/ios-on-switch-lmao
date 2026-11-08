@@ -78,7 +78,7 @@ TEST(CryptexSource, SmallReadsGoThroughTheCache)
     for (const char *copy : {"copypv", "memcpy", "writeBytes"})
         EXPECT_THAT(issue, Not(HasSubstr(copy)));
     // The copy: on the thread call, from held windows, without readBytes/writeBytes' flush.
-    const std::string copy = body("bool copyOut(Pending *p)");
+    const std::string copy = body("bool copyOut(const Pending *p)");
     EXPECT_THAT(copy, HasSubstr("switchClientCopy(p->buffer, bytes,"));
     EXPECT_THAT(copy, HasSubstr("copypv"));
     const std::string finish = body("void finishRequest(thread_call_param_t parameter, thread_call_param_t)");
@@ -98,7 +98,7 @@ TEST(CryptexSource, NotAVirtualDeviceAndReadOnly)
 {
     const std::string &source = cryptex();
     const std::string configure = body("bool SwitchCryptexDevice::configure(");
-    EXPECT_THAT(configure, HasSubstr("kIOPropertyPhysicalInterconnectTypeKey, OSString::withCStringNoCopy(\"SD\")"));
+    EXPECT_THAT(configure, HasSubstr("putString(protocol, kIOPropertyPhysicalInterconnectTypeKey, \"SD\")"));
     EXPECT_THAT(configure, Not(HasSubstr("Virtual")));
     EXPECT_THAT(source, Not(HasSubstr("kIOPropertyPhysicalInterconnectTypeVirtual")));
     EXPECT_TRUE(Search(source, R"(reportWriteProtection\(bool \*value\) override\s*\{\s*\*value = true;)"));
@@ -163,8 +163,7 @@ TEST(CryptexSource, PrefetchPagesFilesIn)
     EXPECT_THAT(proven, HasSubstr("device->readBlock(buffer, image / kPage)"));
     EXPECT_THAT(proven, HasSubstr("no read-ahead for %s (%s)"));
     EXPECT_THAT(body("int nameVnode(vnode_t vp, void *argument)"), HasSubstr("hit->vid != vnode_vid(vp)"));
-    EXPECT_THAT(body("uint32_t buildRuns("),
-                HasSubstr("vnode_iterate(gPrefetch.mounts[index], 0, nameVnode, &naming)"));
+    EXPECT_THAT(body("uint32_t buildRuns("), HasSubstr("vnode_iterate(mount, 0, nameVnode, &naming)"));
 }
 
 // A list this build will not replay makes the boot a recording boot with no prefetch: loadList checks it

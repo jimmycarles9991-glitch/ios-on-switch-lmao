@@ -120,7 +120,7 @@
 #endif
 
 #if CONFIG_MACF
-SYSCTL_NODE(, OID_AUTO, security, CTLFLAG_RW | CTLFLAG_LOCKED, 0,
+SYSCTL_EXTENSIBLE_NODE(, OID_AUTO, security, CTLFLAG_RW | CTLFLAG_LOCKED, 0,
     "Security Controls");
 SYSCTL_EXTENSIBLE_NODE(_security, OID_AUTO, mac, CTLFLAG_RW | CTLFLAG_LOCKED, 0,
     "TrustedBSD MAC policy controls");

@@ -27,7 +27,7 @@ IOService *makeNub(uint64_t registers, uint64_t bytes, uint32_t intid);
 IOService *waitForRootPort(IOService *controller, unsigned number, uint64_t timeoutNS);
 
 // One line of the controller's children: "<class> port <n> power <state>" each (n from "port", ? without one).
-void describePorts(IOService *controller, char *buffer, size_t size);
+void describePorts(const IOService *controller, char *buffer, size_t size);
 
 // UsbForcePower (IOUSBHostFamilyDefinitions.h kUSBHostPropertyForcePower) on an AppleUSBHostController or an
 // AppleUSBHostPort runs its own forcePower and waits for the state (the port: 1 s, the controller: 6 s). On a port it is

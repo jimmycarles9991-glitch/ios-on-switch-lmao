@@ -135,13 +135,13 @@ const uint8_t kTemperatureDescriptor[] = {
 // SwitchMotion line: "batch 0 us").
 #define MOTION_DESCRIPTOR(usage, x)                                                                                  \
     0x06, 0x00, 0xff, 0x09, usage, 0xa1, 0x01, 0x85, 0x01, /* Apple vendor: usage, Collection (Application), ID 1 */ \
-        0x05, 0x20, 0x0a, x, 0x04, 0x0a, x + 1, 0x04, 0x0a, x + 2, 0x04, /* Sensor: X, Y, Z */                       \
-        0x17, 0x00, 0x00, 0x00, 0x80, 0x27, 0xff, 0xff, 0xff, 0x7f,      /* Logical -2^31 .. 2^31-1 */               \
-        0x37, 0x00, 0x00, 0x00, 0x80, 0x47, 0xff, 0xff, 0xff, 0x7f,      /* Physical the same */                     \
-        0x55, 0x0a, 0x75, 0x20, 0x95, 0x03, 0x81, 0x02,                  /* Unit Exponent -6, 3 x 32 bits, Input */  \
-        0x0a, 0x0e, 0x03, 0x15, 0x00, 0x35, 0x00, 0x55, 0x00,            /* Report Interval, 0 .., exponent 0 */     \
-        0x95, 0x01, 0xb1, 0x02,                                          /* 1 x 32 bits, Feature */                  \
-        0x0a, 0x1b, 0x03, 0xb1, 0x02,                                    /* Report Latency: 1 x 32 bits, Feature */  \
+        0x05, 0x20, 0x0a, x, 0x04, 0x0a, (x) + 1, 0x04, 0x0a, (x) + 2, 0x04, /* Sensor: X, Y, Z */                   \
+        0x17, 0x00, 0x00, 0x00, 0x80, 0x27, 0xff, 0xff, 0xff, 0x7f,          /* Logical -2^31 .. 2^31-1 */           \
+        0x37, 0x00, 0x00, 0x00, 0x80, 0x47, 0xff, 0xff, 0xff, 0x7f,          /* Physical the same */                 \
+        0x55, 0x0a, 0x75, 0x20, 0x95, 0x03, 0x81, 0x02,       /* Unit Exponent -6, 3 x 32 bits, Input */             \
+        0x0a, 0x0e, 0x03, 0x15, 0x00, 0x35, 0x00, 0x55, 0x00, /* Report Interval, 0 .., exponent 0 */                \
+        0x95, 0x01, 0xb1, 0x02,                               /* 1 x 32 bits, Feature */                             \
+        0x0a, 0x1b, 0x03, 0xb1, 0x02,                         /* Report Latency: 1 x 32 bits, Feature */             \
         0xc0
 const uint8_t kAccelerometerDescriptor[] = {
     MOTION_DESCRIPTOR(0x03, 0x53)};                                 // Accelerometer; Acceleration Axis X 0x0453
@@ -207,20 +207,23 @@ bool isDigitizer(OSObject *event)
 void addEdge(OSObject *event)
 {
     const int32_t mask = call<int32_t, uint32_t, IOOptionBits>(event, kGetInteger, kMask, 0);
-    call<void, uint32_t, int32_t, IOOptionBits>(event, kSetInteger, kMask, mask | (int32_t)kFromEdgeTip, 0);
+    call<void, uint32_t, int32_t, IOOptionBits>(event, kSetInteger, kMask,
+                                                static_cast<int32_t>(static_cast<uint32_t>(mask) | kFromEdgeTip), 0);
 }
 
+// NOLINTNEXTLINE(misc-const-correctness): IOHIDEventService::dispatchEvent's slot, its parameters as declared
 void dispatch(IOService *driver, OSObject *event, IOOptionBits options)
 {
     const uint32_t marked = contacts;
     if (marked && event && event->metaCast("IOHIDEvent") && isDigitizer(event)) {
-        OSArray *children = *reinterpret_cast<OSArray **>(reinterpret_cast<uint8_t *>(event) + 24);
+        const OSArray *children = *reinterpret_cast<OSArray **>(reinterpret_cast<uint8_t *>(event) + 24);
         bool any = false;
         for (unsigned i = 0; children && i < children->getCount(); ++i) {
             OSObject *child = children->getObject(i);
             if (!child || !child->metaCast("IOHIDEvent") || !isDigitizer(child))
                 continue;
-            const uint32_t index = (uint32_t)call<int32_t, uint32_t, IOOptionBits>(child, kGetInteger, kIndex, 0);
+            const uint32_t index =
+                static_cast<uint32_t>(call<int32_t, uint32_t, IOOptionBits>(child, kGetInteger, kIndex, 0));
             if (index < 32 && (marked & (1u << index))) {
                 addEdge(child);
                 any = true;
@@ -234,12 +237,12 @@ void dispatch(IOService *driver, OSObject *event, IOOptionBits options)
 
 // The IOHIDEventDriver that has opened this device's interface (device -> IOHIDInterface -> driver): its handleStart
 // opens the interface, so an instance only attached for probing is never taken.
-IOService *findDriver(IOService *device)
+LIBKERN_RETURNS_NOT_RETAINED IOService *findDriver(const IOService *device)
 {
     IOService *found = nullptr;
     OSIterator *interfaces = device->getChildIterator(gIOServicePlane);
     while (interfaces && !found) {
-        auto *interface = OSDynamicCast(IOService, interfaces->getNextObject());
+        const auto *interface = OSDynamicCast(IOService, interfaces->getNextObject());
         if (!interface)
             break;
         OSIterator *drivers = interface->getChildIterator(gIOServicePlane);
@@ -259,7 +262,7 @@ IOService *findDriver(IOService *device)
 // Gives the driver its own vtable copy with the wrapped dispatchEvent; every other event driver keeps the original.
 bool install(IOService *driver)
 {
-    uintptr_t *table = *reinterpret_cast<uintptr_t **>(driver);
+    const uintptr_t *table = *reinterpret_cast<uintptr_t **>(driver);
     auto *copy = static_cast<uintptr_t *>(IOMalloc(kSlots * sizeof(uintptr_t)));
     if (!copy)
         return false;
@@ -330,7 +333,7 @@ OSObject *event(uint64_t timestamp, int32_t fixed)
             IOLog(
                 "SwitchHID: temperature events off: IOHIDEvent reads back type %u level %#x, set %u %#x (wrong vtable "
                 "slots)\n",
-                type, (uint32_t)back, kType, (uint32_t)fixed);
+                type, static_cast<uint32_t>(back), kType, static_cast<uint32_t>(fixed));
             broken = true;
             e->release();
             return nullptr;
@@ -355,6 +358,7 @@ IONotifier *notifier;
 // The device's handler, given that driver (any thread: the event service's user client).
 OSObject *answer(void *device);
 
+// NOLINTNEXTLINE(misc-const-correctness): IOHIDEventService::copyEvent's slot, its parameters as declared
 OSObject *copyEvent(IOService *driver, uint32_t type, OSObject *matching, IOOptionBits options)
 {
     if (type == kType) {
@@ -370,7 +374,9 @@ OSObject *copyEvent(IOService *driver, uint32_t type, OSObject *matching, IOOpti
 }  // namespace temperature
 }  // namespace
 
+// NOLINTNEXTLINE(misc-use-internal-linkage): OSDefineMetaClassAndStructors needs the class's external linkage
 class SwitchHIDDevice : public IOHIDDevice {
+    // NOLINTNEXTLINE(misc-explicit-constructor): IOKit's structors macro declares the metaclass constructor
     OSDeclareDefaultStructors(SwitchHIDDevice) IOWorkLoop *loop = nullptr;
     IOBufferMemoryDescriptor *buffer = nullptr;
     const Profile *profile = nullptr;
@@ -459,7 +465,7 @@ public:
             if (shared)
                 shared->retain();
             loop = shared;
-            setProperty("LocationID", (unsigned long long)locationID, 32);
+            setProperty("LocationID", static_cast<unsigned long long>(locationID), 32);
         } else {
             loop = IOWorkLoop::workLoop();
         }
@@ -468,8 +474,8 @@ public:
             return false;
         // Matched by this module's personality; Built-In reaches the interface and the event service (backboardd's
         // built-in touch screen filter). DisplayIntegrated comes from the Touch Screen usage (IOHIDEventService).
-        setProperty("VendorID", (unsigned long long)kVendorID, 32);
-        setProperty("ProductID", (unsigned long long)profile->productID, 32);
+        setProperty("VendorID", static_cast<unsigned long long>(kVendorID), 32);
+        setProperty("ProductID", static_cast<unsigned long long>(profile->productID), 32);
         setProperty("Manufacturer", "Nintendo");
         setProperty("Built-In", true);
         if (profile == &kProfiles[kSwitchHIDOrientation])
@@ -484,7 +490,7 @@ public:
     void addAopPlugIn()
     {
         OSDictionary *types = OSDictionary::withCapacity(1);
-        OSString *plugIn = OSString::withCString("AppleSPU.kext/PlugIns/AppleSPULib.plugin");
+        const OSString *plugIn = OSString::withCString("AppleSPU.kext/PlugIns/AppleSPULib.plugin");
         if (types && plugIn && types->setObject("7ACF5332-1A35-4893-87CB-BA64E1887FAE", plugIn))
             setProperty("IOCFPlugInTypes", types);
         OSSafeReleaseNULL(types);
@@ -544,7 +550,8 @@ public:
     {
         const uintptr_t *table = *reinterpret_cast<const uintptr_t *const *>(this);
         const uint32_t *code = reinterpret_cast<const uint32_t *>(table[kHandleReport]);
-        return code && code[0x34 / 4] == 0x3942c268 && code[0x48 / 4] == 0xf94007e1 && code[0x50 / 4] == 0xf9431508;
+        return (code != nullptr) && code[0x34 / 4] == 0x3942c268 && code[0x48 / 4] == 0xf94007e1 &&
+               code[0x50 / 4] == 0xf9431508;
     }
 
     IOReturn postAt(const void *report, size_t length, uint64_t timestamp)
@@ -644,7 +651,7 @@ OSDefineMetaClassAndStructors(SwitchHIDDevice, IOHIDDevice)
         };
 
         for (const auto &entry : entries) {
-            OSNumber *number = OSNumber::withNumber(entry.value, 32);
+            const OSNumber *number = OSNumber::withNumber(entry.value, 32);
             if (!number || !dict->setObject(entry.key, number))
                 panic("SwitchHID: no memory for the ALS properties");
             number->release();
@@ -658,13 +665,17 @@ OSDefineMetaClassAndStructors(SwitchHIDDevice, IOHIDDevice)
         OSDictionary *dict = OSDictionary::withCapacity(8);
         OSDictionary *pair = OSDictionary::withCapacity(2);
         OSArray *pairs = OSArray::withCapacity(1);
-        OSNumber *page = OSNumber::withNumber(p.usagePage, 32), *usage = OSNumber::withNumber(p.usage, 32);
-        OSNumber *vendor = OSNumber::withNumber(kVendorID, 32), *product = OSNumber::withNumber(p.productID, 32);
-        OSNumber *score = OSNumber::withNumber(kProbeScore, 32);
-        OSString *ioClass = OSString::withCString("IOHIDEventDriver"),
-                 *provider = OSString::withCString("IOHIDInterface");
-        OSString *bundle = OSString::withCString("com.apple.iokit.IOHIDFamily");
-        bool ok = dict && pair && pairs && page && usage && vendor && product && score && ioClass && provider && bundle;
+        const OSNumber *page = OSNumber::withNumber(p.usagePage, 32);
+        const OSNumber *usage = OSNumber::withNumber(p.usage, 32);
+        const OSNumber *vendor = OSNumber::withNumber(kVendorID, 32);
+        const OSNumber *product = OSNumber::withNumber(p.productID, 32);
+        const OSNumber *score = OSNumber::withNumber(kProbeScore, 32);
+        const OSString *ioClass = OSString::withCString("IOHIDEventDriver");
+        const OSString *provider = OSString::withCString("IOHIDInterface");
+        const OSString *bundle = OSString::withCString("com.apple.iokit.IOHIDFamily");
+        bool const ok = (dict != nullptr) && (pair != nullptr) && (pairs != nullptr) && (page != nullptr) &&
+                        (usage != nullptr) && (vendor != nullptr) && (product != nullptr) && (score != nullptr) &&
+                        (ioClass != nullptr) && (provider != nullptr) && (bundle != nullptr);
         if (ok) {
             pair->setObject("DeviceUsagePage", page);
             pair->setObject("DeviceUsage", usage);
@@ -714,7 +725,7 @@ OSDefineMetaClassAndStructors(SwitchHIDDevice, IOHIDDevice)
 
         OSArray *personalities = OSArray::withCapacity(sizeof(kProfiles) / sizeof(kProfiles[0]));
         for (const Profile &p : kProfiles) {
-            OSDictionary *dict = personality(p);
+            const OSDictionary *dict = personality(p);
             if (!personalities || !dict)
                 panic("SwitchHID: no memory for the IOHIDEventDriver personalities");
             personalities->setObject(dict);
@@ -740,15 +751,17 @@ OSObject *answer(void *device)
 // concurrent virtual call takes one table or the other.
 SwitchHIDHook install(IOService *driver, SwitchHIDDevice *device, bool atPublish)
 {
-    static bool slotsLogged, vtableLogged;
-    const uint32_t page = edge::call<uint32_t>(driver, kPrimaryUsagePage),
-                   usage = edge::call<uint32_t>(driver, kPrimaryUsage);
-    uintptr_t *vtable = *reinterpret_cast<uintptr_t **>(driver);
+    static bool slotsLogged;
+    static bool vtableLogged;
+    const uint32_t page = edge::call<uint32_t>(driver, kPrimaryUsagePage);
+    const uint32_t usage = edge::call<uint32_t>(driver, kPrimaryUsage);
+    const uintptr_t *vtable = *reinterpret_cast<uintptr_t **>(driver);
     if (page != 0xff00 || usage != 0x05) {
-        if (!slotsLogged)
+        if (!slotsLogged) {
             IOLog("SwitchHID: temperature sensor not hooked: event driver slots 199/200 answer %#x/%#x, not 0xff00/0x5 "
                   "(IOHIDEventService's reserved slots moved)\n",
                   page, usage);
+        }
         slotsLogged = true;
         return kSwitchHIDHookWrongSlots;
     }
@@ -762,9 +775,10 @@ SwitchHIDHook install(IOService *driver, SwitchHIDDevice *device, bool atPublish
         copy[kCopyEvent] = reinterpret_cast<uintptr_t>(&copyEvent);
         table = copy;
     } else if (reinterpret_cast<uintptr_t>(vtable) != originalTable) {
-        if (!vtableLogged)
+        if (!vtableLogged) {
             IOLog("SwitchHID: temperature sensor not hooked: its event driver has another vtable (%p, first %p)\n",
                   vtable, reinterpret_cast<void *>(originalTable));
+        }
         vtableLogged = true;
         return kSwitchHIDHookOtherVtable;
     }
@@ -784,7 +798,7 @@ SwitchHIDHook install(IOService *driver, SwitchHIDDevice *device, bool atPublish
 // driver's VendorID/ProductID never fired for them on hardware.
 bool published(void *, void *, IOService *driver, IONotifier *)
 {
-    IOService *interface = driver ? driver->getProvider() : nullptr;
+    const IOService *interface = driver ? driver->getProvider() : nullptr;
     auto *device = interface ? OSDynamicCast(SwitchHIDDevice, interface->getProvider()) : nullptr;
     if (!device || !device->isTemperature())
         return true;
@@ -891,10 +905,11 @@ IOService *switch_hid_create_temperature(const char *product, uint32_t locationI
     return device;
 }
 
+// NOLINTBEGIN(misc-const-correctness): SwitchHID.h's API takes the device it changes through the HID device it casts to
 bool switch_hid_temperature_hooked(IOService *device)
 {
     auto *hid = OSDynamicCast(SwitchHIDDevice, device);
-    return hid && hid->isHooked();
+    return (hid != nullptr) && hid->isHooked();
 }
 
 SwitchHIDHook switch_hid_temperature_hook(IOService *device)
@@ -909,10 +924,11 @@ SwitchHIDHook switch_hid_temperature_hook(IOService *device)
         return kSwitchHIDHookNoDriver;
     IOLockLock(temperature::lock);
     SwitchHIDHook result = kSwitchHIDHooked;
-    if (hid->isHooked())
+    if (hid->isHooked()) {
         result = hid->isHookedAtPublish() ? kSwitchHIDHookedAtPublish : kSwitchHIDHooked;
-    else
+    } else {
         result = temperature::install(driver, hid, false);
+    }
     IOLockUnlock(temperature::lock);
     return result;
 }
@@ -937,7 +953,7 @@ IOReturn switch_hid_post_at(IOService *device, const void *report, size_t length
 bool switch_hid_supports_timestamps(IOService *device)
 {
     auto *hid = OSDynamicCast(SwitchHIDDevice, device);
-    return hid && hid->timed;
+    return (hid != nullptr) && hid->timed;
 }
 
 IOReturn switch_hid_dispatch_event(IOService *device, OSObject *event)
@@ -958,3 +974,5 @@ void switch_hid_set_edge_contacts(IOService *device, uint32_t contacts)
 {
     edge::contacts = contacts;
 }
+
+// NOLINTEND(misc-const-correctness)

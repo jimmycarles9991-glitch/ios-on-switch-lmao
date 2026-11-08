@@ -14,7 +14,6 @@
 #include <sys/ioccom.h>
 
 struct fileglob;
-struct image_params;
 struct nameidata;
 struct vnode;
 
@@ -26,8 +25,7 @@ extern bool switch_pretranslated_on;
 
 void switch_pretranslated_capture(void);
 void switch_pretranslated_redirect(struct nameidata *ndp);
-bool switch_pretranslated_trusted(struct vnode *vp, int64_t arch_offset, bool redirected);
-bool switch_pretranslated_image(const struct image_params *imgp);
+bool switch_pretranslated_authentic(struct vnode *vp);
 int switch_pretranslated_mmap_check(struct fileglob *fg, int flags, int prot, int maxprot);
 int switch_pretranslated_refuse(enum switch_pt_op op, struct vnode *v0, struct vnode *v1, struct vnode *v2,
                                 struct vnode *v3, uint32_t intent);
@@ -68,9 +66,9 @@ static inline void switch_pretranslated_lookup(struct nameidata *ndp)
     (void)ndp;
 }
 
-static inline bool switch_pretranslated_image(const struct image_params *imgp)
+static inline bool switch_pretranslated_authentic(struct vnode *vp)
 {
-    (void)imgp;
+    (void)vp;
     return false;
 }
 

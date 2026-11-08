@@ -93,6 +93,18 @@ TEST_F(SwitchCAR, PowerUpFollowsLinuxOrder)
     EXPECT_TRUE(switch_pmc_partition_is_on(2));
 }
 
+TEST_F(SwitchCAR, PowerUpInResetLeavesTheResetAsserted)
+{
+    ASSERT_TRUE(switch_pmc_power_up_in_reset(20, 156, 156));
+    EXPECT_EQ(writes(), (std::vector<std::pair<uintptr_t, uint32_t>>{
+                            {kCar + 0x438, 1u << 28},
+                            {kPmc + kToggle, 20 | kStart},
+                            {kCar + 0x448, 1u << 28},
+                            {kPmc + kClamp, 1u << 20},
+                        }));
+    EXPECT_TRUE(switch_pmc_partition_is_on(20));
+}
+
 TEST_F(SwitchCAR, PartitionAlreadyInStateIsNotToggled)
 {
     gModel.registers[kPmc + kStatus] = 1u << 9;

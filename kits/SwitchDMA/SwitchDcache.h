@@ -22,7 +22,7 @@
 extern "C" {
 #endif
 
-// CTR_EL0.DminLine on the Cortex-A57.
+// CTR_EL0.DminLine on the Cortex-A57, a constant because EL0 cannot read CTR_EL0 (XNU leaves SCTLR_EL1.UCT clear).
 #define SWITCH_DCACHE_LINE 64u
 
 #ifndef SWITCH_DCACHE_OP
@@ -131,8 +131,14 @@ static inline void switch_dcache_spans(switch_dcache_op op, const switch_dma_spa
 }
 
 #if defined(KERNEL) || defined(SWITCH_DCACHE_PHYS_MODEL)
+#include "SwitchHwPage.h"
+#ifndef KERNEL
+bool switch_dma_pa_managed(uint64_t pa);
+#endif
+
 // XNU's physical aperture (osfmk/arm64/arm_vm_init.c): linear only within the chunk phystokv_range() reports, and
 // only over managed RAM (it panics on anything else).
+// NOLINTNEXTLINE(readability-redundant-declaration): not every kernel configuration's headers declare it
 uint64_t phystokv_range(uint64_t pa, size_t *max_length);
 
 static inline void switch_dcache_phys_lines(switch_dcache_op op, uint64_t pa, uint64_t length)
@@ -143,6 +149,16 @@ static inline void switch_dcache_phys_lines(switch_dcache_op op, uint64_t pa, ui
         switch_dcache_lines(op, (const volatile void *)(uintptr_t)va, chunk);
         pa += chunk;
         length -= chunk;
+    }
+}
+
+// An engine's page list: each hardware page of managed RAM through the aperture; a page outside it (device memory a
+// task mapped) has no cacheable alias to maintain. A page's offset bits are ignored.
+static inline void switch_dcache_hw_pages(switch_dcache_op op, const uint64_t *pages, size_t count)
+{
+    for (size_t i = 0; i < count; ++i) {
+        if (switch_dma_pa_managed(pages[i]))
+            switch_dcache_phys_lines(op, pages[i] & ~SWITCH_HW_PAGE_MASK, SWITCH_HW_PAGE_SIZE);
     }
 }
 #endif

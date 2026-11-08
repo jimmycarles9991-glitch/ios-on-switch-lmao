@@ -20,8 +20,10 @@ static inline int switch_diag_video_matches(uint64_t base, uint64_t display, uin
 
 static inline void switch_diag_pixel(volatile uint32_t *pixels, unsigned x, unsigned y, uint32_t color)
 {
-    if (x < 1280 && y < 720)
+    if (x < 1280 && y < 720) {
+        /* NOLINTNEXTLINE(clang-analyzer-core.NullDereference): drawing starts once the framebuffer is mapped */
         pixels[(uint64_t)(1279 - x) * 720 + y] = color;
+    }
 }
 
 static inline void switch_diag_clear(volatile uint32_t *pixels)
@@ -82,17 +84,22 @@ static inline int switch_diag_text(volatile uint32_t *pixels, unsigned x, unsign
         if (ch >= 'a' && ch <= 'z')
             ch -= 'a' - 'A';
         const uint8_t *glyph = switch_diag_font[sizeof(switch_diag_font) / sizeof(switch_diag_font[0]) - 2].row;
-        for (unsigned i = 0; i < sizeof(switch_diag_font) / sizeof(switch_diag_font[0]); ++i)
+        for (unsigned i = 0; i < sizeof(switch_diag_font) / sizeof(switch_diag_font[0]); ++i) {
             if (switch_diag_font[i].ch == ch) {
                 glyph = switch_diag_font[i].row;
                 break;
             }
-        for (unsigned row = 0; row < 7; ++row)
-            for (unsigned col = 0; col < 6; ++col)
-                for (unsigned dy = 0; dy < 2; ++dy)
-                    for (unsigned dx = 0; dx < 2; ++dx)
+        }
+        for (unsigned row = 0; row < 7; ++row) {
+            for (unsigned col = 0; col < 6; ++col) {
+                for (unsigned dy = 0; dy < 2; ++dy) {
+                    for (unsigned dx = 0; dx < 2; ++dx) {
                         switch_diag_pixel(pixels, x + col * 2 + dx, y + row * 2 + dy,
                                           col < 5 && (glyph[row] & (1u << (4 - col))) ? color : SWITCH_BACKGROUND);
+                    }
+                }
+            }
+        }
         x += 12;
     }
     return 1;

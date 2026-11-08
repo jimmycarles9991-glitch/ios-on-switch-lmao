@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """The symbolized iOS 17 (21H461) prelinked kernelcache: kernel exports, kext symbols, kext GOT import names."""
 import sys, struct, os, json
-from native_prelink import macho, backed_offset, unserialize_xml
+from native_prelink import unserialize_xml
+from tools.common.macho import macho, backed_offset
 import paths
 PATH = paths.KERNELCACHE_17
 

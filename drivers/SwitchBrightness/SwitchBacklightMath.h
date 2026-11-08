@@ -28,7 +28,8 @@ constexpr unsigned kSpanRaw = kPanelMax - kFloorRaw;
 
 // Luminance, nits * 65536 (16.16 fixed point, as CoreBrightness's backlight-calibration-parameters and brightness-nits).
 constexpr uint32_t kNitsMax = 400u << 16, kNitsMid = 140u << 16;
-constexpr uint32_t kNitsMin = (uint32_t)(((uint64_t)kNitsMax * kFloorRaw + kPanelMax / 2) / kPanelMax);  // 12.5 nits
+constexpr uint32_t kNitsMin =
+    static_cast<uint32_t>((static_cast<uint64_t>(kNitsMax) * kFloorRaw + kPanelMax / 2) / kPanelMax);  // 12.5 nits
 
 // backlight-marketing-table: the slider's luminance at evenly spaced slider positions, int32 nits * 65536 (21H461
 // DisplayCreateWithID 0x1b62ae0b0..0x1b62ae158: CFDataGetLength / 4 entries, each scvtf / 65536 into display+0x48).
@@ -37,20 +38,21 @@ constexpr uint32_t kNitsMin = (uint32_t)(((uint64_t)kNitsMax * kFloorRaw + kPane
 // here), so slider 0, 0.5 and 1 are 12.5, 140 and 400 nits, linear between. These are CoreBrightness's own three points
 // for a display without a table (5, 140 and 400 nits at 0x1b632d644, which the legacy architecture takes) with the bottom
 // raised to the panel's floor, lMinProduct, so the slider's bottom asks for no less than the panel shows.
-constexpr int32_t kMarketingTable[] = {(int32_t)kNitsMin, (int32_t)kNitsMid, (int32_t)kNitsMax};
+constexpr int32_t kMarketingTable[] = {static_cast<int32_t>(kNitsMin), static_cast<int32_t>(kNitsMid),
+                                       static_cast<int32_t>(kNitsMax)};
 
 inline unsigned toRaw(uint32_t brightness)
 {
     if (brightness > kMax)
         brightness = kMax;
-    return kFloorRaw + (unsigned)(((uint64_t)brightness * kSpanRaw + kMax / 2) / kMax);
+    return kFloorRaw + static_cast<unsigned>((static_cast<uint64_t>(brightness) * kSpanRaw + kMax / 2) / kMax);
 }
 
 inline uint32_t toBrightness(unsigned raw)
 {
     if (raw >= kPanelMax)
         return kMax;
-    return raw <= kFloorRaw ? 0 : (uint32_t)((uint64_t)(raw - kFloorRaw) * kMax / kSpanRaw);
+    return raw <= kFloorRaw ? 0 : static_cast<uint32_t>(static_cast<uint64_t>(raw - kFloorRaw) * kMax / kSpanRaw);
 }
 
 // A brightness-nits value (nits * 65536, signed as CoreBrightness sends it) as a panel level.
@@ -58,8 +60,12 @@ inline unsigned nitsToRaw(int32_t nits)
 {
     if (nits <= 0)
         return kFloorRaw;
-    const uint64_t raw = ((uint64_t)nits * kPanelMax + kNitsMax / 2) / kNitsMax;
-    return raw < kFloorRaw ? kFloorRaw : raw > kPanelMax ? kPanelMax : (unsigned)raw;
+    const uint64_t raw = (static_cast<uint64_t>(nits) * kPanelMax + kNitsMax / 2) / kNitsMax;
+    if (raw < kFloorRaw)
+        return kFloorRaw;
+    if (raw > kPanelMax)
+        return kPanelMax;
+    return static_cast<unsigned>(raw);
 }
 
 // The same as a brightness (0..kMax) that toRaw() turns back into that level, for SwitchBacklight's ramp and
@@ -72,7 +78,7 @@ inline uint32_t nitsToBrightness(int32_t nits)
     if (raw >= kPanelMax)
         return kMax;
     // Round up so that toRaw() lands on raw exactly: toRaw rounds to nearest.
-    return (uint32_t)(((uint64_t)(raw - kFloorRaw) * kMax + kSpanRaw - 1) / kSpanRaw);
+    return static_cast<uint32_t>((static_cast<uint64_t>(raw - kFloorRaw) * kMax + kSpanRaw - 1) / kSpanRaw);
 }
 
 // A panel level as nits * 65536 (the brightness-nits readback).
@@ -80,16 +86,16 @@ inline uint32_t rawToNits(unsigned raw)
 {
     if (raw > kPanelMax)
         raw = kPanelMax;
-    return (uint32_t)(((uint64_t)raw * kNitsMax + kPanelMax / 2) / kPanelMax);
+    return static_cast<uint32_t>((static_cast<uint64_t>(raw) * kNitsMax + kPanelMax / 2) / kPanelMax);
 }
 
 // IODisplayParameters.BrightnessMilliNits {min, max, value}, as AppleARMBacklight publishes it (J120: max 600000) and
 // thermalmonitord reads value and max as SInt32: the panel's luminance in thousandths of a nit.
-constexpr uint32_t kMilliNitsMax = (uint32_t)(((uint64_t)kNitsMax * 1000 + 32768) >> 16);
+constexpr uint32_t kMilliNitsMax = static_cast<uint32_t>((static_cast<uint64_t>(kNitsMax) * 1000 + 32768) >> 16);
 
 inline uint32_t rawToMilliNits(unsigned raw)
 {
-    return (uint32_t)(((uint64_t)rawToNits(raw) * 1000 + 32768) >> 16);
+    return static_cast<uint32_t>((static_cast<uint64_t>(rawToNits(raw)) * 1000 + 32768) >> 16);
 }
 }  // namespace switch_backlight
 #endif

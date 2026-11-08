@@ -9,8 +9,8 @@ O=$3
 L=$4
 shift 4
 NVK=${NVK:-${HERE}/../../../../bazel-bin/gpu/nvk/host/libvulkan_nouveau.dylib} # bazel build //gpu/nvk:host
-QC=${HERE}/../../eq/qc/QuartzCore.framework/default.metallib                   # the path suffix the facade keys QuartzCore by
-C=${HERE}/../../precompile/corpus.log
+QC=${QC:-${HERE}/../../eq/qc/QuartzCore.framework/default.metallib}            # the path suffix the facade keys QuartzCore by
+C=${CORPUS:-${HERE}/../../precompile/corpus.log}
 mkdir -p "${O}/cache-${L}"
 # the states the frame may use: the pack's (FRAME_KEYS=all: every corpus state, the ones m2v draws included)
 if [[ "${FRAME_KEYS:-}" != all ]]; then
@@ -20,7 +20,9 @@ else
     unset FRAME_KEYS
 fi
 export RAWCAP_PROGRAMS=${P}/work/programs.bin RAWCAP_LAYOUTS=${P}/layouts.txt NVDEC_REGS=1 MESA_SHADER_CACHE_DISABLE=true NMB_ASYNC_PSO=0 NMB_ASYNC_PSO_API=0
-RAWCAP_LOG=${O}/${L}.nvk.log FRAME_INPLACE=1 "${B}/nvkframe" "${NVK}" "${O}/cache-${L}" "${QC}" "${C}" "$@" >"${O}/${L}.nvk.out" 2>"${O}/${L}.nvk.err" || {
+# NVK as the raw path draws: its copies on the copy engine (NVK's default, vk_meta's draws, gives frame 0 a draw per upload) and
+# its interlock hidden, so a fetching state is the barrier form, the one form of it the pack holds (rawpack.py)
+RAWCAP_LOG=${O}/${L}.nvk.log NVK_COPIES=ce NVK_DEBUG=no_fsi "${B}/nvkframe" "${NVK}" "${O}/cache-${L}" "${QC}" "${C}" "$@" >"${O}/${L}.nvk.out" 2>"${O}/${L}.nvk.err" || {
     echo "nvkframe failed"
     tail -5 "${O}/${L}.nvk.err"
 }

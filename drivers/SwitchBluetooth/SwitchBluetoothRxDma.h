@@ -46,6 +46,29 @@ struct switch_bt_h4_frame {
     bool lost;
 };
 
+static inline uint8_t switch_bt_h4_header_bytes(uint8_t type)
+{
+    switch (type) {
+    case SWITCH_BT_H4_EVENT:
+        return 2;
+    case SWITCH_BT_H4_ACL:
+        return 4;
+    case SWITCH_BT_H4_SCO:
+        return 3;
+    default:
+        return 0;
+    }
+}
+
+static inline uint32_t switch_bt_h4_length(const struct switch_bt_h4_frame *f)
+{
+    if (f->type == SWITCH_BT_H4_EVENT)
+        return f->header[1];
+    if (f->type == SWITCH_BT_H4_ACL)
+        return f->header[2] | (uint32_t)f->header[3] << 8;
+    return f->header[2];
+}
+
 // One more byte; true when it ends a packet.
 static inline bool switch_bt_h4_frame_byte(struct switch_bt_h4_frame *f, uint8_t byte)
 {
@@ -53,21 +76,19 @@ static inline bool switch_bt_h4_frame_byte(struct switch_bt_h4_frame *f, uint8_t
         return false;
     if (f->state == 0) {
         f->type = byte;
-        f->need = byte == SWITCH_BT_H4_EVENT ? 2 : byte == SWITCH_BT_H4_ACL ? 4 : byte == SWITCH_BT_H4_SCO ? 3 : 0;
+        f->need = switch_bt_h4_header_bytes(byte);
         f->have = 0;
         f->state = 1;
-        f->lost = !f->need;
+        f->lost = f->need == 0;
         return false;
     }
     if (f->state == 1) {
         f->header[f->have++] = byte;
         if (f->have < f->need)
             return false;
-        f->left = f->type == SWITCH_BT_H4_EVENT ? f->header[1]
-                  : f->type == SWITCH_BT_H4_ACL ? (uint32_t)(f->header[2] | f->header[3] << 8)
-                                                : f->header[2];
+        f->left = switch_bt_h4_length(f);
         f->state = f->left ? 2 : 0;
-        return !f->left;
+        return f->left == 0;
     }
     if (--f->left)
         return false;
@@ -79,7 +100,12 @@ static inline bool switch_bt_h4_frame_byte(struct switch_bt_h4_frame *f, uint8_t
 // in yet; 0 between packets); false when the framing is lost.
 static inline bool switch_bt_h4_frame_left(const struct switch_bt_h4_frame *f, uint32_t *left)
 {
-    *left = f->state == 1 ? (uint32_t)(f->need - f->have) : f->state == 2 ? f->left : 0;
+    uint32_t n = 0;
+    if (f->state == 1)
+        n = (uint32_t)(f->need - f->have);
+    if (f->state == 2)
+        n = f->left;
+    *left = n;
     return !f->lost;
 }
 

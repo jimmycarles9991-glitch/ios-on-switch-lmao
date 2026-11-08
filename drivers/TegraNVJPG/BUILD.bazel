@@ -9,7 +9,6 @@ lint_files(exclude = [
     "**/linux/**",
     "**/nouveau/**",
     "**/nvidia/**",
-    "selftest/J3Vectors.h",
 ])
 
 exports_files(glob(
@@ -29,13 +28,12 @@ filegroup(
 kernel_headers()
 
 # TegraNVJPG: the NVJPG falcon (JPEG codec 1.0) as the system's hardware JPEG decoder (the AppleJPEGDriver service and
-# its AppleJPEGDriverUserClient, which CMPhoto and VideoToolbox's JPEG decoder open): its SMMU domain, job engine, boot
-# self-test (J0..J4) against libjpeg-turbo's decode of embedded JPEGs, and user client; firmware by .incbin.
+# its AppleJPEGDriverUserClient, which CMPhoto and VideoToolbox's JPEG decoder open): its SMMU domain, job engine and
+# user client; firmware by .incbin.
 kernel_driver(
     name = "TegraNVJPG",
     srcs = [
         "TegraNVJPG.cpp",
-        "TegraNVJPGSelfTest.cpp",
         "TegraNVJPGUserClient.cpp",
         "firmware.S",
     ],

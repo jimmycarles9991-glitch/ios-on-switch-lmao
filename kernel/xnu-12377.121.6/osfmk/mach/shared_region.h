@@ -88,7 +88,11 @@
 /* ARM64_TODO: move to higher memory */
 #endif
 #define SHARED_REGION_BASE_ARM64                0x180000000ULL
-#define SHARED_REGION_SIZE_ARM64                0x180000000ULL
+/*
+ * Switch: Darwin 27's default arm64 shared region is 8 GiB (xnu-13432.42.3 in 24B119: vm_shared_region_create's
+ * first base/limit/size row is 0x180000000/0x380000000/0x200000000); 24B119's dyld cache maps up to 0x31e5ac000.
+ */
+#define SHARED_REGION_SIZE_ARM64                0x200000000ULL
 #define SHARED_REGION_NESTING_BASE_ARM64        SHARED_REGION_BASE_ARM64
 #define SHARED_REGION_NESTING_SIZE_ARM64        SHARED_REGION_SIZE_ARM64
 #define SHARED_REGION_NESTING_MIN_ARM64         ?

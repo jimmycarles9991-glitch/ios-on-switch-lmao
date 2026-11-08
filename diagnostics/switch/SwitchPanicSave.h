@@ -19,9 +19,6 @@ extern "C" {
 // switch_thermal_sensor, 0 for none, and its temperature), filed with the PMC's reset cause by
 // switch_panic_save_pending. A no-op in kernels without the panic record.
 void switch_panic_save_thermal(int sensor, int millic);
-#ifdef __cplusplus
-}
-#endif
 
 #if defined(SWITCH_XNU_DIAGNOSTICS) && SWITCH_XNU_DIAGNOSTICS
 void switch_panic_save_init(void);
@@ -44,5 +41,8 @@ void switch_panic_save_watchdog(unsigned seconds);
 #define switch_panic_save_pending_stackshot(bytes)            ((const void *)0)
 #define switch_panic_save_done(error, path)                   ((void)0)
 #define switch_panic_save_watchdog(seconds)                   ((void)0)
+#endif
+#ifdef __cplusplus
+}
 #endif
 #endif

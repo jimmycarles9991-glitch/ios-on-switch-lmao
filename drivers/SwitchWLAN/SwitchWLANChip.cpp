@@ -100,9 +100,10 @@ void Chip::write(uint32_t address, uint32_t value)
 
 const Core *Chip::find(uint16_t coreId) const
 {
-    for (unsigned i = 0; i < coreCount_; ++i)
+    for (unsigned i = 0; i < coreCount_; ++i) {
         if (cores_[i].id == coreId)
             return &cores_[i];
+    }
     return nullptr;
 }
 
@@ -120,7 +121,8 @@ uint32_t Chip::erom(uint32_t &at, uint32_t &type)
 // brcmf_chip_dmp_get_regaddr: the first 4/8 KiB register slave and the wrapper of the component being scanned.
 bool Chip::regaddr(uint32_t &at, uint32_t &base, uint32_t &wrap)
 {
-    uint32_t type = 0, wraptype;
+    uint32_t type = 0;
+    uint32_t wraptype = 0;
     (void)erom(at, type);
     if (type == kDescMasterPort) {
         wraptype = kSlaveMwrap;
@@ -133,7 +135,7 @@ bool Chip::regaddr(uint32_t &at, uint32_t &base, uint32_t &wrap)
     }
     base = wrap = 0;
     while (!base || !wrap) {
-        uint32_t value;
+        uint32_t value = 0;
         do {
             value = erom(at, type);
             if (type == kDescEot) {
@@ -149,7 +151,7 @@ bool Chip::regaddr(uint32_t &at, uint32_t &base, uint32_t &wrap)
             (void)erom(at, type);
         const uint32_t size = (value >> 4) & 3;
         if (size == kSizeDesc) {
-            uint32_t sizeType;
+            uint32_t sizeType = 0;
             if (erom(at, sizeType) & kDescAddrsizeGt32)
                 (void)erom(at, sizeType);
         }
@@ -171,7 +173,7 @@ void Chip::scanCores()
     uint32_t at = read(kChipCommon + 0xFC);
     const uint32_t end = at + 4 * kEromWords;
     while (at < end && coreCount_ < sizeof(cores_) / sizeof(cores_[0])) {
-        uint32_t type;
+        uint32_t type = 0;
         uint32_t value = erom(at, type);
         if (type == kDescEot)
             break;
@@ -181,10 +183,12 @@ void Chip::scanCores()
         value = erom(at, type);
         if (type != kDescComponent)
             break;
-        const uint32_t masters = (value >> 14) & 0x1F, slaves = (value >> 19) & 0x1F;
+        const uint32_t masters = (value >> 14) & 0x1F;
+        const uint32_t slaves = (value >> 19) & 0x1F;
         if (!(masters + slaves) && id != kCorePmu && id != kCoreGci)
             continue;
-        uint32_t base, wrap;
+        uint32_t base = 0;
+        uint32_t wrap = 0;
         if (regaddr(at, base, wrap))
             cores_[coreCount_++] = {id, static_cast<uint8_t>(value >> 24), base, wrap};
     }
@@ -231,7 +235,9 @@ void Chip::tcmCopy(uint32_t address, const uint8_t *data, size_t length)
 bool Chip::boot(const uint8_t *image, size_t imageLength, const uint8_t *nvram, size_t nvramLength, char *why,
                 size_t whyLength)
 {
-    const Core *arm = find(kCoreArmCr4), *pcie2 = find(kCorePcie2), *d11 = find(kCore80211);
+    const Core *arm = find(kCoreArmCr4);
+    const Core *pcie2 = find(kCorePcie2);
+    const Core *d11 = find(kCore80211);
     // A RAM size recorded in the image ("SMAR" at 0x6c) wins over the banks (brcmf_pcie_adjust_ramsize).
     if (imageLength >= 0x6c + 8 && le32(image + 0x6c) == 0x534D4152)
         ramSize_ = le32(image + 0x70);
@@ -284,7 +290,7 @@ bool Chip::boot(const uint8_t *image, size_t imageLength, const uint8_t *nvram, 
                  sharedFlags_);
         return false;
     }
-    uint64_t ms = (nowNs() - t0) / 1000000;
+    const uint64_t ms = (nowNs() - t0) / 1000000;
     IOLog("SwitchWLAN: firmware up in %llu ms (shared v%u at %#x, flags %#x, RAM %u KiB)\n", ms, version, shared,
           sharedFlags_, ramSize_ / 1024);
     return true;
@@ -292,7 +298,7 @@ bool Chip::boot(const uint8_t *image, size_t imageLength, const uint8_t *nvram, 
 
 void Chip::crash(char *out, size_t length)
 {
-    auto text = [this](uint32_t address, char *buffer, size_t size) {
+    const auto text = [this](uint32_t address, char *buffer, size_t size) {
         size_t n = 0;
         for (uint32_t k = 0; k < 96 && n + 1 < size && address >= ramBase_ && address + k < ramBase_ + ramSize_; ++k) {
             const uint8_t c = tcm_.r8(address + k);
@@ -305,7 +311,7 @@ void Chip::crash(char *out, size_t length)
     };
     const uint32_t flags = shared_ ? tcm_.r32(shared_) : 0;
     size_t used = 0;
-    auto append = [&](int written) {
+    const auto append = [&](int written) {
         if (written > 0)
             used += static_cast<size_t>(written);
         if (used >= length)
@@ -313,7 +319,8 @@ void Chip::crash(char *out, size_t length)
     };
     append(snprintf(out, length, "shared flags %#x", flags));
     if (flags & kSharedAssert) {
-        char expression[100], file[100];
+        char expression[100];
+        char file[100];
         text(tcm_.r32(shared_ + kSharedAssertExp), expression, sizeof(expression));
         text(tcm_.r32(shared_ + kSharedAssertFile), file, sizeof(file));
         append(snprintf(out + used, length - used, ", assert \"%s\" at %s:%u", expression, file,
@@ -338,7 +345,9 @@ void Chip::consoleTail(char *out, size_t length)
     out[0] = 0;
     if (!console_ || console_ < ramBase_ || console_ >= ramBase_ + ramSize_ || length < 2)
         return;
-    const uint32_t buffer = tcm_.r32(console_ + 8), size = tcm_.r32(console_ + 12), index = tcm_.r32(console_ + 16);
+    const uint32_t buffer = tcm_.r32(console_ + 8);
+    const uint32_t size = tcm_.r32(console_ + 12);
+    const uint32_t index = tcm_.r32(console_ + 16);
     if (!size || size > 0x10000 || index >= size || buffer < ramBase_ || buffer + size > ramBase_ + ramSize_) {
         snprintf(out, length, "(console unreadable: buf %#x size %u index %u)", buffer, size, index);
         return;
@@ -362,7 +371,7 @@ void Chip::consoleTail(char *out, size_t length)
 
 size_t nvramConvert(const uint8_t *text, size_t textLength, uint8_t *out, size_t outLength)
 {
-    auto printable = [](uint8_t c) {
+    const auto printable = [](uint8_t c) {
         return c >= 0x20 && c < 0x7F && c != '#';
     };
     size_t n = 0;
@@ -383,7 +392,7 @@ size_t nvramConvert(const uint8_t *text, size_t textLength, uint8_t *out, size_t
             while (at < lineEnd && printable(text[at]))
                 ++at;
             const size_t entry = at - start;
-            if (!(entry >= 4 && !memcmp(text + start, "RAW1", 4))) {  // raw OTP dumps are not variables
+            if (entry < 4 || memcmp(text + start, "RAW1", 4)) {  // raw OTP dumps are not variables
                 if (n + entry + 1 > outLength)
                     return 0;
                 if (entry >= 9 && !memcmp(text + start, "boardrev=", 9))

@@ -717,6 +717,6 @@ toolchain notes: `kernel/toolchain-notes-12377.md`.
 `ipsw kernel cpp --json --methods dl/ipsw-26.5.2/kernelcache.decompressed > prelink26/cpp26.json` (100 MB, deleted),
 `ipsw kernel cpp --inheritance ... > prelink26/inherit26.txt`, `ipsw kernel symbolicate --signatures dl/symbolicator
 --json -o prelink26/sym2 ...`, then `prelink26/kcinfo.py` / `classify.py` / `pcrel.py` (closure, fixups, branches),
-`NAMES_SEED_ALL=1 prelink26/names.py` (plain run = hold-out check), `prelink26/emit26.py <our kernel> <kc> <out>`,
+`prelink26/names.py`, `prelink26/emit26.py <our kernel> <kc> <out>`,
 `prelink26/verify26.py <out> <kc>`, `prelink26/bindings26.py`. `clang -O2 -o build/a64kext tools/a64kext.c
 a64x/a64x_classify.c a64x/a64x_rewrite.c a64x/a64x_image.c`.

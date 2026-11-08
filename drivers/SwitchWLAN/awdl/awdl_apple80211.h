@@ -240,12 +240,10 @@ void a80211_awdl_peer(struct a80211_awdl *f, const uint8_t addr[6], int present,
 // interface has to exist. It is never brought up and its link never reads active, as on an iPad whose AWDL is down;
 // NECP's listener scan skips an interface without IFF_UP | IFF_RUNNING.
 // BSD <net/if.h> and <net/if_media.h> values (this file builds without them); SwitchWLANAwdl.cpp asserts they match.
-enum {
-    A80211_IFF_BROADCAST = 0x2,
-    A80211_IFF_SIMPLEX = 0x800,
-    A80211_IFF_MULTICAST = 0x8000,
-    A80211_IFM_AVALID = 0x1,
-};
+#define A80211_IFF_BROADCAST 0x2u
+#define A80211_IFF_SIMPLEX   0x800u
+#define A80211_IFF_MULTICAST 0x8000u
+#define A80211_IFM_AVALID    0x1u
 
 struct a80211_awdl_down_if {
     uint16_t if_flags;

@@ -38,7 +38,10 @@ kernel_driver(
     ],
     c_copts = DFLL_C_FLAGS + LINUX_RELAXATIONS,
     c_recipe = ":freestanding_c",
-    hdr_deps = [],
+    hdr_deps = [
+        "kits/SwitchLinux",
+        "kits/SwitchMMIO",
+    ],
     object_names = "path",
 )
 
@@ -48,17 +51,13 @@ kernel_driver(
         "shim/linux.c",
         "platform.c",
         "dfll.c",
-        "shim/xnu_glue.cpp",
     ],
     c_copts = DFLL_C_FLAGS,
     c_recipe = ":freestanding_c",
-    copts = [
-        "-I",
-        "{tree}/drivers/TegraDFLL/shim",
-    ],
     hdr_deps = [
         "drivers/TegraI2C",
+        "kits/SwitchLinux",
+        "kits/SwitchMMIO",
     ],
     object_names = "path",
-    stems = {"xnu_glue.cpp": "shim_xnu_glue.cpp"},
 )

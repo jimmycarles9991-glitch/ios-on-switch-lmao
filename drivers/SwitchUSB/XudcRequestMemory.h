@@ -87,6 +87,7 @@ inline void requestRead(const RequestDirect &, IOMemoryDescriptor *md, uint32_t 
     md->readBytes(offset, to, length);
 }
 
+// NOLINTNEXTLINE(misc-const-correctness): the SWITCH_XUDC_DIRECT variant's signature, whose copy takes a writable buffer
 inline void requestWrite(const RequestDirect &, IOMemoryDescriptor *md, uint32_t offset, uint8_t *from, uint32_t length)
 {
     md->writeBytes(offset, from, length);

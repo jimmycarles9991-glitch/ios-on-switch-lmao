@@ -17,7 +17,7 @@ import bisect, collections, json, os, re, struct, subprocess, sys
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 from ptrauth_disc import discriminators
-from native_prelink import macho, backed_offset
+from tools.common.macho import macho, backed_offset
 
 M64 = (1 << 64) - 1
 SLIDE17 = -0x1000000

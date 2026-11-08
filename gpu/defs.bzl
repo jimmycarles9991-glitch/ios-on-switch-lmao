@@ -129,7 +129,7 @@ def _metal_plugin_impl(ctx):
         # The compile flags again, as the old one-line build had them: clang passes -O2 on to ld, whose code
         # deduplication it turns on (118 KB less __text).
         ["clang++"] + _IOS + _PLUGIN_CFLAGS + ["-bundle"] + [o.path for o in objects] + [ctx.file.bridge.path] +
-        ["-Wl,-dead_strip", "-Wl,-oso_prefix,@PWD@/", "-lobjc"] + frameworks + ["-o", out.path],
+        ["-Wl,-dead_strip", "-Wl,-oso_prefix,@PWD@/", "-lobjc"] + frameworks + ctx.attr.linkopts + ["-o", out.path],
         objects + [ctx.file.bridge],
         [out],
     )
@@ -157,6 +157,7 @@ metal_plugin = rule(
         "include_markers": attr.label_list(allow_files = True, doc = "one file per -I directory, in order"),
         "stack": attr.label(allow_single_file = True, doc = "the raw path's stack key (TEGRA_RAW_STACK)"),
         "frameworks": attr.string_list(default = ["Foundation", "Metal", "IOSurface"]),
+        "linkopts": attr.string_list(doc = "added to the link"),
         "bridge": attr.label(mandatory = True, allow_single_file = True),
         "_xcode_run": attr.label(default = "//tools/gpu:xcode_run", executable = True, cfg = "exec"),
     },

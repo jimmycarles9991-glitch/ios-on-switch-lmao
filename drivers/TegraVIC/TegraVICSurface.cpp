@@ -50,7 +50,7 @@ extern "C" bool tegra_vic_surface_start(void)
     OSDictionary *match = IOService::nameMatching("IOCoreSurfaceRoot");
     if (!match)
         return false;
-    IOService *root = IOService::waitForMatchingService(match, 5ull * 1000 * 1000 * 1000);
+    IOService *root = IOService::waitForMatchingService(match, 5ULL * 1000 * 1000 * 1000);
     match->release();
     gRoot = root;  // kept (waitForMatchingService retained it)
     return gRoot != nullptr;
@@ -109,7 +109,8 @@ extern "C" IOReturn tegra_vic_surface_pages(TegraVICSurface *s, uint64_t offset,
                                             uint32_t max, uint32_t *count)
 {
     *count = 0;
-    const uint64_t first = offset >> 12, end = (offset + bytes + 0xfff) >> 12;
+    const uint64_t first = offset >> 12;
+    const uint64_t end = (offset + bytes + 0xfff) >> 12;
     if (!bytes || offset + bytes > s->memory->getLength() || end - first > max)
         return kIOReturnBadArgument;
     if (!s->prepared) {
@@ -140,7 +141,7 @@ extern "C" IOReturn tegra_vic_surface_prepare(TegraVICSurface *s, uint64_t exten
 // scaler's frame-done moves it (AppleM2ScalerCSCDriver calls the same function on its destination), so whoever caches by
 // seed (the raw GPU path's 4:2:0 conversions, IOSurfaceGetSeed) sees the new picture. Thread context; the surface's own
 // lock is taken inside. Its next CPU lock cleans the CPU's caches once, as after Apple's engines.
-extern "C" void tegra_vic_surface_written(TegraVICSurface *s)
+extern "C" void tegra_vic_surface_written(const TegraVICSurface *s)
 {
     if (s->surface)
         (void)tegra_vic_ios_device_unlock(s->surface, 0);
@@ -148,7 +149,7 @@ extern "C" void tegra_vic_surface_written(TegraVICSurface *s)
 
 extern "C" void tegra_vic_surface_complete(TegraVICSurface *s)
 {
-    if (!s->prepared)
+    if (!s->prepared || !s->memory)
         return;
     s->memory->complete();
     (void)tegra_vic_ios_complete(s->surface);

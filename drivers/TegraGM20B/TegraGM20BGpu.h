@@ -98,6 +98,9 @@ int tgm_vm_unmap_pages(struct tgm_vm *vm, uint64_t va, uint64_t range, uint8_t p
 /* A zero-bandwidth-clear entry (ds, l2 as TegraGM20BAbiZbc has them): its table index, or -EINVAL (format), -ENOSPC
  * (table full), -ENODEV (no compression). */
 int tgm_zbc_add(int depth, uint32_t format, const uint32_t ds[4], const uint32_t l2[4]);
+/* 0 when booted with switch-no-gpu-compression (TegraGM20B.cpp): GetInfo leaves TegraGM20BInfoCompression clear, so no
+ * client binds a compressible kind or adds ZBC entries. */
+int switch_gpu_compression_on(void);
 /* Kernel range: map `mem` somewhere at or above TGM_KERNEL_VA and return the address. */
 int tgm_vm_kmap(struct tgm_vm *vm, struct tgm_mem *mem, uint64_t bytes, uint64_t *va);
 
@@ -133,11 +136,10 @@ struct tgm_push {
 	uint32_t no_prefetch;
 };
 /* Append the pushes, then the fence (WFI semaphore release of the next seqno), then kick. User mappings are
- * L2-cacheable: the L2's clean lines are invalidated on the GPU before the pushes are fetched and its dirty lines written back before the seqno
- * is released (gpu.c l2_on). With present order the pushes run only after
- * the last GPU present queued before this call has finished reading its surface (a GPU-side wait), and after what the
- * acquires tgm_chan_order queued for the channel wait for. -EBUSY when the GPFIFO stays full for 1 s (a panic from the
- * self-test on), -EIO on a dead channel. */
+ * L2-cacheable: the L2's clean lines are invalidated on the GPU before the pushes are fetched and its dirty lines
+ * written back before the seqno is released (gpu.c l2_on). The pushes run after what the acquires tgm_chan_order
+ * queued for the channel wait for. -EBUSY when the GPFIFO stays full for 1 s (a panic from the self-test on), -EIO on a
+ * dead channel. */
 struct tgm_prof;
 int tgm_chan_exec(struct tgm_chan *chan, const struct tgm_push *push, uint32_t count,
 		  uint32_t *seqno, const struct tgm_prof *prof);
@@ -152,13 +154,13 @@ enum {
 	TGM_PC_DRAW = 0,   /* + size * 4 + pitch * 2 + msaa */
 	TGM_PC_CLEAR = 12, /* + the same */
 	TGM_PC_PASS = 24,  /* begins a render pass, draws and clears nothing */
-	TGM_PC_SYNC,       /* only waits, cache invalidates and host flushes */
-	TGM_PC_COMPUTE,
-	TGM_PC_COPY,
-	TGM_PC_2D,
-	TGM_PC_STATE, /* state and anything else */
-	TGM_PC_FENCE, /* the kernel's fence push (WFI, L2 flush): the end stamp's share */
-	TGM_PC_COUNT,
+	TGM_PC_SYNC = 25,  /* only waits, cache invalidates and host flushes */
+	TGM_PC_COMPUTE = 26,
+	TGM_PC_COPY = 27,
+	TGM_PC_2D = 28,
+	TGM_PC_STATE = 29, /* state and anything else */
+	TGM_PC_FENCE = 30, /* the kernel's fence push (WFI, L2 flush): the end stamp's share */
+	TGM_PC_COUNT = 31,
 	TGM_PC_SKIP =
 		0xff, /* no stamp after this push: a method may continue into the next one, or it was not read */
 };
@@ -189,6 +191,8 @@ int tgm_chan_order(struct tgm_chan *chan, uint32_t flags, uint32_t seqno, uint32
  * self-test passed, or under client fault isolation for a client's channel: an error on a kernel channel panics
  * (nvkm's report in the panic string). */
 uint32_t tgm_chan_error(struct tgm_chan *chan);
+/* For error 1: the GPU VA its MMU fault report names (0: none named). */
+uint64_t tgm_chan_fault_va(struct tgm_chan *chan);
 /* Panic naming `who` and the channel's state (fence, GPFIFO GET/PUT, PGRAPH/engine/PBDMA status, MC error registers):
  * work submitted on it did not complete and nvkm reported no error. */
 void tgm_chan_hung(struct tgm_chan *chan, const char *who, uint32_t seqno, uint64_t waited_ns)
@@ -215,7 +219,22 @@ int tegra_gm20b_sync_for_cpu(const void *va, uint64_t bytes, uint64_t timeout_ns
 
 /* Fence pages: one per connection, from one pool range the GPU present maps whole (gpu.c). Zeroed; 0 or -ENOMEM. */
 int tgm_fence_page_get(volatile uint32_t **va, uint64_t *pa);
-void tgm_fence_page_put(volatile uint32_t *va);
+void tgm_fence_page_put(const volatile uint32_t *va);
+
+/* The kernel's own client channels whose writes other channels follow on the GPU (the copy engine's plane copies, the
+ * tiling moves): each one's fence (a TegraGM20BAbiFence) is in the fence range every address space maps, as a
+ * connection's channels' are, never handed out again. *page_pa is its 4 KiB page, which the channel's own space maps
+ * writable, and *offset the fence's place in it. */
+enum tgm_fence_kernel_channel {
+	TGM_FENCE_KERNEL_COPY,
+	TGM_FENCE_KERNEL_RELAYOUT,
+	TGM_FENCE_KERNEL_CHANNELS,
+};
+
+int tgm_fence_kernel(unsigned int which, volatile uint32_t **va, uint64_t *page_pa,
+		     uint32_t *offset);
+/* A channel's fence word is a TegraGM20BAbiFence: its kill record zeroed, for a channel about to be made on it. */
+void tgm_fence_kill_clear(volatile uint32_t *fence);
 
 /* GPU present (gpu.c "GPU present"): a kernel channel and address space, made at the first call (from the self-test on).
  * Mappings in it are volatile, at addresses the caller picks in [TGM_USER_VA_START, TGM_KERNEL_VA). tgm_present_copy

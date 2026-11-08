@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Stage the TegraGM20B Metal plugin onto the SD card's iPadOS Data volume, mounted on the Mac.
 
-usage: stage-tegra-gm20b-metal.py <Data mount point> (--build <manifest or dir> | --remove) [--no-raw]
+usage: stage-tegra-gm20b-metal.py <Data mount point> (--build <manifest or dir> | --remove) [--no-raw] [--progress]
 
 --build is //gpu:bundle's manifest (bazel-bin/gpu/bundle.stage, in //deploy:sd's runfiles: tools/gpu/stage_manifest.py),
 or a directory laid out as //gpu:base (bazel-bin/gpu/base, an lkg snapshot's gpu/). Exit status 0 on success, else one
@@ -26,6 +26,8 @@ Only files whose sha256 differs from what the card holds are copied, and files t
 nothing else), and <Data>/ngpu/stage.pending the files a stage was writing, which the next one copies again if it was
 cut short. A card without the list has the three directories replaced whole.
 --remove deletes the three directories and the list (the preferences stay; without a Metal device they change nothing).
+--progress prints 'progress DONE/TOTAL bytes' as the files land and 'progress WHAT' before a long wait, for the deploy
+and the image builder to show.
 The CDHashes must also be in the boot entry's static trust cache (//boot:package appends //gpu:trustcache, the same
 TegraGM20BMetal.trustcache), so stage and package from the same build.
 """
@@ -38,7 +40,7 @@ import shutil
 import subprocess
 import sys
 from collections.abc import Callable
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 DATA_UUID = 'D1B1D053-D0A6-496C-8625-A947A3DA863E'
@@ -61,10 +63,11 @@ PREFS = {
 Wanted = dict[str, tuple[Path, str, int, int]]
 
 
-def _arguments(argv: list[str]) -> tuple[Path, Path | None, bool, bool]:
+def _arguments(argv: list[str]) -> tuple[Path, Path | None, bool, bool, bool]:
     remove = '--remove' in argv
     raw = '--no-raw' not in argv and os.environ.get('TEGRA_RAW_STAGE', '1') != '0'
-    argv = [a for a in argv if a != '--no-raw']
+    progress = '--progress' in argv
+    argv = [a for a in argv if a not in ('--no-raw', '--progress')]
     build = None
     if '--build' in argv[:-1]:
         build = Path(os.path.abspath(argv[argv.index('--build') + 1]))
@@ -72,7 +75,7 @@ def _arguments(argv: list[str]) -> tuple[Path, Path | None, bool, bool]:
     args = [a for a in argv if a != '--remove']
     if len(args) != 1 or (build is None and not remove):
         sys.exit(__doc__)
-    return Path(args[0]).resolve(), build, remove, raw
+    return Path(args[0]).resolve(), build, remove, raw, progress
 
 
 def _check_volume(data: Path) -> None:
@@ -163,7 +166,22 @@ def _remove(data: Path, paths: list[str]) -> None:
             empty = empty.parent
 
 
-def sync(data: Path, wanted: Wanted) -> str:
+def _copy_all(data: Path, wanted: Wanted, changed: list[str], report: Callable[[str], None]) -> None:
+    total, done = sum(wanted[p][2] for p in changed), 0
+    report(f'{done}/{total} bytes')
+    with ThreadPoolExecutor(8) as pool:
+        copies = {pool.submit(_copy, wanted[p][0], data / p, wanted[p][3]): p for p in changed}
+        try:
+            for copied in as_completed(copies):
+                copied.result()
+                done += wanted[copies[copied]][2]
+                report(f'{done}/{total} bytes')
+        finally:
+            for pending in copies:
+                pending.cancel()
+
+
+def sync(data: Path, wanted: Wanted, report: Callable[[str], None]) -> str:
     """Make the card hold `wanted` under the three staged directories; return what was done."""
     for directory in (data / 'ngpu', data / ADDONS):
         directory.mkdir(exist_ok=True)
@@ -182,8 +200,7 @@ def sync(data: Path, wanted: Wanted) -> str:
     _remove(data, stale)
     for directory in sorted({(data / p).parent for p in changed}):
         directory.mkdir(mode=0o755, parents=True, exist_ok=True)
-    with ThreadPoolExecutor(8) as pool:
-        list(pool.map(lambda p: _copy(wanted[p][0], data / p, wanted[p][3]), changed))
+    _copy_all(data, wanted, changed, report)
 
     def write_state(path: Path) -> None:
         with gzip.open(path, 'wt', compresslevel=1) as f:
@@ -216,8 +233,17 @@ def _merge_preferences(data: Path) -> None:
                 os.chown(file, owner, owner)
 
 
+def _silent(_: str) -> None:
+    pass
+
+
+def _report(what: str) -> None:
+    print('progress', what, flush=True)
+
+
 def main() -> None:
-    data, build, remove, raw = _arguments(sys.argv[1:])
+    data, build, remove, raw, progress = _arguments(sys.argv[1:])
+    report = _report if progress else _silent
     _check_volume(data)
     if remove:
         for top in OWNED:
@@ -226,13 +252,16 @@ def main() -> None:
             (data / name).unlink(missing_ok=True)
         print('removed', data / BUNDLE)
         return
+    if not build.is_file():
+        report('hashing the build')
     wanted = from_manifest(build) if build.is_file() else from_directory(build)
     if BUNDLE + '/TegraGM20BMetal' not in wanted:
         sys.exit(f'stage-tegra-gm20b-metal: no plugin build in {build} (bazel build //gpu:bundle)')
     if not raw:
         wanted = {p: w for p, w in wanted.items() if not p.startswith(RAW + '/')}
-    done = sync(data, wanted)
+    done = sync(data, wanted, report)
     _merge_preferences(data)
+    report('flushing to the card')
     subprocess.run(['sync'], check=True)
     staged = sorted({p.split('/')[2] for p in wanted})
     print('staged', data / BUNDLE, staged, done)

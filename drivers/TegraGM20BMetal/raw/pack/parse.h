@@ -4,7 +4,7 @@ constexpr uint64_t kScanMaxBytes = 512 << 10, kScanWindowNs = 5000000000ULL;
 struct PushCounts {
     uint64_t submits, scanned, bytes, readBytes, unparsed;
     uint64_t passes, targets, linearTargets, draws, wfi, texInval, shaderInval, clears, ceCopies, ceBytes, blits,
-        dispatches, acquires, hostFlushes;
+        dispatches, acquires, hostFlushes, instructionInval, constantInval;
 };
 
 PushCounts gPush;
@@ -27,12 +27,16 @@ void pushMethod(PushCounts &c, PushParse &p, uint32_t subc, uint32_t mthd, uint3
     const bool target = mthd >= 0x0800 && mthd < 0x0a00;  // SET_COLOR_TARGET_*(j), 64 bytes apart
     switch (subc) {
     case 0:  // MAXWELL_B
+        // INVALIDATE_SHADER_CACHES(_NO_WFI) CONSTANT
+        c.constantInval += (mthd == 0x021c || mthd == 0x0da4) && (data & (1u << 12));
         if (mthd == 0x0110)
             c.wfi++;  // WAIT_FOR_IDLE
         else if (mthd == 0x1288 || mthd == 0x1338)
             c.texInval++;  // INVALIDATE_TEXTURE_DATA_CACHE(_NO_WFI)
         else if (mthd == 0x021c)
             c.shaderInval++;  // INVALIDATE_SHADER_CACHES (waits for idle)
+        else if (mthd == 0x0da4 && (data & 1))
+            c.instructionInval++;  // INVALIDATE_SHADER_CACHES_NO_WFI INSTRUCTION
         else if (mthd == 0x1538)
             c.passes++;  // SET_ZT_SELECT: once per vkCmdBeginRendering
         else if (mthd == 0x19d0)

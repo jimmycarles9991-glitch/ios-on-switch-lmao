@@ -54,6 +54,9 @@ enum {
 	TegraGM20BInfoExecSurfaces = 1u << 7,  /* ExecSurfaces (method 17) is implemented */
 	TegraGM20BInfoPriority = 1u << 8,      /* Priority (method 18) is implemented */
 	TegraGM20BInfoCompression = 1u << 9, /* compressible kinds bind; method 19 is implemented */
+	TegraGM20BInfoKillRecord = 1u << 10, /* a channel's fence word is a TegraGM20BAbiFence */
+	TegraGM20BInfoTiledCache = 1u
+		<< 11, /* every GR context holds the tile coalescer's table: a client may enable the tiled cache */
 };
 
 /* Method 1, output only. Everything NVK's struct nv_device_info needs that the client cannot derive. */
@@ -221,6 +224,19 @@ struct TegraGM20BAbiChannelCreateReply {
 	uint32_t fence_token;  /* clientMemoryForType type of the fence page */
 	uint32_t fence_offset; /* byte offset of this channel's uint32 seqno in that page */
 	uint32_t reserved;
+};
+
+/* What fence_offset points at (TegraGM20BInfoKillRecord). The GPU writes `completed`. When the kext kills the channel
+ * (method 11) it writes the rest, then moves `completed` past every seqno it gave out, so a client that sees `completed`
+ * pass a seqno sees the record too, with a load barrier between the two reads. A seqno s with
+ * (int32_t)(s - killed_first) >= 0 and (int32_t)(killed_last - s) >= 0 never ran to its end: that work failed with
+ * `error`, method 11's code. error 0: the channel lives. ChannelCreate zeroes the record of the channel it makes (a slot's
+ * seqnos continue across channels, so a record names the seqnos of the channel it was written for alone). */
+struct TegraGM20BAbiFence {
+	uint32_t completed;
+	uint32_t killed_first;
+	uint32_t killed_last;
+	uint32_t error;
 };
 
 /* Method 7. Waits (bounded) for the channel to go idle, then tears it down. */
@@ -423,7 +439,7 @@ struct TegraGM20BAbiZbcReply {
 	uint32_t reserved;
 };
 
-#if defined(__cplusplus)
+#ifdef __cplusplus
 #define TEGRA_GM20B_ASSERT(x, n) static_assert(sizeof(x) == (n), #x " layout")
 #else
 #define TEGRA_GM20B_ASSERT(x, n) _Static_assert(sizeof(struct x) == (n), #x " layout")

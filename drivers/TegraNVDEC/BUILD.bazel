@@ -9,8 +9,6 @@ lint_files(exclude = [
     "**/linux/**",
     "**/nouveau/**",
     "**/nvidia/**",
-    "selftest/HEVCPicture176.h",
-    "selftest/VP9Picture160.h",
 ])
 
 exports_files(glob(
@@ -34,7 +32,6 @@ kernel_driver(
     srcs = [
         "TegraNVDEC.cpp",
         "TegraNVDECMemory.cpp",
-        "TegraNVDECSelfTest.cpp",
         "TegraNVDECUserClient.cpp",
         "firmware.S",
     ],

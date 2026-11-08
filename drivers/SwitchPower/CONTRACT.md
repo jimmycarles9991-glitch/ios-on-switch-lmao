@@ -256,3 +256,26 @@ r15.tar --age-limit 600`, then `/usr/bin/log show --archive <dir>.logarchive --s
    pattern.
 4. Then play something heavy for 10 minutes (or loop a 4K video plus a browser): the console stays usable (the CPU
    governor's top may come down: that is CLTM working), the fan follows SwitchThermal's curve, no panic.
+
+## 10. iOS 27 (24B119) on J181AP
+
+24B119's thermalmonitord, booted as J181, reads `/System/Library/ThermalMonitor/J181AP-Info.plist`; SwitchSensors
+publishes that model's services when the kernel is built for 24B119 (`SwitchSensorModels.h`, selected by
+`SWITCH_IPSW_DEVICE_J181AP`), and J120AP's for 21H461.
+
+- **[V]** `Sensors`: 53 entries, 6 synth (TK0F, TK0C, TK1C, TK2C, TSFD, TSBH; `requiresWatchDog` false), 47 HID, so
+  the watchdog mask is **0x7fffffffffff**. 13 of the 47 are `shadowSensor` (`Th0f` and the like): the `Avg:` reading
+  again under its own filter.
+- **[V]** `-[HidSensors loadProductTemperatureParameters:]` keeps the **matchNames** as its HID keys (the 4CCs go to a
+  separate list); `getHIDSensorDict` maps each service to the first key whose matchName equals its Product (or, for a
+  4-character matchName, whose 4CC equals its LocationID), stores readings by key, and expects
+  `keys - shadows` services: **34**, one per distinct matchName. Shadows take their key's reading.
+- **[V]** The read path is 21H461's: `SensorDispatcherHelper getTemperatureFromSMCForKey:` first (-1 with no
+  AppleSMCSensorDispatcher key, so on to HID), then `IOHIDServiceClientCopyEvent(service, 15)` and field `0xf0000`.
+- **[V]** The J120AP table under J181 matched only `PMU tcal` and the PMGR die sensors 0-2: thermalmonitord would have
+  reported the rest missing and NativeSwitchWatchdog turned the watchdog off for the boot.
+- **Open [V by strings]**: J181's plist asks for CPMS package control (`packageComponentControl.expectsCPMSSupport`,
+  `powerZoneParams.usesPackageControl`), fast die control, the lifetime servo and power-zone telemetry. 24B119 looks
+  for `ApplePPM` (CPMS), `AppleCLPC` and `AppleDieTempController` for those, none of which the Switch publishes, so
+  CPU and GPU mitigation from CLTM reach nothing on iOS 27 until stand-ins exist; SwitchThermal's fan curve and DFLL
+  caps remain the protection.

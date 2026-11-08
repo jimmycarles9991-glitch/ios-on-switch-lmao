@@ -61,7 +61,7 @@ enum : uint8_t {
     FW_REVISION = 0x4c,
 };
 
-enum : uint16_t {
+enum : unsigned {
     CONFIG1_SPDSRC_SHIFT = 14,
     CONFIG1_SPDSRC_MASK = 3u << 14,
     SPDSRC12_ON = 0,
@@ -84,14 +84,14 @@ struct Listener {
 int read16(uint8_t reg, uint16_t &value)
 {
     uint8_t b[2] = {};
-    int err = tegra_i2c_read(kBus, kPD, reg, b, 2);
-    value = (uint16_t)(b[0] | b[1] << 8);
+    const int err = tegra_i2c_read(kBus, kPD, reg, b, 2);
+    value = static_cast<uint16_t>(b[0] | static_cast<unsigned>(b[1]) << 8);
     return err;
 }
 
 int write16(uint8_t reg, uint16_t value)
 {
-    const uint8_t b[2] = {(uint8_t)value, (uint8_t)(value >> 8)};
+    const uint8_t b[2] = {static_cast<uint8_t>(value), static_cast<uint8_t>(value >> 8)};
     return tegra_i2c_write(kBus, kPD, reg, b, 2);
 }
 
@@ -109,13 +109,15 @@ enum class Nego : uint8_t {
 
 uint32_t le32(const uint8_t *b)
 {
-    return (uint32_t)b[0] | (uint32_t)b[1] << 8 | (uint32_t)b[2] << 16 | (uint32_t)b[3] << 24;
+    return static_cast<uint32_t>(b[0]) | static_cast<uint32_t>(b[1]) << 8 | static_cast<uint32_t>(b[2]) << 16 |
+           static_cast<uint32_t>(b[3]) << 24;
 }
 
 // "15", "1.2", "2.25": milli-units as units without trailing zeros.
 void formatMilli(char *out, size_t size, unsigned milli)
 {
-    const unsigned whole = milli / 1000, frac = milli % 1000;
+    const unsigned whole = milli / 1000;
+    const unsigned frac = milli % 1000;
     if (!frac) {
         snprintf(out, size, "%u", whole);
     } else if (frac % 100 == 0) {
@@ -133,7 +135,8 @@ void formatPdos(char *out, size_t size, const uint32_t *pdos, unsigned count, un
     size_t used = 0;
     out[0] = 0;
     for (unsigned i = 0; i < count && used + 1 < size; ++i) {
-        char volts[12], amps[12];
+        char volts[12];
+        char amps[12];
         formatMilli(volts, sizeof(volts), charge::pdoMillivolts(pdos[i]));
         formatMilli(amps, sizeof(amps), charge::pdoMilliamps(pdos[i]));
         static const char *const kTypes[] = {"", "battery ", "variable ", "augmented "};
@@ -143,7 +146,7 @@ void formatPdos(char *out, size_t size, const uint32_t *pdos, unsigned count, un
                                      i + 1 == chosen ? "*" : "", kTypes[charge::pdoType(pdos[i])], volts, amps);
         if (n < 0)
             break;
-        used += (size_t)n < size - used ? (size_t)n : size - used - 1;
+        used += static_cast<size_t>(n) < size - used ? static_cast<size_t>(n) : size - used - 1;
     }
 }
 
@@ -153,15 +156,18 @@ void formatPdos(char *out, size_t size, const uint32_t *pdos, unsigned count, un
     const int config = tegra_gpio_config(gpio);
     if (config < 0)
         return "?";
-    if (!(config & 1))
+    const auto bits = static_cast<unsigned>(config);
+    if (!(bits & 1u))
         return "sfio";
-    if (config & 2)
-        return (config & 4) ? "out 1" : "out 0";
-    return (config & 8) ? "in 1" : "in 0";
+    if (bits & 2u)
+        return (bits & 4u) ? "out 1" : "out 0";
+    return (bits & 8u) ? "in 1" : "in 0";
 }
 }  // namespace
 
+// NOLINTNEXTLINE(misc-use-internal-linkage): OSDefineMetaClassAndStructors needs the class's external linkage
 class SwitchPD : public IOService {
+    // NOLINTNEXTLINE(misc-explicit-constructor): IOKit's structors macro declares the metaclass constructor
     OSDeclareDefaultStructors(SwitchPD);
 
     IOWorkLoop *loop = nullptr;
@@ -199,7 +205,7 @@ class SwitchPD : public IOService {
     void withdraw();
     void fail(const char *why);
     void endNegotiation();
-    bool readContract(uint32_t &pdo, uint32_t &rdo);
+    static bool readContract(uint32_t &pdo, uint32_t &rdo);
     static void alertFired(OSObject *owner, IOInterruptEventSource *, int);
     static void windowFired(OSObject *owner, IOTimerEventSource *);
     static void negoFired(OSObject *owner, IOTimerEventSource *);
@@ -229,7 +235,8 @@ IOLock *pdLock()
     IOLock *lock = __atomic_load_n(&gPDLock, __ATOMIC_ACQUIRE);
     if (lock)
         return lock;
-    IOLock *fresh = IOLockAlloc(), *none = nullptr;
+    IOLock *fresh = IOLockAlloc();
+    IOLock *none = nullptr;
     if (!fresh)
         return nullptr;
     if (__atomic_compare_exchange_n(&gPDLock, &none, fresh, false, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE))
@@ -266,7 +273,7 @@ bool SwitchPD::begin(uint16_t &type, uint16_t &revision, uint16_t &config, bool 
     negoTimer = loop ? IOTimerEventSource::timerEventSource(this, &SwitchPD::negoFired) : nullptr;
     IOService *nub = tegra_gpio_interrupt_nub(TEGRA_GPIO_PD_ALERT, TEGRA_GPIO_LEVEL_LOW);
     alert = nub && loop ? IOInterruptEventSource::interruptEventSource(this, &SwitchPD::alertFired, nub, 0) : nullptr;
-    if (!window || loop->addEventSource(window) != kIOReturnSuccess || !negoTimer ||
+    if (!loop || !window || loop->addEventSource(window) != kIOReturnSuccess || !negoTimer ||
         loop->addEventSource(negoTimer) != kIOReturnSuccess || !alert ||
         loop->addEventSource(alert) != kIOReturnSuccess) {
         panic("SwitchPD: cannot attach the BM92T36 ALERT (PK4, GPIO %u, level low)", TEGRA_GPIO_PD_ALERT);
@@ -274,7 +281,9 @@ bool SwitchPD::begin(uint16_t &type, uint16_t &revision, uint16_t &config, bool 
     loop->runAction(
         [](OSObject *owner, void *, void *, void *, void *) -> IOReturn {
             auto *self = static_cast<SwitchPD *>(owner);
-            uint16_t alertBits = 0, status1 = 0, status2 = 0;
+            uint16_t alertBits = 0;
+            uint16_t status1 = 0;
+            uint16_t status2 = 0;
             (void)read16(ALERT_STATUS, alertBits);  // releases a latched ALERT; its event is the state read next
             if (self->readStatus(status1, status2))
                 self->handle(0, status1, status2);
@@ -293,7 +302,7 @@ bool SwitchPD::readStatus(uint16_t &status1, uint16_t &status2)
     if (err && !reportedReadFailure)
         IOLog("SwitchPD: status read failed (I2C %d)\n", err);
     reportedReadFailure = err != 0;
-    return !err;
+    return err == 0;
 }
 
 // Work loop: an ALERT (the pin is masked while this runs and unmasked after, TegraGPIO level pins, so the
@@ -303,9 +312,10 @@ void SwitchPD::handle(uint16_t alertBits, uint16_t status1, uint16_t status2)
     state.alert = alertBits;
     state.status1 = status1;
     state.status2 = status2;
-    state.plugged = status1 & SWITCH_PD_STATUS1_INSERT;
-    state.vbusPresent = status1 & SWITCH_PD_STATUS1_VSAFE;
-    state.dataHost = state.plugged && ((status1 >> SWITCH_PD_STATUS1_DR_SHIFT) & 3) == SWITCH_PD_DATA_ROLE_DFP;
+    state.plugged = ((status1 & SWITCH_PD_STATUS1_INSERT) != 0u);
+    state.vbusPresent = ((status1 & SWITCH_PD_STATUS1_VSAFE) != 0u);
+    state.dataHost = state.plugged &&
+                     ((static_cast<unsigned>(status1) >> SWITCH_PD_STATUS1_DR_SHIFT) & 3u) == SWITCH_PD_DATA_ROLE_DFP;
     apply(switch_pd_decide(phase, alertBits, status1, status2, allowSource));
     negotiate(alertBits);
     const auto atRest = [](const void *pd) -> bool {
@@ -314,16 +324,19 @@ void SwitchPD::handle(uint16_t alertBits, uint16_t status1, uint16_t status2)
     };
     const bool contractOurs = nego == Nego::Settling || nego == Nego::Done;
     switch_pd_alt_alert(this, loop, atRest, alertBits, status1,
-                        phase == SWITCH_PD_SINK && state.plugged && !(status1 & SWITCH_PD_STATUS1_SRC_MODE),
+                        phase == SWITCH_PD_SINK && state.plugged && ((status1 & SWITCH_PD_STATUS1_SRC_MODE) == 0u),
                         contractOurs && choice.dock);
     notify();
 }
 
 void SwitchPD::notify()
 {
-    state.role = phase == SWITCH_PD_EMPTY    ? SWITCH_PD_ROLE_NONE
-                 : phase == SWITCH_PD_SOURCE ? SWITCH_PD_ROLE_SOURCE
-                                             : SWITCH_PD_ROLE_SINK;
+    state.role = SWITCH_PD_ROLE_SINK;
+    if (phase == SWITCH_PD_EMPTY) {
+        state.role = SWITCH_PD_ROLE_NONE;
+    } else if (phase == SWITCH_PD_SOURCE) {
+        state.role = SWITCH_PD_ROLE_SOURCE;
+    }
     for (unsigned i = 0; i < listenerCount; ++i)
         listeners[i].function(listeners[i].context, &state);
 }
@@ -352,11 +365,13 @@ void SwitchPD::apply(const switch_pd_step &step)
 
 // A phase's outputs (SwitchPDPolicy.h): switches off first when they go off, the rails, then the switches on, so the
 // controller never closes a switch onto a rail that is still ramping. A rail that cannot come up holds the port.
+// NOLINTNEXTLINE(misc-no-recursion): HELD has no source rails, so the nested enter() goes no deeper
 void SwitchPD::enter(switch_pd_phase next, const char *why)
 {
     phase = next;
     sawDetach = false;
-    const bool switches = switch_pd_switches_on(next, allowSource), rails = switch_pd_rails_on(next);
+    const bool switches = switch_pd_switches_on(next, allowSource);
+    const bool rails = switch_pd_rails_on(next);
     if (!switches)
         setSwitches(false);
     const bool railsDone = setRails(rails);
@@ -381,8 +396,8 @@ void SwitchPD::setSwitches(bool on)
     uint16_t config = 0;
     int err = read16(CONFIG1, config);
     if (!err) {
-        config =
-            (uint16_t)((config & ~CONFIG1_SPDSRC_MASK) | (on ? SPDSRC12_ON : SPDSRC12_OFF) << CONFIG1_SPDSRC_SHIFT);
+        config = static_cast<uint16_t>((config & ~CONFIG1_SPDSRC_MASK) | (on ? SPDSRC12_ON : SPDSRC12_OFF)
+                                                                             << CONFIG1_SPDSRC_SHIFT);
         err = write16(CONFIG1, config);
     }
     if (!err) {
@@ -415,7 +430,7 @@ bool SwitchPD::setRails(bool on)
             (void)tegra_gpio_output(kVconnGpio, 0);
             (void)tegra_gpio_output(kSourceRailGpio, 0);
         }
-        railsOn = !err;
+        railsOn = (err == 0);
     } else {
         err = tegra_gpio_output(kVconnGpio, 0);
         if (const int rail = tegra_gpio_output(kSourceRailGpio, 0))
@@ -424,7 +439,7 @@ bool SwitchPD::setRails(bool on)
     }
     if (err)
         IOLog("SwitchPD: source rails %s failed (%d)\n", on ? "on" : "off", err);
-    return !err;
+    return err == 0;
 }
 
 // Reattach: the partner proved sink-only and is back as our sink; the rails were up before it came, so our switch
@@ -456,7 +471,8 @@ void SwitchPD::endSourcing(switch_pd_phase next, const char *why)
 void SwitchPD::windowFired(OSObject *owner, IOTimerEventSource *)
 {
     auto *self = static_cast<SwitchPD *>(owner);
-    uint16_t status1 = 0, status2 = 0;
+    uint16_t status1 = 0;
+    uint16_t status2 = 0;
     if (!self->readStatus(status1, status2))
         return;
     const switch_pd_step step = switch_pd_window_end(self->phase, self->sawDetach, status1);
@@ -475,7 +491,7 @@ void SwitchPD::alertFired(OSObject *owner, IOInterruptEventSource *, int)
     const uint64_t now = mach_absolute_time();
     uint64_t elapsedNS = 0;
     absolutetime_to_nanoseconds(now - self->alertWindow, &elapsedNS);
-    if (elapsedNS > 1000000000ull) {
+    if (elapsedNS > 1000000000ULL) {
         self->alertWindow = now;
         self->alertCount = 0;
     }
@@ -483,8 +499,10 @@ void SwitchPD::alertFired(OSObject *owner, IOInterruptEventSource *, int)
         self->stopEvents();
         return;
     }
-    uint16_t alertBits = 0, status1 = 0, status2 = 0;
-    int err = read16(ALERT_STATUS, alertBits);
+    uint16_t alertBits = 0;
+    uint16_t status1 = 0;
+    uint16_t status2 = 0;
+    const int err = read16(ALERT_STATUS, alertBits);
     if (err) {
         if (!self->reportedReadFailure)
             IOLog("SwitchPD: status read failed (I2C %d)\n", err);
@@ -564,7 +582,10 @@ void SwitchPD::systemSleep(bool entering)
 // Work loop. The status registers are not clear-on-read (ALERT_STATUS, which is, stays alertFired's).
 void SwitchPD::describe(char *buffer, size_t size)
 {
-    uint16_t status1 = 0, status2 = 0, config = 0, vendor = 0;
+    uint16_t status1 = 0;
+    uint16_t status2 = 0;
+    uint16_t config = 0;
+    uint16_t vendor = 0;
     int err = read16(STATUS1, status1);
     if (!err)
         err = read16(STATUS2, status2);
@@ -577,8 +598,9 @@ void SwitchPD::describe(char *buffer, size_t size)
         "BM92T36 %s%s: STATUS1 %#x (switch1 %u switch2 %u VSAFE %u) STATUS2 %#x CONFIG1 %#x VENDOR %#x (OCP %s)%s; "
         "rails %s (v_vdd5v3 PX3 %s, VCONN PK5 %s); PSEL/OTG PJ5 %s PL0 %s",
         switch_pd_phase_name(phase), allowSource ? "" : " (host mode off)", status1,
-        !!(status1 & SWITCH_PD_STATUS1_SPDSRC1), !!(status1 & SWITCH_PD_STATUS1_SPDSRC2),
-        !!(status1 & SWITCH_PD_STATUS1_VSAFE), status2, config, vendor,
+        static_cast<unsigned>((status1 & SWITCH_PD_STATUS1_SPDSRC1) != 0u),
+        static_cast<unsigned>((status1 & SWITCH_PD_STATUS1_SPDSRC2) != 0u),
+        static_cast<unsigned>((status1 & SWITCH_PD_STATUS1_VSAFE) != 0u), status2, config, vendor,
         (vendor & VENDOR_CONFIG_OCP_DISABLE) ? "off" : "on", err ? " (I2C error)" : "", railsOn ? "on" : "off",
         pinText(kSourceRailGpio), pinText(kVconnGpio), pinText(kChargeSelect1Gpio), pinText(kChargeSelect2Gpio));
 }
@@ -588,7 +610,8 @@ void SwitchPD::describe(char *buffer, size_t size)
 // From handle(), after decide(): only a sink session with a source partner negotiates; anything else ends it.
 void SwitchPD::negotiate(uint16_t alertBits)
 {
-    const bool sinkSession = phase == SWITCH_PD_SINK && state.plugged && !(state.status1 & SWITCH_PD_STATUS1_SRC_MODE);
+    const bool sinkSession =
+        phase == SWITCH_PD_SINK && state.plugged && ((state.status1 & SWITCH_PD_STATUS1_SRC_MODE) == 0u);
     if (!sinkSession) {
         if (nego != Nego::Idle || state.pdSource || state.contractMillivolts)
             endNegotiation();
@@ -658,7 +681,8 @@ void SwitchPD::negotiate(uint16_t alertBits)
 
 bool SwitchPD::readContract(uint32_t &pdo, uint32_t &rdo)
 {
-    uint8_t p[5] = {}, r[5] = {};
+    uint8_t p[5] = {};
+    uint8_t r[5] = {};
     if (tegra_i2c_read(kBus, kPD, CURRENT_PDO, p, sizeof(p)) || tegra_i2c_read(kBus, kPD, CURRENT_RDO, r, sizeof(r))) {
         return false;
     }
@@ -678,7 +702,7 @@ void SwitchPD::choose()
     }
     sourcePdoCount = raw[0] / 4 > 7 ? 7 : raw[0] / 4;
     for (unsigned i = 0; i < sourcePdoCount; ++i)
-        sourcePdos[i] = le32(raw + 1 + 4 * i);
+        sourcePdos[i] = le32(raw + 1 + 4 * static_cast<size_t>(i));
     if (!sourcePdoCount) {
         if (nego != Nego::NotPd) {
             IOLog("SwitchPD: no USB-PD source capabilities: the charger keeps its own input detection (status1 %#x)\n",
@@ -693,14 +717,15 @@ void SwitchPD::choose()
         fail(choice.refusal);
         return;
     }
-    uint32_t pdo = 0, rdo = 0;
+    uint32_t pdo = 0;
+    uint32_t rdo = 0;
     if (readContract(pdo, rdo) && charge::contractMatches(choice, pdo, rdo)) {
         publish();  // ours already (made by an earlier boot): nothing to request
         return;
     }
     const uint32_t request = charge::encodeRdo(choice);
-    const uint8_t message[5] = {4, (uint8_t)request, (uint8_t)(request >> 8), (uint8_t)(request >> 16),
-                                (uint8_t)(request >> 24)};
+    const uint8_t message[5] = {4, static_cast<uint8_t>(request), static_cast<uint8_t>(request >> 8),
+                                static_cast<uint8_t>(request >> 16), static_cast<uint8_t>(request >> 24)};
     if (tegra_i2c_write(kBus, kPD, SET_RDO, message, sizeof(message)) || write16(COMMAND, SEND_RDO_CMD)) {
         fail("the request could not be written");
         return;
@@ -713,7 +738,8 @@ void SwitchPD::choose()
 void SwitchPD::verify()
 {
     negoTimer->cancelTimeout();
-    uint32_t pdo = 0, rdo = 0;
+    uint32_t pdo = 0;
+    uint32_t rdo = 0;
     if (!readContract(pdo, rdo)) {
         fail("the new contract could not be read");
         return;
@@ -739,9 +765,11 @@ void SwitchPD::publish()
     negoTimer->cancelTimeout();
     nego = Nego::Done;
     failedRequests = 0;
-    state.contractMillivolts = (uint16_t)choice.millivolts;
-    state.inputLimitMilliamps = (uint16_t)choice.inputLimit;
-    char volts[12], amps[12], pdos[192];
+    state.contractMillivolts = static_cast<uint16_t>(choice.millivolts);
+    state.inputLimitMilliamps = static_cast<uint16_t>(choice.inputLimit);
+    char volts[12];
+    char amps[12];
+    char pdos[192];
     formatMilli(volts, sizeof(volts), choice.millivolts);
     formatMilli(amps, sizeof(amps), choice.inputLimit);
     formatPdos(pdos, sizeof(pdos), sourcePdos, sourcePdoCount, choice.position);
@@ -812,7 +840,9 @@ SwitchPD *startPD()
         gPDStage = 3;
         IOService *resources = IOService::getResourceService();
         SwitchPD *pd = OSTypeAlloc(SwitchPD);
-        uint16_t type = 0, revision = 0, config = 0;
+        uint16_t type = 0;
+        uint16_t revision = 0;
+        uint16_t config = 0;
         bool turnedOff = false;
         if (resources && pd && pd->init() && pd->attach(resources)) {
             if (pd->begin(type, revision, config, turnedOff)) {
@@ -828,6 +858,7 @@ SwitchPD *startPD()
             OSSafeReleaseNULL(pd);
         }
     }
+    // NOLINTNEXTLINE(clang-analyzer-osx.cocoa.RetainCount): gPD keeps the started SwitchPD for good
     SwitchPD *pd = gPDStage == 2 ? gPD : nullptr;
     IOLockUnlock(lock);
     return pd;

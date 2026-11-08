@@ -94,6 +94,7 @@
 
 // The original AppleARMBacklight::gMetaClass (original-bindings.S), declared with a concrete type so that its address is
 // a constant initializer. Nothing here constructs or calls it.
+// NOLINTNEXTLINE(misc-use-internal-linkage): in an anonymous namespace it would make gOriginalAppleARMBacklightMeta internal
 class OriginalBacklightMetaClass : public OSMetaClass {
 public:
     OSObject *alloc() const override;
@@ -119,7 +120,7 @@ extern "C" __attribute__((weak)) void switch_motion_display_power(bool)
 namespace {
 using namespace switch_backlight;
 static_assert(kPanelMax == TEGRA_PANEL_BRIGHTNESS_MAX, "SwitchBacklightMath.h's panel range");
-constexpr uint64_t kLongestFadeNS = 10000000000ull;
+constexpr uint64_t kLongestFadeNS = 10000000000ULL;
 constexpr uint64_t kSendIntervalNS = 50000000;  // three frames at 60 Hz between panel commands
 constexpr uint32_t kQuietMS = 1000;             // no request for this long: the change is over (its log line)
 
@@ -136,7 +137,7 @@ OSDictionary *range(uint32_t max, uint32_t value)
     } entries[] = {{"min", 0}, {"max", max}, {"value", value}};
 
     for (const auto &entry : entries) {
-        OSNumber *number = OSNumber::withNumber(entry.value, 32);
+        const OSNumber *number = OSNumber::withNumber(entry.value, 32);
         if (dict && number)
             dict->setObject(entry.key, number);
         OSSafeReleaseNULL(number);
@@ -174,7 +175,7 @@ OSDictionary *calibration()
 
     OSDictionary *dict = OSDictionary::withCapacity(sizeof(entries) / sizeof(entries[0]));
     for (const auto &entry : entries) {
-        OSNumber *number = OSNumber::withNumber(entry.value, 32);
+        const OSNumber *number = OSNumber::withNumber(entry.value, 32);
         if (!dict || !number || !dict->setObject(entry.key, number)) {
             OSSafeReleaseNULL(number);
             OSSafeReleaseNULL(dict);
@@ -209,7 +210,9 @@ extern "C" bool switch_display_power_enabled(void)
     return off == 0;
 }
 
+// NOLINTNEXTLINE(misc-use-internal-linkage): OSDefineMetaClassAndStructors needs the class's external linkage
 class SwitchBacklight : public IOService {
+    // NOLINTNEXTLINE(misc-explicit-constructor): IOKit's structors macro declares the metaclass constructor
     OSDeclareDefaultStructors(SwitchBacklight) IOWorkLoop *loop = nullptr;
     IOTimerEventSource *work = nullptr;
     IOTimerEventSource *quiet = nullptr;
@@ -262,13 +265,13 @@ public:
 // AppleARMBacklight metaclass (see above). The C++ base class stays IOService.
 SwitchBacklight::MetaClass SwitchBacklight::gMetaClass;
 const OSMetaClass *const SwitchBacklight::metaClass = &SwitchBacklight::gMetaClass;
+// NOLINTNEXTLINE(cppcoreguidelines-interfaces-global-init): only its address, a link-time constant
 const OSMetaClass *const SwitchBacklight::superClass = &gOriginalAppleARMBacklightMeta;
 
 SwitchBacklight::SwitchBacklight(const OSMetaClass *meta) : IOService(meta)
 {}
 
-SwitchBacklight::~SwitchBacklight()
-{}
+SwitchBacklight::~SwitchBacklight() = default;
 
 const OSMetaClass *SwitchBacklight::getMetaClass() const
 {
@@ -282,9 +285,9 @@ OSMetaClassConstructorInit(SwitchBacklight, IOService, ) OSDefineDefaultStructor
 void SwitchBacklight::publishParameters()
 {
     OSDictionary *parameters = OSDictionary::withCapacity(3);
-    OSDictionary *brightness = range(kMax, current);
-    OSDictionary *raw = range(TEGRA_PANEL_BRIGHTNESS_MAX, toRaw(current));
-    OSDictionary *milliNits = range(kMilliNitsMax, rawToMilliNits(toRaw(current)));
+    const OSDictionary *brightness = range(kMax, current);
+    const OSDictionary *raw = range(TEGRA_PANEL_BRIGHTNESS_MAX, toRaw(current));
+    const OSDictionary *milliNits = range(kMilliNitsMax, rawToMilliNits(toRaw(current)));
     if (parameters && brightness && raw && milliNits) {
         parameters->setObject("brightness", brightness);
         parameters->setObject("rawBrightness", raw);
@@ -366,13 +369,13 @@ void SwitchBacklight::powerOn()
     // display-on timeout; without one it takes 450 lux (AABC::FirstALSSampleTimeout, 141 nits on 11-06).
     switch_als_set_active(true);
     const uint64_t scanout = mach_absolute_time();
-    const int level = (int)toRaw(target ? target : lit);
+    const int level = static_cast<int>(toRaw(target ? target : lit));
     const int err = tegra_panel_power_on(level);
     if (err)
         IOLog("SwitchBacklight: panel on failed (%d): the display is not running\n", err);
     const uint64_t panel = mach_absolute_time();
     panelOn = true;
-    sentRaw = err || level < 0 ? ~0u : (unsigned)level;
+    sentRaw = err || level < 0 ? ~0u : static_cast<unsigned>(level);
     if (target == 0 && level >= 0)
         target = current = lit;
     gDisplayOn = true;
@@ -388,7 +391,8 @@ void SwitchBacklight::powerOn()
 void SwitchBacklight::step()
 {
     IOLockLock(requestLock);
-    const bool on = wantOn, fresh = haveRequest;
+    const bool on = wantOn;
+    const bool fresh = haveRequest;
     const uint32_t value = requestValue;
     const uint64_t fadeNS = requestFadeNS;
     haveRequest = false;
@@ -416,7 +420,9 @@ void SwitchBacklight::step()
     uint32_t next = target;
     const uint64_t elapsed = mach_absolute_time() - rampStart;
     if (rampLength && elapsed < rampLength) {
-        next = (uint32_t)((int64_t)from + ((int64_t)target - (int64_t)from) * (int64_t)elapsed / (int64_t)rampLength);
+        next = static_cast<uint32_t>(static_cast<int64_t>(from) +
+                                     (static_cast<int64_t>(target) - static_cast<int64_t>(from)) *
+                                         static_cast<int64_t>(elapsed) / static_cast<int64_t>(rampLength));
     }
     const unsigned raw = toRaw(next);
     if (raw != sentRaw) {
@@ -489,14 +495,14 @@ void SwitchBacklight::guardFired(OSObject *owner, IOTimerEventSource *sender)
 
 IOReturn SwitchBacklight::setProperties(OSObject *properties)
 {
-    OSDictionary *dict = OSDynamicCast(OSDictionary, properties);
+    const OSDictionary *dict = OSDynamicCast(OSDictionary, properties);
     if (!dict)
         return kIOReturnBadArgument;
     // DisplayBrightnessNitsNVRAM (lMidPanel, nits * 65536): DisplayCreateWithID's first write here under the new
     // architecture (0x1b62b0f44, straight through IORegistryEntrySetCFProperty while display+0x78 is still NULL), past all
     // five of its failures and just before __DisplayCheckEDRSupport starts libEDR's server, so the first one says
     // CoreBrightness has its display (logged once). Nothing else is done with it.
-    if (OSNumber *nvram = OSDynamicCast(OSNumber, dict->getObject("DisplayBrightnessNitsNVRAM"))) {
+    if (const OSNumber *nvram = OSDynamicCast(OSNumber, dict->getObject("DisplayBrightnessNitsNVRAM"))) {
         if (!__atomic_exchange_n(&gSawDisplay, true, __ATOMIC_RELAXED)) {
             IOLog("SwitchBacklight: CoreBrightness made its display (new backlight architecture, NVRAM %u nits): "
                   "libEDR's server starts next\n",
@@ -512,24 +518,26 @@ IOReturn SwitchBacklight::setProperties(OSObject *properties)
                   cap->unsigned32BitValue() >> 16);
         }
     }
-    OSNumber *nits = OSDynamicCast(OSNumber, dict->getObject("brightness-nits"));
-    OSNumber *brightness = OSDynamicCast(OSNumber, dict->getObject("brightness"));
+    const OSNumber *nits = OSDynamicCast(OSNumber, dict->getObject("brightness-nits"));
+    const OSNumber *brightness = OSDynamicCast(OSNumber, dict->getObject("brightness"));
     if (!nits && !brightness)
         return kIOReturnSuccess;  // FadePeriod / backlight-level alone: nothing to do
-    uint32_t value;
+    uint32_t value = 0;
     uint64_t fadeNS = 0;
     if (nits) {
         // nits * 65536, a CFNumber SInt32; CoreBrightness steps its own ramps, so no fade here.
-        const int32_t requested = (int32_t)nits->unsigned32BitValue();
+        const int32_t requested = static_cast<int32_t>(nits->unsigned32BitValue());
         value = nitsToBrightness(requested);
         if (!__atomic_exchange_n(&gSawNits, true, __ATOMIC_RELAXED)) {
+            // NOLINTBEGIN(bugprone-signed-bitwise): signed 16.16 nits, as CoreBrightness sends them
             IOLog("SwitchBacklight: CoreBrightness sets brightness-nits (first %d.%02d nits, panel %u)\n",
-                  requested >> 16, (int)(((requested & 0xffff) * 100) >> 16), toRaw(value));
+                  requested >> 16, (((requested & 0xffff) * 100) >> 16), toRaw(value));
+            // NOLINTEND(bugprone-signed-bitwise)
         }
     } else {
-        OSNumber *fade = OSDynamicCast(OSNumber, dict->getObject("FadePeriod"));
+        const OSNumber *fade = OSDynamicCast(OSNumber, dict->getObject("FadePeriod"));
         value = brightness->unsigned32BitValue();
-        fadeNS = fade ? fade->unsigned64BitValue() * 1000000000ull / 65536 : 0;
+        fadeNS = fade ? fade->unsigned64BitValue() * 1000000000ULL / 65536 : 0;
     }
     IOLockLock(requestLock);
     requestValue = value;
@@ -571,7 +579,7 @@ bool SwitchBacklight::start(IOService *provider)
         return false;
     nanoseconds_to_absolutetime(kSendIntervalNS, &sendInterval);
     sleepEnabled = switch_display_power_enabled();
-    nanoseconds_to_absolutetime(SWITCH_WAKE_GUARD_MS * 1000000ull, &guardTimeout);
+    nanoseconds_to_absolutetime(SWITCH_WAKE_GUARD_MS * 1000000ULL, &guardTimeout);
     requestLock = IOLockAlloc();
     loop = IOWorkLoop::workLoop();
     work = loop ? IOTimerEventSource::timerEventSource(this, &SwitchBacklight::workFired) : nullptr;
@@ -584,7 +592,7 @@ bool SwitchBacklight::start(IOService *provider)
     }
     // Start from what the boot chain left on the panel; nothing is sent until CoreBrightness asks.
     const int boot = tegra_panel_boot_brightness();
-    current = target = boot >= 0 ? toBrightness((unsigned)boot) : kMax / 2;
+    current = target = boot >= 0 ? toBrightness(static_cast<unsigned>(boot)) : kMax / 2;
     if (current)
         lit = current;
     setName("backlight");
@@ -613,7 +621,7 @@ bool SwitchBacklight::start(IOService *provider)
     // first step and the slider, which set the logical brightness directly, do. The new architecture fails the display
     // without backlight-marketing-table (0x1b62ae660), so the two go together.
     OSData *table = OSData::withBytes(kMarketingTable, sizeof(kMarketingTable));
-    const bool marketing = table && setProperty("backlight-marketing-table", table);
+    const bool marketing = (table != nullptr) && setProperty("backlight-marketing-table", table);
     OSSafeReleaseNULL(table);
     if (marketing) {
         setProperty("new-backlight-architecture", kOSBooleanTrue);
@@ -686,6 +694,7 @@ extern "C" int switch_backlight_start(void)
         return -1;
     }
     __atomic_store_n(&gBacklight, candidate, __ATOMIC_RELEASE);
+    // NOLINTNEXTLINE(clang-analyzer-osx.cocoa.RetainCount): gBacklight keeps the started backlight for good
     return 0;
 }
 

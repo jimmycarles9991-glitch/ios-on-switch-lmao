@@ -3,7 +3,6 @@
 load("//ipsw:defs.bzl", _ipsw_pins = "ipsw_pins")
 load("//kernel:prelink.bzl", "PRELINK")
 load("//kernel/rules:kernel.bzl", "KernelObjectsInfo")
-load("//translate/arm64e/pretranslate:defs.bzl", "PretranslatedInfo")
 
 # The selected IPSW kind's member pins as JSON (//ipsw:defs.bzl).
 ipsw_pins = _ipsw_pins
@@ -15,6 +14,7 @@ def _install_spec_impl(ctx):
         "cryptex-h": ctx.file.cryptex_h,
         "cryptex-cpp": ctx.file.cryptex_cpp,
         "block-cpp": ctx.file.block_cpp,
+        "volumes-h": ctx.file.volumes_h,
     }
     args = ctx.actions.args()
     for flag, f in sources.items():
@@ -37,6 +37,7 @@ install_spec = rule(
         "cryptex_h": attr.label(allow_single_file = True, mandatory = True),
         "cryptex_cpp": attr.label(allow_single_file = True, mandatory = True),
         "block_cpp": attr.label(allow_single_file = True, mandatory = True),
+        "volumes_h": attr.label(allow_single_file = True, mandatory = True),
         "_tool": attr.label(default = "//tools/install:spec", executable = True, cfg = "exec"),
     },
     doc = "The partition size and volume/cryptex UUIDs the kernel was built with, parsed from its sources.",
@@ -218,17 +219,8 @@ def _image_inputs_impl(ctx):
             paths[name] = _rlocation(ctx, found[0])
             files.append(found[0])
     runfiles = ctx.runfiles(files = [out] + files)
-    roles = {}
-    for target in ctx.attr.pretranslated:
-        info = target[PretranslatedInfo]
-        roles[info.role] = {
-            "driver": _rlocation(ctx, info.driver),
-            "tool": _rlocation(ctx, info.tool),
-            "trustcaches": [_rlocation(ctx, f) for f in info.apple_trustcaches],
-        }
-        runfiles = runfiles.merge(info.runfiles)
-    if roles:
-        paths["pretranslate"] = roles
+    for target in ctx.attr.inputs.values():
+        runfiles = runfiles.merge(target[DefaultInfo].default_runfiles)
     ctx.actions.write(out, json.encode_indent(paths) + "\n")
     return [DefaultInfo(files = depset([out]), runfiles = runfiles)]
 
@@ -236,11 +228,7 @@ image_inputs = rule(
     implementation = _image_inputs_impl,
     attrs = {
         "inputs": attr.string_keyed_label_dict(allow_files = True),
-        "pretranslated": attr.label_list(
-            providers = [PretranslatedInfo],
-            doc = "iOS 27's pretranslate drivers, run by the composer over each mounted volume",
-        ),
     },
-    doc = "{input name: runfiles path} as JSON for tools/install/image.py, with the inputs in runfiles; an empty " +
-          "input (a label_flag left at :none) is left out.",
+    doc = "{input name: runfiles path} as JSON for tools/install/image.py, with the inputs and their runfiles in " +
+          "runfiles; an empty input (a label_flag left at :none) is left out.",
 )

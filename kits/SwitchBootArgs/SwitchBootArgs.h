@@ -14,7 +14,7 @@ extern "C" {
 static inline bool switch_boot_flag(const char *name)
 {
     uint32_t value = 0;
-    return PE_parse_boot_argn(name, &value, sizeof(value)) && value;
+    return PE_parse_boot_argn(name, &value, sizeof(value)) != 0 && value != 0;
 }
 
 static inline uint32_t switch_boot_u32(const char *name, uint32_t fallback)

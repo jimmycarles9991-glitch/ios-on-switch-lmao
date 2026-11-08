@@ -21,6 +21,7 @@ RAW = [
     "probe.mm",
     "ca/caset.py",
     "ca/caspec.py",
+    "ca/caspec27.py",
     "ca/qc-21H461.json",
 ]
 

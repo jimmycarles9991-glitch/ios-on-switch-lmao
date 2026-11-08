@@ -170,12 +170,16 @@ CheckOptions:
   # `if (pointer)` and `if (flags & BIT)` are idiomatic; int <-> bool conversions elsewhere are flagged.
   readability-implicit-bool-conversion.AllowPointerConditions: true
   readability-implicit-bool-conversion.AllowIntegerConditions: true
+  # C's !, && and || yield int by definition: returning one from a bool function is not a conversion to flag.
+  readability-implicit-bool-conversion.AllowLogicalOperatorConversion: true
   # One-line bodies may go without braces (the house style); bodies of two lines or more need them.
   readability-braces-around-statements.ShortStatementLines: 2
   # Only the confusable suffix: l (vs 1). 0x10u is as clear as 0x10U.
   readability-uppercase-literal-suffix.NewSuffixes: 'L;LL;LU;LLU;UL;ULL'
   # `1 << 5` with positive literals is a mask, not a sign bug; bitwise on signed variables is still flagged.
   bugprone-signed-bitwise.IgnorePositiveIntegerLiterals: true
+  # int8_t is a number (RSSI, dBm): widening it to int is meant to sign-extend. Plain and signed char stay checked.
+  bugprone-signed-char-misuse.CharTypedefsToIgnore: 'int8_t'
   # bzero/bcopy are the kernel's own; keep the check for gets/strcpy-class functions only.
   bugprone-unsafe-functions.ReportMoreUnsafeFunctions: false
   bugprone-suspicious-string-compare.WarnOnImplicitComparison: false

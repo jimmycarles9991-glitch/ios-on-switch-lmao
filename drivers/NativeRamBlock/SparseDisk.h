@@ -19,14 +19,14 @@ struct RamSparseDisk {
 
 static uint32_t ramU32(const uint8_t *p)
 {
-    uint32_t v;
+    uint32_t v = 0;
     memcpy(&v, p, 4);
     return v;
 }
 
 static uint64_t ramU64(const uint8_t *p)
 {
-    uint64_t v;
+    uint64_t v = 0;
     memcpy(&v, p, 8);
     return v;
 }
@@ -38,12 +38,15 @@ static bool ramPackedLayout(const uint8_t *p, uint64_t n, uint64_t *logical)
     if (!logical || !p || n < 32 || n > 0x10000000 || memcmp(p, "DBRDISK1", 8) || ramU32(p + 8) != 1 ||
         ramU32(p + 12) != 4096)
         return false;
-    uint64_t size = ramU64(p + 16), count = ramU64(p + 24), end = 0;
+    const uint64_t size = ramU64(p + 16);
+    const uint64_t count = ramU64(p + 24);
+    uint64_t end = 0;
     if (!size || size > (1ULL << 40) || (size & 4095) || count > 65536 || count > (n - 32) / 16)
         return false;
     uint64_t cursor = 32 + count * 16;
     for (uint64_t i = 0; i < count; ++i) {
-        uint64_t at = ramU64(p + 32 + i * 16), len = ramU64(p + 40 + i * 16);
+        const uint64_t at = ramU64(p + 32 + i * 16);
+        const uint64_t len = ramU64(p + 40 + i * 16);
         if (!len || ((at | len) & 4095) || at < end || at > size || len > size - at || len > n - cursor)
             return false;
         end = at + len;
@@ -65,9 +68,11 @@ template <class Ops> static bool ramSparseImport(RamSparseDisk &d, const uint8_t
     uint64_t size = 0;
     if (!d.pages || !ramPackedLayout(p, n, &size) || d.bytes != size || d.resident)
         return false;
-    uint64_t count = ramU64(p + 24), cursor = 32 + count * 16;
+    const uint64_t count = ramU64(p + 24);
+    uint64_t cursor = 32 + count * 16;
     for (uint64_t i = 0; i < count; ++i) {
-        uint64_t at = ramU64(p + 32 + i * 16), len = ramU64(p + 40 + i * 16);
+        const uint64_t at = ramU64(p + 32 + i * 16);
+        const uint64_t len = ramU64(p + 40 + i * 16);
         for (uint64_t j = 0; j < len; j += 4096) {
             const uint8_t *src = p + cursor + j;
             uint8_t any = 0;
@@ -100,7 +105,10 @@ static uint64_t ramSparseIO(RamSparseDisk &d, bool write, uint64_t offset, uint6
         return 0;
     uint64_t done = 0;
     while (done < length) {
-        uint64_t at = offset + done, index = at / 4096, skip = at & 4095, n = 4096 - skip;
+        const uint64_t at = offset + done;
+        const uint64_t index = at / 4096;
+        const uint64_t skip = at & 4095;
+        uint64_t n = 4096 - skip;
         if (n > length - done)
             n = length - done;
         uint8_t *page = d.pages[index];
@@ -117,7 +125,7 @@ static uint64_t ramSparseIO(RamSparseDisk &d, bool write, uint64_t offset, uint6
             d.pages[index] = page;
             d.resident += 4096;
         }
-        uint64_t actual = write ? ops.read(done, page + skip, n) : ops.copy(done, (page ? page : zero) + skip, n);
+        const uint64_t actual = write ? ops.read(done, page + skip, n) : ops.copy(done, (page ? page : zero) + skip, n);
         if (actual > n)
             break;
         done += actual;
@@ -135,15 +143,18 @@ static bool ramSparseWriteAtomic(RamSparseDisk &d, uint64_t offset, const uint8_
 {
     if (!d.pages || !input || !length || length > 65536 || offset > d.bytes || length > d.bytes - offset)
         return false;
-    const uint64_t first = offset / 4096, last = (offset + length - 1) / 4096;
+    const uint64_t first = offset / 4096;
+    const uint64_t last = (offset + length - 1) / 4096;
     uint64_t missing = 0;
     for (uint64_t i = first; i <= last; ++i)
         missing += d.pages[i] == nullptr;
     if (!ramSparseRoom(d, missing))
         return false;
+    // NOLINTNEXTLINE(misc-const-correctness): the pages become d.pages' writable storage (a template: the check sees no use)
     uint8_t *fresh[17] = {};
-    uint64_t indices[17] = {}, count = 0;
-    for (uint64_t i = first; i <= last; ++i)
+    uint64_t indices[17] = {};
+    uint64_t count = 0;
+    for (uint64_t i = first; i <= last; ++i) {
         if (!d.pages[i]) {
             uint8_t *page = ops.allocate();
             if (!page) {
@@ -154,12 +165,14 @@ static bool ramSparseWriteAtomic(RamSparseDisk &d, uint64_t offset, const uint8_
             fresh[count] = page;
             indices[count++] = i;
         }
+    }
     for (uint64_t j = 0; j < count; ++j)
         d.pages[indices[j]] = fresh[j];
     d.resident += count * 4096;
     uint64_t done = 0;
     while (done < length) {
-        uint64_t at = offset + done, n = 4096 - (at & 4095);
+        const uint64_t at = offset + done;
+        uint64_t n = 4096 - (at & 4095);
         if (n > length - done)
             n = length - done;
         memcpy(d.pages[at / 4096] + (at & 4095), input + done, n);

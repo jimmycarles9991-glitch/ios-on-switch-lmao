@@ -23,8 +23,8 @@ installs (it ignores buttons for the first second), VOL+ or VOL- goes back. Then
 3. The boot files go into `switchroot/ios/`, each 8 MiB chunk checked before it's written and read back after.
    `bootargs.txt` is never touched.
 4. It reads the container 8 MiB at a time, and the security engine checks each chunk's SHA-256 before any of it is
-   written. The checkpoint areas and the internal pool are written whole. The partition's other blocks keep their old
-   bytes, which the new container never reads.
+   written. The checkpoint descriptor area is written whole, because APFS scans it for the newest superblock. The
+   partition's other blocks keep their old bytes, which the new container never reads.
 5. `apfs.c` fits the container to the partition, the way `diskutil apfs resizeContainer` shrinks one, but in place.
    It checks everything first and writes the bitmaps first and the superblocks last. Then it measures the container
    again from the card.

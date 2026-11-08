@@ -229,7 +229,7 @@ constexpr uint32_t kCapMsi = 0x05;
 
 uint32_t bridgeWindow(uint32_t base, uint32_t length)
 {
-    auto field = [](uint32_t a) {
+    const auto field = [](uint32_t a) {
         return (a >> 16) & 0xFFF0u;
     };
     return (field(base + length - 1) << 16) | field(base);
@@ -278,7 +278,10 @@ void TegraPcie::rpModify(uint32_t offset, uint32_t clear, uint32_t set) const
 // nxk power `pcie_power`). XUSB shares it and is normally on already; only switched on if it is off.
 bool TegraPcie::rail(char *why, size_t whyLength)
 {
-    constexpr uint8_t kPmic = 0x3C, kLdo1Cfg = 0x25, kModeNormal = 3u << 6, kLdo1_1V05 = (1050000 - 800000) / 25000;
+    constexpr uint8_t kPmic = 0x3C;
+    constexpr uint8_t kLdo1Cfg = 0x25;
+    constexpr uint8_t kModeNormal = 3u << 6;
+    constexpr uint8_t kLdo1_1V05 = (1050000 - 800000) / 25000;
     int err = tegra_i2c_init(5);
     uint8_t value = 0;
     if (!err)
@@ -291,7 +294,7 @@ bool TegraPcie::rail(char *why, size_t whyLength)
     }
     if (err)
         snprintf(why, whyLength, "PMIC LDO1 (I2C5 0x3c reg 0x25): I2C error %d", err);
-    return !err;
+    return err == 0;
 }
 
 // clk_plle_tegra210_enable, B01 values. Left alone if the hardware sequencer already drives it or it is locked.
@@ -449,7 +452,7 @@ bool TegraPcie::uphy(char *why, size_t whyLength)
     // Lane 0 to pcie-x1 and out of IDDQ; the other lanes' functions stay as the loader set them (XUSB's).
     p.modify(PADCTL_USB3_PAD_MUX, kLane0FunctionMask, kLane0IddqDisable);
     // AUX mux clamps off in Linux's order (aux_mux_lp0_clamp disable): CLAMP_EN, CLAMP_EN_EARLY, VCORE_DOWN.
-    for (uint32_t bit : kAuxMuxLp0) {
+    for (const uint32_t bit : kAuxMuxLp0) {
         p.modify(PADCTL_ELPG_PROGRAM1, bit, 0);
         IODelay(200);
     }
@@ -474,7 +477,8 @@ void TegraPcie::pads()
 // starts from whatever the boot chain left (it is "powered on by default"), and this puts it in a known state.
 void TegraPcie::moduleReset()
 {
-    const uint32_t bit = 1u << kWlRegOn, enable = bit << 8;
+    const uint32_t bit = 1u << kWlRegOn;
+    const uint32_t enable = bit << 8;
     gpio_.w32(kGpioH + kGpioMskOut, enable);  // value 0 first, so the pin never glitches high
     gpio_.w32(kGpioH + kGpioMskOe, enable | bit);
     gpio_.w32(kGpioH + kGpioMskCnf, enable | bit);
@@ -632,12 +636,13 @@ bool TegraPcie::enumerate(Endpoint &ep, char *why, size_t whyLength)
         epConfigWrite(offset, 0xFFFFFFFF);
         const uint32_t probe = epConfigRead(offset);
         epConfigWrite(offset, 0);
-        const bool memory = probe && !(probe & 1);
+        const bool memory = (probe != 0u) && ((probe & 1) == 0u);
         if (!memory) {
             ++i;
             continue;
         }
-        const bool wide = (probe & 6) == 4, prefetchable = (probe & 8) != 0;
+        const bool wide = (probe & 6) == 4;
+        const bool prefetchable = (probe & 8) != 0;
         const uint32_t size = ~(probe & ~0xFu) + 1;
         if (!size) {
             i += wide ? 2 : 1;
@@ -768,7 +773,8 @@ bool TegraPcie::endpointDecodes()
 bool TegraPcie::msiEnable(uint32_t msiPA, char *why, size_t whyLength)
 {
     // The chip's MSI capability (brcmfmac: at 0x58, 64-bit address). Found through the capability list.
-    uint32_t at = epConfigRead(CFG_CAP_PTR) & 0xFC, cap = 0;
+    uint32_t at = epConfigRead(CFG_CAP_PTR) & 0xFC;
+    uint32_t cap = 0;
     for (int hops = 0; hops < 16 && at >= 0x40; ++hops) {
         const uint32_t header = epConfigRead(at);
         if ((header & 0xFF) == kCapMsi) {
@@ -790,7 +796,7 @@ bool TegraPcie::msiEnable(uint32_t msiPA, char *why, size_t whyLength)
     pcie_.modify(kAfi + AFI_INTR_MASK, 0, kAfiIntrMaskMsi);
 
     const uint32_t control = epConfigRead(cap) >> 16;
-    const bool wide = control & (1u << 7);
+    const bool wide = (control & (1u << 7)) != 0u;
     epConfigWrite(cap + 4, msiPA);
     if (wide)
         epConfigWrite(cap + 8, 0);

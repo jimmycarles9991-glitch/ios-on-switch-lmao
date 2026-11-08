@@ -3,6 +3,7 @@
  * SPDX-License-Identifier: MIT
  */
 #include "nvk_device.h"
+#include "nvk_switch_capture.h"
 
 #include "nvk_cmd_buffer.h"
 #include "nvk_entrypoints.h"
@@ -306,8 +307,13 @@ nvk_CreateDevice(VkPhysicalDevice physicalDevice,
        * not taking one so we need to reserve one at device create time.  If
        * we do so now then it will always have sampler index 0 so we can rely
        * on that in the compiler lowering code (similar to null descriptors).
+       *
+       * Switch: reserved on every GPU, so sampler index 0 means "no sampler"
+       * in every process: the raw GM20B path reads a texture handle naming
+       * it so (TegraGM20BMetal raw/pack/layouts.py, raw_record.cpp), where it
+       * would otherwise be whichever sampler the process made first.
        */
-      if (pdev->info.cls_eng3d < MAXWELL_A) {
+      {
          const struct nvk_sampler_header txf_sampler =
             nvk_txf_sampler_header(pdev);
 
@@ -341,6 +347,7 @@ nvk_CreateDevice(VkPhysicalDevice physicalDevice,
                              pdev->info.cls_eng3d < VOLTA_A);
       if (result != VK_SUCCESS)
          goto fail_edb_bview_cache;
+      switch_nvk_programs_init(dev);
 
       result = nvk_heap_init(dev, &dev->event_heap,
                              NVKMD_MEM_LOCAL | NVKMD_MEM_COHERENT,
@@ -419,6 +426,7 @@ fail_slm:
 fail_event_heap:
    nvk_heap_finish(dev, &dev->event_heap);
 fail_shader_heap:
+   switch_nvk_programs_finish(dev);
    nvk_heap_finish(dev, &dev->shader_heap);
 fail_edb_bview_cache:
    nvk_edb_bview_cache_finish(dev, &dev->edb_bview_cache);
@@ -476,6 +484,7 @@ nvk_DestroyDevice(VkDevice _device, const VkAllocationCallbacks *pAllocator)
       if (pdev->info.cls_eng3d < MAXWELL_B)
          nvk_heap_finish(dev, &dev->qmd_heap);
       nvk_heap_finish(dev, &dev->event_heap);
+      switch_nvk_programs_finish(dev);
       nvk_heap_finish(dev, &dev->shader_heap);
       nvk_edb_bview_cache_finish(dev, &dev->edb_bview_cache);
       nvk_descriptor_table_finish(dev, &dev->samplers);

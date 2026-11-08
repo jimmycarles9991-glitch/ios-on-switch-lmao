@@ -98,7 +98,7 @@ uint64_t nowNs();
 // Little-endian fields of firmware messages, any alignment (the build is -mstrict-align).
 inline uint16_t le16(const uint8_t *p)
 {
-    return static_cast<uint16_t>(p[0] | (p[1] << 8));
+    return static_cast<uint16_t>(p[0] | (static_cast<unsigned>(p[1]) << 8));
 }
 
 inline uint32_t le32(const uint8_t *p)
@@ -121,7 +121,7 @@ inline void put16(uint8_t *p, uint16_t v)
 
 inline void put32(uint8_t *p, uint32_t v)
 {
-    for (int i = 0; i < 4; ++i)
+    for (unsigned i = 0; i < 4; ++i)
         p[i] = static_cast<uint8_t>(v >> (8 * i));
 }
 
@@ -165,7 +165,7 @@ private:
     uint32_t cfgPage_ = ~0u;
 
     bool map();
-    bool rail(char *why, size_t whyLength);
+    static bool rail(char *why, size_t whyLength);
     bool powerUp(char *why, size_t whyLength);
     bool plle(char *why, size_t whyLength);
     bool uphyManagementClock(char *why, size_t whyLength);
@@ -320,7 +320,8 @@ class Msgbuf {
 public:
     using EventHandler = void (*)(void *context, const Event &event);
     // Ethernet header + payload, and the firmware interface it came in on (0: the station)
-    using FrameHandler = void (*)(void *context, const uint8_t *frame, size_t length, uint8_t ifidx);
+    // `kind`: the rx completion's frame type (BCM_MSGBUF_RX_FRAME_*: 802.3 for the station, 802.11 in monitor mode).
+    using FrameHandler = void (*)(void *context, const uint8_t *frame, size_t length, uint8_t ifidx, uint8_t kind);
 
     enum Flow {
         FLOW_CLOSED,
@@ -553,7 +554,7 @@ private:
 
     uint8_t *txVa(uint32_t id) const
     {
-        return area_ + txBase_ + (id - 1) * kTxBufferSize;
+        return area_ + txBase_ + static_cast<size_t>(id - 1) * kTxBufferSize;
     }
 
     uint32_t txPa(uint32_t id) const
@@ -563,7 +564,7 @@ private:
 
     uint8_t *rxVa(uint32_t id) const
     {
-        return area_ + rxBase_ + id * kRxBufferSize;
+        return area_ + rxBase_ + static_cast<size_t>(id) * kRxBufferSize;
     }
 
     uint32_t rxPa(uint32_t id) const

@@ -1,7 +1,9 @@
 """The GPU bundle's external inputs (MODULE.bazel `gpu` extension).
 
-@gpu_device_data  what only a Switch makes (precompile/harvest.py --pack): the driver records m2v wrote and the Metal
-               libraries Core Image compiled there, one tar pinned by sha256 (DEVICE_DATA), fetched into the repository
+@gpu_device_data  what only a Switch makes (precompile/harvest.py --pack): the driver records m2v wrote, the Metal
+               libraries Core Image compiled there and the compiler's replies that made them (the frontend's msl/
+               cache, which the seed carries so no process compiles Core Image's sources on first use), one tar
+               pinned by sha256 (DEVICE_DATA), fetched into the repository
                cache once from ~/Library/Application Support/switch-ios/gpu-device-data/ (or
                $SWITCH_HOME/gpu-device-data/), where harvest.py --pack writes it; never from a checkout. Empty on a
                machine that has never harvested a console (CI, anyone else's Mac): the seed is made without it.
@@ -107,6 +109,11 @@ filegroup(
 filegroup(
     name = "libraries",
     srcs = glob(["data/**"], allow_empty = True),
+)
+
+filegroup(
+    name = "replies",
+    srcs = glob(["msl/**"], allow_empty = True),
 )
 """.format(**(DEVICE_DATA or {"file": "no device data", "sha256": "none"})))
 

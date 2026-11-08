@@ -1,7 +1,7 @@
 /* boot/loader/seed.c against a model of what it touches: CAR's SE and ENTROPY clock/reset bits, SE2's registers
  * (security, config, lists, RNG, status, interrupt and error latches) with a DRBG that writes its output into the
- * output list's buffer when started, the AHB write queue, the counter, and the 64-byte seed and 8-byte report in an
- * ADT. Every access seed.c makes goes through switch_seed_read32/write32 below; anything outside the model aborts.
+ * output list's buffer when started, the AHB write queue, the counter, and the seed and 8-byte report in an ADT. Every
+ * access seed.c makes goes through switch_seed_read32/write32 below; anything outside the model aborts.
  * seed_scenarios() is run by seed_test.cpp (BUILD.bazel builds seed.c with SWITCH_SEED_HOST_TEST). */
 #include <stdio.h>
 #include <stdlib.h>
@@ -15,7 +15,8 @@ volatile uint32_t *switch_seed_dma_words(void);
 #define AHB       0x6000c000u
 #define SE2       0x70412000u
 #define SEED_PA   0x80000100u
-#define SOURCE_PA 0x80000200u
+#define SOURCE_PA 0x80000400u
+#define WORDS     (SWITCH_SEED_BYTES / 4u)
 
 enum {
     SE_CLOCK_OFF = 1,
@@ -38,8 +39,8 @@ static struct {
     uint32_t modes[4];
     unsigned starts, se_accesses, drains, busy_reads;
     uint64_t counter;
-    uint32_t seed[16], source[2];
-    uint32_t drbg[16];
+    uint32_t seed[WORDS], source[2];
+    uint32_t drbg[WORDS];
 } m;
 
 static uint64_t ticks(void)
@@ -49,13 +50,13 @@ static uint64_t ticks(void)
 
 static void start(void)
 {
-    CHECK(m.config == 0x01002000u && m.crypto == 0x108u && m.last == 3 && m.in_ll == 0);
+    CHECK(m.config == 0x01002000u && m.crypto == 0x108u && m.last == SWITCH_SEED_BYTES / 16u - 1u && m.in_ll == 0);
     CHECK((m.rng & ~3u) == 4u);                   /* SRC_ENTROPY, a mode, nothing else */
     CHECK((m.rng_src & 2u) && !(m.rng_src & 1u)); /* RO_ENT_SRC on, its lock never set */
     CHECK(m.out_ll == (uint32_t)(uintptr_t)switch_seed_dma_words());
     volatile uint32_t *dma = switch_seed_dma_words();
-    CHECK(dma[0] == 0 && dma[1] == (uint32_t)(uintptr_t)(dma + 16) && dma[2] == 64);
-    for (unsigned i = 16; i < 32; ++i)
+    CHECK(dma[0] == 0 && dma[1] == (uint32_t)(uintptr_t)(dma + 16) && dma[2] == SWITCH_SEED_BYTES);
+    for (unsigned i = 16; i < 16 + WORDS; ++i)
         CHECK(dma[i] == 0); /* cleared before the start */
     m.modes[m.starts < 4 ? m.starts : 3] = m.rng & 3u;
     ++m.starts;
@@ -66,7 +67,7 @@ static void start(void)
         m.err = 0x40u;
         return;
     }
-    for (unsigned i = 0; i < 16; ++i) {
+    for (unsigned i = 0; i < WORDS; ++i) {
         uint32_t word = (m.flags & ZERO_OUTPUT) ? 0 : 0x9e3779b9u * (i + 7u) ^ m.starts * 0x85ebca6bu;
         if (m.flags & REPEAT_OUTPUT)
             word = 0x1234u + (i & 3u);
@@ -81,7 +82,7 @@ static void start(void)
 
 uint32_t switch_seed_read32(uint64_t pa)
 {
-    if (pa >= SEED_PA && pa < SEED_PA + 64)
+    if (pa >= SEED_PA && pa < SEED_PA + SWITCH_SEED_BYTES)
         return m.seed[(pa - SEED_PA) / 4];
     if (pa >= SOURCE_PA && pa < SOURCE_PA + 8)
         return m.source[(pa - SOURCE_PA) / 4];
@@ -136,7 +137,7 @@ uint32_t switch_seed_read32(uint64_t pa)
 
 void switch_seed_write32(uint64_t pa, uint32_t value)
 {
-    if (pa >= SEED_PA && pa < SEED_PA + 64) {
+    if (pa >= SEED_PA && pa < SEED_PA + SWITCH_SEED_BYTES) {
         m.seed[(pa - SEED_PA) / 4] = value;
         return;
     }
@@ -197,9 +198,16 @@ void switch_seed_write32(uint64_t pa, uint32_t value)
     }
 }
 
-static const uint32_t pinned[16] = {0x11111111u, 0x22222222u, 0x33333333u, 0x44444444u, 0x55555555u, 0x66666666u,
-                                    0x77777777u, 0x88888888u, 0x99999999u, 0xaaaaaaaau, 0xbbbbbbbbu, 0xccccccccu,
-                                    0xddddddddu, 0xeeeeeeeeu, 0xffffffffu, 0x01234567u};
+static uint32_t pinned(unsigned i)
+{
+    return 0x11111111u * (i % 15u + 1u) ^ i << 24;
+}
+
+static void pin_seed(void)
+{
+    for (unsigned i = 0; i < WORDS; ++i)
+        m.seed[i] = pinned(i);
+}
 
 static uint32_t run(unsigned flags)
 {
@@ -210,11 +218,11 @@ static uint32_t run(unsigned flags)
     m.rst_w = (flags & ENTROPY_OFF) ? 1u << 21 : 0;
     m.security = (flags & SE_SECURE) ? 0x35u : 0x10035u; /* as read on hardware: 0x10035 */
     m.counter = 0x123456789ull;
-    memcpy(m.seed, pinned, sizeof(pinned));
+    pin_seed();
     const uint32_t word = switch_seed_mix(SEED_PA, SOURCE_PA, ticks, 38400);
     CHECK(m.source[0] == SWITCH_SEED_MAGIC && m.source[1] == word);
     volatile uint32_t *dma = switch_seed_dma_words();
-    for (unsigned i = 16; i < 32; ++i)
+    for (unsigned i = 16; i < 16 + WORDS; ++i)
         CHECK(dma[i] == 0); /* nothing of the output stays in the image */
     return word;
 }
@@ -222,10 +230,10 @@ static uint32_t run(unsigned flags)
 /* The seed after a run: pinned ^ output (if mixed) ^ the counter in words 0 and 1. */
 static void check_seed(int mixed)
 {
-    for (unsigned i = 2; i < 16; ++i)
-        CHECK(m.seed[i] == (pinned[i] ^ (mixed ? m.drbg[i] : 0)));
-    const uint32_t c0 = m.seed[0] ^ pinned[0] ^ (mixed ? m.drbg[0] : 0);
-    const uint32_t c1 = m.seed[1] ^ pinned[1] ^ (mixed ? m.drbg[1] : 0);
+    for (unsigned i = 2; i < WORDS; ++i)
+        CHECK(m.seed[i] == (pinned(i) ^ (mixed ? m.drbg[i] : 0)));
+    const uint32_t c0 = m.seed[0] ^ pinned(0) ^ (mixed ? m.drbg[0] : 0);
+    const uint32_t c1 = m.seed[1] ^ pinned(1) ^ (mixed ? m.drbg[1] : 0);
     const uint64_t counter = (uint64_t)c1 << 32 | c0;
     CHECK(counter > 0x123456789ull && counter <= m.counter); /* a counter value read during the run */
 }
@@ -241,7 +249,7 @@ unsigned seed_scenarios(void)
     CHECK((w & 0xffffu) == SWITCH_SEED_STATUS_MIXED && m.starts == 1 && m.modes[0] == 2);
     check_seed(1);
     uint32_t fold = 0;
-    for (unsigned i = 0; i < 16; ++i)
+    for (unsigned i = 0; i < WORDS; ++i)
         fold ^= m.drbg[i];
     CHECK(w >> 16 == ((fold ^ fold >> 16) & 0xffffu));
     ++scenarios;
@@ -305,7 +313,7 @@ unsigned seed_scenarios(void)
 
     /* Two boots (different engine output) give different seeds from the same pinned bytes. */
     w = run(0);
-    uint32_t first[16];
+    uint32_t first[WORDS];
     memcpy(first, m.seed, sizeof(first));
     memset(&m, 0, sizeof(m));
     m.clk_v = 1u << 31;
@@ -313,9 +321,9 @@ unsigned seed_scenarios(void)
     m.security = 0x10035u;
     m.counter = 0x123456789ull;
     m.starts = 5; /* the model's output depends on its start count */
-    memcpy(m.seed, pinned, sizeof(pinned));
+    pin_seed();
     (void)switch_seed_mix(SEED_PA, SOURCE_PA, ticks, 38400);
-    CHECK(memcmp(first + 2, m.seed + 2, 56) != 0);
+    CHECK(memcmp(first + 2, m.seed + 2, sizeof(first) - 8) != 0);
     ++scenarios;
 
     return scenarios;

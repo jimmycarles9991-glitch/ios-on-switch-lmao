@@ -1,8 +1,7 @@
 """adt.py SEED_HEX OUT: the native OLED board's ADT for the full-RAM root-boot profile.
 
-native_oled_adt.generate_adt makes it; the CMake flow read it from passes/native-root-memory-v1/full-ram.adt. Its only
-nondeterminism, the 64-byte /chosen/random-seed, is pinned (the value that file carries), so the result is
-byte-identical to it.
+native_oled_adt.generate_adt makes it. Its only nondeterminism, the /chosen/random-seed, is pinned (//boot:adt), so the
+result is the same on every build; the loader mixes a per-boot seed into it (boot/loader/seed.h).
 """
 
 import sys

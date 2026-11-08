@@ -184,6 +184,7 @@ TEST(Index, ByteFlipsNeverReadOutOfBounds)
 TEST(Tables, DuplicateIdsAreRefused)
 {
     EXPECT_EQ(build({{"/a", 1, 2}, {"/b", 1, 4}}, {5}).error, SWITCH_PT_DUPLICATE_ID);
+    EXPECT_EQ(build({{"/a", 1, 2}, {"/b", 1, 2, {{7}}}}, {5}).error, SWITCH_PT_DUPLICATE_ID);
     EXPECT_EQ(build({{"/a", 1, 2}, {"/b", 3, 2}}, {5}).error, SWITCH_PT_DUPLICATE_ID);
     EXPECT_EQ(build({{"/a", 1, 2}}, {2}).error, SWITCH_PT_DUPLICATE_ID);
     EXPECT_EQ(build(kFiles, kDirs).error, SWITCH_PT_OK);
@@ -207,11 +208,27 @@ TEST(Tables, FindsSystemFilesByIdAndName)
     EXPECT_TRUE(switch_pt_name_listed(&b.tables, fnv("b", 1), "b", 1));
     EXPECT_FALSE(switch_pt_name_listed(&b.tables, fnv("c", 1), "c", 1));
     EXPECT_FALSE(switch_pt_name_listed(&b.tables, fnv("libexec", 7), "libexec", 7));
-    EXPECT_EQ(switch_pt_system_file(&b.tables, 30, "b", 1), 2);
-    EXPECT_EQ(switch_pt_system_file(&b.tables, 40, "b", 1), 3);
-    EXPECT_EQ(switch_pt_system_file(&b.tables, 40, "a", 1), -1);
-    EXPECT_EQ(switch_pt_system_file(&b.tables, 50, "b", 1), -1);
-    EXPECT_EQ(switch_pt_system_file(&b.tables, 0, "b", 1), -1);
+    EXPECT_EQ(switch_pt_system_file(&b.tables, 30, fnv("b", 1), "b", 1), 2);
+    EXPECT_EQ(switch_pt_system_file(&b.tables, 40, fnv("b", 1), "b", 1), 3);
+    EXPECT_EQ(switch_pt_system_file(&b.tables, 40, fnv("a", 1), "a", 1), -1);
+    EXPECT_EQ(switch_pt_system_file(&b.tables, 50, fnv("b", 1), "b", 1), -1);
+    EXPECT_EQ(switch_pt_system_file(&b.tables, 0, fnv("b", 1), "b", 1), -1);
+}
+
+TEST(Tables, HardLinksAreFoundByEveryName)
+{
+    for (switch_pt_hash_fn hash : {fnv, collide}) {
+        Built b = build({{"/usr/libexec/d", 1, 2}, {"/usr/sbin/d", 1, 2}, {"/usr/sbin/e", 1, 2}, {"/usr/sbin/f", 3, 4}},
+                        {5}, hash);
+        REQUIRE(b.error == SWITCH_PT_OK);
+        EXPECT_EQ(switch_pt_system_file(&b.tables, 1, hash("d", 1), "d", 1), 0);
+        EXPECT_EQ(switch_pt_system_file(&b.tables, 1, hash("e", 1), "e", 1), 2);
+        EXPECT_EQ(switch_pt_system_file(&b.tables, 1, hash("f", 1), "f", 1), -1);
+        EXPECT_EQ(switch_pt_system_file(&b.tables, 3, hash("e", 1), "e", 1), -1);
+        uint32_t listed = 0;
+        EXPECT_TRUE(switch_pt_map_get(&b.tables.data, 2, &listed));
+        EXPECT_EQ(listed, 0u);
+    }
 }
 
 TEST(Tables, NamesThatShareAHashStayApart)
@@ -320,7 +337,6 @@ namespace {
 struct switch_pt_trust_facts trusted()
 {
     struct switch_pt_trust_facts facts = {};
-    facts.redirected = true;
     facts.listed = true;
     facts.regular = true;
     facts.mode = 0755;
@@ -329,7 +345,7 @@ struct switch_pt_trust_facts trusted()
     return facts;
 }
 
-TEST(Trust, ARedirectedListedRootFileWithAPinnedCdhash)
+TEST(Trust, AListedRootFileWithAPinnedCdhash)
 {
     const struct switch_pt_trust_facts facts = trusted();
     EXPECT_TRUE(switch_pt_trusted(&facts));
@@ -341,9 +357,6 @@ TEST(Trust, ARedirectedListedRootFileWithAPinnedCdhash)
 TEST(Trust, EachMissingFactRefuses)
 {
     const std::vector<void (*)(struct switch_pt_trust_facts &)> breaks = {
-        [](struct switch_pt_trust_facts &f) {
-            f.redirected = false;
-        },
         [](struct switch_pt_trust_facts &f) {
             f.listed = false;
         },

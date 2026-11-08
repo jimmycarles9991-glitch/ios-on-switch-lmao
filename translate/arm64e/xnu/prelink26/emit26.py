@@ -10,8 +10,8 @@ _PrelinkLinkKASLROffsets), with what an arm64e MH_FILESET source needs on top:
     kext -> kext: target + slide; kext -> kernel: our kernel's address of the same name (prelink26/names.py);
   * branches: the kernel collection builder removed the kexts' stubs (BL straight into Apple's kernel), so every
     B/BL into the kernel is re-aimed at our kernel's function of the same name;
-  * kernel targets without a name: functions go to a trampoline that panics naming the Apple address, data to
-    _switch_prelink_cut_null; both are listed in the report (nothing is silently wrong).
+  * every kernel target has a name (names.py, pinned_names.py, shims.py): the prelink refuses any it is missing,
+    with the kexts that import it.
 usage: emit26.py OUR_KERNEL KERNELCACHE OUTPUT   (writes OUTPUT and OUTPUT.json)
 """
 import base64, bisect, collections, copy, hashlib, json, os, struct, subprocess, sys, tempfile
@@ -21,7 +21,7 @@ R = os.path.join(HERE, "..")
 sys.path.insert(0, HERE)
 from kcinfo import KC, ROOTS, decode8
 import paths
-from native_prelink import macho, exports, backed_offset
+from tools.common.macho import macho, exports, backed_offset
 
 CUTS = {("com.apple.iokit.IOUSBHostFamily", "com.apple.driver.AppleSMC"): "_switch_prelink_cut_null",
         ("com.apple.iokit.IOUSBHostFamily", "com.apple.driver.usb.AppleUSBHostPlatformProperties"): None,
@@ -59,6 +59,70 @@ def to_xml(value):
 def sx(v, b): return v - (1 << b) if v & (1 << (b - 1)) else v
 
 
+LC_SEGMENT_SPLIT_INFO = 0x1E
+
+
+def first_section(kc, fo, vm):
+    """The lowest section address of the kext whose header is at file offset fo (unslid address vm)."""
+    addresses = []
+    for cmd, p, size in kc.entry_cmds(fo):
+        if cmd == 0x19:
+            for k in range(struct.unpack_from("<I", kc.d, p + 64)[0]):
+                addresses.append(struct.unpack_from("<Q", kc.d, p + 72 + 80 * k + 32)[0])
+    return min((a for a in addresses if a >= vm), default=vm)
+
+
+def mark_split(blob, at, vm, kc, fo, name):
+    """Give the kext header at blob[at] an empty LC_SEGMENT_SPLIT_INFO, as kcgen leaves on every kext of a prelinked
+    kernelcache (21H461's: dataoff and datasize 0).
+
+    XNU's prelinked-kernelcache paths take it to mean the kext's segments are scattered through the cache, which ours
+    are; a fileset's kexts do not carry it. Without it kalloc_type_view_parse panics ("No support for non-split seg
+    KCs") before the console, OSKext::setVMAttributes re-protects the kext as one range (its start then faults) and
+    slidePrelinkedExecutable frees what it takes for the kext's tail.
+    """
+    ncmds, sizeofcmds = struct.unpack_from("<II", blob, at + 16)
+    end = at + 32 + sizeofcmds
+    if vm + 32 + sizeofcmds + 16 > first_section(kc, fo, vm) or any(blob[end:end + 16]):
+        raise SystemExit("%s: no header padding for LC_SEGMENT_SPLIT_INFO" % name)
+    struct.pack_into("<4I", blob, end, LC_SEGMENT_SPLIT_INFO, 16, 0, 0)
+    struct.pack_into("<II", blob, at + 16, ncmds + 1, sizeofcmds + 16)
+
+
+def write_fips_macs(kexts, kc, blobs, blob_at):
+    """Give every kext with corecrypto's FIPS integrity check the MAC of its text as it now runs; the rule and the
+    MAC are the pretranslation's too (translate/arm64e/macho/fips.h). Returns {kext: new MAC (hex)}."""
+    macs = {}
+    with tempfile.TemporaryDirectory() as t:
+        headers = []
+        for b in kexts:
+            n, at = blob_at(kc.entry[b][0])
+            sizeofcmds = struct.unpack_from("<I", blobs[n], at + 20)[0]
+            path = os.path.join(t, "%d.h" % len(headers))
+            open(path, "wb").write(blobs[n][at:at + 32 + sizeofcmds])
+            headers.append((b, path))
+        found = subprocess.run([paths.ARM64E, "fips", *[p for _, p in headers]], check=True, capture_output=True,
+                               text=True).stdout.split()
+        lines = iter(found)
+        for b, _ in headers:
+            first = next(lines)
+            if first == "-":
+                continue
+            text_va, size, mac_va = int(first, 16), int(next(lines), 16), int(next(lines), 16)
+            n, at = blob_at(text_va)
+            m, mac_at = blob_at(mac_va)
+            original, translated = os.path.join(t, "original"), os.path.join(t, "translated")
+            open(original, "wb").write(kc.d[kc.va2off(text_va):kc.va2off(text_va) + size])
+            open(translated, "wb").write(blobs[n][at:at + size])
+            was = bytes(blobs[m][mac_at:mac_at + 32]).hex()
+            mac = subprocess.run([paths.ARM64E, "fips-mac", original, translated, was], check=True,
+                                 capture_output=True, text=True).stdout.strip()
+            blobs[m][mac_at:mac_at + 32] = bytes.fromhex(mac)
+            if mac != was:
+                macs[b] = mac
+    return macs
+
+
 def main():
     our_path, kc_path, out_path = sys.argv[1:4]
     native_data = open(our_path, "rb").read()
@@ -88,7 +152,7 @@ def main():
     source = json.load(open(paths.work("kernel-names.json")))["source"]
     def exported(a, n):
         return (n in kpi or n.startswith(prefixes) or n.startswith("__ZTV") or n.endswith("gMetaClassE")
-                or source.get(hex(a)) in ("vtable", "got17", "got17+order", "symbolicator-class"))
+                or source.get(hex(a)) in ("vtable", "got17", "got17+order", "symbolicator-class", "shim"))
     names = {a: n for a, n in names.items() if exported(a, n)}
     # extents
     ext = []
@@ -187,24 +251,7 @@ def main():
     pointer_sites = []
     unresolved_fn, unresolved_data = collections.Counter(), collections.Counter()
     unresolved_by_component = collections.defaultdict(lambda: {"functions": set(), "data": set()})
-    tramp = {}                                  # apple function address -> trampoline va (unslid frame)
-    tramp_words = []
-    tramp_base = stub_va + len(stubs)
-    panic = nsym.get("_panic")
     cut_null = nsym.get("_switch_prelink_cut_null")
-    def trampoline(apple):
-        if apple not in tramp:
-            at = tramp_base + 4 * len(tramp_words)
-            tramp[apple] = at
-            msg = b"SwitchPrelink: kext called Apple kernel function 0x%x, which has no name here\n" % apple
-            msg += b"\0" * (-len(msg) % 4)
-            # adr x0, msg ; b _panic ; msg
-            imm = 8
-            tramp_words.append(0x10000000 | ((imm & 3) << 29) | (((imm >> 2) & 0x7FFFF) << 5))
-            off = panic - (at + 4 + slide)
-            tramp_words.append(0x14000000 | ((off >> 2) & 0x3FFFFFF))
-            tramp_words.extend(struct.unpack("<%dI" % (len(msg) // 4), msg))
-        return tramp[apple]
     kmod_address_sites = {(kc.plist[b]["_PrelinkKmodInfo"] & M64) + 156 for b in sel}
     kinds = collections.Counter()
     fixup_sites = set()
@@ -220,10 +267,10 @@ def main():
             if n and n in nsym:
                 new = nsym[n]; kinds["kernel"] += 1
             elif any(lo <= tgt < hi for lo, hi in kernel_text):
-                new = trampoline(tgt) + slide; unresolved_fn[tgt] += 1; kinds["kernel unresolved function"] += 1
+                new = 0; unresolved_fn[tgt] += 1; kinds["kernel unresolved function"] += 1
                 unresolved_by_component[o[2]]["functions"].add(tgt)
             else:
-                new = cut_null; unresolved_data[tgt] += 1; kinds["kernel unresolved data"] += 1
+                new = 0; unresolved_data[tgt] += 1; kinds["kernel unresolved data"] += 1
                 unresolved_by_component[o[2]]["data"].add(tgt)
         elif t and (o[2], t[2]) in CUTS:
             new = cut_null; kinds["cut"] += 1
@@ -261,22 +308,26 @@ def main():
                     if n and n in nsym and in_our_text(nsym[n]):
                         dest = nsym[n]; br["kernel"] += 1
                     else:
-                        dest = trampoline(tgt) + slide; unresolved_fn[tgt] += 1; br["kernel unresolved"] += 1
+                        unresolved_fn[tgt] += 1; br["kernel unresolved"] += 1
                         unresolved_by_component[b]["functions"].add(tgt)
+                        continue
                     off = dest - (pc + slide)
                     if not -(1 << 27) <= off < (1 << 27): raise SystemExit("branch out of range at %x" % pc)
                     struct.pack_into("<I", text, o0 + 4 * i, (w & 0xFC000000) | ((off >> 2) & 0x3FFFFFF))
-    stub_area = stubs + struct.pack("<%dI" % len(tramp_words), *tramp_words)
+    stub_area = stubs
     if len(stub_area) > stub_reserve: raise SystemExit("stub area overflow")
     text.extend(bytes(stub_va - text_lo - len(text)))
     text.extend(stub_area)
     text.extend(bytes(-len(text) % PAGE))
+    # 4b. FIPS integrity MACs over the final text, while the headers still hold the kernelcache's addresses
+    fips_macs = write_fips_macs(sorted(sel), kc, blobs, blob_at)
     # 5. kext headers: slid segment/section addresses, arm64 subtype ALL, no LINKEDIT mapping
     for b in sorted(sel):
         vm, fo = kc.entry[b]
         n_, at = blob_at(vm)
         blob = blobs[n_]
         struct.pack_into("<I", blob, at + 8, 0)          # cpusubtype: CPU_SUBTYPE_ARM64_ALL, no ptrauth ABI
+        mark_split(blob, at, vm, kc, fo, b)
         for cmd, p, size in kc.entry_cmds(fo):
             if cmd != 0x19: continue
             q = at + (p - fo)
@@ -385,12 +436,12 @@ def main():
               "cuts": [list(k) for k in CUTS],
               "segments": [{k: (hex(v) if isinstance(v, int) else v) for k, v in s.items()} for s in new_segments],
               "pointer_kinds": dict(kinds), "pointer_sites": len(pointer_sites), "branch_kinds": dict(br),
+              "fips_macs": fips_macs,
               "unresolved_kernel_functions": {hex(a): c for a, c in sorted(unresolved_fn.items())},
               "unresolved_kernel_data": {hex(a): c for a, c in sorted(unresolved_data.items())},
               "unresolved_by_component": {b: {k: [hex(a) for a in sorted(v)] for k, v in u.items()}
                                           for b, u in sorted(unresolved_by_component.items())},
-              "translation": xlate, "stub_area": {"va": hex(stub_va + slide), "a64x_words": len(stubs) // 4,
-                                                   "trampoline_words": len(tramp_words)},
+              "translation": xlate, "stub_area": {"va": hex(stub_va + slide), "a64x_words": len(stubs) // 4},
               "kmod_info": kmods, "sparse_index": {"va": hex(index_va), "headers": len(headers)},
               "early_security_initializers": {}, "runtime_qualified": False}
     json.dump(report, open(out_path + ".json", "w"), indent=1)
@@ -402,6 +453,11 @@ def main():
     for x in xlate.values():
         tot["words"] += x["words"]; tot["changed"] += x["changed"]; tot["stub_words"] += x["stub_words"]
     print("translation", dict(tot))
+    if unresolved_fn or unresolved_data:
+        raise SystemExit("emit26.py: kernel targets the kexts use that nothing names (names.py, pinned_names.py, "
+                         "shims.py):\n" + "\n".join("  %s: functions %s, data %s" % (b, sorted(map(hex, u["functions"])),
+                                                                                       sorted(map(hex, u["data"])))
+                                                   for b, u in sorted(unresolved_by_component.items())))
 
 
 if __name__ == "__main__":

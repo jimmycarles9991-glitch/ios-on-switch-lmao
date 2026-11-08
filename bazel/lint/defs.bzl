@@ -33,6 +33,8 @@ PATTERNS = [
     "**/*.inc",
     "**/*.m",
     "**/*.mm",
+    # Swift
+    "**/*.swift",
     # Rust, shell, Markdown, JSON, TOML, YAML
     "**/*.rs",
     "**/*.sh",

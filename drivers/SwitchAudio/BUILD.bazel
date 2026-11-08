@@ -33,6 +33,9 @@ kernel_driver(
     name = "SwitchAudio",
     srcs = [
         "SwitchAudio.cpp",
+        "SwitchAudioClocks.cpp",
+        "SwitchAudioCodec.cpp",
+        "SwitchAudioStream.cpp",
         "SwitchRT5639.cpp",
     ],
     hdr_deps = [
@@ -59,6 +62,7 @@ ios_binary(
         "SwitchAudioAbi.h",
         "SwitchAudioFormat.h",
         "hal/SwitchAudioConvert.h",
+        "//kits/SwitchDMA:SwitchDcache.h",
         "//kits/SwitchRefusal:SwitchRefusal.h",
     ],
     copts = [
@@ -74,7 +78,11 @@ ios_binary(
         "CoreFoundation",
         "-framework",
         "IOKit",
-    ],
+    ] + select({
+        # 21H461's iPad, J120, has a Hawking device; 24B119's, J181, has none.
+        "//ipsw:21H461": ["-DSWITCH_AUDIO_HAWKING=1"],
+        "//conditions:default": [],
+    }),
     coreaudio_headers = True,
     pagesize = "4096",
     sign_identifier = "com.brunostjohn.switch.audio",
@@ -85,6 +93,6 @@ filegroup(
     name = "overlay_files",
     srcs = glob([
         "hal/*.plist",
-        "tunings/*.austrip",
+        "tunings/**/*.austrip",
     ]),
 )

@@ -1,0 +1,45 @@
+# The kernel ABI iOS user space reaches, checked against Apple's kernel cache of the selected IPSW kind (abi_check.py):
+# every system call, Mach trap, MIG routine and (iOS 26 and later) sysctl Apple's kernel answers, ours answers with the
+# same arguments, unless gaps/<kind>.txt names it with its reason. A new IPSW kind needs its own gaps file.
+#
+#   bazel test //kernel/abi:abi_test [--config=ios27]
+load("@rules_python//python:py_library.bzl", "py_library")
+load("@rules_python//python:py_test.bzl", "py_test")
+load("//bazel/lint:defs.bzl", "lint_files")
+
+lint_files()
+
+py_library(
+    name = "kernel_tables",
+    srcs = [
+        "kernel_image.py",
+        "kernel_tables.py",
+    ],
+    deps = ["//tools/common:macho"],
+)
+
+py_test(
+    name = "abi_test",
+    size = "small",
+    srcs = ["abi_check.py"],
+    args = [
+        "$(rootpath //ipsw:kernelcache)",
+        "$(rootpath //kernel:prelinked)",
+        "$(rootpath :gaps)",
+    ],
+    data = [
+        ":gaps",
+        "//ipsw:kernelcache",
+        "//kernel:prelinked",
+    ],
+    main = "abi_check.py",
+    deps = [":kernel_tables"],
+)
+
+alias(
+    name = "gaps",
+    actual = select({
+        "//ipsw:21H461": "gaps/21H461.txt",
+        "//ipsw:24B119": "gaps/24B119.txt",
+    }),
+)

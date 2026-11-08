@@ -28,14 +28,15 @@ static inline int tegra_vic_bounce_needed(const TegraVICSurfaceDesc *d, uint32_t
     const TegraVICFormat *f = tegra_vic_format(d->fourcc);
     if (!f)
         return -1;
-    int needed = 0;
+    bool needed = false;
     for (uint32_t p = 0; p < f->planes; p++)
-        needed |= d->planeBytesPerRow[p] % align != 0;
+        needed = needed || d->planeBytesPerRow[p] % align != 0;
     if (!needed)
         return 1;
-    for (uint32_t p = 0; p < f->planes; p++)
+    for (uint32_t p = 0; p < f->planes; p++) {
         if (d->planeOffset[p] % TEGRA_VIC_BOUNCE_OFFSET_ALIGN)
             return -1;
+    }
     return 0;
 }
 
@@ -71,8 +72,8 @@ static inline TegraVICBounceOrder tegra_vic_bounce_order(int bounceSrc, int boun
 {
     TegraVICBounceOrder o = {0, 0, 0, 0, 0};
     o.fills = (bounceSrc ? 1u : 0u) + (bounceDst ? 1u : 0u);
-    o.vicWaits = o.fills != 0;
-    o.copiesBack = bounceDst != 0;
+    o.vicWaits = static_cast<int>(o.fills != 0);
+    o.copiesBack = static_cast<int>(bounceDst != 0);
     if (o.vicWaits)
         o.vicAcquire = *next += TEGRA_VIC_BOUNCE_INCREMENTS;
     if (o.copiesBack)

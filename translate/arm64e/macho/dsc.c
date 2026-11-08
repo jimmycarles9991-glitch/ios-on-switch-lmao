@@ -1,14 +1,16 @@
 #include "dsc.h"
 
 #include "../a64x/a64x.h"
+#include "macho.h"
 
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
-#define PAGE  4096u
-#define WORDS (PAGE / 4)
+#define PAGE              4096u
+#define MH_DYLIB_IN_CACHE 0x80000000u
+#define WORDS             (PAGE / 4)
 
 static uint32_t rd32(const uint8_t *p)
 {
@@ -188,6 +190,55 @@ static uint64_t replace_cdhashes(const struct a64x_dsc_file *f, uint8_t *out, co
     return replaced;
 }
 
+static bool file_offset(const struct a64x_dsc_file *f, uint64_t va, uint64_t size, uint64_t *off)
+{
+    for (uint32_t m = 0; m < f->nmaps; m++) {
+        const struct a64x_dsc_mapping *d = &f->maps[m];
+        if (va >= d->addr && size <= d->size && va - d->addr <= d->size - size) {
+            *off = d->fileoff + (va - d->addr);
+            return true;
+        }
+    }
+    return false;
+}
+
+uint64_t a64x_dsc_fips_each(const struct a64x_dsc_file *f, const uint8_t *bytes,
+                            void (*found)(void *ctx, const struct a64x_fips *fips), void *ctx)
+{
+    uint64_t n = 0;
+    for (uint32_t m = 0; m < f->nmaps; m++) {
+        const struct a64x_dsc_mapping *d = &f->maps[m];
+        if (!(d->prot & 4))
+            continue;
+        /* Every image's __TEXT, which its mach_header starts, is page aligned in the cache. */
+        for (uint64_t k = 0; k + 32 <= d->size; k += PAGE) {
+            const uint8_t *h = bytes + d->fileoff + k;
+            struct a64x_fips fips;
+            if (rd32(h) != A64X_MH_MAGIC_64 || !(rd32(h + 24) & MH_DYLIB_IN_CACHE) ||
+                !a64x_fips_find(h, d->size - k, &fips) ||
+                !file_offset(f, fips.text_vmaddr, fips.text_size, &fips.text_fileoff) ||
+                !file_offset(f, fips.mac_vmaddr, A64X_FIPS_MAC_SIZE, &fips.mac_fileoff))
+                continue;
+            found(ctx, &fips);
+            n++;
+        }
+    }
+    return n;
+}
+
+struct fips_pair {
+    const uint8_t *original;
+    uint8_t *out;
+    uint64_t rewritten;
+};
+
+static void rewrite_fips_mac(void *ctx, const struct a64x_fips *fips)
+{
+    struct fips_pair *p = ctx;
+    p->rewritten += (uint64_t)a64x_fips_rewrite(p->original + fips->text_fileoff, p->out + fips->text_fileoff,
+                                                fips->text_size, p->out + fips->mac_fileoff);
+}
+
 int a64x_dsc_apply(const struct a64x_plan *plan, const struct a64x_dsc_file *f, const struct a64x_cdhash_pair *pairs,
                    size_t npairs, uint8_t *out, uint8_t cdhash[A64X_CDHASH_SIZE], struct a64x_dsc_stats *st, char *err,
                    size_t errlen)
@@ -204,6 +255,9 @@ int a64x_dsc_apply(const struct a64x_plan *plan, const struct a64x_dsc_file *f, 
             memcpy(out + f->maps[m].fileoff + k, now, PAGE);
         }
     }
+    struct fips_pair fp = {f->base, out, 0};
+    (void)a64x_dsc_fips_each(f, f->base, rewrite_fips_mac, &fp);
+    st->fips_macs = fp.rewritten;
     if (pairs && npairs)
         st->cdhashes_replaced = replace_cdhashes(f, out, pairs, npairs);
     if (!f->sig_off)

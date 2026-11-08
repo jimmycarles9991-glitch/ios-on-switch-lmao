@@ -10,13 +10,14 @@ Steps:
                    also merges the device's m2v journals into the checkout's corpus.log
   2 boot entry     switchroot/ios/* and bootloader/ini/ios.ini on the FAT: only files that differ are
                    copied, stale files in switchroot/ios/ removed (never the user's bootargs.txt or the install
-                   images in switchroot/ios/install/), AppleDouble files by name; nothing else on the FAT. Refused
+                   images' NAME.SII.NNN parts), AppleDouble files by name; nothing else on the FAT. Refused
                    when the card's iOS is another kind than the build's (its System volume is not the IPSW's)
-  3 overlay        <Data>/Switch/overlay := the package's overlay/; also removes the r3 Wi-Fi bring-up's configd Debug
-                   logging profile (STALE_LOGGING_PROFILES) if a card still has it; and stages hekate's "Dump Joy-Con
-                   BT" (the FAT's switchroot/joycon_mac.ini, only read) as <Data>/Switch/bluetooth/{host-address,
-                   joycon-pairing.plist}, removed when the FAT has none (joycon_pairing.py; --no-joycon-pairing
-                   skips it)
+  3 overlay        <Data>/Switch/overlay := the package's overlay/; when its /Applications changed, writes
+                   <Data>/datamigrator/migrate so the next boot registers the apps (system_apps.py); also removes the
+                   r3 Wi-Fi bring-up's configd Debug logging profile (STALE_LOGGING_PROFILES) if a card still has
+                   it; and stages hekate's "Dump Joy-Con BT" (the FAT's switchroot/joycon_mac.ini, only read) as
+                   <Data>/Switch/bluetooth/{host-address, joycon-pairing.plist}, removed when the FAT has none
+                   (joycon_pairing.py; --no-joycon-pairing skips it)
   4 GPU bundle     <Data>/ngpu/addons/TegraGM20BMetal.{bundle,m2v-seed,raw} from --//deploy:gpu_bundle, via the
                    plugin's stager, which copies only the files whose sha256 the card does not already hold and
                    reads nothing more when the card's list matches the build (its CDHashes must be in the same
@@ -34,28 +35,25 @@ import argparse
 import json
 import os
 import plistlib
-import subprocess
 import sys
 import time
 from pathlib import Path
 
 if __package__ in (None, ''):
     sys.path.insert(0, str(Path(os.path.abspath(__file__)).parents[2]))
+from tools.common import paths
 from tools.deploy import (
     joycon_pairing,
     poster_snapshots,
     pull_logs,
+    system_apps,
 )
 from tools.install import (
     card as cards,
     host,
+    progress,
     renamed,
 )
-
-try:
-    from python.runfiles import runfiles
-except ImportError:
-    runfiles = None
 
 # Logging profiles put on Data by hand during bring-up, which nothing else removes: com.apple.SystemConfiguration at
 # Debug, persisted, writes ~8 Debug lines/s to the persisted log (configd SCDynamicStore/IPMonitor, wifid
@@ -83,12 +81,6 @@ def set_awdl(data_root: Path, on: bool, log: host.Log) -> None:
     elif flag.exists():
         flag.unlink()
     log('awdl: {} ({})'.format('on' if flag.exists() else 'off', AWDL_FLAG))
-
-
-def located(path: str | None) -> str | None:
-    if path and not os.path.isabs(path) and runfiles:
-        path = runfiles.Create().Rlocation(path) or path
-    return os.path.abspath(path) if path else None
 
 
 def launchd_check(data: Path, labels: list[str], log: host.Log) -> bool:
@@ -189,8 +181,9 @@ def _confirmed(args: argparse.Namespace, card: cards.Card) -> None:
 
 def _stage_gpu(args: argparse.Namespace, data_root: Path, log: host.Log) -> None:
     command = [sys.executable, args.stager, str(data_root)]
-    command += ['--remove'] if args.remove_gpu else ['--build', args.gpu_bundle]
-    result = subprocess.run(command, capture_output=True, text=True, check=False)
+    command += ['--remove'] if args.remove_gpu else ['--build', args.gpu_bundle, '--progress']
+    with progress.step('gpu: staging the Metal bundle'):
+        result = host.stream(command, progress.ours)
     log('gpu:', (result.stdout + result.stderr).strip())
     if result.returncode:
         raise host.HostError('GPU bundle NOT staged')
@@ -199,7 +192,7 @@ def _stage_gpu(args: argparse.Namespace, data_root: Path, log: host.Log) -> None
 def _write(args: argparse.Namespace, data_root: Path, fat: object, pairing: dict | None, log: host.Log) -> bool:
     """Write the deploy to the mounted Data volume (and the FAT); False when the launchd check fails."""
     renamed.migrate_data(data_root, log)
-    out = Path(args.logs_out or pull_logs.state_dir() / 'device-logs' / time.strftime('boot-%m%d-%H%M'))
+    out = Path(args.logs_out or paths.state_dir() / 'device-logs' / time.strftime('boot-%m%d-%H%M'))
     if args.pull_logs:
         what = pull_logs.Pull(csstore=not args.no_csstore, launchd=not args.no_launchd_log, kcdata=args.kcdata)
         pull_logs.pull(data_root, out, log, what)
@@ -208,7 +201,9 @@ def _write(args: argparse.Namespace, data_root: Path, fat: object, pairing: dict
         pull_logs.harvest(data_root, out, log, harvest_dir, args.corpus)
     with cards.mounted(fat.identifier, log) as fat_root:
         cards.sync_boot_entry(fat_root, args.boot_package, log)
+    apps = system_apps.digest(data_root)
     cards.sync_overlay(data_root, args.boot_package, log)
+    system_apps.request_migration(data_root, apps, log)
     remove_stale_logging_profiles(data_root, log)
     if not args.no_joycon_pairing:
         joycon_pairing.stage(data_root, pairing, log)
@@ -231,15 +226,14 @@ def _eject(card: cards.Card, target: object, log: host.Log) -> None:
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     for name in ('boot_package', 'spec', 'ipsw', 'gpu_bundle', 'stager', 'kcdata'):
-        setattr(args, name, located(getattr(args, name)))
-    log = host.Log(
-        args.log or Path.home() / 'Library/Logs/switch-ios-install/deploy-{}.log'.format(time.strftime('%Y%m%d-%H%M%S'))
-    )
+        setattr(args, name, paths.located(getattr(args, name)))
+    log = host.Log(args.log or paths.run_log('deploy', 'switch-ios-install'))
     try:
-        card, spec, fat, target, data = _checked(args, log)
-        with cards.mounted(fat.identifier, log) as fat_root:
-            changes, removed = cards.sync_boot_entry(fat_root, args.boot_package, log, dry_run=True)
-            pairing = None if args.no_joycon_pairing else joycon_pairing.read(fat_root, log)
+        with progress.step(f'deploy: checking {args.disk}', unit=None):
+            card, spec, fat, target, data = _checked(args, log)
+            with cards.mounted(fat.identifier, log) as fat_root:
+                changes, removed = cards.sync_boot_entry(fat_root, args.boot_package, log, dry_run=True)
+                pairing = None if args.no_joycon_pairing else joycon_pairing.read(fat_root, log)
         log(f'card {card.disk}: FAT {fat.identifier}, iPad Data {data}')
         for step in _plan(args, changes, removed, pairing):
             log('  plan:', step)
@@ -247,14 +241,15 @@ def main(argv: list[str] | None = None) -> int:
             log('dry run: nothing written (add --yes)')
             return 0
         _confirmed(args, card)
-        preboot = pull_logs.data_volume(card, spec['volumes']['preboot']['uuid'])
-        if preboot:
-            with cards.mounted(preboot, log) as preboot_root:
-                renamed.migrate_preboot(preboot_root, spec, log)
-        with cards.mounted(data, log) as data_root:
-            ok = _write(args, data_root, fat, pairing, log)
-        if not args.no_eject:
-            _eject(card, target, log)
+        with progress.step(f'deploy: writing to {card.disk}', unit=None):
+            preboot = pull_logs.data_volume(card, spec['volumes']['preboot']['uuid'])
+            if preboot:
+                with cards.mounted(preboot, log) as preboot_root:
+                    renamed.migrate_preboot(preboot_root, spec, log)
+            with cards.mounted(data, log) as data_root:
+                ok = _write(args, data_root, fat, pairing, log)
+            if not args.no_eject:
+                _eject(card, target, log)
         log('deployed')
         return 0 if ok else 1
     except cards.RefusedError as error:

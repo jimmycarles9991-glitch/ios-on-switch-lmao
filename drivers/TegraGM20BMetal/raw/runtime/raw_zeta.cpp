@@ -90,8 +90,8 @@ void zetaTargetWords(Push &p, const Texture *z)
     // SIZE_A the row stride in texels (NVK: the Z/S hardware has no tile width), C one layer, THIRD_DIMENSION_DEFINES_ARRAY_SIZE
     p.inc(ZT_SIZE_A, {z->pitch / z->bpp, z->height, 1});
     p.m(ZT_LAYER, 0);
-    p.m(Z_COMPRESSION, 0);
-    p.m(STENCIL_COMPRESSION, 0);
+    p.m(Z_COMPRESSION, z->comptags);
+    p.m(STENCIL_COMPRESSION, z->comptags);
     p.m(ZT_SPARSE, 0);
 }
 

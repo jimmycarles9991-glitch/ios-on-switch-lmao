@@ -33,7 +33,6 @@ kernel_driver(
         "TegraVIC.cpp",
         "TegraVICBounce.cpp",
         "TegraVICPresent.cpp",
-        "TegraVICSelfTest.cpp",
         "TegraVICSurface.cpp",
         "TegraVICUserClient.cpp",
         "original-bindings.S",

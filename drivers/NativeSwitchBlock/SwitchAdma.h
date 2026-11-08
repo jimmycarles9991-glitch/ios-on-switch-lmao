@@ -38,7 +38,7 @@ static_assert(sizeof(SwitchAdmaDescriptor) == 16, "ADMA2 64-bit addressing descr
 // for transfer complete, never for a descriptor.
 constexpr uint16_t kAdmaValid = 0x01, kAdmaEnd = 0x02, kAdmaTransfer = 0x20;
 constexpr uint32_t kAdmaMaxLength = 0xf000;
-constexpr uint64_t kAdmaLine = 64, kAdmaPage = 4096, kAdma4GiB = 1ull << 32;
+constexpr uint64_t kAdmaLine = 64, kAdmaPage = 4096, kAdma4GiB = 1ULL << 32;
 
 // Why a request went through the bounce buffer instead (stats index; kAdmaOk is "ADMA2 is off").
 enum SwitchAdmaRefusal : uint8_t {
@@ -77,9 +77,10 @@ struct SwitchAdmaTable {
             return kAdmaAlign;
         if (pa >= limit || length > limit - pa)
             return kAdmaHigh;
-        for (uint64_t page = pa & ~(kAdmaPage - 1); page < pa + length; page += kAdmaPage)
+        for (uint64_t page = pa & ~(kAdmaPage - 1); page < pa + length; page += kAdmaPage) {
             if (!pageOk(page))
                 return kAdmaMemory;
+        }
         return kAdmaOk;
     }
 
@@ -104,6 +105,7 @@ struct SwitchAdmaTable {
                 if (count == capacity)
                     return kAdmaFull;
                 last = &entries[count++];
+                // NOLINTNEXTLINE(clang-analyzer-core.CallAndMessage): entries is allocated before the first add()
                 *last = {kAdmaValid | kAdmaTransfer, 0, static_cast<uint32_t>(pa), static_cast<uint32_t>(pa >> 32), 0};
                 room = kAdmaMaxLength;
             }
@@ -151,7 +153,7 @@ struct SwitchAdmaTable {
     }
 
     // End on the last descriptor; false for an empty table.
-    bool finish()
+    bool finish() const
     {
         if (!count)
             return false;
@@ -182,7 +184,7 @@ template <typename Memory> struct SwitchAdmaStaging {
         uint32_t length;
     };
 
-    static constexpr uint64_t kNoRun = ~0ull;
+    static constexpr uint64_t kNoRun = ~0ULL;
     SwitchAdmaTable *table;
     uint64_t bouncePA;  // physically contiguous, cacheable RAM below 4 GiB, as long as the longest chain
     Stage *stages;
@@ -244,6 +246,7 @@ template <typename Memory> struct SwitchAdmaStaging {
                 } else {
                     if (count == capacity)
                         return kAdmaFull;
+                    // NOLINTNEXTLINE(clang-analyzer-core.CallAndMessage): staging is on only once its stages are allocated
                     stages[count++] = {memory, done, static_cast<uint32_t>(at), static_cast<uint32_t>(segment)};
                 }
                 ++refused[why];
@@ -288,8 +291,8 @@ template <typename Memory> struct SwitchAdmaStaging {
 // - Off (a proof differed, or the engine stopped on an ADMA error): everything above 4 GiB through the bounce buffer
 //   until reboot, as before r12-sdio. setup()'s own check can start in On (its high test pages matched) or Off (they kept
 //   their fill: the engine drops the high word).
-constexpr uint64_t kAdmaDmaLimit = 1ull << 34;  // mainline Linux's DMA mask for this controller
-constexpr uint64_t kAdmaIramAlias = 0x140000000ull, kAdmaIramBytes = 0x40000;
+constexpr uint64_t kAdmaDmaLimit = 1ULL << 34;  // mainline Linux's DMA mask for this controller
+constexpr uint64_t kAdmaIramAlias = 0x140000000ULL, kAdmaIramBytes = 0x40000;
 
 struct SwitchAdmaHigh {
     enum State : uint8_t {
@@ -312,13 +315,13 @@ struct SwitchAdmaHigh {
     // Whether a page may go straight to the card in this direction (on top of the driver's own RAM check).
     bool pageOk(uint64_t page, bool write) const
     {
-        return !(state == kProving && !write && page - kAdmaIramAlias < kAdmaIramBytes);
+        return state != kProving || write || page - kAdmaIramAlias >= kAdmaIramBytes;
     }
 
     // A direct read whose table reaches above 4 GiB, while proving: compare it with SDMA before it completes.
     bool proofDue(bool write, uint64_t high) const
     {
-        return state == kProving && !write && high;
+        return state == kProving && !write && (high != 0u);
     }
 
     // A matching proof; true when it was the last one needed (the caller logs that once).
@@ -339,7 +342,7 @@ struct SwitchAdmaHigh {
     // A direct write whose table reaches above 4 GiB, while its read-backs last.
     bool writeCheckDue(bool write, uint64_t high) const
     {
-        return state == kOn && write && high && writeProofsLeft;
+        return state == kOn && write && (high != 0u) && (writeProofsLeft != 0u);
     }
 
     void writeChecked()
@@ -351,6 +354,6 @@ struct SwitchAdmaHigh {
     // Whether proofs are still to come (reads; with `writes`, ADMA2 writes being on, the writes' read-backs too).
     bool checking(bool writes) const
     {
-        return state == kProving || (writes && state == kOn && writeProofsLeft);
+        return state == kProving || (writes && state == kOn && (writeProofsLeft != 0u));
     }
 };

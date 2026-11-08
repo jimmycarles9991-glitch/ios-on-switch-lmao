@@ -1,0 +1,16 @@
+diff --git a/hw/arm/tegra2/apb/pmc/pmc.c b/hw/arm/tegra2/apb/pmc/pmc.c
+index 77a237f..38fde6a 100644
+--- a/hw/arm/tegra2/apb/pmc/pmc.c
++++ b/hw/arm/tegra2/apb/pmc/pmc.c
+@@ -1194,6 +1194,11 @@ void tegra_pmc_reset(DeviceState *dev, ShutdownCause cause)
+     s->pwrgate_toggle.reg32 = PWRGATE_TOGGLE_RESET;
+     s->remove_clamping_cmd.reg32 = REMOVE_CLAMPING_CMD_RESET;
+     s->pwrgate_status.reg32 = PWRGATE_STATUS_RESET;
++    if (tegra_board >= TEGRAX1_BOARD) {
++        /* Partitions the boot chain finds powered and never ungates itself: the display controllers (DIS, DISB:
++         * hekate drives the panel without a toggle) and the APE (AUD), which L4T and our audio driver take as on. */
++        s->pwrgate_status.reg32 |= BIT(18) | BIT(19) | BIT(27);
++    }
+     s->blink_timer.reg32 = BLINK_TIMER_RESET;
+     s->pwr_det_latch.reg32 = PWR_DET_LATCH_RESET;
+     s->cpupwrgood_timer.reg32 = CPUPWRGOOD_TIMER_RESET;

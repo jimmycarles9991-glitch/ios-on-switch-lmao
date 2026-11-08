@@ -45,6 +45,7 @@ FOREIGN_DIRS = ["linux/", "nouveau/"]
 GENERATED_HEADERS = {
     "storage-abi": "//{}:gen_storage_abi".format(KERNEL_PACKAGE),
     "native-ram-block": "//{}:gen_native_data_seed".format(KERNEL_PACKAGE),
+    "ipsw-volumes": "//{}:gen_ipsw_volumes".format(KERNEL_PACKAGE),
 }
 
 # The kernel SDK every kernel cc target compiles against (and whose make variables their flags use).

@@ -49,7 +49,9 @@ static inline int tgm_cbc_size(uint32_t param, uint32_t ltcs, uint64_t ram_mib, 
 	const uint64_t row =
 		(uint64_t)tgm_cbc_cacheline_bytes(param) * tgm_cbc_slices(param) * ltcs;
 	const uint64_t slack = (uint64_t)ltcs << 11;
-	uint64_t cap = (1ULL << line_bits) - 1, lines = ram_mib << 3, bytes;
+	uint64_t cap = (1ULL << line_bits) - 1;
+	uint64_t lines = ram_mib << 3;
+	uint64_t bytes = 0;
 
 	if (cap > 0x1ffff)
 		cap = 0x1ffff;
@@ -71,7 +73,7 @@ static inline int tgm_cbc_size(uint32_t param, uint32_t ltcs, uint64_t ram_mib, 
  * LTCs (nvgpu gm20b_ltc_cbc_fix_config, "Bug 1477079"). 0 if the field (26 bits) cannot hold it. */
 static inline int tgm_cbc_base(uint64_t pa, uint32_t ltcs, uint32_t *base)
 {
-	uint64_t b;
+	uint64_t b = 0;
 
 	if (!ltcs)
 		return 0;
@@ -91,7 +93,7 @@ static inline int tgm_cbc_base(uint64_t pa, uint32_t ltcs, uint32_t *base)
 static inline uint32_t tgm_comp_page_shift(const uint64_t *pas, uint32_t npages)
 {
 	const uint32_t per = (uint32_t)(TGM_COMP_BYTES >> 12);
-	uint32_t i;
+	uint32_t i = 0;
 
 	if (!npages || npages % per)
 		return 12;

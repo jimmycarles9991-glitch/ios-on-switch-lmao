@@ -57,6 +57,7 @@ seed_tools(
     abi_header = "//drivers/TegraGM20B:TegraGM20BABI.h",
     frontend = METAL + ":NativeBridgeMetalFrontend.mm",
     host_bridge = "//gpu:bridge_host",
+    metal_abi = METAL + "/abi:MetalABI.h",
     metal_header = METAL + ":NativeBridgeMetalFrontend.h",
     mock_iokit = GM20B_METAL + ":precompile/mock_iokit.c",
     nvk = "//gpu/nvk:dylib",
@@ -101,6 +102,7 @@ metal_seed(
     device_libraries = "@gpu_device_data//:libraries",
     embedded = [METAL + ":TwoPlaneStandIn.h"],
     records = "@gpu_device_data//:records",
+    replies = "@gpu_device_data//:replies",
     tags = ["manual"],
     tools = ":tools",
 )

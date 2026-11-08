@@ -24,9 +24,9 @@ static inline void switch_thermal_record_encode(enum switch_thermal_sensor senso
     if (tenths > 599) {
         tenths = 599;
     }
-    fields[0] = (uint8_t)(tenths % 10);
-    fields[1] = (uint8_t)(tenths / 10);
-    fields[2] = (uint8_t)sensor;
+    fields[0] = static_cast<uint8_t>(tenths % 10);
+    fields[1] = static_cast<uint8_t>(tenths / 10);
+    fields[2] = static_cast<uint8_t>(sensor);
     fields[3] = 1;
     fields[4] = 1;
     fields[5] = SWITCH_THERMAL_RECORD_MAGIC;
@@ -47,7 +47,7 @@ switch_thermal_record_decode(const uint8_t fields[SWITCH_THERMAL_RECORD_FIELDS],
         return SWITCH_THERMAL_NONE;
     }
     *millic = 60000 + fields[1] * 1000 + fields[0] * 100;
-    return (enum switch_thermal_sensor)fields[2];
+    return static_cast<enum switch_thermal_sensor>(fields[2]);
 }
 
 #endif

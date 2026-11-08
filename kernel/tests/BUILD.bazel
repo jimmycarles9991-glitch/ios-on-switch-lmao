@@ -25,13 +25,18 @@
 #                            and the cache text they write, against the assembler and the bytes the 1.6-only sites
 #                            shipped; the status bar battery's fill in whole pixels with equal gaps at 1.25; the
 #                            switcher's landscape card scale; Control Center's battery row in whole pixels at 1.25
-#   xnu_ui_scale_sites_test  bsd/vm/switch_ui_scale_sites.h against 21H461's text mappings: every edit in its site's
+#   xnu_ui_scale_sites_test  bsd/vm/switch_ui_scale_sites_21H461.h against 21H461's text mappings: every edit in its site's
 #                            chunk, each site the one site of its slot in its mapping and on no other pager's slot; the
 #                            two battery fills one edit of the same code, the CoverSheetKit row's tbz and the CoreUI
 #                            row bytes decoded; the switcher's card scale (its branches kept, the landscape scale the
 #                            largest that keeps six cards clear of the status bar and the dock, as Apple lays them out);
 #                            the SystemStatusUI row the icon size 15 entries of its tables; no two sites on one page;
-#                            the header the same in both trees, no UI scale pager at scale 1
+#                            the headers the same in both trees, no UI scale pager at scale 1, the kernel's kind's
+#                            table and cache magic
+#   xnu_ui_scale_sites_24B119_test  bsd/vm/switch_ui_scale_sites_24B119.h against 24B119's (translated) text mappings:
+#                            the same placement checks; the FrontBoardServices, MobileGestalt, CoreUI, ProgressUI and
+#                            CoverSheetKit edits decoded; the keyboard's iPad table giving the 10.2-inch iPad's idiom
+#                            below 768x1024 and every other screen's unchanged
 #   xnu_page_ratio_test      16 KiB VM pages over the 4 KiB granule: pmap.c's write_pte_fast (both trees) writes a
 #                            VM page as four consecutive 4 KiB frames, repeats empty and compressed entries, refuses an
 #                            unaligned PTE
@@ -43,6 +48,9 @@
 #                            a whole core, and its hook in both trees' thread_set_cpulimit
 #   switch_commpage_test     <switch/commpage.h>: the ARMv8 crypto features from ID_AA64ISAR0_EL1 into the commpage and
 #                            hw.optional.arm.FEAT_*, and its hook in both trees' commpage_init_arm_optional_features_isar0
+#   switch_spawn_test        <switch/spawn.h>: iOS 27's posix_spawn attribute block (xnu-13432's layout, 24B119's
+#                            libsystem_kernel offsets) read into the 12377 kernel's struct, its own size copied as
+#                            before, any other size refused, and the hook in 12377's posix_spawn
 #   switch_prefs_test        kernel/switch/boot/prefs.c takes keys out of plists CoreFoundation wrote and reads back
 #                            (binary, both count forms, wide references, damaged files; XML as the setup wrote it); no
 #                            boot-time setup in either tree or the 12377 port record sets SpringBoard's never-dim keys
@@ -288,11 +296,18 @@ copy_file(
     out = "vm/switch_ui_scale.h",
 )
 
-copy_file(
-    name = "switch_ui_scale_sites",
-    src = "//kernel/xnu-10063.141.1/bsd:vm/switch_ui_scale_sites.h",
-    out = "vm/switch_ui_scale_sites.h",
-)
+[
+    copy_file(
+        name = "switch_ui_scale_sites" + kind,
+        src = "//kernel/xnu-10063.141.1/bsd:vm/switch_ui_scale_sites{}.h".format(kind),
+        out = "vm/switch_ui_scale_sites{}.h".format(kind),
+    )
+    for kind in [
+        "",
+        "_21H461",
+        "_24B119",
+    ]
+]
 
 host_test(
     name = "xnu_ui_scale_test",
@@ -303,21 +318,42 @@ host_test(
     includes = ["."],
 )
 
+_UI_SCALE_SITES_HDRS = [
+    "vm/switch_ui_scale.h",
+    "vm/switch_ui_scale_sites.h",
+    "vm/switch_ui_scale_sites_21H461.h",
+    "vm/switch_ui_scale_sites_24B119.h",
+    "xnu_ui_scale_sites_checks.h",
+]
+
+_UI_SCALE_SITES_DATA = [
+    "//kernel/xnu-10063.141.1/osfmk:vm/vm_shared_region.c",
+    "//kernel/xnu-12377.121.6/osfmk:vm/vm_shared_region.c",
+]
+
 host_test(
     name = "xnu_ui_scale_sites_test",
-    srcs = [
-        "vm/switch_ui_scale.h",
-        "vm/switch_ui_scale_sites.h",
-        "xnu_ui_scale_sites_test.cpp",
+    srcs = _UI_SCALE_SITES_HDRS + ["xnu_ui_scale_sites_test.cpp"],
+    data = _UI_SCALE_SITES_DATA + [
+        "//kernel/xnu-{}/bsd:vm/{}".format(tree, file)
+        for tree in [
+            "10063.141.1",
+            "12377.121.6",
+        ]
+        for file in [
+            "switch_ui_scale_sites.h",
+            "switch_ui_scale_sites_21H461.h",
+            "switch_ui_scale_sites_24B119.h",
+            "vm_unix.c",
+        ]
     ],
-    data = [
-        "//kernel/xnu-10063.141.1/bsd:vm/switch_ui_scale_sites.h",
-        "//kernel/xnu-10063.141.1/bsd:vm/vm_unix.c",
-        "//kernel/xnu-10063.141.1/osfmk:vm/vm_shared_region.c",
-        "//kernel/xnu-12377.121.6/bsd:vm/switch_ui_scale_sites.h",
-        "//kernel/xnu-12377.121.6/bsd:vm/vm_unix.c",
-        "//kernel/xnu-12377.121.6/osfmk:vm/vm_shared_region.c",
-    ],
+    includes = ["."],
+)
+
+host_test(
+    name = "xnu_ui_scale_sites_24B119_test",
+    srcs = _UI_SCALE_SITES_HDRS + ["xnu_ui_scale_sites_24B119_test.cpp"],
+    data = _UI_SCALE_SITES_DATA,
     includes = ["."],
 )
 
@@ -474,6 +510,43 @@ host_test(
         'COMMPAGE_10063=\\"$(rootpath //kernel/xnu-10063.141.1/osfmk:arm/commpage/commpage.c)\\"',
         'COMMPAGE_12377=\\"$(rootpath //kernel/xnu-12377.121.6/osfmk:arm/commpage/commpage.c)\\"',
     ],
+    includes = ["."],
+)
+
+# --- kernel/switch/include/switch/spawn.h ---------------------------------------------------------------------------------
+copy_file(
+    name = "switch_spawn",
+    src = "//kernel/switch:include/switch/spawn.h",
+    out = "switch/spawn.h",
+)
+
+# spawnattr_12377.h: 12377's struct _posix_spawnattr, after the types it names.
+genrule(
+    name = "spawnattr_12377",
+    srcs = ["//kernel/xnu-12377.121.6/bsd:sys/spawn_internal.h"],
+    outs = ["spawnattr_12377.h"],
+    cmd = """{
+        printf '#include <mach/machine.h>\\n#include <signal.h>\\n#include <stdbool.h>\\n#include <stdint.h>\\n';
+        printf '#define NBINPREFS 4\\ntypedef int task_role_t;\\n';
+        printf 'typedef void *_posix_spawn_port_actions_t;\\ntypedef void *_posix_spawn_mac_policy_extensions_t;\\n';
+        awk '
+            /^typedef struct _posix_spawnattr \\{/ { on = 1 }
+            on { print }
+            on && /^\\} \\*_posix_spawnattr_t;/ { done = 1; exit }
+            END { if (!done) exit 1 }
+        ' $<;
+    } > $@""",
+)
+
+host_test(
+    name = "switch_spawn_test",
+    srcs = [
+        "spawnattr_12377.h",
+        "switch/spawn.h",
+        "switch_spawn_test.cpp",
+    ],
+    data = ["//kernel/xnu-12377.121.6/bsd:kern/kern_exec.c"],
+    defines = ['KERN_EXEC_12377=\\"$(rootpath //kernel/xnu-12377.121.6/bsd:kern/kern_exec.c)\\"'],
     includes = ["."],
 )
 

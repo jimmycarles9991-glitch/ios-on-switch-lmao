@@ -8,6 +8,7 @@
 // (xnu-10063 zalloc.c zone_init), so a span whose first and last words are in it lies in it.
 #pragma once
 #include <IOKit/IOMemoryDescriptor.h>
+#include "../../kits/SwitchDMA/SwitchDcache.h"
 #include "SwitchDMADirect.h"
 
 struct zone;
@@ -68,17 +69,12 @@ inline void switch_dma_direct_copy(IOMemoryDescriptor *md, uint32_t offset, uint
 
 // performOperation's cache maintenance by virtual address, one barrier at the end: clean (kIOMemoryIncoherentIOStore)
 // or clean and invalidate (kIOMemoryIncoherentIOFlush). The data cache is physically tagged, so these are the lines the
-// physical walk maintains. Replaced by kits/SwitchDMA's switch_dcache_*_spans when that lands.
+// physical walk maintains.
 inline void switch_dma_direct_sync(IOMemoryDescriptor *md, uint32_t offset, uint32_t length, bool invalidate)
 {
-    (void)switch_dma_for_each_span(switch_dma_direct_spans(md), offset, length,
-                                   [invalidate](uint64_t va, uint32_t take) {
-                                       for (uint64_t at = va & ~63ull; at < va + take; at += 64) {
-                                           if (invalidate)
-                                               __asm__ volatile("dc civac, %0" ::"r"(at) : "memory");
-                                           else
-                                               __asm__ volatile("dc cvac, %0" ::"r"(at) : "memory");
-                                       }
-                                   });
-    __asm__ volatile("dsb sy" ::: "memory");
+    const switch_dcache_op op = invalidate ? SWITCH_DCACHE_CLEAN_INVALIDATE : SWITCH_DCACHE_CLEAN;
+    (void)switch_dma_for_each_span(switch_dma_direct_spans(md), offset, length, [op](uint64_t va, uint32_t take) {
+        switch_dcache_lines(op, reinterpret_cast<const volatile void *>(static_cast<uintptr_t>(va)), take);
+    });
+    switch_dcache_sync();
 }

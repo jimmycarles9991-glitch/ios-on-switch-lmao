@@ -14,13 +14,17 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 #define SWITCH_PD_ALT_ALERT_CMD_DONE     (1u << 2)
 #define SWITCH_PD_ALT_ALERT_PLUGPULL     (1u << 3)
 #define SWITCH_PD_ALT_ALERT_VDM_RECEIVED (1u << 11)
 #define SWITCH_PD_ALT_ALERT_CONTRACT     (1u << 12)
 #define SWITCH_PD_ALT_STATUS1_LASTCMD    (7u << 4)
 #define SWITCH_PD_ALT_STATUS1_INSERT     (1u << 7)
-#define SWITCH_PD_ALT_STATUS1_DR_SHIFT   8
+#define SWITCH_PD_ALT_STATUS1_DR_SHIFT   8u
 #define SWITCH_PD_ALT_STATUS1_CSIDE      (1u << 11)
 #define SWITCH_PD_ALT_STATUS1_CMD_BUSY   (1u << 13)
 #define SWITCH_PD_ALT_DP_STATUS_DP_EN    (1u << 15)
@@ -109,7 +113,7 @@ static inline bool switch_pd_alt_active(const struct switch_pd_alt *alt)
     return alt->step != SWITCH_PD_ALT_IDLE && alt->step != SWITCH_PD_ALT_DONE && alt->step != SWITCH_PD_ALT_FAILED;
 }
 
-static inline struct switch_pd_alt_out switch_pd_alt_none(void)
+static inline struct switch_pd_alt_out switch_pd_alt_none()
 {
     struct switch_pd_alt_out out = {SWITCH_PD_ALT_NONE, 0, 0, {0}, 0, NULL};
     return out;
@@ -150,7 +154,7 @@ static inline struct switch_pd_alt_out switch_pd_alt_dock_request(uint8_t write,
 }
 
 // The LED as bm92t_usbhub_led_cfg(info, 128, 0, 0, 64) sets it at dock entry: fade 64, off 0, on 0, duty 128.
-static inline struct switch_pd_alt_out switch_pd_alt_dock_led(void)
+static inline struct switch_pd_alt_out switch_pd_alt_dock_led()
 {
     const uint8_t bytes[12] = {0x00, 0x00, 0x7E, 0x05, 1, 1, 0x01, 0x00, 64, 0, 0, 128};
     return switch_pd_alt_vdm(bytes, 12);
@@ -192,7 +196,7 @@ static inline bool switch_pd_alt_has_svid(const uint8_t *vdm, size_t len, uint16
 {
     const size_t count = vdm[0] < len ? vdm[0] : len - 1;
     for (size_t i = 5; i + 1 <= count; i += 2) {
-        if ((uint16_t)(vdm[i] | (vdm[i + 1] << 8)) == svid) {
+        if ((uint16_t)((unsigned)vdm[i] | (unsigned)vdm[i + 1] << 8U) == svid) {
             return true;
         }
     }
@@ -203,5 +207,9 @@ static inline bool switch_pd_alt_acked(const uint8_t *vdm, uint8_t command)
 {
     return vdm[1] == (uint8_t)(0x40u | command);
 }
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif

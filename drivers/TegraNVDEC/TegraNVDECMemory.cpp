@@ -9,12 +9,11 @@
 #include "../TegraSMMU/TegraSMMU.h"
 #include "../TegraSMMU/TegraSMMUEngine.h"
 #include "../../kits/SwitchDMA/SwitchDMABuffer.h"
-#include "../../kits/SwitchDMA/SwitchDcache.h"
 
 namespace {
-constexpr uint64_t kWindowBase = 1ull << 30, kWindowBytes = 1ull << 30;
+constexpr uint64_t kWindowBase = 1ULL << 30, kWindowBytes = 1ULL << 30;
 constexpr uint32_t kIdentityTables = 4;  // the firmware and the setup slots: at most two 4 MiB sections each
-constexpr uint64_t kWiredLimit = 512ull << 20;
+constexpr uint64_t kWiredLimit = 512ULL << 20;
 constexpr uint32_t kTranslation = (1u << 24) | (1u << 25);  // nvdecsrd, nvdecswr
 
 const TegraSMMUSwgroup kGroups[] = {
@@ -25,16 +24,6 @@ const TegraSMMUSwgroup kGroups[] = {
 TegraSMMUEngine gSpace;
 uint64_t gWired;  // atomic: bytes of every live buffer
 }  // namespace
-
-extern "C" void tegra_nvdec_cache_clean(const void *va, size_t size)
-{
-    switch_dcache_clean(va, size);
-}
-
-extern "C" void tegra_nvdec_cache_flush(const void *va, size_t size)
-{
-    switch_dcache_clean_invalidate(va, size);
-}
 
 extern "C" int tegra_nvdec_memory_init(const switch_dma_buffer *firmware, const switch_dma_buffer *setup, char *line,
                                        size_t size)

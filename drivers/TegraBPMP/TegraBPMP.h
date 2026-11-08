@@ -35,6 +35,7 @@ int tegra_bpmp_emc_set(unsigned int khz, unsigned int *now_khz);
 // while this reads SIGN_OF_LIFE, every channel free; otherwise it powers the BPMP off and runs an SC7 entry firmware,
 // which this boot chain does not have (hekate passes one on T210 only), and never reaches SC7. Any context.
 #define TEGRA_BPMP_SIGN_OF_LIFE 0xAAAAAAAAu
+// NOLINTNEXTLINE(readability-redundant-declaration): the drivers that call it never include the port's bpmp.h
 unsigned int tegra_bpmp_semaphore(void);
 
 #ifdef __cplusplus

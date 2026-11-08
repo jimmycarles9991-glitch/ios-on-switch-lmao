@@ -6,7 +6,10 @@
 // Written from the published descriptions of the protocol: Stute, Kreitschmann, Hollick, "One Billion Apples' Secret
 // Sauce: Recipe for the Apple Wireless Direct Link Ad hoc Protocol" (MobiCom 2018) and the AWDL field definitions of
 // Wireshark's dissector, cross-checked against the field lists iPadOS 21H461's own wifip2pd carries in its Swift
-// metadata (AWDL-CONTRACT.md §4). No code from OWL (GPLv3) is used.
+// metadata (AWDL-CONTRACT.md §4). What goes on the air (field values, TLV order, the sync counter, the election order)
+// follows OWL (seemoo-lab/owl), the implementation shown to interoperate with Apple devices. OWL is GPL-3.0 and this
+// project GPL-2.0-only, so none of its code is used: its behaviour is matched and its frame layouts are the host
+// tests' reference bytes.
 //
 // Not thread safe: the caller serialises every call on one lock. No allocation: struct awdl_core is one block the
 // caller provides (awdl_core_size()). No floating point (kernel code is -mgeneral-regs-only).
@@ -25,6 +28,7 @@ extern "C" {
 #define AWDL_AW_TU             16u    // availability window
 #define AWDL_EAW_AWS           4u     // one channel-sequence slot (extended AW) = 4 AWs = 64 TU
 #define AWDL_SEQ_SLOTS         16u    // channel sequence length; one sequence = 1024 TU
+#define AWDL_EAW_TU            64u    // AWDL_AW_TU * AWDL_EAW_AWS
 #define AWDL_PSF_INTERVAL_TU   110u   // period of PSFs
 #define AWDL_MAX_PEERS         32u
 #define AWDL_PEER_TIMEOUT_US   3000000u  // a peer silent this long is lost
@@ -57,6 +61,11 @@ enum {
     AWDL_TLV_ELECTION_PARAMS_V2 = 24,
 };
 
+static inline uint32_t awdl_tlv_bit(unsigned type)
+{
+    return 1u << type;
+}
+
 // Channel sequence encodings
 enum {
     AWDL_CHAN_ENC_SIMPLE = 0,
@@ -65,18 +74,17 @@ enum {
 };
 
 // Data path state flags (subset this stack writes and reads)
-enum {
-    AWDL_DPS_INFRA_INFO = 0x0001,
-    AWDL_DPS_INFRA_ADDRESS = 0x0002,
-    AWDL_DPS_AWDL_ADDRESS = 0x0004,
-    AWDL_DPS_UMI = 0x0010,
-    AWDL_DPS_COUNTRY_CODE = 0x0100,
-    AWDL_DPS_SOCIAL_CHANNEL_MAP = 0x0200,
-    AWDL_DPS_EXTENSION = 0x8000,
-};
+#define AWDL_DPS_INFRA_INFO         0x0001u
+#define AWDL_DPS_INFRA_ADDRESS      0x0002u
+#define AWDL_DPS_AWDL_ADDRESS       0x0004u
+#define AWDL_DPS_UMI                0x0010u
+#define AWDL_DPS_COUNTRY_CODE       0x0100u
+#define AWDL_DPS_SOCIAL_CHANNEL_MAP 0x0200u
+#define AWDL_DPS_EXTENSION          0x8000u
 
 // One channel: the channel number and the operating class (0x51: 2.4 GHz 20 MHz; 0x73: 5 GHz 20 MHz; 0x80: 5 GHz
-// 80 MHz, where the number is the block's centre, 42 for 36-48, 155 for 149-161).
+// 80 MHz). Apple names an 80 MHz slot by its primary channel ({149, 0x80}, {44, 0x80}); a centre index (155, 42) is read
+// as its block's AWDL primary.
 struct awdl_chan {
     uint8_t number;
     uint8_t opclass;
@@ -84,6 +92,7 @@ struct awdl_chan {
 
 uint16_t awdl_chan_freq(struct awdl_chan c);  // MHz of the primary 20 MHz channel; 0 for an empty slot
 uint8_t awdl_chan_primary(struct awdl_chan c);
+uint8_t awdl_chan_centre80(uint8_t primary);  // the 80 MHz block's centre channel of a 5 GHz primary; 0 for 2.4 GHz
 // The global operating class (IEEE 802.11 Annex E, table E-4) of a 20 MHz channel: 81 (0x51) for 1-13, 82 for 14,
 // 115 (0x73) for 36-48, 118 for 52-64, 121 for 100-144, 124 (0x7c) for 149-161, 125 for 165-177; 0 for anything else.
 uint8_t awdl_opclass_20mhz(uint8_t channel);
@@ -100,13 +109,13 @@ struct awdl_chanseq {
 
 struct awdl_sync_params {
     uint8_t tx_channel;
-    uint16_t tx_counter;  // TU until the sender's next AW starts (wifip2pd: "downCounter")
+    uint16_t tx_counter;  // TU until the sender's next EAW starts, 1..64 (wifip2pd: "downCounter")
     uint8_t master_channel, guard_time;
     uint16_t aw_period, af_period, flags, aw_ext_length, aw_cmn_length, aw_remaining;
     uint8_t min_ext, max_ext_mcast, max_ext_ucast, max_ext_af;
     uint8_t master[6];
     uint8_t presence_mode;
-    uint16_t aw_seq;  // the sender's current AW sequence number
+    uint16_t aw_seq;  // the sender's current AW sequence number (a multiple of 4 starts each EAW)
     int16_t ap_beacon_delta;
     struct awdl_chanseq seq;
     uint8_t has_seq;
@@ -153,9 +162,9 @@ struct awdl_af {
     uint8_t ht_ampdu, ht_mcs[2];
 };
 
-// Parse an 802.11 frame (header + body, no FCS). 0: an AWDL action frame, decoded into *out. Negative: not AWDL or
+// Parse an 802.11 frame (header + body, no FCS). 0: an AWDL action frame, decoded into *a. Negative: not AWDL or
 // malformed (each TLV is bounds-checked; unknown TLVs are skipped).
-int awdl_af_parse(const uint8_t *frame, size_t len, struct awdl_af *out);
+int awdl_af_parse(const uint8_t *f, size_t len, struct awdl_af *a);
 
 // ---- the stack -------------------------------------------------------------------------------------------------------
 struct awdl_rx_meta {
@@ -168,9 +177,11 @@ struct awdl_rx_meta {
 // stack; queue work for later if needed.
 struct awdl_host {
     void *ctx;
-    // One 802.11 frame (no FCS) to send on freq_mhz at or after tx_tsf (0: now). no_ack: group/action frames. Returns 0
-    // when queued.
-    int (*tx)(void *ctx, const uint8_t *frame, size_t len, uint16_t freq_mhz, uint64_t tx_tsf, int no_ack);
+    // One 802.11 frame (no FCS) to send on freq_mhz as soon as the radio can (its timing fields are stamped for the
+    // moment it was built); the radio then stays on freq_mhz until local TSF `stay_until` (0: no need) so the peers'
+    // frames of that slot reach us. A radio that cannot hop makes each such stay one excursion from its home channel.
+    // no_ack: group/action frames. Returns 0 when queued.
+    int (*tx)(void *ctx, const uint8_t *frame, size_t len, uint16_t freq_mhz, uint64_t stay_until, int no_ack);
     // The radio runs this sequence of 16 slots of 64 TU, slot 0 starting at anchor_tsf (a multiple of 1024 TU after
     // it). Called when the sequence or the synchronisation changes.
     void (*schedule)(void *ctx, const struct awdl_chan seq[AWDL_SEQ_SLOTS], uint64_t anchor_tsf);
@@ -196,6 +207,7 @@ struct awdl_config {
     uint32_t self_metric;  // election metric; low so a nearby Apple device stays master
     uint8_t awdl_version;  // e.g. 0x34 = 3.4
     uint8_t device_class;  // 1 macOS, 2 iOS
+    uint8_t ht_streams;    // receive MCS bytes in the HT TLV (the BCM4356 is 2x2)
     char country[3];
     // Who runs the protocol. NATIVE (the default on this chip): the firmware's own AWDL does sync, election, PSF/MIF
     // and the AWDL data encapsulation; the core configures it with iovars, learns peers from the action frames the
@@ -273,14 +285,14 @@ void awdl_core_fw_event(struct awdl_core *c, const struct awdl_fw_event *e, cons
 void awdl_core_fw_result(struct awdl_core *c, const char *name, int status, uint64_t now);
 // Native backend: a frame the firmware delivered on its AWDL interface. AWDL data (802.3 with the AWDL LLC/SNAP
 // header) is decapsulated and handed to host.deliver as Ethernet; it refreshes the peer. Anything else is counted.
-void awdl_core_rx_eth(struct awdl_core *c, const uint8_t *eth, size_t len, uint64_t now);
-// The access point's frequency while the station is associated (0 otherwise). The native schedule interleaves it
-// (awdl_schedule); a change while running re-sends the schedule.
+void awdl_core_rx_eth(struct awdl_core *c, const uint8_t *frame, size_t len, uint64_t now);
+// The access point's frequency while the station is associated (0 otherwise). The schedule interleaves it
+// (awdl_schedule); a change while running re-sends the schedule (native) or re-installs it (soft).
 void awdl_core_set_infra(struct awdl_core *c, uint16_t infra_mhz, uint64_t now);
 // The AWDL interface's firmware index once its WLC_E_IF arrived, -1 before.
 int awdl_core_fw_ifidx(const struct awdl_core *c);
 
-// The native schedule follows the AWDL states macOS was measured in (Stute, Kreitschmann, Hollick, MobiCom 2018,
+// Both backends' schedule follows the AWDL states macOS was measured in (Stute, Kreitschmann, Hollick, MobiCom 2018,
 // table 2; p the 5 GHz social channel, s channel 6, i the access point's):
 //   idle (enabled, discoverable, browsing, no transfer): "Low Power", p in slots 0, 9, 10 and s in 8, the least any
 //     Apple device was seen to keep; the other 12 slots are the access point's;
@@ -302,7 +314,7 @@ uint16_t awdl_slot_mask(uint16_t infra_mhz, enum awdl_mode mode);
 // infra channel while associated (the radio stays with the access point there) and empty otherwise. The 5 GHz social
 // channel is the infra channel when that is 44 or 149 (then only slot 8 leaves it), else `social5` (44 or 149, learnt
 // from the master's sequence), else both until a master is heard (149 before slot 8, 44 after). 5 GHz social slots
-// are 80 MHz ({42, 0x80}, {155, 0x80}); the infra channel is 20 MHz with its global operating class.
+// are 80 MHz ({44, 0x80}, {149, 0x80}); the infra channel is 20 MHz with its global operating class.
 void awdl_schedule(struct awdl_chan out[AWDL_SEQ_SLOTS], uint16_t infra_mhz, uint8_t social5, enum awdl_mode mode);
 // Slots of a schedule away from the infra channel (unassociated: the slots AWDL uses at all).
 unsigned awdl_slots_away(const struct awdl_chan seq[AWDL_SEQ_SLOTS], uint16_t infra_mhz);
@@ -314,7 +326,7 @@ void awdl_core_traffic_registered(struct awdl_core *c, const char *who, uint64_t
 enum awdl_mode awdl_core_mode(const struct awdl_core *c);
 // The data path state TLV's social channel map for a schedule: 0x1 channel 6, 0x2 channel 44, 0x4 channel 149.
 uint16_t awdl_social_map(const struct awdl_chan seq[AWDL_SEQ_SLOTS]);
-// The TLVs our MIFs carry beyond sync and election (service params, HT caps, data path state, arpa, version): the
+// The TLVs our MIFs carry beyond sync and election (service params, HT caps, arpa, data path state, version): the
 // "awdl_payload" the firmware appends to its frames in the native backend. Returns the length or 0.
 size_t awdl_core_build_payload(struct awdl_core *c, uint8_t *buf, size_t size);
 
@@ -331,14 +343,27 @@ uint64_t awdl_core_aw_start(const struct awdl_core *c, uint16_t seq, uint64_t no
 struct awdl_chan awdl_core_channel_at(const struct awdl_core *c, uint64_t now);
 
 // ---- frame building (exposed for tests) ------------------------------------------------------------------------------
-// Builds our PSF or MIF for transmission at `now` into buf; returns its length (0 if buf is too small).
+// Our PSF or MIF stamped for `now` (OWL's TLV order: sync, election, channel sequence, election v2, service params,
+// then for a MIF HT capabilities and arpa, then data path state and version) into buf; its length (0 if no room).
 size_t awdl_core_build_af(struct awdl_core *c, uint8_t subtype, uint64_t now, uint8_t *buf, size_t size);
 
 // ---- data path -------------------------------------------------------------------------------------------------------
 // Ethernet frame -> AWDL 802.11 data frame (src = our address). Returns the length or 0.
 size_t awdl_data_encap(const uint8_t *eth, size_t len, const uint8_t self[6], uint16_t seq, uint8_t *out, size_t size);
-// AWDL 802.11 data frame -> Ethernet frame. Returns the length or 0 (not AWDL data / malformed). *seq gets the AWDL
-// sequence number, *retry the 802.11 retry bit.
+
+// One MSDU of an AWDL data frame, pointing into the frame.
+struct awdl_msdu {
+    const uint8_t *dst, *src, *payload;
+    uint16_t ethertype;
+    size_t len;
+};
+
+#define AWDL_MAX_MSDUS 8
+// An AWDL data frame (data or QoS data, plain or A-MSDU) -> its MSDUs. Returns how many (0: not AWDL data or malformed;
+// one bad subframe rejects the frame). *seq gets the first MSDU's AWDL sequence number, *retry the 802.11 retry bit.
+size_t awdl_data_msdus(const uint8_t *frame, size_t len, struct awdl_msdu *out, size_t max, uint16_t *seq, int *retry);
+size_t awdl_msdu_ether(const struct awdl_msdu *m, uint8_t *out, size_t size);  // Ethernet frame length, 0 if no room
+// AWDL 802.11 data frame -> Ethernet frame of its first MSDU. Returns the length or 0.
 size_t awdl_data_decap(const uint8_t *frame, size_t len, uint8_t *out, size_t size, uint16_t *seq, int *retry);
 
 // ---- TSF clock: the radio's TSF from the host clock between reads ----------------------------------------------------

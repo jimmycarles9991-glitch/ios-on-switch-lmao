@@ -76,8 +76,9 @@ mach_host_special_port_description(int port)
 		[HOST_MEMORY_ERROR_PORT] = "memory error stats",
 		[HOST_MANAGEDAPPDISTD_PORT] = "managedappdistributiond",
 		[HOST_DOUBLEAGENTD_PORT] = "doubleagentd",
+		[HOST_DISKIMAGESIOD_PORT] = "diskimagesiod",
 	};
-	_Static_assert(HOST_DOUBLEAGENTD_PORT == HOST_MAX_SPECIAL_PORT,
+	_Static_assert(HOST_DISKIMAGESIOD_PORT == HOST_MAX_SPECIAL_PORT,
 	    "all host special ports must have descriptions");
 
 	return hsp_descs[port_index];

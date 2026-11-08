@@ -14,6 +14,7 @@
 #include <IOKit/IOLocks.h>
 #include <IOKit/IOReturn.h>
 #include "TegraDisplayColorMath.h"
+#include "../../kits/SwitchMMIO/SwitchMMIOWords.h"
 
 class TegraDisplayColor {
 public:
@@ -21,7 +22,7 @@ public:
     void free();
 
     // Under the work-loop gate: DC A mapped, then unmapped.
-    void attach(volatile uint32_t *dc);
+    void attach(SwitchMMIOWords registers);
     void detach();
 
     IOReturn getGammaTable(void *table);
@@ -49,7 +50,7 @@ public:
 
     // A panic's screen without the transform (a colour filter or a low white point could hide its text): the CMU bypassed
     // with the caller's next GENERAL_ACT_REQ. Stores only, from any context, the controller clocked.
-    static void bypassForPanic(volatile uint32_t *dc);
+    static void bypassForPanic(SwitchMMIOWords registers);
 
 private:
     void commit();
@@ -57,7 +58,7 @@ private:
     void writeEnable(bool enable);
 
     IOSimpleLock *lock = nullptr;
-    volatile uint32_t *dc = nullptr;
+    SwitchMMIOWords dc;
     uint32_t colorControl = 0;
     uint32_t generation = 0;
     bool pendingDirty = false, activeValid = false, hwEnabled = false;

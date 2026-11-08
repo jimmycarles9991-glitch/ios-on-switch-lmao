@@ -1,0 +1,80 @@
+# kits/SwitchLinux on the host: the spin and reader-writer locks on real threads against a model of the preemption level
+# and interrupt mask, and the XNU side against stand-ins that record what it asks of the kernel.
+#
+#   bazel test //kits/SwitchLinux/test:all
+load("//bazel/lint:defs.bzl", "lint_files")
+load("//bazel/testing:defs.bzl", "host_library", "host_shims", "host_test")
+
+lint_files()
+
+host_shims(
+    name = "lock_kernel",
+    headers = [
+        "IOKit/IOLib.h",
+        "kern/clock.h",
+    ],
+    stubs = "switch_linux_lock_stubs.h",
+)
+
+host_library(
+    name = "lock",
+    srcs = [
+        "switch_linux_lock_model.cpp",
+        "//kits/SwitchLinux:SwitchLinux.h",
+        "//kits/SwitchLinux:SwitchLinuxLock.cpp",
+        "//kits/SwitchLinux:SwitchLinuxLock.h",
+    ],
+    defines = ["SWITCH_LINUX_HOST_MODEL=1"],
+    deps = [":lock_kernel"],
+)
+
+host_test(
+    name = "switch_linux_lock_test",
+    srcs = [
+        "switch_linux_lock_test.cpp",
+        "//kits/SwitchLinux:SwitchLinux.h",
+        "//kits/SwitchLinux:SwitchLinuxLock.h",
+    ],
+    defines = ["SWITCH_LINUX_HOST_MODEL=1"],
+    deps = [
+        ":lock",
+        ":lock_kernel",
+    ],
+)
+
+host_shims(
+    name = "kernel",
+    headers = [
+        "IOKit/IOLib.h",
+        "kern/clock.h",
+        "kern/locks.h",
+        "kern/sched_prim.h",
+        "kern/thread_call.h",
+        "os/log.h",
+    ],
+    stubs = "switch_linux_stubs.h",
+)
+
+host_library(
+    name = "glue",
+    srcs = [
+        "//kits/SwitchLinux:SwitchLinux.cpp",
+        "//kits/SwitchLinux:SwitchLinux.h",
+        "//kits/SwitchTime:SwitchTime.h",
+    ],
+    deps = [":kernel"],
+)
+
+host_test(
+    name = "switch_linux_test",
+    srcs = [
+        "switch_linux_record.h",
+        "switch_linux_stubs.cpp",
+        "switch_linux_test.cpp",
+        "//kits/SwitchLinux:SwitchLinux.h",
+    ],
+    deps = [
+        ":glue",
+        ":kernel",
+    ],
+)

@@ -88,13 +88,16 @@ static void window_close(u64 now)
 void tegra_gm20b_compositor_vsync(uint64_t stamp, uint32_t lead_us, uint64_t interval)
 {
 	struct nvkm_device *device = READ_ONCE(dl.device);
-	unsigned long flags;
-	u64 now = nvxnu_nanotime(), step, vblank, target = 0;
+	unsigned long flags = 0;
+	u64 now = nvxnu_nanotime();
+	u64 step = 0;
+	u64 vblank = 0;
+	u64 target = 0;
 
 	if (!device)
 		return;
 	step = nvxnu_abstime_to_ns(interval);
-	vblank = nvxnu_abstime_to_ns(stamp) + lead_us * 1000ull;
+	vblank = nvxnu_abstime_to_ns(stamp) + lead_us * 1000ULL;
 	spin_lock_irqsave(&dl.lock, flags);
 	if (!dl.vsync_last || now - dl.vsync_last > step * 3 / 2)
 		dl.vsync_since = now;
@@ -121,10 +124,13 @@ static int window_live(u64 now)
 
 static void hold_work(void *arg)
 {
-	u64 now = nvxnu_nanotime(), next = 0;
-	int resident, preempt = -1, live;
+	u64 now = nvxnu_nanotime();
+	u64 next = 0;
+	int resident = 0;
+	int preempt = -1;
+	int live = 0;
 	struct tgm_window w;
-	unsigned long flags;
+	unsigned long flags = 0;
 
 	(void)arg;
 	spin_lock_irqsave(&dl.lock, flags);
@@ -162,7 +168,7 @@ static void check_work(void *arg)
 static void expire_work(void *arg)
 {
 	u64 now = nvxnu_nanotime();
-	unsigned long flags;
+	unsigned long flags = 0;
 	int again = 0;
 
 	(void)arg;
@@ -172,10 +178,11 @@ static void expire_work(void *arg)
 			dl.expire_at = dl.target + dl.interval;
 			again = 1;
 		} else {
-			if (TGM_STATS && dl.kicked)
+			if (TGM_STATS && dl.kicked) {
 				dl.expired++;
-			else if (TGM_STATS)
+			} else if (TGM_STATS) {
 				dl.empty++;
+			}
 			window_close(now);
 		}
 	}
@@ -187,7 +194,7 @@ static void expire_work(void *arg)
 void tgm_deadline_kicked(int compositor, int app)
 {
 	u64 now = nvxnu_nanotime();
-	unsigned long flags;
+	unsigned long flags = 0;
 
 	if (!READ_ONCE(dl.device))
 		return;
@@ -201,22 +208,25 @@ void tgm_deadline_kicked(int compositor, int app)
 			dl.frame_target = dl.next_target;
 		}
 	}
-	dl.frame_app |= app;
+	if (app)
+		dl.frame_app = 1;
 	spin_unlock_irqrestore(&dl.lock, flags);
 }
 
 /* Interrupt pass. The anchor moves on every 2^40 ns (18 minutes), keeping the rate, so the span never overflows. */
 void tgm_deadline_clock(uint64_t ns, uint64_t pt)
 {
-	unsigned long flags;
-	u64 rate;
+	unsigned long flags = 0;
+	u64 rate = 0;
 
 	spin_lock_irqsave(&dl.lock, flags);
-	if (!dl.cal_ns || pt < dl.cal_pt || ns - dl.cal_ns >= 1ull << 40) {
+	if (!dl.cal_ns || pt < dl.cal_pt || ns - dl.cal_ns >= 1ULL << 40) {
 		dl.cal_ns = ns;
 		dl.cal_pt = pt;
-	} else if ((rate = tgm_pt_rate(ns - dl.cal_ns, pt - dl.cal_pt))) {
-		WRITE_ONCE(dl.pt_rate, rate);
+	} else {
+		rate = tgm_pt_rate(ns - dl.cal_ns, pt - dl.cal_pt);
+		if (rate)
+			WRITE_ONCE(dl.pt_rate, rate);
 	}
 	spin_unlock_irqrestore(&dl.lock, flags);
 }
@@ -228,11 +238,12 @@ uint64_t tgm_deadline_pt_ns(uint64_t pt_span)
 
 void tgm_deadline_progress(uint64_t ns, int biased)
 {
-	unsigned long flags;
+	unsigned long flags = 0;
 
 	spin_lock_irqsave(&dl.lock, flags);
 	dl.frame_ns += ns;
-	dl.frame_biased |= biased;
+	if (biased)
+		dl.frame_biased = 1;
 	spin_unlock_irqrestore(&dl.lock, flags);
 }
 
@@ -241,8 +252,9 @@ void tgm_deadline_progress(uint64_t ns, int biased)
  * since, its window opens now. */
 void tgm_deadline_presented(uint64_t queued)
 {
-	u64 now = nvxnu_nanotime(), target = 0;
-	unsigned long flags;
+	u64 now = nvxnu_nanotime();
+	u64 target = 0;
+	unsigned long flags = 0;
 
 	if (!READ_ONCE(dl.device))
 		return;
@@ -250,10 +262,11 @@ void tgm_deadline_presented(uint64_t queued)
 	if (dl.frame_open) {
 		if (TGM_STATS) {
 			dl.frames++;
-			if (dl.frame_target && now > dl.frame_target && dl.frame_app)
+			if (dl.frame_target && now > dl.frame_target && dl.frame_app) {
 				dl.missed_app++;
-			else if (dl.frame_target && now > dl.frame_target)
+			} else if (dl.frame_target && now > dl.frame_target) {
 				dl.missed_clear++;
+			}
 		}
 		if (!dl.frame_biased && dl.frame_ns)
 			dl.expected = tgm_expect(dl.expected, dl.frame_ns);
@@ -280,7 +293,7 @@ void tgm_deadline_presented(uint64_t queued)
 
 void tgm_deadline_suspend(void)
 {
-	unsigned long flags;
+	unsigned long flags = 0;
 
 	if (!READ_ONCE(dl.device))
 		return;
@@ -296,7 +309,7 @@ void tgm_deadline_suspend(void)
 
 void tgm_deadline_resume(void)
 {
-	unsigned long flags;
+	unsigned long flags = 0;
 
 	if (!READ_ONCE(dl.device))
 		return;
@@ -308,9 +321,14 @@ void tgm_deadline_resume(void)
 
 void tgm_deadline_stats(char *buf, unsigned int len)
 {
-	u32 frames, missed_app, missed_clear, windows, empty, expired;
-	unsigned long flags;
-	u64 expected;
+	u32 frames = 0;
+	u32 missed_app = 0;
+	u32 missed_clear = 0;
+	u32 windows = 0;
+	u32 empty = 0;
+	u32 expired = 0;
+	unsigned long flags = 0;
+	u64 expected = 0;
 
 	if (!READ_ONCE(dl.device)) {
 		scnprintf(buf, len, "deadline off");

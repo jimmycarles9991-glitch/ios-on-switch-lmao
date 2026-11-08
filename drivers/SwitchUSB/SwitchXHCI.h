@@ -27,6 +27,7 @@ inline size_t firmwareBytes()
 }  // namespace xhost
 
 class SwitchXHCI : public AppleUSBXHCI {
+    // NOLINTNEXTLINE(misc-explicit-constructor): IOKit's structors macro declares the metaclass constructor
     OSDeclareDefaultStructors(SwitchXHCI);
 
     IOWorkLoop *tegraLoop;  // mailbox and the lost-interrupt check; AppleUSBXHCI keeps its own loop
@@ -47,7 +48,7 @@ class SwitchXHCI : public AppleUSBXHCI {
     static void mailboxAction(OSObject *owner, IOInterruptEventSource *, int);
     void armCheck(uint32_t ms, uint8_t stage);
     void checkFired(IOTimerEventSource *);
-    xusb_irq_sample hostSample() const;
+    static xusb_irq_sample hostSample();
     xusb_irq_sample mailboxSample() const;
     uint32_t *shadowFor(uint64_t address);
 

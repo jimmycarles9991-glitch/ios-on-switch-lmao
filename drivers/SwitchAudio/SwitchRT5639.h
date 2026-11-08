@@ -70,12 +70,19 @@ struct RegValue {
 
 class SwitchRT5639 {
 public:
+    // LDO1_EN high, its 400 ms, then rt5640_i2c_probe's VENDOR_ID2 check. False: no RT5639 answered (one log line),
+    // LDO1_EN low again; the codec is never touched this boot.
+    static bool present();
+    static bool answering();
+
     // rt5640_i2c_probe, rt5640_probe, rt5640_enable_jack_detect, then the static link setup the machine driver and
     // hw_params give it and the mixer switches of nvaudio_conf.xml's speaker and headphone paths; outputs muted, every
-    // power register 0. After SC7 (afterSleep) LDO1_EN stayed high, so a codec that answers needs no power-up wait.
-    void probe(bool afterSleep, bool capture);
+    // power register 0. With LDO1_EN already high (after present(), or after SC7) a codec that answers needs no
+    // power-up wait. A codec that stops answering is one log line and off for the boot: every later access is skipped
+    // and the I2S, its master, plays on into nothing.
+    void probe(bool ldoOn, bool capture);
 
-    uint16_t read(uint8_t reg);
+    static uint16_t read(uint8_t reg);
 
     // rt5640_set_bias_level STANDBY (from OFF) and OFF.
     void biasStandby();
@@ -117,7 +124,7 @@ public:
 
     static bool jackPlugged(uint16_t irqStatus)
     {
-        return !(irqStatus & (1u << 4));  // JD_STATUS, inverted (jd_inverted)
+        return (irqStatus & (1u << 4)) == 0u;  // JD_STATUS, inverted (jd_inverted)
     }
 
 private:

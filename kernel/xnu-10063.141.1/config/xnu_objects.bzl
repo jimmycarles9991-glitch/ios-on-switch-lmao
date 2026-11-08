@@ -15,13 +15,15 @@ directory) is spelled <gen>/. and maps to "./", as make's relative spellings wer
 
 Placeholders in recipes and tables: {xnu} the XNU source, {export} EXPORT_HDRS, {gen} the component's generated
 directory (make's `.`), {sdkroot} the kernel SDK root, {san} the sanitizer ignore lists, {tree} the kernel tree,
-{owner_header} bsd's owner-data-volume.h.
+{owner_header} bsd's owner-data-volume.h, {kernel_virt_base} the IPSW kind's kernel window base.
 """
 
+load("@bazel_skylib//rules:common_settings.bzl", "BuildSettingInfo")
 load("@rules_cc//cc:find_cc_toolchain.bzl", "find_cc_toolchain", "use_cc_toolchain")
 load("@rules_cc//cc/common:cc_common.bzl", "cc_common")
 load("@xcode//:defs.bzl", "DEVELOPER_DIR", "XCODE_TOOLCHAIN")
 load("//bazel/platforms:transitions.bzl", "kernel_transition", "outer_transition")
+load("//ipsw:ipsw.bzl", "kernel_virt_base")
 load("//kernel/rules:layout.bzl", "MOVED_ROOTS", "OLD_TREE", "PATH_ROOT", "tree_path")
 load("//kernel/switch:objects.bzl", "SWITCH_ROOT", "switch_copts", "switch_objects", "with_kprof")
 load(":recipes_development.bzl", "DEVELOPMENT_RECIPES")
@@ -203,6 +205,7 @@ def _xnu_objects_impl(ctx):
     gen = struct(path = gen_path, legacy = legacy_gen)
     places = {
         "{export}": _dir_of(export_hdrs, "/EXPORT_HDRS/", "EXPORT_HDRS") + "/EXPORT_HDRS",
+        "{kernel_virt_base}": kernel_virt_base(ctx.attr._kind[BuildSettingInfo].value),
         "{gen}": gen_path,
         "{owner_dir}": owner.dirname,
         "{owner_header}": owner.path,
@@ -363,6 +366,7 @@ xnu_objects_rule = rule(
         "tree_headers": attr.label_list(allow_files = True, doc = "the kernel tree's headers XNU includes"),
         "xnu_headers": attr.label_list(allow_files = True, doc = "XNU's source headers (every component's :headers)"),
         "_allowlist_function_transition": attr.label(default = "@bazel_tools//tools/allowlists/function_transition_allowlist"),
+        "_kind": attr.label(default = "//ipsw:kind"),
         "_setsegname": attr.label(default = "//kernel/xnu-10063.141.1:setsegname", executable = True, cfg = "exec"),
     },
     toolchains = use_cc_toolchain(),

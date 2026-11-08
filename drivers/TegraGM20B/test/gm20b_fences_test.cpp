@@ -257,6 +257,17 @@ protected:
 	}
 };
 
+// A kernel copy (the copy engine's plane copies, a tiling move) follows every running writer on the GPU: its own channel's
+// earlier work runs before it anyway, another's fence is an acquire, and one it cannot acquire on is refused (said), never
+// waited for on the CPU.
+TEST(WriterOrder, AKernelCopyOrdersOnTheGpuOrRefuses)
+{
+	EXPECT_EQ(tgm_writer_order(7, 7, 0), TGM_WRITER_IN_CHANNEL);
+	EXPECT_EQ(tgm_writer_order(7, 7, 1), TGM_WRITER_IN_CHANNEL);
+	EXPECT_EQ(tgm_writer_order(7, 9, 1), TGM_WRITER_GPU_ACQUIRE);
+	EXPECT_EQ(tgm_writer_order(7, 9, 0), TGM_WRITER_REFUSED);
+}
+
 TEST_F(Fences, AReadOfASurfaceAnotherChannelIsWritingWaitsOnceForThatWrite)
 {
 	Surface s(0x90000000, 101);

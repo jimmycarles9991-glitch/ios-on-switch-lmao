@@ -7,8 +7,11 @@
                                      arguments), with the same tools, versions and configs the checks use.
 
 The tools (bazel/lint/tools.bzl, @llvm, the Rust toolchain) and their configs (repository root) are declared inputs:
-nothing comes from the host or from a user's own config files.
+nothing comes from the host or from a user's own config files. swift-format is the one exception: Xcode's own
+(the pinned host input, bazel/host/xcode.bzl), as rules_swift's compiler is.
 """
+
+load("@xcode//:defs.bzl", "XCODE_TOOLCHAIN")
 
 C_FAMILY = ["c", "cc", "cpp", "h", "hpp", "inc", "m", "mm"]
 STARLARK_NAMES = ["BUILD", "BUILD.bazel", "MODULE.bazel", "REPO.bazel"]
@@ -30,6 +33,9 @@ def _is_rs(f):
 
 def _is_md(f):
     return f.extension == "md"
+
+def _is_swift(f):
+    return f.extension == "swift"
 
 def _is_github_yaml(f):
     return f.extension in ("yml", "yaml") and f.short_path.startswith(".github/")
@@ -74,6 +80,9 @@ def _tools(ctx):
         dprint_config = ctx.file._dprint_config,
         rustfmt_config = ctx.file._rustfmt_config,
         shellcheck_config = ctx.file._shellcheck_config,
+        swift_format = XCODE_TOOLCHAIN + "/swift-format",
+        swift_format_config = ctx.file._swift_format_config,
+        xcode = ctx.file._xcode,
     )
 
 # Each check: which files it applies to, and for one file the command (argv) and the extra inputs it reads.
@@ -136,6 +145,16 @@ def _check_dprint(t, f, _):
     argv.extend([p.path for p in t.dprint_plugins])
     return argv, [t.dprint, t.dprint_config] + t.dprint_plugins
 
+# swift-format's own format check is `lint`, which also reports its style rules; formatting alone is the diff between
+# the file and what `format` makes of it. It skips symbolic links (every sandboxed input is one) unless told not to.
+def _check_swift_format(t, f, _):
+    command = 'out="$(mktemp)" && "$0" format --follow-symlinks --configuration "$1" "$2" > "$out" && diff -u "$2" "$out"'
+    return ["/bin/sh", "-c", command, t.swift_format, t.swift_format_config.path, f.path], [t.swift_format_config, t.xcode]
+
+def _check_swift_lint(t, f, _):
+    argv = [t.swift_format, "lint", "--strict", "--follow-symlinks", "--configuration", t.swift_format_config.path, f.path]
+    return argv, [t.swift_format_config, t.xcode]
+
 CHECKS = {
     "actionlint": (_is_workflow, _check_actionlint),
     "buildifier": (_is_starlark, _check_buildifier),
@@ -149,6 +168,8 @@ CHECKS = {
     "rustfmt": (_is_rs, _check_rustfmt),
     "shellcheck": (_is_sh, _check_shellcheck),
     "shfmt": (_is_sh, _check_shfmt),
+    "swift_format": (_is_swift, _check_swift_format),
+    "swift_lint": (_is_swift, _check_swift_lint),
 }
 
 # Runs the check; its report is empty when it passes and holds the tool's output when it fails. The action itself
@@ -158,6 +179,7 @@ _RUN = """\
 report="$1"; shift
 export DPRINT_CACHE_DIR="$(mktemp -d)" RUMDL_CACHE_DIR="$(mktemp -d)" NO_COLOR=1
 log="$(mktemp)"
+trap 'rm -rf "$DPRINT_CACHE_DIR" "$RUMDL_CACHE_DIR" "$log"' EXIT
 if "$@" > "$log" 2>&1; then
     : > "$report"
 else
@@ -166,7 +188,6 @@ else
     [ -s "$report" ] || echo "(no output)" > "$report"
     echo "exit $rc: $*" >> "$report"
 fi
-rm -f "$log"
 """
 
 _TEST = """\
@@ -243,6 +264,8 @@ _TOOL_ATTRS = {
     "_shellcheck": attr.label(default = "@shellcheck//:shellcheck", executable = True, cfg = "exec", allow_single_file = True),
     "_shellcheck_config": attr.label(default = "//:.shellcheckrc", allow_single_file = True),
     "_shfmt": attr.label(default = "@shfmt//file", executable = True, cfg = "exec", allow_single_file = True),
+    "_swift_format_config": attr.label(default = "//:.swift-format", allow_single_file = True),
+    "_xcode": attr.label(default = "@xcode//:identity", allow_single_file = True),
 }
 
 lint_test = rule(
@@ -270,6 +293,7 @@ RUSTFMT="$runfiles/{rustfmt}"
 RUMDL="$runfiles/{rumdl}"
 DPRINT="$runfiles/{dprint}"
 DPRINT_PLUGINS=({dprint_plugins})
+SWIFT_FORMAT="{swift_format}"
 export DPRINT_CACHE_DIR="$(mktemp -d)" RUMDL_CACHE_DIR="$(mktemp -d)" NO_COLOR=1
 trap 'rm -rf "$DPRINT_CACHE_DIR" "$RUMDL_CACHE_DIR"' EXIT
 cd "$BUILD_WORKSPACE_DIRECTORY"
@@ -305,6 +329,7 @@ SH_FILES=({sh_files})
 RS_FILES=({rs_files})
 MD_FILES=({md_files})
 DATA_FILES=({data_files})
+SWIFT_FILES=({swift_files})
 
 run clang-format C_FILES "$CLANG_FORMAT" -i --style=file --fallback-style=none
 run ruff PY_FILES "$RUFF" format --quiet --no-cache --config ruff.toml
@@ -312,6 +337,7 @@ run buildifier STARLARK_FILES "$BUILDIFIER" -mode=fix -lint=off -config=.buildif
 run shfmt SH_FILES "$SHFMT" -w {shfmt_style}
 run rustfmt RS_FILES "$RUSTFMT" --config-path rustfmt.toml
 run rumdl MD_FILES "$RUMDL" fmt --silent --color never --config .rumdl.toml
+run swift-format SWIFT_FILES "$SWIFT_FORMAT" format --in-place --configuration .swift-format
 # dprint takes the plugins after the files.
 run dprint DATA_FILES bash -c 'exec "$0" fmt --config dprint.json "$@" --plugins '"${{DPRINT_PLUGINS[*]}}" "$DPRINT"
 """
@@ -335,6 +361,7 @@ def _format_runner_impl(ctx):
         dprint = rlocation(t.dprint),
         dprint_plugins = " ".join(['"$runfiles/{}"'.format(rlocation(p)) for p in t.dprint_plugins]),
         shfmt_style = " ".join(SHFMT_STYLE),
+        swift_format = t.swift_format,
         c_files = _quote([f.short_path for f in files if _is_c(f)]),
         py_files = _quote([f.short_path for f in files if _is_py(f)]),
         starlark_files = _quote([f.short_path for f in files if _is_starlark(f)]),
@@ -342,6 +369,7 @@ def _format_runner_impl(ctx):
         rs_files = _quote([f.short_path for f in files if _is_rs(f)]),
         md_files = _quote([f.short_path for f in files if _is_md(f)]),
         data_files = _quote([f.short_path for f in files if _is_data(f)]),
+        swift_files = _quote([f.short_path for f in files if _is_swift(f)]),
     ), is_executable = True)
     tools = [t.clang_format, t.ruff, t.buildifier, t.shfmt, t.rustfmt, t.rumdl, t.dprint] + t.dprint_plugins
     return [DefaultInfo(

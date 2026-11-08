@@ -1,7 +1,7 @@
 /* SPDX-License-Identifier: MIT */
 /*
  * Switch replacement for nouveau's include/nvif/os.h: the small slice of the Linux kernel API that
- * the vendored nvkm code uses, implemented on XNU (shim/linux.c + shim/xnu_glue.cpp via nvxnu.h).
+ * the vendored nvkm code uses, implemented on XNU (kits/SwitchLinux, shim/linux.c + shim/xnu_glue.cpp via nvxnu.h).
  * Nothing in here includes an XNU header.
  */
 #ifndef __NOUVEAU_OS_H__
@@ -11,6 +11,7 @@
 #include <stddef.h>
 #include <stdint.h>
 #include "../nvxnu.h"
+#include "../../../../../kits/SwitchMMIO/SwitchMMIO.h"
 
 #define CONFIG_NOUVEAU_PLATFORM_DRIVER 1
 #define CONFIG_ARCH_TEGRA 1
@@ -21,6 +22,7 @@
 #define __take_second_arg(__ignored, val, ...) val
 #define __is_defined(x) ___is_defined(x)
 #define ___is_defined(val) ____is_defined(__ARG_PLACEHOLDER_##val)
+// NOLINTNEXTLINE(bugprone-macro-parentheses): Linux's IS_ENABLED trick pastes the argument against the 1
 #define ____is_defined(arg1_or_junk) __take_second_arg(arg1_or_junk 1, 0)
 #define IS_ENABLED(option) __is_defined(option)
 #define IS_BUILTIN(option) __is_defined(option)
@@ -316,12 +318,12 @@ static inline unsigned long __ffs64(u64 x)
 
 static inline unsigned long roundup_pow_of_two(unsigned long n)
 {
-	return n <= 1 ? 1 : 1UL << fls_long(n - 1);
+	return n <= 1 ? 1 : 1UL << (unsigned)fls_long(n - 1);
 }
 
 static inline unsigned long rounddown_pow_of_two(unsigned long n)
 {
-	return 1UL << (fls_long(n) - 1);
+	return 1UL << (unsigned)(fls_long(n) - 1);
 }
 
 #define order_base_2(n) ilog2(roundup_pow_of_two(n))
@@ -337,13 +339,13 @@ static inline int get_order(unsigned long size)
 
 static inline size_t size_mul(size_t a, size_t b)
 {
-	size_t r;
+	size_t r = 0;
 	return __builtin_mul_overflow(a, b, &r) ? SIZE_MAX : r;
 }
 
 static inline size_t size_add(size_t a, size_t b)
 {
-	size_t r;
+	size_t r = 0;
 	return __builtin_add_overflow(a, b, &r) ? SIZE_MAX : r;
 }
 
@@ -474,7 +476,7 @@ static inline int isdigit(int c)
 
 static inline int isalpha(int c)
 {
-	return (c | 32) >= 'a' && (c | 32) <= 'z';
+	return ((unsigned)c | 32u) >= 'a' && ((unsigned)c | 32u) <= 'z';
 }
 
 static inline int isalnum(int c)
@@ -714,11 +716,33 @@ struct mutex {
 };
 
 #define DEFINE_MUTEX(n) struct mutex n = {NULL}
-void mutex_init(struct mutex *m);
-void mutex_destroy(struct mutex *m);
-void mutex_lock(struct mutex *m);
-void mutex_unlock(struct mutex *m);
-int mutex_trylock(struct mutex *m);
+
+static inline void mutex_init(struct mutex *m)
+{
+	m->lck = switch_linux_mutex_alloc();
+}
+
+static inline void mutex_destroy(struct mutex *m)
+{
+	switch_linux_mutex_free(m->lck);
+	m->lck = NULL;
+}
+
+static inline void mutex_lock(struct mutex *m)
+{
+	switch_linux_mutex_lock(switch_linux_mutex_of(&m->lck));
+}
+
+static inline void mutex_unlock(struct mutex *m)
+{
+	switch_linux_mutex_unlock(m->lck);
+}
+
+static inline int mutex_trylock(struct mutex *m)
+{
+	return switch_linux_mutex_trylock(switch_linux_mutex_of(&m->lck)) ? 1 : 0;
+}
+
 #define mutex_lock_nested(m, s) mutex_lock(m)
 #define __mutex_init(m, n, k)  \
 	do {                   \
@@ -728,90 +752,78 @@ int mutex_trylock(struct mutex *m);
 bool mutex_is_locked(struct mutex *m);
 #define mutex_lock_interruptible(m) (mutex_lock(m), 0)
 
+/* kits/SwitchLinux: a word in the lock, preemption off while held, the _irq forms mask interrupts as Linux's do. */
 typedef struct spinlock {
-	void *lck;
+	switch_linux_spinlock lock;
 } spinlock_t;
 
-#define DEFINE_SPINLOCK(n) spinlock_t n = {NULL}
-#define __SPIN_LOCK_UNLOCKED(n) {NULL}
-void spin_lock_init(spinlock_t *s);
-void spin_lock(spinlock_t *s);
-void spin_unlock(spinlock_t *s);
-#define spin_lock_irqsave(s, f)         \
-	do {                            \
-		(f) = nvxnu_irq_save(); \
-		spin_lock(s);           \
-	} while (0)
-#define spin_unlock_irqrestore(s, f)  \
-	do {                          \
-		spin_unlock(s);       \
-		nvxnu_irq_restore(f); \
-	} while (0)
-#define spin_lock_irq(s) spin_lock(s)
-#define spin_unlock_irq(s) spin_unlock(s)
+#define DEFINE_SPINLOCK(n) spinlock_t n = {SWITCH_LINUX_SPINLOCK_INIT}
+#define __SPIN_LOCK_UNLOCKED(n) {SWITCH_LINUX_SPINLOCK_INIT}
+#define spin_lock_init(s) ((s)->lock.holder = 0)
+#define spin_lock(s) switch_linux_spin_lock(&(s)->lock)
+#define spin_unlock(s) switch_linux_spin_unlock(&(s)->lock)
+#define spin_trylock(s) switch_linux_spin_trylock(&(s)->lock)
+#define spin_lock_irqsave(s, f) ((f) = switch_linux_spin_lock_irqsave(&(s)->lock))
+#define spin_unlock_irqrestore(s, f) switch_linux_spin_unlock_irqrestore(&(s)->lock, (f))
+#define spin_lock_irq(s) switch_linux_spin_lock_irq(&(s)->lock)
+#define spin_unlock_irq(s) switch_linux_spin_unlock_irq(&(s)->lock)
 #define spin_lock_bh(s) spin_lock(s)
 #define spin_unlock_bh(s) spin_unlock(s)
-#define assert_spin_locked(s) \
-	do {                  \
-		(void)(s);    \
-	} while (0)
+#define assert_spin_locked(s) BUG_ON(!switch_linux_spin_is_locked(&(s)->lock))
 
-typedef struct {
-	void *lck;
-} rwlock_t;
+/* Linux's rwlock_t spins with preemption off: nvkm takes one with interrupts off inside nvkm_intr's spinlock
+ * (nvkm_event_ntfy), where a sleeping lck_rw is not allowed (xnu-12377 asserts it). Readers may nest. */
+typedef switch_linux_rwlock rwlock_t;
 
-void rwlock_init(rwlock_t *l);
-void read_lock(rwlock_t *l);
-void read_unlock(rwlock_t *l);
-void write_lock(rwlock_t *l);
-void write_unlock(rwlock_t *l);
-#define read_lock_irqsave(l, f)         \
-	do {                            \
-		(f) = nvxnu_irq_save(); \
-		read_lock(l);           \
-	} while (0)
-#define read_unlock_irqrestore(l, f)  \
-	do {                          \
-		read_unlock(l);       \
-		nvxnu_irq_restore(f); \
-	} while (0)
-#define write_lock_irq(l) write_lock(l)
-#define write_unlock_irq(l) write_unlock(l)
-#define read_lock_irq(l) read_lock(l)
-#define read_unlock_irq(l) read_unlock(l)
-#define write_lock_irqsave(l, f)        \
-	do {                            \
-		(f) = nvxnu_irq_save(); \
-		write_lock(l);          \
-	} while (0)
-#define write_unlock_irqrestore(l, f) \
-	do {                          \
-		write_unlock(l);      \
-		nvxnu_irq_restore(f); \
-	} while (0)
+#define rwlock_init(l) ((l)->state = 0)
+#define read_lock(l) switch_linux_read_lock(l)
+#define read_unlock(l) switch_linux_read_unlock(l)
+#define write_lock(l) switch_linux_write_lock(l)
+#define write_unlock(l) switch_linux_write_unlock(l)
+#define read_lock_irqsave(l, f) ((f) = switch_linux_read_lock_irqsave(l))
+#define read_unlock_irqrestore(l, f) switch_linux_read_unlock_irqrestore((l), (f))
+#define write_lock_irqsave(l, f) ((f) = switch_linux_write_lock_irqsave(l))
+#define write_unlock_irqrestore(l, f) switch_linux_write_unlock_irqrestore((l), (f))
+#define read_lock_irq(l) switch_linux_read_lock_irq(l)
+#define read_unlock_irq(l) switch_linux_read_unlock_irq(l)
+#define write_lock_irq(l) switch_linux_write_lock_irq(l)
+#define write_unlock_irq(l) switch_linux_write_unlock_irq(l)
 
 struct rw_semaphore {
 	void *lck;
 };
 
-void init_rwsem(struct rw_semaphore *s);
-void down_read(struct rw_semaphore *s);
-void up_read(struct rw_semaphore *s);
-void down_write(struct rw_semaphore *s);
-void up_write(struct rw_semaphore *s);
+static inline void init_rwsem(struct rw_semaphore *s)
+{
+	s->lck = switch_linux_rwsem_alloc();
+}
+
+static inline void down_read(struct rw_semaphore *s)
+{
+	switch_linux_down_read(switch_linux_rwsem_of(&s->lck));
+}
+
+static inline void up_read(struct rw_semaphore *s)
+{
+	switch_linux_up_read(s->lck);
+}
+
+static inline void down_write(struct rw_semaphore *s)
+{
+	switch_linux_down_write(switch_linux_rwsem_of(&s->lck));
+}
+
+static inline void up_write(struct rw_semaphore *s)
+{
+	switch_linux_up_write(s->lck);
+}
+
 #define down_read_nested(s, n) down_read(s)
 #define down_write_nested(s, n) down_write(s)
-#define local_irq_save(f)               \
-	do {                            \
-		(f) = nvxnu_irq_save(); \
-	} while (0)
-#define local_irq_restore(f) nvxnu_irq_restore(f)
-#define preempt_disable() \
-	do {              \
-	} while (0)
-#define preempt_enable() \
-	do {             \
-	} while (0)
+#define local_irq_save(f) ((f) = switch_linux_irq_save())
+#define local_irq_restore(f) switch_linux_irq_restore(f)
+#define preempt_disable() _disable_preemption()
+#define preempt_enable() _enable_preemption()
 
 struct list_head {
 	struct list_head *next, *prev;
@@ -906,7 +918,8 @@ static inline int list_is_singular(const struct list_head *h)
 static inline void __list_splice(const struct list_head *l, struct list_head *p,
 				 struct list_head *n)
 {
-	struct list_head *f = l->next, *t = l->prev;
+	struct list_head *f = l->next;
+	struct list_head *t = l->prev;
 	f->prev = p;
 	p->next = f;
 	t->next = n;
@@ -961,34 +974,35 @@ static inline size_t list_count_nodes(struct list_head *h)
 #define list_next_entry(p, m) list_entry((p)->m.next, __typeof__(*(p)), m)
 #define list_prev_entry(p, m) list_entry((p)->m.prev, __typeof__(*(p)), m)
 #define list_entry_is_head(p, h, m) (&(p)->m == (h))
-#define list_for_each(p, h) for (p = (h)->next; p != (h); p = p->next)
-#define list_for_each_safe(p, n, h) for (p = (h)->next, n = p->next; p != (h); p = n, n = p->next)
-#define list_for_each_entry(p, h, m)                                                   \
-	for (p = list_first_entry(h, __typeof__(*p), m); !list_entry_is_head(p, h, m); \
-	     p = list_next_entry(p, m))
-#define list_for_each_entry_reverse(p, h, m)                                          \
-	for (p = list_last_entry(h, __typeof__(*p), m); !list_entry_is_head(p, h, m); \
-	     p = list_prev_entry(p, m))
+#define list_for_each(p, h) for ((p) = (h)->next; (p) != (h); (p) = (p)->next)
+#define list_for_each_safe(p, n, h) \
+	for ((p) = (h)->next, (n) = (p)->next; (p) != (h); (p) = (n), (n) = (p)->next)
+#define list_for_each_entry(p, h, m)                                                       \
+	for ((p) = list_first_entry(h, __typeof__(*(p)), m); !list_entry_is_head(p, h, m); \
+	     (p) = list_next_entry(p, m))
+#define list_for_each_entry_reverse(p, h, m)                                              \
+	for ((p) = list_last_entry(h, __typeof__(*(p)), m); !list_entry_is_head(p, h, m); \
+	     (p) = list_prev_entry(p, m))
 #define list_for_each_entry_continue(p, h, m) \
-	for (p = list_next_entry(p, m); !list_entry_is_head(p, h, m); p = list_next_entry(p, m))
+	for ((p) = list_next_entry(p, m); !list_entry_is_head(p, h, m); (p) = list_next_entry(p, m))
 #define list_for_each_entry_continue_reverse(p, h, m) \
-	for (p = list_prev_entry(p, m); !list_entry_is_head(p, h, m); p = list_prev_entry(p, m))
+	for ((p) = list_prev_entry(p, m); !list_entry_is_head(p, h, m); (p) = list_prev_entry(p, m))
 #define list_for_each_entry_from(p, h, m) \
-	for (; !list_entry_is_head(p, h, m); p = list_next_entry(p, m))
+	for (; !list_entry_is_head(p, h, m); (p) = list_next_entry(p, m))
 #define list_for_each_entry_from_reverse(p, h, m) \
-	for (; !list_entry_is_head(p, h, m); p = list_prev_entry(p, m))
-#define list_for_each_entry_safe(p, n, h, m)                                        \
-	for (p = list_first_entry(h, __typeof__(*p), m), n = list_next_entry(p, m); \
-	     !list_entry_is_head(p, h, m); p = n, n = list_next_entry(n, m))
-#define list_for_each_entry_safe_reverse(p, n, h, m)                               \
-	for (p = list_last_entry(h, __typeof__(*p), m), n = list_prev_entry(p, m); \
-	     !list_entry_is_head(p, h, m); p = n, n = list_prev_entry(n, m))
-#define list_for_each_entry_safe_from(p, n, h, m)                     \
-	for (n = list_next_entry(p, m); !list_entry_is_head(p, h, m); \
-	     p = n, n = list_next_entry(n, m))
-#define list_for_each_entry_safe_continue(p, n, h, m)                                            \
-	for (p = list_next_entry(p, m), n = list_next_entry(p, m); !list_entry_is_head(p, h, m); \
-	     p = n, n = list_next_entry(n, m))
+	for (; !list_entry_is_head(p, h, m); (p) = list_prev_entry(p, m))
+#define list_for_each_entry_safe(p, n, h, m)                                              \
+	for ((p) = list_first_entry(h, __typeof__(*(p)), m), (n) = list_next_entry(p, m); \
+	     !list_entry_is_head(p, h, m); (p) = (n), (n) = list_next_entry(n, m))
+#define list_for_each_entry_safe_reverse(p, n, h, m)                                     \
+	for ((p) = list_last_entry(h, __typeof__(*(p)), m), (n) = list_prev_entry(p, m); \
+	     !list_entry_is_head(p, h, m); (p) = (n), (n) = list_prev_entry(n, m))
+#define list_for_each_entry_safe_from(p, n, h, m)                       \
+	for ((n) = list_next_entry(p, m); !list_entry_is_head(p, h, m); \
+	     (p) = (n), (n) = list_next_entry(n, m))
+#define list_for_each_entry_safe_continue(p, n, h, m)                  \
+	for ((p) = list_next_entry(p, m), (n) = list_next_entry(p, m); \
+	     !list_entry_is_head(p, h, m); (p) = (n), (n) = list_next_entry(n, m))
 
 static inline void list_rotate_left(struct list_head *h)
 {
@@ -1055,11 +1069,13 @@ static inline void __clear_bit(unsigned long n, volatile unsigned long *a)
 	a[BIT_WORD(n)] &= ~BIT_MASK(n);
 }
 
+/* NOLINTNEXTLINE(readability-non-const-parameter): the atomic below writes through a */
 static inline void set_bit(unsigned long n, volatile unsigned long *a)
 {
 	__atomic_or_fetch(&a[BIT_WORD(n)], BIT_MASK(n), __ATOMIC_SEQ_CST);
 }
 
+/* NOLINTNEXTLINE(readability-non-const-parameter): the atomic below writes through a */
 static inline void clear_bit(unsigned long n, volatile unsigned long *a)
 {
 	__atomic_and_fetch(&a[BIT_WORD(n)], ~BIT_MASK(n), __ATOMIC_SEQ_CST);
@@ -1070,12 +1086,14 @@ static inline bool test_bit(unsigned long n, const volatile unsigned long *a)
 	return (a[BIT_WORD(n)] & BIT_MASK(n)) != 0;
 }
 
+/* NOLINTNEXTLINE(readability-non-const-parameter): the atomic below writes through a */
 static inline bool test_and_set_bit(unsigned long n, volatile unsigned long *a)
 {
 	return (__atomic_fetch_or(&a[BIT_WORD(n)], BIT_MASK(n), __ATOMIC_SEQ_CST) & BIT_MASK(n)) !=
 	       0;
 }
 
+/* NOLINTNEXTLINE(readability-non-const-parameter): the atomic below writes through a */
 static inline bool test_and_clear_bit(unsigned long n, volatile unsigned long *a)
 {
 	return (__atomic_fetch_and(&a[BIT_WORD(n)], ~BIT_MASK(n), __ATOMIC_SEQ_CST) &
@@ -1133,24 +1151,23 @@ static inline void bitmap_copy(unsigned long *d, const unsigned long *s, unsigne
 
 static inline void *kmalloc(size_t s, gfp_t g)
 {
-	return nvxnu_malloc(s, !!(g & __GFP_ZERO));
+	return switch_linux_malloc(s, !!(g & __GFP_ZERO));
 }
 
 static inline void *kzalloc(size_t s, gfp_t g)
 {
 	(void)g;
-	return nvxnu_malloc(s, 1);
+	return switch_linux_malloc(s, 1);
 }
 
 static inline void kfree(const void *p)
 {
-	if (p)
-		nvxnu_free((void *)p);
+	switch_linux_free(p);
 }
 
 static inline void *kmalloc_array(size_t n, size_t s, gfp_t g)
 {
-	size_t b;
+	size_t b = 0;
 	return __builtin_mul_overflow(n, s, &b) ? NULL : kmalloc(b, g);
 }
 
@@ -1290,25 +1307,20 @@ void __iomem *ioremap(phys_addr_t pa, size_t size);
 void __iomem *ioremap_wc(phys_addr_t pa, size_t size);
 void iounmap(volatile void __iomem *va);
 
+/* kits/SwitchMMIO's load-acquire: the A57's erratum 832075 workaround, and the ordering Linux's trailing dma_rmb gave. */
 static inline u8 ioread8(const volatile void __iomem *p)
 {
-	u8 v = *(const volatile u8 *)p;
-	dma_rmb();
-	return v;
+	return switch_mmio_read8((const volatile u8 *)p, 0);
 }
 
 static inline u16 ioread16(const volatile void __iomem *p)
 {
-	u16 v = *(const volatile u16 *)p;
-	dma_rmb();
-	return v;
+	return switch_mmio_read16((const volatile u8 *)p, 0);
 }
 
 static inline u32 ioread32(const volatile void __iomem *p)
 {
-	u32 v = *(const volatile u32 *)p;
-	dma_rmb();
-	return v;
+	return switch_mmio_read32((const volatile u8 *)p, 0);
 }
 
 static inline void iowrite8(u8 v, volatile void __iomem *p)
@@ -1320,19 +1332,18 @@ static inline void iowrite8(u8 v, volatile void __iomem *p)
 static inline void iowrite16(u16 v, volatile void __iomem *p)
 {
 	dma_wmb();
-	*(volatile u16 *)p = v;
+	switch_mmio_write16((volatile u8 *)p, 0, v);
 }
 
 static inline void iowrite32(u32 v, volatile void __iomem *p)
 {
-	dma_wmb();
-	*(volatile u32 *)p = v;
+	switch_mmio_write32_publish((volatile u8 *)p, 0, v);
 }
 
 #define readl(p) ioread32(p)
 #define writel(v, p) iowrite32(v, p)
-#define readl_relaxed(p) (*(const volatile u32 *)(p))
-#define writel_relaxed(v, p) (*(volatile u32 *)(p) = (v))
+#define readl_relaxed(p) switch_mmio_read32((const volatile u8 *)(p), 0)
+#define writel_relaxed(v, p) switch_mmio_write32((volatile u8 *)(p), 0, (v))
 #define ioread16_native ioread16
 #define iowrite16_native iowrite16
 #define ioread32_native ioread32
@@ -1425,12 +1436,11 @@ static inline int dma_set_mask_and_coherent(struct device *d, u64 m)
 void dma_sync_single_for_device(struct device *, dma_addr_t, size_t, enum dma_data_direction);
 void dma_sync_single_for_cpu(struct device *, dma_addr_t, size_t, enum dma_data_direction);
 
-unsigned long nvxnu_jiffies(void);
-#define jiffies nvxnu_jiffies()
+#define jiffies ((unsigned long)(switch_linux_nanotime() / (NSEC_PER_SEC / HZ)))
 
 static inline ktime_t ktime_get(void)
 {
-	return (ktime_t)nvxnu_nanotime();
+	return (ktime_t)switch_linux_nanotime();
 }
 
 #define ktime_get_raw ktime_get
@@ -1501,22 +1511,22 @@ static inline s64 ktime_us_delta(ktime_t a, ktime_t b)
 
 static inline void udelay(unsigned long us)
 {
-	nvxnu_udelay((u32)us);
+	switch_linux_udelay(us);
 }
 
 static inline void ndelay(unsigned long ns)
 {
-	nvxnu_udelay((u32)DIV_ROUND_UP(ns, 1000));
+	switch_linux_udelay(DIV_ROUND_UP(ns, 1000));
 }
 
 static inline void mdelay(unsigned long ms)
 {
-	nvxnu_udelay((u32)(ms * 1000));
+	switch_linux_udelay((u64)ms * 1000);
 }
 
 static inline void msleep(unsigned int ms)
 {
-	nvxnu_usleep(ms * 1000);
+	switch_linux_usleep_range((u64)ms * 1000, (u64)ms * 1000);
 }
 
 static inline unsigned long msleep_interruptible(unsigned int ms)
@@ -1527,13 +1537,12 @@ static inline unsigned long msleep_interruptible(unsigned int ms)
 
 static inline void usleep_range(unsigned long lo, unsigned long hi)
 {
-	(void)hi;
-	nvxnu_usleep((u32)lo);
+	switch_linux_usleep_range(lo, hi);
 }
 
 static inline void fsleep(unsigned long us)
 {
-	nvxnu_usleep((u32)us);
+	switch_linux_usleep_range(us, us);
 }
 
 static inline unsigned long msecs_to_jiffies(unsigned int m)
@@ -1564,12 +1573,12 @@ static inline unsigned long nsecs_to_jiffies(u64 n)
 
 static inline void cond_resched(void)
 {
-	nvxnu_yield();
+	switch_linux_cond_resched();
 }
 
 static inline void schedule(void)
 {
-	nvxnu_yield();
+	switch_linux_cond_resched();
 }
 
 long schedule_timeout(long timeout);
@@ -1682,27 +1691,31 @@ struct work_struct {
 };
 struct workqueue_struct;
 void nvxnu_work_trampoline(void *work);
-#define INIT_WORK(w, f)                                                          \
-	do {                                                                     \
-		(w)->func = (f);                                                 \
-		(w)->thread_call = nvxnu_work_alloc(nvxnu_work_trampoline, (w)); \
+#define INIT_WORK(w, f)                                                                 \
+	do {                                                                            \
+		(w)->func = (f);                                                        \
+		(w)->thread_call = switch_linux_call_alloc(nvxnu_work_trampoline, (w)); \
 	} while (0)
 
 static inline bool schedule_work(struct work_struct *w)
 {
-	nvxnu_work_schedule(w->thread_call);
-	return true;
+	return !switch_linux_call_enter(w->thread_call);
 }
 
 #define queue_work(wq, w) schedule_work(w)
 
+/* nvkm's fini paths rely on a flush running a queued item (a runlist's recovery cancelled at suspend left the runlist
+ * blocked). */
 static inline bool flush_work(struct work_struct *w)
 {
-	nvxnu_work_cancel_wait(w->thread_call);
-	return true;
+	return switch_linux_call_flush(w->thread_call, nvxnu_work_trampoline, w);
 }
 
-#define cancel_work_sync flush_work
+static inline bool cancel_work_sync(struct work_struct *w)
+{
+	return switch_linux_call_cancel_wait(w->thread_call);
+}
+
 #define system_wq ((struct workqueue_struct *)0)
 
 /* interrupts: the handler runs from nvxnu_poll_irqs */
@@ -1731,7 +1744,7 @@ const void *free_irq(unsigned int irq, void *dev);
 	} while (0)
 #define in_interrupt() 0
 #define in_atomic() 0
-#define irqs_disabled() 0
+#define irqs_disabled() (!nvxnu_irqs_enabled())
 
 struct firmware {
 	size_t size;
@@ -1790,21 +1803,21 @@ int tegra_fuse_readl(unsigned long offset, u32 *value);
 
 static inline u16 get_unaligned_le16(const void *p)
 {
-	u16 v;
+	u16 v = 0;
 	memcpy(&v, p, 2);
 	return v;
 }
 
 static inline u32 get_unaligned_le32(const void *p)
 {
-	u32 v;
+	u32 v = 0;
 	memcpy(&v, p, 4);
 	return v;
 }
 
 static inline u64 get_unaligned_le64(const void *p)
 {
-	u64 v;
+	u64 v = 0;
 	memcpy(&v, p, 8);
 	return v;
 }
@@ -1963,6 +1976,7 @@ struct i2c_board_info {
 };
 
 #define I2C_M_RD 0x0001
+// NOLINTNEXTLINE(bugprone-macro-parentheses): t initializes a char array, which takes a bare string literal
 #define I2C_BOARD_INFO(t, a) .type = t, .addr = (a)
 
 static inline int i2c_transfer(struct i2c_adapter *a, struct i2c_msg *m, int n)

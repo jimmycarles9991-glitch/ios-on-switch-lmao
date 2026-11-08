@@ -20,13 +20,13 @@ enum {
     DMA_LOW = 0x58,
     DMA_HIGH = 0x5c,
     VERSION = 0xfe,
-    TRANSFER_DONE = 2,
-    DMA_BOUNDARY = 8,
     MAX_POLLS = 1000000
 };
 
-#define DMA_ERRORS UINT32_C(0xffff8000)
-#define BOUNDARY   UINT64_C(524288)
+#define TRANSFER_DONE UINT32_C(2)
+#define DMA_BOUNDARY  UINT32_C(8)
+#define DMA_ERRORS    UINT32_C(0xffff8000)
+#define BOUNDARY      UINT64_C(524288)
 
 static int bad(struct switch_sd_dma *d, int error)
 {
@@ -145,8 +145,9 @@ int switch_sd_dma_complete(struct switch_sd_dma *d, void *c, uint8_t *output)
             return bad(d, SWITCH_SD_UNQUALIFIED);
         memcpy(output, d->bytes, d->length);
         d->read_bytes += d->length;
-    } else
+    } else {
         d->write_bytes += d->length;
+    }
     d->active = 0;
     d->completed = 0;
     return SWITCH_SD_OK;

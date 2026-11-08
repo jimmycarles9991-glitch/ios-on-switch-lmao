@@ -30,19 +30,19 @@ bool switch_dma_page_list(IOMemoryDescriptor *memory, uint64_t offset, uint64_t 
 bool switch_dma_pages_alloc(switch_dma_pages *out, size_t size, IOOptionBits extraOptions)
 {
     *out = {};
-    const uint64_t whole = ((uint64_t)size + SWITCH_HW_PAGE_MASK) & ~SWITCH_HW_PAGE_MASK;
+    const uint64_t whole = (static_cast<uint64_t>(size) + SWITCH_HW_PAGE_MASK) & ~SWITCH_HW_PAGE_MASK;
     if (!size || whole / SWITCH_HW_PAGE_SIZE > UINT32_MAX)
         return false;
-    const IOOptionBits options = (IOOptionBits)kIODirectionInOut | extraOptions;
+    const IOOptionBits options = static_cast<IOOptionBits>(kIODirectionInOut) | extraOptions;
     IOBufferMemoryDescriptor *memory =
-        IOBufferMemoryDescriptor::inTaskWithOptions(kernel_task, options, (vm_size_t)whole, PAGE_SIZE);
+        IOBufferMemoryDescriptor::inTaskWithOptions(kernel_task, options, static_cast<vm_size_t>(whole), PAGE_SIZE);
     if (!memory)
         return false;
     if (memory->prepare() != kIOReturnSuccess) {
         memory->release();
         return false;
     }
-    const uint32_t count = (uint32_t)(whole / SWITCH_HW_PAGE_SIZE);
+    const uint32_t count = static_cast<uint32_t>(whole / SWITCH_HW_PAGE_SIZE);
     uint64_t *pages = IONew(uint64_t, count);
     auto *va = static_cast<uint8_t *>(memory->getBytesNoCopy());
     uint32_t listed = 0;
@@ -55,7 +55,7 @@ bool switch_dma_pages_alloc(switch_dma_pages *out, size_t size, IOOptionBits ext
     }
     bzero(va, whole);
     switch_dcache_clean_invalidate(va, whole);
-    *out = {memory, va, pages, count, (size_t)whole};
+    *out = {memory, va, pages, count, static_cast<size_t>(whole)};
     return true;
 }
 

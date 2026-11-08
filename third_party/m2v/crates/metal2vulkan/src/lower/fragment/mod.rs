@@ -94,9 +94,9 @@ pub(crate) use depth_test::{
 };
 pub use discard::DiscardForm;
 pub(crate) use fetch::{
-    blends_half_in_shader, blends_through_inputs, compiled_write_mask, extended_range_blend,
-    half4_output, half_blend_attachment, interlock_orders, kept_channels, storage_form, ColorUse,
-    StorageSamples,
+    blends_half_in_shader, blends_inputs_beside_interlock, blends_through_inputs,
+    compiled_write_mask, extended_range_blend, half4_output, half_blend_attachment,
+    interlock_orders, kept_channels, storage_form, ColorUse, StorageSamples,
 };
 pub use fetch::{
     select_output as select_storage_output, select_second_output as select_storage_second_output,
@@ -184,6 +184,11 @@ pub struct FragmentPlan {
     /// The extended-range attachments whose blend the function computes over their input
     /// attachments, on a device that orders fetch through them (`input_blend`), by index.
     pub input_blends: BTreeMap<u32, InputBlend>,
+    /// The extended-range attachments the function blends into whose storage form the pipeline's
+    /// state blocks, on a device that orders fetch through the pixel interlock alone under
+    /// `AcceptUnordered` (`fetch::plan`): their blend is computed over their input attachments,
+    /// unordered, as on a device with neither ordered form (`input_blend`).
+    pub blocked_blends: BTreeSet<u32>,
     /// The stage interface's `FragCoord` object, which gives the pixel of the storage form and
     /// of the shader-side stencil.
     pub fetch_coord: Option<usize>,

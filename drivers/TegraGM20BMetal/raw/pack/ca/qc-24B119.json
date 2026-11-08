@@ -1,0 +1,6069 @@
+{
+  "blend_function_info": [
+    "000000",
+    "000800",
+    "000001",
+    "000805",
+    "014000",
+    "014800",
+    "014005",
+    "014801",
+    "000004",
+    "000005",
+    "014804",
+    "014805",
+    "200801",
+    "200a01",
+    "200901",
+    "113000",
+    "100803",
+    "000b01",
+    "000c01",
+    "000801",
+    "113803",
+    "014009",
+    "000801",
+    "000a01",
+    "000800",
+    "014000",
+    "000000",
+    "000000",
+    "000000",
+    "000000",
+    "000000",
+    "000000",
+    "000000",
+    "000000",
+    "000000",
+    "000000",
+    "000000",
+    "000000",
+    "000000",
+    "000000",
+    "000000",
+    "000000",
+    "080000",
+    "080000",
+    "020000",
+    "020000",
+    "020000",
+    "020000",
+    "020000",
+    "020000",
+    "000000",
+    "000000",
+    "000000",
+    "000000",
+    "000000",
+    "000000",
+    "000000",
+    "000000",
+    "040000",
+    "040000",
+    "000000",
+    "000000",
+    "020000",
+    "000000"
+  ],
+  "build": "24B119",
+  "decoders": {
+    "BlendFunction": {
+      "acp": 24,
+      "adc": 61,
+      "add": 12,
+      "adi": 22,
+      "aml": 25,
+      "asb": 62,
+      "bcm": 42,
+      "cbn": 33,
+      "cdg": 32,
+      "cli": 53,
+      "clr": 0,
+      "col": 56,
+      "cpy": 1,
+      "dap": 10,
+      "dfs": 59,
+      "dfu": 58,
+      "dif": 36,
+      "din": 8,
+      "div": 38,
+      "dlc": 52,
+      "dot": 9,
+      "dov": 7,
+      "drk": 30,
+      "dso": 50,
+      "dst": 2,
+      "exc": 20,
+      "hlt": 35,
+      "hue": 54,
+      "lbn": 39,
+      "ldg": 19,
+      "llt": 40,
+      "lso": 51,
+      "ltn": 31,
+      "lum": 57,
+      "max": 18,
+      "min": 17,
+      "mpy": 28,
+      "mul": 15,
+      "non": 63,
+      "ovl": 29,
+      "pdi": 27,
+      "pin": 41,
+      "pld": 26,
+      "sap": 6,
+      "sat": 55,
+      "sbd": 14,
+      "sbi": 23,
+      "sbs": 13,
+      "sbt": 37,
+      "scn": 16,
+      "sds": 60,
+      "sin": 4,
+      "slt": 34,
+      "sod": 21,
+      "sot": 5,
+      "sov": 3,
+      "vci": 49,
+      "vcm": 43,
+      "vdr": 46,
+      "vds": 44,
+      "vlc": 48,
+      "vlr": 47,
+      "vls": 45,
+      "xor": 11
+    },
+    "CoordFunction": {
+      "cl": 5,
+      "cn": 2,
+      "id": 0,
+      "lm": 4,
+      "rd": 1,
+      "tl": 3
+    },
+    "DestinationFunction": {
+      "cl": 4,
+      "id": 0,
+      "s1": 3,
+      "sa": 1,
+      "sg": 2
+    },
+    "ImageFunction": {
+      "alp": 25,
+      "ara": 6,
+      "arx": 7,
+      "ayc": 43,
+      "blk": 8,
+      "blu": 39,
+      "bra": 4,
+      "brx": 5,
+      "byr": 44,
+      "cir": 10,
+      "clr": 23,
+      "crf": 17,
+      "dfa": 47,
+      "dfr": 46,
+      "dst": 42,
+      "fil": 28,
+      "fls": 29,
+      "grn": 38,
+      "inv": 32,
+      "r3p": 40,
+      "red": 24,
+      "ref": 19,
+      "rrg": 14,
+      "rsd": 20,
+      "ryb": 36,
+      "sa1": 33,
+      "sar": 2,
+      "scd": 21,
+      "scf": 18,
+      "si0": 12,
+      "si1": 13,
+      "sqr": 9,
+      "sr1": 34,
+      "src": 0,
+      "srg": 35,
+      "stk": 30,
+      "sts": 31,
+      "sup": 11,
+      "sxr": 3,
+      "uec": 15,
+      "ues": 16,
+      "usd": 22,
+      "w30": 27,
+      "wht": 37,
+      "xrg": 1,
+      "y3p": 41,
+      "ybr": 26,
+      "ycp": 45
+    },
+    "MTLPixelFormat": {
+      "0071": 71,
+      "0081": 81,
+      "0551": 551,
+      "0553": 553,
+      "0556": 556,
+      "2C0h": 65,
+      "2C16": 63,
+      "4444": 42,
+      "A008": 1,
+      "BGRA": 80,
+      "L008": 10,
+      "L016": 20,
+      "L555": 43,
+      "L565": 40,
+      "LA88": 30,
+      "R10k": 90,
+      "RGBA": 70,
+      "RGfA": 125,
+      "RGhA": 115,
+      "b3a8": 550,
+      "l10r": 94,
+      "l64r": 110,
+      "w30r": 554,
+      "w40a": 552
+    },
+    "Opcode": {
+      "1d": 8,
+      "3d": 9,
+      "4d": 10,
+      "c0": 2,
+      "c1": 3,
+      "c2": 4,
+      "c3": 5,
+      "c4": 6,
+      "ch": 14,
+      "cp": 16,
+      "cs": 12,
+      "fs": 19,
+      "hd": 13,
+      "hg": 22,
+      "lc": 7,
+      "ls": 17,
+      "mt": 1,
+      "nl": 0,
+      "pd": 15,
+      "pt": 18,
+      "r1": 21,
+      "rw": 20,
+      "sd": 11
+    },
+    "TextureFilter": {
+      "77": 9,
+      "as": 10,
+      "b4": 5,
+      "b8": 6,
+      "bx": 4,
+      "cu": 3,
+      "la": 11,
+      "li": 1,
+      "ll": 8,
+      "lm": 2,
+      "mb": 7,
+      "nr": 0
+    },
+    "TextureFunction": {
+      "3dl": 134,
+      "a50": 130,
+      "a75": 129,
+      "add": 10,
+      "alm": 115,
+      "alt": 106,
+      "apl": 133,
+      "asg": 128,
+      "ast": 105,
+      "atc": 131,
+      "aup": 114,
+      "axl": 47,
+      "bco": 16,
+      "bds": 15,
+      "bia": 26,
+      "bib": 126,
+      "bim": 17,
+      "bri": 93,
+      "brj": 94,
+      "bro": 97,
+      "bvc": 52,
+      "c33": 18,
+      "c3a": 23,
+      "c3b": 19,
+      "c3s": 20,
+      "c3x": 24,
+      "c4b": 21,
+      "c4p": 22,
+      "c4x": 25,
+      "cab": 42,
+      "cam": 43,
+      "ced": 109,
+      "cid": 4,
+      "cim": 3,
+      "clm": 89,
+      "clr": 0,
+      "cma": 13,
+      "con": 51,
+      "crv": 58,
+      "cst": 135,
+      "db2": 31,
+      "db4": 32,
+      "dcg": 62,
+      "dff": 60,
+      "dfg": 61,
+      "dfp": 64,
+      "dfs": 63,
+      "dfv": 59,
+      "dgd": 66,
+      "dgf": 95,
+      "dgg": 96,
+      "dgh": 65,
+      "dkf": 68,
+      "dpm": 44,
+      "ds4": 27,
+      "ds6": 28,
+      "ds8": 29,
+      "edc": 108,
+      "edr": 110,
+      "ega": 102,
+      "egm": 103,
+      "gba": 70,
+      "gbb": 71,
+      "gbc": 72,
+      "gbd": 73,
+      "gbe": 74,
+      "gbf": 75,
+      "gbg": 76,
+      "gbh": 77,
+      "gfg": 86,
+      "gfs": 87,
+      "gsa": 78,
+      "gsb": 79,
+      "gsc": 80,
+      "gsd": 81,
+      "gse": 82,
+      "gsf": 83,
+      "gsg": 84,
+      "gsh": 85,
+      "hom": 90,
+      "hue": 88,
+      "ida": 2,
+      "img": 1,
+      "ipc": 132,
+      "irb": 127,
+      "kfh": 67,
+      "l2s": 112,
+      "lra": 9,
+      "lrc": 8,
+      "lrp": 7,
+      "lub": 113,
+      "m1a": 6,
+      "map": 56,
+      "met": 100,
+      "mpc": 57,
+      "mua": 5,
+      "n11": 34,
+      "n15": 35,
+      "n19": 36,
+      "n23": 37,
+      "n27": 38,
+      "nb7": 33,
+      "opa": 99,
+      "p3c": 107,
+      "pbl": 124,
+      "pc0": 119,
+      "pc1": 120,
+      "pcr": 123,
+      "peo": 125,
+      "pnc": 14,
+      "prc": 121,
+      "ps0": 122,
+      "r2e": 50,
+      "rac": 49,
+      "rad": 48,
+      "rbw": 46,
+      "rim": 91,
+      "rio": 98,
+      "s1a": 12,
+      "s2l": 111,
+      "sai": 118,
+      "sb3": 45,
+      "sdr": 104,
+      "sgr": 69,
+      "spl": 11,
+      "srl": 101,
+      "srm": 92,
+      "sta": 117,
+      "stl": 116,
+      "ups": 30,
+      "vcm": 53,
+      "vdk": 54,
+      "vlt": 55,
+      "vrb": 41,
+      "vrc": 40,
+      "vrd": 39
+    },
+    "VertexLayout": {
+      "ln": 1,
+      "pt": 2,
+      "sf": 0
+    },
+    "VertexShaderType": {
+      "as": 17,
+      "c0": 13,
+      "db": 5,
+      "df": 7,
+      "fx": 0,
+      "ib": 15,
+      "p0": 10,
+      "p1": 11,
+      "pb": 14,
+      "pr": 12,
+      "rb": 16,
+      "s0": 1,
+      "s1": 2,
+      "s2": 3,
+      "si": 9,
+      "st": 8,
+      "up": 4,
+      "vb": 6
+    }
+  },
+  "fixed_frag_names": [
+    "fixed_frag_lph_cph",
+    "fixed_frag_lph_cpf"
+  ],
+  "fixed_vert_names": [
+    "fixed_vert_lph_spc",
+    "fixed_vert_lph_gen"
+  ],
+  "fragment_shader_type_info": [
+    [
+      null,
+      32
+    ],
+    [
+      "downsample_4_frag",
+      5
+    ],
+    [
+      "downsample_6_frag",
+      5
+    ],
+    [
+      "downsample_8_frag",
+      5
+    ],
+    [
+      "upsample_frag",
+      4
+    ],
+    [
+      "downsample_blur_2_frag",
+      5
+    ],
+    [
+      "downsample_blur_4_frag",
+      5
+    ],
+    [
+      "narrow_blur_7_frag",
+      5
+    ],
+    [
+      "narrow_blur_11_frag",
+      5
+    ],
+    [
+      "narrow_blur_15_frag",
+      5
+    ],
+    [
+      "narrow_blur_19_frag",
+      5
+    ],
+    [
+      "narrow_blur_23_frag",
+      5
+    ],
+    [
+      "narrow_blur_27_frag",
+      5
+    ],
+    [
+      "single_pass_blur_3",
+      5
+    ],
+    [
+      "variable_blur_downsample_frag",
+      5
+    ],
+    [
+      "variable_blur_clamp_downsample_frag",
+      5
+    ],
+    [
+      "variable_blur_frag",
+      38
+    ],
+    [
+      "resolve_blur_weight_frag",
+      2
+    ],
+    [
+      "chromatic_aberration",
+      2
+    ],
+    [
+      "chromatic_aberration_map",
+      6
+    ],
+    [
+      "displacement_map",
+      6
+    ],
+    [
+      "axial_shading_frag",
+      66
+    ],
+    [
+      "radial_shading_frag",
+      98
+    ],
+    [
+      "radial_complex_shading_frag",
+      98
+    ],
+    [
+      "radial_2ep_frag",
+      99
+    ],
+    [
+      "conic_shading_frag",
+      98
+    ],
+    [
+      "glass_background_minimal",
+      6
+    ],
+    [
+      "glass_background_e",
+      6
+    ],
+    [
+      "glass_background_r",
+      6
+    ],
+    [
+      "glass_background_re",
+      6
+    ],
+    [
+      "glass_background_c",
+      6
+    ],
+    [
+      "glass_background_ce",
+      6
+    ],
+    [
+      "glass_background_cr",
+      6
+    ],
+    [
+      "glass_background_all",
+      6
+    ],
+    [
+      "glass_background_sdf_minimal",
+      7
+    ],
+    [
+      "glass_background_sdf_e",
+      7
+    ],
+    [
+      "glass_background_sdf_r",
+      7
+    ],
+    [
+      "glass_background_sdf_re",
+      7
+    ],
+    [
+      "glass_background_sdf_c",
+      7
+    ],
+    [
+      "glass_background_sdf_ce",
+      7
+    ],
+    [
+      "glass_background_sdf_cr",
+      7
+    ],
+    [
+      "glass_background_sdf_all",
+      7
+    ],
+    [
+      "glass_foreground",
+      6
+    ],
+    [
+      "glass_foreground_sdf",
+      7
+    ],
+    [
+      "home_affordance_base",
+      2
+    ],
+    [
+      "alpha_smooth_threshold",
+      5
+    ],
+    [
+      "alpha_threshold",
+      5
+    ],
+    [
+      "p3_clamp",
+      1
+    ],
+    [
+      "edr_clamp",
+      1
+    ],
+    [
+      "color_edr",
+      1
+    ],
+    [
+      "alpha_linear_premultiply",
+      1
+    ],
+    [
+      "edr_scale",
+      33
+    ],
+    [
+      "luma_boost",
+      2
+    ],
+    [
+      "stroke_line_frag",
+      72
+    ],
+    [
+      "stroke_arc_frag",
+      67
+    ],
+    [
+      "stroke_arc_instanced_frag",
+      73
+    ],
+    [
+      "path_cubic_frag",
+      10
+    ],
+    [
+      "path_cubic_frag",
+      11
+    ],
+    [
+      "path_rect_frag",
+      12
+    ],
+    [
+      "path_stroke_curve_frag",
+      13
+    ],
+    [
+      "path_clear_frag",
+      14
+    ],
+    [
+      "path_blit_frag",
+      78
+    ],
+    [
+      "path_blit_frag_eo",
+      78
+    ],
+    [
+      "buffer_image_blit_frag",
+      79
+    ],
+    [
+      "image_rect_blit_frag",
+      80
+    ],
+    [
+      "asg_frag",
+      17
+    ],
+    [
+      "asg_75_frag",
+      17
+    ],
+    [
+      "asg_50_frag",
+      17
+    ],
+    [
+      "attachment_clear_frag",
+      78
+    ],
+    [
+      "inplace_copy",
+      2
+    ],
+    [
+      "apply_apl_dimming",
+      34
+    ],
+    [
+      "simple_rim",
+      2
+    ],
+    [
+      "brim_init",
+      2
+    ],
+    [
+      "brim_jump",
+      6
+    ],
+    [
+      "sdf_gen_field",
+      6
+    ],
+    [
+      "sdf_gen_gradients",
+      6
+    ],
+    [
+      "brim_outline",
+      70
+    ],
+    [
+      "rim_outline",
+      70
+    ]
+  ],
+  "functions": {
+    "alpha_linear_premultiply_lpf": [],
+    "alpha_linear_premultiply_lph": [],
+    "alpha_smooth_threshold_lpf": [],
+    "alpha_smooth_threshold_lph": [],
+    "alpha_threshold_lpf": [],
+    "alpha_threshold_lph": [],
+    "apply_apl_dimming_lpf": [],
+    "apply_apl_dimming_lph": [],
+    "asg_50_frag_lpf": [],
+    "asg_50_frag_lph": [],
+    "asg_75_frag_lpf": [],
+    "asg_75_frag_lph": [],
+    "asg_frag_lpf": [],
+    "asg_frag_lph": [],
+    "asg_vert_lpf": [],
+    "asg_vert_lph": [],
+    "attachment_clear_frag_lpf": [],
+    "attachment_clear_frag_lph": [],
+    "axial_shading_frag_lpf": [],
+    "axial_shading_frag_lph": [],
+    "backdrop_capture_compute_tile_lpf": [
+      [
+        "fc_generic",
+        53,
+        true
+      ],
+      [
+        "fc_vertex_layout",
+        49,
+        false
+      ],
+      [
+        "fc_has_lod_bias",
+        53,
+        true
+      ],
+      [
+        "fc_has_noise_scale",
+        53,
+        true
+      ],
+      [
+        "fc_has_ycbcr_matrix",
+        53,
+        true
+      ],
+      [
+        "fc_has_gamma_luts",
+        53,
+        true
+      ],
+      [
+        "fc_has_asg_77_weights",
+        53,
+        true
+      ],
+      [
+        "fc_has_image_0A",
+        53,
+        true
+      ],
+      [
+        "fc_has_image_1A",
+        53,
+        true
+      ],
+      [
+        "fc_has_image_0B",
+        53,
+        true
+      ],
+      [
+        "fc_has_image_1B",
+        53,
+        true
+      ],
+      [
+        "fc_has_image_0C",
+        53,
+        true
+      ],
+      [
+        "fc_has_image_1C",
+        53,
+        true
+      ],
+      [
+        "fc_has_noise_tex",
+        53,
+        true
+      ],
+      [
+        "fc_has_lut_tex",
+        53,
+        false
+      ],
+      [
+        "fc_has_color_params",
+        53,
+        true
+      ],
+      [
+        "fc_has_color_trc0",
+        53,
+        true
+      ],
+      [
+        "fc_has_color_trc1",
+        53,
+        true
+      ],
+      [
+        "fc_has_color_cube0",
+        53,
+        true
+      ],
+      [
+        "fc_has_color_cube1",
+        53,
+        true
+      ],
+      [
+        "fc_texture_function",
+        49,
+        false
+      ],
+      [
+        "fc_blend_function",
+        49,
+        false
+      ],
+      [
+        "fc_destination_function",
+        49,
+        false
+      ],
+      [
+        "fc_image_count",
+        49,
+        false
+      ],
+      [
+        "fc_dest_index",
+        49,
+        false
+      ],
+      [
+        "fc_dest_count",
+        49,
+        false
+      ],
+      [
+        "fc_noise_width",
+        49,
+        false
+      ],
+      [
+        "fc_clamp_color",
+        53,
+        false
+      ],
+      [
+        "fc_extended_range",
+        53,
+        false
+      ],
+      [
+        "fc_unbounded_range",
+        53,
+        false
+      ],
+      [
+        "fc_debug_xr",
+        53,
+        false
+      ],
+      [
+        "fc_has_premultiply",
+        53,
+        false
+      ],
+      [
+        "fc_has_hdr_scale",
+        53,
+        false
+      ],
+      [
+        "fc_has_edr_factor",
+        53,
+        false
+      ],
+      [
+        "fc_image_function0",
+        49,
+        false
+      ],
+      [
+        "fc_image_function1",
+        49,
+        false
+      ],
+      [
+        "fc_coord_function0",
+        49,
+        false
+      ],
+      [
+        "fc_coord_function1",
+        49,
+        false
+      ],
+      [
+        "fc_plane_count0",
+        49,
+        false
+      ],
+      [
+        "fc_plane_count1",
+        49,
+        false
+      ],
+      [
+        "fc_texcoord_count0",
+        49,
+        false
+      ],
+      [
+        "fc_texcoord_count1",
+        49,
+        false
+      ],
+      [
+        "fc_memoryless_index0",
+        49,
+        false
+      ],
+      [
+        "fc_memoryless_index1",
+        49,
+        false
+      ],
+      [
+        "fc_color_inputs0",
+        49,
+        false
+      ],
+      [
+        "fc_color_inputs1",
+        49,
+        false
+      ],
+      [
+        "fc_color_opcodes0",
+        52,
+        false
+      ],
+      [
+        "fc_color_opcodes1",
+        52,
+        false
+      ],
+      [
+        "fc_color_opcodes_ext0",
+        50,
+        false
+      ],
+      [
+        "fc_color_opcodes_ext1",
+        50,
+        false
+      ],
+      [
+        "fc_color_opaque0",
+        53,
+        false
+      ],
+      [
+        "fc_color_opaque1",
+        53,
+        false
+      ],
+      [
+        "fc_filter0",
+        49,
+        false
+      ],
+      [
+        "fc_filter1",
+        49,
+        false
+      ],
+      [
+        "fc_debug_backdrop_magenta",
+        53,
+        true
+      ],
+      [
+        "fc_single_quad_backdrop",
+        53,
+        true
+      ],
+      [
+        "fc_backdrop_downsample",
+        53,
+        true
+      ],
+      [
+        "fc_backdrop_edge_clear",
+        53,
+        true
+      ]
+    ],
+    "backdrop_capture_compute_tile_lph": [
+      [
+        "fc_generic",
+        53,
+        true
+      ],
+      [
+        "fc_vertex_layout",
+        49,
+        false
+      ],
+      [
+        "fc_has_lod_bias",
+        53,
+        true
+      ],
+      [
+        "fc_has_noise_scale",
+        53,
+        true
+      ],
+      [
+        "fc_has_ycbcr_matrix",
+        53,
+        true
+      ],
+      [
+        "fc_has_gamma_luts",
+        53,
+        true
+      ],
+      [
+        "fc_has_asg_77_weights",
+        53,
+        true
+      ],
+      [
+        "fc_has_image_0A",
+        53,
+        true
+      ],
+      [
+        "fc_has_image_1A",
+        53,
+        true
+      ],
+      [
+        "fc_has_image_0B",
+        53,
+        true
+      ],
+      [
+        "fc_has_image_1B",
+        53,
+        true
+      ],
+      [
+        "fc_has_image_0C",
+        53,
+        true
+      ],
+      [
+        "fc_has_image_1C",
+        53,
+        true
+      ],
+      [
+        "fc_has_noise_tex",
+        53,
+        true
+      ],
+      [
+        "fc_has_lut_tex",
+        53,
+        false
+      ],
+      [
+        "fc_has_color_params",
+        53,
+        true
+      ],
+      [
+        "fc_has_color_trc0",
+        53,
+        true
+      ],
+      [
+        "fc_has_color_trc1",
+        53,
+        true
+      ],
+      [
+        "fc_has_color_cube0",
+        53,
+        true
+      ],
+      [
+        "fc_has_color_cube1",
+        53,
+        true
+      ],
+      [
+        "fc_texture_function",
+        49,
+        false
+      ],
+      [
+        "fc_blend_function",
+        49,
+        false
+      ],
+      [
+        "fc_destination_function",
+        49,
+        false
+      ],
+      [
+        "fc_image_count",
+        49,
+        false
+      ],
+      [
+        "fc_dest_index",
+        49,
+        false
+      ],
+      [
+        "fc_dest_count",
+        49,
+        false
+      ],
+      [
+        "fc_noise_width",
+        49,
+        false
+      ],
+      [
+        "fc_clamp_color",
+        53,
+        false
+      ],
+      [
+        "fc_extended_range",
+        53,
+        false
+      ],
+      [
+        "fc_unbounded_range",
+        53,
+        false
+      ],
+      [
+        "fc_debug_xr",
+        53,
+        false
+      ],
+      [
+        "fc_has_premultiply",
+        53,
+        false
+      ],
+      [
+        "fc_has_hdr_scale",
+        53,
+        false
+      ],
+      [
+        "fc_has_edr_factor",
+        53,
+        false
+      ],
+      [
+        "fc_image_function0",
+        49,
+        false
+      ],
+      [
+        "fc_image_function1",
+        49,
+        false
+      ],
+      [
+        "fc_coord_function0",
+        49,
+        false
+      ],
+      [
+        "fc_coord_function1",
+        49,
+        false
+      ],
+      [
+        "fc_plane_count0",
+        49,
+        false
+      ],
+      [
+        "fc_plane_count1",
+        49,
+        false
+      ],
+      [
+        "fc_texcoord_count0",
+        49,
+        false
+      ],
+      [
+        "fc_texcoord_count1",
+        49,
+        false
+      ],
+      [
+        "fc_memoryless_index0",
+        49,
+        false
+      ],
+      [
+        "fc_memoryless_index1",
+        49,
+        false
+      ],
+      [
+        "fc_color_inputs0",
+        49,
+        false
+      ],
+      [
+        "fc_color_inputs1",
+        49,
+        false
+      ],
+      [
+        "fc_color_opcodes0",
+        52,
+        false
+      ],
+      [
+        "fc_color_opcodes1",
+        52,
+        false
+      ],
+      [
+        "fc_color_opcodes_ext0",
+        50,
+        false
+      ],
+      [
+        "fc_color_opcodes_ext1",
+        50,
+        false
+      ],
+      [
+        "fc_color_opaque0",
+        53,
+        false
+      ],
+      [
+        "fc_color_opaque1",
+        53,
+        false
+      ],
+      [
+        "fc_filter0",
+        49,
+        false
+      ],
+      [
+        "fc_filter1",
+        49,
+        false
+      ],
+      [
+        "fc_debug_backdrop_magenta",
+        53,
+        true
+      ],
+      [
+        "fc_single_quad_backdrop",
+        53,
+        true
+      ],
+      [
+        "fc_backdrop_downsample",
+        53,
+        true
+      ],
+      [
+        "fc_backdrop_edge_clear",
+        53,
+        true
+      ]
+    ],
+    "blur_copy_compute": [],
+    "brim_init_lpf": [],
+    "brim_init_lph": [],
+    "brim_jump_lpf": [],
+    "brim_jump_lph": [],
+    "brim_outline_lpf": [],
+    "brim_outline_lph": [],
+    "buffer_image_blit_frag_lpf": [],
+    "buffer_image_blit_frag_lph": [],
+    "buffer_image_blit_vert_lpf": [],
+    "buffer_image_blit_vert_lph": [],
+    "chromatic_aberration_lpf": [],
+    "chromatic_aberration_lph": [],
+    "chromatic_aberration_map_lpf": [],
+    "chromatic_aberration_map_lph": [],
+    "color_edr_lpf": [],
+    "color_edr_lph": [],
+    "compute_apl": [],
+    "compute_apl_fast": [],
+    "compute_average_luma": [],
+    "compute_clear": [],
+    "compute_simd_blur_11": [],
+    "compute_simd_blur_15": [],
+    "compute_simd_blur_19": [],
+    "compute_simd_blur_23": [],
+    "compute_simd_blur_27": [],
+    "compute_simd_blur_5": [],
+    "compute_simd_blur_7": [],
+    "compute_sum_luma": [],
+    "conic_shading_frag_lpf": [],
+    "conic_shading_frag_lph": [],
+    "displacement_map_lpf": [],
+    "displacement_map_lph": [],
+    "downsample_4_compute": [],
+    "downsample_4_compute_final": [],
+    "downsample_4_frag_lpf": [],
+    "downsample_4_frag_lph": [],
+    "downsample_6_compute": [],
+    "downsample_6_frag_lpf": [],
+    "downsample_6_frag_lph": [],
+    "downsample_8_compute": [],
+    "downsample_8_compute_final": [],
+    "downsample_8_frag_lpf": [],
+    "downsample_8_frag_lph": [],
+    "downsample_blur_2_compute": [],
+    "downsample_blur_2_frag_lpf": [],
+    "downsample_blur_2_frag_lph": [],
+    "downsample_blur_4_compute": [],
+    "downsample_blur_4_frag_lpf": [],
+    "downsample_blur_4_frag_lph": [],
+    "downsample_blur_vert_lpf": [],
+    "downsample_blur_vert_lph": [],
+    "dynamic_system_ootf_decimate": [],
+    "edr_clamp_lpf": [],
+    "edr_clamp_lph": [],
+    "edr_scale_lpf": [],
+    "edr_scale_lph": [],
+    "fixed_frag_lph_cpf": [
+      [
+        "fc_generic",
+        53,
+        true
+      ],
+      [
+        "fc_vertex_layout",
+        49,
+        false
+      ],
+      [
+        "fc_framebuffer_fetch",
+        53,
+        true
+      ],
+      [
+        "fc_attachment_count",
+        49,
+        true
+      ],
+      [
+        "fc_has_lod_bias",
+        53,
+        true
+      ],
+      [
+        "fc_has_noise_scale",
+        53,
+        true
+      ],
+      [
+        "fc_has_ycbcr_matrix",
+        53,
+        true
+      ],
+      [
+        "fc_has_gamma_luts",
+        53,
+        true
+      ],
+      [
+        "fc_has_asg_77_weights",
+        53,
+        true
+      ],
+      [
+        "fc_has_attachment_0",
+        53,
+        true
+      ],
+      [
+        "fc_has_attachment_1",
+        53,
+        true
+      ],
+      [
+        "fc_has_attachment_2",
+        53,
+        true
+      ],
+      [
+        "fc_has_image_0A",
+        53,
+        true
+      ],
+      [
+        "fc_has_image_1A",
+        53,
+        true
+      ],
+      [
+        "fc_has_image_0B",
+        53,
+        true
+      ],
+      [
+        "fc_has_image_1B",
+        53,
+        true
+      ],
+      [
+        "fc_has_image_0C",
+        53,
+        true
+      ],
+      [
+        "fc_has_image_1C",
+        53,
+        true
+      ],
+      [
+        "fc_has_noise_tex",
+        53,
+        true
+      ],
+      [
+        "fc_has_lut_tex",
+        53,
+        false
+      ],
+      [
+        "fc_has_color_params",
+        53,
+        true
+      ],
+      [
+        "fc_has_color_trc0",
+        53,
+        true
+      ],
+      [
+        "fc_has_color_trc1",
+        53,
+        true
+      ],
+      [
+        "fc_has_color_cube0",
+        53,
+        true
+      ],
+      [
+        "fc_has_color_cube1",
+        53,
+        true
+      ],
+      [
+        "fc_texture_function",
+        49,
+        false
+      ],
+      [
+        "fc_blend_function",
+        49,
+        false
+      ],
+      [
+        "fc_destination_function",
+        49,
+        false
+      ],
+      [
+        "fc_image_count",
+        49,
+        false
+      ],
+      [
+        "fc_dest_index",
+        49,
+        false
+      ],
+      [
+        "fc_dest_count",
+        49,
+        false
+      ],
+      [
+        "fc_noise_width",
+        49,
+        false
+      ],
+      [
+        "fc_clamp_color",
+        53,
+        false
+      ],
+      [
+        "fc_extended_range",
+        53,
+        false
+      ],
+      [
+        "fc_unbounded_range",
+        53,
+        false
+      ],
+      [
+        "fc_debug_xr",
+        53,
+        false
+      ],
+      [
+        "fc_has_premultiply",
+        53,
+        false
+      ],
+      [
+        "fc_has_hdr_scale",
+        53,
+        false
+      ],
+      [
+        "fc_has_edr_factor",
+        53,
+        false
+      ],
+      [
+        "fc_perspective",
+        53,
+        false
+      ],
+      [
+        "fc_image_function0",
+        49,
+        false
+      ],
+      [
+        "fc_image_function1",
+        49,
+        false
+      ],
+      [
+        "fc_coord_function0",
+        49,
+        false
+      ],
+      [
+        "fc_coord_function1",
+        49,
+        false
+      ],
+      [
+        "fc_plane_count0",
+        49,
+        false
+      ],
+      [
+        "fc_plane_count1",
+        49,
+        false
+      ],
+      [
+        "fc_texcoord_count0",
+        49,
+        false
+      ],
+      [
+        "fc_texcoord_count1",
+        49,
+        false
+      ],
+      [
+        "fc_memoryless_index0",
+        49,
+        false
+      ],
+      [
+        "fc_memoryless_index1",
+        49,
+        false
+      ],
+      [
+        "fc_color_inputs0",
+        49,
+        false
+      ],
+      [
+        "fc_color_inputs1",
+        49,
+        false
+      ],
+      [
+        "fc_color_opcodes0",
+        52,
+        false
+      ],
+      [
+        "fc_color_opcodes1",
+        52,
+        false
+      ],
+      [
+        "fc_color_opcodes_ext0",
+        50,
+        false
+      ],
+      [
+        "fc_color_opcodes_ext1",
+        50,
+        false
+      ],
+      [
+        "fc_color_opaque0",
+        53,
+        false
+      ],
+      [
+        "fc_color_opaque1",
+        53,
+        false
+      ],
+      [
+        "fc_filter0",
+        49,
+        false
+      ],
+      [
+        "fc_filter1",
+        49,
+        false
+      ]
+    ],
+    "fixed_frag_lph_cph": [
+      [
+        "fc_generic",
+        53,
+        true
+      ],
+      [
+        "fc_vertex_layout",
+        49,
+        false
+      ],
+      [
+        "fc_framebuffer_fetch",
+        53,
+        true
+      ],
+      [
+        "fc_attachment_count",
+        49,
+        true
+      ],
+      [
+        "fc_has_lod_bias",
+        53,
+        true
+      ],
+      [
+        "fc_has_noise_scale",
+        53,
+        true
+      ],
+      [
+        "fc_has_ycbcr_matrix",
+        53,
+        true
+      ],
+      [
+        "fc_has_gamma_luts",
+        53,
+        true
+      ],
+      [
+        "fc_has_asg_77_weights",
+        53,
+        true
+      ],
+      [
+        "fc_has_attachment_0",
+        53,
+        true
+      ],
+      [
+        "fc_has_attachment_1",
+        53,
+        true
+      ],
+      [
+        "fc_has_attachment_2",
+        53,
+        true
+      ],
+      [
+        "fc_has_image_0A",
+        53,
+        true
+      ],
+      [
+        "fc_has_image_1A",
+        53,
+        true
+      ],
+      [
+        "fc_has_image_0B",
+        53,
+        true
+      ],
+      [
+        "fc_has_image_1B",
+        53,
+        true
+      ],
+      [
+        "fc_has_image_0C",
+        53,
+        true
+      ],
+      [
+        "fc_has_image_1C",
+        53,
+        true
+      ],
+      [
+        "fc_has_noise_tex",
+        53,
+        true
+      ],
+      [
+        "fc_has_lut_tex",
+        53,
+        false
+      ],
+      [
+        "fc_has_color_params",
+        53,
+        true
+      ],
+      [
+        "fc_has_color_trc0",
+        53,
+        true
+      ],
+      [
+        "fc_has_color_trc1",
+        53,
+        true
+      ],
+      [
+        "fc_has_color_cube0",
+        53,
+        true
+      ],
+      [
+        "fc_has_color_cube1",
+        53,
+        true
+      ],
+      [
+        "fc_texture_function",
+        49,
+        false
+      ],
+      [
+        "fc_blend_function",
+        49,
+        false
+      ],
+      [
+        "fc_destination_function",
+        49,
+        false
+      ],
+      [
+        "fc_image_count",
+        49,
+        false
+      ],
+      [
+        "fc_dest_index",
+        49,
+        false
+      ],
+      [
+        "fc_dest_count",
+        49,
+        false
+      ],
+      [
+        "fc_noise_width",
+        49,
+        false
+      ],
+      [
+        "fc_clamp_color",
+        53,
+        false
+      ],
+      [
+        "fc_extended_range",
+        53,
+        false
+      ],
+      [
+        "fc_unbounded_range",
+        53,
+        false
+      ],
+      [
+        "fc_debug_xr",
+        53,
+        false
+      ],
+      [
+        "fc_has_premultiply",
+        53,
+        false
+      ],
+      [
+        "fc_has_hdr_scale",
+        53,
+        false
+      ],
+      [
+        "fc_has_edr_factor",
+        53,
+        false
+      ],
+      [
+        "fc_perspective",
+        53,
+        false
+      ],
+      [
+        "fc_image_function0",
+        49,
+        false
+      ],
+      [
+        "fc_image_function1",
+        49,
+        false
+      ],
+      [
+        "fc_coord_function0",
+        49,
+        false
+      ],
+      [
+        "fc_coord_function1",
+        49,
+        false
+      ],
+      [
+        "fc_plane_count0",
+        49,
+        false
+      ],
+      [
+        "fc_plane_count1",
+        49,
+        false
+      ],
+      [
+        "fc_texcoord_count0",
+        49,
+        false
+      ],
+      [
+        "fc_texcoord_count1",
+        49,
+        false
+      ],
+      [
+        "fc_memoryless_index0",
+        49,
+        false
+      ],
+      [
+        "fc_memoryless_index1",
+        49,
+        false
+      ],
+      [
+        "fc_color_inputs0",
+        49,
+        false
+      ],
+      [
+        "fc_color_inputs1",
+        49,
+        false
+      ],
+      [
+        "fc_color_opcodes0",
+        52,
+        false
+      ],
+      [
+        "fc_color_opcodes1",
+        52,
+        false
+      ],
+      [
+        "fc_color_opcodes_ext0",
+        50,
+        false
+      ],
+      [
+        "fc_color_opcodes_ext1",
+        50,
+        false
+      ],
+      [
+        "fc_color_opaque0",
+        53,
+        false
+      ],
+      [
+        "fc_color_opaque1",
+        53,
+        false
+      ],
+      [
+        "fc_filter0",
+        49,
+        false
+      ],
+      [
+        "fc_filter1",
+        49,
+        false
+      ]
+    ],
+    "fixed_vert_lpf_gen": [
+      [
+        "fc_generic",
+        53,
+        true
+      ],
+      [
+        "fc_base_color",
+        53,
+        true
+      ],
+      [
+        "fc_vertex_layout",
+        49,
+        false
+      ],
+      [
+        "fc_perspective",
+        53,
+        false
+      ],
+      [
+        "fc_texcoord_count0",
+        49,
+        false
+      ],
+      [
+        "fc_texcoord_count1",
+        49,
+        false
+      ]
+    ],
+    "fixed_vert_lpf_spc": [
+      [
+        "fc_generic",
+        53,
+        true
+      ],
+      [
+        "fc_vertex_layout",
+        49,
+        false
+      ],
+      [
+        "fc_perspective",
+        53,
+        false
+      ],
+      [
+        "fc_texcoord_count0",
+        49,
+        false
+      ],
+      [
+        "fc_texcoord_count1",
+        49,
+        false
+      ]
+    ],
+    "fixed_vert_lph_gen": [
+      [
+        "fc_generic",
+        53,
+        true
+      ],
+      [
+        "fc_base_color",
+        53,
+        true
+      ],
+      [
+        "fc_vertex_layout",
+        49,
+        false
+      ],
+      [
+        "fc_perspective",
+        53,
+        false
+      ],
+      [
+        "fc_texcoord_count0",
+        49,
+        false
+      ],
+      [
+        "fc_texcoord_count1",
+        49,
+        false
+      ]
+    ],
+    "fixed_vert_lph_spc": [
+      [
+        "fc_generic",
+        53,
+        true
+      ],
+      [
+        "fc_vertex_layout",
+        49,
+        false
+      ],
+      [
+        "fc_perspective",
+        53,
+        false
+      ],
+      [
+        "fc_texcoord_count0",
+        49,
+        false
+      ],
+      [
+        "fc_texcoord_count1",
+        49,
+        false
+      ]
+    ],
+    "glass_background_all_lpf": [],
+    "glass_background_all_lph": [],
+    "glass_background_c_lpf": [],
+    "glass_background_c_lph": [],
+    "glass_background_ce_lpf": [],
+    "glass_background_ce_lph": [],
+    "glass_background_cr_lpf": [],
+    "glass_background_cr_lph": [],
+    "glass_background_e_lpf": [],
+    "glass_background_e_lph": [],
+    "glass_background_minimal_lpf": [],
+    "glass_background_minimal_lph": [],
+    "glass_background_r_lpf": [],
+    "glass_background_r_lph": [],
+    "glass_background_re_lpf": [],
+    "glass_background_re_lph": [],
+    "glass_background_sdf_all_lpf": [],
+    "glass_background_sdf_all_lph": [],
+    "glass_background_sdf_c_lpf": [],
+    "glass_background_sdf_c_lph": [],
+    "glass_background_sdf_ce_lpf": [],
+    "glass_background_sdf_ce_lph": [],
+    "glass_background_sdf_cr_lpf": [],
+    "glass_background_sdf_cr_lph": [],
+    "glass_background_sdf_e_lpf": [],
+    "glass_background_sdf_e_lph": [],
+    "glass_background_sdf_minimal_lpf": [],
+    "glass_background_sdf_minimal_lph": [],
+    "glass_background_sdf_r_lpf": [],
+    "glass_background_sdf_r_lph": [],
+    "glass_background_sdf_re_lpf": [],
+    "glass_background_sdf_re_lph": [],
+    "glass_foreground_lpf": [],
+    "glass_foreground_lph": [],
+    "glass_foreground_sdf_lpf": [],
+    "glass_foreground_sdf_lph": [],
+    "home_affordance_base_lpf": [],
+    "home_affordance_base_lph": [],
+    "image_rect_blit_frag_lpf": [],
+    "image_rect_blit_frag_lph": [],
+    "image_rect_blit_vert_lpf": [],
+    "image_rect_blit_vert_lph": [],
+    "inplace_copy_lpf": [],
+    "inplace_copy_lph": [],
+    "luma_boost_lpf": [],
+    "luma_boost_lph": [],
+    "narrow_blur_11_compute": [],
+    "narrow_blur_11_compute_final": [],
+    "narrow_blur_11_frag_lpf": [],
+    "narrow_blur_11_frag_lph": [],
+    "narrow_blur_15_compute": [],
+    "narrow_blur_15_compute_final": [],
+    "narrow_blur_15_frag_lpf": [],
+    "narrow_blur_15_frag_lph": [],
+    "narrow_blur_19_compute": [],
+    "narrow_blur_19_compute_final": [],
+    "narrow_blur_19_frag_lpf": [],
+    "narrow_blur_19_frag_lph": [],
+    "narrow_blur_23_compute": [],
+    "narrow_blur_23_compute_final": [],
+    "narrow_blur_23_frag_lpf": [],
+    "narrow_blur_23_frag_lph": [],
+    "narrow_blur_27_compute": [],
+    "narrow_blur_27_compute_final": [],
+    "narrow_blur_27_frag_lpf": [],
+    "narrow_blur_27_frag_lph": [],
+    "narrow_blur_7_compute": [],
+    "narrow_blur_7_compute_final": [],
+    "narrow_blur_7_frag_lpf": [],
+    "narrow_blur_7_frag_lph": [],
+    "p3_clamp_lpf": [],
+    "p3_clamp_lph": [],
+    "path_blit_frag_eo_lpf": [],
+    "path_blit_frag_eo_lph": [],
+    "path_blit_frag_lpf": [],
+    "path_blit_frag_lph": [],
+    "path_blit_vert_lpf": [],
+    "path_blit_vert_lph": [],
+    "path_clear_frag_lpf": [],
+    "path_clear_frag_lph": [],
+    "path_cubic_frag_lpf": [],
+    "path_cubic_frag_lph": [],
+    "path_cubic_vert_0_lpf": [],
+    "path_cubic_vert_0_lph": [],
+    "path_cubic_vert_1_lpf": [],
+    "path_cubic_vert_1_lph": [],
+    "path_rect_frag_lpf": [],
+    "path_rect_frag_lph": [],
+    "path_rect_vert_lpf": [],
+    "path_rect_vert_lph": [],
+    "path_stroke_curve_frag_lpf": [],
+    "path_stroke_curve_frag_lph": [],
+    "path_stroke_curve_vert_lpf": [],
+    "path_stroke_curve_vert_lph": [],
+    "radial_2ep_frag_lpf": [],
+    "radial_2ep_frag_lph": [],
+    "radial_complex_shading_frag_lpf": [],
+    "radial_complex_shading_frag_lph": [],
+    "radial_shading_frag_lpf": [],
+    "radial_shading_frag_lph": [],
+    "read_surf_frag": [],
+    "read_surf_frag_rg_uint": [],
+    "read_surf_vert": [],
+    "read_write_surf_compute": [],
+    "resolve_blur_weight_frag_lpf": [],
+    "resolve_blur_weight_frag_lph": [],
+    "rgb_to_420f": [],
+    "rim_outline_lpf": [],
+    "rim_outline_lph": [],
+    "sdf_filter_vert_lpf": [],
+    "sdf_filter_vert_lph": [],
+    "sdf_gen_field_lpf": [],
+    "sdf_gen_field_lph": [],
+    "sdf_gen_gradients_lpf": [],
+    "sdf_gen_gradients_lph": [],
+    "simple_rim_lpf": [],
+    "simple_rim_lph": [],
+    "single_pass_blur_3_lpf": [],
+    "single_pass_blur_3_lph": [],
+    "std_vert0_lpf": [],
+    "std_vert0_lph": [],
+    "std_vert1_lpf": [],
+    "std_vert1_lph": [],
+    "std_vert2_lpf": [],
+    "std_vert2_lph": [],
+    "stroke_arc_frag_lpf": [],
+    "stroke_arc_frag_lph": [],
+    "stroke_arc_instanced_frag_lpf": [],
+    "stroke_arc_instanced_frag_lph": [],
+    "stroke_arc_instanced_vert_lpf": [],
+    "stroke_arc_instanced_vert_lph": [],
+    "stroke_line_frag_lpf": [],
+    "stroke_line_frag_lph": [],
+    "stroke_line_vert_lpf": [],
+    "stroke_line_vert_lph": [],
+    "sum_apl_and_compute_dimming_factor": [],
+    "tile_average_luma": [],
+    "tile_average_luma_quad": [],
+    "tile_downsample_1": [],
+    "tile_downsample_2": [],
+    "tile_downsample_4": [],
+    "tile_downsample_8": [],
+    "tile_simd_blur_11": [],
+    "tile_simd_blur_15": [],
+    "tile_simd_blur_19": [],
+    "tile_simd_blur_23": [],
+    "tile_simd_blur_27": [],
+    "tile_simd_blur_5": [],
+    "tile_simd_blur_7": [],
+    "upsample_frag_lpf": [],
+    "upsample_frag_lph": [],
+    "upsample_vert_lpf": [],
+    "upsample_vert_lph": [],
+    "variable_blur_clamp_downsample_frag_lpf": [],
+    "variable_blur_clamp_downsample_frag_lph": [],
+    "variable_blur_copy_base_mip_compute": [],
+    "variable_blur_downsample_compute": [],
+    "variable_blur_downsample_compute_agx2": [],
+    "variable_blur_downsample_frag_lpf": [],
+    "variable_blur_downsample_frag_lph": [],
+    "variable_blur_frag_lpf": [],
+    "variable_blur_frag_lph": [],
+    "variable_blur_vert_lpf": [],
+    "variable_blur_vert_lph": []
+  },
+  "image_function_info": [
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    16,
+    16,
+    16,
+    64,
+    32,
+    48,
+    0,
+    16,
+    0,
+    512,
+    768,
+    768,
+    0,
+    0,
+    0,
+    6,
+    0,
+    1,
+    1,
+    1,
+    1,
+    0,
+    0,
+    0,
+    0,
+    2,
+    0,
+    0,
+    0,
+    0,
+    6,
+    8,
+    2,
+    6,
+    0,
+    256,
+    256
+  ],
+  "image_plane_count": [
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    1,
+    1,
+    2,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    0,
+    1,
+    1,
+    3,
+    3,
+    0,
+    1,
+    2,
+    3,
+    1,
+    1
+  ],
+  "image_texcoord_count": [
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    0,
+    1,
+    1,
+    2,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    0,
+    1,
+    1,
+    1,
+    2,
+    0,
+    1,
+    2,
+    2,
+    1,
+    1
+  ],
+  "layout": 27,
+  "manifest": [
+    [
+      "Kbd_TimgA2Xhue_Isrc",
+      1005,
+      0
+    ],
+    [
+      "Kbd_TimgA2Xhx_Isrc",
+      1005,
+      0
+    ],
+    [
+      "Kbdd_TimgA2Xhu_Isrc",
+      1005,
+      0
+    ],
+    [
+      "Kbdd_TimgA2Xhue_Isrc",
+      1005,
+      0
+    ],
+    [
+      "Kbdde_TimgA2Xhu_Isrc",
+      1005,
+      0
+    ],
+    [
+      "Kbdde_TimgA2Xhue_Isrc",
+      1005,
+      0
+    ],
+    [
+      "Kbdde_TimgA2Xhx_Isrc",
+      1005,
+      0
+    ],
+    [
+      "Kbdde_TimgBsovA2Xhu_Isrc",
+      1004,
+      0
+    ],
+    [
+      "Kbde_TimgA2Xhx_Isrc",
+      1005,
+      0
+    ],
+    [
+      "Kbds_TimgA2Xhu_Isrc",
+      1005,
+      0
+    ],
+    [
+      "Kbds_TimgA2Xhue_Isrc",
+      1005,
+      0
+    ],
+    [
+      "Kbds_TimgA2Xhx_Isrc",
+      1005,
+      0
+    ],
+    [
+      "Kbds_TimgBsovA2Xhu_Isrc",
+      1004,
+      0
+    ],
+    [
+      "Kbds_TimgBsovA2Xhx_Isrc",
+      1005,
+      0
+    ],
+    [
+      "Kbdsd_TimgA2Xhu_Isrc",
+      1005,
+      0
+    ],
+    [
+      "Kbdsd_TimgA2Xhue_Isrc",
+      1005,
+      0
+    ],
+    [
+      "Kbdsd_TimgA2Xhx_Isrc",
+      1005,
+      0
+    ],
+    [
+      "Kbdsd_TimgBsovA2Xhu_Isrc",
+      1004,
+      0
+    ],
+    [
+      "Kbdsde_TimgA2Xh_Isrc",
+      1005,
+      0
+    ],
+    [
+      "Kbdsde_TimgA2Xhu_Isrc",
+      1005,
+      0
+    ],
+    [
+      "Kbdsde_TimgA2Xhue_Isrc",
+      1005,
+      0
+    ],
+    [
+      "Kbdsde_TimgA2Xhx_Isrc",
+      1005,
+      0
+    ],
+    [
+      "Kbdsde_TimgBsovA2Xhu_Isrc",
+      1006,
+      0
+    ],
+    [
+      "Kbdsde_TimgBsovA2Xhx_Isrc",
+      1005,
+      0
+    ],
+    [
+      "Kbdse_TimgA2Xhx_Isrc",
+      1005,
+      0
+    ],
+    [
+      "P0071Xmw_A3Xghfc",
+      0,
+      0
+    ],
+    [
+      "P0081Xm_A2Xghfc",
+      0,
+      0
+    ],
+    [
+      "P0081Xmw_A3Xghfc",
+      0,
+      0
+    ],
+    [
+      "PBGRABsovXmw_A3Xhfc",
+      1005,
+      0
+    ],
+    [
+      "PBGRABsovXmw_TbibA3Xhf",
+      0,
+      0
+    ],
+    [
+      "PBGRABsovXmw_TimgA3Xhfc_Isrc",
+      1005,
+      0
+    ],
+    [
+      "PBGRABsovXmw_TimgA3Xhfc_IsrcN3Ocsmtsdnlnlnl",
+      1007,
+      0
+    ],
+    [
+      "PBGRABsovXmw_TimgA3Xhfcn_IsrcCcl",
+      1005,
+      0
+    ],
+    [
+      "PBGRABsovXmw_TimgA3Xhfcp_Isrc",
+      1005,
+      0
+    ],
+    [
+      "PBGRABsovXmw_TirbA3Xhf_Isrc",
+      0,
+      0
+    ],
+    [
+      "PBGRABsovXmw_TpblA3Xhf",
+      0,
+      0
+    ],
+    [
+      "PBGRABsovXmw_TpcrA3Xhf",
+      0,
+      0
+    ],
+    [
+      "PBGRAXm_A2Xghfc",
+      0,
+      0
+    ],
+    [
+      "PBGRAXm_Tc4bA2Xhfc_Idst",
+      1005,
+      0
+    ],
+    [
+      "PBGRAXmw_A3Xghfc",
+      0,
+      0
+    ],
+    [
+      "PBGRAXmw_A3Xhfc",
+      1005,
+      0
+    ],
+    [
+      "PBGRAXmw_BclrA3Xhfc",
+      1005,
+      0
+    ],
+    [
+      "PBGRAXmw_TatcA3S1Xhf",
+      0,
+      0
+    ],
+    [
+      "PBGRAXmw_TimgA3Xhfcp_Ixrg",
+      1005,
+      0
+    ],
+    [
+      "PBGRAXmw_TpcrA3Xhf",
+      0,
+      0
+    ],
+    [
+      "PL008Xmw_A3Xghfc",
+      0,
+      0
+    ],
+    [
+      "PL555Xm_A2Xghfc",
+      0,
+      0
+    ],
+    [
+      "PL555Xmw_A3Xghfc",
+      0,
+      0
+    ],
+    [
+      "PLA88Xmw_A3Xghfc",
+      0,
+      0
+    ],
+    [
+      "PRGBAXm_A2Xghfc",
+      0,
+      0
+    ],
+    [
+      "PRGBAXmw_A3Xghfc",
+      0,
+      0
+    ],
+    [
+      "PRGhABsovXm_A2Xhfcu",
+      1005,
+      0
+    ],
+    [
+      "PRGhABsovXm_Tds8A2Xhf_Isrc",
+      0,
+      0
+    ],
+    [
+      "PRGhABsovXm_TimgA2Xhfcu_Iscd",
+      1005,
+      0
+    ],
+    [
+      "PRGhABsovXmw_TimgA3Xhfcu_IsrcN3Ocsmtsdnlnlnl",
+      1007,
+      0
+    ],
+    [
+      "PRGhABsovXmw_TpcrA3Xhf",
+      0,
+      0
+    ],
+    [
+      "PRGhAXm_A2Xghfc",
+      0,
+      0
+    ],
+    [
+      "PRGhAXm_A2Xhfcu",
+      1005,
+      0
+    ],
+    [
+      "PRGhAXm_Tc33A2Xhfcu_Idst",
+      1005,
+      0
+    ],
+    [
+      "PRGhAXm_Tc3sA2Xhfcu_Idst",
+      1005,
+      0
+    ],
+    [
+      "PRGhAXm_Tds4A2Xhf_Isrc",
+      0,
+      0
+    ],
+    [
+      "PRGhAXm_Tds8A2Xhf_Isrc",
+      0,
+      0
+    ],
+    [
+      "PRGhAXm_ThomA2Xhf_Isrc_Isrc",
+      0,
+      0
+    ],
+    [
+      "PRGhAXm_TimgA2Xhfcu_Idfr",
+      1005,
+      0
+    ],
+    [
+      "PRGhAXm_TimgA2Xhfcu_Irsd",
+      1005,
+      0
+    ],
+    [
+      "PRGhAXm_TimgA2Xhfcu_Iscd",
+      1005,
+      0
+    ],
+    [
+      "PRGhAXm_TimgA2Xhfcu_IsrcCcl",
+      1005,
+      0
+    ],
+    [
+      "PRGhAXm_TimgBdfuA2Xhfcu_Iscd",
+      1005,
+      0
+    ],
+    [
+      "PRGhAXm_Tn19A2Xhf_Isrc",
+      0,
+      0
+    ],
+    [
+      "PRGhAXm_Tsb3A2Xhf_Isrc",
+      0,
+      0
+    ],
+    [
+      "PRGhAXm_TvrbA2Xhfn_Isrc_Isrc",
+      0,
+      0
+    ],
+    [
+      "PRGhAXmw_A3Xghfc",
+      0,
+      0
+    ],
+    [
+      "PRGhAXmw_BclrA3Xhfcu",
+      1005,
+      0
+    ],
+    [
+      "PRGhAXmw_TpcrA3Xhf",
+      0,
+      0
+    ],
+    [
+      "Pb3a8BaddXmw_TimgA3Xhfcx_Isrc",
+      1007,
+      0
+    ],
+    [
+      "Pb3a8BdotXm_TcimA2Xhfcx_Isup",
+      1005,
+      0
+    ],
+    [
+      "Pb3a8BdotXmw_TcmaA3S1LlnXhfcu",
+      1003,
+      0
+    ],
+    [
+      "Pb3a8BdotXmw_TimgA3Xhfcx_IsrcM1",
+      1005,
+      0
+    ],
+    [
+      "Pb3a8BdotXmw_TpblA3S1Xhf",
+      1003,
+      0
+    ],
+    [
+      "Pb3a8BmulXmw_A3S1Xhfcu",
+      1005,
+      0
+    ],
+    [
+      "Pb3a8BmulXmw_TcmaA3S1LlnXhfcu",
+      1005,
+      0
+    ],
+    [
+      "Pb3a8BmulXmw_TimgA3S1Xhfcu_Icir",
+      1005,
+      0
+    ],
+    [
+      "Pb3a8BmulXmw_TimgA3S1Xhfcu_Iuec",
+      1005,
+      0
+    ],
+    [
+      "Pb3a8BmulXmw_TpblA3S1Xhf",
+      1003,
+      0
+    ],
+    [
+      "Pb3a8BsovXm_TmuaA2Xhfcx_IsrcCcl_Isup",
+      1005,
+      0
+    ],
+    [
+      "Pb3a8BsovXmw_A3Xhfcx",
+      1005,
+      0
+    ],
+    [
+      "Pb3a8BsovXmw_A3Xhfcxn",
+      1005,
+      0
+    ],
+    [
+      "Pb3a8BsovXmw_A3Xhfcxs",
+      1005,
+      0
+    ],
+    [
+      "Pb3a8BsovXmw_TaltA3Xhf_Isrc",
+      1003,
+      0
+    ],
+    [
+      "Pb3a8BsovXmw_TbibA3Xhf",
+      1003,
+      0
+    ],
+    [
+      "Pb3a8BsovXmw_TcimA3S1Xhfcu_Ialp",
+      1005,
+      0
+    ],
+    [
+      "Pb3a8BsovXmw_TcimA3S1Xhfcu_IalpCcl",
+      1007,
+      0
+    ],
+    [
+      "Pb3a8BsovXmw_TcimA3Xhfcx_Ialp",
+      1005,
+      0
+    ],
+    [
+      "Pb3a8BsovXmw_TcimA3Xhfcx_Icir",
+      1005,
+      0
+    ],
+    [
+      "Pb3a8BsovXmw_TcimA3Xhfcx_Ired",
+      1005,
+      0
+    ],
+    [
+      "Pb3a8BsovXmw_TcimA3Xhfcx_Isi1",
+      1009,
+      0
+    ],
+    [
+      "Pb3a8BsovXmw_TcimA3Xhfcx_Isrc",
+      1005,
+      0
+    ],
+    [
+      "Pb3a8BsovXmw_TcimA3Xhfcx_IsrcM1",
+      1005,
+      0
+    ],
+    [
+      "Pb3a8BsovXmw_TcimA3Xhfcx_IsrcN3Oc0sdnlnlnlnl",
+      1007,
+      0
+    ],
+    [
+      "Pb3a8BsovXmw_TcimA3Xhfcx_Isup",
+      1005,
+      0
+    ],
+    [
+      "Pb3a8BsovXmw_TcimA3Xhfcx_Iuec",
+      1005,
+      0
+    ],
+    [
+      "Pb3a8BsovXmw_TcimA3Xhfcx_Ixrg",
+      1007,
+      0
+    ],
+    [
+      "Pb3a8BsovXmw_TcimA3Xhfcxn_Ialp",
+      1005,
+      0
+    ],
+    [
+      "Pb3a8BsovXmw_TcimA3Xhfcxs_Ialp",
+      1005,
+      0
+    ],
+    [
+      "Pb3a8BsovXmw_TcimA3Xhfcxs_Ired",
+      1003,
+      0
+    ],
+    [
+      "Pb3a8BsovXmw_TcimA3Xhfcxs_Isrc",
+      1006,
+      0
+    ],
+    [
+      "Pb3a8BsovXmw_TcimA3Xhfcxs_Isup",
+      1005,
+      0
+    ],
+    [
+      "Pb3a8BsovXmw_TcmaA3LlnXhfcx",
+      1005,
+      0
+    ],
+    [
+      "Pb3a8BsovXmw_TcmaA3S1LlnXhfcu",
+      1005,
+      0
+    ],
+    [
+      "Pb3a8BsovXmw_TgbgA3Xhf_Isrc_Isrc",
+      1003,
+      0
+    ],
+    [
+      "Pb3a8BsovXmw_TgfsA3Xhf_Isrc",
+      1003,
+      0
+    ],
+    [
+      "Pb3a8BsovXmw_TgsgA3Xhf_Isrc",
+      1003,
+      0
+    ],
+    [
+      "Pb3a8BsovXmw_TgshA3Xhf_Isrc",
+      1003,
+      0
+    ],
+    [
+      "Pb3a8BsovXmw_TimgA3S1Xhfcu_Ialp",
+      1005,
+      0
+    ],
+    [
+      "Pb3a8BsovXmw_TimgA3S1Xhfcu_IalpCcl",
+      1005,
+      0
+    ],
+    [
+      "Pb3a8BsovXmw_TimgA3S1Xhfcu_Iara",
+      1005,
+      0
+    ],
+    [
+      "Pb3a8BsovXmw_TimgA3S1Xhfcu_Isrc",
+      1005,
+      0
+    ],
+    [
+      "Pb3a8BsovXmw_TimgA3S1Xhfcu_Isrg",
+      1005,
+      0
+    ],
+    [
+      "Pb3a8BsovXmw_TimgA3Xhfcx_Ialp",
+      1005,
+      0
+    ],
+    [
+      "Pb3a8BsovXmw_TimgA3Xhfcx_IalpCcl",
+      1005,
+      0
+    ],
+    [
+      "Pb3a8BsovXmw_TimgA3Xhfcx_Iara",
+      1005,
+      0
+    ],
+    [
+      "Pb3a8BsovXmw_TimgA3Xhfcx_Icir",
+      1005,
+      0
+    ],
+    [
+      "Pb3a8BsovXmw_TimgA3Xhfcx_Ired",
+      1005,
+      0
+    ],
+    [
+      "Pb3a8BsovXmw_TimgA3Xhfcx_Isrc",
+      1005,
+      0
+    ],
+    [
+      "Pb3a8BsovXmw_TimgA3Xhfcx_IsrcM1",
+      1005,
+      0
+    ],
+    [
+      "Pb3a8BsovXmw_TimgA3Xhfcx_IsrcN3Oc0sdnlnlnlnl",
+      1007,
+      0
+    ],
+    [
+      "Pb3a8BsovXmw_TimgA3Xhfcx_Isrg",
+      1005,
+      0
+    ],
+    [
+      "Pb3a8BsovXmw_TimgA3Xhfcx_Isup",
+      1005,
+      0
+    ],
+    [
+      "Pb3a8BsovXmw_TimgA3Xhfcxn_Isrc",
+      1005,
+      0
+    ],
+    [
+      "Pb3a8BsovXmw_TimgA3Xhfcxp_Isrc",
+      1005,
+      0
+    ],
+    [
+      "Pb3a8BsovXmw_TimgA3Xhfcxp_IsrcN3Ocsmtsdnlnlnl",
+      1007,
+      0
+    ],
+    [
+      "Pb3a8BsovXmw_TimgA3Xhfcxs_Ialp",
+      1005,
+      0
+    ],
+    [
+      "Pb3a8BsovXmw_TimgA3Xhfcxs_Isrc",
+      1005,
+      0
+    ],
+    [
+      "Pb3a8BsovXmw_TimgA3Xhfcxsn_Isrc",
+      1006,
+      0
+    ],
+    [
+      "Pb3a8BsovXmw_TirbA3Xhf_Isrc",
+      1003,
+      0
+    ],
+    [
+      "Pb3a8BsovXmw_TlrpA3Xhfcx_Isrc_Isrc",
+      1005,
+      0
+    ],
+    [
+      "Pb3a8BsovXmw_Tm1aA3Xhfcx_Icir_Icir",
+      1005,
+      0
+    ],
+    [
+      "Pb3a8BsovXmw_TmuaA3Xhfcx_Ired_Isqr",
+      1005,
+      0
+    ],
+    [
+      "Pb3a8BsovXmw_TmuaA3Xhfcx_Isrc_Isqr",
+      1005,
+      0
+    ],
+    [
+      "Pb3a8BsovXmw_TmuaA3Xhfcx_Isrc_IsrcM1",
+      1005,
+      0
+    ],
+    [
+      "Pb3a8BsovXmw_TmuaA3Xhfcx_Ixrg_Isrg",
+      1005,
+      0
+    ],
+    [
+      "Pb3a8BsovXmw_TmuaA3Xhfcxs_Isrc_IsrcM1",
+      1005,
+      0
+    ],
+    [
+      "Pb3a8BsovXmw_TmuaA3Xhfcxs_Ixrg_Isrg",
+      1005,
+      0
+    ],
+    [
+      "Pb3a8BsovXmw_TpblA3Xhf",
+      1003,
+      0
+    ],
+    [
+      "Pb3a8BsovXmw_Tpc0A3Xhf",
+      1003,
+      0
+    ],
+    [
+      "Pb3a8BsovXmw_Tpc1A3Xhf",
+      1003,
+      0
+    ],
+    [
+      "Pb3a8BsovXmw_TpcrA3Xhf",
+      1003,
+      0
+    ],
+    [
+      "Pb3a8BsovXmw_TprcA3Xhf",
+      1003,
+      0
+    ],
+    [
+      "Pb3a8BsovXmw_Tps0A3Xhf",
+      1003,
+      0
+    ],
+    [
+      "Pb3a8BsovXmw_TsplA3Xhfcx_IsrcM1",
+      1005,
+      0
+    ],
+    [
+      "Pb3a8BsovXmw_TvcmA3Xhfcx_IsrcM1",
+      1005,
+      0
+    ],
+    [
+      "Pb3a8BsovXmw_TvcmA3Xhfcxs_IsrcM1",
+      1005,
+      0
+    ],
+    [
+      "Pb3a8Xm_A2Xghfc",
+      1003,
+      0
+    ],
+    [
+      "Pb3a8Xmw_A3S1Xhfcu",
+      1005,
+      0
+    ],
+    [
+      "Pb3a8Xmw_A3Xghfc",
+      1003,
+      0
+    ],
+    [
+      "Pb3a8Xmw_A3Xhfcx",
+      1005,
+      0
+    ],
+    [
+      "Pb3a8Xmw_A3Xhfcxs",
+      1005,
+      0
+    ],
+    [
+      "Pb3a8Xmw_BclrA3Xhfcx",
+      1005,
+      0
+    ],
+    [
+      "Pb3a8Xmw_BvcmA3Xhfcx",
+      1005,
+      0
+    ],
+    [
+      "Pb3a8Xmw_TaplA3Xhfn_Isrc",
+      1003,
+      0
+    ],
+    [
+      "Pb3a8Xmw_TatcA3S1Xhf",
+      1003,
+      0
+    ],
+    [
+      "Pb3a8Xmw_TbdsA3Xhfcx_Isup_Isrc",
+      1005,
+      0
+    ],
+    [
+      "Pb3a8Xmw_TbdsA3Xhfcx_Isup_IsrcM1",
+      1005,
+      0
+    ],
+    [
+      "Pb3a8Xmw_TbdsA3Xhfcxes_Isup_IsrcM1",
+      1005,
+      0
+    ],
+    [
+      "Pb3a8Xmw_TbimBcpyA3Xhfcx_Isrc_Isrc",
+      1005,
+      0
+    ],
+    [
+      "Pb3a8Xmw_Tc4pA3S1Xhfcu_Idst",
+      1005,
+      0
+    ],
+    [
+      "Pb3a8Xmw_TcimA3S1Xhfcu_Isup",
+      1007,
+      0
+    ],
+    [
+      "Pb3a8Xmw_TcimBadcA3Xhfcxs_Isup",
+      1005,
+      0
+    ],
+    [
+      "Pb3a8Xmw_TcimBdsoA3Xhfcx_Ialp",
+      1005,
+      0
+    ],
+    [
+      "Pb3a8Xmw_TcimBdsoA3Xhfcxs_Ialp",
+      1005,
+      0
+    ],
+    [
+      "Pb3a8Xmw_TcimBvcmA3Xhfcx_Isrc",
+      1005,
+      0
+    ],
+    [
+      "Pb3a8Xmw_TcmaA3LlnXhfcx",
+      1005,
+      0
+    ],
+    [
+      "Pb3a8Xmw_TcmaA3S1LlnXhfcu",
+      1005,
+      0
+    ],
+    [
+      "Pb3a8Xmw_TdfgBvcmA3Xhfcx_Isrc",
+      1005,
+      0
+    ],
+    [
+      "Pb3a8Xmw_TdkfBvcmA3Xhfcx_Irsd",
+      1005,
+      0
+    ],
+    [
+      "Pb3a8Xmw_TdkfBvcmA3Xhfcx_Iscd",
+      1005,
+      0
+    ],
+    [
+      "Pb3a8Xmw_TdkfBvcmA3Xhfcx_Isrc",
+      1007,
+      0
+    ],
+    [
+      "Pb3a8Xmw_TdkfBvcmA3Xhfcx_IsrcM1",
+      1005,
+      0
+    ],
+    [
+      "Pb3a8Xmw_TdkfBvcmA3Xhfcxs_Iscd",
+      1006,
+      0
+    ],
+    [
+      "Pb3a8Xmw_TdkfBvcmA3Xhfcxs_Isrc",
+      1007,
+      0
+    ],
+    [
+      "Pb3a8Xmw_TimgA3S1Xhfcu_Ialp",
+      1005,
+      0
+    ],
+    [
+      "Pb3a8Xmw_TimgA3S1Xhfcu_Icir",
+      1005,
+      0
+    ],
+    [
+      "Pb3a8Xmw_TimgA3S1Xhfcu_Idfr",
+      1005,
+      0
+    ],
+    [
+      "Pb3a8Xmw_TimgA3S1Xhfcu_Isrc",
+      1005,
+      0
+    ],
+    [
+      "Pb3a8Xmw_TimgA3S1Xhfcu_IsrcM0",
+      1005,
+      0
+    ],
+    [
+      "Pb3a8Xmw_TimgA3S1Xhfcues_IsrcM0",
+      1005,
+      0
+    ],
+    [
+      "Pb3a8Xmw_TimgA3Xhfcx_Isrc",
+      1005,
+      0
+    ],
+    [
+      "Pb3a8Xmw_TimgA3Xhfcx_IsrcCcl",
+      1005,
+      0
+    ],
+    [
+      "Pb3a8Xmw_TimgA3Xhfcx_Isxr",
+      1005,
+      0
+    ],
+    [
+      "Pb3a8Xmw_TimgA3Xhfcx_Ixrg",
+      1005,
+      0
+    ],
+    [
+      "Pb3a8Xmw_TimgA3Xhfcx_IxrgN3OcsmtsdnlnlnlXq",
+      1007,
+      0
+    ],
+    [
+      "Pb3a8Xmw_TimgA3Xhfcxp_Ixrg",
+      1005,
+      0
+    ],
+    [
+      "Pb3a8Xmw_TimgA3Xhfcxs_Ixrg",
+      1005,
+      0
+    ],
+    [
+      "Pb3a8Xmw_TimgBaddA3S1Xhfcu_Ialp",
+      1005,
+      0
+    ],
+    [
+      "Pb3a8Xmw_TimgBdsoA3Xhfcx_Ialp",
+      1007,
+      0
+    ],
+    [
+      "Pb3a8Xmw_TimgBdsoA3Xhfcxn_Isrc",
+      1006,
+      0
+    ],
+    [
+      "Pb3a8Xmw_TimgBdsoA3Xhfcxn_Isrg",
+      1005,
+      1011
+    ],
+    [
+      "Pb3a8Xmw_TimgBdsoA3Xhfcxsn_Isrc",
+      1006,
+      0
+    ],
+    [
+      "Pb3a8Xmw_TimgBvcmA3Xhfcx_Ialp",
+      1005,
+      0
+    ],
+    [
+      "Pb3a8Xmw_TimgBvcmA3Xhfcxn_Isrc",
+      1005,
+      0
+    ],
+    [
+      "Pb3a8Xmw_TimgBvcmA3Xhfcxsn_Isrc",
+      1005,
+      0
+    ],
+    [
+      "Pb3a8Xmw_TipcA3Xhf_Isrc",
+      1004,
+      0
+    ],
+    [
+      "Pb3a8Xmw_TirbA3Xhf_Isrc",
+      1003,
+      0
+    ],
+    [
+      "Pb3a8Xmw_TlubA3Xhf_Isrc",
+      1003,
+      0
+    ],
+    [
+      "Pw30rBdotXmw_A3S1Xhfcu",
+      1007,
+      0
+    ],
+    [
+      "Pw30rBdotXmw_TcimA3S1Xhfcu_Isup",
+      1007,
+      0
+    ],
+    [
+      "Pw30rBmulXmw_A3S1Xhfcu",
+      1005,
+      0
+    ],
+    [
+      "Pw30rBmulXmw_TcmaA3S1LlnXhfcu",
+      1005,
+      0
+    ],
+    [
+      "Pw30rBmulXmw_TimgA3S1Xhfcu_Icir",
+      1005,
+      0
+    ],
+    [
+      "Pw30rBsovXm_TcimA2Xhfcxn_Ialp",
+      1008,
+      0
+    ],
+    [
+      "Pw30rBsovXm_TgbcA2Xhf_Isrc_Isrc",
+      1003,
+      0
+    ],
+    [
+      "Pw30rBsovXm_TgseA2Xhf_Isrc",
+      1003,
+      0
+    ],
+    [
+      "Pw30rBsovXm_TimgA2S1Xhfcu_IalpCcl",
+      1007,
+      0
+    ],
+    [
+      "Pw30rBsovXm_TimgA2Xhfcx_Isrg",
+      1007,
+      0
+    ],
+    [
+      "Pw30rBsovXm_TimgA2Xhfcx_Isup",
+      1007,
+      0
+    ],
+    [
+      "Pw30rBsovXmw_A3S1Xhfcu",
+      1005,
+      0
+    ],
+    [
+      "Pw30rBsovXmw_A3Xhfcx",
+      1005,
+      0
+    ],
+    [
+      "Pw30rBsovXmw_A3Xhfcxn",
+      1005,
+      0
+    ],
+    [
+      "Pw30rBsovXmw_A3Xhfcxs",
+      1006,
+      0
+    ],
+    [
+      "Pw30rBsovXmw_TbibA3Xhf",
+      1003,
+      0
+    ],
+    [
+      "Pw30rBsovXmw_TcimA3S1Xhfcu_Ialp",
+      1005,
+      0
+    ],
+    [
+      "Pw30rBsovXmw_TcimA3S1Xhfcu_IalpCcl",
+      1006,
+      0
+    ],
+    [
+      "Pw30rBsovXmw_TcimA3S1Xhfcu_Isup",
+      1005,
+      0
+    ],
+    [
+      "Pw30rBsovXmw_TcimA3Xhfcx_Ialp",
+      1005,
+      0
+    ],
+    [
+      "Pw30rBsovXmw_TcimA3Xhfcx_IalpCcl",
+      1005,
+      0
+    ],
+    [
+      "Pw30rBsovXmw_TcimA3Xhfcx_Iara",
+      1006,
+      0
+    ],
+    [
+      "Pw30rBsovXmw_TcimA3Xhfcx_Icir",
+      1005,
+      0
+    ],
+    [
+      "Pw30rBsovXmw_TcimA3Xhfcx_Ired",
+      1005,
+      0
+    ],
+    [
+      "Pw30rBsovXmw_TcimA3Xhfcx_Isi0",
+      1008,
+      0
+    ],
+    [
+      "Pw30rBsovXmw_TcimA3Xhfcx_Isi1",
+      1009,
+      0
+    ],
+    [
+      "Pw30rBsovXmw_TcimA3Xhfcx_Isrc",
+      1005,
+      0
+    ],
+    [
+      "Pw30rBsovXmw_TcimA3Xhfcx_IsrcM1",
+      1005,
+      0
+    ],
+    [
+      "Pw30rBsovXmw_TcimA3Xhfcx_Isrg",
+      1005,
+      0
+    ],
+    [
+      "Pw30rBsovXmw_TcimA3Xhfcx_Isup",
+      1005,
+      0
+    ],
+    [
+      "Pw30rBsovXmw_TcimA3Xhfcx_Iues",
+      1005,
+      0
+    ],
+    [
+      "Pw30rBsovXmw_TcimA3Xhfcx_Ixrg",
+      1005,
+      0
+    ],
+    [
+      "Pw30rBsovXmw_TcimA3Xhfcxn_Ialp",
+      1005,
+      0
+    ],
+    [
+      "Pw30rBsovXmw_TcimA3Xhfcxn_Isrc",
+      1005,
+      0
+    ],
+    [
+      "Pw30rBsovXmw_TcimA3Xhfcxs_Ialp",
+      1006,
+      0
+    ],
+    [
+      "Pw30rBsovXmw_TcimA3Xhfcxs_Iara",
+      1007,
+      0
+    ],
+    [
+      "Pw30rBsovXmw_TcimA3Xhfcxs_Ired",
+      1006,
+      0
+    ],
+    [
+      "Pw30rBsovXmw_TcimA3Xhfcxs_Isi1",
+      1009,
+      0
+    ],
+    [
+      "Pw30rBsovXmw_TcimA3Xhfcxs_Isrc",
+      1006,
+      0
+    ],
+    [
+      "Pw30rBsovXmw_TcimA3Xhfcxs_IsrcM1",
+      1006,
+      0
+    ],
+    [
+      "Pw30rBsovXmw_TcimA3Xhfcxs_Isrg",
+      1005,
+      0
+    ],
+    [
+      "Pw30rBsovXmw_TcimA3Xhfcxs_Isup",
+      1005,
+      0
+    ],
+    [
+      "Pw30rBsovXmw_TcimA3Xhfcxs_Ixrg",
+      1007,
+      0
+    ],
+    [
+      "Pw30rBsovXmw_TcimA3Xhfcxsn_Ialp",
+      1005,
+      0
+    ],
+    [
+      "Pw30rBsovXmw_TcimA3Xhfcxsn_Isrc",
+      1006,
+      0
+    ],
+    [
+      "Pw30rBsovXmw_TcmaA3LlnXhfcx",
+      1005,
+      0
+    ],
+    [
+      "Pw30rBsovXmw_TcmaA3S1LlnXhfcu",
+      1005,
+      0
+    ],
+    [
+      "Pw30rBsovXmw_TdffA3Xhfcx_Irsd",
+      1005,
+      0
+    ],
+    [
+      "Pw30rBsovXmw_TdffA3Xhfcx_Iscd",
+      1005,
+      0
+    ],
+    [
+      "Pw30rBsovXmw_TgbcA3Xhf_Isrc_Isrc",
+      1003,
+      0
+    ],
+    [
+      "Pw30rBsovXmw_TgbeA3Xhf_Isrc_Isrc",
+      1003,
+      0
+    ],
+    [
+      "Pw30rBsovXmw_TgbgA3Xhf_Isrc_Isrc",
+      1003,
+      0
+    ],
+    [
+      "Pw30rBsovXmw_TgbhA3Xhf_Isrc_Isrc",
+      1003,
+      0
+    ],
+    [
+      "Pw30rBsovXmw_TgfsA3Xhf_Isrc",
+      1003,
+      0
+    ],
+    [
+      "Pw30rBsovXmw_TgseA3Xhf_Isrc",
+      1003,
+      0
+    ],
+    [
+      "Pw30rBsovXmw_TgsgA3Xhf_Isrc",
+      1003,
+      0
+    ],
+    [
+      "Pw30rBsovXmw_TgshA3Xhf_Isrc",
+      1003,
+      0
+    ],
+    [
+      "Pw30rBsovXmw_TimgA3S1Xhfcu_Ialp",
+      1005,
+      0
+    ],
+    [
+      "Pw30rBsovXmw_TimgA3S1Xhfcu_IalpCcl",
+      1005,
+      0
+    ],
+    [
+      "Pw30rBsovXmw_TimgA3S1Xhfcu_Iara",
+      1007,
+      0
+    ],
+    [
+      "Pw30rBsovXmw_TimgA3S1Xhfcu_Iscd",
+      1005,
+      0
+    ],
+    [
+      "Pw30rBsovXmw_TimgA3S1Xhfcu_Isrc",
+      1005,
+      0
+    ],
+    [
+      "Pw30rBsovXmw_TimgA3S1Xhfcu_Isrg",
+      1006,
+      0
+    ],
+    [
+      "Pw30rBsovXmw_TimgA3S1Xhfcus_Iscd",
+      1006,
+      0
+    ],
+    [
+      "Pw30rBsovXmw_TimgA3Xhfcx_Ialp",
+      1005,
+      0
+    ],
+    [
+      "Pw30rBsovXmw_TimgA3Xhfcx_IalpCcl",
+      1005,
+      0
+    ],
+    [
+      "Pw30rBsovXmw_TimgA3Xhfcx_Iara",
+      1005,
+      0
+    ],
+    [
+      "Pw30rBsovXmw_TimgA3Xhfcx_Icir",
+      1005,
+      0
+    ],
+    [
+      "Pw30rBsovXmw_TimgA3Xhfcx_Ired",
+      1005,
+      0
+    ],
+    [
+      "Pw30rBsovXmw_TimgA3Xhfcx_Isar",
+      1005,
+      0
+    ],
+    [
+      "Pw30rBsovXmw_TimgA3Xhfcx_Isrc",
+      1005,
+      0
+    ],
+    [
+      "Pw30rBsovXmw_TimgA3Xhfcx_IsrcCcl",
+      1005,
+      0
+    ],
+    [
+      "Pw30rBsovXmw_TimgA3Xhfcx_IsrcM1",
+      1005,
+      0
+    ],
+    [
+      "Pw30rBsovXmw_TimgA3Xhfcx_Isrg",
+      1005,
+      0
+    ],
+    [
+      "Pw30rBsovXmw_TimgA3Xhfcx_Isup",
+      1005,
+      0
+    ],
+    [
+      "Pw30rBsovXmw_TimgA3Xhfcxn_Isrc",
+      1005,
+      0
+    ],
+    [
+      "Pw30rBsovXmw_TimgA3Xhfcxn_IsrcCcl",
+      1005,
+      0
+    ],
+    [
+      "Pw30rBsovXmw_TimgA3Xhfcxp_Isrc",
+      1006,
+      0
+    ],
+    [
+      "Pw30rBsovXmw_TimgA3Xhfcxps_Isrc",
+      1007,
+      0
+    ],
+    [
+      "Pw30rBsovXmw_TimgA3Xhfcxs_Ialp",
+      1005,
+      0
+    ],
+    [
+      "Pw30rBsovXmw_TimgA3Xhfcxs_IalpCcl",
+      1006,
+      0
+    ],
+    [
+      "Pw30rBsovXmw_TimgA3Xhfcxs_Iara",
+      1006,
+      0
+    ],
+    [
+      "Pw30rBsovXmw_TimgA3Xhfcxs_Ired",
+      1006,
+      0
+    ],
+    [
+      "Pw30rBsovXmw_TimgA3Xhfcxs_Isrc",
+      1006,
+      0
+    ],
+    [
+      "Pw30rBsovXmw_TimgA3Xhfcxs_Isrg",
+      1006,
+      0
+    ],
+    [
+      "Pw30rBsovXmw_TimgA3Xhfcxs_Isup",
+      1006,
+      0
+    ],
+    [
+      "Pw30rBsovXmw_TimgA3Xhfcxsn_Isrc",
+      1006,
+      0
+    ],
+    [
+      "Pw30rBsovXmw_TirbA3Xhf_Isrc",
+      1003,
+      0
+    ],
+    [
+      "Pw30rBsovXmw_TlrpA3Xhfcx_Isrc_Isrc",
+      1005,
+      0
+    ],
+    [
+      "Pw30rBsovXmw_Tm1aA3Xhfcx_Isi0_Isi0",
+      1003,
+      0
+    ],
+    [
+      "Pw30rBsovXmw_Tm1aA3Xhfcx_Isup_Isup",
+      1005,
+      0
+    ],
+    [
+      "Pw30rBsovXmw_TmuaA3Xhfcx_Iara_Isqr",
+      1005,
+      0
+    ],
+    [
+      "Pw30rBsovXmw_TmuaA3Xhfcx_Ired_Isqr",
+      1005,
+      0
+    ],
+    [
+      "Pw30rBsovXmw_TmuaA3Xhfcx_IsrcCcl_Isrg",
+      1007,
+      0
+    ],
+    [
+      "Pw30rBsovXmw_TmuaA3Xhfcx_Isrc_Isqr",
+      1005,
+      0
+    ],
+    [
+      "Pw30rBsovXmw_TmuaA3Xhfcx_Isrc_IsrcM1",
+      1005,
+      0
+    ],
+    [
+      "Pw30rBsovXmw_TmuaA3Xhfcx_Ixrg_Isrg",
+      1006,
+      0
+    ],
+    [
+      "Pw30rBsovXmw_TmuaA3Xhfcxes_Isrc_IsrcM1",
+      1007,
+      0
+    ],
+    [
+      "Pw30rBsovXmw_TmuaA3Xhfcxs_Iara_Isqr",
+      1006,
+      0
+    ],
+    [
+      "Pw30rBsovXmw_TmuaA3Xhfcxs_Ired_Isqr",
+      1005,
+      0
+    ],
+    [
+      "Pw30rBsovXmw_TmuaA3Xhfcxs_Isrc_Isqr",
+      1007,
+      0
+    ],
+    [
+      "Pw30rBsovXmw_TmuaA3Xhfcxs_Isrc_IsrcM1",
+      1006,
+      0
+    ],
+    [
+      "Pw30rBsovXmw_TmuaA3Xhfcxs_Ixrg_Isrg",
+      1007,
+      0
+    ],
+    [
+      "Pw30rBsovXmw_TpblA3Xhf",
+      1003,
+      0
+    ],
+    [
+      "Pw30rBsovXmw_Tpc0A3Xhf",
+      1003,
+      0
+    ],
+    [
+      "Pw30rBsovXmw_Tpc1A3Xhf",
+      1003,
+      0
+    ],
+    [
+      "Pw30rBsovXmw_TpcrA3Xhf",
+      1003,
+      0
+    ],
+    [
+      "Pw30rBsovXmw_TprcA3Xhf",
+      1003,
+      0
+    ],
+    [
+      "Pw30rBsovXmw_TsplA3Xhfcx_IsrcM1",
+      1005,
+      0
+    ],
+    [
+      "Pw30rBsovXmw_TvcmA3Xhfcx_IsrcM1",
+      1005,
+      0
+    ],
+    [
+      "Pw30rBsovXmw_TvcmA3Xhfcxs_IsrcM1",
+      1007,
+      0
+    ],
+    [
+      "Pw30rXm_A2Xghfc",
+      1003,
+      0
+    ],
+    [
+      "Pw30rXm_TimgA2Xhfcx_Isup",
+      1008,
+      0
+    ],
+    [
+      "Pw30rXmw_A3S1Xhfcu",
+      1005,
+      0
+    ],
+    [
+      "Pw30rXmw_A3Xghfc",
+      1003,
+      0
+    ],
+    [
+      "Pw30rXmw_A3Xhfcx",
+      1005,
+      0
+    ],
+    [
+      "Pw30rXmw_A3Xhfcxs",
+      1005,
+      0
+    ],
+    [
+      "Pw30rXmw_BclrA3Xhfcx",
+      1005,
+      0
+    ],
+    [
+      "Pw30rXmw_BvcmA3Xhfcx",
+      1005,
+      0
+    ],
+    [
+      "Pw30rXmw_TaplA3Xhfn_Isrc",
+      1003,
+      0
+    ],
+    [
+      "Pw30rXmw_TatcA3S1Xhf",
+      1003,
+      0
+    ],
+    [
+      "Pw30rXmw_TbdsA3Xhfcx_Isi0_Isrc",
+      1008,
+      0
+    ],
+    [
+      "Pw30rXmw_TbdsA3Xhfcx_Isi0_IsrcM1",
+      1003,
+      0
+    ],
+    [
+      "Pw30rXmw_TbdsA3Xhfcx_Isi1_Isrc",
+      1009,
+      0
+    ],
+    [
+      "Pw30rXmw_TbdsA3Xhfcx_IsupCcl_Isrc",
+      1005,
+      0
+    ],
+    [
+      "Pw30rXmw_TbdsA3Xhfcx_IsupCcl_IsrcM1",
+      1005,
+      0
+    ],
+    [
+      "Pw30rXmw_TbdsA3Xhfcx_Isup_Isrc",
+      1005,
+      0
+    ],
+    [
+      "Pw30rXmw_TbdsA3Xhfcx_Isup_IsrcM1",
+      1005,
+      0
+    ],
+    [
+      "Pw30rXmw_TbdsA3Xhfcxes_Isi1_Isrc",
+      1009,
+      0
+    ],
+    [
+      "Pw30rXmw_TbdsA3Xhfcxes_Isi1_IsrcM1",
+      1009,
+      0
+    ],
+    [
+      "Pw30rXmw_TbdsA3Xhfcxes_Isup_Isrc",
+      1006,
+      0
+    ],
+    [
+      "Pw30rXmw_TbdsA3Xhfcxes_Isup_IsrcM1",
+      1005,
+      0
+    ],
+    [
+      "Pw30rXmw_Tc4pA3S1Xhfcu_Idst",
+      1005,
+      0
+    ],
+    [
+      "Pw30rXmw_TcimA3S1Xhfcu_Ialp",
+      1005,
+      0
+    ],
+    [
+      "Pw30rXmw_TcimA3S1Xhfcu_Isup",
+      1005,
+      0
+    ],
+    [
+      "Pw30rXmw_TcimA3Xhfcx_Isi0",
+      1008,
+      0
+    ],
+    [
+      "Pw30rXmw_TcimA3Xhfcx_Isi1",
+      1009,
+      0
+    ],
+    [
+      "Pw30rXmw_TcimA3Xhfcx_Isup",
+      1005,
+      0
+    ],
+    [
+      "Pw30rXmw_TcimA3Xhfcxs_Isi1",
+      1009,
+      0
+    ],
+    [
+      "Pw30rXmw_TcimA3Xhfcxs_Isup",
+      1006,
+      0
+    ],
+    [
+      "Pw30rXmw_TcimBadcA3Xhfcx_Isup",
+      1005,
+      0
+    ],
+    [
+      "Pw30rXmw_TcimBadcA3Xhfcxs_Isup",
+      1007,
+      0
+    ],
+    [
+      "Pw30rXmw_TcimBdsoA3S1Xhfcun_Ialp",
+      1007,
+      1011
+    ],
+    [
+      "Pw30rXmw_TcimBdsoA3Xhfcx_Ialp",
+      1005,
+      0
+    ],
+    [
+      "Pw30rXmw_TcimBdsoA3Xhfcxs_Ialp",
+      1007,
+      0
+    ],
+    [
+      "Pw30rXmw_TcimBvcmA3Xhfcx_Ialp",
+      1005,
+      0
+    ],
+    [
+      "Pw30rXmw_TcimBvcmA3Xhfcx_Isrc",
+      1005,
+      0
+    ],
+    [
+      "Pw30rXmw_TcimBvcmA3Xhfcxs_Ialp",
+      1007,
+      0
+    ],
+    [
+      "Pw30rXmw_TcimBvcmA3Xhfcxs_Isrc",
+      1007,
+      0
+    ],
+    [
+      "Pw30rXmw_TcimBvcmA3Xhfcxs_Isup",
+      1007,
+      0
+    ],
+    [
+      "Pw30rXmw_TcimBvcmA3Xhfcxsn_Ialp",
+      1007,
+      0
+    ],
+    [
+      "Pw30rXmw_TcimBvcmA3Xhfcxsn_Irrg",
+      1007,
+      0
+    ],
+    [
+      "Pw30rXmw_TcimBvcmA3Xhfcxsn_Isrc",
+      1008,
+      0
+    ],
+    [
+      "Pw30rXmw_TcmaA3LlnXhfcx",
+      1005,
+      0
+    ],
+    [
+      "Pw30rXmw_TcmaBvcmA3LlnXhfcx",
+      1003,
+      0
+    ],
+    [
+      "Pw30rXmw_TdfgBvcmA3Xhfcx_Isrc",
+      1006,
+      0
+    ],
+    [
+      "Pw30rXmw_TdfgBvcmA3Xhfcxs_Isrc",
+      1007,
+      0
+    ],
+    [
+      "Pw30rXmw_TdkfBvcmA3Xhfcx_Irsd",
+      1005,
+      0
+    ],
+    [
+      "Pw30rXmw_TdkfBvcmA3Xhfcx_Iscd",
+      1005,
+      0
+    ],
+    [
+      "Pw30rXmw_TdkfBvcmA3Xhfcx_Isrc",
+      1005,
+      0
+    ],
+    [
+      "Pw30rXmw_TdkfBvcmA3Xhfcx_IsrcM1",
+      1005,
+      0
+    ],
+    [
+      "Pw30rXmw_TdkfBvcmA3Xhfcxes_IsrcM1",
+      1006,
+      0
+    ],
+    [
+      "Pw30rXmw_TdkfBvcmA3Xhfcxs_Irsd",
+      1006,
+      0
+    ],
+    [
+      "Pw30rXmw_TdkfBvcmA3Xhfcxs_Iscd",
+      1006,
+      0
+    ],
+    [
+      "Pw30rXmw_TdkfBvcmA3Xhfcxs_Isrc",
+      1006,
+      0
+    ],
+    [
+      "Pw30rXmw_TimgA3S1Xhfcu_Ialp",
+      1005,
+      0
+    ],
+    [
+      "Pw30rXmw_TimgA3S1Xhfcu_Idfr",
+      1005,
+      0
+    ],
+    [
+      "Pw30rXmw_TimgA3S1Xhfcu_Irsd",
+      1005,
+      0
+    ],
+    [
+      "Pw30rXmw_TimgA3S1Xhfcu_Iscd",
+      1005,
+      0
+    ],
+    [
+      "Pw30rXmw_TimgA3S1Xhfcu_IsrcM0",
+      1005,
+      0
+    ],
+    [
+      "Pw30rXmw_TimgA3S1Xhfcues_IsrcM0",
+      1005,
+      0
+    ],
+    [
+      "Pw30rXmw_TimgA3S1Xhfcus_Idfr",
+      1007,
+      0
+    ],
+    [
+      "Pw30rXmw_TimgA3S1Xhfcus_Irsd",
+      1007,
+      0
+    ],
+    [
+      "Pw30rXmw_TimgA3S1Xhfcus_Iscd",
+      1006,
+      0
+    ],
+    [
+      "Pw30rXmw_TimgA3Xhfcx_IsrcCcl",
+      1005,
+      0
+    ],
+    [
+      "Pw30rXmw_TimgA3Xhfcx_Isup",
+      1005,
+      0
+    ],
+    [
+      "Pw30rXmw_TimgA3Xhfcx_Isxr",
+      1005,
+      0
+    ],
+    [
+      "Pw30rXmw_TimgA3Xhfcx_Ixrg",
+      1005,
+      0
+    ],
+    [
+      "Pw30rXmw_TimgA3Xhfcx_IxrgCcl",
+      1005,
+      0
+    ],
+    [
+      "Pw30rXmw_TimgA3Xhfcxp_Ixrg",
+      1006,
+      0
+    ],
+    [
+      "Pw30rXmw_TimgA3Xhfcxps_Ixrg",
+      1007,
+      0
+    ],
+    [
+      "Pw30rXmw_TimgA3Xhfcxs_IsrcCcl",
+      1006,
+      0
+    ],
+    [
+      "Pw30rXmw_TimgA3Xhfcxs_Isup",
+      1005,
+      0
+    ],
+    [
+      "Pw30rXmw_TimgA3Xhfcxs_Ixrg",
+      1006,
+      0
+    ],
+    [
+      "Pw30rXmw_TimgA3Xhfcxs_IxrgCcl",
+      1007,
+      0
+    ],
+    [
+      "Pw30rXmw_TimgBaddA3S1Xhfcu_Ialp",
+      1005,
+      0
+    ],
+    [
+      "Pw30rXmw_TimgBdsoA3Xhfcxn_Isrc",
+      1006,
+      0
+    ],
+    [
+      "Pw30rXmw_TimgBdsoA3Xhfcxn_Isrg",
+      1005,
+      1011
+    ],
+    [
+      "Pw30rXmw_TimgBdsoA3Xhfcxsn_Isrc",
+      1007,
+      0
+    ],
+    [
+      "Pw30rXmw_TimgBvcmA3Xhfcx_Ialp",
+      1005,
+      0
+    ],
+    [
+      "Pw30rXmw_TimgBvcmA3Xhfcx_Ired",
+      1005,
+      0
+    ],
+    [
+      "Pw30rXmw_TimgBvcmA3Xhfcxn_Isrc",
+      1006,
+      0
+    ],
+    [
+      "Pw30rXmw_TimgBvcmA3Xhfcxs_Ialp",
+      1006,
+      0
+    ],
+    [
+      "Pw30rXmw_TimgBvcmA3Xhfcxs_Ired",
+      1007,
+      0
+    ],
+    [
+      "Pw30rXmw_TimgBvcmA3Xhfcxs_Isup",
+      1007,
+      0
+    ],
+    [
+      "Pw30rXmw_TimgBvcmA3Xhfcxsn_Isrc",
+      1007,
+      0
+    ],
+    [
+      "Pw30rXmw_TipcA3Xhf_Isrc",
+      1004,
+      0
+    ],
+    [
+      "Pw30rXmw_TlubA3Xhf_Isrc",
+      1003,
+      0
+    ],
+    [
+      "Pw40aBaddXmw_TimgA3Xhfcx_Isrc",
+      1007,
+      0
+    ],
+    [
+      "Pw40aBdinXm_TcimA2Xhfcx_Isrc",
+      1005,
+      0
+    ],
+    [
+      "Pw40aBdinXm_TimgA2Xhfcx_Isup",
+      1005,
+      0
+    ],
+    [
+      "Pw40aBdinXmw_TimgA3Xhfcx_Isrc",
+      1005,
+      0
+    ],
+    [
+      "Pw40aBdotXm_TcimA2Xhfcx_Ialp",
+      1007,
+      0
+    ],
+    [
+      "Pw40aBdotXm_TcimA2Xhfcx_Isup",
+      1005,
+      0
+    ],
+    [
+      "Pw40aBdotXm_TcmaA2LlnXhfcx",
+      1005,
+      0
+    ],
+    [
+      "Pw40aBdotXm_TimgA2Xhfcx_Ialp",
+      1005,
+      0
+    ],
+    [
+      "Pw40aBdotXmw_A3S1Xhfcu",
+      1005,
+      1007
+    ],
+    [
+      "Pw40aBdotXmw_TcimA3S1Xhfcu_Isup",
+      1005,
+      1007
+    ],
+    [
+      "Pw40aBdotXmw_TimgA3S1Xhfcu_Ialp",
+      1005,
+      1007
+    ],
+    [
+      "Pw40aBmulXmw_A3Xhfcx",
+      1005,
+      0
+    ],
+    [
+      "Pw40aBmulXmw_TimgA3Xhfcx_Icir",
+      1005,
+      0
+    ],
+    [
+      "Pw40aBsovXm_A2S1Xhfcu",
+      1005,
+      0
+    ],
+    [
+      "Pw40aBsovXm_A2Xhfcx",
+      1005,
+      0
+    ],
+    [
+      "Pw40aBsovXm_TcimA2S1Xhfcu_Isup",
+      1005,
+      0
+    ],
+    [
+      "Pw40aBsovXm_TcimA2Xhfcx_Ialp",
+      1005,
+      0
+    ],
+    [
+      "Pw40aBsovXm_TcimA2Xhfcx_Isrc",
+      1005,
+      0
+    ],
+    [
+      "Pw40aBsovXm_TcimA2Xhfcx_IsrcCcl",
+      1005,
+      0
+    ],
+    [
+      "Pw40aBsovXm_TcimA2Xhfcx_IsrcM1",
+      1005,
+      0
+    ],
+    [
+      "Pw40aBsovXm_TcimA2Xhfcx_Isup",
+      1005,
+      0
+    ],
+    [
+      "Pw40aBsovXm_TcimA2Xhfcxn_Ialp",
+      1005,
+      0
+    ],
+    [
+      "Pw40aBsovXm_TcimA2Xhfcxs_Isrc",
+      1005,
+      0
+    ],
+    [
+      "Pw40aBsovXm_TcmaA2LlnXhfcx",
+      1005,
+      0
+    ],
+    [
+      "Pw40aBsovXm_TcmaA2S1LlnXhfcu",
+      1005,
+      0
+    ],
+    [
+      "Pw40aBsovXm_TgbcA2Xhf_Isrc_Isrc",
+      1005,
+      0
+    ],
+    [
+      "Pw40aBsovXm_TgbgA2Xhf_Isrc_Isrc",
+      1005,
+      0
+    ],
+    [
+      "Pw40aBsovXm_TgsgA2Xhf_Isrc",
+      1005,
+      0
+    ],
+    [
+      "Pw40aBsovXm_TimgA2S1Xhfcu_IsrcM0",
+      1005,
+      0
+    ],
+    [
+      "Pw40aBsovXm_TimgA2S1Xhfcue_IsrcM0",
+      1005,
+      0
+    ],
+    [
+      "Pw40aBsovXm_TimgA2Xhfcx_Ialp",
+      1005,
+      0
+    ],
+    [
+      "Pw40aBsovXm_TimgA2Xhfcx_Ired",
+      1005,
+      0
+    ],
+    [
+      "Pw40aBsovXm_TimgA2Xhfcx_Isrc",
+      1005,
+      0
+    ],
+    [
+      "Pw40aBsovXm_TimgA2Xhfcx_IsrcM1",
+      1005,
+      0
+    ],
+    [
+      "Pw40aBsovXm_TimgA2Xhfcxn_Isrc",
+      1005,
+      0
+    ],
+    [
+      "Pw40aBsovXm_TmuaA2Xhfcx_Iara_Isqr",
+      1005,
+      0
+    ],
+    [
+      "Pw40aBsovXm_TmuaA2Xhfcx_Ired_Isqr",
+      1005,
+      0
+    ],
+    [
+      "Pw40aBsovXm_TmuaA2Xhfcx_IsrcCcl_Isrg",
+      1005,
+      0
+    ],
+    [
+      "Pw40aBsovXm_TmuaA2Xhfcx_IsrcCcl_Isup",
+      1005,
+      0
+    ],
+    [
+      "Pw40aBsovXm_TmuaA2Xhfcx_Isrc_Isqr",
+      1005,
+      0
+    ],
+    [
+      "Pw40aBsovXm_TmuaA2Xhfcx_Isrc_IsrcM1",
+      1005,
+      0
+    ],
+    [
+      "Pw40aBsovXm_TmuaA2Xhfcxn_Isrc_Isqr",
+      1005,
+      0
+    ],
+    [
+      "Pw40aBsovXmw_A3S1Xhfcu",
+      1005,
+      1007
+    ],
+    [
+      "Pw40aBsovXmw_A3Xhfcx",
+      1005,
+      0
+    ],
+    [
+      "Pw40aBsovXmw_A3Xhfcxs",
+      1005,
+      1007
+    ],
+    [
+      "Pw40aBsovXmw_TbibA3Xhf",
+      1005,
+      0
+    ],
+    [
+      "Pw40aBsovXmw_TcimA3S1Xhfcu_Ialp",
+      1005,
+      1007
+    ],
+    [
+      "Pw40aBsovXmw_TcimA3S1Xhfcu_IalpCcl",
+      1005,
+      1007
+    ],
+    [
+      "Pw40aBsovXmw_TcimA3Xhfcx_Ialp",
+      1005,
+      0
+    ],
+    [
+      "Pw40aBsovXmw_TcimA3Xhfcx_Icir",
+      1005,
+      0
+    ],
+    [
+      "Pw40aBsovXmw_TcimA3Xhfcx_Iclr",
+      1005,
+      1007
+    ],
+    [
+      "Pw40aBsovXmw_TcimA3Xhfcx_Ired",
+      1005,
+      1007
+    ],
+    [
+      "Pw40aBsovXmw_TcimA3Xhfcx_Isrc",
+      1005,
+      0
+    ],
+    [
+      "Pw40aBsovXmw_TcimA3Xhfcx_IsrcM1",
+      1005,
+      1007
+    ],
+    [
+      "Pw40aBsovXmw_TcimA3Xhfcx_IsrcN3Oc0c4nlnlnlnl",
+      1005,
+      1007
+    ],
+    [
+      "Pw40aBsovXmw_TcimA3Xhfcx_Isup",
+      1005,
+      1007
+    ],
+    [
+      "Pw40aBsovXmw_TcimA3Xhfcx_Iuec",
+      1005,
+      0
+    ],
+    [
+      "Pw40aBsovXmw_TcimA3Xhfcx_Ixrg",
+      1005,
+      1011
+    ],
+    [
+      "Pw40aBsovXmw_TcimA3Xhfcxn_Ialp",
+      1005,
+      1007
+    ],
+    [
+      "Pw40aBsovXmw_TcimA3Xhfcxn_Isrc",
+      1005,
+      1007
+    ],
+    [
+      "Pw40aBsovXmw_TcimA3Xhfcxs_Ialp",
+      1005,
+      1007
+    ],
+    [
+      "Pw40aBsovXmw_TcimA3Xhfcxs_Isrc",
+      1005,
+      1007
+    ],
+    [
+      "Pw40aBsovXmw_TcimA3Xhfcxs_Isup",
+      1005,
+      1007
+    ],
+    [
+      "Pw40aBsovXmw_TcmaA3LlnXhfcx",
+      1005,
+      0
+    ],
+    [
+      "Pw40aBsovXmw_TgbgA3Xhf_Isrc_Isrc",
+      1005,
+      0
+    ],
+    [
+      "Pw40aBsovXmw_TgbhA3Xhf_Isrc_Isrc",
+      1005,
+      0
+    ],
+    [
+      "Pw40aBsovXmw_TgfsA3Xhf_Isrc",
+      1005,
+      0
+    ],
+    [
+      "Pw40aBsovXmw_TgsgA3Xhf_Isrc",
+      1005,
+      0
+    ],
+    [
+      "Pw40aBsovXmw_TimgA3S1Xhfcu_Ialp",
+      1005,
+      1007
+    ],
+    [
+      "Pw40aBsovXmw_TimgA3S1Xhfcu_IalpCcl",
+      1005,
+      1007
+    ],
+    [
+      "Pw40aBsovXmw_TimgA3S1Xhfcu_Iara",
+      1005,
+      1007
+    ],
+    [
+      "Pw40aBsovXmw_TimgA3S1Xhfcu_Iscd",
+      1005,
+      1007
+    ],
+    [
+      "Pw40aBsovXmw_TimgA3S1Xhfcu_Isrc",
+      1005,
+      1007
+    ],
+    [
+      "Pw40aBsovXmw_TimgA3S1Xhfcu_Isrg",
+      1005,
+      1007
+    ],
+    [
+      "Pw40aBsovXmw_TimgA3S1Xhfcus_Iscd",
+      1006,
+      1007
+    ],
+    [
+      "Pw40aBsovXmw_TimgA3Xhfcx_Ialp",
+      1005,
+      1011
+    ],
+    [
+      "Pw40aBsovXmw_TimgA3Xhfcx_IalpCcl",
+      1005,
+      1007
+    ],
+    [
+      "Pw40aBsovXmw_TimgA3Xhfcx_Iara",
+      1005,
+      1007
+    ],
+    [
+      "Pw40aBsovXmw_TimgA3Xhfcx_Icir",
+      1005,
+      0
+    ],
+    [
+      "Pw40aBsovXmw_TimgA3Xhfcx_Ired",
+      1005,
+      1007
+    ],
+    [
+      "Pw40aBsovXmw_TimgA3Xhfcx_Isrc",
+      1005,
+      0
+    ],
+    [
+      "Pw40aBsovXmw_TimgA3Xhfcx_IsrcN3Oc0c4nlnlnlnl",
+      1005,
+      1007
+    ],
+    [
+      "Pw40aBsovXmw_TimgA3Xhfcx_Isrg",
+      1005,
+      1007
+    ],
+    [
+      "Pw40aBsovXmw_TimgA3Xhfcx_Isup",
+      1005,
+      1007
+    ],
+    [
+      "Pw40aBsovXmw_TimgA3Xhfcxn_Isrc",
+      1005,
+      1011
+    ],
+    [
+      "Pw40aBsovXmw_TimgA3Xhfcxp_Isrc",
+      1005,
+      1007
+    ],
+    [
+      "Pw40aBsovXmw_TimgA3Xhfcxs_Ialp",
+      1005,
+      1007
+    ],
+    [
+      "Pw40aBsovXmw_TimgA3Xhfcxs_Iara",
+      1005,
+      1007
+    ],
+    [
+      "Pw40aBsovXmw_TimgA3Xhfcxs_Isrc",
+      1005,
+      1007
+    ],
+    [
+      "Pw40aBsovXmw_TlrpA3Xhfcx_Isrc_Isrc",
+      1005,
+      1011
+    ],
+    [
+      "Pw40aBsovXmw_Tm1aA3Xhfcx_Isup_Isup",
+      1005,
+      1007
+    ],
+    [
+      "Pw40aBsovXmw_TmuaA3S1Xhfcusn_IsrcN3Oc0mtc4nlnlnl_Isqr",
+      1005,
+      1007
+    ],
+    [
+      "Pw40aBsovXmw_TmuaA3Xhfcx_Iara_Isqr",
+      1005,
+      1007
+    ],
+    [
+      "Pw40aBsovXmw_TmuaA3Xhfcx_Igrn_Isqr",
+      1005,
+      1007
+    ],
+    [
+      "Pw40aBsovXmw_TmuaA3Xhfcx_Ired_Isqr",
+      1005,
+      1007
+    ],
+    [
+      "Pw40aBsovXmw_TmuaA3Xhfcx_Isrc_IsrcM1",
+      1005,
+      1007
+    ],
+    [
+      "Pw40aBsovXmw_TmuaA3Xhfcx_Ixrg_Isrg",
+      1005,
+      1007
+    ],
+    [
+      "Pw40aBsovXmw_TmuaA3Xhfcxs_Isrc_IsrcM1",
+      1005,
+      1007
+    ],
+    [
+      "Pw40aBsovXmw_TmuaA3Xhfcxs_Ixrg_Isrg",
+      1005,
+      1007
+    ],
+    [
+      "Pw40aBsovXmw_TpblA3Xhf",
+      1005,
+      0
+    ],
+    [
+      "Pw40aBsovXmw_Tpc1A3Xhf",
+      1005,
+      0
+    ],
+    [
+      "Pw40aBsovXmw_TpcrA3Xhf",
+      1005,
+      0
+    ],
+    [
+      "Pw40aBsovXmw_TprcA3Xhf",
+      1005,
+      0
+    ],
+    [
+      "Pw40aBsovXmw_TsplA3Xhfcx_IsrcM1",
+      1005,
+      0
+    ],
+    [
+      "Pw40aBsovXmw_TvcmA3Xhfcx_IsrcM1",
+      1005,
+      1007
+    ],
+    [
+      "Pw40aBsovXmw_TvcmA3Xhfcxs_IsrcM1",
+      1005,
+      1007
+    ],
+    [
+      "Pw40aXm_A2S1Xhfcu",
+      1005,
+      0
+    ],
+    [
+      "Pw40aXm_A2Xghfc",
+      1005,
+      0
+    ],
+    [
+      "Pw40aXm_A2Xhfcx",
+      1005,
+      0
+    ],
+    [
+      "Pw40aXm_BovlA2S1Xhfcu",
+      1008,
+      0
+    ],
+    [
+      "Pw40aXm_TatcA2S1Xhf",
+      1005,
+      0
+    ],
+    [
+      "Pw40aXm_Tc33A2Xhfcx_Idst",
+      1005,
+      0
+    ],
+    [
+      "Pw40aXm_Tc3sA2Xhfcx_Idst",
+      1005,
+      0
+    ],
+    [
+      "Pw40aXm_TcimA2S1Xhfcu_Isup",
+      1005,
+      0
+    ],
+    [
+      "Pw40aXm_TcimA2Xhfcx_Isup",
+      1005,
+      0
+    ],
+    [
+      "Pw40aXm_TcmaA2LlnXhfcx",
+      1005,
+      0
+    ],
+    [
+      "Pw40aXm_TdfgBbcmA2Xhfcxs_Isrc",
+      1005,
+      0
+    ],
+    [
+      "Pw40aXm_TdkfBvcmA2Xhfcx_Iscd",
+      1005,
+      0
+    ],
+    [
+      "Pw40aXm_TdkfBvcmA2Xhfcx_IsrcM1",
+      1005,
+      0
+    ],
+    [
+      "Pw40aXm_TdkfBvcmA2Xhfcxes_IsrcM1",
+      1005,
+      0
+    ],
+    [
+      "Pw40aXm_TdkfBvcmA2Xhfcxs_Iscd",
+      1006,
+      0
+    ],
+    [
+      "Pw40aXm_TdkfBvcmA2Xhfcxs_Isrc",
+      1005,
+      0
+    ],
+    [
+      "Pw40aXm_Tds4A2Xhf_Isrc",
+      1005,
+      0
+    ],
+    [
+      "Pw40aXm_Tds8A2Xhf_Isrc",
+      1005,
+      0
+    ],
+    [
+      "Pw40aXm_TgbgA2Xhf_Isrc_Isrc",
+      1005,
+      0
+    ],
+    [
+      "Pw40aXm_TgsgA2Xhf_Isrc",
+      1005,
+      0
+    ],
+    [
+      "Pw40aXm_TgshA2Xhf_Isrc",
+      1005,
+      0
+    ],
+    [
+      "Pw40aXm_ThomA2Xhf_Isrc_Isrc",
+      1005,
+      0
+    ],
+    [
+      "Pw40aXm_TimgA2S1Xhfcu_Isrc",
+      1005,
+      0
+    ],
+    [
+      "Pw40aXm_TimgA2S1Xhfcue_Isrc",
+      1005,
+      0
+    ],
+    [
+      "Pw40aXm_TimgA2S1Xhfcus_Idfr",
+      1005,
+      0
+    ],
+    [
+      "Pw40aXm_TimgA2Xhfcx_Isrc",
+      1005,
+      0
+    ],
+    [
+      "Pw40aXm_TimgA2Xhfcx_Isup",
+      1005,
+      0
+    ],
+    [
+      "Pw40aXm_TimgA2Xhfcx_Ixrg",
+      1005,
+      0
+    ],
+    [
+      "Pw40aXm_TipcA2Xhf_Isrc",
+      1005,
+      0
+    ],
+    [
+      "Pw40aXm_TmpcA2Xhfcx_Idst",
+      1005,
+      0
+    ],
+    [
+      "Pw40aXm_TmuaA2Xhfcxn_Isrc_Isqr",
+      1005,
+      0
+    ],
+    [
+      "Pw40aXm_TmuaBbcmA2Xhfcx_Ired_Isqr",
+      1005,
+      0
+    ],
+    [
+      "Pw40aXm_Tn19A2Xhf_Isrc",
+      1005,
+      0
+    ],
+    [
+      "Pw40aXm_Tsb3A2Xhf_Isrc",
+      1005,
+      0
+    ],
+    [
+      "Pw40aXm_TvrbA2Xhfn_Isrc_Isrc",
+      1005,
+      0
+    ],
+    [
+      "Pw40aXmw_A3S1Xhfcu",
+      1005,
+      0
+    ],
+    [
+      "Pw40aXmw_A3Xghfc",
+      1005,
+      0
+    ],
+    [
+      "Pw40aXmw_A3Xhfcx",
+      1005,
+      0
+    ],
+    [
+      "Pw40aXmw_A3Xhfcxs",
+      1005,
+      1007
+    ],
+    [
+      "Pw40aXmw_BvcmA3Xhfcxn",
+      1006,
+      1007
+    ],
+    [
+      "Pw40aXmw_BvcmA3Xhfcxsn",
+      1006,
+      1007
+    ],
+    [
+      "Pw40aXmw_TatcA3S1Xhf",
+      1005,
+      0
+    ],
+    [
+      "Pw40aXmw_TbdsA3Xhfcx_Isup_Isrc",
+      1005,
+      1007
+    ],
+    [
+      "Pw40aXmw_TbdsA3Xhfcx_Isup_IsrcM1",
+      1005,
+      1007
+    ],
+    [
+      "Pw40aXmw_TbdsA3Xhfcxes_Isup_IsrcM1",
+      1005,
+      1007
+    ],
+    [
+      "Pw40aXmw_Tc4pA3S1Xhfcu_Idst",
+      1005,
+      1007
+    ],
+    [
+      "Pw40aXmw_TcimA3Xhfcx_Icir",
+      1005,
+      0
+    ],
+    [
+      "Pw40aXmw_TcimA3Xhfcx_Isup",
+      1005,
+      1007
+    ],
+    [
+      "Pw40aXmw_TcimBadcA3Xhfcx_Isup",
+      1005,
+      1007
+    ],
+    [
+      "Pw40aXmw_TcimBadcA3Xhfcxs_Isup",
+      1005,
+      1007
+    ],
+    [
+      "Pw40aXmw_TcimBdsoA3S1Xhfcun_Ialp",
+      1005,
+      1007
+    ],
+    [
+      "Pw40aXmw_TcimBdsoA3Xhfcx_Ialp",
+      1005,
+      1007
+    ],
+    [
+      "Pw40aXmw_TcimBdsoA3Xhfcxs_Ialp",
+      1005,
+      1007
+    ],
+    [
+      "Pw40aXmw_TcimBvcmA3Xhfcx_Isrc",
+      1005,
+      1007
+    ],
+    [
+      "Pw40aXmw_TcimBvcmA3Xhfcxn_Ialp",
+      1005,
+      1007
+    ],
+    [
+      "Pw40aXmw_TcimBvcmA3Xhfcxn_Irrg",
+      1006,
+      1007
+    ],
+    [
+      "Pw40aXmw_TcimBvcmA3Xhfcxs_Ired",
+      1006,
+      1007
+    ],
+    [
+      "Pw40aXmw_TcimBvcmA3Xhfcxsn_Irrg",
+      1006,
+      1007
+    ],
+    [
+      "Pw40aXmw_TcmaA3LlnXhfcx",
+      1005,
+      0
+    ],
+    [
+      "Pw40aXmw_TdfgBvcmA3Xhfcx_Isrc",
+      1005,
+      1007
+    ],
+    [
+      "Pw40aXmw_TdfgBvcmA3Xhfcxs_Isrc",
+      1005,
+      1007
+    ],
+    [
+      "Pw40aXmw_TdkfBvcmA3Xhfcx_Irsd",
+      1005,
+      1007
+    ],
+    [
+      "Pw40aXmw_TdkfBvcmA3Xhfcx_Iscd",
+      1005,
+      1007
+    ],
+    [
+      "Pw40aXmw_TdkfBvcmA3Xhfcx_Isrc",
+      1005,
+      1007
+    ],
+    [
+      "Pw40aXmw_TdkfBvcmA3Xhfcx_IsrcM1",
+      1005,
+      1007
+    ],
+    [
+      "Pw40aXmw_TdkfBvcmA3Xhfcxes_IsrcM1",
+      1005,
+      1007
+    ],
+    [
+      "Pw40aXmw_TdkfBvcmA3Xhfcxs_Irsd",
+      1005,
+      1007
+    ],
+    [
+      "Pw40aXmw_TdkfBvcmA3Xhfcxs_Iscd",
+      1005,
+      1007
+    ],
+    [
+      "Pw40aXmw_TdkfBvcmA3Xhfcxs_Isrc",
+      1005,
+      1007
+    ],
+    [
+      "Pw40aXmw_TimgA3S1Xhfcu_Idfr",
+      1005,
+      1007
+    ],
+    [
+      "Pw40aXmw_TimgA3S1Xhfcu_Irsd",
+      1005,
+      1007
+    ],
+    [
+      "Pw40aXmw_TimgA3S1Xhfcu_Iscd",
+      1005,
+      1007
+    ],
+    [
+      "Pw40aXmw_TimgA3S1Xhfcu_IsrcM0",
+      1005,
+      1007
+    ],
+    [
+      "Pw40aXmw_TimgA3S1Xhfcues_IsrcM0",
+      1005,
+      1007
+    ],
+    [
+      "Pw40aXmw_TimgA3S1Xhfcus_Idfr",
+      1005,
+      1007
+    ],
+    [
+      "Pw40aXmw_TimgA3S1Xhfcus_Iscd",
+      1006,
+      1007
+    ],
+    [
+      "Pw40aXmw_TimgA3Xhfcx_Icir",
+      1005,
+      0
+    ],
+    [
+      "Pw40aXmw_TimgA3Xhfcx_Isrc",
+      1005,
+      0
+    ],
+    [
+      "Pw40aXmw_TimgA3Xhfcx_IsrcCcl",
+      1005,
+      0
+    ],
+    [
+      "Pw40aXmw_TimgA3Xhfcx_Isup",
+      1005,
+      1007
+    ],
+    [
+      "Pw40aXmw_TimgA3Xhfcx_Isxr",
+      1005,
+      0
+    ],
+    [
+      "Pw40aXmw_TimgA3Xhfcx_Ixrg",
+      1005,
+      0
+    ],
+    [
+      "Pw40aXmw_TimgA3Xhfcx_IxrgCcl",
+      1005,
+      0
+    ],
+    [
+      "Pw40aXmw_TimgA3Xhfcx_IxrgN3Oc3mtc4nlnlnl",
+      1005,
+      1007
+    ],
+    [
+      "Pw40aXmw_TimgA3Xhfcxp_Ixrg",
+      1005,
+      1007
+    ],
+    [
+      "Pw40aXmw_TimgA3Xhfcxps_Ixrg",
+      1005,
+      1007
+    ],
+    [
+      "Pw40aXmw_TimgA3Xhfcxs_IsrcCcl",
+      1005,
+      1007
+    ],
+    [
+      "Pw40aXmw_TimgA3Xhfcxs_Ixrg",
+      1005,
+      1007
+    ],
+    [
+      "Pw40aXmw_TimgBdsoA3Xhfcxn_Isrc",
+      1006,
+      1007
+    ],
+    [
+      "Pw40aXmw_TimgBdsoA3Xhfcxn_Isrg",
+      1005,
+      1006
+    ],
+    [
+      "Pw40aXmw_TimgBdsoA3Xhfcxsn_Isrc",
+      1006,
+      1007
+    ],
+    [
+      "Pw40aXmw_TimgBvcmA3Xhfcx_Ialp",
+      1005,
+      1007
+    ],
+    [
+      "Pw40aXmw_TimgBvcmA3Xhfcx_Ired",
+      1005,
+      1007
+    ],
+    [
+      "Pw40aXmw_TimgBvcmA3Xhfcxn_Isrc",
+      1005,
+      1007
+    ],
+    [
+      "Pw40aXmw_TimgBvcmA3Xhfcxs_Ired",
+      1005,
+      1007
+    ],
+    [
+      "Pw40aXmw_TimgBvcmA3Xhfcxsn_Isrc",
+      1005,
+      1007
+    ],
+    [
+      "Pw40aXmw_TipcA3Xhf_Isrc",
+      1005,
+      0
+    ],
+    [
+      "Pw40aXmw_TirbA3Xhf_Isrc",
+      1005,
+      0
+    ],
+    [
+      "Pw40aXmw_TlubA3Xhf_Isrc",
+      1005,
+      0
+    ]
+  ],
+  "metallib_sha256": "342e3ee16a83e7b04837dcdadf4a786020711e3179afcf0ca50a461e7331218b",
+  "name_tables": {
+    "fragment": [
+      {
+        "count": 1,
+        "default": 0,
+        "flag": false,
+        "letter": "T",
+        "width": 3
+      },
+      {
+        "count": 1,
+        "default": 63,
+        "flag": false,
+        "letter": "B",
+        "width": 3
+      },
+      {
+        "count": 1,
+        "default": 0,
+        "flag": false,
+        "letter": "D",
+        "width": 2
+      },
+      {
+        "count": 1,
+        "default": 1,
+        "flag": false,
+        "letter": "A",
+        "width": 1
+      },
+      {
+        "count": 1,
+        "default": 0,
+        "flag": false,
+        "letter": "S",
+        "width": 1
+      },
+      {
+        "count": 1,
+        "default": 0,
+        "flag": false,
+        "letter": "L",
+        "width": 2
+      },
+      {
+        "count": 0,
+        "default": 0,
+        "flag": true,
+        "letter": "X",
+        "width": 0
+      },
+      {
+        "count": 0,
+        "default": 0,
+        "flag": false,
+        "letter": "g",
+        "width": 0
+      },
+      {
+        "count": 0,
+        "default": 0,
+        "flag": false,
+        "letter": "h",
+        "width": 0
+      },
+      {
+        "count": 0,
+        "default": 0,
+        "flag": false,
+        "letter": "v",
+        "width": 0
+      },
+      {
+        "count": 0,
+        "default": 0,
+        "flag": false,
+        "letter": "f",
+        "width": 0
+      },
+      {
+        "count": 0,
+        "default": 0,
+        "flag": false,
+        "letter": "c",
+        "width": 0
+      },
+      {
+        "count": 0,
+        "default": 0,
+        "flag": false,
+        "letter": "x",
+        "width": 0
+      },
+      {
+        "count": 0,
+        "default": 0,
+        "flag": false,
+        "letter": "u",
+        "width": 0
+      },
+      {
+        "count": 0,
+        "default": 0,
+        "flag": false,
+        "letter": "p",
+        "width": 0
+      },
+      {
+        "count": 0,
+        "default": 0,
+        "flag": false,
+        "letter": "e",
+        "width": 0
+      },
+      {
+        "count": 0,
+        "default": 0,
+        "flag": false,
+        "letter": "s",
+        "width": 0
+      },
+      {
+        "count": 0,
+        "default": 0,
+        "flag": false,
+        "letter": "n",
+        "width": 0
+      },
+      {
+        "count": 0,
+        "default": 0,
+        "flag": false,
+        "letter": "l",
+        "width": 0
+      },
+      {
+        "count": 0,
+        "default": 0,
+        "flag": false,
+        "letter": "r",
+        "width": 0
+      }
+    ],
+    "image": [
+      {
+        "count": 1,
+        "default": 0,
+        "flag": false,
+        "letter": "I",
+        "width": 3
+      },
+      {
+        "count": 1,
+        "default": 0,
+        "flag": false,
+        "letter": "C",
+        "width": 2
+      },
+      {
+        "count": 1,
+        "default": 0,
+        "flag": false,
+        "letter": "F",
+        "width": 2
+      },
+      {
+        "count": 1,
+        "default": -1,
+        "flag": false,
+        "letter": "M",
+        "width": 1
+      },
+      {
+        "count": 1,
+        "default": 0,
+        "flag": false,
+        "letter": "N",
+        "width": 1
+      },
+      {
+        "count": 6,
+        "default": 0,
+        "flag": false,
+        "letter": "O",
+        "width": 2
+      },
+      {
+        "count": 0,
+        "default": 0,
+        "flag": true,
+        "letter": "X",
+        "width": 0
+      },
+      {
+        "count": 0,
+        "default": 0,
+        "flag": false,
+        "letter": "q",
+        "width": 0
+      }
+    ],
+    "pipeline": [
+      {
+        "count": 1,
+        "default": 0,
+        "flag": false,
+        "letter": "P",
+        "width": 4
+      },
+      {
+        "count": 1,
+        "default": 63,
+        "flag": false,
+        "letter": "B",
+        "width": 3
+      },
+      {
+        "count": 0,
+        "default": 0,
+        "flag": true,
+        "letter": "X",
+        "width": 0
+      },
+      {
+        "count": 0,
+        "default": 0,
+        "flag": false,
+        "letter": "b",
+        "width": 0
+      },
+      {
+        "count": 0,
+        "default": 0,
+        "flag": false,
+        "letter": "m",
+        "width": 0
+      },
+      {
+        "count": 0,
+        "default": 0,
+        "flag": false,
+        "letter": "w",
+        "width": 0
+      }
+    ]
+  },
+  "tex_image_count": [
+    0,
+    1,
+    1,
+    1,
+    1,
+    2,
+    2,
+    2,
+    1,
+    1,
+    2,
+    1,
+    1,
+    0,
+    2,
+    2,
+    1,
+    2,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    2,
+    1,
+    2,
+    2,
+    1,
+    1,
+    1,
+    1,
+    1,
+    0,
+    1,
+    2,
+    1,
+    1,
+    1,
+    2,
+    1,
+    1,
+    1,
+    1,
+    1,
+    2,
+    1,
+    2,
+    1,
+    1,
+    1,
+    1,
+    1,
+    2,
+    2,
+    2,
+    2,
+    2,
+    2,
+    2,
+    2,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    2,
+    1,
+    1,
+    1,
+    2,
+    1,
+    1,
+    1,
+    2,
+    2,
+    2,
+    2,
+    2,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    0,
+    0,
+    0,
+    0,
+    1,
+    1,
+    1,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    1,
+    1,
+    1,
+    1,
+    0,
+    1,
+    1,
+    1,
+    0
+  ],
+  "texture_filter_info": [
+    0,
+    0,
+    0,
+    0,
+    1,
+    1,
+    1,
+    1,
+    1,
+    3,
+    0,
+    0
+  ],
+  "texture_function_info": [
+    "0000000000000000",
+    "0000000000000000",
+    "0000000000000000",
+    "0000000000000000",
+    "0000000000000000",
+    "0000000000000000",
+    "0000000000000000",
+    "0000000000000000",
+    "0000000000000100",
+    "0000000000000100",
+    "0000000000000000",
+    "0000000000000000",
+    "0000000000000000",
+    "0000000000000000",
+    "0000000000000000",
+    "0000000000000200",
+    "0000000000000a00",
+    "0000000000000a00",
+    "009c000000000000",
+    "009c000000000000",
+    "009c000000000000",
+    "00ac000000000000",
+    "00ac000000000000",
+    "009c000000000000",
+    "009c000000000000",
+    "00ac000000000000",
+    "0000000000000100",
+    "0142940000006000",
+    "0242940000006000",
+    "0342940000006000",
+    "0400000000006000",
+    "0542940000006000",
+    "0642940000006000",
+    "0742948900006000",
+    "0842948900006000",
+    "0942948900006000",
+    "0a42948900006000",
+    "0b42948900006000",
+    "0c42948900006000",
+    "0e0c0c0000006000",
+    "0f0c0c0000006000",
+    "100c0c0c0c006000",
+    "129a120000002000",
+    "130c0c0000006000",
+    "140c0c0000006000",
+    "0d42948900006000",
+    "1109000000006000",
+    "150a8c0000002000",
+    "160a8c0c00002000",
+    "170c8c0c0c002000",
+    "180c8c8c0a002000",
+    "190c000000002000",
+    "00ac898900000000",
+    "00ac898900000200",
+    "008c8c8900000600",
+    "008c8c8900000600",
+    "0000000000000100",
+    "0000000000000100",
+    "00a4000000000000",
+    "0000000000000100",
+    "008c8c0000000000",
+    "000c8c0000000000",
+    "009c8c8c00000000",
+    "008c8c0000000000",
+    "008c8c0000000000",
+    "008c8c8c00000000",
+    "008c8c0000000000",
+    "00a48c8c00000000",
+    "00ac8c8c00000000",
+    "0000000000000000",
+    "1a2c2cacac004001",
+    "1b2c2cacac004001",
+    "1c2c2cacac004001",
+    "1d2c2cacac004001",
+    "1e2c2cacac004001",
+    "1f2c2cacac004001",
+    "202c2cacac004001",
+    "212c2cacac004001",
+    "221c2c2cacac4001",
+    "231c2c2cacac4001",
+    "241c2c2cacac4001",
+    "251c2c2cacac4001",
+    "261c2c2cacac4001",
+    "271c2c2cacac4001",
+    "281c2c2cacac4001",
+    "291c2c2cacac4001",
+    "2a2c000000004000",
+    "2b1c2c0000004000",
+    "0000000000000100",
+    "0000000000000100",
+    "2c8c898900000000",
+    "0000000000000100",
+    "478c8c0000000000",
+    "4889000000000000",
+    "4989898900000000",
+    "4a0c000000000000",
+    "4b0c000000000000",
+    "4c8c8c8c8a004000",
+    "4d8c8c0000000000",
+    "0000000000000100",
+    "0000000000000100",
+    "0000000000000100",
+    "0000000000000100",
+    "0000000000000100",
+    "0000000000000100",
+    "2d8c8c0000004000",
+    "2e0a8c8900004000",
+    "2f00000000008200",
+    "308a898989008200",
+    "318a898900008200",
+    "33a2000000008200",
+    "0000000000008000",
+    "0000000000008000",
+    "3499000000000200",
+    "0000000000000200",
+    "3200000000008200",
+    "3500000000000000",
+    "360c000000000000",
+    "3700000000000000",
+    "3800000000001000",
+    "3900000000001000",
+    "3a00000000001000",
+    "3b00000000001000",
+    "3c00000000001000",
+    "3d09000000001000",
+    "3e09000000001000",
+    "3f8c000000000001",
+    "400c0c0000000000",
+    "410a090000002000",
+    "420a090000002000",
+    "430a090000002000",
+    "4400000000000000",
+    "4500000000000000",
+    "4600000000000001",
+    "0000000000000102",
+    "0000000000000000"
+  ],
+  "vertex_layout_info": [
+    [
+      304,
+      248,
+      4329,
+      6378,
+      8411
+    ],
+    [
+      144,
+      232,
+      2267,
+      0,
+      0
+    ],
+    [
+      208,
+      232,
+      2276,
+      3147,
+      0
+    ]
+  ],
+  "vertex_shader_type_info": [
+    null,
+    "std_vert0",
+    "std_vert1",
+    "std_vert2",
+    "upsample_vert",
+    "downsample_blur_vert",
+    "variable_blur_vert",
+    "sdf_filter_vert",
+    "stroke_line_vert",
+    "stroke_arc_instanced_vert",
+    "path_cubic_vert_0",
+    "path_cubic_vert_1",
+    "path_rect_vert",
+    "path_stroke_curve_vert",
+    "path_blit_vert",
+    "buffer_image_blit_vert",
+    "image_rect_blit_vert",
+    "asg_vert"
+  ]
+}

@@ -2241,6 +2241,88 @@ fail_stages:
    return result;
 }
 
+/* ios-on-switch-lmao: one stage of a graphics pipeline library, compiled as
+ * vk_graphics_pipeline_compile_shaders compiles a library's stage (the
+ * precompile, then the stage alone in its partition, so no varyings are
+ * linked), with no pipeline and no cache. The caller owns the shader.
+ */
+VkResult
+vk_pipeline_compile_library_stage(struct vk_device *device,
+                                  VkPipelineCreateFlags2KHR pipeline_flags,
+                                  const void *pipeline_info_pNext,
+                                  const VkPipelineShaderStageCreateInfo *info,
+                                  VkPipelineLayout layout,
+                                  const struct vk_graphics_pipeline_state *state,
+                                  struct vk_shader **shader_out)
+{
+   VK_FROM_HANDLE(vk_pipeline_layout, pipeline_layout, layout);
+   const struct vk_device_shader_ops *ops = device->shader_ops;
+   struct vk_pipeline_stage stage = {
+      .stage = vk_to_mesa_shader_stage(info->stage),
+   };
+
+   vk_pipeline_hash_precomp_shader_stage(device, pipeline_flags,
+                                         pipeline_info_pNext, info, &stage);
+   VkResult result =
+      vk_pipeline_precompile_shader(device, NULL, pipeline_flags,
+                                    pipeline_info_pNext, info, &stage);
+   if (result != VK_SUCCESS)
+      return result;
+
+   const struct nir_shader_compiler_options *nir_options =
+      ops->get_nir_options(device->physical, stage.stage, &stage.precomp->rs);
+   nir_shader *nir =
+      vk_pipeline_precomp_shader_get_nir(stage.precomp, nir_options);
+   if (nir == NULL) {
+      vk_pipeline_precomp_shader_unref(device, stage.precomp);
+      return vk_error(device, VK_ERROR_OUT_OF_HOST_MEMORY);
+   }
+
+   const VkPushConstantRange *push_range =
+      get_push_range_for_stage(pipeline_layout, stage.stage);
+   struct vk_shader_compile_info compile = {
+      .stage = stage.stage,
+      .flags = vk_pipeline_to_shader_flags(pipeline_flags, stage.stage,
+                                           pipeline_layout),
+      .next_stage_mask = stage.stage == MESA_SHADER_FRAGMENT ?
+                         0 : VK_SHADER_STAGE_FRAGMENT_BIT,
+      .nir = nir,
+      .robustness = &stage.precomp->rs,
+      .set_layout_count = pipeline_layout != NULL ? pipeline_layout->set_count : 0,
+      .set_layouts = pipeline_layout != NULL ? pipeline_layout->set_layouts : NULL,
+      .embedded_sampler_count = stage.precomp->embedded_sampler_count,
+      .embedded_samplers = stage.precomp->embedded_samplers,
+      .push_constant_range_count = push_range != NULL,
+      .push_constant_ranges = push_range,
+   };
+   result = vk_compile_shaders(device, 1, &compile, state,
+                               &device->enabled_features, &device->alloc,
+                               shader_out);
+   vk_pipeline_precomp_shader_unref(device, stage.precomp);
+   return result;
+}
+
+/* ios-on-switch-lmao: the shader a graphics pipeline holds for a stage, NULL
+ * where it holds none.
+ */
+struct vk_shader *
+vk_graphics_pipeline_stage_shader(VkPipeline _pipeline,
+                                  mesa_shader_stage stage)
+{
+   VK_FROM_HANDLE(vk_pipeline, pipeline, _pipeline);
+   if (pipeline == NULL ||
+       pipeline->bind_point != VK_PIPELINE_BIND_POINT_GRAPHICS)
+      return NULL;
+
+   struct vk_graphics_pipeline *gfx =
+      container_of(pipeline, struct vk_graphics_pipeline, base);
+   for (uint32_t i = 0; i < gfx->stage_count; i++) {
+      if (gfx->stages[i].stage == stage)
+         return gfx->stages[i].shader;
+   }
+   return NULL;
+}
+
 VKAPI_ATTR VkResult VKAPI_CALL
 vk_common_CreateGraphicsPipelines(VkDevice _device,
                                   VkPipelineCache pipelineCache,

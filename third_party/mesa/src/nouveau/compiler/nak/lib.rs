@@ -41,11 +41,13 @@ mod spill_values;
 mod ssa_value;
 mod to_cssa;
 
-#[cfg(test)]
+// ios-on-switch-lmao: the host's unit tests (--cfg nak_host_tests, BUILD.bazel nak_sm53_half_test) build without the
+// hardware runner and nvdisasm, which need a GPU's DRM node and NVIDIA's disassembler
+#[cfg(all(test, not(nak_host_tests)))]
 mod hw_tests;
 
-#[cfg(test)]
+#[cfg(all(test, not(nak_host_tests)))]
 mod hw_runner;
 
-#[cfg(test)]
+#[cfg(all(test, not(nak_host_tests)))]
 mod nvdisasm_tests;

@@ -40,57 +40,61 @@ struct PushParse {
 // Fragment shading passes per pixel, log2, as the macro derives them: log2 samples - log2(1 / minSampleShading), at least 0
 inline uint32_t shadingPassesLog2(const PushParse &p)
 {
-	const int32_t passes = int32_t((p.antiAlias >> 4) & 0xf) - int32_t(p.antiAlias & 0xf);
-	return passes > 0 ? uint32_t(passes) : 0;
+	const int32_t passes = static_cast<int32_t>((p.antiAlias >> 4) & 0xf) -
+			       static_cast<int32_t>(p.antiAlias & 0xf);
+	return passes > 0 ? static_cast<uint32_t>(passes) : 0;
 }
 
 inline void pushMethod(PushCounts &c, PushParse &p, uint32_t subc, uint32_t mthd, uint32_t data)
 {
-	if (mthd < 0x100) {                          // host methods, any subchannel
-		if (mthd == 0x001c && (data & 0xd))  // SEMAPHORED: ACQUIRE, ACQ_GEQ, ACQ_AND
+	if (mthd < 0x100) {                            // host methods, any subchannel
+		if (mthd == 0x001c && (data & 0xd)) {  // SEMAPHORED: ACQUIRE, ACQ_GEQ, ACQ_AND
 			c.acquires++;
-		else if (mthd == 0x0050)  // SET_REFERENCE (NVK's host barrier)
+		} else if (mthd == 0x0050) {  // SET_REFERENCE (NVK's host barrier)
 			c.setRef++;
-		else if (mthd == 0x0034 && (data & 0x1f) == 0x0e)  // MEM_OP_D L2_SYSMEM_INVALIDATE
+		} else if (mthd == 0x0034 &&
+			   (data & 0x1f) == 0x0e) {  // MEM_OP_D L2_SYSMEM_INVALIDATE
 			c.l2Inval++;
-		else if (mthd == 0x0078)  // WFI
+		} else if (mthd == 0x0078) {  // WFI
 			c.hostWfi++;
+		}
 		return;
 	}
 	const bool target =
 		mthd >= 0x0800 && mthd < 0x0a00;  // SET_COLOR_TARGET_*(j), 64 bytes apart
 	switch (subc) {
 	case 0:  // MAXWELL_B
-		if (mthd == 0x0110)
+		if (mthd == 0x0110) {
 			c.wfi++;  // WAIT_FOR_IDLE
-		else if (mthd == 0x1288 || mthd == 0x1338 || mthd == 0x0f74)
+		} else if (mthd == 0x1288 || mthd == 0x1338 || mthd == 0x0f74) {
 			c.texInval++;  // INVALIDATE_TEXTURE_DATA_CACHE(_NO_WFI), 0x0f74 the one PIXEL_SHADER_BARRIER orders
-		else if (mthd == 0x0de0)
+		} else if (mthd == 0x0de0) {
 			c.psBarriers++;  // PIXEL_SHADER_BARRIER
-		else if (mthd == 0x1224 && (data & 3))
+		} else if (mthd == 0x1224 && (data & 3)) {
 			c.interlocks++;  // SET_PIXEL_SHADER_INTERLOCK_CONTROL: TILE_COALESCER_MODE not NO_CONFLICT_DETECT
-		else if (mthd == 0x021c)
+		} else if (mthd == 0x021c) {
 			c.shaderInval++;  // INVALIDATE_SHADER_CACHES (waits for idle)
-		else if (mthd == 0x0da4)
+		} else if (mthd == 0x0da4) {
 			c.shaderInvalNoWfi++;  // INVALIDATE_SHADER_CACHES_NO_WFI
-		else if (mthd == 0x1538) {
+		} else if (mthd == 0x1538) {
 			c.passes++;  // SET_ZT_SELECT: once per vkCmdBeginRendering
 			c.depthPasses += data & 1;
-		} else if (mthd == 0x19d0)
+		} else if (mthd == 0x19d0) {
 			c.clears++;  // CLEAR_SURFACE
-		else if (mthd == 0x1618) {
+		} else if (mthd == 0x1618) {
 			c.draws++;  // BEGIN outside an MME macro
-			c.sampleDraws += p.shadingKnown && shadingPassesLog2(p);
-		} else if (mthd == 0x0808)
+			c.sampleDraws +=
+				static_cast<uint64_t>(p.shadingKnown && shadingPassesLog2(p) != 0u);
+		} else if (mthd == 0x0808) {
 			p.rtWidth = data;  // SET_COLOR_TARGET_WIDTH(0)
-		else if (mthd == 0x080c)
+		} else if (mthd == 0x080c) {
 			p.rtHeight = data;  // SET_COLOR_TARGET_HEIGHT(0)
-		else if (target && (mthd & 0x3f) == 0x10 && data)
+		} else if (target && (mthd & 0x3f) == 0x10 && data) {
 			c.targets++;  // SET_COLOR_TARGET_FORMAT, not DISABLED
-		else if (target && (mthd & 0x3f) == 0x14) {
+		} else if (target && (mthd & 0x3f) == 0x14) {
 			const bool pitch =
-				data & (1u << 12);  // SET_COLOR_TARGET_MEMORY LAYOUT_PITCH
-			c.linearTargets += pitch;
+				(data & (1u << 12)) != 0u;  // SET_COLOR_TARGET_MEMORY LAYOUT_PITCH
+			c.linearTargets += static_cast<uint64_t>(pitch);
 			if (mthd == 0x0814)
 				p.rtPitch = pitch;
 		} else if (mthd >= 0x3800 && mthd < 0x3c00 && !(mthd & 7)) {  // CALL_MME_MACRO(j)
@@ -98,40 +102,42 @@ inline void pushMethod(PushCounts &c, PushParse &p, uint32_t subc, uint32_t mthd
 			if (j == 10) {
 				const uint32_t mask = data >> 16;
 				p.antiAlias = (p.antiAlias & ~mask) | (data & mask);
-				p.shadingKnown = p.shadingKnown || (mask & 0xf);
+				p.shadingKnown = p.shadingKnown || ((mask & 0xf) != 0u);
 			}
-			c.draws += j >= 11 && j <= 16;
-			c.sampleDraws +=
-				j >= 11 && j <= 16 && p.shadingKnown && shadingPassesLog2(p);
-			c.clears += j == 2;
+			c.draws += static_cast<uint64_t>(j >= 11 && j <= 16);
+			c.sampleDraws += static_cast<uint64_t>(
+				j >= 11 && j <= 16 && p.shadingKnown && shadingPassesLog2(p) != 0u);
+			c.clears += static_cast<uint64_t>(j == 2);
 			// SET_ANTI_ALIAS (once per vkCmdBeginRendering), its argument the macro's data: a sample count
 			// (log2 in bits 7:4, under mask 0xf0 in bits 23:16) above one
-			c.msaaPasses += j == 10 && (data & 0x00f00000) && (data & 0xf0);
+			c.msaaPasses += static_cast<uint64_t>(
+				j == 10 && ((data & 0x00f00000) != 0u) && (data & 0xf0) != 0u);
 			if (j == 10 && (data & 0x00f00000))
-				p.msaa = data & 0xf0;
+				p.msaa = ((data & 0xf0) != 0u);
 		}
 		break;
-	case 1:                                  // MAXWELL_COMPUTE_B
-		c.dispatches += mthd == 0x02b4;  // SEND_PCAS_A
-		c.wfi += mthd == 0x0110;
-		c.shaderInval += mthd == 0x021c;
-		c.shaderInvalNoWfi += mthd == 0x0da4;
-		c.texInval += mthd == 0x1288 || mthd == 0x1338;
+	case 1:                                                         // MAXWELL_COMPUTE_B
+		c.dispatches += static_cast<uint64_t>(mthd == 0x02b4);  // SEND_PCAS_A
+		c.wfi += static_cast<uint64_t>(mthd == 0x0110);
+		c.shaderInval += static_cast<uint64_t>(mthd == 0x021c);
+		c.shaderInvalNoWfi += static_cast<uint64_t>(mthd == 0x0da4);
+		c.texInval += static_cast<uint64_t>(mthd == 0x1288 || mthd == 0x1338);
 		break;
-	case 3:                             // FERMI_TWOD_A
-		c.blits += mthd == 0x08dc;  // PIXELS_FROM_MEMORY_SRC_Y0_INT
+	case 3:                                                    // FERMI_TWOD_A
+		c.blits += static_cast<uint64_t>(mthd == 0x08dc);  // PIXELS_FROM_MEMORY_SRC_Y0_INT
 		break;
 	case 4:  // MAXWELL_DMA_COPY_A
-		if (mthd == 0x0418)
+		if (mthd == 0x0418) {
 			p.ceLine = data;
-		else if (mthd == 0x041c)
+		} else if (mthd == 0x041c) {
 			p.ceCount = data;
-		else if (mthd == 0x0300 &&
-			 !p.ceLine)  // LAUNCH_DMA of nothing: NVK's copy-engine WFI
+		} else if (mthd == 0x0300 &&
+			   !p.ceLine) {  // LAUNCH_DMA of nothing: NVK's copy-engine WFI
 			c.ceWfi++;
-		else if (mthd == 0x0300) {  // LAUNCH_DMA (bit 9 MULTI_LINE)
+		} else if (mthd == 0x0300) {  // LAUNCH_DMA (bit 9 MULTI_LINE)
 			c.ceCopies++;
-			c.ceBytes += uint64_t(p.ceLine) * ((data & (1u << 9)) ? p.ceCount : 1);
+			c.ceBytes += static_cast<uint64_t>(p.ceLine) *
+				     ((data & (1u << 9)) ? p.ceCount : 1);
 		}
 		break;
 	default:
@@ -154,8 +160,11 @@ inline void pushParse(PushCounts &c, PushParse &p, const uint32_t *w, uint64_t n
 			p.left--;
 			continue;
 		}
-		const uint32_t h = w[i], op = h >> 29, count = (h >> 16) & 0x1fff,
-			       subc = (h >> 13) & 7, mthd = (h & 0xfff) << 2;
+		const uint32_t h = w[i];
+		const uint32_t op = h >> 29;
+		const uint32_t count = (h >> 16) & 0x1fff;
+		const uint32_t subc = (h >> 13) & 7;
+		const uint32_t mthd = (h & 0xfff) << 2;
 		if (!h)
 			continue;  // padding
 		if (op == 4) {     // IMMD_DATA_METHOD: the data is the count field
@@ -176,12 +185,15 @@ inline void pushParse(PushCounts &c, PushParse &p, const uint32_t *w, uint64_t n
 // draws and clears by the pass state the parser holds.
 inline uint8_t pushClass(const PushCounts &before, const PushCounts &after, const PushParse &p)
 {
-	const uint64_t pixels = uint64_t(p.rtPitch ? p.rtWidth / 4 : p.rtWidth) * p.rtHeight;
-	const uint8_t variant = (pixels >= 600000   ? 0
-				 : pixels >= 100000 ? 1
-						    : 2) *
-					4 +
-				(p.rtPitch ? 2 : 0) + (p.msaa ? 1 : 0);
+	const uint64_t pixels =
+		static_cast<uint64_t>(p.rtPitch ? p.rtWidth / 4 : p.rtWidth) * p.rtHeight;
+	uint8_t area = 2;
+	if (pixels >= 600000) {
+		area = 0;
+	} else if (pixels >= 100000) {
+		area = 1;
+	}
+	const uint8_t variant = area * 4 + (p.rtPitch ? 2 : 0) + (p.msaa ? 1 : 0);
 	if (after.draws > before.draws)
 		return TGM_PC_DRAW + variant;
 	if (after.clears > before.clears)
@@ -196,8 +208,8 @@ inline uint8_t pushClass(const PushCounts &before, const PushCounts &after, cons
 		return TGM_PC_2D;
 	const uint64_t syncBefore = before.wfi + before.shaderInval + before.shaderInvalNoWfi +
 				    before.texInval + before.setRef + before.l2Inval +
-				    before.hostWfi + before.ceWfi + before.psBarriers,
-		       syncAfter = after.wfi + after.shaderInval + after.shaderInvalNoWfi +
+				    before.hostWfi + before.ceWfi + before.psBarriers;
+	const uint64_t syncAfter = after.wfi + after.shaderInval + after.shaderInvalNoWfi +
 				   after.texInval + after.setRef + after.l2Inval + after.hostWfi +
 				   after.ceWfi + after.psBarriers;
 	return syncAfter > syncBefore ? TGM_PC_SYNC : TGM_PC_STATE;

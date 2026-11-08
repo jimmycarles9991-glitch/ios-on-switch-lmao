@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BSD-2-Clause-Patent
-// TegraNVDEC user client ABI, v8 (kernel: TegraNVDECUserClient.cpp; client: SwitchVideoDecoders/AVD).
+// TegraNVDEC user client ABI, v9 (kernel: TegraNVDECUserClient.cpp; client: SwitchVideoDecoders/AVD).
 //
-// The service is "TegraNVDEC" (IOServiceMatching), published by default once NVDEC has proven itself (N4). Its user
+// The service is "TegraNVDEC" (IOServiceMatching), published by default once NVDEC has proven itself (N3). Its user
 // client's class is named AppleD5500UserClient, iPad7,1's own decoder client (VXD393), which some of 21H461's sandbox
 // profiles may admit; the processes known to decode are granted outright (NativeSandboxGrantProcess on the service).
 // Open type TEGRA_NVDEC_OPEN_TYPE.
@@ -29,39 +29,24 @@
 #define TEGRA_NVDEC_ABI_H
 #include <stdint.h>
 
-#define TEGRA_NVDEC_ABI_VERSION  8
+#define TEGRA_NVDEC_ABI_VERSION  9
 #define TEGRA_NVDEC_OPEN_TYPE    0x4e44       // 'ND'
 #define TEGRA_NVDEC_TUNNEL_MAGIC 0x4e44544eu  // 'NDTN'
 #define TEGRA_NVDEC_TUNNEL_PROBE 0xffffffffu
 
 enum TegraNVDECMethod {
-    TegraNVDECMethodGetInfo = 1,         // -> TegraNVDECInfo
-    TegraNVDECMethodBufferAlloc = 2,     // TegraNVDECBufferAlloc -> TegraNVDECBufferReply
-    TegraNVDECMethodBufferFree = 3,      // TegraNVDECBuffer -> (waits for the last job, revokes the client's mappings)
-    TegraNVDECMethodSubmit = 4,          // TegraNVDECSubmit -> TegraNVDECFence
-    TegraNVDECMethodWait = 5,            // TegraNVDECWait ->
-    TegraNVDECMethodClaimSelfTest = 6,   // -> TegraNVDECClaim: claimed = 1 for the one caller that runs the clip check
-    TegraNVDECMethodReportSelfTest = 7,  // TegraNVDECReport -> (the claiming connection only)
-    TegraNVDECMethodWaitSelfTest = 8,    // -> TegraNVDECClaim: sleeps while the check runs, at most 3 s
-    TegraNVDECMethodPresent = 9,         // TegraNVDECPresent -> (the picture is in the IOSurface)
+    TegraNVDECMethodGetInfo = 1,      // -> TegraNVDECInfo
+    TegraNVDECMethodBufferAlloc = 2,  // TegraNVDECBufferAlloc -> TegraNVDECBufferReply
+    TegraNVDECMethodBufferFree = 3,   // TegraNVDECBuffer -> (waits for the last job, revokes the client's mappings)
+    TegraNVDECMethodSubmit = 4,       // TegraNVDECSubmit -> TegraNVDECFence
+    TegraNVDECMethodWait = 5,         // TegraNVDECWait ->
+    TegraNVDECMethodPresent = 6,      // TegraNVDECPresent -> (the picture is in the IOSurface)
 };
 
-#define TEGRA_NVDEC_FEATURE_PRESENT (1u << 0)  // TegraNVDECInfo.features: Present is on (VIC proved block-linear input)
-
-// The userland clip check (AVD's ClipCheck.c): one connection per boot claims it and reports its VP9 and HEVC verdicts;
-// until then 'vp09' and 'hvc1' are registered nowhere as NVDEC decoders, and a failure turns that codec off
-// (TegraNVDECInfo.codecs loses it, Submit refuses it). HEVC Main 10 has its own verdict: a failure there clears only
-// TEGRA_NVDEC_HEVC_MAIN10 (Main 10 streams then decode in software; Main stays on NVDEC).
-// A claiming connection that closes before reporting gives the claim back.
-enum {
-    TEGRA_NVDEC_CHECK_UNCLAIMED = 0,
-    TEGRA_NVDEC_CHECK_RUNNING = 1,
-    TEGRA_NVDEC_CHECK_PASSED = 2,
-    TEGRA_NVDEC_CHECK_FAILED = 3,
-};
+#define TEGRA_NVDEC_FEATURE_PRESENT (1u << 0)  // TegraNVDECInfo.features: Present is on (VIC reads block linear)
 
 // NVDEC application ids (clc5b0.h NVC5B0_SET_APPLICATION_ID_ID_*). TegraNVDECInfo.codecs has bit n set for each
-// codec whose boot self-test (N3) passed; Submit refuses the others.
+// codec NVDEC decodes; Submit refuses the others.
 enum {
     TEGRA_NVDEC_CODEC_H264 = 3,
     TEGRA_NVDEC_CODEC_HEVC = 7,
@@ -69,7 +54,8 @@ enum {
 };
 
 // Not an application id: TegraNVDECInfo.codecs bit 16, HEVC Main 10 written as 8-bit NV12 (disp_output_mode 2/3) is
-// proven (set with HEVC at N3, which decodes an 8-bit picture; cleared by a failed Main 10 clip check).
+// decoded. Not set: on the unit (11-06) clip T's first picture came out with luma CRC 0xeeb22512 where FFmpeg's
+// samples >> 2 give 0xfe5d343b, so Main 10 streams decode in software until that is fixed.
 #define TEGRA_NVDEC_HEVC_MAIN10 (1u << 16)
 
 typedef struct {
@@ -126,14 +112,6 @@ typedef struct {
 typedef struct {
     uint32_t fence, reserved;
 } TegraNVDECFence;
-
-typedef struct {
-    uint32_t claimed, state;  // state: TEGRA_NVDEC_CHECK_*
-} TegraNVDECClaim;
-
-typedef struct {
-    uint32_t vp9_ok, hevc_ok, hevc10_ok, reserved;
-} TegraNVDECReport;
 
 // A decoded picture of buffer `handle` (NV12 block linear, GOB height 2^block_height_log2: NVDEC's is 1) into the
 // '420v'/'420f' IOSurface `surface_id` of the calling task: the window (crop_x, crop_y, width x height) at (dst_x,

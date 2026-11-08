@@ -28,8 +28,6 @@ rust_test(
     name = "key_test",
     srcs = ["key_test.rs"],
     edition = "2024",
-    deps = [
-        ":key_shim",
-        "//kits/SwitchRefusal:switch_refusal_rs",
-    ],
+    link_deps = [":key_shim"],
+    deps = ["//kits/SwitchRefusal:switch_refusal_rs"],
 )

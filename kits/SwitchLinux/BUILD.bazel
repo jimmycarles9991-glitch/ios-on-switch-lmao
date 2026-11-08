@@ -1,0 +1,34 @@
+# The XNU side of the Linux-compat shims (TegraBPMP, TegraDFLL, TegraGM20B), once: heap, interrupt mask, time and
+# delays, event sleeps, sleeping locks, thread calls, device mappings; spin and reader-writer locks inline.
+#
+#   bazel test //kits/SwitchLinux/test:all
+load("//bazel/lint:defs.bzl", "lint_files")
+load("//kernel/rules:kernel.bzl", "kernel_driver", "kernel_headers")
+
+package(default_visibility = ["//visibility:public"])
+
+lint_files()
+
+exports_files(glob(
+    ["**"],
+    exclude = ["BUILD.bazel"],
+))
+
+filegroup(
+    name = "all_files",
+    srcs = glob(
+        ["**"],
+        exclude = ["BUILD.bazel"],
+    ),
+)
+
+kernel_headers()
+
+kernel_driver(
+    name = "SwitchLinux",
+    srcs = [
+        "SwitchLinux.cpp",
+        "SwitchLinuxLock.cpp",
+    ],
+    hdr_deps = ["kits/SwitchTime"],
+)

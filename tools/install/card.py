@@ -15,16 +15,20 @@ entry under the project's former names (renamed.py) and the icon's former name (
 to the paths the caller names.
 """
 
+import argparse
 import contextlib
 import hashlib
 import os
+import re
 import shutil
+import sys
 import tempfile
 from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
 
-from tools.install import gpt, host, renamed, target as targets
+from tools.common import files, hashing
+from tools.install import disks, gpt, host, renamed, target as targets
 
 LINUX_MBR = 0x83
 BOOT_ENTRY = 'switchroot/ios'
@@ -34,7 +38,9 @@ ICON = 'bootloader/res/icon_ios_hue.bmp'
 FORMER_ICONS = ('bootloader/res/icon_ios.bmp',)
 # The user's own files in the entry's folder, which no package ships: the loader reads bootargs.txt at boot.
 USER_FILES = ('bootargs.txt',)
-HASH_CHUNK = 8 << 20
+# The installer's image parts beside the boot files (folder.py writes them, install-ios.bin reads them): never a
+# boot package's, so a deploy keeps them.
+INSTALL_PART = re.compile(r'([A-Z0-9]+)\.SII\.([0-9]{3})')
 
 
 class RefusedError(Exception):
@@ -84,6 +90,20 @@ def resolve(argument: str) -> Card:
     if not info.get('WritableMedia', True):
         raise RefusedError(f'{name} is read-only media (SD lock switch?)')
     return Card(name, info, int(info['TotalSize']), image)
+
+
+def confirm(args: argparse.Namespace, disk: str, warning: str) -> None:
+    """Have the user type `disk` after `warning` (or pass --confirm=disk), and keep it in args.confirm for sudo."""
+    if args.confirm:
+        if args.confirm != disk:
+            raise RefusedError(f'--confirm={args.confirm} does not name the target {disk}')
+        return
+    if not sys.stdin.isatty():
+        raise RefusedError(f'type-to-confirm needs a terminal (or pass --confirm={disk})')
+    answer = input(f'{warning} Type {disk} to continue: ')
+    if answer.strip() != disk:
+        raise RefusedError('not confirmed')
+    args.confirm = disk
 
 
 def read_table(card: Card) -> gpt.Table:
@@ -203,6 +223,24 @@ def table_snapshot(card: Card) -> bytes:
     return b''.join(parts)
 
 
+def changed_outside(card: Card, before: bytes, after: bytes, index: int | None) -> list[int]:
+    """Return the offsets at which two table_snapshot()s differ, other than where retyping entry `index` writes.
+
+    Retyping writes that entry in both arrays and the two headers; with `index` None every byte counts.
+    """
+    if len(after) != len(before):
+        raise host.HostError('the partition table changed shape')
+    table, span = card.table, card.table.entry_sectors * gpt.SECTOR
+    allowed = set()
+    if index is not None:
+        entry = index * table.entry_size
+        allowed |= set(range(gpt.SECTOR, 2 * gpt.SECTOR))
+        for base in (2 * gpt.SECTOR, 2 * gpt.SECTOR + span):
+            allowed |= set(range(base + entry, base + entry + table.entry_size))
+        allowed |= set(range(len(after) - gpt.SECTOR, len(after)))
+    return [i for i in range(len(after)) if after[i] != before[i] and i not in allowed]
+
+
 def volumes(card: Card) -> dict[str, dict]:
     """{uuid: {DeviceIdentifier, Roles, Name, ...}} of the APFS container on the target, {} when none is attached."""
     container = host.container_on(card.slice(card.target))
@@ -219,29 +257,23 @@ def mounted(identifier: str, log: host.Log, read_only: bool = False, owners: boo
         info = host.disk_info(identifier) or {}
         if not read_only and not info.get('WritableVolume'):
             raise host.HostError(f'{identifier} is mounted read-only at {current}')
-        yield Path(current)
-        return
-    with tempfile.TemporaryDirectory(prefix='switch-') as directory:
-        args = ['mount']
-        if read_only:
-            args.append('readOnly')
-        args += ['-mountOptions', 'nobrowse', '-mountPoint', directory, identifier]
-        host.run('diskutil', *args, log=log)
+        if owners or not info.get('GlobalPermissionsEnabled'):
+            yield Path(current)
+            return
+        # macOS's own mount of a card enforces owners, which closes root's 0700 folders to the user
+        disks.unmount(identifier, log)
+    with tempfile.TemporaryDirectory(prefix='switch-', ignore_cleanup_errors=True) as directory:
+        mode = ['readOnly'] if read_only else []
+        disks.mount_at(
+            identifier, directory, [*mode, '-mountOptions', 'nobrowse' if owners else 'nobrowse,noowners'], log
+        )
         try:
             if owners and os.geteuid() == 0:
                 host.run('diskutil', 'enableOwnership', directory, log=log)
             yield Path(directory)
         finally:
             host.run('sync')
-            host.run('diskutil', 'unmount', identifier, log=log, check=False)
-
-
-def sha256_file(path: Path) -> str:
-    digest = hashlib.sha256()
-    with open(path, 'rb') as f:
-        while chunk := f.read(HASH_CHUNK):
-            digest.update(chunk)
-    return digest.hexdigest()
+            disks.unmount(identifier, log)
 
 
 def boot_entry_files(package: str | Path) -> dict[str, Path]:
@@ -273,40 +305,8 @@ def sync_boot_entry(
     """
     fat_root = Path(fat_root)
     wanted = boot_entry_files(package)
-    changed, removed = [], []
-    for relative, source in wanted.items():
-        target = fat_root / relative
-        if (
-            target.is_file()
-            and target.stat().st_size == source.stat().st_size
-            and sha256_file(target) == sha256_file(source)
-        ):
-            continue
-        changed.append(relative)
-        if not dry_run:
-            target.parent.mkdir(parents=True, exist_ok=True)
-            partial = target.with_name('.switch-partial-' + target.name)
-            shutil.copyfile(source, partial)
-            os.replace(partial, target)
-    entry = fat_root / BOOT_ENTRY
-    if entry.is_dir():
-        for path in sorted(entry.iterdir()):
-            relative = f'{BOOT_ENTRY}/{path.name}'
-            if (
-                relative not in wanted
-                and path.is_file()
-                and not path.name.startswith('._')
-                and path.name not in USER_FILES
-            ):
-                removed.append(relative)
-                if not dry_run:
-                    path.unlink()
-    removed += renamed.remove_older_boot_entries(fat_root, INI, BOOT_ENTRY, dry_run)
-    for relative in FORMER_ICONS:
-        if (fat_root / relative).is_file():
-            removed.append(relative)
-            if not dry_run:
-                (fat_root / relative).unlink()
+    changed = _copy_changed(fat_root, wanted, dry_run)
+    removed = _remove_stale(fat_root, wanted, dry_run)
     for relative in list(wanted) + removed:  # AppleDouble files, by name only
         double = (fat_root / relative.rstrip('/')).with_name('._' + Path(relative.rstrip('/')).name)
         if double.exists() and not dry_run:
@@ -327,19 +327,63 @@ def sync_boot_entry(
     return changed, removed
 
 
+def _copy_changed(fat_root: Path, wanted: dict[str, Path], dry_run: bool) -> list[str]:
+    changed = []
+    for relative, source in wanted.items():
+        target = fat_root / relative
+        if (
+            target.is_file()
+            and target.stat().st_size == source.stat().st_size
+            and hashing.sha256_file(target) == hashing.sha256_file(source)
+        ):
+            continue
+        changed.append(relative)
+        if not dry_run:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            files.copy(source, target)
+    return changed
+
+
+def _remove_stale(fat_root: Path, wanted: dict[str, Path], dry_run: bool) -> list[str]:
+    """Remove the entry's files the package no longer has, older entries and former icons; return what went."""
+    removed = []
+    entry = fat_root / BOOT_ENTRY
+    if entry.is_dir():
+        for path in sorted(entry.iterdir()):
+            relative = f'{BOOT_ENTRY}/{path.name}'
+            if (
+                relative not in wanted
+                and path.is_file()
+                and not path.name.startswith('._')
+                and path.name not in USER_FILES
+                and not INSTALL_PART.fullmatch(path.name)
+            ):
+                removed.append(relative)
+                if not dry_run:
+                    path.unlink()
+    removed += renamed.remove_older_boot_entries(fat_root, INI, BOOT_ENTRY, dry_run)
+    for relative in FORMER_ICONS:
+        if (fat_root / relative).is_file():
+            removed.append(relative)
+            if not dry_run:
+                (fat_root / relative).unlink()
+    return removed
+
+
 def tree_digest(root: Path) -> str | None:
     root = Path(root)
-    digest = hashlib.sha256()
     if not root.is_dir():
         return None
-    for path in sorted(root.rglob('*')):
-        if path.name.startswith('._'):
-            continue
+    paths = [p for p in sorted(root.rglob('*')) if not p.name.startswith('._')]
+    files = [p for p in paths if not p.is_dir()]
+    hashes = dict(zip(files, hashing.sha256_files(files), strict=True))
+    digest = hashlib.sha256()
+    for path in paths:
         relative = path.relative_to(root).as_posix()
-        if path.is_dir():
-            digest.update(b'd ' + relative.encode() + b'\n')
+        if path in hashes:
+            digest.update(f'f {relative} {path.stat().st_mode & 0o777 | 0o200:o} {hashes[path]}\n'.encode())
         else:
-            digest.update(f'f {relative} {path.stat().st_mode & 0o777 | 0o200:o} {sha256_file(path)}\n'.encode())
+            digest.update(b'd ' + relative.encode() + b'\n')
     return digest.hexdigest()
 
 

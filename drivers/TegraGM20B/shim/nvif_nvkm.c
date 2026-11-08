@@ -61,12 +61,13 @@ static int nvkm_client_resume(void *priv)
 static int nvkm_client_suspend(void *priv, bool runtime)
 {
 	struct nvkm_client *client = priv;
-	enum nvkm_suspend_state state;
+	enum nvkm_suspend_state state = NVKM_POWEROFF;
 
-	if (runtime)
+	if (runtime) {
 		state = NVKM_RUNTIME_SUSPEND;
-	else
+	} else {
 		state = NVKM_SUSPEND;
+	}
 	return nvkm_object_fini(&client->object, state);
 }
 

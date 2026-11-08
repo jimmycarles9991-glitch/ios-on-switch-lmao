@@ -301,25 +301,6 @@ size_t generateWords(const MipChain &c, uint32_t firstLevel, uint32_t lastLevel)
     return kBeginWords + kEndWords + steps * (2 * kSurfaceWords + kBlitWords + kStepWaitWords);
 }
 
-Sampling sampling(uint32_t i)
-{
-    // the documented convention first, then texel centres at whole numbers (centre origin, the origin back half a texel; corner
-    // origin at half a step less half a texel), then the other plausible readings of the class
-    static const Sampling kAll[kSamplings] = {{0, 0, 0}, {0, 0, -1}, {1, 1, -1}, {1, 1, 0},
-                                              {0, 1, 0}, {0, 0, 1},  {1, 0, 0},  {0, 1, -1}};
-    return i < kSamplings ? kAll[i] : Sampling{};
-}
-
-void samplingName(const Sampling &s, char *out, size_t size)
-{
-    char du[16] = "", ht[16] = "";
-    if (s.halfDu)
-        snprintf(du, sizeof du, "%+d*du/2", s.halfDu);
-    if (s.halfTexel)
-        snprintf(ht, sizeof ht, "%+.1f", s.halfTexel * 0.5);
-    snprintf(out, size, "%s%s%s", s.corner ? "corner" : "centre", du, ht);
-}
-
 void emitGenerate(Push &p, const MipChain &c, uint64_t chainVa, const Pitch *level0, uint32_t fmt2d,
                   uint32_t firstLevel, uint32_t lastLevel, Sampling sampling)
 {
@@ -367,22 +348,7 @@ void emitCopyToLevel(Push &p, const MipChain &c, uint64_t chainVa, uint32_t leve
     end(p);
 }
 
-void emitCopyFromLevel(Push &p, const MipChain &c, uint64_t chainVa, uint32_t level, const Pitch &dst, uint32_t fmt2d,
-                       uint32_t sx, uint32_t sy, uint32_t dx, uint32_t dy, uint32_t w, uint32_t h)
-{
-    if (level >= c.levels || !w || !h)
-        return;
-    const MipLevel &s = c.level[level];
-    if (sx + w > s.width || sy + h > s.height || dx + w > dst.width || dy + h > dst.height)
-        return;
-    begin(p);
-    surface(p, TWOD_SET_DST_FORMAT, fmt2d, false, 0, dst.pitch, dst.width, dst.height, dst.va);
-    surface(p, TWOD_SET_SRC_FORMAT, fmt2d, true, s.yLog2, 0, s.width, s.height, chainVa + s.offset);
-    blit(p, FILTER_POINT, dx, dy, w, h, 1ull << 32, 1ull << 32, uint64_t(sx) << 32, uint64_t(sy) << 32);
-    end(p);
-}
-
-// ---- reference and self-test ----
+// ---- reference ----
 
 void referenceDownsample(const uint8_t *src, uint32_t srcPitch, uint32_t sw, uint32_t sh, uint8_t *dst,
                          uint32_t dstPitch, uint32_t dw, uint32_t dh, uint32_t bpp)
@@ -418,86 +384,6 @@ void referenceDownsample(const uint8_t *src, uint32_t srcPitch, uint32_t sw, uin
             }
         }
     }
-}
-
-void selfTestPattern(uint8_t *pixels, uint32_t pitch)
-{
-    // components that tell the four 2x2 neighbours apart at every step (a one-texel shift changes the result by > 1)
-    for (uint32_t y = 0; y < kSelfTestH; y++)
-        for (uint32_t x = 0; x < kSelfTestW; x++) {
-            uint8_t *t = pixels + size_t(y) * pitch + x * 4;
-            t[0] = uint8_t(x * 10 + 7);                 // blue: a ramp in x
-            t[1] = uint8_t(y * 23 + 5);                 // green: a ramp in y
-            t[2] = uint8_t((x * 37 + y * 101) & 0xff);  // red: both
-            t[3] = uint8_t(((x ^ y) & 1) ? 255 : 64);   // alpha: a checker
-        }
-}
-
-uint32_t selfTestDetail(const MipChain &c, const uint8_t *chainCpu, bool fermi, SelfTestReport &r)
-{
-    r = SelfTestReport{};
-    if (c.width != kSelfTestW || c.height != kSelfTestH || c.bpp != 4)
-        return r.bad = ~0u;
-    uint8_t want[kSelfTestW * kSelfTestH * 4], above[kSelfTestW * kSelfTestH * 4];
-    selfTestPattern(want, kSelfTestW * 4);
-    for (uint32_t l = 0; l < c.levels; l++) {
-        const MipLevel &lv = c.level[l];
-        if (l) {
-            const MipLevel &up = c.level[l - 1];
-            for (uint32_t y = 0; y < up.height; y++)
-                for (uint32_t xb = 0; xb < up.width * 4; xb++)
-                    above[size_t(y) * up.width * 4 + xb] = chainCpu[texelOffset(c, l - 1, xb, y, fermi)];
-            referenceDownsample(above, up.width * 4, up.width, up.height, want, lv.width * 4, lv.width, lv.height, 4);
-        }
-        for (uint32_t y = 0; y < lv.height; y++)
-            for (uint32_t xb = 0; xb < lv.width * 4; xb++) {
-                const int got = chainCpu[texelOffset(c, l, xb, y, fermi)], w = want[size_t(y) * lv.width * 4 + xb];
-                const int d = std::abs(got - w);
-                if (d > r.maxDiff[xb % 4])
-                    r.maxDiff[xb % 4] = uint8_t(d);
-                if (d <= 1)
-                    continue;
-                r.bad++;
-                r.levelBad[l]++;
-                if (r.firsts < 3)
-                    r.first[r.firsts++] = {uint8_t(l),   uint8_t(xb % 4),  uint8_t(w),
-                                           uint8_t(got), uint16_t(xb / 4), uint16_t(y)};
-            }
-    }
-    return r.bad;
-}
-
-uint32_t selfTestCheck(const MipChain &c, const uint8_t *chainCpu, uint32_t *first, bool fermi)
-{
-    if (first)
-        *first = ~0u;
-    if (c.width != kSelfTestW || c.height != kSelfTestH || c.bpp != 4)
-        return ~0u;
-    // each level against the reference step from the level above as the GPU made it (so one step's rounding is not carried)
-    uint8_t want[kSelfTestW * kSelfTestH * 4], above[kSelfTestW * kSelfTestH * 4];
-    selfTestPattern(want, kSelfTestW * 4);
-    uint32_t bad = 0;
-    for (uint32_t l = 0; l < c.levels; l++) {
-        const MipLevel &lv = c.level[l];
-        if (l) {
-            const MipLevel &up = c.level[l - 1];
-            for (uint32_t y = 0; y < up.height; y++)
-                for (uint32_t xb = 0; xb < up.width * 4; xb++)
-                    above[size_t(y) * up.width * 4 + xb] = chainCpu[texelOffset(c, l - 1, xb, y, fermi)];
-            referenceDownsample(above, up.width * 4, up.width, up.height, want, lv.width * 4, lv.width, lv.height, 4);
-        }
-        const uint8_t *cur = want;
-        for (uint32_t y = 0; y < lv.height; y++)
-            for (uint32_t xb = 0; xb < lv.width * 4; xb++) {
-                const int got = chainCpu[texelOffset(c, l, xb, y, fermi)], want = cur[size_t(y) * lv.width * 4 + xb];
-                if (std::abs(got - want) > 1) {
-                    if (!bad && first)
-                        *first = l << 24 | y << 12 | xb;
-                    bad++;
-                }
-            }
-    }
-    return bad;
 }
 
 }  // namespace fx

@@ -7,17 +7,36 @@ const uint8_t awdl_bssid[6] = {0x00, 0x25, 0x00, 0xff, 0x94, 0x73};
 const uint8_t awdl_oui[3] = {0x00, 0x17, 0xf2};
 static const uint8_t kLlc[8] = {0xaa, 0xaa, 0x03, 0x00, 0x17, 0xf2, 0x08, 0x00};
 
+// Apple's frames name a 5 GHz 80 MHz slot by its primary channel with operating class 0x80 ({149, 0x80}, OWL's
+// CHAN_OPCLASS_149), not by the block's centre as IEEE 802.11 Annex E would. A centre index is still read as its
+// block's AWDL primary, so either form a peer sends lands on the right channel.
 uint8_t awdl_chan_primary(struct awdl_chan c)
 {
-    if (c.opclass == 0x80 || c.opclass == 0x81) {
-        // An 80 MHz block named by its centre; AWDL's primaries are 44 (36-48) and 149 (149-161).
-        if (c.number == 42)
-            return 44;
-        if (c.number == 155)
-            return 149;
-        return c.number >= 6 ? (uint8_t)(c.number - 6) : 0;
+    if (c.opclass != 0x80 && c.opclass != 0x81)
+        return c.number;
+    switch (c.number) {
+    case 42:
+        return 44;
+    case 155:
+        return 149;
+    case 58:
+    case 106:
+    case 122:
+    case 138:
+    case 171:
+        return (uint8_t)(c.number - 6);
+    default:
+        return c.number;
     }
-    return c.number;
+}
+
+uint8_t awdl_chan_centre80(uint8_t primary)
+{
+    if (primary >= 149 && primary <= 161)
+        return 155;
+    if (primary >= 36 && primary <= 144)
+        return (uint8_t)(primary - (primary - 36) % 16 + 6);
+    return 0;
 }
 
 uint8_t awdl_opclass_20mhz(uint8_t ch)
@@ -42,12 +61,13 @@ uint8_t awdl_opclass_20mhz(uint8_t ch)
 struct awdl_chan awdl_chan_of_freq(uint16_t mhz)
 {
     uint8_t ch = 0;
-    if (mhz == 2484)
+    if (mhz == 2484) {
         ch = 14;
-    else if (mhz >= 2412 && mhz <= 2472)
+    } else if (mhz >= 2412 && mhz <= 2472) {
         ch = (uint8_t)((mhz - 2407) / 5);
-    else if (mhz >= 5180 && mhz <= 5885)
+    } else if (mhz >= 5180 && mhz <= 5885) {
         ch = (uint8_t)((mhz - 5000) / 5);
+    }
     const uint8_t opclass = awdl_opclass_20mhz(ch);
     return opclass ? (struct awdl_chan){ch, opclass} : (struct awdl_chan){0, 0};
 }
@@ -65,7 +85,7 @@ uint16_t awdl_chan_freq(struct awdl_chan c)
 // ---- reading -----------------------------------------------------------------------------------------------------
 static uint16_t rd16(const uint8_t *p)
 {
-    return (uint16_t)(p[0] | (p[1] << 8));
+    return (uint16_t)(p[0] | ((unsigned)p[1] << 8));
 }
 
 static uint32_t rd32(const uint8_t *p)
@@ -92,13 +112,14 @@ static int parse_chanseq(const uint8_t *p, size_t n, struct awdl_chanseq *s)
         return -1;
     s->count = (uint8_t)(count > AWDL_SEQ_SLOTS ? AWDL_SEQ_SLOTS : count);
     for (unsigned i = 0; i < s->count; ++i) {
-        const uint8_t *e = p + 6 + i * width;
-        if (s->encoding == AWDL_CHAN_ENC_SIMPLE)
+        const uint8_t *e = p + 6 + (size_t)i * width;
+        if (s->encoding == AWDL_CHAN_ENC_SIMPLE) {
             s->chan[i] = (struct awdl_chan){e[0], awdl_opclass_20mhz(e[0])};
-        else if (s->encoding == AWDL_CHAN_ENC_LEGACY)  // {flags, channel}
+        } else if (s->encoding == AWDL_CHAN_ENC_LEGACY) {  // {flags, channel}
             s->chan[i] = (struct awdl_chan){e[1], awdl_opclass_20mhz(e[1])};
-        else
+        } else {
             s->chan[i] = (struct awdl_chan){e[0], e[1]};
+        }
     }
     return (int)(6 + count * width);
 }
@@ -167,7 +188,6 @@ static void parse_dps(const uint8_t *v, size_t n, struct awdl_data_path_state *d
     if (d->flags & AWDL_DPS_AWDL_ADDRESS) {
         NEED(6);
         memcpy(d->awdl_address, v + at, 6);
-        at += 6;
     }
 #undef NEED
 }
@@ -175,7 +195,8 @@ static void parse_dps(const uint8_t *v, size_t n, struct awdl_data_path_state *d
 // Arpa: flags, then the host name as DNS labels; a 0xc0 compression byte ends it (AWDL compresses ".local").
 static void parse_arpa(const uint8_t *v, size_t n, char *out, size_t size)
 {
-    size_t at = 1, w = 0;
+    size_t at = 1;
+    size_t w = 0;
     out[0] = 0;
     while (at < n && v[at] && v[at] < 0xc0) {
         const size_t l = v[at++];
@@ -301,7 +322,7 @@ void awdl_put16(uint8_t *p, uint16_t v)
 
 void awdl_put32(uint8_t *p, uint32_t v)
 {
-    for (int i = 0; i < 4; ++i)
+    for (unsigned i = 0; i < 4; ++i)
         p[i] = (uint8_t)(v >> (8 * i));
 }
 
@@ -372,7 +393,8 @@ size_t awdl_data_encap(const uint8_t *eth, size_t len, const uint8_t self[6], ui
 {
     if (len < 14)
         return 0;
-    const size_t payload = len - 14, total = 24 + 8 + 8 + payload;
+    const size_t payload = len - 14;
+    const size_t total = 24 + 8 + 8 + payload;
     if (total > size)
         return 0;
     memset(out, 0, 24);
@@ -380,7 +402,7 @@ size_t awdl_data_encap(const uint8_t *eth, size_t len, const uint8_t self[6], ui
     memcpy(out + 4, eth, 6);    // A1: destination
     memcpy(out + 10, self, 6);  // A2: us
     memcpy(out + 16, awdl_bssid, 6);
-    awdl_put16(out + 22, (uint16_t)((seq & 0xfff) << 4));
+    awdl_put16(out + 22, (uint16_t)((seq & 0xfffu) << 4));
     memcpy(out + 24, kLlc, 8);
     out[32] = 0x03;  // AWDL data header: 0x0403, sequence, reserved, ethertype (network order)
     out[33] = 0x04;
@@ -392,35 +414,75 @@ size_t awdl_data_encap(const uint8_t *eth, size_t len, const uint8_t self[6], ui
     return total;
 }
 
-size_t awdl_data_decap(const uint8_t *f, size_t len, uint8_t *out, size_t size, uint16_t *seq, int *retry)
+// One MSDU's LLC/SNAP and AWDL data header (03 04, le16 sequence, 2 reserved, be16 ethertype), then its payload.
+static int msdu_at(const uint8_t *p, size_t n, const uint8_t *dst, const uint8_t *src, struct awdl_msdu *m,
+                   uint16_t *seq)
 {
-    if (len < 24 || (f[0] & 0x0c) != 0x08)
-        return 0;  // not data
-    if (f[1] & 0x03)
-        return 0;  // ToDS/FromDS must be clear
-    if (memcmp(f + 16, awdl_bssid, 6))
+    if (n < 16 || memcmp(p, kLlc, 8) || p[8] != 0x03 || p[9] != 0x04)
         return 0;
+    m->dst = dst;
+    m->src = src;
+    m->ethertype = (uint16_t)(((unsigned)p[14] << 8) | p[15]);
+    m->payload = p + 16;
+    m->len = n - 16;
+    if (seq)
+        *seq = rd16(p + 10);
+    return 1;
+}
+
+size_t awdl_data_msdus(const uint8_t *f, size_t len, struct awdl_msdu *out, size_t max, uint16_t *seq, int *retry)
+{
+    if (len < 24 || (f[0] & 0x0c) != 0x08 || (f[1] & 0x03) || memcmp(f + 16, awdl_bssid, 6) || !max)
+        return 0;  // not data, a DS bit set, or not the AWDL BSS
+    if ((f[0] & 0x40) == 0x40)
+        return 0;  // a null subtype carries no payload
     size_t at = 24;
-    if (f[0] & 0x80) {  // QoS data: QoS control, then HT control if the order bit is set
+    int amsdu = 0;
+    if (f[0] & 0x80) {  // QoS data: QoS control (bit 7: A-MSDU present), then HT control if the order bit is set
+        if (at + 2 > len)
+            return 0;
+        amsdu = (f[at] & 0x80) != 0;
         at += 2;
         if (f[1] & 0x80)
             at += 4;
     }
-    if ((f[0] & 0x70) == 0x40)
-        return 0;  // null data carries no payload
-    if (at + 16 > len || memcmp(f + at, kLlc, 8) || f[at + 8] != 0x03 || f[at + 9] != 0x04)
+    if (at > len)
         return 0;
-    const size_t payload = len - at - 16;
-    if (14 + payload > size)
-        return 0;
-    memcpy(out, f + 4, 6);
-    memcpy(out + 6, f + 10, 6);
-    out[12] = f[at + 14];
-    out[13] = f[at + 15];
-    memcpy(out + 14, f + at + 16, payload);
-    if (seq)
-        *seq = rd16(f + at + 10);
     if (retry)
         *retry = (f[1] & 0x08) != 0;
-    return 14 + payload;
+    if (!amsdu)
+        return (size_t)msdu_at(f + at, len - at, f + 4, f + 10, out, seq);
+    // A-MSDU (Apple aggregates AWDL data): subframes of DA, SA, be16 length and the MSDU, each padded to 4 bytes.
+    size_t n = 0;
+    while (at + 14 <= len && n < max) {
+        const size_t l = ((size_t)f[at + 12] << 8) | f[at + 13];
+        if (at + 14 + l > len)
+            return 0;
+        if (!msdu_at(f + at + 14, l, f + at, f + at + 6, &out[n], n ? NULL : seq))
+            return 0;
+        ++n;
+        at += 14 + l;
+        at += (4 - (14 + l) % 4) % 4;
+    }
+    return n;
+}
+
+size_t awdl_data_decap(const uint8_t *f, size_t len, uint8_t *out, size_t size, uint16_t *seq, int *retry)
+{
+    struct awdl_msdu m;
+    if (awdl_data_msdus(f, len, &m, 1, seq, retry) != 1)
+        return 0;
+    return awdl_msdu_ether(&m, out, size);
+}
+
+size_t awdl_msdu_ether(const struct awdl_msdu *m, uint8_t *out, size_t size)
+{
+    if (14 + m->len > size)
+        return 0;
+    memcpy(out, m->dst, 6);
+    memcpy(out + 6, m->src, 6);
+    out[12] = (uint8_t)(m->ethertype >> 8);
+    out[13] = (uint8_t)m->ethertype;
+    memcpy(out + 14, m->payload, m->len);
+    return 14 + m->len;
 }

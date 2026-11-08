@@ -1,61 +1,59 @@
 // SPDX-License-Identifier: MIT
-// A render state's raw record read off NVK's own emission, in process: the pack generator's technique (pack/rawpack.py) run on
-// one command buffer NVK recorded with one draw of the state, decoded on the CPU by pack/nvdec (Mesa's MME simulator for NVK's
-// macros) and never submitted. The decoder starts from NVK's context as the pack holds it (PackInit: NVK's queue init of this
-// build, its MME macros among it), with the addresses of the live NVK set over it (set()).
+// A render state's draws read off NVK's own emission, in process: the commands NVK recorded for one command buffer, never
+// submitted, decoded on the CPU by pack/nvdec (Mesa's MME simulator for NVK's macros) as the pack generator decodes its probe's.
+// Each command buffer is decoded from NVK's context as the pack holds it (PackInit: NVK's queue init of this build, its MME
+// macros among it) with this process's addresses where the pack marks them: what NVK assumes at a command buffer's start.
 #pragma once
 #include <cstdint>
+#include <cstdio>
 #include <functional>
+#include <map>
 #include <memory>
 #include <string>
 #include <utility>
 #include <vector>
+#include "../pack/probe_record.h"
 
 namespace nvdec {
 class Decoder;
-}
+struct ProgramInfo;
+}  // namespace nvdec
 
 namespace raw {
 
 class Pack;
+struct InitAddresses;
 
 struct CapturedProgram {
-    std::string id;  // nvdec's name: the FNV-1a of its bytes where known, "unknown:..." else
+    std::string id;  // nvdec's name: the FNV-1a of its header, code and data
     // header + code, NAK's shader data, each constant buffer's nvk_cbuf_type
     std::vector<uint8_t> image, data, cbufTypes;
 };
 
-struct CapturedState {
-    // The 3D methods the draw leaves other than the context did after its init, the raw path's own (raw_owned.h) left out
-    std::vector<std::pair<uint32_t, uint32_t>> registers;
-    CapturedProgram vertex, pixel;
-    uint32_t pushMask = 0, push[32] = {};  // the root-table words [0x700, 0x780) the command buffer wrote
-};
-
 class Capture {
 public:
-    // `map`: [va, va + bytes) of the recording driver's GPU VM as its CPU left it, or null
-    explicit Capture(std::function<const uint8_t *(uint64_t va, uint64_t bytes)> map);
+    // [va, va + bytes) of the recording driver's GPU VM as its CPU left it, or null
+    using Map = std::function<const uint8_t *(uint64_t va, uint64_t bytes)>;
+    // The program a draw binds at SET_PIPELINE_PROGRAM offset `offset`, as the recording driver uploaded it; false: none
+    using ProgramAt = std::function<bool(uint32_t offset, nvdec::ProgramInfo &out)>;
+
+    Capture(Map map, ProgramAt programAt);
     ~Capture();
 
-    bool prime(const Pack &pack, std::string &err);
-    // A method of the live driver's context the pack's init holds another value for (its own addresses)
-    void set(uint32_t subc, uint32_t mthd, uint32_t value);
-
-    // The programs a capture can name (their bytes, data and constant buffer types: NVK's records)
-    nvdec::Decoder &decoder()
-    {
-        return *decoder_;
-    }
-
-    // One command buffer's push segments, in order: a record per draw
-    std::vector<CapturedState> decode(const std::vector<std::pair<const uint32_t *, uint64_t>> &segments);
+    bool prime(const Pack &pack, const InitAddresses &here, std::string &err);
+    // One command buffer's push segments, in order
+    nvdec::ProbeSubmission decode(const std::vector<std::pair<const uint32_t *, uint64_t>> &segments);
+    // The 3D registers the context leaves that are not 0
+    std::map<uint32_t, uint32_t> context() const;
+    // A program a decoded draw bound, by its id; null: none
+    const CapturedProgram *program(const std::string &id);
 
 private:
-    std::unique_ptr<nvdec::Decoder> decoder_;
-    std::vector<uint32_t> context_;  // the 3D registers after prime()
-    std::vector<CapturedState> drawn_;
-    void record(nvdec::Decoder &d);
+    Map map_;
+    ProgramAt programAt_;
+    FILE *sink_;  // the decoder's canonical records, which nothing reads
+    std::unique_ptr<nvdec::Decoder> primed_;
+    std::map<std::string, CapturedProgram> programs_;
 };
 
 }  // namespace raw

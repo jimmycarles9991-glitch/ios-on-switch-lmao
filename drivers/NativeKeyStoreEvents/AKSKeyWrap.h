@@ -60,7 +60,8 @@ inline bool wrap(const Primitives &p, const uint8_t *key, size_t keyLength, uint
     if (!wrapLengthValid(keyLength))
         return false;
     const size_t n = keyLength / kBlock;
-    uint8_t a[8], b[16];
+    uint8_t a[8];
+    uint8_t b[16];
     for (size_t i = 0; i < 8; ++i)
         a[i] = kDefaultIV[i];
     for (size_t i = 0; i < keyLength; ++i)
@@ -92,7 +93,8 @@ inline bool unwrap(const Primitives &p, const uint8_t *wrapped, size_t wrappedLe
     if (!unwrappedLengthValid(wrappedLength))
         return false;
     const size_t n = wrappedLength / kBlock - 1;
-    uint8_t a[8], b[16];
+    uint8_t a[8];
+    uint8_t b[16];
     for (size_t k = 0; k < 8; ++k)
         a[k] = wrapped[k];
     for (size_t i = 0; i < n * kBlock; ++i)
@@ -127,9 +129,10 @@ inline bool unwrap(const Primitives &p, const uint8_t *wrapped, size_t wrappedLe
 inline void hmacSha256(Sha256Parts sha256, const uint8_t *key, size_t keyLength, const void *const *parts,
                        const size_t *lengths, size_t count, uint8_t mac[32])
 {
-    uint8_t pad[64], inner[32];
+    uint8_t pad[64];
+    uint8_t inner[32];
     for (size_t i = 0; i < 64; ++i)
-        pad[i] = static_cast<uint8_t>((i < keyLength ? key[i] : 0) ^ 0x36);
+        pad[i] = static_cast<uint8_t>((i < keyLength ? key[i] : 0u) ^ 0x36u);
     const void *innerParts[1 + 8];
     size_t innerLengths[1 + 8];
     innerParts[0] = pad;
@@ -140,7 +143,7 @@ inline void hmacSha256(Sha256Parts sha256, const uint8_t *key, size_t keyLength,
     }
     sha256(innerParts, innerLengths, 1 + (count < 8 ? count : 8), inner);
     for (size_t i = 0; i < 64; ++i)
-        pad[i] = static_cast<uint8_t>((i < keyLength ? key[i] : 0) ^ 0x5c);
+        pad[i] = static_cast<uint8_t>((i < keyLength ? key[i] : 0u) ^ 0x5cu);
     const void *outerParts[2] = {pad, inner};
     const size_t outerLengths[2] = {sizeof pad, sizeof inner};
     sha256(outerParts, outerLengths, 2, mac);

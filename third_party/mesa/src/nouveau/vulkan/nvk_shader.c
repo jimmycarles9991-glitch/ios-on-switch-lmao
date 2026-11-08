@@ -7,6 +7,7 @@
  * SPDX-License-Identifier: MIT
  */
 #include "nvk_shader.h"
+#include "nvk_switch_capture.h"
 
 #include "nvk_cmd_buffer.h"
 #include "nvk_descriptor_set_layout.h"
@@ -744,6 +745,7 @@ nvk_shader_upload(struct nvk_device *dev, struct nvk_shader *shader)
       }
       shader->gs_hdr_addr = shader->upload_addr + gs_hdr_offset;
       shader->data_addr = shader->upload_addr + data_offset;
+      switch_nvk_program_uploaded(dev, shader);
    }
    free(data);
 
@@ -1138,6 +1140,7 @@ nvk_shader_destroy(struct vk_device *vk_dev,
    vk_free2(&dev->vk.alloc, pAllocator, shader->push_dw);
 
    if (shader->upload_size > 0) {
+      switch_nvk_program_freed(dev, shader);
       nvk_heap_free(dev, &dev->shader_heap,
                     shader->upload_addr,
                     shader->upload_size);

@@ -20,7 +20,14 @@
 //! not hold, keys or entries out of order or repeated) are not an archive. Nothing is allocated
 //! for a count before the bytes it counts are there.
 //!
-//! A file is read whole, and written through a temporary file beside it and a rename, so a
+//! A metallib is an archive too, holding nothing for this device: thin (`MTLB`), or universal (a
+//! big-endian fat file of AIR64 slices that are one and binaries for Apple's GPUs), as Apple's
+//! frameworks ship theirs and QuartzCore and CoreUI open them as their archives. Metal loads such
+//! a file on a GPU it holds no binary for with a count of 0, and every lookup misses (measured on
+//! an M4: iOS 17's QuartzCore file, AIR64 and applegpu_g9g, either slice alone, and a thin AIR
+//! metallib). Only its header, slice table and each AIR64 slice's magic are read.
+//!
+//! An archive's file is read whole, and written through a temporary file beside it and a rename, so a
 //! reader never sees part of one. The errors are Metal's (measured on an M3 Max and an M4): a
 //! file that is missing or not an archive, or a missing directory to write into, is
 //! `InvalidFile`; any other failure to write (a directory at the path, for one) is `Write`.
@@ -30,12 +37,18 @@ use crate::shader_cache::EntryKind;
 use metal2vulkan::cache::Hash256;
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
-use std::io::Write as _;
+use std::io::{Read, Seek, SeekFrom, Write as _};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 const MAGIC: &[u8; 8] = b"M2VBARCH";
 const VERSION: u32 = 1;
+const METALLIB_MAGIC: [u8; 4] = *b"MTLB";
+const UNIVERSAL_MAGIC: u32 = 0xcafe_babe;
+const AIR64_CPU_TYPE: u32 = 0x0100_0017;
+const APPLE_GPU_CPU_TYPE: u32 = 0x0100_0013;
+const UNIVERSAL_SLICE_LEN: usize = 20;
+const UNIVERSAL_SLICES_MAX: usize = 64;
 const KINDS: [EntryKind; 3] = [
     EntryKind::Function,
     EntryKind::ComputePipeline,
@@ -181,10 +194,59 @@ impl<'a> Reader<'a> {
 
 /// The archive in the file `path`.
 pub(crate) fn read(path: &Path) -> Result<Contents, Error> {
-    std::fs::read(path)
+    std::fs::File::open(path)
         .ok()
-        .and_then(|bytes| decode(&bytes))
+        .and_then(read_file)
         .ok_or_else(|| invalid_file(path))
+}
+
+fn read_file(mut file: std::fs::File) -> Option<Contents> {
+    let mut head = [0u8; 8];
+    file.read_exact(&mut head).ok()?;
+    if head == *MAGIC {
+        let mut bytes = head.to_vec();
+        file.read_to_end(&mut bytes).ok()?;
+        return decode(&bytes);
+    }
+    is_metallib(&mut file, head).then(Contents::default)
+}
+
+/// Whether the file whose first eight bytes are `head` is a metallib, thin or universal.
+fn is_metallib(file: &mut std::fs::File, head: [u8; 8]) -> bool {
+    if head[..4] == METALLIB_MAGIC {
+        return true;
+    }
+    let word = |bytes: &[u8], at: usize| {
+        u32::from_be_bytes([bytes[at], bytes[at + 1], bytes[at + 2], bytes[at + 3]])
+    };
+    if word(&head, 0) != UNIVERSAL_MAGIC {
+        return false;
+    }
+    let count = word(&head, 4) as usize;
+    if count == 0 || count > UNIVERSAL_SLICES_MAX {
+        return false;
+    }
+    let mut table = vec![0u8; count * UNIVERSAL_SLICE_LEN];
+    let Ok(length) = file.metadata().map(|m| m.len()) else {
+        return false;
+    };
+    if file.read_exact(&mut table).is_err() {
+        return false;
+    }
+    table.chunks_exact(UNIVERSAL_SLICE_LEN).all(|slice| {
+        let (offset, size) = (u64::from(word(slice, 8)), u64::from(word(slice, 12)));
+        let mut magic = [0u8; 4];
+        offset + size <= length
+            && match word(slice, 0) {
+                APPLE_GPU_CPU_TYPE => true,
+                AIR64_CPU_TYPE => {
+                    file.seek(SeekFrom::Start(offset)).is_ok()
+                        && file.read_exact(&mut magic).is_ok()
+                        && magic == METALLIB_MAGIC
+                }
+                _ => false,
+            }
+    })
 }
 
 /// Write `bytes`, an archive's encoding, to the file `url`, replacing what is there.

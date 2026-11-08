@@ -7,10 +7,9 @@
 #include <IOKit/IOLib.h>
 #include <IOKit/IOLocks.h>
 #include "../../kits/SwitchCAR/SwitchUPHY.h"
+#include "../../kits/SwitchMMIO/SwitchMMIOKernel.h"
 #include "XusbLanes.h"
 #include "XusbSuperSpeed.h"
-
-extern "C" vm_offset_t ml_io_map(vm_offset_t phys_addr, vm_size_t size);
 
 namespace {
 constexpr uint64_t kPadctlPA = 0x7009F000;
@@ -21,17 +20,17 @@ bool gUp;  // under gLock; read without it for switch_usb_ss_up
 
 uint32_t r(uint32_t offset)
 {
-    return *reinterpret_cast<volatile uint32_t *>(gPadctl + offset);
+    return switch_mmio_read32(gPadctl, offset);
 }
 
 void w(uint32_t offset, uint32_t value)
 {
-    *reinterpret_cast<volatile uint32_t *>(gPadctl + offset) = value;
+    switch_mmio_write32(gPadctl, offset, value);
 }
 
 bool pllLocked()
 {
-    return r(XUSB_PADCTL_UPHY_PLL_P0_CTL1) & XUSB_UPHY_PLL_LOCKDET;
+    return (r(XUSB_PADCTL_UPHY_PLL_P0_CTL1) & XUSB_UPHY_PLL_LOCKDET) != 0u;
 }
 
 void runSteps(const xusb_elpg_step *steps)
@@ -46,9 +45,8 @@ void runSteps(const xusb_elpg_step *steps)
 // Lock held, lane clamped.
 void laneUp()
 {
-    for (uint32_t i = 0; i < XUSB_B01_USB3_LANE_WRITES; ++i)
-        w(XUSB_PADCTL_UPHY_MISC_CTL8(XUSB_SS_LANE),
-          xusb_uphy_cfg(xusb_b01_usb3_lane_data[i][0], xusb_b01_usb3_lane_data[i][1]));
+    for (const auto &write : xusb_b01_usb3_lane_data)
+        w(XUSB_PADCTL_UPHY_MISC_CTL8(XUSB_SS_LANE), xusb_uphy_cfg(write[0], write[1]));
     w(XUSB_PADCTL_USB3_PAD_MUX, xusb_pad_mux_ss(r(XUSB_PADCTL_USB3_PAD_MUX)));
     w(XUSB_PADCTL_SS_PORT_MAP, xusb_ss_port_map(r(XUSB_PADCTL_SS_PORT_MAP)));
     w(XUSB_PADCTL_USB3_ECTL(XUSB_SS_PORT, 1), xusb_ectl1(r(XUSB_PADCTL_USB3_ECTL(XUSB_SS_PORT, 1))));
@@ -63,10 +61,10 @@ void laneUp()
 bool switch_usb_ss_init(void)
 {
     if (!gPadctl)
-        gPadctl = reinterpret_cast<volatile uint8_t *>(ml_io_map(kPadctlPA, 0x1000));
+        gPadctl = switch_mmio_map(kPadctlPA, 0x1000);
     if (!gLock)
         gLock = IOLockAlloc();
-    return gPadctl && gLock;
+    return (gPadctl != nullptr) && (gLock != nullptr);
 }
 
 // The UPHY announcement is read under the lock: PCIe sets it to "not ready" before its clamp takes the lock, so a lane
@@ -123,10 +121,10 @@ void switch_usb_ss_describe(char *buffer, size_t size)
     // The PLL's lock bit only once PCIe has calibrated it: until then the UPHY may still be held in reset.
     const uint32_t elpg = r(XUSB_PADCTL_ELPG_PROGRAM_1);
     const bool ready = switch_uphy_ready();
+    const char *pll = "not calibrated by PCIe yet";
+    if (ready)
+        pll = pllLocked() ? "calibrated, locked" : "calibrated, not locked";
     snprintf(buffer, size, "SS lane %s (USB3_PAD_MUX %#x SS_PORT_MAP %#x ELPG_1 %#x%s, UPHY PLL %s)",
              switch_usb_ss_up() ? "up" : "down", r(XUSB_PADCTL_USB3_PAD_MUX), r(XUSB_PADCTL_SS_PORT_MAP), elpg,
-             xusb_ss_clamped(elpg) ? " clamped" : "",
-             !ready        ? "not calibrated by PCIe yet"
-             : pllLocked() ? "calibrated, locked"
-                           : "calibrated, not locked");
+             xusb_ss_clamped(elpg) ? " clamped" : "", pll);
 }

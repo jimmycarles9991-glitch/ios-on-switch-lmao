@@ -186,6 +186,60 @@ fn a_file_that_is_missing_or_not_an_archive_is_an_invalid_file() {
     }
 }
 
+/// A universal file of `slices` (CPU type, bytes), laid out as Apple's frameworks' metallibs are.
+fn universal(slices: &[(u32, &[u8])]) -> Vec<u8> {
+    let mut out = 0xcafe_babe_u32.to_be_bytes().to_vec();
+    out.extend_from_slice(&(slices.len() as u32).to_be_bytes());
+    let mut at = 8 + 20 * slices.len();
+    for (cpu, bytes) in slices {
+        for word in [*cpu, 0, at as u32, bytes.len() as u32, 0] {
+            out.extend_from_slice(&word.to_be_bytes());
+        }
+        at += bytes.len();
+    }
+    for (_, bytes) in slices {
+        out.extend_from_slice(bytes);
+    }
+    out
+}
+
+#[test]
+fn a_metallib_is_an_archive_holding_nothing_for_this_device() {
+    let scratch = Scratch::new();
+    let dir = scratch.path();
+    let air = b"MTLB\x01\x80\x02\x00 the AIR64 library".as_slice();
+    let gpu = [0xCF, 0xFA, 0xED, 0xFE, 0x13, 0, 0, 1].as_slice();
+    fs::write(dir.join("thin"), air).unwrap();
+    fs::write(
+        dir.join("universal"),
+        universal(&[(0x0100_0017, air), (0x0100_0013, gpu)]),
+    )
+    .unwrap();
+    fs::write(
+        dir.join("gpu-first"),
+        universal(&[(0x0100_0013, gpu), (0x0100_0017, air)]),
+    )
+    .unwrap();
+    fs::write(dir.join("gpu-only"), universal(&[(0x0100_0013, gpu)])).unwrap();
+    for name in ["thin", "universal", "gpu-first", "gpu-only"] {
+        assert_eq!(
+            container::read(&dir.join(name)),
+            Ok(Contents::default()),
+            "{name}"
+        );
+    }
+    let mut cut = universal(&[(0x0100_0017, air)]);
+    cut.truncate(cut.len() - 4);
+    fs::write(dir.join("arm64"), universal(&[(0x0100_000c, gpu)])).unwrap();
+    fs::write(dir.join("air-not-mtlb"), universal(&[(0x0100_0017, gpu)])).unwrap();
+    fs::write(dir.join("cut"), cut).unwrap();
+    fs::write(dir.join("no-slices"), universal(&[])).unwrap();
+    for name in ["arm64", "air-not-mtlb", "cut", "no-slices"] {
+        let path = dir.join(name);
+        assert_eq!(container::read(&path), Err(invalid_file(&path)), "{name}");
+    }
+}
+
 #[test]
 fn writing_replaces_the_file_whole_and_leaves_nothing_else() {
     let scratch = Scratch::new();

@@ -47,7 +47,7 @@ uint32_t native_aks_lock_state(void)
 }
 
 #if DEVELOPMENT || DEBUG
-static void aks_publish(void)
+static void aks_publish()
 {
     // Slot 0: counters; slot 1: selector:count tokens ('e' = the last answer was an error). Slots 2-3 belong to the Data store.
     char row[48];
@@ -57,7 +57,7 @@ static void aks_publish(void)
         if (!aks_count[sel])
             continue;
         char token[16];
-        int n = snprintf(token, sizeof token, "%u:%u%s ", sel, aks_count[sel], aks_rc[sel] ? "e" : "");
+        const int n = snprintf(token, sizeof token, "%u:%u%s ", sel, aks_count[sel], aks_rc[sel] ? "e" : "");
         if (n <= 0 || used + (unsigned)n > 46)
             break;
         memcpy(row + used, token, (size_t)n + 1);
@@ -99,7 +99,7 @@ void native_aks_call(uint32_t, int32_t)
 {}
 #endif
 
-static void native_keyevents_probe(void)
+static void native_keyevents_probe()
 {
     if (native_keyevents_stage)
         return;
@@ -107,7 +107,7 @@ static void native_keyevents_probe(void)
     native_keyevents_status = kIOReturnNotPermitted;
     // No SEP: stand in for AppleKeyStore whether or not Data is ephemeral.
     const OSSymbol *name = OSSymbol::withCString("AppleKeyStore");
-    bool absent = name && !OSMetaClass::getMetaClassWithName(name);
+    const bool absent = (name != nullptr) && (OSMetaClass::getMetaClassWithName(name) == nullptr);
     OSSafeReleaseNULL(name);
     if (!absent)
         return;
@@ -123,9 +123,9 @@ static void native_keyevents_probe(void)
         return;
     native_keyevents_stage = 2;
     IOService *service = native_keyevents_allocate();
-    bool initialized = service && service->init();
-    bool attached = initialized && service->attach(provider);
-    bool started = attached && service->start(provider);
+    const bool initialized = (service != nullptr) && service->init();
+    const bool attached = initialized && service->attach(provider);
+    const bool started = attached && service->start(provider);
     if (!started) {
         if (attached)
             service->detach(provider);

@@ -12,6 +12,7 @@ import subprocess
 import sys
 from collections.abc import Iterable, Iterator
 
+from tools.devicerun import raw_stats
 from tools.devicerun.checks import FRAME_PREFIX, GROUPS
 from tools.devicerun.morning import CHECKLIST
 from tools.devicerun.reports import crash_rows, frame_rows
@@ -118,6 +119,11 @@ def selected(label: str | None) -> dict[str, list[Check]]:
     return {name: [c for c in group if not label or c.boot in {'', label}] for name, group in GROUPS.items()}
 
 
+def all_checks(label: str | None) -> list[Check]:
+    """Return the selected groups' checks and the summaries' own (rows of their own, not one per check)."""
+    return [c for group in selected(label).values() for c in group] + [raw_stats.CHECK]
+
+
 def checklist(label: str | None) -> str:
     steps = CHECKLIST[''] + (CHECKLIST.get(label, []) if label else [])
     return '\n'.join([f'Boot {label or "(no label)"}: manual steps before pulling the logs', *steps, ''])
@@ -127,10 +133,10 @@ def evaluate_all(
     records: Iterable[dict], crashes: str | None, label: str | None = None
 ) -> list[tuple[str, list[Result]]]:
     groups_in = selected(label)
-    checks = [c for group in groups_in.values() for c in group]
-    results, frame_lines = run_checks(records, checks)
+    results, frame_lines = run_checks(records, all_checks(label))
     by_check = {r.check.name: r for r in results}
     groups = [(name, [by_check[c.name] for c in group]) for name, group in groups_in.items()]
+    groups.append(('raw', raw_stats.rows(by_check[raw_stats.CHECK.name])))
     groups.append(('frames', frame_rows(frame_lines)))
     groups.append(('crashes', crash_rows(crashes)))
     return groups
@@ -148,7 +154,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument('--ndjson', action='store_true', help='the input is `log show --style ndjson` output')
     parser.add_argument('--predicate', action='store_true', help='print the log show predicate and exit')
     args = parser.parse_args(argv)
-    checks = [c for group in selected(args.boot_label).values() for c in group]
+    checks = all_checks(args.boot_label)
     if args.predicate:
         print(predicate(checks))
         return 0

@@ -5972,30 +5972,14 @@ native_switch_overlay_image(const struct image_params *imgp)
 
 /*
  * Switch: the two read-only Apple cryptex mounts (SwitchRawMount.h native_switch_raw_cache_prepare mounts the
- * original System and App cryptex APFS volumes at /private/preboot/Cryptexes/{OS,App}). Real iOS grafts these onto the
- * preboot volume (libignition), so their executables are "on an authorized cryptex / system volume" and meet the self
- * launch constraint every launchd system service and BrowserEngineKit web process requires (21H461 AMFI:
- * on-system-volume or on-authorized-authapfs-volume, launch-type 1, validation-category 1). We attach and mount them
- * instead of grafting, so that fact is otherwise absent and WebKit's BEWebContentProcess/BENetworkingProcess/
- * BERenderingProcess and the App-cryptex daemons (webbookmarksd, SafariBookmarksSyncAgent, Safari.History) die with a
- * Launch Constraint Violation before launch. Supply the graft's answer for vnodes on exactly these two mounts, by the
- * mount_t the kernel recorded when it mounted them (never a path string). This changes only the launch-constraint
- * decision: code-signing, cdhash and trust-cache enforcement are unchanged and happen during image activation, so a
- * binary on these mounts still has to match Apple's static trust cache exactly and nothing on Data gains anything.
+ * System and App cryptex APFS volumes at /private/preboot/Cryptexes/{OS,App} where iOS grafts them). Recorded by
+ * mount_t, never by path: VNOP_IOCTL answers FSIOC_AUTH_FS for their files as APFS does for a graft's
+ * (kernel/switch/vfs/auth_fs.c), which AMFI's launch constraints read as on-authorized-authapfs-volume.
  */
 mount_t native_owner_cryptex_mount[2] = {NULL, NULL};
 /* The Preboot mount the two cryptexes stand in a graft on (vfs_syscalls.c getfsstat64_callback reports its mount point
  * for them, as a graft's files would; their own f_mntonname is unchanged). */
 mount_t native_owner_cryptex_host = NULL;
-static bool
-native_switch_cryptex_image(const struct image_params *imgp)
-{
-	mount_t mp = imgp->ip_vp ? vnode_mount(imgp->ip_vp) : NULL;
-	if (!mp || !(vfs_flags(mp) & MNT_RDONLY)) return false;
-	for (unsigned i = 0; i < 2; ++i)
-		if (native_owner_cryptex_mount[i] && mp == native_owner_cryptex_mount[i]) return true;
-	return false;
-}
 
 /*
  * exec_extract_strings
@@ -8178,16 +8162,16 @@ native_switch_gamut_cache(proc_t p, user_addr_t scratch, mount_t data_mount)
 }
 
 /* MobileGestalt answers what it reads of /product (GraphicsFeatureSetClass and its fallbacks, the memory class, the
- * artwork traits), of /arm-io (soc-generation, which gates its codec answers) and of the root (platform-name, its
- * HardwarePlatform) from the same build-keyed cache, so an answer made before a package changed one of them outlives the
- * change. A digest of the three nodes' own properties is kept in a marker, and the cache is dropped once whenever it
- * differs. Failures are logged only; the next boot tries again. */
+ * artwork traits), of /product/audio (acoustic-id, its AcousticID), of /arm-io (soc-generation, which gates its codec
+ * answers) and of the root (platform-name, its HardwarePlatform) from the same build-keyed cache, so an answer made
+ * before a package changed one of them outlives the change. A digest of the four nodes' own properties is kept in a
+ * marker, and the cache is dropped once whenever it differs. Failures are logged only; the next boot tries again. */
 static void
 native_switch_identity_cache(proc_t p, user_addr_t scratch, mount_t data_mount)
 {
 	static const char cache[] = "/private/var/containers/Shared/SystemGroup/systemgroup.com.apple.mobilegestaltcache/"
 	    "Library/Caches/com.apple.MobileGestalt.plist", marker[] = "/private/var/Switch/mobilegestalt-identity";
-	static const char *const nodes[] = {"/", "/product", "/arm-io"};
+	static const char *const nodes[] = {"/", "/product", "/product/audio", "/arm-io"};
 	uint64_t digest = 0xcbf29ce484222325ULL;
 	for (unsigned int n = 0; n < sizeof(nodes) / sizeof(nodes[0]); ++n) {
 		DTEntry node;
@@ -8249,6 +8233,54 @@ native_switch_als_cache(proc_t p, user_addr_t scratch, mount_t data_mount)
 		if (!error) error = native_switch_watchdog_file(p, scratch, marker, "", 0, data_mount, 0, 0, 0644);
 	}
 	printf("SwitchRawBoot: ambient light sensor %s: MobileGestalt cache dropped (%d)\n", als ? "on" : "off", error);
+}
+
+/* timed keeps kern.monotonicclock with the UTC it last trusted (/var/db/timed/com.apple.timed.plist) and, while the clock
+ * reads above that, extrapolates from it. Kernels before SwitchMonotonicBase.h counted the clock from the SoC's power-up;
+ * this one counts seconds since 2000 by the MAX77620, so a pair an older kernel's boot cached would put the time decades
+ * ahead. The marker holds the boot session UUID of the last boot under this clock, and timed saves its own boot's UUID
+ * (BootUUID, NSUUID's upper-case string) with the pair: a cache without the marker's UUID was written by another kernel,
+ * or by none since, and is dropped before timed starts. A cache timed did not save in the last boot is dropped too,
+ * which is no worse than a cold boot. Failures are logged only. */
+static int
+native_switch_bytes_hold(const char *bytes, int length, const char *needle, int size)
+{
+	for (int at = 0; at + size <= length; ++at) {
+		if (!memcmp(bytes + at, needle, (size_t)size)) return 1;
+	}
+	return 0;
+}
+
+static void
+native_switch_timed_cache(proc_t p, user_addr_t scratch, mount_t data_mount)
+{
+	static const char cache[] = "/private/var/db/timed/com.apple.timed.plist",
+	    marker[] = "/private/var/Switch/monotonic-clock-boot";
+	const int uuid_length = (int)strlen(bootsessionuuid_string);
+	char *last = NULL, *cached = NULL;
+	int last_length = 0, cached_length = 0, keep = 0;
+	if (!native_switch_read_data_file(p, marker, data_mount, &last, &last_length) && last && last_length == uuid_length &&
+	    !native_switch_read_data_file(p, cache, data_mount, &cached, &cached_length) && cached) {
+		keep = native_switch_bytes_hold(cached, cached_length, last, last_length);
+	}
+	if (last) kfree_data(last, (vm_size_t)last_length);
+	if (cached) kfree_data(cached, (vm_size_t)cached_length);
+	int error = 0;
+	if (!keep) {
+		struct unlink_args request = {.path = scratch + 0x900};
+		int32_t result = 0;
+		error = copyout(cache, request.path, sizeof(cache));
+		if (!error) error = native_switch_unlink(p, &request, &result);
+		if (error == ENOENT) error = 0;
+	}
+	if (!error) error = native_switch_mkdir(p, scratch, "/private/var/Switch", 0, 0755);
+	if (!error) {
+		error = native_switch_watchdog_file(p, scratch, marker, bootsessionuuid_string, uuid_length, data_mount, 0, 0,
+		    0644);
+	}
+	if (!keep || error) {
+		printf("SwitchRawBoot: timed's cache %s (%d)\n", keep ? "kept" : "dropped, not saved in this clock's last boot", error);
+	}
 }
 
 extern const struct switch_ui_scale *switch_ui_scale(void);
@@ -8410,9 +8442,9 @@ native_switch_setup_state(proc_t p, user_addr_t scratch, mount_t data_mount)
 		{"com.apple.UIKit", SWITCH_PLIST("<key>UIPreferredContentSizeCategoryName</key>"
 		    "<string>UICTContentSizeCategoryXXL</string>"), kSetupOnce, kSetupUnitScale}, /* the user's Text Size then sticks */
 		/* Seeded once: DataMigrator keeps its results and its hang-reboot count in this domain. */
-		{"com.apple.migration", SWITCH_PLIST("<key>LastSystemVersion</key><string>21H461</string>"
+		{"com.apple.migration", SWITCH_PLIST("<key>LastSystemVersion</key><string>" SWITCH_IPSW_BUILD "</string>"
 		    "<key>DMUserDataDisposition</key><dict><key>SyntheticDidUpgrade</key><false/>"
-		    "<key>buildVersion</key><string>21H461</string></dict>"), kSetupOnce},
+		    "<key>buildVersion</key><string>" SWITCH_IPSW_BUILD "</string></dict>"), kSetupOnce},
 	};
 #undef SWITCH_SPRINGBOARD
 #undef SWITCH_PLIST
@@ -8472,6 +8504,7 @@ native_switch_setup_state(proc_t p, user_addr_t scratch, mount_t data_mount)
 		native_switch_gamut_cache(p, scratch, data_mount);
 		native_switch_identity_cache(p, scratch, data_mount);
 		native_switch_als_cache(p, scratch, data_mount);
+		native_switch_timed_cache(p, scratch, data_mount);
 		native_switch_ui_scale_cache(p, scratch, data_mount);
 		native_switch_portrait_display(p, scratch, data_mount);
 		native_switch_system_app_migration(p, scratch, data_mount);
@@ -9306,11 +9339,10 @@ process_signature(proc_t p, struct image_params *imgp)
 		goto done;
 	}
 
-	/* call the launch constraints hook (Switch: not for the Data overlay's executables, native_switch_overlay_image,
-	 * nor for the two grafted-equivalent Apple cryptex mounts, native_switch_cryptex_image; trust cache still enforced) */
+	/* call the launch constraints hook (Switch: not for the Data overlay's executables, native_switch_overlay_image;
+	 * trust cache still enforced) */
 	os_reason_t launch_constraint_reason;
-	error = (native_switch_overlay_image(imgp) || native_switch_cryptex_image(imgp)) ?
-	    0 : mac_proc_check_launch_constraints(p, imgp, &launch_constraint_reason);
+	error = native_switch_overlay_image(imgp) ? 0 : mac_proc_check_launch_constraints(p, imgp, &launch_constraint_reason);
 	if (error != 0) {
 		signature_failure_reason = launch_constraint_reason;
 		goto done;

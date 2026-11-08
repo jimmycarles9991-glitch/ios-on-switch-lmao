@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: BSD-2-Clause-Patent
-// IOMobileFramebuffer's frame information, as J120AP's display pipe (21H461 IOMFB::UPPipe_H9G) gives it: supportedFrameInfo
-// (selector 74) names the keys, ChangeFrameInfo (selector 73, slot changeFrameInfo) picks a client's, and at each present
+// IOMobileFramebuffer's frame information, as J120AP's display pipe (21H461 IOMFB::UPPipe_H9G) gives it, with J181AP's
+// keys under iOS 27 (24B119's IOMobileFramebuffer.framework decodes the same entries): supportedFrameInfo (selector 74)
+// names the keys, ChangeFrameInfo (selector 73, slot changeFrameInfo) picks a client's, and at each present
 // the family's frameInfo_notify hands every client sendFrameInfo, which queues one entry on the client's shared data queue:
 // uint64 {mask, swap id, one value per set bit, lowest bit first}. IOMobileFramebuffer.framework turns the entry into a
 // dictionary for Core Animation's frame_info_callback, which matches it to its swap by id and reads Presentation_time and
@@ -11,13 +12,18 @@
 // ones (kern_ingest_timestamp) and the frame info's Issued_time, Presentation_time and Requested_presentation back
 // (kern_egest_timestamp). The swap request's timestamp is already continuous; a present's mach_absolute_time stamp is not.
 //
-// J120 publishes 14 keys. These are the ones DC A can answer truthfully. Thermal_throttle is 0 because DC A scans at the
-// panel's clock and has no thermal performance state. The per-layer, blend, colour-manager and dither CRCs, Issued_time,
-// Performance_headroom, PRC_duration and CA_mode are J120 pipe internals with no DC A counterpart; IOMobileFramebuffer
-// refuses those keys to a client as it refuses Min_FrameTime on J120.
+// J120 publishes 14 keys, J181 the first 11 of them (its key table ends at Performance_headroom: no Thermal_throttle,
+// PRC_duration or CA_mode). These are the ones of the kind's iPad that DC A can answer truthfully. Thermal_throttle is 0
+// because DC A scans at the panel's clock and has no thermal performance state. The per-layer, blend, colour-manager and
+// dither CRCs, Issued_time, Performance_headroom, PRC_duration and CA_mode are pipe internals with no DC A counterpart;
+// IOMobileFramebuffer refuses those keys to a client as it refuses Min_FrameTime on either iPad.
 #pragma once
 #include <stddef.h>
 #include <stdint.h>
+
+#ifndef SWITCH_IPSW_BUILD
+#error "SwitchFrameInfo.h: the key set is the IPSW kind's; compile with -include switch_ipsw_volumes.h"
+#endif
 
 namespace switch_frame_info {
 
@@ -26,11 +32,16 @@ enum Key : uint32_t {
     kPresentationDelta,
     kRequestedPresentation,
     kThermalThrottle,
-    kKeys
 };
 
-inline constexpr const char *kNames[kKeys] = {"Presentation_time", "Presentation_delta", "Requested_presentation",
-                                              "Thermal_throttle"};
+#if SWITCH_IPSW_DEVICE_J181AP
+inline constexpr uint32_t kKeys = kThermalThrottle;
+#else
+inline constexpr uint32_t kKeys = kThermalThrottle + 1;
+#endif
+
+inline constexpr const char *kNames[kThermalThrottle + 1] = {"Presentation_time", "Presentation_delta",
+                                                             "Requested_presentation", "Thermal_throttle"};
 constexpr uint32_t kAllKeys = (1u << kKeys) - 1;
 constexpr uint32_t kNotificationType = 3;  // EnableNotifications' frame-info type
 constexpr size_t kKeyBytes = 64;
@@ -122,10 +133,11 @@ public:
         Entry *free = nullptr;
         for (Entry &e : entries) {
             if (e.record == record) {
-                if (mask)
+                if (mask) {
                     e.mask = mask;
-                else
+                } else {
                     e = {};
+                }
                 return kOk;
             }
             if (!e.record && !free)
@@ -141,17 +153,19 @@ public:
 
     Entry *find(const void *record)
     {
-        for (Entry &e : entries)
+        for (Entry &e : entries) {
             if (record && e.record == record)
                 return &e;
+        }
         return nullptr;
     }
 
     bool any() const
     {
-        for (const Entry &e : entries)
+        for (const Entry &e : entries) {
             if (e.record)
                 return true;
+        }
         return false;
     }
 

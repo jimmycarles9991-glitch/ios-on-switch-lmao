@@ -32,8 +32,6 @@ TEST(TegraSMMUSource, OneOwnerOfTheGlobalRegisters)
             sawOwner = true;
             continue;
         }
-        if (name.find("NativeAdreno") != std::string::npos)
-            continue;  // the Qualcomm port's own SMMU
         ++units;
         std::ifstream file(path, std::ios::binary);
         std::ostringstream text;

@@ -31,7 +31,7 @@
 #include "NativePlanes.h"
 #include "../TegraGM20B/TegraGM20BLayout.h"
 
-namespace NativeColumnScan {
+namespace native_column_scan {
 
 constexpr uint32_t kHDirection = 1u << 0, kVDirection = 1u << 2, kScanColumn = 1u << 4;
 constexpr uint32_t kBlockKind = 2;  // SURFACE_KIND BLOCK; BLOCK_HEIGHT (log2 GOBs) in bits 6:4
@@ -41,15 +41,15 @@ constexpr uint32_t kPlanarRotationMaxWidth = 4096, kPlanarRotationMaxHeight = 23
 // laid out in GOBs of 2^yLog2 (4: the UI's 16-GOB blocks; 1: NVDEC's own, SwitchVideoDecoders/AVD/BlockLinear.h).
 constexpr uint32_t kSourceWidth = 3840, kSourceHeight = 2160, kRowBytes = 3840;
 constexpr uint32_t kLumaRows = 2176, kChromaRows = 1152;
-constexpr uint64_t kChromaOffset = (uint64_t)kRowBytes * kLumaRows;
-constexpr uint64_t kSurfaceBytes = kChromaOffset + (uint64_t)kRowBytes * kChromaRows;
+constexpr uint64_t kChromaOffset = static_cast<uint64_t>(kRowBytes) * kLumaRows;
+constexpr uint64_t kSurfaceBytes = kChromaOffset + static_cast<uint64_t>(kRowBytes) * kChromaRows;
 constexpr uint8_t kMaxYLog2 = 4;
 
 // The panel (portrait 720x1280) showing the 1280x720 landscape image, and the reference frame in the UI's layout.
 constexpr uint32_t kPanelWidth = 720, kPanelHeight = 1280, kScale = 3;
 constexpr uint32_t kReferenceRowBytes = kPanelWidth * 4;
 constexpr uint8_t kReferenceYLog2 = 4;
-constexpr uint64_t kReferenceBytes = (uint64_t)kReferenceRowBytes * kPanelHeight;
+constexpr uint64_t kReferenceBytes = static_cast<uint64_t>(kReferenceRowBytes) * kPanelHeight;
 static_assert(kSourceWidth == kPanelHeight * kScale && kSourceHeight == kPanelWidth * kScale, "a 1/3 scan of 4K");
 static_assert(kLumaRows % (8u << kMaxYLog2) == 0 && kChromaRows % (8u << kMaxYLog2) == 0 &&
                   kChromaRows * 2 >= kSourceHeight && kPanelHeight % (8u << kReferenceYLog2) == 0,
@@ -73,23 +73,23 @@ inline bool sameWindow(const Window &a, const Window &b)
 // `luma`, `luma` + kChromaOffset in window A's address space). False when window A cannot scan it so.
 inline bool scanWindow(uint32_t luma, uint8_t yLog2, Window &w)
 {
-    const uint32_t hInc = NativePlanes::ddaIncrement(kSourceHeight, kPanelWidth, 8),
-                   vInc = NativePlanes::ddaIncrement(kSourceWidth, kPanelHeight, 15);
+    const uint32_t hInc = native_planes::ddaIncrement(kSourceHeight, kPanelWidth, 8);
+    const uint32_t vInc = native_planes::ddaIncrement(kSourceWidth, kPanelHeight, 15);
     if (!hInc || !vInc || yLog2 > kMaxYLog2 || kSourceWidth > kPlanarRotationMaxWidth ||
-        kSourceHeight > kPlanarRotationMaxHeight || (uint64_t)luma + kSurfaceBytes > 0x100000000ull)
+        kSourceHeight > kPlanarRotationMaxHeight || static_cast<uint64_t>(luma) + kSurfaceBytes > 0x100000000ULL)
         return false;
     w = {};
-    w.options = NativePlanes::kWinEnable | kScanColumn | kHDirection | NativePlanes::kCscEnable |
-                (kSourceHeight != kPanelWidth ? NativePlanes::kHFilterOn : 0) |
-                (kSourceWidth != kPanelHeight ? NativePlanes::kVFilterOn : 0);
-    w.depth = NativePlanes::kDepthYCbCr420SP;
+    w.options = native_planes::kWinEnable | kScanColumn | kHDirection | native_planes::kCscEnable |
+                (kSourceHeight != kPanelWidth ? native_planes::kHFilterOn : 0) |
+                (kSourceWidth != kPanelHeight ? native_planes::kVFilterOn : 0);
+    w.depth = native_planes::kDepthYCbCr420SP;
     w.size = kPanelHeight << 16 | kPanelWidth;
     w.prescaled = kSourceWidth << 16 | kSourceHeight;
     w.dda = vInc << 16 | hInc;
     w.lineStride = kRowBytes << 16 | kRowBytes;
-    w.kind = kBlockKind | (uint32_t)yLog2 << 4;
+    w.kind = kBlockKind | static_cast<uint32_t>(yLog2) << 4;
     w.start = luma;
-    w.startU = luma + (uint32_t)kChromaOffset;
+    w.startU = luma + static_cast<uint32_t>(kChromaOffset);
     w.hOffset = kSourceWidth - 1;
     return true;
 }
@@ -99,13 +99,13 @@ inline bool scanWindow(uint32_t luma, uint8_t yLog2, Window &w)
 inline Window referenceWindow(uint32_t start, uint32_t depth)
 {
     Window w = {};
-    w.options = NativePlanes::kWinEnable;
+    w.options = native_planes::kWinEnable;
     w.depth = depth;
     w.size = kPanelHeight << 16 | kPanelWidth;
     w.prescaled = kPanelHeight << 16 | kReferenceRowBytes;
     w.dda = 0x10001000;
     w.lineStride = kReferenceRowBytes;
-    w.kind = kBlockKind | (uint32_t)kReferenceYLog2 << 4;
+    w.kind = kBlockKind | static_cast<uint32_t>(kReferenceYLog2) << 4;
     w.start = start;
     return w;
 }
@@ -123,7 +123,7 @@ inline uint8_t lumaAt(uint32_t x, uint32_t y)
         return 235;
     if (x >= kMarkerFrom && x < kMarkerTo && y >= kMarkerFrom && y < kMarkerTo)
         return 16;
-    return (uint8_t)(16 + x * 160 / kSourceWidth + ((y / 240) & 1) * 40);
+    return static_cast<uint8_t>(16 + x * 160 / kSourceWidth + ((y / 240) & 1) * 40);
 }
 
 // What panel line `line`, pixel `pixel` must show: landscape pixel (1279 - line, pixel), i.e. its 3x3 source cell.
@@ -134,26 +134,27 @@ inline uint8_t panelLuma(uint32_t line, uint32_t pixel)
 
 inline uint32_t greyBgra(uint8_t y)
 {
-    return 0xff000000u | (uint32_t)y << 16 | (uint32_t)y << 8 | y;
+    return 0xff000000u | static_cast<uint32_t>(y) << 16 | static_cast<uint32_t>(y) << 8 | y;
 }
 
 // Block-linear fills, a 16-byte GOB run at a time (TegraGM20BLayout.h's layout, which DC A scans).
 template <typename ByteAt>
 void fillBlockLinear(uint8_t *plane, uint32_t rowBytes, uint32_t rows, uint8_t yLog2, ByteAt byteAt)
 {
-    for (uint32_t y = 0; y < rows; ++y)
+    for (uint32_t y = 0; y < rows; ++y) {
         for (uint32_t xB = 0; xB < rowBytes; xB += 16) {
             uint8_t *run = plane + tgm_layout_offset_of(rowBytes, yLog2, xB, y);
             for (uint32_t i = 0; i < 16; ++i)
                 run[i] = byteAt(xB + i, y);
         }
+    }
 }
 
 // The NV12 test surface (kSurfaceBytes) in blocks 2^yLog2 GOBs tall; rows past the image are border.
 inline void fillSurface(uint8_t *surface, uint8_t yLog2)
 {
     fillBlockLinear(surface, kRowBytes, kLumaRows, yLog2, [](uint32_t x, uint32_t y) {
-        return y < kSourceHeight ? lumaAt(x, y) : (uint8_t)235;
+        return y < kSourceHeight ? lumaAt(x, y) : static_cast<uint8_t>(235);
     });
     fillBlockLinear(surface + kChromaOffset, kRowBytes, kChromaRows, yLog2, [](uint32_t, uint32_t) {
         return kChroma;
@@ -165,7 +166,7 @@ inline void fillReference(uint8_t *frame)
 {
     fillBlockLinear(frame, kReferenceRowBytes, kPanelHeight, kReferenceYLog2, [](uint32_t xB, uint32_t y) {
         const uint32_t pixel = greyBgra(panelLuma(y, xB / 4));
-        return (uint8_t)(pixel >> (8 * (xB % 4)));
+        return static_cast<uint8_t>(pixel >> (8 * (xB % 4)));
     });
 }
 
@@ -236,19 +237,21 @@ struct Run {
             }
             return frames >= kWaitFrames ? fail("the display never went quiet") : kNothing;
         case kReferenceLatch:
-            referenceUnderflows += underflow;
+            referenceUnderflows += static_cast<unsigned int>(underflow);
             if (requestOut)
                 return ++latchFrames >= kLatchFrames ? fail("window A did not take the reference frame") : kNothing;
             stage = kReference;
             wait = kTransitionFrames;
             return kNothing;
         case kReference:
-            referenceUnderflows += underflow;
-            if (wait && wait--)
+            referenceUnderflows += static_cast<unsigned int>(underflow);
+            if (wait != 0) {
+                --wait;
                 return kNothing;
+            }
             return settleReference(crc);
         case kScanLatch:
-            underflows += underflow;
+            underflows += static_cast<unsigned int>(underflow);
             if (requestOut)
                 return ++latchFrames >= kLatchFrames ? fail("window A did not take the column scan") : kNothing;
             stage = kScan;
@@ -256,7 +259,7 @@ struct Run {
         case kScan:
             return scanFrame(crc, underflow, asWritten);
         case kRestoreLatch:
-            underflows += underflow;
+            underflows += static_cast<unsigned int>(underflow);
             if (requestOut && ++latchFrames < kLatchFrames)
                 return kNothing;
             restored = !requestOut && asWritten;
@@ -291,8 +294,8 @@ struct Run {
     Action scanFrame(uint32_t crc, bool underflow, bool asWritten)
     {
         ++scanFrames;
-        underflows += underflow;
-        mismatches += !asWritten;
+        underflows += static_cast<unsigned int>(underflow);
+        mismatches += static_cast<unsigned int>(!asWritten);
         if (scanFrames > kTransitionFrames) {
             if (scanFrames > kTransitionFrames + 1 && crc != scanCrc)
                 ++crcChanges;
@@ -339,7 +342,8 @@ struct Run {
     // Stable, underflow-free and as written, and window A back as it was.
     bool clean() const
     {
-        return !why && scanCrc && !crcChanges && !underflows && !mismatches && restored;
+        return (why == nullptr) && (scanCrc != 0u) && (crcChanges == 0u) && (underflows == 0u) && (mismatches == 0u) &&
+               restored;
     }
 
     // Clean, and the very image the reference frame shows.
@@ -356,4 +360,4 @@ struct Run {
     }
 };
 
-}  // namespace NativeColumnScan
+}  // namespace native_column_scan

@@ -1,5 +1,5 @@
-// test_awdl.c and test_native.c: each failed check prints "FAIL file:line: ..." to stderr; main returns 1 if any did,
-// else prints the summary line ending in ": ok".
+// test_awdl.c, test_native.c, test_owl.c and test_sched.c: each failed check prints "FAIL file:line: ..." to stderr;
+// main returns 1 if any did, else each part prints its summary line ending in ": ok".
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
 
@@ -18,4 +18,6 @@ TEST(Awdl, CoreApple80211AndFirmware)
     std::fputs(out.c_str(), stdout);
     EXPECT_EQ(code, 0);
     EXPECT_THAT(out, testing::HasSubstr("creation failures: ok"));
+    EXPECT_THAT(out, testing::HasSubstr("channel forms: ok"));
+    EXPECT_THAT(out, testing::HasSubstr("beside the access point: ok"));
 }

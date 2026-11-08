@@ -15,6 +15,7 @@
 // Waits on hardware status with no interrupt behind it (PLL lock, falcon DMA, CNR after the firmware starts, mailbox
 // ownership) are bounded register polls at bring-up, as in Linux; events are interrupt-driven only.
 #pragma once
+#include "../../kits/SwitchMMIO/SwitchMMIOKernel.h"
 #include <stddef.h>
 #include <stdint.h>
 
@@ -27,23 +28,23 @@ constexpr uint32_t kFalconKHz = 204000;  // CLK_SOURCE_XUSB_FALCON: PLLP 408 MHz
 // Falcon mailbox commands (xhci-tegra.c enum tegra_xusb_mbox_cmd).
 enum MboxCmd : uint32_t {
     MBOX_MSG_ENABLED = 1,
-    MBOX_INC_FALC_CLOCK,
-    MBOX_DEC_FALC_CLOCK,
-    MBOX_INC_SSPI_CLOCK,
-    MBOX_DEC_SSPI_CLOCK,
-    MBOX_SET_BW,
-    MBOX_SET_SS_PWR_GATING,
-    MBOX_SET_SS_PWR_UNGATING,
-    MBOX_SAVE_DFE_CTLE_CTX,
-    MBOX_AIRPLANE_MODE_ENABLED,
-    MBOX_AIRPLANE_MODE_DISABLED,
-    MBOX_START_HSIC_IDLE,
-    MBOX_STOP_HSIC_IDLE,
-    MBOX_DBC_WAKE_STACK,
-    MBOX_HSIC_PRETEND_CONNECT,
-    MBOX_RESET_SSPI,
-    MBOX_DISABLE_SS_LFPS_DETECTION,
-    MBOX_ENABLE_SS_LFPS_DETECTION,
+    MBOX_INC_FALC_CLOCK = 2,
+    MBOX_DEC_FALC_CLOCK = 3,
+    MBOX_INC_SSPI_CLOCK = 4,
+    MBOX_DEC_SSPI_CLOCK = 5,
+    MBOX_SET_BW = 6,
+    MBOX_SET_SS_PWR_GATING = 7,
+    MBOX_SET_SS_PWR_UNGATING = 8,
+    MBOX_SAVE_DFE_CTLE_CTX = 9,
+    MBOX_AIRPLANE_MODE_ENABLED = 10,
+    MBOX_AIRPLANE_MODE_DISABLED = 11,
+    MBOX_START_HSIC_IDLE = 12,
+    MBOX_STOP_HSIC_IDLE = 13,
+    MBOX_DBC_WAKE_STACK = 14,
+    MBOX_HSIC_PRETEND_CONNECT = 15,
+    MBOX_RESET_SSPI = 16,
+    MBOX_DISABLE_SS_LFPS_DETECTION = 17,
+    MBOX_ENABLE_SS_LFPS_DETECTION = 18,
     MBOX_ACK = 128,
     MBOX_NAK = 129,
 };
@@ -71,7 +72,7 @@ public:
     // raises PMC wake event 39 when it signals resume; false (nothing armed) without a device. After SC7, before
     // powerOn: the pad back from the PMC.
     bool armRemoteWake(unsigned port);
-    void disarmRemoteWake();
+    static void disarmRemoteWake();
 
     // USB2 port 0 (the USB-C port's D+/D-), XusbPorts.h: OTG capability, then the ID override (xusb-tegra210.c):
     // host grounds ID (the VBUS override off first, 1.5 ms, as Linux) and clears what a boot stage's charger detection
@@ -101,7 +102,7 @@ public:
     // xHCI registers through our own mapping (bring-up, the lost-interrupt check).
     uint32_t xhci(uint32_t offset) const
     {
-        return *reinterpret_cast<volatile uint32_t *>(regs + offset);
+        return switch_mmio_read32(regs, offset);
     }
 
     uint32_t capLength() const
@@ -128,39 +129,15 @@ public:
     bool interruptSample(uint32_t &iman, uint32_t &usbcmd, uint32_t &usbsts, uint32_t &erdp) const;
 
 private:
-    volatile uint8_t *car = nullptr, *pmcPage = nullptr, *fusePage = nullptr, *mc = nullptr, *padctl = nullptr,
-                     *regs = nullptr, *fpci = nullptr, *ipfs = nullptr;
+    volatile uint8_t *car = nullptr, *fusePage = nullptr, *mc = nullptr, *padctl = nullptr, *regs = nullptr,
+                     *fpci = nullptr, *ipfs = nullptr;
     bool mailboxHang = false, isMapped = false, isPowered = false;
     unsigned usb2First = 0, usb2Count = 0, usb3First = 0, usb3Count = 0;
     uint32_t partitionsFound = 0;  // PMC partitions powerOn found already powered (bits as PWRGATE_STATUS)
 
     void padctlUp();
 
-    static uint32_t r(volatile uint8_t *b, uint32_t o)
-    {
-        return *reinterpret_cast<volatile uint32_t *>(b + o);
-    }
-
-    static void w(volatile uint8_t *b, uint32_t o, uint32_t v)
-    {
-        *reinterpret_cast<volatile uint32_t *>(b + o) = v;
-    }
-
-    static void rmw(volatile uint8_t *b, uint32_t o, uint32_t clear, uint32_t set)
-    {
-        w(b, o, (r(b, o) & ~clear) | set);
-    }
-
-    static bool waitBits(volatile uint8_t *b, uint32_t o, uint32_t mask, uint32_t value, uint32_t us);
-    uint32_t pmc(uint32_t o) const;
-    void pmcWrite(uint32_t o, uint32_t v);
-
-    void pmcRmw(uint32_t o, uint32_t clear, uint32_t set)
-    {
-        pmcWrite(o, (pmc(o) & ~clear) | set);
-    }
-
-    bool powerUp(uint32_t partition, uint32_t clockSet, uint32_t resetSet, uint32_t bit);
+    bool powerUp(unsigned partition, unsigned id);
     uint32_t csbRead(uint32_t offset);
     void csbWrite(uint32_t offset, uint32_t value);
 };

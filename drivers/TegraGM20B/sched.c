@@ -44,7 +44,7 @@ static struct {
 	struct nvkm_runl_func func; /* nvkm's, with sched_update */
 	struct nvkm_memory *mem;
 	u32 segment; /* bytes: two segments, one written while the host may still read the other */
-	int next;
+	unsigned int next;
 	struct nvkm_cgrp *unit[SCHED_UNITS];
 	u8 level[SCHED_UNITS];
 	u16 entries[SCHED_UNITS], order[SCHED_ORDER];
@@ -61,7 +61,7 @@ static int is_high(int chid)
 
 static u8 cgrp_level(struct nvkm_cgrp *cgrp)
 {
-	struct nvkm_chan *chan;
+	struct nvkm_chan *chan = NULL;
 	u8 top = TGM_LEVEL_BACKGROUND;
 
 	nvkm_cgrp_foreach_chan(chan, cgrp)
@@ -80,9 +80,13 @@ static int sched_update(struct nvkm_runl *runl)
 	const u32 size = runl->func->size;
 	struct nvkm_memory *mem = rl[runl->id].mem;
 	struct nvkm_cgrp **unit = rl[runl->id].unit;
-	struct nvkm_cgrp *cgrp;
-	struct nvkm_chan *chan;
-	u32 units = 0, n, i, start, offset;
+	struct nvkm_cgrp *cgrp = NULL;
+	struct nvkm_chan *chan = NULL;
+	u32 units = 0;
+	u32 n = 0;
+	u32 i = 0;
+	u32 start = 0;
+	u32 offset = 0;
 
 	if (runl->func->pending(runl))
 		runl->func->wait(runl);
@@ -94,7 +98,7 @@ static int sched_update(struct nvkm_runl *runl)
 			break;
 		unit[units] = cgrp;
 		rl[runl->id].level[units] = cgrp_level(cgrp);
-		rl[runl->id].entries[units++] = cgrp->hw + cgrp->chan_nr;
+		rl[runl->id].entries[units++] = (int)cgrp->hw + cgrp->chan_nr;
 	}
 	n = tgm_interleave(rl[runl->id].level, rl[runl->id].entries, units,
 			   rl[runl->id].segment / size, rl[runl->id].order, SCHED_ORDER);
@@ -121,21 +125,37 @@ static int sched_update(struct nvkm_runl *runl)
 }
 
 /* nvkm writes PFIFO_PREEMPT and waits for its own preempt to finish; one written over a high kick's preempt still in
- * flight (tgm_sched_kicked does not wait for its own) is lost, and nvkm would take the channel for preempted. */
+ * flight (tgm_sched_kicked does not wait for its own) is lost, and nvkm would take the channel for preempted
+ * (tgm_preempt_how). */
 static void sched_chan_preempt(struct nvkm_chan *chan)
 {
 	struct nvkm_device *device = chan->cgrp->runl->fifo->engine.subdev.device;
+	int pending = (nvkm_rd32(device, PFIFO_PREEMPT) & PFIFO_PREEMPT_PENDING) != 0;
 
-	nvkm_wait_msec(device, chan->cgrp->runl->fifo->timeout.chan_msec, PFIFO_PREEMPT,
-		       PFIFO_PREEMPT_PENDING, 0);
+	switch (tgm_preempt_how(irqs_disabled(), pending)) {
+	case TGM_PREEMPT_RECOVER:
+		nvkm_runl_rc_cgrp(chan->cgrp);
+		return;
+	case TGM_PREEMPT_AFTER_WAIT:
+		/* nouveau's nvkm_wait_msec computes in int and widens the timeout. */
+		/* NOLINTBEGIN(bugprone-signed-bitwise) */
+		/* NOLINTBEGIN(bugprone-implicit-widening-of-multiplication-result) */
+		nvkm_wait_msec(device, chan->cgrp->runl->fifo->timeout.chan_msec, PFIFO_PREEMPT,
+			       PFIFO_PREEMPT_PENDING, 0);
+		/* NOLINTEND(bugprone-implicit-widening-of-multiplication-result) */
+		/* NOLINTEND(bugprone-signed-bitwise) */
+		break;
+	case TGM_PREEMPT_NOW:
+		break;
+	}
 	orig_chan_preempt(chan);
 }
 
 void tgm_sched_init(struct nvkm_device *device)
 {
 	struct nvkm_fifo *fifo = device->fifo;
-	struct nvkm_runl *runl;
-	u32 entries;
+	struct nvkm_runl *runl = NULL;
+	u32 entries = 0;
 
 	tgm_hold_init();
 	tgm_deadline_init(device);
@@ -154,8 +174,8 @@ void tgm_sched_init(struct nvkm_device *device)
 		/* nvkm's whole ring holds two of these: every entry once, and a high group after each low one */
 		entries = 2 * ((runl->cgid ? runl->cgid->nr : 0) + runl->chid->nr);
 		rl[runl->id].segment = ALIGN(entries * runl->func->size, 0x1000);
-		if (nvkm_memory_new(device, NVKM_MEM_TARGET_INST, 2 * rl[runl->id].segment, 0x1000,
-				    true, &rl[runl->id].mem)) {
+		if (nvkm_memory_new(device, NVKM_MEM_TARGET_INST, 2 * (u64)rl[runl->id].segment,
+				    0x1000, true, &rl[runl->id].mem)) {
 			nvxnu_log("tegra-gm20b: runlist %d keeps nvkm's round robin: no memory\n",
 				  runl->id);
 			continue;
@@ -172,7 +192,7 @@ void tgm_sched_init(struct nvkm_device *device)
 
 void tgm_sched_level(struct nvkm_device *device, unsigned int chid, unsigned int to)
 {
-	struct nvkm_runl *runl;
+	struct nvkm_runl *runl = NULL;
 
 	if (chid >= SCHED_CHIDS || to >= TGM_LEVELS || READ_ONCE(level[chid]) == to)
 		return;
@@ -203,22 +223,25 @@ static enum tgm_sched_kick counted(enum tgm_sched_kick kick)
 	if (!TGM_STATS)
 		return kick;
 	__atomic_fetch_add(&st.kicks, 1, __ATOMIC_RELAXED);
-	if (kick == TGM_KICK_PREEMPTED)
+	if (kick == TGM_KICK_PREEMPTED) {
 		__atomic_fetch_add(&st.preempted, 1, __ATOMIC_RELAXED);
-	else if (kick == TGM_KICK_SWITCHING)
+	} else if (kick == TGM_KICK_SWITCHING) {
 		__atomic_fetch_add(&st.switching, 1, __ATOMIC_RELAXED);
-	else if (kick == TGM_KICK_DEFERRED)
+	} else if (kick == TGM_KICK_DEFERRED) {
 		__atomic_fetch_add(&st.deferred, 1, __ATOMIC_RELAXED);
-	else if (kick == TGM_KICK_FOLLOWED)
+	} else if (kick == TGM_KICK_FOLLOWED) {
 		__atomic_fetch_add(&st.followed, 1, __ATOMIC_RELAXED);
+	}
 	return kick;
 }
 
 /* The app channel GR or the PBDMA serving the runlist is on (TegraGM20BSchedPolicy.h) */
 static int sched_victim(struct nvkm_device *device, struct nvkm_runl *runl)
 {
-	struct nvkm_engn *engn;
-	u32 eng = 0, pbdma = 0, chid = 0;
+	struct nvkm_engn *engn = NULL;
+	u32 eng = 0;
+	u32 pbdma = 0;
+	u32 chid = 0;
 
 	nvkm_runl_foreach_engn(engn, runl)
 	{
@@ -236,16 +259,19 @@ static int sched_victim(struct nvkm_device *device, struct nvkm_runl *runl)
 
 int tgm_sched_loaded(struct nvkm_device *device, unsigned int chid)
 {
-	struct nvkm_runl *runl;
-	struct nvkm_engn *engn;
-	u32 eng;
+	struct nvkm_runl *runl = NULL;
+	struct nvkm_engn *engn = NULL;
+	u32 eng = 0;
 
 	nvkm_runl_foreach(runl, device->fifo)
 	{
 		if (runl->runq_nr && runl->runq[0] &&
 		    PBDMA_CHID(nvkm_rd32(device, PBDMA_CHANNEL(runl->runq[0]->id))) == chid)
 			return 1;
-		nvkm_runl_foreach_engn(engn, runl)
+		/* Only engines with a context have a status register: SW's id 15 reads 0x0026b8, which PRI-times out */
+		/* nouveau's runlist walk takes each engine by container_of. */
+		/* NOLINTNEXTLINE(clang-analyzer-security.ArrayBound) */
+		nvkm_runl_foreach_engn_cond(engn, runl, engn->func->cxid)
 		{
 			eng = nvkm_rd32(device, PFIFO_ENG_STATUS(engn->id));
 			if (!(eng & PFIFO_ENG_ID_TSG) && PFIFO_ENG_ID(eng) == chid)
@@ -259,8 +285,8 @@ int tgm_sched_loaded(struct nvkm_device *device, unsigned int chid)
 
 int tgm_sched_resident(struct nvkm_device *device)
 {
-	struct nvkm_runl *runl;
-	struct nvkm_engn *engn;
+	struct nvkm_runl *runl = NULL;
+	struct nvkm_engn *engn = NULL;
 
 	nvkm_runl_foreach(runl, device->fifo)
 	{
@@ -282,16 +308,19 @@ static enum tgm_sched_kick queued_behind(struct nvkm_device *device, enum tgm_sc
 	u64 asked = kick == TGM_KICK_PREEMPTED ? nvkm_timer_read(device->timer) : 0;
 
 	queued->behind = -1;
-	if (victim >= 0 && (queued->asked_pt = tgm_hold_asked(victim, asked)))
-		queued->behind = victim;
+	if (victim >= 0) {
+		queued->asked_pt = tgm_hold_asked(victim, asked);
+		if (queued->asked_pt)
+			queued->behind = victim;
+	}
 	return counted(kick);
 }
 
 enum tgm_sched_kick tgm_sched_kicked(struct nvkm_device *device, unsigned int chid,
 				     struct tgm_sched_queued *queued)
 {
-	struct nvkm_runl *runl;
-	int victim;
+	struct nvkm_runl *runl = NULL;
+	int victim = 0;
 
 	queued->behind = -1;
 	nvkm_runl_foreach(runl, device->fifo)
@@ -322,11 +351,11 @@ enum tgm_sched_kick tgm_sched_kicked(struct nvkm_device *device, unsigned int ch
 
 void tgm_sched_stats(char *buf, unsigned int len)
 {
-	u32 kicks = __atomic_exchange_n(&st.kicks, 0, __ATOMIC_RELAXED),
-	    preempted = __atomic_exchange_n(&st.preempted, 0, __ATOMIC_RELAXED),
-	    switching = __atomic_exchange_n(&st.switching, 0, __ATOMIC_RELAXED),
-	    deferred = __atomic_exchange_n(&st.deferred, 0, __ATOMIC_RELAXED),
-	    followed = __atomic_exchange_n(&st.followed, 0, __ATOMIC_RELAXED);
+	u32 kicks = __atomic_exchange_n(&st.kicks, 0, __ATOMIC_RELAXED);
+	u32 preempted = __atomic_exchange_n(&st.preempted, 0, __ATOMIC_RELAXED);
+	u32 switching = __atomic_exchange_n(&st.switching, 0, __ATOMIC_RELAXED);
+	u32 deferred = __atomic_exchange_n(&st.deferred, 0, __ATOMIC_RELAXED);
+	u32 followed = __atomic_exchange_n(&st.followed, 0, __ATOMIC_RELAXED);
 
 	scnprintf(buf, len,
 		  "%u high kicks: %u preempted an app, %u found a switch under way, %u deferred, "

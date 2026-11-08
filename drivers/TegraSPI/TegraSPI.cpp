@@ -137,22 +137,22 @@ void clockEnable(const BusInfo &info)
 void pinmux(const BusInfo &info)
 {
     const uint16_t outputs[] = {info.mosi, info.sck, info.cs0};
-    for (uint16_t pad : outputs)
+    for (const uint16_t pad : outputs)
         switch_mmio_write32(gPinmux, pad, (switch_mmio_read32(gPinmux, pad) & ~kPinmuxFieldMask) | kPinmuxOut);
     switch_mmio_write32(gPinmux, info.miso, (switch_mmio_read32(gPinmux, info.miso) & ~kPinmuxFieldMask) | kPinmuxIn);
 }
 
 // Both FIFOs empty (tegra_spi_clear_fifo): a flush completes within a few microseconds.
-bool flushFifos(Bus &b)
+bool flushFifos(const Bus &b)
 {
-    uint32_t status = switch_mmio_read32(b.regs, FIFO_STATUS);
+    const uint32_t status = switch_mmio_read32(b.regs, FIFO_STATUS);
     if ((status & (FIFO_RX_EMPTY | FIFO_TX_EMPTY)) == (FIFO_RX_EMPTY | FIFO_TX_EMPTY))
         return true;
     switch_mmio_write32(b.regs, FIFO_STATUS, status | FIFO_RX_FLUSH | FIFO_TX_FLUSH);
     return switch_mmio_wait32(b.regs, FIFO_STATUS, FIFO_RX_EMPTY | FIFO_TX_EMPTY, FIFO_RX_EMPTY | FIFO_TX_EMPTY, 2000);
 }
 
-void clearStatus(Bus &b)
+void clearStatus(const Bus &b)
 {
     switch_mmio_write32(b.regs, TRANS_STATUS, switch_mmio_read32(b.regs, TRANS_STATUS));  // write 1 to clear
     switch_mmio_write32(b.regs, FIFO_STATUS, FIFO_ERR | FIFO_ERRORS);
@@ -165,7 +165,8 @@ int configure(Bus &b, const BusInfo &info)
     uint32_t cmd = switch_mmio_read32(b.regs, COMMAND1);
     cmd &= ~(CMD1_BIT_LENGTH_MASK | CMD1_PACKED | CMD1_TX_EN | CMD1_RX_EN | CMD1_BOTH_EN_BYTE | CMD1_BOTH_EN_BIT |
              CMD1_LSBYTE_FE | CMD1_LSBIT_FE | CMD1_BIDIROE | CMD1_CS_SEL_MASK | CMD1_MODE_MASK | CMD1_PIO);
-    cmd |= CMD1_M_S | ((uint32_t)info.mode << CMD1_MODE_SHIFT) | CMD1_CS_SW_HW | CMD1_CS_SS_VAL | CMD1_BIT_LENGTH_8;
+    cmd |= CMD1_M_S | (static_cast<uint32_t>(info.mode) << CMD1_MODE_SHIFT) | CMD1_CS_SW_HW | CMD1_CS_SS_VAL |
+           CMD1_BIT_LENGTH_8;
     b.idle = cmd;
     switch_mmio_write32(b.regs, COMMAND1, cmd);
     switch_mmio_write32(b.regs, DMA_CTL, 0);
@@ -182,12 +183,14 @@ int configure(Bus &b, const BusInfo &info)
 // clears the status and whose thread (tegra_spi_isr_thread, handle_cpu_based_xfer) then drains the RX FIFO.
 // A work-loop action here would cost a second thread switch per transfer (the IMU does 100-400 a second) and keep the
 // interrupt masked for the drain, not just three register accesses.
+// NOLINTNEXTLINE(misc-const-correctness): IOFilterInterruptEventSource::Filter's signature
 bool filterInterrupt(OSObject *, IOFilterInterruptEventSource *sender)
 {
     for (Bus &b : gBus) {
         if (b.irq != sender)
             continue;
-        const uint32_t trans = switch_mmio_read32(b.regs, TRANS_STATUS), fifo = switch_mmio_read32(b.regs, FIFO_STATUS);
+        const uint32_t trans = switch_mmio_read32(b.regs, TRANS_STATUS);
+        const uint32_t fifo = switch_mmio_read32(b.regs, FIFO_STATUS);
         uint32_t expected = kActive;
         if (trans & TRANS_RDY) {
             b.fifo = fifo;
@@ -217,7 +220,7 @@ int take(Bus &b)
             continue;
         }
         if (b.rx)
-            b.rx[b.done] = (uint8_t)word;
+            b.rx[b.done] = static_cast<uint8_t>(word);
         ++b.done;
     }
     __atomic_store_n(&b.state, kIdle, __ATOMIC_RELAXED);
@@ -229,11 +232,12 @@ int take(Bus &b)
 // for an interrupt already under way, panic with the controller's and the GIC's state.
 int sleepForAction(unsigned bus, Bus &b, uint64_t us)
 {
-    uint64_t deadline;
-    clock_interval_to_deadline((uint32_t)us, kMicrosecondScale, &deadline);
+    uint64_t deadline = 0;
+    clock_interval_to_deadline(static_cast<uint32_t>(us), kMicrosecondScale, &deadline);
     for (bool grace = false;; grace = true) {
         for (;;) {
-            const wait_result_t wait = assert_wait_deadline((event_t)&b.state, THREAD_UNINT, deadline);
+            const wait_result_t wait =
+                assert_wait_deadline(reinterpret_cast<event_t>(&b.state), THREAD_UNINT, deadline);
             if (__atomic_load_n(&b.state, __ATOMIC_ACQUIRE) != kActive) {
                 if (wait == THREAD_WAITING)
                     clear_wait(current_thread(), THREAD_AWAKENED);
@@ -244,7 +248,8 @@ int sleepForAction(unsigned bus, Bus &b, uint64_t us)
         }
         if (__atomic_load_n(&b.state, __ATOMIC_ACQUIRE) != kActive)
             return take(b);
-        const uint32_t trans = switch_mmio_read32(b.regs, TRANS_STATUS), mask = switch_mmio_read32(b.regs, INTR_MASK);
+        const uint32_t trans = switch_mmio_read32(b.regs, TRANS_STATUS);
+        const uint32_t mask = switch_mmio_read32(b.regs, INTR_MASK);
         if (!(trans & TRANS_RDY) || (mask & INTR_ALL))
             break;
         if (grace) {
@@ -269,19 +274,19 @@ int block(unsigned bus, Bus &b, unsigned cs, const uint8_t *tx, uint8_t *rx, siz
     int result = flushFifos(b) ? TEGRA_SPI_OK : TEGRA_SPI_ETIMEDOUT;
     if (result == TEGRA_SPI_OK) {
         clearStatus(b);
-        const uint32_t cmd = (b.idle & ~(CMD1_CS_SS_VAL | CMD1_CS_SEL_MASK)) | ((uint32_t)cs << CMD1_CS_SEL_SHIFT) |
-                             CMD1_TX_EN | CMD1_RX_EN;
+        const uint32_t cmd = (b.idle & ~(CMD1_CS_SS_VAL | CMD1_CS_SEL_MASK)) |
+                             (static_cast<uint32_t>(cs) << CMD1_CS_SEL_SHIFT) | CMD1_TX_EN | CMD1_RX_EN;
         switch_mmio_write32(b.regs, COMMAND1, cmd);
         for (size_t i = 0; i < len; ++i)
             switch_mmio_write32(b.regs, TX_FIFO, tx ? tx[i] : 0);
-        switch_mmio_write32(b.regs, DMA_BLK, (uint32_t)len - 1);
+        switch_mmio_write32(b.regs, DMA_BLK, static_cast<uint32_t>(len) - 1);
         b.rx = rx;
         b.len = len;
         b.done = 0;
         __atomic_store_n(&b.state, kActive, __ATOMIC_RELEASE);
         __asm__ volatile("dmb sy" ::: "memory");  // kActive is visible to the filter's CPU before the clock starts
         switch_mmio_write32(b.regs, COMMAND1, cmd | CMD1_PIO);
-        result = sleepForAction(bus, b, 2000 + (uint64_t)len * 8 * 1000000 / b.hz);
+        result = sleepForAction(bus, b, 2000 + static_cast<uint64_t>(len) * 8 * 1000000 / b.hz);
     }
     switch_mmio_write32(b.regs, COMMAND1, b.idle);  // chip select high
     b.rx = nullptr;
@@ -382,7 +387,7 @@ extern "C" int tegra_spi_transfer(unsigned bus, unsigned cs, const void *tx, voi
     if (!b.lock)
         return TEGRA_SPI_ENOTREADY;
     IOLockLock(b.lock);
-    int result = b.ready ? block(bus, b, cs, (const uint8_t *)tx, (uint8_t *)rx, len) : TEGRA_SPI_ENOTREADY;
+    const int result = b.ready ? block(bus, b, cs, (const uint8_t *)tx, (uint8_t *)rx, len) : TEGRA_SPI_ENOTREADY;
     if (result != TEGRA_SPI_OK && result != TEGRA_SPI_ENOTREADY)
         recover(b, kBus[bus - 1]);
     IOLockUnlock(b.lock);

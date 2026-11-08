@@ -20,11 +20,6 @@ CBUF = re.compile(r'cb(\d+) type=(\d+) size=([0-9a-f]+) data=(\S+)')
 SHADER_DATA, SET = '2', '3'
 
 
-def key_hash(key: str) -> int:
-    own = re.search(r'\| f (ycbcr_\w+)', key)
-    return packfile.fnv(('raw.ycbcr.' + own.group(1)).encode() if own else key.encode())
-
-
 def bindings(lines: list[str]) -> dict[str, list[tuple]]:
     """Give each stage's program and the constant buffers of type shader data (whole) and set 0 (slot and size)."""
     out, stage = {}, None
@@ -61,7 +56,7 @@ def main() -> None:
     twin = {}
     for d in sys.argv[3:]:
         for p in probelog.load(os.path.join(d, 'probe256.out'), os.path.join(d, 'probe256.log')):
-            twin.setdefault(key_hash(p['key']), p['canon'])
+            twin.setdefault(packfile.key_hash(p), p['canon'])
     draws = raw_draws(sys.argv[2])
     if len(draws) != len(keys):
         sys.exit(f'datacheck: {len(keys)} states drawn, {len(draws)} raw submissions with a draw')

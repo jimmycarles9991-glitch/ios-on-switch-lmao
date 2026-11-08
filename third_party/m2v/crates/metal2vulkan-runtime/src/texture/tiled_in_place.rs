@@ -34,10 +34,13 @@ use std::sync::Mutex;
 impl Buffer {
     /// The device's optimal image of `descriptor` bound `offset` bytes into the buffer's memory,
     /// holding the bytes there as the device's layout of that image reads them. The buffer is a
-    /// no-copy buffer over host memory. Refused (`NotImplemented(Textures)`) for a texture
-    /// buffer, a format whose image is not exactly its bytes (another texel size, a depth or
-    /// stencil aspect), a buffer of other memory, or an image whose alignment, size or memory
-    /// type does not fit the buffer at `offset`.
+    /// no-copy buffer over host memory. An extended-range format's image is its texels in their
+    /// unsigned integer format (`FormatEmulation::ExtendedRange`), the bytes the raw GM20B path
+    /// keeps for such a texture (a two-plane one's color word and alpha byte side by side, as
+    /// this crate holds it). Refused (`NotImplemented(Textures)`) for a texture buffer, a format
+    /// whose image is not exactly its bytes (another texel size, a depth or stencil aspect), a
+    /// buffer of other memory, or an image whose alignment, size or memory type does not fit the
+    /// buffer at `offset`.
     pub fn new_tiled_texture_in_place(
         &self,
         descriptor: &TextureDescriptor,
@@ -86,7 +89,9 @@ impl Device {
             .map_err(|refusal| image_error(CALL, refusal))?;
         let exact = matches!(
             plan.mapping.emulation,
-            FormatEmulation::Direct | FormatEmulation::SwizzledView
+            FormatEmulation::Direct
+                | FormatEmulation::SwizzledView
+                | FormatEmulation::ExtendedRange
         );
         if !exact || plan.mapping.aspects != ImageAspectFlags::COLOR {
             return Err(refused);

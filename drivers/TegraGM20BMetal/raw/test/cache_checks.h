@@ -1,18 +1,20 @@
 // SPDX-License-Identifier: MIT
-// The record cache's and compile table's checks (runtime/raw_cache.h), over any records: raw/test/cachecheck's, a bucket's real
+// The record cache's and compile table's checks (runtime/raw_cache.h, raw_compiler.h), over any records: raw/test/cachecheck's, a bucket's real
 // ones, and //drivers/TegraGM20BMetal/test:raw_cache_test's made up ones.
 //  - every record and a refusal come back from an entry as they went in, and an entry of another key, stack or AIR, a truncated
 //    one and one with a byte changed come back as none;
 //  - a second cache over the same directory (the next boot) finds every entry; another stack's directory and a dead writer's
 //    temporary are gone once it opens; four processes storing the same entries while this one reads never show a torn entry;
 //  - a capped cache stays under its cap and keeps the latest entry;
-//  - eight threads asking for one state make it once; the next process's table takes it (and a refusal) from the disk, and
-//    keeps no entry for a probe that failed.
+//  - eight threads asking for one state make it once; a refusal sticks; a probe that failed is tried again by later asks,
+//    Compiler::kRetries times; the next process's table takes the state (and the refusal) from the disk, and finds no entry
+//    for the probe that failed.
 #pragma once
 #include <sys/stat.h>
 #include <sys/time.h>
 #include <sys/wait.h>
 #include <unistd.h>
+#include <algorithm>
 #include <atomic>
 #include <cstdio>
 #include <cstdlib>
@@ -21,7 +23,7 @@
 #include <thread>
 #include <utility>
 #include <vector>
-#include "../runtime/raw_cache.h"
+#include "../runtime/raw_compiler.h"
 
 namespace cachechecks {
 
@@ -162,8 +164,10 @@ inline void run(const std::vector<std::pair<std::string, raw::RuntimeRecord>> &r
         const std::string capped = scratch + "/cachecheck-cap";
         system(("rm -rf '" + capped + "'").c_str());
         mkdir(capped.c_str(), 0700);
-        const uint64_t one = raw::encodeEntry(keyOf(stack, records[0].first, 7), &records[0].second, "").size();
-        const uint64_t cap = one * 3;
+        uint64_t largest = 0;
+        for (const auto &[key, rec] : records)
+            largest = std::max<uint64_t>(largest, raw::encodeEntry(keyOf(stack, key, 7), &rec, "").size());
+        const uint64_t cap = largest * 3;
         raw::RecordCache cache;
         cache.open(capped, stack, cap);
         for (const auto &[key, rec] : records)
@@ -201,7 +205,7 @@ inline void run(const std::vector<std::pair<std::string, raw::RuntimeRecord>> &r
         };
         const raw::CacheKey k = keyOf(stack, records[0].first, 7);
         {
-            raw::Compiler compiler(&cache, make);
+            raw::Compiler compiler(&cache, make, 0);
             std::vector<std::thread> askers;
             for (int t = 0; t < 8; t++)
                 askers.emplace_back([&] {
@@ -217,22 +221,34 @@ inline void run(const std::vector<std::pair<std::string, raw::RuntimeRecord>> &r
             const raw::RuntimeRecord *rec = nullptr;
             check(compiler.ask(k, nullptr, &rec) == raw::Compiler::State::Ready && rec && same(*rec, model),
                   "an asked state is ready");
-            check(makes == 3 && dones == 1, "eight threads asking one state make it once");
-            check(compiler.ask(keyOf(stack, "failed", 7), nullptr) == raw::Compiler::State::Refused,
-                  "a failed probe is not tried again in the process");
+            check(makes == 3 && dones == 8, "eight threads asking one state make it once and each hears of it");
+            check(compiler.ask(keyOf(stack, refusedKey, 7), nullptr) == raw::Compiler::State::Refused,
+                  "a refusal sticks");
+            uint64_t wait = 1;
+            check(compiler.retryAfter(keyOf(stack, "failed", 7), wait) && wait == 0,
+                  "a failed probe may be tried again");
+            check(!compiler.retryAfter(keyOf(stack, refusedKey, 7), wait), "a refused state is not tried again");
+            for (uint32_t retry = 0; retry <= raw::Compiler::kRetries; retry++) {
+                compiler.ask(keyOf(stack, "failed", 7), nullptr);
+                compiler.drain();
+            }
+            check(compiler.ask(keyOf(stack, "failed", 7), nullptr) == raw::Compiler::State::Failed &&
+                      makes == 3 + raw::Compiler::kRetries && !compiler.retryAfter(keyOf(stack, "failed", 7), wait),
+                  "a failed probe is tried again, kRetries times");
             const raw::Compiler::Stats s = compiler.stats();
-            check(s.misses == 3 && s.hits == 0 && s.refusals == 1 && s.failures == 1, "first process: three misses");
+            check(s.hits == 0 && s.refusals == 1 && s.failures == 1 + raw::Compiler::kRetries,
+                  "first process: every make a miss");
         }
         {
             raw::RecordCache again;
             again.open(tableDir, stack, 0);
-            raw::Compiler compiler(&again, make);
+            raw::Compiler compiler(&again, make, 0);
             compiler.ask(k, nullptr);
             compiler.ask(keyOf(stack, refusedKey, 7), nullptr);
             compiler.ask(keyOf(stack, "failed", 7), nullptr);
             compiler.drain();
             const raw::Compiler::Stats s = compiler.stats();
-            check(makes == 4 && s.hits == 2 && s.misses == 1,
+            check(makes == 4 + raw::Compiler::kRetries && s.hits == 2 && s.misses == 1,
                   "the next process takes the record and refusal from disk");
             check(compiler.ask(keyOf(stack, refusedKey, 7), nullptr) == raw::Compiler::State::Refused,
                   "a refusal from disk stays refused");

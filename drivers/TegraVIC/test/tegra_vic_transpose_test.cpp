@@ -12,7 +12,7 @@
 #include <vector>
 
 #include "../TegraVICConfig.h"
-#include "../TegraVICProbe.h"
+#include "TegraVICProbe.h"
 #include "vic_model.h"
 
 namespace {
@@ -102,6 +102,57 @@ TegraVICTraits provenTraits(uint32_t flips)
     t.fillThroughMatrix = 1;
     t.yccIn = TEGRA_VIC_YCC_IN_RGB | TEGRA_VIC_YCC_IN_COPY;
     return t;
+}
+
+// The unit's own lines from the boot self-test that measured kTegraVICTraits, identical on all 19 boots of 11-05 23:53
+// to 11-06 23:42: the transposes and sub-rectangles it noted, in the order it ran them.
+const char *const kUnitDiagLines[] = {
+    "TegraVIC: diag transpose rects before, surface before the transpose (16x32 out of 32x16): transform 6; card 1,0 "
+    "at "
+    "byte 256, 0,1 at 4; output pixel <- card (0,0)<-0,0 (1,0)<-0,1 (0,1)<-1,0 (15,0)<-0,15 (0,31)<-31,0 "
+    "(15,31)<-31,15",
+    "TegraVIC: diag transpose rects before, surface after the transpose (16x32 out of 32x16): no transform; card 1,0 "
+    "at "
+    "byte 128, 0,1 at 4; output pixel <- card (0,0)<-0,0 (1,0)<-0,1 (0,1)<-2,0 (15,0)<-0,15 (0,31)<-- (15,31)<--",
+    "TegraVIC: diag transpose rects after, surface before the transpose (16x32 out of 32x16): no transform; card 1,0 "
+    "at "
+    "byte 0, 0,1 at -1; output pixel <- card (0,0)<-1,0 (1,0)<-1,0 (0,1)<-3,0 (15,0)<-1,7 (0,31)<-- (15,31)<--",
+    "TegraVIC: diag transpose rects after, surface after the transpose (16x32 out of 32x16): no transform; card 1,0 at "
+    "byte 0, 0,1 at -1; output pixel <- card (0,0)<-1,0 (1,0)<-1,0 (0,1)<-5,0 (15,0)<-1,7 (0,31)<-- (15,31)<--",
+    "TegraVIC: diag sub-rectangle transform 1 (32x16 at 8,4 in 64x48): landed elsewhere; 512 of 512 pixels off, 256 "
+    "around it written, card 0,0 at 55,4 (want 39,4): whole-surface jobs only",
+    "TegraVIC: diag sub-rectangle transform 2 (32x16 at 8,4 in 64x48): landed elsewhere; 512 of 512 pixels off, 512 "
+    "around it written, card 0,0 at 8,43 (want 8,19): whole-surface jobs only",
+    "TegraVIC: diag sub-rectangle transform 3 (32x16 at 8,4 in 64x48): landed elsewhere; 512 of 512 pixels off, 512 "
+    "around it written, card 0,0 at 55,43 (want 39,19): whole-surface jobs only",
+    "TegraVIC: diag sub-rectangle transform 4 (16x32 at 8,4 in 64x48): landed elsewhere; 512 of 512 pixels off, 512 "
+    "around it written, card 0,0 at 55,4 (want 23,4): whole-surface jobs only",
+    "TegraVIC: diag sub-rectangle transform 5 (16x32 at 8,4 in 64x48): landed elsewhere; 512 of 512 pixels off, 512 "
+    "around it written, card 0,0 at 55,43 (want 23,35): whole-surface jobs only",
+    "TegraVIC: diag sub-rectangle transform 7 (16x32 at 8,4 in 64x48): landed elsewhere; 512 of 512 pixels off, 128 "
+    "around it written, card 0,0 at 8,43 (want 8,35): whole-surface jobs only",
+};
+
+// The model flipping around the surface is the unit: the probes on it write the unit's lines word for word, and what
+// they prove is kTegraVICTraits' transform half.
+TEST(TransposeModel, IsTheUnitAndGivesItsTraits)
+{
+    Bench b(VIC_MODEL_FLIP_SURFACE);
+    TegraVICProbeEnv e = b.env();
+    TegraVICTraits t = baseTraits();
+    char line[300] = "";
+    ASSERT_TRUE(tegra_vic_probe_transforms(&e, &t, line, sizeof(line))) << line;
+    tegra_vic_probe_placement(&e, &t);
+    ASSERT_EQ(b.notes.size(), std::size(kUnitDiagLines));
+    for (size_t i = 0; i < b.notes.size(); i++)
+        EXPECT_EQ(b.notes[i], kUnitDiagLines[i]);
+    EXPECT_EQ(memcmp(t.vicFlips, kTegraVICTraits.vicFlips, sizeof(t.vicFlips)), 0);
+    EXPECT_EQ(t.rotations, kTegraVICTraits.rotations);
+    EXPECT_EQ(t.preTransposeRects, kTegraVICTraits.preTransposeRects);
+    EXPECT_EQ(t.preTransposeSurface, kTegraVICTraits.preTransposeSurface);
+    EXPECT_EQ(t.subRects, kTegraVICTraits.subRects);
+    EXPECT_EQ(kTegraVICTraits.in.cbChannel, kMeasured.cbChannel);
+    EXPECT_EQ(kTegraVICTraits.out.crChannel, kMeasured.crChannel);
 }
 
 // The plain transpose of the card (VIC combination 0,0,1) under convention `convention`, as V4 builds it.

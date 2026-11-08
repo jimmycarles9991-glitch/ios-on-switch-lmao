@@ -20,8 +20,8 @@
 // The bounce pool (8 MiB, physically contiguous, below 4 GiB) for the boot, taken at start-up while such a run is easy
 // to find (taken at the first device attach it was not: vm_page_find_contiguous fails once memory is in use). USB
 // thread; 0, or -1 (the caller logs it).
-int switch_usb_dma_reserve(void);
+int switch_usb_dma_reserve();
 
 // Creates (once) and starts the mapper attached to IOResources, on the reserved pool; nullptr on failure (logged).
 // `reach` is the first physical address the controller cannot address (HCCPARAMS1.AC64: 64-bit or 32-bit DMA).
-IOMapper *switch_usb_dma_mapper(uint64_t reach);
+LIBKERN_RETURNS_NOT_RETAINED IOMapper *switch_usb_dma_mapper(uint64_t reach);

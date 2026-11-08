@@ -52,4 +52,5 @@ rust_library(
     srcs = ["SwitchRefusal.rs"],
     crate_name = "switch_refusal",
     edition = "2024",
+    link_deps = [":switch_refusal"],
 )

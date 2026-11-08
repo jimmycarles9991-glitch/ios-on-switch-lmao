@@ -46,7 +46,7 @@ static inline uint32_t switch_soctherm_thresh(int32_t millic)
     if (millic <= 0) {
         return 0;
     }
-    const uint32_t steps = (uint32_t)millic / SWITCH_SOCTHERM_GRAIN_MILLIC;
+    const uint32_t steps = static_cast<uint32_t>(millic) / SWITCH_SOCTHERM_GRAIN_MILLIC;
     return steps > SWITCH_SOCTHERM_LVL0_THRESH ? SWITCH_SOCTHERM_LVL0_THRESH : steps;
 }
 

@@ -308,6 +308,80 @@ static void testGenerate()
 }
 
 // ---- 4. teeth ----
+// The device sweep's source: 24 x 10 BGRA8 texels whose components tell the four 2x2 neighbours apart at every step (a one-texel
+// shift changes the result by more than 1); 24x10 -> 12x5 -> 6x2 -> 3x1 -> 1x1, odd steps on purpose
+constexpr uint32_t kSweepW = 24, kSweepH = 10;
+
+static void sweepPattern(uint8_t *pixels, uint32_t pitch)
+{
+    for (uint32_t y = 0; y < kSweepH; y++)
+        for (uint32_t x = 0; x < kSweepW; x++) {
+            uint8_t *t = pixels + size_t(y) * pitch + x * 4;
+            t[0] = uint8_t(x * 10 + 7);
+            t[1] = uint8_t(y * 23 + 5);
+            t[2] = uint8_t((x * 37 + y * 101) & 0xff);
+            t[3] = uint8_t(((x ^ y) & 1) ? 255 : 64);
+        }
+}
+
+// Bytes off by more than 1, each level against the reference step from the level above as the engine made it (so one step's
+// rounding is not carried), read in the Tegra or Fermi view; *first: the first one's level << 24 | y << 12 | x
+static uint32_t sweepCheck(const fx::MipChain &c, const uint8_t *chainCpu, uint32_t *first, bool fermi)
+{
+    *first = ~0u;
+    uint8_t want[kSweepW * kSweepH * 4], above[kSweepW * kSweepH * 4];
+    sweepPattern(want, kSweepW * 4);
+    uint32_t bad = 0;
+    for (uint32_t l = 0; l < c.levels; l++) {
+        const fx::MipLevel &lv = c.level[l];
+        if (l) {
+            const fx::MipLevel &up = c.level[l - 1];
+            for (uint32_t y = 0; y < up.height; y++)
+                for (uint32_t xb = 0; xb < up.width * 4; xb++)
+                    above[size_t(y) * up.width * 4 + xb] = chainCpu[fx::texelOffset(c, l - 1, xb, y, fermi)];
+            fx::referenceDownsample(above, up.width * 4, up.width, up.height, want, lv.width * 4, lv.width, lv.height,
+                                    4);
+        }
+        for (uint32_t y = 0; y < lv.height; y++)
+            for (uint32_t xb = 0; xb < lv.width * 4; xb++)
+                if (std::abs(int(chainCpu[fx::texelOffset(c, l, xb, y, fermi)]) -
+                             int(want[size_t(y) * lv.width * 4 + xb])) > 1) {
+                    if (!bad)
+                        *first = l << 24 | y << 12 | xb;
+                    bad++;
+                }
+    }
+    return bad;
+}
+
+// The sweep's chain generated with `sampling` on the 2D engine model, documented or as measured
+static void sweepChain(fx::Sampling sampling, bool measured, fx::MipChain &c, std::vector<uint8_t> &chain)
+{
+    fx::mipChainLayout(kSweepW, kSweepH, fx::fullLevels(kSweepW, kSweepH), 4, c);
+    std::vector<uint8_t> pitch(256 * kSweepH);
+    chain.assign(c.bytes, 0);
+    sweepPattern(pitch.data(), 256);
+    std::vector<uint32_t> push(fx::twodInitWords() + fx::generateWords(c, 0, c.levels - 1));
+    Push p{push.data(), push.data() + push.size()};
+    fx::emitTwodInit(p);
+    const fx::Pitch l0{0x1000000000ull, 256, kSweepW, kSweepH};
+    fx::emitGenerate(p, c, 0x2000000000ull, &l0, 0xcf, 0, c.levels - 1, sampling);
+    twodsim::Sim sim;
+    sim.quirkCentreHalfTexel = measured;
+    sim.map(l0.va, pitch);
+    sim.map(0x2000000000ull, chain);
+    sim.run(push.data(), size_t(p.at - push.data()));
+}
+
+static uint32_t sweepBad(fx::Sampling sampling, bool measured)
+{
+    fx::MipChain c;
+    std::vector<uint8_t> chain;
+    sweepChain(sampling, measured, c, chain);
+    uint32_t first;
+    return sweepCheck(c, chain.data(), &first, false);
+}
+
 static void testTeeth()
 {
     // (a) the per-level 2D wait dropped: the next level reads what the last wrote before it is done
@@ -360,42 +434,37 @@ static void testTeeth()
         sim.run(run.push.data(), size_t(p.at - run.push.data()));
         CHECK(compare(run, reference(run)) > 0, "teeth (c): an unclamped layout read back equal");
     }
-    // (d) the device self-test: passes on the modelled engine, fails on one sampling without the half-texel offset
-    for (int quirk = 0; quirk < 2; quirk++) {
+    // (d) the device's sweep (fx::kGm20bSampling's comment): the eight samplings its render server tried at every boot that ran
+    // the sweep, and the bytes below level 0 each made wrong in the Tegra view. The 2D engine model as measured gives the same
+    // counts; kGm20bSampling is exact on it and on the documented engine alike, and the documented sampling is not on the device.
+    {
+        static const fx::Sampling kSwept[8] = {{0, 0, 0}, {0, 0, -1}, {1, 1, -1}, {1, 1, 0},
+                                               {0, 1, 0}, {0, 0, 1},  {1, 0, 0},  {0, 1, -1}};
+        static const uint32_t kDevice[8] = {287, 230, 287, 0, 287, 26, 230, 0};
+        uint32_t counts[8];
+        for (int i = 0; i < 8; i++)
+            counts[i] = sweepBad(kSwept[i], true);
+        CHECK(!memcmp(counts, kDevice, sizeof counts),
+              "the measured model's sweep %u %u %u %u %u %u %u %u is not the device's 287 230 287 0 287 26 230 0",
+              counts[0], counts[1], counts[2], counts[3], counts[4], counts[5], counts[6], counts[7]);
+        CHECK(sweepBad(fx::kGm20bSampling, true) == 0 && sweepBad(fx::kGm20bSampling, false) == 0,
+              "kGm20bSampling is not exact on both engines");
+        CHECK(sweepBad(fx::Sampling{}, true) > 0, "teeth (d): the documented sampling passed on the measured engine");
+        printf("sweep: measured model %u %u %u %u %u %u %u %u (the device's), kGm20bSampling exact\n", counts[0],
+               counts[1], counts[2], counts[3], counts[4], counts[5], counts[6], counts[7]);
+    }
+    // the CPU's view of the chain: right in the Tegra arrangement is wrong in the Fermi one, and both are permutations
+    {
         fx::MipChain c;
-        fx::mipChainLayout(fx::kSelfTestW, fx::kSelfTestH, fx::fullLevels(fx::kSelfTestW, fx::kSelfTestH), 4, c);
-        std::vector<uint8_t> pitch(256 * fx::kSelfTestH), chain(c.bytes, 0);
-        fx::selfTestPattern(pitch.data(), 256);
-        std::vector<uint32_t> push(fx::twodInitWords() + fx::generateWords(c, 0, c.levels - 1));
-        Push p{push.data(), push.data() + push.size()};
-        fx::emitTwodInit(p);
-        const fx::Pitch l0{0x1000000000ull, 256, fx::kSelfTestW, fx::kSelfTestH};
-        fx::emitGenerate(p, c, 0x2000000000ull, &l0, 0xcf, 0, c.levels - 1);
-        twodsim::Sim sim;
-        sim.quirkNoHalfTexel = quirk;
-        sim.map(l0.va, pitch);
-        sim.map(0x2000000000ull, chain);
-        sim.run(push.data(), size_t(p.at - push.data()));
-        uint32_t first;
-        const uint32_t bad = fx::selfTestCheck(c, chain.data(), &first);
-        if (!quirk)
-            CHECK(bad == 0, "self-test fails on the modelled engine: %u bytes, first %08x", bad, first);
-        else
-            CHECK(bad > 0, "teeth (d): the self-test passed an engine without the half-texel offset");
-        if (!quirk) {  // the device line's second view: a chain right in the Tegra view reads wrong in the Fermi view
-            uint32_t f2;
-            CHECK(fx::selfTestCheck(c, chain.data(), &f2, true) > 0,
-                  "self-test's Fermi view does not tell the views apart");
-            std::vector<uint8_t> seen(512, 0);  // both GOB arrangements are permutations of the 512 bytes
-            for (uint32_t y = 0; y < 8; y++)
-                for (uint32_t x = 0; x < 64; x++)
-                    seen[fx::gobOffsetFermi(x, y)]++, seen[fx::gobOffset(x, y)] += 2;
-            CHECK(std::count(seen.begin(), seen.end(), 3) == 512, "GOB arrangements are not permutations");
-        }
-        if (quirk)
-            printf("self-test: modelled engine 0 bad bytes; engine without the half-texel offset %u bad (first level "
-                   "%u)\n",
-                   bad, first >> 24);
+        std::vector<uint8_t> chain;
+        sweepChain(fx::kGm20bSampling, false, c, chain);
+        uint32_t f2;
+        CHECK(sweepCheck(c, chain.data(), &f2, true) > 0, "the sweep's Fermi view does not tell the views apart");
+        std::vector<uint8_t> seen(512, 0);
+        for (uint32_t y = 0; y < 8; y++)
+            for (uint32_t x = 0; x < 64; x++)
+                seen[fx::gobOffsetFermi(x, y)]++, seen[fx::gobOffset(x, y)] += 2;
+        CHECK(std::count(seen.begin(), seen.end(), 3) == 512, "GOB arrangements are not permutations");
     }
 }
 

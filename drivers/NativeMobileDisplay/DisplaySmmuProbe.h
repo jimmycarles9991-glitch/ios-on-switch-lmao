@@ -141,10 +141,13 @@ struct DisplaySmmuProbe {
                     // next frame end, one more in case the latched CRC trails a frame
             return kNothing;
         }
-        if (wait && --wait)
-            return kNothing;
+        if (wait) {
+            --wait;
+            if (wait)
+                return kNothing;
+        }
         seen = crc;
-        Action failed;
+        Action failed = kNothing;
         if (!settle(crc, &failed))
             return failed;
         switch (stage) {

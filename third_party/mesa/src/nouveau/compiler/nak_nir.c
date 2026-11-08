@@ -263,6 +263,21 @@ lower_bit_size_cb(const nir_instr *instr, void *data)
                                 : alu->def.bit_size;
 
       switch (alu->op) {
+      /* ios-on-switch-lmao: SM53 has HADD2, HMUL2 and HFMA2 (nak/sm50.rs) */
+      case nir_op_fabs:
+      case nir_op_fadd:
+      case nir_op_fneg:
+      case nir_op_fmul:
+      case nir_op_ffma:
+      case nir_op_fsat:
+         if (bit_size == 16 && nak->sm >= 53 && nak->sm < 70)
+            return 0;
+         break;
+      default:
+         break;
+      }
+
+      switch (alu->op) {
       case nir_op_bit_count:
       case nir_op_ufind_msb:
       case nir_op_ifind_msb:

@@ -39,7 +39,9 @@ constexpr uint32_t kMcAllCountWeight = 0x400, kAvgWindowLog2 = 7;
 constexpr uint32_t kActmonIntid = 32 + 45, kActmonClock = 119;
 }  // namespace
 
+// NOLINTNEXTLINE(misc-use-internal-linkage): OSDefineMetaClassAndStructors needs the class's external linkage
 class SwitchEMC : public OSObject {
+    // NOLINTNEXTLINE(misc-explicit-constructor): IOKit's structors macro declares the metaclass constructor
     OSDeclareDefaultStructors(SwitchEMC) IOWorkLoop *loop = nullptr;
     IOInterruptEventSource *actmon = nullptr, *signal = nullptr;
     IOTimerEventSource *hold = nullptr;
@@ -52,6 +54,9 @@ class SwitchEMC : public OSObject {
 #if DEVELOPMENT || DEBUG
     uint64_t residency[SWITCH_EMC_MAX_RATES] = {}, since = 0;
     unsigned moves = 0;
+    // Hints that found the EMC below its top rate: from the first such hint to the BPMP's answer at the top rate.
+    uint64_t raiseAsked = 0, raiseTicks = 0, raiseMax = 0, bpmpMax = 0;
+    unsigned raises = 0;
 #endif
 
     static void actmonFired(OSObject *owner, IOInterruptEventSource *, int);
@@ -91,7 +96,7 @@ SwitchEMC *gEMC;
 // load, without waking the work loop.
 bool gTopHeld;
 
-void framesStarted(void)
+void framesStarted()
 {
     if (SwitchEMC *emc = __atomic_load_n(&gEMC, __ATOMIC_ACQUIRE))
         emc->hint();
@@ -133,7 +138,7 @@ bool SwitchEMC::setup(char *why, size_t size)
     uint32_t table[SWITCH_EMC_MAX_RATES * 2];
     unsigned now = 0;
     const int rows = tegra_bpmp_emc_rates(table, sizeof(table) / sizeof(table[0]));
-    int err = rows < 0 ? rows : tegra_bpmp_emc_get(&now);
+    const int err = rows < 0 ? rows : tegra_bpmp_emc_get(&now);
     if (rows < 0 || err) {
         snprintf(why, size, "the BPMP gave no EMC table or rate (%d)", rows < 0 ? rows : err);
         return false;
@@ -164,7 +169,7 @@ bool SwitchEMC::setup(char *why, size_t size)
 bool SwitchEMC::held(uint64_t now)
 {
     const uint64_t frame = switch_idle_last_frame();
-    return now < __atomic_load_n(&hintUntil, __ATOMIC_ACQUIRE) || (frame && now - frame < frameTicks);
+    return now < __atomic_load_n(&hintUntil, __ATOMIC_ACQUIRE) || ((frame != 0u) && now - frame < frameTicks);
 }
 
 void SwitchEMC::armHoldEnd(uint64_t now)
@@ -204,9 +209,10 @@ void SwitchEMC::moveTo(unsigned index)
     unsigned now = 0;
     const int err = tegra_bpmp_emc_set(khz[index], &now);
     if (err) {
-        if (!refusalLogged)
+        if (!refusalLogged) {
             os_log_error(OS_LOG_DEFAULT, "SwitchEMC: the BPMP refused %u kHz (%d); staying at %u kHz", khz[index], err,
                          khz[cur]);
+        }
         refusalLogged = true;
         return;
     }
@@ -239,7 +245,21 @@ void SwitchEMC::signalFired(OSObject *owner, IOInterruptEventSource *, int)
     auto *self = static_cast<SwitchEMC *>(owner);
     if (!self->governing)
         return;
+#if DEVELOPMENT || DEBUG
+    const unsigned before = self->cur;
+    const uint64_t bpmp = mach_absolute_time();
+#endif
     self->moveTo(self->count - 1);
+#if DEVELOPMENT || DEBUG
+    const uint64_t asked = __atomic_exchange_n(&self->raiseAsked, 0, __ATOMIC_RELAXED);
+    if (before != self->cur && asked) {
+        const uint64_t now = mach_absolute_time();
+        self->raises++;
+        self->raiseTicks += now - asked;
+        self->raiseMax = now - asked > self->raiseMax ? now - asked : self->raiseMax;
+        self->bpmpMax = now - bpmp > self->bpmpMax ? now - bpmp : self->bpmpMax;
+    }
+#endif
     self->program();
 }
 
@@ -253,13 +273,19 @@ void SwitchEMC::holdFired(OSObject *owner, IOTimerEventSource *)
 // Any context (the scheduler's callout, an interrupt filter, a thread): the top rate at once, kept for the hold.
 void SwitchEMC::hint()
 {
-    uint64_t until = mach_absolute_time() + holdTicks;
+    const uint64_t until = mach_absolute_time() + holdTicks;
     uint64_t was = __atomic_load_n(&hintUntil, __ATOMIC_RELAXED);
     while (until > was &&
            !__atomic_compare_exchange_n(&hintUntil, &was, until, true, __ATOMIC_RELEASE, __ATOMIC_RELAXED)) {
     }
-    if (!__atomic_load_n(&gTopHeld, __ATOMIC_ACQUIRE))
+    if (!__atomic_load_n(&gTopHeld, __ATOMIC_ACQUIRE)) {
+#if DEVELOPMENT || DEBUG
+        uint64_t none = 0;
+        __atomic_compare_exchange_n(&raiseAsked, &none, mach_absolute_time(), false, __ATOMIC_RELAXED,
+                                    __ATOMIC_RELAXED);
+#endif
         signal->interruptOccurred(nullptr, nullptr, 0);
+    }
 }
 
 void SwitchEMC::startActmon()
@@ -338,7 +364,8 @@ IOReturn SwitchEMC::statsAction(OSObject *owner, void *line, void *size, void *w
 size_t SwitchEMC::stats(char *line, size_t size)
 {
     const uint64_t t = mach_absolute_time();
-    uint64_t total = 0, at[SWITCH_EMC_MAX_RATES];
+    uint64_t total = 0;
+    uint64_t at[SWITCH_EMC_MAX_RATES];
     for (unsigned i = 0; i < count; ++i) {
         at[i] = residency[i] + (governing && i == cur ? t - since : 0);
         total += at[i];
@@ -348,9 +375,15 @@ size_t SwitchEMC::stats(char *line, size_t size)
         const unsigned pm = total ? static_cast<unsigned>(at[i] * 1000 / total) : 0;
         n += static_cast<size_t>(snprintf(line + n, size - n, " %u:%u.%u%%", khz[i] / 1000, pm / 10, pm % 10));
     }
+    if (n < size) {
+        n += static_cast<size_t>(
+            snprintf(line + n, size - n, ", %u raises: hint to top %llu/%llu us (BPMP max %llu us)", raises,
+                     raises ? raiseTicks / raises * 5 / 96 : 0, raiseMax * 5 / 96, bpmpMax * 5 / 96));
+    }
     memset(residency, 0, sizeof(residency));
     since = t;
-    moves = 0;
+    moves = raises = 0;
+    raiseTicks = raiseMax = bpmpMax = 0;
     return n;
 }
 #endif
@@ -358,6 +391,7 @@ size_t SwitchEMC::stats(char *line, size_t size)
 extern "C" void switch_emc_start(void)
 {
     char why[128];
+    // NOLINTNEXTLINE(misc-const-correctness): __atomic_store_n publishes it as gEMC, which is not const
     SwitchEMC *emc = SwitchEMC::create(why, sizeof(why));
     if (!emc) {
         IOLog("SwitchEMC: on-demand EMC off: %s\n", why);
@@ -373,10 +407,11 @@ extern "C" void switch_emc_hint(unsigned int hint)
     SwitchEMC *emc = __atomic_load_n(&gEMC, __ATOMIC_ACQUIRE);
     if (!emc)
         return;
-    if (hint == SWITCH_PERF_HINT_BOOT_DONE)
+    if (hint == SWITCH_PERF_HINT_BOOT_DONE) {
         emc->govern();
-    else
+    } else {
         emc->hint();
+    }
 }
 
 // TegraGM20B, before each channel's doorbell: work for the GPU, so the EMC goes to its top rate ahead of that work's

@@ -19,7 +19,7 @@ inline uint32_t switchSdBits(const uint8_t *reg, unsigned bits, unsigned hi, uns
 {
     uint32_t value = 0;
     for (unsigned bit = hi + 1; bit-- > lo;)
-        value = value << 1 | ((reg[(bits - 1 - bit) / 8] >> (bit % 8)) & 1u);
+        value = value << 1 | ((static_cast<uint32_t>(reg[(bits - 1 - bit) / 8]) >> (bit % 8)) & 1u);
     return value;
 }
 
@@ -114,13 +114,14 @@ inline SwitchSdCsd switchSdParseCsd(const uint8_t csd[16])
     c.structure = static_cast<uint8_t>(switchSdBits(csd, 128, 127, 126));
     c.tranSpeed = static_cast<uint8_t>(switchSdBits(csd, 128, 103, 96));
     c.ccc = static_cast<uint16_t>(switchSdBits(csd, 128, 95, 84));
-    if (c.structure == 1)
+    if (c.structure == 1) {
         c.bytes = (static_cast<uint64_t>(switchSdBits(csd, 128, 69, 48)) + 1) * 512 * 1024;
-    else if (c.structure == 2)
+    } else if (c.structure == 2) {
         c.bytes = (static_cast<uint64_t>(switchSdBits(csd, 128, 75, 48)) + 1) * 512 * 1024;
-    else if (c.structure == 0)
+    } else if (c.structure == 0) {
         c.bytes = (static_cast<uint64_t>(switchSdBits(csd, 128, 73, 62)) + 1)
                   << (switchSdBits(csd, 128, 49, 47) + 2 + switchSdBits(csd, 128, 83, 80));
+    }
     return c;
 }
 
@@ -142,7 +143,15 @@ inline SwitchSdScr switchSdParseScr(const uint8_t scr[8])
     s.spec4 = static_cast<uint8_t>(switchSdBits(scr, 64, 42, 42));
     s.specX = static_cast<uint8_t>(switchSdBits(scr, 64, 41, 38));
     s.cmdSupport = static_cast<uint8_t>(switchSdBits(scr, 64, 35, 32));
-    s.major = s.spec < 2 ? 1 : !s.spec3 ? 2 : s.specX ? static_cast<uint8_t>(4 + s.specX) : s.spec4 ? 4 : 3;
+    if (s.spec < 2) {
+        s.major = 1;
+    } else if (!s.spec3) {
+        s.major = 2;
+    } else if (s.specX) {
+        s.major = static_cast<uint8_t>(4 + s.specX);
+    } else {
+        s.major = s.spec4 ? 4 : 3;
+    }
     return s;
 }
 
@@ -173,11 +182,11 @@ inline SwitchSdStatus switchSdParseStatus(const uint8_t ssr[64])
     s.appClass = static_cast<uint8_t>(switchSdBits(ssr, 512, 339, 336));
     const uint32_t queue = switchSdBits(ssr, 512, 335, 331);
     s.cqDepth = static_cast<uint8_t>(queue ? queue + 1 : 0);
-    s.cache = switchSdBits(ssr, 512, 330, 330);
-    s.hostMaintenance = switchSdBits(ssr, 512, 329, 329);
-    s.cardMaintenance = switchSdBits(ssr, 512, 328, 328);
-    s.discard = switchSdBits(ssr, 512, 313, 313);
-    s.fule = switchSdBits(ssr, 512, 312, 312);
+    s.cache = (switchSdBits(ssr, 512, 330, 330) != 0u);
+    s.hostMaintenance = (switchSdBits(ssr, 512, 329, 329) != 0u);
+    s.cardMaintenance = (switchSdBits(ssr, 512, 328, 328) != 0u);
+    s.discard = (switchSdBits(ssr, 512, 313, 313) != 0u);
+    s.fule = (switchSdBits(ssr, 512, 312, 312) != 0u);
     // 16 KiB to 4 MiB in powers of two, then 8, 12, 16, 24, 32 and 64 MiB (Table 4-47).
     static const uint32_t kAuKiB[] = {0,    16,   32,   64,    128,   256,   512,   1024,
                                       2048, 4096, 8192, 12288, 16384, 24576, 32768, 65536};
@@ -193,7 +202,8 @@ inline SwitchSdStatus switchSdParseStatus(const uint8_t ssr[64])
 inline uint64_t switchSdEraseTimeoutMs(const SwitchSdStatus &s, uint64_t aus)
 {
     const uint64_t ms = s.eraseSize && s.eraseTimeout
-                            ? uint64_t(s.eraseTimeout) * 1000 * aus / s.eraseSize + uint64_t(s.eraseOffset) * 1000
+                            ? static_cast<uint64_t>(s.eraseTimeout) * 1000 * aus / s.eraseSize +
+                                  static_cast<uint64_t>(s.eraseOffset) * 1000
                             : 250 * aus;
     return ms < 1000 ? 1000 : ms;
 }
@@ -219,7 +229,7 @@ inline uint32_t switchSdExtArgument(uint8_t fno, uint32_t address, uint32_t leng
 // Whether [address, address + length) is a valid single-page access.
 inline bool switchSdExtRange(uint32_t address, uint32_t length)
 {
-    return length && length <= 512 && address <= 0x1ffff && (address & 0x1ff) + length <= 512;
+    return (length != 0u) && length <= 512 && address <= 0x1ffff && (address & 0x1ff) + length <= 512;
 }
 
 struct SwitchSdExtFunction {
@@ -237,7 +247,7 @@ struct SwitchSdGeneralInfo {
 
 inline uint16_t switchLe16(const uint8_t *p)
 {
-    return static_cast<uint16_t>(p[0] | p[1] << 8);
+    return static_cast<uint16_t>(p[0] | static_cast<uint32_t>(p[1]) << 8);
 }
 
 inline uint32_t switchLe32(const uint8_t *p)
@@ -270,7 +280,7 @@ inline SwitchSdGeneralInfo switchSdParseGeneralInfo(const uint8_t *info, uint32_
         const uint32_t next = switchLe16(info + ext + 40) & 0x3ff;
         if (info[ext + 42] == 1) {
             const uint32_t set = switchLe32(info + ext + 44);
-            SwitchSdExtFunction f = {true, static_cast<uint8_t>(set >> 18 & 0xf), set & 0x1ffff};
+            const SwitchSdExtFunction f = {true, static_cast<uint8_t>(set >> 18 & 0xf), set & 0x1ffff};
             if (sfc == 1 && !g.power.found)
                 g.power = f;
             if (sfc == 2 && !g.perf.found)
@@ -319,10 +329,10 @@ inline SwitchSdPerf switchSdParsePerf(const uint8_t *reg)
 {
     SwitchSdPerf p = {};
     p.revision = reg[0];
-    p.fxEvent = reg[1] & 1;
-    p.cardMaintenance = reg[2] & 1;
+    p.fxEvent = ((reg[1] & 1) != 0);
+    p.cardMaintenance = ((reg[2] & 1) != 0);
     p.hostMaintenance = (reg[2] & 2) != 0;
-    p.cache = reg[4] & 1;
+    p.cache = ((reg[4] & 1) != 0);
     p.cqDepth = static_cast<uint8_t>(reg[6] && reg[6] <= 0x1f ? reg[6] + 1 : 0);
     for (unsigned i = 8; i < 16; ++i)
         p.taskErrors |= reg[i];
@@ -413,9 +423,9 @@ inline void switchSdR1ErrorNames(uint32_t r1, char *out, unsigned long size)
 // ---- Data command framing ------------------------------------------------------------------------------------------
 // SDHCI TRANSFER_MODE (0x0c) bits and the COMMAND (0x0e) low byte of a data command with an R1 response (48-bit, CRC and
 // index checked, data present).
-constexpr uint16_t kSdTransferDma = 0x01, kSdTransferBlockCount = 0x02, kSdTransferAutoCmd12 = 0x04,
+constexpr uint32_t kSdTransferDma = 0x01, kSdTransferBlockCount = 0x02, kSdTransferAutoCmd12 = 0x04,
                    kSdTransferAutoCmd23 = 0x08, kSdTransferRead = 0x10, kSdTransferMulti = 0x20;
-constexpr uint16_t kSdDataR1 = 0x3a;
+constexpr uint32_t kSdDataR1 = 0x3a;
 
 struct SwitchSdFrame {
     uint16_t transfer, command;
@@ -431,10 +441,13 @@ inline SwitchSdFrame switchSdBlockFrame(uint32_t sectors, bool write, bool cmd23
 {
     const bool multi = sectors > 1;
     uint16_t transfer = static_cast<uint16_t>(kSdTransferDma | (write ? 0 : kSdTransferRead));
-    if (multi)
+    if (multi) {
         transfer = static_cast<uint16_t>(transfer | kSdTransferBlockCount | kSdTransferMulti |
                                          (cmd23 ? kSdTransferAutoCmd23 : kSdTransferAutoCmd12));
-    const uint16_t index = static_cast<uint16_t>(write ? (multi ? 25 : 24) : (multi ? 18 : 17));
+    }
+    const uint32_t writeIndex = multi ? 25 : 24;
+    const uint32_t readIndex = multi ? 18 : 17;
+    const uint32_t index = write ? writeIndex : readIndex;
     return {transfer, static_cast<uint16_t>(index << 8 | kSdDataR1), multi && cmd23 ? sectors : 0, multi && !cmd23};
 }
 
@@ -466,5 +479,5 @@ inline SwitchSdFrame switchSdTaskFrame(uint32_t sectors)
     const bool multi = sectors > 1;
     const uint16_t transfer = static_cast<uint16_t>(kSdTransferDma | kSdTransferRead |
                                                     (multi ? kSdTransferBlockCount | kSdTransferMulti : 0));
-    return {transfer, static_cast<uint16_t>(46 << 8 | kSdDataR1), 0, false};
+    return {transfer, static_cast<uint16_t>(46u << 8 | kSdDataR1), 0, false};
 }

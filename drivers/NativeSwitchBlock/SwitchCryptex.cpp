@@ -34,8 +34,10 @@
 #include "SwitchCryptex.h"
 #include "SwitchCryptexCache.h"
 #include "SwitchCryptexMap.h"
+#include "../../kits/SwitchTime/SwitchTime.h"
 
-struct switch_record_entry {  // bsd/vfs/vfs_cluster.c
+// NOLINTNEXTLINE(misc-use-internal-linkage): the layout bsd/vfs/vfs_cluster.c writes, named in its C interface
+struct switch_record_entry {
     vnode_t vp;
     uint64_t offset;
     uint32_t length;
@@ -53,20 +55,23 @@ void switch_cluster_record_start(struct switch_record_entry *log, uint32_t capac
 uint32_t switch_cluster_record_stop(void);                                             // bsd/vfs/vfs_cluster.c
 #if DEVELOPMENT || DEBUG
 void switch_cluster_image_direct(uint64_t bytes, uint32_t cardReads);  // bsd/vfs/vfs_cluster.c
-#endif
+// NOLINTNEXTLINE(readability-redundant-declaration): not every kernel configuration's headers declare it
 int vnode_pagein(vnode_t, upl_t, upl_offset_t, vm_object_offset_t, upl_size_t, int, int *);  // bsd/vm/vnode_pager.c
-int VFS_VGET(mount_t, ino64_t, vnode_t *, vfs_context_t);                                    // bsd/vfs/kpi_vfs.c
-IOBlockStorageDevice *switch_block_device(IOService **controller, dev_t *whole, uint64_t *sectors,
-                                          uint32_t *maxReadSectors);  // NativeSwitchBlock.cpp
+#endif
+// bsd/vm/vnode_pager.c
+int VFS_VGET(mount_t, ino64_t, vnode_t *, vfs_context_t);  // bsd/vfs/kpi_vfs.c
+LIBKERN_RETURNS_NOT_RETAINED IOBlockStorageDevice *
+switch_block_device(IOService **controller, dev_t *whole, uint64_t *sectors,
+                    uint32_t *maxReadSectors);  // NativeSwitchBlock.cpp
 void qsort(void *, size_t, size_t, int (*)(const void *, const void *));
 processor_t cpu_to_processor(int);
 void processor_cpu_load_info(processor_t, natural_t ticks[CPU_STATE_MAX]);
+// NOLINTNEXTLINE(readability-redundant-declaration): not every kernel configuration's headers declare it
 int ml_get_max_cpu_number(void);
 }
 
 namespace {
-const char *const paths[SWITCH_CRYPTEX_COUNT] = {"/private/preboot/Switch-Staging/044-76034-038.dmg",
-                                                 "/private/preboot/Switch-Staging/044-75188-038.dmg"};
+const char *const paths[SWITCH_CRYPTEX_COUNT] = {SWITCH_SYSTEM_CRYPTEX_IMAGE, SWITCH_APP_CRYPTEX_IMAGE};
 const char *const uuids[SWITCH_CRYPTEX_COUNT] = {SWITCH_SYSTEM_CRYPTEX_UUID, SWITCH_APP_CRYPTEX_UUID};
 // Fixed development identifier consumed by the owner boot-manifest code.
 const uint8_t systemIdentifier[48] = {0x13, 0x14, 0x8b, 0xb4, 0x2c, 0x8c, 0xe4, 0xb5, 0x6d, 0x83, 0x5d, 0x89,
@@ -77,20 +82,13 @@ int results[SWITCH_CRYPTEX_COUNT] = {ENXIO, ENXIO};
 bool attempted[SWITCH_CRYPTEX_COUNT];
 IOService *directDevice[SWITCH_CRYPTEX_COUNT];  // the image's direct read map, when it is the one attached
 
-uint64_t uptimeMs()
-{
-    uint64_t ns;
-    absolutetime_to_nanoseconds(mach_absolute_time(), &ns);
-    return ns / 1000000;
-}
-
-bool below(IORegistryEntry *media, IORegistryEntry *ancestor)
+bool below(const IORegistryEntry *media, const IORegistryEntry *ancestor)
 {
     bool found = false;
-    IORegistryEntry *entry = media->copyParentEntry(gIOServicePlane);
+    const IORegistryEntry *entry = media->copyParentEntry(gIOServicePlane);
     for (unsigned depth = 0; entry && depth < 32 && !found; ++depth) {
         found = entry == ancestor;
-        IORegistryEntry *parent = entry->copyParentEntry(gIOServicePlane);
+        const IORegistryEntry *parent = entry->copyParentEntry(gIOServicePlane);
         entry->release();
         entry = parent;
     }
@@ -99,11 +97,11 @@ bool below(IORegistryEntry *media, IORegistryEntry *ancestor)
 }
 
 // The IOMedia carrying this volume UUID once IOMediaBSDClient has named it (below `ancestor` if one is given).
-int findVolume(const char *uuid, IORegistryEntry *ancestor, dev_t *device, char *path, size_t capacity)
+int findVolume(const char *uuid, const IORegistryEntry *ancestor, dev_t *device, char *path, size_t capacity)
 {
     OSDictionary *match = IOService::serviceMatching("IOMedia");
     OSDictionary *properties = OSDictionary::withCapacity(1);
-    OSString *wanted = OSString::withCString(uuid);
+    const OSString *wanted = OSString::withCString(uuid);
     if (!match || !properties || !wanted) {
         OSSafeReleaseNULL(match);
         OSSafeReleaseNULL(properties);
@@ -119,12 +117,12 @@ int findVolume(const char *uuid, IORegistryEntry *ancestor, dev_t *device, char 
     if (!it)
         return EAGAIN;
     int error = EAGAIN;
-    while (auto *media = OSDynamicCast(IOService, it->getNextObject())) {
+    while (const auto *media = OSDynamicCast(IOService, it->getNextObject())) {
         if (ancestor && !below(media, ancestor))
             continue;
-        auto *name = OSDynamicCast(OSString, media->getProperty(kIOBSDNameKey));
-        auto *majorNumber = OSDynamicCast(OSNumber, media->getProperty(kIOBSDMajorKey));
-        auto *minorNumber = OSDynamicCast(OSNumber, media->getProperty(kIOBSDMinorKey));
+        const auto *name = OSDynamicCast(OSString, media->getProperty(kIOBSDNameKey));
+        const auto *majorNumber = OSDynamicCast(OSNumber, media->getProperty(kIOBSDMajorKey));
+        const auto *minorNumber = OSDynamicCast(OSNumber, media->getProperty(kIOBSDMinorKey));
         if (!name || !majorNumber || !minorNumber)
             continue;
         *device = makedev(majorNumber->unsigned32BitValue(), minorNumber->unsigned32BitValue());
@@ -183,7 +181,7 @@ constexpr uint32_t kBootWindows = 256;
 constexpr uint32_t kSteadyWindows = 64;
 constexpr uint32_t kMinWindows = 8;
 constexpr uint32_t kBuckets = 1024;
-constexpr uint64_t kAroundBytes = 16 * kImageBlock;  // reads up to 64 KiB read their windows around them
+constexpr uint64_t kAroundBytes = 16ULL * kImageBlock;  // reads up to 64 KiB read their windows around them
 constexpr uint32_t kRequestReads = kSwitchAroundWindows * kSwitchWindowReads;
 constexpr unsigned kWorkers = 4;  // prefetch threads: APFS pages a run in one block at a time
 
@@ -244,17 +242,19 @@ struct {
 
 bool isPrefetchThread(thread_t thread)
 {
-    for (unsigned i = 0; i < kWorkers; ++i)
-        if (__atomic_load_n(&gFlow.threads[i], __ATOMIC_RELAXED) == thread)
+    for (thread_t &slot : gFlow.threads) {
+        if (__atomic_load_n(&slot, __ATOMIC_RELAXED) == thread)
             return true;
+    }
     return false;
 }
 
 bool prefetchRunning()
 {
-    for (unsigned i = 0; i < kWorkers; ++i)
-        if (__atomic_load_n(&gFlow.threads[i], __ATOMIC_RELAXED) != THREAD_NULL)
+    for (thread_t &slot : gFlow.threads) {
+        if (__atomic_load_n(&slot, __ATOMIC_RELAXED) != THREAD_NULL)
             return true;
+    }
     return false;
 }
 
@@ -330,14 +330,15 @@ void returnJob(Job *j)
 }
 
 // The request's blocks, out of its windows into its memory (the windows are held: their blocks do not change).
-bool copyOut(Pending *p)
+bool copyOut(const Pending *p)
 {
-    const uint64_t first = p->start / kImageBlock, end = first + p->length / kImageBlock;
+    const uint64_t first = p->start / kImageBlock;
+    const uint64_t end = first + p->length / kImageBlock;
     for (uint32_t i = 0; i < p->cache.windows; ++i) {
         const SwitchWindow *w = p->cache.window[i];
         const uint64_t from = first > w->tag ? first : w->tag;
         const uint64_t to = end < w->tag + kSwitchWindowBlocks ? end : w->tag + kSwitchWindowBlocks;
-        uint8_t *bytes = static_cast<uint8_t *>(w->bytes) + (from - w->tag) * kImageBlock;
+        const uint8_t *bytes = static_cast<uint8_t *>(w->bytes) + (from - w->tag) * kImageBlock;
         if (from >= to || !switchClientCopy(p->buffer, bytes, static_cast<uint32_t>((to - from) * kImageBlock), true,
                                             copypv, static_cast<uint32_t>((from - first) * kImageBlock)))
             return false;
@@ -395,14 +396,15 @@ void pieceDone(void *, void *parameter, IOReturn status, UInt64 actualByteCount)
 void jobFinish(Job *j)
 {
     IOLockLock(gCache.lock);
-    SwitchCacheRequest *ready = gCache.cache.finished(j->window, j->first, j->count, j->status == kIOReturnSuccess);
+    const SwitchCacheRequest *ready =
+        gCache.cache.finished(j->window, j->first, j->count, j->status == kIOReturnSuccess);
     IOLockUnlock(gCache.lock);
     const uint64_t ahead = j->ahead;
     returnJob(j);
     if (ahead)
         flowDone(ahead);
     while (ready) {
-        SwitchCacheRequest *next = ready->nextReady;  // (the request may be gone once told)
+        const SwitchCacheRequest *next = ready->nextReady;  // (the request may be gone once told)
         pieceDone(nullptr, ready->owner, kIOReturnSuccess, 0);
         ready = next;
     }
@@ -423,9 +425,19 @@ void jobPieceDone(void *, void *parameter, IOReturn status, UInt64)
     if (__atomic_sub_fetch(&j->remaining, 1, __ATOMIC_ACQ_REL) == 0)
         jobFinish(j);
 }
+
+void putString(OSDictionary *dictionary, const char *key, const char *value)
+{
+    if (const OSString *string = OSString::withCStringNoCopy(value)) {
+        dictionary->setObject(key, string);
+        string->release();
+    }
+}
 }  // namespace
 
+// NOLINTNEXTLINE(misc-use-internal-linkage): OSDefineMetaClassAndStructors needs external linkage (kalloc type view)
 class SwitchCryptexDevice : public IOBlockStorageDevice {
+    // NOLINTNEXTLINE(misc-explicit-constructor): IOKit's structors macro declares the metaclass constructor
 OSDeclareDefaultStructors(SwitchCryptexDevice)
 
     public : bool configure(unsigned image, Extent *map, uint32_t count, uint64_t bytes, IOBlockStorageDevice *sd,
@@ -453,22 +465,27 @@ OSDeclareDefaultStructors(SwitchCryptexDevice)
 
     char *getVendorString() override
     {
-        return const_cast<char *>("Switch");
+        static char vendor[] = "Switch";
+        return vendor;
     }
 
     char *getProductString() override
     {
-        return const_cast<char *>(index ? "App cryptex" : "System cryptex");
+        static char app[] = "App cryptex";
+        static char base[] = "System cryptex";
+        return index ? app : base;
     }
 
     char *getRevisionString() override
     {
-        return const_cast<char *>("1.0");
+        static char revision[] = "1.0";
+        return revision;
     }
 
     char *getAdditionalDeviceInfoString() override
     {
-        return const_cast<char *>("cryptex image extents on SDMMC1");
+        static char info[] = "cryptex image extents on SDMMC1";
+        return info;
     }
 
     IOReturn reportBlockSize(UInt64 *value) override
@@ -558,26 +575,27 @@ OSDefineMetaClassAndStructors(SwitchCryptexDevice, IOBlockStorageDevice)
     bool SwitchCryptexDevice::configure(unsigned image, Extent *map, uint32_t count, uint64_t bytes,
                                         IOBlockStorageDevice *sdDevice, uint64_t, uint32_t sdMaxSectors)
 {
+    if (!map)
+        return false;
     index = image;
     extents = map;
     extentCount = count;
     blocks = bytes / kImageBlock;
     sd = sdDevice;
-    maxPiece = uint64_t(sdMaxSectors) * kSdSector;
+    maxPiece = static_cast<uint64_t>(sdMaxSectors) * kSdSector;
     for (uint32_t i = 0; i < count; ++i)
         holes |= map[i].disk == kSwitchHole;
     // A request larger than one SD read is split here anyway; IOBlockStorageDriver keeps them at 1 MiB.
     setProperty(kIOMaximumBlockCountReadKey, (1024 * 1024) / kImageBlock, 64);
-    setProperty(kIOMaximumByteCountReadKey, 1024 * 1024, 64);
+    setProperty(kIOMaximumByteCountReadKey, 1024LL * 1024, 64);
     if (OSDictionary *protocol = OSDictionary::withCapacity(2)) {
-        protocol->setObject(kIOPropertyPhysicalInterconnectTypeKey, OSString::withCStringNoCopy("SD"));
-        protocol->setObject(kIOPropertyPhysicalInterconnectLocationKey,
-                            OSString::withCStringNoCopy(kIOPropertyInternalKey));
+        putString(protocol, kIOPropertyPhysicalInterconnectTypeKey, "SD");
+        putString(protocol, kIOPropertyPhysicalInterconnectLocationKey, kIOPropertyInternalKey);
         setProperty(kIOPropertyProtocolCharacteristicsKey, protocol);
         protocol->release();
     }
     if (OSDictionary *device = OSDictionary::withCapacity(1)) {
-        device->setObject(kIOPropertyMediumTypeKey, OSString::withCStringNoCopy(kIOPropertyMediumTypeSolidStateKey));
+        putString(device, kIOPropertyMediumTypeKey, kIOPropertyMediumTypeSolidStateKey);
         setProperty(kIOPropertyDeviceCharacteristicsKey, device);
         device->release();
     }
@@ -594,7 +612,8 @@ IOReturn SwitchCryptexDevice::doAsyncReadWrite(IOMemoryDescriptor *buffer, UInt6
         return kIOReturnBadArgument;
     if (buffer->getDirection() != kIODirectionIn)
         return kIOReturnNotWritable;
-    const uint64_t length = count * kImageBlock, start = block * kImageBlock;
+    const uint64_t length = count * kImageBlock;
+    const uint64_t start = block * kImageBlock;
     if (buffer->getLength() < length)
         return kIOReturnBadArgument;
     Pending *p = takePending();
@@ -624,7 +643,8 @@ IOReturn SwitchCryptexDevice::doAsyncReadWrite(IOMemoryDescriptor *buffer, UInt6
         gFlow.inflight += length;
         IOLockUnlock(gFlow.lock);
     }
-    uint32_t pieces = 0, at = switchExtentAt(extents, extentCount, start);
+    uint32_t pieces = 0;
+    uint32_t at = switchExtentAt(extents, extentCount, start);
     uint64_t done = 0;
     if (holes) {
         // A range the image file does not store reads as zeros: written before any card read is issued into the same
@@ -633,9 +653,10 @@ IOReturn SwitchCryptexDevice::doAsyncReadWrite(IOMemoryDescriptor *buffer, UInt6
             const SwitchPiece piece = switchNextPiece(extents, extentCount, &z, start + done, length - done, maxPiece);
             if (!piece.length)
                 break;
-            for (uint64_t k = 0; piece.disk == kSwitchHole && k < piece.length; k += kImageBlock)
+            for (uint64_t k = 0; piece.disk == kSwitchHole && k < piece.length; k += kImageBlock) {
                 if (buffer->writeBytes(done + k, gZeros, kImageBlock) != kImageBlock)
                     failPending(p, kIOReturnIOError);
+            }
             done += piece.length;
         }
         done = 0;
@@ -710,15 +731,16 @@ uint32_t SwitchCryptexDevice::issueRead(const SwitchCacheRead &read, bool ahead)
     Job *j = takeJob();
     if (!j) {  // the read fails at once: its blocks are read again by the next request that wants them
         IOLockLock(gCache.lock);
-        SwitchCacheRequest *ready = gCache.cache.finished(read.window, read.first, read.count, false);
+        const SwitchCacheRequest *ready = gCache.cache.finished(read.window, read.first, read.count, false);
         IOLockUnlock(gCache.lock);
-        for (SwitchCacheRequest *next; ready; ready = next) {
+        for (const SwitchCacheRequest *next = nullptr; ready; ready = next) {
             next = ready->nextReady;
             pieceDone(nullptr, ready->owner, kIOReturnSuccess, 0);
         }
         return 0;
     }
-    const uint64_t start = (read.window->tag + read.first) * kImageBlock, length = uint64_t(read.count) * kImageBlock;
+    const uint64_t start = (read.window->tag + read.first) * kImageBlock;
+    const uint64_t length = static_cast<uint64_t>(read.count) * kImageBlock;
     *j = {nullptr, read.window, read.first, read.count, 1, kIOReturnSuccess, ahead ? length : 0};
     if (j->ahead) {
         IOLockLock(gFlow.lock);
@@ -726,8 +748,9 @@ uint32_t SwitchCryptexDevice::issueRead(const SwitchCacheRead &read, bool ahead)
         IOLockUnlock(gFlow.lock);
     }
     auto *memory = static_cast<IOBufferMemoryDescriptor *>(read.window->memory);
-    uint8_t *bytes = static_cast<uint8_t *>(read.window->bytes) + uint64_t(read.first) * kImageBlock;
-    uint32_t pieces = 0, at = switchExtentAt(extents, extentCount, start);
+    uint8_t *bytes = static_cast<uint8_t *>(read.window->bytes) + static_cast<uint64_t>(read.first) * kImageBlock;
+    uint32_t pieces = 0;
+    uint32_t at = switchExtentAt(extents, extentCount, start);
     uint64_t done = 0;
     while (done < length) {
         const SwitchPiece piece = switchNextPiece(extents, extentCount, &at, start + done, length - done, maxPiece);
@@ -739,7 +762,7 @@ uint32_t SwitchCryptexDevice::issueRead(const SwitchCacheRead &read, bool ahead)
             continue;
         }
         IOSubMemoryDescriptor *sub = IOSubMemoryDescriptor::withSubRange(
-            memory, uint64_t(read.first) * kImageBlock + done, piece.length, kIODirectionIn);
+            memory, static_cast<uint64_t>(read.first) * kImageBlock + done, piece.length, kIODirectionIn);
         if (!sub)
             break;
         __atomic_fetch_add(&j->remaining, 1, __ATOMIC_RELAXED);
@@ -833,9 +856,10 @@ IOReturn SwitchCryptexDevice::readBlock(IOMemoryDescriptor *buffer, uint64_t blo
         uint64_t deadline = 0;
         clock_interval_to_deadline(10, NSEC_PER_SEC, &deadline);
         IOLockLock(wait.lock);
-        while (!wait.done)
+        while (!wait.done) {
             if (IOLockSleepDeadline(wait.lock, &wait, deadline, THREAD_UNINT) == THREAD_TIMED_OUT && !wait.done)
                 panic("SwitchCryptex: a read of block %llu of %s never completed (10 s)", block, paths[index]);
+        }
         IOLockUnlock(wait.lock);
         status = wait.status;
     }
@@ -890,7 +914,7 @@ const char *proveCache(SwitchCryptexDevice *device, vnode_t image, const Extent 
 {
     IOBufferMemoryDescriptor *buffer = IOBufferMemoryDescriptor::withOptions(kIODirectionIn, kImageBlock, kImageBlock);
     auto *file = static_cast<uint8_t *>(IOMallocData(kImageBlock));
-    const bool prepared = buffer && buffer->prepare() == kIOReturnSuccess;
+    const bool prepared = (buffer != nullptr) && buffer->prepare() == kIOReturnSuccess;
     const char *why = prepared && file ? nullptr : "no memory";
     uint64_t offsets[kSampledExtents + 3];
     unsigned n = 0;
@@ -899,18 +923,19 @@ const char *proveCache(SwitchCryptexDevice *device, vnode_t image, const Extent 
         offsets[n++] = kImageBlock;
     offsets[n++] = bytes - kImageBlock;
     for (unsigned k = 1; k <= kSampledExtents && count > 2; ++k)
-        offsets[n++] = map[uint64_t(count - 1) * k / (kSampledExtents + 1)].file;
+        offsets[n++] = map[static_cast<uint64_t>(count - 1) * k / (kSampledExtents + 1)].file;
     vfs_context_t ctx = vfs_context_current();
     for (unsigned i = 0; i < n && !why; ++i) {
         int resid = 0;
         if (vn_rdwr(UIO_READ, image, reinterpret_cast<caddr_t>(file), kImageBlock, static_cast<off_t>(offsets[i]),
                     UIO_SYSSPACE, IO_NOAUTH, vfs_context_ucred(ctx), &resid, vfs_context_proc(ctx)) ||
-            resid)
+            resid) {
             why = "the image file could not be read";
-        else if (device->readBlock(buffer, offsets[i] / kImageBlock) != kIOReturnSuccess)
+        } else if (device->readBlock(buffer, offsets[i] / kImageBlock) != kIOReturnSuccess) {
             why = "a read through it failed";
-        else if (memcmp(buffer->getBytesNoCopy(), file, kImageBlock))
+        } else if (memcmp(buffer->getBytesNoCopy(), file, kImageBlock)) {
             why = "a block read through it differs from the image file";
+        }
     }
     if (prepared)
         buffer->complete();
@@ -931,10 +956,10 @@ bool sameBothWays(vnode_t image, const Extent &e, uint64_t offset, IOBlockStorag
         resid)
         return false;
     if (e.disk == kSwitchHole)
-        return !memcmp(gZeros, file, kImageBlock);
+        return memcmp(gZeros, file, kImageBlock) == 0;
     if (readSd(sd, (e.disk + (offset - e.file)) / kSdSector, direct) != kIOReturnSuccess)
         return false;
-    return !memcmp(direct->getBytesNoCopy(), file, kImageBlock);
+    return memcmp(direct->getBytesNoCopy(), file, kImageBlock) == 0;
 }
 
 // The image's extents on the SD APFS window, or nullptr with *why set. `image` is open; `preboot` its volume's device.
@@ -946,20 +971,26 @@ Extent *resolveExtents(vnode_t image, uint64_t bytes, dev_t preboot, dev_t whole
     if (!devvp)
         return *why = "no Preboot device vnode", nullptr;
     Extent *map = nullptr;
-    uint32_t n = 0, blockSize = 0;
-    bool physical = true, asked = false, locked = false;
+    uint32_t n = 0;
+    uint32_t blockSize = 0;
+    bool physical = true;
+    bool asked = false;
+    bool locked = false;
     if (vnode_specrdev(devvp) != preboot) {
         *why = "image not on the Preboot volume";
     } else if (VNOP_IOCTL(devvp, DKIOCGETBLOCKSIZE, reinterpret_cast<caddr_t>(&blockSize), 0, ctx) || !blockSize) {
         *why = "no Preboot block size";
-    } else if (!(map = static_cast<Extent *>(IOMallocData(kMaxExtents * sizeof(Extent))))) {
-        *why = "no memory";
     } else {
-        locked = !VNOP_IOCTL(devvp, DKIOCLOCKPHYSICALEXTENTS, nullptr, 0, ctx);
+        map = static_cast<Extent *>(IOMallocData(kMaxExtents * sizeof(Extent)));
+        if (!map)
+            *why = "no memory";
+    }
+    if (map) {
+        locked = (VNOP_IOCTL(devvp, DKIOCLOCKPHYSICALEXTENTS, nullptr, 0, ctx) == 0);
         for (uint64_t at = 0; at < bytes && !*why;) {
             daddr64_t blkno = -1;
             size_t run = 0;
-            const size_t ask = bytes - at > (1ull << 30) ? (1ull << 30) : size_t(bytes - at);
+            const size_t ask = bytes - at > (1ULL << 30) ? (1ULL << 30) : static_cast<size_t>(bytes - at);
             if (VNOP_BLOCKMAP(image, static_cast<off_t>(at), ask, &blkno, &run, nullptr,
                               VNODE_READ | VNODE_BLOCKMAP_NO_TRACK, nullptr) ||
                 !run) {
@@ -967,16 +998,17 @@ Extent *resolveExtents(vnode_t image, uint64_t bytes, dev_t preboot, dev_t whole
                 break;
             }
             if (run > bytes - at)
-                run = size_t(bytes - at);
+                run = static_cast<size_t>(bytes - at);
             if (blkno < 0) {  // a hole: zeros, nothing to read
                 if (!switchAppendExtent(map, &n, kMaxExtents, at, kSwitchHole, run))
                     *why = "too many extents";
                 at += run;
                 continue;
             }
-            const uint64_t logical = uint64_t(blkno) * blockSize;
+            const uint64_t logical = static_cast<uint64_t>(blkno) * blockSize;
             for (uint64_t part = 0; part < run && !*why;) {
-                uint64_t disk = logical + part, length = run - part;
+                uint64_t disk = logical + part;
+                uint64_t length = run - part;
                 if (physical) {
                     dk_physical_extent_t request = {};
                     request.offset = disk;
@@ -1055,7 +1087,10 @@ IOService *attachDirect(unsigned index, dev_t preboot, const char **why)
         *why = "the image file is compressed";
     } else if (!va.va_data_size || va.va_data_size % kImageBlock) {
         *why = "image size not a multiple of 4 KiB";
-    } else if ((map = resolveExtents(image, va.va_data_size, preboot, whole, windowSectors * kSdSector, &count, why))) {
+    } else {
+        map = resolveExtents(image, va.va_data_size, preboot, whole, windowSectors * kSdSector, &count, why);
+    }
+    if (map) {
         direct = IOBufferMemoryDescriptor::withOptions(kIODirectionIn, kImageBlock, kImageBlock);
         file = static_cast<uint8_t *>(IOMallocData(kImageBlock));
         if (!direct || !file || direct->prepare() != kIOReturnSuccess) {
@@ -1066,7 +1101,7 @@ IOService *attachDirect(unsigned index, dev_t preboot, const char **why)
             bool same = sameBothWays(image, map[0], 0, sd, direct, file) &&
                         sameBothWays(image, last, va.va_data_size - kImageBlock, sd, direct, file);
             for (unsigned k = 1; same && k <= kSampledExtents && count > 2; ++k) {
-                const Extent &e = map[uint64_t(count - 1) * k / (kSampledExtents + 1)];
+                const Extent &e = map[static_cast<uint64_t>(count - 1) * k / (kSampledExtents + 1)];
                 same = sameBothWays(image, e, e.file, sd, direct, file);
             }
             direct->complete();
@@ -1102,19 +1137,21 @@ IOService *attachDirect(unsigned index, dev_t preboot, const char **why)
             cacheOff = "no memory for its windows";
         } else {
             __atomic_store_n(&gCache.on, true, __ATOMIC_RELEASE);
-            if ((cacheOff = proveCache(device, image, map, count, va.va_data_size)))
+            cacheOff = proveCache(device, image, map, count, va.va_data_size);
+            if (cacheOff)
                 __atomic_store_n(&gCache.on, false, __ATOMIC_RELEASE);
         }
         if (cacheOff)
             IOLog("SwitchCryptex: read cache off (%s); every read goes to the card\n", cacheOff);
     }
-    if (gCache.on)
+    if (gCache.on) {
         IOLog("SwitchCryptex: %s read from the card through the read cache (%u windows of %u KiB, checked): %u "
               "extents, %llu MiB\n",
               paths[index], gCache.count, kSwitchWindowBytes >> 10, count, va.va_data_size >> 20);
-    else
+    } else {
         IOLog("SwitchCryptex: %s read straight from the card: %u extents, %llu MiB\n", paths[index], count,
               va.va_data_size >> 20);
+    }
     vnode_put(image);  // the open's use count keeps the file (and its extents) for the device's life
     device->registerService();
     return device;
@@ -1175,7 +1212,8 @@ extern "C" int switch_cryptex_attach(unsigned index, dev_t preboot, dev_t *devic
         directDevice[index] = attachDirect(index, preboot, &why);
     if (!directDevice[index]) {
         IOLog("SwitchCryptex: %s direct read map refused (%s); attaching it through DiskImages\n", paths[index], why);
-        if ((error = attachDiskImages(index)))
+        error = attachDiskImages(index);
+        if (error)
             return results[index] = error;
     }
     return results[index] = waitVolume(index, device, path, capacity);
@@ -1196,14 +1234,15 @@ extern "C" int switch_cryptex_fallback(unsigned index, dev_t *device, char *path
     // The map's volume is gone once its container has terminated (the image file stays open: the map is never freed).
     for (unsigned attempt = 0; attempt < 100 && !findVolume(uuids[index], direct, device, path, capacity); ++attempt)
         IOSleep(50);
-    if ((error = attachDiskImages(index)))
+    error = attachDiskImages(index);
+    if (error)
         return results[index] = error;
     return results[index] = waitVolume(index, device, path, capacity);
 }
 
 extern "C" int switch_cryptex_volume_status(unsigned index, dev_t *device, char *path, size_t capacity)
 {
-    int error = outputs(index, device, path, capacity);
+    const int error = outputs(index, device, path, capacity);
     if (error)
         return error;
     return results[index] ? results[index] : findVolume(uuids[index], directDevice[index], device, path, capacity);
@@ -1252,9 +1291,9 @@ namespace {
 constexpr uint32_t kPage = 4096;   // the list's page and the image cache's block, whatever the VM page size
 constexpr uint32_t kMaxRun = 128;  // pages: 512 KiB per page-in, as the old 512 KiB advisory reads
 constexpr uint32_t kMaxGap = 8;    // read through up to 32 KiB of unrecorded pages rather than start another page-in
-constexpr uint64_t kInFlightBytes = 3 * kMaxRun * kPage;
+constexpr uint64_t kInFlightBytes = static_cast<uint64_t>(3 * kMaxRun) * kPage;
 constexpr uint64_t kRecordAfterBootS = 5;
-constexpr uint64_t kListCapPages = (768ull << 20) / kPage;
+constexpr uint64_t kListCapPages = (768ULL << 20) / kPage;
 constexpr uint32_t kLogEntries = 1u << 16;  // 2 MiB, allocated on recording boots only
 // The 11-04 boots reached SpringBoard 110-135 s after the mounts.
 constexpr uint64_t kRecordBackstopS = 180;
@@ -1318,8 +1357,9 @@ bool imageKeys(ListHeader *key)
         VATTR_WANTED(&va, va_data_size);
         VATTR_WANTED(&va, va_fileid);
         VATTR_WANTED(&va, va_modify_time);
-        const bool ok = !vnode_getattr(image, &va, vfs_context_current()) && VATTR_IS_SUPPORTED(&va, va_data_size) &&
-                        VATTR_IS_SUPPORTED(&va, va_fileid) && VATTR_IS_SUPPORTED(&va, va_modify_time);
+        const bool ok = (vnode_getattr(image, &va, vfs_context_current()) == 0) &&
+                        VATTR_IS_SUPPORTED(&va, va_data_size) && VATTR_IS_SUPPORTED(&va, va_fileid) &&
+                        VATTR_IS_SUPPORTED(&va, va_modify_time);
         vnode_put(image);
         if (!ok)
             return false;
@@ -1345,7 +1385,10 @@ Run *loadList(const ListHeader &key, uint32_t *count, const char **why)
                 vfs_context_ucred(ctx), &resid, vfs_context_proc(ctx)) ||
         resid) {
         *why = "its header is unreadable";
-    } else if (!(*why = switchListRefusal(header, key.images, kLogEntries * 4u))) {
+    } else {
+        *why = switchListRefusal(header, key.images, kLogEntries * 4u);
+    }
+    if (!*why) {
         const size_t bytes = header.runs * sizeof(Run);
         runs = static_cast<Run *>(IOMallocData(bytes));
         if (!runs) {
@@ -1373,9 +1416,10 @@ void waitFlowBelow(uint64_t limit)
         uint64_t deadline = 0;
         clock_interval_to_deadline(kFlowTimeoutS, NSEC_PER_SEC, &deadline);
         if (IOLockSleepDeadline(gFlow.lock, &gFlow.inflight, deadline, THREAD_UNINT) == THREAD_TIMED_OUT &&
-            gFlow.inflight >= limit)
+            gFlow.inflight >= limit) {
             panic("SwitchBootPrefetch: %llu bytes of its reads still on the card after %u s with none finishing",
                   gFlow.inflight, kFlowTimeoutS);
+        }
     }
     IOLockUnlock(gFlow.lock);
 }
@@ -1388,13 +1432,14 @@ bool mediaBase(IOService *device, dev_t dev, uint64_t *base)
     if (!it)
         return false;
     bool found = false;
-    while (IORegistryEntry *entry = it->getNextObject()) {
-        auto *majorNumber = OSDynamicCast(OSNumber, entry->getProperty(kIOBSDMajorKey));
-        auto *minorNumber = OSDynamicCast(OSNumber, entry->getProperty(kIOBSDMinorKey));
+    while (const IORegistryEntry *entry = it->getNextObject()) {
+        const auto *majorNumber = OSDynamicCast(OSNumber, entry->getProperty(kIOBSDMajorKey));
+        const auto *minorNumber = OSDynamicCast(OSNumber, entry->getProperty(kIOBSDMinorKey));
         if (!majorNumber || !minorNumber ||
             makedev(majorNumber->unsigned32BitValue(), minorNumber->unsigned32BitValue()) != dev)
             continue;
-        auto *at = OSDynamicCast(OSNumber, entry->getProperty("Base"));  // kIOMediaBaseKey (not in this storage ABI)
+        const auto *at =
+            OSDynamicCast(OSNumber, entry->getProperty("Base"));  // kIOMediaBaseKey (not in this storage ABI)
         *base = at ? at->unsigned64BitValue() : 0;
         found = true;
         break;
@@ -1421,23 +1466,27 @@ void prepareMap(unsigned index)
     int error = 0;
     if (VNOP_IOCTL(devvp, DKIOCGETBLOCKSIZE, reinterpret_cast<caddr_t>(&m.blockSize), 0, ctx) || !m.blockSize) {
         why = "no block size";
-    } else if ((error = VNOP_IOCTL(devvp, DKIOCGETPHYSICALEXTENT, reinterpret_cast<caddr_t>(&request), 0, ctx))) {
-        if (error != ENOTTY)
-            why = "DKIOCGETPHYSICALEXTENT failed";
-        m.physical = false;  // ENOTTY: the volume's offsets are the image's (mapProven checks that)
-        m.base = 0;
-    } else if (!mediaBase(device, request.dev, &m.base)) {
-        why = "its volume's store is not on the image device";
     } else {
-        m.physical = true;
-        m.store = request.dev;
+        error = VNOP_IOCTL(devvp, DKIOCGETPHYSICALEXTENT, reinterpret_cast<caddr_t>(&request), 0, ctx);
+        if (error) {
+            if (error != ENOTTY)
+                why = "DKIOCGETPHYSICALEXTENT failed";
+            m.physical = false;  // ENOTTY: the volume's offsets are the image's (mapProven checks that)
+            m.base = 0;
+        } else if (!mediaBase(device, request.dev, &m.base)) {
+            why = "its volume's store is not on the image device";
+        } else {
+            m.physical = true;
+            m.store = request.dev;
+        }
     }
     vnode_put(devvp);
-    if (why)
+    if (why) {
         IOLog("SwitchBootPrefetch: no read-ahead for %s (%s); its runs are paged in block by block\n", paths[index],
               why);
-    else
+    } else {
         m.state = kMapUnproven;
+    }
 }
 
 // A logical offset on the volume's device as an image offset; *length shrinks to what stays contiguous there.
@@ -1457,7 +1506,7 @@ bool toImage(vnode_t devvp, unsigned index, uint64_t logical, uint64_t *image, u
             *length = request.length;
     }
     *image = m.base + at;
-    return !(*image % kPage);
+    return (*image % kPage) == 0u;
 }
 
 // The first read-ahead of each image checks its map on real bytes: the file's page at `offset` (vn_rdwr, through APFS
@@ -1469,34 +1518,37 @@ bool mapProven(SwitchCryptexDevice *device, vnode_t vp, unsigned index, off_t of
     uint8_t state = __atomic_load_n(&m.state, __ATOMIC_ACQUIRE);
     if (state != kMapUnproven)
         return state == kMapOn;
-    if (!__atomic_compare_exchange_n(&m.state, &state, uint8_t(kMapProving), false, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE))
+    if (!__atomic_compare_exchange_n(&m.state, &state, static_cast<uint8_t>(kMapProving), false, __ATOMIC_ACQ_REL,
+                                     __ATOMIC_ACQUIRE))
         return false;
     IOBufferMemoryDescriptor *buffer = IOBufferMemoryDescriptor::withOptions(kIODirectionIn, kPage, kPage);
     auto *file = static_cast<uint8_t *>(IOMallocData(kPage));
-    const bool prepared = buffer && buffer->prepare() == kIOReturnSuccess;
+    const bool prepared = (buffer != nullptr) && buffer->prepare() == kIOReturnSuccess;
     const char *why = prepared && file ? nullptr : "no memory";
     vfs_context_t ctx = vfs_context_kernel();
     int resid = 0;
     if (!why && (vn_rdwr(UIO_READ, vp, reinterpret_cast<caddr_t>(file), kPage, offset, UIO_SYSSPACE, IO_NOAUTH,
                          vfs_context_ucred(ctx), &resid, vfs_context_proc(ctx)) ||
-                 resid >= static_cast<int>(kPage)))
+                 resid >= static_cast<int>(kPage))) {
         why = "its first file page could not be read";
-    else if (!why && image + kPage > device->imageBytes())
+    } else if (!why && image + kPage > device->imageBytes()) {
         why = "the map points past the image";
-    else if (!why && device->readBlock(buffer, image / kPage) != kIOReturnSuccess)
+    } else if (!why && device->readBlock(buffer, image / kPage) != kIOReturnSuccess) {
         why = "the image could not be read";
-    else if (!why && memcmp(buffer->getBytesNoCopy(), file, kPage - static_cast<uint32_t>(resid)))
+    } else if (!why && memcmp(buffer->getBytesNoCopy(), file, kPage - static_cast<uint32_t>(resid))) {
         why = "a file page is not the image block its map names";
+    }
     if (prepared)
         buffer->complete();
     OSSafeReleaseNULL(buffer);
     if (file)
         IOFreeData(file, kPage);
-    __atomic_store_n(&m.state, uint8_t(why ? kMapOff : kMapOn), __ATOMIC_RELEASE);
-    if (why)
+    __atomic_store_n(&m.state, static_cast<uint8_t>(why ? kMapOff : kMapOn), __ATOMIC_RELEASE);
+    if (why) {
         IOLog("SwitchBootPrefetch: no read-ahead for %s (%s); its runs are paged in block by block\n", paths[index],
               why);
-    return !why;
+    }
+    return why == nullptr;
 }
 
 // The file's absent pages [at, at + bytes), extent by extent, read ahead into the cache.
@@ -1515,7 +1567,7 @@ void mapAhead(SwitchCryptexDevice *device, vnode_t devvp, vnode_t vp, unsigned i
         uint64_t length = run;
         if (blkno >= 0) {  // (a hole reads as zeros: nothing to read ahead)
             uint64_t image = 0;
-            if (!toImage(devvp, index, uint64_t(blkno) * m.blockSize, &image, &length) ||
+            if (!toImage(devvp, index, static_cast<uint64_t>(blkno) * m.blockSize, &image, &length) ||
                 !mapProven(device, vp, index, at + done, image))
                 return;
             device->readAhead(image, length);
@@ -1536,7 +1588,8 @@ void readAheadRun(vnode_t vp, unsigned index, off_t offset, off_t length)
         return;
     const off_t end = offset + length;
     for (off_t at = offset; at < end;) {
-        int absent = 0, present = 0;
+        int absent = 0;
+        int present = 0;
         if (ubc_range_op(vp, at, end, UPL_ROP_ABSENT, &absent) != KERN_SUCCESS || absent < 0)
             break;
         if (absent) {
@@ -1564,8 +1617,12 @@ void bootIoDone()
         SwitchWindow *retired[32];
         batch = 0;
         IOLockLock(gCache.lock);
-        while (batch < 32 && (retired[batch] = gCache.cache.retire(keep)))
+        while (batch < 32) {
+            retired[batch] = gCache.cache.retire(keep);
+            if (!retired[batch])
+                break;
             ++batch;
+        }
         IOLockUnlock(gCache.lock);
         for (uint32_t i = 0; i < batch; ++i) {
             auto *memory = static_cast<IOBufferMemoryDescriptor *>(retired[i]->memory);
@@ -1580,7 +1637,8 @@ void bootIoDone()
 void prefetchDone()
 {
     waitFlowBelow(1);
-    const uint64_t started = gPrefetch.startedMs, now = uptimeMs();
+    const uint64_t started = gPrefetch.startedMs;
+    const uint64_t now = switch_now_ms();
     SwitchCacheStats s = {};
     if (gCache.lock) {
         IOLockLock(gCache.lock);
@@ -1603,6 +1661,7 @@ void prefetchDone()
 
 // One of kWorkers prefetch threads: takes the next run in order, reads it ahead into the cache, pages it in; at most
 // kInFlightBytes of the threads' reads on the card (on DiskImages nothing is counted and each page-in waits for its own).
+// NOLINTNEXTLINE(misc-const-correctness): thread_continue_t fixes the signature
 void prefetchWorker(void *parameter, wait_result_t)
 {
     const auto slot = static_cast<unsigned>(reinterpret_cast<uintptr_t>(parameter));
@@ -1634,21 +1693,22 @@ void prefetchWorker(void *parameter, wait_result_t)
                 __atomic_fetch_add(&gPrefetch.missing, 1, __ATOMIC_RELAXED);
                 continue;
             }
-            vpSize = static_cast<off_t>(ubc_getsize(vp));
+            vpSize = ubc_getsize(vp);
             __atomic_fetch_add(&gPrefetch.files, 1, __ATOMIC_RELAXED);
         }
         if (!vp)
             continue;
         SwitchPageIn in;
-        if (!switchRunPageIn(run, kPage, PAGE_SIZE, uint64_t(vpSize), &in))
+        if (!switchRunPageIn(run, kPage, PAGE_SIZE, static_cast<uint64_t>(vpSize), &in))
             continue;
-        const off_t offset = off_t(in.offset), length = off_t(in.length);
+        const off_t offset = static_cast<off_t>(in.offset);
+        const off_t length = static_cast<off_t>(in.length);
         if (directDevice[run.index])
             readAheadRun(vp, run.index, offset, length);
         int error = 0;
         (void)vnode_pagein(vp, nullptr, 0, static_cast<vm_object_offset_t>(offset), static_cast<upl_size_t>(length),
                            directDevice[run.index] ? 0 : UPL_IOSYNC, &error);
-        __atomic_fetch_add(&gPrefetch.bytes, uint64_t(length), __ATOMIC_RELAXED);
+        __atomic_fetch_add(&gPrefetch.bytes, static_cast<uint64_t>(length), __ATOMIC_RELAXED);
     }
     if (vp)
         vnode_put(vp);
@@ -1662,10 +1722,11 @@ using Range = SwitchRange;  // a logged read's file, pages [first, end) and firs
 
 int compareEntries(const void *a, const void *b)
 {
-    auto *x = static_cast<const switch_record_entry *>(a), *y = static_cast<const switch_record_entry *>(b);
+    const auto *x = static_cast<const switch_record_entry *>(a);
+    const auto *y = static_cast<const switch_record_entry *>(b);
     if (x->vp != y->vp)
         return x->vp < y->vp ? -1 : 1;
-    return x->vid < y->vid ? -1 : x->vid > y->vid;
+    return x->vid < y->vid ? -1 : static_cast<int>(x->vid > y->vid);
 }
 
 int compareRanges(const void *a, const void *b)
@@ -1694,15 +1755,17 @@ struct Naming {
 // pointers are never dereferenced: a vnode recycled since its read is simply not found, and its reads not kept.
 int nameVnode(vnode_t vp, void *argument)
 {
-    auto *naming = static_cast<Naming *>(argument);
+    const auto *naming = static_cast<Naming *>(argument);
     // The groups are sorted by (vp, vid): the first with this vnode pointer (it may appear with several vids).
-    uint32_t lo = 0, hi = naming->count;
+    uint32_t lo = 0;
+    uint32_t hi = naming->count;
     while (lo < hi) {
         const uint32_t mid = lo + (hi - lo) / 2;
-        if (naming->groups[mid].vp < vp)
+        if (naming->groups[mid].vp < vp) {
             lo = mid + 1;
-        else
+        } else {
             hi = mid;
+        }
     }
     for (Group *hit = naming->groups + lo; hit < naming->groups + naming->count && hit->vp == vp; ++hit) {
         if (hit->vid != vnode_vid(vp) || !vnode_isreg(vp) || vnode_isnamedstream(vp))
@@ -1724,7 +1787,9 @@ uint32_t buildRuns(switch_record_entry *log, uint32_t entries, Run **out, uint32
     qsort(log, entries, sizeof(*log), compareEntries);
     auto *groups = static_cast<Group *>(IOMallocData((entries ? entries : 1) * sizeof(Group)));
     auto *ranges = static_cast<Range *>(IOMallocData((entries ? entries : 1) * sizeof(Range)));
-    uint32_t groupCount = 0, n = 0, count = 0;
+    uint32_t groupCount = 0;
+    uint32_t n = 0;
+    uint32_t count = 0;
     uint64_t pages = 0;
     Run *runs = nullptr;
     if (groups && ranges) {
@@ -1736,23 +1801,26 @@ uint32_t buildRuns(switch_record_entry *log, uint32_t entries, Run **out, uint32
             i = j;
         }
         Naming naming = {groups, groupCount};
-        for (unsigned index = 0; index < SWITCH_CRYPTEX_COUNT; ++index)
-            if (gPrefetch.mounts[index])
-                (void)vnode_iterate(gPrefetch.mounts[index], 0, nameVnode, &naming);
+        for (auto &mount : gPrefetch.mounts) {
+            if (mount)
+                (void)vnode_iterate(mount, 0, nameVnode, &naming);
+        }
         for (uint32_t g = 0; g < groupCount; ++g) {
             for (uint32_t i = groups[g].first; i < groups[g].end; ++i) {
-                const uint64_t first = log[i].offset / kPage, end = (log[i].offset + log[i].length + kPage - 1) / kPage;
+                const uint64_t first = log[i].offset / kPage;
+                const uint64_t end = (log[i].offset + log[i].length + kPage - 1) / kPage;
                 if (!groups[g].fileId || !log[i].when || end > UINT32_MAX) {
                     ++*dropped;
                     continue;
                 }
-                ranges[n++] = {groups[g].fileId, uint32_t(first), uint32_t(end), log[i].when, uint8_t(log[i].index)};
+                ranges[n++] = {groups[g].fileId, static_cast<uint32_t>(first), static_cast<uint32_t>(end), log[i].when,
+                               static_cast<uint8_t>(log[i].index)};
                 pages += end - first;
             }
         }
         qsort(ranges, n, sizeof(Range), compareRanges);
         const uint64_t capacity = switchRunCapacity(n, pages, kMaxRun, kMaxGap);
-        runs = n && capacity <= kLogEntries * 4ull ? static_cast<Run *>(IOMallocData(capacity * sizeof(Run))) : nullptr;
+        runs = n && capacity <= kLogEntries * 4ULL ? static_cast<Run *>(IOMallocData(capacity * sizeof(Run))) : nullptr;
         if (runs)
             count = switchMergeRuns(ranges, n, runs, capacity, kMaxRun, kMaxGap, files);
         if (runs)
@@ -1780,7 +1848,8 @@ void saveRecording()
     const uint32_t appended = switch_cluster_record_stop();
     const uint32_t entries = appended < kLogEntries ? appended : kLogEntries;
     Run *runs = nullptr;
-    uint32_t files = 0, dropped = 0;
+    uint32_t files = 0;
+    uint32_t dropped = 0;
     const uint32_t built = buildRuns(log, entries, &runs, &files, &dropped);
     const uint32_t count = switchCapRuns(runs, built, kListCapPages);
     ListHeader header = gPrefetch.key;
@@ -1799,21 +1868,23 @@ void saveRecording()
         int resid = 0;
         error = vn_rdwr(UIO_WRITE, vp, reinterpret_cast<caddr_t>(&header), sizeof(header), 0, UIO_SYSSPACE,
                         IO_NOAUTH | IO_UNIT, vfs_context_ucred(ctx), &resid, vfs_context_proc(ctx));
-        if (!error)
+        if (!error) {
             error = vn_rdwr(UIO_WRITE, vp, reinterpret_cast<caddr_t>(runs), static_cast<int>(count * sizeof(Run)),
                             sizeof(header), UIO_SYSSPACE, IO_NOAUTH | IO_UNIT, vfs_context_ucred(ctx), &resid,
                             vfs_context_proc(ctx));
+        }
         vnode_close(vp, FWRITE, ctx);
     }
     if (runs)
         IOFreeData(runs, gPrefetch.runCapacity * sizeof(Run));
-    if (error)
+    if (error) {
         IOLog("SwitchBootPrefetch: %s not saved: %d (%u reads logged)\n", path, error, appended);
-    else
+    } else {
         IOLog("SwitchBootPrefetch: recorded %u runs (%llu MiB) of %u cryptex files for the next boots (%u of %u "
               "reads not kept, %u runs past the %llu MiB cap)\n",
               count, (pages * kPage) >> 20, files, dropped + (appended - entries), appended, built - count,
               (kListCapPages * kPage) >> 20);
+    }
 }
 
 // The next boots record afresh: the list is emptied, which loadList refuses.
@@ -1911,14 +1982,16 @@ void prefetchStart()
             gPrefetch.listPages += runs[i].pages;
         for (unsigned i = 0; i < SWITCH_CRYPTEX_COUNT; ++i)
             prepareMap(i);
-        gPrefetch.startedMs = uptimeMs();
+        gPrefetch.startedMs = switch_now_ms();
         gPrefetch.workers = kWorkers;
         for (unsigned i = 0; i < kWorkers; ++i) {
             thread_t thread = THREAD_NULL;
-            if (kernel_thread_start(prefetchWorker, reinterpret_cast<void *>(uintptr_t(i)), &thread) == KERN_SUCCESS)
+            if (kernel_thread_start(prefetchWorker, reinterpret_cast<void *>(static_cast<uintptr_t>(i)), &thread) ==
+                KERN_SUCCESS) {
                 thread_deallocate(thread);
-            else if (!__atomic_sub_fetch(&gPrefetch.workers, 1, __ATOMIC_ACQ_REL))
+            } else if (!__atomic_sub_fetch(&gPrefetch.workers, 1, __ATOMIC_ACQ_REL)) {
                 prefetchDone();
+            }
         }
         return;
     }

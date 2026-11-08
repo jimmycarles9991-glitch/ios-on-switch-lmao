@@ -21,7 +21,7 @@ MORNING = [
         'p50(m2v) == 0',
         subsystem=RAW,
         regex=RAW_5S,
-        source='drivers/TegraGM20BMetal/raw/runtime/RawMetal.mm',
+        source='drivers/TegraGM20BMetal/raw/runtime/RawMetalRates.mm',
         note='m2v=0 in steady App Library scroll',
     ),
     Check('raw.m2v-xr', 'r31-rawrt', 'raw ', subsystem=RAW, regex=r'm2v=\d+\([^)]*XR', source=DOC),
@@ -102,6 +102,10 @@ CHECKLIST = {
         '1 Home, hands off, 60 s   2 Home pages + widgets, 20 s   3 App Library scroll, 30 s',
         '4 Spotlight typing, 20 s   5 App switcher, 20 s   6 Control Center x5, then Notification Center x5',
         '7 Home folder open/close x5   8 App Library scroll again, 15 s',
+        (
+            'Then the same steps on the iOS 27 image, pulled separately: its stutter.* rows hold too (CA_FORCE_TIMER '
+            "as QuartzCore's vblank switch is proven on 21H461 only)"
+        ),
     ],
     'A': [
         '9 Full-screen video in Tips or Photos: 15 s controls hidden, 5 s showing',

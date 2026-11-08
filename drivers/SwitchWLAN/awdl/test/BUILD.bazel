@@ -3,7 +3,9 @@
 # over a simulated air of two and three nodes with skewed clocks, a two-channel sequence, the TSF clock, the IO80211
 # user-client event ring and awdl0's Apple80211 requests; and the firmware's AWDL (test_native.c): iovar payloads
 # against the brcmfmac AWDL series' traced bytes, the probe, the data path's AWDL header, the schedule and both firmware
-# generations' bring-up against a mock firmware.
+# generations' bring-up against a mock firmware; against OWL (test_owl.c): our PSF/MIF bytes = OWL's frame layout,
+# synchronisation to a master running OWL's sync formulas, its election cases, A-MSDU, the channel forms; and the soft
+# backend beside the access point on one radio (test_sched.c).
 #
 #   bazel test //drivers/SwitchWLAN/awdl/test:all
 load("//bazel/lint:defs.bzl", "lint_files")
@@ -23,7 +25,12 @@ host_library(
         "//drivers/SwitchWLAN:awdl/awdl_bcm.c",
         "//drivers/SwitchWLAN:awdl/awdl_bcm_trace.c",
         "//drivers/SwitchWLAN:awdl/awdl_core.c",
+        "//drivers/SwitchWLAN:awdl/awdl_data.c",
         "//drivers/SwitchWLAN:awdl/awdl_internal.h",
+        "//drivers/SwitchWLAN:awdl/awdl_native.c",
+        "//drivers/SwitchWLAN:awdl/awdl_native_rx.c",
+        "//drivers/SwitchWLAN:awdl/awdl_schedule.c",
+        "//drivers/SwitchWLAN:awdl/awdl_tx.c",
         "//drivers/SwitchWLAN:awdl/awdl_wire.c",
     ],
     hdrs = [
@@ -41,6 +48,8 @@ host_library(
     srcs = [
         "test_awdl.c",
         "test_native.c",
+        "test_owl.c",
+        "test_sched.c",
     ],
     copts = COPTS,
     defines = ["main=awdl_tests_main"],

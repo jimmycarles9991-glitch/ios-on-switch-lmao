@@ -3,10 +3,11 @@
  * Boundary between the Linux-flavoured C world (vendored nouveau nvkm + shim/linux.c) and XNU.
  * Everything here is plain C with fixed-width types only, so it can be included from both sides
  * without dragging Linux names into XNU translation units or XNU names into nvkm ones.
- * Implemented in shim/xnu_glue.cpp.
+ * The kernel services are kits/SwitchLinux's; the GPU's own are in shim/xnu_glue.cpp.
  */
 #ifndef NVXNU_H
 #define NVXNU_H
+#include "../../../../kits/SwitchLinux/SwitchLinuxLock.h"
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -35,49 +36,100 @@ void nvxnu_errors_fatal(int (*contained)(const char *errors));
 const char *nvxnu_gpu_errors(void);
 void nvxnu_panic(const char *fmt, ...) __attribute__((noreturn, format(printf, 1, 2)));
 
-/* heap (sizes are tracked by the glue; free needs no size) */
-void *nvxnu_malloc(unsigned long size, int zero);
-void nvxnu_free(void *p);
-unsigned long nvxnu_malloc_size(void *p);
+/* sleeping locks (thread context): kits/SwitchLinux's */
+static inline void *nvxnu_mutex_alloc(void)  // NOLINT(modernize-redundant-void-arg): a C header
+{
+	return switch_linux_mutex_alloc();
+}
 
-/* locks: opaque handles allocated on first use */
-void *nvxnu_mutex_alloc(void);
-void nvxnu_mutex_free(void *m);
-void nvxnu_mutex_lock(void *m);
-void nvxnu_mutex_unlock(void *m);
-int nvxnu_mutex_trylock(void *m);
+static inline void nvxnu_mutex_lock(void *m)
+{
+	switch_linux_mutex_lock(m);
+}
+
+static inline void nvxnu_mutex_unlock(void *m)
+{
+	switch_linux_mutex_unlock(m);
+}
+
+static inline int nvxnu_mutex_trylock(void *m)
+{
+	return switch_linux_mutex_trylock(m) ? 1 : 0;
+}
+
 /* With `m` held: releases it, sleeps until nvxnu_wakeup(event) or the deadline (~0: none), takes it again. 1 if woken. */
-int nvxnu_mutex_sleep(void *m, const void *event, nvxnu_u64 deadline_ns);
-void nvxnu_wakeup(const void *event);
-void *nvxnu_spin_alloc(void);
-void nvxnu_spin_free(void *s);
-void nvxnu_spin_lock(void *s);
-void nvxnu_spin_unlock(void *s);
-unsigned long nvxnu_irq_save(void);
-void nvxnu_irq_restore(unsigned long flags);
-void *nvxnu_rw_alloc(void);
-void nvxnu_rw_lock_shared(void *rw);
-void nvxnu_rw_unlock_shared(void *rw);
-void nvxnu_rw_lock_exclusive(void *rw);
-void nvxnu_rw_unlock_exclusive(void *rw);
+static inline int nvxnu_mutex_sleep(void *m, const void *event, nvxnu_u64 deadline_ns)
+{
+	return switch_linux_mutex_sleep(m, event, deadline_ns) ? 1 : 0;
+}
 
-nvxnu_u64 nvxnu_nanotime(void);
+static inline void nvxnu_wakeup(const void *event)
+{
+	switch_linux_wakeup(event);
+}
+
+static inline int nvxnu_irqs_enabled(void)  // NOLINT(modernize-redundant-void-arg): a C header
+{
+	return switch_linux_irqs_disabled() ? 0 : 1;
+}
+
+static inline nvxnu_u64 nvxnu_nanotime(void)  // NOLINT(modernize-redundant-void-arg): a C header
+{
+	return switch_linux_nanotime();
+}
+
 /* mach_absolute_time units to nvxnu_nanotime's */
-nvxnu_u64 nvxnu_abstime_to_ns(nvxnu_u64 abstime);
-void nvxnu_udelay(nvxnu_u32 us); /* busy wait */
-void nvxnu_usleep(nvxnu_u32 us); /* may block */
-void nvxnu_yield(void);
+static inline nvxnu_u64 nvxnu_abstime_to_ns(nvxnu_u64 abstime)
+{
+	return switch_linux_abstime_to_ns(abstime);
+}
 
-/* deferred work: run fn(arg) on a kernel thread call */
-void *nvxnu_work_alloc(void (*fn)(void *), void *arg);
-void nvxnu_work_schedule(void *w);
-void nvxnu_work_cancel_wait(void *w);
+/* XNU's delay: spins where blocking is not allowed or not worth it, blocks otherwise */
+static inline void nvxnu_udelay(nvxnu_u32 us)
+{
+	switch_linux_udelay(us);
+}
+
+static inline void nvxnu_usleep(nvxnu_u32 us)
+{
+	switch_linux_usleep_range(us, us);
+}
+
+/* deferred work: run fn(arg) on a kernel thread call, never two runs of one item at once (a Linux work item's rule) */
+static inline void *nvxnu_work_alloc(void (*fn)(void *), void *arg)
+{
+	return switch_linux_call_alloc(fn, arg);
+}
+
+static inline void nvxnu_work_schedule(void *w)
+{
+	if (w)
+		(void)switch_linux_call_enter(w);
+}
+
+/* 1 if a run was pending (and is now cancelled); returns once no run is under way */
+static inline int nvxnu_work_cancel_wait(void *w)
+{
+	return w && switch_linux_call_cancel_wait(w) ? 1 : 0;
+}
+
 /* once, ns from now (a deadline, not a loop); cancel: no wait, any context */
-void nvxnu_work_schedule_after(void *w, nvxnu_u64 ns);
-void nvxnu_work_cancel(void *w);
+static inline void nvxnu_work_schedule_after(void *w, nvxnu_u64 ns)
+{
+	if (w)
+		(void)switch_linux_call_enter_after(w, ns);
+}
 
-volatile void *nvxnu_ioremap(nvxnu_u64 pa, nvxnu_u64 size, int write_combined);
-void nvxnu_iounmap(volatile void *va, nvxnu_u64 size);
+static inline void nvxnu_work_cancel(void *w)
+{
+	if (w)
+		(void)switch_linux_call_cancel(w);
+}
+
+static inline volatile void *nvxnu_ioremap(nvxnu_u64 pa, nvxnu_u64 size, int write_combined)
+{
+	return switch_linux_ioremap(pa, size, write_combined);
+}
 
 /*
  * GPU memory pool: physically contiguous, below 4 GiB, mapped write-combined in the kernel.

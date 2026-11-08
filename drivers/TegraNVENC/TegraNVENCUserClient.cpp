@@ -21,6 +21,7 @@
 #include <string.h>
 #include "TegraNVENC.h"
 #include "TegraNVENCABI.h"
+#include "../../kits/SwitchDMA/SwitchDcache.h"
 
 namespace {
 constexpr uint32_t kMaxBuffers = 64, kMaxConnections = 16;
@@ -46,7 +47,9 @@ IOReturn ioreturn(int err)
 }
 }  // namespace
 
+// NOLINTNEXTLINE(misc-use-internal-linkage): OSDefineMetaClassAndStructors needs the class's external linkage
 class AppleAVE2UserClient : public IOUserClient {
+    // NOLINTNEXTLINE(misc-explicit-constructor): IOKit's structors macro declares the metaclass constructor
     OSDeclareDefaultStructors(AppleAVE2UserClient)
 
         struct Buffer {
@@ -60,7 +63,7 @@ class AppleAVE2UserClient : public IOUserClient {
     bool submitted_ = false, counted_ = false;
 
     Buffer *find(uint32_t handle);
-    bool quiesce();
+    bool quiesce() const;
     void drop(Buffer *b, bool returnMemory);
     IOReturn run(uint32_t method, const void *in, uint32_t inSize, void *out, uint32_t *outSize);
     static bool resolve(void *context, uint32_t handle, TegraNVENCBlock *block);
@@ -87,22 +90,23 @@ OSDefineMetaClassAndStructors(AppleAVE2UserClient, IOUserClient)
 
     AppleAVE2UserClient::Buffer *AppleAVE2UserClient::find(uint32_t handle)
 {
-    for (uint32_t i = 0; handle && i < kMaxBuffers; i++)
+    for (uint32_t i = 0; handle && i < kMaxBuffers; i++) {
         if (buffers_[i].handle == handle)
             return &buffers_[i];
+    }
     return nullptr;
 }
 
 bool AppleAVE2UserClient::resolve(void *context, uint32_t handle, TegraNVENCBlock *block)
 {
-    Buffer *b = static_cast<AppleAVE2UserClient *>(context)->find(handle);
+    const Buffer *b = static_cast<AppleAVE2UserClient *>(context)->find(handle);
     if (b)
         *block = b->block;
     return b != nullptr;
 }
 
 // The connection's jobs are done (or the engine is wedged and will never touch memory again before a resume resets it).
-bool AppleAVE2UserClient::quiesce()
+bool AppleAVE2UserClient::quiesce() const
 {
     if (!submitted_)
         return true;
@@ -130,9 +134,10 @@ IOReturn AppleAVE2UserClient::clientClose()
     const bool idle = quiesce();
     if (!idle)
         IOLog("TegraNVENC: a closing client's job never finished; its buffers stay wired\n");
-    for (uint32_t i = 0; i < kMaxBuffers; i++)
-        if (buffers_[i].handle)
-            drop(&buffers_[i], idle);
+    for (Buffer &b : buffers_) {
+        if (b.handle)
+            drop(&b, idle);
+    }
     IOLockUnlock(lock_);
     terminate();
     return kIOReturnSuccess;
@@ -141,9 +146,10 @@ IOReturn AppleAVE2UserClient::clientClose()
 void AppleAVE2UserClient::free()
 {
     if (lock_) {
-        for (uint32_t i = 0; i < kMaxBuffers; i++)
-            if (buffers_[i].handle)
-                drop(&buffers_[i], quiesce());
+        for (Buffer &b : buffers_) {
+            if (b.handle)
+                drop(&b, quiesce());
+        }
         IOLockFree(lock_);
         lock_ = nullptr;
     }
@@ -155,7 +161,7 @@ void AppleAVE2UserClient::free()
 IOReturn AppleAVE2UserClient::clientMemoryForType(UInt32 type, IOOptionBits *options, IOMemoryDescriptor **memory)
 {
     IOLockLock(lock_);
-    Buffer *b = find(type);
+    const Buffer *b = find(type);
     if (b) {
         b->block.pages.memory->retain();
         *memory = b->block.pages.memory;
@@ -185,6 +191,7 @@ IOReturn AppleAVE2UserClient::run(uint32_t method, const void *in, uint32_t inSi
 
     if (method == TegraNVENCMethodWait) {  // no lock: other calls of this connection may proceed while it sleeps
         const TegraNVENCWait *w = static_cast<const TegraNVENCWait *>(in);
+        // NOLINTNEXTLINE(clang-analyzer-core.NullDereference): input size checked above
         if (w->invalidate_count > TEGRA_NVENC_MAX_RANGES)
             return kIOReturnBadArgument;
         const int ret = tegra_nvenc_wait(w->fence);  // bounded by the kernel, whatever timeout_us says
@@ -194,12 +201,12 @@ IOReturn AppleAVE2UserClient::run(uint32_t method, const void *in, uint32_t inSi
         IOReturn result = kIOReturnSuccess;
         for (uint32_t i = 0; i < w->invalidate_count; i++) {
             const TegraNVENCRange *r = &w->invalidate[i];
-            Buffer *b = find(r->handle);
-            if (!b || (uint64_t)r->offset + r->length > b->block.size) {
+            const Buffer *b = find(r->handle);
+            if (!b || static_cast<uint64_t>(r->offset) + r->length > b->block.size) {
                 result = kIOReturnBadArgument;
                 break;
             }
-            tegra_nvenc_cache_flush(b->block.va + r->offset, r->length);
+            switch_dcache_clean_invalidate(b->block.va + r->offset, r->length);
         }
         IOLockUnlock(lock_);
         return result;
@@ -216,24 +223,26 @@ IOReturn AppleAVE2UserClient::run(uint32_t method, const void *in, uint32_t inSi
         info->codecs = 1u << TEGRA_NVENC_CODEC_H264;
         info->max_width = info->max_height = 4096;
         info->max_mbs = 36864;
-        const TegraNVENCProven *proven = tegra_nvenc_proven();
-        info->input_layout = proven->inputLayout;
-        info->chroma_mode = proven->chromaMode;
-        info->p_frames = proven->pFrames;
+        info->input_layout = TEGRA_NVENC_LAYOUT_TILED16;
+        info->chroma_mode = TEGRA_NVENC_CHROMA_OFFSET;
+        info->p_frames = 1;
         tegra_nvenc_memory_usage(&info->memory_limit, &info->memory_free);
         break;
     }
     case TegraNVENCMethodBufferAlloc: {
+        // NOLINTNEXTLINE(clang-analyzer-core.NullDereference): input size checked above
         const uint64_t size = static_cast<const TegraNVENCBufferAlloc *>(in)->size;
         Buffer *slot = nullptr;
-        for (uint32_t i = 0; i < kMaxBuffers && !slot; i++)
+        for (uint32_t i = 0; i < kMaxBuffers && !slot; i++) {
             if (!buffers_[i].handle)
                 slot = &buffers_[i];
+        }
         if (!slot || !size || size > kMaxBufferBytes) {
             ret = slot ? kIOReturnBadArgument : kIOReturnNoResources;
             break;
         }
-        if ((ret = ioreturn(tegra_nvenc_buffer_alloc(size, &slot->block))))
+        ret = ioreturn(tegra_nvenc_buffer_alloc(size, &slot->block));
+        if (ret)
             break;
         slot->handle = nextHandle_++;
         if (!nextHandle_)
@@ -245,6 +254,7 @@ IOReturn AppleAVE2UserClient::run(uint32_t method, const void *in, uint32_t inSi
         break;
     }
     case TegraNVENCMethodBufferFree: {
+        // NOLINTNEXTLINE(clang-analyzer-core.NullDereference): input size checked above
         Buffer *b = find(static_cast<const TegraNVENCBuffer *>(in)->handle);
         if (!b) {
             ret = kIOReturnBadArgument;
@@ -307,7 +317,9 @@ IOReturn AppleAVE2UserClient::externalMethod(uint32_t selector, IOExternalMethod
     return ret;
 }
 
+// NOLINTNEXTLINE(misc-use-internal-linkage): OSDefineMetaClassAndStructors needs the class's external linkage
 class TegraNVENC : public IOService {
+    // NOLINTNEXTLINE(misc-explicit-constructor): IOKit's structors macro declares the metaclass constructor
 OSDeclareDefaultStructors(TegraNVENC)
 
     public : IOReturn newUserClient(task_t task, void *securityID, UInt32 type, OSDictionary *properties,
@@ -375,13 +387,13 @@ extern "C" int tegra_nvenc_publish(void)
         return -12;
     }
     service->registerService();
-    uint64_t limit = 0, free = 0;
+    uint64_t limit = 0;
+    uint64_t free = 0;
     tegra_nvenc_memory_usage(&limit, &free);
-    const TegraNVENCProven *proven = tegra_nvenc_proven();
     IOLog("TegraNVENC: E3 ok service published (user client AppleAVE2UserClient, ABI %u, input layout %u, chroma mode "
-          "%u, %s; buffers of any pages behind the SMMU, %llu MiB at most)\n",
-          TEGRA_NVENC_ABI_VERSION, proven->inputLayout, proven->chromaMode,
-          proven->pFrames ? "P pictures" : "intra only", limit >> 20);
+          "%u, P pictures; buffers of any pages behind the SMMU, %llu MiB at most)\n",
+          TEGRA_NVENC_ABI_VERSION, static_cast<unsigned>(TEGRA_NVENC_LAYOUT_TILED16),
+          static_cast<unsigned>(TEGRA_NVENC_CHROMA_OFFSET), limit >> 20);
     service->release();  // the attachment keeps it
     return 0;
 }

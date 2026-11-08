@@ -16,16 +16,24 @@
     "on the panel, under each name ProgressUI looks for at a truncated main-screen-scale of 1 or 2 (iPadOS 17 and 27).",
     "portrait (optional): staged only for a portrait-native kernel (drivers/NativeMobileDisplay/SwitchPortrait.h).",
     "debug (optional): staged only in debug boot packages (switch-fetchform, which the BlueTool stand-in runs on request).",
+    "kind (optional): staged only for that IPSW kind (--//ipsw:kind), for paths only its System volume has.",
     "J120's speaker strips give the presets and bypass flags of VirtualAudio's built-in DSP chain for the speaker port",
     "(nine AUs tuned for J120's four MAX98723 drivers). drivers/SwitchAudio/tunings has same-named ones, gated like the",
-    "plug-in, that bypass every AU of those chains except the volume (see hal/SwitchAudioPlugIn.c).",
+    "plug-in, that bypass every AU of those chains except the volume (see hal/SwitchAudioPlugIn.c). iOS 27 (J181) builds",
+    "the speaker port's chain from the DSP graphs of its acoustic ID's directory (AID2003/VAD/speaker_*.dspg: loudness",
+    "normalizer, virtual bass, two ToneMeisters, vrq2, MeisterStueck, ControlFreak and speaker protection V3, tuned for",
+    "J181's MAX98357s), its strips matching boxes by name: tunings/AID2003 bypasses every box but the volume (vrq2;",
+    "AUVolume in measurement).",
     "The VideoDecoders union (HEVCH8, AVD) has no gate: AVD registers only in processes that may open the TegraNVDEC",
     "service, which the kernel publishes once NVDEC proves itself at boot.",
     "H264H7.videoencoder (AVE on NVENC) has no gate either: it registers only once the kernel published TegraNVENC (E3).",
-    "The J120 iPadOS 17 and Lake wallpapers (WallpaperKit loads a bundle only at the device's logical screen class, which",
-    "follows switch-ui-scale, or at 'any'; 21H461 ships @2x only): each bundle directory is its own union, showing an 'any'",
-    "Wallpaper.plist (tools/package/wallpaper_1x.py, pinned) over the sealed one, with the sealed .ca and HEIC beneath.",
-    "No gate."
+    "The iPadOS 17 and Lake wallpapers of each IPSW's own iPad (WallpaperKit loads a bundle only at the device's logical",
+    "screen class, which follows switch-ui-scale, or at 'any'; an IPSW ships @2x only): each bundle directory is its own",
+    "union, showing an 'any' Wallpaper.plist (tools/package/wallpaper_1x.py, pinned) over the sealed one, with the sealed",
+    ".ca and images beneath. No gate.",
+    "SwitchHWTest.app (hw_test_app, debug packages only) is a bundle entry: the whole .app from its .ipa, every Mach-O",
+    "in the trust cache, in a union over /Applications. Deploy asks for an upgrade migration when it changes, so",
+    "LaunchServices registers it the way it registers an OS update's system apps (tools/deploy/system_apps.py)."
   ],
   "files": [
     {
@@ -90,40 +98,102 @@
     {
       "path": "/Library/Audio/Tunings/J120/VAD/j120_speaker_general.austrip",
       "source": "drivers/SwitchAudio/tunings/j120_speaker_general.austrip",
-      "boot-arg": "switch-no-audio"
+      "boot-arg": "switch-no-audio",
+      "kind": "21H461"
     },
     {
       "path": "/Library/Audio/Tunings/J120/VAD/j120_speaker_latenight_general.austrip",
       "source": "drivers/SwitchAudio/tunings/j120_speaker_latenight_general.austrip",
-      "boot-arg": "switch-no-audio"
+      "boot-arg": "switch-no-audio",
+      "kind": "21H461"
     },
     {
       "path": "/Library/Audio/Tunings/J120/VAD/j120_speaker_latenight_movie.austrip",
       "source": "drivers/SwitchAudio/tunings/j120_speaker_latenight_movie.austrip",
-      "boot-arg": "switch-no-audio"
+      "boot-arg": "switch-no-audio",
+      "kind": "21H461"
     },
     {
       "path": "/Library/Audio/Tunings/J120/VAD/j120_speaker_measurement.austrip",
       "source": "drivers/SwitchAudio/tunings/j120_speaker_measurement.austrip",
-      "boot-arg": "switch-no-audio"
+      "boot-arg": "switch-no-audio",
+      "kind": "21H461"
     },
     {
       "path": "/Library/Audio/Tunings/J120/VAD/j120_speaker_movie.austrip",
       "source": "drivers/SwitchAudio/tunings/j120_speaker_movie.austrip",
-      "boot-arg": "switch-no-audio"
+      "boot-arg": "switch-no-audio",
+      "kind": "21H461"
     },
     {
       "path": "/Library/Audio/Tunings/J120/VAD/j120_speaker_ringtone.austrip",
       "source": "drivers/SwitchAudio/tunings/j120_speaker_ringtone.austrip",
-      "boot-arg": "switch-no-audio"
+      "boot-arg": "switch-no-audio",
+      "kind": "21H461"
+    },
+    {
+      "path": "/Library/Audio/Tunings/AID2003/VAD/speaker_general.austrip",
+      "source": "drivers/SwitchAudio/tunings/AID2003/speaker_general.austrip",
+      "boot-arg": "switch-no-audio",
+      "kind": "24B119"
+    },
+    {
+      "path": "/Library/Audio/Tunings/AID2003/VAD/speaker_latenight_general.austrip",
+      "source": "drivers/SwitchAudio/tunings/AID2003/speaker_latenight_general.austrip",
+      "boot-arg": "switch-no-audio",
+      "kind": "24B119"
+    },
+    {
+      "path": "/Library/Audio/Tunings/AID2003/VAD/speaker_latenight_movie.austrip",
+      "source": "drivers/SwitchAudio/tunings/AID2003/speaker_latenight_movie.austrip",
+      "boot-arg": "switch-no-audio",
+      "kind": "24B119"
+    },
+    {
+      "path": "/Library/Audio/Tunings/AID2003/VAD/speaker_measurement.austrip",
+      "source": "drivers/SwitchAudio/tunings/AID2003/speaker_measurement.austrip",
+      "boot-arg": "switch-no-audio",
+      "kind": "24B119"
+    },
+    {
+      "path": "/Library/Audio/Tunings/AID2003/VAD/speaker_movie.austrip",
+      "source": "drivers/SwitchAudio/tunings/AID2003/speaker_movie.austrip",
+      "boot-arg": "switch-no-audio",
+      "kind": "24B119"
+    },
+    {
+      "path": "/Library/Audio/Tunings/AID2003/VAD/speaker_ringtone.austrip",
+      "source": "drivers/SwitchAudio/tunings/AID2003/speaker_ringtone.austrip",
+      "boot-arg": "switch-no-audio",
+      "kind": "24B119"
     },
     {
       "path": "/Library/Wallpaper/Collections/iPadOS_17~ipad.wallpaperCollection/Wallpapers/7570.iPadOS_17_Flat-1024w-1366h@2x~ipad.wallpaper/Wallpaper.plist",
-      "source": "build/wallpaper-1x/7570.iPadOS_17_Flat.plist"
+      "source": "build/wallpaper-1x/21H461/7570.iPadOS_17_Flat.plist",
+      "kind": "21H461"
     },
     {
       "path": "/Library/Wallpaper/Collections/Lake~ipad.wallpaperCollection/Wallpapers/7560.Lake_Flat-1024w-1366h@2x~ipad.wallpaper/Wallpaper.plist",
-      "source": "build/wallpaper-1x/7560.Lake_Flat.plist"
+      "source": "build/wallpaper-1x/21H461/7560.Lake_Flat.plist",
+      "kind": "21H461"
+    },
+    {
+      "path": "/Library/Wallpaper/Collections/iPadOS_17~ipad.wallpaperCollection/Wallpapers/7570.iPadOS_17-810w-1080h@2x~ipad.wallpaper/Wallpaper.plist",
+      "source": "build/wallpaper-1x/24B119/7570.iPadOS_17.plist",
+      "kind": "24B119"
+    },
+    {
+      "path": "/Library/Wallpaper/Collections/Lake~ipad.wallpaperCollection/Wallpapers/7560.Lake-810w-1080h@2x~ipad.wallpaper/Wallpaper.plist",
+      "source": "build/wallpaper-1x/24B119/7560.Lake.plist",
+      "kind": "24B119"
+    },
+    {
+      "path": "/Applications/SwitchHWTest.app",
+      "source": "build/switch-hwtest/SwitchHWTest.ipa",
+      "trust": true,
+      "bundle": true,
+      "union": "/Applications",
+      "debug": true
     }
   ]
 }

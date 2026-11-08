@@ -38,7 +38,7 @@ struct switch_diag_state {
     char stage[104];
     char panic_text[1024];
 };
-struct switch_diag_state switch_diag_record;
+static struct switch_diag_state switch_diag_record;
 static volatile uint32_t *framebuffer;
 /* Fixed RAM text history. No allocation, firmware, UART or storage access. */
 #define CONSOLE_ROWS    24u
@@ -54,7 +54,9 @@ volatile uint64_t switch_user_record[14];
 /* Only the assembly entry can arm this after validating the fixed contract.
  * Last stage and fault fields remain available even if the display cannot draw.
  * [enabled, stage, recursive-fault guard, vector, ESR, FAR, ELR, SCTLR]. */
+/* NOLINTNEXTLINE(misc-use-internal-linkage): osfmk/arm64/start.s uses it by name */
 volatile uint64_t switch_early_record[8];
+/* NOLINTNEXTLINE(misc-use-internal-linkage): osfmk/arm64/start.s uses it by name */
 unsigned char switch_early_stack[4096] __attribute__((aligned(16)));
 extern const unsigned char ExceptionVectorsBase[];
 
@@ -99,9 +101,10 @@ __attribute__((noreturn, no_stack_protector)) void switch_diag_early_fault(void)
     if (switch_early_record[0]) {
         volatile uint32_t *pixels = (volatile uint32_t *)(uintptr_t)SWITCH_FB_PA;
         // Erase only the bounded early-C text area, preserving loader status.
-        for (unsigned y = 320; y < 620; ++y)
+        for (unsigned y = 320; y < 620; ++y) {
             for (unsigned x = 16; x < 1264; ++x)
                 switch_diag_pixel(pixels, x, y, SWITCH_BACKGROUND);
+        }
         (void)switch_diag_text(pixels, 16, 340, 704, "EARLY XNU EXCEPTION - HALTED", 104, SWITCH_RED);
         early_hex(380, "VECTOR=", switch_early_record[3]);
         early_hex(400, "LAST STAGE=", switch_early_record[1]);
@@ -173,6 +176,7 @@ void switch_diag_graphics_takeover(void)
 }
 
 /* NativeLegacyDisplay reserves scanout just before copying a real surface. */
+/* NOLINTNEXTLINE(misc-use-internal-linkage): kits/qemu's LegacyDisplayProbe calls it (weak import) */
 int boot_progress_prepare_scanout(void)
 {
     if (switch_diag_record.panicked)
@@ -188,6 +192,7 @@ int boot_progress_prepare_scanout(void)
     return 1;
 }
 
+/* NOLINTNEXTLINE(misc-use-internal-linkage): kits/qemu's LegacyDisplayProbe calls it (weak import) */
 void boot_progress_cancel_scanout(void)
 {
     if (native_text_console) {
@@ -215,7 +220,8 @@ static void console_blank(unsigned row)
 /* Called with interrupts disabled on the already-required single CPU. */
 static void console_flush(void)
 {
-    uint64_t now, freq;
+    uint64_t now = 0;
+    uint64_t freq = 0;
     __asm__ volatile("mrs %0,cntpct_el0" : "=r"(now));
     __asm__ volatile("mrs %0,cntfrq_el0" : "=r"(freq));
     if (console_last_draw && freq && now - console_last_draw < freq / 5)
@@ -224,12 +230,14 @@ static void console_flush(void)
     unsigned first = console_used == CONSOLE_ROWS ? (console_head + 1) % CONSOLE_ROWS : 0;
     for (unsigned row = 0; row < CONSOLE_ROWS; row++) {
         const char *line = row < console_used ? console_lines[(first + row) % CONSOLE_ROWS] : NULL;
-        if (line)
+        if (line) {
             text(180 + row * 20, line, CONSOLE_COLUMNS + 1, SWITCH_WHITE);
-        else
-            for (unsigned y = 180 + row * 20; y < 194 + row * 20; y++)
+        } else {
+            for (unsigned y = 180 + row * 20; y < 194 + row * 20; y++) {
                 for (unsigned x = 16; x < 1264; x++)
                     switch_diag_pixel(framebuffer, x, y, SWITCH_BACKGROUND);
+            }
+        }
     }
     sync_pixels();
 }
@@ -257,11 +265,12 @@ void switch_diag_console_putc(char c)
             if (c == '\b') {
                 if (console_column)
                     console_lines[console_head][--console_column] = ' ';
-            } else
-                console_lines[console_head][console_column++] = (c == '\t') ? ' '
-                                                                : ((unsigned char)c >= 32 && (unsigned char)c < 127)
-                                                                    ? c
-                                                                    : '?';
+            } else {
+                char shown = (unsigned char)c >= 32 && (unsigned char)c < 127 ? c : '?';
+                if (c == '\t')
+                    shown = ' ';
+                console_lines[console_head][console_column++] = shown;
+            }
         }
     }
     console_busy = 0;
@@ -278,7 +287,7 @@ void switch_diag_process_event(int pid, const char *name, const char *event, int
 
 void switch_diag_init(const boot_args *args)
 {
-    const int cpus = (int)ml_get_max_cpu_number() + 1;
+    const int cpus = ml_get_max_cpu_number() + 1;
     if (!switch_native_cpu_profile_matches(cpus))
         return;
     /* The native profile belongs exclusively to XNU's video console (text mode) or to the boot logo (graphics mode).
@@ -320,9 +329,10 @@ void switch_diag_stage(const char *message)
         switch_diag_record.stage[n] = message[n];
     switch_diag_record.stage[n] = 0;
     ++switch_diag_record.stages;
-    for (unsigned y = 100; y < 120; ++y)
+    for (unsigned y = 100; y < 120; ++y) {
         for (unsigned x = 16; x < 1264; ++x)
             switch_diag_pixel(framebuffer, x, y, SWITCH_BACKGROUND);
+    }
     text(100, switch_diag_record.stage, sizeof(switch_diag_record.stage), SWITCH_GREEN);
     sync_pixels();
     (void)ml_set_interrupts_enabled(previous);
@@ -337,20 +347,23 @@ __attribute__((no_stack_protector)) void switch_diag_panic(const char *format, v
         display(format);
     if (switch_early_record[0]) {
         __asm__ volatile("msr daifset, #15" ::: "memory");
-        if (switch_early_record[2] || switch_diag_record.panicked)
+        if (switch_early_record[2] || switch_diag_record.panicked) {
             for (;;)
                 __asm__ volatile("wfe" ::: "memory");
+        }
         switch_early_record[2] = 1;
         switch_diag_record.panicked = 1;
         switch_diag_record.caller = caller;
         volatile uint32_t *pixels = (volatile uint32_t *)(uintptr_t)SWITCH_FB_PA;
-        for (unsigned y = 320; y < 620; ++y)
+        for (unsigned y = 320; y < 620; ++y) {
             for (unsigned x = 16; x < 1264; ++x)
                 switch_diag_pixel(pixels, x, y, SWITCH_BACKGROUND);
+        }
         (void)switch_diag_text(pixels, 16, 340, 704, "EARLY XNU PANIC - HALTED", 104, SWITCH_RED);
         early_hex(380, "LAST STAGE=", switch_early_record[1]);
         early_hex(400, "CALLER=", caller);
         __asm__ volatile("dsb sy" ::: "memory");
+        /* NOLINTNEXTLINE(cppcoreguidelines-init-variables): va_copy initializes it */
         va_list copy;
         va_copy(copy, *args);
         int count = vsnprintf(switch_diag_record.panic_text, sizeof(switch_diag_record.panic_text), format, copy);
@@ -389,9 +402,10 @@ __attribute__((no_stack_protector)) void switch_diag_panic(const char *format, v
     if (switch_diag_record.panicked)
         panic_spin_forever();
     switch_diag_record.panicked = 1;
-    for (unsigned y = 140; y < 660; y++)
+    for (unsigned y = 140; y < 660; y++) {
         for (unsigned x = 16; x < 1264; x++)
             switch_diag_pixel(framebuffer, x, y, SWITCH_BACKGROUND);
+    }
     switch_diag_record.caller = caller;
     __asm__ volatile("mrs %0, CurrentEL" : "=r"(switch_diag_record.current_el));
     __asm__ volatile("mrs %0, sctlr_el1" : "=r"(switch_diag_record.sctlr));
@@ -407,6 +421,7 @@ __attribute__((no_stack_protector)) void switch_diag_panic(const char *format, v
     hex_line(264, "SAMPLED ESR=", switch_diag_record.sampled_esr);
     hex_line(284, "SAMPLED FAR=", switch_diag_record.sampled_far);
     sync_pixels();
+    /* NOLINTNEXTLINE(cppcoreguidelines-init-variables): va_copy initializes it */
     va_list copy;
     va_copy(copy, *args);
     int count = vsnprintf(switch_diag_record.panic_text, sizeof(switch_diag_record.panic_text), format, copy);
@@ -417,9 +432,10 @@ __attribute__((no_stack_protector)) void switch_diag_panic(const char *format, v
         switch_diag_record.truncated = 1;
     if (switch_diag_record.truncated)
         text(644, "PANIC TEXT TRUNCATED", 104, SWITCH_RED);
-    for (unsigned y = 680; y < 700; ++y)
+    for (unsigned y = 680; y < 700; ++y) {
         for (unsigned x = 16; x < 1264; ++x)
             switch_diag_pixel(framebuffer, x, y, SWITCH_BACKGROUND);
+    }
     text(680, "HALTED ON PANIC - PHOTOGRAPH THIS SCREEN", 104, SWITCH_RED);
     sync_pixels();
     panic_spin_forever();
@@ -450,23 +466,29 @@ void switch_diag_files_update(void)
     if (!switch_diag_record.ready || switch_diag_record.panicked || switch_files_record[0] != SWITCH_FILES_MAGIC)
         return;
     boolean_t previous = ml_set_interrupts_enabled(FALSE);
-    for (unsigned y = 350; y < 660; y++)
+    for (unsigned y = 350; y < 660; y++) {
         for (unsigned x = 16; x < 1264; x++)
             switch_diag_pixel(framebuffer, x, y, SWITCH_BACKGROUND);
-    const char *message = switch_files_record[3]        ? "FILE CHECK REFUSED OR FAILED - NO RETRY"
-                          : switch_files_record[2] == 9 ? "FAT FILE SAMPLES VERIFIED - READ ONLY"
-                                                        : "READ-ONLY FAT FILE CHECK IN PROGRESS";
+    }
+    const char *message = "READ-ONLY FAT FILE CHECK IN PROGRESS";
+    if (switch_files_record[3]) {
+        message = "FILE CHECK REFUSED OR FAILED - NO RETRY";
+    } else if (switch_files_record[2] == 9) {
+        message = "FAT FILE SAMPLES VERIFIED - READ ONLY";
+    }
     text(360, message, 104, switch_files_record[2] == 9 && !switch_files_record[3] ? SWITCH_GREEN : SWITCH_WHITE);
     hex_line(400, "FILE STAGE / ERROR=", (switch_files_record[2] << 32) | switch_files_record[3]);
-    if (switch_files_record[32])
+    if (switch_files_record[32]) {
         hex_line(420, "GPT ERROR=", switch_files_record[32]);
-    else
+    } else {
         hex_line(420, "FAT ERROR / SD ERROR=", (switch_files_record[4] << 32) | switch_files_record[5]);
+    }
     hex_line(440, "CARD CAPACITY SECTORS=", switch_files_record[6]);
-    if (switch_files_record[32])
+    if (switch_files_record[32]) {
         hex_line(460, "GPT ENTRY COUNT / BYTES=", (switch_files_record[35] << 32) | (uint32_t)switch_files_record[36]);
-    else
+    } else {
         hex_line(460, "FAT PARTITION FIRST=", switch_files_record[7]);
+    }
     hex_line(480, "FAT PARTITION SECTORS=", switch_files_record[8]);
     hex_line(500, "SHA SELFTEST / CLUSTER BYTES=", (switch_files_record[29] << 32) | switch_files_record[9]);
     hex_line(520, "FIXTURE MATCH / HASHED BYTES=", (switch_files_record[17] << 32) | switch_files_record[16]);
@@ -516,7 +538,9 @@ void switch_diag_user_syscall(unsigned code, int error, int pid, uint64_t pc, ui
         return;
     }
     if (step == 2) {
-        uint64_t results[4], page = 0, length = 0;
+        uint64_t results[4];
+        uint64_t page = 0;
+        uint64_t length = 0;
         if (copyin(SWITCH_USER_RESULTS, results, sizeof(results)) ||
             copyin(SWITCH_USER_USER_PAGE_SIZE, &page, sizeof(page)) ||
             copyin(SWITCH_USER_OLD_LENGTH, &length, sizeof(length))) {
@@ -537,14 +561,17 @@ void switch_diag_user_syscall(unsigned code, int error, int pid, uint64_t pc, ui
     if (step == 2)
         switch_diag_stage("SIGNED PID1 TEST PROCESS RUNNING");
     boolean_t previous = ml_set_interrupts_enabled(FALSE);
-    for (unsigned y = 144; y < 164; ++y)
+    for (unsigned y = 144; y < 164; ++y) {
         for (unsigned x = 16; x < 1264; ++x)
             switch_diag_pixel(framebuffer, x, y, SWITCH_BACKGROUND);
-    text(144,
-         step == 0   ? "EL0 ENTERED - GETPID RETURNED 1"
-         : step == 1 ? "EL0 SYSCTL COMPLETED - WAITING FOR USER ACKNOWLEDGEMENT"
-                     : "EL0 USERSPACE VERIFIED - PID 1",
-         104, SWITCH_GREEN);
+    }
+    const char *reached = "EL0 USERSPACE VERIFIED - PID 1";
+    if (step == 0) {
+        reached = "EL0 ENTERED - GETPID RETURNED 1";
+    } else if (step == 1) {
+        reached = "EL0 SYSCTL COMPLETED - WAITING FOR USER ACKNOWLEDGEMENT";
+    }
+    text(144, reached, 104, SWITCH_GREEN);
     hex_line(184, "USER PC=", pc);
     hex_line(204, "USER CPSR=", cpsr);
     hex_line(224, "COMPLETED TEST SYSCALLS=", step + 1);
@@ -552,9 +579,10 @@ void switch_diag_user_syscall(unsigned code, int error, int pid, uint64_t pc, ui
         hex_line(264, "GETPID RESULT=", switch_user_record[8]);
         hex_line(284, "SYSCTL RESULT=", switch_user_record[9]);
         hex_line(304, "USER PAGE SIZE=", switch_user_record[12]);
-        for (unsigned y = 680; y < 700; ++y)
+        for (unsigned y = 680; y < 700; ++y) {
             for (unsigned x = 16; x < 1264; ++x)
                 switch_diag_pixel(framebuffer, x, y, SWITCH_BACKGROUND);
+        }
         text(680, "OWN SIGNED TEST PROCESS - IPADOS APPS ARE NOT RUNNING", 104, SWITCH_WHITE);
     }
     sync_pixels();
@@ -564,9 +592,12 @@ void switch_diag_user_syscall(unsigned code, int error, int pid, uint64_t pc, ui
         block_start();
         if (switch_sd_record[0] == SWITCH_SD_DIAG_MAGIC && switch_files_record[0] != SWITCH_FILES_MAGIC) {
             previous = ml_set_interrupts_enabled(FALSE);
-            const char *message = switch_sd_record[2] == 5     ? "SD SECTOR 0 MATCHES U-BOOT - READ ONLY"
-                                  : switch_sd_record[3] == 123 ? "SD SECTOR 0 MISMATCH - NO RETRY"
-                                                               : "SD REFUSED OR FAILED - NO RETRY";
+            const char *message = "SD REFUSED OR FAILED - NO RETRY";
+            if (switch_sd_record[2] == 5) {
+                message = "SD SECTOR 0 MATCHES U-BOOT - READ ONLY";
+            } else if (switch_sd_record[3] == 123) {
+                message = "SD SECTOR 0 MISMATCH - NO RETRY";
+            }
             text(360, message, 104, switch_sd_record[2] == 5 ? SWITCH_GREEN : SWITCH_WHITE);
             hex_line(400, "SD ERROR=", switch_sd_record[3]);
             hex_line(420, "TRANSPORT STAGE=", switch_sd_record[11]);

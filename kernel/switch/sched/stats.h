@@ -50,7 +50,8 @@ static inline void switch_sched_note(struct switch_sched_window *w, uint64_t us)
 /* The bound under which pct percent of the runs waited: its bucket's upper edge, never above the longest wait. */
 static inline uint64_t switch_sched_percentile(const struct switch_sched_window *w, unsigned int pct)
 {
-    uint64_t need = ((uint64_t)w->runs * pct + 99) / 100, seen = 0;
+    uint64_t need = ((uint64_t)w->runs * pct + 99) / 100;
+    uint64_t seen = 0;
 
     if (w->runs == 0) {
         return 0;
@@ -58,7 +59,7 @@ static inline uint64_t switch_sched_percentile(const struct switch_sched_window 
     for (unsigned int b = 0; b < SWITCH_SCHED_BUCKETS; b++) {
         seen += w->hist[b];
         if (seen >= need) {
-            uint64_t edge = b + 1 < SWITCH_SCHED_BUCKETS ? 1ull << b : w->max_us;
+            uint64_t edge = b + 1 < SWITCH_SCHED_BUCKETS ? 1ULL << b : w->max_us;
             return edge < w->max_us ? edge : w->max_us;
         }
     }
@@ -83,6 +84,15 @@ static inline const char *switch_sched_bucket_name(uint8_t bucket)
     return bucket < sizeof(names) / sizeof(names[0]) ? names[bucket] : "?";
 }
 
+/* The end of `out` after an snprintf at `at` returned n: clamped to the buffer, unchanged on an error. */
+static inline size_t switch_sched_appended(size_t at, int n, size_t size)
+{
+    if (n < 0) {
+        return at;
+    }
+    return at + (size_t)n < size ? at + (size_t)n : size - 1;
+}
+
 /*
  * One thread's entry: "label[pid] base/sched mode qos bucket: runs p50/p99/max us", then the fail-safe and CPU-limit
  * counts when there are any. Returns the length written (snprintf's, clamped to the buffer).
@@ -90,8 +100,8 @@ static inline const char *switch_sched_bucket_name(uint8_t bucket)
 static inline size_t switch_sched_format(char *out, size_t size, const char *label, int pid,
                                          const struct switch_sched_class *c, const struct switch_sched_window *w)
 {
-    size_t at;
-    int n;
+    size_t at = 0;
+    int n = 0;
 
     if (size == 0) {
         return 0;
@@ -100,14 +110,14 @@ static inline size_t switch_sched_format(char *out, size_t size, const char *lab
                  switch_sched_mode_name(c->mode), switch_sched_qos_name(c->qos), switch_sched_bucket_name(c->bucket),
                  w->runs, (unsigned long long)switch_sched_percentile(w, 50),
                  (unsigned long long)switch_sched_percentile(w, 99), (unsigned long long)w->max_us);
-    at = n < 0 ? 0 : ((size_t)n < size ? (size_t)n : size - 1);
+    at = switch_sched_appended(0, n, size);
     if (w->failsafe_runs != 0 && at < size) {
         n = snprintf(out + at, size - at, ", %u fail-safe", w->failsafe_runs);
-        at = n < 0 ? at : (at + (size_t)n < size ? at + (size_t)n : size - 1);
+        at = switch_sched_appended(at, n, size);
     }
     if (w->limit_blocks != 0 && at < size) {
         n = snprintf(out + at, size - at, ", CPU limit %u/%llu us", w->limit_blocks, (unsigned long long)w->limit_us);
-        at = n < 0 ? at : (at + (size_t)n < size ? at + (size_t)n : size - 1);
+        at = switch_sched_appended(at, n, size);
     }
     return at;
 }

@@ -25,9 +25,12 @@
 #include "TegraGM20BGpu.h"
 #include "TegraGM20BRail.h"
 #include "TegraGM20BSleep.h"
+#include "shim/include/switch_tiled_cache.h"
 
 extern "C" {
+// NOLINTNEXTLINE(readability-redundant-declaration): not every kernel configuration's headers declare it
 boolean_t PE_parse_boot_argn(const char *arg_string, void *arg_ptr, int max_arg);
+// NOLINTNEXTLINE(readability-redundant-declaration): not every kernel configuration's headers declare it
 kern_return_t OSKextLoadKextWithIdentifier(const char *kextIdentifier);
 int nvxnu_trace_paced(void);  // shim/xnu_glue.cpp
 // The staged accelerator class (TegraGM20BAccelerator.cpp, a late object like SwitchAccelStub.cpp): weak, so this file links
@@ -43,6 +46,7 @@ extern kmod_info_t g_kernel_kmod_info;
 // runs).
 extern "C" void switch_thermal_gpu_ready(void);
 
+// NOLINTNEXTLINE(readability-redundant-declaration): not every kernel configuration's headers declare it
 extern "C" int vsnprintf(char *, size_t, const char *, va_list);
 
 namespace
@@ -72,6 +76,7 @@ volatile uint64_t gRailDemandAt;
 void bringupDone()
 {
 	__atomic_store_n(&gBringupDone, 1, __ATOMIC_RELEASE);
+	// NOLINTNEXTLINE(cppcoreguidelines-pro-type-const-cast): the wait event is the word's address
 	thread_wakeup(const_cast<int *>(&gBringupDone));
 	switch_thermal_gpu_ready();
 }
@@ -81,19 +86,21 @@ void bringupDone()
 void waitBringup()
 {
 	constexpr uint32_t kBringupWaitMs = 30000;
-	uint64_t deadline;
+	uint64_t deadline = 0;
 	clock_interval_to_deadline(kBringupWaitMs, kMillisecondScale, &deadline);
 	while (!__atomic_load_n(&gBringupDone, __ATOMIC_ACQUIRE)) {
+		// NOLINTNEXTLINE(cppcoreguidelines-pro-type-const-cast): the wait event is the word's address
 		assert_wait_deadline(const_cast<int *>(&gBringupDone), THREAD_UNINT, deadline);
 		if (__atomic_load_n(&gBringupDone, __ATOMIC_ACQUIRE)) {
 			clear_wait(current_thread(), THREAD_AWAKENED);
 			break;
 		}
 		if (thread_block(THREAD_CONTINUE_NULL) == THREAD_TIMED_OUT &&
-		    !__atomic_load_n(&gBringupDone, __ATOMIC_ACQUIRE))
+		    !__atomic_load_n(&gBringupDone, __ATOMIC_ACQUIRE)) {
 			panic("tegra-gm20b: system sleep: the GPU bring-up still runs %u ms into "
 			      "it",
 			      kBringupWaitMs);
+		}
 	}
 }
 
@@ -108,7 +115,7 @@ IOReturn publish()
 	if (!tegra_gm20b_accelerator_static_init || !tegra_gm20b_accelerator_allocate ||
 	    !tegra_gm20b_accelerator_instance_size)
 		return kIOReturnUnsupported;
-	kern_return_t kr = OSKextLoadKextWithIdentifier("com.apple.iokit.IOGPUFamily");
+	const kern_return_t kr = OSKextLoadKextWithIdentifier("com.apple.iokit.IOGPUFamily");
 	if (kr)
 		return kr;
 	const OSSymbol *name = OSSymbol::withCString("IOAcceleratorES");
@@ -121,7 +128,7 @@ IOReturn publish()
 	if (!handle)
 		return kIOReturnNoResources;
 	tegra_gm20b_accelerator_static_init();
-	IOReturn ret = OSMetaClass::postModLoad(handle);
+	const IOReturn ret = OSMetaClass::postModLoad(handle);
 	if (ret)
 		return ret;
 	IOService *accelerator = tegra_gm20b_accelerator_allocate();
@@ -171,9 +178,9 @@ int clkgateSysctl SYSCTL_HANDLER_ARGS
 	error = SYSCTL_IN(req, &on, sizeof(on));
 	if (error)
 		return error;
-	if (tgm_clkgate_switch(on != 0))
+	if (tgm_clkgate_switch(static_cast<int>(on != 0)))
 		return EBUSY;
-	gClkgateOn = on != 0;
+	gClkgateOn = static_cast<int>(on != 0);
 	return 0;
 }
 
@@ -189,6 +196,7 @@ void registerClkgateSysctl()
 }
 #endif
 
+// NOLINTNEXTLINE(misc-const-correctness): kernel_thread_start's thread_continue_t signature
 void bringup(void *arg, wait_result_t)
 {
 	const int stage = static_cast<int>(reinterpret_cast<intptr_t>(arg));
@@ -206,11 +214,12 @@ void bringup(void *arg, wait_result_t)
 	}
 	if (stage >= 4) {
 		const IOReturn ret = publish();
-		if (ret)
+		if (ret) {
 			IOLog("tegra-gm20b: M4 FAIL publish AGXAccelerator 0x%x\n", ret);
-		else
+		} else {
 			IOLog("tegra-gm20b: M4 ok published AGXAccelerator (MetalPluginName "
 			      "TegraGM20BMetal)\n");
+		}
 	}
 #if TGM_STATS
 	registerClkgateSysctl();
@@ -221,7 +230,7 @@ void bringup(void *arg, wait_result_t)
 bool gpuDisabled()
 {
 	unsigned off = 0;
-	return PE_parse_boot_argn("switch-no-gpu", &off, sizeof(off)) && off;
+	return (PE_parse_boot_argn("switch-no-gpu", &off, sizeof(off)) != 0) && (off != 0u);
 }
 }  // namespace
 
@@ -232,16 +241,36 @@ extern "C" int tegra_gm20b_bringup_busy(void)
 {
 	static int wanted = -1;
 	if (wanted < 0)
-		wanted = !gpuDisabled();
-	return wanted && (!__atomic_load_n(&gBringupDone, __ATOMIC_ACQUIRE) ||
-			  __atomic_load_n(&gSleeping, __ATOMIC_ACQUIRE) ||
-			  __atomic_load_n(&gRailMoving, __ATOMIC_ACQUIRE) > 0);
+		wanted = static_cast<int>(!gpuDisabled());
+	return static_cast<int>((wanted != 0) &&
+				((__atomic_load_n(&gBringupDone, __ATOMIC_ACQUIRE) == 0) ||
+				 (__atomic_load_n(&gSleeping, __ATOMIC_ACQUIRE) != 0) ||
+				 __atomic_load_n(&gRailMoving, __ATOMIC_ACQUIRE) > 0));
+}
+
+extern "C" int switch_tiled_cache_on(void)
+{
+	unsigned off = 0;
+	return static_cast<int>(
+		(PE_parse_boot_argn("switch-no-tiled-cache", &off, sizeof(off)) == 0) ||
+		(off == 0u));
+}
+
+extern "C" int switch_gpu_compression_on(void)
+{
+	static bool logged = false;
+	unsigned off = 0;
+	const bool on = (PE_parse_boot_argn("switch-no-gpu-compression", &off, sizeof(off)) == 0) ||
+			(off == 0u);
+	if (!on && !__atomic_exchange_n(&logged, true, __ATOMIC_RELAXED))
+		IOLog("tegra-gm20b: compression off (switch-no-gpu-compression)\n");
+	return static_cast<int>(on);
 }
 
 extern "C" void tgm_journal(const char *fmt, ...)
 {
 	char line[256];
-	va_list ap;
+	va_list ap;  // NOLINT(cppcoreguidelines-init-variables): va_start initializes it
 	va_start(ap, fmt);
 	vsnprintf(line, sizeof(line), fmt, ap);
 	va_end(ap);
@@ -266,10 +295,11 @@ extern "C" void tegra_gm20b_resume(void)
 	if (!__atomic_load_n(&gSleeping, __ATOMIC_ACQUIRE))
 		return;
 	IOLockLock(gRailLock);
-	if (gRailSC7Held)
+	if (gRailSC7Held) {
 		tgm_rail_sc7_release();
-	else
+	} else {
 		tgm_wake();
+	}
 	gRailSC7Held = 0;
 	__atomic_store_n(&gSleeping, 0, __ATOMIC_RELEASE);
 	IOLockUnlock(gRailLock);
@@ -284,10 +314,10 @@ namespace
 void railMove(thread_call_param_t, thread_call_param_t)
 {
 	IOLockLock(gRailLock);
-	const bool up = !tgm_railed();
-	const bool expected = __atomic_exchange_n(&gRailExpected, 0, __ATOMIC_ACQ_REL);
-	const bool displayOn = __atomic_load_n(&gRailDisplayOn, __ATOMIC_ACQUIRE);
-	const bool idle = tgm_idle_now();
+	const bool up = tgm_railed() == 0;
+	const bool expected = __atomic_exchange_n(&gRailExpected, 0, __ATOMIC_ACQ_REL) != 0;
+	const bool displayOn = __atomic_load_n(&gRailDisplayOn, __ATOMIC_ACQUIRE) != 0;
+	const bool idle = tgm_idle_now() != 0;
 	uint64_t heldUntil = 0;
 	const uint64_t hold = tgm_rail_hold_ns(__atomic_load_n(&gRailDemands, __ATOMIC_ACQUIRE));
 	if (hold) {
@@ -295,10 +325,11 @@ void railMove(thread_call_param_t, thread_call_param_t)
 		heldUntil += __atomic_load_n(&gRailDemandAt, __ATOMIC_ACQUIRE);
 	}
 	const bool held = heldUntil > mach_absolute_time();
-	const enum tgm_rail_move move =
-		tgm_rail_next(up, displayOn || expected, idle, held,
-			      __atomic_load_n(&gSleeping, __ATOMIC_ACQUIRE) ||
-				      !__atomic_load_n(&gBringupDone, __ATOMIC_ACQUIRE));
+	const enum tgm_rail_move move = tgm_rail_next(
+		static_cast<int>(up), static_cast<int>(displayOn || expected),
+		static_cast<int>(idle), static_cast<int>(held),
+		static_cast<int>((__atomic_load_n(&gSleeping, __ATOMIC_ACQUIRE) != 0) ||
+				 (__atomic_load_n(&gBringupDone, __ATOMIC_ACQUIRE)) == 0));
 	if (move == TGM_RAIL_DOWN) {
 		__atomic_add_fetch(&gRailMoving, 1, __ATOMIC_ACQ_REL);
 		tgm_rail_down();
@@ -371,7 +402,7 @@ extern "C" int tegra_gm20b_probe(void)
 		railMove, nullptr, THREAD_CALL_PRIORITY_KERNEL, THREAD_CALL_OPTIONS_ONCE);
 	if (!gRailLock || !gRailCall || !gRailHoldCall)
 		panic("tegra-gm20b: no memory for the rail-gate's lock and thread calls at boot");
-	thread_t thread;
+	thread_t thread = nullptr;
 	if (kernel_thread_start(bringup, reinterpret_cast<void *>(static_cast<intptr_t>(kStage)),
 				&thread) != KERN_SUCCESS) {
 		IOLog("tegra-gm20b: could not start the bring-up thread\n");

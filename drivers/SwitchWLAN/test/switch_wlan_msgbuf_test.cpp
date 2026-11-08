@@ -106,6 +106,7 @@ void put32(uint8_t *p, uint32_t v)
 // ---- the firmware ----------------------------------------------------------------------------------------------------
 struct Frame {
     std::vector<uint8_t> bytes;
+    uint8_t ifidx = 0, kind = 1;  // the rx completion's interface and frame type (802.3)
 };
 
 Frame makeFrame(uint32_t seq, size_t length)
@@ -145,6 +146,8 @@ public:
     uint64_t rxStarved = 0;     // frames dropped for want of a posted receive buffer
     unsigned minPosted = ~0u;   // fewest receive buffers it held when a frame came
     uint16_t lastTxStatus = 0;
+    uint16_t ioctlIn = 0, ioctlOut = 0;  // the last ioctl's input and output lengths
+    std::vector<uint8_t> ioctlBytes;     // and what it carried
 
     uint8_t *va(uint32_t pa) const
     {
@@ -214,8 +217,10 @@ public:
         memcpy(va(pa), f.bytes.data(), f.bytes.size());
         uint8_t item[32] = {};
         item[0] = 0x12;
+        item[1] = f.ifidx;
         put32(item + 4, id);
         put16(item + 14, static_cast<uint16_t>(f.bytes.size()));
+        put16(item + 18, f.kind);
         if (!push(2, item))
             throw std::runtime_error("rx complete ring full");
         return true;
@@ -279,6 +284,9 @@ private:
                 throw std::runtime_error("ioctl without a response buffer");
             const auto [id, pa] = ioctlBuffers.front();
             ioctlBuffers.pop_front();
+            ioctlIn = le16(item + 14);
+            ioctlOut = le16(item + 16);
+            ioctlBytes.assign(va(le32(item + 24)), va(le32(item + 24)) + ioctlIn);
             put32(va(pa), 0x12345678);
             out[0] = 0x0C;
             put32(out + 4, id);
@@ -331,10 +339,10 @@ Firmware gFw;
 // ---- the driver around Msgbuf: what SwitchWLAN.cpp and SwitchWLANNet.cpp do with it ----------------------------------
 std::vector<Frame> gReceived;
 
-void onFrame(void *, const uint8_t *frame, size_t length, uint8_t)
+void onFrame(void *, const uint8_t *frame, size_t length, uint8_t ifidx, uint8_t kind)
 {
     gCount.copiedBytes += length;  // SwitchWLANNet on_rx: the one copy, into the mbuf
-    gReceived.push_back(Frame{std::vector<uint8_t>(frame, frame + length)});
+    gReceived.push_back(Frame{std::vector<uint8_t>(frame, frame + length), ifidx, kind});
 }
 
 void onEvent(void *, const swlan::Event &)
@@ -732,6 +740,54 @@ TEST(SwitchWlanMsgbuf, DownloadEveryFrameIntactAndBuffersBack)
         EXPECT_LE(static_cast<double>(r.tcmReads) / static_cast<double>(r.frames), 0.15);
         EXPECT_LE(static_cast<double>(r.doorbells) / static_cast<double>(r.frames), 1.0 / 16);
         EXPECT_GE(static_cast<double>(r.frames) / static_cast<double>(r.msis), 16.0);
+    });
+}
+
+// Each frame's interface and type reach the handler: the type is the completion's le16 flags at +18 (brcmfmac's
+// BRCMF_MSGBUF_PKT_FLAGS_FRAME_802_3 = 1, FRAME_802_11 = 2, which monitor mode sets), not its interface byte.
+TEST(SwitchWlanMsgbuf, ReceiveCarriesInterfaceAndFrameType)
+{
+    ExpectPassesInFreshProcess([] {
+        REQUIRE(bringUp());
+        gReceived.clear();
+        Frame station = makeFrame(1, 100);
+        Frame monitor = makeFrame(2, 60);
+        monitor.kind = 2;
+        Frame other = makeFrame(3, 80);
+        other.ifidx = 1;
+        gFw.receive(station);
+        gFw.receive(monitor);
+        gFw.receive(other);
+        firmware();
+        ASSERT_EQ(gReceived.size(), 3u);
+        EXPECT_EQ(gReceived[0].kind, 1u);
+        EXPECT_EQ(gReceived[0].ifidx, 0u);
+        EXPECT_EQ(gReceived[1].kind, 2u);
+        EXPECT_EQ(gReceived[1].bytes, monitor.bytes);
+        EXPECT_EQ(gReceived[2].ifidx, 1u);
+        EXPECT_EQ(gReceived[2].kind, 1u);
+    });
+}
+
+// brcmf_msgbuf_tx_ioctl's lengths: a request up to the message size goes whole; a longer one (actframe's 1837 bytes)
+// declares its length as the output length and carries the first 1518 bytes.
+TEST(SwitchWlanMsgbuf, LongIoctlDeclaresItsLengthAndCarriesTheMessageSize)
+{
+    ExpectPassesInFreshProcess([] {
+        REQUIRE(bringUp());
+        static uint8_t request[1837];
+        for (size_t i = 0; i < sizeof(request); ++i)
+            request[i] = static_cast<uint8_t>(i * 7);
+        char why[200] = "";
+        REQUIRE(gMb.ioctlSubmit(263, 0, request, 40, 0, why, sizeof(why)));
+        firmware();
+        EXPECT_EQ(gFw.ioctlIn, 40u);
+        EXPECT_EQ(gFw.ioctlOut, 40u);
+        REQUIRE(gMb.ioctlSubmit(263, 0, request, sizeof(request), 0, why, sizeof(why)));
+        firmware();
+        EXPECT_EQ(gFw.ioctlIn, 1518u);
+        EXPECT_EQ(gFw.ioctlOut, 1837u);
+        EXPECT_EQ(gFw.ioctlBytes, std::vector<uint8_t>(request, request + 1518));
     });
 }
 

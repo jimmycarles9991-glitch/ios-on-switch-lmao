@@ -1486,6 +1486,35 @@ impl CommandBuffer {
         self.commit_as("commit", None)
     }
 
+    /// Hand the `VkCommandBuffer`s its ended encoders recorded to `each` (their raw handles), in their order, instead
+    /// of committing them (a runtime extension): a capture of the driver's commands that never
+    /// runs them, read on the CPU (TegraGM20BMetal's raw path reads a state's registers off one
+    /// draw). Nothing is submitted or scheduled and no batch is made, so the first work of the
+    /// resources made since the device's last submission stays queued for its next real batch,
+    /// and no event or fence is signaled. The command buffer can never be committed after.
+    ///
+    /// Refused as [`commit`](Self::commit) is, and where an encoder left commands to record at
+    /// commit (deferred segments: a capture holds only what encoding recorded).
+    pub fn capture(&self, mut each: impl FnMut(u64)) -> Result<(), Error> {
+        use ash::vk::Handle;
+        let mut state = self.state();
+        if let Some(problem) = state.refusal() {
+            return Err(invalid("capture", problem));
+        }
+        if state
+            .recorded
+            .iter()
+            .any(|encoder| !encoder.segments.is_empty())
+        {
+            return Err(internal("a capture of commands left to record at commit"));
+        }
+        state.committing = true;
+        for raw in state.recorded.iter().flat_map(|encoder| &encoder.raws) {
+            each(raw.as_raw());
+        }
+        Ok(())
+    }
+
     /// Commit the command buffer as failed with `failure`: a runtime extension, no Metal call
     /// (docs/API.md, "A command buffer committed as failed"), for layered validation, error
     /// injection and paravirtualization. It fails as Metal's failed command buffers do (measured

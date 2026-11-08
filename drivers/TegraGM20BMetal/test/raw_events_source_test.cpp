@@ -20,7 +20,7 @@ namespace {
 
 TEST(RawEventsSource, APlainEventStaysOnRawAsASharedOneDoes)
 {
-    const std::string raw = SourceText("../raw/runtime/RawMetal.mm");
+    const std::string raw = SourceText("../raw/runtime/RawMetalEvents.mm");
     const std::string record =
         Between(raw, "- (void)event:(id<MTLEvent>)event value:(uint64_t)value signal:(bool)signal", "[self record:m];");
     EXPECT_THAT(record, Not(HasSubstr("conformsToProtocol:@protocol(MTLSharedEvent)")));

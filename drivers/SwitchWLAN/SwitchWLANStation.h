@@ -67,15 +67,15 @@ struct swlan_status {
 // its work loop. Handlers must not block. A join that gets as far as the access point calls associated (the 802.11
 // link is up, the key handshake of a secured network still to come) and then connect_done with how it ended.
 struct swlan_events {
-    void (*scan_done)(void);
-    void (*associated)(void);
+    void (*scan_done)();
+    void (*associated)();
     void (*connect_done)(int result);  // SWLAN_RES_*
     void (*link_lost)(int reason);
     void (*rx)(const uint8_t *eth, size_t length);  // Ethernet header + payload
     // From the work loop too: after each interrupt's frames (rx_flush: hand what rx gathered to the stack in one go),
     // and when the radio can take frames again after switch_wlan_tx_room said 0, or the station came up (tx_ready).
-    void (*rx_flush)(void);
-    void (*tx_ready)(void);
+    void (*rx_flush)();
+    void (*tx_ready)();
 };
 
 // Radio side. Every call only queues work (or copies a snapshot) and returns; any thread context.

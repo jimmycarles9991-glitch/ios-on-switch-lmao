@@ -334,6 +334,11 @@ pub(crate) struct Infos<'a> {
     meshes: bool,
 }
 
+// SAFETY: the create infos are only read, by the driver and by `part` and `whole`, while `Infos`
+// lives; nothing writes them meanwhile. A creation's two shader libraries read them from two
+// threads at once (`Linked::made`).
+unsafe impl Sync for Infos<'_> {}
+
 impl<'a> Infos<'a> {
     /// The whole pipeline's create info.
     fn whole(&self) -> vk::GraphicsPipelineCreateInfo<'a> {
@@ -989,8 +994,8 @@ impl VariantObjects {
     }
 
     /// The pipeline of `infos` linked, without link-time optimization, from `linked`, the
-    /// libraries of its parts named `names`: each made here where no caller made it or is
-    /// making it, through the device's shader cache under its name, else waited for.
+    /// libraries of its parts named `names`: each made where no caller made it or is making it,
+    /// through the device's shader cache under its name, else waited for ([`Linked::made`]).
     fn linked(
         &self,
         infos: &Infos<'_>,
@@ -998,34 +1003,29 @@ impl VariantObjects {
         linked: Linked,
     ) -> Result<(vk::Pipeline, Linked), Error> {
         let shared = self.device.shared();
-        let mut raws = [vk::Pipeline::null(); 4];
-        for ((part, library), (raw, name)) in Part::ALL
-            .into_iter()
-            .zip(&linked.0)
-            .zip(raws.iter_mut().zip(names))
-        {
-            *raw = library.made(|| {
-                let mut flag =
-                    vk::GraphicsPipelineLibraryCreateInfoEXT::default().flags(part.flag());
-                let info = infos.part(part, &mut flag);
-                let create = |cache| {
-                    // SAFETY: every pointer in `info` outlives the call; the pipeline cache is
-                    // the making's own, destroyed once the call returned, or none.
-                    unsafe { shared.vk().create_graphics_pipelines(cache, &[info], None) }
-                };
-                // A part with shaders is made through the device's shader cache, under a record
-                // of its own; one without holds nothing a record would keep.
-                let made = match part.holds_shaders() {
-                    true => shared.make_pipelines(Making::new(part.kind()).digest(name), create),
-                    false => create(vk::PipelineCache::null()),
-                }
-                .map_err(|(_, error)| vulkan(error))?;
-                shared.counts.pipeline_library_made(part);
-                made.first()
-                    .copied()
-                    .ok_or_else(|| internal("the driver made no pipeline library"))
-            })?;
-        }
+        let raws = linked.made(|part| {
+            let mut flag = vk::GraphicsPipelineLibraryCreateInfoEXT::default().flags(part.flag());
+            let info = infos.part(part, &mut flag);
+            let create = |cache| {
+                // SAFETY: every pointer in `info` outlives the call; the pipeline cache is the
+                // making's own, destroyed once the call returned, or none.
+                unsafe { shared.vk().create_graphics_pipelines(cache, &[info], None) }
+            };
+            // A part with shaders is made through the device's shader cache, under a record of
+            // its own; one without holds nothing a record would keep.
+            let made = match part.holds_shaders() {
+                true => shared.make_pipelines(
+                    Making::new(part.kind()).digest(&names[part as usize]),
+                    create,
+                ),
+                false => create(vk::PipelineCache::null()),
+            }
+            .map_err(|(_, error)| vulkan(error))?;
+            shared.counts.pipeline_library_made(part);
+            made.first()
+                .copied()
+                .ok_or_else(|| internal("the driver made no pipeline library"))
+        })?;
         let mut libraries = vk::PipelineLibraryCreateInfoKHR::default().libraries(&raws);
         let info = vk::GraphicsPipelineCreateInfo::default()
             .layout(infos.layout)

@@ -57,6 +57,8 @@ int nvbios_exec(struct nvbios_init *i)
 	return -ENODEV;
 }
 
+/* nouveau's prototypes (the nvkm/subdev/bios headers): these stubs keep their signatures. */
+/* NOLINTBEGIN(readability-non-const-parameter) */
 u32 nvbios_boostEm(struct nvkm_bios *b, u8 i, u8 *v, u8 *h, u8 *c, u8 *l, struct nvbios_boostE *e)
 {
 	(void)b;
@@ -201,6 +203,8 @@ u32 nvbios_volt_entry_parse(struct nvkm_bios *b, int i, u8 *v, u8 *l, struct nvb
 	return 0;
 }
 
+/* NOLINTEND(readability-non-const-parameter) */
+
 int nvbios_vpstate_parse(struct nvkm_bios *b, struct nvbios_vpstate_header *h)
 {
 	(void)b;
@@ -218,6 +222,7 @@ int nvbios_vpstate_entry(struct nvkm_bios *b, struct nvbios_vpstate_header *h, u
 	return -ENODEV;
 }
 
+/* NOLINTNEXTLINE(misc-use-internal-linkage): nouveau's code links against it */
 bool nvkm_lockvgac(struct nvkm_device *d, bool lock)
 {
 	(void)d;

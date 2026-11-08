@@ -30,8 +30,8 @@ enum : uint32_t {
     COMP_ISOCH_BUFFER_OVERRUN = 31,
 };
 
-constexpr uint32_t kMaxIsochEndpoints = 4;                // Linux tegra-xudc XUDC_MAX_ISOCH_EPS
-constexpr int32_t kIsocFrameError = (int32_t)0xe00002bc;  // kIOReturnError
+constexpr uint32_t kMaxIsochEndpoints = 4;                             // Linux tegra-xudc XUDC_MAX_ISOCH_EPS
+constexpr int32_t kIsocFrameError = static_cast<int32_t>(0xe00002bc);  // kIOReturnError
 
 // IOUSBDeviceIsocFrame (kalloc_var element of 24 bytes in 21H461's IOUSBDeviceFamily).
 struct IsocFrame {
@@ -49,16 +49,19 @@ constexpr uint64_t kIsocNoStamp = 0xe0005108;
 // One service interval: 2^(bInterval - 1) microframes at high speed, frames at full speed (USB 2.0 9.6.6).
 constexpr uint64_t isocIntervalNs(bool fullSpeed, uint32_t bInterval)
 {
-    const uint32_t exponent = bInterval < 1 ? 0 : bInterval > 16 ? 15 : bInterval - 1;
-    return (fullSpeed ? 1000000ull : 125000ull) << exponent;
+    uint32_t exponent = bInterval > 16 ? 15 : bInterval - 1;
+    if (bInterval < 1)
+        exponent = 0;
+    return (fullSpeed ? 1000000ULL : 125000ULL) << exponent;
 }
 
 // The frames, the last one serviced at `last`, each one interval before the next.
 inline void isocStamp(IsocFrame *frames, uint32_t count, uint64_t last, uint64_t interval)
 {
-    for (uint32_t i = count; i-- > 0; last -= interval)
+    for (uint32_t i = count; i-- > 0; last -= interval) {
         if (frames[i].timeStamp != kIsocNoStamp)
             frames[i].timeStamp = last;
+    }
 }
 
 // Frame bytes [offset, offset + length) of a request whose memory is `runs` (physically contiguous, in order) as one
@@ -71,7 +74,7 @@ inline bool planFrame(const Run *runs, uint32_t count, uint32_t offset, uint32_t
     uint64_t total = 0;
     for (uint32_t i = 0; i < count; ++i)
         total += runs[i].length;
-    if (length > kBouncePageBytes || (uint64_t)offset + length > total)
+    if (length > kBouncePageBytes || static_cast<uint64_t>(offset) + length > total)
         return false;
     *piece = {0, offset, length, length != 0};
     if (!length)
@@ -79,8 +82,9 @@ inline bool planFrame(const Run *runs, uint32_t count, uint32_t offset, uint32_t
     for (uint32_t i = 0, start = 0; i < count; start += runs[i++].length) {
         if (offset >= start + runs[i].length)
             continue;
-        const uint64_t pa = runs[i].pa + (offset - start), end = runs[i].pa + runs[i].length;
-        const uint64_t lineMask = ~(uint64_t)(kCacheLine - 1);
+        const uint64_t pa = runs[i].pa + (offset - start);
+        const uint64_t end = runs[i].pa + runs[i].length;
+        const uint64_t lineMask = ~static_cast<uint64_t>(kCacheLine - 1);
         const bool fits = offset + length <= start + runs[i].length;
         const bool direct =
             fits && (pa >> 16) == ((pa + length - 1) >> 16) && pa + length <= reach &&
@@ -179,7 +183,7 @@ public:
             Frame &f = r.frame[at];
             const bool moved = code == COMP_SUCCESS || code == COMP_SHORT_PACKET;
             f.state = moved && residue <= f.length ? kDone : kFailed;
-            f.actual = f.state == kDone ? (uint16_t)(f.length - residue) : 0;
+            f.actual = f.state == kDone ? static_cast<uint16_t>(f.length - residue) : 0;
             settle(r, at);
             complete_ = k + (at + 1u == r.frames ? 1 : 0);
             return IsocVerdict::Recorded;
@@ -214,9 +218,10 @@ private:
     // Frames before `upTo` that raised no event moved whole.
     static void settle(Request &r, uint32_t upTo)
     {
-        for (uint32_t i = 0; i < upTo; ++i)
+        for (uint32_t i = 0; i < upTo; ++i) {
             if (r.frame[i].state == kPending)
                 r.frame[i] = {r.frame[i].length, r.frame[i].length, kDone};
+        }
     }
 
     Request requests_[MaxRequests];

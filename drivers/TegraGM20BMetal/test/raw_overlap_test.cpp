@@ -100,6 +100,24 @@ TEST(RawOverlap, OverlappingQuadsSplitWhereTheSecondBegins)
     EXPECT_EQ(split(m, false, 12), (Runs{{0, 6}, {6, 12}}));
 }
 
+TEST(RawOverlap, IndicesCountFromTheBaseVertex)
+{
+    // two overlapping quads from vertex 4, after a quad no index reaches from there
+    Mesh m;
+    m.grid(500, 500, {10}, {10});
+    m.indices.clear();
+    m.grid(0, 0, {100}, {100});
+    m.grid(50, 50, {100}, {100});
+    for (uint16_t &i : m.indices)
+        i = uint16_t(i - 4);
+    raw::TriangleRuns t;
+    Runs runs;
+    raw::DrawGeometry g = m.geometry(12);
+    g.first = 4;
+    EXPECT_TRUE(t.split(g, false, runs));
+    EXPECT_EQ(runs, (Runs{{0, 6}, {6, 12}}));
+}
+
 TEST(RawOverlap, FoldedStripSplits)
 {
     Mesh m;

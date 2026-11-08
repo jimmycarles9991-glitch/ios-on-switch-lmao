@@ -15,6 +15,8 @@ import zlib
 from collections.abc import Iterable, Sequence
 from typing import NamedTuple
 
+from loader_abi import SEED_BYTES
+
 MANAGED_BASE = 0xB2004000
 MANAGED_USER_BASE = 0xB207C000
 MANAGED_SIZE = 768 << 20
@@ -26,20 +28,29 @@ GICC_BASE, GICC_SIZE = 0x50042000, 0x100
 MODEL = 'Nintendo Switch (OLED model)'
 COMPATIBLE = ('nvidia,fric', 'nintendo,aula', 'nintendo,nx', 'nvidia,tegra210b01')
 ROOT_VOLUME_UUID = '04769D26-2CA0-4825-B443-E2E5F88300F2'
-ROOT_MATCHING = (
-    '<dict><key>IOProviderClass</key><string>IOMedia</string>'
-    '<key>IOPropertyMatch</key><dict><key>UUID</key><string>' + ROOT_VOLUME_UUID + '</string></dict></dict>'
-).encode('ascii') + b'\0'
 
 
-def _node(name: str, properties: Iterable[tuple[str, bytes]] = (), children: Sequence[bytes] = ()) -> bytes:
-    """Apple DT: LE counts, 32-byte property names, and 4-byte value padding."""
+def root_matching(volume_uuid: str) -> bytes:
+    """/chosen/root-matching: the IOMedia of the APFS volume `volume_uuid` (the IPSW kind's System volume)."""
+    return (
+        '<dict><key>IOProviderClass</key><string>IOMedia</string>'
+        '<key>IOPropertyMatch</key><dict><key>UUID</key><string>' + volume_uuid.upper() + '</string></dict></dict>'
+    ).encode('ascii') + b'\0'
+
+
+ROOT_MATCHING = root_matching(ROOT_VOLUME_UUID)
+
+
+def property_bytes(key: str, value: bytes, flags: int = 0) -> bytes:
+    """One Apple DT property: its 32-byte name, its length (`flags` in the top bit), its value padded to 4 bytes."""
+    return struct.pack('<32sI', key.encode('ascii'), flags | len(value)) + value + bytes(-len(value) % 4)
+
+
+def node(name: str, properties: Iterable[tuple[str, bytes]] = (), children: Sequence[bytes] = ()) -> bytes:
+    """Apple DT: LE counts, then the properties (its name first), then the children."""
     properties = [('name', name.encode('ascii') + b'\0'), *properties]
-    result = struct.pack('<II', len(properties), len(children))
-    for key, value in properties:
-        result += struct.pack('<32sI', key.encode('ascii'), len(value))
-        result += value + bytes(-len(value) % 4)
-    return result + b''.join(children)
+    head = struct.pack('<II', len(properties), len(children))
+    return head + b''.join(property_bytes(key, value) for key, value in properties) + b''.join(children)
 
 
 def _empty_nvram_proxy() -> list[tuple[str, bytes]]:
@@ -130,10 +141,10 @@ def _memory_map(profile: Profile) -> list[tuple[str, bytes]]:
 
 
 def _cpus(native_smp: bool) -> bytes:
-    return _node(
+    return node(
         'cpus',
         children=[
-            _node(
+            node(
                 f'cpu{core}',
                 [
                     ('state', b'stopped\0' if core else b'running\0'),
@@ -161,19 +172,19 @@ def _cpus(native_smp: bool) -> bytes:
 def generate_adt(seed: bytes | None, profile: Profile) -> bytes:
     """Serialize only the audited native resources; deterministic seed for tests."""
     if seed is None:
-        seed = os.urandom(64)
-    if not isinstance(seed, bytes) or len(seed) != 64:
-        raise ValueError('random seed must be exactly 64 bytes')
+        seed = os.urandom(SEED_BYTES)
+    if not isinstance(seed, bytes) or len(seed) != SEED_BYTES:
+        raise ValueError(f'random seed must be exactly {SEED_BYTES} bytes')
     _check_profile(profile)
     userspace_fixture, _, root_boot, full_ram, native_smp = profile
-    return _node(
+    return node(
         'device-tree',
         [
             ('model', MODEL.encode('ascii') + b'\0'),
             ('compatible', b'\0'.join(s.encode('ascii') for s in COMPATIBLE) + b'\0'),
         ],
         [
-            _node(
+            node(
                 'chosen',
                 [
                     ('random-seed', seed),
@@ -188,25 +199,25 @@ def generate_adt(seed: bytes | None, profile: Profile) -> bytes:
                 ],
                 [
                     # arm_vm_init asserts that this node exists; TrustCache is optional.
-                    _node('memory-map', _memory_map(profile)),
-                    *([_node('manifest-properties')] if userspace_fixture or root_boot else []),
+                    node('memory-map', _memory_map(profile)),
+                    *([node('manifest-properties')] if userspace_fixture or root_boot else []),
                 ],
             ),
             _cpus(native_smp),
-            *([_node('psci', [('compatible', b'arm,psci-0.2\0'), ('method', b'smc\0')])] if native_smp else []),
+            *([node('psci', [('compatible', b'arm,psci-0.2\0'), ('method', b'smc\0')])] if native_smp else []),
             # Preserve XNU's RAM-based vnode sizing instead of the BCM2837 cap.
-            _node(
+            node(
                 'defaults',
                 [('kern.maxvnodes', struct.pack('<I', ((4 << 30) if full_ram else MANAGED_SIZE) // 65536 + 1024))]
                 if root_boot
                 else [],
             ),  # No vmm-present on physical hardware.
-            _node('options'),
+            node('options'),
             # Original AppleImage4 requires this node in the main OS environment;
             # the strings still identify the actual Nintendo board.
             *(
                 [
-                    _node(
+                    node(
                         'product',
                         [('product-name', MODEL.encode('ascii') + b'\0'), ('model', MODEL.encode('ascii') + b'\0')],
                     )
@@ -214,7 +225,7 @@ def generate_adt(seed: bytes | None, profile: Profile) -> bytes:
                 if userspace_fixture or root_boot
                 else []
             ),
-            _node(
+            node(
                 'arm-io',
                 [
                     ('device_type', b'nvidia,tegra210b01\0'),
@@ -223,7 +234,7 @@ def generate_adt(seed: bytes | None, profile: Profile) -> bytes:
                     ('ranges', struct.pack('<3Q', 0, GICD_BASE, GICC_BASE + GICC_SIZE - GICD_BASE)),
                 ],
                 [
-                    _node(
+                    node(
                         'intc',
                         [
                             ('compatible', b'arm,cortex-a15-gic\0'),

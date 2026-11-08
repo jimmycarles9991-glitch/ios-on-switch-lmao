@@ -4,6 +4,7 @@
 // 8-bit sRGB). One LUT1 and one LUT2 serve all three channels, and the CSC has no offsets. Integer only: the kernel has
 // no floating point. C++, header only, for the driver and its host test.
 #pragma once
+#include <stddef.h>
 #include <stdint.h>
 #include "TegraDisplayColorTables.h"
 
@@ -11,7 +12,7 @@ namespace switch_color {
 
 // IOMobileFramebuffer's matrices: S31.32 (QuartzCore converts with fcvtzs #32), rows are output channels.
 using Q32 = int64_t;
-constexpr Q32 kOne = Q32(1) << 32;
+constexpr Q32 kOne = static_cast<Q32>(1ULL << 32);
 
 struct Matrix {
     Q32 m[3][3];
@@ -73,43 +74,54 @@ struct Tables {
 inline void identityGamma(uint8_t (&gamma)[256])
 {
     for (unsigned i = 0; i < 256; ++i)
-        gamma[i] = uint8_t(i);
+        gamma[i] = static_cast<uint8_t>(i);
 }
 
 inline bool equal(const Matrix &a, const Matrix &b)
 {
-    for (int r = 0; r < 3; ++r)
-        for (int c = 0; c < 3; ++c)
+    for (int r = 0; r < 3; ++r) {
+        for (int c = 0; c < 3; ++c) {
             if (a.m[r][c] != b.m[r][c])
                 return false;
+        }
+    }
     return true;
 }
 
 inline Q32 clampQ32(__int128 value)
 {
-    const __int128 limit = (__int128(1) << 63) - 1;
-    return Q32(value > limit ? limit : value < -limit ? -limit : value);
+    if (value > INT64_MAX) {
+        return INT64_MAX;
+    }
+    if (value < -INT64_MAX) {
+        return -INT64_MAX;
+    }
+    return static_cast<Q32>(value);
 }
 
+// NOLINTBEGIN(bugprone-signed-bitwise): S31.32 fixed point; a signed value's shift right rounds toward minus
+// infinity on purpose, and the CSC's ten-bit field is the value's two's complement.
 inline Matrix multiply(const Matrix &outer, const Matrix &inner)
 {
     Matrix out;
-    for (int r = 0; r < 3; ++r)
+    for (int r = 0; r < 3; ++r) {
         for (int c = 0; c < 3; ++c) {
             __int128 sum = 0;
             for (int k = 0; k < 3; ++k)
-                sum += __int128(outer.m[r][k]) * inner.m[k][c];
+                sum += static_cast<__int128>(outer.m[r][k]) * inner.m[k][c];
             out.m[r][c] = clampQ32(sum >> 32);
         }
+    }
     return out;
 }
 
 inline Matrix scaled(const Matrix &in, Q32 factor)
 {
     Matrix out;
-    for (int r = 0; r < 3; ++r)
+    for (int r = 0; r < 3; ++r) {
         for (int c = 0; c < 3; ++c)
-            out.m[r][c] = clampQ32((__int128(in.m[r][c]) * factor) >> 32);
+            out.m[r][c] = clampQ32((static_cast<__int128>(in.m[r][c]) * factor) >> 32);
+    }
     return out;
 }
 
@@ -117,11 +129,14 @@ inline Matrix scaled(const Matrix &in, Q32 factor)
 // 0x3ba is -0.27), rounded half away from zero and clamped to [-2, 2).
 inline int32_t cscValue(Q32 value)
 {
-    constexpr Q32 half = Q32(1) << 23;
+    constexpr Q32 half = static_cast<Q32>(1ULL << 23);
     const Q32 magnitude = value < 0 ? -value : value;
-    const Q32 rounded = magnitude > (Q32(512) << 24) ? 512 : (magnitude + half) >> 24;
-    const int32_t signedValue = int32_t(value < 0 ? -rounded : rounded);
-    return signedValue > 511 ? 511 : signedValue < -512 ? -512 : signedValue;
+    const Q32 rounded = magnitude > static_cast<Q32>(512ULL << 24) ? 512 : (magnitude + half) >> 24;
+    const int32_t signedValue = static_cast<int32_t>(value < 0 ? -rounded : rounded);
+    if (signedValue > 511) {
+        return 511;
+    }
+    return signedValue < -512 ? -512 : signedValue;
 }
 
 // One CSC row; when rounding each coefficient would change the row's sum, the coefficient nearest a rounding boundary
@@ -140,7 +155,7 @@ inline void cscRow(const Q32 (&row)[3], uint16_t *words)
         int best = 0;
         Q32 bestError = 0;
         for (int c = 0; c < 3; ++c) {
-            const Q32 error = (row[c] - (Q32(value[c]) << 24)) * step;
+            const Q32 error = (row[c] - (static_cast<Q32>(value[c]) << 24)) * step;
             if (c == 0 || error > bestError) {
                 best = c;
                 bestError = error;
@@ -151,13 +166,16 @@ inline void cscRow(const Q32 (&row)[3], uint16_t *words)
             value[best] = adjusted;
     }
     for (int c = 0; c < 3; ++c)
-        words[c] = uint16_t(value[c] & 0x3ff);
+        words[c] = static_cast<uint16_t>(value[c] & 0x3ff);
 }
+
+// NOLINTEND(bugprone-signed-bitwise)
 
 // An IEEE 754 single (SetContrast's argument) as 16.16; false for a negative, infinite or NaN value.
 inline bool floatToUnity16(uint32_t bits, uint32_t *out)
 {
-    const uint32_t exponent = bits >> 23 & 0xff, mantissa = bits & 0x7fffff;
+    const uint32_t exponent = bits >> 23 & 0xff;
+    const uint32_t mantissa = bits & 0x7fffff;
     if (exponent == 0xff || (bits >> 31 && (exponent || mantissa)))
         return false;
     if (!exponent) {
@@ -165,12 +183,18 @@ inline bool floatToUnity16(uint32_t bits, uint32_t *out)
         return true;
     }
     const uint64_t significand = mantissa | 1u << 23;
-    const int shift = int(exponent) - 134;
-    if (shift >= 0)
-        *out =
-            shift >= 9 ? UINT32_MAX : uint32_t(significand << shift > UINT32_MAX ? UINT32_MAX : significand << shift);
-    else
-        *out = -shift >= 40 ? 0 : uint32_t((significand + (uint64_t(1) << (-shift - 1))) >> -shift);
+    const int shift = static_cast<int>(exponent) - 134;
+    if (shift >= 9) {
+        *out = UINT32_MAX;
+    } else if (shift >= 0) {
+        const uint64_t value = significand << static_cast<unsigned>(shift);
+        *out = value > UINT32_MAX ? UINT32_MAX : static_cast<uint32_t>(value);
+    } else if (shift <= -40) {
+        *out = 0;
+    } else {
+        const auto down = static_cast<unsigned>(-shift);
+        *out = static_cast<uint32_t>((significand + (1ULL << (down - 1))) >> down);
+    }
     return true;
 }
 
@@ -178,9 +202,10 @@ inline bool floatToUnity16(uint32_t bits, uint32_t *out)
 inline uint8_t outputStage(uint32_t value, const Inputs &in, bool inverted)
 {
     if (in.contrast && in.contrast != kUnity16) {
-        const int64_t scaledValue = (int64_t(2 * value) - 255) * in.contrast + int64_t(255) * kUnity16;
-        const int64_t result = scaledValue <= 0 ? 0 : (scaledValue + kUnity16) / (2 * kUnity16);
-        value = result > 255 ? 255 : uint32_t(result);
+        const int64_t scaledValue =
+            (static_cast<int64_t>(2 * value) - 255) * in.contrast + static_cast<int64_t>(255) * kUnity16;
+        const int64_t result = scaledValue <= 0 ? 0 : (scaledValue + kUnity16) / (2 * static_cast<int64_t>(kUnity16));
+        value = result > 255 ? 255 : static_cast<uint32_t>(result);
     }
     if (inverted)
         value = 255 - value;
@@ -189,9 +214,10 @@ inline uint8_t outputStage(uint32_t value, const Inputs &in, bool inverted)
 
 inline bool gammaIsIdentity(const uint8_t (&gamma)[256])
 {
-    for (unsigned i = 0; i < 256; ++i)
+    for (unsigned i = 0; i < 256; ++i) {
         if (gamma[i] != i)
             return false;
+    }
     return true;
 }
 
@@ -208,13 +234,14 @@ inline void build(const Inputs &in, Tables &out)
         matrix = multiply(kGrayscale, matrix);
     if (!equal(in.harmony, zero))
         matrix = multiply(in.harmony, matrix);
-    uint64_t scale =
-        uint64_t(in.correction ? in.correction : kUnity16) * (in.accessibilityScale ? in.accessibilityScale : kUnity16);
-    if (scale > uint64_t(kOne))
-        scale = uint64_t(kOne);
-    matrix = scaled(matrix, Q32(scale));
-    for (int r = 0; r < 3; ++r)
+    uint64_t scale = static_cast<uint64_t>(in.correction ? in.correction : kUnity16) *
+                     (in.accessibilityScale ? in.accessibilityScale : kUnity16);
+    if (scale > static_cast<uint64_t>(kOne))
+        scale = static_cast<uint64_t>(kOne);
+    matrix = scaled(matrix, static_cast<Q32>(scale));
+    for (size_t r = 0; r < 3; ++r) {
         cscRow(matrix.m[r], &out.csc[r * 3]);
+    }
     for (unsigned i = 0; i < kLut1Entries; ++i)
         out.lut1[i] = kSrgbToLinear[i];
     for (unsigned k = 0; k < kLut2Entries; ++k)
@@ -222,14 +249,16 @@ inline void build(const Inputs &in, Tables &out)
     bool identityCsc = true;
     for (unsigned i = 0; i < kCscWords; ++i)
         identityCsc = identityCsc && out.csc[i] == (i % 4 == 0 ? kCscOne : 0);
-    const bool contrast = in.contrast && in.contrast != kUnity16, gammaTable = !gammaIsIdentity(in.gamma);
+    const bool contrast = (in.contrast != 0u) && in.contrast != kUnity16;
+    const bool gammaTable = !gammaIsIdentity(in.gamma);
     out.reasons = (equal(in.harmony, kIdentity) && equal(in.accessibility, kIdentity) ? 0 : kReasonMatrix) |
-                  (scale < uint64_t(kOne) ? kReasonScale : 0) | (inverted || grayscale ? kReasonRemap : 0) |
-                  (contrast ? kReasonContrast : 0) | (gammaTable ? kReasonGamma : 0);
+                  (scale < static_cast<uint64_t>(kOne) ? kReasonScale : 0) |
+                  (inverted || grayscale ? kReasonRemap : 0) | (contrast ? kReasonContrast : 0) |
+                  (gammaTable ? kReasonGamma : 0);
     out.enabled = !identityCsc || inverted || contrast || gammaTable;
     if (in.blank) {
-        for (unsigned k = 0; k < kLut2Entries; ++k)
-            out.lut2[k] = 0;
+        for (uint8_t &value : out.lut2)
+            value = 0;
         out.reasons |= kReasonBlank;
         out.enabled = true;
     }

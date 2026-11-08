@@ -1,7 +1,8 @@
 """Join the buckets into the packed seed, check the tools against the GPU bundle, and lay the seed out for an image.
 
 usage: merge.py join --index <bucket index>... --report <bucket report>... [--records <driver record store>]
-                     --ipsw <build> --plan <plan.json> --inventory <inventory.json> --out <dir>
+                     [--replies <compile reply store>] --ipsw <build> --plan <plan.json> --inventory <inventory.json>
+                     --out <dir>
        merge.py check --tools-manifest <MANIFEST.json> --twin <tools' libvulkan_nouveau.dylib> --base <path>... --out F
        merge.py tree --seed <join's dir> --pack <bucket pack>... [--raw <raw pack dir>] --out <tree dir> --size F
 
@@ -11,7 +12,9 @@ SEED (the line the plugin logs) and MANIFEST.json. It is packed (m2v's shader_ca
 packs/<NNN> as the bucket wrote it, the merged records are the last pack, and `index` names every entry's pack, offset
 and length. The join reads only the buckets' indexes and reports, never their packs or the tools (the records name
 NVK's identity; the stack key, which every raw/ edit changes, is no part of the seed), and writes SEED, MANIFEST.json,
-index and packs/<the records' pack> into <out>.
+index and packs/<the records' pack> into <out>. The device's Metal compiler replies (the frontend's msl/<name>.reply:
+Core Image's kernel sources compiled to AIR by the OS's MTLCompiler, named by its LC_UUID and the request) whose
+envelope holds go to <out>/msl/ as they are, where the frontend reads one its own cache lacks.
 check: refuses tools that are not the GPU bundle's (--base: its tree or files): their NVK twin must have the bundle
 NVK's LC_UUID (nvk_twin.py gives the twin the iOS dylib's), and the bundle's Info.plist must name the tools' stack key
 (NVK, m2v, the bridge and the frontend); a seed of other tools would never be hit. A validation action: the seed does
@@ -38,6 +41,9 @@ from tools.gpu.nvk_twin import lc_uuid
 
 CONTENT = '529a20fd270ababa3e5ec2fe4d1674d93739ba5bcd61861674b4fb6db349af9f'
 RECORD_MAGIC = b'M2VPPLC\0'
+REPLY_MAGIC = b'NSC1'
+REPLY_HEADER = 48
+REPLY_NAME = re.compile(r'^[0-9a-f]{64}\.reply$')
 SEED = 'ngpu/addons/TegraGM20BMetal.m2v-seed/shared'
 RAW = 'ngpu/addons/TegraGM20BMetal.raw'
 INDEX_MAGIC = b'M2VSEED2'
@@ -65,6 +71,33 @@ def record_ok(data: bytes) -> bool:
         and 44 + int.from_bytes(data[36:44], 'little') + 32 == len(data)
         and hashlib.sha256(data[:-32]).digest() == data[-32:]
     )
+
+
+def reply_ok(data: bytes) -> bool:
+    """Check a compile reply's envelope (NBCompileReplyHeader): magic, the lengths ending the file, the digest."""
+    if len(data) < REPLY_HEADER or data[:4] != REPLY_MAGIC:
+        return False
+    warnings, metallib = struct.unpack_from('<IQ', data, 4)
+    return (
+        metallib > 0
+        and REPLY_HEADER + warnings + metallib == len(data)
+        and hashlib.sha256(data[REPLY_HEADER:]).digest() == data[16:REPLY_HEADER]
+    )
+
+
+def copy_replies(store: Path | None, out: Path) -> tuple[dict[str, int], list[str]]:
+    """Copy the store's compile replies whose name and envelope hold into <out>; the counts and each kept one's line."""
+    counts, kept = dict.fromkeys(('kept', 'refused'), 0), []
+    for path in sorted(store.glob('*.reply')) if store and store.is_dir() else []:
+        data = path.read_bytes()
+        if not REPLY_NAME.match(path.name) or not reply_ok(data):
+            counts['refused'] += 1
+            continue
+        out.mkdir(parents=True, exist_ok=True)
+        (out / path.name).write_bytes(data)
+        kept.append(f'msl/{path.name}\0{hashlib.sha256(data).hexdigest()}\n')
+        counts['kept'] += 1
+    return counts, kept
 
 
 def union(indexes: list[Path]) -> tuple[Entries, int]:
@@ -179,6 +212,9 @@ def join(args: argparse.Namespace) -> None:
     digest = hashlib.sha256()
     for relative in sorted(entries):
         digest.update(f'{relative}\0{entries[relative][0]}\n'.encode())
+    replies, kept = copy_replies(args.replies, out / 'msl')
+    for reply in kept:
+        digest.update(reply.encode())
     line = f'generated m2v-build {build[:8]} nvk {identity[12:28].hex()[:8]} content {digest.hexdigest()[:8]}'
     meta = {
         'SEED': line + '\n',
@@ -189,6 +225,7 @@ def join(args: argparse.Namespace) -> None:
                 'plan': json.loads(args.plan.read_text()),
                 'crawl': crawled(json.loads(args.inventory.read_text())),
                 'device_records': device,
+                'compile_replies': replies,
                 'disagreeing_names': disagree,
                 'crashed': [line for r in reports for line in r.get('crashed', [])],
                 'refused': refusals([line for r in reports for line in r.get('refused', [])]),
@@ -200,7 +237,10 @@ def join(args: argparse.Namespace) -> None:
     for name, text in meta.items():
         (out / name).write_text(text)
     write_index(out / 'index', build, records + 1, entries)
-    print(f'seed: {line} ({len(entries)} entries from {len(args.index)} buckets; device records {device})')
+    print(
+        f'seed: {line} ({len(entries)} entries from {len(args.index)} buckets; device records {device}; '
+        f'compile replies {replies})'
+    )
 
 
 def check(args: argparse.Namespace) -> None:
@@ -257,6 +297,7 @@ def main() -> None:
     j.add_argument('--index', type=Path, action='append', required=True)
     j.add_argument('--report', type=Path, action='append', required=True)
     j.add_argument('--records', type=Path)
+    j.add_argument('--replies', type=Path)
     for name in ('plan', 'inventory', 'out'):
         j.add_argument('--' + name, type=Path, required=True)
     j.add_argument('--ipsw', required=True)

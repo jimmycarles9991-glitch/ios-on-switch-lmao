@@ -21,6 +21,7 @@
 extern "C" {
 #endif
 
+// NOLINTNEXTLINE(readability-redundant-declaration): not every kernel configuration's headers declare it
 boolean_t pmap_valid_page(ppnum_t pn);
 
 // RAM the VM manages (what phystokv reaches). pmap_valid_page takes a VM page number: atop_64, never

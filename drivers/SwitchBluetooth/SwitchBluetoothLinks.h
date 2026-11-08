@@ -52,7 +52,7 @@ struct switch_bt_links {
 
 static inline uint16_t switch_bt_le16(const uint8_t *p)
 {
-    return (uint16_t)(p[0] | p[1] << 8);
+    return (uint16_t)(p[0] | (unsigned)p[1] << 8);
 }
 
 // The connection handle of an ACL or LE ACL header (handle in bits 11:0, packet boundary and broadcast flags above).
@@ -63,9 +63,11 @@ static inline uint16_t switch_bt_acl_handle(const uint8_t header[2])
 
 static inline struct switch_bt_link *switch_bt_link_find(struct switch_bt_links *links, uint16_t handle)
 {
-    for (unsigned i = 0; i < SWITCH_BT_LINKS; ++i)
+    // NOLINTNEXTLINE(modernize-loop-convert): C too (the host harness)
+    for (unsigned i = 0; i < SWITCH_BT_LINKS; ++i) {
         if (links->link[i].kind != SWITCH_BT_LINK_FREE && links->link[i].handle == handle)
             return &links->link[i];
+    }
     return NULL;
 }
 
@@ -75,9 +77,10 @@ static inline struct switch_bt_link *switch_bt_link_open(struct switch_bt_links 
                                                          const uint8_t addr[6], uint8_t role)
 {
     struct switch_bt_link *slot = switch_bt_link_find(links, handle);
-    for (unsigned i = 0; !slot && i < SWITCH_BT_LINKS; ++i)
+    for (unsigned i = 0; !slot && i < SWITCH_BT_LINKS; ++i) {
         if (links->link[i].kind == SWITCH_BT_LINK_FREE)
             slot = &links->link[i];
+    }
     if (!slot)
         return NULL;
     const struct switch_bt_link fresh = {handle, kind, role, {0}, 0, 0, 0, 0, 0, 0, 0, 0};
@@ -127,14 +130,15 @@ static inline int switch_bt_links_completed(struct switch_bt_links *links, const
     if (length < 1 || length < 1u + 4u * params[0])
         return -1;
     int total = 0;
-    for (unsigned i = 0; i < params[0]; ++i) {
+    for (size_t i = 0; i < params[0]; ++i) {
         const uint16_t handle = (uint16_t)(switch_bt_le16(params + 1 + 4 * i) & 0x0fffu);
         const uint16_t count = switch_bt_le16(params + 3 + 4 * i);
         struct switch_bt_link *slot = switch_bt_link_find(links, handle);
-        if (slot)
+        if (slot) {
             slot->done += count;
-        else
+        } else {
             links->strayDone += count;
+        }
         total += count;
     }
     return total;
@@ -182,7 +186,7 @@ static inline void switch_bt_request_note(struct switch_bt_requests *requests, c
     struct switch_bt_request *slot = NULL;
     for (unsigned i = 0; i < SWITCH_BT_REQUESTS && !slot; ++i) {
         struct switch_bt_request *e = &requests->entry[i];
-        bool same = e->used;
+        bool same = e->used != 0;
         for (unsigned b = 0; b < 6 && same; ++b)
             same = e->addr[b] == addr[b];
         if (same)
@@ -203,9 +207,10 @@ static inline bool switch_bt_accept_as_central(struct switch_bt_requests *reques
 {
     if (length < 7)
         return false;
+    // NOLINTNEXTLINE(modernize-loop-convert): C too (the host harness)
     for (unsigned i = 0; i < SWITCH_BT_REQUESTS; ++i) {
         struct switch_bt_request *e = &requests->entry[i];
-        bool same = e->used;
+        bool same = e->used != 0;
         for (unsigned b = 0; b < 6 && same; ++b)
             same = e->addr[b] == params[b];
         if (!same)
@@ -307,9 +312,10 @@ static const struct switch_bt_name switch_bt_link_commands[] = {
 
 static inline const char *switch_bt_lookup(const struct switch_bt_name *names, size_t count, uint16_t code)
 {
-    for (size_t i = 0; i < count; ++i)
+    for (size_t i = 0; i < count; ++i) {
         if (names[i].code == code)
             return names[i].name;
+    }
     return NULL;
 }
 
@@ -338,7 +344,7 @@ static inline bool switch_bt_event_wanted(uint8_t code, uint8_t sub)
 static inline void switch_bt_format_addr(char out[18], const uint8_t *addr)
 {
     static const char digits[] = "0123456789abcdef";
-    for (unsigned i = 0; i < 6; ++i) {
+    for (size_t i = 0; i < 6; ++i) {
         out[i * 3] = digits[addr[5 - i] >> 4];
         out[i * 3 + 1] = digits[addr[5 - i] & 15];
         out[i * 3 + 2] = i < 5 ? ':' : '\0';
@@ -576,7 +582,7 @@ static inline void switch_bt_describe_command(char *out, size_t size, uint16_t o
         if (length < 1)
             break;
         snprintf(out, size, "%s 0x%02x (inquiry scan %u, page scan %u)", name, params[0], params[0] & 1,
-                 params[0] >> 1 & 1);
+                 (unsigned)params[0] >> 1 & 1);
         return;
     case 0x0c1c:
         if (length < 4)
@@ -590,7 +596,7 @@ static inline void switch_bt_describe_command(char *out, size_t size, uint16_t o
         return;
     default: {  // Set Event Filter and anything new: the parameters in hex, at most 12 bytes
         char hex[25];
-        uint32_t i = 0;
+        size_t i = 0;
         for (; i < length && i < 12; ++i)
             snprintf(hex + 2 * i, 3, "%02x", params[i]);
         hex[2 * i] = '\0';

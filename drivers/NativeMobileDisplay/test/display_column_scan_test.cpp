@@ -14,7 +14,7 @@
 #include "../NativeColumnScan.h"
 
 namespace {
-using namespace NativeColumnScan;
+using namespace native_column_scan;
 
 constexpr uint32_t kSurfaceIova = 0x40000000u, kReferenceIova = 0x50000000u;
 
@@ -50,7 +50,7 @@ struct WindowModel {
 
     uint32_t bpp() const
     {
-        return w.depth == NativePlanes::kDepthYCbCr420SP ? 1 : 4;
+        return w.depth == native_planes::kDepthYCbCr420SP ? 1 : 4;
     }
 
     uint64_t address(uint32_t start, uint32_t stride, uint32_t xB, uint32_t y) const
@@ -103,8 +103,8 @@ TEST(ColumnScanWindow, TheModelScansTheLandscapeUiAsTheHardwareDid)
         return (uint8_t)(landscape(xB / 4, y) >> (8 * (xB % 4)));
     });
     Window w = {};
-    w.options = NativePlanes::kWinEnable | kScanColumn | kHDirection;
-    w.depth = NativePlanes::kDepthB8G8R8A8;
+    w.options = native_planes::kWinEnable | kScanColumn | kHDirection;
+    w.depth = native_planes::kDepthB8G8R8A8;
     w.size = 1280u << 16 | 720;
     w.prescaled = 1280u << 16 | 720 * 4;
     w.dda = 0x10001000;
@@ -148,9 +148,9 @@ TEST(ColumnScanWindow, RegistersFollowL4TsScanColumnRules)
 
 TEST(ColumnScanWindow, ReferenceIsTheUisOwnLayout)
 {
-    const Window w = referenceWindow(kReferenceIova, NativePlanes::kDepthB8G8R8A8);
+    const Window w = referenceWindow(kReferenceIova, native_planes::kDepthB8G8R8A8);
     // hekate's pitch window geometry (kPitchSize, kPitchPrescaled, unit DDA) in the portrait UI's 16-GOB blocks.
-    EXPECT_EQ(w.options, NativePlanes::kWinEnable);
+    EXPECT_EQ(w.options, native_planes::kWinEnable);
     EXPECT_EQ(w.size, 1280u << 16 | 720u);
     EXPECT_EQ(w.prescaled, 1280u << 16 | 2880u);
     EXPECT_EQ(w.dda, 0x10001000u);
@@ -170,7 +170,7 @@ TEST_P(ColumnScanImage, ScanAndReferenceShowTheSamePanel)
     fillReference(m.reference.data());
     Window scan;
     ASSERT_TRUE(scanWindow(kSurfaceIova, yLog2, scan));
-    const Window ref = referenceWindow(kReferenceIova, NativePlanes::kDepthB8G8R8A8);
+    const Window ref = referenceWindow(kReferenceIova, native_planes::kDepthB8G8R8A8);
     WindowModel scanned{scan, m}, shown{ref, m};
     for (uint32_t line = 0; line < kPanelHeight; ++line)
         for (uint32_t pixel = 0; pixel < kPanelWidth; ++pixel) {
@@ -375,7 +375,7 @@ TEST(ColumnScanRun, FailuresRestoreThenFinish)
 
 TEST(ColumnScanRun, AbortWritesTheRestoreOnlyOnce)
 {
-    NativeColumnScan::Run r;
+    native_column_scan::Run r;
     EXPECT_FALSE(r.abort("off"));  // idle
     r.begin();
     EXPECT_FALSE(r.abort("off"));  // waiting: window A untouched

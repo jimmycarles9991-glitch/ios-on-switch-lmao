@@ -19,7 +19,7 @@ public:
     // (0: no touch yet).
     static bool active(uint64_t nowUs, uint64_t beganUs, uint64_t lastDownUs)
     {
-        return beganUs && lastDownUs && nowUs >= beganUs && nowUs - lastDownUs < kTailUs;
+        return beganUs != 0 && lastDownUs != 0 && nowUs >= beganUs && nowUs - lastDownUs < kTailUs;
     }
 
     // A present at nowUs, `periods` refresh periods after the previous present (`intervalUs`), charged to `cause` when
@@ -39,7 +39,13 @@ public:
         if (intervalUs >= kStillUs) {
             ++still;
         } else {
-            ++bins[periods <= 1 ? 0 : periods >= 4 ? 3 : periods - 1];
+            uint32_t bin = 3;
+            if (periods <= 1) {
+                bin = 0;
+            } else if (periods < 4) {
+                bin = periods - 1;
+            }
+            ++bins[bin];
             if (periods >= 2) {
                 lost += periods - 1;
                 if (cause < kCauses)
@@ -65,11 +71,15 @@ public:
             out, size,
             "%llu ms (touch %llu ms), %u presents: 1:%u 2:%u 3:%u 4+:%u, %llu periods lost, worst %llu.%llu ms, "
             "still %u; long idle %u ca %u gpu %u queue %u latch %u rate %u",
-            (unsigned long long)((last - began) / 1000), (unsigned long long)((lastDownUs - began) / 1000), presents,
-            bins[0], bins[1], bins[2], bins[3], (unsigned long long)lost, (unsigned long long)(worstUs / 1000),
-            (unsigned long long)(worstUs / 100 % 10), still, causes[0], causes[1], causes[2], causes[3], causes[4],
-            causes[5]);
-        return n < 0 ? 0 : ((size_t)n < size ? (size_t)n : size - 1);
+            static_cast<unsigned long long>((last - began) / 1000),
+            static_cast<unsigned long long>((lastDownUs - began) / 1000), presents, bins[0], bins[1], bins[2], bins[3],
+            static_cast<unsigned long long>(lost), static_cast<unsigned long long>(worstUs / 1000),
+            static_cast<unsigned long long>(worstUs / 100 % 10), still, causes[0], causes[1], causes[2], causes[3],
+            causes[4], causes[5]);
+        if (n < 0)
+            return 0;
+        const size_t length = static_cast<size_t>(n);
+        return length < size ? length : size - 1;
     }
 
 private:

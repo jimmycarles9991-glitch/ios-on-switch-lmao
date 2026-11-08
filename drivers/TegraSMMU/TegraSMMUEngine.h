@@ -20,7 +20,7 @@ struct TegraSMMUSwgroup {
 };
 
 struct TegraSMMUEngine {
-    static constexpr uint64_t kPageLimit = 1ull << 34;  // a table entry's 22-bit page frame
+    static constexpr uint64_t kPageLimit = 1ULL << 34;  // a table entry's 22-bit page frame
 
     uint32_t asid = 0;
     TegraSMMUDomain domain;
@@ -44,5 +44,5 @@ struct TegraSMMUEngine {
     uint64_t map(const uint64_t *pages, uint32_t count, bool writable);
     // A range map() returned; only once the engine can no longer touch it.
     void unmap(uint64_t iova, uint32_t count);
-    void usage(uint64_t *total, uint64_t *free);
+    void usage(uint64_t *total, uint64_t *free) const;
 };

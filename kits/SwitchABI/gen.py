@@ -17,9 +17,10 @@ kind's prelink slide; an entry the table marks "unported" becomes a function tha
 import argparse
 import json
 import re
-import struct
 import sys
 from pathlib import Path
+
+from tools.common import macho
 
 JsonObject = dict[str, object]
 
@@ -248,20 +249,11 @@ def symbol_map(interface: JsonObject, table: JsonObject) -> dict[str, tuple[int 
 
 def undefined_symbols(path: str | Path) -> set[str]:
     data = Path(path).read_bytes()
-    magic, _, _, _, ncmds = struct.unpack_from('<IiiII', data)
-    if magic != 0xFEEDFACF:
-        raise SystemExit(f'{path}: not a 64-bit Mach-O object')
-    at, names = 32, set()
-    for _ in range(ncmds):
-        cmd, size = struct.unpack_from('<II', data, at)
-        if cmd == 2:
-            symoff, nsyms, stroff, _ = struct.unpack_from('<4I', data, at + 8)
-            for i in range(nsyms):
-                strx, kind, _, _, _ = struct.unpack_from('<IBBHQ', data, symoff + 16 * i)
-                if (kind & 0xE0) == 0 and (kind & 0x0E) == 0 and kind & 1:
-                    names.add(data[stroff + strx : data.index(b'\0', stroff + strx)].decode())
-        at += size
-    return names
+    try:
+        image = macho.macho(data, subtypes=None)
+    except ValueError as error:
+        raise SystemExit(f'{path}: not a 64-bit ARM64 Mach-O object ({error})') from None
+    return {s.name for s in macho.symbols(data, image, macho.undefined_external)}
 
 
 def bindings(pairs: list[tuple[JsonObject, JsonObject, str]], objects: list[str]) -> str:

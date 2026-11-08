@@ -21,6 +21,7 @@
 #define init_timer tdfll_init_timer
 #define mod_timer tdfll_mod_timer
 #define del_timer tdfll_del_timer
+#define del_timer_sync tdfll_del_timer_sync
 #define hrtimer_init tdfll_hrtimer_init
 #define hrtimer_start tdfll_hrtimer_start
 #define hrtimer_cancel tdfll_hrtimer_cancel

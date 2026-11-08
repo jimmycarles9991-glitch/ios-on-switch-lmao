@@ -11,6 +11,7 @@
 #include "../../drivers/SwitchSuspend/SwitchSleepSteps.h"
 #include "SwitchPanicSave.h"
 #include "SwitchPowerTrail.h"
+#include "../../kits/SwitchTime/SwitchTime.h"
 
 #if DEVELOPMENT || DEBUG
 extern int vsnprintf(char *, size_t, const char *, va_list);
@@ -59,13 +60,6 @@ static void load_words(void *to, const volatile void *from, size_t bytes)
     const volatile uint32_t *src = (const volatile uint32_t *)from;
     for (size_t i = 0; i < bytes / 4; ++i)
         dst[i] = src[i];
-}
-
-static uint64_t uptime_ns(void)
-{
-    uint64_t ns = 0;
-    absolutetime_to_nanoseconds(mach_absolute_time(), &ns);
-    return ns;
 }
 
 /* The last boot's lines with a good CRC, oldest first: the highest seq found is the last line written. */
@@ -125,7 +119,7 @@ void switch_power_trail(const char *format, ...)
     struct trail_line line = {0};
     for (uint32_t i = 0; i < TEXT_BYTES - 1 && text[i]; ++i)
         line.text[i] = text[i];
-    line.uptime_ns = uptime_ns();
+    line.uptime_ns = switch_now_ns();
     line.seq = __atomic_add_fetch(&next_seq, 1, __ATOMIC_RELAXED);
     line.crc = line_crc(&line);
     volatile struct trail_line *slot = &ring[(line.seq - 1) % count];

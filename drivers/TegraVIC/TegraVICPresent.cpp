@@ -80,14 +80,15 @@ const char *place(const TegraVICPicture *p, const TegraVICSurfaceDesc *d, Placem
         return "picture of odd size";
     if (pl->width < TEGRA_VIC_MIN_DIM || pl->height < TEGRA_VIC_MIN_DIM)
         return "picture under 2x2";
-    if (!p->pages || !p->bytes || p->bytes > (uint64_t)p->pageCount << 12 || p->bytes > (uint64_t)kPresentPages << 12)
+    if (!p->pages || !p->bytes || p->bytes > static_cast<uint64_t>(p->pageCount) << 12 ||
+        p->bytes > static_cast<uint64_t>(kPresentPages) << 12)
         return "picture memory outside its page list or over 32 MiB";
     for (uint32_t k = 0; k < 2; k++) {
         pl->band[k] =
             tegra_vic_band_420(d->planeOffset[k], pl->whole.pitch[k], k, p->dstX, p->dstY, pl->width, pl->height);
         pl->pages[k] = tegra_vic_band_pages(&pl->band[k]);
     }
-    if ((uint64_t)pl->pages[0] + pl->pages[1] > kPresentPages)
+    if (static_cast<uint64_t>(pl->pages[0]) + pl->pages[1] > kPresentPages)
         return "destination rows over 32 MiB";
     return nullptr;
 }
@@ -106,12 +107,12 @@ void describe(const TegraVICPicture *p, const Placement &pl, uint64_t srcBase, u
     dst->lastRowExact = 1;
     uint64_t window = dstBase;
     for (uint32_t k = 0; k < 2; k++) {
-        const uint32_t inPage = (uint32_t)(pl.band[k].start & SWITCH_HW_PAGE_MASK);
+        const uint32_t inPage = static_cast<uint32_t>(pl.band[k].start & SWITCH_HW_PAGE_MASK);
         dst->pitch[k] = pl.band[k].pitch;
         dst->rows[k] = pl.band[k].rows;
         dst->base[k] = window + inPage;
-        dst->span[k] = ((uint64_t)pl.pages[k] << SWITCH_HW_PAGE_SHIFT) - inPage;
-        window += (uint64_t)pl.pages[k] << SWITCH_HW_PAGE_SHIFT;
+        dst->span[k] = (static_cast<uint64_t>(pl.pages[k]) << SWITCH_HW_PAGE_SHIFT) - inPage;
+        window += static_cast<uint64_t>(pl.pages[k]) << SWITCH_HW_PAGE_SHIFT;
     }
     bzero(src, sizeof(*src));
     src->format = pl.whole.format;
@@ -128,10 +129,10 @@ void describe(const TegraVICPicture *p, const Placement &pl, uint64_t srcBase, u
     src->blockLinear = 1;
     src->blockHeightLog2 = p->blockHeightLog2;
     bzero(op, sizeof(*op));
-    op->srcX = (uint64_t)p->cropX << 16;
-    op->srcY = (uint64_t)p->cropY << 16;
-    op->srcW = (uint64_t)pl.width << 16;
-    op->srcH = (uint64_t)pl.height << 16;
+    op->srcX = static_cast<uint64_t>(p->cropX) << 16;
+    op->srcY = static_cast<uint64_t>(p->cropY) << 16;
+    op->srcW = static_cast<uint64_t>(pl.width) << 16;
+    op->srcH = static_cast<uint64_t>(pl.height) << 16;
     op->dstW = pl.width;
     op->dstH = pl.height;
     op->nearest = 1;  // 1:1
@@ -142,6 +143,7 @@ struct CacheRuns {
     const uint64_t *pages;
 };
 
+// NOLINTNEXTLINE(misc-const-correctness): the page walker's callback signature
 void cacheRun(void *context, uint32_t page, uint32_t offset, uint32_t length)
 {
     const CacheRuns *c = static_cast<const CacheRuns *>(context);
@@ -154,7 +156,8 @@ void cacheRun(void *context, uint32_t page, uint32_t offset, uint32_t length)
 // ever clean in the CPU's caches here: every present cleans its own lines before VIC writes them.
 void cacheRectangle(switch_dcache_op op, const Placement &pl)
 {
-    CacheRuns luma = {op, gPresentPages}, chroma = {op, gPresentPages + pl.pages[0]};
+    CacheRuns luma = {op, gPresentPages};
+    CacheRuns chroma = {op, gPresentPages + pl.pages[0]};
     tegra_vic_band_runs(&pl.band[0], cacheRun, &luma);
     tegra_vic_band_runs(&pl.band[1], cacheRun, &chroma);
     switch_dcache_sync();
@@ -163,13 +166,15 @@ void cacheRectangle(switch_dcache_op op, const Placement &pl)
 // The destination rows' pages: luma's band, then chroma's.
 IOReturn listDestination(TegraVICSurface *surface, const Placement &pl)
 {
-    uint32_t listed = 0, more = 0;
+    uint32_t listed = 0;
+    uint32_t more = 0;
     IOReturn ret =
         tegra_vic_surface_pages(surface, pl.band[0].start, tegra_vic_band_end(&pl.band[0]) - pl.band[0].start,
                                 gPresentPages, pl.pages[0], &listed);
-    if (!ret)
+    if (!ret) {
         ret = tegra_vic_surface_pages(surface, pl.band[1].start, tegra_vic_band_end(&pl.band[1]) - pl.band[1].start,
                                       gPresentPages + listed, pl.pages[1], &more);
+    }
     return ret;
 }
 }  // namespace
@@ -177,7 +182,8 @@ IOReturn listDestination(TegraVICSurface *surface, const Placement &pl)
 extern "C" bool tegra_vic_present_ready(void)
 {
     const TegraVICTraits *t = tegra_vic_traits();
-    return __atomic_load_n(&gPresentPages, __ATOMIC_ACQUIRE) && tegra_vic_ready() && t && t->blockLinearIn;
+    return (__atomic_load_n(&gPresentPages, __ATOMIC_ACQUIRE) != nullptr) && tegra_vic_ready() && (t != nullptr) &&
+           (t->blockLinearIn != 0u);
 }
 
 // Only with block-linear input proven; the page list is the ready bit: without it every present is refused.
@@ -185,7 +191,7 @@ extern "C" void tegra_vic_present_start(void)
 {
     if (!tegra_vic_traits()->blockLinearIn || __atomic_load_n(&gPresentPages, __ATOMIC_ACQUIRE))
         return;
-    if (uint64_t *dst = IONew(uint64_t, kPresentPages))
+    if (uint64_t *dst = IONew(uint64_t, kPresentPages))  // NOLINT(misc-const-correctness): gPresentPages takes it
         __atomic_store_n(&gPresentPages, dst, __ATOMIC_RELEASE);
 }
 
@@ -193,7 +199,7 @@ extern "C" int tegra_vic_present(const TegraVICPicture *p, task_t task, const ch
 {
     *why = nullptr;
     if (!tegra_vic_present_ready()) {
-        *why = "VIC is not published, or block-linear input is not proven (see the V4 line)";
+        *why = "VIC is not published";
         presentRefused(*why);
         return -19;
     }
@@ -206,7 +212,8 @@ extern "C" int tegra_vic_present(const TegraVICPicture *p, task_t task, const ch
     }
     // Checked before the engine lock, at the windows' own addresses, so a refusal costs no engine time.
     Placement pl;
-    TegraVICImage src, dst;
+    TegraVICImage src;
+    TegraVICImage dst;
     TegraVICOp op;
     *why = place(p, &surface.desc, &pl);
     TegraVICJob *check = *why ? nullptr : IONew(TegraVICJob, 1);
@@ -234,7 +241,8 @@ extern "C" int tegra_vic_present(const TegraVICPicture *p, task_t task, const ch
         presentRefused(*why);
         return -12;
     }
-    const uint32_t srcPages = (uint32_t)((p->bytes + 0xfff) >> 12), dstPages = pl.pages[0] + pl.pages[1];
+    const uint32_t srcPages = (uint32_t)((p->bytes + 0xfff) >> 12);
+    const uint32_t dstPages = pl.pages[0] + pl.pages[1];
     const uint64_t dstBase = tegra_vic_window_map(TEGRA_VIC_WINDOW_DST, gPresentPages, dstPages, true);
     const uint64_t srcBase = tegra_vic_window_map(TEGRA_VIC_WINDOW_SRC, p->pages, srcPages, false);
     describe(p, pl, srcBase, dstBase, &src, &dst, &op);

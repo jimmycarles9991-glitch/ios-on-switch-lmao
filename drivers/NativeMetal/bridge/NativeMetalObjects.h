@@ -174,6 +174,11 @@ uint32_t nmb_function_constant_count(const NmbFunction *);
 size_t nmb_function_constant(const NmbFunction *, uint32_t at, char *out, size_t size, uint64_t info[3]);
 /* Metal's MTLFunctionType (1 vertex, 2 fragment, 3 kernel, ...). */
 uint64_t nmb_function_type(const NmbFunction *);
+// vertexAttributes (stage_input false) or stageInputAttributes: their count, -1 where Metal answers nil; attribute `at`'s name
+// into out and its attributeIndex, MTLDataType, isActive, isPatchData and isPatchControlPointData into info[5]
+int64_t nmb_function_attribute_count(const NmbFunction *, bool stage_input);
+size_t nmb_function_attribute(const NmbFunction *, bool stage_input, uint32_t at, char *out, size_t size,
+                              uint64_t info[5]);
 
 NmbComputePipeline *nmb_compute_pipeline_new(NmbDevice *, NmbFunction *);
 void nmb_compute_pipeline_release(NmbComputePipeline *);
@@ -277,6 +282,9 @@ bool nmb_command_buffer_on_completed(NmbCommandBuffer *, void (*handler)(void *c
  * The caller keeps context alive until completion (or a refused commit). */
 bool nmb_command_buffer_on_scheduled(NmbCommandBuffer *, void (*handler)(void *context), void *context);
 bool nmb_command_buffer_commit(NmbCommandBuffer *);
+/* Each VkCommandBuffer the command buffer's encoders recorded, in order, to each(ctx, handle) instead of a commit: a capture the
+ * driver never runs. The command buffer cannot be committed after. */
+bool nmb_command_buffer_capture(NmbCommandBuffer *, void (*each)(void *ctx, uint64_t command_buffer), void *ctx);
 /* Wait for scheduling and scheduled handlers only; false on a refused wait. */
 bool nmb_command_buffer_wait_scheduled(NmbCommandBuffer *);
 /* 0 completed in time, 1 timed out (timeout_ms 0 waits without a bound). */
@@ -287,6 +295,8 @@ int nmb_command_buffer_wait_completed_for(NmbCommandBuffer *, uint64_t timeout_m
 /* Metal's MTLCommandBufferStatus (0 not enqueued .. 4 completed, 5 error). */
 uint64_t nmb_command_buffer_status(const NmbCommandBuffer *);
 size_t nmb_command_buffer_error(const NmbCommandBuffer *, char *out, size_t size);
+/* Metal's MTLCommandBufferError code of a failed command buffer, 0 before it failed. */
+uint64_t nmb_command_buffer_error_code(const NmbCommandBuffer *);
 double nmb_command_buffer_gpu_time(const NmbCommandBuffer *, bool end);
 
 /* Events: an MTLEvent (shared false) or an MTLSharedEvent within this process. */

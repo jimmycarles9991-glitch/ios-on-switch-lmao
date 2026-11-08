@@ -145,10 +145,80 @@ class CardTest(unittest.TestCase):
         with self.assertRaisesRegex(cards.RefusedError, 'expected one Linux'):
             cards.check_layout(table(both(rename(1, 'linux'), retype(8, gpt.EMUMMC))), SPEC)
 
+    def test_a_retype_may_change_only_its_entry_and_the_headers(self):
+        card = table()
+        span = card.table.entry_sectors * gpt.SECTOR
+        before = bytes((3 + 2 * card.table.entry_sectors) * gpt.SECTOR)
+
+        def changed(*offsets: int, index: int | None = 8) -> list[int]:
+            after = bytearray(before)
+            for at in offsets:
+                after[at] = 1
+            return cards.changed_outside(card, before, bytes(after), index)
+
+        entry = 2 * gpt.SECTOR + 8 * 128
+        allowed = (gpt.SECTOR, entry, entry + 127, entry + span + 56, len(before) - 1)
+        self.assertEqual(changed(*allowed), [])
+        self.assertEqual(changed(*allowed, index=None), list(allowed))
+        self.assertEqual(changed(446, entry - 1, entry + 128 + span), [446, entry - 1, entry + 128 + span])
+        with self.assertRaisesRegex(cards.host.HostError, 'shape'):
+            cards.changed_outside(card, before, before[:-1], 8)
+
     def test_resolve_refuses_partitions_and_paths(self):
         for argument in ('disk4s9', '/Volumes/SWITCH SD', '/dev/disk4s1', 'rdisk4s2'):
             with self.assertRaises(cards.RefusedError):
                 cards.resolve(argument)
+
+
+class MountedTest(unittest.TestCase):
+    def mount(self, info: dict, owners: bool = False, taken: list[str] | None = None) -> list[list[str]]:
+        """`taken`: where macOS mounts the volume itself, one per `diskutil mount`, before ours lands."""
+        calls = []
+        mounted_at = ['/Volumes/Data']
+        taken = list(taken or [])
+
+        def run(*args: str, **_: object) -> str:
+            calls.append(list(args))
+            if args[:2] == ('diskutil', 'unmount'):
+                mounted_at[0] = None
+            if args[:2] == ('diskutil', 'mount'):
+                mounted_at[0] = taken.pop(0) if taken else args[-2]
+            return ''
+
+        with (
+            mock.patch.object(cards.host, 'mount_point', side_effect=lambda _: mounted_at[0]),
+            mock.patch.object(cards.host, 'disk_info', return_value=info),
+            mock.patch.object(cards.host, 'run', side_effect=run),
+            cards.mounted('disk34s2', lambda *_: None, owners=owners) as root,
+        ):
+            calls.append(['root', str(root)])
+        return calls
+
+    def test_a_mount_that_ignores_owners_is_reused(self):
+        calls = self.mount({'WritableVolume': True, 'GlobalPermissionsEnabled': False})
+        self.assertEqual(calls, [['root', '/Volumes/Data']])
+
+    def test_a_mount_that_enforces_owners_is_remounted_without_them(self):
+        calls = self.mount({'WritableVolume': True, 'GlobalPermissionsEnabled': True})
+        self.assertEqual(calls[0], ['diskutil', 'unmount', 'disk34s2'])
+        self.assertEqual(calls[1][:3], ['diskutil', 'mount', '-mountOptions'])
+        self.assertEqual(calls[1][3], 'nobrowse,noowners')
+        self.assertNotEqual(calls[2], ['root', '/Volumes/Data'])
+
+    def test_owners_wanted_keeps_the_mount(self):
+        calls = self.mount({'WritableVolume': True, 'GlobalPermissionsEnabled': True}, owners=True)
+        self.assertEqual(calls, [['root', '/Volumes/Data']])
+
+    def test_a_volume_macos_mounts_first_is_taken_back(self):
+        calls = self.mount({'WritableVolume': True, 'GlobalPermissionsEnabled': True}, taken=['/Volumes/SWITCH SD'])
+        mounts = [i for i, c in enumerate(calls) if c[:2] == ['diskutil', 'mount']]
+        self.assertEqual(len(mounts), 2)
+        self.assertEqual(calls[mounts[0] + 1], ['diskutil', 'unmount', 'disk34s2'])
+        self.assertEqual(calls[mounts[1] + 1], ['root', calls[mounts[1]][-2]])
+
+    def test_a_volume_that_never_mounts_here_is_refused(self):
+        with self.assertRaises(cards.host.HostError):
+            self.mount({'WritableVolume': True, 'GlobalPermissionsEnabled': True}, taken=['/Volumes/SWITCH SD'] * 3)
 
 
 if __name__ == '__main__':

@@ -1,9 +1,11 @@
 """The copy step needs only the card's FAT: a card with both a Linux and an Android partition is fine (no device)."""
 
+import tempfile
 import unittest
+from pathlib import Path
 from unittest import mock
 
-from tools.install import card as cards, to_card
+from tools.install import card as cards, folder, to_card
 
 
 def part(index: int, name: str, content: str) -> cards.Part:
@@ -26,6 +28,20 @@ class FatTest(unittest.TestCase):
                 self.assertRaises(cards.RefusedError),
             ):
                 to_card.fat_of(self.CARD)
+
+
+class PlanTest(unittest.TestCase):
+    def test_the_shared_files_that_differ_are_planned_and_counted(self) -> None:
+        out, root = Path(tempfile.mkdtemp()), Path(tempfile.mkdtemp())
+        for relative, data in ((folder.PAYLOAD, b'new installer'), (cards.INI, b'[iOS]\n')):
+            (out / relative).parent.mkdir(parents=True, exist_ok=True)
+            (out / relative).write_bytes(data)
+        (root / cards.INI).parent.mkdir(parents=True)
+        (root / cards.INI).write_bytes(b'[iOS]\n')
+        lines = []
+        need = to_card.plan(out, root, [], lambda *parts: lines.append(' '.join(map(str, parts))))
+        self.assertEqual(lines, [f'  copy: {folder.PAYLOAD}'])
+        self.assertEqual(need, len(b'new installer'))
 
 
 if __name__ == '__main__':

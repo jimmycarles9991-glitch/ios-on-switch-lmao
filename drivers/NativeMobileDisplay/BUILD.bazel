@@ -1,6 +1,7 @@
 load("//bazel/lint:defs.bzl", "lint_files")
 
 # drivers/NativeMobileDisplay: moved from out/native-a57/root-v1/tree/drivers/NativeMobileDisplay by the layout move.
+load("//kernel/rules:driver_flags.bzl", "IPSW_KIND_FLAGS")
 load("//kernel/rules:kernel.bzl", "kernel_driver", "kernel_headers")
 load("//kits/SwitchABI:defs.bzl", "switch_abi_bindings")
 
@@ -43,6 +44,8 @@ kernel_driver(
         "IOMobileFramebufferLegacy",
         "IOSurface",
     ],
+    # The IPSW kind's iPad (SWITCH_IPSW_DEVICE_*): SwitchFrameInfo.h's key set.
+    copts = IPSW_KIND_FLAGS,
     hdr_deps = [
         "drivers/ArmGIC",
         "drivers/SwitchPower",
@@ -54,6 +57,10 @@ kernel_driver(
         "drivers/TegraSMMU",
         # TegraVICConfig.h: the traits the detach gate reads (r18-planes).
         "drivers/TegraVIC",
+        "kits/SwitchCAR",
+        "kits/SwitchDMA",
+        "kits/SwitchDT",
+        "kits/SwitchMMIO",
         "kits/SwitchRefusal",
         "kits/SwitchSysctl",
     ],

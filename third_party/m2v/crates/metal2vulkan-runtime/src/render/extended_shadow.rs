@@ -374,11 +374,15 @@ impl ShadowFill {
 /// destination.
 pub(super) fn reads_color(graphics: &GraphicsState, index: u32) -> bool {
     stores(graphics, index)
-        || graphics
-            .input_attachments
-            .iter()
-            .any(|a| a.color_index == index)
+        || reads_input(graphics, index)
         || color(graphics, index).is_some_and(|a| a.blend.is_some())
+}
+
+fn reads_input(graphics: &GraphicsState, index: u32) -> bool {
+    graphics
+        .input_attachments
+        .iter()
+        .any(|a| a.color_index == index)
 }
 
 /// Whether a draw of `graphics` may write color `index`: in the interlocked storage form, or
@@ -419,7 +423,9 @@ impl RenderCommandEncoder {
     /// Before a draw of `pipeline`, start the shadows of the colors it blends into or reads that
     /// an earlier draw of the pass wrote or whose clear their codes cannot hold (the module
     /// docs): those no earlier instance wrote, the current instance's draws recorded again first
-    /// into one that leaves them out where they wrote them.
+    /// into one that leaves them out where they wrote them. Not a color the draw reads as an input
+    /// attachment (a pipeline the compile layer left on input attachments beside the interlock),
+    /// whose shadowed variant is refused: it reads the codes, and would only give the shadow up.
     pub(super) fn start_extended_shadows(&mut self, pipeline: &DrawingState) -> Result<(), Error> {
         if !self.extended.holds
             || self.replaying
@@ -438,6 +444,7 @@ impl RenderCommandEncoder {
             .copied()
             .filter(|c| {
                 reads_color(graphics, *c)
+                    && !reads_input(graphics, *c)
                     && self.extended_written.contains(c)
                     && !self.extended.live.contains(c)
                     && !self.extended.ended.contains(c)

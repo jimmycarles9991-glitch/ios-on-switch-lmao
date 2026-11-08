@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0
 /*
- * Switch: the Linux 4.9 kernel services the vendored L4T DFLL sources call, on XNU (through dfllxnu.h only).
+ * Switch: the Linux 4.9 kernel services the vendored L4T DFLL sources call, on XNU (through kits/SwitchLinux only).
  * Board specifics (which clocks, which regulator, the device tree node) live in platform.c.
  *
  * Concurrency: every clock-framework, OPP, of_*, pm_runtime, regulator and devm call here comes from the public API
@@ -13,6 +13,7 @@
 #include <linux/clkdev.h>
 #include <linux/cpu.h>
 #include <linux/device.h>
+#include <linux/iopoll.h>
 #include <linux/of.h>
 #include <linux/platform_device.h>
 #include <linux/pm_opp.h>
@@ -26,8 +27,8 @@
 int printk(const char *fmt, ...)
 {
 	char line[256];
-	va_list ap;
-	int n;
+	va_list ap; /* NOLINT(cppcoreguidelines-init-variables): va_start initializes it */
+	int n = 0;
 
 	va_start(ap, fmt);
 	n = vsnprintf(line, sizeof(line), fmt, ap);
@@ -38,39 +39,39 @@ int printk(const char *fmt, ...)
 	/* L4T messages mostly end in "\n", a few do not ("unexpected ref clk rate ..."): one line each either way */
 	if (n && line[n - 1] == '\n')
 		line[n - 1] = 0;
-	dfllxnu_log("TegraDFLL: %s\n", line);
+	switch_linux_log("TegraDFLL: %s\n", line);
 	return n;
 }
 
 /* devm_* memory is never released (see device.h) */
 void *kmalloc(size_t size, gfp_t flags)
 {
-	return dfllxnu_malloc(size);
+	return switch_linux_malloc(size, 1);
 }
 
 void *kzalloc(size_t size, gfp_t flags)
 {
-	return dfllxnu_malloc(size);
+	return switch_linux_malloc(size, 1);
 }
 
 void kfree(const void *p)
 {
-	dfllxnu_free((void *)(uintptr_t)p);
+	switch_linux_free(p);
 }
 
 void *devm_kzalloc(struct device *dev, size_t size, gfp_t flags)
 {
-	return dfllxnu_malloc(size);
+	return switch_linux_malloc(size, 1);
 }
 
 void *devm_kmalloc(struct device *dev, size_t size, gfp_t flags)
 {
-	return dfllxnu_malloc(size);
+	return switch_linux_malloc(size, 1);
 }
 
 void devm_kfree(struct device *dev, void *p)
 {
-	dfllxnu_free(p);
+	switch_linux_free(p);
 }
 
 /* pinctrl: only clk-dfll.c's PWM-to-PMIC path asks; the OLED drives its MAX77812 over I2C (no nvidia,pwm-to-pmic) */
@@ -89,28 +90,6 @@ int pinctrl_select_state(struct pinctrl *p, struct pinctrl_state *s)
 	return -ENODEV;
 }
 
-/* spinlocks: interrupts off + a test-and-set word */
-unsigned long tdfll_spin_lock_irqsave(spinlock_t *l)
-{
-	unsigned long flags = dfllxnu_irq_save();
-
-	while (__atomic_exchange_n(&l->slock, 1u, __ATOMIC_ACQUIRE))
-		while (__atomic_load_n(&l->slock, __ATOMIC_RELAXED))
-			__asm__ __volatile__("yield" ::: "memory");
-	return flags;
-}
-
-void tdfll_spin_unlock_irqrestore(spinlock_t *l, unsigned long flags)
-{
-	__atomic_store_n(&l->slock, 0u, __ATOMIC_RELEASE);
-	dfllxnu_irq_restore(flags);
-}
-
-unsigned long tdfll_jiffies(void)
-{
-	return (unsigned long)(dfllxnu_nanotime() / NSEC_PER_MSEC);
-}
-
 static unsigned int poll_timeouts;
 
 int tdfll_poll_timed_out(void)
@@ -126,7 +105,7 @@ unsigned int tdfll_poll_timeouts(void)
 
 static void *call_alloc(void (*fn)(void *), void *arg)
 {
-	void *call = dfllxnu_call_alloc(fn, arg);
+	void *call = switch_linux_call_alloc(fn, arg);
 
 	if (!call)
 		panic("TegraDFLL: cannot allocate a thread call for a DFLL timer");
@@ -150,14 +129,19 @@ int mod_timer(struct timer_list *timer, unsigned long expires)
 	unsigned long now = jiffies;
 
 	timer->expires = expires;
-	dfllxnu_call_arm(timer->tdfll_call,
-			 (u64)(expires > now ? expires - now : 0) * (u64)(NSEC_PER_SEC / HZ));
+	switch_linux_call_enter_after(timer->tdfll_call, (u64)(expires > now ? expires - now : 0) *
+								 (u64)(NSEC_PER_SEC / HZ));
 	return 0;
 }
 
 int del_timer(struct timer_list *timer)
 {
-	return timer->tdfll_call ? dfllxnu_call_cancel(timer->tdfll_call) : 0;
+	return timer->tdfll_call && switch_linux_call_cancel(timer->tdfll_call) ? 1 : 0;
+}
+
+int del_timer_sync(struct timer_list *timer)
+{
+	return timer->tdfll_call && switch_linux_call_cancel_wait(timer->tdfll_call) ? 1 : 0;
 }
 
 static void hrtimer_fire(void *arg)
@@ -177,24 +161,25 @@ void hrtimer_start(struct hrtimer *timer, ktime_t tim, const enum hrtimer_mode m
 {
 	if (mode == HRTIMER_MODE_ABS)
 		tim -= ktime_get();
-	dfllxnu_call_arm(timer->tdfll_call, tim > 0 ? (u64)tim : 0);
+	switch_linux_call_enter_after(timer->tdfll_call, tim > 0 ? (u64)tim : 0);
 }
 
 int hrtimer_cancel(struct hrtimer *timer)
 {
-	return timer->tdfll_call ? dfllxnu_call_cancel(timer->tdfll_call) : 0;
+	return timer->tdfll_call && switch_linux_call_cancel_wait(timer->tdfll_call) ? 1 : 0;
 }
 
 /* device tree: static nodes (see of.h) */
 static const struct tdfll_property *of_find_prop(const struct device_node *np, const char *name)
 {
-	const struct tdfll_property *p;
+	const struct tdfll_property *p = NULL;
 
 	if (!np)
 		return NULL;
-	for (p = np->properties; p && p->name; p++)
+	for (p = np->properties; p && p->name; p++) {
 		if (!strcmp(p->name, name))
 			return p;
+	}
 	return NULL;
 }
 
@@ -239,21 +224,22 @@ struct device_node *of_parse_phandle(const struct device_node *np, const char *p
 int of_device_is_compatible(const struct device_node *device, const char *compat)
 {
 	const struct tdfll_property *p = of_find_prop(device, "compatible");
-	unsigned int i;
+	unsigned int i = 0;
 
-	for (i = 0; p && p->strings && i < p->nstrings; i++)
+	for (i = 0; p && p->strings && i < p->nstrings; i++) {
 		if (!strcmp(p->strings[i], compat))
 			return 1;
+	}
 	return 0;
 }
 
 bool of_device_is_available(const struct device_node *device)
 {
-	const char *status;
+	const char *status = NULL;
 
 	if (of_property_read_string(device, "status", &status))
 		return true;
-	return !strcmp(status, "okay") || !strcmp(status, "ok");
+	return (!strcmp(status, "okay") || !strcmp(status, "ok")) != 0;
 }
 
 /* Linux __of_match_node: the node's first compatible string that any entry matches wins (so a node with
@@ -262,20 +248,22 @@ const struct of_device_id *of_match_node(const struct of_device_id *matches,
 					 const struct device_node *node)
 {
 	const struct tdfll_property *p = of_find_prop(node, "compatible");
-	const struct of_device_id *m;
-	unsigned int i;
+	const struct of_device_id *m = NULL;
+	unsigned int i = 0;
 
-	for (i = 0; p && p->strings && i < p->nstrings; i++)
-		for (m = matches; m->compatible[0] || m->name[0] || m->type[0]; m++)
+	for (i = 0; p && p->strings && i < p->nstrings; i++) {
+		for (m = matches; m->compatible[0] || m->name[0] || m->type[0]; m++) {
 			if (m->compatible[0] && !strcmp(m->compatible, p->strings[i]))
 				return m;
+		}
+	}
 	return NULL;
 }
 
 struct resource *platform_get_resource(struct platform_device *pdev, unsigned int type,
 				       unsigned int num)
 {
-	u32 i;
+	u32 i = 0;
 
 	for (i = 0; i < pdev->num_resources; i++) {
 		struct resource *r = &pdev->resource[i];
@@ -288,12 +276,12 @@ struct resource *platform_get_resource(struct platform_device *pdev, unsigned in
 
 void __iomem *devm_ioremap(struct device *dev, resource_size_t offset, resource_size_t size)
 {
-	return (void __iomem *)(uintptr_t)dfllxnu_ioremap(offset, size);
+	return (void __iomem *)(uintptr_t)switch_linux_ioremap(offset, size, 0);
 }
 
 void __iomem *devm_ioremap_resource(struct device *dev, struct resource *res)
 {
-	void __iomem *va;
+	void __iomem *va = NULL;
 
 	if (!res || !(res->flags & IORESOURCE_MEM))
 		return ERR_PTR(-EINVAL);
@@ -406,7 +394,7 @@ int regulator_count_voltages(struct regulator *regulator)
 /* regulator_list_voltage_linear, then _regulator_list_voltage's constraint filter (0 = not usable) */
 int regulator_list_voltage(struct regulator *regulator, unsigned selector)
 {
-	int uV;
+	int uV = 0;
 
 	if (selector >= (unsigned)regulator->n_voltages)
 		return -EINVAL;
@@ -444,26 +432,29 @@ static struct opp_table opp_tables[2];
 
 static struct opp_table *opp_table_get(struct device *dev, bool create)
 {
-	unsigned int i;
+	unsigned int i = 0;
 
-	for (i = 0; i < ARRAY_SIZE(opp_tables); i++)
+	for (i = 0; i < ARRAY_SIZE(opp_tables); i++) {
 		if (opp_tables[i].dev == dev)
 			return &opp_tables[i];
+	}
 	if (!create)
 		return NULL;
-	for (i = 0; i < ARRAY_SIZE(opp_tables); i++)
+	for (i = 0; i < ARRAY_SIZE(opp_tables); i++) {
 		if (!opp_tables[i].dev) {
 			opp_tables[i].dev = dev;
 			opp_tables[i].count = 0;
 			return &opp_tables[i];
 		}
+	}
 	return NULL;
 }
 
 int dev_pm_opp_add(struct device *dev, unsigned long freq, unsigned long u_volt)
 {
 	struct opp_table *t = opp_table_get(dev, true);
-	int i, j;
+	int i = 0;
+	int j = 0;
 
 	if (!t)
 		return -ENOMEM;
@@ -485,9 +476,9 @@ int dev_pm_opp_add(struct device *dev, unsigned long freq, unsigned long u_volt)
 void dev_pm_opp_remove(struct device *dev, unsigned long freq)
 {
 	struct opp_table *t = opp_table_get(dev, false);
-	int i;
+	int i = 0;
 
-	for (i = 0; t && i < t->count; i++)
+	for (i = 0; t && i < t->count; i++) {
 		if (t->opp[i].rate == freq) {
 			for (; i + 1 < t->count; i++)
 				t->opp[i] = t->opp[i + 1];
@@ -495,31 +486,34 @@ void dev_pm_opp_remove(struct device *dev, unsigned long freq)
 				t->dev = NULL;
 			return;
 		}
+	}
 }
 
 struct dev_pm_opp *dev_pm_opp_find_freq_ceil(struct device *dev, unsigned long *freq)
 {
 	struct opp_table *t = opp_table_get(dev, false);
-	int i;
+	int i = 0;
 
-	for (i = 0; t && i < t->count; i++)
+	for (i = 0; t && i < t->count; i++) {
 		if (t->opp[i].rate >= *freq) {
 			*freq = t->opp[i].rate;
 			return &t->opp[i];
 		}
+	}
 	return ERR_PTR(-ERANGE);
 }
 
 struct dev_pm_opp *dev_pm_opp_find_freq_floor(struct device *dev, unsigned long *freq)
 {
 	struct opp_table *t = opp_table_get(dev, false);
-	int i;
+	int i = 0;
 
-	for (i = t ? t->count - 1 : -1; i >= 0; i--)
+	for (i = t ? t->count - 1 : -1; i >= 0; i--) {
 		if (t->opp[i].rate <= *freq) {
 			*freq = t->opp[i].rate;
 			return &t->opp[i];
 		}
+	}
 	return ERR_PTR(-ERANGE);
 }
 
@@ -559,21 +553,23 @@ static struct clk *clk_list;
 
 struct clk *tdfll_clk_lookup(const char *name)
 {
-	struct clk *c;
+	struct clk *c = NULL;
 
-	for (c = clk_list; c && name; c = c->next)
+	for (c = clk_list; c && name; c = c->next) {
 		if (!strcmp(c->name, name))
 			return c;
+	}
 	return NULL;
 }
 
 static int clk_fetch_parent_index(struct clk *clk, struct clk *parent)
 {
-	int i;
+	int i = 0;
 
-	for (i = 0; parent && i < clk->num_parents; i++)
+	for (i = 0; parent && i < clk->num_parents; i++) {
 		if (clk->parent_names[i] && !strcmp(clk->parent_names[i], parent->name))
 			return i;
+	}
 	return -EINVAL;
 }
 
@@ -585,11 +581,11 @@ static struct clk *clk_parent_by_index(struct clk *clk, unsigned int index)
 struct clk *clk_register(struct device *dev, struct clk_hw *hw)
 {
 	const struct clk_init_data *init = hw->init;
-	struct clk *clk;
+	struct clk *clk = NULL;
 
 	if (!init || !init->name || !init->ops)
 		return ERR_PTR(-EINVAL);
-	clk = dfllxnu_malloc(sizeof(*clk));
+	clk = switch_linux_malloc(sizeof(*clk), 1);
 	if (!clk)
 		return ERR_PTR(-ENOMEM);
 	clk->name = init->name;
@@ -598,10 +594,11 @@ struct clk *clk_register(struct device *dev, struct clk_hw *hw)
 	clk->flags = init->flags;
 	clk->parent_names = init->parent_names;
 	clk->num_parents = init->num_parents;
-	if (clk->num_parents == 1)
+	if (clk->num_parents == 1) {
 		clk->parent = clk_parent_by_index(clk, 0);
-	else if (clk->num_parents > 1 && clk->ops->get_parent)
+	} else if (clk->num_parents > 1 && clk->ops->get_parent) {
 		clk->parent = clk_parent_by_index(clk, clk->ops->get_parent(hw));
+	}
 	hw->clk = clk;
 	if (clk->ops->init)
 		clk->ops->init(hw);
@@ -612,13 +609,14 @@ struct clk *clk_register(struct device *dev, struct clk_hw *hw)
 
 void clk_unregister(struct clk *clk)
 {
-	struct clk **pp;
+	struct clk **pp = NULL;
 
-	for (pp = &clk_list; *pp; pp = &(*pp)->next)
+	for (pp = &clk_list; *pp; pp = &(*pp)->next) {
 		if (*pp == clk) {
 			*pp = clk->next;
 			return;
 		}
+	}
 }
 
 const char *__clk_get_name(const struct clk *clk)
@@ -632,9 +630,10 @@ struct clk_hw *__clk_get_hw(struct clk *clk)
 }
 
 /* No rate cache: every clock here recalculates from hardware or driver state (clk-dfll.c: last_unrounded_rate). */
+/* NOLINTNEXTLINE(misc-no-recursion): walks up the clock tree, a few parents deep */
 unsigned long clk_get_rate(struct clk *clk)
 {
-	unsigned long parent_rate;
+	unsigned long parent_rate = 0;
 
 	if (!clk)
 		return 0;
@@ -661,11 +660,12 @@ struct clk *clk_get(struct device *dev, const char *id)
 	const struct tdfll_property *names = dev ? of_find_prop(dev->of_node, "clock-names") : NULL;
 	const struct tdfll_property *clocks = dev ? of_find_prop(dev->of_node, "clocks") : NULL;
 	struct clk *clk = NULL;
-	unsigned int i;
+	unsigned int i = 0;
 
-	for (i = 0; names && clocks && id && i < names->nstrings && i < clocks->nstrings; i++)
+	for (i = 0; names && clocks && id && i < names->nstrings && i < clocks->nstrings; i++) {
 		if (!strcmp(names->strings[i], id))
 			clk = tdfll_clk_lookup(clocks->strings[i]);
+	}
 	if (!clk)
 		clk = tdfll_clk_lookup(id);
 	return clk ? clk : ERR_PTR(-ENOENT);
@@ -687,9 +687,10 @@ void clk_put(struct clk *clk)
 {
 }
 
+/* NOLINTNEXTLINE(misc-no-recursion): walks up the clock tree, a few parents deep */
 int clk_prepare(struct clk *clk)
 {
-	int ret;
+	int ret = 0;
 
 	if (!clk)
 		return 0;
@@ -709,6 +710,7 @@ int clk_prepare(struct clk *clk)
 	return 0;
 }
 
+/* NOLINTNEXTLINE(misc-no-recursion): walks up the clock tree, a few parents deep */
 void clk_unprepare(struct clk *clk)
 {
 	if (!clk || WARN_ON(clk->prepare_count == 0))
@@ -720,9 +722,10 @@ void clk_unprepare(struct clk *clk)
 	}
 }
 
+/* NOLINTNEXTLINE(misc-no-recursion): walks up the clock tree, a few parents deep */
 int clk_enable(struct clk *clk)
 {
-	int ret;
+	int ret = 0;
 
 	if (!clk)
 		return 0;
@@ -742,6 +745,7 @@ int clk_enable(struct clk *clk)
 	return 0;
 }
 
+/* NOLINTNEXTLINE(misc-no-recursion): walks up the clock tree, a few parents deep */
 void clk_disable(struct clk *clk)
 {
 	if (!clk || WARN_ON(clk->enable_count == 0))
@@ -753,16 +757,21 @@ void clk_disable(struct clk *clk)
 	}
 }
 
+static bool notify_stopped(int ret)
+{
+	return ((unsigned int)ret & NOTIFY_STOP_MASK) != 0;
+}
+
 static int clk_notify(struct clk *clk, unsigned long msg, unsigned long old_rate,
 		      unsigned long new_rate)
 {
 	struct clk_notifier_data cnd = {.clk = clk, .old_rate = old_rate, .new_rate = new_rate};
-	struct notifier_block *nb;
+	struct notifier_block *nb = NULL;
 	int ret = NOTIFY_DONE;
 
 	for (nb = clk->notifiers; nb; nb = nb->next) {
 		ret = nb->notifier_call(nb, msg, &cnd);
-		if (ret & NOTIFY_STOP_MASK)
+		if (notify_stopped(ret))
 			break;
 	}
 	return ret;
@@ -779,20 +788,21 @@ int clk_notifier_register(struct clk *clk, struct notifier_block *nb)
 
 int clk_notifier_unregister(struct clk *clk, struct notifier_block *nb)
 {
-	struct notifier_block **pp;
+	struct notifier_block **pp = NULL;
 
-	for (pp = clk ? &clk->notifiers : NULL; pp && *pp; pp = &(*pp)->next)
+	for (pp = clk ? &clk->notifiers : NULL; pp && *pp; pp = &(*pp)->next) {
 		if (*pp == nb) {
 			*pp = nb->next;
 			return 0;
 		}
+	}
 	return -ENOENT;
 }
 
 long clk_round_rate(struct clk *clk, unsigned long rate)
 {
 	struct clk_rate_request req = {.rate = rate, .max_rate = ULONG_MAX};
-	unsigned long parent_rate;
+	unsigned long parent_rate = 0;
 
 	if (!clk)
 		return 0;
@@ -814,7 +824,9 @@ long clk_round_rate(struct clk *clk, unsigned long rate)
  */
 int clk_set_rate(struct clk *clk, unsigned long rate)
 {
-	unsigned long old_rate, new_rate, parent_rate;
+	unsigned long old_rate = 0;
+	unsigned long new_rate = 0;
+	unsigned long parent_rate = 0;
 	int ret = 0;
 
 	if (!clk)
@@ -846,7 +858,7 @@ int clk_set_rate(struct clk *clk, unsigned long rate)
 			return -EINVAL;
 		new_rate = (unsigned long)r;
 	}
-	if (clk_notify(clk, PRE_RATE_CHANGE, old_rate, new_rate) & NOTIFY_STOP_MASK) {
+	if (notify_stopped(clk_notify(clk, PRE_RATE_CHANGE, old_rate, new_rate))) {
 		clk_notify(clk, ABORT_RATE_CHANGE, old_rate, new_rate);
 		return -EBUSY;
 	}
@@ -866,9 +878,12 @@ int clk_set_rate(struct clk *clk, unsigned long rate)
  */
 int clk_set_parent(struct clk *clk, struct clk *parent)
 {
-	struct clk *old;
-	unsigned long old_p_rate, p_rate, rate;
-	int index, ret;
+	struct clk *old = NULL;
+	unsigned long old_p_rate = 0;
+	unsigned long p_rate = 0;
+	unsigned long rate = 0;
+	int index = 0;
+	int ret = 0;
 
 	if (!clk)
 		return 0;
@@ -886,10 +901,10 @@ int clk_set_parent(struct clk *clk, struct clk *parent)
 	old_p_rate = old ? clk_get_rate(old) : 0;
 	rate = clk_get_rate(clk);
 
-	if (clk_notify(clk, PRE_RATE_CHANGE, rate, clk->ops->recalc_rate ? rate : p_rate) &
-	    NOTIFY_STOP_MASK)
+	if (notify_stopped(
+		    clk_notify(clk, PRE_RATE_CHANGE, rate, clk->ops->recalc_rate ? rate : p_rate)))
 		return -EBUSY;
-	if (clk_notify(clk, PRE_PARENT_CHANGE, old_p_rate, p_rate) & NOTIFY_STOP_MASK) {
+	if (notify_stopped(clk_notify(clk, PRE_PARENT_CHANGE, old_p_rate, p_rate))) {
 		ret = -EBUSY;
 		goto abort;
 	}
@@ -949,6 +964,7 @@ int clk_register_clkdev(struct clk *clk, const char *con_id, const char *dev_fmt
 	return 0;
 }
 
+/* NOLINTNEXTLINE(misc-use-internal-linkage): clk-dfll.c calls it (declared in the vendored clk.h) */
 void tegra_clk_debugfs_add(struct clk *clk);
 
 void tegra_clk_debugfs_add(struct clk *clk)

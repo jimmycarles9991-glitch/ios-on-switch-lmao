@@ -12,7 +12,8 @@
 #
 #   bazel run //:format [-- PATH...]   format every file in place (or only these files and directories):
 #                                      C/C++/ObjC clang-format, Python ruff format, Starlark buildifier,
-#                                      shell shfmt, Rust rustfmt, Markdown rumdl, JSON/TOML dprint
+#                                      shell shfmt, Rust rustfmt, Markdown rumdl, JSON/TOML dprint, Swift
+#                                      swift-format (Xcode's)
 #   bazel test //:format_test          the same formatters as checks, one cached action per file
 #   bazel test //:lint_test            the linters: ruff check, buildifier lint=warn, shellcheck, rumdl
 #   bazel test //:clang_tidy_test      clang-tidy over every C/C++/ObjC unit the build compiles, one cached action each
@@ -21,8 +22,8 @@
 #
 # The files are //:lint_files: each package's lint_files() (bazel/lint/defs.bzl) plus its subpackages'. Configs, at
 # the root: .clang-format, .clang-tidy, ruff.toml, .buildifier.json, .shellcheckrc, .rumdl.toml, dprint.json,
-# rustfmt.toml. Not linted: assembly (.S: no maintained linter; the assembler at -Werror is the check), linker
-# scripts, plists, device trees, GLSL/Metal shaders and patches.
+# rustfmt.toml, .swift-format. Not linted: assembly (.S: no maintained linter; the assembler at -Werror is the
+# check), linker scripts, plists, device trees, GLSL/Metal shaders and patches.
 load("//bazel/lint:checks.bzl", "format_runner", "lint_test")
 load("//bazel/lint:clang_tidy.bzl", "clang_tidy_test")
 load("//bazel/lint:defs.bzl", "lint_files")
@@ -38,6 +39,7 @@ exports_files([
     ".clang-tidy",
     ".rumdl.toml",
     ".shellcheckrc",
+    ".swift-format",
     "dprint.json",
     "ruff.toml",
     "rustfmt.toml",
@@ -119,6 +121,7 @@ lint_test(
         "rumdl_format",
         "rustfmt",
         "shfmt",
+        "swift_format",
     ],
 )
 
@@ -131,6 +134,7 @@ lint_test(
         "ruff",
         "rumdl",
         "shellcheck",
+        "swift_lint",
     ],
     # Not in `bazel test //...` until the tree's findings are fixed.
     tags = ["manual"],

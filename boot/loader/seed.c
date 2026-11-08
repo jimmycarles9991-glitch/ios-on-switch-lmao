@@ -46,16 +46,18 @@ enum {
 #define AHB_MEM_WRQUE_MST_ID 0x0fc
 #define AHB_MASTER_SE2       (1u << 13) /* nvidia,ahb-master-id of se@70412000 (SE1 is 14) */
 
-#define SEED_WORDS (SWITCH_SEED_BYTES / 4u)
+#define SEED_WORDS  (SWITCH_SEED_BYTES / 4u)
+#define SEED_BLOCKS (SWITCH_SEED_BYTES / 16u)
+#define SEED_OUT    16u
 
-/* The output list (words 0..2) and the 64 output bytes (words 16..31), each in a cache line of its own. Written into
+/* The output list (words 0..2) and the output (from word SEED_OUT), each in cache lines of their own. Written into
  * the raw image (link.ld: no .bss). The MMU is off when this runs, so the address is the physical one, below 4 GiB. */
 #ifndef SWITCH_SEED_HOST_TEST
 #define SEED_DATA __attribute__((section(".data")))
 #else
 #define SEED_DATA
 #endif
-static volatile uint32_t seed_dma[32] __attribute__((aligned(64))) SEED_DATA;
+static volatile uint32_t seed_dma[SEED_OUT + SEED_WORDS] __attribute__((aligned(64))) SEED_DATA;
 
 #ifndef SWITCH_SEED_HOST_TEST
 uint32_t switch_seed_read32(uint64_t pa)
@@ -97,7 +99,8 @@ static uint32_t car_read(uint32_t offset)
     return switch_seed_read32(SWITCH_SEED_CAR_PA + offset);
 }
 
-/* One DRBG operation: 64 bytes into seed_dma[16..31]. Returns MIXED or the failure, with the register in *detail. */
+/* One DRBG operation: SWITCH_SEED_BYTES into seed_dma from SEED_OUT. Returns MIXED or the failure, with the register
+ * in *detail. */
 static uint32_t generate(uint32_t mode, uint64_t (*ticks)(void), uint64_t timeout, uint32_t *detail)
 {
     uint32_t value = se_read(SE_STATUS);
@@ -105,11 +108,11 @@ static uint32_t generate(uint32_t mode, uint64_t (*ticks)(void), uint64_t timeou
         *detail = value;
         return SWITCH_SEED_STATUS_BUSY;
     }
-    const uint32_t list = (uint32_t)(uintptr_t)seed_dma, output = (uint32_t)(uintptr_t)(seed_dma + 16);
+    const uint32_t list = (uint32_t)(uintptr_t)seed_dma, output = (uint32_t)(uintptr_t)(seed_dma + SEED_OUT);
     seed_dma[0] = 0; /* last entry index */
     seed_dma[1] = output;
     seed_dma[2] = SWITCH_SEED_BYTES;
-    for (unsigned i = 16; i < 32; ++i)
+    for (unsigned i = SEED_OUT; i < SEED_OUT + SEED_WORDS; ++i)
         seed_dma[i] = 0;
     barrier();
 
@@ -117,7 +120,7 @@ static uint32_t generate(uint32_t mode, uint64_t (*ticks)(void), uint64_t timeou
     se_write(SE_CRYPTO_CONFIG, SE_CRYPTO_RNG);
     se_write(SE_RNG_CONFIG, SE_RNG_SRC_ENTROPY | mode);
     se_write(SE_RNG_SRC_CONFIG, se_read(SE_RNG_SRC_CONFIG) | SE_RNG_RO_ENT_SRC);
-    se_write(SE_LAST_BLOCK, SWITCH_SEED_BYTES / 16u - 1u);
+    se_write(SE_LAST_BLOCK, SEED_BLOCKS - 1u);
     se_write(SE_IN_LL, 0);
     se_write(SE_OUT_LL, list);
     se_write(SE_ERR_STATUS, se_read(SE_ERR_STATUS));
@@ -125,7 +128,7 @@ static uint32_t generate(uint32_t mode, uint64_t (*ticks)(void), uint64_t timeou
     /* An engine that drops our writes (secure-only after all) would never finish: check it took them. */
     value = se_read(SE_CONFIG);
     if (value != SE_CONFIG_RNG || se_read(SE_CRYPTO_CONFIG) != SE_CRYPTO_RNG || se_read(SE_OUT_LL) != list ||
-        se_read(SE_LAST_BLOCK) != SWITCH_SEED_BYTES / 16u - 1u) {
+        se_read(SE_LAST_BLOCK) != SEED_BLOCKS - 1u) {
         *detail = value;
         return SWITCH_SEED_STATUS_IGNORED;
     }
@@ -167,15 +170,15 @@ static uint32_t generate(uint32_t mode, uint64_t (*ticks)(void), uint64_t timeou
 static int output_plausible(void)
 {
     uint32_t any = 0;
-    for (unsigned i = 16; i < 32; ++i)
+    for (unsigned i = SEED_OUT; i < SEED_OUT + SEED_WORDS; ++i)
         any |= seed_dma[i];
     if (!any)
         return 0;
-    for (unsigned a = 0; a < 4; ++a) {
-        for (unsigned b = a + 1; b < 4; ++b) {
+    for (unsigned a = 0; a < SEED_BLOCKS; ++a) {
+        for (unsigned b = a + 1; b < SEED_BLOCKS; ++b) {
             unsigned same = 0;
             for (unsigned w = 0; w < 4; ++w)
-                same += seed_dma[16 + 4 * a + w] == seed_dma[16 + 4 * b + w];
+                same += seed_dma[SEED_OUT + 4 * a + w] == seed_dma[SEED_OUT + 4 * b + w];
             if (same == 4)
                 return 0;
         }
@@ -222,7 +225,7 @@ uint32_t switch_seed_mix(uint64_t seed_pa, uint64_t source_pa, uint64_t (*ticks)
     if (status == SWITCH_SEED_STATUS_MIXED) {
         uint32_t fold = 0;
         for (unsigned i = 0; i < SEED_WORDS; ++i) {
-            const uint32_t word = seed_dma[16 + i];
+            const uint32_t word = seed_dma[SEED_OUT + i];
             switch_seed_write32(seed_pa + 4 * i, switch_seed_read32(seed_pa + 4 * i) ^ word);
             fold ^= word;
         }
@@ -231,7 +234,7 @@ uint32_t switch_seed_mix(uint64_t seed_pa, uint64_t source_pa, uint64_t (*ticks)
     /* The counter too, whatever the engine did: a little variation even for the pinned seed. */
     switch_seed_write32(seed_pa, switch_seed_read32(seed_pa) ^ (uint32_t)now);
     switch_seed_write32(seed_pa + 4, switch_seed_read32(seed_pa + 4) ^ (uint32_t)(now >> 32));
-    for (unsigned i = 16; i < 32; ++i)
+    for (unsigned i = SEED_OUT; i < SEED_OUT + SEED_WORDS; ++i)
         seed_dma[i] = 0;
     const uint32_t word = status | flags | (detail & 0xffffu) << 16;
     switch_seed_write32(source_pa, SWITCH_SEED_MAGIC);

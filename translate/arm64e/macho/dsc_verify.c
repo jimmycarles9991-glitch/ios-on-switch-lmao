@@ -39,11 +39,35 @@ struct xmap {
     bool all_code; /* a TEXT_STUBS mapping */
 };
 
+#define MAX_FIPS 16
+
 struct cache {
     struct xmap *maps;
     int n;
     const struct a64x_plan *plan;
+    uint64_t fips[MAX_FIPS]; /* the FIPS integrity MACs' addresses, each the one a64x_fips_rewrite leaves */
+    int nfips, bad_fips;
+    const uint8_t *orig, *out; /* the file a64x_dsc_fips_each is walking, before and after */
 };
+
+static void check_fips_mac(void *ctx, const struct a64x_fips *fips)
+{
+    struct cache *c = ctx;
+    if (!a64x_fips_kept(c->orig + fips->text_fileoff, c->out + fips->text_fileoff, fips->text_size,
+                        c->orig + fips->mac_fileoff, c->out + fips->mac_fileoff) ||
+        c->nfips == MAX_FIPS)
+        c->bad_fips++;
+    else
+        c->fips[c->nfips++] = fips->mac_vmaddr;
+}
+
+static bool fips_mac_at(const struct cache *c, uint64_t va)
+{
+    for (int i = 0; i < c->nfips; i++)
+        if (va - c->fips[i] < A64X_FIPS_MAC_SIZE)
+            return true;
+    return false;
+}
 
 static int cmp_xmap(const void *a, const void *b)
 {
@@ -178,7 +202,7 @@ static int check_code(const struct cache *c, const struct xmap *m, struct a64x_d
         uint32_t was = rd32(m->in + 4 * k), now = rd32(m->out + 4 * k), one;
         bool freed = m->freed[k >> 3] & (1u << (k & 7));
         if (!m->all_code && !a64x_plan_is_code(c->plan, va)) {
-            if (was != now)
+            if (was != now && !fips_mac_at(c, va))
                 return fail(err, errlen, "data word at 0x%llx changed", (unsigned long long)va);
             continue;
         }
@@ -249,7 +273,8 @@ int a64x_dsc_verify(const struct a64x_plan *plan, const struct a64x_dsc_file *or
                     int nfiles, struct a64x_dsc_verify *v, char *err, size_t errlen)
 {
     memset(v, 0, sizeof(*v));
-    struct cache c = {calloc((size_t)nfiles * A64X_DSC_MAX_MAPPINGS, sizeof(struct xmap)), 0, plan};
+    struct cache c = {
+        calloc((size_t)nfiles * A64X_DSC_MAX_MAPPINGS, sizeof(struct xmap)), 0, plan, {0}, 0, 0, NULL, NULL};
     int rc = c.maps ? 0 : fail(err, errlen, "out of memory");
     for (int f = 0; f < nfiles && !rc; f++) {
         if (orig[f].size != out[f].size || orig[f].nmaps != out[f].nmaps)
@@ -279,6 +304,14 @@ int a64x_dsc_verify(const struct a64x_plan *plan, const struct a64x_dsc_file *or
             a64x_dead_checks(in, scratch, WORDS, c.maps[i].addr + k, &code, mark_hole, &h);
         }
     }
+    for (int f = 0; f < nfiles && !rc; f++) {
+        c.orig = orig[f].base;
+        c.out = out[f].base;
+        (void)a64x_dsc_fips_each(&orig[f], orig[f].base, check_fips_mac, &c);
+    }
+    v->fips_macs = (uint64_t)c.nfips;
+    if (!rc && c.bad_fips)
+        rc = fail(err, errlen, "%d FIPS integrity MACs not as the translation leaves them", c.bad_fips);
     for (int i = 0; i < c.n && !rc; i++)
         rc = check_code(&c, &c.maps[i], v, err, errlen);
     for (int f = 0; f < nfiles && !rc; f++) {

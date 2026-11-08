@@ -67,6 +67,17 @@ nvk_upload_queue_flush_locked(struct nvk_device *dev,
    if (nv_push_dw_count(&queue->push) == 0)
       return VK_SUCCESS;
 
+#ifdef NVK_HAS_DARWIN
+   /* The kernel killed the channel (a GPU fault or hang): the copies it had in
+    * flight are lost, and the next go to a new one, which needs no setup.
+    */
+   if (nvkmd_darwin_ctx_lost(queue->ctx)) {
+      result = nvkmd_darwin_ctx_reopen(queue->ctx, &dev->vk.base);
+      if (result != VK_SUCCESS)
+         return result;
+   }
+#endif
+
    /* nvk_mem_stream_flush() will not update last_time_point if it fails.  If
     * we do fail and lose the device, nvk_upload_queue_sync won't wait forever
     * on a time point that will never signal.

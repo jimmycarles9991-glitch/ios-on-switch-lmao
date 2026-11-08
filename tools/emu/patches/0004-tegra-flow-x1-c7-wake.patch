@@ -1,0 +1,283 @@
+diff --git a/hw/arm/tegra2/include/tegra_cpu.h b/hw/arm/tegra2/include/tegra_cpu.h
+index 176841c..ececac1 100644
+--- a/hw/arm/tegra2/include/tegra_cpu.h
++++ b/hw/arm/tegra2/include/tegra_cpu.h
+@@ -42,6 +42,7 @@ void tegra_cpu_halt(int cpu_id);
+ void tegra_cpu_unhalt(int cpu_id);
+ void tegra_cpu_reset_assert(int cpu_id);
+ void tegra_cpu_reset_deassert(int cpu_id, int flow);
++int tegra_cpu_reset_asserted(int cpu_id);
+ void tegra_cpu_set_rvbar(uint64_t value);
+ int tegra_cpu_is_powergated(int cpu_id);
+ void tegra_cpu_powergate(int cpu_id);
+diff --git a/hw/arm/tegra2/irq_dispatcher.c b/hw/arm/tegra2/irq_dispatcher.c
+index 254e9b0..bc32b4b 100644
+--- a/hw/arm/tegra2/irq_dispatcher.c
++++ b/hw/arm/tegra2/irq_dispatcher.c
+@@ -53,6 +53,11 @@ static void tegra_irq_dispatcher_set_irq_dev(void *opaque, int irq, int level)
+ 
+     qemu_set_irq(qdev_get_gpio_in(DEVICE(gic_dev), irq), level);
+     qemu_set_irq(qdev_get_gpio_in(DEVICE(ictlr), irq), level);
++
++    /* A core waiting in the flow controller wakes on the distributor's pending state, which no CPU interface sees. */
++    if (level && tegra_board >= TEGRAX1_BOARD) {
++        tegra_flow_on_irq(TEGRA_CCPLEX_CORE0);
++    }
+ }
+ 
+ static void tegra_irq_dispatcher_set_irq_gic(void *opaque, int irq, int level)
+@@ -71,7 +76,7 @@ static void tegra_irq_dispatcher_set_irq_gic(void *opaque, int irq, int level)
+ 
+     qemu_set_irq(s->cpu_irqs[cpu_id][ARM_CPU_IRQ], level);
+ 
+-    if (level && !tegra_cpu_is_powergated(cpu_id)) {
++    if (level && (tegra_board >= TEGRAX1_BOARD || !tegra_cpu_is_powergated(cpu_id))) {
+         tegra_flow_on_irq(cpu_id);
+     }
+ }
+@@ -115,6 +120,13 @@ static void tegra_irq_dispatcher_set_cop_irq_lic(void *opaque, int irq, int leve
+     }
+ }
+ 
++static void tegra_irq_dispatcher_gic_wake(void *opaque, int cpu_id, int level)
++{
++    if (level) {
++        tegra_flow_on_irq(cpu_id);
++    }
++}
++
+ static void tegra_irq_dispatcher_realize(DeviceState *dev, Error **errp)
+ {
+     tegra_irq_dispatcher *s = TEGRA_IRQ_DISPATCHER(dev);
+@@ -124,6 +136,7 @@ static void tegra_irq_dispatcher_realize(DeviceState *dev, Error **errp)
+     qdev_init_gpio_in(dev, tegra_irq_dispatcher_set_irq_gic, s->num_cpu);
+     qdev_init_gpio_in(dev, tegra_irq_dispatcher_set_cpu_irq_lic, s->num_cpu);
+     qdev_init_gpio_in(dev, tegra_irq_dispatcher_set_cop_irq_lic, s->num_cpu);
++    qdev_init_gpio_in_named(dev, tegra_irq_dispatcher_gic_wake, "gic-wake", s->num_cpu);
+ }
+ 
+ static void tegra_irq_dispatcher_priv_reset(DeviceState *dev)
+diff --git a/hw/arm/tegra2/ppsb/flow/flow.c b/hw/arm/tegra2/ppsb/flow/flow.c
+index 13f9fb6..35aaae2 100644
+--- a/hw/arm/tegra2/ppsb/flow/flow.c
++++ b/hw/arm/tegra2/ppsb/flow/flow.c
+@@ -112,6 +112,45 @@ typedef struct tegra_flow_timer_arg {
+     int cpu_id;
+ } tegra_flow_timer_arg;
+ 
++/*
++ * Whether the GIC distributor has an enabled, pending SGI or SPI for a CCPLEX core, whatever its CPU interface says: the
++ * GIC-400's per-core outputs reach the flow controller even with the interface off or the core power-gated (C7).
++ */
++static int tegra_flow_gic_pending(int cpu_id)
++{
++    GICState *s = gic_dev;
++
++    for (int i = 0; i < INT_GIC_NR; i++) {
++        if (i == GIC_NR_SGIS) {
++            i = GIC_INTERNAL;  /* the core's own PPIs (its timers) are off with it */
++        }
++        if (GIC_DIST_TEST_ENABLED(i, 1 << cpu_id) && gic_test_pending(s, i, 1 << cpu_id)) {
++            return 1;
++        }
++    }
++    return 0;
++}
++
++/*
++ * Tegra X1 halt events: bit 8 GIC FIQ, bit 9 GIC IRQ, bit 10 LIC FIQ, bit 11 LIC IRQ, each for the core itself (the
++ * Tegra 2 layout this model was written for had per-processor IRQ/FIQ bits there instead).
++ */
++static int tegra_flow_x1_irq_events(tegra_flow *s, int cpu_id)
++{
++    return tegra_board >= TEGRAX1_BOARD && cpu_id != TEGRA_BPMP &&
++           (s->halt_events[cpu_id].reg32 & (0xF << 8));
++}
++
++static int tegra_flow_x1_wake(tegra_flow *s, int cpu_id)
++{
++    halt_events_t ev = s->halt_events[cpu_id];
++
++    if ((ev.fiq_0 || ev.fiq_1) && tegra_flow_gic_pending(cpu_id)) {
++        return 1;
++    }
++    return (ev.irq_0 || ev.irq_1) && tegra_ictlr_is_irq_pending_on_cpu(cpu_id);
++}
++
+ static int tegra_flow_have_pending_irq(int cpu_id)
+ {
+     GICState *s = gic_dev;
+@@ -121,7 +160,7 @@ static int tegra_flow_have_pending_irq(int cpu_id)
+         return 1;
+     }
+ 
+-    if (cpu_id == TEGRA_BPMP || tegra_cpu_is_powergated(cpu_id)) {
++    if (cpu_id == TEGRA_BPMP || (tegra_cpu_is_powergated(cpu_id) && tegra_board < TEGRAX1_BOARD)) {
+         return 0;
+     }
+ 
+@@ -149,7 +188,12 @@ static int tegra_flow_arm_event(tegra_flow *s, int cpu_id, int wait)
+         }
+     }
+ 
+-    if (s->halt_events[cpu_id].irq_0) {
++    if (tegra_flow_x1_irq_events(s, cpu_id)) {
++        if (tegra_flow_x1_wake(s, cpu_id)) {
++            goto fired;
++        }
++        unimplemented = 0;
++    } else if (s->halt_events[cpu_id].irq_0) {
+         if (TEGRA_BPMP != cpu_id) {
+             if (tegra_flow_have_pending_irq(cpu_id)) {
+                  goto fired;
+@@ -165,7 +209,7 @@ static int tegra_flow_arm_event(tegra_flow *s, int cpu_id, int wait)
+         unimplemented = 0;
+     }
+ 
+-    if (s->halt_events[cpu_id].irq_1) {
++    if (s->halt_events[cpu_id].irq_1 && !tegra_flow_x1_irq_events(s, cpu_id)) {
+         if (tegra_flow_have_pending_irq(TEGRA_BPMP)) {
+             goto fired;
+         }
+@@ -375,6 +419,11 @@ static void tegra_flow_run_cpu(int cpu_id)
+     if (tegra_cpu_is_powergated(cpu_id)) {
+         tegra_cpu_unpowergate(cpu_id);
+         tegra_pmc_update_crail();
++        /* A Tegra X1 core the flow controller powered down comes back out of reset, at its reset vector (bl31's warm
++         * boot entry), not where it stopped. */
++        if (tegra_board >= TEGRAX1_BOARD && cpu_id != TEGRA_BPMP && tegra_cpu_reset_asserted(cpu_id)) {
++            tegra_cpu_reset_deassert(cpu_id, 1);
++        }
+     } else {
+         tegra_cpu_unhalt(cpu_id);
+     }
+@@ -400,7 +449,11 @@ void tegra_flow_on_irq(int cpu_id)
+             }
+         }
+ 
+-        if (cpu_id != TEGRA_BPMP) {
++        if (tegra_flow_x1_irq_events(s, cpu_idX)) {
++            if (tegra_flow_x1_wake(s, cpu_idX)) {
++                goto event;
++            }
++        } else if (cpu_id != TEGRA_BPMP) {
+             if (s->halt_events[cpu_idX].irq_0) {
+                 goto event;
+             }
+@@ -421,7 +474,8 @@ event:
+     }
+ 
+     if (!(s->halt_events[cpu_id].mode & WAIT_IRQ)) {
+-        if (tegra_cpu_is_powergated(cpu_id)) {
++        /* Tegra X1 power-gates each core on its own (C7): the others need not be stopped. */
++        if (tegra_cpu_is_powergated(cpu_id) && tegra_board < TEGRAX1_BOARD) {
+             if (cpu_id == TEGRA_BPMP) {
+                 g_assert(s->halt_events[cpu_id].mode & STOP);
+             }
+@@ -541,8 +595,7 @@ static int tegra_flow_powergate(tegra_flow *s, int cpu_id, int is_sibling)
+     }
+ 
+     if (!(s->halt_events[cpu_id].mode & STOP)) {
+-        tegra_cpu_unpowergate(cpu_id);
+-        tegra_pmc_update_crail();
++        tegra_flow_run_cpu(cpu_id);
+     }
+ 
+     return 1;
+diff --git a/hw/arm/tegra2/tegrax1.c b/hw/arm/tegra2/tegrax1.c
+index 59b3c63..080dc43 100644
+--- a/hw/arm/tegra2/tegrax1.c
++++ b/hw/arm/tegra2/tegrax1.c
+@@ -769,13 +769,19 @@ static void __tegrax1_init(MachineState *machine)
+     sysbus_connect_irq(gicbusdev, TEGRA_CCPLEX_CORE2, DIRQ_INT(ARM_CPU_IRQ + 2));
+     sysbus_connect_irq(gicbusdev, TEGRA_CCPLEX_CORE3, DIRQ_INT(ARM_CPU_IRQ + 3));
+ 
+-    /* CPU IRQ+FIQ */
+-    sysbus_connect_irq(lic, 0, DIRQ_INT(ARM_CPU_IRQ + 2));
+-    sysbus_connect_irq(lic, 1, DIRQ_INT(ARM_CPU_FIQ + 2));
++    /* The dispatcher's inputs after the devices': one GIC line per core, then the LIC's CPU pair, then its COP pair
++     * (tegra2.c's +2/+4 are for two cores). */
++    sysbus_connect_irq(lic, 0, DIRQ_INT(TEGRAX1_CCPLEX_NCORES + ARM_CPU_IRQ));
++    sysbus_connect_irq(lic, 1, DIRQ_INT(TEGRAX1_CCPLEX_NCORES + ARM_CPU_FIQ));
+ 
+-    /* COP IRQ+FIQ */
+-    sysbus_connect_irq(lic, 2, DIRQ_INT(ARM_CPU_IRQ + 4));
+-    sysbus_connect_irq(lic, 3, DIRQ_INT(ARM_CPU_FIQ + 4));
++    sysbus_connect_irq(lic, 2, DIRQ_INT(2 * TEGRAX1_CCPLEX_NCORES + ARM_CPU_IRQ));
++    sysbus_connect_irq(lic, 3, DIRQ_INT(2 * TEGRAX1_CCPLEX_NCORES + ARM_CPU_FIQ));
++
++    /* The GIC's wake requests for power-gated cores go to the flow controller. */
++    for (i = 0; i < TEGRAX1_CCPLEX_NCORES; i++) {
++        qdev_connect_gpio_out_named(gic_dev, "wake", i,
++                                    qdev_get_gpio_in_named(tegra_irq_dispatcher_dev, "gic-wake", i));
++    }
+ 
+     /* Cache controller */
+     //sysbus_create_simple("l2x0", TEGRA_ARM_PL310_BASE, NULL);
+diff --git a/hw/intc/arm_gic.c b/hw/intc/arm_gic.c
+index b1a7c58..8437280 100644
+--- a/hw/intc/arm_gic.c
++++ b/hw/intc/arm_gic.c
+@@ -172,6 +172,26 @@ static inline bool gic_irq_signaling_enabled(GICState *s, int cpu, bool virt,
+ 
+ /* TODO: Many places that call this routine could be optimized.  */
+ /* Update interrupt status after enabled or pending bits have been changed.  */
++/*
++ * The distributor's wake request for a core whose CPU interface is off, as the GIC-400's power-management outputs give
++ * it to a power controller: SGIs and SPIs only, since a core's own PPIs (its timers) stop when it powers down.
++ */
++static bool gic_wake_pending(GICState *s, int cpu)
++{
++    int cm = 1 << cpu;
++
++    for (int irq = 0; irq < s->num_irq; irq++) {
++        if (irq == GIC_NR_SGIS) {
++            irq = GIC_INTERNAL;
++        }
++        if (irq < s->num_irq && GIC_DIST_TEST_ENABLED(irq, cm) && gic_test_pending(s, irq, cm) &&
++            (irq < GIC_INTERNAL ? true : (GIC_DIST_TARGET(irq) & cm) != 0)) {
++            return true;
++        }
++    }
++    return false;
++}
++
+ static inline void gic_update_internal(GICState *s, bool virt)
+ {
+     int best_irq;
+@@ -190,8 +210,14 @@ static inline void gic_update_internal(GICState *s, bool virt)
+                                        GICD_CTLR_EN_GRP0 | GICD_CTLR_EN_GRP1)) {
+             qemu_irq_lower(irq_lines[cpu]);
+             qemu_irq_lower(fiq_lines[cpu]);
++            if (!virt && (s->ctlr & (GICD_CTLR_EN_GRP0 | GICD_CTLR_EN_GRP1))) {
++                qemu_set_irq(s->wake_irq[cpu], gic_wake_pending(s, cpu));
++            }
+             continue;
+         }
++        if (!virt) {
++            qemu_irq_lower(s->wake_irq[cpu]);
++        }
+ 
+         if (virt) {
+             gic_get_best_virq(s, cpu, &best_irq, &best_prio, &group);
+@@ -2137,6 +2163,7 @@ static void arm_gic_realize(DeviceState *dev, Error **errp)
+         error_propagate(errp, local_err);
+         return;
+     }
++    qdev_init_gpio_out_named(dev, s->wake_irq, "wake", s->num_cpu);
+ 
+     if (kvm_enabled() && !kvm_arm_supports_user_irq()) {
+         error_setg(errp, "KVM with user space irqchip only works when the "
+diff --git a/include/hw/intc/arm_gic_common.h b/include/hw/intc/arm_gic_common.h
+index 9680c34..8af7306 100644
+--- a/include/hw/intc/arm_gic_common.h
++++ b/include/hw/intc/arm_gic_common.h
+@@ -74,6 +74,8 @@ struct GICState {
+     qemu_irq parent_nmi[GIC_NCPU];
+     qemu_irq parent_vnmi[GIC_NCPU];
+     qemu_irq maintenance_irq[GIC_NCPU];
++    /* Per core: an enabled SGI or SPI is pending for it while its CPU interface signals nothing (power-down wake). */
++    qemu_irq wake_irq[GIC_NCPU];
+ 
+     /* GICD_CTLR; for a GIC with the security extensions the NS banked version
+      * of this register is just an alias of bit 1 of the S banked version.

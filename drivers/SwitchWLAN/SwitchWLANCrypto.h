@@ -9,8 +9,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
-namespace swlan {
-namespace crypto {
+namespace swlan::crypto {
 
 struct Sha1 {
     uint32_t h[5];
@@ -53,7 +52,6 @@ struct Aes128 {
     void decrypt(uint8_t block[16]) const;
 };
 
-}  // namespace crypto
-}  // namespace swlan
+}  // namespace swlan::crypto
 
 #endif

@@ -110,14 +110,14 @@ static inline const char *tegra_vic_image_from(const TegraVICSurfaceDesc *d, uin
     im->format = tegra_vic_format(d->fourcc);
     if (!im->format)
         return "pixel format the scaler does not take";
-    if (d->planes != im->format->planes && !(d->planes == 0 && im->format->planes == 1))
+    if (d->planes != im->format->planes && (d->planes != 0 || im->format->planes != 1))
         return "plane count does not match the pixel format";
     im->width = d->width;
     im->height = d->height;
     const uint64_t extent = tegra_vic_surface_extent(d);
     if (extent > d->length)
         return "planes extend past the surface's memory";
-    for (uint32_t p = 0; p < im->format->planes; p++) {
+    for (uint32_t p = 0; p < im->format->planes && p < 2; p++) {
         if (d->planeBytesPerRow[p] > 0xffffffffu || d->planeHeight[p] > 0xffffffffu)
             return "plane geometry";
         im->pitch[p] = (uint32_t)d->planeBytesPerRow[p];
@@ -126,7 +126,7 @@ static inline const char *tegra_vic_image_from(const TegraVICSurfaceDesc *d, uin
         im->span[p] = d->length - d->planeOffset[p];
     }
     im->standard = tegra_vic_standard_for(d->width, d->height);
-    return 0;
+    return NULL;  // NOLINT(modernize-use-nullptr): C too (vic_host.c)
 }
 
 // Up to three jobs per request: fills first (ZeroFill, BorderFill), the transform (or WriteOnlyMode's fill) last.
@@ -158,8 +158,10 @@ static inline void tegra_vic_even_rect(const TegraVICFormat *f, const TegraVICSu
 {
     if (!f->subsampled)
         return;
-    uint32_t x0 = o->dstX & ~1u, y0 = o->dstY & ~1u, x1 = (o->dstX + o->dstW + 1) & ~1u,
-             y1 = (o->dstY + o->dstH + 1) & ~1u;
+    const uint32_t x0 = o->dstX & ~1u;
+    const uint32_t y0 = o->dstY & ~1u;
+    uint32_t x1 = (o->dstX + o->dstW + 1) & ~1u;
+    uint32_t y1 = (o->dstY + o->dstH + 1) & ~1u;
     if (x1 > d->width)
         x1 = d->width & ~1u;
     if (y1 > d->height)
@@ -191,7 +193,7 @@ static inline const char *tegra_vic_plan(const TegraVICRequest *r, const TegraVI
     if (r->src_event_port || r->dst_event_port)
         return "shared events";
     const TegraVICFormat *df = tegra_vic_format(dst->fourcc);
-    const int writeOnly = (f & TEGRA_VIC_REQ_WRITE_ONLY) != 0;
+    const bool writeOnly = (f & TEGRA_VIC_REQ_WRITE_ONLY) != 0;
     if (!df || (!writeOnly && !tegra_vic_format(src->fourcc)))
         return "pixel format the scaler does not take";
     if ((f & TEGRA_VIC_REQ_ALPHA_OVERRIDE) && df->alpha)
@@ -201,7 +203,10 @@ static inline const char *tegra_vic_plan(const TegraVICRequest *r, const TegraVI
         return "protected source into a less protected destination";
     *kind = TEGRA_VIC_PLAN_BAD;
     // Rectangles: an empty one is the whole surface (as AppleM2ScalerCSCDriver reads them).
-    uint32_t dx = r->dst_x, dy = r->dst_y, dw = r->dst_w, dh = r->dst_h;
+    uint32_t dx = r->dst_x;
+    uint32_t dy = r->dst_y;
+    uint32_t dw = r->dst_w;
+    uint32_t dh = r->dst_h;
     if (!dw || !dh) {
         dx = dy = 0;
         dw = dst->width;
@@ -242,12 +247,12 @@ static inline const char *tegra_vic_plan(const TegraVICRequest *r, const TegraVI
             o->srcH = (uint64_t)src->height << 16;
         }
         o->transform = (uint32_t)(f & TEGRA_VIC_REQ_TRANSFORM);
-        o->nearest = (f & TEGRA_VIC_REQ_NEAREST) != 0;
+        o->nearest = (f & TEGRA_VIC_REQ_NEAREST) ? 1 : 0;
         plan->readsSource = 1;
     }
-    plan->callback = r->cb_fn && !(f & TEGRA_VIC_REQ_SKIP_CALLBACK);
+    plan->callback = (r->cb_fn != 0 && (f & TEGRA_VIC_REQ_SKIP_CALLBACK) == 0) ? 1 : 0;
     *kind = TEGRA_VIC_PLAN_OK;
-    return 0;
+    return NULL;  // NOLINT(modernize-use-nullptr): C too (vic_host.c)
 }
 
 #ifdef __cplusplus

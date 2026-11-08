@@ -40,10 +40,10 @@ class ExtentsTest(unittest.TestCase):
     def write(self, at: int, data: bytes):
         os.pwrite(self.fd, data, at)
 
-    def test_container_reads_checkpoint_areas(self):
+    def test_container_reads_the_checkpoint_descriptor_area(self):
         block, count, container, areas = extents.container(nxsb(1, 8, 9, 32))
         self.assertEqual((block, count, container), (BLOCK, SIZE // BLOCK, uuid.UUID(bytes=bytes(range(16)))))
-        self.assertEqual(areas, [(BLOCK, 9 * BLOCK), (9 * BLOCK, 41 * BLOCK)])
+        self.assertEqual(areas, [(BLOCK, 9 * BLOCK)])
         with self.assertRaises(extents.ExtentError):
             extents.container(nxsb(1, 8 | extents.NX_NONCONTIGUOUS, 9, 32))
         with self.assertRaises(extents.ExtentError):
@@ -103,6 +103,23 @@ class ExtentsTest(unittest.TestCase):
             [manifest.Boot('bl33.bin', manifest.BOOT_OFFSET, 1, [bytes(32)])],
         )
         self.assertEqual(manifest.decode(manifest.encode(m)).extents, plan)
+
+
+class DataAreaTest(unittest.TestCase):
+    def test_the_data_area_and_the_pool_keep_their_holes(self):
+        """Only the descriptor area is zero-filled: the data area's and the pool's unwritten tails stay unwritten."""
+        fd = os.open(tempfile.mktemp(), os.O_RDWR | os.O_CREAT)
+        self.addCleanup(os.close, fd)
+        os.ftruncate(fd, SIZE)
+        os.pwrite(fd, nxsb(1, 8, 9, 32), 0)
+        os.pwrite(fd, b'checkpoint map', 9 * BLOCK)
+        os.pwrite(fd, b'pool bitmap', 60 * BLOCK)
+        data = extents.data_ranges(fd, 0, SIZE, BLOCK)
+        _, _, _, areas = extents.container(os.pread(fd, BLOCK, 0))
+        plan = extents.plan(data, areas, SIZE, BLOCK)
+        zeros = [(at, n) for at, src, n in plan if src == manifest.ZERO]
+        self.assertEqual(zeros, [(BLOCK, 8 * BLOCK)])
+        self.assertEqual(sum(n for _, src, n in plan if src != manifest.ZERO), 3 * BLOCK)
 
 
 if __name__ == '__main__':

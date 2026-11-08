@@ -28,18 +28,20 @@ usage: harvest.py <corpus.log> <pipelines.log>...
           Support/switch-ios or $SWITCH_HOME): with --volume, and for every saved cache below --records-from, each
           driver record (the content directory's v1/<content>/<xx>/<name>, m2v's VkPipelineCache data of one pipeline
           making, named by what the making reads and the NVK identity) whose envelope checks out is copied to
-          <device>/records/<xx>/<name>, and every cache's libs/<SHA-256>.metallib (a library a process made from bytes)
-          to <device>/data/. The device's own makings: those of draws' variants that no creation predicts, and each one
-          the precompile makes otherwise than the device (r8-webgpu: 1268 of the 1293 records of the 23:17 boot's caches
-          were not in the seed). The seed takes those of its NVK's identity.
-          harvest.py --records-from <dir>... [--device <dir>]: only the records of every m2v cache below each <dir> (the
-          --save copies, e.g. <state>/device-logs/*/m2v), no corpus.
+          <device>/records/<xx>/<name>, every cache's libs/<SHA-256>.metallib (a library a process made from bytes)
+          to <device>/data/, and every msl/<name>.reply (the frontend's kept MTLCompiler reply: Core Image's kernel
+          source compiled to AIR) whose envelope checks out to <device>/msl/. The device's own makings: those of draws'
+          variants that no creation predicts, and each one the precompile makes otherwise than the device (r8-webgpu:
+          1268 of the 1293 records of the 23:17 boot's caches were not in the seed). The seed takes those of its NVK's
+          identity, and every reply.
+          harvest.py --records-from <dir>... [--device <dir>]: only the records and compile replies of every m2v cache
+          below each <dir> (the --save copies, e.g. <state>/device-logs/*/m2v), no corpus.
 --pack    harvest.py --pack [--device <dir>]: the staging directory as the build's @gpu_device_data: a tar (sorted, no
           times or owners) of its records and of the libraries made from bytes that the corpus names and the build
           cannot make itself (not one of gpu/apple-libs.sha256's, not the frontend's TwoPlaneStandIn.h: Core Image's
-          kernels compiled on the device), written to <state>/gpu-device-data/m2v-device-<sha256[:16]>.tar; prints the
-          DEVICE_DATA pin for gpu/deps.bzl. The first build after the pin copies the tar into the repository cache; no
-          build reads the staging directory.
+          kernels compiled on the device) and of its compile replies, written to
+          <state>/gpu-device-data/m2v-device-<sha256[:16]>.tar; prints the DEVICE_DATA pin for gpu/deps.bzl. The first
+          build after the pin copies the tar into the repository cache; no build reads the staging directory.
 """
 
 import hashlib
@@ -77,6 +79,11 @@ CONTENT = (
 )
 # m2v shader_cache/driver.rs: magic, identity (28 bytes), data length (u64), data, SHA-256
 RECORD_MAGIC = b'M2VPPLC\0'
+# The frontend's kept MTLCompiler reply (NativeBridgeMetalFrontend.mm NBCompileReplyHeader): "NSC1", the warning and
+# metallib lengths, the SHA-256 of both, then both; named by the SHA-256 of the compiler's LC_UUID and the request.
+REPLY_MAGIC = b'NSC1'
+REPLY_HEADER = 48
+REPLY_NAME = re.compile(r'^[0-9a-f]{64}\.reply$')
 
 
 def normal(line: str) -> tuple[str | None, str | None]:
@@ -252,6 +259,33 @@ def collect(m2v: Path, store: Path) -> None:
             shutil.copyfile(path, target)
 
 
+def reply_ok(data: bytes) -> bool:
+    """Return whether `data` is a whole compile reply (the frontend's NBCompileReplyHeader, then its payload)."""
+    if len(data) < REPLY_HEADER or data[:4] != REPLY_MAGIC:
+        return False
+    warnings, metallib = int.from_bytes(data[4:8], 'little'), int.from_bytes(data[8:16], 'little')
+    return (
+        metallib > 0
+        and REPLY_HEADER + warnings + metallib == len(data)
+        and hashlib.sha256(data[REPLY_HEADER:]).digest() == data[16:REPLY_HEADER]
+    )
+
+
+def replies(m2v: Path, store: Path) -> int:
+    """Copy a cache's compile replies whose envelope checks out into `store`; how many were new."""
+    copied = 0
+    for path in sorted((m2v / 'msl').glob('*.reply')) if (m2v / 'msl').is_dir() else []:
+        target = store / path.name
+        if target.is_file() or not REPLY_NAME.match(path.name):
+            continue
+        data = path.read_bytes()
+        if reply_ok(data):
+            store.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(data)
+            copied += 1
+    return copied
+
+
 def record_ok(data: bytes) -> bool:
     """Return whether `data` is a whole driver record.
 
@@ -322,6 +356,9 @@ def pack(store: Path, corpus: Path) -> None:
         for p in (store / 'data').glob('*.metallib')
         if p.stem in named and p.stem not in own and hashlib.sha256(p.read_bytes()).hexdigest() == p.stem
     )
+    members += sorted(
+        p for p in (store / 'msl').glob('*.reply') if REPLY_NAME.match(p.name) and reply_ok(p.read_bytes())
+    )
     if not members:
         sys.exit(f'{store}: no driver records or libraries staged (harvest.py --volume or --records-from first)')
     data = io.BytesIO()
@@ -337,9 +374,10 @@ def pack(store: Path, corpus: Path) -> None:
     out.write_bytes(data.getvalue())
     record_count = sum(1 for p in members if p.parts[-3] == 'records')
     library_count = sum(1 for p in members if p.parts[-2] == 'data')
+    reply_count = sum(1 for p in members if p.parts[-2] == 'msl')
     print(
         f'{out}: {record_count} driver records, {library_count} libraries '
-        f'(of {len(named)} made from bytes the corpus names)'
+        f'(of {len(named)} made from bytes the corpus names), {reply_count} compile replies'
     )
     print(f'gpu/deps.bzl:\nDEVICE_DATA = {{\n    "file": "{out.name}",\n    "sha256": "{digest}",\n}}')
 
@@ -370,6 +408,8 @@ def main() -> None:
             sorted({str(v1.parent) for d in records_from for v1 in Path(d).rglob('v1') if (v1 / CONTENT).is_dir()}),
             store / 'records',
         )
+        kept = sum(replies(msl.parent, store / 'msl') for d in records_from for msl in sorted(Path(d).rglob('msl')))
+        print(f'{store / "msl"}: {kept} new compile replies')
         return
     opens = set(option(args, '--open', many=True)) or set(SYSTEM_CACHES)
     open_all = '--open-all' in args
@@ -393,6 +433,7 @@ def main() -> None:
                 )
                 collect(m2v, store)
                 records([m2v], store / 'records')
+                replies(m2v, store / 'msl')
                 if save:
                     target = Path(save) / where.replace('/', '_')
                     shutil.rmtree(target, ignore_errors=True)

@@ -12,6 +12,7 @@
 #include "nvk_mme.h"
 #include "nvk_physical_device.h"
 #include "nvk_shader.h"
+#include "nvk_tiled_cache.h"
 
 #include "util/bitpack_helpers.h"
 #include "util/compiler.h"
@@ -665,6 +666,8 @@ nvk_push_draw_state_init(struct nvk_queue *queue, struct nv_push *p)
 
    if (pdev->info.cls_eng3d >= HOPPER_A)
        P_IMMD(p, NVCB97, SET_TEXTURE_HEADER_VERSION, 1);
+
+   nvk_push_tiled_cache_init(p, pdev);
 
    /* Store the address to CB0 in a pair of state registers */
    uint64_t cb0_addr = queue->draw_cb0->va->addr;
@@ -3771,7 +3774,7 @@ nvk_flush_ms_state(struct nvk_cmd_buffer *cmd)
          sl = vk_standard_sample_locations_state(samples);
       }
 
-      struct nak_sample_location push_sl[NVK_MAX_SAMPLES];
+      struct nak_sample_location push_sl[NVK_MAX_SAMPLES] = {};
       for (uint32_t i = 0; i < sl->per_pixel; i++)
          push_sl[i] = vk_to_nak_sample_location(sl->locations[i]);
 
@@ -6016,6 +6019,7 @@ nvk_CmdEndTransformFeedback2EXT(VkCommandBuffer commandBuffer,
          .structure_size = STRUCTURE_SIZE_ONE_WORD,
       });
    }
+   nvk_cmd_flush_tiled_cache(cmd);
 }
 
 static void

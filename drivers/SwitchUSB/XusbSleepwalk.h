@@ -77,8 +77,11 @@ static inline enum xusb_utmi_speed xusb_utmi_speed(uint32_t portsc)
 static inline uint32_t xusb_sleepwalk_phases(enum xusb_utmi_speed speed)
 {
     const uint32_t pulldowns = 0x03030303u;
-    const uint32_t highzA = 1u << 6, apA = 1u << 4, anA = 1u << 5;
-    const uint32_t anBCD = (1u << 13) | (1u << 21) | (1u << 29), apBCD = (1u << 12) | (1u << 20) | (1u << 28);
+    const uint32_t highzA = 1u << 6;
+    const uint32_t apA = 1u << 4;
+    const uint32_t anA = 1u << 5;
+    const uint32_t anBCD = (1u << 13) | (1u << 21) | (1u << 29);
+    const uint32_t apBCD = (1u << 12) | (1u << 20) | (1u << 28);
     const uint32_t highzBCD = (1u << 14) | (1u << 22) | (1u << 30);
     switch (speed) {
     case XUSB_UTMI_HS:
@@ -95,7 +98,8 @@ static inline uint32_t xusb_sleepwalk_phases(enum xusb_utmi_speed speed)
 // TERM_PAD_CFG's PCTRL (bits 1-6) and TCTRL (bits 7-12) from USB2_BIAS_PAD_CTL1 (TCTRL bits 0-5, PCTRL bits 6-11).
 static inline uint32_t xusb_sleepwalk_term(uint32_t term_pad_cfg, uint32_t bias_pad_ctl1)
 {
-    const uint32_t tctrl = bias_pad_ctl1 & 0x3fu, pctrl = (bias_pad_ctl1 >> 6) & 0x3fu;
+    const uint32_t tctrl = bias_pad_ctl1 & 0x3fu;
+    const uint32_t pctrl = (bias_pad_ctl1 >> 6) & 0x3fu;
     return (term_pad_cfg & ~XUSB_TERM_MASK) | pctrl << 1 | tctrl << 7;
 }
 

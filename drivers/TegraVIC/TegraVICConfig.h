@@ -13,17 +13,18 @@
 //   1.0 = 1 << (r_shift + 8), offsets in 1/256 of a 10-bit step).
 //   switch-frame-tap tools/vic_csc.py (measured on a T210B01 VIC, 528 values reproduced exactly; read, not copied):
 //   the 10-bit pipeline (in10 = in8 << 2, out8 = out10 >> 2), both matrix stages truncate, and which pipeline channel
-//   each NV12 byte lands in. TegraVIC's boot self-test (V4) proves these on this unit before anything is published.
+//   each NV12 byte lands in. The unit's boot self-test confirmed these (kTegraVICTraits).
 //   averne's FFmpeg nvtegra (libavutil/clb0b6.h, hwcontext_nvtegra.c; read, not copied): CONTROL_PARAMS GPTIMER_ON
 //   and FALCON_CONTROL, PipeConfig downsample 1.0 = 4 (U9.2), the chroma siting values, NV12 = T_Y8___U8V8_N420.
 //   CTCaer's hekate bdk/display/vic.c (GPLv2; read, not copied), the one VIC transpose known to work on this hardware
 //   (Nyx's 1280x720 frame turned onto the 720x1280 panel): a transposed job is described before the transpose, the
 //   target rectangle and the whole OutputSurfaceConfig (OutSurfaceWidth/Height and OutLumaWidth/Height 1279/719, the
 //   source's), and the engine writes a 720-pixel-stride, 1280-row picture: composed pixel (x, y) lands in memory row x,
-//   column y, so LumaHeight + 1 is the row stride and LumaWidth + 1 the rows. V4's diag lines on the unit show the
+//   column y, so LumaHeight + 1 is the row stride and LumaWidth + 1 the rows. The unit's diag lines showed the
 //   same law: with LumaHeight 31 (the rows, post-transpose) a 256-byte-pitch 16x32 output got a 128-byte row stride.
 #ifndef TEGRA_VIC_CONFIG_H
 #define TEGRA_VIC_CONFIG_H
+#include <stdbool.h>
 #include <stdint.h>
 #include <string.h>
 
@@ -90,10 +91,11 @@ static inline void tegra_vic_put(uint8_t *cfg, uint32_t offset, uint32_t bit, ui
     for (uint32_t i = 0; i < width; i++) {
         const uint32_t b = bit + i;
         uint8_t *p = cfg + offset + b / 8;
-        if ((value >> i) & 1)
+        if ((value >> i) & 1) {
             *p = (uint8_t)(*p | (1u << (b % 8)));
-        else
+        } else {
             *p = (uint8_t)(*p & ~(1u << (b % 8)));
+        }
     }
 }
 
@@ -102,7 +104,7 @@ static inline uint64_t tegra_vic_get(const uint8_t *cfg, uint32_t offset, uint32
     uint64_t v = 0;
     for (uint32_t i = 0; i < width; i++) {
         const uint32_t b = bit + i;
-        v |= (uint64_t)((cfg[offset + b / 8] >> (b % 8)) & 1) << i;
+        v |= (uint64_t)(((uint32_t)cfg[offset + b / 8] >> (b % 8)) & 1u) << i;
     }
     return v;
 }
@@ -205,14 +207,22 @@ static inline void tegra_vic_matrix_put(uint8_t *cfg, uint32_t base, const Tegra
     TEGRA_VIC_SET(cfg, base, MATRIX_ENABLE, 1);
 }
 
-// The engine's arithmetic for one pixel (the law above), for the self-test's expectations and the host test.
+static inline uint32_t tegra_vic_clamp(int64_t v, uint32_t max)
+{
+    if (v < 0)
+        return 0;
+    return v > max ? max : (uint32_t)v;
+}
+
+// The engine's arithmetic for one pixel (the law above), for the host test's expectations. Both
+// stages shift the signed sum arithmetically: the engine floors negative sums, it does not round them toward zero.
 static inline void tegra_vic_matrix_apply(const TegraVICMatrix *m, const uint32_t in10[3], uint32_t out10[3])
 {
     for (int r = 0; r < 3; r++) {
         int64_t acc = (int64_t)m->c[r][0] * in10[0] + (int64_t)m->c[r][1] * in10[1] + (int64_t)m->c[r][2] * in10[2];
-        acc = (acc >> m->shift) + m->c[r][3];
-        acc >>= 8;
-        out10[r] = acc < 0 ? 0 : acc > 1023 ? 1023 : (uint32_t)acc;
+        acc = (acc >> m->shift) + m->c[r][3];  // NOLINT(bugprone-signed-bitwise): arithmetic shift, see above
+        acc >>= 8;                             // NOLINT(bugprone-signed-bitwise): arithmetic shift, see above
+        out10[r] = tegra_vic_clamp(acc, 1023);
     }
 }
 
@@ -235,24 +245,28 @@ static inline void tegra_vic_kr_kb(uint32_t standard, int64_t *kr, int64_t *kb)
     *kb = standard == TEGRA_VIC_YCC_709 ? 72200 : 114000;
 }
 
-// Which pipeline channel carries Cb and which Cr for the 4:2:0 formats (ch0 is always Y). The self-test (V4) proves
-// it on the unit; switch-frame-tap measured Cr in channel 1 and Cb in channel 2 for T_Y8___U8V8_N420 with NV12 data.
+// Which pipeline channel carries Cb and which Cr for the 4:2:0 formats (ch0 is always Y). The unit's self-test found
+// it; switch-frame-tap measured Cr in channel 1 and Cb in channel 2 for T_Y8___U8V8_N420 with NV12 data.
 typedef struct {
     uint32_t cbChannel, crChannel;
 } TegraVICChroma;
 
 // RGB (pipeline channels R, G, B) -> Y'CbCr, 8-bit video range (Y 16..235, C 16..240) or full range (Y 0..255, C 128
 // +- 127.5), rounded to nearest at the final >> 2 (offset + 2 10-bit steps).
-static inline void tegra_vic_matrix_rgb_to_ycc(uint32_t standard, int full, const TegraVICChroma *ch, TegraVICMatrix *m)
+static inline void tegra_vic_matrix_rgb_to_ycc(uint32_t standard, bool full, const TegraVICChroma *ch,
+                                               TegraVICMatrix *m)
 {
-    int64_t kr, kb;
+    int64_t kr = 0;
+    int64_t kb = 0;
     tegra_vic_kr_kb(standard, &kr, &kb);
     const int64_t kg = 1000000 - kr - kb;
-    const int64_t ys = full ? 1000000 : 1000000 * 219 / 255, cs = full ? 1000000 : 1000000 * 224 / 255;
-    const int64_t one = (int64_t)1 << (TEGRA_VIC_MATRIX_SHIFT + 8);
+    const int64_t ys = full ? 1000000 : 1000000 * 219 / 255;
+    const int64_t cs = full ? 1000000 : 1000000 * 224 / 255;
+    const int64_t one = (int64_t)(1ULL << (TEGRA_VIC_MATRIX_SHIFT + 8));
     // Rows in micro-units: Y = kr R + kg G + kb B; Cb = (B - Y) / (2 (1 - kb)); Cr = (R - Y) / (2 (1 - kr)).
     const int64_t y[3] = {kr * ys / 1000000, kg * ys / 1000000, kb * ys / 1000000};
-    const int64_t cbDen = 2 * (1000000 - kb), crDen = 2 * (1000000 - kr);
+    const int64_t cbDen = 2 * (1000000 - kb);
+    const int64_t crDen = 2 * (1000000 - kr);
     const int64_t cb[3] = {-kr * cs / cbDen, -kg * cs / cbDen, (1000000 - kb) * cs / cbDen};
     const int64_t cr[3] = {(1000000 - kr) * cs / crDen, -kg * cs / crDen, -kb * cs / crDen};
     memset(m, 0, sizeof(*m));
@@ -269,19 +283,26 @@ static inline void tegra_vic_matrix_rgb_to_ycc(uint32_t standard, int full, cons
 }
 
 // Y'CbCr -> RGB, the inverse: R = Y + 2(1-kr) Cr; B = Y + 2(1-kb) Cb; G = Y - (2kb(1-kb) Cb + 2kr(1-kr) Cr) / kg.
-static inline void tegra_vic_matrix_ycc_to_rgb(uint32_t standard, int full, const TegraVICChroma *ch, TegraVICMatrix *m)
+static inline void tegra_vic_matrix_ycc_to_rgb(uint32_t standard, bool full, const TegraVICChroma *ch,
+                                               TegraVICMatrix *m)
 {
-    int64_t kr, kb;
+    int64_t kr = 0;
+    int64_t kb = 0;
     tegra_vic_kr_kb(standard, &kr, &kb);
     const int64_t kg = 1000000 - kr - kb;
     // Gains of the 8-bit code values: luma 255/219 (video) or 1; chroma 255/224 (video) or 1.
-    const int64_t gy = full ? 1000000 : 1000000 * 255 / 219, gc = full ? 1000000 : 1000000 * 255 / 224;
-    const int64_t rCr = 2 * (1000000 - kr) * gc / 1000000, bCb = 2 * (1000000 - kb) * gc / 1000000;
-    const int64_t gCb = 2 * kb * (1000000 - kb) / kg * gc / 1000000, gCr = 2 * kr * (1000000 - kr) / kg * gc / 1000000;
-    const int64_t one = (int64_t)1 << (TEGRA_VIC_MATRIX_SHIFT + 8);
+    const int64_t gy = full ? 1000000 : 1000000 * 255 / 219;
+    const int64_t gc = full ? 1000000 : 1000000 * 255 / 224;
+    const int64_t rCr = 2 * (1000000 - kr) * gc / 1000000;
+    const int64_t bCb = 2 * (1000000 - kb) * gc / 1000000;
+    const int64_t gCb = 2 * kb * (1000000 - kb) / kg * gc / 1000000;
+    const int64_t gCr = 2 * kr * (1000000 - kr) / kg * gc / 1000000;
+    const int64_t one = (int64_t)(1ULL << (TEGRA_VIC_MATRIX_SHIFT + 8));
     memset(m, 0, sizeof(*m));
     m->shift = TEGRA_VIC_MATRIX_SHIFT;
-    const uint32_t y = 0, cb = ch->cbChannel, cr = ch->crChannel;
+    const uint32_t y = 0;
+    const uint32_t cb = ch->cbChannel;
+    const uint32_t cr = ch->crChannel;
     m->c[0][y] = m->c[1][y] = m->c[2][y] = tegra_vic_fix(gy, one);
     m->c[0][cr] = tegra_vic_fix(rCr, one);
     m->c[1][cb] = tegra_vic_fix(-gCb, one);
@@ -295,14 +316,16 @@ static inline void tegra_vic_matrix_ycc_to_rgb(uint32_t standard, int full, cons
 }
 
 // The full-range BT.709 RGB of an 8-bit Y'CbCr sample: the float conversion in integer millionths, rounded and clamped
-// (the self-test's reference for reading 4:2:0; the host test checks it against the float formula).
+// (the reference for reading 4:2:0; the host test checks it against the float formula).
 static inline void tegra_vic_ideal_rgb709_full(const uint32_t ycc[3], uint32_t rgb[3])
 {
-    const int64_t y = (int64_t)ycc[0] * 1000000, cb = (int64_t)ycc[1] - 128, cr = (int64_t)ycc[2] - 128;
+    const int64_t y = (int64_t)ycc[0] * 1000000;
+    const int64_t cb = (int64_t)ycc[1] - 128;
+    const int64_t cr = (int64_t)ycc[2] - 128;
     const int64_t v[3] = {y + 1574800 * cr, y - 187324 * cb - 468124 * cr, y + 1855600 * cb};
     for (int c = 0; c < 3; c++) {
         const int64_t r = v[c] >= 0 ? (v[c] + 500000) / 1000000 : -((-v[c] + 500000) / 1000000);
-        rgb[c] = r < 0 ? 0 : r > 255 ? 255 : (uint32_t)r;
+        rgb[c] = tegra_vic_clamp(r, 255);
     }
 }
 
@@ -333,10 +356,11 @@ static inline const TegraVICFormat *tegra_vic_format(uint32_t fourcc)
         {TEGRA_VIC_FOURCC('4', '2', '0', 'v'), TEGRA_VIC_T_Y8___U8V8_N420, 2, TEGRA_VIC_KIND_YCC_VIDEO, 0, {1, 2}, 1},
         {TEGRA_VIC_FOURCC('4', '2', '0', 'f'), TEGRA_VIC_T_Y8___U8V8_N420, 2, TEGRA_VIC_KIND_YCC_FULL, 0, {1, 2}, 1},
     };
-    for (unsigned i = 0; i < sizeof(formats) / sizeof(formats[0]); i++)
+    for (unsigned i = 0; i < sizeof(formats) / sizeof(formats[0]); i++) {  // NOLINT(modernize-loop-convert): C too
         if (formats[i].fourcc == fourcc)
             return &formats[i];
-    return 0;
+    }
+    return NULL;  // NOLINT(modernize-use-nullptr): C too (vic_host.c)
 }
 
 // --- Jobs ---------------------------------------------------------------------------------------------------------
@@ -384,7 +408,7 @@ typedef struct {
     uint32_t fillAlpha10;             // and its alpha (10-bit)
 } TegraVICOp;
 
-// What the boot self-test proved about this engine (TegraVICSelfTest.cpp).
+// What this engine does with the configurations tegra_vic_build makes.
 typedef struct {
     TegraVICChroma in, out;        // channel of Cb/Cr when reading and writing 4:2:0
     uint8_t vicFlips[8][3];        // IOSurfaceAccelerator transform -> OutputFlipX, OutputFlipY, OutputTranspose
@@ -400,6 +424,28 @@ typedef struct {
     uint32_t subRects;           // bit t: under transform t a destination rectangle inside a larger surface lands in
                                  // place (where the flips mirror is measured, not assumed); transform 0 always
 } TegraVICTraits;
+
+// VIC 4.0 as the unit measured it with a boot self-test on all 19 boots from 11-05 23:53 to 11-06 23:42, every line
+// the same: Cb in channel 2 both ways, 4:2:0 read to RGB within two steps (samples widened x << 2 | x >> 6) and
+// passed through exactly, the background colour through the output matrix, 2-tap scaling, rows on 256 bytes (144- and
+// 192-byte pitches lost half the copy), all 8 transforms with a transposed job's rectangles and surface given before
+// the transpose, and sub-rectangles in place under transforms 0 and 6 only (the flips mirror around the surface).
+// The flip table is the transform probe's on test/vic_model.h, whose output reproduces every one of those boots'
+// transpose and sub-rectangle diag lines (tegra_vic_transpose_test pins both).
+static const TegraVICTraits kTegraVICTraits = {
+    .in = {2, 1},
+    .out = {2, 1},
+    .vicFlips = {{0, 0, 0}, {1, 0, 0}, {0, 1, 0}, {1, 1, 0}, {0, 1, 1}, {1, 1, 1}, {0, 0, 1}, {1, 0, 1}},
+    .preTransposeRects = 1,
+    .preTransposeSurface = 1,
+    .rotations = 0xff,
+    .bilinear = 1,
+    .pitchAlign = 256,
+    .fillThroughMatrix = 1,
+    .yccIn = TEGRA_VIC_YCC_IN_RGB | TEGRA_VIC_YCC_IN_COPY,
+    .blockLinearIn = 1,
+    .subRects = 0x41,
+};
 
 #define TEGRA_VIC_MAX_METHODS 12
 
@@ -426,7 +472,11 @@ static inline uint32_t tegra_vic_chroma_horiz(uint32_t site)
 
 static inline uint32_t tegra_vic_chroma_vert(uint32_t site)
 {
-    return (site == 3 || site == 4) ? 0 : (site == 5 || site == 6) ? 2 : 1;
+    if (site == 3 || site == 4)
+        return 0;
+    if (site == 5 || site == 6)
+        return 2;
+    return 1;
 }
 
 // Validates an image: geometry the engine can address and every plane's extent inside its mapping.
@@ -446,7 +496,9 @@ static inline const char *tegra_vic_check_image(const TegraVICImage *im, const T
     for (uint32_t p = 0; p < f->planes; p++) {
         const uint32_t w = f->subsampled && p ? im->width / 2 : im->width;
         const uint32_t h = f->subsampled && p ? im->height / 2 : im->height;
-        const uint32_t align = im->blockLinear ? 64 : t && t->pitchAlign ? t->pitchAlign : 256;  // GOBs are 64 wide
+        uint32_t align = t && t->pitchAlign ? t->pitchAlign : 256;
+        if (im->blockLinear)
+            align = 64;  // GOBs are 64 wide
         if (im->base[p] & 0xff)
             return "plane not 256-byte aligned";
         if (im->pitch[p] % align || im->pitch[p] % f->bpe[p])
@@ -461,13 +513,16 @@ static inline const char *tegra_vic_check_image(const TegraVICImage *im, const T
             return "plane shorter than the surface";
         // The engine reads or writes (LumaHeight + 1) rows of (LumaWidth + 1) elements: h rows of pitch bytes (a
         // block-linear plane: all its rows, whole blocks).
-        const uint64_t extent = im->blockLinear    ? (uint64_t)im->pitch[p] * im->rows[p]
-                                : im->lastRowExact ? (uint64_t)im->pitch[p] * (h - 1) + (uint64_t)w * f->bpe[p]
-                                                   : (uint64_t)im->pitch[p] * h;
+        uint64_t extent = (uint64_t)im->pitch[p] * h;
+        if (im->blockLinear) {
+            extent = (uint64_t)im->pitch[p] * im->rows[p];
+        } else if (im->lastRowExact) {
+            extent = (uint64_t)im->pitch[p] * (h - 1) + (uint64_t)w * f->bpe[p];
+        }
         if (extent > im->span[p])
             return "plane extends past its mapping";
     }
-    return 0;
+    return NULL;  // NOLINT(modernize-use-nullptr): C too (vic_host.c)
 }
 
 // Builds the configuration and methods for one job. `configAddr`, `filterAddr` are where the configuration and the
@@ -476,12 +531,12 @@ static inline const char *tegra_vic_build(const TegraVICImage *src, const TegraV
                                           const TegraVICTraits *t, uint64_t configAddr, uint64_t filterAddr,
                                           TegraVICJob *job)
 {
-    const char *why;
     if (dst->blockLinear)
         return "block-linear destination";
-    if ((why = tegra_vic_check_image(dst, t, "destination")))
-        return why;
-    if (!op->fill && (why = tegra_vic_check_image(src, t, "source")))
+    const char *why = tegra_vic_check_image(dst, t, "destination");
+    if (!why && !op->fill)
+        why = tegra_vic_check_image(src, t, "source");
+    if (why)
         return why;
     if (op->transform > 7)
         return "transform outside the 8 flips and rotations";
@@ -499,7 +554,8 @@ static inline const char *tegra_vic_build(const TegraVICImage *src, const TegraV
         if (op->srcX + op->srcW > ((uint64_t)src->width << 16) || op->srcY + op->srcH > ((uint64_t)src->height << 16))
             return "source rectangle outside the source";
         // Scale per output axis: a transposed job's destination width comes from the source height.
-        const uint64_t sw = transpose ? op->srcH : op->srcW, sh = transpose ? op->srcW : op->srcH;
+        const uint64_t sw = transpose ? op->srcH : op->srcW;
+        const uint64_t sh = transpose ? op->srcW : op->srcH;
         if (((uint64_t)op->dstW << 16) > sw * TEGRA_VIC_MAX_UPSCALE ||
             ((uint64_t)op->dstH << 16) > sh * TEGRA_VIC_MAX_UPSCALE)
             return "upscale past 16x";
@@ -515,8 +571,8 @@ static inline const char *tegra_vic_build(const TegraVICImage *src, const TegraV
     if (!op->fill && src->blockLinear && !t->blockLinearIn)
         return "block-linear source this engine has not proven";
     if (!op->fill && src->format->kind != TEGRA_VIC_KIND_RGB) {
-        const int same = dst->format->kind == src->format->kind && src->standard == dst->standard &&
-                         t->in.cbChannel == t->out.cbChannel;  // the pass-through tegra_vic_build programs below
+        const bool same = dst->format->kind == src->format->kind && src->standard == dst->standard &&
+                          t->in.cbChannel == t->out.cbChannel;  // the pass-through tegra_vic_build programs below
         if (!(t->yccIn & (same ? TEGRA_VIC_YCC_IN_COPY : TEGRA_VIC_YCC_IN_RGB)))
             return same ? "4:2:0 copy this engine has not proven" : "4:2:0 conversion this engine has not proven";
     }
@@ -526,21 +582,25 @@ static inline const char *tegra_vic_build(const TegraVICImage *src, const TegraV
     TEGRA_VIC_SET(c, TEGRA_VIC_PIPE, PIPE_DOWNSAMPLE_HORIZ, 4);  // 1.0, U9.2
     TEGRA_VIC_SET(c, TEGRA_VIC_PIPE, PIPE_DOWNSAMPLE_VERT, 4);
 
-    // Output. With the rectangles (and, apart, the output surface) given before the transpose (traits the self-test
+    // Output. With the rectangles (and, apart, the output surface) given before the transpose (traits the unit
     // proves), they are swapped for a transposed job. The surface before the transpose is all of OutputSurfaceConfig
     // (hekate's programming): its size, and the planes' memory geometry with width and height exchanged, since the
     // engine writes composed pixel (x, y) to memory row x, column y (LumaHeight + 1 elements a row, LumaWidth + 1 rows).
-    const uint32_t swap = transpose && t->preTransposeRects, swapSurface = transpose && t->preTransposeSurface;
-    const uint32_t ow = swapSurface ? dst->height : dst->width, oh = swapSurface ? dst->width : dst->height;
-    const uint32_t tx = swap ? op->dstY : op->dstX, ty = swap ? op->dstX : op->dstY;
-    const uint32_t tw = swap ? op->dstH : op->dstW, th = swap ? op->dstW : op->dstH;
-    const int alpha = !op->fill && src->format->alpha && dst->format->alpha;
+    const bool swap = transpose != 0 && t->preTransposeRects != 0;
+    const bool swapSurface = transpose != 0 && t->preTransposeSurface != 0;
+    const uint32_t ow = swapSurface ? dst->height : dst->width;
+    const uint32_t oh = swapSurface ? dst->width : dst->height;
+    const uint32_t tx = swap ? op->dstY : op->dstX;
+    const uint32_t ty = swap ? op->dstX : op->dstY;
+    const uint32_t tw = swap ? op->dstH : op->dstW;
+    const uint32_t th = swap ? op->dstW : op->dstH;
+    const bool alpha = op->fill == 0 && src->format->alpha != 0 && dst->format->alpha != 0;
     TEGRA_VIC_SET(c, TEGRA_VIC_OUTPUT, OUT_ALPHA_FILL_MODE,
                   alpha ? TEGRA_VIC_ALPHA_SOURCE_STREAM : TEGRA_VIC_ALPHA_OPAQUE);
     TEGRA_VIC_SET(c, TEGRA_VIC_OUTPUT, OUT_BACKGROUND_ALPHA, op->fill ? op->fillAlpha10 & 1023 : 1023);
     if (op->fill) {
         // A Y'CbCr destination: the background goes through the output matrix if the engine does that (a trait the
-        // self-test proves), else it is converted here, through the same arithmetic, into the output channels.
+        // unit measured), else it is converted here, through the same arithmetic, into the output channels.
         uint32_t bg[3] = {op->fill10[0] & 1023, op->fill10[1] & 1023, op->fill10[2] & 1023};
         if (dst->format->kind != TEGRA_VIC_KIND_RGB) {
             TegraVICMatrix m;
@@ -573,11 +633,13 @@ static inline const char *tegra_vic_build(const TegraVICImage *src, const TegraV
     TEGRA_VIC_SET(c, TEGRA_VIC_OUTPUT_SURFACE, SURF_BLK_KIND, TEGRA_VIC_BLK_PITCH);
     TEGRA_VIC_SET(c, TEGRA_VIC_OUTPUT_SURFACE, SURF_WIDTH, ow - 1);
     TEGRA_VIC_SET(c, TEGRA_VIC_OUTPUT_SURFACE, SURF_HEIGHT, oh - 1);
-    const uint32_t lumaRow = dst->pitch[0] / df->bpe[0], lumaRows = dst->height;
+    const uint32_t lumaRow = dst->pitch[0] / df->bpe[0];
+    const uint32_t lumaRows = dst->height;
     TEGRA_VIC_SET(c, TEGRA_VIC_OUTPUT_SURFACE, SURF_LUMA_WIDTH, (swapSurface ? lumaRows : lumaRow) - 1);
     TEGRA_VIC_SET(c, TEGRA_VIC_OUTPUT_SURFACE, SURF_LUMA_HEIGHT, (swapSurface ? lumaRow : lumaRows) - 1);
     if (df->planes > 1) {
-        const uint32_t chromaRow = dst->pitch[1] / df->bpe[1], chromaRows = dst->height / 2;
+        const uint32_t chromaRow = dst->pitch[1] / df->bpe[1];
+        const uint32_t chromaRows = dst->height / 2;
         TEGRA_VIC_SET(c, TEGRA_VIC_OUTPUT_SURFACE, SURF_CHROMA_WIDTH, (swapSurface ? chromaRows : chromaRow) - 1);
         TEGRA_VIC_SET(c, TEGRA_VIC_OUTPUT_SURFACE, SURF_CHROMA_HEIGHT, (swapSurface ? chromaRow : chromaRows) - 1);
     } else {
@@ -585,10 +647,10 @@ static inline const char *tegra_vic_build(const TegraVICImage *src, const TegraV
         TEGRA_VIC_SET(c, TEGRA_VIC_OUTPUT_SURFACE, SURF_CHROMA_HEIGHT, 16383);
     }
 
-    const int dstYcc = df->kind != TEGRA_VIC_KIND_RGB;
+    const bool dstYcc = df->kind != TEGRA_VIC_KIND_RGB;
     if (!op->fill) {
         const TegraVICFormat *sf = src->format;
-        const int srcYcc = sf->kind != TEGRA_VIC_KIND_RGB;
+        const bool srcYcc = sf->kind != TEGRA_VIC_KIND_RGB;
         const uint32_t slot = TEGRA_VIC_SLOTS;  // slot 0
         uint8_t *s = c;
         TEGRA_VIC_SET(s, slot, SLOT_ENABLE, 1);
@@ -614,7 +676,7 @@ static inline const char *tegra_vic_build(const TegraVICImage *src, const TegraV
         TEGRA_VIC_SET(s, surf, SURF_CHROMA_LOC_VERT, sf->subsampled ? tegra_vic_chroma_vert(src->chromaSite) : 0);
         // Block linear (averne's nvtegra VIC setup for NVDEC's pictures): 16Bx2 kind, the GOBs a block, the 32Bx8
         // cache, and the planes' heights as their whole blocks.
-        const int bl = src->blockLinear != 0;
+        const bool bl = src->blockLinear != 0;
         TEGRA_VIC_SET(s, surf, SURF_BLK_KIND, bl ? TEGRA_VIC_BLK_16Bx2 : TEGRA_VIC_BLK_PITCH);
         TEGRA_VIC_SET(s, surf, SURF_BLK_HEIGHT, bl ? src->blockHeightLog2 : 0);
         TEGRA_VIC_SET(s, surf, SURF_CACHE_WIDTH, bl ? TEGRA_VIC_CACHE_32Bx8 : TEGRA_VIC_CACHE_64Bx4);
@@ -628,8 +690,8 @@ static inline const char *tegra_vic_build(const TegraVICImage *src, const TegraV
         // Colour: 4:2:0 in -> RGB through the slot matrix, RGB -> 4:2:0 out through the output matrix. A 4:2:0 to
         // 4:2:0 job of the same range and standard passes the channels through untouched (the identity, measured).
         TegraVICMatrix m;
-        const int sameYcc = srcYcc && dstYcc && sf->kind == df->kind && src->standard == dst->standard &&
-                            t->in.cbChannel == t->out.cbChannel;
+        const bool sameYcc = srcYcc && dstYcc && sf->kind == df->kind && src->standard == dst->standard &&
+                             t->in.cbChannel == t->out.cbChannel;
         if (srcYcc && !sameYcc) {
             tegra_vic_matrix_ycc_to_rgb(src->standard, sf->kind == TEGRA_VIC_KIND_YCC_FULL, &t->in, &m);
             tegra_vic_matrix_put(s, slot + TEGRA_VIC_SLOT_MATRIX, &m);
@@ -648,7 +710,7 @@ static inline const char *tegra_vic_build(const TegraVICImage *src, const TegraV
         n++;                           \
     } while (0)
     TEGRA_VIC_METHOD(TEGRA_VIC_M_SET_APPLICATION_ID, 1);
-    TEGRA_VIC_METHOD(TEGRA_VIC_M_SET_CONTROL_PARAMS, (TEGRA_VIC_CONFIG_BYTES / 16) << 16 |
+    TEGRA_VIC_METHOD(TEGRA_VIC_M_SET_CONTROL_PARAMS, (TEGRA_VIC_CONFIG_BYTES / 16u) << 16 |
                                                          TEGRA_VIC_CONTROL_GPTIMER_ON |
                                                          TEGRA_VIC_CONTROL_FALCON_CONTROL);
     TEGRA_VIC_METHOD(TEGRA_VIC_M_SET_CONFIG_STRUCT_OFFSET, configAddr >> 8);
@@ -665,7 +727,7 @@ static inline const char *tegra_vic_build(const TegraVICImage *src, const TegraV
 #undef TEGRA_VIC_METHOD
     job->count = n;
     job->pixels = (uint64_t)op->dstW * op->dstH + (op->fill ? 0 : (op->srcW >> 16) * (op->srcH >> 16));
-    return 0;
+    return NULL;  // NOLINT(modernize-use-nullptr): C too (vic_host.c)
 }
 
 #ifdef __cplusplus

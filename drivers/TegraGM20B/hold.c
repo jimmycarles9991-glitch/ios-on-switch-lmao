@@ -45,7 +45,7 @@ static struct {
 void tgm_hold_init(void)
 {
 	static int once;
-	unsigned int i;
+	unsigned int i = 0;
 
 	if (once)
 		return;
@@ -58,8 +58,8 @@ void tgm_hold_init(void)
 static struct nvkm_chan *chan_get(struct nvkm_device *device, unsigned int chid,
 				  unsigned long *flags)
 {
-	struct nvkm_runl *runl;
-	struct nvkm_chan *chan;
+	struct nvkm_runl *runl = NULL;
+	struct nvkm_chan *chan = NULL;
 
 	nvkm_runl_foreach(runl, device->fifo)
 	{
@@ -86,16 +86,17 @@ static void held_end(unsigned int chid, u64 now)
 /* hold.lock held */
 static int chan_hold(struct nvkm_device *device, unsigned int chid, u64 now)
 {
-	unsigned long flags, irq;
+	unsigned long flags = 0;
+	unsigned long irq = 0;
 	struct nvkm_chan *chan = chan_get(device, chid, &flags);
 	int held = 0;
 
 	if (!chan)
 		return 0;
 	spin_lock_irqsave(&chan->lock, irq);
-	if (tgm_may_hold(TGM_LEVEL_FOREGROUND, test_bit(chid, hold.tracked),
-			 test_bit(chid, hold.needed), atomic_read(&chan->errored),
-			 test_bit(chid, hold.isolating), atomic_read(&chan->cgrp->rc),
+	if (tgm_may_hold(TGM_LEVEL_FOREGROUND, (int)test_bit(chid, hold.tracked),
+			 (int)test_bit(chid, hold.needed), atomic_read(&chan->errored),
+			 (int)test_bit(chid, hold.isolating), atomic_read(&chan->cgrp->rc),
 			 atomic_read(&chan->blocked))) {
 		atomic_inc(&chan->blocked);
 		chan->func->stop(chan);
@@ -115,8 +116,9 @@ static int chan_hold(struct nvkm_device *device, unsigned int chid, u64 now)
 /* hold.lock held. A channel errored or put into recovery since it was held stays blocked: nvkm's recovery owns it. */
 static void chan_release(struct nvkm_device *device, unsigned int chid, u64 now)
 {
-	unsigned long flags, irq;
-	struct nvkm_chan *chan;
+	unsigned long flags = 0;
+	unsigned long irq = 0;
+	struct nvkm_chan *chan = NULL;
 
 	if (!test_bit(chid, hold.held))
 		return;
@@ -125,7 +127,7 @@ static void chan_release(struct nvkm_device *device, unsigned int chid, u64 now)
 	if (!chan)
 		return;
 	spin_lock_irqsave(&chan->lock, irq);
-	if (tgm_may_release(atomic_read(&chan->errored), test_bit(chid, hold.isolating),
+	if (tgm_may_release(atomic_read(&chan->errored), (int)test_bit(chid, hold.isolating),
 			    atomic_read(&chan->cgrp->rc)) &&
 	    atomic_dec_and_test(&chan->blocked))
 		chan->func->start(chan);
@@ -135,7 +137,7 @@ static void chan_release(struct nvkm_device *device, unsigned int chid, u64 now)
 
 void tgm_hold_track(struct nvkm_device *device, unsigned int chid, int on)
 {
-	unsigned long flags;
+	unsigned long flags = 0;
 
 	if (chid >= HOLD_CHIDS)
 		return;
@@ -157,7 +159,7 @@ void tgm_hold_track(struct nvkm_device *device, unsigned int chid, int on)
 
 void tgm_hold_drop(unsigned int chid)
 {
-	unsigned long flags;
+	unsigned long flags = 0;
 
 	if (chid >= HOLD_CHIDS)
 		return;
@@ -170,7 +172,7 @@ void tgm_hold_drop(unsigned int chid)
 
 void tgm_hold_need(struct nvkm_device *device, unsigned int chid)
 {
-	unsigned long flags;
+	unsigned long flags = 0;
 
 	if (chid >= HOLD_CHIDS)
 		return;
@@ -188,7 +190,8 @@ int tgm_hold_needed(unsigned int chid)
 
 void tgm_hold_unneed(uint64_t queued)
 {
-	unsigned long flags, chid;
+	unsigned long flags = 0;
+	unsigned long chid = 0;
 
 	spin_lock_irqsave(&hold.lock, flags);
 	for_each_set_bit(chid, hold.needed, HOLD_CHIDS)
@@ -202,8 +205,11 @@ void tgm_hold_unneed(uint64_t queued)
 uint64_t tgm_hold_due(struct nvkm_device *device, const struct tgm_window *w, int resident,
 		      int *preempt)
 {
-	unsigned long flags, chid;
-	u64 next = 0, at, latency;
+	unsigned long flags = 0;
+	unsigned long chid = 0;
+	u64 next = 0;
+	u64 at = 0;
+	u64 latency = 0;
 
 	*preempt = -1;
 	spin_lock_irqsave(&hold.lock, flags);
@@ -213,7 +219,8 @@ uint64_t tgm_hold_due(struct nvkm_device *device, const struct tgm_window *w, in
 		    test_bit(chid, hold.needed))
 			continue;
 		latency = hold.latency[chid];
-		if (tgm_owed_turn(test_bit(chid, hold.held_last), w->now - hold.closed, latency)) {
+		if (tgm_owed_turn((int)test_bit(chid, hold.held_last), w->now - hold.closed,
+				  latency)) {
 			__set_bit(chid, hold.turned);
 			__clear_bit(chid, hold.held_last);
 			if (TGM_STATS) {
@@ -240,9 +247,9 @@ uint64_t tgm_hold_due(struct nvkm_device *device, const struct tgm_window *w, in
 int tgm_hold_preempt(struct nvkm_device *device, unsigned int chid)
 {
 	struct nvkm_runl *runl = NULL;
-	struct nvkm_chan *chan;
-	unsigned long flags;
-	u64 pt;
+	struct nvkm_chan *chan = NULL;
+	unsigned long flags = 0;
+	u64 pt = 0;
 
 	if (chid >= HOLD_CHIDS)
 		return 0;
@@ -279,8 +286,8 @@ busy:
 
 uint64_t tgm_hold_asked(unsigned int chid, uint64_t asked_pt)
 {
-	unsigned long flags;
-	u64 asked;
+	unsigned long flags = 0;
+	u64 asked = 0;
 
 	if (chid >= HOLD_CHIDS)
 		return 0;
@@ -296,15 +303,16 @@ uint64_t tgm_hold_asked(unsigned int chid, uint64_t asked_pt)
 
 void tgm_hold_sampled(unsigned int chid, uint64_t asked_pt, uint64_t start_pt)
 {
-	unsigned long flags;
-	u64 sample;
+	unsigned long flags = 0;
+	u64 sample = 0;
 
 	if (chid >= HOLD_CHIDS)
 		return;
 	spin_lock_irqsave(&hold.lock, flags);
 	/* only the first submission behind an ask: later ones also waited for the compositor's own work before them */
-	if (hold.asked_pt[chid] == asked_pt && start_pt > asked_pt &&
-	    (sample = tgm_deadline_pt_ns(start_pt - asked_pt))) {
+	if (hold.asked_pt[chid] == asked_pt && start_pt > asked_pt)
+		sample = tgm_deadline_pt_ns(start_pt - asked_pt);
+	if (sample) {
 		hold.latency[chid] =
 			tgm_preempt_sampled(hold.latency[chid], sample, HOLD_LATENCY_MAX);
 		hold.asked_pt[chid] = 0;
@@ -317,7 +325,7 @@ void tgm_hold_sampled(unsigned int chid, uint64_t asked_pt, uint64_t start_pt)
 void tgm_hold_check(struct nvkm_device *device, unsigned int chid)
 {
 	int resident = tgm_sched_resident(device);
-	unsigned long flags;
+	unsigned long flags = 0;
 
 	if (chid >= HOLD_CHIDS || resident == (int)chid || resident == TGM_VICTIM_SWITCHING)
 		return;
@@ -338,7 +346,8 @@ uint64_t tgm_hold_latency(unsigned int chid)
 
 void tgm_hold_release(struct nvkm_device *device, uint64_t now)
 {
-	unsigned long flags, chid;
+	unsigned long flags = 0;
+	unsigned long chid = 0;
 
 	spin_lock_irqsave(&hold.lock, flags);
 	bitmap_copy(hold.held_last, hold.held, HOLD_CHIDS);
@@ -356,7 +365,8 @@ void tgm_hold_release(struct nvkm_device *device, uint64_t now)
 
 uint64_t tgm_hold_held_ns(unsigned int chid, uint64_t now)
 {
-	u64 since, total;
+	u64 since = 0;
+	u64 total = 0;
 
 	if (chid >= HOLD_CHIDS)
 		return 0;
@@ -374,8 +384,14 @@ void tgm_hold_chan_stats(unsigned int chid, uint64_t *latency, unsigned int *tur
 
 void tgm_hold_stats(char *buf, unsigned int len)
 {
-	unsigned long flags;
-	u32 holds, preempts, busy, turned, hopeless, samples, checks;
+	unsigned long flags = 0;
+	u32 holds = 0;
+	u32 preempts = 0;
+	u32 busy = 0;
+	u32 turned = 0;
+	u32 hopeless = 0;
+	u32 samples = 0;
+	u32 checks = 0;
 
 	spin_lock_irqsave(&hold.lock, flags);
 	holds = hold.holds;

@@ -19,6 +19,7 @@ host_test(
         "switch_mmio_model_test.cpp",
         "//kits/SwitchMMIO:SwitchMMIO.h",
         "//kits/SwitchMMIO:SwitchMMIOKernel.h",
+        "//kits/SwitchMMIO:SwitchMMIOWords.h",
     ],
     defines = ["SWITCH_MMIO_HOST_MODEL=1"],
     deps = [":kernel"],

@@ -9,18 +9,27 @@
 #include <errno.h>
 #endif
 
-const uint8_t bcm_awdl_events[] = {WLC_E_ACTION_FRAME_RX,    WLC_E_AWDL_AW,
-                                   WLC_E_AWDL_ROLE,          WLC_E_AWDL_EVENT,
-                                   WLC_E_AWDL_RX_PRB_RESP,   WLC_E_AWDL_RX_ACT_FRAME,
-                                   WLC_E_AWDL_WOWL_NULLPKT,  WLC_E_AWDL_PHYCAL_STATUS,
-                                   WLC_E_AWDL_OOB_AF_STATUS, WLC_E_AWDL_SCAN_STATUS,
-                                   WLC_E_AWDL_AW_START,      WLC_E_AWDL_AW_END,
-                                   WLC_E_AWDL_AW_EXT,        WLC_E_AWDL_PEER_CACHE_CONTROL};
+const uint8_t bcm_awdl_events[] = {BCM_E_ACTION_FRAME_COMPLETE,
+                                   BCM_E_ACTION_FRAME_OFF_CHAN_COMPLETE,
+                                   WLC_E_ACTION_FRAME_RX,
+                                   WLC_E_AWDL_AW,
+                                   WLC_E_AWDL_ROLE,
+                                   WLC_E_AWDL_EVENT,
+                                   WLC_E_AWDL_RX_PRB_RESP,
+                                   WLC_E_AWDL_RX_ACT_FRAME,
+                                   WLC_E_AWDL_WOWL_NULLPKT,
+                                   WLC_E_AWDL_PHYCAL_STATUS,
+                                   WLC_E_AWDL_OOB_AF_STATUS,
+                                   WLC_E_AWDL_SCAN_STATUS,
+                                   WLC_E_AWDL_AW_START,
+                                   WLC_E_AWDL_AW_END,
+                                   WLC_E_AWDL_AW_EXT,
+                                   WLC_E_AWDL_PEER_CACHE_CONTROL};
 const unsigned bcm_awdl_event_count = sizeof bcm_awdl_events;
 
 static uint16_t be16(const uint8_t *p)
 {
-    return (uint16_t)((p[0] << 8) | p[1]);
+    return (uint16_t)(((unsigned)p[0] << 8) | p[1]);
 }
 
 static uint32_t be32(const uint8_t *p)
@@ -110,7 +119,11 @@ size_t bcm_probe_request(unsigned item, uint8_t *out, size_t size)
     // brcmf_feat_awdl_check: brcmf_fil_bsscfg_int_query(ifp 0, "interface_create", &ver = 0); for bsscfg 0
     // brcmf_create_bsscfg drops the "bsscfg:" prefix, so it is the name and a le32 0. peer_op: INFO for no address
     // (never ADD, opcode 0, from a zero-filled buffer).
-    const size_t params = item == BCM_PROBE_INTERFACE_CREATE ? 4 : item == BCM_PROBE_AWDL_PEER_OP ? 9 : 0;
+    size_t params = 0;
+    if (item == BCM_PROBE_INTERFACE_CREATE)
+        params = 4;
+    if (item == BCM_PROBE_AWDL_PEER_OP)
+        params = 9;
     if (n + params > size)
         return 0;
     memcpy(out, name, n);
@@ -121,7 +134,7 @@ size_t bcm_probe_request(unsigned item, uint8_t *out, size_t size)
 }
 
 const char *const bcm_monitor_probe_names[BCM_MONITOR_PROBE_COUNT] = {"WLC_GET_MONITOR", "monitor_promisc_level",
-                                                                      "sta_monitor"};
+                                                                      "sta_monitor", "af_flying_max", "tsf"};
 
 size_t bcm_monitor_probe_request(unsigned item, uint8_t *out, size_t size)
 {
@@ -140,12 +153,13 @@ size_t bcm_actframe_request(uint8_t *out, size_t size, const uint8_t *frame, siz
     static const char name[] = "actframe";
     if (len <= BCM_80211_MGMT_HDR_LEN || len - BCM_80211_MGMT_HDR_LEN > BCM_AF_BODY_MAX)
         return 0;
-    const uint16_t fc = (uint16_t)(frame[0] | frame[1] << 8);
+    const uint16_t fc = (uint16_t)((unsigned)frame[0] | (unsigned)frame[1] << 8U);
     if ((fc & 0x00fc) != 0x00d0)  // type management, subtype action
         return 0;
-    const size_t body = len - BCM_80211_MGMT_HDR_LEN, total = sizeof(name) + BCM_AF_PARAMS_HDR_LEN + body;
-    if (total > size)
+    const size_t body = len - BCM_80211_MGMT_HDR_LEN;
+    if (size < BCM_ACTFRAME_REQUEST_LEN)
         return 0;
+    memset(out, 0, BCM_ACTFRAME_REQUEST_LEN);
     uint8_t *p = out;
     memcpy(p, name, sizeof(name));
     p += sizeof(name);
@@ -165,7 +179,7 @@ size_t bcm_actframe_request(uint8_t *out, size_t size, const uint8_t *frame, siz
     for (unsigned i = 0; i < 4; ++i)
         *p++ = (uint8_t)(packet_id >> (8 * i));
     memcpy(p, frame + BCM_80211_MGMT_HDR_LEN, body);
-    return total;
+    return BCM_ACTFRAME_REQUEST_LEN;
 }
 
 void bcm_probe_record(struct bcm_awdl_probe *p, unsigned item, int status, const uint8_t *reply, size_t length)
@@ -187,9 +201,10 @@ int bcm_probe_has(const struct bcm_awdl_probe *p, unsigned item)
 uint32_t bcm_probe_absent(const struct bcm_awdl_probe *p)
 {
     uint32_t absent = 0;
-    for (unsigned i = 0; i < BCM_PROBE_COUNT; ++i)
+    for (unsigned i = 0; i < BCM_PROBE_COUNT; ++i) {
         if (!bcm_probe_has(p, i))
             absent |= 1u << i;
+    }
     return absent;
 }
 
@@ -206,26 +221,33 @@ enum bcm_awdl_api bcm_awdl_api_of(const struct bcm_awdl_probe *p)
 
 const char *bcm_awdl_api_name(enum bcm_awdl_api api)
 {
-    return api == BCM_AWDL_API_IFC_V3 ? "interface_create v3" : api == BCM_AWDL_API_AWDL_IF ? "awdl_if (7.x)" : "none";
+    if (api == BCM_AWDL_API_IFC_V3)
+        return "interface_create v3";
+    return api == BCM_AWDL_API_AWDL_IF ? "awdl_if (7.x)" : "none";
 }
 
 struct awdl_radio_verdict awdl_radio_verdict_of(int query, int abi_ok, int has_native, int can_monitor, int can_inject,
-                                                const struct bcm_awdl_probe *probe)
+                                                int can_tx_action, int trial, const struct bcm_awdl_probe *probe)
 {
-    struct awdl_radio_verdict v = {AWDL_RADIO_OFF, AWDL_OFF_NOT, bcm_awdl_api_of(probe)};
-    const int soft = can_monitor && can_inject;
-    if (query == -EAGAIN)
+    struct awdl_radio_verdict v = {AWDL_RADIO_OFF, AWDL_OFF_NOT, bcm_awdl_api_of(probe), 0};
+    const int soft = can_monitor && can_inject && can_tx_action;
+    if (query == -EAGAIN) {
         v.mode = AWDL_RADIO_UNDECIDED;
-    else if (query < 0)
+    } else if (query < 0) {
         v.off = AWDL_OFF_NO_RADIO;
-    else if (!abi_ok)
+    } else if (!abi_ok) {
         v.off = AWDL_OFF_ABI;
-    else if (!has_native && !soft)
+    } else if (!has_native && !soft) {
         v.off = AWDL_OFF_NO_BACKEND;
-    else if (has_native && v.api == BCM_AWDL_API_NONE && !soft)
+    } else if (has_native && v.api == BCM_AWDL_API_NONE && !soft) {
         v.off = AWDL_OFF_NO_API;
-    else
+    } else {
         v.mode = has_native && v.api != BCM_AWDL_API_NONE ? AWDL_RADIO_NATIVE : AWDL_RADIO_SOFT;
+    }
+    if (trial && (v.off == AWDL_OFF_NO_BACKEND || v.off == AWDL_OFF_NO_API)) {
+        v.mode = AWDL_RADIO_SOFT;
+        v.trial = 1;
+    }
     return v;
 }
 
@@ -233,12 +255,12 @@ struct awdl_radio_verdict awdl_radio_verdict_of(int query, int abi_ok, int has_n
 size_t bcm_ifc_v3_awdl(uint8_t *out, const uint8_t mac[6])
 {
     memset(out, 0, BCM_IFC_V3_LEN);
-    awdl_put16(out, 3);                       // ver
-    awdl_put16(out + 2, BCM_IFC_V3_LEN);      // len
-    awdl_put16(out + 4, BCM_IFC_V3_LEN);      // fixed_len
-    out[6] = 2;                               // iftype WL_INTERFACE_CREATE_AWDL
-    out[7] = 0;                               // wlc_index
-    awdl_put32(out + 8, 0x02 | 0x08 | 0x10);  // MAC_USE | IF_INDEX_USE | BSSID_USE
+    awdl_put16(out, 3);                          // ver
+    awdl_put16(out + 2, BCM_IFC_V3_LEN);         // len
+    awdl_put16(out + 4, BCM_IFC_V3_LEN);         // fixed_len
+    out[6] = 2;                                  // iftype WL_INTERFACE_CREATE_AWDL
+    out[7] = 0;                                  // wlc_index
+    awdl_put32(out + 8, 0x02u | 0x08u | 0x10u);  // MAC_USE | IF_INDEX_USE | BSSID_USE
     memcpy(out + 12, mac, 6);
     memcpy(out + 18, awdl_bssid, 6);
     out[24] = BCM_AWDL_IFIDX;  // if_index, then pad[3]
@@ -358,10 +380,11 @@ size_t bcm_awdl_payload(uint8_t *out, size_t size, int u16_length, const uint8_t
     const size_t head = u16_length ? 2 : 4;
     if (head + length > size || length > 0xffff)
         return 0;
-    if (u16_length)
+    if (u16_length) {
         awdl_put16(out, (uint16_t)length);
-    else
+    } else {
         awdl_put32(out, (uint32_t)length);
+    }
     if (length)
         memcpy(out + head, tlvs, length);
     return head + length;
@@ -386,10 +409,11 @@ size_t bcm_awdl_oob_auto(uint8_t *out, size_t size, const uint8_t *tlvs, size_t 
 
 size_t bcm_awdl_psf_dwell(uint8_t *out, int on)
 {
-    if (on)
+    if (on) {
         memcpy(out, bcm_trace_psf_dwell, BCM_AWDL_PSF_DWELL_LEN);
-    else
+    } else {
         memset(out, 0, BCM_AWDL_PSF_DWELL_LEN);
+    }
     return BCM_AWDL_PSF_DWELL_LEN;
 }
 
@@ -417,8 +441,12 @@ size_t bcm_slot_bss(uint8_t *out, uint16_t slots44)
     memcpy(out, bcm_trace_slot_bss, BCM_AWDL_SLOT_BSS_LEN);
     out[0x0c] = 9;
     for (unsigned i = 0; i < 16; ++i) {
-        const uint16_t cs = i == 8 ? 0x1006 : (slots44 >> i) & 1 ? 0xe22a : 0;  // as traced: 6/20, 44 in 36-48/80
-        uint8_t *s0 = out + 0x4c + 2 * i, *s1 = out + 0x78 + 2 * i, *adv = out + 0x1e + 2 * i;
+        uint16_t cs = (((unsigned)slots44 >> i) & 1u) ? 0xe22a : 0;  // as traced: 6/20, 44 in 36-48/80
+        if (i == 8)
+            cs = 0x1006;
+        uint8_t *s0 = out + 0x4c + (size_t)2 * i;
+        uint8_t *s1 = out + 0x78 + (size_t)2 * i;
+        uint8_t *adv = out + 0x1e + (size_t)2 * i;
         s0[0] = adv[0] = (uint8_t)(cs >> 8);
         s0[1] = adv[1] = (uint8_t)cs;
         s1[0] = s1[1] = 0;
@@ -433,17 +461,27 @@ uint16_t bcm_chanspec_of(struct awdl_chan c)
         return 0;
     if (p <= 14)
         return (uint16_t)(0x1000 | p);  // 2.4 GHz, 20 MHz
-    if (c.opclass == 0x80 && c.number >= 6 && p >= c.number - 6) {
-        const unsigned sb = (unsigned)(p - (c.number - 6)) / 4;  // which 20 MHz of the block is primary
-        return (uint16_t)(0xc000 | 0x2000 | (sb << 8) | c.number);
+    const uint8_t centre = awdl_chan_centre80(p);
+    if ((c.opclass == 0x80 || c.opclass == 0x81) && centre) {
+        const unsigned sb = (unsigned)(p - (centre - 6)) / 4;  // which 20 MHz of the block is primary
+        return (uint16_t)(0xc000u | 0x2000u | (sb << 8) | centre);
     }
-    return (uint16_t)(0xc000 | 0x1000 | p);  // 5 GHz, 20 MHz
+    return (uint16_t)(0xc000u | 0x1000u | p);  // 5 GHz, 20 MHz
+}
+
+uint16_t bcm_chanspec20(uint8_t channel, int d11n)
+{
+    if (!channel)
+        return 0;
+    if (d11n)  // brcmu_d11n_encchspec: band 2G 0x2000 / 5G 0x1000, BW_20 0x0800, no sideband 0x0300
+        return (uint16_t)((channel <= 14 ? 0x2000u : 0x1000u) | 0x0800u | 0x0300u | channel);
+    return (uint16_t)((channel <= 14 ? 0x0000u : 0xc000u) | 0x1000u | channel);  // d11ac: band, BW_20
 }
 
 uint8_t bcm_chanspec_primary(uint16_t chanspec)
 {
     const uint8_t ch = (uint8_t)(chanspec & 0xff);
-    const unsigned sb = (chanspec >> 8) & 7;
+    const unsigned sb = ((unsigned)chanspec >> 8) & 7;
     switch (chanspec & 0x3800) {
     case 0x2000:
         return (uint8_t)(ch - 6 + 4 * sb);  // 80 MHz
@@ -463,7 +501,8 @@ size_t bcm_awdl_encap(const uint8_t *eth, size_t length, uint16_t seq, uint8_t *
         return 0;
     const size_t n = length + BCM_AWDL_DATA_HDR_LEN;
     memmove(out + 14 + BCM_AWDL_DATA_HDR_LEN, eth + 14, length - 14);  // payload first: out may overlap eth's tail
-    const uint8_t type0 = eth[12], type1 = eth[13];
+    const uint8_t type0 = eth[12];
+    const uint8_t type1 = eth[13];
     memmove(out, eth, 12);
     out[12] = (uint8_t)((n - 14) >> 8);  // 802.3 length
     out[13] = (uint8_t)(n - 14);
@@ -483,8 +522,9 @@ size_t bcm_awdl_decap(const uint8_t *f, size_t length, uint8_t *out, size_t size
     if (n > size)
         return 0;
     if (seq)
-        *seq = (uint16_t)(f[24] | (f[25] << 8));
-    const uint8_t type0 = f[28], type1 = f[29];
+        *seq = (uint16_t)(f[24] | ((unsigned)f[25] << 8));
+    const uint8_t type0 = f[28];
+    const uint8_t type1 = f[29];
     memmove(out + 14, f + 30, length - 30);
     memmove(out, f, 12);
     out[12] = type0;
@@ -520,7 +560,11 @@ int bcm_awdl_rx_af(const uint8_t *d, size_t len, struct bcm_rx_frame *meta, cons
     memset(meta, 0, sizeof *meta);
     if (len >= 2) {
         const uint16_t version = be16(d);
-        const size_t hdr = version == 1 ? BCM_RX_MGMT_V1_LEN : version == 2 ? BCM_RX_MGMT_V2_LEN : 0;
+        size_t hdr = 0;
+        if (version == 1)
+            hdr = BCM_RX_MGMT_V1_LEN;
+        if (version == 2)
+            hdr = BCM_RX_MGMT_V2_LEN;
         if (hdr && len > hdr) {
             const uint8_t *b = d + hdr;
             size_t n = len - hdr;

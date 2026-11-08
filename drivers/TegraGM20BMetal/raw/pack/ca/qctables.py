@@ -9,14 +9,17 @@ reads them. Addresses are per build (most of the tables have no symbol): a new I
 
 usage: qctables.py <QuartzCore Mach-O, extracted from the dyld shared cache with its slide applied> <build> <out.json>
                    <QuartzCore.framework/default.metallib>
-       (ipsw dyld extract <dyld_shared_cache_arm64> QuartzCore --slide -o <dir>)
+       (ipsw dyld extract <dyld_shared_cache_arm64[e]> QuartzCore --slide -o <dir>)
 The metallib's SHA-256 goes into the tables: the pack generator uses them only with that library (rawpack.py).
+iOS 27's QuartzCore lays its tables out anew (qctables27.py): its tables carry "layout": 27.
 """
 
 import hashlib
 import json
 import struct
 import sys
+
+import qctables27
 
 ADDRESSES = {
     '21H461': {
@@ -105,10 +108,23 @@ def name_table(img: Image, va: int, n: int) -> list[dict]:
 
 def main() -> None:
     path, build, out, metallib = sys.argv[1:5]
-    a = ADDRESSES[build]
     img = Image(path)
     with open(metallib, 'rb') as f:
-        digest = hashlib.sha256(f.read()).hexdigest()
+        library = f.read()
+    digest = hashlib.sha256(library).hexdigest()
+    if build in qctables27.ADDRESSES:
+        t = {'build': build, 'metallib_sha256': digest, **qctables27.tables(img, qctables27.ADDRESSES[build])}
+        t['functions'] = qctables27.functions(library)
+    else:
+        t = tables(img, build, digest)
+    with open(out, 'w') as f:
+        json.dump(t, f, indent=2, sort_keys=True)  # dprint's JSON layout (//:format_test)
+        f.write('\n')
+
+
+def tables(img: Image, build: str, digest: str) -> dict:
+    """Give the tables of a QuartzCore laid out as 21H461's."""
+    a = ADDRESSES[build]
     t = {'build': build, 'metallib_sha256': digest, 'decoders': {k: img.nsdict(v) for k, v in a['decoders'].items()}}
     t['name_tables'] = {k: name_table(img, va, n) for k, (va, n) in a['name_tables'].items()}
     va, n, w = a['texture_function_info']
@@ -141,9 +157,7 @@ def main() -> None:
         has_min, has_max = img.read(e + 8, 1)[0], img.read(e + 24, 1)[0]
         fmin, fmax = struct.unpack('<Q', img.read(e + 16, 8))[0], struct.unpack('<Q', img.read(e + 32, 8))[0]
         t['manifest'].append([img.cstr(img.ptr(e)), fmin if has_min else 0, fmax if has_max else 0])
-    with open(out, 'w') as f:
-        json.dump(t, f, indent=2, sort_keys=True)  # dprint's JSON layout (//:format_test)
-        f.write('\n')
+    return t
 
 
 if __name__ == '__main__':

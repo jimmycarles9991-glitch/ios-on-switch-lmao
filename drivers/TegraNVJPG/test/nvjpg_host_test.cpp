@@ -1,4 +1,4 @@
-// nvjpg_host.c's checks (the libjpeg-turbo matrix, targets, the boot self-test's vectors; BUILD.bazel builds it with
+// nvjpg_host.c's checks (the libjpeg-turbo matrix and targets; BUILD.bazel builds it with
 // libjpeg-turbo): it prints "PASS nvjpg (...)" first and returns 0, or prints each failure ("FAIL ...") and returns 1.
 #include <gtest/gtest.h>
 
@@ -6,7 +6,7 @@
 
 extern "C" int nvjpg_host_main(int argc, char **argv);
 
-TEST(TegraNVJPG, ParserTargetsAndVectors)
+TEST(TegraNVJPG, ParserAndTargets)
 {
     char name[] = "nvjpg_host";
     char *argv[] = {name, nullptr};

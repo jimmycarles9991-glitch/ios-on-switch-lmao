@@ -14,6 +14,7 @@ bazel run //:image --config=ios27               # IOS27.SII.* beside it
 bazel run //:image_dry_run                      # the plan, without the large IPSW downloads
 bazel run //:image_to_card -- disk4             # what copying would write and remove
 bazel run //:image_to_card -- disk4 --yes       # copy, then eject
+bazel run //:image_to_card -- disk4 --direct --yes  # one image straight onto the iOS partition, no Switch step
 bazel run //:image_boot                         # new boot files into an image, after a kernel-only change
 ```
 
@@ -26,14 +27,28 @@ fails unless macOS attaches it and `fsck_apfs` passes it.
 Each stage is kept with a key of what it was made from (`tools/install/keys.py`): compose, populate, pack, and the
 head of `.001` (the manifest and boot files). An unchanged rerun computes the keys and stops. New boot files rewrite
 only the head, and a changed overlay repopulates a clone of the kept container, `composed.img` in
-`~/Library/Caches/switch-ios/image` (`image-<build>` for other builds). Populating sets the owners of iOS's files, which
-needs root, so a run that populates asks for your password once. `//:image_to_card` writes only what the card lacks,
-judged by the manifests' chunk hashes, so a kernel-only change rewrites the head of `.001` and nothing else.
+`~/Library/Caches/switch-ios/image` (`image-<build>` for other builds). Nothing runs as root: populate writes iOS's
+files as you and sets their owners in the detached image. For iOS 27, translating each volume and rebuilding the two
+cryptexes are Bazel actions, cached like any other, so a rerun after a later failure translates nothing. They take
+about 13 GB for iOS 27 (the System cryptex's delta and image alone 11 GB).
+Each stage measures what it will write from its inputs and refuses to start unless that much is free with 2 GiB to
+spare. A run first detaches whatever an earlier run left attached and deletes its partial files. Files left by older
+runs under sudo belong to root, so it prints the `sudo rm -rf` that removes them.
+
+`//:image_to_card` writes only what the card lacks, judged by the manifests' chunk hashes, so a kernel-only change
+rewrites the head of `.001` and nothing else. Without `--yes` it shows the plan, a new `install-ios.bin` included, and
+writes nothing.
+
+`--direct` does the installer's work on the Mac instead (`tools/install/direct.py`): it writes one image onto the
+iOS partition at the card's raw speed, without copying it onto the FAT first, fits it with the installer's own
+`apfs_tool`, and runs `fsck_apfs`. It asks for your password because writing a raw disk needs root. The card stays in
+the reader the whole time: macOS lets go of the old iOS container when the partition is retyped, and attaches the new
+one at the end. Add `--image IOS27` when `out/sd` holds both images.
 
 Every install writes a new container with a new Data volume, so nothing from an earlier install survives. The first
 boot takes a few minutes longer while iOS finishes setting itself up behind its own progress bar under the Apple logo.
 
-The card's `switchroot/ios/bl31.bin` and `bl33.bin` are what hekate starts. Only `install-ios.bin` and
+The card's `switchroot/ios/bl31.bin` and `bl33.bin` are what hekate starts. Only `install-ios.bin`, `--direct` and
 `bazel run //deploy:sd` write them, and deploy refuses a card whose iOS is the other version. Copying an image never
 changes what boots.
 

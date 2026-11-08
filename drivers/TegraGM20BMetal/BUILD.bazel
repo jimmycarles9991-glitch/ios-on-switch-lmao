@@ -29,23 +29,33 @@ filegroup(
     ]),
 )
 
+# The raw facade's Objective-C++ units (RawMetal.mm and the RawMetal*.mm beside it, RawAlias.mm, RawComplete.mm, RawProbe.mm)
+filegroup(
+    name = "raw_facade_srcs",
+    srcs = glob(["raw/runtime/Raw*.mm"]),
+)
+
+# What the runtime's capture of a state compiles beside it: pack/nvdec (the generator's decoder) and Mesa's MME simulator
+filegroup(
+    name = "raw_capture_headers",
+    srcs = glob([
+        "raw/pack/*.h",
+        "raw/pack/mesa/**/*.h",
+    ]) + ["raw/fx/test/twod_sim.h"],
+)
+
 # Not a hand run's leftovers: a .pyc of the modules (the host Python's) in a checkout would change the raw pack's action key
 # there and nowhere else, so that checkout's pack never hits the disk cache another checkout filled, and the other way round.
 filegroup(
     name = "raw_pack_generator",
     srcs = glob(
-        [
-            "raw/pack/**",
-            # the mock's capture mode (pack/cap.cpp) and the methods the raw path owns (pack/mkpack.py)
-            "raw/runtime/raw_capture.*",
-            "raw/runtime/raw_pack.*",
-        ],
+        ["raw/pack/**"],
         exclude = [
             "**/__pycache__/**",
             "**/*.pyc",
             "**/.DS_Store",
         ],
-    ) + ["raw/runtime/raw_owned.h"],
+    ) + ["raw/runtime/raw_owned.h"],  # the methods the raw path owns (pack/mkpack.py reads them)
 )
 
 filegroup(
@@ -62,6 +72,7 @@ ios_binary(
     srcs = [
         "raw/fx/fx_mip.cpp",
         "raw/runtime/raw_alias.cpp",
+        "raw/runtime/raw_comp.cpp",
         "raw/runtime/raw_gpu.cpp",
         "raw/runtime/raw_kernel.cpp",
         "raw/runtime/raw_pack.cpp",
@@ -101,7 +112,10 @@ py_library(
         ],
         exclude = ["raw/pack/ca/*_test.py"],
     ),
-    data = ["raw/pack/ca/qc-21H461.json"],
+    data = [
+        "raw/pack/ca/qc-21H461.json",
+        "raw/pack/ca/qc-24B119.json",
+    ],
 )
 
 # raw/pack/ca/caspec.py makes every Core Animation state of the corpus from its name alone (QuartzCore's own decoding).
@@ -113,6 +127,16 @@ py_test(
         "raw/pack/ca/qc-21H461.json",
     ],
     main = "raw/pack/ca/caspec_test.py",
+    deps = [":raw_pack"],
+)
+
+# The same for iOS 27's QuartzCore (raw/pack/ca/caspec27.py): every state of the raw pack's tiers against the functions
+# and constants its own library declares (no iOS 27 journal exists yet).
+py_test(
+    name = "caspec27_test",
+    srcs = ["raw/pack/ca/caspec27_test.py"],
+    data = ["raw/pack/ca/qc-24B119.json"],
+    main = "raw/pack/ca/caspec27_test.py",
     deps = [":raw_pack"],
 )
 
@@ -138,6 +162,17 @@ py_binary(
     srcs = ["raw/test/ordercheck.py"],
     main = "raw/test/ordercheck.py",
 )
+
+# The raw path's shader-data and target checks against the pack (they read it with the pack generator's modules).
+[py_binary(
+    name = check,
+    srcs = ["raw/test/%s.py" % check],
+    main = "raw/test/%s.py" % check,
+    deps = [":raw_pack"],
+) for check in [
+    "datacheck",
+    "targetcheck",
+]]
 
 py_binary(
     name = "check_dyld_cache_imports",

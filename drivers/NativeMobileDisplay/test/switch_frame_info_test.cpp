@@ -1,5 +1,6 @@
-// Host test of drivers/NativeMobileDisplay/SwitchFrameInfo.h: the keys selector 74 answers, the entries a present
-// queues, decoded the way 21H461's IOMobileFramebuffer.framework decodes them, and the client and pending-swap tables.
+// Host test of drivers/NativeMobileDisplay/SwitchFrameInfo.h, built once per IPSW kind: the keys selector 74 answers,
+// the entries a present queues, decoded the way IOMobileFramebuffer.framework decodes them (21H461 and 24B119 alike,
+// PackAndDispatchFrameInfoNotifictionData), and the client and pending-swap tables.
 #include <gtest/gtest.h>
 
 #include <cstring>
@@ -44,6 +45,19 @@ std::map<std::string, uint64_t> decode(const uint64_t *entry, unsigned words, ui
     return out;
 }
 
+// The kind's iPad's keys that DC A answers, in its pipe's order (the key tables of 21H461's UPPipe_H9G, 14 keys, and
+// 24B119's UPPipe_H11P, the first 11 of those).
+const std::vector<std::string> &kindKeys()
+{
+#if SWITCH_IPSW_DEVICE_J181AP
+    static const std::vector<std::string> keys = {"Presentation_time", "Presentation_delta", "Requested_presentation"};
+#else
+    static const std::vector<std::string> keys = {"Presentation_time", "Presentation_delta", "Requested_presentation",
+                                                  "Thermal_throttle"};
+#endif
+    return keys;
+}
+
 uint32_t maskOf(std::initializer_list<const char *> names)
 {
     const std::vector<std::string> keys = keyList();
@@ -68,14 +82,14 @@ TEST(SwitchFrameInfo, SupportedAnswersEveryKeyAndTheSharedQueue)
     EXPECT_STREQ(key, "Presentation_time");
     for (size_t i = strlen(key); i < kKeyBytes; ++i)
         EXPECT_EQ(key[i], 0);
-    EXPECT_EQ(keyList(), (std::vector<std::string>{"Presentation_time", "Presentation_delta", "Requested_presentation",
-                                                   "Thermal_throttle"}));
+    EXPECT_EQ(keyList(), kindKeys());
     count = 7;
     EXPECT_EQ(supported(kKeys, &count, key, &flags), kBadArgument);
     EXPECT_EQ(count, 7u);
 }
 
-// Core Animation's AccelServer enables its eight keys one at a time; the ones J120 has that DC A can answer come back.
+// Core Animation's AccelServer enables its eight keys one at a time; the ones the kind's iPad has that DC A can answer
+// come back.
 TEST(SwitchFrameInfo, CoreAnimationsKeysThatExist)
 {
     const std::vector<std::string> keys = keyList();
@@ -85,7 +99,7 @@ TEST(SwitchFrameInfo, CoreAnimationsKeysThatExist)
     for (const char *name : ca)
         for (const std::string &k : keys)
             found += k == name;
-    EXPECT_EQ(found, 4u);
+    EXPECT_EQ(found, kindKeys().size());
 }
 
 TEST(SwitchFrameInfo, EntryDecodesToTheFrame)
@@ -101,6 +115,7 @@ TEST(SwitchFrameInfo, EntryDecodesToTheFrame)
     EXPECT_EQ(d["Presentation_time"], 1000000u);
     EXPECT_EQ(d["Presentation_delta"], 1000000u);  // from 0, as J120's pipe keeps it
     EXPECT_EQ(d["Requested_presentation"], 999500u);
+    EXPECT_EQ(d.count("Thermal_throttle"), kKeys > kThermalThrottle ? 1u : 0u);
     EXPECT_EQ(d["Thermal_throttle"], 0u);
     EXPECT_EQ(last, 1000000u);
 

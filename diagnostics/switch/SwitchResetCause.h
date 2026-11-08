@@ -11,6 +11,10 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 enum switch_reset_cause {
     SWITCH_RESET_POWER_ON = 0,
     SWITCH_RESET_WATCHDOG = 1,
@@ -61,7 +65,12 @@ static inline int switch_reset_files_report(enum switch_reset_cause cause, int p
     if (panic_saved) {
         return 0;
     }
-    return thermal != SWITCH_THERMAL_NONE || cause == SWITCH_RESET_WATCHDOG || cause == SWITCH_RESET_THERMTRIP;
+    return (thermal != SWITCH_THERMAL_NONE || cause == SWITCH_RESET_WATCHDOG || cause == SWITCH_RESET_THERMTRIP) ? 1
+                                                                                                                 : 0;
 }
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif

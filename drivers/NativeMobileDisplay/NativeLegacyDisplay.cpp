@@ -21,6 +21,11 @@
 #include <libkern/c++/OSData.h>
 #include <pexpert/pexpert.h>
 #include "../ArmGIC/SwitchInterrupts.h"
+#include "../../kits/SwitchDMA/SwitchDcache.h"
+#include "../../kits/SwitchDMA/SwitchDMABuffer.h"
+#include "../../kits/SwitchDT/SwitchDTProperty.h"
+#include "../../kits/SwitchCAR/SwitchCAR.h"
+#include "../../kits/SwitchMMIO/SwitchMMIOWords.h"
 #include "../../kits/SwitchSysctl/SwitchSysctl.h"
 #include "../TegraDisplayFlip/TegraScanoutCopy.h"
 #include "../TegraDisplayFlip/TegraScanoutRing.h"
@@ -63,6 +68,7 @@ extern "C" IOMemoryDescriptor *native_legacy_surface_descriptor(OSObject *);
 extern "C" int tegra_gm20b_sync_for_cpu(const void *, uint64_t, uint64_t) __attribute__((weak));
 // XNU ipc_kmsg.c (osfmk/ipc/switch_render_senders.h): the mach messages the render server receives, by sender
 extern "C" void switch_render_server_watch(task_t);
+// NOLINTNEXTLINE(readability-redundant-declaration): not every kernel configuration's headers declare it
 extern "C" void proc_selfname(char *, int);
 extern "C" size_t switch_render_senders_line(char *, size_t, uint64_t, unsigned);
 // XNU (kernel/switch/diag/frames.c): the current run of touches, the clients' commit cadence and touch delivery, and
@@ -171,9 +177,10 @@ static void noteSurface(OSObject *surface, IOMemoryDescriptor *memory)
 {
     static OSObject *seen[4];
     native_legacy_surfaces[1] = native_legacy_surfaces[1] + 1;
-    for (OSObject *known : seen)
+    for (const OSObject *known : seen) {
         if (known == surface)
             return;
+    }
     const unsigned k = native_legacy_surfaces[0];
     native_legacy_surfaces[0] = k + 1;
     if (k >= 4)
@@ -191,12 +198,13 @@ static void noteSurface(OSObject *surface, IOMemoryDescriptor *memory)
             largest = length;
     }
     memory->complete();
-    native_legacy_surfaces[2 + 3 * k] = uint32_t(memory->getLength());
+    native_legacy_surfaces[2 + 3 * k] = static_cast<uint32_t>(memory->getLength());
     native_legacy_surfaces[3 + 3 * k] = segments;
-    native_legacy_surfaces[4 + 3 * k] = uint32_t(largest >> 10);
+    native_legacy_surfaces[4 + 3 * k] = static_cast<uint32_t>(largest >> 10);
     // Whether a client surface could ever be scanned in place (one physically contiguous run; the DC has no SMMU on this boot chain).
     IOLog("SwitchDisplay: client surface %u: %llu bytes in %u physical segments, largest %llu KiB\n", k,
-          (unsigned long long)memory->getLength(), segments, (unsigned long long)(largest >> 10));
+          static_cast<unsigned long long>(memory->getLength()), segments,
+          static_cast<unsigned long long>(largest >> 10));
 }
 
 extern "C" void native_legacy_gpu_fallback_observed(int status);
@@ -209,9 +217,9 @@ volatile uint64_t native_legacy_early_retires, native_legacy_early_failures;
 // that subclass is not part of this port: without it the render server never saw a vsync. Display controller A's vblank interrupt drives
 // it here while at least one client has vsync notifications enabled. An interrupt that cannot be had or stays silent panics. Events: 0 armed, 1 sent, 2 idle (no client), 3 late (timer deadline passed, cadence
 // restarted), 4 timer started, 5 refresh properties reported at that rate.
-extern "C" void native_legacy_vsync_notify(void *display, uint64_t timestamp, uint64_t continuousTime,
-                                           uint64_t interval);
+
 extern "C" void native_legacy_vsync_observed(unsigned event, unsigned hz);
+// NOLINTNEXTLINE(readability-redundant-declaration): not every kernel configuration's headers declare it
 extern "C" uint64_t mach_continuous_time(void);
 
 // SwitchBrightness (TegraPanel.cpp) plays its DSI commands at DC A frame ends, from the vblank interrupt's filter below (primary interrupt
@@ -274,10 +282,10 @@ extern "C" __attribute__((weak)) void tegra_display_power_up(void)
 // Display controller A (hekate bdk/display/di.h, Linux drivers/gpu/drm/tegra/dc.h): 32-bit registers, word indices. INT_STATUS is write-1-
 // to-clear, INT_ENABLE lets a bit latch, INT_MASK routes a latched bit to the level-high line, GIC_SPI 73 = INTID 105 (mainline
 // tegra210.dtsi dc@54200000, hekate irq.h IRQ_DISPLAY). DC A's clock (CAR DISP1, L27) must run before its registers are read.
-static constexpr uint64_t kDisplayAPA = 0x54200000, kCarPA = 0x60006000;
+static constexpr uint64_t kDisplayAPA = 0x54200000;
 static constexpr uint32_t kDcIntStatus = 0x037, kDcIntMask = 0x038, kDcIntEnable = 0x039, kFrameEndInt = 1u << 1,
                           kVblankInt = 1u << 2;
-static constexpr uint32_t kDisplayAInterrupt = 105, kCarResetL = 0x004, kCarClockL = 0x010, kCarDisp1 = 1u << 27;
+static constexpr uint32_t kDisplayAInterrupt = 105, kCarDisp1Id = 27;  // Linux TEGRA210_CLK_DISP1
 // r17-touch: V_PULSE2, a raster-line interrupt, for the compositor's vsync phase (VsyncPhase.h). L4T dc_reg.h and
 // tegra_dc_init_vpulse2_int (T21x): INT bit 5; DISP_SIGNAL_OPTIONS0 V_PULSE_2_ENABLE bit 19; V_PULSE2_CONTROL H position 0,
 // LAST(1) (bit 8); V_PULSE2_POSITION_A START line 12:0 and END line 28:16, lines counted as L4T counts them (its V_BLANK line is
@@ -337,8 +345,9 @@ static constexpr uint32_t kWinBActReq = 1u << 2, kWinBUpdate = 1u << 10, kWinBAc
 // H_DIRECTION starts (L4T window.c: (x + w) * Bpp - 1 = 0x13FF, the value hekate quotes for Horizon's own block scanout).
 // Portrait-native (SwitchPortrait.h): the same block layout scanned row by row, unrotated, as hekate's pitch window
 // scans; kBlockScan is what the block layout adds to hekate's WIN_OPTIONS.
-static constexpr uint32_t kBlockSurfaceKind = 2u | (4u << 4), kBlockLineStride = (uint32_t)kNativeBlockStride,
-                          kBlockHOffset = SWITCH_PORTRAIT_NATIVE ? 0 : (uint32_t)kNativeBlockStride - 1,
+static constexpr uint32_t kBlockSurfaceKind = 2u | (4u << 4),
+                          kBlockLineStride = static_cast<uint32_t>(kNativeBlockStride),
+                          kBlockHOffset = SWITCH_PORTRAIT_NATIVE ? 0 : static_cast<uint32_t>(kNativeBlockStride) - 1,
                           kBlockScan = SWITCH_PORTRAIT_NATIVE ? 0 : kScanColumn | kHDirection;
 static constexpr const char *kBlockScanName =
     SWITCH_PORTRAIT_NATIVE ? "row scan of the portrait" : "column scan of the landscape";
@@ -350,17 +359,18 @@ static constexpr uint32_t kPitchSize = (1280u << 16) | 720u, kPitchPrescaled = (
 // after every 2880-byte row. kTapeLines positions 64 bytes apart, then the console redraws at position 0, whose window no window
 // within kTapeGap lines of the end reaches (two window extents, plus slack for a multi-line scroll).
 static constexpr uint32_t kTapeLineBytes = 64, kTapeGap = 45, kTapeStride = 2880 + kTapeGap * kTapeLineBytes;
-static constexpr uint64_t kTapeWindow = 1279ull * kTapeStride + 2880;
-static constexpr uint32_t kTapeLines = (uint32_t)((kTapeWindow + kTapeLineBytes - 1) / kTapeLineBytes) + 2 * kTapeGap;
+static constexpr uint64_t kTapeWindow = 1279ULL * kTapeStride + 2880;
+static constexpr uint32_t kTapeLines =
+    static_cast<uint32_t>((kTapeWindow + kTapeLineBytes - 1) / kTapeLineBytes) + 2 * kTapeGap;
 static constexpr uint64_t kTapeBytes =
-    ((uint64_t)(kTapeLines - 1) * kTapeLineBytes + kTapeWindow + 0x3fff) & ~0x3fffull;
+    (static_cast<uint64_t>(kTapeLines - 1) * kTapeLineBytes + kTapeWindow + 0x3fff) & ~0x3fffULL;
 static constexpr unsigned kTapeWaitMS = 100;  // the console's wait for a frame end: six frames
 
 // 32-bit BGRA, plain ('BGRA') or in Apple's lossless-compressed spelling ('&BGA', one plane): the GPU that renders the surface here writes plain rows
 // either way (no compression is implemented), so the bytes are the same.
 static inline bool nativeBgra(uint32_t format, uint32_t planes)
 {
-    return (format == 0x42475241 && !planes) || (format == 0x26424741 && planes <= 1);
+    return (format == 0x42475241 && (planes == 0u)) || (format == 0x26424741 && planes <= 1);
 }
 
 // Panics draw into the boot framebuffer as the pitch console does (rotation 3: SwitchPanicSave.c's panic screen once the
@@ -379,7 +389,7 @@ extern "C" void (*volatile switch_display_panic_hook)(const char *message);
 
 namespace {
 struct PanicRestore {
-    volatile uint32_t *dc;
+    SwitchMMIOWords dc;
     volatile uint64_t *pixels;
     uint64_t bytes;
     uint32_t options, stride, kind, hOffset, start;  // start: the boot framebuffer, where the panic console draws
@@ -405,9 +415,9 @@ void restorePitchOnPanic(const char *message)
         if (first) {
             volatile uint64_t *pixels = gPanicRestore.pixels;
             for (uint64_t i = 0; i < gPanicRestore.bytes / 8; ++i)
-                pixels[i] = 0xff000000ff000000ull;
+                pixels[i] = 0xff000000ff000000ULL;
         }
-        volatile uint32_t *dc = gPanicRestore.dc;
+        const SwitchMMIOWords dc = gPanicRestore.dc;
         dc[kDcStateAccess] = dc[kDcStateAccess] & ~(kReadMuxActive | kWriteMuxActive);
         dc[kDcWindowHeader] = kWindowASelect;
         dc[kWinLineStride] = gPanicRestore.stride;
@@ -423,12 +433,13 @@ void restorePitchOnPanic(const char *message)
         }
 #endif
         dc[kWinOptions] = gPanicRestore.options;
-        uint32_t update = kGeneralUpdate | kWinAUpdate, request = kGeneralActReq | kWinAActReq;
+        uint32_t update = kGeneralUpdate | kWinAUpdate;
+        uint32_t request = kGeneralActReq | kWinAActReq;
         TegraDisplayColor::bypassForPanic(dc);
         if (gPanicRestore.planes) {  // the panic screen over nothing: window B off, window A opaque again
-            dc[kWinBBase + NativePlanes::kOptions] = 0;
+            dc[kWinBBase + native_planes::kOptions] = 0;
             for (unsigned i = 0; i < 3; ++i)
-                dc[kWinABase + NativePlanes::kBlendLayer + i] = gPanicRestore.blend[i];
+                dc[kWinABase + native_planes::kBlendLayer + i] = gPanicRestore.blend[i];
             update |= kWinBUpdate;
             request |= kWinBActReq;
         }
@@ -437,8 +448,8 @@ void restorePitchOnPanic(const char *message)
         dc[kDcStateControl] = request;
     } else if (gPanicRestore
                    .planes) {  // the plane probe covers the screen before the first frame: off, the console shows
-        volatile uint32_t *dc = gPanicRestore.dc;
-        dc[kWinBBase + NativePlanes::kOptions] = 0;
+        const SwitchMMIOWords dc = gPanicRestore.dc;
+        dc[kWinBBase + native_planes::kOptions] = 0;
         TegraDisplayColor::bypassForPanic(dc);
         __asm__ volatile("dsb sy" ::: "memory");
         dc[kDcStateControl] = kGeneralUpdate | kWinBUpdate;
@@ -447,16 +458,12 @@ void restorePitchOnPanic(const char *message)
     (void)message;
 }
 
-// Clean and invalidate [address, address + bytes) to the point of coherency, by VA (CTR_EL0 line size).
-void cleanInvalidate(const void *address, uint64_t bytes)
+inline uint64_t counterNow()
 {
-    uint64_t ctr;
-    __asm__ volatile("mrs %0, ctr_el0" : "=r"(ctr));
-    const uintptr_t line = (uintptr_t)4 << ((ctr >> 16) & 15), end = (uintptr_t)address + bytes;
-    __asm__ volatile("dsb sy" ::: "memory");
-    for (uintptr_t at = (uintptr_t)address & ~(line - 1); at < end; at += line)
-        __asm__ volatile("dc civac, %0" ::"r"(at) : "memory");
-    __asm__ volatile("dsb sy" ::: "memory");
+    // NOLINTNEXTLINE(misc-const-correctness): the asm writes it
+    uint64_t ticks = 0;
+    __asm__ volatile("isb\n\tmrs %0, cntpct_el0" : "=r"(ticks));
+    return ticks;
 }
 
 // The MAIR attribute byte the kernel's translation of address resolves to (PAR_EL1 after AT S1E1R, as XNU's mmu_kvtop):
@@ -465,10 +472,11 @@ void cleanInvalidate(const void *address, uint64_t bytes)
 uint32_t mairAttribute(const void *address)
 {
     const boolean_t enabled = ml_set_interrupts_enabled(FALSE);
-    uint64_t par;
+    // NOLINTNEXTLINE(misc-const-correctness): the asm writes it
+    uint64_t par = 0;
     __asm__ volatile("at s1e1r, %1\n\tisb\n\tmrs %0, par_el1" : "=r"(par) : "r"(address) : "memory");
     ml_set_interrupts_enabled(enabled);
-    return (par & 1) ? 0x100 : (uint32_t)(par >> 56);
+    return (par & 1) ? 0x100 : static_cast<uint32_t>(par >> 56);
 }
 
 // Steady-state timing (NativeLegacyDisplay): one mean/max/count per stage, in timebase ticks.
@@ -496,7 +504,7 @@ struct Span {
 
     static uint64_t ticksToUs(uint64_t ticks)
     {
-        uint64_t ns;
+        uint64_t ns = 0;
         absolutetime_to_nanoseconds(ticks, &ns);
         return ns / 1000;
     }
@@ -515,26 +523,26 @@ struct FrameHist {
     {
         const uint64_t ms = us / 1000;
         if (ms < 64)
-            return (unsigned)ms;
+            return static_cast<unsigned>(ms);
         if (ms < 128)
-            return 64 + (unsigned)((ms - 64) / 4);
+            return 64 + static_cast<unsigned>((ms - 64) / 4);
         if (ms < 256)
-            return 80 + (unsigned)((ms - 128) / 8);
+            return 80 + static_cast<unsigned>((ms - 128) / 8);
         if (ms < 1024)
-            return 96 + (unsigned)((ms - 256) / 64);
+            return 96 + static_cast<unsigned>((ms - 256) / 64);
         return kBins - 1;
     }
 
     static uint64_t upperUs(unsigned bin)
     {
         if (bin < 64)
-            return (bin + 1) * 1000ull;
+            return (bin + 1) * 1000ULL;
         if (bin < 80)
-            return (64 + (bin - 63) * 4) * 1000ull;
+            return (64 + (bin - 63) * 4) * 1000ULL;
         if (bin < 96)
-            return (128 + (bin - 79) * 8) * 1000ull;
+            return (128 + (bin - 79) * 8) * 1000ULL;
         if (bin < 108)
-            return (256 + (bin - 95) * 64) * 1000ull;
+            return (256 + (bin - 95) * 64) * 1000ULL;
         return UINT64_MAX;
     }
 
@@ -551,7 +559,7 @@ struct FrameHist {
     {
         if (!count)
             return 0;
-        const uint64_t rank = ((uint64_t)count * permille + 999) / 1000;
+        const uint64_t rank = (static_cast<uint64_t>(count) * permille + 999) / 1000;
         uint64_t seen = 0;
         for (unsigned bin = 0; bin < kBins; ++bin) {
             seen += bins[bin];
@@ -572,7 +580,9 @@ struct FrameHists {
 };
 }
 
+// NOLINTNEXTLINE(misc-use-internal-linkage): OSDefineMetaClassAndStructors needs the class's external linkage (its kalloc type view)
 class NativeLegacyDisplay : public IOMobileFramebufferLegacy {
+    // NOLINTNEXTLINE(misc-explicit-constructor): IOKit's structors macro declares the metaclass constructor
     OSDeclareDefaultStructors(NativeLegacyDisplay) IOMemoryMap *bootMapping = nullptr;
     bool primary = false;
     bool logicalPM = false;
@@ -604,18 +614,22 @@ class NativeLegacyDisplay : public IOMobileFramebufferLegacy {
 
     static int32_t usFrom(uint64_t fromNs, uint64_t toNs)
     {
-        const int64_t us = ((int64_t)toNs - (int64_t)fromNs) / 1000;
-        return us > INT32_MAX ? INT32_MAX : us <= INT32_MIN ? INT32_MIN + 1 : (int32_t)us;
+        const int64_t us = (static_cast<int64_t>(toNs) - static_cast<int64_t>(fromNs)) / 1000;
+        if (us > INT32_MAX)
+            return INT32_MAX;
+        if (us <= INT32_MIN)
+            return INT32_MIN + 1;
+        return static_cast<int32_t>(us);
     }
 
     static uint32_t us32(uint64_t ns)
     {
-        return ns / 1000 > UINT32_MAX ? UINT32_MAX : (uint32_t)(ns / 1000);
+        return ns / 1000 > UINT32_MAX ? UINT32_MAX : static_cast<uint32_t>(ns / 1000);
     }
 
     static uint16_t sat16(uint64_t n)
     {
-        return n > 0xffff ? 0xffff : (uint16_t)n;
+        return n > 0xffff ? 0xffff : static_cast<uint16_t>(n);
     }
 
     static uint64_t ticksNs(uint64_t ticks)
@@ -635,17 +649,19 @@ class NativeLegacyDisplay : public IOMobileFramebufferLegacy {
     {
         if (!request)
             return false;
-        for (auto entry : validated)
+        for (const auto *entry : validated) {
             if (entry == request)
                 return true;
+        }
         return false;
     }
 
     void removeValidated(const OriginalLegacySwapRequest *request)
     {
-        for (auto &entry : validated)
+        for (auto &entry : validated) {
             if (entry == request)
                 entry = nullptr;
+        }
     }
 
     // True when the request is new (not a second validation of one already pending).
@@ -658,9 +674,10 @@ class NativeLegacyDisplay : public IOMobileFramebufferLegacy {
             ++slot;
         if (slot == kValidated) {
             slot = 0;
-            for (unsigned i = 1; i < kValidated; ++i)
+            for (unsigned i = 1; i < kValidated; ++i) {
                 if (validatedAt[i] < validatedAt[slot])
                     slot = i;
+            }
             __atomic_fetch_add(&validatedEvicted, 1u, __ATOMIC_RELAXED);
         }
         validated[slot] = request;
@@ -673,9 +690,10 @@ class NativeLegacyDisplay : public IOMobileFramebufferLegacy {
     void pruneValidated()
     {
         const OriginalLegacySwapRequest *current = nullptr;
-        memcpy(&current, reinterpret_cast<const unsigned char *>(this) + swapQueueCurrent, sizeof(current));
-        uint64_t second;
-        nanoseconds_to_absolutetime(1000000000ull, &second);
+        memcpy(&current, reinterpret_cast<const unsigned char *>(this) + swapQueueCurrent,
+               sizeof(const OriginalLegacySwapRequest *));
+        uint64_t second = 0;
+        nanoseconds_to_absolutetime(1000000000ULL, &second);
         const uint64_t now = mach_absolute_time();
         for (unsigned i = 0; i < kValidated; ++i) {
             const OriginalLegacySwapRequest *&entry = validated[i];
@@ -690,10 +708,11 @@ class NativeLegacyDisplay : public IOMobileFramebufferLegacy {
             entry = nullptr;
             ++validatedStale;
         }
-        if (const uint32_t evicted = __atomic_exchange_n(&validatedEvicted, 0u, __ATOMIC_RELAXED))
+        if (const uint32_t evicted = __atomic_exchange_n(&validatedEvicted, 0u, __ATOMIC_RELAXED)) {
             IOLog("SwitchDisplay: the accepted-swap table was full: %u entries replaced (%u stale ones dropped so "
                   "far)\n",
                   evicted, validatedStale);
+        }
     }
 
     // The request queued behind this one in the family's tail queue (each request's next at swapNext; NativeLegacySwapQueue.h
@@ -701,24 +720,28 @@ class NativeLegacyDisplay : public IOMobileFramebufferLegacy {
     static const OriginalLegacySwapRequest *queuedAfter(const OriginalLegacySwapRequest *request)
     {
         const OriginalLegacySwapRequest *next = nullptr;
-        if (request)
-            memcpy(&next, reinterpret_cast<const unsigned char *>(request) + swapNext, sizeof(next));
+        if (request) {
+            memcpy(&next, reinterpret_cast<const unsigned char *>(request) + swapNext,
+                   sizeof(const OriginalLegacySwapRequest *));
+        }
         return next;
     }
 
     uint64_t submittedAt(const OriginalLegacySwapRequest *request) const
     {
-        for (unsigned i = 0; i < kValidated; ++i)
+        for (unsigned i = 0; i < kValidated; ++i) {
             if (request && validated[i] == request)
                 return validatedAt[i];
+        }
         return 0;
     }
 
     FrameTimeline timelineOf(const OriginalLegacySwapRequest *request) const
     {
-        for (unsigned i = 0; i < kValidated; ++i)
+        for (unsigned i = 0; i < kValidated; ++i) {
             if (request && validated[i] == request)
                 return validatedTl[i];
+        }
         return {};
     }
 
@@ -757,7 +780,7 @@ class NativeLegacyDisplay : public IOMobileFramebufferLegacy {
     // 250 ms after the start, that frame ends arrive.
     IOFilterInterruptEventSource *vblankSource = nullptr;
     IOMemoryMap *dcMap = nullptr;
-    volatile uint32_t *dc = nullptr;
+    SwitchMMIOWords dc;
     uint32_t dcEnable = 0, dcMask = 0;  // INT_ENABLE and INT_MASK as found, restored on stop
     // INT_MASK is written from outside the gate too (frame-end holds), so every write of it takes this lock.
     IOSimpleLock *intMaskLock = nullptr;
@@ -771,7 +794,7 @@ class NativeLegacyDisplay : public IOMobileFramebufferLegacy {
     // kPhaseProbeFlips latched flips with it programmed, one line and the phase is off for the boot. Once it has, a silent one
     // panics as a silent V_BLANK does. The phase runs on the frame marks, which every kernel keeps (the stats are debug only).
     VsyncPhase phase;
-    uint64_t vpulseTime = 0, vpulseContinuous = 0, deliveredFrame = ~0ull;
+    uint64_t vpulseTime = 0, vpulseContinuous = 0, deliveredFrame = ~0ULL;
     uint64_t vsyncSentAt = 0;  // the frame timeline: the last vsync sent (its stamp), and the CPU clock then
     uint32_t vsyncSentKhz = 0;
     int64_t feAfterVblankNs = 0;  // the frame end's time after V_BLANK's, measured
@@ -808,11 +831,10 @@ class NativeLegacyDisplay : public IOMobileFramebufferLegacy {
     bool doubleBuffer = false;
     static constexpr unsigned kScanBuffers = TegraScanoutRing::kMaxBuffers;
     static constexpr int kNoBuffer = TegraScanoutRing::kNone;
-    IOBufferMemoryDescriptor *scanBuffers[kScanBuffers] =
-        {};                                        // surfaces 1 and 2's pages ([0] unused: the boot framebuffer)
-    IOMemoryMap *scanMappings[kScanBuffers] = {};  // their write-combined views
-    uint64_t scanAddresses[kScanBuffers] = {};     // their physical addresses
-    TegraScanoutRing ring;                         // which surface is scanned, asked for, replaced, drawn
+    switch_dma_buffer scanBuffers[kScanBuffers] = {};  // surfaces 1 and 2's pages ([0] unused: the boot framebuffer)
+    IOMemoryMap *scanMappings[kScanBuffers] = {};      // their write-combined views
+    uint64_t scanAddresses[kScanBuffers] = {};         // their physical addresses
+    TegraScanoutRing ring;                             // which surface is scanned, asked for, replaced, drawn
     // The direct-scanout gate's probe (DisplaySmmuProbe.h): once, kProbeAfterFrames frame ends
     // after window A first scanned a client frame, with nothing in flight, DC A's CRC unit and the display's SMMU domain (ASID
     // TEGRA_SMMU_ASID_DISPLAY on the "dc" swgroup) prove window A reads the scanned buffer through an IOVA slot; then all of
@@ -820,10 +842,10 @@ class NativeLegacyDisplay : public IOMobileFramebufferLegacy {
     // after it: direct scanout is the next stage.
     static constexpr uint32_t kDcCrcControl = 0x300, kDcCrcLatched = 0x329, kCrcOn = (1u << 3) | (1u << 2) | (1u << 0);
     static constexpr uint32_t kDisplay0aTranslation = 1u << 1;  // client display0a (id 1) in TRANSLATION_ENABLE_0
-    static constexpr uint64_t kProbeSlot = 0x10000000ull;  // below DRAM (0x80000000): only a translation reaches it
+    static constexpr uint64_t kProbeSlot = 0x10000000ULL;  // below DRAM (0x80000000): only a translation reaches it
     static constexpr unsigned kProbeTables = 64, kProbeAfterFrames = 600;  // r18-planes: 40 tables for the plane slots
-    IOBufferMemoryDescriptor *probeTables = nullptr;
-    uint64_t probeTablesPa = 0, probeAt = 0;
+    switch_dma_buffer probeTables = {};
+    uint64_t probeAt = 0;
     TegraSMMUDomain probeDomain;
     DisplaySmmuProbe probe;
     bool probeRan = false, probeUnderflow = false;
@@ -844,10 +866,10 @@ class NativeLegacyDisplay : public IOMobileFramebufferLegacy {
     // replaced it. A slot keeps its surface's descriptor retained and prepared until another surface needs the slot and it is
     // neither scanned nor asked for. Window A underflowing kDirectUnderflowFrames in a row from a slot turns direct off (one
     // line); swaps keep retiring at their latch.
-    static constexpr int kSlot0 = (int)TegraScanoutRing::kMaxBuffers;
+    static constexpr int kSlot0 = static_cast<int>(TegraScanoutRing::kMaxBuffers);
     static constexpr unsigned kSlots = TegraScanoutRing::kMaxEntries - TegraScanoutRing::kMaxBuffers,
                               kDirectUnderflowFrames = 3;
-    static constexpr uint64_t kSlotSpan = 4ull << 20;
+    static constexpr uint64_t kSlotSpan = 4ULL << 20;
 
     struct DirectSlot {
         IOMemoryDescriptor *memory;
@@ -876,10 +898,11 @@ class NativeLegacyDisplay : public IOMobileFramebufferLegacy {
     // (premultiplied). The domain comes up at the start, before backboardd: the plane probe (DisplaySmmuProbe's stages on
     // window B, which covers the screen with a frozen copy of it for about 20 frames) proves window B reads through it; only
     // then are planes on (planesOn), and only then may XNU start backboardd without CA_DISABLE_DETACHED
-    // (native_legacy_detach_ready below). Window B's register sets move through DC A as NativePlanes::PlaneLatch follows them;
+    // (native_legacy_detach_ready below). Window B's register sets move through DC A as native_planes::PlaneLatch follows them;
     // a set is a slot index (kOff: window off). A swap retires when the latch that shows it (or a newer one) is seen.
     static constexpr unsigned kPlaneSlots = 8;
-    static constexpr uint64_t kPlaneSlotSpan = 20ull << 20, kPlaneSlot0 = kProbeSlot + (uint64_t)kSlots * kSlotSpan;
+    static constexpr uint64_t kPlaneSlotSpan = 20ULL << 20,
+                              kPlaneSlot0 = kProbeSlot + static_cast<uint64_t>(kSlots) * kSlotSpan;
     static constexpr unsigned kPlaneUnderflowFrames = 3;
 
     struct PlaneSlot {
@@ -894,12 +917,12 @@ class NativeLegacyDisplay : public IOMobileFramebufferLegacy {
     struct PlaneSet {
         bool on;
         int slot;
-        NativePlanes::Image image;
+        native_planes::Image image;
         uint64_t seq;  // the take sequence of the newest swap this set shows
     };
 
     PlaneSet planeSets[kPlaneSlots + 1] = {};  // by slot; [kPlaneSlots] is the window off
-    NativePlanes::PlaneLatch planeLatch;
+    native_planes::PlaneLatch planeLatch;
     bool planesOn = false, planesAttached = false, planeProbeRan = false, planeProbing = false;
     uint64_t planeProbeAt = 0;
     // The plane change the next window A flip carries (the swap being taken), and the one each ring entry carried.
@@ -925,7 +948,7 @@ class NativeLegacyDisplay : public IOMobileFramebufferLegacy {
     static constexpr unsigned kFlipDeadlineMS = 100;
     // XNU's console tape (startConsoleTape), from start until the first client frame scans: the pages, their write-combined view
     // and physical address, and whether the console draws there (window A scans it; read by the filter and the console's wait).
-    IOBufferMemoryDescriptor *tapeBuffer = nullptr;
+    switch_dma_buffer tapeBuffer = {};
     IOMemoryMap *tapeMapping = nullptr;
     uint32_t tapeAddress = 0;
     volatile bool tapeAttached = false;
@@ -1132,19 +1155,25 @@ class NativeLegacyDisplay : public IOMobileFramebufferLegacy {
         if (lastPresent && stamp > lastPresent) {
             const uint64_t us = Span::ticksToUs(stamp - lastPresent);
             intervalUs = us;
-            if (us >= kGapUs)
+            if (us >= kGapUs) {
                 ++stGaps[us < 1000000 ? 0 : 1];
-            else {
+            } else {
                 if (frameHists)
                     hists->presentGap.add(us);
                 const uint64_t period = vsyncInterval ? Span::ticksToUs(vsyncInterval) : 16667;
                 const uint64_t frames = (us + period / 2) / period;
-                periods = (uint32_t)frames;
-                ++stVb[frames <= 1 ? 0 : frames >= 4 ? 3 : frames - 1];
+                periods = static_cast<uint32_t>(frames);
+                uint64_t bin = 3;
+                if (frames <= 1) {
+                    bin = 0;
+                } else if (frames < 4) {
+                    bin = frames - 1;
+                }
+                ++stVb[bin];
                 if (frames >= 2) {
-                    cause = noteLong((uint32_t)frames, mark);
+                    cause = noteLong(static_cast<uint32_t>(frames), mark);
                     if (SWITCH_FRAME_TIMELINE)
-                        noteSlowFrame(stamp, us, (uint32_t)frames, cause, mark);
+                        noteSlowFrame(stamp, us, static_cast<uint32_t>(frames), cause, mark);
                 }
             }
         }
@@ -1158,17 +1187,19 @@ class NativeLegacyDisplay : public IOMobileFramebufferLegacy {
     {
         uint64_t period = vsyncInterval;
         if (!period)
-            nanoseconds_to_absolutetime(16666667ull, &period);
+            nanoseconds_to_absolutetime(16666667ULL, &period);
         return period;
     }
 
     // Debug kernels: a present inside a touch interaction window (SwitchInteraction.h), after closing an ended one.
     void noteInteraction(uint64_t stamp, uint64_t intervalUs, uint32_t periods, unsigned cause)
     {
-        uint64_t began = 0, lastDown = 0;
+        uint64_t began = 0;
+        uint64_t lastDown = 0;
         switch_frames_touch_activity(&began, &lastDown);
-        const uint64_t now = Span::ticksToUs(stamp), beganUs = Span::ticksToUs(began),
-                       lastDownUs = Span::ticksToUs(lastDown);
+        const uint64_t now = Span::ticksToUs(stamp);
+        const uint64_t beganUs = Span::ticksToUs(began);
+        const uint64_t lastDownUs = Span::ticksToUs(lastDown);
         SwitchInteraction &window = hists->interaction;
         const bool active = SwitchInteraction::active(now, beganUs, lastDownUs);
         if (window.isOpen() && !active)
@@ -1182,7 +1213,8 @@ class NativeLegacyDisplay : public IOMobileFramebufferLegacy {
     {
         if (!frameHists || !hists->interaction.isOpen())
             return;
-        uint64_t began = 0, lastDown = 0;
+        uint64_t began = 0;
+        uint64_t lastDown = 0;
         switch_frames_touch_activity(&began, &lastDown);
         const uint64_t lastDownUs = Span::ticksToUs(lastDown);
         if (!SwitchInteraction::active(Span::ticksToUs(mach_absolute_time()), Span::ticksToUs(began), lastDownUs))
@@ -1211,7 +1243,7 @@ class NativeLegacyDisplay : public IOMobileFramebufferLegacy {
         if (mark.tl.vsyncUs == kNotSeen || mark.tl.vsyncUs > 0)
             return 0;
         uint64_t back = 0;
-        nanoseconds_to_absolutetime((uint64_t)-(int64_t)mark.tl.vsyncUs * 1000, &back);
+        nanoseconds_to_absolutetime(static_cast<uint64_t>(-static_cast<int64_t>(mark.tl.vsyncUs)) * 1000, &back);
         return back < mark.submit ? mark.submit - back : 0;
     }
 
@@ -1220,17 +1252,22 @@ class NativeLegacyDisplay : public IOMobileFramebufferLegacy {
     {
         uint64_t period = vsyncInterval;
         if (!period)
-            nanoseconds_to_absolutetime(16666667ull, &period);
+            nanoseconds_to_absolutetime(16666667ULL, &period);
         const uint64_t due = lastPresent + period;  // the boundary a one-frame interval would have used
-        unsigned cause;
-        if (!mark.submit || mark.submit >= due)
-            cause = idleSincePresent                                           ? kLongIdle
-                    : mark.submit && phase.paced(Span::ticksToUs(mark.submit)) ? kLongRate
-                                                                               : kLongCa;
-        else if (mark.ready > due)
+        unsigned cause = 0;
+        if (!mark.submit || mark.submit >= due) {
+            if (idleSincePresent) {
+                cause = kLongIdle;
+            } else if (mark.submit && phase.paced(Span::ticksToUs(mark.submit))) {
+                cause = kLongRate;
+            } else {
+                cause = kLongCa;
+            }
+        } else if (mark.ready > due) {
             cause = mark.ready - mark.kick > due - mark.submit ? kLongGpu : kLongQueue;
-        else
+        } else {
             cause = kLongLatch;
+        }
         ++stLong[cause];
         stLongFrames[cause] += frames - 1;
         return cause;
@@ -1238,39 +1275,44 @@ class NativeLegacyDisplay : public IOMobileFramebufferLegacy {
 
     // Debug kernels: one "SwitchFrame" line per present 1.5 periods or more after the one before (tools/frames reads them),
     // its points in microseconds from the vsync its swap came after (from its submission when none is known).
-    void noteSlowFrame(uint64_t stamp, uint64_t us, uint32_t frames, unsigned cause, const FrameMark &mark)
+    static void noteSlowFrame(uint64_t stamp, uint64_t us, uint32_t frames, unsigned cause, const FrameMark &mark)
     {
         static const char *const kCause[kLongCauses] = {"idle", "ca", "gpu", "queue", "latch", "rate"};
         const FrameTimeline &tl = mark.tl;
-        const bool fromVsync = mark.submit && tl.vsyncUs != kNotSeen;
+        const bool fromVsync = (mark.submit != 0u) && tl.vsyncUs != kNotSeen;
         const uint64_t submitNs = mark.submit ? ticksNs(mark.submit) : 0;
-        uint64_t origin = mark.submit ? mark.submit : stamp, back = 0;
+        uint64_t origin = mark.submit ? mark.submit : stamp;
+        uint64_t back = 0;
         if (fromVsync && tl.vsyncUs < 0)
-            nanoseconds_to_absolutetime((uint64_t)-(int64_t)tl.vsyncUs * 1000, &back);
+            nanoseconds_to_absolutetime(static_cast<uint64_t>(-static_cast<int64_t>(tl.vsyncUs)) * 1000, &back);
         origin -= back;
         const uint64_t originNs = ticksNs(origin);
-        auto at = [originNs](uint64_t ticks) -> long long {
-            return ticks ? ((long long)ticksNs(ticks) - (long long)originNs) / 1000 : -1;
+        const auto at = [originNs](uint64_t ticks) -> long long {
+            return ticks ? (static_cast<long long>(ticksNs(ticks)) - static_cast<long long>(originNs)) / 1000 : -1;
         };
-        auto rel = [&](int32_t fromSubmitUs) -> long long {
+        const auto rel = [&](int32_t fromSubmitUs) -> long long {
             return mark.submit && fromSubmitUs != kNotSeen
-                       ? ((long long)submitNs + (long long)fromSubmitUs * 1000 - (long long)originNs) / 1000
+                       ? (static_cast<long long>(submitNs) + static_cast<long long>(fromSubmitUs) * 1000 -
+                          static_cast<long long>(originNs)) /
+                             1000
                        : -1;
         };
+        const char *anchor = "latch";
+        if (fromVsync) {
+            anchor = "vsync";
+        } else if (mark.submit) {
+            anchor = "swap";
+        }
         char line[640];
         snprintf(line, sizeof(line),
                  "latch %llu after %u frames (%llu us), cause %s; origin %s %llu; first submit %lld, last "
                  "submit %lld (%u, exec %u us), swap %lld, offer %lld, gpu done %lld, flip %lld, latch "
                  "%lld us; other submits %u; swap thread base %d sched %d mode %d qos %d; cpu %u MHz at vsync %u at "
                  "swap; imp %u %u us, bind %u %u us, alloc %u %u us, free %u, clean %u KiB %u us",
-                 stamp, frames, us, cause < kLongCauses ? kCause[cause] : "?",
-                 fromVsync     ? "vsync"
-                 : mark.submit ? "swap"
-                               : "latch",
-                 origin, rel(tl.firstUs), rel(tl.lastUs), tl.submits, tl.execUs, at(mark.submit), at(mark.kick),
-                 rel(tl.doneUs), at(mark.ready), at(stamp), tl.others, tl.basePri, tl.schedPri, tl.mode, tl.qos,
-                 tl.mhzVsync, tl.mhzSwap, tl.imports, tl.importUs, tl.binds, tl.bindUs, tl.allocs, tl.allocUs, tl.frees,
-                 tl.cleanKiB, tl.cleanUs);
+                 stamp, frames, us, cause < kLongCauses ? kCause[cause] : "?", anchor, origin, rel(tl.firstUs),
+                 rel(tl.lastUs), tl.submits, tl.execUs, at(mark.submit), at(mark.kick), rel(tl.doneUs), at(mark.ready),
+                 at(stamp), tl.others, tl.basePri, tl.schedPri, tl.mode, tl.qos, tl.mhzVsync, tl.mhzSwap, tl.imports,
+                 tl.importUs, tl.binds, tl.bindUs, tl.allocs, tl.allocUs, tl.frees, tl.cleanKiB, tl.cleanUs);
         os_log(OS_LOG_DEFAULT, "SwitchFrame: %s", line);  // one string: os_log drops a record whose scalars outgrow it
     }
 
@@ -1282,7 +1324,8 @@ class NativeLegacyDisplay : public IOMobileFramebufferLegacy {
 
     void noteMissedFrame(uint64_t stamp)
     {
-        const uint64_t last = missLast, before = missFrames;
+        const uint64_t last = missLast;
+        const uint64_t before = missFrames;
         missLast = stamp;
         missFrames = 0;
         if (!last || stamp <= last)
@@ -1321,7 +1364,7 @@ class NativeLegacyDisplay : public IOMobileFramebufferLegacy {
         return frameEnds < 2 || vsyncArmed || tapeAttached || tapeSettle || kickDeferred || presentDeferred ||
                ring.pending != kNoBuffer || ring.superseded != kNoBuffer || ring.drawing != kNoBuffer ||
                ring.held != kNoBuffer || (rotated && !rotationLatched) || probeRequest || probe.active() ||
-               (!probeRan && probeTables && doubleBuffer) || (planesOn && planeLatch.requested()) ||
+               (!probeRan && (probeTables.memory != nullptr) && doubleBuffer) || (planesOn && planeLatch.requested()) ||
                planeProbe.active() || planeHeldSet;
     }
 
@@ -1338,7 +1381,7 @@ public:
     bool frameEndRouted()
     {
         const IOInterruptState state = IOSimpleLockLockDisableInterrupt(intMaskLock);
-        const bool routed = intMaskLive && (dc[kDcIntEnable] & dc[kDcIntMask] & kFrameEndInt);
+        const bool routed = intMaskLive && ((dc[kDcIntEnable] & dc[kDcIntMask] & kFrameEndInt) != 0u);
         IOSimpleLockUnlockEnableInterrupt(intMaskLock, state);
         return routed;
     }
@@ -1353,7 +1396,7 @@ private:
     {
         const void *head = nullptr;
         memcpy(&head, reinterpret_cast<const unsigned char *>(this) + vsyncClientList, sizeof(head));
-        return head;
+        return head != nullptr;
     }
 
     // Selector 72's registration of a vsync client ends in kickSwapQueue (slot 290), which arms the tick; the tick stops by itself once
@@ -1397,7 +1440,8 @@ private:
             char gic[192];
             switch_interrupt_describe(kDisplayAInterrupt, gic, sizeof(gic));
             panic("SwitchDisplay: no DC A frame end in 250 ms: INT_STATUS %#x MASK %#x ENABLE %#x, %s",
-                  dc[kDcIntStatus], dc[kDcIntMask], dc[kDcIntEnable], gic);
+                  static_cast<uint32_t>(dc[kDcIntStatus]), static_cast<uint32_t>(dc[kDcIntMask]),
+                  static_cast<uint32_t>(dc[kDcIntEnable]), gic);
         }
         vsyncArmed = false;
         if (!vsyncTimer)
@@ -1447,15 +1491,16 @@ private:
             tegra_panel_frame_end_filter();
             self->color->frameEndFilter();
             if (self->tapeAttached) {
-                __atomic_fetch_add(&self->tapeFrames, 1ull, __ATOMIC_RELEASE);
+                __atomic_fetch_add(&self->tapeFrames, 1ULL, __ATOMIC_RELEASE);
                 thread_wakeup((event_t)&self->tapeFrames);
             }
             // r6-lows: the frame end's time (the present stamp); debug kernels also the DC A period and a frame end the
             // action has not taken yet.
-            const uint64_t now = mach_absolute_time(), last = self->feLast;
+            const uint64_t now = mach_absolute_time();
+            const uint64_t last = self->feLast;
             __atomic_store_n(&self->feStamp, now, __ATOMIC_RELEASE);
             self->feLast = now;
-            if (self->stats) {
+            if (NativeLegacyDisplay::stats) {
                 // Only consecutive frame ends (a stopped scanout or SC7 in between is no period).
                 if (last && now > last && (!self->vsyncInterval || now - last < 2 * self->vsyncInterval)) {
                     const uint64_t period = now - last;
@@ -1471,7 +1516,7 @@ private:
             }
         }
         // Two V_BLANKs before the action runs (the gate busy, e.g. with a copy) fold into one notification; the stats count both.
-        if ((status & kVblankInt) && self->stats && self->vsyncArmed) {
+        if ((status & kVblankInt) && NativeLegacyDisplay::stats && self->vsyncArmed) {
             __atomic_fetch_add(&self->stVblanks, 1u, __ATOMIC_RELAXED);
             if (__atomic_load_n(&self->dcPending, __ATOMIC_ACQUIRE) & kVblankInt)
                 __atomic_fetch_add(&self->stVsyncFolded, 1u, __ATOMIC_RELAXED);
@@ -1498,7 +1543,8 @@ private:
         if (status & kFrameEndInt)
             frameEnds = frameEnds + 1;
         if ((status & kFrameEndInt) && stats) {
-            const uint64_t stamp = __atomic_load_n(&feStamp, __ATOMIC_ACQUIRE), now = mach_absolute_time();
+            const uint64_t stamp = __atomic_load_n(&feStamp, __ATOMIC_ACQUIRE);
+            const uint64_t now = mach_absolute_time();
             if (stamp && now > stamp)
                 stFeLate.add(now - stamp);
         }
@@ -1511,19 +1557,21 @@ private:
             columnScanFrameEnd();
         // After the compositor's vsync, since a latched flip starts the next frame's copy right here. A flip is also looked for at
         // V_BLANK (unmasked while a vsync client is registered), in case the controller latches after its FRAME_END.
-        if ((status & kFrameEndInt) && rotated)
+        if ((status & kFrameEndInt) && rotated) {
             checkRotation();
-        else if ((status & kVblankInt) && rotationLatched && ring.pending != kNoBuffer)
+        } else if ((status & kVblankInt) && rotationLatched && ring.pending != kNoBuffer) {
             checkFlip(false);
+        }
         if ((status & kFrameEndInt) && tapeSettle)
             checkTapeSettled();
         if (status & kFrameEndInt)
             probeFrameEnd();
         if (status & kFrameEndInt)
             planeFrameEnd();
-        if (status & kFrameEndInt)
-            color->frameEndAction(ring.pending == kNoBuffer && !probeRequest && !(rotated && !rotationLatched) &&
+        if (status & kFrameEndInt) {
+            color->frameEndAction(ring.pending == kNoBuffer && !probeRequest && (!rotated || rotationLatched) &&
                                   !columnScanBusy());
+        }
         if ((status & kFrameEndInt) && stats) {
             if (frameStall.frameEnd(mach_absolute_time(), refreshTicks(), vsyncWanted()))
                 switch_stall_frame(frameStall.lastPresent());
@@ -1555,30 +1603,33 @@ private:
         // r16-idle: a window in which nothing reached the screen and nothing went wrong is logged once, marked quiet; the
         // windows after it are counted and reset as always but not logged, until a swap, a present or an error comes. A
         // lit, still screen then writes no display lines at all (it wrote two every 5 s).
-        const bool quiet = !stSwaps && !stPresents && !stUnderflows && !stGpuTimeouts && !stNewMaps && !stFallbacks &&
-                           !stVsyncIdle && !__atomic_load_n(&stRejected, __ATOMIC_RELAXED);
+        const bool quiet = (stSwaps == 0u) && (stPresents == 0u) && (stUnderflows == 0u) && (stGpuTimeouts == 0u) &&
+                           (stNewMaps == 0u) && (stFallbacks == 0u) && (stVsyncIdle == 0u) &&
+                           (__atomic_load_n(&stRejected, __ATOMIC_RELAXED) == 0u);
         const bool logged = !(quiet && statsQuiet);
         statsQuiet = quiet;
         // Logged every time, quiet or not: the render server took frames and committed none, which is what a hung
         // client of it looks like from here.
-        if (stVsyncs && !stSwaps && !stPresents)
+        if (stVsyncs && !stSwaps && !stPresents) {
             os_log(OS_LOG_DEFAULT,
                    "SwitchDisplay: quiet display: %llu ms with vsync %u sent of %u vblanks and no swap or present",
                    (unsigned long long)(us / 1000), stVsyncs, vblanks);
-        auto rate = [us](uint32_t n) {
-            return (unsigned long long)((uint64_t)n * 10000000ULL / (us ? us : 1));
+        }
+        const auto rate = [us](uint32_t n) {
+            return (static_cast<uint64_t>(n) * 10000000ULL / (us ? us : 1));
         };  // per second, in tenths
         char line[960];
         size_t at = 0;
         auto add = [&](const char *format, auto... values) {
             if (at < sizeof(line))
-                at += (size_t)snprintf(line + at, sizeof(line) - at, format, values...);
+                at += static_cast<size_t>(snprintf(line + at, sizeof(line) - at, format, values...));
         };
-        auto span = [&](const char *name, const Span &value) {
-            add(" %s %llu/%llu", name, (unsigned long long)value.meanUs(), (unsigned long long)value.maxUs());
+        const auto span = [&](const char *name, const Span &value) {
+            add(" %s %llu/%llu", name, static_cast<unsigned long long>(value.meanUs()),
+                static_cast<unsigned long long>(value.maxUs()));
         };
-        add("%llu ms: %u DC A interrupts, %u swaps %llu.%llu/s,", (unsigned long long)(us / 1000), irqs, stSwaps,
-            rate(stSwaps) / 10, rate(stSwaps) % 10);
+        add("%llu ms: %u DC A interrupts, %u swaps %llu.%llu/s,", static_cast<unsigned long long>(us / 1000), irqs,
+            stSwaps, rate(stSwaps) / 10, rate(stSwaps) % 10);
         span("interval", stInterval);
         span("client", stClient);
         span("submit-retire", stRetire);
@@ -1590,7 +1641,7 @@ private:
         span("scan", stScan);
         span("copy", stCopy);
         span("gpu-copy", stGpuCopy);
-        add(" read %llu", (unsigned long long)Span::ticksToUs(stRead));
+        add(" read %llu", static_cast<unsigned long long>(Span::ticksToUs(stRead)));
         add(") us mean/max; copy fast %u byte %u gpu %u (declined %u); vsync %u sent %llu.%llu/s of %u vblanks,",
             stFast, stByte, stGpuCopies, stGpuDeclined, stVsyncs, rate(stVsyncs) / 10, rate(stVsyncs) % 10, vblanks);
         span("late", stVsyncLate);
@@ -1601,12 +1652,13 @@ private:
         // the counts over 1.5x and 2x the period (2+ and 3+ frames: presents are whole frames apart); idle or stalled gaps of
         // 250 ms-1 s and over 1 s; swap submission to present; the measured DC A period; frame-end work-loop delay, frame ends
         // folded into one action, swaps that waited for a flip, flips latched at the first frame end or later.
-        auto quantiles = [&](const char *name, const FrameHist &h) {
+        const auto quantiles = [&](const char *name, const FrameHist &h) {
             const uint64_t top = h.maxUs;
             add(" %s p50 %llu p99 %llu p99.9 %llu max %llu.%llu ms", name,
-                (unsigned long long)(h.quantileUs(500) / 1000), (unsigned long long)(h.quantileUs(990) / 1000),
-                (unsigned long long)(h.quantileUs(999) / 1000), (unsigned long long)(top / 1000),
-                (unsigned long long)(top % 1000 / 100));
+                static_cast<unsigned long long>(h.quantileUs(500) / 1000),
+                static_cast<unsigned long long>(h.quantileUs(990) / 1000),
+                static_cast<unsigned long long>(h.quantileUs(999) / 1000), static_cast<unsigned long long>(top / 1000),
+                static_cast<unsigned long long>(top % 1000 / 100));
         };
         add("; present %u", stPresents);
         if (frameHists) {
@@ -1618,19 +1670,20 @@ private:
         if (frameHists)
             quantiles("swap-to-scan", hists->latency);
         {
-            const uint64_t sum = __atomic_exchange_n(&fePeriodSum, 0ull, __ATOMIC_RELAXED);
+            const uint64_t sum = __atomic_exchange_n(&fePeriodSum, 0ULL, __ATOMIC_RELAXED);
             const uint32_t n = __atomic_exchange_n(&fePeriodN, 0u, __ATOMIC_RELAXED);
-            const uint64_t low = __atomic_exchange_n(&fePeriodMin, UINT64_MAX, __ATOMIC_RELAXED),
-                           high = __atomic_exchange_n(&fePeriodMax, 0ull, __ATOMIC_RELAXED);
+            const uint64_t low = __atomic_exchange_n(&fePeriodMin, UINT64_MAX, __ATOMIC_RELAXED);
+            const uint64_t high = __atomic_exchange_n(&fePeriodMax, 0ULL, __ATOMIC_RELAXED);
             uint64_t meanNs = 0;
             if (n)
                 absolutetime_to_nanoseconds(sum / n, &meanNs);
-            add("; frame %llu.%03llu ms (%llu-%llu us, %u)", (unsigned long long)(meanNs / 1000000),
-                (unsigned long long)(meanNs / 1000 % 1000), (unsigned long long)(n ? Span::ticksToUs(low) : 0),
-                (unsigned long long)Span::ticksToUs(high), n);
+            add("; frame %llu.%03llu ms (%llu-%llu us, %u)", static_cast<unsigned long long>(meanNs / 1000000),
+                static_cast<unsigned long long>(meanNs / 1000 % 1000),
+                static_cast<unsigned long long>(n ? Span::ticksToUs(low) : 0),
+                static_cast<unsigned long long>(Span::ticksToUs(high)), n);
         }
         add(", fe-late %llu/%llu us, folded %u, flip-waited %u, latch 1st %u later %u",
-            (unsigned long long)stFeLate.meanUs(), (unsigned long long)stFeLate.maxUs(),
+            static_cast<unsigned long long>(stFeLate.meanUs()), static_cast<unsigned long long>(stFeLate.maxUs()),
             __atomic_exchange_n(&stFeFolded, 0u, __ATOMIC_RELAXED), stFlipWait.count, stLatch[0], stLatch[1]);
         add(", rejected %u (reason %u)", __atomic_exchange_n(&stRejected, 0u, __ATOMIC_RELAXED),
             __atomic_load_n(&stRejectReason, __ATOMIC_RELAXED));
@@ -1641,23 +1694,27 @@ private:
         add("%u presents: swap-to-scan = queue %llu/%llu (surface wait %llu/%llu) + copy %llu/%llu + latch %llu/%llu "
             "us "
             "mean/max",
-            stPresents, (unsigned long long)stPQueue.meanUs(), (unsigned long long)stPQueue.maxUs(),
-            (unsigned long long)stPWait.meanUs(), (unsigned long long)stPWait.maxUs(),
-            (unsigned long long)stPCopy.meanUs(), (unsigned long long)stPCopy.maxUs(),
-            (unsigned long long)stPLatch.meanUs(), (unsigned long long)stPLatch.maxUs());
-        add("; direct %u%s", stDirect, directOn ? "" : latchRetire ? " (off)" : "");
+            stPresents, static_cast<unsigned long long>(stPQueue.meanUs()),
+            static_cast<unsigned long long>(stPQueue.maxUs()), static_cast<unsigned long long>(stPWait.meanUs()),
+            static_cast<unsigned long long>(stPWait.maxUs()), static_cast<unsigned long long>(stPCopy.meanUs()),
+            static_cast<unsigned long long>(stPCopy.maxUs()), static_cast<unsigned long long>(stPLatch.meanUs()),
+            static_cast<unsigned long long>(stPLatch.maxUs()));
+        add("; direct %u%s", stDirect, !directOn && latchRetire ? " (off)" : "");
         stDirect = 0;
-        add("; %u buffers%s, replaced %u, collapsed %u", doubleBuffer ? ring.buffers : 1u,
-            !doubleBuffer || ring.replace ? ""
-            : stFallbacks                 ? " (fell back to double buffering now)"
-                                          : " (double-buffered)",
-            stReplaced, stCollapsed);
+        const char *buffering = "";
+        if (doubleBuffer && !ring.replace)
+            buffering = stFallbacks ? " (fell back to double buffering now)" : " (double-buffered)";
+        add("; %u buffers%s, replaced %u, collapsed %u", doubleBuffer ? ring.buffers : 1u, buffering, stReplaced,
+            stCollapsed);
         // r18-planes: window B sets written (of them by swaps that changed only window B: video frames with no UI composite),
         // seen latched, new slot mappings, detached layers not shown, window B underflow frames, ready-mask mismatches.
-        add("; planes %s: flips %u (b-only %u) latched %u, maps %u, dropped %u, underflow %u, unready %u",
-            planesOn         ? "on"
-            : planesAttached ? "off"
-                             : "-",
+        const char *planesState = "-";
+        if (planesOn) {
+            planesState = "on";
+        } else if (planesAttached) {
+            planesState = "off";
+        }
+        add("; planes %s: flips %u (b-only %u) latched %u, maps %u, dropped %u, underflow %u, unready %u", planesState,
             stPlaneFlips, stPlaneOnly, stPlaneLatched, stPlaneMaps, stPlaneDropped, stPlaneUnderflows, stPlaneUnready);
         stPlaneFlips = stPlaneOnly = stPlaneLatched = stPlaneMaps = stPlaneDropped = stPlaneUnderflows =
             stPlaneUnready = 0;
@@ -1670,31 +1727,37 @@ private:
         add("; vsync folded %u late>1ms %u idle %u", __atomic_exchange_n(&stVsyncFolded, 0u, __ATOMIC_RELAXED),
             stVsyncLateN, stVsyncIdle);
         if (stTouchSwap.count) {
-            add("; touch->swap %llu/%llu us mean/max,", (unsigned long long)stTouchSwap.meanUs(),
-                (unsigned long long)stTouchSwap.maxUs());
+            add("; touch->swap %llu/%llu us mean/max,", static_cast<unsigned long long>(stTouchSwap.meanUs()),
+                static_cast<unsigned long long>(stTouchSwap.maxUs()));
             if (frameHists)
                 quantiles("touch->scan", hists->touchScan);
             add(" (%u)", stTouchSwap.count);
         }
         // r17-touch: the vsync phase: the lead in effect (0: at V_BLANK), the line, the lead V_PULSE2 gave, the last window's
         // response p99, margin and miss floor, and its misses this boot.
-        add("; phase %s lead %u us (line %u, measured %llu/%llu us), p99 %u margin %u floor %u, misses %u",
-            phaseFailed         ? "off"
-            : phaseDelivering() ? "on"
-                                : "at V_BLANK",
-            phase.lead(), phaseLine, (unsigned long long)stPhaseLead.meanUs(), (unsigned long long)stPhaseLead.maxUs(),
-            phase.lastP99(), phase.marginUs(), phase.floorUs(), phase.missCount());
+        const char *phaseState = "at V_BLANK";
+        if (phaseFailed) {
+            phaseState = "off";
+        } else if (phaseDelivering()) {
+            phaseState = "on";
+        }
+        add("; phase %s lead %u us (line %u, measured %llu/%llu us), p99 %u margin %u floor %u, misses %u", phaseState,
+            phase.lead(), phaseLine, static_cast<unsigned long long>(stPhaseLead.meanUs()),
+            static_cast<unsigned long long>(stPhaseLead.maxUs()), phase.lastP99(), phase.marginUs(), phase.floorUs(),
+            phase.missCount());
         stPhaseLead = Span{};
         if (quiet)
             add("%s", "; quiet (the next quiet windows are not logged)");
         if (logged)
             os_log(OS_LOG_DEFAULT, "SwitchDisplay pacing: %s", line);  // log only, never the boot console
         // who drew in this window: Core Animation's clients send each commit to the render server as a mach message
-        if (switch_render_senders_line(line, sizeof(line), us / 1000, 6) && logged)
+        if (switch_render_senders_line(line, sizeof(line), us / 1000, 6) && logged) {
             os_log(OS_LOG_DEFAULT, "SwitchDisplay clients: %llu ms to the render server: %s",
                    (unsigned long long)(us / 1000), line);
-        if (switch_frames_line(false, line, sizeof(line)) && logged)
+        }
+        if (switch_frames_line(false, line, sizeof(line)) && logged) {
             os_log(OS_LOG_DEFAULT, "SwitchDisplay commits: %llu ms: %s", (unsigned long long)(us / 1000), line);
+        }
         stTouchSwap = Span{};
         if (frameHists)
             hists->touchScan = FrameHist{};
@@ -1740,7 +1803,7 @@ private:
     // while a lead is in effect and nothing turned the phase off.
     bool phaseDelivering() const
     {
-        return vpulseSeen && !phaseFailed && phase.lead();
+        return vpulseSeen && !phaseFailed && (phase.lead() != 0u);
     }
 
     void vpulseNotify()
@@ -1801,19 +1864,24 @@ private:
         if (fe && vblankTime) {
             const uint64_t a = fe > vblankTime ? fe - vblankTime : vblankTime - fe;
             if (Span::ticksToUs(a) < 4000)
-                feAfterVblankNs = (int64_t)Span::ticksToUs(a) * 1000 * (fe > vblankTime ? 1 : -1);
+                feAfterVblankNs = static_cast<int64_t>(Span::ticksToUs(a)) * 1000 * (fe > vblankTime ? 1 : -1);
         }
         if (vpulseThisFrame && fe > vpulseTime && vsyncInterval && fe - vpulseTime < vsyncInterval) {
-            measuredLeadUs = (uint32_t)Span::ticksToUs(fe - vpulseTime);
+            measuredLeadUs = static_cast<uint32_t>(Span::ticksToUs(fe - vpulseTime));
             if (phaseDelivering())
                 stPhaseLead.add(fe - vpulseTime);
             // Off by more than two lines from the lead asked for: correct the line once (latched with the next flip).
             const uint32_t lineUs = lineNs() / 1000 ? lineNs() / 1000 : 1;
-            const int32_t error = ((int32_t)measuredLeadUs - (int32_t)phaseAsked) / (int32_t)lineUs;
+            const int32_t error = (static_cast<int32_t>(measuredLeadUs) - static_cast<int32_t>(phaseAsked)) /
+                                  static_cast<int32_t>(lineUs);
             if (phaseAsked && !phaseSettle && (error > 2 || error < -2)) {
                 phaseCorrection += error;
-                const int32_t bound = (int32_t)totalLines;
-                phaseCorrection = phaseCorrection > bound ? bound : phaseCorrection < -bound ? -bound : phaseCorrection;
+                const int32_t bound = static_cast<int32_t>(totalLines);
+                if (phaseCorrection > bound) {
+                    phaseCorrection = bound;
+                } else if (phaseCorrection < -bound) {
+                    phaseCorrection = -bound;
+                }
                 programPhase(phaseAsked);
             }
         }
@@ -1826,7 +1894,8 @@ private:
         switch_interrupt_describe(kDisplayAInterrupt, gic, sizeof(gic));
         panic("SwitchDisplay: no DC A V_PULSE2 in %u frame ends with the vsync phase on: INT_STATUS %#x MASK %#x "
               "ENABLE %#x, %s",
-              vpulseSilent, dc[kDcIntStatus], dc[kDcIntMask], dc[kDcIntEnable], gic);
+              vpulseSilent, static_cast<uint32_t>(dc[kDcIntStatus]), static_cast<uint32_t>(dc[kDcIntMask]),
+              static_cast<uint32_t>(dc[kDcIntEnable]), gic);
     }
 
     uint32_t lineNs() const
@@ -1834,7 +1903,7 @@ private:
         uint64_t ns = 0;
         if (vsyncInterval)
             absolutetime_to_nanoseconds(vsyncInterval, &ns);
-        return totalLines ? (uint32_t)(ns / totalLines) : 0;
+        return totalLines ? static_cast<uint32_t>(ns / totalLines) : 0;
     }
 
     // V_PULSE2's registers for the line `lead` before the frame end (assembly copies: they latch with the next flip).
@@ -1849,16 +1918,16 @@ private:
     {
         if (!dc || hwSuspended || phaseFailed || !totalLines || !lineNs())
             return;
-        const int64_t back = ((int64_t)leadUs * 1000 - feAfterVblankNs) / (int64_t)lineNs();
-        int64_t line = (int64_t)vblankLine - back - phaseCorrection;
+        const int64_t back = (static_cast<int64_t>(leadUs) * 1000 - feAfterVblankNs) / static_cast<int64_t>(lineNs());
+        int64_t line = static_cast<int64_t>(vblankLine) - back - phaseCorrection;
         if (line < 2)
             line = 2;
-        if (line > (int64_t)vblankLine - 1)
-            line = (int64_t)vblankLine - 1;
+        if (line > static_cast<int64_t>(vblankLine) - 1)
+            line = static_cast<int64_t>(vblankLine) - 1;
         phaseAsked = leadUs;
-        if (vpulseProgrammed && (uint32_t)line == phaseLine)
+        if (vpulseProgrammed && static_cast<uint32_t>(line) == phaseLine)
             return;
-        phaseLine = (uint32_t)line;
+        phaseLine = static_cast<uint32_t>(line);
         phaseSettle = 2;
         writePhaseRegisters();
         if (!vpulseProgrammed) {
@@ -1878,7 +1947,7 @@ private:
         if (phaseFailed || !mark.submit || !mark.ready)
             return;
         if (vsyncInterval)
-            phase.setPeriod((uint32_t)Span::ticksToUs(vsyncInterval));
+            phase.setPeriod(static_cast<uint32_t>(Span::ticksToUs(vsyncInterval)));
         if (phaseSettle)
             --phaseSettle;
         phase.present(Span::ticksToUs(mark.submit), Span::ticksToUs(mark.ready), Span::ticksToUs(stamp));
@@ -1893,8 +1962,10 @@ private:
         switch_interrupt_describe(kDisplayAInterrupt, gic, sizeof(gic));
         IOLog("SwitchDisplay: vsync phase off for this boot: V_PULSE2 never reached the CPU in %u flips (line %u; "
               "SIGNAL_OPTIONS0 %#x V_PULSE2 %#x/%#x INT_STATUS %#x MASK %#x ENABLE %#x, %s); vsync stays at V_BLANK\n",
-              phaseProbe, phaseLine, dc[kDcDispSignalOptions0], dc[kDcDispVpulse2Control], dc[kDcDispVpulse2Position],
-              dc[kDcIntStatus], dc[kDcIntMask], dc[kDcIntEnable], gic);
+              phaseProbe, phaseLine, static_cast<uint32_t>(dc[kDcDispSignalOptions0]),
+              static_cast<uint32_t>(dc[kDcDispVpulse2Control]), static_cast<uint32_t>(dc[kDcDispVpulse2Position]),
+              static_cast<uint32_t>(dc[kDcIntStatus]), static_cast<uint32_t>(dc[kDcIntMask]),
+              static_cast<uint32_t>(dc[kDcIntEnable]), gic);
     }
 
     // The compositor has no vsync client any more: it has nothing to draw until it registers again.
@@ -1928,20 +1999,13 @@ private:
         switch_interrupt_describe(kDisplayAInterrupt, gic, sizeof(gic));
         panic("SwitchDisplay: no DC A V_BLANK in %u frame ends with vsync armed: INT_STATUS %#x MASK %#x ENABLE "
               "%#x, %s",
-              vsyncSilent, dc[kDcIntStatus], dc[kDcIntMask], dc[kDcIntEnable], gic);
+              vsyncSilent, static_cast<uint32_t>(dc[kDcIntStatus]), static_cast<uint32_t>(dc[kDcIntMask]),
+              static_cast<uint32_t>(dc[kDcIntEnable]), gic);
     }
 
     static bool displayClocked()
     {
-        IODeviceMemory *memory = IODeviceMemory::withRange(kCarPA, 0x1000);
-        IOMemoryMap *car = memory ? memory->map(kIOMapAnywhere | kIOMapInhibitCache) : nullptr;
-        OSSafeReleaseNULL(memory);
-        if (!car)
-            return false;
-        const volatile uint32_t *regs = reinterpret_cast<const volatile uint32_t *>(car->getVirtualAddress());
-        const bool running = (regs[kCarClockL / 4] & kCarDisp1) && !(regs[kCarResetL / 4] & kCarDisp1);
-        car->release();
-        return running;
+        return switch_car_clock_enabled(kCarDisp1Id) && !switch_car_reset_asserted(kCarDisp1Id);
     }
 
     bool startVblank(IOWorkLoop *loop)
@@ -1954,7 +2018,7 @@ private:
         OSSafeReleaseNULL(memory);
         if (!dcMap)
             panic("SwitchDisplay: cannot map DC A");
-        dc = reinterpret_cast<volatile uint32_t *>(dcMap->getVirtualAddress());
+        dc = SwitchMMIOWords(static_cast<uintptr_t>(dcMap->getVirtualAddress()));
         color->attach(dc);
         vblankSource = IOFilterInterruptEventSource::filterInterruptEventSource(
             this, &NativeLegacyDisplay::vblankFired, &NativeLegacyDisplay::vblankFilter, nub, 0);
@@ -2005,7 +2069,7 @@ private:
         dc[kDcIntStatus] = kVblankInt | kFrameEndInt | kVpulse2Int;
         vpulseProgrammed = vpulseSeen = false;
         color->detach();
-        dc = nullptr;
+        dc = SwitchMMIOWords();
         OSSafeReleaseNULL(dcMap);
         dcPending = 0;
     }
@@ -2025,7 +2089,7 @@ private:
             timer->release();
             return;
         }
-        nanoseconds_to_absolutetime(1000000000ull / hz, &vsyncInterval);
+        nanoseconds_to_absolutetime(1000000000ULL / hz, &vsyncInterval);
         vsyncHz = hz;
         vsyncTimer = timer;
         // A client may already have registered: arm under the gate, like the registration does. The vblank interrupt starts under the
@@ -2070,20 +2134,23 @@ private:
         if (!vblankSource)
             panic("SwitchDisplay: the hardware rotation needs DC A frame ends to confirm the latch");
         blockMapping = mapScanout(bootMapping->getPhysicalAddress());
-        if (!blockMapping || !blockMapping->getVirtualAddress() || blockMapping->getLength() < kNativeBlockBytes)
+        if (!blockMapping || !blockMapping->getVirtualAddress() || blockMapping->getLength() < kNativeBlockBytes) {
             panic("SwitchDisplay: cannot map the %#llx-byte block-linear scanout at %#llx", kNativeBlockBytes,
                   (uint64_t)bootMapping->getPhysicalAddress());
+        }
         hwRotate = true;
         startDoubleBuffer();
         // The memory type each CPU view of the scanout really got (MAIR byte: 0x44 write-combined, 0x00/0x04 device): the copy's
         // store rate depends on it.
+        const char *buffers = "";
+        if (doubleBuffer) {
+            buffers = ring.buffers == 3 ? " and two more buffers (triple-buffered, latest frame wins)"
+                                        : " and a second buffer (double-buffered)";
+        }
         IOLog("SwitchDisplay: hardware rotation armed: block-linear %ux%u at %#llx%s, window A switches at the "
               "first client frame; "
               "memory type %#x (pitch view %#x)\n",
-              kNativeBlockWidth, kNativeBlockHeight, (uint64_t)bootMapping->getPhysicalAddress(),
-              !doubleBuffer       ? ""
-              : ring.buffers == 3 ? " and two more buffers (triple-buffered, latest frame wins)"
-                                  : " and a second buffer (double-buffered)",
+              kNativeBlockWidth, kNativeBlockHeight, static_cast<uint64_t>(bootMapping->getPhysicalAddress()), buffers,
               mairAttribute(reinterpret_cast<const void *>(blockMapping->getVirtualAddress())),
               mairAttribute(reinterpret_cast<const void *>(bootMapping->getVirtualAddress())));
     }
@@ -2092,13 +2159,13 @@ private:
     // descriptor on: for a physical descriptor IOKit takes the memory type from the descriptor's own cache mode (the default, for
     // RAM the kernel does not manage, is device memory), and the GPU driver found a map-time kIOMapWriteCombineCache alone left its
     // mappings device memory (TegraGM20BUserClient.cpp kPoolCacheMode). Device memory takes every 16-byte store as its own bus write.
-    IOMemoryMap *mapScanout(uint64_t pa, uint64_t bytes = kNativeBlockBytes) const
+    static IOMemoryMap *mapScanout(uint64_t pa, uint64_t bytes = kNativeBlockBytes)
     {
         IOAddressRange range = {pa, bytes};
         IOMemoryDescriptor *memory = IOMemoryDescriptor::withAddressRanges(
             &range, 1,
-            IOOptionBits(kIODirectionInOut) | IOOptionBits(kIOMemoryTypePhysical64) |
-                (IOOptionBits(kIOWriteCombineCache) << kIOMemoryBufferCacheShift),
+            static_cast<IOOptionBits>(kIODirectionInOut) | static_cast<IOOptionBits>(kIOMemoryTypePhysical64) |
+                (static_cast<IOOptionBits>(kIOWriteCombineCache) << kIOMemoryBufferCacheShift),
             TASK_NULL);
         IOMemoryMap *map = memory ? memory->map(kIOMapAnywhere | kIOMapWriteCombineCache) : nullptr;
         OSSafeReleaseNULL(memory);
@@ -2110,37 +2177,30 @@ private:
     // page. Surface 1 is required (as before); without surface 2 the display double-buffers, said in one line.
     bool startScanBuffer(unsigned i, bool required)
     {
-        const IOOptionBits options = IOOptionBits(kIODirectionInOut) | IOOptionBits(kIOMemoryPhysicallyContiguous) |
-                                     IOOptionBits(kIOMemoryMapperNone);
-        IOBufferMemoryDescriptor *buffer = IOBufferMemoryDescriptor::inTaskWithPhysicalMask(
-            kernel_task, options, kNativeBlockBytes, 0x00000000fffe0000ULL);
-        IOByteCount run = 0;
-        const uint64_t pa = buffer ? buffer->getPhysicalSegment(0, &run, kIOMemoryMapperNone) : 0;
+        // switch_dma_alloc zeroed the pages and cleaned them out of the kernel's cacheable alias, which nothing writes after
+        // this, so no dirty line can land on a frame the write-combined mapping wrote around the cache.
+        switch_dma_buffer buffer = {};
         IOMemoryMap *mapping = nullptr;
-        if (pa && run >= kNativeBlockBytes && !(pa & 0x1ffff) && pa + kNativeBlockBytes <= (1ull << 32) &&
-            buffer->getBytesNoCopy()) {
-            // The allocator zeroed the pages through the kernel's cacheable alias. Write those lines back and drop them now,
-            // before the write-combined mapping writes the same memory around the cache; nothing writes through the cacheable
-            // alias after this, so no dirty line can later land on a frame.
-            cleanInvalidate(buffer->getBytesNoCopy(), kNativeBlockBytes);
-            mapping = mapScanout(pa);
+        if (switch_dma_alloc(&buffer, kNativeBlockBytes, 0x00000000fffe0000ULL) && !(buffer.pa & 0x1ffff)) {
+            mapping = mapScanout(buffer.pa);
             if (mapping && (!mapping->getVirtualAddress() || mapping->getLength() < kNativeBlockBytes))
                 OSSafeReleaseNULL(mapping);
         }
         if (!mapping) {
-            if (required)
-                panic("SwitchDisplay: no mapped, physically contiguous %#llx-byte buffer "
-                      "below 4 GiB for surface %u (got %#llx, %#llx contiguous)",
-                      kNativeBlockBytes, i, pa, (uint64_t)run);
-            IOLog("SwitchDisplay: no physically contiguous %#llx-byte buffer below 4 GiB for surface %u (got %#llx, "
-                  "%#llx contiguous): double-buffered, a late frame delays the ones after it\n",
-                  kNativeBlockBytes, i, pa, (uint64_t)run);
-            OSSafeReleaseNULL(buffer);
+            if (required) {
+                panic("SwitchDisplay: no mapped, physically contiguous %#llx-byte buffer below 4 GiB for surface %u "
+                      "(got %#llx)",
+                      kNativeBlockBytes, i, buffer.pa);
+            }
+            IOLog("SwitchDisplay: no physically contiguous %#llx-byte buffer below 4 GiB for surface %u (got %#llx): "
+                  "double-buffered, a late frame delays the ones after it\n",
+                  kNativeBlockBytes, i, buffer.pa);
+            switch_dma_free(&buffer);
             return false;
         }
         scanBuffers[i] = buffer;
         scanMappings[i] = mapping;
-        scanAddresses[i] = pa;
+        scanAddresses[i] = buffer.pa;
         return true;
     }
 
@@ -2154,16 +2214,8 @@ private:
         doubleBuffer = true;
         ring.reset(buffers);
         // The SMMU probe's page tables (directory + tables), physically contiguous below 4 GiB; none: no probe.
-        probeTables = IOBufferMemoryDescriptor::inTaskWithPhysicalMask(
-            kernel_task, IOOptionBits(kIODirectionInOut) | IOOptionBits(kIOMemoryPhysicallyContiguous),
-            (uint64_t)kProbeTables * 4096, 0x00000000fffff000ULL);
-        IOByteCount run = 0;
-        probeTablesPa = probeTables ? probeTables->getPhysicalSegment(0, &run, kIOMemoryMapperNone) : 0;
-        if (!probeTablesPa || run < (uint64_t)kProbeTables * 4096 || probeTablesPa + run > (1ull << 32) ||
-            !probeTables->getBytesNoCopy()) {
+        if (!switch_dma_alloc(&probeTables, static_cast<size_t>(kProbeTables) * 4096))
             IOLog("SwitchDisplay: no contiguous %u KiB for the SMMU probe's tables: probe off\n", kProbeTables * 4);
-            OSSafeReleaseNULL(probeTables);
-        }
         kickDeferred = false;
     }
 
@@ -2181,27 +2233,18 @@ private:
         if (!hwRotate)
             return;
         checkPitchWindow();
-        const IOOptionBits options = IOOptionBits(kIODirectionInOut) | IOOptionBits(kIOMemoryPhysicallyContiguous) |
-                                     IOOptionBits(kIOMemoryMapperNone);
-        tapeBuffer =
-            IOBufferMemoryDescriptor::inTaskWithPhysicalMask(kernel_task, options, kTapeBytes, 0x00000000fffff000ULL);
-        IOByteCount run = 0;
-        const uint64_t pa = tapeBuffer ? tapeBuffer->getPhysicalSegment(0, &run, kIOMemoryMapperNone) : 0;
-        if (pa && run >= kTapeBytes && pa + kTapeBytes <= (1ull << 32) && tapeBuffer->getBytesNoCopy()) {
-            // As for surface 1: the zeroing went through the cacheable alias, which nothing writes after this.
-            cleanInvalidate(tapeBuffer->getBytesNoCopy(), kTapeBytes);
-            tapeMapping = mapScanout(pa, kTapeBytes);
-        }
+        // As for surface 1: switch_dma_alloc cleaned the zeroing out of the cacheable alias, which nothing writes after this.
+        if (switch_dma_alloc(&tapeBuffer, kTapeBytes))
+            tapeMapping = mapScanout(tapeBuffer.pa, kTapeBytes);
         if (!tapeMapping || !tapeMapping->getVirtualAddress() || tapeMapping->getLength() < kTapeBytes) {
-            IOLog("SwitchDisplay: no physically contiguous %#llx-byte console tape below 4 GiB (got %#llx, %#llx "
-                  "contiguous): "
-                  "the console scrolls in software\n",
-                  kTapeBytes, pa, (uint64_t)run);
+            IOLog("SwitchDisplay: no physically contiguous %#llx-byte console tape below 4 GiB (got %#llx): the "
+                  "console scrolls in software\n",
+                  kTapeBytes, tapeBuffer.pa);
             OSSafeReleaseNULL(tapeMapping);
-            OSSafeReleaseNULL(tapeBuffer);
+            switch_dma_free(&tapeBuffer);
             return;
         }
-        tapeAddress = (uint32_t)pa;
+        tapeAddress = static_cast<uint32_t>(tapeBuffer.pa);
         tapeStrideSet = false;
         tapeAttached = true;
         dc[kDcRegActControl] = pitchActControl & ~kWinAActHcntrSel;
@@ -2213,7 +2256,7 @@ private:
             tapeAttached = false;
             dc[kDcRegActControl] = pitchActControl;
             OSSafeReleaseNULL(tapeMapping);
-            OSSafeReleaseNULL(tapeBuffer);
+            switch_dma_free(&tapeBuffer);
             return;
         }
         chainPanicHook();
@@ -2231,7 +2274,7 @@ private:
         NativeLegacyDisplay *self = static_cast<NativeLegacyDisplay *>(owner);
         if (self->hwSuspended)
             return;  // unclocked for SC7
-        volatile uint32_t *dc = self->dc;
+        const SwitchMMIOWords dc = self->dc;
         __asm__ volatile("dsb sy" ::: "memory");
         dc[kDcWindowHeader] = kWindowASelect;
         if (!self->tapeStrideSet) {
@@ -2246,7 +2289,8 @@ private:
     // XNU's console, under its lock: DC A took the last tapeShow (its ACT_REQ is clear).
     static int tapeLatched(void *owner)
     {
-        return !(static_cast<NativeLegacyDisplay *>(owner)->dc[kDcStateControl] & kWinAActReq);
+        return static_cast<int>(
+            static_cast<int>((static_cast<NativeLegacyDisplay *>(owner)->dc[kDcStateControl] & kWinAActReq)) == 0u);
     }
 
     static int tapeWait(void *owner)
@@ -2266,12 +2310,12 @@ private:
         // or behind it would wait on itself (the 100 ms panic below, seen on hardware). Scroll without waiting then.
         if (__atomic_load_n(&dcPending, __ATOMIC_ACQUIRE))
             return 0;
-        if (IOWorkLoop *loop = getWorkLoop(); loop && loop->onThread())
+        if (const IOWorkLoop *loop = getWorkLoop(); loop && loop->onThread())
             return 0;
         const uint64_t seen = __atomic_load_n(&tapeFrames, __ATOMIC_ACQUIRE);
-        uint64_t deadline;
+        uint64_t deadline = 0;
         clock_interval_to_deadline(kTapeWaitMS, kMillisecondScale, &deadline);
-        assert_wait_deadline((event_t)&tapeFrames, THREAD_UNINT, deadline);
+        assert_wait_deadline(reinterpret_cast<event_t>(&tapeFrames), THREAD_UNINT, deadline);
         // Asserted before the count is read again: a frame end in between is not missed.
         if (__atomic_load_n(&tapeFrames, __ATOMIC_ACQUIRE) != seen) {
             clear_wait(current_thread(), THREAD_AWAKENED);
@@ -2286,7 +2330,8 @@ private:
         switch_interrupt_describe(kDisplayAInterrupt, gic, sizeof(gic));
         panic("SwitchDisplay: the console waited %u ms for a DC A frame end to scroll: INT_STATUS %#x MASK %#x "
               "ENABLE %#x, %s",
-              kTapeWaitMS, dc[kDcIntStatus], dc[kDcIntMask], dc[kDcIntEnable], gic);
+              kTapeWaitMS, static_cast<uint32_t>(dc[kDcIntStatus]), static_cast<uint32_t>(dc[kDcIntMask]),
+              static_cast<uint32_t>(dc[kDcIntEnable]), gic);
     }
 
     // Under the gate, once window A no longer scans the tape: the console (released at the first frame) leaves it, its pages go.
@@ -2301,7 +2346,7 @@ private:
         tapeSettle = false;
         thread_wakeup((event_t)&tapeFrames);  // a console still waiting to scroll: there is no tape now
         OSSafeReleaseNULL(tapeMapping);
-        OSSafeReleaseNULL(tapeBuffer);
+        switch_dma_free(&tapeBuffer);
     }
 
     // Under the gate, in a kick, right after native_legacy_prepare_scanout released XNU's console: its last scroll may still wait for
@@ -2326,7 +2371,8 @@ private:
                 return;
             panic("SwitchDisplay: window A never latched the console's last scroll in %u frames: STATE_CONTROL %#x "
                   "ACT_CONTROL %#x START %#x",
-                  kLatchFrames, dc[kDcStateControl], dc[kDcRegActControl], windowActive(kWinbufStartAddr));
+                  kLatchFrames, static_cast<uint32_t>(dc[kDcStateControl]), static_cast<uint32_t>(dc[kDcRegActControl]),
+                  windowActive(kWinbufStartAddr));
         }
         tapeSettle = false;
         if (kickDeferred) {
@@ -2361,28 +2407,35 @@ private:
               ring.pending != kNoBuffer ? surfaceAddress(ring.pending)
               : probe.onIova            ? (uint32_t)kProbeSlot
                                         : surfaceAddress(probeSurface),
-              kFlipDeadlineMS, frameEnds - flipRequested, dc[kDcStateControl], dc[kDcIntStatus], dc[kDcIntMask],
-              dc[kDcIntEnable], gic);
+              kFlipDeadlineMS, frameEnds - flipRequested, static_cast<uint32_t>(dc[kDcStateControl]),
+              static_cast<uint32_t>(dc[kDcIntStatus]), static_cast<uint32_t>(dc[kDcIntMask]),
+              static_cast<uint32_t>(dc[kDcIntEnable]), gic);
     }
 
     // Surface i's physical address (window A's START_ADDR); 0 is the boot framebuffer, also the pitch console's.
     uint32_t surfaceAddress(int i) const
     {
-        if (i >= kSlot0)
-            return (uint32_t)(kProbeSlot + (uint64_t)(i - kSlot0) * kSlotSpan);  // a direct slot's IOVA
-        return (uint32_t)(i > 0 ? scanAddresses[i] : bootMapping->getPhysicalAddress());
+        if (i >= kSlot0) {
+            return static_cast<uint32_t>(kProbeSlot +
+                                         static_cast<uint64_t>(i - kSlot0) * kSlotSpan);  // a direct slot's IOVA
+        }
+        // NOLINTNEXTLINE(clang-analyzer-core.CallAndMessage): surface 0 is scanned only while bootMapping is mapped
+        return static_cast<uint32_t>(i > 0 ? scanAddresses[i] : bootMapping->getPhysicalAddress());
     }
 
     // The surface window A scans when its START_ADDR is start; kNoBuffer when none is.
     int surfaceIndex(uint32_t start) const
     {
-        for (unsigned i = 0; i < (doubleBuffer ? ring.buffers : 1u); ++i)
-            if (start == surfaceAddress((int)i))
-                return (int)i;
-        if (directAttached)
-            for (unsigned k = 0; k < kSlots; ++k)
-                if (start == surfaceAddress(kSlot0 + (int)k))
-                    return kSlot0 + (int)k;
+        for (unsigned i = 0; i < (doubleBuffer ? ring.buffers : 1u); ++i) {
+            if (start == surfaceAddress(static_cast<int>(i)))
+                return static_cast<int>(i);
+        }
+        if (directAttached) {
+            for (unsigned k = 0; k < kSlots; ++k) {
+                if (start == surfaceAddress(kSlot0 + static_cast<int>(k)))
+                    return kSlot0 + static_cast<int>(k);
+            }
+        }
         return kNoBuffer;
     }
 
@@ -2391,7 +2444,7 @@ private:
     {
         if (i >= kSlot0) {
             kind = slots[i - kSlot0].tiled ? kBlockSurfaceKind : 0;
-            stride = slots[i - kSlot0].tiled ? kBlockLineStride : (uint32_t)slots[i - kSlot0].stride;
+            stride = slots[i - kSlot0].tiled ? kBlockLineStride : static_cast<uint32_t>(slots[i - kSlot0].stride);
             hOffset = 0;
         } else {
             kind = kBlockSurfaceKind;
@@ -2402,7 +2455,12 @@ private:
 
     bool sameLayout(int a, int b) const
     {
-        uint32_t ka, sa, ha, kb, sb, hb;
+        uint32_t ka = 0;
+        uint32_t sa = 0;
+        uint32_t ha = 0;
+        uint32_t kb = 0;
+        uint32_t sb = 0;
+        uint32_t hb = 0;
         layoutOf(a, ka, sa, ha);
         layoutOf(b, kb, sb, hb);
         return ka == kb && sa == sb && ha == hb;
@@ -2436,10 +2494,11 @@ private:
         if (gPanicRestore.panicking)
             return;
         const int target = ring.target();
-        if (target == kNoBuffer)
+        if (target == kNoBuffer) {
             panic("SwitchDisplay: a frame to flip, but no scanout surface was free for it (front %d pending %d "
                   "replaced %d)",
                   ring.front, ring.pending, ring.superseded);
+        }
         presentEntry(target);
     }
 
@@ -2472,7 +2531,9 @@ private:
         dc[kDcStateAccess] = dc[kDcStateAccess] & ~(kReadMuxActive | kWriteMuxActive);
         dc[kDcWindowHeader] = kWindowASelect;
         if (directAttached) {
-            uint32_t kind, stride, hOffset;
+            uint32_t kind = 0;
+            uint32_t stride = 0;
+            uint32_t hOffset = 0;
             layoutOf(i, kind, stride, hOffset);
             dc[kWinbufSurfaceKind] = kind;
             dc[kWinLineStride] = stride;
@@ -2481,7 +2542,9 @@ private:
         dc[kWinbufStartAddr] = surfaceAddress(i);
         // Window B's change for this frame, if any, into its assembly registers: one UPDATE write arms both windows and one
         // ACT_REQ write latches them at the same boundary (the ARM copy makes a replaced pair whole either way).
-        uint32_t update = kGeneralUpdate | kWinAUpdate, request = kGeneralActReq | kWinAActReq;
+        uint32_t update = kGeneralUpdate | kWinAUpdate;
+        uint32_t request = kGeneralActReq | kWinAActReq;
+        // NOLINTNEXTLINE(clang-analyzer-security.ArrayBound): i is a ring entry, never kNoBuffer
         if (entryPlaneSet[i]) {
             entryPlaneSet[i] = false;
             planeStage(entryPlane[i], update, request);
@@ -2504,10 +2567,11 @@ private:
             switch_boot_io_report();  // once; later calls return at once
         if (!rotated && &switch_console_hold && switch_console_hold)
             return;  // the console keeps the screen (migration)
-        if (!rotated)
+        if (!rotated) {
             startRotation();
-        else if (doubleBuffer)
+        } else if (doubleBuffer) {
             flip();
+        }
     }
 
     // A frame end (atFrameEnd) or vblank while a flip is out, under the gate. Which surface window A scans (its active START_ADDR)
@@ -2515,22 +2579,26 @@ private:
     // then taken at the next boundary), or nothing yet. Each latch frees the surfaces no longer scanned.
     void checkFlip(bool atFrameEnd)
     {
-        const uint32_t control = dc[kDcStateControl], start = windowActive(kWinbufStartAddr);
-        const int asked = ring.pending, replaced = ring.superseded, scanned = ring.front;
+        const uint32_t control = dc[kDcStateControl];
+        const uint32_t start = windowActive(kWinbufStartAddr);
+        const int asked = ring.pending;
+        const int replaced = ring.superseded;
+        const int scanned = ring.front;
         const uint64_t stamp = atFrameEnd ? __atomic_load_n(&feStamp, __ATOMIC_ACQUIRE) : vblankTime;
-        switch (ring.latch(surfaceIndex(start), control & (kGeneralActReq | kWinAActReq))) {
+        switch (ring.latch(surfaceIndex(start), (control & (kGeneralActReq | kWinAActReq)) != 0u)) {
         case TegraScanoutRing::kWaiting:
             if (!atFrameEnd || frameEnds - flipRequested < kLatchFrames)
                 return;
             panic("SwitchDisplay: window A never latched the flip to %#x in %u frames: STATE_CONTROL %#x "
                   "ACT_CONTROL %#x START %#x",
-                  surfaceAddress(asked), kLatchFrames, control, dc[kDcRegActControl], start);
+                  surfaceAddress(asked), kLatchFrames, control, static_cast<uint32_t>(dc[kDcRegActControl]), start);
         case TegraScanoutRing::kInconsistent:
             // Double-buffered already, this is the check the path had before r14: window A does not show the flip asked for.
-            if (!ring.replace)
+            if (!ring.replace) {
                 panic("SwitchDisplay: window A latched START_ADDR %#x, not the flip to %#x (front %#x; STATE_CONTROL "
                       "%#x)",
                       start, surfaceAddress(asked), surfaceAddress(scanned), control);
+            }
             recoverFlip(start, control, asked, replaced, scanned);
             return;
         case TegraScanoutRing::kTaken:
@@ -2573,27 +2641,27 @@ private:
     struct ProbeIo {
         NativeLegacyDisplay *d;
 
-        void tweakPixel()
+        void tweakPixel() const
         {
             d->probeWritePixel(d->probePixel ^ 0x00010101u);
         }
 
-        void restorePixel()
+        void restorePixel() const
         {
             d->probeWritePixel(d->probePixel);
         }
 
-        bool attach()
+        bool attach() const
         {
             return d->probeAttach();
         }
 
-        void scan(bool iova)
+        void scan(bool iova) const
         {
-            volatile uint32_t *regs = d->dc;
+            const SwitchMMIOWords regs = d->dc;
             regs[kDcStateAccess] = regs[kDcStateAccess] & ~(kReadMuxActive | kWriteMuxActive);
             regs[kDcWindowHeader] = kWindowASelect;
-            regs[kWinbufStartAddr] = iova ? (uint32_t)kProbeSlot : d->surfaceAddress(d->probeSurface);
+            regs[kWinbufStartAddr] = iova ? static_cast<uint32_t>(kProbeSlot) : d->surfaceAddress(d->probeSurface);
             regs[kDcStateControl] = kGeneralUpdate | kWinAUpdate;
             regs[kDcStateControl] = kGeneralActReq | kWinAActReq;
             // Out until a frame end shows it taken (probeFrameEnd); a lost DC A interrupt panics at the flip deadline.
@@ -2602,19 +2670,19 @@ private:
             d->flipTimer->setTimeoutMS(kFlipDeadlineMS);
         }
 
-        void detach()
+        void detach() const
         {
             if (d->probe.stage == DisplaySmmuProbe::kDone && d->startDirect())
                 return;               // passed: the domain stays
             if (d->planesAttached) {  // window B's planes use the domain: only the probe's slot goes
-                d->probeDomain.unmap(kProbeSlot, (uint32_t)(kNativeBlockBytes / 4096));
+                d->probeDomain.unmap(kProbeSlot, static_cast<uint32_t>(kNativeBlockBytes / 4096));
                 d->cleanDomain();
                 return;
             }
             tegra_smmu_detach(TEGRA_SMMU_ASID_DISPLAY, TEGRA_SMMU_DC_ASID);
         }
 
-        void crcOff()
+        void crcOff() const
         {
             d->dc[kDcCrcControl] = 0;
             d->dc[kDcStateControl] = kGeneralUpdate;
@@ -2633,7 +2701,7 @@ private:
     bool otherWindowEnabled()
     {
         static constexpr uint32_t kWindowBCSelect[] = {1u << 5, 1u << 6};
-        for (uint32_t select : kWindowBCSelect) {
+        for (const uint32_t select : kWindowBCSelect) {
             const uint32_t access = dc[kDcStateAccess] & ~(kReadMuxActive | kWriteMuxActive);
             dc[kDcStateAccess] = access | kReadMuxActive;
             dc[kDcWindowHeader] = select;
@@ -2651,30 +2719,32 @@ private:
     bool probeAttach()
     {
         // With planes on, the domain is the plane probe's already (window A's surfaces 1:1 in it): it is extended, not made.
-        if (!planesAttached && !probeDomain.init(probeTables->getBytesNoCopy(), probeTablesPa, kProbeTables)) {
+        if (!planesAttached && !probeDomain.init(probeTables.va, probeTables.pa, kProbeTables)) {
             snprintf(probeLine, sizeof(probeLine), "the table buffer cannot hold a directory");
             return false;
         }
         bool ok = true;
         for (unsigned i = 0; i < ring.buffers; ++i)
-            ok = ok && probeDomain.identity(surfaceAddress((int)i), kNativeBlockBytes, false);
+            ok = ok && probeDomain.identity(surfaceAddress(static_cast<int>(i)), kNativeBlockBytes, false);
         uint64_t pages[64];
         for (uint64_t off = 0; ok && off < kNativeBlockBytes; off += sizeof(pages) / sizeof(pages[0]) * 4096) {
             uint32_t n = 0;
-            for (; n < 64 && off + n * 4096ull < kNativeBlockBytes; ++n)
-                pages[n] = surfaceAddress(probeSurface) + off + n * 4096ull;
+            for (; n < 64 && off + n * 4096ULL < kNativeBlockBytes; ++n)
+                pages[n] = surfaceAddress(probeSurface) + off + n * 4096ULL;
             ok = probeDomain.map(kProbeSlot + off, pages, n, false);
         }
         if (!ok) {
             snprintf(probeLine, sizeof(probeLine), "more than %u SMMU tables needed", kProbeTables);
             return false;
         }
-        uintptr_t low, high;
+        uintptr_t low = 0;
+        uintptr_t high = 0;
         probeDomain.takeDirty(&low, &high);
-        cleanInvalidate(probeTables->getBytesNoCopy(), (uint64_t)kProbeTables * 4096);
+        switch_dcache_clean_invalidate(probeTables.va, static_cast<uint64_t>(kProbeTables) * 4096);
         probeSwgroupWas = tegra_smmu_read(TEGRA_SMMU_DC_ASID);
-        return !tegra_smmu_attach(TEGRA_SMMU_ASID_DISPLAY, probeDomain.ptb(), TEGRA_SMMU_DC_ASID,
-                                  TEGRA_SMMU_TRANSLATION_ENABLE_0, kDisplay0aTranslation, probeLine, sizeof(probeLine));
+        return tegra_smmu_attach(TEGRA_SMMU_ASID_DISPLAY, probeDomain.ptb(), TEGRA_SMMU_DC_ASID,
+                                 TEGRA_SMMU_TRANSLATION_ENABLE_0, kDisplay0aTranslation, probeLine,
+                                 sizeof(probeLine)) == 0;
     }
 
     // Every DC A frame end: start the probe once things are quiet, or take its next step.
@@ -2690,7 +2760,7 @@ private:
             }
         }
         if (!probe.active()) {
-            if (probeRan || !probeTables || !doubleBuffer || !rotationLatched || hwSuspended || scanoutStopped ||
+            if (probeRan || !probeTables.memory || !doubleBuffer || !rotationLatched || hwSuspended || scanoutStopped ||
                 tapeAttached || gPanicRestore.panicking)
                 return;
             if (!probeAt)
@@ -2720,7 +2790,7 @@ private:
             probeHoldSince = mach_absolute_time();
             return;
         }
-        const bool requestOut = dc[kDcStateControl] & (kGeneralActReq | kWinAActReq);
+        const bool requestOut = (dc[kDcStateControl] & (kGeneralActReq | kWinAActReq)) != 0u;
         const DisplaySmmuProbe::Action action = probe.frameEnd(dc[kDcCrcLatched], requestOut, probeUnderflow);
         probeUnderflow = false;
         ProbeIo io = {this};
@@ -2729,22 +2799,25 @@ private:
     }
 
     // The probe is over (passed, or failed and undone): its line, and the swaps it held go.
+    // NOLINTNEXTLINE(misc-no-recursion): kickSwapQueue's kicking flag stops re-entry; a nested kick only loops
     void finishProbe()
     {
-        if (probe.stage == DisplaySmmuProbe::kDone)
+        if (probe.stage == DisplaySmmuProbe::kDone) {
             IOLog("SwitchDisplay: SMMU probe ok: DC A reads window A through the SMMU (ASID %u, swgroup dc, MC %#x "
                   "was "
                   "%#x, TRANSLATION_ENABLE_0 %#x): CRC %#x by physical address, 1:1 and at IOVA %#llx, %#x with one "
                   "pixel "
                   "changed; %s\n",
-                  (unsigned)TEGRA_SMMU_ASID_DISPLAY, (unsigned)TEGRA_SMMU_DC_ASID, probeSwgroupWas,
-                  tegra_smmu_read(TEGRA_SMMU_TRANSLATION_ENABLE_0), probe.base, (unsigned long long)kProbeSlot,
-                  probe.tweaked, directOn ? "the domain stays: direct scanout on" : "back in bypass");
-        else
+                  static_cast<unsigned>(TEGRA_SMMU_ASID_DISPLAY), static_cast<unsigned>(TEGRA_SMMU_DC_ASID),
+                  probeSwgroupWas, tegra_smmu_read(TEGRA_SMMU_TRANSLATION_ENABLE_0), probe.base,
+                  static_cast<unsigned long long>(kProbeSlot), probe.tweaked,
+                  directOn ? "the domain stays: direct scanout on" : "back in bypass");
+        } else {
             IOLog("SwitchDisplay: SMMU probe failed at %s: %s%s%s (CRC base %#x again %#x pixel %#x last %#x, "
                   "first latched at frame end %u of %u); undone, direct scanout stays off\n",
                   DisplaySmmuProbe::name(probe.failedAt), probe.why, probeLine[0] ? ": " : "", probeLine, probe.base,
                   probe.again, probe.tweaked, probe.seen, probe.firstLatch, probe.frames);
+        }
         if (!probeRequest)
             probeHoldSince = 0;
         if (kickDeferred && !probeRequest) {  // else at the frame end that shows the last request taken
@@ -2755,10 +2828,11 @@ private:
 
     // In a kick held by the probe: past kProbeHoldMs the probe is undone (abortProbe) and its last start-address request no
     // longer holds swaps (a later flip supersedes it; DC A takes the assembly copy at the boundary either way). True: go.
+    // NOLINTNEXTLINE(misc-no-recursion): kickSwapQueue's kicking flag stops re-entry; a nested kick only loops
     bool releaseProbeHold()
     {
-        uint64_t bound;
-        nanoseconds_to_absolutetime((uint64_t)kProbeHoldMs * 1000000ull, &bound);
+        uint64_t bound = 0;
+        nanoseconds_to_absolutetime(static_cast<uint64_t>(kProbeHoldMs) * 1000000ULL, &bound);
         if (!probeHoldSince || mach_absolute_time() - probeHoldSince < bound)
             return false;
         if (probe.active())
@@ -2774,6 +2848,7 @@ private:
     }
 
     // The display is going away or to sleep with the probe running: undo now (registers still clocked).
+    // NOLINTNEXTLINE(misc-no-recursion): kickSwapQueue's kicking flag stops re-entry; a nested kick only loops
     void abortProbe(const char *reason)
     {
         if (!probe.active())
@@ -2791,12 +2866,13 @@ private:
             blanked = false;
             color->setBlank(false);
         }
-        if (const int held = ring.flipHeld(); held != kNoBuffer)
+        if (const int held = ring.flipHeld(); held != kNoBuffer) {
             writeFlip(held);
-        // r16-idle: nothing is out any more, so the deadline has nothing to check; left armed it woke the CPU 100 ms after
-        // the last flip of every burst. The next writeFlip arms it again.
-        else if (ring.pending == kNoBuffer && !probeRequest && flipTimer)
+            // r16-idle: nothing is out any more, so the deadline has nothing to check; left armed it woke the CPU 100 ms after
+            // the last flip of every burst. The next writeFlip arms it again.
+        } else if (ring.pending == kNoBuffer && !probeRequest && flipTimer) {
             flipTimer->cancelTimeout();
+        }
         if (kickDeferred) {
             kickDeferred = false;
             kickSwapQueue();
@@ -2820,24 +2896,31 @@ private:
     // check keeps hekate's values for every way back (stopRotation, restorePitchWindow, the panic hook).
     void checkPitchWindow()
     {
-        const uint32_t options = windowActive(kWinOptions), size = windowActive(kWinSize),
-                       prescaled = windowActive(kWinPrescaled);
-        const uint32_t dda = windowActive(kWinDdaIncrement), stride = windowActive(kWinLineStride),
-                       kind = windowActive(kWinbufSurfaceKind);
-        const uint32_t start = windowActive(kWinbufStartAddr), startHigh = windowActive(kWinbufStartAddrHi);
-        const uint32_t hOffset = windowActive(kWinbufHOffset), vOffset = windowActive(kWinbufVOffset);
-        const uint32_t depth = windowActive(kWinColorDepth), position = windowActive(kWinPosition);
-        const bool boot = (stride & 0xffff) == 2880 && start == (uint32_t)bootMapping->getPhysicalAddress();
+        const uint32_t options = windowActive(kWinOptions);
+        const uint32_t size = windowActive(kWinSize);
+        const uint32_t prescaled = windowActive(kWinPrescaled);
+        const uint32_t dda = windowActive(kWinDdaIncrement);
+        const uint32_t stride = windowActive(kWinLineStride);
+        const uint32_t kind = windowActive(kWinbufSurfaceKind);
+        const uint32_t start = windowActive(kWinbufStartAddr);
+        const uint32_t startHigh = windowActive(kWinbufStartAddrHi);
+        const uint32_t hOffset = windowActive(kWinbufHOffset);
+        const uint32_t vOffset = windowActive(kWinbufVOffset);
+        const uint32_t depth = windowActive(kWinColorDepth);
+        const uint32_t position = windowActive(kWinPosition);
+        const bool boot =
+            (stride & 0xffff) == 2880 && start == static_cast<uint32_t>(bootMapping->getPhysicalAddress());
         const bool tape = tapeAttached && (stride & 0xffff) == kTapeStride && start >= tapeAddress &&
                           start - tapeAddress < kTapeLines * kTapeLineBytes &&
-                          !((start - tapeAddress) % kTapeLineBytes);
+                          (((start - tapeAddress) % kTapeLineBytes) == 0u);
         if ((options & (kWinEnable | kScanColumn | kHDirection | kVDirection)) != kWinEnable || size != kPitchSize ||
             prescaled != kPitchPrescaled || dda != kUnitDda || !(boot || tape) || (kind & 3) || startHigh || hOffset ||
-            vOffset || position || (depth != 0xc && depth != 0xd))
+            vOffset || position || (depth != 0xc && depth != 0xd)) {
             panic("SwitchDisplay: window A is not hekate's pitch window: OPTIONS %#x SIZE %#x PRESCALED %#x DDA %#x "
                   "STRIDE %#x KIND %#x "
                   "START %#x:%#x H %#x V %#x POS %#x DEPTH %#x",
                   options, size, prescaled, dda, stride, kind, startHigh, start, hOffset, vOffset, position, depth);
+        }
         if (pitchSaved)
             return;
         pitchSaved = true;
@@ -2883,9 +2966,10 @@ private:
         // frame through the pitch window at the handover. Single-buffered it is in the boot framebuffer, which window A may not scan
         // yet (the console tape).
         const int target = doubleBuffer ? ring.target() : 0;
-        if (target == kNoBuffer)
+        if (target == kNoBuffer) {
             panic("SwitchDisplay: the first frame has no scanout surface (front %d pending %d replaced %d)", ring.front,
                   ring.pending, ring.superseded);
+        }
         dc[kWinbufStartAddr] = surfaceAddress(target);
         // From here a panic must put the pitch window back (see restorePitchOnPanic); disarmed it only stops this driver's flips.
         chainPanicHook();
@@ -2927,21 +3011,26 @@ private:
                 panic("SwitchDisplay: window A never latched the rotation in %u frames: STATE_CONTROL %#x "
                       "ACT_CONTROL %#x OPTIONS %#x "
                       "STRIDE %#x KIND %#x H %#x",
-                      kLatchFrames, control, dc[kDcRegActControl], windowActive(kWinOptions),
+                      kLatchFrames, control, static_cast<uint32_t>(dc[kDcRegActControl]), windowActive(kWinOptions),
                       windowActive(kWinLineStride), windowActive(kWinbufSurfaceKind), windowActive(kWinbufHOffset));
             }
-            const uint32_t options = windowActive(kWinOptions), stride = windowActive(kWinLineStride);
-            const uint32_t kind = windowActive(kWinbufSurfaceKind), hOffset = windowActive(kWinbufHOffset),
-                           start = windowActive(kWinbufStartAddr);
-            uint32_t wantKind = kBlockSurfaceKind, wantStride = kBlockLineStride, wantH = kBlockHOffset;
+            const uint32_t options = windowActive(kWinOptions);
+            const uint32_t stride = windowActive(kWinLineStride);
+            const uint32_t kind = windowActive(kWinbufSurfaceKind);
+            const uint32_t hOffset = windowActive(kWinbufHOffset);
+            const uint32_t start = windowActive(kWinbufStartAddr);
+            uint32_t wantKind = kBlockSurfaceKind;
+            uint32_t wantStride = kBlockLineStride;
+            uint32_t wantH = kBlockHOffset;
             if (doubleBuffer)
                 layoutOf(ring.pending != kNoBuffer ? ring.pending : ring.front, wantKind, wantStride, wantH);
             if (options != (pitchOptions | kBlockScan) || (stride & 0xffff) != wantStride || kind != wantKind ||
-                hOffset != wantH || start != expectedStart())
+                hOffset != wantH || start != expectedStart()) {
                 panic("SwitchDisplay: DC A did not take the block-linear window A: OPTIONS %#x STRIDE %#x KIND %#x "
                       "H %#x START %#x, wrote %#x %#x %#x %#x %#x",
                       options, stride, kind, hOffset, start, pitchOptions | kBlockScan, kBlockLineStride,
                       kBlockSurfaceKind, kBlockHOffset, expectedStart());
+            }
             rotationLatched = true;
             underflowRun = 0;
             dc[kDcIntStatus] = kWinAUnderflowInt;
@@ -2953,7 +3042,8 @@ private:
             }
             if (ring.pending != kNoBuffer) {
                 // start is expectedStart(), the flip asked for last: taken (a replaced one never scanned for long).
-                const int asked = ring.pending, replaced = ring.superseded;
+                const int asked = ring.pending;
+                const int replaced = ring.superseded;
                 ring.latch(surfaceIndex(start), false);
                 if (replaced != kNoBuffer)
                     ++stReplaced;
@@ -3016,9 +3106,10 @@ private:
         if (rotated) {
             gPanicRestore.armed = false;
             __asm__ volatile("dmb ish" ::: "memory");
-            if (bootMapping)
+            if (bootMapping) {
                 native_legacy_fill_pixels(reinterpret_cast<volatile void *>(bootMapping->getVirtualAddress()),
                                           bootMapping->getLength(), 2880, 720, 1280, 0xff000000U);
+            }
             restorePitchWindow();
             rotated = false;
             rotationLatched = false;
@@ -3037,7 +3128,7 @@ private:
         ring.reset(0);
         for (unsigned i = 1; i < kScanBuffers; ++i) {
             OSSafeReleaseNULL(scanMappings[i]);
-            OSSafeReleaseNULL(scanBuffers[i]);
+            switch_dma_free(&scanBuffers[i]);
             scanAddresses[i] = 0;
         }
         if (flipTimer) {
@@ -3062,15 +3153,16 @@ private:
         if (!hz)
             return;
         // Double-buffered, the copy time is still only the copy: a swap that waits for the previous flip's latch waits before it.
-        if (doubleBuffer)
+        if (doubleBuffer) {
             IOLog("SwitchDisplay: block-linear copy %llu us, max %llu us, mean %llu us over %llu swaps "
                   "(double-buffered, %llu waited for a flip)\n",
                   ticks * 1000000 / hz, copyTicksMax * 1000000 / hz, copyTicksSum / copyFrames * 1000000 / hz,
                   copyFrames, flipWaits);
-        else
+        } else {
             IOLog("SwitchDisplay: %s copy %llu us, max %llu us, mean %llu us over %llu swaps\n",
                   hwRotate ? "block-linear" : "rotating", ticks * 1000000 / hz, copyTicksMax * 1000000 / hz,
                   copyTicksSum / copyFrames * 1000000 / hz, copyFrames);
+        }
     }
 
 public:
@@ -3243,15 +3335,16 @@ public:
         } args = {this, status};
 
         IOWorkLoop *loop = getWorkLoop();
-        auto action = [](OSObject *, void *a0, void *, void *, void *) -> IOReturn {
-            Args *a = static_cast<Args *>(a0);
+        const auto action = [](OSObject *, void *a0, void *, void *, void *) -> IOReturn {
+            const Args *a = static_cast<Args *>(a0);
             a->display->finishGpuSwap(a->status);
             return kIOReturnSuccess;
         };
-        if (loop)
+        if (loop) {
             loop->runAction(action, this, &args);
-        else
+        } else {
             finishGpuSwap(status);
+        }
     }
 
     void free() override
@@ -3318,22 +3411,35 @@ public:
 
     bool start(IOService *provider) override
     {
-        if (!(color = IOMallocType(TegraDisplayColor)) || !color->init() || !(intMaskLock = IOSimpleLockAlloc()) ||
-            !(frameInfo = IOMallocType(switch_frame_info::State)))
+        color = IOMallocType(TegraDisplayColor);
+        if (color == nullptr || !color->init()) {
             return false;
-        if (frameHists && !(hists = IOMallocType(FrameHists)))
+        }
+        intMaskLock = IOSimpleLockAlloc();
+        if (intMaskLock == nullptr) {
             return false;
+        }
+        frameInfo = IOMallocType(switch_frame_info::State);
+        if (frameInfo == nullptr) {
+            return false;
+        }
+        if (frameHists) {
+            hists = IOMallocType(FrameHists);
+            if (!hists)
+                return false;
+        }
         if (!startDisplay(provider))
             return false;
         startVsync();
         startHardwareRotation();
-        if (IOWorkLoop *loop = hwRotate ? getWorkLoop() : nullptr)
+        if (IOWorkLoop *loop = hwRotate ? getWorkLoop() : nullptr) {
             loop->runAction(
                 [](OSObject *owner, void *, void *, void *, void *) -> IOReturn {
                     static_cast<NativeLegacyDisplay *>(owner)->startConsoleTape();
                     return kIOReturnSuccess;
                 },
                 this);
+        }
         startCopyLoop();
         startGpuCopy();
         if (primary) {
@@ -3347,6 +3453,7 @@ public:
 
     void forgetPrimary()
     {
+        // NOLINTNEXTLINE(misc-const-correctness): the expected value's type must be primaryDisplay's
         NativeLegacyDisplay *self = this;
         __atomic_compare_exchange_n(&primaryDisplay, &self, nullptr, false, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE);
     }
@@ -3400,7 +3507,7 @@ public:
             return kIOReturnUnsupported;
         }
         native_legacy_pm_observed(3, kIOReturnSuccess, ordinal);
-        IOReturn status = IOMobileFramebufferLegacy::setPowerState(ordinal, device);
+        const IOReturn status = IOMobileFramebufferLegacy::setPowerState(ordinal, device);
         native_legacy_pm_observed(4, status, ordinal);
         return status;
     }
@@ -3424,6 +3531,7 @@ public:
     // previous frame until the user touched it again). A retirement inside a kick only asks the running kick to loop.
     bool kicking = false, rekick = false;
 
+    // NOLINTNEXTLINE(misc-no-recursion): kickSwapQueue's kicking flag stops re-entry; a nested kick only loops
     void kickSwapQueue() override
     {
         unmaskFrameEnd();
@@ -3441,6 +3549,7 @@ public:
         kicking = false;
     }
 
+    // NOLINTNEXTLINE(misc-no-recursion): kickSwapQueue's kicking flag stops re-entry; a nested kick only loops
     void kickOnce()
     {
         if (transferred || !logicalPM || !bootMapping || !primary)
@@ -3528,13 +3637,15 @@ public:
         if (!surface) {
             // Validated blank swap (all layers disabled over black): solid-fill the actual GOP.
             PE_Video blank = {};
-            uint32_t bw = 0, bh = 0;
+            uint32_t bw = 0;
+            uint32_t bh = 0;
             getDisplayDimensions(&bw, &bh);
-            uint64_t blankLength = (uint64_t)bw * bh * 4;
+            uint64_t blankLength = static_cast<uint64_t>(bw) * bh * 4;
             if (PE_current_console(&blank) || blank.v_baseAddr != bootMapping->getPhysicalAddress() ||
                 !native_legacy_video_mode(blank) || native_legacy_video_width(blank) != bw ||
                 native_legacy_video_height(blank) != bh ||
-                !native_legacy_surface_bounds((uint32_t)blank.v_width, (uint32_t)blank.v_height, blank.v_rowBytes,
+                !native_legacy_surface_bounds(static_cast<uint32_t>(blank.v_width),
+                                              static_cast<uint32_t>(blank.v_height), blank.v_rowBytes,
                                               bootMapping->getLength(), bootMapping->getLength())) {
                 native_legacy_transfer_observed(kIOReturnNotReady, request, 0);
                 return;
@@ -3563,8 +3674,8 @@ public:
                                    drawSurface()->getLength(), 0xff000000U)
                              : !native_legacy_fill_pixels(
                                    reinterpret_cast<volatile void *>(bootMapping->getVirtualAddress()),
-                                   bootMapping->getLength(), blank.v_rowBytes, (uint32_t)blank.v_width,
-                                   (uint32_t)blank.v_height, 0xff000000U)) {
+                                   bootMapping->getLength(), blank.v_rowBytes, static_cast<uint32_t>(blank.v_width),
+                                   static_cast<uint32_t>(blank.v_height), 0xff000000U)) {
                 native_legacy_transfer_observed(kIOReturnBadArgument, request, 0);
                 return;
             }
@@ -3576,7 +3687,7 @@ public:
             native_legacy_frame_observed(1, 0, 0, 0, 0, 0);
             {
                 const uint32_t colors[4] = {0xff000000U, 0, 0, 0};
-                const uint64_t counts[4] = {(uint64_t)bw * bh, 0, 0, 0};
+                const uint64_t counts[4] = {static_cast<uint64_t>(bw) * bh, 0, 0, 0};
                 native_legacy_frame_colors_observed(colors, counts, 0);
             }
             native_legacy_transfer_observed(kIOReturnSuccess, request, blankLength);
@@ -3588,11 +3699,12 @@ public:
         planeShownUi = surface;
         IOMemoryDescriptor *memory = native_legacy_surface_descriptor(surface);
         PE_Video video = {};
-        uint32_t width = 0, height = 0;
+        uint32_t width = 0;
+        uint32_t height = 0;
         getDisplayDimensions(&width, &height);
-        uint64_t length = (uint64_t)width * height * 4;
-        uint64_t sourceStride = native_legacy_surface_stride(surface);
-        uint64_t allocation = native_legacy_surface_allocation(surface);
+        const uint64_t length = static_cast<uint64_t>(width) * height * 4;
+        const uint64_t sourceStride = native_legacy_surface_stride(surface);
+        const uint64_t allocation = native_legacy_surface_allocation(surface);
         if (!memory || !memory->metaCast("IOMemoryDescriptor") ||
             !native_legacy_surface_bounds(width, height, sourceStride, allocation, memory->getLength()) ||
             native_legacy_surface_width(surface) < width || native_legacy_surface_height(surface) < height ||
@@ -3600,8 +3712,8 @@ public:
             PE_current_console(&video) || video.v_baseAddr != bootMapping->getPhysicalAddress() ||
             !native_legacy_video_mode(video) || native_legacy_video_width(video) != width ||
             native_legacy_video_height(video) != height ||
-            !native_legacy_surface_bounds((uint32_t)video.v_width, (uint32_t)video.v_height, video.v_rowBytes,
-                                          bootMapping->getLength(), bootMapping->getLength())) {
+            !native_legacy_surface_bounds(static_cast<uint32_t>(video.v_width), static_cast<uint32_t>(video.v_height),
+                                          video.v_rowBytes, bootMapping->getLength(), bootMapping->getLength())) {
             native_legacy_transfer_observed(kIOReturnNotReady, request, 0);
             return;
         }
@@ -3643,10 +3755,10 @@ public:
             }
             return;
         }
-        uint64_t mapAt = stats ? mach_absolute_time() : 0;
+        const uint64_t mapAt = stats ? mach_absolute_time() : 0;
         bool ownedSource = true;
         IOMemoryMap *source = sourceMapping(memory, ownedSource);
-        auto releaseSource = [&] {
+        const auto releaseSource = [&] {
             if (ownedSource)
                 OSSafeReleaseNULL(source);
         };
@@ -3670,13 +3782,14 @@ public:
             return;
         }
         {
-            uint64_t gpu, cache;
-            bool timedOut;
+            uint64_t gpu = 0;
+            uint64_t cache = 0;
+            bool timedOut = false;
             syncForCpu(sourceAddress, allocation, gpu, cache, timedOut);
             if (stats && tegra_gm20b_sync_for_cpu) {
                 stGpu.add(gpu);
                 stCache.add(cache);
-                stGpuTimeouts += timedOut;
+                stGpuTimeouts += static_cast<uint32_t>(timedOut);
             }
         }
         if (hwRotate
@@ -3700,8 +3813,7 @@ public:
             stRead = readPass(sourceAddress, sourceStride, width, height);
         }
         noteTaken(request, kickAt);  // before the flip, which carries it to the present
-        uint64_t copyStart;
-        __asm__ volatile("isb\n\tmrs %0, cntpct_el0" : "=r"(copyStart));
+        const uint64_t copyStart = counterNow();
         uint64_t stored = UINT64_MAX;
         if (stored == UINT64_MAX && hwRotate) {
             // One unrotated swizzling pass; the first such frame switches window A under it (latched at a frame boundary;
@@ -3731,8 +3843,7 @@ public:
         }
         __asm__ volatile("dsb sy" ::: "memory");
         {
-            uint64_t copyEnd;
-            __asm__ volatile("isb\n\tmrs %0, cntpct_el0" : "=r"(copyEnd));
+            const uint64_t copyEnd = counterNow();
             native_legacy_copy_timing_observed(copyEnd - copyStart, stored);
             noteCopy(copyEnd - copyStart);
             if (stats) {
@@ -3767,7 +3878,7 @@ public:
     }
 
     // The kernel mapping of a surface's memory for its copy; the caller releases it.
-    IOMemoryMap *sourceMapping(IOMemoryDescriptor *memory, bool &owned)
+    static IOMemoryMap *sourceMapping(IOMemoryDescriptor *memory, bool &owned)
     {
         owned = true;
         return memory->map(kIOMapAnywhere | kIOMapReadOnly);
@@ -3779,7 +3890,7 @@ public:
     // returns at once, no cache operation. With the stats the two are timed apart: the wait alone (a zero-length range), then the same
     // clean+invalidate done here (not a second zero-timeout sync: gpu.c panics on any sync timeout, and a submission made in between
     // would be one). Ticks, 0 without stats.
-    void syncForCpu(const void *address, uint64_t bytes, uint64_t &gpu, uint64_t &cache, bool &timedOut) const
+    static void syncForCpu(const void *address, uint64_t bytes, uint64_t &gpu, uint64_t &cache, bool &timedOut)
     {
         gpu = cache = 0;
         timedOut = false;
@@ -3792,7 +3903,7 @@ public:
         const uint64_t waitAt = mach_absolute_time();
         timedOut = tegra_gm20b_sync_for_cpu(address, 0, kGpuWaitNs) != 0;
         const uint64_t cacheAt = mach_absolute_time();
-        cleanInvalidate(address, bytes);
+        switch_dcache_clean_invalidate(address, bytes);
         gpu = cacheAt - waitAt;
         cache = mach_absolute_time() - cacheAt;
     }
@@ -3806,8 +3917,8 @@ public:
     };
 
     // A tiled source (tegra_gm20b_surface_tiled) is already in the scanout's block layout: copied as it is.
-    Swizzled swizzle(IOMemoryMap *target, const void *source, uint64_t bytes, uint64_t stride, uint32_t width,
-                     uint32_t height, bool tiled) const
+    static Swizzled swizzle(IOMemoryMap *target, const void *source, uint64_t bytes, uint64_t stride, uint32_t width,
+                            uint32_t height, bool tiled)
     {
         void *out = reinterpret_cast<void *>(target->getVirtualAddress());
         if (tiled) {
@@ -3824,28 +3935,29 @@ public:
 
     void noteSwizzled(Swizzled how)
     {
-        if (how == kSwizzleTiled)
+        if (how == kSwizzleTiled) {
             ++stFast;
-        else if (how == kSwizzleByte)
+        } else if (how == kSwizzleByte) {
             ++stByte;
+        }
     }
 
     // The stats' read probe: every visible row of the source loaded once, 16 bytes at a time. Ticks; 0 when
     // the source is not 16-byte aligned.
     static uint64_t readPass(const void *source, uint64_t stride, uint32_t width, uint32_t height)
     {
-        if (((uintptr_t)source | stride) & 15)
+        if ((reinterpret_cast<uintptr_t>(source) | stride) & 15)
             return 0;
-        uint64_t start, end, sum = 0;
-        __asm__ volatile("isb\n\tmrs %0, cntpct_el0" : "=r"(start));
+        uint64_t sum = 0;
+        const uint64_t start = counterNow();
         for (uint32_t y = 0; y < height; ++y) {
-            const uint64_t *row =
-                reinterpret_cast<const uint64_t *>(reinterpret_cast<uintptr_t>(source) + (uint64_t)y * stride);
+            const uint64_t *row = reinterpret_cast<const uint64_t *>(reinterpret_cast<uintptr_t>(source) +
+                                                                     static_cast<uint64_t>(y) * stride);
             for (uint32_t x = 0; x < width / 2; x += 2)
                 sum ^= row[x] + row[x + 1];
         }
         __asm__ volatile("" ::"r"(sum));  // keeps the loads
-        __asm__ volatile("isb\n\tmrs %0, cntpct_el0" : "=r"(end));
+        const uint64_t end = counterNow();
         return end - start;
     }
 
@@ -3870,9 +3982,10 @@ public:
         if (!copyLoop)
             return;
         IOWorkLoop *loop = getWorkLoop();
-        if (!loop)
+        if (!loop) {
             panic("SwitchDisplay: the display's work loop is gone before its copy thread "
                   "stopped");
+        }
         loop->runAction(
             [](OSObject *owner, void *, void *, void *, void *) -> IOReturn {
                 __atomic_store_n(&static_cast<NativeLegacyDisplay *>(owner)->copyStopping, true, __ATOMIC_RELEASE);
@@ -3933,23 +4046,22 @@ public:
     {
         const void *source = reinterpret_cast<const void *>(job.source->getVirtualAddress());
         job.status = kIOReturnSuccess;
-        if (__atomic_load_n(&copyStopping, __ATOMIC_ACQUIRE))
+        if (__atomic_load_n(&copyStopping, __ATOMIC_ACQUIRE)) {
             job.status = kIOReturnAborted;
-        else {
+        } else {
             syncForCpu(source, job.allocation, job.gpu, job.cache, job.timedOut);
-            if (!native_legacy_prepare_scanout())
+            if (!native_legacy_prepare_scanout()) {
                 job.status = kIOReturnNotReady;
-            else {
+            } else {
                 if (job.read)
                     job.readTicks = readPass(source, job.stride, job.width, job.height);
-                uint64_t start, end;
-                __asm__ volatile("isb\n\tmrs %0, cntpct_el0" : "=r"(start));
+                const uint64_t start = counterNow();
                 job.swizzled =
                     swizzle(job.target, source, job.source->getLength(), job.stride, job.width, job.height, job.tiled);
                 if (job.swizzled == kSwizzleFailed)
                     job.status = kIOReturnBadArgument;
                 __asm__ volatile("dsb sy" ::: "memory");
-                __asm__ volatile("isb\n\tmrs %0, cntpct_el0" : "=r"(end));
+                const uint64_t end = counterNow();
                 job.copy = end - start;
                 if (stats)
                     job.attribute = mairAttribute(source);
@@ -3970,14 +4082,14 @@ public:
         if (job.ownedSource)
             OSSafeReleaseNULL(job.source);
         if (job.status == kIOReturnSuccess) {
-            native_legacy_copy_timing_observed(job.copy, (uint64_t)job.width * job.height * 4);
+            native_legacy_copy_timing_observed(job.copy, static_cast<uint64_t>(job.width) * job.height * 4);
             noteCopy(job.copy);
         }
         if (stats) {
             if (tegra_gm20b_sync_for_cpu && job.status != kIOReturnAborted) {
                 stGpu.add(job.gpu);
                 stCache.add(job.cache);
-                stGpuTimeouts += job.timedOut;
+                stGpuTimeouts += static_cast<uint32_t>(job.timedOut);
             }
             if (job.read)
                 stRead = job.readTicks;
@@ -4013,7 +4125,7 @@ public:
     {
         const OriginalLegacySwapRequest *request = job.request;
         presentBlock();
-        native_legacy_transfer_observed(kIOReturnSuccess, request, (uint64_t)job.width * job.height * 4);
+        native_legacy_transfer_observed(kIOReturnSuccess, request, static_cast<uint64_t>(job.width) * job.height * 4);
         // Retired at the start, or gone from the queue while the gate was open (the family discarded it): nothing left to retire.
         if (job.retired || pendingSwapRequest() != request) {
             transferred = false;
@@ -4038,9 +4150,9 @@ public:
             // The swap retired when the client took it; its copy ending only releases the next frame. A failed copy loses this frame
             // (the next one takes the CPU copy).
             gpuRetired = false;
-            if (status == 0)
+            if (status == 0) {
                 native_legacy_transfer_observed(kIOReturnSuccess, request, gpuLength);
-            else {
+            } else {
                 native_legacy_early_failures = native_legacy_early_failures + 1;
                 native_legacy_gpu_fallback_observed(status);
                 gpuBypass = true;
@@ -4088,9 +4200,10 @@ public:
             panic("SwitchDisplay: stopped with GPU frame copy %llu outstanding", gpuSequence);
         IOWorkLoop *loop = getWorkLoop();
         IOEventSource *sources[] = {gpuDoneSource, gpuDeadline};
-        for (IOEventSource *source : sources)
+        for (IOEventSource *source : sources) {
             if (source && loop)
                 loop->removeEventSource(source);
+        }
         if (gpuDeadline)
             gpuDeadline->cancelTimeout();
         OSSafeReleaseNULL(gpuDoneSource);
@@ -4121,7 +4234,7 @@ public:
         copy.sourceBytes = allocation;
         copy.target = surfaceAddress(target);
         copy.targetBytes = kNativeBlockBytes;
-        copy.targetPitch = (uint32_t)kNativeBlockStride;
+        copy.targetPitch = static_cast<uint32_t>(kNativeBlockStride);
         copy.blockHeightLog2 = 4;  // kNativeBlockGobs, the DC's BLOCK_HEIGHT(4)
         copy.flags = tiled ? TEGRA_SCANOUT_COPY_SOURCE_BLOCK : 0;
         memory->retain();
@@ -4139,7 +4252,7 @@ public:
         gpuDeadline->setTimeoutMS(kGpuCopyDeadlineMS);
         native_legacy_swap_stage(1);
         gpuRequest = request;
-        gpuLength = (uint64_t)width * height * 4;
+        gpuLength = static_cast<uint64_t>(width) * height * 4;
         transferred = true;
         noteTaken(request, kickAt);
         if (!latchRetire && retireSwap(request, true)) {
@@ -4210,10 +4323,11 @@ public:
             kickSwapQueue();
             return;
         }
-        if (SWITCH_FRAME_TIMELINE)
+        if (SWITCH_FRAME_TIMELINE) {
             taken.tl.doneUs =
                 taken.submit ? usFrom(ticksNs(taken.submit), ticksNs(__atomic_load_n(&gpuDoneAt, __ATOMIC_RELAXED)))
                              : kNotSeen;
+        }
         gpuPresented = request;
         gpuPresentedEntry = directEntry;
         if (hwSuspended) {
@@ -4232,8 +4346,9 @@ public:
         if (directEntry != kNoBuffer) {
             flipRequest = request;
             presentEntry(directEntry);  // the compositor's rendering of it is done
-        } else
+        } else {
             presentBlock();  // the GPU's completion already put the frame in DRAM
+        }
         native_legacy_transfer_observed(kIOReturnSuccess, request, gpuLength);
         if (latchRetire) {  // it retires when it is seen on screen (checkFlip)
             transferred = false;
@@ -4271,6 +4386,7 @@ public:
     }
 
     // Separately gated retirement after a real scanout store, shared by copied and blank frames.
+    // NOLINTNEXTLINE(misc-no-recursion): kickSwapQueue's kicking flag stops re-entry; a nested kick only loops
     void finishTransfer(const OriginalLegacySwapRequest *request, bool force = false)
     {
         // Only after the real copy and store barrier: select the actual pending head and let the unchanged family release it and wake
@@ -4295,35 +4411,39 @@ public:
     // --- Direct scanout (see the members) ------------------------------------------------------------------------------
     void take(const OriginalLegacySwapRequest *request)
     {
-        for (const Taken &t : takenSwaps)
+        for (const Taken &t : takenSwaps) {
             if (t.request == request)
                 return;
-        for (Taken &t : takenSwaps)
+        }
+        for (Taken &t : takenSwaps) {
             if (!t.request) {
                 t = {request, ++takeSeq};
                 return;
             }
+        }
         takenSwaps[0] = {request, ++takeSeq};  // more than eight in flight cannot happen (the family queues fewer)
     }
 
     void untake(const OriginalLegacySwapRequest *request)
     {
-        for (Taken &t : takenSwaps)
+        for (Taken &t : takenSwaps) {
             if (t.request == request)
                 t = {};
+        }
     }
 
     uint64_t seqOf(const OriginalLegacySwapRequest *request) const
     {
-        for (const Taken &t : takenSwaps)
+        for (const Taken &t : takenSwaps) {
             if (request && t.request == request)
                 return t.seq;
+        }
         return 0;
     }
 
     void noteFrameInfoTaken(const OriginalLegacySwapRequest *request)
     {
-        auto bytes = reinterpret_cast<const unsigned char *>(request);
+        const auto *bytes = reinterpret_cast<const unsigned char *>(request);
         uint32_t id = 0;
         uint64_t requested = 0;
         memcpy(&id, bytes + swapId, sizeof(id));
@@ -4335,9 +4455,11 @@ public:
     // taken as seq, on screen from shownAt (mach_absolute_time).
     void frameShown(uint64_t seq, uint64_t shownAt)
     {
-        const uint64_t continuous = mach_continuous_time(), absolute = mach_absolute_time();
+        const uint64_t nowContinuous = mach_continuous_time();
+        const uint64_t nowAbsolute = mach_absolute_time();
         switch_frame_info::Frame frame;
-        if (frameInfo->pending.shown(seq, switch_frame_info::continuousTime(shownAt, absolute, continuous), frame) &&
+        if (frameInfo->pending.shown(seq, switch_frame_info::continuousTime(shownAt, nowAbsolute, nowContinuous),
+                                     frame) &&
             frameInfo->clients.any())
             native_legacy_frame_info_notify(this, &frame);
     }
@@ -4345,14 +4467,16 @@ public:
     // The first accepted swap in the family's queue not yet taken (latchRetire: older ones wait on screen for their latch).
     const OriginalLegacySwapRequest *firstUntaken() const
     {
-        for (const OriginalLegacySwapRequest *r = pendingSwapRequest(); r; r = queuedAfter(r))
+        for (const OriginalLegacySwapRequest *r = pendingSwapRequest(); r; r = queuedAfter(r)) {
             if (!seqOf(r))
                 return r;
+        }
         return nullptr;
     }
 
     // At a latch (latchRetire): every taken swap at the head up to the one seen on screen (take sequence seq) retires, in queue
     // order; the one still in flight, or a newer one asked for, stays. shownAt: when the screen began showing it (mach time).
+    // NOLINTNEXTLINE(misc-no-recursion): kickSwapQueue's kicking flag stops re-entry; a nested kick only loops
     void retireThrough(uint64_t seq, uint64_t shownAt)
     {
         frameShown(seq, shownAt);
@@ -4373,18 +4497,18 @@ public:
 
     // A swap window A can scan in place: one full-frame BGRA surface (validateSwap's single layer), its rows a multiple of 64
     // bytes, at most one slot. The portrait-native layout only: window A then scans rows unrotated, as hekate's pitch window does.
-    bool directCandidate(OSObject *surface) const
+    static bool directCandidate(OSObject *surface)
     {
         if (!SWITCH_PORTRAIT_NATIVE)
             return false;
         if (!surface || !surface->metaCast("IOSurface"))
             return false;
-        const uint64_t stride = native_legacy_surface_stride(surface),
-                       allocation = native_legacy_surface_allocation(surface);
+        const uint64_t stride = native_legacy_surface_stride(surface);
+        const uint64_t allocation = native_legacy_surface_allocation(surface);
         return native_legacy_surface_width(surface) == kNativeBlockWidth &&
                native_legacy_surface_height(surface) == kNativeBlockHeight &&
                nativeBgra(native_legacy_surface_format(surface), native_legacy_surface_planes(surface)) &&
-               !(stride % 64) && stride >= (uint64_t)kNativeBlockWidth * 4 && stride <= 0xffff &&
+               ((stride % 64) == 0u) && stride >= static_cast<uint64_t>(kNativeBlockWidth) * 4 && stride <= 0xffff &&
                allocation <= kSlotSpan && allocation >= stride * kNativeBlockHeight;
     }
 
@@ -4397,16 +4521,16 @@ public:
             if (slots[k].memory == memory && slots[k].stride == stride) {
                 slots[k].used = ++slotUses;
                 slots[k].tiled = tiled;
-                return kSlot0 + (int)k;
+                return kSlot0 + static_cast<int>(k);
             }
-            if (!ring.busy(kSlot0 + (int)k) && (victim < 0 || slots[k].used < slots[victim].used))
-                victim = (int)k;
+            if (!ring.busy(kSlot0 + static_cast<int>(k)) && (victim < 0 || slots[k].used < slots[victim].used))
+                victim = static_cast<int>(k);
         }
         if (victim < 0)
             return kNoBuffer;
-        dropSlot((unsigned)victim);
-        const uint64_t iova = kProbeSlot + (uint64_t)victim * kSlotSpan;
-        const uint32_t pages = (uint32_t)((allocation + 4095) / 4096);
+        dropSlot(static_cast<unsigned>(victim));
+        const uint64_t iova = kProbeSlot + static_cast<uint64_t>(victim) * kSlotSpan;
+        const uint32_t pages = static_cast<uint32_t>((allocation + 4095) / 4096);
         if (memory->prepare(kIODirectionOut) != kIOReturnSuccess)
             return kNoBuffer;
         uint64_t batch[64];
@@ -4417,14 +4541,14 @@ public:
             while (n < 64 && mapped + n < pages) {
                 IOByteCount length = 0;
                 const uint64_t pa =
-                    memory->getPhysicalSegment((uint64_t)(mapped + n) * 4096, &length, kIOMemoryMapperNone);
+                    memory->getPhysicalSegment(static_cast<uint64_t>(mapped + n) * 4096, &length, kIOMemoryMapperNone);
                 if (!pa || (pa & 4095) || length < 4096) {
                     ok = false;
                     break;
                 }
                 batch[n++] = pa;
             }
-            ok = ok && probeDomain.map(iova + (uint64_t)mapped * 4096, batch, n, false);
+            ok = ok && probeDomain.map(iova + static_cast<uint64_t>(mapped) * 4096, batch, n, false);
             mapped += n;
         }
         if (!ok) {
@@ -4444,7 +4568,7 @@ public:
     {
         IOByteCount length = 0;
         const addr64_t pa = memory->getPhysicalSegment(0, &length, kIOMemoryMapperNone);
-        return pa && tegra_gm20b_surface_tiled(pa & ~0xfffULL);
+        return (pa != 0u) && (tegra_gm20b_surface_tiled(pa & ~0xfffULL) != 0);
     }
 
     // A slot's mapping and its surface given back (it is neither scanned nor asked for).
@@ -4452,7 +4576,7 @@ public:
     {
         DirectSlot &slot = slots[k];
         if (slot.pages)
-            probeDomain.unmap(kProbeSlot + (uint64_t)k * kSlotSpan, slot.pages);
+            probeDomain.unmap(kProbeSlot + static_cast<uint64_t>(k) * kSlotSpan, slot.pages);
         if (slot.memory) {
             slot.memory->complete(kIODirectionOut);
             slot.memory->release();
@@ -4464,9 +4588,10 @@ public:
     // The table entries just written, to memory, then the SMMU's caches for the display's ASID.
     void cleanDomain()
     {
-        uintptr_t low, high;
+        uintptr_t low = 0;
+        uintptr_t high = 0;
         if (probeDomain.takeDirty(&low, &high))
-            cleanInvalidate(reinterpret_cast<const void *>(low), high - low);
+            switch_dcache_clean_invalidate(reinterpret_cast<const void *>(low), high - low);
         tegra_smmu_flush(TEGRA_SMMU_ASID_DISPLAY);
     }
 
@@ -4503,7 +4628,7 @@ public:
         __atomic_store_n(&gpuScanout, true, __ATOMIC_RELEASE);
         gpuDeadline->setTimeoutMS(kGpuCopyDeadlineMS);
         gpuRequest = request;
-        gpuLength = (uint64_t)width * height * 4;
+        gpuLength = static_cast<uint64_t>(width) * height * 4;
         gpuDirect = entry;
         transferred = true;
         noteTaken(request, kickAt);
@@ -4519,7 +4644,7 @@ public:
     {
         if (!gpuCopy || !gpuDoneSource || !SWITCH_PORTRAIT_NATIVE)
             return false;
-        probeDomain.unmap(kProbeSlot, (uint32_t)(kNativeBlockBytes / 4096));  // the probe's own slot mapping
+        probeDomain.unmap(kProbeSlot, static_cast<uint32_t>(kNativeBlockBytes / 4096));  // the probe's own slot mapping
         if (!probeDomain.reserve(kProbeSlot, kSlots * kSlotSpan)) {
             snprintf(probeLine, sizeof(probeLine), "no SMMU tables for %u slots", kSlots);
             return false;
@@ -4593,8 +4718,8 @@ public:
         // (the rule since r6), plus one detached layer window B shows exactly. Updated layers only: the family fills in the
         // ones a swap does not update after this (0xa60), and the kick reads those.
         __atomic_store_n(&gLastSwapAbs, mach_absolute_time(), __ATOMIC_RELAXED);
-        auto bytes = reinterpret_cast<const unsigned char *>(request);
-        auto word = [&](unsigned offset) {
+        const auto *bytes = reinterpret_cast<const unsigned char *>(request);
+        const auto word = [&](unsigned offset) {
             uint32_t value = 0;
             memcpy(&value, bytes + offset, 4);
             return value;
@@ -4603,17 +4728,21 @@ public:
         unsigned reason = 1;
         bool accepted = false;
         if (logicalPM && primary && bootMapping && request) {
-            OSObject *surfaces[NativePlanes::kLayers] = {};
+            OSObject *surfaces[native_planes::kLayers] = {};
             memcpy(surfaces, bytes + swapSurfaces, sizeof(surfaces));
-            uint32_t width = 0, height = 0;
+            uint32_t width = 0;
+            uint32_t height = 0;
             getDisplayDimensions(&width, &height);
-            const uint32_t updated = word(swapUpdated), background = word(swapBackground);
+            const uint32_t updated = word(swapUpdated);
+            const uint32_t background = word(swapBackground);
             bool options = true;
             for (unsigned offset = swapOptions; offset <= swapOptions + 8; offset += 4)
                 options = options && word(offset) == 0;
-            bool hasSurface[NativePlanes::kLayers] = {}, any = false, objects = true;
-            NativePlanes::Layer layers[NativePlanes::kLayers];
-            for (unsigned i = 0; i < NativePlanes::kLayers; ++i) {
+            bool hasSurface[native_planes::kLayers] = {};
+            bool any = false;
+            bool objects = true;
+            native_planes::Layer layers[native_planes::kLayers];
+            for (unsigned i = 0; i < native_planes::kLayers; ++i) {
                 if (!(updated & (1u << i)) || !surfaces[i])
                     continue;
                 if (!surfaces[i]->metaCast("IOSurface"))
@@ -4624,22 +4753,22 @@ public:
                 if (objects)
                     layers[i] = planeLayerOf(bytes, i, surfaces[i]);
             }
-            if (!width || !height || !options || word(swapSize) != width || word(swapSize + 4) != height)
+            if (!width || !height || !options || word(swapSize) != width || word(swapSize + 4) != height) {
                 reason = 3;
-            else if (!objects)
+            } else if (!objects) {
                 reason = 4;
-            else if (!any) {
+            } else if (!any) {
                 // No surface in any slot and every updated layer disabled over black: present a blank screen.
                 reason = native_legacy_blank_state(updated, word(swapReady), background) ? 5 : 2;
                 accepted = reason == 5;
             } else {
-                reason = NativePlanes::checkUpdated(updated, background, hasSurface, layers, width, height);
+                reason = native_planes::checkUpdated(updated, background, hasSurface, layers, width, height);
                 // The UI's own memory: its rows within the descriptor (a surface larger than the display, rows or lines
                 // padded to the GPU's alignment, is accepted: only the visible rectangle is read).
-                for (unsigned i = 0; !reason && i < NativePlanes::kLayers; ++i) {
-                    if (!hasSurface[i] || !NativePlanes::isUi(layers[i], width, height))
+                for (unsigned i = 0; !reason && i < native_planes::kLayers; ++i) {
+                    if (!hasSurface[i] || !native_planes::isUi(layers[i], width, height))
                         continue;
-                    IOMemoryDescriptor *memory = native_legacy_surface_descriptor(surfaces[i]);
+                    const IOMemoryDescriptor *memory = native_legacy_surface_descriptor(surfaces[i]);
                     if (!memory || !memory->metaCast("IOMemoryDescriptor") ||
                         !native_legacy_surface_bounds(width, height, native_legacy_surface_stride(surfaces[i]),
                                                       native_legacy_surface_allocation(surfaces[i]),
@@ -4648,8 +4777,8 @@ public:
                         surface = surfaces[i];
                     }
                 }
-                accepted = !reason;
-                if (reason == 4 || reason == NativePlanes::kFormat || reason == NativePlanes::kAlignment)
+                accepted = (reason == 0u);
+                if (reason == 4 || reason == native_planes::kFormat || reason == native_planes::kAlignment) {
                     native_legacy_surface_rejected(
                         native_legacy_surface_width(surface), native_legacy_surface_height(surface),
                         native_legacy_surface_format(surface), native_legacy_surface_planes(surface),
@@ -4657,12 +4786,14 @@ public:
                         native_legacy_surface_descriptor(surface)
                             ? native_legacy_surface_descriptor(surface)->getLength()
                             : 0);
+                }
             }
         }
-        if (accepted)
+        if (accepted) {
             noteSubmitted(request);
-        else
+        } else {
             removeValidated(request);
+        }
         if (!accepted && stats) {
             __atomic_fetch_add(&stRejected, 1u, __ATOMIC_RELAXED);
             __atomic_store_n(&stRejectReason, reason, __ATOMIC_RELAXED);
@@ -4695,10 +4826,14 @@ public:
         for (unsigned i = 0; i < kValidated; ++i) {
             if (validated[i] != request)
                 continue;
-            const uint64_t submitNs = ticksNs(validatedAt[i]), vsync = __atomic_load_n(&vsyncSentAt, __ATOMIC_RELAXED);
+            const uint64_t submitNs = ticksNs(validatedAt[i]);
+            const uint64_t vsync = __atomic_load_n(&vsyncSentAt, __ATOMIC_RELAXED);
             SwitchFrameGpu gpu;
             tegra_gm20b_frame_take(&gpu);
-            int base = 0, sched = 0, mode = 0, qos = 0;
+            int base = 0;
+            int sched = 0;
+            int mode = 0;
+            int qos = 0;
             switch_thread_sched(current_thread(), &base, &sched, &mode, &qos);
             FrameTimeline &tl = validatedTl[i];
             tl.vsyncUs = vsync ? usFrom(submitNs, ticksNs(vsync)) : kNotSeen;
@@ -4710,7 +4845,7 @@ public:
             tl.bindUs = us32(gpu.bindNs);
             tl.allocUs = us32(gpu.allocNs);
             tl.cleanUs = us32(gpu.cleanNs);
-            tl.cleanKiB = (uint32_t)(gpu.cleanBytes >> 10);
+            tl.cleanKiB = static_cast<uint32_t>(gpu.cleanBytes >> 10);
             tl.submits = sat16(gpu.submits);
             tl.others = sat16(gpu.others);
             tl.imports = sat16(gpu.imports);
@@ -4719,10 +4854,10 @@ public:
             tl.frees = sat16(gpu.frees);
             tl.mhzVsync = sat16(__atomic_load_n(&vsyncSentKhz, __ATOMIC_RELAXED) / 1000);
             tl.mhzSwap = sat16(switch_perf_cpu_khz() / 1000);
-            tl.basePri = (int8_t)base;
-            tl.schedPri = (int8_t)sched;
-            tl.mode = (int8_t)mode;
-            tl.qos = (int8_t)qos;
+            tl.basePri = static_cast<int8_t>(base);
+            tl.schedPri = static_cast<int8_t>(sched);
+            tl.mode = static_cast<int8_t>(mode);
+            tl.qos = static_cast<int8_t>(qos);
             KDBG(SWITCH_KDBG_CODE(SWITCH_KDBG_SWAP), frameEnds);
             switch_sched_render_swapped();
             return;
@@ -4737,17 +4872,13 @@ public:
         if (!pitch)
             return kIOReturnBadArgument;
         *pitch = 0;
-        IOService *provider = getProvider();
+        const IOService *provider = getProvider();
         if (!provider)
             return kIOReturnNotReady;
-        OSObject *property = provider->getProperty("dot-pitch");
+        const OSObject *property = provider->getProperty("dot-pitch");
         if (!property)
             return kIOReturnNotFound;
-        OSData *data = OSDynamicCast(OSData, property);
-        if (!data || data->getLength() != sizeof(*pitch))
-            return kIOReturnBadArgument;
-        memcpy(pitch, data->getBytesNoCopy(), sizeof(*pitch));
-        return kIOReturnSuccess;
+        return switch_osdata_value(property, pitch) ? kIOReturnSuccess : kIOReturnBadArgument;
     }
 
     IOReturn supportedFrameInfo(uint32_t index, uint32_t *count, char *key, uint32_t *flags) override
@@ -4784,10 +4915,11 @@ public:
         void *owner = nullptr;
         memcpy(&owner, static_cast<const unsigned char *>(client) + frameInfoClientOwner, sizeof(owner));
         const IOReturn status = native_legacy_frame_info_enqueue(owner, words, n * sizeof(words[0]));
-        if (status != kIOReturnSuccess)
+        if (status != kIOReturnSuccess) {
             switch_refusal("display", "frame-info-queue",
                            "frame info for swap %u dropped (%#x): the client's queue is full or gone",
-                           (uint32_t)words[1], status);
+                           static_cast<uint32_t>(words[1]), status);
+        }
         return status;
     }
 
@@ -4798,7 +4930,7 @@ public:
         proc_selfname(opener, sizeof(opener));
         if (!strcmp(opener, "backboardd"))
             switch_render_server_watch(task);  // the opener, in its own context
-        IOReturn status = IOMobileFramebufferLegacy::newUserClient(task, security, type, client);
+        const IOReturn status = IOMobileFramebufferLegacy::newUserClient(task, security, type, client);
         native_legacy_client_observed(status, status == kIOReturnSuccess && client ? *client : nullptr);
         if (status == kIOReturnSuccess && client && *client && primary && displaySleepEnabled())
             answerPowerRequests(*client);
@@ -4858,11 +4990,12 @@ public:
         IOMemoryMap *mapping = provider->mapDeviceMemoryWithIndex(0, kIOMapWriteCombineCache);
         if (!mapping)
             return false;
-        bool valid = mapping->getVirtualAddress() && mapping->getPhysicalAddress() == video.v_baseAddr &&
+        bool valid = (mapping->getVirtualAddress() != 0u) && mapping->getPhysicalAddress() == video.v_baseAddr &&
                      mapping->getLength() == video.v_rowBytes * video.v_height;
         if (valid) {
             installBootDimensions(native_legacy_video_width(video), native_legacy_video_height(video));
-            uint32_t width = 0, height = 0;
+            uint32_t width = 0;
+            uint32_t height = 0;
             getDisplayDimensions(&width, &height);
             valid = width == native_legacy_video_width(video) && height == native_legacy_video_height(video);
             if (valid) {
@@ -4882,12 +5015,12 @@ public:
 
     // The compositor's framebuffer rows (QuartzCore CA::WindowServer::AppleDisplay::update_display_limits reads this IOMFB
     // property; iosurface_alignment() then rounds every framebuffer's bytesPerRow up to it, 64 by default), and VideoToolbox's
-    // outputs (NativePlanes::kPublishedRowAlignment): 720 x 4 = 2880 becomes 3072-byte rows. The scanout copies take any
+    // outputs (native_planes::kPublishedRowAlignment): 720 x 4 = 2880 becomes 3072-byte rows. The scanout copies take any
     // source stride.
     void publishStrideRequirements()
     {
         OSDictionary *requirements = OSDictionary::withCapacity(1);
-        OSNumber *horizontal = OSNumber::withNumber(NativePlanes::kPublishedRowAlignment, 32);
+        const OSNumber *horizontal = OSNumber::withNumber(native_planes::kPublishedRowAlignment, 32);
         if (requirements && horizontal && requirements->setObject("StrideLinearHorizontal", horizontal))
             setProperty("DisplayPipeStrideRequirements", requirements);
         OSSafeReleaseNULL(horizontal);
@@ -4896,24 +5029,25 @@ public:
     }
 
     // r18-planes: the limits Core Animation detaches a layer within (AppleDisplay::update_display_limits reads them once, at
-    // the display's creation; NativePlanes::Limits has the values and why). With backboardd still under CA_DISABLE_DETACHED
+    // the display's creation; native_planes::Limits has the values and why). With backboardd still under CA_DISABLE_DETACHED
     // (native_legacy_detach_ready false) nothing is detached and these change nothing.
     void publishPlaneLimits()
     {
-        const NativePlanes::Limits limits;
+        const native_planes::Limits limits;
 
         struct Entry {
             const char *key;
             uint64_t value;
         };
 
-        auto publish = [this](const char *name, const Entry *entries, unsigned count, unsigned bits) {
+        const auto publish = [this](const char *name, const Entry *entries, unsigned count, unsigned bits) {
             OSDictionary *dict = OSDictionary::withCapacity(count);
-            for (unsigned i = 0; dict && i < count; ++i)
-                if (OSNumber *n = OSNumber::withNumber(entries[i].value, bits)) {
+            for (unsigned i = 0; dict && i < count; ++i) {
+                if (const OSNumber *n = OSNumber::withNumber(entries[i].value, bits)) {
                     dict->setObject(entries[i].key, n);
                     n->release();
                 }
+            }
             if (dict)
                 setProperty(name, dict);
             OSSafeReleaseNULL(dict);
@@ -4933,7 +5067,7 @@ public:
                                 {"VideoClock", 78000000},
                                 {"PixelClock", 78000000}};
         publish("IOMFBMaxSrcPixels", source, 7, 64);
-        const Entry base[] = {{"PlaneBaseAlignmentLinear", NativePlanes::kPublishedBaseAlignment}};
+        const Entry base[] = {{"PlaneBaseAlignmentLinear", native_planes::kPublishedBaseAlignment}};
         publish("DisplayPipePlaneBaseAlignment", base, 1, 64);
         const Entry layers[] = {{"MaxNumLayers", limits.maxLayers}};
         publish("IOMFBNumLayers", layers, 1, 32);
@@ -4999,7 +5133,7 @@ public:
         if (!__atomic_exchange_n(&reported, true, __ATOMIC_RELAXED)) {
             int64_t sum = 0;
             for (unsigned i = 0; i < 4; ++i)
-                sum += (int32_t)temperatures[i];
+                sum += static_cast<int32_t>(temperatures[i]);
             const int64_t hundredths = sum * 100 / 4 / 65536;
             IOLog("SwitchDisplay: display temperature %s%lld.%02lld C from thermalmonitord (TSFD); the panel "
                   "compensates for temperature itself\n",
@@ -5028,11 +5162,11 @@ public:
 #undef LEAF
 };
 
-// OSDefineMetaClassAndStructors(NativeLegacyDisplay, IOMobileFramebufferLegacy), registered under J120's class name. iPadOS
-// finds the internal display as an AppleCLCD: VideoToolbox's and MediaToolbox's FigGetAlignmentForIOSurfaceOutput match
-// IOServiceMatching("AppleCLCD") for the display pipe's alignment, and the poster extensions' sandbox profiles allow
-// iokit-get-properties on the iokit-registry-entry-class AppleCLCD. Apple's AppleCLCD (AppleMobileDispH9G) is not prelinked
-// here, so the name is free.
+// OSDefineMetaClassAndStructors(NativeLegacyDisplay, IOMobileFramebufferLegacy), registered under the class name of J120's
+// and J181's internal display (AppleMobileDispH9G's and AppleMobileDispH12P's IOClass). iPadOS finds the internal display
+// as an AppleCLCD: VideoToolbox's and MediaToolbox's FigGetAlignmentForIOSurfaceOutput match IOServiceMatching("AppleCLCD")
+// for the display pipe's alignment, and the poster extensions' sandbox profiles allow iokit-get-properties on the
+// iokit-registry-entry-class AppleCLCD. Neither kext is prelinked here, so the name is free.
 OSDefineMetaClassWithInit(NativeLegacyDisplay, IOMobileFramebufferLegacy, ) NativeLegacyDisplay::MetaClass::MetaClass()
     : OSMetaClass("AppleCLCD", NativeLegacyDisplay::superClass, sizeof(NativeLegacyDisplay))
 {}
@@ -5079,7 +5213,8 @@ extern "C" void native_legacy_frame_end_release(void)
 extern "C" bool native_legacy_frame_end_held(void)
 {
     NativeLegacyDisplay *display = __atomic_load_n(&NativeLegacyDisplay::primaryDisplay, __ATOMIC_ACQUIRE);
-    return __atomic_load_n(&gFrameEndHolds, __ATOMIC_ACQUIRE) && display && display->frameEndRouted();
+    return (__atomic_load_n(&gFrameEndHolds, __ATOMIC_ACQUIRE) != 0u) && (display != nullptr) &&
+           display->frameEndRouted();
 }
 
 // SC7 hooks for the sleep code; contract in TegraDisplayPower.h. The panel sleeps and wakes with TegraPanel's own power sequence
@@ -5096,7 +5231,7 @@ template <typename Body> static bool onDisplayLoop(NativeLegacyDisplay *display,
 
     display->getWorkLoop()->runAction(
         [](OSObject *owner, void *a0, void *, void *, void *) -> IOReturn {
-            Call *c = static_cast<Call *>(a0);
+            const Call *c = static_cast<Call *>(a0);
             *c->result = (*c->body)(static_cast<NativeLegacyDisplay *>(owner));
             return kIOReturnSuccess;
         },
@@ -5110,9 +5245,10 @@ static NativeLegacyDisplay *sc7Display(const char *step)
     if (!display || !display->getWorkLoop())
         panic("SwitchDisplay: %s before the display started", step);
     const uint32_t panel = tegra_display_panel_id();
-    if (panel != TEGRA_DISPLAY_PANEL_AMS699VC01)
+    if (panel != TEGRA_DISPLAY_PANEL_AMS699VC01) {
         panic("SwitchDisplay: %s: panel %#x has no cold init here (only the OLED's AMS699VC01, %#x)", step, panel,
               TEGRA_DISPLAY_PANEL_AMS699VC01);
+    }
     return display;
 }
 
@@ -5157,26 +5293,28 @@ extern "C" void native_legacy_gpu_complete(void *display, int status)
 }
 
 // r18-planes, XNU kern_exec.c (native_switch_exec_environment, when it starts backboardd): may Core Animation detach layers?
-// Only on what is proven this boot: the plane probe passed (window B scans through the SMMU), and TegraVIC proved the
-// IOSurfaceAccelerator quarter turns (transforms 4 and 7), 4:2:0 to RGB and a row pitch (V4 pitch: 16, 64 or else 256
-// bytes), since on an internal display every rotated detached layer (here: every landscape video) is first copied through
+// Only when the plane probe passed this boot (window B scans through the SMMU) and TegraVIC's traits have the
+// IOSurfaceAccelerator quarter turns (transforms 4 and 7), 4:2:0 to RGB and a row pitch within ours (kTegraVICTraits),
+// since on an internal display every rotated detached layer (here: every landscape video) is first copied through
 // it into a destination Core Animation allocates, and what Core Animation does when that copy is refused is not known.
-// The alignment Core Animation sizes those destinations by is VIC's from start (NativePlanes::kPublishedRowAlignment).
+// The alignment Core Animation sizes those destinations by is VIC's from start (native_planes::kPublishedRowAlignment).
 // Otherwise backboardd keeps CA_DISABLE_DETACHED=1 and nothing changes. One line per call.
 extern "C" bool native_legacy_detach_ready(void)
 {
-    NativeLegacyDisplay *display = __atomic_load_n(&NativeLegacyDisplay::primaryDisplay, __ATOMIC_ACQUIRE);
-    const bool planes = display && display->planesReady();
+    const NativeLegacyDisplay *display = __atomic_load_n(&NativeLegacyDisplay::primaryDisplay, __ATOMIC_ACQUIRE);
+    const bool planes = (display != nullptr) && display->planesReady();
     const TegraVICTraits *vic = tegra_vic_ready() ? tegra_vic_traits() : nullptr;
-    const bool turns = vic && (vic->rotations & 0x90) == 0x90 && (vic->yccIn & TEGRA_VIC_YCC_IN_RGB);
+    const bool turns =
+        (vic != nullptr) && (vic->rotations & 0x90) == 0x90 && ((vic->yccIn & TEGRA_VIC_YCC_IN_RGB) != 0u);
     const uint32_t pitch = vic ? vic->pitchAlign : 0;
-    const bool pitched = pitch && pitch <= NativePlanes::kPublishedRowAlignment && !(pitch & (pitch - 1));
+    const bool pitched =
+        (pitch != 0u) && pitch <= native_planes::kPublishedRowAlignment && ((pitch & (pitch - 1)) == 0u);
     const bool ok = planes && turns && pitched;
     IOLog("SwitchDisplay: backboardd %s detach layers: planes %s, IOSurfaceAccelerator quarter turns %s (transforms "
           "%#x), VIC row pitch %u%s (rows %u, plane bases %u)\n",
           ok ? "may" : "may not", planes ? "on" : "off", turns ? "proven" : "not proven", vic ? vic->rotations : 0,
-          pitch, pitched ? "" : " (not proven)", NativePlanes::kPublishedRowAlignment,
-          NativePlanes::kPublishedBaseAlignment);
+          pitch, pitched ? "" : " (not proven)", native_planes::kPublishedRowAlignment,
+          native_planes::kPublishedBaseAlignment);
     return ok;
 }
 

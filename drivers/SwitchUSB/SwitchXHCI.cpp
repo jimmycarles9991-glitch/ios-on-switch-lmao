@@ -42,7 +42,8 @@ bool SwitchXHCI::start(IOService *provider)
     operationalOffset = gHost.capLength();
     // Controller structures non-cacheable: the write-combine cache mode (normal non-cacheable) in place of the one
     // AppleUSBHostController::init picked (AppleNubT8011USBXHCI clears it: its fabric is coherent; ours is not).
-    setRingBufferOptions((ringBufferOptions() & ~(uint32_t)kIOMapCacheMask) | (uint32_t)kIOMapWriteCombineCache);
+    setRingBufferOptions((ringBufferOptions() & ~static_cast<uint32_t>(kIOMapCacheMask)) |
+                         static_cast<uint32_t>(kIOMapWriteCombineCache));
     // Without the mapper AppleUSBXHCI would run on (copyMapper NULL is no error to it) there is no cache maintenance.
     if (!switch_usb_dma_mapper(dmaReach()))
         return false;
@@ -97,7 +98,8 @@ uint32_t *SwitchXHCI::shadowFor(uint64_t address)
     if (!capBase || hardwareInterrupters >= kRequiredInterrupters)
         return nullptr;
     const uint64_t first = capBase + runtimeOffset + 0x20;
-    const uint64_t from = first + 32ull * hardwareInterrupters, to = first + 32ull * kRequiredInterrupters;
+    const uint64_t from = first + 32ULL * hardwareInterrupters;
+    const uint64_t to = first + 32ULL * kRequiredInterrupters;
     if (address < from || address >= to)
         return nullptr;
     const uint64_t at = address - first;
@@ -117,7 +119,7 @@ uint32_t adjustWrite(uint32_t offset, uint32_t value, uint32_t runtime, uint32_t
             [](void *, uint32_t at) {
                 return gHost.xhci(at);
             },
-            nullptr, (uint32_t)xhost::kXhciBytes, 3);
+            nullptr, static_cast<uint32_t>(xhost::kXhciBytes), 3);
         gSsFirst = ss.first;
         gSsCount = ss.count;
         gSsFound = true;
@@ -138,7 +140,7 @@ uint32_t SwitchXHCI::regRead32(uint64_t base, uint32_t offset)
 {
     if (!capBase && offset == 4)
         capBase = base;  // start reads the capability registers first
-    if (uint32_t *s = shadowFor(base + offset))
+    if (const uint32_t *s = shadowFor(base + offset))
         return *s;
     uint32_t value = AppleUSBXHCI::regRead32(base, offset);
     if (capBase && base + offset == capBase + 4 && hardwareInterrupters < kRequiredInterrupters) {
@@ -149,8 +151,8 @@ uint32_t SwitchXHCI::regRead32(uint64_t base, uint32_t offset)
 
 uint64_t SwitchXHCI::regRead64(uint64_t base, uint32_t offset)
 {
-    if (uint32_t *s = shadowFor(base + offset))
-        return s[0] | (uint64_t)s[1] << 32;
+    if (const uint32_t *s = shadowFor(base + offset))
+        return s[0] | static_cast<uint64_t>(s[1]) << 32;
     return AppleUSBXHCI::regRead64(base, offset);
 }
 
@@ -161,7 +163,7 @@ void SwitchXHCI::regWrite32(uint64_t base, uint32_t offset, uint32_t value)
         return;
     }
     if (capBase && base + offset >= capBase && base + offset - capBase < xhost::kXhciBytes)
-        value = adjustWrite((uint32_t)(base + offset - capBase), value, runtimeOffset, hardwareInterrupters);
+        value = adjustWrite(static_cast<uint32_t>(base + offset - capBase), value, runtimeOffset, hardwareInterrupters);
     // xhci-tegra.c tegra_xusb_probe_finish: USBCMD.EU3S (MFINDEX stops in U3), on every write so that a reset or a
     // controller AppleUSBXHCI reinitializes after SC7 keeps it.
     if (capBase && base + offset == capBase + operationalOffset)
@@ -172,8 +174,8 @@ void SwitchXHCI::regWrite32(uint64_t base, uint32_t offset, uint32_t value)
 void SwitchXHCI::regWrite64(uint64_t base, uint32_t offset, uint64_t value)
 {
     if (uint32_t *s = shadowFor(base + offset)) {
-        s[0] = (uint32_t)value;
-        s[1] = (uint32_t)(value >> 32);
+        s[0] = static_cast<uint32_t>(value);
+        s[1] = static_cast<uint32_t>(value >> 32);
         return;
     }
     AppleUSBXHCI::regWrite64(base, offset, value);
@@ -195,14 +197,15 @@ bool switchxhci_start(char *why, size_t whySize)
     // DEFERRED_PERSONALITIES): AppleUSBHostResources (AppleUSBHostController::start waits for it) and
     // IOUSBMassStorageResource, as their kexts' Info.plist has them. iOS 27's packet capture matches IOResources too
     // (iOS 17's matches AppleUSBHostResources, so it follows that one).
-    bool resources = xhost::addResourcePersonality("AppleUSBHostResources", "AppleUSBHostResources",
-                                                   "com.apple.iokit.IOUSBHostFamily") &&
-                     xhost::addResourcePersonality("IOUSBMassStorageResource", "IOUSBMassStorageResource",
-                                                   "com.apple.iokit.IOUSBMassStorageDriver");
+    const bool resources = xhost::addResourcePersonality("AppleUSBHostResources", "AppleUSBHostResources",
+                                                         "com.apple.iokit.IOUSBHostFamily") &&
+                           xhost::addResourcePersonality("IOUSBMassStorageResource", "IOUSBMassStorageResource",
+                                                         "com.apple.iokit.IOUSBMassStorageDriver")
 #if XNU_12377_121_6
-    resources = resources && xhost::addResourcePersonality("AppleUSBHostPacketFilter", "AppleUSBHostPacketFilter",
-                                                           "com.apple.driver.usb.AppleUSBHostPacketFilter", "IOBSD");
+                           && xhost::addResourcePersonality("AppleUSBHostPacketFilter", "AppleUSBHostPacketFilter",
+                                                            "com.apple.driver.usb.AppleUSBHostPacketFilter", "IOBSD")
 #endif
+        ;
     if (!resources) {
         snprintf(why, whySize, "IOCatalogue refused the USB host resource personalities");
         return false;

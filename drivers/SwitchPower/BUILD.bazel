@@ -1,6 +1,7 @@
 load("//bazel/lint:defs.bzl", "lint_files")
 
 # drivers/SwitchPower: moved from out/native-a57/root-v1/tree/drivers/SwitchPower by the layout move.
+load("//kernel/rules:driver_flags.bzl", "IPSW_KIND_FLAGS")
 load("//kernel/rules:kernel.bzl", "kernel_driver", "kernel_headers")
 
 package(default_visibility = ["//visibility:public"])
@@ -41,6 +42,8 @@ kernel_driver(
         "SwitchSocTherm.cpp",
         "SwitchVirtualTemps.cpp",
     ],
+    # SwitchSensors.h's thermal model is the IPSW kind's iPad's.
+    copts = IPSW_KIND_FLAGS,
     hdr_deps = [
         "diagnostics/switch",
         "drivers/ArmGIC",

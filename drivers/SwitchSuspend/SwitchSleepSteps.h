@@ -116,6 +116,7 @@ void switch_sleep_mark(unsigned step);
 #define switch_sleep_trail(step) switch_power_trail("step %#04x %s", (unsigned)(step), switch_sleep_step_name(step))
 
 // A step's name, or 0 for a code that is none.
+// NOLINTBEGIN(modernize-use-nullptr): C (TegraGM20B's gpu.c) reads this header too
 static inline const char *switch_sleep_step_name(unsigned step)
 {
     static const char *const names[0x40] = {
@@ -190,10 +191,14 @@ static inline const char *switch_sleep_step_name(unsigned step)
         "gpu fences",           "gpu idle off",       "gpu nvkm",
         "gpu power down",       "gpu down",
     };
-    if (step >= SWITCH_STEP_SLEEP_WATCHDOG && step < SWITCH_STEP_SLEEP_WATCHDOG + sizeof(inner) / sizeof(inner[0]))
+    if (step >= SWITCH_STEP_SLEEP_WATCHDOG && step < SWITCH_STEP_SLEEP_WATCHDOG + sizeof(inner) / sizeof(inner[0])) {
+        // NOLINTNEXTLINE(clang-analyzer-security.ArrayBound): the test above keeps step inside inner
         return inner[step - SWITCH_STEP_SLEEP_WATCHDOG];
+    }
     return step >= SWITCH_STEP_SLEEP && step < SWITCH_STEP_SLEEP + 0x40u ? names[step - SWITCH_STEP_SLEEP] : 0;
 }
+
+// NOLINTEND(modernize-use-nullptr)
 
 #ifdef __cplusplus
 }

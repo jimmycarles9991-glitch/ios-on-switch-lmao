@@ -1,0 +1,6 @@
+# What 21H461's kernel answers and our xnu-10063.141.1 does not. Its sysctls are not compared: the kernel cache is not
+# a fileset, so nothing names the kext that owns an oid.
+
+# objc_bp_assist_cfg_np: the published 10063.141.1 has enosys here. libobjc's _objc_init calls it and goes on after
+# ENOSYS or EIO.
+sysent 535

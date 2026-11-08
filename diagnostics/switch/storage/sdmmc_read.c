@@ -168,7 +168,7 @@ static int read_transfer(struct switch_sd_host *h, uint64_t lba, uint32_t count,
         error = switch_sd_dma_wait(h->dma, &h->io, h->context, r);
         if (error)
             goto failed;
-    } else
+    } else {
         for (uint32_t block = 0; block < count; block++) {
             /* Some hosts coassert ready and done for the final buffered block.
          * Drain it only when present-state also confirms readable data. */
@@ -193,6 +193,7 @@ static int read_transfer(struct switch_sd_host *h, uint64_t lba, uint32_t count,
             if (!batch)
                 h->io.write32(h->context, STATUS, BUFFER_READY);
         }
+    }
     r->stage = 4;
     if (!h->dma) {
         error = wait_event(h, TRANSFER_DONE, r, batch, 0);
@@ -268,9 +269,10 @@ int switch_sd_read_sector(struct switch_sd_host *h, uint64_t lba, uint8_t output
         return SWITCH_SD_ARGUMENT;
     uint8_t sector[512];
     int error = read_transfer(h, lba, 1, sector, r);
-    if (!error)
+    if (!error) {
         for (uint32_t i = 0; i < 512; i++)
             output[i] = sector[i];
+    }
     return error;
 }
 
@@ -417,7 +419,13 @@ static int write_command(struct switch_sd_host *h, uint16_t command, uint32_t ar
     h->io.write16(h->context, BLOCK_SIZE, (uint16_t)(size ? size : 512));
     h->io.write16(h->context, BLOCK_COUNT, (uint16_t)(size ? count : 0));
     h->io.write32(h->context, ARGUMENT, argument);
-    h->io.write16(h->context, TRANSFER, (uint16_t)(!size ? 0 : input ? (count > 1 ? 0x26 : 0x02) : 0x12));
+    uint16_t transfer = 0x12;
+    if (!size) {
+        transfer = 0;
+    } else if (input) {
+        transfer = count > 1 ? 0x26 : 0x02;
+    }
+    h->io.write16(h->context, TRANSFER, transfer);
     if (size && h->dma) {
         error = switch_sd_dma_prepare(h->dma, &h->io, h->context, size, count, input);
         if (error)
@@ -437,7 +445,7 @@ static int write_command(struct switch_sd_host *h, uint16_t command, uint32_t ar
             error = switch_sd_dma_wait(h->dma, &h->io, h->context, r);
             if (error)
                 return write_fail(h, error);
-        } else
+        } else {
             for (uint32_t block = 0; block < count; block++) {
                 if (input) {
                     /* Completion before the last word is accepted is always short,
@@ -461,7 +469,8 @@ static int write_command(struct switch_sd_host *h, uint16_t command, uint32_t ar
                  * Device/status reads and serializing timer samples per word
                  * stall PIO; check latched errors after the bounded block. */
                     for (uint32_t word = 0; word < size / 4; word++) {
-                        uint32_t at = block * size + word * 4, value = 0;
+                        uint32_t at = block * size + word * 4;
+                        uint32_t value = 0;
                         for (uint32_t j = 0; j < 4; j++)
                             value |= (uint32_t)input[at + j] << (8 * j);
                         h->io.write32(h->context, BUFFER, value);
@@ -489,6 +498,7 @@ static int write_command(struct switch_sd_host *h, uint16_t command, uint32_t ar
                     }
                 }
             }
+        }
         if (!h->dma) {
             error = wait_event(h, TRANSFER_DONE, r, budget, 0);
             if (error)
@@ -512,10 +522,11 @@ static int write_command(struct switch_sd_host *h, uint16_t command, uint32_t ar
         error = switch_sd_dma_complete(h->dma, h->context, output);
         if (error)
             return write_fail(h, error);
-        if (input)
+        if (input) {
             r->words_written = size * count / 4;
-        else
+        } else {
             r->words_read += size * count / 4;
+        }
     }
     write_restore(h, &saved);
     return SWITCH_SD_OK;
@@ -553,7 +564,8 @@ static uint32_t write_le32(const uint8_t *p)
 
 static int write_cache_probe(struct switch_sd_host *h, struct switch_sd_result *r, struct batch_budget *budget)
 {
-    uint8_t bytes[512], general[512];
+    uint8_t bytes[512];
+    uint8_t general[512];
     int error = write_command(h, 0x371a, h->rca << 16, 0, 0, 0, 0, r, budget);
     if (error)
         return error;
@@ -582,25 +594,31 @@ static int write_cache_probe(struct switch_sd_host *h, struct switch_sd_result *
     error = write_command(h, 0x303a, 0x1ff, 512, 1, general, 0, r, budget);
     if (error)
         return error;
-    uint32_t length = write_le16(general + 2), total = general[4], ext = 16;
+    uint32_t length = write_le16(general + 2);
+    uint32_t total = general[4];
+    uint32_t ext = 16;
     if (write_le16(general) != 0 || length < 16 || length > 512 || !total || total > 10)
         return SWITCH_SD_CACHE_UNQUALIFIED;
-    uint32_t seen[10] = {0}, perf = 0;
+    uint32_t seen[10] = {0};
+    uint32_t perf = 0;
     for (uint32_t i = 0; i < total; i++) {
         if (ext < 16 || ext > length || length - ext < 48)
             return SWITCH_SD_CACHE_UNQUALIFIED;
-        for (uint32_t j = 0; j < i; j++)
+        for (uint32_t j = 0; j < i; j++) {
             if (ext < seen[j] + 48 && seen[j] < ext + 48)
                 return SWITCH_SD_CACHE_UNQUALIFIED;
+        }
         seen[i] = ext;
-        uint32_t next = write_le16(general + ext + 40), registers = general[ext + 42];
+        uint32_t next = write_le16(general + ext + 40);
+        uint32_t registers = general[ext + 42];
         if (registers != 1 || (i + 1 == total ? next != 0 : next == 0))
             return SWITCH_SD_CACHE_UNQUALIFIED;
         if (write_le16(general + ext) == 2) {
             if (perf++)
                 return SWITCH_SD_CACHE_UNQUALIFIED;
             uint32_t address = write_le32(general + ext + 44);
-            uint32_t fno = (address >> 18) & 15, page = (address >> 9) & 255;
+            uint32_t fno = (address >> 18) & 15;
+            uint32_t page = (address >> 9) & 255;
             /* Standard performance register is one 512-byte page. A nonzero
              * starting offset or reserved address bit needs a larger parser. */
             if ((address & 0xffc201ffu) || !fno)

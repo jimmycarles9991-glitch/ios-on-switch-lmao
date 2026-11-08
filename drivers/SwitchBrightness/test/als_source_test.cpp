@@ -238,7 +238,7 @@ TEST(SwitchALSSource, DisplayCreateWithIDHasWhatItNeedsBeforeBacklightControl)
     EXPECT_TRUE(std::regex_search(
         start,
         std::regex(
-            R"re(const bool marketing = table && setProperty\("backlight-marketing-table", table\);\s*)re"
+            R"re(const bool marketing = \(table != nullptr\) && setProperty\("backlight-marketing-table", table\);\s*)re"
             R"re(OSSafeReleaseNULL\(table\);\s*if \(marketing\) \{\s*setProperty\("new-backlight-architecture")re")));
     EXPECT_TRUE(std::regex_search(
         start, std::regex(R"re(if \(OSDynamicCast\(OSDictionary, getProperty\("IODisplayParameters"\)\)\) \{\s*)re"

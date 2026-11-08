@@ -259,7 +259,8 @@ int writeAlarm2(const uint8_t *fields, unsigned count, uint8_t update)
 
 extern "C" int switch_pmic_thermal_record(enum switch_thermal_sensor sensor, int millic)
 {
-    uint8_t fields[SWITCH_THERMAL_RECORD_FIELDS], update = 0;
+    uint8_t fields[SWITCH_THERMAL_RECORD_FIELDS];
+    uint8_t update = 0;
     switch_thermal_record_encode(sensor, millic, fields);
     __atomic_store_n(&gThermalHeld, true, __ATOMIC_RELEASE);
 #if DEVELOPMENT || DEBUG
@@ -280,7 +281,8 @@ extern "C" int switch_pmic_thermal_record(enum switch_thermal_sensor sensor, int
 
 extern "C" enum switch_thermal_sensor switch_pmic_thermal_take(int *millic)
 {
-    uint8_t fields[SWITCH_THERMAL_RECORD_FIELDS] = {}, update = 0;
+    uint8_t fields[SWITCH_THERMAL_RECORD_FIELDS] = {};
+    uint8_t update = 0;
     max77620::rtcQuiet(true);
     int err = updateBits(&update);
     if (!err) {

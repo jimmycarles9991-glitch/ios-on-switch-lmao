@@ -15,8 +15,15 @@
 #if TARGET_OS_IPHONE
 static void pushcount_report(const char *)
 {}  // the mock GPU's counter exists on the host only
+
+static void mock_iokit_comp_stats(unsigned long out[5])
+{
+    for (int i = 0; i < 5; i++)
+        out[i] = 0;
+}
 #else
 extern "C" void pushcount_report(const char *what);
+extern "C" void mock_iokit_comp_stats(unsigned long out[5]);
 #endif
 
 static uint64_t threadNs()
@@ -88,12 +95,13 @@ int main(int argc, char **argv)
             CFDictionarySetValue(p, kIOSurfaceBytesPerRow, nr);
             CFDictionarySetValue(p, kIOSurfacePixelFormat, nf);
             IOSurfaceRef s = IOSurfaceCreate(p);
-            ok = dev.createSurfaceTexture(IOSurfaceGetID(s), IOSurfaceGetBaseAddress(s), IOSurfaceGetAllocSize(s), s, 0,
-                                          td.w, td.h, uint32_t(IOSurfaceGetBytesPerRow(s)), 80, tex[t]);
+            ok =
+                dev.createSurfaceTexture(IOSurfaceGetID(s), IOSurfaceGetBaseAddress(s), IOSurfaceGetAllocSize(s), s, 0,
+                                         td.w, td.h, uint32_t(IOSurfaceGetBytesPerRow(s)), 80, tex[t], td.renderTarget);
         } else if (td.memoryless) {
             ok = dev.createMemoryless(td.w, td.h, td.format, tex[t]);
-        } else {
-            ok = dev.createTexture(td.w, td.h, td.format, tex[t]);
+        } else {  // private in nvkframe: block-linear, as the facade makes a private texture (RawMetal.mm rmNewTexture)
+            ok = dev.createTexture(td.w, td.h, td.format, tex[t], false, true);
         }
         if (!ok) {
             fprintf(stderr, "texture %d failed\n", t);
@@ -135,12 +143,23 @@ int main(int argc, char **argv)
             }
         cpu.push_back((threadNs() - c0) / 1e6);
     }
-    raw::Buffer ring;
+    raw::Buffer ring, indices, fills;
     dev.createBuffer(frame::kRingBytes, ring);
+    dev.createBuffer(65536, indices);
+    const bool filling = frame::fillUniforms() && dev.createBuffer(frame::kFillBytes, fills);  // FRAME_FILL (frame.h)
+    if (filling)
+        memset(fills.cpu, 0, frame::kFillBytes);
     uint64_t ringAt = 0;
     for (unsigned f = 0; f < frames && !harness; f++) {
         const uint64_t c0 = threadNs();
         raw::CommandBuffer *cb = dev.begin();
+        if (filling) {
+            if (!f)
+                cb->clean(fills.cpu, frame::kFillBytes, true);
+            raw::BlitEncoder *be = cb->blit();
+            be->fillBytes(fills.va + frame::kFillFrom, frame::kFillBytes - frame::kFillFrom, frame::fillValue(f));
+            be->end();
+        }
         unsigned drawIndex = 0;
         for (const frame::Pass &pass : frame::passes(f, shape, blur.size(), uber.size())) {
             raw::PassDesc pd;
@@ -182,10 +201,17 @@ int main(int argc, char **argv)
                             bound[b.stage][b.slot] = true;
                         } else
                             e->setBufferOffset(b.stage, b.slot, ringAt);
-                        ringAt = (ringAt + b.length + 255) & ~uint64_t(255);
+                        // FRAME_RING_ALIGN: as nvkframe.mm's
+                        static const uint64_t align =
+                            getenv("FRAME_RING_ALIGN") ? uint64_t(atoi(getenv("FRAME_RING_ALIGN"))) : 256;
+                        ringAt = (ringAt + b.length + align - 1) / align * align;
                         continue;
                     }
                     e->setBytes(b.stage, b.slot, bytes.data(), b.length);
+                }
+                if (const int slot = filling ? frame::fillSlot(d) : -1; slot >= 0) {
+                    e->setBuffer(2, uint32_t(slot), &fills, 0);
+                    bound[2][slot] = false;
                 }
                 for (int t = 0; t < 16; t++)
                     if (d.textures[t] >= 0)
@@ -202,9 +228,18 @@ int main(int argc, char **argv)
                     e->setCullMode(d.cull);
                     e->setWinding(d.winding);
                     e->setFillMode(d.fill);
+                    e->setDepthBias(d.bias[0], d.bias[1], d.bias[2]);
                 }
                 const char *why = nullptr;
-                if (!e->draw(d.primitive, d.first, d.count, d.instances, 0, &why)) {
+                if (frame::indexedDraw(d.blur, drawIndex)) {
+                    static uint32_t ibAt = 0;
+                    const frame::Indexed x = frame::indexed(drawIndex, indices.cpu, ibAt);
+                    if (!e->drawIndexed(3, x.count, 2, &indices, x.offset, x.instances, x.baseVertex, x.baseInstance,
+                                        &why)) {
+                        fprintf(stderr, "draw refused: %s\n", why);
+                        return 1;
+                    }
+                } else if (!e->draw(d.primitive, d.first, d.count, d.instances, d.baseInstance, &why)) {
                     fprintf(stderr, "draw refused: %s\n", why);
                     return 1;
                 }
@@ -232,6 +267,16 @@ int main(int argc, char **argv)
                harness ? "harness" : "raw", c.size(), shape.blurPasses, shape.draws, sum / c.size(), c[c.size() / 2],
                c[c.size() * 9 / 10], dev.stats.pushBytes.load() / 1024.0 / frames,
                dev.stats.uploadBytes.load() / 1024.0 / frames, (unsigned long long)dev.stats.ringWaits.load());
+    if (dev.stats.compBackings.load() || dev.stats.compFailed.load()) {
+        unsigned long m[5];
+        mock_iokit_comp_stats(m);
+        printf(
+            "comp: backings %llu (%llu KiB) failed %llu, zbc clears %llu hit %llu miss | kernel binds %lu refused %lu "
+            "alias %lu cpu %lu nolines %lu\n",
+            (unsigned long long)dev.stats.compBackings.load(), (unsigned long long)(dev.stats.compBytes.load() >> 10),
+            (unsigned long long)dev.stats.compFailed.load(), (unsigned long long)dev.stats.zbcHits.load(),
+            (unsigned long long)dev.stats.zbcMisses.load(), m[0], m[1], m[2], m[3], m[4]);
+    }
     pushcount_report("rawframe");
     return 0;
 }

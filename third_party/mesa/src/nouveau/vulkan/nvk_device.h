@@ -67,6 +67,11 @@ struct nvk_device {
 
    struct nvk_shader *copy_queries;
    struct nvk_shader *copy_indirect;
+
+   /* Switch: the uploaded graphics programs by header address, for the raw
+    * GM20B path's capture (nvk_switch_capture.c)
+    */
+   struct switch_nvk_programs *switch_programs;
 };
 
 VK_DEFINE_HANDLE_CASTS(nvk_device, vk.base, VkDevice, VK_OBJECT_TYPE_DEVICE)

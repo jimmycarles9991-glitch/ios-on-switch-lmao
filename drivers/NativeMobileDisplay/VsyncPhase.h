@@ -70,7 +70,7 @@ public:
         if (!v || ready < v->t || latch < ready)
             return out;
         out.answered = true;
-        out.responseUs = (uint32_t)(ready - v->t < 0xffffffffu ? ready - v->t : 0xffffffffu);
+        out.responseUs = static_cast<uint32_t>(ready - v->t < 0xffffffffu ? ready - v->t : 0xffffffffu);
         out.paced = submit - v->t < period / 2;
         if (v->lead && latch - v->t > v->lead + period / 2) {
             out.missed = true;
@@ -99,7 +99,7 @@ public:
         if (!leadUs)
             return;
         const Sent *v = answered(submit);
-        miss(t, v && ready > v->t ? (uint32_t)(ready - v->t) : leadUs + period / 4);
+        miss(t, v && ready > v->t ? static_cast<uint32_t>(ready - v->t) : leadUs + period / 4);
     }
 
     uint32_t floorUs() const
@@ -111,7 +111,7 @@ public:
     bool paced(uint64_t submit) const
     {
         const Sent *v = answered(submit);
-        return v && submit - v->t < period / 2;
+        return (v != nullptr) && submit - v->t < period / 2;
     }
 
     uint32_t lead() const
@@ -161,9 +161,10 @@ private:
     const Sent *answered(uint64_t submit) const
     {
         const Sent *v = nullptr;
-        for (const Sent &s : sent)
+        for (const Sent &s : sent) {
             if (s.t && s.t <= submit && (!v || s.t > v->t))
                 v = &s;
+        }
         return v;
     }
 
@@ -193,7 +194,7 @@ private:
     uint32_t recentPeak() const
     {
         uint32_t most = windowPeak;
-        for (uint32_t p : peaks)
+        for (const uint32_t p : peaks)
             most = p > most ? p : most;
         return most;
     }
@@ -202,10 +203,11 @@ private:
     {
         notePeak(us);
         ++count;
-        if (us / 500 >= kBins)
+        if (us / 500 >= kBins) {
             ++over;
-        else
+        } else {
             ++bins[us / 500];
+        }
     }
 
     void clear()
@@ -221,7 +223,8 @@ private:
     void decide()
     {
         const unsigned want = (count * 99 + 99) / 100;
-        unsigned seen = 0, bin = 0;
+        unsigned seen = 0;
+        unsigned bin = 0;
         for (; bin < kBins; ++bin) {
             seen += bins[bin];
             if (seen >= want)
@@ -229,10 +232,12 @@ private:
         }
         p99 = bin < kBins ? (bin + 1) * 500 : 0xffffffffu;
         const uint32_t longest = recentPeak() > missFloor ? recentPeak() : missFloor;
-        const uint64_t peak = (uint64_t)longest + kMarginUs;
-        const uint64_t need = (uint64_t)p99 + margin > peak ? (uint64_t)p99 + margin : peak;
-        uint32_t target = need < kMinLeadUs ? kMinLeadUs : (uint32_t)(need < 0xffffffffu ? need : 0xffffffffu);
-        if ((uint64_t)target + kMinSavingUs > period) {
+        const uint64_t peak = static_cast<uint64_t>(longest) + kMarginUs;
+        const uint64_t need = static_cast<uint64_t>(p99) + margin > peak ? static_cast<uint64_t>(p99) + margin : peak;
+        uint32_t target = kMinLeadUs;
+        if (need >= kMinLeadUs)
+            target = static_cast<uint32_t>(need < 0xffffffffu ? need : 0xffffffffu);
+        if (static_cast<uint64_t>(target) + kMinSavingUs > period) {
             leadUs = 0;  // no room: at V_BLANK
             return;
         }

@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 // The raw GM20B path's pipeline pack (pack/mkpack.py writes it, pack/rawpack.py runs the whole generation at bundle build time;
-// this is its layout). Little endian, packed, sections 256-byte aligned. Read-only after load: mmapped and pointed into.
+// this is its layout). Little endian, packed, sections 256-byte aligned. Read-only after load: mmapped shared and pointed into,
+// so every process reads the same page-cache pages. Its pipelines are in keyHash order (Pack::find searches them in place).
 #pragma once
 #include <cstdint>
 #include <string>
@@ -28,16 +29,20 @@ enum PackSectionId {
 
 struct PackHeader {
     char magic[8];                                    // "GM20BPK1"
-    uint32_t version, programs, pipelines, samplers;  // version 4
+    uint32_t version, programs, pipelines, samplers;  // version 5
     PackSection section[PackSectionCount];
     uint64_t stack;  // the build's stack key (build-tegra-gm20b-metal.py: the plugin is compiled with the same one)
 };
 
-// NVK's constant buffer types (nvk_shader.h nvk_cbuf_type) a raw draw binds
+// A program's constant buffer as the pack and the runtime's capture name it: its nvk_cbuf_type in bits 0-2, and for a uniform
+// buffer's descriptor (CbufUbo) its byte offset in set 0 / 16 in bits 3-7. A uniform buffer of another set, or past 496 bytes,
+// is CbufUnbindable: no raw draw binds it.
 enum PackCbufType : uint8_t {
     CbufRoot = 1,
     CbufShaderData = 2,
-    CbufSet = 3
+    CbufSet = 3,
+    CbufUbo = 5,
+    CbufUnbindable = 7
 };
 
 struct PackProgram {
@@ -68,10 +73,23 @@ struct PackEntry {
     uint8_t kind;         // PackEntryKind
     uint8_t stage;        // UBO: 1 vertex, 2 fragment; handles: 2
     uint8_t slot;         // UBO: Metal buffer index; texture: fragment texture index; fetch: color attachment
-    uint8_t samplerKind;  // handles: PackSamplerKind. Buffers: 0 uniform (NVK rounds the range up to 256), 1 storage
+    uint8_t samplerKind;  // handles: PackSamplerKind. Buffers: bufferStorage, bufferResidualWord
     uint8_t sampler;      // handles: fragment sampler index, or constexpr sampler number. Buffers: the function's
     uint8_t pad;          //   window on the slot in 16-byte units (sampler | pad << 8), 0 = the whole buffer
 };
+
+// A buffer entry: storage, else uniform (NVK rounds its range up to the 256-byte cbuf alignment)
+inline bool bufferStorage(const PackEntry &e)
+{
+    return e.samplerKind & 1;
+}
+
+// A uniform buffer entry's root push word (0x700 + 4 x word) that holds m2v's SlotBindOffset residual for its slot, -1 where the
+// record names none (its states then take only offsets that are multiples of 256)
+inline int bufferResidualWord(const PackEntry &e)
+{
+    return int(e.samplerKind >> 2) - 1;
+}
 
 enum PackPipelineFlags : uint32_t {
     PipelineFetches = 1,
@@ -85,6 +103,16 @@ enum class PackForm : uint8_t {
     Default,
     Barrier
 };
+
+constexpr uint8_t cbufKind(uint8_t type)
+{
+    return type & 7;
+}
+
+constexpr uint32_t cbufUboOffset(uint8_t type)
+{
+    return uint32_t(type >> 3) * 16;
+}
 
 struct PackPipeline {
     uint64_t keyHash;    // FNV-1a 64 of the state key (the frontend journal's R-line fields but the label)
@@ -122,6 +150,15 @@ enum PackReloc : uint32_t {
 };
 
 #pragma pack(pop)
+
+// What a context init's marked methods take in this process (PackReloc): the shader heap, the zero page, the root table (NVK's
+// cb0), the texture and sampler header pools and their highest indices
+struct InitAddresses {
+    uint64_t heap, zero, root, tic, tsc;
+    uint32_t ticMax, tscMax;
+};
+
+uint32_t relocated(const PackInitMethod &m, const InitAddresses &a);
 static_assert(sizeof(PackPipeline) == 36 + 16 * 8 + 4 + 32 * 4, "pack layout");
 static_assert(sizeof(PackProgram) == 32, "pack layout");
 
@@ -159,7 +196,8 @@ private:
     const uint8_t *base_ = nullptr;
     size_t size_ = 0;
     const PackHeader *hdr_ = nullptr;
-    std::vector<std::pair<uint64_t, uint32_t>> index_;  // sorted (keyHash, pipeline)
+    // the pipelines in keyHash order, for a pack whose section is not in that order itself (mkpack.py's are); empty: it is
+    std::vector<uint32_t> index_;
 };
 
 }  // namespace raw

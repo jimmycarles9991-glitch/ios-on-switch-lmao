@@ -35,7 +35,9 @@ void centre(volatile uint8_t *regs, unsigned group, int millic)
 }
 }  // namespace
 
+// NOLINTNEXTLINE(misc-use-internal-linkage): OSDefineMetaClassAndStructors needs the class's external linkage
 class SwitchSocTherm : public OSObject {
+    // NOLINTNEXTLINE(misc-explicit-constructor): IOKit's structors macro declares the metaclass constructor
     OSDeclareDefaultStructors(SwitchSocTherm) IOWorkLoop *loop = nullptr;
     IOInterruptEventSource *source = nullptr;
     volatile uint8_t *regs = nullptr;
@@ -50,7 +52,7 @@ class SwitchSocTherm : public OSObject {
 
     static void fired(OSObject *owner, IOInterruptEventSource *, int);
     void armThermtrip(volatile uint8_t *mapped);
-    static IOReturn armAction(OSObject *owner, void *regs, void *, void *, void *);
+    static IOReturn armAction(OSObject *owner, void *mapped, void *, void *, void *);
     static IOReturn listenAction(OSObject *owner, void *moved, void *ctx, void *added, void *);
     void tell(unsigned group, int millic);
 
@@ -180,6 +182,7 @@ IOReturn SwitchSocTherm::listenAction(OSObject *owner, void *moved, void *ctx, v
 
 void SwitchSocTherm::arm(volatile uint8_t *mapped)
 {
+    // NOLINTNEXTLINE(cppcoreguidelines-pro-type-const-cast): runAction passes void *; armAction restores volatile
     loop->runAction(&SwitchSocTherm::armAction, this, const_cast<uint8_t *>(mapped));
 }
 
@@ -197,7 +200,8 @@ SwitchSocTherm *shared()
     SwitchSocTherm *have = __atomic_load_n(&gSocTherm, __ATOMIC_ACQUIRE);
     if (have)
         return have;
-    SwitchSocTherm *fresh = SwitchSocTherm::create(), *none = nullptr;
+    SwitchSocTherm *fresh = SwitchSocTherm::create();
+    SwitchSocTherm *none = nullptr;
     if (!fresh)
         return nullptr;
     if (__atomic_compare_exchange_n(&gSocTherm, &none, fresh, false, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE))
@@ -215,7 +219,7 @@ extern "C" void switch_soctherm_armed(volatile unsigned char *regs)
 
 extern "C" int switch_soctherm_read(enum switch_soctherm_group group, int *millic)
 {
-    SwitchSocTherm *socTherm = __atomic_load_n(&gSocTherm, __ATOMIC_ACQUIRE);
+    const SwitchSocTherm *socTherm = __atomic_load_n(&gSocTherm, __ATOMIC_ACQUIRE);
     volatile uint8_t *regs = socTherm ? socTherm->armedRegs() : nullptr;
     if (!regs || group >= SWITCH_SOCTHERM_GROUPS)
         return -1;

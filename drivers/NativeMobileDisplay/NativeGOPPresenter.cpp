@@ -18,9 +18,9 @@ volatile uint64_t native_gop_gpu_offers, native_gop_gpu_completions, native_gop_
  * and [5] the longest such wait (ns), [6] total ns waited in timed-out calls. A timed wait that returns long before its deadline shows here. */
 volatile uint64_t native_gop_wait_stats[7];
 IOService *native_gop_presenter_create(void);
-bool native_gop_gpu_offer(IOService *, void *display, IOMemoryDescriptor *, uint64_t stride, uint32_t width,
+bool native_gop_gpu_offer(const IOService *, void *display, IOMemoryDescriptor *, uint64_t stride, uint32_t width,
                           uint32_t height);
-void native_gop_presenter_set_source(IOService *presenter, IOService *nub);
+void native_gop_presenter_set_source(const IOService *presenter, IOService *nub);
 // Provided by the display driver: finishes (status 0) or fails the swap that was offered.
 void native_legacy_gpu_complete(void *display, int status);
 }
@@ -30,6 +30,7 @@ static NativeGOPPresenter
     *gHandoff;  // the presenter in GPU mode: the hand-off entry points below reach it without the registry
 
 class NativeGOPPresenter : public IOService {
+    // NOLINTNEXTLINE(misc-explicit-constructor): IOKit's structors macro declares the metaclass constructor
     OSDeclareDefaultStructors(NativeGOPPresenter) friend class NativeGOPClient;
     IOMemoryMap *mapping = nullptr;
     IOLock *gate = nullptr;
@@ -96,6 +97,7 @@ public:
 };
 
 class NativeGOPClient : public IOUserClient {
+    // NOLINTNEXTLINE(misc-explicit-constructor): IOKit's structors macro declares the metaclass constructor
     OSDeclareDefaultStructors(NativeGOPClient) NativeGOPPresenter *controller = nullptr;
     task_t task = TASK_NULL;
     bool opened = false;
@@ -196,8 +198,10 @@ IOReturn NativeGOPPresenter::transfer(task_t task, const NGPPresent &q, NGPTrans
     if (status == kIOReturnSuccess) {
         // A range inside a block-linear surface holds its texels tiled: the rows come from the GPU driver's scratch, taken
         // before the gate since that call sleeps. Past the surface's end the range is read as it is.
-        void *rows = nullptr, *rowsMemory = nullptr;
-        uint64_t rowsOffset = 0, fromRows = 0;
+        void *rows = nullptr;
+        void *rowsMemory = nullptr;
+        uint64_t rowsOffset = 0;
+        uint64_t fromRows = 0;
         const addr64_t pa = input->getPhysicalSegment(0, nullptr, kIOMemoryMapperNone);
         const int tiled = pa ? tegra_gm20b_surface_rows(pa, &rows, &rowsMemory, &rowsOffset) : 0;
         IOMemoryDescriptor *rowsSource = static_cast<IOMemoryDescriptor *>(rowsMemory);
@@ -205,14 +209,14 @@ IOReturn NativeGOPPresenter::transfer(task_t task, const NGPPresent &q, NGPTrans
             fromRows = rowsSource->getLength() - rowsOffset < q.bytes ? rowsSource->getLength() - rowsOffset : q.bytes;
         uint8_t *frame = reinterpret_cast<uint8_t *>(mapping->getVirtualAddress());
         IOLockLock(gate);
-        if (!online)
+        if (!online) {
             status = kIOReturnNotReady;
-        else if (tiled < 0)
+        } else if (tiled < 0) {
             status = kIOReturnNoMemory;
-        else if ((fromRows && rowsSource->readBytes(rowsOffset, frame, fromRows) != fromRows) ||
-                 input->readBytes(fromRows, frame + fromRows, q.bytes - fromRows) != q.bytes - fromRows)
+        } else if ((fromRows != 0 && rowsSource->readBytes(rowsOffset, frame, fromRows) != fromRows) ||
+                   input->readBytes(fromRows, frame + fromRows, q.bytes - fromRows) != q.bytes - fromRows) {
             status = kIOReturnUnderrun;
-        else {
+        } else {
             __asm__ volatile("dsb oshst" ::: "memory");
             native_gop_transfers = native_gop_transfers + 1;
             result->sequence = native_gop_transfers;
@@ -220,9 +224,10 @@ IOReturn NativeGOPPresenter::transfer(task_t task, const NGPPresent &q, NGPTrans
             native_gop_bytes = native_gop_bytes + q.bytes;
         }
         IOLockUnlock(gate);
-        if (rows)
+        if (rows != nullptr) {
             tegra_gm20b_surface_rows_done(rows);
-        IOReturn completion = input->complete(kIODirectionIn);
+        }
+        const IOReturn completion = input->complete(kIODirectionIn);
         if (status == kIOReturnSuccess)
             status = completion;
     }
@@ -240,7 +245,7 @@ bool NativeGOPPresenter::offer(void *display, IOMemoryDescriptor *memory, uint64
     if (!gpuMode || !memory || !display || !gate)
         return false;
     IOLockLock(gate);
-    bool accepted = online && gpuClient && !swap.offered;
+    const bool accepted = online && gpuClient && !swap.offered;
     if (accepted) {
         memory->retain();
         swap = {true, false, ++swapSequence, display, memory, nullptr, stride, width, height};
@@ -257,8 +262,8 @@ IOReturn NativeGOPPresenter::waitSwap(task_t task, uint64_t timeoutMs, NGPSwap *
         return kIOReturnUnsupported;
     if (timeoutMs > 1000)
         timeoutMs = 1000;
-    uint64_t deadline;
-    clock_interval_to_deadline((uint32_t)timeoutMs, kMillisecondScale, &deadline);
+    uint64_t deadline = 0;
+    clock_interval_to_deadline(static_cast<uint32_t>(timeoutMs), kMillisecondScale, &deadline);
     const uint64_t began = mach_absolute_time();
     native_gop_wait_stats[0] = native_gop_wait_stats[0] + 1;
     native_gop_wait_stats[2] = timeoutMs;
@@ -286,8 +291,10 @@ IOReturn NativeGOPPresenter::waitSwap(task_t task, uint64_t timeoutMs, NGPSwap *
     swap.delivered = true;
     IOMemoryDescriptor *memory = swap.memory;
     memory->retain();
-    const uint64_t sequence = swap.sequence, stride = swap.stride;
-    const uint32_t width = swap.width, height = swap.height;
+    const uint64_t sequence = swap.sequence;
+    const uint64_t stride = swap.stride;
+    const uint32_t width = swap.width;
+    const uint32_t height = swap.height;
     IOLockUnlock(gate);
     // The frame's pages go into the client's task here, writable like any import (the GPU maps them for reading; the kernel pins and maintains them).
     IOMemoryMap *map = memory->createMappingInTask(task, 0, kIOMapAnywhere);
@@ -324,10 +331,11 @@ IOReturn NativeGOPPresenter::completeSwap(uint64_t sequence, int status)
     IOLockUnlock(gate);
     OSSafeReleaseNULL(done.map);
     done.memory->release();
-    if (status)
+    if (status) {
         __atomic_fetch_add(&native_gop_gpu_failures, 1, __ATOMIC_RELAXED);
-    else
+    } else {
         native_gop_gpu_completions = native_gop_gpu_completions + 1;
+    }
     native_legacy_gpu_complete(done.display, status);
     return kIOReturnSuccess;
 }
@@ -351,17 +359,17 @@ void NativeGOPPresenter::abandonSwap()
     native_legacy_gpu_complete(done.display, kIOReturnAborted);
 }
 
-extern "C" void native_gop_presenter_set_source(IOService *presenter, IOService *nub)
+extern "C" void native_gop_presenter_set_source(const IOService *presenter, IOService *nub)
 {
     if (NativeGOPPresenter *p = OSDynamicCast(NativeGOPPresenter, presenter))
         p->setMemorySource(nub);
 }
 
-extern "C" bool native_gop_gpu_offer(IOService *presenter, void *display, IOMemoryDescriptor *memory, uint64_t stride,
-                                     uint32_t width, uint32_t height)
+extern "C" bool native_gop_gpu_offer(const IOService *presenter, void *display, IOMemoryDescriptor *memory,
+                                     uint64_t stride, uint32_t width, uint32_t height)
 {
     NativeGOPPresenter *p = OSDynamicCast(NativeGOPPresenter, presenter);
-    return p && p->offer(display, memory, stride, width, height);
+    return (p != nullptr) && p->offer(display, memory, stride, width, height);
 }
 
 // Entry points for the GPU client that reaches the hand-off through an already admitted connection (the Adreno accelerator's user client, which
@@ -385,7 +393,7 @@ IOReturn NativeGOPPresenter::handoffCall(uint32_t op, task_t task, const void *i
         NGPWait q = {};
         NGPSwap swap = {};
         memcpy(&q, in, sizeof(q));
-        IOReturn status = p->waitSwap(task, q.timeout_ms, &swap);
+        const IOReturn status = p->waitSwap(task, q.timeout_ms, &swap);
         if (status == kIOReturnSuccess)
             memcpy(out, &swap, sizeof(swap));
         return status;
@@ -395,7 +403,7 @@ IOReturn NativeGOPPresenter::handoffCall(uint32_t op, task_t task, const void *i
             return kIOReturnBadArgument;
         NGPComplete q = {};
         memcpy(&q, in, sizeof(q));
-        return p->completeSwap(q.sequence, (int)q.status);
+        return p->completeSwap(q.sequence, static_cast<int>(q.status));
     }
     default:
         return kIOReturnUnsupported;
@@ -405,7 +413,7 @@ IOReturn NativeGOPPresenter::handoffCall(uint32_t op, task_t task, const void *i
 // The scanout as a writable, retained descriptor (GPU mode only); the caller maps it into its task.
 IOMemoryDescriptor *NativeGOPPresenter::handoffMemory()
 {
-    NativeGOPPresenter *p = gHandoff;
+    const NativeGOPPresenter *p = gHandoff;
     if (!p || !p->gpuMode || !p->online || !p->mapping)
         return nullptr;
     IOMemoryDescriptor *memory = p->mapping->getMemoryDescriptor();
@@ -435,8 +443,12 @@ IOReturn NativeGOPPresenter::newUserClient(task_t task, void *security, UInt32 t
     if (!client)
         return kIOReturnNoMemory;
     bool attached = false;
-    if (!client->initWithTask(task, security, type, properties) || !(attached = client->attach(this)) ||
-        !client->start(this)) {
+    bool started = client->initWithTask(task, security, type, properties);
+    if (started) {
+        attached = client->attach(this);
+        started = attached && client->start(this);
+    }
+    if (!started) {
         if (attached)
             client->detach(this);
         client->release();
@@ -468,9 +480,10 @@ bool NativeGOPClient::start(IOService *provider)
 void NativeGOPClient::stop(IOService *provider)
 {
     if (opened) {
-        if (controller)
+        if (controller) {
             controller->abandonSwap();
-        controller->close(this);
+            controller->close(this);
+        }
         opened = false;
     }
     controller = nullptr;
@@ -488,7 +501,7 @@ void NativeGOPClient::free()
 
 IOReturn NativeGOPClient::modeAction(OSObject *target, void *, IOExternalMethodArguments *a)
 {
-    NativeGOPClient *client = OSDynamicCast(NativeGOPClient, target);
+    const NativeGOPClient *client = OSDynamicCast(NativeGOPClient, target);
     if (!client || !client->opened || !client->controller)
         return kIOReturnNotOpen;
     if (a->structureOutputDescriptor || !a->structureOutput)
@@ -499,7 +512,7 @@ IOReturn NativeGOPClient::modeAction(OSObject *target, void *, IOExternalMethodA
 
 IOReturn NativeGOPClient::presentAction(OSObject *target, void *, IOExternalMethodArguments *a)
 {
-    NativeGOPClient *client = OSDynamicCast(NativeGOPClient, target);
+    const NativeGOPClient *client = OSDynamicCast(NativeGOPClient, target);
     if (!client || !client->opened || !client->controller)
         return kIOReturnNotOpen;
     if (a->structureInputDescriptor || a->structureOutputDescriptor || !a->structureInput || !a->structureOutput)
@@ -507,7 +520,7 @@ IOReturn NativeGOPClient::presentAction(OSObject *target, void *, IOExternalMeth
     NGPPresent q = {};
     NGPTransfer result = {};
     memcpy(&q, a->structureInput, sizeof(q));
-    IOReturn status = client->controller->transfer(client->task, q, &result);
+    const IOReturn status = client->controller->transfer(client->task, q, &result);
     if (status == kIOReturnSuccess)
         memcpy(a->structureOutput, &result, sizeof(result));
     return status;
@@ -515,7 +528,7 @@ IOReturn NativeGOPClient::presentAction(OSObject *target, void *, IOExternalMeth
 
 IOReturn NativeGOPClient::waitAction(OSObject *target, void *, IOExternalMethodArguments *a)
 {
-    NativeGOPClient *client = OSDynamicCast(NativeGOPClient, target);
+    const NativeGOPClient *client = OSDynamicCast(NativeGOPClient, target);
     if (!client || !client->opened || !client->controller)
         return kIOReturnNotOpen;
     if (a->structureInputDescriptor || a->structureOutputDescriptor || !a->structureInput || !a->structureOutput)
@@ -523,7 +536,7 @@ IOReturn NativeGOPClient::waitAction(OSObject *target, void *, IOExternalMethodA
     NGPWait q = {};
     NGPSwap swap = {};
     memcpy(&q, a->structureInput, sizeof(q));
-    IOReturn status = client->controller->waitSwap(client->task, q.timeout_ms, &swap);
+    const IOReturn status = client->controller->waitSwap(client->task, q.timeout_ms, &swap);
     if (status == kIOReturnSuccess)
         memcpy(a->structureOutput, &swap, sizeof(swap));
     return status;
@@ -531,14 +544,14 @@ IOReturn NativeGOPClient::waitAction(OSObject *target, void *, IOExternalMethodA
 
 IOReturn NativeGOPClient::completeAction(OSObject *target, void *, IOExternalMethodArguments *a)
 {
-    NativeGOPClient *client = OSDynamicCast(NativeGOPClient, target);
+    const NativeGOPClient *client = OSDynamicCast(NativeGOPClient, target);
     if (!client || !client->opened || !client->controller)
         return kIOReturnNotOpen;
     if (a->structureInputDescriptor || a->structureOutputDescriptor || !a->structureInput)
         return kIOReturnUnsupported;
     NGPComplete q = {};
     memcpy(&q, a->structureInput, sizeof(q));
-    return client->controller->completeSwap(q.sequence, (int)q.status);
+    return client->controller->completeSwap(q.sequence, static_cast<int>(q.status));
 }
 
 IOReturn NativeGOPClient::externalMethod(uint32_t selector, IOExternalMethodArguments *a, IOExternalMethodDispatch *,
@@ -550,6 +563,7 @@ IOReturn NativeGOPClient::externalMethod(uint32_t selector, IOExternalMethodArgu
                                                        {completeAction, 0, sizeof(NGPComplete), 0, 0}};
     if (selector >= 4)
         return kIOReturnUnsupported;
+    // NOLINTNEXTLINE(cppcoreguidelines-pro-type-const-cast): IOUserClient::externalMethod takes a non-const dispatch
     return IOUserClient::externalMethod(selector, a, const_cast<IOExternalMethodDispatch *>(methods + selector), this,
                                         nullptr);
 }

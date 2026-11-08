@@ -47,6 +47,7 @@ int main(int argc, char **argv)
             return 2;
         }
         setenv("NMB_DEVICE_BASE_NSOBJECT", "1", 1);
+        setenv("NVDEC_WRITETHROUGH", "1", 0);
         id<MTLDevice> m2v = native_bridge_metal_open(argv[3], argv[2], 0, missing);
         if (!m2v) {
             fprintf(stderr, "NO M2V DEVICE: %s\n", nmb_last_error());

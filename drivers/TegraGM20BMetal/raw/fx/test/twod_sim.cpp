@@ -183,11 +183,15 @@ bool Sim::launch()
     auto clampi = [](double v, uint32_t n) {
         return uint32_t(std::clamp(int64_t(std::floor(v)), int64_t(0), int64_t(n) - 1));
     };
-    const double half = corner || quirkNoHalfTexel ? 0.0 : 0.5;
+    auto position = [&](double origin, uint32_t i, double step) {
+        if (corner)
+            return origin + i * step;
+        return quirkCentreHalfTexel ? origin + i * step + 0.5 : origin + (i + 0.5) * step;
+    };
     for (uint32_t y = 0; y < dh; y++) {
-        const double v = sy0 + (y + half) * dv;
+        const double v = position(sy0, y, dv);
         for (uint32_t x = 0; x < dw; x++) {
-            const double u = sx0 + (x + half) * du;
+            const double u = position(sx0, x, du);
             uint8_t *out = at(texel(d, dx0 + x, dy0 + y), d.bpp);
             if (!out) {
                 err_ = "destination unmapped";
@@ -202,8 +206,7 @@ bool Sim::launch()
                 memcpy(out, in, d.bpp);
                 continue;
             }
-            const double centre = quirkIntegerCentres ? 0.0 : 0.5;
-            const double uu = u - centre, vv = v - centre, fu = std::floor(uu), fv = std::floor(vv);
+            const double uu = u - 0.5, vv = v - 0.5, fu = std::floor(uu), fv = std::floor(vv);
             uint32_t wx = uint32_t(std::lround((uu - fu) * 256.0)), wy = uint32_t(std::lround((vv - fv) * 256.0));
             uint32_t x0 = clampi(fu, s.width), x1 = clampi(fu + 1, s.width), y0 = clampi(fv, s.height),
                      y1 = clampi(fv + 1, s.height);

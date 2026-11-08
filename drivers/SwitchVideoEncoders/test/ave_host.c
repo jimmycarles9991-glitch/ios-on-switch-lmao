@@ -361,7 +361,7 @@ static void layouts(void)
             }
         EXPECT(ok, "layout %u is not a bijection on %ux%u", layout, PITCH, ROWS);
     }
-    // NVDEC's GOB-height-2 formula (TegraNVDECSelfTest.cpp blockLinear) is BL2's.
+    // NVDEC's GOB-height-2 formula (SwitchVideoDecoders/AVD/BlockLinear.h) is BL2's.
     for (uint32_t y = 0; y < 32; y++)
         for (uint32_t x = 0; x < 128; x++) {
             const uint32_t gob =

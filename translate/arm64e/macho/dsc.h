@@ -8,6 +8,7 @@
 #define A64X_DSC_H
 
 #include "codesign.h"
+#include "fips.h"
 
 #include <stdbool.h>
 #include <stddef.h>
@@ -53,8 +54,16 @@ struct a64x_dsc_file {
 int a64x_dsc_parse(const uint8_t *buf, size_t size, struct a64x_dsc_file *f, char *err, size_t errlen);
 
 struct a64x_dsc_stats {
-    uint64_t pages, words_changed, plan_words, dead_checks, cdhashes_replaced;
+    uint64_t pages, words_changed, plan_words, dead_checks, cdhashes_replaced, fips_macs;
 };
+
+/*
+ * corecrypto's FIPS integrity check of every image whose header is in this file's executable mappings
+ * (libcorecrypto's, macho/fips.h), its text and MAC in this file too: calls found(ctx, fips) with file offsets.
+ * Returns how many.
+ */
+uint64_t a64x_dsc_fips_each(const struct a64x_dsc_file *f, const uint8_t *bytes,
+                            void (*found)(void *ctx, const struct a64x_fips *fips), void *ctx);
 
 /* Old and new cdhash of one translated on-disk binary slice (sorted by old for a64x_dsc_apply). */
 struct a64x_cdhash_pair {
@@ -62,8 +71,8 @@ struct a64x_cdhash_pair {
 };
 
 /*
- * out: a copy of f (f->size bytes), translated, prebuilt-loader cdhashes replaced (pairs may be NULL), re-signed;
- * cdhash: the new one. 0, or -1 with a message.
+ * out: a copy of f (f->size bytes), translated, FIPS integrity MACs of its translated text, prebuilt-loader cdhashes
+ * replaced (pairs may be NULL), re-signed; cdhash: the new one. 0, or -1 with a message.
  */
 int a64x_dsc_apply(const struct a64x_plan *plan, const struct a64x_dsc_file *f, const struct a64x_cdhash_pair *pairs,
                    size_t npairs, uint8_t *out, uint8_t cdhash[A64X_CDHASH_SIZE], struct a64x_dsc_stats *st, char *err,
@@ -73,10 +82,10 @@ int a64x_dsc_apply(const struct a64x_plan *plan, const struct a64x_dsc_file *f, 
  * The whole translated cache against the original, from the output bytes only: no A12-baseline instruction left in
  * code (the plan's code ranges and every TEXT_STUBS mapping, whatever the plan says); every changed code word is a one-word rewrite, a `b ok`, a word freed by a dead check, or a stub site whose
  * every path stays in freed words until it returns to site + 4 (B) or RETs (BL); data bytes unchanged except
- * replaced cdhashes; every file's signature checks.
+ * replaced cdhashes and FIPS integrity MACs, each as a64x_fips_rewrite leaves it; every file's signature checks.
  */
 struct a64x_dsc_verify {
-    uint64_t code_words, rewritten, dead_checks, stub_words, sites_ok, sites_bad, left_baseline;
+    uint64_t code_words, rewritten, dead_checks, stub_words, sites_ok, sites_bad, left_baseline, fips_macs;
     uint64_t sites[64], left[64]; /* by class */
 };
 

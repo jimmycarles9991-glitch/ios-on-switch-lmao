@@ -17,6 +17,8 @@ filegroup(
     srcs = [
         "AsyncPipelines.h",
         "GpuMemoryRelease.h",
+        "ImageFilterLink.h",
+        "LimitsTable.h",
         "NativeBridgeMetalFrontend.h",
         "QueuePriority.h",
         "SurfaceLayout.h",
@@ -24,6 +26,7 @@ filegroup(
         "TwoPlaneStandIn.h",
         "bridge/NativeMetalBridge.h",
         "bridge/NativeMetalObjects.h",
+        "//kits/SwitchDMA:SwitchDcache.h",
     ],
 )
 
@@ -31,6 +34,7 @@ filegroup(
     name = "bridge_rust",
     srcs = [
         "bridge/NativeMetalBridge.rs",
+        "bridge/NativeMetalFailure.rs",
         "bridge/NativeMetalObjects.rs",
         "bridge/NativeMetalTarget.rs",
     ],

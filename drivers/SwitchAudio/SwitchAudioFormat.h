@@ -29,6 +29,10 @@
 #define SWITCH_AUDIO_FN static inline
 #endif
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /* TEGRA210_AUDIOCIF_BITS_* (CIF words) and TEGRA210_I2S_BITS_* (I2S_CTRL bit size) share one encoding. */
 enum {
     SWITCH_AUDIO_BITS_16 = 3,
@@ -187,6 +191,10 @@ SWITCH_AUDIO_FN int64_t switch_audio_capture_frame(uint64_t t, uint64_t anchor, 
         return -1;
     return (int64_t)((t - anchor) % ring_frames);
 }
+
+#ifdef __cplusplus
+}
+#endif
 
 #undef SWITCH_AUDIO_FN
 #endif

@@ -76,7 +76,7 @@ static inline uint32_t tegra_host1x_op_incr_syncpt(uint32_t cond, uint32_t syncp
 }
 
 // Brings host1x up once (clock and reset adopted or enabled, sync unit configured, the syncpoint interrupt claimed,
-// channel 0's command DMA started) and runs its self-test: a host-class increment completed by interrupt.
+// channel 0's command DMA started); each engine's own proof of life is the first increment completed by interrupt.
 // Idempotent; returns TEGRA_HOST1X_OK or the failure, after logging one line either way.
 int tegra_host1x_start(void);
 
@@ -117,7 +117,7 @@ void tegra_host1x_resume(void);
 // most; a fifth is refused with a log line and its engine is then not reloaded after SC7). Clients quiesce in the
 // reverse order of registration and reload in order, so an engine that registers after NVDEC (NVJPG, whose MBIST
 // workaround runs on NVDEC's clock) finds NVDEC already back.
-void tegra_host1x_set_sleep_client(void (*suspend)(void), void (*resume)(void));
+void tegra_host1x_set_sleep_client(void (*suspend)(), void (*resume)());
 void tegra_nvdec_suspend(void);
 void tegra_nvdec_resume(void);
 

@@ -54,16 +54,20 @@ struct clk *devm_clk_get(struct device *dev, const char *id)
 
 int clk_prepare_enable(struct clk *c)
 {
+	const char *name = "pll_p_out5";
+
 	if (!c)
 		return 0;
 	/* pll_p_out5 gets its 204 MHz divider before it is ungated (tegra.c sets it only afterwards), as L4T's init table
 	 * (l4t49 clk-tegra210.c:3784) and nvgpu's probe (platform_gk20a_tegra.c:462,498) do before unrailgate enables it */
 	if (c->id == TEGRA_GM20B_CLK_PWR)
 		tegra_gm20b_clk_set_rate(c->id, 204000000);
-	nvxnu_step("tegra-gm20b: M1 step: enable clock %s\n", c->id == TEGRA_GM20B_CLK_GPU ? "gpu"
-							      : c->id == TEGRA_GM20B_CLK_REF
-								      ? "pllg_ref"
-								      : "pll_p_out5");
+	if (c->id == TEGRA_GM20B_CLK_GPU) {
+		name = "gpu";
+	} else if (c->id == TEGRA_GM20B_CLK_REF) {
+		name = "pllg_ref";
+	}
+	nvxnu_step("tegra-gm20b: M1 step: enable clock %s\n", name);
 	return tegra_gm20b_clk_enable(c->id, 1);
 }
 
@@ -108,7 +112,7 @@ struct regulator *devm_regulator_get(struct device *dev, const char *id)
 int regulator_enable(struct regulator *r)
 {
 	const long long uv = GPU_BOOT_UV;
-	int ret;
+	int ret = 0;
 	nvxnu_step("tegra-gm20b: M1 step: VDD_GPU: read MAX77812 over I2C5\n");
 	ret = tegra_gm20b_rail_set_uv((int)uv); /* voltage first, as hekate does, then enable */
 	if (!ret)
@@ -162,7 +166,7 @@ int reset_control_assert(struct reset_control *r)
 
 int reset_control_deassert(struct reset_control *r)
 {
-	int ret;
+	int ret = 0;
 	(void)r;
 	nvxnu_step("tegra-gm20b: M1 step: deassert GPU reset (gpu clock gated around it)\n");
 	tegra_gm20b_clk_enable(TEGRA_GM20B_CLK_GPU, 0);

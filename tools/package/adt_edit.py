@@ -1,10 +1,13 @@
 #!/usr/bin/env python3
-"""The board ADT (//boot:adt) with what iPadOS userland expects of a J120.
+"""The board ADT (//boot:adt) with what iPadOS userland expects of the IPSW's own iPad: J120 (21H461), J181 (24B119).
 
-Also the radios' nodes, the overlay's union directories, the loader's zeroed slots and, with --smp, all four A57s.
+The iPad's identity (model, board, SoC, /product) is read from Apple's device tree of that iPad in the IPSW
+(//ipsw:device_tree). Also the radios' nodes, the overlay's union directories, the loader's zeroed slots and, with
+--smp, all four A57s.
 
-    adt_edit.py --adt BASE --overlay-plan PLAN --bt-patch HCD --portrait-header H [--smp]
-                [--a64x-cache-pretranslated LIST] [--switch-pretranslated-trust MODULE] --out ADT
+    adt_edit.py --adt BASE --apple-adt APPLE --overlay-plan PLAN --bt-patch HCD --portrait-header H
+                --root-volume-uuid UUID [--smp] [--a64x-cache-pretranslated LIST] [--switch-pretranslated-trust MODULE]
+                [--switch-os-cryptex-trust MODULE]... [--switch-app-cryptex-trust MODULE]... --out ADT
 """
 
 import argparse
@@ -14,8 +17,17 @@ from collections.abc import Sequence
 from pathlib import Path
 
 from boot_config import portrait_native
-from loader_abi import SEED_SOURCE_BYTES, SEED_SOURCE_PROPERTY, STAMPS_BYTES, STAMPS_PROPERTY
+from loader_abi import (
+    BOOT_MANIFEST_HASH_BYTES,
+    BOOT_MANIFEST_HASH_PROPERTY,
+    SEED_SOURCE_BYTES,
+    SEED_SOURCE_PROPERTY,
+    STAMPS_BYTES,
+    STAMPS_PROPERTY,
+)
+from native_oled_adt import property_bytes, root_matching
 from native_xnu_layout import parse_adt
+from trust import im4p_payload
 
 # USB 2.0 device mode on the USB-C port (drivers/SwitchUSB): the USB function set configd's USBDeviceConfiguration
 # plug-in gives Apple's IOUSBDeviceFamily, by name from /System/Library/AppleUSBDevice/USBDeviceConfiguration.plist.
@@ -32,9 +44,65 @@ USB_HOST = True
 # CADeviceUseCIF10 (so the display reports no extended colours, and CADisplayMode, FBSDisplayConfiguration and UIScreen
 # say sRGB), UIKit's _supportsDeepColor, and WebCore's screenSupportsExtendedColor, so WebKit tiles are BGRA8 rather
 # than two-plane b3a8 and Core Animation stops making w30r surfaces, formats the GM20B only reaches through copies. 'P3'
-# is J120's own. Asset catalog images that this IPSW ships only in P3 (some onboarding and tips art) are not found under
-# sRGB. The kernel drops MobileGestalt's cache when this changes (kern_exec.c native_switch_gamut_cache).
+# is J120's own, 'sRGB' J181's. Asset catalog images that 21H461 ships only in P3 (some onboarding and tips art) are not
+# found under sRGB. The kernel drops MobileGestalt's cache when this changes (kern_exec.c native_switch_gamut_cache).
 DISPLAY_GAMUT = 'sRGB'
+# The /product keys that name the iPad or say what its software offers, copied from Apple's tree of the IPSW's own iPad;
+# a key that tree lacks is left out. The rest of /product is the Switch's own.
+PRODUCT_IDENTITY = (
+    'product-name',
+    'product-description',
+    'artwork-device-idiom',
+    'artwork-device-subtype',
+    'artwork-scale-factor',
+    'compatible-device-fallback',
+    'thin-bezel',
+    'product-id',
+    # MobileGestalt's GraphicsFeatureSetClass and GraphicsFeatureSetFallbacks, by which CoreUI picks asset catalog
+    # renditions (without them every CUICatalog logs that kMGArtworkGraphicsFeatureSetClass has no answer).
+    'graphics-featureset-class',
+    'graphics-featureset-fallbacks',
+    'device-perf-memory-class',
+    'app-macho-architecture',
+    'framebuffer-identifier',
+    'display-mirroring',
+    'ui-background-quality',
+    'ui-weather-quality',
+    'bluetooth-le',
+    'ui-pip',
+    'ui-pinned-app',
+    'ui-floating-live-app',
+    'ui-overlay-app',
+    'hearingaid-audio-equalization',
+    'hearingaid-low-energy-audio',
+    'iap2-protocol-supported',
+    'allow-32bit-apps',
+    'partition-style',
+    'ephemeral-data-mode',
+    'multiuser-sessions',
+    'has-applelpm',
+    'has-boot-chime',
+    'udid-version',
+    'chrome-identifier',
+    'device-color-policy',
+    'itunes-min-ver',
+    'mobiledevice-min-ver',
+    'ptp-large-files',
+    'RF-exposure-separation-distance',
+    'disable-globe-map',
+    'sandman-support',
+    'supports-avatars',
+    'wifi-chipset',
+    'sub-product-type',
+    'fdr-product-type',
+    'unique-model',
+    'has-exclaves',
+    'exclaves-enabled',
+)
+# /product/audio's keys that name the iPad's acoustic design, copied as PRODUCT_IDENTITY is. MobileGestalt's AcousticID
+# is acoustic-id, which iOS 27's VirtualAudio takes its tunings directory from (J181's 2003:
+# /Library/Audio/Tunings/AID2003). J120 has none and its tunings are named by the model.
+AUDIO_IDENTITY = ('acoustic-id',)
 
 
 def adt_parse(data: bytes, pos: int = 0) -> tuple[list, int]:
@@ -53,12 +121,11 @@ def adt_parse(data: bytes, pos: int = 0) -> tuple[list, int]:
     return [props, nodes], pos
 
 
-def adt_serialize(node: list) -> bytes:
-    props, children = node
-    out = struct.pack('<II', len(props), len(children))
-    for name, word, value in props:
-        out += name.encode().ljust(32, b'\0') + struct.pack('<I', word) + value + bytes(-len(value) % 4)
-    return out + b''.join(adt_serialize(c) for c in children)
+def adt_serialize(tree: list) -> bytes:
+    props, children = tree
+    head = struct.pack('<II', len(props), len(children))
+    body = b''.join(property_bytes(name, value, word & 0x80000000) for name, word, value in props)
+    return head + body + b''.join(adt_serialize(c) for c in children)
 
 
 def put(node: list, name: str, value: bytes) -> None:
@@ -82,6 +149,17 @@ def u32(value: int) -> bytes:
     return struct.pack('<I', value)
 
 
+def apple_properties(apple: list, path: str) -> dict[str, bytes]:
+    """Return the properties of the node at `path` ('/', '/product', '/arm-io') of Apple's parsed tree."""
+    node = apple
+    for name in filter(None, path.split('/')):
+        found = [c for c in node[1] if any(p[0] == 'name' and p[2].split(b'\0')[0] == name.encode() for p in c[0])]
+        if len(found) != 1:
+            raise SystemExit(f"Apple's device tree has no single {path}")
+        node = found[0]
+    return {p[0]: p[2] for p in node[0]}
+
+
 def four_cores(tree: list) -> None:
     """All four A57s (MPIDR 0-3, one cluster, shared L2) started by PSCI CPU_ON over SMC."""
     cpus = child(tree, 'cpus')
@@ -100,14 +178,16 @@ def four_cores(tree: list) -> None:
     put(psci, 'method', b'smc\0')
 
 
-def _identity(tree: list) -> None:
-    put(tree, 'model', b'iPad7,1\0')  # hw.model; idle code matches "compatible"
-    put(tree, 'target-type', b'J120\0')
+def _identity(tree: list, apple: list) -> None:
+    root = apple_properties(apple, '/')
+    put(tree, 'model', root['model'])  # hw.model; idle code matches "compatible"
+    put(tree, 'target-type', root['target-type'])
     # The audio server keys its routing database on the board name; the Switch entries stay
     # after it (switch_idle_board looks for nintendo,aula).
+    board = root['compatible'].split(b'\0', 1)[0] + b'\0'
     compatible = next(p[2] for p in tree[0] if p[0] == 'compatible')
-    if not compatible.startswith(b'J120AP\0'):
-        put(tree, 'compatible', b'J120AP\0' + compatible)
+    if not compatible.startswith(board):
+        put(tree, 'compatible', board + compatible)
 
 
 def _chosen(tree: list, portrait: bool) -> list:
@@ -127,35 +207,26 @@ def _chosen(tree: list, portrait: bool) -> list:
         put(chosen, key, u32(0))
     for key in ('certificate-security-mode', 'effective-security-mode-sep'):
         put(chosen, key, u32(1))
+    # xnu-12377 asserts that iBoot reported whether kernel text gets locked (ml_unsafe_kernel_text, which dtrace asks
+    # before patching text). No CTRR here, but the kernel maps its text read-only all the same.
+    put(chosen, 'kernel-ctrr-to-be-enabled', u32(1))
     return chosen
 
 
-def _product(tree: list) -> None:
+def _product(tree: list, apple: list) -> None:
     product = child(tree, 'product')
-    for key, value in (
-        ('product-name', b'iPad Pro (12.9-inch) (2nd generation)\0'),
-        ('product-description', b'iPad Pro (12.9-inch) (2nd generation)\0'),
-        ('model', b'iPad7,1\0'),
-        ('artwork-device-idiom', b'pad\0'),
-        ('artwork-device-subtype', u32(2732)),
-        ('artwork-scale-factor', u32(2)),
-        ('artwork-display-gamut', DISPLAY_GAMUT.encode() + b'\0'),
-        ('compatible-device-fallback', b'iPad6,7\0'),
-        ('thin-bezel', u32(1)),
-        ('product-id', bytes.fromhex('e9fefef6e6f9d12a5ba1a2551866cbbd749f0ec3')),
-        # MobileGestalt's GraphicsFeatureSetClass and GraphicsFeatureSetFallbacks, by which CoreUI picks asset catalog
-        # renditions (without them every CUICatalog logs that kMGArtworkGraphicsFeatureSetClass has no answer).
-        ('graphics-featureset-class', b'APPLE3\0'),
-        ('graphics-featureset-fallbacks', b'APPLE3v1:APPLE2:APPLE1:GLES2,0\0'),
-        ('device-perf-memory-class', u32(3)),
-        ('app-macho-architecture', b'arm64\0'),
-        ('framebuffer-identifier', b'0\0'),
-        ('display-mirroring', u32(1)),
-        ('ui-background-quality', u32(100)),
-        ('ui-weather-quality', u32(100)),
-    ):
-        put(product, key, value)
-    put(child(product, 'audio'), 'wireless-splitter', u32(1))  # as UniXNU's 21H461 profile
+    identity = apple_properties(apple, '/product')
+    for key in PRODUCT_IDENTITY:
+        if key in identity:
+            put(product, key, identity[key])
+    put(product, 'model', apple_properties(apple, '/')['model'])
+    put(product, 'artwork-display-gamut', DISPLAY_GAMUT.encode() + b'\0')
+    audio = child(product, 'audio')
+    put(audio, 'wireless-splitter', u32(1))  # as UniXNU's 21H461 profile
+    apple_audio = apple_properties(apple, '/product/audio')
+    for key in AUDIO_IDENTITY:
+        if key in apple_audio:
+            put(audio, key, apple_audio[key])
 
 
 def _radios(tree: list, bt_patch: bytes | None) -> None:
@@ -212,57 +283,30 @@ def _usb(tree: list) -> None:
 
 
 def _media_accel(tree: list) -> None:
-    """The keys iOS's media frameworks read before they pick a hardware path."""
+    """Set the keys iOS's media frameworks read before they pick a hardware path."""
     # J120 has iommu-present (empty) on /arm-io. Its one reader in 21H461's dyld cache, VideoToolbox's
     # FigCreateIOSurfacePropertiesDictionary, otherwise asks every IOSurface it makes (decoder and pixel-transfer pools)
     # for the PurpleGfxMem carveout, which this tree does not have. The engines that touch those surfaces reach
     # scattered pages through their own MMUs: VIC, NVJPG and the display through the MC SMMU, the GPU through its GMMU.
     arm_io = child(tree, 'arm-io')
     put(arm_io, 'iommu-present', b'')
-    # J120's A10X generation. MobileGestalt compares it in about 25 answers, among them HEVCDecoder8bitSupported (H8)
-    # and HEVCDecoder10bitSupported (H9): absent, both answer false although NVDEC decodes HEVC. Its other reader in the
-    # dyld cache is DeviceIdentity; the kernel only lists it as sandbox-readable.
-    put(arm_io, 'soc-generation', b'H9\0')
+
+
+def platform_name(apple: list) -> bytes:
+    """Return the iPad's SoC as iBoot names it in platform-name ('t8011', 't8030'), from /arm-io's 'arm-io,<soc>'."""
+    family, _, soc = apple_properties(apple, '/arm-io')['compatible'].split(b'\0', 1)[0].partition(b',')
+    if family != b'arm-io' or not soc.startswith(b't'):
+        raise SystemExit("Apple's /arm-io compatible names no SoC")
+    return soc + b'\0'
 
 
 def _capabilities(tree: list) -> None:
-    """J120's own answers to what MobileGestalt reads before iOS offers a feature (libMobileGestalt, 21H461)."""
-    # IOPlatformExpertDevice carries the root's properties; MobileGestalt's HardwarePlatform is its platform-name, which
-    # iBoot sets to the SoC. Without it CoreVideo, AMS and the store's user agent read NULL.
-    put(tree, 'platform-name', b't8011\0')
-    put(tree, 'target-sub-type', b'J120AP\0')
+    """Set the Switch's answers to what MobileGestalt reads before iOS offers a feature (libMobileGestalt)."""
     put(child(tree, 'chosen'), 'display-corner-radius', u32(0))
     product = child(tree, 'product')
-    for key, value in (
-        ('bluetooth-le', u32(1)),
-        ('ui-pip', b''),
-        ('ui-pinned-app', b''),
-        ('ui-floating-live-app', b''),
-        ('ui-overlay-app', b''),
-        ('hearingaid-audio-equalization', u32(1)),
-        ('hearingaid-low-energy-audio', u32(1)),
-        ('iap2-protocol-supported', u32(1)),
-        ('allow-32bit-apps', u32(1)),
-        ('partition-style', b'iOS\0'),
-        ('ephemeral-data-mode', u32(0)),
-        ('multiuser-sessions', u32(0)),
-        ('has-applelpm', u32(0)),
-        ('has-boot-chime', u32(0)),
-        ('udid-version', u32(1)),
-        ('chrome-identifier', b'com.apple.dt.devicekit.chrome.tablet\0'),
-        ('device-color-policy', u32(0)),
-        ('itunes-min-ver', u32(0xC0500)),
-        ('mobiledevice-min-ver', b'1600\0'),
-        ('ptp-large-files', u32(1)),
-        ('RF-exposure-separation-distance', u32(5)),
-        ('disable-globe-map', b''),
-        ('sandman-support', u32(1)),
-        ('supports-avatars', b''),
-        ('wifi-chipset', b'4355\0'),
-    ):
-        put(product, key, value)
     # MobileGestalt's volume-buttons answer is whether /buttons has function-button_volup; nothing here resolves the
-    # function (SwitchButtons owns the buttons; AppleM68Buttons, which would, is not prelinked). J120's bytes.
+    # function (SwitchButtons owns the buttons; AppleM68Buttons, which would, is not prelinked). J120's GPIO bytes under
+    # every identity: only their presence is read (J181's resolve through its AOP's 'btnR').
     buttons = child(tree, 'buttons')
     put(buttons, 'function-button_volup', bytes.fromhex('240000004f4950472800000000000000'))
     put(buttons, 'function-button_voldown', bytes.fromhex('240000004f4950472b00000000000000'))
@@ -307,14 +351,13 @@ def ipad_adt(
     bt_patch: bytes | None = None,
     portrait: bool = False,
 ) -> bytes:
-    """Return the inherited Switch tree plus what iPadOS userland expects of a J120.
+    """Return the inherited Switch tree plus what iPadOS userland expects of an iPad, but the iPad's identity.
 
     The values are those of UniXNU-qemu's make-qemu-adt.py, which boots this build to SpringBoard.
     """
     tree, end = adt_parse(data)
     if end != len(data):
         raise SystemExit('trailing bytes after the ADT')
-    _identity(tree)
     chosen = _chosen(tree, portrait)
     # IOPMrootDomain reads this at boot complete (gSleepDisabledFlag) and refuses every sleep while it is 1. Whether
     # the console may sleep is SwitchSuspend's call at runtime (a CPU power assertion while it cannot).
@@ -323,15 +366,13 @@ def ipad_adt(
     # compressor present but inactive: anonymous memory is never compressed and jetsam kills instead. 2 is
     # VM_PAGER_COMPRESSOR_NO_SWAP: the active in-core compressor, no swap files (4 would swap to the SD card).
     put(child(tree, 'defaults'), 'kern.vm_compressor', u32(2))
-    _product(tree)
     _radios(tree, bt_patch)
     # The platform UUID. IOPlatformExpertDevice::generatePlatformUUID makes IOPlatformUUID from /chosen
-    # unique-chip-id (8 bytes) and chip-id (4 bytes), as iBoot sets them; without them the IOPlatformUUID resource
-    # is never published and gethostuuid() with no timeout waits for ever. configd's IPConfiguration start() makes
-    # one call (its CGA host UUID, as net.inet6.send.opmode is 1), so configd's plugin thread stops there: no other
-    # start(), no prime(), so State:/Network/Interface never lists en0 and wifid makes no Wi-Fi device. chip-id is
-    # J120's A10X (T8011); unique-chip-id stands in for the ECID, a fixed value with the overlay MACs' 02:1d:5a.
-    put(chosen, 'chip-id', u32(0x8011))
+    # unique-chip-id (8 bytes) and chip-id (4 bytes, with_ipad_identity's), as iBoot sets them; without them the
+    # IOPlatformUUID resource is never published and gethostuuid() with no timeout waits for ever. configd's
+    # IPConfiguration start() makes one call (its CGA host UUID, as net.inet6.send.opmode is 1), so configd's plugin
+    # thread stops there: no other start(), no prime(), so State:/Network/Interface never lists en0 and wifid makes no
+    # Wi-Fi device. unique-chip-id stands in for the ECID, a fixed value with the overlay MACs' 02:1d:5a.
     put(chosen, 'unique-chip-id', struct.pack('<Q', 0x001D5A0000000001))
     _usb(tree)
     _media_accel(tree)
@@ -339,6 +380,41 @@ def ipad_adt(
     _boot_slots(tree, chosen, overlay_dirs)
     if smp:
         four_cores(tree)
+    return adt_serialize(tree)
+
+
+def with_ipad_identity(data: bytes, apple: bytes) -> bytes:
+    """Return the ADT with the identity of the iPad whose device tree Apple ships in the IPSW (`apple`, an ADT)."""
+    tree, _ = adt_parse(data)
+    ipad, end = adt_parse(apple)
+    if end != len(apple):
+        raise SystemExit("trailing bytes after Apple's device tree")
+    _identity(tree, ipad)
+    _product(tree, ipad)
+    # IOPlatformExpertDevice carries the root's properties; MobileGestalt's HardwarePlatform is its platform-name, which
+    # iBoot sets to the SoC. Without it CoreVideo, AMS and the store's user agent read NULL.
+    soc = platform_name(ipad)
+    put(tree, 'platform-name', soc)
+    put(tree, 'target-sub-type', apple_properties(ipad, '/')['target-sub-type'])
+    put(child(tree, 'chosen'), 'chip-id', u32(int(soc[1:-1], 16)))
+    # The SoC generation (J120's A10X: H9, J181's A13: H12). MobileGestalt compares it in about 25 answers, among them
+    # HEVCDecoder8bitSupported (H8) and HEVCDecoder10bitSupported (H9): absent, both answer false although NVDEC decodes
+    # HEVC. Its other reader in the dyld cache is DeviceIdentity; the kernel only lists it as sandbox-readable.
+    put(child(tree, 'arm-io'), 'soc-generation', apple_properties(ipad, '/arm-io')['soc-generation'])
+    return adt_serialize(tree)
+
+
+def with_root_volume(data: bytes, volume_uuid: str) -> bytes:
+    """Return the ADT whose /chosen/root-matching names the IPSW kind's System volume (ipsw/pins.bzl "volumes")."""
+    tree, _ = adt_parse(data)
+    put(child(tree, 'chosen'), 'root-matching', root_matching(volume_uuid))
+    return adt_serialize(tree)
+
+
+def with_boot_manifest_hash_slot(data: bytes) -> bytes:
+    """Return the ADT with a zeroed /chosen/boot-manifest-hash (loader_abi.BOOT_MANIFEST_HASH_PROPERTY)."""
+    tree, _ = adt_parse(data)
+    put(child(tree, 'chosen'), BOOT_MANIFEST_HASH_PROPERTY, bytes(BOOT_MANIFEST_HASH_BYTES))
     return adt_serialize(tree)
 
 
@@ -369,13 +445,35 @@ def with_switch_pretranslated_trust(data: bytes, module: bytes) -> bytes:
     return adt_serialize(tree)
 
 
+def with_cryptex_trust(data: bytes, cryptex: str, modules: Sequence[bytes]) -> bytes:
+    """Return the ADT with /chosen/switch-<cryptex>-cryptex-trust, the UUIDs of the trust modules of its code.
+
+    Each is Apple's IM4P of the cryptex's trust cache or iOS 27's pretranslated module of it. The kernel answers
+    FSIOC_AUTH_FS for a file of that cryptex's mount signed with a CDHash from one of them
+    (kernel/switch/vfs/auth_fs.c), as APFS does for a grafted cryptex's files.
+    """
+    uuids = b''
+    for data_or_im4p in modules:
+        module = im4p_payload(data_or_im4p) if data_or_im4p[:1] == b'\x30' else data_or_im4p
+        if len(module) < 24 or struct.unpack_from('<I', module)[0] not in (1, 2):
+            raise SystemExit(f'{cryptex} cryptex trust: {len(module)} bytes, not a version 1 or 2 trust module')
+        uuids += module[4:20]
+    tree, _ = adt_parse(data)
+    put(child(tree, 'chosen'), f'switch-{cryptex}-cryptex-trust', uuids)
+    return adt_serialize(tree)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    for name in ('adt', 'overlay-plan', 'bt-patch', 'portrait-header', 'out'):
+    for name in ('adt', 'apple-adt', 'overlay-plan', 'bt-patch', 'portrait-header', 'out'):
         parser.add_argument('--' + name, required=True, type=Path)
+    parser.add_argument('--root-volume-uuid', required=True, help="the IPSW kind's System volume")
     parser.add_argument('--smp', action='store_true')
+    parser.add_argument('--boot-manifest-hash', action='store_true', help='a zeroed slot the layout step fills')
     parser.add_argument('--a64x-cache-pretranslated', type=Path)
     parser.add_argument('--switch-pretranslated-trust', type=Path)
+    for cryptex in ('os', 'app'):
+        parser.add_argument(f'--switch-{cryptex}-cryptex-trust', type=Path, action='append', default=[])
     args = parser.parse_args()
     dirs = [tuple(d) for d in json.loads(args.overlay_plan.read_text())['dirs']]
     adt = ipad_adt(
@@ -385,10 +483,17 @@ def main() -> None:
         bt_patch=args.bt_patch.read_bytes(),
         portrait=portrait_native(args.portrait_header),
     )
+    adt = with_ipad_identity(adt, args.apple_adt.read_bytes())
+    adt = with_root_volume(adt, args.root_volume_uuid)
+    if args.boot_manifest_hash:
+        adt = with_boot_manifest_hash_slot(adt)
     if args.a64x_cache_pretranslated:
         adt = with_a64x_cache_pretranslated(adt, args.a64x_cache_pretranslated.read_bytes())
     if args.switch_pretranslated_trust:
         adt = with_switch_pretranslated_trust(adt, args.switch_pretranslated_trust.read_bytes())
+    for cryptex in ('os', 'app'):
+        if modules := getattr(args, f'switch_{cryptex}_cryptex_trust'):
+            adt = with_cryptex_trust(adt, cryptex, [path.read_bytes() for path in modules])
     if ('/filesystems', 'DoNotUseSEP') not in parse_adt(adt).properties:
         raise SystemExit('ADT patch failed')
     args.out.write_bytes(adt)

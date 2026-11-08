@@ -1,0 +1,34 @@
+diff --git a/target/arm/cortex-regs.c b/target/arm/cortex-regs.c
+index ae817b0..4db0ffd 100644
+--- a/target/arm/cortex-regs.c
++++ b/target/arm/cortex-regs.c
+@@ -50,12 +50,15 @@ static const ARMCPRegInfo cortex_a72_a57_a53_cp_reginfo[] = {
+     { .name = "CPUACTLR",
+       .cp = 15, .opc1 = 0, .crm = 15,
+       .access = PL1_RW, .type = ARM_CP_CONST | ARM_CP_64BIT, .resetvalue = 0 },
++    /* Kept, not RAZ/WI: firmware sets SMPEN (bit 6) before the core caches, and later boot stages check it. */
+     { .name = "CPUECTLR_EL1", .state = ARM_CP_STATE_AA64,
+       .opc0 = 3, .opc1 = 1, .crn = 15, .crm = 2, .opc2 = 1,
+-      .access = PL1_RW, .type = ARM_CP_CONST, .resetvalue = 0 },
++      .access = PL1_RW, .resetvalue = 0,
++      .fieldoffset = offsetof(CPUARMState, cp15.cpuectlr_el1) },
+     { .name = "CPUECTLR",
+       .cp = 15, .opc1 = 1, .crm = 15,
+-      .access = PL1_RW, .type = ARM_CP_CONST | ARM_CP_64BIT, .resetvalue = 0 },
++      .access = PL1_RW, .type = ARM_CP_ALIAS | ARM_CP_64BIT,
++      .fieldoffset = offsetof(CPUARMState, cp15.cpuectlr_el1) },
+     { .name = "CPUMERRSR_EL1", .state = ARM_CP_STATE_AA64,
+       .opc0 = 3, .opc1 = 1, .crn = 15, .crm = 2, .opc2 = 2,
+       .access = PL1_RW, .type = ARM_CP_CONST, .resetvalue = 0 },
+diff --git a/target/arm/cpu.h b/target/arm/cpu.h
+index bc5c66e..482a9ff 100644
+--- a/target/arm/cpu.h
++++ b/target/arm/cpu.h
+@@ -498,6 +498,7 @@ typedef struct CPUArchState {
+         uint64_t pmccfiltr_el0; /* Performance Monitor Filter Register */
+         uint64_t vpidr_el2; /* Virtualization Processor ID Register */
+         uint64_t vmpidr_el2; /* Virtualization Multiprocessor ID Register */
++        uint64_t cpuectlr_el1; /* Cortex-A57/A53/A72 CPUECTLR (implementation defined) */
+         uint64_t tfsr_el[4]; /* tfsre0_el1 is index 0.  */
+         uint64_t gcr_el1;
+         uint64_t rgsr_el1;

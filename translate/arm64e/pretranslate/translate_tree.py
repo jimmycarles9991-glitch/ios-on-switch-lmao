@@ -1,6 +1,6 @@
 """Translate one mounted volume (the System volume, the SystemOS cryptex or the App cryptex) offline.
 
-    translate_tree --role ROLE --tool arm64e --volume MNT --out DIR [--apple-trustcache IM4P]...
+    translate_tree --role ROLE --tool arm64e --volume MNT --out DIR [--apple-trustcache IM4P]... [--progress]
 
 The tree is read-only (a decrypted image mounted on the Mac). For every Mach-O whose translation changes bytes, the
 replacement file goes to DIR under its volume path and an entry to DIR/<role>.manifest.json. The new cdhashes become
@@ -10,10 +10,12 @@ the prebuilt-loader cdhashes of on-disk binaries are updated to their translatio
 cdhashes go to DIR/a64x-cache-pretranslated.bin for the device tree.
 
 Each file is translated by one `arm64e` subprocess, skipped when DIR already holds its output for this input and
-translator version (content addressed): reruns resume. It does not mount or write outside DIR.
+translator version (content addressed): reruns resume. It does not mount or write outside DIR. --progress prints
+'progress DONE/TOTAL files' as it goes and 'progress WHAT' before a long wait, for the image builder to show.
 """
 
 import argparse
+import concurrent.futures
 import hashlib
 import json
 import os
@@ -25,23 +27,16 @@ from collections.abc import Callable, Iterable
 from pathlib import Path
 from typing import NamedTuple
 
+from tools.common import files, hashing
 from tools.trustcache.trustcache import trust_module
 
 CACHE_DIR = 'System/Library/Caches/com.apple.dyld'
 MACHO_MAGIC = (b'\xcf\xfa\xed\xfe', b'\xca\xfe\xba\xbe', b'\xca\xfe\xba\xbf')  # thin 64, fat BE, fat64 BE
 
 
-def sha256(path: Path) -> str:
-    h = hashlib.sha256()
-    with open(path, 'rb') as f:
-        for chunk in iter(lambda: f.read(1 << 20), b''):
-            h.update(chunk)
-    return h.hexdigest()
-
-
 def key_sha256(path: Path) -> str | None:
     try:
-        return sha256(path)
+        return hashing.sha256_file(path)
     except OSError:
         return None
 
@@ -139,7 +134,7 @@ class Memo(NamedTuple):
             if sha_out is None:
                 dst.unlink(missing_ok=True)
                 return kept
-            if data.is_file() and sha256(data) == sha_out:
+            if data.is_file() and hashing.sha256_file(data) == sha_out:
                 dst.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copyfile(data, dst)
                 return kept
@@ -148,10 +143,8 @@ class Memo(NamedTuple):
         sha_out = None
         if dst.is_file():
             shutil.copyfile(dst, data)
-            sha_out = sha256(data)
-        partial = record.with_suffix('.partial')
-        partial.write_text(json.dumps(dict(result, _sha_out=sha_out)))
-        os.replace(partial, record)
+            sha_out = hashing.sha256_file(data)
+        files.write_text(record, json.dumps(dict(result, _sha_out=sha_out)))
         return result
 
 
@@ -162,6 +155,11 @@ def _external_pairs(paths: Iterable[str]) -> list[tuple[str, str]]:
             old, new = line.split()
             pairs.append((old, new))
     return pairs
+
+
+def _report(args: argparse.Namespace, what: str) -> None:
+    if args.progress:
+        print('progress', what, flush=True)
 
 
 def _machos(volume: Path, cache: Path) -> list[Path]:
@@ -176,7 +174,7 @@ def _machos(volume: Path, cache: Path) -> list[Path]:
     return machos
 
 
-def main() -> None:
+def _arguments() -> argparse.Namespace:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument('--role', required=True, choices=('os', 'system_cryptex', 'app_cryptex'))
     ap.add_argument('--tool', required=True, help='the arm64e CLI')
@@ -192,7 +190,12 @@ def main() -> None:
     ap.add_argument(
         '--memo', type=Path, help='keep translations here across runs, keyed by their inputs (default: none)'
     )
-    args = ap.parse_args()
+    ap.add_argument('--progress', action='store_true', help='print how far it is (progress DONE/TOTAL files)')
+    return ap.parse_args()
+
+
+def main() -> None:
+    args = _arguments()
     memo = Memo(args.memo) if args.memo else None
 
     out = args.out
@@ -211,19 +214,25 @@ def main() -> None:
     no_category = 0
 
     cache = args.volume / CACHE_DIR
-    for src in sorted(_machos(args.volume, cache)):
+    _report(args, 'finding the Mach-O files')
+    machos = sorted(_machos(args.volume, cache))
+
+    def translate(src: Path) -> tuple[Path, Path, str, dict]:
         rel = src.relative_to(args.volume)
         dst = out / 'files' / rel
-        in_sha = sha256(src)
+        in_sha = hashing.sha256_file(src)
+        record = work / (str(rel).replace('/', '_') + '.json')
         if memo:
-            report = work / 'report.json'
             r = memo.run(
                 ['file', in_sha, translator.version],
                 dst,
-                lambda src=src, dst=dst, report=report: pretranslate_file(translator.tool, src, dst, report),
+                lambda: pretranslate_file(translator.tool, src, dst, record.with_suffix('.report.json')),
             )
         else:
-            r = _memoized(translator, src, dst, work / (str(rel).replace('/', '_') + '.json'), in_sha)
+            r = _memoized(translator, src, dst, record, in_sha)
+        return rel, dst, in_sha, r
+
+    for rel, dst, in_sha, r in _in_order(args, translate, machos, 'files'):
         translated = [s for s in r['slices'] if s['status'] == 'translated']
         if not translated:
             dst.unlink(missing_ok=True)
@@ -233,7 +242,7 @@ def main() -> None:
                 'path': '/' + str(rel),
                 'file': os.path.relpath(dst, out),
                 'sha256_in': in_sha,
-                'sha256_out': sha256(dst),
+                'sha256_out': hashing.sha256_file(dst),
                 'cdhash': [s['cdhash_out'] for s in translated],
             }
         )
@@ -274,6 +283,7 @@ def _translate_cache(
         run_tool(args.tool, 'plan', '-o', str(plan), str(main_cache))
         return {}
 
+    _report(args, 'planning the dyld shared cache')
     if memo:
         memo.run(['plan', key_sha256(main_cache), version], plan, make_plan)
     else:
@@ -282,39 +292,58 @@ def _translate_cache(
     pairs_file.write_text(''.join(f'{a} {b}\n' for a, b in pairs))
 
     suffixes = _subcache_suffixes(main_cache)
-    cdhashes = []
-    for name in ['dyld_shared_cache_arm64e'] + [f'dyld_shared_cache_arm64e{s}' for s in suffixes]:
-        src = cache / name
-        if name.endswith(('.symbols', '.atlas')) or not src.exists():
-            continue
-        dst = out / 'files' / CACHE_DIR / name
-        dst.parent.mkdir(parents=True, exist_ok=True)
+    names = ['dyld_shared_cache_arm64e'] + [f'dyld_shared_cache_arm64e{s}' for s in suffixes]
+    sources = [cache / n for n in names if not n.endswith(('.symbols', '.atlas')) and (cache / n).exists()]
 
-        def apply(src: Path = src, dst: Path = dst) -> dict:
+    def apply(src: Path) -> tuple[Path, Path, str, str, str]:
+        dst = out / 'files' / CACHE_DIR / src.name
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        sha_in = hashing.sha256_file(src)
+
+        def run() -> dict:
             line = run_tool(args.tool, 'dsc-apply', '-c', str(pairs_file), str(plan), str(src), str(dst))
             return {'cdhash': line.split()[0]}
 
         if memo:
-            parts = ['dsc', key_sha256(src), key_sha256(plan), key_sha256(pairs_file), version]
-            cdhash = memo.run(parts, dst, apply)['cdhash']
+            cdhash = memo.run(['dsc', sha_in, key_sha256(plan), key_sha256(pairs_file), version], dst, run)['cdhash']
         else:
-            cdhash = apply()['cdhash']
+            cdhash = run()['cdhash']
+        return src, dst, cdhash, sha_in, hashing.sha256_file(dst)
+
+    cdhashes = []
+    for src, dst, cdhash, sha_in, sha_out in _in_order(args, apply, sources, 'dyld cache files'):
         cdhashes.append(bytes.fromhex(cdhash))
-        if sha256(dst) == sha256(src):
+        if sha_out == sha_in:
             dst.unlink()
             continue
         manifest['files'].append(
             {
                 'path': '/' + str(dst.relative_to(out / 'files')),
                 'file': os.path.relpath(dst, out),
-                'sha256_in': sha256(src),
-                'sha256_out': sha256(dst),
+                'sha256_in': sha_in,
+                'sha256_out': sha_out,
                 'cdhash': [cdhash],
             }
         )
         flags, cat = apple.get(_cache_cdhash_in(src), (0, 0))
         trust.append((bytes.fromhex(cdhash), flags, cat))
     (out / 'a64x-cache-pretranslated.bin').write_bytes(b''.join(cdhashes))
+
+
+def _in_order[T, R](args: argparse.Namespace, work: Callable[[T], R], items: list[T], unit: str) -> list[R]:
+    """Run work(item) for every item on every core, each its own arm64e process; return the results in items' order.
+
+    The arm64e tool is single-threaded, and each item writes only its own outputs, so they run side by side; folding
+    the results in the given order keeps the manifest, trust module and cdhash lists byte for byte the serial run's.
+    """
+    results: dict[int, R] = {}
+    with concurrent.futures.ThreadPoolExecutor(os.cpu_count() or 1) as pool:
+        pending = {pool.submit(work, item): i for i, item in enumerate(items)}
+        _report(args, f'0/{len(items)} {unit}')
+        for future in concurrent.futures.as_completed(pending):
+            results[pending[future]] = future.result()
+            _report(args, f'{len(results)}/{len(items)} {unit}')
+    return [results[i] for i in range(len(items))]
 
 
 def _subcache_suffixes(main_cache: Path) -> list[str]:

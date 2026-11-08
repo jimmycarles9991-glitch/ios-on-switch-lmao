@@ -38,17 +38,41 @@ py_test(
     ],
 )
 
-# adt_edit.py's ipad_adt over a minimal Switch tree: J120's answers on /arm-io, the root and /product, which
-# VideoToolbox and MobileGestalt read before iOS uses a feature.
+# adt_edit.py over a minimal Switch tree: the selected IPSW kind's iPad's answers on /arm-io, the root and /product
+# (from Apple's tree of it, //ipsw:device_tree), which VideoToolbox and MobileGestalt read before iOS uses a feature.
 py_test(
     name = "adt_media_test",
     size = "small",
     srcs = ["adt_media_test.py"],
-    data = ["//tools/package:adt_edit.py"],
+    data = [
+        "//drivers/TegraVIC:TegraVICUserClient.cpp",
+        "//ipsw:device_tree",
+        "//tools/package:adt_edit.py",
+    ],
     deps = [
         "//tools/package:boot_config",
         "//tools/package:loader_abi",
+        "//tools/package:native_oled_adt",
         "//tools/package:native_xnu_layout",
+        "//tools/package:trust_lib",
+        "@rules_python//python/runfiles",
+    ],
+)
+
+# overlay.py's plan of overlay/manifest.json for each IPSW kind: a "kind" entry (the wallpapers' Wallpaper.plist, whose
+# bundle directories only that kind's System volume has) is staged and unioned for that kind alone.
+py_test(
+    name = "overlay_plan_test",
+    size = "small",
+    srcs = ["overlay_plan_test.py"],
+    data = [
+        "//overlay:manifest.json",
+        "//tools/package:overlay.py",
+    ],
+    deps = [
+        "//tools/common:macho",
+        "//tools/package:boot_config",
+        "//tools/trustcache",
         "@rules_python//python/runfiles",
     ],
 )

@@ -45,7 +45,7 @@ struct tgm_layout {
 // Texel sizes NIL tiles (others are pitch-linear: NV_MMU_PTE_KIND_PITCH)
 static inline int tgm_layout_tiles_bpp(uint32_t bpp)
 {
-	return bpp == 1 || bpp == 2 || bpp == 4 || bpp == 8 || bpp == 16;
+	return (bpp == 1 || bpp == 2 || bpp == 4 || bpp == 8 || bpp == 16) ? 1 : 0;
 }
 
 static inline uint32_t tgm_layout_log2_ceil(uint32_t v)
@@ -60,11 +60,16 @@ static inline uint32_t tgm_layout_log2_ceil(uint32_t v)
 // below twice the image's height in GOBs. The hardware clamps each mip level's block height the same way.
 static inline uint8_t tgm_layout_y_log2(uint32_t height)
 {
-	const uint32_t y = height >= 86   ? 4
-			   : height >= 43 ? 3
-			   : height >= 22 ? 2
-			   : height >= 11 ? 1
-					  : 0;
+	uint32_t y = 0;
+	if (height >= 86) {
+		y = 4;
+	} else if (height >= 43) {
+		y = 3;
+	} else if (height >= 22) {
+		y = 2;
+	} else if (height >= 11) {
+		y = 1;
+	}
 	const uint32_t clamp = tgm_layout_log2_ceil((height + 7) / 8);
 	return (uint8_t)(y < clamp ? y : clamp);
 }
@@ -78,7 +83,7 @@ static inline int tgm_layout_tiled(uint32_t width, uint32_t height, uint32_t bpp
 		return 0;
 	const uint8_t y = tgm_layout_y_log2(height);
 	const uint32_t block_rows = 8u << y;
-	const uint64_t block = 512ull << y;
+	const uint64_t block = 512ULL << y;
 	out->width = width;
 	out->height = height;
 	out->bpp = bpp;
@@ -104,7 +109,7 @@ static inline uint64_t tgm_layout_offset_of(uint32_t row_bytes, uint8_t y_log2, 
 {
 	const uint32_t block_rows = 8u << y_log2;
 	const uint64_t block = (uint64_t)(y / block_rows) * (row_bytes / 64) + xB / 64;
-	return block * (512ull << y_log2) + (uint64_t)((y % block_rows) / 8) * 512 +
+	return block * (512ULL << y_log2) + (uint64_t)((y % block_rows) / 8) * 512 +
 	       tgm_layout_gob_offset(xB, y);
 }
 
@@ -119,29 +124,33 @@ static inline void tgm_layout_write(const struct tgm_layout *l, uint8_t *tiled, 
 				    uint32_t y, uint32_t w, uint32_t h, const uint8_t *src,
 				    uint64_t pitch)
 {
-	const uint32_t first = x * l->bpp, end = (x + w) * l->bpp;
-	for (uint32_t row = 0; row < h; row++)
+	const uint32_t first = x * l->bpp;
+	const uint32_t end = (x + w) * l->bpp;
+	for (uint32_t row = 0; row < h; row++) {
 		for (uint32_t xB = first; xB < end;) {
-			const uint32_t stop = (xB & ~15u) + 16,
-				       run = (stop < end ? stop : end) - xB;
+			const uint32_t stop = (xB & ~15u) + 16;
+			const uint32_t run = (stop < end ? stop : end) - xB;
 			__builtin_memcpy(tiled + tgm_layout_offset(l, xB, y + row),
 					 src + row * pitch + (xB - first), run);
 			xB += run;
 		}
+	}
 }
 
 static inline void tgm_layout_read(const struct tgm_layout *l, const uint8_t *tiled, uint32_t x,
 				   uint32_t y, uint32_t w, uint32_t h, uint8_t *dst, uint64_t pitch)
 {
-	const uint32_t first = x * l->bpp, end = (x + w) * l->bpp;
-	for (uint32_t row = 0; row < h; row++)
+	const uint32_t first = x * l->bpp;
+	const uint32_t end = (x + w) * l->bpp;
+	for (uint32_t row = 0; row < h; row++) {
 		for (uint32_t xB = first; xB < end;) {
-			const uint32_t stop = (xB & ~15u) + 16,
-				       run = (stop < end ? stop : end) - xB;
+			const uint32_t stop = (xB & ~15u) + 16;
+			const uint32_t run = (stop < end ? stop : end) - xB;
 			__builtin_memcpy(dst + row * pitch + (xB - first),
 					 tiled + tgm_layout_offset(l, xB, y + row), run);
 			xB += run;
 		}
+	}
 }
 
 // Provided by the GPU driver (weak in its callers): the layout of the IOSurface whose first page is `pa` when it is

@@ -2,9 +2,9 @@
 
 iPadOS 17.7.11 (21H461). What CMPhoto, ImageIO, UIKit and VideoToolbox's JPEG plug-ins ask of Apple's hardware JPEG
 codec driver, and how TegraNVJPG answers on the Tegra X1's NVJPG. **[V]** = read in the 21H461 binaries (dyld cache,
-kernelcache), with the address; **[I]** = inferred; **[T]** = to be proven by TegraNVJPG's boot self-test on the unit
-(J3), not before. Nothing here has run on the device yet: every hardware fact below is [T] until the first boot's
-`TegraNVJPG: J3 ok` line.
+kernelcache), with the address; **[I]** = inferred; **[T]** = proven on the unit by the boot self-test TegraNVJPG ran on
+every boot of 11-05 and 11-06 (23 boots, all `J3 ok` with formats 0x3f, sampling 0x17, scales 0x3, whole-MCU writes),
+which these facts made unnecessary; it is gone, and those results are TegraNVJPG.cpp's `kTraits`.
 
 Sources: dyld cache `out/agent-scratch/r9-hang/dsc` (CMPhoto, JPEGH1.videodecoder, JPEGH1.videoencoder, ImageIO,
 UIKitCore, libMobileGestalt); kernelcache `vendor/unixnu/out/ipsw/21H461/kernelcache.decompressed`
@@ -117,7 +117,7 @@ Accepted [code; hardware facts T]: Huffman sequential 8-bit (SOF0/SOF1), one int
 1 or 2 × chroma 1x1 (4:2:0, 4:2:2, 4:4:4; 4:4:0 parsed but has no request code) or grey 1x1, up to 4 quantisation and
 4+4 Huffman tables, restart intervals, Annex K tables when DHT is absent (Motion JPEG), a truncated scan (EOI
 appended), any size up to 16384; into '420f' (NV12; grey files: luma by NVJPG, chroma 0x80 by the CPU), BGRA, RGBA,
-32ARGB, at 1, 1/2, 1/4, 1/8 (each format, sampling and scale only once J3 proved it); at any x/y offset that keeps
+32ARGB, at 1 and 1/2 (1/4 and 1/8 missed libjpeg-turbo's BGRA on the unit); at any x/y offset that keeps
 the plane starts on 256 bytes.
 
 Refused as **kIOReturnUnsupported** (CMPhoto falls back for that image, `__prepare` mode 1, 0x1aaee020c; JPEGH1 decodes
@@ -125,7 +125,7 @@ the frame with its software session, 0x201120568; ImageIO's read plugin decodes 
 progressive, lossless, hierarchical, arithmetic, JPEG-LS, 12-bit, 16-bit tables, quantisation value 0, CMYK/YCCK, Adobe
 RGB, 4:1:1, chroma above 1x1, grey above 1x1, non-interleaved or multiple scans, DNL, sizes above 16384, undefined or
 corrupt tables; destination formats other than the four (420v, 422f, 444f, yuvf, ...); a decode size that is not the
-file's / 2^n; anything J3 did not prove; strides not a multiple of 64; plane starts not on 256 bytes; MCU padding that
+file's / 2^n; 1/4 and 1/8; strides not a multiple of 64; plane starts not on 256 bytes; MCU padding that
 would run into another plane or past the destination's 1 MiB sink (§7). The destination's pixel format is checked before
 anything is copied (under the interchange formats CMPhoto also asks for 422f, 444f and yuvf).; a destination above 255
 MiB or a scan above 64 MiB (the SMMU windows); sel 5 crop rectangles. Refused as **kIOReturnBadArgument**: unknown
@@ -199,20 +199,16 @@ Colour: NVJPG converts with JFIF's full-range BT.601 (T.871), programmed in its 
 | clock | PLLP 408 MHz | below the T210B01 DVFS floor, as TegraNVDEC [I] |
 
 Stages: J0 host1x + buffers, J1 SMMU (ASID 125 through TegraSMMU; VIC 127, display 126) + power + falcon, J2
-IMMEDIATE/OP_DONE by interrupt, J3 self-test (translation through remapped identity pages; J3A 44x40 4:2:0 with
-restart markers to NV12 and BGRA over 0x00/0xff guards: picture within tolerance, nothing past the MCU grid, whether
-the partial MCU column/row is written; the windows with reversed pages; optional RGBA, ARGB, I420, 4:2:2 and 4:4:4 to
-NV12 and BGRA, grey, grey to BGRA, 1/2 1/4 1/8 against libjpeg-turbo's scaled decode), J4 publish. Before J4 every
-failure is one line and the engine is parked (reset, clock off, swgroup in bypass); after, a job past its bound
-(2 s queue + 1 µs per 16 grid pixels, ≤ 30 s, GP timer on) panics with one line and a lost syncpoint interrupt
-panics in TegraHost1x. Sleep: TegraHost1x's fourth sleep client (after NVDEC, whose clock the MBIST pulse borrows).
+IMMEDIATE/OP_DONE by interrupt, J3 publish. Before J3 every failure is one line and the engine is parked (reset, clock
+off, swgroup in bypass); after, a job past its bound (2 s queue + 1 µs per 16 grid pixels, ≤ 30 s, GP timer on) panics
+with one line and a lost syncpoint interrupt panics in TegraHost1x. Sleep: TegraHost1x's fourth sleep client (after
+NVDEC, whose clock the MBIST pulse borrows).
 
 ## 9. Gaps and risks
 
-- Every hardware fact is [T] until a boot: table order, quant order, NV12/RGB memory modes, the JFIF kernel's sign
-  conventions, DCT scaling, the write extent. J3 checks each before publishing; a wrong one turns that feature off or
-  keeps the service unpublished (CPU decoding as today).
-- Whole-MCU writes (if J3 measures them): '420f' destinations from CoreVideo leave 16 KiB-aligned room after the luma,
+- 1/4 and 1/8 DCT scaling: NVJPG's BGRA missed libjpeg-turbo's scaled decode by up to 7 and 15 steps (J3A) on every
+  boot that measured it; off until someone finds whether the setup or the tolerance is wrong.
+- Whole-MCU writes: '420f' destinations from CoreVideo leave 16 KiB-aligned room after the luma,
   under 8 padded rows at 1080p, so non-MCU-aligned heights into '420f' are refused (CPU). BGRA uses the sink.
 - CMPhoto's native destinations under the interchange formats (CMPhoto fjds_createPixelBufferFromJPEGData: '444f' for
   4:4:4 files, 'yuvf' for 4:2:2, '420f' otherwise [V]) are written by NVJPG itself: '422f' and '444f' semi-planar
@@ -233,28 +229,23 @@ Pull logs read-only after boot (`idevicesyslog -u <udid> archive boot.tar --age-
 `/usr/bin/log show boot.logarchive --predicate 'eventMessage CONTAINS "TegraNVJPG"'`; the kernel's IOLog lines are
 also in the boot console).
 
-1. **Bring-up**, in order, one line each, within a few seconds of NVDEC's N4 line:
+1. **Bring-up**, in order, one line each, within a few seconds of NVDEC's N3 line:
    `TegraNVJPG: J0 ok firmware 16640 bytes ...`, `J1 ok ASID 125 ... partition 26 ... 408 MHz, falcon started (OS code
    0+0x300 data 0x3d00+0x200, 13 apps)`, `J2 ok host interface and falcon incremented syncpoint ...`,
-   `J3 ok N decodes in ... us ...: SMMU translates ...; formats F, sampling S, scales C; writes ...`,
-   `J4 ok AppleJPEGDriver published (... interchange formats 1, ...)`.
-   - J3's numbers: formats bit 0 NV12, 1 I420, 2 BGRA, 3 RGBA, 4 ARGB, 5 grey (all: 0x3f); sampling bit 0 grey, 1 4:2:0,
-     2 4:2:2, 4 4:4:4 (all tested: 0x17); scales bit n = 1/2^n (all: 0xf). "writes clipped to the picture" or "whole
-     MCUs". Each optional case that failed has its own `J3 <what> off: ...` line with the measured error.
-   - A `J<n> FAIL` line ends the bring-up: nothing is published and JPEG stays on the CPU, as before. J3 FAIL lines
-     print the measured largest and mean error and where (got/want), so a tolerance or a table order can be fixed from
-     the line itself. A `J2 FAIL ... no interrupt came` or `J3 FAIL ... lost its interrupt` points at host1x/GIC, a
-     `J3 FAIL translation ...` at the SMMU.
+   `J3 ok AppleJPEGDriver published (... interchange formats 1, ...)`.
+   - A `J<n> FAIL` line ends the bring-up: nothing is published and JPEG stays on the CPU, as before. A
+     `J2 FAIL ... no interrupt came` points at host1x/GIC.
 2. **The service**: no `JPEGH1`-registered hardware JPEG encoder (VideoToolbox lists only software 'jpeg' encoders),
    and `ioreg`-style property dumps (if available) show AppleJPEGNumCores 1 on the TegraNVJPG entry.
 3. **Use**: `TegraNVJPG: first hardware decode done: WxH to wxh (format F, 1/n) in E us engine (C cycles), P us CPU`
-   once, at the first decode; then (debug kernels) every 5 s with work an os_log line `TegraNVJPG: 5s decodes=N
-   refused=R failed=X engine=..us/decode cpu=..us/decode pixels=..K/decode scan=..KB/decode`.
+   once per output format (F: TEGRA_NVJPG_OUT_*; 6 '422f', 7 '444f' and 8 'yuvf' have no device evidence yet: their
+   first lines, and the picture next to the same file decoded on a Mac, are the check); then (debug kernels) every 5 s
+   with work an os_log line
+   `TegraNVJPG: 5s decodes=N refused=R failed=X engine=..us/decode cpu=..us/decode pixels=..K/decode scan=..KB/decode`.
    Each kind of refusal is one error line per process (kits/SwitchRefusal, subsystem com.brunostjohn.switch.refusal,
-   category TegraNVJPG): `<process>[<pid>] <why>: decode refused, the caller decodes on the CPU: <why>`.
-   From the caller's side, CMPhoto logs `JPEGDecompressSurface : Picture decode failed: %08x` for a refused or failed
-   call (then decodes that image in software): 0xe00002c7 refused (unsupported), 0xe00002c2 bad request, 0xe00002ca
-   engine error.
+   category TegraNVJPG): `<process>[<pid>] <why>: decode refused, the caller decodes on the CPU: <why>`. From the
+   caller's side, CMPhoto logs `JPEGDecompressSurface : Picture decode failed: %08x` for a refused or failed call (then
+   decodes that image in software): 0xe00002c7 refused (unsupported), 0xe00002c2 bad request, 0xe00002ca engine error.
 4. **Failures**: `failed=` should stay 0; any `TegraNVJPG: decode error 0x... after N bytes (MCU x,y)` line names a
    file the engine could not finish (a GP-timer expiry is 0x30000001).
 5. **Cost** (never slower): compare `engine=` + `cpu=` per decode with a software decode of the same size (CMPhoto's

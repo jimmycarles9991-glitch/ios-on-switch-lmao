@@ -2,16 +2,16 @@
 """Make the shader seed's host tools (//gpu/seed:local_tools, gpu/seed/defs.bzl seed_tools), one action per step.
 
     seed.py mock --xcode-env F --abi-header TegraGM20BABI.h --mock-iokit mock_iokit.c --out libmock_iokit.dylib
-    seed.py tool --xcode-env F --metal-header NativeBridgeMetalFrontend.h --precompile precompile.mm
-                 --frontend NativeBridgeMetalFrontend.mm --host-bridge <darwin libnative_metal_bridge.a>
-                 --mock libmock_iokit.dylib --out precompile
+    seed.py tool --xcode-env F --metal-header NativeBridgeMetalFrontend.h --metal-abi MetalABI.h
+                 --precompile precompile.mm --frontend NativeBridgeMetalFrontend.mm
+                 --host-bridge <darwin libnative_metal_bridge.a> --mock libmock_iokit.dylib --out precompile
     seed.py twin --nvk <iOS dylib> --twin <host dylib> --out libvulkan_nouveau.dylib
     seed.py layout --precompile F --mock F --twin-dylib F --raw <raw pack tools dir> --stack <stack file>
                    --nvk-source <the iOS dylib's .source> --out <dir> --manifest <a copy of its MANIFEST.json>
     seed.py archive --tools <dir> --out <tar>
 
 layout: the tools directory the seed runs (precompile, libmock_iokit.dylib beside it, the twin with its .source, raw/
-with the raw pack's probe, mock and ycbcr.metallib) and MANIFEST.json: the raw path's stack key (the plugin is built
+with the raw pack's probe, mock and own.metallib) and MANIFEST.json: the raw path's stack key (the plugin is built
 with it), the twin's LC_UUID (the iOS dylib's), NVK's compiler identity (which NVK hashes into its pipeline cache UUID),
 the Mesa tree and the architecture. The seed refuses tools whose manifest is not the GPU bundle's. Only mock, tool and
 the raw pack's build need Xcode; running the tools needs nothing but macOS.
@@ -95,6 +95,8 @@ def tool(args: argparse.Namespace, root: Path, work: Path) -> None:
             f'-ffile-prefix-map={root}=/switch-ios',
             '-I',
             Path(args.metal_header).parent,
+            '-I',
+            Path(args.metal_abi).parent,
             '-x',
             'objective-c++',
             args.precompile,
@@ -177,7 +179,7 @@ def archive(args: argparse.Namespace, _root: Path, _work: Path) -> None:
 
 STEPS = {
     'mock': (mock, ('xcode-env', 'abi-header', 'mock-iokit', 'out')),
-    'tool': (tool, ('xcode-env', 'metal-header', 'precompile', 'frontend', 'host-bridge', 'mock', 'out')),
+    'tool': (tool, ('xcode-env', 'metal-header', 'metal-abi', 'precompile', 'frontend', 'host-bridge', 'mock', 'out')),
     'twin': (twin, ('nvk', 'twin', 'out')),
     'layout': (layout, ('precompile', 'mock', 'twin-dylib', 'raw', 'stack', 'nvk-source', 'out', 'manifest')),
     'archive': (archive, ('tools', 'out')),

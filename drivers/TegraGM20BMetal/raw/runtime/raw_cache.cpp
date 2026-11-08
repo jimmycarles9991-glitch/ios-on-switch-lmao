@@ -3,7 +3,6 @@
 #include "raw_cache.h"
 
 #include <dirent.h>
-#include <dispatch/dispatch.h>
 #include <fcntl.h>
 #include <sys/stat.h>
 #include <time.h>
@@ -212,11 +211,6 @@ void removeStale(const std::string &parent, const std::string &ours)
             unlink(f.path.c_str());
 }
 
-uint64_t nowUs()
-{
-    return clock_gettime_nsec_np(CLOCK_UPTIME_RAW) / 1000;
-}
-
 }  // namespace
 
 uint64_t CacheKey::name() const
@@ -299,19 +293,36 @@ RecordCache::Found decodeEntry(const std::string &bytes, const CacheKey &k, Runt
 
 bool RecordCache::open(const std::string &dir, uint64_t stack, uint64_t capBytes)
 {
+    if (!attach(dir, stack, capBytes))
+        return false;
+    tidy();
+    return true;
+}
+
+bool RecordCache::attach(const std::string &dir, uint64_t stack, uint64_t capBytes)
+{
     std::lock_guard<std::mutex> l(lock_);
-    const std::string name = "raw-" + hex16(stack);
-    const std::string mine = dir + "/" + name;
+    const std::string mine = dir + "/raw-" + hex16(stack);
     if (dir.empty() || (mkdir(mine.c_str(), 0700) != 0 && errno != EEXIST) || access(mine.c_str(), W_OK) != 0)
         return false;
-    removeStale(dir, name);
+    parent_ = dir;
     dir_ = mine;
     stack_ = stack;
     cap_ = capBytes;
     bytes_ = 0;
-    for (const File &f : files(dir_, ".rec"))
-        bytes_ += f.bytes;
     return true;
+}
+
+void RecordCache::tidy()
+{
+    if (dir_.empty())
+        return;
+    removeStale(parent_, "raw-" + hex16(stack_));
+    uint64_t bytes = 0;
+    for (const File &f : files(dir_, ".rec"))
+        bytes += f.bytes;
+    std::lock_guard<std::mutex> l(lock_);
+    bytes_ = bytes;
 }
 
 std::string RecordCache::path(const CacheKey &k) const
@@ -336,6 +347,8 @@ bool RecordCache::store(const CacheKey &k, const RuntimeRecord *record, const st
         return false;
     const std::string bytes = encodeEntry(k, record, refusal), final = path(k);
     std::lock_guard<std::mutex> l(lock_);
+    if (cap_ && bytes.size() > cap_ / 4 * 3)
+        return false;
     if (cap_ && bytes_ + bytes.size() > cap_)
         evict(bytes.size());
     const std::string temporary = dir_ + "/" + std::to_string(getpid()) + "-" + std::to_string(serial++) + ".tmp";
@@ -370,88 +383,6 @@ void RecordCache::evict(uint64_t room)
         if (unlink(f.path.c_str()) == 0)
             bytes_ -= f.bytes;
     }
-}
-
-struct Compiler::Job {
-    Compiler *compiler;
-    CacheKey key;
-    Done done;
-};
-
-Compiler::Compiler(RecordCache *cache, Make make)
-    : cache_(cache), make_(std::move(make)),
-      queue_(dispatch_queue_create(
-          "com.brunostjohn.switch.raw.compile",
-          dispatch_queue_attr_make_with_qos_class(DISPATCH_QUEUE_SERIAL, QOS_CLASS_BACKGROUND, 0)))
-{}
-
-Compiler::~Compiler()
-{
-    drain();
-    dispatch_release(static_cast<dispatch_queue_t>(queue_));
-}
-
-Compiler::State Compiler::ask(const CacheKey &k, Done done, const RuntimeRecord **record)
-{
-    std::lock_guard<std::mutex> l(lock_);
-    const auto [it, first] = entries_.try_emplace(k.name());
-    if (!first) {
-        if (record)
-            *record = it->second.record.get();
-        return it->second.state;
-    }
-    queued_++;
-    dispatch_async_f(static_cast<dispatch_queue_t>(queue_), new Job{this, k, std::move(done)}, run);
-    return State::Pending;
-}
-
-void Compiler::run(void *context)
-{
-    std::unique_ptr<Job> job(static_cast<Job *>(context));
-    Compiler &c = *job->compiler;
-    const uint64_t began = nowUs();
-    auto record = std::make_unique<RuntimeRecord>();
-    std::string why;
-    const RecordCache::Found found = c.cache_ ? c.cache_->load(job->key, *record, why) : RecordCache::Found::None;
-    Outcome outcome = found == RecordCache::Found::Record    ? Outcome::Made
-                      : found == RecordCache::Found::Refusal ? Outcome::Refused
-                                                             : c.make_(job->key, *record, why);
-    if (found == RecordCache::Found::None && outcome != Outcome::Failed && c.cache_)
-        c.cache_->store(job->key, outcome == Outcome::Made ? record.get() : nullptr, why);
-    const RuntimeRecord *made = nullptr;
-    {
-        std::lock_guard<std::mutex> l(c.lock_);
-        Entry &e = c.entries_[job->key.name()];
-        e.why = why;
-        if (outcome == Outcome::Made) {
-            e.record = std::move(record);
-            made = e.record.get();
-        }
-        (found == RecordCache::Found::None ? c.stats_.misses : c.stats_.hits)++;
-        c.stats_.refusals += outcome == Outcome::Refused;
-        c.stats_.failures += outcome == Outcome::Failed;
-        c.stats_.makeUs += nowUs() - began;
-        e.state = outcome == Outcome::Made ? State::Ready : State::Refused;
-    }
-    if (job->done)
-        job->done(made, why);
-    std::lock_guard<std::mutex> l(c.lock_);
-    c.queued_--;
-    c.idle_.notify_all();
-}
-
-void Compiler::drain()
-{
-    std::unique_lock<std::mutex> l(lock_);
-    idle_.wait(l, [&] {
-        return queued_ == 0;
-    });
-}
-
-Compiler::Stats Compiler::stats() const
-{
-    std::lock_guard<std::mutex> l(lock_);
-    return stats_;
 }
 
 }  // namespace raw

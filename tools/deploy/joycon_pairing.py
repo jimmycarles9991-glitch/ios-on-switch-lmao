@@ -26,6 +26,8 @@ import re
 from collections.abc import Callable
 from pathlib import Path
 
+from tools.common import files
+
 INI = 'switchroot/joycon_mac.ini'
 STAGED = 'Switch/bluetooth'
 PRODUCTS = {1: ('Joy-Con (L)', 0x2006), 2: ('Joy-Con (R)', 0x2007), 3: ('Pro Controller', 0x2009)}
@@ -146,10 +148,7 @@ def stage(data_root: Path, pairing: dict | None, log: Callable[..., None], dry_r
         directory.mkdir(parents=True, exist_ok=True)
         directory.chmod(0o755)
         for path in changed:
-            partial = path.with_name('.partial-' + path.name)
-            partial.write_bytes(wanted[path])
-            partial.chmod(0o644)
-            partial.replace(path)
+            files.write_bytes(path, wanted[path], mode=0o644)
     log(
         'joycon pairing: {}{}'.format(
             'staged {} for {}'.format('/'.join(p.name for p in changed), pairing['host'])

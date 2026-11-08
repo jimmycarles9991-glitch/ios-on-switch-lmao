@@ -28,6 +28,10 @@
 #define SWITCH_LE_FN static inline
 #endif
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 enum {
     SWITCH_LE_OP_META = 0xfce9,
     SWITCH_LE_OP_OLYMPIC = 0xfce2,
@@ -208,7 +212,7 @@ SWITCH_LE_FN void switch_le_enable_command(switch_le_command *c, bool on)
 
 SWITCH_LE_FN bool switch_le_filter_any(const switch_le_filter *f)
 {
-    return (f->uuidFiltering && f->uuidCount) || f->ruleCount || f->addressCount;
+    return (f->uuidFiltering && (f->uuidCount != 0u)) || (f->ruleCount != 0u) || (f->addressCount != 0u);
 }
 
 SWITCH_LE_FN int8_t switch_le_rules_floor(const switch_le_filter *f)
@@ -227,38 +231,46 @@ SWITCH_LE_FN unsigned switch_le_filter_program(const switch_le_filter *f, switch
 {
     unsigned n = 0;
 #define SWITCH_LE_NEXT() (n < max ? &out[n++] : (switch_le_command *)0)
-    switch_le_command *c;
-    if ((c = SWITCH_LE_NEXT()))
+    switch_le_command *c = SWITCH_LE_NEXT();
+    if (c)
         switch_le_enable_command(c, false);
     for (uint8_t index = SWITCH_LE_INDEX_UUIDS; index <= SWITCH_LE_INDEX_ADDRESSES; ++index) {
-        if ((c = SWITCH_LE_NEXT()))
+        c = SWITCH_LE_NEXT();
+        if (c)
             switch_le_unselect(c, index);
     }
     if (!switch_le_filter_any(f))
         return n;
     if (f->uuidFiltering && f->uuidCount) {
         for (unsigned i = 0; i < f->uuidCount; ++i) {
-            if ((c = SWITCH_LE_NEXT()))
+            c = SWITCH_LE_NEXT();
+            if (c)
                 switch_le_uuid_command(c, SWITCH_APCF_ADD, &f->uuids[i]);
         }
-        if ((c = SWITCH_LE_NEXT()))
+        c = SWITCH_LE_NEXT();
+        if (c)
             switch_le_select(c, SWITCH_LE_INDEX_UUIDS, SWITCH_APCF_FEATURE_UUID, SWITCH_LE_RSSI_ANY);
     }
     if (f->ruleCount) {
-        if ((c = SWITCH_LE_NEXT()))
+        c = SWITCH_LE_NEXT();
+        if (c)
             switch_le_apple_command(c);
-        if ((c = SWITCH_LE_NEXT()))
+        c = SWITCH_LE_NEXT();
+        if (c)
             switch_le_select(c, SWITCH_LE_INDEX_APPLE, SWITCH_APCF_FEATURE_MANUFACTURER, switch_le_rules_floor(f));
     }
     if (f->addressCount) {
         for (unsigned i = 0; i < f->addressCount; ++i) {
-            if ((c = SWITCH_LE_NEXT()))
+            c = SWITCH_LE_NEXT();
+            if (c)
                 switch_le_address_command(c, SWITCH_APCF_ADD, &f->addresses[i]);
         }
-        if ((c = SWITCH_LE_NEXT()))
+        c = SWITCH_LE_NEXT();
+        if (c)
             switch_le_select(c, SWITCH_LE_INDEX_ADDRESSES, SWITCH_APCF_FEATURE_ADDRESS, SWITCH_LE_RSSI_ANY);
     }
-    if ((c = SWITCH_LE_NEXT()))
+    c = SWITCH_LE_NEXT();
+    if (c)
         switch_le_enable_command(c, true);
 #undef SWITCH_LE_NEXT
     return n;
@@ -273,7 +285,7 @@ SWITCH_LE_FN void switch_le_uuid_update(switch_le_filter *f, uint8_t action, con
     if (length != 2 && length != 16)
         return;
     unsigned at = 0;
-    while (at < f->uuidCount && !(f->uuids[at].length == length && !memcmp(f->uuids[at].uuid, uuid, length)))
+    while (at < f->uuidCount && (f->uuids[at].length != length || memcmp(f->uuids[at].uuid, uuid, length)))
         ++at;
     if (action == SWITCH_APCF_ADD && at == f->uuidCount && f->uuidCount < SWITCH_LE_MAX_UUIDS) {
         f->uuids[f->uuidCount].length = length;
@@ -383,6 +395,10 @@ SWITCH_LE_FN bool switch_le_filter_scan_enable(const switch_le_filter *f, uint8_
     params[1] = 0;
     return true;
 }
+
+#ifdef __cplusplus
+}
+#endif
 
 #undef SWITCH_LE_FN
 #endif

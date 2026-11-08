@@ -85,9 +85,9 @@ static inline bool swlan_sta_parse(const uint8_t *b, size_t n, struct swlan_sta 
         ((uint8_t *)out)[i] = 0;
     if (n < 16)
         return false;
-    out->ver = (uint16_t)(b[0] | b[1] << 8);
-    out->len = (uint16_t)(b[2] | b[3] << 8);
-    size_t len = out->len < n ? out->len : n;
+    out->ver = (uint16_t)(b[0] | (unsigned)b[1] << 8);
+    out->len = (uint16_t)(b[2] | (unsigned)b[3] << 8);
+    const size_t len = out->len < n ? out->len : n;
     if (len < 16)
         return false;
     out->flags = swlan_coex_le32(b + 8);
@@ -276,7 +276,7 @@ static inline int swlan_btc_profile_describe(const uint8_t *b, size_t n, char *o
     size_t at = k > 0 ? (size_t)k : 0;
     const unsigned rows = b[9] < 4 ? b[9] : 4;
     for (unsigned r = 0; r < rows && at < size; ++r) {
-        const uint8_t *row = b + 10 + 20 + 5 * r;
+        const uint8_t *row = b + 10 + 20 + 5 * (size_t)r;
         k = snprintf(out + at, size - at, " %d,%d,%d,%d,%d", (int8_t)row[0], (int8_t)row[1], (int8_t)row[2],
                      (int8_t)row[3], (int8_t)row[4]);
         at += k > 0 ? (size_t)k : 0;
@@ -320,15 +320,16 @@ static inline bool swlan_nvram_value(const char *text, size_t length, const char
                 bool any = false;
                 for (; i < end; ++i) {
                     const char c = text[i];
-                    unsigned d;
-                    if (c >= '0' && c <= '9')
+                    unsigned d = 0;
+                    if (c >= '0' && c <= '9') {
                         d = (unsigned)(c - '0');
-                    else if (base == 16 && c >= 'a' && c <= 'f')
+                    } else if (base == 16 && c >= 'a' && c <= 'f') {
                         d = (unsigned)(c - 'a' + 10);
-                    else if (base == 16 && c >= 'A' && c <= 'F')
+                    } else if (base == 16 && c >= 'A' && c <= 'F') {
                         d = (unsigned)(c - 'A' + 10);
-                    else
+                    } else {
                         break;
+                    }
                     v = v * base + d;
                     any = true;
                 }

@@ -125,6 +125,12 @@ extern "C" uint64_t phystokv_range(uint64_t pa, size_t *max_length)
     return pa + kAperture;
 }
 
+// Managed RAM in the model: below 0x90000000.
+extern "C" bool switch_dma_pa_managed(uint64_t pa)
+{
+    return pa < 0x90000000;
+}
+
 namespace {
 TEST(SwitchDcache, PhysicalRangesWalkTheApertureChunkByChunk)
 {
@@ -142,5 +148,15 @@ TEST(SwitchDcache, PhysicalRangesWalkTheApertureChunkByChunk)
         // A chunk boundary inside a line is impossible (chunks are line multiples), so the model holds unchanged.
         ASSERT_EQ(got, want) << std::hex << pa << " " << length;
     }
+}
+
+TEST(SwitchDcache, HardwarePagesSkipUnmanagedOnesAndTheirOffsets)
+{
+    const uint64_t pages[] = {0x80005123, 0x90000000, 0x80001000};
+    switch_dcache_hw_pages(SWITCH_DCACHE_CLEAN_INVALIDATE, pages, 3);
+    std::vector<Event> got = take(), want = expected(SWITCH_DCACHE_CLEAN_INVALIDATE, 0x80005000 + kAperture, 4096);
+    const std::vector<Event> second = expected(SWITCH_DCACHE_CLEAN_INVALIDATE, 0x80001000 + kAperture, 4096);
+    want.insert(want.end(), second.begin(), second.end());
+    EXPECT_EQ(got, want);
 }
 }  // namespace

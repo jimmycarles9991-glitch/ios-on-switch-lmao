@@ -42,6 +42,30 @@ ipsw_kernelcache = rule(
     },
 )
 
+def _ipsw_device_tree_impl(ctx):
+    out = ctx.actions.declare_file(ctx.attr.out)
+    ctx.actions.run(
+        executable = ctx.executable._im4p,
+        arguments = [ctx.file.src.path, out.path, "--expect-type=dtre", "--lzfse"],
+        inputs = [ctx.file.src],
+        outputs = [out],
+        mnemonic = "IpswDeviceTree",
+        progress_message = "Decompressing the %s device tree" % ctx.attr.ipsw[IpswInfo].build,
+        # LZFSE through macOS's compression_tool.
+        execution_requirements = {"requires-darwin": ""},
+    )
+    return [DefaultInfo(files = depset([out]))]
+
+ipsw_device_tree = rule(
+    implementation = _ipsw_device_tree_impl,
+    doc = "The device tree IM4P's 'dtre' payload, LZFSE-decompressed: Apple's tree of the IPSW's own device.",
+    attrs = _IPSW | {
+        "src": attr.label(mandatory = True, allow_single_file = True),
+        "out": attr.string(mandatory = True),
+        "_im4p": attr.label(default = "//tools/kernel:im4p", executable = True, cfg = "exec"),
+    },
+)
+
 def _ipsw_static_trust_impl(ctx):
     ipsw = ctx.attr.ipsw[IpswInfo]
     out = ctx.actions.declare_file(ctx.attr.out)

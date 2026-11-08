@@ -19,6 +19,7 @@
 #include "../../kits/SwitchMMIO/SwitchMMIOKernel.h"
 
 extern "C" {
+// NOLINTNEXTLINE(readability-redundant-declaration): not every kernel configuration's headers declare it
 extern task_t kernel_task;
 }
 
@@ -100,7 +101,7 @@ inline uint32_t rd(const tegra_apbdma_channel *ch, uint32_t reg)
     return switch_mmio_read32(ch->regs, reg);
 }
 
-inline void wr(tegra_apbdma_channel *ch, uint32_t reg, uint32_t value)
+inline void wr(const tegra_apbdma_channel *ch, uint32_t reg, uint32_t value)
 {
     switch_mmio_write32(ch->regs, reg, value);
 }
@@ -138,7 +139,8 @@ bool bringUp()
     gwr(GENERAL, kGeneralEnable);
     gwr(CONTROL, 0);
     gwr(IRQ_MASK_SET, 0xffffffffu);
-    const uint32_t general = grd(GENERAL), mask = grd(IRQ_MASK);
+    const uint32_t general = grd(GENERAL);
+    const uint32_t mask = grd(IRQ_MASK);
     if (!(general & kGeneralEnable) || mask != 0xffffffffu) {
         snprintf(gWhy, sizeof(gWhy), "controller did not take its set-up (GENERAL %#x IRQ_MASK %#x)", general, mask);
         return false;
@@ -162,9 +164,9 @@ void ensureUp()
     gwr(IRQ_MASK_SET, 0xffffffffu);
 }
 
-void stopLocked(tegra_apbdma_channel *ch)
+void stopLocked(const tegra_apbdma_channel *ch)
 {
-    uint32_t csr = rd(ch, CSR) & ~CSR_IE_EOC;
+    const uint32_t csr = rd(ch, CSR) & ~CSR_IE_EOC;
     wr(ch, CSR, csr);
     wr(ch, CSR, csr & ~CSR_ENB);
     const uint32_t status = rd(ch, STATUS);
@@ -174,6 +176,7 @@ void stopLocked(tegra_apbdma_channel *ch)
 
 // Primary interrupt context, CPU0: the end of count acknowledged (tegra_dma_isr writes STATUS back), then the owner.
 // Nothing for the work loop: the owner signals its own when it needs to.
+// NOLINTNEXTLINE(misc-const-correctness): IOFilterInterruptEventSource::Filter's signature
 bool filter(OSObject *, IOFilterInterruptEventSource *sender)
 {
     for (tegra_apbdma_channel &ch : gChannels) {
@@ -201,7 +204,7 @@ bool tegra_apbdma_alloc(uint32_t size, tegra_apbdma_buffer *out)
     if (!switch_dma_alloc(&buffer, size))
         return false;
     out->va = buffer.va;
-    out->pa = (uint32_t)buffer.pa;
+    out->pa = static_cast<uint32_t>(buffer.pa);
     out->size = size;
     out->memory = buffer.memory;
     return true;
@@ -217,10 +220,8 @@ tegra_apbdma_channel *tegra_apbdma_open(unsigned channel, IOWorkLoop *loop, tegr
     static IOLock *volatile created;
     if (!created) {
         IOLock *lock = IOLockAlloc();
-        if (!lock || !__sync_bool_compare_and_swap(&created, nullptr, lock)) {
-            if (lock)
-                IOLockFree(lock);
-        }
+        if (lock && !__sync_bool_compare_and_swap(&created, nullptr, lock))
+            IOLockFree(lock);
     }
     gLock = created;
     if (!gLock) {
@@ -231,10 +232,11 @@ tegra_apbdma_channel *tegra_apbdma_open(unsigned channel, IOWorkLoop *loop, tegr
     if (!gTried) {
         gTried = true;
         gDma = switch_mmio_map(kDmaPA, kDmaSize);
-        if (!gDma)
+        if (!gDma) {
             snprintf(gWhy, sizeof(gWhy), "cannot map the controller or CAR");
-        else
+        } else {
             gUp = bringUp();
+        }
     }
     tegra_apbdma_channel *ch = &gChannels[channel];
     const char *fail = nullptr;
@@ -244,7 +246,7 @@ tegra_apbdma_channel *tegra_apbdma_open(unsigned channel, IOWorkLoop *loop, tegr
         fail = "channel already open";
     if (!fail) {
         ch->number = channel;
-        ch->regs = gDma + kChannelBase + channel * kChannelStride;
+        ch->regs = gDma + kChannelBase + static_cast<size_t>(channel) * kChannelStride;
         // The channel takes what it is given: a pointer register written and read back (then cleared).
         stopLocked(ch);
         wr(ch, AHB_PTR, 0x8badf00c);
@@ -322,32 +324,32 @@ void tegra_apbdma_start_rx_words(tegra_apbdma_channel *ch, uint32_t apb, unsigne
     wr(ch, CSR, csr | CSR_ENB);
 }
 
-uint32_t tegra_apbdma_moved(tegra_apbdma_channel *ch, bool *endPending)
+uint32_t tegra_apbdma_moved(const tegra_apbdma_channel *ch, bool *endPending)
 {
     const uint32_t count = rd(ch, WORD_TRANSFER) & COUNT_MASK;
     const uint32_t status = rd(ch, STATUS);
     if (endPending)
-        *endPending = status & STATUS_ISE_EOC;
+        *endPending = ((status & STATUS_ISE_EOC) != 0u);
     const uint32_t left = count + 4;
     return left >= ch->size ? 0 : ch->size - left;
 }
 
-void tegra_apbdma_stop(tegra_apbdma_channel *ch)
+void tegra_apbdma_stop(const tegra_apbdma_channel *ch)
 {
     stopLocked(ch);
 }
 
-bool tegra_apbdma_running(tegra_apbdma_channel *ch)
+bool tegra_apbdma_running(const tegra_apbdma_channel *ch)
 {
-    return rd(ch, CSR) & CSR_ENB;
+    return (rd(ch, CSR) & CSR_ENB) != 0u;
 }
 
-uint32_t tegra_apbdma_interrupts(tegra_apbdma_channel *ch)
+uint32_t tegra_apbdma_interrupts(const tegra_apbdma_channel *ch)
 {
     return ch->interrupts;
 }
 
-void tegra_apbdma_describe(tegra_apbdma_channel *ch, char *buffer, size_t size)
+void tegra_apbdma_describe(const tegra_apbdma_channel *ch, char *buffer, size_t size)
 {
     char gic[160];
     switch_interrupt_describe(intidOf(ch->number), gic, sizeof(gic));

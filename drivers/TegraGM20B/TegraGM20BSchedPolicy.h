@@ -6,6 +6,10 @@
 #include <stdint.h>
 #include "TegraGM20BHost.h"
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 #define TGM_VICTIM_NONE (-1)
 #define TGM_VICTIM_SWITCHING (-2)
 
@@ -22,7 +26,7 @@ enum tgm_level {
 static inline enum tgm_level tgm_priority_level(uint32_t priority, uint32_t background_priority,
 						int background)
 {
-	uint32_t p = background ? background_priority : priority;
+	const uint32_t p = background ? background_priority : priority;
 
 	if (p == 0 && !background)
 		return TGM_LEVEL_HIGH;
@@ -51,13 +55,13 @@ static inline int tgm_kick_victim(uint32_t eng, int eng_high, int pbdma_busy, ui
  * tgm_hold_need): the compositor would only yield at its acquire and the host switch back. */
 static inline int tgm_kick_may_preempt(int victim, int needed)
 {
-	return victim >= 0 && !needed;
+	return (victim >= 0 && needed == 0) ? 1 : 0;
 }
 
 static inline void tgm_interleave_units(const uint8_t *tier_of, unsigned units, unsigned tier,
 					uint16_t *order, unsigned *n)
 {
-	unsigned i;
+	unsigned i = 0;
 
 	for (i = 0; i < units; i++) {
 		if (tier_of[i] == tier)
@@ -70,7 +74,7 @@ static inline void tgm_interleave_units(const uint8_t *tier_of, unsigned units, 
 static inline void tgm_interleave_upper(const uint8_t *tier_of, unsigned units, unsigned tiers,
 					uint16_t *order, unsigned *n)
 {
-	unsigned i;
+	unsigned i = 0;
 
 	tgm_interleave_units(tier_of, units, tiers - 1, order, n);
 	if (tiers < 3)
@@ -90,10 +94,20 @@ static inline unsigned tgm_interleave_tiers(const uint8_t *level, const uint16_t
 					    unsigned units, int merge, unsigned max,
 					    uint16_t *order, unsigned order_max)
 {
-	uint8_t tier_of_level[TGM_LEVELS] = {0}, tier_of[512];
-	unsigned count[TGM_LEVELS] = {0}, present[TGM_LEVELS] = {0}, tiers = 0, every, seen = 0,
-		 n = 0, i, top = 0;
-	uint64_t weight[TGM_LEVELS] = {0}, above_units, above_entries, repeats;
+	uint8_t tier_of_level[TGM_LEVELS] = {0};
+	uint8_t tier_of[512];
+	unsigned count[TGM_LEVELS] = {0};
+	unsigned present[TGM_LEVELS] = {0};
+	unsigned tiers = 0;
+	unsigned every = 0;
+	unsigned seen = 0;
+	unsigned n = 0;
+	unsigned i = 0;
+	unsigned top = 0;
+	uint64_t weight[TGM_LEVELS] = {0};
+	uint64_t above_units = 0;
+	uint64_t above_entries = 0;
+	uint64_t repeats = 0;
 
 	if (units > sizeof(tier_of))
 		return 0;
@@ -104,10 +118,11 @@ static inline unsigned tgm_interleave_tiers(const uint8_t *level, const uint16_t
 	for (i = 0; i < TGM_LEVELS; i++) {
 		if (!present[i])
 			continue;
-		if (merge && i < top)
+		if (merge && i < top) {
 			tiers = 1;
-		else
+		} else {
 			tier_of_level[i] = (uint8_t)tiers++;
+		}
 	}
 	if (tiers < 2)
 		return 0;
@@ -119,7 +134,7 @@ static inline unsigned tgm_interleave_tiers(const uint8_t *level, const uint16_t
 	above_units = count[tiers - 1];
 	above_entries = weight[tiers - 1];
 	if (tiers == 3) {
-		above_units += count[1] * (1 + count[2]);
+		above_units += (uint64_t)count[1] * (1 + count[2]);
 		above_entries += weight[1] + count[1] * weight[2];
 	}
 	for (every = 1; every <= (merge ? count[0] : 1); every++) {
@@ -149,7 +164,8 @@ static inline unsigned tgm_interleave_tiers(const uint8_t *level, const uint16_t
 static inline unsigned tgm_interleave(const uint8_t *level, const uint16_t *entries, unsigned units,
 				      unsigned max, uint16_t *order, unsigned order_max)
 {
-	unsigned n, i;
+	unsigned n = 0;
+	unsigned i = 0;
 
 	n = tgm_interleave_tiers(level, entries, units, 0, max, order, order_max);
 	if (!n)
@@ -172,7 +188,10 @@ static inline int tgm_compositor_drawing(uint64_t now, uint64_t interval, uint64
 {
 	if (!vsync_last || !interval || now - vsync_last > interval * 3 / 2)
 		return 0;
-	return now - vsync_since <= 2 * interval || (kick_last && now - kick_last <= 2 * interval);
+	return (now - vsync_since <= 2 * interval ||
+		(kick_last != 0 && now - kick_last <= 2 * interval))
+		       ? 1
+		       : 0;
 }
 
 /* When an app channel is held off the GPU (disabled, and preempted if it is on it) so the compositor's frame, `expected`
@@ -183,7 +202,7 @@ static inline int tgm_compositor_drawing(uint64_t now, uint64_t interval, uint64
 static inline uint64_t tgm_hold_time(uint64_t vblank, uint64_t interval, uint64_t now,
 				     uint64_t expected, uint64_t preempt, int resident)
 {
-	uint64_t lead = expected + preempt;
+	const uint64_t lead = expected + preempt;
 
 	if (vblank > lead && now < vblank - lead)
 		return vblank - lead;
@@ -200,7 +219,7 @@ static inline uint64_t tgm_hold_time(uint64_t vblank, uint64_t interval, uint64_
 
 static inline uint64_t tgm_pt_rate(uint64_t ns_span, uint64_t pt_span)
 {
-	if (ns_span < TGM_PT_CAL_MIN_NS || !pt_span || ns_span >= 1ull << 47)
+	if (ns_span < TGM_PT_CAL_MIN_NS || !pt_span || ns_span >= 1ULL << 47)
 		return 0;
 	return (ns_span << 16) / pt_span;
 }
@@ -214,7 +233,7 @@ static inline uint64_t tgm_pt_ns(uint64_t pt_span, uint64_t rate)
  * the high work that ended before it at `last_end`: summed per frame, the compositor's GPU time. */
 static inline uint64_t tgm_gpu_span(uint64_t end, uint64_t start, uint64_t last_end)
 {
-	uint64_t from = start > last_end ? start : last_end;
+	const uint64_t from = start > last_end ? start : last_end;
 
 	return end > from ? end - from : 0;
 }
@@ -224,7 +243,24 @@ static inline uint64_t tgm_gpu_span(uint64_t end, uint64_t start, uint64_t last_
  * turn every other frame. */
 static inline int tgm_owed_turn(int held_last, uint64_t since_close, uint64_t preempt)
 {
-	return held_last && since_close < preempt;
+	return (held_last != 0 && since_close < preempt) ? 1 : 0;
+}
+
+/* How a channel preempt nvkm asks for goes out (sched.c): a PFIFO_PREEMPT written while another is in flight is lost.
+ * nvkm's error path asks from the interrupt pass with interrupts off under the channel's spinlock (nvkm_chan_error),
+ * where nothing may wait: with one in flight there the channel's group goes to nvkm's recovery, which takes it off the
+ * engines and the runlist from its work item. */
+enum tgm_preempt_how {
+	TGM_PREEMPT_NOW,
+	TGM_PREEMPT_AFTER_WAIT,
+	TGM_PREEMPT_RECOVER,
+};
+
+static inline enum tgm_preempt_how tgm_preempt_how(int irqs_off, int pending)
+{
+	if (pending == 0)
+		return TGM_PREEMPT_NOW;
+	return irqs_off != 0 ? TGM_PREEMPT_RECOVER : TGM_PREEMPT_AFTER_WAIT;
 }
 
 /* nvkm's recovery uses the same enable bits as the hold (nvkm_chan_error blocks a channel for good, nvkm_runl_rc_cgrp
@@ -232,7 +268,7 @@ static inline int tgm_owed_turn(int held_last, uint64_t since_close, uint64_t pr
  * recovery is never held or released here. */
 static inline int tgm_may_release(int errored, int isolating, int rc)
 {
-	return !errored && !isolating && !rc;
+	return (errored == 0 && isolating == 0 && rc == 0) ? 1 : 0;
 }
 
 /* An app channel the hold may take: below the compositor's level, registered by gpu.c, not waited for by the present in
@@ -240,8 +276,10 @@ static inline int tgm_may_release(int errored, int isolating, int rc)
 static inline int tgm_may_hold(unsigned level, int holdable, int needed, int errored, int isolating,
 			       int rc, int blocked)
 {
-	return level < TGM_LEVEL_HIGH && holdable && !needed && !blocked &&
-	       tgm_may_release(errored, isolating, rc);
+	return (level < TGM_LEVEL_HIGH && holdable != 0 && needed == 0 && blocked == 0 &&
+		tgm_may_release(errored, isolating, rc) != 0)
+		       ? 1
+		       : 0;
 }
 
 /* The compositor's GPU time per frame: rises at once toward a longer frame, falls slowly, so one short frame does not
@@ -259,10 +297,11 @@ static inline uint64_t tgm_expect(uint64_t expected, uint64_t sample)
 
 static inline uint64_t tgm_preempt_sampled(uint64_t preempt, uint64_t sample, uint64_t max)
 {
-	if (sample > preempt)
+	if (sample > preempt) {
 		preempt = sample;
-	else
+	} else {
 		preempt -= (preempt - sample) / 8;
+	}
 	if (preempt > max)
 		preempt = max;
 	return preempt < TGM_PREEMPT_MIN_NS ? TGM_PREEMPT_MIN_NS : preempt;
@@ -280,9 +319,13 @@ static inline uint64_t tgm_preempt_left_early(uint64_t preempt)
 static inline uint64_t tgm_unheld_ns(uint64_t now, uint64_t since, uint64_t held_now,
 				     uint64_t held_then)
 {
-	uint64_t elapsed = now > since ? now - since : 0, held = held_now - held_then;
+	const uint64_t elapsed = now > since ? now - since : 0;
+	const uint64_t held = held_now - held_then;
 
 	return elapsed > held ? elapsed - held : 0;
 }
 
+#ifdef __cplusplus
+}
+#endif
 #endif

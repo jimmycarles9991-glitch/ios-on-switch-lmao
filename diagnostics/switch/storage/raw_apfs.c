@@ -17,9 +17,10 @@ static uint64_t le64(const uint8_t *p)
 
 static int nonzero(const uint8_t *p, uint32_t n)
 {
-    for (uint32_t i = 0; i < n; i++)
+    for (uint32_t i = 0; i < n; i++) {
         if (p[i])
             return 1;
+    }
     return 0;
 }
 
@@ -63,14 +64,16 @@ static int finish(struct switch_raw_apfs *b, int error)
 static uint64_t checksum(const uint8_t *p, uint32_t size)
 {
     const uint64_t mod = UINT64_C(0xffffffff);
-    uint64_t a = 0, b = 0;
+    uint64_t a = 0;
+    uint64_t b = 0;
     for (uint32_t at = 8; at < size; at += 4) {
         a += le32(p + at);
         b += a;
     }
     a %= mod;
     b %= mod;
-    uint64_t x = mod - (a + b) % mod, y = mod - (a + x) % mod;
+    uint64_t x = mod - (a + b) % mod;
+    uint64_t y = mod - (a + x) % mod;
     return x | (y << 32);
 }
 
@@ -83,39 +86,41 @@ static int area(uint64_t base, uint32_t raw_count, uint64_t blocks)
     return (raw_count & 0x80000000) || count <= blocks - base;
 }
 
-int switch_raw_apfs_validate_nxsb(const void *block, uint32_t available, uint64_t sectors)
+int switch_raw_apfs_validate_nxsb(const void *block, uint32_t available_bytes, uint64_t partition_sector_count)
 {
-    if (!block || available < 4096 || !sectors)
+    if (!block || available_bytes < 4096 || !partition_sector_count)
         return SWITCH_BLOCK_INVALID;
     const uint8_t *p = block;
     uint32_t size = le32(p + 36);
-    if (size < 4096 || size > 65536 || (size & (size - 1)) || size > available)
+    if (size < 4096 || size > 65536 || (size & (size - 1)) || size > available_bytes)
         return SWITCH_BLOCK_CORRUPT;
     uint64_t blocks = le64(p + 40);
     uint32_t type = le32(p + 24);
     if (le64(p) != checksum(p, size) || le64(p + 8) != 1 || !le64(p + 16) || (type & 0xffff) != 1 ||
         (type & 0x30000000) || le32(p + 28) || le32(p + 32) != 0x4253584e || le32(p + 36) != size || !blocks ||
-        blocks > sectors / (size / 512) || !nonzero(p + 72, 16) || (le64(p + 64) & UINT64_C(0x100)) ||
+        blocks > partition_sector_count / (size / 512) || !nonzero(p + 72, 16) || (le64(p + 64) & UINT64_C(0x100)) ||
         nonzero(p + 1280, 16) || !area(le64(p + 112), le32(p + 104), blocks) ||
         !area(le64(p + 120), le32(p + 108), blocks) || !le64(p + 160) || le64(p + 160) >= blocks || !le32(p + 180) ||
         le32(p + 180) > 100)
         return SWITCH_BLOCK_CORRUPT;
     if (!(le32(p + 104) & 0x80000000) && !(le32(p + 108) & 0x80000000)) {
-        uint64_t a = le64(p + 112), z = le64(p + 120);
+        uint64_t a = le64(p + 112);
+        uint64_t z = le64(p + 120);
         if (a < z + le32(p + 108) && z < a + le32(p + 104))
             return SWITCH_BLOCK_CORRUPT;
     }
     return SWITCH_BLOCK_OK;
 }
 
-int switch_raw_apfs_open(struct switch_raw_apfs *b, const struct switch_raw_apfs_io *io, uint64_t capacity,
-                         const struct switch_raw_apfs_partition *parts, uint32_t count, const uint8_t expected_uuid[16],
-                         void *scratch, uint32_t scratch_bytes)
+int switch_raw_apfs_open(struct switch_raw_apfs *b, const struct switch_raw_apfs_io *io, uint64_t capacity_sectors,
+                         const struct switch_raw_apfs_partition *parts, uint32_t count,
+                         const uint8_t expected_container_uuid[16], void *private_scratch, uint32_t scratch_bytes)
 {
     if (!b || b->magic == RAW_MAGIC || !io || !io->ready || !io->begin || !io->end || !io->offline || !io->read ||
         !io->qualify || !io->unbind || !io->write || !io->sync || (!parts && count) ||
-        count > SWITCH_RAW_APFS_MAX_PARTITIONS || !capacity || capacity > UINT64_MAX / 512 || !expected_uuid ||
-        !nonzero(expected_uuid, 16) || !scratch || scratch_bytes < SWITCH_RAW_APFS_SCRATCH_BYTES)
+        count > SWITCH_RAW_APFS_MAX_PARTITIONS || !capacity_sectors || capacity_sectors > UINT64_MAX / 512 ||
+        !expected_container_uuid || !nonzero(expected_container_uuid, 16) || !private_scratch ||
+        scratch_bytes < SWITCH_RAW_APFS_SCRATCH_BYTES)
         return SWITCH_BLOCK_INVALID;
     memset(b, 0, sizeof(*b));
     b->magic = RAW_MAGIC;
@@ -123,13 +128,14 @@ int switch_raw_apfs_open(struct switch_raw_apfs *b, const struct switch_raw_apfs
     const struct switch_raw_apfs_partition *selected = 0;
     for (uint32_t i = 0; i < count; i++) {
         const struct switch_raw_apfs_partition *p = &parts[i];
-        if (!p->first_sector || !p->sector_count || p->first_sector >= capacity ||
-            p->sector_count > capacity - p->first_sector || !nonzero(p->type_guid, 16))
+        if (!p->first_sector || !p->sector_count || p->first_sector >= capacity_sectors ||
+            p->sector_count > capacity_sectors - p->first_sector || !nonzero(p->type_guid, 16))
             return fail(b, SWITCH_BLOCK_CORRUPT);
-        for (uint32_t j = 0; j < i; j++)
+        for (uint32_t j = 0; j < i; j++) {
             if (p->first_sector < parts[j].first_sector + parts[j].sector_count &&
                 parts[j].first_sector < p->first_sector + p->sector_count)
                 return fail(b, SWITCH_BLOCK_CORRUPT);
+        }
         if (!memcmp(p->type_guid, apfs_type, 16)) {
             if (selected)
                 return fail(b, SWITCH_BLOCK_CORRUPT);
@@ -148,18 +154,18 @@ int switch_raw_apfs_open(struct switch_raw_apfs *b, const struct switch_raw_apfs
     status = io->begin(io->context, 129, 5);
     if (status)
         return fail(b, status);
-    uint8_t *bytes = scratch;
+    uint8_t *bytes = private_scratch;
     status = io->read(io->context, b->first_sector, 1, bytes);
     if (!status) {
         uint32_t size = le32(bytes + 36);
         if (le32(bytes + 32) != 0x4253584e || size < 4096 || size > 65536 || (size & (size - 1)) ||
-            size / 512 > b->partition_sectors)
+            size / 512 > b->partition_sectors) {
             status = SWITCH_BLOCK_CORRUPT;
-        else {
+        } else {
             status = io->read(io->context, b->first_sector, size / 512, bytes);
             if (!status)
                 status = switch_raw_apfs_validate_nxsb(bytes, size, b->partition_sectors);
-            if (!status && memcmp(bytes + 72, expected_uuid, 16))
+            if (!status && memcmp(bytes + 72, expected_container_uuid, 16))
                 status = SWITCH_BLOCK_CORRUPT;
             if (!status) {
                 b->block_size = size;
@@ -199,29 +205,29 @@ static int request(struct switch_raw_apfs *b, uint64_t offset, const void *bytes
     return offset > size || n > size - offset ? SWITCH_BLOCK_INVALID : SWITCH_BLOCK_OK;
 }
 
-int switch_raw_apfs_read(struct switch_raw_apfs *b, uint64_t offset, void *bytes, uint32_t n)
+int switch_raw_apfs_read(struct switch_raw_apfs *b, uint64_t offset, void *bytes, uint32_t length)
 {
-    int status = request(b, offset, bytes, n);
+    int status = request(b, offset, bytes, length);
     if (status)
         return status;
-    status = b->io.begin(b->io.context, n / 512, 5);
+    status = b->io.begin(b->io.context, length / 512, 5);
     if (status)
         return fail(b, status);
-    return finish(b, b->io.read(b->io.context, b->first_sector + offset / 512, n / 512, bytes));
+    return finish(b, b->io.read(b->io.context, b->first_sector + offset / 512, length / 512, bytes));
 }
 
-int switch_raw_apfs_write(struct switch_raw_apfs *b, uint64_t offset, const void *bytes, uint32_t n)
+int switch_raw_apfs_write(struct switch_raw_apfs *b, uint64_t offset, const void *bytes, uint32_t length)
 {
-    int status = request(b, offset, bytes, n);
+    int status = request(b, offset, bytes, length);
     if (status)
         return status;
     uint64_t lba = b->first_sector + offset / 512;
-    if (!permit(b, lba, n / 512))
+    if (!permit(b, lba, length / 512))
         return fail(b, SWITCH_BLOCK_CORRUPT);
-    status = b->io.begin(b->io.context, n / 512, 30);
+    status = b->io.begin(b->io.context, length / 512, 30);
     if (status)
         return fail(b, status);
-    return finish(b, b->io.write(b->io.context, lba, n / 512, bytes));
+    return finish(b, b->io.write(b->io.context, lba, length / 512, bytes));
 }
 
 int switch_raw_apfs_sync(struct switch_raw_apfs *b)

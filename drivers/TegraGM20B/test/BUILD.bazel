@@ -1,6 +1,8 @@
 # drivers/TegraGM20B on the host:
 #   gm20b_comp_test          TegraGM20BComp.h against nvgpu's gm20b: the compbit backing store's size, lines and base for
 #                            every plausible CBC_PARAM, which page lists and binds may compress, a compressed bind's PTEs
+#   gm20b_tiled_cache_test   TegraGM20BTiledCache.h: the tile coalescer's table in the golden context is deko3d's masked
+#                            writes folded over sw_ctx's zero
 #   gm20b_coherency_test     TegraGM20BCoherency.cpp: which IOSurface lock/unlock traps clean or invalidate an import,
 #                            across imports of one surface and their release, and traps racing a release; each surface's
 #                            layout decision (TegraGM20BTiled.cpp) and its contents tiled in place; CPU locks of a
@@ -41,7 +43,7 @@
 #                            gpu.c's lock protocol on threads; GPU time never backwards across rail cycles
 #   gm20b_clkgate_test       TegraGM20BClkgate.h against nvgpu's gm20b_gating_reglist.c (nvidia/, verbatim): the SLCG and
 #                            BLCG writes are nvgpu's prod lists in its load order; ELCG's gate control; where gpu.c
-#                            applies them
+#                            applies them; GR's reset in a recovery with gating off
 #
 #   bazel test //drivers/TegraGM20B/test:all
 load("//bazel/lint:defs.bzl", "lint_files")
@@ -55,6 +57,15 @@ host_test(
         "gm20b_comp_test.cpp",
         "//drivers/TegraGM20B:TegraGM20BComp.h",
     ],
+)
+
+host_test(
+    name = "gm20b_tiled_cache_test",
+    srcs = [
+        "gm20b_tiled_cache_test.cpp",
+        "//drivers/TegraGM20B:TegraGM20BTiledCache.h",
+    ],
+    cxx_std = "c++17",
 )
 
 host_test(
@@ -104,11 +115,15 @@ host_test(
         "//drivers/TegraGM20B:TegraGM20BClkgate.h",
     ],
     data = [
+        "//drivers/TegraGM20B:clkgate.c",
         "//drivers/TegraGM20B:gpu.c",
+        "//drivers/TegraGM20B:nouveau/nvkm/engine/gr/base.c",
         "//drivers/TegraGM20B:nvidia/gm20b_gating_reglist.c",
     ],
     defines = [
+        'CLKGATE_C=\\"$(rootpath //drivers/TegraGM20B:clkgate.c)\\"',
         'GPU_C=\\"$(rootpath //drivers/TegraGM20B:gpu.c)\\"',
+        'GR_BASE_C=\\"$(rootpath //drivers/TegraGM20B:nouveau/nvkm/engine/gr/base.c)\\"',
         'REGLIST=\\"$(rootpath //drivers/TegraGM20B:nvidia/gm20b_gating_reglist.c)\\"',
     ],
 )
@@ -139,14 +154,22 @@ host_test(
     data = [
         "//drivers/TegraGM20BMetal:raw/runtime/raw_gpu.cpp",
         "//drivers/TegraGM20BMetal:raw/runtime/raw_kernel.cpp",
+        "//drivers/TegraGM20BMetal:raw/runtime/raw_pack.cpp",
         "//third_party/mesa/src/nouveau/vulkan:nvkmd/darwin/nvkmd_darwin.c",
         "//third_party/mesa/src/nouveau/vulkan:nvk_image.c",
         "//third_party/mesa/src/nouveau/vulkan:nvk_queue.c",
         "//third_party/mesa/src/vulkan/runtime:vk_queue.c",
+        "//drivers/TegraGM20B:TegraGM20BCopy.cpp",
+        "//drivers/TegraGM20B:TegraGM20BDeviceClient.cpp",
         "//drivers/TegraGM20B:TegraGM20BExecSurfaces.cpp",
         "//drivers/TegraGM20B:TegraGM20BGpu.h",
+        "//drivers/TegraGM20B:TegraGM20BRelayout.cpp",
         "//drivers/TegraGM20B:TegraGM20BUserClient.cpp",
         "//drivers/TegraGM20B:gpu.c",
+        "//drivers/TegraGM20B:recover.c",
+        "//drivers/TegraGM20B:sched.c",
+        "//drivers/TegraGM20B:shim/include/nvif/os.h",
+        "//drivers/TegraGM20B:shim/include/nvxnu.h",
         "//drivers/TegraGM20B:shim/linux.c",
         "//drivers/TegraGM20B:shim/xnu_glue.cpp",
     ],
@@ -170,6 +193,8 @@ host_library(
     ],
     hdrs = [
         "//drivers/TegraDisplayFlip:TegraScanoutCopy.h",
+        "//drivers/TegraGM20B:TegraGM20BABI.h",
+        "//drivers/TegraGM20B:TegraGM20BFences.h",
         "//drivers/TegraGM20B:TegraGM20BGpu.h",
         "//drivers/TegraGM20B:TegraGM20BLayout.h",
         "//drivers/TegraGM20B:TegraGM20BRelayout.h",
@@ -224,6 +249,8 @@ host_test(
     srcs = [
         "gm20b_ce_model.h",
         "gm20b_relayout_test.cpp",
+        "//drivers/TegraGM20B:TegraGM20BABI.h",
+        "//drivers/TegraGM20B:TegraGM20BFences.h",
         "//drivers/TegraGM20B:TegraGM20BGpu.h",
         "//drivers/TegraGM20B:TegraGM20BLayout.h",
         "//drivers/TegraGM20B:TegraGM20BRelayout.h",
@@ -236,8 +263,10 @@ host_test(
     srcs = [
         "gm20b_ce_model.h",
         "gm20b_copy_test.cpp",
+        "//drivers/TegraGM20B:TegraGM20BABI.h",
         "//drivers/TegraGM20B:TegraGM20BCopy.h",
         "//drivers/TegraGM20B:TegraGM20BCopyPush.h",
+        "//drivers/TegraGM20B:TegraGM20BFences.h",
         "//drivers/TegraGM20B:TegraGM20BGpu.h",
         "//drivers/TegraGM20B:TegraGM20BLayout.h",
         "//drivers/TegraGM20B:TegraGM20BRelayout.h",

@@ -6,11 +6,7 @@ drivers/SwitchVideoDecoders/test/VP9Trace.h
 drivers/SwitchVideoDecoders/test/HEVCClip.h
 drivers/SwitchVideoDecoders/test/HEVCTrace.h
 drivers/SwitchVideoDecoders/AVD/VP9Tables.h
-drivers/TegraNVDEC/selftest/VP9Picture160.h
-drivers/TegraNVDEC/selftest/HEVCPicture176.h
 drivers/SwitchVideoDecoders/test/vp9gen/vpx_config.h
-drivers/TegraNVENC/selftest/E3Vectors.h
-drivers/TegraNVJPG/selftest/J3Vectors.h
 drivers/NativeMetal/TwoPlaneStandIn.h
 drivers/TegraGM20BMetal/raw/pack/srgb_knots.h
 bazel/pinned/*/**

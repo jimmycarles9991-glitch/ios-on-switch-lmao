@@ -37,6 +37,7 @@
 #include <stdint.h>
 #include <IOKit/IOLib.h>
 #include "../TegraI2C/TegraI2C.h"
+#include "../../kits/SwitchMMIO/SwitchMMIO.h"
 
 namespace switchclk {
 constexpr uint64_t kCarPA = 0x60006000;
@@ -68,19 +69,14 @@ inline unsigned voutMilliVolts(uint8_t code)
     return 250u + 5u * code;
 }
 
-inline uint32_t reg32(volatile uint8_t *base, uint32_t offset)
-{
-    return *(volatile uint32_t *)(base + offset);
-}
-
 inline unsigned refKHz(volatile uint8_t *car)
 {
-    return 38400u >> ((reg32(car, OSC_CTRL) >> 26) & 3);
+    return 38400u >> ((switch_mmio_read32(car, OSC_CTRL) >> 26) & 3);
 }
 
 inline unsigned clkmKHz(volatile uint8_t *car)
 {
-    return 38400u / (((reg32(car, SPARE_REG0) >> 2) & 3) + 1);
+    return 38400u / (((switch_mmio_read32(car, SPARE_REG0) >> 2) & 3) + 1);
 }
 
 // The post divider a DIVP code selects (Linux pll_qlin_pdiv_to_hw), 0 for an undefined code.
@@ -98,10 +94,12 @@ inline unsigned pllKHz(uint32_t base, unsigned ref, unsigned divnShift, bool und
         return 0;
     if (base & kPllBypass)
         return ref;
-    const uint32_t m = base & 0xff, n = (base >> divnShift) & 0xff, p = qlinDivider(base);
+    const uint32_t m = base & 0xff;
+    const uint32_t n = (base >> divnShift) & 0xff;
+    const uint32_t p = qlinDivider(base);
     if (!m || !p)
         return 0;
-    return (unsigned)((uint64_t)ref * n / m / (undivided ? 1 : p));
+    return static_cast<unsigned>(static_cast<uint64_t>(ref) * n / m / (undivided ? 1 : p));
 }
 
 struct Cpu {
@@ -111,20 +109,29 @@ struct Cpu {
 
 inline Cpu readCpu(volatile uint8_t *car)
 {
-    Cpu cpu{reg32(car, CCLK_BURST_POLICY), reg32(car, SUPER_CCLK_DIVIDER), reg32(car, PLLX_BASE), 0, 0};
+    Cpu cpu{switch_mmio_read32(car, CCLK_BURST_POLICY), switch_mmio_read32(car, SUPER_CCLK_DIVIDER),
+            switch_mmio_read32(car, PLLX_BASE), 0, 0};
     const uint32_t state = cpu.policy >> 28;
-    const unsigned index = state == 1 ? 0 : state == 4 ? 2 : state == 8 ? 3 : 1;
+    unsigned index = 1;
+    if (state == 1) {
+        index = 0;
+    } else if (state == 4) {
+        index = 2;
+    } else if (state == 8) {
+        index = 3;
+    }
     cpu.source = (cpu.policy >> (index * 4)) & 0xf;
     uint64_t kHz = 0;
-    if (cpu.source == 0)
+    if (cpu.source == 0) {
         kHz = clkmKHz(car);
-    else if (cpu.source == kSourcePllp)
+    } else if (cpu.source == kSourcePllp) {
         kHz = kPllpKHz;
-    else if (cpu.source == kSourcePllx)
+    } else if (cpu.source == kSourcePllx) {
         kHz = pllKHz(cpu.pllx, refKHz(car), 8, false);
+    }
     if (cpu.divider & (1u << 31))
         kHz = kHz * (((cpu.divider >> 8) & 0xff) + 1) / ((cpu.divider & 0xff) + 1);
-    cpu.kHz = (unsigned)kHz;
+    cpu.kHz = static_cast<unsigned>(kHz);
     return cpu;
 }
 
@@ -143,17 +150,17 @@ struct Emc {
 
 inline Emc readEmc(volatile uint8_t *car)
 {
-    Emc emc{reg32(car, CLK_SOURCE_EMC), 0, 0, 0};
+    Emc emc{switch_mmio_read32(car, CLK_SOURCE_EMC), 0, 0, 0};
     emc.source = emc.clockSource >> 29;
     emc.divider = emc.clockSource & 0xff;
     const unsigned ref = refKHz(car);
     unsigned parent = 0;
     switch (emc.source) {
     case 0:
-        parent = pllKHz(reg32(car, PLLM_BASE), ref, 8, false);
+        parent = pllKHz(switch_mmio_read32(car, PLLM_BASE), ref, 8, false);
         break;
     case 1:
-        parent = pllKHz(reg32(car, PLLC_BASE), ref, 10, false);
+        parent = pllKHz(switch_mmio_read32(car, PLLC_BASE), ref, 10, false);
         break;
     case 2:
     case 7:
@@ -163,16 +170,18 @@ inline Emc readEmc(volatile uint8_t *car)
         parent = clkmKHz(car);
         break;
     case 4:
-        parent = pllKHz(reg32(car, PLLM_BASE), ref, 8, true);
+        parent = pllKHz(switch_mmio_read32(car, PLLM_BASE), ref, 8, true);
         break;
     case 5:
-        parent = pllKHz(reg32(car, PLLMB_BASE), ref, 8, true);
+        parent = pllKHz(switch_mmio_read32(car, PLLMB_BASE), ref, 8, true);
         break;
     case 6:
-        parent = pllKHz(reg32(car, PLLMB_BASE), ref, 8, false);
+        parent = pllKHz(switch_mmio_read32(car, PLLMB_BASE), ref, 8, false);
+        break;
+    default:  // the field is three bits, all named above
         break;
     }
-    emc.kHz = (unsigned)((uint64_t)parent * 2 / (emc.divider + 2));
+    emc.kHz = static_cast<unsigned>(static_cast<uint64_t>(parent) * 2 / (emc.divider + 2));
     return emc;
 }
 
@@ -196,7 +205,7 @@ inline int readCpuRail(uint8_t *address, uint8_t *vout)
             // Only a MAX77812 with its CPU output (M4, EN_CTRL 0x06 bit 6, hekate max77812.h) on and a VDD_CPU code inside
             // hekate's CPU range (600..1525 mV) is VDD_CPU: anything else at that address is never written.
             uint8_t enable = 0;
-            int checked = tegra_i2c_read(kPmicBus, kMax77812Addresses[i], 0x06, &enable, 1);
+            const int checked = tegra_i2c_read(kPmicBus, kMax77812Addresses[i], 0x06, &enable, 1);
             const unsigned mv = voutMilliVolts(*vout);
             if (checked || !(enable & (1u << 6)) || mv < 600 || mv > 1525)
                 return TEGRA_I2C_ENACK;
@@ -211,10 +220,11 @@ inline int readCpuRail(uint8_t *address, uint8_t *vout)
 
 inline void formatMHz(char *buffer, size_t size, unsigned kHz)
 {
-    if (kHz)
+    if (kHz) {
         snprintf(buffer, size, "%u.%u MHz", kHz / 1000, (kHz % 1000) / 100);
-    else
+    } else {
         snprintf(buffer, size, "? MHz");
+    }
 }
 }  // namespace switchclk
 #endif

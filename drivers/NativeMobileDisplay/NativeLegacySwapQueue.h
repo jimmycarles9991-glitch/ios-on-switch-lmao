@@ -8,7 +8,8 @@
 const OriginalLegacySwapRequest *pendingSwapRequest() const
 {
     const OriginalLegacySwapRequest *request = nullptr;
-    memcpy(&request, reinterpret_cast<const unsigned char *>(this) + swapQueueHead, sizeof(request));
+    memcpy(&request, reinterpret_cast<const unsigned char *>(this) + swapQueueHead,
+           sizeof(const OriginalLegacySwapRequest *));
     return request;
 }
 
@@ -18,9 +19,13 @@ const OriginalLegacySwapRequest *pendingSwapRequest() const
 // reference moves to the current swap for the family's completion.
 bool activateOnlyPendingSwap(const OriginalLegacySwapRequest *request)
 {
-    auto self = reinterpret_cast<unsigned char *>(this);
-    auto bytes = reinterpret_cast<const unsigned char *>(request);
-    const void *current = nullptr, *head = nullptr, *tail = nullptr, *next = nullptr, *previous = nullptr;
+    auto *self = reinterpret_cast<unsigned char *>(this);
+    const auto *bytes = reinterpret_cast<const unsigned char *>(request);
+    const void *current = nullptr;
+    const void *head = nullptr;
+    const void *tail = nullptr;
+    void *next = nullptr;
+    const void *previous = nullptr;
     memcpy(&current, self + swapQueueCurrent, 8);
     memcpy(&head, self + swapQueueHead, 8);
     memcpy(&tail, self + swapQueueTail, 8);
@@ -32,14 +37,16 @@ bool activateOnlyPendingSwap(const OriginalLegacySwapRequest *request)
         return false;
     if (next) {
         const void *link = self + swapQueueHead;
-        memcpy(const_cast<unsigned char *>(reinterpret_cast<const unsigned char *>(next)) + swapPrevious, &link, 8);
-    } else if (tail != bytes + swapNext)
+        memcpy(static_cast<unsigned char *>(next) + swapPrevious, &link, 8);
+    } else if (tail != bytes + swapNext) {
         return false;
+    }
     memcpy(self + swapQueueCurrent, &request, 8);
     if (next) {
         memcpy(self + swapQueueHead, &next, 8);
     } else {
-        const void *empty = nullptr, *emptyTail = self + swapQueueHead;
+        const void *empty = nullptr;
+        const void *emptyTail = self + swapQueueHead;
         memcpy(self + swapQueueHead, &empty, 8);
         memcpy(self + swapQueueTail, &emptyTail, 8);
     }

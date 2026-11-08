@@ -24,4 +24,5 @@ static int verify(const uint8_t key[VR_KEY_BYTES], const uint8_t digest[32],
     error = rsa_verify_pkcs1v15(&public_key, ccoid_sha256, 32, digest, VR_SIGNATURE_BYTES, signature, &valid);
     return error == 0 && valid;
 }
+// NOLINTNEXTLINE(misc-use-internal-linkage): SwitchRootPolicy declares and uses it
 const struct vr_crypto vr_xnu_crypto = {hash, verify};

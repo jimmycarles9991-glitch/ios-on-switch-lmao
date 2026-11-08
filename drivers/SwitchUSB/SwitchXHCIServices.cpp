@@ -11,6 +11,7 @@
 #include <libkern/c++/OSSymbol.h>
 #include <string.h>
 #include "../ArmGIC/SwitchInterrupts.h"
+#include "../../kits/SwitchDT/SwitchDTProperty.h"
 
 namespace xhost {
 namespace {
@@ -38,11 +39,12 @@ bool addResourcePersonality(const char *ioClass, const char *category, const cha
                                     {"CFBundleIdentifier", bundle}};
     for (const auto &pair : pairs) {
         const OSSymbol *value = ok ? OSSymbol::withCString(pair[1]) : nullptr;
-        ok = value && personality->setObject(pair[0], value);
+        ok = (value != nullptr) && personality->setObject(pair[0], value);
         OSSafeReleaseNULL(value);
     }
-    OSArray *array = ok ? OSArray::withObjects((const OSObject **)&personality, 1) : nullptr;
-    ok = array && gIOCatalogue->addDrivers(array, true);
+    const OSObject *entries[] = {personality};
+    OSArray *array = ok ? OSArray::withObjects(entries, 1) : nullptr;
+    ok = (array != nullptr) && gIOCatalogue->addDrivers(array, true);
     OSSafeReleaseNULL(array);
     OSSafeReleaseNULL(personality);
     return ok;
@@ -50,14 +52,18 @@ bool addResourcePersonality(const char *ioClass, const char *category, const cha
 
 IOService *makeNub(uint64_t registers, uint64_t bytes, uint32_t intid)
 {
-    IOService *gic = switch_interrupt_nub(intid, false);
-    OSObject *controllers = gic ? gic->copyProperty(gIOInterruptControllersKey) : nullptr;
-    OSObject *specifiers = gic ? gic->copyProperty(gIOInterruptSpecifiersKey) : nullptr;
+    // NOLINTBEGIN(clang-analyzer-osx.cocoa.RetainCount): switch_interrupt_nub lends the registry's nub
+    const IOService *gic = switch_interrupt_nub(intid, false);
+    const OSObject *controllers = gic ? gic->copyProperty(gIOInterruptControllersKey) : nullptr;
+    const OSObject *specifiers = gic ? gic->copyProperty(gIOInterruptSpecifiersKey) : nullptr;
+    // NOLINTEND(clang-analyzer-osx.cocoa.RetainCount)
     OSDictionary *dict = OSDictionary::withCapacity(4);
-    IODeviceMemory *window = IODeviceMemory::withRange(registers, bytes);
-    OSArray *memory = window ? OSArray::withObjects((const OSObject **)&window, 1) : nullptr;
+    const IODeviceMemory *window = IODeviceMemory::withRange(registers, bytes);
+    const OSObject *ranges[] = {window};
+    OSArray *memory = window ? OSArray::withObjects(ranges, 1) : nullptr;
     IOService *nub = OSTypeAlloc(IOService);
-    bool ok = controllers && specifiers && dict && memory && nub;
+    bool ok = (controllers != nullptr) && (specifiers != nullptr) && (dict != nullptr) && (memory != nullptr) &&
+              (nub != nullptr);
     if (ok) {
         dict->setObject(gIOInterruptControllersKey, controllers);
         dict->setObject(gIOInterruptSpecifiersKey, specifiers);
@@ -97,7 +103,7 @@ IOService *waitForRootPort(IOService *controller, unsigned number, uint64_t time
     return found;
 }
 
-void describePorts(IOService *controller, char *buffer, size_t size)
+void describePorts(const IOService *controller, char *buffer, size_t size)
 {
     size_t used = 0;
     buffer[0] = 0;
@@ -107,11 +113,8 @@ void describePorts(IOService *controller, char *buffer, size_t size)
         if (child == nullptr)
             break;
         const OSObject *value = child->copyProperty(kPortNumber);
-        const auto *data = OSDynamicCast(OSData, value);
         uint32_t number = 0;
-        const bool known = data != nullptr && data->getLength() >= sizeof(number);
-        if (known)
-            memcpy(&number, data->getBytesNoCopy(), sizeof(number));
+        const bool known = switch_osdata_read_prefix(value, &number, sizeof(number));
         const unsigned power = child->getPowerState();
         const int n = known ? snprintf(buffer + used, size - used, "%s%s port %u power %u", used != 0 ? ", " : "",
                                        child->getMetaClass()->getClassName(), number, power)

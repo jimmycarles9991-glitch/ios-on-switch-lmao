@@ -8,9 +8,15 @@ import concurrent.futures
 import datetime
 import os
 import plistlib
+import pty
+import re
+import selectors
 import subprocess
 import sys
 from pathlib import Path
+
+from tools.common import sudo
+from tools.install import progress
 
 TOOLS = {
     'diskutil': '/usr/sbin/diskutil',
@@ -18,6 +24,8 @@ TOOLS = {
     'ditto': '/usr/bin/ditto',
     'cp': '/bin/cp',
     'fsck_apfs': '/sbin/fsck_apfs',
+    'newfs_apfs': '/sbin/newfs_apfs',
+    'mkbom': '/usr/bin/mkbom',
     'sw_vers': '/usr/bin/sw_vers',
     'sync': '/bin/sync',
 }
@@ -32,12 +40,13 @@ class Log:
 
     def __init__(self, path: str | Path):
         self.path = Path(path)
-        self.path.parent.mkdir(parents=True, exist_ok=True)
+        sudo.user_directory(self.path.parent)
         self.file = self.path.open('a')
+        sudo.give_back(self.path)
 
     def __call__(self, *parts: object) -> None:
         line = ' '.join(str(p) for p in parts)
-        print(line, flush=True)
+        progress.println(line)
         self.file.write('{} {}\n'.format(datetime.datetime.now().isoformat(timespec='seconds'), line))
         self.file.flush()
 
@@ -61,17 +70,122 @@ def run(tool: str, *args: object, check: bool = True, binary: bool = False, log:
     command = [TOOLS.get(tool, tool), *map(str, args)]
     if log:
         log.quiet('$', ' '.join(command))
-    result = subprocess.run(command, capture_output=True, text=not binary, check=False)
+    progress.running(brief(command))
+    process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=not binary)
+    stdout, stderr = _communicate(process)
+    if check and process.returncode:
+        raise HostError(_failure(command, process.returncode, stdout, stderr))
+    return stdout
+
+
+def _communicate(process: subprocess.Popen) -> tuple[str | bytes, str | bytes]:
+    with process:
+        try:
+            while True:
+                try:
+                    return process.communicate(timeout=progress.WAIT)
+                except subprocess.TimeoutExpired:
+                    progress.tick()
+        except BaseException:
+            process.kill()
+            raise
+
+
+def _failure(command: list[str], returncode: int, stdout: str | bytes, stderr: str | bytes) -> str:
+    detail = stderr.decode(errors='replace') if isinstance(stderr, bytes) else (stderr or stdout or '').strip()
+    return '{} failed ({}): {}'.format(' '.join(command), returncode, detail)
+
+
+def brief(command: list[str]) -> str:
+    """Return a command as the running step's note: its words without options, each path by its name."""
+    words = [Path(w).name if '/' in w else w for w in command if not w.startswith('-')]
+    return ' '.join(words)[:80]
+
+
+class _Lines:
+    """One stream of a tool's output, cut into lines at each newline or carriage return as it arrives."""
+
+    def __init__(self, parse: progress.Parser) -> None:
+        self.parse, self.partial, self.kept = parse, b'', []
+
+    def feed(self, data: bytes) -> None:
+        buffer = self.partial + data
+        cut = len(buffer) - 1 if buffer.endswith(b'\r') else len(buffer)
+        *lines, rest = re.split(rb'\r\n|\r|\n', buffer[:cut])
+        self.partial = rest + buffer[cut:]
+        for line in lines:
+            self.take(line)
+
+    def take(self, raw: bytes) -> None:
+        line = raw.decode(errors='replace')
+        update = self.parse(line)
+        if update:
+            progress.apply(update)
+        if update is None or update.keep:
+            self.kept.append(line)
+
+    def text(self) -> str:
+        if self.partial.rstrip(b'\r'):
+            self.take(self.partial.rstrip(b'\r'))
+        self.partial = b''
+        return ''.join(line + '\n' for line in self.kept)
+
+
+def _read(fd: int) -> bytes:
+    try:
+        return os.read(fd, 1 << 16)
+    except OSError:  # EIO: a pseudo-terminal whose last writer is gone
+        return b''
+
+
+def stream(command: list[str], parse: progress.Parser) -> subprocess.CompletedProcess:
+    """Run `command` and read its output as it comes; parse() turns its progress lines into the running step's.
+
+    Its stdout is a pseudo-terminal, so a tool that buffers a pipe (apfs_prepare_cryptex) still prints each line as it
+    goes. Returns its output without the lines parse() took as progress alone.
+    """
+    progress.running(brief(command))
+    terminal, child = pty.openpty()
+    try:
+        process = subprocess.Popen(command, stdout=child, stderr=subprocess.PIPE)
+    except BaseException:
+        os.close(terminal)
+        raise
+    finally:
+        os.close(child)
+    errors = process.stderr.fileno()
+    lines = {terminal: _Lines(parse), errors: _Lines(parse)}
+    try:
+        with selectors.DefaultSelector() as selector:
+            for fd in lines:
+                selector.register(fd, selectors.EVENT_READ)
+            while selector.get_map():
+                for key, _ in selector.select(progress.WAIT):
+                    data = _read(key.fd)
+                    if data:
+                        lines[key.fd].feed(data)
+                    else:
+                        selector.unregister(key.fd)
+                progress.tick()
+        process.wait()
+    except BaseException:
+        process.kill()
+        process.wait()
+        raise
+    finally:
+        os.close(terminal)
+        process.stderr.close()
+    return subprocess.CompletedProcess(command, process.returncode, lines[terminal].text(), lines[errors].text())
+
+
+def watch(tool: str, *args: object, parse: progress.Parser, log: Log | None = None, check: bool = True) -> str:
+    """Run a tool that reports its progress as run() does, reading that progress with parse() (stream)."""
+    command = [TOOLS.get(tool, tool), *map(str, args)]
+    if log:
+        log.quiet('$', ' '.join(command))
+    result = stream(command, parse)
     if check and result.returncode:
-        raise HostError(
-            '{} failed ({}): {}'.format(
-                ' '.join(command),
-                result.returncode,
-                (result.stderr or result.stdout or '').strip()
-                if not binary
-                else result.stderr.decode(errors='replace'),
-            )
-        )
+        raise HostError(_failure(command, result.returncode, result.stdout, result.stderr))
     return result.stdout
 
 
@@ -169,17 +283,27 @@ CHUNK = 8 << 20
 
 
 def copy_parallel(src: int, src_offset: int, dst: int, dst_offset: int, size: int) -> None:
-    """`size` bytes from `src` to `dst` in CHUNK pieces on every core; all-zero pieces stay holes."""
+    """`size` bytes from `src` to `dst` in CHUNK pieces on every core; all-zero pieces stay holes.
 
-    def piece(at: int) -> None:
+    Each piece counts toward the running step (progress) as it lands.
+    """
+
+    def piece(at: int) -> int:
         chunk = os.pread(src, min(CHUNK, size - at), src_offset + at)
         if len(chunk) != min(CHUNK, size - at):
             raise HostError(f'short read at {src_offset + at}')
         if chunk.strip(b'\0'):
             os.pwrite(dst, chunk, dst_offset + at)
+        return len(chunk)
 
     with concurrent.futures.ThreadPoolExecutor(os.cpu_count() or 4) as pool:
-        list(pool.map(piece, range(0, size, CHUNK)))
+        pieces = [pool.submit(piece, at) for at in range(0, size, CHUNK)]
+        try:
+            for copied in concurrent.futures.as_completed(pieces):
+                progress.advance(copied.result())
+        finally:
+            for pending in pieces:
+                pending.cancel()
 
 
 def copy_file_parallel(source: str | os.PathLike, target: str | os.PathLike) -> None:

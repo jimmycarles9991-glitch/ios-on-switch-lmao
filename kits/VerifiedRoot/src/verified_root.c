@@ -13,7 +13,7 @@ static int same(const uint8_t *a, const uint8_t *b, size_t n)
 {
     uint8_t diff = 0;
     for (size_t i = 0; i < n; ++i)
-        diff |= a[i] ^ b[i];
+        diff |= (uint8_t)(a[i] ^ b[i]);
     return diff == 0;
 }
 
@@ -23,7 +23,9 @@ int vr_open(const uint8_t *p, size_t n, const uint8_t key[VR_KEY_BYTES], uint64_
     static const uint8_t magic[8] = {'V', 'R', 'O', 'O', 'T', '0', '1', 0};
     static const uint8_t key_magic[8] = {'V', 'R', 'O', 'O', 'T', 'K', 'E', 'Y'};
     uint8_t digest[32];
-    uint64_t bytes, count, generation;
+    uint64_t bytes = 0;
+    uint64_t count = 0;
+    uint64_t generation = 0;
     if (!out)
         return VR_FORMAT;
     *out = (struct vr_view){0};

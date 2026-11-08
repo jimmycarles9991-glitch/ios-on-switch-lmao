@@ -1,5 +1,11 @@
 """Flag lists several kernel drivers share (moved out of the kernel tree's BUILD.bazel by the layout move)."""
 
+# The selected IPSW kind's header (//kernel:ipsw_volumes_header) in every source: its build, iPad and volumes.
+IPSW_KIND_FLAGS = [
+    "-include",
+    "{build}/ipsw-volumes/switch_ipsw_volumes.h",
+]
+
 # NativeSwitchBlock: the SD card's block device (+ cryptex files), and the board drivers riding in its archive.
 BLOCK_FLAGS = [
     "-mgeneral-regs-only",
@@ -12,7 +18,7 @@ BLOCK_FLAGS = [
     "{tree}/diagnostics/switch",
     "-I",
     "{tree}/kits/VerifiedRoot/include",
-]
+] + IPSW_KIND_FLAGS
 
 # TegraGM20B: the Tegra X1 GPU (vendored nouveau nvkm under an XNU shim, IOAcceleratorES + AGXDeviceUserClient). Apple
 # clang's kernel defaults add -Wsign-conversion, -Wshorten-64-to-32 and

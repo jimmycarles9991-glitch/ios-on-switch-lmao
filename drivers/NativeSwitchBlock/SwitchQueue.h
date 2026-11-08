@@ -33,7 +33,9 @@ inline uint32_t switchGatherReads(Request *head, Request *first, uint32_t limit,
                                   uint64_t *start, uint32_t *sectors, uint32_t maxGap = 0, uint32_t gapBudget = 0)
 {
     first->chained = true;
-    uint64_t low = first->lba, high = first->lba + first->sectors, payload = first->sectors;
+    uint64_t low = first->lba;
+    uint64_t high = first->lba + first->sectors;
+    uint64_t payload = first->sectors;
     uint32_t count = 1;
     // Passes over the queue until one adds nothing: requests queued in rising order join in one pass.
     for (bool grew = true; grew && count < maxCount;) {
@@ -42,8 +44,11 @@ inline uint32_t switchGatherReads(Request *head, Request *first, uint32_t limit,
         for (Request *r = head; r && seen < scan && count < maxCount; r = r->next, ++seen) {
             if (r->write || r->chained)
                 continue;
-            const uint64_t from = r->lba, to = r->lba + r->sectors;
-            uint64_t newLow = low, newHigh = high, gap = 0;
+            const uint64_t from = r->lba;
+            const uint64_t to = r->lba + r->sectors;
+            uint64_t newLow = low;
+            uint64_t newHigh = high;
+            uint64_t gap = 0;
             bool inside = false;
             if (from >= high) {
                 gap = from - high;
@@ -89,7 +94,8 @@ inline bool switchChainFits(const Request *head, uint64_t start, uint32_t sector
 {
     uint64_t total = 0;
     uint32_t found = 0;
-    bool atStart = false, atEnd = false;
+    bool atStart = false;
+    bool atEnd = false;
     for (const Request *r = head; r; r = r->next) {
         if (!r->chained)
             continue;
@@ -155,7 +161,9 @@ template <typename Request> inline void switchClearChain(Request *head)
 // clears the mark, and returns them linked in rising LBA order.
 template <typename Request> inline Request *switchUnlinkChain(Request *&head, Request *&tail, uint32_t count)
 {
-    Request *chain = nullptr, *last = nullptr, *prev = nullptr;
+    Request *chain = nullptr;
+    Request *last = nullptr;
+    Request *prev = nullptr;
     for (Request *r = head; r && count;) {
         Request *const next = r->next;
         if (!r->chained) {
@@ -163,10 +171,11 @@ template <typename Request> inline Request *switchUnlinkChain(Request *&head, Re
             r = next;
             continue;
         }
-        if (prev)
+        if (prev) {
             prev->next = next;
-        else
+        } else {
             head = next;
+        }
         if (tail == r)
             tail = prev;
         r->chained = false;
@@ -174,10 +183,11 @@ template <typename Request> inline Request *switchUnlinkChain(Request *&head, Re
         if (!chain || last->lba < r->lba) {
             // The usual case: queued in rising order, appended.
             r->next = nullptr;
-            if (last)
+            if (last) {
                 last->next = r;
-            else
+            } else {
                 chain = r;
+            }
             last = r;
         } else {
             Request **at = &chain;

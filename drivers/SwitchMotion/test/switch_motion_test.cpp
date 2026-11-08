@@ -416,6 +416,9 @@ struct UnknownPart : Chip {
 
 // --- Kernel interfaces the driver calls -------------------------------------------------------------------------------
 static unsigned gSpiSuspends = 0, gSpiResumes = 0;
+// Set by a scenario: every transfer from then on fails with it (the bus or the part broken), counted in gSpiFailed.
+static int gSpiFailure = 0;
+static unsigned gSpiFailed = 0;
 
 extern "C" int tegra_spi_init(unsigned bus)
 {
@@ -438,6 +441,10 @@ extern "C" int tegra_spi_transfer(unsigned bus, unsigned cs, const void *txv, vo
     const auto *tx = static_cast<const uint8_t *>(txv);
     auto *rx = static_cast<uint8_t *>(rxv);
     const uint8_t reg = tx[0] & 0x7f;
+    if (gSpiFailure) {
+        ++gSpiFailed;
+        return gSpiFailure;
+    }
     gChip->access();
     if (tx[0] & 0x80) {
         REQUIRE(rx);
@@ -700,6 +707,8 @@ static void teardown()
     gChip = nullptr;
     gTimedPosts = true;
     gDisplayLit = false;
+    gSpiFailure = 0;
+    gSpiFailed = 0;
 }
 
 // What start() sends an ICM-42607 after identifying it: reset (TDK inv_imu_device_reset), interface and INT2 set-up,
@@ -947,6 +956,33 @@ static void icm42607Faults()
         check(start(chip), "0x67: started");
         check(gMotion && gMotion->imu == "ICM-42607", "0x67: ICM-42607");
         expectOps(k42607Start, "0x67 start");
+        teardown();
+    }
+    {  // SPI4 fails at the first WHO_AM_I read: one line, no further transfer, nothing started, no panic.
+        Icm42607 chip;
+        gSpiFailure = TEGRA_SPI_EIO;
+        check(!start(chip), "transfer fails at identify: not started");
+        check(gSpiFailed == 1, "transfer fails at identify: one attempt");
+        expectLog("IOLog: SwitchMotion: off: SPI4 read of IMU register 0x75 failed (-5)", "transfer fails at identify");
+        check(!logged("no IMU on SPI4"), "transfer fails at identify: not taken for an unknown part");
+        check(!gMotion && gHid.empty(), "transfer fails at identify: nothing published");
+        teardown();
+    }
+    {  // SPI4 fails while sampling: one line, the part given up, data-ready masked, no further transfer, no panic.
+        Icm42607 chip;
+        check(start(chip), "transfer fails sampling: started");
+        setInterval(kSwitchHIDAccelerometer, 10000);
+        const int16_t accel[3] = {1, 2, 3}, none[3] = {};
+        chip.produce(accel, none);
+        gSpiFailure = TEGRA_SPI_ETIMEDOUT;
+        check(deliver() == 1, "transfer fails sampling: one interrupt");
+        expectLog("IOLog: SwitchMotion: off: SPI4 read of ICM-42607-P register 0x39 failed (-4)",
+                  "transfer fails sampling");
+        check(gSpiFailed == 1, "transfer fails sampling: one attempt");
+        check(!dataReady()->enabled && !IOTimerEventSource::last->armed,
+              "transfer fails sampling: masked, no watchdog");
+        setInterval(kSwitchHIDGyro, 5000);
+        check(gSpiFailed == 1, "transfer fails sampling: off for the boot");
         teardown();
     }
     {  // Nothing known: both WHO_AM_I values in one line, not a single write.

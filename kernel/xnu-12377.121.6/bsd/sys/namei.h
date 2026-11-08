@@ -161,7 +161,6 @@ struct nameidata {
 #define NAMEI_ATFD              0x400000 /* use the fd passed as the starting directory for lookup */
 
 #define NAMEI_FIRMLINK_FOLLOWED 0x800000 /* Firmlink followed since last root encounter */
-#define NAMEI_SWITCH_PRETRANSLATED 0x1000000 /* Switch: ni_vp is the Data copy of a System file (kits/SwitchPretranslated) */
 
 #ifdef KERNEL
 /*

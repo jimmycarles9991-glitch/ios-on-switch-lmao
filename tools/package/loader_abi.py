@@ -49,11 +49,16 @@ LZ4_MAGIC = b'\x04\x22\x4d\x18'
 STAMPS_PROPERTY = 'switch-boot-stamps'
 STAMPS_BYTES = 26 * 8
 STAMPS_SLOT = 0xA001EF00
-# /chosen/random-seed (the pinned 64 bytes) and /chosen/switch-seed-source (8 zero bytes): the loader mixes SE2's
-# DRBG output into the first and reports in the second (boot/loader/seed.h).
+# /chosen/random-seed (the pinned bytes) and /chosen/switch-seed-source (8 zero bytes): the loader mixes SE2's DRBG
+# output into the first and reports in the second (boot/loader/seed.h SWITCH_SEED_BYTES: what xnu-12377 reads).
 SEED_PROPERTY = 'random-seed'
-SEED_BYTES = 64
+SEED_BYTES = 256
 SEED_SOURCE_PROPERTY = 'switch-seed-source'
+# iBoot's /chosen/boot-manifest-hash: the SHA-384 of what authorised this boot. Here the boot is the kernel and the
+# trust cache bundle the window carries (no Apple manifest), hashed by the layout step into this zeroed property.
+# iOS 27's Image4 entangles its nonce magazine with it and refuses to start without one.
+BOOT_MANIFEST_HASH_PROPERTY = 'boot-manifest-hash'
+BOOT_MANIFEST_HASH_BYTES = 48
 SEED_SOURCE_BYTES = 8
 
 # The fixed same-boot SD reference page (boot/storage/sd_reference.h): the loader's code, data and stacks end below.

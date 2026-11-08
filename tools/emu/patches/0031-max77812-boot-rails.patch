@@ -1,0 +1,73 @@
+diff --git a/hw/arm/tegra2/tegrax1.c b/hw/arm/tegra2/tegrax1.c
+index 8de2aac..7683b1d 100644
+--- a/hw/arm/tegra2/tegrax1.c
++++ b/hw/arm/tegra2/tegrax1.c
+@@ -588,10 +588,11 @@ static void* tegra_init_timer(hwaddr base, qemu_irq irq, uint32_t id)
+     return tegra_init_obj(base, irq, "tegra.timer", "id", id, false);
+ }
+ 
+-static void* tegra_init_pmic(I2CBus *bus, uint8_t addr, uint32_t version)
++static void* tegra_init_pmic(I2CBus *bus, uint8_t addr, uint32_t version, uint8_t max77812_en_ctrl)
+ {
+     I2CSlave *tmp = i2c_slave_new("max77xpmic", addr);
+     qdev_prop_set_uint32(DEVICE(tmp), "version", version);
++    qdev_prop_set_uint8(DEVICE(tmp), "max77812-en-ctrl", max77812_en_ctrl);
+     i2c_slave_realize_and_unref(tmp, bus, &error_fatal);
+ 
+     return tmp;
+@@ -1186,17 +1187,18 @@ static void __tegrax1_init(MachineState *machine)
+     uint32_t pmic_version = tegra_board < TEGRAX1PLUS_BOARD ? 0x35 : 0x53;
+ 
+     /* Max77620Pmic */
+-    tegra_i2c_pmic_dev = tegra_init_pmic(tegra_i2c_get_bus(tegra_idc5_dev), 0x3C, pmic_version);
++    tegra_i2c_pmic_dev = tegra_init_pmic(tegra_i2c_get_bus(tegra_idc5_dev), 0x3C, pmic_version, 0);
+ 
+     /* Max77621Cpu */
+-    tegra_i2c_subpmic_devs[0] = tegra_init_pmic(tegra_i2c_get_bus(tegra_idc5_dev), 0x1B, pmic_version);
++    tegra_i2c_subpmic_devs[0] = tegra_init_pmic(tegra_i2c_get_bus(tegra_idc5_dev), 0x1B, pmic_version, 0);
+ 
+     /* Max77621Gpu */
+-    tegra_i2c_subpmic_devs[1] = tegra_init_pmic(tegra_i2c_get_bus(tegra_idc5_dev), 0x1C, pmic_version);
++    tegra_i2c_subpmic_devs[1] = tegra_init_pmic(tegra_i2c_get_bus(tegra_idc5_dev), 0x1C, pmic_version, 0);
+ 
+-    /* Max77812Pmic */
+-    tegra_i2c_subpmic_devs[2] = tegra_init_pmic(tegra_i2c_get_bus(tegra_idc5_dev), 0x31, pmic_version);
+-    tegra_i2c_subpmic_devs[3] = tegra_init_pmic(tegra_i2c_get_bus(tegra_idc5_dev), 0x33, pmic_version);
++    /* Max77812Pmic: vdd-cpu (M4) on as hekate starts the CPU, and on the retail part at 0x33 vddio-ddr (M3) on from
++     * power-up (hekate bdk/power/max7762x.c, max77812.h) */
++    tegra_i2c_subpmic_devs[2] = tegra_init_pmic(tegra_i2c_get_bus(tegra_idc5_dev), 0x31, pmic_version, 0x40);
++    tegra_i2c_subpmic_devs[3] = tegra_init_pmic(tegra_i2c_get_bus(tegra_idc5_dev), 0x33, pmic_version, 0x50);
+ 
+     /* Bq24193 */
+     tegra_i2c_charger_dev = i2c_slave_create_simple(tegra_i2c_get_bus(tegra_idc1_dev), "dummyi2c", 0x6B);
+diff --git a/hw/misc/max77xpmic.c b/hw/misc/max77xpmic.c
+index e146b5b..e0ace47 100644
+--- a/hw/misc/max77xpmic.c
++++ b/hw/misc/max77xpmic.c
+@@ -30,6 +30,7 @@ struct MAX77XPMICState {
+     I2CSlave parent_obj;
+     int8_t addr;
+     uint32_t version;
++    uint8_t en_ctrl;
+ 
+     uint8_t regs[0x71];
+ };
+@@ -75,6 +76,10 @@ static void max77xpmic_realize(DeviceState *dev, Error **errp)
+     s->regs[0x42] = 0x07; // ONOFFCNFG2
+ 
+     s->regs[0x5C] = s->version; // REG_CID4
++
++    /* A MAX77812 (Mariko's CPU/GPU/DRAM regulator) has its own map; EN_CTRL (0x06) holds the rails on at boot. */
++    if (s->en_ctrl)
++        s->regs[0x06] = s->en_ctrl;
+ }
+ 
+ static int max77xpmic_send(I2CSlave *i2c, uint8_t data)
+@@ -165,6 +170,7 @@ static int max77xpmic_event(I2CSlave *i2c, enum i2c_event event)
+ 
+ static Property max77xpmic_properties[] = {
+     DEFINE_PROP_UINT32("version", MAX77XPMICState, version, 0x35),
++    DEFINE_PROP_UINT8("max77812-en-ctrl", MAX77XPMICState, en_ctrl, 0),
+     DEFINE_PROP_END_OF_LIST(),
+ };
+ 

@@ -300,4 +300,24 @@ TEST(RawRegion, AClippedCornerCoversNothing)
     EXPECT_FALSE(raw::WrittenRegion::covers(g, false, kWidth, kHeight));
 }
 
+TEST(RawRegion, AnIndexedDrawReadsItsIndicesFromTheBaseVertex)
+{
+    // the indices name the second quad's vertices from the base vertex 4: the first quad's pixels are not written
+    std::vector<float> a, b, c;
+    raw::DrawGeometry g = quad(a, 0, 0, 100, 100);
+    const std::vector<float> second = positions({{300, 0}, {400, 0}, {300, 100}, {400, 100}});
+    a.insert(a.end(), second.begin(), second.end());
+    g.positions.base = reinterpret_cast<const uint8_t *>(a.data());
+    g.positionBytes = a.size() * sizeof(float);
+    const uint16_t indices[6] = {0, 1, 2, 1, 3, 2};
+    g.indices = reinterpret_cast<const uint8_t *>(indices);
+    g.indexSize = 2;
+    g.first = 4;
+    g.count = 6;
+    raw::WrittenRegion written;
+    written.add(g);
+    EXPECT_FALSE(written.meets(quad(b, 0, 0, 100, 100)));
+    EXPECT_TRUE(written.meets(quad(c, 350, 50, 450, 150)));
+}
+
 }  // namespace

@@ -1,26 +1,26 @@
 """The NVK host twin with the device's pipeline cache identity, as the seed and the raw pack both run it."""
 
 import shutil
-import struct
 import subprocess
 import sys
 from pathlib import Path
+
+from tools.common import macho
 
 
 def lc_uuid(path: str | Path, value: bytes | None = None) -> bytes:
     """Return the LC_UUID of the thin 64-bit Mach-O at `path`, after setting it to `value` (16 bytes) when given."""
     data = bytearray(Path(path).read_bytes())
-    magic, _, _, _, ncmds = struct.unpack_from('<5I', data)
-    at = 32
-    for _ in range(ncmds if magic == 0xFEEDFACF else 0):
-        cmd, size = struct.unpack_from('<2I', data, at)
-        if cmd == 0x1B:  # LC_UUID
-            if value is not None:
-                data[at + 8 : at + 24] = value
-                Path(path).write_bytes(data)
-            return bytes(data[at + 8 : at + 24])
-        at += size
-    sys.exit(f'{path}: no LC_UUID')
+    try:
+        at = macho.uuid_offset(macho.macho(data, subtypes=None))
+    except ValueError:
+        at = None
+    if at is None:
+        sys.exit(f'{path}: no LC_UUID')
+    if value is not None:
+        data[at : at + 16] = value
+        Path(path).write_bytes(data)
+    return bytes(data[at : at + 16])
 
 
 def make_twin(nvk: str, twin: str, out: str, env: dict[str, str]) -> None:

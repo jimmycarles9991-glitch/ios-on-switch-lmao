@@ -4,6 +4,7 @@
 # resolves to them.
 load("@rules_cc//cc/toolchains:cc_toolchain.bzl", "cc_toolchain")
 load("//bazel/lint:defs.bzl", "lint_files")
+load("//translate/arm64e:target.bzl", "a64x_target_linkopts")
 load(":config.bzl", "apple_cc_toolchain_config")
 
 package(default_visibility = ["//visibility:public"])
@@ -19,6 +20,7 @@ filegroup(
 
 [apple_cc_toolchain_config(
     name = platform + "_config",
+    link_flags = a64x_target_linkopts() if platform == "ios" else [],
     platform = platform,
 ) for platform in ("ios", "macos")]
 

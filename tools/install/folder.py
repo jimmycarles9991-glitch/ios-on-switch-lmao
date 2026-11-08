@@ -13,18 +13,19 @@ or written.
 
 import json
 import os
-import re
 import shutil
 from pathlib import Path
 
-from tools.install import card as cards, host, manifest, renamed
+from tools.common import hashing
+from tools.common.files import replacing
+from tools.install import card as cards, host, manifest, progress, renamed
 
 SII_DIR = cards.BOOT_ENTRY
 LEGACY = cards.BOOT_ENTRY + '/install'
 PAYLOAD = 'bootloader/payloads/install-ios.bin'
 MARKER = '.switch-ios-image'
 SHARED = (cards.INI, cards.ICON, PAYLOAD)
-PART = re.compile(r'([A-Z0-9]+)\.SII\.([0-9]{3})')
+PART = cards.INSTALL_PART
 COPY_CHUNK = 64 << 20
 
 
@@ -139,47 +140,65 @@ def copy_plan(out: Path, fat_root: Path, name: str) -> tuple[list[tuple[str, int
 
 
 def _copy_range(source: Path, target: Path, start: int, end: int) -> None:
-    whole = start == 0 and end == source.stat().st_size
-    partial = target.with_name('.switch-partial-' + target.name) if whole else target
-    with open(source, 'rb') as src, open(partial, 'wb' if whole else 'r+b') as dst:
+    if start == 0 and end == source.stat().st_size:
+        with replacing(target) as partial:
+            _copy_bytes(source, partial, start, end, 'wb')
+    else:
+        _copy_bytes(source, target, start, end, 'r+b')
+
+
+def _copy_bytes(source: Path, target: Path, start: int, end: int, mode: str) -> None:
+    with open(source, 'rb') as src, open(target, mode) as dst:
         src.seek(start)
         dst.seek(start)
         while start < end:
             data = src.read(min(COPY_CHUNK, end - start))
             dst.write(data)
             start += len(data)
+            progress.advance(len(data))
         dst.flush()
         os.fsync(dst.fileno())
-    if whole:
-        os.replace(partial, target)
 
 
 def merge(out: Path, fat_root: Path, names: list[str], log: host.Log) -> tuple[list[str], list[str]]:
     """Put images NAMES and the payload, ini and icon from `out` onto a mounted FAT; return (written, removed)."""
     out, fat_root = Path(out), Path(fat_root)
     written, removed = [], []
-    for name in names:
-        copies, stale = copy_plan(out, fat_root, name)
-        for relative in stale:
-            (fat_root / relative).unlink()
-            removed.append(relative)
-        for relative, start, end in copies:
-            (fat_root / relative).parent.mkdir(parents=True, exist_ok=True)
-            _copy_range(out / relative, fat_root / relative, start, end)
-            written.append(relative if end != manifest.BODY_OFFSET or start else relative + ' (head)')
-    if (fat_root / LEGACY).is_dir() and not any((fat_root / LEGACY).iterdir()):
-        (fat_root / LEGACY).rmdir()
-    for relative in SHARED:
-        source, target = out / relative, fat_root / relative
-        if source.is_file() and not (target.is_file() and cards.sha256_file(target) == cards.sha256_file(source)):
+    with progress.step('card: copying', copy_bytes(out, fat_root, names)):
+        for name in names:
+            copies, stale = copy_plan(out, fat_root, name)
+            for relative in stale:
+                (fat_root / relative).unlink()
+                removed.append(relative)
+            for relative, start, end in copies:
+                progress.note(relative)
+                (fat_root / relative).parent.mkdir(parents=True, exist_ok=True)
+                _copy_range(out / relative, fat_root / relative, start, end)
+                written.append(relative if end != manifest.BODY_OFFSET or start else relative + ' (head)')
+        for relative in shared_plan(out, fat_root):
+            progress.note(relative)
+            source, target = out / relative, fat_root / relative
             target.parent.mkdir(parents=True, exist_ok=True)
             _copy_range(source, target, 0, source.stat().st_size)
             written.append(relative)
+    if (fat_root / LEGACY).is_dir() and not any((fat_root / LEGACY).iterdir()):
+        (fat_root / LEGACY).rmdir()
     removed += renamed.remove_older_boot_entries(fat_root, cards.INI, cards.BOOT_ENTRY, False)
     host.run('sync')
     log(f'card: {len(written)} written, {len(removed)} removed: {", ".join(written + removed) or "nothing"}')
     return written, removed
 
 
+def shared_plan(out: Path, fat_root: Path) -> list[str]:
+    """Return the shared files (install-ios.bin, the ini, the icon) the FAT lacks or holds other bytes of."""
+    differ = []
+    for relative in SHARED:
+        source, target = Path(out) / relative, Path(fat_root) / relative
+        if source.is_file() and not (target.is_file() and hashing.sha256_file(target) == hashing.sha256_file(source)):
+            differ.append(relative)
+    return differ
+
+
 def copy_bytes(out: Path, fat_root: Path, names: list[str]) -> int:
-    return sum(end - start for name in names for _, start, end in copy_plan(out, fat_root, name)[0])
+    images = sum(end - start for name in names for _, start, end in copy_plan(out, fat_root, name)[0])
+    return images + sum((Path(out) / r).stat().st_size for r in shared_plan(out, fat_root))

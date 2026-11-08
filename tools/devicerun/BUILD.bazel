@@ -10,9 +10,12 @@ py_library(
     srcs = [
         "checks.py",
         "devicerun.py",
+        "hwtest.py",
         "morning.py",
+        "raw_stats.py",
         "reports.py",
         "rules.py",
+        "stutter.py",
     ],
     deps = ["//tools/frames:lib"],
 )
@@ -29,5 +32,30 @@ py_test(
     size = "small",
     srcs = ["devicerun_test.py"],
     data = glob(["test/**"]),
+    deps = [":lib"],
+)
+
+# hwtest.py's checks over synthetic app lines, and its TESTS against the app's own test IDs.
+py_test(
+    name = "hwtest_test",
+    size = "small",
+    srcs = ["hwtest_test.py"],
+    data = ["//hw_test_app:test_sources"],
+    deps = [":lib"],
+)
+
+# raw_stats.py's per-boot sum of the raw path's rates lines over synthetic lines.
+py_test(
+    name = "raw_stats_test",
+    size = "small",
+    srcs = ["raw_stats_test.py"],
+    deps = [":lib"],
+)
+
+# stutter.py's frame-pacing checks over lines in the kernel's formats.
+py_test(
+    name = "stutter_test",
+    size = "small",
+    srcs = ["stutter_test.py"],
     deps = [":lib"],
 )

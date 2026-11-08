@@ -927,6 +927,7 @@ _pmap_lookup_in_static_trust_cache
 _pmap_lookup_in_loaded_trust_caches
 _pmap_cs_configuration
 _port_name_to_task:_port_name_to_task_external
+_port_name_to_task_name
 _port_name_to_thread
 _post_sys_powersource
 _proc_best_name
@@ -1056,6 +1057,7 @@ _task_get_suspend_stats
 _task_set_cs_auxiliary_info
 _task_id_token_to_energy_id
 _task_is_driver
+_task_is_privileged
 _termioschars
 _thread_call_allocate_with_priority
 _thread_call_allocate_with_qos
@@ -1426,6 +1428,7 @@ _sbuf_overflowed
 _sbuf_putc
 _sbuf_printf
 _sbuf_vprintf
+_sysctl__security_children
 _sysctl__security_mac_children
 _mac_vnode_label_allocate
 _mac_vnode_label_get

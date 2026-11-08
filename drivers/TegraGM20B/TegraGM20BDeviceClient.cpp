@@ -1,8 +1,10 @@
 // SPDX-License-Identifier: MIT
 // IOGPU's device connection on AGXAccelerator: IOGPUDeviceCreate (IOGPU.framework) opens type 1 (API in the high half)
 // and QuartzCore's IOMFBDisplay::hint_agx_timing then gives the GPU each vsync's deadline through it
-// (IOGPUDeviceSetDisplayParams). It holds no GPU resources: IOGPUDeviceCreate's queries are answered empty (no shared
-// stamps, no trace ids, as a device with none) and the deadline is kept for the scheduler (tegra_gm20b_display_deadline).
+// (IOGPUDeviceSetDisplayParams: scalar method 0x21 on iOS 17, IOConnectTrap2 index 8 on iOS 27). It holds no GPU
+// resources: IOGPUDeviceCreate's queries are answered empty (no shared stamps, no trace ids, as a device with none) and
+// the deadline is kept for the scheduler (tegra_gm20b_display_deadline). XNU answers a trap index with no trap behind it
+// kIOReturnSuccess, so every other index is refused here, by name.
 #include <IOKit/IOUserClient.h>
 #include "../../kits/SwitchRefusal/SwitchRefusal.h"
 
@@ -16,6 +18,9 @@ enum : uint32_t {
 	kClientName = 6,        // 16 bytes in: the process's name
 	kSetDisplayParams = 0x21,
 };
+
+// IOGPUDeviceSetDisplayParams' trap: p1 the next vblank, p2 the frame interval
+constexpr UInt32 kSetDisplayParamsTrap = 8;
 
 // The latest deadline QuartzCore gave (a seqlock: odd while written): the next vblank and the frame interval in mach
 // absolute time units, as its vsync callback computes them.
@@ -36,8 +41,10 @@ void storeDeadline(uint64_t nextVblank, uint64_t interval)
 // The deadline QuartzCore last gave; false before the first.
 extern "C" bool tegra_gm20b_display_deadline(uint64_t *nextVblank, uint64_t *interval)
 {
-	uint32_t before, after;
-	uint64_t next, step;
+	uint32_t before = 0;
+	uint32_t after = 0;
+	uint64_t next = 0;
+	uint64_t step = 0;
 	do {
 		before = __atomic_load_n(&gDeadline.sequence, __ATOMIC_ACQUIRE);
 		next = gDeadline.nextVblank;
@@ -54,8 +61,10 @@ extern "C" bool tegra_gm20b_display_deadline(uint64_t *nextVblank, uint64_t *int
 	return true;
 }
 
+// NOLINTNEXTLINE(misc-use-internal-linkage): OSDefineMetaClassAndStructors needs the class's external linkage
 class TegraGM20BDeviceUserClient : public IOUserClient
 {
+	// NOLINTNEXTLINE(misc-explicit-constructor): IOKit's structors macro declares the metaclass constructor
 	OSDeclareDefaultStructors(TegraGM20BDeviceUserClient);
 
 public:
@@ -63,6 +72,12 @@ public:
 	IOReturn externalMethod(uint32_t selector, IOExternalMethodArguments *arguments,
 				IOExternalMethodDispatch *dispatch, OSObject *target,
 				void *reference) APPLE_KEXT_OVERRIDE;
+	IOExternalTrap *getTargetAndTrapForIndex(IOService **targetP,
+						 UInt32 index) APPLE_KEXT_OVERRIDE;
+
+private:
+	IOReturn setDisplayParams(void *nextVblank, void *interval, void *, void *, void *, void *);
+	IOReturn refuseTrap(void *, void *, void *, void *, void *, void *);
 };
 
 OSDefineMetaClassAndStructors(TegraGM20BDeviceUserClient, IOUserClient)
@@ -77,7 +92,7 @@ IOReturn TegraGM20BDeviceUserClient::externalMethod(uint32_t selector,
 						    IOExternalMethodArguments *arguments,
 						    IOExternalMethodDispatch *, OSObject *, void *)
 {
-	auto answerEmpty = [arguments](uint32_t size) {
+	const auto answerEmpty = [arguments](uint32_t size) {
 		if (arguments->structureOutputDescriptor || arguments->structureOutputSize < size ||
 		    !arguments->structureOutput)
 			return kIOReturnBadArgument;
@@ -107,6 +122,35 @@ IOReturn TegraGM20BDeviceUserClient::externalMethod(uint32_t selector,
 				 selector);
 		return kIOReturnUnsupported;
 	}
+}
+
+// NOLINTNEXTLINE(readability-convert-member-functions-to-static): an IOTrap is an IOService member function
+IOReturn TegraGM20BDeviceUserClient::setDisplayParams(void *nextVblank, void *interval, void *,
+						      void *, void *, void *)
+{
+	storeDeadline(reinterpret_cast<uint64_t>(nextVblank), reinterpret_cast<uint64_t>(interval));
+	return kIOReturnSuccess;
+}
+
+// NOLINTNEXTLINE(readability-convert-member-functions-to-static): an IOTrap is an IOService member function
+IOReturn TegraGM20BDeviceUserClient::refuseTrap(void *, void *, void *, void *, void *, void *)
+{
+	return kIOReturnUnsupported;
+}
+
+IOExternalTrap *TegraGM20BDeviceUserClient::getTargetAndTrapForIndex(IOService **targetP,
+								     UInt32 index)
+{
+	static IOExternalTrap displayParams = {
+		nullptr, static_cast<IOTrap>(&TegraGM20BDeviceUserClient::setDisplayParams)};
+	static IOExternalTrap refused = {
+		nullptr, static_cast<IOTrap>(&TegraGM20BDeviceUserClient::refuseTrap)};
+	*targetP = this;
+	if (index == kSetDisplayParamsTrap)
+		return &displayParams;
+	switch_refusal_k(switch_refusal_key_with(switch_refusal_key("iogpu", "device-trap"), index),
+			 "iogpu", "device-trap", "IOGPU device trap %u refused", index);
+	return &refused;
 }
 
 // Called by tegra_gm20b_new_user_client for IOGPU's device type.

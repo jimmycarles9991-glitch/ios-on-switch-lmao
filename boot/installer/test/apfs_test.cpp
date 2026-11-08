@@ -253,6 +253,7 @@ TEST(Fit, CutsChunksChunkInfoBlocksAndThePool)
     EXPECT_EQ(get(sm, 2568 + 2 * 8, 8), 0u);
     EXPECT_EQ(get(sm, 152, 8), 3u * (5 + 2));
     EXPECT_EQ(get(sm, 224, 2), 1u);
+    EXPECT_EQ(get(sm, 264, 2), 30u);
     uint64_t released = kPoolBlocks - 3 * (5 + 2);
     EXPECT_EQ(get(sm, 72, 8), free_before - (kBlocks - target) + released);
     const Block &cib1 = c.at(kPool + 1);
@@ -317,6 +318,31 @@ TEST(Fit, AChunkWithABitmapPastTheCutRaisesTheMinimum)
     auto before = c.blocks;
     EXPECT_NE(c.fit(4 * kChunk + 1000), 0);
     EXPECT_EQ(c.blocks, before);
+}
+
+// What newfs_apfs on macOS 27 writes at each size (measured), and the rule's own steps around them.
+TEST(QueueLimits, MainQueueSteps)
+{
+    const std::pair<uint64_t, uint16_t> sizes[] = {
+        {4000, 1},      {4544, 1},      {4545, 3},      {9088, 3},        {13632, 3},    {13633, 4},
+        {16384, 4},     {32768, 8},     {65536, 15},    {131776, 29},     {131777, 30},  {261888, 58},
+        {262143, 58},   {262144, 116},  {262400, 116},  {393216, 174},    {524288, 231}, {786432, 347},
+        {1048575, 462}, {1048576, 512}, {4194304, 512}, {268435456, 512},
+    };
+    for (auto [blocks, limit] : sizes) {
+        EXPECT_EQ(switch_apfs_main_queue_limit(blocks), limit) << blocks << " blocks";
+    }
+}
+
+TEST(QueueLimits, PoolQueueSteps)
+{
+    const std::pair<uint64_t, uint16_t> pools[] = {
+        {6, 1},    {777, 1},  {1131, 1}, {1134, 1}, {1136, 1}, {1137, 3}, {1551, 3}, {2253, 3},
+        {3099, 3}, {3408, 3}, {3409, 4}, {3411, 4}, {4536, 4}, {4560, 5}, {6195, 6}, {24774, 22},
+    };
+    for (auto [pool, limit] : pools) {
+        EXPECT_EQ(switch_apfs_pool_queue_limit(pool), limit) << pool << " pool blocks";
+    }
 }
 
 }  // namespace

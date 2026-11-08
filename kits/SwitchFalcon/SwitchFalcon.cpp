@@ -30,7 +30,7 @@ switch_falcon_result switch_falcon_load(volatile uint8_t *engine, uint64_t firmw
     if (!switch_mmio_wait32(engine, SWITCH_FALCON_DMACTL, kDmactlScrubbing, 0, kScrubUs))
         return SWITCH_FALCON_SCRUBBING;
     switch_mmio_write32(engine, SWITCH_FALCON_DMACTL, 0);
-    switch_mmio_write32(engine, SWITCH_FALCON_DMATRFBASE, (uint32_t)((firmware_pa + image->bin_data) >> 8));
+    switch_mmio_write32(engine, SWITCH_FALCON_DMATRFBASE, static_cast<uint32_t>((firmware_pa + image->bin_data) >> 8));
     bool queued = true;
     for (uint32_t offset = 0; queued && offset < image->data_size; offset += kChunk)
         queued = queue(engine, image->data + offset, offset, false);
@@ -50,7 +50,7 @@ void switch_falcon_start(volatile uint8_t *engine)
     switch_mmio_write32(engine, SWITCH_FALCON_CPUCTL, kCpuctlStart);
 }
 
-const char *switch_falcon_state(volatile uint8_t *engine, char *text, size_t size)
+const char *switch_falcon_state(const volatile uint8_t *engine, char *text, size_t size)
 {
     snprintf(text, size, "falcon CPUCTL %#x IDLESTATE %#x IRQSTAT %#x MAILBOX0 %#x DEBUGINFO %#x",
              switch_mmio_read32(engine, SWITCH_FALCON_CPUCTL), switch_mmio_read32(engine, SWITCH_FALCON_IDLESTATE),

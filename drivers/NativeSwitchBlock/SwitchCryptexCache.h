@@ -25,7 +25,7 @@ constexpr uint32_t kSwitchWindowBytes = kSwitchWindowBlocks * kSwitchCacheBlock;
 constexpr uint32_t kSwitchSpanWindows = 9;                        // windows a request of up to 1 MiB can touch
 constexpr uint32_t kSwitchWindowReads = kSwitchWindowBlocks / 2;  // most separate reads one window can need
 constexpr uint32_t kSwitchAroundWindows = 2;  // windows a read-around request may touch (at most 16 blocks)
-constexpr uint64_t kSwitchNoTag = ~0ull;
+constexpr uint64_t kSwitchNoTag = ~0ULL;
 
 struct SwitchCacheRequest;
 
@@ -141,20 +141,23 @@ public:
         if (!blocks || first >= imageBlocks || blocks > imageBlocks - first)
             return refuse(r, 0);
         const uint64_t firstTag = first - first % kSwitchWindowBlocks;
-        const uint64_t last = first + blocks - 1, lastTag = last - last % kSwitchWindowBlocks;
+        const uint64_t last = first + blocks - 1;
+        const uint64_t lastTag = last - last % kSwitchWindowBlocks;
         const uint32_t n = static_cast<uint32_t>((lastTag - firstTag) / kSwitchWindowBlocks + 1);
         if (n > kSwitchSpanWindows ||
             (mode == kReadAround && (n > kSwitchAroundWindows || capacity < n * kSwitchWindowReads)))
             return refuse(r, 0);
         for (uint32_t i = 0; i < n; ++i) {
-            const uint64_t tag = firstTag + uint64_t(i) * kSwitchWindowBlocks;
-            const uint64_t from = first > tag ? first : tag,
-                           to = first + blocks < tag + kSwitchWindowBlocks ? first + blocks : tag + kSwitchWindowBlocks;
-            const uint32_t need = switchWindowMask(uint32_t(from - tag), uint32_t(to - tag));
+            const uint64_t tag = firstTag + static_cast<uint64_t>(i) * kSwitchWindowBlocks;
+            const uint64_t from = first > tag ? first : tag;
+            const uint64_t to = first + blocks < tag + kSwitchWindowBlocks ? first + blocks : tag + kSwitchWindowBlocks;
+            const uint32_t need = switchWindowMask(static_cast<uint32_t>(from - tag), static_cast<uint32_t>(to - tag));
             SwitchWindow *w = lookup(image, tag);
             if (mode == kCoveredOnly && (!w || (need & ~(w->valid | w->reading))))
                 return refuse(r, i);
-            if (!w && !(w = take(image, tag)))
+            if (!w)
+                w = take(image, tag);
+            if (!w)
                 return refuse(r, i);
             pin(w);
             r->window[i] = w;
@@ -196,14 +199,17 @@ public:
         const uint64_t tag = first - first % kSwitchWindowBlocks;
         const uint64_t end = first + blocks < tag + kSwitchWindowBlocks ? first + blocks : tag + kSwitchWindowBlocks;
         SwitchWindow *w = lookup(image, tag);
-        if (!w && !(w = take(image, tag)))
+        if (!w)
+            w = take(image, tag);
+        if (!w)
             return 0;
-        const uint32_t want = switchWindowMask(uint32_t(first - tag), uint32_t(end - tag)) & ~(w->valid | w->reading);
+        const uint32_t want = switchWindowMask(static_cast<uint32_t>(first - tag), static_cast<uint32_t>(end - tag)) &
+                              ~(w->valid | w->reading);
         if (w->idle && want)
             unlinkIdle(w);  // reading from here on: not reusable until the reads finish
         *count = emit(w, want, true, reads);
         makeIdleIfUnused(w);  // (a window taken for nothing goes straight back)
-        return uint32_t(end - first);
+        return static_cast<uint32_t>(end - first);
     }
 
     // A read from emit() has finished (ok: the blocks hold the image's bytes). Returns the requests it made ready (linked
@@ -221,13 +227,13 @@ public:
         SwitchCacheRequest *ready = nullptr;
         for (SwitchWait **link = &w->waits; *link;) {
             SwitchWait *wait = *link;
-            bool done;
+            bool done = false;
             if (!ok && (wait->need & m)) {
                 wait->request->failed = true;
                 done = true;
             } else {
                 wait->need &= ~w->valid;
-                done = !wait->need;
+                done = (wait->need == 0u);
             }
             if (!done) {
                 link = &wait->next;
@@ -287,7 +293,8 @@ public:
     // The invariants, or nullptr (for the tests).
     const char *check() const
     {
-        uint32_t idle = 0, live = 0;
+        uint32_t idle = 0;
+        uint32_t live = 0;
         for (const SwitchWindow *w = oldest, *prev = nullptr; w; prev = w, w = w->newer) {
             if (!w->idle || w->older != prev)
                 return "idle list broken";
@@ -324,13 +331,15 @@ public:
         }
         if (live != liveCount)
             return "live count";
-        for (uint32_t b = 0; b <= mask; ++b)
-            for (const SwitchWindow *w = table[b]; w; w = w->chain)
+        for (uint32_t b = 0; b <= mask; ++b) {
+            for (const SwitchWindow *w = table[b]; w; w = w->chain) {
                 if (w->retired || w->tag == kSwitchNoTag || bucket(w->image, w->tag) != b)
                     return "hash chain";
+            }
+        }
         uint32_t idleFlags = 0;
         for (uint32_t i = 0; i < allCount; ++i)
-            idleFlags += all[i].idle;
+            idleFlags += static_cast<uint32_t>(all[i].idle);
         return idleFlags == idle ? nullptr : "idle flags";
     }
 
@@ -341,32 +350,35 @@ private:
 
     uint32_t bucket(uint8_t image, uint64_t tag) const
     {
-        uint64_t h = (tag / kSwitchWindowBlocks) * 0x9e3779b97f4a7c15ull ^ (uint64_t(image) << 61);
+        const uint64_t h = (tag / kSwitchWindowBlocks) * 0x9e3779b97f4a7c15ULL ^ (static_cast<uint64_t>(image) << 61);
         return static_cast<uint32_t>(h >> 32) & mask;
     }
 
     SwitchWindow *lookup(uint8_t image, uint64_t tag) const
     {
-        for (SwitchWindow *w = table[bucket(image, tag)]; w; w = w->chain)
+        for (SwitchWindow *w = table[bucket(image, tag)]; w; w = w->chain) {
             if (w->tag == tag && w->image == image)
                 return w;
+        }
         return nullptr;
     }
 
     void unhash(SwitchWindow *w)
     {
-        for (SwitchWindow **link = &table[bucket(w->image, w->tag)]; *link; link = &(*link)->chain)
+        for (SwitchWindow **link = &table[bucket(w->image, w->tag)]; *link; link = &(*link)->chain) {
             if (*link == w) {
                 *link = w->chain;
                 break;
             }
+        }
         w->chain = nullptr;
     }
 
     // The window's blocks inside an image of imageBlocks blocks.
     static uint32_t within(uint64_t tag, uint64_t imageBlocks)
     {
-        return imageBlocks - tag >= kSwitchWindowBlocks ? ~0u : switchWindowMask(0, uint32_t(imageBlocks - tag));
+        return imageBlocks - tag >= kSwitchWindowBlocks ? ~0u
+                                                        : switchWindowMask(0, static_cast<uint32_t>(imageBlocks - tag));
     }
 
     void linkIdle(SwitchWindow *w, bool cold)
@@ -404,7 +416,7 @@ private:
     {
         if (w->users || w->reading || w->idle || w->retired)
             return;
-        linkIdle(w, !(w->valid & ~w->served));
+        linkIdle(w, (w->valid & ~w->served) == 0u);
     }
 
     void pin(SwitchWindow *w)

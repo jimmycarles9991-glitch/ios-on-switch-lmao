@@ -31,5 +31,6 @@ kernel_driver(
     name = "TegraGPIO",
     hdr_deps = [
         "drivers/ArmGIC",
+        "kits/SwitchMMIO",
     ],
 )

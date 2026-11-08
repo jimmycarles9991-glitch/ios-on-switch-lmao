@@ -2,6 +2,7 @@
 
 load("@bazel_skylib//rules:common_settings.bzl", "BuildSettingInfo")
 load("//bazel:profile.bzl", "switch_debug_define")
+load("//translate/arm64e:target.bzl", "a64x_target_linkopts")
 load(":common.bzl", "KERNEL_TOOL_ATTRS", "PY_TOOLCHAIN", "run_tool", "setting")
 
 def _ios_binary_impl(ctx):
@@ -30,6 +31,7 @@ def _ios_binary_impl(ctx):
     args += ["--", switch_debug_define(ctx)]
     for flag in ctx.attr.copts:
         args.append(flag.replace("{tree}", ctx.label.package))
+    args += ctx.attr.linkopts
     args += [f.path for f in ctx.files.srcs]
     run_tool(
         ctx,
@@ -42,7 +44,7 @@ def _ios_binary_impl(ctx):
     )
     return [DefaultInfo(files = depset([out]))]
 
-ios_binary = rule(
+_ios_binary = rule(
     implementation = _ios_binary_impl,
     doc = "An ad hoc signed arm64 iOS 17 binary (the overlay's tools, plug-ins and decoders).",
     attrs = dict(KERNEL_TOOL_ATTRS, **{
@@ -50,6 +52,7 @@ ios_binary = rule(
         "srcs": attr.label_list(allow_files = True, mandatory = True),
         "hdrs": attr.label_list(allow_files = True),
         "copts": attr.string_list(),
+        "linkopts": attr.string_list(),
         "coreaudio_headers": attr.bool(),
         "sign_identifier": attr.string(),
         "entitlements": attr.label(allow_single_file = True),
@@ -58,3 +61,12 @@ ios_binary = rule(
     }),
     toolchains = [PY_TOOLCHAIN],
 )
+
+def ios_binary(name, **kwargs):
+    """An ad hoc signed arm64 iOS binary, marked as built for this core where the kernel reads the marker.
+
+    Args:
+        name: the target's name.
+        **kwargs: _ios_binary's attributes.
+    """
+    _ios_binary(name = name, linkopts = a64x_target_linkopts(), **kwargs)

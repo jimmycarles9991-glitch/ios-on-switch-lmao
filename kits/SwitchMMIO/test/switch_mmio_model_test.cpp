@@ -1,5 +1,6 @@
 // SwitchMMIO.h and SwitchMMIOKernel.h against a register model and a clock that ticks once per look.
 #include "kits/SwitchMMIO/SwitchMMIOKernel.h"
+#include "kits/SwitchMMIO/SwitchMMIOWords.h"
 
 #include <gtest/gtest.h>
 
@@ -44,6 +45,41 @@ TEST_F(SwitchMMIO, ReadWriteAndModify)
     EXPECT_EQ(gRegisters[at(0x10)], 0xf0f0f003u);
     switch_mmio_write32_publish(base(), 0x14, 7);
     EXPECT_EQ(gWrites.back(), std::make_pair(at(0x14), 7u));
+}
+
+TEST_F(SwitchMMIO, FlushedWriteIsReadBack)
+{
+    std::vector<uintptr_t> reads;
+    gOnRead = [&](uintptr_t address, uint32_t value) {
+        reads.push_back(address);
+        EXPECT_EQ(gWrites.size(), 1u);
+        return value;
+    };
+    switch_mmio_write32_flush(base(), 0x18, 0x55);
+    EXPECT_EQ(gWrites.back(), std::make_pair(at(0x18), 0x55u));
+    EXPECT_EQ(reads, std::vector<uintptr_t>{at(0x18)});
+}
+
+// The display's register blocks, numbered in words: each index is a read or a write of that word, nothing cached.
+TEST_F(SwitchMMIO, WordBlocksReadAndWriteTheWord)
+{
+    const SwitchMMIOWords regs(base());
+    regs[0x10] = 0x0f;
+    EXPECT_EQ(gWrites.back(), std::make_pair(at(0x40), 0x0fu));
+    regs[0x10] |= 0x30;
+    EXPECT_EQ(gRegisters[at(0x40)], 0x3fu);
+    regs[0x10] &= ~0x01u;
+    EXPECT_EQ(gRegisters[at(0x40)], 0x3eu);
+    regs[0x11] = regs[0x10];
+    EXPECT_EQ(gRegisters[at(0x44)], 0x3eu);
+    gRegisters[at(0x48)] = 7;
+    const uint32_t value = regs[0x12];
+    EXPECT_EQ(value, 7u);
+    const SwitchMMIOWords window = regs + 0x10;
+    window[2] = 9;
+    EXPECT_EQ(gRegisters[at(0x48)], 9u);
+    EXPECT_TRUE(static_cast<bool>(regs));
+    EXPECT_FALSE(static_cast<bool>(SwitchMMIOWords()));
 }
 
 TEST_F(SwitchMMIO, FieldMacros)

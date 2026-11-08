@@ -459,13 +459,14 @@ build_cbuf_map(nir_shader *nir, struct lower_descriptors_ctx *ctx)
           cbufs[i].key.type == NVK_CBUF_TYPE_UBO_DESC)
          continue;
 
-      /* Prior to Turing, indirect cbufs require splitting the pushbuf and
-       * pushing bits of the descriptor set.  Doing this every draw call is
-       * probably more overhead than it's worth.
+      /* ios-on-switch-lmao: prior to Turing, an indirect cbuf is bound by
+       * splitting the pushbuf to push the descriptor from memory into
+       * NVK_MME_BIND_CBUF_DESC (nvk_cmd_flush_gfx_cbufs), and a push
+       * descriptor set's from the CPU. Upstream skips them as more overhead
+       * than they are worth; on GM20B every load of an unpromoted UBO is a
+       * bounds-checked 64-bit global load with a branch around it, which costs
+       * far more per pixel than a split per draw.
        */
-      if (ctx->dev_info->cls_eng3d < TURING_A &&
-          cbufs[i].key.type == NVK_CBUF_TYPE_UBO_DESC)
-         continue;
 
       ctx->cbuf_map->cbufs[ctx->cbuf_map->cbuf_count++] = cbufs[i].key;
    }

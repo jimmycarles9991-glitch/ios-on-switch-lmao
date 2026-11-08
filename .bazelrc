@@ -41,6 +41,10 @@ build --spawn_strategy=sandboxed
 # every other Rust action (and every action of release) stays sandboxed.
 build:debug --strategy=Rustc=sandboxed,local
 build:debug --strategy=RustcMetadata=sandboxed,local
+# The other exception: iOS 27's translation attaches and mounts disk images (hdiutil, diskutil), which no sandbox
+# allows, so its two actions (install/translated.bzl) run here.
+build --strategy=Pretranslate=local
+build --strategy=TranslatedCryptex=local
 # No network inside actions (repository rules fetch; actions never do).
 build --sandbox_default_allow_network=false
 # Reuse sandbox directory trees between actions: faster sandbox setup, the same isolation.
@@ -68,6 +72,15 @@ common --noexperimental_check_output_files
 # xcrun shim) only to re-exec the hermetic interpreter, ~0.08 s of every Python tool action (six on a driver edit's
 # path); the script starts the hermetic interpreter at once. The same interpreter, venv and program.
 common --@rules_python//python/config_settings:bootstrap_impl=script
+
+# hw_test_app (debug images) is signed ad hoc, like the overlay's other user-space code: the boot package's trust cache
+# holds its CDHashes. With this identity rules_apple signs without the stand-in profile it requires for device builds.
+build --@rules_apple//apple/build_settings:signing_certificate_name=-
+# The app is for the device: rules_apple otherwise builds an Apple silicon host's iOS targets for the simulator.
+build --ios_multi_cpus=arm64
+# rules_apple tags its bundling, signing and profile-reading actions no-sandbox, for codesign's keychain lookups. An ad
+# hoc identity and an XML profile need neither the keychain nor anything undeclared, so they run sandboxed like the rest.
+build --modify_execution_info=^(BundleApp|BundleTreeApp|ProcessAndSign|SignBinary|ExtractFromProvisioningProfile)$=-no-sandbox
 
 # --- Output ------------------------------------------------------------------------------------------------------
 build --show_result=30

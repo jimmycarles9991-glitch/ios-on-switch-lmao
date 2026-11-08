@@ -29,8 +29,14 @@ py_library(
     name = tool,
     srcs = [tool + ".py"],
     deps = [":common"] + {
-        "corecrypto": [":kernel_names"],
-        "libpthread": [":kernel_names"],
+        "corecrypto": [
+            ":kernel_names",
+            "//tools/common:macho",
+        ],
+        "libpthread": [
+            ":kernel_names",
+            "//tools/common:macho",
+        ],
         "trust_bundle": [":im4p_lib"],
     }.get(tool, []),
 ) for tool in KERNEL_TOOLS]

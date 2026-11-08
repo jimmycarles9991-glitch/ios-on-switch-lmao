@@ -2,6 +2,7 @@ load("@bazel_skylib//lib:selects.bzl", "selects")
 load("@bazel_skylib//rules:common_settings.bzl", "bool_flag", "string_flag")
 load("@rules_cc//cc:cc_library.bzl", "cc_library")
 load("//bazel/lint:defs.bzl", "lint_files")
+load("//ipsw:ipsw.bzl", "ipsw_volumes_header")
 # The kernel: which XNU it is built from, and (from the layout move on) the kernelcache's archives, link and prelink.
 
 load("//kernel:prelink.bzl", "kernel_prelink_switch")
@@ -88,20 +89,14 @@ filegroup(
         "//drivers/ArmCpu:all_files",
         "//drivers/ArmDTPlatform:all_files",
         "//drivers/ArmGIC:all_files",
-        "//drivers/ArmVirtPlatform:all_files",
         "//drivers/SwitchAccelStub:all_files",
         "//drivers/NativeAES:all_files",
-        "//drivers/NativeAdreno:all_files",
-        "//drivers/NativeGeniSpi:all_files",
         "//drivers/NativeHidInput:all_files",
         "//drivers/NativeSwitchBlock:all_files",
         "//drivers/NativeSwitchWatchdog:all_files",
         "//drivers/NativeKeyStoreEvents:all_files",
         "//drivers/NativeMobileDisplay:all_files",
         "//drivers/NativeRamBlock:all_files",
-        "//drivers/NativeUfs:all_files",
-        "//drivers/NativeVirtioBlock:all_files",
-        "//drivers/NativeVirtioConsole:all_files",
         "//drivers/SwitchAudio:all_files",
         "//drivers/SwitchBattery:all_files",
         "//drivers/SwitchBluetooth:all_files",
@@ -141,8 +136,10 @@ filegroup(
         "//kits/SwitchCAR:all_files",
         "//kits/SwitchCRC:all_files",
         "//kits/SwitchDMA:all_files",
+        "//kits/SwitchDT:all_files",
         "//kits/SwitchFalcon:all_files",
         "//kits/SwitchIdle:all_files",
+        "//kits/SwitchLinux:all_files",
         "//kits/SwitchMMIO:all_files",
         "//kits/SwitchMath:all_files",
         "//kits/SwitchRefusal:all_files",
@@ -200,6 +197,11 @@ outer_headers(
     srcs = [":native_data_seed_header"],
 )
 
+outer_headers(
+    name = "gen_ipsw_volumes",
+    srcs = [":ipsw_volumes_header"],
+)
+
 # --- Generated and pinned inputs, where the CMake flow's -I flags expected them (tree/build/<dir>) -----------------
 tool_output(
     name = "storage_abi",
@@ -212,6 +214,12 @@ tool_output(
     message = "IOStorageFamily-315 headers (storage-abi)",
     out_dirs = ["build/storage-abi/include"],
     tool = "storage_abi.py",
+)
+
+# The selected IPSW kind's System volume and cryptexes, for the drivers that find and mount them (BLOCK_FLAGS).
+ipsw_volumes_header(
+    name = "ipsw_volumes_header",
+    out = "build/ipsw-volumes/switch_ipsw_volumes.h",
 )
 
 # NativeRamBlock's seed pins: a pure function of the pinned seed and its volume UUID (XNU_OWNER_DATA_VOLUME_UUID).
@@ -356,6 +364,7 @@ kernel_archive(
         "//kits/SwitchCAR:SwitchCAR",
         "//kits/SwitchDMA:SwitchDMA",
         "//kits/SwitchFalcon:SwitchFalcon",
+        "//kits/SwitchLinux:SwitchLinux",
         "//kits/SwitchScratch:SwitchScratch",
     ] + select({
         "//drivers/SwitchDisplayPort:on": ["//drivers/SwitchDisplayPort:SwitchDisplayPort"],
@@ -496,7 +505,10 @@ xnu_kernel(
 xnu_kernel_12377(
     name = "kernel_unprelinked_12377",
     out = "build/xnu-12377/mach.development.bcm2837.unstripped.noctf",
-    extra_exports = ["prelink.exports"],
+    extra_exports = [
+        "prelink.exports",
+        "prelink26.exports",
+    ],
     inputs = [
         ":corecrypto",
         ":libArmDTPlatform",
@@ -538,6 +550,8 @@ kernel_prelink_fileset(
     name = "kernel_12377",
     out = "build/xnu-12377/kernel.macho",
     kernel = ":kernel_unprelinked_12377",
+    # 24B119's kernel is Darwin 27.2.
+    signatures = "@symbolicator//:kernel_27_2",
     slide = "-0x4088000",
     symbolsets = "//kernel/xnu-12377.121.6/config:symbolsets_plist",
 )

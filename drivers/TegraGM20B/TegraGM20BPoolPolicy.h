@@ -30,9 +30,10 @@ struct Limits {
 inline const char *refusal(uint64_t bytes, uint64_t held, uint64_t avail, const Limits &l,
 			   bool compositor = false)
 {
-	if (avail < bytes + l.floorBytes)
+	if (avail < bytes + l.floorBytes) {
 		return compositor ? "the pool's last 16 MiB stay for nvkm"
 				  : "the pool's last 16 MiB stay for the compositor and nvkm";
+	}
 	if (compositor)
 		return nullptr;
 	if (bytes <= l.smallBytes)

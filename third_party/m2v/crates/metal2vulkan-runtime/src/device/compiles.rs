@@ -220,7 +220,7 @@ pub(super) fn held(sink: &MessageSink, message: &DebugMessage) -> bool {
 
 /// `call`, with this thread holding the sink messages the driver raises in it ([`held`]): its
 /// result, and the messages in the order raised.
-fn holding<R>(call: impl FnOnce() -> R) -> (R, Vec<(MessageSink, DebugMessage)>) {
+pub(super) fn holding<R>(call: impl FnOnce() -> R) -> (R, Vec<(MessageSink, DebugMessage)>) {
     /// Stops holding however `call` ends.
     struct Clear;
     impl Drop for Clear {

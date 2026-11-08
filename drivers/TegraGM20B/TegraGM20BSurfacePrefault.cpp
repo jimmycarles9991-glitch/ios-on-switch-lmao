@@ -26,10 +26,10 @@ namespace
 {
 using RootClient = OriginalIOSurfaceRootUserClient;
 constexpr TegraGM20BSurfaceCreateAbi kCreateAbi = {
-	{uint32_t(RootClient::createSurfaceSelector),
-	 uint32_t(RootClient::createSurfaceFastPathSelector),
-	 uint32_t(RootClient::createSurfaceClientMemorySelector), ~0u},
-	uint32_t(RootClient::createOutputSurfaceID)};
+	{static_cast<uint32_t>(RootClient::createSurfaceSelector),
+	 static_cast<uint32_t>(RootClient::createSurfaceFastPathSelector),
+	 static_cast<uint32_t>(RootClient::createSurfaceClientMemorySelector), ~0u},
+	static_cast<uint32_t>(RootClient::createOutputSurfaceID)};
 constexpr uint32_t kQueued =
 	16;  // creates waiting for the thread call; past it a create is left to fault lazily
 
@@ -74,7 +74,7 @@ Prefault *prefault()
 	return fresh;
 }
 
-void faultIn(Prefault *p, const Created &c)
+void faultIn(const Prefault *p, const Created &c)
 {
 	OSObject *surface = tgm_surface_lookup(c.id, c.task);
 	if (!surface)
@@ -86,6 +86,7 @@ void faultIn(Prefault *p, const Created &c)
 		if (memory && memory->prepare(kIODirectionInOut) == kIOReturnSuccess)
 			memory->complete(kIODirectionInOut);
 	}
+	// NOLINTNEXTLINE(clang-analyzer-osx.cocoa.RetainCount): tgm_surface_lookup returns it retained
 	surface->release();
 }
 

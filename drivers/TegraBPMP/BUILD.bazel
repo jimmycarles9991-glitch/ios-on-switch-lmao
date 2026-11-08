@@ -69,6 +69,8 @@ kernel_driver(
     hdr_deps = [
         "drivers/ArmGIC",
         "drivers/TegraI2C",
+        "kits/SwitchLinux",
+        "kits/SwitchMMIO",
     ],
     object_names = "path",
     object_prefix = "tegra-bpmp_",

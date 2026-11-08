@@ -14,7 +14,7 @@ struct SwitchExtent {
         length;  // bytes; disk is kSwitchHole for a range the file does not store (it reads as zeros)
 };
 
-constexpr uint64_t kSwitchHole = ~0ull;
+constexpr uint64_t kSwitchHole = ~0ULL;
 
 // Appends an extent, merged into the last one when it continues it in the image and on the card (or both are holes).
 // False when full.
@@ -42,19 +42,21 @@ inline bool switchExtentsCover(const SwitchExtent *map, uint32_t count, uint64_t
             return false;
         at += map[i].length;
     }
-    return count && at == bytes;
+    return (count != 0u) && at == bytes;
 }
 
 // The extent holding image offset `offset` (the last one that begins at or before it).
 inline uint32_t switchExtentAt(const SwitchExtent *map, uint32_t count, uint64_t offset)
 {
-    uint32_t lo = 0, hi = count;
+    uint32_t lo = 0;
+    uint32_t hi = count;
     while (hi - lo > 1) {
         const uint32_t mid = lo + (hi - lo) / 2;
-        if (map[mid].file <= offset)
+        if (map[mid].file <= offset) {
             lo = mid;
-        else
+        } else {
             hi = mid;
+        }
     }
     return lo;
 }
@@ -109,10 +111,12 @@ struct SwitchPageIn {
 inline bool switchRunPageIn(const SwitchRun &run, uint64_t listPage, uint64_t vmPage, uint64_t fileBytes,
                             SwitchPageIn *out)
 {
-    const uint64_t first = uint64_t(run.page) * listPage, mask = vmPage - 1;
+    const uint64_t first = static_cast<uint64_t>(run.page) * listPage;
+    const uint64_t mask = vmPage - 1;
     if (first >= fileBytes)
         return false;
-    const uint64_t eof = (fileBytes + mask) & ~mask, end = (first + uint64_t(run.pages) * listPage + mask) & ~mask;
+    const uint64_t eof = (fileBytes + mask) & ~mask;
+    const uint64_t end = (first + static_cast<uint64_t>(run.pages) * listPage + mask) & ~mask;
     out->offset = first & ~mask;
     out->length = (end < eof ? end : eof) - out->offset;
     return true;
@@ -121,7 +125,7 @@ inline bool switchRunPageIn(const SwitchRun &run, uint64_t listPage, uint64_t vm
 // Enough runs for any merge of n ranges holding `pages` pages in all.
 inline uint64_t switchRunCapacity(uint32_t n, uint64_t pages, uint32_t maxRun, uint32_t maxGap)
 {
-    return n + (pages + uint64_t(n) * maxGap) / maxRun + 1;
+    return n + (pages + static_cast<uint64_t>(n) * maxGap) / maxRun + 1;
 }
 
 // Ranges sorted by (index, fileId, first) to runs: each file's ranges joined through gaps of at most maxGap pages, cut
@@ -148,7 +152,8 @@ inline uint32_t switchMergeRuns(const SwitchRange *ranges, uint32_t n, SwitchRun
         }
         for (uint32_t page = r.first; page < end && count < capacity; page += maxRun) {
             const uint32_t pages = end - page < maxRun ? end - page : maxRun;
-            runs[count++] = {r.fileId, page, uint16_t(pages), uint8_t(when < 255 ? when : 255), r.index};
+            runs[count++] = {r.fileId, page, static_cast<uint16_t>(pages),
+                             static_cast<uint8_t>(when < 255 ? when : 255), r.index};
         }
     }
     return count;
@@ -163,7 +168,7 @@ inline int switchCompareRuns(const SwitchRun &x, const SwitchRun &y)
         return x.index < y.index ? -1 : 1;
     if (x.fileId != y.fileId)
         return x.fileId < y.fileId ? -1 : 1;
-    return x.page < y.page ? -1 : x.page > y.page;
+    return x.page < y.page ? -1 : static_cast<int>(x.page > y.page);
 }
 
 inline int switchCompareRanges(const SwitchRange &x, const SwitchRange &y)
@@ -172,7 +177,7 @@ inline int switchCompareRanges(const SwitchRange &x, const SwitchRange &y)
         return x.index < y.index ? -1 : 1;
     if (x.fileId != y.fileId)
         return x.fileId < y.fileId ? -1 : 1;
-    return x.first < y.first ? -1 : x.first > y.first;
+    return x.first < y.first ? -1 : static_cast<int>(x.first > y.first);
 }
 
 // The prefetch list file: this header, then `runs` SwitchRun. This layout is format SWCHPF02, frozen by
@@ -200,9 +205,9 @@ constexpr uint32_t kSwitchListVersion = 2;
 
 inline uint64_t switchFnv(const uint8_t *p, uint64_t n)
 {
-    uint64_t h = 0xcbf29ce484222325ull;
+    uint64_t h = 0xcbf29ce484222325ULL;
     for (uint64_t i = 0; i < n; ++i)
-        h = (h ^ p[i]) * 0x100000001b3ull;
+        h = (h ^ p[i]) * 0x100000001b3ULL;
     return h;
 }
 
@@ -225,7 +230,7 @@ struct SwitchReplayResult {
     uint32_t missingFiles;
 };
 
-constexpr uint64_t kSwitchStaleForegroundBytes = 64ull << 20;
+constexpr uint64_t kSwitchStaleForegroundBytes = 64ULL << 20;
 
 // Why the next boot records afresh, or nullptr to keep replaying the list.
 inline const char *switchListStale(const SwitchReplayResult &r, uint64_t capPages, uint64_t pageBytes)
@@ -242,15 +247,17 @@ inline const char *switchListStale(const SwitchReplayResult &r, uint64_t capPage
 // Whether a saved header is a list this build replays for these images (at most maxRuns runs), or why not.
 inline const char *switchListRefusal(const SwitchListHeader &saved, const SwitchImageKey (&images)[2], uint32_t maxRuns)
 {
-    for (unsigned i = 0; i < sizeof(kSwitchListMagic); ++i)
+    for (unsigned i = 0; i < sizeof(kSwitchListMagic); ++i) {
         if (saved.magic[i] != kSwitchListMagic[i])
             return "not an SWCHPF02 list";
+    }
     if (saved.version != kSwitchListVersion || saved.headerBytes != sizeof(SwitchListHeader))
         return "an SWCHPF02 list of another version";
-    for (unsigned i = 0; i < kSwitchListImages; ++i)
+    for (unsigned i = 0; i < kSwitchListImages; ++i) {
         if (saved.images[i].bytes != images[i].bytes || saved.images[i].fileId != images[i].fileId ||
             saved.images[i].mtimeSec != images[i].mtimeSec || saved.images[i].mtimeNsec != images[i].mtimeNsec)
             return "saved for other cryptex images";
+    }
     if (!saved.runs || saved.runs > maxRuns)
         return "no runs, or too many";
     return nullptr;

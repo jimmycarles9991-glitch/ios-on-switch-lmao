@@ -56,8 +56,7 @@ ios_binary(
 )
 
 # AVD.videodecoder: H.264, VP9 and HEVC on NVDEC as VideoToolbox's hardware 'avc1', 'vp09' and 'hvc1' decoders
-# (registered where TegraNVDEC is open to the process and the codec passed its boot self-test and clip check), with the
-# once-per-boot clip checks (ClipCheck.c over test/VDECClip.h, test/VP9Clip.h and test/HEVCClip.h).
+# (registered where TegraNVDEC is open to the process).
 ios_binary(
     name = "AVD",
     srcs = [
@@ -67,7 +66,6 @@ ios_binary(
         "AVD/H264Syntax.c",
         "AVD/NVDECClient.c",
         "AVD/BlockLinear.c",
-        "AVD/ClipCheck.c",
         "AVD/VP9NVDEC.c",
         "AVD/VP9Syntax.c",
         "AVD/VP9Probs.c",
@@ -83,12 +81,7 @@ ios_binary(
         allow_empty = True,
     ) + [
         "//drivers/TegraNVDEC:headers",
-        "//kits/SwitchCRC:headers",
         "//kits/SwitchRefusal:SwitchRefusal.h",
-    ] + [
-        "test/VDECClip.h",
-        "test/VP9Clip.h",
-        "test/HEVCClip.h",
     ],
     copts = [
         "-O2",
@@ -116,7 +109,7 @@ ios_binary(
     sign_identifier = "com.brunostjohn.switch.avd",
 )
 
-# vdectest: the clip check as a command (AVD/ClipCheck.c); on the device the same check runs inside AVD.videodecoder.
+# vdectest: the clip check as a command (AVD/ClipCheck.c), on the device and on a Mac.
 ios_binary(
     name = "vdectest",
     srcs = [

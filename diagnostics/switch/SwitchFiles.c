@@ -48,9 +48,10 @@ static struct reader reader;
 
 static int equal(const uint8_t *a, const uint8_t *b, unsigned n)
 {
-    for (unsigned i = 0; i < n; i++)
+    for (unsigned i = 0; i < n; i++) {
         if (a[i] != b[i])
             return 0;
+    }
     return 1;
 }
 
@@ -339,7 +340,8 @@ void switch_files_probe(struct switch_sd_host *host)
         fail(&reader, 212, 0);
         return;
     }
-    uint64_t first = slice.first_sector, count = slice.sector_count;
+    uint64_t first = slice.first_sector;
+    uint64_t count = slice.sector_count;
     switch_files_record[7] = first;
     switch_files_record[8] = count;
     switch_files_record[33] = slice.partition_index;
@@ -540,7 +542,7 @@ int switch_files_block_source(struct switch_block_source *source)
 #endif
 
 /* Persistent Data uses the same reader, card and failure latch as OS/SystemOS. */
-volatile uint64_t switch_data_record[16];
+static volatile uint64_t switch_data_record[16];
 
 static int data_begin_metadata(void *context, uint32_t sectors, uint32_t seconds)
 {
@@ -620,7 +622,7 @@ static int data_write(void *context, uint64_t lba, uint32_t count, const uint8_t
     int error = switch_sd_write_sectors(r->host, lba, count, bytes, &result);
     r->request_sectors += count;
     switch_data_record[6] = lba;
-    switch_data_record[7] += result.words_written * 4u;
+    switch_data_record[7] += (uint64_t)result.words_written * 4u;
     return data_result(r, error, &result);
 }
 
@@ -672,7 +674,9 @@ static int raw_read(void *context, uint64_t lba, uint32_t count, uint8_t *bytes)
     (void)count;
     (void)bytes;
 #endif
-    return error ? (reader.request_error ? reader.request_error : SWITCH_BLOCK_IO) : SWITCH_BLOCK_OK;
+    if (!error)
+        return SWITCH_BLOCK_OK;
+    return reader.request_error ? reader.request_error : SWITCH_BLOCK_IO;
 }
 
 int switch_files_raw_open(struct switch_raw_apfs *backend, void *scratch, uint32_t bytes)

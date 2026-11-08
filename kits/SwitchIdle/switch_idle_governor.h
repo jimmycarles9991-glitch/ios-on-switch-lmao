@@ -68,6 +68,14 @@ static inline bool switch_idle_timer_bound(uint64_t now, uint64_t wake_at)
     return now + SWITCH_IDLE_TIMER_SLACK >= wake_at;
 }
 
+/* How long a core in C7 took to come back after its wake timer fired at `wake_at`: the state's exit latency as the
+ * device sees it. 0 when an interrupt or IPI woke it before the timer could have. Over SWITCH_IDLE_C7_WAKE_LATENCY, the
+ * deadline the timer stood in for went by before the core was back. */
+static inline uint64_t switch_idle_c7_exit(uint64_t now, uint64_t wake_at)
+{
+    return now > wake_at ? now - wake_at : 0;
+}
+
 static inline uint64_t switch_idle_learn(uint64_t predicted, uint64_t idle, bool timer_bound)
 {
     if (idle < predicted) {

@@ -13,7 +13,7 @@ import subprocess
 import uuid
 from pathlib import Path
 
-from tools.install import apfs, gpt, host
+from tools.install import apfs, disks, gpt, host, progress, space
 
 COPY_CHUNK = 8 << 20
 F_PUNCHHOLE = 99  # <sys/fcntl.h>: deallocate a range of a file (APFS)
@@ -41,11 +41,12 @@ def attach_raw(image: Path, log: host.Log, mount: bool = False) -> str:
 
 
 def fsck(store: str, what: str, log: host.Log) -> None:
-    result = subprocess.run(
-        [host.TOOLS['fsck_apfs'], '-n', '/dev/r' + store], capture_output=True, text=True, check=False
-    )
+    with progress.step(f'fsck_apfs {store} ({what})', unit=None):
+        result = host.stream([host.TOOLS['fsck_apfs'], '-n', '/dev/r' + store], progress.phases)
     log.quiet(result.stdout + result.stderr)
-    tail = (result.stdout + result.stderr).strip().splitlines()[-1:] or ['?']
+    # The verdict is stdout's last line. Warnings go to stderr, among them a fitted container's block count being
+    # smaller than its device's, which is what a fit proof's clone of the full-size image always shows.
+    tail = result.stdout.strip().splitlines()[-1:] or result.stderr.strip().splitlines()[-1:] or ['?']
     if result.returncode or 'appears to be OK' not in tail[0]:
         raise host.HostError(f'fsck_apfs -n {store} ({what}): {tail[0]}')
     log(f'fsck_apfs {store} ({what}): {tail[0]}')
@@ -74,10 +75,25 @@ def _attach_os(os_dmg: str, log: host.Log) -> tuple[str, str]:
     return (store[:slice_at] if slice_at > 0 else store), store
 
 
-def os_container_bytes(os_dmg: str, log: host.Log) -> int:
+def os_measure(os_dmg: str, system_uuid: str, log: host.Log) -> tuple[int, int]:
+    """Return what the OS image's container uses and what its System volume's /private/var takes, by their own counts.
+
+    Composing writes the first; populating copies the second onto Data.
+    """
     whole, source = _attach_os(os_dmg, log)
     try:
-        return int(host.disk_info(source)['TotalSize'])
+        container = host.container_on(source[len('/dev/') :])
+        if not container:
+            raise host.HostError(f'{os_dmg}: no APFS container on {source}')
+        used = int(container['CapacityCeiling']) - int(container['CapacityFree'])
+        volume = next(
+            (v['DeviceIdentifier'] for v in container['Volumes'] if v['APFSVolumeUUID'].upper() == system_uuid.upper()),
+            None,
+        )
+        if volume is None:
+            raise host.HostError(f'{os_dmg}: no System volume {system_uuid}')
+        with disks.mounted(volume, log, owners=False, read_only=True) as root:
+            return used, space.allocated(root / 'private/var')
     finally:
         host.run('hdiutil', 'detach', whole, log=log)
 
@@ -105,8 +121,9 @@ def _copy_os(os_dmg: str, image: Path, partition_sectors: int, spec: dict, log: 
             first = (gpt.APFS, uuid.uuid4(), START_SECTOR, START_SECTOR + os_bytes // gpt.SECTOR - 1, 'compose')
             for lba, data in gpt.build(disk_sectors, [first]):
                 os.pwrite(ifd, data, lba * gpt.SECTOR)
-            host.copy_parallel(sfd, 0, ifd, START_SECTOR * gpt.SECTOR, os_bytes)
-            os.fsync(ifd)
+            with progress.step('compose: copying the OS container', os_bytes):
+                host.copy_parallel(sfd, 0, ifd, START_SECTOR * gpt.SECTOR, os_bytes)
+                os.fsync(ifd)
         finally:
             os.close(sfd)
             os.close(ifd)
@@ -120,7 +137,10 @@ def _grow(image: Path, partition_bytes: int, spec: dict, log: host.Log) -> None:
     disk = attach_raw(image, log)
     try:
         store = disk + 's1'
-        host.run('diskutil', 'apfs', 'resizeContainer', store, f'{partition_bytes}B', log=log)
+        with progress.step(f'compose: growing the container to {progress.size(partition_bytes)}', unit=None):
+            host.watch(
+                'diskutil', 'apfs', 'resizeContainer', store, f'{partition_bytes}B', parse=progress.phases, log=log
+            )
         container = host.container_on(store)
         if not container:
             raise host.HostError('the scratch container did not attach')

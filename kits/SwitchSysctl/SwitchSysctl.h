@@ -19,7 +19,7 @@ static inline void switch_sysctl_oid(struct sysctl_oid *oid, struct sysctl_oid_l
     memset(oid, 0, sizeof(*oid));
     oid->oid_parent = parent;
     oid->oid_number = OID_AUTO;
-    oid->oid_kind = kind | CTLFLAG_OID2;
+    oid->oid_kind = kind | CTLFLAG_OID2;  // NOLINT(bugprone-signed-bitwise): XNU's CTLTYPE/CTLFLAG bits are int
     oid->oid_name = name;
     oid->oid_handler = handler;
     oid->oid_fmt = format;

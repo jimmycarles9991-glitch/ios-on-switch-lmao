@@ -40,6 +40,9 @@
 #if defined(XNU_NATIVE_ARCH_TIMER) && XNU_NATIVE_ARCH_TIMER
 #include <arm64/switch_smp.h>
 #endif
+#if defined(SWITCH_XNU_DIAGNOSTICS) && SWITCH_XNU_DIAGNOSTICS
+#include <switch/boot_layout.h>
+#endif
 
 #if __ARM_KERNEL_PROTECT__
 #include <arm/pmap.h>
@@ -1022,18 +1025,18 @@ LEXT(start_first_cpu)
 	tst x16, x17
 	b.ne Lswitch_early_disabled
 	ldr x16, [x20, BA_PHYS_BASE]
-	MOV64 x17, 0xb207c000
+	MOV64 x17, SWITCH_KERNEL_PHYS_BASE
 	cmp x16, x17
 	b.eq Lswitch_early_legacy_ram
-	MOV64 x17, 0x80000000
+	MOV64 x17, SWITCH_BOOT_PHYS_BASE
 	cmp x16, x17
 	b.ne Lswitch_early_disabled
 	ldr x16, [x20, BA_MEM_SIZE]
-	MOV64 x17, 0x100000000
+	MOV64 x17, SWITCH_BOOT_MEM_SIZE
 	cmp x16, x17
 	b.ne Lswitch_early_disabled
 	ldr x16, [x20, BA_VIRT_BASE]
-	MOV64 x17, 0xffffffefd2200000
+	MOV64 x17, SWITCH_BOOT_VIRT_BASE
 	cmp x16, x17
 	b.ne Lswitch_early_disabled
 	b Lswitch_early_ram_ready
@@ -1043,7 +1046,7 @@ Lswitch_early_legacy_ram:
 	cmp x16, x17
 	b.ne Lswitch_early_disabled
 	ldr x16, [x20, BA_VIRT_BASE]
-	MOV64 x17, 0xfffffff00427c000
+	MOV64 x17, SWITCH_KERNEL_VIRT_BASE
 	cmp x16, x17
 	b.ne Lswitch_early_disabled
 Lswitch_early_ram_ready:
@@ -1199,15 +1202,15 @@ Lkernelcache_base_found:
     // These temporary block mappings must stop before the Device framebuffer
     // slots; C builds the complete exclusion-aware aperture before low steals.
     ldr x16, [x20, BA_PHYS_BASE]
-    MOV64 x17, 0x80000000
+    MOV64 x17, SWITCH_BOOT_PHYS_BASE
     cmp x16, x17
     b.ne Lswitch_bootstrap_span_ready
     ldr x16, [x20, BA_MEM_SIZE]
-    MOV64 x17, 0x100000000
+    MOV64 x17, SWITCH_BOOT_MEM_SIZE
     cmp x16, x17
     b.ne Lswitch_bootstrap_span_ready
     ldr x16, [x20, BA_VIRT_BASE]
-    MOV64 x17, 0xffffffefd2200000
+    MOV64 x17, SWITCH_BOOT_VIRT_BASE
     cmp x16, x17
     b.ne Lswitch_bootstrap_span_ready
     MOV64 x17, 0xe207c000

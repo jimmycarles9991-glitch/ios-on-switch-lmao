@@ -11,29 +11,25 @@
 #include "SwitchDiag.h"
 #include "SwitchPowerTrail.h"
 #include <switch/boot.h>
-
+// NOLINTNEXTLINE(readability-redundant-declaration): not every kernel configuration's headers declare it
 extern kern_return_t OSKextLoadKextWithIdentifier(const char *identifier);
+
 extern int native_verified_block_os_root_authorized(dev_t, dev_t);
 
-volatile int switch_boot_apfs_status = -1;
-volatile uint32_t switch_boot_apfs_registered = 0;
-volatile uintptr_t switch_boot_apfs_vfsops = 0;
-volatile int switch_boot_mobile_graphics_status = -1;
+static volatile int switch_boot_apfs_status = -1;
+static volatile uint32_t switch_boot_apfs_registered = 0;
+static volatile uintptr_t switch_boot_apfs_vfsops = 0;
+static volatile int switch_boot_mobile_graphics_status = -1;
 
-volatile int switch_boot_root_trust_enabled = 1;
-volatile int switch_boot_root_accepted_value = 0;
-volatile int switch_boot_root_apple_autherr = -1;
-volatile int switch_boot_root_decision = -1;
-volatile int switch_boot_root_readonly = -1;
-volatile dev_t switch_boot_root_mount_device = NODEV;
-volatile dev_t switch_boot_root_selected_device = NODEV;
+static volatile int switch_boot_root_trust_enabled = 1;
+static volatile int switch_boot_root_accepted_value = 0;
+static volatile int switch_boot_root_apple_autherr = -1;
+static volatile int switch_boot_root_decision = -1;
+static volatile int switch_boot_root_readonly = -1;
+static volatile dev_t switch_boot_root_mount_device = NODEV;
+static volatile dev_t switch_boot_root_selected_device = NODEV;
 
-void switch_boot_apfs_checkpoint(void);
-void switch_boot_mobile_graphics_checkpoint(void);
-void switch_boot_root_accepted_checkpoint(int, int);
-void switch_boot_root_checkpoint(int, int, dev_t);
-
-__attribute__((noinline)) void switch_boot_apfs_checkpoint(void)
+__attribute__((noinline)) static void switch_boot_apfs_checkpoint(void)
 {
     __asm__ volatile("" ::: "memory");
 }
@@ -53,7 +49,7 @@ static void switch_boot_load_apfs(void)
     switch_boot_apfs_checkpoint();
 }
 
-__attribute__((noinline)) void switch_boot_mobile_graphics_checkpoint(void)
+__attribute__((noinline)) static void switch_boot_mobile_graphics_checkpoint(void)
 {
     __asm__ volatile("" ::: "memory");
 }
@@ -123,12 +119,12 @@ void switch_boot_mountroot_done(int err)
     }
 }
 
-__attribute__((noinline)) void switch_boot_root_accepted_checkpoint(int apple, int owner)
+__attribute__((noinline)) static void switch_boot_root_accepted_checkpoint(int apple, int owner)
 {
     __asm__ volatile("" : : "r"(apple), "r"(owner) : "memory");
 }
 
-__attribute__((noinline)) void switch_boot_root_checkpoint(int apple, int owner, dev_t device)
+__attribute__((noinline)) static void switch_boot_root_checkpoint(int apple, int owner, dev_t device)
 {
     __asm__ volatile("" : : "r"(apple), "r"(owner), "r"(device) : "memory");
 }

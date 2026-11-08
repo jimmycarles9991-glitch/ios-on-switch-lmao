@@ -56,12 +56,16 @@ int switch_watchdog_publish(void)
         IOLog("SwitchWatchdog: start failed\n");
         return -1;
     }
+    // NOLINTNEXTLINE(clang-analyzer-osx.cocoa.RetainCount): the started watchdog is kept for good (above)
     IOService *pmu = switch_pmu_allocate();
     bool attached = false;
-    if (pmu && pmu->init() && (attached = pmu->attach(provider)) && pmu->start(provider)) {
-        pmu->release();  // the registry (IOResources) holds it
-        __atomic_store_n(&watchdog_ready, 1, __ATOMIC_RELEASE);
-        return 0;
+    if (pmu && pmu->init()) {
+        attached = pmu->attach(provider);
+        if (attached && pmu->start(provider)) {
+            pmu->release();  // the registry (IOResources) holds it
+            __atomic_store_n(&watchdog_ready, 1, __ATOMIC_RELEASE);
+            return 0;
+        }
     }
     if (attached)
         pmu->detach(provider);

@@ -6,14 +6,14 @@
 #include <stdint.h>
 
 struct TegraSMMUSpace {
-    static constexpr uint64_t kGranule = 64 * 1024;
+    static constexpr uint64_t kGranule = 64ULL * 1024;
     uint64_t base = 0;
     uint32_t granules = 0, free = 0;
     uint32_t *used = nullptr;
 
     static constexpr uint32_t bitmapWords(uint64_t bytes)
     {
-        return (uint32_t)((bytes / kGranule + 31) / 32);
+        return static_cast<uint32_t>((bytes / kGranule + 31) / 32);
     }
 
     static constexpr uint64_t round(uint64_t bytes)
@@ -25,10 +25,10 @@ struct TegraSMMUSpace {
     bool init(uint64_t windowBase, uint64_t bytes, uint32_t *bitmap, uint32_t words)
     {
         if (!bitmap || !bytes || (windowBase | bytes) & (kGranule - 1) || words < bitmapWords(bytes) ||
-            windowBase + bytes > (1ull << 32))
+            windowBase + bytes > (1ULL << 32))
             return false;
         base = windowBase;
-        granules = (uint32_t)(bytes / kGranule);
+        granules = static_cast<uint32_t>(bytes / kGranule);
         free = granules;
         used = bitmap;
         for (uint32_t i = 0; i < words; i++)
@@ -38,16 +38,18 @@ struct TegraSMMUSpace {
 
     bool taken(uint32_t i) const
     {
-        return used[i / 32] & (1u << (i % 32));
+        return (used[i / 32] & (1u << (i % 32))) != 0u;
     }
 
+    // NOLINTNEXTLINE(readability-make-member-function-const): marks the space's bitmap, through its pointer
     void mark(uint32_t first, uint32_t count, bool on)
     {
         for (uint32_t i = first; i < first + count; i++) {
-            if (on)
+            if (on) {
                 used[i / 32] |= 1u << (i % 32);
-            else
+            } else {
                 used[i / 32] &= ~(1u << (i % 32));
+            }
         }
     }
 
@@ -56,8 +58,9 @@ struct TegraSMMUSpace {
     {
         if (!used || !bytes || round(bytes) / kGranule > free)
             return 0;
-        const uint32_t count = (uint32_t)(round(bytes) / kGranule);
-        uint32_t run = 0, first = 0;
+        const uint32_t count = static_cast<uint32_t>(round(bytes) / kGranule);
+        uint32_t run = 0;
+        uint32_t first = 0;
         for (uint32_t i = 0; i < granules && run < count;) {
             if (!run && !(i % 32) && used[i / 32] == 0xffffffffu) {
                 i += 32;
@@ -76,7 +79,7 @@ struct TegraSMMUSpace {
             return 0;
         mark(first, count, true);
         free -= count;
-        return base + (uint64_t)first * kGranule;
+        return base + static_cast<uint64_t>(first) * kGranule;
     }
 
     // A range alloc() returned, with the size it was asked for.
@@ -84,12 +87,14 @@ struct TegraSMMUSpace {
     {
         if (!used || iova < base || (iova - base) % kGranule)
             return false;
-        const uint32_t first = (uint32_t)((iova - base) / kGranule), count = (uint32_t)(round(bytes) / kGranule);
+        const uint32_t first = static_cast<uint32_t>((iova - base) / kGranule);
+        const uint32_t count = static_cast<uint32_t>(round(bytes) / kGranule);
         if (!count || first + count > granules)
             return false;
-        for (uint32_t i = first; i < first + count; i++)
+        for (uint32_t i = first; i < first + count; i++) {
             if (!taken(i))
                 return false;
+        }
         mark(first, count, false);
         free += count;
         return true;
@@ -97,11 +102,11 @@ struct TegraSMMUSpace {
 
     uint64_t bytesFree() const
     {
-        return (uint64_t)free * kGranule;
+        return static_cast<uint64_t>(free) * kGranule;
     }
 
     uint64_t bytesTotal() const
     {
-        return (uint64_t)granules * kGranule;
+        return static_cast<uint64_t>(granules) * kGranule;
     }
 };

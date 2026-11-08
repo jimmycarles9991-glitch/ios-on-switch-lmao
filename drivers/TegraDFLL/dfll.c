@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0
 /*
  * The TegraDFLL.h API: the sequences L4T's CPU frequency driver and clock framework run around the vendored DFLL
- * driver, on the shim's clock tree. Linux-side C (shim prelude); XNU only through dfllxnu.h and TegraI2C.
+ * driver, on the shim's clock tree. Linux-side C (shim prelude); XNU only through kits/SwitchLinux and TegraI2C.
  *
  * Enable follows the T210 cpufreq driver L4T runs on this SoC (CTCaer switch-l4t-kernel-nvidia linux-dev
  * drivers/cpufreq/tegra210-cpufreq.c enable_cpu_clk: clk_set_rate(dfll, rate of cpu_g), clk_set_parent(cpu_g, dfll)),
@@ -60,7 +60,7 @@ static int fail(char *why, size_t len, int err, const char *fmt, ...) __printf(4
 
 static int fail(char *why, size_t len, int err, const char *fmt, ...)
 {
-	va_list ap;
+	va_list ap; /* NOLINT(cppcoreguidelines-init-variables): va_start initializes it */
 
 	if (why && len) {
 		va_start(ap, fmt);
@@ -72,25 +72,12 @@ static int fail(char *why, size_t len, int err, const char *fmt, ...)
 
 static void lock(void)
 {
-	void *m = __atomic_load_n(&api_lock, __ATOMIC_ACQUIRE);
-
-	if (!m) {
-		void *fresh = dfllxnu_mutex_alloc(), *expected = NULL;
-
-		if (!fresh)
-			panic("TegraDFLL: cannot allocate the API lock");
-		if (__atomic_compare_exchange_n(&api_lock, &expected, fresh, false,
-						__ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE))
-			m = fresh;
-		else
-			m = expected; /* lost the race: the other one is in use (this one leaks, once) */
-	}
-	dfllxnu_mutex_lock(m);
+	switch_linux_mutex_lock(switch_linux_mutex_of(&api_lock));
 }
 
 static void unlock(void)
 {
-	dfllxnu_mutex_unlock(api_lock);
+	switch_linux_mutex_unlock(api_lock);
 }
 
 static int apply_thermal(void)
@@ -103,9 +90,9 @@ static int apply_thermal(void)
 
 static int prepare_locked(char *why, size_t len)
 {
-	struct platform_device *pdev;
-	struct platform_driver *drv;
-	int ret;
+	struct platform_device *pdev = NULL;
+	struct platform_driver *drv = NULL;
+	int ret = 0;
 
 	if (st.prepared)
 		return 0;
@@ -119,9 +106,10 @@ static int prepare_locked(char *why, size_t len)
 		drv = tdfll_builtin_platform_driver();
 		pdev->dev.driver = &drv->driver;
 		ret = drv->probe(pdev);
-		if (ret)
+		if (ret) {
 			fail(st.prepare_why, sizeof(st.prepare_why), ret,
 			     "the L4T DFLL probe failed (%d), see above", ret);
+		}
 	}
 	if (!ret) {
 		st.td = platform_get_drvdata(pdev);
@@ -130,13 +118,18 @@ static int prepare_locked(char *why, size_t len)
 		st.pllx = clk_get(NULL, "pll_x");
 		st.pllp = clk_get(NULL, "pll_p");
 		if (!st.td || IS_ERR(st.dfll) || IS_ERR(st.cclk_g) || IS_ERR(st.pllx) ||
-		    IS_ERR(st.pllp))
+		    IS_ERR(st.pllp)) {
 			ret = fail(st.prepare_why, sizeof(st.prepare_why), -ENODEV,
 				   "the DFLL probe left no clock");
+		}
 	}
-	if (!ret && st.thermal_set && (ret = apply_thermal()))
-		fail(st.prepare_why, sizeof(st.prepare_why), ret,
-		     "thermal indices %u/%u out of range", st.floor_index, st.cap_index);
+	if (!ret && st.thermal_set) {
+		ret = apply_thermal();
+		if (ret) {
+			fail(st.prepare_why, sizeof(st.prepare_why), ret,
+			     "thermal indices %u/%u out of range", st.floor_index, st.cap_index);
+		}
+	}
 	if (ret) {
 		if (ret !=
 		    -EAGAIN) /* see tdfll_platform_init: a transient PMIC probe failure is retried */
@@ -150,7 +143,7 @@ static int prepare_locked(char *why, size_t len)
 
 int tegra_dfll_cpu_prepare(char *why, size_t len)
 {
-	int ret;
+	int ret = 0;
 
 	lock();
 	ret = prepare_locked(why, len);
@@ -161,27 +154,30 @@ int tegra_dfll_cpu_prepare(char *why, size_t len)
 /* tegra124_cpu_switch_to_pllx, with regulator_sync_voltage = the VDD_CPU code found at enable */
 static int to_pllx_locked(char *why, size_t len)
 {
-	int ret;
+	int ret = 0;
 
 	/* PRE_PARENT_CHANGE unlocks the DFLL (open loop), the mux moves to PLLP, the DFLL is unprepared (disabled) */
 	ret = clk_set_parent(st.cclk_g, st.pllp);
-	if (ret)
+	if (ret) {
 		return fail(why, len, ret,
 			    "cannot move the CPU off the DFLL (%d); it stays on the DFLL", ret);
+	}
 	st.enabled = false;
 	ret = tdfll_platform_vout_write(st.kept_vout);
-	if (ret)
+	if (ret) {
 		return fail(why, len, -EIO,
 			    "VDD_CPU not restored to %u mV (TegraI2C %d); the CPU stays on PLLP "
 			    "408 MHz",
 			    MAX77812_UV(st.kept_vout) / 1000, ret);
-	dfllxnu_msleep(VOUT_SLEW_MS);
+	}
+	msleep(VOUT_SLEW_MS);
 	if (!tdfll_platform_pllx_locked())
 		return fail(why, len, -EIO, "PLLX is not locked; the CPU stays on PLLP 408 MHz");
 	ret = clk_set_parent(st.cclk_g, st.pllx);
-	if (ret)
+	if (ret) {
 		return fail(why, len, ret,
 			    "cannot move the CPU to PLLX (%d); it stays on PLLP 408 MHz", ret);
+	}
 	return 0;
 }
 
@@ -195,36 +191,41 @@ static u32 dfll_last_sent(u32 sts)
  * more step while TegraI2C reads the PMIC back, so the value it sent just before or just after that read both count. */
 static int check_closed_loop(char *why, size_t len)
 {
-	u32 ctrl = tdfll_platform_dfll_readl(DFLL_CTRL),
-	    before = tdfll_platform_dfll_readl(DFLL_I2C_STS), after;
+	u32 ctrl = tdfll_platform_dfll_readl(DFLL_CTRL);
+	u32 before = tdfll_platform_dfll_readl(DFLL_I2C_STS);
+	u32 after = 0;
 	u8 vout = 0;
-	int err;
+	int err = 0;
 
-	if ((ctrl & 3) != DFLL_CTRL_CLOSED_LOOP)
+	if ((ctrl & 3) != DFLL_CTRL_CLOSED_LOOP) {
 		return fail(why, len, -EIO, "the DFLL did not close the loop (DFLL_CTRL %#x)",
 			    ctrl);
+	}
 	err = tdfll_platform_vout_read(&vout);
 	after = tdfll_platform_dfll_readl(DFLL_I2C_STS);
-	if (err)
+	if (err) {
 		return fail(why, len, -EIO, "VDD_CPU unreadable after the switch (TegraI2C %d)",
 			    err);
-	if (vout != dfll_last_sent(before) && vout != dfll_last_sent(after))
+	}
+	if (vout != dfll_last_sent(before) && vout != dfll_last_sent(after)) {
 		return fail(why, len, -EIO,
 			    "MAX77812 holds %u mV but the DFLL last sent %u mV (DFLL_I2C_STS %#x)",
 			    MAX77812_UV(vout) / 1000, MAX77812_UV(dfll_last_sent(after)) / 1000,
 			    after);
+	}
 	return 0;
 }
 
 int tegra_dfll_cpu_enable(unsigned long rate_hz, char *why, size_t len)
 {
 	char undo[96];
-	unsigned long now;
-	int ret;
+	unsigned long now = 0;
+	int ret = 0;
 
-	if (rate_hz > TEGRA_DFLL_CPU_MAX_HZ)
+	if (rate_hz > TEGRA_DFLL_CPU_MAX_HZ) {
 		return fail(why, len, -EINVAL, "%lu kHz is above Horizon's %lu kHz CPU maximum",
 			    rate_hz / 1000, TEGRA_DFLL_CPU_MAX_HZ / 1000);
+	}
 	lock();
 	if (st.enabled) {
 		ret = clk_set_rate(st.dfll, rate_hz);
@@ -237,9 +238,10 @@ int tegra_dfll_cpu_enable(unsigned long rate_hz, char *why, size_t len)
 		ret = tdfll_platform_cpu_on_pllx(why, len);
 	if (!ret)
 		ret = tdfll_platform_i2c5_shareable(why, len);
-	if (!ret && tdfll_platform_vout_read(&st.kept_vout))
+	if (!ret && tdfll_platform_vout_read(&st.kept_vout)) {
 		ret = fail(why, len, -EIO, "VDD_CPU (MAX77812 %#x) does not answer",
 			   tdfll_platform_pmic_address());
+	}
 	if (ret)
 		goto out;
 
@@ -257,13 +259,17 @@ int tegra_dfll_cpu_enable(unsigned long rate_hz, char *why, size_t len)
 		goto out;
 	}
 	st.enabled = true;
-	if ((tdfll_platform_dfll_readl(DFLL_CTRL) & 3) != DFLL_CTRL_CLOSED_LOOP)
+	if ((tdfll_platform_dfll_readl(DFLL_CTRL) & 3) != DFLL_CTRL_CLOSED_LOOP) {
 		ret = fail(why, len, -EIO, "the DFLL did not close the loop (DFLL_CTRL %#x)",
 			   tdfll_platform_dfll_readl(DFLL_CTRL));
-	if (!ret && (ret = clk_set_rate(st.dfll, rate_hz)))
-		fail(why, len, ret, "the DFLL refused %lu kHz (%d)", rate_hz / 1000, ret);
+	}
 	if (!ret) {
-		dfllxnu_msleep(ENABLE_SETTLE_MS);
+		ret = clk_set_rate(st.dfll, rate_hz);
+		if (ret)
+			fail(why, len, ret, "the DFLL refused %lu kHz (%d)", rate_hz / 1000, ret);
+	}
+	if (!ret) {
+		msleep(ENABLE_SETTLE_MS);
 		ret = check_closed_loop(why, len);
 	}
 	if (ret) {
@@ -316,9 +322,10 @@ int tegra_dfll_cpu_disable_to_pllx(char *why, size_t len)
 	lock();
 	if (st.enabled) {
 		ret = to_pllx_locked(why, len);
-		if (!ret)
+		if (!ret) {
 			printk("CPU back on PLLX, VDD_CPU %u mV\n",
 			       MAX77812_UV(st.kept_vout) / 1000);
+		}
 	}
 	unlock();
 	return ret;
@@ -327,7 +334,7 @@ int tegra_dfll_cpu_disable_to_pllx(char *why, size_t len)
 int tegra_dfll_cpu_opps(unsigned long max_hz, unsigned int *khz, unsigned int *mv, unsigned int cap)
 {
 	struct device *cpu = get_cpu_device(0);
-	struct dev_pm_opp *opp;
+	struct dev_pm_opp *opp = NULL;
 	unsigned long rate = 0;
 	unsigned int n = 0;
 	int ret = -EPERM;
@@ -392,7 +399,7 @@ void tegra_dfll_cpu_status(unsigned long *target_hz, unsigned long *measured, un
 /* cvb.c tegra_cvb_add_opp_table's choice, repeated for the description (the driver keeps it in td->soc) */
 static const struct cvb_table *chosen_cvb(void)
 {
-	unsigned int i;
+	unsigned int i = 0;
 
 	for (i = 0; i < ARRAY_SIZE(tegra210b01_cpu_cvb_tables); i++) {
 		const struct cvb_table *t = &tegra210b01_cpu_cvb_tables[i];
@@ -407,10 +414,11 @@ static const struct cvb_table *chosen_cvb(void)
 void tegra_dfll_cpu_describe(unsigned long rate_hz, char *buf, size_t len)
 {
 	struct device *cpu = get_cpu_device(0);
-	const struct cvb_table *cvb;
-	struct dev_pm_opp *opp;
-	unsigned long top = ULONG_MAX, at;
-	size_t n;
+	const struct cvb_table *cvb = NULL;
+	struct dev_pm_opp *opp = NULL;
+	unsigned long top = ULONG_MAX;
+	unsigned long at = 0;
+	size_t n = 0;
 
 	if (!buf || !len)
 		return;
@@ -437,8 +445,8 @@ void tegra_dfll_cpu_describe(unsigned long rate_hz, char *buf, size_t len)
 		 IS_ERR(opp) ? 0 : dev_pm_opp_get_voltage(opp) / 1000);
 	n = strlen(buf);
 	if (st.enabled) {
-		u32 ctrl = tdfll_platform_dfll_readl(DFLL_CTRL),
-		    sent = dfll_last_sent(tdfll_platform_dfll_readl(DFLL_I2C_STS));
+		u32 ctrl = tdfll_platform_dfll_readl(DFLL_CTRL);
+		u32 sent = dfll_last_sent(tdfll_platform_dfll_readl(DFLL_I2C_STS));
 		u64 measured = measured_hz();
 		snprintf(buf + n, len - n,
 			 "; %s, target %lu MHz, measured %llu MHz, VDD_CPU sent %u mV (MAX77812 "
@@ -471,9 +479,13 @@ int tegra_dfll_cpu_resume(char *why, size_t len)
 	ret = tdfll_platform_resume(why, len);
 	if (!ret)
 		tegra_dfll_resume(tdfll_platform_dfll_device(), false);
-	if (!ret && st.thermal_set && (ret = apply_thermal()))
-		fail(why, len, ret, "thermal indices %u/%u refused after SC7", st.floor_index,
-		     st.cap_index);
+	if (!ret && st.thermal_set) {
+		ret = apply_thermal();
+		if (ret) {
+			fail(why, len, ret, "thermal indices %u/%u refused after SC7",
+			     st.floor_index, st.cap_index);
+		}
+	}
 out:
 	unlock();
 	return ret;

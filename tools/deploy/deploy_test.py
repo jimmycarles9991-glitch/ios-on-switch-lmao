@@ -52,6 +52,8 @@ class SyncTest(unittest.TestCase):
             'switchroot/ios/._old.bin',
             'switchroot/ios/boot.scr',
             'switchroot/ios/bootargs.txt',
+            'switchroot/ios/IOS17.SII.001',
+            'switchroot/ios/IOS27.SII.005',
             'switchroot/ios/install/21H461/part-00.bin',
             'switchroot/ios/install/24B119/bl33.bin',
             'payload.bin',
@@ -79,6 +81,8 @@ class SyncTest(unittest.TestCase):
             'bootloader/hekate_ipl.ini',
             'switchroot/ubuntu/boot.scr',
             'switchroot/ios/bootargs.txt',
+            'switchroot/ios/IOS17.SII.001',
+            'switchroot/ios/IOS27.SII.005',
             'switchroot/ios/install/21H461/part-00.bin',
             'switchroot/ios/install/24B119/bl33.bin',
             'payload.bin',
@@ -162,6 +166,17 @@ class SyncTest(unittest.TestCase):
         self.assertEqual(renamed.migrate_preboot(preboot, spec, Log(), dry_run=True), ['Old-Staging'])
         self.assertEqual(renamed.migrate_preboot(preboot, spec, Log()), ['Old-Staging'])
         self.assertEqual(sorted(p.name for p in preboot.iterdir()), ['Other', 'Switch-Staging'])
+
+    def test_a_folder_the_user_cannot_read_is_not_a_former_name(self):
+        data = self.root / 'data'
+        (data / 'Switch/overlay').mkdir(parents=True)
+        (data / 'audit').mkdir()
+        (data / 'audit').chmod(0o000)
+        try:
+            self.assertEqual(renamed.data_folder(data), data / 'Switch')
+            self.assertEqual(renamed.migrate_data(data, Log()), [])
+        finally:
+            (data / 'audit').chmod(0o755)
 
     def test_overlay_replaced_only_when_different(self):
         data = self.root / 'data'

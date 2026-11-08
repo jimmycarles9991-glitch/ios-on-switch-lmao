@@ -123,6 +123,8 @@ static TICKETS: AtomicU64 = AtomicU64::new(0);
 thread_local! {
     /// Whether this thread holds a turn now.
     static HOLDS: Cell<bool> = const { Cell::new(false) };
+    /// Whether the turn this thread holds is one of the ahead turns.
+    static HOLDS_AHEAD: Cell<bool> = const { Cell::new(false) };
     /// How long this thread's making waited for its turn, or its piece in its pool, since
     /// [`take_waited`] last read it (the creation log, `creation_log.rs`).
     static WAITED: Cell<Duration> = const { Cell::new(Duration::ZERO) };
@@ -323,11 +325,26 @@ pub(crate) fn aged(urgency: Urgency, since: Instant, age: Duration) -> Urgency {
 pub(crate) struct Turn {
     budget: Arc<Budget>,
     ahead: bool,
+    /// Whether a thread holds it: the one it was taken on, or a spare turn's thread once handed
+    /// it ([`Turn::hold_here`]).
+    held: bool,
+}
+
+impl Turn {
+    /// Hold this spare turn ([`spare_turn`]) on this thread, which then takes no second one for
+    /// its makings: until it is dropped, on this thread.
+    pub(crate) fn hold_here(&mut self) {
+        HOLDS.with(|holds| holds.set(true));
+        HOLDS_AHEAD.with(|ahead| ahead.set(self.ahead));
+        self.held = true;
+    }
 }
 
 impl Drop for Turn {
     fn drop(&mut self) {
-        HOLDS.with(|holds| holds.set(false));
+        if self.held {
+            HOLDS.with(|holds| holds.set(false));
+        }
         let mut state = lock(&self.budget.state);
         state.held -= 1;
         if self.ahead {
@@ -440,11 +457,13 @@ impl Budget {
                 }
                 drop(state);
                 HOLDS.with(|holds| holds.set(true));
+                HOLDS_AHEAD.with(|holds_ahead| holds_ahead.set(ahead));
                 // The next asker may have a turn too.
                 self.freed.notify_all();
                 let turn = Turn {
                     budget: Arc::clone(self),
                     ahead,
+                    held: true,
                 };
                 return Some((turn, piece));
             }
@@ -456,6 +475,35 @@ impl Budget {
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .0;
         }
+    }
+
+    /// A turn for a making of `urgency`, taken now without waiting where one is free that it may
+    /// take (an ahead one for [`Urgency::Ahead`]) and no waiting asker may take one now, so it
+    /// never delays another's making; held by no thread until handed to one
+    /// ([`Turn::hold_here`]).
+    pub(crate) fn spare(self: &Arc<Self>, urgency: Urgency) -> Option<Turn> {
+        let mut state = lock(&self.state);
+        let ahead = urgency == Urgency::Ahead;
+        let ahead_free = state.held_ahead < self.ahead;
+        if state.held >= self.turns || (ahead && !ahead_free) {
+            return None;
+        }
+        let waited_for = state
+            .askers
+            .iter()
+            .any(|(_, asker)| matches!(asker.rank(self.age, ahead_free), Some(Some(_))));
+        if waited_for {
+            return None;
+        }
+        state.held += 1;
+        if ahead {
+            state.held_ahead += 1;
+        }
+        Some(Turn {
+            budget: Arc::clone(self),
+            ahead,
+            held: false,
+        })
     }
 
     /// The turns held now and the askers waiting (the tests).
@@ -487,6 +535,22 @@ fn thread_turn_in(budget: &Arc<Budget>, ticket: u64) -> Option<Turn> {
     let waited = asked.elapsed();
     WAITED.with(|cell| cell.set(cell.get() + waited));
     Some(turn)
+}
+
+/// A second turn for the making this thread holds a turn for, where one is spare now
+/// ([`Budget::spare`]): an ahead one where this thread's is, else at the rank [`program_turn`]
+/// asks at. A thread of the runtime's makes a part of this thread's making with it
+/// (`device/alongside.rs`). `None` where this thread holds no turn or none is spare.
+pub(crate) fn spare_turn() -> Option<Turn> {
+    if !HOLDS.with(Cell::get) {
+        return None;
+    }
+    let urgency = match (HOLDS_AHEAD.with(Cell::get), exit_guard::in_host_step()) {
+        (true, _) => Urgency::Ahead,
+        (false, true) => Urgency::HostStep,
+        (false, false) => Urgency::Program,
+    };
+    process().spare(urgency)
 }
 
 /// A turn for a thread of `queue`'s pool, from `budget`, with the pool's piece it was ranked by,
@@ -522,8 +586,8 @@ pub(crate) fn waited_turn(budget: &Arc<Budget>, ticket: u64) -> Turn {
 #[cfg(test)]
 mod tests {
     use super::{
-        helper_turn, program_turn, ticket, turns_for, waited_turn, Budget, Urgency, APPLE_TURNS,
-        MOST_TURNS,
+        helper_turn, holds_turn, program_turn, ticket, turns_for, waited_turn, Budget, Urgency,
+        APPLE_TURNS, MOST_TURNS,
     };
     use crate::pipeline::pool::Pool;
     use std::sync::{mpsc, Arc, Mutex};
@@ -588,6 +652,53 @@ mod tests {
             order.lock().unwrap().push(name);
         })
         .unwrap()
+    }
+
+    /// A spare turn is taken at once where one is free that it may take, an ahead one for a
+    /// making nothing waits for; never past the turns. Handed to no thread, it leaves the turn
+    /// its taker holds as it was when given back.
+    #[test]
+    fn a_spare_turn_is_one_free_now() {
+        let budget = Arc::new(Budget::new(3, 1));
+        let _held = waited_turn(&budget, ticket());
+        let ahead = budget.spare(Urgency::Ahead).unwrap();
+        assert!(budget.spare(Urgency::Ahead).is_none(), "no ahead turn left");
+        let waited = budget.spare(Urgency::Program).unwrap();
+        assert_eq!(budget.census(), (3, 0));
+        assert!(budget.spare(Urgency::HostStep).is_none(), "no turn left");
+        drop(waited);
+        assert!(holds_turn());
+        // A pool's piece nothing waits for, with no ahead turn free, holds back no one.
+        let order = Arc::new(Mutex::new(Vec::new()));
+        let pool = Pool::within(Arc::clone(&budget));
+        pool.run(noting(&order, "ahead"));
+        until(|| budget.census() == (2, 1));
+        let beside = budget.spare(Urgency::Program).unwrap();
+        drop(ahead);
+        until(|| order.lock().unwrap().len() == 1);
+        drop(beside);
+        until(|| budget.census() == (1, 0));
+    }
+
+    /// A spare turn handed to a thread is that thread's: its makings take no second turn.
+    #[test]
+    fn a_spare_turn_held_on_its_thread_is_that_thread_s_turn() {
+        let budget = Arc::new(Budget::new(2, 1));
+        let _held = waited_turn(&budget, ticket());
+        let spare = budget.spare(Urgency::Program).unwrap();
+        let other = crate::exit_guard::spawn(std::thread::Builder::new(), move || {
+            assert!(!holds_turn());
+            let mut spare = spare;
+            spare.hold_here();
+            assert!(holds_turn());
+            assert!(program_turn().is_none());
+            drop(spare);
+            holds_turn()
+        })
+        .unwrap();
+        assert!(!other.join().unwrap());
+        assert!(holds_turn());
+        assert_eq!(budget.census(), (1, 0));
     }
 
     /// A free turn goes to the making something waits for before one nothing waits for, though

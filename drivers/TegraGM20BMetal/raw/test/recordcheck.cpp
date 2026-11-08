@@ -9,47 +9,11 @@
 #include <map>
 #include <string>
 #include "probe_logs.h"
+#include "record_compare.h"
 
 namespace {
 
 using probelogs::Run;
-
-std::string differences(const raw::Pack &pack, const raw::PackPipeline &pp, const raw::RuntimeRecord &r)
-{
-    std::string why;
-    const raw::PackPipeline &rp = r.pipeline;
-    if (pack.string(pp.keyString) != r.keyString)
-        why += " key-fields";
-    const uint32_t *blob = pack.section<uint32_t>(raw::PackBlob) + pp.blob;
-    if (pp.blobDwords != r.blob.size() || memcmp(blob, r.blob.data(), r.blob.size() * 4))
-        why += " blob";
-    if (pp.entries != rp.entries || memcmp(pp.entry, rp.entry, sizeof pp.entry))
-        why += " entries";
-    if (pp.pushes != rp.pushes || pp.pushMask != rp.pushMask || memcmp(pp.pushWords, rp.pushWords, sizeof pp.pushWords))
-        why += " push";
-    if (pp.vertexSlot != rp.vertexSlot || pp.vertexStride != rp.vertexStride)
-        why += " vertex";
-    if (pp.setBytes != rp.setBytes)
-        why += " set-bytes";
-    if (pp.flags != rp.flags)
-        why += " flags";
-    if (pp.keyHash != rp.keyHash)
-        why += " key";
-    if (!r.extras.empty() || !r.samplers.empty())
-        why += " extras";
-    for (int k = 0; k < 2; k++) {
-        const raw::PackProgram &packed = pack.section<raw::PackProgram>(raw::PackPrograms)[k ? pp.fs : pp.vs];
-        raw::PackProgram made;
-        const std::vector<uint8_t> slot = raw::programSlot(r.programs[k], made);
-        const uint8_t *heap = pack.section<uint8_t>(raw::PackHeap) + packed.heapOffset;
-        if (packed.bytes != made.bytes || memcmp(heap, slot.data(), slot.size()) ||
-            packed.program - packed.heapOffset != made.program || packed.dataOffset != made.dataOffset ||
-            packed.dataBytes != made.dataBytes || packed.cbufs != made.cbufs ||
-            memcmp(packed.cbufType, made.cbufType, sizeof made.cbufType))
-            why += k ? " pixel-program" : " vertex-program";
-    }
-    return why;
-}
 
 }  // namespace
 
@@ -60,7 +24,7 @@ int main(int argc, char **argv)
         return 2;
     }
     const std::string dir = argv[1];
-    Run r256, r16, r4096;
+    Run r256, r16, r4096, bound;
     raw::Pack pack;
     std::string err;
     if (!probelogs::loadRun(dir, 256, r256) || !probelogs::loadRun(dir, 16, r16) ||
@@ -68,6 +32,8 @@ int main(int argc, char **argv)
         fprintf(stderr, "recordcheck: %s\n", err.empty() ? "probe runs unread" : err.c_str());
         return 1;
     }
+    const bool offsets =
+        probelogs::loadRun(dir, "probeoff", bound);  // (a bucket probed before the bind-offset run has none)
     const std::map<std::string, raw::CapturedProgram> programs = probelogs::loadPrograms(dir + "/programs.bin");
     const raw::PackRules rules = raw::PackRules::of(pack, r256.context);
     auto byIndex = [](const Run &run, uint32_t index) -> const nvdec::ProbeSubmission * {
@@ -79,7 +45,12 @@ int main(int argc, char **argv)
     uint32_t same = 0, refused = 0, storage = 0, bad = 0;
     for (size_t i = 0; i < r256.probes.size(); i++) {
         const auto &[index, key] = r256.probes[i];
-        const raw::ProbeRuns runs = {&r256.submissions[i], byIndex(r16, index), byIndex(r4096, index), index, key};
+        const raw::ProbeRuns runs = {&r256.submissions[i],
+                                     byIndex(r16, index),
+                                     byIndex(r4096, index),
+                                     index,
+                                     key,
+                                     offsets ? byIndex(bound, index) : nullptr};
         raw::RuntimeRecord made;
         std::string why;
         const bool ok = raw::makeRecord(
@@ -93,7 +64,7 @@ int main(int argc, char **argv)
         const bool barrier = pp && (pp->flags & raw::PipelineBarrierForm);
         std::string verdict;
         if (pp && !barrier) {
-            verdict = ok ? differences(pack, *pp, made) : " refused (" + why + ")";
+            verdict = ok ? recordcompare::differences(pack, *pp, made) : " refused (" + why + ")";
             same += verdict.empty();
         } else if (barrier) {
             verdict = !ok && why.rfind("storage form", 0) == 0 ? "" : " not refused as a storage form";

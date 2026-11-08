@@ -19,6 +19,7 @@
 #include <libkern/c++/OSData.h>
 #include <libkern/c++/OSIterator.h>
 #include <pexpert/pexpert.h>
+#include "../../kits/SwitchDT/SwitchDTProperty.h"
 
 // Observation counters describe actual published nubs, not started drivers.
 extern "C" {
@@ -31,15 +32,17 @@ volatile uint32_t armdt_platform_nvram_proxy = 0;
 volatile uint32_t armdt_platform_device_count = 0;
 }
 
+// NOLINTNEXTLINE(misc-use-internal-linkage): OSDefineMetaClassAndStructors needs the class's external linkage
 class ArmDTPlatform : public IODTPlatformExpert {
+    // NOLINTNEXTLINE(misc-explicit-constructor): IOKit's structors macro declares the metaclass constructor
 OSDeclareDefaultStructors(ArmDTPlatform) public : bool configure(IOService *provider) override;
-    const char *deleteList(void) override;
-    const char *excludeList(void) override;
+    const char *deleteList() override;
+    const char *excludeList() override;
     void getUTCTimeOfDay(clock_sec_t *secs, clock_nsec_t *nsecs) override;
     void setUTCTimeOfDay(clock_sec_t secs, clock_nsec_t nsecs) override;
 
 private:
-    bool hasNVRAMProxy(IOService *provider);
+    static bool hasNVRAMProxy(IOService *provider);
     bool createDeviceNubs(IOService *provider);
 };
 
@@ -48,7 +51,7 @@ OSDefineMetaClassAndStructors(ArmDTPlatform, IODTPlatformExpert)
     // Serialized empty name lists: XNU's processTopLevel() treats a null pointer
     // as "every entry" (remove every child), not as "nothing". An empty list
     // genuinely selects no entry, so the supplied device tree is preserved.
-    const char *ArmDTPlatform::deleteList(void)
+    const char *ArmDTPlatform::deleteList()
 {
     return "()";
 }
@@ -57,7 +60,7 @@ OSDefineMetaClassAndStructors(ArmDTPlatform, IODTPlatformExpert)
 // IODTNVRAM::init took the node's place in the device-tree plane): a nub made from it would take that place in turn,
 // so IODeviceTree:/options, where userland reads and writes NVRAM, would be an empty IOPlatformDevice: nothing to
 // read, and every write refused (sandbox "iokit-set-properties iokit-class:IOPlatformDevice").
-const char *ArmDTPlatform::excludeList(void)
+const char *ArmDTPlatform::excludeList()
 {
     return "('options')";
 }
@@ -66,9 +69,9 @@ const char *ArmDTPlatform::excludeList(void)
 // PEGetUTCTimeOfDay() and writes it on settimeofday() (PESetUTCTimeOfDay()); both land here. The
 // board's RTC driver publishes itself as the "IORTC" resource (an IORTC, the class XNU defines for
 // this), as IOKitInitializeTime() expects; without one the inherited stubs answer 0, the 1970 epoch.
-static IORTC *publishedRTC(void)
+static IORTC *publishedRTC()
 {
-    IOService *resources = IOService::getResourceService();
+    const IOService *resources = IOService::getResourceService();
     return resources ? OSDynamicCast(IORTC, resources->getProperty("IORTC")) : nullptr;
 }
 
@@ -94,21 +97,19 @@ void ArmDTPlatform::setUTCTimeOfDay(clock_sec_t secs, clock_nsec_t nsecs)
 
 bool ArmDTPlatform::hasNVRAMProxy(IOService *provider)
 {
-    IORegistryEntry *chosen = provider->childFromPath("chosen", gIODTPlane);
+    const IORegistryEntry *chosen = provider->childFromPath("chosen", gIODTPlane);
     if (chosen == nullptr) {
         return false;
     }
-    OSData *bankSize = OSDynamicCast(OSData, chosen->getProperty("nvram-bank-size"));
-    OSData *proxyData = OSDynamicCast(OSData, chosen->getProperty("nvram-proxy-data"));
-    bool valid = (bankSize != nullptr) && (bankSize->getLength() == sizeof(uint32_t)) && (proxyData != nullptr) &&
-                 (proxyData->getLength() != 0);
+    const bool valid = switch_dt_length(chosen, "nvram-bank-size") == sizeof(uint32_t) &&
+                       switch_dt_length(chosen, "nvram-proxy-data") != 0;
     chosen->release();
     return valid;
 }
 
 bool ArmDTPlatform::createDeviceNubs(IOService *provider)
 {
-    IORegistryEntry *bus = provider->childFromPath("arm-io", gIODTPlane);
+    const IORegistryEntry *bus = provider->childFromPath("arm-io", gIODTPlane);
     if (bus == nullptr) {
         return false;
     }
@@ -126,7 +127,7 @@ bool ArmDTPlatform::createDeviceNubs(IOService *provider)
         return false;
     }
     uint32_t count = 0;
-    IORegistryEntry *entry;
+    IORegistryEntry *entry = nullptr;
     while ((entry = OSDynamicCast(IORegistryEntry, iterator->getNextObject())) != nullptr) {
         IOService *nub = createNub(entry);
         if (nub == nullptr) {
@@ -147,11 +148,11 @@ bool ArmDTPlatform::createDeviceNubs(IOService *provider)
 
 bool ArmDTPlatform::configure(IOService *provider)
 {
-    IORegistryEntry *cpus = provider->childFromPath("cpus", gIODTPlane);
-    IORegistryEntry *bus = provider->childFromPath("arm-io", gIODTPlane);
-    IORegistryEntry *defaults = provider->childFromPath("defaults", gIODTPlane);
-    IORegistryEntry *options = provider->childFromPath("options", gIODTPlane);
-    bool structure = (cpus != nullptr) && (bus != nullptr) && (defaults != nullptr) && (options != nullptr);
+    const IORegistryEntry *cpus = provider->childFromPath("cpus", gIODTPlane);
+    const IORegistryEntry *bus = provider->childFromPath("arm-io", gIODTPlane);
+    const IORegistryEntry *defaults = provider->childFromPath("defaults", gIODTPlane);
+    const IORegistryEntry *options = provider->childFromPath("options", gIODTPlane);
+    const bool structure = (cpus != nullptr) && (bus != nullptr) && (defaults != nullptr) && (options != nullptr);
     if (cpus != nullptr) {
         cpus->release();
     }
@@ -188,11 +189,10 @@ bool ArmDTPlatform::configure(IOService *provider)
     uint32_t cpuCount = 0;
     uint32_t busCount = 0;
     uint32_t defaultsCount = 0;
-    IORegistryEntry *child;
+    const IORegistryEntry *child = nullptr;
     while ((child = OSDynamicCast(IORegistryEntry, iterator->getNextObject())) != nullptr) {
         count++;
-        OSData *type = OSDynamicCast(OSData, child->getProperty("device_type"));
-        if ((type != nullptr) && (type->getLength() == 4) && (memcmp(type->getBytesNoCopy(), "cpu", 4) == 0)) {
+        if (switch_dt_string_is(child, "device_type", "cpu")) {
             cpuCount++;
         }
         if (strcmp(child->getName(), "arm-io") == 0) {

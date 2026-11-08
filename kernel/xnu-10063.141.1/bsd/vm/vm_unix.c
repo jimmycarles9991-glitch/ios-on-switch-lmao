@@ -2765,14 +2765,14 @@ switch_widget_deadline_pager(const struct switch_wd_site *site, vm_object_t file
 const struct switch_ui_scale *switch_ui_scale(void);
 
 
-static uint32_t switch_us_logged[SWITCH_US_SITES];
+static uint32_t switch_us_logged[SWITCH_US_MAX_SITES];
 
 /* crypt_ops is the site, as for the widget deadlines */
 static int
 switch_ui_scale_page(const void *src, void *dst, unsigned long long src_offset, void *ops)
 {
 	const struct switch_us_site *site = ops;
-	const unsigned which = (unsigned)(site - switch_us_sites);
+	const unsigned which = (unsigned)(site - SWITCH_US_CACHE->sites);
 	const struct switch_ui_scale *scale = switch_ui_scale();
 	uint8_t *out = dst;
 	uint8_t patched[2][sizeof(site->edit[0].stock)];
@@ -2834,10 +2834,10 @@ switch_ui_scale_pager(const struct switch_us_site *site, vm_object_t file_object
 		printf("SwitchUIScale: %s cache header read failed (%d), cache text left stock\n", site->name, error);
 		return MEMORY_OBJECT_NULL;
 	}
-	if (memcmp(header, switch_hg_magic, sizeof(switch_hg_magic)) != 0 ||
+	if (memcmp(header, SWITCH_US_CACHE->magic, sizeof(SWITCH_US_CACHE->magic)) != 0 ||
 	    memcmp(header + SWITCH_HG_UUID_OFFSET, site->uuid, sizeof(site->uuid)) != 0) {
-		printf("SwitchUIScale: %s is not in the 21H461 subcache (UUID differs), cache text left stock\n",
-		    site->name);
+		printf("SwitchUIScale: %s is not in the %s subcache (UUID differs), cache text left stock\n",
+		    site->name, SWITCH_US_CACHE->build);
 		return MEMORY_OBJECT_NULL;
 	}
 
@@ -2863,12 +2863,12 @@ switch_ui_scale_pager(const struct switch_us_site *site, vm_object_t file_object
  * Called by vm_shared_region_map_file_setup() for each executable cache mapping it has just entered in a shared
  * region, once per slot (0 .. SWITCH_TEXT_SLOTS - 1 there). Returns an apple_protect pager for the slot's range to replace
  * (range_offset/range_size within the mapping), or MEMORY_OBJECT_NULL to keep that part of the mapping stock. The home
- * grid, settings icons and keyboard ranges are in different subcaches (.25, .13, .03), one per mapping, so they only
- * answer slot 0; the .07 mapping holds both widget deadline sites, slot k being site k; a UI scale site answers its own
- * slot (switch_ui_scale_sites.h; .11 holds three: MobileGestalt and the two CoreUI ones; .31 only ProgressUI's;
- * .03's two UIKitCore battery fills are slots 1 and 2, the keyboard's being 0; .13's CoverSheetKit row is slot 1,
- * the settings icons' being 0; .25's SpringBoard switcher scale and SystemStatusUI battery row are slots 1 and 2,
- * the home grid's being 0).
+ * grid, settings icons and keyboard ranges are in different subcaches of 21H461 (.25, .13, .03), one per mapping, so
+ * they only answer slot 0; the .07 mapping holds both widget deadline sites, slot k being site k; a UI scale site
+ * answers its own slot (switch_ui_scale_sites_<build>.h; on 21H461 .11 holds three: MobileGestalt and the two CoreUI
+ * ones; .31 only ProgressUI's; .03's two UIKitCore battery fills are slots 1 and 2, the keyboard's being 0; .13's
+ * CoverSheetKit row is slot 1, the settings icons' being 0; .25's SpringBoard switcher scale and SystemStatusUI
+ * battery row are slots 1 and 2, the home grid's being 0).
  */
 memory_object_t switch_shared_cache_text_pager(vm_object_t file_object, uint64_t file_offset, uint64_t size,
     uint64_t unslid_address, struct vnode *vp, unsigned slot, uint64_t *range_offset, uint64_t *range_size);
@@ -2890,7 +2890,7 @@ switch_shared_cache_text_pager(vm_object_t file_object, uint64_t file_offset, ui
 			return mo;
 		}
 	}
-	const struct switch_us_site *site = switch_us_site_for_slot(slot, unslid_address, size, file_offset);
+	const struct switch_us_site *site = switch_us_site_for_slot(SWITCH_US_CACHE, slot, unslid_address, size, file_offset);
 	if (site != NULL) {
 		mo = switch_ui_scale_pager(site, file_object, file_offset, size, unslid_address, vp, range_offset,
 		    range_size);

@@ -12,7 +12,7 @@
 #include "../NativePlanes.h"
 #include "bazel/testing/source_text.h"
 
-using namespace NativePlanes;
+using namespace native_planes;
 
 namespace {
 
@@ -169,9 +169,9 @@ TEST(DisplayBlend, TheDriverWritesTheseValues)
     const std::string driver = switch_ios::test::SourceText("../NativePlanesDisplay.h");
     EXPECT_NE(driver.find("win[kBlendLayer] = kBlendBypass | 2;"), std::string::npos);
     const std::string blendA = switch_ios::test::Between(driver, "void planeBlendA(bool over", "\n}\n");
-    EXPECT_NE(blendA.find("a[NativePlanes::kBlendLayer] = NativePlanes::kBlendPremultiplied;"), std::string::npos);
-    EXPECT_NE(blendA.find("a[NativePlanes::kBlendMatch] = NativePlanes::kBlendOver;"), std::string::npos);
-    EXPECT_NE(blendA.find("a[NativePlanes::kBlendNomatch] = NativePlanes::kBlendOver;"), std::string::npos);
+    EXPECT_NE(blendA.find("a[native_planes::kBlendLayer] = native_planes::kBlendPremultiplied;"), std::string::npos);
+    EXPECT_NE(blendA.find("a[native_planes::kBlendMatch] = native_planes::kBlendOver;"), std::string::npos);
+    EXPECT_NE(blendA.find("a[native_planes::kBlendNomatch] = native_planes::kBlendOver;"), std::string::npos);
 }
 
 }  // namespace

@@ -39,6 +39,7 @@ host_library(
         "//drivers/SwitchBattery:SwitchBattery.h",
         "//drivers/SwitchBattery:SwitchChargePolicy.h",
         "//drivers/SwitchPower:SwitchPower.h",
+        "//drivers/SwitchPower:SwitchSensorModels.h",
         "//drivers/SwitchPower:SwitchSensors.h",
         "//drivers/SwitchSuspend:SwitchWake.h",
         "//drivers/SwitchSuspend:SwitchWakeSources.h",

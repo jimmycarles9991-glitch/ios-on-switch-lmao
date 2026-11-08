@@ -43,7 +43,10 @@ kernel_driver(
         "drivers/SwitchPower",
         "drivers/TegraGPIO",
         "drivers/TegraI2C",
+        "kits/SwitchDMA",
+        "kits/SwitchMMIO",
         "kits/SwitchRefusal",
+        "kits/SwitchTime",
     ],
     stems = {"NativeSwitchBlock.cpp": "NativeSwitchBlockDevice"},
 )

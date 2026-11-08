@@ -1,10 +1,9 @@
 // SPDX-License-Identifier: BSD-2-Clause-Patent
-// The radio services the AWDL stack uses, exactly as agreed in out/agent-scratch/r12-awdl/RADIO-API.md (r12-awdl owns
-// the radio side and implements these in SwitchWLAN; r12-awdl-stack's SwitchWLANAwdl.cpp calls them). Until the radio
-// side lands, SwitchWLANAwdl.cpp carries weak defaults that answer "unavailable", so AWDL stays off.
+// The radio services the AWDL stack (SwitchWLANAwdl.cpp) uses: SwitchWLAN.cpp's for the firmware's own AWDL (§6), and
+// SwitchWLANAwdlSoft.cpp's for the soft backend (§2-§5).
 // Plain C types only. Every function: any thread, never blocks; completions come through the callbacks. The
-// exceptions wait for the firmware (swlan_awdl_tsf_read, swlan_awdl_var): the stack calls them only from
-// its own threads, with its lock dropped, never from a callback of this API. The registration calls
+// exception waits for the firmware (swlan_awdl_var): the stack calls it only from its own threads, with its lock
+// dropped, never from a callback of this API. The registration calls
 // (swlan_awdl_rx_start, swlan_awdl_events, swlan_awdl_fw_events, swlan_awdl_eth_rx) only store the callback: the
 // stack calls them with its lock held. Whatever the firmware needs for them (event_msgs bits, monitor) is set up by
 // swlan_awdl_open, which the stack calls without its lock.
@@ -18,20 +17,21 @@
 extern "C" {
 #endif
 
-#define SWLAN_AWDL_ABI_VERSION 2  // 2: per-interface variables (swlan_awdl_var) and the bring-up probe in the caps
+// 2: per-interface variables (swlan_awdl_var) and the bring-up probe in the caps; 3: action frames with a stay
+// (can_tx_action, swlan_tx_req.stay_us) in place of timed injection
+#define SWLAN_AWDL_ABI_VERSION 3
 
 struct bcm_awdl_probe;  // awdl/awdl_bcm.h
 
 struct swlan_awdl_caps {
     uint32_t abi_version;        // SWLAN_AWDL_ABI_VERSION
-    uint8_t can_monitor;         // rx of 802.11 frames with metadata (§2)
-    uint8_t can_inject;          // tx of caller-built 802.11 frames (§3)
-    uint8_t can_inject_timed;    // tx honours tx_tsf
+    uint8_t can_monitor;         // rx of 802.11 frames, AWDL data included (§2)
+    uint8_t can_inject;          // tx of caller-built 802.11 data frames (§3)
+    uint8_t can_tx_action;       // tx of action frames on a chosen channel, then a stay there (§3, actframe)
     uint8_t can_scheduled_hops;  // runs a TSF-locked channel sequence (§4)
     uint8_t can_stay_assoc;      // hops while en0 stays associated (mchan); else time-shared
     uint8_t has_native_awdl;     // the firmware's own awdl iovars (§6)
-    uint8_t _pad;
-    uint32_t tsf_read_us_err;
+    uint8_t soft_trial;          // debug builds: the soft backend runs although it cannot carry data (switch-awdl-soft)
     uint8_t self_mac[6];
     uint16_t max_inject_len;
     // What the firmware's iovar table answered at bring-up (SwitchWLAN.cpp's probe, once a boot): the stack picks the
@@ -67,13 +67,15 @@ int swlan_awdl_rx_start(swlan_rx_fn fn, void *ctx);
 int swlan_awdl_rx_stop(void);
 int swlan_awdl_rx_filter(const uint8_t dst[6], const uint8_t bssid[6], uint16_t ethertype_or_0);
 
+// Sent as soon as the radio can. A radio without hops leaves its home channel for a frame on another one and comes back
+// `stay_us` after the request (an excursion: the frame's slot); on its home channel it never moves.
 struct swlan_tx_req {
     const uint8_t *frame;  // whole 802.11 frame, no FCS
     size_t len;
     uint16_t freq_mhz;
     uint8_t rate_mcs;  // 0xff: firmware default
     uint8_t flags;     // bit0 NO_ACK, bit1 fail-if-off-channel
-    uint64_t tx_tsf;   // 0: asap
+    uint32_t stay_us;  // 0: no need to stay
 };
 
 enum {
@@ -115,7 +117,6 @@ struct swlan_awdl_event {
 
 typedef void (*swlan_evt_fn)(void *ctx, const struct swlan_awdl_event *e);
 int swlan_awdl_events(swlan_evt_fn fn, void *ctx);
-int swlan_awdl_tsf_read(uint64_t *tsf_us);
 
 // ---- §6 native AWDL: the firmware's own AWDL (cap "awdl", r7p8) ----------------------------------------------------------
 // One firmware variable on firmware interface `ifidx` (the msgbuf ioctl's interface: 0 the station; the AWDL
@@ -127,7 +128,7 @@ int swlan_awdl_tsf_read(uint64_t *tsf_us);
 #define SWLAN_FWERR_BASE  1000
 #define SWLAN_FWERR(bcme) (-SWLAN_FWERR_BASE + (bcme))
 
-static inline int swlan_is_fwerr(int e)
+static inline bool swlan_is_fwerr(int e)
 {
     return e < -SWLAN_FWERR_BASE && e > -2 * SWLAN_FWERR_BASE;  // BCME codes are -1 .. -60
 }

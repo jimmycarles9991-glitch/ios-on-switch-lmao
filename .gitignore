@@ -12,8 +12,9 @@ bundles/
 *.dmg
 *.HEIC
 *.heic
-# ...except the video decoder's test inputs
+# ...except test inputs: the video decoder's and the hardware test app's pinned media
 !/drivers/SwitchVideoDecoders/test/*.heic
+!/bazel/pinned/hw_test_app/media/*.heic
 
 # Editor/agent leftovers
 *.orig

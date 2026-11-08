@@ -54,7 +54,7 @@ class StageTest(unittest.TestCase):
         return manifest
 
     def sync(self) -> str:
-        return stage.sync(self.data, stage.from_manifest(self.manifest()))
+        return stage.sync(self.data, stage.from_manifest(self.manifest()), lambda _: None)
 
     def card(self) -> dict[str, bytes]:
         top = self.data / 'ngpu/addons'
@@ -74,7 +74,7 @@ class StageTest(unittest.TestCase):
         for source in (self.runfiles / '_main/out').rglob('*'):
             if source.is_file():
                 source.unlink()
-        self.assertTrue(stage.sync(self.data, stage.from_manifest(manifest)).startswith('unchanged'))
+        self.assertTrue(stage.sync(self.data, stage.from_manifest(manifest), lambda _: None).startswith('unchanged'))
 
     def test_a_change_copies_that_file_and_a_dropped_file_goes(self):
         self.sync()

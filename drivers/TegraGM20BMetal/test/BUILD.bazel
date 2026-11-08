@@ -7,15 +7,28 @@
 #   nvk_wait_any_test nvkmd_darwin's WAIT_ANY (nvkmd_darwin_wait_any.h) over a model of the kext's WaitFence: it returns
 #                     once one sync of the set resolves (a host signal, a fence's interrupt), sleeps until then, keeps
 #                     its deadline, and calls a passed fence whose wake never came a lost interrupt
+#   nvk_kill_test     nvkmd_darwin's view of a channel the kernel killed (nvkmd_darwin_kill.h): the fence word's kill record
+#                     names the seqnos that never ran, a kept record answers for its old channel alone, a timeline keeps
+#                     its failed values
 #   nvk_surfaces_test nvkmd_darwin's ExecSurfaces record (nvkmd_darwin_surfaces.h): each BO once with its accesses merged,
 #                     past its room the all-imports flag, its length
 #   raw_events_source_test  how a command buffer with a plain or shared Metal event stays raw (frontend, bridge, m2v,
 #                     RawMetal), and the cross-process shared event refusal line
 #   raw_follow_test   raw/runtime/raw_follow.h: the raw path's threads take a fixed-priority committer's policy, never a
 #                     lower one, and keep their own for a timeshare committer
+#   raw_tiled_cache_test  raw/runtime/raw_tiled_cache.h: with the kernel's tiled-cache bit, deko3d's configuration then the
+#                     enable at context init and one flush per command buffer; nothing without it
+#   raw_comp_test     raw/runtime/raw_comp.h: the compressible kinds the raw path binds are the kernel kind table's (nouveau
+#                     gm200_mmu_kind) and demote as it says; the boot ZBC values read alike by Metal and NV format
 #   stage_test        stage-tegra-gm20b-metal.py on a directory standing in for the Data volume
 #   raw_ycbcr_test    raw/runtime/raw_ycbcr.cpp: the two-plane YCbCr textures the raw path converts (m2v's rules) and the
 #                     conversion's shape; its texels against Metal's reads are raw/test/ycbcroracle.mm's (this Mac's GPU)
+#   raw_xr_test       raw/runtime/raw_xr.h: the extended-range formats the raw path keeps and the codes Metal's Clear
+#                     stores in them (an M4 Max's); against Metal's own reads and clears it is raw/test/xroracle.mm's
+#   raw_clear_test    raw/runtime/raw_clear.h: the clear values the raw path hands NVK, m2v's for every format it renders
+#                     (raw/test/targetcheck.py: its target formats against NVK's)
+#   raw_sampler_test  raw/runtime/raw_sampler.h: the Metal samplers the raw path takes, as m2v samples them on NVK
+#                     (raw/test/samplercheck: their headers against NVK's)
 #   raw_cache_test    raw/runtime/raw_cache.h: the records the runtime makes for states the pack lacks, kept on disk and
 #                     made once per process (raw/test/cachecheck: the same checks on a bucket's real records), and
 #                     raw_metallib.h: the functions' AIR hashes that key them
@@ -24,6 +37,9 @@
 #                     barrier's region test over such draws, and which covers a render area (a clear it makes redundant)
 #   raw_overlap_test  raw/runtime/raw_overlap.h: a fetching draw's triangles in runs that share no pixel (against a GPU's
 #                     coverage it is raw/test/overlaporacle.mm's, this Mac's GPU)
+#   nak_half_round_test  NAK's rewrites of metal2vulkan's half emulation (nak_nir_algebraic.py): its rounding as two
+#                     conversions, the same for every f32 input; half sums and products in f32 as HADD2/HMUL2, the
+#                     same for every pair of halves
 #
 #   bazel test //drivers/TegraGM20BMetal/test:all
 load("@rules_python//python:py_test.bzl", "py_test")
@@ -76,6 +92,20 @@ host_test(
 )
 
 host_test(
+    name = "nvk_kill_test",
+    srcs = [
+        "nvk_kill_test.cpp",
+        "//drivers/TegraGM20B:TegraGM20BABI.h",
+        "//third_party/mesa/src/nouveau/vulkan:nvkmd/darwin/nvkmd_darwin_kill.h",
+    ],
+    copts = [
+        "-I",
+        "drivers/TegraGM20B",
+    ],
+    cxx_std = "c++17",
+)
+
+host_test(
     name = "nvk_surfaces_test",
     srcs = [
         "nvk_surfaces_test.cpp",
@@ -96,7 +126,7 @@ host_test(
         "//drivers/NativeMetal:NativeBridgeMetalFrontend.mm",
         "//drivers/NativeMetal:bridge/NativeMetalObjects.rs",
         "//drivers/TegraGM20BMetal:TegraGM20BMetalPlugin.mm",
-        "//drivers/TegraGM20BMetal:raw/runtime/RawMetal.mm",
+        "//drivers/TegraGM20BMetal:raw/runtime/RawMetalEvents.mm",
         "//third_party/m2v/crates/metal2vulkan-runtime:sources",
     ],
 )
@@ -108,6 +138,40 @@ host_test(
         "//drivers/TegraGM20BMetal:raw/runtime/raw_follow.h",
     ],
     cxx_std = "c++17",
+)
+
+host_test(
+    name = "raw_tiled_cache_test",
+    srcs = [
+        "raw_tiled_cache_test.cpp",
+        "//drivers/TegraGM20B:TegraGM20BABI.h",
+        "//drivers/TegraGM20BMetal:raw/runtime/raw_push.h",
+        "//drivers/TegraGM20BMetal:raw/runtime/raw_tiled_cache.h",
+    ],
+    copts = [
+        "-iquote",
+        "drivers/TegraGM20B",
+    ],
+    cxx_std = "c++17",
+)
+
+host_test(
+    name = "raw_comp_test",
+    srcs = [
+        "raw_comp_test.cpp",
+        "//drivers/TegraGM20B:TegraGM20BABI.h",
+        "//drivers/TegraGM20BMetal:raw/pack/nvdec_comp.h",
+        "//drivers/TegraGM20BMetal:raw/runtime/raw_comp.h",
+        "//drivers/TegraGM20BMetal:raw/runtime/raw_kernel.h",
+        "//drivers/TegraGM20BMetal:raw/runtime/raw_surfaces.h",
+    ],
+    copts = [
+        "-iquote",
+        "drivers/TegraGM20B",
+    ],
+    cxx_std = "c++17",
+    data = ["//drivers/TegraGM20B:nouveau/nvkm/subdev/mmu/gm200.c"],
+    defines = ['GM200_C=\\"$(rootpath //drivers/TegraGM20B:nouveau/nvkm/subdev/mmu/gm200.c)\\"'],
 )
 
 py_test(
@@ -122,6 +186,33 @@ host_test(
         "raw_ycbcr_test.cpp",
         "//drivers/TegraGM20BMetal:raw/runtime/raw_ycbcr.cpp",
         "//drivers/TegraGM20BMetal:raw/runtime/raw_ycbcr.h",
+    ],
+    cxx_std = "c++17",
+)
+
+host_test(
+    name = "raw_xr_test",
+    srcs = [
+        "raw_xr_test.cpp",
+        "//drivers/TegraGM20BMetal:raw/runtime/raw_xr.h",
+    ],
+    cxx_std = "c++17",
+)
+
+host_test(
+    name = "raw_clear_test",
+    srcs = [
+        "raw_clear_test.cpp",
+        "//drivers/TegraGM20BMetal:raw/runtime/raw_clear.h",
+    ],
+    cxx_std = "c++17",
+)
+
+host_test(
+    name = "raw_sampler_test",
+    srcs = [
+        "raw_sampler_test.cpp",
+        "//drivers/TegraGM20BMetal:raw/runtime/raw_sampler.h",
     ],
     cxx_std = "c++17",
 )
@@ -155,6 +246,8 @@ host_test(
         "//drivers/TegraGM20BMetal:raw/runtime/raw_cache.cpp",
         "//drivers/TegraGM20BMetal:raw/runtime/raw_cache.h",
         "//drivers/TegraGM20BMetal:raw/runtime/raw_capture.h",
+        "//drivers/TegraGM20BMetal:raw/runtime/raw_compiler.cpp",
+        "//drivers/TegraGM20BMetal:raw/runtime/raw_compiler.h",
         "//drivers/TegraGM20BMetal:raw/runtime/raw_metallib.cpp",
         "//drivers/TegraGM20BMetal:raw/runtime/raw_metallib.h",
         "//drivers/TegraGM20BMetal:raw/runtime/raw_pack.cpp",
@@ -163,4 +256,16 @@ host_test(
         "//drivers/TegraGM20BMetal:raw/test/cache_checks.h",
     ],
     cxx_std = "c++17",
+)
+
+host_test(
+    name = "nak_half_round_test",
+    size = "medium",
+    srcs = ["nak_half_round_test.cpp"],
+    copts = [
+        "-O2",
+        "-march=armv8.2-a+fp16",
+    ],
+    cxx_std = "c++17",
+    sanitize = False,
 )

@@ -27,6 +27,8 @@ void switch_pmc_remove_clamping(unsigned partition);
 // tegra_powergate_sequence_power_up: reset asserted, partition on, clock on, clamps off, reset deasserted (10 us
 // between steps). Engine quirks (MC hot reset, MBIST work-arounds, clock sources) stay with the engine's driver.
 bool switch_pmc_power_up(unsigned partition, unsigned clock_id, unsigned reset_id);
+// The same up to the clamps, the reset left asserted for a driver that programs its engine's clocks first (XUSB).
+bool switch_pmc_power_up_in_reset(unsigned partition, unsigned clock_id, unsigned reset_id);
 // tegra_powergate_power_down: clock on, reset asserted, clock off, partition off.
 bool switch_pmc_power_down(unsigned partition, unsigned clock_id, unsigned reset_id);
 
@@ -35,6 +37,8 @@ bool switch_pmc_io_pad_off(unsigned dpd);
 
 uint32_t switch_pmc_read(uint32_t offset);
 void switch_pmc_write(uint32_t offset, uint32_t value);
+// Serialised with every other kit user's PMC read-modify-write (thread context).
+void switch_pmc_rmw(uint32_t offset, uint32_t clear, uint32_t set);
 
 #ifdef __cplusplus
 }

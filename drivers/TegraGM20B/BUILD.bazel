@@ -37,7 +37,10 @@ kernel_driver(
         "{tree}/drivers/TegraGM20B",
     ],
     c_recipe = ":freestanding_c",
-    hdr_deps = [],
+    hdr_deps = [
+        "kits/SwitchLinux",
+        "kits/SwitchMMIO",
+    ],
     object_names = "path",
 )
 
@@ -68,6 +71,7 @@ kernel_driver(
         "TegraGM20BExecSurfaces.cpp",
         "TegraGM20BSharedWiring.cpp",
         "TegraGM20BSurfacePrefault.cpp",
+        "TegraGM20BTiledCache.c",
         # Subclasses the original IOAcceleratorES: a late object, run by TegraGM20B.cpp after IOGPUFamily loads.
         "TegraGM20BAccelerator.cpp",
         # GM20B falcon firmware (linux-firmware nvidia/gm20b) by .incbin.
@@ -89,7 +93,10 @@ kernel_driver(
         "drivers/SwitchSuspend",
         "drivers/TegraDisplayFlip",
         "drivers/TegraI2C",
+        "kits/SwitchDMA",
         "kits/SwitchIdle",
+        "kits/SwitchLinux",
+        "kits/SwitchMMIO",
         "kits/SwitchRefusal",
         "kits/SwitchScratch",
         "kits/SwitchSysctl",

@@ -103,38 +103,43 @@ static inline struct switch_pd_step switch_pd_step_make(enum switch_pd_act act, 
 }
 
 // After an ALERT (alert = its ALERT_STATUS) or with the state as it is (alert 0).
+// NOLINTBEGIN(modernize-use-nullptr): C (the host harness) reads this header too; 0 is the step without a reason
 static inline struct switch_pd_step switch_pd_decide(enum switch_pd_phase phase, uint16_t alert, uint16_t status1,
                                                      uint16_t status2, bool allow_source)
 {
     const bool plugged = (status1 & SWITCH_PD_STATUS1_INSERT) != 0;
     const bool vbus = (status1 & SWITCH_PD_STATUS1_VSAFE) != 0;
-    const bool partner_is_sink = plugged && (status1 & SWITCH_PD_STATUS1_SRC_MODE);
-    const bool otg_sink = partner_is_sink && (status2 & SWITCH_PD_STATUS2_OTG_INSERT);
+    const bool partner_is_sink = plugged && ((status1 & SWITCH_PD_STATUS1_SRC_MODE) != 0u);
+    const bool otg_sink = partner_is_sink && ((status2 & SWITCH_PD_STATUS2_OTG_INSERT) != 0u);
     const struct switch_pd_step none = switch_pd_step_make(SWITCH_PD_NONE, phase, false, 0);
     switch (phase) {
     case SWITCH_PD_EMPTY:
         // Our sink without OTG_INSERT (yet, or an accessory): nothing to decide until the controller says more.
         if (!plugged || (partner_is_sink && !otg_sink))
             return none;
-        if (!partner_is_sink)
+        if (!partner_is_sink) {
             return switch_pd_step_make(SWITCH_PD_ENTER, SWITCH_PD_SINK, false,
                                        "sink: the partner is a source (charger, host or dock)");
-        if (vbus)  // the rails are off here: this VBUS is not ours
+        }
+        if (vbus) {  // the rails are off here: this VBUS is not ours
             return switch_pd_step_make(SWITCH_PD_ENTER, SWITCH_PD_SINK, false,
                                        "sink: the partner came up as our sink with VBUS already up");
-        if (!allow_source)
+        }
+        if (!allow_source) {
             return switch_pd_step_make(SWITCH_PD_ENTER, SWITCH_PD_SINK, false,
                                        "sink: the partner came up as our sink; host mode off");
+        }
         return switch_pd_step_make(SWITCH_PD_ENTER, SWITCH_PD_CLASSIFY, false,
                                    "classifying: the partner came up as our sink; source switches off 1 s");
     case SWITCH_PD_CLASSIFY:
         // The switches moved the port: a sink-only partner stays away, a dual-role one sources.
         if (!plugged)
             return switch_pd_step_make(SWITCH_PD_SAW_DETACH, phase, false, 0);
-        if (!partner_is_sink)
+        if (!partner_is_sink) {
             return switch_pd_step_make(
                 SWITCH_PD_ENTER, SWITCH_PD_SINK, true,
                 "dual-role partner: it sources with our source switches off (sink until unplugged)");
+        }
         return none;
     case SWITCH_PD_REATTACH:
         if (!plugged || (partner_is_sink && !otg_sink))
@@ -146,12 +151,14 @@ static inline struct switch_pd_step switch_pd_decide(enum switch_pd_phase phase,
     case SWITCH_PD_SOURCE:
         if (!plugged)
             return switch_pd_step_make(SWITCH_PD_END, SWITCH_PD_EMPTY, false, "detached: VBUS, v_vdd5v3, VCONN off");
-        if (!partner_is_sink)
+        if (!partner_is_sink) {
             return switch_pd_step_make(SWITCH_PD_END, SWITCH_PD_SINK, false,
                                        "not sourcing: the partner took the source role (sink until unplugged)");
-        if (alert & SWITCH_PD_ALERT_CONTRACT)
+        }
+        if (alert & SWITCH_PD_ALERT_CONTRACT) {
             return switch_pd_step_make(SWITCH_PD_END, SWITCH_PD_HELD, false,
                                        "not sourcing: the partner made a USB-PD contract (no plain OTG device)");
+        }
         if ((alert & SWITCH_PD_ALERT_SRC_FAULT) || (status1 & SWITCH_PD_STATUS1_FAULT_MASK))
             return switch_pd_step_make(SWITCH_PD_END, SWITCH_PD_HELD, false, "not sourcing: source fault");
         return none;
@@ -172,8 +179,9 @@ static inline bool switch_pd_usb_host(bool sourcing, uint16_t status1)
 {
     const bool plugged = (status1 & SWITCH_PD_STATUS1_INSERT) != 0;
     const bool vbus = (status1 & SWITCH_PD_STATUS1_VSAFE) != 0;
-    const bool partner_sources = plugged && vbus && !(status1 & SWITCH_PD_STATUS1_SRC_MODE);
-    const bool dfp = ((status1 >> SWITCH_PD_STATUS1_DR_SHIFT) & 3u) == SWITCH_PD_DATA_ROLE_DFP;
+    const bool partner_sources = plugged && vbus && ((status1 & SWITCH_PD_STATUS1_SRC_MODE) == 0u);
+    const bool dfp =
+        ((status1 & (3u << SWITCH_PD_STATUS1_DR_SHIFT)) >> SWITCH_PD_STATUS1_DR_SHIFT) == SWITCH_PD_DATA_ROLE_DFP;
     return sourcing || (partner_sources && dfp);
 }
 
@@ -182,20 +190,25 @@ static inline struct switch_pd_step switch_pd_window_end(enum switch_pd_phase ph
 {
     const bool plugged = (status1 & SWITCH_PD_STATUS1_INSERT) != 0;
     if (phase == SWITCH_PD_CLASSIFY) {
-        if (!saw_detach)
+        if (!saw_detach) {
             return switch_pd_step_make(SWITCH_PD_ENTER, SWITCH_PD_SINK, false,
                                        "not sourcing: no detach with our source switches off, sink-only not proven");
-        if (plugged)
+        }
+        if (plugged) {
             return switch_pd_step_make(SWITCH_PD_ENTER, SWITCH_PD_SINK, false,
                                        "not sourcing: the partner came back with our source switches off");
+        }
         return switch_pd_step_make(SWITCH_PD_ENTER, SWITCH_PD_REATTACH, false,
                                    "sink-only partner: it left with our source switches off and sourced nothing; "
                                    "source rails (OCP, v_vdd5v3, VCONN), then switches, on");
     }
-    if (phase == SWITCH_PD_REATTACH)
+    if (phase == SWITCH_PD_REATTACH) {
         return switch_pd_step_make(SWITCH_PD_ENTER, SWITCH_PD_EMPTY, false,
                                    "empty: the sink-only partner did not come back; source rails off");
+    }
     return switch_pd_step_make(SWITCH_PD_NONE, phase, false, 0);
 }
+
+// NOLINTEND(modernize-use-nullptr)
 
 #endif

@@ -260,9 +260,12 @@ inline void committed(Stamps &s, Since &since, const Churn &totals, const void *
 // replay on m2v
 inline bool slow(const Stamps &s)
 {
-    const uint64_t ms = ticksPerMs(), commit = s.get(Commit), previous = s.get(Previous), back = s.get(Back);
+    const uint64_t ms = ticksPerMs();
+    const uint64_t commit = s.get(Commit);
+    const uint64_t previous = s.get(Previous);
+    const uint64_t back = s.get(Back);
     const uint64_t gap = previous && commit > previous ? commit - previous : 0;
-    return (gap > 20 * ms && gap < 250 * ms) || (back > commit && back - commit > 8 * ms) || s.get(ReplayStart);
+    return (gap > 20 * ms && gap < 250 * ms) || (back > commit && back - commit > 8 * ms) || s.get(ReplayStart) != 0;
 }
 
 // After the completed handlers ran: the kdebug event, and the line when the command buffer was slow (at most 20 a second,
@@ -284,7 +287,7 @@ inline void finished(Stamps &s)
         return;
     }
     static os_log_t log = os_log_create("com.brunostjohn.switch.TegraGM20BMetal", "frame");
-    auto g = [&s](Field f) {
+    const auto g = [&s](Field f) {
         return (unsigned long long)s.get(f);
     };
     char sites[2 * kSiteFrames * 48];

@@ -25,7 +25,7 @@ TEST(SwitchXudcSource, DriverUsesTheHeader)
              "#include \"XudcTransfer.h\"",
              "plan(runs, runCount, r.length, ep.mps, out, probe, kReach",
              "ep.tds->decide(index, e.code(), e.residue(), ep.in, residue,",
-             "ep.tds->push({(uint16_t)first, (uint16_t)n, r.length, probe && n > 1});",
+             "ep.tds->push({static_cast<uint16_t>(first), static_cast<uint16_t>(n), r.length, probe && n > 1});",
              "using Tds = TdRing<kDataRingTrbs - 1, kQueueDepth>;",
              "requestSync(r, r.md, 0, r.length, out);",
              "requestSync(r, r.md, 0, actual, true);",
@@ -62,7 +62,7 @@ TEST(SwitchXudcSource, OnlyTheHeadCompletes)
     EXPECT_THAT(
         source,
         HasSubstr("void SwitchXUDC::complete(uint32_t dci, IOReturn status, uint32_t actual, const Decision *event)"));
-    EXPECT_THAT(source, HasSubstr("case Verdict::Lost:\n        return lostEvent(dci, e, index, d);"));
+    EXPECT_THAT(source, HasSubstr("case Verdict::Lost:\n        lostEvent(dci, e, index, d);\n        return;"));
     EXPECT_THAT(source, HasSubstr("panic(\"SwitchUSB: XUDC transfer event lost on DCI %u"));
     EXPECT_THAT(source, HasSubstr("panic(\"SwitchUSB: XUDC event ring full, events were lost"));
 }

@@ -21,6 +21,8 @@
  */
 #include "ctxgf100.h"
 
+#include <switch_tiled_cache.h>
+
 static void
 gm20b_grctx_generate_main(struct gf100_gr_chan *chan)
 {
@@ -31,6 +33,7 @@ gm20b_grctx_generate_main(struct gf100_gr_chan *chan)
 	int i, tmp;
 
 	gf100_gr_mmio(gr, gr->sw_ctx);
+	switch_tiled_cache_golden(device);
 
 	gf100_gr_wait_idle(gr);
 

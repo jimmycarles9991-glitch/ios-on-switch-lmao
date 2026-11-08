@@ -53,7 +53,8 @@ alias(
     }),
 )
 
-# fetchform is a debug build's, so never in a package composed from the release (release builds).
+# fetchform and the hardware test app are a debug build's, so never in a package composed from the release (release
+# builds), which also keeps rules_apple, Swift and the Metal toolchain out of the Xcode-free image path.
 selects.config_setting_group(
     name = "local_debug",
     match_all = [
@@ -67,12 +68,13 @@ filegroup(
     srcs = [],
 )
 
-# The board ADT (the CMake flow's passes/native-root-memory-v1/full-ram.adt): generated, with its random seed pinned.
+# The board ADT, generated, with its random seed pinned: the CMake flow's 64 bytes (passes/native-root-memory-v1/
+# full-ram.adt), then 192 more for xnu-12377's 256 (boot/loader/seed.h).
 tool_output(
     name = "adt",
     outs = ["full-ram.adt"],
     args = [
-        "41d4ed8aee6621528a6a355e703603425eef27f7a8df3c8f3cf4460c943df40e4c8b6d7631620a39969418a79e0cb0817cd0d525a13134285ee356ac8871a940",
+        "41d4ed8aee6621528a6a355e703603425eef27f7a8df3c8f3cf4460c943df40e4c8b6d7631620a39969418a79e0cb0817cd0d525a13134285ee356ac8871a940bf7c5ca763a3b3b59a6396a4a5a1a65eb6be4e7192b809aa9472e695a17d5e6492afe92ba9f0d4c9d9831c3c7e4de329dc1d45cc8860982c20d89f67a6bc9863f4d1e123b269c92f815d8dc4c3cd4465fd94347865f56697cabaace0f626ee9eff9073be0c618df269f828ab451859f0812764250cb8cfcf352750e55b3b673a72be976026a8d60fb7182acd76062b23e21bd37f0bbe69e432da1b811cb23fc49a56466fb359c24c2d1cc5bcd9c0fc9c93d1f8f00bac4d25095a25181dde4696",
         "{out}",
     ],
     binary = "//tools/package:adt",
@@ -169,14 +171,24 @@ boot_package(
         "//install:from_release": {"@switch_release//:overlay/" + source: source for source in OVERLAY_BINARIES.values()},
         "//conditions:default": OVERLAY_BINARIES,
     }) | select({
-        ":local_debug": {"//drivers/TegraGM20BMetal:fetchform": "build/switch-gpu/fetchform"},
+        ":local_debug": {
+            "//drivers/TegraGM20BMetal:fetchform": "build/switch-gpu/fetchform",
+            "//hw_test_app:SwitchHWTest": "build/switch-hwtest/SwitchHWTest.ipa",
+        },
         "//conditions:default": {},
     }),
     overlay_data = {
         "//boot/logo:apple-logo~ipad.png": "build/progressui/apple-logo~ipad.png",
-        "//bazel/pinned:overlay/wallpaper-1x/7570.iPadOS_17_Flat.plist": "build/wallpaper-1x/7570.iPadOS_17_Flat.plist",
-        "//bazel/pinned:overlay/wallpaper-1x/7560.Lake_Flat.plist": "build/wallpaper-1x/7560.Lake_Flat.plist",
-    },
+    } | select({
+        "//ipsw:21H461": {
+            "//bazel/pinned:overlay/wallpaper-1x/21H461/7570.iPadOS_17_Flat.plist": "build/wallpaper-1x/21H461/7570.iPadOS_17_Flat.plist",
+            "//bazel/pinned:overlay/wallpaper-1x/21H461/7560.Lake_Flat.plist": "build/wallpaper-1x/21H461/7560.Lake_Flat.plist",
+        },
+        "//ipsw:24B119": {
+            "//bazel/pinned:overlay/wallpaper-1x/24B119/7570.iPadOS_17.plist": "build/wallpaper-1x/24B119/7570.iPadOS_17.plist",
+            "//bazel/pinned:overlay/wallpaper-1x/24B119/7560.Lake.plist": "build/wallpaper-1x/24B119/7560.Lake.plist",
+        },
+    }),
     overlay_files = ["//overlay:overlay_sources"],
     overlay_manifest = "//overlay:manifest.json",
     portrait_header = "//drivers/NativeMobileDisplay:SwitchPortrait.h",
@@ -194,6 +206,15 @@ boot_package(
         "//conditions:default": ":smp",
     }),
     static_trust = "//ipsw:static_system_trust",
+    system_trust = "//ipsw:system_cryptex_trust_cache",
+    xcode_env = select({
+        "//install:from_release": None,
+        "//conditions:default": "@xcode//:xcode.env",
+    }),
+    xcode_identity = select({
+        "//install:from_release": None,
+        "//conditions:default": "@xcode//:identity",
+    }),
 )
 
 # The loader and the window constants it was compiled for (constants.json: layout.h's and runs.h's), which the release
@@ -253,7 +274,7 @@ py_binary(
     ],
     main = "//tools/package:snapshot.py",
     tags = ["manual"],
-    deps = ["@rules_python//python/runfiles"],
+    deps = ["//tools/common:paths"],
 )
 
 # The RAM metadata exporter (exporter.uimg, pinned in bazel/pinned/firmware and staged in bl33.bin): its builder and its

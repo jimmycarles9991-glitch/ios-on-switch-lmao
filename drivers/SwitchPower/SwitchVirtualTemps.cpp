@@ -12,7 +12,9 @@
 #include "../../kits/SwitchRefusal/SwitchRefusal.h"
 #include "SwitchPower.h"
 
+// NOLINTNEXTLINE(misc-use-internal-linkage): OSDefineMetaClassAndStructors needs the class's external linkage
 class AppleVTempDispatcher : public IOService {
+    // NOLINTNEXTLINE(misc-explicit-constructor): IOKit's structors macro declares the metaclass constructor
     OSDeclareDefaultStructors(AppleVTempDispatcher);
     IOLock *lock = nullptr;
     OSDictionary *temperatures = nullptr;
@@ -46,7 +48,7 @@ void AppleVTempDispatcher::free()
 
 IOReturn AppleVTempDispatcher::setProperties(OSObject *properties)
 {
-    OSDictionary *dict = OSDynamicCast(OSDictionary, properties);
+    const OSDictionary *dict = OSDynamicCast(OSDictionary, properties);
     if (!dict || !dict->getCount()) {
         switch_refusal("AppleVTempDispatcher", "not a dictionary", "setProperties without sensor values");
         return kIOReturnBadArgument;
@@ -58,7 +60,7 @@ IOReturn AppleVTempDispatcher::setProperties(OSObject *properties)
     IOLockLock(lock);
     OSDictionary *next = OSDictionary::withDictionary(temperatures, temperatures->getCount() + dict->getCount());
     while (const OSSymbol *key = OSDynamicCast(OSSymbol, keys->getNextObject())) {
-        OSNumber *value = OSDynamicCast(OSNumber, dict->getObject(key));
+        const OSNumber *value = OSDynamicCast(OSNumber, dict->getObject(key));
         if (!value) {
             switch_refusal("AppleVTempDispatcher", "not a number", "%s is not a fixed-point temperature",
                            key->getCStringNoCopy());

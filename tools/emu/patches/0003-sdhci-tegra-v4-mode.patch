@@ -1,0 +1,172 @@
+diff --git a/hw/arm/tegra2/tegrax1.c b/hw/arm/tegra2/tegrax1.c
+index f31c03f..59b3c63 100644
+--- a/hw/arm/tegra2/tegrax1.c
++++ b/hw/arm/tegra2/tegrax1.c
+@@ -526,7 +526,11 @@ static void* tegra_init_sdmmc(int index, hwaddr base, qemu_irq irq, bool emmc, u
+     DriveInfo *di;
+ 
+     void* tmpdev = qdev_new(TYPE_SYSBUS_SDHCI);
+-    qdev_prop_set_uint32(tmpdev, "capareg", 0x376c0c8c); // Value from hardware is 0x376cd08c. Workaround qemu BASECLKFREQ validation.
++    /* SD Host Controller 3.00 registers with Tegra's v4 mode (64-bit ADMA2/SDMA), the hardware's capabilities and a
++     * writable HOST_CONTROL2 (QEMU keeps it read-only without UHS). */
++    qdev_prop_set_uint8(tmpdev, "sd-spec-version", 3);
++    qdev_prop_set_uint8(tmpdev, "uhs", 1);
++    qdev_prop_set_uint64(tmpdev, "capareg", 0x376cd08c);
+     sysbus_realize_and_unref(SYS_BUS_DEVICE(tmpdev), &error_fatal);
+ 
+     //sysbus_mmio_map(SYS_BUS_DEVICE(tmpdev), 0, base);
+diff --git a/hw/sd/sdhci.c b/hw/sd/sdhci.c
+index 140621a..0f65885 100644
+--- a/hw/sd/sdhci.c
++++ b/hw/sd/sdhci.c
+@@ -325,6 +325,45 @@ static void sdhci_data_transfer(void *opaque);
+ 
+ #define BLOCK_SIZE_MASK (4 * KiB - 1)
+ 
++/*
++ * Host Version 4 mode (HOST_CONTROL2 bit 12, SD Host Controller spec 4.10): SDMA takes its 64-bit address from the
++ * ADMA System Address register, and register 0x00 becomes the 32-bit block count / Auto CMD23 argument.
++ */
++static bool sdhci_v4_mode(SDHCIState *s)
++{
++    return s->hostctl2 & (1 << 12);
++}
++
++static bool sdhci_v4_64bit(SDHCIState *s)
++{
++    return sdhci_v4_mode(s) && (s->hostctl2 & (1 << 13));
++}
++
++static hwaddr sdhci_sdma_addr(SDHCIState *s)
++{
++    return sdhci_v4_mode(s) ? (hwaddr)s->admasysaddr : s->sdmasysad;
++}
++
++static void sdhci_sdma_advance(SDHCIState *s, unsigned int bytes)
++{
++    if (sdhci_v4_mode(s)) {
++        s->admasysaddr += bytes;
++    } else {
++        s->sdmasysad += bytes;
++    }
++}
++
++static void sdhci_auto_cmd23(SDHCIState *s)
++{
++    SDRequest request = { .cmd = 23, .arg = s->sdmasysad };
++    uint8_t response[16];
++
++    if (sdbus_do_command(&s->sdbus, &request, response) != 4) {
++        s->acmd12errsts |= R_SDHC_ACMD12ERRSTS_TIMEOUT_ERR_MASK;
++        s->errintsts |= SDHC_EIS_CMD12ERR;
++    }
++}
++
+ static void sdhci_send_command(SDHCIState *s)
+ {
+     SDRequest request;
+@@ -338,6 +377,9 @@ static void sdhci_send_command(SDHCIState *s)
+     request.arg = s->argument;
+ 
+     trace_sdhci_send_command(request.cmd, request.arg);
++    if ((s->trnmod & SDHC_TRNS_ACMD23) && (s->cmdreg & SDHC_CMD_DATA_PRESENT)) {
++        sdhci_auto_cmd23(s);
++    }
+     rlen = sdbus_do_command(&s->sdbus, &request, response);
+ 
+     if (s->cmdreg & SDHC_CMD_RESPONSE) {
+@@ -594,7 +636,7 @@ static void sdhci_sdma_transfer_multi_blocks(SDHCIState *s)
+     unsigned int begin;
+     const uint16_t block_size = s->blksize & BLOCK_SIZE_MASK;
+     uint32_t boundary_chk = 1 << (((s->blksize & ~BLOCK_SIZE_MASK) >> 12) + 12);
+-    uint32_t boundary_count = boundary_chk - (s->sdmasysad % boundary_chk);
++    uint32_t boundary_count = boundary_chk - (sdhci_sdma_addr(s) % boundary_chk);
+ 
+     if (!(s->trnmod & SDHC_TRNS_BLK_CNT_EN) || !s->blkcnt) {
+         qemu_log_mask(LOG_UNIMP, "infinite transfer is not supported\n");
+@@ -606,7 +648,7 @@ static void sdhci_sdma_transfer_multi_blocks(SDHCIState *s)
+      * possible stop at page boundary if initial address is not page aligned,
+      * allow them to work properly
+      */
+-    if ((s->sdmasysad % boundary_chk) == 0) {
++    if ((sdhci_sdma_addr(s) % boundary_chk) == 0) {
+         page_aligned = true;
+     }
+ 
+@@ -628,9 +670,9 @@ static void sdhci_sdma_transfer_multi_blocks(SDHCIState *s)
+                     s->blkcnt--;
+                 }
+             }
+-            dma_memory_write(s->dma_as, s->sdmasysad, &s->fifo_buffer[begin],
++            dma_memory_write(s->dma_as, sdhci_sdma_addr(s), &s->fifo_buffer[begin],
+                              s->data_count - begin, MEMTXATTRS_UNSPECIFIED);
+-            s->sdmasysad += s->data_count - begin;
++            sdhci_sdma_advance(s, s->data_count - begin);
+             if (s->data_count == block_size) {
+                 s->data_count = 0;
+             }
+@@ -649,9 +691,9 @@ static void sdhci_sdma_transfer_multi_blocks(SDHCIState *s)
+                 s->data_count = block_size;
+                 boundary_count -= block_size - begin;
+             }
+-            dma_memory_read(s->dma_as, s->sdmasysad, &s->fifo_buffer[begin],
++            dma_memory_read(s->dma_as, sdhci_sdma_addr(s), &s->fifo_buffer[begin],
+                             s->data_count - begin, MEMTXATTRS_UNSPECIFIED);
+-            s->sdmasysad += s->data_count - begin;
++            sdhci_sdma_advance(s, s->data_count - begin);
+             if (s->data_count == block_size) {
+                 sdbus_write_data(&s->sdbus, s->fifo_buffer, block_size);
+                 s->data_count = 0;
+@@ -682,10 +724,10 @@ static void sdhci_sdma_transfer_single_block(SDHCIState *s)
+ 
+     if (s->trnmod & SDHC_TRNS_READ) {
+         sdbus_read_data(&s->sdbus, s->fifo_buffer, datacnt);
+-        dma_memory_write(s->dma_as, s->sdmasysad, s->fifo_buffer, datacnt,
++        dma_memory_write(s->dma_as, sdhci_sdma_addr(s), s->fifo_buffer, datacnt,
+                          MEMTXATTRS_UNSPECIFIED);
+     } else {
+-        dma_memory_read(s->dma_as, s->sdmasysad, s->fifo_buffer, datacnt,
++        dma_memory_read(s->dma_as, sdhci_sdma_addr(s), s->fifo_buffer, datacnt,
+                         MEMTXATTRS_UNSPECIFIED);
+         sdbus_write_data(&s->sdbus, s->fifo_buffer, datacnt);
+     }
+@@ -706,6 +748,17 @@ static void get_adma_description(SDHCIState *s, ADMADescr *dscr)
+     uint32_t adma1 = 0;
+     uint64_t adma2 = 0;
+     hwaddr entry_addr = (hwaddr)s->admasysaddr;
++    if (SDHC_DMA_TYPE(s->hostctl1) == SDHC_CTRL_ADMA2_32 && sdhci_v4_64bit(s)) {
++        /* v4 with 64-bit addressing: 128-bit descriptors (attribute, length, 64-bit address, 32 reserved bits). */
++        dma_memory_read(s->dma_as, entry_addr, &dscr->attr, 1, MEMTXATTRS_UNSPECIFIED);
++        dma_memory_read(s->dma_as, entry_addr + 2, &dscr->length, 2, MEMTXATTRS_UNSPECIFIED);
++        dscr->length = le16_to_cpu(dscr->length);
++        dma_memory_read(s->dma_as, entry_addr + 4, &dscr->addr, 8, MEMTXATTRS_UNSPECIFIED);
++        dscr->addr = le64_to_cpu(dscr->addr);
++        dscr->attr &= (uint8_t) ~0xC0;
++        dscr->incr = 16;
++        return;
++    }
+     switch (SDHC_DMA_TYPE(s->hostctl1)) {
+     case SDHC_CTRL_ADMA2_32:
+         dma_memory_read(s->dma_as, entry_addr, &adma2, sizeof(adma2),
+@@ -1167,7 +1220,9 @@ sdhci_write(void *opaque, hwaddr offset, uint64_t val, unsigned size)
+ 
+     switch (offset & ~0x3) {
+     case SDHC_SYSAD:
+-        if (!TRANSFERRING_DATA(s->prnsts)) {
++        if (sdhci_v4_mode(s)) {
++            MASKED_WRITE(s->sdmasysad, mask, value);
++        } else if (!TRANSFERRING_DATA(s->prnsts)) {
+             s->sdmasysad = (s->sdmasysad & mask) | value;
+             MASKED_WRITE(s->sdmasysad, mask, value);
+             /* Writing to last byte of sdmasysad might trigger transfer */
+@@ -1311,7 +1366,9 @@ sdhci_write(void *opaque, hwaddr offset, uint64_t val, unsigned size)
+     case SDHC_ADMASYSADDR:
+         s->admasysaddr = (s->admasysaddr & (0xFFFFFFFF00000000ULL |
+                 (uint64_t)mask)) | (uint64_t)value;
+-        s->sdmasysad = (s->sdmasysad & mask) | value; // NOTE: This should be handled better?
++        if (!sdhci_v4_mode(s)) {
++            s->sdmasysad = (s->sdmasysad & mask) | value; // NOTE: This should be handled better?
++        }
+         break;
+     case SDHC_ADMASYSADDR + 4:
+         s->admasysaddr = (s->admasysaddr & (0x00000000FFFFFFFFULL |

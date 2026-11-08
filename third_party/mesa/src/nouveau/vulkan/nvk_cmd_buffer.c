@@ -15,6 +15,7 @@
 #include "nvk_physical_device.h"
 #include "nvk_rust.h"
 #include "nvk_shader.h"
+#include "nvk_tiled_cache.h"
 #include "nvkmd/nvkmd.h"
 
 #include "vk_pipeline_layout.h"
@@ -427,6 +428,7 @@ nvk_EndCommandBuffer(VkCommandBuffer commandBuffer)
 {
    VK_FROM_HANDLE(nvk_cmd_buffer, cmd, commandBuffer);
 
+   nvk_cmd_flush_tiled_cache(cmd);
    nvk_cmd_buffer_flush_push(cmd, false);
 
    /* We only need to flush the memory objects we own because, if there are
@@ -1510,6 +1512,25 @@ nvk_cmd_buffer_get_cbuf_addr(struct nvk_cmd_buffer *cmd,
    }
 
    case NVK_CBUF_TYPE_UBO_DESC: {
+      /* ios-on-switch-lmao: a set made without update-after-bind cannot
+       * change from its bind until the command buffer completes, so its
+       * descriptor is read on the CPU, as a push set's is, rather than pushed
+       * from memory into NVK_MME_BIND_CBUF_DESC (a split pushbuf per UBO and
+       * draw before Turing).
+       */
+      const struct nvk_descriptor_set *set = desc->sets[cbuf->desc_set].set;
+      if (desc->sets[cbuf->desc_set].type == NVK_DESCRIPTOR_SET_TYPE_SET &&
+          set != NULL && set->map != NULL &&
+          !(set->layout->flags &
+            VK_DESCRIPTOR_SET_LAYOUT_CREATE_UPDATE_AFTER_BIND_POOL_BIT) &&
+          cbuf->desc_offset + sizeof(union nvk_buffer_descriptor) <= set->size_B) {
+         union nvk_buffer_descriptor ubo_desc;
+         memcpy(&ubo_desc, (const char *)set->map + cbuf->desc_offset,
+                sizeof(ubo_desc));
+         *addr_out = nvk_ubo_descriptor_addr(pdev, ubo_desc);
+         return true;
+      }
+
       if (desc->sets[cbuf->desc_set].type != NVK_DESCRIPTOR_SET_TYPE_PUSH)
          return false;
 

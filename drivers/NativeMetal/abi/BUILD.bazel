@@ -1,0 +1,98 @@
+load("@rules_cc//cc:cc_library.bzl", "cc_library")
+
+# Metal.framework's ABI as each IPSW kind has it (kinds/<kind>.json), read out of the kind's SystemOS dyld cache by
+# extract.py: _MTLDevice's size, methods and limits table, the private classes the frontend calls, and per Metal object
+# the protocol methods the system's code sends. The tables are committed (CI has no IPSWs):
+#
+#   bazel run [--config=ios27] //drivers/NativeMetal/abi:extract   rewrites the selected kind's table from its cryptex
+#   bazel run [--config=ios27] //drivers/NativeMetal/abi:verify    fails if the committed table differs from it
+#
+# :MetalABI.h is the selected kind's (--//ipsw:kind) facts the frontend compiles in (gen.py).
+load("@rules_python//python:py_binary.bzl", "py_binary")
+load("@rules_python//python:py_library.bzl", "py_library")
+load("@rules_python//python:py_test.bzl", "py_test")
+load("//bazel/lint:defs.bzl", "lint_files")
+
+package(default_visibility = ["//visibility:public"])
+
+lint_files()
+
+exports_files(glob(["kinds/*.json"]))
+
+py_library(
+    name = "dyld_cache",
+    srcs = [
+        "dyld_cache.py",
+        "objc_metadata.py",
+        "sends.py",
+    ],
+)
+
+py_library(
+    name = "extract_lib",
+    srcs = ["extract.py"],
+    data = ["interface.json"],
+    deps = [":dyld_cache"],
+)
+
+[py_binary(
+    name = name,
+    srcs = ["extract.py"],
+    args = [
+        "--cryptex",
+        "$(rootpath @ipsw//:system_cryptex)",
+        "--pins",
+        "$(rootpath //ipsw:pins.bzl)",
+    ] + check,
+    data = [
+        "interface.json",
+        "//ipsw:pins.bzl",
+        "@ipsw//:system_cryptex",
+    ],
+    main = "extract.py",
+    tags = ["manual"],
+    deps = [":dyld_cache"],
+) for name, check in [
+    ("extract", []),
+    (
+        "verify",
+        ["--check"],
+    ),
+]]
+
+py_library(
+    name = "gen_lib",
+    srcs = ["gen.py"],
+)
+
+py_binary(
+    name = "gen",
+    srcs = ["gen.py"],
+)
+
+genrule(
+    name = "header",
+    srcs = select(
+        {"//ipsw:" + table[len("kinds/"):-len(".json")]: [table] for table in glob(["kinds/*.json"])},
+        no_match_error = "drivers/NativeMetal/abi has no table for this IPSW kind (bazel run :extract)",
+    ),
+    outs = ["MetalABI.h"],
+    cmd = "$(execpath :gen) $(SRCS) $@",
+    tools = [":gen"],
+)
+
+cc_library(
+    name = "metal_abi",
+    hdrs = [":MetalABI.h"],
+    includes = ["."],
+)
+
+py_test(
+    name = "abi_test",
+    srcs = ["abi_test.py"],
+    data = glob(["kinds/*.json"]),
+    deps = [
+        ":extract_lib",
+        ":gen_lib",
+    ],
+)

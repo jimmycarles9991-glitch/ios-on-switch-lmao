@@ -6,6 +6,7 @@
 
 extern "C" {
 uint64_t pmap_find_pa(pmap_t pmap, uint64_t va);
+// NOLINTNEXTLINE(readability-redundant-declaration): not every kernel configuration's headers declare it
 pmap_t get_task_pmap(task_t task);
 }
 
@@ -40,9 +41,9 @@ bool same(const SharedWiring *w, task_t task, uint64_t address, uint64_t bytes, 
 // wired pages cannot be anyone else's while wired, so the task mapping them at both ends means it maps this wiring.
 bool stillMapped(const SharedWiring *w)
 {
-	const pmap_t pmap = get_task_pmap(w->task);
+	struct pmap *const pmap = get_task_pmap(w->task);
 	const uint64_t last = w->bytes - 4096;
-	return pmap && pmap_find_pa(pmap, w->address) == w->pas[0] &&
+	return (pmap != nullptr) && pmap_find_pa(pmap, w->address) == w->pas[0] &&
 	       pmap_find_pa(pmap, w->address + last) == w->pas[w->npages - 1];
 }
 
@@ -68,10 +69,11 @@ SharedWiring *sharedWiringFind(task_t task, uint64_t address, uint64_t bytes, ui
 	SharedWiring *w = gWirings;
 	while (w && !same(w, task, address, bytes, surfaceId))
 		w = w->next;
-	if (w && stillMapped(w))
+	if (w && stillMapped(w)) {
 		w->refs++;
-	else
+	} else {
 		w = nullptr;
+	}
 	IOLockUnlock(lock);
 	return w;
 }
@@ -87,7 +89,7 @@ SharedWiring *sharedWiringPublish(SharedWiring *made)
 	SharedWiring *w = gWirings;
 	while (w && !same(w, made->task, made->address, made->bytes, made->surfaceId))
 		w = w->next;
-	if (w && !memcmp(w->pas, made->pas, size_t(made->npages) * sizeof(uint64_t))) {
+	if (w && !memcmp(w->pas, made->pas, static_cast<size_t>(made->npages) * sizeof(uint64_t))) {
 		w->refs++;
 	} else {
 		w = made;
@@ -107,7 +109,7 @@ void sharedWiringPut(SharedWiring *w)
 	bool last = true;
 	if (lock) {
 		IOLockLock(lock);
-		last = !--w->refs;
+		last = ((--w->refs) == 0u);
 		if (last) {
 			for (SharedWiring **p = &gWirings; *p; p = &(*p)->next) {
 				if (*p == w) {

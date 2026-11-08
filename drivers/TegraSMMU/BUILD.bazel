@@ -34,5 +34,8 @@ kernel_headers()
 # translated swgroup uses, and an engine's whole address space (TegraSMMUEngine.h: NVDEC's and NVENC's).
 kernel_driver(
     name = "TegraSMMU",
-    hdr_deps = ["kits/SwitchDMA"],
+    hdr_deps = [
+        "kits/SwitchDMA",
+        "kits/SwitchMMIO",
+    ],
 )

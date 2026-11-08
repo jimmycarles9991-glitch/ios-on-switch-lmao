@@ -10,10 +10,13 @@
 // the XUDC interrupt (GIC SPI 44, INTID 76; CTRL.IE and the IPFS IP_INT mask are set by powerOn()).
 //
 // The controller does not snoop the A57 caches: every ring, context and data buffer is cleaned before the
-// controller reads it and invalidated before the CPU reads what the controller wrote (cacheFlush).
+// controller reads it and invalidated before the CPU reads what the controller wrote (switch_dcache_clean_invalidate).
 #pragma once
 #include <IOKit/IOBufferMemoryDescriptor.h>
 #include <libkern/c++/OSObject.h>
+#include "../../kits/SwitchDMA/SwitchDcache.h"
+#include "../../kits/SwitchDMA/SwitchDMABuffer.h"
+#include "../../kits/SwitchMMIO/SwitchMMIOKernel.h"
 #include "XudcTransfer.h"
 #include "XudcIsoch.h"
 
@@ -59,16 +62,17 @@ struct Event {
 };
 
 // Physically contiguous, cacheable DMA memory below 4 GiB.
+// The XUSB partitions' module clocks and resets (Linux TEGRA210_CLK_*: bank * 32 + bit over banks L H U V W X Y).
+constexpr unsigned kClockXusbHost = 2 * 32 + 25, kClockXusbDev = 2 * 32 + 31, kClockXusbSs = 4 * 32 + 28;
+
 struct DmaBuffer {
-    IOBufferMemoryDescriptor *md = nullptr;
+    switch_dma_buffer buffer = {};
     uint8_t *va = nullptr;
     uint32_t pa = 0;
     uint32_t size = 0;
     bool allocate(uint32_t bytes);
     void release();
 };
-
-void cacheFlush(const volatile void *p, size_t n);  // clean+invalidate by VA, then DSB
 
 // UTMI pad 0 bring-up (PLLU, UTMIPLL, fuse calibration, bias tracking); fusePage is 0x7000F000. Also used by the host
 // controller (XusbHost.cpp).
@@ -91,7 +95,7 @@ public:
     void connect();                                     // VBUS/ID override, enable, port to RxDetect: pull-up on
     void disconnect();                                  // device mode and VBUS override off: the host sees a detach
     bool nextEvent(Event &event);                       // false when the ring is empty
-    bool eventPending();                                // the next event is there (nextEvent would return it)
+    bool eventPending() const;                          // the next event is there (nextEvent would return it)
     void finishEvents();                                // ERDP update + EHB clear after a batch
     bool takeInterrupt();                               // ST.IP set? Then acknowledge it (W1C, IP only)
     bool interruptPending();                            // ST.IP, read only
@@ -131,7 +135,8 @@ public:
 
     uint64_t trbBuffer(uint32_t dci, uint32_t index) const
     {
-        return rings[dci].trb[index * 4] | (uint64_t)rings[dci].trb[index * 4 + 1] << 32;
+        const size_t at = static_cast<size_t>(index) * 4;
+        return rings[dci].trb[at] | static_cast<uint64_t>(rings[dci].trb[at + 1]) << 32;
     }
 
     bool trbIndex(uint32_t dci, uint32_t trbPA, uint32_t *index) const;
@@ -152,42 +157,27 @@ private:
         DmaBuffer own;  // a data endpoint's ring (EP0's is in `control`)
     };
 
-    volatile uint8_t *car = nullptr, *pmcPage = nullptr, *fusePage = nullptr, *mc = nullptr, *padctl = nullptr,
-                     *xudc = nullptr;
+    volatile uint8_t *car = nullptr, *fusePage = nullptr, *mc = nullptr, *padctl = nullptr, *xudc = nullptr;
     DmaBuffer control;  // contexts, EP0's transfer ring
     DmaBuffer events;   // the event ring's two segments of kEventSegmentTrbs
     Ring rings[kMaxDci];
     uint32_t eventIndex = 0, eventCycle = 1;
 
-    static uint32_t r(volatile uint8_t *b, uint32_t o)
-    {
-        return *(volatile uint32_t *)(b + o);
-    }
-
-    static void w(volatile uint8_t *b, uint32_t o, uint32_t v)
-    {
-        *(volatile uint32_t *)(b + o) = v;
-    }
-
-    uint32_t pmc(uint32_t o);
-    void pmcWrite(uint32_t o, uint32_t v);
-
     uint32_t xr(uint32_t o)
     {
-        return r(xudc, o);
+        return switch_mmio_read32(xudc, o);
     }
 
     void xw(uint32_t o, uint32_t v)
     {
-        w(xudc, o, v);
+        switch_mmio_write32(xudc, o, v);
     }
 
-    bool waitBits(volatile uint8_t *b, uint32_t o, uint32_t mask, uint32_t value, uint32_t us);
-    bool powerUp(uint32_t partition, uint32_t clockSet, uint32_t resetSet, uint32_t bit);
+    static bool powerUp(unsigned partition, unsigned id);
     bool initPhy();
     void clearPortChange(uint32_t change);
     void resetEp0();
-    volatile uint32_t *context(uint32_t dci);
+    volatile uint32_t *context(uint32_t dci) const;
     void resetRing(uint32_t dci);
     void toggleBit(uint32_t reg, uint32_t dci, bool set);
 };

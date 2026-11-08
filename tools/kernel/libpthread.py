@@ -10,7 +10,6 @@ usage: libpthread.py --xcode-env F --source DIR --sdkroot DIR --kernel-names NAM
 """
 
 import argparse
-import struct
 import subprocess
 import sys
 import tempfile
@@ -20,10 +19,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import common
 from kernel_names import archive_names
 
+from tools.common import macho
+
 
 def check(path: Path) -> None:
-    data = path.read_bytes()
-    if struct.unpack_from('<4I', data) != (0xFEEDFACF, 0x100000C, 0, 1):
+    if macho.arm64_kind(path.read_bytes()) != macho.MH_OBJECT:
         sys.exit('Unexpected pthread object architecture: ' + path.name)
 
 

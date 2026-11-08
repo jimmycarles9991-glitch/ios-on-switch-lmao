@@ -25,7 +25,7 @@ class IOService;
 class IOTimerEventSource;
 
 // True once ArmCpu has the GIC and CPU0's interface up and nubs can be had.
-bool switch_interrupts_ready(void);
+bool switch_interrupts_ready();
 
 // Returns a retained-by-the-registry nub whose interrupt index 0 is `intid`.
 // The same nub is returned for repeated calls with the same INTID. Sleeps until

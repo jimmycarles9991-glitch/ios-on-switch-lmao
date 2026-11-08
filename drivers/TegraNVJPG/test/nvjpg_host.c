@@ -9,9 +9,7 @@
 //   truncated headers; a truncated scan is accepted without EOI;
 // - the target translation: strides, plane extents (padded and clipped), formats, the JFIF matrix against the float
 //   formula;
-// - mutation fuzzing of the parser under ASan/UBSan;
-// - the boot self-test's vectors (selftest/J3Vectors.h): the committed JPEGs parse, and their reference planes are
-//   libjpeg-turbo's decode of those bytes (integer IDCT, raw YCbCr), byte for byte. `--write FILE` regenerates them.
+// - mutation fuzzing of the parser under ASan/UBSan.
 // Without libjpeg-turbo (no HAVE_LIBJPEG) only the checks that need no encoder run.
 #include <math.h>
 #include <setjmp.h>
@@ -20,13 +18,30 @@
 #include <stdlib.h>
 #include <string.h>
 #include "../TegraNVJPGJpeg.h"
-#include "../selftest/J3Vectors.h"
 #ifdef HAVE_LIBJPEG
 #include <jpeglib.h>
 #define STR2(x)                      #x
 #define STR(x)                       STR2(x)
 #define LIBJPEG_TURBO_VERSION_STRING STR(LIBJPEG_TURBO_VERSION)
 #endif
+
+// The JFIF conversion in integer arithmetic with the coefficients the jobs program (kTegraNVJPGJfif).
+static uint8_t clamp8(int32_t v)
+{
+    if (v < 0)
+        return 0;
+    return (uint8_t)(v > 255 ? 255 : v);
+}
+
+static void jfif_rgb(uint32_t y, uint32_t cb, uint32_t cr, uint8_t rgb[3])
+{
+    const int32_t Y = (int32_t)y * kTegraNVJPGJfif[0];
+    const int32_t u = (int32_t)cb - 128;
+    const int32_t v = (int32_t)cr - 128;
+    rgb[0] = clamp8((Y + kTegraNVJPGJfif[1] * v + 32768) / 65536);
+    rgb[1] = clamp8((Y + kTegraNVJPGJfif[2] * u + kTegraNVJPGJfif[3] * v + 32768) / 65536);
+    rgb[2] = clamp8((Y + kTegraNVJPGJfif[4] * u + 32768) / 65536);
+}
 
 static int failures;
 
@@ -304,7 +319,7 @@ static void targets(void)
         for (int cb = 0; cb < 256; cb += 3)
             for (int cr = 0; cr < 256; cr += 7) {
                 uint8_t rgb[3];
-                tegra_nvjpg_jfif_rgb((uint32_t)y, (uint32_t)cb, (uint32_t)cr, rgb);
+                jfif_rgb((uint32_t)y, (uint32_t)cb, (uint32_t)cr, rgb);
                 const double f[3] = {y + 1.402 * (cr - 128), y - 0.344136 * (cb - 128) - 0.714136 * (cr - 128),
                                      y + 1.772 * (cb - 128)};
                 for (int c = 0; c < 3; c++) {
@@ -567,239 +582,12 @@ static const struct {
     {{"16-bit tables", 64, 32, CS_YCC, 2, 2, 0, 0, 0, 1, 0, 0, 0, 0, 0}, "16-bit"},
 };
 
-// The boot self-test's vectors. Each is libjpeg-turbo's encoding of the synthetic picture; the reference planes are
-// its integer-IDCT raw decode of the bytes as committed.
-typedef struct {
-    const char *name;
-    uint32_t w, h, hs, vs, cs, restart, quality, optimize;
-} VectorSpec;
-
-static const VectorSpec kVectorSpecs[] = {
-    {"J3A", 44, 40, 2, 2, CS_YCC, 2, 92, 0},   // 4:2:0, a partial MCU column and row, restart every 2 MCUs
-    {"J3B", 40, 24, 2, 1, CS_YCC, 0, 85, 1},   // 4:2:2, optimised (non-standard) Huffman tables
-    {"J3C", 24, 16, 1, 1, CS_YCC, 0, 95, 0},   // 4:4:4
-    {"J3D", 24, 16, 1, 1, CS_GREY, 1, 90, 0},  // grey, restart every MCU
-};
-
-enum {
-    kVectorCount = sizeof(kVectorSpecs) / sizeof(kVectorSpecs[0])
-};
-
-typedef struct {
-    uint32_t w, h, comps, cw, ch;
-    uint8_t *plane[3];
-} Planes;
-
-// libjpeg-turbo's raw (YCbCr, not upsampled) decode with the integer IDCT, at 1/2^scale (its DCT scaling).
-static int raw_decode(const uint8_t *d, size_t n, uint32_t scale, Planes *out)
-{
-    struct jpeg_decompress_struct c;
-    Error err;
-    c.err = jpeg_std_error(&err.mgr);
-    err.mgr.error_exit = error_exit;
-    err.mgr.emit_message = quiet;
-    JSAMPARRAY rows[3] = {0};
-    uint32_t ph[3] = {0};
-    if (setjmp(err.jump)) {
-        fail("raw decode: %s", err.message);
-        jpeg_destroy_decompress(&c);
-        return -1;
-    }
-    jpeg_create_decompress(&c);
-    jpeg_mem_src(&c, d, n);
-    jpeg_read_header(&c, TRUE);
-    c.raw_data_out = TRUE;
-    c.dct_method = JDCT_ISLOW;
-    c.out_color_space = c.jpeg_color_space;
-    c.scale_num = 1, c.scale_denom = 1u << scale;
-    jpeg_start_decompress(&c);
-    out->w = c.output_width, out->h = c.output_height, out->comps = (uint32_t)c.num_components;
-    out->cw = c.num_components == 3 ? c.comp_info[1].downsampled_width : 0;
-    out->ch = c.num_components == 3 ? c.comp_info[1].downsampled_height : 0;
-    const uint32_t group = (uint32_t)(c.max_v_samp_factor * c.min_DCT_v_scaled_size);
-    for (int i = 0; i < c.num_components; i++) {
-        const jpeg_component_info *ci = &c.comp_info[i];
-        const uint32_t pw = ci->width_in_blocks * (uint32_t)ci->DCT_h_scaled_size;
-        ph[i] = (uint32_t)(ci->v_samp_factor * ci->DCT_v_scaled_size);
-        rows[i] = malloc(sizeof(JSAMPROW) * ph[i]);
-        for (uint32_t r = 0; r < ph[i]; r++)
-            rows[i][r] = malloc(pw);
-        out->plane[i] = calloc(1, (size_t)(i ? out->cw * out->ch : out->w * out->h));
-    }
-    for (uint32_t row = 0; c.output_scanline < c.output_height; row++) {
-        (void)jpeg_read_raw_data(&c, rows, (JDIMENSION)group);
-        for (int i = 0; i < c.num_components; i++) {
-            const uint32_t w = i ? out->cw : out->w, h = i ? out->ch : out->h;
-            for (uint32_t r = 0; r < ph[i] && row * ph[i] + r < h; r++)
-                memcpy(out->plane[i] + (row * ph[i] + r) * w, rows[i][r], w);
-        }
-    }
-    jpeg_finish_decompress(&c);
-    for (int i = 0; i < c.num_components; i++) {
-        for (uint32_t r = 0; r < ph[i]; r++)
-            free(rows[i][r]);
-        free(rows[i]);
-    }
-    jpeg_destroy_decompress(&c);
-    return 0;
-}
-
-static void print_array(FILE *f, const char *name, const uint8_t *d, size_t n)
-{
-    fprintf(f, "static const uint8_t %s[%zu] = {", name, n);
-    for (size_t i = 0; i < n; i++)
-        fprintf(f, "%s%u,", i % 24 ? " " : "\n    ", d[i]);
-    fprintf(f, "\n};\n");
-}
-
-static int write_vectors(const char *path)
-{
-    FILE *f = fopen(path, "w");
-    if (!f)
-        return 1;
-    fprintf(f,
-            "// SPDX-License-Identifier: BSD-2-Clause-Patent\n"
-            "// Generated by test/nvjpg_host --write (libjpeg-turbo %s): the boot self-test's JPEGs (libjpeg-turbo's "
-            "encoding of\n// the synthetic picture in nvjpg_host.c) and libjpeg-turbo's integer-IDCT raw decode of "
-            "them. Do not edit; the host\n// test checks the planes against a fresh decode of these bytes.\n",
-            LIBJPEG_TURBO_VERSION_STRING);
-    for (int v = 0; v < kVectorCount; v++) {
-        const VectorSpec *vs = &kVectorSpecs[v];
-        const Spec sp = {vs->name,          vs->w, vs->h,       vs->cs, (uint8_t)vs->hs,
-                         (uint8_t)vs->vs,   0,     vs->restart, 0,      (int)vs->quality,
-                         (int)vs->optimize, 0,     0,           0,      1};
-        unsigned long n = 0;
-        uint8_t *d = encode(&sp, &n);
-        if (!d)
-            return 1;
-        char name[64];
-        snprintf(name, sizeof(name), "k%sJpeg", vs->name);
-        print_array(f, name, d, n);
-        for (uint32_t scale = 0; scale < (v == 0 ? 4u : 1u); scale++) {  // J3A also at 1/2, 1/4, 1/8
-            Planes p;
-            if (raw_decode(d, n, scale, &p))
-                return 1;
-            for (uint32_t i = 0; i < p.comps; i++) {
-                if (scale)
-                    snprintf(name, sizeof(name), "k%sScale%uPlane%u", vs->name, scale, i);
-                else
-                    snprintf(name, sizeof(name), "k%sPlane%u", vs->name, i);
-                print_array(f, name, p.plane[i], (size_t)(i ? p.cw * p.ch : p.w * p.h));
-                free(p.plane[i]);
-            }
-        }
-        free(d);
-    }
-    fprintf(f, "#define TEGRA_NVJPG_J3_VECTORS 1\n");
-    fclose(f);
-    return 0;
-}
 #endif  // HAVE_LIBJPEG
-
-// The committed vectors parse, with the geometry the self-test assumes.
-static void vectors(void)
-{
-#ifdef TEGRA_NVJPG_J3_VECTORS
-    static const struct {
-        const char *name;
-        const uint8_t *jpeg;
-        size_t n;
-        uint32_t w, h, comps, chroma;
-    } v[] = {
-        {"J3A", kJ3AJpeg, sizeof(kJ3AJpeg), 44, 40, 3, TEGRA_NVJPG_CHROMA_420},
-        {"J3B", kJ3BJpeg, sizeof(kJ3BJpeg), 40, 24, 3, TEGRA_NVJPG_CHROMA_422H},
-        {"J3C", kJ3CJpeg, sizeof(kJ3CJpeg), 24, 16, 3, TEGRA_NVJPG_CHROMA_444},
-        {"J3D", kJ3DJpeg, sizeof(kJ3DJpeg), 24, 16, 1, TEGRA_NVJPG_CHROMA_MONO},
-    };
-
-    for (size_t i = 0; i < sizeof(v) / sizeof(v[0]); i++) {
-        TegraNVJPGImage img;
-        const char *why = parse_copy(v[i].jpeg, v[i].n, &img);
-        CHECK(!why, "%s: %s", v[i].name, why ? why : "");
-        if (why)
-            continue;
-        CHECK(img.width == v[i].w && img.height == v[i].h && img.components == v[i].comps &&
-                  img.chroma == v[i].chroma && img.eoi,
-              "%s: geometry", v[i].name);
-        edits(v[i].name, v[i].jpeg, v[i].n);
-        fuzz(v[i].jpeg, v[i].n, 20000);
-    }
-#ifdef HAVE_LIBJPEG
-    static const struct {
-        const uint8_t *jpeg;
-        size_t n;
-        const uint8_t *plane[3];
-        size_t size[3];
-    } r[] = {
-        {kJ3AJpeg,
-         sizeof(kJ3AJpeg),
-         {kJ3APlane0, kJ3APlane1, kJ3APlane2},
-         {sizeof(kJ3APlane0), sizeof(kJ3APlane1), sizeof(kJ3APlane2)}},
-        {kJ3BJpeg,
-         sizeof(kJ3BJpeg),
-         {kJ3BPlane0, kJ3BPlane1, kJ3BPlane2},
-         {sizeof(kJ3BPlane0), sizeof(kJ3BPlane1), sizeof(kJ3BPlane2)}},
-        {kJ3CJpeg,
-         sizeof(kJ3CJpeg),
-         {kJ3CPlane0, kJ3CPlane1, kJ3CPlane2},
-         {sizeof(kJ3CPlane0), sizeof(kJ3CPlane1), sizeof(kJ3CPlane2)}},
-        {kJ3DJpeg, sizeof(kJ3DJpeg), {kJ3DPlane0, NULL, NULL}, {sizeof(kJ3DPlane0), 0, 0}},
-    };
-
-    for (size_t i = 0; i < sizeof(r) / sizeof(r[0]); i++) {
-        Planes p;
-        if (raw_decode(r[i].jpeg, r[i].n, 0, &p))
-            continue;
-        for (uint32_t k = 0; k < p.comps; k++) {
-            const size_t size = k ? (size_t)p.cw * p.ch : (size_t)p.w * p.h;
-            CHECK(size == r[i].size[k] && !memcmp(p.plane[k], r[i].plane[k], size),
-                  "%s: reference plane %u is not libjpeg-turbo's decode", v[i].name, k);
-            free(p.plane[k]);
-        }
-    }
-    static const uint8_t *const scaled[3][3] = {{kJ3AScale1Plane0, kJ3AScale1Plane1, kJ3AScale1Plane2},
-                                                {kJ3AScale2Plane0, kJ3AScale2Plane1, kJ3AScale2Plane2},
-                                                {kJ3AScale3Plane0, kJ3AScale3Plane1, kJ3AScale3Plane2}};
-    static const size_t scaledSize[3][3] = {
-        {sizeof(kJ3AScale1Plane0), sizeof(kJ3AScale1Plane1), sizeof(kJ3AScale1Plane2)},
-        {sizeof(kJ3AScale2Plane0), sizeof(kJ3AScale2Plane1), sizeof(kJ3AScale2Plane2)},
-        {sizeof(kJ3AScale3Plane0), sizeof(kJ3AScale3Plane1), sizeof(kJ3AScale3Plane2)}};
-    for (uint32_t scale = 1; scale <= 3; scale++) {
-        Planes p;
-        if (raw_decode(kJ3AJpeg, sizeof(kJ3AJpeg), scale, &p))
-            continue;
-        // The geometry the self-test assumes: libjpeg's jdiv_round_up of the picture, and chroma at the same size
-        // (libjpeg scales the chroma blocks' IDCT less instead of upsampling: a scaled raw decode is 4:4:4).
-        CHECK(p.w == (44u + (1u << scale) - 1) >> scale && p.h == (40u + (1u << scale) - 1) >> scale, "J3A 1/%u: %ux%u",
-              1u << scale, p.w, p.h);
-        CHECK(p.cw == p.w && p.ch == p.h, "J3A 1/%u: chroma %ux%u", 1u << scale, p.cw, p.ch);
-        for (uint32_t k = 0; k < 3; k++) {
-            const size_t size = k ? (size_t)p.cw * p.ch : (size_t)p.w * p.h;
-            CHECK(size == scaledSize[scale - 1][k] && !memcmp(p.plane[k], scaled[scale - 1][k], size),
-                  "J3A 1/%u: reference plane %u is not libjpeg-turbo's decode", 1u << scale, k);
-            free(p.plane[k]);
-        }
-    }
-#endif
-#else
-    fail("selftest/J3Vectors.h holds no vectors (run nvjpg_host --write)");
-#endif
-}
 
 int main(int argc, char **argv)
 {
-#ifdef HAVE_LIBJPEG
-    if (argc == 3 && !strcmp(argv[1], "--write"))
-        return write_vectors(argv[2]);
-#else
-    (void)argv;
-    if (argc > 1) {
-        printf("FAIL --write needs libjpeg-turbo\n");
-        return 1;
-    }
-#endif
+    (void)argc, (void)argv;
     targets();
-    vectors();
 #ifdef HAVE_LIBJPEG
     uint32_t files = 0;
     for (size_t i = 0; i < sizeof(kAccepted) / sizeof(kAccepted[0]); i++) {
@@ -830,9 +618,9 @@ int main(int argc, char **argv)
         return 1;
     }
 #ifdef HAVE_LIBJPEG
-    printf("PASS nvjpg (%u libjpeg-turbo %s files, vectors checked)\n", files, LIBJPEG_TURBO_VERSION_STRING);
+    printf("PASS nvjpg (%u libjpeg-turbo %s files)\n", files, LIBJPEG_TURBO_VERSION_STRING);
 #else
-    printf("PASS nvjpg (no libjpeg-turbo: parser, vectors and targets only)\n");
+    printf("PASS nvjpg (no libjpeg-turbo: parser and targets only)\n");
 #endif
     return 0;
 }

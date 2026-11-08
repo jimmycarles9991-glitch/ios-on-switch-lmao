@@ -4,14 +4,12 @@
 
 #include <cstdio>
 #include "../pack/nvdec.h"
-#include "raw_owned.h"
 #include "raw_pack.h"
 
 namespace raw {
 namespace {
 
-constexpr uint32_t kMethods = 0x10000;  // a subchannel's method space, bytes
-constexpr int kVertexStage = 1, kPixelStage = 5;
+constexpr uint32_t kMmeScratch = 0x3400;  // MAXWELL_B's MME shadow scratch: NVK's bookkeeping, not state
 
 // A one-method incrementing header (NV's PUSH_HDR_INC)
 uint32_t methodHeader(uint32_t subc, uint32_t mthd)
@@ -19,31 +17,30 @@ uint32_t methodHeader(uint32_t subc, uint32_t mthd)
     return 1u << 29 | 1u << 16 | subc << 13 | mthd >> 2;
 }
 
-CapturedProgram program(nvdec::Decoder &d, int stage)
-{
-    CapturedProgram p;
-    if (const nvdec::ProgramInfo *known = d.boundProgram(stage, p.id)) {
-        p.image = known->image;
-        p.data = known->data;
-        p.cbufTypes = known->cbufTypes;
-    }
-    return p;
-}
-
 }  // namespace
 
-Capture::Capture(std::function<const uint8_t *(uint64_t va, uint64_t bytes)> map)
-    : decoder_(std::make_unique<nvdec::Decoder>(std::move(map), fopen("/dev/null", "w")))
+Capture::Capture(Map map, ProgramAt programAt)
+    : map_(std::move(map)), programAt_(std::move(programAt)), sink_(fopen("/dev/null", "w"))
 {
-    decoder_->fullStateAtFirstDraw = false;
-    decoder_->onDraw = [this](nvdec::Decoder &d) {
-        record(d);
+    primed_ = std::make_unique<nvdec::Decoder>(
+        [this](uint64_t va, uint64_t bytes) {
+            return map_(va, bytes);
+        },
+        sink_);
+    primed_->fullStateAtFirstDraw = false;
+    primed_->programAt = [this](uint32_t offset, nvdec::ProgramInfo &out) {
+        return programAt_(offset, out);
     };
 }
 
-Capture::~Capture() = default;
+Capture::~Capture()
+{
+    primed_.reset();
+    if (sink_)
+        fclose(sink_);
+}
 
-bool Capture::prime(const Pack &pack, std::string &err)
+bool Capture::prime(const Pack &pack, const InitAddresses &here, std::string &err)
 {
     const PackInitMethod *init = pack.section<PackInitMethod>(PackInit);
     const uint64_t count = pack.bytes(PackInit) / sizeof(PackInitMethod);
@@ -55,47 +52,55 @@ bool Capture::prime(const Pack &pack, std::string &err)
     words.reserve(2 * count);
     for (uint64_t i = 0; i < count; i++) {
         words.push_back(methodHeader(init[i].subc, init[i].mthd));
-        words.push_back(init[i].data);
+        words.push_back(relocated(init[i], here));
     }
-    decoder_->submitBegin();
-    decoder_->push(words.data(), words.size());
-    decoder_->submitEnd();
-    context_.resize(kMethods / 4);
-    for (uint32_t m = 0; m < kMethods; m += 4)
-        context_[m / 4] = decoder_->reg3d(m);
+    primed_->submitBegin();
+    primed_->push(words.data(), words.size());
+    primed_->submitEnd();
     return true;
 }
 
-void Capture::set(uint32_t subc, uint32_t mthd, uint32_t value)
+nvdec::ProbeSubmission Capture::decode(const std::vector<std::pair<const uint32_t *, uint64_t>> &segments)
 {
-    const uint32_t words[2] = {methodHeader(subc, mthd), value};
-    decoder_->submitBegin();
-    decoder_->push(words, 2);
-    decoder_->submitEnd();
-    if (subc == 0)
-        context_[mthd / 4] = value;
+    nvdec::ProbeSubmission s;
+    // the context copied, the programs the decoder knows moved (they only grow, and are handed back below)
+    std::multimap<uint64_t, nvdec::ProgramInfo> programs = std::move(primed_->programs);
+    nvdec::Decoder d(*primed_);
+    d.programs = std::move(programs);
+    d.onDraw = [&s](nvdec::Decoder &at) {
+        s.records.emplace_back();
+        at.probeRecord(s.records.back());
+        s.targets.insert(s.records.back().targets.begin(), s.records.back().targets.end());
+    };
+    d.submitBegin();
+    for (const auto &segment : segments)
+        d.push(segment.first, segment.second);
+    d.submitEnd();
+    s.draws = uint32_t(d.draws - primed_->draws);
+    s.dispatches = uint32_t(d.dispatches - primed_->dispatches);
+    s.clears = uint32_t(d.clears - primed_->clears);
+    // the programs it learned from the driver stay known: the next capture's draws of them match by their bytes
+    primed_->programs = std::move(d.programs);
+    return s;
 }
 
-std::vector<CapturedState> Capture::decode(const std::vector<std::pair<const uint32_t *, uint64_t>> &segments)
+std::map<uint32_t, uint32_t> Capture::context() const
 {
-    drawn_.clear();
-    decoder_->submitBegin();
-    for (const auto &s : segments)
-        decoder_->push(s.first, s.second);
-    decoder_->submitEnd();
-    return std::move(drawn_);
+    std::map<uint32_t, uint32_t> out;
+    for (uint32_t m = 0; m < kMmeScratch; m += 4)
+        if (const uint32_t v = primed_->reg3d(m))
+            out[m] = v;
+    return out;
 }
 
-void Capture::record(nvdec::Decoder &d)
+const CapturedProgram *Capture::program(const std::string &id)
 {
-    CapturedState s;
-    for (uint32_t m = 0; m < kMethods; m += 4)
-        if (!ownedMethod(m) && d.reg3d(m) != context_[m / 4])
-            s.registers.push_back({m, d.reg3d(m)});
-    s.vertex = program(d, kVertexStage);
-    s.pixel = program(d, kPixelStage);
-    d.pushWords(s.pushMask, s.push);
-    drawn_.push_back(std::move(s));
+    if (const auto it = programs_.find(id); it != programs_.end())
+        return &it->second;
+    const nvdec::ProgramInfo *p = primed_->programById(id);
+    if (!p)
+        return nullptr;
+    return &(programs_[id] = {id, p->image, p->data, p->cbufTypes});
 }
 
 }  // namespace raw

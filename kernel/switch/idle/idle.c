@@ -27,6 +27,7 @@ struct idle_core {
     uint32_t state;
 #if DEVELOPMENT || DEBUG
     struct switch_idle_counts counts;
+    bool from_c7; /* back from C7 and no idle entry since: the next frame line paid the exit */
 #endif
 } __attribute__((aligned(64)));
 
@@ -73,6 +74,9 @@ void switch_idle_wfi(struct cpu_data *cdp)
     struct idle_core *core = &idle_cores[cpu];
     const uint64_t now = mach_absolute_time();
     const uint64_t deadline = cdp->rtcPop;
+#if DEVELOPMENT || DEBUG
+    core->from_c7 = false;
+#endif
     core->entered = now;
     core->state = os_atomic_load(&idle_c7, acquire)
                       ? switch_idle_choose(core->predicted, now, deadline, os_atomic_load(&idle_frame_at, relaxed))
@@ -102,7 +106,23 @@ void switch_idle_resumed(struct cpu_data *cdp)
     switch_secondary_vectors_leave();
     idle_platform->resumed(cpu);
     ClearIdlePop(FALSE);
-    idle_exit(&idle_cores[cpu], mach_absolute_time());
+    struct idle_core *core = &idle_cores[cpu];
+    const uint64_t now = mach_absolute_time();
+#if DEVELOPMENT || DEBUG
+    const uint64_t exit_latency = switch_idle_c7_exit(now, core->wake_at);
+    if (exit_latency != 0) {
+        core->counts.timer_exits++;
+        core->counts.exit_ticks += exit_latency;
+        if (exit_latency > core->counts.exit_max) {
+            core->counts.exit_max = exit_latency;
+        }
+        if (exit_latency > SWITCH_IDLE_C7_WAKE_LATENCY) {
+            core->counts.exits_late++;
+        }
+    }
+    core->from_c7 = true;
+#endif
+    idle_exit(core, now);
 }
 
 void switch_idle_start(const struct switch_idle_platform *platform)
@@ -115,6 +135,13 @@ void switch_idle_start(const struct switch_idle_platform *platform)
 
 void switch_idle_note_frame(void)
 {
+#if DEVELOPMENT || DEBUG
+    const uint32_t cpu = (uint32_t)getCpuDatap()->cpu_number;
+    if (cpu < SWITCH_SMP_CORE_COUNT && idle_cores[cpu].from_c7) {
+        idle_cores[cpu].from_c7 = false;
+        idle_cores[cpu].counts.frame_wakes++;
+    }
+#endif
     const uint64_t now = mach_absolute_time();
     const uint64_t before = os_atomic_xchg(&idle_frame_at, now, relaxed);
     if (now - before >= SWITCH_IDLE_FRAME_WINDOW) {

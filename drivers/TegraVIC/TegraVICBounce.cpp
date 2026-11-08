@@ -32,10 +32,11 @@ void watchdog(thread_call_param_t, thread_call_param_t)
 {
     IOLockLock(gLock);
     const uint32_t pending = gBackQueued - gBackLanded;
-    if (pending && gBackLanded == gBackSeen)
+    if (pending && gBackLanded == gBackSeen) {
         panic("TegraVIC: copy-engine bounce lost its completion: %u copies back outstanding after %u ms (syncpoint "
               "%u at %u)",
               pending, kLandedWithinMs, gSyncpt, tegra_host1x_syncpt_read(gSyncpt));
+    }
     if (pending)
         watchLocked();
     IOLockUnlock(gLock);
@@ -43,14 +44,15 @@ void watchdog(thread_call_param_t, thread_call_param_t)
 
 IOReturn ioreturnOf(int err)
 {
-    return err == -EBUSY    ? kIOReturnBusy
-           : err == -ENOMEM ? kIOReturnNoMemory
-           : err            ? kIOReturnIOError
-                            : kIOReturnSuccess;
+    if (err == -EBUSY)
+        return kIOReturnBusy;
+    if (err == -ENOMEM)
+        return kIOReturnNoMemory;
+    return err ? kIOReturnIOError : kIOReturnSuccess;
 }
 }  // namespace
 
-IOReturn tegra_vic_bounce_start(void)
+IOReturn tegra_vic_bounce_start()
 {
     if (gLock)
         return kIOReturnSuccess;
@@ -69,12 +71,12 @@ IOReturn tegra_vic_bounce_start(void)
     return kIOReturnSuccess;
 }
 
-uint32_t tegra_vic_bounce_syncpt(void)
+uint32_t tegra_vic_bounce_syncpt()
 {
     return gSyncpt;
 }
 
-uint32_t *tegra_vic_bounce_next(void)
+uint32_t *tegra_vic_bounce_next()
 {
     return &gNext;
 }
@@ -90,10 +92,10 @@ IOReturn tegra_vic_bounce_stage(TegraVICBounce *b, const TegraVICSurfaceDesc *d,
             IOLockSleep(gLock, &b->inFlight, THREAD_UNINT);
         IOLockUnlock(gLock);
         switch_dma_pages_free(&b->scratch);
-        if (!switch_dma_pages_alloc(&b->scratch, (size_t)b->desc.length))
+        if (!switch_dma_pages_alloc(&b->scratch, static_cast<size_t>(b->desc.length)))
             return kIOReturnNoMemory;
     }
-    b->pages = (uint32_t)(b->desc.length / TEGRA_VIC_BOUNCE_PAGE);
+    b->pages = static_cast<uint32_t>(b->desc.length / TEGRA_VIC_BOUNCE_PAGE);
     return kIOReturnSuccess;
 }
 
@@ -104,11 +106,12 @@ IOReturn tegra_vic_bounce_queue(IOMemoryDescriptor *from, const TegraVICSurfaceD
     const TegraVICFormat *f = tegra_vic_format(fd->fourcc);
     const tegra_gm20b_ce_done done = {signal ? gSyncpt : TEGRA_GM20B_CE_NO_SYNCPT, landed, arg};
     for (uint32_t p = 0; p < f->planes; p++) {
-        const tegra_gm20b_ce_plane src = {from, fd->planeOffset[p], (uint32_t)fd->planeBytesPerRow[p]};
-        const tegra_gm20b_ce_plane dst = {to, td->planeOffset[p], (uint32_t)td->planeBytesPerRow[p]};
+        // NOLINTNEXTLINE(clang-analyzer-security.ArrayBound): a format's planes never outnumber a descriptor's
+        const tegra_gm20b_ce_plane src = {from, fd->planeOffset[p], static_cast<uint32_t>(fd->planeBytesPerRow[p])};
+        const tegra_gm20b_ce_plane dst = {to, td->planeOffset[p], static_cast<uint32_t>(td->planeBytesPerRow[p])};
         const bool last = p + 1 == f->planes;
         const int err = tegra_gm20b_ce_copy_plane(&src, &dst, tegra_vic_bounce_row_bytes(f, fd->width, p),
-                                                  (uint32_t)fd->planeHeight[p], p ? nullptr : wait,
+                                                  static_cast<uint32_t>(fd->planeHeight[p]), p ? nullptr : wait,
                                                   last && (signal || landed) ? &done : nullptr);
         if (err)
             return ioreturnOf(err);

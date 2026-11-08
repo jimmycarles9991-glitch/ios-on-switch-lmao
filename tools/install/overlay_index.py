@@ -9,7 +9,8 @@ path order, u64 the System file's id, u64 the Data file's id, u32 the offset of 
 string table, the files' NUL-terminated absolute System paths, sorted by bytes and unique, every byte belonging to one
 path. The kernel finds a System file by its id and the Data file by its, so no path is resolved on the device; the
 directory ids are what it refuses every change under, and a file keeps the System volume's launch status only if its
-own CDHash equals the one its entry carries.
+own CDHash equals the one its entry carries. A System file with several hard links has one entry per path, all with
+its id, one Data file's id and one CDHash: the kernel redirects whichever name a lookup arrives by.
 """
 
 import struct
@@ -44,15 +45,19 @@ def check_path(path: str) -> None:
 
 
 def _check(files: list[tuple[str, int, int, bytes]], directories: list[int]) -> None:
-    system = [s for _, s, _, _ in files]
-    data = [d for _, _, d, _ in files] + list(directories)
-    if 0 in system or 0 in data:
-        raise OverlayIndexError('a file id of 0')
-    if len(set(system)) != len(system) or len(set(data)) != len(data):
-        raise OverlayIndexError('the overlay index names a file id twice')
     for _, _, _, cdhash in files:
         if not isinstance(cdhash, (bytes, bytearray)) or len(cdhash) != CDHASH:
             raise OverlayIndexError('a CDHash that is not 20 bytes')
+    if any(0 in (s, d) for _, s, d, _ in files) or 0 in directories:
+        raise OverlayIndexError('a file id of 0')
+    by_system, by_data = {}, {}
+    for _, system, data, cdhash in files:
+        if by_system.setdefault(system, (data, bytes(cdhash))) != (data, bytes(cdhash)):
+            raise OverlayIndexError('hard links of one System file with different Data files or CDHashes')
+        if by_data.setdefault(data, system) != system:
+            raise OverlayIndexError('the overlay index names a Data file id twice')
+    if len(set(directories)) != len(directories) or set(directories) & by_data.keys():
+        raise OverlayIndexError('the overlay index names a directory id twice')
 
 
 def encode(files: list[tuple[str, int, int, bytes]], directories: list[int]) -> bytes:

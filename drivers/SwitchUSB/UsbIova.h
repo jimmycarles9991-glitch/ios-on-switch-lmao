@@ -59,23 +59,23 @@ struct UsbIovaWindow {
 
     uint64_t iova(uint32_t index) const
     {
-        return base + (uint64_t)index * kPage;
+        return base + static_cast<uint64_t>(index) * kPage;
     }
 
     bool contains(uint64_t address) const
     {
-        return address >= base && address < base + (uint64_t)pages * kPage;
+        return address >= base && address < base + static_cast<uint64_t>(pages) * kPage;
     }
 
     uint32_t index(uint64_t address) const
     {
-        return (uint32_t)((address - base) / kPage);
+        return static_cast<uint32_t>((address - base) / kPage);
     }
 
     // Pages a mapping of `length` bytes needs when its first byte sits `offset` bytes into a page.
     static uint32_t pagesFor(uint64_t offset, uint64_t length)
     {
-        return (uint32_t)(((offset & (kPage - 1)) + length + kPage - 1) / kPage);
+        return static_cast<uint32_t>(((offset & (kPage - 1)) + length + kPage - 1) / kPage);
     }
 };
 
@@ -92,10 +92,11 @@ inline bool usb_iova_page_aligned(Segment segment, uint64_t length, uint64_t lim
         if (!pa || !bytes || pa + bytes > limit)
             return false;
         const uint64_t take = bytes < length - done ? bytes : length - done;
-        if (!done)
+        if (!done) {
             *firstPa = pa;
-        else if (pa & (page - 1))
+        } else if (pa & (page - 1)) {
             return false;
+        }
         if (done + take < length && ((pa + take) & (page - 1)))
             return false;
         done += take;

@@ -9,6 +9,10 @@
 
 #include "SwitchPDAltMode.h"
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 static inline unsigned switch_pd_alt_last_command(uint16_t status1)
 {
     return (status1 & SWITCH_PD_ALT_STATUS1_LASTCMD) >> 4;
@@ -16,7 +20,7 @@ static inline unsigned switch_pd_alt_last_command(uint16_t status1)
 
 static inline unsigned switch_pd_alt_data_role(uint16_t status1)
 {
-    return (status1 >> SWITCH_PD_ALT_STATUS1_DR_SHIFT) & 3u;
+    return ((unsigned)status1 >> SWITCH_PD_ALT_STATUS1_DR_SHIFT) & 3u;
 }
 
 // The step's opening command: what a transition into it sends, and what a paused step sends again.
@@ -136,9 +140,9 @@ static inline struct switch_pd_alt_out switch_pd_alt_reply(struct switch_pd_alt 
         if (!switch_pd_alt_acked(vdm, 0x01) || len < 17) {
             return switch_pd_alt_finish(alt, SWITCH_PD_ALT_DONE, "no alternate modes: Discover Identity not acked");
         }
-        const unsigned vid = (unsigned)(vdm[5] | (vdm[6] << 8));
-        const unsigned type = (vdm[8] >> 3) & 7u;
-        const unsigned pid = (unsigned)(vdm[15] | (vdm[16] << 8));
+        const unsigned vid = (unsigned)vdm[5] | (unsigned)vdm[6] << 8U;
+        const unsigned type = ((unsigned)vdm[8] >> 3U) & 7U;
+        const unsigned pid = (unsigned)vdm[15] | (unsigned)vdm[16] << 8U;
         alt->dock = type == 5 && vid == 0x057E && pid == 0x2003;
         if (alt->dock) {
             return switch_pd_alt_go(alt, SWITCH_PD_ALT_ENTER_DOCK);
@@ -357,5 +361,9 @@ static inline const char *switch_pd_alt_step_name(enum switch_pd_alt_step step)
         "failed"};
     return (unsigned)step < sizeof(names) / sizeof(names[0]) ? names[step] : "?";
 }
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif

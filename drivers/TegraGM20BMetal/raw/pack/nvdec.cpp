@@ -22,8 +22,6 @@ struct mme_sim_state_ops {
 };
 
 void mme_fermi_decode(struct mme_fermi_inst *insts, const uint32_t *in, uint32_t inst_count);
-void cap_describe(uint64_t va) __attribute__((weak));
-void cap_scrub(uint64_t va, uint64_t bytes) __attribute__((weak));
 void mme_fermi_sim_core(uint32_t inst_count, const struct mme_fermi_inst *insts,
                         const struct mme_sim_state_ops *state_ops, void *state_handler);
 }
@@ -51,6 +49,8 @@ enum : uint32_t {
     PIXEL_SHADER_BARRIER = 0x0de0,
     NO_OPERATION = 0x0100,
     INVALIDATE_TEXTURE_DATA_CACHE_PIXEL_ORDERED = 0x0f74,
+    TILED_CACHE_BARRIER = 0x0f7c,  // deko3d's engine_3d.def (raw/runtime/raw_tiled_cache.h)
+    TILED_CACHE_FLUSH = 0x0f80,
     ZT_A = 0x0fe0,
     ZT_B = 0x0fe4,
     CLEAR_SURFACE_CONTROL = 0x10f8,
@@ -74,6 +74,8 @@ enum : uint32_t {
     RENDER_ENABLE_OVERRIDE = 0x1944,
     CLEAR_SURFACE = 0x19d0,
     COLOR_COMPRESSION = 0x19e0,
+    Z_COMPRESSION = 0x19cc,
+    ZT_SIZE_A = 0x1228,
     REPORT_SEMAPHORE_A = 0x1b00,
     REPORT_SEMAPHORE_D = 0x1b0c,
     VERTEX_STREAM_A = 0x1c00,
@@ -139,6 +141,9 @@ std::string nameless(const std::string &s)
     return out;
 }
 
+// An indexed draw of at most this many indices prints them by value (eqcheck.py joins a split draw's runs from them)
+constexpr uint32_t kListedIndices = 256;
+
 std::string hex(uint64_t v)
 {
     char b[24];
@@ -154,7 +159,8 @@ bool ignored3d(uint32_t m)
         return true;  // control, MME RAM loads, WFI
     if (m == INVALIDATE_SHADER_CACHES || m == INVALIDATE_SHADER_CACHES_NO_WFI || m == INVALIDATE_TEXTURE_DATA_CACHE ||
         m == INVALIDATE_TEXTURE_DATA_CACHE_NO_WFI || m == INVALIDATE_SAMPLER_CACHE_NO_WFI ||
-        m == INVALIDATE_TEXTURE_HEADER_CACHE_NO_WFI || m == FLUSH_PENDING_WRITES)
+        m == INVALIDATE_TEXTURE_HEADER_CACHE_NO_WFI || m == FLUSH_PENDING_WRITES || m == TILED_CACHE_BARRIER ||
+        m == TILED_CACHE_FLUSH)
         return true;
     if (m >= CLEAR_RECT_H && m <= COLOR_CLEAR_VALUE + 0xc)
         return true;  // clear rect/vertex array triggers/clear values
@@ -181,9 +187,11 @@ bool ignored3d(uint32_t m)
         return true;
     if (m >= PIPELINE && m < PIPELINE + 0x180 && (m & 0x3f) == 4)
         return true;  // program offsets: compared as programs
-    // other address-bearing state NVK sets once (shader local memory, zcull, query/ICB, index buffer, MME DMA)
-    static const uint32_t addrs[] = {0x0790, 0x0794, 0x07e0, 0x07e4, 0x07e8, 0x07ec, 0x07f0, 0x07f4, 0x07f8, 0x07fc,
-                                     0x0f84, 0x0f88, 0x1550, 0x1554, 0x17c8, 0x17cc, 0x17d0, 0x17d4, 0x17d8};
+    // other address-bearing state NVK sets once (shader local memory, zcull, query/ICB, index buffer, MME DMA), and an
+    // indexed draw's first index and count (SET_INDEX_BUFFER_F, DRAW_INDEX_BUFFER: its ib line's)
+    static const uint32_t addrs[] = {0x0790, 0x0794, 0x07e0, 0x07e4, 0x07e8, 0x07ec, 0x07f0,
+                                     0x07f4, 0x07f8, 0x07fc, 0x0f84, 0x0f88, 0x1550, 0x1554,
+                                     0x17c8, 0x17cc, 0x17d0, 0x17d4, 0x17d8, 0x17dc, 0x17e0};
     return std::find(std::begin(addrs), std::end(addrs), m) != std::end(addrs);
 }
 }  // namespace
@@ -204,12 +212,9 @@ void Decoder::twod(uint32_t subc, uint32_t mthd, uint32_t data)
     auto *sim = static_cast<twodsim::Sim *>(twod_);
     if (!sim) {
         twod_ = sim = new twodsim::Sim;
-        // NVDEC_TWOD_QUIRK: the engine as r7q's GM20B measured it ("integer": bilinear taps from the position's own
-        // fraction) or with no half-texel origin ("nohalf"): the self-test's sweep must find the sampling that undoes it
-        if (const char *q = getenv("NVDEC_TWOD_QUIRK")) {
-            sim->quirkIntegerCentres = !strcmp(q, "integer");
-            sim->quirkNoHalfTexel = !strcmp(q, "nohalf");
-        }
+        // NVDEC_TWOD_QUIRK=gm20b: the engine as the device measured it (its centre origin half a texel off, fx::kGm20bSampling)
+        if (const char *q = getenv("NVDEC_TWOD_QUIRK"))
+            sim->quirkCentreHalfTexel = !strcmp(q, "gm20b");
         sim->host = [this](uint64_t va, uint64_t bytes) {
             return const_cast<uint8_t *>(map_ ? map_(va, bytes) : nullptr);
         };
@@ -258,6 +263,11 @@ void Decoder::submitEnd()
         fprintf(out_, "END-OF-SUBMIT barriers=%s\n", s.c_str());
         pendingBarriers_.clear();
     }
+    if (compSubmit.any())
+        fprintf(out_, "COMP draws=%llu clears=%llu zbc=%llu zbcKiB=%llu\n", (unsigned long long)compSubmit.draws,
+                (unsigned long long)compSubmit.clears, (unsigned long long)compSubmit.zbc,
+                (unsigned long long)(compSubmit.zbcBytes >> 10));
+    compSubmit = {};
     fprintf(out_, "SUBMIT %llu\n", (unsigned long long)submits);
 }
 
@@ -324,8 +334,10 @@ void Decoder::method(uint32_t subc, uint32_t mthd, uint32_t data, bool fromMme)
     }
     if (subc != 0) {
         reg_[subc][mthd >> 2] = data;
-        if (subc == 1 && mthd == 0x02b4)
+        if (subc == 1 && mthd == 0x02b4) {
+            dispatches++;
             fprintf(out_, "DISPATCH\n");
+        }
         if (subc == 4 && mthd == 0x0300) {
             barrier("CE_COPY");
             copyEngine(data);
@@ -370,6 +382,12 @@ void Decoder::method(uint32_t subc, uint32_t mthd, uint32_t data, bool fromMme)
     case PIXEL_SHADER_BARRIER:
         barrier("PSB");
         break;
+    case TILED_CACHE_BARRIER:
+        barrier("TCBAR");
+        break;
+    case TILED_CACHE_FLUSH:
+        barrier("TCFLUSH");
+        break;
     case NO_OPERATION:
         // raw_gpu.cpp's marks (SWITCH_RAW_HARNESS_MARKS builds): a fetch barrier left out, a draw's run after its first
         if (data == 0x0e11de)
@@ -391,6 +409,12 @@ void Decoder::method(uint32_t subc, uint32_t mthd, uint32_t data, bool fromMme)
     case INVALIDATE_SHADER_CACHES:
     case INVALIDATE_SHADER_CACHES_NO_WFI:
         barrier("SHINV");
+        if (data & 1)  // INSTRUCTION
+            barrier("ICINV");
+        if (data & 0x1000) {  // CONSTANT
+            barrier("CBINV");
+            constantStale_.clear();
+        }
         break;
     default:
         break;
@@ -434,8 +458,17 @@ void Decoder::method(uint32_t subc, uint32_t mthd, uint32_t data, bool fromMme)
         }
         indexed_ = true;
         draw("DRAW", 0, most + 1);
-        fprintf(out_, "  ib size=%u count=%u data=%s restart=%x end=%llx\n", size, data,
-                contentHash(ib, idx.size(), 0, false, false).c_str(), r3(0x1648),
+        std::string indices = contentHash(ib, idx.size(), 0, false, false);
+        if (data <= kListedIndices) {
+            indices = "";
+            for (uint32_t i = 0; i < data; i++) {
+                uint32_t v = 0;
+                memcpy(&v, &idx[size_t(i) * size], size);
+                indices += (i ? "," : "") + hex(v);
+            }
+        }
+        fprintf(out_, "  ib size=%u first=%u count=%u %s=%s restart=%x end=%llx\n", size, first, data,
+                data <= kListedIndices ? "idx" : "data", indices.c_str(), r3(0x1648),
                 (unsigned long long)(addr3(0x17d0, 0x17d4) - addr3(0x17c8, 0x17cc)));
         indexed_ = false;
         return;
@@ -510,6 +543,19 @@ void Decoder::copyEngine(uint32_t launch)
         return d;
     };
     const Side in = side(srcPitch, src, pitchIn, 0x728, srcElem), out = side(dstPitch, dst, pitchOut, 0x70c, elem);
+    // a constant buffer is pitch memory: block-linear destinations are images
+    if (dstPitch && length && lines) {
+        constantStale_.push_back({dst, dst + uint64_t(lines - 1) * pitchOut + uint64_t(length) * elem});
+        // one hull of them all: may see a stale read where there is none, never miss one
+        if (constantStale_.size() > 1024) {
+            uint64_t lo = ~0ull, hi = 0;
+            for (const auto &r : constantStale_) {
+                lo = std::min(lo, r.first);
+                hi = std::max(hi, r.second);
+            }
+            constantStale_.assign(1, {lo, hi});
+        }
+    }
     auto addr = [](const Side &d, uint32_t e, uint32_t y, uint32_t elemBytes) {
         if (!d.tiled)
             return d.base + uint64_t(y) * d.pitch + uint64_t(e) * elemBytes;
@@ -864,6 +910,7 @@ bool Decoder::loadPrograms(const char *path)
         at += 80 + code;
         p.data.assign(b.begin() + at, b.begin() + at + data);
         at += data;
+        p.id = hex(fnv(p.data.data(), p.data.size(), fnv(p.image.data(), p.image.size())));
         programs.emplace(fnv(p.image.data(), 80), p);
     }
     return true;
@@ -874,27 +921,41 @@ bool Decoder::loadPrograms(const char *path)
 // marked unknown. The header sits 0x30 bytes into its upload and the data 256-aligned after the code (nvk_shader_upload).
 const ProgramInfo *Decoder::program(int stage, std::string &id)
 {
-    const uint64_t at = addr3(PROGRAM_REGION_A, PROGRAM_REGION_B) + r3(PIPELINE + 0x40 * stage + 4);
+    const uint32_t offset = r3(PIPELINE + 0x40 * stage + 4);
+    const uint64_t at = addr3(PROGRAM_REGION_A, PROGRAM_REGION_B) + offset;
     uint8_t head[80 + 256];
     if (!read(at, head, sizeof head)) {
         id = "unmapped";
         return nullptr;
     }
-    auto range = programs.equal_range(fnv(head, 80));
-    for (auto it = range.first; it != range.second; ++it) {
-        const ProgramInfo &p = it->second;
-        std::vector<uint8_t> b(p.image.size()), data(p.data.size());
-        read(at, b.data(), b.size());
-        const uint64_t dataAt = at - 0x30 + ((0x30 + b.size() + 0xff) & ~uint64_t(0xff));
-        if (b == p.image && (data.empty() || (read(dataAt, data.data(), data.size()) && data == p.data))) {
-            id = hex(fnv(data.data(), data.size(), fnv(b.data(), b.size())));
-            return &p;
+    auto match = [&]() -> const ProgramInfo * {
+        auto range = programs.equal_range(fnv(head, 80));
+        for (auto it = range.first; it != range.second; ++it) {
+            const ProgramInfo &p = it->second;
+            std::vector<uint8_t> b(p.image.size()), data(p.data.size());
+            read(at, b.data(), b.size());
+            const uint64_t dataAt = at - 0x30 + ((0x30 + b.size() + 0xff) & ~uint64_t(0xff));
+            if (b == p.image && (data.empty() || (read(dataAt, data.data(), data.size()) && data == p.data)))
+                return &p;
         }
+        return nullptr;
+    };
+    const ProgramInfo *known = match();
+    ProgramInfo learned;
+    if (!known && programAt && programAt(offset, learned) && learned.image.size() >= 80) {
+        learned.id =
+            hex(fnv(learned.data.data(), learned.data.size(), fnv(learned.image.data(), learned.image.size())));
+        programs.emplace(fnv(learned.image.data(), 80), learned);
+        known = match();
+    }
+    if (known) {
+        id = known->id;
+        return known;
     }
     id = "unknown:" + hex(fnv(head, sizeof head));
-    if (cap_describe && getenv("NVDEC_DESCRIBE")) {
+    if (describe && getenv("NVDEC_DESCRIBE")) {
         fprintf(stderr, "program stage %d at ", stage);
-        cap_describe(at);
+        describe(at);
     }
     if (const char *dir =
             getenv("NVDEC_DUMPPROG")) {  // the unknown program's header and first 8 KiB, for a diff with known ones
@@ -912,6 +973,7 @@ const ProgramInfo *Decoder::program(int stage, std::string &id)
 void Decoder::clear(uint32_t data)
 {
     clears++;
+    countComp(data);
     std::string bar;
     for (auto &b : pendingBarriers_)
         bar += (bar.empty() ? "" : ",") + b;
@@ -931,154 +993,239 @@ void Decoder::clear(uint32_t data)
         r3(CLEAR_RECT_V), r3(CLEAR_SURFACE_CONTROL), zs, bar.c_str());
 }
 
-// Raw facts of a draw for the pack generator (tools/mkpack.py): every non-zero 3D register, the root table's words, set 0's
-// words, the words behind each pointer in set 0, the texture/sampler headers of the pools' first entries in use, the vertex
-// streams and the program offsets.
-void Decoder::probeDump(uint32_t first, uint32_t count)
+// A draw (clearData 0) or a clear into a compressed target (nvdec_comp.h)
+void Decoder::countComp(uint32_t clearData)
 {
-    fprintf(out_, "P begin\n");
-    std::string line = "P regs";
+    if (!vaKind)
+        return;
+    const uint32_t rt = (clearData >> 6) & 0xf, m = COLOR_TARGET + 0x40 * rt;
+    const uint32_t colorKind = r3(COLOR_COMPRESSION + 4 * rt) ? vaKind(addr3(m, m + 4)) : 0;
+    const uint32_t zetaKind = (r3(ZT_SELECT) & 1) && r3(Z_COMPRESSION) ? vaKind(addr3(ZT_A, ZT_B)) : 0;
+    auto add = [&](uint64_t CompCounts::*f, uint64_t n) {
+        comp.*f += n;
+        compSubmit.*f += n;
+    };
+    if (!clearData) {
+        uint32_t live = r3(CT_SELECT) & 0xf;
+        bool any = compressibleKind(zetaKind);
+        for (uint32_t j = 0; j < live && j < 8 && !any; j++)
+            any = r3(COLOR_COMPRESSION + 4 * j) &&
+                  compressibleKind(vaKind(addr3(COLOR_TARGET + 0x40 * j, COLOR_TARGET + 0x40 * j + 4)));
+        if (any)
+            add(&CompCounts::draws, 1);
+        return;
+    }
+    const bool rect = r3(CLEAR_SURFACE_CONTROL) & 0x10;
+    const uint32_t h = r3(CLEAR_RECT_H), v = r3(CLEAR_RECT_V);
+    auto whole = [&](uint32_t width, uint32_t height) {
+        return !rect || (!(h & 0xffff) && !(v & 0xffff) && (h >> 16) >= width && (v >> 16) >= height);
+    };
+    if ((clearData & 0x3c) && compressibleKind(colorKind)) {
+        const uint32_t w[4] = {r3(COLOR_CLEAR_VALUE), r3(COLOR_CLEAR_VALUE + 4), r3(COLOR_CLEAR_VALUE + 8),
+                               r3(COLOR_CLEAR_VALUE + 0xc)};
+        add(&CompCounts::clears, 1);
+        if ((clearData & 0x3c) == 0x3c && whole(r3(m + 8), r3(m + 0xc)) && zbcBootColorNv(r3(m + 0x10), w)) {
+            add(&CompCounts::zbc, 1);
+            add(&CompCounts::zbcBytes, uint64_t(r3(m + 8)) * r3(m + 0xc) * compBytesPerTexel(colorKind));
+        }
+    }
+    if ((clearData & 1) && compressibleKind(zetaKind)) {
+        add(&CompCounts::clears, 1);
+        if (whole(r3(ZT_SIZE_A), r3(ZT_SIZE_A + 4)) && zbcBootDepthBits(r3(Z_CLEAR_VALUE))) {
+            add(&CompCounts::zbc, 1);
+            add(&CompCounts::zbcBytes, uint64_t(r3(ZT_SIZE_A)) * r3(ZT_SIZE_A + 4) * compBytesPerTexel(zetaKind));
+        }
+    }
+}
+
+// Raw facts of a draw for the pack generator (tools/mkpack.py) and the runtime's record maker: every non-zero 3D register, the
+// bound constant buffers, the root table's words, the sets' words, the words behind each pointer in them, the texture/sampler
+// headers set 0 can name and the pools' first entries, the vertex streams and the programs.
+void Decoder::probeRecord(ProbeRecord &r)
+{
+    r = {};
     for (uint32_t i = 0x200 / 4; i < 0x4000; i++)
-        if (reg_[0][i] && i * 4 < MME_SCRATCH) {
-            char b[24];
-            snprintf(b, sizeof b, " %x=%x", i * 4, reg_[0][i]);
-            line += b;
-        }
-    fprintf(out_, "%s\n", line.c_str());
-    auto words = [&](const char *tag, uint64_t va, uint32_t bytes) {
-        std::vector<uint32_t> w(bytes / 4);
-        read(va, w.data(), bytes);
-        std::string l = std::string("P ") + tag + " " + hex(va);
-        for (uint32_t x : w) {
-            char b[12];
-            snprintf(b, sizeof b, " %x", x);
-            l += b;
-        }
-        fprintf(out_, "%s\n", l.c_str());
+        if (reg_[0][i] && i * 4 < MME_SCRATCH)
+            r.regs[i * 4] = reg_[0][i];
+    auto words = [&](uint64_t va, uint32_t bytes) {
+        ProbeRecord::Words w{va, std::vector<uint32_t>(bytes / 4)};
+        read(va, w.words.data(), bytes);
         return w;
+    };
+    auto pointer = [&](uint64_t v) {
+        return (v >> 32) >= 1 && (v >> 32) < 0x80 && map_ && map_(v, 1);
     };
     for (int g = 0; g < 5; g++)
         for (int s = 0; s < 18; s++)
             if (binds_[g][s].valid)
-                fprintf(out_, "P bind %d %d %s %x\n", g, s, hex(binds_[g][s].addr).c_str(), binds_[g][s].size);
+                r.binds.push_back({g, s, binds_[g][s].addr, binds_[g][s].size});
     const uint64_t root = binds_[4][0].valid ? binds_[4][0].addr : binds_[0][0].addr;
-    std::vector<uint32_t> r = words("root", root, 0x780);
-    {  // the root-table words written this submission in the push windows [0x700, 0x780): m2v's push ranges as NVK wrote them
-        std::string l = "P pushw";
-        for (auto it = writtenThisSubmit_.lower_bound(root + 0x700);
-             it != writtenThisSubmit_.end() && *it < root + 0x780; ++it) {
-            char b[32];
-            snprintf(b, sizeof b, " %x=%x", unsigned(*it - root), cbufWrites_[*it]);
-            l += b;
-        }
-        fprintf(out_, "%s\n", l.c_str());
-    }
+    r.root = words(root, 0x780);
+    // the root-table words written this submission in the push windows [0x700, 0x780): m2v's push ranges as NVK wrote them
+    for (auto it = writtenThisSubmit_.lower_bound(root + 0x700); it != writtenThisSubmit_.end() && *it < root + 0x780;
+         ++it)
+        r.pushWords.push_back({uint32_t(*it - root), cbufWrites_[*it]});
+    const std::vector<uint32_t> &rw = r.root.words;
     for (int set = 0; set < 2; set++) {
-        const uint64_t sa = (uint64_t(r[(0x38 + 16 * set) / 4 + 1]) << 32) | r[(0x38 + 16 * set) / 4];
-        const uint32_t ss = r[(0x38 + 16 * set) / 4 + 2];
+        const uint64_t sa = (uint64_t(rw[(0x38 + 16 * set) / 4 + 1]) << 32) | rw[(0x38 + 16 * set) / 4];
+        const uint32_t ss = rw[(0x38 + 16 * set) / 4 + 2];
         if (!sa || !ss)
             continue;
-        char tag[16];
-        snprintf(tag, sizeof tag, "set%d", set);
-        std::vector<uint32_t> d = words(tag, sa, std::min<uint32_t>(ss, 0x1000));
+        r.sets[set] = words(sa, std::min<uint32_t>(ss, 0x1000));
+        const std::vector<uint32_t> &d = r.sets[set].words;
         for (size_t i = 0; i + 3 < d.size(); i += 2) {
             const uint64_t v = (uint64_t(d[i + 1]) << 32) | d[i];
-            if ((v >> 32) >= 1 && (v >> 32) < 0x80 && map_ && map_(v, 1)) {
-                char t2[32];
-                snprintf(t2, sizeof t2, "ptr%d.%zu", set, i * 4);
-                words(t2, v, 256);
-            }
+            if (pointer(v))
+                r.setPointers[set][uint32_t(i * 4)] = words(v, 256);
         }
     }
-    for (int k = 0; k < 2; k++) {
-        const uint32_t pushw = 0x700 / 4;
-        for (uint32_t i = pushw; i + 1 < pushw + 32; i += 2) {
-            const uint64_t v = (uint64_t(r[i + 1]) << 32) | r[i];
-            if (k == 0 && (v >> 32) >= 1 && (v >> 32) < 0x80 && map_ && map_(v, 1)) {
-                char t2[32];
-                snprintf(t2, sizeof t2, "pushptr.%u", (i - pushw) * 4);
-                words(t2, v, 256);
-            }
-        }
+    for (uint32_t i = 0x700 / 4; i + 1 < 0x700 / 4 + 32; i += 2) {
+        const uint64_t v = (uint64_t(rw[i + 1]) << 32) | rw[i];
+        if (pointer(v))
+            r.pushPointers[(i - 0x700 / 4) * 4] = words(v, 256);
     }
     // the texture and sampler headers any set-0 word could name (tic in bits 19:0, tsc in 31:20), plus entry 0 of each pool
     std::set<uint32_t> tics = {0}, tscs = {0};
-    for (const std::string &tag : {std::string("set0"), std::string("set1")})
-        (void)tag;
-    {
-        const uint64_t sa = (uint64_t(r[0x38 / 4 + 1]) << 32) | r[0x38 / 4];
-        const uint32_t ss = std::min<uint32_t>(r[0x38 / 4 + 2], 0x1000);
-        std::vector<uint32_t> d(ss / 4);
-        if (sa && ss)
-            read(sa, d.data(), ss);
-        for (uint32_t w : d) {
-            if ((w & 0xfffff) <= r3(TIC_POOL_C))
-                tics.insert(w & 0xfffff);
-            if ((w >> 20) <= r3(TSC_POOL_C))
-                tscs.insert(w >> 20);
-        }
+    for (uint32_t w : r.sets[0].words) {
+        if ((w & 0xfffff) <= r3(TIC_POOL_C))
+            tics.insert(w & 0xfffff);
+        if ((w >> 20) <= r3(TSC_POOL_C))
+            tscs.insert(w >> 20);
     }
+    auto header = [](const uint32_t (&e)[8]) {
+        std::array<uint32_t, 8> a;
+        std::copy(e, e + 8, a.begin());
+        return a;
+    };
     for (uint32_t t : tics) {
         uint32_t e[8];
         read(addr3(TIC_POOL_A, TIC_POOL_B) + 32ull * t, e, 32);
-        bool any = false;
-        for (uint32_t x : e)
-            any |= x != 0;
-        if (any)
-            fprintf(out_, "P tic %u %s %x %x %x %x %x %x %x %x\n", t,
-                    name((uint64_t(e[2] & 0xffff) << 32) | (e[1] & 0xffffffe0u)).c_str(), e[0], e[1], e[2], e[3], e[4],
-                    e[5], e[6], e[7]);
+        if (std::any_of(e, e + 8, [](uint32_t x) {
+                return x != 0;
+            }))
+            r.tic[t] = {name((uint64_t(e[2] & 0xffff) << 32) | (e[1] & 0xffffffe0u)), header(e)};
     }
     for (uint32_t t : tscs) {
         uint32_t e[8];
         read(addr3(TSC_POOL_A, TSC_POOL_B) + 32ull * t, e, 32);
-        bool any = false;
-        for (uint32_t x : e)
-            any |= x != 0;
-        if (any)
-            fprintf(out_, "P tsc %u %x %x %x %x %x %x %x %x\n", t, e[0], e[1], e[2], e[3], e[4], e[5], e[6], e[7]);
+        if (std::any_of(e, e + 8, [](uint32_t x) {
+                return x != 0;
+            }))
+            r.tsc[t] = header(e);
     }
     for (uint32_t j = 0; j < 16; j++) {
         const uint32_t fmt = r3(VERTEX_STREAM_A + 0x10 * j);
         if (!(fmt & (1u << 12)))
             continue;
-        const uint64_t loc = addr3(VERTEX_STREAM_A + 0x10 * j + 4, VERTEX_STREAM_A + 0x10 * j + 8);
-        const uint64_t limit = addr3(VERTEX_STREAM_LIMIT + 8 * j, VERTEX_STREAM_LIMIT + 8 * j + 4);
-        char tag[16];
-        snprintf(tag, sizeof tag, "vb%u", j);
-        fprintf(out_, "P vbinfo %u %s %s %x\n", j, hex(loc).c_str(), hex(limit).c_str(), fmt);
-        words(tag, loc, 256);
+        ProbeRecord::Stream &s = r.streams[j];
+        s.format = fmt;
+        s.location = addr3(VERTEX_STREAM_A + 0x10 * j + 4, VERTEX_STREAM_A + 0x10 * j + 8);
+        s.limit = addr3(VERTEX_STREAM_LIMIT + 8 * j, VERTEX_STREAM_LIMIT + 8 * j + 4);
+        s.words = words(s.location, 256).words;
     }
     for (int i = 0; i < 6; i++) {
         if (!(r3(PIPELINE + 0x40 * i) & 1))
             continue;
-        std::string id;
-        const ProgramInfo *p = program(i, id);
-        fprintf(out_, "P prog %d %s %x %s\n", i, id.c_str(), r3(PIPELINE + 0x40 * i + 4), p ? "known" : "unknown");
+        ProbeRecord::Program &p = r.programs[i];
+        p.known = program(i, p.id) != nullptr;
+        p.offset = r3(PIPELINE + 0x40 * i + 4);
     }
-    fprintf(out_, "P draw %u %u %x\n", first, count, r3(BEGIN));
-    fprintf(out_, "P end\n");
+    r.begin = r3(BEGIN);
+    const uint32_t ct = r3(CT_SELECT);
+    for (uint32_t k = 0; k < (ct & 0xf) && k < 8; k++) {
+        const uint32_t j = (ct >> (4 + 3 * k)) & 7, m = COLOR_TARGET + 0x40 * j;
+        r.targets[name(addr3(m, m + 4))] = j;
+    }
+}
+
+namespace {
+
+void printWords(FILE *out, const std::string &tag, const ProbeRecord::Words &w)
+{
+    std::string l = "P " + tag + " " + hex(w.va);
+    for (uint32_t x : w.words) {
+        char b[12];
+        snprintf(b, sizeof b, " %x", x);
+        l += b;
+    }
+    fprintf(out, "%s\n", l.c_str());
+}
+
+void printProbe(FILE *out, const ProbeRecord &r)
+{
+    fprintf(out, "P begin\n");
+    std::string line = "P regs";
+    for (const auto &[m, v] : r.regs) {
+        char b[24];
+        snprintf(b, sizeof b, " %x=%x", m, v);
+        line += b;
+    }
+    fprintf(out, "%s\n", line.c_str());
+    for (const ProbeRecord::Bind &b : r.binds)
+        fprintf(out, "P bind %d %d %s %x\n", b.group, b.slot, hex(b.addr).c_str(), b.bytes);
+    printWords(out, "root", r.root);
+    std::string l = "P pushw";
+    for (const auto &[offset, word] : r.pushWords) {
+        char b[32];
+        snprintf(b, sizeof b, " %x=%x", offset, word);
+        l += b;
+    }
+    fprintf(out, "%s\n", l.c_str());
+    for (int set = 0; set < 2; set++) {
+        if (r.sets[set].words.empty())
+            continue;
+        printWords(out, "set" + std::to_string(set), r.sets[set]);
+        for (const auto &[offset, w] : r.setPointers[set])
+            printWords(out, "ptr" + std::to_string(set) + "." + std::to_string(offset), w);
+    }
+    for (const auto &[offset, w] : r.pushPointers)
+        printWords(out, "pushptr." + std::to_string(offset), w);
+    for (const auto &[t, h] : r.tic)
+        fprintf(out, "P tic %u %s %x %x %x %x %x %x %x %x\n", t, h.name.c_str(), h.w[0], h.w[1], h.w[2], h.w[3], h.w[4],
+                h.w[5], h.w[6], h.w[7]);
+    for (const auto &[t, e] : r.tsc)
+        fprintf(out, "P tsc %u %x %x %x %x %x %x %x %x\n", t, e[0], e[1], e[2], e[3], e[4], e[5], e[6], e[7]);
+    for (const auto &[j, s] : r.streams) {
+        fprintf(out, "P vbinfo %u %s %s %x\n", j, hex(s.location).c_str(), hex(s.limit).c_str(), s.format);
+        printWords(out, "vb" + std::to_string(j), {s.location, s.words});
+    }
+    for (const auto &[i, p] : r.programs)
+        fprintf(out, "P prog %d %s %x %s\n", i, p.id.c_str(), p.offset, p.known ? "known" : "unknown");
+    fprintf(out, "P draw %u %u %x\n", r.first, r.count, r.begin);
+    fprintf(out, "P end\n");
+}
+
+}  // namespace
+
+void Decoder::probeDump(uint32_t first, uint32_t count)
+{
+    ProbeRecord r;
+    probeRecord(r);
+    r.first = first;
+    r.count = count;
+    printProbe(out_, r);
     // NVDEC_SCRUB: zero set 0 and what its pointers reach once read, so that the next draw's descriptors and payloads show only
     // the bytes m2v writes for it (its allocations are recycled: what it does not write would otherwise be the last draw's)
-    if (cap_scrub && getenv("NVDEC_SCRUB")) {
-        const uint64_t sa = (uint64_t(r[0x38 / 4 + 1]) << 32) | r[0x38 / 4];
-        const uint32_t ss = std::min<uint32_t>(r[0x38 / 4 + 2], 0x1000);
-        if (sa && ss) {
-            std::vector<uint32_t> d(ss / 4);
-            read(sa, d.data(), ss);
+    if (scrub && getenv("NVDEC_SCRUB")) {
+        if (const std::vector<uint32_t> &d = r.sets[0].words; !d.empty()) {
             for (size_t i = 0; i + 1 < d.size(); i += 2) {
                 const uint64_t v = (uint64_t(d[i + 1]) << 32) | d[i];
                 if ((v >> 32) >= 1 && (v >> 32) < 0x80 && map_ && map_(v, 1))
-                    cap_scrub(v, 256);
+                    scrub(v, 256);
             }
-            cap_scrub(sa, ss);
+            scrub(r.sets[0].va, d.size() * 4);
         }
-        for (uint32_t j = 0; j < 16; j++) {
-            const uint32_t fmt = r3(VERTEX_STREAM_A + 0x10 * j);
-            if (fmt & (1u << 12))
-                cap_scrub(addr3(VERTEX_STREAM_A + 0x10 * j + 4, VERTEX_STREAM_A + 0x10 * j + 8), 256);
-        }
+        for (const auto &[j, s] : r.streams)
+            scrub(s.location, 256);
     }
+}
+
+const ProgramInfo *Decoder::programById(const std::string &id) const
+{
+    for (const auto &kv : programs)
+        if (kv.second.id == id)
+            return &kv.second;
+    return nullptr;
 }
 
 bool Decoder::bound(int group, int slot, uint64_t &addr, uint32_t &bytes) const
@@ -1102,17 +1249,46 @@ void Decoder::pushWords(uint32_t &mask, uint32_t words[32]) const
     }
 }
 
+// Whether a live stage's program reads a constant buffer (not the root table, which LOAD_CONSTANT_BUFFER writes in order) over
+// bytes in constantStale_
+bool Decoder::readsStaleConstants()
+{
+    for (int i = 0; i < 6; i++) {
+        const uint32_t group = r3(PIPELINE + 0x40 * i + 0x10);
+        if (!(r3(PIPELINE + 0x40 * i) & 1) || group >= 5)
+            continue;
+        std::string id;
+        const ProgramInfo *info = program(i, id);
+        const size_t slots = info ? info->cbufTypes.size() : 18;
+        for (size_t s = 0; s < slots; s++) {
+            const Bind &b = binds_[group][s];
+            const uint8_t type = info ? info->cbufTypes[s] & 7 : 0;
+            if (!b.valid || type == 1 || (type == 0 && s == 0))
+                continue;
+            for (const auto &r : constantStale_)
+                if (b.addr < r.second && r.first < b.addr + b.size)
+                    return true;
+        }
+    }
+    return false;
+}
+
 void Decoder::draw(const char *kind, uint32_t first, uint32_t count)
 {
     draws++;
     if (onDraw)
         onDraw(*this);
+    if (!constantStale_.empty() && readsStaleConstants()) {
+        staleConstantReads++;
+        barrier("CBSTALE");
+    }
     std::string bar;
     for (auto &b : pendingBarriers_)
         bar += (bar.empty() ? "" : ",") + b;
     pendingBarriers_.clear();
     fprintf(out_, "%s first=%u count=%u begin=%08x barriers=%s\n", indexed_ ? "DRAW-INDEXED" : kind, first, count,
             r3(BEGIN), bar.c_str());
+    countComp(0);
 
     // Which render targets, vertex streams and stages are live: their registers are compared, the others are not.
     const uint32_t ct = r3(CT_SELECT), ctCount = ct & 0xf;
@@ -1137,6 +1313,10 @@ void Decoder::draw(const char *kind, uint32_t first, uint32_t count)
             const uint32_t i = (m - PIPELINE) / 0x40;
             return (m & 0x3f) == 0 || stageLive[i];
         }
+        // the primitive restart index is the index buffer's: a vertex array draw reads none (NVK leaves its last index
+        // buffer's in place or puts its pipeline's 0 back, as its dynamic state goes, before either)
+        if (m == 0x1648)
+            return indexed_;
         return true;
     };
 
@@ -1197,8 +1377,8 @@ void Decoder::draw(const char *kind, uint32_t first, uint32_t count)
             bytes = std::min<uint64_t>(bytes, limit - loc + 1);
         uint32_t head[4] = {};
         read(loc, head, 16);
-        if (cap_describe && getenv("NVDEC_DESCRIBE"))
-            cap_describe(loc);
+        if (describe && getenv("NVDEC_DESCRIBE"))
+            describe(loc);
         fprintf(out_, "  vb%u stride=%u data=%s head=%08x,%08x,%08x,%08x\n", j, stride,
                 contentHash(loc, bytes, 2, false, false).c_str(), head[0], head[1], head[2], head[3]);
     }
@@ -1229,7 +1409,7 @@ void Decoder::draw(const char *kind, uint32_t first, uint32_t count)
         const size_t slots = info ? info->cbufTypes.size() : 18;
         for (size_t s = 0; s < slots; s++) {
             const Bind &b = binds_[group][s];
-            const uint8_t type = info ? info->cbufTypes[s] : 0;
+            const uint8_t type = info ? info->cbufTypes[s] & 7 : 0;  // raw_pack.h PackCbufType
             if (!b.valid) {
                 if (info)
                     fprintf(out_, "    cb%zu INVALID\n", s);

@@ -2,12 +2,15 @@
 #   switch_governor_test             SwitchGovernor.h, the CPU's on-demand clock governor: load traces in, operating
 #                                    points out, with SwitchPerfGovernor.cpp's tunables as shipped; L4T's T210B01 CVB
 #                                    table cut at Horizon's 1785 MHz, re-derived independently
+#   switch_thermal_sensors_j181_test SwitchSensorModels.h's J181AP table: the 24B119 plist's services, nearest
+#                                    measurements
 #   switch_thermal_sensors_test      SwitchSensors.h, thermalmonitord's sensors: the J120AP plist's table, nearest
 #                                    measurements, unit conversions, SOC_THERM fuse calibration against L4T's, CLTM
 #   switch_sensors_hid_source_test   the HID descriptor and IOHIDFamily vtable slots the sensors are published through
 #   switch_emc_governor_test         SwitchEMCGovernor.h: the EMC rates used, ACTMON's watermarks and the governor's moves
 #   switch_soctherm_window_test      SwitchSocThermWindow.h: SOC_THERM's one-degree LVL0 window and the groups' registers
 #   switch_thermal_shutdown_test     software shutdown below the hardware trip, its RTC record, the reset cause decoding
+#   switch_monotonic_base_test       SwitchMonotonicBase.h: kern.monotonicclock never reads below the previous boot's
 # The headers are C: each is compiled as C11 with -Wconversion -Wsign-conversion in a harness (its static inline
 # functions as exported ones) and driven by a GoogleTest test.
 #
@@ -51,6 +54,7 @@ host_library(
     hdrs = [
         "switch_thermal_sensors_harness.h",
         "//drivers/SwitchPower:SwitchGovernor.h",
+        "//drivers/SwitchPower:SwitchSensorModels.h",
         "//drivers/SwitchPower:SwitchSensors.h",
     ],
     copts = C_FLAGS,
@@ -59,6 +63,12 @@ host_library(
 host_test(
     name = "switch_thermal_sensors_test",
     srcs = ["switch_thermal_sensors_test.cpp"],
+    deps = [":switch_thermal_sensors_harness"],
+)
+
+host_test(
+    name = "switch_thermal_sensors_j181_test",
+    srcs = ["switch_thermal_sensors_j181_test.cpp"],
     deps = [":switch_thermal_sensors_harness"],
 )
 
@@ -96,5 +106,13 @@ host_test(
         "//drivers/SwitchPower:SwitchSocThermWindow.h",
         "//drivers/SwitchPower:SwitchThermalLimits.h",
         "//drivers/SwitchPower:SwitchThermalRecord.h",
+    ],
+)
+
+host_test(
+    name = "switch_monotonic_base_test",
+    srcs = [
+        "switch_monotonic_base_test.cpp",
+        "//drivers/SwitchPower:SwitchMonotonicBase.h",
     ],
 )

@@ -1,5 +1,5 @@
-// bsd/vm/switch_ui_scale_sites.h: the UI scale sites against 21H461's cache text mappings, and the slot each mapping
-// maps them by (switch_us_site_for_slot, what switch_shared_cache_text_pager() asks once per slot of a mapping).
+// bsd/vm/switch_ui_scale_sites_21H461.h: iOS 17's UI scale sites against 21H461's cache text mappings, and the slot each
+// mapping maps them by (switch_us_site_for_slot, what switch_shared_cache_text_pager() asks once per slot of a mapping).
 #include <gtest/gtest.h>
 
 #include <cmath>
@@ -8,25 +8,17 @@
 #include <string>
 #include <vector>
 
-#include "bazel/testing/source_text.h"
+#include "kernel/tests/xnu_ui_scale_sites_checks.h"
 
-extern "C" {
-#include "vm/switch_ui_scale.h"
-#include "vm/switch_ui_scale_sites.h"
-}
+using switch_ui_scale_sites::BranchTarget;
+using switch_ui_scale_sites::TextMapping;
+using switch_ui_scale_sites::Word;
 
 namespace {
-// 21H461's subcaches with a patched page: __TEXT is each one's only executable mapping, at file offset 0 (ipsw dyld
-// info). Slots another pager takes: slot 0 of .25, .13 and .03 (home grid, settings icons and keyboard, asked before
-// any UI scale site) and slots 0 and 1 of .07 (the widget deadlines, asked after: a UI scale site there would hide one).
-struct TextMapping {
-    const char *name;
-    uint8_t uuid[16];
-    uint64_t address, size;
-    unsigned other_pagers_slots;
-};
-
-const TextMapping kMappings[] = {
+// 21H461's subcaches with a patched page (ipsw dyld info). Slots another pager takes: slot 0 of .25, .13 and .03 (home
+// grid, settings icons and keyboard, asked before any UI scale site) and slots 0 and 1 of .07 (the widget deadlines,
+// asked after: a UI scale site there would hide one).
+const std::vector<TextMapping> kMappings = {
     {".03",
      {0x1b, 0x9c, 0xcf, 0x0c, 0x7b, 0x68, 0x39, 0x63, 0xaf, 0x64, 0x48, 0x4b, 0xcf, 0xda, 0xc1, 0x4c},
      0x186dac000,
@@ -64,110 +56,24 @@ const TextMapping kMappings[] = {
      0},
 };
 
-constexpr uint64_t kChunk = 0x1000;
-
-const TextMapping *MappingOf(const switch_us_site &site)
-{
-    for (const TextMapping &mapping : kMappings) {
-        if (std::memcmp(mapping.uuid, site.uuid, sizeof(site.uuid)) == 0) {
-            return &mapping;
-        }
-    }
-    return nullptr;
-}
-
-std::string NameOf(const switch_us_site &site)
-{
-    return std::string(site.name) + " " + site.applied;
-}
+const switch_us_cache &kCache = switch_us_cache_21H461;
 
 const switch_us_site *Named(const std::string &name)
 {
-    for (const switch_us_site &site : switch_us_sites) {
-        if (NameOf(site) == name) {
-            return &site;
-        }
-    }
-    ADD_FAILURE() << "no site " << name;
-    return nullptr;
-}
-
-uint32_t Word(const uint8_t *bytes)
-{
-    return static_cast<uint32_t>(bytes[0]) | static_cast<uint32_t>(bytes[1]) << 8 |
-           static_cast<uint32_t>(bytes[2]) << 16 | static_cast<uint32_t>(bytes[3]) << 24;
-}
-
-unsigned TextSlots(const char *vm_shared_region)
-{
-    const std::string source = switch_ios::test::SourceText(vm_shared_region);
-    const std::string define = "#define SWITCH_TEXT_SLOTS ";
-    const size_t at = source.find(define);
-    if (at == std::string::npos) {
-        ADD_FAILURE() << "no SWITCH_TEXT_SLOTS in " << vm_shared_region;
-        return 0;
-    }
-    return static_cast<unsigned>(std::stoul(source.substr(at + define.size())));
+    return switch_ui_scale_sites::Named(kCache, name);
 }
 }  // namespace
 
 TEST(XnuUiScaleSites, EveryEditIsInItsSitesChunkOfItsSubcache)
 {
-    for (const switch_us_site &site : switch_us_sites) {
-        SCOPED_TRACE(NameOf(site));
-        const TextMapping *mapping = MappingOf(site);
-        ASSERT_NE(mapping, nullptr);
-        EXPECT_EQ(site.page_vmaddr - site.page_fileoff, mapping->address);
-        EXPECT_EQ(site.page_vmaddr % SWITCH_US_PAGE_SIZE, 0u);
-        EXPECT_EQ(site.chunk_offset % kChunk, 0u);
-        EXPECT_LT(site.chunk_offset, SWITCH_US_PAGE_SIZE);
-        ASSERT_GE(site.edits, 1u);
-        ASSERT_LE(site.edits, sizeof(site.edit) / sizeof(site.edit[0]));
-        const uint64_t chunk = site.page_fileoff + site.chunk_offset;
-        for (unsigned i = 0; i < site.edits; i++) {
-            const switch_us_edit &edit = site.edit[i];
-            EXPECT_GE(edit.fileoff, chunk) << i;
-            EXPECT_LE(edit.fileoff + edit.length, chunk + kChunk) << i;
-            EXPECT_LE(edit.length, sizeof(edit.stock)) << i;
-            EXPECT_LE(edit.at + edit.size, edit.length) << i;
-            if (edit.kind == SWITCH_US_FIXED) {
-                EXPECT_LE(edit.size, sizeof(edit.patched)) << i;
-            }
-        }
-    }
+    EXPECT_STREQ(kCache.build, "21H461");
+    EXPECT_EQ(std::memcmp(kCache.magic, "dyld_v1   arm64", sizeof(kCache.magic)), 0);
+    switch_ui_scale_sites::ExpectEveryEditInItsSitesChunk(kCache, kMappings);
 }
 
 TEST(XnuUiScaleSites, EachSiteIsTheOneSiteOfItsSlotInItsMapping)
 {
-    const unsigned slots = TextSlots("../xnu-10063.141.1/osfmk/vm/vm_shared_region.c");
-    EXPECT_EQ(TextSlots("../xnu-12377.121.6/osfmk/vm/vm_shared_region.c"), slots);
-    std::vector<unsigned> found(SWITCH_US_SITES, 0);
-    for (const TextMapping &mapping : kMappings) {
-        for (unsigned slot = 0; slot < slots; slot++) {
-            SCOPED_TRACE(std::string(mapping.name) + " slot " + std::to_string(slot));
-            const switch_us_site *site = switch_us_site_for_slot(slot, mapping.address, mapping.size, 0);
-            if (site == nullptr) {
-                continue;
-            }
-            EXPECT_EQ(MappingOf(*site), &mapping) << NameOf(*site);
-            EXPECT_EQ(site->slot, slot) << NameOf(*site);
-            EXPECT_EQ(mapping.other_pagers_slots & 1u << slot, 0u)
-                << NameOf(*site) << " shares a slot with another pager";
-            found[static_cast<size_t>(site - switch_us_sites)]++;
-        }
-    }
-    for (size_t i = 0; i < SWITCH_US_SITES; i++) {
-        EXPECT_EQ(found[i], 1u) << NameOf(switch_us_sites[i]) << " (slot " << switch_us_sites[i].slot << ")";
-    }
-    // a mapping that starts after a site's page, ends inside it or maps another file offset holds none of it
-    for (const switch_us_site &site : switch_us_sites) {
-        SCOPED_TRACE(NameOf(site));
-        const uint64_t address = MappingOf(site)->address, size = MappingOf(site)->size;
-        EXPECT_TRUE(switch_us_site_in_mapping(&site, address, size, 0));
-        EXPECT_FALSE(switch_us_site_in_mapping(&site, site.page_vmaddr + SWITCH_US_PAGE_SIZE, size, 0));
-        EXPECT_FALSE(switch_us_site_in_mapping(&site, address, site.page_vmaddr - address + 0x1000, 0));
-        EXPECT_FALSE(switch_us_site_in_mapping(&site, address, size, SWITCH_US_PAGE_SIZE));
-    }
+    switch_ui_scale_sites::ExpectEachSiteTheOneSiteOfItsSlot(kCache, kMappings);
 }
 
 TEST(XnuUiScaleSites, BothUIKitCoreBatteryFillsAreOneEditOfTheSameCode)
@@ -219,17 +125,6 @@ TEST(XnuUiScaleSites, CoverSheetKitRowIsTheIPadWithoutAHomeButton)
 }
 
 namespace {
-// A branch's target from its address: b's imm26 or tbz/tbnz's imm14, in words.
-uint64_t BranchTarget(uint64_t address, uint32_t insn)
-{
-    if ((insn & 0xfc000000u) == 0x14000000u) {
-        const int64_t imm26 = static_cast<int64_t>(insn & 0x3ffffffu);
-        return address + static_cast<uint64_t>((imm26 >= 0x2000000 ? imm26 - 0x4000000 : imm26) * 4);
-    }
-    const int64_t imm14 = static_cast<int64_t>((insn >> 5) & 0x3fff);
-    return address + static_cast<uint64_t>((imm14 >= 0x2000 ? imm14 - 0x4000 : imm14) * 4);
-}
-
 // -[SBMixedGridSwitcherModifier _fullScreenCardScale] after the site: the settings' row scale (0.3 for two rows,
 // App Exposé's 0.42 for one), the landscape scale for two rows across a wider-than-tall container, the card width
 // rounded to whole points, 0 for a zero-width container.
@@ -345,13 +240,7 @@ TEST(XnuUiScaleSites, SwitcherCardsFitBetweenTheStatusBarAndTheDock)
 
 TEST(XnuUiScaleSites, NoTwoSitesOfAMappingShareAPage)
 {
-    for (const switch_us_site &a : switch_us_sites) {
-        for (const switch_us_site &b : switch_us_sites) {
-            if (&a != &b && MappingOf(a) == MappingOf(b)) {
-                EXPECT_NE(a.page_vmaddr, b.page_vmaddr) << NameOf(a) << " and " << NameOf(b);
-            }
-        }
-    }
+    switch_ui_scale_sites::ExpectNoTwoSitesOfAMappingShareAPage(kCache, kMappings);
 }
 
 TEST(XnuUiScaleSites, SystemStatusUiRowIsIconSize15OfTheBatteryTables)
@@ -401,9 +290,13 @@ TEST(XnuUiScaleSites, CoreUiRowBytes)
 
 TEST(XnuUiScaleSitesSource, BothTreesAndNoPagerAtScaleOne)
 {
-    const bool same = switch_ios::test::SourceText("../xnu-12377.121.6/bsd/vm/switch_ui_scale_sites.h") ==
-                      switch_ios::test::SourceText("../xnu-10063.141.1/bsd/vm/switch_ui_scale_sites.h");
-    EXPECT_TRUE(same) << "the two trees' switch_ui_scale_sites.h differ";
+    for (const char *header :
+         {"switch_ui_scale_sites.h", "switch_ui_scale_sites_21H461.h", "switch_ui_scale_sites_24B119.h"}) {
+        const std::string vm = "/bsd/vm/";
+        const bool same = switch_ios::test::SourceText("../xnu-12377.121.6" + vm + header) ==
+                          switch_ios::test::SourceText("../xnu-10063.141.1" + vm + header);
+        EXPECT_TRUE(same) << "the two trees' " << header << " differ";
+    }
     for (const char *tree : {"../xnu-10063.141.1/bsd/vm/vm_unix.c", "../xnu-12377.121.6/bsd/vm/vm_unix.c"}) {
         SCOPED_TRACE(tree);
         const std::string vm_unix = switch_ios::test::SourceText(tree);
@@ -417,8 +310,11 @@ TEST(XnuUiScaleSitesSource, BothTreesAndNoPagerAtScaleOne)
         const size_t no_bytes = pager.find("!switch_ui_scale_edit_bytes(site->edit[i].kind, switch_ui_scale()");
         ASSERT_NE(no_bytes, std::string::npos);
         EXPECT_LT(no_bytes, pager.find("apple_protect_pager_setup("));
-        // the dispatch asks the table which site a slot maps
+        // the dispatch asks the kernel's kind's table which site a slot maps, and the pager its cache's magic
         const std::string dispatch = switch_ios::test::Body(vm_unix, "\nswitch_shared_cache_text_pager(");
-        EXPECT_NE(dispatch.find("switch_us_site_for_slot(slot, unslid_address, size, file_offset)"), std::string::npos);
+        EXPECT_NE(dispatch.find("switch_us_site_for_slot(SWITCH_US_CACHE, slot, unslid_address, size, file_offset)"),
+                  std::string::npos);
+        EXPECT_NE(pager.find("memcmp(header, SWITCH_US_CACHE->magic, sizeof(SWITCH_US_CACHE->magic))"),
+                  std::string::npos);
     }
 }

@@ -40,9 +40,10 @@ static inline bool tegra_smmu_attachments_note(struct tegra_smmu_attachments *t,
 static inline void tegra_smmu_attachments_forget(struct tegra_smmu_attachments *t, uint32_t asidReg)
 {
     uint32_t kept = 0;
-    for (uint32_t i = 0; i < t->count; ++i)
+    for (uint32_t i = 0; i < t->count; ++i) {
         if (t->entry[i].asidReg != asidReg)
             t->entry[kept++] = t->entry[i];
+    }
     t->count = kept;
 }
 

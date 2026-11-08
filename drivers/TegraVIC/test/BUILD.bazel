@@ -6,7 +6,7 @@
 # headers TegraVIC.cpp parses (tegra_vic_firmware_test); a
 # TransformSurface destination's seed moves when its job is done, through a pinned binding (tegra_vic_seed_source_test);
 # transposed jobs on vic_model.h, the output layout model pinned to the unit's V4 diag lines and hekate's rotation, with
-# V4's own probes (TegraVICProbe.h) run on it (tegra_vic_transpose_test).
+# the probes that measured the unit's transform traits (TegraVICProbe.h) run on it (tegra_vic_transpose_test).
 #
 #   bazel test //drivers/TegraVIC/test:all
 load("//bazel/lint:defs.bzl", "lint_files")
@@ -79,6 +79,6 @@ host_test(
         "tegra_vic_transpose_test.cpp",
         "vic_model.h",
         "//drivers/TegraVIC:TegraVICConfig.h",
-        "//drivers/TegraVIC:TegraVICProbe.h",
+        "TegraVICProbe.h",
     ],
 )

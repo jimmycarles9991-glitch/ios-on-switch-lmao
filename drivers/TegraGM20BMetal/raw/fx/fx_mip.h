@@ -57,11 +57,11 @@ uint32_t fullLevels(uint32_t width, uint32_t height);
 // or more than kMaxLevels or more than fullLevels, a size of 0 or over 16384, bpp not 1/2/4/8/16)
 bool mipChainLayout(uint32_t width, uint32_t height, uint32_t levels, uint32_t bpp, MipChain &out);
 // Byte offset of texel byte (xB, y) inside level `l` of the chain, from the chain's base, in the CPU's view (TegraColor GOBs;
-// `fermi`: the FermiColor arrangement instead, the self-test's second guess at the CPU's view of kind 0xFE memory)
+// `fermi`: the FermiColor arrangement instead, the desktop parts'; the device's CPU view of kind 0xFE memory is TegraColor)
 uint64_t texelOffset(const MipChain &c, uint32_t l, uint32_t xB, uint32_t y, bool fermi = false);
 
-// The CPU's copy of `w` x `h` texels at (x, y) of level `l` between the chain's memory (`chainCpu`, the view the self-test chose:
-// `fermi`) and rows `rowBytes` apart: a Shared mipmapped texture's replaceRegion/getBytes of a level below the first. Moves each
+// The CPU's copy of `w` x `h` texels at (x, y) of level `l` between the chain's memory (`chainCpu`, in the view `fermi` names)
+// and rows `rowBytes` apart: a Shared mipmapped texture's replaceRegion/getBytes of a level below the first. Moves each
 // GOB line's 16-byte run at once; the caller cleans or invalidates the lines.
 void writeLevel(const MipChain &c, uint8_t *chainCpu, uint32_t l, uint32_t x, uint32_t y, uint32_t w, uint32_t h,
                 const uint8_t *src, size_t rowBytes, bool fermi = false);
@@ -82,8 +82,8 @@ uint32_t gobOffsetFermi(uint32_t xB, uint32_t y);
 void mipChainTic(const MipChain &c, uint64_t va, uint32_t tic0, bool srgb, uint32_t baseLevel, uint32_t levelCount,
                  uint32_t out[8]);
 
-// FERMI_TWOD_A surface format of an MTLPixelFormat the 2D engine filters faithfully (cl902d.h SET_SRC_FORMAT), 0: none (the
-// texture then stays as it is today: no chain)
+// FERMI_TWOD_A surface format of an MTLPixelFormat the 2D engine filters faithfully (cl902d.h SET_SRC_FORMAT), 0: none (a
+// chain of that format is kept, and its generateMipmaps is not the 2D engine's)
 uint32_t twodFormat(uint32_t mtlPixelFormat);
 
 // A pitch-linear surface of the raw path (a raw::Texture: va, pitch, width, height)
@@ -101,24 +101,23 @@ void emitTwodInit(Push &p);
 // converting the pitch texture into chain level 0 first (firstLevel must then be 0). Starts with a 3D wait for idle (the work
 // before it wrote level 0) and ends with one plus a 3D texture data cache invalidate (the draws after it sample the chain).
 // How a scaled (bilinear) step asks the 2D engine to sample: the origin mode and the source origin SRC_X0/Y0 = halfDu x du/2 +
-// halfTexel x 1/2 (each axis with its own du/dv). The class's documented convention (origin centre, source origin 0: texel
-// centres at i + 1/2) is sampling(0); r7q's GM20B made level 1 of the self-test wrong in almost every byte under it (287 of the
-// 304 bytes below level 0, its level 0 exact), what an engine that weighs bilinear taps from the position's own fraction (texel
-// centres at whole numbers) gives. The self-test tries every candidate once at open and keeps the first exact one.
+// halfTexel x 1/2 (each axis with its own du/dv).
 struct Sampling {
     uint8_t corner = 0;    // SAMPLE_MODE ORIGIN: 0 centre, 1 corner
     int8_t halfDu = 0;     // the origin's du/2 multiples
     int8_t halfTexel = 0;  // and its half-texel multiples
 };
 
-constexpr uint32_t kSamplings = 8;
-Sampling sampling(uint32_t i);  // the candidates, in the order the self-test tries them
-// "centre", "centre-0.5", "corner+du/2-0.5", ...: for the device line
-void samplingName(const Sampling &s, char *out, size_t size);
+// GM20B's: corner origin, the source origin at half a step (texel x samples at (x + 1/2) du). The class's documented centre
+// origin (sampling at SRC_X0 + (x + 1/2) du) is not what the engine does: the device's own sweep of eight candidates, in the
+// render server at every boot that ran it (11-05 11:02 and 11:33, 11-06 21:40, 23:16, 23:23 and 23:43), found 287 bytes of 304
+// below level 0 wrong under it, and none under this one (raw/fx/test/mipcheck.cpp holds the sweep's counts to the 2D engine
+// model, twod_sim's quirkCentreHalfTexel)
+constexpr Sampling kGm20bSampling = {1, 1, 0};
 
 size_t generateWords(const MipChain &c, uint32_t firstLevel, uint32_t lastLevel);
 void emitGenerate(Push &p, const MipChain &c, uint64_t chainVa, const Pitch *level0, uint32_t fmt2d,
-                  uint32_t firstLevel, uint32_t lastLevel, Sampling sampling = {});
+                  uint32_t firstLevel, uint32_t lastLevel, Sampling sampling = kGm20bSampling);
 
 // A 1:1 copy of [sx, sx + w) x [sy, sy + h) of a pitch surface into level `level` of the chain at (dx, dy): a copy into a level
 // (copyFromTexture/copyFromBuffer ... destinationLevel:), with the same waits as emitGenerate.
@@ -126,41 +125,9 @@ size_t copyWords();
 void emitCopyToLevel(Push &p, const MipChain &c, uint64_t chainVa, uint32_t level, const Pitch &src, uint32_t fmt2d,
                      uint32_t sx, uint32_t sy, uint32_t dx, uint32_t dy, uint32_t w, uint32_t h);
 
-// The reverse: `w` x `h` texels of chain level `level` at (sx, sy) into a pitch surface at (dx, dy), 1:1 (copyFromTexture ...
-// sourceLevel: n, Core Animation's average-luma read of its last level), with the same waits
-void emitCopyFromLevel(Push &p, const MipChain &c, uint64_t chainVa, uint32_t level, const Pitch &dst, uint32_t fmt2d,
-                       uint32_t sx, uint32_t sy, uint32_t dx, uint32_t dy, uint32_t w, uint32_t h);
-
-// The device self-test (run once at the raw device's open, results read back after the open's own wait): a pattern of
-// kSelfTestW x kSelfTestH BGRA8 texels for a pitch source, and the check of the chain the GPU made from it (the CPU's view of
-// the chain memory). Returns the number of bytes off by more than 1 (0: the 2D engine samples as designed); *first: the first
-// bad byte's (level << 24 | y << 12 | x) or ~0u. `fermi`: read the chain in the FermiColor arrangement (the device line reports
-// both: Tegra 0 = as designed; Tegra > 0 and Fermi 0 = the CPU's view differs, the GPU's sampling is fine; both > 0 = the 2D
-// engine's scaled sample position is not the centre convention: chains stay off).
-constexpr uint32_t kSelfTestW = 24, kSelfTestH = 10;  // odd steps on purpose: 24x10 -> 12x5 -> 6x2 -> 3x1 -> 1x1
-void selfTestPattern(uint8_t *pixels, uint32_t pitch);
-uint32_t selfTestCheck(const MipChain &c, const uint8_t *chainCpu, uint32_t *first, bool fermi = false);
-
-// The same check, said in detail (the device line when it fails): bytes off by more than 1 (per level), the largest difference
-// per byte of a texel (BGRA8: blue, green, red, alpha) and the first differing bytes. Every difference at most 2 reads as the
-// engine's rounding; larger ones as where it samples (a positional error: origin, half texel)
-struct SelfTestReport {
-    uint32_t bad = 0, levelBad[kMaxLevels] = {};
-    uint8_t maxDiff[4] = {};
-
-    struct Byte {
-        uint8_t level, channel, want, got;
-        uint16_t x, y;
-    } first[3] = {};
-
-    uint32_t firsts = 0;
-};
-
-uint32_t selfTestDetail(const MipChain &c, const uint8_t *chainCpu, bool fermi, SelfTestReport &r);
-
-// The CPU reference of one chain step: level n+1 from level n exactly as the 2D engine's bilinear, centre-origin blit samples
-// (u = (x + 0.5) * w_n / w_{n+1} - 0.5, clamp to edge, unorm8 per component, weights at 1/256): the self-test's expectation and
-// the host simulator's oracle.
+// The CPU reference of one chain step: level n+1 from level n exactly as the 2D engine's bilinear blit samples under
+// kGm20bSampling (u = (x + 0.5) * w_n / w_{n+1} - 0.5, clamp to edge, unorm8 per component, weights at 1/256): the host
+// tests' oracle.
 void referenceDownsample(const uint8_t *src, uint32_t srcPitch, uint32_t sw, uint32_t sh, uint8_t *dst,
                          uint32_t dstPitch, uint32_t dw, uint32_t dh, uint32_t bpp);
 

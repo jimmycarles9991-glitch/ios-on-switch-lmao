@@ -392,9 +392,10 @@ template <typename Bus> struct SwitchCqEngine {
             return fail(bus, "tasks assigned to a busy queue"), false;
         if (!n || n > depth)
             return fail(bus, "a group larger than the queue"), false;
-        for (unsigned i = 0; i < n; ++i)
-            if (!t[i].sectors || t[i].sectors > 0xffff || t[i].lba > 0xffffffffull)
+        for (unsigned i = 0; i < n; ++i) {
+            if (!t[i].sectors || t[i].sectors > 0xffff || t[i].lba > 0xffffffffULL)
                 return fail(bus, "a task the queue cannot take"), false;
+        }
         queued = next = 0;
         if (!emptied) {
             uint32_t r1 = 0;
@@ -540,21 +541,24 @@ template <typename Bus> struct SwitchCqEngine {
         };
 
         int owed = kEarlier;  // whose completions are still to run: the caller's batch, a chain, or nothing
-        const auto pay = [&]() {
-            if (owed == kEarlier)
+        const auto pay = [&] {
+            if (owed == kEarlier) {
                 host.completeEarlier();
-            else if (owed >= 0)
+            } else if (owed >= 0) {
                 host.complete(static_cast<unsigned>(owed));
+            }
             owed = kNothing;
         };
         *proven = 0;
         unsigned done = 0;  // chains 0..done-1 have their task's data
-        bool errors = false, legacy = false;
+        bool errors = false;
+        bool legacy = false;
         for (unsigned attempt = 0; !legacy; ++attempt) {
             const unsigned m = n - done;
             bool ok = enter(bus) && submit(bus, t + done, m);
             while (ok && done < n) {
-                const uint8_t before = bus.lastCommand(), task = static_cast<uint8_t>(next);
+                const uint8_t before = bus.lastCommand();
+                const uint8_t task = static_cast<uint8_t>(next);
                 host.beginTask(done, argument());
                 pay();
                 uint32_t r1 = 0;
@@ -579,12 +583,9 @@ template <typename Bus> struct SwitchCqEngine {
             error.tasks = static_cast<uint8_t>(m);
             const Recovery r = recover(bus);
             host.recovered(error);
-            if (r == kStuck) {
-                host.powerCycle();
-                powerCycled();
-            } else if (attempt == 0) {
+            if (r != kStuck && attempt == 0) {
                 legacy = false;  // once more through the queue
-            } else if (r == kInPlace && !quit(bus, "the card stays in CQ mode")) {
+            } else if (r == kStuck || (r == kInPlace && !quit(bus, "the card stays in CQ mode"))) {
                 host.powerCycle();
                 powerCycled();
             }
@@ -634,7 +635,14 @@ template <typename Bus> struct SwitchCqEngine {
                 owed = static_cast<int>(i);
             }
         }
-        const Outcome outcome = stopped ? kGroupStopped : legacy ? kGroupLegacy : errors ? kGroupRetried : kGroupQueued;
+        Outcome outcome = kGroupQueued;
+        if (stopped) {
+            outcome = kGroupStopped;
+        } else if (legacy) {
+            outcome = kGroupLegacy;
+        } else if (errors) {
+            outcome = kGroupRetried;
+        }
         if (outcome == kGroupLegacy)
             ++legacyGroups;
         if (outcome == kGroupRetried)
@@ -650,10 +658,11 @@ template <typename Bus> struct SwitchCqEngine {
     {
         for (unsigned i = 0; i < n; ++i) {
             host.beginLegacy(i);
-            if (i)
+            if (i) {
                 host.complete(i - 1);
-            else
+            } else {
                 host.completeEarlier();
+            }
             host.endLegacy(i);
         }
     }
@@ -679,8 +688,11 @@ private:
         pausedNow = false;
         if (!failed) {
             strikes = 0;
-            if (clean < kForgive && ++clean == kForgive)
-                pauseLength = kPauseMin;
+            if (clean < kForgive) {
+                ++clean;
+                if (clean == kForgive)
+                    pauseLength = kPauseMin;
+            }
             return;
         }
         clean = 0;

@@ -31,5 +31,8 @@ kernel_headers()
 kernel_driver(
     name = "SwitchNVRAM",
     copts = BLOCK_FLAGS,
-    hdr_deps = ["kits/SwitchCRC"],
+    hdr_deps = [
+        "kits/SwitchCRC",
+        "kits/SwitchDT",
+    ],
 )

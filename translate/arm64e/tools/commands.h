@@ -9,6 +9,8 @@ int a64x_cmd_check(int argc, char **argv);        /* a64check.c: what the loader
 int a64x_cmd_dsc_apply(int argc, char **argv);    /* dsc.c: one dyld cache file translated with its plan */
 int a64x_cmd_dsc_verify(int argc, char **argv);   /* dsc.c: a translated dyld cache against the original */
 int a64x_cmd_class(int argc, char **argv);        /* a64class.c: class of each hex word on stdin */
+int a64x_cmd_fips(int argc, char **argv);         /* fips.c: where corecrypto's FIPS integrity check reads */
+int a64x_cmd_fips_mac(int argc, char **argv);     /* fips.c: the MAC that check computes */
 int a64x_cmd_gen_toptable(int argc, char **argv); /* gen_toptable.c: the classifier's fast-reject table */
 int a64x_cmd_holes(int argc, char **argv);        /* a64holes.c: dead space in a dyld cache's text */
 int a64x_cmd_kext(int argc, char **argv);         /* a64kext.c: kexts of a prelinked kernel, kernel mode */

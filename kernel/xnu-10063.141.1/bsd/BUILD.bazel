@@ -3,8 +3,8 @@
 # :objects compiles each object of objects.bzl (make's bsd.filelist, link order) on its own, so an edit to one
 # source recompiles that object and relinks the kernel (//kernel/xnu-10063.141.1/config:xnu_objects.bzl). A new
 # source: add it to objects.bzl where conf/files would put it, with any flags its conf/Makefile.* entry adds.
-load("@bazel_skylib//rules:write_file.bzl", "write_file")
 load("//bazel/lint:defs.bzl", "lint_files")
+load("//ipsw:ipsw.bzl", "ipsw_volumes_header")
 load("//kernel/xnu-10063.141.1/config:xnu_objects.bzl", "xnu_objects")
 load(":objects.bzl", "DEVELOPMENT", "RELEASE")
 
@@ -65,12 +65,13 @@ filegroup(
     ),
 )
 
-# kern_exec.c's -include (make's xnu_build.py made it from build-options.json: the scratch Data volume the
-# owner-data mount selects, XNU_OWNER_DATA_MOUNT=1 with XNU_NATIVE_RAM_BLOCK=1).
-write_file(
+# kern_exec.c's -include: the scratch Data volume the owner-data mount selects (XNU_OWNER_DATA_MOUNT=1 with
+# XNU_NATIVE_RAM_BLOCK=1) and the selected IPSW kind's System volume and cryptexes (SwitchRawMount.h). vm_unix.c
+# takes the kind from it too (its UI scale sites, vm/switch_ui_scale_sites.h).
+ipsw_volumes_header(
     name = "owner_header",
     out = "owner/owner-data-volume.h",
-    content = ['#define XNU_OWNER_DATA_VOLUME_UUID "CCD5A1A2-2FDC-4B25-B322-AE1722871BC9"'],
+    lines = ['#define XNU_OWNER_DATA_VOLUME_UUID "CCD5A1A2-2FDC-4B25-B322-AE1722871BC9"'],
 )
 
 xnu_objects(

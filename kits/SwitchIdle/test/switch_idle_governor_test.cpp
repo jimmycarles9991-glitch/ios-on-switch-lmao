@@ -108,6 +108,76 @@ TEST(SwitchIdleGovernor, ACoreInEveryFrameStaysInWfiWhileFramesFlow)
     EXPECT_EQ(core.c7, 0u);
 }
 
+// The frame core (ArmGIC's frameTarget: DC A, GPU stall/nonstall, host1x syncpoint all on the last core) from a cold
+// start: per refresh period a V_BLANK wake and a GPU-done wake `gpu` later, each handled for `work`, the frame line
+// noted only once the wake has happened (switch_idle_note_frame runs in the interrupt). Counts the frame lines that
+// found the core in C7.
+struct FrameCore : Core {
+    unsigned frameWakes = 0;
+
+    void line(uint64_t gap, uint64_t work)
+    {
+        const bool c7 = idle(1000 * kMs, gap) == SWITCH_IDLE_C7;
+        frameWakes += c7 ? 1 : 0;
+        frame_at = now;
+        now += work;
+    }
+
+    void frames(unsigned count, uint64_t period, uint64_t gpu, uint64_t work)
+    {
+        for (unsigned i = 0; i < count; ++i) {
+            line(period - gpu - work, work);
+            line(gpu - work, work);
+        }
+    }
+};
+
+TEST(SwitchIdleGovernor, OnlyTheFirstFrameLineAfterAQuietSpellFindsTheFrameCoreInC7)
+{
+    constexpr uint64_t kWork = SWITCH_IDLE_TICKS_US(60);
+    for (const uint64_t period : {SWITCH_IDLE_TICKS_US(8333), kFrame, SWITCH_IDLE_TICKS_US(20833),
+                                  SWITCH_IDLE_TICKS_US(25000), SWITCH_IDLE_TICKS_US(33333)}) {
+        FrameCore core;
+        core.predicted = 2000 * kMs;
+        core.frames(600, period, period * 3 / 5, kWork);
+        EXPECT_EQ(core.frameWakes, 1u) << period;
+        EXPECT_EQ(core.c7, 1u) << period;
+    }
+}
+
+TEST(SwitchIdleGovernor, TheFrameCoreAtSixtyHertzWithOnlyVblankNeverPowersDown)
+{
+    FrameCore core;
+    core.predicted = 2000 * kMs;
+    for (unsigned i = 0; i < 600; ++i)
+        core.line(kFrame - SWITCH_IDLE_TICKS_US(60), SWITCH_IDLE_TICKS_US(60));
+    EXPECT_EQ(core.frameWakes, 1u);
+}
+
+TEST(SwitchIdleGovernor, BelowThirtyHertzTheFrameCorePowersDownBetweenFrames)
+{
+    FrameCore core;
+    core.predicted = 2000 * kMs;
+    constexpr uint64_t kPeriod24 = SWITCH_IDLE_TICKS_US(41667);
+    for (unsigned i = 0; i < 240; ++i)
+        core.line(kPeriod24 - SWITCH_IDLE_TICKS_US(60), SWITCH_IDLE_TICKS_US(60));
+    EXPECT_GT(core.frameWakes, 200u);
+}
+
+TEST(SwitchIdleGovernor, AC7ExitCostsUnderOnePercentOfAFrame)
+{
+    EXPECT_EQ(SWITCH_IDLE_C7_WAKE_LATENCY * 1000 / kFrame, 7u);
+}
+
+TEST(SwitchIdleGovernor, OnlyATimerEndedC7ExitIsMeasured)
+{
+    const uint64_t wakeAt = 500 * kMs;
+    EXPECT_EQ(switch_idle_c7_exit(wakeAt - kMs, wakeAt), 0u);
+    EXPECT_EQ(switch_idle_c7_exit(wakeAt, wakeAt), 0u);
+    EXPECT_EQ(switch_idle_c7_exit(wakeAt + SWITCH_IDLE_TICKS_US(90), wakeAt), SWITCH_IDLE_TICKS_US(90));
+    EXPECT_GT(switch_idle_c7_exit(wakeAt + SWITCH_IDLE_TICKS_US(140), wakeAt), SWITCH_IDLE_C7_WAKE_LATENCY);
+}
+
 TEST(SwitchIdleGovernor, AnIdleCoreStillTakesC7WhileFramesFlowElsewhere)
 {
     Core core;

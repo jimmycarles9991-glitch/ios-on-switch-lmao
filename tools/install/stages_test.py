@@ -4,6 +4,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from unittest import mock
 
 from tools.install import folder, manifest, sii_fixture, stages
 
@@ -26,16 +27,27 @@ class ScratchTest(unittest.TestCase):
         self.assertEqual(len(set(dirs)), len(dirs))
 
 
-class TranslationMemoTest(unittest.TestCase):
-    def roles(self, **flags):
-        args = SimpleNamespace(scratch='/scratch', pretranslate={'os': {'driver': 'd', 'tool': 't'}}, **flags)
-        return stages.Stages(args, SPEC, PINS, quiet).roles()
+class BazelOutputsTest(unittest.TestCase):
+    def test_deltas_are_the_roles_bazel_made(self) -> None:
+        args = SimpleNamespace(scratch='/scratch', delta_os='/out/delta_os', delta_app_cryptex=None)
+        deltas = stages.Stages(args, SPEC, PINS, quiet).deltas()
+        self.assertIn('os', deltas)
+        self.assertNotIn('app_cryptex', deltas)
+        self.assertEqual(deltas.kept, Path('/scratch') / stages.KEPT)
 
-    def test_populate_translates_afresh_by_default(self):
-        self.assertIsNone(self.roles().memo_root)
+    def test_an_ipsw_without_translation_has_no_deltas(self) -> None:
+        self.assertIsNone(stages.Stages(SimpleNamespace(scratch='/s'), SPEC, PINS, quiet).deltas())
 
-    def test_translation_memo_reads_the_scratchs_memo(self):
-        self.assertEqual(self.roles(translation_memo=True).memo_root, Path('/scratch') / stages.TRANSLATIONS)
+    def test_a_translated_cryptex_comes_with_its_sha256(self) -> None:
+        work = Path(tempfile.mkdtemp())
+        image = work / 'app.dmg'
+        image.write_bytes(b'sealed')
+        Path(str(image) + '.sha256').write_text('ab' * 32 + '\n')
+        args = SimpleNamespace(scratch=str(work), system_cryptex='/ipsw/sys.dmg', app_cryptex='/ipsw/app.dmg')
+        args.translated_app_cryptex = str(image)
+        sources, expected = stages.Stages(args, SPEC, PINS, quiet).cryptexes()
+        self.assertEqual(sources, {'system_cryptex': '/ipsw/sys.dmg', 'app_cryptex': str(image)})
+        self.assertEqual(expected, {'app_cryptex': 'ab' * 32})
 
 
 class StateTest(unittest.TestCase):
@@ -53,6 +65,43 @@ class StateTest(unittest.TestCase):
         self.assertEqual(self.work.state()['populate'], 'p1')
         (self.dir / stages.COMPOSED).unlink()
         self.assertNotIn('compose', self.work.state())
+
+
+class CleanTest(unittest.TestCase):
+    def test_leftovers_and_partials_go_and_root_owned_ones_are_named(self) -> None:
+        scratch = Path(tempfile.mkdtemp())
+        (scratch / 'delta-os').mkdir()
+        (scratch / 'delta-os/f').write_bytes(b'x')
+        (scratch / '141-10410-227.dmg').write_bytes(b'rebuilt')
+        (scratch / '.partial-composed.img').write_bytes(b'half')
+        (scratch / 'populated.img.partial').write_bytes(b'half')
+        (scratch / stages.COMPOSED).write_bytes(b'kept')
+        args = SimpleNamespace(scratch=str(scratch), system_cryptex='/ipsw/141-10410-227.dmg', app_cryptex=None)
+        lines = []
+        work = stages.Stages(args, SPEC, PINS, lambda *p: lines.append(' '.join(map(str, p))))
+        real_unlink = Path.unlink
+
+        def unlink(path: Path, missing_ok: bool = False) -> None:
+            if path.name.endswith('.dmg'):
+                raise PermissionError(path)
+            real_unlink(path, missing_ok=missing_ok)
+
+        with (
+            mock.patch.object(stages.disks.host, 'plist', return_value={'images': []}),
+            mock.patch.object(Path, 'unlink', unlink),
+        ):
+            work.clean()
+        self.assertFalse((scratch / 'delta-os').exists())
+        self.assertFalse((scratch / '.partial-composed.img').exists())
+        self.assertFalse((scratch / 'populated.img.partial').exists())
+        self.assertTrue((scratch / stages.COMPOSED).exists())
+        self.assertTrue(any('sudo rm -rf' in line and '141-10410-227.dmg' in line for line in lines), lines)
+
+    def test_state_is_written_whole(self) -> None:
+        scratch = Path(tempfile.mkdtemp())
+        work = stages.Stages(SimpleNamespace(scratch=str(scratch)), SPEC, PINS, quiet)
+        work.save(compose='c', offset=1)
+        self.assertEqual([p.name for p in scratch.iterdir()], [stages.STATE])
 
 
 class MinimumTest(unittest.TestCase):

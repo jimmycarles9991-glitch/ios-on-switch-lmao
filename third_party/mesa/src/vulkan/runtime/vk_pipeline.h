@@ -236,6 +236,22 @@ vk_pipeline_get_rt_scratch_size(struct vk_pipeline *pipeline);
 uint32_t
 vk_pipeline_get_rt_ray_queries(struct vk_pipeline *pipeline);
 
+struct vk_graphics_pipeline_state;
+struct vk_shader;
+
+VkResult
+vk_pipeline_compile_library_stage(struct vk_device *device,
+                                  VkPipelineCreateFlags2KHR pipeline_flags,
+                                  const void *pipeline_info_pNext,
+                                  const VkPipelineShaderStageCreateInfo *info,
+                                  VkPipelineLayout layout,
+                                  const struct vk_graphics_pipeline_state *state,
+                                  struct vk_shader **shader_out);
+
+struct vk_shader *
+vk_graphics_pipeline_stage_shader(VkPipeline pipeline,
+                                  mesa_shader_stage stage);
+
 #ifdef __cplusplus
 }
 #endif

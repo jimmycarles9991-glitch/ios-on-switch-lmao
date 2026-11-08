@@ -75,8 +75,9 @@ static inline bool switch_falcon_parse(const uint8_t *fw, size_t length, switch_
     image->data = switch_falcon_le32(fw + os + 8);
     image->data_size = switch_falcon_le32(fw + os + 12);
     image->apps = switch_falcon_le32(fw + os + 16);
-    return image->code_size && image->code <= image->bin_size && image->code_size <= image->bin_size - image->code &&
-           image->data <= image->bin_size && image->data_size <= image->bin_size - image->data;
+    return image->code_size != 0 && image->code <= image->bin_size &&
+           image->code_size <= image->bin_size - image->code && image->data <= image->bin_size &&
+           image->data_size <= image->bin_size - image->data;
 }
 
 typedef enum switch_falcon_result {
@@ -93,7 +94,7 @@ switch_falcon_result switch_falcon_load(volatile uint8_t *engine, uint64_t firmw
 // falcon_boot minus its final idle wait: the caller proves the OS runs by its first method's completion.
 void switch_falcon_start(volatile uint8_t *engine);
 // One line of falcon state for a failure report; returns text.
-const char *switch_falcon_state(volatile uint8_t *engine, char *text, size_t size);
+const char *switch_falcon_state(const volatile uint8_t *engine, char *text, size_t size);
 
 #ifdef __cplusplus
 }

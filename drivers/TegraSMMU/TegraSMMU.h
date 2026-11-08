@@ -8,7 +8,7 @@
 // bit 31, ASID in 30:24 here written as asid << 24), PTC_FLUSH 0x34 (0: all). A swgroup's ASID register is ENABLE 31 |
 // ASID; each memory client has a translation bit in TRANSLATION_ENABLE_0..4 (0x228..0x238), which switchroot's bl31 sets
 // for every client while leaving every swgroup in bypass. The global SMMU enable is secure-only (reads back garbage), so a
-// user proves translation itself (TegraVIC V3).
+// whether translation is on is known from what the unit's engines did (TegraVIC.cpp), not read back.
 #pragma once
 #include <stddef.h>
 #include <stdint.h>

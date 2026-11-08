@@ -34,8 +34,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
 import kernelcache
 
-sys.path.insert(0, str(Path(__file__).parents[2] / 'tools/prelink'))
-from native_prelink import backed_offset, macho
+from tools.common.macho import backed_offset, macho
 
 HERE = Path(__file__).parent
 JsonObject = dict[str, object]

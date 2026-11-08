@@ -25,6 +25,7 @@ struct nvkmd_va;
 
 struct _drmDevice;
 struct vk_object_base;
+struct vk_sync;
 struct vk_sync_wait;
 struct vk_sync_signal;
 
@@ -122,6 +123,7 @@ struct nvkmd_info {
    bool has_overmap;
    bool has_compression;
    bool has_host_import;
+   bool has_tiled_cache;
 };
 
 struct nvkmd_pdev_ops {
@@ -420,6 +422,21 @@ void *nvkmd_darwin_submit_data(const void *queue);
 void nvkmd_darwin_submit_data_free(void *data);
 void nvkmd_darwin_submit_surfaces(struct nvkmd_ctx *ctx, const void *data);
 void nvkmd_darwin_submit_surfaces_end(struct nvkmd_ctx *ctx);
+
+/* ios-on-switch-lmao: the kernel killed an exec context's channel for a GPU
+ * fault or hang (TegraGM20BABI.h method 11). What it had in flight failed, and
+ * so does what it is given until reopen gives it a new channel, whose GPU
+ * context the caller sets up again; no work is run again. A timeline value
+ * whose signal was among the failed work answers sync_failure with method
+ * 11's error once the timeline reached it (0: it ran to its end).
+ */
+bool nvkmd_darwin_ctx_lost(struct nvkmd_ctx *ctx);
+VkResult MUST_CHECK
+nvkmd_darwin_ctx_reopen(struct nvkmd_ctx *ctx, struct vk_object_base *log_obj);
+uint32_t nvkmd_darwin_sync_failure(struct vk_sync *sync, uint64_t value);
+
+/* The caller's pages a host import is of, NULL for any other memory. */
+const void *nvkmd_darwin_mem_host_ptr(const struct nvkmd_mem *mem);
 #endif
 
 static inline void

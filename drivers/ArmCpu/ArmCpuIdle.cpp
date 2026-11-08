@@ -18,6 +18,7 @@
 #include "../../kits/SwitchMMIO/SwitchMMIOKernel.h"
 #include "ArmCpuIdle.h"
 
+// NOLINTNEXTLINE(readability-redundant-declaration): not every kernel configuration's headers declare it
 extern "C" vm_offset_t ml_static_vtop(vm_offset_t);
 extern "C" volatile uint32_t armcpu_gic_targets[8];
 
@@ -68,6 +69,7 @@ void resumed(uint32_t cpu)
     armcpu::restoreBankedGic();
 }
 
+// NOLINTNEXTLINE(misc-const-correctness): IOInterruptAction's signature
 void timerInterrupt(OSObject *, void *refCon, IOService *, int)
 {
     disarm(static_cast<uint32_t>(reinterpret_cast<uintptr_t>(refCon)));
@@ -79,9 +81,9 @@ const switch_idle_platform kPlatform = {
     .wake_ticks_max = kTmrTicksMax,
 };
 
-const char *check(void)
+const char *check()
 {
-    uint64_t frequency;
+    uint64_t frequency = 0;  // NOLINT(misc-const-correctness): written by the asm after it
     __asm__ volatile("mrs %0, cntfrq_el0" : "=r"(frequency));
     if (!armcpu::nativeGicV2Smp())
         return "not every core runs on the native GICv2";
@@ -123,6 +125,7 @@ bool claimTimers(char *why, size_t size)
         if (nub->registerInterrupt(0, nullptr, timerInterrupt, reinterpret_cast<void *>(uintptr_t{cpu})) !=
                 kIOReturnSuccess ||
             nub->enableInterrupt(0) != kIOReturnSuccess) {
+            // NOLINTNEXTLINE(clang-analyzer-osx.cocoa.RetainCount): the GIC keeps its nubs; this reference is not ours
             snprintf(why, size, "INTID %u (CPU%u's TMR) not registered", intid, cpu);
             return false;
         }
@@ -137,7 +140,7 @@ bool claimTimers(char *why, size_t size)
 }
 }  // namespace
 
-void armcpu_idle_start(void)
+void armcpu_idle_start()
 {
     char why[128];
     if (const char *reason = check()) {

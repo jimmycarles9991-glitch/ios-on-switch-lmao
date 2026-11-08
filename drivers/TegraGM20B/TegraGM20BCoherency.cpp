@@ -108,7 +108,7 @@ tgm_coh **idBucket(uint32_t surfaceId)
 	return &gById[(surfaceId ^ (surfaceId >> 8)) & (kBuckets - 1)];
 }
 
-void idUnlink(tgm_coh *c)
+void idUnlink(const tgm_coh *c)
 {
 	for (tgm_coh **p = idBucket(c->surfaceId); *p; p = &(*p)->idNext) {
 		if (*p == c) {
@@ -142,7 +142,7 @@ void release(tgm_coh *c)  // registry lock held
 bool tiledNow(const tgm_coh *c)
 {
 	const tgm_tiled *t = __atomic_load_n(&c->tiled, __ATOMIC_ACQUIRE);
-	return t && t->tiled;
+	return (t != nullptr) && (t->tiled != 0);
 }
 
 // Drops one reference to each of `n` entries (at most kBatch). An entry whose last reference this is while its surface is
@@ -154,10 +154,11 @@ void drop(tgm_coh *const *cs, uint32_t n)
 	uint32_t nlast = 0;
 	IOLockLock(gRegistryLock);
 	for (uint32_t i = 0; i < n; i++) {
-		if (cs[i]->refs == 1 && tiledNow(cs[i]) && nlast < kBatch)
+		if (cs[i]->refs == 1 && tiledNow(cs[i]) && nlast < kBatch) {
 			last[nlast++] = cs[i];
-		else
+		} else {
 			release(cs[i]);
+		}
 	}
 	IOLockUnlock(gRegistryLock);
 	for (uint32_t i = 0; i < nlast; i++) {
@@ -168,11 +169,11 @@ void drop(tgm_coh *const *cs, uint32_t n)
 	}
 }
 
-uint64_t maintain(tgm_coh *c)
+uint64_t maintain(const tgm_coh *c)
 {
 	IOLockLock(c->lock);
 	tgm_cpu_clean_pages(c->pas, c->npages);
-	const uint64_t bytes = uint64_t(c->npages) << 12;
+	const uint64_t bytes = static_cast<uint64_t>(c->npages) << 12;
 	IOLockUnlock(c->lock);
 	return bytes;
 }
@@ -181,7 +182,8 @@ uint64_t maintain(tgm_coh *c)
 // one entry unless its imports began at different pages.
 uint32_t findById(uint32_t surfaceId, uint32_t skip, tgm_coh **out)
 {
-	uint32_t n = 0, seen = 0;
+	uint32_t n = 0;
+	uint32_t seen = 0;
 	IOLockLock(gRegistryLock);
 	for (tgm_coh *c = *idBucket(surfaceId); c && n < kBatch; c = c->idNext) {
 		if (c->surfaceId == surfaceId && seen++ >= skip) {
@@ -227,18 +229,24 @@ void surfaceTrapped(uint32_t surfaceId, bool unlock, bool readOnly)
 {
 	tgm_coh *found[kBatch];
 	uint32_t n = kBatch;
-	for (uint32_t skip = 0; n == kBatch && (n = findById(surfaceId, skip, found)); skip += n) {
-		uint64_t bytes = 0, done = 0;
+	for (uint32_t skip = 0; n == kBatch; skip += n) {
+		n = findById(surfaceId, skip, found);
+		if (!n)
+			break;
+		uint64_t bytes = 0;
+		uint64_t done = 0;
 		for (uint32_t i = 0; i < n; i++) {
-			if (!unlock)
+			if (!unlock) {
 				__atomic_add_fetch(&found[i]->cpuLocks, 1, __ATOMIC_ACQ_REL);
-			else if (__atomic_load_n(&found[i]->cpuLocks, __ATOMIC_ACQUIRE))
+			} else if (__atomic_load_n(&found[i]->cpuLocks, __ATOMIC_ACQUIRE)) {
 				__atomic_sub_fetch(&found[i]->cpuLocks, 1, __ATOMIC_ACQ_REL);
+			}
 			// a block-linear surface's CPU locks read and write a scratch (TegraGM20BViews.cpp), never its pages
 			if (tiledNow(found[i]))
 				continue;
-			const bool maintained = unlock || __atomic_exchange_n(&found[i]->gpuDirty,
-									      0, __ATOMIC_ACQ_REL);
+			const bool maintained =
+				unlock || (__atomic_exchange_n(&found[i]->gpuDirty, 0,
+							       __ATOMIC_ACQ_REL) != 0);
 			if (maintained) {
 				bytes += maintain(found[i]);
 				done++;
@@ -262,7 +270,7 @@ void adopt(tgm_coh *c, const uint64_t *pas, uint32_t npages)
 	uint64_t *copy = IONew(uint64_t, npages);
 	if (!copy)
 		return;
-	memcpy(copy, pas, size_t(npages) * sizeof(uint64_t));
+	memcpy(copy, pas, static_cast<size_t>(npages) * sizeof(uint64_t));
 	IODelete(c->pas, uint64_t, c->npages);
 	c->pas = copy;
 	c->npages = npages;
@@ -285,7 +293,7 @@ tgm_coh *entryNew(uint64_t pa, const uint64_t *pas, uint32_t npages)
 		IODelete(c, tgm_coh, 1);
 		return nullptr;
 	}
-	memcpy(c->pas, pas, size_t(npages) * sizeof(uint64_t));
+	memcpy(c->pas, pas, static_cast<size_t>(npages) * sizeof(uint64_t));
 	c->npages = npages;
 	return c;
 }
@@ -307,7 +315,8 @@ extern "C" struct tgm_coh *tgm_coherency_add(uint64_t pa, uint32_t surface_id, c
 		return nullptr;
 	tgm_coh *fresh = entryNew(pa, pas, npages);
 	IOLockLock(gRegistryLock);
-	tgm_coh **p = pageSlot(pa), *c = *p;
+	tgm_coh **p = pageSlot(pa);
+	tgm_coh *c = *p;
 	// A live import of the same surface that finished its own clean: every CPU write since came through an
 	// IOSurfaceUnlock that cleaned these pages, so they are clean already.
 	if (c && surface_id && c->surfaceId == surface_id && c->npages >= npages &&
@@ -319,7 +328,8 @@ extern "C" struct tgm_coh *tgm_coherency_add(uint64_t pa, uint32_t surface_id, c
 	}
 	if (c) {
 		c->refs++;
-		c->writable |= writable;
+		if (writable)
+			c->writable = 1;
 		if (gpu_writes)
 			__atomic_store_n(&c->gpuWrites, 1, __ATOMIC_RELAXED);
 		if (surface_id && !c->surfaceId) {
@@ -335,7 +345,8 @@ extern "C" struct tgm_coh *tgm_coherency_add(uint64_t pa, uint32_t surface_id, c
 		entryFree(fresh);
 	if (*covered) {
 		IOLockLock(c->lock);
-		*covered = !memcmp(c->pas, pas, size_t(npages) * sizeof(uint64_t));
+		*covered = static_cast<int>(
+			memcmp(c->pas, pas, size_t(npages) * sizeof(uint64_t)) == 0);
 		IOLockUnlock(c->lock);
 	}
 	if (c && npages > c->npages) {
@@ -364,13 +375,14 @@ extern "C" void tgm_coherency_put(struct tgm_coh *c)
 
 // One submission of channel `uid` that may write the surface, into `slots`: a later one of the same channel takes its
 // slot. False: no slot left for it.
+// NOLINTNEXTLINE(readability-non-const-parameter): the compare-and-swap below writes through slots
 static bool noteWriter(uint64_t *slots, uint32_t uid, uint32_t seqno)
 {
-	const uint64_t mine = uint64_t(uid) << 32 | seqno;
+	const uint64_t mine = static_cast<uint64_t>(uid) << 32 | seqno;
 	for (uint32_t i = 0; i < TGM_COH_WRITERS; i++) {
 		uint64_t seen = __atomic_load_n(&slots[i], __ATOMIC_ACQUIRE);
-		while (seen && uint32_t(seen >> 32) == uid) {
-			if (int32_t(seqno - uint32_t(seen)) <= 0 ||
+		while (seen && static_cast<uint32_t>(seen >> 32) == uid) {
+			if (static_cast<int32_t>(seqno - static_cast<uint32_t>(seen)) <= 0 ||
 			    __atomic_compare_exchange_n(&slots[i], &seen, mine, false,
 							__ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE))
 				return true;
@@ -385,7 +397,9 @@ static bool noteWriter(uint64_t *slots, uint32_t uid, uint32_t seqno)
 	// Slots are freed only by a CPU lock, and a surface the CPU never locks keeps every channel that ever wrote it.
 	for (uint32_t i = 0; i < TGM_COH_WRITERS; i++) {
 		uint64_t seen = __atomic_load_n(&slots[i], __ATOMIC_ACQUIRE);
-		if (seen && tgm_writer_done(uint32_t(seen >> 32), uint32_t(seen)) &&
+		if (seen &&
+		    tgm_writer_done(static_cast<uint32_t>(seen >> 32),
+				    static_cast<uint32_t>(seen)) &&
 		    __atomic_compare_exchange_n(&slots[i], &seen, mine, false, __ATOMIC_ACQ_REL,
 						__ATOMIC_RELAXED))
 			return true;
@@ -419,8 +433,8 @@ extern "C" uint32_t tgm_coherency_writers(const struct tgm_coh *c, uint64_t out[
 					  uint32_t *lost, uint64_t *pa)
 {
 	uint32_t n = 0;
-	for (uint32_t i = 0; i < TGM_COH_WRITERS; i++) {
-		const uint64_t w = __atomic_load_n(&c->listed[i], __ATOMIC_ACQUIRE);
+	for (const uint64_t &slot : c->listed) {
+		const uint64_t w = __atomic_load_n(&slot, __ATOMIC_ACQUIRE);
 		if (w)
 			out[n++] = w;
 	}
@@ -441,23 +455,25 @@ static bool writersPending(tgm_coh *c, bool wait)
 	bool pending = false;
 	if (__atomic_load_n(&c->writersLost, __ATOMIC_ACQUIRE)) {
 		if (!wait)
-			return !tgm_writers_all_done();
+			return tgm_writers_all_done() == 0;
 		__atomic_store_n(&c->writersLost, 0, __ATOMIC_RELAXED);
 		tgm_writers_wait_all();
 		pending = true;
 	}
-	for (uint32_t i = 0; i < TGM_COH_WRITERS; i++) {
-		uint64_t seen = __atomic_load_n(&c->writers[i], __ATOMIC_ACQUIRE);
-		if (!seen || tgm_writer_done(uint32_t(seen >> 32), uint32_t(seen))) {
-			if (seen)
-				__atomic_compare_exchange_n(&c->writers[i], &seen, 0, false,
+	for (uint64_t &writer : c->writers) {
+		uint64_t seen = __atomic_load_n(&writer, __ATOMIC_ACQUIRE);
+		if (!seen || tgm_writer_done(static_cast<uint32_t>(seen >> 32),
+					     static_cast<uint32_t>(seen))) {
+			if (seen) {
+				__atomic_compare_exchange_n(&writer, &seen, 0, false,
 							    __ATOMIC_ACQ_REL, __ATOMIC_RELAXED);
+			}
 			continue;
 		}
 		if (!wait)
 			return true;
-		tgm_writer_wait(uint32_t(seen >> 32), uint32_t(seen));
-		__atomic_compare_exchange_n(&c->writers[i], &seen, 0, false, __ATOMIC_ACQ_REL,
+		tgm_writer_wait(static_cast<uint32_t>(seen >> 32), static_cast<uint32_t>(seen));
+		__atomic_compare_exchange_n(&writer, &seen, 0, false, __ATOMIC_ACQ_REL,
 					    __ATOMIC_RELAXED);
 		pending = true;
 	}
@@ -468,33 +484,37 @@ extern "C" int tegra_gm20b_iosurface_lock_will(uint32_t surface_id, uint32_t opt
 {
 	if (!surface_id || !__atomic_load_n(&gWithId, __ATOMIC_RELAXED))
 		return 0;
-	const bool avoidSync = options & kLockAvoidSync;
+	const bool avoidSync = (options & kLockAvoidSync) != 0u;
 	tgm_coh *found[kBatch];
 	uint32_t n = kBatch;
-	bool waited = false, refused = false;
-	for (uint32_t skip = 0; n == kBatch && !refused && (n = findById(surface_id, skip, found));
-	     skip += n) {
+	bool waited = false;
+	bool refused = false;
+	for (uint32_t skip = 0; n == kBatch && !refused; skip += n) {
+		n = findById(surface_id, skip, found);
+		if (!n)
+			break;
 		for (uint32_t i = 0; i < n && !refused; i++) {
 			if (tiledNow(found[i]))
 				continue;  // its view's copy waits for the writers on the GPU (TegraGM20BViews.cpp)
-			if (avoidSync)
+			if (avoidSync) {
 				refused = writersPending(found[i], false);
-			else
+			} else {
 				waited |= writersPending(found[i], true);
+			}
 		}
 		drop(found, n);
 	}
 #if TGM_STATS
 	if (waited || refused) {
 		IOLockLock(gRegistryLock);
-		gStats.waitedN += waited;
-		gStats.cannotLockN += refused;
+		gStats.waitedN += static_cast<uint64_t>(waited);
+		gStats.cannotLockN += static_cast<uint64_t>(refused);
 		IOLockUnlock(gRegistryLock);
 	}
 #else
 	(void)waited;
 #endif
-	return refused;
+	return static_cast<int>(refused);
 }
 
 extern "C" void tgm_coherency_gpu_writes(uint32_t surface_id)
@@ -516,7 +536,7 @@ extern "C" int tegra_gm20b_surface_tiled(uint64_t pa)
 	IOLockLock(gRegistryLock);
 	const tgm_coh *c = *pageSlot(pa);
 	const tgm_tiled *t = c ? __atomic_load_n(&c->tiled, __ATOMIC_ACQUIRE) : nullptr;
-	const int tiled = t && t->tiled;
+	const int tiled = static_cast<int>((t != nullptr) && t->tiled != 0);
 	IOLockUnlock(gRegistryLock);
 	return tiled;
 }
@@ -528,18 +548,20 @@ extern "C" int tegra_gm20b_surface_layout(uint64_t pa, struct tgm_layout *out)
 	IOLockLock(gRegistryLock);
 	const tgm_coh *c = *pageSlot(pa);
 	const tgm_tiled *t = c ? __atomic_load_n(&c->tiled, __ATOMIC_ACQUIRE) : nullptr;
-	const int tiled = t && t->tiled;
+	const int tiled = static_cast<int>((t != nullptr) && t->tiled != 0);
 	if (tiled)
 		*out = t->layout;
 	IOLockUnlock(gRegistryLock);
 	return tiled;
 }
 
+// NOLINTNEXTLINE(misc-const-correctness): the host tests' stubs and the C callers share this signature
 extern "C" void tgm_coh_lock(struct tgm_coh *c)
 {
 	IOLockLock(c->lock);
 }
 
+// NOLINTNEXTLINE(misc-const-correctness): the host tests' stubs and the C callers share this signature
 extern "C" void tgm_coh_unlock(struct tgm_coh *c)
 {
 	IOLockUnlock(c->lock);
@@ -553,7 +575,8 @@ extern "C" struct tgm_tiled **tgm_coh_tiled(struct tgm_coh *c)
 extern "C" int tgm_coh_alone(struct tgm_coh *c)
 {
 	IOLockLock(gRegistryLock);
-	const int alone = c->refs == 1 && !__atomic_load_n(&c->cpuLocks, __ATOMIC_ACQUIRE);
+	const int alone = static_cast<int>(c->refs == 1 &&
+					   (__atomic_load_n(&c->cpuLocks, __ATOMIC_ACQUIRE)) == 0u);
 	IOLockUnlock(gRegistryLock);
 	return alone;
 }
@@ -567,16 +590,19 @@ extern "C" struct tgm_coh *tgm_coh_find_tiled(uint32_t id)
 {
 	if (!tgm_tiled_any())
 		return nullptr;
-	tgm_coh *found[kBatch], *tiled = nullptr;
+	tgm_coh *found[kBatch];
+	tgm_coh *tiled = nullptr;
 	const uint32_t n = id && gRegistryLock ? findById(id, 0, found) : 0;
-	for (uint32_t i = 0; i < n; i++)
+	for (uint32_t i = 0; i < n; i++) {
 		if (!tiled && tiledNow(found[i]))
 			tiled = found[i];
+	}
 	tgm_coh *others[kBatch];
 	uint32_t m = 0;
-	for (uint32_t i = 0; i < n; i++)
+	for (uint32_t i = 0; i < n; i++) {
 		if (found[i] != tiled)
 			others[m++] = found[i];
+	}
 	drop(others, m);
 	return tiled;
 }
@@ -587,17 +613,19 @@ extern "C" struct tgm_coh *tgm_coh_find_tiled_pa(uint64_t pa, uint64_t *offset)
 		return nullptr;
 	IOLockLock(gRegistryLock);
 	tgm_coh *found = nullptr;
-	for (uint32_t b = 0; b < kBuckets && !found; b++)
+	for (uint32_t b = 0; b < kBuckets && !found; b++) {
 		for (tgm_coh *c = gByPage[b]; c && !found; c = c->next) {
 			if (!tiledNow(c))
 				continue;
-			for (uint32_t i = 0; i < c->npages; i++)
-				if (c->pas[i] == (pa & ~0xfffull)) {
+			for (uint32_t i = 0; i < c->npages; i++) {
+				if (c->pas[i] == (pa & ~0xfffULL)) {
 					found = c;
 					*offset = (uint64_t(i) << 12) | (pa & 0xfff);
 					break;
 				}
+			}
 		}
+	}
 	if (found)
 		found->refs++;
 	IOLockUnlock(gRegistryLock);
@@ -609,7 +637,7 @@ extern "C" struct tgm_coh *tgm_coh_find_pa(uint64_t pa)
 	if (!gRegistryLock)
 		return nullptr;
 	IOLockLock(gRegistryLock);
-	tgm_coh *c = *pageSlot(pa & ~0xfffull);
+	tgm_coh *c = *pageSlot(pa & ~0xfffULL);
 	if (c)
 		c->refs++;
 	IOLockUnlock(gRegistryLock);
@@ -636,8 +664,8 @@ extern "C" uint32_t tgm_coh_writers(struct tgm_coh *c, struct tgm_relayout_write
 		return 0;
 	}
 	uint32_t n = 0;
-	for (uint32_t i = 0; i < TGM_COH_WRITERS; i++) {
-		const uint64_t seen = __atomic_load_n(&c->writers[i], __ATOMIC_ACQUIRE);
+	for (uint64_t &writer : c->writers) {
+		const uint64_t seen = __atomic_load_n(&writer, __ATOMIC_ACQUIRE);
 		if (!seen || tgm_writer_done(uint32_t(seen >> 32), uint32_t(seen)))
 			continue;
 		if (n == max) {
@@ -671,8 +699,9 @@ extern "C" void tegra_gm20b_iosurface_trap(uint32_t index, uint32_t surface_id, 
 {
 	if (!surface_id || !__atomic_load_n(&gWithId, __ATOMIC_RELAXED))
 		return;
-	if (index == kTrapLock)
-		surfaceTrapped(surface_id, false, options & kLockReadOnly);
-	else if (index == kTrapUnlock && !(options & kLockReadOnly))
+	if (index == kTrapLock) {
+		surfaceTrapped(surface_id, false, (options & kLockReadOnly) != 0u);
+	} else if (index == kTrapUnlock && !(options & kLockReadOnly)) {
 		surfaceTrapped(surface_id, true, false);
+	}
 }

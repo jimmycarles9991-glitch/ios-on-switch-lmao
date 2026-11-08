@@ -12,13 +12,17 @@ py_library(
     name = "native_prelink",
     srcs = ["native_prelink.py"],
     imports = ["."],
+    deps = ["//tools/common:macho"],
 )
 
 # Prelinks Apple's original kexts into the linked kernel (kernel/rules/kernel.bzl kernel_prelink runs it).
 py_binary(
     name = "emit_prelink",
     srcs = ["emit_prelink.py"],
-    deps = [":native_prelink"],
+    deps = [
+        ":native_prelink",
+        "//tools/common:macho",
+    ],
 )
 
 py_test(
@@ -28,5 +32,8 @@ py_test(
         "emit_prelink.py",
         "emit_prelink_options_test.py",
     ],
-    deps = [":native_prelink"],
+    deps = [
+        ":native_prelink",
+        "//tools/common:macho",
+    ],
 )

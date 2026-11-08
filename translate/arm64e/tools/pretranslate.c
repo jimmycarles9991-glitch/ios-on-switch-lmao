@@ -49,9 +49,9 @@ static void report_slice(FILE *f, const struct a64x_slice *s, const struct a64x_
             "\", \"sites\": %" PRIu64 ", \"shared_sites\": %" PRIu64 ", \"shared_copies\": %" PRIu64
             ", \"stub_words\": %" PRIu64 ", \"spill_sites\": %" PRIu64 ", \"dead_checks\": %" PRIu64
             ", \"hole_words\": %" PRIu64 ", \"tail_words\": %" PRIu64 ", \"island_words\": %" PRIu64
-            ", \"changed\": %" PRIu64 ", \"verified_sites\": %ld",
+            ", \"changed\": %" PRIu64 ", \"verified_sites\": %ld, \"fips_mac\": %s",
             r->sites, r->shared_sites, r->shared_copies, r->stub_words, r->spill_sites, r->dead_checks, r->hole_words,
-            r->tail_words, r->island_words, r->changed, verified);
+            r->tail_words, r->island_words, r->changed, verified, r->fips_mac ? "true" : "false");
     counts(f, "rewrite1", r->stats.rewrite1);
     counts(f, "stubs", r->stats.stubs);
     counts(f, "left", r->stats.left);

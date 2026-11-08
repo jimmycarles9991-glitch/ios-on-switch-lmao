@@ -25,19 +25,20 @@ namespace
 template <class T> T at(const void *object, unsigned long offset)
 {
 	T value;
+	// NOLINTNEXTLINE(bugprone-sizeof-expression): T may be a pointer; the field is that pointer
 	memcpy(&value, static_cast<const uint8_t *>(object) + offset, sizeof(value));
 	return value;
 }
 
 // The user client's IOSurfaceClient of surface `id`, retained (under the mutex the table's lock pointer names), or null
-OSObject *surfaceClient(void *client, uint32_t id)
+OSObject *surfaceClient(const void *client, uint32_t id)
 {
 	using UC = OriginalIOSurfaceRootUserClient;
 	auto *lock = at<lck_mtx_t *>(client, UC::clientTableLock);
 	OSObject *c = nullptr;
 	lck_mtx_lock(lock);
 	if (id < at<uint32_t>(client, UC::clientCapacity)) {
-		auto **table = at<OSObject **>(client, UC::clientTable);
+		auto *const *table = at<OSObject **>(client, UC::clientTable);
 		c = table ? table[id] : nullptr;
 		if (c && at<void *>(c, OriginalIOSurfaceClient::sharedClient) !=
 				 at<void *>(client, UC::sharedClient))
@@ -52,18 +53,19 @@ OSObject *surfaceClient(void *client, uint32_t id)
 
 extern "C" int tgm_cpu_view_of(void *client, uint32_t id, struct tgm_cpu_view *out)
 {
-	OSObject *c = surfaceClient(client, id);
+	const OSObject *c = surfaceClient(client, id);
 	if (!c)
 		return 0;
 	IOMemoryMap *map = at<IOMemoryMap *>(c, OriginalIOSurfaceClient::map);
-	IOMemoryDescriptor *md = map ? map->getMemoryDescriptor() : nullptr;
+	const IOMemoryDescriptor *md = map ? map->getMemoryDescriptor() : nullptr;
 	int mapped = map ? 1 : 0;
 	// IOSurface maps the whole descriptor (createMappingInTask with no offset or length): the view puts back the same
-	if (map && (!md || map->getLength() != md->getLength()))
+	if (map && (!md || map->getLength() != md->getLength())) {
 		mapped = -1;
-	else if (map)
+	} else if (map) {
 		*out = {client, map->getAddressTask(), map->getAddress(), map->getLength(),
 			0,      map->getMapOptions()};
+	}
 	c->release();
 	return mapped;
 }
@@ -78,17 +80,18 @@ extern "C" int tgm_cpu_view_remap(const struct tgm_cpu_view *view, void *memory,
 		return -22;
 	const IOOptionBits options = (view->options & ~uint32_t(kIOMapAnywhere)) | kIOMapOverwrite |
 				     kIOMapUnique | (prefault ? kIOMapPrefault : 0);
-	IOMemoryMap *map = md->createMappingInTask(static_cast<task_t>(view->task), view->address,
-						   options, offset, view->length);
+	const IOMemoryMap *map = md->createMappingInTask(
+		static_cast<task_t>(view->task), view->address, options, offset, view->length);
 	if (!map)
 		return -12;
 	map->release();
 	return 0;
 }
 
+// NOLINTNEXTLINE(misc-const-correctness): TegraGM20BGpu.h's declaration, which C calls
 extern "C" void *tgm_surface_memory(void *client, uint32_t id)
 {
-	OSObject *c = surfaceClient(client, id);
+	const OSObject *c = surfaceClient(client, id);
 	if (!c)
 		return nullptr;
 	IOMemoryMap *map = at<IOMemoryMap *>(c, OriginalIOSurfaceClient::map);
@@ -104,13 +107,16 @@ extern "C" OSObject *tgm_surface_lookup(uint32_t id, void *task)
 	static IOService *root;  // kept
 	if (!__atomic_load_n(&root, __ATOMIC_ACQUIRE)) {
 		OSDictionary *match = IOService::nameMatching("IOCoreSurfaceRoot");
+		// NOLINTNEXTLINE(misc-const-correctness): the compare-and-swap below stores it
 		IOService *found = match ? IOService::copyMatchingService(match) : nullptr;
 		OSSafeReleaseNULL(match);
+		// NOLINTNEXTLINE(misc-const-correctness): the compare-and-swap writes the current value back into it
 		IOService *expected = nullptr;
 		if (found && !__atomic_compare_exchange_n(&root, &expected, found, false,
 							  __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE))
 			found->release();
 	}
+	// NOLINTNEXTLINE(clang-analyzer-osx.cocoa.RetainCount): root keeps the matched service for good
 	IOService *r = __atomic_load_n(&root, __ATOMIC_ACQUIRE);
 	return r ? tegra_gm20b_ios_lookup(r, id, static_cast<task_t>(task)) : nullptr;
 }
@@ -119,10 +125,11 @@ extern "C" OSObject *tgm_surface_lookup(uint32_t id, void *task)
 // they hold rows for good (TegraGM20BLayout.h). One this task cannot look up is taken as one too: rows are always right.
 extern "C" int tgm_surface_client_memory(uint32_t id, void *task)
 {
-	OSObject *surface = tgm_surface_lookup(id, task);
+	const OSObject *surface = tgm_surface_lookup(id, task);
 	if (!surface)
 		return 1;
-	const int client = at<uint64_t>(surface, OriginalIOSurface::clientMemory) != 0;
+	const int client =
+		static_cast<int>(at<uint64_t>(surface, OriginalIOSurface::clientMemory) != 0);
 	surface->release();
 	return client;
 }
@@ -135,13 +142,15 @@ extern "C" void tgm_memory_release(void *memory)
 
 extern "C" int tgm_cpu_view_live(const struct tgm_cpu_view *view)
 {
-	return !static_cast<IOService *>(view->client)->isInactive();
+	return static_cast<int>(!static_cast<IOService *>(view->client)->isInactive());
 }
 
+// NOLINTNEXTLINE(misc-const-correctness): the host tests' stubs and the C callers share this signature
 extern "C" void tgm_cpu_view_hold(struct tgm_cpu_view *view, int hold)
 {
-	if (hold)
+	if (hold) {
 		static_cast<OSObject *>(view->client)->retain();
-	else
+	} else {
 		static_cast<OSObject *>(view->client)->release();
+	}
 }

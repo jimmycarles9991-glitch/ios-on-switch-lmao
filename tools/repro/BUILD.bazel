@@ -27,11 +27,13 @@ py_binary(
 py_library(
     name = "linkedit_lib",
     srcs = ["linkedit.py"],
+    deps = ["//tools/common:macho"],
 )
 
 py_binary(
     name = "linkedit",
     srcs = ["linkedit.py"],
+    deps = ["//tools/common:macho"],
 )
 
 py_test(

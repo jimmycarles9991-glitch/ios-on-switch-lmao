@@ -232,20 +232,30 @@ static void test_encoders(void)
     NCHECK(bcm_chanspec_of((struct awdl_chan){42, 0x80}) == 0xe22a);
     NCHECK(bcm_chanspec_of((struct awdl_chan){6, 81}) == 0x1006);
     NCHECK(bcm_chanspec_of((struct awdl_chan){155, 0x80}) == 0xe09b);
+    // Apple's on-air form names the primary: the same 80 MHz chanspecs
+    NCHECK(bcm_chanspec_of((struct awdl_chan){149, 0x80}) == 0xe09b &&
+           bcm_chanspec_of((struct awdl_chan){44, 0x80}) == 0xe22a);
+    NCHECK(bcm_chanspec20(149, 0) == 0xd095 && bcm_chanspec20(6, 0) == 0x1006 && bcm_chanspec20(44, 1) == 0x1b2c &&
+           bcm_chanspec20(6, 1) == 0x2b06 && bcm_chanspec20(0, 0) == 0);
     NCHECK(bcm_chanspec_of((struct awdl_chan){36, 115}) == 0xd024 && bcm_chanspec_of((struct awdl_chan){0, 0}) == 0);
 
-    // actframe: chanspec and dwell, the frame's BSSID (addr3), pad, its destination (addr1), body length, packet id,
-    // then the body from the category byte (AWDL: 127, Apple OUI, type 8).
+    // actframe: brcmfmac's whole brcmf_fil_af_params_le: chanspec and dwell, the frame's BSSID (addr3), pad, its
+    // destination (addr1), body length, packet id, then the body from the category byte (AWDL: 127, Apple OUI, type 8),
+    // zero to BRCMF_FIL_ACTION_FRAME_SIZE.
     {
         uint8_t af[24 + 6] = {0xd0, 0x00, 0x00, 0x00, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x02, 0xaa, 0xbb, 0xcc, 0xdd,
                               0xee, 0x00, 0x25, 0x00, 0xff, 0x94, 0x73, 0x00, 0x00, 0x7f, 0x00, 0x17, 0xf2, 0x08, 0x10};
-        uint8_t req[64];
-        const size_t n = bcm_actframe_request(req, sizeof req, af, sizeof af, 0xd095, 0, 7);
-        NCHECK(n == 9 + 28 + 6 && !memcmp(req, "actframe", 9) &&
-               bytes_eq(req + 9, 28, "95d00000 00000000 002500ff9473 0000 ffffffffffff 0600 07000000") &&
-               bytes_eq(req + 37, 6, "7f0017f20810"));
-        NCHECK(bcm_actframe_request(req, 42, af, sizeof af, 0xd095, 0, 7) == 0);  // no room
-        af[0] = 0x08;                                                             // a data frame
+        static uint8_t req[BCM_ACTFRAME_REQUEST_LEN];
+        memset(req, 0xee, sizeof req);
+        const size_t n = bcm_actframe_request(req, sizeof req, af, sizeof af, 0xd095, 66, 7);
+        int tail_zero = 1;
+        for (size_t k = 37 + 6; k < sizeof req; ++k)
+            tail_zero &= req[k] == 0;
+        NCHECK(n == 1837 && !memcmp(req, "actframe", 9) &&
+               bytes_eq(req + 9, 28, "95d00000 42000000 002500ff9473 0000 ffffffffffff 0600 07000000") &&
+               bytes_eq(req + 37, 6, "7f0017f20810") && tail_zero);
+        NCHECK(bcm_actframe_request(req, sizeof req - 1, af, sizeof af, 0xd095, 0, 7) == 0);  // no room
+        af[0] = 0x08;                                                                         // a data frame
         NCHECK(bcm_actframe_request(req, sizeof req, af, sizeof af, 0xd095, 0, 7) == 0);
         NCHECK(bcm_actframe_request(req, sizeof req, af, 24, 0xd095, 0, 7) == 0);  // no body
     }
@@ -373,6 +383,9 @@ static void test_monitor_probe(void)
     NCHECK(bcm_monitor_probe_request(BCM_MONITOR_PROBE_STA_MONITOR, b, sizeof b) == 12 &&
            !memcmp(b, "sta_monitor", 12));
     NCHECK(bcm_monitor_probe_request(BCM_MONITOR_PROBE_STA_MONITOR, b, 11) == 0);
+    NCHECK(bcm_monitor_probe_request(BCM_MONITOR_PROBE_AF_FLYING_MAX, b, sizeof b) == 14 &&
+           !memcmp(b, "af_flying_max", 14));
+    NCHECK(bcm_monitor_probe_request(BCM_MONITOR_PROBE_TSF, b, sizeof b) == 4 && !memcmp(b, "tsf", 4));
     NCHECK(bcm_monitor_probe_request(BCM_MONITOR_PROBE_COUNT, b, sizeof b) == 0);
     NCHECK(BCM_WLC_GET_MONITOR == 107 &&
            !strcmp(bcm_monitor_probe_names[BCM_MONITOR_PROBE_GET_MONITOR], "WLC_GET_MONITOR"));
@@ -383,26 +396,31 @@ static void test_radio_verdict(void)
     struct bcm_awdl_probe p;
     probe_7_35_252_108(&p);
     NCHECK(bcm_probe_absent(&p) == (((1u << BCM_PROBE_COUNT) - 1) & ~(1u << BCM_PROBE_EVENT_MSGS_EXT)));
-    struct awdl_radio_verdict v = awdl_radio_verdict_of(0, 1, 1, 0, 0, &p);
-    NCHECK(v.mode == AWDL_RADIO_OFF && v.off == AWDL_OFF_NO_API && v.api == BCM_AWDL_API_NONE);
-    v = awdl_radio_verdict_of(-EAGAIN, 0, 0, 0, 0, NULL);
-    NCHECK(v.mode == AWDL_RADIO_UNDECIDED);
-    v = awdl_radio_verdict_of(-ENODEV, 0, 0, 0, 0, NULL);
-    NCHECK(v.mode == AWDL_RADIO_OFF && v.off == AWDL_OFF_NO_RADIO);
-    v = awdl_radio_verdict_of(0, 0, 1, 0, 0, &p);
-    NCHECK(v.mode == AWDL_RADIO_OFF && v.off == AWDL_OFF_ABI);
-    v = awdl_radio_verdict_of(0, 1, 0, 1, 0, NULL);
-    NCHECK(v.mode == AWDL_RADIO_OFF && v.off == AWDL_OFF_NO_BACKEND);
-    v = awdl_radio_verdict_of(0, 1, 1, 1, 1, &p);
-    NCHECK(v.mode == AWDL_RADIO_SOFT && v.off == AWDL_OFF_NOT);
-    v = awdl_radio_verdict_of(0, 1, 0, 1, 1, NULL);
+    struct awdl_radio_verdict v = awdl_radio_verdict_of(0, 1, 1, 0, 0, 0, 0, &p);
+    NCHECK(v.mode == AWDL_RADIO_OFF && v.off == AWDL_OFF_NO_API && v.api == BCM_AWDL_API_NONE && !v.trial);
+    // the debug trial runs the soft backend on this firmware, and says what it lacks
+    v = awdl_radio_verdict_of(0, 1, 1, 0, 0, 1, 1, &p);
+    NCHECK(v.mode == AWDL_RADIO_SOFT && v.trial && v.off == AWDL_OFF_NO_API);
+    v = awdl_radio_verdict_of(-EAGAIN, 0, 0, 0, 0, 0, 1, NULL);
+    NCHECK(v.mode == AWDL_RADIO_UNDECIDED && !v.trial);
+    v = awdl_radio_verdict_of(-ENODEV, 0, 0, 0, 0, 0, 1, NULL);
+    NCHECK(v.mode == AWDL_RADIO_OFF && v.off == AWDL_OFF_NO_RADIO && !v.trial);
+    v = awdl_radio_verdict_of(0, 0, 1, 0, 0, 0, 1, &p);
+    NCHECK(v.mode == AWDL_RADIO_OFF && v.off == AWDL_OFF_ABI && !v.trial);
+    v = awdl_radio_verdict_of(0, 1, 0, 1, 0, 1, 0, NULL);
+    NCHECK(v.mode == AWDL_RADIO_OFF && v.off == AWDL_OFF_NO_BACKEND);  // monitor and action frames, no data out
+    v = awdl_radio_verdict_of(0, 1, 1, 1, 1, 0, 0, &p);
+    NCHECK(v.mode == AWDL_RADIO_OFF && v.off == AWDL_OFF_NO_API);  // no way to its channels
+    v = awdl_radio_verdict_of(0, 1, 1, 1, 1, 1, 0, &p);
+    NCHECK(v.mode == AWDL_RADIO_SOFT && v.off == AWDL_OFF_NOT && !v.trial);
+    v = awdl_radio_verdict_of(0, 1, 0, 1, 1, 1, 0, NULL);
     NCHECK(v.mode == AWDL_RADIO_SOFT);
     bcm_probe_record(&p, BCM_PROBE_AWDL_IF, BCME_BADARG, NULL, 0);
-    v = awdl_radio_verdict_of(0, 1, 1, 0, 0, &p);
+    v = awdl_radio_verdict_of(0, 1, 1, 0, 0, 0, 0, &p);
     NCHECK(v.mode == AWDL_RADIO_NATIVE && v.api == BCM_AWDL_API_AWDL_IF);
     const uint8_t v3[4] = {3, 0, 0, 0};
     bcm_probe_record(&p, BCM_PROBE_INTERFACE_CREATE, 0, v3, 4);
-    v = awdl_radio_verdict_of(0, 1, 1, 0, 0, &p);
+    v = awdl_radio_verdict_of(0, 1, 1, 0, 0, 0, 0, &p);
     NCHECK(v.mode == AWDL_RADIO_NATIVE && v.api == BCM_AWDL_API_IFC_V3);
 }
 
@@ -452,8 +470,8 @@ static void test_schedule(void)
     awdl_schedule(s, 0, 0, AWDL_MODE_IDLE);
     for (int i = 0; i < 16; ++i) {
         const uint8_t p = awdl_chan_primary(s[i]);
-        NCHECK(i == 0                ? p == 149 && s[i].number == 155 && s[i].opclass == 0x80
-               : (i == 9 || i == 10) ? p == 44 && s[i].number == 42 && s[i].opclass == 0x80
+        NCHECK(i == 0                ? p == 149 && s[i].number == 149 && s[i].opclass == 0x80
+               : (i == 9 || i == 10) ? p == 44 && s[i].number == 44 && s[i].opclass == 0x80
                : i == 8              ? p == 6 && s[i].opclass == 81
                                      : p == 0);
     }
@@ -482,7 +500,7 @@ static void test_schedule(void)
     // infra on 149 (5 GHz social): only slot 8 leaves it, in either mode
     awdl_schedule(s, 5745, 0, AWDL_MODE_IDLE);
     NCHECK(awdl_slots_away(s, 5745) == 1 && count_primary(s, 149) == 15);
-    NCHECK(s[0].number == 155 && s[0].opclass == 0x80 && s[5].number == 149 && s[5].opclass == 0x7c);
+    NCHECK(s[0].number == 149 && s[0].opclass == 0x80 && s[5].number == 149 && s[5].opclass == 0x7c);
     awdl_schedule(s, 5745, 0, AWDL_MODE_TRANSFER);
     NCHECK(awdl_slots_away(s, 5745) == 1);
     awdl_schedule(s, 5220, 0, AWDL_MODE_TRANSFER);  // infra on 44 likewise
@@ -500,6 +518,10 @@ static struct awdl_core *make_phone(const uint8_t addr[6], uint32_t metric)
     snprintf(pc.hostname, sizeof pc.hostname, "iPhone");
     const struct awdl_host ph = {NULL, mock_tx, NULL, NULL, NULL, NULL, NULL, NULL};
     NCHECK(awdl_core_init(phone, &ph, &pc) == 0);
+    struct awdl_chan seq[AWDL_SEQ_SLOTS];
+    for (unsigned i = 0; i < AWDL_SEQ_SLOTS; ++i)
+        seq[i] = (struct awdl_chan){149, 0x80};
+    awdl_core_set_sequence(phone, seq, 5000000);
     awdl_core_start(phone, 5000000);
     return phone;
 }
@@ -509,7 +531,8 @@ static struct awdl_core *make_native(const uint8_t me[6], uint8_t api, uint32_t 
     struct awdl_core *core = (struct awdl_core *)calloc(1, awdl_core_size());
     struct awdl_config cfg;
     awdl_config_default(&cfg, me);
-    NCHECK(cfg.backend == AWDL_BACKEND_NATIVE);
+    NCHECK(cfg.backend == AWDL_BACKEND_SOFT);
+    cfg.backend = AWDL_BACKEND_NATIVE;
     cfg.fw_api = api;
     cfg.fw_absent = absent;
     const struct awdl_host h = {NULL, mock_tx, NULL, mock_peer, mock_deliver, NULL, mock_iovar, mock_tx_eth};
@@ -644,7 +667,7 @@ static void test_flow_ifc_v3(void)
         if (!strcmp(calls[i].name, "awdl_election_tree"))
             tree = &calls[i];
     }
-    NCHECK(add && add->len == 0x25 && bytes_eq(add->buf, 16, "00 00 0a1b2c3d4e5f 01 2d 1a ce11 17 ff ff"));
+    NCHECK(add && add->len == 0x25 && bytes_eq(add->buf, 16, "00 00 0a1b2c3d4e5f 01 2d 1a ce11 1b ff ff"));
     NCHECK(slave && slave->buf[0] == 1 && slave->buf[1] == BCM_AWDL_ROLE_SLAVE &&
            !memcmp(slave->buf + 4, phone_addr, 6));
     NCHECK(tree && !memcmp(tree->buf + 0x0f, phone_addr, 6) && rd32(tree->buf + 0x15) == 200 && tree->buf[0x19] == 1);
@@ -788,7 +811,7 @@ static void test_flow_awdl_if(void)
     const struct fw_call *cs = find_call("awdl_chan_seq", 0);
     NCHECK(cs->len == 38 &&
            bytes_eq(cs->buf, 38,
-                    "0f 03 00 03 ffff 9b80 0651 0651 0651 0651 0651 0651 0651 0651 2a80 2a80 0651 0651 0651 "
+                    "0f 03 00 03 ffff 9580 0651 0651 0651 0651 0651 0651 0651 0651 2c80 2c80 0651 0651 0651 "
                     "0651 0651"));
     // the phone's master channel is 149 (its default sequence): our 44 slots follow it
     struct awdl_core *phone = make_phone(phone_addr, 200);
@@ -799,7 +822,7 @@ static void test_flow_awdl_if(void)
     for (int i = before; i < ncalls; ++i)
         if (!strcmp(calls[i].name, "awdl_chan_seq"))
             cs2 = &calls[i];
-    NCHECK(cs2 && cs2->buf[6 + 2 * 9] == 155);
+    NCHECK(cs2 && cs2->buf[6 + 2 * 9] == 149);
     // a roam to 5 GHz channel 36: the free slots move there (opclass 115), sent again
     before = ncalls;
     awdl_core_set_infra(core, 5180, 1600000);
@@ -820,7 +843,7 @@ static void test_flow_awdl_if(void)
         NCHECK(delivered == 1 && awdl_core_mode(core) == AWDL_MODE_TRANSFER && ncalls == before + 1 &&
                !strcmp(calls[before].name, "awdl_chan_seq"));
         NCHECK(bytes_eq(calls[before].buf, 38,
-                        "0f 03 00 03 ffff 9b80 9b80 9b80 9b80 9b80 9b80 2473 2473 0651 9b80 9b80 9b80 9b80 9b80 "
+                        "0f 03 00 03 ffff 9580 9580 9580 9580 9580 9580 2473 2473 0651 9580 9580 9580 9580 9580 "
                         "2473 2473"));
         NCHECK(awdl_slots_away(awdl_core_sequence(core), 5180) == 12);
         // more data keeps it; 3 s after the last frame the deadline returns it to idle (one chan_seq each way)
@@ -909,7 +932,7 @@ static void test_create_failures(void)
     NCHECK(seq0 && seq0->buf[6 + 2 * 5] == 0 && seq0->buf[6 + 2 * 15] == 0);
     int was = ncalls;
     awdl_core_fw_result(core, "awdl_chan_seq", BCME_BADCHAN, 1200000);
-    NCHECK(ncalls == was + 1 && !strcmp(calls[was].name, "awdl_chan_seq") && calls[was].buf[6 + 2 * 5] == 155 &&
+    NCHECK(ncalls == was + 1 && !strcmp(calls[was].name, "awdl_chan_seq") && calls[was].buf[6 + 2 * 5] == 149 &&
            calls[was].buf[7 + 2 * 5] == 0x80 && count_primary(awdl_core_sequence(core), 0) == 0);
     awdl_core_fw_result(core, "awdl_chan_seq", BCME_BADCHAN, 1200000);
     NCHECK(ncalls == was + 1 && awdl_core_running(core));

@@ -1,5 +1,6 @@
 // TegraGM20BClkgate.h against nvgpu's own gm20b_gating_reglist.c (kept verbatim in nvidia/): the registers and values
 // the driver writes are nvgpu's "prod" lists, in nvgpu's load order, and gpu.c applies them at bring-up and after SC7.
+// GR's reset in a recovery runs with gating off and gets the lists back after it, as nvgpu resets GR.
 #include "drivers/TegraGM20B/TegraGM20BClkgate.h"
 
 #include <gtest/gtest.h>
@@ -116,6 +117,59 @@ TEST(Gm20bClkgate, GpuFollowsNvgpusOrderAroundTheGoldenContext)
 	EXPECT_NE(enable, std::string::npos);
 	EXPECT_NE(gpu.find("\twake_fence();\n\ttgm_clkgate_enable(gpu.device);\n\twake_open();\n"),
 		  std::string::npos);
+}
+
+// The C definition starting with `head`, through `close` at column 0 (a function's brace, a table's "};")
+std::string Body(const std::string &source, const std::string &head, const char *close = "\n}\n")
+{
+	const size_t at = source.find(head);
+	if (at == std::string::npos)
+		return "";
+	const size_t end = source.find(close, at);
+	return source.substr(at, end == std::string::npos ? std::string::npos : end - at);
+}
+
+TEST(Gm20bClkgate, GrResetRunsWithGatingOffAndGetsTheListsBack)
+{
+	const std::string reset =
+		Body(Text(CLKGATE_C), "static int gated_reset(struct nvkm_engine *engine)");
+	const size_t off = reset.find("tgm_clkgate_disable(device);");
+	const size_t nouveau = reset.find("ret = gr_reset(engine);");
+	const size_t on = reset.find("tgm_clkgate_enable(device);");
+	ASSERT_NE(off, std::string::npos);
+	ASSERT_NE(nouveau, std::string::npos);
+	ASSERT_NE(on, std::string::npos);
+	EXPECT_LT(off, nouveau);
+	EXPECT_LT(nouveau, on);
+
+	const std::string guard =
+		Body(Text(CLKGATE_C), "void tgm_clkgate_guard_reset(struct nvkm_device *device)");
+	EXPECT_NE(guard.find("nvkm_device_engine(device, NVKM_ENGINE_GR, 0)"), std::string::npos);
+	EXPECT_NE(guard.find("gr_func.reset = gated_reset;"), std::string::npos);
+	EXPECT_NE(guard.find("gr->func == &gr_func"), std::string::npos) << "installed once";
+}
+
+TEST(Gm20bClkgate, TheGuardIsInPlaceBeforeAnyChannel)
+{
+	const std::string gpu = Text(GPU_C);
+	const size_t load = gpu.find(
+		"\t\ttgm_clkgate_load(gpu.device);\n\t\ttgm_clkgate_guard_reset(gpu.device);\n");
+	const size_t golden = gpu.find("\t\tret = m3(line, len);\n");
+	ASSERT_NE(load, std::string::npos);
+	ASSERT_NE(golden, std::string::npos);
+	EXPECT_LT(load, golden);
+}
+
+// The guard replaces GR's engine table by a copy: a whole one only while nouveau's table names its classes through
+// fifo.sclass and leaves the trailing sclass list (a flexible array the copy drops) empty.
+TEST(Gm20bClkgate, NouveausGrEngineTableCopiesWhole)
+{
+	const std::string table =
+		Body(Text(GR_BASE_C), "static const struct nvkm_engine_func\nnvkm_gr = {", "\n};");
+	ASSERT_FALSE(table.empty());
+	EXPECT_NE(table.find(".reset = nvkm_gr_reset,"), std::string::npos);
+	EXPECT_NE(table.find(".fifo.sclass = nvkm_gr_oclass_get,"), std::string::npos);
+	EXPECT_EQ(table.find("\t.sclass"), std::string::npos);
 }
 
 }  // namespace

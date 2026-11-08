@@ -11,28 +11,19 @@ whose key is unchanged and reruns from the first that changed; when only the hea
 is rewritten.
 """
 
-import concurrent.futures
 import hashlib
 import json
-import os
 from dataclasses import dataclass
 from pathlib import Path
 
-VERSIONS = {'compose': 1, 'populate': 1, 'pack': 1, 'head': 1}
+from tools.common import hashing
+
+VERSIONS = {'compose': 1, 'populate': 2, 'pack': 1, 'head': 1}
 STAGES = ('compose', 'populate', 'pack', 'head')
-CHUNK = 8 << 20
 
 
 def digest(value: object) -> str:
     return hashlib.sha256(json.dumps(value, sort_keys=True).encode()).hexdigest()
-
-
-def file_digest(path: str | Path) -> str:
-    h = hashlib.sha256()
-    with open(path, 'rb') as f:
-        while data := f.read(CHUNK):
-            h.update(data)
-    return h.hexdigest()
 
 
 def tree_digest(root: str | Path | None) -> str | None:
@@ -41,10 +32,9 @@ def tree_digest(root: str | Path | None) -> str | None:
         return None
     root = Path(root)
     if root.is_file():
-        return file_digest(root)
+        return hashing.sha256_file(root)
     paths = sorted(p for p in root.rglob('*') if p.is_file() and not p.name.startswith('._'))
-    with concurrent.futures.ThreadPoolExecutor(os.cpu_count() or 4) as pool:
-        hashes = list(pool.map(file_digest, paths))
+    hashes = hashing.sha256_files(paths)
     entries = [
         (p.relative_to(root).as_posix(), p.stat().st_mode & 0o111, h) for p, h in zip(paths, hashes, strict=True)
     ]
@@ -64,7 +54,7 @@ def compute(inputs: dict, boot_files: list[tuple[str, Path]], label: str) -> Key
     compose = digest({'version': VERSIONS['compose'], **inputs['compose']})
     populate = digest({'version': VERSIONS['populate'], 'compose': compose, **inputs['populate']})
     pack = digest({'version': VERSIONS['pack'], 'populate': populate})
-    boot = [(name, file_digest(path)) for name, path in boot_files]
+    boot = [(name, hashing.sha256_file(path)) for name, path in boot_files]
     head = digest({'version': VERSIONS['head'], 'pack': pack, 'boot': boot, 'label': label})
     return Keys(compose, populate, pack, head)
 

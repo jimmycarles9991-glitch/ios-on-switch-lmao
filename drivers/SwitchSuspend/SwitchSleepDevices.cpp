@@ -44,16 +44,16 @@ extern "C" void switch_sleep_mark(unsigned step)
 }
 #endif
 
-void switch_sleep_timed(uint8_t step, void (*hook)(void))
+void switch_sleep_timed(uint8_t step, void (*hook)())
 {
     switch_sleep_mark(step);
     const uint64_t start = mach_absolute_time();
     hook();
-    const uint64_t us = switch_sleep_ns_since(start) / 1000;
+    const uint64_t us = switch_ns_since(start) / 1000;
     switch_power_journal("SwitchSuspend: %s: %llu.%03llu ms", switch_sleep_step_name(step), us / 1000, us % 1000);
 }
 
-bool switch_sleep_devices(void)
+bool switch_sleep_devices()
 {
     // first: it shares LDO6 with the touch panel, and its clock is the display's frame end
     switch_sleep_timed(SWITCH_STEP_SLEEP_ALS, switch_als_suspend);
@@ -66,7 +66,7 @@ bool switch_sleep_devices(void)
     switch_sleep_mark(SWITCH_STEP_SLEEP_BLUETOOTH);
     const uint64_t at = mach_absolute_time();
     const bool btWake = switch_bluetooth_suspend();
-    switch_power_journal("SwitchSuspend: sleep bluetooth: %llu us", switch_sleep_ns_since(at) / 1000);
+    switch_power_journal("SwitchSuspend: sleep bluetooth: %llu us", switch_ns_since(at) / 1000);
     switch_sleep_timed(SWITCH_STEP_SLEEP_WIFI, switch_wlan_suspend);
     switch_sleep_timed(SWITCH_STEP_SLEEP_HOST1X,
                        tegra_nvdec_suspend);  // NVDEC, NVENC, VIC, NVJPG quiesced, then host1x
@@ -81,7 +81,7 @@ bool switch_sleep_devices(void)
     return btWake;
 }
 
-void switch_sleep_storage(void)
+void switch_sleep_storage()
 {
     // The journal to Data while the SD is up: what follows is in RAM only until the wake (and lost to a forced
     // power-off).
@@ -91,7 +91,7 @@ void switch_sleep_storage(void)
     switch_sleep_timed(SWITCH_STEP_SLEEP_SD, switch_block_suspend);
 }
 
-void switch_wake_devices(void)
+void switch_wake_devices()
 {
     switch_sleep_timed(SWITCH_STEP_WAKE_SE, tegra_se_resume);
     switch_sleep_timed(SWITCH_STEP_WAKE_SD, switch_block_resume);

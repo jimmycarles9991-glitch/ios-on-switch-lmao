@@ -74,10 +74,11 @@ static inline int switch_wake_bt_buttons(const uint8_t *acl, size_t length, uint
     if (!acl || length < 4)
         return -1;
     const unsigned flags = (unsigned)(acl[1] >> 4) & 3u;  // packet boundary: 1 = continuation
-    const unsigned aclLength = (unsigned)(acl[2] | acl[3] << 8);
+    const unsigned aclLength = acl[2] | (unsigned)acl[3] << 8;
     if (flags == 1u || length < 4 + 4 + 2 || aclLength < 4 + 2)
         return -1;
-    const unsigned l2capLength = (unsigned)(acl[4] | acl[5] << 8), cid = (unsigned)(acl[6] | acl[7] << 8);
+    const unsigned l2capLength = acl[4] | (unsigned)acl[5] << 8;
+    const unsigned cid = acl[6] | (unsigned)acl[7] << 8;
     if (cid < 0x40u || l2capLength + 4u != aclLength)
         return -1;  // signalling/fixed channels, or a fragmented frame
     const uint8_t *hid = acl + 8;
@@ -85,7 +86,7 @@ static inline int switch_wake_bt_buttons(const uint8_t *acl, size_t length, uint
     if (hid[0] != 0xa1)
         return -1;
     const uint8_t id = hid[1];
-    size_t at;
+    size_t at = 0;
     if (id == 0x30 || id == 0x21) {
         if (l2capLength != 1 + 49)
             return -1;  // HIDP header + the standard 49-byte report
@@ -103,7 +104,7 @@ static inline int switch_wake_bt_buttons(const uint8_t *acl, size_t length, uint
     }
     if (have <= at)
         return -1;
-    *handle = (uint16_t)((unsigned)(acl[0] | acl[1] << 8) & 0x0fffu);
+    *handle = (uint16_t)((acl[0] | (unsigned)acl[1] << 8) & 0x0fffu);
     *report = id;
     return (int)(((hid[at] & 0x10) ? SWITCH_BT_HOME : 0u) | ((hid[at] & 0x20) ? SWITCH_BT_CAPTURE : 0u));
 }
@@ -146,20 +147,22 @@ static inline void switch_bt_buttons_settle(struct switch_bt_buttons *b, uint64_
                                             struct switch_bt_buttons_step *step)
 {
     uint8_t down = 0;
-    for (unsigned i = 0; i < SWITCH_BT_BUTTON_LINKS; ++i)
+    for (unsigned i = 0; i < SWITCH_BT_BUTTON_LINKS; ++i) {
         if (b->used[i])
             down = (uint8_t)(down | b->held[i]);
-    const uint8_t pressed = (uint8_t)(down & ~b->down), released = (uint8_t)(b->down & ~down);
+    }
+    const uint8_t pressed = (uint8_t)(down & ~(unsigned)b->down);
+    const uint8_t released = (uint8_t)(b->down & ~(unsigned)down);
     for (unsigned k = 0; k < 2; ++k) {
         const uint8_t bit = (uint8_t)(1u << k);
         if (released & bit) {
             if (!(b->spoiled & bit) && now - b->since[k] < SWITCH_BT_CLICK_LIMIT_NS)
                 step->click |= bit;
-            b->spoiled = (uint8_t)(b->spoiled & ~bit);
+            b->spoiled = (uint8_t)(b->spoiled & ~(unsigned)bit);
         }
         if (pressed & bit) {
             b->since[k] = now;
-            b->spoiled = (uint8_t)(b->spoiled & ~bit);
+            b->spoiled = (uint8_t)(b->spoiled & ~(unsigned)bit);
             if (bit == SWITCH_BT_HOME && dark) {
                 step->click |= bit;
                 b->spoiled |= bit;
@@ -178,18 +181,21 @@ static inline struct switch_bt_buttons_step switch_bt_buttons_report(struct swit
 {
     struct switch_bt_buttons_step step = {0, 0, false};
     unsigned slot = SWITCH_BT_BUTTON_LINKS;
-    for (unsigned i = 0; i < SWITCH_BT_BUTTON_LINKS && slot == SWITCH_BT_BUTTON_LINKS; ++i)
+    for (unsigned i = 0; i < SWITCH_BT_BUTTON_LINKS && slot == SWITCH_BT_BUTTON_LINKS; ++i) {
         if (b->used[i] && b->handle[i] == handle)
             slot = i;
+    }
     if (slot == SWITCH_BT_BUTTON_LINKS) {
-        for (unsigned i = 0; i < SWITCH_BT_BUTTON_LINKS && slot == SWITCH_BT_BUTTON_LINKS; ++i)
+        for (unsigned i = 0; i < SWITCH_BT_BUTTON_LINKS && slot == SWITCH_BT_BUTTON_LINKS; ++i) {
             if (!b->used[i])
                 slot = i;
+        }
         if (slot == SWITCH_BT_BUTTON_LINKS) {
             slot = 0;
-            for (unsigned i = 1; i < SWITCH_BT_BUTTON_LINKS; ++i)
+            for (unsigned i = 1; i < SWITCH_BT_BUTTON_LINKS; ++i) {
                 if (b->age[i] < b->age[slot])
                     slot = i;
+            }
             b->used[slot] = 0;  // the oldest connection's buttons go, without a click
             struct switch_bt_buttons_step none = {0, 0, false};
             switch_bt_buttons_settle(b, now, dark, &none);
@@ -214,9 +220,10 @@ static inline void switch_bt_buttons_gone(struct switch_bt_buttons *b, uint16_t 
         b->held[i] = 0;
     }
     uint8_t down = 0;
-    for (unsigned i = 0; i < SWITCH_BT_BUTTON_LINKS; ++i)
+    for (unsigned i = 0; i < SWITCH_BT_BUTTON_LINKS; ++i) {
         if (b->used[i])
             down = (uint8_t)(down | b->held[i]);
+    }
     b->spoiled = (uint8_t)(b->spoiled & down);
     b->down = down;
 }
@@ -344,16 +351,19 @@ static inline void switch_wake_pmc_registers(uint64_t events, uint32_t mask[2], 
                                              uint32_t lowClear[2])
 {
     mask[0] = mask[1] = highSet[0] = highSet[1] = lowClear[0] = lowClear[1] = 0;
+    // NOLINTNEXTLINE(modernize-loop-convert): C (the host harness) reads this header too
     for (size_t i = 0; i < SWITCH_WAKE_PMC_EVENTS; ++i) {
         const unsigned e = switch_wake_pmc_events[i].event;
         if (!(events >> e & 1u))
             continue;
-        const unsigned bank = e / 32, bit = e % 32;
+        const unsigned bank = e / 32;
+        const unsigned bit = e % 32;
         mask[bank] |= 1u << bit;
-        if (switch_wake_pmc_events[i].level == SWITCH_WAKE_HIGH)
+        if (switch_wake_pmc_events[i].level == SWITCH_WAKE_HIGH) {
             highSet[bank] |= 1u << bit;
-        else
+        } else {
             lowClear[bank] |= 1u << bit;
+        }
     }
 }
 
@@ -364,13 +374,19 @@ static inline void switch_wake_pmc_registers(uint64_t events, uint32_t mask[2], 
 static inline uint64_t switch_wake_pmc_armed(bool usbHigh, bool gaugeHigh, bool btWake, bool wifiWake, bool usbDevice)
 {
     uint64_t events = 0;
+    // NOLINTNEXTLINE(modernize-loop-convert): C (the host harness) reads this header too
     for (size_t i = 0; i < SWITCH_WAKE_PMC_EVENTS; ++i) {
         const unsigned e = switch_wake_pmc_events[i].event;
-        const bool wanted = switch_wake_pmc_events[i].armed ? (e != 14 || usbHigh) && (e != 27 || gaugeHigh)
-                            : e == 52                       ? btWake
-                            : e == 8                        ? wifiWake
-                            : e == 39                       ? usbDevice
-                                                            : false;
+        bool wanted = false;
+        if (switch_wake_pmc_events[i].armed) {
+            wanted = (e != 14 || usbHigh) && (e != 27 || gaugeHigh);
+        } else if (e == 52) {
+            wanted = btWake;
+        } else if (e == 8) {
+            wanted = wifiWake;
+        } else if (e == 39) {
+            wanted = usbDevice;
+        }
         if (wanted)
             events |= (uint64_t)1 << e;
     }
@@ -381,6 +397,7 @@ static inline uint64_t switch_wake_pmc_armed(bool usbHigh, bool gaugeHigh, bool 
 // armed, by table order; "unknown" if none.
 static inline const char *switch_wake_pmc_reason(const uint32_t status[2], uint64_t armed)
 {
+    // NOLINTNEXTLINE(modernize-loop-convert): C (the host harness) reads this header too
     for (size_t i = 0; i < SWITCH_WAKE_PMC_EVENTS; ++i) {
         const unsigned e = switch_wake_pmc_events[i].event;
         if ((armed >> e & 1u) && (status[e / 32] >> (e % 32) & 1u))

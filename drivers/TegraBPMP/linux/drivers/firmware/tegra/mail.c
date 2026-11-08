@@ -30,7 +30,6 @@ static unsigned int timeout_mul = 4;
 struct channel_data channel_area[NR_MAX_CHANNELS];
 static struct completion *completion;
 static DEFINE_SPINLOCK(lock);
-static DEFINE_RAW_SPINLOCK(ach_lock);
 static const struct channel_cfg *channel_cfg;
 static const struct mail_ops *mail_ops;
 
@@ -149,23 +148,9 @@ void bpmp_handle_irq(unsigned int chidx)
 	spin_unlock(&lock);
 }
 
-static int bpmp_wait_master_free(int ch)
-{
-	ktime_t start;
-
-	if (mail_ops->master_free(mail_ops, ch))
-		return 0;
-
-	start = ktime_get();
-
-	while (ktime_us_delta(ktime_get(), start) < CHANNEL_TIMEOUT) {
-		if (mail_ops->master_free(mail_ops, ch))
-			return 0;
-	}
-
-	return -ETIMEDOUT;
-}
-
+/* SWITCH: the per-CPU atomic channels' send (tegra_bpmp_send_receive_atomic, for callers with interrupts off) is not
+ * built: it polls the channel for the BPMP's ack, and nothing here sends with interrupts off. Every request takes a
+ * thread channel, whose answer raises the doorbell interrupt (bpmp_trywait). */
 static void __bpmp_write_ch(int ch, int mrq, int flags, void *data, int sz)
 {
 	struct mb_data *p = channel_area[ch].ob;
@@ -180,18 +165,6 @@ static void __bpmp_write_ch(int ch, int mrq, int flags, void *data, int sz)
 	}
 
 	mail_ops->signal_slave(mail_ops, ch);
-}
-
-static int bpmp_write_ch(int ch, int mrq, int flags, void *data, int sz)
-{
-	int r;
-
-	r = bpmp_wait_master_free(ch);
-	if (r)
-		return r;
-
-	__bpmp_write_ch(ch, mrq, flags, data, sz);
-	return 0;
 }
 
 static int bpmp_write_threaded_ch(int *ch, int mrq, void *data, int sz)
@@ -248,23 +221,6 @@ static int bpmp_read_ch(int ch, void *data, int sz)
 	return r;
 }
 
-static int bpmp_wait_ack(int ch)
-{
-	ktime_t start;
-
-	if (mail_ops->master_acked(mail_ops, ch))
-		return 0;
-
-	start = ktime_get();
-
-	while (ktime_us_delta(ktime_get(), start) < CHANNEL_TIMEOUT) {
-		if (mail_ops->master_acked(mail_ops, ch))
-			return 0;
-	}
-
-	return -ETIMEDOUT;
-}
-
 static int bpmp_valid_txfer(void *ob_data, int ob_sz, void *ib_data, int ib_sz)
 {
 	return ob_sz >= 0 &&
@@ -301,67 +257,6 @@ static void bpmp_dump_req(int ch)
 	bpmp_format_req(fmt, sizeof(fmt), d.data, sizeof(d.data));
 	pr_err("ch %d mrq %d data <%s>\n", ch, d.code, fmt);
 }
-
-static int bpmp_send_receive_atomic(int ch, int mrq, void *ob_data, int ob_sz,
-		void *ib_data, int ib_sz)
-{
-	char fmt[MSG_DATA_MIN_SZ * 5] = "";
-	int r;
-
-	r = bpmp_write_ch(ch, mrq, DO_ACK, ob_data, ob_sz);
-	if (r)
-		return r;
-
-	if (mail_ops->ring_doorbell)
-		mail_ops->ring_doorbell(ch);
-
-	r = bpmp_wait_ack(ch);
-	if (r) {
-		bpmp_format_req(fmt, sizeof(fmt), ob_data, ob_sz);
-		pr_err("bpmp_wait_ack() returned %d (ch %d mrq %d data <%s>)\n",
-				r, mrq, ch, fmt);
-		WARN_ON(1);
-		return r;
-	}
-
-	return __bpmp_read_ch(ch, ib_data, ib_sz);
-}
-
-/* should be called with local irqs disabled */
-int tegra_bpmp_send_receive_atomic(int mrq, void *ob_data, int ob_sz,
-		void *ib_data, int ib_sz)
-{
-	unsigned int cpu;
-	int ch;
-	int r;
-
-	if (WARN_ON(!irqs_disabled()))
-		return -EPERM;
-
-	if (!bpmp_valid_txfer(ob_data, ob_sz, ib_data, ib_sz))
-		return -EINVAL;
-
-	if (!mail_ops)
-		return -ENODEV;
-
-	if (channel_cfg->per_cpu_ch_cnt == 1) {
-		raw_spin_lock(&ach_lock);
-		ch = channel_cfg->per_cpu_ch_0;
-	} else {
-		cpu = smp_processor_id();
-		if (cpu >= channel_cfg->per_cpu_ch_cnt)
-			return -ENODEV;
-		ch = channel_cfg->per_cpu_ch_0 + cpu;
-	}
-
-	r = bpmp_send_receive_atomic(ch, mrq, ob_data, ob_sz, ib_data, ib_sz);
-
-	if (channel_cfg->per_cpu_ch_cnt == 1)
-		raw_spin_unlock(&ach_lock);
-
-	return r;
-}
-EXPORT_SYMBOL(tegra_bpmp_send_receive_atomic);
 
 static int bpmp_trywait(int ch, int mrq, void *ob_data, int ob_sz)
 {

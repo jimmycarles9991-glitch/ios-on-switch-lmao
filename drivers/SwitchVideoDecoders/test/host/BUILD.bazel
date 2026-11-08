@@ -103,7 +103,7 @@ host_library(
     deps = [":h264"],
 )
 
-# The once-per-boot clip check over the three clips, on VideoToolbox.
+# The clip check over the three clips, on VideoToolbox.
 host_library(
     name = "clip_check",
     srcs = [

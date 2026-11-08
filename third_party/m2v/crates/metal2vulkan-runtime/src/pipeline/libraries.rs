@@ -33,7 +33,9 @@
 //!   (`shader_cache/driver.rs`), as a whole pipeline is; the vertex input and fragment output
 //!   libraries hold no shader and keep no record.
 
+use super::budget::Turn;
 use super::content_keyed::{program_call, ContentKeyed, Gone, Owned};
+use crate::device::alongside::alongside;
 use crate::device::{lock, DeviceShared};
 use crate::error::Error;
 use crate::release;
@@ -107,7 +109,19 @@ enum Slot {
 
 /// A caller's making of a library: where it ends without a library (an error, or a panic), the
 /// library waits for the next caller again, and those waiting are woken.
-struct Claim<'a>(&'a Library);
+pub(crate) struct Claim<'a>(&'a Library);
+
+impl Claim<'_> {
+    /// The library made by `make`, on whichever thread holds the claim.
+    pub(crate) fn made(
+        self,
+        make: impl FnOnce() -> Result<vk::Pipeline, Error>,
+    ) -> Result<vk::Pipeline, Error> {
+        let raw = make()?;
+        *lock(&self.0.state) = Slot::Made(raw);
+        Ok(raw)
+    }
+}
 
 impl Drop for Claim<'_> {
     fn drop(&mut self) {
@@ -155,11 +169,20 @@ impl Library {
         }
         *state = Slot::Making;
         drop(state);
-        let claim = Claim(self);
-        let raw = make()?;
-        *lock(&self.state) = Slot::Made(raw);
-        drop(claim);
-        Ok(raw)
+        Claim(self).made(make)
+    }
+
+    /// Its making, claimed now where no caller made it or is making it: the claim's holder makes
+    /// it ([`Claim::made`]), and other callers wait for that.
+    pub(crate) fn claim(&self) -> Option<Claim<'_>> {
+        let mut state = lock(&self.state);
+        match *state {
+            Slot::Waiting => {
+                *state = Slot::Making;
+                Some(Claim(self))
+            }
+            Slot::Making | Slot::Made(_) => None,
+        }
     }
 }
 
@@ -224,6 +247,65 @@ impl Libraries {
 }
 
 impl Linked {
+    /// Each part's library, in [`Part::ALL`]'s order, made by `make` where no caller made it or
+    /// is making it, else waited for ([`Library::made`]). Where this thread makes the
+    /// pre-rasterization library and a making turn is spare (`budget::spare_turn`), the fragment
+    /// shader library, the other that compiles shaders, is made at once on a thread of the
+    /// runtime's (`device/alongside.rs`): a creation's two compiles take the longer one's time,
+    /// not their sum. The first failure in that order is the creation's, as when made one after
+    /// another; a library made meanwhile stays made for the next caller.
+    pub(crate) fn made(
+        &self,
+        make: impl Fn(Part) -> Result<vk::Pipeline, Error> + Sync,
+    ) -> Result<[vk::Pipeline; 4], Error> {
+        self.made_with(super::budget::spare_turn, make)
+    }
+
+    /// [`made`](Self::made), its spare turn from `spare`.
+    pub(crate) fn made_with(
+        &self,
+        spare: impl FnOnce() -> Option<Turn>,
+        make: impl Fn(Part) -> Result<vk::Pipeline, Error> + Sync,
+    ) -> Result<[vk::Pipeline; 4], Error> {
+        let made_here = |part: Part| self.library(part).made(|| make(part));
+        let fragment = match self.library(Part::PreRasterization).is_made() {
+            true => None,
+            false => {
+                spare().and_then(|turn| Some((turn, self.library(Part::FragmentShader).claim()?)))
+            }
+        };
+        let mut raws = [vk::Pipeline::null(); 4];
+        match fragment {
+            None => {
+                for part in Part::ALL {
+                    raws[part as usize] = made_here(part)?;
+                }
+            }
+            Some((turn, claim)) => {
+                let (fragment, before) = alongside(
+                    turn,
+                    || claim.made(|| make(Part::FragmentShader)),
+                    || {
+                        Ok::<_, Error>([
+                            made_here(Part::VertexInput)?,
+                            made_here(Part::PreRasterization)?,
+                        ])
+                    },
+                );
+                let [vertex_input, pre_rasterization] = before?;
+                raws[Part::VertexInput as usize] = vertex_input;
+                raws[Part::PreRasterization as usize] = pre_rasterization;
+                raws[Part::FragmentShader as usize] = fragment?;
+                raws[Part::FragmentOutput as usize] = made_here(Part::FragmentOutput)?;
+            }
+        }
+        Ok(raws)
+    }
+
+    fn library(&self, part: Part) -> &Library {
+        &self.0[part as usize]
+    }
+
     /// Whether the libraries of its shaders, its pre-rasterization and fragment shader parts,
     /// are made: a key whose shaders' libraries are made links on the caller's thread, where its
     /// vertex input and fragment output libraries, which hold no shader, are made in well under a
@@ -243,15 +325,202 @@ mod tests {
     use super::*;
     use crate::error::internal;
     use crate::exit_guard;
+    use crate::pipeline::budget::{ticket, waited_turn, Budget, Urgency};
     use ash::vk::Handle;
     use std::sync::mpsc;
-    use std::thread::Builder;
+    use std::thread::{Builder, ThreadId};
     use std::time::Duration;
 
     const WAIT: Duration = Duration::from_secs(10);
 
     fn raw(n: u64) -> vk::Pipeline {
         vk::Pipeline::from_raw(n)
+    }
+
+    fn linked() -> Linked {
+        Linked(std::array::from_fn(|_| Arc::new(Library::new())))
+    }
+
+    fn part_raw(part: Part) -> vk::Pipeline {
+        raw(part as u64 + 1)
+    }
+
+    /// Two makings that each wait, at most [`WAIT`], until both reached it: whether they did.
+    #[derive(Default)]
+    struct Meeting {
+        arrived: Mutex<usize>,
+        all: Condvar,
+    }
+
+    impl Meeting {
+        fn meet(&self) -> bool {
+            let mut arrived = lock(&self.arrived);
+            *arrived += 1;
+            self.all.notify_all();
+            let (arrived, _) = self
+                .all
+                .wait_timeout_while(arrived, WAIT, |arrived| *arrived < 2)
+                .unwrap();
+            *arrived >= 2
+        }
+    }
+
+    /// The parts made, each with the thread that made it.
+    #[derive(Default)]
+    struct Makings(Mutex<Vec<(Part, ThreadId)>>);
+
+    impl Makings {
+        fn made(&self, part: Part) -> Result<vk::Pipeline, Error> {
+            lock(&self.0).push((part, std::thread::current().id()));
+            Ok(part_raw(part))
+        }
+
+        fn parts(&self) -> Vec<Part> {
+            lock(&self.0).iter().map(|(part, _)| *part).collect()
+        }
+
+        fn thread_of(&self, part: Part) -> ThreadId {
+            lock(&self.0)
+                .iter()
+                .find(|(made, _)| *made == part)
+                .unwrap()
+                .1
+        }
+    }
+
+    #[test]
+    fn a_creation_makes_its_two_shader_libraries_at_once_with_a_spare_turn() {
+        let budget = Arc::new(Budget::new(4, 3));
+        let _mine = waited_turn(&budget, ticket());
+        let linked = linked();
+        let meeting = Meeting::default();
+        let makings = Makings::default();
+        let made = linked
+            .made_with(
+                || budget.spare(Urgency::Program),
+                |part| {
+                    if part.holds_shaders() {
+                        assert!(meeting.meet(), "{part:?} made while the other waited");
+                    }
+                    makings.made(part)
+                },
+            )
+            .unwrap();
+        assert_eq!(made, Part::ALL.map(part_raw));
+        assert!(Part::ALL
+            .iter()
+            .all(|part| linked.0[*part as usize].is_made()));
+        let here = std::thread::current().id();
+        assert_eq!(makings.thread_of(Part::PreRasterization), here);
+        assert_ne!(makings.thread_of(Part::FragmentShader), here);
+        assert_eq!(budget.census().0, 1, "the spare turn is given back");
+    }
+
+    #[test]
+    fn a_failed_fragment_shader_library_fails_the_creation_and_waits_for_the_next() {
+        let budget = Arc::new(Budget::new(4, 3));
+        let _mine = waited_turn(&budget, ticket());
+        let linked = linked();
+        let makings = Makings::default();
+        let failed = linked.made_with(
+            || budget.spare(Urgency::Program),
+            |part| match part {
+                Part::FragmentShader => Err(internal("the driver refused")),
+                _ => makings.made(part),
+            },
+        );
+        assert!(failed.is_err());
+        assert_eq!(
+            makings.parts(),
+            vec![Part::VertexInput, Part::PreRasterization]
+        );
+        assert!(!linked.0[Part::FragmentShader as usize].is_made());
+        assert!(!linked.0[Part::FragmentOutput as usize].is_made());
+        let made = linked
+            .made_with(|| None, |part| makings.made(part))
+            .unwrap();
+        assert_eq!(made, Part::ALL.map(part_raw));
+    }
+
+    #[test]
+    fn a_failed_pre_rasterization_library_fails_the_creation_first() {
+        let budget = Arc::new(Budget::new(4, 3));
+        let _mine = waited_turn(&budget, ticket());
+        let linked = linked();
+        let failed = linked.made_with(
+            || budget.spare(Urgency::Program),
+            |part| match part {
+                Part::PreRasterization => Err(internal("pre-rasterization refused")),
+                Part::FragmentShader => Err(internal("fragment refused")),
+                _ => Ok(part_raw(part)),
+            },
+        );
+        let error = format!("{:?}", failed.err().unwrap());
+        assert!(error.contains("pre-rasterization refused"), "{error}");
+    }
+
+    #[test]
+    fn without_a_spare_turn_the_libraries_are_made_in_order_here() {
+        let linked = linked();
+        let makings = Makings::default();
+        linked
+            .made_with(|| None, |part| makings.made(part))
+            .unwrap();
+        assert_eq!(makings.parts(), Part::ALL.to_vec());
+        let here = std::thread::current().id();
+        assert!(Part::ALL
+            .iter()
+            .all(|part| makings.thread_of(*part) == here));
+    }
+
+    #[test]
+    fn a_made_pre_rasterization_library_asks_for_no_spare_turn() {
+        let linked = linked();
+        linked.0[Part::PreRasterization as usize]
+            .made(|| Ok(part_raw(Part::PreRasterization)))
+            .unwrap();
+        let makings = Makings::default();
+        linked
+            .made_with(
+                || panic!("a spare turn asked for"),
+                |part| makings.made(part),
+            )
+            .unwrap();
+        assert_eq!(
+            makings.parts(),
+            vec![
+                Part::VertexInput,
+                Part::FragmentShader,
+                Part::FragmentOutput
+            ]
+        );
+    }
+
+    #[test]
+    fn a_fragment_shader_library_being_made_gives_the_spare_turn_back() {
+        let budget = Arc::new(Budget::new(4, 3));
+        let _mine = waited_turn(&budget, ticket());
+        let linked = linked();
+        let claim = linked.0[Part::FragmentShader as usize].claim().unwrap();
+        let (asked, has_asked) = mpsc::channel();
+        std::thread::scope(|scope| {
+            let creation = exit_guard::spawn_scoped(scope, Builder::new(), || {
+                let _theirs = waited_turn(&budget, ticket());
+                linked.made_with(
+                    || {
+                        let spare = budget.spare(Urgency::Program);
+                        asked.send(()).unwrap();
+                        spare
+                    },
+                    |part| Ok(part_raw(part)),
+                )
+            })
+            .unwrap();
+            has_asked.recv_timeout(WAIT).unwrap();
+            claim.made(|| Ok(part_raw(Part::FragmentShader))).unwrap();
+            assert_eq!(creation.join().unwrap().unwrap(), Part::ALL.map(part_raw));
+        });
+        assert_eq!(budget.census().0, 1);
     }
 
     #[test]

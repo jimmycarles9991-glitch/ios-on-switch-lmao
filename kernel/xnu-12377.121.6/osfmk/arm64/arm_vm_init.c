@@ -46,6 +46,7 @@
 #include <arm/misc_protos.h>
 #include <pexpert/arm64/boot.h>
 #include <pexpert/device_tree.h>
+#include <switch/prelink.h>
 #include <switch/ram.h>
 
 #include <libkern/kernel_mach_header.h>
@@ -1437,8 +1438,9 @@ noAuxKC:
 		 * read-only pages and kernel read-only pages, in the event that this gap
 		 * exists.
 		 */
-		if ((segPLKDATACONSTB + segSizePLKDATACONST) < segTEXTB) {
-			arm_vm_page_granular_RWNX(segPLKDATACONSTB + segSizePLKDATACONST, segTEXTB - (segPLKDATACONSTB + segSizePLKDATACONST),
+		const vm_offset_t kext_readonly_end = switch_kext_readonly_end(segPLKDATACONSTB + segSizePLKDATACONST, segPLKTEXTEXECB + segSizePLKTEXTEXEC);
+		if (kext_readonly_end < segTEXTB) {
+			arm_vm_page_granular_RWNX(kext_readonly_end, segTEXTB - kext_readonly_end,
 			    ARM64_GRANULE_ALLOW_BLOCK | ARM64_GRANULE_ALLOW_HINT);
 		}
 	}

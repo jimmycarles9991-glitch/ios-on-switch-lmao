@@ -108,7 +108,7 @@ static int clk_rate(unsigned int cmd, s64 hz, s64 *out)
 {
 	struct cmd_clk_set_rate_request args;
 	s64 reply = 0;
-	int err;
+	int err = 0;
 
 	memset(&args, 0, sizeof(args));
 	args.rate = hz;
@@ -138,12 +138,13 @@ static int mailbox_up(char *line, unsigned long size)
 	struct mrq_ping_response pong = {0};
 	struct mrq_query_abi_request abi = {.mrq = MRQ_QUERY_FW_TAG};
 	struct mrq_query_abi_response abi_reply = {0};
-	int err;
+	int err = 0;
 
 	if (mailbox_state <= 0) {
-		if (mailbox_state < 0)
+		if (mailbox_state < 0) {
 			snprintf(line, size, "BPMP mailbox unavailable (%d), EMC left as is",
 				 mailbox_state);
+		}
 		return mailbox_state;
 	}
 	err = bpmp_mail_init(&t210_chcfg, &t210_mail_ops, &bpmp_node);
@@ -186,10 +187,17 @@ int tegra_bpmp_emc_boot(unsigned int khz, char *line, unsigned long size)
 	struct mrq_emc_dvfs_table_response table;
 	struct cmd_clk_get_all_info_response info;
 	char rates[EMC_DVFS_TABLE_MAX_SIZE * 6 + 1] = "";
-	unsigned int i, fw_mv = 0, need_mv = 0, have_mv = 0, n = 0;
-	s64 before = 0, rounded = 0, after = 0;
+	unsigned int i = 0;
+	unsigned int fw_mv = 0;
+	unsigned int need_mv = 0;
+	unsigned int have_mv = 0;
+	unsigned int n = 0;
+	s64 before = 0;
+	s64 rounded = 0;
+	s64 after = 0;
 	uint8_t sd0 = 0;
-	int found = 0, err;
+	int found = 0;
+	int err = 0;
 
 	err = mailbox_up(line, size);
 	if (err)
@@ -240,9 +248,10 @@ int tegra_bpmp_emc_boot(unsigned int khz, char *line, unsigned long size)
 			 before / 1000000, khz, rates);
 		return -EINVAL;
 	}
-	for (i = 0; i < ARRAY_SIZE(emc_core_mv) && !need_mv; i++)
+	for (i = 0; i < ARRAY_SIZE(emc_core_mv) && !need_mv; i++) {
 		if (khz <= emc_core_mv[i].khz)
 			need_mv = emc_core_mv[i].mv;
+	}
 	if (!need_mv) {
 		snprintf(line, size,
 			 "%lld MHz kept: %u MHz is above L4T's T210B01 EMC DVFS table (3200 MHz)",
@@ -298,9 +307,11 @@ static int emc_frozen;
 int tegra_bpmp_sc7_suspend(char *line, unsigned long size)
 {
 	u32 enable[2] = {TEGRA_PM_SC7, 0};
-	s64 now = 0, rounded = 0, after = 0;
-	unsigned int channels;
-	int err;
+	s64 now = 0;
+	s64 rounded = 0;
+	s64 after = 0;
+	unsigned int channels = 0;
+	int err = 0;
 
 	emc_resume_hz = 0;
 	__atomic_store_n(&emc_frozen, 1, __ATOMIC_RELEASE);
@@ -338,8 +349,9 @@ int tegra_bpmp_sc7_suspend(char *line, unsigned long size)
 
 int tegra_bpmp_sc7_resume(char *line, unsigned long size)
 {
-	s64 now = 0, after = 0;
-	int err;
+	s64 now = 0;
+	s64 after = 0;
+	int err = 0;
 
 	if (mailbox_state) {
 		__atomic_store_n(&emc_frozen, 0, __ATOMIC_RELEASE);
@@ -361,8 +373,9 @@ int tegra_bpmp_sc7_resume(char *line, unsigned long size)
 int tegra_bpmp_emc_rates(unsigned int *khz, unsigned int max)
 {
 	struct mrq_emc_dvfs_table_response table;
-	unsigned int i, n = 0;
-	int err;
+	unsigned int i = 0;
+	unsigned int n = 0;
+	int err = 0;
 
 	if (mailbox_state)
 		return mailbox_state < 0 ? mailbox_state : -ENODEV;
@@ -380,7 +393,7 @@ int tegra_bpmp_emc_rates(unsigned int *khz, unsigned int max)
 int tegra_bpmp_emc_get(unsigned int *khz)
 {
 	s64 now = 0;
-	int err;
+	int err = 0;
 
 	if (mailbox_state)
 		return mailbox_state < 0 ? mailbox_state : -ENODEV;
@@ -393,7 +406,7 @@ int tegra_bpmp_emc_get(unsigned int *khz)
 int tegra_bpmp_emc_set(unsigned int khz, unsigned int *now_khz)
 {
 	s64 after = 0;
-	int err;
+	int err = 0;
 
 	if (mailbox_state)
 		return mailbox_state < 0 ? mailbox_state : -ENODEV;

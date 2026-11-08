@@ -133,8 +133,9 @@ int a64x_cmd_dsc_apply(int argc, char **argv)
         return 1;
     }
     print_cdhash(cdhash);
-    printf(" pages %" PRIu64 " changed %" PRIu64 " plan %" PRIu64 " dead_checks %" PRIu64 " cdhashes %" PRIu64 "\n",
-           st.pages, st.words_changed, st.plan_words, st.dead_checks, st.cdhashes_replaced);
+    printf(" pages %" PRIu64 " changed %" PRIu64 " plan %" PRIu64 " dead_checks %" PRIu64 " cdhashes %" PRIu64
+           " fips_macs %" PRIu64 "\n",
+           st.pages, st.words_changed, st.plan_words, st.dead_checks, st.cdhashes_replaced, st.fips_macs);
     free(out);
     free(pairs);
     return 0;
@@ -214,8 +215,10 @@ int a64x_cmd_dsc_verify(int argc, char **argv)
     struct a64x_dsc_verify v;
     int rc = a64x_dsc_verify(&plan, orig, out, n, &v, err, sizeof(err));
     printf("verify: %d files, %" PRIu64 " code words: %" PRIu64 " one-word rewrites, %" PRIu64 " dead checks, %" PRIu64
-           " stub words, sites %" PRIu64 " ok %" PRIu64 " broken; A12-baseline words left %" PRIu64 "\n",
-           n, v.code_words, v.rewritten, v.dead_checks, v.stub_words, v.sites_ok, v.sites_bad, v.left_baseline);
+           " stub words, sites %" PRIu64 " ok %" PRIu64 " broken; A12-baseline words left %" PRIu64
+           "; FIPS MACs %" PRIu64 "\n",
+           n, v.code_words, v.rewritten, v.dead_checks, v.stub_words, v.sites_ok, v.sites_bad, v.left_baseline,
+           v.fips_macs);
     for (int c = 1; c < 64 && c < A64X_NCLASSES; c++) {
         if (v.sites[c] || v.left[c])
             printf("  %-12s sites %" PRIu64 " left %" PRIu64 "\n", a64x_class_name((enum a64x_class)c), v.sites[c],

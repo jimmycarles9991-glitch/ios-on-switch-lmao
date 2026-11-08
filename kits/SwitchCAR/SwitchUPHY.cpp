@@ -7,6 +7,7 @@ void *gContext;
 bool gReady;
 }  // namespace
 
+// NOLINTNEXTLINE(misc-const-correctness): kept in gContext for the listener, which owns what it points to
 extern "C" void switch_uphy_listen(switch_uphy_listener listener, void *context)
 {
     __atomic_store_n(&gContext, context, __ATOMIC_RELAXED);

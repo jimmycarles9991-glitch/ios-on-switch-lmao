@@ -3,14 +3,16 @@
   1. every kext instruction word outside data islands is ARMv8.0 (a64x classifier: no PAC, LSE, LDAPR, FP16, ...);
   2. every pointer in the KASLR list is a plain address inside a mapped segment of the output;
   3. every B/BL in kext code lands in executable memory of the output (our kernel's text, kext text, stub area);
-  4. the a64x stubs and trampolines are ARMv8.0 too.
+  4. the a64x stubs and trampolines are ARMv8.0 too;
+  5. every kext with corecrypto's FIPS integrity check holds the MAC the translation leaves (macho/fips.h).
 usage: verify26.py OUTPUT KERNELCACHE"""
 import bisect, collections, json, os, struct, subprocess, sys
 HERE = os.path.dirname(os.path.abspath(__file__))
 R = os.path.join(HERE, "..")
 sys.path.insert(0, HERE)
 import paths
-from native_prelink import macho, backed_offset, unserialize_xml
+from native_prelink import unserialize_xml
+from tools.common.macho import macho, backed_offset
 from kcinfo import KC
 
 out_path, kc_path = sys.argv[1:3]
@@ -64,16 +66,36 @@ base = next(s["va"] for s in img["segments"] if s["name"] == "__PRELINK_TEXT")
 for off in struct.unpack_from("<%dI" % n, packed, 4):
     v = struct.unpack_from("<Q", o, backed_offset(img["segments"], base + off, 8, len(o)))[0]
     res["pointer mapped" if mapped(v) else "pointer NOT mapped"] += 1
-# stub area + trampolines
+# stub area
 sa = int(rep["stub_area"]["va"], 16)
-nw = rep["stub_area"]["a64x_words"] + rep["stub_area"]["trampoline_words"]
+nw = rep["stub_area"]["a64x_words"]
 sw = struct.unpack_from("<%dI" % nw, o, backed_offset(img["segments"], sa, 4 * nw, len(o)))
 r2 = subprocess.run([paths.ARM64E, "class"], input="\n".join("%08x" % w for w in sw[:rep["stub_area"]["a64x_words"]]) + "\n",
                     capture_output=True, text=True)
 res["stub words not ARMv8.0"] = sum(1 for c in r2.stdout.split("\n") if c and c != "ok")
+# FIPS integrity MACs, from the output's own headers (slid) and text
+import tempfile
+with tempfile.TemporaryDirectory() as t:
+    for b in rep.get("fips_macs", {}):
+        hdr_va = kc.entry[b][0] + slide
+        at = backed_offset(img["segments"], hdr_va, 32, len(o))
+        hdr = o[at:at + 32 + struct.unpack_from("<I", o, at + 20)[0]]
+        open(os.path.join(t, "h"), "wb").write(hdr)
+        text_va, size, mac_va = (int(x, 16) for x in subprocess.run([paths.ARM64E, "fips", os.path.join(t, "h")],
+                                 check=True, capture_output=True, text=True).stdout.split())
+        ta = backed_offset(img["segments"], text_va, size, len(o))
+        ko = kc.va2off(text_va - slide)
+        open(os.path.join(t, "original"), "wb").write(kc.d[ko:ko + size])
+        open(os.path.join(t, "text"), "wb").write(o[ta:ta + size])
+        was = kc.d[kc.va2off(mac_va - slide):kc.va2off(mac_va - slide) + 32].hex()
+        mac = subprocess.run([paths.ARM64E, "fips-mac", os.path.join(t, "original"), os.path.join(t, "text"), was],
+                             check=True, capture_output=True, text=True).stdout.strip()
+        ma = backed_offset(img["segments"], mac_va, 32, len(o))
+        kept = o[ma:ma + 32].hex() == mac
+        res["FIPS MAC as the translation leaves it" if kept else "FIPS MAC NOT as the translation leaves it"] += 1
 print(json.dumps(dict(res), indent=1))
 print("kext words the classifier still flags (data islands left as they were, or untranslated):", dict(left))
 for (b, c), v in left_where.most_common(12): print("   ", b, c, v)
 print("prelink info entries:", len(md["_PrelinkInfoDictionary"]), "KASLR pointers:", n)
-if res["pointer NOT mapped"] or res["stub words not ARMv8.0"]:
-    sys.exit("verify26: KASLR pointers outside the image or stub words above ARMv8.0")
+if res["pointer NOT mapped"] or res["stub words not ARMv8.0"] or res["FIPS MAC NOT as the translation leaves it"]:
+    sys.exit("verify26: KASLR pointers outside the image, stub words above ARMv8.0 or a stale FIPS MAC")

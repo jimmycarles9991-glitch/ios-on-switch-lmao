@@ -2,7 +2,8 @@
 
 iPadOS 17.7.11 (21H461). What `IOSurfaceAccelerator.framework` asks of the kernel, who calls it and how, and how
 TegraVIC answers it on the Tegra X1's VIC. **[V]** = read in the 21H461 binaries (dyld cache, kernelcache) or the
-r7p9d device log; **[I]** = inferred; **[T]** = proven by TegraVIC's boot self-test on the unit, not before.
+r7p9d device log; **[I]** = inferred; **[T]** = measured on the unit by TegraVIC's boot self-test, the same on all 19
+boots of 11-05 23:53 to 11-06 23:42; the self-test is gone and its results are `kTegraVICTraits` (TegraVICConfig.h).
 
 Sources: dyld cache `out/agent-scratch/r9-hang/dsc` (IOSurfaceAccelerator 147.0.32, QuartzCore 1120.34.13,
 VideoToolbox, MediaToolbox); kernelcache `vendor/unixnu/out/ipsw/21H461/kernelcache.decompressed`
@@ -152,9 +153,9 @@ Apple's code that still runs: the classes' constructors, `getMetaClass`, the ser
    blit clip, lock-in, read-only, unwire, power, coalescing, Comm records) are accepted and ignored. Refused as
    **kIOReturnUnsupported** (callers fall back): histogram, HDR, film grain, colour remap, shared events, alpha override
    into a surface with alpha, formats other than BGRA/RGBA/420v/420f, protected-to-less-protected, and any shape the
-   checker refuses (pitch the unit cannot address, odd 4:2:0 rects, >16x scaling, sizes outside 2..8192, transforms not
-   proven, a destination sub-rectangle under a transform whose placement V4 did not prove, a same-format 4:2:0
-   pass-through V4 did not prove). Refused as **kIOReturnBadArgument**: unknown surface IDs, Transform bits 3-5.
+   checker refuses (pitch the unit cannot address, odd 4:2:0 rects, >16x scaling, sizes outside 2..8192, a destination
+   sub-rectangle under a transform other than 0 and 6, whose placement is not in place on the unit). Refused as
+   **kIOReturnBadArgument**: unknown surface IDs, Transform bits 3-5.
 3. Build and check every VIC job in the calling thread (`tegra_vic_build`, `TegraVICConfig.h`), so refusals are the
    call's own result; then queue (16 deep, FIFO) for the engine thread. Sync calls sleep until their jobs are done.
 4. Engine thread: `IOSurface::prepare`, map each surface page by page into its SMMU window (source read-only), clean
@@ -167,22 +168,9 @@ are generated in its encoding (`tegra_vic_matrix_*`) and checked on the host aga
 
 ## 9. Gaps and risks
 
-- r7u-r7w (11-05): V4 failed "420f -> BGRA (BT.709 full) not the reference in either chroma order (worst 223 steps);
-  first pixel 0xff295bd6" on every boot. The check's mistake, not the engine's: it compared the engine's output with
-  the eight patches while its source was the flat RGB c0 40 20 fill the 420f fill check had just written over them (Y
-  89, Cb 97, Cr 193 by the model; the fill check allows one step). The reported pixel (R 41, G 91, B 214) is that fill
-  read with Cb and Cr exchanged, the second order tried. Now the 420f -> BGRA check runs before the fill check, on the
-  420f the engine wrote, and expects what the engine's arithmetic gives for the samples read back from it (to one
-  step, as before); it still gates V4. The arithmetic has one measured choice besides the chroma order: an 8-bit
-  sample widened to the 10-bit pipeline as x << 2 or as x << 2 | x >> 6. That pixel fits only the second (0x295bd5
-  from Cr 194; x << 2 is 2 steps off for any fill byte within one of the model's); the V4 line says which held. If it
-  is the second, the matrices still assume the first, so 4:2:0 -> RGB results sit up to about one step above BT.709 in
-  R and B (chroma zero read as 514, not 512): the next change, once the line has shown it, is to build
-  `tegra_vic_matrix_ycc_to_rgb` for the measured law. On a failure it logs, once: each patch centre in both orders
-  (read Y Cb Cr, wrote, expected, the BT.709 value), the configuration words of the job (pipe, output, output surface
-  and matrix, slot 0 config, surface and matrix), its methods and the falcon's state ("TegraVIC: diag ..."). The 420f
-  -> 420f pass-through is checked too, as a trait (`yccIn`): not proven, such jobs are refused (callers fall back);
-  not a gate.
+- 4:2:0 -> RGB: the unit widens an 8-bit sample to the 10-bit pipeline as x << 2 | x >> 6 [T]; the matrices assume
+  x << 2, so R and B sit up to about one step above BT.709 (chroma zero read as 514, not 512). Building
+  `tegra_vic_matrix_ycc_to_rgb` for the measured law is open.
 - **Shared events** are refused. If Core Animation sends them on the clone path, each frame's transform fails with
   kIOReturnUnsupported (no crash; CA force-completes the events). The device log says so once per process
   (kits/SwitchRefusal, category TegraVIC: "shared events: IOSurfaceAccelerator transform refused (not on VIC), the
@@ -192,19 +180,18 @@ are generated in its encoding (`tegra_vic_matrix_*`) and checked on the host aga
 - 4:2:2, 4:4:4, L565, l10r, RGhA, 10-bit: refused (VideoToolbox falls back per call).
 - GetHistogram, GetTransformEstimation, CaptureSurface: unsupported.
 - Rotation direction: TegraVIC takes bit 2 as a clockwise quarter turn applied after the flips (Android's HAL order)
-  [I]; the self-test maps each IOSA transform to VIC's flip/transpose bits by measurement, so only this convention, not
-  VIC's, is assumed. Screen Recording's clone does not rotate (Transform 0).
+  [I]; which VIC flip/transpose bits implement each IOSA transform was measured on the unit (`vicFlips` [T]), so only
+  this convention, not VIC's, is assumed. Screen Recording's clone does not rotate (Transform 0).
 - Transposed jobs (`OutputTranspose`): VIC composes the target rectangle before the transpose and writes composed
   pixel (x, y) to memory row x, column y, so the whole OutputSurfaceConfig is given in pre-transpose geometry: surface
   size swapped, `OutLumaWidth` = rows - 1 and `OutLumaHeight` = pitch / bpe - 1 (chroma likewise) [V: hekate's Nyx
-  rotation programs exactly that on this SoC; the unit's V4 diag lines with the luma geometry left post-transpose show
-  a row stride of `OutLumaHeight` + 1 pixels]. V4 still tries the four conventions (rectangles × surface, before or
-  after) and logs one "diag transpose" line for each (os_log); the first that copies the card as a transform is used
-  [T]. Transposed 4:2:0 output is proven by turning a BGRA patch card into 420f both ways (transforms 4 and 7); if that
-  fails, transforms 4-7 are dropped, V4 does not fail.
-- Destination sub-rectangles under a flip or quarter turn: whether VIC mirrors within the target rectangle or the
-  whole surface is not known [I]; V4 copies the card into a sub-rectangle of a larger surface under each proven
-  transform (`subRects`), and a transform whose rectangle lands elsewhere keeps whole-surface jobs only.
+  rotation programs exactly that on this SoC; the unit's diag lines with the luma geometry left post-transpose show
+  a row stride of `OutLumaHeight` + 1 pixels]. Of the four conventions (rectangles × surface, before or after the
+  transpose) the unit copied the card with rectangles and surface before [T]; transposed 4:2:0 output (a BGRA patch
+  card into 420f, transforms 4 and 7) matched too [T].
+- Destination sub-rectangles under a flip or quarter turn: VIC mirrors around the whole surface, so a sub-rectangle
+  lands in place only under transforms 0 and 6 (`subRects` 0x41 [T]; test/vic_model.h reproduces the unit's diag lines);
+  under the others the checker allows whole-surface jobs only.
 
 ## 10. NVDEC's pictures (not IOSurfaceAccelerator)
 
@@ -215,8 +202,9 @@ one of its buffers, with that buffer's page list, copied 1:1 by the 4:2:0 pass-t
 into the source window read-only; it needs no cache maintenance (NVDEC wrote DRAM, no CPU writes its buffers); the
 destination is cleaned and invalidated before and invalidated after, as for every job, so a GPU that does not snoop the
 CPU's caches reads what VIC wrote. Synchronous on the decoder's thread under the engine lock, with page lists of its own
-(32 MiB a side). Block-linear input is a V4 trait (`blockLinearIn`: a 128x64 picture written in block linear by the CPU
-must copy exactly, to a step); without it the service still publishes, `tegra_vic_present_ready` is false,
-TegraNVDECInfo has no present feature and the decoders copy on the CPU. Refusals (odd sizes, unaddressable surfaces) are
+(32 MiB a side). Block-linear input (`blockLinearIn`) comes with the 4:2:0 pass-through: a 128x64 picture written in
+block linear by the CPU copied exactly, to a step, on all 21 boots of 11-05 and 11-06 that checked it, so the check is
+gone. Without the pass-through the service still publishes, `tegra_vic_present_ready` is false, TegraNVDECInfo has no
+present feature and the decoders copy on the CPU. Refusals (odd sizes, unaddressable surfaces) are
 one line per kind per boot and leave the picture invalidated for the decoder's CPU copy. Stats: "TegraVIC: Ns
 present=..." per 5 s window with pictures.

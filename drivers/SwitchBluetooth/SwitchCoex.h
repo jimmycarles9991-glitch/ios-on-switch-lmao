@@ -64,7 +64,7 @@ static inline void switch_coex_bt_reset(struct switch_coex_bt *s)
 
 static inline uint16_t switch_coex_le16(const uint8_t *p)
 {
-    return (uint16_t)(p[0] | p[1] << 8);
+    return (uint16_t)(p[0] | (unsigned)p[1] << 8);
 }
 
 // One command of the client's on its way to the controller: the state it sets. Returns the SWITCH_COEX_* parts it
@@ -72,20 +72,20 @@ static inline uint16_t switch_coex_le16(const uint8_t *p)
 static inline unsigned switch_coex_bt_command(struct switch_coex_bt *s, uint16_t opcode, const uint8_t *p,
                                               uint32_t length)
 {
-    struct switch_coex_bt was = *s;
+    const struct switch_coex_bt was = *s;
     unsigned changed = 0;
     switch (opcode) {
     case SWITCH_COEX_OP_LE_SCAN_PARAMS:
         if (length < 5)
             return 0;
-        s->le_active = p[0] == 1;
+        s->le_active = p[0] == 1 ? 1 : 0;
         s->le_interval = switch_coex_le16(p + 1);
         s->le_window = switch_coex_le16(p + 3);
         break;
     case SWITCH_COEX_OP_LE_EXT_SCAN_PARAMS:  // own address, filter, PHYs, then per PHY {type, interval, window}
         if (length < 8)
             return 0;
-        s->le_active = p[3] == 1;
+        s->le_active = p[3] == 1 ? 1 : 0;
         s->le_interval = switch_coex_le16(p + 4);
         s->le_window = switch_coex_le16(p + 6);
         break;
@@ -93,7 +93,7 @@ static inline unsigned switch_coex_bt_command(struct switch_coex_bt *s, uint16_t
     case SWITCH_COEX_OP_LE_EXT_SCAN_ENABLE:
         if (length < 1)
             return 0;
-        s->le_on = p[0] != 0;
+        s->le_on = p[0] ? 1 : 0;
         break;
     case SWITCH_COEX_OP_WRITE_SCAN_ENABLE:
         if (length < 1)
@@ -163,9 +163,10 @@ static inline int switch_coex_describe_le(const struct switch_coex_bt *s, char *
 {
     if (!s->le_interval)
         return snprintf(out, size, "LE scan %s, unset", s->le_on ? "on" : "off");
-    if (!s->le_on)
+    if (!s->le_on) {
         return snprintf(out, size, "LE scan off (%u/%u ms)", switch_coex_ms(s->le_window),
                         switch_coex_ms(s->le_interval));
+    }
     return snprintf(out, size, "LE scan on %u/%u ms %s (%u%%)", switch_coex_ms(s->le_window),
                     switch_coex_ms(s->le_interval), s->le_active ? "active" : "passive",
                     switch_coex_duty(s->le_interval, s->le_window));
@@ -218,9 +219,11 @@ enum {
 // SWITCH_COEX_AFH_CHANNELS when none). Returns how many stay usable.
 static inline unsigned switch_coex_afh_map(uint32_t wifi_mhz, uint8_t map[10], unsigned *first, unsigned *last)
 {
-    unsigned lo = SWITCH_COEX_AFH_CHANNELS, hi = SWITCH_COEX_AFH_CHANNELS;
+    unsigned lo = SWITCH_COEX_AFH_CHANNELS;
+    unsigned hi = SWITCH_COEX_AFH_CHANNELS;
     if (wifi_mhz >= 2412 && wifi_mhz <= 2484) {
-        const int a = (int)wifi_mhz - 11 - 2402, b = (int)wifi_mhz + 11 - 2402;
+        const int a = (int)wifi_mhz - 11 - 2402;
+        const int b = (int)wifi_mhz + 11 - 2402;
         lo = a < 0 ? 0u : (unsigned)a;
         hi = b > 78 ? 78u : (unsigned)b;
     }
@@ -245,7 +248,8 @@ static inline unsigned switch_coex_afh_map(uint32_t wifi_mhz, uint8_t map[10], u
 // (the Wi-Fi channel's) it still uses.
 static inline unsigned switch_coex_afh_used(const uint8_t map[10], unsigned first, unsigned last, unsigned *in_range)
 {
-    unsigned used = 0, inside = 0;
+    unsigned used = 0;
+    unsigned inside = 0;
     for (unsigned n = 0; n < SWITCH_COEX_AFH_CHANNELS; ++n) {
         if (!(map[n / 8] & (1u << (n & 7))))
             continue;

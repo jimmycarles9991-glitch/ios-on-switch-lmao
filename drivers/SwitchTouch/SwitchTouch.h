@@ -9,7 +9,7 @@ extern "C" {
 
 // Creates the touch HID device (loads IOHIDFamily on first use) and the driver, whose work loop then powers the
 // panel up and takes its interrupt. Thread context, after bsd_autoconf() (IOKit, OSKext and the GIC up). Idempotent.
-// Returns 0; every failure panics with a one-line reason.
+// Returns 0. A panel that does not come up is one log line, touch off until the screen next lights.
 int switch_touch_start(void);
 
 // System sleep (drivers/SwitchSuspend), thread context with I2C up: panel off before SC7, brought up again after it

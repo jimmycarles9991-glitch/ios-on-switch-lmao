@@ -1,0 +1,13 @@
+diff --git a/hw/arm/tegra2/ppsb/ictlr/ictlr.c b/hw/arm/tegra2/ppsb/ictlr/ictlr.c
+index 2aa67bc..85507c9 100644
+--- a/hw/arm/tegra2/ppsb/ictlr/ictlr.c
++++ b/hw/arm/tegra2/ppsb/ictlr/ictlr.c
+@@ -75,7 +75,7 @@ int tegra_ictlr_is_irq_pending_on_cpu(int cpu_id)
+     int ret = 0;
+ 
+     g_assert(tegra_ictlr_dev != NULL);
+-    g_assert(cpu_id < s->num_cpu);
++    g_assert(cpu_id < s->num_cpu || cpu_id == TEGRA_BPMP);
+ 
+     switch (cpu_id) {
+     case TEGRA_CCPLEX_CORE0:

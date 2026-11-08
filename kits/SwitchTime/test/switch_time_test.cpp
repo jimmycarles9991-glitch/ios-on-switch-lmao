@@ -24,5 +24,8 @@ TEST(SwitchTime, ElapsedAndDeadlines)
     EXPECT_EQ(switch_deadline_us(100), gSwitchTimeNow + 1920);
     EXPECT_EQ(switch_deadline_ms(2), gSwitchTimeNow + 38400);
     EXPECT_EQ(switch_now_us(), gSwitchTimeNow * 625 / 12 / 1000);
+    EXPECT_EQ(switch_now_ns(), gSwitchTimeNow * 625 / 12);
+    EXPECT_EQ(switch_now_ms(), gSwitchTimeNow * 625 / 12 / 1000000);
+    EXPECT_EQ(switch_ns_since(start), 3000000u);
 }
 }  // namespace

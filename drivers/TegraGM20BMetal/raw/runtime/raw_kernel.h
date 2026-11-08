@@ -8,6 +8,7 @@
 // Not thread safe: raw::Device calls it under its own lock.
 #pragma once
 #include <atomic>
+#include <mutex>
 #include <cstdint>
 #include <map>
 #include <string>
@@ -48,7 +49,8 @@ public:
     bool import(void *addr, uint64_t bytes, Bo &bo, uint32_t kind = 0, uint32_t surfaceId = 0);
     // The same in two steps, for a caller that serialises the VA list itself: the kernel's BoImport (the wiring: the slow part,
     // safe beside the other calls) and then the VA and its bind (bindImport, under the caller's lock).
-    bool importPages(void *addr, uint64_t bytes, Bo &bo, uint32_t surfaceId = 0);
+    // `gpuReads`: the GPU never writes it (TegraGM20BImportGpuReads), so no submission marks it GPU-dirty
+    bool importPages(void *addr, uint64_t bytes, Bo &bo, uint32_t surfaceId = 0, bool gpuReads = false);
     // The GPU may write the IOSurface from now on (BoImport took it as only sampled): before its first render or store.
     bool surfaceGpuWrites(uint32_t surfaceId);
     // SurfaceLayout (method 16) for the import `bo` of a surface: its layout, decided by the kernel once for every process
@@ -58,6 +60,17 @@ public:
     uint32_t surfaceLayout(const Bo &bo, uint32_t width, uint32_t height, uint32_t bpp, uint32_t bytesPerRow,
                            bool writes);
     bool bindImport(void *addr, Bo &bo, uint32_t kind);
+    // BoAlloc of physically contiguous memory aligned to 2^alignLog2, never CPU-mapped: the kernel gives such memory comptags
+    // (raw_comp.h). The slow part (a contiguous search in the kernel), safe beside the other calls; the kern_return_t.
+    int allocContiguous(uint64_t bytes, uint32_t alignLog2, Bo &bo);
+    // Binds it whole at a VA aligned as its memory with compressible `kind`; false with `noLines` when the kernel had no
+    // comptags left for it (kIOReturnNoResources), with the BO left unbound. Under the caller's lock (the VA list).
+    bool bindCompressed(Bo &bo, uint32_t kind, bool &noLines);
+    // GPU VA held for binds made into it later (bindImportAt), whole granules; 0: none left. releaseVa gives it back.
+    uint64_t reserveVa(uint64_t bytes);
+    void releaseVa(uint64_t va, uint64_t bytes);
+    // bindImport at `va`, a granule boundary inside a reservation: freeing the BO leaves the VA to the reservation
+    bool bindImportAt(void *addr, Bo &bo, uint64_t va, uint32_t kind);
     // BoFree (the kernel unbinds it at once and releases the pages after the channels complete what they had); the VA goes
     // back to the free list at once: call it only once no submission that uses the BO is still running (raw::Device does).
     void free(Bo &bo);
@@ -70,6 +83,31 @@ public:
     {
         return lostChannel_.load(std::memory_order_relaxed) == channel;
     }
+
+    // Why the last channel found dead was killed (TegraGM20BAbiStatus: 1 MMU fault at lostFaultVa(), 2 GR exception, 3 host
+    // error, 4 hang); 0 when the kernel did not say
+    uint32_t lostError() const
+    {
+        return lostError_.load(std::memory_order_relaxed);
+    }
+
+    uint64_t lostFaultVa() const
+    {
+        return lostFaultVa_.load(std::memory_order_relaxed);
+    }
+
+    // Channels made so far: with a channel's id, the count when it was the newest names that channel alone (the kernel reuses
+    // ids, and a destroyed channel's waiters may answer after its id is another's)
+    uint32_t opened() const
+    {
+        return opened_.load(std::memory_order_acquire);
+    }
+
+    // `channel`, as it was when `opened` channels had been made, is dead (an Exec or WaitFence answered so, or its kill record
+    // says so): lost() and the cause from GetStatus. Nothing when a channel was made since: that one is not it.
+    void markLost(uint32_t channel, uint32_t opened);
+    // GetStatus: false when the kernel has no such channel (destroyed) or refused the call
+    bool status(uint32_t channel, TegraGM20BAbiStatus &st);
 
     // `last`: the channel's last submitted seqno (0 if none), waited on when the GPFIFO is full
     // `surfaces` (null: none): the host imports the submission touches, named to the kernel (ExecSurfaces, method 17,
@@ -86,6 +124,12 @@ public:
     bool canOrder() const
     {
         return (info_.flags & TegraGM20BInfoOrder) != 0;
+    }
+
+    // A channel's fence word is a TegraGM20BAbiFence: a kill names the seqnos it took
+    bool killRecords() const
+    {
+        return (info_.flags & TegraGM20BInfoKillRecord) != 0;
     }
 
     const std::string &error() const
@@ -113,7 +157,9 @@ private:
     // A SurfaceWrites failed: imports stop saying the GPU only samples them, and every Exec carries
     // TegraGM20BPushImportsWritten.
     std::atomic<bool> importsWritten_{false};
-    std::atomic<uint32_t> lostChannel_{0};
+    std::atomic<uint32_t> lostChannel_{0}, lostError_{0}, opened_{0};
+    std::mutex lostLock_;  // a channel made, and a channel marked lost, one after the other
+    std::atomic<uint64_t> lostFaultVa_{0};
     uint64_t fenceMap_ = 0;  // the connection's fence page, mapped once: every channel's word is in it
     uint32_t selector_ = 0;
     TegraGM20BAbiInfo info_ = {};

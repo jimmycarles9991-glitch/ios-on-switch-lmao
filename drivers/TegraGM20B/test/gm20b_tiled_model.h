@@ -30,7 +30,12 @@ void scatter(const tgm_relayout_pages &p, const std::vector<uint8_t> &bytes);
 struct Move {
 	int op;
 	std::vector<tgm_relayout_writer> writers;
+	bool rowsClean;  // no page of the scratch held a CPU line the CPU may still write back
 };
+
+// Pages with lines in the CPU's cache that a clean and invalidate has not taken out since (a scratch is zero-filled
+// through the cache when it is made)
+extern std::set<uint64_t> gCpuLines;
 
 extern std::vector<Move> gMoves;
 extern bool gMoveFails;

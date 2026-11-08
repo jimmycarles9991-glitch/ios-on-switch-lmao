@@ -13,6 +13,7 @@
 #include "../SwitchBattery/SwitchBattery.h"
 #include "../TegraI2C/TegraI2C.h"
 #include "../../kits/SwitchCAR/SwitchUPHY.h"
+#include "../../kits/SwitchDT/SwitchDTProperty.h"
 #include "SwitchPD.h"
 #include "SwitchPDPolicy.h"
 #include "SwitchUSB.h"
@@ -51,7 +52,10 @@ bool gSsUp, gDockHubSeen;  // role thread: the lane as last reported
 // are always on.
 bool railOn(char *why, size_t whySize)
 {
-    constexpr uint8_t kPmic = 0x3C, kLdo1Cfg = 0x25, kModeNormal = 3u << 6, kLdo1_1V05 = (1050000 - 800000) / 25000;
+    constexpr uint8_t kPmic = 0x3C;
+    constexpr uint8_t kLdo1Cfg = 0x25;
+    constexpr uint8_t kModeNormal = 3u << 6;
+    constexpr uint8_t kLdo1_1V05 = (1050000 - 800000) / 25000;
     uint8_t value = 0;
     int err = tegra_i2c_init(5);
     if (!err)
@@ -63,7 +67,7 @@ bool railOn(char *why, size_t whySize)
     }
     if (err)
         snprintf(why, whySize, "PMIC LDO1 (avddio_usb) not readable: I2C5 error %d", err);
-    return !err;
+    return err == 0;
 }
 
 // SwitchPD's work loop: short. Our VBUS on a sink-only partner wants the host role; a cable from a host while we are
@@ -92,13 +96,16 @@ void pdChanged(void *, const SwitchPDState *state)
 // (REG01/05/08/09, battery current). Log only, never the boot console.
 void reportRole(thread_call_param_t, thread_call_param_t change)
 {
-    char xhci[720], lane[200], pd[300], charger[260];
+    char xhci[720];
+    char lane[200];
+    char pd[300];
+    char charger[260];
     switchxhci_describe(xhci, sizeof(xhci));
     switch_usb_ss_describe(lane, sizeof(lane));
     (void)switch_pd_describe(pd, sizeof(pd));
     (void)switch_battery_describe_otg(charger, sizeof(charger));
     const char *role = gHostRole ? "host" : "device";
-    const unsigned number = (unsigned)(uintptr_t)change;
+    const unsigned number = static_cast<unsigned>(reinterpret_cast<uintptr_t>(change));
     // Under the 1 KiB os_log record (kprof keeps its lines under 900): one line, or two when it would not fit.
     if (strlen(xhci) + strlen(lane) + strlen(pd) + strlen(charger) < 820) {
         os_log(OS_LOG_DEFAULT, "SwitchUSB: %s role +1 s (change %u): %s | %s | %s | %s", role, number, xhci, lane, pd,
@@ -115,7 +122,8 @@ void armReport()
     uint64_t deadline = 0;
     clock_interval_to_deadline(kReportMS, kMillisecondScale, &deadline);
     thread_call_cancel(gReportCall);
-    thread_call_enter1_delayed(gReportCall, (thread_call_param_t)(uintptr_t)++gRoleChanges, deadline);
+    thread_call_enter1_delayed(gReportCall,
+                               reinterpret_cast<thread_call_param_t>(static_cast<uintptr_t>(++gRoleChanges)), deadline);
 }
 
 // Role thread: SS port 0's lane up for a host whose SuperSpeed pair DisplayPort leaves free, once PCIe has calibrated
@@ -142,7 +150,8 @@ void applyLanes()
     followLane();
     switchxhci_superspeed();
     IOLockLock(gLock);
-    const bool dockHub = gDockHub, dockHost = gDockHost;
+    const bool dockHub = gDockHub;
+    const bool dockHost = gDockHost;
     IOLockUnlock(gLock);
     const bool host = gHostRole && gHostUp;
     if (dockHost && dockHub && host && !gDockHubSeen) {
@@ -223,9 +232,9 @@ void usbThread(void *, wait_result_t)
     char why[160] = "";
     if (gDevicePort) {
         if (railOn(why, sizeof(why)) && switchxudc_start(gDevicePort, why, sizeof(why))) {
-            const OSData *configuration = OSDynamicCast(OSData, gDevicePort->getProperty("configuration-string"));
+            const char *configuration = switch_dt_string(gDevicePort, "configuration-string");
             IOLog("SwitchUSB: device mode ready (XUDC at 0x700d0000, configuration %s)\n",
-                  configuration && configuration->getLength() ? (const char *)configuration->getBytesNoCopy() : "?");
+                  configuration ? configuration : "?");
         } else {
             IOLog("SwitchUSB: device mode off: %s\n", why);
         }
@@ -251,7 +260,7 @@ IOService *publishedNode(const char *path)
 {
     // ArmDTPlatform publishes every /arm-io child as an IOPlatformDevice that takes the node's place in the device
     // tree plane, so the path names the nub itself.
-    IORegistryEntry *node = IORegistryEntry::fromPath(path, gIODTPlane);
+    const IORegistryEntry *node = IORegistryEntry::fromPath(path, gIODTPlane);
     IOService *nub = OSDynamicCast(IOService, node);
     if (node && !nub) {
         IOLog("SwitchUSB: %s was not published\n", path);
@@ -263,7 +272,7 @@ IOService *publishedNode(const char *path)
 
 // SwitchXHCI's interrupt check gave host mode up for this boot (it logged why): SwitchPD stops sourcing and keeps the
 // port sink-only, which ends the host role through pdChanged; the role thread never takes the host role again.
-void switch_usb_host_failed(void)
+void switch_usb_host_failed()
 {
     __atomic_store_n(&gHostFailed, true, __ATOMIC_RELEASE);
     (void)switch_pd_allow_source(false);
@@ -275,7 +284,7 @@ extern "C" int switch_usb_start(void)
     if (__atomic_exchange_n(&started, 1, __ATOMIC_ACQ_REL))
         return 0;
     gDevicePort = publishedNode("/arm-io/usb-device");
-    if (IOService *host = publishedNode("/arm-io/usb-xhci")) {
+    if (const IOService *host = publishedNode("/arm-io/usb-xhci")) {
         gHostPackaged = true;
         host->release();
     }
@@ -288,11 +297,12 @@ extern "C" int switch_usb_start(void)
     gReportCall = gRoleCall ? thread_call_allocate_with_options(&reportRole, nullptr, THREAD_CALL_PRIORITY_LOW,
                                                                 THREAD_CALL_OPTIONS_ONCE)
                             : nullptr;
-    gSsInit = gReportCall && gHostPackaged && switch_usb_ss_init();
-    if (gSsInit)
+    gSsInit = (gReportCall != nullptr) && gHostPackaged && switch_usb_ss_init();
+    if (gSsInit) {
         switch_uphy_listen(&uphyChanged, nullptr);
-    else if (gReportCall && gHostPackaged)
+    } else if (gReportCall && gHostPackaged) {
         IOLog("SwitchUSB: SuperSpeed off: no pad controller mapping or lock\n");
+    }
     thread_t thread = THREAD_NULL;
     if (!gReportCall || kernel_thread_start(&usbThread, nullptr, &thread) != KERN_SUCCESS) {
         IOLog("SwitchUSB: device mode off: no thread\n");

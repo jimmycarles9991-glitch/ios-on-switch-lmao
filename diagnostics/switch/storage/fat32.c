@@ -31,9 +31,10 @@ static void copy_bytes(uint8_t *to, const uint8_t *from, uint32_t n)
 
 static int same(const uint8_t *a, const uint8_t *b, uint32_t n)
 {
-    for (uint32_t i = 0; i < n; i++)
+    for (uint32_t i = 0; i < n; i++) {
         if (a[i] != b[i])
             return 0;
+    }
     return 1;
 }
 
@@ -117,7 +118,7 @@ static struct chain chain_start(uint32_t c)
 /* Brent's cycle detector needs constant memory; budget also bounds every walk. */
 static int chain_next(struct switch_fat_volume *v, struct chain *s, struct budget *b)
 {
-    uint32_t next;
+    uint32_t next = 0;
     int rc = fat_entry(v, s->cluster, &next, b);
     if (rc)
         return rc;
@@ -170,9 +171,13 @@ static int mount_bpb(struct switch_fat_volume *v, uint64_t first, uint64_t count
     int rc = sector(v, first, buf, b);
     if (rc)
         return rc;
-    uint32_t spc = buf[13], reserved = le16(buf + 14), fats = buf[16];
-    uint32_t total = le32(buf + 32), fat_size = le32(buf + 36);
-    uint32_t flags = le16(buf + 40), root = le32(buf + 44);
+    uint32_t spc = buf[13];
+    uint32_t reserved = le16(buf + 14);
+    uint32_t fats = buf[16];
+    uint32_t total = le32(buf + 32);
+    uint32_t fat_size = le32(buf + 36);
+    uint32_t flags = le16(buf + 40);
+    uint32_t root = le32(buf + 44);
     if (buf[510] != 0x55 || buf[511] != 0xaa || le16(buf + 11) != 512 || !spc || spc > 128 || (spc & (spc - 1)) ||
         !reserved || !fats || fats > 2 || le16(buf + 17) || le16(buf + 19) || le16(buf + 22) || !fat_size || !total ||
         le16(buf + 42) || (flags & 0xff70u))
@@ -218,7 +223,7 @@ int switch_fat_mount(struct switch_fat_volume *v, switch_fat_read512 read512, vo
         return rc;
     if (buf[510] != 0x55 || buf[511] != 0xaa)
         return SWITCH_FAT_FORMAT;
-    const uint8_t *p = buf + 446 + partition_index * 16;
+    const uint8_t *p = buf + 446 + (uintptr_t)partition_index * 16;
     if ((p[0] != 0 && p[0] != 0x80) || (p[4] != 0x0b && p[4] != 0x0c))
         return SWITCH_FAT_FORMAT;
     return mount_bpb(v, le32(p + 8), le32(p + 12), &b);
@@ -249,13 +254,16 @@ static int parse_path(const char *path, uint8_t names[SWITCH_FAT_MAX_DEPTH][11],
         length++;
     if (!length || length > SWITCH_FAT_MAX_PATH)
         return SWITCH_FAT_ARGUMENT;
-    uint32_t i = path[0] == '/' ? 1 : 0, n = 0;
+    uint32_t i = path[0] == '/' ? 1 : 0;
+    uint32_t n = 0;
     while (i < length) {
         if (n == SWITCH_FAT_MAX_DEPTH)
             return SWITCH_FAT_LIMIT;
         for (uint32_t j = 0; j < 11; j++)
             names[n][j] = ' ';
-        uint32_t base = 0, ext = 0, dot = 0;
+        uint32_t base = 0;
+        uint32_t ext = 0;
+        uint32_t dot = 0;
         while (i < length && path[i] != '/') {
             uint8_t c = (uint8_t)path[i++];
             if (c == '.') {
@@ -281,8 +289,11 @@ static int parse_path(const char *path, uint8_t names[SWITCH_FAT_MAX_DEPTH][11],
         if (!base || (dot && !ext))
             return SWITCH_FAT_ARGUMENT;
         n++;
-        if (i < length && ++i == length)
-            return SWITCH_FAT_ARGUMENT;
+        if (i < length) {
+            ++i;
+            if (i == length)
+                return SWITCH_FAT_ARGUMENT;
+        }
     }
     if (!n)
         return SWITCH_FAT_ARGUMENT;
@@ -329,13 +340,15 @@ static int lookup(struct switch_fat_volume *v, uint32_t first, const uint8_t nam
 
 static int cluster_in_sorted(const uint32_t *clusters, uint32_t count, uint32_t key)
 {
-    uint32_t lo = 0, hi = count;
+    uint32_t lo = 0;
+    uint32_t hi = count;
     while (lo < hi) {
         uint32_t mid = lo + (hi - lo) / 2;
-        if (clusters[mid] < key)
+        if (clusters[mid] < key) {
             lo = mid + 1;
-        else
+        } else {
             hi = mid;
+        }
     }
     return lo < count && clusters[lo] == key;
 }
@@ -344,13 +357,15 @@ int switch_fat_lookup_size(struct switch_fat_volume *v, const char *path, uint32
 {
     if (!v || !v->mounted || !v->read512 || !size)
         return SWITCH_FAT_ARGUMENT;
-    uint8_t names[SWITCH_FAT_MAX_DEPTH][11], entry[32];
+    uint8_t names[SWITCH_FAT_MAX_DEPTH][11];
+    uint8_t entry[32];
     uint32_t depth = 0;
     int rc = parse_path(path, names, &depth);
     if (rc)
         return rc;
     struct budget b = {SWITCH_FAT_MAX_IO, SWITCH_FAT_MAX_CHAIN};
-    uint32_t first = v->root_cluster, length = 0;
+    uint32_t first = v->root_cluster;
+    uint32_t length = 0;
     for (uint32_t i = 0; i < depth; i++) {
         rc = lookup(v, first, names[i], entry, &b);
         if (rc)
@@ -362,12 +377,13 @@ int switch_fat_lookup_size(struct switch_fat_volume *v, const char *path, uint32
                 return SWITCH_FAT_NOT_FILE;
             if (!cluster_valid(v, first))
                 return SWITCH_FAT_CHAIN;
-        } else if (entry[11] & 0x10)
+        } else if (entry[11] & 0x10) {
             return SWITCH_FAT_NOT_FILE;
+        }
     }
     if ((!length && first) || (length && !cluster_valid(v, first)))
         return SWITCH_FAT_CHAIN;
-    uint32_t entries;
+    uint32_t entries = 0;
     rc = switch_fat_index_count(v, length, &entries);
     if (rc)
         return rc;
@@ -402,10 +418,12 @@ int switch_fat_path_directories_exclude(struct switch_fat_volume *v, const char 
         v->sectors_per_cluster > 128 || (v->sectors_per_cluster & (v->sectors_per_cluster - 1)) ||
         count > v->cluster_count)
         return SWITCH_FAT_ARGUMENT;
-    for (uint32_t n = 0; n < count; n++)
+    for (uint32_t n = 0; n < count; n++) {
         if (!cluster_valid(v, clusters[n]) || (n && clusters[n - 1] >= clusters[n]))
             return SWITCH_FAT_ARGUMENT;
-    uint8_t names[SWITCH_FAT_MAX_DEPTH][11], entry[32];
+    }
+    uint8_t names[SWITCH_FAT_MAX_DEPTH][11];
+    uint8_t entry[32];
     uint32_t depth = 0;
     int rc = parse_path(path, names, &depth);
     if (rc)
@@ -423,8 +441,9 @@ int switch_fat_path_directories_exclude(struct switch_fat_volume *v, const char 
             if (!(entry[11] & 0x10) || le32(entry + 28))
                 return SWITCH_FAT_NOT_FILE;
             first = (le16(entry + 20) << 16) | le16(entry + 26);
-        } else if (entry[11] & 0x10)
+        } else if (entry[11] & 0x10) {
             return SWITCH_FAT_NOT_FILE;
+        }
     }
     return SWITCH_FAT_OK;
 }
@@ -455,13 +474,15 @@ static int open_file(struct switch_fat_volume *v, const char *path, struct switc
         return SWITCH_FAT_ARGUMENT;
     if (indexed && !map && capacity)
         return SWITCH_FAT_ARGUMENT;
-    uint8_t names[SWITCH_FAT_MAX_DEPTH][11], entry[32];
+    uint8_t names[SWITCH_FAT_MAX_DEPTH][11];
+    uint8_t entry[32];
     uint32_t depth = 0;
     int rc = parse_path(path, names, &depth);
     if (rc)
         return rc;
     struct budget b = {SWITCH_FAT_MAX_IO, SWITCH_FAT_MAX_CHAIN};
-    uint32_t first = v->root_cluster, size = 0;
+    uint32_t first = v->root_cluster;
+    uint32_t size = 0;
     for (uint32_t i = 0; i < depth; i++) {
         rc = lookup(v, first, names[i], entry, &b);
         if (rc)
@@ -473,10 +494,11 @@ static int open_file(struct switch_fat_volume *v, const char *path, struct switc
                 return SWITCH_FAT_NOT_FILE;
             if (!cluster_valid(v, first))
                 return SWITCH_FAT_CHAIN;
-        } else if (entry[11] & 0x10)
+        } else if (entry[11] & 0x10) {
             return SWITCH_FAT_NOT_FILE;
+        }
     }
-    uint32_t clusters;
+    uint32_t clusters = 0;
     rc = switch_fat_index_count(v, size, &clusters);
     if (rc)
         return rc;
@@ -542,7 +564,8 @@ int switch_fat_read(struct switch_fat_volume *v, const struct switch_fat_file *f
     struct budget b = {SWITCH_FAT_MAX_IO, SWITCH_FAT_MAX_CHAIN};
     struct chain s = chain_start(file->first_cluster);
     uint32_t bytes = v->sectors_per_cluster * 512u;
-    uint32_t skip = (uint32_t)(offset / bytes), within = (uint32_t)(offset % bytes);
+    uint32_t skip = (uint32_t)(offset / bytes);
+    uint32_t within = (uint32_t)(offset % bytes);
     for (uint32_t n = 0; n < skip; n++) {
         int rc = chain_next(v, &s, &b);
         if (rc)
@@ -550,9 +573,11 @@ int switch_fat_read(struct switch_fat_volume *v, const struct switch_fat_file *f
         if (!s.cluster)
             return SWITCH_FAT_CHAIN;
     }
-    uint8_t buf[512], *dest = output;
+    uint8_t buf[512];
+    uint8_t *dest = output;
     while (length) {
-        uint32_t sector_index = within / 512, byte = within % 512;
+        uint32_t sector_index = within / 512;
+        uint32_t byte = within % 512;
         uint32_t n = 512 - byte;
         if (n > length)
             n = length;
@@ -561,7 +586,7 @@ int switch_fat_read(struct switch_fat_volume *v, const struct switch_fat_file *f
             count = v->sectors_per_cluster - sector_index;
         if (count > SWITCH_FAT_MAX_READ_SECTORS)
             count = SWITCH_FAT_MAX_READ_SECTORS;
-        int rc;
+        int rc = 0;
         if (!byte && count > 1 && v->read_sectors) {
             rc = sector_run(v, cluster_sector(v, s.cluster) + sector_index, count, dest, &b);
             n = count * 512;
@@ -599,13 +624,16 @@ int switch_fat_read_indexed(struct switch_fat_volume *v, const struct switch_fat
     if (!length)
         return SWITCH_FAT_OK;
     uint32_t bytes = v->sectors_per_cluster * 512u;
-    uint32_t at = (uint32_t)(offset / bytes), within = (uint32_t)(offset % bytes);
+    uint32_t at = (uint32_t)(offset / bytes);
+    uint32_t within = (uint32_t)(offset % bytes);
     struct budget b = {SWITCH_FAT_MAX_IO, SWITCH_FAT_MAX_CHAIN};
-    uint8_t buf[512], *dest = output;
+    uint8_t buf[512];
+    uint8_t *dest = output;
     while (length) {
         if (at >= indexed->count || !cluster_valid(v, indexed->clusters[at]))
             return SWITCH_FAT_CHAIN;
-        uint32_t sector_index = within / 512, byte = within % 512;
+        uint32_t sector_index = within / 512;
+        uint32_t byte = within % 512;
         uint32_t n = 512 - byte;
         if (n > length)
             n = length;
@@ -617,7 +645,8 @@ int switch_fat_read_indexed(struct switch_fat_volume *v, const struct switch_fat
             count = v->sectors_per_cluster - sector_index;
             if (count > limit)
                 count = limit;
-            uint32_t next = at + 1, previous = indexed->clusters[at];
+            uint32_t next = at + 1;
+            uint32_t previous = indexed->clusters[at];
             while (count < limit && next < indexed->count && cluster_valid(v, indexed->clusters[next]) &&
                    indexed->clusters[next] == previous + 1) {
                 uint32_t add = limit - count;
@@ -627,7 +656,7 @@ int switch_fat_read_indexed(struct switch_fat_volume *v, const struct switch_fat
                 previous = indexed->clusters[next++];
             }
         }
-        int rc;
+        int rc = 0;
         if (count > 1) {
             rc = sector_run(v, cluster_sector(v, indexed->clusters[at]) + sector_index, count, dest, &b);
             n = count * 512;

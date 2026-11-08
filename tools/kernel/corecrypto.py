@@ -16,7 +16,6 @@ import dataclasses
 import hashlib
 import json
 import os
-import struct
 import subprocess
 import sys
 import tempfile
@@ -25,6 +24,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import common
 from kernel_names import archive_names
+
+from tools.common import macho
 
 
 def kext_sources(project: dict[str, dict[str, dict[str, object]]], source: Path) -> list[Path]:
@@ -137,8 +138,7 @@ class Archiver:
         if failed:
             sys.exit(f'{len(failed)} corecrypto sources failed:\n{failed[0][1]}')
         for destination, _ in results:
-            data = destination.read_bytes()
-            if struct.unpack_from('<4I', data) != (0xFEEDFACF, 0x100000C, 0, 1):
+            if macho.arm64_kind(destination.read_bytes()) != macho.MH_OBJECT:
                 sys.exit('Wrong object architecture: ' + destination.name)
         archive = self.out / ('libcorecrypto_kernel' + variant + '.a')
         subprocess.run(['xcrun', 'ar', 'rcs', str(archive), *[str(d) for d, _ in results]], check=True, env=self.env)

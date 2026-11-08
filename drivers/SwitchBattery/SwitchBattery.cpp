@@ -98,7 +98,7 @@ enum : uint8_t {
     DevName = 0x21,
 };
 
-constexpr uint16_t kStatusKeep = (1u << 1) | (1u << 3);  // POR, BST; the rest are alert flags
+constexpr unsigned kStatusKeep = (1u << 1) | (1u << 3);  // POR, BST; the rest are alert flags
 constexpr uint16_t kConfigAen = 1u << 2;
 
 // Interrupt lines, all on TegraGPIO (OLED DTB, decompiled: i2c@7000c000 children):
@@ -123,10 +123,30 @@ struct PdSnapshot {
     unsigned millivolts, inputLimit;
 };
 
+const char *inputSource(bool boosting, bool good, const PdSnapshot &pd, unsigned vbus)
+{
+    if (boosting)
+        return "our OTG boost";
+    if (!good)
+        return "none";
+    if (pd.inputLimit)
+        return "USB-PD";
+    if (pd.pdSource)
+        return "USB-PD (controller's contract)";
+    if (vbus == 1)
+        return "USB host";
+    return vbus == 2 ? "adapter" : "unknown";
+}
+
+unsigned flag(unsigned value, unsigned mask)
+{
+    return (value & mask) ? 1 : 0;
+}
+
 uint64_t packPd(const SwitchPDState *s)
 {
-    return 1ull | (uint64_t)s->plugged << 1 | (uint64_t)s->pdSource << 2 | (uint64_t)s->contractMillivolts << 16 |
-           (uint64_t)s->inputLimitMilliamps << 32;
+    return 1ULL | static_cast<uint64_t>(s->plugged) << 1 | static_cast<uint64_t>(s->pdSource) << 2 |
+           static_cast<uint64_t>(s->contractMillivolts) << 16 | static_cast<uint64_t>(s->inputLimitMilliamps) << 32;
 }
 
 PdSnapshot unpackPd(uint64_t w)
@@ -134,7 +154,8 @@ PdSnapshot unpackPd(uint64_t w)
     // Before SwitchPD's first word (or without the controller): a cable might be in; no contract.
     if (!(w & 1))
         return PdSnapshot{true, false, 0, 0};
-    return PdSnapshot{(w >> 1 & 1) != 0, (w >> 2 & 1) != 0, (unsigned)(w >> 16 & 0xffff), (unsigned)(w >> 32 & 0xffff)};
+    return PdSnapshot{(w >> 1 & 1) != 0, (w >> 2 & 1) != 0, static_cast<unsigned>(w >> 16 & 0xffff),
+                      static_cast<unsigned>(w >> 32 & 0xffff)};
 }
 
 struct Reading {
@@ -148,14 +169,14 @@ struct Reading {
 int gaugeWord(uint8_t reg, uint16_t *value)
 {
     uint8_t b[2] = {};
-    int err = tegra_i2c_read(kBus, kGauge, reg, b, sizeof(b));
-    *value = (uint16_t)(b[0] | b[1] << 8);
+    const int err = tegra_i2c_read(kBus, kGauge, reg, b, sizeof(b));
+    *value = static_cast<uint16_t>(b[0] | static_cast<unsigned>(b[1]) << 8);
     return err;
 }
 
 int gaugeWrite(uint8_t reg, uint16_t value)
 {
-    const uint8_t b[2] = {(uint8_t)value, (uint8_t)(value >> 8)};
+    const uint8_t b[2] = {static_cast<uint8_t>(value), static_cast<uint8_t>(value >> 8)};
     return tegra_i2c_write(kBus, kGauge, reg, b, sizeof(b));
 }
 
@@ -165,8 +186,9 @@ int gaugeWrite(uint8_t reg, uint16_t value)
 // ALRT releases.
 int armGauge(unsigned percent, uint16_t temperatureWindow)
 {
-    uint16_t config = 0, status = 0;
-    int err = gaugeWrite(SAlrtTh, (uint16_t)((percent + 1) << 8 | (percent > 1 ? percent - 1 : 0)));
+    uint16_t config = 0;
+    uint16_t status = 0;
+    int err = gaugeWrite(SAlrtTh, static_cast<uint16_t>((percent + 1) << 8 | (percent > 1 ? percent - 1 : 0)));
     if (!err)
         err = gaugeWrite(VAlrtTh, 0xff00);
     if (!err)
@@ -194,7 +216,7 @@ int readFaults(uint8_t *latched, uint8_t *now)
     if (!err)
         err = tegra_i2c_read(kBus, kCharger, bq::Fault, now, 1);
     if (!err)
-        __atomic_fetch_or(&gFaultsSeen, (uint8_t)(*latched | *now), __ATOMIC_ACQ_REL);
+        __atomic_fetch_or(&gFaultsSeen, static_cast<uint8_t>(*latched | *now), __ATOMIC_ACQ_REL);
     return err;
 }
 
@@ -211,7 +233,8 @@ int chargerUpdate(uint8_t reg, uint8_t mask, uint8_t value)
 {
     uint8_t current = 0;
     int err = tegra_i2c_read(kBus, kCharger, reg, &current, 1);
-    const uint8_t next = (uint8_t)((current & ~mask) | (value & mask));
+    const unsigned bits = mask;
+    const uint8_t next = static_cast<uint8_t>((current & ~bits) | (value & bits));
     if (!err && next != current)
         err = tegra_i2c_write(kBus, kCharger, reg, &next, 1);
     return err;
@@ -247,7 +270,7 @@ bool chargerMatches(const uint8_t regs[9], const charge::Decision &d)
 
 void setNumber(OSDictionary *dict, const char *key, int64_t value)
 {
-    if (OSNumber *n = OSNumber::withNumber((unsigned long long)value, 32)) {
+    if (const OSNumber *n = OSNumber::withNumber(static_cast<unsigned long long>(value), 32)) {
         dict->setObject(key, n);
         n->release();
     }
@@ -280,11 +303,12 @@ OSDictionary *adapterDetails(bool external, uint8_t reg00, uint8_t reg08, const 
         setNumber(dict, kIOPMPSAdapterDetailsFamilyKey, kIOPSFamilyCodeDisconnected);
         return dict;
     }
-    int millivolts = 5000, milliamps = (int)bq::decodeInputLimit(reg00);
+    int millivolts = 5000;
+    const int milliamps = static_cast<int>(bq::decodeInputLimit(reg00));
     int family = bq::vbusStat(reg08) == 1 ? kIOPSFamilyCodeUSBHost : kIOPSFamilyCodeUSBChargingPort;
     const char *description = "usb charger";
     if (pd.inputLimit) {
-        millivolts = (int)pd.millivolts;
+        millivolts = static_cast<int>(pd.millivolts);
         family = kIOPSFamilyCodeUSBCPD;
         description = "pd charger";
     } else if (pd.pdSource) {
@@ -292,7 +316,7 @@ OSDictionary *adapterDetails(bool external, uint8_t reg00, uint8_t reg08, const 
         description = "pd charger";
     }
     setNumber(dict, kIOPMPSAdapterDetailsFamilyKey, family);
-    setNumber(dict, kIOPMPSAdapterDetailsWattsKey, (int64_t)millivolts * milliamps / 1000000);
+    setNumber(dict, kIOPMPSAdapterDetailsWattsKey, static_cast<int64_t>(millivolts) * milliamps / 1000000);
     setNumber(dict, kIOPMPSAdapterDetailsVoltage, millivolts);
     setNumber(dict, kIOPMPSAdapterDetailsAmperageKey, milliamps);
     setNumber(dict, "PMUConfiguration", milliamps);  // [IOS-CLTM]: the input current limit thermalmonitord reads
@@ -315,7 +339,8 @@ IOLock *boostLock()
     IOLock *lock = __atomic_load_n(&gBoostLock, __ATOMIC_ACQUIRE);
     if (lock)
         return lock;
-    IOLock *fresh = IOLockAlloc(), *none = nullptr;
+    IOLock *fresh = IOLockAlloc();
+    IOLock *none = nullptr;
     if (!fresh)
         return nullptr;
     if (__atomic_compare_exchange_n(&gBoostLock, &none, fresh, false, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE))
@@ -344,13 +369,13 @@ int watchdogLocked()
     if (gBoosting || !gChargeAllowed) {
         if ((reg & bq::kWatchdogMask) && gWatchdogSaved == 0xff)
             gWatchdogSaved = reg & bq::kWatchdogMask;
-        next = (uint8_t)(reg & ~bq::kWatchdogMask);
+        next = static_cast<uint8_t>(reg & ~bq::kWatchdogMask);
     } else if (gWatchdogSaved != 0xff) {
-        next = (uint8_t)((reg & ~bq::kWatchdogMask) | gWatchdogSaved);
+        next = static_cast<uint8_t>((reg & ~bq::kWatchdogMask) | gWatchdogSaved);
     }
     if (next != reg)
         err = tegra_i2c_write(kBus, kCharger, bq::TerminationTimer, &next, 1);
-    if (!err && !(gBoosting || !gChargeAllowed))
+    if (!err && !gBoosting && gChargeAllowed)
         gWatchdogSaved = 0xff;
     return err;
 }
@@ -366,12 +391,15 @@ int reg01Locked(uint8_t *was, uint8_t *now)
         err = tegra_i2c_read(kBus, kCharger, bq::PowerOnConfig, &reg, 1);
     if (err)
         return err;
-    uint8_t next = (uint8_t)(reg & ~(bq::kChgConfigMask | bq::kWatchdogReset | 0x80));
-    next |= gBoosting ? bq::kChgConfigOtg : gChargeAllowed ? bq::kChgConfigCharge : bq::kChgConfigOff;
+    uint8_t next = static_cast<uint8_t>(reg & ~(bq::kChgConfigMask | bq::kWatchdogReset | 0x80));
+    unsigned mode = gChargeAllowed ? bq::kChgConfigCharge : bq::kChgConfigOff;
+    if (gBoosting)
+        mode = bq::kChgConfigOtg;
+    next |= mode;
     if (gBoosting)
         next |= bq::kBoostLim1300;
     if (gManaged)
-        next = (uint8_t)((next & ~bq::kSysMinMask) | charge::kReg01SysMin);
+        next = static_cast<uint8_t>((next & ~bq::kSysMinMask) | charge::kReg01SysMin);
     if (was)
         *was = reg;
     if (now)
@@ -402,7 +430,8 @@ int applyReg01(const bool *chargeAllowed, const bool *managed, uint8_t *was, uin
 // line when it changes CHG_CONFIG.
 int startMode(const bool *chargeAllowed, const bool *managed)
 {
-    uint8_t was = 0, now = 0;
+    uint8_t was = 0;
+    uint8_t now = 0;
     const int err = applyReg01(chargeAllowed, managed, &was, &now, nullptr);
     static const char *const kModes[] = {"off", "charge", "OTG", "OTG"};
     if (err) {
@@ -428,13 +457,13 @@ void storeTemperature(bool good, int milliC)
     __atomic_store_n(&gTempMilliC, milliC, __ATOMIC_RELAXED);
     __atomic_store_n(&gTempAt, good ? mach_absolute_time() : 0, __ATOMIC_RELAXED);
     __atomic_store_n(&gTempGen, gTempGen + 1, __ATOMIC_RELEASE);
-    if (!before != !good)
+    if ((before == 0u) != !good)
         switch_sensors_note();
 }
 
 void formatCentiC(char *out, size_t size, int centi)
 {
-    const unsigned a = (unsigned)(centi < 0 ? -centi : centi);
+    const unsigned a = static_cast<unsigned>(centi < 0 ? -centi : centi);
     snprintf(out, size, "%s%u.%02u", centi < 0 ? "-" : "", a / 100, a % 100);
 }
 
@@ -442,18 +471,27 @@ void formatCentiC(char *out, size_t size, int centi)
 void statusFields(Reading *r)
 {
     const uint8_t status = r->charger[bq::SystemStatus];
-    const unsigned vbus = bq::vbusStat(status), chrg = bq::chargeStat(status);
+    const unsigned vbus = bq::vbusStat(status);
+    const unsigned chrg = bq::chargeStat(status);
     // VBUS 3 = OTG: we power the partner; and while we source the port (the boost on), what the charger sees is ours.
-    r->external = (status & bq::kPowerGood) && vbus != 3 && !__atomic_load_n(&gBoosting, __ATOMIC_RELAXED);
+    r->external = ((status & bq::kPowerGood) != 0) && vbus != 3 && !__atomic_load_n(&gBoosting, __ATOMIC_RELAXED);
     r->charging = r->external && (chrg == 1 || chrg == 2);
     r->full = r->external && chrg == 3;
 }
 
 int readAll(Reading *r)
 {
-    uint16_t repCap = 0, repSoc = 0, temp = 0, vcell = 0, current = 0, avgCurrent = 0;
-    uint16_t fullCap = 0, cycles = 0, designCap = 0;
-    uint8_t latched = 0, now = 0;
+    uint16_t repCap = 0;
+    uint16_t repSoc = 0;
+    uint16_t temp = 0;
+    uint16_t vcell = 0;
+    uint16_t current = 0;
+    uint16_t avgCurrent = 0;
+    uint16_t fullCap = 0;
+    uint16_t cycles = 0;
+    uint16_t designCap = 0;
+    uint8_t latched = 0;
+    uint8_t now = 0;
     int err = gaugeWord(RepCap, &repCap);
     if (!err)
         err = gaugeWord(RepSOC, &repSoc);
@@ -487,9 +525,9 @@ int readAll(Reading *r)
     r->designCapacity = designCap / 2;
     r->cycles = cycles / 100u;
     r->millivolts = (vcell >> 3) * 625u / 1000;
-    r->milliamps = (int16_t)current * 15625 / 100000;
-    r->avgMilliamps = (int16_t)avgCurrent * 15625 / 100000;
-    r->centiCelsius = (int16_t)temp * 100 / 256;
+    r->milliamps = static_cast<int16_t>(current) * 15625 / 100000;
+    r->avgMilliamps = static_cast<int16_t>(avgCurrent) * 15625 / 100000;
+    r->centiCelsius = static_cast<int16_t>(temp) * 100 / 256;
     r->milliCelsius = switch_max17050_millic(temp);
     return 0;
 }
@@ -501,7 +539,9 @@ static bool gBatteryExternal;
 
 extern "C" bool native_aks_device_digest(const char *label, uint8_t out[32]);
 
+// NOLINTNEXTLINE(misc-use-internal-linkage): OSDefineMetaClassAndStructors needs the class's external linkage (its kalloc type view)
 class SwitchBattery : public IOPMPowerSource {
+    // NOLINTNEXTLINE(misc-explicit-constructor): IOKit's structors macro declares the metaclass constructor
     OSDeclareDefaultStructors(SwitchBattery);
     IOWorkLoop *loop = nullptr;
     IOTimerEventSource *timer = nullptr;
@@ -534,7 +574,7 @@ class SwitchBattery : public IOPMPowerSource {
     void publishSerial();
     bool identify();
     bool refresh();
-    bool reportAsFound(uint8_t found[11]);
+    static bool reportAsFound(uint8_t found[11]);
     bool setUpCharger(const uint8_t found[11]);
     void manage(Reading &r, const PdSnapshot &pd);
     void apply(const charge::Decision &next, const char *why, int centiCelsius);
@@ -591,7 +631,7 @@ void SwitchBattery::publishSerial()
 
 void SwitchBattery::setKeyNumber(const char *key, int64_t value)
 {
-    if (OSNumber *n = OSNumber::withNumber((unsigned long long)value, 32)) {
+    if (OSNumber *n = OSNumber::withNumber(static_cast<unsigned long long>(value), 32)) {
         setKey(key, n);
         n->release();
     }
@@ -638,13 +678,14 @@ void SwitchBattery::free()
 
 bool SwitchBattery::identify()
 {
-    uint8_t name[2] = {}, vendor = 0;
+    uint8_t name[2] = {};
+    uint8_t vendor = 0;
     int err = tegra_i2c_init(kBus);
     if (!err)
         err = tegra_i2c_read(kBus, kGauge, DevName, name, sizeof(name));
     if (!err)
         err = tegra_i2c_read(kBus, kCharger, bq::VendorPart, &vendor, 1);
-    if (!err && (name[0] | name[1] << 8) == 0x00ac && vendor == 0x2f) {
+    if (!err && (name[0] | static_cast<unsigned>(name[1]) << 8) == 0x00ac && vendor == 0x2f) {
         uint8_t found[11] = {};
         const bool foundRead = reportAsFound(found);
         managed = foundRead && setUpCharger(found);  // no snapshot to fall back to: read only
@@ -663,7 +704,8 @@ bool SwitchBattery::identify()
 // One line with the charger as an earlier boot, the bootloader or the chip's own reset left it, before any write.
 bool SwitchBattery::reportAsFound(uint8_t found[11])
 {
-    uint8_t latched = 0, now = 0;
+    uint8_t latched = 0;
+    uint8_t now = 0;
     const int err = readCharger(found, &latched, &now);
     found[9] = now;
     found[10] = latched;
@@ -682,7 +724,7 @@ bool SwitchBattery::reportAsFound(uint8_t found[11])
           bq::decodeChargeVoltage(found[4]), bq::watchdogSeconds(found[5]), (found[5] & bq::kEnTimer) ? "on" : "off",
           kVbus[bq::vbusStat(found[8])], (found[8] & bq::kPowerGood) ? ", power good" : "",
           (found[8] & bq::kDpm) ? ", in DPM" : "", kCharge[bq::chargeStat(found[8])],
-          ((latched | now) & bq::kFaultWatchdog) ? "default" : "host");
+          ((static_cast<unsigned>(latched) | now) & bq::kFaultWatchdog) ? "default" : "host");
     return true;
 }
 
@@ -691,7 +733,7 @@ bool SwitchBattery::setUpCharger(const uint8_t found[11])
 {
     uint16_t temp = 0;
     int err = gaugeWord(Temp, &temp);
-    const int centi = (int16_t)temp * 100 / 256;
+    const int centi = static_cast<int16_t>(temp) * 100 / 256;
     char celsius[16];
     formatCentiC(celsius, sizeof(celsius), centi);
     if (!err && (!temp || centi < charge::kPlausibleMinCentiC || centi > charge::kPlausibleMaxCentiC)) {
@@ -705,10 +747,13 @@ bool SwitchBattery::setUpCharger(const uint8_t found[11])
     decision = charge::decide(zone, requests);
     if (!err)
         err = writeCharger(decision);
-    const bool charges = decision.charge, yes = true;
+    const bool charges = decision.charge;
+    const bool yes = true;
     if (!err)
         err = startMode(&charges, &yes);
-    uint8_t now[9] = {}, latched = 0, current = 0;
+    uint8_t now[9] = {};
+    uint8_t latched = 0;
+    uint8_t current = 0;
     if (!err)
         err = readCharger(now, &latched, &current);
     if (!err && chargerMatches(now, decision)) {
@@ -726,7 +771,8 @@ bool SwitchBattery::setUpCharger(const uint8_t found[11])
         (void)tegra_i2c_write(kBus, kCharger, reg, &found[reg], 1);
     }
     (void)chargerUpdate(bq::InputSource, bq::kVindpmMask, found[bq::InputSource]);
-    const bool allowed = decision.charge, no = false;
+    const bool allowed = decision.charge;
+    const bool no = false;
     (void)startMode(&allowed, &no);
     if (IOLock *lock = boostLock()) {  // SYS_MIN as found (REG01's other bits are the arbiter's)
         IOLockLock(lock);
@@ -742,7 +788,7 @@ bool SwitchBattery::setUpCharger(const uint8_t found[11])
 bool SwitchBattery::refresh()
 {
     Reading r = {};
-    int err = readAll(&r);
+    const int err = readAll(&r);
     if (err) {
         if (!reportedFailure)
             IOLog("SwitchBattery: read failed (%d), keeping last values\n", err);
@@ -779,7 +825,7 @@ bool SwitchBattery::refresh()
     setVoltage(r.millivolts);
     setAmperage(r.avgMilliamps);
     __atomic_store_n(&gBatteryExternal, r.external, __ATOMIC_RELAXED);
-    __atomic_store_n(&gBatteryAvgMa, (int)r.avgMilliamps, __ATOMIC_RELAXED);
+    __atomic_store_n(&gBatteryAvgMa, r.avgMilliamps, __ATOMIC_RELAXED);
     setCycleCount(r.cycles);
     setKey(kIOPMFullyChargedKey, r.full ? kOSBooleanTrue : kOSBooleanFalse);
     setKey("AppleRawExternalConnected", (r.external || (inflowOff && pd.plugged)) ? kOSBooleanTrue : kOSBooleanFalse);
@@ -832,7 +878,8 @@ void SwitchBattery::manage(Reading &r, const PdSnapshot &pd)
 {
     if ((r.fault & bq::kFaultWatchdog) || !chargerMatches(r.charger, decision)) {
         if (++lostInARow > kLostLimit) {
-            const bool allowed = decision.charge, no = false;
+            const bool allowed = decision.charge;
+            const bool no = false;
             (void)applyReg01(&allowed, &no, nullptr, nullptr, nullptr);
             managed = false;  // zoneControl stays: charging still stops outside 4-51 C
             IOLog("SwitchBattery: charger keeps losing its settings (REG00-06 %02x %02x %02x %02x %02x %02x %02x, "
@@ -858,7 +905,8 @@ void SwitchBattery::manage(Reading &r, const PdSnapshot &pd)
         snprintf(why, sizeof(why), "%s -> %s", charge::zoneName(from), charge::zoneName(next));
         apply(charge::decide(zone, requests), why, r.centiCelsius);
     }
-    uint8_t was = 0, now = 0;
+    uint8_t was = 0;
+    uint8_t now = 0;
     const int err = applyReg01(nullptr, nullptr, &was, &now, &boosting);
     if (!err && was != now) {
         IOLog("SwitchBattery: REG01 was %#x, set %#x (CHG_CONFIG %u)\n", was, now, (now & bq::kChgConfigMask) >> 4);
@@ -904,7 +952,8 @@ void SwitchBattery::followZone(const Reading &r)
     const charge::Zone next = charge::nextZone(zone, r.centiCelsius);
     decision = charge::decide(next, requests);
     const bool charges = decision.charge;
-    uint8_t was = 0, now = 0;
+    uint8_t was = 0;
+    uint8_t now = 0;
     const int err = applyReg01(&charges, nullptr, &was, &now, nullptr);
     if (next == zone)
         return;
@@ -924,7 +973,7 @@ void SwitchBattery::applyInput(Reading &r, const PdSnapshot &pd)
     if (!pd.plugged)
         appliedPd = false;  // the next cable starts from the chip's own detection
     uint8_t reg00 = r.charger[bq::InputSource];
-    const bool hiZ = reg00 & bq::kHiZ;
+    const bool hiZ = (reg00 & bq::kHiZ) != 0;
     if (decision.hiZ) {  // [IOS-PD] DisableInflow: the input off, the system on the battery, until it is released
         if (!hiZ && !boosting) {
             // Under REG01's lock: a boost SwitchPD starts meanwhile is never put behind a disconnected input.
@@ -933,10 +982,10 @@ void SwitchBattery::applyInput(Reading &r, const PdSnapshot &pd)
                 return;
             IOLockLock(lock);
             int err = 0;
-            const uint8_t next = (uint8_t)(reg00 | bq::kHiZ);
+            const uint8_t next = static_cast<uint8_t>(reg00 | bq::kHiZ);
             if (!gBoosting)
                 err = tegra_i2c_write(kBus, kCharger, bq::InputSource, &next, 1);
-            const bool written = !gBoosting && !err;
+            const bool written = !gBoosting && (err == 0);
             IOLockUnlock(lock);
             if (written)
                 r.charger[bq::InputSource] = next;
@@ -982,7 +1031,7 @@ void SwitchBattery::applyInput(Reading &r, const PdSnapshot &pd)
         step = want;
     int err = 0;
     for (;;) {
-        const uint8_t next = (uint8_t)((reg00 & ~(bq::kHiZ | bq::kIinlimMask)) | step);
+        const uint8_t next = static_cast<uint8_t>((reg00 & ~(bq::kHiZ | bq::kIinlimMask)) | step);
         err = tegra_i2c_write(kBus, kCharger, bq::InputSource, &next, 1);
         if (err)
             break;
@@ -994,7 +1043,8 @@ void SwitchBattery::applyInput(Reading &r, const PdSnapshot &pd)
     }
     r.charger[bq::InputSource] = reg00;
     // What the chip holds now, read back (the proof that the contract's limit applied): one line per change.
-    uint8_t back00 = 0, back02 = 0;
+    uint8_t back00 = 0;
+    uint8_t back02 = 0;
     int readErr = tegra_i2c_read(kBus, kCharger, bq::InputSource, &back00, 1);
     if (!readErr)
         readErr = tegra_i2c_read(kBus, kCharger, bq::ChargeCurrent, &back02, 1);
@@ -1016,14 +1066,8 @@ void SwitchBattery::stats(const Reading &r, const PdSnapshot &pd)
     static const char *const kCharge[] = {"not charging", "pre-charge", "fast charge", "done"};
     const uint8_t s = r.charger[bq::SystemStatus];
     const unsigned vbus = bq::vbusStat(s);
-    const bool good = s & bq::kPowerGood;
-    const char *source = boosting        ? "our OTG boost"
-                         : !good         ? "none"
-                         : pd.inputLimit ? "USB-PD"
-                         : pd.pdSource   ? "USB-PD (controller's contract)"
-                         : vbus == 1     ? "USB host"
-                         : vbus == 2     ? "adapter"
-                                         : "unknown";
+    const bool good = (s & bq::kPowerGood) != 0;
+    const char *source = inputSource(boosting, good, pd, vbus);
     char celsius[16];
     formatCentiC(celsius, sizeof(celsius), r.centiCelsius);
     os_log(
@@ -1060,19 +1104,19 @@ IOReturn SwitchBattery::request(const OSDictionary *dict)
 {
     charge::Requests next = requests;
     bool known = false;
-    if (OSBoolean *b = OSDynamicCast(OSBoolean, dict->getObject("IsCharging"))) {
+    if (const OSBoolean *b = OSDynamicCast(OSBoolean, dict->getObject("IsCharging"))) {
         next.osInhibit = !b->getValue();
         known = true;
     }
-    if (OSBoolean *b = OSDynamicCast(OSBoolean, dict->getObject("ExternalConnected"))) {
+    if (const OSBoolean *b = OSDynamicCast(OSBoolean, dict->getObject("ExternalConnected"))) {
         next.inflowDisabled = !b->getValue();
         known = true;
     }
-    if (OSBoolean *b = OSDynamicCast(OSBoolean, dict->getObject("PredictiveChargingInhibit"))) {
+    if (const OSBoolean *b = OSDynamicCast(OSBoolean, dict->getObject("PredictiveChargingInhibit"))) {
         next.predictiveInhibit = b->getValue();
         known = true;
     }
-    if (OSNumber *n = OSDynamicCast(OSNumber, dict->getObject("AppleChargeRateLimitIndex"))) {
+    if (const OSNumber *n = OSDynamicCast(OSNumber, dict->getObject("AppleChargeRateLimitIndex"))) {
         next.thermalLimitIndex = n->unsigned32BitValue();
         known = true;
     }
@@ -1167,7 +1211,7 @@ void SwitchBattery::alertFired(OSObject *owner, IOInterruptEventSource *sender, 
     const uint64_t now = mach_absolute_time();
     uint64_t elapsedNS = 0;
     absolutetime_to_nanoseconds(now - self->alertWindowStart[i], &elapsedNS);
-    if (elapsedNS > 1000000000ull) {
+    if (elapsedNS > 1000000000ULL) {
         self->alertWindowStart[i] = now;
         self->alertCount[i] = 0;
     }
@@ -1248,6 +1292,7 @@ extern "C" int switch_battery_start(void)
     return 0;
 }
 
+// NOLINTNEXTLINE(misc-const-correctness): IOWorkLoop::Action fixes the signature
 static IOReturn sleepAction(OSObject *owner, void *entering, void *, void *, void *)
 {
     static_cast<SwitchBattery *>(owner)->sleep(entering != nullptr);
@@ -1269,7 +1314,10 @@ extern "C" void switch_battery_resume(void)
 
 extern "C" int switch_battery_gauge_sample(struct switch_battery_gauge *sample)
 {
-    uint16_t qh = 0, avg = 0, now = 0, vcell = 0;
+    uint16_t qh = 0;
+    uint16_t avg = 0;
+    uint16_t now = 0;
+    uint16_t vcell = 0;
     int err = gaugeWord(QH, &qh);
     if (!err)
         err = gaugeWord(AvgCurrent, &avg);
@@ -1317,7 +1365,8 @@ extern "C" int switch_battery_set_otg_boost(bool on, bool ourVbus)
     int err = tegra_i2c_init(kBus);
     if (!err && on && !gBoosting && !ourVbus) {
         err = tegra_i2c_read(kBus, kCharger, bq::SystemStatus, &status, 1);
-        refused = !err && ((status & bq::kPowerGood) || bq::vbusStat(status) == 1 || bq::vbusStat(status) == 2);
+        refused =
+            (err == 0) && (((status & bq::kPowerGood) != 0) || bq::vbusStat(status) == 1 || bq::vbusStat(status) == 2);
     }
     if (!err && !refused) {
         const bool was = gBoosting;
@@ -1329,7 +1378,9 @@ extern "C" int switch_battery_set_otg_boost(bool on, bool ourVbus)
     IOLockUnlock(lock);
     if (err)
         IOLog("SwitchBattery: OTG boost %s failed (I2C %d)\n", on ? "on" : "off", err);
-    return err ? -1 : refused ? SWITCH_BATTERY_BOOST_VBUS_PRESENT : 0;
+    if (err)
+        return -1;
+    return refused ? SWITCH_BATTERY_BOOST_VBUS_PRESENT : 0;
 }
 
 // The USB role report's charger line (SwitchBattery.h). Writes nothing; REG09's faults go through readFaults, so the
@@ -1341,7 +1392,11 @@ extern "C" int switch_battery_describe_otg(char *buffer, size_t size)
     static const char *const kVbusStat[4] = {"none", "USB host", "adapter", "OTG"};
     static const char *const kChrgStat[4] = {"not charging", "pre-charge", "fast charge", "done"};
     static const char *const kWatchdog[4] = {"off", "40 s", "80 s", "160 s"};
-    uint8_t config = 0, timer = 0, status = 0, latched = 0, now = 0;
+    uint8_t config = 0;
+    uint8_t timer = 0;
+    uint8_t status = 0;
+    uint8_t latched = 0;
+    uint8_t now = 0;
     uint16_t current = 0;
     int err = tegra_i2c_init(kBus);
     if (!err)
@@ -1361,9 +1416,10 @@ extern "C" int switch_battery_describe_otg(char *buffer, size_t size)
              "BQ24193 REG01 %#x (CHG_CONFIG %u, %s%s) REG05 %#x (watchdog %s) REG08 %#x (VBUS %s, %s, PG %u) REG09 "
              "%#x/%#x (boost fault %u/%u, watchdog fault %u/%u); battery %d mA",
              config, (config & bq::kChgConfigMask) >> 4, (config & bq::kBoostLim1300) ? "1.3 A" : "500 mA",
-             __atomic_load_n(&gBoosting, __ATOMIC_RELAXED) ? ", ours" : "", timer, kWatchdog[(timer >> 4) & 3], status,
-             kVbusStat[status >> 6], kChrgStat[(status >> 4) & 3], !!(status & bq::kPowerGood), latched, now,
-             !!(latched & 0x40), !!(now & 0x40), !!(latched & 0x80), !!(now & 0x80),
+             __atomic_load_n(&gBoosting, __ATOMIC_RELAXED) ? ", ours" : "", timer,
+             kWatchdog[(static_cast<unsigned>(timer) >> 4) & 3], status, kVbusStat[static_cast<unsigned>(status) >> 6],
+             kChrgStat[(static_cast<unsigned>(status) >> 4) & 3], flag(status, bq::kPowerGood), latched, now,
+             flag(latched, 0x40), flag(now, 0x40), flag(latched, 0x80), flag(now, 0x80),
              gauge ? 0 : (int16_t)current * 15625 / 100000);
     return 0;
 }

@@ -23,11 +23,13 @@ exports_files(glob(
 py_library(
     name = "gen_lib",
     srcs = ["gen.py"],
+    deps = ["//tools/common:macho"],
 )
 
 py_binary(
     name = "gen",
     srcs = ["gen.py"],
+    deps = ["//tools/common:macho"],
 )
 
 py_library(
@@ -65,7 +67,7 @@ py_binary(
         "kinds/*/*.json",
     ]),
     deps = [
-        "//tools/prelink:native_prelink",
+        "//tools/common:macho",
         "//translate/arm64e:prelink26",
     ],
 )
@@ -95,7 +97,7 @@ py_binary(
     ]),
     main = "extract.py",
     deps = [
-        "//tools/prelink:native_prelink",
+        "//tools/common:macho",
         "//translate/arm64e:prelink26",
     ],
 )
@@ -108,7 +110,7 @@ py_test(
         "test/extract_test.py",
     ],
     deps = [
-        "//tools/prelink:native_prelink",
+        "//tools/common:macho",
         "//translate/arm64e:prelink26",
     ],
 )

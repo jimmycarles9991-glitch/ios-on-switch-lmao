@@ -17,12 +17,16 @@
 #include <stdio.h>
 #include <string>
 #include <vector>
+#include <dlfcn.h>
 #include "NativeBridgeMetalFrontend.h"
 #include "bridge/NativeMetalObjects.h"
 #include "../runtime/RawMetal.h"
 extern "C" void mock_iokit_report(void);
 extern "C" void pushcount_report(const char *what);
 static void (*const r8_set_stats)(void) = nullptr;  // r8-nullmoth's instrumented bridge only
+// A malloc counter preloaded into the run (DYLD_INSERT_LIBRARIES): the steady frames' allocations, every thread's
+static const auto mc_start = reinterpret_cast<void (*)(void)>(dlsym(RTLD_DEFAULT, "mc_start"));
+static const auto mc_stop = reinterpret_cast<void (*)(unsigned)>(dlsym(RTLD_DEFAULT, "mc_stop"));
 
 static void missing(const char *cls, const char *sel)
 {
@@ -348,6 +352,8 @@ int main(int argc, char **argv)
                 pushcount_report("warm-up");
                 if (r8_set_stats)
                     r8_set_stats();
+                if (mc_start)
+                    mc_start();
             }
             if (pause && frame == warm) {
                 fprintf(stderr, "pid %d warm; press enter\n", getpid());
@@ -470,6 +476,8 @@ int main(int argc, char **argv)
                "draw %.1f us\n",
                cpu.size(), draws, mode, sum / cpu.size(), cpu[cpu.size() / 2], cpu[cpu.size() * 9 / 10],
                wall[wall.size() / 2], 1000 * sum / cpu.size() / draws);
+        if (mc_stop)
+            mc_stop(unsigned(frames - warm));
         char text[2048] = {};
         native_bridge_metal_rates(text, sizeof text);
         printf("rates: %s\n", text);

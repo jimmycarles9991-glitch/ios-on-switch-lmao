@@ -31,12 +31,17 @@
 #include <map>
 #include <tuple>
 #include <vector>
+#include <IOKit/IOReturn.h>
+#include <mach/kern_return.h>
+#include "raw_comp.h"
 #include "raw_kernel.h"
 #include "raw_pack.h"
 #include "raw_push.h"
 #include "raw_overlap.h"
 #include "raw_region.h"
+#include "raw_sampler.h"
 #include "raw_zeta.h"
+#include "raw_xr.h"
 #include "raw_ycbcr.h"
 #include "../fx/fx_mip.h"
 
@@ -114,8 +119,8 @@ struct Texture {
     uint8_t bpp = 0;
     bool renderable = false;  // a pitch render target as it is: a target format, address and pitch multiples of 128
     // A target format, but an address or pitch the render hardware does not take (NVK's linear-render rule, linearTarget): a pass
-    // renders it through a pool image the copy engine fills from it before and copies back to it after (NVK's own tiled shadow,
-    // nvk_linear_render_copy, for the same targets: the texels stored are the same)
+    // renders it, block-linear, through a pool image the copy engine fills from it before and copies back to it after (NVK's
+    // own tiled shadow, nvk_linear_render_copy, for the same targets: the texels stored are the same)
     bool shadowTarget = false;
     bool memoryless = false;  // no memory: a pass gives it a backing (Device::backing)
     bool wc =
@@ -134,6 +139,11 @@ struct Texture {
     } planes;
 
     bool planar = false;
+    // A planar texture rendered into: its passes render into planarStandIn (RGBA16Float, block-linear), which a draw loads from
+    // the planes before a pass that loads it and stores into them after one that stores it, through luma (R8Unorm over plane 0)
+    // and chroma (RG8Unorm over plane 1): the frontend's two-plane stand-in (TwoPlaneStandIn.metal), as m2v renders it. Never
+    // sampled: Metal reads the texture's codes (span)
+    Texture *planarStandIn = nullptr;
     // A two-plane YCbCr surface's texture (raw_ycbcr.h): the image sampled is span (RGBA16Float, RGBA32Float, RGBA8Unorm,
     // RGB10A2Unorm), which a pass of the pack's conversion state draws from the planes' textures, luma (R8Unorm, R16Unorm) and
     // chroma (RG8Unorm, RG16Unorm; none over plane 1), before the work that samples it (pack/ycbcr.metal; shape: its fragment
@@ -153,26 +163,27 @@ struct Texture {
     }
 
     // Rows 16 but not 32 bytes apart (or an address off 32): the texture header's pitch takes multiples of 32, so it is sampled
-    // through `sampled`, a pool image of its texels the copy engine refreshes from it (CommandBuffer::refresh) before work that
-    // samples it, as m2v samples such a surface through a shadow image it copies in. tic is sampled's.
+    // through `sampled`, a block-linear pool image of its texels the copy engine refreshes from it before work that samples
+    // it, as m2v samples such a surface through a shadow image it copies in. tic is sampled's.
     Texture *sampled = nullptr;
 
-    // A mipmapped texture's levels (r12, raw/fx): level 0 is this texture (pitch, pool memory: rendered, copied and cleared as any
-    // other), and `chain` the block-linear image of every level that its texture header (tic) points at, which the 2D engine
-    // fills from level 0 (BlitEncoder::generate). The chain's own level 0 is a copy: `l0Fresh` says it holds what the texture's
-    // level 0 holds now, `levelsFresh` that its later levels were generated since the last generateMipmaps (encode order, under
-    // the submit lock: the GPU's order).
-    // `rawLevels`: levels written directly (a pass into the level, chainLevelTarget, or a copy from a mirror) since the last
-    // generate, so not what generating from level 0 gives: m2v gets them by copies (RawMetal.mm mirrorsForM2v).
-    // `mirrorLevels`: levels m2v rendered since, held by the RMTexture's mirror of each and copied into the chain before
-    // the raw path next reads it (BlitEncoder::copyToLevel).
+    // An extended-range texture's (raw_xr.h): the image a draw samples, its codes' values as RGBA16Float, which a pass of the
+    // pack's conversion state draws from the codes (tic) before the work that samples it. Null: not sampled.
+    Texture *standIn = nullptr;
+    // Metal keeps it losslessly compressed (m2v nan_clear.rs keeps_nan_sign): an extended-range Clear in a pass that records
+    // no draw call stores Metal's straight route's codes
+    bool compressed = false;
+    // Its memory is bound with a compressible kind (raw_comp.h): its passes enable colour, or Z and stencil, compression
+    bool comptags = false;
+
+    // A mipmapped texture's levels (r12, raw/fx): `chain` is the block-linear image of every level, NIL's layout, and this texture
+    // is its level 0 (va, span, pitch and block height level 0's; its header, tic, the chain's). The 2D engine fills the later
+    // levels from level 0 in place (BlitEncoder::generate); m2v's twin is a texture of every level over the same memory, so
+    // whatever either driver writes into a level is the level.
     struct Chain {
         fx::MipChain layout;
         uint64_t va = 0;
-        Span span;
-        uint32_t fmt2d = 0;
-        bool l0Fresh = false, levelsFresh = false;
-        uint16_t rawLevels = 0, mirrorLevels = 0;
+        uint32_t fmt2d = 0;  // the 2D engine's surface format (fx::twodFormat); 0: it does not filter this one
         uint32_t levelTic[fx::kMaxLevels] = {};  // a view of each level alone (Device::levelTic), made on first use
     } *chain = nullptr;
 
@@ -186,6 +197,10 @@ struct Texture {
     // Depth32Float_Stencil8 (raw_zeta.h): block-linear zeta memory, bound with its own PTE kind; never sampled, copied or a
     // colour target
     bool zeta = false;
+
+    // Device::createView's: a header of its own over its parent's memory. Whatever else it was copied from the parent with
+    // (planes, stand-ins, images) stays the parent's, which outlives it: destroyTexture frees its header alone.
+    bool view = false;
 };
 
 struct Buffer {
@@ -200,16 +215,11 @@ struct Buffer {
     Lease *lease = nullptr;    // as Texture::lease
 };
 
-struct SamplerDesc {                                      // the MTLSamplerDescriptor fields the TSC takes
-    uint8_t minFilter = 0, magFilter = 0, mipFilter = 0;  // MTLSamplerMinMagFilter / MTLSamplerMipFilter
-    uint8_t sAddress = 0, tAddress = 0, rAddress = 0;     // MTLSamplerAddressMode (clampToBorderColor: not taken)
-    uint8_t maxAnisotropy = 1;
-    float lodMin = 0, lodMax = 3.402823466e+38f;
-};
-
 // Level `level` (1 .. levels - 1) of mipmapped texture `t`'s chain as a render target (raw_target.h: NVK's block-linear
 // target of that level), for a pass to render into: `out` names the chain's memory, it owns nothing. False: not a level of it.
 bool chainLevelTarget(const Texture &t, uint32_t level, Texture &out);
+// The same level as the copy engine's block-linear side, for a format the 3D engine does not render too
+bool chainLevelImage(const Texture &t, uint32_t level, Texture &out);
 // The sampler header NVK writes for the Vulkan sampler m2v makes of `d` (Mesa nvk_sampler_get_header; checked against the twin for
 // Core Animation's combinations: pack/mksamplers.py, test/samplercheck.cpp)
 void samplerHeader(const SamplerDesc &d, uint32_t w[8]);
@@ -227,7 +237,17 @@ struct Pipeline {
     std::vector<uint32_t> methods;         // the state's registers as ready push words (program offsets relocated)
     uint32_t push[32] = {}, pushMask = 0;  // root table [0x700, 0x780): the words m2v's push ranges write, and which
     uint8_t setSlot[2] = {};  // the constant buffer slot the vertex and the pixel program read set 0 at (0: none)
-    uint8_t writeBits = 0;    // colors its draws write: SET_CT_WRITE(i) with a channel on
+
+    // the uniform buffers of set 0 its programs read as constant buffers: the group (0 vertex, 4 pixel), the slot and the set's
+    // entry that names the buffer; false where a program reads one no entry names (its draws are refused)
+    struct UboCbuf {
+        uint8_t group, slot, entry;
+    };
+
+    UboCbuf ubos[16] = {};
+    uint8_t uboCount = 0;
+    bool ubosNamed = true;
+    uint8_t writeBits = 0;  // colors its draws write: SET_CT_WRITE(i) with a channel on
     // colors its fragment shader reads, and may write, as storage images inside the pixel interlock (metal2vulkan's storage
     // form of a fetch: the state turns the interlock on with SET_PIXEL_SHADER_INTERLOCK_CONTROL); the ROP writes none of them
     uint8_t storageBits = 0;
@@ -244,7 +264,21 @@ struct Pipeline {
     uint8_t readBits = 0;      // colors its draws read as they were: blended into, or written through a partial mask
     uint8_t fetchBits = 0;     // colors it reads by framebuffer fetch
     uint32_t depthFormat = 0;  // its key's depth and stencil attachment format (ds=<format>/<format>; 0: none)
+    // push words setting back the registers outside the pack's varying ones its methods set (a state the runtime made:
+    // raw_record.h extras), to their value in every pack state: emitted before the next state's methods
+    std::vector<uint32_t> restore;
 };
+
+// A program in the heap: its record, its SET_PIPELINE_PROGRAM value, its shader data's GPU address (0: none) and its header
+struct PlacedProgram {
+    const PackProgram *record = nullptr;
+    uint32_t program = 0;
+    uint64_t data = 0;
+    const uint8_t *header = nullptr;  // its shader header, as the CPU holds it
+};
+
+struct RuntimeRecord;
+struct CapturedProgram;
 
 // A render pass's attachments (Core Animation: color 0 the target, color 1 a memoryless attachment, writeMask 0 or 15)
 struct ColorAttachment {
@@ -285,6 +319,8 @@ public:
     }
 
     void setBytes(int stage, uint32_t slot, const void *bytes, uint32_t length);  // stage 1 vertex, 2 fragment
+    // the same for bytes already written at `va` (256-byte aligned, zero to the next 256 bytes; `cpu` the CPU's view)
+    void setBytesAt(int stage, uint32_t slot, uint64_t va, uint32_t length, const uint8_t *cpu);
     void setBuffer(int stage, uint32_t slot, const Buffer *buffer, uint64_t offset);
     void setBufferOffset(int stage, uint32_t slot, uint64_t offset);
 
@@ -321,15 +357,18 @@ public:
         raster_.fill = mode;
     }
 
+    // setDepthBias:slopeScale:clamp: of finite constant and slope factors (an infinite or NaN one m2v draws through the
+    // viewport: refused before it gets here)
+    void setDepthBias(float constant, float slope, float clamp);
+
     void setViewport(double x, double y, double w, double h, double znear, double zfar);
     void barrier();  // memoryBarrier...: everything before is written and visible to what follows
     // false: this draw cannot be drawn exactly as m2v would (*why says what); the command buffer goes to m2v instead
     bool draw(uint32_t primitive, uint32_t first, uint32_t count, uint32_t instances, uint32_t baseInstance,
               const char **why);
-    // drawIndexedPrimitives of one instance, base vertex and instance 0 (Core Animation's meshes): `count` indices of `indexSize`
-    // bytes (2 or 4) at `offset` in `ib`
+    // drawIndexedPrimitives: `count` indices of `indexSize` bytes (2 or 4) at `offset` in `ib`, each `baseVertex` on
     bool drawIndexed(uint32_t primitive, uint32_t count, uint32_t indexSize, const Buffer *ib, uint64_t offset,
-                     const char **why);
+                     uint32_t instances, int32_t baseVertex, uint32_t baseInstance, const char **why);
     void end();
 
 private:
@@ -347,17 +386,20 @@ private:
     Device *dev_ = nullptr;
     PassDesc pass_;
     Push p_;
+    const Pipeline *extrasAtBegin_ = nullptr;  // set back by the pass's prologue, before its clears
     uint32_t *bodyStart_ = nullptr;
     std::vector<std::pair<uint32_t *, uint32_t *>> bodies_;  // the pass body's push segments, in order
     void reserve();
     Pipeline *pipeline_ = nullptr, *emitted_ = nullptr;
+    bool residualsPushed_ = false;  // the last draw's push words held SlotBindOffset residuals (RenderEncoder::prepare)
     Bound bufs_[3][31];
     const Texture *textures_[16] = {};
     const Sampler *samplers_[16] = {};
     uint64_t vbVa_ = 0, vbLimit_ = 0, ibVa_ = 0, ibEnd_ = 0;
     uint32_t ibSize_ = 0;
-    // the state a draw needs, up to its draw parameters (vertices [vFirst, vFirst + vCount) of the stream are CPU-cleaned)
-    bool prepare(Pipeline *pl, uint32_t primitive, uint32_t first, uint32_t vFirst, uint32_t vCount,
+    // the state a draw needs, up to its draw parameters (vertices [vFirst, vFirst + vCount) of the stream are CPU-cleaned):
+    // the first vertex a draw of vertices starts at, or the base vertex an indexed one adds to each index
+    bool prepare(Pipeline *pl, uint32_t primitive, int32_t first, uint32_t vFirst, uint32_t vCount,
                  uint32_t baseInstance, bool indexed, const char **why);
     uint32_t scissor_[2] = {}, viewport_[8] = {};
     bool scissorDirty_ = true, viewportDirty_ = true;
@@ -369,13 +411,18 @@ private:
     // clockwise, fill) at a pass's start, put back at its end
     struct Raster {
         uint8_t cull = 0, winding = 0, fill = 0;
+        bool bias = true;                                         // polygon offset on: a triangle topology's
+        uint32_t biasConstant = 0, biasSlope = 0, biasClamp = 0;  // float bits
     };
+
+    float depthBias_[3] = {};
 
     Raster raster_, rasterHeld_;
     void writeRaster(Push &p, const Raster &want);
+    Raster rasterFor(uint32_t primitive) const;
     uint32_t blendColor_[4] = {};  // Metal's default, (0, 0, 0, 0), until the encoder sets one
     bool blendColorDirty_ = true;
-    uint32_t topology_ = ~0u, restart_ = ~0u, first_ = 0, baseInstance_ = 0;
+    uint32_t topology_ = ~0u, restart_ = ~0u, first_ = 0, baseInstance_ = 0, baseVertex_ = 0;
     uint8_t writtenBits_ = 0;         // colors the ROP wrote since the last barrier
     uint8_t storageWrittenBits_ = 0;  // colors a fragment shader may have written as storage since the last barrier
     bool memoryless_[8] = {};
@@ -394,10 +441,10 @@ private:
     // colors the pass's first draw overwrites whole and opaquely: their clears inside the render area are not needed
     uint8_t covered_ = 0;
     using Runs = std::vector<std::pair<uint32_t, uint32_t>>;
-    const Runs &selfRuns(const Pipeline &pl, uint32_t primitive, uint32_t first, uint32_t count, uint32_t instances);
+    const Runs &selfRuns(const Pipeline &pl, uint32_t primitive, int32_t first, uint32_t count, uint32_t instances);
     const uint8_t *drawIndices_ = nullptr;
     uint32_t drawIndexSize_ = 0, drawIndexCount_ = 0;
-    DrawGeometry geometry(const Pipeline &pl, uint32_t primitive, uint32_t first, uint32_t count,
+    DrawGeometry geometry(const Pipeline &pl, uint32_t primitive, int32_t first, uint32_t count,
                           const PixelBox &limit) const;
 #if !defined(SWITCH_DEBUG) || SWITCH_DEBUG
     // the same draws under two other rules, counted only: one barrier per fetching draw after any color write (the rule
@@ -424,6 +471,9 @@ class BlitEncoder {
 public:
     // `bytes` bytes from `src` to `dst` (vkCmdCopyBuffer)
     void copyBytes(uint64_t src, uint64_t dst, uint64_t bytes);
+    // `bytes` bytes at `dst` set to `value` (fillBuffer:range:value:): the copy engine writing a constant, its whole words as
+    // NVK's vkCmdFillBuffer (nvk_cmd_fill_memory_ce), the bytes before and after them one at a time
+    void fillBytes(uint64_t dst, uint64_t bytes, uint8_t value);
     // `lines` rows of `width` pixels of `bpp` bytes, from `src` (row stride srcPitch) to `dst` (dstPitch) (vkCmdCopyImage and the
     // buffer<->image copies of linear images)
     void copyRect(uint64_t src, uint32_t srcPitch, uint64_t dst, uint32_t dstPitch, uint32_t width, uint32_t lines,
@@ -439,15 +489,8 @@ public:
     // A planar texture's image from its surface's planes (Texture::planar): two remapped copies, the luma codes into green
     // (alpha 255), then the chroma pairs into red (Cr) and blue (Cb), each leaving the other components as they are
     void convertPlanar(const Texture &t);
-    // A mipmapped texture's chain (Texture::chain) on the 2D engine: `all`, generateMipmaps (level 0 converted from the texture,
-    // then each level from the one above); else level 0 only (the texture's level 0 was written since: what sampling it needs)
-    void generate(Texture &t, bool all);
-    // `w` x `h` texels of chain level `level` of `t` at (sx, sy) into the pitch texture `dst` at (dx, dy) (copyFromTexture of a
-    // level below the first); 1:1 on the 2D engine
-    void copyFromLevel(const Texture &t, uint32_t level, uint32_t sx, uint32_t sy, const Texture &dst, uint32_t dx,
-                       uint32_t dy, uint32_t w, uint32_t h);
-    // The whole of chain level `level` of `t` from the pitch texture `src` of its size (its mirror); 1:1 on the 2D engine
-    void copyToLevel(Texture &t, uint32_t level, const Texture &src);
+    // generateMipmaps of a mipmapped texture (Texture::chain) on the 2D engine: each later level from the one above, in place
+    void generate(Texture &t);
     void end();
 
 private:
@@ -463,7 +506,6 @@ private:
 enum RefusalId : uint8_t {
     RefNone,
     RefIndexedRange,
-    RefBaseInstance,
     RefColorFormats,
     RefUboOffset,
     RefNoTic,
@@ -484,8 +526,11 @@ public:
     // `invalidate`: also dropped from the CPU's caches (memory the GPU writes, so no dirty line lands on it later).
     void clean(const void *cpu, uint64_t bytes, bool invalidate = false);
     // One Exec (more when the segments exceed one Exec's 255): the submission prologue, then every pass and blit in order.
+    // false with `partial`: the kernel refused a later Exec after earlier ones were submitted; those completed before it
+    // returned, and the next command buffer gets a new channel (the GPU's state after them is not what the device tracks).
     bool commit(uint32_t &seqno);
-    // Nothing of it is submitted: the rings get back what it took, the root table's shadow what it was.
+    bool partial = false;
+    // Nothing of it is on the GPU any more: the rings get back what it took, the root table's shadow what it was.
     void abandon();
 
     // A host import the submission reads or writes (a surface's, a no-copy buffer's), for the kernel's order with other
@@ -511,16 +556,45 @@ private:
     BlitEncoder blit_;
     uint64_t pushStart_ = 0, uploadStart_ = 0;
     uint32_t rootPush_[32] = {};
-    uint32_t restart_ = 0;  // SET_DA_PRIMITIVE_RESTART_INDEX as the GPU will hold it
-    DepthStencilRegs ds_;   // and its depth/stencil registers
-    bool drawn_ = false;    // a draw was encoded (NVK resets the restart index at a command buffer's first)
+    uint32_t restart_ = 0;                  // SET_DA_PRIMITIVE_RESTART_INDEX as the GPU will hold it
+    DepthStencilRegs ds_;                   // and its depth/stencil registers
+    const Pipeline *extrasLive_ = nullptr;  // and the state whose extras it holds (Pipeline::restore)
+    bool drawn_ = false;  // a draw was encoded (NVK resets the restart index at a command buffer's first)
+    // the prologue's INVALIDATE_SHADER_CACHES_NO_WFI data word, which commit gives the INSTRUCTION bit when programs were placed
+    // in the heap since the last submission that invalidated the instruction cache
+    uint32_t *shaderInvalidate_ = nullptr;
     void segment(uint32_t *from, uint32_t *to);
 };
 
 class Device {
 public:
+    // Whose device it is. The render server draws every frame of the screen from its start: its channel, shader heap and first
+    // chunks are made at open. Any other process's are made at their first use, in smaller steps, and what stays empty goes
+    // back to the kernel when it idles (trim): most never draw, and a widget's jetsam limit is tens of MB.
+    enum class Role : uint8_t {
+        RenderServer,
+        Client
+    };
+
     ~Device();
-    bool open(const char *packPath, uint64_t stack, std::string &err);
+    bool open(const char *packPath, uint64_t stack, std::string &err, Role role = Role::RenderServer);
+
+    Role role() const
+    {
+        return role_;
+    }
+
+    // The channel and its context, made now if not yet (a client's first command buffer, Order or mipmapped texture); with it
+    // the 2D engine's mip-chain self-test. False: the kernel refused it (`channelError()`), and the device submits nothing
+    // until a call kChannelRetryNs or more later gets one.
+    bool ensureChannel();
+
+    // Why the kernel last refused the channel or its context (ensureChannel, or begin() making a killed channel again)
+    std::string channelError()
+    {
+        std::lock_guard<std::mutex> l(channelLock_);
+        return channelError_;
+    }
 
     const Pack &pack() const
     {
@@ -530,6 +604,9 @@ public:
     // A pack pipeline by its state key's FNV-1a (RawMetal.mm rawPipelineKey); null: not in the pack.
     // caTransform: its vertex function is Core Animation's fixed_vert_l?h_spc (Pipeline::caTransform)
     Pipeline *pipeline(uint64_t keyHash, PackForm form = PackForm::Default, bool caTransform = false);
+    // A state the runtime made a record of (raw_record.h), drawn from then on as the pack's are; null: its programs find no room
+    // in the heap or its samplers none in the header pool (`why`)
+    Pipeline *addRecord(const RuntimeRecord &r, bool caTransform, std::string &why);
 
     // Resources (thread safe). All textures are 2D, one level, one sample, pitch-linear.
     // pool memory, rows 256-byte aligned; `wc`: write-combined GPU-pool memory (a texture the CPU writes with replaceRegion:
@@ -555,6 +632,10 @@ public:
                             const YcbcrPlan &plan, uint32_t width, uint32_t height, Texture &t);
     // The pack's conversion state of a YCbCr texture's output (Texture::ycbcr), null if the pack has none
     Pipeline *ycbcrPipeline(uint8_t output);
+    // An extended-range texture's stand-in (Texture::standIn), made if the pack has its conversion state
+    bool createStandIn(Texture &t);
+    // The pack's conversion state of an extended-range texture's stand-in, null if the pack has none
+    Pipeline *xrPipeline(XrForm form);
     // s's header under address map `map` (Texture::addressMap), made now if it is not yet
     bool samplerVariant(Sampler &s, uint8_t map);
     // A two-plane 4:4:4 surface's texture of RGB8_444_2P (542): its planes at `luma`/`chroma` (offsets in the allocation,
@@ -562,14 +643,20 @@ public:
     bool createPlanarTexture(uint64_t surfaceId, void *base, uint64_t allocBytes, const void *surface, uint64_t luma,
                              uint32_t lumaPitch, uint64_t chroma, uint32_t chromaPitch, uint32_t width, uint32_t height,
                              Texture &t);
+    // A planar texture's stand-in and its planes' render targets (Texture::planarStandIn); false where the pack lacks the
+    // stand-in
+    // states or a plane cannot be rendered
+    bool createPlanarTarget(uint64_t surfaceId, void *base, uint64_t allocBytes, const void *surface, Texture &t);
+    // The pack's stand-in states: the planes' codes into the stand-in, or (`store`) the stand-in into the planes
+    Pipeline *standInPipeline(bool store);
     bool createBufferTexture(const Buffer &b, uint64_t offset, uint32_t width, uint32_t height, uint32_t pitch,
                              uint32_t format,
                              Texture &t);  // over a buffer's memory (t holds no reference: the caller keeps the buffer)
     bool createView(const Texture &of, uint32_t format, Texture &t);  // the same memory as another format
     // Memoryless (a pass gives it a backing); Depth32Float_Stencil8 among them, as zeta (Texture::zeta)
     bool createMemoryless(uint32_t width, uint32_t height, uint32_t format, Texture &t);
-    // A mipmapped 2D texture of `levels` levels: level 0 a pool texture as createTexture's, its header the block-linear chain's
-    // (Texture::chain). False: not one the raw path keeps (chainsOn() false, a format the 2D engine does not filter, no memory).
+    // A mipmapped 2D texture of `levels` levels: level 0 of its block-linear chain (Texture::chain), its header the chain's.
+    // False: not one the raw path keeps (not a render target format, extended range, no memory).
     bool createMipTexture(uint32_t width, uint32_t height, uint32_t format, uint32_t levels, Texture &t);
     // The texture header of level `level` of mipmapped texture `t`'s chain alone, as NVK's view of that level (a pass into
     // the level fetches its color through it); 0: none
@@ -581,11 +668,9 @@ public:
         return k_.shared();
     }
 
-    // Whether mip chains are on: the 2D engine's self-test at open made the chain the design expects (fx_mip.h)
-    bool chainsOn() const
-    {
-        return chainsOn_;
-    }
+    // The memory no resource holds goes back to the kernel: empty chunks of the pool, of images and of buffers, and the kept
+    // dedicated ones (the kernel keeps their pages until the work submitted before has completed)
+    void trim();
 
     // Whether the device's resource lock is free now (try, never waits: the stall line's)
     bool lockFree()
@@ -602,9 +687,10 @@ public:
     uint32_t wcChunksHeld();
     uint64_t wcChunkBytesHeld();
 
+    // the shader heap's bound bytes (the programs placed so far, in steps)
     uint64_t heapBytes() const
     {
-        return heap_.bytes;
+        return heapBound_;
     }
 
     bool createBufferNoCopy(void *bytes, uint64_t length, Buffer &b);
@@ -626,7 +712,7 @@ public:
     // below a low mark, so the render thread's allocations find room (Stats::poolStalls counts the ones that had to grow it).
     void warm();
 
-    // Submission. begin() opens the one command buffer (the caller serialises encoding and commit).
+    // Submission. begin() opens the one command buffer (the caller serialises encoding and commit); null: no channel.
     CommandBuffer *begin();
 
     uint32_t completed() const
@@ -634,29 +720,50 @@ public:
         return *fence_;
     }
 
+    // 0 before the channel is made (it may be made on another thread: a client's first mipmapped texture)
     uint32_t submitted() const
     {
-        return lastSeqno_;
+        return channelReady_.load(std::memory_order_acquire) ? lastSeqno_ : 0;
     }
 
     bool done(uint32_t seqno) const
     {
-        return int32_t(*fence_ - seqno) >= 0;
+        return !seqno || int32_t(*fence_ - seqno) >= 0;
     }
 
     // In the kernel, on the fence interrupt. False: the submission failed, the channel died with it in flight (reopen).
     bool wait(uint32_t seqno)
     {
-        if (!done(seqno) && !k_.wait(channel_, seqno) && k_.lost(channel_))
-            noteLost();
-        return !lost(seqno);
+        return done(seqno) ? !lost(seqno) : waitFence(seqno);
     }
 
     bool lost(uint32_t seqno) const
     {
+        if (k_.killRecords())
+            return killed(seqno);
         return lostAny_.load(std::memory_order_acquire) &&
                int32_t(lostThrough_.load(std::memory_order_relaxed) - seqno) >= 0;
     }
+
+    // A kill record's error the device writes itself (waitFence): the kernel kept refusing to wait on a channel it called
+    // healthy
+    static constexpr uint32_t kWaitRefused = 0x100;
+
+    // Why the kernel killed the channel of the last seqno lost() named (its kill record's error), else Kernel::lostError and
+    // lostFaultVa: the channel last found dead
+    uint32_t lostError() const
+    {
+        const uint32_t recorded = killedError_.load(std::memory_order_relaxed);
+        return recorded ? recorded : k_.lostError();
+    }
+
+    uint64_t lostFaultVa() const
+    {
+        return k_.lostFaultVa();
+    }
+
+    // Which of this device's memory holds GPU VA `va` (a killed command buffer's fault VA), and where in it, for its line
+    std::string vaOwner(uint64_t va);
 
     // GPU-side order with the process's other driver (NVK's channels), through the kernel's Order (TegraGM20BInfoOrder; false:
     // it has none). orderAfterOthers: this channel's next submission starts with an acquire on what they submitted so far;
@@ -667,19 +774,34 @@ public:
         return k_.canOrder();
     }
 
+    // A channel the kernel killed is made again first (between command buffers, as begin() would), so one GPU fault does not
+    // leave the process ordered on the CPU for good
     int orderAfterOthers(uint32_t &waits)
     {
-        return k_.order(channel_, TegraGM20BOrderAfterTask, 0, waits);
+        if (!ensureChannel())
+            return KERN_FAILURE;
+        for (int attempt = 0;; attempt++) {
+            if ((contextless_ || k_.lost(channel_)) && !reopen())
+                return KERN_FAILURE;
+            const int kr = k_.order(channel_, TegraGM20BOrderAfterTask, 0, waits);
+            if (kr != kIOReturnNotResponding || attempt)
+                return kr;
+        }
     }
 
+    // A killed channel's fence is released and nothing it had runs any more: there is nothing of it to order after
     int orderOthersAfter(uint32_t &waits)
     {
-        return k_.order(channel_, TegraGM20BOrderBeforeTask, lastSeqno_, waits);
+        waits = 0;
+        if (!channelReady_.load(std::memory_order_acquire) || contextless_ || k_.lost(channel_))
+            return KERN_SUCCESS;
+        const int kr = k_.order(channel_, TegraGM20BOrderBeforeTask, lastSeqno_, waits);
+        return kr == kIOReturnNotResponding ? KERN_SUCCESS : kr;
     }
 
     struct Stats {
-        std::atomic<uint64_t> commits{0}, pushBytes{0}, uploadBytes{0}, ringWaits{0}, imports{0}, importBytes{0},
-            poolBytes{0}, poolChunks{0}, cleanBytes{0}, poolStalls{0};
+        std::atomic<uint64_t> commits{0}, pushBytes{0}, uploadBytes{0}, ringWaits{0}, ringsOutgrown{0}, imports{0},
+            importBytes{0}, poolBytes{0}, poolChunks{0}, cleanBytes{0}, poolStalls{0};
         // surface imports made (a kernel import each) and found live, since open
         std::atomic<uint64_t> importsMade{0}, importHits{0};
         // diagnostics: color targets the raw path rendered whose address or pitch is not a multiple of 128 (NVK renders
@@ -688,14 +810,14 @@ public:
         // color targets in rows the raw path rendered through a block-linear shadow, beside a block-linear one in their pass
         std::atomic<uint64_t> rtMixed{0};
         std::atomic<uint32_t> rtUnalignedPitch{0}, rtUnalignedVa{0};
-        // mip chains: made, chain bytes, generated (whole) and level-0 refreshes, copies out of a level
-        std::atomic<uint64_t> chains{0}, chainBytes{0}, chainGenerates{0}, chainRefreshes{0}, chainCopies{0};
+        // mip chains: made, chain bytes, generated
+        std::atomic<uint64_t> chains{0}, chainBytes{0}, chainGenerates{0};
         // write-combined buffers: live bytes, and the buffers that asked for one and got pool memory (the WC pool full)
         std::atomic<uint64_t> wcBytes{0}, wcFallbacks{0};
         // the copy engine's work encoded: launches and the bytes they write (copies, remaps, the pass prologue's shadow copies)
         std::atomic<uint64_t> ceOps{0}, ceBytes{0};
-        // passes into a chain level, and levels copied between a chain and its mirrors (out: for m2v; in: what m2v rendered)
-        std::atomic<uint64_t> levelPasses{0}, mirrorsOut{0}, mirrorsIn{0};
+        // passes into a chain level
+        std::atomic<uint64_t> levelPasses{0};
         // pack programs placed in the shader heap, and states not made because it was full
         std::atomic<uint64_t> programsPlaced{0}, heapFull{0};
         // framebuffer-fetch barriers encoded, and those left out where the draw's pixels meet none a color write reached
@@ -711,6 +833,9 @@ public:
         std::atomic<uint64_t> selfOverlapSplit{0}, selfOverlapRuns{0}, selfOverlapUnbounded{0}, selfOverlapNs{0};
         // channels made again after the kernel killed one
         std::atomic<uint64_t> reopens{0};
+        // backings on compressed memory made, their bytes, and compressed memory the kernel could not make; full-target clears
+        // of compressed targets to a value the boot ZBC table holds (no texels written) and to one it does not
+        std::atomic<uint64_t> compBackings{0}, compBytes{0}, compFailed{0}, zbcHits{0}, zbcMisses{0};
     } stats;
 
 #if !defined(SWITCH_DEBUG) || SWITCH_DEBUG
@@ -731,19 +856,6 @@ public:
     static const char *fetchBarrierName(FetchBarrier b);
 #endif
 
-    // The self-test's result (open), per sampling candidate (fx::sampling(i)): bytes off by more than 1 in the CPU's Tegra and
-    // Fermi views (~0u: not run); the one chains use (selfTestChosen, fx::kSamplings: none passed) and its view; the first
-    // candidate's detail in the Tegra view (what the documented convention gave)
-    uint32_t selfTestTegra[fx::kSamplings], selfTestFermi[fx::kSamplings];
-    uint32_t selfTestChosen = fx::kSamplings;
-    bool selfTestFermiView = false;
-    fx::SelfTestReport selfTestFirst;
-
-    fx::Sampling sampling() const
-    {
-        return sampling_;
-    }
-
 private:
     friend class CommandBuffer;
     friend class RenderEncoder;
@@ -752,6 +864,9 @@ private:
     struct Ring {
         Bo bo;
         uint64_t head = 0, since = 0;  // next free byte; where the open command buffer's use began
+        // No span in flight lies in [head, clear): an allocation there needs no look at them (alloc's scan sets it)
+        uint64_t clear = 0;
+        bool waited = false;  // an allocation waited for the GPU since the last begin(): it doubles there
 
         struct Span {
             uint64_t begin, end;
@@ -759,6 +874,8 @@ private:
         };
 
         std::deque<Span> inflight;
+        std::vector<Bo>
+            outgrown;  // what the open command buffer grew out of (Device::alloc): freed once its work completes
     };
 
     struct Chunk {
@@ -770,23 +887,96 @@ private:
         bool dedicated = false;
     };
 
+    // A role's memory steps: the shared pool chunk (a span over half of one gets its own), a chunk of block-linear images, a
+    // chunk of write-combined buffers, and the rings' first sizes (each doubles where an allocation waited, to the render
+    // server's)
+    struct Sizes {
+        uint64_t chunk, blChunk, wcChunk, push, upload;
+    };
+
+    static const Sizes kSizes[2];
+    Role role_ = Role::RenderServer;
+    Sizes sizes_ = kSizes[0];
     std::mutex lock_;
     Kernel k_;
     Pack pack_;
+    // heap_: the shader heap's GPU VA reservation (bytes: the program window), bound from its start (heapBound_) in parts of
+    // host memory as programs are placed
     Bo heap_, tic_, tsc_, root_, zero_, tickets_;
+
+    struct HeapPart {
+        uint64_t offset = 0, bytes = 0;  // in the heap
+        uint8_t *cpu = nullptr;
+        Bo bo;
+    };
+
+    std::vector<HeapPart> heapParts_;
+    uint64_t heapBound_ = 0;
     Ring push_, upload_;
+    // rings replaced by larger ones, freed once the GPU passed the seqno
+    std::vector<std::pair<Bo, uint32_t>> grownOut_;
+    bool overflowing_ = false;  // the open command buffer outgrew a ring with no memory for a larger one
+    std::deque<std::vector<uint8_t>> overflow_;  // where it is written then (never submitted)
     uint32_t channel_ = 0, lastSeqno_ = 0;
-    const volatile uint32_t *fence_ = nullptr;
+    // the channel's fence word; before there is a channel a zero, which every seqno submitted so far (none) has passed
+    const volatile uint32_t *fence_ = &kNoFence;
+    static constexpr uint32_t kNoFence = 0;
+    std::mutex channelLock_;
+    std::atomic<bool> channelReady_{false};
+    bool channelFailed_ = false;
+    uint64_t channelRetryNs_ = 0;  // CLOCK_UPTIME_RAW: a refused channel is asked for again from then on
+    static constexpr uint64_t kChannelRetryNs = 1000000000;
+    std::string channelError_;
+    // The channel died and the one made since has no context yet (reopen gave up before the context's Exec): begin() makes it
+    // again before it gives out a command buffer. channel_ is 0 while the kernel holds none of this device's.
+    bool contextless_ = false;
     std::vector<uint32_t> freeTic_, freeTsc_;
     uint32_t nextTic_ = 1, nextTsc_ = 1, neutralTsc_ = 0;
-    // the pack's, each made at its first lookup (rec set); sized once at init and never resized: pipeline() hands out
-    // pointers into it
-    std::vector<Pipeline> pipelines_;
+    // the pack's, by record index, each made at its first lookup (a process uses a few of the pack's thousands); a node
+    // container, so the pointers pipeline() hands out stay valid
+    std::unordered_map<uint32_t, Pipeline> pipelines_;
     std::vector<uint32_t> placed_;  // each pack program's heap offset, ~0u: not placed
     uint64_t heapPlaced_ = 0;
+    // heapPlaced_ as of the last submission whose prologue invalidated the SMs' instruction caches, ~0: none on this channel.
+    // The instruction cache prefetches past a program's end, where heapPlace puts the next program.
+    uint64_t heapInvalidated_ = ~0ull;
     uint32_t ctWrite_[8] = {};  // SET_CT_WRITE(i) as the baseline leaves it
     bool place(uint32_t prog, uint32_t &program, uint64_t &data);
-    std::vector<uint32_t> constexprTsc_;
+    bool heapGrow(uint64_t end);
+    const HeapPart *heapPartAt(uint64_t at) const;
+    bool heapPlace(const uint8_t *bytes, uint32_t size, uint64_t &offset);
+    void build(Pipeline &pl, const PackPipeline &pp, const PlacedProgram &vs, const PlacedProgram &fs,
+               const uint32_t *blob, const char *keyString, bool caTransform);
+    // The constexpr samplers' header indices, the pack's then the runtime records' (addRecord, under lock_). A slot is written
+    // once, before the state that names it is published, and never moves: a draw reads it without lock_.
+    static constexpr uint32_t kConstexprSamplers = 256;  // PackEntry::sampler is a byte
+    uint32_t constexprTsc_[kConstexprSamplers] = {};
+    uint32_t constexprCount_ = 0;
+
+    // the states the runtime made (addRecord), never removed: Pipeline::rec points into them
+    struct Completed {
+        PackPipeline record;
+        std::string keyString;
+        std::vector<uint32_t> blob;
+        PackProgram programs[2];
+        Pipeline pipeline;
+    };
+
+    std::deque<Completed> completedStore_;
+    std::unordered_map<uint64_t, Pipeline *> completed_;
+    std::map<std::array<uint32_t, 8>, uint8_t>
+        completedSamplers_;  // their constexpr samplers' headers, by constexprTsc_ index
+
+    struct CompletedProgram {
+        PackProgram info;
+        PlacedProgram placed;
+        uint8_t header[80];
+    };
+
+    std::map<std::string, CompletedProgram> completedPrograms_;  // by program id
+    bool placeCompleted(const CapturedProgram &p, PlacedProgram &out);
+    bool takeTsc(uint32_t &tsc);
+    const Pipeline *extrasLive_ = nullptr;  // the state whose extras (Pipeline::restore) the channel holds
     CommandBuffer cb_;
     uint32_t rootPush_[32] = {};  // what the GPU's root table holds at [0x700, 0x780) after everything submitted
     uint32_t restart_ = 0;        // and its primitive restart index
@@ -812,8 +1002,6 @@ private:
     std::vector<Chunk> wcChunks_;
     bool wcAlloc(uint64_t bytes, Span &s);
     void wcFree(Span &s);
-    bool chainsOn_ = false;
-    fx::Sampling sampling_;  // the self-test's winner: how every chain's scaled steps sample
 
     bool blAlloc(uint64_t bytes, uint64_t align, Span &s)
     {
@@ -828,13 +1016,15 @@ private:
     // a span of chunks bound with PTE kind `kind` (block-linear images), lock_ held
     bool tiledAlloc(std::vector<Chunk> &chunks, uint32_t kind, uint64_t bytes, uint64_t align, Span &s);
     void tiledFree(std::vector<Chunk> &chunks, Span &s);
-    void selfTest();
 
     struct Backing {
         Texture texture;
         uint32_t tag = 0;
         uint32_t lastUse = 0;  // the seqno of the last submission that used it (0: never submitted)
         uint64_t lastCommit = 0;
+        Bo comp;  // its own compressed BO (raw_comp.h), else none
+        // a compressed backing of its shape replaced it: no pass takes it again, trimBackings frees it
+        bool retired = false;
     };
 
     std::vector<Backing *> backings_;  // memoryless attachments' memory, by size and format
@@ -848,16 +1038,37 @@ private:
     uint64_t commitCount_ = 0;
 
     bool init(std::string &err);
+    bool openChannel(std::string &err);
+    void growRing(Ring &r, uint64_t most);
+    void freeChunk(Chunk &ch);
     uint32_t contextWords() const;
     void emitContext(Push &p);
     bool reopen();
+    bool waitFence(uint32_t seqno);
     void noteLost();
-    // the last seqno of a channel that died: it and every one before it failed (or completed before; not told apart)
+    // the last seqno of a channel that died: it and every one before it failed (or completed before; not told apart),
+    // where the kernel writes no kill records
     std::atomic<uint32_t> lostThrough_{0};
     std::atomic<bool> lostAny_{false};
+
+    // The seqnos a kill took (TegraGM20BAbiFence): the live channel's record, then the ones the channels it replaced left,
+    // kept until reopen made the record's slot over (a slot's seqnos continue, so a kept record names its channel's alone).
+    struct Killed {
+        uint32_t first, last, error;
+    };
+
+    bool liveKill(Killed &k) const;
+    bool killed(uint32_t seqno) const;
+    mutable std::mutex killedLock_;
+    std::array<Killed, 4> killedKept_{};
+    uint32_t killedNext_ = 0;
+    mutable std::atomic<uint32_t> killedError_{0};
     uint8_t *alloc(Ring &r, uint32_t bytes, uint32_t align, uint64_t &va);
     void retire(Ring &r, uint32_t seqno);
+    bool ownWords(const Ring &r, uint64_t at, uint64_t bytes) const;
+    bool outgrow(Ring &r, uint32_t bytes, uint64_t &at);
     uint32_t allocTic();
+    void freeTic(uint32_t tic);  // lock_ held
     void writeTic(const Texture &t);
     bool poolAlloc(uint64_t bytes, Span &s);
     void poolFree(Span &s);
@@ -883,6 +1094,23 @@ private:
     Texture *backing(const Texture &memoryless, uint32_t tag = 0, bool blockLinear = false);
     void freeBacking(Texture &t);
     void trimBackings();
+
+    // Compressed backings (raw_comp.cpp), lock_ held: the compressible kind a backing of this shape takes (0: none or
+    // compression off); a backing on compressed memory made off this thread, or nullptr after asking compThread_ for some
+    CompQueue comp_;
+    // made off the render thread on a thread of its own, started at the first ask: the kernel's contiguous search can take
+    // over 100 ms, and no other thread (the pool's grower included, which a render thread may wait for) waits behind it
+    std::thread compThread_;
+    std::condition_variable compWake_;
+    uint32_t compKind(const Texture &m, uint32_t tag, bool blockLinear) const;
+    Backing *compBacking(const Texture &m, uint32_t tag, uint32_t kind);
+    // What was asked for, made, `l` dropped around each kernel allocation
+    void compMake(std::unique_lock<std::mutex> &l);
+    void compStop();
+    void compFree(Backing &b);
+    void compTrim();
+    // A clear of target t (counted only when compressed): `full` it covers t whole, `boot` its value is the boot ZBC table's
+    void countZbc(const Texture &t, bool full, bool boot);
 };
 
 // NV topology for an MTLPrimitiveType (point, line, lineStrip, triangle, triangleStrip)

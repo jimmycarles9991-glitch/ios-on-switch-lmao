@@ -14,10 +14,9 @@ rlocation path off its location.
 """
 
 import argparse
-import hashlib
-import os
-from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+
+from tools.common import hashing
 
 HEADER = '# gpu stage 1 '
 SEED = 'ngpu/addons/TegraGM20BMetal.m2v-seed/shared'
@@ -25,14 +24,10 @@ RAW = 'ngpu/addons/TegraGM20BMetal.raw'
 EXECUTABLES = ('TegraGM20BMetal', 'libvulkan_nouveau.dylib')
 
 
-def line(path: Path, target: str, rlocation: str) -> str:
+def line(path: Path, digest: str, target: str, rlocation: str) -> str:
     """Return the manifest line of the file at `path`, staged at `target`."""
-    digest = hashlib.sha256()
-    with path.open('rb') as f:
-        for chunk in iter(lambda: f.read(1 << 22), b''):
-            digest.update(chunk)
     mode = 0o755 if path.name in EXECUTABLES else 0o644
-    return f'{target}\t{digest.hexdigest()}\t{path.stat().st_size}\t{mode:o}\t{rlocation}'
+    return f'{target}\t{digest}\t{path.stat().st_size}\t{mode:o}\t{rlocation}'
 
 
 def tree(directory: Path, rlocation: str, under: str) -> list[tuple[Path, str, str]]:
@@ -59,8 +54,8 @@ def main() -> None:
         for number, (pack, rlocation) in enumerate(zip(args.pack, args.pack_rlocation, strict=True))
     ]
     files += tree(Path(args.raw), args.raw_rlocation, RAW + '/')
-    with ThreadPoolExecutor(os.cpu_count()) as pool:
-        lines = list(pool.map(lambda f: line(*f), files))
+    digests = hashing.sha256_files([path for path, _, _ in files])
+    lines = [line(path, digest, *where) for (path, *where), digest in zip(files, digests, strict=True)]
     Path(args.out).write_text(HEADER + args.self + '\n' + ''.join(entry + '\n' for entry in sorted(lines)))
 
 

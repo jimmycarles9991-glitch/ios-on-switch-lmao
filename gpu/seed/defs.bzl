@@ -190,6 +190,8 @@ def _metal_seed_impl(ctx):
     args.add_all(reports, before_each = "--report")
     if ctx.files.records:
         args.add("--records", _repo_root(ctx.files.records) + "/records")
+    if ctx.files.replies:
+        args.add("--replies", _repo_root(ctx.files.replies) + "/msl")
     args.add("--ipsw", ctx.attr.ipsw[IpswInfo].build)
     args.add("--plan", report)
     args.add("--inventory", inventory)
@@ -197,7 +199,7 @@ def _metal_seed_impl(ctx):
     ctx.actions.run(
         executable = ctx.executable._merge,
         arguments = [args],
-        inputs = depset(indexes + reports + [report, inventory] + ctx.files.records),
+        inputs = depset(indexes + reports + [report, inventory] + ctx.files.records + ctx.files.replies),
         outputs = [meta],
         mnemonic = "MetalSeedJoin",
         progress_message = "Joining the shader seed's bucket indexes",
@@ -263,6 +265,7 @@ metal_seed = rule(
         "crawl": attr.label(mandatory = True, providers = [CrawlInfo], doc = "the IPSW's libraries (shader_crawl)"),
         "device_libraries": attr.label(allow_files = True, doc = "libraries only the device made (@gpu_device_data)"),
         "records": attr.label(allow_files = True, doc = "the device's driver records (@gpu_device_data)"),
+        "replies": attr.label(allow_files = True, doc = "the device's Metal compiler replies (@gpu_device_data)"),
         "embedded": attr.label_list(allow_files = [".h"], doc = "C arrays of metallibs the frontend makes libraries of"),
         "tools": attr.label(mandatory = True, doc = "the host tools (seed_tools, or files with MANIFEST.json)"),
         "base": attr.label(mandatory = True, doc = "the GPU bundle the seed is for (//gpu:base or the release's)"),
@@ -279,7 +282,7 @@ metal_seed = rule(
 _RAW_BUCKETS = 16
 
 # The generator's modules each step runs (rawpack.py imports or runs them by path, beside it).
-_RAW_SPLIT = ["rawpack.py", "ca/caset.py", "ca/caspec.py"]
+_RAW_SPLIT = ["rawpack.py", "ca/caset.py", "ca/caspec.py", "ca/caspec27.py"]
 _RAW_PROBE = ["rawpack.py", "mkprograms.py", "nvkshader.py", "probelog.py"]
 _RAW_LINK = ["rawpack.py", "mkpack.py", "layouts.py", "packfile.py", "probelog.py"]
 

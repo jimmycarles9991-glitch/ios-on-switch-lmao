@@ -45,5 +45,6 @@ kernel_driver(
         "drivers/TegraSE",
         "drivers/TegraSMMU",
         "kits/SwitchMMIO",
+        "kits/SwitchTime",
     ],
 )

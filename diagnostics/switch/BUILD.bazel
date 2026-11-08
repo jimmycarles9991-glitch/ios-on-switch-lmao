@@ -65,6 +65,9 @@ kernel_driver(
     ],
     hdr_deps = [
         "drivers/SwitchSuspend",
+        "kits/SwitchDMA",
+        "kits/SwitchMMIO",
+        "kits/SwitchTime",
         "kits/VerifiedRoot",
     ],
 )

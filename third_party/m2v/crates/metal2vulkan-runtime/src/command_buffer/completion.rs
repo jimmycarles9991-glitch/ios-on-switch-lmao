@@ -59,6 +59,7 @@ use crate::event::EventShared;
 use crate::exit_guard::{self, Call};
 use crate::gpu_time;
 use crate::release;
+use crate::submission_failure;
 use crate::Device;
 use ash::vk;
 use std::collections::VecDeque;
@@ -262,6 +263,21 @@ fn run(watch: &Watch) {
         }
         // A batch held at its gate, or for a GPU signal to land, may now go (`scheduler`).
         device.shared().scheduler.completions();
+        // A batch whose work the driver reports failed fails its command buffer
+        // (`submission_failure.rs`). A section, as each poll.
+        if submission_failure::asked(device.shared()) {
+            let Some(_busy) = exit_guard::enter() else {
+                exit(watch);
+                return;
+            };
+            for (queue, batch) in &finished {
+                if let Some(code) =
+                    submission_failure::failure(device.shared(), *queue, batch.value)
+                {
+                    batch.buffer.relayed.fail(code, None);
+                }
+            }
+        }
         // Every finished batch's fence is waited for: where a queue's failures are relayed each
         // batch has one (`device/relay.rs`), signaled after the driver reported its failure.
         let mut ending = Vec::new();

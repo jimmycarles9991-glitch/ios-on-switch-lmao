@@ -3,8 +3,9 @@ extension makes one per pinned kind (@ipsw_<kind>_crawl, @ipsw//:crawl_*).
 
 The repository fetches the kind's OS image and cryptexes by range request, makes their content (inflated, decrypted),
 crawls it and keeps only the crawl: tree/root, tree/data and inventory.json, about 233 MB of the 6.5 GB (7.7 GB OS image
-alone for iOS 27) it read. The images bypass the repository cache (no sha256 given to the download; it is checked after)
-and are deleted, so a Mac that only builds the seed never keeps them; //install's image builds fetch them through @ipsw.
+alone for iOS 27) it read. The images are fetched with their pinned sha256, so a Mac whose repository cache holds them
+(any that built an image through @ipsw) clones them instead of downloading 6.5-12 GB again; a Mac that only builds the
+seed keeps them in that cache once.
 
 Reproducible: Bazel keeps the result in its repository contents cache, keyed by the pins, this file and the crawler's
 sources, and hands it to every output base. Any of those changing fetches and crawls again.
@@ -40,13 +41,12 @@ def _image(rctx, python, role, pin):
     first = pin["offset"]
     last = first + pin["stored_size"] - 1
     rctx.report_progress("{}: fetching {} ({} MB)".format(role, pin["member"], pin["stored_size"] >> 20))
-    fetched = rctx.download(
+    rctx.download(
         url = rctx.attr.url,
         output = content if plain else stored,
+        sha256 = pin["sha256"],
         headers = {"Range": ["bytes={}-{}".format(first, last)]},
     )
-    if fetched.sha256 != pin["sha256"]:
-        fail("{}: {} fetched as sha256 {}, pinned {}".format(rctx.name, pin["member"], fetched.sha256, pin["sha256"]))
     if plain:
         return content
     if pin.get("aea_key"):

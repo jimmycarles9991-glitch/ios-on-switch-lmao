@@ -24,11 +24,6 @@ struct TegraNVENCBlock {
 // Resolves a submit's buffer handle; every user client supplies its own.
 typedef bool (*TegraNVENCResolve)(void *context, uint32_t handle, TegraNVENCBlock *block);
 
-// How NVENC reads its input and addresses chroma (TegraNVENCInfo's input_layout, chroma_mode, p_frames).
-struct TegraNVENCProven {
-    uint32_t inputLayout, chromaMode, pFrames;
-};
-
 extern "C" {
 // NVENC's address space (E1): its tables, the firmware, setup slots and scratch identity-mapped, the swgroup translated.
 // 0, or -1 with one line in `line`. Detach puts the swgroup back in bypass (sleep); attach undoes it.
@@ -41,20 +36,15 @@ void tegra_nvenc_memory_release(void);  // a failed bring-up gives the tables ba
 int tegra_nvenc_buffer_alloc(uint64_t size, TegraNVENCBlock *block);
 void tegra_nvenc_buffer_free(TegraNVENCBlock *block);  // only once no job can touch it
 void tegra_nvenc_memory_usage(uint64_t *limit, uint64_t *free);
-void tegra_nvenc_cache_clean(const void *va, size_t size);  // dc cvac: the CPU's writes reach DRAM
-void tegra_nvenc_cache_flush(const void *va, size_t size);  // dc civac: the next CPU read comes from DRAM
 
 // Checks a submit (TegraNVENCCheck.h), cleans its CPU-written ranges, copies its setup into kernel memory, writes 0
 // in the address methods of features it leaves off and queues it on host1x channel 0. Returns 0 and the job's fence,
 // or a negative errno-style value.
 int tegra_nvenc_run(const TegraNVENCSubmit *submit, TegraNVENCResolve resolve, void *context, uint32_t *fence,
                     const char **why);
-const char *tegra_nvenc_falcon_dump(void);  // the falcon's state without its debugger (a job's own line has PC/SP)
-// Sleeps until the fence is reached (syncpoint interrupt), bounded per queued job. Past that bound: a one-line panic
-// once published (E3), else -60 and the engine refuses work.
+// Sleeps until the fence is reached (syncpoint interrupt), bounded per queued job. Past that bound: a one-line panic.
 int tegra_nvenc_wait(uint32_t fence);
 bool tegra_nvenc_ready(void);
-const TegraNVENCProven *tegra_nvenc_proven(void);
 
 int tegra_nvenc_publish(void);  // E3
 }

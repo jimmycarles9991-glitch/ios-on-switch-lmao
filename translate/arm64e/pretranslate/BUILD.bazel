@@ -1,7 +1,7 @@
-# The iOS 27 user space, pretranslated to plain arm64 at image-build time. The composer (//install, --config=ios27)
-# mounts each decrypted image read-only and runs :translate_tree over it; that step needs root (to mount, and to
-# reseal the system volume), which a Bazel action does not have, so it is not a cached build output. The pieces it
-# needs are Bazel targets: the translator, the driver and Apple's trust caches, bundled per role as PretranslatedInfo.
+# The iOS 27 user space, pretranslated to plain arm64 at image-build time. //install:delta_<role> (--config=ios27)
+# mounts each decrypted image read-only as the user and runs :translate_tree over it, a local Bazel action whose output
+# the output base keeps (install/translated.bzl). The translator, the driver and Apple's trust caches are bundled per
+# role as PretranslatedInfo.
 #
 #   bazel run //translate/arm64e/pretranslate:translate_tree -- --role system_cryptex --tool $(location ...) \
 #       --volume <mounted cryptex> --out <dir> --apple-trustcache <system IM4P>
@@ -20,14 +20,22 @@ lint_files()
 py_binary(
     name = "translate_tree",
     srcs = ["translate_tree.py"],
-    deps = ["//tools/trustcache"],
+    deps = [
+        "//tools/common:files",
+        "//tools/common:hashing",
+        "//tools/trustcache",
+    ],
 )
 
 py_test(
     name = "translate_tree_test",
     srcs = ["translate_tree_test.py"],
     data = ["translate_tree.py"],
-    deps = ["//tools/trustcache"],
+    deps = [
+        "//tools/common:files",
+        "//tools/common:hashing",
+        "//tools/trustcache",
+    ],
 )
 
 [pretranslate_role(

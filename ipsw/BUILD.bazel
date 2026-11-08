@@ -5,7 +5,7 @@
 load("@rules_python//python:py_binary.bzl", "py_binary")
 load("@rules_python//python:py_library.bzl", "py_library")
 load("//bazel/lint:defs.bzl", "lint_files")
-load(":defs.bzl", "ipsw_kernelcache", "ipsw_pretranslated", "ipsw_static_trust")
+load(":defs.bzl", "ipsw_device_tree", "ipsw_kernelcache", "ipsw_pretranslated", "ipsw_static_trust")
 load(":ipsw.bzl", "ipsw_kinds")
 load(":pins.bzl", "IPSWS")
 
@@ -18,6 +18,13 @@ ipsw_kernelcache(
     name = "kernelcache",
     src = "@ipsw//:kernelcache",
     out = "kernelcache.decompressed",
+)
+
+# Apple's device tree of the IPSW's own device (J120AP, J181AP): where the ADT's iPad identity comes from (adt_edit.py).
+ipsw_device_tree(
+    name = "device_tree",
+    src = "@ipsw//:device_tree",
+    out = "device_tree.adt",
 )
 
 # iOS 17's kernelcache under every kind: the iPadOS 27 prelink names Apple kernel addresses by the GOT names kexts
@@ -41,6 +48,12 @@ ipsw_static_trust(
 alias(
     name = "app_cryptex_trust_cache",
     actual = "@ipsw//:app_cryptex_trust_cache",
+)
+
+# The System cryptex's trust cache (an IM4P 'trcs'), for the UUID the kernel authenticates that cryptex's files by.
+alias(
+    name = "system_cryptex_trust_cache",
+    actual = "@ipsw//:system_cryptex_trust_cache",
 )
 
 # iOS 27: what the boot package carries of the pretranslate run (pretranslated/<kind>/, made offline from the decrypted

@@ -44,17 +44,13 @@ from pathlib import Path
 
 if __package__ in (None, ''):
     sys.path.insert(0, str(Path(os.path.abspath(__file__)).parents[2]))
+from tools.common import files, paths
 from tools.deploy import mkarchive
 from tools.install import (
     card as cards,
     host,
     renamed,
 )
-
-try:
-    from python.runfiles import runfiles
-except ImportError:
-    runfiles = None
 
 DATA_UUID = 'D1B1D053-D0A6-496C-8625-A947A3DA863E'  # SwitchRawMount.h SWITCH_RAW_DATA_UUID (checked against spec)
 WEBKIT_IDS = (
@@ -66,15 +62,6 @@ WEBKIT_IDS = (
     'com.apple.fskit.exfat',
 )
 BACKBOARDD_CACHE = 'm2v/System_6C7A65AF-CB18-421C-A07A-D724B05A7AB6_Library_Caches_m2v'
-
-
-def state_dir() -> Path:
-    """Where the tools keep what is not the repository's: ~/Library/Application Support/switch-ios, or $SWITCH_HOME."""
-    return Path(os.environ.get('SWITCH_HOME') or Path.home() / 'Library/Application Support/switch-ios')
-
-
-def workspace() -> Path:
-    return Path(os.environ.get('BUILD_WORKSPACE_DIRECTORY') or Path(os.path.abspath(__file__)).parents[2])
 
 
 def copytree(src: Path, dst: Path, log: host.Log) -> bool:
@@ -102,9 +89,7 @@ def mirror(src: Path, dst: Path) -> tuple[int, int]:
         if held and held.st_size == stat.st_size and int(held.st_mtime) == int(stat.st_mtime):
             continue
         target.parent.mkdir(parents=True, exist_ok=True)
-        partial = target.with_name(target.name + '.partial')
-        shutil.copy2(path, partial)
-        partial.replace(target)
+        files.copy(path, target, keep_times=True)
         copied, size = copied + 1, size + stat.st_size
     for path in sorted(dst.rglob('*')) if dst.is_dir() else []:
         if path.is_file() and path.relative_to(dst) not in wanted:
@@ -233,7 +218,7 @@ def harvest(data: Path, out: Path, log: host.Log, harvest_dir: str | None, corpu
     """Merge the m2v journals of every process's cache into the checkout's corpus.log (harvest.py)."""
     # harvest_dir: the checkout's precompile directory (harvest.py and the corpus.log it merges into), relative to the
     # workspace: --harvest-script's parent (//deploy's $(rootpath) of harvest.py, so it follows the file if it moves).
-    script = workspace() / harvest_dir / 'harvest.py' if harvest_dir else None
+    script = paths.workspace() / harvest_dir / 'harvest.py' if harvest_dir else None
     if not (script and script.is_file()):
         log('m2v harvest skipped: no', script)
         return
@@ -328,7 +313,7 @@ def pull(data: str | Path, out: str | Path, log: host.Log, what: Pull = EVERYTHI
     """Mirror the unified log, copy the reports and saved files into <out>, and link the logarchive."""
     data, out = Path(data), Path(out)
     out.mkdir(parents=True, exist_ok=True)
-    unified = state_dir() / 'device-logs' / 'mirror'
+    unified = paths.state_dir() / 'device-logs' / 'mirror'
     for name in ('diagnostics', 'uuidtext'):
         files, size = mirror(data / 'db' / name, unified / name)
         log(f'{name}: {files} files ({size >> 20} MiB) new or changed since the last pull')
@@ -347,17 +332,9 @@ def pull(data: str | Path, out: str | Path, log: host.Log, what: Pull = EVERYTHI
     return out
 
 
-def runfile(path: str | None) -> str | None:
-    """Return a runfiles path (bazel run) or a plain one, absolute; None stays None."""
-    if path and not os.path.isabs(path) and runfiles:
-        path = runfiles.Create().Rlocation(path) or path
-    return os.path.abspath(path) if path else None
-
-
 def load_spec(path: str | None) -> dict:
     """//install:spec from a runfiles path (bazel run) or a plain path."""
-    if path and not os.path.isabs(path) and runfiles:
-        path = runfiles.Create().Rlocation(path) or path
+    path = paths.located(path)
     if not path:
         return {'partition_bytes': 32 << 30, 'volumes': {'data': {'uuid': DATA_UUID}}}
     return json.loads(Path(path).read_text())
@@ -387,10 +364,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument('--kcdata', help="XNU's tools/lldbmacros/kcdata.py (decodes a saved panic's stackshot)")
     parser.add_argument('--no-eject', action='store_true', help='leave the card attached (default: unmount and eject)')
     args = parser.parse_args(argv)
-    log = host.Log(
-        args.log
-        or Path.home() / 'Library/Logs/switch-ios-install/pull-logs-{}.log'.format(time.strftime('%Y%m%d-%H%M%S'))
-    )
+    log = host.Log(args.log or paths.run_log('pull-logs', 'switch-ios-install'))
     try:
         host.check_tools(log)
         spec = load_spec(args.spec)
@@ -399,9 +373,9 @@ def main(argv: list[str] | None = None) -> int:
         volume = data_volume(card, spec['volumes']['data']['uuid'])
         if not volume:
             raise host.HostError('no iPad Data volume {} on {}'.format(spec['volumes']['data']['uuid'], card.disk))
-        out = Path(args.out or state_dir() / 'device-logs' / time.strftime('boot-%m%d-%H%M'))
+        out = Path(args.out or paths.state_dir() / 'device-logs' / time.strftime('boot-%m%d-%H%M'))
         with cards.mounted(volume, log) as data:
-            what = Pull(not args.no_logarchive, not args.no_csstore, not args.no_launchd, runfile(args.kcdata))
+            what = Pull(not args.no_logarchive, not args.no_csstore, not args.no_launchd, paths.located(args.kcdata))
             pull(data, out, log, what)
             if args.harvest:
                 harvest(data, out, log, args.harvest_script and str(Path(args.harvest_script).parent), args.corpus)

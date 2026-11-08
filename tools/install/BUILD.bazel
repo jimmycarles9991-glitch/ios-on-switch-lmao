@@ -15,26 +15,41 @@ py_library(
     name = "lib",
     srcs = [
         "apfs.py",
+        "apfs_tree.py",
         "card.py",
         "compose.py",
         "cryptex.py",
         "delta.py",
+        "direct.py",
+        "direct_stream.py",
+        "disks.py",
         "extents.py",
+        "fill.py",
         "folder.py",
         "gpt.py",
         "host.py",
         "keys.py",
         "manifest.py",
         "overlay_index.py",
+        "owners.py",
         "pack.py",
         "populate.py",
         "pretranslate.py",
+        "progress.py",
         "renamed.py",
+        "room.py",
+        "space.py",
         "stages.py",
         "target.py",
         "to_card.py",
     ],
     imports = ["../.."],
+    deps = [
+        "//tools/common:files",
+        "//tools/common:hashing",
+        "//tools/common:paths",
+        "//tools/common:sudo",
+    ],
 )
 
 py_binary(
@@ -50,6 +65,13 @@ py_binary(
         ":lib",
         "@rules_python//python/runfiles",
     ],
+)
+
+# Bazel runs it for iOS 27's deltas and translated cryptexes (install/translated.bzl).
+py_binary(
+    name = "translate",
+    srcs = ["translate.py"],
+    deps = [":lib"],
 )
 
 py_binary(
@@ -69,6 +91,7 @@ py_binary(
 py_binary(
     name = "artifacts",
     srcs = ["artifacts.py"],
+    deps = ["//tools/common:hashing"],
 )
 
 py_binary(
@@ -119,6 +142,8 @@ py_test(
         "//drivers/NativeSwitchBlock:SwitchCryptex.cpp",
         "//drivers/NativeSwitchBlock:SwitchCryptex.h",
         "//drivers/NativeSwitchBlock:NativeSwitchBlock.cpp",
+        "//install:ipsw",
+        "//kernel:ipsw_volumes_header",
     ],
     deps = [
         ":spec_lib",
@@ -132,11 +157,27 @@ py_library(
     imports = ["../.."],
 )
 
-py_test(
-    name = "compose_test",
-    srcs = ["compose_test.py"],
+# Unit tests: Python on files in the test's own temporary directory, inside the sandbox.
+[py_test(
+    name = name + "_test",
+    size = "small",
+    srcs = [name + "_test.py"],
     deps = [":lib"],
-)
+) for name in [
+    "compose",
+    "delta",
+    "direct",
+    "extents",
+    "host",
+    "keys",
+    "manifest",
+    "overlay_index",
+    "owners",
+    "pretranslate",
+    "progress",
+    "space",
+    "to_card",
+]]
 
 py_test(
     name = "card_test",
@@ -146,20 +187,6 @@ py_test(
         ":lib",
         "@rules_python//python/runfiles",
     ],
-)
-
-py_test(
-    name = "manifest_test",
-    size = "small",
-    srcs = ["manifest_test.py"],
-    deps = [":lib"],
-)
-
-py_test(
-    name = "extents_test",
-    size = "small",
-    srcs = ["extents_test.py"],
-    deps = [":lib"],
 )
 
 # hdiutil and fsck_apfs on a real 128 MB container: macOS, outside the sandbox.
@@ -173,18 +200,72 @@ py_test(
     deps = [":lib"],
 )
 
+# cryptex.rebuild on a sealed stand-in: hdiutil and diskutil, macOS, outside the sandbox.
 py_test(
-    name = "to_card_test",
-    size = "small",
-    srcs = ["to_card_test.py"],
+    name = "cryptex_test",
+    srcs = ["cryptex_test.py"],
+    args = ["$(rootpath //boot/installer:apfs_tool)"],
+    data = ["//boot/installer:apfs_tool"],
+    tags = [
+        "local",
+        "manual",
+    ],
     deps = [":lib"],
 )
 
+# room.fit and apfs_tool on containers newfs_apfs made (a cryptex's kind), checked by macOS: hdiutil, diskutil and
+# fsck_apfs work inside darwin-sandbox, so it runs with every test; it skips itself where there is no diskutil.
 py_test(
-    name = "keys_test",
-    size = "small",
-    srcs = ["keys_test.py"],
+    name = "room_apfs_test",
+    srcs = ["room_apfs_test.py"],
+    args = ["$(rootpath //boot/installer:apfs_tool)"],
+    data = ["//boot/installer:apfs_tool"],
     deps = [":lib"],
+)
+
+# Populate as the user on a small composed container: hdiutil and diskutil, macOS, outside the sandbox.
+py_test(
+    name = "fill_apfs_test",
+    srcs = ["fill_apfs_test.py"],
+    tags = [
+        "local",
+        "manual",
+    ],
+    deps = [":lib"],
+)
+
+# Owners given offline on real APFS images, sealed after: hdiutil and diskutil, macOS, outside the sandbox.
+py_test(
+    name = "owners_apfs_test",
+    srcs = ["owners_apfs_test.py"],
+    tags = [
+        "local",
+        "manual",
+    ],
+    deps = [":lib"],
+)
+
+# The direct install onto a disk image built like the card: hdiutil, diskutil, fsck_apfs and apfs_tool, so macOS,
+# outside the sandbox.
+py_test(
+    name = "direct_card_test",
+    size = "large",
+    srcs = [
+        "direct_card_test.py",
+        "testcard.py",
+    ],
+    data = [
+        "//boot/installer:apfs_tool",
+        "//install:testdata/switch-card-1tb.json",
+    ],
+    tags = [
+        "local",
+        "manual",
+    ],
+    deps = [
+        ":lib",
+        "@rules_python//python/runfiles",
+    ],
 )
 
 py_library(
@@ -213,25 +294,4 @@ py_test(
         ":lib",
         ":sii_fixture",
     ],
-)
-
-py_test(
-    name = "delta_test",
-    size = "small",
-    srcs = ["delta_test.py"],
-    deps = [":lib"],
-)
-
-py_test(
-    name = "pretranslate_test",
-    size = "small",
-    srcs = ["pretranslate_test.py"],
-    deps = [":lib"],
-)
-
-py_test(
-    name = "overlay_index_test",
-    size = "small",
-    srcs = ["overlay_index_test.py"],
-    deps = [":lib"],
 )

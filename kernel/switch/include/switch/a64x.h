@@ -102,6 +102,18 @@ int a64x_emulate_user(struct arm_saved_state *state, uint32_t instr);
 /* kern_mman: an arm64e mapping that cannot be translated fails (it would fault on its first RETAB). */
 bool switch_a64x_mmap_refused(vm_map_t map, struct vnode *vp, off_t file_pos, vm_map_offset_t addr, vm_map_size_t size);
 
+/*
+ * exec's apple[] for an arm64e main executable. With no PAC hardware its code runs translated, pointer authentication
+ * the identity: what it does with its keys off. dyld then grades for keys off (arm64e first, then arm64), so it loads
+ * our plain arm64 plug-ins into Apple's processes as it loads arm64 code into any keys-off process.
+ */
+#define SWITCH_A64X_PTRAUTH_DISABLED "ptrauth_disabled=1"
+
+static inline bool switch_a64x_keys_off(cpu_type_t type, cpu_subtype_t subtype)
+{
+    return a64x_subtype_translated(type, subtype);
+}
+
 /* load_machfile: arm64e text runs only translated; arm64 text is scanned, and translated if it needs it. */
 static inline bool switch_a64x_load_refused(const struct mach_header *header, vm_map_t map, struct vnode *vp,
                                             off_t slice_offset, const void *lcmds, size_t lcmds_size, int64_t slide)
@@ -110,7 +122,7 @@ static inline bool switch_a64x_load_refused(const struct mach_header *header, vm
            a64x_load_image(map, vp, slice_offset, lcmds, lcmds_size, slide) != 0;
 }
 
-#else  /* CONFIG_A64X */
+#else /* CONFIG_A64X */
 struct mach_header;
 struct vnode;
 
@@ -118,6 +130,14 @@ static inline int a64x_subtype_translated(int type, int subtype)
 {
     (void)type, (void)subtype;
     return 0;
+}
+
+#define SWITCH_A64X_PTRAUTH_DISABLED ""
+
+static inline bool switch_a64x_keys_off(int type, int subtype)
+{
+    (void)type, (void)subtype;
+    return false;
 }
 
 static inline bool switch_a64x_mmap_refused(void *map, struct vnode *vp, long long file_pos, unsigned long long addr,

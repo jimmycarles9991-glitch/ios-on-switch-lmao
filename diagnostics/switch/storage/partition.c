@@ -19,17 +19,19 @@ static uint64_t get64(const uint8_t *p)
 
 static int equal(const uint8_t *a, const uint8_t *b, uint32_t n)
 {
-    for (uint32_t i = 0; i < n; i++)
+    for (uint32_t i = 0; i < n; i++) {
         if (a[i] != b[i])
             return 0;
+    }
     return 1;
 }
 
 static int zero(const uint8_t *p, uint32_t n)
 {
-    for (uint32_t i = 0; i < n; i++)
+    for (uint32_t i = 0; i < n; i++) {
         if (p[i])
             return 0;
+    }
     return 1;
 }
 
@@ -107,7 +109,8 @@ static int parse_entry(const uint8_t *p, uint32_t index, struct switch_gpt_works
         return SWITCH_GPT_ENTRIES;
     if (zero(p, 16))
         return SWITCH_GPT_OK;
-    uint64_t first = get64(p + 32), last = get64(p + 40);
+    uint64_t first = get64(p + 32);
+    uint64_t last = get64(p + 40);
     if (zero(p + 16, 16) || first < h->first_usable || first > last || last > h->last_usable)
         return SWITCH_GPT_ENTRIES;
     for (uint32_t i = 0; i < *used; i++) {
@@ -171,9 +174,10 @@ int switch_gpt_scan(switch_fat_read512 read512, void *context, uint64_t capacity
     if (w->sectors[0][510] != 0x55 || w->sectors[0][511] != 0xaa)
         return SWITCH_GPT_MBR;
     uint32_t protective = 0;
-    for (uint32_t i = 0; i < 4; i++)
+    for (uint32_t i = 0; i < 4; i++) {
         if (w->sectors[0][446 + i * 16 + 4] == 0xee)
             protective = 1;
+    }
     if (!protective)
         return SWITCH_GPT_MBR;
     for (uint32_t i = 0; i < 2; i++) {
@@ -184,12 +188,15 @@ int switch_gpt_scan(switch_fat_read512 read512, void *context, uint64_t capacity
         if (rc)
             return rc;
     }
-    const struct switch_gpt_header *a = &w->headers[0], *b = &w->headers[1];
+    const struct switch_gpt_header *a = &w->headers[0];
+    const struct switch_gpt_header *b = &w->headers[1];
     if (a->first_usable != b->first_usable || a->last_usable != b->last_usable || a->entry_count != b->entry_count ||
         a->entry_size != b->entry_size || a->array_crc != b->array_crc || !equal(a->disk_guid, b->disk_guid, 16))
         return SWITCH_GPT_MISMATCH;
     uint32_t bytes = a->entry_count * a->entry_size;
-    uint32_t crcs[2] = {0xffffffffu, 0xffffffffu}, used = 0, index = 0;
+    uint32_t crcs[2] = {0xffffffffu, 0xffffffffu};
+    uint32_t used = 0;
+    uint32_t index = 0;
     for (uint32_t offset = 0; offset < bytes; offset += 512) {
         uint32_t n = bytes - offset;
         if (n > 512)
@@ -235,16 +242,18 @@ int switch_partition_find(switch_fat_read512 read512, void *context, uint64_t ca
     const uint8_t *mbr = w->sectors[0];
     if (mbr[510] != 0x55 || mbr[511] != 0xaa)
         return SWITCH_GPT_MBR;
-    for (uint32_t i = 0; i < 4; i++)
+    for (uint32_t i = 0; i < 4; i++) {
         if (mbr[446 + i * 16 + 4] == 0xee)
             return switch_gpt_find(read512, context, capacity, probe, probe_context, w, output);
+    }
     w->headers[0] = (struct switch_gpt_header){.entry_count = 4, .entry_size = 16};
     w->headers[1] = (struct switch_gpt_header){0};
     uint32_t used = 0;
     for (uint32_t i = 0; i < 4; i++) {
-        const uint8_t *p = mbr + 446 + i * 16;
+        const uint8_t *p = mbr + 446 + (uintptr_t)i * 16;
         uint32_t type = p[4];
-        uint64_t first = get32(p + 8), count = get32(p + 12);
+        uint64_t first = get32(p + 8);
+        uint64_t count = get32(p + 12);
         if (p[0] != 0 && p[0] != 0x80)
             return SWITCH_GPT_MBR;
         if (!type) {
@@ -259,9 +268,10 @@ int switch_partition_find(switch_fat_read512 read512, void *context, uint64_t ca
         if (!first || !count || first >= capacity || count > capacity - first)
             return SWITCH_GPT_GEOMETRY;
         uint64_t last = first + count - 1;
-        for (uint32_t n = 0; n < used; n++)
+        for (uint32_t n = 0; n < used; n++) {
             if (first <= w->used[n].last && w->used[n].first <= last)
                 return SWITCH_GPT_OVERLAP;
+        }
         struct switch_gpt_extent *extent = &w->used[used++];
         *extent = (struct switch_gpt_extent){
             .first = first, .last = last, .partition_index = i, .basic_data = (type == 0x0b || type == 0x0c)};

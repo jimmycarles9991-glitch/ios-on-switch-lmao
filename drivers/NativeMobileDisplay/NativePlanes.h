@@ -47,7 +47,7 @@
 #include <stdint.h>
 #include <string.h>
 
-namespace NativePlanes {
+namespace native_planes {
 
 // --- The swap request ---------------------------------------------------------------------------------------------------
 constexpr unsigned kLayers = 4;
@@ -60,13 +60,13 @@ struct Rect {
 inline Rect rectAt(const unsigned char *request, unsigned base, unsigned layer)
 {
     Rect r;
-    memcpy(&r, request + base + 16 * layer, sizeof(r));
+    memcpy(&r, request + base + static_cast<size_t>(16) * layer, sizeof(r));
     return r;
 }
 
 inline uint32_t wordAt(const unsigned char *request, unsigned offset)
 {
-    uint32_t value;
+    uint32_t value = 0;
     memcpy(&value, request + offset, sizeof(value));
     return value;
 }
@@ -81,8 +81,10 @@ inline unsigned stackPosition(unsigned layer)
 // --- Surfaces -----------------------------------------------------------------------------------------------------------
 constexpr uint32_t fourcc(char a, char b, char c, char d)
 {
-    return (uint32_t)(unsigned char)a << 24 | (uint32_t)(unsigned char)b << 16 | (uint32_t)(unsigned char)c << 8 |
-           (uint32_t)(unsigned char)d;
+    return static_cast<uint32_t>(static_cast<unsigned char>(a)) << 24 |
+           static_cast<uint32_t>(static_cast<unsigned char>(b)) << 16 |
+           static_cast<uint32_t>(static_cast<unsigned char>(c)) << 8 |
+           static_cast<uint32_t>(static_cast<unsigned char>(d));
 }
 
 // An IOSurface as the kernel's IOSurface describes it (plane fields for planar formats only).
@@ -130,7 +132,7 @@ inline bool isNv12(Kind k)
 struct Limits {
     uint32_t minScaleFraction = 4, maxScale = 4;  // 1/4 .. 4x on each axis
     uint32_t maxSrcRectWidth = 1920;
-    uint64_t maxSrcRectTotal = 1920ull * 1088;
+    uint64_t maxSrcRectTotal = 1920ULL * 1088;
     uint32_t maxSrcBuffer = 2048;  // so rows x stride of any source fits one 20 MiB slot (8 KiB x 2048 = 16 MiB)
     uint32_t planeBaseAlignment = 64, strideAlignment = 128;
     uint32_t maxLayers = 2;
@@ -170,14 +172,15 @@ struct Layer {
 // The composited UI on window A: one full-frame BGRA surface, untransformed (validateSwap's rule since r6).
 inline bool isUi(const Layer &l, uint32_t width, uint32_t height)
 {
-    return l.kind == kKindBgra && !l.transform && l.src.x == 0 && l.src.y == 0 && (uint32_t)l.src.w == width &&
-           (uint32_t)l.src.h == height && l.dst.x == 0 && l.dst.y == 0 && (uint32_t)l.dst.w == width &&
-           (uint32_t)l.dst.h == height && l.surface.width >= width && l.surface.height >= height;
+    return l.kind == kKindBgra && (l.transform == 0u) && l.src.x == 0 && l.src.y == 0 &&
+           static_cast<uint32_t>(l.src.w) == width && static_cast<uint32_t>(l.src.h) == height && l.dst.x == 0 &&
+           l.dst.y == 0 && static_cast<uint32_t>(l.dst.w) == width && static_cast<uint32_t>(l.dst.h) == height &&
+           l.surface.width >= width && l.surface.height >= height;
 }
 
 inline bool aligned(uint64_t value, uint64_t to)
 {
-    return to && !(value % to);
+    return (to != 0u) && ((value % to) == 0u);
 }
 
 // --- Window B's registers -------------------------------------------------------------------------------------------------
@@ -251,8 +254,8 @@ inline Matrix matrixOf(const Surface &s)
 // (in - 1) / (out - 1) goes past the H limit for small 4x layers); 0 when it is over the limit.
 inline uint32_t ddaIncrement(uint32_t in, uint32_t out, uint32_t maxWhole)
 {
-    const uint64_t inc = out ? ((uint64_t)in << 12) / out : 0;
-    return inc > (uint64_t)maxWhole << 12 ? 0 : (uint32_t)inc;
+    const uint64_t inc = out ? (static_cast<uint64_t>(in) << 12) / out : 0;
+    return inc > static_cast<uint64_t>(maxWhole) << 12 ? 0 : static_cast<uint32_t>(inc);
 }
 
 // Everything the driver writes for a detached layer, and the part of its surface the window reads.
@@ -280,27 +283,29 @@ inline bool axisOf(int32_t s, int32_t sn, int32_t d, int32_t dn, uint32_t screen
                    bool even, Axis &a)
 {
     a = {};
-    const int64_t d0 = d<0 ? 0 : d, d1 = (int64_t)d + dn>(int64_t) screen ? (int64_t)screen : (int64_t)d + dn;
+    const int64_t d0 = d < 0 ? 0 : d;
+    const int64_t d1 = static_cast<int64_t>(d) + dn > static_cast<int64_t>(screen) ? static_cast<int64_t>(screen)
+                                                                                   : static_cast<int64_t>(d) + dn;
     if (d1 <= d0)
         return true;  // nothing on the screen
-    a.inc = ddaIncrement((uint32_t)sn, (uint32_t)dn, maxWhole);
+    a.inc = ddaIncrement(static_cast<uint32_t>(sn), static_cast<uint32_t>(dn), maxWhole);
     if (!a.inc)
         return false;
     a.visible = true;
-    a.pos = (uint32_t)d0;
-    a.size = (uint32_t)(d1 - d0);
+    a.pos = static_cast<uint32_t>(d0);
+    a.size = static_cast<uint32_t>(d1 - d0);
     // The source position of the first visible output pixel, in 4.12 from the source rectangle's start.
     const uint64_t phase = a.inc > 4096 ? (a.inc - 4096) / 2 : 0;
-    uint64_t at = (uint64_t)s * 4096 + phase + (uint64_t)(d0 - d) * a.inc;
+    const uint64_t at = static_cast<uint64_t>(s) * 4096 + phase + static_cast<uint64_t>(d0 - d) * a.inc;
     uint64_t first = at >> 12;
     if (even && (first & 1))
         --first;
-    a.first = (uint32_t)first;
-    a.initial = (uint32_t)(at - first * 4096);
+    a.first = static_cast<uint32_t>(first);
+    a.initial = static_cast<uint32_t>(at - first * 4096);
     // The last output pixel's source pixel, and the one after it the filter may take, within the surface.
-    const uint64_t last = (a.initial + (uint64_t)(a.size - 1) * a.inc) / 4096 + 1;
+    const uint64_t last = (a.initial + static_cast<uint64_t>(a.size - 1) * a.inc) / 4096 + 1;
     const uint64_t end = first + last + 1 > limit ? limit : first + last + 1;
-    a.count = (uint32_t)(end > first ? end - first : 1);
+    a.count = static_cast<uint32_t>(end > first ? end - first : 1);
     return a.initial <= 0xffff;
 }
 
@@ -310,16 +315,22 @@ inline bool imageOf(const Layer &l, uint32_t width, uint32_t height, Image &imag
 {
     image = Image();
     image.yuv = isNv12(l.kind);
-    const uint32_t bpp = image.yuv ? 1 : 4;              // bytes per pixel the offsets and PRESCALED count (luma)
-    const uint32_t hMax = image.yuv ? 8 : 4, vMax = 15;  // DDA limits (4:2:0 counts as 2 bytes per pixel)
-    Axis x, y;
+    const uint32_t bpp = image.yuv ? 1 : 4;  // bytes per pixel the offsets and PRESCALED count (luma)
+    const uint32_t hMax = image.yuv ? 8 : 4;
+    const uint32_t vMax = 15;  // DDA limits (4:2:0 counts as 2 bytes per pixel)
+    Axis x;
+    Axis y;
     if (!axisOf(l.src.x, l.src.w, l.dst.x, l.dst.w, width, l.surface.width, hMax, image.yuv, x) ||
         !axisOf(l.src.y, l.src.h, l.dst.y, l.dst.h, height, l.surface.height, vMax, image.yuv, y))
         return false;
     if (!x.visible || !y.visible)
         return true;
     image.visible = true;
-    image.colorDepth = image.yuv ? kDepthYCbCr420SP : l.kind == kKindRgba ? kDepthR8G8B8A8 : kDepthB8G8R8A8;
+    if (image.yuv) {
+        image.colorDepth = kDepthYCbCr420SP;
+    } else {
+        image.colorDepth = l.kind == kKindRgba ? kDepthR8G8B8A8 : kDepthB8G8R8A8;
+    }
     image.position = y.pos << 16 | x.pos;
     image.size = y.size << 16 | x.size;
     image.prescaled = y.count << 16 | x.count * bpp;
@@ -327,25 +338,29 @@ inline bool imageOf(const Layer &l, uint32_t width, uint32_t height, Image &imag
     image.hInitial = x.initial;
     image.vInitial = y.initial;
     image.hOffset = x.first * bpp;
-    const bool scaledX = x.inc != 4096 || x.initial, scaledY = y.inc != 4096 || y.initial;
+    const bool scaledX = x.inc != 4096 || (x.initial != 0u);
+    const bool scaledY = y.inc != 4096 || (y.initial != 0u);
     image.options = kWinEnable | (image.yuv ? kCscEnable : 0) | (scaledX ? kHFilterOn : 0) | (scaledY ? kVFilterOn : 0);
     const Surface &f = l.surface;
-    uint64_t low = UINT64_MAX, high = 0;
+    uint64_t low = UINT64_MAX;
+    uint64_t high = 0;
     for (unsigned p = 0; p < (image.yuv ? 2u : 1u); ++p) {
-        const uint64_t base = image.yuv ? f.offset[p] : 0, stride = f.stride[p];
-        const uint64_t row0 = p ? (uint64_t)y.first / 2 : (uint64_t)y.first;
-        const uint64_t rows = p ? ((uint64_t)y.count + 1) / 2 : (uint64_t)y.count;
+        const uint64_t base = image.yuv ? f.offset[p] : 0;
+        const uint64_t stride = f.stride[p];
+        const uint64_t row0 = p ? static_cast<uint64_t>(y.first) / 2 : static_cast<uint64_t>(y.first);
+        const uint64_t rows = p ? (static_cast<uint64_t>(y.count) + 1) / 2 : static_cast<uint64_t>(y.count);
         image.start[p] = base + row0 * stride;
-        const uint64_t a = image.start[p] + image.hOffset,
-                       b = image.start[p] + (rows - 1) * stride + image.hOffset + (uint64_t)x.count * (p ? 1 : bpp);
+        const uint64_t a = image.start[p] + image.hOffset;
+        const uint64_t b =
+            image.start[p] + (rows - 1) * stride + image.hOffset + static_cast<uint64_t>(x.count) * (p ? 1 : bpp);
         if (a < low)
             low = a;
         if (b > high)
             high = b;
     }
     image.lineStride = image.yuv ? f.stride[1] << 16 | f.stride[0] : f.stride[0];
-    image.readLow = low & ~4095ull;
-    image.readHigh = (high + 4095) & ~4095ull;
+    image.readLow = low & ~4095ULL;
+    image.readHigh = (high + 4095) & ~4095ULL;
     image.matrix = matrixOf(f);
     image.fullRange = l.kind == kKindNv12Full;
     return true;
@@ -358,18 +373,24 @@ inline unsigned checkDetached(const Layer &l, uint32_t width, uint32_t height, c
         return kFormat;
     if (l.transform)
         return kTransformed;
-    const Rect s = l.src, d = l.dst;
+    const Rect s = l.src;
+    const Rect d = l.dst;
     if (s.x < 0 || s.y < 0 || s.w <= 0 || s.h <= 0 || d.w <= 0 || d.h <= 0 ||
-        (uint64_t)s.x + (uint64_t)s.w > l.surface.width || (uint64_t)s.y + (uint64_t)s.h > l.surface.height ||
+        static_cast<uint64_t>(s.x) + static_cast<uint64_t>(s.w) > l.surface.width ||
+        static_cast<uint64_t>(s.y) + static_cast<uint64_t>(s.h) > l.surface.height ||
         l.surface.width > limits.maxSrcBuffer || l.surface.height > limits.maxSrcBuffer)
         return kGeometry;
     // Window coordinates are 13 bits; a layer wholly off the screen is accepted and shown as nothing.
-    if ((int64_t)d.x + d.w > 8191 || (int64_t)d.y + d.h > 8191 || d.x < -8191 || d.y < -8191)
+    if (static_cast<int64_t>(d.x) + d.w > 8191 || static_cast<int64_t>(d.y) + d.h > 8191 || d.x < -8191 || d.y < -8191)
         return kGeometry;
-    const uint64_t up = limits.maxScale, down = limits.minScaleFraction;
-    if ((uint64_t)d.w > (uint64_t)s.w * up || (uint64_t)d.h > (uint64_t)s.h * up ||
-        (uint64_t)s.w > (uint64_t)d.w * down || (uint64_t)s.h > (uint64_t)d.h * down ||
-        (uint32_t)s.w > limits.maxSrcRectWidth || (uint64_t)s.w * (uint64_t)s.h > limits.maxSrcRectTotal)
+    const uint64_t up = limits.maxScale;
+    const uint64_t down = limits.minScaleFraction;
+    if (static_cast<uint64_t>(d.w) > static_cast<uint64_t>(s.w) * up ||
+        static_cast<uint64_t>(d.h) > static_cast<uint64_t>(s.h) * up ||
+        static_cast<uint64_t>(s.w) > static_cast<uint64_t>(d.w) * down ||
+        static_cast<uint64_t>(s.h) > static_cast<uint64_t>(d.h) * down ||
+        static_cast<uint32_t>(s.w) > limits.maxSrcRectWidth ||
+        static_cast<uint64_t>(s.w) * static_cast<uint64_t>(s.h) > limits.maxSrcRectTotal)
         return kScale;
     const unsigned planes = isNv12(l.kind) ? 2 : 1;
     for (unsigned p = 0; p < planes; ++p) {
@@ -378,7 +399,8 @@ inline unsigned checkDetached(const Layer &l, uint32_t width, uint32_t height, c
         if (!aligned(base, limits.planeBaseAlignment) || !aligned(l.surface.stride[p], limits.strideAlignment) ||
             l.surface.stride[p] > 0xffff)
             return kAlignment;
-        const uint64_t minRow = (uint64_t)(planes == 1 ? l.surface.width * 4 : (l.surface.width + 1) / 2 * 2);
+        const uint64_t minRow =
+            static_cast<uint64_t>(planes == 1 ? l.surface.width * 4 : (l.surface.width + 1) / 2 * 2);
         if (l.surface.stride[p] < minRow || rows < (p ? (l.surface.height + 1) / 2 : l.surface.height) ||
             base + rows * l.surface.stride[p] > l.surface.allocation ||
             l.surface.allocation > l.surface.descriptorBytes)
@@ -401,14 +423,15 @@ inline Roles rolesOf(const bool present[kLayers], const Layer layers[kLayers], u
 {
     Roles r;
     unsigned uiPosition = 0;
-    for (unsigned i = 0; i < kLayers; ++i)
+    for (unsigned i = 0; i < kLayers; ++i) {
         if (present[i] && isUi(layers[i], width, height) && (r.ui < 0 || stackPosition(i) > uiPosition)) {
-            r.ui = (int)i;
+            r.ui = static_cast<int>(i);
             uiPosition = stackPosition(i);
         }
+    }
     unsigned planePosition = 0;
     for (unsigned i = 0; i < kLayers; ++i) {
-        if (!present[i] || (int)i == r.ui)
+        if (!present[i] || static_cast<int>(i) == r.ui)
             continue;
         if (r.ui >= 0 && stackPosition(i) > uiPosition) {
             ++r.extra;
@@ -417,10 +440,11 @@ inline Roles rolesOf(const bool present[kLayers], const Layer layers[kLayers], u
         if (r.plane < 0 || stackPosition(i) > planePosition) {
             if (r.plane >= 0)
                 ++r.extra;
-            r.plane = (int)i;
+            r.plane = static_cast<int>(i);
             planePosition = stackPosition(i);
-        } else
+        } else {
             ++r.extra;
+        }
     }
     return r;
 }
@@ -513,4 +537,4 @@ struct PlaneLatch {
     }
 };
 
-}  // namespace NativePlanes
+}  // namespace native_planes

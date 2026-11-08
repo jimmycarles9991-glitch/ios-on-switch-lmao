@@ -50,18 +50,22 @@ MACHO_SRCS = [
     "macho/codesign.c",
     "macho/dsc.c",
     "macho/dsc_verify.c",
+    "macho/fips.c",
     "macho/macho.c",
     "macho/pretranslate.c",
     "macho/pt_verify.c",
     "macho/sha256.c",
+    "macho/stub_split.c",
 ]
 
 MACHO_HDRS = [
     "macho/codesign.h",
     "macho/dsc.h",
+    "macho/fips.h",
     "macho/macho.h",
     "macho/pretranslate.h",
     "macho/sha256.h",
+    "macho/stub_split.h",
 ]
 
 filegroup(
@@ -119,7 +123,10 @@ filegroup(
 py_library(
     name = "prelink26",
     srcs = glob(["xnu/prelink26/*.py"]),
-    deps = ["//tools/prelink:native_prelink"],
+    deps = [
+        "//tools/common:macho",
+        "//tools/prelink:native_prelink",
+    ],
 )
 
 py_binary(

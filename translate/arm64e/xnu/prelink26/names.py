@@ -1,16 +1,19 @@
 #!/usr/bin/env python3
-"""Name the 26.5.2 kernel addresses that kexts use, so the kexts can be relinked against our kernel.
+"""Name the fileset kernelcache's kernel addresses that kexts use, so the kexts can be relinked against our kernel.
 
-The 26.5.2 kernelcache is fully stripped. Sources, strongest first:
+The kernelcache is fully stripped. Sources, strongest first:
   1. vtables: Apple kernel class C, slot i (ipsw kernel cpp) <-> our kernel's __ZTV<C> slot i (same 12377 KPI).
      Checked with the arm64e vtable PAC: the slot's discriminator is the SipHash of the mangled name of the method
      that introduced the slot (prelink26/ptrauth_disc.py computes it with clang).
-  2. GOT order: a kext's __auth_got / __got entries are sorted by imported symbol name (98.3% of adjacent pairs in
+  2. vnode operation descriptors (their own name string) and vectors (vnodeops.py).
+  3. GOT order: a kext's __auth_got / __got entries are sorted by imported symbol name (98.3% of adjacent pairs in
      the symbolized iOS 17 cache; the rest are aliases). Between two named neighbours, the unknown entries take the
-     names that the same kext imported in iOS 17 in that interval, or the 26.5.2 KPI names (symbol sets) there,
-     when the count matches exactly. Iterated over every kext until nothing changes.
-  3. ipsw/symbolicator string signatures (Darwin 25.5): seeds for C functions, and a hold-out check of 1-2.
-  4. pinned_names.py: functions identified by hand for one kernelcache, before the GOT pass; any disagreement fails.
+     names that the same kext imported in iOS 17 in that interval when the count matches exactly. Iterated over every
+     kext until nothing changes, with the call graph between named functions.
+  4. ipsw's signatures of this Darwin version, where every GOT section holding the address allows the name.
+  5. pinned_names.py: functions identified by hand for one kernelcache, under the same GOT check. A pin that a
+     source above already names is redundant (same function) or a conflict; the prelink refuses conflicts.
+  6. shims.py: imports our kernel answers with a function of its own, where nothing above names the address.
 Output: prelink26/kernel-names.json {address: name}, with per-source counts and conflicts.
 """
 import bisect, collections, itertools, json, os, struct, sys
@@ -19,9 +22,13 @@ R = os.path.join(HERE, "..")
 sys.path.insert(0, HERE); sys.path.insert(0, os.path.join(R, "tools"))
 from kcinfo import KC, decode8
 from fileset import Fileset
+import funcnames
 import kc17
 import paths
 import pinned_names
+import shims
+import sysctls
+import vnodeops
 
 KCPATH = paths.KERNELCACHE
 OURS = paths.OURS
@@ -169,39 +176,25 @@ def main():
             assign(t_apple, sorted(outs)[0][1], "vtable")
         else:
             vt_stats["apple target shared by different methods (not named)"] += 1
-    # 3a. symbolicator: C names only (C++ ones come demangled)
+    # 3. ipsw: the C++ classes' metaclass and vtable symbols it finds, and its signature names (strings, callers) of
+    # this Darwin version's functions. A signature can land on the wrong function (vfs_addtrigger on lck_rw_free,
+    # cpu_boot_thread on ml_processor_register), so its names wait for the GOT order to check them.
     sym = json.load(open(paths.work("sym/kernelcache.decompressed.symbols.json")))
-    symn = {int(a): n for a, n in sym.items()}
-    holdout = {}
-    for a, n in symn.items():
+    signatures = {}
+    for a, n in ((int(a), n) for a, n in sym.items()):
         if not in_kernel(a): continue
         if n.endswith("::gMetaClass") and n.count("::") == 1:
             mn = "__ZN" + mangle_class(n[:-12]) + "10gMetaClassE"
+            if mn in oname: assign(a, mn, "symbolicator-class")
         elif n.startswith("vtable for ") and n.count("::") <= 1:
             # ipsw gives the vtable's address point; the __ZTV symbol is 16 bytes before it
             c = n[11:]
             mn = "__ZTVN" + mangle_class(c[:-11]) + "9MetaClassE" if c.endswith("::MetaClass") else \
                  ("__ZTV" + mangle_class(c) if "::" not in c else None)
-            if mn is None: continue
-            a = a - 16
-            if not in_kernel(a): continue
-        elif "::" in n or " " in n or "(" in n:
-            continue
-        else:
-            mn = "_" + n
-        if mn in oname:
-            holdout[a] = mn
-    # seed half of the symbolicator names, keep the other half to check the GOT pass
-    seeds = sorted(a for a in holdout if not holdout[a].startswith(("__ZN", "__ZTV")))
-    for a in holdout:
-        if holdout[a].startswith(("__ZN", "__ZTV")): assign(a, holdout[a], "symbolicator-class")
-    seed_all = bool(os.environ.get("NAMES_SEED_ALL"))
-    for j, a in enumerate(seeds):
-        if j % 2 == 0 or seed_all: assign(a, holdout[a], "symbolicator")
-    for a, n in pinned_names.names_for(KCPATH).items():
-        assign(a, n, "pinned")
-        if n not in oname or oname.get(names[a]) != oname[n]:
-            raise SystemExit("pinned name %s for %#x: not in our kernel, or named %s by %s" % (n, a, names[a], source[a]))
+            if mn in oname and in_kernel(a - 16): assign(a - 16, mn, "symbolicator-class")
+        elif "::" not in n and " " not in n and "(" not in n:
+            mn = n if n.startswith("__Z") else "_" + n
+            if mn in oname: signatures[a] = mn
     # vnode operation descriptors (struct vnodeop_desc, vnode_internal.h) carry their own name at +8: "vnop_<op>" for
     # vnop_<op>_desc, "default" for vnop_default_desc. File systems point their operation vectors at them.
     for a in sorted(set(t for t, f in fix.values() if in_kernel(t) and t not in names)):
@@ -214,6 +207,28 @@ def main():
         n = "_vnop_default_desc" if op == "default" else "_%s_desc" % op if op.startswith("vnop_") else None
         if n and n in oname and not ofunc(oname[n]):
             assign(a, n, "vnodeop_desc")
+    kvm, kfo = kc.entry["com.apple.kernel"]
+    ktext_vm = kc.entry_segs(kfo)[0]["va"]
+    fstarts = []
+    for cmd, p, size in kc.entry_cmds(kfo):
+        if cmd == 0x26:
+            off, sz = struct.unpack_from("<II", kc.d, p + 8); q = off; a0 = ktext_vm
+            while q < off + sz:
+                v = 0; sh = 0
+                while True:
+                    byte = kc.d[q]; q += 1; v |= (byte & 0x7F) << sh; sh += 7
+                    if not byte & 0x80: break
+                if not v: break
+                a0 += v; fstarts.append(a0)
+    fstarts.sort()
+    fset = set(fstarts)
+    our_starts = sorted(set(x for x, n in osorted if ofunc(x)))
+    for a, n in vnodeops.name(kc, fix, in_kernel, fstarts, names, ours, oname, oaddr, our_starts).items():
+        assign(a, n, "vnodeop vector")
+    sysctl_names = sysctls.name(kc, fix, in_kernel, fset.__contains__)
+    for a, n in sysctl_names.items():
+        if n.endswith("_children") and n in oname and not ofunc(oname[n]): assign(a, n, "sysctl tree")
+        elif n.startswith("_sysctl_handle_") and n in oname and a in fset: assign(a, n, "sysctl handler")
     # 2. GOT order
     d17, kn17, names17, kexts17, gots17 = kc17.load()
     universe = set(l.strip() for l in open(paths.work("symbolsets26.txt")))
@@ -226,9 +241,6 @@ def main():
                     secs.append((sec["name"], [fix.get(sec["va"] + 8 * i, (None, None))[0] for i in range(sec["size"] // 8)]))
         gots26[bid] = secs
     imports17 = {bid: sorted(set(n for t, ns in seq for n in ns)) for bid, seq in gots17.items()}
-    union17 = sorted(set(n for v in imports17.values() for n in v))
-    funcs_u = sorted(n for n in universe if n in oname and ofunc(oname[n]))
-    data_u = sorted(n for n in universe if n in oname and not ofunc(oname[n]))
     # every kernel entry of every GOT section: address -> [(section key, position)]
     secs_k = {}
     occ = collections.defaultdict(list)
@@ -269,6 +281,41 @@ def main():
             if not any(min(lo) < x < max(hi) for x in na): return False
         return True
     stats = collections.Counter()
+    def apple_size(a):
+        i = bisect.bisect_right(fstarts, a)
+        return (fstarts[i] if i < len(fstarts) else a + 4) - a
+    def wrapped(n):
+        """the function of ours that our n only sets arguments for and branches to (advisory_read: advisory_read_ext)"""
+        at = ours.va2off(oname[n])
+        for i in range(8):
+            w = struct.unpack_from("<I", ours.d, at + 4 * i)[0]
+            if w & 0xFC000000 == 0x14000000:
+                imm = w & 0x3FFFFFF
+                return oname[n] + 4 * i + 4 * (imm - (1 << 26) if imm & (1 << 25) else imm)
+            if w & 0xFC000000 == 0x94000000 or w & 0xFFFFFC1F == 0xD65F0000:
+                return None
+        return None
+    def our_size(n):
+        i = bisect.bisect_right(our_starts, oname[n])
+        return (our_starts[i] if i < len(our_starts) else oname[n] + 4) - oname[n]
+    def twins(addresses):
+        """Apple functions one function of ours stands for: each only branches on (kfree_data, kfree_data_external)"""
+        def branch_only(a):
+            if a not in fset or apple_size(a) > 0x20: return False
+            words = [struct.unpack_from("<I", kc.d, kc.va2off(a) + 4 * i)[0] for i in range(apple_size(a) // 4)]
+            words = [w for w in words if w not in (0xD503237F, 0xD503233F, 0xD503245F, 0xD503201F)]
+            return bool(words) and words[-1] & 0xFC000000 == 0x14000000
+        return all(branch_only(a) for a in addresses)
+    def plausible(a, n):
+        # A few instructions of ours are not a function Apple built twenty times larger: the 21H461 import that
+        # fits a gap can be OutputHost64 where 24B119's kext imports withSpecification.
+        if a in fset and ofunc(oname[n]) and our_size(n) <= 0x20 and apple_size(a) > 0x80 and not wrapped(n):
+            return False
+        # When a wrapper of ours and the function it wraps both fit a GOT gap, the order cannot tell them apart;
+        # Apple's function there is the wrapper only if it is one too (24B119's apfs imports advisory_read_ext where
+        # 21H461's imported advisory_read).
+        m = wrapped(n) if a in fset else None
+        return not (m and apple_size(a) > 0x40 and any(fits(a, x) for x in oaddr.get(m, ())))
     def got_pass():
       total = 0
       while True:
@@ -276,8 +323,6 @@ def main():
         taken = set(names.values())
         for (bid, secname), ks in secs_k.items():
             imp = imports17.get(bid, [])
-            kind_ok = (lambda n: n in oname and ofunc(oname[n])) if secname == "__auth_got" else \
-                      (lambda n: n in oname and not ofunc(oname[n]))
             # the gap bounds use the alias that keeps the section ascending: lowest after, highest before
             known = [(j, names[a]) for j, a in enumerate(ks) if a in names]
             edges = [(-1, "")] + known + [(len(ks), "\x7f")]
@@ -285,19 +330,38 @@ def main():
                 lo, hi = bounds(lo, hi)
                 gap = [ks[j] for j in range(j0 + 1, j1) if ks[j] not in names]
                 if not gap or len(set(gap)) != len(gap): continue
-                for cand_src, pool in (("got17", imp), ("got17-any", union17),
-                                       ("got26-kpi", funcs_u if secname == "__auth_got" else data_u)):
+                # a function pointer kexts take as data sits in __got: the kind is the target's, not the section's
+                functions = {a in fset for a in gap}
+                if len(functions) != 1: continue
+                kind_ok = (lambda n: n in oname and ofunc(oname[n])) if functions == {True} else \
+                          (lambda n: n in oname and not ofunc(oname[n]))
+                # Only the kext's own iOS 17 imports: any kext's, or any KPI name, fit a gap's count by chance
+                # and shifted names by one (amfi_interface_register's on libCoreEntitlements' registration,
+                # proc_is64bit_data's on proc_get_syscall_filter_mask_size); pinned_names.py names the rest.
+                for cand_src, pool in (("got17", imp),):
                     lo_i, hi_i = bisect.bisect_right(pool, lo), bisect.bisect_left(pool, hi)
                     cands = [n for n in pool[lo_i:hi_i] if kind_ok(n) and n not in taken]
                     if len(cands) < len(gap): continue
+                    # Names one function of ours carries (ubc_create_upl, ubc_create_upl_external) may be one GOT
+                    # entry or two in this kernelcache, so the count says nothing: filling by it shifted apfs's ubc_
+                    # names by one.
+                    # Unless every name of each such function is here: then Apple has one function per name
+                    # (kfree_data, kfree_data_external).
+                    if len({oname[n] for n in cands}) != len(cands) and len(cands) == len(gap):
+                        complete = all(oaddr[oname[n]] & set(pool) <= set(cands) for n in cands)
+                        by_function = collections.defaultdict(list)
+                        for a, n in zip(gap, cands): by_function[oname[n]].append(a)
+                        if not complete or not all(twins(t) for t in by_function.values() if len(t) > 1):
+                            stats["alias-ambiguous"] += 1; continue
+                    elif len({oname[n] for n in cands}) != len(cands): stats["alias-ambiguous"] += 1; continue
                     if len(cands) == len(gap):
-                        choice = cands if all(fits(a, n) for a, n in zip(gap, cands)) else None
+                        choice = cands if all(fits(a, n) and plausible(a, n) for a, n in zip(gap, cands)) else None
                         if choice is None: stats['rejected'] += 1; continue
                     else:
                         # more names than entries: the in-order choices every other section allows; one, or none
                         if len(cands) > 14 or len(gap) > 6: continue
                         ok = [c for c in itertools.combinations(cands, len(gap))
-                              if all(fits(a, n) for a, n in zip(gap, c))]
+                              if all(fits(a, n) and plausible(a, n) for a, n in zip(gap, c))]
                         if len(ok) != 1: continue
                         choice = list(ok[0]); cand_src += "+order"
                     for a, n in zip(gap, choice):
@@ -309,21 +373,6 @@ def main():
     # call graph: a named Apple function and ours of the same name call the same functions in the same order,
     # apart from what DEVELOPMENT adds (asserts) and inlining; equal-length runs between agreeing calls pair up
     import difflib
-    kvm, kfo = kc.entry["com.apple.kernel"]
-    ktext_vm = kc.entry_segs(kfo)[0]["va"]
-    fstarts = []
-    for cmd, p, size in kc.entry_cmds(kfo):
-        if cmd == 0x26:
-            off, sz = struct.unpack_from("<II", kc.d, p + 8); q = off; a0 = ktext_vm
-            while q < off + sz:
-                v = 0; sh = 0
-                while True:
-                    byte = kc.d[q]; q += 1; v |= (byte & 0x7F) << sh; sh += 7
-                    if not byte & 0x80: break
-                if not v: break
-                a0 += v; fstarts.append(a0)
-    fstarts.sort()
-    our_starts = sorted(set(x for x, n in osorted if ofunc(x)))
     def calls(data_of, lo, hi):
         out = []
         for pc in range(lo, hi, 4):
@@ -376,89 +425,96 @@ def main():
                 if apple in occ and not fits(apple, nm): continue
                 if assign(apple, nm, "callgraph"): added += 1; used.add(b0)
         return added
+    def derive():
+        while True:
+            g = got_pass()
+            c = callgraph_pass()
+            stats["callgraph named"] += c
+            # spec and fifo vectors share their descs: the names derived so far tell them apart
+            v = sum(assign(a, n, "vnodeop vector") for a, n in
+                    vnodeops.name(kc, fix, in_kernel, fstarts, names, ours, oname, oaddr, our_starts).items())
+            if not g and not c and not v: return
+    derive()
+    # A string that is one function's name, referenced by that function alone (its own __func__; an inlined
+    # callee's __func__ turns up in every caller too)
+    bound = {oname[n] for n in names.values() if n in oname}
+    users = collections.Counter(t for f in fstarts if in_kernel(f) for t in funcnames.strings(kc, fstarts, f))
+    for a in sorted(set(occ) - set(names)):
+        if a not in fset: continue
+        own = [m for m in ("_" + t for t in funcnames.strings(kc, fstarts, a) if users[t] == 1)
+               if m in oname and ofunc(oname[m]) and oname[m] not in bound and fits(a, m)]
+        if len(own) == 1: assign(a, own[0], "function name string")
+    # a signature name or a pin stands only where the GOT order of every section holding the address allows it, and
+    # never against a derived name
+    needed = json.load(open(paths.work("closure.json")))
+    needed = set(needed["kernel_targets"]) | set(needed["kernel_branch_targets"])
+    for a, n in sysctl_names.items():
+        if n.endswith("_children") or n.startswith("_sysctl_handle_"): continue
+        if a in needed and a not in names and n in oname and not ofunc(oname[n]) and (a not in occ or fits(a, n)):
+            assign(a, n, "sysctl variable")
+    rejected_signatures = []
+    for a, n in sorted(signatures.items()):
+        if a in names:
+            if oname.get(names[a]) != oname[n]: rejected_signatures.append((hex(a), n, names[a], source[a]))
+        elif a in occ and not fits(a, n):
+            rejected_signatures.append((hex(a), n, "outside its GOT interval", ""))
+        else:
+            assign(a, n, "signature")
+    pins_redundant, pin_conflicts = [], []
+    for a, n in pinned_names.names_for(KCPATH).items():
+        if n not in oname:
+            pin_conflicts.append((hex(a), n, "not in our kernel", ""))
+        elif a in names:
+            (pins_redundant if oname.get(names[a]) == oname[n] else pin_conflicts).append((hex(a), n, names[a], source[a]))
+        elif a in occ and not fits(a, n):
+            pin_conflicts.append((hex(a), n, "outside its GOT interval", ""))
+        else:
+            assign(a, n, "pinned")
+    derive()
+    # A gap filled while its neighbours were still unnamed can turn out to break an order named later (current_act
+    # where sandbox's GOT holds the entry between current_persona_get and current_task): retract it and derive again.
+    retracted = []
     while True:
-        g = got_pass()
-        c = callgraph_pass()
-        stats["callgraph named"] += c
-        if not g and not c: break
+        wrong = [a for a in occ if a in names and source[a].startswith("got17") and not fits(a, names[a])]
+        if not wrong: break
+        for a in wrong:
+            retracted.append((hex(a), names.pop(a), source.pop(a)))
+        derive()
     rejected = stats["rejected"]; rounds = stats["got rounds"]
     print("call graph named", stats["callgraph named"])
-    # interval pass: an unknown address takes the only KPI name of its kind that fits between its named
-    # neighbours in every section holding it (intersection of all its intervals)
-    kind_of = {}
-    for (bid, secname), ks in secs_k.items():
-        for a in ks: kind_of.setdefault(a, set()).add(secname)
-    all17 = sorted(set(n for v in imports17.values() for n in v) | universe)
-    func_pool = [n for n in all17 if n in oname and ofunc(oname[n])]
-    data_pool = [n for n in all17 if n in oname and not ofunc(oname[n])]
-    ipass = 0
-    while True:
-        progress = 0
-        taken = set(names.values())
-        for a in list(occ):
-            if a in names or len(kind_of[a]) != 1: continue
-            L, H = "", "\x7f"
-            for key, j in occ[a]:
-                ks = secs_k[key]
-                lo, hi = neighbours(ks, j)
-                L, H = max(L, lo), min(H, hi)
-            pool = func_pool if "__auth_got" in kind_of[a] else data_pool
-            c = [n for n in pool[bisect.bisect_right(pool, L):bisect.bisect_left(pool, H)] if n not in taken]
-            if len(c) == 1 and fits(a, c[0]):
-                if assign(a, c[0], "got-interval"): progress += 1; taken.add(c[0]); ipass += 1
-        if not progress: break
-    print("interval pass named", ipass)
-    if os.environ.get("NAMES_DEBUG"):
-        cl0 = json.load(open(paths.work("closure.json")))
-        need0 = set(cl0["kernel_targets"]) | set(cl0["kernel_branch_targets"])
-        shown = 0
-        for a in sorted(need0):
-            if a in names: continue
-            if a not in occ: print("  unnamed, in no GOT:", hex(a)); shown += 1; continue
-            L, H = "", "\x7f"; nb = []
-            for key, j in occ[a]:
-                ks = secs_k[key]
-                lo, hi = neighbours(ks, j)
-                nb.append((key[0].split(".")[-1], key[1], lo, hi))
-                L, H = max(L, lo), min(H, hi)
-            pool = func_pool if "__auth_got" in kind_of[a] else data_pool
-            c = [n for n in pool[bisect.bisect_right(pool, L):bisect.bisect_left(pool, H)] if n not in set(names.values())]
-            print("  unnamed", hex(a), kind_of[a], "occ", len(occ[a]), "interval", L, H, "cands", len(c), c[:6])
-            shown += 1
-            if shown > 12: break
-    # audit: every section's named entries must ascend
+    cl = json.load(open(paths.work("closure.json")))
+    need = sorted(set(cl["kernel_targets"]) | set(cl["kernel_branch_targets"]))
+    order_violations = [(hex(a), names[a], source[a]) for a in need if a in names and a in occ and not fits(a, names[a])]
+    # after the GOT-order audit: a shim's name is ours, not the one the kexts imported
+    shim_conflicts = []
+    for a, (n, why) in shims.shims_for(KCPATH).items():
+        if a in names or n not in oname:
+            shim_conflicts.append((hex(a), n, names.get(a, "not in our kernel"), source.get(a, "")))
+        else:
+            assign(a, n, "shim")
     viol = 0
     for key, ks in secs_k.items():
         kn = [names[a] for a in ks if a in names]
         viol += sum(1 for x, y in zip(kn, kn[1:]) if not min(aliases(x)) < max(aliases(y)))
     print("GOT gap fills rejected by another section's order:", rejected, "order violations after:", viol)
-    # hold-out check
-    chk = collections.Counter()
-    for j, a in enumerate(seeds):
-        if j % 2 == 1 and not seed_all:
-            if a in names:
-                ok = names[a] == holdout[a] or oname.get(names[a]) == oname.get(holdout[a])
-                chk["agree" if ok else "disagree"] += 1
-                kpi = names[a] in universe
-                chk[("KPI " if kpi else "non-KPI ") + source[a] + (" agree" if ok else " disagree")] += 1
-                if not ok and chk["disagree"] <= 10: print("  holdout disagree", hex(a), names[a], source[a], "vs", holdout[a])
-            else:
-                chk["not named by vtable/GOT"] += 1
-    # the targets the kept kexts need
-    cl = json.load(open(paths.work("closure.json")))
-    need = sorted(set(cl["kernel_targets"]) | set(cl["kernel_branch_targets"]))
     got = [a for a in need if a in names]
     print("vtables:", dict(vt_stats), "slots", len(vt_slots))
     print("GOT rounds", rounds, "names total", len(names), collections.Counter(source.values()))
-    print("hold-out (symbolicator names not seeded):", dict(chk))
     print("conflicts", len(conflicts)); [print("  ", c) for c in conflicts[:10]]
+    print("signatures rejected", len(rejected_signatures), "pins redundant", len(pins_redundant),
+          "pin conflicts", len(pin_conflicts), "needed names out of GOT order", len(order_violations),
+          "retracted", len(retracted), "shim conflicts", len(shim_conflicts))
     print("kept kexts need", len(need), "named", len(got), "by source", collections.Counter(source[a] for a in got))
     missing = [a for a in need if a not in names]
     json.dump({"names": {hex(a): n for a, n in names.items()}, "source": {hex(a): s for a, s in source.items()},
                "missing": [hex(a) for a in missing], "conflicts": conflicts, "vt_slots": vt_slots,
-               "holdout": dict(chk)},
-              open(paths.work("kernel-names.json" if seed_all else "kernel-names-holdout.json"), "w"), indent=0)
-
+               "rejected_signatures": rejected_signatures, "pins_redundant": pins_redundant,
+               "pin_conflicts": pin_conflicts, "order_violations": order_violations, "retracted": retracted,
+               "shim_conflicts": shim_conflicts},
+              open(paths.work("kernel-names.json"), "w"), indent=0)
+    if pin_conflicts or order_violations or shim_conflicts:
+        raise SystemExit("names.py: a pin or shim against what the kernelcache shows, or a name out of GOT order:\n" +
+                         "\n".join(map(str, pin_conflicts + order_violations + shim_conflicts)))
 
 if __name__ == "__main__":
     main()

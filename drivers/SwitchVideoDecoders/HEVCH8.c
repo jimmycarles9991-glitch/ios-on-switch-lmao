@@ -26,7 +26,7 @@
 // processes for MSE, MediaCapabilities and HLS; mediaplaybackd and mediaserverd for AVPlayer's HLS variants;
 // videocodecd) get no entry here.
 //
-// Where NVDEC decodes HEVC (TegraNVDEC is open to the process, its N3 HEVC picture and this boot's clip check passed),
+// Where NVDEC decodes HEVC (TegraNVDEC is open to the process),
 // AVD.videodecoder registers its own 'hvc1' with kVTVideoDecoderInfo_Rating 1, which VideoToolbox's registry ranks
 // before this entry (rating 0): sessions run on NVDEC, in streaming processes too, and this entry steps aside without
 // being withdrawn. It stays behind AVD for what AVD does not take: tile sessions (grid HEIC, iPhone photos: AVD has no

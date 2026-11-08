@@ -65,20 +65,23 @@ TEST(SdCqSource, DriverGuards)
     // queue's code are the engine's settle() between read-backs of a card slow to show a byte and (r18-sdcq) between
     // probes of a queue a card has not opened yet.
     const std::string command = body("int NativeSwitchBlock::cqCommand(");
-    EXPECT_THAT(command, HasSubstr("waitSignal(awaited,"));
-    EXPECT_THAT(command, HasSubstr("panic(\"SwitchSD: SDMMC1 interrupt lost"));
+    EXPECT_THAT(command, HasSubstr("awaitStatus(done, limit)"));
+    EXPECT_THAT(body("uint32_t NativeSwitchBlock::awaitStatus("), HasSubstr("interruptLost(signals)"));
     EXPECT_THAT(command, Not(HasSubstr("IOSleep")));
     EXPECT_THAT(command, Not(HasSubstr("IODelay")));
     // r16-sdcq: a CMD49's busy (the byte applied, a flush done) ends in transfer complete; DAT0 confirms it before the
-    // read-back; the limit covers the spec's 1 s of busy or data access.
-    // r18-sdcq: and an R1b's (CMD43: no task assigned before it completes); a failed command's response kept.
-    EXPECT_THAT(command, HasSubstr("(data == kRegWrite || (flags & 3) == 3) && !waitIdle(true, 1000000000)"));
+    // read-back (a card still holding it is released by interrupt, never polled); the limit covers the spec's 1 s of busy
+    // or data access. r18-sdcq: and an R1b's (CMD43: no task assigned before it completes); a failed command's response
+    // kept, read before any CMD13 could replace it.
+    EXPECT_THAT(command, HasSubstr("use = SwitchSdUse::kWrite;"));
+    EXPECT_THAT(command, HasSubstr("use = SwitchSdUse::kBusy;"));
+    EXPECT_THAT(command, HasSubstr("if (!step && !bus.idle() && awaitRelease())\n        step = 10;"));
+    EXPECT_LT(Index(command, "const uint32_t answer = r32(RESPONSE);"), Index(command, "awaitRelease()"));
     // r18-sdcq (r8d): not after a command error, where RESPONSE is still the previous command's.
-    EXPECT_THAT(command,
-                HasSubstr("if ((s & INT_COMMAND) && !(s & 0x000f0000u))\n            *response = r32(RESPONSE);"));
+    EXPECT_THAT(command, HasSubstr("if ((s & INT_COMMAND) && !(s & 0x000f0000u))\n            *response = answer;"));
     // An erase-based trim passes the longer busy its SD Status specifies; every other command keeps the default.
     EXPECT_THAT(command, HasSubstr("limit = limitNs"));
-    EXPECT_THAT(source, HasSubstr("int data,\n                  uint64_t limitNs = 1500000000ull);"));
+    EXPECT_THAT(source, HasSubstr("int data,\n                  uint64_t limitNs = 1500000000ULL);"));
     EXPECT_EQ(Count(source, "kRegNone, limitNs)"), 1u);
     EXPECT_THAT(body("Batch *NativeSwitchBlock::runGroup("), Not(HasSubstr("13, ")));  // no CMD13 task-status polling
     EXPECT_EQ(Count(engine(), "bus.settle()"), 2u);
@@ -192,7 +195,9 @@ TEST(SdCqSource, DriverGuards)
     const std::string check = body("const char *NativeSwitchBlock::checkCq(");
     EXPECT_THAT(check, HasSubstr("if (perf.cqDepth < 2)\n        return \"the card offers no queue\";"));
     EXPECT_THAT(check, HasSubstr("if (perf.cqControl & kSdCqEnable)"));
-    EXPECT_THAT(check, HasSubstr("memcmp(bounce + i * kBytes, checkBuffer + i * kBytes, kBytes)"));
+    EXPECT_THAT(
+        check,
+        HasSubstr("memcmp(bounce + static_cast<size_t>(i) * kBytes, checkBuffer + static_cast<size_t>(i) * kBytes,"));
     EXPECT_LT(Index(check, "cq.start(depth, perf.cache);"), Index(check, "cq.enter(cqBus)"));
     // r18-sdcq: the depth one below byte 6's (the Raspberry Pi kernel's), the test group once more after a recovered
     // protocol error, and the data path's counts from zero.

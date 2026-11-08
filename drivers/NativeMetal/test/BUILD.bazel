@@ -1,5 +1,8 @@
 # drivers/NativeMetal on the host:
-#   queue_priority_test   QueuePriority.h: the process's GPU priority from its Metal queues' (Core Animation's)
+#   limits_table_test       LimitsTable.h: the device's answers in the base class's limits table, past a field the base
+#                           class reads elsewhere (21H461's minConstantBufferAlignmentBytes)
+#   queue_priority_test     QueuePriority.h: the process's GPU priority from its Metal queues' (Core Animation's)
+#   image_filter_link_test  ImageFilterLink.h: Core Image's filter-function link request for the system's Metal compiler
 #
 #   bazel test //drivers/NativeMetal/test:all
 load("//bazel/lint:defs.bzl", "lint_files")
@@ -8,10 +11,29 @@ load("//bazel/testing:defs.bzl", "host_test")
 lint_files()
 
 host_test(
+    name = "limits_table_test",
+    srcs = [
+        "limits_table_test.cpp",
+        "//drivers/NativeMetal:LimitsTable.h",
+    ],
+    cxx_std = "c++17",
+    deps = ["//drivers/NativeMetal/abi:metal_abi"],
+)
+
+host_test(
     name = "queue_priority_test",
     srcs = [
         "queue_priority_test.cpp",
         "//drivers/NativeMetal:QueuePriority.h",
+    ],
+    cxx_std = "c++17",
+)
+
+host_test(
+    name = "image_filter_link_test",
+    srcs = [
+        "image_filter_link_test.cpp",
+        "//drivers/NativeMetal:ImageFilterLink.h",
     ],
     cxx_std = "c++17",
 )

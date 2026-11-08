@@ -52,15 +52,16 @@ static inline uint32_t tgm_copy_push(uint32_t *w, const struct tgm_copy_job *j,
 		i += tgm_relayout_acquire(w + i, &waits[k]);
 	if (j->wait_syncpt != TEGRA_GM20B_CE_NO_SYNCPT)
 		i += tgm_syncpt_wait(w + i, j->wait_syncpt, j->wait_threshold);
-	if (j->src_tiled)
+	if (j->src_tiled) {
 		i += tgm_relayout_copy(w + i, j->src_tiled, j->src_va, 1, j->dst_va, 0,
 				       j->dst_pitch);
-	else if (j->dst_tiled)
+	} else if (j->dst_tiled) {
 		i += tgm_relayout_copy(w + i, j->dst_tiled, j->src_va, 0, j->dst_va, 1,
 				       j->src_pitch);
-	else
+	} else {
 		i += tgm_copy_rows(w + i, j->src_va, j->src_pitch, j->dst_va, j->dst_pitch,
 				   j->row_bytes, j->rows);
+	}
 	if (j->incr_syncpt != TEGRA_GM20B_CE_NO_SYNCPT)
 		i += tgm_syncpt_incr(w + i, j->incr_syncpt);
 	return i;

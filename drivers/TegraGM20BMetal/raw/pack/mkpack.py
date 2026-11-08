@@ -137,18 +137,26 @@ def load_buckets(dirs: list[str], size: int) -> list[dict]:
 
 
 def interlocked(p: dict) -> bool:
-    """Whether the probe's draw had SET_PIXEL_SHADER_INTERLOCK_CONTROL on: metal2vulkan's storage form of a fetch."""
-    return bool(p['records'][0]['regs'].get(0x1224, 0) & 3)
+    """Whether a probe draw had SET_PIXEL_SHADER_INTERLOCK_CONTROL on: metal2vulkan's storage form of a fetch.
+
+    A fetched color whose texture lacks STORAGE is drawn in a scratch that has it, between a copy in and a copy out
+    (full-screen draws of m2v's own): three draws, the state's the middle one.
+    """
+    return any(r and r.get('regs', {}).get(0x1224, 0) & 3 for r in p['records'])
 
 
-def default_forms(simple: list[dict]) -> tuple[list[dict], list[tuple[dict, str]]]:
+def storage_keys(probes: list[dict]) -> set[str]:
+    """Give the keys of the states the default runs drew in the storage form, in one draw or through a scratch."""
+    return {p['key'] for p in probes if not p['form'] and 'failed' not in p and interlocked(p)}
+
+
+def default_forms(simple: list[dict], storage: set[str]) -> tuple[list[dict], list[tuple[dict, str]]]:
     """Give each state its default record and set the rest aside with why.
 
     A state metal2vulkan draws in the storage form (the pixel interlock) gets its barrier form (input attachments,
     ordered by barriers: the barrier run's) as its record; layouts.py cannot name the storage form's image, so it is not
     packed.
     """
-    storage = {p['key'] for p in simple if not p['form'] and interlocked(p)}
     barrier = {p['key'] for p in simple if p['form']}
     kept, aside = [], []
     for p in simple:
@@ -164,19 +172,27 @@ def default_forms(simple: list[dict]) -> tuple[list[dict], list[tuple[dict, str]
     return kept, aside
 
 
-# NVK's cbuf types (nvk_shader.h nvk_cbuf_type) a raw draw binds: the root table at slot 0, then NAK's shader data and
-# set 0 at the slots the program names (raw_gpu.cpp)
-CBUF_ROOT, CBUF_SHADER_DATA, CBUF_SET = 1, 2, 3
+# NVK's cbuf types (nvk_shader.h nvk_cbuf_type) a raw draw binds: the root table at slot 0, then NAK's shader data,
+# set 0, and set 0's uniform buffers (mkprograms.py cbuf_code: the type in bits 0-2, the descriptor's offset / 16 above)
+# at the slots the program names (raw_gpu.cpp)
+CBUF_ROOT, CBUF_SHADER_DATA, CBUF_SET, CBUF_UBO = 1, 2, 3, 5
+
+
+def ubo_offsets(program: dict) -> list[int]:
+    """Return the set-0 byte offsets of the uniform buffers the program reads as constant buffers."""
+    return [(c >> 3) * 16 for c in program['cbufs'][1:] if c & 7 == CBUF_UBO]
 
 
 def raw_bindable(program: dict) -> bool:
     cbufs = program['cbufs']
-    rest = cbufs[1:]
+    rest = [c for c in cbufs[1:] if c & 7 != CBUF_UBO]
+    offsets = ubo_offsets(program)
     return (
         bool(cbufs)
         and cbufs[0] == CBUF_ROOT
         and set(rest) <= {CBUF_SHADER_DATA, CBUF_SET}
         and len(set(rest)) == len(rest)
+        and len(set(offsets)) == len(offsets)
         and (CBUF_SHADER_DATA in rest) == bool(program['data'])
     )
 
@@ -192,7 +208,13 @@ def raw_bound(simple: list[dict], programs: dict[str, dict]) -> tuple[list[dict]
         ]
         if unbound:
             aside.append(
-                (p, f'a program reads constant buffers {unbound[0]}, the raw path binds root, shader data and set 0')
+                (
+                    p,
+                    (
+                        f'a program reads constant buffers {unbound[0]}, the raw path binds root, shader data, set 0 '
+                        'and its uniform buffers'
+                    ),
+                )
             )
         else:
             kept.append(p)
@@ -200,15 +222,17 @@ def raw_bound(simple: list[dict], programs: dict[str, dict]) -> tuple[list[dict]
 
 
 # Why a probed state may stay out of the pack (the raw path hands it to m2v): what its draw needs that the raw path
-# draws otherwise. Any other reason is a generator fault and fails the build.
+# draws otherwise. Any other reason is a generator fault and fails the build, m2v failing a state's draw among them: its
+# pipeline did not build (a compiler regression: 39 RenderBox states once failed in NAK's encoder), and the device would
+# draw nothing for it either.
 EXPECTED_SKIPS = (
-    'm2v failed its draw',
     'draws',
     'dispatches',
     'storage form',
     'warm-up state',
     'a sampler m2v derives from a bound one',
-    'the raw path binds root, shader data and set 0',
+    'the raw path binds root, shader data, set 0 and its uniform buffers',
+    'as a uniform buffer the layout does not name',
     'the raw path has no 3D textures',
 )
 
@@ -277,6 +301,8 @@ def record_reason(records: list[dict]) -> str | None:
 def skip_reason(p: dict) -> str | None:
     if 'failed' in p:
         return f'm2v failed its draw: {p["failed"]}'
+    if p['draws'] != 1 and not p['dispatches'] and not p['form'] and interlocked(p):
+        return 'storage form through a scratch, m2v copying the color in and out around it'
     if p['draws'] != 1:
         return f'{p["draws"]} draws'
     if p['dispatches']:
@@ -297,16 +323,20 @@ def split_probes(probes: list[dict]) -> tuple[list[dict], list[tuple[dict, str]]
     return simple, skipped
 
 
-# a color target's own registers (per-target blend 0x1e00 + 0x20 j, SET_CT_WRITE 0x1a00 + 4 j) mean nothing for a
-# state without target j: what the probe saw there is an earlier state's leftover. Not that state's, so neither in
-# its blob nor in deciding what varies (r8-rawca: two states with a third target made targets 2's blend "vary" for
-# every other state)
+# a color target's own registers (per-target blend 0x1e00 + 0x20 j, SET_CT_WRITE 0x1a00 + 4 j, SET_BLEND 0x1360 + 4 j)
+# mean nothing for a state without target j: what the probe saw there is an earlier state's leftover. Not that state's,
+# so neither in its blob nor in deciding what varies (r8-rawca: two states with a third target made targets 2's blend
+# "vary" for every other state)
 def targets(key: str) -> int:
     return sum(1 for t in key.split() if t[:1] == 'c' and t[1:2].isdigit() and '=' in t)
 
 
 def foreign(m: int, n: int) -> bool:
-    return (0x1E00 <= m < 0x1F00 and (m - 0x1E00) // 0x20 >= n) or (0x1A00 <= m < 0x1A20 and (m - 0x1A00) // 4 >= n)
+    return (
+        (0x1E00 <= m < 0x1F00 and (m - 0x1E00) // 0x20 >= n)
+        or (0x1A00 <= m < 0x1A20 and (m - 0x1A00) // 4 >= n)
+        or (0x1360 <= m < 0x1380 and (m - 0x1360) // 4 >= n)
+    )
 
 
 def split_registers(simple: list[dict], post: dict[int, dict[int, int]]) -> tuple[list[int], dict[int, int]]:
@@ -360,7 +390,43 @@ def lay_out_programs(
     return heap, prog_index, prog_recs
 
 
-def buffer_entry(e: tuple, index: tuple[int, int], sizes: dict[tuple, list[int]]) -> dict:
+def bind_offset(stage: str, slot: int) -> int:
+    """Give the offset the probe's bind-offset run binds a slot's payload at (probe.mm PROBE_BIND_OFFSET)."""
+    return 4 * (1 + slot + (31 if stage == 'f' else 0))
+
+
+def push_words(p: dict) -> dict[int, int]:
+    return {int(o, 16): int(x, 16) for o, x in (w.split('=') for w in p['records'][0].get('pushw', []))}
+
+
+def attach_residuals(dirs: list[str], probes: list[dict]) -> None:
+    """Give each probe ('residuals') the root push words the bind-offset run changed, by their value's low byte.
+
+    A uniform slot's SlotBindOffset residual is its bind offset less the multiple of NVK's 256-byte alignment at or
+    below where its window starts: in that run, the slot's own offset modulo 256 (a window starting past 256 - offset
+    makes it negative), 0 in the 256-byte run's. A bucket without the run gives none (such states take only aligned
+    offsets).
+    """
+    residuals = {}
+    for b, d in enumerate(dirs):
+        out, log = os.path.join(d, 'probeoff.out'), os.path.join(d, 'probeoff.log')
+        if not os.path.exists(out):
+            continue
+        plain = {
+            p['index']: push_words(p)
+            for p in probelog.load(os.path.join(d, 'probe256.out'), os.path.join(d, 'probe256.log'))
+            if p['records']
+        }
+        for p in probelog.load(out, log):
+            if p['draws'] != 1 or p['dispatches'] or not p['records'] or p['index'] not in plain:
+                continue
+            was = plain[p['index']]
+            residuals[(b, p['index'])] = {v & 0xFF: o for o, v in push_words(p).items() if v and not was.get(o)}
+    for p in probes:
+        p['residuals'] = residuals.get((p['bucket'], p['index']), {})
+
+
+def buffer_entry(e: tuple, index: tuple[int, int], sizes: dict[tuple, list[int]], words: dict[int, int]) -> dict:
     s16, s4k = sizes.get((*index, e[0]), (256, 256))
     # a 16-byte payload bound at 256: a uniform buffer (NVK rounds its range to the cbuf alignment); else storage. The
     # 4096-byte one's range: the window (0: the whole payload)
@@ -374,6 +440,7 @@ def buffer_entry(e: tuple, index: tuple[int, int], sizes: dict[tuple, list[int]]
         'size': e[4],
         'ssbo': ssbo,
         'window': window,
+        'residual': None if ssbo else words.get(bind_offset(e[2], e[3])),
     }
 
 
@@ -438,7 +505,7 @@ def pipeline(
     rec['push'] = [(int(o, 16), int(x, 16)) for o, x in (w.split('=') for w in r.get('pushw', []))]
     rec['set_size'] = root[0x38 // 4 + 2] if 'set0' in r else 0
     entries = [
-        buffer_entry(e, (p['bucket'], p['index']), sizes)
+        buffer_entry(e, (p['bucket'], p['index']), sizes, p.get('residuals', {}))
         if e[1] == 'ubo'
         else handle_entry(e, r['tsc'], constexpr_tsc, problems)
         for e in ents
@@ -448,6 +515,19 @@ def pipeline(
     rec['fetch'] = any(e.get('tex', [None])[0] == 'fetch' for e in entries if e['kind'] == 'handle')
     rec['clears'] = len(p['clears'])
     rec['problems'] = problems
+    return rec
+
+
+def with_unnamed_ubos(rec: dict, p: dict, programs: dict[str, dict]) -> dict:
+    """Return the record with a problem for each set-0 uniform buffer a stage reads that its layout does not name."""
+    r = p['records'][0]
+    uniform = {e['off'] for e in rec['entries'] if e['kind'] == 'ubo' and not e['ssbo']}
+    rec['problems'] += [
+        f'stage {stage} reads set 0 at {offset} as a uniform buffer the layout does not name'
+        for stage, pid in ((1, r['prog'][1][0]), (5, r['prog'][5][0]))
+        for offset in ubo_offsets(programs[pid])
+        if offset not in uniform
+    ]
     return rec
 
 
@@ -464,12 +544,13 @@ def main() -> None:
     probes = [
         p for p in load_buckets(dirs, 256) if (p['form'], p['key']) not in seen and not seen.add((p['form'], p['key']))
     ]
+    attach_residuals(dirs, probes)
     programs = load_programs(prog_path)
     init, post = load_init(os.path.join(dirs[0], 'probe256.log'))
     # drop the query-pool setup (submit 4 is not traced) and NVK's own MME bookkeeping we relocate
     report = []
     simple, skipped = split_probes(probes)
-    simple, aside = default_forms(simple)
+    simple, aside = default_forms(simple, storage_keys(probes))
     skipped += aside
     simple, aside = raw_bound(simple, programs)
     skipped += aside
@@ -477,10 +558,9 @@ def main() -> None:
         n = targets(p['key'])
         p['records'][0]['regs'] = {m: v for m, v in p['records'][0]['regs'].items() if not foreign(m, n)}
     varying, baseline = split_registers(simple, post)
-    barriers = sum(1 for p in simple if p['form'])
     report.append(
-        f'{len(probes)} records probed, {len(simple)} taken ({barriers} of them barrier forms of storage-form states), '
-        f'{len(skipped)} set aside'
+        f'{len(probes)} records probed, {len(simple)} taken ({sum(1 for p in simple if p["form"])} of them barrier '
+        f'forms of storage-form states), {len(skipped)} set aside'
     )
     names = ' '.join(f'{m:x}' for m in varying)
     report.append(f'{len(varying)} per-pipeline registers: {names}')
@@ -489,11 +569,13 @@ def main() -> None:
     # pipelines
     pipes, constexpr_tsc = [], []
     for p in simple:
-        rec = pipeline(p, varying, prog_index, sizes, constexpr_tsc)
+        rec = with_unnamed_ubos(pipeline(p, varying, prog_index, sizes, constexpr_tsc), p, programs)
         if rec['problems']:  # m2v draws it (RawMetal.mm: a state not in the pack goes there)
             skipped.append((p, '; '.join(rec['problems'])))
             continue
         pipes.append(rec)
+    # the runtime binary-searches the pipelines in place (raw_pack.cpp Pack::find): no process keeps an index of its own
+    pipes.sort(key=packfile.key_hash)
     # init template with relocations (submissions 1-3 as NVK recorded them)
     init_recs = [(sc, m, d, RELOC_CODE.get(RELOC.get((sc, m)), 0)) for sc, m, d in init]
     report.append(f'init template: {len(init_recs)} methods, {sum(1 for x in init_recs if x[3])} relocated')

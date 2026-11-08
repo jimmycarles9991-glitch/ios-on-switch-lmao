@@ -11,8 +11,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
-namespace swlan {
-namespace wpa {
+namespace swlan::wpa {
 
 constexpr uint16_t kEthPae = 0x888E;
 // Our RSN element for the association request: version 1, CCMP group and pairwise, PSK, no capabilities.
@@ -85,11 +84,10 @@ private:
     void derive(const uint8_t aa[6], uint8_t ptk[48]) const;
     void build(const Key &k, uint16_t info, const uint8_t nonce[32], const uint8_t *data, size_t dataLength,
                const uint8_t kck[16], Step &step) const;
-    const char *unwrapGtk(const Key &k, const uint8_t ptk[48], Gtk &gtk) const;
+    static const char *unwrapGtk(const Key &k, const uint8_t ptk[48], Gtk &gtk);
     bool fresh(const Gtk &gtk);
 };
 
-}  // namespace wpa
-}  // namespace swlan
+}  // namespace swlan::wpa
 
 #endif

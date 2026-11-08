@@ -109,14 +109,15 @@ void fill_channel(channel &c, uint32_t mhz, uint16_t bw = 20, uint8_t center = 0
         c.channel = mhz == 2484 ? 14 : (mhz - 2407) / 5;
         c.flags = 0x8;
     }
-    if (bw >= 160)
+    if (bw >= 160) {
         c.flags |= 0x800;
-    else if (bw >= 80)
+    } else if (bw >= 80) {
         c.flags |= 0x400;
-    else if (bw >= 40)
-        c.flags |= 0x4 | (center > c.channel ? 0x200 : 0);
-    else
+    } else if (bw >= 40) {
+        c.flags |= 0x4u | (center > c.channel ? 0x200u : 0u);
+    } else {
         c.flags |= 0x2;
+    }
 }
 
 void fill_result(scan_result &r, const swlan_bss &b)
@@ -197,7 +198,7 @@ void country(char cc[3])
     for (int i = 0, n = switch_wlan_bss_count(); i < n; ++i) {
         if (switch_wlan_bss_get(i, b) || b->signal_dbm <= best)
             continue;
-        for (unsigned o = 0; o + 2 <= b->ie_len && o + 2 + b->ie[o + 1] <= b->ie_len; o += 2 + b->ie[o + 1])
+        for (unsigned o = 0; o + 2 <= b->ie_len && o + 2 + b->ie[o + 1] <= b->ie_len; o += 2 + b->ie[o + 1]) {
             if (b->ie[o] == 7 && b->ie[o + 1] >= 2 && b->ie[o + 2] >= 'A' && b->ie[o + 2] <= 'Z' &&
                 b->ie[o + 3] >= 'A' && b->ie[o + 3] <= 'Z') {
                 cc[0] = static_cast<char>(b->ie[o + 2]);
@@ -205,6 +206,7 @@ void country(char cc[3])
                 best = b->signal_dbm;
                 break;
             }
+        }
     }
     IOFreeData(b, sizeof(swlan_bss));
 }
@@ -258,7 +260,7 @@ int answer(bool set, apple80211req &rq)
         {
             IOFreeData(p, sizeof(Scratch));
         }
-    } freeScratch{scratch};
+    } const freeScratch{scratch};
 
     Out &out = scratch->out;
     swlan_bss &b = scratch->bss;
@@ -270,7 +272,7 @@ int answer(bool set, apple80211req &rq)
             if (copy_in(rq, in, sizeof in))
                 return EFAULT;
             gPower = in[2] != 0;
-            switch_wlan_power(gPower);
+            switch_wlan_power(static_cast<int>(gPower));
             if (!gPower)
                 swlan::net::set_link(false);
             post_event(kEvPowerChanged, nullptr, 0);
@@ -281,7 +283,7 @@ int answer(bool set, apple80211req &rq)
             uint8_t buf[0x80];
             if (copy_in(rq, buf, sizeof buf))
                 return EFAULT;
-            uint32_t ssidLength;
+            uint32_t ssidLength = 0;
             memcpy(&ssidLength, buf + 16, 4);
             const uint8_t *ssid = buf + 20;
             // Joining or joined: a scan takes the radio off channel for seconds and the access point's beacons and
@@ -291,7 +293,7 @@ int answer(bool set, apple80211req &rq)
                     gCachedScan = thread_call_allocate(cached_scan_done, nullptr);
                 gScanning = 1;
                 gScanCursor = 0;
-                uint64_t at;
+                uint64_t at = 0;
                 clock_interval_to_deadline(2000, kMillisecondScale, &at);
                 thread_call_enter_delayed(gCachedScan, at);
                 return 0;
@@ -313,12 +315,15 @@ int answer(bool set, apple80211req &rq)
             const bool pmk = hasKey && a.key_cipher == 6 && a.key_length == 32;
             gAssocResult = kAssocFailed;
             gKeyed = hasKey;
-            IOLog("SwitchWLAN: wifid asks to join a %u-byte name, %s\n", a.ssid_length,
-                  !hasKey ? "open"
-                  : pmk   ? "with its PMK"
-                          : "with a passphrase");
+            const char *how = "with a passphrase";
+            if (!hasKey) {
+                how = "open";
+            } else if (pmk) {
+                how = "with its PMK";
+            }
+            IOLog("SwitchWLAN: wifid asks to join a %u-byte name, %s\n", a.ssid_length, how);
             const int r = switch_wlan_connect(a.ssid, a.ssid_length, a.bssid, hasKey ? a.key : nullptr,
-                                              hasKey ? a.key_length : 0, pmk);
+                                              hasKey ? a.key_length : 0, static_cast<int>(pmk));
             memset(&a, 0, sizeof a);
             return r ? EINVAL : 0;
         }
@@ -346,11 +351,12 @@ int answer(bool set, apple80211req &rq)
         case kBtPower:
             // What Bluetooth does, for the radio's coexistence handling and its stats line (SwitchWLANCoex.h); wifid
             // logged "APPLE80211_IOC_BT_COEX_FLAGS return -3903" at every A2DP start and stop while this was refused.
-            if (type == kBtCoexFlags)
+            if (type == kBtCoexFlags) {
                 gBtFlags = set_value(rq);
-            else
-                gBtPower = set_value(rq) != 0;
-            switch_wlan_bt_state(gBtFlags, gBtPower != 0);
+            } else {
+                gBtPower = static_cast<uint32_t>(set_value(rq) != 0);
+            }
+            switch_wlan_bt_state(gBtFlags, static_cast<int>(gBtPower != 0));
             return 0;
         case kScanCacheClear:
         case kLocale:
@@ -382,8 +388,8 @@ int answer(bool set, apple80211req &rq)
         return answer_value(rq, 0);
     case kCardCaps: {  // a bitmap, bit n in byte n / 8: AES, AES-CCM, power management, short slot and preamble, WPA2, WME, short guard interval at 20 MHz
         static const uint8_t has[] = {2, 3, 6, 9, 10, 14, 17, 19};
-        for (uint8_t bit : has)
-            out.raw[bit / 8] |= static_cast<uint8_t>(1u << (bit % 8));
+        for (const uint8_t bit : has)
+            out.raw[bit / 8] |= static_cast<uint8_t>(1u << (bit % 8u));
         // AWDL (bit 32, what wifip2pd gates awdl0 on) when the radio's probe found the firmware's AWDL (SwitchWLANAwdl.cpp)
         if (switch_wlan_awdl_capable() == 1)
             out.raw[4] |= 1;
@@ -391,7 +397,7 @@ int answer(bool set, apple80211req &rq)
     }
     case kPhyMode:
         w[0] = 1;
-        w[1] = 0x1 | 0x2 | 0x4 | 0x8 | 0x10 | 0x20 | 0x40;
+        w[1] = 0x1u | 0x2u | 0x4u | 0x8u | 0x10u | 0x20u | 0x40u;
         w[2] = st.state >= SWLAN_STA_ASSOC ? 0x8 : 0;
         return copy_out(rq, w, 12);
     case kSsid:
@@ -418,10 +424,12 @@ int answer(bool set, apple80211req &rq)
         w[2] = 0;
         for (int i = 3; i < 13; i++)
             w[i] = v;
-        return copy_out(rq, w, 13 * 4);
+        return copy_out(rq, w, size_t{13} * 4);
     }
     case kRate:  // Mb/s: the firmware's transmit rate once known, 54 until then
-        return answer_value(rq, st.state < SWLAN_STA_ASSOC ? 0 : st.tx_rate_kbps ? st.tx_rate_kbps / 1000 : 54);
+        if (st.state < SWLAN_STA_ASSOC)
+            return answer_value(rq, 0);
+        return answer_value(rq, st.tx_rate_kbps ? st.tx_rate_kbps / 1000 : 54);
     case kTxPower:
         return answer_value(rq, 15);
     case kDriverVersion:
@@ -449,10 +457,10 @@ int answer(bool set, apple80211req &rq)
         static const uint16_t known[] = {2412, 2417, 2422, 2427, 2432, 2437, 2442, 2447, 2452, 2457, 2462, 5180,
                                          5200, 5220, 5240, 5745, 5765, 5785, 5805, 5825, 5260, 5280, 5300, 5320,
                                          5500, 5520, 5540, 5560, 5580, 5600, 5620, 5640, 5660, 5680, 5700, 5720};
-        for (uint16_t f : known) {
-            fill_channel(*reinterpret_cast<channel *>(&out.chans.list[n]), f);
+        for (const uint16_t f : known) {
+            fill_channel(out.chans.list[n], f);
             const bool dfs = f >= 5250 && f <= 5730;
-            out.chans.list[n].flags |= dfs ? 0x100 : 0x80;
+            out.chans.list[n].flags |= dfs ? 0x100u : 0x80u;
             n++;
         }
         out.chans.count = n;
@@ -496,6 +504,7 @@ int answer_media(struct ifmediareq64 &m)
     static const int media = IFM_IEEE80211 | IFM_AUTO;
     m.ifm_current = media;
     m.ifm_mask = 0;
+    // NOLINTNEXTLINE(bugprone-signed-bitwise): IFM_* are int, as ifm_status is
     m.ifm_status = IFM_AVALID | (st.state == SWLAN_STA_UP ? IFM_ACTIVE : 0);
     m.ifm_active = media;
     if (m.ifmu_ulist && m.ifm_count > 0 && copyout(&media, m.ifmu_ulist, sizeof media))
@@ -539,10 +548,20 @@ void associated()
 
 void connect_done(int result)
 {
-    gAssocResult = result == SWLAN_RES_OK        ? kAssocOk
-                   : result == SWLAN_RES_BAD_KEY ? kAssocBadKey
-                   : result == SWLAN_RES_TIMEOUT ? kAssocTimeout
-                                                 : kAssocFailed;
+    switch (result) {
+    case SWLAN_RES_OK:
+        gAssocResult = kAssocOk;
+        break;
+    case SWLAN_RES_BAD_KEY:
+        gAssocResult = kAssocBadKey;
+        break;
+    case SWLAN_RES_TIMEOUT:
+        gAssocResult = kAssocTimeout;
+        break;
+    default:
+        gAssocResult = kAssocFailed;
+        break;
+    }
     if (result == SWLAN_RES_OK) {
         set_link(true);  // en0 carries data from here: the keys are in
         if (gKeyed) {

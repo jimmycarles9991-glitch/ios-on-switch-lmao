@@ -244,6 +244,7 @@ pub unsafe extern "C" fn nmb_device_open(loader: *const c_char, cache: *const c_
         options.messages = Some(MessageSink::new(observe_message));
         let device = Device::system_default_with(&options).map_err(e("device"))?;
         tell_nvk_submission_memory(&device, loader);
+        crate::failure::tell_nvk_submission_failure(&device, loader);
         Ok(boxed(NmbDevice(
             device,
             std::sync::OnceLock::new(),
@@ -615,28 +616,14 @@ pub unsafe extern "C" fn nmb_device_answer_selector(index: usize, kind: *mut u32
     selector.as_ptr()
 }
 
-/// The GPU families of the target hardware (iPad7,1, A10X: MTLGPUFamilyApple3 and the families below it), which the target OS was built
-/// against and which `supportsFamily:` answers true even where rows of Apple's tables are not exact here. The OS takes its only working path
-/// through them: Core Image's Metal context needs Apple2 (`CIMetalDeviceIsSupported`), and without it falls back to an OpenGL ES context
-/// this device has none of (iconservicesagent crashed in `CI::GLContext::init`, int-155); QuartzCore splits a frame into command buffers of
-/// 128 draws where Apple3 is false (`MetalContext::flush`). Each waived row stays the runtime's own refusal where it is used, and
-/// `nmb_device_family_waivers` names them for the journal.
-const TARGET_FAMILIES: [GpuFamily; 5] = [
-    GpuFamily::Apple1,
-    GpuFamily::Apple2,
-    GpuFamily::Apple3,
-    GpuFamily::Common1,
-    GpuFamily::Common2,
-];
-
-/// The rows of Apple's tables the device does not meet in the target families `supportsFamily:` answers true (`TARGET_FAMILIES`), one
+/// The rows of Apple's tables the device does not meet in the target families `supportsFamily:` answers true (`target::FAMILIES`), one
 /// family per line ("Apple2 4: <row> ..."), into `out` (NUL-terminated); the length the whole text needs.
 #[unsafe(no_mangle)]
 pub extern "C" fn nmb_device_family_waivers(device: *const NmbDevice, out: *mut c_char, size: usize) -> usize {
     guard(0, || {
         let d = &get(device)?.0;
         let mut text = String::new();
-        for family in TARGET_FAMILIES {
+        for &family in crate::target::FAMILIES {
             let blockers = d.family_blockers(family);
             text += &format!("{family:?} {}:", blockers.len());
             for r in &blockers {
@@ -731,9 +718,9 @@ fn runtime_answer(device: &NmbDevice, selector: &str, arg: u64) -> Result<u64, S
         "supportsTextureSampleCount:" => gap(p.supports_texture_sample_count(arg))?,
         "supportsVertexAmplificationCount:" => gap(p.supports_vertex_amplification_count(arg))?,
         "supportsRasterizationRateMapWithLayerCount:" => gap(p.supports_rasterization_rate_map_with_layer_count(arg))?,
-        "supportsFamily:" => {
-            (d.supports_family(arg as i64) || TARGET_FAMILIES.iter().any(|f| f.raw() == arg as i64)) as u64
-        }
+        // The target's families and no others: a family the runtime meets that the target lacks (Metal3 on either target)
+        // would send the OS down paths no target device takes.
+        "supportsFamily:" => crate::target::FAMILIES.iter().any(|f| f.raw() == arg as i64) as u64,
         "supportsPrimitiveType:" => p.supports_primitive_type(arg) as u64,
         "supportsTextureWriteRoundingMode:" => p.supports_texture_write_rounding_mode(arg) as u64,
         _ => return Err(format!("{selector} is not a device query of the bridge")),
@@ -1560,6 +1547,61 @@ pub extern "C" fn nmb_function_constant(
     })
 }
 
+/// `vertexAttributes` (`stage_input` false) or `stageInputAttributes` (true): the function's
+/// attributes, `None` where Metal answers nil.
+fn attributes(
+    function: *const NmbFunction,
+    stage_input: bool,
+) -> Result<Option<Vec<metal2vulkan::reflection::Attribute>>, String> {
+    let f = &get(function)?.0;
+    let attributes = if stage_input {
+        f.stage_input_attributes().map_err(e("stage input attributes"))?
+    } else {
+        f.vertex_attributes().map_err(e("vertex attributes"))?
+    };
+    Ok(attributes)
+}
+
+/// How many attributes `vertexAttributes` (`stage_input` false) or `stageInputAttributes` (true)
+/// answers, -1 where Metal answers nil.
+#[unsafe(no_mangle)]
+pub extern "C" fn nmb_function_attribute_count(function: *const NmbFunction, stage_input: bool) -> i64 {
+    guard(-1, || {
+        Ok(attributes(function, stage_input)?.map_or(-1, |a| a.len() as i64))
+    })
+}
+
+/// Attribute `at` of those [`nmb_function_attribute_count`] counts: its name into `out`, and its
+/// attributeIndex, MTLDataType, isActive, isPatchData and isPatchControlPointData into `info`.
+#[unsafe(no_mangle)]
+pub extern "C" fn nmb_function_attribute(
+    function: *const NmbFunction,
+    stage_input: bool,
+    at: u32,
+    out: *mut c_char,
+    size: usize,
+    info: *mut u64,
+) -> usize {
+    guard(0, || {
+        if info.is_null() {
+            return Err("null attribute info".into());
+        }
+        let attributes = attributes(function, stage_input)?.unwrap_or_default();
+        let a = attributes
+            .get(at as usize)
+            .ok_or_else(|| format!("no attribute {at}"))?;
+        // SAFETY: the header's five words.
+        unsafe { std::slice::from_raw_parts_mut(info, 5) }.copy_from_slice(&[
+            u64::from(a.attribute_index()),
+            u64::from(a.attribute_type().as_raw()),
+            u64::from(a.is_active()),
+            u64::from(a.is_patch_data()),
+            u64::from(a.is_patch_control_point_data()),
+        ]);
+        Ok(copy_out(a.name(), out, size))
+    })
+}
+
 #[unsafe(no_mangle)]
 pub extern "C" fn nmb_function_release(function: *mut NmbFunction) {
     release(function)
@@ -2218,6 +2260,26 @@ pub extern "C" fn nmb_command_buffer_commit(command_buffer: *mut NmbCommandBuffe
     })
 }
 
+/// The `VkCommandBuffer` handles the command buffer's encoders recorded, in order, each to `each(ctx, handle)`, instead of a
+/// commit: a capture never submitted (`CommandBuffer::capture`). The command buffer cannot be committed after.
+///
+/// # Safety
+/// `each` is a valid function for `ctx` for the call's length.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nmb_command_buffer_capture(
+    command_buffer: *mut NmbCommandBuffer,
+    each: unsafe extern "C" fn(ctx: *mut c_void, command_buffer: u64),
+    ctx: *mut c_void,
+) -> bool {
+    guard(false, || {
+        get(command_buffer)?
+            .0
+            .capture(|raw| unsafe { each(ctx, raw) })
+            .map_err(e("capture"))?;
+        Ok(true)
+    })
+}
+
 #[unsafe(no_mangle)]
 pub extern "C" fn nmb_command_buffer_wait(command_buffer: *mut NmbCommandBuffer, timeout_ms: u64) -> i32 {
     guard(-1, || {
@@ -2251,10 +2313,18 @@ pub extern "C" fn nmb_command_buffer_error(
     size: usize,
 ) -> usize {
     guard(0, || {
-        Ok(get(command_buffer)?
-            .0
-            .error_description()
-            .map_or(0, |text| copy_out(&text, out, size)))
+        let command_buffer = &get(command_buffer)?.0;
+        let text = (command_buffer.error_description().filter(|text| !text.is_empty()))
+            .or_else(|| command_buffer.error().map(|error| format!("{error:?}")));
+        Ok(text.map_or(0, |text| copy_out(&text, out, size)))
+    })
+}
+
+/// Metal's MTLCommandBufferError code of a failed command buffer, 0 before it failed.
+#[unsafe(no_mangle)]
+pub extern "C" fn nmb_command_buffer_error_code(command_buffer: *const NmbCommandBuffer) -> u64 {
+    guard(0, || {
+        Ok(get(command_buffer)?.0.error().map_or(0, |error| error.metal_code()))
     })
 }
 

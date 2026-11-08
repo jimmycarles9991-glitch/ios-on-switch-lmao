@@ -20,37 +20,33 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
 import gen
 
+from tools.common import macho
+
 STRUCTORS = {'D1', 'D0', 'getMetaClass'}
 
 Section = tuple[str, str, int, bytes, list[tuple[int, int]]]
 Symbol = tuple[str, int, int]
 
 
-def macho(path: str) -> tuple[list[Section], list[Symbol]]:
+def read_object(path: str) -> tuple[list[Section], list[Symbol]]:
     """Read a 64-bit Mach-O object's sections (segment, name, addr, data, relocations) and symbols."""
     data = Path(path).read_bytes()
-    magic, _, _, _, ncmds = struct.unpack_from('<IiiII', data)
-    if magic != 0xFEEDFACF:
-        raise SystemExit(f'{path}: not a 64-bit Mach-O object')
-    at, sections, symbols = 32, [], []
-    for _ in range(ncmds):
-        cmd, size = struct.unpack_from('<II', data, at)
-        if cmd == 0x19:
-            nsects = struct.unpack_from('<I', data, at + 64)[0]
-            for i in range(nsects):
-                s = at + 72 + 80 * i
-                name, segment = (data[s + k : s + k + 16].rstrip(b'\0').decode() for k in (0, 16))
-                addr, length, offset = struct.unpack_from('<QQI', data, s + 32)
-                reloff, nreloc = struct.unpack_from('<II', data, s + 56)
-                relocations = [struct.unpack_from('<iI', data, reloff + 8 * r) for r in range(nreloc)]
-                sections.append((segment, name, addr, data[offset : offset + length], relocations))
-        elif cmd == 2:
-            symoff, nsyms, stroff, _ = struct.unpack_from('<4I', data, at + 8)
-            for i in range(nsyms):
-                strx, kind, _, _, value = struct.unpack_from('<IBBHQ', data, symoff + 16 * i)
-                symbols.append((data[stroff + strx : data.index(b'\0', stroff + strx)].decode(), kind, value))
-        at += size
-    return sections, symbols
+    try:
+        image = macho.macho(data, subtypes=None)
+    except ValueError as error:
+        raise SystemExit(f'{path}: not a 64-bit ARM64 Mach-O object ({error})') from None
+    sections = [
+        (
+            s['segment'],
+            s['name'],
+            s['va'],
+            data[s['fileoff'] : s['fileoff'] + s['size']],
+            [struct.unpack_from('<iI', data, s['reloff'] + 8 * r) for r in range(s['nreloc'])],
+        )
+        for segment in image['segments']
+        for s in segment['sections']
+    ]
+    return sections, [(s.name, s.type, s.value) for s in macho.symbols(data, image)]
 
 
 def defines(symbols: list[Symbol], name: str) -> bool:
@@ -118,7 +114,7 @@ def slot_errors(interface: dict, table: dict, subclass: str, own: list[str], ent
 
 def check_vtable(interface: dict, table: dict, subclass: str, own: list[str], objects: list[str]) -> None:
     cls = interface['class']
-    found = [(o, macho(o)) for o in objects]
+    found = [(o, read_object(o)) for o in objects]
     name = f'__ZTV{len(subclass)}{subclass}'
     holders = [image for _, image in found if defines(image[1], name)]
     if len(holders) != 1:
@@ -142,7 +138,7 @@ def check_late(plain: str, late: str) -> None:
     def text(sections: list[Section]) -> bytes:
         return b''.join(data for _, name, _, data, _ in sections if name == '__text')
 
-    plain_sections, late_sections = macho(plain)[0], macho(late)[0]
+    plain_sections, late_sections = read_object(plain)[0], read_object(late)[0]
     if text(plain_sections) != text(late_sections):
         raise SystemExit(f'{late}: staging the static initializer changed instructions')
     if any(name == '__mod_init_func' for _, name, _, _, _ in late_sections):

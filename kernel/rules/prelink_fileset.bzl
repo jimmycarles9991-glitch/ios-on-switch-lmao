@@ -2,8 +2,8 @@
 
 The kernelcache's kexts are arm64e and stripped. They are translated in kernel mode, every chained fixup is written as
 a plain pointer, and each Apple kernel address they use is named from the kernelcache's vtables (PAC-checked), GOT
-order (iOS 17's import names) and ipsw's symbolication. An address with no name becomes a trampoline that panics
-naming it (functions) or our cut-null data. The report lists them.
+order (iOS 17's import names), its vnode operation vectors and ipsw's signatures, then pinned_names.py's hand pins.
+The prelink refuses an import that nothing names unless shims.py answers it.
 """
 
 load("@xcode//:defs.bzl", "DEVELOPER_DIR")
@@ -23,6 +23,10 @@ def _kernel_prelink_fileset_impl(ctx):
     args.add("--arm64e", ctx.executable._arm64e)
     args.add("--ipsw", ctx.executable._ipsw)
     args.add("--symbolsets", ctx.file.symbolsets)
+    xnu_signatures = [f for f in ctx.files.signatures if f.basename == "xnu.json"]
+    if len(xnu_signatures) != 1:
+        fail("signatures must hold exactly one xnu.json")
+    args.add("--signatures", xnu_signatures[0])
     args.add("--slide=" + ctx.attr.slide)
     args.add("--out", out)
     args.add("--report", report)
@@ -30,7 +34,7 @@ def _kernel_prelink_fileset_impl(ctx):
     ctx.actions.run(
         executable = ctx.executable._prelink,
         arguments = [args],
-        inputs = [kernel, ctx.file.kernelcache, ctx.file.kernelcache_17, ctx.file.symbolsets],
+        inputs = [kernel, ctx.file.kernelcache, ctx.file.kernelcache_17, ctx.file.symbolsets] + ctx.files.signatures,
         tools = [ctx.executable._arm64e, ctx.executable._ipsw],
         outputs = [out, report, names],
         env = {"DEVELOPER_DIR": DEVELOPER_DIR},
@@ -48,6 +52,7 @@ kernel_prelink_fileset = rule(
         "kernelcache": attr.label(default = "//ipsw:kernelcache", allow_single_file = True),
         "kernelcache_17": attr.label(default = "//ipsw:kernelcache_21H461", allow_single_file = True),
         "symbolsets": attr.label(mandatory = True, allow_single_file = [".plist"], doc = "the kernel's symbolsets.plist"),
+        "signatures": attr.label(mandatory = True, allow_files = True, doc = "ipsw's signatures of the kernelcache's Darwin version (<version>/xnu.json and kexts/)"),
         "out": attr.string(mandatory = True, doc = "the prelinked kernel's path in the package, ending in .macho"),
         "slide": attr.string(mandatory = True, doc = "the kexts' slide the bindings assume (kits/SwitchABI's tables)"),
         "_arm64e": attr.label(default = "//translate/arm64e", executable = True, cfg = "exec"),

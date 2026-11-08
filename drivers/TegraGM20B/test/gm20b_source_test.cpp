@@ -108,8 +108,8 @@ TEST(GM20BPoolPolicySource, SystemBosGoAsPoolViewsDo)
 {
 	const std::string release =
 		flat(definition(client(), "void AGXDeviceUserClient::releaseBo(Bo *bo)"));
-	EXPECT_THAT(release, HasSubstr("if ((bo->pool_va || bo->system) && bo->view && (orphan = "
-				       "IONew(PoolOrphan, 1))) {"));
+	EXPECT_THAT(release, HasSubstr("if ((bo->pool_va || bo->system) && bo->view) orphan = "
+				       "IONew(PoolOrphan, 1); if (orphan) {"));
 	EXPECT_THAT(release, HasSubstr("bo->system ? bo->bmd : nullptr"));
 	EXPECT_THAT(
 		release,
@@ -119,11 +119,11 @@ TEST(GM20BPoolPolicySource, SystemBosGoAsPoolViewsDo)
 		     "orphan->view->release();", "orphan->backing->release();");
 	// Never read through the cacheable alias: the stats and a hang's line both read pushes through pushView.
 	EXPECT_THAT(flat(definition(client(), "const uint32_t *AGXDeviceUserClient::pushView(")),
-		    HasSubstr("!hit || hit->bo->system ? nullptr"));
+		    HasSubstr("if (hit && !hit->bo->system) {"));
 	EXPECT_THAT(flat(definition(client(), "void AGXDeviceUserClient::scanPushes(")),
 		    HasSubstr("pushView(va, bytes, hit)"));
 	EXPECT_THAT(flat(definition(client(), "int AGXDeviceUserClient::hungInterlocks(")),
-		    HasSubstr("pushView(va[i], uint64_t(dwords[i]) * 4, hit)"));
+		    HasSubstr("pushView(va[i], static_cast<uint64_t>(dwords[i]) * 4, hit)"));
 }
 
 // A system BO takes a ready spare as a cached BO does, and its pages go back to the spares once its view is released.
@@ -133,8 +133,9 @@ TEST(GM20BPoolPolicySource, SystemBosTakeAndReturnSpares)
 {
 	const std::string alloc =
 		flat(definition(client(), "IOReturn AGXDeviceUserClient::boAlloc("));
-	EXPECT_THAT(alloc, HasSubstr("} else if (!ret && !(in->flags & TegraGM20BBoContiguous) && "
-				     "(spare = spareTake(in->bytes))) {"));
+	EXPECT_THAT(alloc,
+		    HasSubstr("if (!ret && !bo->pool_va && !(in->flags & TegraGM20BBoContiguous)) "
+			      "spare = spareTake(in->bytes);"));
 	EXPECT_THAT(alloc, Not(HasSubstr("|| system ? kClasses")));
 	EXPECT_THAT(
 		alloc,
@@ -148,7 +149,7 @@ TEST(GM20BPoolPolicySource, SystemBosTakeAndReturnSpares)
 		     "p->ready[c] = s;");
 	const std::string zeros =
 		flat(definition(client(), "void cleanZeros(void *va, uint64_t bytes, bool zero)"));
-	expectBefore(zeros, "bzero(va, bytes);", "dc civac");
+	expectBefore(zeros, "bzero(va, bytes);", "switch_dcache_clean_invalidate(va, bytes);");
 	// A spare is only ever a BO's pages once no task maps them, nothing imports them (the view's release waits for
 	// every import's UPL) and the freeing connection's channels finished (reap).
 	const std::string orphans = flat(definition(client(), "void releaseOrphans()"));
@@ -163,7 +164,8 @@ TEST(GM20BPoolPolicySource, SystemBosTakeAndReturnSpares)
 	const std::string release =
 		flat(definition(client(), "void AGXDeviceUserClient::releaseBo(Bo *bo)"));
 	expectBefore(release, "tgm_mem_del(&bo->mem);", "bo->system ? bo->pas : nullptr");
-	EXPECT_THAT(release, HasSubstr("bo->system ? uint64_t(bo->backing_pages) << 12 : 0"));
+	EXPECT_THAT(release,
+		    HasSubstr("bo->system ? static_cast<uint64_t>(bo->backing_pages) << 12 : 0"));
 	const std::string free =
 		flat(definition(client(), "IOReturn AGXDeviceUserClient::boFree("));
 	expectBefore(free, "unbindOverlaps(binds_[i].va, binds_[i].range, bo);", "reap(false);");
@@ -328,12 +330,12 @@ TEST(GM20BPresentSource, FenceOnlyPresentHasNoCopy)
 TEST(GM20BPresentSource, TiledSourceIsCopiedBlockLinear)
 {
 	const std::string copy = flat(Between(gpu(), "static int present_copy(", "\n}\n"));
-	expectBefore(copy, "if (src_block) PUSH_NVSQ(push, NVA0B5, NVB0B5_SET_SRC_BLOCK_SIZE",
+	expectBefore(copy, "if (src_block) { PUSH_NVSQ(push, NVA0B5, NVB0B5_SET_SRC_BLOCK_SIZE",
 		     "NVB0B5_LAUNCH_DMA");
 	EXPECT_THAT(copy, HasSubstr("(src_block ? 0 : NVB0B5_LAUNCH_DMA_SRC_PITCH)"));
 	const std::string surface = flat(Between(client(), "uint64_t presentSurface(", "\n}\n"));
 	EXPECT_THAT(surface, HasSubstr("const uint32_t kind = blockLinear ? TGM_LAYOUT_KIND : 0;"));
-	EXPECT_THAT(surface, HasSubstr("s.mem, bytes, uint8_t(kind))"));
+	EXPECT_THAT(surface, HasSubstr("s.mem, bytes, static_cast<uint8_t>(kind))"));
 	EXPECT_THAT(flat(Between(client(), "IOReturn AGXDeviceUserClient::vmBind(", "\n}\n")),
 		    Not(HasSubstr("tiled")));
 	EXPECT_THAT(
@@ -372,7 +374,7 @@ TEST(GM20BFenceWakeSource, WaitersWakeByChannel)
 {
 	const std::string nonstall = flat(definition(
 		gpu(), "static int chan_nonstall(struct nvif_event *event, void *repv, u32 repc)"));
-	EXPECT_THAT(nonstall, HasSubstr("else chan_wake_waiters(chan);"));
+	EXPECT_THAT(nonstall, HasSubstr("} else { chan_wake_waiters(chan); }"));
 	EXPECT_EQ(Count(nonstall, "nvxnu_wake();"),
 		  1u);  // the scrubber's, while the sleep gate is shut
 	EXPECT_THAT(flat(definition(gpu(), "static void chan_wake_waiters(struct tgm_chan *chan)")),
@@ -440,13 +442,20 @@ TEST(GM20BRawReopenSource, ReopenKeepsTheHeapAndReplaysTheContext)
 		     "p.m(WAIT_FOR_IDLE, 0);");
 	const std::string context = flat(definition(raw, "void Device::emitContext(Push &p)"));
 	EXPECT_THAT(context, HasSubstr("p.m(LOAD_CB_OFFSET, kRootInterlockTickets);"));
+	// the init template relocated to this device's own addresses (raw_pack.cpp relocated, shared with the runtime's capture)
+	EXPECT_THAT(context, HasSubstr("const InitAddresses here = {heap_.va, zero_.va, root_.va, "
+				       "tic_.va, tsc_.va, kTicCount - 1, kTscCount - 1};"));
+	EXPECT_THAT(context, HasSubstr("relocated(im[i], here)"));
+	const std::string relocated = flat(
+		definition(SourceText("../../TegraGM20BMetal/raw/runtime/raw_pack.cpp"),
+			   "uint32_t relocated(const PackInitMethod &m, const InitAddresses &a)"));
 	for (const char *reloc :
 	     {"case RelocHeapHi:", "case RelocHeapLo:", "case RelocTicHi:", "case RelocTicLo:",
 	      "case RelocTscHi:", "case RelocTscLo:", "case RelocRootHi:", "case RelocRootLo:"})
-		EXPECT_THAT(context, HasSubstr(reloc));
+		EXPECT_THAT(relocated, HasSubstr(reloc));
 	EXPECT_THAT(context, HasSubstr("p.inc(CB_SELECTOR_A,"));
 	const std::string begin = flat(definition(raw, "CommandBuffer *Device::begin()"));
-	expectBefore(begin, "reopen();", "p.m(INVALIDATE_SHADER_CACHES_NO_WFI,");
+	expectBefore(begin, "!reopen())", "p.m(INVALIDATE_SHADER_CACHES_NO_WFI,");
 }
 
 // No spin for GPFIFO or push room: every wait for room sleeps until a fence's interrupt, and the fence reports GET to nvif
@@ -474,11 +483,13 @@ TEST(GM20BL2Source, InvalidateOnTheGpu)
 	const std::string exec = flat(Between(gpu(), "static int chan_exec(", "\n}\n"));
 	expectBefore(exec, "tlb = tgm_tlb_take(&chan->tlb, &chan->vm->tlb);",
 		     "NVB06F_MEM_OP_D_OPERATION_L2_SYSMEM_INVALIDATE);");
-	expectBefore(exec, "NVB06F_MEM_OP_D_OPERATION_L2_SYSMEM_INVALIDATE);",
-		     "NVB06F_MEM_OP_D_OPERATION_MMU_TLB_INVALIDATE); PUSH_KICK(&chan->chan.push);");
-	expectBefore(exec,
-		     "NVB06F_MEM_OP_D_OPERATION_MMU_TLB_INVALIDATE); PUSH_KICK(&chan->chan.push);",
-		     "pushes[i].no_prefetch || ((l2_on() || tlb) && !i));");
+	expectBefore(
+		exec, "NVB06F_MEM_OP_D_OPERATION_L2_SYSMEM_INVALIDATE);",
+		"NVB06F_MEM_OP_D_OPERATION_MMU_TLB_INVALIDATE); } PUSH_KICK(&chan->chan.push);");
+	expectBefore(
+		exec,
+		"NVB06F_MEM_OP_D_OPERATION_MMU_TLB_INVALIDATE); } PUSH_KICK(&chan->chan.push);",
+		"pushes[i].no_prefetch || ((l2_on() || tlb) && !i));");
 }
 
 // A CPU IOSurfaceLock waits for the submissions that may write the surface: Exec names each one once it has its seqno.
@@ -691,4 +702,155 @@ TEST(NvkImageSource, StencilCopyTempStartsOnTheBindAlignment)
 			      "pdev->nvkmd->bind_align_B);"));
 	EXPECT_THAT(flat(definition(image, "nvk_image_plane_alloc_va(struct nvk_device *dev,")),
 		    HasSubstr("const uint64_t va_align_B = plane->plane_align_B;"));
+}
+
+// Nouveau puts the SW engine on the runlist with id 15 and no status register: PFIFO_ENG_STATUS(15) (0x0026b8)
+// PRI-times out, and the GPU's bus error panics. Every per-engine status read is behind a context or a GR check.
+TEST(GM20BSchedSource, EngineStatusReadsSkipTheSoftwareEngine)
+{
+	for (const char *file : {"../sched.c", "../recover.c"}) {
+		const std::string source = SourceText(file);
+		size_t reads = 0;
+		for (size_t at = source.find("PFIFO_ENG_STATUS(engn->id)"); at != std::string::npos;
+		     at = source.find("PFIFO_ENG_STATUS(engn->id)", at + 1)) {
+			const size_t loop = source.rfind("nvkm_runl_foreach_engn", at);
+			ASSERT_NE(loop, std::string::npos) << file;
+			const std::string guard = source.substr(loop, at - loop);
+			EXPECT_TRUE(guard.find("engn->func->cxid") != std::string::npos ||
+				    guard.find("NVKM_ENGINE_GR") != std::string::npos)
+				<< file << ": " << guard;
+			reads++;
+		}
+		EXPECT_GT(reads, 0u) << file;
+	}
+}
+
+// With interrupts off XNU formats an os_log line only through the kernel printf into the message buffer, which has no
+// privacy annotations: "%{public}s" prints "{public}s" and drops nvkm's report (the GR and MMU fault lines).
+TEST(GM20BShimSource, InterruptPassReportsUsePlainFormats)
+{
+	const std::string report = flat(definition(SourceText("../shim/xnu_glue.cpp"),
+						   "static void nvxnu_report(const char *line)"));
+	EXPECT_THAT(report, HasSubstr("os_log_error(OS_LOG_DEFAULT, \"%s\", line)"));
+	EXPECT_THAT(report, Not(HasSubstr("%{")));
+}
+
+// A channel made in a slot continues its predecessor's fence sequence, so every cursor the interrupt pass compares with
+// the completed seqno starts at that fence. From 0, the idle clock would count the predecessor's whole sequence retired,
+// its in-flight count (kicked - retired) would underflow, and the GPU would never drop its clock or rail-gate.
+TEST(GM20BChannelSource, SeqnoCursorsStartAtTheSlotsFence)
+{
+	const std::string create = flat(definition(gpu(), "static int chan_new("));
+	EXPECT_THAT(create, HasSubstr("chan->submitted = READ_ONCE(*fence_cpu);"));
+	for (const char *cursor : {"stat_done", "woken_done", "gov_done", "progress_done"})
+		EXPECT_THAT(create,
+			    HasSubstr(std::string("chan->") + cursor + " = chan->submitted;"))
+			<< cursor;
+}
+
+// nvkm_chan_error preempts from the interrupt pass with interrupts off under the channel's spinlock: the wrapped preempt
+// decides by tgm_preempt_how and waits for a preempt in flight only in thread context.
+TEST(GM20BSchedSource, ThePreemptWaitsOnlyWithInterruptsOn)
+{
+	const std::string preempt =
+		flat(definition(SourceText("../sched.c"),
+				"static void sched_chan_preempt(struct nvkm_chan *chan)"));
+	EXPECT_THAT(preempt, HasSubstr("switch (tgm_preempt_how(irqs_disabled(), pending)) {"));
+	expectBefore(preempt, "case TGM_PREEMPT_RECOVER: nvkm_runl_rc_cgrp(chan->cgrp); return;",
+		     "case TGM_PREEMPT_AFTER_WAIT:");
+	expectBefore(preempt, "case TGM_PREEMPT_AFTER_WAIT:", "nvkm_wait_msec(");
+	expectBefore(preempt, "nvkm_wait_msec(", "case TGM_PREEMPT_NOW:");
+	EXPECT_EQ(Count(preempt, "nvkm_wait_msec("), 1u);
+}
+
+// Linux's work items, as kits/SwitchLinux's calls (whose host test holds that a call never runs twice at once): nvkm's
+// shim allocates them there, a flush runs one still queued, and irqs_disabled() answers.
+TEST(GM20BShimSource, WorkItemsKeepLinuxSemantics)
+{
+	const std::string nvxnu = flat(SourceText("../shim/include/nvxnu.h"));
+	EXPECT_THAT(nvxnu, HasSubstr("return switch_linux_call_alloc(fn, arg);"));
+	EXPECT_THAT(nvxnu, HasSubstr("return switch_linux_irqs_disabled() ? 0 : 1;"));
+	const std::string os = flat(SourceText("../shim/include/nvif/os.h"));
+	EXPECT_THAT(
+		os,
+		HasSubstr("static inline bool flush_work(struct work_struct *w) { return "
+			  "switch_linux_call_flush(w->thread_call, nvxnu_work_trampoline, w); }"));
+	EXPECT_THAT(os, HasSubstr("#define irqs_disabled() (!nvxnu_irqs_enabled())"));
+}
+
+// Rail-down stops what reaches the GPU from callouts as system sleep does: the deadline's holds released while the GPU
+// is up and its callouts stopped before the fences drain, back at the rail-up; a context-switch tick's work stopped once
+// interrupts are off.
+TEST(GM20BRailSource, RailDownStopsTheGpuCallouts)
+{
+	const std::string down = flat(definition(gpu(), "int tgm_rail_down(void)"));
+	expectBefore(down, "sleep_gate();", "tgm_deadline_suspend();");
+	expectBefore(down, "tgm_deadline_suspend();", "sleep_fences();");
+	expectBefore(flat(definition(gpu(), "static void rail_up_locked(const void *site)")),
+		     "__atomic_store_n(&gpu.railed, 0, __ATOMIC_SEQ_CST);",
+		     "tgm_deadline_resume();");
+	const std::string power = flat(definition(gpu(), "static void sleep_power_down(void)"));
+	expectBefore(power, "nvxnu_irq_suspend();", "tgm_recover_suspend();");
+	expectBefore(power, "tgm_recover_suspend();", "regulator_disable(");
+}
+
+// IOGPUDeviceSetDisplayParams is scalar method 0x21 in iOS 17's IOGPU.framework and IOConnectTrap2 index 8 in iOS 27's;
+// XNU answers a trap index with no trap behind it kIOReturnSuccess, so the device connection serves index 8 and refuses
+// every other by name instead of letting it pass unseen.
+TEST(GM20BDeviceSource, DisplayParamsArriveByMethodAndByTrap)
+{
+	const std::string client = SourceText("../TegraGM20BDeviceClient.cpp");
+	EXPECT_THAT(
+		flat(definition(client, "IOExternalTrap "
+					"*TegraGM20BDeviceUserClient::getTargetAndTrapForIndex(")),
+		HasSubstr("*targetP = this; if (index == kSetDisplayParamsTrap) return "
+			  "&displayParams; switch_refusal_k("));
+	EXPECT_THAT(flat(client), HasSubstr("constexpr UInt32 kSetDisplayParamsTrap = 8;"));
+	EXPECT_THAT(
+		flat(definition(client, "IOReturn TegraGM20BDeviceUserClient::setDisplayParams(")),
+		HasSubstr("storeDeadline(reinterpret_cast<uint64_t>(nextVblank), "
+			  "reinterpret_cast<uint64_t>(interval));"));
+	EXPECT_THAT(flat(client),
+		    HasSubstr("case kSetDisplayParams: if (arguments->scalarInputCount != "
+			      "2) return kIOReturnBadArgument; storeDeadline("));
+}
+
+// The tiling move and the copy engine's plane copies follow the surface's running writers through tgm_relayout_waits:
+// acquires in their own push (TegraGM20BRelayout.h tgm_relayout_follow), a refusal for one they cannot acquire on, never a
+// CPU wait. The kernel's own client channels' fences sit in the fence view's last slot, which every space maps and the
+// connections' allocator never hands out, so a copy can acquire on the copy engine's writes.
+TEST(GM20BRelayoutSource, KernelCopiesOrderOnTheGpu)
+{
+	const std::string relayout = SourceText("../TegraGM20BRelayout.cpp");
+	const std::string waits =
+		flat(definition(relayout, "extern \"C\" uint32_t tgm_relayout_waits("));
+	EXPECT_THAT(waits,
+		    HasSubstr("nwaits = tgm_relayout_follow(self, running, fenceVa, n, waits, "
+			      "nwaits, &refused);"));
+	EXPECT_THAT(
+		waits,
+		HasSubstr("\"gpu-order\", \"writer-unordered\", \"a kernel copy goes ahead of"));
+	EXPECT_THAT(waits, Not(HasSubstr("tgm_writer_wait(")));
+	EXPECT_THAT(flat(definition(relayout, "int move(")),
+		    HasSubstr("tgm_relayout_waits(r.vm, tgm_chan_uid(chan), writers, nwriters, "
+			      "waits, 0)"));
+	EXPECT_THAT(
+		flat(definition(relayout, "bool openSpace()")),
+		HasSubstr("tgm_fence_kernel(TGM_FENCE_KERNEL_RELAYOUT, &r.fenceCpu, &fencePage, "
+			  "&fenceOffset)"));
+	const std::string copy = flat(SourceText("../TegraGM20BCopy.cpp"));
+	EXPECT_THAT(copy, HasSubstr("n = tgm_relayout_waits(gCopy.vm, self, w, found, waits, n);"));
+	EXPECT_THAT(copy,
+		    HasSubstr("tgm_fence_kernel(TGM_FENCE_KERNEL_COPY, &c.fenceCpu, &fencePage, "
+			      "&fenceOffset)"));
+	const std::string fences = flat(gpu());
+	EXPECT_THAT(fences, HasSubstr("#define TGM_FENCE_PAGES (TGM_FENCE_USER_PAGES + 1)"));
+	EXPECT_THAT(flat(definition(
+			    gpu(), "int tgm_fence_page_get(volatile uint32_t **va, uint64_t *pa)")),
+		    HasSubstr("i = (fences.next + n) % TGM_FENCE_USER_PAGES;"));
+	EXPECT_THAT(flat(definition(gpu(), "int tgm_fence_kernel(")),
+		    HasSubstr("TGM_FENCE_USER_PAGES * TGM_FENCE_SLOT + which * sizeof(struct "
+			      "TegraGM20BAbiFence);"));
+	EXPECT_THAT(flat(definition(gpu(), "int tgm_writer_fence_va(")),
+		    HasSubstr("off < TGM_FENCE_BYTES"));
 }

@@ -18,7 +18,7 @@
 
 #include "../NativePlanes.h"
 
-using namespace NativePlanes;
+using namespace native_planes;
 
 namespace {
 __attribute__((format(printf, 1, 2))) std::string format(const char *f, ...)

@@ -40,7 +40,7 @@ enum : uint32_t {
 
 // Once, before any game controller can appear (switch_joycon_start calls it first): removes
 // AppleGameControllerPersonality.kext's personalities if it is prelinked. Thread context.
-void switch_joycon_hid_select_personalities(void);
+void switch_joycon_hid_select_personalities();
 
 // Loads IOHIDFamily, registers SwitchJoyConDevice and adds the Nintendo entries of
 // AppleGameControllerPersonality.kext (not in the default prelink set): for every Nintendo controller ProductID, an IOHIDEventDummyService on the IOHIDInterface (so neither IOHIDEventDriver nor the
@@ -48,7 +48,7 @@ void switch_joycon_hid_select_personalities(void);
 // that sets HIDServiceSupport on the IOHIDDevice (so the HID event system makes a user-space service for the device
 // and loads JoyConHIDServicePlugin on it). They match Bluetooth Joy-Cons (bluetoothd's IOHIDUserDevice) as well.
 // Idempotent; thread context; panics with the reason on failure.
-void switch_joycon_hid_prepare(void);
+void switch_joycon_hid_prepare();
 
 // Creates, attaches (under IOResources) and starts a Joy-Con device, and with the first one the system-buttons device.
 // `mac` is the Joy-Con's BD_ADDR in display order. Output reports go to `output(context, ...)`, and the end of its
@@ -59,9 +59,9 @@ IOService *switch_joycon_hid_create(bool left, const uint8_t mac[6], SwitchJoyCo
 // Hands one input report (report ID first) to the device; 0x21 and 0x30 are padded to the descriptor's 49 bytes,
 // longer reports are cut to the descriptor's size (0x31-0x33: 362 bytes with the ID). The Home or Capture bit of
 // 0x21/0x30/0x31 also goes to the system-buttons device. Call from the rail driver's work loop.
-IOReturn switch_joycon_hid_input(IOService *device, const uint8_t *report, size_t length);
+IOReturn switch_joycon_hid_input(const IOService *device, const uint8_t *report, size_t length);
 
 // Releases the Joy-Con's system button if it was down, stops output and session callbacks (output returns
 // kIOReturnOffline from here on; the closes the termination causes report nothing), terminates the device and drops
 // the creator's reference. gamecontrollerd sees the controller disconnect. Rail work loop.
-void switch_joycon_hid_destroy(IOService *device);
+void switch_joycon_hid_destroy(const IOService *device);

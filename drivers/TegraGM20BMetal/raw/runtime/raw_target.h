@@ -6,7 +6,7 @@
 //    offset, its block height clamped to the level as the hardware does, its rows aligned to one GOB's 64 bytes). WIDTH is
 //    the level's row stride in texels (row_stride_B / bpp, as NVK writes it), HEIGHT the level's, MEMORY BLOCK_WIDTH
 //    ONE_GOB, BLOCK_HEIGHT the level's, BLOCK_DEPTH 0, LAYOUT_BLOCKLINEAR, THIRD_DIMENSION_DEFINES_ARRAY_SIZE; one layer,
-//    ARRAY_PITCH the image's layer size / 4, LAYER 0. The 2D engine's level copies (fx::emitCopyToLevel, emitCopyFromLevel,
+//    ARRAY_PITCH the image's layer size / 4, LAYER 0. The 2D engine's level writes (fx::emitCopyToLevel,
 //    emitGenerate) address the same level by the same base and block height.
 #pragma once
 #include <cstdint>
@@ -43,6 +43,16 @@ inline void colorTargetWords(const ColorTargetDesc &d, uint32_t w[kColorTargetWo
     w[2] = d.bpp ? d.pitch / d.bpp : 0;
     w[5] = uint32_t(d.blockHeight & 0xf) << 4;  // BLOCK_WIDTH ONE_GOB, BLOCK_DEPTH ONE_GOB, BLOCKLINEAR, ARRAY_SIZE
     w[7] = uint32_t(d.layerBytes >> 2);
+}
+
+// A slot with no target below the pass's last one, as NVK writes it (nvk_CmdBeginRendering): FORMAT DISABLED, VA 0. Left as it
+// was, the slot would still name the target of an earlier pass, which CT_SELECT's count makes the hardware render to.
+inline void disabledTargetWords(uint32_t w[kColorTargetWords])
+{
+    for (uint32_t i = 0; i < kColorTargetWords; i++)
+        w[i] = 0;
+    w[2] = 64;  // WIDTH
+    w[6] = 1;   // THIRD_DIMENSION
 }
 
 // Level `level` (1 .. levels - 1) of the chain at `chainVa` as a block-linear target; false: not a level of it

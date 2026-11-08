@@ -53,6 +53,16 @@ class DeltaTest(unittest.TestCase):
         self.assertFalse(any(e['source'].exists() for e in self.entries))
         self.assertEqual(delta.apply(self.volume, self.entries, quiet, 'System'), 0)
 
+    def test_hard_links_are_rewritten_once_and_each_replacement_consumed(self):
+        (self.volume / 'usr/sbin').mkdir()
+        (self.volume / 'usr/sbin/tool').hardlink_to(self.tool)
+        twin = self.entries[0]['source'].with_name('twin')
+        twin.write_bytes(self.entries[0]['source'].read_bytes())
+        entries = [self.entries[0], dict(self.entries[0], path='/usr/sbin/tool', source=twin)]
+        self.assertEqual(delta.apply(self.volume, entries, quiet, 'System', consume=True), 1)
+        self.assertEqual((self.volume / 'usr/sbin/tool').read_bytes(), b'arm64 translated')
+        self.assertFalse(any(e['source'].exists() for e in entries))
+
     def test_resumes(self):
         delta.apply(self.volume, self.entries, quiet, 'System')
         self.assertEqual(delta.apply(self.volume, self.entries, quiet, 'System'), 0)
@@ -78,6 +88,43 @@ class DeltaTest(unittest.TestCase):
         )
         with self.assertRaises(delta.DeltaError):
             delta.load(manifest)
+
+
+class AddedBytesTest(unittest.TestCase):
+    def test_counts_the_replacement_in_whole_blocks_less_what_it_replaces(self):
+        root = Path(tempfile.mkdtemp())
+        (root / 'bin').mkdir()
+        (root / 'bin/tool').write_bytes(b'x' * 100)
+        source = root / 'replacement'
+        source.write_bytes(b'y' * 9000)
+        entries = [{'path': '/bin/tool', 'source': source}]
+        old = os.lstat(root / 'bin/tool').st_blocks * 512
+        self.assertEqual(delta.added_bytes(root, entries), 3 * 4096 - old)
+
+    def test_a_smaller_replacement_gives_room_back(self):
+        root = Path(tempfile.mkdtemp())
+        (root / 'big').write_bytes(b'x' * 65536)
+        source = root / 'small'
+        source.write_bytes(b'y')
+        self.assertLess(delta.added_bytes(root, [{'path': '/big', 'source': source}]), 0)
+
+
+class WrittenBytesTest(unittest.TestCase):
+    def setUp(self):
+        self.root = Path(tempfile.mkdtemp())
+        self.a = self.root / 'a'
+        self.a.write_bytes(b'x' * 5000)
+        self.b = self.root / 'b'
+        self.b.write_bytes(b'y')
+
+    def test_counts_every_replacement_whole(self):
+        entries = [{'path': '/a', 'source': self.a}, {'path': '/b', 'source': self.b}]
+        self.assertEqual(delta.written_bytes(self.root, entries), 2 * 4096 + 4096)
+
+    def test_counts_hard_links_once(self):
+        (self.root / 'c').hardlink_to(self.a)
+        entries = [{'path': '/a', 'source': self.a}, {'path': '/c', 'source': self.a}]
+        self.assertEqual(delta.written_bytes(self.root, entries), 2 * 4096)
 
 
 if __name__ == '__main__':

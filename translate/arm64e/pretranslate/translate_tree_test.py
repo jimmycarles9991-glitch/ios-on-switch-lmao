@@ -113,6 +113,18 @@ class WarmThenColdTest(unittest.TestCase):
         self.assertEqual(len(self.calls(self.tool)), 2)
         self.assertEqual(tree(warm), tree(cold))
 
+    def test_progress_counts_the_files_only_when_asked(self):
+        command = [sys.executable, str(DRIVER), '--role', 'os', '--tool', str(self.tool), '--volume', str(self.volume)]
+        quiet = subprocess.run([*command, '--out', str(self.dir / 'quiet')], check=True, capture_output=True, text=True)
+        told = subprocess.run(
+            [*command, '--out', str(self.dir / 'told'), '--progress'], check=True, capture_output=True, text=True
+        )
+        self.assertNotIn('progress', quiet.stdout)
+        self.assertEqual(
+            [line for line in told.stdout.splitlines() if line.startswith('progress')],
+            ['progress finding the Mach-O files', 'progress 0/2 files', 'progress 1/2 files', 'progress 2/2 files'],
+        )
+
     def test_a_changed_input_is_translated_again(self):
         self.run_driver('warm', self.tool)
         (self.volume / 'usr/bin/a').write_bytes(MACHO + b'changed')

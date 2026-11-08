@@ -57,12 +57,9 @@ public:
     uint32_t launches = 0, waits2d = 0, waits3d = 0, texInvalidates2d = 0, texInvalidates3d = 0;
     bool endsSampleable =
         false;  // the last 2D launch is followed by a 3D WAIT_FOR_IDLE and a 3D texture data cache invalidate
-    // a hardware whose centre-origin scaled blit samples at SRC_X0 + (x - DST_X0) * DU_DX (no half-texel offset): the convention
-    // Mesa nvc0's FIXME leaves open; the device self-test must catch it
-    bool quirkNoHalfTexel = false;
-    // a hardware whose bilinear taps are weighed from the sample position's own fraction (texel centres at whole numbers: taps
-    // floor(p), floor(p) + 1, weight frac(p)), point sampling floor(p): r7q's GM20B's self-test failure, byte for byte in count
-    bool quirkIntegerCentres = false;
+    // GM20B as measured: its centre-origin scaled blit samples at SRC_X0 + (x - DST_X0) * DU_DX + 1/2, half a source texel
+    // where the class documents half a step; the corner origin as documented (fx::kGm20bSampling's comment: the device's sweep)
+    bool quirkCentreHalfTexel = false;
 
 private:
     struct Range {

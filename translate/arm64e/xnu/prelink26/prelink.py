@@ -5,7 +5,7 @@ format (emit26.py). Runs classify.py, pcrel.py, names.py, emit26.py and verify26
 the ipsw CLI's views of the kernelcache.
 
 usage: prelink.py --kernel K --kernelcache KC --kernelcache-17 KC17 --arm64e CLI --ipsw IPSW --symbolsets PLIST
-                  --slide SLIDE --out OUT --report REPORT --names NAMES
+                  --signatures VERSION/xnu.json --slide SLIDE --out OUT --report REPORT --names NAMES
 
 SLIDE is the slide the drivers' bindings (kits/SwitchABI's tables) assume: a prelink that moves the kexts elsewhere
 fails here instead of linking addresses that miss.
@@ -37,7 +37,8 @@ def symbol_set_names(plist):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    for name in ('kernel', 'kernelcache', 'kernelcache-17', 'arm64e', 'ipsw', 'symbolsets', 'out', 'report', 'names'):
+    for name in ('kernel', 'kernelcache', 'kernelcache-17', 'arm64e', 'ipsw', 'symbolsets', 'signatures', 'out', 'report',
+                 'names'):
         parser.add_argument('--' + name, required=True, type=Path)
     parser.add_argument('--slide', required=True, type=lambda v: int(v, 0))
     args = parser.parse_args()
@@ -52,14 +53,15 @@ def main():
         PRELINK_ARM64E=str(args.arm64e.resolve()),
         PRELINK_SLIDE=hex(args.slide),
         PYTHONPATH=os.pathsep.join([str(HERE)] + sys.path),
-        NAMES_SEED_ALL='1',
     )
     try:
         nm = subprocess.run(['xcrun', 'nm', str(args.kernel)], env=env, check=True, capture_output=True, text=True)
         (work / 'ours.nm').write_text(''.join(line + '\n' for line in nm.stdout.splitlines() if len(line.split()) == 3))
         with open(work / 'cpp26.json', 'wb') as cpp:
             run(env, args.ipsw, 'kernel', 'cpp', '--json', '--methods', args.kernelcache, stdout=cpp)
-        run(env, args.ipsw, 'kernel', 'symbolicate', '-q', '--json', '-o', work / 'symbolicate', args.kernelcache)
+        signatures = args.signatures.resolve().parent.parent
+        run(env, args.ipsw, 'kernel', 'symbolicate', '-q', '--json', '--signatures', signatures, '-o', work / 'symbolicate',
+            args.kernelcache)
         (symbols,) = (work / 'symbolicate').glob('*.symbols.json')
         (work / 'sym').mkdir()
         symbols.rename(work / 'sym' / 'kernelcache.decompressed.symbols.json')

@@ -7,7 +7,7 @@
 // The contract is that of Apple's A10X decoder (H264H8.videodecoder AppleD5500WrapperHEVCDecoderStartTileSession /
 // DecodeTile, 21H461): requirements set once at the start, the destination and offset of each tile taken from
 // DecodeTile, each tile answered with VTDecoderSessionEmitDecodedTile before DecodeTile returns. What NVDEC and VIC
-// cannot take is refused at the start (Main 10, sizes outside NVDEC's HEVC range, VIC's block-linear input unproven),
+// cannot take is refused at the start (Main 10, sizes outside NVDEC's HEVC range, VIC's present off),
 // and VideoToolbox then takes the next decoder.
 #include <CoreVideo/CoreVideo.h>
 #include <mach/mach_time.h>

@@ -4,8 +4,7 @@
 #include <string.h>
 #include "SwitchWLANCrypto.h"
 
-namespace swlan {
-namespace crypto {
+namespace swlan::crypto {
 namespace {
 
 inline uint32_t rotl(uint32_t x, unsigned n)
@@ -16,14 +15,21 @@ inline uint32_t rotl(uint32_t x, unsigned n)
 void compress(uint32_t h[5], const uint8_t block[64])
 {
     uint32_t w[80];
-    for (int i = 0; i < 16; ++i)
-        w[i] = (static_cast<uint32_t>(block[4 * i]) << 24) | (static_cast<uint32_t>(block[4 * i + 1]) << 16) |
-               (static_cast<uint32_t>(block[4 * i + 2]) << 8) | block[4 * i + 3];
+    for (int i = 0; i < 16; ++i) {
+        w[i] = (static_cast<uint32_t>(block[static_cast<ptrdiff_t>(4) * i]) << 24) |
+               (static_cast<uint32_t>(block[4 * i + 1]) << 16) | (static_cast<uint32_t>(block[4 * i + 2]) << 8) |
+               block[4 * i + 3];
+    }
     for (int i = 16; i < 80; ++i)
         w[i] = rotl(w[i - 3] ^ w[i - 8] ^ w[i - 14] ^ w[i - 16], 1);
-    uint32_t a = h[0], b = h[1], c = h[2], d = h[3], e = h[4];
+    uint32_t a = h[0];
+    uint32_t b = h[1];
+    uint32_t c = h[2];
+    uint32_t d = h[3];
+    uint32_t e = h[4];
     for (int i = 0; i < 80; ++i) {
-        uint32_t f, k;
+        uint32_t f = 0;
+        uint32_t k = 0;
         if (i < 20) {
             f = (b & c) | (~b & d);
             k = 0x5A827999;
@@ -53,7 +59,7 @@ void compress(uint32_t h[5], const uint8_t block[64])
 
 constexpr uint8_t xtime(uint8_t x)
 {
-    return static_cast<uint8_t>((x << 1) ^ ((x & 0x80) ? 0x1B : 0));
+    return static_cast<uint8_t>((static_cast<unsigned>(x) << 1) ^ ((x & 0x80) ? 0x1Bu : 0u));
 }
 
 uint8_t gmul(uint8_t a, uint8_t b)
@@ -70,7 +76,8 @@ uint8_t gmul(uint8_t a, uint8_t b)
 
 constexpr uint8_t rotl8(uint8_t x, unsigned n)
 {
-    return static_cast<uint8_t>((x << n) | (x >> (8 - n)));
+    const unsigned v = x;
+    return static_cast<uint8_t>((v << n) | (v >> (8 - n)));
 }
 
 // S-box and its inverse from the multiplicative inverse in GF(2^8) and the affine map (FIPS-197 5.1.1).
@@ -79,7 +86,8 @@ struct Sboxes {
 
     constexpr Sboxes() : forward(), inverse()
     {
-        uint8_t exp[256] = {}, log[256] = {};
+        uint8_t exp[256] = {};
+        uint8_t log[256] = {};
         uint8_t x = 1;
         for (int i = 0; i < 255; ++i) {
             exp[i] = x;
@@ -88,8 +96,8 @@ struct Sboxes {
         }
         for (int v = 0; v < 256; ++v) {
             const uint8_t inv = v ? exp[(255 - log[v]) % 255] : 0;
-            const uint8_t s =
-                static_cast<uint8_t>(inv ^ rotl8(inv, 1) ^ rotl8(inv, 2) ^ rotl8(inv, 3) ^ rotl8(inv, 4) ^ 0x63);
+            const uint8_t s = static_cast<uint8_t>(static_cast<unsigned>(inv) ^ rotl8(inv, 1) ^ rotl8(inv, 2) ^
+                                                   rotl8(inv, 3) ^ rotl8(inv, 4) ^ 0x63);
             forward[v] = s;
             inverse[s] = static_cast<uint8_t>(v);
         }
@@ -108,16 +116,17 @@ void shiftRows(uint8_t b[16], bool inverse)
 {
     uint8_t s[16];
     memcpy(s, b, 16);
-    for (unsigned r = 1; r < 4; ++r)
+    for (unsigned r = 1; r < 4; ++r) {
         for (unsigned c = 0; c < 4; ++c)
             b[r + 4 * c] = s[r + 4 * (inverse ? (c + 4 - r) % 4 : (c + r) % 4)];
+    }
 }
 
 void mixColumns(uint8_t b[16], const uint8_t m[4])
 {
     for (unsigned c = 0; c < 4; ++c) {
         uint8_t a[4];
-        memcpy(a, b + 4 * c, 4);
+        memcpy(a, b + static_cast<size_t>(4) * c, 4);
         for (unsigned r = 0; r < 4; ++r) {
             uint8_t acc = 0;
             for (unsigned k = 0; k < 4; ++k)
@@ -156,17 +165,19 @@ void Sha1::update(const uint8_t *data, size_t n)
 void Sha1::finish(uint8_t out[20])
 {
     const uint64_t bits = length * 8;
-    static const uint8_t pad = 0x80, zero = 0;
+    static const uint8_t pad = 0x80;
+    static const uint8_t zero = 0;
     update(&pad, 1);
     while (used != 56)
         update(&zero, 1);
     uint8_t be[8];
-    for (int i = 0; i < 8; ++i)
+    for (unsigned i = 0; i < 8; ++i)
         be[i] = static_cast<uint8_t>(bits >> (56 - 8 * i));
     update(be, 8);
-    for (int i = 0; i < 5; ++i)
-        for (int j = 0; j < 4; ++j)
+    for (unsigned i = 0; i < 5; ++i) {
+        for (unsigned j = 0; j < 4; ++j)
             out[4 * i + j] = static_cast<uint8_t>(h[i] >> (24 - 8 * j));
+    }
 }
 
 void Hmac::init(const uint8_t *key, size_t keyLength)
@@ -195,7 +206,8 @@ void Hmac::init(const uint8_t *key, size_t keyLength)
 
 void Hmac::mac(const uint8_t *const *parts, const size_t *lengths, size_t count, uint8_t out[20]) const
 {
-    Sha1 i = inner, o = outer;
+    Sha1 i = inner;
+    Sha1 o = outer;
     for (size_t k = 0; k < count; ++k)
         i.update(parts[k], lengths[k]);
     uint8_t inside[20];
@@ -221,7 +233,8 @@ void passphrasePmk(const uint8_t *passphrase, size_t passphraseLength, const uin
         const uint8_t index[4] = {0, 0, 0, static_cast<uint8_t>(block)};
         const uint8_t *parts[2] = {ssid, index};
         const size_t lengths[2] = {ssidLength, 4};
-        uint8_t u[20], t[20];
+        uint8_t u[20];
+        uint8_t t[20];
         prfKey.mac(parts, lengths, 2, u);
         memcpy(t, u, sizeof(t));
         for (int i = 1; i < 4096; ++i) {
@@ -231,7 +244,7 @@ void passphrasePmk(const uint8_t *passphrase, size_t passphraseLength, const uin
             for (int j = 0; j < 20; ++j)
                 t[j] ^= u[j];
         }
-        memcpy(pmk + 20 * (block - 1), t, block == 1 ? 20 : 12);
+        memcpy(pmk + static_cast<size_t>(20) * (block - 1), t, block == 1 ? 20 : 12);
     }
 }
 
@@ -239,7 +252,7 @@ bool pmkFromHex(const uint8_t *text, size_t length, uint8_t pmk[32])
 {
     if (length != 64)
         return false;
-    auto digit = [](uint8_t c) -> int {
+    const auto digit = [](uint8_t c) -> int {
         if (c >= '0' && c <= '9')
             return c - '0';
         if (c >= 'a' && c <= 'f')
@@ -249,7 +262,8 @@ bool pmkFromHex(const uint8_t *text, size_t length, uint8_t pmk[32])
         return -1;
     };
     for (int i = 0; i < 32; ++i) {
-        const int hi = digit(text[2 * i]), lo = digit(text[2 * i + 1]);
+        const int hi = digit(text[static_cast<ptrdiff_t>(2) * i]);
+        const int lo = digit(text[2 * i + 1]);
         if (hi < 0 || lo < 0)
             return false;
         pmk[i] = static_cast<uint8_t>(hi * 16 + lo);
@@ -263,7 +277,8 @@ void prf(const uint8_t *key, size_t keyLength, const char *label, const uint8_t 
     Hmac h;
     h.init(key, keyLength);
     for (size_t i = 0; 20 * i < outLength; ++i) {
-        const uint8_t zero = 0, counter = static_cast<uint8_t>(i);
+        const uint8_t zero = 0;
+        const uint8_t counter = static_cast<uint8_t>(i);
         const uint8_t *parts[4] = {reinterpret_cast<const uint8_t *>(label), &zero, data, &counter};
         const size_t lengths[4] = {strlen(label), 1, dataLength, 1};
         uint8_t block[20];
@@ -277,7 +292,7 @@ bool same(const uint8_t *a, const uint8_t *b, size_t n)
 {
     uint8_t d = 0;
     for (size_t i = 0; i < n; ++i)
-        d |= a[i] ^ b[i];
+        d |= static_cast<uint8_t>(a[i] ^ b[i]);
     return d == 0;
 }
 
@@ -299,7 +314,7 @@ void Aes128::init(const uint8_t key[16])
             w[i][j] = w[i - 4][j] ^ t[j];
     }
     for (int r = 0; r < 11; ++r)
-        memcpy(roundKeys[r], w[4 * r], 16);
+        memcpy(roundKeys[r], w[static_cast<ptrdiff_t>(4) * r], 16);
 }
 
 void Aes128::encrypt(uint8_t b[16]) const
@@ -344,7 +359,7 @@ bool keyUnwrap(const uint8_t kek[16], const uint8_t *wrapped, size_t wrappedLeng
         for (size_t i = n; i-- > 0;) {
             const uint64_t t = static_cast<uint64_t>(n) * static_cast<uint64_t>(j) + i + 1;
             uint8_t b[16];
-            for (int k = 0; k < 8; ++k)
+            for (unsigned k = 0; k < 8; ++k)
                 b[k] = a[k] ^ static_cast<uint8_t>(t >> (56 - 8 * k));
             memcpy(b + 8, out + 8 * i, 8);
             aes.decrypt(b);
@@ -356,5 +371,4 @@ bool keyUnwrap(const uint8_t kek[16], const uint8_t *wrapped, size_t wrappedLeng
     return same(a, iv, 8);
 }
 
-}  // namespace crypto
-}  // namespace swlan
+}  // namespace swlan::crypto

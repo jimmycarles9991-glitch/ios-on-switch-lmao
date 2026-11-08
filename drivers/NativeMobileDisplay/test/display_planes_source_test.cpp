@@ -78,7 +78,7 @@ TEST(DisplayPlanesSource, DriverFollowsTheRules)
     // validateSwap mirrors the published limits through checkUpdated; the UI's memory is still bounded.
     const std::string validate =
         Method(source, "    bool validateSwap(const OriginalLegacySwapRequest *request) override\n");
-    EXPECT_THAT(validate, HasSubstr("NativePlanes::checkUpdated("));
+    EXPECT_THAT(validate, HasSubstr("native_planes::checkUpdated("));
     EXPECT_THAT(validate, HasSubstr("native_legacy_surface_bounds("));
     // The kick reads the effective layers first; a swap that leaves window A alone changes window B only.
     const std::string kick = Method(source, "    void kickOnce()\n");
@@ -89,7 +89,7 @@ TEST(DisplayPlanesSource, DriverFollowsTheRules)
     const std::string decide =
         Function(planes, "void planeDecide(const OriginalLegacySwapRequest *request, PlaneDecision &d)\n");
     EXPECT_THAT(decide, HasSubstr("swapEffectiveSurfaces"));
-    EXPECT_THAT(decide, HasSubstr("NativePlanes::rolesOf("));
+    EXPECT_THAT(decide, HasSubstr("native_planes::rolesOf("));
     // Window B goes out with window A in one UPDATE write and one ACT_REQ write.
     const std::string flip = Method(source, "    void writeFlip(int i)\n");
     EXPECT_THAT(flip, HasSubstr("planeStage(entryPlane[i], update, request)"));
@@ -110,7 +110,7 @@ TEST(DisplayPlanesSource, DriverFollowsTheRules)
     EXPECT_THAT(Function(planes, "void planeProbeDetach()\n"), HasSubstr("latchRetire = true;"));
     // The panic screen never sits under window B.
     const std::string panic = Function(source, "void restorePitchOnPanic(const char *message)\n");
-    EXPECT_EQ(Count(panic, "dc[kWinBBase + NativePlanes::kOptions] = 0;"), 2u);
+    EXPECT_EQ(Count(panic, "dc[kWinBBase + native_planes::kOptions] = 0;"), 2u);
     // The limits Core Animation reads at the display's creation.
     for (const char *key : {"IOMFBScalingLimits", "IOMFBMaxSrcPixels", "IOMFBNumLayers",
                             "DisplayPipePlaneBaseAlignment", "RGBLayer_MinScaleFraction", "YUVLayer_MaxScale",
@@ -126,9 +126,9 @@ TEST(DisplayPlanesSource, DriverFollowsTheRules)
     EXPECT_THAT(gate, HasSubstr("const bool ok = planes && turns && pitched;"));
     EXPECT_THAT(source, Not(HasSubstr("publishDetachAlignment")));
     EXPECT_THAT(Method(source, "    void publishStrideRequirements()\n"),
-                HasSubstr("OSNumber::withNumber(NativePlanes::kPublishedRowAlignment, 32)"));
+                HasSubstr("OSNumber::withNumber(native_planes::kPublishedRowAlignment, 32)"));
     EXPECT_THAT(Method(source, "    void publishPlaneLimits()\n"),
-                HasSubstr("{\"PlaneBaseAlignmentLinear\", NativePlanes::kPublishedBaseAlignment}"));
+                HasSubstr("{\"PlaneBaseAlignmentLinear\", native_planes::kPublishedBaseAlignment}"));
     // The service is found as J120's: IOServiceMatching("AppleCLCD").
     EXPECT_THAT(
         source,

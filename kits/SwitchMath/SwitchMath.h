@@ -82,7 +82,8 @@ static inline int32_t switch_sat_i32(int64_t value)
 // The largest r with r * r <= value, one result bit per round (no floating point: kernel code).
 static inline uint32_t switch_isqrt_u64(uint64_t value)
 {
-    uint64_t root = 0, bit = 1ull << 62;
+    uint64_t root = 0;
+    uint64_t bit = 1ULL << 62;
     while (bit > value)
         bit >>= 2;
     while (bit) {
@@ -104,14 +105,14 @@ static inline uint32_t switch_isqrt_u64(uint64_t value)
 // Each argument evaluated once, in its own type (so no mixed signed/unsigned comparison is hidden by a cast).
 #define SWITCH_MIN(a, b)                                               \
     __extension__({                                                    \
-        __typeof__(a) switch_min_a_ = (a);                             \
-        __typeof__(b) switch_min_b_ = (b);                             \
+        const __typeof__(a) switch_min_a_ = (a);                       \
+        const __typeof__(b) switch_min_b_ = (b);                       \
         switch_min_a_ < switch_min_b_ ? switch_min_a_ : switch_min_b_; \
     })
 #define SWITCH_MAX(a, b)                                               \
     __extension__({                                                    \
-        __typeof__(a) switch_max_a_ = (a);                             \
-        __typeof__(b) switch_max_b_ = (b);                             \
+        const __typeof__(a) switch_max_a_ = (a);                       \
+        const __typeof__(b) switch_max_b_ = (b);                       \
         switch_max_a_ > switch_max_b_ ? switch_max_a_ : switch_max_b_; \
     })
 

@@ -31,14 +31,15 @@ struct switch_joycon_forward {
 
 static inline unsigned switch_joycon_axis(const uint8_t *stick, unsigned axis)
 {
-    return axis == 0 ? (unsigned)(stick[0] | (stick[1] & 0x0fu) << 8) : (unsigned)(stick[1] >> 4 | stick[2] << 4);
+    return axis == 0 ? (stick[0] | (stick[1] & 0x0fu) << 8) : ((unsigned)stick[1] >> 4 | (unsigned)stick[2] << 4);
 }
 
 static inline bool switch_joycon_forward_moved(const uint8_t *was, const uint8_t *now)
 {
     for (unsigned stick = 0; stick < 2; ++stick) {
         for (unsigned axis = 0; axis < 2; ++axis) {
-            const unsigned a = switch_joycon_axis(was + 3 * stick, axis), b = switch_joycon_axis(now + 3 * stick, axis);
+            const unsigned a = switch_joycon_axis(was + static_cast<size_t>(3) * stick, axis);
+            const unsigned b = switch_joycon_axis(now + static_cast<size_t>(3) * stick, axis);
             if ((a > b ? a - b : b - a) > SWITCH_JOYCON_FORWARD_STICK_NOISE)
                 return true;
         }
@@ -60,10 +61,11 @@ static inline void switch_joycon_forward_output(struct switch_joycon_forward *f,
 {
     if (length < 12 || report[0] != 0x01)
         return;
-    if (report[10] == 0x03)
+    if (report[10] == 0x03) {
         f->simple = report[11] == 0x3f;
-    else if (report[10] == 0x40)
+    } else if (report[10] == 0x40) {
         f->imu = report[11] != 0;
+    }
 }
 
 // True: hand this input report to the HID device. Only 0x30 reports are ever held back.

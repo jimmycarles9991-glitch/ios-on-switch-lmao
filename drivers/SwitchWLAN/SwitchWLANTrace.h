@@ -30,7 +30,7 @@ struct swlan_frame_facts {
 
 static inline uint16_t swlan_trace_be16(const uint8_t *p)
 {
-    return (uint16_t)((p[0] << 8) | p[1]);
+    return (uint16_t)(((unsigned)p[0] << 8) | p[1]);
 }
 
 static inline uint32_t swlan_trace_be32(const uint8_t *p)
@@ -66,9 +66,10 @@ static inline struct swlan_frame_facts swlan_frame_classify(const uint8_t *f, si
     if (ip[9] != 17 || (swlan_trace_be16(ip + 6) & 0x1FFF))
         return out;
     const uint8_t *udp = ip + ihl;
-    const uint16_t sport = swlan_trace_be16(udp), dport = swlan_trace_be16(udp + 2);
+    const uint16_t sport = swlan_trace_be16(udp);
+    const uint16_t dport = swlan_trace_be16(udp + 2);
     const uint16_t id = swlan_trace_be16(udp + 8);
-    const bool answer = udp[10] & 0x80;
+    const bool answer = (udp[10] & 0x80) != 0;
     if (dport == 53 && !answer && sport) {
         out.kind = SWLAN_FRAME_DNS_QUERY;
         out.key = ((uint32_t)sport << 16) | id;
@@ -89,7 +90,11 @@ enum {
 
 static inline unsigned swlan_dns_bucket(uint64_t waited_ns)
 {
-    return waited_ns <= 3000000ull ? 0 : waited_ns <= 20000000ull ? 1 : waited_ns <= 200000000ull ? 2 : 3;
+    if (waited_ns <= 3000000ULL)
+        return 0;
+    if (waited_ns <= 20000000ULL)
+        return 1;
+    return waited_ns <= 200000000ULL ? 2 : 3;
 }
 
 struct swlan_trace_counts {
@@ -174,7 +179,7 @@ static inline void swlan_trace_sent(struct swlan_trace *t, const uint8_t *f, siz
 
 static inline void swlan_trace_received(struct swlan_trace *t, const uint8_t *f, size_t n, uint64_t now_ns)
 {
-    swlan_trace_note_received(t, swlan_frame_classify(f, n), n && !(f[0] & 1), now_ns);
+    swlan_trace_note_received(t, swlan_frame_classify(f, n), (n != 0u) && ((f[0] & 1) == 0), now_ns);
 }
 
 // "DNS out 61 answered 2 (3 ms 2, 20 ms 0, 200 ms 0, later 0, unmatched 0), ARP out 1 request 0 replies, in 3
@@ -209,7 +214,8 @@ static inline int swlan_fw_counters_delta(const uint8_t *now, size_t now_len, co
     out[0] = 0;
     if (now_len < 4)
         return snprintf(out, size, "%zu bytes", now_len);
-    const unsigned version = (unsigned)(now[0] | (now[1] << 8)), length = (unsigned)(now[2] | (now[3] << 8));
+    const unsigned version = now[0] | ((unsigned)now[1] << 8);
+    const unsigned length = now[2] | ((unsigned)now[3] << 8);
     int k = snprintf(out, size, "v%u %u B:", version, length);
     size_t at = k > 0 ? (size_t)k : 0;
     if (!was || was_len != now_len || was[0] != now[0] || was[1] != now[1]) {
@@ -222,7 +228,8 @@ static inline int swlan_fw_counters_delta(const uint8_t *now, size_t now_len, co
     const size_t slots = now_len / 4;
     unsigned more = 0;
     for (size_t i = 1; i < slots; ++i) {
-        const uint8_t *a = now + 4 * i, *b = was + 4 * i;
+        const uint8_t *a = now + 4 * i;
+        const uint8_t *b = was + 4 * i;
         const uint32_t va = (uint32_t)a[0] | ((uint32_t)a[1] << 8) | ((uint32_t)a[2] << 16) | ((uint32_t)a[3] << 24);
         const uint32_t vb = (uint32_t)b[0] | ((uint32_t)b[1] << 8) | ((uint32_t)b[2] << 16) | ((uint32_t)b[3] << 24);
         if (va == vb)

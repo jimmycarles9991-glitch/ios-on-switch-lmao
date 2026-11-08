@@ -9,8 +9,9 @@
 // The source is the Tegra RTC at the start of the PMC page (Linux rtc-tegra.c): a millisecond counter in the always-on
 // partition that keeps counting through SC7 and that nothing writes. Reading MILLI_SECONDS latches SECONDS into
 // SHADOW_SECONDS, so the two reads are one critical section. Its registers need the APB clock (CAR L4), checked before
-// every read so a read never fails once the clock is registered.
+// every read so a read never fails once the clock is registered. Where it starts each boot: SwitchMonotonicBase.h.
 #include "SwitchMonotonicClock.h"
+#include "SwitchMonotonicBase.h"
 #include <IOKit/IOLib.h>
 #include <kern/clock.h>
 #include "../../kits/SwitchCAR/SwitchCAR.h"
@@ -35,8 +36,6 @@ struct LatchedTime {
 
 volatile uint8_t *gRtc;
 IOSimpleLock *gLatch;
-// Added to every reading when the RTC read below mach time at start: XNU subtracts mach time from the monotonic clock
-// in unsigned arithmetic, and a constant cancels in its sleep arithmetic.
 uint64_t gBaseUsec;
 
 LatchedTime latch()
@@ -44,11 +43,11 @@ LatchedTime latch()
     if (!switch_car_clock_enabled(kRtcClock))
         switch_car_clock_enable(kRtcClock);
     const IOInterruptState state = IOSimpleLockLockDisableInterrupt(gLatch);
-    const uint32_t millis = *reinterpret_cast<volatile uint32_t *>(gRtc + RTC_MILLI_SECONDS);
-    const uint32_t seconds = *reinterpret_cast<volatile uint32_t *>(gRtc + RTC_SHADOW_SECONDS);
+    const uint32_t millis = switch_mmio_read32(gRtc, RTC_MILLI_SECONDS);
+    const uint32_t seconds = switch_mmio_read32(gRtc, RTC_SHADOW_SECONDS);
     const uint64_t now = mach_absolute_time();
     IOSimpleLockUnlockEnableInterrupt(gLatch, state);
-    return {((uint64_t)seconds * 1000 + millis) * 1000 + gBaseUsec, now};
+    return {(static_cast<uint64_t>(seconds) * 1000 + millis) * 1000 + gBaseUsec, now};
 }
 
 bool calendarOffsetUsec(const LatchedTime &t, int64_t *offset)
@@ -56,13 +55,13 @@ bool calendarOffsetUsec(const LatchedTime &t, int64_t *offset)
     uint64_t utc = 0;
     if (switch_rtc_utc_usec(&utc) != kIOReturnSuccess)
         return false;
-    *offset = (int64_t)(utc - t.monotonicUsec);
+    *offset = static_cast<int64_t>(utc - t.monotonicUsec);
     return true;
 }
 
 int monotonicSeconds SYSCTL_HANDLER_ARGS
 {
-    const uint32_t seconds = (uint32_t)(latch().monotonicUsec / kUsecPerSec);
+    const uint32_t seconds = static_cast<uint32_t>(latch().monotonicUsec / kUsecPerSec);
     return SYSCTL_OUT(req, &seconds, sizeof(seconds));
 }
 
@@ -92,7 +91,7 @@ int monotonicOffset SYSCTL_HANDLER_ARGS
 struct sysctl_oid gOids[4];
 }  // namespace
 
-extern "C" bool switch_monotonic_clock_start(void)
+extern "C" bool switch_monotonic_clock_start(int64_t rtc_secs, uint64_t rtc_stamp)
 {
     if (gRtc)
         return true;
@@ -113,9 +112,11 @@ extern "C" bool switch_monotonic_clock_start(void)
     gRtc = rtc;
     const LatchedTime first = latch();
     uint64_t machNsec = 0;
+    uint64_t sinceRtcNsec = 0;
     absolutetime_to_nanoseconds(first.machTime, &machNsec);
-    if (first.monotonicUsec < machNsec / 1000)
-        gBaseUsec = machNsec / 1000 - first.monotonicUsec + kUsecPerSec;
+    if (rtc_secs >= 0 && first.machTime > rtc_stamp)
+        absolutetime_to_nanoseconds(first.machTime - rtc_stamp, &sinceRtcNsec);
+    gBaseUsec = switch_monotonic_base_usec(rtc_secs, first.monotonicUsec, sinceRtcNsec / 1000, machNsec / 1000);
 
     constexpr unsigned kRead = CTLFLAG_RD | CTLFLAG_KERN | CTLFLAG_LOCKED;
     switch_sysctl_oid(&gOids[0], &sysctl__kern_children, "monotonicclock", static_cast<int>(CTLTYPE_INT | kRead),
@@ -129,8 +130,9 @@ extern "C" bool switch_monotonic_clock_start(void)
     for (struct sysctl_oid &oid : gOids)
         sysctl_register_oid(&oid);
 #if DEVELOPMENT || DEBUG
-    IOLog("SwitchMonotonicClock: Tegra RTC at %llu ms%s\n", first.monotonicUsec / 1000,
-          gBaseUsec ? " (behind the arm timer, offset added)" : "");
+    IOLog("SwitchMonotonicClock: Tegra RTC at %llu ms, the clock at %llu s%s\n", first.monotonicUsec / 1000,
+          (first.monotonicUsec + gBaseUsec) / kUsecPerSec,
+          rtc_secs >= 0 ? " (seconds since 2000 by the MAX77620)" : " (no MAX77620 reading)");
 #endif
     return true;
 }
@@ -147,5 +149,5 @@ extern "C" bool switch_monotonic_clock_read(uint64_t *usec, uint64_t *mach_time)
 
 extern "C" bool switch_monotonic_clock_offset(int64_t *usec)
 {
-    return gRtc && calendarOffsetUsec(latch(), usec);
+    return (gRtc != nullptr) && calendarOffsetUsec(latch(), usec);
 }

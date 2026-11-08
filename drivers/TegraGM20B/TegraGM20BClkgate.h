@@ -10,7 +10,8 @@
  * (ce2) and nvgpu_pmu_enable_hw (pmu). nvgpu leaves the pwr_csb and therm lists unloaded and so do we. ELCG:
  * gm20b_elcg_init_idle_filters (each engine's idle filter 2 x 2^9 = 1024 clocks; the FECS and HUBMMU idle filters 0)
  * and gm20b_therm_init_elcg_mode(ELCG_AUTO). The engine BLCG mode (THERM_GATE_CTRL blk_clk) stays as reset left it, as
- * nvgpu's boot leaves it. A GR engine reset in recovery drops GR's lists until the next SC7 wake.
+ * nvgpu's boot leaves it. GR's reset in recovery runs with gating off and loads every list again after it
+ * (tgm_clkgate_guard_reset).
  *
  * The tables are:
  *
@@ -216,5 +217,10 @@ void tgm_clkgate_load(struct nvkm_device *device);
 void tgm_clkgate_enable(struct nvkm_device *device);
 /* Debug kernels' A/B (gpu.c tgm_clkgate_switch): every list's "disable" value and ELCG run, as nvgpu turns gating off. */
 void tgm_clkgate_disable(struct nvkm_device *device);
+/* Once GR exists (M2): GR's reset in a channel's recovery (nouveau's nvkm_runl_rc) runs with gating off and gets every list
+ * back with ELCG on after it, as nvgpu resets GR (gk20a_fifo_handle_mmu_fault_locked between nvgpu_cg_pg_disable and
+ * nvgpu_cg_pg_enable; gk20a_init_gr_prepare keeps ELCG at run until GR is initialised again). With ELCG left on, GR's idle
+ * clock gates under FECS's halt and GR's re-initialisation, and the reset drops GR's SLCG/BLCG lists. */
+void tgm_clkgate_guard_reset(struct nvkm_device *device);
 
 #endif /* TEGRA_GM20B_CLKGATE_H */

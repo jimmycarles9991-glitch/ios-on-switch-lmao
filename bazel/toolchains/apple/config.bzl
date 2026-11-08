@@ -125,6 +125,13 @@ def _impl(ctx):
         ),
     ]
 
+    if ctx.attr.link_flags:
+        features.append(feature(
+            name = "platform_link_flags",
+            enabled = True,
+            flag_sets = [flag_set(actions = _LINK, flag_groups = [flag_group(flags = ctx.attr.link_flags)])],
+        ))
+
     clang = tool(path = XCODE_TOOLCHAIN + "/clang")
     clangxx = tool(path = XCODE_TOOLCHAIN + "/clang++")
     action_configs = [
@@ -158,6 +165,7 @@ apple_cc_toolchain_config = rule(
     doc = "A user-space CcToolchainConfigInfo on Xcode's Apple clang: the target and SDK, no other flags of its own.",
     attrs = {
         "platform": attr.string(mandatory = True, values = PLATFORMS.keys()),
+        "link_flags": attr.string_list(doc = "added to every link: the platform's own (//translate/arm64e:target.bzl)"),
     },
     provides = [CcToolchainConfigInfo],
 )

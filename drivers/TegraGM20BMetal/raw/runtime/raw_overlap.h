@@ -82,17 +82,19 @@ private:
         for (uint32_t e = 0; e < g.count; e++) {
             uint32_t v = g.first + e;
             if (g.indices) {
+                uint32_t x;
                 if (g.indexSize == 2) {
-                    uint16_t x;
-                    memcpy(&x, g.indices + 2 * e, 2);
-                    v = strip && x == 0xffff ? ~0u : x;
+                    uint16_t h;
+                    memcpy(&h, g.indices + 2 * e, 2);
+                    x = strip && h == 0xffff ? ~0u : h;
                 } else {
-                    memcpy(&v, g.indices + 4 * e, 4);
+                    memcpy(&x, g.indices + 4 * e, 4);
                 }
-                if (strip && v == ~0u) {
+                if (strip && x == ~0u) {
                     have = 0;  // a restart begins a new strip
                     continue;
                 }
+                v = g.first + x;
             }
             if (have == 3) {
                 window[0] = window[1];

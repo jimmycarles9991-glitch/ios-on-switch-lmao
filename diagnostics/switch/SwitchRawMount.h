@@ -170,22 +170,37 @@ static int native_switch_raw_cache_prepare(proc_t p, user_addr_t scratch, user_a
             cache_device = image_volume;
     }
     native_owner_cryptex_host = preboot_mount;
-    /* dyld looks for code that only the OS cryptex has under the cryptex prefix that
-	 * libignition reports. Ignition is off here, so show each directory holding such
-	 * code through the root's own (21H461: these are all of them). */
+    /* dyld looks for code that only the OS cryptex has under the cryptex prefix that libignition reports. Ignition is
+     * off here, so show each directory holding such code through the root's own: every one of 21H461's and 24B119's
+     * (Mach-O files of the cryptex outside its dyld cache whose path the System volume lacks), each where the selected
+     * kind's cryptex has it. */
     static const char *const cryptex_only[] = {
         "/usr/lib",                                                     // libobjc-trampolines, libffi-trampolines, ...
         "/System/Library/PrivateFrameworks/PlugInKitDaemon.framework",  // pkd's framework, not in the cache
         "/System/Library/PrivateFrameworks/VisualTestKit.framework",
-        "/System/DriverKit/System/Library"};  // the DriverKit shared cache
+        "/System/DriverKit/System/Library",                                        // the DriverKit shared cache
+        "/System/Library/PrivateFrameworks/DeviceRecoveryBrainSupport.framework",  // devicerecoveryd (KeepAlive)
+        "/System/Library/PrivateFrameworks/PeriodicSystemMetricsCore.framework",
+        "/System/Library/PrivateFrameworks/Nodes.framework",
+        "/System/Library/PrivateFrameworks/NodesUI.framework",
+        "/System/Library/PrivateFrameworks/WeaveReplay.framework",
+        "/System/Library/PrivateFrameworks/_NutritionCore_AppIntents.framework",
+        "/System/Library/PrivateFrameworks/iCloudDriveCore.framework/Frameworks",
+        "/usr/libexec/Moments.framework",
+        "/usr/libexec/AppleLatticeSupport.framework"};
     for (unsigned i = 0; i < sizeof(cryptex_only) / sizeof(cryptex_only[0]); ++i) {
         char source[128];
         snprintf(source, sizeof(source), "/private/preboot/Cryptexes/OS%s", cryptex_only[i]);
+        vnode_t probe = NULLVP;
+        if (vnode_lookup(source, 0, &probe, vfs_context_current()) == ENOENT)
+            continue;
+        if (probe)
+            vnode_put(probe);
         if ((error = native_switch_raw_union(p, scratch, source, cryptex_only[i])))
             printf("SwitchRawBoot: %s cryptex union failed: %d\n", cryptex_only[i], error);
     }
-    if (!native_owner_publish_raw_boot_manifest(os_device, "04769D26-2CA0-4825-B443-E2E5F88300F2", cache_device,
-                                                "8846FE78-2910-4297-AF97-D59BB6F8FC16"))
+    if (!native_owner_publish_raw_boot_manifest(os_device, SWITCH_OS_VOLUME_UUID, cache_device,
+                                                SWITCH_SYSTEM_CRYPTEX_UUID))
         printf("SwitchRawBoot: boot-manifest-hash not published (continuing)\n");
     /* Same development dyld mode as the FAT profile; no signature-policy change. */
     dyld_flags |= UINT64_C(8);

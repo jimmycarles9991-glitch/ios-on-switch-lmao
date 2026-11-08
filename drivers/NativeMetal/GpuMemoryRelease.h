@@ -1,5 +1,5 @@
-// When the device gives back the GPU memory no resource holds (nmb_device_release_idle_memory: m2v's empty blocks and
-// spares). Apple's driver keeps such memory in IOGPU's resource pools, which it can mark purgeable (IOGPUResourceSetPurgeable)
+// When a device gives back the GPU memory no resource holds (nmb_device_release_idle_memory: m2v's empty blocks and
+// spares; the raw path's empty chunks, raw::Device::trim). Apple's driver keeps such memory in IOGPU's resource pools, which it can mark purgeable (IOGPUResourceSetPurgeable)
 // so that it stops counting in the process's footprint, and AGXMetal listens for DISPATCH_SOURCE_TYPE_MEMORYPRESSURE. Ours
 // are kernel BOs mapped into the process and charged to its footprint as iokit_mapped until freed, so they go back on the
 // same events, and once the GPU has had nothing to do for a second: a widget or a snapshot service that stopped drawing
@@ -16,7 +16,17 @@ class GpuMemoryRelease {
 public:
     void start(NmbDevice *device)
     {
-        device_ = device;
+        start(
+            [](void *d) {
+                nmb_device_release_idle_memory(static_cast<NmbDevice *>(d));
+            },
+            device);
+    }
+
+    void start(void (*releaser)(void *), void *context)
+    {
+        release_ = releaser;
+        context_ = context;
         queue_ =
             dispatch_queue_create("com.brunostjohn.switch.gpu-memory",
                                   dispatch_queue_attr_make_with_qos_class(DISPATCH_QUEUE_SERIAL, QOS_CLASS_UTILITY, 0));
@@ -56,8 +66,8 @@ public:
 
     void release()
     {
-        if (device_)
-            nmb_device_release_idle_memory(device_);
+        if (release_)
+            release_(context_);
     }
 
 private:
@@ -66,7 +76,8 @@ private:
     int64_t idleNs_ = 0;
     static constexpr uintptr_t kPressure = DISPATCH_MEMORYPRESSURE_WARN | DISPATCH_MEMORYPRESSURE_CRITICAL;
     static constexpr uintptr_t kProcLimit = 0x10 | 0x20;  // DISPATCH_MEMORYPRESSURE_PROC_LIMIT_WARN, _CRITICAL
-    NmbDevice *device_ = nullptr;
+    void (*release_)(void *) = nullptr;
+    void *context_ = nullptr;
     dispatch_queue_t queue_ = nullptr;
     dispatch_source_t idle_ = nullptr, pressure_ = nullptr;
 };

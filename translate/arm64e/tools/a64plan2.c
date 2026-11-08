@@ -13,6 +13,7 @@
  *   a64plan2 [-o PLAN] [-d DUMP_DISTINCT] DIR/dyld_shared_cache_arm64e
  */
 #include "../a64x/a64x.h"
+#include "../macho/stub_split.h"
 #include <fcntl.h>
 #include <inttypes.h>
 #include <stdio.h>
@@ -1052,49 +1053,6 @@ static void add_patch(uint64_t va, uint32_t w)
     npatch++;
 }
 
-static int64_t br_off(uint32_t w, bool *is)
-{
-    *is = true;
-    if ((w & 0x7C000000u) == 0x14000000u)
-        return (int64_t)(int32_t)((w & 0x3FFFFFFu) << 6) >> 4;
-    if ((w & 0x7E000000u) == 0x34000000u)
-        return (int64_t)(int32_t)(((w >> 5) & 0x7FFFFu) << 13) >> 11;
-    if ((w & 0xFF000010u) == 0x54000000u)
-        return (int64_t)(int32_t)(((w >> 5) & 0x7FFFFu) << 13) >> 11;
-    if ((w & 0x7E000000u) == 0x36000000u)
-        return (int64_t)(int32_t)(((w >> 5) & 0x3FFFu) << 18) >> 16;
-    *is = false;
-    return 0;
-}
-
-static uint32_t br_set(uint32_t w, int64_t off, bool *ok)
-{
-    *ok = true;
-    if ((w & 0x7C000000u) == 0x14000000u) {
-        if (off < -(1LL << 27) || off >= (1LL << 27)) {
-            *ok = false;
-            return 0;
-        }
-        return (w & 0xFC000000u) | (uint32_t)((off >> 2) & 0x3FFFFFF);
-    }
-    if ((w & 0x7E000000u) == 0x34000000u || (w & 0xFF000010u) == 0x54000000u) {
-        if (off < -(1LL << 20) || off >= (1LL << 20)) {
-            *ok = false;
-            return 0;
-        }
-        return (w & 0xFF00001Fu) | (uint32_t)(((off >> 2) & 0x7FFFF) << 5);
-    }
-    if ((w & 0x7E000000u) == 0x36000000u) {
-        if (off < -(1LL << 15) || off >= (1LL << 15)) {
-            *ok = false;
-            return 0;
-        }
-        return (w & 0xFFF8001Fu) | (uint32_t)(((off >> 2) & 0x3FFF) << 5);
-    }
-    *ok = false;
-    return 0;
-}
-
 static uint32_t enc_bl(uint64_t from, uint64_t to)
 {
     return 0x94000000u | (uint32_t)(((int64_t)(to - from) >> 2) & 0x3FFFFFF);
@@ -1111,35 +1069,12 @@ static int64_t nbins, *bin_room, *bin_first, *bin_end;
 
 static bool commit(const uint32_t *st, int n, uint64_t dummy, const uint64_t *addr, const uint64_t *links, int nlinks)
 {
-    struct patch tmp[A64X_STUB_MAX * 2 + 4];
-    int nt = 0, li = 0;
-    bool ok = true;
-    for (int j = 0; j < n && ok; j++) {
-        bool isbr;
-        int64_t off = br_off(st[j], &isbr);
-        uint32_t w = st[j];
-        if (isbr) {
-            uint64_t tgt = dummy + 4 * (uint64_t)j + (uint64_t)off;
-            uint64_t nt2 = (tgt >= dummy && tgt < dummy + 4 * (uint64_t)n) ? addr[(tgt - dummy) / 4] : tgt;
-            w = br_set(st[j], (int64_t)(nt2 - addr[j]), &ok);
-        }
-        tmp[nt].va = addr[j];
-        tmp[nt].w = w;
-        nt++;
-        if (li < nlinks && j + 1 < n && addr[j + 1] != addr[j] + 4) {
-            uint32_t b = a64x_branch(links[li], addr[j + 1]);
-            if (!b)
-                ok = false;
-            tmp[nt].va = links[li];
-            tmp[nt].w = b;
-            nt++;
-            li++;
-        }
-    }
-    if (!ok)
+    struct a64x_placed placed[A64X_STUB_MAX * 2 + 4];
+    int np = a64x_stub_split(st, n, dummy, addr, links, nlinks, placed);
+    if (np < 0)
         return false;
-    for (int i = 0; i < nt; i++)
-        add_patch(tmp[i].va, tmp[i].w);
+    for (int i = 0; i < np; i++)
+        add_patch(placed[i].at, placed[i].word);
     return true;
 }
 
@@ -1421,7 +1356,7 @@ static int follow(uint64_t site, uint32_t w)
                 continue;
             }
             bool isb;
-            int64_t off = br_off(x, &isb);
+            int64_t off = a64x_branch_offset(x, &isb);
             if (isb) { /* conditional: both ways */
                 if (nw == 64)
                     return 0;

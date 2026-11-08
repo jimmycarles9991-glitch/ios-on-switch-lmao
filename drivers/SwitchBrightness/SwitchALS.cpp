@@ -72,12 +72,11 @@
 #include "../TegraGPIO/TegraGPIO.h"
 #include "../TegraI2C/TegraI2C.h"
 #include "../SwitchTouch/SwitchHID.h"
+#include "../../kits/SwitchCAR/SwitchPMC.h"
 #include "../../kits/SwitchRefusal/SwitchRefusal.h"
 #include "SwitchALSMath.h"
 #include "SwitchBrightness.h"
 #include "TegraPanel.h"
-
-extern "C" vm_offset_t ml_io_map(vm_offset_t phys_addr, vm_size_t size);
 
 namespace {
 using namespace switch_als;
@@ -120,7 +119,7 @@ int writeRegister(uint8_t reg, uint8_t value)
 
 uint64_t msSince(uint64_t then)
 {
-    uint64_t ns;
+    uint64_t ns = 0;
     absolutetime_to_nanoseconds(mach_absolute_time() - then, &ns);
     return ns / 1000000;
 }
@@ -133,8 +132,17 @@ uint64_t msSince(uint64_t then)
 void describeSupplies(char *buffer, size_t size)
 {
     constexpr unsigned kPmicBus = 5;
-    constexpr uint8_t kPmic = 0x3c, kLdo6Cfg = 0x2f, kGpio3 = 0x39, kAmeGpio = 0x40, kFpsLdo6 = 0x4c, kFpsGpio3 = 0x56;
-    uint8_t ldo[2] = {}, gpio3 = 0, ame = 0, fps = 0, fpsGpio3 = 0;  // LDO6_CFG and LDO6_CFG2 (0x30): one read
+    constexpr uint8_t kPmic = 0x3c;
+    constexpr uint8_t kLdo6Cfg = 0x2f;
+    constexpr uint8_t kGpio3 = 0x39;
+    constexpr uint8_t kAmeGpio = 0x40;
+    constexpr uint8_t kFpsLdo6 = 0x4c;
+    constexpr uint8_t kFpsGpio3 = 0x56;
+    uint8_t ldo[2] = {};  // LDO6_CFG and LDO6_CFG2 (0x30): one read
+    uint8_t gpio3 = 0;
+    uint8_t ame = 0;
+    uint8_t fps = 0;
+    uint8_t fpsGpio3 = 0;
     int err = tegra_i2c_read(kPmicBus, kPmic, kLdo6Cfg, ldo, sizeof(ldo));
     if (!err)
         err = tegra_i2c_read(kPmicBus, kPmic, kGpio3, &gpio3, 1);
@@ -147,10 +155,11 @@ void describeSupplies(char *buffer, size_t size)
     snprintf(buffer, size,
              "LDO6_CFG %#x (mode %u, %u mV) LDO6_CFG2 %#x (POK %u) FPS_LDO6 %#x, GPIO3 %#x AME %#x FPS_GPIO3 %#x (PMIC "
              "read %d)",
-             ldo[0], ldo[0] >> 6, 800 + 50 * (ldo[0] & 0x3f), ldo[1], (ldo[1] >> 3) & 1, fps, gpio3, ame, fpsGpio3,
-             err);
+             ldo[0], ldo[0] >> 6, 800 + 50 * (ldo[0] & 0x3f), ldo[1], (static_cast<unsigned>(ldo[1]) >> 3) & 1u, fps,
+             gpio3, ame, fpsGpio3, err);
 }
 
+#if DEVELOPMENT || DEBUG
 // The bus itself, for the probe line after a sensor that never answered (only this driver uses I2C2, from this work
 // loop, and TegraI2C has just recovered it from a NACK, so it is idle):
 //   * SCL (PJ2) and SDA (PJ3) read as GPIO inputs (tegra_gpio_sample: released throughout; 1 = pulled up), with the
@@ -161,26 +170,25 @@ void describeSupplies(char *buffer, size_t size)
 //   * Who answers on I2C2: a one-byte read of every address 0x08-0x77.
 void describeBus(char *buffer, size_t size)
 {
-    unsigned sclConfig = 0, sdaConfig = 0;
-    const int scl = tegra_gpio_sample(TEGRA_GPIO(J, 2), &sclConfig),
-              sda = tegra_gpio_sample(TEGRA_GPIO(J, 3), &sdaConfig);
+    unsigned sclConfig = 0;
+    unsigned sdaConfig = 0;
+    const int scl = tegra_gpio_sample(TEGRA_GPIO(J, 2), &sclConfig);
+    const int sda = tegra_gpio_sample(TEGRA_GPIO(J, 3), &sdaConfig);
     const int controls[4] = {tegra_gpio_read(TEGRA_GPIO(J, 1)), tegra_gpio_read(TEGRA_GPIO(J, 0)),
                              tegra_gpio_read(TEGRA_GPIO(F, 0)), tegra_gpio_read(TEGRA_GPIO(F, 1))};
     uint32_t pmc[4] = {};
-    if (auto *page = reinterpret_cast<volatile uint8_t *>(ml_io_map(0x7000E000, 0x1000))) {
-        const uint32_t offsets[4] = {0x44, 0xe4, 0x1bc, 0x1c4};  // NO_IOPOWER, PWR_DET_VAL, IO_DPD(2)_STATUS
-        for (unsigned i = 0; i < 4; ++i)
-            pmc[i] = *reinterpret_cast<volatile uint32_t *>(page + 0x400 + offsets[i]);
-    }
+    const uint32_t offsets[4] = {0x44, 0xe4, 0x1bc, 0x1c4};  // NO_IOPOWER, PWR_DET_VAL, IO_DPD(2)_STATUS
+    for (unsigned i = 0; i < 4; ++i)
+        pmc[i] = switch_pmc_read(offsets[i]);
     char acks[64] = "";
     size_t used = 0;
     unsigned found = 0;
     for (uint8_t addr = 0x08; addr <= 0x77; ++addr) {
-        uint8_t byte;
+        uint8_t byte = 0;
         if (tegra_i2c_transfer(kBus, addr, nullptr, 0, &byte, 1) != TEGRA_I2C_OK)
             continue;
         if (found++ < 10)
-            used += (size_t)snprintf(acks + used, sizeof(acks) - used, " 0x%02x", addr);
+            used += static_cast<size_t>(snprintf(acks + used, sizeof(acks) - used, " 0x%02x", addr));
     }
     snprintf(buffer, size,
              "I2C2 as GPIO inputs SCL %d SDA %d (PJ2/PJ3 cnf|oe<<1|out<<2|in<<3 %#x %#x), SFIO GPIO_IN of the working "
@@ -189,9 +197,12 @@ void describeBus(char *buffer, size_t size)
              scl, sda, sclConfig, sdaConfig, controls[0], controls[1], controls[2], controls[3], pmc[0], pmc[1], pmc[2],
              pmc[3], found, acks);
 }
+#endif
 }  // namespace
 
+// NOLINTNEXTLINE(misc-use-internal-linkage): OSDefineMetaClassAndStructors needs the class's external linkage
 class SwitchALS : public IOService {
+    // NOLINTNEXTLINE(misc-explicit-constructor): IOKit's structors macro declares the metaclass constructor
     OSDeclareDefaultStructors(SwitchALS) IOWorkLoop *loop = nullptr;
     IOTimerEventSource *clock = nullptr;        // every sampleUS while running
     IOTimerEventSource *supplyCheck = nullptr;  // kSupplyDeadlineMS for SwitchTouch's first LDO6
@@ -254,6 +265,7 @@ static volatile bool gSupply;  // LDO6 as SwitchTouch last reported it, for a re
 // powered down (it keeps its registers while LDO6 stays on) and its timer is off. Starting sets it up at once; the
 // first tick is kFirstSampleUS later, a whole conversion after the set-up, because the sensor's registers still hold
 // the last conversion from before it powered down.
+// NOLINTNEXTLINE(misc-no-recursion): giveUp() sets broken first, so its update() only stops the sensor
 void SwitchALS::update()
 {
     const bool want = lit && !suspended && supply && !broken;
@@ -265,10 +277,11 @@ void SwitchALS::update()
         __atomic_store_n(&running, true, __ATOMIC_RELEASE);
         clock->setTimeoutUS(kFirstSampleUS);
         const int err = configure();
-        if (err)
+        if (err) {
             failed(err);  // the first tick tries again
-        else
+        } else {
             configured = true;
+        }
         return;
     }
     __atomic_store_n(&running, false, __ATOMIC_RELEASE);
@@ -281,6 +294,7 @@ void SwitchALS::update()
 // Work loop. The ALS is not worth a boot: a part that is not a BH1730, a sensor that does not answer, a supply that
 // never comes and an event path nothing takes each log one line (the caller's) and leave the sensor off; a lost
 // display interrupt still panics.
+// NOLINTNEXTLINE(misc-no-recursion): giveUp() sets broken first, so its update() only stops the sensor
 void SwitchALS::giveUp()
 {
     broken = true;
@@ -295,12 +309,14 @@ void SwitchALS::giveUp()
 // this configuration's. Nothing touches the hardware before this.
 int SwitchALS::configure()
 {
-    int err;
+    int err = 0;
     if (!identified) {
         uint8_t id = 0;
-        if ((err = tegra_i2c_init(kBus)))
+        err = tegra_i2c_init(kBus);
+        if (err)
             return err;
-        if ((err = tegra_i2c_read(kBus, kSensor, kCommand | RegId, &id, 1)))
+        err = tegra_i2c_read(kBus, kSensor, kCommand | RegId, &id, 1);
+        if (err)
             return err;
         // BH1730FVC PART_ID: part number 0111 in bits 7:4.
         if ((id >> 4) != 7) {
@@ -308,15 +324,16 @@ int SwitchALS::configure()
             broken = true;  // sample() turns the sensor off
             return -1;
         }
-        if ((err = tegra_i2c_write(kBus, kSensor, kSoftwareReset, nullptr, 0)))
+        err = tegra_i2c_write(kBus, kSensor, kSoftwareReset, nullptr, 0);
+        if (err)
             return err;
         identified = true;
         IOLog("SwitchALS: started (BH1730 id %#x after %u failed tries, LDO6 on for %llu ms; a sample every %u us)\n",
               id, errors, msSince(supplyAt), kSampleUS);
     }
-    err = writeRegister(RegGain, (uint8_t)gain);
+    err = writeRegister(RegGain, static_cast<uint8_t>(gain));
     if (!err)
-        err = writeRegister(RegTiming, (uint8_t)(256 - kCycles));
+        err = writeRegister(RegTiming, static_cast<uint8_t>(256 - kCycles));
     if (!err)
         err = writeRegister(RegControl, kPowerOn | kAdcEnable);
     skip = 0;
@@ -341,9 +358,10 @@ void SwitchALS::dispatch(uint32_t level, uint32_t visible, uint32_t ir)
         return;
     }
     vcall<void, uint64_t>(event, kSetTimeStamp, mach_absolute_time());
-    vcall<void, uint32_t, int32_t, IOOptionBits>(event, kSetIntegerValue, kFieldLevel, (int32_t)level, 0);
-    vcall<void, uint32_t, int32_t, IOOptionBits>(event, kSetIntegerValue, kFieldChannel0, (int32_t)visible, 0);
-    vcall<void, uint32_t, int32_t, IOOptionBits>(event, kSetIntegerValue, kFieldChannel1, (int32_t)ir, 0);
+    vcall<void, uint32_t, int32_t, IOOptionBits>(event, kSetIntegerValue, kFieldLevel, static_cast<int32_t>(level), 0);
+    vcall<void, uint32_t, int32_t, IOOptionBits>(event, kSetIntegerValue, kFieldChannel0, static_cast<int32_t>(visible),
+                                                 0);
+    vcall<void, uint32_t, int32_t, IOOptionBits>(event, kSetIntegerValue, kFieldChannel1, static_cast<int32_t>(ir), 0);
     // kIOReturnNotReady until IOHIDEventDriver has started on the device; CoreBrightness never sees the sensor without it.
     const IOReturn status = switch_hid_dispatch_event(hid, event);
     event->release();
@@ -372,6 +390,7 @@ void SwitchALS::noteStats(uint32_t level, uint32_t visible, uint32_t ir)
     const unsigned tolerance = loggedLux / 8 > 2 ? loggedLux / 8 : 2;
     if (gain != loggedGain || panel != loggedPanel || luxMin + tolerance < loggedLux ||
         luxMax > loggedLux + tolerance) {
+        // NOLINTNEXTLINE(clang-analyzer-security.ArrayBound): nextGain() keeps gain under kGains
         os_log(OS_LOG_DEFAULT, "SwitchALS: %u samples, lux %u (%u..%u), ch0 %u ch1 %u gain %ux, panel %d", samples,
                level, luxMin, luxMax, visible, ir, kGainFactor[gain], panel);
         loggedLux = level;
@@ -384,9 +403,11 @@ void SwitchALS::noteStats(uint32_t level, uint32_t visible, uint32_t ir)
 }
 #endif
 
-// Work loop: a transfer to the sensor failed. kErrorLimit in a row turn it off, with one line on the supplies, one on
-// the bus and the controller's last failure (TegraI2C), and, if it never answered, one on the lines, the PMC's rails
-// and whoever answers on I2C2 (describeBus). The sampling is stopped first, so the probe runs on an idle bus.
+// Work loop: a transfer to the sensor failed. kErrorLimit in a row turn it off with one line on the supplies. Debug
+// kernels add one on the bus and the controller's last failure (TegraI2C) and, if it never answered, one on the lines,
+// the PMC's rails and whoever answers on I2C2 (describeBus, a read of every address). The sampling is stopped first, so
+// the probe runs on an idle bus.
+// NOLINTNEXTLINE(misc-no-recursion): giveUp() sets broken first, so its update() only stops the sensor
 void SwitchALS::failed(int err)
 {
     if (broken) {
@@ -401,12 +422,14 @@ void SwitchALS::failed(int err)
     IOLog("SwitchALS: off: BH1730 on I2C2 0x29 %s: I2C error %d (%s) %u times in a row, LDO6 on for %llu ms; %s\n",
           identified ? "stopped answering" : "never answered", err, err == TEGRA_I2C_ENACK ? "no ACK" : "bus fault",
           errors, msSince(supplyAt), line);
+#if DEVELOPMENT || DEBUG
     tegra_i2c_describe(kBus, line, sizeof(line));
     IOLog("SwitchALS: %s\n", line);
     if (identified)
         return;
     describeBus(line, sizeof(line));
     IOLog("SwitchALS: probe: %s\n", line);
+#endif
 }
 
 // Work loop, every kSampleUS while running. A sensor update() could not set up is set up here.
@@ -427,7 +450,8 @@ void SwitchALS::sample()
         --skip;
         return;
     }
-    const uint32_t visible = (uint32_t)data[1] << 8 | data[0], ir = (uint32_t)data[3] << 8 | data[2];
+    const uint32_t visible = static_cast<uint32_t>(data[1]) << 8 | data[0];
+    const uint32_t ir = static_cast<uint32_t>(data[3]) << 8 | data[2];
     if (!saturated(visible, ir) || gain == 0) {  // a clipped reading at a higher gain only steps the gain down
         const uint32_t level = lux(visible, ir, gain);
         dispatch(level, visible, ir);
@@ -439,7 +463,7 @@ void SwitchALS::sample()
     const unsigned next = nextGain(gain, visible, ir);
     if (next == gain)
         return;
-    if (writeRegister(RegGain, (uint8_t)next))
+    if (writeRegister(RegGain, static_cast<uint8_t>(next)))
         return;  // counted on the next read if the sensor is gone
     gain = next;
     skip = 1;  // the conversion in flight finishes at the old gain
@@ -461,8 +485,8 @@ void SwitchALS::reportIntervalSet(void *context, const uint8_t *report, size_t l
     auto *self = static_cast<SwitchALS *>(context);
     if (length < 5)
         return;
-    const uint32_t asked =
-        (uint32_t)report[1] | (uint32_t)report[2] << 8 | (uint32_t)report[3] << 16 | (uint32_t)report[4] << 24;
+    const uint32_t asked = static_cast<uint32_t>(report[1]) | static_cast<uint32_t>(report[2]) << 8 |
+                           static_cast<uint32_t>(report[3]) << 16 | static_cast<uint32_t>(report[4]) << 24;
     if (asked && asked < kSampleUS) {
         switch_refusal("als", "interval-below-conversion",
                        "report interval %u us asked; the BH1730 converts every %u us, so it reports at that", asked,
@@ -561,8 +585,8 @@ extern "C" int switch_als_start(void)
 
 extern "C" bool switch_als_published(void)
 {
-    SwitchALS *als = __atomic_load_n(&gALS, __ATOMIC_ACQUIRE);
-    return als && als->published();
+    const SwitchALS *als = __atomic_load_n(&gALS, __ATOMIC_ACQUIRE);
+    return (als != nullptr) && als->published();
 }
 
 extern "C" void switch_als_set_active(bool active)

@@ -13,6 +13,7 @@
 load("@rules_rust//rust:defs.bzl", "rust_static_library")
 load("//bazel/lint:defs.bzl", "lint_files")
 load("//bazel/rust:defs.bzl", "cargo_ids", "rust_artifact")
+load("//translate/arm64e:target.bzl", "a64x_target_linkopts")
 load(":defs.bzl", "gpu_stage", "gpu_tree", "llvm_as", "metal_bundle", "metal_plugin", "raw_stack")
 
 package(default_visibility = ["//visibility:public"])
@@ -22,6 +23,9 @@ lint_files()
 METAL = "//drivers/NativeMetal"
 
 GM20B_METAL = "//drivers/TegraGM20BMetal"
+
+# The selected IPSW kind's Metal.framework facts (drivers/NativeMetal/abi).
+METAL_ABI = METAL + "/abi:MetalABI.h"
 
 GM20B_ABI = "//drivers/TegraGM20B:TegraGM20BABI.h"
 
@@ -49,6 +53,7 @@ rust_static_library(
     name = "bridge",
     srcs = [
         METAL + ":bridge/NativeMetalBridge.rs",
+        METAL + ":bridge/NativeMetalFailure.rs",
         METAL + ":bridge/NativeMetalObjects.rs",
         METAL + ":bridge/NativeMetalTarget.rs",
     ],
@@ -66,12 +71,15 @@ rust_static_library(
     },
     # cargo's -C metadata for the crate (bazel/rust/defs.bzl: the release bridge is cargo's, byte for byte). A staticlib
     # takes no extra-filename: the archive's own object is named without cargo's suffix (no shipped byte depends on it).
-    rustc_flags = cargo_ids("0cd6ef7afe7b4328", "943b498a20400856")[:1],
+    # target_j181: iOS 27 identifies the hardware as iPad12,1 (NativeMetalTarget.rs's A13 answers).
+    rustc_flags = cargo_ids("0cd6ef7afe7b4328", "943b498a20400856")[:1] + ["--check-cfg=cfg(target_j181)"] + select({
+        "//ipsw:24B119": ["--cfg=target_j181"],
+        "//conditions:default": [],
+    }),
     version = "0.1.0",
-    # kits/SwitchRefusal's C, bundled into the archive by rustc (a static native library of a staticlib): the plugin
-    # image's one copy, which the frontend and the raw path call too
+    # switch_refusal_rs brings kits/SwitchRefusal's C, bundled into the archive by rustc (a static native library of a
+    # staticlib): the plugin image's one copy, which the frontend and the raw path call too
     deps = [
-        "//kits/SwitchRefusal:switch_refusal",
         "//kits/SwitchRefusal:switch_refusal_rs",
         "//third_party/m2v/crates/metal2vulkan",
         "//third_party/m2v/crates/metal2vulkan-runtime",
@@ -108,6 +116,7 @@ raw_stack(
     name = "raw_stack",
     srcs = [
         METAL + ":bridge/NativeMetalBridge.rs",
+        METAL + ":bridge/NativeMetalFailure.rs",
         METAL + ":bridge/NativeMetalObjects.rs",
         METAL + ":bridge/NativeMetalTarget.rs",
         METAL + ":NativeBridgeMetalFrontend.mm",
@@ -127,18 +136,24 @@ metal_plugin(
     srcs = [
         GM20B_METAL + ":TegraGM20BMetalPlugin.mm",
         METAL + ":NativeBridgeMetalFrontend.mm",
-        GM20B_METAL + ":raw/runtime/RawMetal.mm",
-        GM20B_METAL + ":raw/runtime/RawAlias.mm",
+        GM20B_METAL + ":raw_facade_srcs",
     ],
     hdrs = [
         METAL + ":frontend_headers",
+        METAL_ABI,
         GM20B_METAL + ":raw_runtime_headers",
+        GM20B_METAL + ":raw_capture_headers",
         GM20B_ABI,
         GM20B_LAYOUT,
         "//kits/SwitchRefusal:SwitchRefusal.h",
         "//kits/SwitchRefusal:SwitchRefusalSite.h",
     ],
     bridge = ":bridge_ios",
+    # Mesa's MME simulator: the raw path's capture of a state runs NVK's macros (raw/runtime/raw_capture.h)
+    c_srcs = [
+        GM20B_METAL + ":raw/pack/mesa/mme_fermi.c",
+        GM20B_METAL + ":raw/pack/mesa/mme_fermi_sim.c",
+    ],
     cc_srcs = [
         GM20B_METAL + ":raw/runtime/raw_gpu.cpp",
         GM20B_METAL + ":raw/runtime/raw_alias.cpp",
@@ -147,6 +162,14 @@ metal_plugin(
         GM20B_METAL + ":raw/runtime/raw_pack.cpp",
         GM20B_METAL + ":raw/runtime/raw_ycbcr.cpp",
         GM20B_METAL + ":raw/runtime/raw_zeta.cpp",
+        GM20B_METAL + ":raw/runtime/raw_comp.cpp",
+        GM20B_METAL + ":raw/runtime/raw_capture.cpp",
+        GM20B_METAL + ":raw/runtime/raw_record.cpp",
+        GM20B_METAL + ":raw/runtime/raw_cache.cpp",
+        GM20B_METAL + ":raw/runtime/raw_compiler.cpp",
+        GM20B_METAL + ":raw/runtime/raw_metallib.cpp",
+        GM20B_METAL + ":raw/runtime/raw_completed.cpp",
+        GM20B_METAL + ":raw/pack/nvdec.cpp",
     ],
     frameworks = [
         "Foundation",
@@ -156,10 +179,12 @@ metal_plugin(
     ],
     include_markers = [
         METAL + ":NativeBridgeMetalFrontend.h",
+        METAL_ABI,
         GM20B_METAL + ":raw/runtime/RawMetal.h",
         GM20B_ABI,
         "//kits/SwitchRefusal:SwitchRefusal.h",
     ],
+    linkopts = a64x_target_linkopts(),
     stack = ":raw_stack",
 )
 

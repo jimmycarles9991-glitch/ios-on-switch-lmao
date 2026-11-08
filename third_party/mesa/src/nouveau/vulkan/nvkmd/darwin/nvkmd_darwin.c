@@ -125,6 +125,7 @@ darwin_open(struct vk_object_base *log_obj, struct nvkmd_darwin_conn *c,
    }
    c->kernel_map = (info->flags & TegraGM20BInfoKernelMap) != 0;
    c->exec_surfaces = (info->flags & TegraGM20BInfoExecSurfaces) != 0;
+   c->kill_record = (info->flags & TegraGM20BInfoKillRecord) != 0;
 
    return VK_SUCCESS;
 }
@@ -319,7 +320,36 @@ darwin_wait_seqno(struct nvkmd_darwin_dev *dev, uint32_t channel,
                                   &wait, sizeof(wait), NULL, 0);
    if (kr == kIOReturnTimeout)
       return VK_TIMEOUT;
+   /* A killed channel's fence passed every seqno it gave out; what failed is
+    * its kill record's.
+    */
+   if (kr == kIOReturnNotResponding)
+      return VK_SUCCESS;
    return darwin_result(NULL, kr, "WaitFence");
+}
+
+static const volatile struct TegraGM20BAbiFence *
+darwin_channel_fence(const struct nvkmd_darwin_channel *chan)
+{
+   return (const volatile struct TegraGM20BAbiFence *)chan->fence;
+}
+
+/* channels_mutex held: the error a seqno of `channel` failed with, 0 if it ran
+ * to its end (or has not ended yet).
+ */
+static uint32_t
+darwin_seqno_error_locked(struct nvkmd_darwin_dev *dev, uint32_t channel,
+                          uint32_t seqno)
+{
+   const uint32_t error = darwin_kills_error(&dev->kills, channel, seqno);
+   if (error != 0 || !dev->conn.kill_record)
+      return error;
+   struct nvkmd_darwin_channel *chan = darwin_channel_locked(dev, channel);
+   struct darwin_kill kill;
+   if (chan == NULL || !darwin_kill_read(darwin_channel_fence(chan), channel,
+                                         &kill))
+      return 0;
+   return darwin_kill_covers(&kill, channel, seqno) ? kill.error : 0;
 }
 
 static struct nvkmd_darwin_sync *
@@ -340,6 +370,7 @@ darwin_sync_init(struct vk_device *device, struct vk_sync *sync,
    s->seqno = 0;
    s->value = initial_value;
    util_dynarray_init(&s->points, NULL);
+   s->failures = NULL;
    return VK_SUCCESS;
 }
 
@@ -347,6 +378,7 @@ static void
 darwin_sync_finish(struct vk_device *device, struct vk_sync *sync)
 {
    util_dynarray_fini(&to_darwin_sync(sync)->points);
+   free(to_darwin_sync(sync)->failures);
 }
 
 static bool
@@ -370,8 +402,22 @@ darwin_point_done(const struct nvkmd_darwin_sync_point *p)
    return done;
 }
 
+/* The error a done point's work failed with: 0 if it ran to its end. */
+static uint32_t
+darwin_point_error(const struct nvkmd_darwin_sync_point *p)
+{
+   if (p->dev == NULL)
+      return 0;
+   simple_mtx_lock(&p->dev->channels_mutex);
+   const uint32_t error =
+      darwin_seqno_error_locked(p->dev, p->channel, p->seqno);
+   simple_mtx_unlock(&p->dev->channels_mutex);
+   return error;
+}
+
 /* darwin_sync_lock held: fold every point the GPU has passed into value, and
- * drop every point at or below it.
+ * drop every point at or below it, keeping the values of those whose work
+ * failed.
  */
 static void
 darwin_timeline_update_locked(struct nvkmd_darwin_sync *s)
@@ -385,8 +431,13 @@ darwin_timeline_update_locked(struct nvkmd_darwin_sync *s)
    }
    unsigned kept = 0;
    for (unsigned i = 0; i < count; i++) {
-      if (points[i].value > s->value)
+      if (points[i].value > s->value) {
          points[kept++] = points[i];
+         continue;
+      }
+      const uint32_t error = darwin_point_error(&points[i]);
+      if (error != 0)
+         darwin_failures_add(&s->failures, points[i].value, error);
    }
    s->points.size = kept * sizeof(*points);
 }
@@ -406,14 +457,18 @@ darwin_timeline_point_locked(struct nvkmd_darwin_sync *s, uint64_t value,
    return found;
 }
 
-/* A timeline signal: by the CPU (dev NULL) or pending on channel/seqno. */
+/* A timeline signal: by the CPU (dev NULL) or pending on channel/seqno. A CPU
+ * signal with an error is that of work a killed channel refused.
+ */
 static void
 darwin_timeline_signal(struct nvkmd_darwin_sync *s, uint64_t value,
                        struct nvkmd_darwin_dev *dev, uint32_t channel,
-                       uint32_t seqno)
+                       uint32_t seqno, uint32_t error)
 {
    pthread_mutex_lock(&darwin_sync_lock);
    if (dev == NULL) {
+      if (error != 0 && value > s->value)
+         darwin_failures_add(&s->failures, value, error);
       if (value > s->value)
          s->value = value;
    } else if (value > s->value) {
@@ -458,7 +513,7 @@ darwin_sync_signal(struct vk_device *device, struct vk_sync *sync,
 {
    struct nvkmd_darwin_sync *s = to_darwin_sync(sync);
    if (darwin_is_timeline(s))
-      darwin_timeline_signal(s, value, NULL, 0, 0);
+      darwin_timeline_signal(s, value, NULL, 0, 0, 0);
    else
       darwin_sync_set(s, NVKMD_DARWIN_SYNC_SIGNALED, NULL, 0, 0);
    return VK_SUCCESS;
@@ -638,7 +693,10 @@ darwin_any_wait_fence(const struct darwin_any_fence *fence, uint64_t timeout_ns)
    };
    const kern_return_t kr = darwin_call(&fence->conn, TegraGM20BMethodWaitFence,
                                         &wait, sizeof(wait), NULL, 0);
-   return kr == KERN_SUCCESS ? 0 : kr == kIOReturnTimeout ? ETIMEDOUT : EIO;
+   /* a killed channel: its fence passed (darwin_wait_seqno) */
+   if (kr == KERN_SUCCESS || kr == kIOReturnNotResponding)
+      return 0;
+   return kr == kIOReturnTimeout ? ETIMEDOUT : EIO;
 }
 
 static void
@@ -846,6 +904,7 @@ nvkmd_darwin_create_pdev(struct vk_object_base *log_obj,
       .has_map_fixed = true,
       .has_overmap = true,
       .has_host_import = (info.flags & TegraGM20BInfoHostImport) != 0,
+      .has_tiled_cache = (info.flags & TegraGM20BInfoTiledCache) != 0,
    };
 
    uint64_t os_page_size = 4096;
@@ -1743,17 +1802,12 @@ darwin_ctx_wait(uint32_t channel, struct vk_object_base *log_obj,
    return VK_SUCCESS;
 }
 
+/* A new channel for `engines`, its fence word mapped: *channel_out names it. */
 static VkResult
-darwin_create_exec_ctx(struct nvkmd_darwin_dev *dev,
-                       struct vk_object_base *log_obj,
-                       enum nvkmd_engines engines, struct nvkmd_ctx **ctx_out)
+darwin_channel_open(struct nvkmd_darwin_dev *dev,
+                    struct vk_object_base *log_obj,
+                    enum nvkmd_engines engines, uint32_t *channel_out)
 {
-   STATIC_ASSERT(NVKMD_ENGINE_COPY == (int)TegraGM20BEngineCopy);
-   STATIC_ASSERT(NVKMD_ENGINE_2D == (int)TegraGM20BEngine2D);
-   STATIC_ASSERT(NVKMD_ENGINE_3D == (int)TegraGM20BEngine3D);
-   STATIC_ASSERT(NVKMD_ENGINE_M2MF == (int)TegraGM20BEngineM2MF);
-   STATIC_ASSERT(NVKMD_ENGINE_COMPUTE == (int)TegraGM20BEngineCompute);
-
    /* Reserve a channel slot (UINT32_MAX until the kernel names the channel). */
    simple_mtx_lock(&dev->channels_mutex);
    struct nvkmd_darwin_channel *slot = darwin_channel_locked(dev, 0);
@@ -1763,19 +1817,12 @@ darwin_create_exec_ctx(struct nvkmd_darwin_dev *dev,
    if (slot == NULL)
       return vk_error(log_obj, VK_ERROR_TOO_MANY_OBJECTS);
 
-   struct nvkmd_darwin_exec_ctx *ctx = CALLOC_STRUCT(nvkmd_darwin_exec_ctx);
-   if (ctx == NULL) {
-      slot->id = 0;
-      return vk_error(log_obj, VK_ERROR_OUT_OF_HOST_MEMORY);
-   }
-
    const struct TegraGM20BAbiChannelCreate req = { .engines = engines };
    struct TegraGM20BAbiChannelCreateReply reply = { 0 };
    kern_return_t kr = darwin_call(&dev->conn, TegraGM20BMethodChannelCreate,
                                   &req, sizeof(req), &reply, sizeof(reply));
    if (kr != KERN_SUCCESS) {
       slot->id = 0;
-      FREE(ctx);
       return kr == kIOReturnNoResources ?
              vk_error(log_obj, VK_ERROR_TOO_MANY_OBJECTS) :
              darwin_result(log_obj, kr, "ChannelCreate");
@@ -1784,12 +1831,12 @@ darwin_create_exec_ctx(struct nvkmd_darwin_dev *dev,
    mach_vm_address_t addr = 0;
    mach_vm_size_t size = 0;
    kr = darwin_map(&dev->conn, reply.fence_token, true, 0, &addr, &size);
-   if (kr != KERN_SUCCESS || reply.fence_offset + 4 > size) {
+   if (kr != KERN_SUCCESS ||
+       reply.fence_offset + sizeof(struct TegraGM20BAbiFence) > size) {
       const struct TegraGM20BAbiChannel destroy = { .channel = reply.channel };
       darwin_call(&dev->conn, TegraGM20BMethodChannelDestroy, &destroy,
                   sizeof(destroy), NULL, 0);
       slot->id = 0;
-      FREE(ctx);
       return vk_errorf(log_obj, VK_ERROR_INITIALIZATION_FAILED,
                        "fence page map failed: 0x%x", kr);
    }
@@ -1803,10 +1850,52 @@ darwin_create_exec_ctx(struct nvkmd_darwin_dev *dev,
    };
    simple_mtx_unlock(&dev->channels_mutex);
 
+   *channel_out = reply.channel;
+   return VK_SUCCESS;
+}
+
+static void
+darwin_channel_close(struct nvkmd_darwin_dev *dev, uint32_t channel)
+{
+   /* The kernel waits for idle before tearing the channel down. */
+   const struct TegraGM20BAbiChannel req = { .channel = channel };
+   darwin_call(&dev->conn, TegraGM20BMethodChannelDestroy, &req, sizeof(req),
+               NULL, 0);
+
+   simple_mtx_lock(&dev->channels_mutex);
+   struct nvkmd_darwin_channel *chan = darwin_channel_locked(dev, channel);
+   if (chan != NULL) {
+      darwin_unmap(&dev->conn, chan->fence_token, chan->fence_map);
+      memset(chan, 0, sizeof(*chan));
+   }
+   simple_mtx_unlock(&dev->channels_mutex);
+}
+
+static VkResult
+darwin_create_exec_ctx(struct nvkmd_darwin_dev *dev,
+                       struct vk_object_base *log_obj,
+                       enum nvkmd_engines engines, struct nvkmd_ctx **ctx_out)
+{
+   STATIC_ASSERT(NVKMD_ENGINE_COPY == (int)TegraGM20BEngineCopy);
+   STATIC_ASSERT(NVKMD_ENGINE_2D == (int)TegraGM20BEngine2D);
+   STATIC_ASSERT(NVKMD_ENGINE_3D == (int)TegraGM20BEngine3D);
+   STATIC_ASSERT(NVKMD_ENGINE_M2MF == (int)TegraGM20BEngineM2MF);
+   STATIC_ASSERT(NVKMD_ENGINE_COMPUTE == (int)TegraGM20BEngineCompute);
+
+   struct nvkmd_darwin_exec_ctx *ctx = CALLOC_STRUCT(nvkmd_darwin_exec_ctx);
+   if (ctx == NULL)
+      return vk_error(log_obj, VK_ERROR_OUT_OF_HOST_MEMORY);
+
+   VkResult result = darwin_channel_open(dev, log_obj, engines, &ctx->channel);
+   if (result != VK_SUCCESS) {
+      FREE(ctx);
+      return result;
+   }
+
    ctx->base.ops = &nvkmd_darwin_exec_ctx_ops;
    ctx->base.dev = &dev->base;
-   ctx->channel = reply.channel;
-   ctx->req.channel = reply.channel;
+   ctx->engines = engines;
+   ctx->req.channel = ctx->channel;
 
    *ctx_out = &ctx->base;
    return VK_SUCCESS;
@@ -1816,22 +1905,103 @@ static void
 nvkmd_darwin_exec_ctx_destroy(struct nvkmd_ctx *_ctx)
 {
    struct nvkmd_darwin_exec_ctx *ctx = nvkmd_darwin_exec_ctx(_ctx);
-   struct nvkmd_darwin_dev *dev = nvkmd_darwin_dev(_ctx->dev);
+   darwin_channel_close(nvkmd_darwin_dev(_ctx->dev), ctx->channel);
+   FREE(ctx);
+}
 
-   /* The kernel waits for idle before tearing the channel down. */
-   const struct TegraGM20BAbiChannel req = { .channel = ctx->channel };
-   darwin_call(&dev->conn, TegraGM20BMethodChannelDestroy, &req, sizeof(req),
-               NULL, 0);
-
+/* The error the kernel killed the context's channel with, 0 while it lives. */
+static uint32_t
+darwin_ctx_kill_error(struct nvkmd_darwin_exec_ctx *ctx)
+{
+   struct nvkmd_darwin_dev *dev = nvkmd_darwin_dev(ctx->base.dev);
+   if (ctx->dead != 0)
+      return ctx->dead;
+   if (!dev->conn.kill_record)
+      return 0;
    simple_mtx_lock(&dev->channels_mutex);
    struct nvkmd_darwin_channel *chan = darwin_channel_locked(dev, ctx->channel);
-   if (chan != NULL) {
-      darwin_unmap(&dev->conn, chan->fence_token, chan->fence_map);
-      memset(chan, 0, sizeof(*chan));
-   }
+   struct darwin_kill kill = { 0 };
+   const bool killed =
+      chan != NULL &&
+      darwin_kill_read(darwin_channel_fence(chan), ctx->channel, &kill);
    simple_mtx_unlock(&dev->channels_mutex);
+   return killed ? kill.error : 0;
+}
 
-   FREE(ctx);
+/* An Exec found the channel dead: what the kernel says it died of. */
+static uint32_t
+darwin_ctx_died(struct nvkmd_darwin_exec_ctx *ctx)
+{
+   struct nvkmd_darwin_dev *dev = nvkmd_darwin_dev(ctx->base.dev);
+   uint32_t error = darwin_ctx_kill_error(ctx);
+   if (error == 0) {
+      const struct TegraGM20BAbiChannel req = { .channel = ctx->channel };
+      struct TegraGM20BAbiStatus status = { 0 };
+      if (darwin_call(&dev->conn, TegraGM20BMethodGetStatus, &req, sizeof(req),
+                      &status, sizeof(status)) == KERN_SUCCESS)
+         error = status.error;
+   }
+   return error != 0 ? error : 3;
+}
+
+bool
+nvkmd_darwin_ctx_lost(struct nvkmd_ctx *_ctx)
+{
+   return darwin_ctx_kill_error(nvkmd_darwin_exec_ctx(_ctx)) != 0;
+}
+
+VkResult
+nvkmd_darwin_ctx_reopen(struct nvkmd_ctx *_ctx, struct vk_object_base *log_obj)
+{
+   struct nvkmd_darwin_exec_ctx *ctx = nvkmd_darwin_exec_ctx(_ctx);
+   struct nvkmd_darwin_dev *dev = nvkmd_darwin_dev(_ctx->dev);
+   const uint32_t error = darwin_ctx_kill_error(ctx);
+
+   /* Kept before ChannelCreate zeroes the slot's record: the syncs still
+    * pending on the old channel find what failed here.
+    */
+   if (dev->conn.kill_record) {
+      simple_mtx_lock(&dev->channels_mutex);
+      struct nvkmd_darwin_channel *chan =
+         darwin_channel_locked(dev, ctx->channel);
+      struct darwin_kill kill;
+      if (chan != NULL &&
+          darwin_kill_read(darwin_channel_fence(chan), ctx->channel, &kill))
+         darwin_kills_add(&dev->kills, &kill);
+      simple_mtx_unlock(&dev->channels_mutex);
+   }
+   darwin_channel_close(dev, ctx->channel);
+
+   uint32_t channel = 0;
+   VkResult result = darwin_channel_open(dev, log_obj, ctx->engines, &channel);
+   if (result != VK_SUCCESS)
+      return result;
+
+   os_log_error(OS_LOG_DEFAULT, "nvk darwin: channel %u was killed (error %u): "
+                "channel %u replaces it", ctx->channel, error, channel);
+   ctx->channel = channel;
+   ctx->req.channel = channel;
+   ctx->req.count = 0;
+   ctx->last_seqno = 0;
+   ctx->submitted = false;
+   ctx->dead = 0;
+   ctx->refused = 0;
+   return VK_SUCCESS;
+}
+
+uint32_t
+nvkmd_darwin_sync_failure(struct vk_sync *sync, uint64_t value)
+{
+   if (sync == NULL || sync->type->init != darwin_sync_init)
+      return 0;
+   struct nvkmd_darwin_sync *s = to_darwin_sync(sync);
+   if (!darwin_is_timeline(s))
+      return 0;
+   pthread_mutex_lock(&darwin_sync_lock);
+   darwin_timeline_update_locked(s);
+   const uint32_t error = darwin_failures_find(s->failures, value);
+   pthread_mutex_unlock(&darwin_sync_lock);
+   return error;
 }
 
 static VkResult
@@ -1851,6 +2021,12 @@ void
 nvkmd_darwin_hint_surfaces(const void *queue)
 {
    darwin_hint_begin(&submit_hint, queue);
+}
+
+const void *
+nvkmd_darwin_mem_host_ptr(const struct nvkmd_mem *mem)
+{
+   return container_of(mem, const struct nvkmd_darwin_mem, base)->host_ptr;
 }
 
 void
@@ -1915,6 +2091,14 @@ nvkmd_darwin_exec_ctx_flush(struct nvkmd_ctx *_ctx,
 
    if (ctx->req.count == 0)
       return VK_SUCCESS;
+   /* Never run again on another channel: the work that faulted would fault
+    * again.
+    */
+   if (ctx->dead != 0) {
+      ctx->refused = ctx->dead;
+      ctx->req.count = 0;
+      return VK_SUCCESS;
+   }
    if (p_atomic_read(&surface_writes_failed))
       ctx->req.pushes[0].flags |= TegraGM20BPushImportsWritten;
 
@@ -1935,6 +2119,11 @@ nvkmd_darwin_exec_ctx_flush(struct nvkmd_ctx *_ctx,
       if (kr == KERN_SUCCESS) {
          ctx->last_seqno = reply.seqno;
          ctx->submitted = true;
+         break;
+      }
+      if (kr == kIOReturnNotResponding) {
+         ctx->dead = darwin_ctx_died(ctx);
+         ctx->refused = ctx->dead;
          break;
       }
       if (kr != kIOReturnBusy)
@@ -2004,13 +2193,27 @@ nvkmd_darwin_exec_ctx_signal(struct nvkmd_ctx *_ctx,
    if (result != VK_SUCCESS)
       return result;
 
+   /* Work the dead channel refused never runs: its signals come now, failed. */
+   const uint32_t refused = ctx->refused;
+   ctx->refused = 0;
+   for (uint32_t i = 0; i < signal_count && refused != 0; i++) {
+      struct nvkmd_darwin_sync *s = to_darwin_sync(signals[i].sync);
+      if (darwin_is_timeline(s))
+         darwin_timeline_signal(s, signals[i].signal_value, NULL, 0, 0,
+                                refused);
+      else
+         darwin_sync_set(s, NVKMD_DARWIN_SYNC_SIGNALED, NULL, 0, 0);
+   }
+   if (refused != 0)
+      return VK_SUCCESS;
+
    /* Everything this channel was given before now is behind last_seqno. */
    for (uint32_t i = 0; i < signal_count; i++) {
       struct nvkmd_darwin_sync *s = to_darwin_sync(signals[i].sync);
       if (darwin_is_timeline(s))
          darwin_timeline_signal(s, signals[i].signal_value,
                                 ctx->last_seqno ? dev : NULL, ctx->channel,
-                                ctx->last_seqno);
+                                ctx->last_seqno, 0);
       else if (ctx->last_seqno == 0)
          darwin_sync_set(s, NVKMD_DARWIN_SYNC_SIGNALED, NULL, 0, 0);
       else
@@ -2039,15 +2242,16 @@ nvkmd_darwin_exec_ctx_sync(struct nvkmd_ctx *_ctx,
          return vk_error(log_obj, VK_ERROR_DEVICE_LOST);
    }
 
-   /* Check for channel errors, as nvkmd_nouveau's empty exec does. */
+   /* A killed channel's work is done, failed: its syncs carry the failure. */
    const struct TegraGM20BAbiChannel req = { .channel = ctx->channel };
    struct TegraGM20BAbiStatus status = { 0 };
    kern_return_t kr = darwin_call(&dev->conn, TegraGM20BMethodGetStatus,
                                   &req, sizeof(req), &status, sizeof(status));
-   if (kr != KERN_SUCCESS || status.error != 0)
+   if (kr != KERN_SUCCESS)
       return vk_errorf(log_obj, VK_ERROR_DEVICE_LOST,
-                       "channel %u error %u at 0x%" PRIx64, ctx->channel,
-                       status.error, status.fault_va);
+                       "channel %u: GetStatus failed: 0x%x", ctx->channel, kr);
+   if (status.error != 0 && ctx->dead == 0)
+      ctx->dead = status.error;
 
    return VK_SUCCESS;
 }
@@ -2156,7 +2360,7 @@ nvkmd_darwin_bind_ctx_signal(struct nvkmd_ctx *_ctx,
    for (uint32_t i = 0; i < signal_count; i++) {
       struct nvkmd_darwin_sync *s = to_darwin_sync(signals[i].sync);
       if (darwin_is_timeline(s))
-         darwin_timeline_signal(s, signals[i].signal_value, NULL, 0, 0);
+         darwin_timeline_signal(s, signals[i].signal_value, NULL, 0, 0, 0);
       else
          darwin_sync_set(s, NVKMD_DARWIN_SYNC_SIGNALED, NULL, 0, 0);
    }

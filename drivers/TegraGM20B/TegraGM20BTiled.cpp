@@ -5,7 +5,9 @@
 // pitch); pitch otherwise, for good. A surface that becomes block-linear has what it holds (rows the CPU or a pitch writer
 // left there) tiled in place by the copy engine, behind the GPU writers it had, before anyone is told it is tiled. From then
 // on the GPU and the display read its own pages tiled (tegra_gm20b_surface_tiled); a CPU lock sees its texels as rows.
-// The decision is made under the entry's lock, so concurrent askers wait for it and get the same answer.
+// The decision is made under the entry's lock, so concurrent askers wait for it and get the same answer. A move's
+// scratch is cleaned and invalidated before the copy engine fills it: a new one was zero-filled through the CPU's cache,
+// and a dirty line written back between the move's two copies would land over the rows the second one reads.
 #include <IOKit/IOLib.h>
 #include <stdint.h>
 #include <string.h>
@@ -59,15 +61,18 @@ Decision decide(tgm_coh *c, tgm_tiled &t, uint32_t width, uint32_t height, uint3
 	if (!tgm_coh_alone(c))
 		return PitchShared;
 	const tgm_relayout_pages pages = tgm_coh_pages(c);
-	const uint64_t bytes = uint64_t(pages.npages) << 12;
+	const uint64_t bytes = static_cast<uint64_t>(pages.npages) << 12;
 	if (!tgm_layout_tiled(width, height, bpp, &t.layout) || t.layout.bytes > bytes ||
-	    bytesPerRow < width * bpp || uint64_t(bytesPerRow) * height > bytes)
+	    bytesPerRow < width * bpp || static_cast<uint64_t>(bytesPerRow) * height > bytes)
 		return PitchShape;
 	t.bytes_per_row = bytesPerRow;
 	tgm_relayout_pages rows;
-	tgm_scratch *scratch = tgm_scratch_get(uint64_t(bytesPerRow) * height, 0, &rows);
+	tgm_scratch *scratch =
+		tgm_scratch_get(static_cast<uint64_t>(bytesPerRow) * height, 0, &rows);
 	tgm_relayout_writer writers[TGM_RELAYOUT_MAX_WAITS];
 	const uint32_t n = tgm_coh_writers(c, writers, TGM_RELAYOUT_MAX_WAITS);
+	if (scratch)
+		tgm_cpu_clean_pages(rows.pas, rows.npages);
 	const int ret = scratch ? tgm_relayout(&pages, &rows, &t.layout, bytesPerRow,
 					       TGM_RELAYOUT_TILE_IN_PLACE, writers, n)
 				: -12;
@@ -82,11 +87,16 @@ extern "C" int tgm_coherency_layout(struct tgm_coh *c, uint32_t width, uint32_t 
 	if (!c)
 		return 0;
 	tgm_coh_lock(c);
-	tgm_tiled **slot = tgm_coh_tiled(c), *t = __atomic_load_n(slot, __ATOMIC_ACQUIRE);
-	if (!t && (t = IONew(tgm_tiled, 1))) {
+	// NOLINTNEXTLINE(misc-const-correctness): the release store below publishes through it
+	tgm_tiled **slot = tgm_coh_tiled(c);
+	tgm_tiled *t = __atomic_load_n(slot, __ATOMIC_ACQUIRE);
+	const bool fresh = t == nullptr;
+	if (fresh)
+		t = IONew(tgm_tiled, 1);
+	if (fresh && t) {
 		bzero(t, sizeof(*t));
-		const Decision d = decide(c, *t, width, height, bpp, bytes_per_row, writes);
-		t->tiled = d == DecidedTiled;
+		const Decision d = decide(c, *t, width, height, bpp, bytes_per_row, writes != 0);
+		t->tiled = static_cast<int>(d == DecidedTiled);
 		if (t->tiled)
 			__atomic_add_fetch(&gTiledLive, 1, __ATOMIC_ACQ_REL);
 		note(d, tgm_coh_surface_id(c), width, height, bpp);
@@ -100,11 +110,12 @@ extern "C" int tgm_coherency_layout(struct tgm_coh *c, uint32_t width, uint32_t 
 			slot, t,
 			__ATOMIC_RELEASE);  // complete before anyone outside the entry lock reads it
 	}
-	const int layout =
-		!t || !t->tiled ? 0
-		: t->layout.width == width && t->layout.height == height && t->layout.bpp == bpp
-			? 1
-			: -1;
+	int layout = 0;
+	if (t && t->tiled) {
+		const bool same = t->layout.width == width && t->layout.height == height &&
+				  t->layout.bpp == bpp;
+		layout = same ? 1 : -1;
+	}
 	tgm_coh_unlock(c);
 	return layout;
 }
@@ -120,15 +131,18 @@ extern "C" void tgm_tiled_untile(struct tgm_coh *c)
 			tgm_scratch_get(uint64_t(t->bytes_per_row) * t->layout.height, 0, &rows);
 		tgm_relayout_writer writers[TGM_RELAYOUT_MAX_WAITS];
 		const uint32_t n = tgm_coh_writers(c, writers, TGM_RELAYOUT_MAX_WAITS);
+		if (scratch)
+			tgm_cpu_clean_pages(rows.pas, rows.npages);
 		const int ret = scratch ? tgm_relayout(&pages, &rows, &t->layout, t->bytes_per_row,
 						       TGM_RELAYOUT_UNTILE_IN_PLACE, writers, n)
 					: -12;
 		tgm_scratch_put(scratch);
-		if (ret)
+		if (ret) {
 			IOLog("tegra-gm20b: IOSurface %u stays block-linear with no GPU client: "
 			      "its texels were not "
 			      "moved back to rows (%d)\n",
 			      tgm_coh_surface_id(c), ret);
+		}
 #if TGM_STATS
 		__atomic_fetch_sub(&gLive, 1, __ATOMIC_RELAXED);
 		__atomic_fetch_sub(&gLiveBytes, t->layout.bytes, __ATOMIC_RELAXED);
@@ -141,7 +155,7 @@ extern "C" void tgm_tiled_untile(struct tgm_coh *c)
 
 extern "C" int tgm_tiled_any(void)
 {
-	return __atomic_load_n(&gTiledLive, __ATOMIC_ACQUIRE) != 0;
+	return static_cast<int>(__atomic_load_n(&gTiledLive, __ATOMIC_ACQUIRE) != 0);
 }
 
 extern "C" void tgm_tiled_free(struct tgm_tiled *t)

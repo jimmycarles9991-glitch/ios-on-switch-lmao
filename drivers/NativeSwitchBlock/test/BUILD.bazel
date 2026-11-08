@@ -31,6 +31,14 @@ host_test(
 )
 
 host_test(
+    name = "sd_bus_test",
+    srcs = [
+        "sd_bus_test.cpp",
+        "//drivers/NativeSwitchBlock:SwitchSdBus.h",
+    ],
+)
+
+host_test(
     name = "sd_trim_test",
     srcs = [
         "sd_trim_test.cpp",
@@ -127,6 +135,14 @@ host_test(
         "//drivers/NativeSwitchBlock:SwitchAdma.h",
         "//drivers/NativeSwitchBlock:NativeSwitchBlock.cpp",
     ],
+    deps = [":source_checks"],
+)
+
+host_test(
+    name = "sd_bus_source_test",
+    srcs = ["sd_bus_source_test.cpp"],
+    copts = ["-O1"],
+    data = ["//drivers/NativeSwitchBlock:NativeSwitchBlock.cpp"],
     deps = [":source_checks"],
 )
 

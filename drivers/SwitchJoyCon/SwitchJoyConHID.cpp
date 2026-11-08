@@ -145,7 +145,9 @@ const uint8_t kButtonsDescriptor[] = {
 };
 }  // namespace
 
+// NOLINTNEXTLINE(misc-use-internal-linkage): OSDefineMetaClassAndStructors needs the class's external linkage (its kalloc type view)
 class SwitchJoyConDevice : public IOHIDDevice {
+    // NOLINTNEXTLINE(misc-explicit-constructor): IOKit's structors macro declares the metaclass constructor
     OSDeclareDefaultStructors(SwitchJoyConDevice) IOWorkLoop *loop = nullptr;
     IOBufferMemoryDescriptor *input = nullptr;
     IOLock *outputLock = nullptr;  // output, ended, outputContext and session
@@ -175,7 +177,7 @@ public:
         snprintf(serial, sizeof(serial), "%02x:%02x:%02x:%02x:%02x:%02x", mac[0], mac[1], mac[2], mac[3], mac[4],
                  mac[5]);
         outputLock = IOLockAlloc();
-        return outputLock && init();
+        return (outputLock != nullptr) && init();
     }
 
     bool isLeft() const
@@ -220,7 +222,7 @@ public:
         if (type != 1 /* kIOHIDReportTypeOutput */ || !report)
             return kIOReturnUnsupported;
         uint8_t bytes[64];
-        const uint8_t id = (uint8_t)(options & 0xff);
+        const uint8_t id = static_cast<uint8_t>(options & 0xff);
         const size_t length = report->getLength();
         if (!length || length > sizeof(bytes) - 1)
             return kIOReturnBadArgument;
@@ -263,7 +265,7 @@ public:
         const int32_t pid = proc_selfpid();
         IOLockLock(outputLock);
         noteSession(switch_joycon_session_open(&session, reinterpret_cast<uintptr_t>(client), pid,
-                                               !strncmp(name, "backboardd", sizeof(name))),
+                                               strncmp(name, "backboardd", sizeof(name)) == 0),
                     pid);
         IOLockUnlock(outputLock);
         return true;
@@ -285,8 +287,9 @@ public:
             return false;
         // bluetoothd's HID devices carry these (com.apple.MobileBluetooth.InputDevice); HIDServiceSupport is what the
         // property-merger personality would add, set here as well so the device does not depend on its probe order.
-        setProperty("VendorID", (unsigned long long)kNintendo, 32);
-        setProperty("ProductID", (unsigned long long)(left ? kSwitchJoyConLeftPID : kSwitchJoyConRightPID), 32);
+        setProperty("VendorID", static_cast<unsigned long long>(kNintendo), 32);
+        setProperty("ProductID", static_cast<unsigned long long>(left ? kSwitchJoyConLeftPID : kSwitchJoyConRightPID),
+                    32);
         setProperty("Manufacturer", "Nintendo");
         setProperty("SerialNumber", serial);
         setProperty("HIDServiceSupport", true);
@@ -349,7 +352,9 @@ __asm__(".text\n"
 // The rail Joy-Cons' Home and Capture as Consumer Menu and Snapshot (file comment). Overrides exactly NativeHidInput's
 // set, as SwitchHIDDevice does. Created with the first rail Joy-Con and kept for the boot; every call comes from the
 // rail driver's work loop (input, attach and detach all run there), so the state needs no lock.
+// NOLINTNEXTLINE(misc-use-internal-linkage): OSDefineMetaClassAndStructors needs the class's external linkage (its kalloc type view)
 class SwitchJoyConButtons : public IOHIDDevice {
+    // NOLINTNEXTLINE(misc-explicit-constructor): IOKit's structors macro declares the metaclass constructor
     OSDeclareDefaultStructors(SwitchJoyConButtons) IOWorkLoop *loop = nullptr;
     IOBufferMemoryDescriptor *report = nullptr;
     uint8_t held[2] = {};  // per Joy-Con (0 R, 1 L): its button, kHome or kCapture, while pressed
@@ -384,8 +389,8 @@ public:
         if (!loop || !report)
             return false;
         // Matched by this file's IOHIDEventDriver personality; Built-In makes backboardd treat it as the console buttons.
-        setProperty("VendorID", (unsigned long long)kNintendo, 32);
-        setProperty("ProductID", (unsigned long long)kButtonsProduct, 32);
+        setProperty("VendorID", static_cast<unsigned long long>(kNintendo), 32);
+        setProperty("ProductID", static_cast<unsigned long long>(kButtonsProduct), 32);
         setProperty("Manufacturer", "Nintendo");
         setProperty("Built-In", true);
         return IOHIDDevice::start(provider);
@@ -408,7 +413,7 @@ public:
     {
         held[isLeft ? 1 : 0] = pressed;
         const uint8_t any = held[0] | held[1];
-        const uint8_t now = (uint8_t)(((any & kHome) ? kMenu : 0) | ((any & kCapture) ? kSnapshot : 0));
+        const uint8_t now = static_cast<uint8_t>(((any & kHome) ? kMenu : 0u) | ((any & kCapture) ? kSnapshot : 0u));
         if (now == posted)
             return;
         // Home down with the panel off: a wake source (journal, wake guarantee); the Menu press below does the waking.
@@ -428,7 +433,7 @@ OSDefineMetaClassAndStructors(SwitchJoyConButtons, IOHIDDevice)
 
     namespace
 {
-    OSDictionary *dictionary(const char *const *keys, OSObject *const *values, unsigned count)
+    OSDictionary *dictionary(const char *const *keys, const OSObject *const *values, unsigned count)
     {
         OSDictionary *dict = OSDictionary::withCapacity(count);
         for (unsigned i = 0; dict && i < count; ++i) {
@@ -441,36 +446,38 @@ OSDefineMetaClassAndStructors(SwitchJoyConButtons, IOHIDDevice)
     // The two AppleGameControllerPersonality entries for one Nintendo ProductID, appended to `out`.
     bool addPersonalities(OSArray * out, uint32_t productID)
     {
-        OSNumber *vendor = OSNumber::withNumber(kNintendo, 32), *product = OSNumber::withNumber(productID, 32);
-        OSNumber *dummyScore = OSNumber::withNumber(kDummyScore, 32),
-                 *mergerScore = OSNumber::withNumber(kMergerScore, 32);
+        OSNumber *vendor = OSNumber::withNumber(kNintendo, 32);
+        OSNumber *product = OSNumber::withNumber(productID, 32);
+        OSNumber *dummyScore = OSNumber::withNumber(kDummyScore, 32);
+        OSNumber *mergerScore = OSNumber::withNumber(kMergerScore, 32);
         OSString *bundle = OSString::withCString("com.apple.iokit.IOHIDFamily");
-        OSString *dummyClass = OSString::withCString("IOHIDEventDummyService"),
-                 *interface = OSString::withCString("IOHIDInterface");
-        OSString *mergerClass = OSString::withCString("IOHIDProviderPropertyMerger"),
-                 *device = OSString::withCString("IOHIDDevice");
-        OSBoolean *no = kOSBooleanFalse, *yes = kOSBooleanTrue;
+        OSString *dummyClass = OSString::withCString("IOHIDEventDummyService");
+        OSString *interface = OSString::withCString("IOHIDInterface");
+        OSString *mergerClass = OSString::withCString("IOHIDProviderPropertyMerger");
+        OSString *device = OSString::withCString("IOHIDDevice");
+        const OSBoolean *no = kOSBooleanFalse;
+        const OSBoolean *yes = kOSBooleanTrue;
 
         const char *dummyKeys[] = {"CFBundleIdentifier", "IOClass",   "IOProviderClass",  "IOProbeScore",
                                    "VendorID",           "ProductID", "HIDServiceSupport"};
-        OSObject *dummyValues[] = {bundle, dummyClass, interface, dummyScore, vendor, product, no};
+        const OSObject *dummyValues[] = {bundle, dummyClass, interface, dummyScore, vendor, product, no};
         OSDictionary *dummy = dictionary(dummyKeys, dummyValues, 7);
 
         const char *matchKeys[] = {"VendorID", "ProductID"};
-        OSObject *matchValues[] = {vendor, product};
+        const OSObject *matchValues[] = {vendor, product};
         OSDictionary *match = dictionary(matchKeys, matchValues, 2);
         const char *mergeKeys[] = {"HIDServiceSupport"};
-        OSObject *mergeValues[] = {yes};
+        const OSObject *mergeValues[] = {yes};
         OSDictionary *merge = dictionary(mergeKeys, mergeValues, 1);
         const char *mergerKeys[] = {"CFBundleIdentifier", "IOClass",         "IOProviderClass",
                                     "IOProbeScore",       "IOPropertyMatch", "IOProviderMergeProperties"};
-        OSObject *mergerValues[] = {bundle, mergerClass, device, mergerScore, match, merge};
+        const OSObject *mergerValues[] = {bundle, mergerClass, device, mergerScore, match, merge};
         OSDictionary *merger = dictionary(mergerKeys, mergerValues, 6);
 
-        const bool ok = dummy && merger && out->setObject(dummy) && out->setObject(merger);
+        const bool ok = (dummy != nullptr) && (merger != nullptr) && out->setObject(dummy) && out->setObject(merger);
         OSObject *all[] = {vendor,      product, dummyScore, mergerScore, bundle, dummyClass, interface,
                            mergerClass, device,  dummy,      match,       merge,  merger};
-        for (OSObject *object : all) {
+        for (const OSObject *object : all) {
             if (object)
                 object->release();
         }
@@ -482,22 +489,26 @@ OSDefineMetaClassAndStructors(SwitchJoyConButtons, IOHIDDevice)
 // MatchPropertyTable compares VendorID, ProductID and the DeviceUsagePairs against the device.
 static void addButtonsPersonality()
 {
-    OSNumber *page = OSNumber::withNumber(0x0c, 32), *usage = OSNumber::withNumber(0x01, 32);
-    OSNumber *vendor = OSNumber::withNumber(kNintendo, 32), *product = OSNumber::withNumber(kButtonsProduct, 32);
+    OSNumber *page = OSNumber::withNumber(0x0c, 32);
+    OSNumber *usage = OSNumber::withNumber(0x01, 32);
+    OSNumber *vendor = OSNumber::withNumber(kNintendo, 32);
+    OSNumber *product = OSNumber::withNumber(kButtonsProduct, 32);
     OSNumber *score = OSNumber::withNumber(kEventDriverScore, 32);
     OSString *bundle = OSString::withCString("com.apple.iokit.IOHIDFamily");
-    OSString *driverClass = OSString::withCString("IOHIDEventDriver"),
-             *interface = OSString::withCString("IOHIDInterface");
+    OSString *driverClass = OSString::withCString("IOHIDEventDriver");
+    OSString *interface = OSString::withCString("IOHIDInterface");
 
     const char *pairKeys[] = {"DeviceUsagePage", "DeviceUsage"};
-    OSObject *pairValues[] = {page, usage};
+    const OSObject *pairValues[] = {page, usage};
     OSDictionary *pair = dictionary(pairKeys, pairValues, 2);
-    OSArray *pairs = pair ? OSArray::withObjects((const OSObject **)&pair, 1) : nullptr;
+    const OSObject *pairObject = pair;
+    OSArray *pairs = pair ? OSArray::withObjects(&pairObject, 1) : nullptr;
     const char *keys[] = {"CFBundleIdentifier", "IOClass",   "IOProviderClass", "IOProbeScore",
                           "VendorID",           "ProductID", "DeviceUsagePairs"};
-    OSObject *values[] = {bundle, driverClass, interface, score, vendor, product, pairs};
+    const OSObject *values[] = {bundle, driverClass, interface, score, vendor, product, pairs};
     OSDictionary *driver = dictionary(keys, values, 7);
-    OSArray *personalities = driver ? OSArray::withObjects((const OSObject **)&driver, 1) : nullptr;
+    const OSObject *driverObject = driver;
+    OSArray *personalities = driver ? OSArray::withObjects(&driverObject, 1) : nullptr;
     if (!personalities)
         panic("SwitchJoyCon: no memory for the system-buttons personality");
     if (!gIOCatalogue->addDrivers(personalities, true)) {
@@ -505,14 +516,14 @@ static void addButtonsPersonality()
     }
     OSObject *all[] = {page,        usage,     vendor, product, score,  bundle,
                        driverClass, interface, pair,   pairs,   driver, personalities};
-    for (OSObject *object : all)
+    for (const OSObject *object : all)
         object->release();
 }
 
 static void addNintendoPersonalities()
 {
     OSArray *personalities = OSArray::withCapacity(2 * sizeof(kNintendoProducts) / sizeof(kNintendoProducts[0]));
-    for (uint32_t product : kNintendoProducts) {
+    for (const uint32_t product : kNintendoProducts) {
         if (!personalities || !addPersonalities(personalities, product))
             panic("SwitchJoyCon: no memory for the personalities");
     }
@@ -524,7 +535,7 @@ static void addNintendoPersonalities()
 // A one-key matching dictionary for IOCatalogue (which compares only the keys it carries).
 static OSDictionary *catalogueMatch(const char *key, const char *value)
 {
-    OSString *string = OSString::withCString(value);
+    const OSString *string = OSString::withCString(value);
     OSDictionary *dict = string ? OSDictionary::withCapacity(1) : nullptr;
     if (dict && !dict->setObject(key, string))
         OSSafeReleaseNULL(dict);
@@ -541,7 +552,7 @@ static OSDictionary *catalogueMatch(const char *key, const char *value)
 // matching cannot happen with both sets present either (same classes, one default match category: one
 // IOHIDEventDummyService wins per interface; mergers fail their probe after setting absent keys), but one source of
 // truth is simpler to reason about.
-void switch_joycon_hid_select_personalities(void)
+void switch_joycon_hid_select_personalities()
 {
     static bool done;
     if (done)
@@ -549,8 +560,8 @@ void switch_joycon_hid_select_personalities(void)
     done = true;
     OSDictionary *byClass = catalogueMatch("IOClass", "AppleGCHIDEventDummyService");
     SInt32 generation = 0;
-    OSOrderedSet *found = gIOCatalogue->findDrivers(byClass, &generation);
-    const bool present = found && found->getCount();
+    const OSOrderedSet *found = gIOCatalogue->findDrivers(byClass, &generation);
+    const bool present = (found != nullptr) && (found->getCount() != 0u);
     OSSafeReleaseNULL(found);
     OSSafeReleaseNULL(byClass);
     if (!present)
@@ -563,7 +574,7 @@ void switch_joycon_hid_select_personalities(void)
     }
 }
 
-void switch_joycon_hid_prepare(void)
+void switch_joycon_hid_prepare()
 {
     static IOLock *volatile lock;
     static bool ready;
@@ -619,7 +630,7 @@ IOService *switch_joycon_hid_create(bool left, const uint8_t mac[6], SwitchJoyCo
     return device;  // the creator's reference, dropped by switch_joycon_hid_destroy
 }
 
-IOReturn switch_joycon_hid_input(IOService *device, const uint8_t *report, size_t length)
+IOReturn switch_joycon_hid_input(const IOService *device, const uint8_t *report, size_t length)
 {
     auto *joycon = OSDynamicCast(SwitchJoyConDevice, device);
     if (!joycon)
@@ -632,7 +643,7 @@ IOReturn switch_joycon_hid_input(IOService *device, const uint8_t *report, size_
     return result;
 }
 
-void switch_joycon_hid_destroy(IOService *device)
+void switch_joycon_hid_destroy(const IOService *device)
 {
     auto *joycon = OSDynamicCast(SwitchJoyConDevice, device);
     if (!joycon)
@@ -641,5 +652,6 @@ void switch_joycon_hid_destroy(IOService *device)
         gButtons->update(joycon->isLeft(), 0);  // a Joy-Con pulled off with its button down releases it
     joycon->detachOutput();
     joycon->terminate();
+    // NOLINTNEXTLINE(clang-analyzer-osx.cocoa.RetainCount): drops switch_joycon_hid_create's reference (see the header)
     joycon->release();
 }

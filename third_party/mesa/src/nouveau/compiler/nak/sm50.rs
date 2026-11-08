@@ -679,7 +679,9 @@ impl SM50Op for OpFMul {
             match &self.srcs[1].src_ref {
                 SrcRef::Zero | SrcRef::Reg(_) => {
                     e.set_opcode(0x5c68);
-                    e.set_reg_src(20..28, &self.srcs[1]);
+                    // ios-on-switch-lmao: its fneg is the shared bit 48, as
+                    // src0's is: set_reg_src asserted it had none
+                    e.set_reg_src_ref(20..28, &self.srcs[1].src_ref);
                 }
                 SrcRef::Imm32(imm32) => {
                     e.set_opcode(0x3868);
@@ -702,6 +704,112 @@ impl SM50Op for OpFMul {
 
         e.set_reg_src_ref(8..16, &self.srcs[0].src_ref);
         e.set_dst(&self.dst);
+    }
+}
+
+// ios-on-switch-lmao: SM53's (GM20B's) packed half ALU in its register form, the fields as the Switch emulators decode
+// shipped GM20B code: Ryujinx (MIT, Ryujinx.Graphics.Shader/Decoders InstTable.cs and InstDecoders.cs: Hadd2R, Hmul2R,
+// Hfma2R) and Eden's shader_recompiler (maxwell.inc, translate/impl/half_floating_point_*.cpp) agree on every bit used
+// here. Every source is a register: the cbuf forms read their operand as one f32, and the immediate forms carry only the
+// top ten bits of each half.
+fn sm53_half_swizzle(src: &Src) -> u8 {
+    match src.src_swizzle {
+        SrcSwizzle::None => 0, // H1_H0
+        SrcSwizzle::Xx => 2,   // H0_H0
+        SrcSwizzle::Yy => 3,   // H1_H1
+    }
+}
+
+fn sm53_half_fmz(ftz: bool, dnz: bool) -> u8 {
+    if dnz {
+        2 // FMZ
+    } else if ftz {
+        1 // FTZ
+    } else {
+        0
+    }
+}
+
+fn sm53_half_legalize(b: &mut LegalizeBuilder, srcs: &mut [Src], abs: bool) {
+    for src in srcs.iter_mut() {
+        if !abs {
+            b.copy_alu_src_if_fabs(src, RegFile::GPR, SrcType::F16v2);
+        }
+        b.copy_alu_src_if_not_reg(src, RegFile::GPR, SrcType::F16v2);
+    }
+}
+
+impl SM50Op for OpHAdd2 {
+    fn legalize(&mut self, b: &mut LegalizeBuilder) {
+        sm53_half_legalize(b, &mut self.srcs, true);
+    }
+
+    fn encode(&self, e: &mut SM50Encoder<'_>) {
+        assert!(e.sm.sm() >= 53);
+        let [a, b] = &self.srcs;
+        e.set_opcode(0x5d10);
+        e.set_dst(&self.dst);
+        e.set_reg_src_ref(8..16, &a.src_ref);
+        e.set_reg_src_ref(20..28, &b.src_ref);
+        e.set_field(28..30, sm53_half_swizzle(b));
+        e.set_bit(30, b.src_mod.has_fabs());
+        e.set_bit(31, b.src_mod.has_fneg());
+        e.set_bit(32, self.saturate);
+        e.set_bit(39, self.ftz);
+        e.set_bit(43, a.src_mod.has_fneg());
+        e.set_bit(44, a.src_mod.has_fabs());
+        e.set_field(47..49, sm53_half_swizzle(a));
+        e.set_field(49..51, u8::from(self.f32)); // OFMT: F16 0, F32 1
+    }
+}
+
+impl SM50Op for OpHMul2 {
+    fn legalize(&mut self, b: &mut LegalizeBuilder) {
+        sm53_half_legalize(b, &mut self.srcs, true);
+    }
+
+    fn encode(&self, e: &mut SM50Encoder<'_>) {
+        assert!(e.sm.sm() >= 53);
+        let [a, b] = &self.srcs;
+        e.set_opcode(0x5d08);
+        e.set_dst(&self.dst);
+        e.set_reg_src_ref(8..16, &a.src_ref);
+        e.set_reg_src_ref(20..28, &b.src_ref);
+        e.set_field(28..30, sm53_half_swizzle(b));
+        e.set_bit(30, b.src_mod.has_fabs());
+        // one negation of the product
+        e.set_bit(31, a.src_mod.has_fneg() ^ b.src_mod.has_fneg());
+        e.set_bit(32, self.saturate);
+        e.set_field(39..41, sm53_half_fmz(self.ftz, self.dnz));
+        e.set_bit(44, a.src_mod.has_fabs());
+        e.set_field(47..49, sm53_half_swizzle(a));
+        e.set_field(49..51, 0_u8); // OFMT F16
+    }
+}
+
+impl SM50Op for OpHFma2 {
+    fn legalize(&mut self, b: &mut LegalizeBuilder) {
+        sm53_half_legalize(b, &mut self.srcs, false);
+    }
+
+    fn encode(&self, e: &mut SM50Encoder<'_>) {
+        assert!(e.sm.sm() >= 53);
+        let [a, b, c] = &self.srcs;
+        assert!(!a.src_mod.has_fabs() && !b.src_mod.has_fabs() && !c.src_mod.has_fabs());
+        e.set_opcode(0x5d00);
+        e.set_dst(&self.dst);
+        e.set_reg_src_ref(8..16, &a.src_ref);
+        e.set_reg_src_ref(20..28, &b.src_ref);
+        e.set_field(28..30, sm53_half_swizzle(b));
+        e.set_bit(30, c.src_mod.has_fneg());
+        // one negation of the product
+        e.set_bit(31, a.src_mod.has_fneg() ^ b.src_mod.has_fneg());
+        e.set_bit(32, self.saturate);
+        e.set_field(35..37, sm53_half_swizzle(c));
+        e.set_field(37..39, sm53_half_fmz(self.ftz, self.dnz));
+        e.set_reg_src_ref(39..47, &c.src_ref);
+        e.set_field(47..49, sm53_half_swizzle(a));
+        e.set_field(49..51, u8::from(self.f32)); // OFMT: F16 0, F32 1
     }
 }
 
@@ -3292,6 +3400,9 @@ macro_rules! sm50_op_match {
             Op::FMnMx($x) => $y,
             Op::FMul($x) => $y,
             Op::FFma($x) => $y,
+            Op::HAdd2($x) => $y,
+            Op::HMul2($x) => $y,
+            Op::HFma2($x) => $y,
             Op::FSet($x) => $y,
             Op::FSetP($x) => $y,
             Op::FSwzAdd($x) => $y,
@@ -3473,4 +3584,212 @@ fn encode_sm50_shader(sm: &ShaderModel50, s: &Shader<'_>) -> Vec<u32> {
     }
 
     encoded
+}
+
+// ios-on-switch-lmao: SM53's half ops decoded by Ryujinx's Maxwell decoder (MIT,
+// Copyright (c) Ryujinx Team and Contributors; Ryujinx.Graphics.Shader/Decoders:
+// the InstTable.cs opcode patterns and the InstDecoders.cs field layouts of
+// Hadd2R, Hmul2R and Hfma2R, ported field by field), independent of the encoder
+// above: every operand, swizzle, modifier and mode the encoder can write
+// decodes to what it was given.
+#[cfg(test)]
+mod sm53_half_tests {
+    use super::*;
+
+    /// Ryujinx InstTable.cs: (pattern, name), '0'/'1' fixed from bit 63 down.
+    const TABLE: [(&str, &str); 3] = [
+        ("0101110100010", "Hadd2R"),
+        ("0101110100001", "Hmul2R"),
+        ("0101110100000", "Hfma2R"),
+    ];
+
+    fn decode_name(w: u64) -> &'static str {
+        for (pattern, name) in TABLE {
+            let fixed = pattern.chars().enumerate().all(|(i, c)| {
+                let bit = (w >> (63 - i)) & 1;
+                bit == u64::from(c == '1')
+            });
+            if fixed {
+                return name;
+            }
+        }
+        "unknown"
+    }
+
+    fn bits(w: u64, at: u32, n: u32) -> u64 {
+        (w >> at) & ((1 << n) - 1)
+    }
+
+    fn reg(i: u32) -> RegRef {
+        RegRef::new(RegFile::GPR, i, 1)
+    }
+
+    fn src(i: u32, m: SrcMod, s: SrcSwizzle) -> Src {
+        Src {
+            src_ref: SrcRef::Reg(reg(i)),
+            src_mod: m,
+            src_swizzle: s,
+        }
+    }
+
+    fn encode(op: impl Into<Op>) -> u64 {
+        let sm = ShaderModel50::new(53);
+        let labels = FxHashMap::default();
+        let mut ip = 0;
+        let mut sched = [0_u32; 2];
+        let i = Instr::new(op);
+        let w = encode_instr(0, Some(&i), &sm, &labels, &mut ip, &mut sched);
+        u64::from(w[0]) | (u64::from(w[1]) << 32)
+    }
+
+    /// Ryujinx HalfSwizzle: F16 (H1_H0) 0, F32 1, H0H0 2, H1H1 3
+    fn swizzle_code(s: SrcSwizzle) -> u64 {
+        match s {
+            SrcSwizzle::None => 0,
+            SrcSwizzle::Xx => 2,
+            SrcSwizzle::Yy => 3,
+        }
+    }
+
+    const SWIZZLES: [SrcSwizzle; 3] =
+        [SrcSwizzle::None, SrcSwizzle::Xx, SrcSwizzle::Yy];
+    const MODS: [SrcMod; 4] =
+        [SrcMod::None, SrcMod::FNeg, SrcMod::FAbs, SrcMod::FNegAbs];
+
+    #[test]
+    fn hadd2_round_trips() {
+        for (k, (ma, mb)) in MODS
+            .iter()
+            .flat_map(|a| MODS.iter().map(move |b| (*a, *b)))
+            .enumerate()
+        {
+            for sa in SWIZZLES {
+                for sb in SWIZZLES {
+                    let (sat, ftz, f32) = (k % 2 == 0, k % 3 == 0, k % 5 == 0);
+                    let w = encode(OpHAdd2 {
+                        dst: reg(3).into(),
+                        srcs: [src(17, ma, sa), src(254, mb, sb)],
+                        saturate: sat,
+                        ftz,
+                        f32,
+                    });
+                    assert_eq!(decode_name(w), "Hadd2R");
+                    assert_eq!(bits(w, 0, 8), 3); // Dest
+                    assert_eq!(bits(w, 8, 8), 17); // SrcA
+                    assert_eq!(bits(w, 20, 8), 254); // SrcB
+                    assert_eq!(bits(w, 47, 2), swizzle_code(sa)); // ASwizzle
+                    assert_eq!(bits(w, 28, 2), swizzle_code(sb)); // BSwizzle
+                    assert_eq!(bits(w, 49, 2), u64::from(f32)); // OFmt
+                    assert_eq!(bits(w, 43, 1) != 0, ma.has_fneg()); // NegA
+                    assert_eq!(bits(w, 44, 1) != 0, ma.has_fabs()); // AbsA
+                    assert_eq!(bits(w, 31, 1) != 0, mb.has_fneg()); // NegB
+                    assert_eq!(bits(w, 30, 1) != 0, mb.has_fabs()); // AbsB
+                    assert_eq!(bits(w, 32, 1) != 0, sat); // Sat
+                    assert_eq!(bits(w, 39, 1) != 0, ftz); // Ftz
+                    assert_eq!(bits(w, 16, 4), 7); // Pred PT, not inverted
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn hmul2_round_trips() {
+        for (k, (ma, mb)) in MODS
+            .iter()
+            .flat_map(|a| MODS.iter().map(move |b| (*a, *b)))
+            .enumerate()
+        {
+            for sa in SWIZZLES {
+                for sb in SWIZZLES {
+                    let (sat, ftz, dnz) = (k % 2 == 0, k % 3 == 0, k % 4 == 0);
+                    let w = encode(OpHMul2 {
+                        dst: reg(200).into(),
+                        srcs: [src(5, ma, sa), src(9, mb, sb)],
+                        saturate: sat,
+                        ftz,
+                        dnz,
+                    });
+                    assert_eq!(decode_name(w), "Hmul2R");
+                    assert_eq!(bits(w, 0, 8), 200);
+                    assert_eq!(bits(w, 8, 8), 5);
+                    assert_eq!(bits(w, 20, 8), 9);
+                    assert_eq!(bits(w, 47, 2), swizzle_code(sa));
+                    assert_eq!(bits(w, 28, 2), swizzle_code(sb));
+                    assert_eq!(bits(w, 49, 2), 0); // OFmt F16
+                    // NegA: Ryujinx's one negation of the product
+                    assert_eq!(
+                        bits(w, 31, 1) != 0,
+                        ma.has_fneg() ^ mb.has_fneg()
+                    );
+                    assert_eq!(bits(w, 44, 1) != 0, ma.has_fabs()); // AbsA
+                    assert_eq!(bits(w, 30, 1) != 0, mb.has_fabs()); // AbsB
+                    assert_eq!(bits(w, 32, 1) != 0, sat);
+                    // Fmz: Ftz 1, Fmz 2
+                    let fmz = if dnz {
+                        2
+                    } else if ftz {
+                        1
+                    } else {
+                        0
+                    };
+                    assert_eq!(bits(w, 39, 2), fmz);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn hfma2_round_trips() {
+        let negs = [SrcMod::None, SrcMod::FNeg];
+        for (k, ((ma, mb), mc)) in negs
+            .iter()
+            .flat_map(|a| negs.iter().map(move |b| (*a, *b)))
+            .flat_map(|ab| negs.iter().map(move |c| (ab, *c)))
+            .enumerate()
+        {
+            for sa in SWIZZLES {
+                for sb in SWIZZLES {
+                    for sc in SWIZZLES {
+                        let (sat, ftz, dnz, f32) =
+                            (k % 2 == 0, k % 3 == 0, k % 4 == 0, k % 5 == 0);
+                        let w = encode(OpHFma2 {
+                            dst: reg(1).into(),
+                            srcs: [
+                                src(2, ma, sa),
+                                src(130, mb, sb),
+                                src(77, mc, sc),
+                            ],
+                            saturate: sat,
+                            ftz,
+                            dnz,
+                            f32,
+                        });
+                        assert_eq!(decode_name(w), "Hfma2R");
+                        assert_eq!(bits(w, 0, 8), 1);
+                        assert_eq!(bits(w, 8, 8), 2);
+                        assert_eq!(bits(w, 20, 8), 130);
+                        assert_eq!(bits(w, 39, 8), 77); // SrcC
+                        assert_eq!(bits(w, 47, 2), swizzle_code(sa));
+                        assert_eq!(bits(w, 28, 2), swizzle_code(sb));
+                        assert_eq!(bits(w, 35, 2), swizzle_code(sc)); // CSwizzle
+                        assert_eq!(bits(w, 49, 2), u64::from(f32));
+                        assert_eq!(
+                            bits(w, 31, 1) != 0,
+                            ma.has_fneg() ^ mb.has_fneg()
+                        ); // NegA
+                        assert_eq!(bits(w, 30, 1) != 0, mc.has_fneg()); // NegC
+                        assert_eq!(bits(w, 32, 1) != 0, sat);
+                        let fmz = if dnz {
+                            2
+                        } else if ftz {
+                            1
+                        } else {
+                            0
+                        };
+                        assert_eq!(bits(w, 37, 2), fmz);
+                    }
+                }
+            }
+        }
+    }
 }

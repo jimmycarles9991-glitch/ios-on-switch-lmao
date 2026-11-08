@@ -8,13 +8,18 @@
 #include <cmath>
 #import <objc/message.h>
 #include <algorithm>
+#include <chrono>
 #include <mach/mach.h>
 #include "../test/frame.h"
+#include "state_desc.h"
 #include "NativeBridgeMetalFrontend.h"
 #include "bridge/NativeMetalObjects.h"
 #ifdef RAW_FACADE  // the same frames through the raw path's Metal facade (runtime/RawMetal.mm) instead of the frontend + m2v + NVK
+#include <IOKit/IOReturn.h>
 #include "../runtime/RawMetal.h"
+#include "TegraGM20BABI.h"
 #define FRAME_PATH "raw-facade"
+extern "C" void mock_iokit_fail_next(unsigned method, unsigned count, int kr);
 #else
 #define FRAME_PATH "nvk"
 #endif
@@ -27,6 +32,16 @@ static void caCommandBuffer(id<MTLCommandBuffer> cb)
     static const SEL protection = NSSelectorFromString(@"setProtectionOptions:");
     if ([(id)cb respondsToSelector:protection])
         ((void (*)(id, SEL, uint64_t))objc_msgSend)(cb, protection, 0);
+}
+
+// FRAME_STATES_OUT=<file>: the frame's states' corpus lines appended to it (the corpus of a pack of just them)
+static void statesOut(const frame::State &s)
+{
+    if (const char *out = getenv("FRAME_STATES_OUT"))
+        if (FILE *f = fopen(out, "a")) {
+            fprintf(f, "%s\n", s.line.c_str());
+            fclose(f);
+        }
 }
 
 static void missing(const char *cls, const char *sel)
@@ -46,92 +61,22 @@ static uint64_t threadNs()
            1000;
 }
 
-static MTLFunctionConstantValues *constants(const std::vector<std::string> &items)
+// FRAME_RATES=1: the rates lines after every frame (that frame's counters): RATESF (raw facade) and M2VF (m2v). Called once
+// before the first frame with -1, for m2v's baseline (its first call only takes one).
+static void framesRates(int f)
 {
-    MTLFunctionConstantValues *v = [MTLFunctionConstantValues new];
-    for (const std::string &item : items) {
-        size_t a = item.rfind(':'), b = a == std::string::npos ? a : item.rfind(':', a - 1);
-        if (a == std::string::npos || b == std::string::npos)
-            continue;
-        std::string name = item.substr(0, b), type = item.substr(b + 1, a - b - 1), hex = item.substr(a + 1);
-        uint8_t bytes[64] = {};
-        for (size_t i = 0; i + 1 < hex.size() && i / 2 < sizeof bytes; i += 2)
-            bytes[i / 2] = (uint8_t)strtoul(hex.substr(i, 2).c_str(), nullptr, 16);
-        if (name[0] == '#')
-            [v setConstantValue:bytes
-                           type:(MTLDataType)atoi(type.c_str())
-                        atIndex:strtoul(name.c_str() + 1, nullptr, 10)];
-        else
-            [v setConstantValue:bytes type:(MTLDataType)atoi(type.c_str()) withName:@(name.c_str())];
-    }
-    return v;
+    if (!getenv("FRAME_RATES"))
+        return;
+    char rates[4096];
+#ifdef RAW_FACADE
+    if (f >= 0 && raw_metal_rates(rates, sizeof rates))
+        printf("RATESF %d %s\n", f, rates);
+#endif
+    if (native_bridge_metal_rates(rates, sizeof rates) && f >= 0)
+        printf("M2VF %d %s\n", f, rates);
 }
 
-static id<MTLFunction> function(id<MTLLibrary> qc, const std::vector<std::string> &stage)
-{
-    if (stage.empty())
-        return nil;
-    if (stage.size() == 1)
-        return [qc newFunctionWithName:@(stage[0].c_str())];
-    NSError *e = nil;
-    return [qc newFunctionWithName:@(stage[0].c_str())
-                    constantValues:constants(std::vector<std::string>(stage.begin() + 1, stage.end()))
-                             error:&e];
-}
-
-static MTLRenderPipelineDescriptor *descriptor(id<MTLLibrary> qc, const std::string &line)
-{
-    size_t bar1 = line.find(" | v "), bar2 = line.find(" | f "), bar3 = line.find(" | ", bar2 + 5);
-    MTLRenderPipelineDescriptor *d = [MTLRenderPipelineDescriptor new];
-    MTLVertexDescriptor *vd = nil;
-    for (const std::string &h : frame::split(line.substr(0, bar1))) {
-        if (h.rfind("label=", 0) == 0) {
-            if (h != "label=-")
-                d.label = @(h.substr(6).c_str());
-        } else if (h.rfind("samples=", 0) == 0)
-            d.rasterSampleCount = strtoul(h.c_str() + 8, nullptr, 10);
-        else if (h.rfind("topo=", 0) == 0)
-            d.inputPrimitiveTopology = (MTLPrimitiveTopologyClass)strtoul(h.c_str() + 5, nullptr, 10);
-        else if (h.rfind("ds=", 0) == 0) {
-            unsigned depth = 0, stencil = 0;
-            sscanf(h.c_str() + 3, "%u/%u", &depth, &stencil);
-            d.depthAttachmentPixelFormat = MTLPixelFormat(depth);
-            d.stencilAttachmentPixelFormat = MTLPixelFormat(stencil);
-        } else if (h[0] == 'c' && isdigit(h[1])) {
-            unsigned i, x[9] = {};
-            if (sscanf(h.c_str(), "c%u=%u:%u:%u:%u:%u:%u:%u:%u:%u", &i, x, x + 1, x + 2, x + 3, x + 4, x + 5, x + 6,
-                       x + 7, x + 8) != 10)
-                continue;
-            MTLRenderPipelineColorAttachmentDescriptor *c = d.colorAttachments[i];
-            c.pixelFormat = (MTLPixelFormat)x[0];
-            c.writeMask = x[1];
-            c.blendingEnabled = x[2];
-            c.sourceRGBBlendFactor = (MTLBlendFactor)x[3];
-            c.destinationRGBBlendFactor = (MTLBlendFactor)x[4];
-            c.rgbBlendOperation = (MTLBlendOperation)x[5];
-            c.sourceAlphaBlendFactor = (MTLBlendFactor)x[6];
-            c.destinationAlphaBlendFactor = (MTLBlendFactor)x[7];
-            c.alphaBlendOperation = (MTLBlendOperation)x[8];
-        } else if (h[0] == 'a' && isdigit(h[1])) {
-            unsigned i, x[6] = {};
-            if (sscanf(h.c_str(), "a%u=%u:%u:%u:%u:%u:%u", &i, x, x + 1, x + 2, x + 3, x + 4, x + 5) != 7)
-                continue;
-            if (!vd)
-                vd = [MTLVertexDescriptor vertexDescriptor];
-            vd.attributes[i].format = (MTLVertexFormat)x[0];
-            vd.attributes[i].offset = x[1];
-            vd.attributes[i].bufferIndex = x[2];
-            vd.layouts[x[2]].stride = x[3];
-            vd.layouts[x[2]].stepFunction = (MTLVertexStepFunction)x[4];
-            vd.layouts[x[2]].stepRate = x[5];
-        }
-    }
-    d.vertexDescriptor = vd;
-    d.vertexFunction = function(qc, frame::split(line.substr(bar1 + 5, bar2 - bar1 - 5)));
-    d.fragmentFunction =
-        function(qc, frame::split(line.substr(bar2 + 5, (bar3 == std::string::npos ? line.size() : bar3) - bar2 - 5)));
-    return d;
-}
+using state_desc::descriptor;
 
 int main(int argc, char **argv)
 {
@@ -168,6 +113,13 @@ int main(int argc, char **argv)
             fprintf(stderr, "NO DEVICE: %s\n", why.UTF8String);
             return 1;
         }
+        // FRAME_REFUSE_CHANNEL: the kernel refuses the raw device's first channel (its frames go to m2v until it gets one)
+        if (getenv("FRAME_REFUSE_CHANNEL"))
+            mock_iokit_fail_next(TegraGM20BMethodChannelCreate, 1, kIOReturnNoResources);
+        // FRAME_COMPLETE=<dir>|memory: the runtime makes the records of the states the pack lacks (RawComplete.h), kept in <dir>;
+        // FRAME_COMPLETE_SETTLE=<frame>: two seconds before that frame, so the frames after draw the states it made
+        if (const char *complete = getenv("FRAME_COMPLETE"))
+            raw_metal_complete_states(strcmp(complete, "memory") ? complete : nullptr);
 #else
         setenv("NMB_DEVICE_BASE_NSOBJECT", "1", 1);
         id<MTLDevice> dev = native_bridge_metal_open(argv[1], argv[2], 0, missing);
@@ -177,15 +129,27 @@ int main(int argc, char **argv)
         }
 #endif
         NSError *error = nil;
-        id<MTLLibrary> qc = [dev newLibraryWithURL:[NSURL fileURLWithPath:@(argv[3])] error:&error];
+        // FRAME_LIBRARY_BYTES=1: the library made from its bytes, as an app's own (no framework's: no state looked up in the
+        // pack, every one the runtime's to make)
+        id<MTLLibrary> qc = nil;
+        if (getenv("FRAME_LIBRARY_BYTES")) {
+            NSData *bytes = [NSData dataWithContentsOfFile:@(argv[3])];
+            qc = [dev newLibraryWithData:dispatch_data_create(bytes.bytes, bytes.length, nil,
+                                                              DISPATCH_DATA_DESTRUCTOR_DEFAULT)
+                                   error:&error];
+        } else {
+            qc = [dev newLibraryWithURL:[NSURL fileURLWithPath:@(argv[3])] error:&error];
+        }
         std::vector<frame::State> all = frame::states(argv[4]);
         std::vector<id<MTLRenderPipelineState>> uber, blur, extra;
+        double createUs = 0;  // the frame's states' creation (newRenderPipelineStateWithDescriptor), on this thread
         for (auto &s : all) {
             if (s.extra) {
                 if (id<MTLRenderPipelineState> p = [dev newRenderPipelineStateWithDescriptor:descriptor(qc, s.line)
                                                                                        error:&error]) {
                     extra.push_back(p);
                     printf("STATE extra %s\n", s.key.c_str());
+                    statesOut(s);
                 }
                 continue;
             }
@@ -195,8 +159,10 @@ int main(int argc, char **argv)
                 continue;
             if (s.blur && blur.size() >= 4 && !getenv("FRAME_ALL_STATES"))
                 continue;
-            id<MTLRenderPipelineState> p = [dev newRenderPipelineStateWithDescriptor:descriptor(qc, s.line)
-                                                                               error:&error];
+            MTLRenderPipelineDescriptor *made = descriptor(qc, s.line);
+            const auto creating = std::chrono::steady_clock::now();
+            id<MTLRenderPipelineState> p = [dev newRenderPipelineStateWithDescriptor:made error:&error];
+            createUs += std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - creating).count();
             if (!p) {
                 fprintf(stderr, "REFUSED %s\n", s.key.c_str());
 #ifdef RAW_FACADE
@@ -206,7 +172,10 @@ int main(int argc, char **argv)
             }
             (s.uber ? uber : blur).push_back(p);
             printf("STATE %s %s\n", s.uber ? "uber" : "blur", s.key.c_str());
+            statesOut(s);
         }
+        printf("CREATE %zu states, %.0f us a state\n", uber.size() + blur.size(),
+               uber.size() + blur.size() ? createUs / double(uber.size() + blur.size()) : 0.0);
         id<MTLCommandQueue> queue = [dev newCommandQueue];
         id<MTLTexture> tex[frame::TEX_COUNT];
         IOSurfaceRef surfaces[frame::TEX_COUNT] = {};
@@ -319,6 +288,36 @@ int main(int argc, char **argv)
                 d.mipmapLevelCount = 1 + unsigned(std::log2(double(std::max(td.w, td.h))));
                 d.storageMode = MTLStorageModePrivate;
                 tex[t] = [dev newTextureWithDescriptor:d];
+            } else if (td.iosurface && td.format == 542) {
+                // a widget snapshot: luma rows one byte a texel, chroma rows two, each rounded up to 64 bytes (FRAME_PITCH:
+                // 16, so neither is a pitch target's 128)
+                const NSUInteger round = frame::pitchShapes("fb") ? 16 : 64, row0 = (td.w + round - 1) / round * round,
+                                 row1 = (2 * td.w + round - 1) / round * round, off1 = (row0 * td.h + 4095) & ~4095ul;
+                NSDictionary *p0 = @{
+                    (id)kIOSurfacePlaneWidth : @(td.w),
+                    (id)kIOSurfacePlaneHeight : @(td.h),
+                    (id)kIOSurfacePlaneBytesPerElement : @1,
+                    (id)kIOSurfacePlaneBytesPerRow : @(row0),
+                    (id)kIOSurfacePlaneOffset : @0,
+                    (id)kIOSurfacePlaneSize : @(row0 * td.h)
+                };
+                NSDictionary *p1 = @{
+                    (id)kIOSurfacePlaneWidth : @(td.w),
+                    (id)kIOSurfacePlaneHeight : @(td.h),
+                    (id)kIOSurfacePlaneBytesPerElement : @2,
+                    (id)kIOSurfacePlaneBytesPerRow : @(row1),
+                    (id)kIOSurfacePlaneOffset : @(off1),
+                    (id)kIOSurfacePlaneSize : @(row1 * td.h)
+                };
+                surfaces[t] = IOSurfaceCreate((__bridge CFDictionaryRef) @{
+                    (id)kIOSurfaceWidth : @(td.w),
+                    (id)kIOSurfaceHeight : @(td.h),
+                    (id)kIOSurfacePixelFormat : @((uint32_t)'_RB4'),
+                    (id)kIOSurfaceAllocSize : @((off1 + row1 * td.h + 16383) & ~16383ul),
+                    (id)kIOSurfacePlaneInfo : @[ p0, p1 ]
+                });
+                d.storageMode = MTLStorageModeShared;
+                tex[t] = [dev newTextureWithDescriptor:d iosurface:surfaces[t] plane:0];
             } else if (td.iosurface) {
                 NSDictionary *p = @{
                     (id)kIOSurfaceWidth : @(td.w),
@@ -330,7 +329,7 @@ int main(int argc, char **argv)
                 surfaces[t] = IOSurfaceCreate((__bridge CFDictionaryRef)p);
                 d.storageMode = MTLStorageModeShared;
                 tex[t] = [dev newTextureWithDescriptor:d iosurface:surfaces[t] plane:0];
-            } else if (!td.memoryless && getenv("FRAME_INPLACE")) {
+            } else if (!td.memoryless && td.format == 80 && getenv("FRAME_INPLACE")) {
                 // m2v's in-place texture over page-aligned memory: what the raw path's pool textures are to m2v (their twins)
                 const NSUInteger row = (td.w * 4 + 255) & ~NSUInteger(255), page = (NSUInteger)getpagesize();
                 const NSUInteger bytes = (row * td.h + page - 1) / page * page;
@@ -427,6 +426,11 @@ int main(int argc, char **argv)
             [e drawPrimitives:MTLPrimitiveTypeTriangleStrip vertexStart:0 vertexCount:4];
             [e endEncoding];
         };
+        id<MTLBuffer> fills = nil;  // FRAME_FILL (frame.h)
+        if (frame::fillUniforms()) {
+            fills = [dev newBufferWithLength:frame::kFillBytes options:MTLResourceStorageModeShared];
+            memset(fills.contents, 0, frame::kFillBytes);
+        }
         // FRAME_MIP: IMAGE1's level 0 from a buffer of a pattern, then its levels (each frame, before its passes)
         id<MTLBuffer> mipSource = nil;
         if (frame::mipImage()) {
@@ -439,7 +443,11 @@ int main(int argc, char **argv)
         // FRAME_YCBCR_WRITE=k: every k-th frame from the k-th, the 4:2:0 surface written under a write lock (its seed moves:
         // a decoder's next frame), so the raw path converts its image again then and only then (RMTexture _imageSeed)
         const unsigned ycbcrWrite = getenv("FRAME_YCBCR_WRITE") ? unsigned(atoi(getenv("FRAME_YCBCR_WRITE"))) : 0;
+        const int settle = getenv("FRAME_COMPLETE_SETTLE") ? atoi(getenv("FRAME_COMPLETE_SETTLE")) : -1;
+        framesRates(-1);
         for (unsigned f = 0; f < frames; f++) {
+            if (int(f) == settle)
+                usleep(2000000);
             if (ycbcrWrite && f && f % ycbcrWrite == 0 && surfaces[frame::IMAGE2] && getenv("FRAME_YCBCR")) {
                 IOSurfaceLock(surfaces[frame::IMAGE2], 0, nullptr);
                 uint8_t *base = (uint8_t *)IOSurfaceGetBaseAddress(surfaces[frame::IMAGE2]);
@@ -450,6 +458,13 @@ int main(int argc, char **argv)
                 const uint64_t c0 = threadNs();
                 id<MTLCommandBuffer> cb = [queue commandBuffer];
                 caCommandBuffer(cb);
+                if (fills) {
+                    id<MTLBlitCommandEncoder> b = [cb blitCommandEncoder];
+                    [b fillBuffer:fills
+                            range:NSMakeRange(frame::kFillFrom, frame::kFillBytes - frame::kFillFrom)
+                            value:frame::fillValue(f)];
+                    [b endEncoding];
+                }
                 if (mipSource) {
                     const frame::TexDesc td = frame::texture(frame::IMAGE1);
                     id<MTLBlitCommandEncoder> b = [cb blitCommandEncoder];
@@ -507,10 +522,42 @@ int main(int argc, char **argv)
                         rp.depthAttachment.clearDepth = pass.clearDepth;
                         rp.stencilAttachment.clearStencil = pass.clearStencil;
                     }
+                    // FRAME_VISIBILITY: every pass carries a visibility result buffer (GL-on-Metal's passes) and every draw sets the
+                    // Disabled mode, so nothing counts into it
+                    static id<MTLBuffer> visibility =
+                        getenv("FRAME_VISIBILITY") ? [dev newBufferWithLength:4096 options:MTLResourceStorageModeShared]
+                                                   : nil;
+                    rp.visibilityResultBuffer = visibility;
+                    // FRAME_SPI: GL-on-Metal's encoder SPI at Metal's defaults on every pass, and (facade) the first attachment's
+                    // store action left Unknown and set by the encoder; the frontend has neither, so its passes go without
+                    static const bool spi = getenv("FRAME_SPI") != nullptr;
+#ifdef RAW_FACADE
+                    const MTLStoreAction store = rp.colorAttachments[0].storeAction;
+                    if (spi)
+                        rp.colorAttachments[0].storeAction = MTLStoreActionUnknown;
+#endif
                     id<MTLRenderCommandEncoder> e = [cb renderCommandEncoderWithDescriptor:rp];
+                    if (spi) {
+                        id spiEncoder = e;
+                        if ([spiEncoder respondsToSelector:@selector(setAlphaTestReferenceValue:)]) {
+                            ((void (*)(id, SEL, float))objc_msgSend)(spiEncoder, @selector(setAlphaTestReferenceValue:),
+                                                                     0.5f);
+                            ((void (*)(id, SEL, BOOL))objc_msgSend)(spiEncoder, @selector(setViewportTransformEnabled:),
+                                                                    YES);
+                            ((void (*)(id, SEL, NSUInteger))objc_msgSend)(spiEncoder,
+                                                                          @selector(setProvokingVertexMode:), 0);
+                            ((void (*)(id, SEL, BOOL))objc_msgSend)(spiEncoder, @selector(setPrimitiveRestartEnabled:),
+                                                                    YES);
+                        }
+#ifdef RAW_FACADE
+                        [e setColorStoreAction:store atIndex:0];
+#endif
+                    }
                     bool bound[3][31] = {};
                     for (const frame::Draw &d : pass.draws) {
                         [e setRenderPipelineState:d.blur ? blur[d.state] : uber[d.state]];
+                        if (visibility)
+                            [e setVisibilityResultMode:MTLVisibilityResultModeDisabled offset:0];
                         for (const frame::Bytes &b : d.bytes) {
                             frame::fill(bytes, b, f, drawIndex);
                             if (shape.ring) {
@@ -528,7 +575,7 @@ int main(int argc, char **argv)
                                 else
                                     [e setFragmentBufferOffset:ringAt atIndex:b.slot];
                                 // FRAME_RING_ALIGN: the ring's suballocation alignment (Core Animation's pool aligns to the
-                                // device's minConstantBufferAlignmentBytes; 16 or 4 binds uniforms the raw path leaves to m2v)
+                                // device's minConstantBufferAlignmentBytes)
                                 static const NSUInteger align =
                                     getenv("FRAME_RING_ALIGN") ? NSUInteger(atoi(getenv("FRAME_RING_ALIGN"))) : 256;
                                 ringAt = (ringAt + b.length + align - 1) / align * align;
@@ -539,6 +586,10 @@ int main(int argc, char **argv)
                             else
                                 [e setFragmentBytes:bytes.data() length:b.length atIndex:b.slot];
                         }
+                        if (const int slot = fills ? frame::fillSlot(d) : -1; slot >= 0) {
+                            [e setFragmentBuffer:fills offset:0 atIndex:NSUInteger(slot)];
+                            bound[2][slot] = false;
+                        }
                         for (int t = 0; t < 16; t++)
                             if (d.textures[t] >= 0)
                                 [e setFragmentTexture:tex[d.textures[t]] atIndex:t];
@@ -547,6 +598,16 @@ int main(int argc, char **argv)
                                 [e setFragmentSamplerState:smp[d.samplers[s]] atIndex:s];
                         if (getenv("FRAME_SAMPLER_SLOT"))
                             [e setFragmentSamplerState:smp[0] atIndex:atoi(getenv("FRAME_SAMPLER_SLOT"))];
+                        // FRAME_SPI: the first bound sampler again with a bind's LOD clamps (GL-on-Metal's)
+                        if (spi)
+                            for (int s = 0; s < 16; s++)
+                                if (d.samplers[s] >= 0) {
+                                    [e setFragmentSamplerState:smp[d.samplers[s]]
+                                                   lodMinClamp:0.5f
+                                                   lodMaxClamp:3.25f
+                                                       atIndex:s];
+                                    break;
+                                }
                         [e setScissorRect:(MTLScissorRect){d.scissor[0], d.scissor[1], d.scissor[2], d.scissor[3]}];
                         if (d.ds >= 0) {
                             [e setDepthStencilState:dss[d.ds]];
@@ -556,26 +617,26 @@ int main(int argc, char **argv)
                             [e setCullMode:MTLCullMode(d.cull)];
                             [e setFrontFacingWinding:MTLWinding(d.winding)];
                             [e setTriangleFillMode:MTLTriangleFillMode(d.fill)];
+                            [e setDepthBias:d.bias[0] slopeScale:d.bias[1] clamp:d.bias[2]];
                         }
-                        // FRAME_INDEXED: every third main draw indexed as Core Animation's meshes are (CA::OGL::MetalContext::draw:
-                        // 16-bit indices written into its buffer pool at 4-byte alignment, drawIndexedPrimitives on triangles)
-                        if (getenv("FRAME_INDEXED") && !d.blur && drawIndex % 3 == 1) {
-                            static NSUInteger ibAt = 0;
-                            if (ibAt + 64 > 65536)
-                                ibAt = 0;
-                            static const uint16_t quad[6] = {0, 1, 2, 2, 1, 3};
-                            memcpy((uint8_t *)indices.contents + ibAt, quad, sizeof quad);
+                        if (frame::indexedDraw(d.blur, drawIndex)) {
+                            static uint32_t ibAt = 0;
+                            const frame::Indexed x =
+                                frame::indexed(drawIndex, static_cast<uint8_t *>(indices.contents), ibAt);
                             [e drawIndexedPrimitives:MTLPrimitiveTypeTriangle
-                                          indexCount:6
+                                          indexCount:x.count
                                            indexType:MTLIndexTypeUInt16
                                          indexBuffer:indices
-                                   indexBufferOffset:ibAt];
-                            ibAt += 12 + (drawIndex % 5) * 4;  // 4-byte aligned, rarely 256
+                                   indexBufferOffset:x.offset
+                                       instanceCount:x.instances
+                                          baseVertex:x.baseVertex
+                                        baseInstance:x.baseInstance];
                         } else
                             [e drawPrimitives:(MTLPrimitiveType)d.primitive
                                   vertexStart:d.first
                                   vertexCount:d.count
-                                instanceCount:d.instances];
+                                instanceCount:d.instances
+                                 baseInstance:d.baseInstance];
                         drawIndex++;
                     }
                     [e endEncoding];
@@ -596,6 +657,7 @@ int main(int argc, char **argv)
                     fprintf(stderr, "frame %u: %s\n", f, cb.error.localizedDescription.UTF8String);
                     return 1;
                 }
+                framesRates(f);
             }
         }
         const size_t warm = cpu.size() > 20 ? 10 : 0;

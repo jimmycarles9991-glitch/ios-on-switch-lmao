@@ -1,0 +1,111 @@
+diff --git a/hw/arm/Kconfig b/hw/arm/Kconfig
+index 79e2155..a12f99f 100644
+--- a/hw/arm/Kconfig
++++ b/hw/arm/Kconfig
+@@ -645,6 +645,7 @@ config ARMSSE
+ config TEGRA2
+     bool
+     select I2C
++    select SSI
+     select SDHCI
+     select SERIAL_MM
+     select LAN9118
+@@ -654,4 +655,5 @@ config TEGRA2
+     select USB_EHCI_SYSBUS
+     select USB_XHCI_SYSBUS
+     select FTM3BD56
++    select FTM4CD60
+     select FIXEDMEM
+diff --git a/hw/arm/tegra2/meson.build b/hw/arm/tegra2/meson.build
+index 9852ea9..fc71cf1 100644
+--- a/hw/arm/tegra2/meson.build
++++ b/hw/arm/tegra2/meson.build
+@@ -47,6 +47,7 @@ arm_ss.add(files(
+   'apb/pinmuxaux/pinmuxaux.c',
+   'apb/fuse/fuse.c',
+   'apb/i2c/i2c.c',
++  'apb/i2c/rt5639.c',
+   'apb/pmc/pmc.c',
+   'apb/rtc/rtc.c',
+   'apb/uart/uart.c',
+@@ -56,6 +57,7 @@ arm_ss.add(files(
+   'apb/sysctr/sysctr.c',
+   'apb/dvfs/dvfs.c',
+   'apb/spi/spi.c',
++  'apb/spi/icm42607.c',
+   'apb/ape/ape.c',
+   'apb/hda/hda.c',
+ 
+diff --git a/hw/arm/tegra2/tegrax1.c b/hw/arm/tegra2/tegrax1.c
+index 080dc43..be05dee 100644
+--- a/hw/arm/tegra2/tegrax1.c
++++ b/hw/arm/tegra2/tegrax1.c
+@@ -39,6 +39,8 @@
+ #include "hw/loader.h"
+ #include "hw/char/serial-mm.h"
+ #include "hw/sd/sdhci.h"
++#include "hw/ssi/ssi.h"
++#include "hw/irq.h"
+ #include "hw/cpu/a9mpcore.h"
+ #include "sysemu/reset.h"
+ #include "sysemu/sysemu.h"
+@@ -61,6 +63,7 @@
+ #include "ppsb/evp/evp.h"
+ #include "apb/fuse/fuse.h"
+ #include "apb/i2c/i2c.h"
++#include "apb/spi/spi.h"
+ #include "dummyi2c/dummyi2c.h"
+ #include "dummyio/dummyio.h"
+ 
+@@ -1138,12 +1141,41 @@ static void __tegrax1_init(MachineState *machine)
+     tegra_spi_devs[1] = tegra_init_obj_simple(TEGRA_SPI2_BASE, DIRQ(INT_SPI_2), "tegra.spi", true);
+     tegra_spi_devs[2] = tegra_init_obj_simple(TEGRA_SPI3_BASE, DIRQ(INT_SPI_3), "tegra.spi", true);
+     tegra_spi_devs[3] = tegra_init_obj_simple(TEGRA_SPI4_BASE, DIRQ(INT_SPI_4), "tegra.spi", true);
++    /* CAR CLK_SOURCE_SBC1..4: each controller's bus clock. */
++    tegra_spi_set_clock_source(tegra_spi_devs[0], 0x134);
++    tegra_spi_set_clock_source(tegra_spi_devs[1], 0x118);
++    tegra_spi_set_clock_source(tegra_spi_devs[2], 0x11c);
++    tegra_spi_set_clock_source(tegra_spi_devs[3], 0x1b4);
++
++    /* The IMU (ICM-42607-P) on SPI4 CS0; its INT2 is GPIO PX2 (port X = 23). */
++    {
++        SSIBus *ssi = (SSIBus *)qdev_get_child_bus(DEVICE(tegra_spi_devs[3]), "ssi");
++        DeviceState *imu = ssi_create_peripheral(ssi, "icm42607p");
++        qdev_connect_gpio_out_named(DEVICE(tegra_spi_devs[3]), "cs", 0, qdev_get_gpio_in_named(imu, SSI_GPIO_CS, 0));
++        qdev_connect_gpio_out_named(imu, "int2", 0, qdev_get_gpio_in(DEVICE(tegra_gpios_dev), 23 * 8 + 2));
++    }
+ 
+     /* QSPI */
+     tegra_qspi_dev = tegra_init_dummyio(TEGRA_QSPI_BASE, TEGRA_QSPI_SIZE, "tegra.qspi", true);
+ 
+     /* TouchPanel */
+-    tegra_i2c_touch_panel_dev = i2c_slave_create_simple(tegra_i2c_get_bus(tegra_idc3_dev), "ftm3bd56", 0x49);
++    if (tegra_board >= TEGRAX1PLUS_BOARD) {
++        /* The OLED's FTM4CD60; its INT is GPIO PX1 (port X = 23), low while it has events. */
++        tegra_i2c_touch_panel_dev = i2c_slave_create_simple(tegra_i2c_get_bus(tegra_idc3_dev), "ftm4cd60", 0x49);
++        qdev_connect_gpio_out_named(DEVICE(tegra_i2c_touch_panel_dev), "int", 0,
++                                    qdev_get_gpio_in(DEVICE(tegra_gpios_dev), 23 * 8 + 1));
++    } else {
++        tegra_i2c_touch_panel_dev = i2c_slave_create_simple(tegra_i2c_get_bus(tegra_idc3_dev), "ftm3bd56", 0x49);
++    }
++
++    /* Lines the board pulls up while nothing drives them low: the volume buttons PX6/PX7 (released), the temperature
++     * alert PX4 and PK4 (idle), and the headphone jack detect PV6 (1 = no plug). */
++    {
++        static const int pulled_up[] = {23 * 8 + 4, 23 * 8 + 6, 23 * 8 + 7, 10 * 8 + 4, 21 * 8 + 6};
++        for (i = 0; i < ARRAY_SIZE(pulled_up); i++) {
++            qemu_set_irq(qdev_get_gpio_in(DEVICE(tegra_gpios_dev), pulled_up[i]), 1);
++        }
++    }
+ 
+     /* Tmp451 (Temperature Sensor) */
+     tegra_i2c_tmpsensor_dev = i2c_slave_create_simple(tegra_i2c_get_bus(tegra_idc1_dev), "dummyi2c", 0x4C);
+@@ -1168,7 +1200,7 @@ static void __tegrax1_init(MachineState *machine)
+     dummyi2c_set_regs(tegra_i2c_tmpsensor_dev, tmpsensor_regs, sizeof(tmpsensor_regs), sizeof(uint8_t), sizeof(tmpsensor_regs));
+ 
+     /* Alc5639 (Audio Codec) */
+-    tegra_i2c_audio_codec_dev = i2c_slave_create_simple(tegra_i2c_get_bus(tegra_idc1_dev), "dummyi2c", 0x1C);
++    tegra_i2c_audio_codec_dev = i2c_slave_create_simple(tegra_i2c_get_bus(tegra_idc1_dev), "rt5639", 0x1C);
+ 
+     /* Max77620Rtc */
+     tegra_i2c_rtc_dev = i2c_slave_create_simple(tegra_i2c_get_bus(tegra_idc5_dev), "max77x", 0x68);

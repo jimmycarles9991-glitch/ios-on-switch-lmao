@@ -40,7 +40,7 @@ constexpr unsigned kSwitchTouchSlots = 10, kSwitchTouchWidth = 1280, kSwitchTouc
 constexpr unsigned kSwitchTouchReportWidth = SWITCH_PORTRAIT_NATIVE ? kSwitchTouchHeight : kSwitchTouchWidth,
                    kSwitchTouchReportHeight = SWITCH_PORTRAIT_NATIVE ? kSwitchTouchWidth : kSwitchTouchHeight;
 
-enum : uint8_t {
+enum : unsigned {
     kSwitchTouchTip = 1u << 0,
     kSwitchTouchValid = 1u << 1
 };  // bit 2 (Untouch) stays 0

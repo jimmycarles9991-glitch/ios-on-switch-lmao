@@ -37,6 +37,7 @@ py_library(
     name = "native_oled_adt",
     srcs = ["native_oled_adt.py"],
     imports = ["."],
+    deps = [":loader_abi"],
 )
 
 py_library(
@@ -67,6 +68,7 @@ py_binary(
     srcs = ["overlay.py"],
     deps = [
         ":boot_config",
+        "//tools/common:macho",
         "//tools/trustcache",
     ],
 )
@@ -77,8 +79,15 @@ py_binary(
     deps = [
         ":boot_config",
         ":loader_abi",
+        ":native_oled_adt",
         ":native_xnu_layout",
+        ":trust_lib",
     ],
+)
+
+py_library(
+    name = "trust_lib",
+    srcs = ["trust.py"],
 )
 
 py_binary(
@@ -120,9 +129,9 @@ py_binary(
     ],
 )
 
-# Remakes bazel/pinned/overlay/wallpaper-1x/*.plist (the J120 iPadOS 17 and Lake wallpapers at the 'any' screen class)
-# from the OS volume image:
-#   bazel run //tools/package:wallpaper_1x -- <OS volume .dmg> <output directory>
+# Remakes bazel/pinned/overlay/wallpaper-1x/<kind>/*.plist (the kind's own iPad's iPadOS 17 and Lake wallpapers at the
+# 'any' screen class) from the kind's OS volume image or its mounted root:
+#   bazel run //tools/package:wallpaper_1x -- <kind> <OS volume .dmg or root> <output directory>
 py_binary(
     name = "wallpaper_1x",
     srcs = ["wallpaper_1x.py"],
@@ -131,9 +140,32 @@ py_binary(
 py_test(
     name = "native_profile_test",
     srcs = ["native_profile_test.py"],
+    data = [
+        "//ipsw:pins.bzl",
+        "//kernel/switch:include/switch/boot_layout.h",
+        "//kernel/switch:ram/ram.c",
+        "//kernel/xnu-10063.141.1/osfmk:arm64/start.s",
+        "//kernel/xnu-12377.121.6/osfmk:arm64/start.s",
+    ],
     deps = [
         ":kernel_window",
         ":loader_abi",
+    ],
+)
+
+# overlay.py's bundle entries (an .ipa's app staged whole, every Mach-O in it trusted) on a fabricated .ipa.
+py_test(
+    name = "overlay_test",
+    size = "small",
+    srcs = [
+        "overlay.py",
+        "overlay_test.py",
+    ],
+    imports = ["."],
+    deps = [
+        ":boot_config",
+        "//tools/common:macho",
+        "//tools/trustcache",
     ],
 )
 
@@ -144,8 +176,11 @@ py_test(
         "wallpaper_1x_test.py",
     ],
     data = [
-        "//bazel/pinned:overlay/wallpaper-1x/7560.Lake_Flat.plist",
-        "//bazel/pinned:overlay/wallpaper-1x/7570.iPadOS_17_Flat.plist",
+        "//bazel/pinned:overlay/wallpaper-1x/21H461/7560.Lake_Flat.plist",
+        "//bazel/pinned:overlay/wallpaper-1x/21H461/7570.iPadOS_17_Flat.plist",
+        "//bazel/pinned:overlay/wallpaper-1x/24B119/7560.Lake.plist",
+        "//bazel/pinned:overlay/wallpaper-1x/24B119/7570.iPadOS_17.plist",
+        "//overlay:manifest.json",
     ],
     imports = ["."],
 )
@@ -153,6 +188,7 @@ py_test(
 # //boot:snapshot copies a build to ~/Library/Application Support/switch-ios/lkg/<name> (its py_binary lives in boot/).
 exports_files([
     "adt_edit.py",
+    "overlay.py",
     "snapshot.py",
 ])
 

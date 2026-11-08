@@ -1,5 +1,7 @@
 #include "pretranslate.h"
 
+#include "stub_split.h"
+
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -268,6 +270,50 @@ static uint64_t take(struct pt *p, uint32_t n)
     return 0;
 }
 
+/*
+ * Holes for an n-word stub that no single place holds, from the top of one stack: neighbours in the file, so the
+ * stub's conditional branches still reach across them. Each hole but the last gives its last word to `B next`.
+ * Returns how many holes, or 0.
+ */
+static int pieces(const struct pt *p, uint32_t n, bool big, uint64_t *addr, uint64_t *links, int *nlinks)
+{
+    const struct hole *h = big ? p->h5 : p->h3;
+    const size_t avail = big ? p->n5 : p->n3;
+    const uint32_t size = big ? 5 : 3;
+    uint32_t k = 0;
+    int used = 0;
+    *nlinks = 0;
+    while (k < n && (size_t)used < avail) {
+        uint64_t off = h[avail - 1 - (size_t)used++].off;
+        uint32_t room = n - k <= size ? n - k : size - 1;
+        for (uint32_t j = 0; j < room; j++)
+            addr[k + j] = off + 4ull * j;
+        k += room;
+        if (k < n)
+            links[(*nlinks)++] = off + 4ull * room;
+    }
+    return k == n ? used : 0;
+}
+
+/* st[0..n), laid out for `laid`, split over holes; returns where it starts and the words it took, or 0 */
+static uint64_t place_split(struct pt *p, const uint32_t *st, int n, uint64_t laid, uint64_t *words)
+{
+    uint64_t addr[A64X_STUB_MAX], links[A64X_STUB_MAX];
+    struct a64x_placed placed[2 * A64X_STUB_MAX];
+    for (int big = 1; big >= 0; big--) {
+        int nlinks, used = pieces(p, (uint32_t)n, big, addr, links, &nlinks);
+        int np = used ? a64x_stub_split(st, n, laid, addr, links, nlinks, placed) : -1;
+        if (np < 0)
+            continue;
+        for (int i = 0; i < np; i++)
+            wr32(p->out + placed[i].at, placed[i].word);
+        *(big ? &p->n5 : &p->n3) -= (size_t)used;
+        *words = (uint64_t)np;
+        return addr[0];
+    }
+    return 0;
+}
+
 /* a stub for w at a place of its own; shared: ends in RET instead of `b site + 4`. Returns its offset or 0. */
 static uint64_t emit(struct pt *p, uint32_t w, uint64_t site, uint32_t dead, uint32_t vdead, bool shared)
 {
@@ -275,14 +321,18 @@ static uint64_t emit(struct pt *p, uint32_t w, uint64_t site, uint32_t dead, uin
     int n = a64x_stub_v(w, site, site + 8, dead, vdead, st, A64X_STUB_MAX);
     if (n <= 0 || n > A64X_STUB_MAX)
         return 0;
-    uint64_t at = take(p, (uint32_t)n);
-    if (!at || a64x_stub_v(w, site, at, dead, vdead, st, A64X_STUB_MAX) != n)
+    uint64_t at = take(p, (uint32_t)n), words = (uint64_t)n;
+    if (at && a64x_stub_v(w, site, at, dead, vdead, st, A64X_STUB_MAX) != n)
         return 0;
     if (shared)
         st[n - 1] = RET;
-    for (int k = 0; k < n; k++)
-        wr32(p->out + at + 4ull * k, st[k]);
-    p->r->stub_words += (uint64_t)n;
+    if (at) {
+        for (int k = 0; k < n; k++)
+            wr32(p->out + at + 4ull * k, st[k]);
+    } else if (!(at = place_split(p, st, n, site + 8, &words))) {
+        return 0;
+    }
+    p->r->stub_words += words;
     if ((st[0] & 0xFFC003FFu) == 0xD10003FFu)
         p->r->spill_sites++;
     return at;
@@ -436,6 +486,10 @@ int a64x_pretranslate(const struct a64x_macho *m, uint8_t *out, struct a64x_pt_r
     }
     for (uint64_t off = m->exec_fileoff; off + 4 <= m->exec_fileoff + m->exec_filesize; off += 4)
         r->changed += rd32(out + off) != rd32(m->base + off);
+    struct a64x_fips fips;
+    if (a64x_pt_fips(m, m->base, &fips))
+        r->fips_mac = a64x_fips_rewrite(m->base + fips.text_fileoff, out + fips.text_fileoff, fips.text_size,
+                                        out + fips.mac_fileoff);
     wr32(out + 28, A64X_PRETRANSLATED);
     if (a64x_cs_rehash(out, m->size, sig_off, sig_size, r->cdhash_out, r->why, sizeof(r->why))) {
         memcpy(out, m->base, m->size);

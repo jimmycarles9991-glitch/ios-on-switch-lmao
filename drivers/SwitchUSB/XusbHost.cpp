@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: BSD-2-Clause-Patent
 // Tegra X1 XUSB host controller hardware layer; see XusbHost.h.
 #include "XusbHost.h"
+#include "../../kits/SwitchCAR/SwitchPMC.h"
 #include "XudcHardware.h"
 #include "XusbPorts.h"
 #include <IOKit/IOLib.h>
@@ -9,14 +10,11 @@
 #include "XusbLanes.h"
 #include "XusbSuperSpeed.h"
 
-extern "C" vm_offset_t ml_io_map(vm_offset_t phys_addr, vm_size_t size);
-
 namespace xhost {
 namespace {
 // Physical bases: Tegra X1 TRM, hekate bdk/soc/t210.h, the OLED DTB.
-constexpr uint64_t kCarPA = 0x60006000, kPmcPagePA = 0x7000E000, kFusePagePA = 0x7000F000, kMcPA = 0x70019000,
-                   kPadctlPA = 0x7009F000, kFpciPA = 0x70098000, kIpfsPA = 0x70099000;
-constexpr uint32_t kPmcOffset = 0x400;
+constexpr uint64_t kCarPA = 0x60006000, kFusePagePA = 0x7000F000, kMcPA = 0x70019000, kPadctlPA = 0x7009F000,
+                   kFpciPA = 0x70098000, kIpfsPA = 0x70099000;
 
 enum : uint32_t {  // clock and reset controller
     RST_DEV_U_SET = 0x310,
@@ -129,77 +127,47 @@ constexpr size_t kFwHeader = 256, kFwCodeTag = 8, kFwCodeSize = 12, kFwCreated =
 
 inline uint32_t le32(const uint8_t *p)
 {
-    return (uint32_t)p[0] | (uint32_t)p[1] << 8 | (uint32_t)p[2] << 16 | (uint32_t)p[3] << 24;
+    return static_cast<uint32_t>(p[0]) | static_cast<uint32_t>(p[1]) << 8 | static_cast<uint32_t>(p[2]) << 16 |
+           static_cast<uint32_t>(p[3]) << 24;
 }
 
 // The firmware image stays where the falcon reads it (ILOAD_BASE) for as long as the controller runs.
 xudc::DmaBuffer gFirmware;
 }  // namespace
 
-bool Controller::waitBits(volatile uint8_t *b, uint32_t o, uint32_t mask, uint32_t value, uint32_t us)
-{
-    for (uint32_t i = 0; i <= us; ++i) {
-        if ((r(b, o) & mask) == value)
-            return true;
-        IODelay(1);
-    }
-    return false;
-}
-
-uint32_t Controller::pmc(uint32_t o) const
-{
-    return r(pmcPage, kPmcOffset + o);
-}
-
-void Controller::pmcWrite(uint32_t o, uint32_t v)
-{
-    w(pmcPage, kPmcOffset + o, v);
-}
-
 bool Controller::map()
 {
     if (isMapped)
         return true;
-    car = (volatile uint8_t *)ml_io_map(kCarPA, 0x1000);
-    pmcPage = (volatile uint8_t *)ml_io_map(kPmcPagePA, 0x1000);
-    fusePage = (volatile uint8_t *)ml_io_map(kFusePagePA, 0x1000);
-    mc = (volatile uint8_t *)ml_io_map(kMcPA, 0x1000);
-    padctl = (volatile uint8_t *)ml_io_map(kPadctlPA, 0x1000);
-    regs = (volatile uint8_t *)ml_io_map(kXhciPA, kXhciBytes);
-    fpci = (volatile uint8_t *)ml_io_map(kFpciPA, 0x1000);
-    ipfs = (volatile uint8_t *)ml_io_map(kIpfsPA, 0x1000);
-    isMapped = car && pmcPage && fusePage && mc && padctl && regs && fpci && ipfs;
+    car = switch_mmio_map(kCarPA, 0x1000);
+    fusePage = switch_mmio_map(kFusePagePA, 0x1000);
+    mc = switch_mmio_map(kMcPA, 0x1000);
+    padctl = switch_mmio_map(kPadctlPA, 0x1000);
+    regs = switch_mmio_map(kXhciPA, kXhciBytes);
+    fpci = switch_mmio_map(kFpciPA, 0x1000);
+    ipfs = switch_mmio_map(kIpfsPA, 0x1000);
+    isMapped = (car != nullptr) && (fusePage != nullptr) && (mc != nullptr) && (padctl != nullptr) &&
+               (regs != nullptr) && (fpci != nullptr) && (ipfs != nullptr);
     return isMapped;
 }
 
 // The XUSB top and pad controller clock on and resets released (shared with the XUDC and PCIe: never asserted).
 void Controller::padctlUp()
 {
-    w(car, CLK_ENB_W_SET, W_XUSB);
-    w(car, RST_DEV_W_CLR, W_XUSB | W_XUSB_PADCTL);
+    switch_mmio_write32(car, CLK_ENB_W_SET, W_XUSB);
+    switch_mmio_write32(car, RST_DEV_W_CLR, W_XUSB | W_XUSB_PADCTL);
     IODelay(2);
 }
 
-// Linux tegra_powergate_power_up order (as XudcHardware::powerUp): reset asserted, partition on, module clock on,
-// clamps removed. The caller releases the reset. A partition already on is left as it is.
-bool Controller::powerUp(uint32_t partition, uint32_t clockSet, uint32_t resetSet, uint32_t bit)
+// Linux tegra_powergate_power_up order, the reset left asserted for the caller to release. A partition already on is
+// left as it is.
+bool Controller::powerUp(unsigned partition, unsigned id)
 {
-    if (pmc(PWRGATE_STATUS) & (1u << partition)) {
+    if (switch_pmc_partition_is_on(partition)) {
         partitionsFound |= 1u << partition;
         return true;
     }
-    w(car, resetSet, bit);
-    if (!waitBits(pmcPage, kPmcOffset + PWRGATE_TOGGLE, TOGGLE_START, 0, 5000))
-        return false;
-    pmcWrite(PWRGATE_TOGGLE, partition | TOGGLE_START);
-    if (!waitBits(pmcPage, kPmcOffset + PWRGATE_STATUS, 1u << partition, 1u << partition, 5000))
-        return false;
-    IODelay(10);
-    w(car, clockSet, bit);
-    IODelay(10);
-    pmcWrite(REMOVE_CLAMPING, 1u << partition);
-    IODelay(10);
-    return true;
+    return switch_pmc_power_up_in_reset(partition, id, id);
 }
 
 // tegra_xusb_probe order: the USB2 pad (shared with the XUDC; skipped when the XUDC already brought it up, since
@@ -209,51 +177,58 @@ bool Controller::powerUp(uint32_t partition, uint32_t clockSet, uint32_t resetSe
 // released, never asserted.
 bool Controller::powerOn(char *why, size_t whySize)
 {
-    const uint32_t asid = r(mc, TEGRA_SMMU_XUSB_HOST_ASID);
+    const uint32_t asid = switch_mmio_read32(mc, TEGRA_SMMU_XUSB_HOST_ASID);
     if (!xusb_host_asid_usable(asid, TEGRA_SMMU_ASID_XUSB_HOST)) {
         snprintf(why, whySize, "XUSB_HOST is translated by another SMMU ASID (MC %#x = %#x)", TEGRA_SMMU_XUSB_HOST_ASID,
                  asid);
         return false;
     }
     padctlUp();
-    rmw(padctl, USB2_PAD_MUX, 3u << 18 | 3u, 1u << 18 | 1u);  // bias pad and OTG pad 0 to XUSB
-    if ((r(padctl, OTG_PAD0_CTL_0) & (OTG_PAD_PD | OTG_PAD_PD_ZI)) && !xudc::usb2PadInit(car, fusePage, padctl)) {
+    switch_mmio_rmw32(padctl, USB2_PAD_MUX, 3u << 18 | 3u, 1u << 18 | 1u);  // bias pad and OTG pad 0 to XUSB
+    if ((switch_mmio_read32(padctl, OTG_PAD0_CTL_0) & (OTG_PAD_PD | OTG_PAD_PD_ZI)) &&
+        !xudc::usb2PadInit(car, fusePage, padctl)) {
         snprintf(why, whySize, "PLLU did not lock");
         return false;
     }
-    rmw(padctl, SS_PORT_MAP, 0xfu, 0);                   // SS port 0 paired with USB2 port 0 (as the XUDC)
-    rmw(padctl, XUSB_CHRG_OTGPAD0_CTL1, 0, VREG_FIX18);  // T210B01: fixed 1.8 V regulator on the USB2 pads
-    pmcWrite(USB_AO, pmc(USB_AO) & 0xfffffff3u);         // ID and VBUS wake detectors powered (as the XUDC)
+    switch_mmio_rmw32(padctl, SS_PORT_MAP, 0xfu, 0);  // SS port 0 paired with USB2 port 0 (as the XUDC)
+    switch_mmio_rmw32(padctl, XUSB_CHRG_OTGPAD0_CTL1, 0,
+                      VREG_FIX18);  // T210B01: fixed 1.8 V regulator on the USB2 pads
+    switch_pmc_write(USB_AO,
+                     switch_pmc_read(USB_AO) & 0xfffffff3u);  // ID and VBUS wake detectors powered (as the XUDC)
 
     // Host core 102 MHz and falcon 204 MHz from PLLP, FS 48 MHz from PLLU FO, SS 120 MHz from the HSIC 480 MHz
     // branch: the L4T device tree's assigned rates, sources as XudcHardware.
-    w(car, CLK_SOURCE_XUSB_CORE_HOST, (r(car, CLK_SOURCE_XUSB_CORE_HOST) & 0x1fffff00u) | 1u << 29 | 6);
-    w(car, CLK_SOURCE_XUSB_FALCON, (r(car, CLK_SOURCE_XUSB_FALCON) & 0x1fffff00u) | 1u << 29 | 2);
-    w(car, CLK_SOURCE_XUSB_FS, (r(car, CLK_SOURCE_XUSB_FS) & 0x1fffffffu) | 2u << 29);
-    w(car, CLK_SOURCE_XUSB_SS, (r(car, CLK_SOURCE_XUSB_SS) & 0x1fffff00u) | 3u << 29 | 6);
+    switch_mmio_write32(car, CLK_SOURCE_XUSB_CORE_HOST,
+                        (switch_mmio_read32(car, CLK_SOURCE_XUSB_CORE_HOST) & 0x1fffff00u) | 1u << 29 | 6);
+    switch_mmio_write32(car, CLK_SOURCE_XUSB_FALCON,
+                        (switch_mmio_read32(car, CLK_SOURCE_XUSB_FALCON) & 0x1fffff00u) | 1u << 29 | 2);
+    switch_mmio_write32(car, CLK_SOURCE_XUSB_FS,
+                        (switch_mmio_read32(car, CLK_SOURCE_XUSB_FS) & 0x1fffffffu) | 2u << 29);
+    switch_mmio_write32(car, CLK_SOURCE_XUSB_SS,
+                        (switch_mmio_read32(car, CLK_SOURCE_XUSB_SS) & 0x1fffff00u) | 3u << 29 | 6);
     IODelay(2);
-    if (!powerUp(PART_XUSBA, CLK_ENB_W_SET, RST_DEV_W_SET, W_XUSB_SS) ||
-        !powerUp(PART_XUSBC, CLK_ENB_U_SET, RST_DEV_U_SET, U_XUSB_HOST)) {
-        snprintf(why, whySize, "XUSB partitions did not power up (PMC PWRGATE_STATUS %#x)", pmc(PWRGATE_STATUS));
+    if (!powerUp(PART_XUSBA, xudc::kClockXusbSs) || !powerUp(PART_XUSBC, xudc::kClockXusbHost)) {
+        snprintf(why, whySize, "XUSB partitions did not power up (PMC PWRGATE_STATUS %#x)",
+                 switch_pmc_read(PWRGATE_STATUS));
         return false;
     }
-    w(car, CLK_ENB_W_SET, W_XUSB_SS);
-    w(car, CLK_ENB_U_SET, U_XUSB_HOST);
-    w(car, RST_DEV_W_CLR, W_XUSB_SS);
-    w(car, RST_DEV_U_CLR, U_XUSB_HOST);
+    switch_mmio_write32(car, CLK_ENB_W_SET, W_XUSB_SS);
+    switch_mmio_write32(car, CLK_ENB_U_SET, U_XUSB_HOST);
+    switch_mmio_write32(car, RST_DEV_W_CLR, W_XUSB_SS);
+    switch_mmio_write32(car, RST_DEV_U_CLR, U_XUSB_HOST);
     IODelay(2);
 
-    rmw(ipfs, IPFS_CONFIGURATION, 0, IPFS_EN_FPCI);
+    switch_mmio_rmw32(ipfs, IPFS_CONFIGURATION, 0, IPFS_EN_FPCI);
     IODelay(10);
-    rmw(fpci, XUSB_CFG_4, CFG_4_BASE_MASK, (uint32_t)kXhciPA & CFG_4_BASE_MASK);
+    switch_mmio_rmw32(fpci, XUSB_CFG_4, CFG_4_BASE_MASK, static_cast<uint32_t>(kXhciPA) & CFG_4_BASE_MASK);
     IODelay(100);
-    rmw(fpci, XUSB_CFG_1, 0, CFG_1_ENABLES);
-    rmw(ipfs, IPFS_INTR_MASK, 0, IPFS_IP_INT_MASK);
-    w(ipfs, IPFS_CLKGATE_HYSTERESIS, 0x80);
+    switch_mmio_rmw32(fpci, XUSB_CFG_1, 0, CFG_1_ENABLES);
+    switch_mmio_rmw32(ipfs, IPFS_INTR_MASK, 0, IPFS_IP_INT_MASK);
+    switch_mmio_write32(ipfs, IPFS_CLKGATE_HYSTERESIS, 0x80);
 
-    rmw(fpci, XUSB_CFG_ARU_C11PAGESEL, 0, HSP0);
-    rmw(fpci, XUSB_CFG_HSPX_CORE_CTRL, HSIC_PLLCLK_VLD, 0);
-    rmw(fpci, XUSB_CFG_ARU_C11PAGESEL, HSP0, 0);
+    switch_mmio_rmw32(fpci, XUSB_CFG_ARU_C11PAGESEL, 0, HSP0);
+    switch_mmio_rmw32(fpci, XUSB_CFG_HSPX_CORE_CTRL, HSIC_PLLCLK_VLD, 0);
+    switch_mmio_rmw32(fpci, XUSB_CFG_ARU_C11PAGESEL, HSP0, 0);
     isPowered = true;
     return true;
 }
@@ -261,14 +236,14 @@ bool Controller::powerOn(char *why, size_t whySize)
 // The CSB window: page select in C11_CSBRANGE, 512-byte page at CSB_BASE_ADDR (xhci-tegra.c csb_readl).
 uint32_t Controller::csbRead(uint32_t offset)
 {
-    w(fpci, XUSB_CFG_ARU_C11_CSBRANGE, (offset >> 9) & 0x7fffff);
-    return r(fpci, XUSB_CFG_CSB_BASE_ADDR + (offset & 0x1ff));
+    switch_mmio_write32(fpci, XUSB_CFG_ARU_C11_CSBRANGE, (offset >> 9) & 0x7fffff);
+    return switch_mmio_read32(fpci, XUSB_CFG_CSB_BASE_ADDR + (offset & 0x1ff));
 }
 
 void Controller::csbWrite(uint32_t offset, uint32_t value)
 {
-    w(fpci, XUSB_CFG_ARU_C11_CSBRANGE, (offset >> 9) & 0x7fffff);
-    w(fpci, XUSB_CFG_CSB_BASE_ADDR + (offset & 0x1ff), value);
+    switch_mmio_write32(fpci, XUSB_CFG_ARU_C11_CSBRANGE, (offset >> 9) & 0x7fffff);
+    switch_mmio_write32(fpci, XUSB_CFG_CSB_BASE_ADDR + (offset & 0x1ff), value);
 }
 
 // tegra_xhci_load_firmware: the falcon's boot code is DMAed from system memory into L2IMEM, the falcon starts at
@@ -278,7 +253,7 @@ bool Controller::loadFirmware(const uint8_t *image, size_t size, char *why, size
 {
     if (csbRead(CSB_MP_ILOAD_BASE_LO) != 0)
         return true;
-    uint32_t length = size >= kFwHeader ? le32(image + kFwLength) : 0;
+    const uint32_t length = size >= kFwHeader ? le32(image + kFwLength) : 0;
     if (length < kFwHeader || length > size) {
         snprintf(why, whySize, "XUSB firmware header says %u bytes, the image has %zu", length, size);
         return false;
@@ -289,13 +264,15 @@ bool Controller::loadFirmware(const uint8_t *image, size_t size, char *why, size
     }
     memcpy(gFirmware.va, image, length);
     gFirmware.va[kFwHsicPorts] = 0;  // header->num_hsic_port: no HSIC on this board
-    xudc::cacheFlush(gFirmware.va, length);
-    uint32_t codeTag = le32(image + kFwCodeTag), codeSize = le32(image + kFwCodeSize);
-    uint32_t tagBlocks = (codeTag + IMEM_BLOCK - 1) / IMEM_BLOCK, sizeBlocks = (codeSize + IMEM_BLOCK - 1) / IMEM_BLOCK;
-    uint64_t base = (uint64_t)gFirmware.pa + kFwHeader;
+    switch_dcache_clean_invalidate(gFirmware.va, length);
+    const uint32_t codeTag = le32(image + kFwCodeTag);
+    const uint32_t codeSize = le32(image + kFwCodeSize);
+    const uint32_t tagBlocks = (codeTag + IMEM_BLOCK - 1) / IMEM_BLOCK;
+    const uint32_t sizeBlocks = (codeSize + IMEM_BLOCK - 1) / IMEM_BLOCK;
+    const uint64_t base = static_cast<uint64_t>(gFirmware.pa) + kFwHeader;
     csbWrite(CSB_MP_ILOAD_ATTR, length);
-    csbWrite(CSB_MP_ILOAD_BASE_HI, (uint32_t)(base >> 32));
-    csbWrite(CSB_MP_ILOAD_BASE_LO, (uint32_t)base);
+    csbWrite(CSB_MP_ILOAD_BASE_HI, static_cast<uint32_t>(base >> 32));
+    csbWrite(CSB_MP_ILOAD_BASE_LO, static_cast<uint32_t>(base));
     csbWrite(CSB_MP_APMAP, APMAP_BOOTPATH);
     csbWrite(CSB_MP_L2IMEMOP_TRIG, L2IMEMOP_INVALIDATE_ALL);
     csbWrite(CSB_MP_L2IMEMOP_SIZE, (tagBlocks & 0x3ff) << 8 | (sizeBlocks & 0xff) << 24);
@@ -305,7 +282,7 @@ bool Controller::loadFirmware(const uint8_t *image, size_t size, char *why, size
     csbWrite(FALC_DMACTL, 0);
     bool loaded = false;
     for (int i = 0; i < 200 && !loaded; ++i) {  // Linux: 10 ms in 50 us steps
-        loaded = csbRead(CSB_MP_L2IMEMOP_RESULT) & L2IMEMOP_RESULT_VLD;
+        loaded = ((csbRead(CSB_MP_L2IMEMOP_RESULT) & L2IMEMOP_RESULT_VLD) != 0u);
         if (!loaded)
             IODelay(50);
     }
@@ -331,23 +308,24 @@ bool Controller::loadFirmware(const uint8_t *image, size_t size, char *why, size
 void Controller::setHostRole(bool host)
 {
     padctlUp();
-    rmw(padctl, XUSB_USB2_PORT_CAP, XUSB_PORT0_CAP_MASK, XUSB_PORT0_CAP_OTG);
-    const uint32_t v = r(padctl, XUSB_USB2_VBUS_ID);
+    switch_mmio_rmw32(padctl, XUSB_USB2_PORT_CAP, XUSB_PORT0_CAP_MASK, XUSB_PORT0_CAP_OTG);
+    const uint32_t v = switch_mmio_read32(padctl, XUSB_USB2_VBUS_ID);
     if (!host) {
-        w(padctl, XUSB_USB2_VBUS_ID, xusb_vbus_id_device(v));
+        switch_mmio_write32(padctl, XUSB_USB2_VBUS_ID, xusb_vbus_id_device(v));
         return;
     }
     if (v & XUSB_VBUS_ID_VBUS_ON) {  // tegra210_xusb_padctl_id_override: VBUS override off, 1-2 ms, then ID
-        w(padctl, XUSB_USB2_VBUS_ID, xusb_vbus_id_drop_vbus(v));
+        switch_mmio_write32(padctl, XUSB_USB2_VBUS_ID, xusb_vbus_id_drop_vbus(v));
         IODelay(1500);
     }
-    w(padctl, XUSB_USB2_VBUS_ID, xusb_vbus_id_host(r(padctl, XUSB_USB2_VBUS_ID)));
-    const uint32_t ctl0 = r(padctl, XUSB_CHRG_OTGPAD0_CTL0), ctl1 = r(padctl, XUSB_CHRG_OTGPAD0_CTL1);
-    const uint32_t ocMap = r(padctl, XUSB_USB2_OC_MAP);
+    switch_mmio_write32(padctl, XUSB_USB2_VBUS_ID, xusb_vbus_id_host(switch_mmio_read32(padctl, XUSB_USB2_VBUS_ID)));
+    const uint32_t ctl0 = switch_mmio_read32(padctl, XUSB_CHRG_OTGPAD0_CTL0);
+    const uint32_t ctl1 = switch_mmio_read32(padctl, XUSB_CHRG_OTGPAD0_CTL1);
+    const uint32_t ocMap = switch_mmio_read32(padctl, XUSB_USB2_OC_MAP);
     if (ctl0 != xusb_chrg_ctl0_host(ctl0) || ctl1 != xusb_chrg_ctl1_host(ctl1) || ocMap != xusb_oc_map_host(ocMap)) {
-        w(padctl, XUSB_CHRG_OTGPAD0_CTL0, xusb_chrg_ctl0_host(ctl0));
-        w(padctl, XUSB_CHRG_OTGPAD0_CTL1, xusb_chrg_ctl1_host(ctl1));
-        w(padctl, XUSB_USB2_OC_MAP, xusb_oc_map_host(ocMap));
+        switch_mmio_write32(padctl, XUSB_CHRG_OTGPAD0_CTL0, xusb_chrg_ctl0_host(ctl0));
+        switch_mmio_write32(padctl, XUSB_CHRG_OTGPAD0_CTL1, xusb_chrg_ctl1_host(ctl1));
+        switch_mmio_write32(padctl, XUSB_USB2_OC_MAP, xusb_oc_map_host(ocMap));
         IOLog("SwitchUSB: host role: pad 0 had charger-detect or over-current settings left (CHRG_OTGPAD0 %#x/%#x, "
               "USB2_OC_MAP %#x), now %#x/%#x, %#x\n",
               ctl0, ctl1, ocMap, xusb_chrg_ctl0_host(ctl0), xusb_chrg_ctl1_host(ctl1), xusb_oc_map_host(ocMap));
@@ -355,9 +333,11 @@ void Controller::setHostRole(bool host)
 }
 
 namespace {
+// NOLINTNEXTLINE(misc-const-correctness): xhci_find_ports's reader signature
 uint32_t readCapability(void *context, uint32_t offset)
 {
-    return *reinterpret_cast<volatile uint32_t *>(static_cast<volatile uint8_t *>(context) + offset);
+    volatile uint8_t *const regs = *static_cast<volatile uint8_t *const *>(context);
+    return *reinterpret_cast<volatile uint32_t *>(regs + offset);
 }
 }  // namespace
 
@@ -366,7 +346,7 @@ unsigned Controller::otgPort()
     if (!isPowered)
         return 0;
     if (!usb2First) {
-        const xhci_port_range usb2 = xhci_find_ports(&readCapability, (void *)regs, (uint32_t)kXhciBytes, 2);
+        const xhci_port_range usb2 = xhci_find_ports(&readCapability, &regs, static_cast<uint32_t>(kXhciBytes), 2);
         usb2First = usb2.first;
         usb2Count = usb2.count;
     }
@@ -378,7 +358,7 @@ unsigned Controller::ssPort()
     if (!isPowered)
         return 0;
     if (!usb3Count) {
-        const xhci_port_range usb3 = xhci_find_ports(&readCapability, (void *)regs, (uint32_t)kXhciBytes, 3);
+        const xhci_port_range usb3 = xhci_find_ports(&readCapability, &regs, static_cast<uint32_t>(kXhciBytes), 3);
         usb3First = usb3.first;
         usb3Count = usb3.count;
     }
@@ -394,7 +374,7 @@ bool Controller::setPortPower(unsigned port, bool on, uint32_t trace[2])
 {
     const uint32_t at = xhci_portsc_offset(capLength(), port);
     trace[0] = xhci(at);
-    w(regs, at, xhci_portsc_power(trace[0], on));
+    switch_mmio_write32(regs, at, xhci_portsc_power(trace[0], on));
     bool followed = false;
     for (int i = 0; i < 100 && !followed; ++i) {
         followed = ((xhci(at) & XHCI_PORTSC_PP) != 0) == on;
@@ -407,7 +387,8 @@ bool Controller::setPortPower(unsigned port, bool on, uint32_t trace[2])
 
 bool Controller::cyclePortPower(unsigned port, uint32_t trace[3])
 {
-    uint32_t offTrace[2], onTrace[2];
+    uint32_t offTrace[2];
+    uint32_t onTrace[2];
     const bool off = setPortPower(port, false, offTrace);
     const bool on = setPortPower(port, true, onTrace);
     trace[0] = offTrace[0];
@@ -423,15 +404,18 @@ void Controller::describePads(char *buffer, size_t size)
         return;
     }
     padctlUp();
-    const uint32_t vbusId = r(padctl, XUSB_USB2_VBUS_ID);
+    const uint32_t vbusId = switch_mmio_read32(padctl, XUSB_USB2_VBUS_ID);
     snprintf(buffer, size,
              "PADCTL PORT_CAP %#x VBUS_ID %#x (ID %s, VBUS override %s) PAD_MUX %#x OTG_PAD0 %#x/%#x CHRG %#x/%#x "
              "OC_MAP %#x VBUS_OC_MAP %#x OC_DET %#x ELPG %#x/%#x SS_PORT_MAP %#x BIAS %#x",
-             r(padctl, XUSB_USB2_PORT_CAP), vbusId, xusb_id_name(vbusId),
-             (vbusId & XUSB_VBUS_ID_VBUS_ON) ? "on" : "off", r(padctl, USB2_PAD_MUX), r(padctl, OTG_PAD0_CTL_0),
-             r(padctl, OTG_PAD0_CTL_1), r(padctl, XUSB_CHRG_OTGPAD0_CTL0), r(padctl, XUSB_CHRG_OTGPAD0_CTL1),
-             r(padctl, XUSB_USB2_OC_MAP), r(padctl, XUSB_VBUS_OC_MAP), r(padctl, XUSB_OC_DET),
-             r(padctl, ELPG_PROGRAM_0), r(padctl, ELPG_PROGRAM_1), r(padctl, SS_PORT_MAP), r(padctl, BIAS_PAD_CTL_0));
+             switch_mmio_read32(padctl, XUSB_USB2_PORT_CAP), vbusId, xusb_id_name(vbusId),
+             (vbusId & XUSB_VBUS_ID_VBUS_ON) ? "on" : "off", switch_mmio_read32(padctl, USB2_PAD_MUX),
+             switch_mmio_read32(padctl, OTG_PAD0_CTL_0), switch_mmio_read32(padctl, OTG_PAD0_CTL_1),
+             switch_mmio_read32(padctl, XUSB_CHRG_OTGPAD0_CTL0), switch_mmio_read32(padctl, XUSB_CHRG_OTGPAD0_CTL1),
+             switch_mmio_read32(padctl, XUSB_USB2_OC_MAP), switch_mmio_read32(padctl, XUSB_VBUS_OC_MAP),
+             switch_mmio_read32(padctl, XUSB_OC_DET), switch_mmio_read32(padctl, ELPG_PROGRAM_0),
+             switch_mmio_read32(padctl, ELPG_PROGRAM_1), switch_mmio_read32(padctl, SS_PORT_MAP),
+             switch_mmio_read32(padctl, BIAS_PAD_CTL_0));
 }
 
 void Controller::describePorts(char *buffer, size_t size)
@@ -441,26 +425,29 @@ void Controller::describePorts(char *buffer, size_t size)
         return;
     }
     const uint32_t op = capLength();
-    const unsigned ports = xhci(4) >> 24, pad = otgPort(), ss = ssPort();
-    const uint32_t padPortsc = pad ? portsc(pad) : 0, ssPortsc = ss ? portsc(ss) : 0;
+    const unsigned ports = xhci(4) >> 24;
+    const unsigned pad = otgPort();
+    const unsigned ss = ssPort();
+    const uint32_t padPortsc = pad ? portsc(pad) : 0;
+    const uint32_t ssPortsc = ss ? portsc(ss) : 0;
     int n = snprintf(buffer, size,
                      "xHCI USBCMD %#x USBSTS %#x, pad 0 = port %u (USB2 %u+%u): %s %s, SS port 0 = port %u (USB3 "
                      "%u+%u): %s %s; PORTSC",
                      xhci(op), xhci(op + 4), pad, usb2First, usb2Count, xhci_portsc_link_name(padPortsc),
                      xhci_portsc_speed_name(padPortsc), ss, usb3First, usb3Count, xhci_portsc_link_name(ssPortsc),
                      xhci_portsc_speed_name(ssPortsc));
-    for (unsigned port = 1; port <= ports && port <= 16 && n > 0 && (size_t)n < size; ++port) {
-        n += snprintf(buffer + n, size - (size_t)n, " %u:%#x", port, xhci(xhci_portsc_offset(op, port)));
+    for (unsigned port = 1; port <= ports && port <= 16 && n > 0 && static_cast<size_t>(n) < size; ++port) {
+        n += snprintf(buffer + n, size - static_cast<size_t>(n), " %u:%#x", port, xhci(xhci_portsc_offset(op, port)));
     }
 }
 
 bool Controller::takeMailboxInterrupt()
 {
-    uint32_t smi = r(fpci, XUSB_CFG_ARU_SMI_INTR);
+    const uint32_t smi = switch_mmio_read32(fpci, XUSB_CFG_ARU_SMI_INTR);
     if (!(smi & (SMI_INTR_EN | SMI_INTR_FW_HANG)))
         return false;
-    w(fpci, XUSB_CFG_ARU_SMI_INTR, smi);
-    (void)r(fpci, XUSB_CFG_ARU_SMI_INTR);  // Linux reads again against a spurious ARU SMI
+    switch_mmio_write32(fpci, XUSB_CFG_ARU_SMI_INTR, smi);
+    (void)switch_mmio_read32(fpci, XUSB_CFG_ARU_SMI_INTR);  // Linux reads again against a spurious ARU SMI
     if (smi & SMI_INTR_FW_HANG)
         mailboxHang = true;
     return true;
@@ -468,7 +455,7 @@ bool Controller::takeMailboxInterrupt()
 
 bool Controller::mailboxPending() const
 {
-    return r(fpci, XUSB_CFG_ARU_SMI_INTR) & (SMI_INTR_EN | SMI_INTR_FW_HANG);
+    return (switch_mmio_read32(fpci, XUSB_CFG_ARU_SMI_INTR) & (SMI_INTR_EN | SMI_INTR_FW_HANG)) != 0u;
 }
 
 // tegra_xusb_mbox_send: ACK/NAK go out while the firmware still owns the mailbox; anything else takes ownership first
@@ -477,18 +464,18 @@ bool Controller::sendMailbox(uint32_t cmd, uint32_t data)
 {
     const bool reply = cmd == MBOX_ACK || cmd == MBOX_NAK;
     if (!reply) {
-        if (r(fpci, XUSB_CFG_ARU_MBOX_OWNER) != MBOX_OWNER_NONE)
+        if (switch_mmio_read32(fpci, XUSB_CFG_ARU_MBOX_OWNER) != MBOX_OWNER_NONE)
             return false;
-        w(fpci, XUSB_CFG_ARU_MBOX_OWNER, MBOX_OWNER_SW);
-        if (r(fpci, XUSB_CFG_ARU_MBOX_OWNER) != MBOX_OWNER_SW)
+        switch_mmio_write32(fpci, XUSB_CFG_ARU_MBOX_OWNER, MBOX_OWNER_SW);
+        if (switch_mmio_read32(fpci, XUSB_CFG_ARU_MBOX_OWNER) != MBOX_OWNER_SW)
             return false;
     }
-    w(fpci, XUSB_CFG_ARU_MBOX_DATA_IN, (cmd & 0xff) << 24 | (data & 0xffffff));
-    rmw(fpci, XUSB_CFG_ARU_MBOX_CMD, 0, MBOX_INT_EN | MBOX_DEST_FALC);
+    switch_mmio_write32(fpci, XUSB_CFG_ARU_MBOX_DATA_IN, (cmd & 0xff) << 24 | (data & 0xffffff));
+    switch_mmio_rmw32(fpci, XUSB_CFG_ARU_MBOX_CMD, 0, MBOX_INT_EN | MBOX_DEST_FALC);
     if (reply)
         return true;
     for (int i = 0; i < 250; ++i) {
-        if (r(fpci, XUSB_CFG_ARU_MBOX_OWNER) == MBOX_OWNER_NONE)
+        if (switch_mmio_read32(fpci, XUSB_CFG_ARU_MBOX_OWNER) == MBOX_OWNER_NONE)
             return true;
         IOSleep(1);
     }
@@ -502,10 +489,12 @@ bool Controller::serviceMailbox()
 {
     if (mailboxHang)
         return false;
-    uint32_t message = r(fpci, XUSB_CFG_ARU_MBOX_DATA_OUT), cmd = message >> 24, data = message & 0xffffff;
-    rmw(fpci, XUSB_CFG_ARU_MBOX_CMD, MBOX_DEST_SMI, 0);
+    const uint32_t message = switch_mmio_read32(fpci, XUSB_CFG_ARU_MBOX_DATA_OUT);
+    const uint32_t cmd = message >> 24;
+    const uint32_t data = message & 0xffffff;
+    switch_mmio_rmw32(fpci, XUSB_CFG_ARU_MBOX_CMD, MBOX_DEST_SMI, 0);
     if (cmd == MBOX_SET_BW || cmd == MBOX_ACK || cmd == MBOX_NAK) {
-        w(fpci, XUSB_CFG_ARU_MBOX_OWNER, MBOX_OWNER_NONE);
+        switch_mmio_write32(fpci, XUSB_CFG_ARU_MBOX_OWNER, MBOX_OWNER_NONE);
         return true;
     }
     const xusb_mbox_ss ss = xusb_mbox_ss_decide(cmd, data);
@@ -518,7 +507,8 @@ bool Controller::serviceMailbox()
             IOLog("SwitchUSB: falcon mailbox reply %u to %u failed\n", ss.reply, cmd);
         return true;
     }
-    uint32_t reply = MBOX_ACK, replyData = data;
+    uint32_t reply = MBOX_ACK;
+    uint32_t replyData = data;
     switch (cmd) {
     case MBOX_INC_FALC_CLOCK:
     case MBOX_DEC_FALC_CLOCK:
@@ -546,24 +536,33 @@ bool Controller::serviceMailbox()
 // (SMI_INTR, owner), and whether powerOn found the partitions already on (a boot stage left them: reset not pulsed).
 void Controller::describe(char *buffer, size_t size) const
 {
-    const uint32_t op = capLength(), rt = runtimeOffset(), iman = xhci(rt + 0x20), cmd = xhci(op), sts = xhci(op + 4);
+    const uint32_t op = capLength();
+    const uint32_t rt = runtimeOffset();
+    const uint32_t iman = xhci(rt + 0x20);
+    const uint32_t cmd = xhci(op);
+    const uint32_t sts = xhci(op + 4);
     const unsigned port = usb2First;
     snprintf(
         buffer, size,
         "USBCMD %#x (INTE %u) USBSTS %#x (EINT %u) IMAN0 %#x (IP %u IE %u) ERDP0 %#x PORTSC%u %#x; FPCI CFG_1 %#x; "
         "IPFS CONFIGURATION %#x INTR_MASK %#x INTR_ENABLE %#x MSI_EN_VEC0 %#x; SMI %#x MBOX_OWNER %#x; "
         "partitions found on %#x",
-        cmd, !!(cmd & XHCI_USBCMD_INTE), sts, !!(sts & XHCI_USBSTS_EINT), iman, !!(iman & XHCI_IMAN_IP),
-        !!(iman & XHCI_IMAN_IE), xhci(rt + 0x38), port, port ? xhci(xhci_portsc_offset(op, port)) : 0,
-        r(fpci, XUSB_CFG_1), r(ipfs, IPFS_CONFIGURATION), r(ipfs, IPFS_INTR_MASK), r(ipfs, IPFS_INTR_ENABLE),
-        r(ipfs, IPFS_MSI_EN_VEC0), r(fpci, XUSB_CFG_ARU_SMI_INTR), r(fpci, XUSB_CFG_ARU_MBOX_OWNER), partitionsFound);
+        cmd, static_cast<unsigned>((cmd & XHCI_USBCMD_INTE) != 0u), sts,
+        static_cast<unsigned>((sts & XHCI_USBSTS_EINT) != 0u), iman, static_cast<unsigned>((iman & XHCI_IMAN_IP) != 0u),
+        static_cast<unsigned>((iman & XHCI_IMAN_IE) != 0u), xhci(rt + 0x38), port,
+        port ? xhci(xhci_portsc_offset(op, port)) : 0, switch_mmio_read32(fpci, XUSB_CFG_1),
+        switch_mmio_read32(ipfs, IPFS_CONFIGURATION), switch_mmio_read32(ipfs, IPFS_INTR_MASK),
+        switch_mmio_read32(ipfs, IPFS_INTR_ENABLE), switch_mmio_read32(ipfs, IPFS_MSI_EN_VEC0),
+        switch_mmio_read32(fpci, XUSB_CFG_ARU_SMI_INTR), switch_mmio_read32(fpci, XUSB_CFG_ARU_MBOX_OWNER),
+        partitionsFound);
 }
 
 bool Controller::interruptSample(uint32_t &iman, uint32_t &usbcmd, uint32_t &usbsts, uint32_t &erdp) const
 {
     if (!isPowered)
         return false;
-    const uint32_t op = capLength(), rt = runtimeOffset();
+    const uint32_t op = capLength();
+    const uint32_t rt = runtimeOffset();
     iman = xhci(rt + 0x20);
     usbcmd = xhci(op);
     usbsts = xhci(op + 4);

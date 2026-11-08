@@ -55,9 +55,11 @@ int switch_split_read(struct switch_split_disk *disk, uint64_t offset, void *out
         return rc;
     uint8_t *dest = output;
     for (uint32_t i = 0; i < disk->count && length; i++) {
-        uint64_t start = disk->offsets[i], size = disk->files[i].size;
+        uint64_t start = disk->offsets[i];
+        uint64_t size = disk->files[i].size;
         if (offset >= start && offset - start < size) {
-            uint64_t local = offset - start, available = size - local;
+            uint64_t local = offset - start;
+            uint64_t available = size - local;
             uint32_t n = available < length ? (uint32_t)available : length;
             rc = switch_fat_read(disk->volume, &disk->files[i], local, dest, n);
             if (rc)
@@ -81,7 +83,7 @@ int switch_split_index_count(const struct switch_fat_volume *v, const struct swi
         return rc;
     uint32_t total_entries = 0;
     for (uint32_t i = 0; i < count; i++) {
-        uint32_t needed;
+        uint32_t needed = 0;
         rc = switch_fat_index_count(v, parts[i].size, &needed);
         if (rc)
             return rc;
@@ -104,7 +106,7 @@ int switch_split_open_indexed(struct switch_split_indexed_disk *disk, struct swi
     disk->size = 0;
     if (!map && capacity)
         return SWITCH_FAT_ARGUMENT;
-    uint32_t needed;
+    uint32_t needed = 0;
     int rc = switch_split_index_count(v, parts, count, total, &needed);
     if (rc)
         return rc;
@@ -112,11 +114,14 @@ int switch_split_open_indexed(struct switch_split_indexed_disk *disk, struct swi
         return SWITCH_FAT_LIMIT;
     uint32_t at = 0;
     for (uint32_t i = 0; i < count; i++) {
-        uint32_t part_entries;
+        uint32_t part_entries = 0;
         rc = switch_fat_index_count(v, parts[i].size, &part_entries);
         if (rc)
             return rc;
-        rc = switch_fat_open_indexed(v, parts[i].path, &disk->files[i], map + at, part_entries);
+        uint32_t *entries = map;
+        if (entries)
+            entries += at;
+        rc = switch_fat_open_indexed(v, parts[i].path, &disk->files[i], entries, part_entries);
         if (rc)
             return rc;
         if (disk->files[i].file.size != parts[i].size)
@@ -141,9 +146,11 @@ int switch_split_read_indexed(struct switch_split_indexed_disk *disk, uint64_t o
         return rc;
     uint8_t *dest = output;
     for (uint32_t i = 0; i < disk->count && length; i++) {
-        uint64_t start = disk->offsets[i], size = disk->files[i].file.size;
+        uint64_t start = disk->offsets[i];
+        uint64_t size = disk->files[i].file.size;
         if (offset >= start && offset - start < size) {
-            uint64_t local = offset - start, available = size - local;
+            uint64_t local = offset - start;
+            uint64_t available = size - local;
             uint32_t n = available < length ? (uint32_t)available : length;
             rc = switch_fat_read_indexed(disk->volume, &disk->files[i], local, dest, n);
             if (rc)

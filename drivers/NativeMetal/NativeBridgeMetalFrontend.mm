@@ -31,13 +31,18 @@
 #include <execinfo.h>
 #include <mach/mach.h>
 #include <mach/mach_time.h>
+#include <os/proc.h>
 #include "bridge/NativeMetalObjects.h"
 #include "NativeBridgeMetalFrontend.h"
 #include "AsyncPipelines.h"
 #include "GpuMemoryRelease.h"
+#include "ImageFilterLink.h"
+#include "LimitsTable.h"
+#include "MetalABI.h"
 #include "QueuePriority.h"
 #include "SurfaceLayout.h"
 #include "SwitchFrameTimeline.h"
+#include "../../kits/SwitchDMA/SwitchDcache.h"
 #include "../../kits/SwitchRefusal/SwitchRefusalSite.h"
 // The two-plane render targets' load and store functions (TwoPlaneStandIn.metal).
 #include "TwoPlaneStandIn.h"
@@ -520,6 +525,20 @@ static void waitForResource(id resource);
         if (!nmb_##kind##_make_aliasable(_handle))                          \
             NBLOG(@"native-metal: makeAliasable refused: %@", lastError()); \
     }
+// Every allocation of this device is resident for its whole life (NBResidencySet), so naming a residency set changes nothing
+// a queue, command buffer or encoder does.
+#define NB_RESIDENCY_SETS(verb)                                                                                      \
+    -(void)verb##ResidencySet : (id<MTLResidencySet>)set API_AVAILABLE(ios(18.0), macos(15.0))                       \
+    {                                                                                                                \
+        (void)set;                                                                                                   \
+    }                                                                                                                \
+    -(void)verb##ResidencySets : (const id<MTLResidencySet> _Nonnull[])sets count : (NSUInteger)count API_AVAILABLE( \
+                                                                                        ios(18.0), macos(15.0))      \
+    {                                                                                                                \
+        (void)sets;                                                                                                  \
+        (void)count;                                                                                                 \
+    }
+
 @interface NBBuffer : NBObject
 @property (nonatomic) NmbBuffer *handle;
 @property (nonatomic) MTLResourceOptions options;
@@ -596,20 +615,6 @@ static void textureGpuWrites(NBTexture *t)
     t.gpuWritesDeclared = true;
 }
 
-// Clean [base, base + bytes) to the point of coherency and invalidate it, by VA from EL0 (XNU sets SCTLR_EL1.UCI). Cortex-A57 data
-// cache lines are 64 bytes (CTR_EL0 is not readable at EL0 here: SCTLR_EL1.UCT is clear). The caller ends its run of these with a DSB.
-static void cleanToCoherency(const void *base, size_t bytes)
-{
-    uintptr_t line = (uintptr_t)base & ~(uintptr_t)63;
-    const uintptr_t end = (uintptr_t)base + bytes;
-    for (; line + 256 <= end; line += 256)
-        __asm__ volatile("dc civac, %0\n dc civac, %1\n dc civac, %2\n dc civac, %3" ::"r"(line), "r"(line + 64),
-                         "r"(line + 128), "r"(line + 192)
-                         : "memory");
-    for (; line < end; line += 64)
-        __asm__ volatile("dc civac, %0" ::"r"(line) : "memory");
-}
-
 @implementation NBBuffer
 
 // A host import the GPU wrote (gpuWrote, set at the writing command buffer's completion): invalidate its lines so a CPU read in
@@ -622,8 +627,7 @@ static void cleanToCoherency(const void *base, size_t bytes)
         return false;
     const size_t bytes = nmb_buffer_length(_handle);
     const uint64_t began = nowUs();
-    cleanToCoherency(nmb_buffer_contents(_handle), bytes);
-    __asm__ volatile("dsb sy" ::: "memory");
+    switch_dcache_clean_invalidate(nmb_buffer_contents(_handle), bytes);
     gReadbackInvalidates++;
     gReadbackBytes += bytes;
     gReadbackUs += nowUs() - began;
@@ -1560,6 +1564,42 @@ static std::string stageText(NBFunction *f)
 @end
 @implementation NBFunctionConstant
 @end
+// A function's stage-input attribute (MTLVertexAttribute's and MTLAttribute's readable properties), for vertexAttributes and
+// stageInputAttributes.
+@interface NBAttribute : NSObject
+@property (nonatomic, copy) NSString *name;
+@property (nonatomic) NSUInteger attributeIndex;
+@property (nonatomic) MTLDataType attributeType;
+@property (nonatomic, getter=isActive) BOOL active;
+@property (nonatomic, getter=isPatchData) BOOL patchData;
+@property (nonatomic, getter=isPatchControlPointData) BOOL patchControlPointData;
+@end
+@implementation NBAttribute
+@end
+
+static NSArray *functionAttributes(const NmbFunction *f, bool stageInput)
+{
+    const int64_t count = nmb_function_attribute_count(f, stageInput);
+    if (count < 0)
+        return nil;
+    NSMutableArray *out = [NSMutableArray arrayWithCapacity:NSUInteger(count)];
+    for (uint32_t i = 0; i < uint32_t(count); i++) {
+        char name[256];
+        uint64_t info[5] = {};
+        if (!nmb_function_attribute(f, stageInput, i, name, sizeof name, info))
+            continue;
+        NBAttribute *a = [NBAttribute new];
+        a.name = [NSString stringWithUTF8String:name];
+        a.attributeIndex = info[0];
+        a.attributeType = (MTLDataType)info[1];
+        a.active = info[2] != 0;
+        a.patchData = info[3] != 0;
+        a.patchControlPointData = info[4] != 0;
+        [out addObject:a];
+    }
+    return out;
+}
+
 @implementation NBFunction
 
 - (void)dealloc
@@ -1589,6 +1629,16 @@ static std::string stageText(NBFunction *f)
 - (MTLFunctionOptions)options
 {
     return MTLFunctionOptionNone;
+}
+
+- (NSArray<MTLVertexAttribute *> *)vertexAttributes
+{
+    return (NSArray<MTLVertexAttribute *> *)functionAttributes(_handle, false);
+}
+
+- (NSArray<MTLAttribute *> *)stageInputAttributes
+{
+    return (NSArray<MTLAttribute *> *)functionAttributes(_handle, true);
 }
 
 // The layout of the argument buffer the function takes at the index, as its AIR lays it out (the runtime's decode). No reflection
@@ -1854,10 +1904,9 @@ static bool systemCompiler();
     return (id<MTLFunction>)function;
 }
 
-// No externFunctionNames (the plugin answers it nil): 21H461's Core Image takes a graph to its legacy DAG
-// (CI::LegacyDAGDescriptor, newLibraryWithImageFilterFunctionsSPI:, refused below) when its kernels are all among those names
-// (CI::DAGPrecompiledKernels) but not all stitchable (CI::MetalDAGHelper::analyze_kernels); without them such a graph is made
-// from source, which is served.
+// No externFunctionNames (the plugin answers it nil). Metal lists a Core Image library's functions there and none in functionNames;
+// 21H461's Core Image counts its own kernels (ci_stdlib, ci_filters: CI::DAGPrecompiledKernels) from it, so on this device it makes
+// every graph of them from source rather than stitching or linking it (CI::LegacyDAGDescriptor, newLibraryWithImageFilterFunctionsSPI:).
 @end
 
 // Each entry of a library's metallib function list, in order, until `visit` answers false: its NAME and, when both tags are there, its
@@ -2038,13 +2087,19 @@ static bool asyncSkips(MTLRenderPassDescriptor *d)
     return nbasync::onscreen(surface, t ? (uint64_t)t.width * t.height : 0);
 }
 
-// Whether newRenderPipelineStateWithDescriptor: makes `d` on a worker (the policy's, AsyncPipelines.h), unless archives must be
-// read (FailOnBinaryArchiveMiss refuses at the call) or a function is another device's (refused at the call).
+static bool archivesOurs(NSArray *list);
+
+// Whether newRenderPipelineStateWithDescriptor: makes `d` on a worker (the policy's, AsyncPipelines.h), unless its archives
+// must answer at the call (FailOnBinaryArchiveMiss refuses there) or a function or archive is another device's (refused at
+// the call). Listed archives alone are read on the worker, where a miss compiles as any state does: a framework's metallib
+// (QuartzCore's, CoreUI's) loads as an archive holding nothing for this device.
 static bool asyncRenderPipelineWanted(MTLRenderPipelineDescriptor *d, MTLPipelineOption options)
 {
-    if (tAsyncWorker || !nbasync::policy().on || !d || d.binaryArchives.count)
+    if (tAsyncWorker || !nbasync::policy().on || !d)
         return false;
     if (options & MTLPipelineOptionFailOnBinaryArchiveMiss)
+        return false;
+    if (d.binaryArchives.count && !archivesOurs(d.binaryArchives))
         return false;
     if (![(id)d.vertexFunction isKindOfClass:[NBFunction class]])
         return false;
@@ -2081,6 +2136,18 @@ static id<MTLRenderPipelineState> asyncRenderPipeline(id device, MTLRenderPipeli
     return (id<MTLRenderPipelineState>)state;
 }
 
+extern "C" id native_bridge_metal_function_metallib(id function, const void **bytes, size_t *length)
+{
+    if (![function isKindOfClass:[NBFunction class]])
+        return nil;
+    NBLibrary *library = ((NBFunction *)function).library;
+    if (!library.bytes || !library.length)
+        return nil;
+    *bytes = library.bytes;
+    *length = library.length;
+    return library;
+}
+
 // TegraGM20BMetal: the m2v twin of a state its raw path draws, made at its first set (AsyncPipelines.h startLazy); made
 // here when this process makes its states on the asking thread.
 extern "C" id native_bridge_metal_render_pipeline_lazy(id device, id descriptor, NSUInteger options)
@@ -2112,6 +2179,8 @@ static void asyncCall(void (^call)(void))
 
 @interface NBSampler : NBObject
 @property (nonatomic) NmbSampler *handle;
+@property (nonatomic, copy) MTLSamplerDescriptor *descriptor;
+@property (nonatomic, strong) NSMutableDictionary<NSValue *, id<MTLSamplerState>> *clamped;
 @end
 @implementation NBSampler
 
@@ -2455,6 +2524,7 @@ struct PassTarget {
 }
 @property (nonatomic, strong) NSMutableArray *waitedEvents;
 @property (nonatomic) NmbCommandBuffer *handle;
+@property (nonatomic, strong) NSArray<NSNumber *> *capturedRaws;  // the VkCommandBuffers a capture read, in order
 @property (nonatomic, strong) NBQueue *queue;
 @property (atomic, copy) NSString *encodeFailure;
 @property (atomic) BOOL committed, failedLocally;
@@ -2503,6 +2573,8 @@ static void waitForResource(id resource)
 }
 
 @implementation NBEncoder
+
+NB_RESIDENCY_SETS(use)
 
 - (void)dealloc
 {
@@ -2884,7 +2956,11 @@ static void waitForResource(id resource)
 
 @end
 
-@interface NBRenderEncoder : NBEncoder
+@interface NBRenderEncoder : NBEncoder {
+    MTLCullMode _cull;
+    MTLWinding _winding;
+    MTLTriangleFillMode _fill;
+}
 @property (nonatomic) bool skipsPending;  // the display's pass: a state still being made skips its draws
 @property (nonatomic) bool skipDraws;     // the state set last is being made (or failed): its draws are skipped
 @property (nonatomic, strong) NSArray<NBTwoPlaneStandIn *> *storeBacks;  // stored into their planes at endEncoding
@@ -2989,6 +3065,55 @@ static void waitForResource(id resource)
     [self sampler:s index:i stage:2];
 }
 
+// A bind's LOD clamps replace the state's (Metal's rule, metal2vulkan's for compute): the state of its descriptor with those clamps,
+// made once per state and clamps
+static id<MTLSamplerState> clampedSampler(id<MTLSamplerState> s, float lodMin, float lodMax)
+{
+    if (![(id)s isKindOfClass:[NBSampler class]])
+        return s;
+    NBSampler *base = (NBSampler *)s;
+    const float clamps[2] = {lodMin, lodMax};
+    NSValue *key = [NSValue valueWithBytes:clamps objCType:@encode(float[2])];
+    @synchronized(base) {
+        if (!base.clamped)
+            base.clamped = [NSMutableDictionary dictionary];
+        if (id<MTLSamplerState> made = base.clamped[key])
+            return made;
+        MTLSamplerDescriptor *d = [base.descriptor copy];
+        d.lodMinClamp = lodMin;
+        d.lodMaxClamp = lodMax;
+        id<MTLSamplerState> made = [(id<MTLDevice>)gDeviceObject newSamplerStateWithDescriptor:d];
+        if (made)
+            base.clamped[key] = made;
+        return made;
+    }
+}
+
+- (void)setVertexSamplerState:(id<MTLSamplerState>)s
+                  lodMinClamp:(float)lodMin
+                  lodMaxClamp:(float)lodMax
+                      atIndex:(NSUInteger)i
+{
+    [self sampler:clampedSampler(s, lodMin, lodMax) index:i stage:1];
+}
+
+- (void)setFragmentSamplerState:(id<MTLSamplerState>)s
+                    lodMinClamp:(float)lodMin
+                    lodMaxClamp:(float)lodMax
+                        atIndex:(NSUInteger)i
+{
+    [self sampler:clampedSampler(s, lodMin, lodMax) index:i stage:2];
+}
+
+- (void)setFragmentSamplerStates:(const id<MTLSamplerState> __unsafe_unretained[])s
+                    lodMinClamps:(const float[])lodMin
+                    lodMaxClamps:(const float[])lodMax
+                       withRange:(NSRange)r
+{
+    for (NSUInteger k = 0; k < r.length; k++)
+        [self sampler:clampedSampler(s[k], lodMin[k], lodMax[k]) index:r.location + k stage:2];
+}
+
 - (void)setDepthStencilState:(id<MTLDepthStencilState>)state
 {
     NBApiTime timed;
@@ -3014,32 +3139,28 @@ static void waitForResource(id resource)
     [self check:nmb_render_set_scissor(self.handle, values) what:"setScissorRect"];
 }
 
-// The runtime takes cull mode, winding and fill mode together; this encoder keeps Metal's defaults until each is set.
+// The runtime takes cull mode, winding and fill mode together; this encoder keeps Metal's defaults (zero) until each is set.
 - (void)raster
 {
     NBApiTime timed;
-    NSNumber *cull = objc_getAssociatedObject(self, "cull"), *winding = objc_getAssociatedObject(self, "winding"),
-             *fill = objc_getAssociatedObject(self, "fill");
-    [self check:nmb_render_set_raster(self.handle, cull.unsignedLongLongValue, winding.unsignedLongLongValue,
-                                      fill.unsignedLongLongValue)
-           what:"raster state"];
+    [self check:nmb_render_set_raster(self.handle, _cull, _winding, _fill) what:"raster state"];
 }
 
 - (void)setCullMode:(MTLCullMode)m
 {
-    objc_setAssociatedObject(self, "cull", @(m), OBJC_ASSOCIATION_RETAIN);
+    _cull = m;
     [self raster];
 }
 
 - (void)setFrontFacingWinding:(MTLWinding)w
 {
-    objc_setAssociatedObject(self, "winding", @(w), OBJC_ASSOCIATION_RETAIN);
+    _winding = w;
     [self raster];
 }
 
 - (void)setTriangleFillMode:(MTLTriangleFillMode)f
 {
-    objc_setAssociatedObject(self, "fill", @(f), OBJC_ASSOCIATION_RETAIN);
+    _fill = f;
     [self raster];
 }
 
@@ -3541,6 +3662,15 @@ static void completed(void *context);
 static void scheduled(void *context);
 @implementation NBCommandBuffer
 
+NB_RESIDENCY_SETS(use)
+
+// The kernel charges GPU time to the task that submits the work: there is no other task to name.
+- (void)setResponsibleTaskIDs:(const uint32_t *)taskIDs count:(uint32_t)count
+{
+    (void)taskIDs;
+    (void)count;
+}
+
 // The planes' codes into `standIn` before a pass that loads it: one draw reading the texture (Metal's tile of the attachment).
 - (void)loadStandIn:(NBTwoPlaneStandIn *)standIn from:(id<MTLTexture>)planes
 {
@@ -3640,7 +3770,10 @@ static void scheduled(void *context);
         return nil;
     char text[512] = {};
     nmb_command_buffer_error(_handle, text, sizeof text);
-    return nbError([NSString stringWithUTF8String:text]);
+    const uint64_t code = nmb_command_buffer_error_code(_handle);
+    return [NSError errorWithDomain:MTLCommandBufferErrorDomain
+                               code:code ? (NSInteger)code : MTLCommandBufferErrorInternal
+                           userInfo:@{NSLocalizedDescriptionKey : [NSString stringWithUTF8String:text]}];
 }
 
 // Debug groups and cache hints name work for tools and the driver's caches; they change nothing the GPU computes here.
@@ -4319,6 +4452,85 @@ static bool heldBehindEvent()
 
 @end
 
+// The raw GM20B path's capture of a render state (NativeBridgeMetalFrontend.h): NVK's exports (nvk_switch_capture.c) over the
+// VkCommandBuffers the command buffer's encoders recorded
+namespace capture {
+using Segments = void (*)(uint64_t, void (*)(void *, uint64_t, const uint32_t *, uint32_t), void *);
+using Map = const void *(*)(uint64_t, uint64_t, uint64_t);
+using Program = bool (*)(uint64_t, uint32_t, const void **, uint32_t *, const void **, uint32_t *, const void **,
+                         uint32_t *, uint8_t *, uint32_t *);
+using Context = bool (*)(uint64_t, uint64_t *, uint64_t *, uint64_t *, uint64_t *, uint32_t *, uint64_t *, uint32_t *);
+
+template <class F> F nvk(const char *name)
+{
+    return reinterpret_cast<F>(nvkSymbol(name));
+}
+
+NSArray<NSNumber *> *raws(id commandBuffer)
+{
+    return [commandBuffer isKindOfClass:[NBCommandBuffer class]] ? ((NBCommandBuffer *)commandBuffer).capturedRaws
+                                                                 : nil;
+}
+}  // namespace capture
+
+extern "C" bool native_bridge_metal_capture(id commandBuffer,
+                                            void (^segment)(uint64_t addr, const uint32_t *cpu, uint32_t dwords),
+                                            NBCaptureContext *context)
+{
+    static const auto segments = capture::nvk<capture::Segments>("switch_nvk_capture_cmd_buffer");
+    static const auto contextOf = capture::nvk<capture::Context>("switch_nvk_capture_context");
+    static const bool complete = segments && contextOf && capture::nvk<capture::Map>("switch_nvk_capture_map") &&
+                                 capture::nvk<capture::Program>("switch_nvk_capture_program");
+    if (![commandBuffer isKindOfClass:[NBCommandBuffer class]] || !complete)
+        return false;
+    NBCommandBuffer *cb = (NBCommandBuffer *)commandBuffer;
+    NSMutableArray<NSNumber *> *raws = [NSMutableArray array];
+
+    struct Reading {
+        capture::Segments segments;
+        void (^segment)(uint64_t, const uint32_t *, uint32_t);
+        NSMutableArray<NSNumber *> *raws;
+    } reading = {segments, segment, raws};
+
+    const bool captured = nmb_command_buffer_capture(
+        cb.handle,
+        [](void *ctx, uint64_t raw) {
+            Reading &r = *static_cast<Reading *>(ctx);
+            [r.raws addObject:@(raw)];
+            r.segments(
+                raw,
+                [](void *inner, uint64_t addr, const uint32_t *cpu, uint32_t dwords) {
+                    static_cast<Reading *>(inner)->segment(addr, cpu, dwords);
+                },
+                ctx);
+        },
+        &reading);
+    cb.capturedRaws = raws;
+    if (!captured || !raws.count)
+        return false;
+    return !context || contextOf(raws[0].unsignedLongLongValue, &context->shaderHeap, &context->zeroPage, &context->cb0,
+                                 &context->images, &context->imageMax, &context->samplers, &context->samplerMax);
+}
+
+extern "C" const void *native_bridge_metal_capture_map(id commandBuffer, uint64_t va, uint64_t bytes)
+{
+    static const auto map = capture::nvk<capture::Map>("switch_nvk_capture_map");
+    NSArray<NSNumber *> *raws = capture::raws(commandBuffer);
+    return map && raws.count ? map(raws[0].unsignedLongLongValue, va, bytes) : nullptr;
+}
+
+extern "C" bool native_bridge_metal_capture_program(id commandBuffer, uint32_t program, NBCapturedProgram *out)
+{
+    static const auto programOf = capture::nvk<capture::Program>("switch_nvk_capture_program");
+    if (!programOf)
+        return false;
+    for (NSNumber *raw in capture::raws(commandBuffer))
+        if (programOf(raw.unsignedLongLongValue, program, &out->header, &out->headerBytes, &out->code, &out->codeBytes,
+                      &out->data, &out->dataBytes, out->cbufTypes, &out->cbufCount))
+            return true;
+    return false;
+}
+
 static void scheduled(void *context)
 {
     [(__bridge NBCommandBuffer *)context didSchedule];
@@ -4350,6 +4562,9 @@ static void completed(void *context)
 }
 
 @implementation NBQueue
+
+NB_RESIDENCY_SETS(add)
+NB_RESIDENCY_SETS(remove)
 
 - (void)dealloc
 {
@@ -5218,6 +5433,14 @@ static bool computeDescriptor(MTLComputePipelineDescriptor *d, NmbComputePipelin
 
 @end
 
+static bool archivesOurs(NSArray *list)
+{
+    for (id archive in list)
+        if (![archive isKindOfClass:[NBBinaryArchive class]])
+            return false;
+    return true;
+}
+
 static bool pipelineArchives(NSArray *list, std::vector<NmbBinaryArchive *> &archives, NSError **error)
 {
     for (id archive in list) {
@@ -5242,6 +5465,9 @@ static bool pipelineArchives(NSArray *list, std::vector<NmbBinaryArchive *> &arc
 // request: the render server, whose QuartzCore never compiles source, never loads it.
 static std::string
     gCompileCache;  // <the runtime's cache>/msl: the compiler's replies, kept across respawns (empty: none kept)
+// <the shared shader cache seed>/msl: the replies the image ships (Core Image's kernels as the device compiled them; the seed's
+// merge.py), read in place when this process's own cache lacks one (empty: no seed)
+static std::string gCompileSeed;
 static std::atomic<uint64_t> gCompiles, gCompilesKept, gCompileRefusals;
 
 // The compiler was written for MTLCompilerService's threads and recurses deeply; a dispatch worker's 512 KiB stack is too small for it
@@ -5274,8 +5500,8 @@ static void onLargeStack(void (^body)(void))
 
 // A reply depends only on the request and the compiler, so a compiled one is kept as <gCompileCache>/<SHA-256 of MTLCompiler's LC_UUID,
 // the request type and its bytes>.reply: magic, warning and metallib lengths, the SHA-256 of both, then both. A respawned process (the
-// icon service is ended whenever it goes idle) reads it instead of compiling again. Written beside its name and renamed; one that does
-// not check out is compiled again; failures are not kept.
+// icon service is ended whenever it goes idle) reads it instead of compiling again, and a process that never compiled it reads the
+// seed's. Written beside its name and renamed; one that does not check out is compiled again; failures are not kept.
 struct NBCompileReplyHeader {
     uint32_t magic, warningBytes;
     uint64_t metallibBytes;
@@ -5284,10 +5510,8 @@ struct NBCompileReplyHeader {
 
 static const uint32_t kNBCompileReplyMagic = 0x3143534e;  // "NSC1"
 
-static std::string compileReplyPath(const unsigned char uuid[16], uint32_t type, const std::vector<uint8_t> &request)
+static std::string compileReplyName(const unsigned char uuid[16], uint32_t type, const std::vector<uint8_t> &request)
 {
-    if (gCompileCache.empty())
-        return std::string();
     CC_SHA256_CTX context;
     CC_SHA256_Init(&context);
     CC_SHA256_Update(&context, uuid, 16);
@@ -5298,14 +5522,15 @@ static std::string compileReplyPath(const unsigned char uuid[16], uint32_t type,
     char name[2 * CC_SHA256_DIGEST_LENGTH + 8];
     for (int i = 0; i < CC_SHA256_DIGEST_LENGTH; i++)
         snprintf(name + 2 * i, 3, "%02x", key[i]);
-    return gCompileCache + "/" + name + ".reply";
+    return std::string(name) + ".reply";
 }
 
-static bool compileReplyRead(const std::string &path, NSData **metallib, NSString **warnings)
+static bool compileReplyRead(const std::string &dir, const std::string &name, NSData **metallib, NSString **warnings)
 {
-    NSData *file = path.empty()
-                       ? nil
-                       : [NSData dataWithContentsOfFile:@(path.c_str()) options:NSDataReadingMappedIfSafe error:nil];
+    NSData *file = dir.empty() ? nil
+                               : [NSData dataWithContentsOfFile:@((dir + "/" + name).c_str())
+                                                        options:NSDataReadingMappedIfSafe
+                                                          error:nil];
     NBCompileReplyHeader header;
     if (file.length < sizeof header)
         return false;
@@ -5325,10 +5550,11 @@ static bool compileReplyRead(const std::string &path, NSData **metallib, NSStrin
     return true;
 }
 
-static void compileReplyWrite(const std::string &path, NSData *metallib, NSString *warnings)
+static void compileReplyWrite(const std::string &name, NSData *metallib, NSString *warnings)
 {
-    if (path.empty() || !metallib.length)
+    if (gCompileCache.empty() || !metallib.length)
         return;
+    const std::string path = gCompileCache + "/" + name;
     NSData *warned = [warnings dataUsingEncoding:NSUTF8StringEncoding];
     NBCompileReplyHeader header = {kNBCompileReplyMagic, (uint32_t)warned.length, metallib.length, {}};
     NSMutableData *file = [NSMutableData dataWithCapacity:sizeof header + warned.length + metallib.length];
@@ -5347,23 +5573,23 @@ static void compileReplyWrite(const std::string &path, NSData *metallib, NSStrin
 
 typedef void (^NBCodeGenReply)(int32_t status, const void *reply, size_t length, const char *message);
 
+// A kept reply is read before the code generation service is made: a process whose requests the seed or its own cache holds never
+// starts the compiler, only loads its framework for the LC_UUID that names the replies.
 static NSData *codeGenRequest(uint32_t type, const std::vector<uint8_t> &request, NSString **warnings,
                               NSString **failure)
 {
     static void *service;
+    static void *(*create)(const char *);
     static void (*build)(void *, void *, uint32_t, const void *, size_t, NBCodeGenReply);
     static unsigned char compilerUuid[16];
-    static dispatch_once_t once;
+    static dispatch_once_t loaded, created;
     static std::mutex lock;
-    dispatch_once(&once, ^{
-        void *library =
-            dlopen("/System/Library/PrivateFrameworks/MTLCompiler.framework/MTLCompiler", RTLD_NOW | RTLD_LOCAL);
-        void *(*create)(const char *) =
-            library ? (void *(*)(const char *))dlsym(library, "MTLCodeGenServiceCreate") : nullptr;
+    dispatch_once(&loaded, ^{
+        void *library = dlopen(SWITCH_METAL_COMPILER, RTLD_NOW | RTLD_LOCAL);
+        create = library ? (void *(*)(const char *))dlsym(library, "MTLCodeGenServiceCreate") : nullptr;
         build = library ? (void (*)(void *, void *, uint32_t, const void *, size_t, NBCodeGenReply))dlsym(
                               library, "MTLCodeGenServiceBuildRequest")
                         : nullptr;
-        service = create && build ? create("native-metal") : nullptr;
         Dl_info info;
         if (build && dladdr((const void *)build, &info) && info.dli_fbase) {
             const mach_header_64 *header = (const mach_header_64 *)info.dli_fbase;
@@ -5374,22 +5600,32 @@ static NSData *codeGenRequest(uint32_t type, const std::vector<uint8_t> &request
                     break;
                 }
         }
-        if (!service)
+        if (!create || !build)
             NBLOG(@"native-metal: the system's Metal compiler (MTLCompiler.framework) did not load: %s",
                   library ? "no code generation service" : dlerror());
     });
-    if (!service) {
+    if (!create || !build) {
         *failure = @"the system's Metal compiler (MTLCompiler.framework) is not available";
         return nil;
     }
-    const std::string kept = compileReplyPath(compilerUuid, type, request);
+    const std::string name = compileReplyName(compilerUuid, type, request);
     NSData *keptMetallib = nil;
     NSString *keptWarnings = nil;
-    if (compileReplyRead(kept, &keptMetallib, &keptWarnings)) {
+    if (compileReplyRead(gCompileCache, name, &keptMetallib, &keptWarnings) ||
+        compileReplyRead(gCompileSeed, name, &keptMetallib, &keptWarnings)) {
         gCompilesKept++;
         *warnings = keptWarnings;
         *failure = nil;
         return keptMetallib;
+    }
+    dispatch_once(&created, ^{
+        service = create("native-metal");
+        if (!service)
+            NBLOG(@"native-metal: the system's Metal compiler (MTLCompiler.framework) made no code generation service");
+    });
+    if (!service) {
+        *failure = @"the system's Metal compiler (MTLCompiler.framework) is not available";
+        return nil;
     }
     __block NSData *metallib = nil;
     __block NSString *warned = nil, *message = nil;
@@ -5429,7 +5665,7 @@ static NSData *codeGenRequest(uint32_t type, const std::vector<uint8_t> &request
         gCompileRefusals++;
         return nil;
     }
-    compileReplyWrite(kept, metallib, warned);
+    compileReplyWrite(name, metallib, warned);
     return metallib;
 }
 
@@ -5509,119 +5745,55 @@ static bool systemCompiler()
 @protocol NBOriginalStitching
 - (NSString *)newDagStringWithGraphs:(NSArray<MTLFunctionStitchingGraph *> *)graphs;
 @end
-// The base class's limits table (-[_MTLDevice limits], the words after isa in 21H461). Metal's accessors read their field from it
-// (-[_MTLDevice maxTextureWidth2D] is limits+0x84), and frameworks read it directly, past this device's methods: PhotosUICore's texture
-// converter takes its largest image from 0x84/0x88 (-[PXGMetalTextureConverter createTextureFromCGImage:transform:alpha:options:],
-// PXGCreateMetalTextureFromBytesInCGImage); with them 0 every image is "too large", is redrawn to fit 0x0 and PXGCreateContext asserts.
-// CoreRE reads minBufferNoCopyAlignmentBytes at 0x7c. The offsets are those accessors' loads (the
-// 61 integer fields; maxLineWidth and maxPointSize are floats, not filled).
+
+@protocol NBImageFilterLinking
+- (id<MTLLibrary>)newLibraryWithCIFilters:(NSArray *)functions
+                  imageFilterFunctionInfo:(const switch_metal::ImageFilterFunctionInfo *)info
+                                    error:(NSError **)error;
+@end
+
+// A library the system's Metal compiler made from a request (a stitched DAG, Core Image's filter-function link), loaded as any library.
+static id<MTLLibrary> libraryFromCompilerRequest(id<MTLDevice> device, uint32_t type,
+                                                 const std::vector<uint8_t> &request, NSString *what, NSError **error)
+{
+    NSString *warnings = nil, *failure = nil;
+    NSData *metallib = codeGenRequest(type, request, &warnings, &failure);
+    if (!metallib) {
+        NBLOG(@"native-metal: %@: %@", what, [failure substringToIndex:MIN(failure.length, (NSUInteger)300)]);
+        if (error)
+            *error = [NSError errorWithDomain:MTLLibraryErrorDomain
+                                         code:MTLLibraryErrorCompileFailure
+                                     userInfo:@{NSLocalizedDescriptionKey : failure}];
+        return nil;
+    }
+    dispatch_data_t data = dispatch_data_create(metallib.bytes, metallib.length, nullptr, ^{
+        (void)metallib;
+    });
+    return [device newLibraryWithData:data error:error];
+}
+
 @protocol NBOriginalLimits
 - (void *)limits;
 @end
 #if TARGET_OS_IPHONE
-static const struct {
-    const char *selector;
-    uint16_t offset;
-} kLimitFields[] = {{"maxFramebufferStorageBits", 0x0},
-                    {"linearTextureArrayAlignmentBytes", 0x4},
-                    {"linearTextureArrayAlignmentSlice", 0x8},
-                    {"maxTileBuffers", 0xc},
-                    {"maxTileTextures", 0x10},
-                    {"maxTileSamplers", 0x14},
-                    {"maxTileInlineDataSize", 0x18},
-                    {"minTilePixels", 0x1c},
-                    {"maxColorAttachments", 0x20},
-                    {"maxVertexAttributes", 0x24},
-                    {"maxVertexBuffers", 0x28},
-                    {"maxVertexTextures", 0x2c},
-                    {"maxVertexSamplers", 0x30},
-                    {"maxVertexInlineDataSize", 0x34},
-                    {"maxInterpolants", 0x38},
-                    {"maxFragmentBuffers", 0x3c},
-                    {"maxFragmentTextures", 0x40},
-                    {"maxFragmentSamplers", 0x44},
-                    {"maxFragmentInlineDataSize", 0x48},
-                    {"maxComputeBuffers", 0x4c},
-                    {"maxComputeTextures", 0x50},
-                    {"maxComputeSamplers", 0x54},
-                    {"maxComputeInlineDataSize", 0x58},
-                    {"maxComputeLocalMemorySizes", 0x5c},
-                    {"maxTotalComputeThreadsPerThreadgroup", 0x60},
-                    {"maxComputeThreadgroupMemory", 0x64},
-                    {"maxVisibilityQueryOffset", 0x70},
-                    {"minConstantBufferAlignmentBytes", 0x78},
-                    {"minBufferNoCopyAlignmentBytes", 0x7c},
-                    {"maxTextureWidth1D", 0x80},
-                    {"maxTextureWidth2D", 0x84},
-                    {"maxTextureHeight2D", 0x88},
-                    {"maxTextureWidth3D", 0x8c},
-                    {"maxTextureHeight3D", 0x90},
-                    {"maxTextureDepth3D", 0x94},
-                    {"maxTextureDimensionCube", 0x98},
-                    {"maxTextureLayers", 0x9c},
-                    {"linearTextureAlignmentBytes", 0xa0},
-                    {"iosurfaceTextureAlignmentBytes", 0xa4},
-                    {"iosurfaceReadOnlyTextureAlignmentBytes", 0xa8},
-                    {"deviceLinearTextureAlignmentBytes", 0xac},
-                    {"deviceLinearReadOnlyTextureAlignmentBytes", 0xb0},
-                    {"maxFunctionConstantIndices", 0xb4},
-                    {"maxComputeThreadgroupMemoryAlignmentBytes", 0xb8},
-                    {"maxInterpolatedComponents", 0xbc},
-                    {"maxTessellationFactor", 0xc0},
-                    {"maxIndirectBuffers", 0xc4},
-                    {"maxIndirectTextures", 0xc8},
-                    {"maxIndirectSamplers", 0xcc},
-                    {"maxIndirectSamplersPerDevice", 0xd0},
-                    {"maxFenceInstances", 0xd4},
-                    {"maxViewportCount", 0xd8},
-                    {"maxCustomSamplePositions", 0xdc},
-                    {"maxVertexAmplificationFactor", 0xe0},
-                    {"maxVertexAmplificationCount", 0xe4},
-                    {"maxTextureBufferWidth", 0xe8},
-                    {"maxComputeAttributes", 0xec},
-                    {"maxIOCommandsInFlight", 0xf0},
-                    {"maxPredicatedNestingDepth", 0xf4},
-                    {"maxAccelerationStructureLevels", 0xf8},
-                    {"maxConstantBufferArguments", 0xfc}};
-
-// Each field whose selector this device answers itself (installAnswers, NBDeviceMethods) gets that answer, so the table says what the
-// methods say; one the device has no answer for stays the base class's 0. Every write is read back through the base class's own accessor,
-// and a field it does not read back is restored and the fill stops there (a different layout), the field named.
+// The base class's limits table (LimitsTable.h) gets each answer of this device's own methods (installAnswers, NBDeviceMethods), so
+// the table says what the methods say; a field the device has no answer for stays the base class's 0.
 static void fillLimits(id device)
 {
-    Class cls = object_getClass(device), base = class_getSuperclass(cls);
-    if (![base instancesRespondToSelector:@selector(limits)])
+    if (![class_getSuperclass(object_getClass(device)) instancesRespondToSelector:@selector(limits)])
         return;
     uint8_t *table = (uint8_t *)[(id<NBOriginalLimits>)device limits];
     if (!table)
         return;
-    for (const auto &field : kLimitFields) {
-        SEL sel = sel_registerName(field.selector);
-        Method own = class_getInstanceMethod(cls, sel), original = class_getInstanceMethod(base, sel);
-        if (!own || !original || method_getImplementation(own) == method_getImplementation(original))
-            continue;
-        char type[8] = {};
-        method_getReturnType(own, type, sizeof type);
-        if (strcmp(type, "Q") && strcmp(type, "L") && strcmp(type, "I"))
-            continue;
-        const uint64_t value = ((NSUInteger (*)(id, SEL))method_getImplementation(own))(device, sel);
-        if (value > UINT32_MAX) {
-            NBREFUSE("limits.overflow", uintptr_t(field.selector), @"limits: %s %llu does not fit the table",
-                     field.selector, (unsigned long long)value);
-            continue;
-        }
-        uint32_t was;
-        memcpy(&was, table + field.offset, 4);
-        const uint32_t word = (uint32_t)value;
-        memcpy(table + field.offset, &word, 4);
-        if (((NSUInteger (*)(id, SEL))method_getImplementation(original))(device, sel) != value) {
-            memcpy(table + field.offset, &was, 4);
+    fillLimitsFromMethods(device, table, [](const LimitField &field, LimitFill how) {
+        if (how == LimitFill::Overflow)
+            NBREFUSE("limits.overflow", uintptr_t(field.selector), @"limits: %s does not fit the table",
+                     field.selector);
+        else if (how == LimitFill::NotRead)
             NBREFUSE("limits.layout", field.offset,
-                     @"limits: the base class does not read %s at 0x%x; the fields from there stay 0", field.selector,
+                     @"limits: the base class does not read %s at 0x%x; it stays its own", field.selector,
                      field.offset);
-            return;
-        }
-    }
+    });
     uint32_t width = 0, height = 0;
     memcpy(&width, table + 0x84, 4);
     memcpy(&height, table + 0x88, 4);
@@ -5633,6 +5805,105 @@ static void fillLimits(id device)
 static void fillLimits(id)
 {}  // the host's _MTLDevice has its own layout
 #endif
+
+// Every allocation of this device is resident from its creation to its release (one GPU address space, no paging), so a
+// residency set keeps its allocations for the client and asks nothing of the GPU. _MTLDevice's own
+// newResidencySetWithDescriptor: asks the driver's allocResidencySet, which the base class answers nil, and returns nil
+// with no error.
+API_AVAILABLE(ios(18.0), macos(15.0))
+@interface NBResidencySet : NBObject <MTLResidencySet>
+@end
+@implementation NBResidencySet {
+    std::mutex _lock;
+    NSMutableArray<id<MTLAllocation>> *_pending;
+    NSArray<id<MTLAllocation>> *_committed;
+}
+
+@dynamic device, label;
+
+- (instancetype)initWithDescriptor:(MTLResidencySetDescriptor *)descriptor
+{
+    if ((self = [super init])) {
+        self.label = descriptor.label;
+        _pending = [NSMutableArray arrayWithCapacity:descriptor.initialCapacity];
+        _committed = @[];
+    }
+    return self;
+}
+
+- (uint64_t)allocatedSize
+{
+    std::lock_guard<std::mutex> hold(_lock);
+    uint64_t bytes = 0;
+    for (id<MTLAllocation> allocation in _committed)
+        bytes += allocation.allocatedSize;
+    return bytes;
+}
+
+- (void)addAllocation:(id<MTLAllocation>)allocation
+{
+    std::lock_guard<std::mutex> hold(_lock);
+    if (allocation && ![_pending containsObject:allocation])
+        [_pending addObject:allocation];
+}
+
+- (void)addAllocations:(const id<MTLAllocation> _Nonnull[])allocations count:(NSUInteger)count
+{
+    for (NSUInteger i = 0; i < count; i++)
+        [self addAllocation:allocations[i]];
+}
+
+- (void)removeAllocation:(id<MTLAllocation>)allocation
+{
+    std::lock_guard<std::mutex> hold(_lock);
+    [_pending removeObject:allocation];
+}
+
+- (void)removeAllocations:(const id<MTLAllocation> _Nonnull[])allocations count:(NSUInteger)count
+{
+    for (NSUInteger i = 0; i < count; i++)
+        [self removeAllocation:allocations[i]];
+}
+
+- (void)removeAllAllocations
+{
+    std::lock_guard<std::mutex> hold(_lock);
+    [_pending removeAllObjects];
+}
+
+- (BOOL)containsAllocation:(id<MTLAllocation>)allocation
+{
+    std::lock_guard<std::mutex> hold(_lock);
+    return [_pending containsObject:allocation];
+}
+
+- (NSArray<id<MTLAllocation>> *)allAllocations
+{
+    std::lock_guard<std::mutex> hold(_lock);
+    return [_pending copy];
+}
+
+- (NSUInteger)allocationCount
+{
+    std::lock_guard<std::mutex> hold(_lock);
+    return _pending.count;
+}
+
+- (void)commit
+{
+    std::lock_guard<std::mutex> hold(_lock);
+    _committed = [_pending copy];
+}
+
+- (void)requestResidency
+{}
+
+- (void)endResidency
+{}
+
+@end
+
+static uint64_t askAnswer(SEL cmd, NSUInteger arg);
 
 @interface NBDeviceMethods : NSObject
 @end
@@ -5836,20 +6107,7 @@ static void fillLimits(id)
     word(0);
     word(0x61726964 /* 'arid' */);
     word(0);
-    NSString *warnings = nil, *failure = nil;
-    NSData *metallib = codeGenRequest(14, request, &warnings, &failure);
-    if (!metallib) {
-        NBLOG(@"native-metal: stitched library: %@", [failure substringToIndex:MIN(failure.length, (NSUInteger)300)]);
-        if (error)
-            *error = [NSError errorWithDomain:MTLLibraryErrorDomain
-                                         code:MTLLibraryErrorCompileFailure
-                                     userInfo:@{NSLocalizedDescriptionKey : failure}];
-        return nil;
-    }
-    dispatch_data_t data = dispatch_data_create(metallib.bytes, metallib.length, nullptr, ^{
-        (void)metallib;
-    });
-    return [(id<MTLDevice>)self newLibraryWithData:data error:error];
+    return libraryFromCompilerRequest((id<MTLDevice>)self, 14, request, @"stitched library", error);
 }
 
 - (id<MTLLibrary>)newLibraryWithStitchedDescriptor:(MTLStitchedLibraryDescriptor *)d
@@ -5893,27 +6151,60 @@ static void fillLimits(id)
     return nil;
 }
 
-// Core Image's legacy DAG (CI::LegacyDAGDescriptor, CreateFunctionFromDAG) and kernel reflection (CIKernelReflection::reflectConstants).
-- (id<MTLLibrary>)newLibraryWithImageFilterFunctionsSPI:(id)functions
-                                imageFilterFunctionInfo:(id)info
+// Core Image's legacy DAG (CI::LegacyDAGDescriptor, CreateFunctionFromDAG) and the constants of a kernel made with function constants
+// from a library's unstitchable function (CIKernelReflection::reflectConstants, which links the function to itself and reads
+// ciKernelMain's). _MTLDevice sends the first to the second.
+- (id<MTLLibrary>)newLibraryWithImageFilterFunctionsSPI:(NSArray *)functions
+                                imageFilterFunctionInfo:(const switch_metal::ImageFilterFunctionInfo *)info
                                                   error:(NSError **)error
 {
-    (void)functions;
-    (void)info;
-    refuseLibrary(@"Core Image filter-function linking");
-    if (error)
-        *error = nbError(@"Core Image filter-function linking is not implemented");
-    return nil;
+    return [(id<NBImageFilterLinking>)self newLibraryWithCIFilters:functions imageFilterFunctionInfo:info error:error];
 }
 
-- (id<MTLLibrary>)newLibraryWithCIFilters:(id)functions imageFilterFunctionInfo:(id)info error:(NSError **)error
+- (id<MTLLibrary>)newLibraryWithCIFilters:(NSArray *)functions
+                  imageFilterFunctionInfo:(const switch_metal::ImageFilterFunctionInfo *)info
+                                    error:(NSError **)error
 {
-    (void)functions;
-    (void)info;
-    refuseLibrary(@"Core Image filter-function linking");
-    if (error)
-        *error = nbError(@"Core Image filter-function linking is not implemented");
-    return nil;
+    if (!systemCompiler()) {
+        refuseLibrary(@"Core Image filter-function linking");
+        if (error)
+            *error = nbError(
+                @"Core Image filter-function linking needs the system compiler, which this process does not load");
+        return nil;
+    }
+    if (!functions.count || !info) {
+        if (error)
+            *error = nbError(@"Core Image filter-function linking needs functions and their infos");
+        return nil;
+    }
+    std::vector<switch_metal::ImageFilterFunction> linked(functions.count);
+    std::vector<NSData *> bitcodes;
+    for (NSUInteger i = 0; i < functions.count; i++) {
+        id function = functions[i];
+        NSData *bitcode = [function isKindOfClass:[NBFunction class]] ? functionBitcode((NBFunction *)function) : nil;
+        if (!bitcode) {
+            if (error)
+                *error =
+                    nbError([NSString stringWithFormat:@"filter function %@ has no bitcode here", [function name]]);
+            return nil;
+        }
+        bitcodes.push_back(bitcode);
+        switch_metal::ImageFilterFunction &f = linked[i];
+        f.name = [[function name] UTF8String] ?: "";
+        f.bitcode = (const uint8_t *)bitcode.bytes;
+        f.bitcodeBytes = bitcode.length;
+        f.earlyOut = info[i].earlyOut;
+        if (info[i].argumentCount && info[i].arguments)
+            f.arguments.assign(info[i].arguments, info[i].arguments + info[i].argumentCount);
+    }
+    const std::vector<uint8_t> request = switch_metal::imageFilterLinkRequest(linked);
+    if (request.empty()) {
+        if (error)
+            *error = nbError(@"the filter functions do not fit one link request");
+        return nil;
+    }
+    return libraryFromCompilerRequest((id<MTLDevice>)self, switch_metal::kImageFilterLinkRequest, request,
+                                      @"Core Image filter-function link", error);
 }
 
 - (BOOL)supportsDynamicLibraries
@@ -6060,6 +6351,63 @@ static void fillLimits(id)
     NBEvent *event = [NBEvent new];
     event.handle = handle;
     return (id<MTLEvent>)event;
+}
+
+// _MTLDevice's own versions of these make Metal's generic _MTLSharedEvent, which this device's command buffers cannot signal
+// or wait on. Only an in-process event with no options is this device's to make; QuartzCore takes nil from
+// newSharedEventWithOptions: as the absent feature and keeps its own path.
+- (id<MTLSharedEvent>)newSharedEventWithOptions:(NSInteger)options
+{
+    if (!options)
+        return [self newSharedEvent];
+    NBREFUSE("sharedevent.options", uint64_t(options), @"newSharedEventWithOptions:%ld: no shared event with options",
+             (long)options);
+    return nil;
+}
+
+- (id<MTLSharedEvent>)newSharedEventWithHandle:(MTLSharedEventHandle *)handle
+{
+    (void)handle;
+    NBREFUSE("sharedevent.handle", 0, @"newSharedEventWithHandle:: no cross-process shared events");
+    return nil;
+}
+
+- (id<MTLSharedEvent>)newSharedEventWithMachPort:(mach_port_t)port
+{
+    (void)port;
+    NBREFUSE("sharedevent.handle", 1, @"newSharedEventWithMachPort:: no cross-process shared events");
+    return nil;
+}
+
+- (id<MTLResidencySet>)newResidencySetWithDescriptor:(MTLResidencySetDescriptor *)descriptor
+                                               error:(NSError **)error API_AVAILABLE(ios(18.0), macos(15.0))
+{
+    if (error)
+        *error = nil;
+    return [[NBResidencySet alloc] initWithDescriptor:descriptor];
+}
+
+// A texture buffer is a linear texture over its buffer: the runtime places both at the same alignment.
+- (NSUInteger)minimumTextureBufferAlignmentForPixelFormat:(MTLPixelFormat)format
+{
+    return (NSUInteger)askAnswer(@selector(minimumLinearTextureAlignmentForPixelFormat:), format);
+}
+
+- (NSUInteger)currentAllocatedSize
+{
+    uint64_t memory[3] = {};
+    return gDevice && nmb_device_memory(gDevice, memory) ? memory[0] : 0;
+}
+
+// This device's memory is charged to the process that maps it (its jetsam footprint), so what it can still hold without
+// paging is what it holds now and what the process may still take.
+- (uint64_t)recommendedMaxWorkingSetSize
+{
+#if TARGET_OS_IPHONE
+    return [self currentAllocatedSize] + os_proc_available_memory();
+#else
+    return NSProcessInfo.processInfo.physicalMemory;
+#endif
 }
 
 - (id<MTLSharedEvent>)newSharedEvent
@@ -6591,6 +6939,7 @@ static void fillLimits(id)
     }
     NBSampler *sampler = [NBSampler new];
     sampler.handle = handle;
+    sampler.descriptor = d;
     return (id<MTLSamplerState>)sampler;
 }
 
@@ -6764,6 +7113,8 @@ extern "C" id native_bridge_metal_open(const char *loader, const char *cache, ui
     if (cache) {
         gCompileCache = std::string(cache) + "/msl";
     }
+    if (const char *seed = getenv("METAL2VULKAN_SHADER_CACHE_SEED"); seed && *seed)
+        gCompileSeed = std::string(seed) + "/msl";
     if (cache && kJournal) {
         // The journal lives in a cache that survives reboots: past 2 MiB it starts again, the previous one kept as pipelines.log.old.
         gJournalPath = std::string(cache) + "/pipelines.log";
@@ -6800,8 +7151,8 @@ extern "C" id native_bridge_metal_open(const char *loader, const char *cache, ui
         base = [NSObject class];
 #endif
 #if TARGET_OS_IPHONE
-    // The target's base class ABI (iPadOS 17.7.11): the dynamic subclass adds no instance variables.
-    if (!base || class_getInstanceSize(base) != 536) {
+    // The dynamic subclass adds no instance variables to the selected IPSW kind's base class (MetalABI.h).
+    if (!base || class_getInstanceSize(base) != kMTLDeviceInstanceSize) {
         NBLOG(@"native-metal: unexpected _MTLDevice ABI");
         return nil;
     }

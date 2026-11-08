@@ -73,26 +73,27 @@ inline uint32_t lux(uint32_t visible, uint32_t ir, unsigned gain)
         return 0;
     int64_t weighted = 0;
     for (const Window &w : kWindow) {
-        if (1000ull * ir / visible < w.rc) {
-            weighted = (int64_t)w.cv * visible - (int64_t)w.ci * ir;
+        if (1000ULL * ir / visible < w.rc) {
+            weighted = static_cast<int64_t>(w.cv) * visible - static_cast<int64_t>(w.ci) * ir;
             break;
         }
     }
     if (weighted <= 0)
         return 0;  // cannot happen inside a row's range; bh1730.c would wrap in u64
-    const uint64_t value =
-        (uint64_t)weighted * 100 * kLuxMultiplier / ((uint64_t)kGainFactor[gain] * kIntegrationUS * 1000);
-    return value > kLuxMax ? kLuxMax : (uint32_t)value;
+    const uint64_t value = static_cast<uint64_t>(weighted) * 100 * kLuxMultiplier /
+                           (static_cast<uint64_t>(kGainFactor[gain]) * kIntegrationUS * 1000);
+    return value > kLuxMax ? kLuxMax : static_cast<uint32_t>(value);
 }
 
 // The gain for the next conversion after one at `gain` read these channels.
 inline unsigned nextGain(unsigned gain, uint32_t visible, uint32_t ir)
 {
     const uint32_t highest = visible > ir ? visible : ir;
+    // NOLINTNEXTLINE(clang-analyzer-security.ArrayBound): SwitchALS passes only a gain this returned, under kGains
     if (gain > 0 && highest > kGainLimits[gain].fl)
         return gain - 1;
     if (gain + 1 < kGains && highest < kGainLimits[gain].cl &&
-        (uint64_t)highest * kGainFactor[gain + 1] / kGainFactor[gain] < kGainLimits[gain + 1].fl) {
+        static_cast<uint64_t>(highest) * kGainFactor[gain + 1] / kGainFactor[gain] < kGainLimits[gain + 1].fl) {
         return gain + 1;
     }
     return gain;

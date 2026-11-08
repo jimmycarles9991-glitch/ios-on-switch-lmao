@@ -1,0 +1,2260 @@
+diff --git a/hw/arm/tegra2/meson.build b/hw/arm/tegra2/meson.build
+index 9852ea9..7e5251c 100644
+--- a/hw/arm/tegra2/meson.build
++++ b/hw/arm/tegra2/meson.build
+@@ -43,6 +43,10 @@ arm_ss.add(files(
+   'ahb/usb/usb.c',
+   'ahb/usb/xusb.c',
+   'ahb/gpu/gpu.c',
++  'ahb/gpu/gm20b_falcon.c',
++  'ahb/gpu/gm20b_mmu.c',
++  'ahb/gpu/gm20b_fifo.c',
++  'ahb/gpu/gm20b_ce.c',
+ 
+   'apb/pinmuxaux/pinmuxaux.c',
+   'apb/fuse/fuse.c',
+diff --git a/hw/arm/tegra2/ahb/gpu/gm20b.h b/hw/arm/tegra2/ahb/gpu/gm20b.h
+new file mode 100644
+index 0000000..675e407
+--- /dev/null
++++ b/hw/arm/tegra2/ahb/gpu/gm20b.h
+@@ -0,0 +1,114 @@
++/*
++ * NVIDIA GM20B (Tegra X1 GPU) model: shared state of gpu.c, gm20b_falcon.c, gm20b_mmu.c and gm20b_fifo.c.
++ *
++ *  This program is free software; you can redistribute it and/or modify it
++ *  under the terms of the GNU General Public License as published by the
++ *  Free Software Foundation; either version 2 of the License, or
++ *  (at your option) any later version.
++ */
++#ifndef TEGRA_GM20B_H
++#define TEGRA_GM20B_H
++
++#include "hw/sysbus.h"
++#include "qemu/timer.h"
++
++#define GM20B_REGS_BYTES     0x1000000
++#define GM20B_BAR1_OFFSET    0x1000000
++#define GM20B_BAR_BYTES      0x2000000
++#define GM20B_CHANNELS       2048
++#define GM20B_SUBCHANNELS    8
++
++enum { GM20B_PMU, GM20B_FECS, GM20B_GPCCS, GM20B_FALCONS };
++
++typedef struct GM20BFalcon {
++    const char *name;
++    hwaddr base;
++    uint32_t imem_bytes, dmem_bytes;
++    uint8_t *imem, *dmem;
++    uint32_t imemc[4], dmemc[8];
++    uint32_t cpuctl, irqstat, irqmask, irqdest;
++    uint32_t mailbox[2];
++    uint32_t bind_stat;
++    int starts;
++    bool lsf;          /* bootstrapped by the ACR: started through CPUCTL_ALIAS */
++    bool rtos;         /* the PMU's LS firmware is up and owns its queues */
++} GM20BFalcon;
++
++/* A channel's position in its pushbuffer between kicks: a method header may have data still to come, and an
++ * acquire that is not yet satisfied blocks the channel at that method. */
++typedef struct GM20BChannel {
++    bool faulted;
++    uint64_t seg_va;          /* the GPFIFO entry being executed: next dword's VA, dwords left */
++    uint32_t seg_left;
++    bool in_seg;
++    uint32_t mthd, subc, count, op;  /* the current method header's state */
++    uint32_t sem[4];          /* SEMAPHOREA..D */
++    uint32_t report[3];       /* 3D/compute SET_REPORT_SEMAPHORE_A..C */
++    uint32_t *ce;             /* MAXWELL_DMA_COPY_A methods, by offset / 4: the channel's copy context */
++    uint32_t class_of[GM20B_SUBCHANNELS];
++    uint64_t methods;
++} GM20BChannel;
++
++typedef struct tegra_gpu_state {
++    SysBusDevice parent_obj;
++    qemu_irq irq_stall;
++    qemu_irq irq_nonstall;
++    MemoryRegion iomem;
++    uint32_t *regs;
++    char *method_log_path;
++    FILE *method_log;
++    char *event_log_path;
++    FILE *event_log;
++    int64_t ptimer_offset;
++    QEMUTimer *ptimer_alarm;
++    QEMUTimer *host_poll;
++    GM20BFalcon falcon[GM20B_FALCONS];
++    bool acr_done;
++    uint32_t runlist_base, runlist_len[2];
++    GM20BChannel chan[GM20B_CHANNELS];
++    uint64_t faults;
++} tegra_gpu;
++
++#define GM20B_REG(s, off) ((s)->regs[(off) >> 2])
++
++/* PFIFO_INTR_0 bits the model raises */
++#define PFIFO_INTR_MMU_FAULT     (1u << 28)
++#define PFIFO_INTR_PBDMA         (1u << 29)
++#define PFIFO_INTR_CHANNEL_INTR  (1u << 31)
++
++/* MMU fault types (GK104+ NV_PFIFO_INTR_MMU_FAULT_INFO_TYPE) and the units and clients the model reports */
++enum { MMU_PDE = 0, MMU_PTE = 2, MMU_VA_LIMIT = 3, MMU_UNBOUND_INST = 4, MMU_RO = 6, MMU_APERTURE = 10 };
++enum { FAULT_UNIT_GR = 0x00, FAULT_UNIT_HOST0 = 0x07, FAULT_UNIT_CE2 = 0x1b };
++enum { FAULT_CLIENT_FE = 0x04, FAULT_CLIENT_HOST = 0x06, FAULT_CLIENT_CE2 = 0x19 };
++
++typedef struct GM20BAccess {
++    tegra_gpu *s;
++    uint64_t inst;            /* instance block of the space, for the fault record */
++    uint64_t pdb;             /* page directory: physical address */
++    bool big64k;
++    uint64_t limit;
++    unsigned unit, client;
++} GM20BAccess;
++
++void gm20b_update_irqs(tegra_gpu *s);
++uint64_t gm20b_ptimer_ns(tegra_gpu *s);
++void gm20b_log_event(tegra_gpu *s, const char *fmt, ...) G_GNUC_PRINTF(2, 3);
++
++void gm20b_falcon_init(tegra_gpu *s);
++void gm20b_falcon_reset(tegra_gpu *s);
++bool gm20b_falcon_read(tegra_gpu *s, hwaddr offset, uint32_t *value);
++bool gm20b_falcon_write(tegra_gpu *s, hwaddr offset, uint32_t value);
++bool gm20b_falcon_pending(tegra_gpu *s, unsigned id);
++void gm20b_falcon_engine_reset(tegra_gpu *s, uint32_t disabled);
++
++bool gm20b_access_init(tegra_gpu *s, GM20BAccess *a, uint64_t inst, unsigned unit, unsigned client);
++bool gm20b_vm_rw(GM20BAccess *a, uint64_t va, void *buf, uint32_t len, bool write);
++void gm20b_bar1_rw(tegra_gpu *s, uint64_t offset, uint64_t *value, unsigned size, bool write);
++
++void gm20b_fifo_reset(tegra_gpu *s);
++bool gm20b_fifo_read(tegra_gpu *s, hwaddr offset, uint32_t *value);
++bool gm20b_fifo_write(tegra_gpu *s, hwaddr offset, uint32_t value);
++void gm20b_fifo_kick(tegra_gpu *s);
++bool gm20b_ce_launch(tegra_gpu *s, GM20BAccess *a, const uint32_t *methods, uint32_t launch);
++
++#endif
+diff --git a/hw/arm/tegra2/ahb/gpu/gm20b_ce.c b/hw/arm/tegra2/ahb/gpu/gm20b_ce.c
+new file mode 100644
+index 0000000..c18f885
+--- /dev/null
++++ b/hw/arm/tegra2/ahb/gpu/gm20b_ce.c
+@@ -0,0 +1,166 @@
++/*
++ * NVIDIA GM20B copy engine (MAXWELL_DMA_COPY_A): LAUNCH_DMA over pitch and block-linear surfaces, with remap.
++ *
++ *  This program is free software; you can redistribute it and/or modify it
++ *  under the terms of the GNU General Public License as published by the
++ *  Free Software Foundation; either version 2 of the License, or
++ *  (at your option) any later version.
++ */
++
++/*
++ * Method offsets and fields are Mesa's clb0b5.h. Block-linear is GM20B's: 64-byte by 8-row GOBs of 16-byte runs
++ * (x bit 5, y bits 2:1, x bit 4, y bit 0, x bits 3:0), blocks one GOB wide and 1 << height GOBs tall, row-major.
++ * Widths, origins and line lengths are in bytes, or in remapped elements with REMAP_ENABLE. Depth is one layer of
++ * GOBs (3D surfaces are not modelled); physical addressing (SRC_TYPE/DST_TYPE) reaches DRAM directly.
++ */
++
++#include "tegra_common.h"
++#include "sysemu/dma.h"
++#include "gm20b.h"
++
++#define M(off) (m[(off) / 4])
++
++typedef struct Surface {
++    uint64_t base;
++    bool pitch, physical;
++    uint32_t pitch_bytes;
++    uint32_t width, height, layer, block_rows_log2;
++    uint32_t origin_x, origin_y;
++} Surface;
++
++static uint32_t gob_offset(uint32_t x, uint32_t y)
++{
++    return ((x >> 5) & 1) << 8 | ((y >> 1) & 3) << 6 | ((x >> 4) & 1) << 5 | (y & 1) << 4 | (x & 15);
++}
++
++static uint64_t bl_address(const Surface *s, uint32_t x, uint32_t y)
++{
++    uint32_t rows = 8u << s->block_rows_log2, block = 512u << s->block_rows_log2;
++    uint64_t per_row = DIV_ROUND_UP(s->width, 64), layer = per_row * DIV_ROUND_UP(MAX(s->height, 1), rows) * block;
++
++    return s->base + s->layer * layer + (uint64_t)(y / rows) * per_row * block + (uint64_t)(x / 64) * block +
++           ((y % rows) / 8) * 512 + gob_offset(x % 64, y % 8);
++}
++
++static bool span(GM20BAccess *a, const Surface *s, uint64_t addr, void *buf, uint32_t len, bool write)
++{
++    if (s->physical) {
++        dma_memory_rw(&address_space_memory, addr, buf, len, write ? DMA_DIRECTION_FROM_DEVICE : DMA_DIRECTION_TO_DEVICE,
++                      MEMTXATTRS_UNSPECIFIED);
++        return true;
++    }
++    return gm20b_vm_rw(a, addr, buf, len, write);
++}
++
++static bool line_access(GM20BAccess *a, const Surface *s, uint32_t line, uint8_t *buf, uint32_t len, bool write)
++{
++    if (s->pitch)
++        return span(a, s, s->base + (uint64_t)line * s->pitch_bytes, buf, len, write);
++    for (uint32_t done = 0; done < len;) {
++        uint32_t x = s->origin_x + done, run = MIN(len - done, 16 - (x & 15));
++        if (!span(a, s, bl_address(s, x, s->origin_y + line), buf + done, run, write))
++            return false;
++        done += run;
++    }
++    return true;
++}
++
++static void surface(Surface *sf, const uint32_t *m, bool src, uint32_t launch, uint32_t scale)
++{
++    uint32_t block = src ? M(0x728) : M(0x70c), origin = src ? M(0x73c) : M(0x720);
++
++    sf->base = ((uint64_t)((src ? M(0x400) : M(0x408)) & 0xff) << 32) | (src ? M(0x404) : M(0x40c));
++    sf->pitch = launch & (src ? (1u << 7) : (1u << 8));
++    sf->physical = launch & (src ? (1u << 12) : (1u << 13));
++    sf->pitch_bytes = src ? M(0x410) : M(0x414);
++    sf->width = (src ? M(0x72c) : M(0x710)) * scale;
++    sf->height = src ? M(0x730) : M(0x714);
++    sf->layer = src ? M(0x738) : M(0x71c);
++    sf->block_rows_log2 = (block >> 4) & 0xf;
++    sf->origin_x = (origin & 0xffff) * scale;
++    sf->origin_y = origin >> 16;
++}
++
++/* SET_REMAP_COMPONENTS: each destination component takes a source component, constant A or B, or is not written */
++static void remap(const uint32_t *m, const uint8_t *src, uint8_t *dst, uint32_t elements, uint8_t *mask)
++{
++    uint32_t comp = M(0x708), size = ((comp >> 16) & 3) + 1;
++    uint32_t nsrc = ((comp >> 20) & 3) + 1, ndst = ((comp >> 24) & 3) + 1;
++
++    for (uint32_t e = 0; e < elements; e++) {
++        for (uint32_t c = 0; c < ndst; c++) {
++            uint32_t sel = (comp >> (c * 4)) & 7, k = (e * ndst + c) * size;
++            uint8_t konst[4];
++            stl_le_p(konst, sel == 4 ? M(0x700) : M(0x704));
++            if (sel <= 3)
++                memcpy(dst + k, src + (e * nsrc + MIN(sel, nsrc - 1)) * size, size);
++            else if (sel <= 5)
++                memcpy(dst + k, konst, size);
++            memset(mask + k, sel <= 5, size);
++        }
++    }
++}
++
++static bool reads_source(uint32_t comp, uint32_t ndst)
++{
++    for (uint32_t c = 0; c < ndst; c++)
++        if (((comp >> (c * 4)) & 7) <= 3)
++            return true;
++    return false;
++}
++
++static bool copy_line(GM20BAccess *a, const uint32_t *m, uint32_t launch, const Surface *src, const Surface *dst,
++                      uint32_t line, uint32_t length)
++{
++    bool remap_on = launch & (1u << 10);
++    uint32_t comp = M(0x708), size = ((comp >> 16) & 3) + 1, ndst = ((comp >> 24) & 3) + 1;
++    uint32_t src_bytes = remap_on ? length * size * (((comp >> 20) & 3) + 1) : length;
++    uint32_t dst_bytes = remap_on ? length * size * ndst : length;
++    g_autofree uint8_t *in = g_malloc0(src_bytes), *out = g_malloc0(dst_bytes), *mask = g_malloc0(dst_bytes);
++    g_autofree uint8_t *old = NULL;
++
++    if ((!remap_on || reads_source(comp, ndst)) && !line_access(a, src, line, in, src_bytes, false))
++        return false;
++    if (!remap_on)
++        return line_access(a, dst, line, in, dst_bytes, true);
++    remap(m, in, out, length, mask);
++    if (memchr(mask, 0, dst_bytes)) {
++        /* NO_WRITE components keep the destination's bytes */
++        old = g_malloc0(dst_bytes);
++        if (!line_access(a, dst, line, old, dst_bytes, false))
++            return false;
++        for (uint32_t i = 0; i < dst_bytes; i++)
++            out[i] = mask[i] ? out[i] : old[i];
++    }
++    return line_access(a, dst, line, out, dst_bytes, true);
++}
++
++static bool release(GM20BAccess *a, const uint32_t *m, tegra_gpu *s, uint32_t launch)
++{
++    unsigned type = (launch >> 3) & 3;
++    uint64_t va = ((uint64_t)(M(0x240) & 0xff) << 32) | M(0x244), now = gm20b_ptimer_ns(s);
++    uint32_t rec[4] = { cpu_to_le32(M(0x248)), 0, cpu_to_le32((uint32_t)now), cpu_to_le32(now >> 32) };
++
++    if (!type)
++        return true;
++    return gm20b_vm_rw(a, va, rec, type == 2 ? 16 : 4, true);
++}
++
++bool gm20b_ce_launch(tegra_gpu *s, GM20BAccess *a, const uint32_t *m, uint32_t launch)
++{
++    bool remap_on = launch & (1u << 10);
++    uint32_t comp = M(0x708), size = ((comp >> 16) & 3) + 1;
++    uint32_t src_scale = remap_on ? size * (((comp >> 20) & 3) + 1) : 1;
++    uint32_t dst_scale = remap_on ? size * (((comp >> 24) & 3) + 1) : 1;
++    uint32_t lines = (launch & (1u << 9)) ? M(0x41c) : 1;
++    Surface src, dst;
++
++    surface(&src, m, true, launch, src_scale);
++    surface(&dst, m, false, launch, dst_scale);
++    if ((launch & 3) && M(0x418)) {
++        for (uint32_t line = 0; line < lines; line++)
++            if (!copy_line(a, m, launch, &src, &dst, line, M(0x418)))
++                return false;
++    }
++    return release(a, m, s, launch);
++}
+diff --git a/hw/arm/tegra2/ahb/gpu/gm20b_falcon.c b/hw/arm/tegra2/ahb/gpu/gm20b_falcon.c
+new file mode 100644
+index 0000000..116cb49
+--- /dev/null
++++ b/hw/arm/tegra2/ahb/gpu/gm20b_falcon.c
+@@ -0,0 +1,456 @@
++/*
++ * NVIDIA GM20B falcons as their firmware answers the host: PMU (ACR, then its RTOS), FECS and GPCCS.
++ *
++ *  This program is free software; you can redistribute it and/or modify it
++ *  under the terms of the GNU General Public License as published by the
++ *  Free Software Foundation; either version 2 of the License, or
++ *  (at your option) any later version.
++ */
++
++/*
++ * No falcon code runs. IMEM and DMEM are real memories behind the PIO ports, and each falcon's firmware is replaced by
++ * what it does for the host, as nouveau (nvkm/subdev/acr, pmu/gm20b.c, gr/gf100.c) and nvgpu expect it:
++ *  - PMU, first start: NVIDIA's HS ACR "load" ucode. It halts with MAILBOX0 0 and leaves the PMU, FECS and GPCCS in
++ *    LS mode (started through CPUCTL_ALIAS).
++ *  - PMU, second start: the LS RTOS. It posts its INIT message (queue layout) and answers ACR commands: WPR region
++ *    init and falcon bootstrap.
++ *  - FECS: the ctxsw firmware's handshake (CTXSW_MAILBOX(0) bit 0 once started) and its method interface (sizes,
++ *    bind pointer, golden save, ctxsw start/stop).
++ * Context images are not produced: the golden save leaves the buffer as the driver wrote it.
++ */
++
++#include "tegra_common.h"
++#include "qemu/log.h"
++#include "gm20b.h"
++
++#define F_IRQSSET   0x000
++#define F_IRQSCLR   0x004
++#define F_IRQSTAT   0x008
++#define F_IRQMSET   0x010
++#define F_IRQMCLR   0x014
++#define F_IRQMASK   0x018
++#define F_IRQDEST   0x01c
++#define F_MAILBOX0  0x040
++#define F_MAILBOX1  0x044
++#define F_CPUCTL    0x100
++#define F_HWCFG     0x108
++#define F_DMACTL    0x10c
++#define F_DMATRFCMD 0x118
++#define F_CPUCTL_ALIAS 0x130
++
++#define CPUCTL_STARTCPU  (1u << 1)
++#define CPUCTL_HALTED    (1u << 4)
++#define CPUCTL_ALIAS_EN  (1u << 6)
++#define IRQ_HALT         (1u << 4)
++#define IRQ_SWGEN0       (1u << 6)
++
++/* The PMU RTOS's queues in its DMEM (pmu/gm20b.c reads queue_info 0, 1 and 4) */
++#define PMU_CMDQ_HEAD   0x4a0
++#define PMU_CMDQ_TAIL   0x4b0
++#define PMU_MSGQ_HEAD   0x4c8
++#define PMU_MSGQ_TAIL   0x4cc
++#define PMU_QUEUE_BYTES 0x200
++static const uint16_t pmu_queue_offset[5] = { 0x1000, 0x1200, 0, 0, 0x1400 };
++
++#define UNIT_REWIND 0x00
++#define UNIT_INIT   0x07
++#define UNIT_ACR    0x0a
++#define ACR_CMD_INIT_WPR_REGION   0x00
++#define ACR_CMD_BOOTSTRAP_FALCON  0x01
++#define ACR_LSF_PMU   0
++#define ACR_LSF_FECS  2
++#define ACR_LSF_GPCCS 3
++
++/* FECS's answers to the discover methods: the sizes nvgpu logs for GM20B's ctxsw firmware */
++#define FECS_GOLDEN_BYTES  0x00030c00
++#define FECS_ZCULL_BYTES   0x00001500
++#define FECS_PM_BYTES      0x00008800
++#define FECS_REGLIST_BYTES 0x00000ad0
++
++static const struct {
++    const char *name;
++    hwaddr base;
++    uint32_t imem, dmem;
++} falcon_desc[GM20B_FALCONS] = {
++    [GM20B_PMU] = { "pmu", 0x10a000, 0x10000, 0x10000 },
++    [GM20B_FECS] = { "fecs", 0x409000, 0x8000, 0x2000 },
++    [GM20B_GPCCS] = { "gpccs", 0x41a000, 0x4000, 0x1400 },
++};
++
++void gm20b_falcon_init(tegra_gpu *s)
++{
++    for (unsigned i = 0; i < GM20B_FALCONS; i++) {
++        GM20BFalcon *f = &s->falcon[i];
++        f->name = falcon_desc[i].name;
++        f->base = falcon_desc[i].base;
++        f->imem_bytes = falcon_desc[i].imem;
++        f->dmem_bytes = falcon_desc[i].dmem;
++        f->imem = g_malloc0(f->imem_bytes);
++        f->dmem = g_malloc0(f->dmem_bytes);
++    }
++}
++
++void gm20b_falcon_reset(tegra_gpu *s)
++{
++    for (unsigned i = 0; i < GM20B_FALCONS; i++) {
++        GM20BFalcon *f = &s->falcon[i];
++        memset(f->imem, 0, f->imem_bytes);
++        memset(f->dmem, 0, f->dmem_bytes);
++        memset(f->imemc, 0, sizeof(f->imemc));
++        memset(f->dmemc, 0, sizeof(f->dmemc));
++        f->cpuctl = CPUCTL_HALTED;
++        f->irqstat = f->irqmask = f->irqdest = 0;
++        f->mailbox[0] = f->mailbox[1] = 0;
++        f->bind_stat = 0;
++        f->starts = 0;
++        f->lsf = f->rtos = false;
++    }
++    s->acr_done = false;
++}
++
++bool gm20b_falcon_pending(tegra_gpu *s, unsigned id)
++{
++    GM20BFalcon *f = &s->falcon[id];
++    uint32_t host = f->irqdest ? (f->irqdest & 0xffff) & ~(f->irqdest >> 16) : 0xffffffff;
++
++    return f->irqstat & f->irqmask & host;
++}
++
++static void dmem_write(GM20BFalcon *f, uint32_t at, const void *data, uint32_t len)
++{
++    if (at + len <= f->dmem_bytes)
++        memcpy(f->dmem + at, data, len);
++}
++
++static void dmem_read(GM20BFalcon *f, uint32_t at, void *data, uint32_t len)
++{
++    memset(data, 0, len);
++    if (at + len <= f->dmem_bytes)
++        memcpy(data, f->dmem + at, len);
++}
++
++static void msgq_post(tegra_gpu *s, const uint8_t *msg, uint32_t len)
++{
++    GM20BFalcon *f = &s->falcon[GM20B_PMU];
++    uint32_t head = GM20B_REG(s, f->base + PMU_MSGQ_HEAD);
++    uint32_t offset = pmu_queue_offset[4];
++
++    if (head + ROUND_UP(len, 4) > offset + PMU_QUEUE_BYTES)
++        head = offset;
++    dmem_write(f, head, msg, len);
++    GM20B_REG(s, f->base + PMU_MSGQ_HEAD) = head + ROUND_UP(len, 4);
++    f->irqstat |= IRQ_SWGEN0;
++}
++
++static void pmu_rtos_boot(tegra_gpu *s)
++{
++    uint8_t msg[42] = { UNIT_INIT, sizeof(msg), 0, 0, 0 /* NV_PMU_INIT_MSG_INIT */ };
++    GM20BFalcon *f = &s->falcon[GM20B_PMU];
++
++    for (unsigned q = 0; q < 5; q++) {
++        uint8_t *info = msg + 8 + q * 6;
++        stw_le_p(info, pmu_queue_offset[q] ? PMU_QUEUE_BYTES : 0);
++        stw_le_p(info + 2, pmu_queue_offset[q]);
++        info[4] = q == 4 ? 0 : q;
++    }
++    f->rtos = true;
++    /* The RTOS routes its message interrupt (SWGEN0) to the host itself: nouveau never programs IRQMSET/IRQDEST */
++    f->irqmask |= IRQ_SWGEN0;
++    f->irqdest = IRQ_SWGEN0;
++    GM20B_REG(s, f->base + PMU_MSGQ_TAIL) = pmu_queue_offset[4];
++    GM20B_REG(s, f->base + PMU_MSGQ_HEAD) = pmu_queue_offset[4];
++    for (unsigned q = 0; q < 2; q++) {
++        GM20B_REG(s, f->base + PMU_CMDQ_HEAD + q * 4) = pmu_queue_offset[q];
++        GM20B_REG(s, f->base + PMU_CMDQ_TAIL + q * 4) = pmu_queue_offset[q];
++    }
++    msgq_post(s, msg, sizeof(msg));
++}
++
++static void lsf_bootstrap(tegra_gpu *s, uint32_t id)
++{
++    unsigned which = id == ACR_LSF_FECS ? GM20B_FECS : id == ACR_LSF_GPCCS ? GM20B_GPCCS : GM20B_FALCONS;
++
++    if (which == GM20B_FALCONS)
++        return;
++    s->falcon[which].lsf = true;
++    s->falcon[which].cpuctl = CPUCTL_HALTED | CPUCTL_ALIAS_EN;
++}
++
++static void pmu_acr_command(tegra_gpu *s, const uint8_t *cmd)
++{
++    uint8_t reply[12] = { UNIT_ACR, 0, 0, cmd[3], cmd[4] };
++
++    gm20b_log_event(s, "pmu ACR command %u (falcon %u)", cmd[4], ldl_le_p(cmd + 12));
++    switch (cmd[4]) {
++    case ACR_CMD_INIT_WPR_REGION:
++        reply[1] = 12; /* error_code 0 */
++        break;
++    case ACR_CMD_BOOTSTRAP_FALCON:
++        lsf_bootstrap(s, ldl_le_p(cmd + 12));
++        stl_le_p(reply + 8, ldl_le_p(cmd + 12));
++        reply[1] = 12;
++        break;
++    default:
++        qemu_log_mask(LOG_UNIMP, "tegra.gpu: PMU ACR command 0x%x\n", cmd[4]);
++        reply[1] = 12;
++        stl_le_p(reply + 8, 1);
++        break;
++    }
++    msgq_post(s, reply, reply[1]);
++}
++
++static void pmu_cmdq(tegra_gpu *s, unsigned q)
++{
++    GM20BFalcon *f = &s->falcon[GM20B_PMU];
++    uint32_t head = GM20B_REG(s, f->base + PMU_CMDQ_HEAD + q * 4);
++    uint32_t tail = GM20B_REG(s, f->base + PMU_CMDQ_TAIL + q * 4);
++    uint8_t cmd[128];
++
++    for (unsigned guard = 0; tail != head && guard < 64; guard++) {
++        dmem_read(f, tail, cmd, sizeof(cmd));
++        if (cmd[0] == UNIT_REWIND) {
++            tail = pmu_queue_offset[q];
++            continue;
++        }
++        if (cmd[0] == UNIT_ACR)
++            pmu_acr_command(s, cmd);
++        else
++            qemu_log_mask(LOG_UNIMP, "tegra.gpu: PMU command for unit 0x%x\n", cmd[0]);
++        tail += ROUND_UP(MAX(cmd[1], 4), 4);
++    }
++    GM20B_REG(s, f->base + PMU_CMDQ_TAIL + q * 4) = tail;
++}
++
++static void falcon_start(tegra_gpu *s, unsigned id)
++{
++    GM20BFalcon *f = &s->falcon[id];
++
++    f->starts++;
++    gm20b_log_event(s, "%s start %d%s", f->name, f->starts, f->lsf ? " (LS)" : "");
++    if (id == GM20B_PMU && !s->acr_done) {
++        /* The HS ACR load: WPR set up, the LS falcons bootstrapped later on the RTOS's command */
++        s->acr_done = true;
++        f->lsf = true;
++        f->mailbox[0] = 0;
++        f->cpuctl = CPUCTL_HALTED | CPUCTL_ALIAS_EN;
++        f->irqstat |= IRQ_HALT;
++        return;
++    }
++    f->cpuctl = f->lsf ? CPUCTL_ALIAS_EN : 0;
++    if (id == GM20B_PMU)
++        pmu_rtos_boot(s);
++    else if (id == GM20B_FECS)
++        GM20B_REG(s, 0x409800) |= 1; /* CTXSW_MAILBOX(0): eUcodeHandshakeInitComplete */
++}
++
++static void fecs_method(tegra_gpu *s, uint32_t method)
++{
++    uint32_t data = GM20B_REG(s, 0x409500);
++
++    gm20b_log_event(s, "fecs method 0x%02x data 0x%08x", method, data);
++    switch (method) {
++    case 0x03: /* bind pointer */
++        GM20B_REG(s, 0x409b00) = data;
++        GM20B_REG(s, 0x409800) |= 0x10;
++        break;
++    case 0x09: /* WFI golden save */
++    case 0x15: /* restore golden */
++        GM20B_REG(s, 0x409800) |= 0x1;
++        break;
++    case 0x04: /* halt pipeline */
++    case 0x38: /* stop ctxsw */
++    case 0x39: /* start ctxsw */
++        GM20B_REG(s, 0x409804) = 0x1;
++        break;
++    case 0x10:
++        GM20B_REG(s, 0x409800) = FECS_GOLDEN_BYTES;
++        break;
++    case 0x16:
++        GM20B_REG(s, 0x409800) = FECS_ZCULL_BYTES;
++        break;
++    case 0x25:
++        GM20B_REG(s, 0x409800) = FECS_PM_BYTES;
++        break;
++    case 0x30:
++        GM20B_REG(s, 0x409800) = FECS_REGLIST_BYTES;
++        break;
++    case 0x31: /* set reglist bind instance */
++    case 0x32: /* set reglist virtual address */
++        GM20B_REG(s, 0x409800) = 0x1;
++        break;
++    case 0x21: /* set watchdog timeout */
++        break;
++    default:
++        qemu_log_mask(LOG_UNIMP, "tegra.gpu: FECS method 0x%x (data 0x%x)\n", method, data);
++        GM20B_REG(s, 0x409800) = 0x1;
++        break;
++    }
++}
++
++static GM20BFalcon *falcon_at(tegra_gpu *s, hwaddr offset, unsigned *id, uint32_t *reg)
++{
++    for (unsigned i = 0; i < GM20B_FALCONS; i++) {
++        if (offset >= s->falcon[i].base && offset < s->falcon[i].base + 0x1000) {
++            *id = i;
++            *reg = offset - s->falcon[i].base;
++            return &s->falcon[i];
++        }
++    }
++    return NULL;
++}
++
++/* IMEMC/IMEMD/IMEMT(port) at 0x180 + 0x10 * port, DMEMC/DMEMD(port) at 0x1c0 + 8 * port. Bit 24 of the control
++ * register advances the address after a write, bit 25 after a read. */
++static bool pio_access(GM20BFalcon *f, uint32_t reg, uint32_t *value, bool write)
++{
++    uint32_t *ctrl, bytes, at, sub;
++    uint8_t *mem;
++
++    if (reg >= 0x180 && reg < 0x1c0) {
++        ctrl = &f->imemc[(reg - 0x180) / 0x10];
++        sub = (reg - 0x180) % 0x10;
++        mem = f->imem;
++        bytes = f->imem_bytes;
++        if (sub == 8) /* IMEMT: tags are not kept */
++            return true;
++    } else if (reg >= 0x1c0 && reg < 0x200) {
++        ctrl = &f->dmemc[(reg - 0x1c0) / 8];
++        sub = (reg - 0x1c0) % 8;
++        mem = f->dmem;
++        bytes = f->dmem_bytes;
++    } else {
++        return false;
++    }
++    if (sub == 0) {
++        if (write)
++            *ctrl = *value;
++        else
++            *value = *ctrl;
++        return true;
++    }
++    if (sub != 4)
++        return false;
++    at = *ctrl & 0x00fffffc;
++    if (at + 4 <= bytes) {
++        if (write)
++            stl_le_p(mem + at, *value);
++        else
++            *value = ldl_le_p(mem + at);
++    }
++    if (*ctrl & (write ? (1u << 24) : (1u << 25)))
++        *ctrl = (*ctrl & ~0x00fffffcu) | ((at + 4) & 0x00fffffc);
++    return true;
++}
++
++/* PMC_ENABLE: an engine taken out of the enable mask is reset with its falcons (gm200_flcn_disable for the PMU, the
++ * GR reset for FECS and GPCCS); the PMU's next start is the HS ACR again. */
++void gm20b_falcon_engine_reset(tegra_gpu *s, uint32_t disabled)
++{
++    for (unsigned i = 0; i < GM20B_FALCONS; i++) {
++        GM20BFalcon *f = &s->falcon[i];
++        if (!(disabled & (i == GM20B_PMU ? 0x2000u : 0x1000u)))
++            continue;
++        f->cpuctl = CPUCTL_HALTED;
++        f->irqstat = 0;
++        f->lsf = f->rtos = false;
++        if (i == GM20B_PMU)
++            s->acr_done = false;
++    }
++}
++
++bool gm20b_falcon_read(tegra_gpu *s, hwaddr offset, uint32_t *value)
++{
++    unsigned id;
++    uint32_t reg;
++    GM20BFalcon *f = falcon_at(s, offset, &id, &reg);
++
++    if (!f)
++        return false;
++    if (pio_access(f, reg, value, false))
++        return true;
++    switch (reg) {
++    case F_IRQSTAT:
++        *value = f->irqstat;
++        return true;
++    case F_IRQMASK:
++        *value = f->irqmask;
++        return true;
++    case F_IRQDEST:
++        *value = f->irqdest;
++        return true;
++    case F_MAILBOX0:
++    case F_MAILBOX1:
++        *value = f->mailbox[(reg - F_MAILBOX0) / 4];
++        return true;
++    case F_CPUCTL:
++    case F_CPUCTL_ALIAS:
++        *value = f->cpuctl;
++        return true;
++    case F_HWCFG:
++        *value = (f->imem_bytes >> 8) | ((f->dmem_bytes >> 8) << 9);
++        return true;
++    case F_DMACTL:
++        *value = 0;
++        return true;
++    case F_DMATRFCMD:
++        *value = 0x2; /* idle */
++        return true;
++    case 0x20c:
++        if (id != GM20B_PMU)
++            return false;
++        *value = f->bind_stat << 12;
++        return true;
++    default:
++        return false;
++    }
++}
++
++bool gm20b_falcon_write(tegra_gpu *s, hwaddr offset, uint32_t value)
++{
++    unsigned id;
++    uint32_t reg;
++    GM20BFalcon *f = falcon_at(s, offset, &id, &reg);
++
++    if (!f)
++        return false;
++    if (pio_access(f, reg, &value, true))
++        return true;
++    switch (reg) {
++    case F_IRQSSET:
++        f->irqstat |= value;
++        return true;
++    case F_IRQSCLR:
++        f->irqstat &= ~value;
++        return true;
++    case F_IRQMSET:
++        f->irqmask |= value;
++        return true;
++    case F_IRQMCLR:
++        f->irqmask &= ~value;
++        return true;
++    case F_IRQDEST:
++        f->irqdest = value;
++        return true;
++    case F_MAILBOX0:
++    case F_MAILBOX1:
++        f->mailbox[(reg - F_MAILBOX0) / 4] = value;
++        return true;
++    case F_CPUCTL:
++    case F_CPUCTL_ALIAS:
++        if (value & CPUCTL_STARTCPU)
++            falcon_start(s, id);
++        return true;
++    default:
++        break;
++    }
++    GM20B_REG(s, offset) = value;
++    if (id == GM20B_PMU && reg == 0x480)
++        f->bind_stat = 5;
++    else if (id == GM20B_PMU && reg == 0x058 && (value & 2))
++        f->bind_stat = 0;
++    else if (id == GM20B_PMU && f->rtos && (reg == PMU_CMDQ_HEAD || reg == PMU_CMDQ_HEAD + 4))
++        pmu_cmdq(s, (reg - PMU_CMDQ_HEAD) / 4);
++    else if (id == GM20B_FECS && reg == 0x504)
++        fecs_method(s, value);
++    return true;
++}
+diff --git a/hw/arm/tegra2/ahb/gpu/gm20b_fifo.c b/hw/arm/tegra2/ahb/gpu/gm20b_fifo.c
+new file mode 100644
+index 0000000..a7eaf1d
+--- /dev/null
++++ b/hw/arm/tegra2/ahb/gpu/gm20b_fifo.c
+@@ -0,0 +1,455 @@
++/*
++ * NVIDIA GM20B host (PFIFO, one PBDMA): runlists, channels, GPFIFO and pushbuffer parsing, host methods, the copy
++ * engine, and the method log.
++ *
++ *  This program is free software; you can redistribute it and/or modify it
++ *  under the terms of the GNU General Public License as published by the
++ *  Free Software Foundation; either version 2 of the License, or
++ *  (at your option) any later version.
++ */
++
++/*
++ * Layouts (nouveau nvkm/engine/fifo/gk104.c, gk110.c; Mesa clb06f.h, clb0b5.h):
++ *  CCSR 0x800000 + 8 * chid: INST (bit 31 bound, 27:0 instance >> 12) and CHANNEL (bit 0 enabled; writes: bit 10 set,
++ *       bit 11 clear; bit 22 PBDMA faulted, 23 engine faulted).
++ *  RAMFC (instance block +0): +0x08/0x0c USERD, +0x48/0x4c GPFIFO base and log2 entries (bits 20:16 of +0x4c).
++ *  USERD: +0x88 GP_GET, +0x8c GP_PUT. GPFIFO entry: VA bits 39:2, length in dwords at bits 30:10 of the high word.
++ *  Runlist (0x2270 base, 0x2274 submit): 8-byte entries, bit 13 of word 0 marks a TSG header.
++ * The host runs a channel from GP_GET to GP_PUT whenever BAR1 is written or the poll timer fires, and keeps its place
++ * in a pushbuffer across an unsatisfied semaphore acquire. Every GPFIFO, pushbuffer and semaphore access is a GMMU
++ * access (gm20b_mmu.c): a bad VA faults the channel as the hardware does and the channel stops.
++ * Engine methods are logged, not executed, but for the semaphore releases of 3D, compute and copy, and the copy
++ * engine's copies and fills (pitch and block-linear, with remap), which the kernel's own channels depend on.
++ */
++
++#include "tegra_common.h"
++#include "qemu/log.h"
++#include "sysemu/dma.h"
++#include "host1x_syncpts.h"
++#include "gm20b.h"
++
++#define CCSR(chid)       (0x800000 + (chid) * 8)
++#define CHAN_ENABLED     (1u << 0)
++#define CHAN_ENABLE_SET  (1u << 10)
++#define CHAN_ENABLE_CLR  (1u << 11)
++#define CHAN_PBDMA_FAULT (1u << 22)
++#define CHAN_ENG_FAULT   (1u << 23)
++
++#define CLASS_HOST   0xb06f
++#define CLASS_COPY   0xb0b5
++#define CLASS_3D     0xb197
++#define CLASS_COMPUTE 0xb1c0
++
++#define POLL_NS      200000
++#define LOG_LINES_MAX 4000000
++
++typedef struct ChannelRun {
++    tegra_gpu *s;
++    unsigned chid;
++    GM20BChannel *c;
++    GM20BAccess host;
++    uint64_t userd;
++    uint64_t gp_base;
++    uint32_t gp_entries;
++    bool blocked;
++    bool stop;
++} ChannelRun;
++
++static uint64_t method_lines;
++
++static uint32_t phys_rd32(uint64_t pa)
++{
++    uint32_t v = 0;
++
++    dma_memory_read(&address_space_memory, pa, &v, 4, MEMTXATTRS_UNSPECIFIED);
++    return le32_to_cpu(v);
++}
++
++static void phys_wr32(uint64_t pa, uint32_t v)
++{
++    v = cpu_to_le32(v);
++    dma_memory_write(&address_space_memory, pa, &v, 4, MEMTXATTRS_UNSPECIFIED);
++}
++
++static void log_method(tegra_gpu *s, unsigned chid, unsigned subc, unsigned cls, uint32_t mthd, uint32_t data,
++                       const char *flag)
++{
++    if (!s->method_log && s->method_log_path && *s->method_log_path) {
++        s->method_log = fopen(s->method_log_path, "w");
++        if (s->method_log)
++            setvbuf(s->method_log, NULL, _IOFBF, 1 << 20);
++    }
++    if (!s->method_log || method_lines >= LOG_LINES_MAX)
++        return;
++    fprintf(s->method_log, "%u %u %04x %04x %08x%s%s\n", chid, subc, cls, mthd, data, flag ? " " : "", flag ? flag : "");
++    if (!(++method_lines & 0xfff))
++        fflush(s->method_log);
++}
++
++static void channel_fault(ChannelRun *r, uint32_t bit, const char *why)
++{
++    r->c->faulted = true;
++    r->stop = true;
++    GM20B_REG(r->s, CCSR(r->chid) + 4) |= bit;
++    gm20b_log_event(r->s, "channel %u stopped: %s", r->chid, why);
++}
++
++/* Semaphores (host SEMAPHORED, 3D/compute SET_REPORT_SEMAPHORE_D, copy LAUNCH_DMA): payload alone, or payload, zero
++ * and the PTIMER time in a 16-byte record. */
++static bool semaphore_release(ChannelRun *r, GM20BAccess *a, uint64_t va, uint32_t payload, bool four_words)
++{
++    uint32_t rec[4] = { cpu_to_le32(payload), 0 };
++    uint64_t now = gm20b_ptimer_ns(r->s);
++
++    rec[2] = cpu_to_le32((uint32_t)now);
++    rec[3] = cpu_to_le32(now >> 32);
++    if (gm20b_vm_rw(a, va, rec, four_words ? 16 : 4, true))
++        return true;
++    channel_fault(r, a == &r->host ? CHAN_PBDMA_FAULT : CHAN_ENG_FAULT, "semaphore release");
++    return false;
++}
++
++static int32_t reduce(unsigned op, uint32_t old, uint32_t v)
++{
++    switch (op) {
++    case 0: return MIN((int32_t)old, (int32_t)v);
++    case 1: return MAX((int32_t)old, (int32_t)v);
++    case 2: return old ^ v;
++    case 3: return old & v;
++    case 4: return old | v;
++    case 5: return old + v;
++    case 6: return old >= v ? 0 : old + 1;
++    case 7: return old == 0 || old > v ? v : old - 1;
++    default: return old;
++    }
++}
++
++/* SEMAPHORED: returns false when an acquire is not yet satisfied (the channel waits at this method) */
++static bool host_semaphore(ChannelRun *r, uint32_t d)
++{
++    GM20BChannel *c = r->c;
++    uint64_t va = ((uint64_t)(c->sem[0] & 0xff) << 32) | (c->sem[1] & ~3u);
++    uint32_t payload = c->sem[2], value = 0;
++    unsigned op = d & 0x1f;
++
++    if (op == 0x2) {
++        semaphore_release(r, &r->host, va, payload, !(d & (1u << 24)));
++        return true;
++    }
++    if (!gm20b_vm_rw(&r->host, va, &value, 4, false)) {
++        channel_fault(r, CHAN_PBDMA_FAULT, "semaphore acquire");
++        return true;
++    }
++    value = le32_to_cpu(value);
++    switch (op) {
++    case 0x1:
++        return value == payload;
++    case 0x4:
++        return (int32_t)(value - payload) >= 0;
++    case 0x8:
++        return (value & payload) != 0;
++    case 0x10:
++        value = cpu_to_le32(reduce((d >> 27) & 0xf, value, payload));
++        if (!gm20b_vm_rw(&r->host, va, &value, 4, true))
++            channel_fault(r, CHAN_PBDMA_FAULT, "semaphore reduction");
++        return true;
++    default:
++        log_method(r->s, r->chid, 0, CLASS_HOST, 0x1c, d, "INVALID_SEMAPHORE_OPERATION");
++        return true;
++    }
++}
++
++static bool host_method(ChannelRun *r, unsigned subc, uint32_t mthd, uint32_t data)
++{
++    GM20BChannel *c = r->c;
++
++    log_method(r->s, r->chid, subc, CLASS_HOST, mthd, data, NULL);
++    switch (mthd) {
++    case 0x00: /* SET_OBJECT */
++        c->class_of[subc] = data & 0xffff;
++        return true;
++    case 0x10: case 0x14: case 0x18:
++        c->sem[(mthd - 0x10) / 4] = data;
++        return true;
++    case 0x1c:
++        return host_semaphore(r, data);
++    case 0x20: /* NON_STALL_INTERRUPT */
++        GM20B_REG(r->s, 0x002100) |= PFIFO_INTR_CHANNEL_INTR;
++        gm20b_update_irqs(r->s);
++        return true;
++    case 0x74: /* SYNCPOINTB: increment (bit 0) the syncpoint in 15:8 */
++        if (data & 1)
++            host1x_incr_syncpt((data >> 8) & 0xff);
++        return true;
++    default:
++        return true;
++    }
++}
++
++/* SET_REPORT_SEMAPHORE_D: RELEASE writes the payload, REPORT_ONLY a zero report; ONE_WORD (bit 28) or four words */
++static void report_semaphore(ChannelRun *r, uint32_t d)
++{
++    GM20BAccess eng = r->host;
++    uint64_t va = ((uint64_t)(r->c->report[0] & 0xff) << 32) | r->c->report[1];
++
++    eng.unit = FAULT_UNIT_GR;
++    eng.client = FAULT_CLIENT_FE;
++    if ((d & 3) == 0 || (d & 3) == 2)
++        semaphore_release(r, &eng, va, (d & 3) == 2 ? 0 : r->c->report[2], !(d & (1u << 28)));
++}
++
++static void copy_method(ChannelRun *r, uint32_t mthd, uint32_t data)
++{
++    GM20BAccess ce = r->host;
++
++    if (!r->c->ce)
++        r->c->ce = g_malloc0(0x800);
++    r->c->ce[(mthd & 0x7fc) / 4] = data;
++    if (mthd != 0x300)
++        return;
++    ce.unit = FAULT_UNIT_CE2;
++    ce.client = FAULT_CLIENT_CE2;
++    if (!gm20b_ce_launch(r->s, &ce, r->c->ce, data))
++        channel_fault(r, CHAN_ENG_FAULT, "copy engine");
++}
++
++static bool engine_method(ChannelRun *r, unsigned subc, uint32_t mthd, uint32_t data)
++{
++    GM20BChannel *c = r->c;
++    unsigned cls = c->class_of[subc];
++
++    log_method(r->s, r->chid, subc, cls, mthd, data, cls ? NULL : "NO_CLASS_BOUND");
++    if (cls == CLASS_COPY && mthd < 0x800)
++        copy_method(r, mthd, data);
++    else if ((cls == CLASS_3D || cls == CLASS_COMPUTE) && mthd >= 0x1b00 && mthd < 0x1b0c)
++        c->report[(mthd - 0x1b00) / 4] = data;
++    else if ((cls == CLASS_3D || cls == CLASS_COMPUTE) && mthd == 0x1b0c)
++        report_semaphore(r, data);
++    return true;
++}
++
++static bool method(ChannelRun *r, unsigned subc, uint32_t mthd, uint32_t data)
++{
++    r->c->methods++;
++    return mthd < 0x100 ? host_method(r, subc, mthd, data) : engine_method(r, subc, mthd, data);
++}
++
++static bool fetch(ChannelRun *r, uint32_t *dword)
++{
++    if (gm20b_vm_rw(&r->host, r->c->seg_va, dword, 4, false)) {
++        *dword = le32_to_cpu(*dword);
++        return true;
++    }
++    channel_fault(r, CHAN_PBDMA_FAULT, "pushbuffer fetch");
++    return false;
++}
++
++static void advance(GM20BChannel *c)
++{
++    c->seg_va += 4;
++    c->seg_left--;
++}
++
++/* One header (Maxwell SEC_OP in bits 31:29), or one data dword of the current method */
++static void step(ChannelRun *r)
++{
++    GM20BChannel *c = r->c;
++    uint32_t dw;
++
++    if (!fetch(r, &dw))
++        return;
++    if (c->count) {
++        if (!method(r, c->subc, c->mthd, dw)) {
++            r->blocked = true;
++            return;
++        }
++        c->count--;
++        if (c->op == 1) {
++            c->mthd += 4;
++        } else if (c->op == 5) {
++            c->mthd += 4;
++            c->op = 3;
++        }
++        advance(c);
++        return;
++    }
++    advance(c);
++    c->op = dw >> 29;
++    c->subc = (dw >> 13) & 7;
++    c->mthd = (dw & 0xfff) << 2;
++    switch (c->op) {
++    case 1: case 3: case 5:
++        c->count = (dw >> 16) & 0x1fff;
++        break;
++    case 4:
++        if (!method(r, c->subc, c->mthd, (dw >> 16) & 0x1fff)) {
++            c->seg_va -= 4;
++            c->seg_left++;
++            r->blocked = true;
++        }
++        break;
++    case 7: /* END_PB_SEGMENT */
++        c->seg_left = 0;
++        break;
++    case 0:
++        if (!dw)
++            break;
++        /* fall through */
++    default:
++        log_method(r->s, r->chid, c->subc, 0, c->mthd, dw, "INVALID_OPCODE");
++        channel_fault(r, CHAN_PBDMA_FAULT, "invalid pushbuffer opcode");
++        break;
++    }
++}
++
++static bool next_entry(ChannelRun *r, uint32_t gp_get)
++{
++    GM20BChannel *c = r->c;
++    uint32_t e[2];
++
++    if (!gm20b_vm_rw(&r->host, r->gp_base + (uint64_t)gp_get * 8, e, 8, false)) {
++        channel_fault(r, CHAN_PBDMA_FAULT, "GPFIFO fetch");
++        return false;
++    }
++    c->seg_va = (le32_to_cpu(e[0]) & ~3u) | ((uint64_t)(le32_to_cpu(e[1]) & 0xff) << 32);
++    c->seg_left = (le32_to_cpu(e[1]) >> 10) & 0x1fffff;
++    c->in_seg = true;
++    c->count = 0;
++    return true;
++}
++
++static bool channel_setup(ChannelRun *r)
++{
++    uint64_t inst = (uint64_t)(GM20B_REG(r->s, CCSR(r->chid)) & 0x0fffffff) << 12;
++    uint32_t hi;
++
++    r->userd = (phys_rd32(inst + 0x08) & ~0x1ffu) | ((uint64_t)phys_rd32(inst + 0x0c) << 32);
++    r->gp_base = (phys_rd32(inst + 0x48) & ~7u) | ((uint64_t)((hi = phys_rd32(inst + 0x4c)) & 0xff) << 32);
++    r->gp_entries = 1u << ((hi >> 16) & 0x1f);
++    return gm20b_access_init(r->s, &r->host, inst, FAULT_UNIT_HOST0, FAULT_CLIENT_HOST);
++}
++
++/* Runs the channel until its GPFIFO is empty, it waits on an acquire or it faults; true if it still has work. */
++static bool run_channel(tegra_gpu *s, unsigned chid)
++{
++    ChannelRun r = { .s = s, .chid = chid, .c = &s->chan[chid] };
++    uint32_t gp_get, gp_put;
++    unsigned budget = 1 << 16;
++
++    if (r.c->faulted || !channel_setup(&r))
++        return false;
++    gp_get = phys_rd32(r.userd + 0x88);
++    gp_put = phys_rd32(r.userd + 0x8c);
++    while (!r.stop && !r.blocked && budget--) {
++        if (!r.c->in_seg || !r.c->seg_left) {
++            if (r.c->in_seg) {
++                r.c->in_seg = false;
++                gp_get = (gp_get + 1) % r.gp_entries;
++                phys_wr32(r.userd + 0x88, gp_get);
++            }
++            if (gp_get == (gp_put % r.gp_entries) || !next_entry(&r, gp_get))
++                break;
++            continue;
++        }
++        step(&r);
++    }
++    return r.blocked || (!r.stop && (r.c->in_seg || gp_get != gp_put % r.gp_entries));
++}
++
++void gm20b_fifo_kick(tegra_gpu *s)
++{
++    uint64_t base = (uint64_t)(s->runlist_base & 0x0fffffff) << 12;
++    bool busy = false;
++
++    for (uint32_t i = 0; s->runlist_base && i < s->runlist_len[0]; i++) {
++        uint32_t w0 = phys_rd32(base + i * 8);
++        unsigned chid = w0 & 0xfff;
++
++        if ((w0 & (1u << 13)) || chid >= GM20B_CHANNELS)
++            continue;
++        if ((GM20B_REG(s, CCSR(chid)) & 0x80000000) && (GM20B_REG(s, CCSR(chid) + 4) & CHAN_ENABLED))
++            busy |= run_channel(s, chid);
++    }
++    if (s->runlist_len[0])
++        timer_mod(s->host_poll, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + (busy ? POLL_NS / 4 : POLL_NS));
++}
++
++void gm20b_fifo_reset(tegra_gpu *s)
++{
++    for (unsigned i = 0; i < GM20B_CHANNELS; i++)
++        g_free(s->chan[i].ce);
++    memset(s->chan, 0, sizeof(s->chan));
++    s->runlist_base = 0;
++    s->runlist_len[0] = s->runlist_len[1] = 0;
++    timer_del(s->host_poll);
++}
++
++bool gm20b_fifo_read(tegra_gpu *s, hwaddr offset, uint32_t *value)
++{
++    if (offset >= CCSR(0) && offset < CCSR(GM20B_CHANNELS)) {
++        *value = GM20B_REG(s, offset);
++        return true;
++    }
++    switch (offset) {
++    case 0x002284: /* runlist 0 info: never pending */
++    case 0x00228c:
++        *value = GM20B_REG(s, offset) & ~(1u << 20);
++        return true;
++    case 0x002634: /* preempt: never pending */
++        *value = GM20B_REG(s, offset) & ~(1u << 20);
++        return true;
++    case 0x002390: /* PBDMA 0 serves runlist 0 */
++        *value = 1;
++        return true;
++    default:
++        return false;
++    }
++}
++
++bool gm20b_fifo_write(tegra_gpu *s, hwaddr offset, uint32_t value)
++{
++    if (offset >= CCSR(0) && offset < CCSR(GM20B_CHANNELS)) {
++        unsigned chid = (offset - CCSR(0)) / 8;
++        if (offset & 4) {
++            uint32_t v = GM20B_REG(s, offset);
++            if (value & CHAN_ENABLE_SET)
++                v |= CHAN_ENABLED;
++            if (value & CHAN_ENABLE_CLR)
++                v &= ~CHAN_ENABLED;
++            if (value & (CHAN_PBDMA_FAULT | CHAN_ENG_FAULT))
++                s->chan[chid].faulted = false;
++            v &= ~(value & (CHAN_PBDMA_FAULT | CHAN_ENG_FAULT));
++            v = (v & ~0x000f0000u) | (value & 0x000f0000u);
++            GM20B_REG(s, offset) = v;
++        } else {
++            GM20B_REG(s, offset) = value;
++            if (!(value & 0x80000000)) {
++                g_free(s->chan[chid].ce);
++                memset(&s->chan[chid], 0, sizeof(s->chan[chid]));
++            }
++        }
++        return true;
++    }
++    switch (offset) {
++    case 0x000204: /* PBDMA enables: GM20B has one */
++        GM20B_REG(s, offset) = value & 1;
++        return true;
++    case 0x002100: /* PFIFO_INTR_0 */
++    case 0x00259c: /* MMU_FAULT_ID */
++        GM20B_REG(s, offset) &= ~value;
++        return true;
++    case 0x002270:
++        s->runlist_base = value;
++        GM20B_REG(s, offset) = value;
++        return true;
++    case 0x002274:
++        gm20b_log_event(s, "runlist %u submit: %u entries at 0x%" PRIx64, (value >> 20) & 0xf, value & 0xffff,
++                        (uint64_t)(s->runlist_base & 0x0fffffff) << 12);
++        s->runlist_len[MIN((value >> 20) & 0xf, 1u)] = value & 0xffff;
++        GM20B_REG(s, offset) = value;
++        gm20b_fifo_kick(s);
++        return true;
++    default:
++        return false;
++    }
++}
+diff --git a/hw/arm/tegra2/ahb/gpu/gm20b_mmu.c b/hw/arm/tegra2/ahb/gpu/gm20b_mmu.c
+new file mode 100644
+index 0000000..c7690fb
+--- /dev/null
++++ b/hw/arm/tegra2/ahb/gpu/gm20b_mmu.c
+@@ -0,0 +1,174 @@
++/*
++ * NVIDIA GM20B GMMU: the two-level walk from an instance block's page directory, and MMU faults as PFIFO reports them.
++ *
++ *  This program is free software; you can redistribute it and/or modify it
++ *  under the terms of the GNU General Public License as published by the
++ *  Free Software Foundation; either version 2 of the License, or
++ *  (at your option) any later version.
++ */
++
++/*
++ * Formats (nouveau nvkm/subdev/mmu/vmmgf100.c, vmmgm200.c):
++ *  instance block +0x200: page directory, bits 1:0 aperture, 2 volatile, 11 big pages are 64 KiB (else 128 KiB),
++ *                         39:12 address; +0x208: the address limit.
++ *  PDE (8 bytes, one per 128 MiB or 64 MiB): low word the big-page table (aperture 1:0, address >> 8 in 31:4), high
++ *       word the 4 KiB-page table (same fields); bit 35 alone marks a sparse directory entry (GM20x).
++ *  PTE: bit 0 valid, 1 privileged, 2 read-only, address >> 8 in 31:4, bit 32 volatile, 34:33 aperture, kind 43:36.
++ *       An invalid PTE with only the volatile bit is sparse on GM20x: reads return zero, writes are dropped.
++ * There is no TLB: invalidates have nothing to drop, so a stale-translation bug cannot show here.
++ * A fault fills the unit's NV_PFIFO_INTR_MMU_FAULT_* record (instance, VA, type/client/access), sets its bit in
++ * MMU_FAULT_ID and PFIFO_INTR_0 MMU_FAULT; a record that is still pending is kept, as the hardware keeps the first.
++ */
++
++#include "tegra_common.h"
++#include "sysemu/dma.h"
++#include "gm20b.h"
++
++#define VA_BITS 40
++
++static uint64_t phys_rd64(uint64_t pa)
++{
++    uint64_t v = 0;
++
++    dma_memory_read(&address_space_memory, pa, &v, 8, MEMTXATTRS_UNSPECIFIED);
++    return le64_to_cpu(v);
++}
++
++static const char *fault_type_name(unsigned type)
++{
++    static const char *const names[] = { "PDE", "PDE_SIZE", "PTE", "VA_LIMIT_VIOLATION", "UNBOUND_INST_BLOCK",
++                                         "PRIV_VIOLATION", "RO_VIOLATION", "WO_VIOLATION", "PITCH_MASK_VIOLATION",
++                                         "WORK_CREATION", "UNSUPPORTED_APERTURE", "COMPRESSION_FAILURE",
++                                         "UNSUPPORTED_KIND", "REGION_VIOLATION", "BOTH_PTES_VALID", "POISONED" };
++    return type < ARRAY_SIZE(names) ? names[type] : "?";
++}
++
++static void raise_fault(GM20BAccess *a, uint64_t va, unsigned type, bool write)
++{
++    tegra_gpu *s = a->s;
++    hwaddr rec = 0x002800 + a->unit * 0x10;
++
++    s->faults++;
++    gm20b_log_event(s, "fault unit 0x%02x client 0x%02x %s %s va 0x%010" PRIx64 " inst 0x%" PRIx64, a->unit,
++                    a->client, write ? "write" : "read", fault_type_name(type), va, a->inst);
++    if (GM20B_REG(s, 0x00259c) & (1u << a->unit))
++        return;
++    GM20B_REG(s, rec + 0x0) = a->inst >> 12;
++    GM20B_REG(s, rec + 0x4) = (uint32_t)va;
++    GM20B_REG(s, rec + 0x8) = va >> 32;
++    GM20B_REG(s, rec + 0xc) = type | (write ? 0x80 : 0) | 0x40 /* hub */ | (a->client << 8);
++    GM20B_REG(s, 0x00259c) |= 1u << a->unit;
++    GM20B_REG(s, 0x002100) |= PFIFO_INTR_MMU_FAULT;
++    gm20b_update_irqs(s);
++}
++
++bool gm20b_access_init(tegra_gpu *s, GM20BAccess *a, uint64_t inst, unsigned unit, unsigned client)
++{
++    uint64_t pd = phys_rd64(inst + 0x200);
++
++    a->s = s;
++    a->inst = inst;
++    a->unit = unit;
++    a->client = client;
++    a->pdb = pd & 0xfffffff000ull;
++    a->big64k = pd & (1u << 11);
++    a->limit = phys_rd64(inst + 0x208);
++    if (!a->pdb) {
++        raise_fault(a, 0, MMU_UNBOUND_INST, false);
++        return false;
++    }
++    return true;
++}
++
++typedef enum { XLATE_OK, XLATE_SPARSE, XLATE_FAULT } XlateResult;
++
++static XlateResult translate(GM20BAccess *a, uint64_t va, bool write, uint64_t *pa, uint64_t *page, unsigned *type)
++{
++    unsigned pd_shift = a->big64k ? 26 : 27, big_shift = a->big64k ? 16 : 17;
++    uint64_t in_pde = va & ((1ull << pd_shift) - 1);
++    uint64_t pde, pte = 0;
++    uint32_t lo, hi;
++
++    if (va >> VA_BITS || (a->limit && va > a->limit)) {
++        *type = MMU_VA_LIMIT;
++        return XLATE_FAULT;
++    }
++    pde = phys_rd64(a->pdb + (va >> pd_shift) * 8);
++    lo = pde, hi = pde >> 32;
++    if (hi & 3) {
++        pte = phys_rd64(((uint64_t)(hi & 0xfffffff0) << 8) + (in_pde >> 12) * 8);
++        *page = 1ull << 12;
++    }
++    if (!(pte & 1) && (lo & 3)) {
++        uint64_t big = phys_rd64(((uint64_t)(lo & 0xfffffff0) << 8) + (in_pde >> big_shift) * 8);
++        if ((big & 1) || !pte) {
++            pte = big;
++            *page = 1ull << big_shift;
++        }
++    }
++    if (!(lo & 3) && !(hi & 3)) {
++        *type = MMU_PDE;
++        return pde == (1ull << 35) ? XLATE_SPARSE : XLATE_FAULT;
++    }
++    if (!(pte & 1)) {
++        *type = MMU_PTE;
++        return pte == (1ull << 32) ? XLATE_SPARSE : XLATE_FAULT;
++    }
++    if (write && (pte & 4)) {
++        *type = MMU_RO;
++        return XLATE_FAULT;
++    }
++    *pa = ((uint64_t)(pte & 0xfffffff0) << 8) + (va & (*page - 1));
++    return XLATE_OK;
++}
++
++bool gm20b_vm_rw(GM20BAccess *a, uint64_t va, void *buf, uint32_t len, bool write)
++{
++    uint8_t *p = buf;
++
++    while (len) {
++        uint64_t pa = 0, page = 1ull << 12;
++        unsigned type = 0;
++        XlateResult r = translate(a, va, write, &pa, &page, &type);
++        uint32_t chunk = MIN(len, page - (va & (page - 1)));
++
++        if (r == XLATE_FAULT) {
++            raise_fault(a, va, type, write);
++            return false;
++        }
++        if (r == XLATE_SPARSE) {
++            if (!write)
++                memset(p, 0, chunk);
++        } else {
++            dma_memory_rw(&address_space_memory, pa, p, chunk, write ? DMA_DIRECTION_FROM_DEVICE : DMA_DIRECTION_TO_DEVICE,
++                          MEMTXATTRS_UNSPECIFIED);
++        }
++        p += chunk;
++        va += chunk;
++        len -= chunk;
++    }
++    return true;
++}
++
++/* BAR1: the CPU's window into the BAR1 address space (NV_PBUS_BAR1_BLOCK 0x1704). A write may be a channel's GP_PUT
++ * in USERD, so the host looks at its channels after every one. */
++void gm20b_bar1_rw(tegra_gpu *s, uint64_t offset, uint64_t *value, unsigned size, bool write)
++{
++    uint32_t block = GM20B_REG(s, 0x001704);
++    GM20BAccess a;
++    uint8_t buf[8] = {};
++
++    if (!(block & 0x80000000) || !gm20b_access_init(s, &a, (uint64_t)(block & 0x0fffffff) << 12, 0x04, 0x07)) {
++        if (!write)
++            *value = 0;
++        return;
++    }
++    if (write) {
++        stq_le_p(buf, *value);
++        gm20b_vm_rw(&a, offset, buf, size, true);
++        gm20b_fifo_kick(s);
++        return;
++    }
++    gm20b_vm_rw(&a, offset, buf, size, false);
++    *value = ldq_le_p(buf) & (size == 8 ? ~0ull : (1ull << (size * 8)) - 1);
++}
+diff --git a/hw/arm/tegra2/ahb/gpu/gpu.c b/hw/arm/tegra2/ahb/gpu/gpu.c
+index 2f05a53..f122627 100644
+--- a/hw/arm/tegra2/ahb/gpu/gpu.c
++++ b/hw/arm/tegra2/ahb/gpu/gpu.c
+@@ -1,5 +1,5 @@
+ /*
+- * ARM NVIDIA X1 emulation.
++ * ARM NVIDIA X1 emulation: the GM20B GPU.
+  *
+  * Copyright (c) yellows8
+  *
+@@ -17,606 +17,317 @@
+  *  with this program; if not, see <http://www.gnu.org/licenses/>.
+  */
+ 
+-// Based on tegra2 device code by digetx.
+-
+-// NOTE: Not intended to render anything.
+-
+-// Various reg names etc are from linux nvgpu.
+-// Various method related names are from deko3d.
++/*
++ * BAR0 is a register file with the behaviour a nouveau-based driver checks: PMC interrupts, PTIMER, the PRI ring,
++ * GPCPLL lock, FB MMU invalidates and WPR info, L2 flushes, the falcons (gm20b_falcon.c), PFIFO with a GMMU walk
++ * (gm20b_fifo.c, gm20b_mmu.c). BAR1 is translated through the BAR1 instance block. Nothing renders: class methods are
++ * logged; the copy engine's pitch copies and fills run.
++ */
+ 
+ #include "tegra_common.h"
+ 
+-#include "hw/sysbus.h"
++#include "hw/irq.h"
++#include "hw/qdev-properties.h"
+ #include "sysemu/dma.h"
+ #include "qemu/log.h"
+-#include "qemu/cutils.h"
+-
+-#include "host1x_syncpts.h"
+ 
+-#include "../host1x/modules/dc/registers/dc.h"
+ #include "devices.h"
+-
+ #include "iomap.h"
+-#include "tegra_trace.h"
++#include "gm20b.h"
+ 
+ #define TYPE_TEGRA_GPU "tegra.gpu"
+ #define TEGRA_GPU(obj) OBJECT_CHECK(tegra_gpu, (obj), TYPE_TEGRA_GPU)
+-#define DEFINE_REG32(reg) reg##_t reg
+-#define WR_MASKED(r, d, m)  r = (r & ~m##_WRMASK) | (d & m##_WRMASK)
+-
+-#define NV_GMMU_VA_RANGE          38
+-
+-//#define TEGRA_GPU_DEBUG
+-
+-typedef struct tegra_gpu_state {
+-    SysBusDevice parent_obj;
+ 
+-    qemu_irq irq_stall;
+-    qemu_irq irq_nonstall;
+-    MemoryRegion iomem;
+-    uint32_t regs[0x2000000>>2];
+-} tegra_gpu;
+-
+-static const VMStateDescription vmstate_tegra_gpu = {
+-    .name = TYPE_TEGRA_GPU,
+-    .version_id = 1,
+-    .minimum_version_id = 1,
+-    .fields = (VMStateField[]) {
+-        VMSTATE_UINT32_ARRAY(regs, tegra_gpu, 0x2000000>>2),
+-        VMSTATE_END_OF_LIST()
+-    }
+-};
+-
+-typedef union tegra_gpu_cmdhdr {
+-    struct {
+-        unsigned int method_address:12;
+-        unsigned int reserved:1;
+-        unsigned int method_subchannel:3;
+-        unsigned int arg:13;
+-        unsigned int sec_op:3;
+-    };
+-
+-    uint32_t data;
+-} tegra_gpu_cmdhdr;
+-
+-typedef union tegra_gpu_method_syncpoint {
+-    struct {
+-        unsigned int operation:1;
+-        unsigned int unk:3;
+-        unsigned int wait_switch:1;
+-        unsigned int unk2:3;
+-        unsigned int syncpt_index:8;
+-    };
+-
+-    uint32_t data;
+-} tegra_gpu_method_syncpoint;
+-
+-typedef union tegra_gpu_method_syncptaction {
+-    struct {
+-        unsigned int id:12;
+-        unsigned int unk:4;
+-        unsigned int flush_cache:1;
+-        unsigned int unk2:3;
+-        unsigned int increment:1;
+-    };
+-
+-    uint32_t data;
+-} tegra_gpu_method_syncptaction;
+-
+-typedef union tegra_gpu_method_setreportsemaphore {
+-    struct {
+-        unsigned int operation:2;
+-        unsigned int flush_disable:1;
+-        unsigned int reduction_enable:1;
+-        unsigned int fence_enable:1;
+-        unsigned int unk:4;
+-        unsigned int reduction_op:3;
+-        unsigned int unit:4;
+-        unsigned int sync_condition:1;
+-        unsigned int format:2;
+-        unsigned int unk2:1;
+-        unsigned int awaken_enable:1;
+-        unsigned int unk3:2;
+-        unsigned int counter:5;
+-        unsigned int structure_size:1;
+-        unsigned int unk4:3;
+-    };
+-
+-    uint32_t data;
+-} tegra_gpu_method_setreportsemaphore;
+-
+-#ifdef TEGRA_GPU_DEBUG
+-static void tegra_gpu_log_hexdump(const char *prefix,
+-                                  const void *bufptr, size_t size)
++#define PMC_INTR_0      0x000100
++#define PMC_INTR_1      0x000104
++#define PMC_INTR_EN_0   0x000140
++#define PMC_INTR_EN_1   0x000144
++#define PMC_ALLOW_0     0x000640
++#define PMC_ALLOW_1     0x000644
++#define PFIFO_INTR_0    0x002100
++#define PFIFO_INTR_EN_0 0x002140
++#define PTIMER_INTR_0   0x009100
++#define PTIMER_INTR_EN  0x009140
++#define PTIMER_TIME_0   0x009400
++#define PTIMER_TIME_1   0x009410
++#define PTIMER_ALARM_0  0x009420
++
++#define MC_INTR_FIFO    (1u << 8)
++#define MC_INTR_GR      (1u << 12)
++#define MC_INTR_TIMER   (1u << 20)
++#define MC_INTR_PMU     (1u << 24)
++
++#define MC_CARVEOUT2_BOM  0x70019c5c
++#define MC_CARVEOUT2_SIZE 0x70019c64
++
++uint64_t gm20b_ptimer_ns(tegra_gpu *s)
+ {
+-    FILE *f = qemu_log_trylock();
+-    if (f) {
+-        qemu_hexdump(f, prefix, bufptr, size);
+-        qemu_log_unlock(f);
+-    }
++    return qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + s->ptimer_offset;
+ }
+-#endif
+ 
+-static MemTxResult tegra_gpu_translate_gmmu(tegra_gpu *s, dma_addr_t addr,
+-                                            dma_addr_t *out_addr,
+-                                            IOMMUAccessFlags flag, dma_addr_t pdb, bool big_page_size)
++void gm20b_log_event(tegra_gpu *s, const char *fmt, ...)
+ {
+-    MemTxResult res = MEMTX_OK;
+-
+-    *out_addr = 0;
+-
+-    pdb &= (1ULL<<34)-1; // TODO: handle properly?
+-
+-    size_t pde_lowbit = big_page_size ? 27 : 26;
+-    size_t pte_lowbit = 12;
+-
+-    if (addr >= SZ_1G*16) // big pages range
+-        pte_lowbit = big_page_size ? 17 : 16;
+-
+-    uint64_t pde_i = (addr & ((1ULL<<NV_GMMU_VA_RANGE)-1)) >> pde_lowbit;
+-    uint64_t pte_i = (addr & ((1ULL<<pde_lowbit)-1)) >> pte_lowbit;
+-
+-    uint32_t pde[2]={};
+-    uint32_t pte[2]={};
+-
+-    dma_addr_t pte_base=0;
+-
+-    res = dma_memory_read(&address_space_memory, pdb + pde_i*8,
+-                          pde, sizeof(pde),
+-                          MEMTXATTRS_UNSPECIFIED);
+-
+-    if (res == MEMTX_OK) {
+-        if ((pde[0] & 0x1) && (pde[1] & 0x8)) { // gmmu_pde_aperture_big_video_memory_f, gmmu_pde_vol_big_true_f
+-            pte_base = ((dma_addr_t)pde[0]>>4) << 12;
+-        }
+-        else if ((pde[1] & 0x1) && (pde[1] & 0x4)) { // gmmu_pde_aperture_small_video_memory_f, gmmu_pde_vol_small_true_f
+-            pte_base = ((dma_addr_t)pde[1]>>4) << 12;
+-        }
+-        else
+-            res = MEMTX_DECODE_ERROR;
+-    }
+-
+-    if (res == MEMTX_OK) {
+-        pte_base &= (1ULL<<34)-1;
+-
+-        res = dma_memory_read(&address_space_memory, pte_base + pte_i*8,
+-                              pte, sizeof(pte),
+-                              MEMTXATTRS_UNSPECIFIED);
+-    }
+-
+-    if (res == MEMTX_OK) {
+-        if (pte[0] & 0x1) { // gmmu_pte_valid_true_f
+-            if (((pte[0] & 0x4) && (flag & IOMMU_WO)) ||      // gmmu_pte_read_only_true_f
+-                ((pte[1] & 0x40000000) && (flag & IOMMU_RO))) // gmmu_pte_read_disable_true_f
+-                res = MEMTX_ACCESS_ERROR;
+-        }
+-        else
+-            res = MEMTX_DECODE_ERROR;
+-    }
+-
+-    if (res == MEMTX_OK) {
+-        *out_addr = ((dma_addr_t)pte[0]>>4) << 12;
+-        *out_addr &= (1ULL<<34)-1;
+-        *out_addr |= addr & ((1ULL<<pte_lowbit)-1);
+-    }
+-
+-    return res;
++    va_list ap;
++
++    if (!s->event_log && s->event_log_path && *s->event_log_path)
++        s->event_log = fopen(s->event_log_path, "w");
++    if (!s->event_log)
++        return;
++    fprintf(s->event_log, "%" PRIu64 " ", gm20b_ptimer_ns(s));
++    va_start(ap, fmt);
++    vfprintf(s->event_log, fmt, ap);
++    va_end(ap);
++    fputc('\n', s->event_log);
++    fflush(s->event_log);
+ }
+ 
+-#if 0
+-static void tegra_gpu_dump_gmmu_pages(tegra_gpu *s, dma_addr_t pdb, bool big_page_size, dma_addr_t gva, dma_addr_t size)
++void gm20b_update_irqs(tegra_gpu *s)
+ {
+-    MemTxResult res = MEMTX_OK;
+-    dma_addr_t ptr = 0;
+-    dma_addr_t databuf_size = 0x1000;
+-    dma_addr_t tmplen_in=databuf_size;
+-
+-    for (dma_addr_t i=0; i<size; i+=databuf_size) {
+-        res = tegra_gpu_translate_gmmu(s, gva + i,
+-                                       &ptr,
+-                                       IOMMU_RO, pdb, big_page_size);
+-        if (res != MEMTX_OK) {
+-            qemu_log_mask(LOG_GUEST_ERROR, "tegra_gpu_dump_gmmu_pages: tegra_gpu_translate_gmmu(0x%" PRIX64 ") failed: 0x%x.\n", gva + i, res);
+-            continue;
+-        }
+-
+-        void* databuf = dma_memory_map(&address_space_memory, ptr, &tmplen_in, DMA_DIRECTION_TO_DEVICE, MEMTXATTRS_UNSPECIFIED);
+-
+-        if (databuf) {
+-            qemu_log_mask(LOG_GUEST_ERROR, "tegra_gpu_dump_gmmu_pages: Dumping gva 0x%" PRIX64 ":\n", gva + i);
+-            tegra_gpu_log_hexdump("tegra_gpu_dump_gmmu_pages", databuf, databuf_size);
+-
+-            dma_memory_unmap(&address_space_memory, databuf, databuf_size, DMA_DIRECTION_TO_DEVICE, databuf_size);
+-        }
+-        else {
+-            qemu_log_mask(LOG_GUEST_ERROR, "tegra_gpu_dump_gmmu_pages: dma_memory_map(0x%" PRIX64 ") failed.\n", ptr);
+-        }
+-    }
++    uint32_t stall = 0, nonstall = 0;
++    uint32_t fifo = GM20B_REG(s, PFIFO_INTR_0) & GM20B_REG(s, PFIFO_INTR_EN_0);
++
++    if (fifo)
++        stall |= MC_INTR_FIFO;
++    /* nvgpu takes the channel (nonstall) interrupt from PMC_INTR_1; nouveau's FIFO handler reads it from leaf 0 */
++    if (fifo & PFIFO_INTR_CHANNEL_INTR)
++        nonstall |= MC_INTR_FIFO;
++    if (GM20B_REG(s, PTIMER_INTR_0) & GM20B_REG(s, PTIMER_INTR_EN))
++        stall |= MC_INTR_TIMER;
++    if (gm20b_falcon_pending(s, GM20B_PMU))
++        stall |= MC_INTR_PMU;
++    if (GM20B_REG(s, 0x400100) || gm20b_falcon_pending(s, GM20B_FECS))
++        stall |= MC_INTR_GR;
++    GM20B_REG(s, PMC_INTR_0) = stall;
++    GM20B_REG(s, PMC_INTR_1) = nonstall;
++    qemu_set_irq(s->irq_stall, (GM20B_REG(s, PMC_INTR_EN_0) & 1) && (stall & GM20B_REG(s, PMC_ALLOW_0)));
++    qemu_set_irq(s->irq_nonstall, (GM20B_REG(s, PMC_INTR_EN_1) & 1) && (nonstall & GM20B_REG(s, PMC_ALLOW_1)));
+ }
+-#endif
+ 
+-static MemTxResult tegra_gpu_rw_gmmu(tegra_gpu *s,
+-                                     dma_addr_t *gva, dma_addr_t *gva_tmp, dma_addr_t *ptr,
+-                                     dma_addr_t pdb, bool big_page_size,
+-                                     void* data, size_t size,
+-                                     DMADirection dir)
++static void ptimer_arm(tegra_gpu *s)
+ {
+-    MemTxResult res = MEMTX_OK;
+-    if (*ptr==0 || (((*gva) & ~0xFFF) != ((*gva_tmp) & ~0xFFF))) {
+-        *gva = (*gva_tmp) & ~0xFFF;
+-        res = tegra_gpu_translate_gmmu(s, *gva,
+-                                       ptr,
+-                                       IOMMU_RO, pdb, big_page_size);
+-        if (res != MEMTX_OK) return res;
+-    }
++    uint32_t now = (uint32_t)gm20b_ptimer_ns(s);
++    int32_t ahead = (int32_t)(GM20B_REG(s, PTIMER_ALARM_0) - now);
+ 
+-    res = dma_memory_rw(&address_space_memory, (*ptr) | ((*gva_tmp) & 0xFFF),
+-                          data, size,
+-                          dir,
+-                          MEMTXATTRS_UNSPECIFIED);
+-    return res;
++    timer_mod(s->ptimer_alarm, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + (ahead > 0 ? ahead : 0));
+ }
+ 
+-static dma_addr_t tegra_gpu_pb_cmd_get_iova(uint32_t *args)
++static void ptimer_fire(void *opaque)
+ {
+-    return (((dma_addr_t)args[0])<<32) | args[1];
++    tegra_gpu *s = opaque;
++
++    GM20B_REG(s, PTIMER_INTR_0) |= 1;
++    gm20b_update_irqs(s);
+ }
+ 
+-static MemTxResult tegra_gpu_parse_pb_cmd(tegra_gpu *s,
+-                                               tegra_gpu_cmdhdr cmdhdr, uint32_t *args, size_t argscount,
+-                                               dma_addr_t pdb, bool big_page_size)
++static uint32_t mc_read(uint64_t pa)
+ {
+-    MemTxResult res = MEMTX_OK;
+-    uint32_t addr = cmdhdr.method_address;
+-    dma_addr_t gva = 0, iova = 0, ptr = 0;
+-
+-    if (addr == 0x1C) { // Syncpoint
+-        if (argscount != 2) {
+-            qemu_log_mask(LOG_GUEST_ERROR, "tegra_gpu_parse_pb_cmd: The argscount for Syncpoint is 0x%zx, expected 0x%x.\n", argscount, 2);
+-        }
+-        else {
+-            tegra_gpu_method_syncpoint *sync = (void*)&args[1];
+-
+-            if (sync->operation == 1) { // Incr
+-                host1x_incr_syncpt(sync->syncpt_index);
+-            }
+-            else {
+-                qemu_log_mask(LOG_GUEST_ERROR, "tegra_gpu_parse_pb_cmd: Syncpoint operation=0x%x is not supported, ignoring.\n", sync->operation);
+-            }
+-        }
+-    }
+-    else if (addr == 0xB2) { // SyncptAction
+-        if (argscount != 1) {
+-            qemu_log_mask(LOG_GUEST_ERROR, "tegra_gpu_parse_pb_cmd: The argscount for SyncptAction is 0x%zx, expected 0x%x.\n", argscount, 1);
+-        }
+-        else {
+-            tegra_gpu_method_syncptaction *action = (void*)&args[0];
+-
+-            if (action->increment) {
+-                host1x_incr_syncpt(action->id);
+-            }
+-            else {
+-                qemu_log_mask(LOG_GUEST_ERROR, "tegra_gpu_parse_pb_cmd: SetReportSemaphore increment=0 is not supported (flush_cache=0x%x), ignoring.\n", action->flush_cache);
+-            }
+-        }
+-    }
+-    else if (addr == 0x6C0) { // SetReportSemaphore*
+-        if (argscount != 4) {
+-            qemu_log_mask(LOG_GUEST_ERROR, "tegra_gpu_parse_pb_cmd: The argscount for SetReportSemaphore is 0x%zx, expected 0x%x.\n", argscount, 4);
+-        }
+-        else {
+-            tegra_gpu_method_setreportsemaphore *sema = (void*)&args[3];
+-
+-            if (sema->operation == 0) { // Release
+-                if (sema->reduction_enable) {
+-                    qemu_log_mask(LOG_GUEST_ERROR, "tegra_gpu_parse_pb_cmd: SetReportSemaphore ReductionEnable is not supported, ignoring.\n");
+-                }
+-                else {
+-                    iova = tegra_gpu_pb_cmd_get_iova(&args[0]);
+-
+-                    // Write SetReportSemaphorePayload to the iova.
+-                    res = tegra_gpu_rw_gmmu(s,
+-                                            &gva, &iova, &ptr,
+-                                            pdb, big_page_size,
+-                                            &args[2], sizeof(args[2]),
+-                                            DMA_DIRECTION_FROM_DEVICE);
+-                }
+-            }
+-            else {
+-                qemu_log_mask(LOG_GUEST_ERROR, "tegra_gpu_parse_pb_cmd: SetReportSemaphore Operation 0x%x is not supported, ignoring.\n", sema->operation);
+-            }
+-        }
+-    }
++    uint32_t v = 0;
+ 
+-    return res;
++    address_space_read(&address_space_memory, pa, (MemTxAttrs){ .secure = 1 }, &v, 4);
++    return le32_to_cpu(v);
+ }
+ 
+-static MemTxResult tegra_gpu_parse_gpfifo_cmds(tegra_gpu *s,
+-                                               dma_addr_t gpu_iova, size_t size, uint32_t desc_high,
+-                                               dma_addr_t pdb, bool big_page_size)
++/* NV_PFB_PRI_MMU_WPR_INFO: on Tegra the GPU's WPR1 is the memory controller's generalized carveout 2 (hekate's GPU
++ * firmware carveout), which the MC sends to the GPU. The address fields are bits 39:8 of a 128 KiB-aligned address. */
++static uint32_t wpr_info(tegra_gpu *s)
+ {
+-    MemTxResult res = MEMTX_OK;
+-    dma_addr_t gpfifo_gva = 0, gpfifo_gva_tmp = 0, gpfifo_ptr = 0;
+-    tegra_gpu_cmdhdr cmdhdr={};
+-    static uint32_t gpfifo_args[0x2000>>2]={};
+-    size_t argscount=0;
+-
+-    #ifdef TEGRA_GPU_DEBUG
+-    qemu_log_mask(LOG_GUEST_ERROR, "tegra_gpu_parse_gpfifo_cmds: gpu_iova = 0x%" PRIx64 ", size = 0x%zx, desc_high = 0x%x\n", gpu_iova, size, desc_high);
+-    #endif
+-
+-    for (size_t i=0; i<size; i++) {
+-        gpfifo_gva_tmp = gpu_iova + i*4;
+-
+-        res = tegra_gpu_rw_gmmu(s,
+-                                &gpfifo_gva, &gpfifo_gva_tmp, &gpfifo_ptr,
+-                                pdb, big_page_size,
+-                                &cmdhdr, sizeof(cmdhdr),
+-                                DMA_DIRECTION_TO_DEVICE);
+-        if (res != MEMTX_OK) break;
+-
+-        argscount = 1;
+-        if (cmdhdr.sec_op == 4 || cmdhdr.sec_op == 7 || cmdhdr.data == 0x0) // IMMD_DATA_METHOD, END_PB_SEGMENT
+-            argscount = 0;
+-        else if (cmdhdr.sec_op == 1 || cmdhdr.sec_op == 3 || cmdhdr.sec_op == 5) // INC_METHOD, NON_INC_METHOD, ONE_INC
+-            argscount = cmdhdr.arg;
+-
+-        #ifdef TEGRA_GPU_DEBUG
+-        qemu_log_mask(LOG_GUEST_ERROR, "tegra_gpu_parse_gpfifo_cmds hdr: data = 0x%x, method_address = 0x%x, reserved = 0x%x, method_subchannel = 0x%x, arg = 0x%x, sec_op = 0x%x\n", cmdhdr.data, cmdhdr.method_address, cmdhdr.reserved, cmdhdr.method_subchannel, cmdhdr.arg, cmdhdr.sec_op);
+-        #endif
+-
+-        for (size_t i2=0; i2<argscount; i++, i2++) {
+-            if (i+1 >= size) {
+-                qemu_log_mask(LOG_GUEST_ERROR, "tegra_gpu_parse_gpfifo_cmds: Aborting since argscount 0x%zx (i2=0x%zx) is larger then the remaining size.\n", argscount, i2);
+-                return res;
+-            }
+-            gpfifo_gva_tmp = gpu_iova + (i+1)*4;
+-            res = tegra_gpu_rw_gmmu(s,
+-                                    &gpfifo_gva, &gpfifo_gva_tmp, &gpfifo_ptr,
+-                                    pdb, big_page_size,
+-                                    &gpfifo_args[i2], sizeof(gpfifo_args[i2]),
+-                                    DMA_DIRECTION_TO_DEVICE);
+-            if (res != MEMTX_OK) break;
+-        }
+-        if (res != MEMTX_OK) break;
+-
+-        #ifdef TEGRA_GPU_DEBUG
+-        if (argscount) tegra_gpu_log_hexdump("tegra_gpu_parse_gpfifo_cmds args", gpfifo_args, argscount*sizeof(uint32_t));
+-        #endif
+-
+-        if (cmdhdr.sec_op == 7) // END_PB_SEGMENT
+-            break;
+-
+-        res = tegra_gpu_parse_pb_cmd(s,
+-                                     cmdhdr, gpfifo_args, argscount,
+-                                     pdb, big_page_size);
+-        if (res != MEMTX_OK) break;
++    uint64_t base = mc_read(MC_CARVEOUT2_BOM);
++    uint64_t bytes = (uint64_t)mc_read(MC_CARVEOUT2_SIZE) << 17;
++
++    switch (GM20B_REG(s, 0x100cd4) & 0xf) {
++    case 2:
++        return (base >> 8) & 0xffffff00;
++    case 3:
++        return bytes ? ((base + bytes - 0x20000) >> 8) & 0xffffff00 : 0;
++    default:
++        return 0;
+     }
+-
+-    return res;
+ }
+ 
+-static MemTxResult tegra_gpu_parse_gpfifo(tegra_gpu *s, uint32_t original_value, uint32_t value,
+-                                          dma_addr_t gpfifo_base, dma_addr_t gpfifo_entries, dma_addr_t pdb, bool big_page_size)
++static bool special_read(tegra_gpu *s, hwaddr offset, uint32_t *value)
+ {
+-    MemTxResult res = MEMTX_OK;
+-    dma_addr_t gpfifo_gva = 0, gpfifo_gva_tmp = 0, gpfifo_ptr = 0;
+-    dma_addr_t data_gva = 0;
+-    uint32_t gpfifo[2]={}; // struct gpfifo_entry
+-    size_t size = 0;
+-
+-    for (uint64_t i=original_value % gpfifo_entries; i!=value; i = (i+1) % gpfifo_entries) {
+-        gpfifo_gva_tmp = gpfifo_base + i*8;
+-
+-        res = tegra_gpu_rw_gmmu(s,
+-                                &gpfifo_gva, &gpfifo_gva_tmp, &gpfifo_ptr,
+-                                pdb, big_page_size,
+-                                gpfifo, sizeof(gpfifo),
+-                                DMA_DIRECTION_TO_DEVICE);
+-        if (res != MEMTX_OK) break;
+-
+-        data_gva = gpfifo[0] | (((dma_addr_t)gpfifo[1] & 0xFF) << 32); // gpu_iova
+-        size = (gpfifo[1] & ~BIT(31)) >> 10;
+-
+-        res = tegra_gpu_parse_gpfifo_cmds(s, data_gva, size, gpfifo[1], pdb, big_page_size);
+-        if (res != MEMTX_OK) break;
++    switch (offset) {
++    case PTIMER_TIME_0:
++        *value = (uint32_t)gm20b_ptimer_ns(s);
++        return true;
++    case PTIMER_TIME_1:
++        *value = gm20b_ptimer_ns(s) >> 32;
++        return true;
++    case 0x100c80: /* MMU_CTRL: free invalidate slots, and an empty (acknowledged) queue */
++        *value = (GM20B_REG(s, offset) & ~0x00ff8000) | (0x10 << 16) | (1 << 15);
++        return true;
++    case 0x100cd4:
++        *value = wpr_info(s);
++        return true;
++    default:
++        return false;
+     }
+-
+-    return res;
+ }
+ 
+-static void tegra_gpu_process_gpfifo(tegra_gpu *s, uint32_t channel_id, uint32_t original_value, uint32_t value)
++static uint64_t tegra_gpu_priv_read(void *opaque, hwaddr offset, unsigned size)
+ {
+-    uint32_t ccsr = s->regs[(0x00800000 + channel_id*8)>>2]; // ccsr_channel_inst
+-
+-    if (ccsr & 0x80000000) { // ccsr_channel_inst_bind_true_f
+-        dma_addr_t inst_ptr = (((dma_addr_t)ccsr) & 0xFFFFFFF) << 12;
+-        inst_ptr &= (1ULL<<34)-1;
+-
+-        uint32_t inst[134]={};
+-        uint32_t *gp_base = &inst[18]; // ram_fc_gp_base/ram_fc_gp_base_hi_w
+-        uint32_t *page_dir_base = &inst[128]; // ram_in_page_dir_base_lo_w/ram_in_page_dir_base_hi_w
+-
+-        if (dma_memory_read(&address_space_memory, inst_ptr,
+-                            inst, sizeof(inst),
+-                            MEMTXATTRS_UNSPECIFIED) == MEMTX_OK) {
+-            dma_addr_t gpfifo_base = gp_base[0] & (0x1FFFFFFF << 3);
+-            gpfifo_base |= ((dma_addr_t)gp_base[1] & 0xFF) << 32;
+-
+-            dma_addr_t gpfifo_entries = (gp_base[1] >> 16) & 0x1F; // pbdma_gp_base_hi_limit2_f
+-            gpfifo_entries = 1<<gpfifo_entries;
+-
+-            dma_addr_t pdb = page_dir_base[0] & (0xFFFFF << 12);
+-            pdb |= ((dma_addr_t)page_dir_base[1] & 0xFF) << 32;
+-
+-            bool big_page_size = (page_dir_base[0] & 0x800) == 0; // big_page_size. Bit clear for 128kb, set for 64kb.
+-
+-            #ifdef TEGRA_GPU_DEBUG
+-            qemu_log_mask(LOG_GUEST_ERROR, "tegra_gpu_process_gpfifo: gpfifo_base = 0x%" PRIx64 ", gpfifo_entries = 0x%" PRIx64 ", pdb = 0x%" PRIx64 ", big_page_size = %d\n", gpfifo_base, gpfifo_entries, pdb, big_page_size);
+-            #endif
++    tegra_gpu *s = opaque;
++    uint32_t value;
+ 
+-            MemTxResult res = tegra_gpu_parse_gpfifo(s, original_value, value, gpfifo_base, gpfifo_entries, pdb, big_page_size);
+-            if (res != MEMTX_OK) qemu_log_mask(LOG_GUEST_ERROR, "tegra_gpu_process_gpfifo: tegra_gpu_parse_gpfifo(): 0x%x\n", res);
+-        }
++    if (offset >= GM20B_BAR1_OFFSET) {
++        uint64_t v = 0;
++        gm20b_bar1_rw(s, offset - GM20B_BAR1_OFFSET, &v, size, false);
++        return v;
+     }
++    if (!special_read(s, offset & ~3, &value) && !gm20b_falcon_read(s, offset & ~3, &value) &&
++        !gm20b_fifo_read(s, offset & ~3, &value))
++        value = GM20B_REG(s, offset & ~3);
++    return extract64(value, (offset & 3) * 8, size * 8);
+ }
+ 
+-static uint64_t tegra_gpu_priv_read(void *opaque, hwaddr offset,
+-                                     unsigned size)
++/* Registers whose operation completes at once on the model; the driver waits for these bits. */
++static void write_completes(tegra_gpu *s, hwaddr offset, uint32_t value)
+ {
+-    tegra_gpu *s = opaque;
+-    uint64_t ret = 0;
+-
+-    if (offset+size <= sizeof(s->regs))
+-        ret = s->regs[offset/sizeof(uint32_t)] & ((1ULL<<size*8)-1);
+-
+-    TRACE_READ(s->iomem.addr, offset, ret);
+-
+-    return ret;
++    switch (offset) {
++    case 0x070000: /* FB flush */
++    case 0x070004: /* L2 invalidate */
++    case 0x070010: /* L2 flush dirty */
++    case 0x070014: /* L2 clean comptags */
++        GM20B_REG(s, offset) = value & ~3u;
++        break;
++    case 0x12004c: /* PRI ring master command */
++        GM20B_REG(s, offset) = 0;
++        break;
++    case 0x137000: /* GPCPLL_CFG: lock once enabled and out of IDDQ */
++        GM20B_REG(s, offset) = (value & 1) && !(value & 2) ? value | (1u << 17) : value & ~(1u << 17);
++        break;
++    case 0x13701c: /* GPCPLL_NDIV_SLOWDOWN: a dynamic ramp is done at once */
++        GM20B_REG(s, 0x1328a0) |= 1u << 24;
++        break;
++    case 0x17e8c8: /* LTC CBC_CTRL1: clear, clean and invalidate are done */
++        GM20B_REG(s, offset) = value & ~0x7u;
++        break;
++    default:
++        break;
++    }
+ }
+ 
+-static void tegra_gpu_priv_write(void *opaque, hwaddr offset,
+-                                  uint64_t value, unsigned size)
++static void tegra_gpu_priv_write(void *opaque, hwaddr offset, uint64_t value, unsigned size)
+ {
+     tegra_gpu *s = opaque;
++    uint32_t v = value;
+ 
+-    TRACE_WRITE(s->iomem.addr, offset, 0, value);
+-
+-    // NOTE: Mailbox-ret values for sizes below are dummy values, not the proper values from hardware.
+-
+-    if (offset+size <= sizeof(s->regs)) {
+-        if (offset < 4) return; // Ignore id reg.
+-
+-        if (offset == 0x2638) {
+-            s->regs[offset>>2] = value;
+-
+-            s->regs[0x00002a00>>2] |= value;
+-            if (s->regs[0x00002a00>>2])
+-                TRACE_IRQ_RAISE(s->iomem.addr, s->irq_nonstall);
+-            s->regs[0x20290>>2] = 0;
+-        }
+-        else if (offset == 0x00002a00) { // fifo_intr_runlist_r
+-            s->regs[offset>>2] &= ~value;
+-            if (s->regs[offset>>2] == 0)
+-                TRACE_IRQ_LOWER(s->iomem.addr, s->irq_nonstall);
+-            return;
+-        }
+-
+-        uint32_t original_value = s->regs[offset/sizeof(uint32_t)];
+-
+-        s->regs[offset/sizeof(uint32_t)] = (s->regs[offset/sizeof(uint32_t)] & ~((1ULL<<size*8)-1)) | value;
+-
+-        if ((offset == 0x00070000 || offset == 0x00070004 || offset == 0x00070010) && (value & BIT(0))) // flush_fb_flush/flush_l2_system_invalidate/flush_l2_flush_dirty_r pending
+-            s->regs[offset>>2] &= ~(BIT(0) | BIT(1)); // Clear pending (from busy) and outstanding.
+-        else if (offset == 0x100C80 && (value & BIT(12)))
+-            s->regs[offset>>2] |= 0x1<<16;
+-        else if (offset == 0x100C80+0x3C && (value & BIT(31)))
+-            s->regs[0x100C80>>2] |= BIT(15);
+-        else if (offset == 0x10A004 && (value & BIT(4)))
+-            s->regs[0x10A008>>2] &= ~BIT(4);
+-        else if (offset == 0x10A100 && (value & BIT(1))) {
+-            s->regs[offset>>2] |= BIT(4);
+-            s->regs[0x10A040>>2] = 0;
+-        }
+-        else if (offset == 0x137014 && (value & BIT(30)))
+-            s->regs[offset>>2] |= BIT(31);
+-        else if (offset == 0x13701C && (value & BIT(31)))
+-            s->regs[0x1328A0>>2] |= BIT(24);
+-        else if (offset == 0x409130 && (value & BIT(1)))
+-            s->regs[0x409800>>2] = 0x1; // gr_fecs_ctxsw_mailbox(0) = eUcodeHandshakeInitComplete
+-        else if (offset == 0x409400 && (value & BIT(12)))
+-            s->regs[offset>>2] &= ~BIT(12);
+-        else if (offset == 0x409504) { // gr_fecs_method_push
+-            if (value == 0x00000004) { // gr_fecs_method_push_adr_halt_pipeline_v
+-                s->regs[(0x409800+(1*4))>>2] = 0x1; // gr_fecs_ctxsw_mailbox(1) = gr_fecs_ctxsw_mailbox_value_pass_v
+-            }
+-            else if (value == 0x00000003) { // gr_fecs_method_push_adr_bind_pointer_v
+-                s->regs[(0x409800+(0*4))>>2] = 0x10; // gr_fecs_ctxsw_mailbox(0)
+-            }
+-            else if (value == 0x00000009) { // gr_fecs_method_push_adr_wfi_golden_save_v
+-                s->regs[(0x409800+(0*4))>>2] = 0x1; // gr_fecs_ctxsw_mailbox(0)
+-            }
+-            else if (value == 0x00000015) { // gr_fecs_method_push_adr_restore_golden_v
+-                s->regs[(0x409800+(0*4))>>2] = 0x1; // gr_fecs_ctxsw_mailbox(0) = gr_fecs_ctxsw_mailbox_value_pass_v
+-            }
+-            else if (value == 0x00000010 || value == 0x00000016 || value == 0x00000025) { // gr_fecs_method_push_adr_discover_image_size_v, gr_fecs_method_push_adr_discover_zcull_image_size_v, gr_fecs_method_push_adr_discover_pm_image_size_v
+-                s->regs[(0x409800+(0*4))>>2] = 0x1; // gr_fecs_ctxsw_mailbox(0)
+-                //if (value == 0x00000010) s->regs[(0x409800+(0*4))>>2] = 0x4;
+-                // NOTE: These use the mailbox ret as size values.
+-            }
+-            else if (value == 0x00000030) { // gr_fecs_method_push_adr_discover_reglist_image_size_v
+-                s->regs[(0x409800+(0*4))>>2] = 0x1; // gr_fecs_ctxsw_mailbox(0)
+-                // NOTE: Mailbox ret is used as a size value.
+-            }
+-            else if (value == 0x00000031 || value == 0x00000032) { // gr_fecs_method_push_adr_set_reglist_bind_instance_v, gr_fecs_method_push_adr_set_reglist_virtual_address_v
+-                s->regs[(0x409800+(4*4))>>2] = 0x1; // gr_fecs_ctxsw_mailbox(4)
+-            }
+-            else if (value == 0x00000038 || value == 0x00000038) { // gr_fecs_method_push_adr_stop_ctxsw_v, gr_fecs_method_push_adr_start_ctxsw_v
+-                s->regs[(0x409800+(1*4))>>2] = 0x1; // gr_fecs_ctxsw_mailbox(1) = gr_fecs_ctxsw_mailbox_value_pass_v
+-            }
+-        }
+-        else if ((offset == 0x409A10 || offset == 0x409B00) && (value & 0x1F))
+-            s->regs[offset>>2] &= ~0x1F;
+-        else if ((s->regs[0x2254>>2] & 0x10000000)) { // fifo_bar1_base fifo_bar1_base_valid_true_f
+-            uint32_t base = (s->regs[0x2254>>2] & 0xFFFFFFF)<<12;
+-            base+= 0x1000000;
+-            size_t num_channels = 0x80;
+-            size_t entrysize = 1<<9;
+-            if (offset >= base && offset < base+num_channels*entrysize) {
+-                if (((offset - base) & (entrysize-1)) == 35*4) { // ram_userd_gp_put_w (GPFIFO)
+-                    uint32_t channel_id = (offset - base) / entrysize;
+-
+-                    tegra_gpu_process_gpfifo(s, channel_id, original_value, value);
+-
+-	            s->regs[(base + channel_id*entrysize + 34*4)>>2] = value; // ram_userd_gp_get_w
+-                }
+-            }
+-        }
++    if (offset >= GM20B_BAR1_OFFSET) {
++        gm20b_bar1_rw(s, offset - GM20B_BAR1_OFFSET, &value, size, true);
++        return;
++    }
++    if (size != 4)
++        v = deposit32(GM20B_REG(s, offset & ~3), (offset & 3) * 8, size * 8, value);
++    offset &= ~3;
++    if (offset < 4) /* BOOT_0 */
++        return;
++    if (gm20b_falcon_write(s, offset, v) || gm20b_fifo_write(s, offset, v)) {
++        gm20b_update_irqs(s);
++        return;
+     }
++    switch (offset) {
++    case PTIMER_TIME_0:
++        s->ptimer_offset += (int64_t)v - (int64_t)(uint32_t)gm20b_ptimer_ns(s);
++        return;
++    case PTIMER_TIME_1:
++        s->ptimer_offset += ((int64_t)v - (int64_t)(gm20b_ptimer_ns(s) >> 32)) << 32;
++        return;
++    case PTIMER_INTR_0:
++    case 0x400100: /* PGRAPH_INTR */
++        GM20B_REG(s, offset) &= ~v;
++        break;
++    case PTIMER_ALARM_0:
++        GM20B_REG(s, offset) = v;
++        ptimer_arm(s);
++        break;
++    case 0x000200: /* PMC_ENABLE */
++        gm20b_falcon_engine_reset(s, GM20B_REG(s, offset) & ~v);
++        GM20B_REG(s, offset) = v;
++        break;
++    default:
++        GM20B_REG(s, offset) = v;
++        write_completes(s, offset, v);
++        break;
++    }
++    gm20b_update_irqs(s);
+ }
+ 
++/* PTOP device info (NV_PTOP_DEVICE_INFO): GR on runlist 0 (engine 0, interrupt 12, reset 12, MMU fault unit 0), and
++ * the copy engine GM20B has, CE2, on the same runlist (engine 1, interrupt 22, reset 21, MMU fault unit 0x1b). */
++static const uint32_t top_device_info[] = {
++    0x80000000 | 0x400000 | (FAULT_UNIT_GR << 3) | 0x4 | 0x1,
++    0x80000000 | (0 << 26) | 0x20 | (0 << 21) | 0x10 | (12 << 15) | 0x8 | (12 << 9) | 0x4 | 0x2,
++    (0x0 << 2) | 0x3,
++    0x80000000 | 0x104000 | (FAULT_UNIT_CE2 << 3) | 0x4 | 0x1,
++    0x80000000 | (1 << 26) | 0x20 | (0 << 21) | 0x10 | (22 << 15) | 0x8 | (21 << 9) | 0x4 | 0x2,
++    (0x3 << 2) | 0x3,
++};
++
+ static void tegra_gpu_priv_reset(DeviceState *dev)
+ {
+     tegra_gpu *s = TEGRA_GPU(dev);
+ 
+-    memset(s->regs, 0, sizeof(s->regs));
+-
+-    s->regs[0x0] = tegra_board >= TEGRAX1PLUS_BOARD ? 0x12E000A1 : 0x12B000A1;
+-
+-    s->regs[0x1010000>>2] = 0x33;
+-
+-    // TODO: Use actual values from hardware?
+-    s->regs[0x120074>>2] = 0x1;
+-    s->regs[0x120078>>2] = 0x1;
+-    s->regs[0x22430>>2] = 0x1;
+-    s->regs[0x22434>>2] = 0x1;
+-    s->regs[0x22438>>2] = 0x1;
++    memset(s->regs, 0, GM20B_REGS_BYTES);
++    s->ptimer_offset = 0;
++    timer_del(s->ptimer_alarm);
++
++    GM20B_REG(s, 0x000000) = tegra_board >= TEGRAX1PLUS_BOARD ? 0x12E000A1 : 0x12B000A1;
++    GM20B_REG(s, 0x120050) = 0x1;        /* PRI ring start: connectivity pass */
++    GM20B_REG(s, 0x12006c) = 0x1;        /* ENUM_LTC */
++    GM20B_REG(s, 0x120074) = 0x1;        /* ENUM_FBP */
++    GM20B_REG(s, 0x120078) = 0x1;        /* ENUM_GPC */
++    GM20B_REG(s, 0x022430) = 0x1;        /* TOP_NUM_GPCS */
++    GM20B_REG(s, 0x022434) = 0x2;        /* TOP_TPC_PER_GPC */
++    GM20B_REG(s, 0x022438) = 0x1;        /* TOP_NUM_FBPS */
++    GM20B_REG(s, 0x409604) = 0x00010001; /* GR: 1 GPC, 1 ROP */
++    GM20B_REG(s, 0x502608) = 0x2;        /* GPC0: 2 TPCs */
++    GM20B_REG(s, 0x17e280) = 0x22000004; /* CBC_PARAM: 2 slices, 2 KiB lines, 4 comptags a line */
++    for (unsigned i = 0; i < ARRAY_SIZE(top_device_info); i++)
++        GM20B_REG(s, 0x022700 + i * 4) = top_device_info[i];
++    gm20b_falcon_reset(s);
++    gm20b_fifo_reset(s);
++    gm20b_update_irqs(s);
+ }
+ 
+ static const MemoryRegionOps tegra_gpu_mem_ops = {
+     .read = tegra_gpu_priv_read,
+     .write = tegra_gpu_priv_write,
+-    .endianness = DEVICE_NATIVE_ENDIAN,
++    .endianness = DEVICE_LITTLE_ENDIAN,
++    .valid = { .min_access_size = 1, .max_access_size = 8 },
++    .impl = { .min_access_size = 1, .max_access_size = 4 },
+ };
+ 
++static void host_poll(void *opaque)
++{
++    gm20b_fifo_kick(opaque);
++}
++
+ static void tegra_gpu_priv_realize(DeviceState *dev, Error **errp)
+ {
+     tegra_gpu *s = TEGRA_GPU(dev);
+ 
++    s->regs = g_malloc0(GM20B_REGS_BYTES);
++    s->ptimer_alarm = timer_new_ns(QEMU_CLOCK_VIRTUAL, ptimer_fire, s);
++    s->host_poll = timer_new_ns(QEMU_CLOCK_VIRTUAL, host_poll, s);
++    gm20b_falcon_init(s);
+     sysbus_init_irq(SYS_BUS_DEVICE(dev), &s->irq_stall);
+     sysbus_init_irq(SYS_BUS_DEVICE(dev), &s->irq_nonstall);
+-
+-    memory_region_init_io(&s->iomem, OBJECT(dev), &tegra_gpu_mem_ops, s,
+-                          TYPE_TEGRA_GPU, sizeof(s->regs));
++    memory_region_init_io(&s->iomem, OBJECT(dev), &tegra_gpu_mem_ops, s, TYPE_TEGRA_GPU, GM20B_BAR_BYTES);
+     sysbus_init_mmio(SYS_BUS_DEVICE(dev), &s->iomem);
+ }
+ 
++static Property tegra_gpu_properties[] = {
++    DEFINE_PROP_STRING("method-log", tegra_gpu, method_log_path),
++    DEFINE_PROP_STRING("event-log", tegra_gpu, event_log_path),
++    DEFINE_PROP_END_OF_LIST(),
++};
++
+ static void tegra_gpu_class_init(ObjectClass *klass, void *data)
+ {
+     DeviceClass *dc = DEVICE_CLASS(klass);
+ 
+     dc->realize = tegra_gpu_priv_realize;
+-    dc->vmsd = &vmstate_tegra_gpu;
++    device_class_set_props(dc, tegra_gpu_properties);
+     device_class_set_legacy_reset(dc, tegra_gpu_priv_reset);
+ }
+ 

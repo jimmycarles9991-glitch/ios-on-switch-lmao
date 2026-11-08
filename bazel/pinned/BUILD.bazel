@@ -20,8 +20,12 @@
 #       The RAM metadata exporter (bazel run //boot:firmware_export rebuilds it).
 #   firmware/BCM4356A3.hcd
 #       The Bluetooth controller's patch RAM (gitlab.com/switchroot/android/nx-firmware).
-#   overlay/wallpaper-1x/*.plist
-#       The J120 (_Flat) iPadOS 17 and Lake bundles' Wallpaper.plist at the 'any' screen class, so
+#   hw_test_app/media/*
+#       The hardware test app's clips and images (debug images only), from `bazel run //hw_test_app:media_tool`: the
+#       Mac's hardware encoder spreads 4K frames over however many engines are free, so they cannot be remade
+#       byte for byte, and pinning them keeps every build off the encoders.
+#   overlay/wallpaper-1x/<kind>/*.plist
+#       Each IPSW kind's own iPad's iPadOS 17 and Lake bundles' Wallpaper.plist at the 'any' screen class, so
 #       WallpaperKit loads them (bazel run //tools/package:wallpaper_1x remakes them from the OS volume; metadata only,
 #       no artwork).
 

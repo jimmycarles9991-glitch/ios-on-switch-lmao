@@ -1,0 +1,419 @@
+diff --git a/hw/input/Kconfig b/hw/input/Kconfig
+index 6d87488..c7b55a3 100644
+--- a/hw/input/Kconfig
++++ b/hw/input/Kconfig
+@@ -34,6 +34,9 @@ config VHOST_USER_INPUT
+ config LASIPS2
+     select PS2
+ 
++config FTM4CD60
++    bool
++
+ config FTM3BD56
+     bool
+     depends on I2C
+diff --git a/hw/input/ftm4cd60.c b/hw/input/ftm4cd60.c
+new file mode 100644
+index 0000000..7db3fcf
+--- /dev/null
++++ b/hw/input/ftm4cd60.c
+@@ -0,0 +1,390 @@
++/*
++ * STMicro FingerTip S FTM4CD60 touch controller (the Switch OLED's, I2C3 0x49, chip id 0x3670).
++ *
++ *  This program is free software; you can redistribute it and/or modify it
++ *  under the terms of the GNU General Public License as published by the
++ *  Free Software Foundation; either version 2 of the License, or
++ *  (at your option) any later version.
++ *
++ *  This program is distributed in the hope that it will be useful, but WITHOUT
++ *  ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
++ *  FITNESS FOR A PARTICULAR PURPOSE. See the GNU General Public License
++ *  for more details.
++ *
++ *  You should have received a copy of the GNU General Public License along
++ *  with this program; if not, see <http://www.gnu.org/licenses/>.
++ */
++
++/* As switchroot's Linux ftm4.c and hekate's touch.c drive it: hardware registers through B6 (a 16-bit address, then
++ * data; a read returns one dummy byte first), the event stack read 8 bytes an event (85/86/87), system reset through
++ * register 0x0028 = 0x80 answered by the controller-ready event 0x10, the event count at 0x0023 (count << 1) and the
++ * interrupt enable at 0x002C (bit 6). INT is low while interrupts are enabled and the stack holds events. Contacts come
++ * from QEMU's absolute pointer and multi-touch input in the landscape 1280x720 frame hekate's GUI uses. */
++
++#include "qemu/osdep.h"
++#include "qemu/log.h"
++#include "qemu/module.h"
++#include "hw/i2c/i2c.h"
++#include "hw/irq.h"
++#include "qom/object.h"
++#include "migration/vmstate.h"
++#include "ui/console.h"
++#include "ui/input.h"
++
++#define TYPE_FTM4CD60 "ftm4cd60"
++OBJECT_DECLARE_SIMPLE_TYPE(FTM4CD60State, FTM4CD60)
++
++#define FTS_READ_ONE_EVENT    0x85
++#define FTS_READ_ALL_EVENT    0x86
++#define FTS_LATEST_EVENT      0x87
++#define FTS_SENSE_OFF         0x92
++#define FTS_SENSE_ON          0x93
++#define FTS_CLEAR_EVENT_STACK 0xA1
++#define FTS_HW_REG            0xB6
++#define FTS_SENSE_MODE        0xC3
++
++#define EV_ENTER              0x03
++#define EV_LEAVE              0x04
++#define EV_MOTION             0x05
++#define EV_CONTROLLER_READY   0x10
++
++#define REG_CHIP_ID           0x0004
++#define REG_EVENT_COUNT       0x0023
++#define REG_SYSTEM_RESET      0x0028
++#define REG_INTERRUPT         0x002C
++#define SYSTEM_RESET          0x80
++#define INTERRUPT_ENABLE      0x40
++
++#define EVENT_BYTES   8
++#define STACK_DEPTH   32
++#define MAX_CONTACTS  10
++/* stm,max-real-coords 1264 x 704 and stm,edge-offset 15 (tegra210b01-nx-common.dtsi fts@49). */
++#define REAL_MAX_X    1264
++#define REAL_MAX_Y    704
++#define EDGE_OFFSET   15
++
++typedef struct FTM4Contact {
++    int32_t x, y;
++    bool down, was_down, moved;
++} FTM4Contact;
++
++struct FTM4CD60State {
++    I2CSlave parent_obj;
++    QemuInputHandlerState *handler;
++    qemu_irq interrupt;
++    uint8_t regs[0x100];
++    uint8_t command[8];
++    uint32_t command_bytes, read_pos;
++    uint8_t events[STACK_DEPTH][EVENT_BYTES];
++    uint32_t event_head, event_count;
++    FTM4Contact contacts[MAX_CONTACTS + 1];
++};
++
++static void ftm4_update_interrupt(FTM4CD60State *s)
++{
++    bool pending = (s->regs[REG_INTERRUPT] & INTERRUPT_ENABLE) && s->event_count;
++
++    qemu_set_irq(s->interrupt, !pending);
++}
++
++static void ftm4_push(FTM4CD60State *s, const uint8_t event[EVENT_BYTES])
++{
++    if (s->event_count == STACK_DEPTH) {
++        qemu_log_mask(LOG_GUEST_ERROR, "ftm4cd60: event stack full, event dropped\n");
++        return;
++    }
++    memcpy(s->events[(s->event_head + s->event_count) % STACK_DEPTH], event, EVENT_BYTES);
++    s->event_count++;
++    ftm4_update_interrupt(s);
++}
++
++static void ftm4_clear(FTM4CD60State *s)
++{
++    s->event_head = s->event_count = 0;
++    ftm4_update_interrupt(s);
++}
++
++static void ftm4_system_reset(FTM4CD60State *s)
++{
++    static const uint8_t ready[EVENT_BYTES] = {EV_CONTROLLER_READY};
++
++    s->regs[REG_INTERRUPT] = 0;
++    ftm4_clear(s);
++    ftm4_push(s, ready);
++}
++
++static uint8_t ftm4_pop_byte(FTM4CD60State *s)
++{
++    uint8_t value;
++
++    if (!s->event_count) {
++        s->read_pos++;
++        return 0;
++    }
++    value = s->events[s->event_head][s->read_pos % EVENT_BYTES];
++    if (++s->read_pos % EVENT_BYTES == 0) {
++        s->event_head = (s->event_head + 1) % STACK_DEPTH;
++        s->event_count--;
++        ftm4_update_interrupt(s);
++    }
++    return value;
++}
++
++static uint16_t ftm4_reg_address(FTM4CD60State *s)
++{
++    return (s->command[1] << 8) | s->command[2];
++}
++
++static uint8_t ftm4_recv(I2CSlave *i2c)
++{
++    FTM4CD60State *s = FTM4CD60(i2c);
++    uint16_t reg;
++
++    if (!s->command_bytes) {
++        return 0;
++    }
++    switch (s->command[0]) {
++    case FTS_READ_ONE_EVENT:
++    case FTS_READ_ALL_EVENT:
++    case FTS_LATEST_EVENT:
++        return ftm4_pop_byte(s);
++    case FTS_HW_REG:
++        if (s->command_bytes < 3 || s->read_pos++ == 0) {
++            return 0;
++        }
++        reg = ftm4_reg_address(s) + s->read_pos - 2;
++        if (reg == REG_EVENT_COUNT) {
++            return MIN(s->event_count, 0x7f) << 1;
++        }
++        return reg < sizeof(s->regs) ? s->regs[reg] : 0;
++    default:
++        qemu_log_mask(LOG_UNIMP, "ftm4cd60: read after command 0x%02x\n", s->command[0]);
++        return 0;
++    }
++}
++
++static void ftm4_write_register(FTM4CD60State *s, uint16_t reg, uint8_t value)
++{
++    if (reg >= sizeof(s->regs)) {
++        return;
++    }
++    if (reg == REG_SYSTEM_RESET && value == SYSTEM_RESET) {
++        ftm4_system_reset(s);
++        return;
++    }
++    s->regs[reg] = value;
++    if (reg == REG_INTERRUPT) {
++        ftm4_update_interrupt(s);
++    }
++}
++
++static int ftm4_send(I2CSlave *i2c, uint8_t data)
++{
++    FTM4CD60State *s = FTM4CD60(i2c);
++
++    if (s->command_bytes < sizeof(s->command)) {
++        s->command[s->command_bytes] = data;
++    }
++    s->command_bytes++;
++    if (s->command_bytes == 1) {
++        switch (data) {
++        case FTS_CLEAR_EVENT_STACK:
++            ftm4_clear(s);
++            break;
++        case FTS_SENSE_ON:
++        case FTS_SENSE_OFF:
++            break;
++        default:
++            break;
++        }
++    } else if (s->command[0] == FTS_HW_REG && s->command_bytes >= 4) {
++        ftm4_write_register(s, ftm4_reg_address(s) + s->command_bytes - 4, data);
++    }
++    return 0;
++}
++
++static int ftm4_event(I2CSlave *i2c, enum i2c_event event)
++{
++    FTM4CD60State *s = FTM4CD60(i2c);
++
++    if (event == I2C_START_SEND) {
++        s->command_bytes = 0;
++    } else if (event == I2C_START_RECV) {
++        s->read_pos = 0;
++    }
++    return 0;
++}
++
++static int32_t ftm4_scale(int64_t value, int max)
++{
++    return EDGE_OFFSET + qemu_input_scale_axis(value, INPUT_EVENT_ABS_MIN, INPUT_EVENT_ABS_MAX, 0, max - EDGE_OFFSET);
++}
++
++static void ftm4_input_event(DeviceState *dev, QemuConsole *src, InputEvent *evt)
++{
++    FTM4CD60State *s = FTM4CD60(dev);
++    FTM4Contact *contact = &s->contacts[MAX_CONTACTS];
++    InputMoveEvent *move;
++    InputMultiTouchEvent *mtt;
++
++    switch (evt->type) {
++    case INPUT_EVENT_KIND_ABS:
++        move = evt->u.abs.data;
++        if (move->axis == INPUT_AXIS_X) {
++            contact->x = ftm4_scale(move->value, REAL_MAX_X);
++        } else {
++            contact->y = ftm4_scale(move->value, REAL_MAX_Y);
++        }
++        contact->moved = true;
++        break;
++    case INPUT_EVENT_KIND_BTN:
++        if (evt->u.btn.data->button == INPUT_BUTTON_LEFT) {
++            contact->down = evt->u.btn.data->down;
++        }
++        break;
++    case INPUT_EVENT_KIND_MTT:
++        mtt = evt->u.mtt.data;
++        if (mtt->slot < 0 || mtt->slot >= MAX_CONTACTS) {
++            break;
++        }
++        contact = &s->contacts[mtt->slot];
++        contact->down = mtt->type != INPUT_MULTI_TOUCH_TYPE_END && mtt->type != INPUT_MULTI_TOUCH_TYPE_CANCEL;
++        if (mtt->axis == INPUT_AXIS_X) {
++            contact->x = ftm4_scale(mtt->value, REAL_MAX_X);
++        } else {
++            contact->y = ftm4_scale(mtt->value, REAL_MAX_Y);
++        }
++        contact->moved = true;
++        break;
++    default:
++        break;
++    }
++}
++
++/* The pointer is contact 0 unless multi-touch slot 0 is in use: the controller has ten contact ids. */
++static void ftm4_input_sync(DeviceState *dev)
++{
++    FTM4CD60State *s = FTM4CD60(dev);
++
++    for (int i = 0; i <= MAX_CONTACTS; i++) {
++        FTM4Contact *c = &s->contacts[i];
++        uint8_t id = i == MAX_CONTACTS ? 0 : i, type;
++        uint8_t event[EVENT_BYTES] = {0};
++
++        if (c->down && !c->was_down) {
++            type = EV_ENTER;
++        } else if (!c->down && c->was_down) {
++            type = EV_LEAVE;
++        } else if (c->down && c->moved) {
++            type = EV_MOTION;
++        } else {
++            c->moved = false;
++            continue;
++        }
++        event[0] = (id << 4) | type;
++        event[1] = c->x >> 4;
++        event[2] = c->y >> 4;
++        event[3] = ((c->x & 0xf) << 4) | (c->y & 0xf);
++        event[4] = 0x80;
++        ftm4_push(s, event);
++        c->was_down = c->down;
++        c->moved = false;
++    }
++}
++
++static const QemuInputHandler ftm4_handler = {
++    .name  = "FTM4CD60 touch screen",
++    .mask  = INPUT_EVENT_MASK_BTN | INPUT_EVENT_MASK_ABS | INPUT_EVENT_MASK_MTT,
++    .event = ftm4_input_event,
++    .sync  = ftm4_input_sync,
++};
++
++static void ftm4_realize(DeviceState *dev, Error **errp)
++{
++    FTM4CD60State *s = FTM4CD60(dev);
++
++    qdev_init_gpio_out_named(dev, &s->interrupt, "int", 1);
++    s->handler = qemu_input_handler_register(dev, &ftm4_handler);
++}
++
++static void ftm4_unrealize(DeviceState *dev)
++{
++    qemu_input_handler_unregister(FTM4CD60(dev)->handler);
++}
++
++static void ftm4_reset(DeviceState *dev)
++{
++    FTM4CD60State *s = FTM4CD60(dev);
++
++    memset(s->regs, 0, sizeof(s->regs));
++    memset(s->contacts, 0, sizeof(s->contacts));
++    s->command_bytes = s->read_pos = 0;
++    /* The chip ID block: id 3670, firmware and config versions. */
++    s->regs[REG_CHIP_ID + 0] = 0x36;
++    s->regs[REG_CHIP_ID + 1] = 0x70;
++    s->regs[REG_CHIP_ID + 2] = 0x00;
++    s->regs[REG_CHIP_ID + 3] = 0x10;
++    s->regs[REG_CHIP_ID + 4] = 0x00;
++    s->regs[REG_CHIP_ID + 5] = 0x01;
++    ftm4_system_reset(s);
++}
++
++static const VMStateDescription vmstate_ftm4_contact = {
++    .name = "ftm4cd60_contact",
++    .version_id = 1,
++    .minimum_version_id = 1,
++    .fields = (const VMStateField[]) {
++        VMSTATE_INT32(x, FTM4Contact),
++        VMSTATE_INT32(y, FTM4Contact),
++        VMSTATE_BOOL(down, FTM4Contact),
++        VMSTATE_BOOL(was_down, FTM4Contact),
++        VMSTATE_BOOL(moved, FTM4Contact),
++        VMSTATE_END_OF_LIST()
++    }
++};
++
++static const VMStateDescription vmstate_ftm4cd60 = {
++    .name = TYPE_FTM4CD60,
++    .version_id = 1,
++    .minimum_version_id = 1,
++    .fields = (const VMStateField[]) {
++        VMSTATE_I2C_SLAVE(parent_obj, FTM4CD60State),
++        VMSTATE_UINT8_ARRAY(regs, FTM4CD60State, 0x100),
++        VMSTATE_UINT8_ARRAY(command, FTM4CD60State, 8),
++        VMSTATE_UINT32(command_bytes, FTM4CD60State),
++        VMSTATE_UINT32(read_pos, FTM4CD60State),
++        VMSTATE_UINT8_2DARRAY(events, FTM4CD60State, STACK_DEPTH, EVENT_BYTES),
++        VMSTATE_UINT32(event_head, FTM4CD60State),
++        VMSTATE_UINT32(event_count, FTM4CD60State),
++        VMSTATE_STRUCT_ARRAY(contacts, FTM4CD60State, MAX_CONTACTS + 1, 0, vmstate_ftm4_contact, FTM4Contact),
++        VMSTATE_END_OF_LIST()
++    }
++};
++
++static void ftm4_class_init(ObjectClass *klass, void *data)
++{
++    DeviceClass *dc = DEVICE_CLASS(klass);
++    I2CSlaveClass *sc = I2C_SLAVE_CLASS(klass);
++
++    device_class_set_legacy_reset(dc, ftm4_reset);
++    dc->realize = ftm4_realize;
++    dc->unrealize = ftm4_unrealize;
++    dc->vmsd = &vmstate_ftm4cd60;
++    sc->send = ftm4_send;
++    sc->recv = ftm4_recv;
++    sc->event = ftm4_event;
++}
++
++static const TypeInfo ftm4cd60_info = {
++    .name          = TYPE_FTM4CD60,
++    .parent        = TYPE_I2C_SLAVE,
++    .instance_size = sizeof(FTM4CD60State),
++    .class_init    = ftm4_class_init,
++};
++
++static void ftm4cd60_register_types(void)
++{
++    type_register_static(&ftm4cd60_info);
++}
++
++type_init(ftm4cd60_register_types)
+diff --git a/hw/input/meson.build b/hw/input/meson.build
+index c2c50eb..83c906d 100644
+--- a/hw/input/meson.build
++++ b/hw/input/meson.build
+@@ -11,3 +11,4 @@ system_ss.add(when: 'CONFIG_VIRTIO_INPUT_HOST', if_true: files('virtio-input-hos
+ 
+ system_ss.add(when: 'CONFIG_LASIPS2', if_true: files('lasips2.c'))
+ system_ss.add(when: 'CONFIG_FTM3BD56', if_true: files('ftm3bd56.c'))
++system_ss.add(when: 'CONFIG_FTM4CD60', if_true: files('ftm4cd60.c'))

@@ -46,7 +46,7 @@ std::string emptyPack(const char *dir)
 {
     raw::PackHeader h = {};
     memcpy(h.magic, "GM20BPK1", 8);
-    h.version = 3;  // raw_pack.h
+    h.version = 4;  // raw_pack.h
     for (auto &s : h.section)
         s.offset = sizeof h;
     const std::string path = std::string(dir) + "/alias-empty.pack";

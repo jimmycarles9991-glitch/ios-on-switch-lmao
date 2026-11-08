@@ -15,17 +15,21 @@
 #define SWITCH_REFUSAL_INLINE static inline
 #endif
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 // The key of (domain, reason_key): 64-bit FNV-1a (offset basis 0xcbf29ce484222325, prime 0x100000001b3) over the
 // domain's bytes, one zero byte, then reason_key's bytes. constexpr in C++, so a binding can fold it.
 SWITCH_REFUSAL_INLINE uint64_t switch_refusal_key(const char *domain, const char *reason_key)
 {
-    uint64_t hash = 0xcbf29ce484222325ull;
+    uint64_t hash = 0xcbf29ce484222325ULL;
     for (; *domain != '\0'; domain++) {
-        hash = (hash ^ (uint8_t)*domain) * 0x100000001b3ull;
+        hash = (hash ^ (uint8_t)*domain) * 0x100000001b3ULL;
     }
-    hash *= 0x100000001b3ull;
+    hash *= 0x100000001b3ULL;
     for (; *reason_key != '\0'; reason_key++) {
-        hash = (hash ^ (uint8_t)*reason_key) * 0x100000001b3ull;
+        hash = (hash ^ (uint8_t)*reason_key) * 0x100000001b3ULL;
     }
     return hash;
 }
@@ -34,15 +38,11 @@ SWITCH_REFUSAL_INLINE uint64_t switch_refusal_key(const char *domain, const char
 // a selector) is a reason of its own.
 SWITCH_REFUSAL_INLINE uint64_t switch_refusal_key_with(uint64_t key, uint64_t detail)
 {
-    for (int byte = 0; byte < 8; byte++) {
-        key = (key ^ ((detail >> (byte * 8)) & 0xff)) * 0x100000001b3ull;
+    for (unsigned byte = 0; byte < 8U; byte++) {
+        key = (key ^ ((detail >> (byte * 8U)) & 0xffU)) * 0x100000001b3ULL;
     }
     return key;
 }
-
-#ifdef __cplusplus
-extern "C" {
-#endif
 
 // True the first time this process presents key, and from then on false for one relaxed atomic load. In the kernel the
 // process is the calling thread's (work loops and interrupt threads are all kernel_task). Lock-free, allocation-free,

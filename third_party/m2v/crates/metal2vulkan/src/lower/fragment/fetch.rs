@@ -211,6 +211,14 @@ pub(crate) fn blends_through_inputs(p: &DeviceProfile) -> bool {
         && (p.fields().fragment.rasterization_order_color_access || unordered_inputs(p))
 }
 
+/// Whether `p` computes the blend of an extended-range attachment whose storage form a pipeline's
+/// state blocks over the attachment's input attachment, unordered (`input_blend`): it orders fetch
+/// through the pixel interlock alone ([`interlock_orders`]) and its policy accepts the unordered
+/// fetch, as it then reads a fetched color the storage form blocks (`color`). NVK on Maxwell B.
+pub(crate) fn blends_inputs_beside_interlock(p: &DeviceProfile) -> bool {
+    interlock_orders(p) && p.fields().framebuffer_fetch == FramebufferFetchPolicy::AcceptUnordered
+}
+
 /// Whether `p` asks for Metal's 16-bit float blend of a `half4` output, computed by the function
 /// in the storage form (`DevicePolicy::half_blend`), which a device that orders fetch through
 /// the pixel interlock alone ([`interlock_orders`]) takes.
@@ -943,6 +951,7 @@ pub(super) fn plan(cx: &mut SelectCx<'_>) -> Result<(), Error> {
     }
     let mut read = colors_read(cx, &body.used)?;
     read.extend(blended.iter().map(|&(color, _)| color));
+    let blends: BTreeSet<u32> = blended.iter().map(|&(color, _)| color).collect();
     // Every other attachment the pipeline's state names that the function writes through its
     // first output: a color the draw moved into the storage form (above), written through it as a
     // fetched one is, or one named for Metal's 16-bit float blend alone.
@@ -1157,8 +1166,13 @@ pub(super) fn plan(cx: &mut SelectCx<'_>) -> Result<(), Error> {
             }
             Err(blocked) => match cx.profile.fields().framebuffer_fetch {
                 FramebufferFetchPolicy::RequireOrdered => return Err(tied(blocked.into())),
-                // No exact path: the input attachment reads unordered (`color`).
-                FramebufferFetchPolicy::AcceptUnordered => {}
+                // No exact path: the input attachment reads unordered (`color`), and an
+                // extended-range attachment's blend is computed over it (`input_blend`).
+                FramebufferFetchPolicy::AcceptUnordered => {
+                    if blends.contains(&color) {
+                        cx.families.fragment.blocked_blends.insert(color);
+                    }
+                }
             },
         }
     }

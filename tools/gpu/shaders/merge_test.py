@@ -24,6 +24,16 @@ def record(payload: bytes) -> bytes:
     return body + hashlib.sha256(body).digest()
 
 
+def reply(metallib: bytes, warnings: bytes = b'') -> bytes:
+    payload = warnings + metallib
+    return (
+        merge.REPLY_MAGIC
+        + struct.pack('<IQ', len(warnings), len(metallib))
+        + hashlib.sha256(payload).digest()
+        + payload
+    )
+
+
 def read_index(path: Path) -> tuple[str, dict[tuple[bytes, int], tuple[int, int, int]]]:
     """Read the index back, and look every entry up through its run, as seed.rs does."""
     data = path.read_bytes()
@@ -82,6 +92,12 @@ class JoinTest(unittest.TestCase):
         records = self.root / 'records/dd'
         records.mkdir(parents=True)
         (records / ('dd' + 'd' * 62)).write_bytes(record(b'the device made this one'))
+        replies = self.root / 'msl'
+        replies.mkdir()
+        good = reply(b'MTLB a kernel', b'a warning')
+        (replies / ('a' * 64 + '.reply')).write_bytes(good)
+        (replies / ('b' * 64 + '.reply')).write_bytes(good[:-1] + b'?')
+        (replies / 'c.reply').write_bytes(good)
         for name, value in (
             ('plan.json', {}),
             (
@@ -96,6 +112,7 @@ class JoinTest(unittest.TestCase):
                 index=[b[1] for b in buckets],
                 report=[b[2] for b in buckets],
                 records=self.root / 'records',
+                replies=replies,
                 ipsw='21H461',
                 plan=self.root / 'plan.json',
                 inventory=self.root / 'inventory.json',
@@ -118,6 +135,10 @@ class JoinTest(unittest.TestCase):
         self.assertEqual(entries[bytes.fromhex(named.rsplit('/', 1)[-1]), 1][0], 0, 'the first bucket to name it')
         self.assertEqual(read(f'v1/{CONTENT}/dd/dd' + 'd' * 62), record(b'the device made this one'))
         self.assertIn('generated m2v-build bbbbbbbb', (out / 'SEED').read_text())
+        self.assertEqual(sorted(p.name for p in (out / 'msl').iterdir()), ['a' * 64 + '.reply'])
+        self.assertEqual((out / 'msl' / ('a' * 64 + '.reply')).read_bytes(), good)
+        manifest = json.loads((out / 'MANIFEST.json').read_text())
+        self.assertEqual(manifest['compile_replies'], {'kept': 1, 'refused': 2})
 
 
 if __name__ == '__main__':

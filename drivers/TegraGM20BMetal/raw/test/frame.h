@@ -59,6 +59,19 @@ inline bool a3()
     return getenv("FRAME_A3") != nullptr;
 }
 
+// FRAME_542: the framebuffers are widget snapshots, RGB8_444_2P (542) textures over two-plane 4:4:4 '_RB4' surfaces, which
+// the main pass's states (those with c0=542 in the corpus) render through the frontend's stand-in; FRAME_PITCH's rows apply too.
+// FRAME_542=load: the main pass loads the snapshot instead of clearing it
+inline bool snapshot()
+{
+    return getenv("FRAME_542") != nullptr;
+}
+
+inline bool snapshotLoads()
+{
+    return snapshot() && !strcmp(getenv("FRAME_542"), "load");
+}
+
 // FRAME_DS: the main pass draws Depth32Float_Stencil8 states (ds=260/260) beside a memoryless attachment of that format, cleared,
 // under the depth/stencil states of dsSpec and changing stencil references; its first color is memoryless too (the raw path
 // renders no pitch color beside a depth/stencil attachment)
@@ -67,12 +80,26 @@ inline bool depthStencil()
     return getenv("FRAME_DS") != nullptr;
 }
 
+// FRAME_QC27: iOS 27's Core Animation states (caspec27.py), whose second attachment is RGBA16Float and whose blur passes
+// draw into RGBA16Float
+inline bool qc27()
+{
+    return getenv("FRAME_QC27") != nullptr;
+}
+
+// FRAME_XR: the blur passes draw Core Animation's extended-range blur states (RGB10A8_2P_XR10, format 550, both attachments) into
+// targets of that format, each sampling the one before; every fourth main draw samples the last of them
+inline bool extendedRange()
+{
+    return getenv("FRAME_XR") != nullptr;
+}
+
 struct State {
     std::string line, key;
     bool uber, blur, extra = false;
 };
 
-// The corpus states the frame uses: BGRA8 (format 80) two-attachment states only (the pack has no extended-range state).
+// The corpus states the frame uses: BGRA8 (format 80) two-attachment states (FRAME_XR: the blurs' 550 ones).
 inline std::vector<State> states(const char *corpusPath)
 {
     std::vector<State> out;
@@ -93,9 +120,18 @@ inline std::vector<State> states(const char *corpusPath)
             l.erase(at, l.find(' ', at + 1) - at);  // not in the key
         // FRAME_A3: the three-attachment states instead (a third R32Float attachment, c2=55: Core Animation's "A3" states,
         // r7n's harvest), drawn in a main pass with that third attachment
-        if (l.find(" c0=80:") == std::string::npos || l.find(" c1=80:") == std::string::npos ||
-            (a3() ? l.find(" c2=55:") == std::string::npos || l.find(" c3=") != std::string::npos
-                  : l.find(" c2=") != std::string::npos))
+        const bool blurLine = l.find("v downsample_blur_vert_lph") != std::string::npos,
+                   xrBlur = extendedRange() && blurLine;
+        const char *c0 = xrBlur                    ? " c0=550:"
+                         : qc27() && blurLine      ? " c0=115:"
+                         : snapshot() && !blurLine ? " c0=542:"
+                                                   : " c0=80:",
+                   *c1 = xrBlur   ? " c1=550:"
+                         : qc27() ? " c1=115:"
+                                  : " c1=80:";
+        if (l.find(c0) == std::string::npos || l.find(c1) == std::string::npos ||
+            (a3() && !xrBlur ? l.find(" c2=55:") == std::string::npos || l.find(" c3=") != std::string::npos
+                             : l.find(" c2=") != std::string::npos))
             continue;
         State s{l, key(l), l.find("v fixed_vert_lph_spc") != std::string::npos,
                 l.find("v downsample_blur_vert_lph") != std::string::npos};
@@ -161,7 +197,8 @@ enum Tex : int {
 struct TexDesc {
     int w, h;
     bool iosurface, memoryless, renderTarget;
-    uint32_t format = 80;  // MTLPixelFormat: BGRA8Unorm, or R32Float (55) for the A3 states' third attachment
+    uint32_t format =
+        80;  // MTLPixelFormat: BGRA8Unorm, R32Float (55) for the A3 states' third attachment, 550 FRAME_XR's blurs
 };
 
 // FRAME_PITCH: the surfaces' rows as clients' and the render server's can lie since r12a (its needed alignment back at 16): the
@@ -178,14 +215,14 @@ inline TexDesc texture(int t)
     switch (t) {
     case FB0:
     case FB1:
-        return {pitchShapes("fb") ? 1272 : 1280, 720, true, false, true};
+        return {pitchShapes("fb") ? 1272 : 1280, 720, true, false, true, snapshot() ? 542u : 80u};
     case MEMORYLESS:
-        return {1280, 720, false, true, true};
+        return {1280, 720, false, true, true, qc27() ? 115u : 80u};
     case BLUR0:
     case BLUR1:
-        return {320, 180, false, false, true};
+        return {320, 180, false, false, true, extendedRange() ? 550u : qc27() ? 115u : 80u};
     case BLUR_MEMORYLESS:
-        return {320, 180, false, true, true};
+        return {320, 180, false, true, true, extendedRange() ? 550u : qc27() ? 115u : 80u};
     case IMAGE0:
         return {1280, 720, true, false, false};
     case A3TARGET:
@@ -254,15 +291,17 @@ struct Draw {
     int textures[16];                                             // Tex or -1
     int samplers[16];                                             // sampler spec index or -1
     uint32_t primitive = 4, first = 0, count = 4, instances = 1;  // MTLPrimitiveType (4 triangle strip)
-    int ds = -1;                                                  // dsSpec index set before it (-1: none set)
-    uint32_t stencilRef[2] = {};                                  // set before it where ds >= 0
-    // set before it where raster: MTLCullMode, MTLWinding, MTLTriangleFillMode
+    uint32_t baseInstance = 0;
+    int ds = -1;                  // dsSpec index set before it (-1: none set)
+    uint32_t stencilRef[2] = {};  // set before it where ds >= 0
+    // set before it where raster: MTLCullMode, MTLWinding, MTLTriangleFillMode, and setDepthBias's factors
     bool raster = false;
     uint8_t cull = 0, winding = 0, fill = 0;
+    float bias[3] = {};
 };
 
-// FRAME_RASTER: the main pass's draws cull no face, the front or the back, wind clockwise or counter-clockwise, and some fill
-// with lines (Core Animation culls a layer that is not doubleSided)
+// FRAME_RASTER: the main pass's draws cull no face, the front or the back, wind clockwise or counter-clockwise, some fill
+// with lines, some are biased in depth and some draw lines (Core Animation culls a layer that is not doubleSided)
 inline bool rasterState()
 {
     return getenv("FRAME_RASTER") != nullptr;
@@ -281,13 +320,41 @@ struct Pass {
 struct Shape {
     unsigned blurPasses = 8, draws = 100,
              mainStates = getenv("FRAME_STATES") ? unsigned(atoi(getenv("FRAME_STATES"))) : 12;
-    uint32_t uniformBytes = 256, vertexBytes = 192;
+    // FRAME_UNIFORM_BYTES: the uniform payloads' length (with FRAME_RING_ALIGN=4, 52 binds them at offsets 4, 8 and 12 past 16)
+    uint32_t uniformBytes = getenv("FRAME_UNIFORM_BYTES") ? uint32_t(atoi(getenv("FRAME_UNIFORM_BYTES"))) : 256,
+             vertexBytes = 192;
     // FRAME_RING: every payload goes into one shared buffer at 256-aligned offsets, bound with set*Buffer:offset: at a pass's first
     // draw and set*BufferOffset: after (Core Animation's per-frame ring, cabench mode 16), instead of set*Bytes
     bool ring = getenv("FRAME_RING") != nullptr;
 };
 
 constexpr uint32_t kRingBytes = 8 << 20;
+
+// FRAME_FILL: each frame's command buffer first fills a buffer over [kFillFrom, kFillBytes) with a byte of the frame
+// (fillBuffer:range:value:: whole words, and ends that are not), and every main-pass draw reads its first fragment uniform
+// slot from that buffer, so what the fill wrote is in the draws' decode
+inline bool fillUniforms()
+{
+    return getenv("FRAME_FILL") != nullptr;
+}
+
+constexpr uint32_t kFillBytes = 4096, kFillFrom = 3;
+
+inline uint8_t fillValue(unsigned frame)
+{
+    return uint8_t(0x30 + frame % 64);
+}
+
+// The fragment slot a main-pass draw reads from the filled buffer (FRAME_FILL): its first fragment payload's; -1: none
+template <typename Draw> int fillSlot(const Draw &d)
+{
+    if (d.blur)
+        return -1;
+    for (const auto &b : d.bytes)
+        if (b.stage == 2)
+            return int(b.slot);
+    return -1;
+}
 
 // FRAME_RTSIZE: the main pass's renderTargetWidth/Height 37 and 23 pixels short of its attachments' (the device's passes, r7o:
 // "a render target size other than the attachment's"), so its render area, default viewport and scissor, clears and the
@@ -305,7 +372,9 @@ inline std::vector<Pass> passes(unsigned frameIndex, const Shape &s, size_t blur
 {
     std::vector<Pass> out;
     for (unsigned p = 0; p < s.blurPasses && blurCount; p++) {
-        Pass bp{{p & 1 ? BLUR1 : BLUR0, BLUR_MEMORYLESS, -1}, {0, 0, 0}, {0, 0, 0, 0}, {}};
+        // FRAME_BLUR_LOAD: the blur targets' load action (0 DontCare, 1 Load, 2 Clear to a color past [0, 1] in two channels)
+        const int blurLoad = getenv("FRAME_BLUR_LOAD") ? atoi(getenv("FRAME_BLUR_LOAD")) : 0;
+        Pass bp{{p & 1 ? BLUR1 : BLUR0, BLUR_MEMORYLESS, -1}, {blurLoad, 0, 0}, {0.25f, -0.5f, 1.125f, 0.75f}, {}};
         Draw d{int(p % blurCount), true, {0, 0, 320, 180}, {}, {}, {}};
         for (int &t : d.textures)
             t = -1;
@@ -321,7 +390,10 @@ inline std::vector<Pass> passes(unsigned frameIndex, const Shape &s, size_t blur
         bp.draws.push_back(d);
         out.push_back(bp);
     }
-    Pass mp{{frameIndex & 1 ? FB1 : FB0, MEMORYLESS, a3() ? A3TARGET : -1}, {2, 0, 2}, {0, 0, 0, 1}, {}};
+    Pass mp{{frameIndex & 1 ? FB1 : FB0, MEMORYLESS, a3() ? A3TARGET : -1},
+            {snapshotLoads() ? 1 : 2, 0, 2},
+            {0, 0, 0, 1},
+            {}};
     if (depthStencil()) {
         mp.color[0] = DS_COLOR;
         mp.depth = ZETA;
@@ -356,9 +428,11 @@ inline std::vector<Pass> passes(unsigned frameIndex, const Shape &s, size_t blur
                 d.first = 1, d.count = 3;
             if (i % 7 == 3)
                 d.instances = 2;
+            if (i % 9 == 4)
+                d.baseInstance = 3;
         }
         d.textures[3] = IMAGE1 + int(i % 3);
-        d.textures[4] = IMAGE2;
+        d.textures[4] = extendedRange() && i % 4 == 0 && s.blurPasses ? (s.blurPasses & 1 ? BLUR0 : BLUR1) : IMAGE2;
         d.textures[9] = IMAGE3;
         d.samplers[1] = 1;
         if (rasterState()) {
@@ -366,6 +440,13 @@ inline std::vector<Pass> passes(unsigned frameIndex, const Shape &s, size_t blur
             d.cull = uint8_t(i % 3);
             d.winding = uint8_t((i / 3) % 2);
             d.fill = uint8_t(i % 7 == 3);
+            if (i % 5 == 1) {
+                d.bias[0] = 0.25f * float(i % 9) - 1.0f;
+                d.bias[1] = i % 2 ? 2.0f : 0.0f;
+                d.bias[2] = i % 3 ? 0.0f : 0.5f;
+            }
+            if (i % 11 == 5)
+                d.primitive = 1;  // MTLPrimitiveTypeLine
         }
         if (depthStencil() && i % 3 != 2) {
             d.ds = int((i / 3) % kDsSpecs);
@@ -376,6 +457,45 @@ inline std::vector<Pass> passes(unsigned frameIndex, const Shape &s, size_t blur
     }
     out.push_back(mp);
     return out;
+}
+
+// FRAME_INDEXED: every third main draw indexed as Core Animation's meshes are (CA::OGL::MetalContext::draw: 16-bit indices
+// written into its buffer pool at 4-byte alignment, drawIndexedPrimitives on triangles), at `at` in the index buffer, which
+// it advances; with FRAME_INDEXED_FORMS also several instances, a base vertex and a base instance
+struct Indexed {
+    uint32_t count, offset, instances = 1, baseInstance = 0;
+    int32_t baseVertex = 0;
+};
+
+inline bool indexedDraw(bool blur, uint32_t drawIndex)
+{
+    return getenv("FRAME_INDEXED") && !blur && drawIndex % 3 == 1;
+}
+
+// FRAME_INDEX_PAST: every other indexed draw from the 64 KiB index buffer's tail, its last two positions past the buffer's end
+// (Metal fetches index 0 there), every fourth of those from an offset one byte past the index size's multiple (rounded down)
+inline Indexed indexed(uint32_t drawIndex, uint8_t *buffer, uint32_t &at)
+{
+    constexpr uint32_t kBytes = 65536;
+    static const uint16_t quad[6] = {0, 1, 2, 2, 1, 3};
+    if (getenv("FRAME_INDEX_PAST") && drawIndex % 2 == 0) {
+        memcpy(buffer + kBytes - 8, quad, 8);
+        return Indexed{6, kBytes - 8 + (drawIndex % 8 == 0 ? 1u : 0u)};
+    }
+    if (at + 64 > kBytes - 8)
+        at = 0;
+    memcpy(buffer + at, quad, sizeof quad);
+    Indexed x{6, at};
+    if (getenv("FRAME_INDEXED_FORMS")) {
+        if (drawIndex % 4 == 0)
+            x.instances = 2;
+        if (drawIndex % 4 == 2)
+            x.count = 3, x.baseVertex = 1;  // the quad's vertices 1 to 3
+        if (drawIndex % 5 == 3)
+            x.baseInstance = 2;
+    }
+    at += 12 + (drawIndex % 5) * 4;  // offsets 4-byte aligned, as the buffer pool hands them out
+    return x;
 }
 
 // Deterministic contents for a setBytes call: vertices (a quad, stride 48, moved per draw) or uniforms.

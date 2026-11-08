@@ -2,13 +2,14 @@
 #define SWITCH_LOADER_SEED_H
 /* A per-boot /chosen/random-seed from the Security Engine's DRBG.
  *
- * XNU seeds early_random() and the kernel PRNG (cckprng) from the 64 bytes of /chosen/random-seed and a timebase nonce
- * (osfmk/prng/prng_random.c bootseed_init; the arm64 bootseed_init_native is empty), then zeroes the property
- * (PE_get_random_seed). The ADT carries a seed fixed at package time (tools/package/adt.py pins it), so without this
- * every boot of every build starts both generators from the same bytes. Just before XNU starts, with the caches and MMU
- * off, the loader XORs 64 bytes of SE2's SP 800-90 DRBG output (entropy source on, forced reseed) and the counter into
- * the seed in the copied ADT. XOR keeps the result at least as good as either input: if the engine does not answer,
- * the seed is the pinned one as before, and the loader never refuses for this.
+ * XNU seeds early_random() and the kernel PRNG (cckprng) from /chosen/random-seed (osfmk/prng/prng_random.c
+ * bootseed_init; the arm64 bootseed_init_native is empty), then zeroes what it read (PE_get_random_seed). xnu-12377
+ * reads 256 bytes, one 64-byte quarter per seed it derives, and panics on fewer, before any console; xnu-10063 reads
+ * the first 64. The ADT carries a seed fixed at package time (tools/package/adt.py pins it), so without this every boot
+ * of every build starts both generators from the same bytes. Just before XNU starts, with the caches and MMU off, the
+ * loader XORs 256 bytes of SE2's SP 800-90 DRBG output (entropy source on, forced reseed, one operation) and the
+ * counter into the seed in the copied ADT. XOR keeps the result at least as good as either input: if the engine does
+ * not answer, the seed is the pinned one as before, and the loader never refuses for this.
  *
  * Programming (Linux L4T tegra-se.c tegra_se_config_algo/config_crypto SE_AES_OP_MODE_RNG_DRBG; hekate bdk/sec/se.c
  * se_rng_pseudo and _se_op_wait; switchroot BL31 tegra_se_generate_srk): CONFIG = ENC_ALG RNG | ENC_MODE KEY192 | DST
@@ -26,7 +27,7 @@
 #include <stdint.h>
 
 #define SWITCH_SEED_MAGIC        0x44454553u /* "SEED" */
-#define SWITCH_SEED_BYTES        64u
+#define SWITCH_SEED_BYTES        256u
 #define SWITCH_SEED_SOURCE_BYTES 8u
 
 enum switch_seed_status {
@@ -51,8 +52,9 @@ enum switch_seed_status {
 #define SWITCH_SEED_AHB_ARB_PA UINT64_C(0x6000c000)
 #define SWITCH_SEED_SE2_PA     UINT64_C(0x70412000)
 
-/* Mixes the engine's output and `counter` into the 64-byte seed at seed_pa (4-byte aligned, 32-bit accesses) and writes
- * the two status words at source_pa. `ticks` reads the counter; `timeout` is in its units. Returns the status word. */
+/* Mixes the engine's output and `counter` into the SWITCH_SEED_BYTES seed at seed_pa (4-byte aligned, 32-bit
+ * accesses) and writes the two status words at source_pa. `ticks` reads the counter; `timeout` is in its units. Returns
+ * the status word. */
 uint32_t switch_seed_mix(uint64_t seed_pa, uint64_t source_pa, uint64_t (*ticks)(void), uint64_t timeout);
 
 /* Supplied by the target (seed.c, MMIO) or by the host test. */

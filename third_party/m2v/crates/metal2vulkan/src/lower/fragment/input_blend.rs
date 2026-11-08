@@ -21,7 +21,13 @@
 //! Maxwell, `fetch::unordered_inputs`) the same blend reads the input attachment without that
 //! order: a later draw's blend reads an earlier draw's codes (the runtime records a barrier between
 //! them), but fragments of one draw that cover the same pixel blend in no defined order, recorded
-//! as `PrecisionNote::UnorderedFramebufferFetch`, the trade every fetch takes there.
+//! as `PrecisionNote::UnorderedFramebufferFetch`, the trade every fetch takes there. A device that
+//! orders fetch through the pixel interlock alone under that policy (NVK on Maxwell B,
+//! `fetch::blends_inputs_beside_interlock`) does so for the attachments whose storage form the
+//! pipeline's state blocks (`FragmentPlan::blocked_blends`: a function that discards beside a
+//! depth or stencil attachment), the same trade it makes for a fetched color the storage form
+//! blocks; the runtime draws such a pipeline in a render pass instance whose subpass reads its
+//! colors as input attachments.
 //!
 //! The blend is Metal's model's alone, its gap refused by name (`Feature::ExtendedRangeBlend`,
 //! as the storage form refuses it): a `half4` output under every factor and operation, a
@@ -74,24 +80,30 @@ pub struct InputBlend {
 /// input attachment's read, its decode, the encode, and a merge of kept channels.
 const WRITE_WORDS: u64 = 120;
 
-/// Whether the device reads input attachments for framebuffer fetch, in rasterization order or
-/// unordered under `AcceptUnordered` (`fetch::blends_through_inputs`), where this module computes
-/// an extended-range blend (on one that orders it through the pixel interlock, the storage form
-/// does, `fetch::interlock_orders`).
-fn through_inputs(cx: &SelectCx<'_>) -> bool {
-    fetch::blends_through_inputs(cx.profile)
+/// Whether the function computes the blend of extended-range attachment `color` over its input
+/// attachment: on a device that reads input attachments for framebuffer fetch, in rasterization
+/// order or unordered under `AcceptUnordered` (`fetch::blends_through_inputs`), every such
+/// attachment; on one that orders it through the pixel interlock, where the storage form computes
+/// the blend (`fetch::interlock_orders`), those whose storage form the pipeline's state blocks
+/// (`FragmentPlan::blocked_blends`).
+fn through_inputs(cx: &SelectCx<'_>, color: u32) -> bool {
+    fetch::blends_through_inputs(cx.profile) || cx.families.fragment.blocked_blends.contains(&color)
 }
 
 /// Plan the extended-range attachments the function writes through a first output where the
-/// pipeline blends them (`LoweringInputs::extended_range_colors`), on a device that fetches
-/// through input attachments, before the stage interface: each one whose write stores some of
-/// its format's channels reads its input attachment, blends there, and states
-/// `RuntimeFact::ExtendedRangeInputBlend` (see the module docs).
+/// pipeline blends them (`LoweringInputs::extended_range_colors`), and whose blend it computes
+/// over their input attachments ([`through_inputs`]), before the stage interface: each one whose
+/// write stores some of its format's channels reads its input attachment, blends there, and
+/// states `RuntimeFact::ExtendedRangeInputBlend` (see the module docs).
 pub(super) fn plan(cx: &mut SelectCx<'_>) -> Result<(), Error> {
-    if cx.stage != Stage::Fragment || !through_inputs(cx) {
+    if cx.stage != Stage::Fragment {
         return Ok(());
     }
-    let blended = fetch::blended_extended_range(cx)?;
+    if !fetch::blends_through_inputs(cx.profile) && cx.families.fragment.blocked_blends.is_empty() {
+        return Ok(());
+    }
+    let mut blended = fetch::blended_extended_range(cx)?;
+    blended.retain(|&(color, _)| through_inputs(cx, color));
     if blended.is_empty() {
         return Ok(());
     }
@@ -168,8 +180,14 @@ pub(super) fn plan(cx: &mut SelectCx<'_>) -> Result<(), Error> {
         cx.descriptors.input_attachments = cx.descriptors.input_attachments.saturating_add(1);
         cx.facts.insert(RuntimeFact::FramebufferFetch { color });
         // Without rasterization order the blend reads the texel unordered within a draw.
-        if fetch::unordered_inputs(cx.profile) {
-            cx.precision.insert(PrecisionNote::UnorderedFramebufferFetch);
+        if !cx
+            .profile
+            .fields()
+            .fragment
+            .rasterization_order_color_access
+        {
+            cx.precision
+                .insert(PrecisionNote::UnorderedFramebufferFetch);
         }
         planned.insert(
             color,

@@ -36,9 +36,10 @@ void switch_block_destroy(struct switch_block_backend *backend)
     struct switch_block_allocator allocator = backend->allocator;
     backend->online = 0;
     backend->magic = 0;
-    for (unsigned i = 0; i < SWITCH_BLOCK_DISK_COUNT; i++)
+    for (unsigned i = 0; i < SWITCH_BLOCK_DISK_COUNT; i++) {
         if (backend->maps[i])
             allocator.release(allocator.context, backend->maps[i], backend->map_bytes[i]);
+    }
     allocator.release(allocator.context, backend, sizeof(*backend));
 }
 
@@ -151,10 +152,7 @@ int switch_block_read(struct switch_block_backend *backend, unsigned index, uint
     }
     int error = switch_split_read_indexed(&backend->disks[index], offset, destination, length);
     int end_status = backend->source.end(backend->source.context);
-    status = end_status != SWITCH_BLOCK_OK ? end_status
-             : error == SWITCH_FAT_IO      ? SWITCH_BLOCK_IO
-             : error                       ? SWITCH_BLOCK_CORRUPT
-                                           : SWITCH_BLOCK_OK;
+    status = end_status != SWITCH_BLOCK_OK ? end_status : switch_block_fat_status(error);
     if (status != SWITCH_BLOCK_OK)
         backend->online = 0;
     return status;
@@ -193,7 +191,7 @@ int switch_block_read_verified(struct switch_block_backend *backend, unsigned in
         return status;
     }
     int error = switch_split_read_indexed(&backend->disks[index], first, scratch, span);
-    status = error == SWITCH_FAT_IO ? SWITCH_BLOCK_IO : error ? SWITCH_BLOCK_CORRUPT : SWITCH_BLOCK_OK;
+    status = switch_block_fat_status(error);
     if (status == SWITCH_BLOCK_OK) {
         for (uint32_t at = 0; at < span; at += VR_BLOCK_BYTES) {
             uint32_t n = span - at < VR_BLOCK_BYTES ? span - at : VR_BLOCK_BYTES;
@@ -208,10 +206,11 @@ int switch_block_read_verified(struct switch_block_backend *backend, unsigned in
     int end_status = backend->source.end(backend->source.context);
     if (end_status != SWITCH_BLOCK_OK)
         status = end_status;
-    if (status != SWITCH_BLOCK_OK)
+    if (status != SWITCH_BLOCK_OK) {
         backend->online = 0;
-    else
+    } else {
         memmove(scratch, (uint8_t *)scratch + (offset - first), length);
+    }
     return status;
 }
 
@@ -220,19 +219,23 @@ int switch_block_excludes_clusters(struct switch_block_backend *backend, const s
 {
     if (!healthy(backend) || volume != backend->source.volume || !clusters || !count)
         return SWITCH_BLOCK_NOT_READY;
-    for (uint32_t n = 0; n < count; n++)
+    for (uint32_t n = 0; n < count; n++) {
         if (clusters[n] < 2 || clusters[n] - 2 >= volume->cluster_count || (n && clusters[n - 1] >= clusters[n]))
             return SWITCH_BLOCK_CORRUPT;
+    }
     for (unsigned d = 0; d < SWITCH_BLOCK_DISK_COUNT; d++) {
         uint32_t entries = (uint32_t)(backend->map_bytes[d] / sizeof(uint32_t));
         for (uint32_t n = 0; n < entries; n++) {
-            uint32_t key = backend->maps[d][n], lo = 0, hi = count;
+            uint32_t key = backend->maps[d][n];
+            uint32_t lo = 0;
+            uint32_t hi = count;
             while (lo < hi) {
                 uint32_t mid = lo + (hi - lo) / 2;
-                if (clusters[mid] < key)
+                if (clusters[mid] < key) {
                     lo = mid + 1;
-                else
+                } else {
                     hi = mid;
+                }
             }
             if (lo < count && clusters[lo] == key)
                 return SWITCH_BLOCK_CORRUPT;

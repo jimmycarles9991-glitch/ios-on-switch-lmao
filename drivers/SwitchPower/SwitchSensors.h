@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: BSD-2-Clause-Patent
 // The Switch's temperature sensors as iPadOS's thermalmonitord (CLTM) reads them: which physical measurement answers
-// each sensor the J120AP thermal model expects, and the unit conversions on the way. Plain C with no kernel dependency,
-// so the host tests (test/switch_thermal_sensors_test.cpp) check this same header; SwitchSensors.cpp is the kernel
-// side and drivers/SwitchPower/CONTRACT.md the full contract with its evidence.
+// each sensor the thermal model of the IPSW's iPad expects (SwitchSensorModels.h: J120AP, J181AP), and the unit
+// conversions on the way. Plain C with no kernel dependency, so the host tests (test/switch_thermal_sensors_test.cpp,
+// test/switch_thermal_sensors_j181_test.cpp) check this same header; SwitchSensors.cpp is the kernel side and
+// drivers/SwitchPower/CONTRACT.md the full contract with its evidence.
 //
 // thermalmonitord (21H461, ThermalMonitor-1952.120.7) on J120AP: /System/Library/ThermalMonitor/J120AP-Info.plist
 // "Sensors" lists 43 entries; the 38 that are not synthSensor are HID sensors, and each must answer every 5 s cycle or
@@ -10,6 +11,8 @@
 // with PrimaryUsagePage 0xff00 / PrimaryUsage 5 whose Product equals the entry's matchName; thermalmonitord reads it
 // with IOHIDServiceClientCopyEvent(kIOHIDEventTypeTemperature) and takes IOHIDEventGetFloatValue(event, 0xf0000)
 // (kIOHIDEventFieldTemperatureLevel, degrees C) times 100 as an int; -40 C < value < 150 C or it is a read failure.
+// 24B119's thermalmonitord on J181AP reads the same way (-[HidSensors getHIDSensorDict]: the SMC first, then
+// IOHIDServiceClientCopyEvent type 15, field 0xf0000), with its readings keyed by matchName.
 //
 // Mapping rule: every value is a real measurement, from the physical sensor nearest to what the iPad's sensor
 // measures. The Switch (T210B01 "Mariko", OLED) has: SOC_THERM's six on-die tsensors (cpu0-cpu3 beside each A57 core,
@@ -49,65 +52,34 @@ struct switch_sensor {
     int info_only;  // the plist's infoOnly: never read (a -127 C placeholder), but its service must exist
 };
 
-// The J120AP-Info.plist Sensors array, non-synth entries, in order (index = thermalmonitord's sensor index and watchdog
-// mask bit). 'i'/'a'/'x' = instantaneous / window average / window maximum on Apple's PMGR: each is one instantaneous
-// reading here (thermalmonitord reads all three in the same cycle, so the one-sample average and maximum are that
-// sample). Board thermistors (PMU tdevN, PMU2 tdevN, PMU tjunc) take the PCB channel: the one board-level point the
-// Switch measures away from the cells. PMGR SOC die sensors take the die points outside the CPU cores (T210B01 has
-// three: gpu, pllx, the TMP451 diode; the fourth slot is the GPU's, the largest block). ACC (the CPU complex) sensors
-// 0-3 are SOC_THERM's per-core cpu0-cpu3.
-#define SWITCH_SENSOR_COUNT 38u
-static const struct switch_sensor switch_sensors[SWITCH_SENSOR_COUNT] = {
-    {"TG0B", "gas gauge battery", SWITCH_SRC_BATTERY, 0},
-    {"TP1d", "PMU tdev1", SWITCH_SRC_TMP451_PCB, 1},
-    {"TP2d", "PMU tdev2", SWITCH_SRC_TMP451_PCB, 0},
-    {"TP3d", "PMU tdev3", SWITCH_SRC_TMP451_PCB, 1},
-    {"TP4d", "PMU tdev4", SWITCH_SRC_TMP451_PCB, 1},
-    {"TP5d", "PMU tdev5", SWITCH_SRC_TMP451_PCB, 1},
-    {"TP6d", "PMU tdev6", SWITCH_SRC_TMP451_PCB, 0},
-    {"TP7d", "PMU tdev7", SWITCH_SRC_TMP451_PCB, 1},
-    {"TP8d", "PMU tdev8", SWITCH_SRC_TMP451_PCB, 0},
-    {"TR1d", "PMU2 tdev1", SWITCH_SRC_TMP451_PCB, 1},
-    {"TR2d", "PMU2 tdev2", SWITCH_SRC_TMP451_PCB, 1},
-    {"TP0Z", "PMU tcal", SWITCH_SRC_TCAL, 0},
-    {"TP0j", "PMU tjunc", SWITCH_SRC_TMP451_PCB, 1},
-    {"TQ0B", "Charger tbat", SWITCH_SRC_BATTERY, 1},
-    {"Th0i", "PMGR SOC Die Temp Sensor0", SWITCH_SRC_SOC_GPU, 1},
-    {"Th0a", "Avg: PMGR SOC Die Temp Sensor0", SWITCH_SRC_SOC_GPU, 0},
-    {"Th0x", "Max: PMGR SOC Die Temp Sensor0", SWITCH_SRC_SOC_GPU, 0},
-    {"Th1i", "PMGR SOC Die Temp Sensor1", SWITCH_SRC_SOC_PLLX, 1},
-    {"Th1a", "Avg: PMGR SOC Die Temp Sensor1", SWITCH_SRC_SOC_PLLX, 0},
-    {"Th1x", "Max: PMGR SOC Die Temp Sensor1", SWITCH_SRC_SOC_PLLX, 0},
-    {"Th2i", "PMGR SOC Die Temp Sensor2", SWITCH_SRC_TMP451_SOC, 1},
-    {"Th2a", "Avg: PMGR SOC Die Temp Sensor2", SWITCH_SRC_TMP451_SOC, 0},
-    {"Th2x", "Max: PMGR SOC Die Temp Sensor2", SWITCH_SRC_TMP451_SOC, 0},
-    {"Th3i", "PMGR SOC Die Temp Sensor3", SWITCH_SRC_SOC_GPU, 1},
-    {"Th3a", "Avg: PMGR SOC Die Temp Sensor3", SWITCH_SRC_SOC_GPU, 0},
-    {"Th3x", "Max: PMGR SOC Die Temp Sensor3", SWITCH_SRC_SOC_GPU, 0},
-    {"Tc0i", "ACC Temp Sensor0", SWITCH_SRC_SOC_CPU0, 1},
-    {"Tc0a", "Avg: ACC Temp Sensor0", SWITCH_SRC_SOC_CPU0, 0},
-    {"Tc0x", "Max: ACC Temp Sensor0", SWITCH_SRC_SOC_CPU0, 0},
-    {"Tc1i", "ACC Temp Sensor1", SWITCH_SRC_SOC_CPU1, 1},
-    {"Tc1a", "Avg: ACC Temp Sensor1", SWITCH_SRC_SOC_CPU1, 0},
-    {"Tc1x", "Max: ACC Temp Sensor1", SWITCH_SRC_SOC_CPU1, 0},
-    {"Tc2i", "ACC Temp Sensor2", SWITCH_SRC_SOC_CPU2, 1},
-    {"Tc2a", "Avg: ACC Temp Sensor2", SWITCH_SRC_SOC_CPU2, 0},
-    {"Tc2x", "Max: ACC Temp Sensor2", SWITCH_SRC_SOC_CPU2, 0},
-    {"Tc3i", "ACC Temp Sensor3", SWITCH_SRC_SOC_CPU3, 1},
-    {"Tc3a", "Avg: ACC Temp Sensor3", SWITCH_SRC_SOC_CPU3, 0},
-    {"Tc3x", "Max: ACC Temp Sensor3", SWITCH_SRC_SOC_CPU3, 0},
-};
+#include "SwitchSensorModels.h"
 
-// The sensors thermalmonitord reads every 5 s (copyEvent), as a mask of table indices. It sets an infoOnly sensor's
-// health bit whenever its service exists, so with no service hooked its "current" mask is exactly the infoOnly bits
-// (0x9249276ba).
-static inline uint64_t switch_sensors_read_mask(void)
+// The table of the IPSW's own iPad (switch_ipsw_volumes.h's SWITCH_IPSW_DEVICE_*): J181 for iOS 27, J120 for iOS 17.
+#ifdef SWITCH_IPSW_DEVICE_J181AP
+#define SWITCH_SENSOR_COUNT SWITCH_SENSOR_COUNT_J181AP
+#define switch_sensors      switch_sensors_j181ap
+#else
+#define SWITCH_SENSOR_COUNT SWITCH_SENSOR_COUNT_J120AP
+#define switch_sensors      switch_sensors_j120ap
+#endif
+
+// The sensors thermalmonitord reads every 5 s (copyEvent), as a mask of a table's indices. It sets an infoOnly
+// sensor's health bit whenever its service exists, so with no service hooked its "current" mask is exactly the infoOnly
+// bits (J120: 0x9249276ba).
+static inline uint64_t switch_sensor_table_read_mask(const struct switch_sensor *sensors, unsigned count)
 {
     uint64_t mask = 0;
-    for (unsigned i = 0; i < SWITCH_SENSOR_COUNT; ++i)
-        if (!switch_sensors[i].info_only)
-            mask |= 1ull << i;
+    for (unsigned i = 0; i < count; ++i) {
+        if (!sensors[i].info_only)
+            mask |= 1ULL << i;
+    }
     return mask;
+}
+
+// NOLINTNEXTLINE(modernize-redundant-void-arg): C (the host harness) reads this header too
+static inline uint64_t switch_sensors_read_mask(void)
+{
+    return switch_sensor_table_read_mask(switch_sensors, SWITCH_SENSOR_COUNT);
 }
 
 // A 4CC as the 32-bit big-endian integer thermalmonitord compares a service's LocationID with.
@@ -133,13 +105,13 @@ static inline int32_t switch_sensor_cltm_centi(int32_t fixed)
 // thermalmonitord's -[HidSensors isTempSensorDataValid:value:] on centi-degrees: (uint32)(v - 15000) > 0xffffb5c8.
 static inline int switch_sensor_cltm_valid(int32_t centi)
 {
-    return (uint32_t)(centi - 15000) > 0xffffb5c8u;
+    return (uint32_t)(centi - 15000) > 0xffffb5c8u ? 1 : 0;
 }
 
 // Only physically plausible readings are handed to thermalmonitord; anything else is a read failure (no event).
 static inline int switch_sensor_plausible(int32_t milli_c)
 {
-    return milli_c > -40000 && milli_c < 150000;
+    return milli_c > -40000 && milli_c < 150000 ? 1 : 0;
 }
 
 // SOC_THERM readback (TS_*_STATUS1 bits 15:0, SENSOR_TEMP1/2 halves): TTTTTTTT H______N, T = degrees, H = +0.5, N =
@@ -165,8 +137,9 @@ static inline int32_t switch_max17050_millic(uint16_t raw)
 // a degree either way raises ALRT and the current reading never violates it.
 static inline uint16_t switch_max17050_talrt(int32_t milli_c)
 {
-    int32_t whole = milli_c >= 0 ? (milli_c + 500) / 1000 : -((-milli_c + 500) / 1000);  // nearest
-    int32_t hi = whole + 1, lo = whole - 1;
+    const int32_t whole = milli_c >= 0 ? (milli_c + 500) / 1000 : -((-milli_c + 500) / 1000);  // nearest
+    int32_t hi = whole + 1;
+    int32_t lo = whole - 1;
     if (hi > 127)
         hi = 127;
     if (hi < -127)
@@ -175,7 +148,7 @@ static inline uint16_t switch_max17050_talrt(int32_t milli_c)
         lo = -128;
     if (lo > 126)
         lo = 126;
-    return (uint16_t)((uint16_t)(uint8_t)(int8_t)hi << 8 | (uint8_t)(int8_t)lo);
+    return (uint16_t)((unsigned)(uint8_t)(int8_t)hi << 8 | (uint8_t)(int8_t)lo);
 }
 
 // --- SOC_THERM fuse calibration (Linux drivers/thermal/tegra/tsensor-fuse.c and tegra210-soctherm.c, T210B01) ----
@@ -207,6 +180,7 @@ struct switch_tsensor_shared {
 static inline int32_t switch_sign_extend32(uint32_t value, unsigned index)
 {
     const unsigned shift = 31 - index;
+    // NOLINTNEXTLINE(bugprone-signed-bitwise): an arithmetic shift right sign-extends the field
     return (int32_t)(value << shift) >> shift;
 }
 
@@ -215,6 +189,7 @@ static inline int64_t switch_div64_precise(int64_t a, int32_t b)
 {
     const int64_t al = a * 65536;
     const int64_t r = (al * 2 + 1) / ((int64_t)b * 2);
+    // NOLINTNEXTLINE(bugprone-signed-bitwise): an arithmetic shift, as Linux's div64_s64_precise
     return r >> 16;
 }
 
@@ -238,11 +213,13 @@ static inline uint32_t switch_tsensor_calib(const struct switch_tsensor_config *
 {
     const int32_t cp = shared->base_cp * 64 + switch_sign_extend32(fuse & 0x1fffu, 12);
     const int32_t ft = shared->base_ft * 32 + switch_sign_extend32((fuse >> 13) & 0x1fffu, 12);
-    const int32_t delta_sens = ft - cp, delta_temp = shared->actual_temp_ft - shared->actual_temp_cp;
-    const int32_t mult = (int32_t)(cfg->pdiv * cfg->tsample_ate), div = (int32_t)(cfg->tsample * cfg->pdiv_ate);
+    const int32_t delta_sens = ft - cp;
+    const int32_t delta_temp = shared->actual_temp_ft - shared->actual_temp_cp;
+    const int32_t mult = (int32_t)(cfg->pdiv * cfg->tsample_ate);
+    const int32_t div = (int32_t)(cfg->tsample * cfg->pdiv_ate);
     if (!delta_sens)
         return 0;
-    int64_t temp = (int64_t)delta_temp * (1ll << 13) * mult;
+    int64_t temp = (int64_t)delta_temp * (1LL << 13) * mult;
     int16_t therma = (int16_t)switch_div64_precise(temp, (int32_t)((int64_t)delta_sens * div));
     temp = (int64_t)ft * shared->actual_temp_cp - (int64_t)cp * shared->actual_temp_ft;
     int16_t thermb = (int16_t)switch_div64_precise(temp, delta_sens);
@@ -280,9 +257,10 @@ static const char *const switch_cltm_keys[SWITCH_CLTM_CONTRIBUTORS] = {
 static inline uint32_t switch_cltm_ceiling(const uint32_t fraction[SWITCH_CLTM_CONTRIBUTORS])
 {
     uint32_t c = 0x10000u;
-    for (unsigned i = 0; i < SWITCH_CLTM_CONTRIBUTORS; ++i)
+    for (unsigned i = 0; i < SWITCH_CLTM_CONTRIBUTORS; ++i) {
         if (fraction[i] < c)
             c = fraction[i];
+    }
     return c;
 }
 

@@ -7,8 +7,7 @@
 
 No card is needed: the container is composed for 1 TiB and install-ios.bin fits it to the card's iOS partition, which
 must be at least the image's minimum. Every stage is kept with the key of what it was made from (keys.py), so a rerun
-does only what changed. Populating the container needs root for file owners, so a run that populates asks for sudo
-once.
+does only what changed. Nothing needs root: file owners are given in the detached image (owners.py).
 """
 
 import argparse
@@ -20,27 +19,24 @@ import sys
 import time
 from collections.abc import Callable
 from pathlib import Path
-from typing import NoReturn
 
 if __package__ in (None, ''):
     sys.path.insert(0, str(Path(os.path.abspath(__file__)).parents[2]))
+from tools.common import paths
 from tools.install import (
     apfs,
     card as cards,
-    compose,
+    disks,
     extents,
     folder,
     gpt,
     host,
     keys,
     manifest,
+    progress,
+    space,
     stages,
 )
-
-try:
-    from python.runfiles import runfiles as rules_python_runfiles
-except ImportError:
-    rules_python_runfiles = None
 
 INPUTS = (
     'spec',
@@ -56,48 +52,30 @@ INPUTS = (
     'install_payload',
     'pretranslated_pins',
     'apfs_tool',
+    'delta_os',
+    'delta_app_cryptex',
+    'delta_system_cryptex',
+    'translated_app_cryptex',
+    'translated_system_cryptex',
 )
-HEADROOM = 4 << 30
-DATA_SEED_BYTES = 1 << 30
-
-
-def runfiles() -> 'rules_python_runfiles.Runfiles | None':
-    return rules_python_runfiles.Create() if rules_python_runfiles else None
+BAZEL_OUTPUTS = (
+    'delta_os',
+    'delta_app_cryptex',
+    'delta_system_cryptex',
+    'translated_app_cryptex',
+    'translated_system_cryptex',
+)
 
 
 def resolve_inputs(args: argparse.Namespace) -> None:
-    locate = runfiles()
-
-    def where(value: str) -> str:
-        return os.path.abspath(locate.Rlocation(value) or value if locate and not os.path.isabs(value) else value)
-
-    args.pretranslate = {}
     for listing in args.inputs or []:
-        for name, value in json.loads(Path(where(listing)).read_text()).items():
-            if name == 'pretranslate':
-                for role, spec in value.items():
-                    args.pretranslate[role] = {
-                        'driver': where(spec['driver']),
-                        'tool': where(spec['tool']),
-                        'trustcaches': [where(f) for f in spec['trustcaches']],
-                    }
-            elif not getattr(args, name, None):
+        for name, value in json.loads(Path(paths.located(listing)).read_text()).items():
+            if not getattr(args, name, None):
                 setattr(args, name, value)
     for name in INPUTS:
-        value = getattr(args, name, None)
-        if value and not os.path.isabs(value) and locate:
-            value = locate.Rlocation(value) or value
-        setattr(args, name, os.path.abspath(value) if value else None)
+        setattr(args, name, paths.located(getattr(args, name, None)) or None)
     if args.gpu_base and os.path.isfile(args.gpu_base):
         args.gpu_base = os.path.dirname(args.gpu_base)
-
-
-def needed(args: argparse.Namespace, pins: dict, os_bytes: int) -> int:
-    seed = 0
-    if args.shader_seed_size:
-        seed = json.loads(Path(args.shader_seed_size).read_text())['blocks4k']
-    cryptexes = sum(pins['members'][m]['size'] for m in ('system_cryptex', 'app_cryptex'))
-    return os_bytes + cryptexes + DATA_SEED_BYTES + seed + HEADROOM
 
 
 def plan_lines(args: argparse.Namespace, first: str | None, name: str) -> list[str]:
@@ -105,7 +83,7 @@ def plan_lines(args: argparse.Namespace, first: str | None, name: str) -> list[s
         return [f"write {name}.SII.001's head (manifest and boot files); the rest is unchanged"]
     steps = [
         f'compose a 1 TiB iOS container in {args.scratch}/{stages.COMPOSED} (kept for the next run)',
-        'populate Data and Preboot on a clone of it (asks for sudo once)',
+        'populate Data and Preboot on a clone of it, owners given offline',
         f'prove the fit on a clone, pack {args.out}/{folder.SII_DIR}/{name}.SII.*',
     ]
     start = ('compose', 'populate', 'pack').index(first) if first else len(steps)
@@ -135,7 +113,8 @@ class Timer:
 
     def __call__(self, stage: str, work: Callable[[], object]) -> object:
         wall, cpu = time.monotonic(), self.cpu()
-        result = work()
+        with progress.step(stage, unit=None):
+            result = work()
         wall, cpu = time.monotonic() - wall, self.cpu() - cpu
         cores = os.cpu_count() or 1
         share = 100 * cpu / max(wall, 1e-9) / cores
@@ -150,13 +129,6 @@ class Builder:
         self.spec = stages.ipsw_volumes(json.loads(Path(args.spec).read_text()), self.pins)
         self.name, self.label = folder.image_name(self.pins), stages.version_label(self.pins)
         self.time = Timer(log)
-
-    def warm(self) -> int:
-        check_inputs(self.args)
-        self.log(f'image: {self.label}: warming translations')
-        stages.Stages(self.args, self.spec, self.pins, self.log).warm_translations()
-        self.log(f'translations kept in {Path(self.args.scratch) / stages.TRANSLATIONS}')
-        return 0
 
     def run(self) -> int:
         check_inputs(self.args)
@@ -177,6 +149,10 @@ class Builder:
         if self.args.dry_run or first is None:
             self.log('dry run: nothing written' if self.args.dry_run else f'{self.name}.SII: unchanged')
             return 0
+        work.clean()
+        if first != 'head':
+            cached = sum(space.allocated(getattr(self.args, n, None)) for n in BAZEL_OUTPUTS)
+            space.check_run(self.args.scratch, work.space_needed(first), cached, self.log)
         if first == 'head':
             self.time('head', lambda: stages.refresh_head(out, self.name, files, self.label))
             self.finish(out, k)
@@ -191,13 +167,10 @@ class Builder:
     def compose_and_populate(self, work: stages.Stages, k: keys.Keys, first: str) -> bool:
         """Run compose and populate as far as `first` and --stop-after ask; return whether pack comes next."""
         if first == 'compose':
-            self.check_space()
             self.time('compose', lambda: work.compose(k.compose))
         if self.args.stop_after == 'compose':
             return False
         if first in ('compose', 'populate'):
-            if os.geteuid() != 0:
-                reexec_as_root(self.args)
             self.time('populate', lambda: work.populate(k.populate))
         return self.args.stop_after != 'populate'
 
@@ -230,44 +203,11 @@ class Builder:
         entry = {'pack': k.pack, 'head': k.head, 'label': self.label, 'boot': stages.boot_record(self.args)}
         entry['minimum_bytes'] = minimum or before.get('minimum_bytes')
         folder.record(out, self.name, entry)
-        kept = Path(self.args.scratch) / 'pretranslated'
+        kept = Path(self.args.scratch) / stages.KEPT
         if kept.is_dir():
             shutil.copytree(kept, Path(out) / 'pretranslated', dirs_exist_ok=True)
             shutil.rmtree(kept)
         self.add_shared(out)
-        stages.give_back(out)
-
-    def check_space(self) -> None:
-        want = needed(self.args, self.pins, compose.os_container_bytes(self.args.os_dmg, self.log))
-        free = stages.free_bytes(self.args.scratch)
-        if free < want + stages.FLOOR:
-            raise host.HostError(
-                f'{self.args.scratch} has {free >> 30} GiB free; composing needs about {want >> 30} GiB and leaves '
-                f'{stages.FLOOR >> 30} GiB'
-            )
-
-
-def reexec_as_root(args: argparse.Namespace) -> NoReturn:
-    """Run the same command under sudo.
-
-    The runfiles variables go along: the inputs are found, and so are the runfiles of the pretranslate drivers it
-    starts (sudo clears the environment).
-    """
-    locate = runfiles()
-    env = [f'{k}={v}' for k, v in sorted((locate.EnvVars() if locate else {}).items())]
-    command = ['sudo', '--', '/usr/bin/env', *env, sys.executable, os.path.abspath(__file__)]
-    for key, value in sorted(vars(args).items()):
-        if key == 'pretranslate':
-            continue
-        flag = '--' + key.replace('_', '-')
-        if key == 'inputs':
-            command += [f'{flag}={v}' for v in value or []]
-        elif value is True:
-            command.append(flag)
-        elif value not in (None, False):
-            command.append(f'{flag}={value}')
-    print('composing needs root for file owners; running under sudo', flush=True)
-    os.execvp('sudo', command)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -276,16 +216,6 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument('--boot-only', action='store_true', help="rewrite only the image's boot files (the head)")
     parser.add_argument('--stop-after', choices=('compose', 'populate'), help='stop after this stage; rerun to go on')
     parser.add_argument('--dry-run', action='store_true')
-    parser.add_argument(
-        '--warm-translations',
-        action='store_true',
-        help="translate iOS 27's volumes into the scratch's memo as this user, then stop (no compose)",
-    )
-    parser.add_argument(
-        '--translation-memo',
-        action='store_true',
-        help="populate takes translations from the scratch's memo instead of translating again",
-    )
     parser.add_argument('--scratch', help='where the container is composed and kept (sparse; about 15 GB used)')
     parser.add_argument('--log')
     parser.add_argument('--inputs', action='append', help='a JSON file of the inputs below (//install:image_inputs)')
@@ -293,18 +223,15 @@ def main(argv: list[str] | None = None) -> int:
         parser.add_argument('--' + name.replace('_', '-'))
     args = parser.parse_args(argv)
     resolve_inputs(args)
-    workspace = os.environ.get('BUILD_WORKSPACE_DIRECTORY') or os.getcwd()
-    args.out = os.path.abspath(args.out or os.path.join(workspace, 'out/sd'))
+    args.out = os.path.abspath(args.out or paths.workspace() / 'out/sd')
     build = json.loads(Path(args.ipsw).read_text())['build']
     args.scratch = os.path.abspath(args.scratch or stages.default_scratch(build))
-    args.log = args.log or str(
-        Path.home() / 'Library/Logs/switch-ios/image-{}.log'.format(time.strftime('%Y%m%d-%H%M%S'))
-    )
+    args.log = args.log or str(paths.run_log('image'))
     log = host.Log(args.log) if not args.dry_run else PrintLog()
     try:
         host.check_tools(log)
-        builder = Builder(args, log)
-        return builder.warm() if args.warm_translations else builder.run()
+        with disks.interrupts():
+            return Builder(args, log).run()
     except cards.RefusedError as error:
         log('REFUSED:', error)
         return 2
@@ -317,7 +244,7 @@ def main(argv: list[str] | None = None) -> int:
 
 class PrintLog:
     def __call__(self, *parts: object) -> None:
-        print(*parts, flush=True)
+        progress.println(' '.join(str(p) for p in parts))
 
     def quiet(self, *parts: object) -> None:
         pass

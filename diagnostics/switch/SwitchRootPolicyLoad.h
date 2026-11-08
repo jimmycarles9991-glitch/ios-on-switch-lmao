@@ -18,9 +18,13 @@ const struct switch_root_policy *switch_root_policy_get(unsigned disk)
  * envelope hashing and signature/table verification. No partial publication. */
 int switch_root_policy_load(void)
 {
-    vm_offset_t descriptors = 0, storage[2] = {0, 0}, index = 0;
-    vm_size_t sizes[2] = {0, 0}, index_size = 0;
-    unsigned code = 400, disk = 0;
+    vm_offset_t descriptors = 0;
+    vm_offset_t storage[2] = {0, 0};
+    vm_offset_t index = 0;
+    vm_size_t sizes[2] = {0, 0};
+    vm_size_t index_size = 0;
+    unsigned code = 400;
+    unsigned disk = 0;
     int active = 0;
     if (root_policy_attempted)
         return root_policies ? 0 : 400;
@@ -33,7 +37,8 @@ int switch_root_policy_load(void)
     struct switch_root_policy *views = (struct switch_root_policy *)descriptors;
     for (disk = 0; disk < 2; disk++) {
         const struct switch_root_expected *e = &switch_root_expected[disk];
-        if (!e->bytes || e->bytes > 64u * 1024u * 1024u || e->image_bytes != switch_storage_volumes[disk].size_bytes) {
+        if (!e->bytes || e->bytes > (uint64_t)64u * 1024u * 1024u ||
+            e->image_bytes != switch_storage_volumes[disk].size_bytes) {
             code = 403;
             goto fail;
         }
@@ -134,9 +139,10 @@ fail:
     reader.offline = 1;
     if (index)
         kmem_free(kernel_map, index, index_size);
-    for (unsigned i = 0; i < 2; i++)
+    for (unsigned i = 0; i < 2; i++) {
         if (storage[i])
             kmem_free(kernel_map, storage[i], sizes[i]);
+    }
     if (descriptors)
         kmem_free(kernel_map, descriptors, PAGE_SIZE);
     switch_root_progress(0x80000000u | code, disk, 0, 0);

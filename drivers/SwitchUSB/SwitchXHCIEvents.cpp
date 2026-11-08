@@ -71,7 +71,7 @@ bool SwitchXHCI::mailboxFilter(OSObject *owner, IOFilterInterruptEventSource *)
 
 void SwitchXHCI::mailboxAction(OSObject *owner, IOInterruptEventSource *, int)
 {
-    auto *self = static_cast<SwitchXHCI *>(owner);
+    const auto *self = static_cast<SwitchXHCI *>(owner);
     if (self->mailboxStorm) {
         self->mailbox->disable();
         char state[200];
@@ -99,9 +99,12 @@ IOReturn SwitchXHCI::expectPortChange()
     return kIOReturnSuccess;
 }
 
-xusb_irq_sample SwitchXHCI::hostSample() const
+xusb_irq_sample SwitchXHCI::hostSample()
 {
-    uint32_t iman = 0, usbcmd = 0, usbsts = 0, erdp = 0;
+    uint32_t iman = 0;
+    uint32_t usbcmd = 0;
+    uint32_t usbsts = 0;
+    uint32_t erdp = 0;
     (void)gHost.interruptSample(iman, usbcmd, usbsts, erdp);
     return {switch_interrupt_count(xhost::kHostIntid), erdp, xusb_xhci_pending(iman, usbsts),
             xusb_xhci_deliverable(iman, usbcmd)};
@@ -122,7 +125,8 @@ void SwitchXHCI::armCheck(uint32_t ms, uint8_t stage)
 
 void SwitchXHCI::checkFired(IOTimerEventSource *)
 {
-    const xusb_irq_sample host = hostSample(), mailboxNow = mailboxSample();
+    const xusb_irq_sample host = hostSample();
+    const xusb_irq_sample mailboxNow = mailboxSample();
     const xusb_irq_verdict hostVerdict = xusb_irq_judge(hostAtCheck, host, firstCheck, checkStage);
     const xusb_irq_verdict mailboxVerdict = xusb_irq_judge(mailboxAtCheck, mailboxNow, false, checkStage);
     const bool hostSide = hostVerdict >= mailboxVerdict;
@@ -137,7 +141,8 @@ void SwitchXHCI::checkFired(IOTimerEventSource *)
         return;
     }
     const uint32_t intid = hostSide ? xhost::kHostIntid : xhost::kMailboxIntid;
-    char state[480], gic[192];
+    char state[480];
+    char gic[192];
     gHost.describe(state, sizeof(state));
     switch_interrupt_describe(intid, gic, sizeof(gic));
     if (verdict == XUSB_IRQ_PANIC) {
@@ -195,12 +200,13 @@ void switchxhci_describe(char *buffer, size_t size)
         snprintf(buffer, size, "XUSB not mapped");
         return;
     }
-    char pads[400], ports[360];
+    char pads[400];
+    char ports[360];
     gHost.describePads(pads, sizeof(pads));
     gHost.describePorts(ports, sizeof(ports));
     const PowerCycle cycle = gCycle;
-    const unsigned host = switch_interrupt_count(xhost::kHostIntid),
-                   mailbox = switch_interrupt_count(xhost::kMailboxIntid);
+    const unsigned host = switch_interrupt_count(xhost::kHostIntid);
+    const unsigned mailbox = switch_interrupt_count(xhost::kMailboxIntid);
     if (cycle.port) {
         snprintf(buffer, size, "%s; INTID 71 x%u 72 x%u; last PP cycle port %u %#x>%#x>%#x%s; %s", ports, host, mailbox,
                  cycle.port, cycle.trace[0], cycle.trace[1], cycle.trace[2],
@@ -210,16 +216,17 @@ void switchxhci_describe(char *buffer, size_t size)
     }
 }
 
-void switchxhci_expect_port_change(void)
+void switchxhci_expect_port_change()
 {
     SwitchXHCI *controller = __atomic_load_n(&SwitchXHCI::running, __ATOMIC_ACQUIRE);
     IOWorkLoop *loop = controller ? controller->tegraLoopForCheck() : nullptr;
-    if (loop)
+    if (loop) {
         loop->runAction(
             [](OSObject *owner, void *, void *, void *, void *) {
                 return static_cast<SwitchXHCI *>(owner)->expectPortChange();
             },
             controller);
+    }
 }
 
 // SwitchUSB.cpp's suspend and resume, thread context. IOKit has taken AppleUSBXHCI to Sleep or Off before the platform
@@ -243,7 +250,7 @@ void switchxhci_sleep(bool entering)
         return;
     }
     if (gRemoteWake) {
-        gHost.disarmRemoteWake();
+        xhost::Controller::disarmRemoteWake();
         gRemoteWake = false;
     }
     char why[160] = "";
@@ -296,17 +303,19 @@ void followSuperSpeed(SwitchXHCI *controller)
 {
     if (!gHost.powered())
         return;
-    const unsigned usb2 = gHost.otgPort(), number = gHost.ssPort();
-    const bool usb2Connected = usb2 && (gHost.portsc(usb2) & XHCI_PORTSC_CCS);
+    const unsigned usb2 = gHost.otgPort();
+    const unsigned number = gHost.ssPort();
+    const bool usb2Connected = (usb2 != 0u) && ((gHost.portsc(usb2) & XHCI_PORTSC_CCS) != 0u);
     const xusb_ss_port_step step = xusb_ss_port_follow(gCable, switch_usb_ss_up(), gSsHeld, usb2Connected);
     if (!step.power_on && !step.power_off)
         return;
     IOService *port = number ? xhost::waitForRootPort(controller, number, kPortWaitNS) : nullptr;
     if (!port) {
         static bool reported;
-        if (!reported)
+        if (!reported) {
             IOLog("SwitchUSB: no SuperSpeed root port for SS port 0 (xHCI port %u, controller power %u)\n", number,
                   static_cast<unsigned>(controller->getPowerState()));
+        }
         reported = true;
         return;
     }
@@ -336,7 +345,7 @@ void followSuperSpeed(SwitchXHCI *controller)
 }
 }  // namespace
 
-void switchxhci_superspeed(void)
+void switchxhci_superspeed()
 {
     SwitchXHCI *controller = __atomic_load_n(&SwitchXHCI::running, __ATOMIC_ACQUIRE);
     if (controller)
@@ -362,7 +371,8 @@ void switchxhci_cable(bool connected)
               number, static_cast<unsigned>(controller->getPowerState()), ports);
         return;
     }
-    const unsigned controllerBefore = controller->getPowerState(), portBefore = port->getPowerState();
+    const unsigned controllerBefore = controller->getPowerState();
+    const unsigned portBefore = port->getPowerState();
     const IOReturn raised = connected ? xhost::forcePower(controller, true) : kIOReturnSuccess;
     // SuperSpeed before USB 2.0 going on and off, as tegra_xhci_set_host_mode: a USB 3 device that finds its USB2 port
     // powered first may settle there.

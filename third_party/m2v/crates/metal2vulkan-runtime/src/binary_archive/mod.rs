@@ -20,8 +20,9 @@
 //!   the archive keys of its stages. Adding twice keeps one copy.
 //! - **Files.** An archive is read whole from its descriptor's file (`container.rs`) and written
 //!   through a temporary file and a rename. An archive of another profile or build loads, and
-//!   its entries miss, as Metal's archive of another device or OS does. Labels are not written,
-//!   as Metal's are not.
+//!   its entries miss, as Metal's archive of another device or OS does; so does a metallib (an
+//!   Apple framework's, which holds binaries for Apple's GPUs only). Labels are not written, as
+//!   Metal's are not.
 //! - **Differences from Metal**, accepted (docs/API.md §10): the file is read whole at load, so an
 //!   archive serializes after its file was deleted, where Metal's fails; and a file is a path,
 //!   so a URL that is not a file cannot be named, where Metal answers it as an invalid URL.
@@ -97,9 +98,9 @@ pub(crate) type Used = RefCell<Vec<Artifact>>;
 
 impl Device {
     /// `newBinaryArchiveWithDescriptor:error:`: an empty archive, or the archive in the
-    /// descriptor's file. A file that is missing or not an archive is
-    /// `BinaryArchive(InvalidFile)`, as Metal answers for a missing, empty, garbage or text file
-    /// and for a directory (measured on an M3 Max and an M4).
+    /// descriptor's file (a metallib's holds nothing for this device). A file that is missing or
+    /// not an archive is `BinaryArchive(InvalidFile)`, as Metal answers for a missing, empty,
+    /// garbage or text file and for a directory (measured on an M3 Max and an M4).
     pub fn new_binary_archive(
         &self,
         descriptor: &BinaryArchiveDescriptor,

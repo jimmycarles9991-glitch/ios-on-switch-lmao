@@ -14,6 +14,7 @@ import json
 import re
 import sys
 from collections.abc import Callable
+from types import ModuleType
 
 NONE_BLEND = 58  # BlendFunction "non"
 BOOL, UCHAR, UCHAR4 = 53, 49, 52  # MTLDataType
@@ -32,12 +33,18 @@ class Tables:
             self.t = json.load(f)
         self.dec = self.t['decoders']
         self.tfi = [bytes.fromhex(x) for x in self.t['texture_function_info']]
+        self.none_blend = self.dec['BlendFunction']['non']
+        self.v27 = None
+        if self.t.get('layout') == 27:
+            import caspec27  # noqa: PLC0415  (it builds on this module's segments and constants)
+
+            self.v27 = caspec27.Tables27(self.t)
 
     def tfi_flags(self, tf: int) -> int:  # texture_function_info[tf] bytes 5-6
-        return self.tfi[tf][5] | self.tfi[tf][6] << 8
+        return self.v27.tfi_flags(tf) if self.v27 else self.tfi[tf][5] | self.tfi[tf][6] << 8
 
     def shader_type(self, tf: int) -> int:
-        return self.tfi[tf][0] & 0x3F
+        return self.v27.shader_type(tf) if self.v27 else self.tfi[tf][0] & 0x3F
 
     def images(self, tf: int) -> int:
         return self.t['tex_image_count'][tf]
@@ -108,6 +115,10 @@ class _Segment:
 
 def decode(tables: Tables, name: str) -> Spec:
     """Pipeline::Spec::decode_name."""
+    if tables.v27:
+        import caspec27  # noqa: PLC0415
+
+        return caspec27.decode(tables.v27, name)
     s = Spec()
     dec, nt = tables.dec, tables.t['name_tables']
 
@@ -347,20 +358,32 @@ def state_line(tables: Tables, name: str) -> str:
     """Give the journal's R line of the state `name`, spaced as the frontend journals it (the probe keys by that text).
 
     Each function's part is its name, a blank, its constants: two blanks before the next '|' for one without constants,
-    as RawMetal.mm raw_metal_pipeline_key makes the key the pack is looked up by.
+    as RawMetalLibrary.mm raw_metal_pipeline_key makes the key the pack is looked up by.
     """
     s = decode(tables, name)
-    atts, vertex = color_attachments(tables, s)
+    rules = _rules(tables)
+    atts, vertex = rules.color_attachments(tables.v27 or tables, s)
     parts = ['samples=1', 'topo=0', 'ds=0/0']
     parts += [f'c{i}=' + ':'.join(map(str, a)) for i, a in enumerate(atts)]
     if vertex:
-        parts += [f'a{i}={fmt}:{off}:1:{stride}:1:1' for i, fmt, off, stride in vertex_attributes(tables, s)]
+        attributes = rules.vertex_attributes(tables.v27 or tables, s)
+        parts += [f'a{i}={fmt}:{off}:1:{stride}:1:1' for i, fmt, off, stride in attributes]
 
     def text(fn: tuple[str, list[Const]]) -> str:
         return fn[0] + ' ' + ' '.join(f'{k}:{t}:{v}' for k, t, v in sorted(fn[1]))
 
-    v, f = text(vertex_function(tables, s)), text(fragment_function(tables, s))
+    v = text(rules.vertex_function(tables.v27 or tables, s))
+    f = text(rules.fragment_function(tables.v27 or tables, s))
     return f'R ok=1 label=com.apple.coreanimation.{name} ' + ' '.join(parts) + f' | v {v} | f {f} | '
+
+
+def _rules(tables: Tables) -> ModuleType:
+    """Give the module that makes a state's descriptor and functions as this QuartzCore does."""
+    if tables.v27:
+        import caspec27  # noqa: PLC0415
+
+        return caspec27
+    return sys.modules[__name__]
 
 
 def state_fields(tables: Tables, name: str) -> str:

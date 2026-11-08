@@ -4,6 +4,13 @@
 #include "block_backend.h"
 #include "split_disk.h"
 
+static inline int switch_block_fat_status(int error)
+{
+    if (error == SWITCH_FAT_IO)
+        return SWITCH_BLOCK_IO;
+    return error ? SWITCH_BLOCK_CORRUPT : SWITCH_BLOCK_OK;
+}
+
 /* Trusted native glue supplies this only after card, GPT, FAT and sample
  * qualification. Every referenced object/path and callback context has static
  * or backend-long lifetime. The volume and medium stay immutable except for

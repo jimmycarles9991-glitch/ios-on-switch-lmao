@@ -13,6 +13,8 @@
 int test_failures;
 #define failures test_failures
 void test_native_main(void);  // test_native.c
+void test_owl_main(void);     // test_owl.c
+void test_sched_main(void);   // test_sched.c
 #define CHECK(x)                                                         \
     do {                                                                 \
         if (!(x)) {                                                      \
@@ -88,9 +90,10 @@ static int node_index(void *ctx)
     return (int)(intptr_t)ctx;
 }
 
-static int sim_tx(void *ctx, const uint8_t *frame, size_t len, uint16_t freq, uint64_t tx_tsf, int no_ack)
+static int sim_tx(void *ctx, const uint8_t *frame, size_t len, uint16_t freq, uint64_t stay_until, int no_ack)
 {
     (void)no_ack;
+    (void)stay_until;
     const int i = node_index(ctx);
     if (nair == (int)(sizeof air / sizeof air[0]) || len > sizeof air[0].data)
         return -1;
@@ -99,7 +102,7 @@ static int sim_tx(void *ctx, const uint8_t *frame, size_t len, uint16_t freq, ui
     f->freq = freq;
     f->len = len;
     memcpy(f->data, frame, len);
-    f->at = tx_tsf ? global_of(i, tx_tsf) : 0;  // 0: "now", fixed up by the loop
+    f->at = 0;  // "now", fixed up by the loop
     air_tx_count++;
     return 0;
 }
@@ -184,6 +187,11 @@ static void sim_node(int i, uint8_t last, uint32_t metric, int64_t offset, int32
     snprintf(cfg.hostname, sizeof cfg.hostname, "node%d", i);
     const struct awdl_host h = {(void *)(intptr_t)i, sim_tx, sim_schedule, sim_peer, sim_deliver, sim_log};
     CHECK(awdl_core_init(n->core, &h, &cfg) == 0);
+    // one social channel all the way round (OWL's static sequence), so nodes meet before they are synchronised
+    struct awdl_chan seq[AWDL_SEQ_SLOTS];
+    for (unsigned k = 0; k < AWDL_SEQ_SLOTS; ++k)
+        seq[k] = (struct awdl_chan){149, 0x80};
+    awdl_core_set_sequence(n->core, seq, 0);
 }
 
 static void sim_start(int i, uint64_t g)
@@ -373,11 +381,14 @@ static void test_build_roundtrip(void)
     CHECK((a.present & want) == want);
     CHECK(!strcmp(a.hostname, "node0"));
     CHECK(a.sync.seq.count == 16 && a.chanseq.count == 16);
-    // the target is a whole number of TU before the next AW, and the AW number is the one at the target
+    // the down counter is the TU to the next EAW (OWL's rounding up), exact at target_tx_time, which is at most a TU
+    // before the build time in phy_tx_time; the AW number is the current one
     const uint64_t target = (now & ~0xffffffffull) | a.target_tx_time;
     const uint64_t next = target + (uint64_t)a.sync.tx_counter * AWDL_TU_US;
-    CHECK(awdl_core_aw_start(nodes[0].core, (uint16_t)(a.sync.aw_seq + 1), now) == next);
-    CHECK(target >= now && target - now < AWDL_TU_US);
+    CHECK(a.phy_tx_time == (uint32_t)now && a.sync.aw_seq == awdl_core_aw_seq(nodes[0].core, now));
+    CHECK(awdl_core_aw_start(nodes[0].core, (uint16_t)((a.sync.aw_seq & ~3u) + 4), now) == next);
+    CHECK(target <= now && now - target < AWDL_TU_US && a.sync.tx_counter >= 1 && a.sync.tx_counter <= 64);
+    CHECK(a.sync.presence_mode == 4 && a.sync.ap_beacon_delta == (int16_t)a.sync.aw_seq);
     const size_t p = awdl_core_build_af(nodes[0].core, AWDL_SUBTYPE_PSF, now, buf, sizeof buf);
     CHECK(awdl_af_parse(buf, p, &a) == 0 && a.subtype == AWDL_SUBTYPE_PSF && !(a.present & (1u << AWDL_TLV_ARPA)));
     CHECK(awdl_core_build_af(nodes[0].core, AWDL_SUBTYPE_MIF, now, buf, 80) == 0);  // too small: nothing
@@ -731,6 +742,8 @@ int main(int argc, char **argv)
     test_ring();
     test_facade();
     test_native_main();
+    test_owl_main();
+    test_sched_main();
     sim_reset(0);
     if (failures) {
         fprintf(stderr, "%d check(s) failed\n", failures);

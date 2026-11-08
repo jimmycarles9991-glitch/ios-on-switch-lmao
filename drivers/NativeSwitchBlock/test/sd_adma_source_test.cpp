@@ -100,7 +100,7 @@ TEST(SdAdmaSource, HighProofGuards)
     EXPECT_THAT(build, HasSubstr("cacheableRam(page) && high.pageOk(page, write)"));
     // Writes never go above 4 GiB while that is unproven; the IRAM alias window stays out of proving reads.
     EXPECT_THAT(header, HasSubstr("state == kOn || (state == kProving && !write) ? kAdmaDmaLimit : kAdma4GiB"));
-    EXPECT_THAT(header, HasSubstr("!(state == kProving && !write && page - kAdmaIramAlias < kAdmaIramBytes)"));
+    EXPECT_THAT(header, HasSubstr("state != kProving || write || page - kAdmaIramAlias >= kAdmaIramBytes"));
     // Only reads are poisoned, and a mismatch puts SDMA's bytes into the requests before they complete.
     EXPECT_THAT(body("void NativeSwitchBlock::prepareDirect("), HasSubstr("poison && !write"));
     const std::string prove = body("bool NativeSwitchBlock::proveHigh(");
@@ -131,12 +131,17 @@ TEST(SdAdmaSource, PipelinedWorker)
     EXPECT_FALSE(Search(body("void NativeSwitchBlock::beginBatch("),
                         R"(\b(complete|command|run|transfer|bounceChain|waitSignal)\()"));
     // complete(): STATUS first (a command that finished meanwhile takes no interrupt), then the interrupt; its time limit
-    // starts there; a lost interrupt still panics, and polling only without the interrupt (irqMode false).
+    // starts there; a lost interrupt panics, and there is no polled mode.
     const std::string complete = body("int NativeSwitchBlock::complete(");
-    EXPECT_THAT(complete, HasSubstr("const uint64_t start = nowNs();"));
+    EXPECT_THAT(complete, HasSubstr("const uint64_t start = switch_now_ns();"));
     EXPECT_LT(Index(complete, "s = r32(STATUS);"), Index(complete, "waitSignal("));
-    EXPECT_THAT(complete, HasSubstr("SDMMC1 interrupt lost"));
-    EXPECT_LT(Index(complete, "if (irqMode)"), Index(complete, "IOSleep(1)"));
+    EXPECT_THAT(complete, HasSubstr("interruptLost(awaited)"));
+    EXPECT_THAT(complete, Not(HasSubstr("IOSleep")));
+    EXPECT_THAT(body("void NativeSwitchBlock::interruptLost("), HasSubstr("panic(\"SwitchSD: SDMMC1 interrupt lost"));
+    // Card commands, the recovery's CMD12 and each tuning block sleep on the interrupt too.
+    for (const char *waiter : {"int NativeSwitchBlock::cardCommand(", "void NativeSwitchBlock::recover(",
+                               "void NativeSwitchBlock::tuneStep()"})
+        EXPECT_THAT(body(waiter), HasSubstr("awaitStatus(")) << waiter;
     // endBatch: a split command's errors take run()'s retry, and a read's pages are invalidated after the command.
     const std::string end = body("void NativeSwitchBlock::endBatch(");
     EXPECT_THAT(end, HasSubstr("retry(step, status, first->lba, sectors, write, table.count)"));
@@ -158,7 +163,7 @@ TEST(SdAdmaSource, ReadStaging)
                 HasSubstr("pa >= bouncePA && pa - bouncePA < kBounceBytes"));
     // setup()'s check runs the staging path on the hardware; a failure only keeps it off (no panic in it).
     const std::string check = body("const char *NativeSwitchBlock::checkAdma(");
-    EXPECT_THAT(check, HasSubstr("stagingOn = !stagingWhy;"));
+    EXPECT_THAT(check, HasSubstr("stagingOn = (stagingWhy == nullptr);"));
     EXPECT_LT(Index(check, "copyStaged()"), Index(check, "memcmp(pageBytes, reference, kTestBytes)"));
     EXPECT_THAT(check, Not(HasSubstr("panic(")));
 }

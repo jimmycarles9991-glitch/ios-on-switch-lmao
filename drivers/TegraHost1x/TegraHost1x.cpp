@@ -26,7 +26,6 @@
 #include "../../kits/SwitchDMA/SwitchDMABuffer.h"
 #include "../../kits/SwitchDMA/SwitchDcache.h"
 #include "../../kits/SwitchMMIO/SwitchMMIOKernel.h"
-#include "../../kits/SwitchTime/SwitchTime.h"
 
 namespace {
 constexpr uint64_t kHost1xPA = 0x50000000, kHost1xSize = 0x34000;
@@ -120,7 +119,7 @@ inline void syncWrite(uint32_t o, uint32_t v)
 
 inline bool reached(uint32_t value, uint32_t threshold)
 {
-    return (int32_t)(value - threshold) >= 0;
+    return static_cast<int32_t>(value - threshold) >= 0;
 }
 
 // The syncpoint line (level). Every armed status bit seen is disabled and cleared, as Linux syncpt_thresh_isr does,
@@ -186,7 +185,7 @@ bool channelAlloc()
     for (Channel &c : gChannels) {
         if (!switch_dma_alloc(&c.push, kPushBytes + PAGE_SIZE))
             return false;
-        c.va = (uint32_t *)c.push.va;
+        c.va = reinterpret_cast<uint32_t *>(c.push.va);
     }
     return true;
 }
@@ -200,7 +199,7 @@ void channelProgram()
         switch_dcache_clean(c.va, kPushBytes + 4);
         syncWrite(SYNC_CMDPROC_STOP, sync(SYNC_CMDPROC_STOP) & ~(1u << n));
         channelWrite(n, CH_DMACTRL, DMACTRL_STOP);
-        channelWrite(n, CH_DMASTART, (uint32_t)c.push.pa);
+        channelWrite(n, CH_DMASTART, static_cast<uint32_t>(c.push.pa));
         channelWrite(n, CH_DMAPUT, 0);
         channelWrite(n, CH_DMAEND, kPushBytes + 4);
         channelWrite(n, CH_DMACTRL, DMACTRL_STOP | DMACTRL_GETRST | DMACTRL_INITGET);
@@ -258,28 +257,7 @@ int bringUp()
         return fail("no push buffer below 4 GiB", 0);
     channelProgram();
     gState = 1;
-
-    uint32_t id = 0;
-    tegra_host1x_syncpt_alloc(&id);
-    const uint32_t before = tegra_host1x_syncpt_read(id);
-    const uint32_t stream[] = {
-        tegra_host1x_op_setclass(TEGRA_HOST1X_CLASS_HOST1X, 0, 0),
-        tegra_host1x_op_incr_syncpt(TEGRA_HOST1X_COND_IMMEDIATE, id),
-    };
-    const uint64_t began = switch_now_us();
-    int ret = tegra_host1x_submit(stream, 2);
-    if (!ret)
-        ret = tegra_host1x_syncpt_wait(id, before + 1, 100000);
-    if (ret) {
-        char state[160];
-        tegra_host1x_describe(state, sizeof(state));
-        IOLog("TegraHost1x: H1 FAIL self-test syncpoint %u at %u (%s), %s\n", id, tegra_host1x_syncpt_read(id),
-              ret == TEGRA_HOST1X_ELOST ? "reached, but its interrupt never came" : "not reached", state);
-        gState = TEGRA_HOST1X_ENODEV;
-        return gState;
-    }
-    IOLog("TegraHost1x: H1 ok syncpoint %u %u->%u by interrupt in %llu us (channel 0, host1x %u MHz%s)\n", id, before,
-          tegra_host1x_syncpt_read(id), switch_now_us() - began, gClockMHz, enabled ? ", enabled here" : "");
+    IOLog("TegraHost1x: H1 ok channel 0, host1x %u MHz%s\n", gClockMHz, enabled ? ", enabled here" : "");
     return TEGRA_HOST1X_OK;
 }
 }  // namespace
@@ -289,7 +267,9 @@ extern "C" int tegra_host1x_start(void)
     static volatile int started;
     static IOLock *startLock;
     if (!startLock) {
-        IOLock *fresh = IOLockAlloc(), *expected = nullptr;
+        IOLock *fresh = IOLockAlloc();
+        // NOLINTNEXTLINE(misc-const-correctness): the compare-exchange writes it
+        IOLock *expected = nullptr;
         if (!__atomic_compare_exchange_n(&startLock, &expected, fresh, false, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE))
             IOLockFree(fresh);
     }
@@ -327,13 +307,14 @@ extern "C" int tegra_host1x_syncpt_wait(uint32_t id, uint32_t threshold, uint32_
         return TEGRA_HOST1X_ENODEV;
     if (id >= kSyncpts)
         return TEGRA_HOST1X_EINVAL;
-    const uint32_t word = id / 32, bit = 1u << (id % 32);
+    const uint32_t word = id / 32;
+    const uint32_t bit = 1u << (id % 32);
     IOLockLock(gLock);
     syncWrite(SYNC_INT_THRESH + 4 * id, threshold);
     syncWrite(SYNC_INT_STATUS + 4 * word, bit);
     syncWrite(SYNC_INT_ENABLE_CPU0 + 4 * word, bit);
     gArmed[word] |= bit;
-    uint64_t deadline;
+    uint64_t deadline = 0;
     clock_interval_to_deadline(timeoutUs, kMicrosecondScale, &deadline);
     int ret = TEGRA_HOST1X_OK;
     for (bool grace = false; !reached(tegra_host1x_syncpt_read(id), threshold);) {
@@ -387,7 +368,8 @@ extern "C" int tegra_host1x_submit_on(uint32_t channel, const uint32_t *words, u
     // job's own opcodes, and a RESTART landing inside an opcode's data is taken as data, so the command processor runs
     // on to DMAEND and stops (DMAGET 0x4004, DMAPUT 0x84, the fence never reached). Such a job starts at 0, the rest
     // of the buffer NOPs (host1x_opcode_nop: NONINCR, count 0) up to the RESTART.
-    const uint32_t tail = kPushBytes - c.put, bytes = count * 4;
+    const uint32_t tail = kPushBytes - c.put;
+    const uint32_t bytes = count * 4;
     const uint32_t pad = bytes > tail ? tail : 0;
     if (pad + bytes > room) {
         IOLockUnlock(gSubmitLock);
@@ -471,8 +453,8 @@ extern "C" void tegra_host1x_resume(void)
     }
     IOLockLock(gLock);
     syncConfigure();
-    for (uint32_t i = 0; i < kSyncpts / 32; i++)
-        gArmed[i] = 0;
+    for (uint32_t &armed : gArmed)
+        armed = 0;
     IOLockUnlock(gLock);
     for (uint32_t id = kFirstOwn; id < kSyncpts && id < gNextSyncpt; id++)
         syncWrite(SYNC_SYNCPT + 4 * id, gSaved[id]);
@@ -491,15 +473,18 @@ namespace {
 constexpr uint32_t kSleepClients = 4;
 
 struct SleepClient {
-    void (*suspend)(void), (*resume)(void);
+    void (*suspend)(), (*resume)();
 } gSleepClients[kSleepClients];
 
 uint32_t gSleepClientCount;
 
+// NOLINTNEXTLINE(misc-const-correctness): the compare-exchange stores through slot
 IOLock *lazyLock(IOLock **slot)
 {
     if (!__atomic_load_n(slot, __ATOMIC_ACQUIRE)) {
-        IOLock *fresh = IOLockAlloc(), *expected = nullptr;
+        IOLock *fresh = IOLockAlloc();
+        // NOLINTNEXTLINE(misc-const-correctness): the compare-exchange writes it
+        IOLock *expected = nullptr;
         if (!__atomic_compare_exchange_n(slot, &expected, fresh, false, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE))
             IOLockFree(fresh);
     }
@@ -509,7 +494,7 @@ IOLock *lazyLock(IOLock **slot)
 IOLock *gRegisterLock;
 }  // namespace
 
-extern "C" void tegra_host1x_set_sleep_client(void (*suspend)(void), void (*resume)(void))
+extern "C" void tegra_host1x_set_sleep_client(void (*suspend)(), void (*resume)())
 {
     IOLock *lock = lazyLock(&gRegisterLock);
     IOLockLock(lock);

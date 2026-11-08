@@ -20,7 +20,7 @@ SeedToolsInfo = provider(
         "twin": "the NVK twin, libvulkan_nouveau.dylib",
         "manifest": "MANIFEST.json (the stack key, the twin's LC_UUID and compiler identity)",
         "nvk_identity": "the twin's .source (its Mesa tree and compiler identity), or None: what a bucket is keyed on",
-        "raw": "the raw pack's probe, mock and ycbcr.metallib (files, or one directory)",
+        "raw": "the raw pack's probe, mock and own.metallib (files, or one directory)",
         "raw_dir": "the directory holding them",
     },
 )
@@ -86,6 +86,7 @@ def _seed_tools_impl(ctx):
     args.add("tool")
     args.add("--xcode-env", ctx.file._xcode_env)
     args.add("--metal-header", ctx.file.metal_header)
+    args.add("--metal-abi", ctx.file.metal_abi)
     args.add("--precompile", ctx.file.precompile)
     args.add("--frontend", ctx.file.frontend)
     args.add("--host-bridge", ctx.file.host_bridge)
@@ -94,7 +95,7 @@ def _seed_tools_impl(ctx):
     ctx.actions.run(
         executable = tool,
         arguments = [args],
-        inputs = [ctx.file.metal_header, ctx.file.precompile, ctx.file.frontend, ctx.file.host_bridge, steps["mock"]] +
+        inputs = [ctx.file.metal_header, ctx.file.metal_abi, ctx.file.precompile, ctx.file.frontend, ctx.file.host_bridge, steps["mock"]] +
                  ctx.files.hdrs + xcode,
         outputs = [precompile],
         mnemonic = "SeedToolsPrecompile",
@@ -108,13 +109,14 @@ def _seed_tools_impl(ctx):
     args.add("build")
     args.add("--xcode-env", ctx.file._xcode_env)
     args.add("--host-bridge", ctx.file.host_bridge)
+    args.add("--metal-abi", ctx.file.metal_abi)
     args.add("--generator", ctx.file.raw_generator)
     args.add("--tree", tree)
     args.add("--out", raw.path)
     ctx.actions.run(
         executable = ctx.executable._rawpack,
         arguments = [args],
-        inputs = depset([ctx.file.host_bridge, ctx.file.raw_generator] + xcode + [f for f in ctx.files.raw_srcs if f.extension != "py"]),
+        inputs = depset([ctx.file.host_bridge, ctx.file.metal_abi, ctx.file.raw_generator] + xcode + [f for f in ctx.files.raw_srcs if f.extension != "py"]),
         outputs = [raw],
         mnemonic = "SeedToolsRaw",
         progress_message = "Building the raw pack's probe and mock GM20B",
@@ -162,6 +164,7 @@ seed_tools = rule(
         "abi_header": attr.label(mandatory = True, allow_single_file = True),
         "mock_iokit": attr.label(mandatory = True, allow_single_file = True),
         "metal_header": attr.label(mandatory = True, allow_single_file = True),
+        "metal_abi": attr.label(mandatory = True, allow_single_file = True, doc = "the selected IPSW kind's MetalABI.h"),
         "precompile": attr.label(mandatory = True, allow_single_file = True),
         "frontend": attr.label(mandatory = True, allow_single_file = True),
         "hdrs": attr.label_list(allow_files = True),

@@ -3,8 +3,7 @@
 // twice, once requiring a hardware decoder and once with hardware disabled, every output frame's luma CRC compared
 // with x264's reconstruction in display order; then test/HEVCClip.h's HEVC clips (Main on hardware, Main 10 on
 // hardware against the reference >> 2, Main in software) against FFmpeg's. On a Mac it checks the clip and the check itself against Apple's
-// decoders (tests/test_switch_video.py). On the Switch the same check runs inside AVD.videodecoder once per boot
-// (launchd does not start jobs of ours: 21H461's launchd reads only its signed cache), logged under com.brunostjohn.switch.avd.
+// decoders (tests/test_switch_video.py). On the Switch it proves NVDEC's whole path, logged under com.brunostjohn.switch.avd.
 #include <os/log.h>
 #include <stdio.h>
 #include "../AVD/ClipCheck.h"

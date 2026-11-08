@@ -1,0 +1,98 @@
+# What 24B119's kernel (xnu-13432.42.3) answers and our xnu-12377 does not, each with who in 24B119's user space asks
+# (its dyld cache and executables, searched by name and by call).
+# Nothing that starts before SpringBoard depends on one: none of the 108 RunAtLoad or KeepAlive daemons' executables
+# (launchd's first jobs, amfid, backboardd and SpringBoard among them) names a sysctl below, and no libsystem image reads
+# one outside libsystem_sanitizers' ASan start (asan::initShadow). dasd, started on demand, sets kern.trial.*.
+
+# IOKit's io_service_get_wait_info (xnu-13432). IOServiceGetWaitInfo calls it; only /usr/sbin/ioreg does.
+mig 2891
+# mach_memory_entry_region_info (memory_entry.defs, xnu-13432): no caller.
+mig 4904
+# The virtual_env subsystem (virtual_env_create, _get_current, _get_info) and posix_spawn's port action 6 that names an
+# environment: no caller.
+mig 8669??
+# mach_vm_region_recurse and vm32 region_recurse: vm_region_submap_info_64 grew pages_wired and wire_tag (V3). The
+# count is negotiated, so a caller asking for V3 gets V2's count back.
+mig 3821 reply
+mig 3822 reply
+mig 4815 reply
+
+# CPU performance counters (config_cpu_counters, config_pervasive_cpi/energy): XNU's code drives Apple's PMU, not the
+# A57's PMUv3. Named by kperf, DVTInstrumentsFoundation, locationd and taskinfo.
+sysctl kpc
+sysctl kpc.*
+sysctl kern.monotonic
+sysctl kern.monotonic.*
+sysctl kern.cpc
+sysctl kern.cpc.*
+sysctl kern.microstackshot.pmi_*
+sysctl ktrace.secure
+
+# Apple's page table and trust monitors (SPTM, TXM): none on the Tegra X1.
+sysctl kern.sptm
+sysctl kern.sptm.*
+sysctl vm.cs_defer_to_csm
+sysctl vm.cs_defer_to_csm_not
+
+# CPU features the A57 lacks (24B119 reports them 0 on an A13 too). libBNNS and MLIR_ML name some.
+sysctl hw.optional.arm.FEAT_*
+
+# A third performance level (hw.perflevel2) and the L2-sharing flag (xnu-13432): no reader.
+sysctl hw.perflevel2
+sysctl hw.perflevel2.*
+sysctl hw.perflevel?.sharesl2
+
+# xnu-13432's app swap and freezer knobs and counters (dasd and mmaintenanced name kern.trial.*; a DSC image names
+# vm.compressor.swapper.*). kern.memorystatus_swap_all_apps has no CTLTYPE in 24B119 (an int either way).
+sysctl kern.trial.*
+sysctl kern.memorystatus_freezer_error_already_frozen_count
+sysctl kern.memorystatus_freezer_skipped_unknown_count
+sysctl kern.memorystatus_swap_all_apps type
+sysctl vm.compressor.swapper.*
+
+# xnu-13432's VM counters and debug switches. vm.debug_range_enabled is read by libsystem_sanitizers only; the rest
+# have no reader. vm.vm_page_filecache_min became a quad: no reader.
+sysctl vm.all_map_ranges
+sysctl vm.debug_range_enabled
+sysctl vm.global_wire_exhaustion_limit
+sysctl vm.map
+sysctl vm.mem_entry_wimg_non_writable
+sysctl vm.object_readonly_*
+sysctl vm.page_balance*
+sysctl vm.page_booter_count
+sysctl vm.page_cpu_pageable_*_count
+sysctl vm.page_free_cpu_count
+sysctl vm.page_pageout_scan_balanced
+sysctl vm.page_wired_count
+sysctl vm.page_wired_unmanaged_count
+sysctl vm.pageout_inactive_busy
+sysctl vm.panic_ws_crash
+sysctl vm.speculative_pages_*
+sysctl vm.vm_map_user_range_debug
+sysctl vm.vm_page_filecache_min type
+
+# xnu-13432's networking tunables and counters: Network.framework names some TCP ones, netstat prints others.
+sysctl net.inet.icmp.frag*
+sysctl net.inet.ipsec.offload_fastpath_*
+sysctl net.inet.tcp.aqm_fc_*
+sysctl net.inet.tcp.lqm_ul_bw_jump_*
+sysctl net.inet.tcp.pacing
+sysctl net.inet.tcp.prr
+sysctl net.inet.tcp.prr_ssrb
+sysctl net.inet.tcp.rbbr_*
+sysctl net.inet.tcp.recv_bg_algo
+sysctl net.inet.tcp.throttle_be
+sysctl net.inet.tcp.timer_advanced_enabled
+sysctl net.link.bridge.rtable_max
+sysctl net.link.droptap.drop_stats
+sysctl net.link.fake.*
+sysctl net.link.generic.system.intcoproc_unrestricted
+sysctl net.necp.*
+sysctl net.observability
+sysctl net.pf
+sysctl net.pf.socket_lookup_contended
+sysctl debug.bpf_iflist
+
+# Platform and boot internals with no reader.
+sysctl machdep.deferred_ipi_timeout
+sysctl kern.surt_ready

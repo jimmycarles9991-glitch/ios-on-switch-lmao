@@ -1,0 +1,873 @@
+diff --git a/hw/arm/tegra2/apb/spi/icm42607.c b/hw/arm/tegra2/apb/spi/icm42607.c
+new file mode 100644
+index 0000000..b0ce376
+--- /dev/null
++++ b/hw/arm/tegra2/apb/spi/icm42607.c
+@@ -0,0 +1,434 @@
++/*
++ * TDK InvenSense ICM-42607-P 6-axis IMU on SPI (the Switch OLED's, SPI4 CS0, data-ready on INT2).
++ *
++ *  This program is free software; you can redistribute it and/or modify it
++ *  under the terms of the GNU General Public License as published by the
++ *  Free Software Foundation; either version 2 of the License, or
++ *  (at your option) any later version.
++ *
++ *  This program is distributed in the hope that it will be useful, but WITHOUT
++ *  ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
++ *  FITNESS FOR A PARTICULAR PURPOSE. See the GNU General Public License
++ *  for more details.
++ *
++ *  You should have received a copy of the GNU General Public License along
++ *  with this program; if not, see <http://www.gnu.org/licenses/>.
++ */
++
++/* Register map and behaviour from TDK DS-000451 (ICM-42670-P, which the ICM-42607-P shares) and TDK's
++ * inv_imu_driver: user bank 0 directly, MREG1-3 through BLK_SEL/MADDR/M_W/M_R, a FIFO of 16-byte records, and
++ * data-ready / FIFO-threshold interrupts latched on INT2 until their status register is read. The console lies flat,
++ * screen up and still: the accelerometer reads +1 g on Z, the gyroscope 0. */
++
++#include "qemu/osdep.h"
++#include "hw/ssi/ssi.h"
++#include "hw/irq.h"
++#include "qemu/timer.h"
++#include "qemu/log.h"
++#include "qapi/error.h"
++#include "migration/vmstate.h"
++#include "qom/object.h"
++
++#define TYPE_ICM42607P "icm42607p"
++OBJECT_DECLARE_SIMPLE_TYPE(ICM42607PState, ICM42607P)
++
++#define REG_MCLK_RDY           0x00
++#define REG_DEVICE_CONFIG      0x01
++#define REG_SIGNAL_PATH_RESET  0x02
++#define REG_DRIVE_CONFIG3      0x05
++#define REG_TEMP_DATA1         0x09
++#define REG_ACCEL_DATA_X1      0x0b
++#define REG_PWR_MGMT0          0x1f
++#define REG_GYRO_CONFIG0       0x20
++#define REG_ACCEL_CONFIG0      0x21
++#define REG_TEMP_CONFIG0       0x22
++#define REG_GYRO_CONFIG1       0x23
++#define REG_ACCEL_CONFIG1      0x24
++#define REG_FIFO_CONFIG1       0x28
++#define REG_FIFO_CONFIG2       0x29
++#define REG_FIFO_CONFIG3       0x2a
++#define REG_INT_SOURCE0        0x2b
++#define REG_INT_SOURCE3        0x2d
++#define REG_INTF_CONFIG0       0x35
++#define REG_INTF_CONFIG1       0x36
++#define REG_INT_STATUS_DRDY    0x39
++#define REG_INT_STATUS         0x3a
++#define REG_FIFO_COUNTH        0x3d
++#define REG_FIFO_COUNTL        0x3e
++#define REG_FIFO_DATA          0x3f
++#define REG_WHO_AM_I           0x75
++#define REG_BLK_SEL_W          0x79
++#define REG_MADDR_W            0x7a
++#define REG_M_W                0x7b
++#define REG_BLK_SEL_R          0x7c
++#define REG_MADDR_R            0x7d
++#define REG_M_R                0x7e
++
++#define WHO_AM_I_ICM42607P     0x60
++#define MCLK_RDY               BIT(3)
++#define SOFT_RESET             BIT(4)
++#define FIFO_FLUSH             BIT(2)
++#define FIFO_BYPASS            BIT(0)
++#define FIFO_STOP_ON_FULL      BIT(1)
++#define INT_DRDY               BIT(0)
++#define INT_RESET_DONE         BIT(4)
++#define INT_FIFO_THS           BIT(2)
++#define INT_FIFO_FULL          BIT(1)
++#define SRC_DRDY               BIT(3)
++#define SRC_FIFO_THS           BIT(2)
++#define SRC_FIFO_FULL          BIT(1)
++#define DATA_BIG_ENDIAN        BIT(4)
++#define COUNT_BIG_ENDIAN       BIT(5)
++#define COUNT_RECORDS          BIT(6)
++#define MREG1_FIFO_CONFIG5     0x01
++#define FIFO_WM_GT_TH          BIT(5)
++#define FIFO_GYRO_EN           BIT(1)
++#define FIFO_ACCEL_EN          BIT(0)
++
++#define RECORD_BYTES 16
++#define FIFO_RECORDS 144
++#define MREG_BLOCKS  3
++
++struct ICM42607PState {
++    SSIPeripheral parent_obj;
++    qemu_irq int2;
++    QEMUTimer *timer;
++    uint8_t regs[128];
++    uint8_t mreg[MREG_BLOCKS][256];
++    uint8_t fifo[FIFO_RECORDS][RECORD_BYTES];
++    uint32_t fifo_head, fifo_count, fifo_byte;
++    uint8_t address;
++    bool addressed, reading;
++    uint16_t timestamp;
++};
++
++static const uint8_t icm42607p_resets[][2] = {
++    {REG_DEVICE_CONFIG, 0x04}, {REG_DRIVE_CONFIG3, 0x05}, {REG_GYRO_CONFIG0, 0x69}, {REG_ACCEL_CONFIG0, 0x69},
++    {REG_TEMP_CONFIG0, 0x40}, {REG_GYRO_CONFIG1, 0x31}, {REG_ACCEL_CONFIG1, 0x41}, {REG_FIFO_CONFIG1, FIFO_BYPASS},
++    {REG_INT_SOURCE0, 0x10}, {REG_INTF_CONFIG0, DATA_BIG_ENDIAN | COUNT_BIG_ENDIAN}, {REG_INTF_CONFIG1, 0x01},
++    {REG_WHO_AM_I, WHO_AM_I_ICM42607P},
++};
++
++static int icm42607p_block(uint8_t blk_sel)
++{
++    switch (blk_sel) {
++    case 0x00:
++        return 0;
++    case 0x28:
++        return 1;
++    case 0x50:
++        return 2;
++    default:
++        return -1;
++    }
++}
++
++static void icm42607p_update_int2(ICM42607PState *s)
++{
++    uint8_t source = s->regs[REG_INT_SOURCE3];
++    bool level = ((source & SRC_DRDY) && (s->regs[REG_INT_STATUS_DRDY] & INT_DRDY)) ||
++                 ((source & SRC_FIFO_THS) && (s->regs[REG_INT_STATUS] & INT_FIFO_THS)) ||
++                 ((source & SRC_FIFO_FULL) && (s->regs[REG_INT_STATUS] & INT_FIFO_FULL));
++    qemu_set_irq(s->int2, level);
++}
++
++/* GYRO/ACCEL_CONFIG0 ODR codes 5..15: 1600 Hz halving down to 1.5625 Hz. */
++static int64_t icm42607p_period_ns(uint8_t config0)
++{
++    unsigned code = config0 & 0xf;
++
++    if (code < 5) {
++        code = 5;
++    }
++    return (int64_t)(NANOSECONDS_PER_SECOND / 1600) << (code - 5);
++}
++
++static bool icm42607p_accel_on(ICM42607PState *s)
++{
++    return (s->regs[REG_PWR_MGMT0] & 3) >= 2;
++}
++
++static bool icm42607p_gyro_on(ICM42607PState *s)
++{
++    return ((s->regs[REG_PWR_MGMT0] >> 2) & 3) == 3;
++}
++
++static void icm42607p_schedule(ICM42607PState *s)
++{
++    if (!icm42607p_accel_on(s) && !icm42607p_gyro_on(s)) {
++        timer_del(s->timer);
++        return;
++    }
++    if (!timer_pending(s->timer)) {
++        uint8_t config0 = s->regs[icm42607p_gyro_on(s) ? REG_GYRO_CONFIG0 : REG_ACCEL_CONFIG0];
++        timer_mod(s->timer, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + icm42607p_period_ns(config0));
++    }
++}
++
++static void icm42607p_put16(uint8_t *at, int16_t value, bool big_endian)
++{
++    at[big_endian ? 0 : 1] = (uint16_t)value >> 8;
++    at[big_endian ? 1 : 0] = (uint16_t)value & 0xff;
++}
++
++static uint32_t icm42607p_watermark(ICM42607PState *s)
++{
++    return s->regs[REG_FIFO_CONFIG2] | ((s->regs[REG_FIFO_CONFIG3] & 0xf) << 8);
++}
++
++static void icm42607p_push_record(ICM42607PState *s, const int16_t sample[6])
++{
++    uint8_t enables = s->mreg[0][MREG1_FIFO_CONFIG5];
++    uint8_t *record;
++
++    if (s->regs[REG_FIFO_CONFIG1] & FIFO_BYPASS || !(enables & (FIFO_ACCEL_EN | FIFO_GYRO_EN))) {
++        return;
++    }
++    if (s->fifo_count == FIFO_RECORDS) {
++        s->regs[REG_INT_STATUS] |= INT_FIFO_FULL;
++        if (s->regs[REG_FIFO_CONFIG1] & FIFO_STOP_ON_FULL) {
++            return;
++        }
++        s->fifo_head = (s->fifo_head + 1) % FIFO_RECORDS;
++        s->fifo_count--;
++        s->fifo_byte = 0;
++    }
++    record = s->fifo[(s->fifo_head + s->fifo_count) % FIFO_RECORDS];
++    memset(record, 0, RECORD_BYTES);
++    record[0] = ((enables & FIFO_ACCEL_EN) ? 0x40 : 0) | ((enables & FIFO_GYRO_EN) ? 0x20 : 0);
++    for (int i = 0; i < 6; i++) {
++        bool on = i < 3 ? icm42607p_accel_on(s) : icm42607p_gyro_on(s);
++        icm42607p_put16(&record[1 + 2 * i], on ? sample[i] : INT16_MIN, true);
++    }
++    record[13] = 0;
++    icm42607p_put16(&record[14], (int16_t)s->timestamp, true);
++    s->fifo_count++;
++    if (s->fifo_count >= icm42607p_watermark(s) && icm42607p_watermark(s)) {
++        s->regs[REG_INT_STATUS] |= INT_FIFO_THS;
++    }
++}
++
++static void icm42607p_tick(void *opaque)
++{
++    ICM42607PState *s = opaque;
++    bool big = s->regs[REG_INTF_CONFIG0] & DATA_BIG_ENDIAN;
++    int16_t sample[6] = {0};
++
++    /* FS_SEL 6:5: 0 = 16 g (2048 LSB/g), 1 = 8 g, 2 = 4 g, 3 = 2 g. */
++    sample[2] = (int16_t)(2048 << ((s->regs[REG_ACCEL_CONFIG0] >> 5) & 3));
++    for (int i = 0; i < 6; i++) {
++        icm42607p_put16(&s->regs[REG_ACCEL_DATA_X1 + 2 * i], sample[i], big);
++    }
++    s->timestamp += 1;
++    s->regs[REG_INT_STATUS_DRDY] |= INT_DRDY;
++    icm42607p_push_record(s, sample);
++    icm42607p_update_int2(s);
++    icm42607p_schedule(s);
++}
++
++static void icm42607p_reset_registers(ICM42607PState *s)
++{
++    memset(s->regs, 0, sizeof(s->regs));
++    memset(s->mreg, 0, sizeof(s->mreg));
++    for (size_t i = 0; i < ARRAY_SIZE(icm42607p_resets); i++) {
++        s->regs[icm42607p_resets[i][0]] = icm42607p_resets[i][1];
++    }
++    s->mreg[0][MREG1_FIFO_CONFIG5] = FIFO_WM_GT_TH;
++    s->regs[REG_INT_STATUS] = INT_RESET_DONE;
++    s->fifo_head = s->fifo_count = s->fifo_byte = 0;
++    timer_del(s->timer);
++    icm42607p_update_int2(s);
++}
++
++static uint8_t icm42607p_fifo_byte(ICM42607PState *s)
++{
++    uint8_t value;
++
++    if (!s->fifo_count) {
++        return s->fifo_byte++ ? 0 : 0x80;
++    }
++    value = s->fifo[s->fifo_head][s->fifo_byte];
++    if (++s->fifo_byte == RECORD_BYTES) {
++        s->fifo_byte = 0;
++        s->fifo_head = (s->fifo_head + 1) % FIFO_RECORDS;
++        s->fifo_count--;
++    }
++    return value;
++}
++
++static uint8_t icm42607p_read(ICM42607PState *s, uint8_t reg)
++{
++    uint8_t value = s->regs[reg];
++    uint32_t count;
++    int block;
++
++    switch (reg) {
++    case REG_MCLK_RDY:
++        return (icm42607p_accel_on(s) || icm42607p_gyro_on(s)) ? MCLK_RDY : 0;
++    case REG_INT_STATUS_DRDY:
++    case REG_INT_STATUS:
++        s->regs[reg] = 0;
++        icm42607p_update_int2(s);
++        return value;
++    case REG_FIFO_COUNTH:
++    case REG_FIFO_COUNTL:
++        count = (s->regs[REG_INTF_CONFIG0] & COUNT_RECORDS) ? s->fifo_count
++                                                            : s->fifo_count * RECORD_BYTES - s->fifo_byte;
++        if ((reg == REG_FIFO_COUNTH) == !!(s->regs[REG_INTF_CONFIG0] & COUNT_BIG_ENDIAN)) {
++            return count >> 8;
++        }
++        return count & 0xff;
++    case REG_FIFO_DATA:
++        return icm42607p_fifo_byte(s);
++    case REG_M_R:
++        block = icm42607p_block(s->regs[REG_BLK_SEL_R]);
++        return block < 0 ? 0 : s->mreg[block][s->regs[REG_MADDR_R]];
++    default:
++        return value;
++    }
++}
++
++static void icm42607p_write(ICM42607PState *s, uint8_t reg, uint8_t value)
++{
++    int block;
++
++    switch (reg) {
++    case REG_WHO_AM_I:
++    case REG_MCLK_RDY:
++    case REG_INT_STATUS:
++    case REG_INT_STATUS_DRDY:
++    case REG_FIFO_COUNTH:
++    case REG_FIFO_COUNTL:
++        return;
++    case REG_SIGNAL_PATH_RESET:
++        if (value & SOFT_RESET) {
++            icm42607p_reset_registers(s);
++            return;
++        }
++        if (value & FIFO_FLUSH) {
++            s->fifo_head = s->fifo_count = s->fifo_byte = 0;
++        }
++        return;
++    case REG_M_W:
++        block = icm42607p_block(s->regs[REG_BLK_SEL_W]);
++        if (block >= 0) {
++            s->mreg[block][s->regs[REG_MADDR_W]] = value;
++        }
++        return;
++    case REG_FIFO_CONFIG1:
++        if ((value & FIFO_BYPASS) && !(s->regs[reg] & FIFO_BYPASS)) {
++            s->fifo_head = s->fifo_count = s->fifo_byte = 0;
++        }
++        break;
++    default:
++        break;
++    }
++    s->regs[reg] = value;
++    if (reg == REG_PWR_MGMT0 || reg == REG_GYRO_CONFIG0 || reg == REG_ACCEL_CONFIG0) {
++        timer_del(s->timer);
++        icm42607p_schedule(s);
++    }
++    if (reg == REG_INT_SOURCE3) {
++        icm42607p_update_int2(s);
++    }
++}
++
++/* SPI: the first byte is R/W (bit 7) and the address; the address then increments, except on FIFO_DATA and M_R. */
++static uint32_t icm42607p_transfer(SSIPeripheral *dev, uint32_t value)
++{
++    ICM42607PState *s = ICM42607P(dev);
++    uint8_t reg;
++    uint32_t out = 0;
++
++    if (!s->addressed) {
++        s->addressed = true;
++        s->reading = value & 0x80;
++        s->address = value & 0x7f;
++        return 0;
++    }
++    reg = s->address;
++    if (s->reading) {
++        out = icm42607p_read(s, reg);
++    } else {
++        icm42607p_write(s, reg, value);
++    }
++    if (reg != REG_FIFO_DATA && reg != REG_M_R && reg != REG_M_W) {
++        s->address = (s->address + 1) & 0x7f;
++    }
++    return out;
++}
++
++static int icm42607p_set_cs(SSIPeripheral *dev, bool level)
++{
++    ICM42607PState *s = ICM42607P(dev);
++
++    if (level) {
++        s->addressed = false;
++    }
++    return 0;
++}
++
++static void icm42607p_realize(SSIPeripheral *dev, Error **errp)
++{
++    ICM42607PState *s = ICM42607P(dev);
++
++    qdev_init_gpio_out_named(DEVICE(dev), &s->int2, "int2", 1);
++    s->timer = timer_new_ns(QEMU_CLOCK_VIRTUAL, icm42607p_tick, s);
++}
++
++static void icm42607p_reset(DeviceState *dev)
++{
++    ICM42607PState *s = ICM42607P(dev);
++
++    s->addressed = false;
++    s->timestamp = 0;
++    icm42607p_reset_registers(s);
++}
++
++static const VMStateDescription vmstate_icm42607p = {
++    .name = TYPE_ICM42607P,
++    .version_id = 1,
++    .minimum_version_id = 1,
++    .fields = (const VMStateField[]) {
++        VMSTATE_SSI_PERIPHERAL(parent_obj, ICM42607PState),
++        VMSTATE_UINT8_ARRAY(regs, ICM42607PState, 128),
++        VMSTATE_UINT8_2DARRAY(mreg, ICM42607PState, MREG_BLOCKS, 256),
++        VMSTATE_UINT8_2DARRAY(fifo, ICM42607PState, FIFO_RECORDS, RECORD_BYTES),
++        VMSTATE_UINT32(fifo_head, ICM42607PState),
++        VMSTATE_UINT32(fifo_count, ICM42607PState),
++        VMSTATE_UINT32(fifo_byte, ICM42607PState),
++        VMSTATE_UINT8(address, ICM42607PState),
++        VMSTATE_BOOL(addressed, ICM42607PState),
++        VMSTATE_BOOL(reading, ICM42607PState),
++        VMSTATE_UINT16(timestamp, ICM42607PState),
++        VMSTATE_TIMER_PTR(timer, ICM42607PState),
++        VMSTATE_END_OF_LIST()
++    }
++};
++
++static void icm42607p_class_init(ObjectClass *klass, void *data)
++{
++    DeviceClass *dc = DEVICE_CLASS(klass);
++    SSIPeripheralClass *k = SSI_PERIPHERAL_CLASS(klass);
++
++    k->realize = icm42607p_realize;
++    k->transfer = icm42607p_transfer;
++    k->set_cs = icm42607p_set_cs;
++    k->cs_polarity = SSI_CS_LOW;
++    dc->vmsd = &vmstate_icm42607p;
++    device_class_set_legacy_reset(dc, icm42607p_reset);
++}
++
++static const TypeInfo icm42607p_info = {
++    .name = TYPE_ICM42607P,
++    .parent = TYPE_SSI_PERIPHERAL,
++    .instance_size = sizeof(ICM42607PState),
++    .class_init = icm42607p_class_init,
++};
++
++static void icm42607p_register_types(void)
++{
++    type_register_static(&icm42607p_info);
++}
++
++type_init(icm42607p_register_types)
+diff --git a/hw/arm/tegra2/apb/spi/spi.c b/hw/arm/tegra2/apb/spi/spi.c
+index 1aa0e93..f888c13 100644
+--- a/hw/arm/tegra2/apb/spi/spi.c
++++ b/hw/arm/tegra2/apb/spi/spi.c
+@@ -22,113 +22,321 @@
+ #include "tegra_common.h"
+ 
+ #include "hw/sysbus.h"
+-
++#include "hw/irq.h"
++#include "hw/ssi/ssi.h"
+ #include "qapi/error.h"
+-#include "qapi/qapi-commands.h"
+-
+ #include "iomap.h"
+ #include "tegra_trace.h"
+ #include "devices.h"
+-
+-#include "qemu/cutils.h"
+ #include "qemu/log.h"
++#include "qemu/timer.h"
++#include "exec/address-spaces.h"
++#include "migration/vmstate.h"
+ 
+ #include "spi.h"
+ 
++/* The T114+ SPI controller (spi-tegra114 programming model): PIO blocks of BIT_LENGTH+1-bit words through 64-entry
++ * FIFOs, chip selects under software or hardware control, RDY and FIFO errors on one level interrupt. A block's words
++ * are exchanged when PIO (or DMA) is set and RDY comes after the time the bus clock (CAR CLK_SOURCE_SBCx) needs to
++ * shift them: a block that ends at once would let a driver's next block finish inside its interrupt handler. */
++
+ #define TYPE_TEGRA_SPI "tegra.spi"
+ #define TEGRA_SPI(obj) OBJECT_CHECK(tegra_spi, (obj), TYPE_TEGRA_SPI)
+-#define DEFINE_REG32(reg) reg##_t reg
+-#define WR_MASKED(r, d, m)  r = (r & ~m##_WRMASK) | (d & m##_WRMASK)
++
++#define SPI_REGS        (0x194 >> 2)
++#define SPI_FIFO_DEPTH  64
++#define SPI_CS_LINES    4
++
++#define CMD1_BIT_LENGTH(v) ((v) & 0x1f)
++#define CMD1_PACKED     BIT(5)
++#define CMD1_TX_EN      BIT(11)
++#define CMD1_RX_EN      BIT(12)
++#define CMD1_CS_SS_VAL  BIT(20)
++#define CMD1_CS_SW_HW   BIT(21)
++#define CMD1_CS_SEL(v)  (((v) >> 26) & 3)
++#define CMD1_PIO        BIT(31)
++
++#define TRANS_RDY       BIT(30)
++#define TRANS_BLK_CNT   0xffff
++
++#define FIFO_RX_EMPTY   BIT(0)
++#define FIFO_RX_FULL    BIT(1)
++#define FIFO_TX_EMPTY   BIT(2)
++#define FIFO_TX_FULL    BIT(3)
++#define FIFO_RX_UNF     BIT(4)
++#define FIFO_RX_OVF     BIT(5)
++#define FIFO_TX_UNF     BIT(6)
++#define FIFO_TX_OVF     BIT(7)
++#define FIFO_ERRORS     0xf0
++#define FIFO_ERR        BIT(8)
++#define FIFO_TX_FLUSH   BIT(14)
++#define FIFO_RX_FLUSH   BIT(15)
++
++#define DMA_EN          BIT(31)
++
++#define INTR_RX_UNF     BIT(25)
++#define INTR_RX_OVF     BIT(26)
++#define INTR_TX_UNF     BIT(27)
++#define INTR_TX_OVF     BIT(28)
++#define INTR_RDY        BIT(29)
++#define INTR_ALL        (0x1f << 25)
++
++#define SPI_TX_DATA_OFFSET  0x18
++#define SPI_RX_DATA_OFFSET  0x1c
++#define SPI_TX_FIFO_OFFSET  0x108
++#define SPI_RX_FIFO_OFFSET  0x188
++
++#define CAR_BASE            0x60006000
++#define PLLP_HZ             408000000ULL
+ 
+ typedef struct tegra_spi_state {
+     SysBusDevice parent_obj;
+-
+     qemu_irq irq;
++    qemu_irq cs_lines[SPI_CS_LINES];
+     MemoryRegion iomem;
+-
+-    uint32_t regs[0x194>>2];
+-
++    SSIBus *bus;
++    uint32_t regs[SPI_REGS];
++    uint32_t tx_fifo[SPI_FIFO_DEPTH];
++    uint32_t rx_fifo[SPI_FIFO_DEPTH];
++    uint32_t tx_head, tx_len, rx_head, rx_len;
++    uint32_t errors;
++    int32_t selected;
++    uint32_t clock_source;
++    uint32_t block_words;
++    QEMUTimer *done;
+ } tegra_spi;
+ 
+ static const VMStateDescription vmstate_tegra_spi = {
+     .name = TYPE_TEGRA_SPI,
+-    .version_id = 1,
+-    .minimum_version_id = 1,
++    .version_id = 2,
++    .minimum_version_id = 2,
+     .fields = (VMStateField[]) {
+-        VMSTATE_UINT32_ARRAY(regs, tegra_spi, 0x194>>2),
+-
++        VMSTATE_UINT32_ARRAY(regs, tegra_spi, SPI_REGS),
++        VMSTATE_UINT32_ARRAY(tx_fifo, tegra_spi, SPI_FIFO_DEPTH),
++        VMSTATE_UINT32_ARRAY(rx_fifo, tegra_spi, SPI_FIFO_DEPTH),
++        VMSTATE_UINT32(tx_head, tegra_spi),
++        VMSTATE_UINT32(tx_len, tegra_spi),
++        VMSTATE_UINT32(rx_head, tegra_spi),
++        VMSTATE_UINT32(rx_len, tegra_spi),
++        VMSTATE_UINT32(errors, tegra_spi),
++        VMSTATE_INT32(selected, tegra_spi),
++        VMSTATE_UINT32(block_words, tegra_spi),
++        VMSTATE_TIMER_PTR(done, tegra_spi),
+         VMSTATE_END_OF_LIST()
+     }
+ };
+ 
++#define REG(s, off) ((s)->regs[(off) >> 2])
++
+ static void tegra_spi_update_irq(tegra_spi *s)
+ {
+-    uint32_t mask = ~s->regs[SPI_INTR_MASK_OFFSET>>2];
+-    uint32_t val = s->regs[SPI_FIFO_STATUS_OFFSET>>2];
++    uint32_t unmasked = ~REG(s, SPI_INTR_MASK_OFFSET);
++    bool level = false;
++
++    if ((REG(s, SPI_TRANSFER_STATUS_OFFSET) & TRANS_RDY) && (unmasked & INTR_RDY)) {
++        level = true;
++    }
++    if ((s->errors & FIFO_RX_UNF) && (unmasked & INTR_RX_UNF)) level = true;
++    if ((s->errors & FIFO_RX_OVF) && (unmasked & INTR_RX_OVF)) level = true;
++    if ((s->errors & FIFO_TX_UNF) && (unmasked & INTR_TX_UNF)) level = true;
++    if ((s->errors & FIFO_TX_OVF) && (unmasked & INTR_TX_OVF)) level = true;
++    qemu_set_irq(s->irq, level);
++}
+ 
+-    // Convert val to SPI_INTR_MASK format.
+-    val = (val & 0xC0000000) | ((val & 0xF0) << 21);
+-    if (s->regs[SPI_TRANSFER_STATUS_OFFSET>>2] & BIT(30)) val |= BIT(29); // RDY
++static uint32_t tegra_spi_fifo_status(tegra_spi *s)
++{
++    uint32_t value = s->errors;
++
++    if (!s->rx_len) value |= FIFO_RX_EMPTY;
++    if (s->rx_len == SPI_FIFO_DEPTH) value |= FIFO_RX_FULL;
++    if (!s->tx_len) value |= FIFO_TX_EMPTY;
++    if (s->tx_len == SPI_FIFO_DEPTH) value |= FIFO_TX_FULL;
++    if (s->errors) value |= FIFO_ERR;
++    value |= (SPI_FIFO_DEPTH - s->tx_len) << 16;
++    value |= s->rx_len << 23;
++    return value;
++}
+ 
+-    if (val & mask) {
+-        TRACE_IRQ_RAISE(s->iomem.addr, s->irq);
+-        qemu_log_mask(LOG_GUEST_ERROR, "tegra.spi: Raised IRQ.\n");
++/* With CS_SW_HW the selected chip select follows CS_SS_VAL (1 = high, idle); without it the controller drives it low
++ * for a block only. */
++static void tegra_spi_select(tegra_spi *s, int cs)
++{
++    if (s->selected == cs) {
++        return;
+     }
+-    else {
+-        TRACE_IRQ_LOWER(s->iomem.addr, s->irq);
+-        qemu_log_mask(LOG_GUEST_ERROR, "tegra.spi: Lowered IRQ.\n");
++    if (s->selected >= 0) {
++        qemu_set_irq(s->cs_lines[s->selected], 1);
++    }
++    s->selected = cs;
++    if (cs >= 0) {
++        qemu_set_irq(s->cs_lines[cs], 0);
++    }
++}
++
++static void tegra_spi_software_cs(tegra_spi *s)
++{
++    uint32_t cmd = REG(s, SPI_COMMAND_OFFSET);
++
++    if (cmd & CMD1_CS_SW_HW) {
++        tegra_spi_select(s, (cmd & CMD1_CS_SS_VAL) ? -1 : (int)CMD1_CS_SEL(cmd));
+     }
+ }
+ 
+-static uint64_t tegra_spi_priv_read(void *opaque, hwaddr offset,
+-                                    unsigned size)
++/* CLK_SOURCE_SBCx: source 31:29 (0 = PLLP_OUT0), a 7.1 divider in 7:0: rate = 408 MHz * 2 / (divider + 2). */
++static int64_t tegra_spi_block_ns(tegra_spi *s, uint64_t bits)
++{
++    uint32_t source = s->clock_source ?
++        address_space_ldl_le(&address_space_memory, CAR_BASE + s->clock_source, MEMTXATTRS_UNSPECIFIED, NULL) : 0;
++    uint64_t hz = PLLP_HZ * 2 / ((source & 0xff) + 2);
++
++    if (source >> 29) {
++        qemu_log_mask(LOG_UNIMP, "tegra.spi: clock source %u is timed as PLLP\n", source >> 29);
++    }
++    return bits * NANOSECONDS_PER_SECOND / hz;
++}
++
++void tegra_spi_set_clock_source(void *dev, uint32_t car_offset)
++{
++    TEGRA_SPI(dev)->clock_source = car_offset;
++}
++
++static void tegra_spi_run_block(tegra_spi *s)
++{
++    uint32_t cmd = REG(s, SPI_COMMAND_OFFSET);
++    uint32_t words = (REG(s, SPI_DMA_BLK_SIZE_OFFSET) & 0xffff) + 1;
++    uint32_t bits = CMD1_BIT_LENGTH(cmd) + 1;
++    uint32_t mask = bits >= 32 ? UINT32_MAX : (1u << bits) - 1;
++    bool hardware_cs = !(cmd & CMD1_CS_SW_HW);
++
++    if (cmd & CMD1_PACKED) {
++        qemu_log_mask(LOG_UNIMP, "tegra.spi: packed mode is not modelled; words are sent unpacked\n");
++    }
++    if (hardware_cs) {
++        tegra_spi_select(s, CMD1_CS_SEL(cmd));
++    }
++    for (uint32_t i = 0; i < words; i++) {
++        uint32_t out = 0, in;
++
++        if (cmd & CMD1_TX_EN) {
++            if (s->tx_len) {
++                out = s->tx_fifo[s->tx_head];
++                s->tx_head = (s->tx_head + 1) % SPI_FIFO_DEPTH;
++                s->tx_len--;
++            } else {
++                s->errors |= FIFO_TX_UNF;
++            }
++        }
++        in = ssi_transfer(s->bus, out & mask) & mask;
++        if (cmd & CMD1_RX_EN) {
++            if (s->rx_len < SPI_FIFO_DEPTH) {
++                s->rx_fifo[(s->rx_head + s->rx_len) % SPI_FIFO_DEPTH] = in;
++                s->rx_len++;
++            } else {
++                s->errors |= FIFO_RX_OVF;
++            }
++        }
++    }
++    if (hardware_cs) {
++        tegra_spi_select(s, -1);
++    }
++    s->block_words = words;
++    timer_mod(s->done, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + tegra_spi_block_ns(s, words * bits));
++}
++
++static void tegra_spi_block_done(void *opaque)
+ {
+     tegra_spi *s = opaque;
+-    uint64_t ret = 0;
+ 
+-    TRACE_READ(s->iomem.addr, offset, ret);
++    REG(s, SPI_TRANSFER_STATUS_OFFSET) =
++        (REG(s, SPI_TRANSFER_STATUS_OFFSET) & ~TRANS_BLK_CNT) | TRANS_RDY | (s->block_words & TRANS_BLK_CNT);
++    tegra_spi_update_irq(s);
++}
+ 
+-    if (offset+size <= sizeof(s->regs)) ret = s->regs[offset/sizeof(uint32_t)] & ((1ULL<<size*8)-1);
++static uint64_t tegra_spi_priv_read(void *opaque, hwaddr offset, unsigned size)
++{
++    tegra_spi *s = opaque;
++    uint64_t ret = 0;
+ 
++    switch (offset) {
++    case SPI_FIFO_STATUS_OFFSET:
++        ret = tegra_spi_fifo_status(s);
++        break;
++    case SPI_RX_FIFO_OFFSET:
++    case SPI_RX_DATA_OFFSET:
++        if (s->rx_len) {
++            ret = s->rx_fifo[s->rx_head];
++            s->rx_head = (s->rx_head + 1) % SPI_FIFO_DEPTH;
++            s->rx_len--;
++        } else {
++            s->errors |= FIFO_RX_UNF;
++            tegra_spi_update_irq(s);
++        }
++        break;
++    default:
++        if (offset + size <= sizeof(s->regs)) {
++            ret = s->regs[offset >> 2];
++        }
++        break;
++    }
++    TRACE_READ(s->iomem.addr, offset, ret);
+     return ret;
+ }
+ 
+-static void tegra_spi_priv_write(void *opaque, hwaddr offset,
+-                                 uint64_t value, unsigned size)
++static void tegra_spi_priv_write(void *opaque, hwaddr offset, uint64_t value, unsigned size)
+ {
+     tegra_spi *s = opaque;
+ 
+     TRACE_WRITE(s->iomem.addr, offset, 0, value);
+-
+-    if (offset+size <= sizeof(s->regs)) {
+-        if (offset == SPI_COMMAND_OFFSET) {
+-            if (value & BIT(31)) { // PIO = GO
+-                value &= ~BIT(31);
+-                s->regs[SPI_TRANSFER_STATUS_OFFSET>>2] |= BIT(30); //RDY
+-                s->regs[SPI_TRANSFER_STATUS_OFFSET>>2] = (s->regs[SPI_TRANSFER_STATUS_OFFSET>>2] & ~0xFFFF) | (s->regs[SPI_DMA_BLK_SIZE_OFFSET>>2] & 0xFFFF);
+-                tegra_spi_update_irq(s);
+-            }
++    switch (offset) {
++    case SPI_COMMAND_OFFSET:
++        REG(s, offset) = value & ~CMD1_PIO;
++        tegra_spi_software_cs(s);
++        if (value & CMD1_PIO) {
++            tegra_spi_run_block(s);
+         }
+-        else if (offset == SPI_TRANSFER_STATUS_OFFSET) {
+-            if (value & BIT(30)) value &= ~BIT(30); // RDY
++        break;
++    case SPI_TRANSFER_STATUS_OFFSET:
++        if (value & TRANS_RDY) {
++            REG(s, offset) &= ~TRANS_RDY;
+         }
+-        else if (offset == SPI_FIFO_STATUS_OFFSET) {
+-            value &= ~0x3FFF000F;
+-            value |= s->regs[SPI_FIFO_STATUS_OFFSET>>2] & 0x3FFF000F;
+-            value &= ~(s->regs[SPI_FIFO_STATUS_OFFSET>>2] & 0xF0);
++        tegra_spi_update_irq(s);
++        break;
++    case SPI_FIFO_STATUS_OFFSET:
++        s->errors &= ~(value & FIFO_ERRORS);
++        if (value & FIFO_TX_FLUSH) {
++            s->tx_head = s->tx_len = 0;
+         }
+-        else if (offset == SPI_DMA_CTL_OFFSET) {
+-            if (value & BIT(31)) { // DMA = enable
+-                value &= ~BIT(31);
+-                s->regs[SPI_TRANSFER_STATUS_OFFSET>>2] |= BIT(30); //RDY
+-                s->regs[SPI_TRANSFER_STATUS_OFFSET>>2] = (s->regs[SPI_TRANSFER_STATUS_OFFSET>>2] & ~0xFFFF) | (s->regs[SPI_DMA_BLK_SIZE_OFFSET>>2] & 0xFFFF);
+-                tegra_spi_update_irq(s);
+-            }
++        if (value & FIFO_RX_FLUSH) {
++            s->rx_head = s->rx_len = 0;
+         }
+-
+-        s->regs[offset/sizeof(uint32_t)] = (s->regs[offset/sizeof(uint32_t)] & ~((1ULL<<size*8)-1)) | value;
+-
+-        if (offset == SPI_TRANSFER_STATUS_OFFSET || offset == SPI_FIFO_STATUS_OFFSET || offset == SPI_INTR_MASK_OFFSET) tegra_spi_update_irq(s);
++        tegra_spi_update_irq(s);
++        break;
++    case SPI_TX_FIFO_OFFSET:
++    case SPI_TX_DATA_OFFSET:
++        if (s->tx_len < SPI_FIFO_DEPTH) {
++            s->tx_fifo[(s->tx_head + s->tx_len) % SPI_FIFO_DEPTH] = value;
++            s->tx_len++;
++        } else {
++            s->errors |= FIFO_TX_OVF;
++            tegra_spi_update_irq(s);
++        }
++        break;
++    case SPI_DMA_CTL_OFFSET:
++        REG(s, offset) = value & ~DMA_EN;
++        if (value & DMA_EN) {
++            qemu_log_mask(LOG_UNIMP, "tegra.spi: DMA blocks run from the FIFOs; the APB DMA side is not modelled\n");
++            tegra_spi_run_block(s);
++        }
++        break;
++    case SPI_INTR_MASK_OFFSET:
++        REG(s, offset) = value;
++        tegra_spi_update_irq(s);
++        break;
++    default:
++        if (offset + size <= sizeof(s->regs)) {
++            s->regs[offset >> 2] = value;
++        }
++        break;
+     }
+ }
+ 
+@@ -137,11 +345,20 @@ static void tegra_spi_priv_reset(DeviceState *dev)
+     tegra_spi *s = TEGRA_SPI(dev);
+ 
+     memset(s->regs, 0, sizeof(s->regs));
+-    s->regs[SPI_COMMAND_OFFSET>>2] = SPI_COMMAND_RESET;
+-    s->regs[SPI_TIMING_REG2_OFFSET>>2] = SPI_TIMING_REG2_RESET;
+-    s->regs[SPI_TRANSFER_STATUS_OFFSET>>2] = SPI_TRANSFER_STATUS_RESET;
+-    s->regs[SPI_FIFO_STATUS_OFFSET>>2] = SPI_FIFO_STATUS_RESET;
+-    s->regs[SPI_SPARE_CTLR_OFFSET>>2] = SPI_SPARE_CTLR_RESET;
++    REG(s, SPI_COMMAND_OFFSET) = SPI_COMMAND_RESET;
++    REG(s, SPI_TIMING_REG2_OFFSET) = SPI_TIMING_REG2_RESET;
++    REG(s, SPI_TRANSFER_STATUS_OFFSET) = SPI_TRANSFER_STATUS_RESET;
++    REG(s, SPI_SPARE_CTLR_OFFSET) = SPI_SPARE_CTLR_RESET;
++    REG(s, SPI_INTR_MASK_OFFSET) = INTR_ALL;
++    s->tx_head = s->tx_len = s->rx_head = s->rx_len = 0;
++    s->errors = 0;
++    s->selected = -1;
++    s->block_words = 0;
++    timer_del(s->done);
++    for (int i = 0; i < SPI_CS_LINES; i++) {
++        qemu_set_irq(s->cs_lines[i], 1);
++    }
++    qemu_set_irq(s->irq, 0);
+ }
+ 
+ static const MemoryRegionOps tegra_spi_mem_ops = {
+@@ -155,7 +372,9 @@ static void tegra_spi_priv_realize(DeviceState *dev, Error **errp)
+     tegra_spi *s = TEGRA_SPI(dev);
+ 
+     sysbus_init_irq(SYS_BUS_DEVICE(dev), &s->irq);
+-
++    qdev_init_gpio_out_named(dev, s->cs_lines, "cs", SPI_CS_LINES);
++    s->bus = ssi_create_bus(dev, "ssi");
++    s->done = timer_new_ns(QEMU_CLOCK_VIRTUAL, tegra_spi_block_done, s);
+     memory_region_init_io(&s->iomem, OBJECT(dev), &tegra_spi_mem_ops, s,
+                           TYPE_TEGRA_SPI, TEGRA_SPI1_SIZE);
+     sysbus_init_mmio(SYS_BUS_DEVICE(dev), &s->iomem);
+diff --git a/hw/arm/tegra2/apb/spi/spi.h b/hw/arm/tegra2/apb/spi/spi.h
+index 365ce59..9bd7f65 100644
+--- a/hw/arm/tegra2/apb/spi/spi.h
++++ b/hw/arm/tegra2/apb/spi/spi.h
+@@ -34,4 +34,6 @@
+ #define SPI_SPARE_CTLR_OFFSET 0x190
+ #define SPI_SPARE_CTLR_RESET 0x0FFF0000
+ 
++void tegra_spi_set_clock_source(void *dev, uint32_t car_offset);
++
+ #endif // TEGRA_SPI_H

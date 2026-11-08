@@ -14,6 +14,7 @@ load("@rules_python//python:py_binary.bzl", "py_binary")
 load("//bazel/lint:defs.bzl", "lint_files")
 load("//boot:overlay.bzl", "OVERLAY_BINARIES")
 load(":defs.bzl", "fake_boot_package", "image_inputs", "install_artifacts", "install_spec", "ipsw_pins", "prelink_options", "release_prelink", "release_tree", "test_member")
+load(":translated.bzl", "pretranslated_delta", "translated_cryptex")
 
 package(default_visibility = ["//visibility:public"])
 
@@ -27,6 +28,7 @@ install_spec(
     cryptex_cpp = "//drivers/NativeSwitchBlock:SwitchCryptex.cpp",
     cryptex_h = "//drivers/NativeSwitchBlock:SwitchCryptex.h",
     raw_mount = "//diagnostics/switch:SwitchRawMount.h",
+    volumes_h = "//kernel:ipsw_volumes_header",
 )
 
 ipsw_pins(name = "ipsw")
@@ -217,8 +219,43 @@ image_inputs(
     },
 )
 
+# iOS 27: each role's pretranslate delta and the two cryptexes rebuilt from theirs, made as the user and kept in the
+# output base (install/translated.bzl). The System cryptex's dyld cache takes the other two roles' cdhash pairs.
+[pretranslated_delta(
+    name = "delta_" + role,
+    image = image,
+    pairs = pairs,
+    pins = ":ipsw_pins",
+    tags = ["manual"],
+    translator = "//translate/arm64e/pretranslate:" + role,
+) for role, image, pairs in [
+    ("os", "@ipsw//:os", []),
+    ("app_cryptex", "@ipsw//:app_cryptex", []),
+    (
+        "system_cryptex",
+        ":system_cryptex",
+        [
+            ":delta_os",
+            ":delta_app_cryptex",
+        ],
+    ),
+]]
+
+[translated_cryptex(
+    name = "translated_" + role,
+    apfs_tool = ":image_apfs_tool",
+    delta = ":delta_" + role,
+    image = image,
+    pins = ":ipsw_pins",
+    role = role,
+    tags = ["manual"],
+) for role, image in [
+    ("app_cryptex", "@ipsw//:app_cryptex"),
+    ("system_cryptex", ":system_cryptex"),
+]]
+
 # The IPSW's large members, and the shader seed made from them: building these fetches the 5.2 GB OS image and
-# inflates the 3.3 GB system cryptex.
+# inflates the 3.3 GB system cryptex (and for iOS 27 translates them).
 image_inputs(
     name = "image_ipsw",
     inputs = {
@@ -228,14 +265,15 @@ image_inputs(
         "shader_seed": ":shader_seed",
         "shader_seed_size": ":shader_seed_size",
         "system_cryptex": ":system_cryptex",
-    },
-    pretranslated = select({
-        "//ipsw:ios27": [
-            "//translate/arm64e/pretranslate:os",
-            "//translate/arm64e/pretranslate:app_cryptex",
-            "//translate/arm64e/pretranslate:system_cryptex",
-        ],
-        "//conditions:default": [],
+    } | select({
+        "//ipsw:ios27": {
+            "delta_app_cryptex": ":delta_app_cryptex",
+            "delta_os": ":delta_os",
+            "delta_system_cryptex": ":delta_system_cryptex",
+            "translated_app_cryptex": ":translated_app_cryptex",
+            "translated_system_cryptex": ":translated_system_cryptex",
+        },
+        "//conditions:default": {},
     }),
     tags = ["manual"],
 )
@@ -289,12 +327,18 @@ py_binary(
     ],
 )
 
-# `bazel run //:image_to_card -- diskN [--yes]`: out/sd's images onto the card (tools/install/to_card.py).
+# `bazel run //:image_to_card -- diskN [--yes]`: out/sd's images onto the card (tools/install/to_card.py); with
+# --direct, one image straight onto its iOS partition (tools/install/direct.py, which fits it with apfs_tool).
 py_binary(
     name = "image_to_card",
     srcs = ["//tools/install:to_card.py"],
+    data = [":image_apfs_tool"],
+    env = {"SWITCH_APFS_TOOL": "$(rlocationpath :image_apfs_tool)"},
     main = "//tools/install:to_card.py",
-    deps = ["//tools/install:lib"],
+    deps = [
+        "//tools/install:lib",
+        "@rules_python//python/runfiles",
+    ],
 )
 
 # The release's image-builder inputs (ios-on-switch-lmao-<version>-image-inputs.tar, r22-ci): this project's built

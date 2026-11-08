@@ -16,6 +16,7 @@
 //!   `queue.rs` [`Device::new_command_queue`], and so on).
 
 mod adopt;
+pub(super) mod alongside;
 pub(super) mod argument_buffers;
 mod compiles;
 pub(super) mod create;
@@ -323,6 +324,8 @@ pub(super) struct DeviceShared {
     pub(super) owners: super::used_resources::Owners,
     /// The consumer's hook told of each batch's host memory (`submission_memory.rs`).
     pub(super) submission_memory: OnceLock<super::submission_memory::SubmissionMemoryHook>,
+    /// The consumer's hook asked for each finished batch's failure (`submission_failure.rs`).
+    pub(super) submission_failure: OnceLock<super::submission_failure::SubmissionFailureHook>,
     /// The program's live buffers of their own, and their resident set (`live_buffers.rs`).
     pub(super) live_buffers: super::live_buffers::LiveBuffers,
     /// How its command buffers are timed on the GPU (`gpu_time.rs`).
@@ -1334,6 +1337,7 @@ impl Device {
             fresh: Default::default(),
             owners: Default::default(),
             submission_memory: OnceLock::new(),
+            submission_failure: OnceLock::new(),
             live_buffers: Default::default(),
             timing,
             view_reinterpretation,

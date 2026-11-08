@@ -20,9 +20,9 @@ struct TegraVICBounce {
 
 // The copy engine's host1x syncpoint (allocated once) and its value after everything queued so far, which
 // tegra_vic_bounce_order advances.
-IOReturn tegra_vic_bounce_start(void);
-uint32_t tegra_vic_bounce_syncpt(void);
-uint32_t *tegra_vic_bounce_next(void);
+IOReturn tegra_vic_bounce_start();
+uint32_t tegra_vic_bounce_syncpt();
+uint32_t *tegra_vic_bounce_next();
 // The scratch for surface `d` at pitches that are multiples of `align`.
 IOReturn tegra_vic_bounce_stage(TegraVICBounce *b, const TegraVICSurfaceDesc *d, uint32_t align);
 // Every plane of `from` (geometry fd) into `to` (td) on the copy engine, after `wait` (null: none); with `signal` the

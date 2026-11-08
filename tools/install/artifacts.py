@@ -13,10 +13,11 @@ Writes into <dir>:
 """
 
 import argparse
-import hashlib
 import json
 import shutil
 from pathlib import Path
+
+from tools.common import hashing
 
 DATA_PLAN = """\
 Data volume ({name}, UUID {uuid}, role Data, case-sensitive, unencrypted) is seeded once, by //install:sd:
@@ -31,14 +32,6 @@ The kernel creates the rest itself at boot (XNU kern_exec.c, SwitchRawMount.h): 
 disabled.plist, keybags/containers/dslocal directories, setup-skip preferences, Switch/system-app-migration,
 Switch/portrait-native-*, Switch/panic-*.log.
 """
-
-
-def sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with open(path, 'rb') as f:
-        while chunk := f.read(1 << 20):
-            digest.update(chunk)
-    return digest.hexdigest()
 
 
 def main() -> None:
@@ -74,7 +67,7 @@ def main() -> None:
     (out / 'data-seed-plan.txt').write_text(DATA_PLAN.format(name=data['name'], uuid=data['uuid']))
     entry = {}
     for path in [*sorted((package / 'switchroot/ios').iterdir()), ini]:
-        entry[path.relative_to(package).as_posix()] = {'size': path.stat().st_size, 'sha256': sha256(path)}
+        entry[path.relative_to(package).as_posix()] = {'size': path.stat().st_size, 'sha256': hashing.sha256_file(path)}
     (out / 'boot-entry.json').write_text(json.dumps(entry, indent=2) + '\n')
     overlay = package / 'overlay'
     manifest = {

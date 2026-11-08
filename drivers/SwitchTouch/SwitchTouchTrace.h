@@ -27,12 +27,13 @@ struct SwitchTouchTrace {
 
     void add(unsigned ms, int dx, int dy, unsigned z)
     {
-        const Sample s = {(uint16_t)(ms > 0xffff ? 0xffff : ms), (int16_t)dx, (int16_t)dy,
-                          (uint16_t)(z > 0xffff ? 0xffff : z)};
-        if (count < kHead)
+        const Sample s = {static_cast<uint16_t>(ms > 0xffff ? 0xffff : ms), static_cast<int16_t>(dx),
+                          static_cast<int16_t>(dy), static_cast<uint16_t>(z > 0xffff ? 0xffff : z)};
+        if (count < kHead) {
             head[count] = s;
-        else
+        } else {
             tail[(count - kHead) % kTail] = s;
+        }
         ++count;
     }
 
@@ -46,13 +47,15 @@ struct SwitchTouchTrace {
     {
         const unsigned skipped = count > kHead + kTail ? count - kHead - kTail : 0;
         const unsigned lines = (count - skipped + kPerLine - 1) / kPerLine;
-        unsigned i = 0, line = 0;
+        unsigned i = 0;
+        unsigned line = 0;
         while (i < count) {
             char text[kPerLine * 20 + 1];
             size_t at = 0;
             for (unsigned n = 0; n < kPerLine && i < count; ++n) {
                 const Sample &s = this->at(i);
-                at += (size_t)snprintf(text + at, sizeof(text) - at, " %u:%d,%d,%u", s.ms, s.dx, s.dy, s.z);
+                at +=
+                    static_cast<size_t>(snprintf(text + at, sizeof(text) - at, " %u:%d,%d,%u", s.ms, s.dx, s.dy, s.z));
                 if (at >= sizeof(text))
                     at = sizeof(text) - 1;
                 i = i + 1 == kHead && skipped ? kHead + skipped : i + 1;

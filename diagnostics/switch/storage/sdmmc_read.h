@@ -67,16 +67,15 @@ struct switch_sd_result {
     uint32_t cache_evidence;
 };
 
-enum switch_sd_readiness_failure {
-    SWITCH_SD_READY_VERSION = 1u << 0,
-    SWITCH_SD_READY_ACTIVE = 1u << 1,
-    SWITCH_SD_READY_CARD = 1u << 2,
-    SWITCH_SD_READY_BUS = 1u << 3,
-    SWITCH_SD_READY_POWER = 1u << 4,
-    SWITCH_SD_READY_CLOCK = 1u << 5,
-    SWITCH_SD_READY_RESET = 1u << 6,
-    SWITCH_SD_READY_BLOCK_SIZE = 1u << 7
-};
+/* Bits of readiness_failures: macros, since a C enumerator is an int. */
+#define SWITCH_SD_READY_VERSION    (1u << 0)
+#define SWITCH_SD_READY_ACTIVE     (1u << 1)
+#define SWITCH_SD_READY_CARD       (1u << 2)
+#define SWITCH_SD_READY_BUS        (1u << 3)
+#define SWITCH_SD_READY_POWER      (1u << 4)
+#define SWITCH_SD_READY_CLOCK      (1u << 5)
+#define SWITCH_SD_READY_RESET      (1u << 6)
+#define SWITCH_SD_READY_BLOCK_SIZE (1u << 7)
 
 enum switch_sd_error {
     SWITCH_SD_OK = 0,

@@ -1,0 +1,30 @@
+# The helpers every tool shares: one module per concern, the one implementation of its pattern, //tools/common:<module>.
+load("@rules_python//python:py_library.bzl", "py_library")
+load("@rules_python//python:py_test.bzl", "py_test")
+load("//bazel/lint:defs.bzl", "lint_files")
+
+package(default_visibility = ["//visibility:public"])
+
+lint_files()
+
+MODULES = {
+    "files": [],
+    "hashing": [],
+    "macho": [],
+    "paths": ["@rules_python//python/runfiles"],
+    "sudo": [],
+}
+
+[py_library(
+    name = module,
+    srcs = [module + ".py"],
+    imports = ["../.."],
+    deps = deps,
+) for module, deps in MODULES.items()]
+
+[py_test(
+    name = module + "_test",
+    size = "small",
+    srcs = [module + "_test.py"],
+    deps = [":" + module],
+) for module in MODULES]

@@ -12,7 +12,7 @@ from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
 
-from tools.install import compose, extents, host, manifest
+from tools.install import compose, extents, host, manifest, progress
 
 ALIGN = 4096
 WORKERS = os.cpu_count() or 4
@@ -87,7 +87,10 @@ def _chunk(fd: int, offset: int, ranges: list[tuple[int, int]], writer: Writer, 
 
 
 def body(fd: int, offset: int, plan: list[tuple[int, int, int]], writer: Writer, punch: bool) -> list[bytes]:
-    """Read, write and hash every body chunk on every core; punch the image behind, in order."""
+    """Read, write and hash every body chunk on every core; punch the image behind, in order.
+
+    Each chunk counts toward the running step (progress) once it is written.
+    """
     hashes = []
     with concurrent.futures.ThreadPoolExecutor(WORKERS) as pool:
         queued = []
@@ -103,6 +106,7 @@ def body(fd: int, offset: int, plan: list[tuple[int, int, int]], writer: Writer,
 def _settle(fd: int, offset: int, item: tuple, punch: bool) -> bytes:
     ranges, future = item
     digest = future.result()
+    progress.advance(sum(n for _, n in ranges))
     if punch:
         for at, n in ranges:
             compose.punch(fd, offset + at, n)
@@ -140,8 +144,7 @@ def write_head(directory: Path, m: manifest.Manifest, boot_files: list[tuple[str
 class Source:
     """The composed container: the image file, its offset there, and apfs_tool's measure of it in bytes.
 
-    The measure has container_bytes, minimum_bytes and the internal pool's [pool_start, pool_end), which the installer
-    writes whole like the checkpoint areas: the fit reads the pool's bitmaps from the card.
+    The measure has container_bytes, minimum_bytes and the internal pool's [pool_start, pool_end).
     """
 
     image: Path
@@ -172,12 +175,13 @@ def pack(source: Source, target: Target, log: host.Log, punch: bool = True) -> m
         if block * count != size:
             raise extents.ExtentError(f'the container is {block * count} bytes, its measure {size}')
         data = [(a, min(b, minimum)) for a, b in extents.data_ranges(fd, source.offset, size, block) if a < minimum]
-        plan = extents.plan(data, [*areas, (layout['pool_start'], layout['pool_end'])], minimum, block)
+        plan = extents.plan(data, areas, minimum, block)
         sizes = manifest.split(manifest.BODY_OFFSET + sum(n for _, s, n in plan if s != manifest.ZERO))
         log(f'pack: {len(plan)} extents, {sum(sizes)} bytes in {len(sizes)} parts, {WORKERS} workers')
         writer = Writer(directory, name, sizes)
         try:
-            hashes = body(fd, source.offset, plan, writer, punch)
+            with progress.step(f'pack: writing {name}.SII', sum(sizes) - manifest.BODY_OFFSET):
+                hashes = body(fd, source.offset, plan, writer, punch)
         finally:
             writer.close()
     finally:

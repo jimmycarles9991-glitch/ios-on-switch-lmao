@@ -193,7 +193,7 @@ pub(crate) struct Relayed(Mutex<Option<(u64, Option<String>)>>);
 
 impl Relayed {
     /// Keep `code` (not 0) and `description`, unless a failure was kept already.
-    fn fail(&self, code: u64, description: Option<&str>) {
+    pub(crate) fn fail(&self, code: u64, description: Option<&str>) {
         let mut failure = lock(&self.0);
         if failure.is_none() {
             *failure = Some((code, description.map(str::to_owned)));

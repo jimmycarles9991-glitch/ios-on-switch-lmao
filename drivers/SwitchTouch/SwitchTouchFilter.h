@@ -44,7 +44,7 @@ constexpr int32_t kPixelsPerMeter = 1280 * 1000 / 155;
 
 constexpr int32_t fromMicrometers(int32_t um)
 {
-    return (int32_t)((int64_t)um * kPixelsPerMeter * kQ / 1000000);
+    return static_cast<int32_t>(static_cast<int64_t>(um) * kPixelsPerMeter * kQ / 1000000);
 }
 
 constexpr int32_t kHysteresis = fromMicrometers(300);
@@ -62,18 +62,26 @@ static_assert(kStillRadius < 125 * kQ / 10, "the still radius stays inside UIKit
 // A pan's strength below its recent level by kLiftFrom (none of the step held back) to kLiftTo (all of it), as far as
 // the finger was still: under kFlickSpeed (150 mm/s, 1/kQ px per ms) over the last kSpeedUs.
 constexpr uint32_t kLiftFrom = kFull * 3 / 10, kLiftTo = kFull * 6 / 10;
-constexpr uint32_t kFlickSpeed = (uint32_t)fromMicrometers(150), kSpeedUs = 20000;
+constexpr uint32_t kFlickSpeed = static_cast<uint32_t>(fromMicrometers(150)), kSpeedUs = 20000;
 
 constexpr uint32_t ramp(uint64_t value, uint64_t from, uint64_t to)
 {
-    return value <= from ? 0 : value >= to ? kFull : (uint32_t)((value - from) * kFull / (to - from));
+    if (value <= from) {
+        return 0;
+    }
+    if (value >= to) {
+        return kFull;
+    }
+    return static_cast<uint32_t>((value - from) * kFull / (to - from));
 }
 
 constexpr uint32_t settling(uint64_t sinceDownUs)
 {
-    const uint32_t settled = sinceDownUs >= kSettleUs ? 0 : (uint32_t)((kSettleUs - sinceDownUs) * kFull / kSettleUs);
-    const uint32_t tail =
-        sinceDownUs >= kSettleTailUs ? 0 : (uint32_t)((kSettleTailUs - sinceDownUs) * kFull / kSettleTailUs / 5);
+    const uint32_t settled =
+        sinceDownUs >= kSettleUs ? 0 : static_cast<uint32_t>((kSettleUs - sinceDownUs) * kFull / kSettleUs);
+    const uint32_t tail = sinceDownUs >= kSettleTailUs
+                              ? 0
+                              : static_cast<uint32_t>((kSettleTailUs - sinceDownUs) * kFull / kSettleTailUs / 5);
     return settled > tail ? settled : tail;
 }
 
@@ -81,17 +89,20 @@ constexpr uint32_t settling(uint64_t sinceDownUs)
 constexpr uint32_t instability(uint64_t sinceDownUs, uint64_t sinceLastUs, uint32_t z, uint32_t lastZ)
 {
     const uint32_t settle = settling(sinceDownUs);
-    const uint32_t larger = z > lastZ ? z : lastZ, change = z > lastZ ? z - lastZ : lastZ - z;
+    const uint32_t larger = z > lastZ ? z : lastZ;
+    const uint32_t change = z > lastZ ? z - lastZ : lastZ - z;
     // change / larger per sinceLastUs, in units of 1/kFull per second
-    const uint64_t rate = larger && sinceLastUs ? (uint64_t)change * 1000000 * kFull / larger / sinceLastUs : 0;
-    const uint32_t pressing = ramp(rate, (uint64_t)kStableRate * kFull, (uint64_t)kUnstableRate * kFull);
+    const uint64_t rate =
+        larger && sinceLastUs ? static_cast<uint64_t>(change) * 1000000 * kFull / larger / sinceLastUs : 0;
+    const uint32_t pressing =
+        ramp(rate, static_cast<uint64_t>(kStableRate) * kFull, static_cast<uint64_t>(kUnstableRate) * kFull);
     return settle > pressing ? settle : pressing;
 }
 
 // 0 .. kFull: how far a pan is lifting, from its strength in 1/kQ against its recent level.
 constexpr uint32_t lifting(uint32_t z, uint32_t level)
 {
-    return z < level ? ramp((uint64_t)(level - z) * kFull / level, kLiftFrom, kLiftTo) : 0;
+    return z < level ? ramp(static_cast<uint64_t>(level - z) * kFull / level, kLiftFrom, kLiftTo) : 0;
 }
 
 struct Axis {
@@ -110,13 +121,15 @@ struct Axis {
 
     void absorb(int32_t px, uint32_t unstable)
     {
-        const int32_t now = px * kQ, delta = now - raw;
+        const int32_t now = px * kQ;
+        const int32_t delta = now - raw;
         const int32_t target = raw - offset;
         raw = now;
-        offset += (int32_t)((int64_t)delta * unstable / kFull);
+        offset += static_cast<int32_t>(static_cast<int64_t>(delta) * unstable / kFull);
         const int32_t moved = raw - offset - target;
         if (moved && offset) {
-            int32_t repay = (moved < 0 ? -moved : moved) / 2, owed = offset < 0 ? -offset : offset;
+            int32_t repay = (moved < 0 ? -moved : moved) / 2;
+            int32_t const owed = offset < 0 ? -offset : offset;
             repay = repay < owed ? repay : owed;
             offset += offset < 0 ? repay : -repay;
         }
@@ -124,10 +137,11 @@ struct Axis {
 
     void track(int32_t to)
     {
-        if (to - centre > kHysteresis)
+        if (to - centre > kHysteresis) {
             centre = to - kHysteresis;
-        else if (centre - to > kHysteresis)
+        } else if (centre - to > kHysteresis) {
             centre = to + kHysteresis;
+        }
     }
 
     int32_t pixel() const
@@ -162,31 +176,37 @@ struct Contact {
     // True when the reported pixel changed.
     bool sample(int32_t px, int32_t py, uint32_t strength, uint64_t us)
     {
-        const int32_t wasX = x.pixel(), wasY = y.pixel();
+        const int32_t wasX = x.pixel();
+        const int32_t wasY = y.pixel();
         const uint64_t sinceLastUs = us - lastUs;
         const uint32_t lift = lifting(strength * kQ, level);
-        const int64_t stepX = (int64_t)px * kQ - x.raw, stepY = (int64_t)py * kQ - y.raw;
-        const uint32_t step = switch_isqrt_u64((uint64_t)(stepX * stepX + stepY * stepY));
+        const int64_t stepX = static_cast<int64_t>(px) * kQ - x.raw;
+        const int64_t stepY = static_cast<int64_t>(py) * kQ - y.raw;
+        const uint32_t step = switch_isqrt_u64(static_cast<uint64_t>(stepX * stepX + stepY * stepY));
         noteSpeed(step, sinceLastUs, lift);
-        uint32_t unstable;
+        uint32_t unstable = 0;
         if (panning) {
             const uint32_t still = speed >= kFlickSpeed ? 0 : kFull - speed * kFull / kFlickSpeed;
-            const uint32_t settle = settling(us - downUs), lifted = lift * still / kFull;
+            const uint32_t settle = settling(us - downUs);
+            const uint32_t lifted = lift * still / kFull;
             unstable = settle > lifted ? settle : lifted;
         } else {
             unstable = instability(us - downUs, sinceLastUs, strength, z);
         }
         x.absorb(px, unstable);
         y.absorb(py, unstable);
-        int32_t nextX = x.follow(), nextY = y.follow();
+        int32_t nextX = x.follow();
+        int32_t nextY = y.follow();
         holdNearTouchDown(nextX, nextY);
         limitStep(nextX, nextY, step);
         x.track(toX = nextX);
         y.track(toY = nextY);
-        const int64_t fromDownX = x.centre - downX, fromDownY = y.centre - downY;
-        if (fromDownX * fromDownX + fromDownY * fromDownY >= (int64_t)kPanGate * kPanGate)
+        const int64_t fromDownX = x.centre - downX;
+        const int64_t fromDownY = y.centre - downY;
+        if (fromDownX * fromDownX + fromDownY * fromDownY >= static_cast<int64_t>(kPanGate) * kPanGate)
             panning = true;
-        level = (uint32_t)((int64_t)level + ((int64_t)strength * kQ - (int64_t)level) / 4);
+        level = static_cast<uint32_t>(static_cast<int64_t>(level) +
+                                      (static_cast<int64_t>(strength) * kQ - static_cast<int64_t>(level)) / 4);
         z = strength;
         lastUs = us;
         return x.pixel() != wasX || y.pixel() != wasY;
@@ -197,35 +217,40 @@ private:
     void noteSpeed(uint64_t step, uint64_t sinceLastUs, uint32_t lift)
     {
         const uint64_t now = sinceLastUs ? step * 1000 / sinceLastUs : speed;
-        speed = (uint32_t)(((uint64_t)speed * kSpeedUs + (lift ? 0 : now * sinceLastUs)) / (sinceLastUs + kSpeedUs));
+        speed = static_cast<uint32_t>((static_cast<uint64_t>(speed) * kSpeedUs + (lift ? 0 : now * sinceLastUs)) /
+                                      (sinceLastUs + kSpeedUs));
     }
 
     // The offset's payback and the catch-up past kStillRadius together never move the point more than 1.5 of the
     // finger's step.
     void limitStep(int32_t &nextX, int32_t &nextY, uint32_t step) const
     {
-        const int64_t dx = nextX - toX, dy = nextY - toY, most = (int64_t)step * 3 / 2;
-        const int64_t d = switch_isqrt_u64((uint64_t)(dx * dx + dy * dy));
+        const int64_t dx = nextX - toX;
+        const int64_t dy = nextY - toY;
+        const int64_t most = static_cast<int64_t>(step) * 3 / 2;
+        const int64_t d = switch_isqrt_u64(static_cast<uint64_t>(dx * dx + dy * dy));
         if (d <= most)
             return;
-        nextX = toX + (int32_t)(dx * most / d);
-        nextY = toY + (int32_t)(dy * most / d);
+        nextX = toX + static_cast<int32_t>(dx * most / d);
+        nextY = toY + static_cast<int32_t>(dy * most / d);
     }
 
     void holdNearTouchDown(int32_t &nextX, int32_t &nextY)
     {
         if (escaped)
             return;
-        const int64_t dx = nextX - downX, dy = nextY - downY;
-        const int32_t d = (int32_t)switch_isqrt_u64((uint64_t)(dx * dx + dy * dy));
+        const int64_t dx = nextX - downX;
+        const int64_t dy = nextY - downY;
+        const int32_t d = static_cast<int32_t>(switch_isqrt_u64(static_cast<uint64_t>(dx * dx + dy * dy)));
         if (d >= kCatchUpRadius) {
             escaped = true;
             return;
         }
-        const int64_t kept =
-            d <= kStillRadius ? 0 : (int64_t)(d - kStillRadius) * kCatchUpRadius / (kCatchUpRadius - kStillRadius);
-        nextX = downX + (d ? (int32_t)(dx * kept / d) : 0);
-        nextY = downY + (d ? (int32_t)(dy * kept / d) : 0);
+        const int64_t kept = d <= kStillRadius ? 0
+                                               : static_cast<int64_t>(d - kStillRadius) * kCatchUpRadius /
+                                                     (kCatchUpRadius - kStillRadius);
+        nextX = downX + (d ? static_cast<int32_t>(dx * kept / d) : 0);
+        nextY = downY + (d ? static_cast<int32_t>(dy * kept / d) : 0);
     }
 };
 

@@ -56,7 +56,7 @@ struct TegraScanoutRing {
         if (held != kNone || (!replace && (pending != kNone || superseded != kNone)))
             return kNone;
         for (unsigned k = 1; k < buffers; ++k) {
-            const int i = (int)(((unsigned)front + k) % buffers);
+            const int i = static_cast<int>((static_cast<unsigned>(front) + k) % buffers);
             if (!busy(i))
                 return i;
         }

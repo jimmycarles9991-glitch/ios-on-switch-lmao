@@ -205,7 +205,7 @@ static inline struct xusb_ss_port_step xusb_ss_port_follow(bool cable, bool lane
 // SC7). Translation by any other ASID would send the falcon's firmware fetch to someone else's tables.
 static inline bool xusb_host_asid_usable(uint32_t asid_reg, uint32_t ours)
 {
-    return !(asid_reg & 0x80000000u) || (asid_reg & 0x7fu) == ours;
+    return ((asid_reg & 0x80000000u) == 0u) || (asid_reg & 0x7fu) == ours;
 }
 
 // --- Falcon mailbox: the SuperSpeed messages ---------------------------------------------------------------------------
@@ -234,7 +234,7 @@ static inline struct xusb_mbox_ss xusb_mbox_ss_decide(uint32_t cmd, uint32_t dat
     if (cmd == XUSB_MBOX_DISABLE_SS_LFPS_DETECTION || cmd == XUSB_MBOX_ENABLE_SS_LFPS_DETECTION) {
         const uint32_t ports = (data >> 1) & 0xfu;
         d.handled = true;
-        d.lfps = (ports >> XUSB_SS_PORT) & 1u;
+        d.lfps = (((ports >> XUSB_SS_PORT) & 1u) != 0u);
         d.lfps_enable = cmd == XUSB_MBOX_ENABLE_SS_LFPS_DETECTION;
         d.lfps_settle = d.lfps && !d.lfps_enable;
     } else if (cmd == XUSB_MBOX_SAVE_DFE_CTLE_CTX) {

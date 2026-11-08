@@ -33,7 +33,14 @@ struct vctx {
     const uint8_t *data, *out;
     uint8_t *freed; /* 1 bit per word of the executable segment */
     uint64_t lo, hi;
+    uint64_t mac_lo, mac_hi; /* the FIPS integrity MAC, checked against the translated text */
 };
+
+int a64x_pt_fips(const struct a64x_macho *m, const uint8_t *bytes, struct a64x_fips *fips)
+{
+    return a64x_fips_find(bytes, m->size, fips) && fips->text_fileoff <= m->size &&
+           fips->text_size <= m->size - fips->text_fileoff && fips->mac_fileoff <= m->size - A64X_FIPS_MAC_SIZE;
+}
 
 static bool code_at(void *ctx, uint64_t off)
 {
@@ -156,7 +163,7 @@ static int check_words(struct vctx *c, bool no_pac, struct a64x_pt_check *v, cha
             if (a64x_class_is_baseline(cn) && counts)
                 v->left_baseline++;
         }
-        if (was == now || off == 28)
+        if (was == now || off == 28 || (off >= c->mac_lo && off < c->mac_hi))
             continue;
         if (!code && !freed)
             return fail(err, errlen, "data word at 0x%llx changed", (unsigned long long)off);
@@ -185,9 +192,19 @@ long a64x_pt_verify(const struct a64x_macho *m, const uint8_t *out, struct a64x_
         return fail(err, errlen, "no code signature");
     if (rd32(out + 28) != A64X_PRETRANSLATED)
         return fail(err, errlen, "not marked");
+    uint64_t mac_lo = 0, mac_hi = 0;
+    struct a64x_fips fips;
+    if (a64x_pt_fips(m, m->base, &fips)) {
+        if (!a64x_fips_kept(m->base + fips.text_fileoff, out + fips.text_fileoff, fips.text_size,
+                            m->base + fips.mac_fileoff, out + fips.mac_fileoff))
+            return fail(err, errlen, "FIPS integrity MAC not as the translation leaves it");
+        mac_lo = fips.mac_fileoff;
+        mac_hi = mac_lo + A64X_FIPS_MAC_SIZE;
+    }
     for (uint64_t at = 0; at < m->size; at++) {
         bool exec = at >= m->exec_fileoff && at < m->exec_fileoff + m->exec_filesize;
-        if (exec || (at >= 28 && at < 32) || (at >= sig_off && at < sig_off + sig_size))
+        if (exec || (at >= 28 && at < 32) || (at >= sig_off && at < sig_off + sig_size) ||
+            (at >= mac_lo && at < mac_hi))
             continue;
         if (out[at] != m->base[at])
             return fail(err, errlen, "byte 0x%llx outside the code changed", (unsigned long long)at);
@@ -202,7 +219,9 @@ long a64x_pt_verify(const struct a64x_macho *m, const uint8_t *out, struct a64x_
                      out,
                      calloc(m->exec_filesize / 32 + 1, 1),
                      m->exec_fileoff,
-                     m->exec_fileoff + m->exec_filesize};
+                     m->exec_fileoff + m->exec_filesize,
+                     mac_lo,
+                     mac_hi};
     int rc = c.freed ? 0 : fail(err, errlen, "out of memory");
     struct a64x_code_map cm = {&c, code_at, flags};
     for (uint64_t off = c.lo; off < c.hi && !rc && !(flags & A64X_MAP_NO_PAC); off += PAGE) {

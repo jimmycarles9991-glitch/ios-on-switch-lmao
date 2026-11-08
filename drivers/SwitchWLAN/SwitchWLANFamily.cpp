@@ -35,7 +35,9 @@ IOWorkLoop *gLoop;
 
 }  // namespace
 
+// NOLINTNEXTLINE(misc-use-internal-linkage): OSDefineMetaClassAndStructors needs the class's external linkage
 class IO80211Controller : public IOEthernetController {
+    // NOLINTNEXTLINE(misc-explicit-constructor): IOKit's structors macro declares the metaclass constructor
     OSDeclareDefaultStructors(IO80211Controller);
 
 public:
@@ -128,7 +130,9 @@ private:
 
 OSDefineMetaClassAndStructors(IO80211Controller, IOEthernetController);
 
+// NOLINTNEXTLINE(misc-use-internal-linkage): OSDefineMetaClassAndStructors needs the class's external linkage
 class IO80211Interface : public IOEthernetInterface {
+    // NOLINTNEXTLINE(misc-explicit-constructor): IOKit's structors macro declares the metaclass constructor
     OSDeclareDefaultStructors(IO80211Interface);
 
 public:

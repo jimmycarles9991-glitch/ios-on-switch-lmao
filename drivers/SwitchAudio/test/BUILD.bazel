@@ -2,6 +2,7 @@
 # formulas for that stream, and the plug-in's float32 <-> S32 conversions (hal/SwitchAudioConvert.h) with NEON, as on
 # the device, against the scalar fallback (switch_audio_format_test); the driver and plug-in use them, and the I2S clock
 # is 47999.878 Hz on PLLA (switch_audio_source_test).
+load("@rules_python//python:py_test.bzl", "py_test")
 load("//bazel/lint:defs.bzl", "lint_files")
 load("//bazel/testing:defs.bzl", "host_library", "host_test")
 
@@ -57,8 +58,26 @@ host_test(
     ],
     data = [
         "//drivers/SwitchAudio:SwitchAudio.cpp",
+        "//drivers/SwitchAudio:SwitchAudioClocks.cpp",
+        "//drivers/SwitchAudio:SwitchAudioCodec.cpp",
+        "//drivers/SwitchAudio:SwitchAudioDriver.h",
+        "//drivers/SwitchAudio:SwitchAudioRegisters.h",
+        "//drivers/SwitchAudio:SwitchAudioStream.cpp",
         "//drivers/SwitchAudio:SwitchRT5639.cpp",
         "//drivers/SwitchAudio:hal/SwitchAudioPlugIn.c",
     ],
     deps = [":neon_harness"],
+)
+
+# The overlay's speaker strips per IPSW kind (J120's and J181's AID2003): every box of the kind's speaker chains
+# bypassed but the volume.
+py_test(
+    name = "speaker_strips_test",
+    size = "small",
+    srcs = ["speaker_strips_test.py"],
+    data = [
+        "//drivers/SwitchAudio:overlay_files",
+        "//overlay:manifest.json",
+    ],
+    deps = ["@rules_python//python/runfiles"],
 )

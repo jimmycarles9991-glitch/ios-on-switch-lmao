@@ -1,0 +1,4 @@
+# What prelink26's shims.py binds iOS 27 kext imports to (kernel/switch/prelink/shims.c, built for xnu-12377 only), so
+# a RELEASE kernel keeps them external; see prelink.exports.
+_switch_prelink_enosys
+_switch_prelink_unreachable

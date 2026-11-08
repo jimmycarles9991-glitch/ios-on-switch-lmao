@@ -35,9 +35,10 @@ constexpr uint32_t kBusyLocks =
 
 int findView(const tgm_tiled &t, const tgm_cpu_view &v)
 {
-	for (uint32_t i = 0; i < t.nviews; i++)
+	for (uint32_t i = 0; i < t.nviews; i++) {
 		if (t.views[i].view.task == v.task && t.views[i].view.address == v.address)
-			return int(i);
+			return static_cast<int>(i);
+	}
 	return -1;
 }
 
@@ -68,7 +69,7 @@ void noteBusy(tgm_tiled &t, uint32_t id)
 {
 #if TGM_STATS
 	const uint64_t now = tgm_timestamp_ns();
-	if (now - t.window_ns > 1000000000ull) {
+	if (now - t.window_ns > 1000000000ULL) {
 		t.window_ns = now;
 		t.window_locks = 0;
 	}
@@ -89,7 +90,7 @@ void noteBusy(tgm_tiled &t, uint32_t id)
 }
 
 // A move the copy engine could not make is the CPU's (tgm_relayout_by_cpu cannot fail)
-void move(tgm_coh *c, tgm_tiled &t, const tgm_relayout_pages &rows, int op)
+void move(tgm_coh *c, const tgm_tiled &t, const tgm_relayout_pages &rows, int op)
 {
 	const tgm_relayout_pages pages = tgm_coh_pages(c);
 	tgm_relayout_writer writers[TGM_RELAYOUT_MAX_WAITS];
@@ -113,7 +114,8 @@ int fill(tgm_coh *c, tgm_tiled &t, uint32_t options)
 	if ((options & kLockAvoidSync) && tgm_coh_writers(c, writers, TGM_RELAYOUT_MAX_WAITS))
 		return 1;
 	tgm_relayout_pages rows;
-	tgm_scratch *scratch = tgm_scratch_get(uint64_t(tgm_coh_pages(c).npages) << 12, 1, &rows);
+	tgm_scratch *scratch =
+		tgm_scratch_get(static_cast<uint64_t>(tgm_coh_pages(c).npages) << 12, 1, &rows);
 	if (!scratch) {
 		switch_refusal("iosurface-layout", "no-scratch",
 			       "IOSurface %u: no memory for a CPU lock's rows: the lock is refused",
@@ -136,10 +138,11 @@ void drain(tgm_coh *c, tgm_tiled &t)
 		tgm_cpu_clean_pages(rows.pas, rows.npages);
 		move(c, t, rows, TGM_RELAYOUT_TO_TILED);
 	}
-	if (t.stranded)
+	if (t.stranded) {
 		tgm_scratch_discard(t.scratch);
-	else
+	} else {
 		tgm_scratch_put(t.scratch);
+	}
 	t.scratch = nullptr;
 	t.wrote = t.stranded = 0;
 }
@@ -182,13 +185,14 @@ int lock(tgm_coh *c, tgm_tiled &t, void *client, uint32_t id, uint32_t options, 
 			return 1;
 		}
 	}
-	held = !t.locks++;
-	t.wrote |= !(options & kLockReadOnly);
+	held = ((t.locks++) == 0u);
+	if ((options & kLockReadOnly) == 0)
+		t.wrote = 1;
 	noteBusy(t, id);
 	if (!mapped)
 		return 0;
 	if (i < 0) {
-		i = int(t.nviews++);
+		i = static_cast<int>(t.nviews++);
 		t.views[i].view = v;
 		t.views[i].locks = 0;
 		tgm_cpu_view_hold(&t.views[i].view, 1);
@@ -217,7 +221,7 @@ void unlock(tgm_coh *c, tgm_tiled &t, void *client, uint32_t id, uint32_t option
 				       id, ret);
 			t.stranded = 1;
 		}
-		removeView(t, uint32_t(i));
+		removeView(t, static_cast<uint32_t>(i));
 	}
 	if (!--t.locks) {
 		if (t.scratch)
@@ -233,20 +237,23 @@ extern "C" int tgm_views_trap(void *client, uint32_t index, uint32_t id, uint32_
 	if (!c)
 		return 0;
 	int refused = 0;
-	bool held = false, released = false;
+	bool held = false;
+	bool released = false;
 	tgm_coh_lock(c);
 	tgm_tiled *t = __atomic_load_n(tgm_coh_tiled(c), __ATOMIC_ACQUIRE);
 	if (t && t->tiled) {
-		const bool wasHeld = t->locks;
+		const bool wasHeld = t->locks != 0u;
 		dropDead(c, *t, released);
-		if (index == kLock)
+		if (index == kLock) {
 			refused = lock(c, *t, client, id, options, held);
-		else
+		} else {
 			unlock(c, *t, client, id, options, released);
+		}
 		released = released && wasHeld;
-		if (held)
+		if (held) {
 			tgm_coh_hold(
 				c);  // (the entry lock, then the registry's: the order the decision takes them in)
+		}
 	}
 	tgm_coh_unlock(c);
 	if (released)
@@ -268,7 +275,7 @@ extern "C" int tegra_gm20b_surface_rows(uint64_t pa, void **rows, void **memory,
 		return 0;
 	int got = 0;
 	tgm_coh_lock(c);
-	tgm_tiled *t = __atomic_load_n(tgm_coh_tiled(c), __ATOMIC_ACQUIRE);
+	const tgm_tiled *t = __atomic_load_n(tgm_coh_tiled(c), __ATOMIC_ACQUIRE);
 	if (t && t->tiled) {
 		tgm_relayout_pages pages;
 		tgm_scratch *scratch =

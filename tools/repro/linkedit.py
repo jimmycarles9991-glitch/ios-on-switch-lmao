@@ -14,16 +14,17 @@ Prints the UUIDs and every renamed symbol (old -> new) per address.
 
 import argparse
 import collections
-import struct
 import sys
 import uuid
 from collections.abc import Collection
 from pathlib import Path
 
-LC_SEGMENT_64, LC_SYMTAB, LC_DYSYMTAB, LC_UUID = 0x19, 0x2, 0xB, 0x1B
+from tools.common import macho
+
 # Commands whose payload is offsets and sizes into __LINKEDIT (function starts, data in code, code signature, split
 # info, dyld info, chained fixups, exports trie).
 LINKEDIT_DATA = {0x1D, 0x1E, 0x22, 0x80000022, 0x26, 0x29, 0x2B, 0x2E, 0x80000033, 0x80000034}
+MASKED = {macho.LC_SYMTAB, macho.LC_DYSYMTAB, macho.LC_UUID, *LINKEDIT_DATA}
 
 SymbolKey = tuple[int, int, int, int]
 Symbol = tuple[SymbolKey, str]
@@ -32,40 +33,27 @@ Findings = tuple[list[str], list[str]]
 
 
 def parse(data: bytes) -> dict:
-    magic, _, _, _, ncmds, sizeofcmds = struct.unpack_from('<6I', data)
-    if magic != 0xFEEDFACF:
-        raise SystemExit('not a 64-bit Mach-O')
-    at, segments, symtab, image_uuid, masked = 32, [], None, None, []
-    for _ in range(ncmds):
-        cmd, size = struct.unpack_from('<II', data, at)
-        if cmd == LC_SEGMENT_64:
-            name = data[at + 8 : at + 24].rstrip(b'\0').decode()
-            _, _, fileoff, filesize = struct.unpack_from('<4Q', data, at + 24)
-            segments.append((name, fileoff, filesize))
-            if name == '__LINKEDIT':
-                masked.append((at, at + size))
-        elif cmd == LC_SYMTAB:
-            symtab = struct.unpack_from('<4I', data, at + 8)
-            masked.append((at, at + size))
-        elif cmd == LC_UUID:
-            image_uuid = data[at + 8 : at + 24]
-            masked.append((at, at + size))
-        elif cmd == LC_DYSYMTAB or cmd in LINKEDIT_DATA:
-            masked.append((at, at + size))
-        at += size
-    if at != 32 + sizeofcmds:
-        raise SystemExit('load command sizes do not add up')
-    return {'segments': segments, 'symtab': symtab, 'uuid': image_uuid, 'masked': masked}
+    try:
+        image = macho.macho(data, subtypes=None)
+    except ValueError as error:
+        raise SystemExit(f'not a 64-bit ARM64 Mach-O: {error}') from None
+    linkedit = {s['command_offset'] for s in image['segments'] if s['name'] == '__LINKEDIT'}
+    masked = [
+        (at, at + size)
+        for command, at, size in image['commands']
+        if command in MASKED or (command == macho.LC_SEGMENT_64 and at in linkedit)
+    ]
+    uuid_at = macho.uuid_offset(image)
+    return {
+        'image': image,
+        'segments': [(s['name'], s['fileoff'], s['filesize']) for s in image['segments']],
+        'uuid': data[uuid_at : uuid_at + 16] if uuid_at is not None else None,
+        'masked': masked,
+    }
 
 
-def symbols(data: bytes, symtab: tuple[int, int, int, int]) -> list[Symbol]:
-    symoff, nsyms, stroff, _ = symtab
-    out = []
-    for i in range(nsyms):
-        strx, kind, sect, desc, value = struct.unpack_from('<IBBHQ', data, symoff + 16 * i)
-        end = data.index(b'\0', stroff + strx)
-        out.append(((value, kind, sect, desc), data[stroff + strx : end].decode(errors='replace')))
-    return out
+def symbols(data: bytes, image: dict) -> list[Symbol]:
+    return [((s.value, s.type, s.sect, s.desc), s.name) for s in macho.symbols(data, image)]
 
 
 def uuid_spans(image_uuid: bytes) -> list[bytes]:
@@ -180,7 +168,7 @@ def compare(old: bytes, new: bytes, removed: Collection[str] = ()) -> Findings:
     if a['uuid'] != b['uuid']:
         report.append(f'LC_UUID {uuid.UUID(bytes=bytes(a["uuid"]))} -> {uuid.UUID(bytes=bytes(b["uuid"]))}')
     segment_report, failures = segment_differences(old, new, a, b)
-    old_symbols, new_symbols = symbols(old, a['symtab']), symbols(new, b['symtab'])
+    old_symbols, new_symbols = symbols(old, a['image']), symbols(new, b['image'])
     removed_report, removed_failures = drop_removed(old_symbols, new_symbols, removed)
     rename_report, rename_failures = renames(old_symbols, new_symbols)
     return report + segment_report + removed_report + rename_report, failures + removed_failures + rename_failures

@@ -1,0 +1,166 @@
+diff --git a/hw/arm/tegra2/apb/i2c/rt5639.c b/hw/arm/tegra2/apb/i2c/rt5639.c
+new file mode 100644
+index 0000000..97b0e30
+--- /dev/null
++++ b/hw/arm/tegra2/apb/i2c/rt5639.c
+@@ -0,0 +1,160 @@
++/*
++ * Realtek RT5639 audio codec register file (the Switch's, I2C1 0x1C).
++ *
++ *  This program is free software; you can redistribute it and/or modify it
++ *  under the terms of the GNU General Public License as published by the
++ *  Free Software Foundation; either version 2 of the License, or
++ *  (at your option) any later version.
++ *
++ *  This program is distributed in the hope that it will be useful, but WITHOUT
++ *  ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
++ *  FITNESS FOR A PARTICULAR PURPOSE. See the GNU General Public License
++ *  for more details.
++ *
++ *  You should have received a copy of the GNU General Public License along
++ *  with this program; if not, see <http://www.gnu.org/licenses/>.
++ */
++
++/* As Linux rt5640.c drives it: 8-bit register addresses, 16-bit big-endian values, the private registers through
++ * PRIV_INDEX/PRIV_DATA, the vendor IDs at 0xFD-0xFF and a soft reset through register 0. Only the register file: no
++ * audio path, and the jack and microphone detection read as nothing plugged in. */
++
++#include "qemu/osdep.h"
++#include "qemu/module.h"
++#include "hw/i2c/i2c.h"
++#include "migration/vmstate.h"
++#include "qom/object.h"
++
++#define TYPE_RT5639 "rt5639"
++OBJECT_DECLARE_SIMPLE_TYPE(RT5639State, RT5639)
++
++#define RT5639_RESET       0x00
++#define RT5639_PRIV_INDEX  0x6a
++#define RT5639_PRIV_DATA   0x6c
++#define RT5639_VENDOR_ID   0xfd
++#define RT5639_VENDOR_ID1  0xfe
++#define RT5639_VENDOR_ID2  0xff
++
++struct RT5639State {
++    I2CSlave parent_obj;
++    uint16_t regs[256];
++    uint16_t priv[256];
++    uint8_t reg, bytes;
++    uint16_t value;
++};
++
++static void rt5639_defaults(RT5639State *s)
++{
++    memset(s->regs, 0, sizeof(s->regs));
++    memset(s->priv, 0, sizeof(s->priv));
++    s->regs[RT5639_VENDOR_ID] = 0x0000;
++    s->regs[RT5639_VENDOR_ID1] = 0x10ec;
++    s->regs[RT5639_VENDOR_ID2] = 0x6231;
++}
++
++static uint16_t rt5639_read(RT5639State *s, uint8_t reg)
++{
++    if (reg == RT5639_PRIV_DATA) {
++        return s->priv[s->regs[RT5639_PRIV_INDEX] & 0xff];
++    }
++    return s->regs[reg];
++}
++
++static void rt5639_write(RT5639State *s, uint8_t reg, uint16_t value)
++{
++    switch (reg) {
++    case RT5639_RESET:
++        rt5639_defaults(s);
++        return;
++    case RT5639_VENDOR_ID:
++    case RT5639_VENDOR_ID1:
++    case RT5639_VENDOR_ID2:
++        return;
++    case RT5639_PRIV_DATA:
++        s->priv[s->regs[RT5639_PRIV_INDEX] & 0xff] = value;
++        return;
++    default:
++        s->regs[reg] = value;
++        return;
++    }
++}
++
++static int rt5639_send(I2CSlave *i2c, uint8_t data)
++{
++    RT5639State *s = RT5639(i2c);
++
++    if (s->bytes == 0) {
++        s->reg = data;
++    } else if (s->bytes == 1) {
++        s->value = data << 8;
++    } else if (s->bytes == 2) {
++        rt5639_write(s, s->reg, s->value | data);
++    }
++    s->bytes++;
++    return 0;
++}
++
++static uint8_t rt5639_recv(I2CSlave *i2c)
++{
++    RT5639State *s = RT5639(i2c);
++    uint16_t value = rt5639_read(s, s->reg);
++
++    return (s->bytes++ & 1) ? value & 0xff : value >> 8;
++}
++
++static int rt5639_event(I2CSlave *i2c, enum i2c_event event)
++{
++    RT5639State *s = RT5639(i2c);
++
++    s->bytes = 0;
++    return 0;
++}
++
++static void rt5639_reset(DeviceState *dev)
++{
++    RT5639State *s = RT5639(dev);
++
++    s->reg = s->bytes = 0;
++    rt5639_defaults(s);
++}
++
++static const VMStateDescription vmstate_rt5639 = {
++    .name = TYPE_RT5639,
++    .version_id = 1,
++    .minimum_version_id = 1,
++    .fields = (const VMStateField[]) {
++        VMSTATE_I2C_SLAVE(parent_obj, RT5639State),
++        VMSTATE_UINT16_ARRAY(regs, RT5639State, 256),
++        VMSTATE_UINT16_ARRAY(priv, RT5639State, 256),
++        VMSTATE_UINT8(reg, RT5639State),
++        VMSTATE_UINT8(bytes, RT5639State),
++        VMSTATE_UINT16(value, RT5639State),
++        VMSTATE_END_OF_LIST()
++    }
++};
++
++static void rt5639_class_init(ObjectClass *klass, void *data)
++{
++    DeviceClass *dc = DEVICE_CLASS(klass);
++    I2CSlaveClass *sc = I2C_SLAVE_CLASS(klass);
++
++    device_class_set_legacy_reset(dc, rt5639_reset);
++    dc->vmsd = &vmstate_rt5639;
++    sc->send = rt5639_send;
++    sc->recv = rt5639_recv;
++    sc->event = rt5639_event;
++}
++
++static const TypeInfo rt5639_info = {
++    .name          = TYPE_RT5639,
++    .parent        = TYPE_I2C_SLAVE,
++    .instance_size = sizeof(RT5639State),
++    .class_init    = rt5639_class_init,
++};
++
++static void rt5639_register_types(void)
++{
++    type_register_static(&rt5639_info);
++}
++
++type_init(rt5639_register_types)

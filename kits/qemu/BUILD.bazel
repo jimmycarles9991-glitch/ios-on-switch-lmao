@@ -84,5 +84,6 @@ kernel_driver(
     abi = ["IOMobileFramebufferLegacy"],
     hdr_deps = [
         "drivers/NativeMobileDisplay",
+        "kits/SwitchDT",
     ],
 )

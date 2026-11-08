@@ -11,6 +11,7 @@
 #include "nvk_event.h"
 #include "nvk_mme.h"
 #include "nvk_physical_device.h"
+#include "nvk_tiled_cache.h"
 #include "nvkmd/nvkmd.h"
 
 #include "vk_common_entrypoints.h"
@@ -301,6 +302,7 @@ emit_zero_queries(struct nvk_cmd_buffer *cmd, struct nvk_query_pool *pool,
             .structure_size = STRUCTURE_SIZE_ONE_WORD,
          });
       }
+      nvk_cmd_flush_tiled_cache(cmd);
       break;
    }
    default:
@@ -375,6 +377,7 @@ nvk_CmdResetQueryPool(VkCommandBuffer commandBuffer,
             .structure_size = STRUCTURE_SIZE_ONE_WORD,
          });
       }
+      nvk_cmd_flush_tiled_cache(cmd);
    }
 
    /* Wait for the above writes to complete.  This prevents WaW hazards on any
@@ -422,6 +425,7 @@ nvk_CmdWriteTimestamp2(VkCommandBuffer commandBuffer,
          .pipeline_location = vk_stage_flags_to_nv9097_pipeline_location(stage),
          .structure_size = STRUCTURE_SIZE_FOUR_WORDS,
       });
+      nvk_cmd_flush_tiled_cache(cmd);
    } else if (subc == SUBC_NV90C0) {
       struct nv_push *p = nvk_cmd_buffer_push(cmd, 7);
 
@@ -850,6 +854,7 @@ nvk_CmdEndQueryIndexedEXT(VkCommandBuffer commandBuffer,
       .pipeline_location = PIPELINE_LOCATION_ALL,
       .structure_size = STRUCTURE_SIZE_ONE_WORD,
    });
+   nvk_cmd_flush_tiled_cache(cmd);
 
    /* From the Vulkan spec:
     *

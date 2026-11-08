@@ -30,13 +30,6 @@ def tic_kind(tic: tuple[str, list[int]], rts: dict[str, int]) -> tuple[str, int 
     return ('tic?', f'{name}:{width}x{height}')
 
 
-DUMMY_TSC = [
-    0x26092,
-    0x291,
-    0x40000,
-]  # MTLSamplerDescriptor's defaults through m2v + NVK (nearest, clamp, not mipmapped)
-
-
 def tsc_kind(t: list[int]) -> tuple[str, int | str]:
     # probe.mm tags fragment sampler slot s with max LOD 1 + s/2 under a nearest mip filter, linear filters when s&1 and
     # a repeating U when s&2. m2v hands Vulkan the level a nearest mip filter reads at the bound (metal/sampler.rs
@@ -87,8 +80,8 @@ def layout(p: dict) -> tuple[list[tuple], list[str]]:
             s = r['tsc'].get(tsc)
             tk = tic_kind(t, rts) if t else (None if not tic else ('tic?', tic))
             sk = tsc_kind(s) if s else ('tsc?', tsc)
-            if sk[0] == 'tsc?' and tsc == 0 and s and s[:3] == DUMMY_TSC:
-                sk = None  # index 0: the probe's warm-up sampler, never bound in a probe: the handle names no sampler
+            if tsc == 0:
+                sk = None  # NVK's reserved sampler (nvk_device.c): the handle names no sampler
             entries.append((o * 4, 'handle', tk, sk, w))
             if tk and tk[0].endswith('?'):
                 problems.append(f'unidentified handle at {o * 4}: {w:x}')

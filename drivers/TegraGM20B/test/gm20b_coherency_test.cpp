@@ -37,10 +37,14 @@ extern "C" int proc_selfpid(void)
 	return 1;
 }
 
+std::set<uint64_t> gCpuLines;
+
 extern "C" void tgm_cpu_clean_pages(const uint64_t *pas, uint32_t npages)
 {
 	std::lock_guard<std::mutex> hold(gCleanLock);
 	cleanCalls().emplace_back(pas, pas + npages);
+	for (uint32_t i = 0; i < npages; i++)
+		gCpuLines.erase(pas[i]);
 }
 
 FakeGpu gGpu;
@@ -105,7 +109,14 @@ extern "C" int tgm_relayout(const struct tgm_relayout_pages *surface,
 			    uint32_t bytes_per_row, int op,
 			    const struct tgm_relayout_writer *writers, uint32_t nwriters)
 {
-	gMoves.push_back({op, std::vector<tgm_relayout_writer>(writers, writers + nwriters)});
+	bool rowsClean = true;
+	{
+		std::lock_guard<std::mutex> hold(gCleanLock);
+		for (uint32_t i = 0; i < rows->npages; i++)
+			rowsClean = rowsClean && !gCpuLines.count(rows->pas[i]);
+	}
+	gMoves.push_back(
+		{op, std::vector<tgm_relayout_writer>(writers, writers + nwriters), rowsClean});
 	if (gMoveFails)
 		return -5;
 	std::vector<uint8_t> s = gather(*surface), r = gather(*rows);
@@ -148,8 +159,11 @@ extern "C" struct tgm_scratch *tgm_scratch_get(uint64_t bytes, int,
 		return nullptr;
 	static uint64_t next = 0x200000000ull;
 	auto *s = new tgm_scratch;
-	for (uint64_t at = 0; at < bytes; at += 4096, next += 4096)
+	std::lock_guard<std::mutex> hold(gCleanLock);
+	for (uint64_t at = 0; at < bytes; at += 4096, next += 4096) {
 		s->pas.push_back(next);
+		gCpuLines.insert(next);
+	}
 	*pages = {s->pas.data(), uint32_t(s->pas.size())};
 	return s;
 }
@@ -498,6 +512,19 @@ TEST_F(Coherency, TilingFollowsTheSurfacesWritersOnTheGpu)
 	EXPECT_EQ(gMoves[0].writers[0].seqno, 12u);
 	EXPECT_TRUE(gGpu.waits.empty());  // ordered on the GPU, no CPU wait
 	tgm_coherency_put(c);
+}
+
+TEST_F(Coherency, TilingMovesStartOnAScratchWithNoCpuLines)
+{
+	const auto p = pages(0x85300000, 5);
+	tgm_coh *first = add(p[0], 34, p.data(), 5, 1);
+	ASSERT_EQ(tgm_coherency_layout(first, kW, kH, kBpp, kRow, 1), 1);
+	tgm_coherency_put(first);
+	ASSERT_EQ(gMoves.size(), 2u);
+	EXPECT_EQ(gMoves[0].op, TGM_RELAYOUT_TILE_IN_PLACE);
+	EXPECT_TRUE(gMoves[0].rowsClean);
+	EXPECT_EQ(gMoves[1].op, TGM_RELAYOUT_UNTILE_IN_PLACE);
+	EXPECT_TRUE(gMoves[1].rowsClean);
 }
 
 TEST_F(Coherency, PitchForGoodUnlessTheFirstAskerWritesItAlone)

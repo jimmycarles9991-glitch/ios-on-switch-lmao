@@ -65,17 +65,22 @@
 
 /* SwitchBrightness (SwitchBacklight.cpp): false from a display-off request until the panel is lit again; a plain read.
  * This weak default (a kernel without the backlight) has the panel lit. */
+/* NOLINTNEXTLINE(misc-use-internal-linkage): the weak default SwitchBrightness overrides */
 __attribute__((weak)) _Bool switch_display_is_on(void)
 {
-    return 1;
+    return true;
 }
 
 extern int vsnprintf(char *, size_t, const char *, va_list);
+// NOLINTNEXTLINE(readability-redundant-declaration): not every kernel configuration's headers declare it
 extern int snprintf(char *, size_t, const char *, ...);
+
 /* osfmk/kern/clock.c: lock-free (a panic may hold the clock lock) and in RELEASE, which has no DTrace. */
 extern void switch_clock_calendar_nowait(clock_sec_t *secs, clock_nsec_t *nanosecs);
 extern uint32_t crc32(uint32_t crc, const void *buf, size_t size);
+// NOLINTNEXTLINE(readability-redundant-declaration): not every kernel configuration's headers declare it
 extern uint64_t mach_absolute_time(void);
+
 extern boolean_t switch_ram_reserved(ppnum_t pnum);
 extern int get_system_inshutdown(void);
 extern unsigned char iso_font[256 * 16];
@@ -204,25 +209,34 @@ static void msgbuf_tail(uint32_t limit, void (*out)(const char *, size_t))
     const struct msgbuf *mb = msgbufp;
     if (!mb || mb->msg_magic != MSG_MAGIC || mb->msg_size <= 0 || mb->msg_size > MAX_MSG_BSIZE || !mb->msg_bufc)
         return;
-    const uint32_t size = (uint32_t)mb->msg_size, x = (uint32_t)mb->msg_bufx % size;
+    const uint32_t size = (uint32_t)mb->msg_size;
+    const uint32_t x = (uint32_t)mb->msg_bufx % size;
     const uint32_t n = limit < size ? limit : size;
-    uint32_t at = (x + size - n) % size, left = n;
+    uint32_t at = (x + size - n) % size;
+    uint32_t left = n;
     /* Start after a partial first line: the window starts mid-line, or it is the whole ring and the ring wrapped. */
-    const char before = at == x ? (mb->msg_bufc[x] ? 'x' : 0) : mb->msg_bufc[(at + size - 1) % size];
-    if (before && before != '\n')
+    char before = 0;
+    if (at != x) {
+        before = mb->msg_bufc[(at + size - 1) % size];
+    } else if (mb->msg_bufc[x]) {
+        before = 'x';
+    }
+    if (before && before != '\n') {
         while (left && mb->msg_bufc[at] != '\n') {
             at = (at + 1) % size;
             --left;
         }
+    }
     while (left) {
         const uint32_t run = (size - at < left) ? size - at : left;
         uint32_t from = at;
-        for (uint32_t i = at; i < at + run; ++i) /* an unwrapped ring is NUL past bufx */
+        for (uint32_t i = at; i < at + run; ++i) { /* an unwrapped ring is NUL past bufx */
             if (!mb->msg_bufc[i]) {
                 if (i > from)
                     out(mb->msg_bufc + from, i - from);
                 from = i + 1;
             }
+        }
         if (at + run > from)
             out(mb->msg_bufc + from, at + run - from);
         at = (at + run) % size;
@@ -240,7 +254,8 @@ static int append_xnu_log(const volatile uint8_t *base, uint32_t bytes)
                                   {h->eph_other_log_offset, h->eph_other_log_len}};
     puts_("\n--- XNU panic log ---\n");
     for (int i = 0; i < 2; ++i) {
-        const uint32_t offset = parts[i][0], length = parts[i][1];
+        const uint32_t offset = parts[i][0];
+        const uint32_t length = parts[i][1];
         if (!offset || offset >= bytes || length > bytes - offset)
             continue;
         for (uint32_t j = 0; j < length && text_at < TEXT_MAX; ++j) {
@@ -263,7 +278,8 @@ static void keep_stackshot(const volatile uint8_t *base, uint32_t bytes)
     drain();
     if (h->eph_magic != EMBEDDED_PANIC_MAGIC)
         return;
-    const uint32_t offset = h->eph_stackshot_offset, length = h->eph_stackshot_len;
+    const uint32_t offset = h->eph_stackshot_offset;
+    const uint32_t length = h->eph_stackshot_len;
     const uint64_t flags = h->eph_panic_flags;
     if (!(flags & EMBEDDED_PANIC_HEADER_FLAG_STACKSHOT_SUCCEEDED) || !offset || !length || offset >= bytes ||
         length > bytes - offset) {
@@ -304,7 +320,8 @@ static void seal(uint32_t phase)
     r->phase = phase;
     r->blocks = (text_at + BLOCK_BYTES - 1) / BLOCK_BYTES;
     for (uint32_t b = 0; b < r->blocks; ++b) {
-        const uint32_t at = b * BLOCK_BYTES, n = text_at - at < BLOCK_BYTES ? text_at - at : BLOCK_BYTES;
+        const uint32_t at = b * BLOCK_BYTES;
+        const uint32_t n = text_at - at < BLOCK_BYTES ? text_at - at : BLOCK_BYTES;
         r->block_crc[b] = crc_of(c->text + at, n);
     }
     r->magic = RECORD_MAGIC;
@@ -315,11 +332,15 @@ static void seal(uint32_t phase)
 static void format_time(char *out, size_t bytes, uint64_t secs)
 {
     /* Civil date of a day count (H. Hinnant's days_from_civil inverse). */
-    const int64_t z = (int64_t)(secs / 86400) + 719468, era = z / 146097;
-    const uint64_t doe = (uint64_t)(z - era * 146097), yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
-    const uint64_t doy = doe - (365 * yoe + yoe / 4 - yoe / 100), mp = (5 * doy + 2) / 153;
-    const uint64_t d = doy - (153 * mp + 2) / 5 + 1, m = mp < 10 ? mp + 3 : mp - 9,
-                   y = yoe + (uint64_t)era * 400 + (m <= 2);
+    const int64_t z = (int64_t)(secs / 86400) + 719468;
+    const int64_t era = z / 146097;
+    const uint64_t doe = (uint64_t)(z - era * 146097);
+    const uint64_t yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    const uint64_t doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    const uint64_t mp = (5 * doy + 2) / 153;
+    const uint64_t d = doy - (153 * mp + 2) / 5 + 1;
+    const uint64_t m = mp < 10 ? mp + 3 : mp - 9;
+    const uint64_t y = yoe + (uint64_t)era * 400 + (m <= 2);
     const uint64_t s = secs % 86400;
     snprintf(out, bytes, "%04llu-%02llu-%02llu-%02llu%02llu%02llu", (unsigned long long)y, (unsigned long long)m,
              (unsigned long long)d, (unsigned long long)(s / 3600), (unsigned long long)(s / 60 % 60),
@@ -337,10 +358,11 @@ static void glyph(unsigned col, unsigned row, unsigned char ch, uint32_t color)
 {
     if (ch < 32 || ch > 126)
         ch = '?';
-    const unsigned char *rows = iso_font + ch * 16u;
-    for (unsigned y = 0; y < 16; ++y)
+    const unsigned char *rows = iso_font + (size_t)ch * 16u;
+    for (unsigned y = 0; y < 16; ++y) {
         for (unsigned x = 0; x < 8; ++x)
-            switch_diag_pixel(screen, col * 8 + x, row * 16 + y, (rows[y] >> x) & 1 ? color : kBlack);
+            switch_diag_pixel(screen, col * 8 + x, row * 16 + y, ((unsigned)rows[y] >> x) & 1u ? color : kBlack);
+    }
 }
 
 static void clear_rows(unsigned first, unsigned last)
@@ -424,29 +446,31 @@ static int watchdog_panic; /* the panic string is a watchdog timeout (switch_pan
 
 static int starts_with(const char *s, const char *prefix)
 {
-    while (*prefix)
+    while (*prefix) {
         if (*s++ != *prefix++)
             return 0;
+    }
     return 1;
 }
 
 static void draw_status(void)
 {
     char line[COLS + 1];
-    if (save_on && region && reboot_s && watchdog_panic && !reboot_arg)
+    if (save_on && region && reboot_s && watchdog_panic && !reboot_arg) {
         snprintf(line, sizeof(line),
                  "Watchdog panic: saved in RAM. Warm reset %us after the panic; iPadOS then writes "
                  "/private/var/Switch/panic-*.log and .kcdata (the stackshot).",
                  reboot_s);
-    else if (save_on && region && reboot_s)
+    } else if (save_on && region && reboot_s) {
         snprintf(line, sizeof(line),
                  "Saved in RAM. Warm reset %us after the panic: hekate writes SD:/L4T_panic.txt, iPadOS "
                  "/private/var/Switch/panic-*.log.",
                  reboot_s);
-    else if (save_on && region)
+    } else if (save_on && region) {
         snprintf(line, sizeof(line), "Saved in RAM (no reset). Holding POWER loses it.");
-    else
+    } else {
         snprintf(line, sizeof(line), "Not saved (%s). Hold POWER to turn off.", save_off_reason);
+    }
     clear_rows(ROWS - 1, ROWS);
     drawz(ROWS - 1, ROWS, line, save_on && region ? SWITCH_GREEN : SWITCH_RED);
     drain();
@@ -461,8 +485,8 @@ static void draw_screen(void)
     char title[COLS + 1];
     uint64_t ns = 0;
     absolutetime_to_nanoseconds(panic_at, &ns);
-    snprintf(title, sizeof(title), "XNU PANIC   cpu %u   %llu.%03llu s after boot", panic_cpu,
-             (unsigned long long)(ns / 1000000000ull), (unsigned long long)(ns / 1000000ull % 1000));
+    snprintf(title, sizeof(title), "XNU PANIC   cpu %u   %llu.%03llu s after boot", panic_cpu, ns / 1000000000ULL,
+             ns / 1000000ULL % 1000);
     drawz(0, 1, title, SWITCH_RED);
     drawz(1, LOG_ROW - 1, panic_line, SWITCH_WHITE);
     tail_used = 0;
@@ -521,11 +545,12 @@ void switch_panic_save_init(void)
     if (pmc)
         last_reset_status = pmc[PMC_RST_STATUS / 4];
     save_on = 1;
-    for (uint64_t pa = REGION_PA; pa < REGION_PA + REGION_BYTES; pa += PAGE_SIZE)
+    for (uint64_t pa = REGION_PA; pa < REGION_PA + REGION_BYTES; pa += PAGE_SIZE) {
         if (!switch_ram_reserved((ppnum_t)atop_64(pa))) {
             save_off_reason = "0xb0000000 is not reserved RAM";
             return;
         }
+    }
     /* Always: a watchdog panic resets even with the panic screen held. */
     tmr = (volatile uint32_t *)ml_io_map((vm_offset_t)TMR_PA, 4096);
     region = (volatile uint8_t *)ml_io_map_wcomb((vm_offset_t)REGION_PA, REGION_BYTES);
@@ -548,7 +573,8 @@ void switch_panic_save_init(void)
         return;
     pending = 1;
     for (uint32_t b = 0; b < r->blocks; ++b) {
-        const uint32_t at = b * BLOCK_BYTES, n = r->text_bytes - at < BLOCK_BYTES ? r->text_bytes - at : BLOCK_BYTES;
+        const uint32_t at = b * BLOCK_BYTES;
+        const uint32_t n = r->text_bytes - at < BLOCK_BYTES ? r->text_bytes - at : BLOCK_BYTES;
         if (r->block_crc[b] != crc_of(c->text + at, n))
             ++pending_damaged;
     }
@@ -576,6 +602,7 @@ int switch_panic_begin(const char *format, va_list *args, unsigned long caller, 
         return screen_taken;
     panic_at = mach_absolute_time();
     panic_cpu = (unsigned)cpu_number();
+    /* NOLINTNEXTLINE(cppcoreguidelines-init-variables): va_copy initializes it */
     va_list copy;
     va_copy(copy, *args);
     const int length = vsnprintf(panic_line, sizeof(panic_line), format, copy);
@@ -598,14 +625,14 @@ int switch_panic_begin(const char *format, va_list *args, unsigned long caller, 
         switch_clock_calendar_nowait(&secs, &nsecs);
         uint64_t ns = 0;
         absolutetime_to_nanoseconds(panic_at, &ns);
-        char when[32], head[256];
+        char when[32];
+        char head[256];
         format_time(when, sizeof(when), secs);
         text_at = 0;
         shot()->magic = 0; /* the last panic's, should it still be here */
         snprintf(head, sizeof(head),
                  "SwitchPanic record 1: %s UTC, %llu.%03llu s after boot, cpu %u, caller 0x%lx\npanic: ", when,
-                 (unsigned long long)(ns / 1000000000ull), (unsigned long long)(ns / 1000000ull % 1000), panic_cpu,
-                 caller);
+                 ns / 1000000000ULL, ns / 1000000ULL % 1000, panic_cpu, caller);
         puts_(head);
         puts_(panic_line);
         puts_("\n\n--- kernel log, last 64 KiB (msgbuf) ---\n");
@@ -668,7 +695,7 @@ void switch_panic_logged(void)
     if (!save_on || !region || !reboot_s)
         return;
     uint64_t deadline = 0;
-    nanoseconds_to_absolutetime((uint64_t)reboot_s * 1000000000ull, &deadline);
+    nanoseconds_to_absolutetime((uint64_t)reboot_s * 1000000000ULL, &deadline);
     deadline += panic_at;
     while (mach_absolute_time() < deadline)
         __asm__ volatile("isb" ::: "memory");
@@ -689,17 +716,19 @@ static const char *reset_report(char *path, size_t path_bytes)
     const enum switch_reset_cause cause = switch_reset_cause(last_reset_status);
     const enum switch_thermal_sensor thermal = (enum switch_thermal_sensor)thermal_sensor;
     char thermal_text[96] = "";
-    if (thermal != SWITCH_THERMAL_NONE)
+    if (thermal != SWITCH_THERMAL_NONE) {
         snprintf(thermal_text, sizeof(thermal_text), "; thermal shutdown %s %d.%d C",
                  switch_thermal_sensor_name(thermal), thermal_millic / 1000, thermal_millic % 1000 / 100);
+    }
     const int report = switch_reset_files_report(cause, pending, thermal);
-    if (report)
+    if (report) {
         os_log_error(OS_LOG_DEFAULT, "SwitchReset: last boot ended by %s (PMC_RST_STATUS %#x)%s%s",
                      switch_reset_cause_name(cause), last_reset_status, thermal_text,
                      pending ? "; its panic is filed" : "");
-    else
+    } else {
         os_log(OS_LOG_DEFAULT, "SwitchReset: last boot ended by %s (PMC_RST_STATUS %#x)%s%s",
                switch_reset_cause_name(cause), last_reset_status, thermal_text, pending ? "; its panic is filed" : "");
+    }
     if (!report)
         return NULL;
     char when[32];
@@ -708,17 +737,19 @@ static const char *reset_report(char *path, size_t path_bytes)
     clock_get_calendar_microtime(&secs, &usecs);
     format_time(when, sizeof(when), (uint64_t)secs);
     snprintf(path, path_bytes, "/private/var/Switch/reset-%s.log", when);
+    const char *story = "The SoC watchdog reset a hung console before any panic was recorded.";
+    if (thermal != SWITCH_THERMAL_NONE) {
+        story = "SwitchThermal shut the console down in order: it crossed its software thermal shutdown threshold "
+                "(SwitchThermalLimits.h).";
+    } else if (cause == SWITCH_RESET_THERMTRIP) {
+        story = "SOC_THERM's hardware thermal trip reset the SoC: the software thermal shutdown below it did not get "
+                "there first.";
+    }
     snprintf(report_text, sizeof(report_text),
              "Switch reset report, filed %s UTC at the next boot\n"
              "The last boot ended by: %s (PMC_RST_STATUS %#x)%s\n"
              "%s\n",
-             when, switch_reset_cause_name(cause), last_reset_status, thermal_text,
-             thermal != SWITCH_THERMAL_NONE ? "SwitchThermal shut the console down in order: it crossed its software "
-                                              "thermal shutdown threshold (SwitchThermalLimits.h)."
-             : cause == SWITCH_RESET_THERMTRIP
-                 ? "SOC_THERM's hardware thermal trip reset the SoC: the software thermal "
-                   "shutdown below it did not get there first."
-                 : "The SoC watchdog reset a hung console before any panic was recorded.");
+             when, switch_reset_cause_name(cause), last_reset_status, thermal_text, story);
     report_pending = 1;
     return report_text;
 }

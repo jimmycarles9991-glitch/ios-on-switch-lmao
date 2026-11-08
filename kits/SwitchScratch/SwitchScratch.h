@@ -13,8 +13,8 @@
 
 class IOBufferMemoryDescriptor;
 
-constexpr uint64_t kSwitchScratchIdleNs = 10ull * 1000 * 1000 * 1000;
-constexpr uint64_t kSwitchScratchKeepBytes = 32ull << 20;
+constexpr uint64_t kSwitchScratchIdleNs = 10ULL * 1000 * 1000 * 1000;
+constexpr uint64_t kSwitchScratchKeepBytes = 32ULL << 20;
 
 struct switch_scratch {
     IOBufferMemoryDescriptor *memory;

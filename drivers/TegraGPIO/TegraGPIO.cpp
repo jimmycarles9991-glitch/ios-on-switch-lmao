@@ -21,8 +21,7 @@
 #include <libkern/c++/OSSymbol.h>
 #include "TegraGPIO.h"
 #include "../ArmGIC/SwitchInterrupts.h"
-
-extern "C" vm_offset_t ml_io_map(vm_offset_t phys_addr, vm_size_t size);
+#include "../../kits/SwitchMMIO/SwitchMMIOKernel.h"
 
 namespace {
 constexpr vm_offset_t kGpioPA = 0x6000D000, kPinmuxPA = 0x70003000, kCarPA = 0x60006000;
@@ -129,12 +128,14 @@ uint32_t lvlBits(uint8_t trigger)
 constexpr char kPortNames[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
 }
 
+// NOLINTNEXTLINE(misc-use-internal-linkage): OSDefineMetaClassAndStructors needs the class's external linkage (its kalloc type view)
 class TegraGPIO : public IOInterruptController {
+    // NOLINTNEXTLINE(misc-explicit-constructor): IOKit's structors macro declares the metaclass constructor
     OSDeclareDefaultStructors(TegraGPIO)
 
         volatile uint8_t *gpio = nullptr,
                          *pinmux = nullptr;
-    volatile uint32_t *car = nullptr;  // sleep resume only (mapped at start: resume runs with interrupts off)
+    volatile uint8_t *car = nullptr;  // sleep resume only (mapped at start: resume runs with interrupts off)
     IOWorkLoop *loop = nullptr;
     IOFilterInterruptEventSource *banks[kBanks] = {};
     IOLock *nubLock = nullptr;
@@ -154,12 +155,12 @@ class TegraGPIO : public IOInterruptController {
 
     uint32_t rd(uint32_t o) const
     {
-        return *(volatile uint32_t *)(gpio + o);
+        return switch_mmio_read32(gpio, o);
     }
 
     void wr(uint32_t o, uint32_t v)
     {
-        *(volatile uint32_t *)(gpio + o) = v;
+        switch_mmio_write32(gpio, o, v);
     }
 
     void maskWrite(unsigned pin, uint32_t reg, bool on)
@@ -204,7 +205,7 @@ public:
 
     bool latched(unsigned pin) const
     {
-        return rd(portReg(pin, INT_STA)) & rd(portReg(pin, INT_ENB)) & pinBit(pin);
+        return (rd(portReg(pin, INT_STA)) & rd(portReg(pin, INT_ENB)) & pinBit(pin)) != 0u;
     }
 
     void setDebounce(unsigned pin, unsigned ms);
@@ -223,16 +224,17 @@ bool TegraGPIO::start(IOService *provider)
 {
     if (!IOInterruptController::start(provider))
         return false;
-    gpio = reinterpret_cast<volatile uint8_t *>(ml_io_map(kGpioPA, 0x1000));
-    pinmux = reinterpret_cast<volatile uint8_t *>(ml_io_map(kPinmuxPA, 0x1000));
-    car = reinterpret_cast<volatile uint32_t *>(ml_io_map(kCarPA, 0x1000));
+    gpio = switch_mmio_map(kGpioPA, 0x1000);
+    pinmux = switch_mmio_map(kPinmuxPA, 0x1000);
+    car = switch_mmio_map(kCarPA, 0x1000);
     nubLock = IOLockAlloc();
     portLock = IOSimpleLockAlloc();
     vectors = IONewZero(IOInterruptVector, TEGRA_GPIO_COUNT);
     if (!gpio || !pinmux || !car || !nubLock || !portLock || !vectors)
         return false;
     for (unsigned i = 0; i < TEGRA_GPIO_COUNT; ++i) {
-        if (!(vectors[i].interruptLock = IOLockAlloc()))
+        vectors[i].interruptLock = IOLockAlloc();
+        if (!vectors[i].interruptLock)
             return false;
     }
 
@@ -256,6 +258,7 @@ bool TegraGPIO::start(IOService *provider)
     for (auto *bank : banks)
         bank->enable();
 
+    // NOLINTNEXTLINE(cppcoreguidelines-pro-type-const-cast): registerInterruptController takes a non-const OSSymbol
     getPlatform()->registerInterruptController(const_cast<OSSymbol *>(gControllerName), this);
     registerService();
     return true;
@@ -308,7 +311,8 @@ void TegraGPIO::serviceBank(unsigned bank)
             continue;
         wr(portReg(first, INT_CLR), pending);
         for (; pending; pending &= pending - 1) {
-            const IOInterruptVectorNumber number = (IOInterruptVectorNumber)(first + (unsigned)__builtin_ctz(pending));
+            const IOInterruptVectorNumber number =
+                static_cast<IOInterruptVectorNumber>(first + static_cast<unsigned>(__builtin_ctz(pending)));
             IOInterruptVector *vector = &vectors[number];
             vector->interruptActive = 1;
             OSMemoryBarrier();
@@ -334,7 +338,7 @@ int TegraGPIO::getVectorType(IOInterruptVectorNumber vectorNumber, IOInterruptVe
 
 void TegraGPIO::disableVectorHard(IOInterruptVectorNumber vectorNumber, IOInterruptVector *)
 {
-    maskWrite((unsigned)vectorNumber, MSK_INT_ENB, false);
+    maskWrite(static_cast<unsigned>(vectorNumber), MSK_INT_ENB, false);
 }
 
 // A level pin was hard-masked while its client ran; whether INT_STA keeps the level latched from before the device
@@ -342,7 +346,7 @@ void TegraGPIO::disableVectorHard(IOInterruptVectorNumber vectorNumber, IOInterr
 // released one does not fire a ghost. Edge pins are never cleared here (that could drop a real edge).
 void TegraGPIO::enableVector(IOInterruptVectorNumber vectorNumber, IOInterruptVector *)
 {
-    const unsigned pin = (unsigned)vectorNumber;
+    const unsigned pin = static_cast<unsigned>(vectorNumber);
     if (isLevel(triggers[pin]))
         wr(portReg(pin, INT_CLR), pinBit(pin));
     maskWrite(pin, MSK_INT_ENB, true);
@@ -354,8 +358,7 @@ void TegraGPIO::configurePin(unsigned pin, uint8_t trigger)
     for (const PinMux &mux : kPinMux) {
         if (mux.gpio != pin)
             continue;
-        volatile uint32_t *reg = reinterpret_cast<volatile uint32_t *>(pinmux + mux.offset);
-        *reg = (*reg & ~PULL_MASK) | mux.pull | TRISTATE | INPUT;
+        switch_mmio_rmw32(pinmux, mux.offset, PULL_MASK, mux.pull | TRISTATE | INPUT);
     }
     maskWrite(pin, MSK_INT_ENB, false);
     const IOInterruptState state = IOSimpleLockLockDisableInterrupt(portLock);
@@ -371,14 +374,18 @@ void TegraGPIO::configurePin(unsigned pin, uint8_t trigger)
 // An IOService whose interrupt 0 resolves to this controller's vector `pin`, attached under the controller.
 IOService *TegraGPIO::makeNub(unsigned pin)
 {
-    const int32_t vector = (int32_t)pin;  // IOInterruptVectorNumber, as resolveInterrupt reads the specifier
-    OSArray *controllers = OSArray::withObjects((const OSObject **)&gControllerName, 1);
-    OSData *specifier = OSData::withBytes(&vector, sizeof(vector));
-    OSArray *specifiers = specifier ? OSArray::withObjects((const OSObject **)&specifier, 1) : nullptr;
-    OSNumber *number = OSNumber::withNumber(pin, 32);
+    // IOInterruptVectorNumber, as resolveInterrupt reads the specifier
+    const int32_t vector = static_cast<int32_t>(pin);
+    const OSObject *controller = gControllerName;
+    const OSArray *controllers = OSArray::withObjects(&controller, 1);
+    const OSData *specifier = OSData::withBytes(&vector, sizeof(vector));
+    const OSObject *specifierObject = specifier;
+    const OSArray *specifiers = specifier ? OSArray::withObjects(&specifierObject, 1) : nullptr;
+    const OSNumber *number = OSNumber::withNumber(pin, 32);
     OSDictionary *properties = OSDictionary::withCapacity(3);
     IOService *nub = OSTypeAlloc(IOService);
-    bool ok = controllers && specifiers && number && properties && nub;
+    bool ok = (controllers != nullptr) && (specifiers != nullptr) && (number != nullptr) && (properties != nullptr) &&
+              (nub != nullptr);
     if (ok) {
         properties->setObject(gIOInterruptControllersKey, controllers);
         properties->setObject(gIOInterruptSpecifiersKey, specifiers);
@@ -389,10 +396,11 @@ IOService *TegraGPIO::makeNub(unsigned pin)
         const unsigned port = pin >> 3;
         const char letter = kPortNames[port < 26 ? port : port - 26];
         char name[16];
-        if (port < 26)
+        if (port < 26) {
             snprintf(name, sizeof(name), "gpio-P%c%u", letter, pin & 7);
-        else
+        } else {
             snprintf(name, sizeof(name), "gpio-P%c%c%u", letter, letter, pin & 7);
+        }
         nub->setName(name);
     }
     OSSafeReleaseNULL(controllers);
@@ -415,12 +423,12 @@ IOService *TegraGPIO::nubFor(unsigned pin, unsigned trigger)
             IOLog("TegraGPIO: GPIO %u is in use with trigger %u\n", pin, triggers[pin]);
             return nullptr;
         }
-        configurePin(pin, (uint8_t)trigger);
+        configurePin(pin, static_cast<uint8_t>(trigger));
     }
     if (!nub) {
         nub = makeNub(pin);
         if (nub) {
-            configurePin(pin, (uint8_t)trigger);
+            configurePin(pin, static_cast<uint8_t>(trigger));
             nubs[pin] = nub;
         } else {
             IOLog("TegraGPIO: nub for GPIO %u failed\n", pin);
@@ -433,7 +441,7 @@ IOService *TegraGPIO::nubFor(unsigned pin, unsigned trigger)
 void TegraGPIO::setDebounce(unsigned pin, unsigned ms)
 {
     if (!ms) {
-        debouncePins[pin >> 3] &= (uint8_t)~pinBit(pin);
+        debouncePins[pin >> 3] &= static_cast<uint8_t>(~pinBit(pin));
         maskWrite(pin, MSK_DBC_EN, false);
         return;
     }
@@ -441,10 +449,10 @@ void TegraGPIO::setDebounce(unsigned pin, unsigned ms)
         ms = 255;
     const IOInterruptState state = IOSimpleLockLockDisableInterrupt(portLock);
     if (debounce[pin >> 3] < ms) {
-        debounce[pin >> 3] = (uint8_t)ms;
+        debounce[pin >> 3] = static_cast<uint8_t>(ms);
         wr(portReg(pin, DBC_CNT), ms);
     }
-    debouncePins[pin >> 3] |= (uint8_t)pinBit(pin);
+    debouncePins[pin >> 3] |= static_cast<uint8_t>(pinBit(pin));
     IOSimpleLockUnlockEnableInterrupt(portLock, state);
     maskWrite(pin, MSK_DBC_EN, true);
 }
@@ -457,16 +465,17 @@ void TegraGPIO::suspend()
 {
     for (unsigned port = 0; port < kBanks * 4; ++port) {
         const unsigned pin = port * 8;
-        saved[port] = {(uint8_t)rd(portReg(pin, CNF)), (uint8_t)rd(portReg(pin, OE)), (uint8_t)rd(portReg(pin, OUT)),
-                       (uint8_t)rd(portReg(pin, INT_ENB)), rd(portReg(pin, INT_LVL))};
+        saved[port] = {static_cast<uint8_t>(rd(portReg(pin, CNF))), static_cast<uint8_t>(rd(portReg(pin, OE))),
+                       static_cast<uint8_t>(rd(portReg(pin, OUT))), static_cast<uint8_t>(rd(portReg(pin, INT_ENB))),
+                       rd(portReg(pin, INT_LVL))};
     }
 }
 
 void TegraGPIO::resume()
 {
-    car[kCarClkEnbLSet / 4] = kCarGpio;
-    car[kCarRstDevLClr / 4] = kCarGpio;
-    (void)car[kCarRstDevicesL / 4];
+    switch_mmio_write32(car, kCarClkEnbLSet, kCarGpio);
+    switch_mmio_write32(car, kCarRstDevLClr, kCarGpio);
+    (void)switch_mmio_read32(car, kCarRstDevicesL);
     for (unsigned port = 0; port < kBanks * 4; ++port) {
         const unsigned pin = port * 8;
         wr(portReg(pin, INT_ENB), 0);
@@ -503,7 +512,7 @@ void TegraGPIO::setOutput(unsigned pin, bool high)
 {
     for (const OutputMux &mux : kOutputMux) {
         if (mux.gpio == pin)
-            *reinterpret_cast<volatile uint32_t *>(pinmux + mux.offset) = mux.value;
+            switch_mmio_write32(pinmux, mux.offset, mux.value);
     }
     maskWrite(pin, MSK_OUT, high);
     maskWrite(pin, MSK_OE, true);
@@ -515,7 +524,8 @@ void TegraGPIO::setOutput(unsigned pin, bool high)
 int TegraGPIO::sample(unsigned pin, unsigned *config)
 {
     const uint32_t bit = pinBit(pin);
-    const bool cnf = rd(portReg(pin, CNF)) & bit, oe = rd(portReg(pin, OE)) & bit;
+    const bool cnf = (rd(portReg(pin, CNF)) & bit) != 0u;
+    const bool oe = (rd(portReg(pin, OE)) & bit) != 0u;
     if (config)
         *config = this->config(pin);
     maskWrite(pin, MSK_OE, false);
@@ -534,8 +544,10 @@ void TegraGPIO::describe(unsigned pin, char *buffer, size_t size) const
     const uint32_t bit = pinBit(pin);
     switch_interrupt_describe(32 + kBankSpi[pin >> 5], gic, sizeof(gic));
     snprintf(buffer, size, "GPIO %u: cnf %u oe %u in %u int_enb %u int_sta %u int_lvl %#x trigger %u, bank %u: %s", pin,
-             !!(rd(portReg(pin, CNF)) & bit), !!(rd(portReg(pin, OE)) & bit), !!(rd(portReg(pin, IN)) & bit),
-             !!(rd(portReg(pin, INT_ENB)) & bit), !!(rd(portReg(pin, INT_STA)) & bit),
+             static_cast<int>((rd(portReg(pin, CNF)) & bit) != 0), static_cast<int>((rd(portReg(pin, OE)) & bit) != 0),
+             static_cast<int>((rd(portReg(pin, IN)) & bit) != 0),
+             static_cast<int>((rd(portReg(pin, INT_ENB)) & bit) != 0),
+             static_cast<int>((rd(portReg(pin, INT_STA)) & bit) != 0),
              (rd(portReg(pin, INT_LVL)) >> (pin & 7)) & kLvlMask, triggers[pin], pin >> 5, gic);
 }
 
@@ -610,10 +622,11 @@ extern "C" void tegra_gpio_describe(unsigned gpio, char *buffer, size_t size)
 {
     if (!size)
         return;
-    if (gController && gpio < TEGRA_GPIO_COUNT)
+    if (gController && gpio < TEGRA_GPIO_COUNT) {
         gController->describe(gpio, buffer, size);
-    else
+    } else {
         snprintf(buffer, size, "GPIO %u: controller not started", gpio);
+    }
 }
 
 // The bank filter acknowledges a pending, enabled pin within microseconds, so one still latched after 50 ms never

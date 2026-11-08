@@ -24,7 +24,8 @@ inline uint64_t switchSdTrimWords(uint64_t first, uint64_t sectors, uint32_t auS
 {
     if (!auSectors)
         return 0;
-    const uint64_t firstAu = (first + auSectors - 1) / auSectors, endAu = (first + sectors) / auSectors;
+    const uint64_t firstAu = (first + auSectors - 1) / auSectors;
+    const uint64_t endAu = (first + sectors) / auSectors;
     return endAu > firstAu ? (endAu - firstAu + 63) / 64 : 0;
 }
 
@@ -43,13 +44,13 @@ inline void switchSdTrimInit(SwitchSdTrimMap *m, uint64_t *storage, uint64_t fir
 
 inline bool switchSdTrimTest(const SwitchSdTrimMap *m, uint64_t au)
 {
-    return m->bits[au / 64] >> (au % 64) & 1;
+    return (m->bits[au / 64] >> (au % 64) & 1) != 0u;
 }
 
 inline void switchSdTrimSet(SwitchSdTrimMap *m, uint64_t au, bool on)
 {
-    const uint64_t bit = 1ull << (au % 64);
-    if (on == !!(m->bits[au / 64] & bit))
+    const uint64_t bit = 1ULL << (au % 64);
+    if (on == ((m->bits[au / 64] & bit) != 0u))
         return;
     m->bits[au / 64] ^= bit;
     m->pending += on ? 1 : -1;
@@ -60,7 +61,8 @@ inline void switchSdTrimMark(SwitchSdTrimMap *m, uint64_t lba, uint64_t count)
 {
     if (!m->aus)
         return;
-    uint64_t au = (lba + m->auSectors - 1) / m->auSectors, end = (lba + count) / m->auSectors;
+    uint64_t au = (lba + m->auSectors - 1) / m->auSectors;
+    uint64_t end = (lba + count) / m->auSectors;
     au = au > m->firstAu ? au - m->firstAu : 0;
     end = end > m->firstAu ? end - m->firstAu : 0;
     for (end = end < m->aus ? end : m->aus; au < end; ++au)
@@ -72,7 +74,8 @@ inline void switchSdTrimClear(SwitchSdTrimMap *m, uint64_t lba, uint64_t count)
 {
     if (!m->pending || !count)
         return;
-    uint64_t au = lba / m->auSectors, end = (lba + count - 1) / m->auSectors + 1;
+    uint64_t au = lba / m->auSectors;
+    uint64_t end = (lba + count - 1) / m->auSectors + 1;
     au = au > m->firstAu ? au - m->firstAu : 0;
     end = end > m->firstAu ? end - m->firstAu : 0;
     for (end = end < m->aus ? end : m->aus; au < end; ++au)

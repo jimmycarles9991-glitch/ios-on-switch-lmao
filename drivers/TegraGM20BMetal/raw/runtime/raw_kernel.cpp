@@ -47,6 +47,13 @@ Kernel::~Kernel()
         IOServiceClose(conn_);
 }
 
+static std::string failed(const char *what, int kr)
+{
+    char line[64];
+    snprintf(line, sizeof line, "%s failed (0x%x)", what, unsigned(kr));
+    return line;
+}
+
 int Kernel::call(uint32_t method, const void *in, size_t inSize, void *out, size_t outSize)
 {
     size_t outBytes = outSize;
@@ -234,12 +241,12 @@ bool Kernel::import(void *addr, uint64_t bytes, Bo &bo, uint32_t kind, uint32_t 
     return bindImport(addr, bo, kind);
 }
 
-bool Kernel::importPages(void *addr, uint64_t bytes, Bo &bo, uint32_t surfaceId)
+bool Kernel::importPages(void *addr, uint64_t bytes, Bo &bo, uint32_t surfaceId, bool gpuReads)
 {
     const uint64_t page = info_.page_size;
     const uintptr_t base = uintptr_t(addr) & ~uintptr_t(page - 1);
     const uint64_t span = ((uintptr_t(addr) + bytes + page - 1) & ~uintptr_t(page - 1)) - base;
-    const bool gpuReads = surfaceId && !importsWritten_.load(std::memory_order_relaxed);
+    gpuReads = gpuReads || (surfaceId && !importsWritten_.load(std::memory_order_relaxed));
     TegraGM20BAbiBoImport in = {base, span, surfaceId, gpuReads ? uint32_t(TegraGM20BImportGpuReads) : 0};
     TegraGM20BAbiBoAllocReply r = {};
     bo = {};
@@ -288,6 +295,27 @@ bool Kernel::bindImport(void *addr, Bo &bo, uint32_t kind)
     return true;
 }
 
+uint64_t Kernel::reserveVa(uint64_t bytes)
+{
+    return allocVa(bytes, kVaGranule);
+}
+
+void Kernel::releaseVa(uint64_t va, uint64_t bytes)
+{
+    freeVa(va, bytes);
+}
+
+bool Kernel::bindImportAt(void *addr, Bo &bo, uint64_t va, uint32_t kind)
+{
+    if (!bind(va, bo.handle, bo.bytes, kind)) {
+        free(bo);
+        return false;
+    }
+    bo.va = va + (uintptr_t(addr) & (info_.page_size - 1));
+    bo.cpu = static_cast<uint8_t *>(addr);
+    return true;
+}
+
 void Kernel::free(Bo &bo)
 {
     if (bo.token && bo.cpu)
@@ -305,8 +333,8 @@ bool Kernel::channel(uint32_t engines, uint32_t &channel, const volatile uint32_
 {
     TegraGM20BAbiChannelCreate in = {engines, 0};
     TegraGM20BAbiChannelCreateReply r = {};
-    if (call(TegraGM20BMethodChannelCreate, &in, sizeof in, &r, sizeof r) != KERN_SUCCESS) {
-        err_ = "ChannelCreate failed";
+    if (const int kr = call(TegraGM20BMethodChannelCreate, &in, sizeof in, &r, sizeof r); kr != KERN_SUCCESS) {
+        err_ = failed("ChannelCreate", kr);
         return false;
     }
     uint64_t size = 0;
@@ -317,6 +345,8 @@ bool Kernel::channel(uint32_t engines, uint32_t &channel, const volatile uint32_
     }
     channel = r.channel;
     fence = reinterpret_cast<const volatile uint32_t *>(uintptr_t(fenceMap_) + r.fence_offset);
+    std::lock_guard<std::mutex> l(lostLock_);
+    opened_.fetch_add(1, std::memory_order_release);
     uint32_t reused = r.channel;
     lostChannel_.compare_exchange_strong(reused, 0, std::memory_order_relaxed);
     return true;
@@ -365,7 +395,10 @@ int Kernel::order(uint32_t channel, uint32_t flags, uint32_t seqno, uint32_t &wa
 {
     const TegraGM20BAbiOrder in = {channel, flags, seqno, 0};
     TegraGM20BAbiOrderReply r = {};
+    const uint32_t at = opened();
     const int kr = call(TegraGM20BMethodOrder, &in, sizeof in, &r, sizeof r);
+    if (kr == kIOReturnNotResponding)
+        markLost(channel, at);
     waits = kr == KERN_SUCCESS ? r.waits : 0;
     return kr;
 }
@@ -382,6 +415,7 @@ bool Kernel::exec(uint32_t channel, const TegraGM20BAbiPush *pushes, uint32_t co
     const size_t in = offsetof(TegraGM20BAbiExec, pushes) + count * sizeof pushes[0];
     TegraGM20BAbiExecReply r = {};
     const bool listed = surfaces && (info_.flags & TegraGM20BInfoExecSurfaces);
+    const uint32_t at = opened();
     for (;;) {
         if (listed) {
             size_t bytes = 0;
@@ -394,9 +428,9 @@ bool Kernel::exec(uint32_t channel, const TegraGM20BAbiPush *pushes, uint32_t co
             return true;
         }
         if (kr == kIOReturnNotResponding)
-            lostChannel_.store(channel, std::memory_order_relaxed);
+            markLost(channel, at);
         if (kr != kIOReturnBusy || !last) {
-            err_ = "Exec failed";
+            err_ = failed("Exec", kr);
             return false;
         }
         // GPFIFO full: block on the last submission's fence (interrupt-driven in the kext), never spin
@@ -405,12 +439,36 @@ bool Kernel::exec(uint32_t channel, const TegraGM20BAbiPush *pushes, uint32_t co
     }
 }
 
+// The kernel keeps a killed channel, and its cause, until ChannelDestroy (reopen), so GetStatus still answers for it here
+bool Kernel::status(uint32_t channel, TegraGM20BAbiStatus &st)
+{
+    const TegraGM20BAbiChannel in = {channel, 0};
+    st = {};
+    if (call(TegraGM20BMethodGetStatus, &in, sizeof in, &st, sizeof st) == KERN_SUCCESS)
+        return true;
+    st = {};
+    return false;
+}
+
+void Kernel::markLost(uint32_t channel, uint32_t opened)
+{
+    std::lock_guard<std::mutex> l(lostLock_);
+    if (opened != opened_.load(std::memory_order_relaxed))
+        return;
+    TegraGM20BAbiStatus st;
+    status(channel, st);  // none: the channel already destroyed (another thread's reopen), the cause unknown
+    lostFaultVa_.store(st.fault_va, std::memory_order_relaxed);
+    lostError_.store(st.error, std::memory_order_relaxed);
+    lostChannel_.store(channel, std::memory_order_relaxed);
+}
+
 bool Kernel::wait(uint32_t channel, uint32_t seqno, uint64_t timeoutNs)
 {
     TegraGM20BAbiWaitFence w = {channel, seqno, timeoutNs};
+    const uint32_t at = opened();
     const int kr = call(TegraGM20BMethodWaitFence, &w, sizeof w, nullptr, 0);
     if (kr == kIOReturnNotResponding)
-        lostChannel_.store(channel, std::memory_order_relaxed);
+        markLost(channel, at);
     if (kr != KERN_SUCCESS) {
         err_ = "WaitFence failed";
         return false;

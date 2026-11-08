@@ -14,7 +14,8 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
-#include "../dfllxnu.h"
+#include "../../../../../kits/SwitchLinux/SwitchLinuxLock.h"
+#include "../../../../../kits/SwitchMMIO/SwitchMMIO.h"
 
 /* config: what the L4T build enables here */
 #define CONFIG_ARCH_TEGRA 1
@@ -95,7 +96,7 @@ typedef struct { int counter; } atomic_t;
 #define U32_MAX ((u32)~0U)
 #define S32_MAX ((s32)(U32_MAX >> 1))
 #define BITS_PER_LONG 64
-#define BIT(n) (1UL << (n))
+#define BIT(n) (1UL << (unsigned int)(n))
 #define NSEC_PER_USEC 1000L
 #define NSEC_PER_MSEC 1000000L
 #define USEC_PER_MSEC 1000L
@@ -194,55 +195,43 @@ __attribute__((noreturn)) void panic(const char *fmt, ...);
 #define rcu_read_lock() do { } while (0)
 #define rcu_read_unlock() do { } while (0)
 
-#define udelay(us) dfllxnu_udelay((u32)(us))
-#define ndelay(ns) dfllxnu_udelay((u32)DIV_ROUND_UP((ns), 1000))
-#define mdelay(ms) dfllxnu_udelay((u32)(ms) * 1000u)
-#define msleep(ms) dfllxnu_msleep((u32)(ms))
-#define usleep_range(lo, hi) dfllxnu_msleep((u32)DIV_ROUND_UP((hi), 1000))
+#define udelay(us) switch_linux_udelay((u64)(us))
+#define ndelay(ns) switch_linux_udelay((u64)DIV_ROUND_UP((ns), 1000))
+#define mdelay(ms) switch_linux_udelay((u64)(ms) * 1000u)
+#define msleep(ms) switch_linux_usleep_range((u64)(ms) * 1000u, (u64)(ms) * 1000u)
+#define usleep_range(lo, hi) switch_linux_usleep_range((u64)(lo), (u64)(hi))
 
 /* time: jiffies at HZ 1000 over XNU's clock */
 #define HZ 1000
-unsigned long tdfll_jiffies(void);
-#define jiffies tdfll_jiffies()
+#define jiffies ((unsigned long)(switch_linux_nanotime() / NSEC_PER_MSEC))
 #define msecs_to_jiffies(ms) ((unsigned long)(ms))
 #define jiffies_to_msecs(j) ((unsigned int)(j))
 #define usecs_to_jiffies(us) ((unsigned long)DIV_ROUND_UP((us), 1000))
 #define jiffies_to_usecs(j) ((unsigned int)(j) * 1000u)
 /* no suspend here (clk-dfll.c only defers hrtimers and one-shot calibration while it is set) */
 #define timekeeping_suspended 0
-static inline ktime_t ktime_get(void) { return (ktime_t)dfllxnu_nanotime(); }
+static inline ktime_t ktime_get(void) { return (ktime_t)switch_linux_nanotime(); }
 static inline ktime_t ktime_set(const s64 secs, const unsigned long nsecs) { return secs * NSEC_PER_SEC + (s64)nsecs; }
 static inline s64 ktime_to_us(const ktime_t kt) { return kt / NSEC_PER_USEC; }
 static inline s64 ktime_to_ms(const ktime_t kt) { return kt / NSEC_PER_MSEC; }
 static inline s64 ktime_us_delta(const ktime_t later, const ktime_t earlier) { return ktime_to_us(later - earlier); }
 static inline s64 ktime_ms_delta(const ktime_t later, const ktime_t earlier) { return ktime_to_ms(later - earlier); }
 
-/* MMIO, with arm64 asm/io.h ordering */
-static inline u32 __raw_readl(const volatile void __iomem *addr) { return *(const volatile u32 *)addr; }
-static inline void __raw_writel(u32 val, volatile void __iomem *addr) { *(volatile u32 *)addr = val; }
+/* MMIO: kits/SwitchMMIO (load-acquire reads for the A57's erratum 832075, which also order what follows) */
+#define __raw_readl(a) switch_mmio_read32((const volatile u8 *)(a), 0)
+#define __raw_writel(v, a) switch_mmio_write32((volatile u8 *)(a), 0, (v))
 #define readl_relaxed(a) __raw_readl(a)
 #define writel_relaxed(v, a) __raw_writel((v), (a))
-static inline u32 readl(const volatile void __iomem *addr)
-{
-	u32 v = __raw_readl(addr);
-	__asm__ __volatile__("dmb oshld" ::: "memory");
-	return v;
-}
-static inline void writel(u32 val, volatile void __iomem *addr)
-{
-	__asm__ __volatile__("dmb oshst" ::: "memory");
-	__raw_writel(val, addr);
-}
+#define readl(a) __raw_readl(a)
+#define writel(v, a) switch_mmio_write32_publish((volatile u8 *)(a), 0, (v))
 
-/* spinlocks: interrupts off on this CPU + a word */
-typedef struct { volatile unsigned int slock; } spinlock_t;
-#define __SPIN_LOCK_UNLOCKED(x) { 0 }
+/* spinlocks: kits/SwitchLinux */
+typedef switch_linux_spinlock spinlock_t;
+#define __SPIN_LOCK_UNLOCKED(x) SWITCH_LINUX_SPINLOCK_INIT
 #define DEFINE_SPINLOCK(x) spinlock_t x = __SPIN_LOCK_UNLOCKED(x)
-#define spin_lock_init(l) do { (l)->slock = 0; } while (0)
-unsigned long tdfll_spin_lock_irqsave(spinlock_t *l);
-void tdfll_spin_unlock_irqrestore(spinlock_t *l, unsigned long flags);
-#define spin_lock_irqsave(l, flags) do { (flags) = tdfll_spin_lock_irqsave(l); } while (0)
-#define spin_unlock_irqrestore(l, flags) tdfll_spin_unlock_irqrestore((l), (flags))
+#define spin_lock_init(l) do { (l)->holder = 0; } while (0)
+#define spin_lock_irqsave(l, flags) do { (flags) = switch_linux_spin_lock_irqsave(l); } while (0)
+#define spin_unlock_irqrestore(l, flags) switch_linux_spin_unlock_irqrestore((l), (flags))
 #define lockdep_assert_held(l) do { } while (0)
 
 #endif

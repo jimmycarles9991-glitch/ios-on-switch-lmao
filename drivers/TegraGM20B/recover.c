@@ -20,7 +20,7 @@
 #define ENG_TIMEOUT 0x002a0c
 #define ENG_TIMEOUT_DETECTION 0x80000000
 #define CTXSW_TIMEOUT_US 250000
-#define PTIMER_US(us) ((us) * 1920 / 3125)
+#define PTIMER_US(us) ((us) * 1920u / 3125u)
 /* written 1 to clear (gk104_runl_fault_clear); a runlist's bit stops its scheduling */
 #define ERROR_SCHED_DISABLE 0x00262c
 #define PFIFO_INTR_0 0x002100
@@ -56,7 +56,7 @@ static void ctxsw_tick(struct nvkm_fifo *fifo, u32 engm)
  * let go again once the switch is waited out; one under recovery is nvkm's to clear. */
 static void sched_disable_clear(struct nvkm_device *device, u32 runlm)
 {
-	struct nvkm_runl *runl;
+	struct nvkm_runl *runl = NULL;
 	u32 set = nvkm_rd32(device, ERROR_SCHED_DISABLE) & runlm;
 	static int logged;
 
@@ -65,40 +65,46 @@ static void sched_disable_clear(struct nvkm_device *device, u32 runlm)
 	nvkm_runl_foreach(runl, device->fifo)
 	{
 		if (atomic_read(&runl->rc_pending))
-			set &= ~BIT(runl->id);
+			set &= ~BIT((u32)runl->id);
 	}
 	if (!set)
 		return;
 	nvkm_wr32(device, ERROR_SCHED_DISABLE, set);
-	if (!logged++)
+	if (!logged++) {
 		nvxnu_log("tegra-gm20b: a context-switch timeout tick stopped runlists %#x "
 			  "(ERROR_SCHED_DISABLE): restarted\n",
 			  set);
+	}
 }
 
 static void ctxsw_work(void *arg)
 {
 	struct nvkm_device *device = ctxsw.fifo->engine.subdev.device;
-	u32 engm = __atomic_exchange_n(&ctxsw.engm, 0, __ATOMIC_RELAXED), stuck = 0, waited = 0;
-	struct nvkm_runl *runl;
-	struct nvkm_engn *engn;
-	bool cgid;
-	int id;
+	u32 engm = __atomic_exchange_n(&ctxsw.engm, 0, __ATOMIC_RELAXED);
+	u32 stuck = 0;
+	u32 waited = 0;
+	struct nvkm_runl *runl = NULL;
+	struct nvkm_engn *engn = NULL;
+	bool cgid = false;
+	int id = 0;
 
 	(void)arg;
 	nvkm_runl_foreach(runl, ctxsw.fifo)
 	{
-		nvkm_runl_foreach_engn_cond(engn, runl, engm & BIT(engn->id))
+		/* nouveau's runlist walk takes each engine by container_of. */
+		/* NOLINTNEXTLINE(clang-analyzer-security.ArrayBound) */
+		nvkm_runl_foreach_engn_cond(engn, runl, engm & BIT((u32)engn->id))
 		{
 			if (!engn->func->chsw || !engn->func->chsw(engn))
 				continue; /* the switch completed meanwhile */
 			id = engn->func->cxid(engn, &cgid);
 			if (id < 0)
 				continue;
-			if (cgid || tgm_ctxsw_stuck(id))
-				stuck |= BIT(engn->id);
-			else
-				waited |= BIT(runl->id);
+			if (cgid || tgm_ctxsw_stuck(id)) {
+				stuck |= BIT((u32)engn->id);
+			} else {
+				waited |= BIT((u32)runl->id);
+			}
 		}
 	}
 	if (stuck) {
@@ -127,6 +133,16 @@ void tgm_recover_init(struct nvkm_device *device)
 	func->intr_ctxsw_timeout = ctxsw_tick;
 }
 
+/* After the GPU's interrupts are off for a power-down (they alone queue the work): a tick's work still queued or running
+ * would read engine status from an unpowered GPU. Its switch is moot, every channel finished before the power-down. */
+void tgm_recover_suspend(void)
+{
+	if (!ctxsw.work)
+		return;
+	nvxnu_work_cancel_wait(ctxsw.work);
+	__atomic_store_n(&ctxsw.engm, 0, __ATOMIC_RELAXED);
+}
+
 void tgm_recover_arm(struct nvkm_device *device)
 {
 	nvkm_wr32(device, ENG_TIMEOUT, ENG_TIMEOUT_DETECTION | PTIMER_US(CTXSW_TIMEOUT_US));
@@ -134,18 +150,20 @@ void tgm_recover_arm(struct nvkm_device *device)
 
 void tgm_recover_fault(struct nvkm_device *device, int chid)
 {
-	struct nvkm_runl *runl;
-	struct nvkm_engn *engn;
+	struct nvkm_runl *runl = NULL;
+	struct nvkm_engn *engn = NULL;
 	u32 engm = 0;
-	bool cgid;
+	bool cgid = false;
 
 	nvkm_runl_foreach(runl, device->fifo)
 	{
+		/* nouveau's runlist walk takes each engine by container_of. */
+		/* NOLINTNEXTLINE(clang-analyzer-security.ArrayBound) */
 		nvkm_runl_foreach_engn_cond(engn, runl, engn->func->cxid)
 		{
 			if ((nvkm_rd32(device, PFIFO_ENG_STATUS(engn->id)) & PFIFO_ENG_BUSY) &&
 			    engn->func->cxid(engn, &cgid) == chid && !cgid)
-				engm |= BIT(engn->id);
+				engm |= BIT((u32)engn->id);
 		}
 	}
 	if (engm && ctxsw.nvkm)
@@ -161,7 +179,7 @@ void tgm_recover_stats(char *buf, unsigned int len)
 
 static int add(int *chids, int n, int max, int chid)
 {
-	int i;
+	int i = 0;
 
 	for (i = 0; i < n; i++) {
 		if (chids[i] == chid)
@@ -174,13 +192,17 @@ static int add(int *chids, int n, int max, int chid)
 
 int tgm_recover_suspects(struct nvkm_device *device, int *chids, int max)
 {
-	struct nvkm_runl *runl;
-	struct nvkm_engn *engn;
-	bool cgid;
-	int n = 0, id, i;
+	struct nvkm_runl *runl = NULL;
+	struct nvkm_engn *engn = NULL;
+	bool cgid = false;
+	int n = 0;
+	int id = 0;
+	int i = 0;
 
 	nvkm_runl_foreach(runl, device->fifo)
 	{
+		/* nouveau's runlist walk takes each engine by container_of. */
+		/* NOLINTNEXTLINE(clang-analyzer-security.ArrayBound) */
 		nvkm_runl_foreach_engn_cond(engn, runl, engn->func->cxid)
 		{
 			if (!(nvkm_rd32(device, PFIFO_ENG_STATUS(engn->id)) & PFIFO_ENG_BUSY))

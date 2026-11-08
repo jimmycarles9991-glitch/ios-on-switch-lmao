@@ -11,7 +11,7 @@ struct nvkm_device;
 void tgm_sched_init(struct nvkm_device *device);
 /* A channel's runlist level (TegraGM20BSchedPolicy.h enum tgm_level): the compositor's channels are high, a
  * runningboardd role sets an app's background or foreground. A change rebuilds the runlist, so the host sees it at once. */
-void tgm_sched_level(struct nvkm_device *device, unsigned int chid, unsigned int level);
+void tgm_sched_level(struct nvkm_device *device, unsigned int chid, unsigned int to);
 /* Before nvkm removes a channel: its level goes back to foreground (nvkm's own runlist update then drops it) and the hold
  * forgets it. */
 void tgm_sched_forget(struct nvkm_device *device, unsigned int chid);
@@ -91,7 +91,8 @@ void tgm_deadline_clock(uint64_t ns, uint64_t pt);
 uint64_t tgm_deadline_pt_ns(uint64_t pt_span);
 /* gpu.c, interrupt pass: the present queued at `queued` completed. */
 void tgm_deadline_presented(uint64_t queued);
-/* gpu.c: system sleep (every hold released, none until the wake) and the wake. */
+/* gpu.c: system sleep and rail-down (every hold released, no callout touching the GPU until the wake or rail-up), and
+ * the wake and rail-up. */
 void tgm_deadline_suspend(void);
 void tgm_deadline_resume(void);
 void tgm_deadline_stats(char *buf, unsigned int len);

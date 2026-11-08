@@ -263,7 +263,8 @@ static inline const char *switch_pt_basename(const struct switch_pt_file *file, 
     return file->path + at;
 }
 
-/* storage: switch_pt_tables_bytes() bytes, 8-aligned and zeroed. A file or directory id twice is refused. */
+/* storage: switch_pt_tables_bytes() bytes, 8-aligned and zeroed. A System id on several records is one file's hard
+ * links, so they must share its Data id and CDHash; any other id twice is refused. */
 static inline enum switch_pt_error switch_pt_tables_build(struct switch_pt_tables *tables,
                                                           const struct switch_pt_index *index, uint32_t extra_data_ids,
                                                           void *storage, size_t bytes, switch_pt_hash_fn hash)
@@ -291,8 +292,14 @@ static inline enum switch_pt_error switch_pt_tables_build(struct switch_pt_table
     tables->names.mask = files - 1;
     for (uint32_t i = 0; i < index->count; ++i) {
         const struct switch_pt_file file = switch_pt_file_at(index, i);
-        if (!switch_pt_map_put(&tables->system, file.system_id, i) ||
-            !switch_pt_map_put(&tables->data, file.data_id, i)) {
+        uint32_t first;
+        if (switch_pt_map_get(&tables->system, file.system_id, &first)) {
+            const struct switch_pt_file link = switch_pt_file_at(index, first);
+            if (link.data_id != file.data_id || __builtin_memcmp(link.cdhash, file.cdhash, SWITCH_PT_CDHASH) != 0) {
+                return SWITCH_PT_DUPLICATE_ID;
+            }
+        } else if (!switch_pt_map_put(&tables->system, file.system_id, i) ||
+                   !switch_pt_map_put(&tables->data, file.data_id, i)) {
             return SWITCH_PT_DUPLICATE_ID;
         }
         uint32_t length;
@@ -331,21 +338,33 @@ static inline bool switch_pt_name_listed(const struct switch_pt_tables *tables, 
     return false;
 }
 
-/* The System file with this id, if listed under this name: the file index, or -1. */
-static inline int64_t switch_pt_system_file(const struct switch_pt_tables *tables, uint64_t system_id, const char *name,
-                                            uint32_t length)
+/* The System file with this id, if listed under this name (hash: the name's, as switch_pt_name_listed takes it): the
+ * file index, or -1. A hard link named differently from the id's first record is found among the name's records. */
+static inline int64_t switch_pt_system_file(const struct switch_pt_tables *tables, uint64_t system_id, uint32_t hash,
+                                            const char *name, uint32_t length)
 {
     uint32_t i;
     if (!switch_pt_map_get(&tables->system, system_id, &i)) {
         return -1;
     }
-    const struct switch_pt_file file = switch_pt_file_at(&tables->index, i);
+    struct switch_pt_file file = switch_pt_file_at(&tables->index, i);
     uint32_t listed_length;
     const char *listed = switch_pt_basename(&file, &listed_length);
-    if (listed_length != length || __builtin_memcmp(listed, name, length) != 0) {
-        return -1;
+    if (listed_length == length && __builtin_memcmp(listed, name, length) == 0) {
+        return i;
     }
-    return i;
+    for (uint32_t slot = hash & tables->names.mask; tables->names.slots[slot]; slot = (slot + 1) & tables->names.mask) {
+        i = tables->names.slots[slot] - 1;
+        if (tables->names.hashes[i] != hash) {
+            continue;
+        }
+        file = switch_pt_file_at(&tables->index, i);
+        listed = switch_pt_basename(&file, &listed_length);
+        if (file.system_id == system_id && listed_length == length && __builtin_memcmp(listed, name, length) == 0) {
+            return i;
+        }
+    }
+    return -1;
 }
 
 enum switch_pt_op {
@@ -405,7 +424,6 @@ static inline bool switch_pt_denied(enum switch_pt_op op, uint32_t in_tree, uint
 }
 
 struct switch_pt_trust_facts {
-    bool redirected;
     bool listed;
     bool regular;
     uint32_t uid;
@@ -415,11 +433,11 @@ struct switch_pt_trust_facts {
     bool cdhash_matches;
 };
 
-/* A pretranslated executable keeps the System volume's launch status only as the redirect produced it: listed, a
- * root:wheel regular file nobody else can write, its CDHash both in the trust module pinned for this tree and equal
- * to the one its own index entry carries, so no trusted binary stands in at another listed path. */
+/* A file of the tree counts as authenticated, as a sealed volume's file does, only if it is listed, a root:wheel
+ * regular file nobody else can write, its CDHash both in the trust module pinned for this tree and equal to the one
+ * its own index entry carries, so no trusted binary stands in at another listed path. */
 static inline bool switch_pt_trusted(const struct switch_pt_trust_facts *facts)
 {
-    return facts->redirected && facts->listed && facts->regular && facts->uid == 0 && facts->gid == 0 &&
-           (facts->mode & 022u) == 0 && facts->cdhash_pinned && facts->cdhash_matches;
+    return facts->listed && facts->regular && facts->uid == 0 && facts->gid == 0 && (facts->mode & 022u) == 0 &&
+           facts->cdhash_pinned && facts->cdhash_matches;
 }

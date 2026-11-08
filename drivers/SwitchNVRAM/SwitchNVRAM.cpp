@@ -36,6 +36,7 @@
 #include <sys/fcntl.h>
 #include <sys/mount.h>
 #include <sys/vnode.h>
+#include "../../kits/SwitchDT/SwitchDTProperty.h"
 #include "SwitchNVRAM.h"
 #include "SwitchNVRAMStore.h"
 
@@ -57,14 +58,10 @@ constexpr uint32_t kBankHeader = 32;
 // every later boot (darkboot: the next boot with the display dark).
 const char *const kNotRestored[] = {"darkboot", nullptr};
 
-uint32_t chosenU32(IORegistryEntry *chosen, const char *key, uint32_t fallback)
+uint32_t chosenU32(const IORegistryEntry *chosen, const char *key, uint32_t fallback)
 {
-    OSData *data = OSDynamicCast(OSData, chosen->getProperty(key));
-    if (!data || data->getLength() != sizeof(uint32_t))
-        return fallback;
-    uint32_t value;
-    memcpy(&value, data->getBytesNoCopy(), sizeof(value));
-    return value;
+    uint32_t value = 0;
+    return switch_dt_value(chosen, key, &value) ? value : fallback;
 }
 }  // namespace
 
@@ -72,6 +69,7 @@ class SwitchNVRAM;
 static SwitchNVRAM *gSwitchNVRAM;
 
 class SwitchNVRAM : public IONVRAMController {
+    // NOLINTNEXTLINE(misc-explicit-constructor): IOKit's structors macro declares the metaclass constructor
     OSDeclareDefaultStructors(SwitchNVRAM) uint32_t bankSize = 0, bankCount = 0, current = 0, stride = 0;
     // banks: what IODTNVRAM wrote (its controller lock). staged: the last bank sync() committed; saved: the bank the
     // file's current slot holds; pending, slot: the writer's copy and its slot.
@@ -94,7 +92,7 @@ class SwitchNVRAM : public IONVRAMController {
     int writeOut();
     int writeSlot(unsigned index);
     static void writeTimer(thread_call_param_t self, thread_call_param_t);
-    static void restoreThread(void *self, wait_result_t);
+    static void restoreThread(void *parameter, wait_result_t);
     static IOReturn powerMessage(void *target, void *, UInt32 type, IOService *, void *, vm_size_t);
 
 public:
@@ -116,22 +114,19 @@ OSDefineMetaClassAndStructors(SwitchNVRAM, IONVRAMController)
     // findCurrentBank() sees its own generation.
     bool SwitchNVRAM::loadChosenImage()
 {
-    IORegistryEntry *chosen = IORegistryEntry::fromPath("/chosen", gIODTPlane);
+    const IORegistryEntry *chosen = IORegistryEntry::fromPath("/chosen", gIODTPlane);
     if (!chosen)
         return false;
     bankSize = chosenU32(chosen, "nvram-bank-size", 0);
     bankCount = chosenU32(chosen, "nvram-bank-count", 1);
     current = chosenU32(chosen, "nvram-current-bank", 0);
-    bool ok = bankSize > kBankHeader && bankSize <= SWITCH_NVRAM_STORE_MAX_IMAGE && bankCount && bankCount <= 8 &&
-              current < bankCount;
+    bool ok = bankSize > kBankHeader && bankSize <= SWITCH_NVRAM_STORE_MAX_IMAGE && (bankCount != 0u) &&
+              bankCount <= 8 && current < bankCount;
     if (ok)
-        banks = IONewZeroData(uint8_t, bankSize *bankCount);
-    ok = ok && banks;
-    if (ok) {
-        OSData *proxy = OSDynamicCast(OSData, chosen->getProperty("nvram-proxy-data"));
-        if (proxy && proxy->getLength() == bankSize)
-            memcpy(banks + current * bankSize, proxy->getBytesNoCopy(), bankSize);
-    }
+        banks = IONewZeroData(uint8_t, static_cast<vm_size_t>(bankSize) * bankCount);
+    ok = ok && (banks != nullptr);
+    if (ok)
+        switch_dt_read(chosen, "nvram-proxy-data", banks + static_cast<size_t>(current) * bankSize, bankSize);
     chosen->release();
     return ok;
 }
@@ -191,7 +186,7 @@ IOReturn SwitchNVRAM::select(uint32_t bank)
 
 IOReturn SwitchNVRAM::eraseBank()
 {
-    bzero(banks + current * bankSize, bankSize);
+    bzero(banks + static_cast<size_t>(current) * bankSize, bankSize);
     return kIOReturnSuccess;
 }
 
@@ -199,7 +194,7 @@ IOReturn SwitchNVRAM::read(IOByteCount offset, UInt8 *buffer, IOByteCount length
 {
     if (!buffer || offset > bankSize || length > bankSize - offset)
         return kIOReturnBadArgument;
-    memcpy(buffer, banks + current * bankSize + offset, length);
+    memcpy(buffer, banks + static_cast<size_t>(current) * bankSize + offset, length);
     return kIOReturnSuccess;
 }
 
@@ -207,7 +202,7 @@ IOReturn SwitchNVRAM::write(IOByteCount offset, UInt8 *buffer, IOByteCount lengt
 {
     if (!buffer || offset > bankSize || length > bankSize - offset)
         return kIOReturnBadArgument;
-    memcpy(banks + current * bankSize + offset, buffer, length);
+    memcpy(banks + static_cast<size_t>(current) * bankSize + offset, buffer, length);
     return kIOReturnSuccess;
 }
 
@@ -216,7 +211,7 @@ IOReturn SwitchNVRAM::write(IOByteCount offset, UInt8 *buffer, IOByteCount lengt
 void SwitchNVRAM::sync()
 {
     IOLockLock(lock);
-    memcpy(staged, banks + current * bankSize, bankSize);
+    memcpy(staged, banks + static_cast<size_t>(current) * bankSize, bankSize);
     dirty = true;
     armLocked();
     IOLockUnlock(lock);
@@ -298,7 +293,7 @@ int SwitchNVRAM::writeSlot(unsigned index)
 uint32_t SwitchNVRAM::dataMounted()
 {
     OSDictionary *match = IOService::serviceMatching("IODTNVRAM");
-    IOService *service = match ? IOService::copyMatchingService(match) : nullptr;
+    const IOService *service = match ? IOService::copyMatchingService(match) : nullptr;
     OSSafeReleaseNULL(match);
     nvram = OSDynamicCast(IODTNVRAM, service);
     if (!nvram) {
@@ -319,7 +314,8 @@ uint32_t SwitchNVRAM::dataMounted()
         length = capacity - static_cast<size_t>(resid);
         vnode_close(vp, FREAD, ctx);
     }
-    uint32_t added = 0, refused = 0;
+    uint32_t added = 0;
+    uint32_t refused = 0;
     uint64_t found = 0;
     const int picked = error ? -1 : switch_nvram_store_pick(file, length, bankSize, &found);
     if (error == ENOENT) {
@@ -330,7 +326,8 @@ uint32_t SwitchNVRAM::dataMounted()
         IOLog("SwitchNVRAM: %s (%u bytes) has no valid slot; NVRAM starts empty\n", kPath,
               static_cast<unsigned>(length));
     } else {
-        const uint8_t *image = file + static_cast<unsigned>(picked) * stride + SWITCH_NVRAM_STORE_HEADER;
+        const uint8_t *image =
+            file + static_cast<size_t>(static_cast<unsigned>(picked)) * stride + SWITCH_NVRAM_STORE_HEADER;
         const IOReturn result = switch_nvram_restore(nvram, image, bankSize, kNotRestored, &added, &refused);
         if (result == kIOReturnSuccess) {
             // The writer's state (no writer runs before mounted is set).
@@ -348,11 +345,12 @@ uint32_t SwitchNVRAM::dataMounted()
     // A bank IODTNVRAM committed before now lacks the restored variables: drop it and have the merged set committed.
     IOLockLock(lock);
     mounted = true;
-    const bool recommit = dirty && added;
-    if (recommit)
+    const bool recommit = dirty && (added != 0u);
+    if (recommit) {
         dirty = false;
-    else if (dirty)
+    } else if (dirty) {
         armLocked();
+    }
     IOLockUnlock(lock);
     power = registerPrioritySleepWakeInterest(powerMessage, this);
     if (!power)

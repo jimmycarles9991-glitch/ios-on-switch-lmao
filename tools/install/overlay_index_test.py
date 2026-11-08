@@ -16,7 +16,7 @@ FILES = [
 class OverlayIndexTest(unittest.TestCase):
     def test_layout(self):
         raw = overlay_index.encode(FILES, [7, 5])
-        magic, version, count, dirs, size, reserved = overlay_index.HEADER.unpack_from(raw)
+        magic, version, count, dirs, _size, reserved = overlay_index.HEADER.unpack_from(raw)
         self.assertEqual((magic, version, count, dirs, reserved), (b'SWOV', 2, 3, 2, 0))
         records = [
             overlay_index.FILE.unpack_from(raw, overlay_index.HEADER.size + overlay_index.FILE.size * i)
@@ -51,11 +51,17 @@ class OverlayIndexTest(unittest.TestCase):
             ([('/a', 0, 2, CD)], [3]),
             ([('/a', 1, 2, CD)], [0]),
             ([('/a', 1, 2, CD), ('/b', 1, 4, CD)], [5]),
+            ([('/a', 1, 2, CD), ('/b', 1, 2, bytes(20))], [5]),
             ([('/a', 1, 2, CD), ('/b', 3, 2, CD)], [5]),
             ([('/a', 1, 2, CD)], [2]),
+            ([('/a', 1, 2, CD)], [5, 5]),
         ]:
             with self.subTest(files=files, dirs=dirs), self.assertRaises(overlay_index.OverlayIndexError):
                 overlay_index.encode(files, dirs)
+
+    def test_hard_links_share_one_data_file(self):
+        files = [('/usr/libexec/d', 1, 2, CD), ('/usr/sbin/d', 1, 2, CD), ('/usr/sbin/e', 3, 4, CD)]
+        self.assertEqual(overlay_index.decode(overlay_index.encode(files, [5])), (files, [5]))
 
     def test_decode_refuses_unsorted_or_loose_tables(self):
         raw = bytearray(overlay_index.encode([('/a', 1, 2, CD), ('/b', 3, 4, CD)], [5]))

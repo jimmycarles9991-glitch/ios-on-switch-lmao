@@ -23,10 +23,9 @@ public:
     uint16_t setupLength() const
     {
         const unsigned char *setup = reinterpret_cast<const unsigned char *>(this) + 16;
-        return static_cast<uint16_t>(setup[6] | setup[7] << 8);
+        return static_cast<uint16_t>(setup[6] | static_cast<unsigned>(setup[7]) << 8);
     }
 
-private:
     IOUSBDeviceControlRequest() = delete;
 };
 
@@ -37,13 +36,11 @@ public:
     int getPipeCountForAlternateSetting(uint8_t alternate);
     class IOUSBDevicePipe *getPipeForAlternateSetting(int index, uint8_t alternate);
 
-private:
     IOUSBDeviceInterface() = delete;
 };
 
 class IOUSBDevicePipe {
 public:
     int getDirection();  // 0 OUT, 1 IN
-private:
     IOUSBDevicePipe() = delete;
 };

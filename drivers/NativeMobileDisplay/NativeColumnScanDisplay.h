@@ -8,13 +8,13 @@
 
 #if SWITCH_FRAME_TIMELINE
 struct ColumnScanState {
-    NativeColumnScan::Run run;
+    native_column_scan::Run run;
     IOBufferMemoryDescriptor *surface = nullptr, *reference = nullptr;
     bool surfaceFilled = false, referenceFilled = false, saved = false, holding = false;
     uint8_t yLog2 = 0, filledYLog2 = 0;
     int surfaceSlot = -1, referenceSlot = -1;
     const char *busyReason = nullptr;
-    NativeColumnScan::Window scan = {};
+    native_column_scan::Window scan = {};
     uint32_t savedWindow[sizeof(kWindowAState) / sizeof(kWindowAState[0])] = {};
     uint32_t savedStartU = 0, savedStartHiU = 0, savedCrcControl = 0, savedCsc[8] = {}, savedHTaps[16] = {},
              savedVTaps[16] = {};
@@ -22,24 +22,25 @@ struct ColumnScanState {
 
 static ColumnScanState columnScan;
 static struct sysctl_oid columnScanOid;
-static constexpr uint32_t kWinc = 0x500, kWinbufStartAddrU = 0x800 + NativePlanes::kStartAddrU,
-                          kWinbufStartAddrHiU = 0x800 + NativePlanes::kStartAddrHiU;
+static constexpr uint32_t kWinc = 0x500, kWinbufStartAddrU = 0x800 + native_planes::kStartAddrU,
+                          kWinbufStartAddrHiU = 0x800 + native_planes::kStartAddrHiU;
 
-bool columnScanBusy()
+static bool columnScanBusy()
 {
     return columnScan.run.busy();
 }
 
 static int columnScanSysctl(struct sysctl_oid *, void *, int, struct sysctl_req *req)
 {
-    int value = 0, changed = 0;
+    int value = 0;
+    int changed = 0;
     const int error = sysctl_io_number(req, 0, sizeof(value), &value, &changed);
     if (error || !changed)
         return error;
-    if (value < 0 || value > NativeColumnScan::kMaxYLog2)
+    if (value < 0 || value > native_column_scan::kMaxYLog2)
         return EINVAL;
     NativeLegacyDisplay *display = __atomic_load_n(&primaryDisplay, __ATOMIC_ACQUIRE);
-    return display ? display->columnScanTrigger((uint8_t)value) : ENODEV;
+    return display ? display->columnScanTrigger(static_cast<uint8_t>(value)) : ENODEV;
 }
 
 static void columnScanRegister()
@@ -69,8 +70,8 @@ int columnScanTrigger(uint8_t yLog2)
         return ENODEV;
     int result = EBUSY;
     columnScanOnLoop([&] {
-        if (columnScan.run.stage == NativeColumnScan::Run::kIdle) {
-            columnScan.run.stage = NativeColumnScan::Run::kPreparing;
+        if (columnScan.run.stage == native_column_scan::Run::kIdle) {
+            columnScan.run.stage = native_column_scan::Run::kPreparing;
             result = 0;
         }
     });
@@ -81,38 +82,40 @@ int columnScanTrigger(uint8_t yLog2)
         if (!result)
             result = columnScanPost(yLog2);
         if (result)
-            columnScan.run.stage = NativeColumnScan::Run::kIdle;
+            columnScan.run.stage = native_column_scan::Run::kIdle;
     });
     return result;
 }
 
 // Both surfaces allocated once and kept for the boot; the NV12 one refilled when the block height changes. DC A does
 // not snoop the CPU's caches.
-int columnScanPrepare(uint8_t yLog2)
+static int columnScanPrepare(uint8_t yLog2)
 {
     ColumnScanState &s = columnScan;
-    if (!s.surface)
+    if (!s.surface) {
         s.surface = IOBufferMemoryDescriptor::inTaskWithOptions(kernel_task, kIODirectionInOut,
-                                                                NativeColumnScan::kSurfaceBytes, PAGE_SIZE);
-    if (!s.reference)
+                                                                native_column_scan::kSurfaceBytes, PAGE_SIZE);
+    }
+    if (!s.reference) {
         s.reference = IOBufferMemoryDescriptor::inTaskWithOptions(kernel_task, kIODirectionInOut,
-                                                                  NativeColumnScan::kReferenceBytes, PAGE_SIZE);
+                                                                  native_column_scan::kReferenceBytes, PAGE_SIZE);
+    }
     if (!s.surface || !s.reference) {
         IOLog("SwitchDisplay: column scan not run: no memory for its %llu-byte surface and %llu-byte reference\n",
-              (unsigned long long)NativeColumnScan::kSurfaceBytes,
-              (unsigned long long)NativeColumnScan::kReferenceBytes);
+              static_cast<unsigned long long>(native_column_scan::kSurfaceBytes),
+              static_cast<unsigned long long>(native_column_scan::kReferenceBytes));
         return ENOMEM;
     }
     if (!s.referenceFilled) {
         uint8_t *frame = static_cast<uint8_t *>(s.reference->getBytesNoCopy());
-        NativeColumnScan::fillReference(frame);
-        cleanInvalidate(frame, NativeColumnScan::kReferenceBytes);
+        native_column_scan::fillReference(frame);
+        switch_dcache_clean_invalidate(frame, native_column_scan::kReferenceBytes);
         s.referenceFilled = true;
     }
     if (!s.surfaceFilled || s.filledYLog2 != yLog2) {
         uint8_t *surface = static_cast<uint8_t *>(s.surface->getBytesNoCopy());
-        NativeColumnScan::fillSurface(surface, yLog2);
-        cleanInvalidate(surface, NativeColumnScan::kSurfaceBytes);
+        native_column_scan::fillSurface(surface, yLog2);
+        switch_dcache_clean_invalidate(surface, native_column_scan::kSurfaceBytes);
         s.surfaceFilled = true;
         s.filledYLog2 = yLog2;
     }
@@ -125,21 +128,23 @@ int columnScanPost(uint8_t yLog2)
 {
     ColumnScanState &s = columnScan;
     const char *why = nullptr;
-    if (!SWITCH_PORTRAIT_NATIVE || !rotated || !rotationLatched)
+    if (!SWITCH_PORTRAIT_NATIVE || !rotated || !rotationLatched) {
         why = "window A does not scan the UI's block-linear frames yet";
-    else if (!directAttached)
+    } else if (!directAttached) {
         why = "window A does not read through the SMMU (direct scanout is off)";
-    else if (!planesOn)
+    } else if (!planesOn) {
         why = "planes are off: no IOVA slot to map the surfaces into";
-    else if (hwSuspended || scanoutStopped)
+    } else if (hwSuspended || scanoutStopped) {
         why = "the display is off";
+    }
     if (!why) {
-        s.surfaceSlot = planeSlotFor(s.surface, 0, NativeColumnScan::kSurfaceBytes, false);
-        s.referenceSlot = planeSlotFor(s.reference, 0, NativeColumnScan::kReferenceBytes, false);
-        if (s.surfaceSlot < 0 || s.referenceSlot < 0)
+        s.surfaceSlot = planeSlotFor(s.surface, 0, native_column_scan::kSurfaceBytes, false);
+        s.referenceSlot = planeSlotFor(s.reference, 0, native_column_scan::kReferenceBytes, false);
+        if (s.surfaceSlot < 0 || s.referenceSlot < 0) {
             why = "no free plane slot";
-        else if (!NativeColumnScan::scanWindow(planeSlotIova(s.surfaceSlot), yLog2, s.scan))
+        } else if (!native_column_scan::scanWindow(planeSlotIova(s.surfaceSlot), yLog2, s.scan)) {
             why = "window A cannot column-scan the surface";
+        }
     }
     if (why) {
         IOLog("SwitchDisplay: column scan not run: %s\n", why);
@@ -178,12 +183,12 @@ const char *columnScanInFlight()
     return nullptr;
 }
 
-NativeColumnScan::Window columnScanActive()
+native_column_scan::Window columnScanActive()
 {
     const uint32_t access = dc[kDcStateAccess] & ~(kReadMuxActive | kWriteMuxActive);
     dc[kDcStateAccess] = access | kReadMuxActive;
     dc[kDcWindowHeader] = kWindowASelect;
-    NativeColumnScan::Window w;
+    native_column_scan::Window w;
     w.options = dc[kWinOptions];
     w.depth = dc[kWinColorDepth];
     w.position = dc[kWinPosition];
@@ -216,17 +221,17 @@ void columnScanSave()
     dc[kDcStateAccess] = access;
     s.savedCrcControl = dc[kDcCrcControl];
     for (unsigned i = 0; i < 8; ++i)
-        s.savedCsc[i] = dc[kWinc + NativePlanes::kCscYof + i];
+        s.savedCsc[i] = dc[kWinc + native_planes::kCscYof + i];
     for (unsigned i = 0; i < 16; ++i) {
-        s.savedHTaps[i] = dc[kWinc + NativePlanes::kHFilter0 + i];
-        s.savedVTaps[i] = dc[kWinc + NativePlanes::kVFilter0 + i];
+        s.savedHTaps[i] = dc[kWinc + native_planes::kHFilter0 + i];
+        s.savedVTaps[i] = dc[kWinc + native_planes::kVFilter0 + i];
     }
     s.saved = true;
 }
 
 bool columnScanRestoredOk()
 {
-    ColumnScanState &s = columnScan;
+    const ColumnScanState &s = columnScan;
     const uint32_t access = dc[kDcStateAccess] & ~(kReadMuxActive | kWriteMuxActive);
     dc[kDcStateAccess] = access | kReadMuxActive;
     dc[kDcWindowHeader] = kWindowASelect;
@@ -238,7 +243,7 @@ bool columnScanRestoredOk()
 }
 
 // Window A's assembly registers (WIN_OPTIONS last) and the CRC unit, latched together at the next frame boundary.
-void columnScanShow(const NativeColumnScan::Window &w)
+void columnScanShow(const native_column_scan::Window &w)
 {
     dc[kDcStateAccess] = dc[kDcStateAccess] & ~(kReadMuxActive | kWriteMuxActive);
     dc[kDcWindowHeader] = kWindowASelect;
@@ -271,7 +276,7 @@ void columnScanRequest()
 
 void columnScanRestoreWindow()
 {
-    ColumnScanState &s = columnScan;
+    const ColumnScanState &s = columnScan;
     dc[kDcStateAccess] = dc[kDcStateAccess] & ~(kReadMuxActive | kWriteMuxActive);
     dc[kDcWindowHeader] = kWindowASelect;
     dc[kWinbufStartAddrU] = s.savedStartU;
@@ -286,42 +291,42 @@ void columnScanRestoreWindow()
 void columnScanWriteUnshadowed(const uint32_t *csc, const uint32_t *hTaps, const uint32_t *vTaps)
 {
     for (unsigned i = 0; i < 8; ++i)
-        dc[kWinc + NativePlanes::kCscYof + i] = csc[i];
+        dc[kWinc + native_planes::kCscYof + i] = csc[i];
     for (unsigned i = 0; i < 16; ++i) {
-        dc[kWinc + NativePlanes::kHFilter0 + i] = hTaps[i];
-        dc[kWinc + NativePlanes::kVFilter0 + i] = vTaps[i];
+        dc[kWinc + native_planes::kHFilter0 + i] = hTaps[i];
+        dc[kWinc + native_planes::kVFilter0 + i] = vTaps[i];
     }
 }
 
-void columnScanPerform(NativeColumnScan::Run::Action action)
+void columnScanPerform(native_column_scan::Run::Action action)
 {
-    ColumnScanState &s = columnScan;
+    const ColumnScanState &s = columnScan;
     switch (action) {
-    case NativeColumnScan::Run::kNothing:
+    case native_column_scan::Run::kNothing:
         return;
-    case NativeColumnScan::Run::kStart: {
+    case native_column_scan::Run::kStart: {
         columnScanSave();
         const uint32_t depth = windowActive(kWinColorDepth);
         gPanicRestore.columnScanDepth = depth;
         __asm__ volatile("dmb ish" ::: "memory");
         gPanicRestore.columnScan = true;
-        columnScanShow(NativeColumnScan::referenceWindow(
+        columnScanShow(native_column_scan::referenceWindow(
             planeSlotIova(s.referenceSlot),
-            depth == NativePlanes::kDepthR8G8B8A8 ? depth : NativePlanes::kDepthB8G8R8A8));
+            depth == native_planes::kDepthR8G8B8A8 ? depth : native_planes::kDepthB8G8R8A8));
         return;
     }
-    case NativeColumnScan::Run::kShowScan: {
+    case native_column_scan::Run::kShowScan: {
         uint32_t vTaps[16];
         for (unsigned i = 0; i < 16; ++i)
-            vTaps[i] = NativePlanes::vFilterTap(i);
-        columnScanWriteUnshadowed(NativePlanes::kCsc[NativePlanes::kBt709][1], NativePlanes::kHFilterTaps, vTaps);
+            vTaps[i] = native_planes::vFilterTap(i);
+        columnScanWriteUnshadowed(native_planes::kCsc[native_planes::kBt709][1], native_planes::kHFilterTaps, vTaps);
         columnScanShow(s.scan);
         return;
     }
-    case NativeColumnScan::Run::kRestore:
+    case native_column_scan::Run::kRestore:
         columnScanRestoreWindow();
         return;
-    case NativeColumnScan::Run::kFinish:
+    case native_column_scan::Run::kFinish:
         columnScanFinish();
         return;
     }
@@ -333,30 +338,34 @@ void columnScanFrameEnd()
     ColumnScanState &s = columnScan;
     if (!s.run.busy())
         return;
-    const NativeColumnScan::Run::Stage stage = s.run.stage;
+    const native_column_scan::Run::Stage stage = s.run.stage;
     const uint32_t underflow = s.run.windowChanged() ? dc[kDcIntStatus] & kWinAUnderflowInt : 0;
     if (underflow)
         dc[kDcIntStatus] = underflow;
-    const NativeColumnScan::Window active = columnScanActive();
-    const bool asWritten = stage == NativeColumnScan::Run::kScan ? NativeColumnScan::sameWindow(active, s.scan)
-                           : stage == NativeColumnScan::Run::kRestoreLatch ? columnScanRestoredOk()
-                                                                           : true;
-    if (stage == NativeColumnScan::Run::kWaiting)
+    const native_column_scan::Window active = columnScanActive();
+    bool asWritten = true;
+    if (stage == native_column_scan::Run::kScan) {
+        asWritten = native_column_scan::sameWindow(active, s.scan);
+    } else if (stage == native_column_scan::Run::kRestoreLatch) {
+        asWritten = columnScanRestoredOk();
+    }
+    if (stage == native_column_scan::Run::kWaiting)
         s.busyReason = columnScanInFlight();
     const uint32_t crc = dc[kDcCrcLatched];
-    const bool requestOut = dc[kDcStateControl] & (kGeneralActReq | kWinAActReq);
-    const NativeColumnScan::Run::Action action = s.run.frameEnd(!s.busyReason, requestOut, crc, underflow, asWritten);
-    if (stage == NativeColumnScan::Run::kScan)
+    const bool requestOut = (dc[kDcStateControl] & (kGeneralActReq | kWinAActReq)) != 0u;
+    const native_column_scan::Run::Action action =
+        s.run.frameEnd(s.busyReason == nullptr, requestOut, crc, underflow != 0u, asWritten);
+    if (stage == native_column_scan::Run::kScan)
         columnScanLogFrame(crc, underflow, active, asWritten);
     columnScanPerform(action);
-    if (action == NativeColumnScan::Run::kFinish && kickDeferred) {  // the swaps held since the request go
+    if (action == native_column_scan::Run::kFinish && kickDeferred) {  // the swaps held since the request go
         kickDeferred = false;
         kickSwapQueue();
     }
 }
 
 // One string: the kernel's os_log drops a record whose scalar arguments outgrow its 256-byte buffer.
-void columnScanLogFrame(uint32_t crc, uint32_t underflow, const NativeColumnScan::Window &w, bool asWritten)
+static void columnScanLogFrame(uint32_t crc, uint32_t underflow, const native_column_scan::Window &w, bool asWritten)
 {
     char line[320];
     snprintf(line, sizeof(line),
@@ -383,30 +392,34 @@ void columnScanFinish()
     }
 }
 
-void columnScanSummary()
+static void columnScanSummary()
 {
-    const NativeColumnScan::Run &r = columnScan.run;
+    const native_column_scan::Run &r = columnScan.run;
     char verdict[200];
-    if (r.exact())
+    if (r.exact()) {
         snprintf(verdict, sizeof(verdict), "PASS, pixel-exact: its CRC is the reference frame's");
-    else if (r.clean())
+    } else if (r.clean()) {
         snprintf(verdict, sizeof(verdict),
                  "PASS, clean but not pixel-exact: stable, no underflow, registers as written, CRC not the "
                  "reference frame's");
-    else
+    } else {
         snprintf(verdict, sizeof(verdict), "FAILED at %s: %s%s%s",
-                 NativeColumnScan::Run::name(r.why ? r.failedAt : NativeColumnScan::Run::kScan),
+                 native_column_scan::Run::name(r.why ? r.failedAt : native_column_scan::Run::kScan),
                  r.why ? r.why : "unstable, underflowing or not as written", columnScan.busyReason ? ", " : "",
                  columnScan.busyReason ? columnScan.busyReason : "");
+    }
+    const char *windowA = "untouched";
+    if (r.restored) {
+        windowA = "restored and read back";
+    } else if (r.restoreWritten) {
+        windowA = "restore written, not confirmed";
+    }
     IOLog("SwitchDisplay: column scan %s; %u-GOB blocks; reference CRC %#x (%u underflow frames), column scan CRC "
           "%#x (%u changes over frames %u-%u), %u underflow frames, registers not as written in %u of %u frames; "
           "window A %s\n",
           verdict, 1u << columnScan.yLog2, r.reference, r.referenceUnderflows, r.scanCrc, r.crcChanges,
-          NativeColumnScan::Run::kTransitionFrames + 1, NativeColumnScan::Run::kScanFrames, r.underflows, r.mismatches,
-          r.scanFrames,
-          r.restored         ? "restored and read back"
-          : r.restoreWritten ? "restore written, not confirmed"
-                             : "untouched");
+          native_column_scan::Run::kTransitionFrames + 1, native_column_scan::Run::kScanFrames, r.underflows,
+          r.mismatches, r.scanFrames, windowA);
 }
 
 // The display stops, sleeps or goes off mid-run (no frame end will come): window A's saved registers go into the
@@ -420,7 +433,7 @@ void columnScanAbort(const char *reason)
     columnScanFinish();
 }
 #else
-bool columnScanBusy()
+static bool columnScanBusy()
 {
     return false;
 }

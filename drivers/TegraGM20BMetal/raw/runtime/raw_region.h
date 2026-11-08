@@ -21,7 +21,7 @@ struct DrawGeometry {
     const uint8_t *matrix = nullptr;  // the float4x4 at vertex buffer 2
     PositionStream positions;
     uint64_t positionBytes = 0;        // bound from positions.base
-    uint32_t first = 0, count = 0;     // vertices, or indices where `indices` is set
+    uint32_t first = 0, count = 0;     // the first vertex and the vertex count, or the base vertex and the index count
     const uint8_t *indices = nullptr;  // 2- or 4-byte indices
     uint32_t indexSize = 0;
     WindowViewport viewport;
@@ -109,15 +109,17 @@ public:
         for (uint32_t i = 0; i < g.count; i++) {
             uint32_t v = g.first + i;
             if (g.indices) {
+                uint32_t x;
                 if (g.indexSize == 2) {
-                    uint16_t x;
-                    memcpy(&x, g.indices + 2 * i, 2);
-                    v = x == 0xffff ? ~0u : x;
+                    uint16_t h;
+                    memcpy(&h, g.indices + 2 * i, 2);
+                    x = h == 0xffff ? ~0u : h;
                 } else {
-                    memcpy(&v, g.indices + 4 * i, 4);
+                    memcpy(&x, g.indices + 4 * i, 4);
                 }
-                if (v == ~0u)
+                if (x == ~0u)
                     continue;  // a strip's restart
+                v = g.first + x;
             }
             if (uint64_t(v) * g.positions.stride + reach > g.positionBytes || !b.add(g.positions, v))
                 return false;

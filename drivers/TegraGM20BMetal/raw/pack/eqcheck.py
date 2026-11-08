@@ -62,26 +62,70 @@ FIRST_RUN = ('cb0 root draw=',)
 
 
 def run_state(lines: list[str]) -> list[str]:
-    return [x for x in lines if not x.startswith(LAST_RUN + FIRST_RUN)]
+    return [x for x in lines if not x.startswith((*LAST_RUN, *FIRST_RUN, 'ib '))]
+
+
+# An indexed draw's index buffer line (nvdec.cpp), its indices by value
+IB = re.compile(r'ib size=(\d+) first=(\d+) count=(\d+) idx=([0-9a-f,]+) restart=(\w+) end=(\w+)$')
+
+
+def ib_line(lines: list[str]) -> re.Match[str] | None:
+    return next((m for m in map(IB.match, lines) if m), None)
+
+
+def fold_indexed(prev: dict, ev: dict) -> dict | None:
+    """Give indexed run `ev` folded into the indexed draw `prev`, or None where it is no run of it.
+
+    A run's indices follow the draw's in the same index buffer; the draw then reads the vertices up to the largest index
+    of either (the vertex bytes of the run that reaches further).
+    """
+    a, b = ib_line(prev['lines']), ib_line(ev['lines'])
+    if not a or not b or (a[1], a[5], a[6]) != (b[1], b[5], b[6]) or int(b[2]) != int(a[2]) + int(a[3]):
+        return None
+    pm, em = DRAW_HEAD.match(prev['head']), DRAW_HEAD.match(ev['head'])
+    further = ev if int(em[3]) >= int(pm[3]) else prev
+    vertices = {x.split()[0]: x for x in further['lines'] if x.startswith(LAST_RUN)}
+    ib = f'ib size={a[1]} first={a[2]} count={int(a[3]) + int(b[3])} idx={a[4]},{b[4]} restart={a[5]} end={a[6]}'
+    lines = []
+    for line in prev['lines']:
+        if line.startswith('ib '):
+            lines.append(ib)
+        elif line.startswith(LAST_RUN):
+            lines.append(vertices.get(line.split()[0], line))
+        else:
+            lines.append(line)
+    count = max(int(pm[3]), int(em[3]))
+    return {'head': f'{pm[1]} first={pm[2]} count={count} begin={pm[4]} barriers={pm[5]}', 'lines': lines}
 
 
 def fold_runs(events: list[dict]) -> list[dict]:
     """Give the events with each split draw's runs folded into one draw of the vertices they cover.
 
-    A run folds into the draw before it when that is a draw of the same kind and state, it is not indexed, and its
-    vertices begin no later than the draw's end: a list's runs partition its vertices, a strip's share the two that
-    join their triangles. Any other run stays a draw of its own, so the comparison fails on it.
+    A run folds into the draw before it when that is a draw of the same kind and state and the run continues it: a
+    non-indexed run's vertices begin no later than the draw's end (a list's runs partition its vertices, a strip's share
+    the two that join their triangles), an indexed run's indices follow the draw's (fold_indexed). Any other run stays a
+    draw of its own, so the comparison fails on it.
     """
     out: list[dict] = []
     for ev in events:
         m = DRAW_HEAD.match(ev['head'])
         barriers = set(m.group(5).split(',')) - {''} if m else set()
         prev = DRAW_HEAD.match(out[-1]['head']) if m and SPLIT in barriers and out else None
-        if not prev or m.group(1) != 'DRAW' or prev.group(1) != m.group(1) or prev.group(4) != m.group(4):
+        if not prev or prev.group(1) != m.group(1) or prev.group(4) != m.group(4):
             out.append(ev)
             continue
+        if run_state(out[-1]['lines']) != run_state(ev['lines']):
+            out.append(ev)
+            continue
+        if m.group(1) == 'DRAW-INDEXED':
+            folded = fold_indexed(out[-1], ev)
+            if folded is None:
+                out.append(ev)
+            else:
+                out[-1] = folded
+            continue
         first, end, start = int(prev.group(2)), int(prev.group(2)) + int(prev.group(3)), int(m.group(2))
-        if not first <= start <= end or run_state(out[-1]['lines']) != run_state(ev['lines']):
+        if not first <= start <= end:
             out.append(ev)
             continue
         end = max(end, start + int(m.group(3)))
@@ -296,6 +340,15 @@ def compare_draw(tally: Tally, fi: int, di: int, x: collections.OrderedDict, y: 
 ELIDED = 'ELIDED'
 
 
+# A draw that reads a constant buffer over bytes the copy engine wrote after its channel's last constant-cache
+# invalidate (nvdec.cpp): wrong on either side
+CBSTALE = 'CBSTALE'
+# What the raw path must cover of NVK's barriers before a draw. CBINV: NVK invalidates the constant cache as it opens
+# each submission and each of m2v's encoders (a primary command buffer of its own), and where a uniform read follows a
+# transfer write
+REQUIRED = {'TEXINV', 'WFI', 'PSB', 'CBINV'}
+
+
 def compare_barriers(tally: Tally, where: str, xb: set[str], yb: set[str]) -> bool:
     missing = xb - yb
     if ELIDED in yb and missing <= {'PSB', 'TEXINV'}:
@@ -305,7 +358,12 @@ def compare_barriers(tally: Tally, where: str, xb: set[str], yb: set[str]) -> bo
         tally.bar_missing[m] += 1
     for m in yb - xb - {ELIDED}:
         tally.bar_extra[m] += 1
-    if 'TEXINV' not in missing and 'WFI' not in missing and 'PSB' not in missing:
+    if CBSTALE in xb | yb:
+        tally.mism['constant cache stale'] += 1
+        if tally.wants('constant cache stale'):
+            tally.examples['constant cache stale'].append(f'{where}: nvk {sorted(xb)} raw {sorted(yb)}')
+        return False
+    if not missing & REQUIRED:
         return True
     tally.mism['barrier (fetch/pass)'] += 1
     if tally.wants('barrier (fetch/pass)'):

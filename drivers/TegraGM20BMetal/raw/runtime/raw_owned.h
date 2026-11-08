@@ -51,6 +51,17 @@ constexpr MethodRange kOwnedMethods[] = {
     {0x1598, 0x15A8},
     {0x179C, 0x17A0},
     {0x19CC, 0x19D0},
+    // SET_PATCH: no raw draw is of patches, and the generator's probe left it as its command buffers' history had it
+    {0x0DCC, 0x0DD0},
+    // cache invalidates and flushes: actions, which the raw path issues itself (a submission's prologue, a barrier), though NVK
+    // leaves the last one's data behind as if it were state
+    {0x021C, 0x0220},
+    {0x0DA4, 0x0DA8},
+    {0x0F74, 0x0F78},
+    {0x1144, 0x1148},
+    {0x1288, 0x128C},
+    {0x1338, 0x133C},
+    {0x1424, 0x142C},
 };
 // clang-format on
 

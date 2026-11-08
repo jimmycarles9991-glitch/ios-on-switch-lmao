@@ -86,19 +86,19 @@ bool switchxhci_start(char *why, size_t whySize);
 // USB2 pad 0's role (XusbHost.h setHostRole; before or after switchxhci_start); with the controller running, host also
 // cycles the OTG port's PORTSC.PP. Thread context.
 void switchxhci_set_host_role(bool host);
-void switchxhci_expect_port_change(void);  // a device appeared in host role: arm the lost-interrupt check
+void switchxhci_expect_port_change();  // a device appeared in host role: arm the lost-interrupt check
 // The USB-C cable in or out in the host role: the connector's root ports powered for a device (SuperSpeed first, while
 // SS port 0's lane is up), or held off. Thread context.
 void switchxhci_cable(bool connected);
 // SS port 0's lane came up or went down with the cable in: its root port follows (XusbLanes.h xusb_ss_port_follow).
 // Role thread.
-void switchxhci_superspeed(void);
+void switchxhci_superspeed();
 // switch_usb_suspend/resume's host half: the Tegra side down for SC7, and powered with its firmware again after it.
 void switchxhci_sleep(bool entering);
 bool switchxhci_remote_wake_armed();  // a device on the port can wake this SC7 (PMC wake event 39)
 // SwitchUSB.cpp: host mode off for this boot (a never-booted interrupt line did not deliver; the caller logged it).
 // Thread context.
-void switch_usb_host_failed(void);
+void switch_usb_host_failed();
 // The role line's xHCI part: USBCMD, USBSTS, every PORTSC (once powered), the last PP cycle and the pad controller.
 void switchxhci_describe(char *buffer, size_t size);
 #endif

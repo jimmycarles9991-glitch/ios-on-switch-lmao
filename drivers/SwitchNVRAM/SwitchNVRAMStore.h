@@ -22,6 +22,10 @@
 #include <string.h>
 #include "../../kits/SwitchCRC/SwitchCRC.h"
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 #define SWITCH_NVRAM_STORE_VERSION   1u
 #define SWITCH_NVRAM_STORE_HEADER    32u
 #define SWITCH_NVRAM_STORE_MAX_IMAGE 0x10000u
@@ -35,7 +39,7 @@ static inline uint32_t switch_nvram_get32(const uint8_t *p)
 
 static inline void switch_nvram_put32(uint8_t *p, uint32_t value)
 {
-    for (int i = 0; i < 4; ++i)
+    for (unsigned i = 0; i < 4; ++i)
         p[i] = (uint8_t)(value >> (8 * i));
 }
 
@@ -59,12 +63,13 @@ static inline int switch_nvram_chrp_valid(const uint8_t *image, uint32_t bytes)
         sum = (sum & 0xff) + (sum >> 8);
     if (sum != image[1])
         return 0;
-    uint32_t low = 1, high = 0;
+    uint32_t low = 1;
+    uint32_t high = 0;
     for (uint32_t i = 20; i < bytes; ++i) {
         low = (low + image[i]) % 65521u;
         high = (high + low) % 65521u;
     }
-    return switch_nvram_get32(image + 16) == (high << 16 | low);
+    return switch_nvram_get32(image + 16) == (high << 16 | low) ? 1 : 0;
 }
 
 // Fills one slot (switch_nvram_store_stride(bytes) bytes at slot) for image.
@@ -77,7 +82,7 @@ static inline void switch_nvram_store_fill(uint8_t *slot, const uint8_t *image, 
     switch_nvram_put32(slot + 16, (uint32_t)sequence);
     switch_nvram_put32(slot + 20, (uint32_t)(sequence >> 32));
     memcpy(slot + SWITCH_NVRAM_STORE_HEADER, image, bytes);
-    uint32_t crc = switch_crc32(0, slot, 28);
+    const uint32_t crc = switch_crc32(0, slot, 28);
     switch_nvram_put32(slot + 28, switch_crc32(crc, image, bytes));
 }
 
@@ -88,7 +93,8 @@ static inline const uint8_t *switch_nvram_store_slot(const uint8_t *file, size_t
     const size_t stride = switch_nvram_store_stride(bytes);
     if (bytes > SWITCH_NVRAM_STORE_MAX_IMAGE || n > 1 || length < n * stride + SWITCH_NVRAM_STORE_HEADER + bytes)
         return NULL;
-    const uint8_t *slot = file + n * stride, *image = slot + SWITCH_NVRAM_STORE_HEADER;
+    const uint8_t *slot = file + n * stride;
+    const uint8_t *image = slot + SWITCH_NVRAM_STORE_HEADER;
     if (memcmp(slot, switch_nvram_store_magic, sizeof(switch_nvram_store_magic)) ||
         switch_nvram_get32(slot + 8) != SWITCH_NVRAM_STORE_VERSION || switch_nvram_get32(slot + 12) != bytes ||
         switch_nvram_get32(slot + 24) != 0)
@@ -104,13 +110,17 @@ static inline const uint8_t *switch_nvram_store_slot(const uint8_t *file, size_t
 static inline int switch_nvram_store_pick(const uint8_t *file, size_t length, uint32_t bytes, uint64_t *sequence)
 {
     uint64_t found[2] = {0, 0};
-    const int ok0 = switch_nvram_store_slot(file, length, bytes, 0, &found[0]) != NULL;
-    const int ok1 = switch_nvram_store_slot(file, length, bytes, 1, &found[1]) != NULL;
+    const int ok0 = switch_nvram_store_slot(file, length, bytes, 0, &found[0]) != NULL ? 1 : 0;
+    const int ok1 = switch_nvram_store_slot(file, length, bytes, 1, &found[1]) != NULL ? 1 : 0;
     if (!ok0 && !ok1)
         return -1;
-    const int pick = ok1 && (!ok0 || found[1] > found[0]);
+    const int pick = (ok1 && (!ok0 || found[1] > found[0])) ? 1 : 0;
     *sequence = found[pick];
     return pick;
 }
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif

@@ -46,6 +46,7 @@ class NativeSwitchWatchdog;
 static NativeSwitchWatchdog *gWatchdog;  // set once its start succeeded; never released
 
 class NativeSwitchWatchdog : public IOWatchdog {
+    // NOLINTNEXTLINE(misc-explicit-constructor): IOKit's structors macro declares the metaclass constructor
     OSDeclareDefaultStructors(NativeSwitchWatchdog) IOWorkLoop *loop_;
     IOTimerEventSource *timer_;
     IONotifier *power_;
@@ -152,19 +153,18 @@ void NativeSwitchWatchdog::arm()
         timer_->cancelTimeout();
         return;
     }
-    bool monitoring;
-    const uint64_t deadline = snapshot(&monitoring), now = mach_absolute_time();
-    if (!monitoring) {
-        // Turned off by watchdogd (system sleep): its re-enable sets now +90 s without a call into us.
-        timer_->wakeAtTime(kIOTimeOptionsWithLeeway, now + recheck_, leeway_);
-    } else if (deadline > now) {
+    bool monitoring = false;
+    const uint64_t deadline = snapshot(&monitoring);
+    const uint64_t now = mach_absolute_time();
+    if (monitoring && deadline > now) {
         timer_->wakeAtTime(kIOTimeOptionsWithLeeway, deadline - now < recheck_ ? deadline : now + recheck_, leeway_);
-    } else if (IOPMRootDomainGetWillShutdown()) {
+    } else if (monitoring && IOPMRootDomainGetWillShutdown()) {
         // Past due during shutdown: the check's own later limits (91/600 s since the last check-in, 121 s after vfs
         // shutdown) need it re-run every second, as the SoC watchdog's interrupt does. Until the power-off.
         timer_->wakeAtTime(now + overdue_);
     } else {
-        // Past due and no panic: defanged (debugger, single user). Looked at again when a check-in could have come.
+        // Turned off by watchdogd (system sleep): its re-enable sets now +90 s without a call into us. Or past due and
+        // no panic: defanged (debugger, single user). Looked at again when a check-in could have come.
         timer_->wakeAtTime(kIOTimeOptionsWithLeeway, now + recheck_, leeway_);
     }
 }
@@ -207,7 +207,7 @@ IOReturn NativeSwitchWatchdog::crashedGated(OSObject *owner, void *pid, void *si
     IOSimpleLockUnlockEnableInterrupt(lock, state);
     self->timer_->cancelTimeout();
     IOLog("SwitchWatchdog: watchdogd[%d] crashed (signal %d): no panic for it; userspace watchdog off for this boot\n",
-          (int)(intptr_t)pid, (int)(intptr_t)signal);
+          static_cast<int>(reinterpret_cast<intptr_t>(pid)), static_cast<int>(reinterpret_cast<intptr_t>(signal)));
     return kIOReturnSuccess;
 }
 
@@ -233,7 +233,8 @@ IOReturn NativeSwitchWatchdog::thermalOffGated(OSObject *owner, void *why, void 
 
 void NativeSwitchWatchdog::daemonCrashed(int pid, int signal)
 {
-    loop_->runAction(&NativeSwitchWatchdog::crashedGated, this, (void *)(intptr_t)pid, (void *)(intptr_t)signal);
+    loop_->runAction(&NativeSwitchWatchdog::crashedGated, this, reinterpret_cast<void *>(static_cast<intptr_t>(pid)),
+                     reinterpret_cast<void *>(static_cast<intptr_t>(signal)));
 }
 
 // Like the SoC watchdog in SC7: the deadline keeps the time it had left (mach_absolute_time may or may not count sleep).
@@ -244,8 +245,9 @@ IOReturn NativeSwitchWatchdog::sleepGated(OSObject *owner, void *, void *, void 
         return kIOReturnSuccess;
     self->asleep_ = true;
     self->timer_->cancelTimeout();
-    bool monitoring;
-    const uint64_t deadline = self->snapshot(&monitoring), now = mach_absolute_time();
+    bool monitoring = false;
+    const uint64_t deadline = self->snapshot(&monitoring);
+    const uint64_t now = mach_absolute_time();
     self->pausedDeadline_ = monitoring && deadline > now ? deadline : 0;
     self->pausedLeft_ = self->pausedDeadline_ ? deadline - now : 0;
     return kIOReturnSuccess;
@@ -273,11 +275,12 @@ IOReturn NativeSwitchWatchdog::wakeGated(OSObject *owner, void *, void *, void *
 IOReturn NativeSwitchWatchdog::powerMessage(void *target, void *, UInt32 type, IOService *, void *, vm_size_t)
 {
     auto *self = static_cast<NativeSwitchWatchdog *>(target);
-    if (type == kIOMessageSystemWillSleep)
+    if (type == kIOMessageSystemWillSleep) {
         self->loop_->runAction(&NativeSwitchWatchdog::sleepGated, self);
-    else if (type == kIOMessageSystemWillNotSleep || type == kIOMessageSystemWillPowerOn ||
-             type == kIOMessageSystemHasPoweredOn)
+    } else if (type == kIOMessageSystemWillNotSleep || type == kIOMessageSystemWillPowerOn ||
+               type == kIOMessageSystemHasPoweredOn) {
         self->loop_->runAction(&NativeSwitchWatchdog::wakeGated, self);
+    }
     return kIOReturnSuccess;  // acknowledged
 }
 
@@ -290,11 +293,12 @@ extern "C" IOService *switch_watchdog_allocate(void)
 extern "C" void switch_watchdogd_crashed(int pid, int signal)
 {
     NativeSwitchWatchdog *watchdog = gWatchdog;
-    if (watchdog)
+    if (watchdog) {
         watchdog->daemonCrashed(pid, signal);
-    else
+    } else {
         IOLog("SwitchWatchdog: watchdogd[%d] crashed (signal %d) with no NativeSwitchWatchdog: no panic for it\n", pid,
               signal);
+    }
 }
 
 // The primary PMU watchdogd requires (IOService with IOPropertyMatch {IOPMUPrimary: 1}, else os_crash()). The Switch's
@@ -302,7 +306,9 @@ extern "C" void switch_watchdogd_crashed(int pid, int signal)
 // IOPMUBootAppName (the foreground app), readable with ioreg. Its name is not AppleDialogSPMIPMU, which bluetoothd looks
 // for; DumpPanic finds it, reads no IOPMUBootError* fault data from it, then writes IOPMUBootErrorClear as it does on
 // J120's PMU: with no fault record here there is nothing to clear, so the write is taken as done.
+// NOLINTNEXTLINE(misc-use-internal-linkage): OSDefineMetaClassAndStructors needs the class's external linkage
 class NativeSwitchPMU : public IOService {
+    // NOLINTNEXTLINE(misc-explicit-constructor): IOKit's structors macro declares the metaclass constructor
 OSDeclareDefaultStructors(NativeSwitchPMU)
 
     public : bool start(IOService *provider) override;
@@ -324,7 +330,7 @@ OSDefineMetaClassAndStructors(NativeSwitchPMU, IOService)
 
 IOReturn NativeSwitchPMU::setProperties(OSObject *properties)
 {
-    OSDictionary *dict = OSDynamicCast(OSDictionary, properties);
+    const OSDictionary *dict = OSDynamicCast(OSDictionary, properties);
     if (!dict)
         return kIOReturnBadArgument;
     static const char *const keys[] = {"IOPMUBootStage", "IOPMUBootAppName"};

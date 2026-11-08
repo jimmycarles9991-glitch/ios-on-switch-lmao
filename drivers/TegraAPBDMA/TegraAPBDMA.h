@@ -80,14 +80,14 @@ void tegra_apbdma_start_rx_words(struct tegra_apbdma_channel *ch, uint32_t apb, 
                                  uint32_t words);
 // Bytes moved in the current pass of the transfer last started (0 .. size, word-granular), and whether an end-of-count
 // is pending that the interrupt has not taken yet (the count then belongs to the next pass, or the transfer is done).
-uint32_t tegra_apbdma_moved(struct tegra_apbdma_channel *ch, bool *endPending);
+uint32_t tegra_apbdma_moved(const struct tegra_apbdma_channel *ch, bool *endPending);
 // The channel off, its interrupt status cleared. Bytes in flight in a burst may still land (the caller stops the
 // device's requests first).
-void tegra_apbdma_stop(struct tegra_apbdma_channel *ch);
-bool tegra_apbdma_running(struct tegra_apbdma_channel *ch);
+void tegra_apbdma_stop(const struct tegra_apbdma_channel *ch);
+bool tegra_apbdma_running(const struct tegra_apbdma_channel *ch);
 // Interrupts taken (end-of-counts) since open.
-uint32_t tegra_apbdma_interrupts(struct tegra_apbdma_channel *ch);
+uint32_t tegra_apbdma_interrupts(const struct tegra_apbdma_channel *ch);
 // One line of the channel's registers and its interrupt's GIC state, for a log or panic line.
-void tegra_apbdma_describe(struct tegra_apbdma_channel *ch, char *buffer, size_t size);
+void tegra_apbdma_describe(const struct tegra_apbdma_channel *ch, char *buffer, size_t size);
 
 #endif

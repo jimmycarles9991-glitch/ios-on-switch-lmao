@@ -9,8 +9,9 @@ bool switch_dma_alloc(switch_dma_buffer *out, size_t size, uint64_t physicalMask
     *out = {};
     if (!size || !physicalMask)
         return false;
-    const IOOptionBits options = (IOOptionBits)kIODirectionInOut | (IOOptionBits)kIOMemoryPhysicallyContiguous |
-                                 (IOOptionBits)kIOMemoryMapperNone | extraOptions;
+    const IOOptionBits options = static_cast<IOOptionBits>(kIODirectionInOut) |
+                                 static_cast<IOOptionBits>(kIOMemoryPhysicallyContiguous) |
+                                 static_cast<IOOptionBits>(kIOMemoryMapperNone) | extraOptions;
     IOBufferMemoryDescriptor *memory =
         IOBufferMemoryDescriptor::inTaskWithPhysicalMask(kernel_task, options, size, physicalMask);
     if (!memory)
@@ -22,7 +23,7 @@ bool switch_dma_alloc(switch_dma_buffer *out, size_t size, uint64_t physicalMask
     IOByteCount contiguous = 0;
     const uint64_t pa = memory->getPhysicalSegment(0, &contiguous, kIOMemoryMapperNone);
     auto *va = static_cast<uint8_t *>(memory->getBytesNoCopy());
-    const uint64_t ceiling = UINT64_MAX >> (unsigned)__builtin_clzll(physicalMask);
+    const uint64_t ceiling = UINT64_MAX >> static_cast<unsigned>(__builtin_clzll(physicalMask));
     if (!pa || !va || contiguous < size || pa + (size - 1) > ceiling) {
         memory->complete();
         memory->release();

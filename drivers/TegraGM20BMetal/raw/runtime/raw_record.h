@@ -39,12 +39,20 @@ struct RuntimeRecord {
 };
 
 // One state's probe: its submissions with tagged payloads of 256, 16 and 4096 bytes, the index its payloads are tagged with, and
-// its key
+// its key; `bound`: with 256-byte payloads each bound at its slot's own offset (probe.mm PROBE_BIND_OFFSET), whose push words
+// name each uniform slot's SlotBindOffset residual (none: the record takes only aligned offsets)
 struct ProbeRuns {
     const nvdec::ProbeSubmission *bytes256, *bytes16, *bytes4096;
     uint32_t index;
     std::string key;
+    const nvdec::ProbeSubmission *bound = nullptr;
 };
+
+// The offset the probe's bind-offset run binds a slot's payload at: below 256, one of its own for each stage and slot
+constexpr uint32_t probeBindOffset(uint32_t stage, uint32_t slot)
+{
+    return 4 * (1 + slot + (stage == 2 ? 31 : 0));
+}
 
 using ProgramLookup = std::function<const CapturedProgram *(const std::string &id)>;
 

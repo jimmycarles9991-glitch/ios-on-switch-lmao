@@ -36,7 +36,9 @@ __attribute__((noreturn)) static void unavailable(unsigned slot)
     panic("ShengPlatformPower: unimplemented operation %u", slot);
 }
 
+// NOLINTNEXTLINE(misc-use-internal-linkage): OSDefineMetaClassAndStructors needs the class's external linkage
 class ShengPlatformPower : public ApplePMGR {
+    // NOLINTNEXTLINE(misc-explicit-constructor): IOKit's structors macro declares the metaclass constructor
 OSDeclareDefaultStructors(ShengPlatformPower) public : void enableCPUCore(unsigned, uint64_t) override
     {
         unavailable(168);
@@ -113,7 +115,7 @@ IOReturn ShengPlatformPower::setProperties(OSObject *properties)
 {
     static uint32_t fraction[SWITCH_CLTM_CONTRIBUTORS] = {0x10000u, 0x10000u, 0x10000u, 0x10000u};
     static uint32_t ceiling = 0x10000u;
-    OSDictionary *dict = OSDynamicCast(OSDictionary, properties);
+    const OSDictionary *dict = OSDynamicCast(OSDictionary, properties);
     if (!dict)
         return kIOReturnBadArgument;
     unsigned taken = 0;
@@ -122,7 +124,7 @@ IOReturn ShengPlatformPower::setProperties(OSObject *properties)
         if (!value)
             continue;
         const uint64_t v = value->unsigned64BitValue();
-        __atomic_store_n(&fraction[i], v > 0x10000u ? 0x10000u : (uint32_t)v, __ATOMIC_RELAXED);
+        __atomic_store_n(&fraction[i], v > 0x10000u ? 0x10000u : static_cast<uint32_t>(v), __ATOMIC_RELAXED);
         setProperty(switch_cltm_keys[i], value);
         ++taken;
     }
@@ -167,7 +169,8 @@ extern "C" void sheng_pmgr_run(void)
         sheng_pmgr_checkpoint();
         return;
     }
-    const OSMetaClass *parent = lookup("ApplePMGR"), *nubMeta = lookup("ApplePMGRNub");
+    const OSMetaClass *parent = lookup("ApplePMGR");
+    const OSMetaClass *nubMeta = lookup("ApplePMGRNub");
     if (!parent || parent != &ApplePMGR::gMetaClass || parent->getClassSize() != sizeof(ApplePMGR) || !nubMeta ||
         nubMeta->getClassSize() != sizeof(ApplePMGRNub)) {
         sheng_pmgr_checkpoint();
@@ -208,11 +211,12 @@ extern "C" void sheng_pmgr_run(void)
         if (bound != reinterpret_cast<uintptr_t>(provider))
             break;
         sheng_pmgr_observation[0] = 3;
-        uint32_t value = sheng_original_pmgr_nub_read(nub);
+        const uint32_t value = sheng_original_pmgr_nub_read(nub);
         sheng_pmgr_observation[7] = value;
         sheng_original_pmgr_nub_write(nub, uint64_t(value | 4));
         sheng_pmgr_observation[8] = sheng_original_pmgr_nub_read(nub);
-        sheng_pmgr_observation[13] = nub->getProvider() != nullptr || provider->getProvider() != nullptr;
+        sheng_pmgr_observation[13] =
+            static_cast<uint64_t>(nub->getProvider() != nullptr || provider->getProvider() != nullptr);
         sheng_pmgr_observation[14] = (nub->getState() | provider->getState()) & kIOServiceRegisteredState;
         if (value != 0xffffffff || sheng_pmgr_observation[8] != 0xffffffff || sheng_pmgr_observation[13] ||
             sheng_pmgr_observation[14])
@@ -242,10 +246,11 @@ extern "C" void sheng_pmgr_run(void)
             provider->registerService(kIOServiceSynchronous);
             nub->registerService(kIOServiceSynchronous);
             sheng_pmgr_observation[0] = 5;
-            sheng_pmgr_observation[13] = nub->getProvider() == provider && provider->getProvider() == platform;
+            sheng_pmgr_observation[13] =
+                static_cast<uint64_t>(nub->getProvider() == provider && provider->getProvider() == platform);
             sheng_pmgr_observation[14] = (nub->getState() & provider->getState()) & kIOServiceRegisteredState;
-            auto matching = IOService::serviceMatching("ApplePMGRNub");
-            IOService *matched = matching ? IOService::waitForMatchingService(matching, 1000000) : nullptr;
+            auto *matching = IOService::serviceMatching("ApplePMGRNub");
+            const IOService *matched = matching ? IOService::waitForMatchingService(matching, 1000000) : nullptr;
             OSSafeReleaseNULL(matching);
             // Check actual service discovery and genuine type identity, then retain
             // both live objects. The registry and original nub refer to this provider.
@@ -265,6 +270,7 @@ extern "C" void sheng_pmgr_run(void)
         sheng_pmgr_observation[1] = kIOReturnSuccess;
     } while (false);
     OSSafeReleaseNULL(nub);
+    // NOLINTNEXTLINE(clang-analyzer-cplusplus.NewDeleteLeaks): OSObject's release() frees what new made
     OSSafeReleaseNULL(description);
     OSSafeReleaseNULL(provider);
     sheng_pmgr_observation[10] = ShengPlatformPower::gMetaClass.getInstanceCount();

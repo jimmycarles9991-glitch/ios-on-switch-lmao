@@ -22,6 +22,7 @@ OBJECT_TYPE_BTREE_NODE = 0x3
 OBJECT_TYPE_OMAP = 0xB
 OBJECT_TYPE_FS = 0xD
 BTNODE_ROOT, BTNODE_LEAF, BTNODE_FIXED_KV_SIZE = 0x1, 0x2, 0x4
+OMAP_VAL_DELETED = 0x1
 VOL_UUID_OFFSET = 240  # apfs_superblock_t.apfs_vol_uuid
 VOL_ROLE_OFFSET = 964  # apfs_superblock_t.apfs_role (u16)
 VOL_NAME_OFFSET = 704  # apfs_superblock_t.apfs_volname[256]
@@ -117,28 +118,44 @@ class Container:
         self._walk(tree, entries, depth=0)
         return entries
 
-    def _walk(self, paddr: int, entries: dict[tuple[int, int], int], depth: int) -> None:
+    def omap_latest(self, omap_paddr: int, xid: int) -> dict[int, int]:
+        """{oid: paddr} of the object map at omap_paddr as of transaction `xid`: each oid's newest live mapping."""
+        newest: dict[int, tuple[int, int, int]] = {}
+        for (oid, at), (flags, paddr) in self._entries_with_flags(omap_paddr).items():
+            if at <= xid and (oid not in newest or at > newest[oid][0]):
+                newest[oid] = (at, flags, paddr)
+        return {oid: paddr for oid, (_, flags, paddr) in newest.items() if not flags & OMAP_VAL_DELETED}
+
+    def _entries_with_flags(self, omap_paddr: int) -> dict[tuple[int, int], tuple[int, int]]:
+        omap = self.read(omap_paddr)
+        if object_header(omap)[2] != OBJECT_TYPE_OMAP or not checksum_ok(omap):
+            raise ApfsError(f'bad object map at block {omap_paddr}')
+        entries = {}
+        self._walk(struct.unpack_from('<Q', omap, 48)[0], entries, depth=0, flags=True)
+        return entries
+
+    def _walk(self, paddr: int, entries: dict, depth: int, flags: bool = False) -> None:
         if depth > 16:
             raise ApfsError('object map tree too deep')
         node = self.read(paddr)
         if not checksum_ok(node) or object_header(node)[2] not in (OBJECT_TYPE_BTREE, OBJECT_TYPE_BTREE_NODE):
             raise ApfsError(f'bad object map node at block {paddr}')
-        flags, _level, nkeys = struct.unpack_from('<HHI', node, 32)
+        node_flags, _level, nkeys = struct.unpack_from('<HHI', node, 32)
         table_off, table_len = struct.unpack_from('<HH', node, 40)
-        if not flags & BTNODE_FIXED_KV_SIZE:
+        if not node_flags & BTNODE_FIXED_KV_SIZE:
             raise ApfsError(f'object map node {paddr} is not fixed-size')
         toc = 56 + table_off
         keys = toc + table_len
-        value_end = self.block_size - (40 if flags & BTNODE_ROOT else 0)
+        value_end = self.block_size - (40 if node_flags & BTNODE_ROOT else 0)
         for i in range(nkeys):
             k, v = struct.unpack_from('<HH', node, toc + 4 * i)
             oid, xid = struct.unpack_from('<QQ', node, keys + k)
-            if flags & BTNODE_LEAF:
-                _flags, _size, target = struct.unpack_from('<IIQ', node, value_end - v)
-                entries[(oid, xid)] = target
+            if node_flags & BTNODE_LEAF:
+                value_flags, _size, target = struct.unpack_from('<IIQ', node, value_end - v)
+                entries[(oid, xid)] = (value_flags, target) if flags else target
             else:
                 child = struct.unpack_from('<Q', node, value_end - v)[0]
-                self._walk(child, entries, depth + 1)
+                self._walk(child, entries, depth + 1, flags)
 
     def volume_blocks(self) -> dict[int, bytes]:
         """{paddr: block} of every volume superblock any checkpoint's object map points at."""

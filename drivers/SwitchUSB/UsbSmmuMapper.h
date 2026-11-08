@@ -17,7 +17,7 @@ bool switch_usb_smmu_map(IOMemoryDescriptor *memory, uint64_t offset, uint64_t l
                          uint64_t alignment, uint64_t *address);
 bool switch_usb_smmu_owns(uint64_t address);
 // Unmaps what switch_usb_smmu_map gave `memory` at `address`: the range it covered and whether the controller could write it.
-bool switch_usb_smmu_unmap(IOMemoryDescriptor *memory, uint64_t address, uint64_t *offset, uint64_t *length,
+bool switch_usb_smmu_unmap(const IOMemoryDescriptor *memory, uint64_t address, uint64_t *offset, uint64_t *length,
                            bool *writable);
 
 // XusbHost.cpp: the falcon firmware image the controller reads by physical address (ILOAD_BASE).

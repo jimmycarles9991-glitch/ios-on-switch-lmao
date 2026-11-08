@@ -5,8 +5,7 @@
 #include <libkern/libkern.h>
 #include "TegraSMMU.h"
 #include "TegraSMMUAttachments.h"
-
-extern "C" vm_offset_t ml_io_map(vm_offset_t phys_addr, vm_size_t size);
+#include "../../kits/SwitchMMIO/SwitchMMIOKernel.h"
 
 namespace {
 constexpr vm_offset_t kMcPA = 0x70019000;
@@ -27,26 +26,30 @@ bool gAttachedFull;                // under gLock: an attachment the table could
 
 inline uint32_t r32(uint32_t o)
 {
-    return *(volatile uint32_t *)(gMc + o);
+    return switch_mmio_read32(gMc, o);
 }
 
 inline void w32(uint32_t o, uint32_t v)
 {
-    *(volatile uint32_t *)(gMc + o) = v;
+    switch_mmio_write32(gMc, o, v);
 }
 
 // The registers and the lock, made by the first caller (thread context).
 bool ready()
 {
     if (!__atomic_load_n(&gLock, __ATOMIC_ACQUIRE)) {
-        IOSimpleLock *fresh = IOSimpleLockAlloc(), *expected = nullptr;
+        IOSimpleLock *fresh = IOSimpleLockAlloc();
+        // NOLINTNEXTLINE(misc-const-correctness): the compare-exchange writes it
+        IOSimpleLock *expected = nullptr;
         if (!fresh)
             return false;
         if (!__atomic_compare_exchange_n(&gLock, &expected, fresh, false, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE))
             IOSimpleLockFree(fresh);
     }
     if (!__atomic_load_n(&gMc, __ATOMIC_ACQUIRE)) {
-        volatile uint8_t *mc = (volatile uint8_t *)ml_io_map(kMcPA, 0x1000), *expected = nullptr;
+        volatile uint8_t *mc = switch_mmio_map(kMcPA, 0x1000);
+        // NOLINTNEXTLINE(misc-const-correctness): the compare-exchange writes it
+        volatile uint8_t *expected = nullptr;
         if (!mc)
             return false;
         __atomic_compare_exchange_n(&gMc, &expected, mc, false, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE);

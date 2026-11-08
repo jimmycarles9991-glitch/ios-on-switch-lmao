@@ -1,0 +1,25 @@
+# kits/SwitchDT on the host, over stand-in registry entries.
+#
+#   bazel test //kits/SwitchDT/test:all
+load("//bazel/lint:defs.bzl", "lint_files")
+load("//bazel/testing:defs.bzl", "host_shims", "host_test")
+
+lint_files()
+
+host_shims(
+    name = "kernel",
+    headers = [
+        "IOKit/IORegistryEntry.h",
+        "libkern/c++/OSData.h",
+    ],
+    stubs = "switch_dt_stubs.h",
+)
+
+host_test(
+    name = "switch_dt_property_test",
+    srcs = [
+        "switch_dt_property_test.cpp",
+        "//kits/SwitchDT:SwitchDTProperty.h",
+    ],
+    deps = [":kernel"],
+)
