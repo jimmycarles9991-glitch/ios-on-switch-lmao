@@ -581,6 +581,42 @@ fn hash_is_verified() {
     );
 }
 
+/// A Core Image library of format 2.8 or later is keyed by its module's own SHA-256, whatever its
+/// `HASH` says (24B119's `ci_stdlib` lists one value no digest of its module gives, and Metal
+/// loads it). Format 2.7's, and every other kind's, `HASH` is still verified.
+#[test]
+fn a_core_image_library_from_format_2_8_is_keyed_by_its_module() {
+    let core_image = |version: (u16, u16), hash: Option<[u8; 32]>| {
+        let mut b = Builder::new(vec![FnSpec::new("_add", 5, 9), FnSpec::new("_asgDownH", 5, 9)]);
+        b.file_type = 1;
+        b.shared_bitcode = true;
+        b.version = version;
+        for f in &mut b.functions {
+            f.hash = hash;
+        }
+        b.build()
+    };
+    let apple = Some([0xb1; 32]);
+    for version in [(2, 8), (2, 9)] {
+        let bytes = core_image(version, apple);
+        let lib = metallib(&bytes);
+        let module = sha256(lib.functions[0].bitcode);
+        assert!(lib.functions.iter().all(|f| f.hash == module), "{version:?}");
+        assert_eq!(lib.functions[1].name, "_asgDownH");
+    }
+    assert_eq!(
+        container_kind(&parse(&core_image((2, 7), apple)).unwrap_err()),
+        ContainerError::HashMismatch
+    );
+    assert!(parse(&core_image((2, 7), None)).is_ok());
+    let mut executable = sample();
+    executable.functions[1].hash = apple;
+    assert_eq!(
+        container_kind(&parse(&executable.build()).unwrap_err()),
+        ContainerError::HashMismatch
+    );
+}
+
 #[test]
 fn unsupported_versions_and_library_kinds() {
     let mut b = sample();

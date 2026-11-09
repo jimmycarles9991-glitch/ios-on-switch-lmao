@@ -138,6 +138,7 @@ static Library &library(const std::string &file)
 // constants, then the constants.
 struct Stage {
     std::string name, file;
+    std::string as;  // the specialized name it was made under (as=)
     bool specialized = false;
     std::vector<std::string> constants;
 };
@@ -153,6 +154,8 @@ static Stage stage(const std::string &text)
     for (size_t i = 1; i < tokens.size(); i++)
         if (tokens[i].rfind("lib=", 0) == 0)
             id = tokens[i].substr(4);
+        else if (tokens[i].rfind("as=", 0) == 0)
+            s.as = tokens[i].substr(3);
         else if (tokens[i] == "spec")
             s.specialized = true;
         else
@@ -208,18 +211,45 @@ static id<MTLFunction> function(const Stage &s, Outcome &outcome, NSError **erro
         outcome = NoFunction;
         return nil;
     }
-    id<MTLFunction> f = s.specialized ? [l.library newFunctionWithName:@(s.name.c_str())
-                                                        constantValues:constants(s.constants)
-                                                                 error:error]
-                                      : [l.library newFunctionWithName:@(s.name.c_str())];
+    id<MTLFunction> f = nil;
+    if (!s.as.empty()) {
+        MTLFunctionDescriptor *d = [MTLFunctionDescriptor functionDescriptor];
+        d.name = @(s.name.c_str());
+        d.specializedName = @(s.as.c_str());
+        d.constantValues = constants(s.constants);
+        f = [l.library newFunctionWithDescriptor:d error:error];
+    } else
+        f = s.specialized
+                ? [l.library newFunctionWithName:@(s.name.c_str()) constantValues:constants(s.constants) error:error]
+                : [l.library newFunctionWithName:@(s.name.c_str())];
     outcome = f ? Made : Refused;
     return f;
+}
+
+// The functions an R line's state links, after its stages (" | <vl|vp|fl|fp> <stage>", the frontend's linkedText), into `d`
+static Outcome linkedStages(const std::vector<std::string> &parts, MTLRenderPipelineDescriptor *d, NSError **error)
+{
+    for (size_t i = 3; i < parts.size(); i++) {
+        const std::string tag = parts[i].substr(0, 3);
+        if (tag != "vl " && tag != "vp " && tag != "fl " && tag != "fp ")
+            continue;
+        Outcome outcome = Made;
+        id<MTLFunction> f = function(stage(parts[i].substr(3)), outcome, error);
+        if (outcome != Made)
+            return outcome;
+        MTLLinkedFunctions *l = tag[0] == 'v' ? d.vertexLinkedFunctions : d.fragmentLinkedFunctions;
+        if (tag[1] == 'l')
+            l.functions = [(l.functions ?: @[]) arrayByAddingObject:f];
+        else
+            l.privateFunctions = [(l.privateFunctions ?: @[]) arrayByAddingObject:f];
+    }
+    return Made;
 }
 
 // ---- lines ----
 // An R line's descriptor (frontend journalRenderPipeline): samples, topology class, depth/stencil formats, options, label, color
 // attachments (format:writeMask:blend:srcRGB:dstRGB:opRGB:srcA:dstA:opA), vertex attributes (format:offset:buffer:stride:step:rate),
-// then both functions. The outcome, counted under the vertex function's library.
+// then both functions and the functions they link. The outcome, counted under the vertex function's library.
 static Outcome renderState(const std::string &line, std::string &file, std::string &label, NSError **why)
 {
     std::vector<std::string> parts = split(line, " | ");
@@ -283,6 +313,8 @@ static Outcome renderState(const std::string &line, std::string &file, std::stri
     d.vertexFunction = function(v, outcome, &error);
     if (f.name != "-" && outcome == Made)
         d.fragmentFunction = function(f, outcome, &error);
+    if (outcome == Made)
+        outcome = linkedStages(parts, d, &error);
     if (outcome != Made) {
         *why = error;
         return outcome;

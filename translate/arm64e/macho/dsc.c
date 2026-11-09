@@ -146,7 +146,7 @@ static void translate_page(const struct a64x_plan *plan, const uint32_t *in, uin
                            struct a64x_dsc_stats *st)
 {
     struct plan_map pm = {plan};
-    struct a64x_code_map code = {&pm, code_of_plan, 0};
+    struct a64x_code_map code = {&pm, code_of_plan, 0, NULL};
     uint32_t planned[WORDS];
     (void)a64x_translate_page(in, out, WORDS, va, &code, NULL, 0, NULL);
     st->dead_checks += a64x_dead_checks(in, out, WORDS, va, &code, NULL, NULL);

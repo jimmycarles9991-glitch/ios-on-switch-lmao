@@ -57,6 +57,8 @@ NVK_SOURCES = (
     'nvk_physical_device.c',
     'nvk_sampler.c',
     'nvk_shader.c',
+    'nvk_switch_push.c',
+    'nvk_switch_round.c',
     'nvkmd/nvkmd.h',
 )
 NVK_TREES = ('layers/',)

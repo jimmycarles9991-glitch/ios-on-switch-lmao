@@ -16,8 +16,9 @@
 //     loses the sensor it is a read failure. One reader of the chip, the fan's.
 //   * MAX17050 (SwitchBattery): the battery thermistor, kept current by the gauge's temperature alert window (a degree
 //     either way, SwitchBattery.cpp) besides its other alerts.
-//   * PMU tcal: the iPad PMU's calibration channel, reported as 0 C: thermalmonitord adds (its default, 0) minus this
-//     to the PMU thermistors, and the Switch's sensors are digital and need no correction.
+//   * PMU tcal: the iPad PMU's calibration channel, answered with thermalmonitord's own reference (51.82 C,
+//     SwitchSensorModels.h): it adds that reference minus this to the PMU thermistors, and the Switch's sensors are
+//     digital and need no correction.
 // A source that cannot answer makes that read fail (no event), and thermalmonitord reports the sensor missing; nothing
 // is ever made up. Every value is the measurement and its time.
 //
@@ -234,7 +235,7 @@ bool read(switch_sensor_source source, int32_t *milliC, uint64_t *at)
         *at = when;
         break;
     case SWITCH_SRC_TCAL:
-        *milliC = 0;
+        *milliC = SWITCH_SENSOR_TCAL_MILLIC;
         *at = mach_absolute_time();
         break;
     default:

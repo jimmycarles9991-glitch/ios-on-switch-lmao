@@ -6,6 +6,8 @@
 #                            loops, exhaustively to 80 bytes at every alignment and over random inputs, guard pages
 #                            after both buffers
 #   xnu_memcmp_source_test   subrs.c uses it on arm64 only, through the two bodies the harness copies
+#   xnu_kernel_classes_source_test  both trees' OSKext.cpp register our drivers' classes under sKextLock, as OSKext::start
+#                            does, and no driver calls OSMetaClass::preModLoad/postModLoad itself
 #   xnu_stall_test           kernel/switch/diag/stall.h's decisions: which samples of a UI main thread are a stall,
 #                            one report and one end per episode, wait names by block_hint.h value, user addresses
 #   xnu_render_senders_test  osfmk/ipc/switch_render_senders.h's table and line: the render server's senders by
@@ -31,12 +33,15 @@
 #                            row bytes decoded; the switcher's card scale (its branches kept, the landscape scale the
 #                            largest that keeps six cards clear of the status bar and the dock, as Apple lays them out);
 #                            the SystemStatusUI row the icon size 15 entries of its tables; no two sites on one page;
-#                            the headers the same in both trees, no UI scale pager at scale 1, the kernel's kind's
-#                            table and cache magic
+#                            the headers the same in both trees, no pager at scale 1 but an every_scale site's (21H461
+#                            has none), the kernel's kind's table and cache magic
 #   xnu_ui_scale_sites_24B119_test  bsd/vm/switch_ui_scale_sites_24B119.h against 24B119's (translated) text mappings:
 #                            the same placement checks; the FrontBoardServices, MobileGestalt, CoreUI, ProgressUI and
 #                            CoverSheetKit edits decoded; the keyboard's iPad table giving the 10.2-inch iPad's idiom
-#                            below 768x1024 and every other screen's unchanged
+#                            below 768x1024 and every other screen's unchanged; the home grid the row of screen type
+#                            0x68, the one every scale's screen falls through to; the switcher's landscape-only card
+#                            scale keeping the shipped calls and exit; both copies of WidgetKit's placeholder deadline;
+#                            WidgetKit's archived image limit at 2x; only the grid and WidgetKit's two applied at scale 1
 #   xnu_page_ratio_test      16 KiB VM pages over the 4 KiB granule: pmap.c's write_pte_fast (both trees) writes a
 #                            VM page as four consecutive 4 KiB frames, repeats empty and compressed entries, refuses an
 #                            unaligned PTE
@@ -54,6 +59,9 @@
 #   switch_prefs_test        kernel/switch/boot/prefs.c takes keys out of plists CoreFoundation wrote and reads back
 #                            (binary, both count forms, wide references, damaged files; XML as the setup wrote it); no
 #                            boot-time setup in either tree or the 12377 port record sets SpringBoard's never-dim keys
+#   switch_prefs_add_test    kernel/switch/boot/prefs.c adds a missing integer key to plists CoreFoundation wrote and
+#                            reads back (binary, offsets widening, XML, <dict/>), never replaces one; only 27's setup
+#                            adds True Tone's default
 #
 #   bazel test //kernel/tests:all
 load("@bazel_skylib//rules:copy_file.bzl", "copy_file")
@@ -126,6 +134,17 @@ host_test(
     copts = ["-fsanitize=undefined"],
     sanitize = False,
     deps = [":memcmp"],
+)
+
+host_test(
+    name = "xnu_kernel_classes_source_test",
+    srcs = ["xnu_kernel_classes_source_test.cpp"],
+    data = [
+        "//kernel:lint_sources",
+        "//kernel/switch:srcs",
+        "//kernel/xnu-10063.141.1/libkern:c++/OSKext.cpp",
+        "//kernel/xnu-12377.121.6/libkern:c++/OSKext.cpp",
+    ],
 )
 
 host_test(
@@ -571,6 +590,20 @@ host_test(
         "//kernel/xnu-10063.141.1/bsd:kern/kern_exec.c",
         "//kernel/xnu-12377.121.6/bsd:kern/kern_exec.c",
         "//translate/arm64e:xnu/port-12377/switch-on-12377.diff",
+    ],
+    linkopts = [
+        "-framework",
+        "CoreFoundation",
+    ],
+    deps = [":prefs"],
+)
+
+host_test(
+    name = "switch_prefs_add_test",
+    srcs = ["switch_prefs_add_test.cpp"],
+    data = [
+        "//kernel/xnu-10063.141.1/bsd:kern/kern_exec.c",
+        "//kernel/xnu-12377.121.6/bsd:kern/kern_exec.c",
     ],
     linkopts = [
         "-framework",

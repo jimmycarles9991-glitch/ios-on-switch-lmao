@@ -1322,6 +1322,7 @@ impl SM70Op for OpHAdd2 {
     }
 
     fn encode(&self, e: &mut SM70Encoder<'_>) {
+        assert!(!self.a_f32);
         if src_is_zero_or_gpr(&self.srcs[1]) {
             e.encode_fp16v2_alu(
                 0x030,

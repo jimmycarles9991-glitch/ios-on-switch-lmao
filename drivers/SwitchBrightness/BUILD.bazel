@@ -46,6 +46,7 @@ kernel_driver(
         "drivers/TegraGPIO",
         "drivers/TegraI2C",
         "kits/SwitchCAR",
+        "kits/SwitchDT",
         "kits/SwitchMMIO",
         "kits/SwitchRefusal",
     ],

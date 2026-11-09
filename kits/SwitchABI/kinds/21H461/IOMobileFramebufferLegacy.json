@@ -42,7 +42,7 @@
     "307": "sendFrameInfo",
     "337": "collectCompletionReports",
     "338": "platformRefreshRates",
-    "345": "platformIdleWithoutClients",
+    "345": "areTimingsEnabled",
     "354": "setDisplayPowerState"
   },
   "fields": {

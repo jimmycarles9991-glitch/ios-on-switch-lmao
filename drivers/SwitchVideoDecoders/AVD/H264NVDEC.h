@@ -19,7 +19,8 @@ typedef struct {
     uint32_t handle;  // the NVDEC buffer holding it (TegraNVDECPresent): luma at 0, chroma at chroma_offset
     uint32_t chroma_offset, rows;  // rows: the planes' block-aligned luma rows (a multiple of 32)
     uint32_t coded_width, coded_height;
-    uint32_t crop_x, crop_y, width, height;  // the displayed window
+    uint32_t crop_x, crop_y, width, height;  // the displayed window, in samples
+    bool wide;                               // 16-bit samples (HEVC Main 10: P010, laid out as 'x420')
     int32_t poc;
     int status;  // 0, or the engine's error_status when nothing decoded
     void *token;

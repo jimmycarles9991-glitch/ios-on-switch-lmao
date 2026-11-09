@@ -89,6 +89,7 @@
 #include <kern/kalloc.h>
 #include <kern/ecc.h>
 #include <kern/host.h>
+#include <switch/vm_stats.h>
 #include <kern/host_statistics.h>
 #include <kern/ipc_host.h>
 #include <kern/misc_protos.h>
@@ -828,17 +829,17 @@ vm_stats(void *info, unsigned int *count)
 	natural_t speculative_count = vm_page_speculative_count;
 	natural_t throttled_count = vm_page_throttled_count;
 
-	if (*count > HOST_VM_INFO64_COUNT) {
+	if (*count > SWITCH_HOST_VM_INFO64_COUNT) {
 		vm_log_error("host_statistics64() count is larger than expected "
 		    "(actual:%u > HOST_VM_INFO64_COUNT:%u). This is most likely a bug in "
 		    "%s [%d] and is likely to result in memory corruption. The buffer count "
 		    "must be passed in units of integer_t's. HOST_VM_INFO64_COUNT may be "
 		    "used as shorthand.\n",
-		    *count, HOST_VM_INFO64_COUNT,
+		    *count, SWITCH_HOST_VM_INFO64_COUNT,
 		    task_best_name(current_task()), task_pid(current_task()));
 		DTRACE_VM2(vm_stats_bad_count,
 		    uint, *count,
-		    uint, HOST_VM_INFO64_COUNT);
+		    uint, SWITCH_HOST_VM_INFO64_COUNT);
 	}
 
 	if (*count < HOST_VM_INFO64_REV0_COUNT) {
@@ -964,7 +965,7 @@ vm_stats(void *info, unsigned int *count)
 	stat->total_tagged_pages = 0;
 #endif /* HAS_MTE */
 
-	*count = HOST_VM_INFO64_REV3_COUNT;
+	*count = switch_vm_stats_newer(info, original_count);
 	return KERN_SUCCESS;
 }
 

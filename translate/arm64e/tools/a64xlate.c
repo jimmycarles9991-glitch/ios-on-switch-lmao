@@ -131,7 +131,7 @@ static void slice(const char *name, const uint8_t *mh, uint64_t len)
         }
         lc += u32(lc, 4);
     }
-    struct a64x_code_map cm = {NULL, is_code, 0};
+    struct a64x_code_map cm = {NULL, is_code, 0, NULL};
     uint64_t stub_va = (vmend + 0x3FFF) & ~0x3FFFull;
     /* dylibs extracted from a dyld cache keep cache addresses (LINKEDIT GBs away): put the region after the text */
     uint64_t xend = 0;
@@ -144,7 +144,9 @@ static void slice(const char *name, const uint8_t *mh, uint64_t len)
     /* pass 1: layout; pass 2: generate */
     uint32_t cursor = 0;
     uint32_t *in = malloc(pagesize), *out = malloc(pagesize);
-    struct a64x_stub_region sr = {stub_va, NULL, 1u << 30, 0};
+    void *walk_buf = malloc(A64X_WALK_BYTES(pagesize / 4));
+    struct a64x_walk walk = a64x_walk_in(walk_buf, pagesize / 4);
+    struct a64x_stub_region sr = {stub_va, NULL, 1u << 30, 0, &walk};
     for (int pass = 0; pass < 2; pass++) {
         cursor = 0;
         memset(&st, 0, sizeof(st));
@@ -208,6 +210,7 @@ static void slice(const char *name, const uint8_t *mh, uint64_t len)
     for (uint32_t i = 0; i < cursor; i++)
         dadd(sr.words[i]);
     free(sr.words);
+    free(walk_buf);
     free(in);
     free(out);
     uint64_t r1 = 0, sb = 0, lf = 0;

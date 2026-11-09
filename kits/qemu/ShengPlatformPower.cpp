@@ -7,7 +7,6 @@
 #include <IOKit/IOLib.h>
 #include <IOKit/IOPlatformExpert.h>
 #include <libkern/c++/OSSymbol.h>
-#include <mach/kmod.h>
 #include <pexpert/pexpert.h>
 #include <libkern/c++/OSNumber.h>
 #include <os/log.h>
@@ -15,7 +14,7 @@
 #include "../../drivers/SwitchPower/SwitchSensors.h"
 
 extern "C" {
-extern kmod_info_t g_kernel_kmod_info;
+OSReturn switch_kernel_classes(void (*initialize)());
 kern_return_t OSKextLoadKextWithIdentifier(const char *);
 void sheng_pmgr_static_init(void) __asm__("__GLOBAL__sub_I_ShengPlatformPower.cpp");
 // stage,status,parent-size,own-size,provider,nub,bound-provider,read-before,
@@ -177,13 +176,7 @@ extern "C" void sheng_pmgr_run(void)
         return;
     }
     sheng_pmgr_observation[2] = parent->getClassSize();
-    void *handle = OSMetaClass::preModLoad(g_kernel_kmod_info.name);
-    if (!handle) {
-        sheng_pmgr_checkpoint();
-        return;
-    }
-    sheng_pmgr_static_init();
-    result = OSMetaClass::postModLoad(handle);
+    result = switch_kernel_classes(sheng_pmgr_static_init);
     if (result) {
         sheng_pmgr_observation[1] = static_cast<uint32_t>(result);
         sheng_pmgr_checkpoint();

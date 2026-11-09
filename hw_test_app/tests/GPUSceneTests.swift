@@ -9,15 +9,17 @@ import Metal
 /// m2v_cbs=, split_cbs= and m2v_why= are the facade's process-wide counters over its run, framework command buffers
 /// included. A hash_* field the two runs disagree on fails the test: the two paths drew different pixels. Failed
 /// comparisons leave got, want and diff PNGs in Documents/gpu/<id>/.
-struct GPUSceneTest: HWTest {
+public struct GPUSceneTest: HWTest {
     let scene: any GPUScene
-    let subsystem = Subsystem.metal
+    public let subsystem = Subsystem.metal
 
-    var id: String { scene.id }
-    var name: String { scene.name }
-    var timeout: TimeInterval { scene.timeout * 2 }
+    public init(scene: any GPUScene) { self.scene = scene }
 
-    func run(_ context: TestContext) async throws -> Outcome {
+    public var id: String { scene.id }
+    public var name: String { scene.name }
+    public var timeout: TimeInterval { scene.timeout * 2 }
+
+    public func run(_ context: TestContext) async throws -> Outcome {
         let primary = try GPU.make()
         let kind = RawFacade.kind(of: primary.device)
         var runs = [(kind, primary)]

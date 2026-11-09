@@ -218,6 +218,7 @@ TEST(SwitchALSSource, DisplayCreateWithIDHasWhatItNeedsBeforeBacklightControl)
     const std::string start = Body(backlight, "bool SwitchBacklight::start(IOService *provider)");
     const std::vector<std::string> order = {
         "publishParameters();",
+        "publishWhitePointType();",
         "setProperty(\"backlight-calibration-parameters\", parameters);",
         "setProperty(\"backlight-marketing-table\", table)",
         "setProperty(\"new-backlight-architecture\", kOSBooleanTrue);",

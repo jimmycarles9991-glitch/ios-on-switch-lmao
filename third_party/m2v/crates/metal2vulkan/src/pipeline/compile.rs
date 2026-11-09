@@ -234,6 +234,7 @@ impl<'a> LinkedSource<'a> {
             key: LinkedKey {
                 list: crate::pipeline::descriptor::LinkedList::Functions,
                 name,
+                symbol: name,
                 air_hash: container::sha256(bitcode),
                 constants,
             },
@@ -250,7 +251,8 @@ pub(crate) fn linked_keys(linked: &LinkedFunctions) -> Vec<LinkedKey<'_>> {
             let info = f.function.info();
             LinkedKey {
                 list,
-                name: info.name,
+                name: f.linked_name(),
+                symbol: info.name,
                 air_hash: info.air_hash,
                 constants: &f.constants,
             }
@@ -1264,6 +1266,7 @@ pub(crate) fn linked_modules(
             m.charge(std::mem::size_of::<LinkedName>())?;
             l.functions.push(LinkedName {
                 name: name.clone(),
+                symbol: key.symbol.as_bytes().into(),
                 constants,
                 handle: handle.map(|h| h.word()),
             });
@@ -1317,6 +1320,7 @@ pub(crate) fn linked_modules(
         m.charge(std::mem::size_of::<LinkedName>() + key.name.len())?;
         l.functions.push(LinkedName {
             name: key.name.as_bytes().into(),
+            symbol: key.symbol.as_bytes().into(),
             constants,
             handle: handle.map(|h| h.word()),
         });

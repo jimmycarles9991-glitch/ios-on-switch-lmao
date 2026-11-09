@@ -24,6 +24,7 @@ struct idle_core {
     uint64_t predicted;
     uint64_t entered;
     uint64_t wake_at;
+    uint64_t lead;
     uint32_t state;
 #if DEVELOPMENT || DEBUG
     struct switch_idle_counts counts;
@@ -82,7 +83,7 @@ void switch_idle_wfi(struct cpu_data *cdp)
                       ? switch_idle_choose(core->predicted, now, deadline, os_atomic_load(&idle_frame_at, relaxed))
                       : SWITCH_IDLE_WFI;
     if (core->state == SWITCH_IDLE_C7) {
-        core->wake_at = switch_idle_c7_wake_at(deadline);
+        core->wake_at = switch_idle_c7_wake_at(deadline, core->lead);
         const int64_t rc =
             idle_platform->power_down(cpu, switch_idle_timer_ticks(now, core->wake_at, idle_platform->wake_ticks_max));
         if (rc != 0) {
@@ -108,20 +109,21 @@ void switch_idle_resumed(struct cpu_data *cdp)
     ClearIdlePop(FALSE);
     struct idle_core *core = &idle_cores[cpu];
     const uint64_t now = mach_absolute_time();
-#if DEVELOPMENT || DEBUG
     const uint64_t exit_latency = switch_idle_c7_exit(now, core->wake_at);
+#if DEVELOPMENT || DEBUG
     if (exit_latency != 0) {
         core->counts.timer_exits++;
         core->counts.exit_ticks += exit_latency;
         if (exit_latency > core->counts.exit_max) {
             core->counts.exit_max = exit_latency;
         }
-        if (exit_latency > SWITCH_IDLE_C7_WAKE_LATENCY) {
+        if (exit_latency > core->lead) {
             core->counts.exits_late++;
         }
     }
     core->from_c7 = true;
 #endif
+    core->lead = switch_idle_c7_lead(core->lead, exit_latency);
     idle_exit(core, now);
 }
 
@@ -130,6 +132,9 @@ void switch_idle_start(const struct switch_idle_platform *platform)
     idle_failure_call = thread_call_allocate_with_options(idle_report_failure, NULL, THREAD_CALL_PRIORITY_KERNEL,
                                                           THREAD_CALL_OPTIONS_ONCE);
     idle_platform = platform;
+    for (uint32_t cpu = 0; cpu < SWITCH_SMP_CORE_COUNT; cpu++) {
+        idle_cores[cpu].lead = switch_idle_c7_lead(0, 0);
+    }
     os_atomic_store(&idle_c7, true, release);
 }
 

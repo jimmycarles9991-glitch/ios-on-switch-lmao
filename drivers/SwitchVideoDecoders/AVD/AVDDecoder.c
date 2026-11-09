@@ -1,21 +1,10 @@
 // SPDX-License-Identifier: BSD-2-Clause-Patent
-// AVD.videodecoder: H.264, VP9 (profile 0) and HEVC (Main, Main 10 as 8-bit, Main Still Picture) on the Tegra X1's
-// NVDEC as VideoToolbox's hardware 'avc1', 'vp09' and 'hvc1' decoders. 'hvc1' is registered with rating 1, so it ranks
-// before HEVCH8.videodecoder's stand-in, which stays behind it for the tile sessions and streams this decoder hands to
-// Apple's software decoder (registerHEVC). Tile sessions (grid HEIC: wallpapers, full-size photos) are AVDTiles.c.
+// AVD.videodecoder: H.264, VP9 (profile 0) and HEVC (Main, Main 10 in 'x420', Main Still Picture) on the Tegra X1's
+// NVDEC as VideoToolbox's hardware 'avc1', 'vp09' and 'hvc1' decoders, registered by AVDRegister.c. Tile sessions
+// (grid HEIC: wallpapers, full-size photos) are AVDTiles.c.
 //
-// How VideoToolbox finds it (21H461 VTLoadVideoDecoders, disassembled): it dlopens a fixed list of paths and calls each
-// one's register function: H264SW.videocodec first (Apple's NEON H.264, registered with IsHardwareAccelerated false),
-// ..., HEVCH8, H8, VCPHEVC, then /System/Library/VideoDecoders/AVD.videodecoder (AVDRegister), the slot of Apple's AVD
-// decoders on later SoCs. iPad7,1 ships no such file; the userland overlay puts this one there.
-//
-// Registration is per process. AVDRegister registers the codecs TegraNVDECInfo.codecs lists when the kernel published
-// TegraNVDEC (it proved itself at boot, N3) and this process may open it (a probe connection, closed at once).
-// VTIsHardwareDecodeSupported only asks the registry (VTSelectAndCreateVideoDecoderInstance with no out-pointer
-// returns before any factory runs), so registering in a process the sandbox refuses would be a false YES there.
-//
-// Selection: VTRegisterVideoDecoder leaves IsHardwareAccelerated true and rating 0; _vtSortRegistryItemsByRating ranks
-// hardware first, so this decoder is tried before H264SW, and a factory that fails moves VideoToolbox to the next one.
+// Selection: _vtSortRegistryItemsByRating ranks a higher rating first, then hardware, so this decoder is tried before
+// H264SW, and a factory that fails moves VideoToolbox to the next one.
 // StartSession is not retried with another decoder, so a stream NVDEC cannot take (interlaced, 4:2:2 or 4:4:4, high
 // bit depth, slice groups, beyond 4096x4096) or one NVDEC has no memory for runs on Apple's software decoder inside
 // this instance: VTSelectAndCreateVideoDecoderInstance with hardware disabled picks it, every class call is forwarded,
@@ -125,7 +114,8 @@ static bool presentPicture(Decoder *d, const H264Picture *picture, CVPixelBuffer
                                  .width = width,
                                  .height = height,
                                  .dst_x = x,
-                                 .dst_y = y};
+                                 .dst_y = y,
+                                 .sample_bytes = picture->wide ? 2 : 1};
     CVPixelBufferLockBaseAddress(image, 0);  // a write lock, so the surface's seed moves as a CPU write moves it
     const int err = nvdec_present(d->client, &p);
     CVPixelBufferUnlockBaseAddress(image, 0);
@@ -148,18 +138,20 @@ void avd_place_picture(Decoder *d, const H264Picture *picture, CVPixelBufferRef 
     const uint32_t roomW = x < w ? w - x : 0, roomH = y < h ? h - y : 0;
     const uint32_t width = roomW < picture->width ? roomW : picture->width;
     const uint32_t height = roomH < picture->height ? roomH : picture->height;
+    const uint32_t bytes = picture->wide ? 2 : 1;
     if (d->present && presentPicture(d, picture, image, x, y, width, height)) {
         d->presented++;
     } else if (width && height) {
         CVPixelBufferLockBaseAddress(image, 0);
         const size_t lumaPitch = CVPixelBufferGetBytesPerRowOfPlane(image, 0);
         const size_t chromaPitch = CVPixelBufferGetBytesPerRowOfPlane(image, 1);
-        uint8_t *luma = (uint8_t *)CVPixelBufferGetBaseAddressOfPlane(image, 0) + y * lumaPitch + x;
-        uint8_t *chroma = (uint8_t *)CVPixelBufferGetBaseAddressOfPlane(image, 1) + y / 2 * chromaPitch + (x & ~1u);
-        block_linear_copy(luma, lumaPitch, picture->luma, picture->pitch, picture->crop_x, picture->crop_y, width,
-                          height);
-        block_linear_copy(chroma, chromaPitch, picture->chroma, picture->pitch, picture->crop_x & ~1u,
-                          picture->crop_y / 2, width & ~1u, (height + 1) / 2);
+        uint8_t *luma = (uint8_t *)CVPixelBufferGetBaseAddressOfPlane(image, 0) + y * lumaPitch + x * bytes;
+        uint8_t *chroma =
+            (uint8_t *)CVPixelBufferGetBaseAddressOfPlane(image, 1) + y / 2 * chromaPitch + (x & ~1u) * bytes;
+        block_linear_copy(luma, lumaPitch, picture->luma, picture->pitch, picture->crop_x * bytes, picture->crop_y,
+                          width * bytes, height);
+        block_linear_copy(chroma, chromaPitch, picture->chroma, picture->pitch, (picture->crop_x & ~1u) * bytes,
+                          picture->crop_y / 2, (width & ~1u) * bytes, (height + 1) / 2);
         // To DRAM: the GPU does not snoop the CPU's caches, and nothing cleans a surface the compositor imported
         // before this write (its IOSurface lock and unlock are traps the kernel's coherency hook never sees).
         sys_dcache_flush(luma, lumaPitch * height);
@@ -345,10 +337,12 @@ static void setAlignment(const Decoder *d, CFMutableDictionaryRef attributes)
         avd_set_number(attributes, kCVPixelBufferPlaneAlignmentKey, 256);
 }
 
-static void setAttributes(Decoder *d, VTVideoDecoderSession session, bool fullRange, OSStatus *status)
+static void setAttributes(Decoder *d, VTVideoDecoderSession session, bool fullRange, bool tenBit, OSStatus *status)
 {
-    d->pixelFormat =
-        fullRange ? kCVPixelFormatType_420YpCbCr8BiPlanarFullRange : kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange;
+    d->pixelFormat = tenBit ? (fullRange ? kCVPixelFormatType_420YpCbCr10BiPlanarFullRange
+                                         : kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange)
+                            : (fullRange ? kCVPixelFormatType_420YpCbCr8BiPlanarFullRange
+                                         : kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange);
     CFMutableDictionaryRef attributes = CFDictionaryCreateMutable(
         kCFAllocatorDefault, 0, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
     CFDictionaryRef surface = CFDictionaryCreate(kCFAllocatorDefault, NULL, NULL, 0, &kCFTypeDictionaryKeyCallBacks,
@@ -392,7 +386,7 @@ static OSStatus startVP9(Decoder *d, VTVideoDecoderSession session, CMVideoForma
     d->primaries = colourTag(format, kCMFormatDescriptionExtension_ColorPrimaries, v ? v[7] : 2, 1, 0);
     d->transfer = colourTag(format, kCMFormatDescriptionExtension_TransferFunction, v ? v[8] : 2, 2, 0);
     OSStatus status;
-    setAttributes(d, session, fullRange, &status);
+    setAttributes(d, session, fullRange, false, &status);
     if (!status)
         os_log(gAVDLog,
                "AVD: session %ux%u in %{public}s on NVDEC (VP9 profile 0, level %d), pictures out by %{public}s",
@@ -402,7 +396,7 @@ static OSStatus startVP9(Decoder *d, VTVideoDecoderSession session, CMVideoForma
 
 // HEVC ('hvcC', ISO/IEC 14496-15 8.3.3.1): 21 bytes of profile and stream facts (lengthSizeMinusOne in the low bits
 // of byte 21), then arrays of VPS/SPS/PPS/SEI units. A stream NVDEC does not take (another profile or chroma format,
-// Main 10 while it is not proven, beyond 4096x4096 or below 144x144, no NVDEC memory) runs on Apple's software decoder
+// Main 10 on a kernel without it, beyond 4096x4096 or below 144x144, no NVDEC memory) runs on Apple's software decoder
 // inside this instance, as H.264 does.
 int avd_load_hvcc(Decoder *d, CFDataRef hvcC)
 {
@@ -438,9 +432,7 @@ static OSStatus startHEVC(Decoder *d, VTVideoDecoderSession session, CMVideoForm
     const char *why = !sps                                      ? "not Main, Main 10 or Main Still Picture 4:2:0"
                       : sps->width > 4096 || sps->height > 4096 ? "beyond NVDEC's 4096x4096"
                       : sps->width < 144 || sps->height < 144   ? "below NVDEC's HEVC floor of 144x144"
-                      : sps->bit_depth == 10 && !tenBit         ? "Main 10, which NVDEC does not decode right yet"
-                      : sps->bit_depth == 10 && sps->colour_description && (sps->transfer == 16 || sps->transfer == 18)
-                          ? "HDR (PQ or HLG): NVDEC writes 8 bits, too few for those transfer curves"
+                      : sps->bit_depth == 10 && !tenBit         ? "Main 10, which this kernel's NVDEC does not decode"
                       : hevc_decoder_configure(d->hevc) ? "no NVDEC memory for its buffers (see the AVD alloc line)"
                                                         : NULL;
     if (why) {
@@ -459,15 +451,13 @@ static OSStatus startHEVC(Decoder *d, VTVideoDecoderSession session, CMVideoForm
         colourTag(format, kCMFormatDescriptionExtension_ColorPrimaries, vui ? sps->colour_primaries : 2, 1, 0);
     d->transfer = colourTag(format, kCMFormatDescriptionExtension_TransferFunction, vui ? sps->transfer : 2, 2, 0);
     OSStatus status;
-    setAttributes(d, session, sps->full_range, &status);
+    setAttributes(d, session, sps->full_range, sps->bit_depth == 10, &status);
     static const char *const kProfiles[4] = {"", "Main", "Main 10", "Main Still Picture"};
     if (!status)
         os_log(gAVDLog,
-               "AVD: session %ux%u in %{public}s on NVDEC (HEVC %{public}s, level %u.%u%{public}s), pictures out by "
-               "%{public}s",
+               "AVD: session %ux%u in %{public}s on NVDEC (HEVC %{public}s, level %u.%u), pictures out by %{public}s",
                d->width, d->height, getprogname(), kProfiles[sps->profile_idc], sps->level_idc / 30,
-               sps->level_idc % 30 / 3, sps->bit_depth == 10 ? ", written as 8-bit NV12" : "",
-               d->present ? "VIC" : "the CPU");
+               sps->level_idc % 30 / 3, d->present ? "VIC" : "the CPU");
     return status;
 }
 
@@ -771,7 +761,7 @@ static const VTPluginDecoderClass kDecoderClass = {
 
 static const VTPluginDecoderVTable kVTable = {NULL, &kBaseClass, &kDecoderClass};
 
-static OSStatus createInstance(FourCharCode codec, CFAllocatorRef allocator, VTVideoDecoderRef *out)
+OSStatus avd_create_instance(FourCharCode codec, CFAllocatorRef allocator, VTVideoDecoderRef *out)
 {
     if (tSoftwareLookup)
         return kVTCouldNotFindVideoDecoderErr;  // VideoToolbox moves on to the next decoder
@@ -803,54 +793,4 @@ static OSStatus createInstance(FourCharCode codec, CFAllocatorRef allocator, VTV
     }
     *out = object;
     return noErr;
-}
-
-// NVDEC's 'hvc1', rated above the default 0: VideoToolbox's registry sorts by rating before the hardware flag, so it
-// is chosen before HEVCH8's stand-in (Apple's software decoder under the hardware flag), which stays registered behind
-// it for what this decoder does not take: the streams startHEVC hands to software and the tile sessions
-// avd_start_tile_session refuses (VTTileDecompressionSessionCreate then moves on to the next decoder).
-static void registerHEVC(void)
-{
-    const int32_t rating = 1;
-    CFNumberRef number = CFNumberCreate(NULL, kCFNumberSInt32Type, &rating);
-    const void *keys[] = {kVTVideoDecoderInfo_Rating}, *values[] = {number};
-    CFDictionaryRef info =
-        CFDictionaryCreate(NULL, keys, values, 1, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
-    const OSStatus status = VTRegisterVideoDecoderWithInfo(kCMVideoCodecType_HEVC, info, createInstance);
-    CFRelease(info);
-    CFRelease(number);
-    if (status)
-        os_log_error(gAVDLog, "AVD: VTRegisterVideoDecoderWithInfo('hvc1') failed: %d", (int)status);
-}
-
-static void registerVP9(void)
-{
-    const OSStatus status = VTRegisterVideoDecoder(kCMVideoCodecType_VP9, createInstance);
-    if (status)
-        os_log_error(gAVDLog, "AVD: VTRegisterVideoDecoder('vp09') failed: %d", (int)status);
-}
-
-__attribute__((visibility("default"))) void AVDRegister(void);
-
-void AVDRegister(void)
-{
-    gAVDLog = os_log_create("com.brunostjohn.switch.avd", "decoder");
-    if (!nvdec_service_present())
-        return;  // switch-no-nvdec, or NVDEC did not come up at boot: nothing changes
-    int error = 0;
-    NVDECClient *probe = nvdec_open(&error);
-    if (!probe) {
-        switch_refusal("AVD", "TegraNVDEC refused the process", "error %#x: H.264 stays on Apple's software decoder",
-                       error);
-        return;
-    }
-    const OSStatus status = VTRegisterVideoDecoder(kCMVideoCodecType_H264, createInstance);
-    if (status)
-        os_log_error(gAVDLog, "AVD: VTRegisterVideoDecoder('avc1') failed: %d", (int)status);
-    const uint32_t codecs = nvdec_codecs(probe);
-    if (codecs & (1u << TEGRA_NVDEC_CODEC_VP9))
-        registerVP9();
-    if (codecs & (1u << TEGRA_NVDEC_CODEC_HEVC))
-        registerHEVC();
-    nvdec_close(probe);
 }

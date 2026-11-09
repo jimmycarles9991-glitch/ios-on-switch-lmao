@@ -1965,7 +1965,8 @@ switch_ui_scale_page(const void *src, void *dst, unsigned long long src_offset, 
 	return 0;
 }
 
-/* The pager for one UI scale site, if this mapping holds it and the scale is not 1, or MEMORY_OBJECT_NULL. */
+/* The pager for one UI scale site, if this mapping holds it and the scale is not 1 (or the site is every_scale), or
+ * MEMORY_OBJECT_NULL. */
 static memory_object_t
 switch_ui_scale_pager(const struct switch_us_site *site, vm_object_t file_object, uint64_t object_base, uint64_t file_offset, uint64_t size,
     uint64_t unslid_address, struct vnode *vp, uint64_t *range_offset, uint64_t *range_size)
@@ -1974,7 +1975,7 @@ switch_ui_scale_pager(const struct switch_us_site *site, vm_object_t file_object
 	    file_object == VM_OBJECT_NULL || vp == NULLVP) {
 		return MEMORY_OBJECT_NULL;  /* not the mapping that holds the site */
 	}
-	if (switch_ui_scale_is_unit(switch_ui_scale())) {
+	if (switch_ui_scale_is_unit(switch_ui_scale()) && !site->every_scale) {
 		return MEMORY_OBJECT_NULL;
 	}
 	for (unsigned i = 0; i < site->edits; i++) {

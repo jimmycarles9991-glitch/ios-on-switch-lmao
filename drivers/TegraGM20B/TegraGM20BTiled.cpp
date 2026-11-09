@@ -13,6 +13,7 @@
 #include <string.h>
 #include "TegraGM20BRelayout.h"
 #include "TegraGM20BTiled.h"
+#include "../../kits/SwitchRefusal/SwitchRefusal.h"
 #if TGM_STATS
 #include <os/log.h>
 extern "C" void proc_selfname(char *buf, int size);
@@ -76,7 +77,21 @@ Decision decide(tgm_coh *c, tgm_tiled &t, uint32_t width, uint32_t height, uint3
 	const int ret = scratch ? tgm_relayout(&pages, &rows, &t.layout, bytesPerRow,
 					       TGM_RELAYOUT_TILE_IN_PLACE, writers, n)
 				: -12;
+	const bool scratched = scratch != nullptr;
 	tgm_scratch_put(scratch);
+	if (!scratched) {
+		switch_refusal(
+			"iosurface-layout", "tile-no-scratch",
+			"IOSurface %u %ux%u x%u bytes: no scratch for its tiling move: it stays "
+			"pitch-linear",
+			tgm_coh_surface_id(c), width, height, bpp);
+	} else if (ret) {
+		switch_refusal(
+			"iosurface-layout", "tile-move-failed",
+			"IOSurface %u %ux%u x%u bytes: its tiling move failed (%d): it stays "
+			"pitch-linear",
+			tgm_coh_surface_id(c), width, height, bpp, ret);
+	}
 	return ret ? PitchMoveFailed : DecidedTiled;
 }
 }  // namespace

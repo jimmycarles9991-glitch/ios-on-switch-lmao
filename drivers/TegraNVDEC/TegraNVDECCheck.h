@@ -476,11 +476,13 @@ static inline const char *tegra_nvdec_check_hevc(const TegraNVDECSubmit *s, cons
         return "dimensions";
     if (p->chroma_format_idc != 1 || p->bit_depth_luma != p->bit_depth_chroma)
         return "chroma format";
-    // 8-bit output only (mode 1 would write 16-bit samples into surfaces sized for 8): 0 for 8-bit, 2/3 for 10-bit.
+    // Mode 0 writes 8-bit samples; mode 1, Main 10's only, writes 16-bit ones, so its surfaces and the pixel rows of
+    // the filter buffer are twice as wide.
     const bool eightBit = p->bit_depth_luma == 8 && p->disp_output_mode == 0;
-    const bool tenBit = p->bit_depth_luma == 10 && (p->disp_output_mode == 2 || p->disp_output_mode == 3);
+    const bool tenBit = p->bit_depth_luma == 10 && p->disp_output_mode == 1;
     if (!eightBit && !tenBit)
         return "output mode";
+    const uint64_t sampleBytes = tenBit ? 2 : 1;
     if (p->log2_min_luma_coding_block_size < 3 || p->log2_max_luma_coding_block_size > 6 ||
         p->log2_min_luma_coding_block_size > p->log2_max_luma_coding_block_size ||
         p->log2_max_luma_coding_block_size < 4 || p->log2_min_transform_block_size < 2 ||
@@ -490,7 +492,7 @@ static inline const char *tegra_nvdec_check_hevc(const TegraNVDECSubmit *s, cons
         return "tiles or slot";
     // Surfaces: the current one is written in whole CTUs (64-aligned rows); references are read within their own.
     const uint32_t pitch = p->framestride[0];
-    if (pitch != p->framestride[1] || (pitch & 63) || pitch < ((w + 63) & ~63u) || pitch > 16384)
+    if (pitch != p->framestride[1] || (pitch & 63) || pitch < ((w + 63) & ~63u) * sampleBytes || pitch > 16384)
         return "pitch";
     const uint64_t rows = (h + 63) & ~63u;
     const uint64_t lumaBytes = (uint64_t)pitch * rows;
@@ -503,10 +505,11 @@ static inline const char *tegra_nvdec_check_hevc(const TegraNVDECSubmit *s, cons
     if (colmv < ((w + 63) & ~63u) * rows / 16 || buf[COLOC] < 17 * colmv)
         return "colocated motion";
     // The filter buffer: 480 bytes of deblocking per row, SAO (3840 per row) from HevcSaoBufferOffset and BSD control
-    // (60 per row) from HevcBsdCtrlOffset, both in 256-byte units, over at least the 64-aligned height.
+    // (60 per row) from HevcBsdCtrlOffset, both in 256-byte units, over at least the 64-aligned height; deblocking and
+    // SAO per sample byte.
     const uint64_t sao = (uint64_t)p->HevcSaoBufferOffset * 256;
     const uint64_t bsd = (uint64_t)p->HevcBsdCtrlOffset * 256;
-    if (sao < 480 * rows || bsd < sao + 3840 * rows || buf[FILTER] < bsd + 60 * rows)
+    if (sao < 480 * sampleBytes * rows || bsd < sao + 3840 * sampleBytes * rows || buf[FILTER] < bsd + 60 * rows)
         return "filter buffer";
     if (buf[TILES] < 0x900)
         return "tile sizes";

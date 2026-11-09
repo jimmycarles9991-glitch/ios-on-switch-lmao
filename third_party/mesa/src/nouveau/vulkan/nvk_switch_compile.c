@@ -10,10 +10,14 @@
 
 #include "nvk_switch_compile.h"
 
+#include "nvk_descriptor_set_layout.h"
+#include "nvk_descriptor_types.h"
 #include "nvk_device.h"
 #include "nvk_entrypoints.h"
+#include "nvk_sampler.h"
 #include "nvk_shader.h"
 #include "nvk_switch_capture.h"
+#include "nvk_switch_round.h"
 
 #include "vk_graphics_state.h"
 #include "vk_pipeline.h"
@@ -77,11 +81,13 @@ switch_nvk_compile_stage(VkDevice _device,
       .ms = info->stage == VK_SHADER_STAGE_FRAGMENT_BIT ? &ms : NULL,
    };
 
+   switch_nvk_half_targets_current = info->half_targets;
    struct vk_shader *shader = NULL;
    VkResult result =
       vk_pipeline_compile_library_stage(&dev->vk, info->pipeline_flags,
                                         info->pipeline_pnext, &stage,
                                         info->layout, &state, &shader);
+   switch_nvk_half_targets_current = 0;
    if (result != VK_SUCCESS)
       return result;
 
@@ -97,4 +103,78 @@ switch_nvk_stage_finish(VkDevice _device, struct switch_nvk_stage *stage)
    if (stage->owner != NULL)
       vk_shader_destroy(&dev->vk, stage->owner, &dev->vk.alloc);
    stage->owner = NULL;
+}
+
+SWITCH_EXPORT bool
+switch_nvk_set_layout_binding(VkDescriptorSetLayout _layout, uint32_t binding,
+                              struct switch_nvk_set_binding *out)
+{
+   VK_FROM_HANDLE(nvk_descriptor_set_layout, layout, _layout);
+   if (binding >= layout->binding_count)
+      return false;
+   const struct nvk_descriptor_set_binding_layout *b = &layout->binding[binding];
+   *out = (struct switch_nvk_set_binding) {
+      .offset = b->offset,
+      .stride = b->stride,
+      .array_size = b->array_size,
+      .immutable_samplers = b->immutable_samplers != NULL,
+   };
+   return true;
+}
+
+/* nvk_descriptor_set_create's size: a set's fixed part, aligned as a set is
+ * placed in its pool, which nvk_descriptor_set_addr hands the root table
+ */
+SWITCH_EXPORT uint32_t
+switch_nvk_set_layout_size(VkDevice _device, VkDescriptorSetLayout _layout)
+{
+   VK_FROM_HANDLE(nvk_device, dev, _device);
+   VK_FROM_HANDLE(nvk_descriptor_set_layout, layout, _layout);
+   const struct nvk_physical_device *pdev = nvk_device_physical(dev);
+   const uint32_t align_B =
+      MAX2(nvk_min_cbuf_alignment(&pdev->info), pdev->info.nc_atom_size_B);
+   return align(layout->non_variable_descriptor_buffer_size, align_B);
+}
+
+SWITCH_EXPORT bool
+switch_nvk_immutable_sampler_header(VkDevice _device,
+                                    VkDescriptorSetLayout _layout,
+                                    uint32_t binding, uint32_t element,
+                                    uint32_t header[8])
+{
+   VK_FROM_HANDLE(nvk_device, dev, _device);
+   VK_FROM_HANDLE(nvk_descriptor_set_layout, layout, _layout);
+   if (binding >= layout->binding_count)
+      return false;
+   const struct nvk_descriptor_set_binding_layout *b = &layout->binding[binding];
+   if (b->immutable_samplers == NULL || element >= b->array_size)
+      return false;
+   const struct nvk_sampler *sampler = b->immutable_samplers[element];
+   const struct nvk_descriptor_table *table = &dev->samplers;
+   const uint64_t addr = nvk_descriptor_table_base_address(
+      (struct nvk_descriptor_table *)table) +
+      (uint64_t)sampler->planes[0].desc_index * table->desc_size;
+   if (!nvk_mem_arena_is_mapped(&table->arena) || table->desc_size != 32)
+      return false;
+   memcpy(header, nvk_mem_arena_map(&table->arena, addr, 32), 32);
+   return true;
+}
+
+SWITCH_EXPORT uint32_t
+switch_nvk_buffer_descriptor_size(VkDevice _device, VkDescriptorType type,
+                                  uint64_t range)
+{
+   VK_FROM_HANDLE(nvk_device, dev, _device);
+   const struct nvk_physical_device *pdev = nvk_device_physical(dev);
+   const VkDeviceAddressRangeEXT addr_range = { .address = 0, .size = range };
+   switch (type) {
+   case VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER:
+   case VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC:
+      return nvk_ubo_descriptor_addr(pdev, nvk_ubo_descriptor(pdev, addr_range)).size;
+   case VK_DESCRIPTOR_TYPE_STORAGE_BUFFER:
+   case VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC:
+      return nvk_ssbo_descriptor(pdev, addr_range).addr.size;
+   default:
+      return 0;
+   }
 }

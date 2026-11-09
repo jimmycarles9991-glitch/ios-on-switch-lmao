@@ -40,7 +40,7 @@
 #if defined(XNU_NATIVE_ARCH_TIMER) && XNU_NATIVE_ARCH_TIMER
 #include <arm64/switch_smp.h>
 #endif
-#if defined(SWITCH_XNU_DIAGNOSTICS) && SWITCH_XNU_DIAGNOSTICS
+#if defined(SWITCH_XNU_BOARD) && SWITCH_XNU_BOARD
 #include <switch/boot_layout.h>
 #endif
 
@@ -104,7 +104,7 @@
  * mark (any colour but the default green) is drawn, a logical 16x16 block at y=280..295, x=16+40*(stage-1)..+15,
  * so a normal boot leaves the screen to the console.
  */
-#if defined(SWITCH_XNU_DIAGNOSTICS) && SWITCH_XNU_DIAGNOSTICS
+#if defined(SWITCH_XNU_BOARD) && SWITCH_XNU_BOARD
 .macro SWITCH_EARLY_MARK stage, color=0xff70ff70
 	cbz x28, 99f
 	cbnz x21, 99f
@@ -318,28 +318,28 @@ LEXT(_start)
 	.global	EXT(LowExceptionVectorBase)
 LEXT(LowExceptionVectorBase)
 	/* EL1 SP 0 */
-#if defined(SWITCH_XNU_DIAGNOSTICS) && SWITCH_XNU_DIAGNOSTICS
+#if defined(SWITCH_XNU_BOARD) && SWITCH_XNU_BOARD
 	mov x0, #0
 	b Lswitch_early_exception
 #else
 	b		.
 #endif
 	.align	7
-#if defined(SWITCH_XNU_DIAGNOSTICS) && SWITCH_XNU_DIAGNOSTICS
+#if defined(SWITCH_XNU_BOARD) && SWITCH_XNU_BOARD
 	mov x0, #1
 	b Lswitch_early_exception
 #else
 	b		.
 #endif
 	.align	7
-#if defined(SWITCH_XNU_DIAGNOSTICS) && SWITCH_XNU_DIAGNOSTICS
+#if defined(SWITCH_XNU_BOARD) && SWITCH_XNU_BOARD
 	mov x0, #2
 	b Lswitch_early_exception
 #else
 	b		.
 #endif
 	.align	7
-#if defined(SWITCH_XNU_DIAGNOSTICS) && SWITCH_XNU_DIAGNOSTICS
+#if defined(SWITCH_XNU_BOARD) && SWITCH_XNU_BOARD
 	mov x0, #3
 	b Lswitch_early_exception
 #else
@@ -347,28 +347,28 @@ LEXT(LowExceptionVectorBase)
 #endif
 	/* EL1 SP1 */
 	.align	7
-#if defined(SWITCH_XNU_DIAGNOSTICS) && SWITCH_XNU_DIAGNOSTICS
+#if defined(SWITCH_XNU_BOARD) && SWITCH_XNU_BOARD
 	mov x0, #4
 	b Lswitch_early_exception
 #else
 	b		.
 #endif
 	.align	7
-#if defined(SWITCH_XNU_DIAGNOSTICS) && SWITCH_XNU_DIAGNOSTICS
+#if defined(SWITCH_XNU_BOARD) && SWITCH_XNU_BOARD
 	mov x0, #5
 	b Lswitch_early_exception
 #else
 	b		.
 #endif
 	.align	7
-#if defined(SWITCH_XNU_DIAGNOSTICS) && SWITCH_XNU_DIAGNOSTICS
+#if defined(SWITCH_XNU_BOARD) && SWITCH_XNU_BOARD
 	mov x0, #6
 	b Lswitch_early_exception
 #else
 	b		.
 #endif
 	.align	7
-#if defined(SWITCH_XNU_DIAGNOSTICS) && SWITCH_XNU_DIAGNOSTICS
+#if defined(SWITCH_XNU_BOARD) && SWITCH_XNU_BOARD
 	mov x0, #7
 	b Lswitch_early_exception
 #else
@@ -376,28 +376,28 @@ LEXT(LowExceptionVectorBase)
 #endif
 	/* EL0 64 */
 	.align	7
-#if defined(SWITCH_XNU_DIAGNOSTICS) && SWITCH_XNU_DIAGNOSTICS
+#if defined(SWITCH_XNU_BOARD) && SWITCH_XNU_BOARD
 	mov x0, #8
 	b Lswitch_early_exception
 #else
 	b		.
 #endif
 	.align	7
-#if defined(SWITCH_XNU_DIAGNOSTICS) && SWITCH_XNU_DIAGNOSTICS
+#if defined(SWITCH_XNU_BOARD) && SWITCH_XNU_BOARD
 	mov x0, #9
 	b Lswitch_early_exception
 #else
 	b		.
 #endif
 	.align	7
-#if defined(SWITCH_XNU_DIAGNOSTICS) && SWITCH_XNU_DIAGNOSTICS
+#if defined(SWITCH_XNU_BOARD) && SWITCH_XNU_BOARD
 	mov x0, #10
 	b Lswitch_early_exception
 #else
 	b		.
 #endif
 	.align	7
-#if defined(SWITCH_XNU_DIAGNOSTICS) && SWITCH_XNU_DIAGNOSTICS
+#if defined(SWITCH_XNU_BOARD) && SWITCH_XNU_BOARD
 	mov x0, #11
 	b Lswitch_early_exception
 #else
@@ -405,28 +405,28 @@ LEXT(LowExceptionVectorBase)
 #endif
 	/* EL0 32 */
 	.align	7
-#if defined(SWITCH_XNU_DIAGNOSTICS) && SWITCH_XNU_DIAGNOSTICS
+#if defined(SWITCH_XNU_BOARD) && SWITCH_XNU_BOARD
 	mov x0, #12
 	b Lswitch_early_exception
 #else
 	b		.
 #endif
 	.align	7
-#if defined(SWITCH_XNU_DIAGNOSTICS) && SWITCH_XNU_DIAGNOSTICS
+#if defined(SWITCH_XNU_BOARD) && SWITCH_XNU_BOARD
 	mov x0, #13
 	b Lswitch_early_exception
 #else
 	b		.
 #endif
 	.align	7
-#if defined(SWITCH_XNU_DIAGNOSTICS) && SWITCH_XNU_DIAGNOSTICS
+#if defined(SWITCH_XNU_BOARD) && SWITCH_XNU_BOARD
 	mov x0, #14
 	b Lswitch_early_exception
 #else
 	b		.
 #endif
 	.align	7
-#if defined(SWITCH_XNU_DIAGNOSTICS) && SWITCH_XNU_DIAGNOSTICS
+#if defined(SWITCH_XNU_BOARD) && SWITCH_XNU_BOARD
 	mov x0, #15
 	b Lswitch_early_exception
 #else
@@ -810,7 +810,7 @@ LEXT(start_cpu)
 	b		start_cpu
 
 
-#if defined(SWITCH_XNU_DIAGNOSTICS) && SWITCH_XNU_DIAGNOSTICS
+#if defined(SWITCH_XNU_BOARD) && SWITCH_XNU_BOARD
 /* PC-relative references work at the physical entry and the linked KVA. A
  * recursive fault while drawing halts without touching the stack again. */
 Lswitch_early_exception:
@@ -1016,7 +1016,7 @@ LEXT(start_first_cpu)
 #if defined(XNU_NATIVE_ARCH_TIMER) && XNU_NATIVE_ARCH_TIMER
 	mov x27, xzr
 #endif
-#if defined(SWITCH_XNU_DIAGNOSTICS) && SWITCH_XNU_DIAGNOSTICS
+#if defined(SWITCH_XNU_BOARD) && SWITCH_XNU_BOARD
 	mov x28, #0
 	// Enable physical early rendering only for the two exact native cold
 	// boot geometries. Neither branch changes the stock console/HUD policy.
@@ -1197,7 +1197,7 @@ Lkernelcache_base_found:
 	sub		x24, x24, x18
 	add		x22, x22, x18
 	add		x23, x23, x18
-#if defined(SWITCH_XNU_DIAGNOSTICS) && SWITCH_XNU_DIAGNOSTICS
+#if defined(SWITCH_XNU_BOARD) && SWITCH_XNU_BOARD
     // Full native DRAM is described by boot_args and the live ADT ledger.
     // These temporary block mappings must stop before the Device framebuffer
     // slots; C builds the complete exclusion-aware aperture before low steals.
@@ -1260,7 +1260,7 @@ Lbootstrap_tables_exhausted:
 	// the early debugger rather than corrupting memory or forging a map.
 	b Lbootstrap_tables_exhausted
 Lbootstrap_tables_ready:
-#if defined(SWITCH_XNU_DIAGNOSTICS) && SWITCH_XNU_DIAGNOSTICS
+#if defined(SWITCH_XNU_BOARD) && SWITCH_XNU_BOARD
 	cbz x28, Lswitch_fb_map_done
 	// The fixed window uses TTBR0 L1 index 3 but stops below the framebuffer.
 	// Reuse only its private L2 page and require both new block slots empty.
@@ -1430,7 +1430,7 @@ common_start:
 	add		x0, x0, x22									// Convert exception vector address to KVA
 	sub		x0, x0, x23
 1:
-#if defined(SWITCH_XNU_DIAGNOSTICS) && SWITCH_XNU_DIAGNOSTICS
+#if defined(SWITCH_XNU_BOARD) && SWITCH_XNU_BOARD
 	cbnz x21, Lswitch_normal_vectors
 	cbz x28, Lswitch_normal_vectors
 	// Keep physical vectors while MMU is off; this identity alias survives enable.
@@ -1475,7 +1475,7 @@ Lswitch_secondary_vbar_selected:
 	dsb sy
 Lswitch_secondary_mmu_live:
 #endif
-#if defined(SWITCH_XNU_DIAGNOSTICS) && SWITCH_XNU_DIAGNOSTICS
+#if defined(SWITCH_XNU_BOARD) && SWITCH_XNU_BOARD
 	cbnz x21, Lswitch_vectors_live
 	cbz x28, Lswitch_vectors_live
 	// Now switch to the KVA alias; keep x0 intact for the SCTLR check below.

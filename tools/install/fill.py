@@ -40,6 +40,20 @@ def _os_entries(deltas: pretranslate.Deltas | None) -> list[dict]:
     return deltas.entries('os') if deltas and 'os' in deltas else []
 
 
+def _staged(e: dict) -> bool:
+    return e['path'].startswith(pretranslate.STAGED_APPS)
+
+
+def data_entries(entries: list[dict]) -> list[dict]:
+    """Return the os delta's entries Data's copy of /private/var takes, paths relative to it."""
+    return delta.entries_under([e for e in entries if not _staged(e)], VAR)
+
+
+def tree_entries(entries: list[dict]) -> list[dict]:
+    """Return the os delta's entries the pretranslated tree takes: the System files and the staged system apps."""
+    return [e for e in entries if not e['path'].startswith(VAR + '/') or _staged(e)]
+
+
 def _write(image: Path, volumes: dict[str, str], inputs: Inputs, log: host.Log) -> dict[str, dict[int, owners.Owner]]:
     """Fill Data and Preboot; return each one's owners by inode."""
     data_owners, preboot_owners = owners.Journal(), owners.Journal()
@@ -57,9 +71,8 @@ def _write(image: Path, volumes: dict[str, str], inputs: Inputs, log: host.Log) 
         data_owners.root, preboot_owners.root = data, preboot
         populate.seed_data(system, data, data_owners, log, reseed=True)
         if entries:
-            delta.apply(data, delta.entries_under(entries, VAR), log, 'Data')
-            rest = [e for e in entries if not e['path'].startswith(VAR + '/')]
-            inputs.deltas.overlay_system(data, originals.__getitem__, rest, data_owners)
+            delta.apply(data, data_entries(entries), log, 'Data')
+            inputs.deltas.overlay_system(data, originals.__getitem__, tree_entries(entries), data_owners)
         populate.stage_cryptexes(preboot, inputs.spec, inputs.images, preboot_owners, log)
         cards.sync_overlay(data, inputs.boot_package, log)
         populate.stage_gpu(data, inputs.gpu_stager, inputs.gpu_base, log)

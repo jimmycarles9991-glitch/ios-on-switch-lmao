@@ -54,13 +54,20 @@ def _probes(out_path: str) -> list[dict]:
 
 
 def _submissions(log_path: str) -> list[list[str]]:
+    """Give the log's submissions, but those that hold nothing.
+
+    m2v submits an empty one ahead of a draw whose colour write mask names no channel its target has (RenderBox 27's
+    filter_blur writes alpha alone to an R8Unorm target), and counting it would shift every earlier probe onto its
+    neighbour's submission.
+    """
     subs, cur = [], []
     with open(log_path) as log:
         for text in log:
             line = text.rstrip('\n')
             cur.append(line)
             if line.startswith('SUBMIT'):
-                subs.append(cur)
+                if len(cur) > 1:
+                    subs.append(cur)
                 cur = []
     return subs
 

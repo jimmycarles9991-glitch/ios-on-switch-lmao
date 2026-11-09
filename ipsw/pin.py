@@ -11,6 +11,7 @@ identity for the device class, then streams each member the build needs once to 
 `sha256` of the member's bytes as stored in the zip (what Bazel downloads with a Range header and keeps in its
 repository cache) and `content_sha256` of the member itself (after inflating a deflated member, or decrypting an
 Apple Encrypted Archive with the key its auth data leads to, which is pinned as `aea_key`). Nothing is written to disk.
+The build identity's Digest of each member is pinned as `manifest_digest`.
 The OS dmg alone is several GB, so expect a few minutes.
 """
 
@@ -183,6 +184,7 @@ def pin_members(remote: Remote, members: dict[str, dict[str, int]], identity: di
             'deflated': member['method'] == 8,
             'sha256': sha256,
             'content_sha256': content_sha256,
+            'manifest_digest': entry['Digest'].hex(),
         }
         if key:
             pins[role]['aea_key'] = key

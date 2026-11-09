@@ -12,7 +12,6 @@
 #include <IOKit/IOService.h>
 #include <IOKit/IOPlatformExpert.h>
 #include <libkern/OSKextLib.h>
-#include <mach/kmod.h>
 #include <kern/clock.h>
 #include <kern/sched_prim.h>
 #include <kern/thread.h>
@@ -40,7 +39,7 @@ void tegra_gm20b_accelerator_static_init(void) __asm__("__GLOBAL__sub_I_TegraGM2
 IOService *tegra_gm20b_accelerator_allocate(void) __attribute__((weak));
 unsigned tegra_gm20b_accelerator_instance_size(void) __attribute__((weak));
 }
-extern kmod_info_t g_kernel_kmod_info;
+extern "C" OSReturn switch_kernel_classes(void (*initialize)());
 
 // drivers/SwitchPower/SwitchThermal.cpp: a CPU raise held back for the bring-up goes ahead (a no-op before that service
 // runs).
@@ -106,7 +105,7 @@ void waitBringup()
 
 // Staged as UniXNU-sheng's publishMetal() (package/GpuPowerProbe.cpp:1217-1251) and SwitchAccelStubPublish.cpp: load
 // IOGPUFamily (already loaded by the stub; idempotent) so the IOAcceleratorES metaclass exists, run our class's static
-// initializer inside preModLoad/postModLoad, then publish with the keys the original discovery reads.
+// initializer through switch_kernel_classes, then publish with the keys the original discovery reads.
 // NativeSandboxGrantProcess: the comma-separated process names whose open our XNU grants in place of the sandbox
 // verdict (IOUserClient.cpp native_sandbox_grant(), as in sheng's zzw-native-adreno-sandbox-grant.patch), each matched
 // on at most its first 16 characters.
@@ -124,11 +123,7 @@ IOReturn publish()
 	if (!parent || parent->getClassSize() != 136 ||
 	    tegra_gm20b_accelerator_instance_size() != 136)
 		return kIOReturnNotFound;
-	void *handle = OSMetaClass::preModLoad(g_kernel_kmod_info.name);
-	if (!handle)
-		return kIOReturnNoResources;
-	tegra_gm20b_accelerator_static_init();
-	const IOReturn ret = OSMetaClass::postModLoad(handle);
+	const IOReturn ret = switch_kernel_classes(tegra_gm20b_accelerator_static_init);
 	if (ret)
 		return ret;
 	IOService *accelerator = tegra_gm20b_accelerator_allocate();

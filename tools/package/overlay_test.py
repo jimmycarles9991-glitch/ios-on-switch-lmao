@@ -1,4 +1,8 @@
-"""overlay.py's bundle entries: an .ipa's app directory staged whole, every Mach-O in it trusted."""
+"""overlay.py's bundle entries and its Supplemental cryptex rule.
+
+A bundle's .ipa app directory is staged whole, every Mach-O in it trusted; the Supplemental cryptex path holds launchd
+plists only.
+"""
 
 import hashlib
 import json
@@ -13,6 +17,7 @@ from unittest import mock
 import overlay
 
 APP = '/Applications/SwitchHWTest.app'
+SUPPLEMENTAL = '/private/preboot/Cryptexes/Supplemental'
 
 
 def signed_macho(seed: bytes) -> bytes:
@@ -111,6 +116,43 @@ class BundleTest(unittest.TestCase):
         entry = dict(planned, path='/Applications/Other.app')
         with self.assertRaises(SystemExit):
             overlay.code_of(entry, self.ipa)
+
+
+class SupplementalTest(unittest.TestCase):
+    """iOS 27's Supplemental cryptex path takes launchd plists and nothing else.
+
+    The commpage byte that makes launchd read it also makes Foundation dlopen Frameworks/ERFoundationExtension.dylib
+    from it into every process and Settings show a PreferenceBundles pane from it (and from /private/var/RPSupport).
+    """
+
+    @staticmethod
+    def manifest(path: str, union: str = SUPPLEMENTAL) -> dict:
+        return {'files': [{'path': path, 'source': 'helper.plist', 'union': union, 'kind': '24B119'}]}
+
+    def test_a_launchd_plist_is_allowed(self):
+        path = SUPPLEMENTAL + '/System/Library/LaunchDaemons/com.brunostjohn.switch.joyconpaird.plist'
+        plan = overlay.plan(self.manifest(path), portrait=False, kind='24B119')
+        self.assertEqual(plan['dirs'], [[SUPPLEMENTAL, '']])
+
+    def test_anything_else_is_refused(self):
+        refused = [
+            (SUPPLEMENTAL + '/Frameworks/ERFoundationExtension.dylib', SUPPLEMENTAL),
+            (SUPPLEMENTAL + '/System/Library/PreferenceBundles/SecurityResearchDeviceERMSettings.bundle', SUPPLEMENTAL),
+            (SUPPLEMENTAL + '/System/Library/LaunchDaemons/joyconpaird', SUPPLEMENTAL),
+            (SUPPLEMENTAL + '/System/Library/JetsamProperties/com.apple.jetsamproperties.cryptex.plist', SUPPLEMENTAL),
+            (SUPPLEMENTAL, '/private/preboot/Cryptexes'),
+            ('/System/Cryptexes/Supplemental/Frameworks/ERFoundationExtension.dylib', '/System/Cryptexes/Supplemental'),
+            ('/private/var/RPSupport/System/Library/PreferenceBundles/X.bundle', '/private/var/RPSupport'),
+        ]
+        for path, union in refused:
+            with self.subTest(path=path), self.assertRaises(SystemExit):
+                overlay.plan(self.manifest(path, union), portrait=False, kind='24B119')
+
+    def test_the_manifest_keeps_the_rule(self):
+        manifest = json.loads(Path('overlay/manifest.json').read_text())
+        for kind in ('21H461', '24B119'):
+            for release in (False, True):
+                overlay.plan(manifest, portrait=False, kind=kind, release=release)
 
 
 if __name__ == '__main__':

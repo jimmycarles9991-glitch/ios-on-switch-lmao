@@ -33,10 +33,12 @@ enum tgm_relayout_op {
 	TGM_RELAYOUT_UNTILE_IN_PLACE,
 };
 
-// A GPU writer's fence as the move's channel sees it: the GPU address of its 32-bit seqno and the seqno to wait for
+// A GPU writer's fence as the move's channel sees it: the GPU address of its 32-bit seqno and the seqno to wait for;
+// and the writer's channel
 struct tgm_relayout_wait {
 	uint64_t va;
 	uint32_t seqno;
+	uint32_t uid;
 };
 
 // The surface's pages at surface_va (TGM_LAYOUT_KIND: its texels) and again at surface_rows_va (kind 0: what it held as
@@ -149,7 +151,8 @@ static inline uint32_t tgm_relayout_follow(uint32_t self, const struct tgm_relay
 		switch (tgm_writer_order(self, writers[i].uid, acquirable)) {
 		case TGM_WRITER_GPU_ACQUIRE:
 			waits[nwaits].va = fence_va[i];
-			waits[nwaits++].seqno = writers[i].seqno;
+			waits[nwaits].seqno = writers[i].seqno;
+			waits[nwaits++].uid = writers[i].uid;
 			break;
 		case TGM_WRITER_REFUSED:
 			(*refused)++;

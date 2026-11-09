@@ -4,11 +4,11 @@ import HWTestGPU
 import SwiftUI
 import UIKit
 
-enum UISceneTests {
+public enum UISceneTests {
     static let all: [any HWTest] = [UITextTest(), UIBlurTest(), UIListTest(), UIRenderBoxTest()]
 
     /// Shows `build`'s views full screen, waits for them to reach the screen, and returns what `measure` makes of them.
-    static func staged<V, R>(
+    public static func staged<V, R>(
         _ context: TestContext, _ build: @escaping @MainActor (UIView, CGRect) -> V,
         _ measure: @escaping @MainActor (V) -> R
     ) async -> R {
@@ -17,7 +17,7 @@ enum UISceneTests {
         return await MainActor.run { measure(views) }
     }
 
-    static func outcome(
+    public static func outcome(
         _ checks: [(String, CompositeCheck)], _ context: TestContext, id: String, metrics: Metrics = Metrics()
     )
         -> Outcome
@@ -139,8 +139,8 @@ struct UIBlurTest: HWTest {
 }
 
 /// Vertical stripes 16 points wide, red and blue, drawn by Core Animation (no backing store).
-final class BackdropStripes: UIView {
-    override init(frame: CGRect) {
+public final class BackdropStripes: UIView {
+    override public init(frame: CGRect) {
         super.init(frame: frame)
         backgroundColor = .blue
         for x in stride(from: CGFloat(0), to: frame.width, by: 32) {

@@ -2162,3 +2162,37 @@ nvk_GetImageOpaqueCaptureDescriptorDataEXT(
 {
    return VK_SUCCESS;
 }
+
+__attribute__((visibility("default"))) int
+switch_nvk_image_memory(VkImage _image, struct switch_nvk_image_memory *out)
+{
+   VK_FROM_HANDLE(nvk_image, image, _image);
+   if (image == NULL || out == NULL)
+      return 1;
+   if (image->plane_count != 1 || image->disjoint)
+      return 2;
+   const struct nvk_image_plane *plane = &image->planes[0];
+   const struct nil_image *nil = &plane->nil;
+   if (plane->addr == 0)
+      return 3;
+   if (nil->num_levels != 1)
+      return 4;
+   if (nil->extent_px.array_len != 1)
+      return 5;
+   if (nil->sample_layout != NIL_SAMPLE_LAYOUT_1X1)
+      return 6;
+   const struct nil_tiling *tiling = &nil->levels[0].tiling;
+   *out = (struct switch_nvk_image_memory){
+      .addr = plane->addr,
+      .size_B = nil->size_B,
+      .array_stride_B = nil->array_stride_B,
+      .row_stride_B = nil->levels[0].row_stride_B,
+      .texel_B = util_format_get_blocksize(nil->format.p_format),
+      .pte_kind = image->is_compressed ? nil->compressed_pte_kind : nil->pte_kind,
+      .compressed = image->is_compressed,
+      .tiled = tiling->gob_type != NIL_GOB_TYPE_LINEAR,
+      .y_log2 = tiling->y_log2,
+      .z_log2 = tiling->z_log2,
+   };
+   return 0;
+}

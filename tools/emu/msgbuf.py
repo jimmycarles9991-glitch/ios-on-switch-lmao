@@ -12,8 +12,9 @@ from tools.emu.monitor import Monitor
 
 MSG_MAGIC = 0x063061
 KERNEL_VA = 0xFFFFFFF000000000
-# Where the loader puts the kernel window (both kinds), which holds XNU's `struct msgbuf msgbuf` in its __DATA.
-KERNEL_PHYS = (0xB0000000, 0x8000000)
+# The loader's kernel window at its largest (tools/package/loader_abi.py WINDOW_BASE, WINDOW_BYTES_MAX), which holds
+# XNU's `struct msgbuf msgbuf` in its __DATA.
+KERNEL_PHYS = (0xB2000000, 0x8000000)
 
 
 @dataclass(frozen=True)

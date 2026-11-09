@@ -332,7 +332,7 @@ int hevc_parse_sps(HEVCParams *params, const uint8_t *nal, size_t size)
     }
     if (b.bad)
         return -1;
-    // Main (8-bit), Main 10 and Main Still Picture: the profiles NVDEC 2.0 decodes into 8-bit NV12.
+    // Main (8-bit), Main 10 and Main Still Picture: the profiles NVDEC 2.0 decodes.
     if (s.profile_idc < 1 || s.profile_idc > 3 || s.bit_depth != s.bit_depth_chroma ||
         (s.bit_depth != 8 && s.bit_depth != 10) || (s.bit_depth == 10 && s.profile_idc != 2))
         return -1;

@@ -318,6 +318,8 @@ mesa_cc_library(
         "nvk_switch_capture.c",
         "nvk_switch_compile.c",
         "nvk_switch_directcheck.c",
+        "nvk_switch_push.c",
+        "nvk_switch_round.c",
         "nvk_upload_queue.c",
         "nvk_video_session.c",
         "nvk_wsi.c",

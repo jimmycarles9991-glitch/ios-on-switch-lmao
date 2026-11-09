@@ -8,7 +8,7 @@
 //    the copy engine zeroed it; the scrubber gives a range back clean only from its fence's interrupt pass, never waits
 //    on the CPU, and panics with one line on a range not back in time;
 //  - the user client reads pushes only through TegraGM20BPushScan.h and profiles only what it read;
-//  - a fence-only present (direct scanout) copies nothing.
+//  - a fence-only present (direct scanout) copies nothing, and the debug read-back rides the frame's own present.
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
 
@@ -133,9 +133,10 @@ TEST(GM20BPoolPolicySource, SystemBosTakeAndReturnSpares)
 {
 	const std::string alloc =
 		flat(definition(client(), "IOReturn AGXDeviceUserClient::boAlloc("));
-	EXPECT_THAT(alloc,
-		    HasSubstr("if (!ret && !bo->pool_va && !(in->flags & TegraGM20BBoContiguous)) "
-			      "spare = spareTake(in->bytes);"));
+	EXPECT_THAT(
+		alloc,
+		HasSubstr("if (!ret && !bo->pool_va && !compressible && "
+			  "!(in->flags & TegraGM20BBoContiguous)) spare = spareTake(in->bytes);"));
 	EXPECT_THAT(alloc, Not(HasSubstr("|| system ? kClasses")));
 	EXPECT_THAT(
 		alloc,
@@ -199,11 +200,44 @@ TEST(GM20BPoolPolicySource, StatsNameThePoolHolders)
 	EXPECT_THAT(
 		stats,
 		HasSubstr("tgm_pool_breakdown(&pool_clients, &pool_orphan_bytes, &pool_orphans, "
-			  "&pool_system_bytes, &pool_systems);"));
+			  "&pool_comp_bytes, &pool_comps, &pool_system_bytes, &pool_systems);"));
 	EXPECT_THAT(
 		stats,
 		HasSubstr(
 			"pool %lu/%llu MiB (compositor %llu, clients \" \"%llu, orphans %llu in"));
+	EXPECT_THAT(stats, HasSubstr("compressible %llu MiB in %llu;"));
+}
+
+// A Compressible BO is pool chunks under the pool's tiers, never a view a task could map, and its chunks go back only once
+// its GPU memory object (and with it its comptags) is gone.
+TEST(GM20BPoolPolicySource, CompressibleBosArePoolChunksNoTaskMaps)
+{
+	const std::string alloc =
+		flat(definition(client(), "IOReturn AGXDeviceUserClient::boAlloc("));
+	const std::string chunks = Between(alloc, "if (!ret && compressible) {",
+					   "if (!ret && (in->flags & TegraGM20BBoCoherent)) {");
+	EXPECT_THAT(chunks,
+		    HasSubstr("refused = compressibleRefusal(in->bytes, pool_bytes_, critical_);"));
+	EXPECT_THAT(
+		flat(definition(client(), "const char *compressibleRefusal(uint64_t bytes, "
+					  "uint64_t held, bool compositor)")),
+		HasSubstr("tgm_pool::compressibleRefusal(bytes, held, avail, limits, compositor)"));
+	EXPECT_THAT(chunks, HasSubstr("takeChunks(in->bytes, bo->pas)"));
+	EXPECT_THAT(alloc, HasSubstr("} else if (!ret && !compressible) {"));
+	EXPECT_THAT(
+		flat(definition(client(), "IOReturn takeChunks(uint64_t bytes, uint64_t *pas)")),
+		HasSubstr("poolZeroNow()"));
+	const std::string release =
+		flat(definition(client(), "void AGXDeviceUserClient::releaseBo(Bo *bo)"));
+	expectBefore(release, "tgm_mem_del(&bo->mem);",
+		     "tgm_pool_free_chunks(bo->pas, bo->npages);");
+	EXPECT_THAT(
+		flat(definition(client(), "IOReturn AGXDeviceUserClient::clientMemoryForType(")),
+		HasSubstr("bo && bo->view"));
+	EXPECT_THAT(flat(definition(SourceText("../shim/linux.c"),
+				    "int nvxnu_pool_alloc_chunks(unsigned long count, unsigned "
+				    "long long *pas)")),
+		    HasSubstr("tgm_comp_pick_chunks(pool_map, pool_dirty, pool_npages,"));
 }
 
 TEST(GM20BPoolScrubSource, NoCpuClearOfTheReservedPool)
@@ -227,7 +261,8 @@ TEST(GM20BPoolScrubSource, EveryAllocationZeroesWhatAFreeLeftDirty)
 	      "void *dma_alloc_attrs(struct device *dev, size_t size, dma_addr_t *handle, gfp_t "
 	      "gfp,",
 	      "void *nvxnu_pool_alloc_clean(unsigned long size, unsigned long align, unsigned long "
-	      "long *pa)"})
+	      "long *pa)",
+	      "int nvxnu_pool_alloc_chunks(unsigned long count, unsigned long long *pas)"})
 		EXPECT_THAT(definition(shim, signature), HasSubstr("pool_zero_dirty("))
 			<< signature;
 	const std::string zero = definition(
@@ -324,6 +359,58 @@ TEST(GM20BPresentSource, FenceOnlyPresentHasNoCopy)
 		     "NVB0B5_LAUNCH_DMA_NON_PIPELINED");
 }
 
+// A present waits for the writers of window B's surface too (TegraScanoutCopy alsoWritten), so the display writes window
+// B's registers for a surface the GPU renders only after that work; window B's own fence maps nothing and copies nothing.
+TEST(GM20BPresentSource, PresentWaitsForWindowBsWritersToo)
+{
+	const std::string copy = flat(Between(gpu(), "static int present_copy(", "\n}\n"));
+	EXPECT_THAT(copy, HasSubstr("present_imports(user, src_pa, also_pa)"));
+	EXPECT_THAT(copy, HasSubstr("(matched && !present_imports(user, src_pa, also_pa))"));
+	EXPECT_THAT(flat(Between(gpu(), "static int present_imports(", "\n}\n")),
+		    HasSubstr("vm_imports(user->vm, src_pa) || (also_pa && vm_imports(user->vm, "
+			      "also_pa))"));
+	EXPECT_THAT(flat(Between(client(), "extern \"C\" int tegra_gm20b_scanout_copy(", "\n}\n")),
+		    HasSubstr("copy->alsoWritten & ~0xfffULL"));
+	const std::string fence =
+		flat(Between(client(), "extern \"C\" int tegra_gm20b_scanout_fence(", "\n}\n"));
+	EXPECT_THAT(fence, HasSubstr("tgm_present_copy(0, pa & ~0xfffULL, 0, 0, 0, 1, 1, 0, 0, 0, "
+				     "presentDone, display)"));
+	EXPECT_THAT(fence, Not(HasSubstr("presentSurface(")));
+}
+
+// The scanout read-back (TegraGM20BReadbackABI.h) rides the frame's own present: a submission of its own would hold the
+// present channel, which then refuses the display's next offer, and the display copies that frame on the CPU. Its copies
+// run after the frame's copy, each after the copies before it, into pitch-linear buffers, and before the fence; a refused
+// present gives the read-back back; its completion, in the GPU interrupt pass, takes no lock and touches no cache; and a
+// release kernel has none of it.
+TEST(GM20BPresentSource, ReadbackRidesTheFramesPresent)
+{
+	const std::string copy = flat(Between(gpu(), "static int present_copy(", "\n}\n"));
+	expectBefore(copy, "if (dst_va) {", "present_push_reads(push, reads, nreads);");
+	expectBefore(copy, "present_push_reads(push, reads, nreads);", "chan_fence(chan);");
+	EXPECT_THAT(copy, HasSubstr("nreads * TGM_PRESENT_READ_DWORDS"));
+	const std::string reads = flat(Between(gpu(), "static void present_push_reads(", "\n}\n"));
+	EXPECT_THAT(reads, HasSubstr("NVB0B5_LAUNCH_DMA_NON_PIPELINED"));
+	EXPECT_THAT(reads, HasSubstr("NVB0B5_LAUNCH_DMA_DST_PITCH"));
+	expectBefore(gpu(), "#if TGM_STATS\n/* Each read-back", "static void present_push_reads(");
+
+	const std::string scanout =
+		flat(Between(client(), "extern \"C\" int tegra_gm20b_scanout_copy(", "\n}\n"));
+	expectBefore(scanout, "#if TGM_STATS tgm_present_read reads",
+		     "#else ret = tgm_present_copy(");
+	EXPECT_THAT(scanout, HasSubstr("nreads ? tgm_readback_done : presentDone"));
+	EXPECT_THAT(scanout, HasSubstr("if (ret && nreads) tgm_readback_refused();"));
+
+	const std::string readback = SourceText("../TegraGM20BReadback.cpp");
+	const std::string done =
+		flat(definition(readback, "void tgm_readback_done(void *display, int status)"));
+	EXPECT_THAT(done, HasSubstr("native_legacy_gpu_complete(display, status);"));
+	EXPECT_THAT(done, Not(HasSubstr("IOLock")));
+	EXPECT_THAT(done, Not(HasSubstr("tgm_cpu_clean_pages")));
+	expectBefore(readback, "#include \"TegraGM20BReadback.h\"\n\n#if TGM_STATS\n", "namespace");
+	EXPECT_EQ(readback.substr(readback.size() - 7), "#endif\n");
+}
+
 // A tiled (block-linear) source: the copy engine reads it block-linear with the tiled block height, never as pitch, through
 // a mapping of the kind its texels were written under; a surface's layout comes from its decision (SurfaceLayout), never
 // from how one client bound it.
@@ -351,9 +438,9 @@ TEST(GM20BSleepSource, GpuTouchingPathsGoThroughTheGate)
 		const std::string body = flat(definition(gpu(), waits));
 		expectBefore(body, "gate_enter();", "gate_leave();");
 	}
-	for (const char *refused :
-	     {"int tgm_present_copy(", "int tgm_pool_scrub(uint64_t pa, uint64_t bytes)",
-	      "static void scrub_work(void *arg)"}) {
+	for (const char *refused : {"int tgm_present_copy(", "int tgm_present_copy_read(",
+				    "int tgm_pool_scrub(uint64_t pa, uint64_t bytes)",
+				    "static void scrub_work(void *arg)"}) {
 		const std::string body = flat(definition(gpu(), refused));
 		expectBefore(body, "if (!gate_try())", "gate_leave();");
 	}
@@ -453,7 +540,10 @@ TEST(GM20BRawReopenSource, ReopenKeepsTheHeapAndReplaysTheContext)
 	     {"case RelocHeapHi:", "case RelocHeapLo:", "case RelocTicHi:", "case RelocTicLo:",
 	      "case RelocTscHi:", "case RelocTscLo:", "case RelocRootHi:", "case RelocRootLo:"})
 		EXPECT_THAT(relocated, HasSubstr(reloc));
-	EXPECT_THAT(context, HasSubstr("p.inc(CB_SELECTOR_A,"));
+	EXPECT_THAT(context, HasSubstr("sampleWords(p, 1, root_.va);"));
+	EXPECT_THAT(
+		flat(definition(raw, "void sampleWords(Push &p, uint32_t samples, uint64_t root)")),
+		HasSubstr("p.inc(CB_SELECTOR_A,"));
 	const std::string begin = flat(definition(raw, "CommandBuffer *Device::begin()"));
 	expectBefore(begin, "!reopen())", "p.m(INVALIDATE_SHADER_CACHES_NO_WFI,");
 }
@@ -704,6 +794,23 @@ TEST(NvkImageSource, StencilCopyTempStartsOnTheBindAlignment)
 		    HasSubstr("const uint64_t va_align_B = plane->plane_align_B;"));
 }
 
+// At M2 the FIFO has no user: nvkm makes its runqueues and runlists and registers its interrupt handler at the first
+// channel (nvkm_fifo_oneinit), from its function table. What recover.c and sched.c take over goes into that table.
+TEST(GM20BSchedSource, HooksGoWhereTheFifosOneinitReadsThem)
+{
+	const std::string recover = flat(definition(
+		SourceText("../recover.c"), "void tgm_recover_init(struct nvkm_device *device)"));
+	EXPECT_THAT(recover, HasSubstr("func->intr = fifo_intr;"));
+	EXPECT_THAT(recover, HasSubstr("func->runq = &ctxsw.runq;"));
+	EXPECT_THAT(recover, HasSubstr("func->chan.func = &ctxsw.chan;"));
+	EXPECT_THAT(recover, HasSubstr("func->intr_ctxsw_timeout = ctxsw_tick;"));
+	const std::string sched = SourceText("../sched.c");
+	EXPECT_THAT(flat(definition(sched, "void tgm_sched_init(struct nvkm_device *device)")),
+		    HasSubstr("tgm_fifo_func(fifo)->runl_ctor = sched_runl_ctor;"));
+	EXPECT_THAT(flat(definition(sched, "static int sched_runl_ctor(struct nvkm_fifo *fifo)")),
+		    HasSubstr("interleave(fifo->engine.subdev.device, runl);"));
+}
+
 // Nouveau puts the SW engine on the runlist with id 15 and no status register: PFIFO_ENG_STATUS(15) (0x0026b8)
 // PRI-times out, and the GPU's bus error panics. Every per-engine status read is behind a context or a GR check.
 TEST(GM20BSchedSource, EngineStatusReadsSkipTheSoftwareEngine)
@@ -815,6 +922,31 @@ TEST(GM20BDeviceSource, DisplayParamsArriveByMethodAndByTrap)
 			      "2) return kIOReturnBadArgument; storeDeadline("));
 }
 
+// A hang's line reads the hung submission's pushes through the user client that claimed the channel's space, and only
+// that: the kernel's copiers (the tiling move, the copy engine's plane copies) claim theirs with their own state, which
+// is no AGXDeviceUserClient. A live channel's client is not freed under it: hang recovery describes channels on the
+// live list under live_lock, and the client's free() takes every channel off it before it frees its lock.
+TEST(GM20BHangSource, OnlyAConnectionsPushesAreRead)
+{
+	EXPECT_THAT(flat(definition(gpu(), "static void chan_describe(")),
+		    HasSubstr("CHAN_PUSH_BYTES, chan->vm->connection, note, sizeof(note));"));
+	EXPECT_THAT(flat(definition(client(), "bool AGXDeviceUserClient::setUp(")),
+		    HasSubstr("tgm_vm_claim_connection(vm_, this);"));
+	EXPECT_THAT(client(), Not(HasSubstr("tgm_vm_claim(")));
+	const std::string relayout = SourceText("../TegraGM20BRelayout.cpp");
+	EXPECT_THAT(flat(definition(relayout, "bool openSpace()")),
+		    HasSubstr("tgm_vm_claim(r.vm, &gRelayout);"));
+	EXPECT_THAT(relayout, Not(HasSubstr("tgm_vm_claim_connection(")));
+	const std::string copy = SourceText("../TegraGM20BCopy.cpp");
+	EXPECT_THAT(flat(definition(copy, "bool openSpace()")),
+		    HasSubstr("tgm_vm_claim(c.vm, &gCopy);"));
+	EXPECT_THAT(copy, Not(HasSubstr("tgm_vm_claim_connection(")));
+	expectBefore(flat(definition(client(), "void AGXDeviceUserClient::free()")),
+		     "for (auto &chan : chans_) tgm_chan_del(&chan);", "IOLockFree(lock_);");
+	expectBefore(flat(definition(gpu(), "void tgm_chan_del(struct tgm_chan **pchan)")),
+		     "mutex_lock(&live_lock); list_del(&chan->live);", "chan_free(chan);");
+}
+
 // The tiling move and the copy engine's plane copies follow the surface's running writers through tgm_relayout_waits:
 // acquires in their own push (TegraGM20BRelayout.h tgm_relayout_follow), a refusal for one they cannot acquire on, never a
 // CPU wait. The kernel's own client channels' fences sit in the fence view's last slot, which every space maps and the
@@ -831,9 +963,20 @@ TEST(GM20BRelayoutSource, KernelCopiesOrderOnTheGpu)
 		waits,
 		HasSubstr("\"gpu-order\", \"writer-unordered\", \"a kernel copy goes ahead of"));
 	EXPECT_THAT(waits, Not(HasSubstr("tgm_writer_wait(")));
-	EXPECT_THAT(flat(definition(relayout, "int move(")),
+	const std::string move = flat(definition(relayout, "int move("));
+	EXPECT_THAT(move,
 		    HasSubstr("tgm_relayout_waits(r.vm, tgm_chan_uid(chan), writers, nwriters, "
 			      "waits, 0)"));
+	// its wait is late on the writer an acquire sits on, so recovery finds that writer, not the copy behind it
+	EXPECT_THAT(move, HasSubstr("acquired[i] = {waits[i].uid, waits[i].seqno};"));
+	EXPECT_THAT(move, HasSubstr("tgm_copy_wait(tgm_chan_uid(chan), seqno, acquired, nwaits);"));
+	EXPECT_THAT(move, Not(HasSubstr("tgm_writer_wait(")));
+	const std::string late = flat(definition(gpu(), "static struct tgm_chan *late_writer("));
+	EXPECT_THAT(late, HasSubstr("(s32)(tgm_chan_completed(chan) - acquired[i].seqno) < 0"));
+	EXPECT_THAT(late, HasSubstr("*late_seqno = seqno; return live_by_uid(uid);"));
+	EXPECT_THAT(flat(definition(gpu(), "static void writer_wait(")),
+		    HasSubstr("chan = late_writer(uid, seqno, acquired, nacquired, &late); if "
+			      "(chan) verdict = hang_recover(chan, \"IOSurface lock\", late, "));
 	EXPECT_THAT(
 		flat(definition(relayout, "bool openSpace()")),
 		HasSubstr("tgm_fence_kernel(TGM_FENCE_KERNEL_RELAYOUT, &r.fenceCpu, &fencePage, "

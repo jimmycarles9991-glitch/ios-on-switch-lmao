@@ -17,7 +17,8 @@ manifest.json: {"files": [{"path": absolute, "source": relative to the tree, "tr
 "boot-arg": name, "union": absolute}]}. The union directory is the file's own unless "union" names an existing
 ancestor (XNU unions are deep, so a new bundle directory can appear inside a sealed one). "portrait": true stages the
 file only for a portrait-native kernel, "debug": true only in a debug boot package (not with --release), "kind" only for
-that IPSW kind (a union over a directory the System volume lacks fails at boot).
+that IPSW kind (a union over a directory the System volume lacks fails at boot). Under the Supplemental cryptex path
+only launchd plists are allowed (SUPPLEMENTAL).
 "bundle": true makes the entry a whole bundle directory: its source is a rules_apple .ipa, whose Payload/<the path's
 name>/ becomes the directory at path, and "trust" covers every Mach-O inside it.
 """
@@ -26,6 +27,7 @@ import argparse
 import hashlib
 import json
 import posixpath
+import re
 import shutil
 import struct
 import sys
@@ -39,6 +41,13 @@ from tools.common import macho
 from tools.trustcache.trustcache import trust_module
 
 OVERLAY_ROOT = '/private/var/Switch/overlay'
+# iOS 27's launchd bootstraps the Supplemental cryptex path's LaunchDaemons, through the commpage byte the 27 kernel
+# sets for it (commpage.c). Other readers of that byte act on files under the same tree: Foundation dlopens
+# Frameworks/ERFoundationExtension.dylib into every process, and Settings shows an Extended Research pane for a bundle
+# under System/Library/PreferenceBundles. So the overlay may put launchd plists there and nothing else.
+SUPPLEMENTAL = '/private/preboot/Cryptexes/Supplemental'
+SUPPLEMENTAL_ROOTS = (SUPPLEMENTAL, '/System/Cryptexes/Supplemental')
+SUPPLEMENTAL_DAEMON = re.compile(re.escape(SUPPLEMENTAL) + r'/System/Library/LaunchDaemons/[A-Za-z0-9._-]+\.plist')
 
 
 def plan(manifest: dict, portrait: bool, kind: str, given: Iterable[str] | None = None, release: bool = False) -> dict:
@@ -64,6 +73,9 @@ def plan(manifest: dict, portrait: bool, kind: str, given: Iterable[str] | None 
         path = entry['path']
         if not path.startswith('/') or posixpath.normpath(path) != path or path.startswith('/private/var/'):
             raise SystemExit(f'overlay: bad path {path}')
+        supplemental = any(path == root or path.startswith(root + '/') for root in SUPPLEMENTAL_ROOTS)
+        if supplemental and not SUPPLEMENTAL_DAEMON.fullmatch(path):
+            raise SystemExit(f'overlay: {path}: only launchd plists may go under {SUPPLEMENTAL}')
         directory, gate = entry.get('union', posixpath.dirname(path)), entry.get('boot-arg', '')
         if not path.startswith(directory.rstrip('/') + '/'):
             raise SystemExit(f'overlay: {path} is not inside its union {directory}')

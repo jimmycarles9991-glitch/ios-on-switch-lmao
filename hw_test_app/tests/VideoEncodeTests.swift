@@ -21,25 +21,29 @@ struct VideoEncodeTest: HWTest {
         return encoders.filter { ($0[kVTVideoEncoderList_IsHardwareAccelerated as String] as? Bool) == true }
     }
 
+    // The session is always created, listed or not: what VTCompressionSessionCreate answers is the evidence.
     func run(_ context: TestContext) async throws -> Outcome {
         let type = codec == .h264 ? kCMVideoCodecType_H264 : kCMVideoCodecType_HEVC
         let offered = Self.hardwareEncoders().filter {
             ($0[kVTVideoEncoderList_CodecType as String] as? UInt32) == type
         }
-        if offered.isEmpty {
-            if codec == .h264 { return .fail("VTCopyVideoEncoderList offers no hardware H.264 encoder") }
-            return .skip("VTCopyVideoEncoderList offers no hardware HEVC encoder")
-        }
+        let listed = offered.compactMap { $0[kVTVideoEncoderList_EncoderID as String] as? String }
         let (width, height, fps) = (1920, 1080, 60)
         let pattern = Pattern(width: width, height: height, clip: realTime ? 0x7001 : 0x7002)
         let settings = CompressorSettings(
             codec: codec, width: width, height: height, fps: fps, bitrate: realTime ? 8_000_000 : 12_000_000,
             realTime: realTime, requireHardware: true)
-        let encoded = try Compressor.encode(settings, pattern: pattern, frames: Self.frames)
+        let encoded: CompressedClip
+        do {
+            encoded = try Compressor.encode(settings, pattern: pattern, frames: Self.frames)
+        } catch VideoError.status(let call, let status) where codec == .hevc && listed.isEmpty {
+            return .skip("no hardware HEVC encoder: none listed, and \(call) returned \(status)")
+        }
         let decoded = try Decompressor.decode(
             encoded.samples, format: encoded.format, pattern: pattern, bitDepth: 8, fps: fps)
         let seconds = Double(Self.frames) / Double(fps)
         var metrics = Metrics()
+        metrics.set("listed", listed.isEmpty ? "-" : listed.joined(separator: ","))
         metrics.set("fps", Double(Self.frames) / encoded.seconds, digits: 1)
         metrics.set("mbps", Double(encoded.bytes * 8) / seconds / 1e6, digits: 2)
         metrics.set("key_frames", encoded.keyFrames)
@@ -48,6 +52,7 @@ struct VideoEncodeTest: HWTest {
         metrics.set("luma_err", decoded.worstLumaError, digits: 1)
         return .judged(
             [
+                ("VTCopyVideoEncoderList offers it as hardware", !listed.isEmpty),
                 ("UsingHardwareAcceleratedVideoEncoder", encoded.usingHardware),
                 ("P pictures after the first key frame", encoded.predictedFrames >= Self.frames - 2),
                 ("decodes back to the pattern (\(decoded.firstMismatch ?? "ok"))", decoded.matched == Self.frames),

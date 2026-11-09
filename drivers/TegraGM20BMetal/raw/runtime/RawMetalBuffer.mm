@@ -13,10 +13,10 @@
     _twin = nil;  // m2v's import over these pages goes first
     void *bytes = _raw.cpu;
     const NSUInteger length = NSUInteger(_raw.length);
+    if (_heap && !_raw.arena)
+        _heap->_used -= _heapBytes;
     if (gRM)
         gRM->raw->destroyBuffer(_raw);
-    if (_heap)
-        _heap->_used -= length;
     if (_deallocator)
         _deallocator(bytes, length);
 }
@@ -29,13 +29,13 @@
     }
     // made outside this object's lock (twinPublish): in place over the same memory (a pool span or the caller's no-copy pages),
     // Shared whatever this buffer's storage mode (the memory is CPU-visible; m2v makes no Private buffer over host memory)
+    // (a no-copy buffer's own length: its pages are the kernel's around it, the twin's no more than the import holds)
     const size_t page = size_t(getpagesize());
     const MTLResourceOptions options = (_options & ~MTLResourceStorageModeMask) | MTLResourceStorageModeShared;
+    const NSUInteger length =
+        _raw.import ? NSUInteger(_raw.length) : (NSUInteger(_raw.length) + page - 1) & ~(page - 1);
     raw::Alias a;
-    return twinPublish(self, _twin,
-                       gRM->raw->alias(_raw, a)
-                           ? rawAliasBuffer(a, _raw.cpu, (NSUInteger(_raw.length) + page - 1) & ~(page - 1), options)
-                           : nil);
+    return twinPublish(self, _twin, gRM->raw->alias(_raw, a) ? rawAliasBuffer(a, _raw.cpu, length, options) : nil);
 }
 
 // A CPU read after a GPU write: the GPU's bytes, not lines the CPU cached before (clean+invalidate keeps any CPU write)
@@ -63,7 +63,7 @@
 
 - (NSUInteger)heapOffset
 {
-    return 0;  // a heap's buffers are allocations of their own (RMHeap)
+    return _raw.arena && _raw.span.valid() ? NSUInteger(_raw.span.offset) : 0;
 }
 
 - (NSUInteger)allocatedSize
@@ -101,10 +101,12 @@
     (void)range;  // the draws that read it clean what they read (raw_gpu.cpp CommandBuffer::clean)
 }
 
-// The pages are never given back while the buffer lives: Volatile and Empty keep the contents (a later NonVolatile answers what
-// was asked before, never Empty), which is what a caller that refills on Empty needs.
+// A buffer of its own keeps its pages while it lives: Volatile and Empty keep the contents (a later NonVolatile answers what
+// was asked before, never Empty), which is what a caller that refills on Empty needs. A heap's buffer is its heap's (RMHeap).
 - (MTLPurgeableState)setPurgeableState:(MTLPurgeableState)state
 {
+    if (_heap)
+        return [(id<MTLHeap>)_heap setPurgeableState:MTLPurgeableStateKeepCurrent];
     const MTLPurgeableState old = _purgeable ? _purgeable : MTLPurgeableStateNonVolatile;
     if (state != MTLPurgeableStateKeepCurrent)
         _purgeable = state == MTLPurgeableStateEmpty ? MTLPurgeableStateVolatile : state;
@@ -117,11 +119,19 @@
 }
 
 - (void)makeAliasable
-{}
+{
+    if (!_heap || _aliasable)
+        return;
+    _aliasable = true;
+    if (_raw.arena)
+        gRM->raw->arenaRelease(_raw);
+    _heap->_used -= _heapBytes;
+    _heapBytes = 0;
+}
 
 - (BOOL)isAliasable
 {
-    return NO;
+    return _aliasable;
 }
 
 - (IOSurfaceRef)iosurface
@@ -166,7 +176,7 @@
     }
     if (!t->_rawOk && ![t rmTwin])
         return nil;
-    return (id<MTLTexture>)t;
+    return swizzled((id<MTLTexture>)t, d.swizzle);
 }
 
 // SPI (Core Animation): the same, one 2D image
@@ -177,95 +187,6 @@
 {
     (void)image;
     return [self newTextureWithDescriptor:d offset:offset bytesPerRow:row];
-}
-
-@end
-
-@implementation RMHeap
-
-- (id)rmTwin
-{
-    return nil;  // the facade's heap is its own: its buffers and textures are ordinary facade resources
-}
-
-- (NSUInteger)size
-{
-    return _descriptor.size;
-}
-
-- (NSUInteger)usedSize
-{
-    return NSUInteger(_used.load());
-}
-
-- (NSUInteger)currentAllocatedSize
-{
-    return _descriptor.size;
-}
-
-- (NSUInteger)maxAvailableSizeWithAlignment:(NSUInteger)alignment
-{
-    (void)alignment;
-    const uint64_t used = _used.load();
-    return used >= _descriptor.size ? 0 : NSUInteger(_descriptor.size - used);
-}
-
-- (MTLStorageMode)storageMode
-{
-    return _descriptor.storageMode;
-}
-
-- (MTLCPUCacheMode)cpuCacheMode
-{
-    return _descriptor.cpuCacheMode;
-}
-
-- (MTLHazardTrackingMode)hazardTrackingMode
-{
-    return _descriptor.hazardTrackingMode;
-}
-
-- (MTLResourceOptions)resourceOptions
-{
-    return _descriptor.resourceOptions;
-}
-
-- (MTLHeapType)type
-{
-    return _descriptor.type;
-}
-
-- (MTLPurgeableState)setPurgeableState:(MTLPurgeableState)state
-{
-    (void)state;
-    return MTLPurgeableStateNonVolatile;
-}
-
-- (id<MTLBuffer>)newBufferWithLength:(NSUInteger)length options:(MTLResourceOptions)options
-{
-    id b = [(id<MTLDevice>)_device newBufferWithLength:length options:options];
-    if ([b isKindOfClass:[RMBuffer class]]) {
-        ((RMBuffer *)b)->_heap = self;
-        _used += length;
-    }
-    return (id<MTLBuffer>)b;
-}
-
-- (id<MTLBuffer>)newBufferWithLength:(NSUInteger)length options:(MTLResourceOptions)options offset:(NSUInteger)offset
-{
-    (void)offset;
-    return [self newBufferWithLength:length options:options];
-}
-
-- (id<MTLTexture>)newTextureWithDescriptor:(MTLTextureDescriptor *)d
-{
-    return [(id<MTLDevice>)_device newTextureWithDescriptor:d];
-}
-
-- (id<MTLTexture>)newTextureWithDescriptor:(MTLTextureDescriptor *)d offset:(NSUInteger)offset
-{
-    (void)offset;
-    return [self newTextureWithDescriptor:d];
 }
 
 @end

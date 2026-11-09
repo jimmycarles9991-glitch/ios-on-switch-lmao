@@ -17,7 +17,12 @@ enum {
     kTilesBytes = 0x900,
     kScalingOff = kTilesOff + kTilesBytes,  // nvdec_hevc_scaling_list_s, 0x400 reserved
     kBitsOff = 0x1000,
-    kFilterBytesPerRow = 480 + 3840 + 60,  // deblocking, SAO, BSD control (averne's FILTER/SAO/BSD_SIZE)
+    // Filter buffer bytes per 64-aligned row: deblocking, SAO, BSD control (averne's FILTER/SAO/BSD_SIZE, 8-bit).
+    // Deblocking and SAO hold pixels, so a 16-bit picture gets twice theirs: the engine writes within the offsets it
+    // is given, and room it does not use costs nothing.
+    kDeblockBytesPerRow = 480,
+    kSaoBytesPerRow = 3840,
+    kBsdBytesPerRow = 60,
 };
 
 typedef struct {
@@ -36,7 +41,8 @@ struct HEVCDecoder {
     int first_sps;
     bool allow10;
     Entry dpb[SLOTS];
-    uint32_t width, height, pitch, rows, luma_bytes, surface_bytes;  // the surfaces' geometry
+    uint32_t width, height, pitch, rows, luma_bytes, surface_bytes;  // the surfaces' geometry (pitch in bytes)
+    uint32_t sample_bytes;                                           // 2 for Main 10: 16-bit samples
     uint32_t input, aux, colmv_bytes, filter_off, aux_bytes;
     uint8_t *input_va, *aux_va;
     uint64_t input_bytes;
@@ -142,7 +148,8 @@ unsigned hevc_decoder_missing_refs(const HEVCDecoder *d)
 // coded video sequence; a new SPS mid-sequence with another size is refused).
 static int configure(HEVCDecoder *d, const HEVCSPS *sps)
 {
-    const uint32_t pitch = ALIGN(sps->width, 64), rows = ALIGN(sps->height, 64);
+    const uint32_t sampleBytes = sps->bit_depth > 8 ? 2 : 1, columns = ALIGN(sps->width, 64);
+    const uint32_t pitch = columns * sampleBytes, rows = ALIGN(sps->height, 64);
     if (d->aux && pitch == d->pitch && rows == d->rows)
         return 0;
     for (int i = 0; i < SLOTS; i++)
@@ -151,13 +158,14 @@ static int configure(HEVCDecoder *d, const HEVCSPS *sps)
     freeSurfaces(d);
     releaseBuffers(d);
     d->width = sps->width, d->height = sps->height, d->pitch = pitch, d->rows = rows;
+    d->sample_bytes = sampleBytes;
     d->luma_bytes = pitch * rows;
     d->surface_bytes = d->luma_bytes + d->luma_bytes / 2;
     // Colocated motion: 17 slots of (64-aligned width x height) / 16 bytes; the filter buffer: deblocking, SAO and
     // BSD control rows over the 64-aligned height (averne's nvtegra_hevc.c sizes).
-    d->colmv_bytes = pitch * rows / 16;
+    d->colmv_bytes = columns * rows / 16;
     d->filter_off = ALIGN(17 * d->colmv_bytes, 256);
-    d->aux_bytes = d->filter_off + kFilterBytesPerRow * rows;
+    d->aux_bytes = d->filter_off + ((kDeblockBytesPerRow + kSaoBytesPerRow) * sampleBytes + kBsdBytesPerRow) * rows;
     void *va;
     if (d->b.alloc(d->b.ctx, d->aux_bytes, &d->aux, &va))
         return -3;
@@ -349,14 +357,12 @@ static void fillSetup(const HEVCDecoder *d, nvdec_hevc_pic_s *p, const HEVCSPS *
     memset(p, 0, sizeof(*p));
     p->stream_len = length;
     p->sw_start_code_e = 1;
-    // 8-bit, or 10-bit truncated to 8 (BT.2020 matrices by their own table)
-    p->disp_output_mode = sps->bit_depth == 8                                                  ? 0
-                          : sps->colour_description && (sps->matrix == 9 || sps->matrix == 10) ? 3
-                                                                                               : 2;
+    // 8-bit samples, or Main 10's in 16 bits (mode 1: P010, the 10 bits high, as 'x420' holds them)
+    p->disp_output_mode = d->sample_bytes == 2 ? 1 : 0;
     p->framestride[0] = p->framestride[1] = d->pitch;
     p->colMvBuffersize = d->colmv_bytes / 256;
-    p->HevcSaoBufferOffset = 480 * d->rows / 256;
-    p->HevcBsdCtrlOffset = (480 + 3840) * d->rows / 256;
+    p->HevcSaoBufferOffset = kDeblockBytesPerRow * d->sample_bytes * d->rows / 256;
+    p->HevcBsdCtrlOffset = (kDeblockBytesPerRow + kSaoBytesPerRow) * d->sample_bytes * d->rows / 256;
     p->pic_width_in_luma_samples = sps->width;
     p->pic_height_in_luma_samples = sps->height;
     p->chroma_format_idc = 1;
@@ -655,6 +661,7 @@ static int decodePicture(HEVCDecoder *d, const Span *seg, int count, const HEVCS
             .coded_height = sps->height,
             .crop_x = sps->crop_left,
             .crop_y = sps->crop_top,
+            .wide = d->sample_bytes == 2,
             .width = (uint32_t)(sps->width - sps->crop_left - sps->crop_right),
             .height = (uint32_t)(sps->height - sps->crop_top - sps->crop_bottom),
             .poc = poc,

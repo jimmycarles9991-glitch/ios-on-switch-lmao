@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 // raw/runtime/raw_sampler.h: the samplers the raw path takes, as m2v samples them on NVK (metal2vulkan-runtime sampler.rs
-// taken_descriptor and metal_anisotropy; metal2vulkan metal/sampler.rs vk_sampler). Their headers against NVK's are
-// raw/test/samplercheck's.
+// taken_descriptor and metal_anisotropy; metal2vulkan metal/sampler.rs vk_sampler), and pixel coordinates as NVK's
+// unnormalized samplers take them. Their headers against NVK's are raw/test/samplercheck's.
 #include "../raw/runtime/raw_sampler.h"
 
 #include <gtest/gtest.h>
@@ -62,15 +62,68 @@ TEST(RawSampler, InvertedClampsReadTheUpperOne)
 TEST(RawSampler, WhatTheHeaderDoesNotExpressIsRefused)
 {
     raw::SamplerDesc s;
-    raw::MetalSamplerFields pixel;
-    pixel.normalizedCoordinates = false;
-    EXPECT_FALSE(raw::takeSampler(pixel, s));
     raw::MetalSamplerFields compare;
     compare.compareFunction = 1;
     EXPECT_FALSE(raw::takeSampler(compare, s));
     raw::MetalSamplerFields nan;
     nan.lodMax = std::numeric_limits<float>::quiet_NaN();
     EXPECT_FALSE(raw::takeSampler(nan, s));
+}
+
+// RenderBox's and TVWidgetExtension's (boot 13: normalized 0, clamp to edge, lodAverage): the texture unit takes texel
+// coordinates from the sampler header alone, so the texture's own header serves normalized samplers too
+TEST(RawSampler, PixelCoordinatesAreTheSamplerHeaders)
+{
+    raw::MetalSamplerFields m;
+    m.normalizedCoordinates = false;
+    m.minFilter = m.magFilter = 1;
+    raw::SamplerDesc s;
+    ASSERT_TRUE(raw::takeSampler(m, s));
+    EXPECT_TRUE(s.pixel);
+    EXPECT_EQ(raw::samplerCoordinateBits(s), 1u << 25);
+    EXPECT_EQ(s.minFilter, 1);
+    raw::SamplerDesc normalized;
+    ASSERT_TRUE(raw::takeSampler(raw::MetalSamplerFields{}, normalized));
+    EXPECT_FALSE(normalized.pixel);
+    EXPECT_EQ(raw::samplerCoordinateBits(normalized), 0u);
+}
+
+// metal2vulkan-runtime sampler.rs taken_descriptor: wrapping s and t clamp to the edge, r's mirror-once too, level 0 alone and
+// no anisotropy
+TEST(RawSampler, PixelSamplerIsPlainMetals)
+{
+    raw::MetalSamplerFields m;
+    m.normalizedCoordinates = false;
+    m.sAddress = raw::kAddressRepeat;
+    m.tAddress = raw::kAddressMirrorRepeat;
+    m.rAddress = raw::kAddressMirrorClampToEdge;
+    m.mipFilter = 2;
+    m.maxAnisotropy = 8;
+    raw::SamplerDesc s;
+    ASSERT_TRUE(raw::takeSampler(m, s));
+    EXPECT_EQ(s.sAddress, raw::kAddressClampToEdge);
+    EXPECT_EQ(s.tAddress, raw::kAddressClampToEdge);
+    EXPECT_EQ(s.rAddress, raw::kAddressClampToEdge);
+    EXPECT_EQ(s.mipFilter, 0);
+    EXPECT_EQ(s.maxAnisotropy, 1);
+    m.sAddress = raw::kAddressClampToZero;
+    m.tAddress = raw::kAddressClampToBorderColor;
+    ASSERT_TRUE(raw::takeSampler(m, s));
+    EXPECT_EQ(s.sAddress, raw::kAddressClampToZero);
+    EXPECT_EQ(s.tAddress, raw::kAddressClampToBorderColor);
+}
+
+TEST(RawSampler, PixelCoordinatesMirroredOnceOnAPlaneAxisAreRefused)
+{
+    raw::SamplerDesc s;
+    for (int axis = 0; axis < 2; axis++) {
+        raw::MetalSamplerFields m;
+        m.normalizedCoordinates = false;
+        (axis ? m.tAddress : m.sAddress) = raw::kAddressMirrorClampToEdge;
+        EXPECT_FALSE(raw::takeSampler(m, s)) << axis;
+        m.normalizedCoordinates = true;
+        EXPECT_TRUE(raw::takeSampler(m, s)) << axis;
+    }
 }
 
 TEST(RawSampler, OnlyATransparentBlackBorderIsTaken)

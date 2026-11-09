@@ -7812,8 +7812,8 @@ native_switch_mkdir(proc_t p, user_addr_t scratch, const char *path, uid_t owner
 
 /* The migration on XNU's console, where the user watches it: DataMigrator's processes as they start and end, a status line
  * every 15 s, and its end (the sentinel gone: DataMigrator removes it when the migration is over). Until then
- * switch_console_hold keeps the console on screen instead of backboardd's progress bar (drivers/NativeMobileDisplay draws
- * the UI's frames but does not show them), for at most an hour; the migration itself carries on either way. */
+ * switch_console_hold keeps the console on screen instead of backboardd's progress bar (drivers/NativeMobileDisplay retires
+ * the UI's frames undrawn), for at most an hour; the migration itself carries on either way. */
 volatile int switch_console_hold = 0;
 #define NATIVE_MIGRATION_TICK_S 15
 #define NATIVE_MIGRATION_HOLD_S 3600

@@ -65,7 +65,7 @@ struct ImageDecodeTest: HWTest {
         let milliseconds = (CFAbsoluteTimeGetCurrent() - start) * 1000
         let result = Pixels.check(decoded, pattern: image.pattern)
         var metrics = Metrics()
-        metrics.set("ms", milliseconds, digits: 1)
+        metrics.set("decode_ms", milliseconds, digits: 1)
         metrics.set("mpix_s", Double(image.width * image.height) / milliseconds / 1000, digits: 1)
         metrics.set("error", result.lumaError, digits: 1)
         return .judged(

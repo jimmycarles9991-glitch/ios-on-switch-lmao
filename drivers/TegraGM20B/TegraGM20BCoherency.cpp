@@ -541,6 +541,29 @@ extern "C" int tegra_gm20b_surface_tiled(uint64_t pa)
 	return tiled;
 }
 
+// The display's hold is one more reference on the entry: the last import's release no longer finds it alone, so nothing
+// moves its texels until the display lets go (tgm_coherency_put, which moves them then if the surface is still block-linear).
+extern "C" void *tegra_gm20b_surface_hold(uint64_t pa, int *tiled)
+{
+	*tiled = 0;
+	if (!gRegistryLock)
+		return nullptr;
+	IOLockLock(gRegistryLock);
+	tgm_coh *c = *pageSlot(pa);
+	const tgm_tiled *t = c ? __atomic_load_n(&c->tiled, __ATOMIC_ACQUIRE) : nullptr;
+	if (t) {
+		c->refs++;
+		*tiled = t->tiled != 0 ? 1 : 0;
+	}
+	IOLockUnlock(gRegistryLock);
+	return t ? c : nullptr;
+}
+
+extern "C" void tegra_gm20b_surface_unhold(void *hold)
+{
+	tgm_coherency_put(static_cast<tgm_coh *>(hold));
+}
+
 extern "C" int tegra_gm20b_surface_layout(uint64_t pa, struct tgm_layout *out)
 {
 	if (!gRegistryLock || !out)

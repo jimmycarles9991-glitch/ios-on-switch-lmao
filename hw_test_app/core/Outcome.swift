@@ -21,6 +21,13 @@ public enum MetricValue: Codable, Equatable, Sendable {
         }
     }
 
+    /// The digits a decoded number was written with, so a report read back and written again keeps them.
+    static func decimals(_ value: Double) -> Int {
+        let text = String(value)
+        if text.contains("e") { return 9 }
+        return text.split(separator: ".").dropFirst().first?.count ?? 0
+    }
+
     static func format(_ value: Double, digits: Int) -> String {
         guard value.isFinite else { return value.isNaN ? "nan" : (value > 0 ? "inf" : "-inf") }
         return String(format: "%.\(max(0, digits))f", value)
@@ -48,7 +55,7 @@ public enum MetricValue: Codable, Equatable, Sendable {
         } else if let value = try? container.decode(Int.self) {
             self = .integer(value)
         } else if let value = try? container.decode(Double.self) {
-            self = .number(value, digits: 3)
+            self = .number(value, digits: Self.decimals(value))
         } else {
             self = .text(try container.decode(String.self))
         }
@@ -59,13 +66,19 @@ public enum MetricValue: Codable, Equatable, Sendable {
 public struct Metrics: Equatable, Sendable {
     public private(set) var keys: [String] = []
     public private(set) var values: [String: MetricValue] = [:]
+    /// Keys the log line cannot carry (not [a-z0-9_]+, or one of LogLine.reservedKeys), left out: the test's
+    /// outcome becomes a harness FAIL naming them (Outcome.withHarnessFaults) and the run goes on.
+    public private(set) var faults: [String] = []
 
     public init() {}
 
     public subscript(key: String) -> MetricValue? { values[key] }
 
     public mutating func set(_ key: String, _ value: MetricValue) {
-        precondition(LogLine.isValidKey(key) && !LogLine.reservedKeys.contains(key), "bad metric key \(key)")
+        guard LogLine.isValidKey(key) && !LogLine.reservedKeys.contains(key) else {
+            if !faults.contains(key) { faults.append(key) }
+            return
+        }
         if values.updateValue(value, forKey: key) == nil { keys.append(key) }
     }
 
@@ -78,6 +91,7 @@ public struct Metrics: Equatable, Sendable {
 
     public mutating func merge(_ other: Metrics, prefix: String = "") {
         for key in other.keys { set(prefix + key, other.values[key]!) }
+        for key in other.faults where !faults.contains(prefix + key) { faults.append(prefix + key) }
     }
 
     public var ordered: [(String, MetricValue)] { keys.map { ($0, values[$0]!) } }
@@ -108,6 +122,13 @@ public struct Outcome: Sendable {
 
     public static func skip(_ detail: String, _ metrics: Metrics = Metrics()) -> Outcome {
         Outcome(.skip, metrics, detail: detail)
+    }
+
+    /// FAIL naming the metric keys the test could not log, ahead of whatever else it found; unchanged without any.
+    public var withHarnessFaults: Outcome {
+        guard !metrics.faults.isEmpty else { return self }
+        let fault = "harness: bad metric key " + metrics.faults.joined(separator: ",")
+        return Outcome(.fail, metrics, detail: detail.isEmpty ? fault : fault + "; " + detail, proof: proof)
     }
 
     /// PASS when every check holds, otherwise FAIL naming the checks that did not.

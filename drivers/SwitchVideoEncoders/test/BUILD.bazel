@@ -5,6 +5,11 @@
 #                  every frame back exactly with Apple's decoder in three input layouts, sync samples where they
 #                  belong, P_Skip from the reference the setup names; the SPS/PPS/avcC parsing back with AVD's
 #                  H264Syntax.c; the checker refusing each kind of bad submit; the rate control on a synthetic encoder
+#   hevcnvenc_host_test  HEVCNVENC.c's H.265 IDR setups byte for byte against NVIDIA's T210 driver's (three sizes),
+#                  the kernel's H.265 checker taking them and refusing each kind of bad submit, the SPS/PPS stating
+#                  the coding tools the setup does
+#   hevcenc_host_test  HEVCEncSyntax.c's VPS, SPS, PPS and slice headers parsed back by AVD's HEVCSyntax.c and taken by
+#                  CoreMedia, the level each size and rate gets
 #
 #   bazel test //drivers/SwitchVideoEncoders/test:all
 load("//bazel/lint:defs.bzl", "lint_files")
@@ -37,6 +42,8 @@ host_library(
         "//drivers/SwitchVideoEncoders:AVE/H264NVENC.h",
         "//drivers/TegraNVENC:TegraNVENCABI.h",
         "//drivers/TegraNVENC:TegraNVENCCheck.h",
+        "//drivers/TegraNVENC:TegraNVENCCheckCommon.h",
+        "//drivers/TegraNVENC:TegraNVENCCheckH265.h",
     ],
     copts = ["-O1"],
 )
@@ -60,6 +67,56 @@ host_library(
     linkopts = FRAMEWORKS,
     textual_hdrs = ["//drivers/SwitchVideoEncoders:AVE/AVEEncoder.c"],
     deps = [":h264_nvenc"],
+)
+
+# The HEVC parameter set and slice header writer, parsed back with AVD's HEVC syntax.
+host_library(
+    name = "hevcenc_host",
+    srcs = [
+        "hevcenc_host.c",
+        "//drivers/SwitchVideoDecoders:AVD/HEVCSyntax.c",
+        "//drivers/SwitchVideoEncoders:AVE/HEVCEncSyntax.c",
+    ],
+    hdrs = [
+        "//drivers/SwitchVideoDecoders:AVD/HEVCSyntax.h",
+        "//drivers/SwitchVideoEncoders:AVE/HEVCEncSyntax.h",
+    ],
+    copts = ["-O1"],
+    defines = ["main=hevcenc_host_main"],
+    linkopts = FRAMEWORKS,
+    deps = [":h264_nvenc"],
+)
+
+# HEVCNVENC.c's IDR setups against NVIDIA's T210 driver's, the kernel's H.265 checker, and the parameter sets agreeing
+# with the setup.
+host_library(
+    name = "hevcnvenc_host",
+    srcs = [
+        "hevcnvenc_host.c",
+        "//drivers/SwitchVideoDecoders:AVD/HEVCSyntax.c",
+        "//drivers/SwitchVideoEncoders:AVE/HEVCEncSyntax.c",
+        "//drivers/SwitchVideoEncoders:AVE/HEVCNVENC.c",
+    ],
+    hdrs = [
+        "//drivers/SwitchVideoDecoders:AVD/HEVCSyntax.h",
+        "//drivers/SwitchVideoEncoders:AVE/HEVCEncSyntax.h",
+        "//drivers/SwitchVideoEncoders:AVE/HEVCNVENC.h",
+    ],
+    copts = ["-O1"],
+    defines = ["main=hevcnvenc_host_main"],
+    deps = [":h264_nvenc"],
+)
+
+host_test(
+    name = "hevcnvenc_host_test",
+    srcs = ["hevcnvenc_host_test.cpp"],
+    deps = [":hevcnvenc_host"],
+)
+
+host_test(
+    name = "hevcenc_host_test",
+    srcs = ["hevcenc_host_test.cpp"],
+    deps = [":hevcenc_host"],
 )
 
 host_test(

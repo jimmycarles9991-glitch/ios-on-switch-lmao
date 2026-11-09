@@ -139,6 +139,61 @@ TEST(Csc, WordFormatMatchesL4t)
     EXPECT_EQ(cscValue(q32(-5.0)), -512);
 }
 
+// IOMobileFramebufferSetMatrix's words as QuartzCore 27 packs them (IOMFBDisplay::update_color_matrix): fcvtzs #32 of
+// each float's magnitude, negated for a negative float, row by row.
+Matrix fromQuartzCore(const float (&rows)[3][3])
+{
+    Matrix m;
+    for (int r = 0; r < 3; ++r) {
+        for (int c = 0; c < 3; ++c) {
+            const auto magnitude = static_cast<int64_t>(std::fabs(double(rows[r][c])) * 4294967296.0);
+            m.m[r][c] = rows[r][c] < 0 ? -magnitude : magnitude;
+        }
+    }
+    return m;
+}
+
+TEST(Csc, QuartzCoreWordsKeepTheirSignAndRow)
+{
+    const float rows[3][3] = {{0.5f, -0.25f, 0}, {0, 1, 0}, {-1.5f, 0, 1.75f}};
+    Inputs in = defaults();
+    in.harmony = fromQuartzCore(rows);
+    Tables tables;
+    build(in, tables);
+    const int32_t expected[9] = {128, -64, 0, 0, 256, 0, -384, 0, 448};
+    for (unsigned i = 0; i < kCscWords; ++i)
+        EXPECT_EQ(cscSigned(tables.csc[i]), expected[i]) << "CSC word " << i;
+}
+
+// The white point matrix for the boot logs' True Tone target, (0.3127, 0.3290) -> (0.382644, 0.384645), in the shape
+// of CoreBrightness 27's CFXUpdateColorFade sRGB path (InvMcatMulMrgb x diag x McatMulMrgb) with its Bradford tables.
+// The diagonal is taken as LMS(target) / LMS(D65): the binary divides by D50's LMS after adapting the target through
+// Mrgb2xyz, which is assumed to land on the same ratio. Its legacy-white-point tables differ in the third decimal. Any
+// scaling CoreBrightness applies afterwards is left out. Rows are the red, green and blue outputs.
+TEST(Csc, TrueToneTowardsFourThousandKelvinTurnsWhiteWarm)
+{
+    const float rows[3][3] = {
+        {1.138203f, 0.218716f, 0.028152f}, {-0.010555f, 0.939250f, 0.008210f}, {-0.012004f, -0.040067f, 0.542906f}};
+    Inputs in = defaults();
+    in.harmony = fromQuartzCore(rows);
+    Tables tables;
+    build(in, tables);
+    EXPECT_EQ(cscSigned(tables.csc[0]), 292) << "KRR: red out of red in, the row keeping its sum";
+    EXPECT_EQ(cscSigned(tables.csc[1]), 56) << "KGR: red out of green in";
+    EXPECT_EQ(cscSigned(tables.csc[8]), 139) << "KBB: blue out of blue in";
+    const Rgb white = scan(tables, {255, 255, 255});
+    EXPECT_EQ(white.r, 255u);
+    EXPECT_GT(white.r, white.g);
+    EXPECT_EQ(white.g, 248u);
+    EXPECT_EQ(white.b, 186u);
+    const Rgb grey = scan(tables, {200, 200, 200});
+    EXPECT_GT(grey.r, grey.g);
+    EXPECT_GT(grey.g, grey.b);
+    const Rgb blue = scan(tables, {0, 0, 255});
+    EXPECT_EQ(blue.r, 46u) << "red out of pure blue: KBR alone";
+    EXPECT_EQ(blue.g, 21u) << "green out of pure blue: KBG alone";
+}
+
 TEST(Csc, NightShiftDiagonalScalesTheChannels)
 {
     Inputs in = defaults();
@@ -268,6 +323,25 @@ TEST(Gamma, IdentityTableIsIdentityAndATableApplies)
     EXPECT_EQ(tables.reasons, uint32_t(kReasonGamma));
     EXPECT_EQ(scan(tables, {128, 128, 128}).r, 100u);
     EXPECT_EQ(scan(tables, {127, 127, 127}).r, 127u);
+}
+
+TEST(Blank, ACscOfZerosUnlessTheOutputStageLiftsBlack)
+{
+    Inputs in = defaults();
+    in.harmony = diagonal(1.0, 0.9, 0.8);
+    Tables shown;
+    build(in, shown);
+    in.blank = true;
+    Tables blank;
+    build(in, blank);
+    for (unsigned i = 0; i < kCscWords; ++i)
+        EXPECT_EQ(blank.csc[i], 0) << "CSC word " << i;
+    EXPECT_EQ(memcmp(blank.lut1, shown.lut1, sizeof(shown.lut1)), 0);
+    EXPECT_EQ(memcmp(blank.lut2, shown.lut2, sizeof(shown.lut2)), 0) << "nine words in a vertical blank, not 960";
+    in.remapMode = kRemapInverted;
+    build(in, blank);
+    EXPECT_EQ(blank.lut2[0], 0);
+    EXPECT_EQ(blank.lut2[kLut2Entries - 1], 0);
 }
 
 TEST(Blank, BlackWhateverTheWindowsAndTheFilters)

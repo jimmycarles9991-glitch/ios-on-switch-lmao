@@ -5,24 +5,26 @@ One action per step (gpu/seed/tools.bzl seed_tools builds, gpu/seed/defs.bzl see
 
     rawpack.py build --xcode-env F --host-bridge <darwin bridge .a> --generator <raw/pack/rawpack.py> --tree <tree>
                      --out <dir>
-        the generator's host tools (the probe through this build's frontend and host bridge, the mock GM20B, the raw
-        path's own.metallib) into <dir>
-    rawpack.py corpus --corpus corpus.log --out <file>
+        the generator's host tools (directpack and the probes through this build's frontend and host bridge, the mock
+        GM20B, the raw path's own.metallib) into <dir>
+    rawpack.py corpus --corpus corpus.log [--archives <build>.tsv] --out <file>
         the corpus lines the probe makes (raw/pack/probe.mm: Core Animation's render states, without lib=), so an edit
-        to any other line leaves the run's input as it was
+        to any other line leaves the run's input as it was; with the render states Apple's archives declare for the
+        device (precompile/archives/<build>.tsv) whose functions are one framework's default.metallib
     rawpack.py split --generator <rawpack.py> --qc default.metallib --corpus <file> --out <bucket corpus>...
         the states of each of the generator's buckets
     rawpack.py probe --generator <rawpack.py> --raw <dir> --nvk <twin dylib> --qc default.metallib
                      --lines <bucket corpus> --out <dir named bucket<i>>
-        one bucket's states made through the shader tools (raw/ holds the probe, the mock and own.metallib; the NVK
-        twin) over the mock GM20B and read off the decoded push stream, its storage-form states again in <out>/barrier
+        one bucket's states made directly through the shader tools (raw/ holds directpack, the probes, the mock and
+        own.metallib; the NVK twin), with bucket 0's warm-up draw and the bucket's kernels probed over the mock GM20B
     rawpack.py link --generator <rawpack.py> --out <dir> <bucket dir>...
-        the pack made from the buckets' probe runs, unstamped: <out>/pack.bin and report.txt
+        the pack made from the buckets' records, unstamped: <out>/pack.bin and report.txt
     rawpack.py stamp --generator <rawpack.py> --pack <pack.bin> --manifest <MANIFEST.json> --out <dir>
         <out>/pack.bin with the tools' stack key in its header
 
-Only the stamp reads the stack key, which every raw/ source changes: a raw runtime edit reruns the stamp alone, and a
-probe runs again only when its states, the probe tools, the NVK twin or QuartzCore's library change. No step but build
+Only the stamp reads the stack key, which every raw/ source changes: a raw runtime edit reruns the stamp alone (but for
+the direct compile's own sources, which the tools build from), and a bucket runs again only when its states, the tools,
+the NVK twin or QuartzCore's library change. No step but build
 runs a compiler, so the image builder runs them with the release's prebuilt tools.
 """
 
@@ -37,26 +39,19 @@ from pathlib import Path
 
 PROBE_LABEL = ' label=com.apple.coreanimation.'
 LIBRARY = re.compile(r' lib=\S+')
-# What the link reads of a bucket's probe runs (mkpack.py), and of its barrier/.
-KEPT = (
-    'programs.bin',
-    'probe256.out',
-    'probe256.log',
-    'probe16.out',
-    'probe16.log',
-    'probe4096.out',
-    'probe4096.log',
-    'probeoff.out',
-    'probeoff.log',
-)
+# A function a state links (" | <vl|vp|fl|fp> <function> lib=<library> ..."), which any library may hold
+LINKED_LIBRARY = re.compile(r'( \| [vf][lp] \S+) lib=\S+')
+# What the link reads of a bucket (directlink.py)
+KEPT = ('records.bin', 'warm.out', 'warm.log', 'programs.bin', 'compute.out', 'compute.log')
 # The frameworks other than QuartzCore whose states the pack holds: their lines keep lib=, which the probe loads
 # them from
 FRAMEWORKS = ('RenderBox',)
+FRAMEWORK_LIBRARY = re.compile(r' lib=/System/Library/(?:Private)?Frameworks/(\w+)\.framework/default\.metallib')
 
 
 def framework_line(line: str) -> bool:
-    """Whether the line's functions are all one pack framework's default.metallib."""
-    libs = set(LIBRARY.findall(line))
+    """Whether the line's stages are both one pack framework's default.metallib (what they link may be another's)."""
+    libs = set(LIBRARY.findall(LINKED_LIBRARY.sub(r'\1', line)))
     return len(libs) == 1 and any(
         lib == f' lib=/System/Library/PrivateFrameworks/{name}.framework/default.metallib'
         for lib in libs
@@ -65,12 +60,32 @@ def framework_line(line: str) -> bool:
 
 
 def probe_lines(corpus: str) -> list[str]:
-    """Return the corpus lines probe.mm makes, as it reads them."""
+    """Return the corpus lines probe.mm and probecompute.mm make, as they read them (a D line keeps its libraries)."""
     return [
-        line if framework_line(line) else LIBRARY.sub('', line)
+        line if framework_line(line) or line.startswith('D ') else LIBRARY.sub('', line)
         for line in corpus.split('\n')
-        if line.startswith('R ') and ' ok=1 ' in line and (PROBE_LABEL in line or framework_line(line))
+        if (line.startswith('R ') and ' ok=1 ' in line and (PROBE_LABEL in line or framework_line(line)))
+        or line.startswith('D ok=1 ')
     ]
+
+
+def archive_lines(inventory: str) -> list[str]:
+    """Return the render states an archive inventory (corpus/tools/archives/declared.py) has the pack make.
+
+    Those declared for the raw device's GPU families that the runtime looks up in the pack (RawMetalStates.mm
+    _packable: a vertex and a fragment function, both one framework's default.metallib, and so is every function it
+    links); not QuartzCore's, whose archive is its offline compilation manifest (raw/pack/ca/caset.py's manifest tier).
+    They keep lib=, which the probe loads them from.
+    """
+    out = []
+    for row in inventory.splitlines():
+        kind, _owner, _source, family, line = row.split('\t')
+        libraries = set(LIBRARY.findall(line))
+        frameworks = set(FRAMEWORK_LIBRARY.findall(line))
+        both = ' | v - ' not in line and ' | f - ' not in line
+        if kind == 'render' and family == 'device' and both and len(libraries) == len(frameworks) == 1:
+            out += [line] if frameworks != {'QuartzCore'} else []
+    return out
 
 
 def generate(generator: list[str], arguments: list[str | Path], env: dict[str, str], what: str) -> str:
@@ -115,11 +130,10 @@ def probe(args: argparse.Namespace, generator: list[str], env: dict[str, str], w
     shutil.copyfile(args.nvk, dylib)
     dylib.chmod(0o755)
     arguments = ['--probe-bucket', out, '--prebuilt', Path(args.raw).resolve(), '--nvk', dylib]
-    print(generate(generator, [*arguments, '--qc', Path(args.qc).resolve()], env, f'probing {out.name}').rstrip())
-    for directory in (out, out / 'barrier'):
-        for path in directory.iterdir() if directory.is_dir() else ():
-            if path.is_file() and path.name not in KEPT:
-                path.unlink()
+    print(generate(generator, [*arguments, '--qc', Path(args.qc).resolve()], env, f'making {out.name}').rstrip())
+    for path in out.iterdir():
+        if path.is_file() and path.name not in KEPT:
+            path.unlink()
 
 
 def link(args: argparse.Namespace, generator: list[str], env: dict[str, str], work: Path) -> None:
@@ -158,6 +172,7 @@ def main() -> None:
     corpus = steps.add_parser('corpus')
     for name in ('corpus', 'out'):
         corpus.add_argument('--' + name, required=True)
+    corpus.add_argument('--archives')
     for step, names in STEPS.items():
         p = steps.add_parser(step)
         for name in names:
@@ -166,7 +181,11 @@ def main() -> None:
     steps.choices['link'].add_argument('buckets', nargs='+')
     args = parser.parse_args()
     if args.step == 'corpus':
-        Path(args.out).write_text(''.join(line + '\n' for line in probe_lines(Path(args.corpus).read_text())))
+        lines = probe_lines(Path(args.corpus).read_text())
+        if args.archives:
+            harvested = set(lines)
+            lines += [line for line in archive_lines(Path(args.archives).read_text()) if line not in harvested]
+        Path(args.out).write_text(''.join(line + '\n' for line in lines))
         return
     root = Path.cwd()
     work = fresh(root / f'_rawpack_{args.step}_{os.getpid()}')

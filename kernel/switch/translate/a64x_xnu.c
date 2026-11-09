@@ -29,6 +29,7 @@
 #include <sys/sysctl.h>
 #include <sys/fcntl.h>
 #include <switch/a64x.h>
+#include <switch/pretranslated.h>
 #include <mach-o/loader.h>
 #include <mach/mach_vm.h>
 #include <kern/kalloc.h>
@@ -58,6 +59,7 @@
 /* statistics (sysctl kern.a64x.*) */
 static uint64_t a64x_images, a64x_pages, a64x_stub_words, a64x_mismatch, a64x_traps, a64x_traps_unhandled;
 static uint64_t a64x_cache_pages, a64x_images_native, a64x_images_marked, a64x_island_words;
+static uint64_t a64x_images_installed;
 
 LCK_GRP_DECLARE(a64x_lck_grp, "a64x");
 static LCK_MTX_DECLARE(a64x_plan_lock, &a64x_lck_grp);
@@ -142,17 +144,22 @@ static int a64x_text_page(const void *src, void *dst, unsigned long long off, vo
     }
     uint32_t pg = (uint32_t)((off - im->text_off) / A64X_PAGE);
     uint32_t c0 = im->cursor[pg], c1 = im->cursor[pg + 1];
-    struct a64x_code_map cm = {im, img_is_code, im->map_flags};
+    struct a64x_code_map cm = {im, img_is_code, im->map_flags, NULL};
+    size_t chk_bytes = (c1 - c0) * sizeof(uint32_t), scratch_bytes = chk_bytes + A64X_WALK_BYTES(A64X_WORDS);
     uint32_t *chk = NULL;
+    struct a64x_walk walk = {NULL, NULL, 0};
     bool ok = true;
     if (c1 > c0) {
-        chk = kalloc_data((c1 - c0) * sizeof(uint32_t), Z_NOWAIT);
+        chk = kalloc_data(scratch_bytes, Z_NOWAIT);
         ok = chk != NULL;
+        if (ok) {
+            walk = a64x_walk_in(chk + (c1 - c0), A64X_WORDS);
+        }
     }
     if (ok) {
-        struct a64x_stub_region sr = {im->text_off + (uint64_t)im->stub_delta, chk, c1, c0};
+        struct a64x_stub_region sr = {im->text_off + (uint64_t)im->stub_delta, chk, c1, c0, &walk};
         uint32_t end = a64x_translate_page(src, dst, A64X_WORDS, off, &cm, c1 > c0 ? &sr : NULL, c0, NULL);
-        if (end != c1 || (chk && bcmp(chk, im->stubs + c0, (c1 - c0) * sizeof(uint32_t)))) {
+        if (end != c1 || (chk && bcmp(chk, im->stubs + c0, chk_bytes))) {
             ok = false;
             OSIncrementAtomic64((SInt64 *)&a64x_mismatch);
             printf("a64x: text page 0x%llx: stubs differ from the validated words; leaving LSE to the trap path\n",
@@ -164,7 +171,7 @@ static int a64x_text_page(const void *src, void *dst, unsigned long long off, vo
         (void)a64x_translate_page(src, dst, A64X_WORDS, off, &cm, NULL, 0, NULL);
     }
     if (chk) {
-        kfree_data(chk, (c1 - c0) * sizeof(uint32_t));
+        kfree_data(chk, scratch_bytes);
     }
     OSIncrementAtomic64((SInt64 *)&a64x_pages);
     return 0;
@@ -183,19 +190,22 @@ static int a64x_stub_page(const void *src, void *dst, unsigned long long off, vo
     return 0;
 }
 
-/* load commands -> executable segment and instruction sections */
+#define A64X_MAX_SECTIONS 64
+
+/* load commands -> executable segment and instruction sections (over 1 KB: allocated, never on the stack) */
 struct a64x_layout {
     uint64_t exec_fileoff, exec_filesize, exec_vmaddr;
     uint64_t vm_end;
     uint32_t nsect;
-    bool marked;                /* has the __TEXT,__a64x_target section: built for this core */
-    uint64_t text_vmaddr;       /* __TEXT (function starts count from it) */
-    uint32_t fs_off, fs_size;   /* LC_FUNCTION_STARTS, slice-relative */
-    uint32_t dic_off, dic_size; /* LC_DATA_IN_CODE, slice-relative */
+    bool marked;                               /* has the __TEXT,__a64x_target section: built for this core */
+    uint64_t text_vmaddr;                      /* __TEXT (function starts count from it) */
+    uint32_t fs_off, fs_size;                  /* LC_FUNCTION_STARTS, slice-relative */
+    uint32_t dic_off, dic_size;                /* LC_DATA_IN_CODE, slice-relative */
+    uint32_t cs_off, cs_size;                  /* LC_CODE_SIGNATURE, slice-relative */
+    struct a64x_range sect[A64X_MAX_SECTIONS]; /* instruction sections, absolute file offsets, file order */
 };
 
-static int a64x_parse(const void *lcmds, size_t size, off_t slice_off, struct a64x_layout *lay,
-                      struct a64x_range *ranges, uint32_t maxr)
+static int a64x_parse(const void *lcmds, size_t size, off_t slice_off, struct a64x_layout *lay)
 {
     const struct mach_header_64 *mh = lcmds;
     if (size < sizeof(*mh) || mh->magic != MH_MAGIC_64 || mh->sizeofcmds > size - sizeof(*mh)) {
@@ -209,15 +219,18 @@ static int a64x_parse(const void *lcmds, size_t size, off_t slice_off, struct a6
         if (p + sizeof(*lc) > end || lc->cmdsize < sizeof(*lc) || p + lc->cmdsize > end) {
             return EBADMACHO;
         }
-        if (lc->cmd == LC_FUNCTION_STARTS || lc->cmd == LC_DATA_IN_CODE) {
+        if (lc->cmd == LC_FUNCTION_STARTS || lc->cmd == LC_DATA_IN_CODE || lc->cmd == LC_CODE_SIGNATURE) {
             const struct linkedit_data_command *ld = (const void *)p;
             if (lc->cmdsize >= sizeof(*ld)) {
                 if (lc->cmd == LC_FUNCTION_STARTS) {
                     lay->fs_off = ld->dataoff;
                     lay->fs_size = ld->datasize;
-                } else {
+                } else if (lc->cmd == LC_DATA_IN_CODE) {
                     lay->dic_off = ld->dataoff;
                     lay->dic_size = ld->datasize;
+                } else {
+                    lay->cs_off = ld->dataoff;
+                    lay->cs_size = ld->datasize;
                 }
             }
         }
@@ -249,11 +262,11 @@ static int a64x_parse(const void *lcmds, size_t size, off_t slice_off, struct a6
                 const struct section_64 *sc = (const void *)(sg + 1);
                 for (uint32_t s = 0; s < sg->nsects; s++) {
                     if ((sc[s].flags & (S_ATTR_PURE_INSTRUCTIONS | S_ATTR_SOME_INSTRUCTIONS)) && sc[s].size) {
-                        if (lay->nsect >= maxr) {
+                        if (lay->nsect >= A64X_MAX_SECTIONS) {
                             return ENOTSUP;
                         }
-                        ranges[lay->nsect].lo = (uint64_t)slice_off + sc[s].offset;
-                        ranges[lay->nsect].hi = (uint64_t)slice_off + sc[s].offset + sc[s].size;
+                        lay->sect[lay->nsect].lo = (uint64_t)slice_off + sc[s].offset;
+                        lay->sect[lay->nsect].hi = (uint64_t)slice_off + sc[s].offset + sc[s].size;
                         lay->nsect++;
                     }
                 }
@@ -336,10 +349,10 @@ static void a64x_find_islands(struct a64x_image *im, const struct a64x_layout *l
             kfree_data(buf, lay->dic_size);
         }
     }
-    struct a64x_islands is = {im->data, fs, 0, 0, false, false, 0, 0};
+    struct a64x_islands is = {im->data, fs, 0, 0, false, false, 0, 0, 0, 0};
     uint8_t *dic_only = im->data;
     im->data = NULL; /* the pass sees instruction sections only, not the islands it is finding */
-    struct a64x_code_map cm = {im, img_is_code, im->map_flags};
+    struct a64x_code_map cm = {im, img_is_code, im->map_flags, NULL};
     for (uint32_t pg = 0; pg < im->npages; pg++) {
         uint64_t off = im->text_off + (uint64_t)pg * A64X_PAGE;
         bzero(page, A64X_PAGE);
@@ -368,7 +381,9 @@ static int a64x_scan(struct a64x_image *im)
 {
     uint32_t *page = kalloc_data(A64X_PAGE, Z_WAITOK);
     uint32_t *out = kalloc_data(A64X_PAGE, Z_WAITOK);
-    struct a64x_code_map cm = {im, img_is_code, im->map_flags};
+    void *walk_buf = kalloc_data(A64X_WALK_BYTES(A64X_WORDS), Z_WAITOK | Z_NOFAIL);
+    struct a64x_walk walk = a64x_walk_in(walk_buf, A64X_WORDS);
+    struct a64x_code_map cm = {im, img_is_code, im->map_flags, NULL};
     uint32_t cursor = 0;
     int error = 0;
     for (uint32_t pg = 0; pg < im->npages && !error; pg++) {
@@ -394,7 +409,7 @@ static int a64x_scan(struct a64x_image *im)
             im->stubs = n;
             im->stubcap = ncap;
         }
-        struct a64x_stub_region sr = {im->text_off + (uint64_t)im->stub_delta, im->stubs, im->stubcap, 0};
+        struct a64x_stub_region sr = {im->text_off + (uint64_t)im->stub_delta, im->stubs, im->stubcap, 0, &walk};
         im->cursor[pg] = cursor;
         cursor = a64x_translate_page(page, out, A64X_WORDS, off, &cm, &sr, cursor, NULL);
         for (uint32_t i = 0; i < A64X_WORDS; i++) {
@@ -405,39 +420,67 @@ static int a64x_scan(struct a64x_image *im)
     im->nstub = cursor;
     kfree_data(page, A64X_PAGE);
     kfree_data(out, A64X_PAGE);
+    kfree_data(walk_buf, A64X_WALK_BYTES(A64X_WORDS));
     return error;
 }
 
-static int a64x_map_image(vm_map_t map, struct vnode *vp, off_t slice_off, const void *lcmds, size_t lcmds_size,
-                          vm_map_offset_t exec_va)
+/* An installed copy of a staged system app (switch_pretranslated_translation): its executable segment is the tree's
+ * translation's, laid out as the image is and validated against that file's own signature. ENOENT when there is none;
+ * a mapping that fails after the image's own was replaced fails the load. */
+static int a64x_map_translation(vm_map_t map, struct vnode *vp, off_t slice_off, const struct a64x_layout *lay,
+                                vm_map_offset_t exec_va)
 {
-    struct a64x_layout lay;
-    struct a64x_range ranges[64];
-    const struct mach_header_64 *mh = lcmds;
+    if (!lay->cs_size) {
+        return ENOENT;
+    }
+    struct vnode *copy = switch_pretranslated_translation(vp, slice_off, slice_off + lay->cs_off, lay->cs_size);
+    if (copy == NULLVP) {
+        return ENOENT;
+    }
+    vm_map_kernel_flags_t vmk_flags = VM_MAP_KERNEL_FLAGS_FIXED(.vmf_overwrite = true);
+    vmk_flags.vmkf_no_copy_on_read = 1;
+    vm_map_offset_t va = exec_va;
+    kern_return_t kr = vm_map_enter_mem_object_control(
+        map, &va, vm_map_round_page(lay->exec_filesize, vm_map_page_mask(map)), 0, vmk_flags,
+        ubc_getobject(copy, UBC_FLAGS_NONE), lay->exec_fileoff, TRUE, VM_PROT_READ | VM_PROT_EXECUTE,
+        VM_PROT_READ | VM_PROT_EXECUTE, VM_INHERIT_DEFAULT);
+    vnode_put(copy);
+    if (kr != KERN_SUCCESS) {
+        printf("a64x: %s: the translation's text not mapped (kr %d)\n", vp->v_name ? vp->v_name : "?", kr);
+        return EIO;
+    }
+    OSIncrementAtomic64((SInt64 *)&a64x_images_installed);
+    return 0;
+}
+
+static int a64x_map_image(vm_map_t map, struct vnode *vp, off_t slice_off, const struct mach_header_64 *mh,
+                          const struct a64x_layout *lay, vm_map_offset_t exec_va)
+{
     int kind = a64x_image_kind(mh->cputype, mh->cpusubtype);
-    int error = a64x_parse(lcmds, lcmds_size, slice_off, &lay, ranges, 64);
     if (kind == A64X_IMAGE_NATIVE) {
         return 0;
     }
-    if (mh->reserved == A64X_PRETRANSLATED || (!error && lay.marked)) {
+    if (mh->reserved == A64X_PRETRANSLATED || lay->marked) {
         /* built for this core: mapped as is, like any binary (signature and trust cache checks unchanged) */
         OSIncrementAtomic64((SInt64 *)&a64x_images_marked);
         return 0;
     }
-    if (error) {
-        /* a plain arm64 image we cannot lay out runs as is; arm64e text cannot */
-        return kind == A64X_IMAGE_ARM64 ? 0 : error;
+    if (kind == A64X_IMAGE_ARM64E) {
+        int error = a64x_map_translation(map, vp, slice_off, lay, exec_va);
+        if (error != ENOENT) {
+            return error;
+        }
     }
     struct a64x_image *im = kalloc_type(struct a64x_image, Z_WAITOK | Z_ZERO);
     im->map_flags = kind == A64X_IMAGE_ARM64 ? A64X_MAP_NO_PAC : 0;
     im->refs = 2; /* one per pager kind (text, stubs); each crypt_end drops one */
-    im->text_off = lay.exec_fileoff;
-    im->text_size = lay.exec_filesize;
-    im->npages = (uint32_t)((lay.exec_filesize + A64X_PAGE - 1) / A64X_PAGE);
+    im->text_off = lay->exec_fileoff;
+    im->text_size = lay->exec_filesize;
+    im->npages = (uint32_t)((lay->exec_filesize + A64X_PAGE - 1) / A64X_PAGE);
     im->cursor = kalloc_data((im->npages + 1) * sizeof(uint32_t), Z_WAITOK | Z_ZERO);
-    im->nranges = lay.nsect;
-    im->ranges = kalloc_data(lay.nsect * sizeof(struct a64x_range), Z_WAITOK);
-    bcopy(ranges, im->ranges, lay.nsect * sizeof(struct a64x_range));
+    im->nranges = lay->nsect;
+    im->ranges = kalloc_data(lay->nsect * sizeof(struct a64x_range), Z_WAITOK);
+    bcopy(lay->sect, im->ranges, lay->nsect * sizeof(struct a64x_range));
     /* sections are in file order already; keep the table sorted for the binary search */
     for (uint32_t i = 1; i < im->nranges; i++) {
         for (uint32_t j = i; j > 0 && im->ranges[j - 1].lo > im->ranges[j].lo; j--) {
@@ -454,11 +497,11 @@ static int a64x_map_image(vm_map_t map, struct vnode *vp, off_t slice_off, const
     im->vp = vp;
 
     /* stubs go right after the image (same distance in every process) */
-    vm_map_offset_t image_end = exec_va + (lay.vm_end - lay.exec_vmaddr);
+    vm_map_offset_t image_end = exec_va + (lay->vm_end - lay->exec_vmaddr);
     vm_map_offset_t stub_va = vm_map_round_page(image_end, vm_map_page_mask(map));
     im->stub_delta = (int64_t)(stub_va - exec_va);
-    a64x_find_islands(im, &lay, slice_off);
-    error = a64x_scan(im);
+    a64x_find_islands(im, lay, slice_off);
+    int error = a64x_scan(im);
     if (!error && kind == A64X_IMAGE_ARM64 && im->changed == 0) {
         /* plain arm64 with nothing the A57 lacks: keep the file's own mapping (byte-identical, no pager) */
         im->refs = 1;
@@ -521,16 +564,17 @@ static int a64x_map_image(vm_map_t map, struct vnode *vp, off_t slice_off, const
 int a64x_load_image(vm_map_t map, struct vnode *vp, off_t slice_offset, const void *lcmds, size_t lcmds_size,
                     int64_t slide)
 {
-    struct a64x_layout lay;
-    struct a64x_range ranges[64];
     const struct mach_header_64 *mh = lcmds;
-    int kind = a64x_image_kind(mh->cputype, mh->cpusubtype);
-    int error = a64x_parse(lcmds, lcmds_size, slice_offset, &lay, ranges, 64);
-    if (error) {
+    struct a64x_layout *lay = kalloc_type(struct a64x_layout, Z_WAITOK | Z_NOFAIL);
+    int error = a64x_parse(lcmds, lcmds_size, slice_offset, lay);
+    if (!error) {
+        error = a64x_map_image(map, vp, slice_offset, mh, lay, (vm_map_offset_t)(lay->exec_vmaddr + slide));
+    } else if (a64x_image_kind(mh->cputype, mh->cpusubtype) != A64X_IMAGE_ARM64E) {
         /* only arm64e must be translated to run; an arm64 image we cannot lay out runs as is */
-        return kind == A64X_IMAGE_ARM64E ? error : 0;
+        error = 0;
     }
-    return a64x_map_image(map, vp, slice_offset, lcmds, lcmds_size, (vm_map_offset_t)(lay.exec_vmaddr + slide));
+    kfree_type(struct a64x_layout, lay);
+    return error;
 }
 
 int a64x_mmap_exec(vm_map_t map, struct vnode *vp, off_t file_pos, vm_map_offset_t addr, vm_map_size_t size)
@@ -561,17 +605,17 @@ int a64x_mmap_exec(vm_map_t map, struct vnode *vp, off_t file_pos, vm_map_offset
     if (!error && resid) {
         error = EBADMACHO;
     }
-    struct a64x_layout lay;
-    struct a64x_range ranges[64];
+    struct a64x_layout *lay = kalloc_type(struct a64x_layout, Z_WAITOK | Z_NOFAIL);
     if (!error) {
-        error = a64x_parse(buf, lsize, file_pos, &lay, ranges, 64);
+        error = a64x_parse(buf, lsize, file_pos, lay);
     }
-    if (!error && (lay.exec_fileoff != (uint64_t)file_pos || lay.exec_filesize > size)) {
+    if (!error && (lay->exec_fileoff != (uint64_t)file_pos || lay->exec_filesize > size)) {
         error = ENOTSUP; /* only a mapping of the whole __TEXT from its start is translated */
     }
     if (!error) {
-        error = a64x_map_image(map, vp, file_pos, buf, lsize, addr);
+        error = a64x_map_image(map, vp, file_pos, buf, lay, addr);
     }
+    kfree_type(struct a64x_layout, lay);
     kfree_data(buf, lsize);
     if (error && a64x_image_kind(mh.cputype, mh.cpusubtype) != A64X_IMAGE_ARM64E) {
         return 0; /* plain arm64 runs untranslated rather than not at all */
@@ -708,7 +752,7 @@ static int a64x_cache_page(const void *src, void *dst, unsigned long long off, v
     if (!a64x_plan) {
         return 0;
     }
-    struct a64x_code_map code = {NULL, plan_is_code, 0};
+    struct a64x_code_map code = {NULL, plan_is_code, 0, NULL};
     /* one-word rewrites; stub-needing words stay unless the plan places them */
     (void)a64x_translate_page(in, out, A64X_WORDS, va, &code, NULL, 0, NULL);
     /* PAC failure checks that pass by construction -> b ok (fully inside this page, as the planner assumed) */
@@ -896,6 +940,8 @@ SYSCTL_QUAD(_kern_a64x, OID_AUTO, traps_unhandled, CTLFLAG_RD | CTLFLAG_LOCKED, 
 /* arm64 images that needed nothing (mapped as is) and images marked as built for this core */
 SYSCTL_QUAD(_kern_a64x, OID_AUTO, images_native, CTLFLAG_RD | CTLFLAG_LOCKED, &a64x_images_native, "");
 SYSCTL_QUAD(_kern_a64x, OID_AUTO, images_marked, CTLFLAG_RD | CTLFLAG_LOCKED, &a64x_images_marked, "");
+/* images of installed staged system apps mapped from the pretranslated tree */
+SYSCTL_QUAD(_kern_a64x, OID_AUTO, images_installed, CTLFLAG_RD | CTLFLAG_LOCKED, &a64x_images_installed, "");
 /* words of __text found to be data (assembler tables) and left untranslated */
 SYSCTL_QUAD(_kern_a64x, OID_AUTO, island_words, CTLFLAG_RD | CTLFLAG_LOCKED, &a64x_island_words, "");
 

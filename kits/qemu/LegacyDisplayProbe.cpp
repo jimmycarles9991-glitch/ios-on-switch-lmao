@@ -16,15 +16,21 @@
 #include <kern/task.h>
 #include <sys/proc.h>
 #include <pexpert/pexpert.h>
-#include <mach/kmod.h>
 #include <machine/machine_routines.h>
 #include "OriginalLegacyFramebufferABI.h"
 #include "../SwitchDT/SwitchDTProperty.h"
-extern "C" kmod_info_t g_kernel_kmod_info;
+extern "C" OSReturn switch_kernel_classes(void (*initialize)());
 extern "C" void native_legacy_display_static_init(void) __asm__("__GLOBAL__sub_I_NativeLegacyDisplay.cpp");
 extern "C" IOService *native_legacy_display_allocate(void);
 extern "C" void native_gop_presenter_static_init(void) __asm__("__GLOBAL__sub_I_NativeGOPPresenter.cpp");
 extern "C" IOService *native_gop_presenter_create(void);
+
+static void native_legacy_static_init()
+{
+    native_legacy_display_static_init();
+    native_gop_presenter_static_init();
+}
+
 static IOService *pendingLegacyDisplay;
 static IOService *activeGOPNub;
 // GPU hand-off presenter: never attached, so the display driver copies every frame itself.
@@ -77,8 +83,6 @@ volatile int native_legacy_meta_status = -1;
 volatile uint32_t native_legacy_init_result, native_legacy_start_result, native_legacy_probe_match;
 volatile uint32_t native_legacy_parent_match, native_legacy_object_size, native_legacy_released;
 volatile uint64_t native_legacy_object, native_legacy_nub, native_legacy_workloop;
-volatile uint32_t native_legacy_guard_slot;
-volatile uint64_t native_legacy_guard_object, native_legacy_guard_caller;
 volatile int native_legacy_surface_status = -1;
 volatile uint32_t native_legacy_surface_found;
 volatile uint64_t native_legacy_video_base, native_legacy_video_bytes;
@@ -832,20 +836,6 @@ __attribute__((noinline)) bool native_legacy_gop_mapping_observed(const IOServic
     return true;
 }
 
-__attribute__((noreturn, noinline)) void native_legacy_backend_guard(unsigned slot, const void *object,
-                                                                     const void *caller)
-{
-    native_legacy_guard_slot = slot;
-    native_legacy_guard_object = (uintptr_t)object;
-    native_legacy_guard_caller = (uintptr_t)caller;
-    panic("NativeLegacyDisplay: leaf=%u caller=%llx stage=%u PM=%u swap=%u/%u copy=%08x bytes=%llu retire=%u "
-          "handoff=%u/%u",
-          slot, (uint64_t)(uintptr_t)caller, native_legacy_stage, native_legacy_pm_stage,
-          native_legacy_swap_validation_result, native_legacy_swap_validation_reason,
-          (unsigned)native_legacy_transfer_status, native_legacy_transfer_bytes, native_legacy_retirement_calls,
-          native_legacy_prepare_reason, native_legacy_prepare_attempts);
-}
-
 void native_legacy_display_probe(void);
 
 void native_legacy_display_probe(void)
@@ -856,14 +846,7 @@ void native_legacy_display_probe(void)
     if (native_legacy_stage)
         return;
     native_legacy_stage = 1;
-    void *handle = OSMetaClass::preModLoad(g_kernel_kmod_info.name);
-    if (!handle) {
-        native_legacy_display_checkpoint();
-        return;
-    }
-    native_legacy_display_static_init();
-    native_gop_presenter_static_init();
-    native_legacy_meta_status = OSMetaClass::postModLoad(handle);
+    native_legacy_meta_status = switch_kernel_classes(native_legacy_static_init);
     if (native_legacy_meta_status) {
         native_legacy_display_checkpoint();
         return;

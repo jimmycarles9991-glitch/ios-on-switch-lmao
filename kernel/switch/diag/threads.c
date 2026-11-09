@@ -6,8 +6,6 @@
 #include <kern/debug.h>
 #include <mach/vm_param.h>
 #include <arm/cpu_data_internal.h>
-#include <libkern/OSKextLibPrivate.h>
-#include <libkern/kernel_mach_header.h>
 #include <vm/vm_kern.h>
 
 #include <switch/diag.h>
@@ -15,10 +13,10 @@
 extern vm_offset_t kernel_stack_size;
 
 /*
- * Switch: every blocked thread whose kernel stack runs through a kext, as
- * "T<tid> h<block hint> <kext> [owner T<tid>]" plus its saved return addresses
- * below the context switch (unslid, low 36 bits). For a kernel-mutex wait the
- * owner comes from kdp_lck_mtx_find_owner, and each owner's own stack follows.
+ * Switch: every thread blocked in the middle of a call (it kept its kernel stack), as "T<tid> h<block hint> p<priority>
+ * e<wait event> [owner T<tid>]" and its saved return addresses below the context switch (unslid, low 36 bits); for a
+ * kernel-mutex wait the owner comes from kdp_lck_mtx_find_owner, and each owner's own stack follows. The only lock it
+ * takes is tasks_threads_lock, never OSKext's: a thread stuck in a kext load holds it.
  */
 static unsigned switch_thread_frames(thread_t thread, uint64_t *frames, unsigned max)
 {
@@ -38,18 +36,18 @@ static unsigned switch_thread_frames(thread_t thread, uint64_t *frames, unsigned
 static void switch_print_frames(const uint64_t *frames, unsigned count)
 {
     printf("   ");
-    for (unsigned i = 2; i < count && i < 14; i++) {
+    for (unsigned i = 2; i < count; i++) {
         printf(" %llx", (uint64_t)VM_KERNEL_UNSLIDE(frames[i]) & 0xfffffffffULL);
     }
     printf("\n");
 }
 
-void switch_print_blocked_kext_threads(const char *(*name_of)(const void *), unsigned max_threads)
+void switch_print_blocked_threads(unsigned max_threads)
 {
     unsigned printed = 0;
     unsigned blocked = 0;
     unsigned owners = 0;
-    uint64_t owner_ids[4];
+    uint64_t owner_ids[8];
     thread_t thread = NULL;
     lck_mtx_lock(&tasks_threads_lock);
     queue_iterate(&threads, thread, thread_t, threads)
@@ -58,31 +56,29 @@ void switch_print_blocked_kext_threads(const char *(*name_of)(const void *), uns
             continue;
         }
         blocked++;
-        uint64_t frames[32];
-        unsigned count = switch_thread_frames(thread, frames, 32);
-        /* OSKextKextForAddress returns the kext's load address, or the kernel's header. */
-        unsigned deepest = count;
-        for (unsigned i = 0; i < count; i++) {
-            void *image = OSKextKextForAddress((const void *)frames[i]);
-            if (image && image != (void *)&_mh_execute_header) {
-                deepest = i;
-            }
-        }
-        if (deepest == count || printed == max_threads) {
+        if (printed == max_threads) {
             continue;
         }
-        const char *name = name_of((const void *)frames[deepest]);
-        printf("T%llu h%d %s", thread->thread_id, thread->block_hint, name ? name : "?");
+        printf("T%llu h%d p%d e%llx", thread->thread_id, thread->block_hint, thread->sched_pri,
+               (unsigned long long)thread->wait_event);
         if (thread->block_hint == kThreadWaitKernelMutex) {
             thread_waitinfo_t info = {};
             kdp_lck_mtx_find_owner(thread->waitq.wq_q, thread->wait_event, &info);
             printf(" owner T%llu", info.owner);
-            if (owners < 4) {
+            bool known = false;
+            for (unsigned o = 0; o < owners; o++) {
+                known = known || owner_ids[o] == info.owner;
+            }
+            if (!known && owners < 8) {
                 owner_ids[owners++] = info.owner;
             }
         }
         printf("\n");
-        switch_print_frames(frames, count);
+        uint64_t frames[32];
+        const unsigned count = switch_thread_frames(thread, frames, 32);
+        if (count > 2) {
+            switch_print_frames(frames, count);
+        }
         printed++;
     }
     for (unsigned o = 0; o < owners; o++) {
@@ -93,7 +89,7 @@ void switch_print_blocked_kext_threads(const char *(*name_of)(const void *), uns
             }
             printf("owner T%llu state=%x h%d run=%d\n", thread->thread_id, (unsigned)thread->state, thread->block_hint,
                    thread->last_processor ? thread->last_processor->cpu_id : -1);
-            if (thread->kernel_stack && thread != current_thread()) {
+            if (thread->kernel_stack && thread != current_thread() && !((unsigned int)thread->state & TH_RUN)) {
                 uint64_t frames[32];
                 switch_print_frames(frames, switch_thread_frames(thread, frames, 32));
             }

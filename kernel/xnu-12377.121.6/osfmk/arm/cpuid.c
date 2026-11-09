@@ -526,7 +526,7 @@ do_cacheid(void)
 		cpuid_cache_info_p->c_isize = (arm_cache_ccsidr_info.bits.NumSets + 1) * c_linesz * c_assoc;
 	}
 
-#if defined(SWITCH_XNU_DIAGNOSTICS) && SWITCH_XNU_DIAGNOSTICS && !defined(APPLE_ARM64_ARCH_FAMILY)
+#if defined(SWITCH_XNU_BOARD) && SWITCH_XNU_BOARD && !defined(APPLE_ARM64_ARCH_FAMILY)
 	/* No set/way "bulk" cache operations (osfmk/arm/caches.c): from c_bulksize_op bytes up (the 2 MiB L2 here),
 	 * IOMemoryDescriptor::performOperation (the original IOStorageFamily and IOHIDFamily call it; Apple built them
 	 * for coherent I/O, where it does nothing), IODMACommand on non-coherent mappings and flush_dcache_syscall

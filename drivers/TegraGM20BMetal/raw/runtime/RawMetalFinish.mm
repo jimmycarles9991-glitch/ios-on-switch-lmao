@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MIT
 #import "RawMetalInternal.h"
+#include "raw_stamps.h"
 
 // The textures and buffers a command buffer wrote (render targets, copy destinations, and for m2v anything a compute encoder
 // bound): their CPU lines are invalidated before the CPU next reads them.
@@ -51,6 +52,10 @@ void forEachWritten(RMCommandBuffer *cb, size_t from, size_t to, void (*written)
             if (compute)
                 written(c.obj);
             break;
+        case OpKernelBuffer:
+        case OpKernelTexture:
+            written(c.obj);
+            break;
         case OpInvocation:  // compute and other recorded calls: every buffer and texture they name
             raw::forEachObject((__bridge NSInvocation *)c.obj, [written](id o) {
                 written((__bridge void *)o);
@@ -76,7 +81,7 @@ void scheduled(RMCommandBuffer *cb)
             cb->_status = MTLCommandBufferStatusScheduled;
         handlers = cb->_scheduledHandlers;
         cb->_scheduledHandlers = nil;
-        cb->_gpuStart = hostSeconds();
+        cb->_kernelEnd = cb->_gpuStart = hostSeconds();
         // Core Animation's render thread waits for this every frame (waitUntilScheduled): with nothing to run, no hop through
         // the handler queue
         if (!handlers.count)
@@ -108,7 +113,7 @@ void finish(RMCommandBuffer *cb, NSError *error)
     gRM->stats.finished.fetch_add(1, std::memory_order_relaxed);
     unhold(cb);
     forEachWritten(cb, 0, cb->_tape.size(), markDirty);
-    if (!cb->_m2v)
+    if (!cb->_signalsOnM2v)
         for (const Cmd &c : cb->_tape)
             if (c.op == OpSignalEvent)
                 [(id<MTLSharedEvent>)(__bridge id)c.obj setSignaledValue:c.c];
@@ -123,7 +128,7 @@ void finish(RMCommandBuffer *cb, NSError *error)
         if (!cb->_scheduledSent) {
             scheduledHandlers = cb->_scheduledHandlers;
             cb->_scheduledHandlers = nil;
-            cb->_gpuStart = hostSeconds();
+            cb->_kernelEnd = hostSeconds();
 #if SWITCH_FRAME_TIMELINE
             gRM->stats.scheduledByFinish++;
 #endif
@@ -132,7 +137,15 @@ void finish(RMCommandBuffer *cb, NSError *error)
         }
         cb->_status = error ? MTLCommandBufferStatusError : MTLCommandBufferStatusCompleted;
         cb->_error = error;
-        cb->_gpuEnd = hostSeconds();
+        // the GPU's own time, its end where this thread saw it complete: the duration exact, both late by that latency
+        uint64_t ns = 0;
+        const bool stamped = !error && !cb->_m2v && gRM->raw->gpuNanoseconds(cb->_stamp, ns);
+        const raw::CommandBufferTimes t =
+            raw::orderedTimes(cb->_kernelStart, cb->_kernelEnd, hostSeconds(), stamped, ns);
+        cb->_kernelStart = t.kernelStart;
+        cb->_kernelEnd = t.kernelEnd;
+        cb->_gpuStart = t.gpuStart;
+        cb->_gpuEnd = t.gpuEnd;
         handlers = cb->_completedHandlers;
         cb->_completedHandlers = nil;
         cb->_completedSent = true;

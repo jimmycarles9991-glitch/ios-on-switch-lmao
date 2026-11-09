@@ -4,9 +4,13 @@ Addresses, the RAM ledger's exclusions, the ADT properties the loader fills, and
 (boot/loader/stage.h).
 """
 
-# The prelinked AMFI closure starts at VA ...0427c000; its 2 MiB offset is kept at PA b207c000.
-PHYSICAL_BASE = 0xB207C000
-WINDOW_SIZE = 768 << 20
+# The kernel window: the trust caches from WINDOW_BASE up, directly below the kernel as XNU wants them
+# (native_xnu_layout.kernel_phys_base), then the kernel from KERNEL_PHYS_BASE (kernel/switch/include/switch/
+# boot_layout.h), where its lowest segment, the prelinked AMFI closure at VA ...0427c000, keeps its 2 MiB offset.
+# 770 MiB take the window to 0xE2200000, the block-rounded envelope the loader checks against the live FDT.
+WINDOW_BASE = 0xB2000000
+KERNEL_PHYS_BASE = 0xB207C000
+WINDOW_SIZE = 770 << 20
 
 # Kept out of XNU's RAM by the loader (the full-RAM profile's ledger).
 NATIVE_EXCLUSIONS = [
@@ -42,7 +46,9 @@ LZ4_BLOCK = 1 << 20
 # The packaging compresses the blocks in shards, one action each: a block's shard is the MiB of the window it starts in,
 # so a block keeps its shard (and an unchanged shard its cached compression) whatever changes elsewhere in the window.
 WINDOW_SHARD_BYTES = 1 << 20
-WINDOW_SHARDS = 0x6000000 // WINDOW_SHARD_BYTES  # the staged window's limit (build_native_loader.py window_checks)
+# The most the loader decodes into the kernel window (boot/loader/copy.h LOADER_WINDOW_BYTES_MAX).
+WINDOW_BYTES_MAX = 128 << 20
+WINDOW_SHARDS = WINDOW_BYTES_MAX // WINDOW_SHARD_BYTES
 LZ4_MAGIC = b'\x04\x22\x4d\x18'
 
 # /chosen/switch-boot-stamps: boot/loader/stamps.h SWITCH_STAMP_COUNT 64-bit words, zero until the loader fills it.

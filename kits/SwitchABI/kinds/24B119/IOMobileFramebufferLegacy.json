@@ -42,7 +42,7 @@
     "325": "sendFrameInfo",
     "358": "collectCompletionReports",
     "359": "platformRefreshRates",
-    "366": "platformIdleWithoutClients",
+    "366": "areTimingsEnabled",
     "375": "setDisplayPowerState"
   },
   "fields": {
@@ -297,6 +297,7 @@
   "found": {
     "C2": "stores the vtable",
     "D2": "branch after the constructors",
+    "areTimingsEnabled": "slot 366 by PAC of _ZNK25IOMobileFramebufferLegacy19are_timings_enabledEv",
     "changeFrameInfo": "slot 214 by hint",
     "collectCompletionReports": "slot 358 by hint",
     "completeCurrentSwap": "slot 312 by hint",
@@ -320,7 +321,6 @@
     "native_legacy_vsync_notify": "the vsync sender (display, timestamp, continuous time, interval), as 21H461's: a 0 continuous time or interval filled in by virtual calls, then every client on the list at +0x1ab8 (21H461 +0x15d8) gets the message (its +0x18), next at +0; the queue kick calls it with +0x100..+0x110 after completing a swap",
     "newUserClient": "slot 141 by PAC of _ZN9IOService13newUserClientEP4taskPvjPP12IOUserClient",
     "platformFrameInfoNotify": "slot 324 by hint",
-    "platformIdleWithoutClients": "slot 366 by hint",
     "platformInternalPlug": "slot 257 by hint",
     "platformInternalUnplug": "slot 258 by hint",
     "platformRefreshRates": "slot 359 by hint",
@@ -393,7 +393,6 @@
       "325": "sendFrameInfo",
       "358": "collectCompletionReports",
       "359": "platformRefreshRates",
-      "366": "platformIdleWithoutClients",
       "375": "setDisplayPowerState"
     },
     "functions": {

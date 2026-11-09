@@ -40,12 +40,11 @@
 #include <libkern/c++/OSIterator.h>
 #include <libkern/c++/OSNumber.h>
 #include <libkern/c++/OSString.h>
-#include <mach/kmod.h>
 #include "SwitchHID.h"
 #include "../SwitchPower/SwitchPower.h"
 #include "../../kits/SwitchRefusal/SwitchRefusal.h"
 
-extern kmod_info_t g_kernel_kmod_info;
+extern "C" OSReturn switch_kernel_classes(void (*initialize)());
 
 // SwitchMotion (SwitchOrientationClient.cpp): the orientation device's AOP user client. Weak, so this archive links
 // without it.
@@ -715,11 +714,7 @@ OSDefineMetaClassAndStructors(SwitchHIDDevice, IOHIDDevice)
         const OSReturn loaded = OSKextLoadKextWithIdentifier("com.apple.iokit.IOHIDFamily");
         if (loaded != kOSReturnSuccess)
             panic("SwitchHID: loading com.apple.iokit.IOHIDFamily failed: %#x", loaded);
-        void *handle = OSMetaClass::preModLoad(g_kernel_kmod_info.name);
-        if (!handle)
-            panic("SwitchHID: OSMetaClass::preModLoad failed");
-        switch_hid_static_init();
-        const OSReturn registered = OSMetaClass::postModLoad(handle);
+        const OSReturn registered = switch_kernel_classes(switch_hid_static_init);
         if (registered != kOSReturnSuccess)
             panic("SwitchHID: registering SwitchHIDDevice failed: %#x", registered);
 

@@ -5,13 +5,15 @@
 // halves added or multiplied in f32 and rounded back to half, a sum's rounding being fquantize2f16 or the sum itself
 // where that gave zero, are the half sum or product (this Mac's f16 arithmetic, denormals kept), for every pair, so NAK
 // may emit SM53's HADD2 and HMUL2 for them; and metal2vulkan's integer widening of a half and narrowing of an f32 holding
-// one are the conversions, so NAK may emit one F2F for each.
+// one are the conversions, so NAK may emit one F2F for each. fquantize2f16 widens on SM53's half ALU, exactly under the
+// device's measured HADD2.F32 (nak/from_nir.rs).
 #include <gtest/gtest.h>
 
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <cstring>
+#include <initializer_list>
 
 namespace {
 
@@ -128,6 +130,35 @@ TEST(NakHalfRound, HalfSumsAndProductsInFloatRoundToTheHalfOnes)
 bool f32Nan(uint32_t u)
 {
     return (u & 0x7f800000) == 0x7f800000 && (u & 0x7fffff);
+}
+
+// GM20B's HADD2.F32 of a half and -0, as gpu.sm53_probe measured the half ALU with an f32 result: the sum rounded to
+// half, a half denormal given as a zero of its sign
+float deviceWidening(_Float16 h)
+{
+    const uint16_t u = halfBits(h);
+    if ((u & 0x7c00) == 0 && (u & 0x3ff))
+        return std::copysign(0.0f, widen(h));
+    return widen(h);
+}
+
+// nak/from_nir.rs fquantize2f16 before Volta, its widening on the half ALU: whether F2F.ftz keeps a half denormal or
+// flushes it, the select takes a zero wherever HADD2.F32 would give one, so the sequence is NIR's fquantize2f16 for
+// every f32
+TEST(NakHalfRound, QuantizeWidensOnTheHalfAluForEveryFloat)
+{
+    uint64_t differ = 0;
+    for (uint64_t i = 0; i <= 0xffffffffull; i++) {
+        const float x = asFloat(uint32_t(i)), want = quantize(x);
+        const _Float16 kept = narrow(x);
+        const uint16_t keptBits = halfBits(kept);
+        const _Float16 flushed = (keptBits & 0x7c00) ? kept : asHalf(keptBits & 0x8000);
+        for (_Float16 h : {kept, flushed}) {
+            const float got = std::fabs(x) < 0x1p-14f ? asFloat(uint32_t(i) & 0x80000000u) : deviceWidening(h);
+            differ += bitsOf(got) != bitsOf(want) && !(std::isnan(got) && std::isnan(want));
+        }
+    }
+    EXPECT_EQ(differ, 0u);
 }
 
 // narrow.rs half_bits_to_f32_bits as NIR has it: the low 16 bits of h, the rest ignored

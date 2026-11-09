@@ -18,6 +18,8 @@
 #include <switch/boot_layout.h>
 #include <switch/ram.h>
 
+#include "SwitchPanicSave.h"
+
 extern vm_offset_t first_avail;
 extern vm_offset_t virtual_space_start;
 extern pmap_paddr_t avail_start, avail_end;
@@ -113,8 +115,33 @@ static void switch_ram_reserve_gpu_pool(void)
     switch_gpu_end = gpu_end;
 }
 
+/*
+ * The kernel's RAM starts at its trust caches, which the loader puts directly below its lowest segment
+ * (tools/package/native_xnu_layout.py) for arm_vm_prot_init to take as EXTRADATA. Only a RELEASE kernel's
+ * arm_vm_prot_init refuses one above the kernel; this refuses it in every configuration.
+ */
+static pmap_paddr_t switch_kernel_ram_start(void)
+{
+    DTEntry map = NULL;
+    const DTMemoryMapRange *trust = NULL;
+    unsigned int bytes = 0;
+    if (SecureDTLookupEntry(NULL, "/chosen/memory-map", &map) != kSuccess ||
+        SecureDTGetProperty(map, "TrustCache", (const void **)&trust, &bytes) != kSuccess) {
+        return SWITCH_KERNEL_PHYS_BASE;
+    }
+    if (bytes != sizeof(*trust) || !trust->length || (trust->paddr & PAGE_MASK) ||
+        trust->paddr > SWITCH_KERNEL_PHYS_BASE || trust->length > SWITCH_KERNEL_PHYS_BASE - trust->paddr) {
+        panic("native TrustCache %#lx+%#zx is not below the kernel at %#x", trust->paddr, trust->length,
+              SWITCH_KERNEL_PHYS_BASE);
+    }
+    return trust->paddr;
+}
+
 void switch_ram_init(struct boot_args *args)
 {
+#if DEVELOPMENT || DEBUG
+    switch_panic_early_test(1);
+#endif
     DTEntry entry = NULL;
     const void *wire = NULL;
     unsigned int bytes = 0;
@@ -137,7 +164,7 @@ void switch_ram_init(struct boot_args *args)
         args->virtBase != SWITCH_BOOT_VIRT_BASE) {
         panic("native RAM ledger/bank geometry");
     }
-    switch_kernel_start = SWITCH_KERNEL_PHYS_BASE;
+    switch_kernel_start = switch_kernel_ram_start();
     switch_bootstrap_start = args->topOfKernelData;
     /* Temporary assembly blocks end at the old envelope rounded down. */
     switch_bootstrap_limit = 0xe2000000ULL;
@@ -203,6 +230,9 @@ void switch_ram_account(uint64_t present)
 
 void switch_ram_bootstrap_done(void)
 {
+#if DEVELOPMENT || DEBUG
+    switch_panic_early_test(2);
+#endif
     if (switch_ledger.committed) {
         first_avail_phys = avail_start;
         sane_size -= avail_start - switch_accounted_bootstrap_end;

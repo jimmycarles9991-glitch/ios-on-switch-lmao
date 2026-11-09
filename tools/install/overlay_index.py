@@ -11,6 +11,10 @@ path. The kernel finds a System file by its id and the Data file by its, so no p
 directory ids are what it refuses every change under, and a file keeps the System volume's launch status only if its
 own CDHash equals the one its entry carries. A System file with several hard links has one entry per path, all with
 its id, one Data file's id and one CDHash: the kernel redirects whichever name a lookup arrives by.
+
+Beside it, .originals (encode_originals) pairs the CDHash of each staged system app file, which installd copies out of
+the redirect's reach, with its translation's: "SWOR", u32 version (1), u32 pair count, u32 0; then per pair, by original
+ascending and unique, 20 bytes the original's CDHash and 20 bytes the translation's, which an index entry carries.
 """
 
 import struct
@@ -18,8 +22,13 @@ import struct
 MAGIC = b'SWOV'
 VERSION = 2
 NAME = '.index'
+ORIGINALS_MAGIC = b'SWOR'
+ORIGINALS_VERSION = 1
+ORIGINALS_NAME = '.originals'
+MAX_ORIGINALS = 1 << 16
 HEADER = struct.Struct('<4sIIIII')
 FILE = struct.Struct('<QQII20s')
+HEADER_ORIGINALS = struct.Struct('<4sIII')
 CDHASH = 20
 MAX_PATH = 1024
 MAX_FILES = 1 << 20
@@ -111,3 +120,17 @@ def decode(raw: bytes) -> tuple[list[tuple[str, int, int, bytes]], list[int]]:
         check_path(p)
     _check(files, directories)
     return files, directories
+
+
+def encode_originals(pairs: list[tuple[bytes, bytes]]) -> bytes:
+    """Return .originals for (original CDHash, translated CDHash) pairs; a pair given twice is written once."""
+    by_original = {}
+    for original, translated in pairs:
+        if len(original) != CDHASH or len(translated) != CDHASH:
+            raise OverlayIndexError('a CDHash that is not 20 bytes')
+        if by_original.setdefault(bytes(original), bytes(translated)) != bytes(translated):
+            raise OverlayIndexError(f'{original.hex()} is translated two ways')
+    if len(by_original) > MAX_ORIGINALS:
+        raise OverlayIndexError('too many originals')
+    body = b''.join(original + translated for original, translated in sorted(by_original.items()))
+    return HEADER_ORIGINALS.pack(ORIGINALS_MAGIC, ORIGINALS_VERSION, len(by_original), 0) + body

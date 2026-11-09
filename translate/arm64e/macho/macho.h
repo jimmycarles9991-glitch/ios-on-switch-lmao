@@ -181,6 +181,14 @@ struct a64x_fixup_stats {
 };
 
 /*
+ * Calls each() for every entry of every chain of the slice's LC_DYLD_CHAINED_FIXUPS (thin images and MH_FILESET
+ * kernel collections), at its slice offset. each() returns NULL, or why the walk stops. 0, or -1 with a message.
+ */
+typedef const char *(*a64x_fixup_fn)(void *ctx, uint64_t loc, uint32_t format, uint64_t raw,
+                                     const struct a64x_fixup *f);
+int a64x_fixups_each(const struct a64x_macho *m, a64x_fixup_fn each, void *ctx, char *err, size_t errlen);
+
+/*
  * Walks every chain of the slice's LC_DYLD_CHAINED_FIXUPS (thin images and MH_FILESET kernel collections) and,
  * when `out` is not NULL (a copy of the slice, m->size bytes), writes each authenticated entry there as its plain
  * equivalent. 0 on success (also for an image without chained fixups), -1 with a message.

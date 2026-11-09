@@ -8,6 +8,8 @@
 #include <nvif/os.h>
 #include <core/device.h>
 
+#include "../TegraGM20BComp.h"
+
 struct task_struct nvxnu_task = {0, "kernel"};
 struct tegra_sku_info tegra_sku_info;
 
@@ -788,6 +790,34 @@ void *nvxnu_pool_alloc_clean(unsigned long size, unsigned long align, unsigned l
 	pool_zero_dirty(i, n, 0);
 	*pa = pool_pages[i].pa;
 	return page_address(&pool_pages[i]);
+}
+
+int nvxnu_pool_alloc_chunks(unsigned long count, unsigned long long *pas)
+{
+	unsigned long i = 0;
+	unsigned long k = 0;
+	int dirty = -1;
+	if (!pool_map || !count)
+		return -ENOMEM;
+	/* pas holds the chunk indices first: chunk i's pages go from entry i * TGM_COMP_PAGES on, so expanding from the
+	 * last chunk down never overwrites an index not read yet */
+	spin_lock(&pool_lock);
+	dirty = tgm_comp_pick_chunks(pool_map, pool_dirty, pool_npages, (uint32_t)count, pas);
+	for (i = 0; dirty >= 0 && i < count; i++)
+		bitmap_set(pool_map, pas[i] * TGM_COMP_PAGES, TGM_COMP_PAGES);
+	if (dirty >= 0)
+		pool_used += count * TGM_COMP_PAGES;
+	spin_unlock(&pool_lock);
+	if (dirty < 0)
+		return -ENOMEM;
+	for (i = count - (unsigned long)dirty; i < count; i++)
+		pool_zero_dirty(pas[i] * TGM_COMP_PAGES, TGM_COMP_PAGES, 0);
+	for (i = count; i-- > 0;) {
+		const unsigned long first = pas[i] * TGM_COMP_PAGES;
+		for (k = 0; k < TGM_COMP_PAGES; k++)
+			pas[i * TGM_COMP_PAGES + k] = pool_pages[first + k].pa;
+	}
+	return 0;
 }
 
 unsigned long nvxnu_pool_claim_dirty(unsigned long max_bytes, unsigned long long *pa)

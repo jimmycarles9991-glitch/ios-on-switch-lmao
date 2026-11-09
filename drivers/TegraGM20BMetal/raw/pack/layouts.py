@@ -5,12 +5,30 @@ The probe is capture/probe.mm, read by its NVDEC_SCRUB records.
 """
 
 import os
+import re
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import probelog
 
 STAGES = {1: 'v', 2: 'f'}
+
+
+def color_table_words() -> list[int]:
+    """Give the colour table's words (runtime/raw_srgb_table.h): what m2v binds beside an 8-bit sRGB target."""
+    with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'runtime', 'raw_srgb_table.h')) as header:
+        text = header.read()
+
+    def table(name: str) -> list[int]:
+        body = text[text.index(name) : text.index('};', text.index(name))]
+        return [int(x, 0) for x in re.findall(r'0x[0-9a-fA-F]+|\b\d+\b', body[body.index('{') :])]
+
+    first, linear = table('kSrgbEncodeFirst['), table('kSrgbLinear[')
+    return [w for b in range(256) for w in (first[b], linear[b], linear[b - 1] if b else 0, 0)]
+
+
+COLOR_TABLE = color_table_words()
+COLOR_TABLE_BYTES = 4 * len(COLOR_TABLE)
 
 
 # TEXHEAD's TEXTURE_TYPE (word 4 bits 26:23): the probe binds 2D textures, so a 3D one is m2v's stand-in for a texture3d
@@ -28,6 +46,26 @@ def tic_kind(tic: tuple[str, list[int]], rts: dict[str, int]) -> tuple[str, int 
     if (w[4] >> 23) & 0xF == TEXTURE_TYPE_3D:
         return ('tex3d', name)
     return ('tic?', f'{name}:{width}x{height}')
+
+
+# MTLPixelFormat R8Unorm_sRGB, RG8Unorm_sRGB, RGBA8Unorm_sRGB, BGRA8Unorm_sRGB: m2v fetches one through a conversion
+# table it binds itself (Core Animation's generic states on such a target)
+SRGB8_FORMATS = {11, 31, 71, 81}
+
+
+def srgb_target(key: str) -> bool:
+    return any(
+        f.startswith('c') and f[1].isdigit() and int(f.split('=', 1)[1].split(':', 1)[0]) in SRGB8_FORMATS
+        for f in key.split(' | ', 1)[0].split()
+        if '=' in f
+    )
+
+
+def pointer_problem(key: str, at: int, word: int) -> str:
+    """Give why a set-0 pointer that is no probe payload of this state's keeps it off the raw path."""
+    if srgb_target(key):
+        return f"a buffer of m2v's own at {at} beside an 8-bit sRGB target ({word:x})"
+    return f'untagged pointer at {at} ({word:x})'
 
 
 def tsc_kind(t: list[int]) -> tuple[str, int | str]:
@@ -49,11 +87,19 @@ def tsc_kind(t: list[int]) -> tuple[str, int | str]:
     return ('smp', slot)
 
 
+def buffer_entry(p: dict, o: int, words: list[int], pw: list[int]) -> tuple | str:
+    """Give the set-0 buffer descriptor at word `o` (`pw` the words it points at) as an entry, else its problem."""
+    if (pw[0] >> 16) == 0xC0DE and pw[1] == p['index']:
+        return (o * 4, 'ubo', STAGES[(pw[0] >> 8) & 0xFF], pw[0] & 0xFF, words[o + 2])
+    if srgb_target(p['key']) and words[o + 2] == COLOR_TABLE_BYTES and pw == COLOR_TABLE[: len(pw)]:
+        return (o * 4, 'color_table')
+    return pointer_problem(p['key'], o * 4, pw[0])
+
+
 def layout(p: dict) -> tuple[list[tuple], list[str]]:
     r = p['records'][0]
     if 'set0' not in r:
         return [], []
-    i = p['index']
     words = r['set0'][1]
     # render targets of the draw by name, from the canonical record (rtN=Rk ...)
     rts = {}
@@ -66,11 +112,11 @@ def layout(p: dict) -> tuple[list[tuple], list[str]]:
     while o < len(words):
         key = f'ptr0.{o * 4}'
         if o % 4 == 0 and key in r['ptr']:
-            pw = r['ptr'][key][1]
-            if (pw[0] >> 16) == 0xC0DE and pw[1] == i:
-                entries.append((o * 4, 'ubo', STAGES[(pw[0] >> 8) & 0xFF], pw[0] & 0xFF, words[o + 2]))
+            entry = buffer_entry(p, o, words, r['ptr'][key][1])
+            if isinstance(entry, str):
+                problems.append(entry)
             else:
-                problems.append(f'untagged pointer at {o * 4} ({pw[0]:x})')
+                entries.append(entry)
             o += 4
             continue
         w = words[o]

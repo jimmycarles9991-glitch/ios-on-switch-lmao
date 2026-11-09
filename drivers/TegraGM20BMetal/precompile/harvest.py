@@ -127,6 +127,9 @@ def _normal_render(line: str) -> tuple[str | None, str | None]:
     end = line.find(' | ', f + 5) if f >= 0 else -1
     if v < 0 or f < 0:
         return None, None
+    # The functions the state links follow its stages (the frontend's linkedText: " | <vl|vp|fl|fp> <stage>")
+    while end >= 0 and line[end + 3 : end + 6] in ('vl ', 'vp ', 'fl ', 'fp '):
+        end = line.find(' | ', end + 3)
     head = line[:v].split()
     label = next((t for t in head if t.startswith('label=')), 'label=-')
     state = ' '.join(t for t in head if DESCRIPTOR.match(t)) + line[v : end if end >= 0 else len(line)]

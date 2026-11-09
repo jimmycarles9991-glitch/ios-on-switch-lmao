@@ -290,6 +290,9 @@ TEST(XnuUiScaleSites, CoreUiRowBytes)
 
 TEST(XnuUiScaleSitesSource, BothTreesAndNoPagerAtScaleOne)
 {
+    for (size_t i = 0; i < kCache.count; i++) {
+        EXPECT_FALSE(kCache.sites[i].every_scale) << switch_ui_scale_sites::NameOf(kCache.sites[i]);
+    }
     for (const char *header :
          {"switch_ui_scale_sites.h", "switch_ui_scale_sites_21H461.h", "switch_ui_scale_sites_24B119.h"}) {
         const std::string vm = "/bsd/vm/";
@@ -302,7 +305,8 @@ TEST(XnuUiScaleSitesSource, BothTreesAndNoPagerAtScaleOne)
         const std::string vm_unix = switch_ios::test::SourceText(tree);
         const std::string pager =
             switch_ios::test::Body(vm_unix, "switch_ui_scale_pager(const struct switch_us_site *site");
-        const size_t unit = pager.find("if (switch_ui_scale_is_unit(switch_ui_scale())) {");
+        // only an every_scale site maps a pager at scale 1; 21H461 has none
+        const size_t unit = pager.find("if (switch_ui_scale_is_unit(switch_ui_scale()) && !site->every_scale) {");
         ASSERT_NE(unit, std::string::npos);
         EXPECT_LT(unit, pager.find("vn_rdwr("));
         EXPECT_LT(unit, pager.find("apple_protect_pager_setup("));

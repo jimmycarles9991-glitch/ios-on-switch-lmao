@@ -19,21 +19,27 @@ SWITCH_APPLE_COPTS = {
     },
 }
 
+# The arm64e translator runs inside exec, mmap and page faults, deep in a 16 KB kernel stack: its scratch is allocated
+# (struct a64x_walk, struct a64x_layout), and a frame over 1 KB in it fails the build.
+_A64X_COPTS = ["-Wframe-larger-than=1024", "-Werror=frame-larger-than"]
+
 # component: [(the Apple object it links after, the source below kernel/switch (or //<path> for one elsewhere in the
 # repository), its own copts[, the XNU versions that build it, when not all])]
 SWITCH_OBJECTS = {
     "bsd": [
         ("bsd/kern/bsd_init.c", "boot/bsd_init.c", []),
         ("bsd/kern/kern_exec.c", "boot/prefs.c", []),
+        ("bsd/kern/kern_exit.c", "diag/exit.c", []),
         ("bsd/kern/lockdown_mode.c", "sysctl/lockdown.c", [], ["12377.121.6"]),
         ("bsd/kern/kern_shutdown.c", "shutdown/shutdown.c", []),
         ("bsd/vfs/vfs_lookup.c", "vfs/pretranslated.c", []),
         ("bsd/vfs/kpi_vfs.c", "vfs/auth_fs.c", []),
+        ("bsd/vfs/vfs_syscalls.c", "vfs/identity.c", []),
         # The translator's core is //translate/arm64e's (its host tools and tests build the same files).
-        ("bsd/kern/mach_loader.c", "translate/a64x_xnu.c", [], ["12377.121.6"]),
-        ("bsd/kern/mach_loader.c", "//translate/arm64e/a64x/a64x_classify.c", [], ["12377.121.6"]),
-        ("bsd/kern/mach_loader.c", "//translate/arm64e/a64x/a64x_rewrite.c", [], ["12377.121.6"]),
-        ("bsd/kern/mach_loader.c", "//translate/arm64e/a64x/a64x_image.c", [], ["12377.121.6"]),
+        ("bsd/kern/mach_loader.c", "translate/a64x_xnu.c", _A64X_COPTS, ["12377.121.6"]),
+        ("bsd/kern/mach_loader.c", "//translate/arm64e/a64x/a64x_classify.c", _A64X_COPTS, ["12377.121.6"]),
+        ("bsd/kern/mach_loader.c", "//translate/arm64e/a64x/a64x_rewrite.c", _A64X_COPTS, ["12377.121.6"]),
+        ("bsd/kern/mach_loader.c", "//translate/arm64e/a64x/a64x_image.c", _A64X_COPTS, ["12377.121.6"]),
         ("bsd/kern/kern_codesigning.c", "prelink/shims.c", [], ["12377.121.6"]),
     ],
     "iokit": [
@@ -49,6 +55,8 @@ SWITCH_OBJECTS = {
         ("osfmk/kern/sched_prim.c", "diag/stall.c", []),
         ("osfmk/kern/sched_prim.c", "diag/stall_snapshot.c", []),
         ("osfmk/kern/sched_prim.c", "diag/stall_frame.c", []),
+        ("osfmk/kern/exception.c", "diag/crash.c", []),
+        ("osfmk/kern/host.c", "vm/stats.c", [], ["12377.121.6"]),
     ],
 }
 

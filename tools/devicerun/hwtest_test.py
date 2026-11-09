@@ -5,10 +5,11 @@ import unittest
 from pathlib import Path
 
 from tools.devicerun import devicerun, hwtest
-from tools.devicerun.rules import FAIL, INFO, NO_DATA, PASS
+from tools.devicerun.rules import FAIL, INFO, NA, NO_DATA, PASS
 
 APP = Path(__file__).resolve().parents[2] / 'hw_test_app'
-SOURCES = (APP / 'tests', APP / 'gpu/scenes')
+SHARED = (APP / 'tests', APP / 'gpu/scenes')
+BY_IOS = {'17': (APP / 'app17',), '27': (APP / 'app27',)}
 PARAMETERIZED = re.compile(
     r'^(decode\.|playback\.|encode\.|audio\.playback_|image\.(' + '|'.join(hwtest.STILLS) + r')$)'
 )
@@ -60,6 +61,22 @@ class Verdicts(unittest.TestCase):
         self.assertIn('280/9/1/0', results['hwtest.pacing'].observed)
         self.assertEqual(results['hwtest.pacing.blur_over'].verdict, FAIL)
 
+    def test_a_version_only_test_is_judged_only_in_that_versions_log(self):
+        line17 = 'HWTEST suite PASS pass=1 fail=0 skip=0 ios=17 ms=1.0'
+        line27 = 'HWTEST suite FAIL pass=0 fail=1 skip=0 ios=27 ms=1.0'
+        results = run('HWTEST metal.device PASS ms=1.0', line17)
+        self.assertEqual(results['hwtest.ui.glass'].verdict, NA)
+        self.assertEqual(results['hwtest.metal.device'].verdict, PASS)
+        results = run('HWTEST ui.glass FAIL ms=1.0 why=streaks', line27)
+        self.assertEqual(results['hwtest.ui.glass'].verdict, FAIL)
+        self.assertEqual(run(line27)['hwtest.pacing.glass_over'].verdict, PASS)
+        self.assertEqual(run('HWTEST ui.glass PASS ms=1.0')['hwtest.ui.glass'].verdict, NO_DATA)
+
+    def test_a_summary_without_ios_leaves_version_tests_na(self):
+        results = run('HWTEST suite PASS pass=1 fail=0 skip=0 ms=1.0')
+        self.assertEqual(results['hwtest.metal4.device'].verdict, NA)
+        self.assertEqual(results['hwtest.suite'].verdict, PASS)
+
     def test_a_clean_run_passes(self):
         results = run('HWTEST metal.device PASS ms=1.0', 'HWTEST suite PASS pass=70 fail=0 skip=0 ms=1.0')
         self.assertEqual(results['hwtest.suite'].verdict, PASS)
@@ -86,26 +103,79 @@ class Verdicts(unittest.TestCase):
 
 
 class AppSources(unittest.TestCase):
-    def declared(self) -> dict[str, bool]:
+    @staticmethod
+    def declared(directories: tuple[Path, ...]) -> dict[str, bool]:
         ids = {}
-        for source in sorted(path for directory in SOURCES for path in directory.glob('*.swift')):
-            for block in re.split(r'\n(?=struct )', source.read_text()):
+        for source in sorted(path for directory in directories for path in directory.glob('*.swift')):
+            for block in re.split(r'\n(?=struct |enum )', source.read_text()):
                 for test_id in re.findall(r'(?:let id = |\bid: )"([a-z0-9_.]+)"', block):
                     ids[test_id] = 'let interactive = true' in block
         return ids
 
     def test_every_literal_id_is_checked_with_its_interactivity(self):
-        declared = self.declared()
+        declared = self.declared(SHARED)
         self.assertGreater(len(declared), 40)
         for test_id, interactive in declared.items():
             self.assertIn(test_id, hwtest.TESTS)
             self.assertEqual(hwtest.TESTS[test_id], interactive, test_id)
 
     def test_every_other_id_is_one_of_the_app_tables(self):
-        declared = self.declared()
+        declared = self.declared(SHARED)
         for test_id in hwtest.TESTS:
             if test_id not in declared:
                 self.assertRegex(test_id, PARAMETERIZED)
+
+    def test_each_versions_own_tests_are_its_table(self):
+        for ios, directories in BY_IOS.items():
+            declared = self.declared(directories)
+            self.assertEqual(declared, hwtest.BY_IOS.get(ios, {}), ios)
+            self.assertFalse(set(declared) & set(hwtest.TESTS), ios)
+
+
+# A literal first argument of Metrics.set: "key", prefix + "key" or an interpolated "\\(label)_key".
+METRIC_SET = re.compile(r'\.set\(\s*(?:[A-Za-z_][\w.]*\s*\+\s*)?"')
+
+
+def swift_string(text: str, start: int) -> tuple[str, bool, int]:
+    """Return a literal's text outside interpolations (it opens at text[start]), whether it interpolates, its end."""
+    parts, at, interpolated = [], start + 1, False
+    while text[at] != '"':
+        if text.startswith('\\(', at):
+            interpolated, depth, at = True, 1, at + 2
+            while depth:
+                if text[at] == '"':
+                    at = swift_string(text, at)[2]
+                    continue
+                depth += {'(': 1, ')': -1}.get(text[at], 0)
+                at += 1
+        elif text[at] == '\\':
+            parts.append(text[at + 1])
+            at += 2
+        else:
+            parts.append(text[at])
+            at += 1
+    return ''.join(parts), interpolated, at + 1
+
+
+class MetricKeys(unittest.TestCase):
+    def test_no_literal_metric_key_is_reserved_or_malformed(self):
+        reserved = {'hw', 'ms', 'why'}  # LogLine.reservedKeys
+        bad = []
+        for source in sorted(APP.rglob('*.swift')):
+            if source.relative_to(APP).parts[0].startswith('host_'):
+                continue
+            text = source.read_text()
+            for match in METRIC_SET.finditer(text):
+                key, interpolated, _ = swift_string(text, match.end() - 1)
+                whole = not interpolated and '+' not in match.group(0)
+                if (whole and key in reserved) or not re.fullmatch(r'[a-z0-9_]*', key):
+                    bad.append(f'{source.relative_to(APP)}:{text.count(chr(10), 0, match.start()) + 1} {key!r}')
+        self.assertEqual(bad, [], 'metric keys the log line cannot carry (LogLine.isValidKey, reservedKeys)')
+
+    def test_the_scan_sees_through_interpolations(self):
+        text = 'm.set("err_\\(e < 0 ? "neg" : "pos")_ms", 1); m.set(prefix + "frames", 2); m.set("ms", 3)'
+        found = [swift_string(text, match.end() - 1)[:2] for match in METRIC_SET.finditer(text)]
+        self.assertEqual(found, [('err__ms', True), ('frames', False), ('ms', False)])
 
 
 if __name__ == '__main__':

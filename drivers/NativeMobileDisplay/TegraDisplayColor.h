@@ -6,14 +6,15 @@
 // transform. Only DC A's volatile registers change: CMU LUT1/LUT2/CSC and DISP_COLOR_CONTROL's CMU_ENABLE. With nothing
 // asked for the CMU is bypassed and the picture is the one hekate set up.
 //
-// The IOMobileFramebuffer calls come from any thread. The tables change in the vertical blank after a frame end (the
-// filter), and the enable bit latches at a frame boundary through GENERAL_ACT_REQ from the work loop (the action), after
-// the tables it enables are written.
+// The IOMobileFramebuffer calls come from any thread. The tables change at frame ends (the filter) only where
+// TegraDisplayColorSequence.h allows, and the enable bit latches at a frame boundary through GENERAL_ACT_REQ from the
+// work loop (the action).
 #pragma once
 #include <IOKit/IOLib.h>
 #include <IOKit/IOLocks.h>
 #include <IOKit/IOReturn.h>
 #include "TegraDisplayColorMath.h"
+#include "TegraDisplayColorSequence.h"
 #include "../../kits/SwitchMMIO/SwitchMMIOWords.h"
 
 class TegraDisplayColor {
@@ -55,13 +56,14 @@ public:
 private:
     void commit();
     void writeTables(const switch_color::Tables &tables, const switch_color::Tables *written);
+    void writeCsc(const switch_color::Tables &tables, const switch_color::Tables &written);
     void writeEnable(bool enable);
 
     IOSimpleLock *lock = nullptr;
     SwitchMMIOWords dc;
     uint32_t colorControl = 0;
     uint32_t generation = 0;
-    bool pendingDirty = false, activeValid = false, hwEnabled = false;
+    switch_color::Sequence sequence;
     bool holding = false;    // a frame-end hold out until the change has reached DC A
     bool announced = false;  // the last enable was logged (a blank alone is not)
     switch_color::Inputs inputs;

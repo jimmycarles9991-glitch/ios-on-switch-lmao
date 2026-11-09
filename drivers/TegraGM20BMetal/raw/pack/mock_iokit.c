@@ -11,7 +11,8 @@
 // MOCK_IMPORT_US=<n>: BoImport takes n us per 16 MiB (the kext's wiring; selcheck's pool test).
 // MOCK_COMPRESSION=1: GetInfo says compressible kinds bind (TegraGM20BInfoCompression), and they do as the kext binds them
 // (mock_comp.h: which binds, the contract's violations counted, MOCK_COMP_LINES=<n> comptag lines). Off by default.
-// MOCK_CONTIG_US=<n>: a Contiguous BoAlloc takes n us (the kext's contiguous search).
+// MOCK_CONTIG_US=<n>: a Contiguous or Compressible BoAlloc takes n us (the kext's contiguous search, or its zeroing).
+// MOCK_COMP_REFUSE=<n>: the first n Compressible BoAllocs are refused with kIOReturnNoMemory (the pool short).
 // MOCK_TILED_CACHE=1: GetInfo says every GR context holds the tiled cache's table (TegraGM20BInfoTiledCache), as the kext
 // does unless booted with switch-no-tiled-cache. Off by default while NVK host builds without the bit stay in use.
 // Each IOServiceOpen is a connection of its own, as another task's would be (Order stays among its channels; MOCK_TASK_WINDOWS=1:
@@ -22,6 +23,8 @@
 // SurfaceLayout (method 16; MOCK_NO_SURFACE_LAYOUT=1 hides it) decides a surface's layout as the kext does: at its first asking
 // import, block-linear when that import writes it, is the surface's only import and its shape tiles, its rows then tiled in
 // place (TegraGM20BLayout.h); pitch for good otherwise.
+// Priority (method 18; MOCK_NO_PRIORITY=1 hides it): one per process, as the kext keeps one per connection
+// (mock_iokit_priority).
 // mock_iokit_kill_next(error): the next Exec on a 3D channel (a queue's, not NVK's upload channel) is accepted, then its
 // channel dies as the kext kills one (method 11's error, and with mock_iokit_kill_next_at the fault VA GetStatus reports
 // for an MMU fault): what it had in flight never runs, its kill record
@@ -59,6 +62,7 @@ enum {
 };
 
 struct bo {
+    uint64_t handle; /* 0: a free slot */
     int fd;
     uint64_t bytes;
     void *import;
@@ -68,8 +72,11 @@ struct bo {
     uint8_t kind_set;
     uint64_t lines; /* comptag lines it holds (mock_comp.h) */
 };
+/* Live BOs by slot. A handle is a serial above the slot (serial << 16 | slot): never reused, as the kext's; a slot (and the
+ * map token, which is the slot) is, once its BO is freed */
 static struct bo bos[kMaxBo];
-static atomic_uint nbo = 1;
+static pthread_mutex_t bo_lock = PTHREAD_MUTEX_INITIALIZER;
+static uint64_t bo_serial;
 static uint32_t submitted[16];
 static uint32_t *fence;   /* the fence page, a TegraGM20BAbiFence per channel at slot*16 */
 static uint32_t dead[16]; /* method 11's error of a killed channel */
@@ -78,13 +85,41 @@ static uint64_t dead_va[16]; /* and its fault VA */
 static uint32_t engines[16];
 static uint8_t live[16]; /* slots in use: a connection gets its lowest free one, its seqnos continuing (the kext's) */
 static uint32_t kill_next;
+
+/* The slot of live handle `h`, or 0 */
+static unsigned slot_of(uint64_t h)
+{
+    const unsigned slot = (unsigned)(h & (kMaxBo - 1));
+    return slot && bos[slot].handle == h ? slot : 0;
+}
+
+/* `o` in a free slot, under a new handle: its slot, or 0 with every slot live */
+static unsigned bo_new(struct bo o)
+{
+    static unsigned cursor = 1;
+    unsigned slot = 0;
+    pthread_mutex_lock(&bo_lock);
+    for (unsigned n = 1; n < kMaxBo && !slot; n++) {
+        if (!bos[cursor].handle)
+            slot = cursor;
+        cursor = cursor + 1 < kMaxBo ? cursor + 1 : 1;
+    }
+    if (slot) {
+        o.handle = ++bo_serial << 16 | slot;
+        bos[slot] = o;
+    }
+    pthread_mutex_unlock(&bo_lock);
+    return slot;
+}
+
 static uint64_t kill_next_va;
-static atomic_ulong calls[16];
-static atomic_uint fail_left[16]; /* mock_iokit_fail_next's, by method */
-static atomic_uint fail_skip[16]; /* mock_iokit_fail_after's calls that go through first */
-static atomic_int fail_kr[16];
-static atomic_ulong import_maps;    /* VmBind map ops onto imported pages */
-static atomic_ulong kind_maps[256]; /* VmBind map ops by PTE kind */
+static atomic_ulong calls[32];
+static atomic_uint fail_left[32]; /* mock_iokit_fail_next's, by method */
+static atomic_uint fail_skip[32]; /* mock_iokit_fail_after's calls that go through first */
+static atomic_int fail_kr[32];
+static atomic_uint priority_now[2] = {2, 4}; /* Priority's (method 18): the connection's foreground and background */
+static atomic_ulong import_maps;             /* VmBind map ops onto imported pages */
+static atomic_ulong kind_maps[256];          /* VmBind map ops by PTE kind */
 #include "mock_comp.h"
 
 /* Surfaces' layouts (method 16), by surface ID */
@@ -435,9 +470,9 @@ static kern_return_t mock_call(mach_port_t c, uint32_t sel, const void *in, size
     }
     if (sel == TegraGM20BTunnelProbe)
         return KERN_SUCCESS;
-    if (sel < 16)
+    if (sel < 32)
         atomic_fetch_add(&calls[sel], 1);
-    if (sel < 16 && atomic_load(&fail_left[sel])) {
+    if (sel < 32 && atomic_load(&fail_left[sel])) {
         if (atomic_load(&fail_skip[sel])) {
             atomic_fetch_sub(&fail_skip[sel], 1);
         } else {
@@ -462,7 +497,8 @@ static kern_return_t mock_call(mach_port_t c, uint32_t sel, const void *in, size
                                                (getenv("MOCK_NO_SURFACE_LAYOUT") ? 0 : TegraGM20BInfoSurfaceLayout) |
                                                (getenv("MOCK_NO_KILL_RECORD") ? 0 : TegraGM20BInfoKillRecord) |
                                                (getenv("MOCK_TILED_CACHE") ? TegraGM20BInfoTiledCache : 0) |
-                                               (getenv("MOCK_COMPRESSION") ? TegraGM20BInfoCompression : 0),
+                                               (getenv("MOCK_COMPRESSION") ? TegraGM20BInfoCompression : 0) |
+                                               (getenv("MOCK_NO_PRIORITY") ? 0 : TegraGM20BInfoPriority),
                                       .chipset = 0x12e,
                                       .gpc_count = 1,
                                       .tpc_count = 2,
@@ -486,17 +522,28 @@ static kern_return_t mock_call(mach_port_t c, uint32_t sel, const void *in, size
     }
     case TegraGM20BMethodBoAlloc: {
         const struct TegraGM20BAbiBoAlloc *a = in;
-        if ((a->flags & TegraGM20BBoContiguous) && getenv("MOCK_CONTIG_US"))
+        if ((a->flags & (TegraGM20BBoContiguous | TegraGM20BBoCompressible)) && getenv("MOCK_CONTIG_US"))
             usleep((useconds_t)atoi(getenv("MOCK_CONTIG_US")));
-        unsigned h = atomic_fetch_add(&nbo, 1);
+        const kern_return_t refused = comp_alloc(a);
+        if (refused != KERN_SUCCESS)
+            return refused;
+        static atomic_uint names;
         char name[64];
-        snprintf(name, sizeof(name), "/nvkmock.%d.%u", getpid(), h);
+        snprintf(name, sizeof(name), "/nvkmock.%d.%u", getpid(), atomic_fetch_add(&names, 1));
         int fd = shm_open(name, O_RDWR | O_CREAT | O_EXCL, 0600);
         shm_unlink(name);
-        if (fd < 0 || ftruncate(fd, (off_t)a->bytes))
+        if (fd < 0 || ftruncate(fd, (off_t)a->bytes)) {
+            if (fd >= 0)
+                close(fd);
             return kIOReturnNoMemory;
-        bos[h] = (struct bo){fd, a->bytes, NULL, 0, a->flags, a->align_log2};
-        struct TegraGM20BAbiBoAllocReply r = {.handle = h, .map_token = h};
+        }
+        const unsigned h =
+            bo_new((struct bo){.fd = fd, .bytes = a->bytes, .flags = a->flags, .align_log2 = a->align_log2});
+        if (!h) {
+            close(fd);
+            return kIOReturnNoMemory;
+        }
+        struct TegraGM20BAbiBoAllocReply r = {.handle = bos[h].handle, .map_token = h};
         memcpy(out, &r, sizeof(r));
         return KERN_SUCCESS;
     }
@@ -510,36 +557,44 @@ static kern_return_t mock_call(mach_port_t c, uint32_t sel, const void *in, size
             slow = getenv("MOCK_IMPORT_US") ? getenv("MOCK_IMPORT_US") : "";
         if (*slow)
             usleep((useconds_t)((uint64_t)atoi(slow) * a->bytes / (16u << 20)));
-        unsigned h = atomic_fetch_add(&nbo, 1);
-        bos[h] = (struct bo){-1, a->bytes, (void *)(uintptr_t)a->address, a->surface_id};
-        struct TegraGM20BAbiBoAllocReply r = {.handle = h, .map_token = 0};
+        const unsigned h = bo_new((struct bo){
+            .fd = -1, .bytes = a->bytes, .import = (void *)(uintptr_t)a->address, .surface = a->surface_id});
+        if (!h)
+            return kIOReturnNoMemory;
+        struct TegraGM20BAbiBoAllocReply r = {.handle = bos[h].handle, .map_token = 0};
         memcpy(out, &r, sizeof(r));
         return KERN_SUCCESS;
     }
     case TegraGM20BMethodSurfaceLayout: {
         const struct TegraGM20BAbiSurfaceLayout *a = in;
-        if (getenv("MOCK_NO_SURFACE_LAYOUT") || a->handle >= kMaxBo || !bos[a->handle].surface)
+        const unsigned h = slot_of(a->handle);
+        if (getenv("MOCK_NO_SURFACE_LAYOUT") || !bos[h].surface)
             return kIOReturnBadArgument;
-        struct TegraGM20BAbiSurfaceLayoutReply r = {.layout = surface_layout(&bos[a->handle], a)};
+        struct TegraGM20BAbiSurfaceLayoutReply r = {.layout = surface_layout(&bos[h], a)};
         memcpy(out, &r, sizeof(r));
         return KERN_SUCCESS;
     }
     case TegraGM20BMethodBoFree: {
         const struct TegraGM20BAbiBoFree *a = in;
-        if (a->handle < kMaxBo && bos[a->handle].fd >= 0)
-            close(bos[a->handle].fd);
-        comp_unbind(0, 0, (unsigned)a->handle);
-        if (a->handle < kMaxBo)
-            bos[a->handle] = (struct bo){0};
+        const unsigned h = slot_of(a->handle);
+        if (!h)
+            return KERN_SUCCESS;
+        if (bos[h].fd >= 0)
+            close(bos[h].fd);
+        comp_unbind(0, 0, h);
+        pthread_mutex_lock(&bo_lock);
+        bos[h] = (struct bo){0};
+        pthread_mutex_unlock(&bo_lock);
         return KERN_SUCCESS;
     }
     case TegraGM20BMethodVmBind: {
         const struct TegraGM20BAbiVmBind *b = in;
         for (uint32_t i = 0; i < b->count && i < TegraGM20BMaxBindOps; i++) {
             const struct TegraGM20BAbiBindOp *op = &b->ops[i];
-            struct bo *o = (op->op == TegraGM20BBindMap && op->handle < kMaxBo) ? &bos[op->handle] : NULL;
+            const unsigned h = op->op == TegraGM20BBindMap ? slot_of(op->handle) : 0;
+            struct bo *o = h ? &bos[h] : NULL;
             if (o) {
-                const kern_return_t kr = comp_bind((unsigned)op->handle, o, op);
+                const kern_return_t kr = comp_bind(h, o, op);
                 if (kr != KERN_SUCCESS)
                     return kr;
             } else if (op->op == TegraGM20BBindUnmap) {
@@ -655,8 +710,8 @@ static kern_return_t mock_call(mach_port_t c, uint32_t sel, const void *in, size
         struct listed *l = &lists[e->channel & 15];
         *l = (struct listed){.given = 1};
         for (uint32_t i = 0; i < e->count && !(e->flags & TegraGM20BExecSurfacesAll); i++) {
-            const uint64_t h = e->uses[i].handle;
-            const uint32_t surface = h < kMaxBo && bos[h].import ? bos[h].surface : 0;
+            const unsigned h = slot_of(e->uses[i].handle);
+            const uint32_t surface = bos[h].import ? bos[h].surface : 0;
             if (!surface)
                 continue; /* not a live import of a surface */
             if (e->uses[i].access & TegraGM20BSurfaceWrite)
@@ -744,6 +799,14 @@ static kern_return_t mock_call(mach_port_t c, uint32_t sel, const void *in, size
         memcpy(out, &t, sizeof(t));
         return KERN_SUCCESS;
     }
+    case TegraGM20BMethodPriority: {
+        const struct TegraGM20BAbiPriority *p = in;
+        if (insz != sizeof(*p) || p->priority > TegraGM20BMaxPriority || p->background_priority > TegraGM20BMaxPriority)
+            return kIOReturnBadArgument;
+        atomic_store(&priority_now[0], p->priority);
+        atomic_store(&priority_now[1], p->background_priority);
+        return KERN_SUCCESS;
+    }
     case TegraGM20BMethodGetStatus: {
         const struct TegraGM20BAbiChannel *ch = in;
         struct TegraGM20BAbiStatus s = {.completed = fence[(ch->channel & 15) * 4],
@@ -772,8 +835,8 @@ static kern_return_t mock_map(io_connect_t c, uint32_t type, task_port_t t, mach
         *size = 4096;
         return KERN_SUCCESS;
     }
-    if (type < kMaxBo)
-        comp_cpu_map(type, &bos[type]);
+    if (type < kMaxBo && comp_cpu_map(type, &bos[type]))
+        return kIOReturnBadArgument;
     void *at = (opt & kIOMapAnywhere) ? NULL : (void *)*addr;
     void *m = mmap(at, bytes, PROT_READ | PROT_WRITE, MAP_SHARED | (at ? MAP_FIXED : 0), fd, 0);
     if (m == MAP_FAILED)
@@ -816,7 +879,7 @@ void mock_iokit_kill_next_at(uint32_t error, uint64_t fault_va)
  * ChannelCreate, a WaitFence that fails with no kill) */
 void mock_iokit_fail_after(unsigned method, unsigned skip, unsigned count, int kr)
 {
-    if (method >= 16)
+    if (method >= 32)
         return;
     atomic_store(&fail_kr[method], kr);
     atomic_store(&fail_skip[method], skip);
@@ -830,7 +893,13 @@ void mock_iokit_fail_next(unsigned method, unsigned count, int kr)
 
 unsigned long mock_iokit_calls(unsigned method)
 {
-    return method < 16 ? calls[method] : 0;
+    return method < 32 ? calls[method] : 0;
+}
+
+void mock_iokit_priority(uint32_t out[2])
+{
+    out[0] = atomic_load(&priority_now[0]);
+    out[1] = atomic_load(&priority_now[1]);
 }
 
 /* The GPU's runs so far (MOCK_GPU_US), up to `most`: channel, seqno, kick, start and end (us), acquires */

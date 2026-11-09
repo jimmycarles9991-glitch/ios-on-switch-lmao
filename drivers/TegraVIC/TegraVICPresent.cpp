@@ -54,6 +54,30 @@ void presentRefused(const char *why)
     switch_refusal("TegraVIC", why, "decoded picture not placed by VIC, the decoder copies it on the CPU");
 }
 
+// A picture of 16-bit samples (P010 into 'x420'/'xf20') goes as an 8-bit one of twice the width: both layouts hold
+// the same bytes in the same places, and the 4:2:0 pass-through moves bytes untouched (kTegraVICTraits.blockLinearIn).
+const char *byteView(const TegraVICPicture *wide, const TegraVICSurfaceDesc *d, TegraVICPicture *p,
+                     TegraVICSurfaceDesc *bytes)
+{
+    *p = *wide;
+    *bytes = *d;
+    if (wide->sampleBytes == 1)
+        return nullptr;
+    if (wide->sampleBytes != 2)
+        return "picture sample size";
+    const uint32_t video = TEGRA_VIC_FOURCC('x', '4', '2', '0');
+    const uint32_t full = TEGRA_VIC_FOURCC('x', 'f', '2', '0');
+    if (d->fourcc != video && d->fourcc != full)
+        return "16-bit picture into a surface that is not 'x420' or 'xf20'";
+    bytes->fourcc = d->fourcc == video ? TEGRA_VIC_FOURCC('4', '2', '0', 'v') : TEGRA_VIC_FOURCC('4', '2', '0', 'f');
+    bytes->width = d->width * 2;
+    p->cropX = wide->cropX * 2;
+    p->width = wide->width * 2;
+    p->dstX = wide->dstX * 2;
+    p->sampleBytes = 1;
+    return nullptr;
+}
+
 // Where the picture lands: its size clipped to the destination, and the rows it covers in each plane.
 struct Placement {
     TegraVICImage whole;  // the surface at address 0, for its format, pitches and colour standard
@@ -195,7 +219,7 @@ extern "C" void tegra_vic_present_start(void)
         __atomic_store_n(&gPresentPages, dst, __ATOMIC_RELEASE);
 }
 
-extern "C" int tegra_vic_present(const TegraVICPicture *p, task_t task, const char **why)
+extern "C" int tegra_vic_present(const TegraVICPicture *picture, task_t task, const char **why)
 {
     *why = nullptr;
     if (!tegra_vic_present_ready()) {
@@ -205,17 +229,22 @@ extern "C" int tegra_vic_present(const TegraVICPicture *p, task_t task, const ch
     }
     [[maybe_unused]] const uint64_t t0 = switch_now_us();
     TegraVICSurface surface;
-    if (tegra_vic_surface_lookup(p->surfaceID, task, &surface)) {
+    if (tegra_vic_surface_lookup(picture->surfaceID, task, &surface)) {
         *why = "surface ID not found for this task";
         presentRefused(*why);
         return -22;
     }
     // Checked before the engine lock, at the windows' own addresses, so a refusal costs no engine time.
+    TegraVICPicture bytes;
+    TegraVICSurfaceDesc desc;
+    const TegraVICPicture *p = &bytes;
     Placement pl;
     TegraVICImage src;
     TegraVICImage dst;
     TegraVICOp op;
-    *why = place(p, &surface.desc, &pl);
+    *why = byteView(picture, &surface.desc, &bytes, &desc);
+    if (!*why)
+        *why = place(p, &desc, &pl);
     TegraVICJob *check = *why ? nullptr : IONew(TegraVICJob, 1);
     if (!*why && !check)
         *why = "no memory for the check";

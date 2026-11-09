@@ -5,6 +5,7 @@
 #include <atomic>
 #include <condition_variable>
 #include <mutex>
+#include <set>
 #include <string>
 #include <utility>
 #include <vector>
@@ -36,6 +37,7 @@ static inline id twinPublish(id object, __strong id &slot, id made)
 }
 @property (nonatomic, copy) NSString *label;
 - (id)rmTwin;  // made now if needed; nil if it cannot be
+- (Class)rmTwinClass;
 @end
 
 @interface RMDevice : NSObject  // the methods the device class gets (raw_metal_device_open); no state of its own
@@ -60,10 +62,14 @@ static inline id twinPublish(id object, __strong id &slot, id made)
 @end
 
 // ---- resources ----
+// A heap of the device (RawMetalHeap.mm): an arena its resources are placed in, or with none (a size or storage mode no arena
+// takes) every resource made as the device makes it, counted against its size
 @interface RMHeap : RMObject {
 @public
     MTLHeapDescriptor *_descriptor;
-    std::atomic<uint64_t> _used;
+    std::atomic<uint64_t> _used;  // what its resources made outside its arena hold
+    uint32_t _arena;              // its arena + 1; 0: none
+    std::atomic<int> _purgeable;  // the MTLPurgeableState asked last (0: never asked)
 }
 @end
 
@@ -74,6 +80,8 @@ static inline id twinPublish(id object, __strong id &slot, id made)
     std::atomic<bool> _gpuDirty;  // the GPU wrote it since the CPU last read it
     void (^_deallocator)(void *, NSUInteger);
     RMHeap *_heap;
+    uint64_t _heapBytes;  // what it counts against its heap outside the arena
+    bool _aliasable;
     MTLPurgeableState _purgeable;
 }
 @end
@@ -107,11 +115,18 @@ typedef NS_ENUM(uint8_t, RMTextureKind) {
     uint64_t _imageWrites;  // and its surface's writes the seed does not show (surfaceWrites)
     bool _imageCurrent;
     RMTexture *_parent;  // a view's
-    RMBuffer *_buffer;   // a texture over a buffer's
+    // a view of part of its parent (newTextureViewWithPixelFormat:textureType:levels:slices:): those of the parent, which its
+    // twin views too; the view's type is its descriptor's
+    NSRange _viewLevels, _viewSlices;
+    bool _viewPart;
+    RMBuffer *_buffer;  // a texture over a buffer's
     NSUInteger _offset, _rowBytes;
     std::atomic<bool> _gpuDirty;
     MTLPurgeableState _purgeable;
     uint8_t _pred;  // why the raw path does not keep it (RMPred; 0: it does)
+    RMHeap *_heap;
+    uint64_t _heapBytes;  // as RMBuffer's
+    bool _aliasable;
 }
 @end
 
@@ -182,6 +197,17 @@ enum Op : uint8_t {
     OpDrawIndexed,
     OpVisibility,
     OpFillBuffer,
+    // a compute encoder's (RawMetalCompute.mm)
+    OpKernelState,
+    OpKernelBytes,
+    OpKernelBuffer,
+    OpKernelBufferOffset,
+    OpKernelTexture,
+    OpKernelSampler,
+    OpKernelMemory,
+    OpKernelUse,
+    OpKernelBarrier,
+    OpDispatch,
 };
 
 // one record: `stage` 1 vertex, 2 fragment; `obj` unretained (the command buffer keeps it); `x` into the extras
@@ -206,6 +232,7 @@ inline Cmd cmd(Op op, uint8_t stage = 0, uint16_t index = 0)
 @interface RMQueue : RMObject {
 @public
     dispatch_queue_t _completionQueue;
+    uint32_t _gpuPriority, _backgroundGpuPriority;  // what it asked for (RawMetalQueuePriority.mm)
     raw::ResidencySets _residency;
 }
 @end
@@ -276,6 +303,8 @@ struct RMSegment {
     NSError *_error;
     RMQueue *_queue;
     bool _committed, _scheduledDone, _completedDone, _m2v;
+    // its event signals are in m2v work (replayed whole, or in its last segment): finish() makes none
+    bool _signalsOnM2v;
     bool
         _partial;  // the kernel refused its raw submission after part of it ran (raw::CommandBuffer::partial): never replayed
     // scheduled() and finish() ran (their handlers taken): a handler added after goes at once, and scheduled() runs once (a
@@ -284,7 +313,8 @@ struct RMSegment {
     std::mutex _lock;
     std::condition_variable _changed;
     uint32_t _seqno;
-    double _gpuStart, _gpuEnd;
+    uint32_t _stamp;  // its raw submission's GPU time stamps (raw::CommandBuffer::stamp), 0 for any other
+    double _kernelStart, _kernelEnd, _gpuStart, _gpuEnd;
     __weak id _active;        // the encoder being recorded (weak: it holds the command buffer, its caller holds it)
     uint64_t _preds;          // every refusal predicate it hit (1 << RMPred)
     uint64_t _predA, _predB;  // the first one's values
@@ -319,8 +349,13 @@ static inline void hit(RMCommandBuffer *cb, RMPred p, uint64_t a = 0, uint64_t b
 @public
     RMCommandBuffer *_cb;
     bool _ended;
+    uint64_t _traceId;
 }
 @end
+
+// The next of the device's trace object IDs, which its command buffers and encoders take at their first globalTraceObjectID
+// (RawMetalEncoder.mm)
+uint64_t nextTraceId();
 
 // A render encoder keeps what its draws need to decide, as they are recorded, whether the raw path draws them exactly as m2v
 // would: the state, each bound buffer's address, the textures, the pass's formats. A draw it would not is the command buffer's
@@ -335,6 +370,7 @@ static inline void hit(RMCommandBuffer *cb, RMPred p, uint64_t a = 0, uint64_t b
     uint32_t _formats[8];  // the pass's color attachments' formats as the raw path holds them (0: none)
     uint32_t _count;       // its attachment count (the last attachment's index + 1)
     uint32_t _zeta;        // its depth/stencil attachment's format as the raw path holds it (0: none)
+    uint32_t _samples;     // its color attachments' samples a pixel
     uint32_t _passAt;      // its pass's RMPass (the command buffer's _passes)
     raw::DepthStencilDesc _ds;
     MTLRenderPassDescriptor *_pass;  // the command buffer's copy, which the raw encode and m2v's replay read
@@ -342,8 +378,21 @@ static inline void hit(RMCommandBuffer *cb, RMPred p, uint64_t a = 0, uint64_t b
 @end
 @interface RMBlitEncoder : RMEncoder
 @end
-@interface RMComputeEncoder : RMEncoder
+@interface RMComputeEncoder : RMEncoder {
+@public
+    MTLDispatchType _type;
+}
 @end
+
+// RawMetalCompute.mm: a compute state over m2v's (`twin`), with what the raw pack keys its kernels by
+id rmComputeState(id device, id twin, id<MTLFunction> function, MTLComputePipelineDescriptor *descriptor);
+// m2v's replay and the raw encode of a compute encoder's commands (the Op*Kernel* ones and OpDispatch): false from the raw
+// encode where it refuses one (*why)
+bool isKernelCommand(Op op);
+// OpBytes and OpKernelBytes (`m`): the bytes into the command buffer's RMBytes, m.a/b/c set (RawMetalBindings.mm)
+void recordBytes(RMCommandBuffer *cb, Cmd m, const void *bytes, NSUInteger length);
+void replayKernel(id encoder, RMCommandBuffer *cb, const Cmd &c, std::set<RMBuffer *> &buffers);
+bool encodeKernel(raw::ComputeEncoder &e, raw::CommandBuffer &rc, RMCommandBuffer *cb, const Cmd &c, const char **why);
 
 static inline void setBinding(RMCommandBuffer *cb, Op op, int stage, NSUInteger index, id object, uint64_t c)
 {
@@ -360,6 +409,9 @@ static inline void setBinding(RMCommandBuffer *cb, Op op, int stage, NSUInteger 
 - (void)updateFence:(id<MTLFence>)fence;
 - (void)waitForFence:(id<MTLFence>)fence;
 @end
+
+// `s` with a bind's LOD clamps (RawMetalBindings.mm)
+id<MTLSamplerState> clampedSampler(id<MTLSamplerState> s, float lodMin, float lodMax);
 
 @interface RMRenderEncoder (Bindings)
 - (void)texture:(int)stage object:(id<MTLTexture>)t index:(NSUInteger)index;

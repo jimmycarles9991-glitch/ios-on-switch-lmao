@@ -53,13 +53,34 @@ static inline uintptr_t switch_dcache_line_of(uintptr_t address)
     return address & ~(uintptr_t)(SWITCH_DCACHE_LINE - 1);
 }
 
+// One DC per line over [from, to), both line-aligned, eight to a turn. DC takes no offset, so a line still costs a DC
+// and an add; the unrolling takes the loop's compare and branch down from one per line to one per eight.
+#define SWITCH_DCACHE_RUN(op, from, to)                                         \
+    do {                                                                        \
+        const uintptr_t run_line_ = SWITCH_DCACHE_LINE;                         \
+        uintptr_t run_at_ = (from);                                             \
+        const uintptr_t run_end_ = (to);                                        \
+        for (; run_end_ - run_at_ >= 8 * run_line_; run_at_ += 8 * run_line_) { \
+            SWITCH_DCACHE_OP(op, run_at_);                                      \
+            SWITCH_DCACHE_OP(op, run_at_ + run_line_);                          \
+            SWITCH_DCACHE_OP(op, run_at_ + 2 * run_line_);                      \
+            SWITCH_DCACHE_OP(op, run_at_ + 3 * run_line_);                      \
+            SWITCH_DCACHE_OP(op, run_at_ + 4 * run_line_);                      \
+            SWITCH_DCACHE_OP(op, run_at_ + 5 * run_line_);                      \
+            SWITCH_DCACHE_OP(op, run_at_ + 6 * run_line_);                      \
+            SWITCH_DCACHE_OP(op, run_at_ + 7 * run_line_);                      \
+        }                                                                       \
+        for (; run_at_ < run_end_; run_at_ += run_line_)                        \
+            SWITCH_DCACHE_OP(op, run_at_);                                      \
+    } while (0)
+
 static inline void switch_dcache_clean_lines(const volatile void *va, size_t length)
 {
     if (!length)
         return;
     const uintptr_t end = (uintptr_t)va + length;
-    for (uintptr_t at = switch_dcache_line_of((uintptr_t)va); at < end; at += SWITCH_DCACHE_LINE)
-        SWITCH_DCACHE_OP("cvac", at);
+    SWITCH_DCACHE_RUN("cvac", switch_dcache_line_of((uintptr_t)va),
+                      switch_dcache_line_of(end - 1) + SWITCH_DCACHE_LINE);
 }
 
 static inline void switch_dcache_clean_invalidate_lines(const volatile void *va, size_t length)
@@ -67,8 +88,8 @@ static inline void switch_dcache_clean_invalidate_lines(const volatile void *va,
     if (!length)
         return;
     const uintptr_t end = (uintptr_t)va + length;
-    for (uintptr_t at = switch_dcache_line_of((uintptr_t)va); at < end; at += SWITCH_DCACHE_LINE)
-        SWITCH_DCACHE_OP("civac", at);
+    SWITCH_DCACHE_RUN("civac", switch_dcache_line_of((uintptr_t)va),
+                      switch_dcache_line_of(end - 1) + SWITCH_DCACHE_LINE);
 }
 
 static inline void switch_dcache_invalidate_lines(const volatile void *va, size_t length)
@@ -86,8 +107,8 @@ static inline void switch_dcache_invalidate_lines(const volatile void *va, size_
         end = switch_dcache_line_of(end);
         SWITCH_DCACHE_OP("civac", end);
     }
-    for (; at < end; at += SWITCH_DCACHE_LINE)
-        SWITCH_DCACHE_OP("ivac", at);
+    if (at < end)
+        SWITCH_DCACHE_RUN("ivac", at, end);
 }
 
 static inline void switch_dcache_lines(switch_dcache_op op, const volatile void *va, size_t length)

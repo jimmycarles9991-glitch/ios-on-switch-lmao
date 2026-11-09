@@ -133,6 +133,17 @@ def _make(tmp: Path, base: Path) -> None:
     (tmp / 'SOURCE').write_text(f'{URL} {COMMIT}\n' + ''.join(f'{p.name} {cache.file_digest(p)}\n' for p in patches()))
 
 
+def ever_built() -> bool:
+    """Return whether this Mac has built tegra_qemu at all, for any key."""
+    return (cache.ROOT / 'tegra-qemu' / 'entries').is_dir()
+
+
+def built() -> Path | None:
+    """Return the patched tegra_qemu binary if this Mac has a build of this key; never build it."""
+    done = cache.existing('tegra-qemu', key())
+    return done / BINARY if done else None
+
+
 def ensure() -> Path:
     """Return the patched tegra_qemu binary, built first if this Mac has no build of this key."""
     return cache.entry('tegra-qemu', key(), _make) / BINARY

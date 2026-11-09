@@ -74,6 +74,7 @@
 // four frames and blocks this loop, so at most one is ever out; a fade or a slider drag is played as a sequence of
 // commands, at most one every three frames (50 ms), each toward the latest request: requests that arrive meanwhile only
 // replace the target. The panel's own dimming (DCS 0x53 bit 3) smooths the steps between them.
+#include <IOKit/IODeviceTreeSupport.h>
 #include <IOKit/IOLib.h>
 #include <IOKit/IOLocks.h>
 #include <IOKit/IOService.h>
@@ -91,6 +92,7 @@
 #include "SwitchBrightness.h"
 #include "../SwitchSuspend/SwitchWake.h"
 #include "../TegraGM20B/TegraGM20BSleep.h"
+#include "../../kits/SwitchDT/SwitchDTProperty.h"
 
 // The original AppleARMBacklight::gMetaClass (original-bindings.S), declared with a concrete type so that its address is
 // a constant initializer. Nothing here constructs or calls it.
@@ -250,6 +252,7 @@ class SwitchBacklight : public IOService {
     void powerOn();
     bool send(unsigned raw);
     void publishParameters();
+    void publishWhitePointType();
     static void quietFired(OSObject *owner, IOTimerEventSource *sender);
 
 public:
@@ -573,6 +576,18 @@ void SwitchBacklight::expectWake(unsigned source)
     }
 }
 
+// The IPSW's iPad's /backlight default-whitepoint-type, which adt_edit.py carries in /chosen: CoreBrightness takes its
+// white point reference from it (DisplayCreateWithCapabilitiesAndID and -[CBColorModuleShared setWhitePointType] read
+// the backlight service and its parents), and without it falls back to its legacy 7059 K white.
+void SwitchBacklight::publishWhitePointType()
+{
+    const IORegistryEntry *chosen = IORegistryEntry::fromPath("/chosen", gIODTPlane);
+    uint32_t type = 0;
+    if (chosen && switch_dt_value(chosen, "switch-whitepoint-type", &type))
+        setProperty("default-whitepoint-type", &type, sizeof(type));
+    OSSafeReleaseNULL(chosen);
+}
+
 bool SwitchBacklight::start(IOService *provider)
 {
     if (!IOService::start(provider))
@@ -601,6 +616,7 @@ bool SwitchBacklight::start(IOService *provider)
     // render server waits on it. No backlight-control instead: neither sees a backlight, and the render server makes no
     // libEDR client.
     publishParameters();
+    publishWhitePointType();
     // CoreBrightness reads ignore-IOMFB (CFData, nonzero) from the backlight and its parents and then clears its use-IOMFB
     // flag (display module init, 0x1b62b55fc): the framebuffer here is a stand-in, so it should not get
     // IOMFBBrightnessLevel writes.

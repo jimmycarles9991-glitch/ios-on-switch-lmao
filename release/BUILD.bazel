@@ -112,6 +112,6 @@ ipsw_free_tests(
         "//boot:loader",
         "//boot:loader_constants",
     ],
-    member = "//ipsw:app_cryptex_trust_cache",
+    member = "@ipsw//:app_cryptex_trust_cache",
     window = "//boot:kernel_window",
 )

@@ -5,6 +5,7 @@
 #pragma once
 #include <cmath>
 #include <cstdint>
+#include <initializer_list>
 
 namespace raw {
 
@@ -13,6 +14,7 @@ struct SamplerDesc {                                      // the MTLSamplerDescr
     uint8_t sAddress = 0, tAddress = 0, rAddress = 0;     // MTLSamplerAddressMode (a border axis: transparent black)
     uint8_t maxAnisotropy = 1;                            // Metal's degree (metalAnisotropy), 1 to 32
     float lodMin = 0, lodMax = 3.402823466e+38f;
+    bool pixel = false;  // normalizedCoordinates NO
 };
 
 // The MTLSamplerDescriptor's properties, as Metal answers them
@@ -25,9 +27,23 @@ struct MetalSamplerFields {
 };
 
 enum : uint64_t {
+    kAddressClampToEdge = 0,
+    kAddressMirrorClampToEdge = 1,
+    kAddressRepeat = 2,
+    kAddressMirrorRepeat = 3,
     kAddressClampToZero = 4,
     kAddressClampToBorderColor = 5,
 };
+
+// TSC word 1's FLOAT_COORD_NORMALIZATION FORCE_UNNORMALIZED_COORDS (clb097tex.h TEXSAMP1 bit 25), which NVK sets for an
+// unnormalizedCoordinates sampler: the texture unit reads texel coordinates whatever the texture header's NORMALIZED_COORDS
+// says, so a texture keeps one header for both kinds of sampler
+constexpr uint32_t kTscForceUnnormalized = 1u << 25;
+
+inline uint32_t samplerCoordinateBits(const SamplerDesc &s)
+{
+    return s.pixel ? kTscForceUnnormalized : 0;
+}
 
 // Metal's degree for a maxAnisotropy (metal_anisotropy): the low five bits of the value taken through a 32-bit float, 0 as 1,
 // 1 to 16 rounded up to a power of two, 17 to 31 as 32
@@ -45,13 +61,19 @@ inline uint8_t metalAnisotropy(uint64_t value)
     return uint8_t(p);
 }
 
-// False where m2v's sampler is one the header does not express: pixel coordinates (m2v's function reads them through the
-// sampler's word), a comparison, NaN clamps (m2v refuses where they are used), or a border axis whose border is not transparent
-// black (Metal's ClampToZero reads the descriptor's border colour too, and an opaque border depends on the view's swizzle).
+// False where m2v's sampler is one the header does not express: a comparison, NaN clamps (m2v refuses where they are used), a
+// border axis whose border is not transparent black (Metal's ClampToZero reads the descriptor's border colour too, and an
+// opaque border depends on the view's swizzle), or pixel coordinates mirrored once on s or t (which Metal mirrors by texel
+// index; the texture unit's unnormalized addressing takes only clamps, as Vulkan's unnormalized samplers do).
+// Pixel coordinates are the texture unit's (samplerCoordinateBits): the sampler Metal samples them with is plain Metal's
+// (metal2vulkan-runtime sampler.rs taken_descriptor): its wrapping axes clamped to the edge, level 0 alone, no anisotropy.
 // lodAverage changes nothing m2v hands NVK.
 inline bool takeSampler(const MetalSamplerFields &m, SamplerDesc &s)
 {
-    if (!m.normalizedCoordinates || m.compareFunction != 0 || std::isnan(m.lodMin) || std::isnan(m.lodMax))
+    if (m.compareFunction != 0 || std::isnan(m.lodMin) || std::isnan(m.lodMax))
+        return false;
+    if (!m.normalizedCoordinates &&
+        (m.sAddress == kAddressMirrorClampToEdge || m.tAddress == kAddressMirrorClampToEdge))
         return false;
     const bool border =
         m.sAddress >= kAddressClampToZero || m.tAddress >= kAddressClampToZero || m.rAddress >= kAddressClampToZero;
@@ -70,6 +92,15 @@ inline bool takeSampler(const MetalSamplerFields &m, SamplerDesc &s)
     s.maxAnisotropy = metalAnisotropy(m.maxAnisotropy);
     s.lodMax = m.lodMax;
     s.lodMin = m.lodMin > m.lodMax ? m.lodMax : m.lodMin;
+    s.pixel = !m.normalizedCoordinates;
+    if (s.pixel) {
+        for (uint8_t *axis : {&s.sAddress, &s.tAddress, &s.rAddress})
+            if (*axis == kAddressRepeat || *axis == kAddressMirrorRepeat ||
+                (axis == &s.rAddress && *axis == kAddressMirrorClampToEdge))
+                *axis = kAddressClampToEdge;
+        s.mipFilter = 0;
+        s.maxAnisotropy = 1;
+    }
     return true;
 }
 

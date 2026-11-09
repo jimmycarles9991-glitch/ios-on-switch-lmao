@@ -5,6 +5,7 @@
 """
 
 from tools.devicerun.hwtest import HWTEST
+from tools.devicerun.lockscreen import LOCKSCREEN
 from tools.devicerun.morning import MORNING
 from tools.devicerun.rules import REPORT, TIMELINE, Check
 from tools.devicerun.stutter import STUTTER
@@ -47,6 +48,24 @@ GROUPS: dict[str, list[Check]] = {
             note='per label; pass --start/--end around 10 idle minutes',
         ),
         Check('launchd.throttled', 'r32-cpuhog', 'throttled by', REPORT, process=LAUNCHD, show=('job',)),
+        Check(
+            'launchd.cameracaptured-jetsam',
+            'r119-rawgaps',
+            'JETSAM_REASON_MEMORY_PERPROCESSLIMIT',
+            process=LAUNCHD,
+            subsystem='com.apple.cameracaptured',
+            note='boot 15: killed and started again every ~20 s',
+        ),
+    ],
+    'camera': [
+        Check(
+            'camera.gpu-work',
+            'r119-rawgaps',
+            'TegraGM20BMetal: cameracaptured',
+            process='cameracaptured',
+            subsystem=GPU_METAL_SUBSYSTEM,
+            note='no camera, so no effect shaders to compile (boot 15: 160 pipelines a launch)',
+        ),
     ],
     'mobilegestalt': [
         Check(
@@ -467,6 +486,26 @@ GROUPS: dict[str, list[Check]] = {
             process='thermalmonitord',
             note='open; was x268/10 min',
         ),
+        Check(
+            'power.thermal-pressure',
+            'r116-sched',
+            'Thermal pressure level',
+            REPORT,
+            process='thermalmonitord',
+            regex=r'Thermal pressure level (?P<pressure>\d+) thermal level (?P<level>\d+)',
+            show=('pressure', 'level'),
+            note='boot 15: 10 at 10 min, 20 (level 4) at 14 min, from a 51.82 C tcal offset; nominal at idle',
+        ),
+        Check(
+            'power.display-tsfd',
+            'r116-sched',
+            'SwitchDisplay: display temperature',
+            'max(c) < 60',
+            process=KERNEL,
+            regex=r'display temperature (?P<c>-?[\d.]+) C from thermalmonitord',
+            source='drivers/NativeMobileDisplay/NativeLegacyDisplay.cpp',
+            note='thermalmonitord CGCenterSkin (TSFD); boot 15 read 83.68 C with the PCB at 33 C',
+        ),
         Check('power.sfi', 'r33-platform', 'system_set_sfi_window', REPORT, process='dasd'),
         Check('power.nvram-sync', 'r33-platform', 'serializeVariables failed', REPORT, process=KERNEL),
     ],
@@ -521,6 +560,7 @@ GROUPS: dict[str, list[Check]] = {
     ],
     'gpu-morning': MORNING,
     'hwtest': HWTEST,
+    'lockscreen': LOCKSCREEN,
     'stutter': STUTTER,
 }
 

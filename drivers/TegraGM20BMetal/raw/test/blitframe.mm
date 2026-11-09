@@ -233,6 +233,85 @@ int main(int argc, char **argv)
             [cb waitUntilCompleted];
             failed += check("buffer-to-buffer copy (300 KB)", (const uint8_t *)z.contents, want.data(), want.size());
         }
+        {
+            // HW Test's gpu.texture.kinds 3D case: in one encoder four planes uploaded, plane 2 copied into a 2D texture, each
+            // plane and the 2D texture read back, each copy reading what one before it wrote
+            const unsigned side = 32, depth = 4, image = side * side * 4;
+            MTLTextureDescriptor *d = [MTLTextureDescriptor new];
+            d.textureType = MTLTextureType3D;
+            d.pixelFormat = MTLPixelFormatRGBA8Unorm;
+            d.width = side;
+            d.height = side;
+            d.depth = depth;
+            d.storageMode = MTLStorageModePrivate;
+            d.usage = MTLTextureUsageShaderRead;
+            id<MTLTexture> volume = [dev newTextureWithDescriptor:d],
+                           flat = texture(MTLPixelFormatRGBA8Unorm, side, side);
+            id<MTLBuffer> staging = [dev newBufferWithLength:image * depth options:MTLResourceStorageModeShared];
+            id<MTLBuffer> out = [dev newBufferWithLength:image * (depth + 1) options:MTLResourceStorageModeShared];
+            for (unsigned i = 0; i < image * depth; i++)
+                ((uint8_t *)staging.contents)[i] = pattern(i + 3);
+            memset(out.contents, 0xee, image * (depth + 1));
+            std::vector<uint8_t> want(image * (depth + 1));
+            memcpy(want.data(), staging.contents, image * depth);
+            memcpy(&want[image * depth], (uint8_t *)staging.contents + 2 * image, image);
+            const MTLSize plane = MTLSizeMake(side, side, 1);
+            id<MTLCommandBuffer> cb = [q commandBuffer];
+            id<MTLBlitCommandEncoder> b = [cb blitCommandEncoder];
+            [b copyFromBuffer:staging
+                       sourceOffset:0
+                  sourceBytesPerRow:side * 4
+                sourceBytesPerImage:image
+                         sourceSize:MTLSizeMake(side, side, depth)
+                          toTexture:volume
+                   destinationSlice:0
+                   destinationLevel:0
+                  destinationOrigin:MTLOriginMake(0, 0, 0)];
+            [b copyFromTexture:volume
+                      sourceSlice:0
+                      sourceLevel:0
+                     sourceOrigin:MTLOriginMake(0, 0, 2)
+                       sourceSize:plane
+                        toTexture:flat
+                 destinationSlice:0
+                 destinationLevel:0
+                destinationOrigin:MTLOriginMake(0, 0, 0)];
+            for (unsigned z = 0; z <= depth; z++)
+                [b copyFromTexture:z < depth ? volume : flat
+                                 sourceSlice:0
+                                 sourceLevel:0
+                                sourceOrigin:MTLOriginMake(0, 0, z < depth ? z : 0)
+                                  sourceSize:plane
+                                    toBuffer:out
+                           destinationOffset:z * image
+                      destinationBytesPerRow:side * 4
+                    destinationBytesPerImage:image];
+            [b endEncoding];
+            [cb commit];
+            [cb waitUntilCompleted];
+            failed += check("3D texture: planes uploaded, plane 2 copied to 2D, all read back, in one encoder",
+                            (const uint8_t *)out.contents, want.data(), want.size());
+        }
+        {
+            // a fill, then copies each reading the one before's destination, in one encoder
+            const unsigned n = 4096;
+            id<MTLBuffer> a = [dev newBufferWithLength:n options:MTLResourceStorageModeShared],
+                          z = [dev newBufferWithLength:n options:MTLResourceStorageModeShared],
+                          y = [dev newBufferWithLength:n options:MTLResourceStorageModeShared];
+            for (id<MTLBuffer> x : @[ a, z, y ])
+                memset(x.contents, 0, n);
+            id<MTLCommandBuffer> cb = [q commandBuffer];
+            id<MTLBlitCommandEncoder> b = [cb blitCommandEncoder];
+            [b fillBuffer:a range:NSMakeRange(0, n) value:0x5a];
+            [b copyFromBuffer:a sourceOffset:0 toBuffer:z destinationOffset:0 size:n];
+            [b copyFromBuffer:z sourceOffset:0 toBuffer:y destinationOffset:0 size:n];
+            [b endEncoding];
+            [cb commit];
+            [cb waitUntilCompleted];
+            const std::vector<uint8_t> want(n, 0x5a);
+            failed += check("a fill and two chained buffer copies in one encoder", (const uint8_t *)y.contents,
+                            want.data(), n);
+        }
         printf("%s: %d case(s) failed\n", strcmp(argv[1], "-") ? "raw facade" : "m2v", failed);
         return failed ? 1 : 0;
     }

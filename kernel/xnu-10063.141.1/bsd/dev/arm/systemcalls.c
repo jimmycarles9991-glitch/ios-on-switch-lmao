@@ -181,11 +181,9 @@ unix_syscall(
 	AUDIT_SYSCALL_ENTER(code, proc, uthread);
 	error = (*(callp->sy_call))(proc, &uthread->uu_arg[0], &(uthread->uu_rval[0]));
 	AUDIT_SYSCALL_EXIT(code, proc, uthread, error);
-#if DEVELOPMENT || DEBUG
 	if (is_saved_state64(state))
 		switch_diag_user_syscall(code, error, pid, get_saved_state_pc(state),
 		    get_saved_state_cpsr(state), uthread->uu_rval[0]);
-#endif
 
 #if CONFIG_MACF
 skip_syscall:

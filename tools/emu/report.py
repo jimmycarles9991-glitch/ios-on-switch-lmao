@@ -64,6 +64,15 @@ def program_counters(registers: str) -> list[str]:
     return re.findall(r'PC=([0-9a-f]+)', registers)[:4]
 
 
+def display_notes(run: Path) -> str:
+    """Count the display controller's QEMU log lines: reads that faulted or left DRAM, and what it does not model."""
+    log = run / 'qemu-guest.log'
+    if not log.exists():
+        return 'no QEMU log'
+    notes = [line for line in log.read_text(errors='replace').splitlines() if line.startswith('tegra.dc:')]
+    return f'{len(notes)} lines' + (f', first: {notes[0]}' if notes else '')
+
+
 def summarize(run: Path, polled: Sequence[str] = ()) -> str:
     """Write and return the run's summary.
 
@@ -87,6 +96,7 @@ def summarize(run: Path, polled: Sequence[str] = ()) -> str:
         f'core PCs: {" ".join(program_counters((run / "registers.txt").read_text()))}',
         f'panic: {panic or "none"}',
         f'gpu: {gpulog.summarize(run)}',
+        f'display: {display_notes(run)}',
         'last kernel lines:',
         *log[-12:],
     ]

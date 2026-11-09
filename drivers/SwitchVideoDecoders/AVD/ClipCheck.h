@@ -20,7 +20,7 @@ typedef enum {
     ClipCheckHEVC,          // test/HEVCClip.h's Main clips A (x265: B-pyramid, RASL, explicit RPS, 2 slices, scaling
                             // lists) and V (Apple's encoder, conformance window) on a hardware 'hvc1' decoder, against
                             // FFmpeg's output
-    ClipCheckHEVC10,        // clip T (Main 10) the same way, against FFmpeg's samples >> 2 (NVDEC's 8-bit output)
+    ClipCheckHEVC10,        // clip T (Main 10) the same way as 'x420', its high bytes against FFmpeg's samples >> 2
     ClipCheckHEVCSoftware,  // clips A and V with hardware disabled: on a Mac, Apple's decoder proves clips and CRCs
 } ClipCheckMode;
 

@@ -56,8 +56,13 @@ L4T `CTCaer/switch-l4t-kernel-4.9` 2d0059f (`drivers/thermal/tegra/`); device lo
   published recovers within 4 passes (20 s), inside watchdogd's 60 s; SwitchSensors starts right after SwitchBattery in
   the board thread to make that rare.
 - **[V]** PMU tcal (TP0Z): `calibrationResistorSensor` = TP0Z's index; offset = `calibrationResistorTempDefault`
-  (CommonProduct +0x24; J120AP never sets it: **0**) minus the filtered tcal (time constant 6000 samples), added to
-  every `TP?d`/`TP?[A-Z]` sensor (`fourCharCodeNeedsPMUtcal:`). A tcal of 0.00 C leaves them unchanged.
+  (CommonProduct +0x24, **5182 = 51.82 C** in both 21H461 and 24B119, set in `initProduct`) minus the filtered tcal,
+  added to every `TP?d`/`TP?[A-Z]` sensor (`fourCharCodeNeedsPMUtcal:`). With no `requiredCalibrationResistorSamples`
+  (J120AP) the filter is seeded with the default and then follows TP0Z (time constant 6000 samples); J181AP averages the
+  first 5 readings. So TP0Z answers exactly 51.82 C, the "no correction" reference. Until r116 it answered 0.00 C:
+  J181 added 51.82 C to every board thermistor from its first pass (TSFD 83.68 C at boot 15's start, TSBH past
+  SoCLowHS's 43 C within 10 minutes, then backlight and charge caps and thermal pressure moderate), and J120's offset
+  crept toward the same over hours (`test/switch_thermal_tcal_test.cpp`).
 - **[V]** J120AP's model (`tm2c22...updateAllThermalLoad:`, constants read from the binary's `__TEXT,__const`), in
   centi-degrees: **SoCSkin TSBH = 68.76 + 0.57 TG0B + 0.42 TP8d**; Ambient TS0A = 155.88 + 1.14 TP2d - 0.29 TP8d;
   CGCenterSkin TSFD = TG0B. Hotspots (plist): `DieTempHS` target 85 C on `dieTempMaxAverage` (the highest of the
@@ -128,7 +133,7 @@ readout**, so they back no sensor (making one up from an alarm bit would invent 
 | 0 | TG0B | gas gauge battery | SoCSkin 0.57, CGCenterSkin | MAX17050 TEMP | the same thing: the battery cell, by its gauge |
 | 1-8 | TP1d..TP8d | PMU tdev1..8 | TP8d SoCSkin 0.42 (filter 45), TP2d Ambient; others info | TMP451 local (PCB) | board NTCs; the PCB channel is the Switch's one board-level point away from the cells |
 | 9-10 | TR1d, TR2d | PMU2 tdev1..2 | info | TMP451 local (PCB) | as above |
-| 11 | TP0Z | PMU tcal | tcal offset | none: 0.00 C | the PMU ADC's calibration channel; the Switch's sensors are digital and need no correction, and 0 is exactly "no correction" for J120AP's default 0 |
+| 11 | TP0Z | PMU tcal | tcal offset | the reference: 51.82 C | the PMU ADC's calibration channel; the Switch's sensors are digital and need no correction, and thermalmonitord's own default is exactly "no correction" |
 | 12 | TP0j | PMU tjunc | info | TMP451 local (PCB) | the PMIC die has no readout; the PCB beside it is the nearest measured point |
 | 13 | TQ0B | Charger tbat | info | MAX17050 TEMP | the battery cell (the BQ24193 only compares the pack NTC against its windows) |
 | 14-16 | Th0i/a/x | PMGR SOC Die Temp Sensor0 | die avg/max, lifetime servo | SOC_THERM gpu | on-die, outside the CPU cores; GPU block |
@@ -272,6 +277,11 @@ publishes that model's services when the kernel is built for 24B119 (`SwitchSens
   `keys - shadows` services: **34**, one per distinct matchName. Shadows take their key's reading.
 - **[V]** The read path is 21H461's: `SensorDispatcherHelper getTemperatureFromSMCForKey:` first (-1 with no
   AppleSMCSensorDispatcher key, so on to HID), then `IOHIDServiceClientCopyEvent(service, 15)` and field `0xf0000`.
+- **[V]** J181AP's model (24B119 `-[tmf02fbce43bb83f6eb51bd31374aa8279 updateAllThermalLoad:]`, the class for
+  model hash 0xdc50f0), in centi-degrees: **BCH7Skin TSBH = 0.88 TG0B + 0.13 TP3d - 22**; CGCenterSkin TSFD = 67 +
+  1.06 TP5d - 0.08 TP2d (pushed to the display driver). SoCHighHS (49 C) and SoCLowHS (43 C) act on TSBH, DieTempHS
+  (85 C) on `dieTempMaxAverage`; their decision tables cap the backlight, the charge rate (`ChargeLimitTable`), package
+  power and the thermal level.
 - **[V]** The J120AP table under J181 matched only `PMU tcal` and the PMGR die sensors 0-2: thermalmonitord would have
   reported the rest missing and NativeSwitchWatchdog turned the watchdog off for the boot.
 - **Open [V by strings]**: J181's plist asks for CPMS package control (`packageComponentControl.expectsCPMSSupport`,

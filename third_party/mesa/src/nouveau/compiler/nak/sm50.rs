@@ -758,7 +758,12 @@ impl SM50Op for OpHAdd2 {
         e.set_bit(39, self.ftz);
         e.set_bit(43, a.src_mod.has_fneg());
         e.set_bit(44, a.src_mod.has_fabs());
-        e.set_field(47..49, sm53_half_swizzle(a));
+        if self.a_f32 {
+            assert!(a.src_swizzle.is_none());
+            e.set_field(47..49, 1_u8); // F32
+        } else {
+            e.set_field(47..49, sm53_half_swizzle(a));
+        }
         e.set_field(49..51, u8::from(self.f32)); // OFMT: F16 0, F32 1
     }
 }
@@ -3672,6 +3677,7 @@ mod sm53_half_tests {
                         saturate: sat,
                         ftz,
                         f32,
+                        a_f32: false,
                     });
                     assert_eq!(decode_name(w), "Hadd2R");
                     assert_eq!(bits(w, 0, 8), 3); // Dest
@@ -3790,6 +3796,27 @@ mod sm53_half_tests {
                     }
                 }
             }
+        }
+    }
+
+    #[test]
+    fn f32_source_is_the_f32_swizzle() {
+        for f32 in [false, true] {
+            let w = encode(OpHAdd2 {
+                dst: reg(6).into(),
+                srcs: [
+                    src(40, SrcMod::None, SrcSwizzle::None),
+                    Src::ZERO.fneg(),
+                ],
+                saturate: false,
+                ftz: false,
+                f32,
+                a_f32: true,
+            });
+            assert_eq!(decode_name(w), "Hadd2R");
+            assert_eq!(bits(w, 8, 8), 40);
+            assert_eq!(bits(w, 47, 2), 1); // ASwizzle F32
+            assert_eq!(bits(w, 49, 2), u64::from(f32));
         }
     }
 }

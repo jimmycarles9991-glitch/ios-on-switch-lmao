@@ -271,26 +271,32 @@ NAMES = {
     0xFFFFFFF00A68F344: '_csblob_get_der_entitlements',
     0xFFFFFFF00A68F4EC: '_csblob_register_profile',
     # One function of ours each under two names, so the GOT count cannot place them. kalloc.c's frees in lifs's GOT
-    # order between kernel_thread_start and lck_grp_alloc_init: the data pair (tail calls into kfree_ext), then the
-    # typed pair (the zone view check, then kfree_ext); the _external twins bound by the name our KPI exports. memcpy before memmove in IOGPUFamily's GOT: the 56-byte
-    # front and the 432-byte body. IOLib.cpp's IOLockSleep and IOLockSleepDeadline, each only a branch to
-    # lck_mtx_sleep / lck_mtx_sleep_deadline.
+    # order between kernel_thread_start and lck_grp_alloc_init, four signatures: kfree_data (KHEAP_DATA, ptr and size
+    # into kfree_ext), kfree_data_addr (KHEAP_DATA and ptr into kfree_addr_ext), kfree_type_impl (the zone view check,
+    # then kfree_ext) and kfree_type_var_impl (the view with bit 0 set into kfree_ext). Our kfree_type_impl handed a
+    # var view reads its version and sizes as a zone and panics in zone_invalid_panic. IOGPUFamily's entry between
+    # mach_vm_region and memmove is mach_vm_wire_level_monitor, not memcpy: KERN_INVALID_ARGUMENT for no pages,
+    # KERN_RESOURCE_SHORTAGE past the user wire limit's pages less the wired count, as ours; memmove is the 432-byte
+    # body. IOLib.cpp's IOLockSleep and IOLockSleepDeadline, each only a branch to lck_mtx_sleep /
+    # lck_mtx_sleep_deadline.
     0xFFFFFFF00A13041C: '_kfree_data',
-    0xFFFFFFF00A130430: '_kfree_data',
+    0xFFFFFFF00A130430: '_kfree_data_addr',
     0xFFFFFFF00A1303D4: '_kfree_type_impl',
-    0xFFFFFFF00A130414: '_kfree_type_impl',
-    0xFFFFFFF00A227074: '_memcpy',
+    0xFFFFFFF00A130414: '_kfree_type_var_impl',
+    0xFFFFFFF00A227074: '_mach_vm_wire_level_monitor',
     0xFFFFFFF00A972EB0: '_memmove',
     0xFFFFFFF00A80E4D0: '_IOLockSleep',
     0xFFFFFFF00A80E4E0: '_IOLockSleepDeadline',
     # Alone in their GOT gaps among our names, with the body: lock_rw_old.c's "Invalid lock sleep action" and
-    # assert_wait_deadline; the tail call into vm_map_region; the arm no-op; port_name_to_task_kernel with flavor 3
-    # (TASK_FLAVOR_NAME); wakeup_with_inheritor_and_turnstile with no woken-thread out pointer (all, not one);
+    # assert_wait_deadline; the tail call into vm_map_region; the arm no-op; port_name_to_task_grp(name, flavor 0,
+    # options 0, group 3), which is port_name_to_task_external's TASK_FLAVOR_CONTROL and TASK_GRP_EXTERNAL (Apple's
+    # inlined port_name_to_task_name passes flavor 3, options 12, group 0: the same argument order as ours);
+    # wakeup_with_inheritor_and_turnstile with no woken-thread out pointer (all, not one);
     # the "Expected to have usecount or iocount" check of vnode_getwithref_noblock; the PAC-signed v_parent load.
     0xFFFFFFF00A138158: '_lck_rw_sleep_deadline',
     0xFFFFFFF00A25442C: '_mach_vm_region',
     0xFFFFFFF00A29C650: '_ml_thread_policy',
-    0xFFFFFFF00A12C90C: '_port_name_to_task_name',
+    0xFFFFFFF00A12C90C: '_port_name_to_task',
     0xFFFFFFF00A13D114: '_wakeup_all_with_inheritor',
     0xFFFFFFF00A2F3A78: '_vnode_getwithref_noblock',
     0xFFFFFFF00A323B44: '_vnode_parent',
@@ -389,9 +395,11 @@ NAMES = {
     0xFFFFFFF00A888034: '__ZN18IOMemoryDescriptor13getPageCountsEPyS0_S0_',
     0xFFFFFFF00A887E18: '__ZN18IOMemoryDescriptor15getDMAMapLengthEPy',
     0xFFFFFFF00A887B3C: '__ZN18IOMemoryDescriptor15getDescriptorIDEv',
-    # Each the only 21H461 import of its kext in its GOT gap: IOGPUFamily's IOPerfControlClient::copyClient, the
-    # serial driver's IORecursiveLockSleepDeadline.
-    0xFFFFFFF00A8F3050: '__ZN19IOPerfControlClient10copyClientEP9IOServicey',
+    # IOGPUFamily's IOPerfControlClient::querySubmitterRole, read from the code: kIOReturnNotFound unless the client's
+    # device type (+0xc) is GPU, else the task's GPU role byte into role_out. copyClient is the 8-byte tail call into
+    # copyClientForDeviceType that the other kexts import. The serial driver's IORecursiveLockSleepDeadline, the only
+    # 21H461 import of its kext in its GOT gap.
+    0xFFFFFFF00A8F3050: '__ZN19IOPerfControlClient18querySubmitterRoleEP9IOServiceP4taskPj',
     0xFFFFFFF00A80E7D8: '_IORecursiveLockSleepDeadline',
     # apfs between lck_mtx_lock and lck_mtx_unlock (IOLockLock and IOLockUnlock's own names): six arguments, the
     # sleep action's flags tested first, the deadline in x5.
@@ -416,11 +424,12 @@ NAMES = {
     # OSMetaClass::getMetaClassWithName: NULL for no name, then sAllClassesDict->getObject(name) under
     # sAllClassesLock (the virtual call's ptrauth discriminator 0x5837 is OSDictionary::getObject(const OSSymbol *)'s).
     0xFFFFFFF00A7A17B8: '__ZN11OSMetaClass20getMetaClassWithNameEPK8OSSymbol',
-    # vfs_vnodecovered: mp->mnt_vnodecovered (+0x38, its signed pointer's discriminator 0x7e60) through
-    # vnode_getwithref, else NULL, as ours. The sandbox's only entry between vfs_statfs and vm_deallocate, where its
-    # 21H461 import was vm_allocate_external: the GOT pass named it that, and the sandbox's mount_notify_mount hook took
-    # a kern_return_t for the covered vnode at devfs's mount in bsd_init (a data abort in vnode_vtype).
-    0xFFFFFFF00A3218C8: '_vfs_vnodecovered',
+    # vfs_vnodecovered_noblock: mp->mnt_vnodecovered (+0x38, its signed pointer's discriminator 0x7e60) through
+    # vnode_getwithref_noblock, else NULL, as ours; vfs_vnodecovered is the same code before it, through
+    # vnode_getwithref. The sandbox's only entry between vfs_statfs and vm_deallocate, where its 21H461 import was
+    # vm_allocate_external: the GOT pass named it that, and the sandbox's mount_notify_mount hook took a kern_return_t
+    # for the covered vnode at devfs's mount in bsd_init (a data abort in vnode_vtype).
+    0xFFFFFFF00A3218C8: '_vfs_vnodecovered_noblock',
 }
 
 

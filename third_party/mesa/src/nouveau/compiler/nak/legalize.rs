@@ -295,6 +295,7 @@ pub trait LegalizeBuildHelpers: SSABuilder {
                     saturate: false,
                     ftz: false,
                     f32: false,
+                    a_f32: false,
                 });
             }
             SrcType::F32 => {

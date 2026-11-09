@@ -165,8 +165,10 @@ TEST(Relayout, TheMovesPushCarriesItsWritersAcquires)
 	s.move(TGM_RELAYOUT_TILE_IN_PLACE, {waits, waits + n});
 	EXPECT_EQ(waits[0].va, kUserFence);
 	EXPECT_EQ(waits[0].seqno, 7u);
+	EXPECT_EQ(waits[0].uid, 5u);
 	EXPECT_EQ(waits[1].va, kCopyEngineFence);
 	EXPECT_EQ(waits[1].seqno, 2u);
+	EXPECT_EQ(waits[1].uid, 6u);
 }
 
 TEST(Relayout, WritersPastThePushsAcquiresAreRefused)
@@ -190,9 +192,9 @@ TEST(Relayout, WritersPastThePushsAcquiresAreRefused)
 TEST(Relayout, WaitsForEveryWriterFirst)
 {
 	Surface s(kCases[2]);
-	s.move(TGM_RELAYOUT_TO_ROWS, {{0x1000040, 7}, {0x1004040, 0xfffffffe}});
+	s.move(TGM_RELAYOUT_TO_ROWS, {{0x1000040, 7, 5}, {0x1004040, 0xfffffffe, 6}});
 	uint32_t w[TGM_RELAYOUT_DWORDS];
-	const tgm_relayout_wait waits[] = {{0x10, 1}, {0x20, 2}};
+	const tgm_relayout_wait waits[] = {{0x10, 1, 5}, {0x20, 2, 6}};
 	const tgm_relayout_move m = {kSurfaceVa,    kSurfaceRowsVa,       kRowsVa,
 				     s.bytesPerRow, TGM_RELAYOUT_TO_ROWS, s.rows.size()};
 	tgm_relayout_push(w, &s.l, &m, waits, 2);

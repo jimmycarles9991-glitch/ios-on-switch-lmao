@@ -1,0 +1,279 @@
+diff --git a/hw/arm/tegra2/ahb/host1x/modules/dc/dc.c b/hw/arm/tegra2/ahb/host1x/modules/dc/dc.c
+index a30e52c..a39bf09 100644
+--- a/hw/arm/tegra2/ahb/host1x/modules/dc/dc.c
++++ b/hw/arm/tegra2/ahb/host1x/modules/dc/dc.c
+@@ -68,6 +68,25 @@ static const struct {
+     [WIN_D] = { 1u << 4, 1u << 10 },
+ };
+ 
++/*
++ * Each window's MC read client and swgroup (Linux memory/tegra/tegra210.c): display0a/0b/0c, displayd and displayt
++ * in swgroup DC for DC A; display0ab/0bb/0cb in DCB for DC B, which is host1x class 0x71.
++ */
++static const TegraSmmuClient dc_clients[2][DC_WINDOWS] = {
++    {
++        [WIN_A] = { 0x228, 1, 0x240 },
++        [WIN_B] = { 0x228, 3, 0x240 },
++        [WIN_C] = { 0x228, 5, 0x240 },
++        [WIN_D] = { 0x234, 19, 0x240 },
++        [WIN_T] = { 0x230, 26, 0x240 },
++    },
++    {
++        [WIN_A] = { 0x228, 2, 0x244 },
++        [WIN_B] = { 0x228, 4, 0x244 },
++        [WIN_C] = { 0x228, 6, 0x244 },
++    },
++};
++
+ typedef struct tegra_dc_state {
+     SysBusDevice parent_obj;
+ 
+@@ -510,6 +529,8 @@ static void tegra_dc_priv_realize(DeviceState *dev, Error **errp)
+     init_window(&s->win[WIN_D], WIN_D_T_CAPS);
+     init_window(&s->win[WIN_T], WIN_D_T_CAPS);
+ 
++    memcpy(s->scanout.client, dc_clients[s->module.class_id == 0x71], sizeof(s->scanout.client));
++
+     s->ptimer = ptimer_init(tegra_dc_vblank, s, PTIMER_POLICY_CONTINUOUS_TRIGGER);
+     ptimer_transaction_begin(s->ptimer);
+     ptimer_set_freq(s->ptimer, s->disp_refresh_rate);
+diff --git a/hw/arm/tegra2/ahb/host1x/modules/dc/scanout.c b/hw/arm/tegra2/ahb/host1x/modules/dc/scanout.c
+index fab084d..e8d4c28 100644
+--- a/hw/arm/tegra2/ahb/host1x/modules/dc/scanout.c
++++ b/hw/arm/tegra2/ahb/host1x/modules/dc/scanout.c
+@@ -18,7 +18,8 @@
+  * 3:0) in blocks one GOB wide and 1 << BLOCK_HEIGHT GOBs tall, LINE_STRIDE / 64 blocks per block row.
+  * Windows blend back to front by WINDOW_LAYER_DEPTH (lower is in front) over the background colour, through
+  * BLEND_NOMATCH_SELECT's factors with K1 and K2 (colour keys are not modelled), or replace what is under them with
+- * BLEND_BYPASS. The display controller reads DRAM only: anything else reads as zeros and is logged once per address.
++ * BLEND_BYPASS. Each window's memory client reads through the MC's SMMU, page by page, and DRAM only: an SMMU fault
++ * or an address outside DRAM reads as zeros and is logged once per page.
+  */
+ 
+ #include "tegra_common.h"
+@@ -126,18 +127,32 @@ static bool dram_read(hwaddr addr, uint8_t *buf, uint32_t len)
+     return true;
+ }
+ 
++static void dc_fault(DcScanout *out, const Window *w, uint64_t addr, int result, unsigned asid)
++{
++    if (out->fault[w->index] == (addr & ~4095ull)) {
++        return;
++    }
++    out->fault[w->index] = addr & ~4095ull;
++    if (result == TEGRA_SMMU_FAULT) {
++        qemu_log_mask(LOG_GUEST_ERROR, "tegra.dc: window %c: SMMU fault at %#" PRIx64 " (ASID %u)\n",
++                      'A' + w->index, addr, asid);
++    } else {
++        qemu_log_mask(LOG_GUEST_ERROR, "tegra.dc: window %c reads %#" PRIx64 ", which is not DRAM\n",
++                      'A' + w->index, addr);
++    }
++}
++
+ static void dc_read(DcScanout *out, const Window *w, uint64_t addr, uint8_t *buf, uint32_t len)
+ {
+     while (len) {
+         uint32_t n = MIN(len, 4096 - (addr & 4095));
++        unsigned asid;
++        hwaddr pa;
++        int result = tegra_smmu_translate(&out->client[w->index], addr, &pa, &asid);
+ 
+-        if (!dram_read(addr, buf, n)) {
++        if (result == TEGRA_SMMU_FAULT || !dram_read(pa, buf, n)) {
+             memset(buf, 0, n);
+-            if (out->fault[w->index] != (addr & ~4095ull)) {
+-                out->fault[w->index] = addr & ~4095ull;
+-                qemu_log_mask(LOG_GUEST_ERROR, "tegra.dc: window %c reads %#" PRIx64 ", which is not DRAM\n",
+-                              'A' + w->index, addr);
+-            }
++            dc_fault(out, w, addr, result, asid);
+         }
+         addr += n;
+         buf += n;
+diff --git a/hw/arm/tegra2/ahb/host1x/modules/dc/scanout.h b/hw/arm/tegra2/ahb/host1x/modules/dc/scanout.h
+index d0d6d07..27d8d16 100644
+--- a/hw/arm/tegra2/ahb/host1x/modules/dc/scanout.h
++++ b/hw/arm/tegra2/ahb/host1x/modules/dc/scanout.h
+@@ -10,6 +10,7 @@
+ #ifndef TEGRA_DC_SCANOUT_H
+ #define TEGRA_DC_SCANOUT_H
+ 
++#include "tegra_smmu.h"
+ #include "window.h"
+ 
+ #define DC_SCANOUT_WINDOWS 5
+@@ -22,6 +23,7 @@ typedef struct DcPlane {
+ } DcPlane;
+ 
+ typedef struct DcScanout {
++    TegraSmmuClient client[DC_SCANOUT_WINDOWS];
+     uint32_t width, height;
+     uint32_t *pixels;
+     DcPlane plane[2];
+diff --git a/hw/arm/tegra2/axi/mc/mc.c b/hw/arm/tegra2/axi/mc/mc.c
+index c0da680..e0049e9 100644
+--- a/hw/arm/tegra2/axi/mc/mc.c
++++ b/hw/arm/tegra2/axi/mc/mc.c
+@@ -22,17 +22,28 @@
+ #include "tegra_common.h"
+ 
+ #include "hw/sysbus.h"
++#include "exec/address-spaces.h"
+ 
+ #include "mc.h"
+ #include "iomap.h"
+ #include "tegra_trace.h"
+ #include "devices.h"
++#include "tegra_smmu.h"
+ 
+ #define TYPE_TEGRA_MC "tegra.mc"
+ #define TEGRA_MC(obj) OBJECT_CHECK(tegra_mc, (obj), TYPE_TEGRA_MC)
+ #define DEFINE_REG32(reg) reg##_t reg
+ #define WR_MASKED(r, d, m)  r = (r & ~m##_WRMASK) | (d & m##_WRMASK)
+ 
++/* MC_SMMU_PTB_ASID selects which ASID's directory MC_SMMU_PTB_DATA reads and writes. */
++#define SMMU_ASIDS          128
++#define SMMU_PTB_ASID       0x1c
++#define SMMU_PTB_DATA       0x20
++#define SMMU_READABLE       (1u << 31)
++#define SMMU_PDE_NEXT       (1u << 28)
++#define SMMU_PFN_MASK       0x3fffffu
++#define SMMU_ASID_ENABLE    (1u << 31)
++
+ typedef struct tegra_mc_state {
+     SysBusDevice parent_obj;
+ 
+@@ -167,6 +178,7 @@ typedef struct tegra_mc_state {
+     DEFINE_REG32(client_activity_monitor_emem_0);
+     DEFINE_REG32(client_activity_monitor_emem_1);
+     uint32_t regs[TEGRA_MC_SIZE>>2];
++    uint32_t smmu_ptb[SMMU_ASIDS];
+ } tegra_mc;
+ 
+ static const VMStateDescription vmstate_tegra_mc = {
+@@ -179,6 +191,7 @@ static const VMStateDescription vmstate_tegra_mc = {
+         VMSTATE_UINT32(err_status.reg32, tegra_mc),
+         VMSTATE_UINT32(emem_cfg.reg32, tegra_mc),
+         VMSTATE_UINT32(smmu_config.reg32, tegra_mc),
++        VMSTATE_UINT32_ARRAY(smmu_ptb, tegra_mc, SMMU_ASIDS),
+         VMSTATE_UINT32(emem_adr_cfg.reg32, tegra_mc),
+         VMSTATE_UINT32(emem_arb_cfg0.reg32, tegra_mc),
+         VMSTATE_UINT32(emem_arb_cfg1.reg32, tegra_mc),
+@@ -607,6 +620,10 @@ static uint64_t tegra_mc_priv_read(void *opaque, hwaddr offset,
+     tegra_mc *s = opaque;
+     uint64_t ret = 0;
+ 
++    if (tegra_board >= TEGRAX1_BOARD && offset == SMMU_PTB_DATA) {
++        return s->smmu_ptb[tegra_mc_priv_read(s, SMMU_PTB_ASID, 4) % SMMU_ASIDS];
++    }
++
+     switch (offset) {
+     case ERR_STATUS_OFFSET:
+         ret = s->err_status.reg32;
+@@ -996,6 +1013,11 @@ static void tegra_mc_priv_write(void *opaque, hwaddr offset,
+ {
+     tegra_mc *s = opaque;
+ 
++    if (tegra_board >= TEGRAX1_BOARD && offset == SMMU_PTB_DATA) {
++        s->smmu_ptb[tegra_mc_priv_read(s, SMMU_PTB_ASID, 4) % SMMU_ASIDS] = value;
++        return;
++    }
++
+     switch (offset) {
+     case ERR_STATUS_OFFSET:
+         TRACE_WRITE(s->iomem.addr, offset, s->err_status.reg32, value);
+@@ -1478,10 +1500,52 @@ static void tegra_mc_priv_write(void *opaque, hwaddr offset,
+     }
+ }
+ 
++enum tegra_smmu_result tegra_smmu_translate(const TegraSmmuClient *client, uint64_t address, hwaddr *pa,
++                                            unsigned *asid)
++{
++    tegra_mc *s = tegra_mc_dev;
++    uint32_t group, ptb, pde, pte;
++    hwaddr table;
++
++    *pa = address;
++    *asid = 0;
++    if (!client->enable_reg || !(tegra_mc_priv_read(s, SMMU_CONFIG_OFFSET, 4) & 1) ||
++        !(tegra_mc_priv_read(s, client->enable_reg, 4) & (1u << client->enable_bit))) {
++        return TEGRA_SMMU_BYPASS;
++    }
++    group = tegra_mc_priv_read(s, client->asid_reg, 4);
++    if (!(group & SMMU_ASID_ENABLE)) {
++        return TEGRA_SMMU_BYPASS;
++    }
++    *asid = group % SMMU_ASIDS;
++    ptb = s->smmu_ptb[*asid];
++    if (address >> 32 || !(ptb & SMMU_READABLE)) {
++        return TEGRA_SMMU_FAULT;
++    }
++    table = (hwaddr)(ptb & SMMU_PFN_MASK) << 12;
++    pde = address_space_ldl_le(&address_space_memory, table + (address >> 22) * 4, MEMTXATTRS_UNSPECIFIED, NULL);
++    if (!(pde & SMMU_READABLE)) {
++        return TEGRA_SMMU_FAULT;
++    }
++    if (!(pde & SMMU_PDE_NEXT)) {
++        *pa = ((hwaddr)(pde & SMMU_PFN_MASK) << 12 & ~(hwaddr)0x3fffff) | (address & 0x3fffff);
++        return TEGRA_SMMU_MAPPED;
++    }
++    table = (hwaddr)(pde & SMMU_PFN_MASK) << 12;
++    pte = address_space_ldl_le(&address_space_memory, table + ((address >> 12) & 0x3ff) * 4, MEMTXATTRS_UNSPECIFIED,
++                               NULL);
++    if (!(pte & SMMU_READABLE)) {
++        return TEGRA_SMMU_FAULT;
++    }
++    *pa = (hwaddr)(pte & SMMU_PFN_MASK) << 12 | (address & 0xfff);
++    return TEGRA_SMMU_MAPPED;
++}
++
+ static void tegra_mc_priv_reset(DeviceState *dev)
+ {
+     tegra_mc *s = TEGRA_MC(dev);
+ 
++    memset(s->smmu_ptb, 0, sizeof(s->smmu_ptb));
+     s->err_status.reg32 = ERR_STATUS_RESET;
+     s->emem_arb_cfg0.reg32 = EMEM_ARB_CFG0_RESET;
+     s->emem_arb_cfg1.reg32 = EMEM_ARB_CFG1_RESET;
+diff --git a/hw/arm/tegra2/include/tegra_smmu.h b/hw/arm/tegra2/include/tegra_smmu.h
+new file mode 100644
+index 0000000..f9a8419
+--- /dev/null
++++ b/hw/arm/tegra2/include/tegra_smmu.h
+@@ -0,0 +1,36 @@
++/*
++ * Tegra X1 memory controller SMMU, as its memory clients see it.
++ *
++ *  This program is free software; you can redistribute it and/or modify it
++ *  under the terms of the GNU General Public License as published by the
++ *  Free Software Foundation; either version 2 of the License, or
++ *  (at your option) any later version.
++ */
++#ifndef TEGRA_SMMU_H
++#define TEGRA_SMMU_H
++
++#include "exec/hwaddr.h"
++
++/* A memory client (Linux memory/tegra/tegra210.c): its TRANSLATION_ENABLE_n bit and its swgroup's ASID register. */
++typedef struct TegraSmmuClient {
++    uint16_t enable_reg;
++    uint8_t enable_bit;
++    uint16_t asid_reg;
++} TegraSmmuClient;
++
++enum tegra_smmu_result {
++    TEGRA_SMMU_BYPASS,
++    TEGRA_SMMU_MAPPED,
++    TEGRA_SMMU_FAULT,
++};
++
++/*
++ * The client's access to address. It is translated only while MC_SMMU_CONFIG is on, the client's TRANSLATION_ENABLE
++ * bit is set and its swgroup's ASID register has ENABLE (bit 31); otherwise *pa is address. A translated access walks
++ * the ASID's directory (PTB_DATA) as Linux iommu/tegra-smmu.c lays it out, with no TLB, and faults on a directory or
++ * page entry without READ (bit 31), or an address past 32 bits. *asid is the ASID it went through.
++ */
++enum tegra_smmu_result tegra_smmu_translate(const TegraSmmuClient *client, uint64_t address, hwaddr *pa,
++                                            unsigned *asid);
++
++#endif

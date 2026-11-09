@@ -30,7 +30,7 @@ static int fail(char *err, size_t errlen, const char *fmt, ...)
 
 struct vctx {
     const struct a64x_macho *m;
-    const uint8_t *data, *out;
+    const uint8_t *data, *out, *entries;
     uint8_t *freed; /* 1 bit per word of the executable segment */
     uint64_t lo, hi;
     uint64_t mac_lo, mac_hi; /* the FIPS integrity MAC, checked against the translated text */
@@ -175,6 +175,7 @@ static int check_words(struct vctx *c, bool no_pac, struct a64x_pt_check *v, cha
             v->rewritten++;
         } else if (freed) {
             v->stub_words++;
+            v->entered_stub_words += a64x_pt_entered(c->m, c->entries, off);
         } else if (stub_site(cw, was) && follow(c, off, now)) {
             v->sites++;
         } else {
@@ -217,13 +218,14 @@ long a64x_pt_verify(const struct a64x_macho *m, const uint8_t *out, struct a64x_
     struct vctx c = {m,
                      islands.data,
                      out,
+                     a64x_pt_entries(m, islands.data),
                      calloc(m->exec_filesize / 32 + 1, 1),
                      m->exec_fileoff,
                      m->exec_fileoff + m->exec_filesize,
                      mac_lo,
                      mac_hi};
-    int rc = c.freed ? 0 : fail(err, errlen, "out of memory");
-    struct a64x_code_map cm = {&c, code_at, flags};
+    int rc = c.freed && c.entries ? 0 : fail(err, errlen, "out of memory or unreadable fixups");
+    struct a64x_code_map cm = {&c, code_at, flags, NULL};
     for (uint64_t off = c.lo; off < c.hi && !rc && !(flags & A64X_MAP_NO_PAC); off += PAGE) {
         uint32_t in[PAGE / 4] = {0}, scratch[PAGE / 4];
         memcpy(in, m->base + off, c.hi - off < PAGE ? c.hi - off : PAGE);
@@ -235,11 +237,14 @@ long a64x_pt_verify(const struct a64x_macho *m, const uint8_t *out, struct a64x_
         set_freed(&c, off);
     if (!rc)
         rc = check_words(&c, flags & A64X_MAP_NO_PAC, v, err, errlen);
+    if (!rc && v->entered_stub_words)
+        rc = fail(err, errlen, "%llu stub words where something branches", (unsigned long long)v->entered_stub_words);
     if (!rc && v->left_baseline)
         rc = fail(err, errlen, "%llu A12-baseline words left", (unsigned long long)v->left_baseline);
     if (!rc)
         rc = a64x_cs_check(out, m->size, sig_off, sig_size, v->cdhash, err, errlen);
     free(c.freed);
+    free((void *)c.entries);
     free(islands.data);
     return rc ? -1 : (long)v->sites;
 }

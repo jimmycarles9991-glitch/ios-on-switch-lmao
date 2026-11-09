@@ -132,7 +132,7 @@ static const uint64_t sizes[] = {PAGE,
                                  2 * BLOCK - PAGE,
                                  2 * BLOCK + PAGE,
                                  UINT64_C(0x4308000),
-                                 UINT64_C(0x6000000)};
+                                 LOADER_WINDOW_BYTES_MAX};
 static const uint64_t offsets[] = {0, PAGE, UINT64_C(0x7c000), BLOCK - PAGE};
 
 int copy_tables_setup(void)
@@ -211,7 +211,7 @@ unsigned copy_tables_negatives(void)
             b.bytes = UINT64_MAX;
             break;
         case 3:
-            b.bytes = UINT64_C(0x6001000);
+            b.bytes = LOADER_WINDOW_BYTES_MAX + PAGE;
             break;
         case 4:
             b.source += PAGE;

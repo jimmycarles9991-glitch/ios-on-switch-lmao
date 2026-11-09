@@ -69,11 +69,19 @@ void tgm_waiter_unwoken(uint32_t waiter, uint32_t seq, uint32_t seqno);
 /* align: at least the VM page (0 for just that) */
 void *tgm_pool_alloc(uint64_t bytes, uint64_t align, uint64_t *pa);
 void tgm_pool_free(void *va, uint64_t bytes, uint64_t pa);
+/* A compressible BO's memory: `bytes` (a 128 KiB multiple) as zeroed 128 KiB-aligned 128 KiB chunks of the pool, in no
+ * order and adjacent or not; `pas` gets every 4 KiB page. 0, or -ENOMEM with nothing taken.
+ * tgm_pool_free_chunks gives them back dirty, for the scrubber. */
+int tgm_pool_alloc_chunks(uint64_t bytes, uint64_t *pas);
+void tgm_pool_free_chunks(const uint64_t *pas, uint32_t npages);
 
-/* Address spaces: one per user-client connection, which claims it (tgm_vm_claim): only channels made for that owner
- * may address it, so BoFree's wait for the connection's channels covers every channel that can reach its pages. */
+/* Address spaces: one per user-client connection, which claims it (tgm_vm_claim_connection): only channels made for
+ * that owner may address it, so BoFree's wait for the connection's channels covers every channel that can reach its
+ * pages. The kernel's own copiers claim theirs with tgm_vm_claim and an owner that is not an AGXDeviceUserClient: a
+ * hang's line reads pushes through a connection's claim only (tgm_client_interlocks). */
 int tgm_vm_new(struct tgm_vm **pvm);
 void tgm_vm_claim(struct tgm_vm *vm, const void *owner);
+void tgm_vm_claim_connection(struct tgm_vm *vm, const void *connection);
 void tgm_vm_del(struct tgm_vm **pvm);
 /* Wrap physical pages as GPU memory. `pas` (one entry per 4 KiB page) must stay valid until tgm_mem_del. lock_wait_ns
  * (or NULL): with the stats, how long the call waited for gpu.lock. */
@@ -205,8 +213,9 @@ void tgm_chan_stalled(struct tgm_chan *chan, const char *who, uint32_t seqno, ui
  * pending; a single submission that runs that long is taken for a hang. */
 void tgm_chan_check_progress(struct tgm_chan *chan, const char *who, uint32_t seqno);
 /* A hang's line (TegraGM20BUserClient.cpp): the SET_PIXEL_SHADER_INTERLOCK_CONTROL methods with conflict detection on
- * in the `n` pushes at va[i] (dwords[i] long) of `client`'s connection (tgm_chan_new's vm_owner). Returns the pushes it
- * read (one in a host import has no kernel view), or -1 when the connection's lock is held by another thread. */
+ * in the `n` pushes at va[i] (dwords[i] long) of `client`'s connection (its space's tgm_vm_claim_connection). Returns
+ * the pushes it read (one in a host import has no kernel view), or -1 when the connection's lock is held by another
+ * thread. */
 int tgm_client_interlocks(const void *client, const uint64_t *va, const uint32_t *dwords,
 			  uint32_t n, uint64_t *interlocks);
 
@@ -241,15 +250,19 @@ void tgm_fence_kill_clear(volatile uint32_t *fence);
  * queues one copy engine copy, pitch source (stride; src_block: block-linear, width x 4 bytes across, blocks of
  * 2^TEGRA_SCANOUT_TILED_BLOCK_HEIGHT_LOG2 GOBs) to a block-linear destination (dst_pitch bytes across, blocks one
  * GOB wide and 2^block_height_log2 GOBs high, 8-line GOBs), after the work submitted so far by the channels whose address
- * spaces import the source (every user channel's when none does), and
- * returns at once: 0, or -EBUSY (one in flight), -EINVAL, -ENODEV. done(arg) runs exactly once for an accepted copy,
- * from the GPU interrupt pass, when its bytes are in DRAM; one not done in 1 s panics. */
+ * spaces import the source or also_pa's surface (window B's; 0: none) (every user channel's when none does), and
+ * returns at once: 0, or -EBUSY (one in flight), -EINVAL, -ENODEV. done(arg, status) runs exactly once for an accepted
+ * copy, from the GPU interrupt pass, when its bytes are in DRAM: status 0, or TEGRA_SCANOUT_SOURCE_LOST when a writer it
+ * waited for was killed before that work ended. One not done in 1 s is the present's deadline's (gpu.c present_deadline).
+ * tgm_present_outstanding: whether the copy accepted with `arg` is not completed yet (its callback not returned). */
 int tgm_present_open(struct tgm_vm **pvm);
 int tgm_present_map(uint64_t va, struct tgm_mem *mem, uint64_t bytes, uint8_t kind);
 int tgm_present_unmap(uint64_t va, uint64_t bytes);
-int tgm_present_copy(uint64_t src_va, uint64_t src_pa, uint64_t stride, int src_block,
-		     uint32_t width, uint32_t height, uint64_t dst_va, uint32_t dst_pitch,
-		     uint32_t block_height_log2, void (*done)(void *), void *arg);
+int tgm_present_copy(uint64_t src_va, uint64_t src_pa, uint64_t also_pa, uint64_t stride,
+		     int src_block, uint32_t width, uint32_t height, uint64_t dst_va,
+		     uint32_t dst_pitch, uint32_t block_height_log2, void (*done)(void *, int),
+		     void *arg);
+int tgm_present_outstanding(const void *arg);
 /* Host import bookkeeping for the present: `pa` is the import's first page; add 1 when made, 0 when released. The
  * present waits only for address spaces that import its surface (src_pa, the surface's first page), when any does. */
 void tgm_vm_import_note(struct tgm_vm *vm, uint64_t pa, int add);
@@ -350,6 +363,10 @@ void tgm_relayout_by_cpu(const struct tgm_relayout_pages *surface,
 			 const struct tgm_relayout_pages *rows, const struct tgm_layout *layout,
 			 uint32_t bytes_per_row, int op, const struct tgm_relayout_writer *writers,
 			 uint32_t nwriters);
+/* tgm_writer_wait for a kernel copy's submission that starts with semaphore acquires on `acquired` (in push order):
+ * while one of them has not completed, the wait is late on that writer, which a long wait recovers, not on the copy. */
+void tgm_copy_wait(uint32_t uid, uint32_t seqno, const struct tgm_relayout_writer *acquired,
+		   uint32_t nacquired);
 /* The GPU address in `vm` (one that maps every connection's fence page, as every tgm_vm_new space does) of channel uid's
  * fence seqno; -ENOENT when it is gone or killed (its work is complete or abandoned). */
 int tgm_writer_fence_va(struct tgm_vm *vm, uint32_t uid, uint64_t *va);
@@ -371,9 +388,27 @@ void tgm_coherency_tiled_bind(struct tgm_coh *c, int add);
 #else
 #define TGM_STATS 0
 #endif
+/* Debug kernels: copies a present runs after its frame's copy and before its fence (TegraGM20BReadback.cpp), each into a
+ * pitch-linear destination dst_pitch bytes across, width x 4 bytes of height lines, from a pitch source (src_block_log2
+ * < 0: src_pitch bytes per row) or a block-linear one (8-line GOBs, blocks one GOB wide and 2^src_block_log2 high,
+ * src_pitch bytes across). tgm_present_copy_read is tgm_present_copy with them. A release kernel has the type only. */
+struct tgm_present_read {
+	uint64_t src_va, dst_va;
+	uint32_t src_pitch, dst_pitch, width, height;
+	int32_t src_block_log2;
+	uint32_t reserved;
+};
+
+#define TGM_PRESENT_READS 2
+
 #if TGM_STATS
 /* Debug kernels: clock gating on (1) or off (0), for the A/B (TegraGM20B.cpp's debug.switch_gpu_clkgate). 0 or -EBUSY. */
 int tgm_clkgate_switch(int on);
+
+int tgm_present_copy_read(uint64_t src_va, uint64_t src_pa, uint64_t also_pa, uint64_t stride,
+			  int src_block, uint32_t width, uint32_t height, uint64_t dst_va,
+			  uint32_t dst_pitch, uint32_t block_height_log2, void (*done)(void *, int),
+			  void *arg, const struct tgm_present_read *reads, uint32_t nreads);
 #endif
 /* The stats: one log line per 5 s of submissions (submits, fence latency, imports, pool, MC errors).
  * tgm_stats_import(+bytes, first page) for each host import made, (-bytes, first page) for each one released. */
@@ -403,9 +438,11 @@ void tgm_stats_bo_alloc(uint64_t bytes, int kind, uint64_t ns, const uint64_t ph
 void tgm_stats_compositor_pool(int64_t bytes);
 void tgm_spare_counts(uint64_t *kept_bytes, uint64_t *ready, uint64_t *pool_zeroing_bytes);
 /* Where the pool is (TegraGM20BUserClient.cpp, for the stats2 line): pool BOs of clients other than the compositor, pool
- * pages freed but still behind their view's release (orphans: a task still maps the view, or an import of it is live), and
- * coherent BOs served from system memory instead (tgm_pool::FromSystem) with their count. */
+ * pages freed but still behind their view's release (orphans: a task still maps the view, or an import of it is live),
+ * every client's compressible BOs with their count, and coherent BOs served from system memory instead
+ * (tgm_pool::FromSystem) with their count. */
 void tgm_pool_breakdown(uint64_t *client_bytes, uint64_t *orphan_bytes, uint64_t *orphans,
+			uint64_t *compressible_bytes, uint64_t *compressibles,
 			uint64_t *system_bytes, uint64_t *systems);
 unsigned long tgm_owner_stats(char *out, unsigned long size);
 void tgm_stats_bo_import(uint64_t bytes, int read_only, int skipped, uint64_t ns,

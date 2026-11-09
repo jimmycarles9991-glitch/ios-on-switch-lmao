@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: BSD-2-Clause-Patent
 // Publishes SwitchAccelStub.cpp's accelerator from bsd_init, long before backboardd starts: load IOGPUFamily (prelinked;
-// nothing else loads it) so the IOAcceleratorES metaclass exists, register our subclass inside preModLoad/postModLoad, then
+// nothing else loads it) so the IOAcceleratorES metaclass exists, register our subclass (switch_kernel_classes), then
 // attach one registered, never-started instance to the platform expert. Same staging as TegraGM20B.cpp's publish() and
 // UniXNU-qemu's QemuMetalPublish.cpp. Registering is what IOServiceGetMatchingServices needs (kIOServiceMatchedState,
 // IOService::getMatchingServices). Any failure is a build or ABI mismatch, so it panics instead of costing 30 s per boot.
@@ -11,7 +11,7 @@
 #include <libkern/c++/OSMetaClass.h>
 
 extern "C" {
-extern kmod_info_t g_kernel_kmod_info;
+OSReturn switch_kernel_classes(void (*initialize)());
 void switch_accel_stub_static_init(void) __asm__("__GLOBAL__sub_I_SwitchAccelStub.cpp");
 IOService *switch_accel_stub_allocate(void);
 unsigned switch_accel_stub_instance_size(void);
@@ -36,13 +36,9 @@ void switch_accel_stub_publish(void)
         panic("SwitchAccelStub: IOAcceleratorES %p size %u, ours %u", parent, parent ? parent->getClassSize() : 0,
               switch_accel_stub_instance_size());
     }
-    void *handle = OSMetaClass::preModLoad(g_kernel_kmod_info.name);
-    if (!handle)
-        panic("SwitchAccelStub: preModLoad failed");
-    switch_accel_stub_static_init();
-    const OSReturn registered = OSMetaClass::postModLoad(handle);
+    const OSReturn registered = switch_kernel_classes(switch_accel_stub_static_init);
     if (registered)
-        panic("SwitchAccelStub: postModLoad 0x%x", registered);
+        panic("SwitchAccelStub: registering its class failed: 0x%x", registered);
     IOService *accelerator = switch_accel_stub_allocate();
     if (!accelerator || !accelerator->init())
         panic("SwitchAccelStub: allocation failed");

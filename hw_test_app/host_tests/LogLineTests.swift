@@ -57,9 +57,12 @@ final class LogLineTests: XCTestCase {
 
     func testSummaryFailsWhenAnyTestFailed() {
         let records = [record("a", .pass()), record("b", .skip("no headset")), record("c", .fail("bad"))]
-        XCTAssertEqual(LogLine.summary(records, milliseconds: 1000), "HWTEST suite FAIL pass=1 fail=1 skip=1 ms=1000.0")
         XCTAssertEqual(
-            LogLine.summary(Array(records.prefix(2)), milliseconds: 5), "HWTEST suite PASS pass=1 fail=0 skip=1 ms=5.0")
+            LogLine.summary(records, ios: 17, milliseconds: 1000),
+            "HWTEST suite FAIL pass=1 fail=1 skip=1 ios=17 ms=1000.0")
+        XCTAssertEqual(
+            LogLine.summary(Array(records.prefix(2)), ios: 27, milliseconds: 5),
+            "HWTEST suite PASS pass=1 fail=0 skip=1 ios=27 ms=5.0")
     }
 
     func testJudgedNamesTheFailedChecks() {
@@ -69,28 +72,24 @@ final class LogLineTests: XCTestCase {
         XCTAssertEqual(Outcome.judged([("ok", true)], Metrics()).verdict, .pass)
     }
 
-    func testReportKeepsTheLatestRunOfEachTest() throws {
-        let records = [record("a", .fail("first")), record("b", .pass()), record("a", .pass(), ms: 3)]
-        let report = Report(started: Date(timeIntervalSince1970: 0), device: ["model": "iPad"], records: records)
-        XCTAssertEqual(report.results.map(\.id), ["a", "b"])
-        XCTAssertEqual(report.results[0].verdict, .pass)
-        XCTAssertEqual(report.summary, Report.Summary(pass: 2, fail: 0, skip: 0))
-        let decoded = try JSONDecoder().decode(Report.self, from: try report.encoded())
-        XCTAssertEqual(decoded.results[0].log, "HWTEST a PASS ms=3.0")
-        XCTAssertEqual(decoded.started, "1970-01-01T00:00:00.000Z")
-    }
-
-    func testReportEncodesTypedMetrics() throws {
+    func testAReservedOrMalformedKeyIsAHarnessFailNotATrap() {
         var metrics = Metrics()
-        metrics.set("frames", 60)
-        metrics.set("fps", 59.94)
-        metrics.set("hardware", true)
-        let report = Report(started: Date(), device: [:], records: [record("v", .pass(metrics))])
-        let json = try JSONSerialization.jsonObject(with: try report.encoded()) as! [String: Any]
-        let entry = (json["results"] as! [[String: Any]])[0]
-        let encoded = entry["metrics"] as! [String: Any]
-        XCTAssertEqual(encoded["frames"] as? Int, 60)
-        XCTAssertEqual(encoded["fps"] as? Double, 59.94)
-        XCTAssertEqual(encoded["hardware"] as? Bool, true)
+        metrics.set("ms", 1.5)
+        metrics.set("Bad-Key", 2)
+        metrics.set("fps", 60)
+        var nested = Metrics()
+        nested.set("why", "x")
+        metrics.merge(nested, prefix: "")
+        XCTAssertEqual(metrics.keys, ["fps"])
+        XCTAssertEqual(metrics.faults, ["ms", "Bad-Key", "why"])
+        let outcome = Outcome.pass(metrics).withHarnessFaults
+        XCTAssertEqual(outcome.verdict, .fail)
+        XCTAssertEqual(outcome.detail, "harness: bad metric key ms,Bad-Key,why")
+        XCTAssertEqual(
+            LogLine.format(record("image.png", outcome)),
+            "HWTEST image.png FAIL fps=60 ms=12.3 why=harness:_bad_metric_key_ms,Bad-Key,why")
+        let failed = Outcome.fail("no decoder", metrics).withHarnessFaults
+        XCTAssertEqual(failed.detail, "harness: bad metric key ms,Bad-Key,why; no decoder")
+        XCTAssertEqual(Outcome.pass().withHarnessFaults.verdict, .pass)
     }
 }

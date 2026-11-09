@@ -52,7 +52,7 @@ struct CPUSingleTest: HWTest {
         let second = Workload.time(threads: 1)
         var metrics = Metrics()
         metrics.set("mops", Double(Workload.rounds) / min(first.seconds, second.seconds) / 1e6, digits: 1)
-        metrics.set("ms", min(first.seconds, second.seconds) * 1000, digits: 1)
+        metrics.set("cpu_ms", min(first.seconds, second.seconds) * 1000, digits: 1)
         return .judged([("the same input gives the same answer", first.results == second.results)], metrics)
     }
 }

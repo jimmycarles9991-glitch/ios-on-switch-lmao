@@ -64,10 +64,11 @@ bool tegra_apbdma_alloc(uint32_t size, struct tegra_apbdma_buffer *out);
 struct tegra_apbdma_channel *tegra_apbdma_open(unsigned channel, IOWorkLoop *loop, tegra_apbdma_handler handler,
                                                void *context, char *why, size_t whySize);
 
-// Device to memory, continuously: one 8-bit APB read of `apb` (a UART's RBR) per byte, four to a burst into
-// [pa, pa + size) (size a multiple of 4), flow-controlled by request line `req`, round and round; end-of-count (and the
-// handler) at every wrap. The caller's lock.
-void tegra_apbdma_start_ring(struct tegra_apbdma_channel *ch, uint32_t apb, unsigned req, uint32_t pa, uint32_t size);
+// Device to memory, continuously, a byte at a time: tegra_apbdma_start_rx_words round and round over [pa, pa + size)
+// (size a multiple of 4, at most TEGRA_APBDMA_MAX_BYTES), one word a byte; end-of-count (and the handler) at every
+// wrap. The channel is the FIFO's only reader while it runs. The caller's lock.
+void tegra_apbdma_start_rx_words_ring(struct tegra_apbdma_channel *ch, uint32_t apb, unsigned req, uint32_t pa,
+                                      uint32_t size);
 // Memory to device, once: `size` bytes (a multiple of 16, at most TEGRA_APBDMA_MAX_BYTES) from `pa` (4-byte aligned)
 // to `apb` (a UART's THR), 16-byte bursts on request line `req`; end-of-count (and the handler) when the last has gone.
 void tegra_apbdma_start_once(struct tegra_apbdma_channel *ch, uint32_t apb, unsigned req, uint32_t pa, uint32_t size);

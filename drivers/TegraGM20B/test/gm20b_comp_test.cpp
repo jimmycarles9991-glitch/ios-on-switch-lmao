@@ -5,7 +5,10 @@
 // GM20B has one LTC of two slices (pri_ringmaster_enum_ltc; gm20b_determine_L2_size_bytes' lts_per_ltc) and the Switch
 // 4 GiB of RAM. CBC_PARAM's other fields are read from the GPU at boot; no published GM20B readout exists, so every
 // plausible comptags-per-cacheline and cache line size is checked.
+#include <algorithm>
+#include <chrono>
 #include <cstdint>
+#include <set>
 #include <vector>
 #include <gtest/gtest.h>
 #include "drivers/TegraGM20B/TegraGM20BComp.h"
@@ -148,6 +151,122 @@ TEST(PageShift, BigPagesOnlyOverAlignedRuns)
 	auto partial = runs({0xe4020000});
 	EXPECT_EQ(tgm_comp_page_shift(partial.data(), (uint32_t)partial.size() - 1), 12u);
 	EXPECT_EQ(tgm_comp_page_shift(partial.data(), 0), 12u);
+}
+
+// The GPU pool as shim/linux.c keeps it: 256 MiB of 4 KiB pages, a bit each in the map (taken) and in dirty (free, not
+// known to be zero)
+struct Pool {
+	static constexpr uint64_t kPages = (256ULL << 20) >> 12;
+	static constexpr uint64_t kWord = sizeof(unsigned long) * 8;
+	std::vector<unsigned long> map = std::vector<unsigned long>(kPages / kWord),
+				   dirty = std::vector<unsigned long>(kPages / kWord);
+
+	static void set(std::vector<unsigned long> &bits, uint64_t page)
+	{
+		bits[page / kWord] |= 1UL << (page % kWord);
+	}
+
+	static bool test(const std::vector<unsigned long> &bits, uint64_t page)
+	{
+		return (bits[page / kWord] >> (page % kWord)) & 1;
+	}
+
+	int pick(uint32_t count, std::vector<uint64_t> &chunks) const
+	{
+		chunks.assign(count, ~0ULL);
+		return tgm_comp_pick_chunks(map.data(), dirty.data(), kPages, count, chunks.data());
+	}
+};
+
+// Every picked chunk is free and distinct, and the pages the caller then zeroes are the dirty chunks' alone
+void expectFree(const Pool &p, const std::vector<uint64_t> &chunks, int dirty)
+{
+	std::set<uint64_t> seen;
+	for (size_t i = 0; i < chunks.size(); i++) {
+		bool anyDirty = false;
+		for (uint64_t k = 0; k < TGM_COMP_PAGES; k++) {
+			EXPECT_FALSE(Pool::test(p.map, chunks[i] * TGM_COMP_PAGES + k))
+				<< chunks[i];
+			anyDirty = anyDirty || Pool::test(p.dirty, chunks[i] * TGM_COMP_PAGES + k);
+		}
+		EXPECT_EQ(anyDirty, i >= chunks.size() - (size_t)dirty) << i;
+		EXPECT_TRUE(seen.insert(chunks[i]).second) << chunks[i];
+	}
+}
+
+TEST(PoolChunks, AFragmentedPoolServesWhatItHasFree)
+{
+	Pool p;
+	// every chunk but every 16th holds a taken page: 128 of 2048 chunks free, none next to another
+	for (uint64_t c = 0; c < Pool::kPages / TGM_COMP_PAGES; c++)
+		if (c % 16)
+			Pool::set(p.map, c * TGM_COMP_PAGES + (c % TGM_COMP_PAGES));
+	std::vector<uint64_t> chunks;
+	const int dirty = p.pick(57, chunks);  // a 720x1280 RGBA16F target: 7296 KiB
+	ASSERT_EQ(dirty, 0);
+	expectFree(p, chunks, dirty);
+	EXPECT_EQ(chunks.front(), 2032u);  // the top free chunk first
+	for (uint64_t c : chunks)
+		EXPECT_EQ(c % 16, 0u);
+	ASSERT_EQ(p.pick(128, chunks), 0);
+	expectFree(p, chunks, 0);
+	EXPECT_EQ(p.pick(129, chunks), -1);
+}
+
+TEST(PoolChunks, CleanChunksBeforeDirtyOnes)
+{
+	Pool p;
+	// the top 64 chunks are free and dirty (a page each), the rest free and clean
+	const uint64_t chunks_total = Pool::kPages / TGM_COMP_PAGES;
+	for (uint64_t c = chunks_total - 64; c < chunks_total; c++)
+		Pool::set(p.dirty, c * TGM_COMP_PAGES + 7);
+	std::vector<uint64_t> chunks;
+	ASSERT_EQ(p.pick(10, chunks), 0);
+	expectFree(p, chunks, 0);
+	EXPECT_EQ(chunks.front(), chunks_total - 65);
+	// only clean chunks below the first taken page of the pool: dirty ones make up the rest
+	for (uint64_t c = 0; c < chunks_total - 64 - 3; c++)
+		Pool::set(p.map, c * TGM_COMP_PAGES);
+	const int dirty = p.pick(10, chunks);
+	ASSERT_EQ(dirty, 7);
+	expectFree(p, chunks, dirty);
+}
+
+TEST(PoolChunks, ChunksStraddleNoWord)
+{
+	Pool p;
+	Pool::set(p.map, 31);      // chunk 0's last page
+	Pool::set(p.map, 32 * 5);  // chunk 5's first page
+	for (uint64_t c = 7; c < Pool::kPages / TGM_COMP_PAGES; c++)
+		Pool::set(p.map, c * TGM_COMP_PAGES + 16);
+	std::vector<uint64_t> chunks;
+	ASSERT_EQ(p.pick(5, chunks), 0);
+	EXPECT_EQ(chunks.front(), 6u);
+	std::sort(chunks.begin(), chunks.end());
+	EXPECT_EQ(chunks, (std::vector<uint64_t>{1, 2, 3, 4, 6}));
+	EXPECT_EQ(p.pick(6, chunks), -1);
+}
+
+// The kernel picks under the pool's spinlock: one pass over 2048 chunks, however fragmented the pool, in microseconds.
+TEST(PoolChunks, OnePassBoundsThePick)
+{
+	Pool p;
+	for (uint64_t c = 1; c < Pool::kPages / TGM_COMP_PAGES; c++)
+		Pool::set(p.map, c * TGM_COMP_PAGES + 31);
+	std::vector<uint64_t> chunks;
+	const auto start = std::chrono::steady_clock::now();
+	constexpr int kPicks = 100;
+	for (int i = 0; i < kPicks; i++)
+		ASSERT_EQ(p.pick(2, chunks),
+			  -1);  // the worst case: every chunk looked at, one found
+	const auto us = std::chrono::duration_cast<std::chrono::microseconds>(
+				std::chrono::steady_clock::now() - start)
+				.count() /
+			kPicks;
+	RecordProperty("pick_us", static_cast<int>(us));
+	EXPECT_LT(us, 1000);
+	ASSERT_EQ(p.pick(1, chunks), 0);
+	EXPECT_EQ(chunks.front(), 0u);
 }
 
 TEST(BindOk, WholeBigPagesOfBigPageMemory)

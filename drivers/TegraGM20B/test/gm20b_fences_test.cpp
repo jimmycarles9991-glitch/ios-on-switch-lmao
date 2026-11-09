@@ -606,4 +606,21 @@ TEST(FenceDecisions, WaitOnlyForAnUnfinishedWriteOfALiveOtherChannel)
 	EXPECT_FALSE(tgm_fence_wanted(writer(kApp, 5), &killed));
 	EXPECT_FALSE(tgm_fence_wanted(0, &running));
 }
+
+// A present's wait passed on a killed writer's release (gpu.c present_fenced): the frame is lost only when the submission it
+// waited for was among those the kill left unfinished, across the seqno wrap too.
+TEST(FenceDecisions, AWaitIsLostOnlyOnASubmissionTheKillLeftUnfinished)
+{
+	const TegraGM20BAbiFence live = {9, 0, 0, 0};
+	const TegraGM20BAbiFence killed = {12, 7, 12, 2};
+	const TegraGM20BAbiFence wrapped = {3, 0xfffffffe, 3, 1};
+	EXPECT_FALSE(tgm_fence_lost(&live, 9));
+	EXPECT_FALSE(tgm_fence_lost(&killed, 6));
+	EXPECT_TRUE(tgm_fence_lost(&killed, 7));
+	EXPECT_TRUE(tgm_fence_lost(&killed, 12));
+	EXPECT_FALSE(tgm_fence_lost(&killed, 13));
+	EXPECT_FALSE(tgm_fence_lost(&wrapped, 0xfffffffd));
+	EXPECT_TRUE(tgm_fence_lost(&wrapped, 0xffffffff));
+	EXPECT_TRUE(tgm_fence_lost(&wrapped, 2));
+}
 }  // namespace

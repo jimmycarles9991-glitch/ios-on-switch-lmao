@@ -266,6 +266,14 @@ bool Kernel::surfaceGpuWrites(uint32_t surfaceId)
     return false;
 }
 
+bool Kernel::priority(uint32_t priority, uint32_t background)
+{
+    if (!(info_.flags & TegraGM20BInfoPriority))
+        return false;
+    const TegraGM20BAbiPriority in = {priority, background};
+    return call(TegraGM20BMethodPriority, &in, sizeof in, nullptr, 0) == KERN_SUCCESS;
+}
+
 uint32_t Kernel::surfaceLayout(const Bo &bo, uint32_t width, uint32_t height, uint32_t bpp, uint32_t bytesPerRow,
                                bool writes)
 {

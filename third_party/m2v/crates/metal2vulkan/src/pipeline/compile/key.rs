@@ -27,12 +27,16 @@ use crate::pipeline::descriptor::{
     LinkedList, PrivateRenderState, RenderPipelineDescriptor, StageInputDescriptor, StageSource,
 };
 
-/// What a compile key records of one linked function: the list it is in, its name, its AIR hash,
-/// and the constant values it was specialized with.
+/// What a compile key records of one linked function: the list it is in, the name it links under,
+/// its module's function that defines it, its AIR hash, and the constant values it was
+/// specialized with.
 #[derive(Clone, Copy, Debug)]
 pub struct LinkedKey<'a> {
     pub list: LinkedList<'a>,
+    /// The name a visible-function reference calls it by (`LinkedFunction::linked_name`).
     pub name: &'a str,
+    /// Its library function's name, which defines it in its module.
+    pub symbol: &'a str,
     pub air_hash: Hash256,
     pub constants: &'a FunctionConstantValues,
 }
@@ -415,6 +419,10 @@ pub fn function_key(
                 LinkedList::Group(name) => h.u64(3).bytes(name.as_bytes()),
             };
             h.bytes(&l.air_hash).bytes(l.name.as_bytes());
+            // Appended only when it differs, so a function linked by its own name keeps its key.
+            if l.symbol != l.name {
+                h.bytes(b"symbol").bytes(l.symbol.as_bytes());
+            }
             constants(&mut h, l.constants);
         }
     }

@@ -1,6 +1,6 @@
 {
   "class": "IOMobileFramebufferLegacy",
-  "doc": "The original IOMobileFramebufferLegacy (com.apple.iokit.IOMobileGraphicsFamily, below IOMobileFramebufferService and IOMobileFramebuffer): the family's swap queue, user client and power states, which NativeLegacyDisplay subclasses in place of Apple's platform display driver. Its virtuals beyond IOService's carry no PAC name we know, so each kind's table places them by hint.",
+  "doc": "The original IOMobileFramebufferLegacy (com.apple.iokit.IOMobileGraphicsFamily, below IOMobileFramebufferService and IOMobileFramebuffer): the family's swap queue, user client and power states, which NativeLegacyDisplay subclasses in place of Apple's platform display driver. Most of its virtuals beyond IOService's carry no PAC name we know, so each kind's table places those by hint.",
   "superclass": "IOService",
   "kext": "com.apple.iokit.IOMobileGraphicsFamily",
   "structors": "abstract",
@@ -193,12 +193,12 @@
       "doc": "ChangeFrameInfo (selector 73: the notification type, 3, and the keys a client wants, one bit per supportedFrameInfo index), under the work-loop gate; client is the family's notification record. J120's AppleCLCD forwards it to its pipe, which keeps the client's mask and answers kIOReturnBadArgument for any other type."
     },
     "platformInternalPlug": {
-      "decl": "virtual void platformInternalPlug() = 0",
+      "decl": "virtual IOReturn platformInternalPlug() = 0",
       "pac": "_ZN25IOMobileFramebufferLegacy20platformInternalPlugEv",
       "doc": "Reached from IOAVHandlerInternalDisplay::plugEvent_async_gated; UnifiedPipeline answers kIOReturnUnsupported. Only a platform display driver implements it, and nothing here should reach it."
     },
     "platformInternalUnplug": {
-      "decl": "virtual void platformInternalUnplug() = 0",
+      "decl": "virtual IOReturn platformInternalUnplug() = 0",
       "pac": "_ZN25IOMobileFramebufferLegacy22platformInternalUnplugEv",
       "doc": "The internal display plug pair's second; UnifiedPipeline answers kIOReturnUnsupported. Only a platform display driver implements it, and nothing here should reach it."
     },
@@ -217,10 +217,10 @@
       "pac": "_ZN25IOMobileFramebufferLegacy20platformRefreshRatesEv",
       "doc": "Reached from hotPlug_notify_gated's refresh frequencies; UnifiedPipeline does nothing. Only a platform display driver implements it, and nothing here should reach it."
     },
-    "platformIdleWithoutClients": {
-      "decl": "virtual void platformIdleWithoutClients() = 0",
-      "pac": "_ZN25IOMobileFramebufferLegacy26platformIdleWithoutClientsEv",
-      "doc": "Reached from disp_has_no_clients_gated and swap_wait_gated; UnifiedPipeline answers a flag of its own. Only a platform display driver implements it, and nothing here should reach it."
+    "areTimingsEnabled": {
+      "decl": "virtual bool areTimingsEnabled() const = 0",
+      "pac": "_ZNK25IOMobileFramebufferLegacy19are_timings_enabledEv",
+      "doc": "Whether the display's timing generator runs. swap_wait_gated logs it as TimingEnable when a swap wait times out (5 s) and cancels the swaps; disp_has_no_clients_gated asks it before its power request. J120's AppleCLCD and J181's UnifiedPipeline answer the flag their timing enable sets (UnifiedPipeline::enable_timings_gated)."
     }
   },
   "fields": {

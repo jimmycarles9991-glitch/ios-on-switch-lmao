@@ -14,13 +14,26 @@
 #                     past its room the all-imports flag, its length
 #   raw_events_source_test  how a command buffer with a plain or shared Metal event stays raw (frontend, bridge, m2v,
 #                     RawMetal), and the cross-process shared event refusal line
+#   raw_linked_source_test  how a render pipeline's linked functions reach m2v (frontend, bridge, its C and Rust forms)
+#                     and how the raw path's twin and record key take them
 #   raw_follow_test   raw/runtime/raw_follow.h: the raw path's threads take a fixed-priority committer's policy, never a
 #                     lower one, and keep their own for a timeshare committer
+#   raw_slm_test      raw/runtime/raw_slm.h: the shader local memory a program's header or a kernel's QMD asks of a
+#                     warp, the area NVK sizes for it, the methods that give it to the raw channel's 3D and compute
+#                     classes (the runtime's, never a record's), ahead of every program of the pack or a record
+#   raw_tic_words_test  raw/runtime/raw_zeta.h and raw_gpu.cpp's block-compressed rows: each depth/stencil format's
+#                     SET_ZT_FORMAT and texture header word 0, and each compressed format's word 0, rebuilt from NIL's
+#                     row of NVK's format by NIL's generator rules
+#   mkpack_owned_test raw/pack/mkpack.py: no blob or baseline register is one the raw path owns
 #   raw_tiled_cache_test  raw/runtime/raw_tiled_cache.h: with the kernel's tiled-cache bit, deko3d's configuration then the
-#                     enable at context init and one flush per command buffer; nothing without it
+#                     enable at context init and one flush per pass and per command buffer; nothing without it
 #   raw_comp_test     raw/runtime/raw_comp.h: the compressible kinds the raw path binds are the kernel kind table's (nouveau
 #                     gm200_mmu_kind) and demote as it says; the boot ZBC values read alike by Metal and NV format
 #   stage_test        stage-tegra-gm20b-metal.py on a directory standing in for the Data volume
+#   inventory_test    raw/test/inventory.tsv, selgaps.txt and refused.txt still describe the kinds' sent tables (selcover,
+#                     over the host harness, writes them from the raw device's objects)
+#   rawpack_records_test  what the pack generator keeps of a probe: texture3d entries, 32 set-0 entries and m2v's
+#                     own buffer beside an 8-bit sRGB target
 #   raw_ycbcr_test    raw/runtime/raw_ycbcr.cpp: the two-plane YCbCr textures the raw path converts (m2v's rules) and the
 #                     conversion's shape; its texels against Metal's reads are raw/test/ycbcroracle.mm's (this Mac's GPU)
 #   raw_xr_test       raw/runtime/raw_xr.h: the extended-range formats the raw path keeps and the codes Metal's Clear
@@ -29,6 +42,13 @@
 #                     (raw/test/targetcheck.py: its target formats against NVK's)
 #   raw_sampler_test  raw/runtime/raw_sampler.h: the Metal samplers the raw path takes, as m2v samples them on NVK
 #                     (raw/test/samplercheck: their headers against NVK's)
+#   raw_archive_test  raw/runtime/raw_archive.h: the binary archive files the device opens where m2v's reader does not
+#                     (iOS 27's thin Apple GPU binaries), as Metal opens a file of another GPU's binaries
+#   raw_heap_test     raw/runtime/raw_heap.h: an MTLHeap's placements in its one span, Metal's contract (a full heap
+#                     answers nil, aliasable ranges are taken again, usedSize and maxAvailableSizeWithAlignment)
+#   raw_residual_test raw/runtime/raw_residual.h: a buffer bound off m2v's descriptor base alignment (16 bytes for a
+#                     storage buffer, 256 for a uniform one) at the aligned base with its SlotBindOffset residual in the
+#                     push word raw/pack/probe_bind.h's bind-offset run names
 #   raw_cache_test    raw/runtime/raw_cache.h: the records the runtime makes for states the pack lacks, kept on disk and
 #                     made once per process (raw/test/cachecheck: the same checks on a bucket's real records), and
 #                     raw_metallib.h: the functions' AIR hashes that key them
@@ -39,7 +59,9 @@
 #                     coverage it is raw/test/overlaporacle.mm's, this Mac's GPU)
 #   nak_half_round_test  NAK's rewrites of metal2vulkan's half emulation (nak_nir_algebraic.py): its rounding as two
 #                     conversions, the same for every f32 input; half sums and products in f32 as HADD2/HMUL2, the
-#                     same for every pair of halves
+#                     same for every pair of halves; and fquantize2f16's widening as HADD2.F32 (nak/from_nir.rs)
+#   nak_fp32_flush_test  NAK's fp32 flush elision (nak_nir_algebraic.py): a flushed source under fneg or fabs feeds an FTZ
+#                     instruction as its source does, and no FTZ result or widened half is a denormal
 #
 #   bazel test //drivers/TegraGM20BMetal/test:all
 load("@rules_python//python:py_test.bzl", "py_test")
@@ -71,6 +93,8 @@ host_test(
         "raw_layout_test.cpp",
         "//drivers/TegraDisplayFlip:TegraScanoutCopy.h",
         "//drivers/TegraGM20B:TegraGM20BLayout.h",
+        "//drivers/TegraGM20BMetal:raw/fx/fx_image.cpp",
+        "//drivers/TegraGM20BMetal:raw/fx/fx_image.h",
         "//drivers/TegraGM20BMetal:raw/fx/fx_mip.cpp",
         "//drivers/TegraGM20BMetal:raw/fx/fx_mip.h",
         "//drivers/TegraGM20BMetal:raw/runtime/raw_push.h",
@@ -132,6 +156,19 @@ host_test(
 )
 
 host_test(
+    name = "raw_linked_source_test",
+    srcs = ["raw_linked_source_test.cpp"],
+    data = [
+        "//drivers/NativeMetal:NativeBridgeMetalFrontend.mm",
+        "//drivers/NativeMetal:bridge/NativeMetalObjects.h",
+        "//drivers/NativeMetal:bridge/NativeMetalObjects.rs",
+        "//drivers/TegraGM20BMetal:raw/runtime/RawComplete.mm",
+        "//drivers/TegraGM20BMetal:raw/runtime/RawMetalLibrary.mm",
+        "//drivers/TegraGM20BMetal:raw/runtime/RawMetalStates.mm",
+    ],
+)
+
+host_test(
     name = "raw_follow_test",
     srcs = [
         "raw_follow_test.cpp",
@@ -180,6 +217,52 @@ py_test(
     data = ["//drivers/TegraGM20BMetal:stage-tegra-gm20b-metal.py"],
 )
 
+py_test(
+    name = "inventory_test",
+    srcs = ["inventory_test.py"],
+    data = [
+        "//drivers/NativeMetal/abi:kinds/21H461.json",
+        "//drivers/NativeMetal/abi:kinds/24B119.json",
+        "//drivers/TegraGM20BMetal:raw/test/inventory.tsv",
+        "//drivers/TegraGM20BMetal:raw/test/refused.txt",
+        "//drivers/TegraGM20BMetal:raw/test/selgaps.txt",
+    ],
+)
+
+py_test(
+    name = "raw_tic_words_test",
+    srcs = ["raw_tic_words_test.py"],
+    data = [
+        "//drivers/TegraGM20BMetal:raw/runtime/raw_gpu.cpp",
+        "//drivers/TegraGM20BMetal:raw/runtime/raw_zeta.h",
+        "//third_party/mesa/src/nouveau/headers:nvidia/classes/cl9097tex.h",
+        "//third_party/mesa/src/nouveau/headers:nvidia/classes/clb097tex.h",
+        "//third_party/mesa/src/nouveau/headers:nvidia/classes/clb197.h",
+        "//third_party/mesa/src/nouveau/headers:nvidia/classes/clb197tex.h",
+        "//third_party/mesa/src/nouveau/nil:nil_formats.csv",
+    ],
+)
+
+py_test(
+    name = "mkpack_owned_test",
+    srcs = ["mkpack_owned_test.py"],
+    data = ["//drivers/TegraGM20BMetal:raw/runtime/raw_owned.h"],
+    deps = ["//drivers/TegraGM20BMetal:raw_pack"],
+)
+
+py_test(
+    name = "rawpack_split_test",
+    srcs = ["rawpack_split_test.py"],
+    deps = ["//drivers/TegraGM20BMetal:raw_pack"],
+)
+
+py_test(
+    name = "rawpack_records_test",
+    srcs = ["rawpack_records_test.py"],
+    data = ["//drivers/TegraGM20BMetal:raw/runtime/raw_owned.h"],  # mkpack.py reads it at import
+    deps = ["//drivers/TegraGM20BMetal:raw_pack"],
+)
+
 host_test(
     name = "raw_ycbcr_test",
     srcs = [
@@ -206,6 +289,37 @@ host_test(
         "//drivers/TegraGM20BMetal:raw/runtime/raw_clear.h",
     ],
     cxx_std = "c++17",
+)
+
+host_test(
+    name = "raw_slm_test",
+    srcs = [
+        "raw_slm_test.cpp",
+        "//drivers/TegraGM20BMetal:raw/runtime/raw_owned.h",
+        "//drivers/TegraGM20BMetal:raw/runtime/raw_push.h",
+        "//drivers/TegraGM20BMetal:raw/runtime/raw_slm.h",
+    ],
+    cxx_std = "c++17",
+    data = [
+        "//drivers/TegraGM20BMetal:raw/runtime/raw_completed.cpp",
+        "//drivers/TegraGM20BMetal:raw/runtime/raw_compute.cpp",
+        "//drivers/TegraGM20BMetal:raw/runtime/raw_gpu.cpp",
+    ],
+)
+
+host_test(
+    name = "raw_stamps_test",
+    srcs = [
+        "raw_stamps_test.cpp",
+        "//drivers/TegraGM20B:nouveau/include/nvhw/class/cl906f.h",
+        "//drivers/TegraGM20BMetal:raw/runtime/raw_push.h",
+        "//drivers/TegraGM20BMetal:raw/runtime/raw_stamps.h",
+    ],
+    cxx_std = "c++17",
+    data = [
+        "//drivers/TegraGM20B:gpu.c",
+        "//drivers/TegraGM20BMetal:raw/runtime/raw_gpu.cpp",
+    ],
 )
 
 host_test(
@@ -239,9 +353,39 @@ host_test(
 )
 
 host_test(
+    name = "raw_archive_test",
+    srcs = [
+        "raw_archive_test.cpp",
+        "//drivers/TegraGM20BMetal:raw/runtime/raw_archive.h",
+    ],
+    cxx_std = "c++17",
+)
+
+host_test(
+    name = "raw_heap_test",
+    srcs = [
+        "raw_heap_test.cpp",
+        "//drivers/TegraGM20BMetal:raw/runtime/raw_heap.h",
+    ],
+    cxx_std = "c++17",
+)
+
+host_test(
+    name = "raw_residual_test",
+    srcs = [
+        "raw_residual_test.cpp",
+        "//drivers/TegraGM20BMetal:raw/pack/probe_bind.h",
+        "//drivers/TegraGM20BMetal:raw/runtime/raw_pack.h",
+        "//drivers/TegraGM20BMetal:raw/runtime/raw_residual.h",
+    ],
+    cxx_std = "c++17",
+)
+
+host_test(
     name = "raw_cache_test",
     srcs = [
         "raw_cache_test.cpp",
+        "//drivers/TegraGM20BMetal:raw/pack/probe_bind.h",
         "//drivers/TegraGM20BMetal:raw/pack/probe_record.h",
         "//drivers/TegraGM20BMetal:raw/runtime/raw_cache.cpp",
         "//drivers/TegraGM20BMetal:raw/runtime/raw_cache.h",
@@ -256,6 +400,18 @@ host_test(
         "//drivers/TegraGM20BMetal:raw/test/cache_checks.h",
     ],
     cxx_std = "c++17",
+)
+
+host_test(
+    name = "nak_fp32_flush_test",
+    size = "medium",
+    srcs = ["nak_fp32_flush_test.cpp"],
+    copts = [
+        "-O2",
+        "-ffp-model=strict",
+    ],
+    cxx_std = "c++17",
+    sanitize = False,
 )
 
 host_test(

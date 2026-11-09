@@ -18,6 +18,7 @@
 #include <sstream>
 #include <string>
 #include <string_view>
+#include <vector>
 
 #ifndef SWITCH_TEST_PACKAGE
 #error "SWITCH_TEST_PACKAGE is set by //bazel/testing:defs.bzl host_test"
@@ -80,6 +81,49 @@ inline size_t Count(std::string_view text, std::string_view needle)
          at = text.find(needle, at + needle.size()))
         ++count;
     return count;
+}
+
+// The lines a compiler sees with `macro` (a build-time version or capability flag such as XNU_12377_121_6) set or not:
+// "#if macro" and "#if !macro" blocks, with their "#else", are resolved; every other conditional is kept whole.
+inline std::string Configured(const std::string &source, std::string_view macro, bool set)
+{
+    enum Branch {
+        kOther,
+        kTaken,
+        kSkipped
+    };
+
+    const std::string ifSet = "#if " + std::string(macro), ifUnset = "#if !" + std::string(macro);
+    std::vector<Branch> open;
+    std::istringstream lines(source);
+    std::string out;
+    for (std::string line; std::getline(lines, line);) {
+        const auto starts = [&](std::string_view prefix) {
+            return line.rfind(prefix, 0) == 0;
+        };
+        if (line == ifSet || line == ifUnset) {
+            open.push_back((line == ifSet) == set ? kTaken : kSkipped);
+            continue;
+        }
+        if (starts("#if")) {
+            open.push_back(kOther);
+        } else if (starts("#else") && !open.empty() && open.back() != kOther) {
+            open.back() = open.back() == kTaken ? kSkipped : kTaken;
+            continue;
+        } else if (starts("#endif") && !open.empty()) {
+            const bool ours = open.back() != kOther;
+            open.pop_back();
+            if (ours)
+                continue;
+        }
+        bool skipping = false;
+        for (const Branch branch : open)
+            skipping = skipping || branch == kSkipped;
+        if (!skipping)
+            out += line + "\n";
+    }
+    EXPECT_TRUE(open.empty()) << "unbalanced conditionals";
+    return out;
 }
 
 }  // namespace switch_ios::test

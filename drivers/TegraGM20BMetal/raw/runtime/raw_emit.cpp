@@ -19,6 +19,8 @@ constexpr uint32_t kCtWrite = 0x1a00;        // SET_CT_WRITE(j)
 constexpr uint32_t kBlendPerTarget =
     0x1e00;  // SET_BLEND_PER_TARGET_SEPARATE_FOR_ALPHA(j), then its ops and coefficients
 constexpr uint32_t kRegisterCount[2] = {0x204c, 0x214c};  // SET_PIPELINE_REGISTER_COUNT(vertex B, pixel)
+constexpr uint32_t kAttribute = 0x1160;                   // SET_VERTEX_ATTRIBUTE_A(i)
+constexpr uint32_t kStreamFormat = 0x1c00;                // SET_VERTEX_STREAM_A_FORMAT(s), 16 bytes apart
 constexpr uint32_t kOpAdd = 0x8006, kZero = 0x4000;
 constexpr uint32_t kViewportClipBase = 0x181c;  // NVK's, z_clamp_zero_one in bit 0
 
@@ -150,7 +152,7 @@ struct Attribute {
 bool emitVertexInput(const std::string &keyFields, const std::vector<uint32_t> &attributes,
                      std::vector<EmitRegister> &out, std::string &why)
 {
-    constexpr uint32_t kAttribute = 0x1160, kStreamFormat = 0x1c00, kStreamEnable = 1u << 12, kStepPerVertex = 1;
+    constexpr uint32_t kStreamEnable = 1u << 12, kStepPerVertex = 1;
     constexpr uint32_t kSourceInactive = 1u << 6, kInactive = kSourceInactive | 0x01u << 21 | 7u << 27;
     std::map<unsigned, Attribute> descriptor;
     for (size_t at = 0; at < keyFields.size();) {
@@ -210,7 +212,7 @@ bool emitVertexInput(const std::string &keyFields, const std::vector<uint32_t> &
 }
 
 bool emitState(const std::string &keyFields, const EmitProgram &vertex, const EmitProgram &fragment,
-               std::vector<EmitRegister> &out, std::string &why)
+               std::vector<EmitRegister> &out, std::string &why, const uint32_t *blended)
 {
     std::map<unsigned, Color> colors;
     unsigned depthFormat = 0;
@@ -230,7 +232,9 @@ bool emitState(const std::string &keyFields, const EmitProgram &vertex, const Em
                 components |= (extendedRange(c.format) ? written >> i & 1 : c.writeMask >> (3 - i) & 1) << i;
         writes[j] = ctWrite(components);
         out.push_back({kCtWrite + 4 * j, writes[j], true});
-        const bool blends = c.blending && c.writeMask && !identityBlend(c) && !extendedRange(c.format);
+        // m2v leaves a blend of ONE and ZERO on where the program does not round the target's writes itself
+        const bool vulkanBlend = blended ? (*blended >> j & 1) : c.blending && !identityBlend(c);
+        const bool blends = vulkanBlend && c.writeMask && !extendedRange(c.format);
         out.push_back({kBlend + 4 * j, blends, writes[j] && !(c.blending && identityBlend(c))});
         if (j)
             out.push_back({kBlendPerTarget + 0x20 * j, 1, true});
@@ -251,6 +255,22 @@ bool emitState(const std::string &keyFields, const EmitProgram &vertex, const Em
     out.push_back({kRegisterCount[0], vertex.gprs, true});
     out.push_back({kRegisterCount[1], fragment.gprs, true});
     return true;
+}
+
+std::set<uint32_t> emittableMethods()
+{
+    constexpr uint32_t kTargets = 8, kStreams = 32;
+    std::set<uint32_t> out = {kEarlyZ, kSingleCtWrite, kViewportClip, kRegisterCount[0], kRegisterCount[1]};
+    for (uint32_t j = 0; j < kTargets; j++) {
+        out.insert({kCtWrite + 4 * j, kBlend + 4 * j});
+        for (uint32_t k = j ? 0 : 1; k < 7; k++)
+            out.insert(kBlendPerTarget + 0x20 * j + 4 * k);
+    }
+    for (uint32_t location = 0; location < 32; location++)
+        out.insert(kAttribute + 4 * location);
+    for (uint32_t stream = 0; stream < kStreams; stream++)
+        out.insert(kStreamFormat + 0x10 * stream);
+    return out;
 }
 
 }  // namespace raw

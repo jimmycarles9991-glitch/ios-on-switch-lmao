@@ -9,6 +9,8 @@ from types import ModuleType
 import native_oled_adt
 from python.runfiles import runfiles
 
+from tools.trustcache.trustcache import trust_module
+
 
 def load_adt_edit() -> ModuleType:
     path = runfiles.Create().Rlocation('_main/tools/package/adt_edit.py')
@@ -87,6 +89,12 @@ class Identity(unittest.TestCase):
         self.assertEqual(product['model'], properties(self.apple)['model'])
         self.assertEqual(product['artwork-display-gamut'], b'sRGB\0')
 
+    def test_backlight_white_point_type_is_apples(self):
+        chosen, apple = properties(find(self.tree, 'chosen')), properties(find(self.apple, 'backlight'))
+        self.assertEqual(apple['default-whitepoint-type'], struct.pack('<I', 1), 'J120 and J181 both say D65')
+        self.assertEqual(chosen[self.adt_edit.WHITEPOINT_TYPE], apple['default-whitepoint-type'])
+        self.assertFalse(any(p[0] == 'name' and p[2] == b'backlight\0' for c in self.tree[1] for p in c[0]))
+
     def test_audio_is_apples_acoustic_design(self):
         audio, apple = properties(find(self.tree, 'product', 'audio')), properties(find(self.apple, 'product', 'audio'))
         for key in self.adt_edit.AUDIO_IDENTITY:
@@ -131,34 +139,38 @@ class Capabilities(unittest.TestCase):
         self.assertNotIn('function-button_halleffect', buttons)
         self.assertEqual(properties(find(tree, 'product', 'maps'))['3d-maps'], struct.pack('<I', 0))
 
-
-def trust_module(uuid: bytes) -> bytes:
-    return struct.pack('<I', 2) + uuid + struct.pack('<I', 0)
-
-
-def im4p(kind: bytes, payload: bytes) -> bytes:
-    def der(tag: int, value: bytes) -> bytes:
-        assert len(value) < 0x80
-        return bytes([tag, len(value)]) + value
-
-    return der(0x30, der(0x16, b'IM4P') + der(0x16, kind) + der(0x16, b'1') + der(0x04, payload))
-
-
-class CryptexTrust(unittest.TestCase):
-    def test_lists_each_modules_uuid_whether_apples_im4p_or_a_module(self):
+    def test_syscfg_is_there_and_empty(self):
         adt_edit = load_adt_edit()
-        system, translated, app = bytes(range(16)), bytes(range(16, 32)), bytes(range(32, 48))
-        adt = adt_edit.ipad_adt(switch_tree())
-        adt = adt_edit.with_cryptex_trust(adt, 'os', [im4p(b'trcs', trust_module(system)), trust_module(translated)])
-        adt = adt_edit.with_cryptex_trust(adt, 'app', [im4p(b'trca', trust_module(app))])
+        tree, _ = adt_edit.adt_parse(adt_edit.ipad_adt(switch_tree()))
+        syscfg = properties(find(tree, 'chosen'))['syscfg-v2-data']
+        self.assertEqual(syscfg[:4], b'gfCS')
+        self.assertEqual(len(syscfg), 24)
+        self.assertEqual(struct.unpack_from('<I', syscfg, 0x14)[0], 0)
+
+
+def h(n: int) -> bytes:
+    return bytes([n]) * 20
+
+
+class CdhashLists(unittest.TestCase):
+    def test_each_role_lists_its_modules_cdhashes_ascending_and_once(self):
+        adt_edit = load_adt_edit()
+        system, translated = trust_module([h(9), h(3)]), trust_module([h(3), h(5)])
+        adt = adt_edit.with_cdhash_lists(
+            adt_edit.ipad_adt(switch_tree()),
+            {'os-cryptex': [system, translated], 'app-cryptex': [trust_module([h(1)])]},
+        )
         chosen = properties(find(adt_edit.adt_parse(adt)[0], 'chosen'))
-        self.assertEqual(chosen['switch-os-cryptex-trust'], system + translated)
-        self.assertEqual(chosen['switch-app-cryptex-trust'], app)
+        self.assertEqual(chosen['switch-os-cryptex-cdhashes'], h(3) + h(5) + h(9))
+        self.assertEqual(chosen['switch-app-cryptex-cdhashes'], h(1))
+        self.assertNotIn('switch-pretranslated-cdhashes', chosen)
 
-    def test_refuses_what_is_not_a_trust_module(self):
+    def test_refuses_what_is_not_a_trust_module_an_unknown_role_or_an_empty_list(self):
         adt_edit = load_adt_edit()
-        with self.assertRaises(SystemExit):
-            adt_edit.with_cryptex_trust(adt_edit.ipad_adt(switch_tree()), 'os', [b'\x01' * 24])
+        adt = adt_edit.ipad_adt(switch_tree())
+        for modules in ({'os-cryptex': [b'\x01' * 24]}, {'kernel': [trust_module([h(1)])]}, {'os-cryptex': []}):
+            with self.subTest(modules=modules), self.assertRaises((SystemExit, ValueError)):
+                adt_edit.with_cdhash_lists(adt, modules)
 
 
 if __name__ == '__main__':

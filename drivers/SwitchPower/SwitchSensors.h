@@ -39,7 +39,7 @@ enum switch_sensor_source {
     SWITCH_SRC_TMP451_SOC,    // TMP451 remote channel: the SoC's thermal diode (hekate's -12.5 C offset applied)
     SWITCH_SRC_TMP451_PCB,    // TMP451 local channel: the PCB at the sensor, next to the SoC
     SWITCH_SRC_BATTERY,       // MAX17050 TEMP: the battery pack's thermistor
-    SWITCH_SRC_TCAL,          // the PMU's calibration channel: none here (digital sensors), reports no correction
+    SWITCH_SRC_TCAL,          // the PMU's calibration channel: answers the model's reference, so no correction
     SWITCH_SRC_COUNT
 };
 
@@ -56,11 +56,13 @@ struct switch_sensor {
 
 // The table of the IPSW's own iPad (switch_ipsw_volumes.h's SWITCH_IPSW_DEVICE_*): J181 for iOS 27, J120 for iOS 17.
 #ifdef SWITCH_IPSW_DEVICE_J181AP
-#define SWITCH_SENSOR_COUNT SWITCH_SENSOR_COUNT_J181AP
-#define switch_sensors      switch_sensors_j181ap
+#define SWITCH_SENSOR_COUNT       SWITCH_SENSOR_COUNT_J181AP
+#define switch_sensors            switch_sensors_j181ap
+#define SWITCH_SENSOR_TCAL_MILLIC SWITCH_SENSOR_TCAL_MILLIC_J181AP
 #else
-#define SWITCH_SENSOR_COUNT SWITCH_SENSOR_COUNT_J120AP
-#define switch_sensors      switch_sensors_j120ap
+#define SWITCH_SENSOR_COUNT       SWITCH_SENSOR_COUNT_J120AP
+#define switch_sensors            switch_sensors_j120ap
+#define SWITCH_SENSOR_TCAL_MILLIC SWITCH_SENSOR_TCAL_MILLIC_J120AP
 #endif
 
 // The sensors thermalmonitord reads every 5 s (copyEvent), as a mask of a table's indices. It sets an infoOnly

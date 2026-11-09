@@ -50,8 +50,9 @@ uint32_t a64x_translate_page(const uint32_t *in, uint32_t *out, uint32_t nwords,
             uint64_t stub_va = sr->va + 4ull * cursor;
             uint32_t dead = a64x_dead_regs_window(in, (int)nwords, (int)i);
             /* V temporaries: those dead within the page (path walk as for X registers) need no save */
-            uint32_t vdead =
-                a64x_class_uses_vtemps(c) ? a64x_dead_vregs_flow(in, (int)nwords, (int)i, 0xFFFFFFFFu, 2000, false) : 0;
+            uint32_t vdead = a64x_class_uses_vtemps(c)
+                                 ? a64x_dead_vregs_flow(in, (int)nwords, (int)i, 0xFFFFFFFFu, 2000, false, sr->walk)
+                                 : 0;
             int n = a64x_stub_v(w, site, stub_va, dead, vdead, stub_buf, A64X_STUB_MAX);
             uint32_t b = n > 0 ? a64x_branch(site, stub_va) : 0;
             if (n > 0 && n <= A64X_STUB_MAX && b && cursor + (uint32_t)n <= sr->cap_words) {
@@ -85,7 +86,8 @@ uint32_t a64x_translate_page(const uint32_t *in, uint32_t *out, uint32_t nwords,
  *   [aut* x16,x17][mov x17,x16][xpac* x17][cmp x16,x17][b.eq ok][brk #0xc47x] ok:          5 free words
  * x16, x17 and NZCV are clobbered by these sequences by definition, so skipping them changes nothing observable.
  * Only sequences entirely inside [0, n) and inside code are taken (the kernel sees one page at a time; the planner
- * applies the same rule). `hole` (optional) is told every freed run.
+ * applies the same rule). `hole` (optional) is told every freed run that nothing enters: compilers share one check
+ * between a signed path and an unsigned early return that branches straight to its EOR, and those words stay live.
  */
 static bool is_check_brk(uint32_t w)
 {
@@ -123,7 +125,11 @@ uint32_t a64x_dead_checks(const uint32_t *in, uint32_t *out, uint32_t n, uint64_
             continue;
         }
         out[first] = 0x14000000u | len; /* b ok (the word after the brk) */
-        if (hole) {
+        bool entered = false;
+        for (uint32_t q = first + 1; hole && q <= k && code && code->is_target; q++) {
+            entered |= code->is_target(code->ctx, va + 4ull * q);
+        }
+        if (hole && !entered) {
             hole(hctx, first + 1, len - 1);
         }
         found++;
@@ -135,7 +141,10 @@ uint32_t a64x_dead_checks(const uint32_t *in, uint32_t *out, uint32_t n, uint64_
  * Data islands in an image translated page by page (no plan, no whole-image reachability): the words of its
  * instruction sections are cut into runs at UDF/zero words, at non-code words and at function starts
  * (LC_FUNCTION_STARTS); a run holding at least one unallocated encoding per 32 words is data (assembler tables:
- * K256, sincos coefficients, Hann windows are 8-50% unallocated; compiled code has none). LC_DATA_IN_CODE ranges are
+ * K256, sincos coefficients, Hann windows are 8-50% unallocated; compiled code has none), and so is what a piece runs
+ * into padding with, after its last word that ends code (a64x_ends_code): a table of 64-bit values below 2^32 is
+ * single words between zero halves, each read alone (lzfse's mask table: 0x1fffffff decodes as an FP16 FNMSUB), and
+ * a jump table can sit right behind the code that dispatches through it. LC_DATA_IN_CODE ranges are
  * marked by the caller. Streamed: pages in order, the open run carries over page boundaries.
  */
 bool a64x_unallocated(uint32_t w)
@@ -149,7 +158,7 @@ bool a64x_unallocated(uint32_t w)
  * pool with no symbol in between is one run, and only the pool must go. A data piece makes the rest of its run data
  * (a table split by words that happen to look like branches).
  */
-static void piece_close(struct a64x_islands *is, uint64_t end)
+static void piece_close(struct a64x_islands *is, uint64_t end, bool padded)
 {
     if (is->open && end > is->piece) {
         /*
@@ -157,23 +166,29 @@ static void piece_close(struct a64x_islands *is, uint64_t end)
 		 * miss one data word in each cache: silent corruption is the worse failure, so one word is enough.)
 		 */
         bool data = is->sticky || (is->pnun && is->pnun * 32 >= end - is->piece);
+        uint64_t from = is->piece;
+        if (!data && padded && !a64x_ends_code(is->last)) {
+            data = true;
+            from = is->tail; /* the code up to its last call stays */
+        }
         if (data) {
-            for (uint64_t k = is->piece; k < end; k++) {
+            for (uint64_t k = from; k < end; k++) {
                 is->data[k >> 3] |= (uint8_t)(1u << (k & 7));
             }
             if (!is->sticky)
                 is->runs++;
             is->sticky = true;
-            is->words += end - is->piece;
+            is->words += end - from;
         }
     }
     is->piece = end;
+    is->tail = end;
     is->pnun = 0;
 }
 
-static void islands_close(struct a64x_islands *is, uint64_t end)
+static void islands_close(struct a64x_islands *is, uint64_t end, bool padded)
 {
-    piece_close(is, end);
+    piece_close(is, end, padded);
     is->open = false;
     is->sticky = false;
 }
@@ -188,6 +203,15 @@ static bool terminator(uint32_t w)
            (w & 0xFFE0001Fu) == 0xD4200000u;
 }
 
+bool a64x_ends_code(uint32_t w)
+{
+    uint32_t one;
+    if (a64x_rewrite1(w, &one)) {
+        w = one;
+    }
+    return terminator(w) || (w & 0xFC000000u) == 0x94000000u || (w & 0xFFFFFC1Fu) == 0xD63F0000u;
+}
+
 void a64x_islands_page(struct a64x_islands *is, const uint32_t *w, uint32_t n, uint64_t first, uint64_t va,
                        const struct a64x_code_map *code)
 {
@@ -195,22 +219,26 @@ void a64x_islands_page(struct a64x_islands *is, const uint32_t *w, uint32_t n, u
         uint64_t k = first + i;
         bool fs = is->fstart && (is->fstart[k >> 3] & (1u << (k & 7)));
         if ((code && !code->is_code(code->ctx, va + 4ull * i)) || !(w[i] >> 16)) {
-            islands_close(is, k);
+            islands_close(is, k, true);
             continue;
         }
         if (fs || !is->open) {
-            islands_close(is, k);
+            islands_close(is, k, false);
             is->open = true;
-            is->piece = k;
+            is->piece = is->tail = k;
         }
         is->pnun += a64x_unallocated(w[i]);
+        is->last = w[i];
+        if (a64x_ends_code(w[i])) {
+            is->tail = k + 1;
+        }
         if (terminator(w[i])) {
-            piece_close(is, k + 1);
+            piece_close(is, k + 1, false);
         }
     }
 }
 
 void a64x_islands_end(struct a64x_islands *is, uint64_t end)
 {
-    islands_close(is, end);
+    islands_close(is, end, true);
 }

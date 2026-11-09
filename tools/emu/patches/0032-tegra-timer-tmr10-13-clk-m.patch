@@ -1,0 +1,57 @@
+diff --git a/hw/arm/tegra2/ppsb/timer/timer.c b/hw/arm/tegra2/ppsb/timer/timer.c
+index 99792cb..a259177 100644
+--- a/hw/arm/tegra2/ppsb/timer/timer.c
++++ b/hw/arm/tegra2/ppsb/timer/timer.c
+@@ -183,12 +183,13 @@ static void tegra_timer_priv_realize(DeviceState *dev, Error **errp)
+ 
+     s->ptimer = ptimer_init(tegra_timer_alarm, s, PTIMER_POLICY);
+     ptimer_transaction_begin(s->ptimer);
+-    ptimer_set_freq(s->ptimer, 1000000 * SCALE);
++    ptimer_set_freq(s->ptimer, s->freq * SCALE);
+     ptimer_transaction_commit(s->ptimer);
+ }
+ 
+ static Property tegra_timer_properties[] = {
+     DEFINE_PROP_UINT32("id", tegra_timer, id, 0), \
++    DEFINE_PROP_UINT32("freq", tegra_timer, freq, 1000000),
+     DEFINE_PROP_END_OF_LIST(),
+ };
+ 
+diff --git a/hw/arm/tegra2/ppsb/timer/timer.h b/hw/arm/tegra2/ppsb/timer/timer.h
+index bedfed0..069a585 100644
+--- a/hw/arm/tegra2/ppsb/timer/timer.h
++++ b/hw/arm/tegra2/ppsb/timer/timer.h
+@@ -61,6 +61,7 @@ typedef struct tegra_timer_state {
+     qemu_irq irq;
+     int irq_sts;
+     uint32_t id;
++    uint32_t freq;
+     bool pcr_read;
+ } tegra_timer;
+ 
+diff --git a/hw/arm/tegra2/tegrax1.c b/hw/arm/tegra2/tegrax1.c
+index bea4634..22bef40 100644
+--- a/hw/arm/tegra2/tegrax1.c
++++ b/hw/arm/tegra2/tegrax1.c
+@@ -585,9 +585,20 @@ static void* tegra_init_obj_simple(hwaddr base, qemu_irq irq, const char *name,
+     return tmpdev;
+ }
+ 
++/*
++ * TMR0-9 count TIMERUS's 1 MHz; TMR10-13, the per-core timers Tegra210 added, count the timer clock itself, clk_m
++ * (Linux timer-tegra.c tegra_rate_for_timer, L4T tegra210_timer.c).
++ */
+ static void* tegra_init_timer(hwaddr base, qemu_irq irq, uint32_t id)
+ {
+-    return tegra_init_obj(base, irq, "tegra.timer", "id", id, false);
++    void* tmpdev = qdev_new("tegra.timer");
++    qdev_prop_set_uint32(tmpdev, "id", id);
++    qdev_prop_set_uint32(tmpdev, "freq", id >= 10 ? SYSTEM_TICK_FREQ : 1000000);
++    sysbus_realize_and_unref(SYS_BUS_DEVICE(tmpdev), &error_fatal);
++    sysbus_mmio_map(SYS_BUS_DEVICE(tmpdev), 0, base);
++    sysbus_connect_irq(SYS_BUS_DEVICE(tmpdev), 0, irq);
++
++    return tmpdev;
+ }
+ 
+ static void* tegra_init_pmic(I2CBus *bus, uint8_t addr, uint32_t version, uint8_t max77812_en_ctrl)

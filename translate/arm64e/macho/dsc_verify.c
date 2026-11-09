@@ -31,11 +31,14 @@ static uint32_t rd32(const uint8_t *p)
     return v;
 }
 
-/* every executable mapping of the cache, sorted by address, with a bit per word: freed by a dead check */
+/*
+ * every executable mapping of the cache, sorted by address, with two bits per word: freed by a dead check, and entered
+ * from code (a branch, ADR, ADRP+ADD or jump table of the original code refers to it)
+ */
 struct xmap {
     uint64_t addr, size;
     const uint8_t *in, *out;
-    uint8_t *freed;
+    uint8_t *freed, *entered;
     bool all_code; /* a TEXT_STUBS mapping */
 };
 
@@ -101,6 +104,46 @@ static bool freed_at(const struct cache *c, uint64_t va, uint32_t *w)
 static bool code_of_plan(void *ctx, uint64_t va)
 {
     return a64x_plan_is_code(ctx, va);
+}
+
+static void enter(const struct cache *c, uint64_t va)
+{
+    struct xmap *m = map_of(c, va);
+    if (m) {
+        uint64_t k = (va - m->addr) / 4;
+        m->entered[k >> 3] |= (uint8_t)(1u << (k & 7));
+    }
+}
+
+static void enter_jump_table(const struct cache *c, const uint32_t w[9], uint64_t br_va)
+{
+    uint64_t table, base, count;
+    if (!a64x_jump_table(w, br_va, &table, &base, &count))
+        return;
+    for (uint64_t i = 0; i < count; i++) {
+        struct xmap *m = map_of(c, table + 4 * i);
+        if (!m)
+            return;
+        enter(c, base + (uint64_t)(int64_t)(int32_t)rd32(m->in + (table + 4 * i - m->addr)));
+    }
+}
+
+static void mark_entries(const struct cache *c)
+{
+    for (int i = 0; i < c->n; i++) {
+        const struct xmap *m = &c->maps[i];
+        const uint32_t *w = (const uint32_t *)(const void *)m->in;
+        const uint32_t n = (uint32_t)(m->size / 4);
+        for (uint32_t k = 0; k < n; k++) {
+            uint64_t to[1];
+            if (!m->all_code && !a64x_plan_is_code(c->plan, m->addr + 4ull * k))
+                continue;
+            if (w[k] == 0xD61F0200u && k >= 8)
+                enter_jump_table(c, &w[k - 8], m->addr + 4ull * k);
+            if (a64x_code_refs(w, n, k, m->addr, to))
+                enter(c, to[0]);
+        }
+    }
 }
 
 struct hole_ctx {
@@ -221,6 +264,7 @@ static int check_code(const struct cache *c, const struct xmap *m, struct a64x_d
             v->rewritten++;
         } else if (freed) {
             v->stub_words++;
+            v->entered_stub_words += (m->entered[k >> 3] >> (k & 7)) & 1;
         } else if (is_stub_class(cw, was)) {
             if (follow(c, va, now)) {
                 v->sites_ok++;
@@ -289,14 +333,17 @@ int a64x_dsc_verify(const struct a64x_plan *plan, const struct a64x_dsc_file *or
                                orig[f].base + d->fileoff,
                                out[f].base + d->fileoff,
                                calloc(d->size / 32 + 1, 1),
+                               calloc(d->size / 32 + 1, 1),
                                (d->flags & A64X_DSC_MAPPING_TEXT_STUBS) != 0};
-            if (!x->freed)
+            if (!x->freed || !x->entered)
                 rc = fail(err, errlen, "out of memory");
         }
     }
     qsort(c.maps, (size_t)c.n, sizeof(*c.maps), cmp_xmap);
+    if (!rc)
+        mark_entries(&c);
     for (int i = 0; i < c.n && !rc; i++) {
-        struct a64x_code_map code = {(void *)plan, code_of_plan, 0};
+        struct a64x_code_map code = {(void *)plan, code_of_plan, 0, NULL};
         for (uint64_t k = 0; k < c.maps[i].size; k += PAGE) {
             uint32_t in[WORDS], scratch[WORDS];
             memcpy(in, c.maps[i].in + k, PAGE);
@@ -320,9 +367,14 @@ int a64x_dsc_verify(const struct a64x_plan *plan, const struct a64x_dsc_file *or
         if (!rc)
             rc = a64x_cs_check(out[f].base, out[f].size, out[f].sig_off, out[f].sig_size, h, err, errlen);
     }
-    for (int i = 0; i < c.n; i++)
+    for (int i = 0; i < c.n; i++) {
         free(c.maps[i].freed);
+        free(c.maps[i].entered);
+    }
     free(c.maps);
+    if (!rc && v->entered_stub_words)
+        rc = fail(err, errlen, "%llu stub words where the original code branches",
+                  (unsigned long long)v->entered_stub_words);
     if (!rc && (v->sites_bad || v->left_baseline))
         rc = fail(err, errlen, "%llu broken sites, %llu A12-baseline words left", (unsigned long long)v->sites_bad,
                   (unsigned long long)v->left_baseline);

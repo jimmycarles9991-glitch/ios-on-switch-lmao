@@ -152,3 +152,13 @@ const char *cltm_key(unsigned i)
 {
     return i < SWITCH_CLTM_CONTRIBUTORS ? switch_cltm_keys[i] : 0;
 }
+
+int tcal_millic_j120(void)
+{
+    return SWITCH_SENSOR_TCAL_MILLIC_J120AP;
+}
+
+int tcal_millic_j181(void)
+{
+    return SWITCH_SENSOR_TCAL_MILLIC_J181AP;
+}

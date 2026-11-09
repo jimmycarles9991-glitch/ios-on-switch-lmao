@@ -29,7 +29,7 @@ def frames(path: str) -> list[list[dict]]:
             if line.startswith('SUBMIT'):
                 subs.append(cur)
                 cur = []
-            elif line.startswith(('DRAW', 'CLEAR', '  ', 'END-OF-SUBMIT')) and not line.startswith(
+            elif line.startswith(('DRAW', 'CLEAR', 'DISPATCH', '  ', 'END-OF-SUBMIT')) and not line.startswith(
                 ('  STATE', 'P ')
             ):  # DRAW-INDEXED too
                 cur.append(line)
@@ -37,12 +37,12 @@ def frames(path: str) -> list[list[dict]]:
     for s in subs:
         events, ev = [], None
         for line in s:
-            if line.startswith(('DRAW', 'CLEAR')):
+            if line.startswith(('DRAW', 'CLEAR', 'DISPATCH')):
                 ev = {'head': line, 'lines': []}
                 events.append(ev)
             elif line.startswith('  ') and ev is not None:
                 ev['lines'].append(line.strip())
-        if any(e['head'].startswith('DRAW') for e in events):
+        if any(e['head'].startswith(('DRAW', 'DISPATCH')) for e in events):
             out.append(fold_runs(events))
     # --flat: every submission's events as one stream (a command buffer the raw path submits in segments is several
     # submissions, each of its driver, where m2v makes one)
@@ -138,12 +138,12 @@ def fold_runs(events: list[dict]) -> list[dict]:
 
 
 def rename_all(out: list[list[dict]]) -> list[list[dict]]:
-    # persistent resources renamed in order of first appearance in draws (clears of textures no draw uses, such as m2v's
-    # initialisation of new textures, would otherwise shift every name)
+    # persistent resources renamed in order of first appearance in draws and dispatches (clears of textures no draw
+    # uses, such as m2v's initialisation of new textures, would otherwise shift every name)
     names = {}
     for events in out:
         for e in events:
-            if e['head'].startswith('DRAW'):
+            if e['head'].startswith(('DRAW', 'DISPATCH')):
                 e['lines'] = [rename(line, names, True) for line in e['lines']]
     for events in out:
         for e in events:
@@ -202,6 +202,10 @@ def fields(ev: dict) -> collections.OrderedDict:
         m = re.match(r'DRAW(?:-INDEXED)? first=(\d+) count=(\d+) begin=(\w+) barriers=(.*)', h)
         f['draw'] = f'{h.split()[0]} {m.group(1)} {m.group(2)} {m.group(3)}'
         f['barriers'] = {x for x in m.group(4).split(',') if x}
+    elif h.startswith('DISPATCH'):
+        m = re.match(r'DISPATCH (.*) barriers=(.*)', h)
+        f['dispatch'] = m.group(1)
+        f['barriers'] = {x for x in m.group(2).split(',') if x}
     else:
         m = re.match(r'CLEAR (.*) barriers=(.*)', h)
         f['clear'] = m.group(1)
@@ -261,6 +265,8 @@ class Tally:
     bar_extra: collections.Counter = field(default_factory=collections.Counter)
     draws: int = 0
     same: int = 0
+    dispatches: int = 0
+    same_dispatches: int = 0
     clears: int = 0
     elided: int = 0
 
@@ -278,6 +284,14 @@ def compare_frame(tally: Tally, fi: int, fa: list[dict], fb: list[dict]) -> None
     for di, (ea, eb) in enumerate(zip(da, db, strict=False)):
         tally.draws += 1
         tally.same += compare_draw(tally, fi, di, fields(ea), fields(eb))
+    ca = [e for e in fa if e['head'].startswith('DISPATCH')]
+    cb = [e for e in fb if e['head'].startswith('DISPATCH')]
+    if len(ca) != len(cb):
+        tally.mism['dispatch count'] += 1
+        tally.examples['dispatch count'].append(f'frame {fi}: nvk {len(ca)} raw {len(cb)}')
+    for di, (ea, eb) in enumerate(zip(ca, cb, strict=False)):
+        tally.dispatches += 1
+        tally.same_dispatches += compare_draw(tally, fi, di, fields(ea), fields(eb))
 
 
 def split_depth_stencil(clears: list[str]) -> list[str]:
@@ -387,7 +401,8 @@ def compare_registers(tally: Tally, where: str, ra: dict[str, str], rb: dict[str
 def report(tally: Tally) -> int:
     print(
         f'draws compared {tally.draws}, identical {tally.same}; clears compared {tally.clears}; '
-        f'fetch barriers raw left out {tally.elided}'
+        f'fetch barriers raw left out {tally.elided}; dispatches compared {tally.dispatches}, '
+        f'identical {tally.same_dispatches}'
     )
     for k, n in tally.mism.most_common():
         print(f'MISMATCH {k:<28} {n}')
@@ -399,7 +414,8 @@ def report(tally: Tally) -> int:
         print('barriers nvk had, raw not (draws):', dict(tally.bar_missing))
     if tally.bar_extra:
         print('barriers raw had, nvk not (draws):', dict(tally.bar_extra))
-    return 0 if tally.draws and tally.same == tally.draws and not tally.mism else 1
+    work = tally.draws + tally.dispatches
+    return 0 if work and tally.same + tally.same_dispatches == work and not tally.mism else 1
 
 
 def main() -> int:

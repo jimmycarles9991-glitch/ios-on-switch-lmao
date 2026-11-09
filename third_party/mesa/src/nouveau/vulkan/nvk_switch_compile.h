@@ -38,6 +38,11 @@ struct switch_nvk_stage_info {
    const void *stage_pnext;
    /* The fragment library's multisample state */
    bool sample_shading;
+   /* The colour attachments of a 16-bit float format (bit j: attachment j),
+    * whose float outputs the fragment program rounds to nearest even
+    * (nvk_switch_round.h)
+    */
+   uint32_t half_targets;
 };
 
 struct switch_nvk_stage {
@@ -59,6 +64,33 @@ VkResult switch_nvk_compile_stage(VkDevice device,
                                   const struct switch_nvk_stage_info *info,
                                   struct switch_nvk_stage *out);
 void switch_nvk_stage_finish(VkDevice device, struct switch_nvk_stage *stage);
+
+/* Where a descriptor set layout's binding lives in a set's descriptor buffer */
+struct switch_nvk_set_binding {
+   uint32_t offset;
+   uint32_t stride;
+   uint32_t array_size;
+   bool immutable_samplers;
+};
+
+/* Binding `binding` of `layout`; false past its bindings */
+bool switch_nvk_set_layout_binding(VkDescriptorSetLayout layout,
+                                   uint32_t binding,
+                                   struct switch_nvk_set_binding *out);
+/* The bytes a set of `layout` binds in the root table (its fixed part) */
+uint32_t switch_nvk_set_layout_size(VkDevice device,
+                                    VkDescriptorSetLayout layout);
+/* The sampler header NVK made for `layout`'s immutable sampler at `binding`
+ * and `element`; false where it has none
+ */
+bool switch_nvk_immutable_sampler_header(VkDevice device,
+                                         VkDescriptorSetLayout layout,
+                                         uint32_t binding, uint32_t element,
+                                         uint32_t header[8]);
+/* The size a buffer descriptor of `type` over `range` bytes holds */
+uint32_t switch_nvk_buffer_descriptor_size(VkDevice device,
+                                           VkDescriptorType type,
+                                           uint64_t range);
 
 #ifdef __cplusplus
 }

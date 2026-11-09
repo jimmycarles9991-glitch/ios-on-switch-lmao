@@ -1,5 +1,4 @@
 # The hardware test app (README.md): SwiftUI on iOS 17 and 27, its test media made at build time on the Mac.
-load("@rules_apple//apple:ios.bzl", "ios_application")
 load("@rules_apple//apple:macos.bzl", "macos_command_line_application")
 load("@rules_apple//apple:resources.bzl", "apple_resource_group")
 load("@rules_cc//cc:cc_library.bzl", "cc_library")
@@ -7,6 +6,7 @@ load("@rules_swift//swift:swift_interop_hint.bzl", "swift_interop_hint")
 load("@rules_swift//swift:swift_library.bzl", "swift_library")
 load("@rules_swift//swift:swift_test.bzl", "swift_test")
 load("//bazel/lint:defs.bzl", "lint_files")
+load(":apps.bzl", "hwtest_app", "ios_arm64e")
 
 package(default_visibility = ["//visibility:public"])
 
@@ -148,53 +148,228 @@ macos_command_line_application(
     deps = [":media_lib"],
 )
 
+# The raw pack corpus's Core Animation states, which gpu.ca.sweep draws on the raw facade and on m2v.
+genrule(
+    name = "ca_states",
+    srcs = ["//drivers/TegraGM20BMetal:precompile/corpus.log"],
+    outs = ["ca_states.log"],
+    cmd = "grep '^R ok=1 label=com.apple.coreanimation[.]' $< > $@",
+)
+
+# gpu.ca.sweep's reference for the build's IPSW: the corpus states drawn on a Mac's GPU with that IPSW's QuartzCore
+# (core/CAGoldens.swift), written into goldens/ by `bazel run //hw_test_app:ca_goldens` (and with --config=ios27).
+genrule(
+    name = "ca_goldens_txt",
+    srcs = select({
+        "//ipsw:21H461": ["goldens/ca_21H461.txt"],
+        "//ipsw:24B119": ["goldens/ca_24B119.txt"],
+    }),
+    outs = ["ca_goldens.txt"],
+    cmd = "cp $< $@",
+)
+
+apple_resource_group(
+    name = "ca_states_resources",
+    resources = [
+        ":ca_goldens_txt",
+        ":ca_states",
+    ],
+)
+
+# Rewrites goldens/ca_<build>.txt: every corpus state drawn on this Mac's GPU with the selected IPSW's QuartzCore
+# (ca_goldens/CAGoldensWriter.swift). Run it after a harvest adds Core Animation states. Manual: it needs a Mac GPU.
+swift_test(
+    name = "ca_goldens",
+    size = "medium",
+    srcs = ["ca_goldens/CAGoldensWriter.swift"],
+    copts = SWIFT_COPTS,
+    data = [
+        ":ca_states",
+        "@ipsw//:crawl_qc",
+    ],
+    env = select({
+        "//ipsw:" + kind: {
+            "CA_BUILD": kind,
+            "CA_LIBRARY": "$(rlocationpath @ipsw//:crawl_qc)",
+            "CA_STATES": "$(rlocationpath :ca_states)",
+        }
+        for kind in ("21H461", "24B119")
+    }),
+    tags = ["manual"],
+    deps = [
+        ":core",
+        ":gpu",
+    ],
+)
+
 apple_resource_group(
     name = "media_resources",
     strip_structured_resources_prefixes = ["hw_test_app"],
     structured_resources = ["@pinned//:hw_test_app/media/" + name for name in MEDIA],
 )
 
-# --- The app -------------------------------------------------------------------------------------------------------
-# tools/devicerun:hwtest_test reads the test IDs out of these.
+# --- The apps --------------------------------------------------------------------------------------------------
+# tools/devicerun:hwtest_test reads the test IDs out of these, and checks every literal metric key in them.
 filegroup(
     name = "test_sources",
     srcs = glob([
+        "app17/*.swift",
+        "app27/*.swift",
+        "core/*.swift",
+        "gpu/*.swift",
         "gpu/scenes/*.swift",
+        "kit/*.swift",
         "tests/*.swift",
     ]),
 )
 
+swift_interop_hint(
+    name = "cpu_clock_module",
+    module_name = "SwitchCPUClock",
+)
+
+# cpu.clock's and cpu.sustained's chain of dependent ADDs (one cycle each on the A57).
+cc_library(
+    name = "cpu_clock",
+    srcs = ["cpu/switch_cpu_clock.c"],
+    hdrs = ["cpu/switch_cpu_clock.h"],
+    aspect_hints = [":cpu_clock_module"],
+    copts = ["-O2"],
+    target_compatible_with = ["@platforms//os:ios"],
+)
+
+swift_interop_hint(
+    name = "sched_probe_module",
+    module_name = "SwitchSchedProbe",
+)
+
+# cpu.sched's spinners, timer and semaphore waiters.
+cc_library(
+    name = "sched_probe",
+    srcs = ["cpu/switch_sched_probe.c"],
+    hdrs = ["cpu/switch_sched_probe.h"],
+    aspect_hints = [":sched_probe_module"],
+    copts = ["-O2"],
+    target_compatible_with = ["@platforms//os:ios"],
+)
+
+swift_interop_hint(
+    name = "a64x_probe_module",
+    module_name = "SwitchA64XProbe",
+)
+
+# a64x.self's LSE and FP16 code, compiled for each app's deployment target like the rest of the app (A12 code from
+# iOS 26 on): no -mcpu, since the point is to see what the a64x loader makes of such code.
+cc_library(
+    name = "a64x_probe",
+    srcs = ["a64x/switch_a64x_probe.c"],
+    hdrs = ["a64x/switch_a64x_probe.h"],
+    aspect_hints = [":a64x_probe_module"],
+    copts = ["-O2"],
+    target_compatible_with = ["@platforms//os:ios"],
+)
+
+# Every test every iOS version runs, the runner, the list, the log lines and the run reports. UIKit: built only under an
+# ios_application's transition, never for the host by `bazel build //hw_test_app/...`.
 swift_library(
-    name = "app_lib",
+    name = "kit",
     srcs = glob([
-        "app/*.swift",
+        "kit/*.swift",
         "tests/*.swift",
     ]),
     copts = SWIFT_COPTS,
-    data = [":media_resources"],
-    module_name = "SwitchHWTest",
-    # UIKit: built only under ios_application's transition, never for the host by `bazel build //hw_test_app/...`.
+    data = [
+        ":ca_states_resources",
+        ":media_resources",
+    ],
+    module_name = "HWTestKit",
     target_compatible_with = ["@platforms//os:ios"],
     deps = [
+        ":a64x_probe",
         ":core",
+        ":cpu_clock",
         ":gpu",
+        ":sched_probe",
         ":video",
     ],
 )
 
-# Ad hoc signed like the overlay's other code (--@rules_apple//apple/build_settings:signing_certificate_name=- in
-# .bazelrc), so its CDHashes go in the boot package's trust cache. rules_apple wants a profile for any device build:
-# adhoc.mobileprovision is a plain-XML stand-in. It lands in the bundle as embedded.mobileprovision, which nothing reads
-# for a trust-cached platform app.
-ios_application(
-    name = "SwitchHWTest",
+swift_library(
+    name = "app17_lib",
+    srcs = glob(["app17/*.swift"]),
+    copts = SWIFT_COPTS,
+    module_name = "SwitchHWTest17",
+    target_compatible_with = ["@platforms//os:ios"],
+    deps = [":kit"],
+)
+
+# iOS 27's own tests: Liquid Glass, QuartzCore 27's glass states, Metal 4, VideoToolbox's frame processors.
+swift_library(
+    name = "app27_lib",
+    srcs = glob(["app27/*.swift"]),
+    copts = SWIFT_COPTS,
+    module_name = "SwitchHWTest27",
+    target_compatible_with = ["@platforms//os:ios"],
+    deps = [
+        ":core",
+        ":gpu",
+        ":kit",
+    ],
+)
+
+# Each iOS version's app is /Applications/SwitchHWTest.app on its own image (the debug //:boot of that kind,
+# boot/BUILD.bazel), so the overlay manifest and tools/devicerun name one app.
+hwtest_app(
+    name = "SwitchHWTest17",
     bundle_id = "com.brunostjohn.switch.hwtest",
+    bundle_name = "SwitchHWTest",
     entitlements = "SwitchHWTest.entitlements",
-    entitlements_validation = "skip",
-    families = ["ipad"],
-    infoplists = ["Info.plist"],
+    infoplist = "Info.plist",
     minimum_os_version = "17.4",
-    provisioning_profile = "adhoc.mobileprovision",
-    resources = glob(["shaders/*.metal"]),
-    deps = [":app_lib"],
+    deps = [":app17_lib"],
+)
+
+hwtest_app(
+    name = "SwitchHWTest27",
+    bundle_id = "com.brunostjohn.switch.hwtest",
+    bundle_name = "SwitchHWTest",
+    # SwitchHWTest's, plus a read of com.apple.CoreBrightness for display.true_tone_default.
+    entitlements = "SwitchHWTest27.entitlements",
+    infoplist = "Info.plist",
+    minimum_os_version = "27.0",
+    deps = [":app27_lib"],
+)
+
+# The same iOS 27 app as arm64e, beside it on a debug 27 image: the a64x loader translates an arm64e image whole
+# (pointer authentication included), an arm64 one only where it finds what the A57 lacks.
+genrule(
+    name = "arm64e_plists",
+    srcs = [
+        "Info.plist",
+        "SwitchHWTest27.entitlements",
+    ],
+    outs = [
+        "arm64e/Info.plist",
+        "arm64e/SwitchHWTest27e.entitlements",
+    ],
+    cmd = " && ".join([
+        "sed 's|<string>HW Test</string>|<string>HW Test arm64e</string>|' $(execpath Info.plist) > $(execpath arm64e/Info.plist)",
+        "sed 's|com.brunostjohn.switch.hwtest<|com.brunostjohn.switch.hwtest27e<|' $(execpath SwitchHWTest27.entitlements) > $(execpath arm64e/SwitchHWTest27e.entitlements)",
+    ]),
+)
+
+hwtest_app(
+    name = "SwitchHWTest27e_app",
+    bundle_id = "com.brunostjohn.switch.hwtest27e",
+    bundle_name = "SwitchHWTest27e",
+    entitlements = "arm64e/SwitchHWTest27e.entitlements",
+    infoplist = "arm64e/Info.plist",
+    minimum_os_version = "27.0",
+    tags = ["manual"],
+    deps = [":app27_lib"],
+)
+
+ios_arm64e(
+    name = "SwitchHWTest27e",
+    app = ":SwitchHWTest27e_app",
 )

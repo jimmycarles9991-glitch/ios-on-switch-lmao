@@ -23,7 +23,9 @@
 // the push buffer NVENC shares with NVDEC (8 x 197 + 4 x 190 words < 4096) and the 8 setup slots. Every job runs with
 // the GP timer on (the checker requires it, 1 << 27 cycles at most, 329 ms at 408 MHz); waits are bounded by
 // kJobBoundUs per queued job whatever a client asks for, and the largest picture the checker admits (36864 macroblocks)
-// encodes well inside it.
+// encodes well inside it. The GP timer does not end a stalled job: its interrupt only records an error for the H.264
+// app, whose end-of-picture spin waits for macroblocks the engine never reports (appDump), so the kernel's bound is
+// what ends it.
 //
 // Firmware: linux-firmware's nvidia/tegra210/nvenc.bin, byte-identical to L4T's nvhost_nvenc050.fw (firmware/SOURCE),
 // booted non-securely as L4T's nvhost and TegraNVDEC boot theirs.
@@ -93,6 +95,17 @@ enum : uint32_t {
 enum : uint32_t {
     ICD_RREG = 0x8,  // icd_cmd opc rreg; register index << 8: SP 20, PC 21 (nvgpu falcon.h FALCON_REG_*)
     THI_INT_STATUS = 0x78,
+    FALCON_IO = 0x1000,           // the falcon's I/O address 0 (I[0x8] is IRQSTAT at 0x1008)
+    ENCODER_INT_STATUS = 0x1870,  // I/O; bit 0 error, bit 1 macroblocks done, write 1 to clear (the H.264 app's ISR)
+};
+
+// The H.264 app's (app 1) DMEM words for the end of a picture, read with tools/falcon: the error its ISR (0xf1b)
+// records, the macroblocks it counts (+= I[0x1848] per encoder interrupt) and the count fn 0x48b9 spins at 0x4916 until
+// (the slice's num_mb, at most the picture's). H.265's app keeps its count and target at 0x360 and 0x38c.
+enum : uint32_t {
+    APP_ERROR = 0x2c8,
+    APP_MBS_DONE = 0x2e4,
+    APP_MBS_TARGET = 0x354,
 };
 
 volatile uint8_t *gNvenc, *gMc;
@@ -164,6 +177,26 @@ const char *falconDump()
         n += snprintf(text + n, sizeof(text) - static_cast<size_t>(n), " %#x/%#x", pc,
                       switch_mmio_read32(gNvenc, SWITCH_FALCON_ICD_RDATA));
     }
+    return text;
+}
+
+uint32_t dmem(uint32_t address)
+{
+    switch_mmio_write32(gNvenc, SWITCH_FALCON_DMEMC, address);
+    return switch_mmio_read32(gNvenc, SWITCH_FALCON_DMEMD);
+}
+
+// Which way the H.264 app is stuck. An error (0xe2640010 GP timer, 0xe2640060 encoder error, 0xe2640200 I[0x1ac4]
+// bits 0-2) with fewer macroblocks than the target: the ISR saw the fault but the spin has no way out. No error and
+// fewer: the engine stopped reporting macroblocks, or its interrupt is pending untaken (encoder status bit 1 set).
+// Count at the target: past the spin, and the PC shows which of the polls after it holds the app.
+const char *appDump()
+{
+    static char text[160];
+    snprintf(text, sizeof(text), "H.264 app error %#x macroblocks %u of %u encoder status %#x (I[%#x] at +%#x)",
+             dmem(APP_ERROR), dmem(APP_MBS_DONE), dmem(APP_MBS_TARGET),
+             switch_mmio_read32(gNvenc, FALCON_IO + ENCODER_INT_STATUS), ENCODER_INT_STATUS,
+             FALCON_IO + ENCODER_INT_STATUS);
     return text;
 }
 
@@ -302,8 +335,8 @@ void engineResume();
 {
     char host[200];
     tegra_host1x_describe(host, sizeof(host));
-    panic("TegraNVENC: job fence %u not reached in %u ms (syncpoint %u at %u, GP timer bound passed); %s; %s", fence,
-          kWaitBoundUs / 1000, gSyncpt, tegra_host1x_syncpt_read(gSyncpt), falconDump(), host);
+    panic("TegraNVENC: job fence %u not reached in %u ms (syncpoint %u at %u, GP timer bound passed); %s; %s; %s",
+          fence, kWaitBoundUs / 1000, gSyncpt, tegra_host1x_syncpt_read(gSyncpt), appDump(), falconDump(), host);
 }
 
 // Back to reset with the clock off after a failed bring-up: nothing will use the engine this boot.
@@ -390,6 +423,10 @@ int run(const TegraNVENCSubmit *s, TegraNVENCResolve resolve, void *context, uin
     if (s->entry_count > TEGRA_NVENC_MAX_ENTRIES || s->clean_count > TEGRA_NVENC_MAX_RANGES ||
         s->setup_bytes > kSetupSlotBytes) {
         *why = "counts";
+        return -22;
+    }
+    if (s->codec >= 32 || !(kTegraNVENCCodecs & (1u << s->codec))) {
+        *why = "codec";
         return -22;
     }
     TegraNVENCBlock blocks[TEGRA_NVENC_MAX_ENTRIES];

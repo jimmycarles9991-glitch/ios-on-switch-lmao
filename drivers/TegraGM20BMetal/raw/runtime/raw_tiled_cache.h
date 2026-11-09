@@ -4,9 +4,9 @@
 // only 0x1134 (SET_MUTABLE_METHOD_CONTROL, deko3d's TiledCacheUnkFeatureEnable); the other offsets and NVN's Tegra X1
 // values are deko3d's (source/maxwell/engine_3d.def, gpu_3d_base.cpp Queue::setup3DEngine, MIT).
 //
-// A WAIT_FOR_IDLE completes binned work (deko3d's DkBarrier_Primitives is a WFI alone), and every raw pass starts with
-// one, so render-target changes need nothing more. The flush that ends each command buffer leaves nothing binned for the
-// kernel's fence.
+// Every pass that drew and every barrier inside a pass flush the cache before the WAIT_FOR_IDLE that follows them, so a later
+// pass, the copy engine, the display's copy or the CPU reads what the draws wrote: whether a WAIT_FOR_IDLE alone drains the
+// tile coalescer is not documented. The flush that ends each command buffer leaves nothing binned for the kernel's fence.
 #pragma once
 #include <os/log.h>
 #include <atomic>
@@ -51,6 +51,12 @@ inline void tiledCacheInit(Push &p, const TegraGM20BAbiInfo &info)
         os_log(os_log_create("com.brunostjohn.switch.TegraGM20BMetal", "raw"),
                "raw: tiled cache on, enabled at context init");
     }
+}
+
+inline void tiledCacheDrain(Push &p, const TegraGM20BAbiInfo &info)
+{
+    if (tiledCache(info))
+        p.m(TILED_CACHE_FLUSH, 0);
 }
 
 inline uint32_t *tiledCacheFlush(uint32_t *at)

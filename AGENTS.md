@@ -31,6 +31,22 @@ Patching Apple's code directly is only for code that is right for Apple's hardwa
 or hardware differs, like SpringBoard's layout metrics at our UI scale. Even then, give the component the right input if
 you can instead of patching it.
 
+## Release builds carry no debug work
+
+Release builds keep Apple's RELEASE options: Apple's printfs are stripped and there is no `-v` console. They keep panic
+text, the saved panic record and error logs (os_log, IOLog). Every other diagnostic compiles out of release: periodic
+stats, probes, self-test timing, journals, and observers on hot paths such as the per-syscall observer. Gate a
+diagnostic on `DEVELOPMENT || DEBUG` where it is built, not on a runtime flag.
+
+## Contain version-specific fixes
+
+One source tree supports several iOS versions (17 on xnu-10063 and 27 on xnu-12377 today, more later). A fix for one
+version must not change how another behaves. Put the difference where versions already differ: the per-build tables
+(`kits/SwitchABI/kinds/<build>`, `switch_ui_scale_sites_<build>.h`, `ipsw/pins.bzl`), that version's own XNU tree, or a
+build-time `#if`. Anything read from one IPSW, such as a UUID, a build string, an offset, a selector number or
+`SetupVersion`, comes from that IPSW's pins, never from a literal that quietly applies to every version. Check every
+change on both versions: both builds and both emulator checks.
+
 ## File Length & Random Tips
 
 Don't write stupidly long files. Around 500 lines of code, you should consider splitting them. Keep helpers away from

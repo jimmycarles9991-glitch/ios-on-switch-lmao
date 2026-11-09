@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: MIT
 #import "RawMetalInternal.h"
 
+#include "raw_residual.h"
+
 @implementation RMRenderEncoder
 
 + (Class)twinClass
@@ -194,16 +196,25 @@ static void forwardCall(RMEncoder *e, SEL selector, const void *argument)
         [_cb takeReason:WhyEncode why:@"a depth/stencil state or format the pass's attachment does not take"];
         return hit(_cb, PredEncDepthStencil, pl.depthFormat, _zeta | uint64_t(_ds.active()) << 32);
     }
+    if (pl.samples != _samples || pl.samplePasses > 1) {
+        [_cb takeReason:WhyEncode why:@"a state whose samples a pixel or per-sample shading the pass does not take"];
+        return hit(_cb, PredEncSamples, pl.samples, _samples | uint64_t(pl.samplePasses) << 32);
+    }
     const raw::PackPipeline &r = *pl.rec;
     for (uint32_t i = 0; i < r.entries; i++) {
         const raw::PackEntry &e = r.entry[i];
         if (e.kind == raw::EntryUbo) {
-            // an offset off NVK's 256-byte uniform alignment needs the push word of m2v's SlotBindOffset residual, which a
-            // record made without the probe's offset run lacks (raw::bufferResidualWord)
-            if (!raw::bufferStorage(e) && raw::bufferResidualWord(e) < 0 && e.stage < 3 && e.slot < 31 &&
-                (_bufVa[e.stage][e.slot] & 255)) {
-                [_cb takeReason:WhyEncode why:@"a uniform buffer bound at an offset that is not a multiple of 256"];
-                return hit(_cb, PredEncUboOffset, uint64_t(e.stage) << 8 | e.slot, _bufVa[e.stage][e.slot] & 255);
+            // an offset off m2v's descriptor base alignment needs the push word of its SlotBindOffset residual, which a
+            // record made without the probe's offset run lacks, or a storage slot whose code another shares
+            // (raw::bufferDescriptor)
+            const bool storage = raw::bufferStorage(e);
+            const uint64_t residual =
+                e.stage < 3 && e.slot < 31 ? _bufVa[e.stage][e.slot] & (raw::bufferBaseAlignment(storage) - 1) : 0;
+            if (raw::bufferResidualWord(e) < 0 && residual) {
+                [_cb takeReason:WhyEncode
+                            why:storage ? @"a storage buffer bound at an offset that is not a multiple of 16"
+                                        : @"a uniform buffer bound at an offset that is not a multiple of 256"];
+                return hit(_cb, PredEncUboOffset, uint64_t(e.stage) << 8 | e.slot, residual);
             }
         } else if (e.kind == raw::EntryTexture && e.samplerKind == raw::SamplerConstexpr && e.slot < 16 &&
                    _tex[e.slot] && _tex[e.slot]->_raw.addressMap) {

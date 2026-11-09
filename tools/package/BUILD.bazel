@@ -81,18 +81,14 @@ py_binary(
         ":loader_abi",
         ":native_oled_adt",
         ":native_xnu_layout",
-        ":trust_lib",
+        "//tools/trustcache",
     ],
-)
-
-py_library(
-    name = "trust_lib",
-    srcs = ["trust.py"],
 )
 
 py_binary(
     name = "trust",
     srcs = ["trust.py"],
+    deps = ["//tools/trustcache"],
 )
 
 py_binary(
@@ -141,6 +137,7 @@ py_test(
     name = "native_profile_test",
     srcs = ["native_profile_test.py"],
     data = [
+        "//boot:loader/copy.h",
         "//ipsw:pins.bzl",
         "//kernel/switch:include/switch/boot_layout.h",
         "//kernel/switch:ram/ram.c",
@@ -150,10 +147,12 @@ py_test(
     deps = [
         ":kernel_window",
         ":loader_abi",
+        ":native_xnu_layout",
     ],
 )
 
-# overlay.py's bundle entries (an .ipa's app staged whole, every Mach-O in it trusted) on a fabricated .ipa.
+# overlay.py's bundle entries (an .ipa's app staged whole, every Mach-O in it trusted) on a fabricated .ipa, and the
+# Supplemental cryptex path's launchd-plists-only rule, on the real manifest too.
 py_test(
     name = "overlay_test",
     size = "small",
@@ -161,6 +160,7 @@ py_test(
         "overlay.py",
         "overlay_test.py",
     ],
+    data = ["//overlay:manifest.json"],
     imports = ["."],
     deps = [
         ":boot_config",

@@ -9,6 +9,11 @@
 #ifndef __ASSEMBLER__
 #include <stdint.h>
 
+/* The most the loader decodes into the kernel window: the copy tables map the window from the L2 table of
+ * 0x80000000-0xBFFFFFFF, which this leaves room in (0xB2000000 + 128 MiB), and the LZ4 stream is staged separately in
+ * bl33.bin below 0xB0000000 (stage.h). tools/package/loader_abi.py WINDOW_BYTES_MAX. */
+#define LOADER_WINDOW_BYTES_MAX UINT64_C(0x8000000)
+
 /* The physical table address is explicit so the page-table builder can be
  * checked on the host without executing privileged instructions. */
 struct loader_copy_bounds {

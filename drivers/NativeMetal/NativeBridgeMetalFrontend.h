@@ -48,35 +48,35 @@ id native_bridge_metal_texture_in_place(id buffer, id descriptor, NSUInteger off
 // image's PTE kind, the image takes the memory's own VA. Nil where the device makes no such image there.
 id native_bridge_metal_texture_tiled_in_place(id buffer, id descriptor, NSUInteger offset);
 
-// The raw GM20B path's capture of a render state (raw/runtime/raw_capture.h): `commandBuffer`'s recorded NVK push segments handed
-// to `segment` in submission order instead of a commit, never run, and what NVK's context init set as this process's addresses
-// (*context: the pack's init relocations, raw_pack.h PackReloc). The command buffer cannot be committed after. False: refused
-// (another device's, committed, commands left to record at commit, or an NVK without the capture exports).
-typedef struct {
-    uint64_t shaderHeap, zeroPage, cb0, images, samplers;
-    uint32_t imageMax, samplerMax;
-} NBCaptureContext;
-
-bool native_bridge_metal_capture(id commandBuffer, void (^segment)(uint64_t addr, const uint32_t *cpu, uint32_t dwords),
-                                 NBCaptureContext *context);
-// The CPU's view of [va, va + bytes) of the captured command buffer's device memory, while the command buffer lives; null: none
-const void *native_bridge_metal_capture_map(id commandBuffer, uint64_t va, uint64_t bytes);
-
-// The program a captured draw binds at SET_PIPELINE_PROGRAM offset `program`: its 80-byte header, code and shader data as NVK
-// uploads them, and each constant buffer's nvk_cbuf_type. False: none of its draws binds one there.
-typedef struct {
-    const void *header, *code, *data;
-    uint32_t headerBytes, codeBytes, dataBytes, cbufCount;
-    uint8_t cbufTypes[16];
-} NBCapturedProgram;
-
-bool native_bridge_metal_capture_program(id commandBuffer, uint32_t program, NBCapturedProgram *out);
 // A render pipeline state of this device made at its first set (AsyncPipelines.h startLazy): the raw path's m2v twin of a
 // state it draws itself.
 id native_bridge_metal_render_pipeline_lazy(id device, id descriptor, NSUInteger options);
 // The metallib a function of this device was made from: its library, which keeps `bytes` while it lives; nil when the
 // function has none (the raw path names a function's AIR by its entry there).
 id native_bridge_metal_function_metallib(id function, const void **bytes, size_t *length);
+// The library function a function of this device was made from (its entry in that metallib), which a specialized function's name is
+// not; nil for another device's.
+NSString *native_bridge_metal_function_library_name(id function);
+// The raw GM20B path's direct compile of a render state (bridge/NativeMetalDirect.h) of this device's functions: false with
+// `why` (valid until the next call on the thread) when the translator refuses it or `each` returns false.
+struct NmbDirectState;
+bool native_bridge_metal_render_direct(id descriptor, bool barrier, NSUInteger textureFormat, NSUInteger textureSamples,
+                                       bool (*each)(const struct NmbDirectState *, void *), void *ctx,
+                                       const char **why);
+// A symbol of the NVK this device opened (null: none)
+void *native_bridge_metal_nvk_symbol(const char *name);
+
+// Where NVK keeps a texture's texels (NVK's switch_nvk_image_memory, the same layout): one plane, level, layer and sample, its GPU
+// address and size, the PTE kind its memory is mapped with, its texel size and level 0's layout. The raw GM20B path renders and
+// copies a stored depth/stencil texture there, in place. 0, else why not: NVK's reason (1 no image, 2 more than one plane, 3 not
+// bound, 4 more than one level, 5 more than one layer, 6 multisampled), -1 no such NVK export, -2 its texels are no one image's.
+struct switch_nvk_image_memory {
+    uint64_t addr, size_B, array_stride_B;
+    uint32_t row_stride_B, texel_B;
+    uint8_t pte_kind, compressed, tiled, y_log2, z_log2;
+};
+
+int native_bridge_metal_texture_memory(id texture, struct switch_nvk_image_memory *out);
 
 // Memory another driver of this process keeps bound in the GPU VM it shares with NVK (the raw GM20B path's: raw_gpu.h Alias): the
 // BO's first byte for the CPU, its size, handle and GPU address, the PTE kind of that binding, and the lease a view holds.

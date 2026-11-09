@@ -321,9 +321,9 @@ static int find_islands(const struct a64x_macho *m, struct a64x_image_xlate *x, 
         }
     }
     /* the pass sees instruction sections only, not the islands it is finding; it adds them to the same bitmap */
-    struct a64x_islands is = {x->data, fs, 0, 0, false, false, 0, 0};
+    struct a64x_islands is = {x->data, fs, 0, 0, false, false, 0, 0, 0, 0};
     struct img_ctx c = {m, NULL};
-    struct a64x_code_map cm = {&c, img_is_code, map_flags};
+    struct a64x_code_map cm = {&c, img_is_code, map_flags, NULL};
     for (uint32_t pg = 0; pg < x->npages; pg++) {
         uint64_t off = m->exec_fileoff + (uint64_t)pg * A64X_XLATE_PAGE;
         read_page(m, off, page);
@@ -380,7 +380,13 @@ int a64x_translate_image(const struct a64x_macho *m, uint32_t map_page, uint32_t
     }
     /* xnu/a64x_xnu.c a64x_scan(): one pass lays out the stubs and gives each page its output */
     struct img_ctx c = {m, x->data};
-    struct a64x_code_map cm = {&c, img_is_code, x->map_flags};
+    struct a64x_code_map cm = {&c, img_is_code, x->map_flags, NULL};
+    void *walk_buf = malloc(A64X_WALK_BYTES(A64X_XLATE_PAGE / 4));
+    if (!walk_buf) {
+        a64x_image_xlate_free(x);
+        return fail(err, errlen, "out of memory");
+    }
+    struct a64x_walk walk = a64x_walk_in(walk_buf, A64X_XLATE_PAGE / 4);
     uint32_t page[A64X_XLATE_PAGE / 4], dst[A64X_XLATE_PAGE / 4], cursor = 0, cap = 0;
     for (uint32_t pg = 0; pg < x->npages; pg++) {
         uint64_t off = m->exec_fileoff + (uint64_t)pg * A64X_XLATE_PAGE;
@@ -389,13 +395,14 @@ int a64x_translate_image(const struct a64x_macho *m, uint32_t map_page, uint32_t
             uint32_t ncap = cap ? cap * 2 : 4 * (A64X_XLATE_PAGE / 4) * A64X_STUB_MAX;
             uint32_t *n = realloc(x->stubs, (size_t)ncap * sizeof(uint32_t));
             if (!n) {
+                free(walk_buf);
                 a64x_image_xlate_free(x);
                 return fail(err, errlen, "out of memory");
             }
             x->stubs = n;
             cap = ncap;
         }
-        struct a64x_stub_region sr = {m->exec_fileoff + (uint64_t)x->stub_delta, x->stubs, cap, 0};
+        struct a64x_stub_region sr = {m->exec_fileoff + (uint64_t)x->stub_delta, x->stubs, cap, 0, &walk};
         x->cursor[pg] = cursor;
         cursor = a64x_translate_page(page, dst, A64X_XLATE_PAGE / 4, off, &cm, &sr, cursor, &x->stats);
         uint64_t in_file = m->exec_filesize - (uint64_t)pg * A64X_XLATE_PAGE;
@@ -405,6 +412,7 @@ int a64x_translate_image(const struct a64x_macho *m, uint32_t map_page, uint32_t
         if (out)
             memcpy(out + off, dst, keep);
     }
+    free(walk_buf);
     x->cursor[x->npages] = cursor;
     x->nstubs = cursor;
     if (x->kind == A64X_KIND_ARM64 && x->changed == 0) {
@@ -642,10 +650,8 @@ int a64x_fixup_strip_auth(uint32_t format, uint64_t raw, uint64_t preferred_base
     return 0;
 }
 
-int a64x_fixups_strip_auth(const struct a64x_macho *m, uint8_t *out, struct a64x_fixup_stats *st, char *err,
-                           size_t errlen)
+int a64x_fixups_each(const struct a64x_macho *m, a64x_fixup_fn each, void *ctx, char *err, size_t errlen)
 {
-    memset(st, 0, sizeof(*st));
     if (!m->fixups_size)
         return 0;
     const uint8_t *h = m->base + m->fixups_off;
@@ -671,7 +677,6 @@ int a64x_fixups_strip_auth(const struct a64x_macho *m, uint8_t *out, struct a64x
             return fail(err, errlen, "segment %u: pointer format %u", s, format);
         if ((uint64_t)starts + so + 22 + 2ull * page_count > m->fixups_size)
             return fail(err, errlen, "segment %u: page starts past the end", s);
-        uint64_t preferred = m->text_vmaddr;
         for (uint32_t p = 0; p < page_count; p++) {
             uint16_t start = rd16(ss + 22 + 2 * p);
             if (start == 0xFFFF)
@@ -698,26 +703,13 @@ int a64x_fixups_strip_auth(const struct a64x_macho *m, uint8_t *out, struct a64x
                         loc + 8 > m->size)
                         return fail(err, errlen, "segment %u: chain past the segment at 0x%llx", s,
                                     (unsigned long long)loc);
-                    uint64_t raw = rd64(m->base + loc), plain;
+                    uint64_t raw = rd64(m->base + loc);
                     struct a64x_fixup f;
                     if (a64x_fixup_decode(format, raw, &f))
                         return fail(err, errlen, "format %u", format);
-                    if (f.bind)
-                        st->binds++;
-                    else
-                        st->rebases++;
-                    if (f.auth) {
-                        if (f.bind)
-                            st->auth_binds++;
-                        else
-                            st->auth_rebases++;
-                        if (a64x_fixup_strip_auth(format, raw, preferred, &plain))
-                            return fail(err, errlen, "0x%llx: auth target does not fit a plain rebase",
-                                        (unsigned long long)loc);
-                        if (out)
-                            memcpy(out + loc, &plain, sizeof(plain));
-                        st->stripped++;
-                    }
+                    const char *why = each(ctx, loc, format, raw, &f);
+                    if (why)
+                        return fail(err, errlen, "0x%llx: %s", (unsigned long long)loc, why);
                     if (!f.next)
                         break;
                     loc += (uint64_t)f.next * stride;
@@ -726,4 +718,40 @@ int a64x_fixups_strip_auth(const struct a64x_macho *m, uint8_t *out, struct a64x
         }
     }
     return 0;
+}
+
+struct strip_ctx {
+    const struct a64x_macho *m;
+    uint8_t *out;
+    struct a64x_fixup_stats *st;
+};
+
+static const char *strip_one(void *ctx, uint64_t loc, uint32_t format, uint64_t raw, const struct a64x_fixup *f)
+{
+    struct strip_ctx *c = ctx;
+    uint64_t plain;
+    if (f->bind)
+        c->st->binds++;
+    else
+        c->st->rebases++;
+    if (!f->auth)
+        return NULL;
+    if (f->bind)
+        c->st->auth_binds++;
+    else
+        c->st->auth_rebases++;
+    if (a64x_fixup_strip_auth(format, raw, c->m->text_vmaddr, &plain))
+        return "auth target does not fit a plain rebase";
+    if (c->out)
+        memcpy(c->out + loc, &plain, sizeof(plain));
+    c->st->stripped++;
+    return NULL;
+}
+
+int a64x_fixups_strip_auth(const struct a64x_macho *m, uint8_t *out, struct a64x_fixup_stats *st, char *err,
+                           size_t errlen)
+{
+    memset(st, 0, sizeof(*st));
+    struct strip_ctx c = {m, out, st};
+    return a64x_fixups_each(m, strip_one, &c, err, errlen);
 }

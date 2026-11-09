@@ -42,6 +42,13 @@ py_binary(
     srcs = ["rawpack.py"],
 )
 
+# Its steps, for the pack's coverage test (//drivers/TegraGM20BMetal:archive_coverage_test: archive_lines)
+py_library(
+    name = "rawpack_steps",
+    srcs = ["rawpack.py"],
+    visibility = ["//drivers/TegraGM20BMetal:__pkg__"],
+)
+
 py_binary(
     name = "raw_stack",
     srcs = ["raw_stack.py"],

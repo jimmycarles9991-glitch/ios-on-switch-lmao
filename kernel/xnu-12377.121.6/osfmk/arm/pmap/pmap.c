@@ -15380,6 +15380,6 @@ pmap_pending_preemption(void)
 }
 #endif /* SCHED_HYGIENE_DEBUG && (DEBUG || DEVELOPMENT) */
 
-#if defined(SWITCH_XNU_DIAGNOSTICS) && SWITCH_XNU_DIAGNOSTICS && !XNU_MONITOR
+#if defined(SWITCH_XNU_BOARD) && SWITCH_XNU_BOARD && !XNU_MONITOR
 #include <arm64/switch_smp_tables.h>
 #endif

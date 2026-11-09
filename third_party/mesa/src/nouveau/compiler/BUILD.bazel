@@ -240,6 +240,11 @@ mesa_rust_library(
     crate_name = "nak_rs",
     crate_root = "nak/lib.rs",
     crate_type = "staticlib",
+    # ios-on-switch-lmao: release builds leave SwitchHWTest's SM53 probe out (nak/api.rs)
+    extra_flags = ["--check-cfg=cfg(switch_release)"] + select({
+        "//bazel:release": ["--cfg=switch_release"],
+        "//conditions:default": [],
+    }),
     lints = NOUVEAU_RUST_ARGS,
     metadata = "ed48680@@nak_rs@sta",
     native_libs = [

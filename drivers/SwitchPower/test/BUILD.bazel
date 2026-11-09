@@ -6,6 +6,7 @@
 #                                    measurements
 #   switch_thermal_sensors_test      SwitchSensors.h, thermalmonitord's sensors: the J120AP plist's table, nearest
 #                                    measurements, unit conversions, SOC_THERM fuse calibration against L4T's, CLTM
+#   switch_thermal_tcal_test         the PMU tcal answer against thermalmonitord's correction and J181's skin model
 #   switch_sensors_hid_source_test   the HID descriptor and IOHIDFamily vtable slots the sensors are published through
 #   switch_emc_governor_test         SwitchEMCGovernor.h: the EMC rates used, ACTMON's watermarks and the governor's moves
 #   switch_soctherm_window_test      SwitchSocThermWindow.h: SOC_THERM's one-degree LVL0 window and the groups' registers
@@ -69,6 +70,12 @@ host_test(
 host_test(
     name = "switch_thermal_sensors_j181_test",
     srcs = ["switch_thermal_sensors_j181_test.cpp"],
+    deps = [":switch_thermal_sensors_harness"],
+)
+
+host_test(
+    name = "switch_thermal_tcal_test",
+    srcs = ["switch_thermal_tcal_test.cpp"],
     deps = [":switch_thermal_sensors_harness"],
 )
 

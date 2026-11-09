@@ -59,31 +59,45 @@
 // interrupt context, drains the RX FIFO into a ring and refills the TX FIFO (3 Mbaud fills the 32-byte FIFO in ~110 us,
 // so the drain cannot wait for a thread, and the line is never left masked for one); its action parses on the work
 // loop. Hardware RTS flow control backs this up for long replies. Attach is the detect pin's GPIO
-// interrupt. A missing reply is either the Joy-Con gone (the line is silent: detach after 500 ms, J:1793) or a lost
-// interrupt (bytes sit in the FIFO with RX interrupts enabled, or the TX FIFO is empty with THRI enabled): that
-// panics in one line with the UART registers and the GIC state. A rail waiting for an attach arms nothing but the
-// detect pin's interrupt; tegra_gpio_check_delivery() (as SwitchButtons) looks at that pin when the display goes off,
-// not on a timer. Every packet also takes one THR-empty interrupt, so the interrupt count proves the UART's line
-// reaches the CPU even when nothing comes back.
+// interrupt. A missing reply is either the Joy-Con gone (the line is silent) or a lost interrupt (bytes sit in the FIFO
+// with RX interrupts enabled, or the TX FIFO is empty with THRI enabled): that panics in one line with the UART
+// registers and the GIC state. A rail waiting for an attach arms nothing but the detect pin's interrupt;
+// tegra_gpio_check_delivery() (as SwitchButtons) looks at that pin when the display goes off, not on a timer. Every
+// packet also takes one THR-empty interrupt, so the interrupt count proves the UART's line reaches the CPU even when
+// nothing comes back.
+// Silence is counted in requests the Joy-Con left unanswered, not in time since its last reply, so a clock that fired
+// late cannot pass for a Joy-Con that stopped. A running Joy-Con is gone after 100 of them (1.5 s), not L4T's 500 ms
+// (J:1793): it runs on its own battery, so a rail contact that bounces while the console is handled leaves it at
+// 3 Mbaud in HID mode with its input mode, IMU, lights and vibration as the plugin set them, and it answers the next
+// request once the contact is back. Detached at 500 ms it would ignore the 1 Mbaud wake until its own 2 s HID timeout
+// and come back as a new HID device, which games see as a disconnect. 1.5 s stays inside that timeout; the cost is
+// a Joy-Con pulled off the rail noticed 1 s later. (A silence seen while the console was handled was a Joy-Con that
+// answered no request for 500 ms and then ignored the 1 Mbaud wake for 2.6 s: in HID mode, not reset.)
 // Giving up on an attach logs one line of rail state (describe); a running Joy-Con that falls silent logs one line
-// with the number of input reports it sent.
+// with its input reports, the requests it left unanswered, and the line errors and breaks since its last reply; one
+// that answers again after 500 ms or more logs one line too.
 //
 // RX by APB DMA while running (TegraAPBDMA.h): by FIFO trigger, a running Joy-Con's reply (~61 bytes of 0x30 report
-// every 15 ms per rail) takes about eight interrupts, around 1000 a second on CPU0 for two rails. While a rail
-// runs, the UART is in DMA mode as Linux serial-tegra puts it (FCR DMA select, 4-byte RX trigger, IER RLSI | RTOIE |
-// EORD and no RDI): channel 0 (UART-B) / 1 (UART-C) moves every 4 bytes into a 4 KiB ring, continuously, and the reply
-// takes one interrupt, EORD or RX timeout once the line has been idle for 4 characters. The filter then takes what the
-// DMA put in the ring (cache lines invalidated first) and, by PIO, the 1-3 bytes below the burst still in the FIFO
-// (serial-tegra tegra_uart_rx_buffer_push + tegra_uart_handle_rx_pio), into the same ring and framing as PIO, and
-// wakes the action once. Reading the FIFO while the channel runs is safe here because a Joy-Con only speaks when spoken
-// to: nothing arrives between its reply and the next request; should the ring move during that read anyway, the order
-// of those bytes is unknown and they count as a line error (the packet is dropped and the stream resynchronises, as
-// for any line error). TX stays PIO (a request fits the FIFO: one THR-empty interrupt). Handshake and pairing keep PIO,
-// so their give-up lines see every byte. The DMA's end-of-count at every wrap is counted: more wraps than the bytes
-// taken account for means the ring was overrun, data lost, and the action panics with one line; bytes in the ring that
-// no interrupt took, after 50 ms, are a lost interrupt (checkDelivery). Non-fatal checks: a channel that does not open,
-// a first reply that does not start with the reply magic, or 4 bytes or more left in the FIFO with the ring not moving
-// turn DMA off for that rail with one log line; it keeps working by interrupt per FIFO trigger.
+// every 15 ms per rail) takes about eight interrupts, around 1000 a second on CPU0 for two rails. While a rail runs,
+// the UART is in DMA mode (FCR DMA select, RX trigger 1, IER RLSI | RTOIE | EORD and no RDI), and channel 0 (UART-B) /
+// 1 (UART-C) is the RX FIFO's only reader, as SwitchBluetooth's: one 32-bit read of RBR per byte, one word a byte, into
+// a 16 KiB ring, continuously (tegra_apbdma_start_rx_words_ring). The reply takes one interrupt, EORD or RX timeout
+// once the line has been idle for 4 characters, and the filter takes the words that moved (cache lines invalidated
+// first) into the same ring and framing as PIO and wakes the action once. Nothing reads the FIFO by PIO while the
+// channel runs: on the console the channel can fall a whole reply behind (the FIFO full, RTS holding the Joy-Con,
+// EORD with nothing in the ring), and a PIO read of the 1-3 bytes below a 4-byte burst, as serial-tegra does it, then
+// raced the channel for the FIFO: it took the 0 that is a reply's length high byte, so the cmd byte 0x92 became it and
+// the parser saw a 37437-byte packet. A channel that is behind is now only late: a take that leaves bytes in the FIFO
+// or ends inside a packet leaves the tail to the next request's tick (the Joy-Con says nothing more until then) and
+// masks RX timeout until then, so a slow channel cannot storm the line; `dmaLate` counts those takes. TX stays PIO (a
+// request fits the FIFO: one THR-empty interrupt). Handshake and pairing keep PIO, so their give-up lines see every
+// byte. The DMA's end-of-count at every wrap is counted: more wraps than the words taken account for means the ring
+// was overrun, data lost, and the action panics with one line; words in the ring that no interrupt took and no tail
+// was expected, after 50 ms, are a lost interrupt (checkDelivery). Non-fatal checks, each a channel that does not
+// work: one that does not open, a first reply that does not start with the reply magic, or bytes in the FIFO across a
+// whole request interval with the channel not moving. Each turns DMA off for that rail with one log line (DMA select
+// off first and a read in flight let land, so PIO sees every byte in order); it keeps working by interrupt per FIFO
+// trigger.
 //
 // Pairing (unless switch-no-bt): the address to pair to is the one SwitchBluetooth programs
 // into the controller for bluetoothd: the unit's own (fuses, as switchroot's U-Boot derives it) or, when deploy staged
@@ -140,16 +154,19 @@
 #include <libkern/c++/OSData.h>
 #include <os/log.h>
 #include <pexpert/pexpert.h>
+#include <sys/sysctl.h>
 #include "../ArmGIC/SwitchInterrupts.h"
 #include "../TegraAPBDMA/TegraAPBDMA.h"
 #include "../TegraGPIO/TegraGPIO.h"
 #include "SwitchJoyCon.h"
 #include "SwitchJoyConHID.h"
 #include "SwitchJoyConForward.h"
+#include "SwitchJoyConRxRing.h"
 #include "SwitchJoyConSession.h"
 #include "../../kits/SwitchCAR/SwitchPMC.h"
 #include "../../kits/SwitchDMA/SwitchDcache.h"
 #include "../../kits/SwitchMMIO/SwitchMMIOKernel.h"
+#include "../../kits/SwitchSysctl/SwitchSysctl.h"
 #include "../../kits/SwitchTime/SwitchTime.h"
 
 namespace {
@@ -185,11 +202,14 @@ enum : uint32_t {
     FCR_TX_CLR = 0x04,
     FCR_DMA = 0x08,  // UART_FCR_DMA_SELECT: RX/TX DMA requests
     FCR_TX_TRIG_16 = 0x00,
-    FCR_RX_TRIG_4 = 0x40,  // the DMA's one-word burst (serial-tegra, chips without 8-byte-only bursts)
+    FCR_RX_TRIG_1 = 0x00,  // DMA mode: a request per byte, one APB read each
     FCR_RX_TRIG_8 = 0x80
 };
 
-constexpr uint32_t kDmaRingBytes = 4096;
+// One word a byte: 4096 bytes, about a second of one rail's replies between the channel's end-of-count interrupts.
+constexpr uint32_t kDmaRingBytes = 16384;
+// Leaving DMA mode: a read the channel had started lands (one byte, < 1 us; SwitchBluetooth kRxDmaSettleUs).
+constexpr uint32_t kDmaSettleUs = 4;
 
 enum : uint32_t {
     LCR_8N1 = 0x03,
@@ -201,6 +221,7 @@ enum : uint32_t {
 enum : uint32_t {
     LSR_DR = 0x01,
     LSR_ERRORS = 0x1e,
+    LSR_BI = 0x10,
     LSR_THRE = 0x20,
     LSR_TEMT = 0x40,
     LSR_TX_FULL = 0x100
@@ -360,7 +381,10 @@ constexpr uint8_t kRumbleNeutral[8] = {0x00, 0x01, 0x40, 0x40, 0x00, 0x01, 0x40,
 
 // Timing (J: 1709 retries, 1748 settle, 1793 silence, 1809 interval; hekate 1257 handshake reply).
 constexpr uint32_t kSettleMS = 64, kHandshakeMS = 100, kCommandMS = 250, kRetryMS = 100, kAttempts = 30;
-constexpr uint32_t kSubcommandMS = 1000, kIntervalMS = 15, kSilenceMS = 500;
+constexpr uint32_t kSubcommandMS = 1000, kIntervalMS = 15;
+// Unanswered requests (see the header): a running Joy-Con is gone after kSilentRequests; one that answers again after
+// kQuietRequests or more is logged.
+constexpr uint32_t kSilentRequests = 1500 / kIntervalMS, kQuietRequests = 500 / kIntervalMS;
 // A non-zero rumble is sent again this often (L4T JC_RUMBLE_PERIOD_MS, J:470).
 constexpr uint32_t kRumbleKeepAliveMS = 50;
 // After the 3 Mbaud switch: 91/11 every 5 ms for up to 200 ms (hekate 1325-1341: ten sends 5 ms apart; L4T's retry
@@ -475,6 +499,7 @@ OSDefineMetaClassAndStructors(SwitchJoyConPairing, IOService)
         uint8_t ring[1024];
         volatile uint32_t head, tail;
         volatile uint32_t interrupts, lineErrors, fastErrors, overflows;  // fastErrors: line errors at 3 Mbaud
+        volatile uint32_t breaks;                                         // line errors that were a break (BI)
         volatile bool stuck;
         bool fast;  // UART at 3 Mbaud (configureUart)
         // The rail framing of the bytes the filter puts in the ring, as uartAction parses them (frameByte), so that a
@@ -486,22 +511,29 @@ OSDefineMetaClassAndStructors(SwitchJoyConPairing, IOService)
         uint8_t tx[kMaxTx];
         uint32_t txLength, txPosition;
         uint32_t ier;
-        // RX by DMA while running (header "RX by APB DMA"), under `lock`: the channel and its ring (null: PIO only),
-        // DMA mode on, the ring offset taken up to, bytes taken since the start, the channel's interrupt count at the
-        // start, the first reply checked; a reason to turn it off (the action logs it), an overrun (the action panics),
-        // and counts: replies taken, leftover bytes by PIO, ring moves during the leftover read.
+        // RX by DMA while running (header "RX by APB DMA"), under `lock`: the channel and its ring of words (null: PIO
+        // only), DMA mode on, the word taken up to, words taken since the start, the channel's interrupt count at the
+        // start, the first reply checked; a tail left to the next tick (RX timeout masked until then); the FIFO held
+        // bytes at the last tick, with the channel at word dmaTickAt (the not-moving check); a reason to turn it off
+        // (the action logs it), an overrun (the action panics); and counts: takes, takes that found the channel behind,
+        // tails the tick took.
         tegra_apbdma_channel *dma;
         tegra_apbdma_buffer dmaRing;
-        bool dmaOn, dmaOff, dmaChecked, dmaOverrun;
+        bool dmaOn, dmaOff, dmaChecked, dmaOverrun, dmaTail, dmaWaited;
         const char *dmaFailed;
-        uint32_t dmaTaken, dmaLapsAtStart, dmaTakes, dmaPio, dmaRaces;
-        uint64_t dmaBytes;
+        uint32_t dmaTaken, dmaLapsAtStart, dmaTakes, dmaLate, dmaTails, dmaTickAt;
+        uint64_t dmaWords;
         // Work loop.
         Phase phase;
         uint8_t step, attempts, fastFailures, sends, slot, counter;  // sends: of the current handshake step
         uint32_t errorsSeen, epoch;  // epoch: bumped when the UART is reprogrammed and unread bytes are dropped
         uint64_t lastReply;
-        uint32_t reports;  // input reports since the handshake completed
+        uint32_t reports;     // input reports since the handshake completed
+        uint32_t unanswered;  // requests sent since the last reply (header: silence)
+        uint32_t errorsAtReply, breaksAtReply;
+        // Since boot, for kern.switch_joycon (debug kernels): input reports, packets dropped for a length no Joy-Con
+        // sends, silences that detached it, silences of kQuietRequests or more it answered after, devices republished.
+        uint32_t replies, dropped, silences, recoveries, republished;
         uint8_t packet[kMaxRx];
         size_t packetLength;
         bool oversizeLogged;
@@ -604,8 +636,10 @@ OSDefineMetaClassAndStructors(SwitchJoyConPairing, IOService)
     static bool filter(Side &s);
     static void fillTx(Side &s);
     static bool drainRx(Side &s);
+    static void countLineStatus(Side &s, uint32_t lsr);
     static void frameByte(Side &s, uint8_t byte);
     static bool takeDma(Side &s);
+    static void takeTail(Side &s);
     static void startDmaLocked(Side &s);
     static void stopDmaLocked(Side &s);
     static void dmaFailedLocked(Side &s, const char *why);
@@ -655,6 +689,8 @@ public:
     void resume();
     void displayPower(bool on);
     void bluetoothAddress(const uint8_t address[6]);
+    // kern.switch_joycon (debug kernels): each rail's state and counters since boot, for hw_test_app's input.rail.
+    void statsLine(char *buffer, size_t size) const;
 };
 
 OSDefineMetaClassAndStructors(SwitchJoyConRail, IOService)
@@ -707,8 +743,9 @@ bool SwitchJoyConRail::uartFilter(OSObject *owner, IOFilterInterruptEventSource 
 // give-up line and keeps a wakeup per interrupt.
 //
 // DMA mode (header "RX by APB DMA"): an RX condition (EORD, RX timeout, line status) masks the RX interrupts as
-// serial-tegra's tegra_uart_isr does (RDI written on, then every RX source off: that clears EORD); once IIR is clear the
-// ring and the FIFO's leftovers are taken (takeDma) and the RX sources come back.
+// serial-tegra's tegra_uart_isr does (RDI written on, then every RX source off: that clears EORD); once IIR is clear
+// the words the channel moved are taken (takeDma) and the RX sources come back, RX timeout only once no tail is left
+// to the next tick. The action wakes for a packet's end, not for a take that ends inside one.
 bool SwitchJoyConRail::filter(Side &s)
 {
     bool got = false;
@@ -744,10 +781,8 @@ bool SwitchJoyConRail::filter(Side &s)
                     wr(s, IER, s.ier & ~(IER_RX | IER_EORD));
                 }
                 dmaRx = true;
-                if (((iir >> 1) & 7) == 3 && (rd(s, LSR) & LSR_ERRORS)) {  // line status: the read clears it
-                    s.lineErrors = s.lineErrors + 1;
-                    s.fastErrors = s.fastErrors + 1;
-                }
+                if (((iir >> 1) & 7) == 3)  // line status: the read clears it
+                    countLineStatus(s, rd(s, LSR));
                 break;
             }
             idle |= ((iir >> 1) & 7) == 6;  // RX timeout
@@ -756,10 +791,11 @@ bool SwitchJoyConRail::filter(Side &s)
         }
     }
     if (dmaRx && !s.stuck) {
-        idle = true;  // EORD and RX timeout come with the line idle: the end of a reply
         got |= takeDma(s);
+        // EORD and RX timeout come with the line idle: the end of a reply, unless the channel is behind.
+        idle = !s.dmaTail;
         if (s.dmaOn)
-            wr(s, IER, s.ier);  // a failed check left PIO's sources (dmaFailedLocked)
+            wr(s, IER, s.dmaTail ? s.ier & ~IER_RTOIE : s.ier);  // a failed check left PIO's sources (dmaFailedLocked)
     }
     if (got && !s.stuck && s.phase == kRunning && !s.packetDone && !idle && s.lineErrors == errorsBefore &&
         s.overflows == overflowsBefore)
@@ -812,16 +848,24 @@ void SwitchJoyConRail::fillTx(Side &s)
     }
 }
 
+// `lock` held: a line status read's errors, counted once.
+void SwitchJoyConRail::countLineStatus(Side &s, uint32_t lsr)
+{
+    if (!(lsr & LSR_ERRORS))
+        return;
+    s.lineErrors = s.lineErrors + 1;
+    if (s.fast)
+        s.fastErrors = s.fastErrors + 1;
+    if (lsr & LSR_BI)
+        s.breaks = s.breaks + 1;
+}
+
 bool SwitchJoyConRail::drainRx(Side &s)
 {
     bool got = false;
     for (;;) {
         const uint32_t lsr = rd(s, LSR);
-        if (lsr & LSR_ERRORS) {
-            s.lineErrors = s.lineErrors + 1;
-            if (s.fast)
-                s.fastErrors = s.fastErrors + 1;
-        }
+        countLineStatus(s, lsr);
         if (!(lsr & LSR_DR))
             break;
         const uint8_t byte = static_cast<uint8_t>(rd(s, RBR_THR));
@@ -838,103 +882,132 @@ bool SwitchJoyConRail::drainRx(Side &s)
     return got;
 }
 
-// `lock` held, DMA mode, RX interrupts masked (filter): what the channel put in the ring since the last take (its cache
-// lines invalidated first: the engine does not snoop), then the bytes below its 4-byte burst still in the FIFO, by PIO
-// (drainRx), all into `ring` with the same framing. More end-of-counts (wraps) than the bytes taken account for is an
-// overrun (the action panics). The non-fatal DMA checks (header) turn DMA off for the rail (dmaFailedLocked), which
-// loses nothing: the PIO drain takes whatever the FIFO holds.
+// `lock` held, DMA mode (filter, or tick for a tail): the words the channel moved since the last take (their cache
+// lines invalidated first: the engine does not snoop), one byte each, into `ring` with the same framing. More
+// end-of-counts (wraps) than the words taken account for is an overrun (the action panics). Bytes still in the FIFO, or
+// a take that ends inside a packet, leave a tail: the channel is behind, and the next tick takes the rest.
 bool SwitchJoyConRail::takeDma(Side &s)
 {
-    const uint32_t size = s.dmaRing.size;
-    const uint32_t at = tegra_apbdma_moved(s.dma, nullptr) % size;
-    const uint32_t count = (at + size - s.dmaTaken) % size;
-    const uint32_t laps = tegra_apbdma_interrupts(s.dma) - s.dmaLapsAtStart;
-    if (laps > (s.dmaBytes + count) / size) {
+    const uint32_t words = s.dmaRing.size / 4;
+    const switch_joycon_rx_take take =
+        switch_joycon_rx_ring_take(words, s.dmaTaken, tegra_apbdma_moved(s.dma, nullptr),
+                                   tegra_apbdma_interrupts(s.dma) - s.dmaLapsAtStart, s.dmaWords);
+    if (take.overrun) {
         s.dmaOverrun = true;
         return true;
     }
-    bool got = false;
-    if (count) {
-        const uint32_t from = s.dmaTaken;
-        for (uint32_t done = 0; done < count;) {
-            const uint32_t start = (from + done) % size;
-            const uint32_t run = count - done < size - start ? count - done : size - start;
-            switch_dcache_clean_invalidate_lines(s.dmaRing.va + start, run);
+    const auto *ring = reinterpret_cast<const uint32_t *>(s.dmaRing.va);
+    if (take.count) {
+        for (uint32_t done = 0; done < take.count;) {
+            const uint32_t start = (take.from + done) % words;
+            const uint32_t run = take.count - done < words - start ? take.count - done : words - start;
+            switch_dcache_clean_invalidate_lines(s.dmaRing.va + static_cast<size_t>(start) * 4,
+                                                 static_cast<size_t>(run) * 4);
             done += run;
         }
         switch_dcache_sync();
-        if (!s.dmaChecked) {
-            // The first reply since the start begins at offset 0: the reply magic, after any zeros (uartAction's
-            // "Obird workaround"). Anything else: the channel's position or data are not what the driver thinks.
-            s.dmaChecked = true;
-            uint32_t i = 0;
-            while (i < count && !s.dmaRing.va[i])
-                ++i;
-            if (from != 0 || count - i < 3 || memcmp(s.dmaRing.va + i, kReplyMagic, 3)) {
-                dmaFailedLocked(s, "the first reply by DMA did not start with the reply magic");
-                return drainRx(s);
-            }
+    }
+    if (take.count && !s.dmaChecked) {
+        // The first reply since the start begins at word 0: the reply magic, after any zeros (uartAction's "Obird
+        // workaround"). Anything else: the channel's position or data are not what the driver thinks.
+        s.dmaChecked = true;
+        uint32_t i = 0;
+        while (i < take.count && !(ring[i] & 0xff))
+            ++i;
+        const bool magic = take.count - i >= 3 && (ring[i] & 0xff) == kReplyMagic[0] &&
+                           (ring[i + 1] & 0xff) == kReplyMagic[1] && (ring[i + 2] & 0xff) == kReplyMagic[2];
+        if (take.from != 0 || !magic) {
+            dmaFailedLocked(s, "the first reply by DMA did not start with the reply magic");
+            return drainRx(s);
         }
-        for (uint32_t i = 0; i < count; ++i) {
-            const uint8_t byte = s.dmaRing.va[(from + i) % size];
-            const uint32_t next = (s.head + 1) % sizeof(s.ring);
-            if (next == s.tail) {
-                s.overflows = s.overflows + 1;
-                continue;
-            }
-            s.ring[s.head] = byte;
-            s.head = next;
-            frameByte(s, byte);
+    }
+    for (uint32_t i = 0; i < take.count; ++i) {
+        const auto byte = static_cast<uint8_t>(ring[(take.from + i) % words]);
+        const uint32_t next = (s.head + 1) % sizeof(s.ring);
+        if (next == s.tail) {
+            s.overflows = s.overflows + 1;
+            continue;
         }
-        s.dmaTaken = at;
-        s.dmaBytes += count;
+        s.ring[s.head] = byte;
+        s.head = next;
+        frameByte(s, byte);
+    }
+    s.dmaTaken = (take.from + take.count) % words;
+    s.dmaWords += take.count;
+    if (take.count)
         s.dmaTakes = s.dmaTakes + 1;
-        got = true;
-    }
-    const uint32_t before = s.head;
-    got |= drainRx(s);
-    const uint32_t pio = (s.head + sizeof(s.ring) - before) % sizeof(s.ring);
-    s.dmaPio += pio;
-    if (pio >= 4 && !count) {
-        dmaFailedLocked(s, "4 or more bytes waited in the FIFO and the DMA took none");
-    } else if (tegra_apbdma_moved(s.dma, nullptr) % size != at) {
-        s.dmaRaces = s.dmaRaces + 1;  // the ring moved while the FIFO was read: their order is unknown
-        s.lineErrors = s.lineErrors + 1;
-        s.fastErrors = s.fastErrors + 1;
-    }
-    return got;
+    const bool behind = (rd(s, LSR) & LSR_DR) != 0u;
+    if (behind)
+        s.dmaLate = s.dmaLate + 1;
+    s.dmaTail = behind || s.frameLength != 0;
+    return take.count != 0;
 }
 
-// `lock` held, work loop (run): the UART into DMA mode with the ring from offset 0. What the FIFO holds is taken by
-// PIO first.
+// Work loop, a running Joy-Con's tick, before its next request: the tail a late channel left (header "RX by APB DMA"),
+// for the action to parse; and the channel's not-moving check, bytes in the FIFO at two ticks in a row with the channel
+// at the same word.
+void SwitchJoyConRail::takeTail(Side &s)
+{
+    bool got = false;
+    const IOInterruptState state = IOSimpleLockLockDisableInterrupt(s.lock);
+    if (s.dmaOn && s.dmaTail) {
+        got = takeDma(s);
+        if (got)
+            s.dmaTails = s.dmaTails + 1;
+        if (s.dmaOn && !s.dmaTail)
+            wr(s, IER, s.ier);
+    }
+    if (s.dmaOn) {
+        const uint32_t at = (tegra_apbdma_moved(s.dma, nullptr) / 4) % (s.dmaRing.size / 4);
+        const bool waiting = (rd(s, LSR) & LSR_DR) != 0u;
+        if (waiting && s.dmaWaited && at == s.dmaTickAt) {
+            dmaFailedLocked(s, "bytes waited in the FIFO for a whole request interval with the channel not moving");
+            (void)drainRx(s);
+            got = true;  // the action logs why
+        }
+        s.dmaWaited = waiting;
+        s.dmaTickAt = at;
+    }
+    IOSimpleLockUnlockEnableInterrupt(s.lock, state);
+    if (got)
+        s.irq->signalInterrupt();
+}
+
+// `lock` held, work loop (run): the UART into DMA mode with the ring from word 0. What the FIFO holds is taken by PIO
+// first.
 void SwitchJoyConRail::startDmaLocked(Side &s)
 {
     if (!s.dma || s.dmaOff || s.dmaOn)
         return;
     (void)drainRx(s);
     s.dmaTaken = 0;
-    s.dmaBytes = 0;
+    s.dmaWords = 0;
     s.dmaChecked = false;
+    s.dmaTail = false;
+    s.dmaWaited = false;
     s.dmaLapsAtStart = tegra_apbdma_interrupts(s.dma);
     switch_dcache_clean_invalidate(s.dmaRing.va, s.dmaRing.size);
     const unsigned request = s.cfg->uart == 'B' ? TEGRA_APBDMA_REQ_UARTB : TEGRA_APBDMA_REQ_UARTC;
-    tegra_apbdma_start_ring(s.dma, static_cast<uint32_t>(kUartPA + s.cfg->uartOffset + RBR_THR), request, s.dmaRing.pa,
-                            s.dmaRing.size);
-    wr(s, IIR_FCR, FCR_FIFO | FCR_DMA | FCR_RX_TRIG_4 | FCR_TX_TRIG_16);
+    tegra_apbdma_start_rx_words_ring(s.dma, static_cast<uint32_t>(kUartPA + s.cfg->uartOffset + RBR_THR), request,
+                                     s.dmaRing.pa, s.dmaRing.size);
+    wr(s, IIR_FCR, FCR_FIFO | FCR_DMA | FCR_RX_TRIG_1 | FCR_TX_TRIG_16);
     s.ier = (s.ier & IER_THRI) | IER_RX_DMA;
     wr(s, IER, s.ier);
     s.dmaOn = true;
 }
 
-// `lock` held: back to PIO (RX interrupt per FIFO trigger), the channel stopped. Unread ring bytes are the caller's to
+// `lock` held: back to PIO (RX interrupt per FIFO trigger), the channel stopped. DMA select goes off first and a read
+// the channel had started lands, so what is left in the FIFO is PIO's, in order. Unread ring words are the caller's to
 // drop (leaving the running phase) or already taken.
 void SwitchJoyConRail::stopDmaLocked(Side &s)
 {
     if (!s.dmaOn)
         return;
     wr(s, IIR_FCR, FCR_FIFO | FCR_RX_TRIG_8 | FCR_TX_TRIG_16);
+    IODelay(kDmaSettleUs);
     tegra_apbdma_stop(s.dma);
     s.dmaOn = false;
+    s.dmaTail = false;
     s.ier = (s.ier & IER_THRI) | IER_RX;
     wr(s, IER, s.ier);
 }
@@ -962,8 +1035,8 @@ void SwitchJoyConRail::uartAction(OSObject *owner, IOInterruptEventSource *sende
     if (s->dmaOverrun) {
         char dma[320];
         tegra_apbdma_describe(s->dma, dma, sizeof(dma));
-        panic("SwitchJoyCon: UART-%c RX DMA overran its ring (data lost): taken %llu bytes at %u, %s", s->cfg->uart,
-              s->dmaBytes, s->dmaTaken, dma);
+        panic("SwitchJoyCon: UART-%c RX DMA overran its ring (data lost): taken %llu words, at word %u, %s",
+              s->cfg->uart, s->dmaWords, s->dmaTaken, dma);
     }
     if (const char *why = __atomic_exchange_n(&s->dmaFailed, nullptr, __ATOMIC_ACQ_REL)) {
         char dma[320];
@@ -1017,10 +1090,11 @@ void SwitchJoyConRail::uartAction(OSObject *owner, IOInterruptEventSource *sende
                 continue;
             const size_t total = 5 + (s->packet[3] | static_cast<size_t>(s->packet[4]) << 8);
             if (total < kMinPacket || total > sizeof(s->packet)) {
+                ++s->dropped;
                 if (total > sizeof(s->packet) && !s->oversizeLogged) {
                     s->oversizeLogged = true;
-                    IOLog("SwitchJoyCon: Joy-Con (%c) sent a %zu-byte rail packet (cmd %#x), dropped\n", s->cfg->letter,
-                          total, s->packet[5]);
+                    IOLog("SwitchJoyCon: Joy-Con (%c) rail packet header gives %zu bytes (cmd %#x), dropped\n",
+                          s->cfg->letter, total, s->packet[5]);
                 }
                 s->packetLength = 0;
                 continue;
@@ -1035,7 +1109,18 @@ void SwitchJoyConRail::uartAction(OSObject *owner, IOInterruptEventSource *sende
 
 void SwitchJoyConRail::received(Side &s, const uint8_t *packet, size_t length)
 {
-    s.lastReply = switch_now_ms();
+    const uint64_t now = switch_now_ms();
+    if (s.phase == kRunning && s.unanswered > kQuietRequests) {
+        IOLog("SwitchJoyCon: Joy-Con (%c) on the rail answered again after %u requests unanswered over %llu ms (line "
+              "errors %u, breaks %u in between)\n",
+              s.cfg->letter, s.unanswered - 1, now - s.lastReply, s.lineErrors - s.errorsAtReply,
+              s.breaks - s.breaksAtReply);
+        ++s.recoveries;
+    }
+    s.lastReply = now;
+    s.unanswered = 0;
+    s.errorsAtReply = s.lineErrors;
+    s.breaksAtReply = s.breaks;
     const uint8_t cmd = packet[5];
     switch (s.phase) {
     case kHandshake:
@@ -1513,6 +1598,9 @@ void SwitchJoyConRail::run(Side &s)
     s.rumbleSent = false;
     s.phase = kRunning;
     s.lastReply = switch_now_ms();
+    s.unanswered = 0;
+    s.errorsAtReply = s.lineErrors;
+    s.breaksAtReply = s.breaks;
     s.reports = 0;
     s.errorsAtRun = s.lineErrors;
     s.overflowsAtRun = s.overflows;
@@ -1571,6 +1659,7 @@ void SwitchJoyConRail::republish(Side &s)
         return;
     }
     dropHid(s);
+    ++s.republished;
     // What the old session queued or left vibrating is not the new session's (run() starts the same way).
     IOLockLock(s.outLock);
     s.queueHead = s.queueTail = 0;
@@ -1611,23 +1700,31 @@ void SwitchJoyConRail::pollAction(OSObject *owner, IOTimerEventSource *)
     self->armPoll();
 }
 
-// One request per 15 ms: the oldest queued output report (subcommands keep their order), else the input request. A
-// Joy-Con that has said nothing for 500 ms is gone (J:1793).
+// One request per 15 ms: the oldest queued output report (subcommands keep their order), else the input request, after
+// the tail of the last reply a late RX channel left. A Joy-Con that left kSilentRequests unanswered is gone (header).
 void SwitchJoyConRail::tick(Side &s)
 {
-    if (switch_now_ms() - s.lastReply > kSilenceMS) {
-        checkDelivery(s, "no reply for 500 ms");
+    takeTail(s);
+    if (s.phase != kRunning)
+        return;  // the tail's parse can end the running phase (a pairing address arrives)
+    if (s.unanswered >= kSilentRequests) {
+        checkDelivery(s, "no reply to the requests of a whole silence");
         // Pulled off the rail, or the HID phase does not work (0 reports): either way it is handshaken again if seated.
         const char *rxDma = s.dma && !s.dmaOff ? "idle" : "off";
         if (s.dmaOn)
             rxDma = "on";
-        IOLog("SwitchJoyCon: Joy-Con (%c) on the rail stopped answering after %u input reports (line errors %u, ring "
-              "overflows %u; RX DMA %s: %u replies, %u bytes by PIO, %u ring moves during it)\n",
-              s.cfg->letter, s.reports, s.lineErrors - s.errorsAtRun, s.overflows - s.overflowsAtRun, rxDma, s.dmaTakes,
-              s.dmaPio, s.dmaRaces);
+        IOLog(
+            "SwitchJoyCon: Joy-Con (%c) on the rail stopped answering after %u input reports: %u requests unanswered "
+            "over %llu ms (line errors %u, breaks %u since its last reply; line errors %u, ring overflows %u since the "
+            "handshake; RX DMA %s: %u takes, %u found it behind, %u tails at the tick)\n",
+            s.cfg->letter, s.reports, s.unanswered, switch_now_ms() - s.lastReply, s.lineErrors - s.errorsAtReply,
+            s.breaks - s.breaksAtReply, s.lineErrors - s.errorsAtRun, s.overflows - s.overflowsAtRun, rxDma, s.dmaTakes,
+            s.dmaLate, s.dmaTails);
+        ++s.silences;
         detach(s);
         return;
     }
+    ++s.unanswered;
     uint8_t report[kMaxOutput];
     size_t length = 0;
     IOLockLock(s.outLock);
@@ -1690,6 +1787,7 @@ void SwitchJoyConRail::runningReport(Side &s, const uint8_t *report, size_t leng
         }
     }
     ++s.reports;
+    ++s.replies;
     rumbleAfterReply(s);
     if (!s.hid)
         return;
@@ -1789,8 +1887,10 @@ void SwitchJoyConRail::checkDelivery(Side &s, const char *why)
     for (unsigned look = 0; look < 2; ++look) {
         const uint32_t seen = s.interrupts;
         const uint32_t lsr = rd(s, LSR);
-        // DMA mode: bytes the channel put in the ring that no EORD/RX-timeout interrupt took.
-        const bool ring = s.dmaOn && tegra_apbdma_moved(s.dma, nullptr) % s.dmaRing.size != s.dmaTaken;
+        // DMA mode: words the channel put in the ring that no EORD/RX-timeout interrupt took, and no tail was left
+        // to the tick for.
+        const bool ring =
+            s.dmaOn && !s.dmaTail && (tegra_apbdma_moved(s.dma, nullptr) / 4) % (s.dmaRing.size / 4) != s.dmaTaken;
         const bool rx = (((lsr & LSR_DR) != 0u) && ((s.ier & (IER_RDI | IER_RTOIE)) != 0u)) || ring;
         const bool tx = ((lsr & LSR_THRE) != 0u) && ((s.ier & IER_THRI) != 0u);
         if (!rx && !tx)
@@ -1807,7 +1907,7 @@ void SwitchJoyConRail::checkDelivery(Side &s, const char *why)
             "SwitchJoyCon: UART-%c interrupt lost (INTID %u, %s): LSR %#x IER %#x MCR %#x tx %u/%u dma %u ring %u/%u, "
             "%s",
             s.cfg->uart, s.cfg->intid, why, lsr, rd(s, IER), rd(s, MCR), s.txPosition, s.txLength, s.dmaOn,
-            s.dmaOn ? tegra_apbdma_moved(s.dma, nullptr) : 0, s.dmaTaken, gic);
+            s.dmaOn ? tegra_apbdma_moved(s.dma, nullptr) / 4 : 0, s.dmaTaken, gic);
     }
 }
 
@@ -2120,7 +2220,46 @@ bool SwitchJoyConRail::start(IOService *provider)
     return true;
 }
 
+void SwitchJoyConRail::statsLine(char *buffer, size_t size) const
+{
+    size_t used = 0;
+    buffer[0] = 0;
+    for (const Side &s : sides) {
+        const int n = snprintf(buffer + used, size - used,
+                               "%s%c running=%d dma=%s replies=%u late=%u tails=%u errors=%u breaks=%u overflows=%u "
+                               "dropped=%u silences=%u recoveries=%u republished=%u",
+                               used ? "; " : "", s.cfg->letter, s.phase == kRunning ? 1 : 0, s.dmaOn ? "on" : "off",
+                               s.replies, s.dmaLate, s.dmaTails, s.lineErrors, s.breaks, s.overflows, s.dropped,
+                               s.silences, s.recoveries, s.republished);
+        if (n < 0 || static_cast<size_t>(n) >= size - used)
+            break;
+        used += static_cast<size_t>(n);
+    }
+}
+
 static SwitchJoyConRail *gRail;  // set once at start, for switch_joycon_suspend/resume
+
+#if DEVELOPMENT || DEBUG
+static int statsSysctl(struct sysctl_oid *, void *, int, struct sysctl_req *req)
+{
+    char line[512] = "";
+    if (const SwitchJoyConRail *rail = __atomic_load_n(&gRail, __ATOMIC_ACQUIRE))
+        rail->statsLine(line, sizeof(line));
+    return SYSCTL_OUT(req, line, strlen(line) + 1);
+}
+
+static void registerStats()
+{
+    static struct sysctl_oid oid;
+    if (oid.oid_name)
+        return;
+    switch_sysctl_oid(&oid, &sysctl__kern_children, "switch_joycon",
+                      static_cast<int>(CTLTYPE_STRING | CTLFLAG_RD | CTLFLAG_LOCKED), statsSysctl, "A",
+                      "each rail: running, RX DMA, and since boot its replies, late and tail takes, "
+                      "line errors, breaks, overflows, dropped packets, silences, recoveries, republished devices");
+    sysctl_register_oid(&oid);
+}
+#endif
 
 extern "C" int switch_joycon_start(void)
 {
@@ -2138,8 +2277,11 @@ extern "C" int switch_joycon_start(void)
     if (!resources || !driver || !driver->init() || !driver->attach(resources) || !driver->start(resources)) {
         panic("SwitchJoyCon: rail driver attach or start failed");
     }
-    gRail = driver;
+    __atomic_store_n(&gRail, driver, __ATOMIC_RELEASE);
     driver->release();  // the attachment keeps it
+#if DEVELOPMENT || DEBUG
+    registerStats();
+#endif
     return 0;
 }
 

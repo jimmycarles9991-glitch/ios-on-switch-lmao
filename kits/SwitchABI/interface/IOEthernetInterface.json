@@ -111,6 +111,12 @@
       "pac": "_ZNK18IONetworkInterface8getIfnetEv",
       "doc": "The ifnet once IONetworkStack attached the interface, else NULL."
     },
+    "attachToDataLinkLayer": {
+      "decl": "virtual IOReturn attachToDataLinkLayer(IOOptionBits options, void *parameter)",
+      "mangled": "__ZN19IOEthernetInterface21attachToDataLinkLayerEjPv",
+      "pac": "_ZN18IONetworkInterface21attachToDataLinkLayerEjPv",
+      "doc": "IONetworkStack's attach to the BSD stack, once the interface has its unit and its \"BSD Name\": allocates and attaches the ifnet. kIOReturnSuccess once the ifnet is attached."
+    },
     "configureOutputPullModel": {
       "decl": "virtual IOReturn configureOutputPullModel(uint32_t driverQueueSize, IOOptionBits options = 0, uint32_t outputQueueSize = 0, uint32_t outputSchedulingModel = 0, uint32_t outputTargetQdelay = 0)",
       "mangled": "__ZN19IOEthernetInterface24configureOutputPullModelEjjjjj",

@@ -756,7 +756,7 @@ do_reboot:
 }
 
 #if defined(XNU_SWITCH_VERIFIED_ROOT) && XNU_SWITCH_VERIFIED_ROOT && \
-    defined(SWITCH_XNU_DIAGNOSTICS) && SWITCH_XNU_DIAGNOSTICS
+    defined(SWITCH_XNU_BOARD) && SWITCH_XNU_BOARD
 extern "C" void switch_raw_root_wait_diagnostic(void);
 #endif
 
@@ -1015,7 +1015,7 @@ IOFindBSDRoot( char * rootName, unsigned int rootNameSize,
 			(void)IOSetRecoveryBoot(BSD_BOOTFAIL_MEDIA_MISSING, NULL, true);
 #elif XNU_TARGET_OS_IOS
 #if defined(XNU_SWITCH_VERIFIED_ROOT) && XNU_SWITCH_VERIFIED_ROOT && \
-    defined(SWITCH_XNU_DIAGNOSTICS) && SWITCH_XNU_DIAGNOSTICS
+    defined(SWITCH_XNU_BOARD) && SWITCH_XNU_BOARD
 			switch_raw_root_wait_diagnostic();
 #endif
 			panic("Failed to mount root device");

@@ -84,7 +84,7 @@ enum QMOp {
     QM_TEXTURE_REPLACE,       // QMTextureBytes: from the staging bytes into the texture
     QM_TEXTURE_GET_BYTES,     // QMTextureBytes: from the texture into the staging bytes
     QM_LIBRARY,               // QMLibrary -> handle, uint64_t count, then count NUL-terminated function names
-    QM_FUNCTION,              // QMFunction (+ name, constants) -> handle, uint64_t type
+    QM_FUNCTION,              // QMFunction (+ name, specialized name, constants) -> handle, uint64_t type
     QM_RENDER_PIPELINE,       // QMRenderPipeline -> handle
     QM_COMPUTE_PIPELINE,      // QMComputePipeline -> handle, uint64_t maxThreads, executionWidth
     QM_SAMPLER,               // QMSampler -> handle
@@ -159,7 +159,7 @@ struct QMLibrary {
 
 // Then the name (nameBytes, NUL included), then each constant: QMConstant, its name (nameBytes), its value (valueBytes), each padded to 8.
 struct QMFunction {
-    uint64_t library, nameBytes, constants;
+    uint64_t library, nameBytes, specializedBytes, constants;  // specializedBytes 0: no specialized name
 };
 
 struct QMConstant {

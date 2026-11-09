@@ -364,6 +364,10 @@ int answer(bool set, apple80211req &rq)
         case kPowerSave:
         case kAuthType:
         case kCipherKey:
+        // The events this caller monitors (IO80211's Apple80211FilterMonitoringEvent: a flag and a 256-bit map). en0
+        // posts every event to every listener, a superset of any filter. 24B119's wifid stops setting up its Wi-Fi
+        // device (WiFiDeviceScheduleWithQueue) when this is refused.
+        case kFilterMonitorEvents:
             return 0;
         default:
             return EOPNOTSUPP;

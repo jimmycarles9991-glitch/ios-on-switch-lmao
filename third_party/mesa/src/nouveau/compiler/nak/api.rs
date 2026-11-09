@@ -522,14 +522,27 @@ fn nak_compile_shader_internal(
         eprintln!("NAK IR:\n{}", &s);
     }
 
+    // ios-on-switch-lmao: SwitchHWTest's SM53 probe shaders, never in
+    // release builds (opt_sm53_half_probe.rs)
+    let sm53_probe = cfg!(not(switch_release))
+        && nak.sm >= 53
+        && nak.sm < 70
+        && s.carries_sm53_probe_marker();
+
     pass!(s, opt_bar_prop);
     pass!(s, opt_uniform_instrs);
     pass!(s, opt_copy_prop);
     pass!(s, opt_prmt);
+    if sm53_probe {
+        pass!(s, opt_sm53_half_probe);
+    }
     pass!(s, opt_lop);
     pass!(s, opt_copy_prop);
     pass!(s, opt_dce);
     pass!(s, opt_out);
+    if sm53_probe {
+        pass!(s, opt_sm53_f32_source_probe);
+    }
     pass!(s, legalize);
     pass!(s, opt_dce);
     pass!(s, opt_instr_sched_prepass);

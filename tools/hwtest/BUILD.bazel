@@ -1,0 +1,47 @@
+# HW Test's run reports on the Mac (README.md): fetched off the card by pull_logs, compared run against run.
+load("@rules_python//python:py_binary.bzl", "py_binary")
+load("@rules_python//python:py_library.bzl", "py_library")
+load("@rules_python//python:py_test.bzl", "py_test")
+load("//bazel/lint:defs.bzl", "lint_files")
+
+package(default_visibility = ["//visibility:public"])
+
+lint_files()
+
+py_library(
+    name = "lib",
+    srcs = [
+        "bootlog.py",
+        "compare.py",
+        "fetch.py",
+        "fromlog.py",
+        "health.py",
+        "hwtest.py",
+        "metrics.py",
+        "posters.py",
+        "reports.py",
+    ],
+    imports = ["../.."],
+    deps = ["//tools/common:paths"],
+)
+
+# bazel run //tools/hwtest -- [--history DIR] [REPORT.json ...]
+py_binary(
+    name = "hwtest",
+    srcs = ["hwtest.py"],
+    deps = [":lib"],
+)
+
+[py_test(
+    name = name,
+    size = "small",
+    srcs = [name + ".py"],
+    deps = [":lib"],
+) for name in [
+    "bootlog_test",
+    "compare_test",
+    "fetch_test",
+    "fromlog_test",
+    "metrics_test",
+    "posters_test",
+]]

@@ -6841,19 +6841,23 @@ static const char *const native_switch_bluetoothd_environment[] = {
 	"BT_HCI_TRANSPORT=H4BC:POSIX:com.apple.uart.bluetooth,3000000", NULL
 };
 /*
- * CA_DISABLE_LUMA_COMPUTE: QuartzCore 27 measures a luma-tracking backdrop (the home grabber, glass that adapts to what is
- * behind it) with compute kernels (compute_sum_luma, compute_average_luma) unless this debug option is set, which it reads
- * from the environment on release builds too; set, it takes the backdrop's average from a mipmapped copy (the 2D engine's
- * chain) and a one-texel readback. The raw GM20B path runs no compute, so each measurement sent its frame's command buffer
- * to m2v.
+ * CA_PRINT_DETACHING (QuartzCore 24B119 ca_debug_options[32], read from the environment on release builds too) makes the
+ * render server log why each layer it considers was or was not detached: "[CA]", "[Server] ... format" and "[Display]
+ * Surface ID:0x%x detach result: %s", os_log info in com.apple.coreanimation's CADebug category, which the debug overlay's
+ * logging profile (drivers/NativeMobileDisplay/logging) persists. Diagnostic only.
  */
+#if DEVELOPMENT || DEBUG
+#define NATIVE_SWITCH_CA_PRINT_DETACHING "CA_PRINT_DETACHING=1",
+#else
+#define NATIVE_SWITCH_CA_PRINT_DETACHING
+#endif
 #if NATIVE_SWITCH_CA_VBL
-static const char *const native_switch_backboardd_vbl_environment[] = {
-	"CA_DISABLE_DETACHED=1", "CA_FORCE_TIMER=1", "CA_DISABLE_LUMA_COMPUTE=1", NULL
+static const char *const native_switch_backboardd_environment[] = {
+	"CA_DISABLE_DETACHED=1", "CA_FORCE_TIMER=1", NATIVE_SWITCH_CA_PRINT_DETACHING NULL
 };
 #else
 static const char *const native_switch_backboardd_environment[] = {
-	"CA_DISABLE_DETACHED=1", "CA_DISABLE_LUMA_COMPUTE=1", NULL
+	"CA_DISABLE_DETACHED=1", NATIVE_SWITCH_CA_PRINT_DETACHING NULL
 };
 #endif
 
@@ -6873,17 +6877,7 @@ native_switch_exec_environment(const struct image_params *imgp)
 	static const char backboardd[] = "/usr/libexec/backboardd";
 	if (!strncmp(executable, backboardd, sizeof(backboardd))) {
 		const int single = !native_legacy_detach_ready();
-#if NATIVE_SWITCH_CA_VBL
-		if (single) {
-			return native_switch_backboardd_vbl_environment;
-		}
-		return native_switch_backboardd_vbl_environment + 1;
-#else
-		if (single) {
-			return native_switch_backboardd_environment;
-		}
-		return native_switch_backboardd_environment + 1;
-#endif
+		return single ? native_switch_backboardd_environment : native_switch_backboardd_environment + 1;
 	}
 	return NULL;
 }
@@ -8757,8 +8751,8 @@ native_switch_mkdir(proc_t p, user_addr_t scratch, const char *path, uid_t owner
 
 /* The migration on XNU's console, where the user watches it: DataMigrator's processes as they start and end, a status line
  * every 15 s, and its end (the sentinel gone: DataMigrator removes it when the migration is over). Until then
- * switch_console_hold keeps the console on screen instead of backboardd's progress bar (drivers/NativeMobileDisplay draws
- * the UI's frames but does not show them), for at most an hour; the migration itself carries on either way. */
+ * switch_console_hold keeps the console on screen instead of backboardd's progress bar (drivers/NativeMobileDisplay retires
+ * the UI's frames undrawn), for at most an hour; the migration itself carries on either way. */
 volatile int switch_console_hold = 0;
 #define NATIVE_MIGRATION_TICK_S 15
 #define NATIVE_MIGRATION_HOLD_S 3600
@@ -9032,6 +9026,50 @@ native_switch_never_dim_release(proc_t p, user_addr_t scratch, mount_t data_moun
 		if (!error) error = native_switch_watchdog_file(p, scratch, marker, "", 0, data_mount, 0, 0, 0644);
 	}
 	printf("SwitchRawBoot: never-dim keys of earlier builds: %s (%d)\n", results[result], error);
+}
+
+/* True Tone starts off, as Settings' switch leaves it: -[CBColorModuleShared CAEnabledPropertyHandler:] saves
+ * CBColorAdaptationEnabled as an integer in com.apple.CoreBrightness for the current user and current host, and
+ * activateColorAdaptation turns True Tone on when the key is not there. iOS's CoreFoundation keeps per-host values apart
+ * only for kCFPreferencesAnyUser (-[_CFXPreferences withSourceForIdentifier:user:byHost:...] drops byHost for any other
+ * user), so the key lives in the domain's plain file, beside CoreBrightness's other settings (Night Shift's colour
+ * temperature, auto-brightness's learned preference). The ambient light sensor has no colour, so CoreBrightness's
+ * repair path would otherwise adapt to its fixed 4000 K white. The key goes in only where it is missing, every other
+ * object kept: once the switch has been used the key is the user's. Before cfprefsd runs. */
+static void
+native_switch_true_tone_default(proc_t p, user_addr_t scratch, mount_t data_mount)
+{
+	static const char plist[] = "/private/var/mobile/Library/Preferences/com.apple.CoreBrightness.plist",
+	    key[] = "CBColorAdaptationEnabled";
+	static const char *const results[] = {"already set", "", "", "plist unreadable", "added"};
+	static const uint8_t empty[] = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<plist version=\"1.0\"><dict/></plist>\n";
+	char *bytes = NULL;
+	int length = 0, error = native_switch_read_data_file(p, plist, data_mount, &bytes, &length);
+	if (error && error != ENOENT) {
+		printf("SwitchRawBoot: True Tone default: %s: %d\n", plist, error);
+		return;
+	}
+	const uint8_t *source = bytes ? (const uint8_t *)bytes : empty;
+	const size_t source_length = bytes ? (size_t)length : sizeof(empty) - 1;
+	const size_t room = switch_prefs_add_room(source_length);
+	size_t edited = room;
+	uint8_t *out = kalloc_data((vm_size_t)room, Z_WAITOK);
+	enum switch_prefs_result result = SWITCH_PREFS_UNREADABLE;
+	error = 0;
+	if (!out) {
+		error = ENOMEM;
+	} else {
+		result = switch_prefs_add_integer(source, source_length, key, 0, out, &edited);
+		if (result == SWITCH_PREFS_ADDED) {
+			error = native_switch_watchdog_file(p, scratch, plist, (const char *)out, (int)edited, data_mount,
+			    501, 501, 0600);
+		}
+		kfree_data(out, (vm_size_t)room);
+	}
+	if (bytes) kfree_data(bytes, (vm_size_t)length);
+	if (result != SWITCH_PREFS_UNCHANGED || error) {
+		printf("SwitchRawBoot: True Tone default: %s (%d)\n", error == ENOMEM ? "no memory" : results[result], error);
+	}
 }
 
 /* MobileGestalt caches its answers (DisplayBootRotation among them) keyed by the OS build alone, so an answer from the
@@ -9384,6 +9422,11 @@ native_switch_setup_state(proc_t p, user_addr_t scratch, mount_t data_mount)
 		 * IsLargeIPad() (ArtworkDeviceSubType 2732), which forces the Pro class on every screen (vm_unix.c's Switch
 		 * keyboard). Managed: the user's other keyboard settings in the domain stay theirs. */
 		{"com.apple.keyboard.preferences", SWITCH_PLIST("<key>KeyboardUseProLayout</key><false/>"), kSetupManaged},
+		/* MobileGestalt's IOSurfaceFormatDictionary is a table by /arm-io soc-generation: H12 has buffer-compression and
+		 * media-compression, so CoreVideo registers the AGX and HTPC compressed tiled formats ('&BGA', '&8v0', ...),
+		 * which only Apple's GPU, decoders and display write or read. CoreVideo's own switch leaves every compressed
+		 * family out, and producers fall back to the plain formats. */
+		{"com.apple.corevideo", SWITCH_PLIST("<key>disable-buffer-compression</key><true/>"), kSetupManaged},
 		{"com.apple.UIKit", SWITCH_PLIST("<key>UIPreferredContentSizeCategoryName</key>"
 		    "<string>UICTContentSizeCategoryXXL</string>"), kSetupOnce, kSetupUnitScale}, /* the user's Text Size then sticks */
 		/* Seeded once: DataMigrator keeps its results and its hang-reboot count in this domain. */
@@ -9446,6 +9489,7 @@ native_switch_setup_state(proc_t p, user_addr_t scratch, mount_t data_mount)
 		native_switch_portrait_cache(p, scratch, data_mount);
 		native_switch_rotation_lock_release(p, scratch, data_mount);
 		native_switch_never_dim_release(p, scratch, data_mount);
+		native_switch_true_tone_default(p, scratch, data_mount);
 		native_switch_gamut_cache(p, scratch, data_mount);
 		native_switch_identity_cache(p, scratch, data_mount);
 		native_switch_als_cache(p, scratch, data_mount);

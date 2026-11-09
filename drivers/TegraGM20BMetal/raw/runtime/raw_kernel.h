@@ -53,6 +53,9 @@ public:
     bool importPages(void *addr, uint64_t bytes, Bo &bo, uint32_t surfaceId = 0, bool gpuReads = false);
     // The GPU may write the IOSurface from now on (BoImport took it as only sampled): before its first render or store.
     bool surfaceGpuWrites(uint32_t surfaceId);
+    // Priority (method 18): every channel of the connection runs at the most urgent of the process's queues' Metal
+    // priorities (TegraGM20BABI.h); false without the method
+    bool priority(uint32_t priority, uint32_t background);
     // SurfaceLayout (method 16) for the import `bo` of a surface: its layout, decided by the kernel once for every process
     // at the first asking import (TegraGM20BLayout.h: block-linear when that importer writes it alone). `writes`: this
     // texture renders into or stores to it. TegraGM20BLayoutTiled, TegraGM20BLayoutOtherShape, or 0 (pitch; also without
@@ -60,12 +63,13 @@ public:
     uint32_t surfaceLayout(const Bo &bo, uint32_t width, uint32_t height, uint32_t bpp, uint32_t bytesPerRow,
                            bool writes);
     bool bindImport(void *addr, Bo &bo, uint32_t kind);
-    // BoAlloc of physically contiguous memory aligned to 2^alignLog2, never CPU-mapped: the kernel gives such memory comptags
-    // (raw_comp.h). The slow part (a contiguous search in the kernel), safe beside the other calls; the kern_return_t.
-    int allocContiguous(uint64_t bytes, uint32_t alignLog2, Bo &bo);
-    // Binds it whole at a VA aligned as its memory with compressible `kind`; false with `noLines` when the kernel had no
-    // comptags left for it (kIOReturnNoResources), with the BO left unbound. Under the caller's lock (the VA list).
-    bool bindCompressed(Bo &bo, uint32_t kind, bool &noLines);
+    // BoAlloc Compressible (raw_comp.h), never CPU-mapped; safe beside the other calls (it may zero pages a free left
+    // dirty); the kern_return_t.
+    int allocCompressible(uint64_t bytes, Bo &bo);
+    // Binds it whole at a VA aligned as its memory with compressible `kind`: the VmBind's kern_return_t (kIOReturnNoResources:
+    // the kernel had no comptags left for it), or kIOReturnNoSpace with no VA left; refused, the BO is left unbound. Under the
+    // caller's lock (the VA list).
+    int bindCompressed(Bo &bo, uint32_t kind);
     // GPU VA held for binds made into it later (bindImportAt), whole granules; 0: none left. releaseVa gives it back.
     uint64_t reserveVa(uint64_t bytes);
     void releaseVa(uint64_t va, uint64_t bytes);

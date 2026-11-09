@@ -10,7 +10,7 @@
 
 extern "C" {
 extern volatile uint32_t native_shared_window_stage;
-extern kmod_info_t g_kernel_kmod_info;
+OSReturn switch_kernel_classes(void (*initialize)());
 volatile uint32_t native_qemu_metal_stage, native_qemu_metal_grants;
 volatile int native_qemu_metal_status;
 void native_qemu_metal_static_init(void) __asm__("__GLOBAL__sub_I_QemuMetalAccelerator.cpp");
@@ -38,13 +38,7 @@ void native_qemu_metal_publish(void)
         return;
     }
     native_qemu_metal_stage = 2;
-    void *handle = OSMetaClass::preModLoad(g_kernel_kmod_info.name);
-    if (!handle) {
-        native_qemu_metal_status = kIOReturnNoResources;
-        return;
-    }
-    native_qemu_metal_static_init();
-    native_qemu_metal_status = OSMetaClass::postModLoad(handle);
+    native_qemu_metal_status = switch_kernel_classes(native_qemu_metal_static_init);
     if (native_qemu_metal_status)
         return;
     if (native_qemu_metal_accelerator_instance_size() != 136) {

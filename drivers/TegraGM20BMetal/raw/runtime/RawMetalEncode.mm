@@ -1,26 +1,15 @@
 // SPDX-License-Identifier: MIT
 #import "RawMetalInternal.h"
-
-// The copy engine's copies of those rows: one copy of every row where they lie a pitch apart, else one per row
-static void copyRows(raw::BlitEncoder *be, uint64_t bufferVa, const BufferRows &r, uint64_t offset,
-                     uint64_t bytesPerRow, const raw::Texture &t, uint32_t x, uint32_t y, uint32_t w, uint32_t h,
-                     bool intoTexture)
-{
-    if (r.uniform) {
-        be->copyBufferTexels(bufferVa + r.first, uint32_t(r.pitch), t, x, y, w, h, intoTexture);
-        return;
-    }
-    for (uint32_t k = 0; k < h; k++)
-        be->copyBufferTexels(bufferVa + bufferRow(r, offset, bytesPerRow, k), w * t.bpp, t, x, y + k, w, 1,
-                             intoTexture);
-}
+#include <optional>
+#include "raw_compute.h"
+#include "raw_samples.h"
 
 // ---- the tape onto the raw path ----
 // false: something in it the raw path cannot do after all (*why); nothing of it was submitted then
 // The host imports a texture's memory lies in, named to the submission (raw::CommandBuffer::use): a surface's or a planar
 // texture's planes, a buffer texture's buffer's, a view's parent's; and a YCbCr texture's planes, which only its conversion
 // reads (its image is pool memory).
-static void useTexture(raw::CommandBuffer *rc, RMTexture *t, bool write)
+void useTexture(raw::CommandBuffer *rc, RMTexture *t, bool write)
 {
     while (t && t->_kind == RMTextureView && t->_parent)
         t = t->_parent;
@@ -32,7 +21,7 @@ static void useTexture(raw::CommandBuffer *rc, RMTexture *t, bool write)
             rc->use(plane->import, false);
 }
 
-static void useBuffer(raw::CommandBuffer *rc, RMBuffer *b, bool write)
+void useBuffer(raw::CommandBuffer *rc, RMBuffer *b, bool write)
 {
     if (b)
         rc->use(b->_raw.import, write);
@@ -51,6 +40,7 @@ bool encodeRaw(RMCommandBuffer *cb, size_t from, size_t to, const char **why)
     }
     raw::RenderEncoder *re = nullptr;
     raw::BlitEncoder *be = nullptr;
+    std::optional<raw::ComputeEncoder> ce;
 
     auto fail = [&](RMPred p, const char *w, uint64_t a = 0, uint64_t b = 0) {
         *why = w;
@@ -60,8 +50,8 @@ bool encodeRaw(RMCommandBuffer *cb, size_t from, size_t to, const char **why)
     };
     // a draw the encoder refused: its predicate and values (raw_gpu.h Refusal)
     auto refused = [&]() {
-        static const RMPred map[] = {PredEncPassRender, PredEncIndexedRange, PredEncColorFormats,
-                                     PredEncUboOffset,  PredEncNoTic,        PredEncDepthStencil};
+        static const RMPred map[] = {PredEncPassRender, PredEncIndexedRange, PredEncColorFormats, PredEncUboOffset,
+                                     PredEncNoTic,      PredEncDepthStencil, PredEncSamples};
         const raw::Refusal &f = rc->refusal;
         hit(cb, f.id < sizeof map / sizeof *map ? map[f.id] : PredEncPassRender, f.a,
             uint64_t(f.b) | uint64_t(f.c) << 32);
@@ -102,6 +92,48 @@ bool encodeRaw(RMCommandBuffer *cb, size_t from, size_t to, const char **why)
         if (store)
             planesWritten.push_back(t);
         return 0;
+    };
+
+    // Multisampled attachments' resolves (MTLStoreActionMultisampleResolve): after their pass, a pass of the pack's resolve state
+    // of the format each, into the resolve texture over the pass's render area (an 8-bit sRGB one as its UNORM twin, whose codes
+    // the state writes), sampling what the pass rendered (the resolve pass's prologue barrier orders its reads after those
+    // writes)
+    struct Resolve {
+        uint32_t attachment;
+        RMTexture *into;
+    };
+
+    std::vector<Resolve> resolves;
+    std::deque<raw::Texture> resolveTargets;  // the encoder reads them until its end()
+    auto resolvePasses = [&]() -> bool {
+        const raw::Texture *from[8] = {};
+        for (const Resolve &r : resolves)
+            from[r.attachment] = re->target(r.attachment);
+        const uint32_t width = re->areaWidth(), height = re->areaHeight();
+        for (const Resolve &r : resolves) {
+            resolveTargets.push_back(r.into->_raw);
+            resolveTargets.back().format = raw::resolveTargetFormat(r.into->_raw.format);
+            raw::PassDesc p;
+            p.color[0].texture = &resolveTargets.back();
+            p.color[0].load = raw::ColorAttachment::DontCare;
+            p.color[0].store = true;
+            p.count = 1;
+            p.width = width;
+            p.height = height;
+            useTexture(rc, r.into, true);
+            raw::RenderEncoder *e = rc->render(p);
+            if (!e)
+                return fail(PredEncPassRender, "a resolve texture the raw path cannot render", r.attachment);
+            const uint32_t samples = from[r.attachment]->samples;
+            e->setPipeline(d.resolvePipeline(r.into->_raw.format));
+            e->setTexture(0, from[r.attachment]);
+            e->setBytes(2, 0, &samples, sizeof samples);
+            if (!e->draw(4 /* MTLPrimitiveTypeTriangleStrip */, 0, 4, 1, 0, why))
+                return refused();
+            e->end();
+        }
+        resolves.clear();
+        return true;
     };
 
     // the planar textures its draws sample: their images from their planes first, once (m2v converts at each encoder that uses
@@ -205,7 +237,7 @@ bool encodeRaw(RMCommandBuffer *cb, size_t from, size_t to, const char **why)
                         if (x && x->sampled) {
                             if (!fill)
                                 fill = rc->blit();
-                            fill->copyTexels(*x, 0, 0, *x->sampled, 0, 0, x->width, x->height);
+                            fill->copyTexels(*x, 0, 0, 0, *x->sampled, 0, 0, 0, x->width, x->height);
                         }
             if (fill)
                 fill->end();
@@ -251,7 +283,7 @@ bool encodeRaw(RMCommandBuffer *cb, size_t from, size_t to, const char **why)
                 continue;
             const raw::Texture &x = t->_raw;
             raw::BlitEncoder *b = rc->blit();
-            b->copyTexels(x, 0, 0, *x.sampled, 0, 0, x.width, x.height);
+            b->copyTexels(x, 0, 0, 0, *x.sampled, 0, 0, 0, x.width, x.height);
             b->end();
         }
     };
@@ -308,7 +340,16 @@ bool encodeRaw(RMCommandBuffer *cb, size_t from, size_t to, const char **why)
     };
     for (size_t at = from; at < to; at++) {
         const Cmd &c = cb->_tape[at];
+        if (isKernelCommand(c.op)) {
+            if (const char *w = nullptr; !encodeKernel(*ce, *rc, cb, c, &w))
+                return fail(PredCompute, w, c.op);
+            continue;
+        }
         switch (c.op) {
+        case OpCompute:
+            ce.emplace(*rc, d);
+            ce->setSerial(c.a == MTLDispatchTypeSerial);
+            break;
         case OpRender: {
             const RMPass &pass = cb->_passes[c.x];
             if (cb->_sampledShadows)
@@ -353,6 +394,10 @@ bool encodeRaw(RMCommandBuffer *cb, size_t from, size_t to, const char **why)
                                                                 : raw::ColorAttachment::DontCare;
                 p.color[j].store =
                     a.store == MTLStoreActionStore || a.store == MTLStoreActionStoreAndMultisampleResolve;
+                if (a.store == MTLStoreActionMultisampleResolve || a.store == MTLStoreActionStoreAndMultisampleResolve)
+                    if (RMTexture *r =
+                            (RMTexture *)((__bridge MTLRenderPassDescriptor *)c.obj).colorAttachments[j].resolveTexture)
+                        resolves.push_back({j, r});
                 const MTLClearColor k = a.clear;
                 p.color[j].clear[0] = float(k.red);
                 p.color[j].clear[1] = float(k.green);
@@ -383,8 +428,14 @@ bool encodeRaw(RMCommandBuffer *cb, size_t from, size_t to, const char **why)
         case OpEnd:
             if (re)
                 re->end();
+            if (re && !resolvePasses())
+                return false;
             if (be)
                 be->end();
+            if (ce) {
+                ce->end();
+                ce.reset();
+            }
             for (RMTexture *t : standInStores)
                 if (standInPass(t, true))
                     return false;
@@ -464,104 +515,26 @@ bool encodeRaw(RMCommandBuffer *cb, size_t from, size_t to, const char **why)
                                  uint32_t(extra(cb, c.x + 2)), why))
                 return refused();
             break;
-        case OpCopyTexture: {
-            RMTexture *s = (__bridge RMTexture *)c.obj, *t = (__bridge RMTexture *)c.obj2;
-            useTexture(rc, s, false);
-            useTexture(rc, t, true);
-            if (!fresh.empty())
-                fresh.erase(t);
-            standInFresh.erase(t);
-            const uint64_t x = c.x, o = extra(cb, x + 10), sl = extra(cb, x + 1), dl = extra(cb, x + 9);
-            const uint32_t sx = uint32_t(extra(cb, x + 2)), sy = uint32_t(extra(cb, x + 3)),
-                           w = uint32_t(extra(cb, x + 5)), h = uint32_t(extra(cb, x + 6)), dx = uint32_t(o),
-                           dy = uint32_t(o >> 32);
-            raw::Texture fromLevel, toLevel;
-            if (sl)
-                raw::chainLevelImage(s->_raw, uint32_t(sl), fromLevel);
-            if (dl)
-                raw::chainLevelImage(t->_raw, uint32_t(dl), toLevel);
-            be->copyTexels(sl ? fromLevel : s->_raw, sx, sy, dl ? toLevel : t->_raw, dx, dy, w, h);
+        case OpCopyTexture:
+        case OpMipmaps:
+        case OpCopyBuffer:
+        case OpFillBuffer:
+        case OpCopyBufferToTexture:
+        case OpCopyTextureToBuffer:
+            encodeBlit(cb, c, rc, be, fresh, standInFresh);
             break;
-        }
-        case OpMipmaps: {  // a chain's levels from level 0 (decided at record)
-            RMTexture *t = (__bridge RMTexture *)c.obj;
-            useTexture(rc, t, true);
-            be->generate(t->_raw);
-            break;
-        }
-        case OpCopyBuffer: {
-            RMBuffer *s = (__bridge RMBuffer *)c.obj, *t = (__bridge RMBuffer *)c.obj2;
-            useBuffer(rc, s, false);
-            useBuffer(rc, t, true);
-            const uint64_t n = extra(cb, c.x + 1), dof = extra(cb, c.x);
-            if (!s->_raw.wc)
-                rc->clean(s->_raw.cpu + c.c, n);
-            if (!t->_raw.wc)
-                rc->clean(t->_raw.cpu + dof, n, true);
-            be->copyBytes(s->_raw.va + c.c, t->_raw.va + dof, n);
-            break;
-        }
-        case OpFillBuffer: {
-            RMBuffer *t = (__bridge RMBuffer *)c.obj;
-            const uint64_t n = extra(cb, c.x);
-            useBuffer(rc, t, true);
-            if (!t->_raw.wc)
-                rc->clean(t->_raw.cpu + c.c, n, true);
-            be->fillBytes(t->_raw.va + c.c, n, uint8_t(c.a));
-            break;
-        }
-        case OpCopyBufferToTexture: {
-            RMBuffer *s = (__bridge RMBuffer *)c.obj;
-            RMTexture *t = (__bridge RMTexture *)c.obj2;
-            useBuffer(rc, s, false);
-            useTexture(rc, t, true);
-            const uint64_t x = c.x, o = extra(cb, x + 8), so = extra(cb, x), row = extra(cb, x + 1);
-            const uint64_t w = extra(cb, x + 3), h = extra(cb, x + 4), dl = extra(cb, x + 7);
-            if (!fresh.empty())
-                fresh.erase(t);
-            standInFresh.erase(t);
-            raw::Texture level;
-            if (dl)
-                raw::chainLevelImage(t->_raw, uint32_t(dl), level);
-            BufferRows rows;
-            bufferRows(so, row, uint32_t(h), uint32_t(w * t->_raw.bpp), t->_raw.bpp, true,
-                       rows);  // (decided at record)
-            const uint64_t first = bufferRow(rows, so, row, 0);
-            if (!s->_raw.wc)
-                rc->clean(s->_raw.cpu + first, bufferRow(rows, so, row, uint32_t(h - 1)) - first + w * t->_raw.bpp);
-            copyRows(be, s->_raw.va, rows, so, row, dl ? level : t->_raw, uint32_t(o), uint32_t(o >> 32), uint32_t(w),
-                     uint32_t(h), true);
-            break;
-        }
-        case OpCopyTextureToBuffer: {
-            RMTexture *s = (__bridge RMTexture *)c.obj;
-            RMBuffer *t = (__bridge RMBuffer *)c.obj2;
-            useTexture(rc, s, false);
-            useBuffer(rc, t, true);
-            const uint64_t x = c.x, o = extra(cb, x + 2), w = extra(cb, x + 4), h = extra(cb, x + 5),
-                           dof = extra(cb, x + 7), row = extra(cb, x + 8), sl = extra(cb, x + 1);
-            raw::Texture level;
-            if (sl)
-                raw::chainLevelImage(s->_raw, uint32_t(sl), level);
-            BufferRows rows;
-            bufferRows(dof, row, uint32_t(h), uint32_t(w * s->_raw.bpp), s->_raw.bpp, false,
-                       rows);  // (decided at record)
-            const uint64_t first = bufferRow(rows, dof, row, 0);
-            if (!t->_raw.wc)
-                rc->clean(t->_raw.cpu + first, bufferRow(rows, dof, row, uint32_t(h - 1)) - first + w * s->_raw.bpp,
-                          true);
-            copyRows(be, t->_raw.va, rows, dof, row, sl ? level : s->_raw, uint32_t(o), uint32_t(o >> 32), uint32_t(w),
-                     uint32_t(h), false);
-            break;
-        }
         default:  // states, fences, events, resources the raw path needs nothing for
             break;
         }
     }
     if (re)
         re->end();
+    if (re && !resolvePasses())
+        return false;
     if (be)
         be->end();
+    if (ce)
+        ce->end();
     for (RMTexture *t : standInStores)
         if (standInPass(t, true))
             return false;
@@ -579,6 +552,7 @@ bool encodeRaw(RMCommandBuffer *cb, size_t from, size_t to, const char **why)
     for (RMTexture *t : planesWritten)  // a write the surface's seed does not show: its image is converted again
         t->_imageCurrent = false;
     cb->_seqno = seq;
+    cb->_stamp = cb->_segs.empty() ? rc->stamp : 0;
     d.stats.levelPasses += levelPasses;
     gRM->stats.draws += rc->draws;
     gRM->stats.passes += rc->passes;

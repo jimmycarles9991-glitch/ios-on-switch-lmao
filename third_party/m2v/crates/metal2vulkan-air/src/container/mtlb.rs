@@ -20,6 +20,12 @@
 //!   function it exports (`TYPE` 3, its symbol as `NAME`) over the library's one module, so its
 //!   functions may share exactly one bitcode range, hashed once; and a Core Image library
 //!   (`file_type` 1), which lists its externals (`TYPE` 5) over one module the same way.
+//! - A Core Image library's `HASH` is its module's SHA-256 up to format 2.7 (all eight of 21H461's)
+//!   and need not be after it: in 24B119 (format 2.9) Core Image's `ci_stdlib`, `ci_stdlib_h`,
+//!   `ci_filters` and `ci_raw`, CoreUI's and Vision's libraries list one value for every function
+//!   that no digest of the module's bytes gives (PencilKit's one is still the SHA-256). Apple's
+//!   loader takes them, so from format 2.8 a Core Image library's functions are keyed by their
+//!   module's own SHA-256. Every other library's `HASH` is verified.
 //! - The extended header's `HDYN` and `ILST` tags each hold an `(offset, size)` of a region of
 //!   the file. `HDYN`'s is a tag list: `NAME`, the library's install name (a dynamic library's
 //!   `installName`; an executable's file name), and one `DYNL` per dynamic library it was linked
@@ -36,6 +42,8 @@ use crate::error::{Error, Feature};
 const HEADER_LEN: usize = 0x58;
 /// The smallest function entry: its size word and `ENDT`.
 const MIN_ENTRY_LEN: u64 = 8;
+/// The first format whose Core Image library `HASH` is not verified (the module docs).
+const CORE_IMAGE_OWN_HASH: (u16, u16) = (2, 8);
 /// Accepted `version_major` values (only 2.x observed).
 const SUPPORTED_MAJOR: [u16; 2] = [1, 2];
 /// `file_type` of an executable library.
@@ -137,7 +145,8 @@ pub struct LibraryFunction<'a> {
     pub name: &'a str,
     /// `TYPE`: the function's stage.
     pub stage: FunctionStage,
-    /// The verified SHA-256 of [`LibraryFunction::bitcode`]: the function's content key.
+    /// The SHA-256 of [`LibraryFunction::bitcode`], its `HASH` verified (or, for a Core Image
+    /// library of format 2.8 or later, computed): the function's content key.
     pub hash: Hash256,
     /// `VERS`: the AIR version, major and minor.
     pub air_version: (u16, u16),
@@ -356,10 +365,12 @@ pub(super) fn parse(bytes: &[u8]) -> Result<Metallib<'_>, Error> {
             }
         }
     }
+    let own_hash =
+        header.file_type == FILE_TYPE_CORE_IMAGE && header.version >= CORE_IMAGE_OWN_HASH;
     let mut hashed: Option<(u64, u64, Hash256)> = None;
     for &(start, len, entry, i) in &ranges {
         let p = parsed
-            .get(i)
+            .get_mut(i)
             .ok_or_else(|| container_error(ContainerError::BadOffset, entry))?;
         let digest = match hashed {
             Some((s, l, digest)) if s == start && l == len => digest,
@@ -369,7 +380,9 @@ pub(super) fn parse(bytes: &[u8]) -> Result<Metallib<'_>, Error> {
                 digest
             }
         };
-        if digest != p.function.hash {
+        if own_hash {
+            p.function.hash = digest;
+        } else if digest != p.function.hash {
             return Err(container_error(ContainerError::HashMismatch, entry));
         }
     }

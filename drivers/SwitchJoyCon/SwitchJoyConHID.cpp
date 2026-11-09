@@ -6,8 +6,8 @@
 // so it is a late object (Drivers.cmake switch_late_object) whose static initializer runs from
 // switch_joycon_hid_prepare() once IOHIDFamily is loaded. Overrides: NativeHidInput's set (free, start, stop,
 // getWorkLoop, newTransportString, newProductString, newReportDescriptor; the bindings leave exactly those IOHIDDevice
-// slots unbound), slot 183, setReport (below), and handleOpen/handleClose, which call the bound originals and keep
-// the device's backboardd session (below).
+// slots unbound), slot 183, setReport (below), handleOpen/handleClose, which call the bound originals and keep the
+// device's backboardd session (below), and on 27 the identity getters (below).
 //
 // Unlike the touch screen and buttons, no IOHIDEventDriver may sit on these devices. iPadOS 17's own Joy-Con support
 // is user space (all verified in the 21H461 OS image):
@@ -39,6 +39,21 @@
 //     controller from the plugin and publishes GCController "Joy-Con (L)"/"Joy-Con (R)" (GCExtendedGamepad sideways,
 //     motion, player lights, rumble). Holding Capture (L) and Home (R) together fuses the two into "Joy-Con (L/R)".
 // So this device only has to look like bluetoothd's Joy-Con IOHIDUserDevice: same IDs, descriptor and report bytes.
+//
+// iPadOS 27 (24B119, its kext prelinked too) moves the claim off the IOHIDDevice. Its "Nintendo JoyCon L/R IOService"
+// personalities put AppleGCHIDUserEventDriver (an IOHIDEventService, GameControllerCategory "switch", score 1000) on
+// the IOHIDInterface. Its "GC User Driver Service" merger then sets GameControllerSupport and HIDServiceSupport on that
+// driver. JoyConHIDServicePlugin matches IOPropertyMatch {GameControllerSupport, GameControllerCategory "switch"} and
+// still speaks to the IOHIDDevice through HIDDevice (synchronous setReport = slot 183, as on 17). So the 27 build adds
+// neither the dummy personalities, which would take the interface from Apple's driver, nor HIDServiceSupport on the
+// device.
+//
+// The plugin's matchService now reads VendorID, ProductID (and PrimaryUsage) from that driver, not the device.
+// IOHIDEventService::start sets each one from its IOHIDInterface (0 when missing), and IOHIDDevice::publishProperties
+// gives the interface only what the device's new*() getters return; a property set on the device reaches personality
+// matching (IOHIDInterface::matchPropertyTable asks the device) but not the interface. So on 27 the device answers
+// newManufacturerString, newVendorIDNumber, newProductIDNumber and newSerialNumberString, as bluetoothd's
+// IOHIDUserDevice does, and publishProperties puts them on the device and the interface.
 //
 // With one addition: a rail device outlives a backboardd restart (a respring), and gamecontrollerd takes only one
 // plugin session per HID service, so the restarted backboardd's plugin and GamepadHIDServiceFilter would be refused
@@ -85,7 +100,6 @@
 #include <libkern/c++/OSDictionary.h>
 #include <libkern/c++/OSNumber.h>
 #include <libkern/c++/OSString.h>
-#include <mach/kmod.h>
 #include <pexpert/pexpert.h>
 #include <IOKit/IOUserClient.h>
 #include <sys/param.h>
@@ -94,15 +108,17 @@
 #include "SwitchJoyConSession.h"
 #include "../SwitchSuspend/SwitchWake.h"
 
-extern kmod_info_t g_kernel_kmod_info;
+extern "C" OSReturn switch_kernel_classes(void (*initialize)());
 extern "C" void switch_joycon_hid_static_init(void) __asm__("__GLOBAL__sub_I_SwitchJoyConHID.cpp");
 
 namespace {
 constexpr uint32_t kNintendo = 0x057e;
+#if !XNU_12377_121_6
 // Over IOHIDEventDriver's own scores and AppleUserHIDEventDriver's 1, as ../SwitchTouch/SwitchHIDDevice.cpp.
 constexpr uint32_t kDummyScore = 10000, kMergerScore = 1000;
 // AppleGameControllerPersonality's Nintendo entries: Joy-Con L, Joy-Con R, Pro Controller, SNES, N64.
 constexpr uint32_t kNintendoProducts[] = {0x2006, 0x2007, 0x2009, 0x2017, 0x2019};
+#endif
 constexpr size_t kLargestInput = 1 + 0x169;  // reports 0x31-0x33
 constexpr size_t kStandardInput = 1 + 0x30;  // reports 0x21 and 0x30
 // AppleGameControllerPersonality.kext (21H461 Info.plist, 45 personalities): 44 IOHIDEventDummyService /
@@ -201,6 +217,28 @@ public:
         return OSString::withCString(left ? "Joy-Con (L)" : "Joy-Con (R)");
     }
 
+#if XNU_12377_121_6
+    OSString *newManufacturerString() const override
+    {
+        return OSString::withCString("Nintendo");
+    }
+
+    OSNumber *newVendorIDNumber() const override
+    {
+        return OSNumber::withNumber(kNintendo, 32);
+    }
+
+    OSNumber *newProductIDNumber() const override
+    {
+        return OSNumber::withNumber(left ? kSwitchJoyConLeftPID : kSwitchJoyConRightPID, 32);
+    }
+
+    OSString *newSerialNumberString() const override
+    {
+        return OSString::withCString(serial);
+    }
+#endif
+
     IOReturn newReportDescriptor(IOMemoryDescriptor **out) const override
     {
         *out = IOBufferMemoryDescriptor::withBytes(kJoyConDescriptor, sizeof(kJoyConDescriptor), kIODirectionNone);
@@ -285,6 +323,7 @@ public:
         input = IOBufferMemoryDescriptor::withCapacity(kLargestInput, kIODirectionNone);
         if (!loop || !input)
             return false;
+#if !XNU_12377_121_6
         // bluetoothd's HID devices carry these (com.apple.MobileBluetooth.InputDevice); HIDServiceSupport is what the
         // property-merger personality would add, set here as well so the device does not depend on its probe order.
         setProperty("VendorID", static_cast<unsigned long long>(kNintendo), 32);
@@ -293,6 +332,7 @@ public:
         setProperty("Manufacturer", "Nintendo");
         setProperty("SerialNumber", serial);
         setProperty("HIDServiceSupport", true);
+#endif
         return IOHIDDevice::start(provider);
     }
 
@@ -443,6 +483,7 @@ OSDefineMetaClassAndStructors(SwitchJoyConButtons, IOHIDDevice)
         return dict;
     }
 
+#if !XNU_12377_121_6
     // The two AppleGameControllerPersonality entries for one Nintendo ProductID, appended to `out`.
     bool addPersonalities(OSArray * out, uint32_t productID)
     {
@@ -483,6 +524,7 @@ OSDefineMetaClassAndStructors(SwitchJoyConButtons, IOHIDDevice)
         }
         return ok;
     }
+#endif
 }  // namespace
 
 // IOHIDEventDriver for SwitchJoyConButtons only, as SwitchHIDDevice.cpp's personality(): IOHIDFamily's
@@ -520,6 +562,7 @@ static void addButtonsPersonality()
         object->release();
 }
 
+#if !XNU_12377_121_6
 static void addNintendoPersonalities()
 {
     OSArray *personalities = OSArray::withCapacity(2 * sizeof(kNintendoProducts) / sizeof(kNintendoProducts[0]));
@@ -531,6 +574,7 @@ static void addNintendoPersonalities()
         panic("SwitchJoyCon: IOCatalogue::addDrivers refused the personalities");
     personalities->release();
 }
+#endif
 
 // A one-key matching dictionary for IOCatalogue (which compares only the keys it carries).
 static OSDictionary *catalogueMatch(const char *key, const char *value)
@@ -590,15 +634,13 @@ void switch_joycon_hid_prepare()
         const OSReturn loaded = OSKextLoadKextWithIdentifier("com.apple.iokit.IOHIDFamily");
         if (loaded != kOSReturnSuccess)
             panic("SwitchJoyCon: loading com.apple.iokit.IOHIDFamily failed: %#x", loaded);
-        void *handle = OSMetaClass::preModLoad(g_kernel_kmod_info.name);
-        if (!handle)
-            panic("SwitchJoyCon: OSMetaClass::preModLoad failed");
-        switch_joycon_hid_static_init();
-        const OSReturn registered = OSMetaClass::postModLoad(handle);
+        const OSReturn registered = switch_kernel_classes(switch_joycon_hid_static_init);
         if (registered != kOSReturnSuccess)
             panic("SwitchJoyCon: registering SwitchJoyConDevice failed: %#x", registered);
 
+#if !XNU_12377_121_6
         addNintendoPersonalities();
+#endif
         addButtonsPersonality();
         ready = true;
     }

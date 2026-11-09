@@ -1,0 +1,50 @@
+# Falcon (fuc5) firmware reader: the decoder, a constant propagation that resolves the firmware's data and I/O
+# addresses, and the accesses an app makes. Used to map what NVENC 5.0's apps read from a picture setup
+# (drivers/TegraNVENC/nvidia/SOURCE, SOURCE-H265).
+#
+#   bazel run //tools/falcon -- accesses $PWD/drivers/TegraNVENC/firmware/nvidia/tegra210/nvenc.bin \
+#       --entry 0x1f00 --region 0xa00:0x400
+load("@rules_python//python:py_binary.bzl", "py_binary")
+load("@rules_python//python:py_library.bzl", "py_library")
+load("@rules_python//python:py_test.bzl", "py_test")
+load("//bazel/lint:defs.bzl", "lint_files")
+
+package(default_visibility = ["//visibility:public"])
+
+lint_files()
+
+py_library(
+    name = "lib",
+    srcs = [
+        "flow.py",
+        "image.py",
+        "isa.py",
+        "semantics.py",
+        "state.py",
+        "tables.py",
+        "values.py",
+    ],
+    imports = ["../.."],
+)
+
+py_binary(
+    name = "falcon",
+    srcs = ["falcon.py"],
+    deps = [":lib"],
+)
+
+py_test(
+    name = "isa_test",
+    size = "small",
+    srcs = ["isa_test.py"],
+    deps = [":lib"],
+)
+
+py_test(
+    name = "flow_test",
+    size = "small",
+    srcs = ["flow_test.py"],
+    args = ["$(rootpath //drivers/TegraNVENC:firmware/nvidia/tegra210/nvenc.bin)"],
+    data = ["//drivers/TegraNVENC:firmware/nvidia/tegra210/nvenc.bin"],
+    deps = [":lib"],
+)

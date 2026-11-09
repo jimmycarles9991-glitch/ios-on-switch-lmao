@@ -194,7 +194,7 @@ IOLibInit(void)
 	gIOWireTracking   = IOTrackingQueueAlloc(kIOWireTrackingName, 0, 0, page_size, 0, 0);
 
 	size_t mapCaptureSize = (kIOTracking & gIOKitDebug) ? page_size : (1024 * 1024);
-#if defined(SWITCH_XNU_DIAGNOSTICS) && SWITCH_XNU_DIAGNOSTICS
+#if defined(SWITCH_XNU_BOARD) && SWITCH_XNU_BOARD
 	/* Not on by default on Switch: every IOMemoryMap of 1 MiB or more into a task (IOSurfaces, GPU buffers) took a
 	 * kernel and a user backtrace under one global lock. io=0x2400000 (kIOTracking | kIOTrackingBoot) still captures. */
 	const uint32_t mapTrackingDefault = 0;

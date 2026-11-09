@@ -32,6 +32,7 @@ import struct
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import kernels
 import layouts
 import packfile
 import probelog
@@ -233,8 +234,13 @@ EXPECTED_SKIPS = (
     'a sampler m2v derives from a bound one',
     'the raw path binds root, shader data, set 0 and its uniform buffers',
     'as a uniform buffer the layout does not name',
-    'the raw path has no 3D textures',
+    'set-0 entries',
+    "a buffer of m2v's own",
+    'no fragment stage',
 )
+# raw_pack.h kNoSlot: a texture3d argument's Metal index, which the probe cannot tell (m2v binds its own 3D view
+# there); the direct compile's records name it
+NO_SLOT = 0xFF
 
 
 def unexpected(why: str) -> bool:
@@ -293,6 +299,8 @@ def record_reason(records: list[dict]) -> str | None:
     r = records[0]
     if any(v[2] != 'known' for v in r['prog'].values()):
         return 'unknown program'
+    if sorted(r['prog']) == [1]:
+        return 'no fragment stage'
     if sorted(r['prog']) != [1, 5]:
         return f'stages {sorted(r["prog"])}'
     return None
@@ -337,6 +345,12 @@ def foreign(m: int, n: int) -> bool:
         or (0x1A00 <= m < 0x1A20 and (m - 0x1A00) // 4 >= n)
         or (0x1360 <= m < 0x1380 and (m - 0x1360) // 4 >= n)
     )
+
+
+# SET_VERTEX_STREAM_A_FORMAT(j) with ENABLE (bit 12) clear: a stream the hardware does not fetch, whose stride the probe
+# saw as an earlier state's leftover. Taken as 0, which the direct compile (runtime/raw_emit.cpp) makes too
+def disabled_stream(m: int, v: int) -> bool:
+    return 0x1C00 <= m < 0x1E00 and (m - 0x1C00) % 0x10 == 0 and not v & 0x1000
 
 
 def split_registers(simple: list[dict], post: dict[int, dict[int, int]]) -> tuple[list[int], dict[int, int]]:
@@ -390,9 +404,19 @@ def lay_out_programs(
     return heap, prog_index, prog_recs
 
 
+FRAGMENT_CODES = (1, 2, 3, 5, 6, 7, 9, 10, 11, 13, 14, 15)
+
+
 def bind_offset(stage: str, slot: int) -> int:
-    """Give the offset the probe's bind-offset run binds a slot's payload at (probe.mm PROBE_BIND_OFFSET)."""
-    return 4 * (1 + slot + (31 if stage == 'f' else 0))
+    """Give the offset the probe's bind-offset run binds a slot's payload at (probe_bind.h probeBindOffset)."""
+    if stage == 'f':
+        return 16 * (12 + slot // 12) + FRAGMENT_CODES[slot % 12]
+    return 16 * (1 + slot // 3) + 4 * (1 + slot % 3)
+
+
+def storage_code(stage: str, slot: int) -> int:
+    """Give the residual a storage slot's push word holds in the bind-offset run (probe_bind.h probeStorageCode)."""
+    return bind_offset(stage, slot) & 15
 
 
 def push_words(p: dict) -> dict[int, int]:
@@ -402,10 +426,11 @@ def push_words(p: dict) -> dict[int, int]:
 def attach_residuals(dirs: list[str], probes: list[dict]) -> None:
     """Give each probe ('residuals') the root push words the bind-offset run changed, by their value's low byte.
 
-    A uniform slot's SlotBindOffset residual is its bind offset less the multiple of NVK's 256-byte alignment at or
-    below where its window starts: in that run, the slot's own offset modulo 256 (a window starting past 256 - offset
-    makes it negative), 0 in the 256-byte run's. A bucket without the run gives none (such states take only aligned
-    offsets).
+    A slot's SlotBindOffset residual is its bind offset less the multiple of m2v's base alignment (NVK's 256 bytes for a
+    uniform buffer, 16 for a storage one) at or below where its window starts: in that run, the slot's own offset
+    modulo the alignment (a window starting past it makes it negative), 0 in the 256-byte run's. A low byte two words
+    share names neither (runtime/raw_residual.h residualWordsByValue). A bucket without the run gives none (such states
+    take only aligned offsets).
     """
     residuals = {}
     for b, d in enumerate(dirs):
@@ -421,17 +446,27 @@ def attach_residuals(dirs: list[str], probes: list[dict]) -> None:
             if p['draws'] != 1 or p['dispatches'] or not p['records'] or p['index'] not in plain:
                 continue
             was = plain[p['index']]
-            residuals[(b, p['index'])] = {v & 0xFF: o for o, v in push_words(p).items() if v and not was.get(o)}
+            changed = [(v & 0xFF, o) for o, v in push_words(p).items() if v and not was.get(o)]
+            values = collections.Counter(v for v, _ in changed)
+            residuals[(b, p['index'])] = {v: o for v, o in changed if values[v] == 1}
     for p in probes:
         p['residuals'] = residuals.get((p['bucket'], p['index']), {})
 
 
-def buffer_entry(e: tuple, index: tuple[int, int], sizes: dict[tuple, list[int]], words: dict[int, int]) -> dict:
-    s16, s4k = sizes.get((*index, e[0]), (256, 256))
-    # a 16-byte payload bound at 256: a uniform buffer (NVK rounds its range to the cbuf alignment); else storage. The
-    # 4096-byte one's range: the window (0: the whole payload)
-    ssbo = s16 < 256
+def is_storage(e: tuple, index: tuple[int, int], sizes: dict[tuple, list[int]]) -> bool:
+    """Tell a storage buffer: its 16-byte payload bound at 256 keeps 16 bytes (NVK rounds a uniform one's to 256)."""
+    return sizes.get((*index, e[0]), (256, 256))[0] < 256
+
+
+def buffer_entry(
+    e: tuple, index: tuple[int, int], sizes: dict[tuple, list[int]], words: dict[int, int], shared: set[int]
+) -> dict:
+    """Give a buffer entry; a storage one's residual word where no other storage slot of the state shares its code."""
+    s4k = sizes.get((*index, e[0]), (256, 256))[1]
+    # the 4096-byte payload's range: the window (0: the whole payload)
+    ssbo = is_storage(e, index, sizes)
     window = 0 if s4k >= 4096 else s4k
+    code = storage_code(e[2], e[3])
     return {
         'off': e[0],
         'kind': 'ubo',
@@ -440,7 +475,7 @@ def buffer_entry(e: tuple, index: tuple[int, int], sizes: dict[tuple, list[int]]
         'size': e[4],
         'ssbo': ssbo,
         'window': window,
-        'residual': None if ssbo else words.get(bind_offset(e[2], e[3])),
+        'residual': (None if code in shared else words.get(code)) if ssbo else words.get(bind_offset(e[2], e[3])),
     }
 
 
@@ -454,7 +489,7 @@ def handle_entry(e: tuple, tsc: dict[int, list[int]], constexpr_tsc: list[list[i
     elif tk[0] == 'fetch':
         ent['tex'] = ('fetch', tk[1])
     elif tk[0] == 'tex3d':
-        problems.append('a texture3d argument, and the raw path has no 3D textures')
+        ent['tex'] = ('tex3d', NO_SLOT)
     else:
         problems.append(f'texture {tk}')
     if sk is None:
@@ -504,13 +539,20 @@ def pipeline(
     root = r['root'][1]
     rec['push'] = [(int(o, 16), int(x, 16)) for o, x in (w.split('=') for w in r.get('pushw', []))]
     rec['set_size'] = root[0x38 // 4 + 2] if 'set0' in r else 0
+    index = (p['bucket'], p['index'])
+    codes = collections.Counter(storage_code(e[2], e[3]) for e in ents if e[1] == 'ubo' and is_storage(e, index, sizes))
+    shared = {c for c, n in codes.items() if n > 1}
     entries = [
-        buffer_entry(e, (p['bucket'], p['index']), sizes, p.get('residuals', {}))
+        buffer_entry(e, index, sizes, p.get('residuals', {}), shared)
         if e[1] == 'ubo'
+        else {'off': e[0], 'kind': 'color_table'}
+        if e[1] == 'color_table'
         else handle_entry(e, r['tsc'], constexpr_tsc, problems)
         for e in ents
     ]
     rec['entries'] = entries
+    if len(entries) > packfile.PACK_ENTRIES:
+        problems.append(f'more than {packfile.PACK_ENTRIES} set-0 entries')
     rec['vbs'] = vertex_streams(r, problems)
     rec['fetch'] = any(e.get('tex', [None])[0] == 'fetch' for e in entries if e['kind'] == 'handle')
     rec['clears'] = len(p['clears'])
@@ -529,6 +571,19 @@ def with_unnamed_ubos(rec: dict, p: dict, programs: dict[str, dict]) -> dict:
         if offset not in uniform
     ]
     return rec
+
+
+def compute_kernels(
+    dirs: list[str], constexpr_tsc: list[list[int]], programs: dict[str, dict], laid: tuple, report: list[str]
+) -> list[dict]:
+    """Give the buckets' compute kernels (kernels.py), their programs appended to the heap image `laid` holds."""
+    loaded, skipped = kernels.load(dirs, constexpr_tsc)
+    computes = [k for k in loaded if k['prog'] in programs]
+    skipped += [(k['key'], 'a program programs.bin lacks') for k in loaded if k['prog'] not in programs]
+    kernels.lay_out(computes, programs, *laid)
+    report.append(f'{len(computes)} compute kernels, {len(skipped)} dispatch shapes left out')
+    report += [f'  skipped kernel {key}: {why}' for key, why in skipped]
+    return computes
 
 
 def main() -> None:
@@ -556,7 +611,9 @@ def main() -> None:
     skipped += aside
     for p in simple:
         n = targets(p['key'])
-        p['records'][0]['regs'] = {m: v for m, v in p['records'][0]['regs'].items() if not foreign(m, n)}
+        p['records'][0]['regs'] = {
+            m: 0 if disabled_stream(m, v) else v for m, v in p['records'][0]['regs'].items() if not foreign(m, n)
+        }
     varying, baseline = split_registers(simple, post)
     report.append(
         f'{len(probes)} records probed, {len(simple)} taken ({sum(1 for p in simple if p["form"])} of them barrier '
@@ -576,17 +633,19 @@ def main() -> None:
         pipes.append(rec)
     # the runtime binary-searches the pipelines in place (raw_pack.cpp Pack::find): no process keeps an index of its own
     pipes.sort(key=packfile.key_hash)
+    computes = compute_kernels(dirs, constexpr_tsc, programs, (heap, prog_index, prog_recs), report)
     # init template with relocations (submissions 1-3 as NVK recorded them)
     init_recs = [(sc, m, d, RELOC_CODE.get(RELOC.get((sc, m)), 0)) for sc, m, d in init]
     report.append(f'init template: {len(init_recs)} methods, {sum(1 for x in init_recs if x[3])} relocated')
-    pack = packfile.Pack(pipes, prog_recs, constexpr_tsc, baseline, init_recs, heap)
+    pack = packfile.Pack(pipes, prog_recs, constexpr_tsc, baseline, init_recs, heap, computes)
     data, blob = packfile.pack_bytes(pack)
     with open(os.path.join(out_dir, 'pack.bin'), 'wb') as pack_bin:
         pack_bin.write(data)
     packfile.write_json(os.path.join(out_dir, 'pack.json'), pack, varying)
     packfile.write_layouts(os.path.join(out_dir, 'layouts.txt'), pack)
     report.append(
-        f'pack.bin {len(data) // 1024} KiB: {len(pipes)} pipelines, {len(prog_recs)} programs, '
+        f'pack.bin {len(data) // 1024} KiB: {len(pipes)} pipelines, {len(computes)} kernels, '
+        f'{len(prog_recs)} programs, '
         f'{len(constexpr_tsc)} constexpr samplers, {len(blob)} blob dwords, {len(baseline)} baseline regs'
     )
     faults = account(report, skipped, len(simple), len(pipes))

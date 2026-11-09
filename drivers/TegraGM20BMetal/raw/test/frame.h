@@ -94,6 +94,15 @@ inline bool extendedRange()
     return getenv("FRAME_XR") != nullptr;
 }
 
+// FRAME_MAIN_FORMAT=<MTLPixelFormat>: the framebuffers are private textures of that format (iOS 27's offscreen passes:
+// BGRA10_XR 552, BGR10_XR 554, RGB10A8_2P_XR10 550, RGBA16Float 115) and the main pass's states those whose first
+// attachment it is
+inline uint32_t mainFormat()
+{
+    const char *v = getenv("FRAME_MAIN_FORMAT");
+    return v ? uint32_t(atoi(v)) : 0;
+}
+
 struct State {
     std::string line, key;
     bool uber, blur, extra = false;
@@ -122,10 +131,12 @@ inline std::vector<State> states(const char *corpusPath)
         // r7n's harvest), drawn in a main pass with that third attachment
         const bool blurLine = l.find("v downsample_blur_vert_lph") != std::string::npos,
                    xrBlur = extendedRange() && blurLine;
-        const char *c0 = xrBlur                    ? " c0=550:"
-                         : qc27() && blurLine      ? " c0=115:"
-                         : snapshot() && !blurLine ? " c0=542:"
-                                                   : " c0=80:",
+        const std::string mainC0 = " c0=" + std::to_string(mainFormat()) + ":";
+        const char *c0 = xrBlur                      ? " c0=550:"
+                         : qc27() && blurLine        ? " c0=115:"
+                         : mainFormat() && !blurLine ? mainC0.c_str()
+                         : snapshot() && !blurLine   ? " c0=542:"
+                                                     : " c0=80:",
                    *c1 = xrBlur   ? " c1=550:"
                          : qc27() ? " c1=115:"
                                   : " c1=80:";
@@ -215,6 +226,8 @@ inline TexDesc texture(int t)
     switch (t) {
     case FB0:
     case FB1:
+        if (mainFormat())
+            return {1280, 720, false, false, true, mainFormat()};
         return {pitchShapes("fb") ? 1272 : 1280, 720, true, false, true, snapshot() ? 542u : 80u};
     case MEMORYLESS:
         return {1280, 720, false, true, true, qc27() ? 115u : 80u};

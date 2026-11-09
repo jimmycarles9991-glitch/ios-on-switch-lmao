@@ -55,6 +55,7 @@ class AppleAVE2UserClient : public IOUserClient {
         struct Buffer {
         uint32_t handle;  // 0: slot free
         TegraNVENCBlock block;
+        IOMemoryMap *map;  // the buffer in the task that allocated it
     };
 
     IOLock *lock_ = nullptr;
@@ -64,7 +65,7 @@ class AppleAVE2UserClient : public IOUserClient {
 
     Buffer *find(uint32_t handle);
     bool quiesce() const;
-    void drop(Buffer *b, bool returnMemory);
+    static void drop(Buffer *b, bool returnMemory);
     IOReturn run(uint32_t method, const void *in, uint32_t inSize, void *out, uint32_t *outSize);
     static bool resolve(void *context, uint32_t handle, TegraNVENCBlock *block);
 
@@ -81,7 +82,6 @@ public:
 
     IOReturn clientClose() APPLE_KEXT_OVERRIDE;
     void free() APPLE_KEXT_OVERRIDE;
-    IOReturn clientMemoryForType(UInt32 type, IOOptionBits *options, IOMemoryDescriptor **memory) APPLE_KEXT_OVERRIDE;
     IOReturn externalMethod(uint32_t selector, IOExternalMethodArguments *arguments, IOExternalMethodDispatch *dispatch,
                             OSObject *target, void *reference) APPLE_KEXT_OVERRIDE;
 };
@@ -118,14 +118,13 @@ bool AppleAVE2UserClient::quiesce() const
 // still write stays wired and mapped in NVENC's address space for good.
 void AppleAVE2UserClient::drop(Buffer *b, bool returnMemory)
 {
-    while (IOMemoryMap *map = removeMappingForDescriptor(b->block.pages.memory)) {
-        map->unmap();
-        map->release();
+    if (b->map) {
+        b->map->unmap();
+        b->map->release();
     }
     if (returnMemory)
         tegra_nvenc_buffer_free(&b->block);
-    b->handle = 0;
-    b->block = {};
+    *b = {};
 }
 
 IOReturn AppleAVE2UserClient::clientClose()
@@ -156,19 +155,6 @@ void AppleAVE2UserClient::free()
     if (counted_)
         __atomic_sub_fetch(&gConnections, 1, __ATOMIC_SEQ_CST);
     IOUserClient::free();
-}
-
-IOReturn AppleAVE2UserClient::clientMemoryForType(UInt32 type, IOOptionBits *options, IOMemoryDescriptor **memory)
-{
-    IOLockLock(lock_);
-    const Buffer *b = find(type);
-    if (b) {
-        b->block.pages.memory->retain();
-        *memory = b->block.pages.memory;
-        *options = kIOMapAnywhere | kIOMapDefaultCache;
-    }
-    IOLockUnlock(lock_);
-    return b ? kIOReturnSuccess : kIOReturnBadArgument;
 }
 
 IOReturn AppleAVE2UserClient::run(uint32_t method, const void *in, uint32_t inSize, void *out, uint32_t *outSize)
@@ -220,7 +206,7 @@ IOReturn AppleAVE2UserClient::run(uint32_t method, const void *in, uint32_t inSi
         memset(info, 0, sizeof(*info));
         info->abi_version = TEGRA_NVENC_ABI_VERSION;
         info->nvenc_version = 0x50;
-        info->codecs = 1u << TEGRA_NVENC_CODEC_H264;
+        info->codecs = kTegraNVENCCodecs;
         info->max_width = info->max_height = 4096;
         info->max_mbs = 36864;
         info->input_layout = TEGRA_NVENC_LAYOUT_TILED16;
@@ -244,6 +230,14 @@ IOReturn AppleAVE2UserClient::run(uint32_t method, const void *in, uint32_t inSi
         ret = ioreturn(tegra_nvenc_buffer_alloc(size, &slot->block));
         if (ret)
             break;
+        slot->map =
+            slot->block.pages.memory->createMappingInTask(current_task(), 0, kIOMapAnywhere | kIOMapDefaultCache);
+        if (!slot->map) {
+            tegra_nvenc_buffer_free(&slot->block);
+            *slot = {};
+            ret = kIOReturnNoMemory;
+            break;
+        }
         slot->handle = nextHandle_++;
         if (!nextHandle_)
             nextHandle_ = 1;
@@ -251,6 +245,7 @@ IOReturn AppleAVE2UserClient::run(uint32_t method, const void *in, uint32_t inSi
         reply->handle = slot->handle;
         reply->reserved = 0;
         reply->size = slot->block.size;
+        reply->address = slot->map->getAddress();
         break;
     }
     case TegraNVENCMethodBufferFree: {

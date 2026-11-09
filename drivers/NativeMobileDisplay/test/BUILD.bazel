@@ -21,12 +21,20 @@
 #                                       against a model of DC A with the ARM copy
 #   tegra_display_color_test            TegraDisplayColorMath.h against a model of DC A's CMU: the sRGB tables, bit-exact
 #                                       passthrough, and what each IOMobileFramebuffer colour input programs
+#   tegra_display_color_sequence_test   TegraDisplayColorSequence.h against a raster model of DC A: no CMU word changes
+#                                       under the scan, late filters defer, DC A ends on the last tables
 #   display_blend_test                  the blend registers window A and B get while a layer is detached, decoded
 #                                       with the gen2 blender's factor fields: the UI premultiplied over the layer over
 #                                       black, Core Animation's own composite, within half a step at every 8-bit alpha
 #   display_column_scan_test            NativeColumnScan.h: window A's column-scan registers against a fetch model held
 #                                       to the landscape UI's hardware rotation; the 4K test surface and the reference
 #                                       frame showing the same panel; the run's decisions for a pass and each failure
+#   display_plane_fence_test            NativePlaneFence.h: window B never writes a surface the GPU renders before its
+#                                       writers' work is done, nor later than the present that orders it, against a
+#                                       model of the GPU present
+#   display_planes_block_test           NativePlanes.h's window B on a GPU block-linear surface: every byte the window
+#                                       fetches from its START, H/V_OFFSET and BLOCK_HEIGHT is the surface pixel's own
+#                                       (TegraGM20BLayout.h), inside the bytes mapped for it
 #   display_planes_source_test          the driver and XNU follow those rules (validateSwap, the kick, one
 #                                       STATE_CONTROL pair, retire at the latch, the panic hook, the published limits,
 #                                       backboardd's CA_DISABLE_DETACHED gate), and the plane accessors are TegraVIC's
@@ -113,6 +121,16 @@ host_test(
 )
 
 host_test(
+    name = "tegra_display_color_sequence_test",
+    srcs = [
+        "tegra_display_color_sequence_test.cpp",
+        "//drivers/NativeMobileDisplay:TegraDisplayColorMath.h",
+        "//drivers/NativeMobileDisplay:TegraDisplayColorSequence.h",
+        "//drivers/NativeMobileDisplay:TegraDisplayColorTables.h",
+    ],
+)
+
+host_test(
     name = "native_legacy_display_source_test",
     srcs = ["native_legacy_display_source_test.cpp"],
     data = [
@@ -128,6 +146,7 @@ host_test(
     srcs = [
         "display_planes_test.cpp",
         "//drivers/NativeMobileDisplay:NativePlanes.h",
+        "//drivers/TegraGM20B:TegraGM20BLayout.h",
     ],
     copts = [
         "-O1",
@@ -136,10 +155,29 @@ host_test(
 )
 
 host_test(
+    name = "display_plane_fence_test",
+    srcs = [
+        "display_plane_fence_test.cpp",
+        "//drivers/NativeMobileDisplay:NativePlaneFence.h",
+    ],
+)
+
+host_test(
+    name = "display_planes_block_test",
+    srcs = [
+        "display_planes_block_test.cpp",
+        "//drivers/NativeMobileDisplay:NativePlanes.h",
+        "//drivers/TegraGM20B:TegraGM20BLayout.h",
+    ],
+    copts = ["-O1"],
+)
+
+host_test(
     name = "display_blend_test",
     srcs = [
         "display_blend_test.cpp",
         "//drivers/NativeMobileDisplay:NativePlanes.h",
+        "//drivers/TegraGM20B:TegraGM20BLayout.h",
     ],
     data = ["//drivers/NativeMobileDisplay:NativePlanesDisplay.h"],
 )
@@ -149,11 +187,17 @@ host_test(
     srcs = ["display_planes_source_test.cpp"],
     data = [
         "//drivers/NativeMobileDisplay:NativeLegacyDisplay.cpp",
+        "//drivers/NativeMobileDisplay:NativePlaneFenceDisplay.h",
         "//drivers/NativeMobileDisplay:NativePlanesDisplay.h",
+        "//drivers/NativeMobileDisplay:NativePlanesTotals.h",
         "//kernel/xnu-10063.141.1/bsd:kern/kern_exec.c",
+        "//kernel/xnu-12377.121.6/bsd:kern/kern_exec.c",
         "//kits/SwitchABI:interface/IOSurface.json",
     ],
-    defines = ['XNU_KERN_EXEC=\\"$(rootpath //kernel/xnu-10063.141.1/bsd:kern/kern_exec.c)\\"'],
+    defines = [
+        'XNU_KERN_EXEC=\\"$(rootpath //kernel/xnu-10063.141.1/bsd:kern/kern_exec.c)\\"',
+        'XNU27_KERN_EXEC=\\"$(rootpath //kernel/xnu-12377.121.6/bsd:kern/kern_exec.c)\\"',
+    ],
 )
 
 host_test(

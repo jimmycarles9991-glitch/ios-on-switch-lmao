@@ -1209,6 +1209,9 @@ unsigned long nvxnu_pool_used_pages(void);
  * goes back clean. */
 void *nvxnu_pool_alloc_clean(unsigned long size, unsigned long align, unsigned long long *pa);
 void nvxnu_pool_free_zeroed(unsigned long long pa, unsigned long size);
+/* `count` zeroed 128 KiB chunks for a compressible BO (TegraGM20BComp.h tgm_comp_pick_chunks): the address of each of their
+ * 4 KiB pages, chunk by chunk, in `pas`. -ENOMEM, with nothing taken, when the pool has fewer free chunks. */
+int nvxnu_pool_alloc_chunks(unsigned long count, unsigned long long *pas);
 /* The GPU scrubber's (gpu.c "pool scrub"): the first run of free pages not known to be zero, at most max_bytes, claimed
  * (allocated) for the copy engine to zero and nvxnu_pool_free_zeroed to give back; its bytes, 0 when none is left. And
  * how many free pages are not known to be zero. */

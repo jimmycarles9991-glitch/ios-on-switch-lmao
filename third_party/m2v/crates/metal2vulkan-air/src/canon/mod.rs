@@ -428,6 +428,17 @@ pub fn specialize_dynamic(
         &pending,
         m,
     )?;
+    for &(g, index) in stubs.bound_constants() {
+        m.charge(std::mem::size_of::<(GlobalId, sccp::FcState)>() * 2)?;
+        fcs.insert(
+            g,
+            sccp::FcState {
+                index,
+                supplied: true,
+                decl: true,
+            },
+        );
+    }
 
     // Static initializers: their stores become constant initializers; a global computed from an
     // unsupplied constant is tainted like the constant itself.

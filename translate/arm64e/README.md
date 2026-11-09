@@ -99,6 +99,11 @@ stub region), so switching is a packaging decision, not a code change.
 - **Contracts relied on**: x16/x17/NZCV are clobbered by compiler PAC check sequences and x16/x17/x30 are dead at calls
   and returns (liveness and the dead-check rewrite depend on it); PACGA's result is only ever compared with another
   PACGA of the same inputs (see Open issues).
+- **A dead check is a hole only while nothing enters it.** Compilers share one tail-call LR check between the signed
+  path and an unsigned early return that branches straight to its EOR (24B119's libsystem_trace `_logDestructor`:
+  `cbz x0` there, so fsck's exit ran a VideoToolbox FP16 stub piece). The planners keep stub words off every word a
+  branch, ADR or ADRP+ADD, jump table, landing pad, function start or rebase refers to, and both verifiers count the
+  stub words where the original code branches.
 
 Words that never occur in a cache are invisible to tests over cache words, so the tests also sample the whole
 encoding space. That is what checks, for instance, FMINV/FMINP on half precision (the min forms of the max encodings,

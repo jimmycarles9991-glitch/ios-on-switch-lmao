@@ -1,5 +1,32 @@
 // SPDX-License-Identifier: MIT
 #import "RawMetalInternal.h"
+#include "NativeBridgeMetalFrontend.h"
+
+// Why the raw path does not take a stored depth/stencil texture's m2v texture in place, from the answer of
+// native_bridge_metal_texture_memory (-3: m2v made no texture)
+static const char *zetaMemoryRefusal(int asked)
+{
+    switch (asked) {
+    case -3:
+        return "m2v made no texture";
+    case -1:
+        return "the frontend or NVK has no texture memory accessor";
+    case -2:
+        return "its texels are no one NVK image's";
+    case 2:
+        return "NVK's image has more than one plane";
+    case 3:
+        return "NVK's image is not bound";
+    case 4:
+        return "NVK's image has more than one level";
+    case 5:
+        return "NVK's image has more than one layer";
+    case 6:
+        return "NVK's image is multisampled";
+    default:
+        return "NVK names no image";
+    }
+}
 
 @implementation RMDevice
 
@@ -29,6 +56,35 @@
         if (const uint64_t n = gPredCbs[p].load(std::memory_order_relaxed))
             d[[NSString stringWithFormat:@"pred.%s", kPredNames[p]]] = @(n);
     return d;
+}
+
+// hw_test_app's system.widgets_render and gpu.raw.memoryless_burst: the bytes the raw device holds now. pool: its pool,
+// block-linear and depth chunks; wc: its write-combined chunks; heap: the shader heap's bound parts; backings: memoryless
+// attachments' uncompressed backings (trimBackings' last count); grows: allocations that wired a chunk themselves.
+- (NSDictionary<NSString *, NSNumber *> *)switchRawMemory
+{
+    raw::Device &d = *gRM->raw;
+    return @{
+        @"pool" : @(d.stats.poolBytes.load()),
+        @"wc" : @(d.wcChunkBytesHeld()),
+        @"heap" : @(d.heapBytes()),
+        @"backings" : @(d.stats.backingBytes.load()),
+        @"grows" : @(d.stats.poolStalls.load())
+    };
+}
+
+// hw_test_app's gpu.compression_churn: the raw device's compressed memory (raw_comp.h). held, held_bytes and views are now;
+// made and refused count since the device opened.
+- (NSDictionary<NSString *, NSNumber *> *)switchRawCompression
+{
+    const auto &s = gRM->raw->stats;
+    return @{
+        @"held" : @(s.compHeld.load()),
+        @"held_bytes" : @(s.compHeldBytes.load()),
+        @"views" : @(s.compViews.load()),
+        @"made" : @(s.compMade.load()),
+        @"refused" : @(s.compFailed.load())
+    };
 }
 
 // The m2v device this one wraps (the one TEGRA_RAW_METAL=0 gives the process): hw_test_app draws each scene on both
@@ -62,7 +118,7 @@
 
 - (NSUInteger)minimumLinearTextureAlignmentForPixelFormat:(MTLPixelFormat)format
 {
-    const NSUInteger a = [gRM->fallback minimumLinearTextureAlignmentForPixelFormat:format];
+    const NSUInteger a = NSUInteger(deviceAnswer(@selector(minimumLinearTextureAlignmentForPixelFormat:), format));
     return a ? std::max<NSUInteger>(a, 32) : a;
 }
 
@@ -133,7 +189,7 @@
     RMBuffer *b = [RMBuffer new];
     b->_device = self;
     b->_options = o;
-    if (!gRM->raw->createBufferNoCopy(p, n, b->_raw)) {  // (not page-aligned, or refused): m2v's, as today
+    if (!gRM->raw->createBufferNoCopy(p, n, b->_raw)) {  // (the import refused): m2v's, as today
         if (!predLogged(PredCallBufForeign))
             logPred(PredCallBufForeign, uintptr_t(p) & 0xfff, n, @"(made: a no-copy buffer the raw path refused)");
         RMTwinObject *t = [RMTwinObject new];
@@ -161,7 +217,7 @@
 // view of it is (texture_tiled_in_place).
 - (id<MTLTexture>)newTextureWithDescriptor:(MTLTextureDescriptor *)d
 {
-    return [self rmNewTexture:d tiled:d.storageMode == MTLStorageModePrivate];
+    return swizzled([self rmNewTexture:d tiled:d.storageMode == MTLStorageModePrivate], d.swizzle);
 }
 
 - (id<MTLTexture>)rmNewTexture:(MTLTextureDescriptor *)d tiled:(bool)tiled
@@ -181,7 +237,9 @@
             return (id<MTLTexture>)t;
         }
     }
-    if (!rawShape(d) && !zetaDescriptor(d)) {
+    const bool line = lineShape(d), volume = volumeShape(d), multisampled = multisampleShape(d);
+    const uint32_t array = arrayType(d);
+    if (!rawShape(d) && !zetaDescriptor(d) && !line && !volume && !array && !multisampled) {
         RMTexture *w = (RMTexture *)[self wrapTwin:[gRM->fallback newTextureWithDescriptor:d] descriptor:d];
         if (w)
             refuseTexture(w, PredTexShape, rawShapeTerm(d), d.pixelFormat, @"twin-only", nil);
@@ -190,9 +248,51 @@
     RMTexture *t = [RMTexture new];
     t->_device = self;
     t->_descriptor = [d copy];
-    if (d.storageMode == MTLStorageModeMemoryless) {
+    if (line) {
+        t->_kind = RMTexturePool;
+        t->_rawOk = gRM->raw->createLine(uint32_t(d.width), uint32_t(d.pixelFormat), t->_raw);
+    } else if (volume) {
+        t->_kind = RMTexturePool;
+        t->_rawOk = gRM->raw->createVolume(uint32_t(d.width), uint32_t(d.height), uint32_t(d.depth),
+                                           uint32_t(d.pixelFormat), volumeRendered(d), t->_raw);
+    } else if (array) {
+        t->_kind = RMTexturePool;
+        const NSUInteger faces = array == raw::fx::kTexTwoDArray ? 1 : 6;
+        t->_rawOk = gRM->raw->createArray(uint32_t(d.width), uint32_t(d.height),
+                                          uint32_t(std::max<NSUInteger>(d.arrayLength, 1) * faces),
+                                          uint32_t(d.pixelFormat), array, t->_raw);
+    } else if (d.storageMode != MTLStorageModeMemoryless && zetaDescriptor(d)) {
+        // one allocation for both drivers: m2v's texture, which the raw path renders and copies in place
+        t->_kind = RMTexturePool;
+        id twin = [gRM->fallback newTextureWithDescriptor:d];
+        struct switch_nvk_image_memory m;
+        const int asked = !twin                                 ? -3
+                          : !native_bridge_metal_texture_memory ? -1
+                                                                : native_bridge_metal_texture_memory(twin, &m);
+        const char *why = asked ? zetaMemoryRefusal(asked) : nullptr;
+        if (!asked) {
+            raw::ZetaMemory z;
+            z.va = m.addr;
+            z.bytes = m.size_B;
+            z.layerBytes = m.array_stride_B;
+            z.pitch = m.row_stride_B;
+            z.bpp = m.texel_B;
+            z.blockHeight = m.y_log2;
+            z.blockDepth = m.z_log2;
+            z.tiled = m.tiled;
+            z.compressed = m.compressed;
+            t->_rawOk = gRM->raw->createZetaOver(z, uint32_t(d.width), uint32_t(d.height), uint32_t(d.pixelFormat),
+                                                 (d.usage & MTLTextureUsageShaderRead) != 0, t->_raw, &why);
+        }
+        if (!t->_rawOk)
+            SWITCH_REFUSE_DETAIL("raw", "zeta.over", d.pixelFormat,
+                                 "a stored %lux%lu depth/stencil texture of format %lu stays m2v's: %s",
+                                 (unsigned long)d.width, (unsigned long)d.height, (unsigned long)d.pixelFormat, why);
+        twinPublish(t, t->_twin, twin);
+    } else if (d.storageMode == MTLStorageModeMemoryless) {
         t->_kind = RMTextureMemoryless;
-        t->_rawOk = gRM->raw->createMemoryless(uint32_t(d.width), uint32_t(d.height), uint32_t(d.pixelFormat), t->_raw);
+        t->_rawOk = gRM->raw->createMemoryless(uint32_t(d.width), uint32_t(d.height), uint32_t(d.pixelFormat), t->_raw,
+                                               std::max<uint32_t>(uint32_t(d.sampleCount), 1));
     } else {
         t->_kind = RMTexturePool;
         // a shared texture (the CPU writes it: replaceRegion) in write-combined memory: its rows need no clean after
@@ -202,7 +302,7 @@
             keepExtendedRange(d, t->_raw, false);
     }
     if (!t->_rawOk) {
-        RMTexture *w = (RMTexture *)[self wrapTwin:[gRM->fallback newTextureWithDescriptor:d] descriptor:d];
+        RMTexture *w = (RMTexture *)[self wrapTwin:t->_twin ?: [gRM->fallback newTextureWithDescriptor:d] descriptor:d];
         if (w)
             refuseTexture(w, PredTexPoolAlloc, d.width, d.height, @"twin-only (pool)", nil);
         return (id<MTLTexture>)w;
@@ -278,6 +378,11 @@ static bool producesTexture(MTLTextureDescriptor *d)
 }
 
 - (id<MTLTexture>)newTextureWithDescriptor:(MTLTextureDescriptor *)d iosurface:(IOSurfaceRef)s plane:(NSUInteger)plane
+{
+    return swizzled([self rmSurfaceTexture:d iosurface:s plane:plane], d.swizzle);
+}
+
+- (id<MTLTexture>)rmSurfaceTexture:(MTLTextureDescriptor *)d iosurface:(IOSurfaceRef)s plane:(NSUInteger)plane
 {
     SWITCH_API(ApiObject);
     if (!s)

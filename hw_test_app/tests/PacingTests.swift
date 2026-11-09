@@ -36,6 +36,9 @@ final class PacingRun: NSObject {
 
     var presented: [Double] { shown.measured }
 
+    /// Commit to on glass of each measured probe frame, in milliseconds (presentedTime is CACurrentMediaTime's clock).
+    var presentLatencies: [Double] { shown.latencies }
+
     /// When the display showed the probe's first drawable (0 until it has).
     var firstPresented: Double { shown.first }
 
@@ -73,7 +76,8 @@ final class PacingRun: NSObject {
         pass.colorAttachments[0].storeAction = .store
         commands.makeRenderCommandEncoder(descriptor: pass)?.endEncoding()
         let shown = shown
-        drawable.addPresentedHandler { shown.add($0.presentedTime, measured: measuring) }
+        let submitted = CACurrentMediaTime()
+        drawable.addPresentedHandler { shown.add($0.presentedTime, submitted: submitted, measured: measuring) }
         commands.present(drawable)
         commands.commit()
     }
@@ -83,13 +87,21 @@ final class PacingRun: NSObject {
 final class ShownTimes: @unchecked Sendable {
     private let lock = NSLock()
     private var times: [Double] = []
+    private var delays: [Double] = []
     private var firstTime: Double = 0
 
-    func add(_ time: Double, measured: Bool) {
+    func add(_ time: Double, submitted: Double, measured: Bool) {
         lock.lock()
         defer { lock.unlock() }
         if measured { times.append(time) }
+        if measured && time > 0 { delays.append((time - submitted) * 1000) }
         if firstTime == 0 && time > 0 { firstTime = time }
+    }
+
+    var latencies: [Double] {
+        lock.lock()
+        defer { lock.unlock() }
+        return delays
     }
 
     var measured: [Double] {
@@ -105,16 +117,26 @@ final class ShownTimes: @unchecked Sendable {
     }
 }
 
-struct PacingTest: HWTest {
-    let id: String
-    let name: String
-    let subsystem = Subsystem.compositor
+public struct PacingTest: HWTest {
+    public let id: String
+    public let name: String
+    public let subsystem = Subsystem.compositor
     let probeSize: CGFloat?
     let build: @MainActor @Sendable (UIView, CGRect) -> (Int) -> Void
 
-    var timeout: TimeInterval { 20 }
+    public init(
+        id: String, name: String, probeSize: CGFloat?,
+        build: @escaping @MainActor @Sendable (UIView, CGRect) -> (Int) -> Void
+    ) {
+        self.id = id
+        self.name = name
+        self.probeSize = probeSize
+        self.build = build
+    }
 
-    func run(_ context: TestContext) async throws -> Outcome {
+    public var timeout: TimeInterval { 20 }
+
+    public func run(_ context: TestContext) async throws -> Outcome {
         let done = Waiter<Bool>()
         let recorder = await context.onStage(fullScreen: true) { stage -> PacingRun in
             let screen = UIScreen.main.bounds
@@ -130,8 +152,8 @@ struct PacingTest: HWTest {
         await MainActor.run { recorder.start() }
         _ = await done.wait(timeout: 15)
         try await Task.sleep(nanoseconds: 200_000_000)
-        let (linkTimes, presented, late) = await MainActor.run {
-            (recorder.linkTimes, recorder.presented, recorder.late)
+        let (linkTimes, presented, late, latencies) = await MainActor.run {
+            (recorder.linkTimes, recorder.presented, recorder.late, recorder.presentLatencies)
         }
         let link = Pacing(times: linkTimes, period: 1.0 / 60)
         let shown = Pacing(times: presented.sorted(), period: 1.0 / 60)
@@ -140,6 +162,8 @@ struct PacingTest: HWTest {
         metrics.set("late", late)
         metrics.merge(shown.metrics(prefix: "present_"))
         metrics.set("unshown", presented.filter { $0 <= 0 }.count)
+        metrics.set("present_latency_p50_ms", Stats.percentile(latencies, 0.5), digits: 2)
+        metrics.set("present_latency_p95_ms", Stats.percentile(latencies, 0.95), digits: 2)
         return .judged(
             [
                 ("5 s of display-link frames", link.frames >= 290),

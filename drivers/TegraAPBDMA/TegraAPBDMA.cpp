@@ -61,7 +61,7 @@ enum : uint32_t {
     STATUS_ISE_EOC = 1u << 30,
     AHBSEQ_INTR_ENB = 1u << 31,
     AHBSEQ_BUS_WIDTH_32 = 2u << 28,
-    AHBSEQ_BURST_1 = 4u << 24,  // one word: the 4-byte RX trigger
+    AHBSEQ_BURST_1 = 4u << 24,  // one word: one APB read
     AHBSEQ_BURST_4 = 5u << 24,  // four words: the 16-byte TX trigger
     APBSEQ_BUS_WIDTH_8 = 0u << 28,
     APBSEQ_BUS_WIDTH_32 = 2u << 28,  // one 32-bit read of the register per word (a UART's RBR: one byte)
@@ -174,6 +174,22 @@ void stopLocked(const tegra_apbdma_channel *ch)
         wr(ch, STATUS, status);
 }
 
+// Device to memory, one 32-bit APB read per request, each stored as one word (tegra_apbdma_start_rx_words).
+void startRxWords(tegra_apbdma_channel *ch, uint32_t apb, unsigned req, uint32_t pa, uint32_t bytes, uint32_t once)
+{
+    ensureUp();
+    stopLocked(ch);
+    ch->size = bytes;
+    wr(ch, APB_PTR, apb);
+    wr(ch, APB_SEQ, APBSEQ_BUS_WIDTH_32 | APBSEQ_WRAP_WORD_1);
+    wr(ch, AHB_PTR, pa);
+    wr(ch, AHB_SEQ, AHBSEQ_INTR_ENB | AHBSEQ_BUS_WIDTH_32 | AHBSEQ_BURST_1);
+    wr(ch, WCOUNT, (bytes - 4) & COUNT_MASK);
+    const uint32_t csr = CSR_IE_EOC | once | CSR_FLOW | (req & 0x1f) << CSR_REQ_SEL_SHIFT;  // device to memory
+    wr(ch, CSR, csr);
+    wr(ch, CSR, csr | CSR_ENB);
+}
+
 // Primary interrupt context, CPU0: the end of count acknowledged (tegra_dma_isr writes STATUS back), then the owner.
 // Nothing for the work loop: the owner signals its own when it needs to.
 // NOLINTNEXTLINE(misc-const-correctness): IOFilterInterruptEventSource::Filter's signature
@@ -279,21 +295,6 @@ tegra_apbdma_channel *tegra_apbdma_open(unsigned channel, IOWorkLoop *loop, tegr
     return ch;
 }
 
-void tegra_apbdma_start_ring(tegra_apbdma_channel *ch, uint32_t apb, unsigned req, uint32_t pa, uint32_t size)
-{
-    ensureUp();
-    stopLocked(ch);
-    ch->size = size;
-    wr(ch, APB_PTR, apb);
-    wr(ch, APB_SEQ, APBSEQ_BUS_WIDTH_8 | APBSEQ_WRAP_WORD_1);
-    wr(ch, AHB_PTR, pa);
-    wr(ch, AHB_SEQ, AHBSEQ_INTR_ENB | AHBSEQ_BUS_WIDTH_32 | AHBSEQ_BURST_1);
-    wr(ch, WCOUNT, (size - 4) & COUNT_MASK);
-    const uint32_t csr = CSR_IE_EOC | CSR_FLOW | (req & 0x1f) << CSR_REQ_SEL_SHIFT;  // continuous: no ONCE
-    wr(ch, CSR, csr);
-    wr(ch, CSR, csr | CSR_ENB);
-}
-
 void tegra_apbdma_start_once(tegra_apbdma_channel *ch, uint32_t apb, unsigned req, uint32_t pa, uint32_t size)
 {
     ensureUp();
@@ -311,17 +312,12 @@ void tegra_apbdma_start_once(tegra_apbdma_channel *ch, uint32_t apb, unsigned re
 
 void tegra_apbdma_start_rx_words(tegra_apbdma_channel *ch, uint32_t apb, unsigned req, uint32_t pa, uint32_t words)
 {
-    ensureUp();
-    stopLocked(ch);
-    ch->size = words * 4;
-    wr(ch, APB_PTR, apb);
-    wr(ch, APB_SEQ, APBSEQ_BUS_WIDTH_32 | APBSEQ_WRAP_WORD_1);
-    wr(ch, AHB_PTR, pa);
-    wr(ch, AHB_SEQ, AHBSEQ_INTR_ENB | AHBSEQ_BUS_WIDTH_32 | AHBSEQ_BURST_1);
-    wr(ch, WCOUNT, (ch->size - 4) & COUNT_MASK);
-    const uint32_t csr = CSR_IE_EOC | CSR_ONCE | CSR_FLOW | (req & 0x1f) << CSR_REQ_SEL_SHIFT;  // device to memory
-    wr(ch, CSR, csr);
-    wr(ch, CSR, csr | CSR_ENB);
+    startRxWords(ch, apb, req, pa, words * 4, CSR_ONCE);
+}
+
+void tegra_apbdma_start_rx_words_ring(tegra_apbdma_channel *ch, uint32_t apb, unsigned req, uint32_t pa, uint32_t size)
+{
+    startRxWords(ch, apb, req, pa, size, 0);  // continuous: no ONCE
 }
 
 uint32_t tegra_apbdma_moved(const tegra_apbdma_channel *ch, bool *endPending)

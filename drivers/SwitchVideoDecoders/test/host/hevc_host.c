@@ -330,6 +330,21 @@ static void testDecode(void)
             }
             printf("checker: %zu kinds of bad HEVC submit refused\n", kinds);
         }
+        if (clip->depth == 10) {  // Main 10: 16-bit samples, so 8-bit-sized surfaces and the 10-to-8 modes are refused
+            const TegraNVDECSubmit good = f.last;
+            const nvdec_hevc_pic_s *q = (const nvdec_hevc_pic_s *)good.setup;
+            CHECK(q->disp_output_mode == 1 && q->framestride[0] >= 2 * ((clip->width + 63u) & ~63u),
+                  "clip %c: mode %u, pitch %u", clip->name, q->disp_output_mode, q->framestride[0]);
+            CHECK(!fakeCheck(&f, &good), "clip %c: the last submit", clip->name);
+            TegraNVDECSubmit narrow = good, eight = good, deblock = good;
+            nvdec_hevc_pic_s *p = (nvdec_hevc_pic_s *)narrow.setup;
+            p->framestride[0] = p->framestride[1] = (clip->width + 63u) & ~63u;
+            ((nvdec_hevc_pic_s *)eight.setup)->disp_output_mode = 2;
+            ((nvdec_hevc_pic_s *)deblock.setup)->HevcSaoBufferOffset = 480 * ((clip->height + 63u) & ~63u) / 256;
+            CHECK(fakeCheck(&f, &narrow) && fakeCheck(&f, &eight) && fakeCheck(&f, &deblock),
+                  "clip %c: the checker took an 8-bit-sized Main 10 submit", clip->name);
+            printf("checker: Main 10 in 16-bit samples, 8-bit-sized surfaces and filter rows refused\n");
+        }
         hevc_decoder_destroy(d);
         for (int h = 1; h <= MAX_BUFFERS; h++)
             CHECK(!f.va[h], "clip %c: buffer %d not freed", clip->name, h);

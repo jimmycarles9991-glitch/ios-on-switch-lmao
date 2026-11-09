@@ -11,9 +11,11 @@ enum {
     SWITCH_STORAGE_INVALID = -1
 };
 
-/* Parsed once during probe; absent/fat retains the existing file backend.
- * Unknown values are fatal. raw is root-boot-only, never a fallback. */
-int switch_files_storage_profile(void);
+/* The root boot reads the raw APFS container on the SD card; the FAT profile is gone. */
+static inline int switch_files_storage_profile(void)
+{
+    return SWITCH_STORAGE_RAW;
+}
 struct switch_raw_apfs;
 int switch_files_raw_open(struct switch_raw_apfs *, void *private_scratch, uint32_t);
 #define SWITCH_FILES_MAGIC UINT64_C(0x5357434846494c45)

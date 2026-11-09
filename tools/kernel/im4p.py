@@ -1,7 +1,8 @@
-"""im4p.py payload IN OUT [--expect-type T] [--lzfse] [--thin-arm64] [--sha256 H]: an IM4P's payload.
+"""im4p.py IN OUT [--expect-type T] [--manifest-digest H] [--lzfse] [--thin-arm64] [--sha256 H]: an IM4P's payload.
 
 Optionally LZFSE-decoded (macOS's compression_tool, a declared host tool) and reduced to its arm64 slice, as
 vendor/unixnu's ipsw.py kernelcache() made kernelcache.decompressed; checked against a pin when one is given.
+--manifest-digest is the IPSW BuildManifest's Digest of the component: the SHA-384 of the whole IM4P.
 """
 
 import argparse
@@ -38,11 +39,15 @@ def main() -> None:
     parser.add_argument('source')
     parser.add_argument('output')
     parser.add_argument('--expect-type')
+    parser.add_argument('--manifest-digest')
     parser.add_argument('--lzfse', action='store_true')
     parser.add_argument('--thin-arm64', action='store_true')
     parser.add_argument('--sha256')
     args = parser.parse_args()
-    fields = im4p_fields(Path(args.source).read_bytes())
+    source = Path(args.source).read_bytes()
+    if args.manifest_digest and hashlib.sha384(source).hexdigest() != args.manifest_digest:
+        sys.exit(f"{args.source}: SHA-384 {hashlib.sha384(source).hexdigest()} is not the BuildManifest's digest")
+    fields = im4p_fields(source)
     kind = fields[1][1].decode()
     if args.expect_type and kind != args.expect_type:
         sys.exit(f'IM4P type {kind} is not {args.expect_type}')

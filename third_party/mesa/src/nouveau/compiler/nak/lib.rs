@@ -23,6 +23,7 @@ mod opt_jump_thread;
 mod opt_lop;
 mod opt_out;
 mod opt_prmt;
+mod opt_sm53_half_probe;
 mod opt_uniform_instrs;
 mod qmd;
 mod reg_tracker;

@@ -572,6 +572,7 @@ static void refusals(void)
         {"direct prediction", "mode decision"},
         {"ME predictors in without out", "ME predictors in without out, or out without in"},
         {"ME predictor buffer too small", "ME predictor buffers"},
+        {"slice of one macroblock more than the picture", "slice control"},
     };
 
     for (unsigned k = 0; k < sizeof(cases) / sizeof(cases[0]); k++) {
@@ -672,6 +673,9 @@ static void refusals(void)
             for (uint32_t i = 0; i < s.entry_count; i++)
                 if (s.entries[i].method == NVC5B7_SET_IN_MEPRED_DATA)
                     avail[i] = 256;
+            break;
+        case 23:
+            ((nvenc_h264_slice_control_s *)(s.setup + pc->slice_control_offset))->num_mb++;
             break;
         }
         const char *why = tegra_nvenc_check(&s, avail);

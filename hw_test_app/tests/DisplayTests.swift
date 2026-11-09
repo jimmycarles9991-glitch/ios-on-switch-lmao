@@ -72,18 +72,23 @@ struct DisplayPacingTest: HWTest {
     }
 }
 
+/// edr_potential= and edr_current= are the screen's EDR headroom as apps read it. A J181 (iPad 9th generation, an sRGB
+/// panel with no XDR) is expected to answer 1, and content that renders extended range for a headroom above 1 would then
+/// not on it (RenderBox's and the posters' RGB10A8_2P_XR10 and BGR10_XR_sRGB targets, if headroom is what picks them).
 struct DisplayModeTest: HWTest {
     let id = "display.mode"
     let name = "Screen mode and maximum frame rate"
     let subsystem = Subsystem.display
 
     func run(_ context: TestContext) async throws -> Outcome {
-        let (fps, native, scale, nativeScale, gamut) = await MainActor.run {
-            () -> (Int, CGRect, CGFloat, CGFloat, Int) in
+        let (fps, native, scale, nativeScale, gamut, edr) = await MainActor.run {
+            () -> (Int, CGRect, CGFloat, CGFloat, Int, (CGFloat, CGFloat)?) in
             let screen = UIScreen.main
+            var edr: (CGFloat, CGFloat)?
+            if #available(iOS 16.0, *) { edr = (screen.potentialEDRHeadroom, screen.currentEDRHeadroom) }
             return (
                 screen.maximumFramesPerSecond, screen.nativeBounds, screen.scale, screen.nativeScale,
-                screen.traitCollection.displayGamut.rawValue
+                screen.traitCollection.displayGamut.rawValue, edr
             )
         }
         var metrics = Metrics()
@@ -92,6 +97,10 @@ struct DisplayModeTest: HWTest {
         metrics.set("scale", Double(scale), digits: 2)
         metrics.set("native_scale", Double(nativeScale), digits: 3)
         metrics.set("gamut", gamut == 1 ? "P3" : "sRGB")
+        if let (potential, current) = edr {
+            metrics.set("edr_potential", Double(potential), digits: 3)
+            metrics.set("edr_current", Double(current), digits: 3)
+        }
         return .judged(
             [("60 frames per second", fps == 60), ("a native size", native.width > 0 && native.height > 0)], metrics)
     }

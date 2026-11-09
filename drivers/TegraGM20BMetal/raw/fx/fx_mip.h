@@ -41,6 +41,9 @@ struct MipLevel {
     uint32_t rowBytes = 0,
              rows = 0;  // the level's extent aligned to its tile (row stride; rows, a multiple of 8 << yLog2)
     uint8_t yLog2 = 0;  // the level's block height in GOBs, log2 (level 0's clamped to the level, as hardware does)
+    // A 3D image's (fx_image.h): the level's depth, max(1, d >> level), its planes in whole blocks of 1 << zLog2
+    uint32_t depth = 1, planes = 1;
+    uint8_t zLog2 = 0;
 };
 
 struct MipChain {
@@ -49,6 +52,15 @@ struct MipChain {
         0;  // level 0's: the texture header's GOBS_PER_BLOCK_HEIGHT and the 2D engine's block size of level 0
     uint64_t bytes = 0, align = 0;
     MipLevel level[kMaxLevels];
+    // A 3D image's depth and level 0's GOBS_PER_BLOCK_DEPTH (fx_image.h); a 2D chain's are 1 and 0
+    uint32_t depth = 1;
+    uint8_t zLog2 = 0;
+    // An array's (or a cube's: six a cube) layers, each `arrayStride` bytes from the one before (fx_image.h)
+    uint32_t layers = 1;
+    uint64_t arrayStride = 0;
+    // A multisampled image's (fx_image.h msLayout): its samples a pixel, laid out 1 << sxLog2 across and 1 << syLog2 down
+    // (rowBytes and rows count samples), and the header's MULTI_SAMPLE_COUNT
+    uint8_t samples = 1, sxLog2 = 0, syLog2 = 0, sampleMode = 0;
 };
 
 // The number of levels of a full chain (Metal's mipmapLevelCount for a full chain): floor(log2(max(w, h))) + 1
@@ -77,10 +89,15 @@ inline uint32_t gobOffset(uint32_t xB, uint32_t y)
 // The same for FermiColor GOBs (nil/copy.rs CopyGOBFermi: the desktop parts' sector order)
 uint32_t gobOffsetFermi(uint32_t xB, uint32_t y);
 
+// TEXHEAD_BL TEXTURE_TYPE (clb097tex.h), NIL pipe_to_nv_texture_type of a view's type
+constexpr uint32_t kTexOneD = 0, kTexTwoD = 1, kTexThreeD = 2, kTexCube = 3, kTexOneDArray = 4, kTexTwoDArray = 5,
+                   kTexCubeArray = 8;
+
 // The texture header of the chain at GPU address `va` (512-byte aligned): word 0 from `tic0` (the format's components, data
-// types and swizzle: raw::formatInfo()->tic0), a view of levels [baseLevel, baseLevel + levelCount). NIL nvb097 for a 2D view.
+// types and swizzle: raw::formatInfo()->tic0), a view of levels [baseLevel, baseLevel + levelCount). NIL nvb097 for a view of
+// `textureType` (a 1D image is NIL's 2D layout of one row).
 void mipChainTic(const MipChain &c, uint64_t va, uint32_t tic0, bool srgb, uint32_t baseLevel, uint32_t levelCount,
-                 uint32_t out[8]);
+                 uint32_t out[8], uint32_t textureType = kTexTwoD);
 
 // FERMI_TWOD_A surface format of an MTLPixelFormat the 2D engine filters faithfully (cl902d.h SET_SRC_FORMAT), 0: none (a
 // chain of that format is kept, and its generateMipmaps is not the 2D engine's)

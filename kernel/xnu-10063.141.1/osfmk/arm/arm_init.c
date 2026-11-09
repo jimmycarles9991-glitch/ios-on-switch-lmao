@@ -710,7 +710,7 @@ arm_init_cpu(
 
 
 	machine_set_current_thread(cpu_data_ptr->cpu_active_thread);
-#if defined(SWITCH_XNU_DIAGNOSTICS) && SWITCH_XNU_DIAGNOSTICS
+#if defined(SWITCH_XNU_BOARD) && SWITCH_XNU_BOARD
 	/* A secondary's first start, and every core's start after system sleep (the boot CPU
 	 * resumes through the same PSCI entry), leaves the entry vectors here; a no-op otherwise. */
 	{

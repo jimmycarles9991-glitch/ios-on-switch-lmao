@@ -32,11 +32,6 @@ static struct switch_raw_apfs_partition raw_partitions[SWITCH_GPT_MAX_ENTRIES];
 static uint32_t raw_partition_count;
 static const int storage_profile = SWITCH_STORAGE_RAW;
 
-int switch_files_storage_profile(void)
-{
-    return storage_profile;
-}
-
 struct reader {
     struct switch_sd_host *host;
     uint64_t start, request_start;

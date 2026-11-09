@@ -84,6 +84,16 @@ static inline int tgm_fence_wanted(uint64_t writer, const struct tgm_fence_sourc
 		       : 0;
 }
 
+/* Whether a wait on `seqno` of a channel whose fence word is `fence` passed only because the channel was killed with that
+ * submission unfinished (its kill record, gpu.c chan_killed): what the waiter ordered after never ran to its end. */
+static inline int tgm_fence_lost(const volatile struct TegraGM20BAbiFence *fence, uint32_t seqno)
+{
+	return (fence->error != 0 && (int32_t)(seqno - fence->killed_first) >= 0 &&
+		(int32_t)(fence->killed_last - seqno) >= 0)
+		       ? 1
+		       : 0;
+}
+
 /* Whether an Exec follows its list: one was given for it, not marked as touching every import, and the Exec submits. */
 static inline int tgm_fence_listed(int given, uint32_t flags, uint32_t pushes)
 {

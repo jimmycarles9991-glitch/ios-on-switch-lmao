@@ -1,11 +1,12 @@
 // SPDX-License-Identifier: MIT
 // The copy engine's moves of block-linear IOSurfaces (TegraGM20BRelayout.h) on the kernel's own GPU client: one address
-// space and copy channel made at the first move, a push page and a fence page from the GPU pool; a move maps the surface's
-// pages twice (TGM_LAYOUT_KIND and kind 0) and the scratch once, and unmaps them after it. Moves are serialised; the caller
-// sleeps on the move's fence interrupt (tgm_writer_wait, which recovers a copy that stops progressing as it does a stuck
-// writer), so the bytes are in DRAM where they were asked for when it returns. The channel is a client channel to the
-// rest of the driver (kernel 0): the present's acquires and a lock's wait for every channel include it, and a fault on it
-// kills it alone (the next move makes another).
+// space and copy channel made at the first move, a push page and a fence page from the GPU pool; a move maps the
+// surface's pages twice (TGM_LAYOUT_KIND and kind 0) and the scratch once, and unmaps them after it. Moves are
+// serialised; the caller sleeps on the move's fence interrupt (tgm_copy_wait, which recovers a writer the move's
+// acquires sit on, or a copy that stops progressing, as it does a stuck writer), so the bytes are in DRAM where they
+// were asked for when it returns. The channel is a client channel to the rest of the driver (kernel 0): the present's
+// acquires and a lock's wait for every channel include it, and a fault on it kills it alone (the next move makes
+// another).
 #include <IOKit/IOLib.h>
 #include <IOKit/IOLocks.h>
 #include <kern/task.h>
@@ -110,7 +111,10 @@ int move(const tgm_relayout_pages &surface, const tgm_relayout_pages &rows, cons
 		uint32_t seqno = 0;
 		ret = tgm_chan_exec(chan, &push, 1, &seqno, nullptr);
 		if (!ret) {
-			tgm_writer_wait(tgm_chan_uid(chan), seqno);
+			tgm_relayout_writer acquired[TGM_RELAYOUT_MAX_WAITS];
+			for (uint32_t i = 0; i < nwaits; i++)
+				acquired[i] = {waits[i].uid, waits[i].seqno};
+			tgm_copy_wait(tgm_chan_uid(chan), seqno, acquired, nwaits);
 			ret = tgm_chan_error(chan) ? -5 : 0;
 		}
 	}

@@ -23,7 +23,6 @@
 #include <IOKit/IOPlatformExpert.h>
 #include <os/log.h>
 #include <IOKit/IOWorkLoop.h>
-#include <libkern/c++/OSKext.h>
 #include <IOKit/IOKitKeys.h>
 #include <IOKit/storage/IOBlockStorageDevice.h>
 #include <IOKit/storage/IOMedia.h>
@@ -132,6 +131,15 @@ constexpr uint32_t kGapSectors = 32 * 1024 / kSector, kGapBudget = 64 * 1024 / k
 constexpr uint32_t kCqTaskSectors = kSafeSectors, kCqGroupSectors = kBounceSectors, kCqMaxTasks = 32, kCqProofs = 32;
 // issue()'s `task` when the command is not a CQ task's CMD46.
 constexpr uint32_t kNoTask = 0xffffffffu;
+
+// What a read's pages hold before the card writes them (prepareDirect). kNone: nothing to keep (the data path), so dirty
+// lines are dropped. kCpuFill: a check's own fill, which must reach DRAM so a byte the engine never delivered shows.
+// kPoisonHigh: the same with the pages above 4 GiB filled with kPoison first (proveHigh).
+enum class ReadFill : uint8_t {
+    kNone,
+    kCpuFill,
+    kPoisonHigh
+};
 
 // cqCommand()'s data: none, one 512-byte block from the card, or to it.
 enum : int {
@@ -436,11 +444,20 @@ struct Stats {
     uint64_t flushes, flushErrors, flushNs;
     // Erase-based trim: erase commands, the sectors they freed and the time the card was busy with them.
     uint64_t trimErases, trimSectors, trimNs;
+#if DEVELOPMENT || DEBUG
     // SwitchSdBus.h: commands refused because the bus was not free at their one PRESENT_STATE read, and DAT0 releases
-    // awaited by CMD13 with busy (the card still programming after a transfer complete).
-    uint64_t busRefused, releases;
+    // awaited by CMD13 with busy (the card still programming after a transfer complete). ADMA2 chains that reached a
+    // non-cacheable page (dmaPage).
+    uint64_t busRefused, releases, uncachedChains;
+#endif
 };
 }
+
+#if DEVELOPMENT || DEBUG
+#define SWITCH_SD_DEBUG_COUNT(field) (++stats.field)
+#else
+#define SWITCH_SD_DEBUG_COUNT(field) ((void)0)
+#endif
 
 class NativeSwitchBlock;
 
@@ -601,6 +618,7 @@ class NativeSwitchBlock : public IOService {
     switch_dma_buffer tableMemory = {};
     SwitchAdmaTable table = {};
     uint64_t tablePA = 0;
+    bool tableUncached = false;  // the table reaches a non-cacheable page (dmaPage), which syncLines leaves alone
     bool adma = false, admaWrites = false;
     uint8_t admaErrorState = 0;
     uint64_t admaErrorAddress = 0;
@@ -818,7 +836,7 @@ class NativeSwitchBlock : public IOService {
     // r10-adma2: the ADMA2 path, the bounce path in SDMA-sized pieces, the write read-back, the setup check, the
     // power-state hooks.
     SwitchAdmaRefusal buildTable(Request *first, uint32_t sectors, bool write, bool task = false);
-    void prepareDirect(bool write, bool poison);
+    void prepareDirect(bool write, ReadFill fill);
     void finishDirect(bool write);
     bool stageChain(Request *first, uint32_t from, uint32_t length, uint8_t *buffer, bool toClient);
     bool bounceChain(Request *first, uint32_t sectors);
@@ -1032,7 +1050,7 @@ bool NativeSwitchBlock::claimBus(SwitchSdUse use)
         state = bus.claim(r32(PRESENT), use);
     if (state == SwitchSdBusState::kFree)
         return true;
-    ++stats.busRefused;
+    SWITCH_SD_DEBUG_COUNT(busRefused);
     return false;
 }
 
@@ -1048,9 +1066,9 @@ void NativeSwitchBlock::ended(uint32_t status)
 // waits for the release, so this runs only if the controller ends one early. 0, or 1 with the lines reset.
 int NativeSwitchBlock::awaitRelease()
 {
-    ++stats.releases;
+    SWITCH_SD_DEBUG_COUNT(releases);
     if (bus.claim(r32(PRESENT), SwitchSdUse::kBusy) != SwitchSdBusState::kFree) {
-        ++stats.busRefused;
+        SWITCH_SD_DEBUG_COUNT(busRefused);
         return 1;
     }
     w32(STATUS, 0xffffffff);
@@ -1573,28 +1591,64 @@ void NativeSwitchBlock::trimStep()
     }
 }
 
-// A page the ADMA2 path may DMA to or from and maintain by line through the kernel's physical aperture: managed RAM with
-// the default write-back cacheable attributes (VM_WIMG_DEFAULT). A write-combined, uncached or device page (a GPU buffer,
-// a carve-out) takes the bounce buffer, where copypv reaches it with its own attributes.
-static bool cacheableRam(uint64_t page)
+// How the ADMA2 path may reach a page of managed RAM. kCacheable: write-back cacheable (VM_WIMG_DEFAULT 0x2), maintained
+// by line through the kernel's physical aperture. kUncached: not cacheable at all (VM_MEM_NOT_CACHEABLE 0x4: write-
+// combined, device, real-time; osfmk/arm/memory_types.h). XNU gives every mapping of a page its attributes, the
+// physical aperture's included (pmap_update_cache_attributes_locked), so such a page has no line to maintain, which is
+// why dcache_incoherent_io_store64 skips it. Anything else (inner-only write-back, write-through, not managed RAM)
+// takes the bounce buffer, where copypv reaches it with its own attributes.
+namespace {
+enum class DmaPage : uint8_t {
+    kRefused,
+    kCacheable,
+    kUncached
+};
+}  // namespace
+
+static DmaPage dmaPage(uint64_t page)
 {
+    constexpr unsigned kWimgDefault = 0x2;
+    constexpr unsigned kWimgNotCacheable = 0x4;
     const ppnum_t pn = static_cast<ppnum_t>(atop_64(page));
-    return page >= gPhysBase && page - gPhysBase < gPhysSize && (pmap_valid_page(pn) != 0) &&
-           pmap_cache_attributes(pn) == 0x2;
+    if (page < gPhysBase || page - gPhysBase >= gPhysSize || (pmap_valid_page(pn) == 0))
+        return DmaPage::kRefused;
+    const unsigned attributes = pmap_cache_attributes(pn);
+    if (attributes == kWimgDefault)
+        return DmaPage::kCacheable;
+    return (attributes & kWimgNotCacheable) != 0 ? DmaPage::kUncached : DmaPage::kRefused;
 }
 
-// By line over every byte the table moves, through the kernel's physical aperture, a page at a time: clean (the card
-// reads what the CPU wrote), clean+invalidate (before a read: no dirty line of the client's can later be evicted over
-// what the card wrote) or invalidate (after a read: drops what the A57 prefetched meanwhile). The table only holds whole
-// lines of managed RAM (SwitchAdma.h), so no other data shares a line and phystokv covers every page.
+static bool cacheableRam(uint64_t page)
+{
+    return dmaPage(page) == DmaPage::kCacheable;
+}
+
+// By line over every byte the table moves, through the kernel's physical aperture: clean (before a write: the card reads
+// what the CPU wrote) or invalidate (before a read: no dirty line of the client's is evicted over what the card writes;
+// after it: drops what the A57 prefetched meanwhile), or both for a read whose fill must reach DRAM first (ReadFill). The
+// table only holds whole lines of managed RAM (SwitchAdma.h), so no other data shares a line, the card overwrites every
+// line of a read, and phystokv covers every page. `uncached`: the table reaches a non-cacheable page somewhere, so each
+// page is asked (dmaPage) and only cacheable ones are maintained.
 // r14-sdcq: entries into [skip, skip + skipBytes) (the gap sink, which the CPU never touches) are left out.
-static void syncLines(switch_dcache_op op, const SwitchAdmaTable &table, uint64_t skip = 0, uint64_t skipBytes = 0)
+static void syncLines(switch_dcache_op op, const SwitchAdmaTable &table, bool uncached, uint64_t skip = 0,
+                      uint64_t skipBytes = 0)
 {
     for (uint32_t i = 0; i < table.count; ++i) {
-        const uint64_t pa = switchAdmaAddress(table.entries[i]);
+        uint64_t pa = switchAdmaAddress(table.entries[i]);
         if (pa - skip < skipBytes)
             continue;
-        switch_dcache_phys_lines(op, pa, table.entries[i].length);
+        const uint64_t end = pa + table.entries[i].length;
+        if (!uncached) {
+            switch_dcache_phys_lines(op, pa, end - pa);
+            continue;
+        }
+        while (pa < end) {
+            const uint64_t page = (pa | (kAdmaPage - 1)) + 1;
+            const uint64_t stop = page < end ? page : end;
+            if (dmaPage(pa) == DmaPage::kCacheable)
+                switch_dcache_phys_lines(op, pa, stop - pa);
+            pa = stop;
+        }
     }
 }
 
@@ -1605,11 +1659,15 @@ static void syncLines(switch_dcache_op op, const SwitchAdmaTable &table, uint64_
 SwitchAdmaRefusal NativeSwitchBlock::buildTable(Request *first, uint32_t sectors, bool write, bool task)
 {
     table.reset();
+    tableUncached = false;
     staging.count = 0;
     const uint64_t limit = task && high.state == SwitchAdmaHigh::kProving ? kAdma4GiB : high.limit(write);
     table.limit = limit;
     const auto pageOk = [&](uint64_t page) {
-        return cacheableRam(page) && high.pageOk(page, write);
+        const DmaPage kind = dmaPage(page);
+        if (kind == DmaPage::kUncached)
+            tableUncached = true;
+        return kind != DmaPage::kRefused && high.pageOk(page, write);
     };
     // r14-sdcq: a read chain's gaps go to the sink, one descriptor each (no gap is longer than the sink).
     // NOLINTNEXTLINE(clang-analyzer-core.NullDereference): a chain always has its first request
@@ -1658,15 +1716,16 @@ SwitchAdmaRefusal NativeSwitchBlock::buildTable(Request *first, uint32_t sectors
 }
 
 // An ADMA2 command for the chain in `table` (buildTable) goes straight to or from the requests' pages. Before it
-// (prepareDirect): the descriptors and the pages cleaned (write) or cleaned and invalidated (read). After it
-// (finishDirect): a read's pages invalidated again. `poison` (a read that proves ADMA2 above 4 GiB, proveHigh): the
-// table's pages up there are filled with kPoison first, so bytes the engine never delivered show (the clean+invalidate
-// takes the fill to DRAM before the card's bytes arrive).
-void NativeSwitchBlock::prepareDirect(bool write, bool poison)
+// (prepareDirect): the descriptors cleaned, and the pages cleaned (write) or invalidated (read). After it (finishDirect):
+// a read's pages invalidated again. Linux's arm64 dma_map_sg cleans before any transfer and XNU's IODMACommand does too
+// (then cleans and invalidates after); both must allow for a device that leaves part of a buffer unwritten. Here every
+// line of a read's table is whole and the card overwrites it or the read fails, so a dirty line is dropped rather than
+// written back. A read whose pages hold a fill to keep (ReadFill) is cleaned and invalidated instead.
+void NativeSwitchBlock::prepareDirect(bool write, ReadFill fill)
 {
     const uint64_t began = switch_now_ns();
     switch_dcache_clean_lines(table.entries, table.count * sizeof(SwitchAdmaDescriptor));
-    for (uint32_t i = 0; poison && !write && i < table.count; ++i) {
+    for (uint32_t i = 0; fill == ReadFill::kPoisonHigh && !write && i < table.count; ++i) {
         uint64_t pa = switchAdmaAddress(table.entries[i]);
         for (const uint64_t end = pa + table.entries[i].length; pa < end;) {
             const uint64_t page = (pa | (kAdmaPage - 1)) + 1;
@@ -1677,11 +1736,13 @@ void NativeSwitchBlock::prepareDirect(bool write, bool poison)
         }
     }
     if (write) {
-        syncLines(SWITCH_DCACHE_CLEAN, table);
+        syncLines(SWITCH_DCACHE_CLEAN, table, tableUncached);
     } else {
-        syncLines(SWITCH_DCACHE_CLEAN_INVALIDATE, table, sinkPA,
-                  sinkPA ? static_cast<uint64_t>(kGapSectors) * kSector : 0);
+        syncLines(fill == ReadFill::kNone ? SWITCH_DCACHE_INVALIDATE : SWITCH_DCACHE_CLEAN_INVALIDATE, table,
+                  tableUncached, sinkPA, sinkPA ? static_cast<uint64_t>(kGapSectors) * kSector : 0);
     }
+    if (tableUncached)
+        SWITCH_SD_DEBUG_COUNT(uncachedChains);
     switch_dcache_sync();
     stats.syncNs += switch_now_ns() - began;
 }
@@ -1705,7 +1766,8 @@ void NativeSwitchBlock::finishDirect(bool write)
     if (write)
         return;
     const uint64_t began = switch_now_ns();
-    syncLines(SWITCH_DCACHE_INVALIDATE, table, sinkPA, sinkPA ? static_cast<uint64_t>(kGapSectors) * kSector : 0);
+    syncLines(SWITCH_DCACHE_INVALIDATE, table, tableUncached, sinkPA,
+              sinkPA ? static_cast<uint64_t>(kGapSectors) * kSector : 0);
     switch_dcache_sync();
     stats.syncNs += switch_now_ns() - began;
 }
@@ -1980,7 +2042,7 @@ void NativeSwitchBlock::beginBatch(Batch &b)
     b.cmd23 = b.direct && sectors > 1 && (b.write ? cmd23Writes : cmd23Reads);
     if (!b.direct)
         return;
-    prepareDirect(b.write, b.proving);
+    prepareDirect(b.write, b.proving ? ReadFill::kPoisonHigh : ReadFill::kNone);
     b.issueStep = issue(static_cast<uint32_t>(first->lba), sectors, b.write, table.count, b.cmd23);
     b.issued = true;
 }
@@ -2494,7 +2556,7 @@ void NativeSwitchBlock::beginTask(Batch &b, uint32_t argument)
     b.direct = b.why == kAdmaOk;
     b.staged = b.direct && (staging.count != 0u);
     if (b.direct) {
-        prepareDirect(false, false);
+        prepareDirect(false, ReadFill::kNone);
     } else {
         switch_dcache_clean_invalidate_lines(bounce, static_cast<uintptr_t>(b.sectors) * kSector);
         switch_dcache_sync();
@@ -3034,12 +3096,18 @@ void NativeSwitchBlock::logThroughput()
         snprintf(cqState + at, sizeof(cqState) - at, " wflush %llu/%llu %llums", stats.flushes, stats.flushErrors,
                  stats.flushNs / 1000000);
     }
+#if DEVELOPMENT || DEBUG
     // SwitchSdBus.h: commands refused at their PRESENT_STATE read and DAT0 releases awaited by CMD13 (both 0 per the
     // spec).
     if (stats.busRefused || stats.releases) {
         const size_t at = strlen(cqState);
         snprintf(cqState + at, sizeof(cqState) - at, " bus refused %llu dat0 %llu", stats.busRefused, stats.releases);
     }
+    if (stats.uncachedChains) {
+        const size_t at = strlen(cqState);
+        snprintf(cqState + at, sizeof(cqState) - at, " uncached %llu", stats.uncachedChains);
+    }
+#endif
     // Erase-based trim: erases, MiB freed and the card's busy ms for them (since boot), and AUs still due.
     if (stats.trimErases || trim.pending) {
         const size_t at = strlen(cqState);
@@ -3997,11 +4065,11 @@ const char *NativeSwitchBlock::checkAdma(const uint8_t *reference, uint32_t *des
         // buffer.
         *descriptors = table.count;
         switch_dcache_clean_lines(table.entries, table.count * sizeof(SwitchAdmaDescriptor));
-        syncLines(SWITCH_DCACHE_CLEAN_INVALIDATE, table);
+        syncLines(SWITCH_DCACHE_CLEAN_INVALIDATE, table, false);
         switch_dcache_sync();
         uint32_t status = 0;
         const int step = command(static_cast<uint32_t>(firstSector), kBounceSectors, false, table.count, &status);
-        syncLines(SWITCH_DCACHE_INVALIDATE, table);
+        syncLines(SWITCH_DCACHE_INVALIDATE, table, false);
         switch_dcache_sync();
         if (step) {
             snprintf(admaWhy, sizeof(admaWhy), "the read failed: step %d, STATUS 0x%08x, ADMA state 0x%02x at 0x%llx",
@@ -4052,7 +4120,7 @@ const char *NativeSwitchBlock::checkAdma(const uint8_t *reference, uint32_t *des
             stagingWhy = "the builder refused the test pages";
         } else {
             *staged = static_cast<uint32_t>(staging.staged / kAdmaPage);
-            prepareDirect(false, false);
+            prepareDirect(false, ReadFill::kCpuFill);
             uint32_t status = 0;
             const int step =
                 command(static_cast<uint32_t>(firstSector), kTestBytes / kSector, false, table.count, &status);
@@ -4112,7 +4180,7 @@ const char *NativeSwitchBlock::checkCmd23(uint64_t *withNs, uint64_t *withoutNs)
                 why = "the builder refused the bounce buffer";
                 break;
             }
-            prepareDirect(false, false);
+            prepareDirect(false, ReadFill::kCpuFill);
             uint32_t status = 0;
             const uint64_t began = switch_now_ns();
             const int step = command(static_cast<uint32_t>(lba), kSectors, false, table.count, &status, with);
@@ -4202,7 +4270,7 @@ const char *NativeSwitchBlock::checkCq(uint64_t *queuedNs, uint64_t *serialNs, u
     for (unsigned i = 0; i < n; ++i) {
         if (!oneRun(i * kBytes))
             return "the builder refused the bounce buffer";
-        prepareDirect(false, false);
+        prepareDirect(false, ReadFill::kCpuFill);
         const uint64_t t0 = switch_now_ns();
         const int step =
             command(static_cast<uint32_t>(lbaOf(n + i)), kSectors, false, table.count, &status, cmd23Reads);
@@ -4241,7 +4309,7 @@ const char *NativeSwitchBlock::checkCq(uint64_t *queuedNs, uint64_t *serialNs, u
                 why = "the builder refused the bounce buffer";
                 break;
             }
-            prepareDirect(false, false);
+            prepareDirect(false, ReadFill::kCpuFill);
             const uint8_t before = cardLast;
             const uint8_t task = static_cast<uint8_t>(cq.next);
             int step = issue(static_cast<uint32_t>(test[i].lba), kSectors, false, table.count, false, cq.argument());
@@ -4803,21 +4871,11 @@ extern "C" int native_verified_block_manifest_sha384(dev_t device, const char *u
 }
 
 extern "C" volatile uint32_t armcpu_core_timer[8], armcpu_core_sgi[8];
-extern "C" void switch_print_blocked_kext_threads(const char *(*name_of)(const void *), unsigned max_threads);
+extern "C" void switch_print_blocked_threads(unsigned max_threads);
+extern "C" void switch_print_processors(const char *who);
 extern "C" void switch_iokit_jobs(int *outstanding, int *threads, int *waiting, int *max_threads);
 
 namespace {
-// Bundle identifier of the kext containing `address` (kexts are never unloaded here).
-const char *kextName(const void *address)
-{
-    OSKext *kext = OSKext::lookupKextWithAddress(reinterpret_cast<vm_address_t>(address));
-    if (!kext)
-        return nullptr;
-    const char *name = kext->getIdentifierCString();
-    kext->release();
-    return name;
-}
-
 // The service-plane subtree under the block device: class, name, busy count and
 // IOService state bits (2 registered, 4 matched, 8 first published, 0x10 first matched).
 // NOLINTNEXTLINE(misc-no-recursion): the service plane below the device is a few levels deep; *budget bounds it
@@ -4859,7 +4917,8 @@ extern "C" void switch_raw_root_wait_diagnostic(void)
     switch_iokit_jobs(&outstanding, &threads, &waiting, &maxThreads);
     IOLog("SwitchSD: IOKit matching jobs outstanding=%d config threads=%d waiting=%d max=%d\n", outstanding, threads,
           waiting, maxThreads);
-    switch_print_blocked_kext_threads(kextName, 6);
+    switch_print_processors("SwitchSD");
+    switch_print_blocked_threads(40);
 }
 
 // FAT-profile entry points: the FAT image path is gone.

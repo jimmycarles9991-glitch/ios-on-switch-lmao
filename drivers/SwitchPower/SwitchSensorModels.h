@@ -13,6 +13,14 @@
 // Switch measures away from the cells. PMGR SOC die sensors take the die points outside the CPU cores (T210B01 has
 // three: gpu, pllx, the TMP451 diode; the fourth slot is the GPU's, the largest block). ACC (the CPU complex) sensors
 // 0-3 are SOC_THERM's per-core cpu0-cpu3.
+// What thermalmonitord takes the PMU tcal channel (TP0Z) to read on a calibrated PMU: CommonProduct's
+// calibrationResistorTempDefault, 51.82 C in both IPSWs (21H461 constant at 0x100062190, 24B119 at 0x10005f630). It adds
+// that default minus its filtered TP0Z to every TP?d / TP?[A-Z] board thermistor, so TP0Z answering exactly the default
+// leaves the Switch's PCB reading uncorrected. J120 seeds the filter with the default and drifts toward what TP0Z answers
+// (6000-sample time constant); J181 averages the first five answers (requiredCalibrationResistorSamples).
+#define SWITCH_SENSOR_TCAL_MILLIC_J120AP 51820
+#define SWITCH_SENSOR_TCAL_MILLIC_J181AP 51820
+
 #define SWITCH_SENSOR_COUNT_J120AP 38u
 static const struct switch_sensor switch_sensors_j120ap[SWITCH_SENSOR_COUNT_J120AP] = {
     {"TG0B", "gas gauge battery", SWITCH_SRC_BATTERY, 0},

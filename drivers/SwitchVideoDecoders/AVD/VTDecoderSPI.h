@@ -82,7 +82,8 @@ extern CMBaseObjectRef VTVideoDecoderGetCMBaseObject(VTVideoDecoderRef decoder);
 // decoder otherwise (21H461 0x19789ee98); VTIsHardwareDecodeSupported sets it in Fig servers and entitled tasks.
 extern const CFStringRef kVTVideoDecoderSpecification_AllowVP9Decode;
 // A decoder's own ID (its info's CMClassImplementationID + "." + the codec) names it for a session; registry info
-// key IsHardwareAccelerated (VTRegisterVideoDecoder's default true) decides whether hardware queries count it.
+// key IsHardwareAccelerated decides whether hardware queries count it. Left out (VTRegisterVideoDecoder), 21H461 reads
+// it as true and 24B119 as false.
 extern const CFStringRef kVTVideoDecoderSpecification_DecoderID;
 extern const CFStringRef kVTVideoDecoder_IsHardwareAccelerated;
 // The registry's first sort key (21H461 _vtSortRegistryItemsByRating, 0x197abe13c): a higher kVTVideoDecoderInfo_Rating

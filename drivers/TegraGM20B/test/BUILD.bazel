@@ -32,6 +32,10 @@
 #   gm20b_sched_test         TegraGM20BSchedPolicy.h and tgm_hang_blame over deploy-2045's hang registers: what a
 #                            compositor kick preempts, the interleaved runlist (full, empty, one level), which channel a
 #                            late wait kills (the context GR cannot switch, a self-hung channel, never slow work)
+#   gm20b_recover_test       TegraGM20BRecover.h over device boots 7 and 9: every SCHED_ERROR and BIND_ERROR code's name,
+#                            which engine whose switch timed out is waited for, killed off or reset (a killed channel's
+#                            context), which engines hold a channel at its unbind, and that a PBDMA ENG_RESET never
+#                            reaches nvkm as the channel's error
 #   gm20b_sleep_test         TegraGM20BSleepGate.h (system sleep's gate and plan): every transition, and on threads with
 #                            gpu.c's sleeping protocol around it, no caller inside between the drain and the wake, a
 #                            submission waiting at the gate goes on at the wake, a caller that never leaves fails the drain
@@ -109,6 +113,16 @@ host_test(
 )
 
 host_test(
+    name = "gm20b_recover_test",
+    srcs = [
+        "gm20b_recover_test.cpp",
+        "//drivers/TegraGM20B:TegraGM20BHost.h",
+        "//drivers/TegraGM20B:TegraGM20BRecover.h",
+    ],
+    cxx_std = "c++17",
+)
+
+host_test(
     name = "gm20b_clkgate_test",
     srcs = [
         "gm20b_clkgate_test.cpp",
@@ -163,6 +177,7 @@ host_test(
         "//drivers/TegraGM20B:TegraGM20BDeviceClient.cpp",
         "//drivers/TegraGM20B:TegraGM20BExecSurfaces.cpp",
         "//drivers/TegraGM20B:TegraGM20BGpu.h",
+        "//drivers/TegraGM20B:TegraGM20BReadback.cpp",
         "//drivers/TegraGM20B:TegraGM20BRelayout.cpp",
         "//drivers/TegraGM20B:TegraGM20BUserClient.cpp",
         "//drivers/TegraGM20B:gpu.c",

@@ -339,13 +339,15 @@ TEST(Image, PagerWindowsReproduceTheScan)
     ASSERT_EQ(0, t.rc) << t.err;
     ASSERT_GT(t.sites, 10);
     WindowCtx c{t.m.get(), t.x.data};
-    a64x_code_map cm{&c, windowIsCode, t.x.map_flags};
+    a64x_code_map cm{&c, windowIsCode, t.x.map_flags, nullptr};
+    std::vector<uint8_t> walk_buf(A64X_WALK_BYTES(1024));
+    a64x_walk walk = a64x_walk_in(walk_buf.data(), 1024);
     for (uint32_t pg = 0; pg < t.x.npages; pg++) {
         uint32_t c0 = t.x.cursor[pg], c1 = t.x.cursor[pg + 1];
         std::vector<uint32_t> chk(c1 - c0 + 1), src(1024, 0), dst(1024);
         uint64_t off = t.m->exec_fileoff + 4096ull * pg;
         memcpy(src.data(), &t.in[off], 4096);
-        a64x_stub_region sr{t.m->exec_fileoff + static_cast<uint64_t>(t.x.stub_delta), chk.data(), c1, c0};
+        a64x_stub_region sr{t.m->exec_fileoff + static_cast<uint64_t>(t.x.stub_delta), chk.data(), c1, c0, &walk};
         uint32_t end =
             a64x_translate_page(src.data(), dst.data(), 1024, off, &cm, c1 > c0 ? &sr : nullptr, c0, nullptr);
         EXPECT_EQ(c1, end) << "page " << pg;

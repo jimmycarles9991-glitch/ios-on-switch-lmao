@@ -15,7 +15,8 @@
 //           canvas made from the tile requirements, each tile presented at its offset, each answered; with VIC off the
 //           tile session is refused and VideoToolbox finds no other decoder by that name.
 //   hevc:   HEVCClip.h's Main clips A and V and Main 10 clip T as 'hvc1' on the fake engine: every picture through
-//           HEVCNVDEC and the kernel's checker, all out of a hardware session; then with every buffer refused, Apple's
+//           HEVCNVDEC and the kernel's checker, all out of a hardware session; clip T again with VIC's present on,
+//           every picture handed over as 16-bit samples into an 'x420' buffer; then with every buffer refused, Apple's
 //           software HEVC decoder in it, matching FFmpeg.
 // Prints "PASS avd ..." when all hold (avd_host_test).
 #include "../../AVD/AVDDecoder.c"
@@ -30,7 +31,7 @@ struct NVDECClient {
 };
 
 static bool gFull, gPresentOn;
-static int gOpens, gSubmits, gRefused, gPresents, gPresentBad, gWaitRanges;
+static int gOpens, gSubmits, gRefused, gPresents, gPresentBad, gWaitRanges, gWidePresents;
 static uint32_t gLastDstX, gLastDstY;
 
 bool nvdec_service_present(void)
@@ -68,33 +69,43 @@ bool nvdec_can_present(const NVDECClient *c)
 }
 
 // The fake VIC: TegraNVDECUserClient's geometry checks and TegraVICConfig.h's address rules for the destination, then
-// the copy (BlockLinear.c, as VIC's pass-through would leave it).
+// the copy (BlockLinear.c, as VIC's pass-through would leave it). 16-bit samples ('x420') go as bytes, as the kernel
+// sends them to VIC: an 8-bit picture of twice the width.
 int nvdec_present(NVDECClient *c, const TegraNVDECPresent *p)
 {
     gPresents++;
     const uint64_t luma = (uint64_t)p->pitch * p->rows;
+    const uint32_t bytes = p->sample_bytes;
     IOSurfaceRef s = IOSurfaceLookup(p->surface_id);
+    const OSType format = s ? IOSurfaceGetPixelFormat(s) : 0;
     bool ok = p->handle < 64 && c->va[p->handle] && p->pitch && !(p->pitch % 64) && p->rows && !(p->rows % 32) &&
               p->block_height_log2 == 1 && !(p->chroma_offset % 256) && p->chroma_offset >= luma &&
-              p->chroma_offset + luma / 2 <= c->size[p->handle] && s;
+              p->chroma_offset + luma / 2 <= c->size[p->handle] && s && !p->reserved &&
+              (bytes == 2 ? format == kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange ||
+                                format == kCVPixelFormatType_420YpCbCr10BiPlanarFullRange
+                          : bytes == 1);
     if (ok) {
         const uintptr_t base = (uintptr_t)IOSurfaceGetBaseAddress(s);
         ok = !(IOSurfaceGetBytesPerRowOfPlane(s, 0) % 256) && !(IOSurfaceGetBytesPerRowOfPlane(s, 1) % 256) &&
              !(((uintptr_t)IOSurfaceGetBaseAddressOfPlane(s, 0) - base) % 256) &&
-             !(((uintptr_t)IOSurfaceGetBaseAddressOfPlane(s, 1) - base) % 256) && !(p->dst_x % 256) &&
+             !(((uintptr_t)IOSurfaceGetBaseAddressOfPlane(s, 1) - base) % 256) && !(p->dst_x * bytes % 256) &&
              !(p->dst_y & 1) && p->dst_x + p->width <= IOSurfaceGetWidth(s) &&
-             p->dst_y + p->height <= IOSurfaceGetHeight(s) && !((p->width | p->height) & 1);
+             p->dst_y + p->height <= IOSurfaceGetHeight(s) && !((p->width | p->height) & 1) &&
+             (p->crop_x + p->width) * bytes <= p->pitch;
     }
     if (ok) {
         IOSurfaceLock(s, 0, NULL);
         const uint8_t *picture = c->va[p->handle];
         const size_t lumaPitch = IOSurfaceGetBytesPerRowOfPlane(s, 0),
                      chromaPitch = IOSurfaceGetBytesPerRowOfPlane(s, 1);
-        block_linear_copy((uint8_t *)IOSurfaceGetBaseAddressOfPlane(s, 0) + p->dst_y * lumaPitch + p->dst_x, lumaPitch,
-                          picture, p->pitch, p->crop_x, p->crop_y, p->width, p->height);
-        block_linear_copy((uint8_t *)IOSurfaceGetBaseAddressOfPlane(s, 1) + p->dst_y / 2 * chromaPitch + p->dst_x,
-                          chromaPitch, picture + p->chroma_offset, p->pitch, p->crop_x, p->crop_y / 2, p->width,
-                          p->height / 2);
+        block_linear_copy((uint8_t *)IOSurfaceGetBaseAddressOfPlane(s, 0) + p->dst_y * lumaPitch + p->dst_x * bytes,
+                          lumaPitch, picture, p->pitch, p->crop_x * bytes, p->crop_y, p->width * bytes, p->height);
+        block_linear_copy((uint8_t *)IOSurfaceGetBaseAddressOfPlane(s, 1) + p->dst_y / 2 * chromaPitch +
+                              p->dst_x * bytes,
+                          chromaPitch, picture + p->chroma_offset, p->pitch, p->crop_x * bytes, p->crop_y / 2,
+                          p->width * bytes, p->height / 2);
+        if (bytes == 2)
+            gWidePresents++;
         IOSurfaceUnlock(s, 0, NULL);
         gLastDstX = p->dst_x;
         gLastDstY = p->dst_y;
@@ -301,9 +312,9 @@ int main(void)
     const void *keys[] = {CFSTR("CMClassImplementationID")}, *values[] = {CFSTR("com.brunostjohn.switch.avd-host")};
     CFDictionaryRef info =
         CFDictionaryCreate(NULL, keys, values, 1, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
-    const OSStatus registered = VTRegisterVideoDecoderWithInfo(kCMVideoCodecType_H264, info, createInstance) ||
-                                VTRegisterVideoDecoderWithInfo(kCMVideoCodecType_VP9, info, createInstance) ||
-                                VTRegisterVideoDecoderWithInfo(kCMVideoCodecType_HEVC, info, createInstance);
+    const OSStatus registered = VTRegisterVideoDecoderWithInfo(kCMVideoCodecType_H264, info, avd_create_instance) ||
+                                VTRegisterVideoDecoderWithInfo(kCMVideoCodecType_VP9, info, avd_create_instance) ||
+                                VTRegisterVideoDecoderWithInfo(kCMVideoCodecType_HEVC, info, avd_create_instance);
     CFRelease(info);
     if (registered) {
         printf("FAIL avd: VTRegisterVideoDecoderWithInfo %d\n", (int)registered);
@@ -354,6 +365,16 @@ int main(void)
     clip_check(ClipCheckHEVC10, hevcSpec, hevc10, sizeof(hevc10));
     printf("hevc10: %s\n", hevc10);
     const int hevcTen = gSubmits - hevcSubmits - hevcMain;
+    // Main 10 with VIC's present on: every picture handed over as 16-bit samples into an 'x420' buffer.
+    char hevc10Vic[512];
+    gPresentOn = true;
+    const int widePresents = gWidePresents, presentsBefore = gPresents, badBefore = gPresentBad;
+    clip_check(ClipCheckHEVC10, hevcSpec, hevc10Vic, sizeof(hevc10Vic));
+    gPresentOn = false;
+    const bool hevc10VicOk = strstr(hevc10Vic, "hevc10: hardware decoder") && strstr(hevc10Vic, "T 0/10") &&
+                             !strstr(hevc10Vic, " out,") && gWidePresents - widePresents == 10 &&
+                             gPresents - presentsBefore == 10 && gPresentBad == badBefore;
+    printf("hevc10 vic: %s (16-bit presents %d)\n", hevc10Vic, gWidePresents - widePresents);
     gFull = true;
     clip_check(ClipCheckHEVC, hevcSpec, hevcFull, sizeof(hevcFull));
     gFull = false;
@@ -368,7 +389,7 @@ int main(void)
                         !strstr(hevc, " out,") && hevcMain == 34 && !gRefused &&
                         strstr(hevc10, "hevc10: hardware decoder") && strstr(hevc10, "T 0/10") &&
                         !strstr(hevc10, " out,") && hevcTen == 10 && strstr(hevcFull, "software decoder") &&
-                        strstr(hevcFull, "A 20/20, V 14/14");
+                        strstr(hevcFull, "A 20/20, V 14/14") && hevc10VicOk;
     printf("engine: %s (opens %d, submits %d, refused %d)\nfull: %s (opens %d)\n", engine, engineOpens, engineSubmits,
            gRefused, full, gOpens - engineOpens);
     const bool ok = engineOpens >= 1 && engineSubmits == 30 && !gRefused &&

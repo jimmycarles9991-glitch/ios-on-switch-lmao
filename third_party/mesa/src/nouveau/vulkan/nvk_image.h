@@ -244,4 +244,17 @@ VkResult nvk_queue_image_bind(struct nvk_queue *queue,
 VkResult nvk_queue_image_opaque_bind(struct nvk_queue *queue,
                                      const VkSparseImageOpaqueMemoryBindInfo *bind_info);
 
+/* Switch: a one-plane, one-level, one-layer, one-sample image's memory as the raw GM20B path renders into it and copies it in
+ * place (its stored depth/stencil textures, one allocation for both drivers): the plane's GPU address and size, the PTE kind
+ * its memory is mapped with, its texel size and level 0's layout. Read-only. 0, else why not: 1 no image, 2 more than one
+ * plane (or disjoint), 3 not bound, 4 more than one level, 5 more than one layer, 6 multisampled.
+ */
+struct switch_nvk_image_memory {
+   uint64_t addr, size_B, array_stride_B;
+   uint32_t row_stride_B, texel_B;
+   uint8_t pte_kind, compressed, tiled, y_log2, z_log2;
+};
+
+int switch_nvk_image_memory(VkImage image, struct switch_nvk_image_memory *out);
+
 #endif

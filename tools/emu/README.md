@@ -10,6 +10,7 @@ bazel run //tools/emu:boot -- --kind=ios27                   # build //:boot for
 bazel run //tools/emu:boot -- --kind=ios17 --sd none --seconds 60 --bootargs -v
 bazel run //tools/emu:check -- --kind=ios17 --until launchd  # a gate: 0 milestone, 1 panic, 2 timeout, 3 no kernel log
 bazel run //tools/emu:build                                  # only the emulator: prints its path
+bazel test //tools/emu:dc_test                               # the display controller and SMMU under qtest
 ```
 
 `check` watches the live kernel log and the panic record every 3 s and stops at the first of the milestone (`cores`,
@@ -34,7 +35,7 @@ Mac. The run directory is `out/emu/<kind>-<time>` unless `--out` names one:
 | `summary.txt` | How far it got: firmware, secondary cores, core PCs, the panic, the last kernel lines |
 | `uart-a.log` | bl31, U-Boot, the boot script, the exporter and the loader, on UART-A |
 | `kernel.log`, `panic.txt` | The kernel's log (XNU's msgbuf, read live through a core's MMU) and its panic record |
-| `screen.png`, `framebuffer.png` | What display controller A scans out, and hekate's framebuffer |
+| `screen.png`, `framebuffer.png` | What display controller A sends the panel (its windows blended), and hekate's framebuffer |
 | `registers.txt` | Every core's registers when the run stopped |
 | `gpu-methods.log` | Every class method a GPU channel ran, named from Mesa's class headers, invalid ones flagged |
 | `gpu-events.log` | The GPU's bring-up (falcons, PMU and FECS commands, runlists), MMU faults, stopped channels |
@@ -78,13 +79,25 @@ emulator needs Homebrew's glib, pixman, libgcrypt, dtc, pkgconf, ninja and mtool
 ## How far to trust it
 
 Modelled: the Cortex-A57 cores (CPUECTLR included), GICv2 behind the legacy interrupt controller, the flow
-controller, PMC, CAR, MC, fuses, I2C with the PMIC and its RTC, display controller A's registers and vblank, and
-SDMMC1 as an SD Host Controller 3.00 in Tegra's v4 mode.
+controller, PMC, CAR, MC, fuses, I2C with the PMIC and its RTC, display controller A, the SMMU for the display's reads,
+and SDMMC1 as an SD Host Controller 3.00 in Tegra's v4 mode.
+
+Display controller A keeps three copies of each window register. `*_UPDATE` copies the assembly copy to the armed
+one, and `*_ACT_REQ` reads 1 until the next frame end makes the armed copy active. Windows A to D scan pitch or
+block-linear surfaces in B8G8R8A8, R8G8B8A8, B5G6R5 or 4:2:0 (through the window's CSC), scale by their DDA increments,
+turn with `SCAN_COLUMN` and blend by depth. The CRC unit reads 0 at the first frame end after it is turned on and the
+first frame's CRC at the second, as the Switch's does.
 
 Different from the hardware:
 
 - Timing. CPU speed, DRAM and every device latency are QEMU's, not the Switch's.
-- The display controller scans out pitch-linear windows only, without blending or the CRC unit.
+- V_BLANK, FRAME_END, every latch and the CRC happen at one instant per frame, and line-counter latching
+  (`HCNTR_SEL`) takes effect on the write. V_PULSE2, underflows, the cursor, colour keys and the filters are
+  missing; scaling takes the nearest pixel.
+- The CRC is CRC-32C over the active pixels' 24-bit RGB, so its values differ from the device's: no public source
+  gives the hardware's algorithm. Our driver only compares CRCs with each other.
+- The SMMU has no TLB, so stale-translation bugs don't show. A fault, or a read outside DRAM, reads zeros and logs one
+  line per page in `qemu-guest.log`.
 - The SD card stays in U-Boot's 48 MHz mode. The controller reports no SDR104, so SwitchSD's SDR104 bring-up does not
   run.
 - No BPMP firmware runs, so the EMC keeps its rate.

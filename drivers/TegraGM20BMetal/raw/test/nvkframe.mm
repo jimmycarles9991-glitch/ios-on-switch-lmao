@@ -283,6 +283,138 @@ int main(int argc, char **argv)
                 [tex[t] replaceRegion:MTLRegionMake2D(0, 0, mw, mh) mipmapLevel:0 withBytes:m.data() bytesPerRow:mw];
                 printf("MASK texels=%016llx corner=%u centre=%u\n", (unsigned long long)hash, m[0],
                        m[(mh / 2) * mw + mw / 2]);
+            } else if (t == frame::IMAGE3 && getenv("FRAME_1D")) {
+                // FRAME_1D=<MTLPixelFormat>: IMAGE3 a 1D lookup table as backboardd's on iOS 27 (4096x1 R32Float/R16Float,
+                // 3072x1 R16Uint, 1024x1 RG32Float): shared, its texels written by replaceRegion
+                const MTLPixelFormat lf = MTLPixelFormat(atoi(getenv("FRAME_1D")) ?: MTLPixelFormatR32Float);
+                MTLTextureDescriptor *ld = [MTLTextureDescriptor new];
+                ld.textureType = MTLTextureType1D;
+                ld.pixelFormat = lf;
+                ld.width = 1024;
+                ld.usage = MTLTextureUsageShaderRead;
+                ld.storageMode = MTLStorageModeShared;
+                tex[t] = [dev newTextureWithDescriptor:ld];
+                std::vector<uint8_t> row(1024 * 16);
+                for (size_t i = 0; i < row.size(); i++)
+                    row[i] = uint8_t(i * 7 + 3);
+                [tex[t] replaceRegion:MTLRegionMake1D(0, 1024)
+                          mipmapLevel:0
+                            withBytes:row.data()
+                          bytesPerRow:row.size()];
+            } else if (t == frame::IMAGE3 && (getenv("FRAME_3D") || getenv("FRAME_ARRAY") || getenv("FRAME_CUBE"))) {
+                // FRAME_3D=<MTLPixelFormat>: IMAGE3 a 17x17x17 colour cube, as Core Animation's colour matching samples one;
+                // FRAME_ARRAY=<layers>: a 17x17 RGBA8 2D array of that many layers; FRAME_CUBE=<cubes>: a 16x16 RGBA8 cube
+                // (or cube array). FRAME_3D_BLIT: private, its planes or layers copied in from a buffer by a blit, else shared
+                // and written by replaceRegion
+                const bool volume = getenv("FRAME_3D") != nullptr, cubes = getenv("FRAME_CUBE") != nullptr;
+                const MTLPixelFormat cf = MTLPixelFormat(volume ? atoi(getenv("FRAME_3D")) ?: MTLPixelFormatRGBA8Unorm
+                                                                : MTLPixelFormatRGBA8Unorm);
+                const NSUInteger side = cubes ? 16 : 17, bpp = cf == MTLPixelFormatRGBA16Float ? 8 : 4,
+                                 row = side * bpp,
+                                 count = cubes    ? NSUInteger(std::max(atoi(getenv("FRAME_CUBE")), 1))
+                                         : volume ? side
+                                                  : NSUInteger(std::max(atoi(getenv("FRAME_ARRAY")), 1)),
+                                 images = cubes ? count * 6 : count;
+                MTLTextureDescriptor *cd = [MTLTextureDescriptor new];
+                cd.textureType = volume  ? MTLTextureType3D
+                                 : cubes ? (count > 1 ? MTLTextureTypeCubeArray : MTLTextureTypeCube)
+                                         : MTLTextureType2DArray;
+                cd.pixelFormat = cf;
+                cd.width = cd.height = side;
+                cd.depth = volume ? side : 1;
+                cd.arrayLength = volume ? 1 : count;
+                cd.usage = MTLTextureUsageShaderRead;
+                const bool blit = getenv("FRAME_3D_BLIT") != nullptr;
+                cd.storageMode = blit ? MTLStorageModePrivate : MTLStorageModeShared;
+                tex[t] = [dev newTextureWithDescriptor:cd];
+                std::vector<uint8_t> cube(row * side * images);
+                for (size_t i = 0; i < cube.size(); i++)
+                    cube[i] = uint8_t(i * 13 + 5);
+                // (a 3D texture's box at once; an array's or cube's layers one slice at a time, as Metal moves them)
+                const NSUInteger moves = volume ? 1 : images, depth = volume ? side : 1, image = row * side;
+                if (blit) {
+                    id<MTLBuffer> from = [dev newBufferWithBytes:cube.data()
+                                                          length:cube.size()
+                                                         options:MTLResourceStorageModeShared];
+                    id<MTLCommandBuffer> up = [queue commandBuffer];
+                    id<MTLBlitCommandEncoder> be = [up blitCommandEncoder];
+                    for (NSUInteger k = 0; k < moves; k++)
+                        [be copyFromBuffer:from
+                                   sourceOffset:k * image
+                              sourceBytesPerRow:row
+                            sourceBytesPerImage:image
+                                     sourceSize:MTLSizeMake(side, side, depth)
+                                      toTexture:tex[t]
+                               destinationSlice:volume ? 0 : k
+                               destinationLevel:0
+                              destinationOrigin:MTLOriginMake(0, 0, 0)];
+                    [be endEncoding];
+                    [up commit];
+                    [up waitUntilCompleted];
+                } else {
+                    for (NSUInteger k = 0; k < moves; k++)
+                        [tex[t] replaceRegion:MTLRegionMake3D(0, 0, 0, side, side, depth)
+                                  mipmapLevel:0
+                                        slice:volume ? 0 : k
+                                    withBytes:cube.data() + k * image
+                                  bytesPerRow:row
+                                bytesPerImage:image];
+                }
+                // FRAME_3D_CHECK (with NVDEC_WRITETHROUGH, so the copy engine's writes reach the texture's memory): its
+                // texels read back as written, on the CPU and (FRAME_3D_BLIT) through the copy engine
+                if (getenv("FRAME_3D_CHECK")) {
+                    std::vector<uint8_t> back(cube.size());
+                    if (blit) {
+                        id<MTLBuffer> out = [dev newBufferWithLength:cube.size() options:MTLResourceStorageModeShared];
+                        id<MTLCommandBuffer> down = [queue commandBuffer];
+                        id<MTLBlitCommandEncoder> be = [down blitCommandEncoder];
+                        for (NSUInteger k = 0; k < moves; k++)
+                            [be copyFromTexture:tex[t]
+                                             sourceSlice:volume ? 0 : k
+                                             sourceLevel:0
+                                            sourceOrigin:MTLOriginMake(0, 0, 0)
+                                              sourceSize:MTLSizeMake(side, side, depth)
+                                                toBuffer:out
+                                       destinationOffset:k * image
+                                  destinationBytesPerRow:row
+                                destinationBytesPerImage:image];
+                        [be endEncoding];
+                        [down commit];
+                        [down waitUntilCompleted];
+                        printf("CUBE %s\n", !memcmp(out.contents, cube.data(), cube.size()) ? "match" : "differs");
+                    }
+#ifdef RAW_FACADE
+                    // the raw path's texture, read by the CPU in NIL's layout (private storage too)
+                    for (NSUInteger k = 0; k < moves; k++)
+                        [tex[t] getBytes:back.data() + k * image
+                              bytesPerRow:row
+                            bytesPerImage:image
+                               fromRegion:MTLRegionMake3D(0, 0, 0, side, side, depth)
+                              mipmapLevel:0
+                                    slice:volume ? 0 : k];
+                    printf("CUBE layout %s\n", back == cube ? "match" : "differs");
+#endif
+                }
+            } else if (t == frame::BLUR0 && getenv("FRAME_FBVIEW")) {
+                // FRAME_FBVIEW: BLUR0, which blur passes render into and sample, a 2D view of part of a private texture:
+                // slice (layer 1 of a 3-layer array), level (level 1 of a chain twice its size), level0 (level 0 of a chain)
+                const char *part = getenv("FRAME_FBVIEW");
+                const bool slice = !strcmp(part, "slice"), level = !strcmp(part, "level");
+                MTLTextureDescriptor *pd = [MTLTextureDescriptor new];
+                pd.textureType = slice ? MTLTextureType2DArray : MTLTextureType2D;
+                pd.pixelFormat = MTLPixelFormat(td.format);
+                pd.width = level ? td.w * 2 : td.w;
+                pd.height = level ? td.h * 2 : td.h;
+                pd.arrayLength = slice ? 3 : 1;
+                pd.mipmapLevelCount = slice ? 1 : 3;
+                pd.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
+                pd.storageMode = MTLStorageModePrivate;
+                id<MTLTexture> parent = [dev newTextureWithDescriptor:pd];
+                tex[t] = [parent newTextureViewWithPixelFormat:pd.pixelFormat
+                                                   textureType:MTLTextureType2D
+                                                        levels:NSMakeRange(level ? 1 : 0, 1)
+                                                        slices:NSMakeRange(slice ? 1 : 0, 1)];
+                printf("FBVIEW %s %lux%lu\n", part, (unsigned long)tex[t].width, (unsigned long)tex[t].height);
             } else if (t == frame::IMAGE1 &&
                        frame::mipImage()) {  // every level, private: m2v's own image, or the raw path's chain
                 d.mipmapLevelCount = 1 + unsigned(std::log2(double(std::max(td.w, td.h))));
@@ -351,6 +483,43 @@ int main(int argc, char **argv)
                 tex[t] = [dev newTextureWithDescriptor:d];
             }
         }
+        // FRAME_VIEW: IMAGE3 a view of part of a texture. level (with FRAME_MIP): levels 1.. of IMAGE1's chain; slice (with
+        // FRAME_ARRAY): a 2D view of layer 1; face (with FRAME_CUBE): a 2D view of face 2; array (with FRAME_CUBE): a 2D-array
+        // view of the faces. With FRAME_3D_CHECK, a layer view reads back its layer's texels.
+        if (const char *part = getenv("FRAME_VIEW")) {
+            id<MTLTexture> of = !strcmp(part, "level") ? tex[frame::IMAGE1] : tex[frame::IMAGE3];
+            const NSUInteger faces = of.textureType == MTLTextureTypeCube || of.textureType == MTLTextureTypeCubeArray
+                                         ? 6
+                                         : 1,
+                             slices = std::max<NSUInteger>(of.arrayLength, 1) * faces;
+            const bool level = !strcmp(part, "level"), array = !strcmp(part, "array");
+            const NSUInteger layer = !strcmp(part, "slice") ? 1 : !strcmp(part, "face") ? 2 : 0;
+            id<MTLTexture> view =
+                [of newTextureViewWithPixelFormat:of.pixelFormat
+                                      textureType:array ? MTLTextureType2DArray : MTLTextureType2D
+                                           levels:level ? NSMakeRange(1, of.mipmapLevelCount - 1) : NSMakeRange(0, 1)
+                                           slices:array ? NSMakeRange(0, slices) : NSMakeRange(layer, 1)];
+            if (!view) {
+                fprintf(stderr, "FRAME_VIEW %s: no view\n", part);
+                return 1;
+            }
+            printf("VIEW %s %lux%lu levels %lu\n", part, (unsigned long)view.width, (unsigned long)view.height,
+                   (unsigned long)view.mipmapLevelCount);
+            if (getenv("FRAME_3D_CHECK") && !level && !array) {
+                const NSUInteger row = of.width * 4, image = row * of.height;
+                std::vector<uint8_t> back(image), want(image);
+                for (size_t i = 0; i < image; i++)
+                    want[i] = uint8_t((layer * image + i) * 13 + 5);
+                [view getBytes:back.data()
+                      bytesPerRow:row
+                    bytesPerImage:image
+                       fromRegion:MTLRegionMake2D(0, 0, of.width, of.height)
+                      mipmapLevel:0
+                            slice:0];
+                printf("VIEW layer %lu %s\n", (unsigned long)layer, back == want ? "match" : "differs");
+            }
+            tex[frame::IMAGE3] = view;
+        }
         id<MTLDepthStencilState> dss[frame::kDsSpecs];
         for (unsigned i = 0; i < frame::kDsSpecs; i++) {
             const frame::DsSpec spec = frame::dsSpec(i);
@@ -400,6 +569,120 @@ int main(int argc, char **argv)
             md.storageMode = MTLStorageModePrivate;
             mipTarget = [dev newTextureWithDescriptor:md];
         }
+        // FRAME_MSAA=<text>: every frame ends with a command buffer of one pass (NVK's resolve leaves its meta state to the draws
+        // after it in its command buffer) drawing, three times, the first corpus state whose line holds <text> (iOS 17's Pride
+        // poster lightsMesh, samples=2 RG11B10Float; FRAME_MSAA_CORPUS: the corpus, else the frame's) from the library at
+        // FRAME_MSAA_LIB, into targets of its count (FRAME_MSAA_SAMPLES: of that many) and formats (FRAME_MSAA_FORMAT: target 0
+        // of that MTLPixelFormat; FRAME_MSAA_DEPTH: the depth/stencil one), the colors cleared and not stored (FRAME_MSAA_STORE:
+        // the first resolved into a texture of its size), the depth/stencil cleared. Every target is memoryless but a one-sample
+        // state's colors, which are private, and that state's fragment textures are BLUR0.
+        id<MTLRenderPipelineState> msaa = nil;
+        id<MTLTexture> msaaTargets[8] = {}, msaaResolved = nil, msaaDepth = nil;
+        bool msaaStencil = false, msaaMultisampled = false;
+        if (const char *pick = getenv("FRAME_MSAA")) {
+            NSError *libError = nil;
+            id<MTLLibrary> lib = [dev newLibraryWithURL:[NSURL fileURLWithPath:@(getenv("FRAME_MSAA_LIB") ?: "")]
+                                                  error:&libError];
+            std::string found;
+            if (FILE *cf = fopen(getenv("FRAME_MSAA_CORPUS") ?: argv[4], "r")) {
+                char buf[16384];
+                while (found.empty() && fgets(buf, sizeof buf, cf)) {
+                    std::string l(buf);
+                    if (l.rfind("R ok=1 ", 0) || l.find(pick) == std::string::npos)
+                        continue;
+                    while (!l.empty() && l.back() == '\n')
+                        l.pop_back();
+                    for (size_t at; (at = l.find(" lib=")) != std::string::npos;)
+                        l.erase(at, l.find(' ', at + 1) - at);
+                    found = l;
+                }
+                fclose(cf);
+            }
+            MTLRenderPipelineDescriptor *md = lib && !found.empty() ? descriptor(lib, found) : nil;
+            if (const char *n = getenv("FRAME_MSAA_SAMPLES"); n && md)
+                md.rasterSampleCount = NSUInteger(atoi(n));
+            if (const char *f = getenv("FRAME_MSAA_FORMAT"); f && md)
+                md.colorAttachments[0].pixelFormat = MTLPixelFormat(atoi(f));
+            if (const char *z = getenv("FRAME_MSAA_DEPTH"); z && md) {
+                md.depthAttachmentPixelFormat = MTLPixelFormat(atoi(z));
+                md.stencilAttachmentPixelFormat = md.depthAttachmentPixelFormat == MTLPixelFormatDepth32Float_Stencil8
+                                                      ? MTLPixelFormatDepth32Float_Stencil8
+                                                      : MTLPixelFormatInvalid;
+            }
+            msaa = md ? [dev newRenderPipelineStateWithDescriptor:md error:&libError] : nil;
+            if (!msaa) {
+                fprintf(stderr, "FRAME_MSAA %s: no state (%s)\n", pick,
+                        libError ? libError.localizedDescription.UTF8String : "no line or library");
+                return 1;
+            }
+            auto msTarget = [&](MTLPixelFormat f, bool memoryless) {
+                MTLTextureDescriptor *td = [MTLTextureDescriptor new];
+                td.textureType = md.rasterSampleCount > 1 ? MTLTextureType2DMultisample : MTLTextureType2D;
+                td.sampleCount = std::max<NSUInteger>(md.rasterSampleCount, 1);
+                td.pixelFormat = f;
+                td.width = 640;
+                td.height = 360;
+                td.usage = MTLTextureUsageRenderTarget;
+                td.storageMode = memoryless ? MTLStorageModeMemoryless : MTLStorageModePrivate;
+                return [dev newTextureWithDescriptor:td];
+            };
+            for (int c = 0; c < 8; c++)
+                if (md.colorAttachments[c].pixelFormat != MTLPixelFormatInvalid)
+                    msaaTargets[c] = msTarget(md.colorAttachments[c].pixelFormat, md.rasterSampleCount > 1);
+            if (md.depthAttachmentPixelFormat != MTLPixelFormatInvalid)
+                msaaDepth = msTarget(md.depthAttachmentPixelFormat, true);
+            msaaStencil = md.stencilAttachmentPixelFormat != MTLPixelFormatInvalid;
+            msaaMultisampled = md.rasterSampleCount > 1;
+            if (getenv("FRAME_MSAA_STORE") && msaaTargets[0]) {
+                MTLTextureDescriptor *rd =
+                    [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:msaaTargets[0].pixelFormat
+                                                                       width:640
+                                                                      height:360
+                                                                   mipmapped:NO];
+                rd.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
+                rd.storageMode = MTLStorageModePrivate;
+                msaaResolved = [dev newTextureWithDescriptor:rd];
+            }
+            printf("MSAA %s samples %lu\n", found.substr(0, 120).c_str(), (unsigned long)md.rasterSampleCount);
+        }
+        auto encodeMsaa = [&](id<MTLCommandBuffer> cb, unsigned f) {
+            MTLRenderPassDescriptor *rp = [MTLRenderPassDescriptor renderPassDescriptor];
+            for (int c = 0; c < 8; c++) {
+                if (!msaaTargets[c])
+                    continue;
+                rp.colorAttachments[c].texture = msaaTargets[c];
+                rp.colorAttachments[c].loadAction = MTLLoadActionClear;
+                rp.colorAttachments[c].storeAction = MTLStoreActionDontCare;
+            }
+            if (msaaResolved) {
+                rp.colorAttachments[0].resolveTexture = msaaResolved;
+                rp.colorAttachments[0].storeAction = MTLStoreActionMultisampleResolve;
+            }
+            if (msaaDepth) {
+                rp.depthAttachment.texture = msaaDepth;
+                rp.depthAttachment.loadAction = MTLLoadActionClear;
+                rp.depthAttachment.storeAction = MTLStoreActionDontCare;
+            }
+            if (msaaStencil) {
+                rp.stencilAttachment.texture = msaaDepth;
+                rp.stencilAttachment.loadAction = MTLLoadActionClear;
+                rp.stencilAttachment.storeAction = MTLStoreActionDontCare;
+            }
+            id<MTLRenderCommandEncoder> e = [cb renderCommandEncoderWithDescriptor:rp];
+            [e setRenderPipelineState:msaa];
+            for (int slot = 0; slot < 8; slot++) {
+                frame::Bytes u = {2, slot, shape.uniformBytes};
+                frame::fill(bytes, u, f, slot);
+                [e setVertexBytes:bytes.data() length:u.length atIndex:slot];
+                [e setFragmentBytes:bytes.data() length:u.length atIndex:slot];
+            }
+            if (!msaaMultisampled)
+                for (int slot = 0; slot < 16; slot++)
+                    [e setFragmentTexture:tex[frame::BLUR0] atIndex:slot];
+            for (int k = 0; k < 3; k++)
+                [e drawPrimitives:MTLPrimitiveTypeTriangleStrip vertexStart:0 vertexCount:4 + k];
+            [e endEncoding];
+        };
         auto encodeExtra = [&](id<MTLCommandBuffer> cb, unsigned f) {
             MTLRenderPassDescriptor *rp = [MTLRenderPassDescriptor renderPassDescriptor];
             rp.colorAttachments[0].texture = mipTarget ? mipTarget : tex[frame::BLUR0];
@@ -419,8 +702,14 @@ int main(int argc, char **argv)
                 [e setVertexBytes:bytes.data() length:u.length atIndex:slot == 1 ? 7 : slot];
                 [e setFragmentBytes:bytes.data() length:u.length atIndex:slot];
             }
+            // (FRAME_1D, FRAME_3D: slot 9 that texture, so m2v's segment samples the raw path's memory through its twin)
             for (int t = 0; t < 16; t++)
-                [e setFragmentTexture:tex[frame::IMAGE1] atIndex:t];
+                [e setFragmentTexture:tex[t == 9 &&
+                                                  (getenv("FRAME_1D") || getenv("FRAME_3D") || getenv("FRAME_ARRAY") ||
+                                                   getenv("FRAME_CUBE") || getenv("FRAME_VIEW"))
+                                              ? frame::IMAGE3
+                                              : frame::IMAGE1]
+                              atIndex:t];
             for (int s2 = 0; s2 < 16; s2++)
                 [e setFragmentSamplerState:smp[s2 & 1] atIndex:s2];
             [e drawPrimitives:MTLPrimitiveTypeTriangleStrip vertexStart:0 vertexCount:4];
@@ -649,6 +938,12 @@ int main(int argc, char **argv)
                     cb = [queue commandBuffer];
                     caCommandBuffer(cb);
                     encodeExtra(cb, f);
+                }
+                if (msaa) {
+                    [cb commit];
+                    cb = [queue commandBuffer];
+                    caCommandBuffer(cb);
+                    encodeMsaa(cb, f);
                 }
                 [cb commit];
                 cpu.push_back((threadNs() - c0) / 1e6);

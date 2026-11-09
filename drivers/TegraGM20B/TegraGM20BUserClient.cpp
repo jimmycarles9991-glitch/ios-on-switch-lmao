@@ -25,6 +25,7 @@
 #include "TegraGM20BPoolPolicy.h"
 #include "TegraGM20BViews.h"
 #include "TegraGM20BPushScan.h"
+#include "TegraGM20BReadback.h"
 #include "TegraGM20BSchedPolicy.h"
 #include "TegraGM20BSharedWiring.h"
 #include "shim/include/switch_tiled_cache.h"
@@ -60,6 +61,11 @@ extern "C" task_t current_task(void);
 // it. NVK fills such BOs (64 KiB command, upload and stream memory; small descriptor and query pools); larger ones (the
 // runtime's pooled blocks, mapped whole and touched only where it places CPU-visible resources) keep lazy faults.
 constexpr uint64_t kPrefaultMaxBytes = 256ULL << 10;
+// A compressible BO's granule: one comptag line, one big page (TegraGM20BComp.h TGM_COMP_BYTES)
+constexpr uint64_t kChunkBytes = 128ULL << 10;
+constexpr uint32_t kBoFlags = static_cast<uint32_t>(TegraGM20BBoCoherent) |
+			      static_cast<uint32_t>(TegraGM20BBoContiguous) |
+			      static_cast<uint32_t>(TegraGM20BBoCompressible);
 
 // Freed pool BOs (see releaseBo): every one's view is released and its pages given back here, on a thread call, never on
 // the freeing thread. A view a task still maps keeps its pages until the last such mapping is gone, so the task can never
@@ -84,6 +90,8 @@ PoolOrphan *gPoolOrphans;
 volatile uint64_t gSystemCoherent, gSystemCoherentBytes;
 // Pool BOs of clients other than the compositor, and pool pages freed but still behind their view's release (orphans)
 volatile uint64_t gClientPoolBytes, gOrphanBytes, gOrphans;
+// Compressible BOs (pool chunks), every client's
+volatile uint64_t gCompressibleBytes, gCompressibles;
 
 void pushOrphan(PoolOrphan *orphan)
 {
@@ -244,6 +252,27 @@ const char *poolRefusal(uint64_t bytes, uint64_t held, bool compositor)
 		bytes, held, avail,
 		{kPoolSmallBytes, kPoolFloorBytes, poolReserveBytes(), clientPoolBytes()},
 		compositor);
+}
+
+// Why a compressible BO of `bytes` stays out of the pool (tgm_pool::compressibleRefusal), or nullptr; freed ranges the
+// thread call has not zeroed yet are room too.
+const char *compressibleRefusal(uint64_t bytes, uint64_t held, bool compositor)
+{
+	const tgm_pool::Limits limits = {kPoolSmallBytes, kPoolFloorBytes, poolReserveBytes(),
+					 clientPoolBytes()};
+	uint64_t avail = tgm_pool_avail();
+	if (avail < bytes + kPoolFloorBytes + poolReserveBytes() && poolZeroNow())
+		avail = tgm_pool_avail();
+	return tgm_pool::compressibleRefusal(bytes, held, avail, limits, compositor);
+}
+
+// A compressible BO's pool chunks: freed ranges the thread call has not zeroed yet are room too, as for a pool BO.
+IOReturn takeChunks(uint64_t bytes, uint64_t *pas)
+{
+	if (!tgm_pool_alloc_chunks(bytes, pas))
+		return kIOReturnSuccess;
+	return poolZeroNow() && !tgm_pool_alloc_chunks(bytes, pas) ? kIOReturnSuccess
+								   : kIOReturnNoMemory;
 }
 
 // BoAlloc without waiting: spare BOs. Made on the caller's thread, a cached BO is allocated and zero-filled by the VM
@@ -697,11 +726,15 @@ extern "C" void tgm_spare_counts(uint64_t *kept_bytes, uint64_t *ready,
 }
 
 extern "C" void tgm_pool_breakdown(uint64_t *client_bytes, uint64_t *orphan_bytes,
-				   uint64_t *orphans, uint64_t *system_bytes, uint64_t *systems)
+				   uint64_t *orphans, uint64_t *compressible_bytes,
+				   uint64_t *compressibles, uint64_t *system_bytes,
+				   uint64_t *systems)
 {
 	*client_bytes = __atomic_load_n(&gClientPoolBytes, __ATOMIC_RELAXED);
 	*orphan_bytes = __atomic_load_n(&gOrphanBytes, __ATOMIC_RELAXED);
 	*orphans = __atomic_load_n(&gOrphans, __ATOMIC_RELAXED);
+	*compressible_bytes = __atomic_load_n(&gCompressibleBytes, __ATOMIC_RELAXED);
+	*compressibles = __atomic_load_n(&gCompressibles, __ATOMIC_RELAXED);
 	*system_bytes = __atomic_load_n(&gSystemCoherentBytes, __ATOMIC_RELAXED);
 	*systems = __atomic_load_n(&gSystemCoherent, __ATOMIC_RELAXED);
 }
@@ -745,6 +778,7 @@ class AGXDeviceUserClient : public IOUserClient
 		uint64_t *pas;  // one per 4 KiB page; tgm_mem keeps a pointer to it
 		void *pool_va;  // Coherent BOs: pool memory (write-combined, contiguous)
 		uint64_t pool_pa;
+		bool chunked;  // Compressible BOs: pas are pool chunks (tgm_pool_alloc_chunks); no view, never CPU-mapped
 		IOBufferMemoryDescriptor *bmd;  // cached BOs
 		IOMemoryDescriptor *wired;      // imports
 		IOMemoryDescriptor *view;       // cached clientMemoryForType descriptor
@@ -807,6 +841,7 @@ class AGXDeviceUserClient : public IOUserClient
 	bool importsWritten_ =
 		false;  // TegraGM20BPushImportsWritten: every submission marks every writable import
 	bool quotaLogged_ = false;
+	bool compressibleLogged_ = false;  // a compressible BoAlloc refused, logged once
 	bool systemLogged_ =
 		false;  // a coherent BoAlloc served from system memory (tgm_pool::FromSystem), logged once
 	uint64_t pool_bytes_ = 0;  // pool BOs held
@@ -875,7 +910,7 @@ OSDefineMetaClassAndStructors(AGXDeviceUserClient, IOUserClient)
 	lock_ = IOLockAlloc();
 	if (!lock_ || tgm_vm_new(&vm_))
 		return false;
-	tgm_vm_claim(vm_, this);
+	tgm_vm_claim_connection(vm_, this);
 	// fence page: pool memory (write-combined), GPU-mapped in the kernel range, read-only to the client
 	if (tgm_fence_page_get(&fence_va_, &fence_pa_) ||
 	    tgm_mem_new(vm_, &fence_pa_, 1, &fence_mem_) ||
@@ -894,6 +929,9 @@ OSDefineMetaClassAndStructors(AGXDeviceUserClient, IOUserClient)
 IOReturn AGXDeviceUserClient::clientClose()
 {
 	releaseMappings();  // first: a view still mapped would keep its pool pages as an orphan (releaseBo)
+#if TGM_STATS
+	tgm_readback_closed(this);
+#endif
 	IOLockLock(lock_);
 	closing_ = true;
 	hangHolder_ = current_thread();
@@ -920,6 +958,9 @@ IOReturn AGXDeviceUserClient::clientClose()
 
 void AGXDeviceUserClient::free()
 {
+#if TGM_STATS
+	tgm_readback_closed(this);
+#endif
 	if (lock_) {
 		releaseMappings();
 		closing_ = true;
@@ -978,6 +1019,14 @@ void AGXDeviceUserClient::releaseBo(Bo *bo)
 		} else {
 			__atomic_sub_fetch(&gClientPoolBytes, bo->bytes, __ATOMIC_RELAXED);
 		}
+	}
+	if (bo->chunked) {
+		if (bo->handle) {
+			pool_bytes_ -= bo->bytes;
+			__atomic_sub_fetch(&gCompressibleBytes, bo->bytes, __ATOMIC_RELAXED);
+			__atomic_sub_fetch(&gCompressibles, 1, __ATOMIC_RELAXED);
+		}
+		tgm_pool_free_chunks(bo->pas, bo->npages);
 	}
 	// A pool BO's view and pages go to the thread call (releaseOrphans: releasing the view can wait for an import on
 	// another connection), which keeps the pages while a task still maps the view. Cached BOs need no such care: their
@@ -1112,9 +1161,11 @@ static IOReturn collectKernelPages(const void *va, uint64_t bytes, uint64_t *pas
 IOReturn AGXDeviceUserClient::boAlloc(const TegraGM20BAbiBoAlloc *in,
 				      TegraGM20BAbiBoAllocReply *out)
 {
+	const bool compressible = (in->flags & TegraGM20BBoCompressible) != 0u;
 	if (!in->bytes || (in->bytes & 0xfff) || in->bytes > kMaxBoBytes || in->align_log2 < 12 ||
-	    in->align_log2 > 21 ||
-	    (in->flags & ~static_cast<uint32_t>(TegraGM20BBoCoherent | TegraGM20BBoContiguous)))
+	    in->align_log2 > 21 || (in->flags & ~kBoFlags) ||
+	    (compressible &&
+	     (in->flags != TegraGM20BBoCompressible || (in->bytes & (kChunkBytes - 1)))))
 		return kIOReturnBadArgument;
 	if (__atomic_load_n(&gPoolOrphans, __ATOMIC_RELAXED))
 		scheduleOrphanRelease();  // not here: releasing a view can wait for another connection (releaseOrphans)
@@ -1139,6 +1190,19 @@ IOReturn AGXDeviceUserClient::boAlloc(const TegraGM20BAbiBoAlloc *in,
 	int kind = TGM_BO_CACHED;
 	Spare *spare = nullptr;
 	const char *refused = nullptr;
+	if (!ret && compressible) {
+		refused = compressibleRefusal(in->bytes, pool_bytes_, critical_);
+		ret = refused ? kIOReturnNoMemory : takeChunks(in->bytes, bo->pas);
+		bo->chunked = ret == kIOReturnSuccess;
+		if (ret && !compressibleLogged_) {
+			IOLog("tegra-gm20b: %s: compressible BoAlloc of %llu KiB refused: %s "
+			      "(client holds %llu MiB of the pool, %llu MiB free); "
+			      "further ones not logged\n",
+			      owner_, in->bytes >> 10, refused ? refused : "no free 128 KiB chunks",
+			      pool_bytes_ >> 20, tgm_pool_avail() >> 20);
+			compressibleLogged_ = true;
+		}
+	}
 	// A coherent BO the pool does not serve (its tiers keep it out, or the pool has no room) is not refused: ordinary pages,
 	// a spare's or made below as a cached BO's are, mapped write-combined (tgm_pool::FromSystem). A refusal would abort
 	// clients such as VectorKit (on Maps' first 4 MiB buffer). A spare is in the state the made path's cleanZeros leaves:
@@ -1167,7 +1231,7 @@ IOReturn AGXDeviceUserClient::boAlloc(const TegraGM20BAbiBoAlloc *in,
 		}
 		systemLogged_ = systemLogged_ || system;
 	}
-	if (!ret && !bo->pool_va && !(in->flags & TegraGM20BBoContiguous))
+	if (!ret && !bo->pool_va && !compressible && !(in->flags & TegraGM20BBoContiguous))
 		spare = spareTake(in->bytes);
 	if (!ret && bo->pool_va) {
 		for (uint32_t i = 0; i < bo->npages; i++)
@@ -1187,7 +1251,7 @@ IOReturn AGXDeviceUserClient::boAlloc(const TegraGM20BAbiBoAlloc *in,
 		bo->bmd = spare->bmd;
 		IODelete(spare, Spare, 1);
 		kind = TGM_BO_SPARE;
-	} else if (!ret) {
+	} else if (!ret && !compressible) {
 		IOOptionBits options = static_cast<IOOptionBits>(kIODirectionInOut) |
 				       static_cast<IOOptionBits>(kIOMemoryMapperNone);
 		// Made here only when no spare was ready (the class is kept warm from now on), at its class's size so that it
@@ -1281,12 +1345,18 @@ IOReturn AGXDeviceUserClient::boAlloc(const TegraGM20BAbiBoAlloc *in,
 		ret = ioreturn(tgm_mem_new_exclusive(vm_, bo->pas, bo->npages, &bo->mem));
 	lap(3);
 	if (ret) {
-		if (!quotaLogged_) {
+		if (!quotaLogged_ && (bo->chunked || !compressible)) {
 			IOLog("tegra-gm20b: BoAlloc %llu bytes flags %#x align 2^%u refused: %#x\n",
 			      in->bytes, in->flags, in->align_log2, ret);
 		}
 		releaseBo(bo);
 		return ret;
+	}
+	if (bo->chunked) {
+		pool_bytes_ += bo->bytes;
+		kind = TGM_BO_POOL;
+		__atomic_add_fetch(&gCompressibleBytes, bo->bytes, __ATOMIC_RELAXED);
+		__atomic_add_fetch(&gCompressibles, 1, __ATOMIC_RELAXED);
 	}
 	if (bo->pool_va) {
 		pool_bytes_ += bo->bytes;
@@ -1989,9 +2059,13 @@ IOReturn AGXDeviceUserClient::mapToken(const TegraGM20BAbiMap *in, TegraGM20BAbi
 	return kIOReturnSuccess;
 }
 
+// IOKit hands a second Map of the same token (no kIOMapUnique) the first one's IOMemoryMap, retained: every channel's Map of
+// the connection's one fence page, which NVK and the raw path share, is the same map. Unmap drops this caller's reference and
+// tears the map down only when no other Map holds it, or one channel's teardown unmaps every other channel's fence word.
 IOReturn AGXDeviceUserClient::unmapToken(const TegraGM20BAbiUnmap *in)
 {
 	Mapping *found = nullptr;
+	bool shared = false;
 	IOLockLock(lock_);
 	for (Mapping **p = &maps_; *p; p = &(*p)->next) {
 		if ((*p)->token == in->token && (*p)->address == in->address) {
@@ -2000,10 +2074,13 @@ IOReturn AGXDeviceUserClient::unmapToken(const TegraGM20BAbiUnmap *in)
 			break;
 		}
 	}
+	for (const Mapping *m = maps_; found && m && !shared; m = m->next)
+		shared = m->map == found->map;
 	IOLockUnlock(lock_);
 	if (!found)
 		return kIOReturnBadArgument;
-	found->map->unmap();
+	if (!shared)
+		found->map->unmap();
 	found->map->release();
 	IODelete(found, Mapping, 1);
 	return kIOReturnSuccess;
@@ -2175,6 +2252,12 @@ IOReturn AGXDeviceUserClient::run(uint32_t method, const void *in, uint32_t inSi
 		wantIn = sizeof(TegraGM20BAbiZbc);
 		wantOut = sizeof(TegraGM20BAbiZbcReply);
 		break;
+#if TGM_STATS
+	case TegraGM20BMethodReadback:
+		wantIn = sizeof(TegraGM20BAbiReadback);
+		wantOut = sizeof(TegraGM20BAbiReadbackReply);
+		break;
+#endif
 	default:
 		return kIOReturnUnsupported;
 	}
@@ -2253,6 +2336,12 @@ IOReturn AGXDeviceUserClient::run(uint32_t method, const void *in, uint32_t inSi
 		return zbcAdd(static_cast<const TegraGM20BAbiZbc *>(in),
 			      static_cast<TegraGM20BAbiZbcReply *>(out));
 	}
+#if TGM_STATS
+	if (method == TegraGM20BMethodReadback) {
+		return tgm_readback_call(this, static_cast<const TegraGM20BAbiReadback *>(in),
+					 static_cast<TegraGM20BAbiReadbackReply *>(out));
+	}
+#endif
 	IOLockLock(lock_);
 	// A channel killed for a GPU fault or hang (client fault isolation) refuses only what names it (Exec, Order and
 	// WaitFence answer kIOReturnNotResponding, GetStatus its error); the connection's memory, binds and other channels
@@ -2373,6 +2462,13 @@ IOReturn AGXDeviceUserClient::externalMethod(uint32_t selector,
 IOReturn AGXDeviceUserClient::clientMemoryForType(UInt32 type, IOOptionBits *options,
 						  IOMemoryDescriptor **memory)
 {
+#if TGM_STATS
+	if (IOMemoryDescriptor *readback = tgm_readback_memory(this, type)) {
+		*memory = readback;
+		*options = kIOMapAnywhere | kIOMapDefaultCache;
+		return kIOReturnSuccess;
+	}
+#endif
 	IOLockLock(lock_);
 	IOReturn ret = kIOReturnBadArgument;
 	if (type == kFenceToken && fence_view_) {
@@ -2380,7 +2476,7 @@ IOReturn AGXDeviceUserClient::clientMemoryForType(UInt32 type, IOOptionBits *opt
 		*memory = fence_view_;
 		*options = kIOMapAnywhere | kIOMapReadOnly | kIOMapWriteCombineCache;
 		ret = kIOReturnSuccess;
-	} else if (const Bo *bo = findToken(type)) {
+	} else if (const Bo *bo = findToken(type); bo && bo->view) {
 		bo->view->retain();
 		*memory = bo->view;
 		*options = kIOMapAnywhere |
@@ -2461,6 +2557,7 @@ extern "C" IOReturn tegra_gm20b_new_user_client(IOService *provider, task_t task
 //             (wired) descriptor and its GPU mapping at kPresentSurface + i * 16 MiB; the least recently offered one goes
 //             when a fifth surface comes. Its CPU caches are cleaned once, when it is imported (the GPU, which wrote it,
 //             does not snoop them, and a dirty line written back later would land on its pixels).
+//   read-back debug kernels: two buffers at 0x50000000 + i * 8 MiB (TegraGM20BReadback.cpp)
 // native_legacy_gpu_complete (NativeLegacyDisplay.cpp, declared by TegraScanoutCopy.h) is a plain reference: the kernel's static
 // link refuses undefined weak ones, and the display is in every kernel that has this driver.
 namespace
@@ -2489,9 +2586,9 @@ PresentSurface gSurfaces[4];
 uint64_t gSurfaceUses;
 IOLock *gPresentLock;
 
-void presentDone(void *display)
+void presentDone(void *display, int status)
 {
-	native_legacy_gpu_complete(display, 0);
+	native_legacy_gpu_complete(display, status);
 }
 
 void dropSurface(PresentSurface &s, unsigned slot)
@@ -2640,13 +2737,43 @@ extern "C" int tegra_gm20b_scanout_copy(const struct TegraScanoutCopy *copy)
 	const uint64_t source = target || fenceOnly ? presentSurface(memory, copy->sourceBytes,
 								     sourceBlock, &sourcePa)
 						    : 0;
-	const int ret =
-		(target || fenceOnly) && source
-			? tgm_present_copy(source, sourcePa, copy->sourceStride,
-					   static_cast<int>(sourceBlock), copy->width, copy->height,
-					   target, copy->targetPitch, copy->blockHeightLog2,
-					   presentDone, copy->display)
-			: -12;  // ENOMEM: the target or the surface could not be mapped
+	int ret = -12;  // ENOMEM: the target or the surface could not be mapped
+	if ((target || fenceOnly) && source) {
+#if TGM_STATS
+		tgm_present_read reads[TGM_PRESENT_READS] = {};
+		const uint32_t nreads = tgm_readback_take(copy, source, sourceBlock, target, reads);
+		ret = tgm_present_copy_read(
+			source, sourcePa, copy->alsoWritten & ~0xfffULL, copy->sourceStride,
+			static_cast<int>(sourceBlock), copy->width, copy->height, target,
+			copy->targetPitch, copy->blockHeightLog2,
+			nreads ? tgm_readback_done : presentDone, copy->display, reads, nreads);
+		if (ret && nreads)
+			tgm_readback_refused();
+#else
+		ret = tgm_present_copy(source, sourcePa, copy->alsoWritten & ~0xfffULL,
+				       copy->sourceStride, static_cast<int>(sourceBlock),
+				       copy->width, copy->height, target, copy->targetPitch,
+				       copy->blockHeightLog2, presentDone, copy->display);
+#endif
+	}
 	IOLockUnlock(gPresentLock);
 	return ret ? ioreturn(ret) : 0;
+}
+
+extern "C" int tegra_gm20b_scanout_fence(void *display, uint64_t pa)
+{
+	if (!display || !pa || tgm_stage() < 3)
+		return kIOReturnNotReady;
+	tgm_vm *vm = nullptr;
+	if (tgm_present_open(&vm))
+		return kIOReturnNotReady;
+	// No copy (dst_va 0): only the acquires on the surface's writers and the fence; nothing of it is mapped.
+	const int ret =
+		tgm_present_copy(0, pa & ~0xfffULL, 0, 0, 0, 1, 1, 0, 0, 0, presentDone, display);
+	return ret ? ioreturn(ret) : 0;
+}
+
+extern "C" int tegra_gm20b_scanout_outstanding(const void *display)
+{
+	return tgm_present_outstanding(display);
 }

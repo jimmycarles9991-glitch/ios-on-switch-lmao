@@ -1,0 +1,134 @@
+# Items raw refuses by design, as the advertised GPU families allow: <container> <item> <reason>, tab-separated
+# (raw/test/selcover_inventory.h). Each still needs raw to answer it with that refusal, not m2v.
+MTLArgumentEncoder	setVisibleFunctionTable:atIndex:	function pointers, visible function tables and dynamic libraries: Apple6 and Mac2, not among the families advertised (NativeMetalTarget.rs FAMILIES)
+MTLArgumentEncoder	setVisibleFunctionTables:withRange:	function pointers, visible function tables and dynamic libraries: Apple6 and Mac2, not among the families advertised (NativeMetalTarget.rs FAMILIES)
+MTLBinaryArchive	addTileRenderPipelineFunctionsWithDescriptor:error:	tile shaders and imageblocks: Apple4, not among the families advertised (NativeMetalTarget.rs FAMILIES); no GM20B form
+MTLCommandBuffer	resourceStateCommandEncoder	sparse textures: Apple6, not among the families advertised (NativeMetalTarget.rs FAMILIES)
+MTLComputeCommandEncoder	setImageblockWidth:height:	tile shaders and imageblocks: Apple4, not among the families advertised (NativeMetalTarget.rs FAMILIES); no GM20B form
+MTLComputeCommandEncoder	setVisibleFunctionTable:atBufferIndex:	function pointers, visible function tables and dynamic libraries: Apple6 and Mac2, not among the families advertised (NativeMetalTarget.rs FAMILIES)
+MTLComputeCommandEncoder	setVisibleFunctionTables:withBufferRange:	function pointers, visible function tables and dynamic libraries: Apple6 and Mac2, not among the families advertised (NativeMetalTarget.rs FAMILIES)
+MTLComputePipelineDescriptor	supportAddingBinaryFunctions	function pointers, visible function tables and dynamic libraries: Apple6 and Mac2, not among the families advertised (NativeMetalTarget.rs FAMILIES)
+MTLComputePipelineState	functionHandleWithBinaryFunction:	function pointers, visible function tables and dynamic libraries: Apple6 and Mac2, not among the families advertised (NativeMetalTarget.rs FAMILIES)
+MTLComputePipelineState	functionHandleWithFunction:	function pointers, visible function tables and dynamic libraries: Apple6 and Mac2, not among the families advertised (NativeMetalTarget.rs FAMILIES)
+MTLComputePipelineState	imageblockMemoryLengthForDimensions:	tile shaders and imageblocks: Apple4, not among the families advertised (NativeMetalTarget.rs FAMILIES); no GM20B form
+MTLComputePipelineState	newComputePipelineStateWithAdditionalBinaryFunctions:error:	function pointers, visible function tables and dynamic libraries: Apple6 and Mac2, not among the families advertised (NativeMetalTarget.rs FAMILIES)
+MTLComputePipelineState	newComputePipelineStateWithBinaryFunctions:error:	function pointers, visible function tables and dynamic libraries: Apple6 and Mac2, not among the families advertised (NativeMetalTarget.rs FAMILIES)
+MTLComputePipelineState	newVisibleFunctionTableWithDescriptor:	function pointers, visible function tables and dynamic libraries: Apple6 and Mac2, not among the families advertised (NativeMetalTarget.rs FAMILIES)
+MTLDevice	convertSparsePixelRegions:toTileRegions:withTileSize:alignmentMode:numRegions:	sparse textures: Apple6, not among the families advertised (NativeMetalTarget.rs FAMILIES)
+MTLDevice	convertSparseTileRegions:toPixelRegions:withTileSize:numRegions:	sparse textures: Apple6, not among the families advertised (NativeMetalTarget.rs FAMILIES)
+MTLDevice	newDynamicLibrary:error:	function pointers, visible function tables and dynamic libraries: Apple6 and Mac2, not among the families advertised (NativeMetalTarget.rs FAMILIES)
+MTLDevice	newDynamicLibraryWithURL:error:	function pointers, visible function tables and dynamic libraries: Apple6 and Mac2, not among the families advertised (NativeMetalTarget.rs FAMILIES)
+MTLDevice	newRenderPipelineStateWithMeshDescriptor:options:completionHandler:	mesh and object stages: Apple7 and Metal 3, not among the families advertised (NativeMetalTarget.rs FAMILIES)
+MTLDevice	newRenderPipelineStateWithMeshDescriptor:options:reflection:error:	mesh and object stages: Apple7 and Metal 3, not among the families advertised (NativeMetalTarget.rs FAMILIES)
+MTLDevice	newRenderPipelineStateWithTileDescriptor:options:completionHandler:	tile shaders and imageblocks: Apple4, not among the families advertised (NativeMetalTarget.rs FAMILIES); no GM20B form
+MTLDevice	sparseTileSizeInBytes	sparse textures: Apple6, not among the families advertised (NativeMetalTarget.rs FAMILIES)
+MTLDevice	sparseTileSizeInBytesForSparsePageSize:	sparse textures: Apple6, not among the families advertised (NativeMetalTarget.rs FAMILIES)
+MTLDevice	sparseTileSizeWithTextureType:pixelFormat:sampleCount:	sparse textures: Apple6, not among the families advertised (NativeMetalTarget.rs FAMILIES)
+MTLDevice	sparseTileSizeWithTextureType:pixelFormat:sampleCount:sparsePageSize:	sparse textures: Apple6, not among the families advertised (NativeMetalTarget.rs FAMILIES)
+MTLDynamicLibrary	device	function pointers, visible function tables and dynamic libraries: Apple6 and Mac2, not among the families advertised (NativeMetalTarget.rs FAMILIES)
+MTLDynamicLibrary	installName	function pointers, visible function tables and dynamic libraries: Apple6 and Mac2, not among the families advertised (NativeMetalTarget.rs FAMILIES)
+MTLDynamicLibrary	label	function pointers, visible function tables and dynamic libraries: Apple6 and Mac2, not among the families advertised (NativeMetalTarget.rs FAMILIES)
+MTLDynamicLibrary	serializeToURL:error:	function pointers, visible function tables and dynamic libraries: Apple6 and Mac2, not among the families advertised (NativeMetalTarget.rs FAMILIES)
+MTLFunctionHandle	device	function pointers, visible function tables and dynamic libraries: Apple6 and Mac2, not among the families advertised (NativeMetalTarget.rs FAMILIES)
+MTLFunctionHandle	name	function pointers, visible function tables and dynamic libraries: Apple6 and Mac2, not among the families advertised (NativeMetalTarget.rs FAMILIES)
+MTLHeapDescriptor	sparsePageSize	sparse textures: Apple6, not among the families advertised (NativeMetalTarget.rs FAMILIES)
+MTLIndirectCommandBufferDescriptor	maxMeshBufferBindCount	mesh and object stages: Apple7 and Metal 3, not among the families advertised (NativeMetalTarget.rs FAMILIES)
+MTLIndirectCommandBufferDescriptor	maxObjectBufferBindCount	mesh and object stages: Apple7 and Metal 3, not among the families advertised (NativeMetalTarget.rs FAMILIES)
+MTLIndirectCommandBufferDescriptor	maxObjectThreadgroupMemoryBindCount	mesh and object stages: Apple7 and Metal 3, not among the families advertised (NativeMetalTarget.rs FAMILIES)
+MTLIndirectComputeCommand	setImageblockWidth:height:	tile shaders and imageblocks: Apple4, not among the families advertised (NativeMetalTarget.rs FAMILIES); no GM20B form
+MTLIndirectRenderCommand	drawMeshThreadgroups:threadsPerObjectThreadgroup:threadsPerMeshThreadgroup:	mesh and object stages: Apple7 and Metal 3, not among the families advertised (NativeMetalTarget.rs FAMILIES)
+MTLIndirectRenderCommand	drawMeshThreads:threadsPerObjectThreadgroup:threadsPerMeshThreadgroup:	mesh and object stages: Apple7 and Metal 3, not among the families advertised (NativeMetalTarget.rs FAMILIES)
+MTLIndirectRenderCommand	setMeshBuffer:offset:atIndex:	mesh and object stages: Apple7 and Metal 3, not among the families advertised (NativeMetalTarget.rs FAMILIES)
+MTLIndirectRenderCommand	setObjectBuffer:offset:atIndex:	mesh and object stages: Apple7 and Metal 3, not among the families advertised (NativeMetalTarget.rs FAMILIES)
+MTLIndirectRenderCommand	setObjectThreadgroupMemoryLength:atIndex:	mesh and object stages: Apple7 and Metal 3, not among the families advertised (NativeMetalTarget.rs FAMILIES)
+MTLMeshRenderPipelineDescriptor	alphaToCoverageEnabled	mesh and object stages: Apple7 and Metal 3, not among the families advertised (NativeMetalTarget.rs FAMILIES)
+MTLMeshRenderPipelineDescriptor	alphaToOneEnabled	mesh and object stages: Apple7 and Metal 3, not among the families advertised (NativeMetalTarget.rs FAMILIES)
+MTLMeshRenderPipelineDescriptor	binaryArchives	mesh and object stages: Apple7 and Metal 3, not among the families advertised (NativeMetalTarget.rs FAMILIES)
+MTLMeshRenderPipelineDescriptor	fragmentLinkedFunctions	mesh and object stages: Apple7 and Metal 3, not among the families advertised (NativeMetalTarget.rs FAMILIES)
+MTLMeshRenderPipelineDescriptor	meshFunction	mesh and object stages: Apple7 and Metal 3, not among the families advertised (NativeMetalTarget.rs FAMILIES)
+MTLMeshRenderPipelineDescriptor	meshLinkedFunctions	mesh and object stages: Apple7 and Metal 3, not among the families advertised (NativeMetalTarget.rs FAMILIES)
+MTLMeshRenderPipelineDescriptor	objectFunction	mesh and object stages: Apple7 and Metal 3, not among the families advertised (NativeMetalTarget.rs FAMILIES)
+MTLMeshRenderPipelineDescriptor	objectLinkedFunctions	mesh and object stages: Apple7 and Metal 3, not among the families advertised (NativeMetalTarget.rs FAMILIES)
+MTLMeshRenderPipelineDescriptor	rasterizationEnabled	mesh and object stages: Apple7 and Metal 3, not among the families advertised (NativeMetalTarget.rs FAMILIES)
+MTLMeshRenderPipelineDescriptor	supportIndirectCommandBuffers	mesh and object stages: Apple7 and Metal 3, not among the families advertised (NativeMetalTarget.rs FAMILIES)
+MTLRenderCommandEncoder	dispatchThreadsPerTile:	tile shaders and imageblocks: Apple4, not among the families advertised (NativeMetalTarget.rs FAMILIES); no GM20B form
+MTLRenderCommandEncoder	drawMeshThreadgroups:threadsPerObjectThreadgroup:threadsPerMeshThreadgroup:	mesh and object stages: Apple7 and Metal 3, not among the families advertised (NativeMetalTarget.rs FAMILIES)
+MTLRenderCommandEncoder	drawMeshThreadgroupsWithIndirectBuffer:indirectBufferOffset:threadsPerObjectThreadgroup:threadsPerMeshThreadgroup:	mesh and object stages: Apple7 and Metal 3, not among the families advertised (NativeMetalTarget.rs FAMILIES)
+MTLRenderCommandEncoder	drawMeshThreads:threadsPerObjectThreadgroup:threadsPerMeshThreadgroup:	mesh and object stages: Apple7 and Metal 3, not among the families advertised (NativeMetalTarget.rs FAMILIES)
+MTLRenderCommandEncoder	setFragmentVisibleFunctionTable:atBufferIndex:	function pointers, visible function tables and dynamic libraries: Apple6 and Mac2, not among the families advertised (NativeMetalTarget.rs FAMILIES)
+MTLRenderCommandEncoder	setFragmentVisibleFunctionTables:withBufferRange:	function pointers, visible function tables and dynamic libraries: Apple6 and Mac2, not among the families advertised (NativeMetalTarget.rs FAMILIES)
+MTLRenderCommandEncoder	setMeshBuffer:offset:atIndex:	mesh and object stages: Apple7 and Metal 3, not among the families advertised (NativeMetalTarget.rs FAMILIES)
+MTLRenderCommandEncoder	setMeshBufferOffset:atIndex:	mesh and object stages: Apple7 and Metal 3, not among the families advertised (NativeMetalTarget.rs FAMILIES)
+MTLRenderCommandEncoder	setMeshBuffers:offsets:withRange:	mesh and object stages: Apple7 and Metal 3, not among the families advertised (NativeMetalTarget.rs FAMILIES)
+MTLRenderCommandEncoder	setMeshBytes:length:atIndex:	mesh and object stages: Apple7 and Metal 3, not among the families advertised (NativeMetalTarget.rs FAMILIES)
+MTLRenderCommandEncoder	setMeshSamplerState:atIndex:	mesh and object stages: Apple7 and Metal 3, not among the families advertised (NativeMetalTarget.rs FAMILIES)
+MTLRenderCommandEncoder	setMeshSamplerState:lodMinClamp:lodMaxClamp:atIndex:	mesh and object stages: Apple7 and Metal 3, not among the families advertised (NativeMetalTarget.rs FAMILIES)
+MTLRenderCommandEncoder	setMeshSamplerStates:lodMinClamps:lodMaxClamps:withRange:	mesh and object stages: Apple7 and Metal 3, not among the families advertised (NativeMetalTarget.rs FAMILIES)
+MTLRenderCommandEncoder	setMeshSamplerStates:withRange:	mesh and object stages: Apple7 and Metal 3, not among the families advertised (NativeMetalTarget.rs FAMILIES)
+MTLRenderCommandEncoder	setMeshTexture:atIndex:	mesh and object stages: Apple7 and Metal 3, not among the families advertised (NativeMetalTarget.rs FAMILIES)
+MTLRenderCommandEncoder	setMeshTextures:withRange:	mesh and object stages: Apple7 and Metal 3, not among the families advertised (NativeMetalTarget.rs FAMILIES)
+MTLRenderCommandEncoder	setObjectBuffer:offset:atIndex:	mesh and object stages: Apple7 and Metal 3, not among the families advertised (NativeMetalTarget.rs FAMILIES)
+MTLRenderCommandEncoder	setObjectBufferOffset:atIndex:	mesh and object stages: Apple7 and Metal 3, not among the families advertised (NativeMetalTarget.rs FAMILIES)
+MTLRenderCommandEncoder	setObjectBuffers:offsets:withRange:	mesh and object stages: Apple7 and Metal 3, not among the families advertised (NativeMetalTarget.rs FAMILIES)
+MTLRenderCommandEncoder	setObjectBytes:length:atIndex:	mesh and object stages: Apple7 and Metal 3, not among the families advertised (NativeMetalTarget.rs FAMILIES)
+MTLRenderCommandEncoder	setObjectSamplerState:atIndex:	mesh and object stages: Apple7 and Metal 3, not among the families advertised (NativeMetalTarget.rs FAMILIES)
+MTLRenderCommandEncoder	setObjectSamplerState:lodMinClamp:lodMaxClamp:atIndex:	mesh and object stages: Apple7 and Metal 3, not among the families advertised (NativeMetalTarget.rs FAMILIES)
+MTLRenderCommandEncoder	setObjectSamplerStates:lodMinClamps:lodMaxClamps:withRange:	mesh and object stages: Apple7 and Metal 3, not among the families advertised (NativeMetalTarget.rs FAMILIES)
+MTLRenderCommandEncoder	setObjectSamplerStates:withRange:	mesh and object stages: Apple7 and Metal 3, not among the families advertised (NativeMetalTarget.rs FAMILIES)
+MTLRenderCommandEncoder	setObjectTexture:atIndex:	mesh and object stages: Apple7 and Metal 3, not among the families advertised (NativeMetalTarget.rs FAMILIES)
+MTLRenderCommandEncoder	setObjectTextures:withRange:	mesh and object stages: Apple7 and Metal 3, not among the families advertised (NativeMetalTarget.rs FAMILIES)
+MTLRenderCommandEncoder	setTileBuffer:offset:atIndex:	tile shaders and imageblocks: Apple4, not among the families advertised (NativeMetalTarget.rs FAMILIES); no GM20B form
+MTLRenderCommandEncoder	setTileBufferOffset:atIndex:	tile shaders and imageblocks: Apple4, not among the families advertised (NativeMetalTarget.rs FAMILIES); no GM20B form
+MTLRenderCommandEncoder	setTileBuffers:offsets:withRange:	tile shaders and imageblocks: Apple4, not among the families advertised (NativeMetalTarget.rs FAMILIES); no GM20B form
+MTLRenderCommandEncoder	setTileBytes:length:atIndex:	tile shaders and imageblocks: Apple4, not among the families advertised (NativeMetalTarget.rs FAMILIES); no GM20B form
+MTLRenderCommandEncoder	setTileSamplerState:atIndex:	tile shaders and imageblocks: Apple4, not among the families advertised (NativeMetalTarget.rs FAMILIES); no GM20B form
+MTLRenderCommandEncoder	setTileSamplerState:lodMinClamp:lodMaxClamp:atIndex:	tile shaders and imageblocks: Apple4, not among the families advertised (NativeMetalTarget.rs FAMILIES); no GM20B form
+MTLRenderCommandEncoder	setTileSamplerStates:lodMinClamps:lodMaxClamps:withRange:	tile shaders and imageblocks: Apple4, not among the families advertised (NativeMetalTarget.rs FAMILIES); no GM20B form
+MTLRenderCommandEncoder	setTileSamplerStates:withRange:	tile shaders and imageblocks: Apple4, not among the families advertised (NativeMetalTarget.rs FAMILIES); no GM20B form
+MTLRenderCommandEncoder	setTileTexture:atIndex:	tile shaders and imageblocks: Apple4, not among the families advertised (NativeMetalTarget.rs FAMILIES); no GM20B form
+MTLRenderCommandEncoder	setTileTextures:withRange:	tile shaders and imageblocks: Apple4, not among the families advertised (NativeMetalTarget.rs FAMILIES); no GM20B form
+MTLRenderCommandEncoder	setTileVisibleFunctionTable:atBufferIndex:	tile shaders and imageblocks: Apple4, not among the families advertised (NativeMetalTarget.rs FAMILIES); no GM20B form
+MTLRenderCommandEncoder	setTileVisibleFunctionTables:withBufferRange:	tile shaders and imageblocks: Apple4, not among the families advertised (NativeMetalTarget.rs FAMILIES); no GM20B form
+MTLRenderCommandEncoder	setVertexVisibleFunctionTable:atBufferIndex:	function pointers, visible function tables and dynamic libraries: Apple6 and Mac2, not among the families advertised (NativeMetalTarget.rs FAMILIES)
+MTLRenderCommandEncoder	setVertexVisibleFunctionTables:withBufferRange:	function pointers, visible function tables and dynamic libraries: Apple6 and Mac2, not among the families advertised (NativeMetalTarget.rs FAMILIES)
+MTLRenderPassDescriptor	imageblockSampleLength	tile shaders and imageblocks: Apple4, not among the families advertised (NativeMetalTarget.rs FAMILIES); no GM20B form
+MTLRenderPassDescriptor	tileHeight	tile shaders and imageblocks: Apple4, not among the families advertised (NativeMetalTarget.rs FAMILIES); no GM20B form
+MTLRenderPassDescriptor	tileWidth	tile shaders and imageblocks: Apple4, not among the families advertised (NativeMetalTarget.rs FAMILIES); no GM20B form
+MTLRenderPipelineDescriptor	supportAddingFragmentBinaryFunctions	function pointers, visible function tables and dynamic libraries: Apple6 and Mac2, not among the families advertised (NativeMetalTarget.rs FAMILIES)
+MTLRenderPipelineDescriptor	supportAddingVertexBinaryFunctions	function pointers, visible function tables and dynamic libraries: Apple6 and Mac2, not among the families advertised (NativeMetalTarget.rs FAMILIES)
+MTLRenderPipelineFunctionsDescriptor	fragmentAdditionalBinaryFunctions	function pointers, visible function tables and dynamic libraries: Apple6 and Mac2, not among the families advertised (NativeMetalTarget.rs FAMILIES)
+MTLRenderPipelineFunctionsDescriptor	tileAdditionalBinaryFunctions	tile shaders and imageblocks: Apple4, not among the families advertised (NativeMetalTarget.rs FAMILIES); no GM20B form
+MTLRenderPipelineFunctionsDescriptor	vertexAdditionalBinaryFunctions	function pointers, visible function tables and dynamic libraries: Apple6 and Mac2, not among the families advertised (NativeMetalTarget.rs FAMILIES)
+MTLRenderPipelineReflection	tileArguments	tile shaders and imageblocks: Apple4, not among the families advertised (NativeMetalTarget.rs FAMILIES); no GM20B form
+MTLRenderPipelineReflection	tileBindings	tile shaders and imageblocks: Apple4, not among the families advertised (NativeMetalTarget.rs FAMILIES); no GM20B form
+MTLRenderPipelineState	functionHandleWithBinaryFunction:stage:	function pointers, visible function tables and dynamic libraries: Apple6 and Mac2, not among the families advertised (NativeMetalTarget.rs FAMILIES)
+MTLRenderPipelineState	functionHandleWithFunction:stage:	function pointers, visible function tables and dynamic libraries: Apple6 and Mac2, not among the families advertised (NativeMetalTarget.rs FAMILIES)
+MTLRenderPipelineState	imageblockMemoryLengthForDimensions:	tile shaders and imageblocks: Apple4, not among the families advertised (NativeMetalTarget.rs FAMILIES); no GM20B form
+MTLRenderPipelineState	imageblockSampleLength	tile shaders and imageblocks: Apple4, not among the families advertised (NativeMetalTarget.rs FAMILIES); no GM20B form
+MTLRenderPipelineState	newRenderPipelineStateWithAdditionalBinaryFunctions:error:	function pointers, visible function tables and dynamic libraries: Apple6 and Mac2, not among the families advertised (NativeMetalTarget.rs FAMILIES)
+MTLRenderPipelineState	newRenderPipelineStateWithBinaryFunctions:error:	function pointers, visible function tables and dynamic libraries: Apple6 and Mac2, not among the families advertised (NativeMetalTarget.rs FAMILIES)
+MTLRenderPipelineState	newVisibleFunctionTableWithDescriptor:stage:	function pointers, visible function tables and dynamic libraries: Apple6 and Mac2, not among the families advertised (NativeMetalTarget.rs FAMILIES)
+MTLRenderPipelineState	requiredThreadsPerTileThreadgroup	tile shaders and imageblocks: Apple4, not among the families advertised (NativeMetalTarget.rs FAMILIES); no GM20B form
+MTLRenderPipelineState	threadgroupSizeMatchesTileSize	tile shaders and imageblocks: Apple4, not among the families advertised (NativeMetalTarget.rs FAMILIES); no GM20B form
+MTLResourceStateCommandEncoder	moveTextureMappingsFromTexture:sourceSlice:sourceLevel:sourceOrigin:sourceSize:toTexture:destinationSlice:destinationLevel:destinationOrigin:	sparse textures: Apple6, not among the families advertised (NativeMetalTarget.rs FAMILIES)
+MTLResourceStateCommandEncoder	updateFence:	sparse textures: Apple6, not among the families advertised (NativeMetalTarget.rs FAMILIES)
+MTLResourceStateCommandEncoder	updateTextureMapping:mode:indirectBuffer:indirectBufferOffset:	sparse textures: Apple6, not among the families advertised (NativeMetalTarget.rs FAMILIES)
+MTLResourceStateCommandEncoder	updateTextureMapping:mode:region:mipLevel:slice:	sparse textures: Apple6, not among the families advertised (NativeMetalTarget.rs FAMILIES)
+MTLResourceStateCommandEncoder	updateTextureMappings:mode:regions:mipLevels:slices:numRegions:	sparse textures: Apple6, not among the families advertised (NativeMetalTarget.rs FAMILIES)
+MTLResourceStateCommandEncoder	waitForFence:	sparse textures: Apple6, not among the families advertised (NativeMetalTarget.rs FAMILIES)
+MTLTexture	firstMipmapInTail	sparse textures: Apple6, not among the families advertised (NativeMetalTarget.rs FAMILIES)
+MTLTexture	isSparse	sparse textures: Apple6, not among the families advertised (NativeMetalTarget.rs FAMILIES)
+MTLTexture	tailSizeInBytes	sparse textures: Apple6, not among the families advertised (NativeMetalTarget.rs FAMILIES)
+MTLTileRenderPipelineColorAttachmentDescriptorArray	objectAtIndexedSubscript:	tile shaders and imageblocks: Apple4, not among the families advertised (NativeMetalTarget.rs FAMILIES); no GM20B form
+MTLTileRenderPipelineColorAttachmentDescriptorArray	setObject:atIndexedSubscript:	tile shaders and imageblocks: Apple4, not among the families advertised (NativeMetalTarget.rs FAMILIES); no GM20B form
+MTLTileRenderPipelineDescriptor	binaryArchives	tile shaders and imageblocks: Apple4, not among the families advertised (NativeMetalTarget.rs FAMILIES); no GM20B form
+MTLTileRenderPipelineDescriptor	maxCallStackDepth	tile shaders and imageblocks: Apple4, not among the families advertised (NativeMetalTarget.rs FAMILIES); no GM20B form
+MTLTileRenderPipelineDescriptor	preloadedLibraries	tile shaders and imageblocks: Apple4, not among the families advertised (NativeMetalTarget.rs FAMILIES); no GM20B form
+MTLTileRenderPipelineDescriptor	requiredThreadsPerThreadgroup	tile shaders and imageblocks: Apple4, not among the families advertised (NativeMetalTarget.rs FAMILIES); no GM20B form
+MTLTileRenderPipelineDescriptor	supportAddingBinaryFunctions	tile shaders and imageblocks: Apple4, not among the families advertised (NativeMetalTarget.rs FAMILIES); no GM20B form
+MTLTileRenderPipelineDescriptor	threadgroupSizeMatchesTileSize	tile shaders and imageblocks: Apple4, not among the families advertised (NativeMetalTarget.rs FAMILIES); no GM20B form
+MTLTileRenderPipelineDescriptor	tileBuffers	tile shaders and imageblocks: Apple4, not among the families advertised (NativeMetalTarget.rs FAMILIES); no GM20B form
+MTLVisibleFunctionTable	gpuResourceID	function pointers, visible function tables and dynamic libraries: Apple6 and Mac2, not among the families advertised (NativeMetalTarget.rs FAMILIES)
+MTLVisibleFunctionTable	setFunction:atIndex:	function pointers, visible function tables and dynamic libraries: Apple6 and Mac2, not among the families advertised (NativeMetalTarget.rs FAMILIES)
+MTLVisibleFunctionTable	setFunctions:withRange:	function pointers, visible function tables and dynamic libraries: Apple6 and Mac2, not among the families advertised (NativeMetalTarget.rs FAMILIES)
+MTLVisibleFunctionTableDescriptor	functionCount	function pointers, visible function tables and dynamic libraries: Apple6 and Mac2, not among the families advertised (NativeMetalTarget.rs FAMILIES)

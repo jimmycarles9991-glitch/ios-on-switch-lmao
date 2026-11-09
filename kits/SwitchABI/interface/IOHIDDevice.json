@@ -97,10 +97,30 @@
       "mangled": "__ZNK11IOHIDDevice18newTransportStringEv",
       "pac": "_ZNK11IOHIDDevice18newTransportStringEv"
     },
+    "newManufacturerString": {
+      "decl": "virtual OSString *newManufacturerString() const",
+      "mangled": "__ZNK11IOHIDDevice21newManufacturerStringEv",
+      "pac": "_ZNK11IOHIDDevice21newManufacturerStringEv"
+    },
     "newProductString": {
       "decl": "virtual OSString *newProductString() const",
       "mangled": "__ZNK11IOHIDDevice16newProductStringEv",
       "pac": "_ZNK11IOHIDDevice16newProductStringEv"
+    },
+    "newVendorIDNumber": {
+      "decl": "virtual OSNumber *newVendorIDNumber() const",
+      "mangled": "__ZNK11IOHIDDevice17newVendorIDNumberEv",
+      "pac": "_ZNK11IOHIDDevice17newVendorIDNumberEv"
+    },
+    "newProductIDNumber": {
+      "decl": "virtual OSNumber *newProductIDNumber() const",
+      "mangled": "__ZNK11IOHIDDevice18newProductIDNumberEv",
+      "pac": "_ZNK11IOHIDDevice18newProductIDNumberEv"
+    },
+    "newSerialNumberString": {
+      "decl": "virtual OSString *newSerialNumberString() const",
+      "mangled": "__ZNK11IOHIDDevice21newSerialNumberStringEv",
+      "pac": "_ZNK11IOHIDDevice21newSerialNumberStringEv"
     },
     "newReportDescriptor": {
       "decl": "virtual IOReturn newReportDescriptor(IOMemoryDescriptor **) const = 0",

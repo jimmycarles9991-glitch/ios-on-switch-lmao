@@ -57,4 +57,20 @@ TEST(SwitchBluetoothSource, RailsLearnTheAddressBeforeLaunchd)
     EXPECT_EQ(body.find("return;"), body.rfind("return;")) << "only the switch-no-bt return";
 }
 
+// iOS 27's BlueTool stand-in runs under the original's seatbelt profile with the original's entitlements: iOS 17's set
+// (Apple's 21H461 BlueTool without its sandbox profile) and seatbelt-profiles ["BlueTool"]. Without a profile 24B119's
+// sandbox applies the original's learned one (Protobox) instead, so the 17 file must not leak into the 27 build.
+TEST(SwitchBluetoothSource, BlueTool27RunsUnderTheOriginalsProfile)
+{
+    const std::string ios17 = SourceText("../BlueTool/BlueTool.entitlements");
+    const std::string ios27 = SourceText("../BlueTool/BlueTool27.entitlements");
+    std::istringstream keys(ios17);
+    for (std::string line; std::getline(keys, line);)
+        if (line.find("<key>") != std::string::npos)
+            EXPECT_THAT(ios27, HasSubstr(line));
+    EXPECT_THAT(ios27, HasSubstr("<key>seatbelt-profiles</key>\n\t<array>\n\t\t<string>BlueTool</string>"));
+    EXPECT_THAT(ios17, Not(HasSubstr("seatbelt-profiles")));
+    EXPECT_THAT(ios17, Not(HasSubstr("com.apple.private.sandbox.profile")));
+}
+
 }  // namespace

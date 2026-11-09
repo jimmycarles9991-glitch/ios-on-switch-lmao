@@ -1439,13 +1439,14 @@ size_t nmb_library_function_name(const NmbLibrary *library, uint32_t index, char
     return (size_t)snprintf(out, size, "%s", library->names[index].c_str());
 }
 
-NmbFunction *nmb_function_new_specialized(NmbLibrary *library, const char *name, const struct NmbConstant *constants,
-                                          uint32_t count)
+NmbFunction *nmb_function_new_specialized(NmbLibrary *library, const char *name, const char *specialized_name,
+                                          const struct NmbConstant *constants, uint32_t count)
 {
     if (!library || !name)
         return refuse<NmbFunction>("no library or name");
     std::vector<unsigned char> payload(sizeof(QMFunction));
-    const QMFunction header = {library->handle, strlen(name) + 1, count};
+    const QMFunction header = {library->handle, strlen(name) + 1, specialized_name ? strlen(specialized_name) + 1 : 0,
+                               count};
     memcpy(payload.data(), &header, sizeof header);
     auto append = [&](const void *bytes, size_t n) {
         payload.insert(payload.end(), static_cast<const unsigned char *>(bytes),
@@ -1453,6 +1454,8 @@ NmbFunction *nmb_function_new_specialized(NmbLibrary *library, const char *name,
         payload.resize(align(payload.size(), 8));
     };
     append(name, header.nameBytes);
+    if (specialized_name)
+        append(specialized_name, header.specializedBytes);
     for (uint32_t i = 0; i < count; i++) {
         const NmbConstant &c = constants[i];
         const QMConstant constant = {c.type, c.index, c.name ? strlen(c.name) + 1 : 0, c.length};
@@ -1470,7 +1473,7 @@ NmbFunction *nmb_function_new_specialized(NmbLibrary *library, const char *name,
 
 NmbFunction *nmb_function_new(NmbLibrary *library, const char *name)
 {
-    return nmb_function_new_specialized(library, name, nullptr, 0);
+    return nmb_function_new_specialized(library, name, nullptr, nullptr, 0);
 }
 
 void nmb_function_release(NmbFunction *function)

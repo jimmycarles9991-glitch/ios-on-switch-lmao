@@ -68,6 +68,7 @@ seed_tools(
     precompile = GM20B_METAL + ":precompile/precompile.mm",
     raw_generator = GM20B_METAL + ":raw/pack/rawpack.py",
     raw_srcs = [
+        GM20B_METAL + ":raw_direct_sources",
         GM20B_METAL + ":raw_pack_generator",
         METAL + ":NativeBridgeMetalFrontend.mm",
         METAL + ":frontend_headers",
@@ -110,6 +111,7 @@ metal_seed(
 seed_raw_pack(
     name = "raw_pack",
     srcs = [GM20B_METAL + ":raw_pack_generator"],
+    archives = [GM20B_METAL + ":archive_inventories"],
     corpus = GM20B_METAL + ":precompile/corpus.log",
     crawl = ":crawl",
     generator = GM20B_METAL + ":raw/pack/rawpack.py",

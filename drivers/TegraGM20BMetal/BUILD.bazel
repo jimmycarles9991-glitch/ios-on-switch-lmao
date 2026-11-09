@@ -20,28 +20,19 @@ exports_files(glob(
 ))
 
 # The raw GM20B path: its runtime (compiled into the plugin), its pack generator, and every source its stack key hashes
-# (every .h/.c/.cpp/.mm/.py/.inc below raw/, the old build's raw_stack()).
+# (every .h/.c/.cpp/.mm/.py/.inc/.metal below raw/, the old build's raw_stack()).
 filegroup(
     name = "raw_runtime_headers",
     srcs = glob([
         "raw/runtime/*.h",
         "raw/fx/*.h",
-    ]),
+    ]) + ["raw/pack/probe_bind.h"],  # the probe's bind offsets, which name a record's residual words (raw_record.h)
 )
 
-# The raw facade's Objective-C++ units (RawMetal.mm and the RawMetal*.mm beside it, RawAlias.mm, RawComplete.mm, RawProbe.mm)
+# The raw facade's Objective-C++ units (RawMetal.mm and the RawMetal*.mm beside it, RawAlias.mm, RawComplete.mm, RawDirect.mm)
 filegroup(
     name = "raw_facade_srcs",
     srcs = glob(["raw/runtime/Raw*.mm"]),
-)
-
-# What the runtime's capture of a state compiles beside it: pack/nvdec (the generator's decoder) and Mesa's MME simulator
-filegroup(
-    name = "raw_capture_headers",
-    srcs = glob([
-        "raw/pack/*.h",
-        "raw/pack/mesa/**/*.h",
-    ]) + ["raw/fx/test/twod_sim.h"],
 )
 
 # Not a hand run's leftovers: a .pyc of the modules (the host Python's) in a checkout would change the raw pack's action key
@@ -55,12 +46,39 @@ filegroup(
             "**/*.pyc",
             "**/.DS_Store",
         ],
-    ) + ["raw/runtime/raw_owned.h"],  # the methods the raw path owns (pack/mkpack.py reads them)
+    ) + [
+        "raw/runtime/raw_owned.h",  # the methods the raw path owns (pack/mkpack.py reads them)
+        "raw/runtime/raw_srgb_table.h",  # the colour table pack/layouts.py recognises
+        # the compute probe's key of a kernel (pack/probecompute.mm)
+        "raw/runtime/raw_compute_key.h",
+        "raw/runtime/raw_metallib.cpp",
+        "raw/runtime/raw_metallib.h",
+        "raw/runtime/raw_pack.h",
+    ],
+)
+
+# The raw runtime's sources the pack generator's directpack.mm makes records with (raw/pack/rawpack.py DIRECT_RUNTIME)
+filegroup(
+    name = "raw_direct_sources",
+    srcs = [
+        "raw/runtime/RawDirect.h",
+        "raw/runtime/RawDirect.mm",
+        "raw/runtime/raw_cache.h",
+        "raw/runtime/raw_compiler.h",
+        "raw/runtime/raw_direct.cpp",
+        "raw/runtime/raw_direct.h",
+        "raw/runtime/raw_emit.cpp",
+        "raw/runtime/raw_emit.h",
+        "raw/runtime/raw_pack.cpp",
+        "raw/runtime/raw_record.h",
+        "raw/runtime/raw_record_parts.cpp",
+        "raw/runtime/raw_record_parts.h",
+    ],
 )
 
 filegroup(
     name = "raw_stack_sources",
-    srcs = glob(["raw/**/*.%s" % suffix for suffix in ("h", "c", "cpp", "mm", "py")]),
+    srcs = glob(["raw/**/*.%s" % suffix for suffix in ("h", "c", "cpp", "mm", "py", "metal")]),
 )
 
 # The GPU context-switch stress and fetch readback (raw/test/fetchform.cpp): debug boot packages stage it at
@@ -70,8 +88,10 @@ filegroup(
 ios_binary(
     name = "fetchform",
     srcs = [
+        "raw/fx/fx_image.cpp",
         "raw/fx/fx_mip.cpp",
         "raw/runtime/raw_alias.cpp",
+        "raw/runtime/raw_arena.cpp",
         "raw/runtime/raw_comp.cpp",
         "raw/runtime/raw_gpu.cpp",
         "raw/runtime/raw_kernel.cpp",
@@ -115,6 +135,7 @@ py_library(
     data = [
         "raw/pack/ca/qc-21H461.json",
         "raw/pack/ca/qc-24B119.json",
+        "raw/runtime/raw_srgb_table.h",  # pack/layouts.py reads it at import
     ],
 )
 
@@ -131,11 +152,14 @@ py_test(
 )
 
 # The same for iOS 27's QuartzCore (raw/pack/ca/caspec27.py): every state of the raw pack's tiers against the functions
-# and constants its own library declares (no iOS 27 journal exists yet).
+# and constants its own library declares, and the journal's iOS 27 states made as drawn.
 py_test(
     name = "caspec27_test",
     srcs = ["raw/pack/ca/caspec27_test.py"],
-    data = ["raw/pack/ca/qc-24B119.json"],
+    data = [
+        "precompile/corpus.log",
+        "raw/pack/ca/qc-24B119.json",
+    ],
     main = "raw/pack/ca/caspec27_test.py",
     deps = [":raw_pack"],
 )
@@ -156,6 +180,73 @@ py_test(
     "run_corpus",
     "runtime_compile_callers",
 ]]
+
+# The pipeline states Apple's OS declares ahead (corpus/tools/archives): binary archives, pipeline libraries and pipeline
+# scripts. `bazel run //drivers/TegraGM20BMetal:declared -- --root <mounted OS volume> --root <mounted cryptex>...
+# --inventory <tsv>` writes precompile/archives/<build>.tsv from an IPSW's images; archive_coverage diffs one against the
+# raw pack's states and the device's journals.
+# What the raw pack makes of them (//gpu/seed:raw_pack takes the IPSW kind's: tools/gpu/rawpack.py archive_lines).
+filegroup(
+    name = "archive_inventories",
+    srcs = glob(["precompile/archives/*.tsv"]),
+)
+
+py_library(
+    name = "archives",
+    srcs = glob(
+        ["corpus/tools/archives/*.py"],
+        exclude = [
+            "corpus/tools/archives/*_test.py",
+            "corpus/tools/archives/coverage.py",
+            "corpus/tools/archives/declared.py",
+        ],
+    ),
+)
+
+py_binary(
+    name = "declared",
+    srcs = ["corpus/tools/archives/declared.py"],
+    main = "corpus/tools/archives/declared.py",
+    deps = [
+        ":archives",
+        "//tools/gpu/shaders:metallib",
+    ],
+)
+
+py_binary(
+    name = "archive_coverage",
+    srcs = ["corpus/tools/archives/coverage.py"],
+    main = "corpus/tools/archives/coverage.py",
+    deps = [
+        ":archives",
+        ":raw_pack",
+    ],
+)
+
+# Every render state the IPSW kinds' archives declare for the device is the raw pack's, or raw takes it from elsewhere
+py_test(
+    name = "archive_coverage_test",
+    srcs = ["corpus/tools/archives/coverage_test.py"],
+    data = [
+        "precompile/corpus.log",
+        "raw/pack/ca/qc-21H461.json",
+        "raw/pack/ca/qc-24B119.json",
+        ":archive_inventories",
+    ],
+    main = "corpus/tools/archives/coverage_test.py",
+    deps = [
+        ":archives",
+        ":raw_pack",
+        "//tools/gpu:rawpack_steps",
+    ],
+)
+
+py_test(
+    name = "archives_test",
+    srcs = ["corpus/tools/archives/archives_test.py"],
+    main = "corpus/tools/archives/archives_test.py",
+    deps = [":archives"],
+)
 
 py_binary(
     name = "ordercheck",

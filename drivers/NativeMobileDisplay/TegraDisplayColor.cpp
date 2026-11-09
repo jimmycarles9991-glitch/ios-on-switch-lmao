@@ -5,15 +5,51 @@
 using namespace switch_color;
 
 // DC A word indices (L4T drivers/video/tegra/dc/dc_reg.h). The CMU's LUTs and CSC are written straight to the unit, with
-// no assembly copy, so they change only in the vertical blank. DISP_COLOR_CONTROL is an assembly register.
+// no assembly copy (TegraDisplayColorSequence.h). DISP_COLOR_CONTROL is an assembly register. DBG_TIMING bit 15 is
+// DBG_V_BLANK (TegraPanel.cpp reads it the same way).
 static constexpr uint32_t kDcStateControl = 0x041, kDcCmuCsc = 0x32a, kDcCmuLut1 = 0x336, kDcCmuLut2 = 0x337,
-                          kDcDispColorControl = 0x430;
-static constexpr uint32_t kGeneralActReq = 1u << 0, kGeneralUpdate = 1u << 8, kCmuEnable = 1u << 20;
+                          kDcDispColorControl = 0x430, kDcDispDbgTiming = 0x4f6;
+static constexpr uint32_t kGeneralActReq = 1u << 0, kGeneralUpdate = 1u << 8, kCmuEnable = 1u << 20,
+                          kDbgVBlank = 1u << 15;
 static constexpr uint32_t kLocationAccessibility = 2, kLocationHarmony = 9;
 
 // NativeLegacyDisplay.cpp: FRAME_END reaches the CPU while a hold is out.
 extern "C" void native_legacy_frame_end_hold(void);
 extern "C" void native_legacy_frame_end_release(void);
+
+#if DEVELOPMENT || DEBUG
+// The first matrices IOMobileFramebuffer hands over, in thousandths, rows as received: what Core Animation's colour
+// requests become before the CSC (one line each, the first kLoggedMatrices of a boot).
+static void logMatrix(const char *call, uint32_t location, const Matrix &m)
+{
+    static constexpr uint32_t kLoggedMatrices = 24;
+    static uint32_t logged = 0;
+    if (__atomic_fetch_add(&logged, 1, __ATOMIC_RELAXED) >= kLoggedMatrices)
+        return;
+    long long v[9];
+    for (int i = 0; i < 9; ++i)
+        v[i] = static_cast<long long>(static_cast<__int128>(m.m[i / 3][i % 3]) * 1000 / kOne);
+    IOLog("SwitchDisplay: colour %s %u: %lld %lld %lld / %lld %lld %lld / %lld %lld %lld\n", call, location, v[0], v[1],
+          v[2], v[3], v[4], v[5], v[6], v[7], v[8]);
+}
+
+// The first CSCs those requests program, signed, 256 being one, KRR KGR KBR (red out) first, with the two 16.16 scales
+// folded into them: what the panel's channels get.
+static void logCsc(const Tables &tables, const Inputs &in)
+{
+    static constexpr uint32_t kLoggedCscs = 24;
+    static uint32_t logged = 0;
+    if (__atomic_fetch_add(&logged, 1, __ATOMIC_RELAXED) >= kLoggedCscs)
+        return;
+    int v[kCscWords];
+    for (unsigned i = 0; i < kCscWords; ++i) {
+        const int word = tables.csc[i];
+        v[i] = word >= 0x200 ? word - 0x400 : word;
+    }
+    IOLog("SwitchDisplay: colour CSC: %d %d %d / %d %d %d / %d %d %d (correction %#x, scale %#x%s)\n", v[0], v[1], v[2],
+          v[3], v[4], v[5], v[6], v[7], v[8], in.correction, in.accessibilityScale, in.blank ? ", blank" : "");
+}
+#endif
 
 // The object comes zeroed from IOMallocType, its member initializers not run.
 bool TegraDisplayColor::init()
@@ -41,18 +77,18 @@ void TegraDisplayColor::attach(SwitchMMIOWords registers)
     colorControl = registers[kDcDispColorControl] & ~kCmuEnable;
     const IOInterruptState state = IOSimpleLockLockDisableInterrupt(lock);
     dc = registers;
-    activeValid = hwEnabled = false;
-    pendingDirty = true;
+    sequence = Sequence();
+    sequence.pendingDirty = true;
     IOSimpleLockUnlockEnableInterrupt(lock, state);
 }
 
 void TegraDisplayColor::detach()
 {
     const IOInterruptState state = IOSimpleLockLockDisableInterrupt(lock);
-    if (dc && hwEnabled)
+    if (dc && sequence.enableAsked)
         writeEnable(false);
     dc = SwitchMMIOWords();
-    activeValid = hwEnabled = false;
+    sequence = Sequence();
     const bool held = holding;
     holding = false;
     IOSimpleLockUnlockEnableInterrupt(lock, state);
@@ -74,14 +110,21 @@ void TegraDisplayColor::commit()
         state = IOSimpleLockLockDisableInterrupt(lock);
         const bool current = seen == generation;
         const bool hold = current && static_cast<bool>(dc) && !holding;
+#if DEVELOPMENT || DEBUG
+        const bool cscChanged = current && memcmp(pending.csc, tables.csc, sizeof(tables.csc)) != 0;
+#endif
         if (current) {
             pending = tables;
-            pendingDirty = true;
+            sequence.pendingDirty = true;
             holding = holding || hold;
         }
         IOSimpleLockUnlockEnableInterrupt(lock, state);
         if (hold)
             native_legacy_frame_end_hold();
+#if DEVELOPMENT || DEBUG
+        if (cscChanged)
+            logCsc(tables, snapshot);
+#endif
         if (current)
             return;
     }
@@ -155,6 +198,9 @@ IOReturn TegraDisplayColor::setMatrix(uint32_t location, const void *matrix)
         return kIOReturnBadArgument;
     Matrix value;
     memcpy(&value, matrix, sizeof(value));
+#if DEVELOPMENT || DEBUG
+    logMatrix("setMatrix", location, value);
+#endif
     const IOReturn status = change(lock, generation, [&] {
         (location == kLocationHarmony ? inputs.harmony : inputs.accessibility) = value;
         return kIOReturnSuccess;
@@ -230,6 +276,9 @@ IOReturn TegraDisplayColor::swapSetColorMatrix(const void *matrix, uint32_t loca
             return kIOReturnUnsupported;
         memcpy(&value, &words[3], sizeof(value));
     }
+#if DEVELOPMENT || DEBUG
+    logMatrix("swapSetColorMatrix", location, value);
+#endif
     const IOReturn status = change(lock, generation, [&] {
         inputs.accessibility = value;
         return kIOReturnSuccess;
@@ -276,6 +325,14 @@ void TegraDisplayColor::writeTables(const Tables &tables, const Tables *written)
     }
 }
 
+void TegraDisplayColor::writeCsc(const Tables &tables, const Tables &written)
+{
+    for (unsigned i = 0; i < kCscWords; ++i) {
+        if (written.csc[i] != tables.csc[i])
+            dc[kDcCmuCsc + i] = tables.csc[i];
+    }
+}
+
 void TegraDisplayColor::writeEnable(bool enable)
 {
     dc[kDcDispColorControl] = colorControl | (enable ? kCmuEnable : 0);
@@ -283,46 +340,57 @@ void TegraDisplayColor::writeEnable(bool enable)
     dc[kDcStateControl] = kGeneralActReq;
 }
 
-// Tables for a disabled CMU are never written: the ones it scans stay until the disable latches.
 void TegraDisplayColor::frameEndFilter()
 {
     IOSimpleLockLock(lock);
-    if (dc && pendingDirty) {
-        if (pending.enabled) {
-            writeTables(pending, activeValid ? &active : nullptr);
-            active = pending;
-            activeValid = true;
+    if (dc) {
+        const Tables *written = sequence.activeValid ? &active : nullptr;
+        const auto actRequestOut = [this] {
+            return (dc[kDcStateControl] & kGeneralActReq) != 0u;
+        };
+        const auto inBlank = [this] {
+            return (dc[kDcDispDbgTiming] & kDbgVBlank) != 0u;
+        };
+        const Write write = atFrameEnd(sequence, pending, written, actRequestOut, inBlank);
+        if (write == Write::kAll) {
+            writeTables(pending, written);
+        } else if (write == Write::kCsc) {
+            writeCsc(pending, active);
         }
-        pendingDirty = false;
+        if (write != Write::kNothing)
+            active = pending;
     }
     IOSimpleLockUnlock(lock);
 }
 
 // mayRequest false: a window A request is out, and the flip, rotation and probe checks read GENERAL_ACT_REQ as part of
-// it; the enable waits for a frame end with none out.
+// it; the enable waits for a frame end with none out. The decision and the write share the lock with the filter, which
+// must never see a bypass it reads as latched before its GENERAL_ACT_REQ is written.
 void TegraDisplayColor::frameEndAction(bool mayRequest)
 {
     const IOInterruptState state = IOSimpleLockLockDisableInterrupt(lock);
     const bool want = pending.enabled;
-    const bool ready = !pendingDirty && activeValid;
-    const bool attached = static_cast<bool>(dc);
     const uint32_t reasons = pending.reasons;
-    const bool settled = !pendingDirty && want == hwEnabled;
-    const bool release = holding && settled;
-    holding = holding && !settled;
+    const bool release = holding && settled(sequence, want);
+    holding = holding && !release;
+    const Enable enable = dc ? atFrameEndAction(sequence, want, mayRequest) : Enable::kKeep;
+    if (enable != Enable::kKeep) {
+        writeEnable(enable == Enable::kOn);
+        enableWritten(sequence, enable == Enable::kOn);
+    }
     IOSimpleLockUnlockEnableInterrupt(lock, state);
     if (release)
         native_legacy_frame_end_release();
-    if (!attached || !mayRequest || want == hwEnabled || (want && !ready))
+    if (enable == Enable::kKeep)
         return;
-    writeEnable(want);
-    hwEnabled = want;
-    if (!want) {
-        if (announced)
+    if (enable == Enable::kOff) {
+        if (announced && !want)
             IOLog("SwitchDisplay: colour CMU off\n");
-        announced = false;
+        announced = announced && want;
         return;
     }
+    if (announced)
+        return;
     announced = ((reasons & ~kReasonBlank) != 0u);
     if (!announced)
         return;
@@ -334,12 +402,11 @@ void TegraDisplayColor::frameEndAction(bool mayRequest)
 void TegraDisplayColor::restoreAfterPowerUp()
 {
     const IOInterruptState state = IOSimpleLockLockDisableInterrupt(lock);
-    hwEnabled = activeValid = false;
+    sequence = Sequence();
     if (dc && pending.enabled) {
         writeTables(pending, nullptr);
         active = pending;
-        activeValid = hwEnabled = true;
-        pendingDirty = false;
+        sequence.activeValid = sequence.enableAsked = true;
         dc[kDcDispColorControl] = colorControl | kCmuEnable;
     }
     IOSimpleLockUnlockEnableInterrupt(lock, state);

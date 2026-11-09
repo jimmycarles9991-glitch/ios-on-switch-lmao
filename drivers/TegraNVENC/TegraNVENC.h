@@ -24,6 +24,11 @@ struct TegraNVENCBlock {
 // Resolves a submit's buffer handle; every user client supplies its own.
 typedef bool (*TegraNVENCResolve)(void *context, uint32_t handle, TegraNVENCBlock *block);
 
+// The codecs Submit takes and GetInfo reports (bit n: TEGRA_NVENC_CODEC_* n). H.265's checker and setup are in the
+// tree (TegraNVENCCheckH265.h, AVE/HEVCNVENC.c) but it is not offered until its P pictures are established and its
+// IDR setup has run on the unit (nvidia/SOURCE-H265).
+constexpr uint32_t kTegraNVENCCodecs = 1u << TEGRA_NVENC_CODEC_H264;
+
 extern "C" {
 // NVENC's address space (E1): its tables, the firmware, setup slots and scratch identity-mapped, the swgroup translated.
 // 0, or -1 with one line in `line`. Detach puts the swgroup back in bypass (sleep); attach undoes it.

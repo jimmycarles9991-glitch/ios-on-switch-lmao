@@ -303,6 +303,20 @@ TEST(XnuUiScale, GridScaleMatchesTheAssembler)
               (std::vector<uint8_t>{0x09, 0x41, 0x60, 0x1e, 0x80, 0x01, 0x00, 0x37, 0x0b, 0x10, 0x69, 0x1e}));
 }
 
+TEST(XnuUiScale, GridPageScaleMatchesTheAssembler)
+{
+    // clang -arch arm64: fmov d1, #0.25 / #0.1875; fabs d2, d2; fcmp d2, d3; fcsel d8, d1, d8, gt; fmul d0, d8, d2;
+    // frinta d0, d0; fdiv d0, d0, d2; fminnm d0, d0, d2
+    const std::vector<uint8_t> rest = {0x42, 0xc0, 0x60, 0x1e, 0x40, 0x20, 0x63, 0x1e, 0x28, 0xcc,
+                                       0x68, 0x1e, 0x00, 0x09, 0x62, 0x1e, 0x00, 0x40, 0x66, 0x1e,
+                                       0x00, 0x18, 0x62, 0x1e, 0x00, 0x78, 0x62, 0x1e};
+    std::vector<uint8_t> quarter = {0x01, 0x10, 0x6a, 0x1e}, three_sixteenths = {0x01, 0x10, 0x69, 0x1e};
+    quarter.insert(quarter.end(), rest.begin(), rest.end());
+    three_sixteenths.insert(three_sixteenths.end(), rest.begin(), rest.end());
+    EXPECT_EQ(EditBytes(SWITCH_US_GRID_PAGE_SCALE, Named("1.25"), 32), quarter);
+    EXPECT_EQ(EditBytes(SWITCH_US_GRID_PAGE_SCALE, Named("1.6"), 32), three_sixteenths);
+}
+
 TEST(XnuUiScale, AWrongLengthOrAFixedEditWritesNothing)
 {
     uint8_t out[20] = {};
@@ -312,6 +326,8 @@ TEST(XnuUiScale, AWrongLengthOrAFixedEditWritesNothing)
     EXPECT_FALSE(switch_ui_scale_edit_bytes(SWITCH_US_BATTERY_FILL, Named("1.25"), out, 20));
     EXPECT_FALSE(switch_ui_scale_edit_bytes(SWITCH_US_GRID_SCALE, Named("1.25"), out, 16));
     EXPECT_FALSE(switch_ui_scale_edit_bytes(SWITCH_US_GRID_SCALE, Named("1"), out, 12));
+    EXPECT_FALSE(switch_ui_scale_edit_bytes(SWITCH_US_GRID_PAGE_SCALE, Named("1.25"), out, 12));
+    EXPECT_FALSE(switch_ui_scale_edit_bytes(SWITCH_US_GRID_PAGE_SCALE, Named("1"), out, 32));
     EXPECT_FALSE(switch_ui_scale_edit_bytes(SWITCH_US_EXPANDED_BATTERY_HEIGHT, Named("1.25"), out, 4));
     EXPECT_FALSE(switch_ui_scale_edit_bytes(SWITCH_US_EXPANDED_BATTERY_LINE, Named("1.25"), out, 16));
     EXPECT_FALSE(switch_ui_scale_edit_bytes(SWITCH_US_FIXED, Named("1.6"), out, 12));

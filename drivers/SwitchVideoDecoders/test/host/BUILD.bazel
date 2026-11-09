@@ -10,6 +10,8 @@
 #   hevc_host_test         HEVCSyntax/HEVCNVDEC over FFmpeg's own trace (../HEVCTrace.h, ../HEVCClip.h from
 #                          ../hevcgen): every slice header field NVDEC is given equals FFmpeg's, pictures in FFmpeg's
 #                          order, every submit accepted by the kernel's checker, which refuses each bad one
+#   avd_register_host_test AVDRegister's hardware entries per process: where it may open TegraNVDEC, or where its
+#                          sessions run in videocodecd
 #   avd_host_test          AVD.videodecoder itself on this Mac's VideoToolbox over a fake TegraNVDEC client: the
 #                          plug-in's class layout, session calls and property answers for 'avc1', 'vp09' and 'hvc1', its
 #                          fall-back onto Apple's software decoders, VIC's present and the private check's gate
@@ -189,6 +191,30 @@ host_library(
 )
 
 host_library(
+    name = "avd_register_host",
+    srcs = [
+        "avd_register_host.c",
+        "//drivers/SwitchVideoDecoders:AVD/AVDDecoder.h",
+        "//drivers/SwitchVideoDecoders:AVD/AVDRegister.c",
+        "//drivers/SwitchVideoDecoders:AVD/NVDECClient.h",
+        "//drivers/SwitchVideoDecoders:AVD/VTDecoderSPI.h",
+        "//kits/SwitchRefusal:SwitchRefusal.c",
+        "//kits/SwitchRefusal:SwitchRefusal.h",
+    ],
+    copts = ["-O1"],
+    defines = ["main=avd_register_host_main"],
+    linkopts = FRAMEWORKS + [
+        "-framework",
+        "Security",
+    ],
+    deps = [
+        ":h264",
+        ":hevc",
+        ":vp9",
+    ],
+)
+
+host_library(
     name = "vdectest",
     srcs = ["//drivers/SwitchVideoDecoders:test/vdectest.c"],
     copts = ["-O1"],
@@ -205,6 +231,7 @@ host_library(
     deps = [":" + host],
 ) for host in [
     "avd_host",
+    "avd_register_host",
     "blocklinear_host",
     "h264_host",
     "hevc_host",

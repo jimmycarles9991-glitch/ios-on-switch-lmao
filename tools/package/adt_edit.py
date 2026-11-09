@@ -6,8 +6,7 @@ The iPad's identity (model, board, SoC, /product) is read from Apple's device tr
 --smp, all four A57s.
 
     adt_edit.py --adt BASE --apple-adt APPLE --overlay-plan PLAN --bt-patch HCD --portrait-header H
-                --root-volume-uuid UUID [--smp] [--a64x-cache-pretranslated LIST] [--switch-pretranslated-trust MODULE]
-                [--switch-os-cryptex-trust MODULE]... [--switch-app-cryptex-trust MODULE]... --out ADT
+                --root-volume-uuid UUID [--smp] [--a64x-cache-pretranslated LIST] [--cdhashes ROLE=MODULE]... --out ADT
 """
 
 import argparse
@@ -27,7 +26,8 @@ from loader_abi import (
 )
 from native_oled_adt import property_bytes, root_matching
 from native_xnu_layout import parse_adt
-from trust import im4p_payload
+
+from tools.trustcache.trustcache import cdhash_list
 
 # USB 2.0 device mode on the USB-C port (drivers/SwitchUSB): the USB function set configd's USBDeviceConfiguration
 # plug-in gives Apple's IOUSBDeviceFamily, by name from /System/Library/AppleUSBDevice/USBDeviceConfiguration.plist.
@@ -103,6 +103,12 @@ PRODUCT_IDENTITY = (
 # is acoustic-id, which iOS 27's VirtualAudio takes its tunings directory from (J181's 2003:
 # /Library/Audio/Tunings/AID2003). J120 has none and its tunings are named by the model.
 AUDIO_IDENTITY = ('acoustic-id',)
+# libMobileGestalt (21H461 and 24B119 alike) takes the syscfg from /chosen/syscfg-v2-data, else from the
+# AppleDiagnosticDataAccessReadOnly service (Apple's kext over the iPad's NAND, absent here), and otherwise waits 5 s
+# for that service to appear. Without this every syscfg question stalled its asker 5 s: backboardd's display setup,
+# long enough for Core Animation clients (chronod, contextstored, replicatord) to abort in +[CADisplay displays].
+# MobileGestalt reads only the magic ('SCfg') and the entry count: a header of 24 bytes with no entries.
+SYSCFG_EMPTY = struct.pack('<6I', 0x53436667, 24, 24, 0, 0, 0)
 
 
 def adt_parse(data: bytes, pos: int = 0) -> tuple[list, int]:
@@ -203,6 +209,7 @@ def _chosen(tree: list, portrait: bool) -> list:
     # Locally administered addresses; MobileGestalt waits on these when they are missing.
     for index, key in enumerate(('mac-address-wifi0', 'mac-address-bluetooth0', 'mac-address-ethernet0')):
         put(chosen, key, bytes([0x02, 0x1D, 0x5A, 0x00, 0x00, index + 1]))
+    put(chosen, 'syscfg-v2-data', SYSCFG_EMPTY)
     for key in ('certificate-production-status', 'effective-production-status-ap'):
         put(chosen, key, u32(0))
     for key in ('certificate-security-mode', 'effective-security-mode-sep'):
@@ -211,6 +218,19 @@ def _chosen(tree: list, portrait: bool) -> list:
     # before patching text). No CTRR here, but the kernel maps its text read-only all the same.
     put(chosen, 'kernel-ctrr-to-be-enabled', u32(1))
     return chosen
+
+
+# CoreBrightness reads default-whitepoint-type from the backlight service and its parents, which on the iPad is the
+# /backlight node: 1 is D65, absent its legacy 7059 K white. A /backlight node here would be published as a nub that the
+# platform's own backlight could match, so the iPad's value rides in /chosen and SwitchBacklight publishes it.
+# Property names are at most 31 bytes, hence the short name.
+WHITEPOINT_TYPE = 'switch-whitepoint-type'
+
+
+def _backlight(tree: list, apple: list) -> None:
+    identity = apple_properties(apple, '/backlight')
+    if 'default-whitepoint-type' in identity:
+        put(child(tree, 'chosen'), WHITEPOINT_TYPE, identity['default-whitepoint-type'])
 
 
 def _product(tree: list, apple: list) -> None:
@@ -391,6 +411,7 @@ def with_ipad_identity(data: bytes, apple: bytes) -> bytes:
         raise SystemExit("trailing bytes after Apple's device tree")
     _identity(tree, ipad)
     _product(tree, ipad)
+    _backlight(tree, ipad)
     # IOPlatformExpertDevice carries the root's properties; MobileGestalt's HardwarePlatform is its platform-name, which
     # iBoot sets to the SoC. Without it CoreVideo, AMS and the store's user agent read NULL.
     soc = platform_name(ipad)
@@ -431,35 +452,26 @@ def with_a64x_cache_pretranslated(data: bytes, cache: bytes) -> bytes:
     return adt_serialize(tree)
 
 
-def with_switch_pretranslated_trust(data: bytes, module: bytes) -> bytes:
-    """Return the ADT with iOS 27's /chosen/switch-pretranslated-trust.
+# The roles whose files the kernel authenticates by CDHash (kernel/switch/vfs/auth_fs.c, pretranslated.c): the System
+# and App cryptexes' mounts and iOS 27's pretranslated tree.
+CDHASH_ROLES = ('os-cryptex', 'app-cryptex', 'pretranslated')
 
-    That is the UUID of the trust module of the System volume's translated executables (the os role's), which the
-    kernel's lookup redirect requires loaded and checks each such executable's CDHash against
-    (bsd/vfs/vfs_switch_pretranslated.c).
+
+def with_cdhash_lists(data: bytes, modules: dict[str, Sequence[bytes]]) -> bytes:
+    """Return the ADT with /chosen/switch-<role>-cdhashes: the CDHashes of each role's trust modules, ascending.
+
+    Every module is also in the bundle's one static module (trust.py); the kernel finds a file's CDHash in its role's
+    list by binary search (kits/SwitchCDHash).
     """
-    if len(module) < 24 or struct.unpack_from('<I', module)[0] != 2:
-        raise SystemExit(f'switch-pretranslated-trust: {len(module)} bytes, not a version 2 trust module')
     tree, _ = adt_parse(data)
-    put(child(tree, 'chosen'), 'switch-pretranslated-trust', module[4:20])
-    return adt_serialize(tree)
-
-
-def with_cryptex_trust(data: bytes, cryptex: str, modules: Sequence[bytes]) -> bytes:
-    """Return the ADT with /chosen/switch-<cryptex>-cryptex-trust, the UUIDs of the trust modules of its code.
-
-    Each is Apple's IM4P of the cryptex's trust cache or iOS 27's pretranslated module of it. The kernel answers
-    FSIOC_AUTH_FS for a file of that cryptex's mount signed with a CDHash from one of them
-    (kernel/switch/vfs/auth_fs.c), as APFS does for a grafted cryptex's files.
-    """
-    uuids = b''
-    for data_or_im4p in modules:
-        module = im4p_payload(data_or_im4p) if data_or_im4p[:1] == b'\x30' else data_or_im4p
-        if len(module) < 24 or struct.unpack_from('<I', module)[0] not in (1, 2):
-            raise SystemExit(f'{cryptex} cryptex trust: {len(module)} bytes, not a version 1 or 2 trust module')
-        uuids += module[4:20]
-    tree, _ = adt_parse(data)
-    put(child(tree, 'chosen'), f'switch-{cryptex}-cryptex-trust', uuids)
+    chosen = child(tree, 'chosen')
+    for role, role_modules in modules.items():
+        if role not in CDHASH_ROLES:
+            raise SystemExit(f'--cdhashes: unknown role {role}')
+        listed = cdhash_list(role_modules)
+        if not listed:
+            raise SystemExit(f'switch-{role}-cdhashes: no CDHashes')
+        put(chosen, f'switch-{role}-cdhashes', listed)
     return adt_serialize(tree)
 
 
@@ -471,9 +483,9 @@ def main() -> None:
     parser.add_argument('--smp', action='store_true')
     parser.add_argument('--boot-manifest-hash', action='store_true', help='a zeroed slot the layout step fills')
     parser.add_argument('--a64x-cache-pretranslated', type=Path)
-    parser.add_argument('--switch-pretranslated-trust', type=Path)
-    for cryptex in ('os', 'app'):
-        parser.add_argument(f'--switch-{cryptex}-cryptex-trust', type=Path, action='append', default=[])
+    parser.add_argument(
+        '--cdhashes', action='append', default=[], metavar='ROLE=MODULE', help='a trust module of a role, repeatable'
+    )
     args = parser.parse_args()
     dirs = [tuple(d) for d in json.loads(args.overlay_plan.read_text())['dirs']]
     adt = ipad_adt(
@@ -489,11 +501,12 @@ def main() -> None:
         adt = with_boot_manifest_hash_slot(adt)
     if args.a64x_cache_pretranslated:
         adt = with_a64x_cache_pretranslated(adt, args.a64x_cache_pretranslated.read_bytes())
-    if args.switch_pretranslated_trust:
-        adt = with_switch_pretranslated_trust(adt, args.switch_pretranslated_trust.read_bytes())
-    for cryptex in ('os', 'app'):
-        if modules := getattr(args, f'switch_{cryptex}_cryptex_trust'):
-            adt = with_cryptex_trust(adt, cryptex, [path.read_bytes() for path in modules])
+    if args.cdhashes:
+        modules = {}
+        for given in args.cdhashes:
+            role, _, path = given.partition('=')
+            modules.setdefault(role, []).append(Path(path).read_bytes())
+        adt = with_cdhash_lists(adt, modules)
     if ('/filesystems', 'DoNotUseSEP') not in parse_adt(adt).properties:
         raise SystemExit('ADT patch failed')
     args.out.write_bytes(adt)

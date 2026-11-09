@@ -51,6 +51,8 @@ void traceSurfaceImage(RMTexture *t, const char *what, uint32_t seed)
 - (void)dealloc
 {
     _twin = nil;
+    if (_heap && !_raw.arena)
+        _heap->_used -= _heapBytes;
     if (_rawOk && _surface && _raw.converted())
         surfaceConverted(_surface, false);
     if (_rawOk)
@@ -100,7 +102,15 @@ void traceSurfaceImage(RMTexture *t, const char *what, uint32_t seed)
             }
             break;
         case RMTextureView:
-            made = [(id<MTLTexture>)[_parent rmTwin] newTextureViewWithPixelFormat:_descriptor.pixelFormat];
+            made = _viewPart ? [(id<MTLTexture>)[_parent rmTwin] newTextureViewWithPixelFormat:_descriptor.pixelFormat
+                                                                                   textureType:_descriptor.textureType
+                                                                                        levels:_viewLevels
+                                                                                        slices:_viewSlices]
+                             : [(id<MTLTexture>)[_parent rmTwin] newTextureViewWithPixelFormat:_descriptor.pixelFormat];
+            if (made && !identitySwizzle(_descriptor.swizzle))  // m2v's texture makes no swizzled view
+                SWITCH_REFUSE_DETAIL("raw", "tex.swizzle", _descriptor.pixelFormat,
+                                     "a swizzled view of format %lu: m2v's work samples it unswizzled",
+                                     (unsigned long)_descriptor.pixelFormat);
             break;
         case RMTextureMemoryless:
             made = [m2v newTextureWithDescriptor:_descriptor];
@@ -140,7 +150,7 @@ void traceSurfaceImage(RMTexture *t, const char *what, uint32_t seed)
 
 - (NSUInteger)heapOffset
 {
-    return 0;  // a heap's textures are allocations of their own (RMHeap)
+    return _raw.arena && _raw.span.valid() ? NSUInteger(_raw.span.offset) : 0;
 }
 
 // Answered here, not by the twin (a residency set's allocatedSize sums its allocations'): the memory this texture owns. A view and
@@ -279,6 +289,8 @@ void traceSurfaceImage(RMTexture *t, const char *what, uint32_t seed)
 
 - (MTLPurgeableState)setPurgeableState:(MTLPurgeableState)state
 {
+    if (_heap)
+        return [(id<MTLHeap>)_heap setPurgeableState:MTLPurgeableStateKeepCurrent];
     const MTLPurgeableState old = _purgeable ? _purgeable : MTLPurgeableStateNonVolatile;
     if (state != MTLPurgeableStateKeepCurrent)
         _purgeable = state == MTLPurgeableStateEmpty ? MTLPurgeableStateVolatile : state;
@@ -286,16 +298,24 @@ void traceSurfaceImage(RMTexture *t, const char *what, uint32_t seed)
 }
 
 - (void)makeAliasable
-{}
+{
+    if (!_heap || _aliasable)
+        return;
+    _aliasable = true;
+    if (_raw.arena)
+        gRM->raw->arenaRelease(_raw);
+    _heap->_used -= _heapBytes;
+    _heapBytes = 0;
+}
 
 - (BOOL)isAliasable
 {
-    return NO;
+    return _aliasable;
 }
 
 - (id<MTLHeap>)heap
 {
-    return nil;
+    return (id<MTLHeap>)_heap;
 }
 
 // CPU writes into the texture's own pages (level 0, slice 0, a 2D texture), cleaned to memory at once: a later command buffer's
@@ -311,6 +331,16 @@ void traceSurfaceImage(RMTexture *t, const char *what, uint32_t seed)
         noteSurfaceWrite(_surface);
     if (_rawOk && _raw.chain && !slice && r.size.depth <= 1) {
         cpuLevel(self, r, level, (uint8_t *)bytes, row, true);
+        return;
+    }
+    if (_rawOk && _raw.type == raw::fx::kTexThreeD && !level && !slice && r.origin.x + r.size.width <= _raw.width &&
+        r.origin.y + r.size.height <= _raw.height && r.origin.z + r.size.depth <= _raw.depth) {
+        cpuVolume(self, r, (uint8_t *)bytes, row, image, true);
+        return;
+    }
+    if (_rawOk && _raw.layers > 1 && !level && slice < _raw.layers && r.size.depth <= 1 &&
+        r.origin.x + r.size.width <= _raw.width && r.origin.y + r.size.height <= _raw.height) {
+        cpuLayer(self, r, slice, (uint8_t *)bytes, row, true);
         return;
     }
     if (!_rawOk || level || slice || r.size.depth > 1 || !_raw.cpu) {
@@ -363,6 +393,16 @@ void traceSurfaceImage(RMTexture *t, const char *what, uint32_t seed)
         cpuLevel(self, r, level, (uint8_t *)bytes, row, false);
         return;
     }
+    if (_rawOk && _raw.type == raw::fx::kTexThreeD && !level && !slice && r.origin.x + r.size.width <= _raw.width &&
+        r.origin.y + r.size.height <= _raw.height && r.origin.z + r.size.depth <= _raw.depth) {
+        cpuVolume(self, r, (uint8_t *)bytes, row, image, false);
+        return;
+    }
+    if (_rawOk && _raw.layers > 1 && !level && slice < _raw.layers && r.size.depth <= 1 &&
+        r.origin.x + r.size.width <= _raw.width && r.origin.y + r.size.height <= _raw.height) {
+        cpuLayer(self, r, slice, (uint8_t *)bytes, row, false);
+        return;
+    }
     if (!_rawOk || level || slice || r.size.depth > 1 || !_raw.cpu) {
         [(id<MTLTexture>)[self rmTwin] getBytes:bytes
                                     bytesPerRow:row
@@ -396,9 +436,48 @@ void traceSurfaceImage(RMTexture *t, const char *what, uint32_t seed)
     [self getBytes:bytes bytesPerRow:row bytesPerImage:0 fromRegion:r mipmapLevel:level slice:0];
 }
 
+bool identitySwizzle(MTLTextureSwizzleChannels s)
+{
+    return s.red == MTLTextureSwizzleRed && s.green == MTLTextureSwizzleGreen && s.blue == MTLTextureSwizzleBlue &&
+           s.alpha == MTLTextureSwizzleAlpha;
+}
+
+id<MTLTexture> swizzled(id<MTLTexture> t, MTLTextureSwizzleChannels s)
+{
+    RMTexture *x = [(id)t isKindOfClass:[RMTexture class]] ? (RMTexture *)t : nil;
+    if (!x || identitySwizzle(s))
+        return t;
+    x->_descriptor.swizzle = s;
+    const uint8_t channels[4] = {uint8_t(s.red), uint8_t(s.green), uint8_t(s.blue), uint8_t(s.alpha)};
+    if (x->_rawOk)
+        gRM->raw->swizzle(x->_raw, channels);
+    return t;
+}
+
+// The header type of a view of `type` (-1: one the raw path makes none of)
+static int viewHeaderType(MTLTextureType type)
+{
+    switch (type) {
+    case MTLTextureType1D:
+        return raw::fx::kTexOneD;
+    case MTLTextureType1DArray:
+        return raw::fx::kTexOneDArray;
+    case MTLTextureType2D:
+        return raw::fx::kTexTwoD;
+    case MTLTextureType2DArray:
+        return raw::fx::kTexTwoDArray;
+    case MTLTextureTypeCube:
+        return raw::fx::kTexCube;
+    case MTLTextureTypeCubeArray:
+        return raw::fx::kTexCubeArray;
+    default:
+        return -1;
+    }
+}
+
 // A view: the same memory under another format's header (raw), or m2v's view of the twin
-// A view of all of it, as its own type: the format view. Of a part of it, or another type: m2v's view of the twin, which raw
-// command buffers refuse (tex.view, b 3)
+// A view of all of it, as its own type: the format view. Of a part of it, or another type: a header over that part
+// (raw::Device::createPartView), else m2v's view of the twin, which raw command buffers refuse (tex.view, b 3)
 - (id<MTLTexture>)newTextureViewWithPixelFormat:(MTLPixelFormat)format
                                     textureType:(MTLTextureType)type
                                          levels:(NSRange)levels
@@ -410,28 +489,57 @@ void traceSurfaceImage(RMTexture *t, const char *what, uint32_t seed)
     if (type == _descriptor.textureType && !levels.location && levels.length == _descriptor.mipmapLevelCount &&
         !slices.location && slices.length == allSlices)
         return [self newTextureViewWithPixelFormat:format];
-    id twin = [(id<MTLTexture>)[self rmTwin] newTextureViewWithPixelFormat:format
-                                                               textureType:type
-                                                                    levels:levels
-                                                                    slices:slices];
-    if (!twin)
-        return nil;
     RMTexture *v = [RMTexture new];
     v->_device = _device;
     v->_descriptor = [_descriptor copy];
     v->_descriptor.pixelFormat = format;
     v->_descriptor.textureType = type;
     v->_descriptor.mipmapLevelCount = levels.length;
+    v->_descriptor.width = std::max<NSUInteger>(_descriptor.width >> levels.location, 1);
+    v->_descriptor.height = std::max<NSUInteger>(_descriptor.height >> levels.location, 1);
+    if (type == MTLTextureType3D)
+        v->_descriptor.depth = std::max<NSUInteger>(_descriptor.depth >> levels.location, 1);
     const bool viewCube = type == MTLTextureTypeCube || type == MTLTextureTypeCubeArray;
     v->_descriptor.arrayLength = std::max<NSUInteger>(viewCube ? slices.length / 6 : slices.length, 1);
     v->_kind = RMTextureView;
     v->_parent = self;
-    v->_twin = twin;
+    v->_viewPart = true;
+    v->_viewLevels = levels;
+    v->_viewSlices = slices;
+    const int header = viewHeaderType(type);
+    if (_rawOk && header >= 0 && raw::formatInfo(uint32_t(format)))
+        v->_rawOk = gRM->raw->createPartView(_raw, uint32_t(format), uint32_t(header), uint32_t(levels.location),
+                                             uint32_t(levels.length), uint32_t(slices.location),
+                                             uint32_t(slices.length), v->_raw);
+    if (v->_rawOk)
+        return (id<MTLTexture>)v;
+    if (![v rmTwin])
+        return nil;
     refuseTexture(v, PredTexView, format, 3, @"view of a part",
                   [NSString stringWithFormat:@"type %lu levels %lu+%lu slices %lu+%lu", (unsigned long)type,
                                              (unsigned long)levels.location, (unsigned long)levels.length,
                                              (unsigned long)slices.location, (unsigned long)slices.length]);
     return (id<MTLTexture>)v;
+}
+
+// A swizzled view: the view, its header reading its channels so. m2v's texture answers nil to this, so a view the raw path does
+// not hold is m2v's unswizzled one, said so.
+- (id<MTLTexture>)newTextureViewWithPixelFormat:(MTLPixelFormat)format
+                                    textureType:(MTLTextureType)type
+                                         levels:(NSRange)levels
+                                         slices:(NSRange)slices
+                                        swizzle:(MTLTextureSwizzleChannels)swizzle
+{
+    RMTexture *v = (RMTexture *)[self newTextureViewWithPixelFormat:format
+                                                        textureType:type
+                                                             levels:levels
+                                                             slices:slices];
+    if (v && !v->_rawOk && !identitySwizzle(swizzle))
+        SWITCH_REFUSE_DETAIL("raw", "tex.swizzle", format,
+                             "a swizzled view of format %lu, type %lu, over a texture the raw path does not hold: m2v "
+                             "samples it unswizzled",
+                             (unsigned long)format, (unsigned long)type);
+    return swizzled((id<MTLTexture>)v, swizzle);
 }
 
 - (id<MTLTexture>)newTextureViewWithPixelFormat:(MTLPixelFormat)format

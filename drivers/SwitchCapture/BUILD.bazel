@@ -1,0 +1,11 @@
+# iOS 27's camera description of J181 for a Switch, which has no camera (overlay/manifest.json).
+load("//bazel/lint:defs.bzl", "lint_files")
+
+package(default_visibility = ["//visibility:public"])
+
+lint_files()
+
+filegroup(
+    name = "overlay_files",
+    srcs = ["J181/AVCaptureSession.plist"],
+)

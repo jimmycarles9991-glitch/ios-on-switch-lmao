@@ -6,9 +6,11 @@
 // path renders would land beside where the next draw samples them.
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <tuple>
 #include <vector>
 
 #include "../raw/runtime/raw_target.h"
@@ -160,6 +162,78 @@ TEST(RawTarget, CpuLevelCopyFollowsTheLayout)
                 EXPECT_GE(untouched, c.bytes - written) << "bytes outside the regions were written";
             }
     std::printf("%u texel bytes copied by the CPU where the layout has them\n", checked);
+}
+
+// bits [lo, hi] of a 256-bit texture header
+uint64_t headerField(const uint32_t w[8], unsigned hi, unsigned lo)
+{
+    uint64_t v = 0;
+    for (unsigned b = hi + 1; b-- > lo;)
+        v = v << 1 | (w[b / 32] >> (b % 32) & 1);
+    return v;
+}
+
+// What NVK reports for Core Animation's backdrop chains (raw/fx/test/niloracle.c, formats 44 and 97, 776x24x10): each level's
+// offset and row pitch, and the image's size
+struct NilLevel {
+    uint64_t offset;
+    uint32_t rowPitch;
+};
+
+const NilLevel kNilBgra8[] = {{0, 3136},     {100352, 1600}, {125952, 832}, {132608, 448}, {136192, 192},
+                              {137728, 128}, {138752, 64},   {139264, 64},  {139776, 64},  {140288, 64}};
+const NilLevel kNilRgba16f[] = {{0, 6208},     {198656, 3136}, {248832, 1600}, {261632, 832}, {268288, 384},
+                                {271360, 192}, {272896, 128},  {273920, 64},   {274432, 64},  {274944, 64}};
+
+// The chain's texture header names level 0 alone (address, block height, extent, last level); the texture unit finds level n
+// by NIL's rule from it: levels packed in order, rows whole GOBs, level 0's block height clamped to the level. The target a
+// pass renders that level through must be the same bytes, and the header of the level alone (Device::levelTic, what a
+// framebuffer fetch from the level reads) must be the chain's own header narrowed to that level.
+TEST(RawTarget, BackdropChainLevelsAreWhereTheHeaderSamplesThem)
+{
+    const uint64_t chainVa = 0x2000000000ull;
+    for (const auto &[bpp, nil, bytes] :
+         {std::tuple{4u, kNilBgra8, 143360ull}, std::tuple{8u, kNilRgba16f, 278528ull}}) {
+        raw::fx::MipChain c;
+        ASSERT_TRUE(raw::fx::mipChainLayout(776, 24, 10, bpp, c));
+        EXPECT_EQ(c.bytes, bytes);
+        uint32_t chain[8];
+        raw::fx::mipChainTic(c, chainVa, 0, false, 0, c.levels, chain);
+        const uint64_t base = headerField(chain, 79, 64) << 32 | headerField(chain, 63, 41) << 9;
+        const uint32_t width = uint32_t(headerField(chain, 143, 128)) + 1,
+                       height = uint32_t(headerField(chain, 175, 160)) + 1;
+        const uint32_t y0 = uint32_t(headerField(chain, 101, 99)), last = uint32_t(headerField(chain, 127, 124));
+        EXPECT_EQ(base, chainVa);
+        EXPECT_EQ(last, c.levels - 1);
+        uint64_t at = 0;
+        for (uint32_t l = 0; l <= last; l++) {
+            const uint32_t lw = std::max(1u, width >> l), lh = std::max(1u, height >> l);
+            uint32_t y = 0;
+            while ((1u << y) < (lh + 7) / 8)
+                y++;
+            y = std::min(y, y0);
+            const uint32_t rowBytes = (lw * bpp + 63) / 64 * 64, rows = (lh + (8u << y) - 1) / (8u << y) * (8u << y);
+            EXPECT_EQ(at, nil[l].offset) << "bpp " << bpp << " level " << l;
+            EXPECT_EQ(rowBytes, nil[l].rowPitch) << "bpp " << bpp << " level " << l;
+            if (l) {
+                raw::ColorTargetDesc d;
+                ASSERT_TRUE(raw::chainLevelDesc(c, chainVa, l, 0xcf, d));
+                uint32_t w[raw::kColorTargetWords];
+                raw::colorTargetWords(d, w);
+                EXPECT_EQ(uint64_t(w[0]) << 32 | w[1], chainVa + at) << "bpp " << bpp << " level " << l;
+                EXPECT_EQ(w[2] * bpp, rowBytes) << "bpp " << bpp << " level " << l;
+                EXPECT_EQ(w[3], lh) << "bpp " << bpp << " level " << l;
+                EXPECT_EQ(w[5] >> 4 & 0xf, y) << "bpp " << bpp << " level " << l;
+                uint32_t alone[8];
+                raw::fx::mipChainTic(c, chainVa, 0, false, l, 1, alone);
+                EXPECT_EQ(headerField(alone, 227, 224), l);
+                EXPECT_EQ(headerField(alone, 231, 228), l);
+                for (int k = 0; k < 7; k++)
+                    EXPECT_EQ(alone[k], chain[k]) << "bpp " << bpp << " level " << l << " word " << k;
+            }
+            at += uint64_t(rowBytes) * rows;
+        }
+    }
 }
 
 }  // namespace

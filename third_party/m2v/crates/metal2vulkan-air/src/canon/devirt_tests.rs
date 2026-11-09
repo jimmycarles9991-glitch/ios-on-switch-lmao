@@ -230,6 +230,7 @@ fn candidates() -> LinkedModule {
             .zip(2..)
             .map(|(name, word)| LinkedName {
                 name: name.as_bytes().into(),
+                symbol: name.as_bytes().into(),
                 constants: Ok(BTreeMap::new()),
                 handle: Some(word),
             })
@@ -385,6 +386,7 @@ fn an_unimportable_candidate_is_refused_at_a_surviving_call() {
     let broken = || LinkedModule {
         functions: vec![LinkedName {
             name: b"inc".as_slice().into(),
+            symbol: b"inc".as_slice().into(),
             constants: Ok(BTreeMap::new()),
             handle: Some(2),
         }],
@@ -466,6 +468,7 @@ fn a_candidate_calling_through_its_table_recurses_on_a_call_stack() {
     let linked = LinkedModule {
         functions: vec![LinkedName {
             name: b"rec".as_slice().into(),
+            symbol: b"rec".as_slice().into(),
             constants: Ok(BTreeMap::new()),
             handle: Some(2),
         }],
@@ -737,6 +740,7 @@ fn pointer_candidates() -> LinkedModule {
             .zip(2..)
             .map(|(name, word)| LinkedName {
                 name: name.as_bytes().into(),
+                symbol: name.as_bytes().into(),
                 constants: Ok(BTreeMap::new()),
                 handle: Some(word),
             })
@@ -1401,6 +1405,7 @@ fn inlining_candidates_at_every_table_call_is_capped() {
     let linked = LinkedModule {
         functions: vec![LinkedName {
             name: b"big".as_slice().into(),
+            symbol: b"big".as_slice().into(),
             constants: Ok(BTreeMap::new()),
             handle: Some(2),
         }],

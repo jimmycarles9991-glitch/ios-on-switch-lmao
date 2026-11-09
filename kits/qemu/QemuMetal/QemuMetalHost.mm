@@ -1099,12 +1099,14 @@ static void handle(uint32_t op, const std::vector<unsigned char> &in, Out &out)
             return p;
         };
         NSString *name = [NSString stringWithUTF8String:(const char *)take(f.nameBytes)];
+        NSString *specialized =
+            f.specializedBytes ? [NSString stringWithUTF8String:(const char *)take(f.specializedBytes)] : nil;
         if (gVerbose)
             note("  function %s in %s, %llu constants", name.UTF8String, owner.label.UTF8String ?: "?", f.constants);
         id<MTLFunction> function = nil;
         NSError *error = nil;
         NSMutableString *constants = [NSMutableString string];  // for a refusal's text
-        if (!f.constants)
+        if (!f.constants && !specialized)
             function = [owner newFunctionWithName:name];
         else {
             MTLFunctionConstantValues *values = [MTLFunctionConstantValues new];
@@ -1120,7 +1122,11 @@ static void handle(uint32_t op, const std::vector<unsigned char> &in, Out &out)
                                         constantName ?: [NSString stringWithFormat:@"#%llu", c.index].UTF8String,
                                         c.type];
             }
-            function = [owner newFunctionWithName:name constantValues:values error:&error];
+            MTLFunctionDescriptor *d = [MTLFunctionDescriptor functionDescriptor];
+            d.name = name;
+            d.specializedName = specialized;
+            d.constantValues = values;
+            function = [owner newFunctionWithDescriptor:d error:&error];
         }
         // Metal's own text for a name the library has not (QemuMetalLibraries.mm makes it Metal's error again: Core Image goes on to its
         // next library only on that one).

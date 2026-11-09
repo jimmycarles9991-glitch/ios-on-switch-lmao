@@ -12,6 +12,7 @@
 #include <string>
 #include <vector>
 #include "../runtime/raw_pack.h"
+#include "../pack/probe_record.h"
 #include "../runtime/raw_record.h"
 
 namespace probelogs {
@@ -101,12 +102,16 @@ inline bool loadRun(const std::string &dir, const std::string &name, Run &run)
         }
     std::vector<nvdec::ProbeSubmission> subs(1);
     nvdec::ProbeRecord *rec = nullptr;
+    bool held = false;  // the submission has a line: one with none is m2v's empty one, not a probe's (probelog.py)
     for (std::string line; std::getline(log, line);) {
         nvdec::ProbeSubmission &s = subs.back();
         if (line.rfind("SUBMIT", 0) == 0) {
-            subs.emplace_back();
+            if (held)
+                subs.emplace_back();
+            held = false;
             continue;
         }
+        held = true;
         if (line.rfind("S regs 0 ", 0) == 0)
             run.context = pairs(fields(line), 3);
         else if (line.rfind("DRAW", 0) == 0)

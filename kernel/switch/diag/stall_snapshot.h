@@ -93,6 +93,7 @@ void switch_stall_put_wait(struct stall_line *l, const struct stall_snapshot *ss
 /* "<label> continuation 0x...;" or "<label> 0x... 0x...;" (unslid) */
 void switch_stall_put_kernel(struct stall_line *l, const char *label, const struct stall_wait *w);
 /* " user pc ... lr ..., frames ..." (copyin: thread context) */
+void switch_stall_put_address(struct stall_line *l, task_t task, const char *label, uint64_t pc);
 void switch_stall_put_user(struct stall_line *l, const struct stall_snapshot *ss);
 void switch_stall_put_census(struct stall_line *l, const struct stall_cpu cpus[STALL_CPUS]);
 

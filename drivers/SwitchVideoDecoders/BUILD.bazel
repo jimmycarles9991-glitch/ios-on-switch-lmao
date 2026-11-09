@@ -50,17 +50,21 @@ ios_binary(
         "-fvisibility=hidden",
         "-install_name",
         "/System/Library/VideoDecoders/HEVCH8.videodecoder",
+        "-framework",
+        "CoreFoundation",
     ],
     pagesize = "4096",
     sign_identifier = "com.brunostjohn.switch.hevch8",
 )
 
 # AVD.videodecoder: H.264, VP9 and HEVC on NVDEC as VideoToolbox's hardware 'avc1', 'vp09' and 'hvc1' decoders
-# (registered where TegraNVDEC is open to the process).
+# (AVD/AVDRegister.c says where they register). Its install name is its own: 24B119's dyld cache holds Apple's
+# AVD.videodecoder, and a file naming itself after a cache dylib is an override of it, not a decoder of its own.
 ios_binary(
     name = "AVD",
     srcs = [
         "AVD/AVDDecoder.c",
+        "AVD/AVDRegister.c",
         "AVD/AVDTiles.c",
         "AVD/H264NVDEC.c",
         "AVD/H264Syntax.c",
@@ -91,7 +95,7 @@ ios_binary(
         "-dynamiclib",
         "-fvisibility=hidden",
         "-install_name",
-        "/System/Library/VideoDecoders/AVD.videodecoder",
+        "/System/Library/VideoDecoders/SwitchAVD.videodecoder",
         "-framework",
         "CoreFoundation",
         "-framework",
@@ -104,6 +108,8 @@ ios_binary(
         "IOKit",
         "-framework",
         "IOSurface",
+        "-framework",
+        "Security",
     ],
     pagesize = "4096",
     sign_identifier = "com.brunostjohn.switch.avd",

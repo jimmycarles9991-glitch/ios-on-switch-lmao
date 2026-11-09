@@ -119,6 +119,10 @@ id<MTLCommandBuffer> replay(RMCommandBuffer *cb, size_t from, size_t to, bool pa
     std::set<void *> updated;  // fences this part updated
     for (size_t at = from; at < to; at++) {
         const Cmd &c = cb->_tape[at];
+        if (isKernelCommand(c.op)) {
+            replayKernel(enc, cb, c, buffers);
+            continue;
+        }
         switch (c.op) {
         case OpRender: {
             enc = [m renderCommandEncoderWithDescriptor:twinPass((__bridge MTLRenderPassDescriptor *)c.obj)];
@@ -273,7 +277,8 @@ id<MTLCommandBuffer> replay(RMCommandBuffer *cb, size_t from, size_t to, bool pa
                 const uint64_t rows = extra(cb, x + 4) * std::max<uint64_t>(extra(cb, x + 5), 1);
                 if ([(id)b isKindOfClass:[RMBuffer class]] && [(id)t isKindOfClass:[RMTexture class]] && t->_raw.bpp &&
                     rows)
-                    range(b, extra(cb, x), extra(cb, x + 1) * (rows - 1) + extra(cb, x + 3) * t->_raw.bpp);
+                    range(b, extra(cb, x),
+                          extra(cb, x + 1) * (rows - 1) + extra(cb, x + 3) * raw::bufferUnit(t->_raw, uint8_t(c.a)));
                 else
                     use(c.obj);
             }
@@ -296,7 +301,9 @@ id<MTLCommandBuffer> replay(RMCommandBuffer *cb, size_t from, size_t to, bool pa
                 const uint64_t rows = extra(cb, x + 5) * std::max<uint64_t>(extra(cb, x + 6), 1);
                 if ([(id)b isKindOfClass:[RMBuffer class]] && [(id)t isKindOfClass:[RMTexture class]] && t->_raw.bpp &&
                     rows)
-                    range(b, extra(cb, x + 7), extra(cb, x + 8) * (rows - 1) + extra(cb, x + 4) * t->_raw.bpp, true);
+                    range(b, extra(cb, x + 7),
+                          extra(cb, x + 8) * (rows - 1) + extra(cb, x + 4) * raw::bufferUnit(t->_raw, uint8_t(c.a)),
+                          true);
                 else
                     use(c.obj2);
             }
@@ -374,6 +381,8 @@ id<MTLCommandBuffer> replay(RMCommandBuffer *cb, size_t from, size_t to, bool pa
             break;
         case OpVisibility:
             [enc setVisibilityResultMode:MTLVisibilityResultMode(c.a) offset:c.c];
+            break;
+        default:  // a compute encoder's: replayKernel, above
             break;
         }
     }

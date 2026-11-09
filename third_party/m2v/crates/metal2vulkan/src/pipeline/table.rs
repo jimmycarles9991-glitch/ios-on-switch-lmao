@@ -115,6 +115,7 @@ mod tests {
         LinkedKey {
             list,
             name,
+            symbol: name,
             air_hash: [hash; 32],
             constants,
         }

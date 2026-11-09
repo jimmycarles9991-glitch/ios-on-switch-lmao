@@ -16,9 +16,10 @@ constexpr uint32_t kIdentityTables = 4;  // the firmware and the setup slots: at
 constexpr uint64_t kWiredLimit = 512ULL << 20;
 constexpr uint32_t kTranslation = (1u << 24) | (1u << 25);  // nvdecsrd, nvdecswr
 
+// NVDEC's only memory clients are nvdecsrd and nvdecswr, both in swgroup "nvdec". MC_SMMU_NVDEC1_ASID (0xae0) has no
+// client, and on the T210B01 it drops ENABLE when written, which failed N1 on every boot.
 const TegraSMMUSwgroup kGroups[] = {
     {TEGRA_SMMU_NVDEC_ASID, TEGRA_SMMU_TRANSLATION_ENABLE_3, kTranslation},
-    {TEGRA_SMMU_NVDEC1_ASID, TEGRA_SMMU_TRANSLATION_ENABLE_3, 0},
 };
 
 TegraSMMUEngine gSpace;

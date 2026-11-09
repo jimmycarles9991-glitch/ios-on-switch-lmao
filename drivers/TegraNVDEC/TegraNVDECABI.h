@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: BSD-2-Clause-Patent
-// TegraNVDEC user client ABI, v9 (kernel: TegraNVDECUserClient.cpp; client: SwitchVideoDecoders/AVD).
+// TegraNVDEC user client ABI, v11 (kernel: TegraNVDECUserClient.cpp; client: SwitchVideoDecoders/AVD).
 //
 // The service is "TegraNVDEC" (IOServiceMatching), published by default once NVDEC has proven itself (N3). Its user
 // client's class is named AppleD5500UserClient, iPad7,1's own decoder client (VXD393), which some of 21H461's sandbox
@@ -11,8 +11,10 @@
 //
 // Model (Linux tegra-drm channel submit / L4T nvhost submit, reduced to what a decoder needs):
 //   * NVDEC sits behind the MC SMMU in an address space of its own. A buffer is any RAM pages, mapped into that space
-//     when allocated; user space maps it too (IOConnectMapMemory64 with type = handle, cacheable) and never sees an
-//     address. Every address method is a relocation (handle + offset) the kernel resolves and bounds-checks.
+//     when allocated and into the allocating task by BufferAlloc itself (cacheable; the reply gives the address), as
+//     IOSurface maps its surfaces: 24B119's videocodecd sandbox denies io_connect_map_memory_into_task (KERN_DENIED,
+//     its kobject MIG filter). User space never sees an NVDEC address: every address method is a relocation (handle +
+//     offset) the kernel resolves and bounds-checks.
 //   * The kernel builds the host1x stream itself: only whitelisted NVDEC methods, written through the engine's THI
 //     METHOD0/METHOD1 pair, followed by an OP_DONE syncpoint increment. The picture setup travels inline and is copied
 //     into kernel-only memory after its sizes are checked against the buffers it makes NVDEC write.
@@ -29,7 +31,7 @@
 #define TEGRA_NVDEC_ABI_H
 #include <stdint.h>
 
-#define TEGRA_NVDEC_ABI_VERSION  9
+#define TEGRA_NVDEC_ABI_VERSION  11
 #define TEGRA_NVDEC_OPEN_TYPE    0x4e44       // 'ND'
 #define TEGRA_NVDEC_TUNNEL_MAGIC 0x4e44544eu  // 'NDTN'
 #define TEGRA_NVDEC_TUNNEL_PROBE 0xffffffffu
@@ -45,6 +47,12 @@ enum TegraNVDECMethod {
 
 #define TEGRA_NVDEC_FEATURE_PRESENT (1u << 0)  // TegraNVDECInfo.features: Present is on (VIC reads block linear)
 
+// Service properties, true for each codec in TegraNVDECInfo.codecs: a process that may not open a client finds them by
+// matching (IOPropertyMatch), which its sandbox does not filter as it filters property reads.
+#define TEGRA_NVDEC_DECODES_H264 "TegraNVDECDecodesH264"
+#define TEGRA_NVDEC_DECODES_VP9  "TegraNVDECDecodesVP9"
+#define TEGRA_NVDEC_DECODES_HEVC "TegraNVDECDecodesHEVC"
+
 // NVDEC application ids (clc5b0.h NVC5B0_SET_APPLICATION_ID_ID_*). TegraNVDECInfo.codecs has bit n set for each
 // codec NVDEC decodes; Submit refuses the others.
 enum {
@@ -53,9 +61,9 @@ enum {
     TEGRA_NVDEC_CODEC_VP9 = 9
 };
 
-// Not an application id: TegraNVDECInfo.codecs bit 16, HEVC Main 10 written as 8-bit NV12 (disp_output_mode 2/3) is
-// decoded. Not set: on the unit (11-06) clip T's first picture came out with luma CRC 0xeeb22512 where FFmpeg's
-// samples >> 2 give 0xfe5d343b, so Main 10 streams decode in software until that is fixed.
+// Not an application id: TegraNVDECInfo.codecs bit 16, HEVC Main 10 is decoded, into 16-bit samples
+// (disp_output_mode 1, the 10 bits high: P010). The 10-to-8-bit modes 2 and 3 are refused: on the unit (11-06) clip
+// T's first picture came out with luma CRC 0xeeb22512 where FFmpeg's samples >> 2 give 0xfe5d343b.
 #define TEGRA_NVDEC_HEVC_MAIN10 (1u << 16)
 
 typedef struct {
@@ -72,8 +80,9 @@ typedef struct {
 
 typedef struct {
     uint32_t handle, reserved;
-    uint64_t size;
-} TegraNVDECBufferReply;  // size rounded to 64 KiB
+    uint64_t size;     // rounded to 64 KiB
+    uint64_t address;  // the buffer in the calling task, until BufferFree or the connection closes
+} TegraNVDECBufferReply;
 
 typedef struct {
     uint32_t handle, reserved;
@@ -114,15 +123,18 @@ typedef struct {
 } TegraNVDECFence;
 
 // A decoded picture of buffer `handle` (NV12 block linear, GOB height 2^block_height_log2: NVDEC's is 1) into the
-// '420v'/'420f' IOSurface `surface_id` of the calling task: the window (crop_x, crop_y, width x height) at (dst_x,
-// dst_y), clipped to the surface (a grid image's tile goes to its place in the canvas; dst_x a multiple of 256 bytes). pitch: whole 64-byte GOBs; rows: whole pairs of 16-row blocks; chroma at chroma_offset
-// (256-byte aligned, past the luma), rows / 2 rows. kIOReturnUnsupported: VIC does not take it (one kernel line says
-// why); kIOReturnBadArgument: geometry outside the buffer or an unknown surface.
+// '420v'/'420f' IOSurface `surface_id` of the calling task, or with 16-bit samples (sample_bytes 2: Main 10's P010)
+// into an 'x420'/'xf20' one: the window (crop_x, crop_y, width x height, in samples) at (dst_x, dst_y), clipped to the
+// surface (a grid image's tile goes to its place in the canvas; dst_x a multiple of 256 bytes). pitch: whole 64-byte
+// GOBs; rows: whole pairs of 16-row blocks; chroma at chroma_offset (256-byte aligned, past the luma), rows / 2 rows.
+// kIOReturnUnsupported: VIC does not take it (one kernel line says why); kIOReturnBadArgument: geometry outside the
+// buffer or an unknown surface.
 typedef struct {
     uint32_t handle, surface_id;
     uint32_t pitch, rows, chroma_offset, block_height_log2;
     uint32_t crop_x, crop_y, width, height;
     uint32_t dst_x, dst_y;
+    uint32_t sample_bytes, reserved;
 } TegraNVDECPresent;
 
 typedef struct {

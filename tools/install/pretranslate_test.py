@@ -135,6 +135,47 @@ class DeltasTest(unittest.TestCase):
         ids = ((system / 'usr/libexec/tool').stat().st_ino, (tree / 'usr/libexec/tool').stat().st_ino)
         self.assertEqual([f[1:3] for f in files], [ids, ids])
 
+    def staged(self, pairs: str) -> tuple[Path, Path, list[dict]]:
+        system = self.dir / 'system'
+        app = system / 'private/var/staged_system_apps/FaceTime.app'
+        app.mkdir(parents=True)
+        (app / 'FaceTime').write_bytes(b'arm64e')
+        (app / 'FaceTime').chmod(0o755)
+        (self.roles.dirs['os'] / 'os.cdhash-pairs').write_text(pairs)
+        entries = [dict(self.roles.entries('os')[0], path='/private/var/staged_system_apps/FaceTime.app/FaceTime')]
+        entries[0]['cdhash'] = ['22' * 20]
+        data = self.dir / 'data'
+        data.mkdir()
+        return system, data, entries
+
+    def test_staged_apps_go_to_the_tree_as_roots_with_their_originals(self):
+        system, data, entries = self.staged(f'{"11" * 20} {"22" * 20}\n{"33" * 20} {"44" * 20}\n')
+        journal = owners.Journal(data)
+        self.roles.overlay_system(data, stats(system), entries, journal)
+        placed = f'{pretranslate.OVERLAY}/private/var/staged_system_apps/FaceTime.app/FaceTime'
+        self.assertEqual((data / placed).read_bytes(), b'arm64')
+        self.assertEqual((journal.wanted[placed].uid, journal.wanted[placed].gid), (0, 0))
+        self.assertEqual(journal.wanted[placed].mode, 0o755)
+        raw = (data / pretranslate.OVERLAY_ORIGINALS).read_bytes()
+        self.assertEqual(raw, overlay_index.encode_originals([(bytes([0x11] * 20), bytes([0x22] * 20))]))
+        self.assertTrue(journal.wanted[pretranslate.OVERLAY_ORIGINALS].flags & stat.SF_IMMUTABLE)
+        files, _ = overlay_index.decode((data / pretranslate.OVERLAY_INDEX).read_bytes())
+        self.assertEqual([(f[0], f[3]) for f in files], [(entries[0]['path'], bytes([0x22] * 20))])
+
+    def test_a_staged_translation_without_its_original_is_refused(self):
+        system, data, entries = self.staged(f'{"33" * 20} {"44" * 20}\n')
+        with self.assertRaisesRegex(host.HostError, 'without an original'):
+            self.roles.overlay_system(data, stats(system), entries, None)
+
+    def test_without_staged_apps_there_are_no_originals(self):
+        system = self.dir / 'system'
+        (system / 'usr/bin').mkdir(parents=True)
+        (system / 'usr/bin/tool').write_bytes(b'arm64e')
+        data = self.dir / 'data'
+        data.mkdir()
+        self.roles.overlay_system(data, stats(system), self.roles.entries('os'), None)
+        self.assertFalse((data / pretranslate.OVERLAY_ORIGINALS).exists())
+
     def test_a_symlink_is_refused(self):
         system = self.dir / 'system'
         (system / 'usr/bin').mkdir(parents=True)

@@ -2,10 +2,12 @@
 // mock_iokit.c's model of the kext's compression (TegraGM20BABI.h TegraGM20BInfoCompression, gpu.c vm_map): which binds of a
 // compressible kind it takes, and the contract a client must keep for the comptags to stay right, counted for the harnesses
 // (mock_iokit_comp_stats):
-//  - refused: a compressible bind of memory the kext gives no comptags (an import, a BO not Contiguous at 2^17 or more, a
-//    size or a va, offset or range off 128 KiB), or with MOCK_COMPRESSION unset (the kext's GetInfo without the bit)
+//  - refused: a compressible bind of memory the kext gives no comptags (an import, a BO neither Compressible nor Contiguous
+//    at 2^17 or more, a size or a va, offset or range off 128 KiB), or with MOCK_COMPRESSION unset (the kext's GetInfo
+//    without the bit)
 //  - alias: a BO bound compressed and also bound with another kind (that binding would read compressed bytes)
-//  - cpu: a BO bound compressed and mapped for the CPU, either way round (the CPU reads compressed bytes)
+//  - cpu: a BO bound compressed and mapped for the CPU, either way round (the CPU reads compressed bytes), or a Compressible
+//    BO's map asked for (the kext refuses it)
 //  - nolines: a compressible bind past MOCK_COMP_LINES 128 KiB lines (kIOReturnNoResources, as the kext out of comptags)
 // mock_iokit_va_kind names the kind a VA is bound with, for nvdec's ZBC and compressed-target counts.
 #ifndef MOCK_COMP_H
@@ -62,9 +64,10 @@ static kern_return_t comp_bind(unsigned h, struct bo *o, const struct TegraGM20B
         o->kind_set = 1;
         return KERN_SUCCESS;
     }
-    if (!getenv("MOCK_COMPRESSION") || o->import || !(o->flags & TegraGM20BBoContiguous) || o->align_log2 < 17 ||
-        !comp_aligned(o->bytes) || !comp_aligned(op->va) || !comp_aligned(op->bo_offset) || !comp_aligned(op->range) ||
-        !op->range) {
+    const int runs =
+        (o->flags & TegraGM20BBoCompressible) || ((o->flags & TegraGM20BBoContiguous) && o->align_log2 >= 17);
+    if (!getenv("MOCK_COMPRESSION") || o->import || !runs || !comp_aligned(o->bytes) || !comp_aligned(op->va) ||
+        !comp_aligned(op->bo_offset) || !comp_aligned(op->range) || !op->range) {
         atomic_fetch_add(&comp_refused, 1);
         return kIOReturnBadArgument;
     }
@@ -107,14 +110,35 @@ static void comp_unbind(uint64_t va, uint64_t range, unsigned h)
     pthread_mutex_unlock(&comp_lock);
 }
 
-/* A CPU mapping of BO `h` */
-static void comp_cpu_map(unsigned h, struct bo *o)
+/* A CPU mapping of BO `h`: 1 if the kext refuses it (a Compressible BO) */
+static int comp_cpu_map(unsigned h, struct bo *o)
 {
+    if (o->flags & TegraGM20BBoCompressible) {
+        atomic_fetch_add(&comp_cpu, 1);
+        fprintf(stderr, "mock: BO %u is Compressible and was asked to be mapped for the CPU\n", h);
+        return 1;
+    }
     o->cpu_maps++;
     if (o->kind_set && comp_kind(o->kind)) {
         atomic_fetch_add(&comp_cpu, 1);
         fprintf(stderr, "mock: BO %u bound compressed and mapped for the CPU\n", h);
     }
+    return 0;
+}
+
+/* BoAlloc's answer to a Compressible BO the kext would refuse (bad flags or size, or the pool short: MOCK_COMP_REFUSE=<n>
+ * refuses the first n with kIOReturnNoMemory), else KERN_SUCCESS */
+static kern_return_t comp_alloc(const struct TegraGM20BAbiBoAlloc *a)
+{
+    static atomic_uint refusals;
+    if (!(a->flags & TegraGM20BBoCompressible))
+        return KERN_SUCCESS;
+    if (a->flags != TegraGM20BBoCompressible || !comp_aligned(a->bytes))
+        return kIOReturnBadArgument;
+    const char *refuse = getenv("MOCK_COMP_REFUSE");
+    if (refuse && atomic_fetch_add(&refusals, 1) < strtoul(refuse, 0, 0))
+        return kIOReturnNoMemory;
+    return KERN_SUCCESS;
 }
 
 /* The PTE kind `va` is bound with if a compressed bind holds it, else 0 */

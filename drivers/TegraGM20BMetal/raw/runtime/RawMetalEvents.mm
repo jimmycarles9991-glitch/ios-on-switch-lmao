@@ -3,7 +3,8 @@
 
 @implementation RMCommandBuffer (Events)
 
-- (void)event:(id<MTLEvent>)event value:(uint64_t)value signal:(bool)signal
+// `milliseconds`: a wait's own limit (encodeWaitForEvent:value:timeout:), 0 for none
+- (void)event:(id<MTLEvent>)event value:(uint64_t)value signal:(bool)signal timeout:(uint32_t)milliseconds
 {
     // the m2v device's events, shared or plain (NBEvent answers a shared event's value, set and notifications): the raw path
     // signals them from the CPU once its work completes, and holds its work until a wait is covered (waitCovered); an event
@@ -18,22 +19,35 @@
     Cmd m = cmd(signal ? OpSignalEvent : OpWaitEvent);
     m.obj = (__bridge void *)event;
     m.c = value;
+    m.a = milliseconds;
     [self record:m];
 }
 
 - (void)encodeSignalEvent:(id<MTLEvent>)event value:(uint64_t)value
 {
-    [self event:event value:value signal:true];
+    [self event:event value:value signal:true timeout:0];
 }
 
 - (void)encodeWaitForEvent:(id<MTLEvent>)event value:(uint64_t)value
 {
-    [self event:event value:value signal:false];
+    [self event:event value:value signal:false timeout:0];
 }
 
 - (void)encodeSignalEventScheduled:(id<MTLEvent>)event value:(uint64_t)value
 {
-    [self event:event value:value signal:true];
+    [self event:event value:value signal:true timeout:0];
+}
+
+// The agents a signal is for are Apple's GPU scheduler's: a signal is every agent's here
+- (void)encodeSignalEvent:(id<MTLSharedEvent>)event value:(uint64_t)value agentMask:(uint64_t)mask
+{
+    (void)mask;
+    [self event:event value:value signal:true timeout:0];
+}
+
+- (void)encodeWaitForEvent:(id<MTLEvent>)event value:(uint64_t)value timeout:(uint32_t)milliseconds
+{
+    [self event:event value:value signal:false timeout:milliseconds];
 }
 
 @end
@@ -126,8 +140,11 @@ void waitEvents(RMCommandBuffer *cb)
         // A signaller that never reaches it (a client killed or suspended mid-frame: Core Animation's per-surface events,
         // CA::OGL::shared_event_submit) holds no one past kEventLimit: the command buffer goes on as if the event were reached,
         // as Core Animation's own SharedEvent::force_complete would make it (r7n: AegirPoster died, r7o: PosterKit's scenes
-        // were suspended, and this wait held every later command buffer and the render thread for good).
-        if (dispatch_semaphore_wait(reached, dispatch_time(DISPATCH_TIME_NOW, kEventLimitNs))) {
+        // were suspended, and this wait held every later command buffer and the render thread for good). A wait with a
+        // timeout of its own goes on after it, as Metal's does.
+        const int64_t own = int64_t(c.a) * NSEC_PER_MSEC;
+        const bool timed = c.a && own < kEventLimitNs;
+        if (dispatch_semaphore_wait(reached, dispatch_time(DISPATCH_TIME_NOW, timed ? own : kEventLimitNs)) && !timed) {
             gRM->stats.eventsReleased++;
             os_log_error(rawLog(),
                          "raw: shared event %p (%{public}s) not reached %llu after %lld ms (at %llu): its command "

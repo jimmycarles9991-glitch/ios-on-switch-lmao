@@ -116,7 +116,7 @@ int main(int argc, char **argv)
         d3.pixelFormat = MTLPixelFormatRGBA16Float;
         d3.width = d3.height = d3.depth = 17;
         d3.usage = MTLTextureUsageShaderRead;
-        verdict("17x17x17 RGBA16F 3D (a colour LUT: m2v's)", [dev newTextureWithDescriptor:d3], false);
+        verdict("17x17x17 RGBA16F 3D (a colour LUT)", [dev newTextureWithDescriptor:d3], true);
         printf("chains %s; shapecheck: %d case(s) failed\n", raw_metal_chains_on() ? "on" : "off", failed);
         return failed ? 1 : 0;
     }

@@ -1,7 +1,8 @@
 /* SPDX-License-Identifier: MIT */
 /*
  * GM20B colour and depth compression as pure functions: the compbit backing store (nouveau/nvkm/subdev/ltc/gm20b.c),
- * which memory and binds may compress (gpu.c), and the PTE fields a compressed bind writes (nvkm/subdev/mmu/vmmgf100.c).
+ * which memory and binds may compress (gpu.c), the GPU pool chunks a compressible BO is made of (shim/linux.c), and the PTE
+ * fields a compressed bind writes (nvkm/subdev/mmu/vmmgf100.c).
  * test/gm20b_comp_test.cpp checks them against nvgpu's gm20b numbers.
  *
  * The CBC numbers are NVIDIA's nvgpu for gm20b (L4T r32.7.6, common/ltc/ltc_gm20b.c: gm20b_ltc_init_comptags,
@@ -104,6 +105,54 @@ static inline uint32_t tgm_comp_page_shift(const uint64_t *pas, uint32_t npages)
 			return 12;
 	}
 	return TGM_COMP_SHIFT;
+}
+
+#define TGM_COMP_PAGES (TGM_COMP_BYTES >> 12)
+
+/* Whether `bits` (one bit per 4 KiB page) has a bit set in chunk `chunk`: pages chunk * TGM_COMP_PAGES on. */
+static inline int tgm_comp_chunk_any(const unsigned long *bits, uint64_t chunk)
+{
+	const uint64_t word_bits = sizeof(unsigned long) * 8;
+	uint64_t page = chunk * TGM_COMP_PAGES;
+	const uint64_t end = page + TGM_COMP_PAGES;
+
+	while (page < end) {
+		const uint64_t at = page % word_bits;
+		const uint64_t n = word_bits - at < end - page ? word_bits - at : end - page;
+		const unsigned long mask = n == word_bits ? ~0UL : ((1UL << n) - 1) << at;
+
+		if (bits[page / word_bits] & mask)
+			return 1;
+		page += n;
+	}
+	return 0;
+}
+
+/* `count` free chunks (each TGM_COMP_BYTES, aligned to it) of a pool of `npages` pages whose `map` has a bit set per page in
+ * use and whose `dirty` has one per free page not known to be zero, for a compressible BO: no two of its big pages need be
+ * adjacent, so a fragmented pool serves it as well as an empty one. One pass from the top down, away from the first-fit
+ * allocations at the bottom; chunks with no dirty page are taken first, so the caller zeroes as little as it can. Their
+ * indices go to `chunks`, the clean ones first; returns how many of them are dirty (the last ones), or -1 with fewer than
+ * `count` free. */
+static inline int tgm_comp_pick_chunks(const unsigned long *map, const unsigned long *dirty,
+				       uint64_t npages, uint32_t count, uint64_t *chunks)
+{
+	uint32_t clean = 0;
+	uint32_t unclean = 0;
+	uint64_t chunk = npages / TGM_COMP_PAGES;
+
+	while (chunk-- > 0 && clean < count) {
+		if (tgm_comp_chunk_any(map, chunk))
+			continue;
+		if (!tgm_comp_chunk_any(dirty, chunk)) {
+			if (clean + unclean == count)
+				unclean--; /* it takes the slot of the last dirty one */
+			chunks[clean++] = chunk;
+		} else if (clean + unclean < count) {
+			chunks[count - 1 - unclean++] = chunk;
+		}
+	}
+	return clean + unclean < count ? -1 : (int)unclean;
 }
 
 /* A compressible kind binds only as whole big pages of memory that has them. */

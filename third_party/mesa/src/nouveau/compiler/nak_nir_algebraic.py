@@ -163,6 +163,31 @@ algebraic_lowering += [
     (('ffma', b, fp32_flushed('a@32'), c), ('ffma', b, a, c), fp32_ftz),
     (('ffma', b, c, fp32_flushed('a@32')), ('ffma', b, c, a), fp32_ftz),
 ]
+# A negated or absolute flushed float reaches an FTZ instruction as the flush's
+# source would (negation and absolute value keep a denormal denormal)
+for m in ['fneg', 'fabs']:
+    for op in ['fadd', 'fmul', 'fmin', 'fmax', 'feq', 'fneu', 'flt', 'fge']:
+        algebraic_lowering += [
+            ((op, (m, fp32_flushed('a@32')), b), (op, (m, a), b), fp32_ftz),
+            ((op, b, (m, fp32_flushed('a@32'))), (op, b, (m, a)), fp32_ftz),
+        ]
+    for op in ['fsat', 'f2i32', 'f2u32']:
+        algebraic_lowering += [((op, (m, fp32_flushed('a@32'))), (op, (m, a)), fp32_ftz)]
+    algebraic_lowering += [
+        (('ffma', (m, fp32_flushed('a@32')), b, c), ('ffma', (m, a), b, c), fp32_ftz),
+        (('ffma', b, (m, fp32_flushed('a@32')), c), ('ffma', b, (m, a), c), fp32_ftz),
+        (('ffma', b, c, (m, fp32_flushed('a@32'))), ('ffma', b, c, (m, a)), fp32_ftz),
+    ]
+# What an FTZ instruction computes is never a denormal (it gives a zero of the
+# result's sign instead), nor is a widened half (2^-24 is a normal f32): a flush
+# of either is the value itself
+for op in ['fadd', 'fmul', 'fmin', 'fmax']:
+    algebraic_lowering += [(fp32_flushed((op, 'a@32', b)), (op, a, b), fp32_ftz)]
+algebraic_lowering += [
+    (fp32_flushed(('ffma', 'a@32', b, c)), ('ffma', a, b, c), fp32_ftz),
+    (fp32_flushed(('fsat', 'a@32')), ('fsat', a), fp32_ftz),
+    (fp32_flushed(('f2f32', 'a@16')), ('f2f32', a)),
+]
 
 # If we find mufu surrounded by bit_size conversions, just do the op in the
 # original bit_size.

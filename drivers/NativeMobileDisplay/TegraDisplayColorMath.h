@@ -256,9 +256,16 @@ inline void build(const Inputs &in, Tables &out)
                   (inverted || grayscale ? kReasonRemap : 0) | (contrast ? kReasonContrast : 0) |
                   (gammaTable ? kReasonGamma : 0);
     out.enabled = !identityCsc || inverted || contrast || gammaTable;
+    // A zero CSC blacks the head with nine words, which fit in a vertical blank; only an output stage that lifts black
+    // (inversion, contrast, a gamma table) needs LUT2 cleared instead.
     if (in.blank) {
-        for (uint8_t &value : out.lut2)
-            value = 0;
+        if (out.lut2[0] == 0) {
+            for (uint16_t &word : out.csc)
+                word = 0;
+        } else {
+            for (uint8_t &value : out.lut2)
+                value = 0;
+        }
         out.reasons |= kReasonBlank;
         out.enabled = true;
     }

@@ -31,7 +31,6 @@ KERNEL_TOOLS = [
     "ios_binary",
     "libpthread",
     "storage_abi",
-    "trust_bundle",
     "unxz",
     "xnu_symbols",
 ]

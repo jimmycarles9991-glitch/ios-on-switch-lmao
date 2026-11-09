@@ -1,0 +1,711 @@
+diff --git a/hw/arm/tegra2/ahb/host1x/modules/dc/dc.c b/hw/arm/tegra2/ahb/host1x/modules/dc/dc.c
+index 01b8d4c..a30e52c 100644
+--- a/hw/arm/tegra2/ahb/host1x/modules/dc/dc.c
++++ b/hw/arm/tegra2/ahb/host1x/modules/dc/dc.c
+@@ -26,6 +26,7 @@
+ #include "sysemu/sysemu.h"
+ 
+ #include "registers/dc.h"
++#include "scanout.h"
+ #include "window.h"
+ 
+ #include "host1x_module.h"
+@@ -84,6 +85,11 @@ typedef struct tegra_dc_state {
+     display_window win[DC_WINDOWS];
+     uint32_t act_pending;
+ 
++    DcScanout scanout;
++    bool crc_running;
++    bool crc_done;
++    unsigned crc_wait;
++
+     struct host1x_module module;
+ 
+     uint8_t disp_refresh_rate;
+@@ -232,6 +238,51 @@ static void tegra_dc_display_command(tegra_dc *s, uint32_t old)
+     }
+ }
+ 
++static void tegra_dc_render(tegra_dc *s)
++{
++    dc_scanout_render(&s->scanout, s->dc.disp_disp_active.h_disp_active, s->dc.disp_disp_active.v_disp_active,
++                      s->dc.disp_blend_background_color.reg32, s->win, DC_WINDOWS);
++}
++
++static void tegra_dc_crc_control(tegra_dc *s, uint32_t old)
++{
++    com_crc_control_t was = { .reg32 = old }, now = s->dc.com_crc_control;
++
++    if (!was.crc_enable && now.crc_enable) {
++        s->dc.com_crc_checksum.reg32 = 0;
++        s->dc.com_crc_checksum_latched.reg32 = 0;
++        s->crc_done = false;
++        s->crc_wait = !now.crc_always && now.crc_wait;
++    }
++}
++
++/*
++ * COM_CRC_CONTROL takes effect at a frame boundary, and both CRC_CHECKSUM and CRC_CHECKSUM_LATCHED take a frame's CRC
++ * at its frame end. After ENABLE the first frame end reads 0 and the second the first frame's CRC, as on the Switch's
++ * DC A (its plane probe's first CRC latches at frame end 2). Without ALWAYS one frame is taken, after CRC_WAIT's extra
++ * frame. FULL_FRAME (blanking and sync included) is taken as ACTIVE_DATA.
++ */
++static void tegra_dc_crc_frame(tegra_dc *s)
++{
++    com_crc_control_t control = s->dc.com_crc_control;
++
++    if (s->crc_running) {
++        tegra_dc_render(s);
++        s->dc.com_crc_checksum.reg32 = dc_scanout_crc(&s->scanout);
++        s->dc.com_crc_checksum_latched.reg32 = s->dc.com_crc_checksum.reg32;
++        s->crc_done = !control.crc_always;
++    }
++    s->crc_running = false;
++    if (!control.crc_enable || s->crc_done) {
++        return;
++    }
++    if (s->crc_wait) {
++        s->crc_wait--;
++        return;
++    }
++    s->crc_running = true;
++}
++
+ static void tegra_dc_priv_write(void *opaque, hwaddr offset,
+                                 uint64_t value, unsigned size)
+ {
+@@ -255,6 +306,9 @@ static void tegra_dc_priv_write(void *opaque, hwaddr offset,
+         if (offset == CMD_DISPLAY_COMMAND_OFFSET) {
+             tegra_dc_display_command(s, old);
+         }
++        if (offset == COM_CRC_CONTROL_OFFSET) {
++            tegra_dc_crc_control(s, old);
++        }
+         return;
+     }
+ 
+@@ -284,6 +338,9 @@ static void tegra_dc_priv_reset(DeviceState *dev)
+         reset_window(&s->win[i]);
+     }
+     s->act_pending = 0;
++    s->crc_running = false;
++    s->crc_done = false;
++    s->crc_wait = 0;
+ }
+ 
+ static const MemoryRegionOps tegra_dc_mem_ops = {
+@@ -351,6 +408,7 @@ static void tegra_dc_vblank(void *opaque)
+         return;
+     }
+ 
++    tegra_dc_crc_frame(s);
+     tegra_dc_latch(s, ACT_REQ_BITS);
+ 
+     if (s->dc.cmd_cont_syncpt_vsync.vsync_en) {
+@@ -410,40 +468,26 @@ static uint32_t tegra_dc_module_read(struct host1x_module *module,
+     return ret;
+ }
+ 
+-// NOTE: Blending is not handled.
+ static void tegra_dc_compose(void *opaque)
+ {
+     tegra_dc *s = opaque;
++    uint32_t width = s->dc.disp_disp_active.h_disp_active, height = s->dc.disp_disp_active.v_disp_active;
++    int x = 0, y = 0, w = width, h = height;
++    pixman_image_t *frame;
+ 
+-    if (s->dc.cmd_display_command.display_ctrl_mode == 0) {
++    if (tegra_dc_stopped(s) || !width || !height) {
+         return;
+     }
+-
+-    int width = s->dc.disp_disp_active.h_disp_active;
+-    int height = s->dc.disp_disp_active.v_disp_active;
+-    if (s->rotate == 90 || s->rotate == 270) {
+-        width = s->dc.disp_disp_active.v_disp_active;
+-        height = s->dc.disp_disp_active.h_disp_active;
+-    }
+-
+-    qemu_console_resize(s->console, width, height); // This will internally do nothing if resize isn't needed.
+-
+-    // Fill the image with the background color. pixman color is 16bit.
+-    if (tegra_board >= TEGRAX1_BOARD) {
+-        pixman_rectangle16_t rect = { .x = 0, .y = 0, .width = width, .height = height };
+-        pixman_color_t color = { .red = s->dc.disp_blend_background_color.bkgnd_red<<8,
+-                               .green = s->dc.disp_blend_background_color.bkgnd_green<<8,
+-                               .blue = s->dc.disp_blend_background_color.bkgnd_blue<<8,
+-                               .alpha = s->dc.disp_blend_background_color.bkgnd_alpha<<8 };
+-
+-        pixman_image_fill_rectangles(PIXMAN_OP_SRC,
+-                                     qemu_console_surface(s->console)->image,
+-                                     &color,
+-                                     1,
+-                                     &rect);
++    tegra_dc_render(s);
++    frame = pixman_image_create_bits(PIXMAN_a8r8g8b8, width, height, s->scanout.pixels, width * 4);
++    if (s->rotate) {
++        tegra_dc_pixman_transform_rotate(frame, s->rotate, &x, &y, &w, &h);
+     }
+-
+-    dpy_gfx_update(s->console, 0, 0, width, height);
++    qemu_console_resize(s->console, w, h);
++    pixman_image_composite(PIXMAN_OP_SRC, frame, NULL, qemu_console_surface(s->console)->image, 0, 0, 0, 0, x, y,
++                           w, h);
++    pixman_image_unref(frame);
++    dpy_gfx_update(s->console, 0, 0, w, h);
+ }
+ 
+ static const GraphicHwOps tegra_dc_ops = {
+diff --git a/hw/arm/tegra2/ahb/host1x/modules/dc/scanout.c b/hw/arm/tegra2/ahb/host1x/modules/dc/scanout.c
+new file mode 100644
+index 0000000..fab084d
+--- /dev/null
++++ b/hw/arm/tegra2/ahb/host1x/modules/dc/scanout.c
+@@ -0,0 +1,490 @@
++/*
++ * Tegra X1 display controller scanout: windows fetched, converted and blended as the panel would get them.
++ *
++ *  This program is free software; you can redistribute it and/or modify it
++ *  under the terms of the GNU General Public License as published by the
++ *  Free Software Foundation; either version 2 of the License, or
++ *  (at your option) any later version.
++ */
++
++/*
++ * Register words and fields are Linux drivers/gpu/drm/tegra/dc.h's. Every enabled window is read from its active
++ * registers: POSITION and SIZE place it, PRESCALED_SIZE (bytes x lines) bounds what it fetches from H_OFFSET and
++ * V_OFFSET on, the 4.12 DDA increments and initial phases step through the source (nearest pixel: the H and V
++ * filters are not modelled), H_DIRECTION and V_DIRECTION read from the last byte and line down. With SCAN_COLUMN
++ * each output line is a source column and each output pixel a source row: PRESCALED_SIZE then holds the source's
++ * height in bytes and its width in pixels, and the H and V DDAs step rows and columns (L4T window.c). Block-linear
++ * surfaces are GM20B's GOBs (64 bytes by 8 lines, 16-byte runs: x bit 5, y bits 2:1, x bit 4, y bit 0, x bits
++ * 3:0) in blocks one GOB wide and 1 << BLOCK_HEIGHT GOBs tall, LINE_STRIDE / 64 blocks per block row.
++ * Windows blend back to front by WINDOW_LAYER_DEPTH (lower is in front) over the background colour, through
++ * BLEND_NOMATCH_SELECT's factors with K1 and K2 (colour keys are not modelled), or replace what is under them with
++ * BLEND_BYPASS. The display controller reads DRAM only: anything else reads as zeros and is logged once per address.
++ */
++
++#include "tegra_common.h"
++
++#include "exec/address-spaces.h"
++#include "exec/memory.h"
++#include "qemu/bswap.h"
++#include "qemu/crc32c.h"
++#include "qemu/log.h"
++#include "qemu/rcu.h"
++
++#include "scanout.h"
++
++#define WIN_OPTIONS             0x700
++#define WIN_COLOR_DEPTH         0x703
++#define WIN_POSITION            0x704
++#define WIN_SIZE                0x705
++#define WIN_PRESCALED_SIZE      0x706
++#define WIN_H_INITIAL_DDA       0x707
++#define WIN_V_INITIAL_DDA       0x708
++#define WIN_DDA_INC             0x709
++#define WIN_LINE_STRIDE         0x70a
++#define WIN_BLEND_LAYER_CONTROL 0x716
++#define WIN_BLEND_NOMATCH       0x718
++#define WINBUF_START_ADDR       0x800
++#define WINBUF_START_ADDR_U     0x802
++#define WINBUF_ADDR_H_OFFSET    0x806
++#define WINBUF_ADDR_V_OFFSET    0x808
++#define WINBUF_SURFACE_KIND     0x80b
++#define WINBUF_START_ADDR_HI    0x80d
++#define WINBUF_START_ADDR_HI_U  0x80f
++#define WINC_CSC_YOF            0x611
++
++#define H_DIRECTION  (1u << 0)
++#define V_DIRECTION  (1u << 2)
++#define SCAN_COLUMN  (1u << 4)
++#define CSC_ENABLE   (1u << 18)
++#define WIN_ENABLE   (1u << 30)
++#define BLEND_BYPASS (1u << 24)
++
++#define SURFACE_PITCH 0
++#define SURFACE_BLOCK 2
++
++#define UNSUPPORTED_DEPTH  (1u << 0)
++#define UNSUPPORTED_KIND   (1u << 1)
++
++enum format { FORMAT_NONE, FORMAT_B8G8R8A8, FORMAT_R8G8B8A8, FORMAT_B5G6R5, FORMAT_NV21, FORMAT_NV12 };
++
++typedef struct Source {
++    uint64_t start;
++    uint32_t stride;
++    uint32_t x0, y0;
++} Source;
++
++typedef struct Window {
++    display_window *regs;
++    int index;
++    enum format format;
++    uint32_t bpp;
++    uint32_t options, depth;
++    uint32_t pos_x, pos_y, out_w, out_h;
++    uint32_t columns, rows;
++    uint32_t h_inc, v_inc, h_init, v_init;
++    uint32_t h_off, v_off;
++    uint32_t kind, block_log2;
++    uint32_t blend, factors;
++    int32_t csc[8];
++} Window;
++
++static enum format format_of(uint32_t depth, uint32_t *bpp)
++{
++    switch (depth) {
++    case 6:
++        *bpp = 2;
++        return FORMAT_B5G6R5;
++    case 12:
++        *bpp = 4;
++        return FORMAT_B8G8R8A8;
++    case 13:
++        *bpp = 4;
++        return FORMAT_R8G8B8A8;
++    case 42:
++        *bpp = 1;
++        return FORMAT_NV21;
++    case 43:
++        *bpp = 1;
++        return FORMAT_NV12;
++    default:
++        *bpp = 4;
++        return FORMAT_NONE;
++    }
++}
++
++static bool dram_read(hwaddr addr, uint8_t *buf, uint32_t len)
++{
++    RCU_READ_LOCK_GUARD();
++    hwaddr xlat, l = len;
++    MemoryRegion *mr = address_space_translate(&address_space_memory, addr, &xlat, &l, false,
++                                               MEMTXATTRS_UNSPECIFIED);
++
++    if (!memory_region_is_ram(mr) || l < len) {
++        return false;
++    }
++    memcpy(buf, (uint8_t *)memory_region_get_ram_ptr(mr) + xlat, len);
++    return true;
++}
++
++static void dc_read(DcScanout *out, const Window *w, uint64_t addr, uint8_t *buf, uint32_t len)
++{
++    while (len) {
++        uint32_t n = MIN(len, 4096 - (addr & 4095));
++
++        if (!dram_read(addr, buf, n)) {
++            memset(buf, 0, n);
++            if (out->fault[w->index] != (addr & ~4095ull)) {
++                out->fault[w->index] = addr & ~4095ull;
++                qemu_log_mask(LOG_GUEST_ERROR, "tegra.dc: window %c reads %#" PRIx64 ", which is not DRAM\n",
++                              'A' + w->index, addr);
++            }
++        }
++        addr += n;
++        buf += n;
++        len -= n;
++    }
++}
++
++static uint32_t gob_offset(uint32_t x, uint32_t y)
++{
++    return ((x >> 5) & 1) << 8 | ((y >> 1) & 3) << 6 | ((x >> 4) & 1) << 5 | (y & 1) << 4 | (x & 15);
++}
++
++static void fetch_pitch(DcScanout *out, const Window *w, const Source *s, DcPlane *p)
++{
++    uint32_t line;
++
++    for (line = 0; line < p->lines; line++) {
++        dc_read(out, w, s->start + (uint64_t)(s->y0 + line) * s->stride + s->x0, p->data + (size_t)line * p->bytes,
++                p->bytes);
++    }
++}
++
++static void fetch_block(DcScanout *out, const Window *w, const Source *s, DcPlane *p)
++{
++    uint32_t gobs = 1u << w->block_log2, block = 512u << w->block_log2;
++    uint64_t block_row = (uint64_t)DIV_ROUND_UP(s->stride, 64) * block;
++    uint32_t x1 = s->x0 + p->bytes, y1 = s->y0 + p->lines, gx, gy, row, run;
++    uint8_t gob[512];
++
++    for (gy = s->y0 / 8; gy * 8 < y1; gy++) {
++        for (gx = s->x0 / 64; gx * 64 < x1; gx++) {
++            dc_read(out, w, s->start + (gy / gobs) * block_row + (uint64_t)gx * block + (gy % gobs) * 512, gob,
++                    sizeof(gob));
++            for (row = 0; row < 8; row++) {
++                uint32_t y = gy * 8 + row;
++
++                if (y < s->y0 || y >= y1) {
++                    continue;
++                }
++                for (run = 0; run < 64; run += 16) {
++                    uint32_t x = gx * 64 + run, from = MAX(x, s->x0), to = MIN(x + 16, x1);
++
++                    if (from < to) {
++                        memcpy(p->data + (size_t)(y - s->y0) * p->bytes + (from - s->x0),
++                               gob + gob_offset(x % 64, row) + (from - x), to - from);
++                    }
++                }
++            }
++        }
++    }
++}
++
++static void fetch_plane(DcScanout *out, const Window *w, const Source *s, DcPlane *p, uint32_t bytes,
++                        uint32_t lines)
++{
++    size_t need = (size_t)bytes * lines;
++
++    if (p->size < need) {
++        p->data = g_realloc(p->data, need);
++        p->size = need;
++    }
++    p->x0 = s->x0;
++    p->y0 = s->y0;
++    p->bytes = bytes;
++    p->lines = lines;
++    if (w->kind == SURFACE_BLOCK) {
++        fetch_block(out, w, s, p);
++    } else {
++        fetch_pitch(out, w, s, p);
++    }
++}
++
++/* Plane 0, and the interleaved chroma of a 4:2:0 window as plane 1, from the window's first byte and line. */
++static void fetch_window(DcScanout *out, const Window *w)
++{
++    uint32_t stride = window_active(w->regs, WIN_LINE_STRIDE);
++    Source s = {
++        .start = window_active(w->regs, WINBUF_START_ADDR) |
++                 (uint64_t)(window_active(w->regs, WINBUF_START_ADDR_HI) & 3) << 32,
++        .stride = stride & 0xffff,
++        .x0 = w->options & H_DIRECTION ? w->h_off + 1 - MIN(w->columns * w->bpp, w->h_off + 1) : w->h_off,
++        .y0 = w->options & V_DIRECTION ? w->v_off + 1 - MIN(w->rows, w->v_off + 1) : w->v_off,
++    };
++
++    fetch_plane(out, w, &s, &out->plane[0], w->columns * w->bpp, w->rows);
++    if (w->format == FORMAT_NV12 || w->format == FORMAT_NV21) {
++        Source c = {
++            .start = window_active(w->regs, WINBUF_START_ADDR_U) |
++                     (uint64_t)(window_active(w->regs, WINBUF_START_ADDR_HI_U) & 3) << 32,
++            .stride = stride >> 16,
++            .x0 = s.x0 & ~1u,
++            .y0 = s.y0 / 2,
++        };
++        fetch_plane(out, w, &c, &out->plane[1], ROUND_UP(s.x0 + w->columns * w->bpp, 2) - c.x0,
++                    (s.y0 + w->rows - 1) / 2 - c.y0 + 1);
++    }
++}
++
++static uint32_t clamp8(int32_t v)
++{
++    return v < 0 ? 0 : v > 255 ? 255 : v;
++}
++
++static int32_t sign_extend(uint32_t v, unsigned bits)
++{
++    return (int32_t)(v << (32 - bits)) >> (32 - bits);
++}
++
++/* WINC_CSC_YOF..KVB: YOF s.7.0, KYRGB 2.8, KUR/KVR/KUB/KVB s.2.8, KUG/KVG s.1.8. */
++static void read_csc(Window *w)
++{
++    static const unsigned bits[8] = { 8, 10, 11, 11, 10, 10, 11, 11 };
++    int i;
++
++    for (i = 0; i < 8; i++) {
++        uint32_t v = read_window(w->regs, WINC_CSC_YOF + i, true) & ((1u << bits[i]) - 1);
++
++        w->csc[i] = i == 1 ? (int32_t)v : sign_extend(v, bits[i]);
++    }
++}
++
++static uint32_t yuv_pixel(const Window *w, uint32_t y, int32_t u, int32_t v)
++{
++    const int32_t *k = w->csc;
++    int32_t luma;
++
++    if (!(w->options & CSC_ENABLE)) {
++        return 0xff000000u | y << 16 | y << 8 | y;
++    }
++    luma = k[1] * ((int32_t)y + k[0]);
++    u -= 128;
++    v -= 128;
++    return 0xff000000u | clamp8((luma + k[2] * u + k[3] * v + 128) >> 8) << 16 |
++           clamp8((luma + k[4] * u + k[5] * v + 128) >> 8) << 8 | clamp8((luma + k[6] * u + k[7] * v + 128) >> 8);
++}
++
++static uint32_t source_pixel(const DcScanout *out, const Window *w, uint32_t sx, uint32_t sy)
++{
++    const DcPlane *p = &out->plane[0];
++    uint32_t pixels = MAX(p->bytes / w->bpp, 1), x, y;
++    const uint8_t *at;
++
++    sx = MIN(sx, pixels - 1);
++    sy = MIN(sy, MAX(p->lines, 1) - 1);
++    x = w->options & H_DIRECTION ? p->bytes - (sx + 1) * w->bpp : sx * w->bpp;
++    y = w->options & V_DIRECTION ? p->lines - 1 - sy : sy;
++    at = p->data + (size_t)y * p->bytes + x;
++
++    switch (w->format) {
++    case FORMAT_B8G8R8A8:
++        return ldl_le_p(at);
++    case FORMAT_R8G8B8A8:
++        return (uint32_t)at[3] << 24 | at[0] << 16 | at[1] << 8 | at[2];
++    case FORMAT_B5G6R5: {
++        uint32_t v = lduw_le_p(at), r = v >> 11, g = (v >> 5) & 63, b = v & 31;
++
++        return 0xff000000u | (r << 3 | r >> 2) << 16 | (g << 2 | g >> 4) << 8 | (b << 3 | b >> 2);
++    }
++    case FORMAT_NV12:
++    case FORMAT_NV21: {
++        const DcPlane *c = &out->plane[1];
++        const uint8_t *uv = c->data + (size_t)((p->y0 + y) / 2 - c->y0) * c->bytes + (((p->x0 + x) & ~1u) - c->x0);
++        int32_t cb = uv[w->format == FORMAT_NV12 ? 0 : 1], cr = uv[w->format == FORMAT_NV12 ? 1 : 0];
++
++        return yuv_pixel(w, *at, cb, cr);
++    }
++    default:
++        return 0;
++    }
++}
++
++static uint32_t mul8(uint32_t a, uint32_t b)
++{
++    uint32_t t = a * b + 128;
++
++    return (t + (t >> 8)) >> 8;
++}
++
++/* BLEND_NOMATCH_SELECT: SRC_COLOR bits 3:0, DST_COLOR 7:4, SRC_ALPHA 11:8, DST_ALPHA 15:12; K1 and K2 from 0x716. */
++static uint32_t blend(const Window *w, uint32_t src, uint32_t dst)
++{
++    uint32_t k1 = (w->blend >> 8) & 0xff, k2 = (w->blend >> 16) & 0xff;
++    uint32_t sa = src >> 24, da = dst >> 24, k1sa = mul8(k1, sa), k1da = mul8(k1, da);
++    uint32_t fsc, fdc, fsa, fda, ret, shift;
++
++    switch (w->factors & 0xf) {
++    case 1: fsc = 255; break;
++    case 2: fsc = k1; break;
++    case 3: fsc = k1da; break;
++    case 4: fsc = 255 - k1da; break;
++    case 5: fsc = k1sa; break;
++    default: fsc = 0; break;
++    }
++    switch ((w->factors >> 4) & 0xf) {
++    case 1: fdc = 255; break;
++    case 2: fdc = k1; break;
++    case 3: fdc = k2; break;
++    case 4: fdc = k1da; break;
++    case 5: fdc = 255 - k1da; break;
++    case 6: fdc = 255 - k1sa; break;
++    case 7: fdc = 255 - k1; break;
++    default: fdc = 0; break;
++    }
++    switch ((w->factors >> 8) & 0xf) {
++    case 1: fsa = k1; break;
++    case 2: fsa = k2; break;
++    case 3: fsa = 255 - k1da; break;
++    default: fsa = 0; break;
++    }
++    switch ((w->factors >> 12) & 0xf) {
++    case 1: fda = 255; break;
++    case 2: fda = 255 - k1sa; break;
++    case 3: fda = k2; break;
++    default: fda = 0; break;
++    }
++
++    ret = MIN(mul8(sa, fsa) + mul8(da, fda), 255u) << 24;
++    for (shift = 0; shift < 24; shift += 8) {
++        ret |= MIN(mul8((src >> shift) & 0xff, fsc) + mul8((dst >> shift) & 0xff, fdc), 255u) << shift;
++    }
++    return ret;
++}
++
++static bool window_of(DcScanout *out, display_window *regs, int index, Window *w)
++{
++    uint32_t pos, size, prescaled, dda, kind;
++
++    memset(w, 0, sizeof(*w));
++    w->regs = regs;
++    w->index = index;
++    w->options = window_active(regs, WIN_OPTIONS);
++    if (!(w->options & WIN_ENABLE)) {
++        return false;
++    }
++    w->format = format_of(window_active(regs, WIN_COLOR_DEPTH) & 0x7f, &w->bpp);
++    kind = window_active(regs, WINBUF_SURFACE_KIND);
++    w->kind = kind & 3;
++    w->block_log2 = (kind >> 4) & 7;
++    {
++        uint32_t why = (w->format == FORMAT_NONE ? UNSUPPORTED_DEPTH : 0) |
++                       (w->kind != SURFACE_PITCH && w->kind != SURFACE_BLOCK ? UNSUPPORTED_KIND : 0);
++
++        if (why & ~out->unsupported[index]) {
++            qemu_log_mask(LOG_UNIMP, "tegra.dc: window %c: COLOR_DEPTH %u, SURFACE_KIND %#x, OPTIONS %#x not modelled\n",
++                          'A' + index, window_active(regs, WIN_COLOR_DEPTH), kind, w->options);
++        }
++        out->unsupported[index] |= why;
++        if (why) {
++            return false;
++        }
++    }
++    pos = window_active(regs, WIN_POSITION);
++    size = window_active(regs, WIN_SIZE);
++    prescaled = window_active(regs, WIN_PRESCALED_SIZE);
++    dda = window_active(regs, WIN_DDA_INC);
++    w->pos_x = pos & 0x1fff;
++    w->pos_y = (pos >> 16) & 0x1fff;
++    w->out_w = size & 0x1fff;
++    w->out_h = (size >> 16) & 0x1fff;
++    w->columns = (prescaled & 0x7fff) / w->bpp;
++    w->rows = (prescaled >> 16) & 0x1fff;
++    if (w->options & SCAN_COLUMN) {
++        uint32_t lines = w->rows;
++
++        w->rows = w->columns;
++        w->columns = lines;
++    }
++    w->h_inc = dda & 0xffff;
++    w->v_inc = dda >> 16;
++    w->h_init = window_active(regs, WIN_H_INITIAL_DDA) & 0xffff;
++    w->v_init = window_active(regs, WIN_V_INITIAL_DDA) & 0xffff;
++    w->h_off = window_active(regs, WINBUF_ADDR_H_OFFSET);
++    w->v_off = window_active(regs, WINBUF_ADDR_V_OFFSET);
++    w->blend = window_active(regs, WIN_BLEND_LAYER_CONTROL);
++    w->factors = window_active(regs, WIN_BLEND_NOMATCH);
++    w->depth = w->blend & 0xff;
++    if (w->format == FORMAT_NV12 || w->format == FORMAT_NV21) {
++        read_csc(w);
++    }
++    return w->out_w && w->out_h && w->columns && w->rows;
++}
++
++static void draw_window(DcScanout *out, const Window *w)
++{
++    uint32_t i, j;
++
++    bool column = w->options & SCAN_COLUMN;
++
++    fetch_window(out, w);
++    for (j = 0; j < w->out_h && w->pos_y + j < out->height; j++) {
++        uint32_t v = (w->v_init + j * w->v_inc) >> 12;
++        uint32_t *line = out->pixels + (size_t)(w->pos_y + j) * out->width;
++
++        for (i = 0; i < w->out_w && w->pos_x + i < out->width; i++) {
++            uint32_t h = (w->h_init + i * w->h_inc) >> 12;
++            uint32_t src = column ? source_pixel(out, w, v, h) : source_pixel(out, w, h, v);
++            uint32_t *dst = &line[w->pos_x + i];
++
++            *dst = w->blend & BLEND_BYPASS ? src : blend(w, src, *dst);
++        }
++    }
++}
++
++void dc_scanout_render(DcScanout *out, uint32_t width, uint32_t height, uint32_t background,
++                       display_window *windows, int count)
++{
++    Window w[DC_SCANOUT_WINDOWS], *order[DC_SCANOUT_WINDOWS];
++    int n = 0, i, j;
++    size_t pixels = (size_t)width * height;
++
++    if (out->width != width || out->height != height) {
++        out->pixels = g_renew(uint32_t, out->pixels, pixels);
++        out->width = width;
++        out->height = height;
++    }
++    for (size_t at = 0; at < pixels; at++) {
++        out->pixels[at] = (background & 0xff000000u) | (background & 0xff) << 16 | (background & 0xff00) |
++                         ((background >> 16) & 0xff);
++    }
++    for (i = 0; i < count && i < DC_SCANOUT_WINDOWS; i++) {
++        if (window_of(out, &windows[i], i, &w[n])) {
++            for (j = n; j > 0 && order[j - 1]->depth < w[n].depth; j--) {
++                order[j] = order[j - 1];
++            }
++            order[j] = &w[n];
++            n++;
++        }
++    }
++    for (i = 0; i < n; i++) {
++        draw_window(out, order[i]);
++    }
++}
++
++uint32_t dc_scanout_crc(const DcScanout *out)
++{
++    g_autofree uint8_t *rgb = g_malloc((size_t)out->width * 3);
++    uint32_t crc = 0xffffffff, x, y;
++
++    for (y = 0; y < out->height; y++) {
++        const uint32_t *line = out->pixels + (size_t)y * out->width;
++
++        for (x = 0; x < out->width; x++) {
++            rgb[x * 3] = line[x] >> 16;
++            rgb[x * 3 + 1] = line[x] >> 8;
++            rgb[x * 3 + 2] = line[x];
++        }
++        crc = crc32c(crc, rgb, out->width * 3);
++    }
++    return ~crc;
++}
+diff --git a/hw/arm/tegra2/ahb/host1x/modules/dc/scanout.h b/hw/arm/tegra2/ahb/host1x/modules/dc/scanout.h
+new file mode 100644
+index 0000000..d0d6d07
+--- /dev/null
++++ b/hw/arm/tegra2/ahb/host1x/modules/dc/scanout.h
+@@ -0,0 +1,39 @@
++/*
++ * Tegra X1 display controller scanout: windows fetched, converted and blended as the panel would get them.
++ *
++ *  This program is free software; you can redistribute it and/or modify it
++ *  under the terms of the GNU General Public License as published by the
++ *  Free Software Foundation; either version 2 of the License, or
++ *  (at your option) any later version.
++ */
++
++#ifndef TEGRA_DC_SCANOUT_H
++#define TEGRA_DC_SCANOUT_H
++
++#include "window.h"
++
++#define DC_SCANOUT_WINDOWS 5
++
++typedef struct DcPlane {
++    uint8_t *data;
++    size_t size;
++    uint32_t x0, y0;
++    uint32_t bytes, lines;
++} DcPlane;
++
++typedef struct DcScanout {
++    uint32_t width, height;
++    uint32_t *pixels;
++    DcPlane plane[2];
++    uint64_t fault[DC_SCANOUT_WINDOWS];
++    uint32_t unsupported[DC_SCANOUT_WINDOWS];
++} DcScanout;
++
++/* The active state of `windows` over `background` (DISP_BLEND_BACKGROUND_COLOR) into out->pixels, A8R8G8B8. */
++void dc_scanout_render(DcScanout *out, uint32_t width, uint32_t height, uint32_t background,
++                       display_window *windows, int count);
++
++/* CRC-32C of the rendered frame's active pixels as the panel gets them: R, G, B bytes, line by line. */
++uint32_t dc_scanout_crc(const DcScanout *out);
++
++#endif
+diff --git a/hw/arm/tegra2/meson.build b/hw/arm/tegra2/meson.build
+index 1884404..b966cd3 100644
+--- a/hw/arm/tegra2/meson.build
++++ b/hw/arm/tegra2/meson.build
+@@ -108,6 +108,7 @@ arm_ss.add(files(
+   'ahb/host1x/modules/dc/registers/vertical_filtering.c',
+   'ahb/host1x/modules/dc/registers/win_common.c',
+   'ahb/host1x/modules/dc/dc.c',
++  'ahb/host1x/modules/dc/scanout.c',
+   'ahb/host1x/modules/dc/window.c',
+ 
+   'ahb/host1x/modules/gr2d/gr2d.c',

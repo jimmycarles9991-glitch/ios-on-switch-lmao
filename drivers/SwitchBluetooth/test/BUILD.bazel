@@ -6,7 +6,8 @@
 #   load, against the PIO model.
 # - switch_coex_test: Wi-Fi/Bluetooth coexistence (SwitchCoex.h with SwitchWLAN's SwitchWLANCoex.h and NVRAM).
 # - switch_bluetooth_le_filter_test: bluetoothd's LE filtering commands into APCF filters (SwitchBluetoothLeFilter.h).
-# - switch_bluetooth_source_test: guards that SwitchBluetooth.cpp programs the UART as both models assume.
+# - switch_bluetooth_source_test: guards that SwitchBluetooth.cpp programs the UART as both models assume, and that
+#   iOS 27's BlueTool stand-in carries the original's seatbelt profile.
 #
 #   bazel test //drivers/SwitchBluetooth/test:all
 load("//bazel/lint:defs.bzl", "lint_files")
@@ -86,7 +87,11 @@ host_test(
 host_test(
     name = "switch_bluetooth_source_test",
     srcs = ["switch_bluetooth_source_test.cpp"],
-    data = ["//drivers/SwitchBluetooth:SwitchBluetooth.cpp"],
+    data = [
+        "//drivers/SwitchBluetooth:BlueTool/BlueTool.entitlements",
+        "//drivers/SwitchBluetooth:BlueTool/BlueTool27.entitlements",
+        "//drivers/SwitchBluetooth:SwitchBluetooth.cpp",
+    ],
 )
 
 host_library(

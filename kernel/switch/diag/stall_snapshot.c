@@ -388,7 +388,7 @@ void switch_stall_put_wait(struct stall_line *l, const struct stall_snapshot *ss
     }
 }
 
-static void put_address(struct stall_line *l, task_t task, const char *label, uint64_t pc)
+void switch_stall_put_address(struct stall_line *l, task_t task, const char *label, uint64_t pc)
 {
     const struct vm_shared_region *sr = task->shared_region;
     uint64_t value;
@@ -417,8 +417,8 @@ void switch_stall_put_user(struct stall_line *l, const struct stall_snapshot *ss
     if (ss->pc == 0) {
         return;
     }
-    put_address(l, ss->task, " user pc ", ss->pc);
-    put_address(l, ss->task, " lr ", ss->lr);
+    switch_stall_put_address(l, ss->task, " user pc ", ss->pc);
+    switch_stall_put_address(l, ss->task, " lr ", ss->lr);
     map = get_task_map_reference(ss->task);
     if (map == VM_MAP_NULL) {
         return;
@@ -430,7 +430,7 @@ void switch_stall_put_user(struct stall_line *l, const struct stall_snapshot *ss
         if (copyinmap(map, fp, frame, sizeof(frame)) != KERN_SUCCESS || frame[1] == 0) {
             break;
         }
-        put_address(l, ss->task, " ", frame[1]);
+        switch_stall_put_address(l, ss->task, " ", frame[1]);
         if (frame[0] <= fp) {
             break;
         }

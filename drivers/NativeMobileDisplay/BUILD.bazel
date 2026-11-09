@@ -26,6 +26,11 @@ filegroup(
     ),
 )
 
+filegroup(
+    name = "overlay_files",
+    srcs = glob(["logging/*.plist"]),
+)
+
 # This package's headers (kernel_headers): what other drivers' hdr_deps name.
 kernel_headers()
 

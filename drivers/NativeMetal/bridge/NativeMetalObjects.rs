@@ -48,7 +48,7 @@ fn set_error(why: String) {
 }
 
 /// Runs `body`, turning an error or a panic into the per-thread reason and `fallback`.
-fn guard<T>(fallback: T, body: impl FnOnce() -> Result<T, String>) -> T {
+pub(crate) fn guard<T>(fallback: T, body: impl FnOnce() -> Result<T, String>) -> T {
     match std::panic::catch_unwind(std::panic::AssertUnwindSafe(body)) {
         Ok(Ok(value)) => value,
         Ok(Err(why)) => {
@@ -67,7 +67,7 @@ fn boxed<T>(value: T) -> *mut T {
 }
 
 /// The object a handle points at.
-fn get<'a, T>(handle: *const T) -> Result<&'a T, String> {
+pub(crate) fn get<'a, T>(handle: *const T) -> Result<&'a T, String> {
     // SAFETY: handles come from `boxed` and live until their release call (the header's contract).
     unsafe { handle.as_ref() }.ok_or_else(|| "null handle".to_string())
 }
@@ -96,7 +96,7 @@ fn copy_out(text: &str, out: *mut c_char, size: usize) -> usize {
     text.len()
 }
 
-fn raw<T: TryFrom<u32>>(value: u64, what: &str) -> Result<T, String>
+pub(crate) fn raw<T: TryFrom<u32>>(value: u64, what: &str) -> Result<T, String>
 where
     T::Error: std::fmt::Debug,
 {
@@ -110,7 +110,7 @@ where
 /// in the process (kits/SwitchRefusal: an error line, kept in release). The kind is the error's variant and first field
 /// (`NotImplemented(Format`, `Unsupported(Unsupported { feature: FramebufferFetch`) without digits, so a value that varies
 /// per call makes no line of its own.
-fn e<E: std::fmt::Debug>(what: &'static str) -> impl FnOnce(E) -> String {
+pub(crate) fn e<E: std::fmt::Debug>(what: &'static str) -> impl FnOnce(E) -> String {
     move |error| {
         let text = format!("{what}: {error:?}");
         let kind: String = text[what.len() + 2..]
@@ -172,6 +172,10 @@ pub unsafe extern "C" fn nmb_function_constant_air(length: *mut usize) -> *const
 pub struct NmbDevice(Device, std::sync::OnceLock<PrivateProperties>, std::sync::Mutex<()>);
 
 impl NmbDevice {
+    pub(crate) fn device(&self) -> &Device {
+        &self.0
+    }
+
     /// The runtime judges the private properties by the family rows once.
     fn private(&self) -> &PrivateProperties {
         self.1.get_or_init(|| self.0.private_properties())
@@ -1270,6 +1274,17 @@ pub extern "C" fn nmb_texture_release(texture: *mut NmbTexture) {
     release(texture)
 }
 
+/// The texture's `VkImage` (metal2vulkan's interop hook, `Texture::vk_image`), as its handle's bits: 0 where its texels are no
+/// one image's. Read-only: the raw GM20B path asks NVK where that image's memory lies, to render and copy it in place.
+#[unsafe(no_mangle)]
+pub extern "C" fn nmb_texture_vk_image(texture: *const NmbTexture) -> u64 {
+    use ash::vk::Handle;
+    // SAFETY: the image stays the texture's; the caller only reads where its memory lies, while the texture lives.
+    guard(0, || {
+        Ok(unsafe { get(texture)?.0.vk_image() }.map_or(0, |image| image.as_raw()))
+    })
+}
+
 #[unsafe(no_mangle)]
 pub extern "C" fn nmb_texture_describe(texture: *const NmbTexture, out: *mut NmbTextureDescriptor) {
     guard((), || {
@@ -1380,7 +1395,8 @@ pub unsafe extern "C" fn nmb_texture_get_bytes(
 // ---- libraries and functions ----
 
 pub struct NmbLibrary(Library, Vec<String>);
-pub struct NmbFunction(Function);
+/// A function and the specialized name a pipeline links it under, where it was made with one.
+pub struct NmbFunction(Function, Option<String>);
 
 /// # Safety
 /// `bytes` holds `length` bytes.
@@ -1445,6 +1461,7 @@ pub unsafe extern "C" fn nmb_function_new(library: *mut NmbLibrary, name: *const
         let name = unsafe { CStr::from_ptr(name) }.to_str().map_err(e("function name"))?;
         Ok(boxed(NmbFunction(
             get(library)?.0.new_function_with_name(name).map_err(e("function"))?,
+            None,
         )))
     })
 }
@@ -1459,11 +1476,13 @@ pub struct NmbConstant {
 }
 
 /// # Safety
-/// `name` is a C string; `constants` holds `count` entries whose names are C strings (or null) and whose bytes hold `length` bytes.
+/// `name` is a C string, `specialized_name` one or null; `constants` holds `count` entries whose names are C strings (or null)
+/// and whose bytes hold `length` bytes.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn nmb_function_new_specialized(
     library: *mut NmbLibrary,
     name: *const c_char,
+    specialized_name: *const c_char,
     constants: *const NmbConstant,
     count: u32,
 ) -> *mut NmbFunction {
@@ -1500,7 +1519,16 @@ pub unsafe extern "C" fn nmb_function_new_specialized(
             .0
             .new_function_with_name_constant_values(name, &values)
             .map_err(e("specialized function"))?;
-        Ok(boxed(NmbFunction(function)))
+        let specialized = if specialized_name.is_null() {
+            None
+        } else {
+            // SAFETY: the caller's contract.
+            let s = unsafe { CStr::from_ptr(specialized_name) }
+                .to_str()
+                .map_err(e("specialized name"))?;
+            Some(s.to_string())
+        };
+        Ok(boxed(NmbFunction(function, specialized)))
     })
 }
 
@@ -1662,7 +1690,7 @@ pub struct NmbComputePipelineDescriptor {
     pub private_count: u64,
 }
 
-/// The functions of a counted handle array, each as a stage links it (`Function::linked_function`).
+/// The functions of a counted handle array, each as a stage links it (`Function::linked_function`), under its specialized name.
 fn linked_functions(
     functions: *const *mut NmbFunction,
     count: u64,
@@ -1675,7 +1703,13 @@ fn linked_functions(
     }
     // SAFETY: the header's counted array of live function handles.
     let handles = unsafe { std::slice::from_raw_parts(functions, usize::try_from(count).map_err(e("linked count"))?) };
-    handles.iter().map(|&f| Ok(get(f)?.0.linked_function())).collect()
+    handles
+        .iter()
+        .map(|&f| {
+            let NmbFunction(function, specialized) = get(f)?;
+            Ok(function.linked_function().with_link_name(specialized.clone()))
+        })
+        .collect()
 }
 
 fn compute_descriptor(descriptor: *const NmbComputePipelineDescriptor) -> Result<ComputePipelineDescriptor, String> {
@@ -1787,6 +1821,14 @@ pub struct NmbRenderPipelineDescriptor {
     pub vertex_inputs: u64,
     pub attributes: [NmbVertexAttribute; 31],
     pub layouts: [NmbVertexLayout; 31],
+    pub vertex_linked: *const *mut NmbFunction,
+    pub vertex_linked_count: u64,
+    pub vertex_private_linked: *const *mut NmbFunction,
+    pub vertex_private_count: u64,
+    pub fragment_linked: *const *mut NmbFunction,
+    pub fragment_linked_count: u64,
+    pub fragment_private_linked: *const *mut NmbFunction,
+    pub fragment_private_count: u64,
 }
 
 fn optional_format(value: u64) -> Result<Option<PixelFormat>, String> {
@@ -1852,11 +1894,42 @@ pub unsafe extern "C" fn nmb_render_pipeline_new_with_options(
     })
 }
 
-fn render_descriptor(descriptor: *const NmbRenderPipelineDescriptor) -> Result<RenderPipelineDescriptor, String> {
+/// A stage's MTLLinkedFunctions: its functions and privateFunctions.
+fn stage_linked(
+    functions: *const *mut NmbFunction,
+    count: u64,
+    private: *const *mut NmbFunction,
+    private_count: u64,
+) -> Result<LinkedFunctions, String> {
+    let mut linked = LinkedFunctions::new();
+    linked.functions = linked_functions(functions, count)?;
+    linked.private_functions = linked_functions(private, private_count)?;
+    Ok(linked)
+}
+
+pub(crate) fn render_descriptor(
+    descriptor: *const NmbRenderPipelineDescriptor,
+) -> Result<RenderPipelineDescriptor, String> {
     let d = get(descriptor)?;
-    let mut out = RenderPipelineDescriptor::new(StageSource::Function(get(d.vertex)?.0.function_descriptor()));
+    let vertex_linked = stage_linked(
+        d.vertex_linked,
+        d.vertex_linked_count,
+        d.vertex_private_linked,
+        d.vertex_private_count,
+    )?;
+    let mut out = RenderPipelineDescriptor::new(StageSource::Function(
+        get(d.vertex)?.0.function_descriptor().with_linked(vertex_linked),
+    ));
     if !d.fragment.is_null() {
-        out.fragment = Some(StageSource::Function(get(d.fragment)?.0.function_descriptor()));
+        let fragment_linked = stage_linked(
+            d.fragment_linked,
+            d.fragment_linked_count,
+            d.fragment_private_linked,
+            d.fragment_private_count,
+        )?;
+        out.fragment = Some(StageSource::Function(
+            get(d.fragment)?.0.function_descriptor().with_linked(fragment_linked),
+        ));
     }
     for (slot, c) in out.color_attachments.iter_mut().zip(d.colors.iter()) {
         if c.format == 0 {
@@ -2256,26 +2329,6 @@ pub extern "C" fn nmb_command_buffer_wait_completed_for(command_buffer: *mut Nmb
 pub extern "C" fn nmb_command_buffer_commit(command_buffer: *mut NmbCommandBuffer) -> bool {
     guard(false, || {
         get(command_buffer)?.0.commit().map_err(e("commit"))?;
-        Ok(true)
-    })
-}
-
-/// The `VkCommandBuffer` handles the command buffer's encoders recorded, in order, each to `each(ctx, handle)`, instead of a
-/// commit: a capture never submitted (`CommandBuffer::capture`). The command buffer cannot be committed after.
-///
-/// # Safety
-/// `each` is a valid function for `ctx` for the call's length.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn nmb_command_buffer_capture(
-    command_buffer: *mut NmbCommandBuffer,
-    each: unsafe extern "C" fn(ctx: *mut c_void, command_buffer: u64),
-    ctx: *mut c_void,
-) -> bool {
-    guard(false, || {
-        get(command_buffer)?
-            .0
-            .capture(|raw| unsafe { each(ctx, raw) })
-            .map_err(e("capture"))?;
         Ok(true)
     })
 }

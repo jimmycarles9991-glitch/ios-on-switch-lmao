@@ -14,6 +14,8 @@ import native_xnu_layout as layout  # //tools/package:packaging
 V = 0xFFFFFFF000001000
 P = 0xA0001000
 N = 0x10000000
+# A kernel one 16 KiB page above its 2 MiB congruence with P: the room a small trust cache takes below it.
+ROOM = 0x4000
 
 
 def macho(
@@ -123,6 +125,7 @@ class NativeLayoutTests(unittest.TestCase):
         self.assertEqual((self.kernel.read_bytes(), self.tree.read_bytes()), original)
 
     def test_raw_sidecars_are_placed_padded_and_fix_only_placeholders(self):
+        self.kernel.write_bytes(macho(base=V + ROOM))
         self.tree.write_bytes(adt(ramdisk=True, trustcache=True))
         ramdisk, cache = self.root / 'ramdisk', self.root / 'trustcache'
         ramdisk.write_bytes(b'ramdisk' * 1000)
@@ -145,10 +148,80 @@ class NativeLayoutTests(unittest.TestCase):
                 bytes(region['size'] - len(content)),
             )
         self.assertEqual(ranges['ramdisk']['size'], 8192)
-        self.assertEqual(ranges['trustcache']['start'], ranges['ramdisk']['end'])
+        self.assertEqual(result['kernel_phys_base'], P + ROOM)
+        self.assertEqual((ranges['trustcache']['start'], ranges['trustcache']['image_offset']), (P, 0))
+        self.assertGreaterEqual(ranges['ramdisk']['start'], result['adt_pa'] + result['adt_size'])
         tree_offset = result['adt_pa'] - P
         self.assertEqual(data[tree_offset : tree_offset + len(original)], expected)
         self.assertEqual(self.tree.read_bytes(), original)
+
+    def test_trust_cache_is_extradata_directly_below_the_kernel(self):
+        # The native window: its 2 MiB block, then the kernel at its VA's offset in it (0x7c000).
+        window, base = 0xB2000000, 0xFFFFFFF00427C000
+        self.kernel.write_bytes(macho(base=base))
+        self.tree.write_bytes(adt(trustcache=True))
+        cache = self.root / 'trustcache'
+        cache.write_bytes(trustcache([bytes([i]) * 20 for i in range(1, 200)]))
+        bundle = cache.read_bytes()
+        result = self.build(physical_base=window, trustcache_path=cache)
+        data = (self.output / 'kernel-window.bin').read_bytes()
+        kernel = 0xB207C000
+        start = kernel - 0x4000 * -(-len(bundle) // 0x4000)
+        self.assertEqual(result['kernel_phys_base'], kernel)
+        self.assertEqual(result['entry_pa'], kernel + 0x10)
+        self.assertEqual(data[: start - window], bytes(start - window))
+        self.assertEqual(data[start - window : start - window + len(bundle)], bundle)
+        self.assertEqual(data[start - window + len(bundle) : kernel - window], bytes(kernel - start - len(bundle)))
+        self.assertEqual(data[kernel - window : kernel - window + 0x100], macho()[0x200:0x300])
+        tree = data[result['adt_pa'] - window : result['adt_pa'] - window + result['adt_size']]
+        offset = layout.parse_adt(self.tree.read_bytes()).properties['/chosen/memory-map', 'TrustCache'][0]
+        self.assertEqual(struct.unpack_from('<QQ', tree, offset), (start, len(bundle)))
+        # XNU's phystokv of the trust caches must land below the kernel's lowest segment: boot_args map the kernel's VA
+        # at its physical base, and physBase (the window's, here) lies below the trust caches.
+        args = data[result['boot_args_pa'] - window :]
+        virt, phys = struct.unpack_from('<QQ', args, 8)
+        self.assertEqual((virt, phys), (base - kernel + window, window))
+        self.assertLess(start - phys + virt, base)
+        self.assertEqual(struct.unpack_from('<Q', args, 0x60)[0], base + result['adt_pa'] - kernel)
+
+    def test_a_trust_cache_larger_than_the_room_moves_the_kernel_a_block_up(self):
+        self.kernel.write_bytes(macho(base=V + ROOM))
+        self.tree.write_bytes(adt(trustcache=True))
+        cache = self.root / 'trustcache'
+        cache.write_bytes(trustcache([i.to_bytes(20, 'big') for i in range(1, 700)]))
+        self.assertGreater(len(cache.read_bytes()), ROOM)
+        result = self.build(trustcache_path=cache)
+        ranges = {r['name']: r for r in result['ranges']}
+        self.assertEqual(result['kernel_phys_base'], P + ROOM + 0x200000)
+        self.assertEqual(ranges['trustcache']['start'], result['kernel_phys_base'] - 0x8000)
+        self.assertEqual(result['entry_pa'], P + ROOM + 0x200000 + 0x10)
+
+    def test_full_ram_refuses_trust_caches_that_would_move_the_kernel(self):
+        self.kernel.write_bytes(macho(base=0xFFFFFFF00427C000))
+        chosen = [('darwinboot-memory-size', struct.pack('<Q', 4 << 30)), ('switch-ram-ledger', bytes(1584))]
+        self.tree.write_bytes(
+            node('device-tree', children=[node('chosen', chosen, [node('memory-map', [('TrustCache', bytes(16))])])])
+        )
+        cache = self.root / 'trustcache'
+        request = {'physical_base': 0xB2000000, 'window_size': 770 << 20, 'full_ram': True, 'trustcache_path': cache}
+        cache.write_bytes(trustcache([i.to_bytes(20, 'big') for i in range(1, 0x7C000 // 24 + 1)]))
+        self.assertGreater(len(cache.read_bytes()), 0x7C000)
+        with self.assertRaisesRegex(layout.LayoutError, 'trust caches must fit the 0x7c000 bytes below it'):
+            self.build(**request)
+        self.assertFalse(self.output.exists())
+        cache.write_bytes(trustcache([i.to_bytes(20, 'big') for i in range(1, 0x7C000 // 24)]))
+        self.assertLessEqual(len(cache.read_bytes()), 0x7C000)
+        result = self.build(**request)
+        self.assertEqual((result['kernel_phys_base'], result['boot_phys_base']), (0xB207C000, 0x80000000))
+        self.assertEqual(result['boot_virt_base'], 0xFFFFFFF00427C000 - 0xB207C000 + 0x80000000)
+
+    def test_a_window_off_the_kernels_2_mib_offset_puts_the_kernel_at_its_next_one(self):
+        result = self.build(physical_base=P + 0x1000)
+        data = (self.output / 'kernel-window.bin').read_bytes()
+        self.assertEqual(result['kernel_phys_base'], P + 0x200000)
+        self.assertEqual(result['phys_base'], P + 0x1000)
+        self.assertEqual(data[: 0x200000 - 0x1000], bytes(0x200000 - 0x1000))
+        self.assertEqual(data[0x200000 - 0x1000 : 0x200000 - 0x1000 + 0x100], macho()[0x200:0x300])
 
     def test_sparse_data_seed_reserves_only_encoded_bytes_and_preserves_exact_adt_length(self):
         # A 1 GiB logical disk with two distant nonzero pages must not expand.
@@ -161,6 +234,7 @@ class NativeLayoutTests(unittest.TestCase):
         seed, cache = self.root / 'seed.dbr', self.root / 'trustcache'
         seed.write_bytes(encoded)
         cache.write_bytes(trustcache())
+        self.kernel.write_bytes(macho(base=V + ROOM))
         self.tree.write_bytes(adt(data_seed=True, trustcache=True))
         original = self.tree.read_bytes()
         result = self.build(data_seed_path=seed, trustcache_path=cache)
@@ -169,7 +243,8 @@ class NativeLayoutTests(unittest.TestCase):
         region = ranges['native_data_seed']
         self.assertNotIn('ramdisk', ranges)
         self.assertEqual(region['start'] % 4096, 0)
-        self.assertGreaterEqual(region['start'], ranges['trustcache']['end'])
+        self.assertGreaterEqual(region['start'], result['adt_pa'] + result['adt_size'])
+        self.assertLessEqual(ranges['trustcache']['end'], result['kernel_phys_base'])
         self.assertEqual(region['size'], 12288)
         self.assertEqual(payload[region['image_offset'] : region['image_offset'] + len(encoded)], encoded)
         self.assertEqual(
@@ -334,9 +409,8 @@ class NativeLayoutTests(unittest.TestCase):
         )
         self.assertEqual(len(result['reserved_ranges']), 2)
 
-    def test_invalid_windows_ranges_and_congruence(self):
+    def test_invalid_windows_and_ranges(self):
         for kwargs in (
-            {'physical_base': P + 0x1000},
             {'window_size': N - 0x200000},
             {'window_size': N + 1},
             {'window_size': 0x200200000},

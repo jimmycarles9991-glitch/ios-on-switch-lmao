@@ -34,8 +34,12 @@ public final class GPU: @unchecked Sendable {
 
     public struct Timing: Sendable {
         public let gpuMilliseconds: Double
+        /// From the commit to the completed handler, on the host's clock.
         public let wallMilliseconds: Double
         public let path: String
+        /// The CPU's part: the encode closure, and the commit call (the raw path encodes and submits inside it).
+        public var encodeMilliseconds = 0.0
+        public var commitMilliseconds = 0.0
 
         /// GPU timestamps that advance prove the work ran on the GPU's clock, not a CPU fallback.
         public var gpuTimed: Bool { gpuMilliseconds > 0 }
@@ -73,23 +77,31 @@ public final class GPU: @unchecked Sendable {
     @discardableResult
     public func run(tolerateError: Bool = false, _ encode: (MTLCommandBuffer) throws -> Void) async throws -> Timing {
         guard let buffer = queue.makeCommandBuffer() else { throw TestFailure("makeCommandBuffer returned nil") }
+        let began = CFAbsoluteTimeGetCurrent()
         try encode(buffer)
         let start = CFAbsoluteTimeGetCurrent()
-        await withCheckedContinuation { (done: CheckedContinuation<Void, Never>) in
-            buffer.addCompletedHandler { _ in done.resume() }
+        var committed = start
+        let completed = await withCheckedContinuation { (done: CheckedContinuation<Double, Never>) in
+            buffer.addCompletedHandler { _ in done.resume(returning: CFAbsoluteTimeGetCurrent()) }
             buffer.commit()
+            committed = CFAbsoluteTimeGetCurrent()
         }
-        let wall = (CFAbsoluteTimeGetCurrent() - start) * 1000
+        let wall = (completed - start) * 1000
+        let encodeMs = (start - began) * 1000
+        let commitMs = (min(committed, completed) - start) * 1000
         let path = RawFacade.path(of: buffer)
         locked { recorded.add(path) }
         if buffer.status == .error {
             let error = buffer.error.map(Self.describe) ?? "no error"
             locked { failures.append(error) }
             if !tolerateError { throw TestFailure("command buffer failed: \(error)") }
-            return Timing(gpuMilliseconds: 0, wallMilliseconds: wall, path: "error:" + error)
+            return Timing(
+                gpuMilliseconds: 0, wallMilliseconds: wall, path: "error:" + error, encodeMilliseconds: encodeMs,
+                commitMilliseconds: commitMs)
         }
         return Timing(
-            gpuMilliseconds: max(0, buffer.gpuEndTime - buffer.gpuStartTime) * 1000, wallMilliseconds: wall, path: path)
+            gpuMilliseconds: max(0, buffer.gpuEndTime - buffer.gpuStartTime) * 1000, wallMilliseconds: wall, path: path,
+            encodeMilliseconds: encodeMs, commitMilliseconds: commitMs)
     }
 
     /// Commits one command buffer without waiting: `finish` waits for a batch of them, so work queued back to back
@@ -165,10 +177,18 @@ public final class GPU: @unchecked Sendable {
         let out = try buffer(rowBytes * height)
         try await run { commands in
             let blit = commands.makeBlitCommandEncoder()!
-            blit.copy(
-                from: texture, sourceSlice: slice, sourceLevel: level, sourceOrigin: MTLOrigin(),
-                sourceSize: MTLSize(width: width, height: height, depth: 1), to: out, destinationOffset: 0,
-                destinationBytesPerRow: rowBytes, destinationBytesPerImage: 0, options: options)
+            let size = MTLSize(width: width, height: height, depth: 1)
+            // m2v's blit encoder has only the form without options: the other is answered zero and copies nothing
+            if options.isEmpty {
+                blit.copy(
+                    from: texture, sourceSlice: slice, sourceLevel: level, sourceOrigin: MTLOrigin(), sourceSize: size,
+                    to: out, destinationOffset: 0, destinationBytesPerRow: rowBytes, destinationBytesPerImage: 0)
+            } else {
+                blit.copy(
+                    from: texture, sourceSlice: slice, sourceLevel: level, sourceOrigin: MTLOrigin(), sourceSize: size,
+                    to: out, destinationOffset: 0, destinationBytesPerRow: rowBytes, destinationBytesPerImage: 0,
+                    options: options)
+            }
             blit.endEncoding()
         }
         return [UInt8](UnsafeRawBufferPointer(start: out.contents(), count: rowBytes * height))

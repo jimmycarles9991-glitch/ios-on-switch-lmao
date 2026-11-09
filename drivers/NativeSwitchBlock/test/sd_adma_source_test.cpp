@@ -97,12 +97,14 @@ TEST(SdAdmaSource, HighProofGuards)
     EXPECT_THAT(build, HasSubstr("const uint64_t limit = task && high.state == SwitchAdmaHigh::kProving ? kAdma4GiB : "
                                  "high.limit(write);"));
     EXPECT_EQ(Count(build, "table.limit = limit;"), 2u);
-    EXPECT_THAT(build, HasSubstr("cacheableRam(page) && high.pageOk(page, write)"));
+    EXPECT_THAT(build, HasSubstr("return kind != DmaPage::kRefused && high.pageOk(page, write);"));
     // Writes never go above 4 GiB while that is unproven; the IRAM alias window stays out of proving reads.
     EXPECT_THAT(header, HasSubstr("state == kOn || (state == kProving && !write) ? kAdmaDmaLimit : kAdma4GiB"));
     EXPECT_THAT(header, HasSubstr("state != kProving || write || page - kAdmaIramAlias >= kAdmaIramBytes"));
     // Only reads are poisoned, and a mismatch puts SDMA's bytes into the requests before they complete.
-    EXPECT_THAT(body("void NativeSwitchBlock::prepareDirect("), HasSubstr("poison && !write"));
+    EXPECT_THAT(body("void NativeSwitchBlock::prepareDirect("), HasSubstr("fill == ReadFill::kPoisonHigh && !write"));
+    EXPECT_THAT(After(source, "void NativeSwitchBlock::beginBatch("),
+                HasSubstr("prepareDirect(b.write, b.proving ? ReadFill::kPoisonHigh : ReadFill::kNone);"));
     const std::string prove = body("bool NativeSwitchBlock::proveHigh(");
     EXPECT_THAT(prove, HasSubstr("high.refuse();"));
     EXPECT_THAT(prove, HasSubstr("stageChain(first, 0, length, checkBuffer, true)"));
@@ -147,6 +149,29 @@ TEST(SdAdmaSource, PipelinedWorker)
     EXPECT_THAT(end, HasSubstr("retry(step, status, first->lba, sectors, write, table.count)"));
     EXPECT_LT(Index(end, "retry("), Index(end, "finishDirect(write)"));
     EXPECT_LT(Index(end, "finishDirect(write)"), Index(end, "proveHigh("));
+}
+
+// The data path does the least maintenance that is correct: writes clean, reads invalidate before and after (every line
+// is whole and the card overwrites it, so a dirty line is dropped, never written back). Only a read whose pages hold a
+// fill to keep (the setup checks, the poison of a proof above 4 GiB) cleans as well. A non-cacheable page has no line to
+// maintain (XNU's dcache_incoherent_io_store64 skips it) and goes straight to the card.
+TEST(SdAdmaSource, MinimalMaintenance)
+{
+    const std::string &source = driver();
+    const std::string prepare = body("void NativeSwitchBlock::prepareDirect(");
+    EXPECT_THAT(prepare, HasSubstr("syncLines(SWITCH_DCACHE_CLEAN, table, tableUncached);"));
+    EXPECT_THAT(prepare,
+                HasSubstr("fill == ReadFill::kNone ? SWITCH_DCACHE_INVALIDATE : SWITCH_DCACHE_CLEAN_INVALIDATE"));
+    EXPECT_THAT(body("void NativeSwitchBlock::finishDirect("), HasSubstr("syncLines(SWITCH_DCACHE_INVALIDATE, table,"));
+    EXPECT_THAT(body("void NativeSwitchBlock::beginTask("), HasSubstr("prepareDirect(false, ReadFill::kNone);"));
+    EXPECT_EQ(Count(source, "prepareDirect(false, ReadFill::kCpuFill);"), 4u);
+    EXPECT_EQ(Count(source, "prepareDirect("), 8u);  // declaration, definition, beginBatch, beginTask, four checks
+    const std::string page = body("static DmaPage dmaPage(");
+    EXPECT_THAT(page, HasSubstr("if (attributes == kWimgDefault)\n        return DmaPage::kCacheable;"));
+    EXPECT_THAT(page, HasSubstr("(attributes & kWimgNotCacheable) != 0 ? DmaPage::kUncached : DmaPage::kRefused"));
+    const std::string sync = body("static void syncLines(");
+    EXPECT_THAT(sync, HasSubstr("if (dmaPage(pa) == DmaPage::kCacheable)"));
+    EXPECT_THAT(body("SwitchAdmaRefusal NativeSwitchBlock::buildTable("), HasSubstr("tableUncached = false;"));
 }
 
 // r12-sdio: a read's refused segments alone go through the bounce buffer, once setup() has run that path.

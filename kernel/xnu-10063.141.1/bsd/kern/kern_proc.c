@@ -161,7 +161,7 @@ SECURITY_READ_ONLY_LATE(u_long) sesshash;
 
 #if PROC_REF_DEBUG
 /* disable panics on leaked proc refs across syscall boundary */
-#if defined(SWITCH_XNU_DIAGNOSTICS) && SWITCH_XNU_DIAGNOSTICS
+#if defined(SWITCH_XNU_BOARD) && SWITCH_XNU_BOARD
 /* Off on Switch, as in RELEASE: tracking takes a backtrace (btref_get) for every proc_ref and proc_rele and drops
  * them all again at each syscall return; the boot-arg can no longer turn it on. */
 static TUNABLE(bool, proc_ref_tracking_disabled, "-disable_procref_tracking", true);

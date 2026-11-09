@@ -288,9 +288,11 @@ static bool a64x_vregs(uint32_t w, uint32_t *vr, uint32_t *vw)
 }
 
 /* V register v dead after w[site]? (same path walk as flow_dead) */
-static bool vflow_dead(const uint32_t *w, int n, int site, uint32_t v, int budget, uint8_t *visited, bool tail_ok)
+static bool vflow_dead(const uint32_t *w, int n, int site, uint32_t v, int budget, const struct a64x_walk *walk,
+                       bool tail_ok)
 {
-    int stack[512], sp = 0;
+    int *stack = walk->stack, sp = 0;
+    uint8_t *visited = walk->visited;
     if (site + 1 >= n) {
         return false;
     }
@@ -356,7 +358,7 @@ static bool vflow_dead(const uint32_t *w, int n, int site, uint32_t v, int budge
                     i = (int)tgt;
                     continue;
                 }
-                if (sp >= 512)
+                if (sp >= A64X_WALK_STACK)
                     return false;
                 stack[sp++] = (int)tgt;
                 i++;
@@ -377,15 +379,18 @@ static bool vflow_dead(const uint32_t *w, int n, int site, uint32_t v, int budge
 }
 
 /* V registers (from candidates) dead after fn[site]; fn = the whole function, branches out of it are tail calls */
-uint32_t a64x_dead_vregs_flow(const uint32_t *fn, int n, int site, uint32_t candidates, int budget, bool whole_function)
+uint32_t a64x_dead_vregs_flow(const uint32_t *fn, int n, int site, uint32_t candidates, int budget, bool whole_function,
+                              const struct a64x_walk *walk)
 {
-    uint8_t visited[(65536 + 7) / 8];
     uint32_t dead = 0;
     if (n > 65536) {
         n = 65536;
     }
+    if (n > (int)walk->words) {
+        return 0;
+    }
     for (uint32_t v = 0; v < 32; v++) {
-        if ((candidates & VM(v)) && vflow_dead(fn, n, site, v, budget, visited, whole_function)) {
+        if ((candidates & VM(v)) && vflow_dead(fn, n, site, v, budget, walk, whole_function)) {
             dead |= VM(v);
         }
     }

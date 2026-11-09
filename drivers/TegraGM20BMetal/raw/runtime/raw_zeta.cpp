@@ -6,7 +6,9 @@
 
 #include <algorithm>
 #include <cstring>
+#include "../fx/fx_image.h"
 #include "raw_gpu.h"
+#include "raw_samples.h"
 
 namespace raw {
 namespace {
@@ -21,8 +23,6 @@ enum : uint32_t {
     ZT_LAYER = 0x179c,
     Z_COMPRESSION = 0x19cc,
 };
-
-constexpr uint32_t kZtFormatZF32X24S8 = 0x19;
 
 // kDepthStencilRegs methods: SET_DEPTH_TEST, _WRITE, _FUNC, SET_STENCIL_TEST, SET_STENCIL_OP_FAIL/ZFAIL/ZPASS, SET_STENCIL_FUNC,
 // _REF, _FUNC_MASK, SET_STENCIL_MASK, then the back face's ops, func, ref, mask, func mask
@@ -55,17 +55,22 @@ uint32_t floatBits(float f)
 }
 }  // namespace
 
-bool zetaShape(uint32_t width, uint32_t height, Texture &t, uint64_t &bytes, uint64_t &align)
+bool zetaShape(uint32_t width, uint32_t height, uint32_t format, uint32_t samples, Texture &t, uint64_t &bytes,
+               uint64_t &align)
 {
-    constexpr uint32_t bpp = 8;
+    const uint32_t i = zetaFormatIndex(format);
+    if (i == kZetaFormats)
+        return false;
+    const uint32_t bpp = kZetaFormatInfo[i].bpp;
     fx::MipChain c;
-    if (!fx::mipChainLayout(width, height, 1, bpp, c))
+    if (samples > 1 ? !fx::msLayout(width, height, samples, bpp, c) : !fx::mipChainLayout(width, height, 1, bpp, c))
         return false;
     const fx::MipLevel &l = c.level[0];
     t = Texture();
     t.width = width;
     t.height = height;
-    t.format = kZetaFormat;
+    t.format = format;
+    t.samples = uint8_t(samples);
     t.bpp = bpp;
     t.pitch = l.rowBytes;
     t.blockLinear = true;
@@ -83,12 +88,12 @@ void zetaTargetWords(Push &p, const Texture *z)
         p.m(ZT_SELECT, 0);
         return;
     }
-    p.inc(ZT_A, {uint32_t(z->va >> 32), uint32_t(z->va), kZtFormatZF32X24S8,
+    p.inc(ZT_A, {uint32_t(z->va >> 32), uint32_t(z->va), kZetaFormatInfo[zetaFormatIndex(z->format)].zt,
                  uint32_t(z->blockHeight & 0xf) << 4,  // WIDTH ONE_GOB, HEIGHT, DEPTH ONE_GOB
                  uint32_t(z->layerBytes >> 2)});
     p.m(ZT_SELECT, 1);
     // SIZE_A the row stride in texels (NVK: the Z/S hardware has no tile width), C one layer, THIRD_DIMENSION_DEFINES_ARRAY_SIZE
-    p.inc(ZT_SIZE_A, {z->pitch / z->bpp, z->height, 1});
+    p.inc(ZT_SIZE_A, {z->pitch / z->bpp, sampleRows(*z), 1});
     p.m(ZT_LAYER, 0);
     p.m(Z_COMPRESSION, z->comptags);
     p.m(STENCIL_COMPRESSION, z->comptags);
@@ -105,15 +110,16 @@ bool DepthStencilRegs::operator==(const DepthStencilRegs &o) const
     return !memcmp(v, o.v, sizeof v);
 }
 
-DepthStencilRegs depthStencilRegs(const DepthStencilDesc &d, uint32_t refFront, uint32_t refBack, bool zeta)
+DepthStencilRegs depthStencilRegs(const DepthStencilDesc &d, uint32_t refFront, uint32_t refBack, bool depth,
+                                  bool stencil)
 {
     DepthStencilRegs r;
     const bool depthTest = d.depthCompare != 7 || d.depthWrite;
     const bool stencilTest = !(noop(d.front) && noop(d.back));
-    r.v[0] = depthTest && zeta;
-    r.v[1] = d.depthWrite && zeta;
+    r.v[0] = depthTest && depth;
+    r.v[1] = d.depthWrite && depth;
     r.v[2] = compareOp(d.depthCompare);
-    r.v[3] = stencilTest && zeta;
+    r.v[3] = stencilTest && stencil;
     const StencilFace *faces[2] = {&d.front, &d.back};
     const uint32_t refs[2] = {refFront, refBack};
     for (uint32_t i = 0; i < 2; i++) {

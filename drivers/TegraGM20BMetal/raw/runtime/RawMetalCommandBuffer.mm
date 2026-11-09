@@ -135,10 +135,9 @@ static void giveRecording(RMCommandBuffer *b)
 
 - (uint64_t)globalTraceObjectID
 {
-    static std::atomic<uint64_t> ids{0};
     std::lock_guard<std::mutex> l(_lock);
     if (!_traceId)
-        _traceId = ++ids;
+        _traceId = nextTraceId();
     return _traceId;
 }
 
@@ -207,12 +206,12 @@ static void giveRecording(RMCommandBuffer *b)
 
 - (CFTimeInterval)kernelStartTime
 {
-    return _gpuStart;
+    return _kernelStart;
 }
 
 - (CFTimeInterval)kernelEndTime
 {
-    return _gpuEnd;
+    return _kernelEnd;
 }
 
 // SPI Core Animation calls on every command buffer: content protection does not exist on this device (no protected surfaces,
@@ -323,6 +322,7 @@ static void giveRecording(RMCommandBuffer *b)
             return;
         _committed = true;
         _status = MTLCommandBufferStatusCommitted;
+        _kernelStart = hostSeconds();
     }
 #if SWITCH_FRAME_TIMELINE
     static thread_local switch_frame::Since since;
@@ -411,7 +411,8 @@ static void giveRecording(RMCommandBuffer *b)
 }
 #endif
 
-// A selector a command buffer does not answer here: recorded for m2v (the command buffer goes there), answered zero.
+// A selector a command buffer does not answer here: recorded for m2v (the command buffer goes there), answered zero; when m2v's
+// command buffer has no method for it either, only answered zero.
 - (NSMethodSignature *)methodSignatureForSelector:(SEL)selector
 {
     if (NSMethodSignature *s = [super methodSignatureForSelector:selector])
@@ -439,6 +440,10 @@ static void giveRecording(RMCommandBuffer *b)
 
 - (void)forwardInvocation:(NSInvocation *)inv
 {
+    if (!twinAnswers(NSClassFromString(@"NBCommandBuffer"), inv.selector)) {
+        answerZero(self, inv);
+        return;
+    }
     [inv retainArguments];
     if (!raw::keepPointedArguments(inv))
         SWITCH_REFUSE_DETAIL("raw", "call.pointer", uintptr_t(inv.selector),
@@ -468,6 +473,18 @@ static void giveRecording(RMCommandBuffer *b)
 + (Class)twinClass
 {
     return NSClassFromString(@"NBQueue");
+}
+
+- (instancetype)init
+{
+    if ((self = [super init]))
+        queuePriorityAdd(self);
+    return self;
+}
+
+- (void)dealloc
+{
+    queuePriorityRemove(self);
 }
 
 - (id)rmTwin

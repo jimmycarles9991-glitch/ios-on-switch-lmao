@@ -66,28 +66,37 @@ ipsw_device_tree = rule(
     },
 )
 
-def _ipsw_static_trust_impl(ctx):
+def _ipsw_apple_trust_impl(ctx):
     ipsw = ctx.attr.ipsw[IpswInfo]
+    pin = ipsw.pins["members"][ctx.attr.role]
+    if "manifest_digest" not in pin:
+        fail("{} has no manifest_digest pinned for {} (ipsw/pin.py)".format(ipsw.build, ctx.attr.role))
     out = ctx.actions.declare_file(ctx.attr.out)
     ctx.actions.run(
-        executable = ctx.executable._trust_bundle,
-        arguments = [out.path, ctx.file.static.path, ctx.file.system.path],
-        inputs = [ctx.file.static, ctx.file.system],
+        executable = ctx.executable._im4p,
+        arguments = [
+            ctx.file.src.path,
+            out.path,
+            "--expect-type=" + ctx.attr.fourcc,
+            "--manifest-digest=" + pin["manifest_digest"],
+        ],
+        inputs = [ctx.file.src],
         outputs = [out],
-        mnemonic = "IpswStaticTrust",
-        progress_message = "Bundling the %s root and OS cryptex trust caches" % ipsw.build,
+        mnemonic = "IpswAppleTrust",
+        progress_message = "Checking the %s %s against its BuildManifest" % (ipsw.build, pin["component"]),
     )
     return [DefaultInfo(files = depset([out]))]
 
-ipsw_static_trust = rule(
-    implementation = _ipsw_static_trust_impl,
-    doc = "The static trust cache bundle for the root and the OS cryptex: the StaticTrustCache's 'trst' payload and " +
-          "the Cryptex1,SystemTrustCache's 'trcs' payload (u32 count 2, u32 offsets).",
+ipsw_apple_trust = rule(
+    implementation = _ipsw_apple_trust_impl,
+    doc = "An Apple trust cache's payload, a version 2 module, once its IM4P's SHA-384 is the BuildManifest's Digest " +
+          "of it (pins.bzl manifest_digest). The boot package merges it into its static module (tools/package/trust.py).",
     attrs = _IPSW | {
-        "static": attr.label(mandatory = True, allow_single_file = True),
-        "system": attr.label(mandatory = True, allow_single_file = True),
+        "role": attr.string(mandatory = True, doc = "the member's role in pins.bzl"),
+        "fourcc": attr.string(mandatory = True, doc = "the IM4P type: trst, trcs or trca"),
+        "src": attr.label(mandatory = True, allow_single_file = True),
         "out": attr.string(mandatory = True),
-        "_trust_bundle": attr.label(default = "//tools/kernel:trust_bundle", executable = True, cfg = "exec"),
+        "_im4p": attr.label(default = "//tools/kernel:im4p", executable = True, cfg = "exec"),
     },
 )
 

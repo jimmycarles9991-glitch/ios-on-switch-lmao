@@ -91,7 +91,7 @@ struct RawSide {
             re->end();
         } else {
             raw::BlitEncoder *be = cb->blit();
-            be->copyTexels(surface, 0, 0, copy, 0, 0, kSide, kSide);
+            be->copyTexels(surface, 0, 0, 0, copy, 0, 0, 0, kSide, kSide);
             be->end();
         }
         cb->use(surface.import, writes);

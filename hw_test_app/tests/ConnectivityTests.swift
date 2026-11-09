@@ -43,7 +43,7 @@ struct ReachabilityTest: HWTest {
         let status = (response as? HTTPURLResponse)?.statusCode ?? 0
         var metrics = Metrics()
         metrics.set("status", status)
-        metrics.set("ms", milliseconds, digits: 1)
+        metrics.set("fetch_ms", milliseconds, digits: 1)
         return .judged(
             [
                 ("HTTP 200", status == 200),

@@ -25,6 +25,7 @@ filegroup(
         "SwitchFrameTimeline.h",
         "TwoPlaneStandIn.h",
         "bridge/NativeMetalBridge.h",
+        "bridge/NativeMetalDirect.h",
         "bridge/NativeMetalObjects.h",
         "//kits/SwitchDMA:SwitchDcache.h",
     ],
@@ -34,6 +35,7 @@ filegroup(
     name = "bridge_rust",
     srcs = [
         "bridge/NativeMetalBridge.rs",
+        "bridge/NativeMetalDirect.rs",
         "bridge/NativeMetalFailure.rs",
         "bridge/NativeMetalObjects.rs",
         "bridge/NativeMetalTarget.rs",

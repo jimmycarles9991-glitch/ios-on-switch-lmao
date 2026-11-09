@@ -11,6 +11,7 @@ py_library(
         "checks.py",
         "devicerun.py",
         "hwtest.py",
+        "lockscreen.py",
         "morning.py",
         "raw_stats.py",
         "reports.py",
@@ -49,6 +50,14 @@ py_test(
     name = "raw_stats_test",
     size = "small",
     srcs = ["raw_stats_test.py"],
+    deps = [":lib"],
+)
+
+# lockscreen.py's checks over boot 15's lock-screen lines.
+py_test(
+    name = "lockscreen_test",
+    size = "small",
+    srcs = ["lockscreen_test.py"],
     deps = [":lib"],
 )
 

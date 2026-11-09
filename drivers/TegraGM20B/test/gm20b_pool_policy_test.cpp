@@ -164,3 +164,34 @@ TEST(GM20BPoolPolicy, RoomForEveryone)
 	check(r.fromSystem == 1 && r.failed == 0,
 	      "past its share, a client's BO comes from system memory");
 }
+
+// Compressed targets on boot 11's pool (54 of 256 MiB used): the compositor's full-screen RGBA16F memoryless targets
+// (7296 KiB each) come from the pool until it holds 48 MiB free, and then its next 16 MiB m2v block still does
+TEST(GM20BPoolPolicy, CompressedTargetsLeaveCoherentRoom)
+{
+	Pool p;
+	p.used = 54 * MiB;
+	Client compositor{true};
+	unsigned made = 0;
+	while (!tgm_pool::compressibleRefusal(7296 * KiB, compositor.held, p.avail(), kLimits,
+					      true)) {
+		p.used += 7296 * KiB;
+		compositor.held += 7296 * KiB;
+		made++;
+	}
+	EXPECT_EQ(made, 21u);
+	EXPECT_GE(p.avail(), kLimits.floorBytes + kLimits.reserveBytes);
+	Result r;
+	alloc(p, compositor, 16 * MiB, false, r);
+	check(r.fromPool == 1, "the compositor's m2v block still comes from the pool");
+	Client app{false};
+	check(tgm_pool::compressibleRefusal(128 * KiB, app.held, p.avail(), kLimits, false) !=
+		      nullptr,
+	      "an app's compressed target waits for room as the compositor's do");
+	Pool fresh;
+	check(tgm_pool::compressibleRefusal(64 * MiB, 0, fresh.avail(), kLimits, false) ==
+			      nullptr &&
+		      tgm_pool::compressibleRefusal(64 * MiB + 128 * KiB, 0, fresh.avail(), kLimits,
+						    false) != nullptr,
+	      "an app's compressed targets stay within its share");
+}

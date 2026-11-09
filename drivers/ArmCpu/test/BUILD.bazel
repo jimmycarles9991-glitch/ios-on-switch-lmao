@@ -1,0 +1,16 @@
+# ArmCpuTmr.h on the host: C7's wake count against the clock TMR10-13 count.
+#
+#   bazel test //drivers/ArmCpu/test:all
+load("//bazel/lint:defs.bzl", "lint_files")
+load("//bazel/testing:defs.bzl", "host_test")
+
+lint_files()
+
+host_test(
+    name = "armcpu_tmr_test",
+    srcs = [
+        "armcpu_tmr_test.cpp",
+        "//drivers/ArmCpu:ArmCpuTmr.h",
+        "//kits/SwitchIdle:switch_idle_governor.h",
+    ],
+)

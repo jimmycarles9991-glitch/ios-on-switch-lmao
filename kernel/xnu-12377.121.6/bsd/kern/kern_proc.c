@@ -184,7 +184,7 @@ SECURITY_READ_ONLY_LATE(u_long) sesshash;
 
 /* Switch: off, as in RELEASE: tracking takes a backtrace (btref_get) for every proc_ref and proc_rele and drops them
  * all again at each syscall return. */
-#if defined(SWITCH_XNU_DIAGNOSTICS) && SWITCH_XNU_DIAGNOSTICS
+#if defined(SWITCH_XNU_BOARD) && SWITCH_XNU_BOARD
 #define SWITCH_PROCREF_TRACKING_OFF 1
 #else
 #define SWITCH_PROCREF_TRACKING_OFF 0

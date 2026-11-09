@@ -67,7 +67,7 @@ static const char *prepare(Decoder *d, const HEVCSPS *sps)
     if (!sps)
         return "not Main or Main Still Picture 4:2:0";
     if (sps->bit_depth != 8)
-        return "10-bit (NVDEC's 10-bit output is not wired yet)";
+        return "10-bit (tiles are placed by VIC, which takes 8-bit NV12)";
     if (sps->width > kTileCeiling || sps->height > kTileCeiling || sps->width < kTileFloor || sps->height < kTileFloor)
         return "tile size outside NVDEC's HEVC range";
     if (hevc_decoder_configure(d->hevc))

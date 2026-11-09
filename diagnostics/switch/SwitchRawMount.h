@@ -4,6 +4,7 @@
 #include "../../drivers/NativeSwitchBlock/SwitchCryptex.h"
 #include "storage/block_backend.h"
 #include <sys/fcntl.h>
+#include <switch/auth_fs.h>
 
 #define SWITCH_RAW_DATA_UUID    "D1B1D053-D0A6-496C-8625-A947A3DA863E"
 #define SWITCH_RAW_PREBOOT_UUID "4AA4A761-5138-439D-9A30-D4138F6887FA"
@@ -142,8 +143,14 @@ static int native_switch_raw_cache_prepare(proc_t p, user_addr_t scratch, user_a
     SWITCH_RAW_STEP("Preboot mount",
                     native_switch_raw_mount(p, scratch, "/private/preboot", path, preboot_device, 0, &preboot_mount));
     static const char *const directories[] = {"/private/preboot/Cryptexes", "/private/preboot/Cryptexes/OS",
-                                              "/private/preboot/Cryptexes/App"};
-    for (unsigned i = 0; i < 3; ++i)
+                                              "/private/preboot/Cryptexes/App",
+#if XNU_12377_121_6
+                                              /* The overlay's union point for the launchd plists 24B119 bootstraps
+                                               * through /System/Cryptexes/Supplemental (commpage.c). */
+                                              "/private/preboot/Cryptexes/Supplemental"
+#endif
+    };
+    for (unsigned i = 0; i < sizeof(directories) / sizeof(directories[0]); ++i)
         SWITCH_RAW_STEP(directories[i], native_switch_raw_directory(p, scratch, directories[i], preboot_mount, 1));
     dev_t cache_device = NODEV;
     /* Real iOS grafts these cryptexes onto the Preboot volume (libignition), so LaunchServices files their bundles
@@ -170,6 +177,7 @@ static int native_switch_raw_cache_prepare(proc_t p, user_addr_t scratch, user_a
             cache_device = image_volume;
     }
     native_owner_cryptex_host = preboot_mount;
+    switch_auth_fs_init();
     /* dyld looks for code that only the OS cryptex has under the cryptex prefix that libignition reports. Ignition is
      * off here, so show each directory holding such code through the root's own: every one of 21H461's and 24B119's
      * (Mach-O files of the cryptex outside its dyld cache whose path the System volume lacks), each where the selected

@@ -57,6 +57,8 @@ public:
 
     // Called at every draw with the decoder in the draw's state (raw/runtime/raw_capture.cpp reads a state off it)
     std::function<void(Decoder &)> onDraw;
+    // Called at every dispatch with the GPU address of its QMD (nvdec_compute.cpp)
+    std::function<void(Decoder &, uint64_t qmd)> onDispatch;
     // The capture's own (pack/cap.cpp): NVDEC_SCRUB's zeroing of what a probe draw read, NVDEC_DESCRIBE's naming of an address
     std::function<void(uint64_t va, uint64_t bytes)> scrub;
     std::function<void(uint64_t va)> describe;
@@ -75,6 +77,20 @@ public:
     {
         return reg_[0][mthd >> 2];
     }
+
+    uint32_t reg(uint32_t subc, uint32_t mthd) const
+    {
+        return subc < 5 ? reg_[subc][mthd >> 2] : 0;
+    }
+
+    // [va, va + bytes) as the GPU sees it now; false: unmapped
+    bool gpuRead(uint64_t va, void *dst, uint64_t bytes)
+    {
+        return read(va, dst, bytes);
+    }
+
+    // The known program whose code starts at `at` (a compute program's: no shader header), or null; `id` names it either way
+    const ProgramInfo *computeProgram(uint64_t at, std::string &id);
 
     // Constant buffer `slot` of shader group `group` (0 vertex .. 4 pixel), as bound now; false: not bound
     bool bound(int group, int slot, uint64_t &addr, uint32_t &bytes) const;
@@ -132,12 +148,31 @@ private:
     void method(uint32_t subc, uint32_t mthd, uint32_t data, bool fromMme);
     void runMacro();
     void copyEngine(uint32_t launch);
+
+    // The copy engine's stores not yet in memory: a PIPELINED launch starts before the launches before it have landed, so they
+    // land only at a NON_PIPELINED launch, a method to another engine or the submission's end, and every read before sees
+    // memory as it was (the hardware's widest overlap)
+    struct CopyStore {
+        uint64_t at;
+        std::vector<uint8_t> bytes, written;  // written: the bytes a remap writes (empty: all)
+    };
+
+    std::vector<CopyStore> copyStores_;
+    void landCopies();
+    void storeCopy(uint64_t at, const uint8_t *bytes, uint64_t n);
     void draw(const char *kind, uint32_t a, uint32_t b);
+    void computeMethod(uint32_t mthd, uint32_t data);
+    void dispatch(uint64_t qmd);
+    void probeKernel(const uint32_t *qmd, const std::string &prog);
+    // the known programs by the hash of their code's first kComputeHead bytes (computeProgram)
+    static constexpr size_t kComputeHead = 64;
+    std::multimap<uint64_t, const ProgramInfo *> computeByHead_;
     void probeDump(uint32_t first, uint32_t count);
     void clear(uint32_t data);
     void countComp(uint32_t clearData);
     void barrier(const std::string &what);
     bool readsStaleConstants();
+    bool dispatchReadsStaleConstants(const uint32_t q[64]);
 
     uint32_t r3(uint32_t mthd) const
     {

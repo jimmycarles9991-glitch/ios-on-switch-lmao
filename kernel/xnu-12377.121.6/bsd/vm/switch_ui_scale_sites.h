@@ -51,6 +51,7 @@ struct switch_us_site {
 	unsigned edits;
 	struct switch_us_edit edit[2];
 	const char *name, *applied;
+	bool every_scale;                           /* applied at scale 1 too; SWITCH_US_FIXED edits only */
 };
 
 /* One IPSW kind's cache: the build it shipped in, its header's magic and its sites. */

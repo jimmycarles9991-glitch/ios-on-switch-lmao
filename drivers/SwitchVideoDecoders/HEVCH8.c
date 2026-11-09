@@ -16,10 +16,10 @@
 //   thumbnail rebuilds) becomes AccelerationMode 2, CMPhoto's RequireHardwareCodec, and
 //   kVTVideoDecoderSpecification_RequireHardwareAcceleratedVideoDecoder: those decodes fail without a hardware entry.
 //
-// So this registers the same software decoder again through VTRegisterVideoDecoder, which leaves
-// kVTVideoDecoder_IsHardwareAccelerated at its default, true, and those still-image decodes find a decoder (Apple's
-// NEON decoder on the CPU, tile decoding included). No Apple binary is patched. VTRegisterVideoDecoder and
-// HEVCVideoDecoder_CreateInstance are exported but not in the SDK, so both come from dlsym.
+// So this registers the same software decoder again with kVTVideoDecoder_IsHardwareAccelerated true (which 21H461
+// assumed for an entry without the key and 24B119 does not), and those still-image decodes find a decoder (Apple's
+// NEON decoder on the CPU, tile decoding included). No Apple binary is patched. HEVCVideoDecoder_CreateInstance is
+// exported but not in the SDK, so it and VideoToolbox's registration come from dlsym.
 //
 // The entry is a stand-in, and VTIsHardwareDecodeSupported('hvc1') answers from the registry alone, so it would tell
 // every process that HEVC decodes in hardware. Processes that choose streaming codecs from that answer (Safari's WebKit
@@ -39,7 +39,7 @@
 #include <string.h>
 
 typedef OSStatus (*CreateInstance)(FourCharCode codecType, CFAllocatorRef allocator, void **decoderOut);
-typedef OSStatus (*RegisterDecoder)(FourCharCode codecType, CreateInstance create);
+typedef OSStatus (*RegisterDecoder)(FourCharCode codecType, CFDictionaryRef info, CreateInstance create);
 
 __attribute__((visibility("default"))) void HEVCH8Register(void);
 
@@ -64,15 +64,22 @@ void HEVCH8Register(void)
     os_log_t log = os_log_create("com.brunostjohn.switch.hevc", "register");
     void *codec = dlopen("/System/Library/VideoCodecs/VCPHEVC.videocodec", RTLD_NOW | RTLD_LOCAL);
     CreateInstance create = codec ? (CreateInstance)dlsym(codec, "HEVCVideoDecoder_CreateInstance") : NULL;
-    RegisterDecoder registerDecoder = (RegisterDecoder)dlsym(RTLD_DEFAULT, "VTRegisterVideoDecoder");
-    if (!create || !registerDecoder) {
+    RegisterDecoder registerDecoder = (RegisterDecoder)dlsym(RTLD_DEFAULT, "VTRegisterVideoDecoderWithInfo");
+    const CFStringRef *hardware = dlsym(RTLD_DEFAULT, "kVTVideoDecoder_IsHardwareAccelerated");
+    if (!create || !registerDecoder || !hardware) {
         os_log_error(log, "HEVCH8: no %{public}s, HEVC stays software-only",
-                     create ? "VTRegisterVideoDecoder" : "HEVCVideoDecoder_CreateInstance in VCPHEVC.videocodec");
+                     !create            ? "HEVCVideoDecoder_CreateInstance in VCPHEVC.videocodec"
+                     : !registerDecoder ? "VTRegisterVideoDecoderWithInfo"
+                                        : "kVTVideoDecoder_IsHardwareAccelerated");
         return;
     }
-    OSStatus status = registerDecoder('hvc1', create);
+    const void *keys[] = {*hardware}, *values[] = {kCFBooleanTrue};
+    CFDictionaryRef info =
+        CFDictionaryCreate(NULL, keys, values, 1, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
+    OSStatus status = registerDecoder('hvc1', info, create);
+    CFRelease(info);
     if (status)
-        os_log_error(log, "HEVCH8: VTRegisterVideoDecoder('hvc1') failed: %d", (int)status);
+        os_log_error(log, "HEVCH8: VTRegisterVideoDecoderWithInfo('hvc1') failed: %d", (int)status);
     else
         os_log(log, "HEVCH8: software HEVC (VCPHEVC) registered as the hardware 'hvc1' decoder for still images");
 }

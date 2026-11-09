@@ -52,6 +52,7 @@ static struct {
 
 static struct {
 	u32 kicks, preempted, switching, deferred, followed;
+	u32 interleaved; /* runlists sched_update lists, for good */
 } st;
 
 static int is_high(int chid)
@@ -151,11 +152,55 @@ static void sched_chan_preempt(struct nvkm_chan *chan)
 	orig_chan_preempt(chan);
 }
 
+/* 1 if `runl` now lists its channel groups with sched_update; its next update writes them so */
+static int interleave(struct nvkm_device *device, struct nvkm_runl *runl)
+{
+	u32 entries = 0;
+
+	if (runl->id < 0 || runl->id >= SCHED_RUNLS || rl[runl->id].mem ||
+	    runl->func->update != nv50_runl_update || !runl->func->pending)
+		return 0;
+	/* nvkm's whole ring holds two of these: every entry once, and a high group after each low one */
+	entries = 2 * ((runl->cgid ? runl->cgid->nr : 0) + runl->chid->nr);
+	rl[runl->id].segment = ALIGN(entries * runl->func->size, 0x1000);
+	if (nvkm_memory_new(device, NVKM_MEM_TARGET_INST, 2 * (u64)rl[runl->id].segment, 0x1000,
+			    true, &rl[runl->id].mem)) {
+		nvxnu_log("tegra-gm20b: runlist %d keeps nvkm's round robin: no memory\n",
+			  runl->id);
+		return 0;
+	}
+	mutex_lock(&runl->mutex);
+	rl[runl->id].func = *runl->func;
+	rl[runl->id].func.update = sched_update;
+	runl->func = &rl[runl->id].func;
+	atomic_set(&runl->changed, 1);
+	mutex_unlock(&runl->mutex);
+	__atomic_fetch_add(&st.interleaved, 1, __ATOMIC_RELAXED);
+	return 1;
+}
+
+static int (*runl_ctor_nvkm)(struct nvkm_fifo *);
+
+/* At M2 the FIFO has no user yet: nvkm makes its runlists at the first channel (nvkm_fifo_oneinit), before its first
+ * init, so their first update waits for a channel to list. */
+static int sched_runl_ctor(struct nvkm_fifo *fifo)
+{
+	struct nvkm_runl *runl = NULL;
+	int ret = runl_ctor_nvkm(fifo);
+
+	if (ret)
+		return ret;
+	nvkm_runl_foreach(runl, fifo)
+	{
+		interleave(fifo->engine.subdev.device, runl);
+	}
+	return 0;
+}
+
 void tgm_sched_init(struct nvkm_device *device)
 {
 	struct nvkm_fifo *fifo = device->fifo;
 	struct nvkm_runl *runl = NULL;
-	u32 entries = 0;
 
 	tgm_hold_init();
 	tgm_deadline_init(device);
@@ -166,27 +211,17 @@ void tgm_sched_init(struct nvkm_device *device)
 		tgm_fifo_func(fifo)->chan.func = &chan_func;
 	}
 
+	if (tgm_fifo_func(fifo)->runl_ctor != sched_runl_ctor) {
+		runl_ctor_nvkm = fifo->func->runl_ctor;
+		tgm_fifo_func(fifo)->runl_ctor = sched_runl_ctor;
+	}
 	nvkm_runl_foreach(runl, device->fifo)
 	{
-		if (runl->id < 0 || runl->id >= SCHED_RUNLS || rl[runl->id].mem ||
-		    runl->func->update != nv50_runl_update || !runl->func->pending)
-			continue;
-		/* nvkm's whole ring holds two of these: every entry once, and a high group after each low one */
-		entries = 2 * ((runl->cgid ? runl->cgid->nr : 0) + runl->chid->nr);
-		rl[runl->id].segment = ALIGN(entries * runl->func->size, 0x1000);
-		if (nvkm_memory_new(device, NVKM_MEM_TARGET_INST, 2 * (u64)rl[runl->id].segment,
-				    0x1000, true, &rl[runl->id].mem)) {
-			nvxnu_log("tegra-gm20b: runlist %d keeps nvkm's round robin: no memory\n",
-				  runl->id);
-			continue;
+		if (interleave(device, runl)) {
+			mutex_lock(&runl->mutex);
+			nvkm_runl_update_locked(runl, true);
+			mutex_unlock(&runl->mutex);
 		}
-		mutex_lock(&runl->mutex);
-		rl[runl->id].func = *runl->func;
-		rl[runl->id].func.update = sched_update;
-		runl->func = &rl[runl->id].func;
-		atomic_set(&runl->changed, 1);
-		nvkm_runl_update_locked(runl, true);
-		mutex_unlock(&runl->mutex);
 	}
 }
 
@@ -358,7 +393,9 @@ void tgm_sched_stats(char *buf, unsigned int len)
 	u32 followed = __atomic_exchange_n(&st.followed, 0, __ATOMIC_RELAXED);
 
 	scnprintf(buf, len,
-		  "%u high kicks: %u preempted an app, %u found a switch under way, %u deferred, "
-		  "%u left the app they wait for running",
-		  kicks, preempted, switching, deferred, followed);
+		  "%u runlists interleaved, %u high kicks: %u preempted an app, %u found a switch "
+		  "under "
+		  "way, %u deferred, %u left the app they wait for running",
+		  __atomic_load_n(&st.interleaved, __ATOMIC_RELAXED), kicks, preempted, switching,
+		  deferred, followed);
 }

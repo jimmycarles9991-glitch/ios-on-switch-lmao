@@ -167,6 +167,7 @@ bool mipChainLayout(uint32_t width, uint32_t height, uint32_t levels, uint32_t b
     // array stride rounded to level 0's tile, then the image's alignment: max(level-0 tile bytes, 4096)
     const uint64_t tile0 = 512ull << y;
     at = (at + tile0 - 1) / tile0 * tile0;
+    out.arrayStride = at;
     out.align = std::max<uint64_t>(tile0, kChainAlign);
     out.bytes = (at + out.align - 1) / out.align * out.align;
     return true;
@@ -221,7 +222,7 @@ void readLevel(const MipChain &c, const uint8_t *chainCpu, uint32_t l, uint32_t 
 }
 
 void mipChainTic(const MipChain &c, uint64_t va, uint32_t tic0, bool srgb, uint32_t baseLevel, uint32_t levelCount,
-                 uint32_t out[8])
+                 uint32_t out[8], uint32_t textureType)
 {
     memset(out, 0, 32);
     out[0] = tic0;                                // COMPONENTS, data types, X..W_SOURCE (NIL nvb097_set_th_bl_0)
@@ -230,7 +231,7 @@ void mipChainTic(const MipChain &c, uint64_t va, uint32_t tic0, bool srgb, uint3
     setField(out, 87, 85, 3);                     // HEADER_VERSION SELECT_BLOCKLINEAR
     setField(out, 98, 96, 0);                     // GOBS_PER_BLOCK_WIDTH ONE_GOB
     setField(out, 101, 99, c.yLog2);              // GOBS_PER_BLOCK_HEIGHT (level 0's)
-    setField(out, 104, 102, 0);                   // GOBS_PER_BLOCK_DEPTH
+    setField(out, 104, 102, c.zLog2);             // GOBS_PER_BLOCK_DEPTH
     setField(out, 108, 106, 0);                   // TILE_WIDTH_IN_GOBS
     setField(out, 112, 112, 1);                   // LOD_ANISO_QUALITY2
     setField(out, 113, 113, 1);                   // LOD_ANISO_QUALITY HIGH
@@ -238,21 +239,23 @@ void mipChainTic(const MipChain &c, uint64_t va, uint32_t tic0, bool srgb, uint3
     setField(out, 116, 115, 0);                   // ANISO_COARSE_SPREAD_MODIFIER NONE
     // MAX_MIP_LEVEL: nil_rs_max_mip_level, 0 for a one-level view of level 0 (unnormalized coordinates stay possible), else the
     // image's last level
-    const bool single = levelCount == 1 && baseLevel == 0;
+    const bool single = levelCount == 1 && baseLevel == 0 && textureType != kTexThreeD && c.layers == 1;
     setField(out, 127, 124, single ? 0 : c.levels - 1);
-    setField(out, 143, 128, c.width - 1);                 // WIDTH_MINUS_ONE
-    setField(out, 150, 150, srgb ? 1 : 0);                // S_R_G_B_CONVERSION
-    setField(out, 154, 151, 1);                           // TEXTURE_TYPE TWO_D
-    setField(out, 156, 155, 0);                           // SECTOR_PROMOTION NO_PROMOTION
-    setField(out, 159, 157, 7);                           // BORDER_SIZE BORDER_SAMPLER_COLOR
-    setField(out, 175, 160, c.height - 1);                // HEIGHT_MINUS_ONE
-    setField(out, 189, 176, 0);                           // DEPTH_MINUS_ONE (one layer)
+    setField(out, 143, 128, c.width - 1);   // WIDTH_MINUS_ONE
+    setField(out, 150, 150, srgb ? 1 : 0);  // S_R_G_B_CONVERSION
+    setField(out, 154, 151, textureType);   // TEXTURE_TYPE
+    setField(out, 156, 155, 0);             // SECTOR_PROMOTION NO_PROMOTION
+    setField(out, 159, 157, 7);             // BORDER_SIZE BORDER_SAMPLER_COLOR
+    setField(out, 175, 160, c.height - 1);  // HEIGHT_MINUS_ONE
+    // DEPTH_MINUS_ONE: a 3D image's depth, an array's layers, a cube array's cubes
+    const bool cube = textureType == kTexCube || textureType == kTexCubeArray;
+    setField(out, 189, 176, (textureType == kTexThreeD ? c.depth : cube ? c.layers / 6 : c.layers) - 1);
     setField(out, 191, 191, 1);                           // NORMALIZED_COORDS
     setField(out, 216, 215, 2);                           // ANISO_FINE_SPREAD_FUNC TWO
     setField(out, 218, 217, 1);                           // ANISO_COARSE_SPREAD_FUNC ONE
     setField(out, 227, 224, baseLevel);                   // RES_VIEW_MIN_MIP_LEVEL
     setField(out, 231, 228, baseLevel + levelCount - 1);  // RES_VIEW_MAX_MIP_LEVEL
-    setField(out, 235, 232, 0);                           // MULTI_SAMPLE_COUNT 1x1
+    setField(out, 235, 232, c.sampleMode);                // MULTI_SAMPLE_COUNT
     setField(out, 247, 236, 0);  // MIN_LOD_CLAMP: min_lod_clamp 0 - base level, clamped at 0 (ufixed 4.8)
 }
 

@@ -43,9 +43,14 @@
 //    0x638) are not shadowed (hekate di.h): written only while the window is off.
 //  - [T] YCbCr 4:2:0 semi-planar with Cb first (NV12, IOSurface '420v'/'420f') is COLOR_DEPTH 43 (mainline plane.c and hekate
 //    di.h; L4T's tegra_dc_ext.h names 42 and 43 the other way round).
+//  - [T] a block-linear surface (WINBUF_SURFACE_KIND BLOCK with its block height; LINE_STRIDE its bytes across) is fetched
+//    from START with the source origin in ADDR_H_OFFSET (bytes) and ADDR_V_OFFSET (lines), as mainline dc.c programs one
+//    whenever supports_block_linear (T210 sets it); window A already scans one so (kBlockSurfaceKind).
 #pragma once
 #include <stdint.h>
 #include <string.h>
+
+#include "../TegraGM20B/TegraGM20BLayout.h"
 
 namespace native_planes {
 
@@ -136,7 +141,22 @@ struct Limits {
     uint32_t maxSrcBuffer = 2048;  // so rows x stride of any source fits one 20 MiB slot (8 KiB x 2048 = 16 MiB)
     uint32_t planeBaseAlignment = 64, strideAlignment = 128;
     uint32_t maxLayers = 2;
+    bool packedYuvUnsupported = false;    // published as IOMFBYUVPackedUnSupported (24B119 only, see kLimits24B119)
+    bool compressionUnsupported = false;  // published as IOMFBMaxSrcPixels' IOMFBCompressionSupport 0 (24B119 only)
 };
+
+// QuartzCore 24B119 [V] reads every key above the same way (update_display_limits 0x1844e82f0; MaxSrcRectWidthForPipe and
+// MaxSrcRectHeightForPipe, absent, become MaxSrcRectWidth and MaxSrcRectTotal / MaxSrcRectWidth). Two kinds of surface it
+// would give window B are new with J181's chip id (0x8030), where 21H461 went by J120's (0x8011) to rule them out:
+//  - Apple's packed 10-bit YUV ('p420', 'pf20'...): AppleDisplay::detachable_layer_impl (0x18443d2a0) takes them, and
+//    IOMFBDisplay::detach_layer makes the IOSurfaceAccelerator copies for the display in them, unless the display says
+//    IOMFBYUVPackedUnSupported (supports_packed_yuv);
+//  - lossless-compressed surfaces: CADeviceUseCompression is on for 0x8030, and AppleDisplay::compressed_pixel_format then
+//    gives the surfaces Core Animation makes for the display ('&8v0', '&BGA') compressed formats unless IOMFBMaxSrcPixels'
+//    IOMFBCompressionSupport is 0.
+// Window B scans neither, so 24B119 publishes both. 10-bit biplanar ('x420') and 'RGhA' have no such key: 24B119 gates
+// the first by IOMFBYUVSupportKey alone (all YUV) and the second by chip id and the surface's transfer function.
+constexpr Limits kLimits24B119 = {.packedYuvUnsupported = true, .compressionUnsupported = true};
 
 // The row and plane-base alignment published for every surface iPadOS sizes for this display (Core Animation's
 // framebuffers through update_display_limits, VideoToolbox's and MediaToolbox's outputs through
@@ -216,6 +236,8 @@ enum : uint32_t {
 };
 
 constexpr uint32_t kWinEnable = 1u << 30, kCscEnable = 1u << 18, kHFilterOn = 1u << 8, kVFilterOn = 1u << 10;
+// WINBUF_SURFACE_KIND: BLOCK, with the block height (GOBs, log2) in bits 6:4 (mainline dc.c DC_WINBUF_SURFACE_KIND_*).
+constexpr uint32_t kSurfaceKindBlock = 2, kSurfaceKindBlockHeightShift = 4;
 constexpr uint32_t kDepthB8G8R8A8 = 12, kDepthR8G8B8A8 = 13, kDepthYCbCr420SP = 43;
 constexpr uint32_t kBlendBypass = 1u << 24, kBlendPremultiplied = 0x00ffff00u, kBlendOver = 0x262;
 // The TRM's default filter taps (mainline dc.c tegra_dc_setup_window): 6-tap H, 2-tap V (128 - 8i).
@@ -260,7 +282,9 @@ inline uint32_t ddaIncrement(uint32_t in, uint32_t out, uint32_t maxWhole)
 
 // Everything the driver writes for a detached layer, and the part of its surface the window reads.
 struct Image {
-    bool visible = false;  // false: the layer lies off the screen (window off)
+    bool visible = false;     // false: the layer lies off the screen (window off)
+    uint8_t surfaceKind = 0;  // WINBUF_SURFACE_KIND (pitch: 0)
+    uint16_t vOffset = 0;     // ADDR_V_OFFSET (pitch: 0)
     uint32_t colorDepth = 0, position = 0, size = 0, prescaled = 0, dda = 0, lineStride = 0, hOffset = 0, options = 0;
     uint32_t hInitial = 0, vInitial = 0;  // H/V_INITIAL_DDA, 4.12: the first output pixel's source phase
     uint64_t start[2] = {};               // surface byte offsets of the first source row each plane is read from
@@ -309,9 +333,54 @@ inline bool axisOf(int32_t s, int32_t sn, int32_t d, int32_t dn, uint32_t screen
     return a.initial <= 0xffff;
 }
 
+// A pitch surface's planes: each one's first source row, and the bytes the window reads from them.
+inline void pitchReads(const Surface &f, const Axis &x, const Axis &y, uint32_t bpp, Image &image)
+{
+    uint64_t low = UINT64_MAX;
+    uint64_t high = 0;
+    for (unsigned p = 0; p < (image.yuv ? 2u : 1u); ++p) {
+        const uint64_t base = image.yuv ? f.offset[p] : 0;
+        const uint64_t stride = f.stride[p];
+        const uint64_t row0 = p ? static_cast<uint64_t>(y.first) / 2 : static_cast<uint64_t>(y.first);
+        const uint64_t rows = p ? (static_cast<uint64_t>(y.count) + 1) / 2 : static_cast<uint64_t>(y.count);
+        image.start[p] = base + row0 * stride;
+        const uint64_t a = image.start[p] + image.hOffset;
+        const uint64_t b =
+            image.start[p] + (rows - 1) * stride + image.hOffset + static_cast<uint64_t>(x.count) * (p ? 1 : bpp);
+        if (a < low)
+            low = a;
+        if (b > high)
+            high = b;
+    }
+    image.lineStride = image.yuv ? f.stride[1] << 16 | f.stride[0] : f.stride[0];
+    image.readLow = low & ~4095ULL;
+    image.readHigh = (high + 4095) & ~4095ULL;
+}
+
+// A surface the GPU renders block-linear (TegraGM20BLayout.h), 32-bit RGB only: START on the first block row the window
+// reads, the rest of the source origin in H_OFFSET (bytes) and V_OFFSET (lines), as mainline dc.c programs a block-linear
+// plane from its buffer's base. A block row is one run of bytes across the whole surface, so the reads are whole block rows.
+inline bool blockReads(const tgm_layout &b, const Surface &f, const Axis &y, Image &image)
+{
+    if (b.bpp != 4 || (b.row_bytes % 64) != 0 || b.width < f.width || b.height < f.height || b.y_log2 > 5)
+        return false;
+    const uint64_t blockRows = 8ULL << b.y_log2;
+    const uint64_t blockRowBytes = static_cast<uint64_t>(b.row_bytes) * blockRows;
+    const uint64_t first = y.first / blockRows;
+    const uint64_t end = (static_cast<uint64_t>(y.first) + y.count + blockRows - 1) / blockRows;
+    image.start[0] = first * blockRowBytes;
+    image.vOffset = static_cast<uint16_t>(y.first - first * blockRows);
+    image.lineStride = b.row_bytes;
+    image.surfaceKind =
+        static_cast<uint8_t>(kSurfaceKindBlock | static_cast<uint32_t>(b.y_log2) << kSurfaceKindBlockHeightShift);
+    image.readLow = image.start[0] & ~4095ULL;
+    image.readHigh = (end * blockRowBytes + 4095) & ~4095ULL;
+    return image.readHigh <= ((f.descriptorBytes + 4095) & ~4095ULL);
+}
+
 // The image of a layer checkDetached accepted: the destination clipped to the display with the source cut exactly where
-// the clipped edge samples it.
-inline bool imageOf(const Layer &l, uint32_t width, uint32_t height, Image &image)
+// the clipped edge samples it. block: the surface's layout when the GPU renders it block-linear.
+inline bool imageOf(const Layer &l, uint32_t width, uint32_t height, Image &image, const tgm_layout *block = nullptr)
 {
     image = Image();
     image.yuv = isNv12(l.kind);
@@ -341,27 +410,13 @@ inline bool imageOf(const Layer &l, uint32_t width, uint32_t height, Image &imag
     const bool scaledX = x.inc != 4096 || (x.initial != 0u);
     const bool scaledY = y.inc != 4096 || (y.initial != 0u);
     image.options = kWinEnable | (image.yuv ? kCscEnable : 0) | (scaledX ? kHFilterOn : 0) | (scaledY ? kVFilterOn : 0);
-    const Surface &f = l.surface;
-    uint64_t low = UINT64_MAX;
-    uint64_t high = 0;
-    for (unsigned p = 0; p < (image.yuv ? 2u : 1u); ++p) {
-        const uint64_t base = image.yuv ? f.offset[p] : 0;
-        const uint64_t stride = f.stride[p];
-        const uint64_t row0 = p ? static_cast<uint64_t>(y.first) / 2 : static_cast<uint64_t>(y.first);
-        const uint64_t rows = p ? (static_cast<uint64_t>(y.count) + 1) / 2 : static_cast<uint64_t>(y.count);
-        image.start[p] = base + row0 * stride;
-        const uint64_t a = image.start[p] + image.hOffset;
-        const uint64_t b =
-            image.start[p] + (rows - 1) * stride + image.hOffset + static_cast<uint64_t>(x.count) * (p ? 1 : bpp);
-        if (a < low)
-            low = a;
-        if (b > high)
-            high = b;
+    if (block) {
+        if (image.yuv || !blockReads(*block, l.surface, y, image))
+            return false;
+    } else {
+        pitchReads(l.surface, x, y, bpp, image);
     }
-    image.lineStride = image.yuv ? f.stride[1] << 16 | f.stride[0] : f.stride[0];
-    image.readLow = low & ~4095ULL;
-    image.readHigh = (high + 4095) & ~4095ULL;
-    image.matrix = matrixOf(f);
+    image.matrix = matrixOf(l.surface);
     image.fullRange = l.kind == kKindNv12Full;
     return true;
 }

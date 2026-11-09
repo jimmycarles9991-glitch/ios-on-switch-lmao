@@ -124,14 +124,14 @@ int main(int argc, char **argv)
     const Sample stated = sample();
     report("first state", base, stated);
     if (client)
-        expect(stated.imported <= (256 << 10) && !stated.channels, "its programs bind one heap step, no channel");
+        expect(stated.imported <= (64 << 10) && !stated.channels, "its programs bind a quarter heap step, no channel");
     raw::Texture t;
     dev.createTexture(256, 256, 80, t);
     const Sample textured = sample();
     report("first texture", base, textured);
     if (client)
-        expect(textured.imported - stated.imported == (4u << 20),
-               "a client's first texture wires one 4 MiB pool chunk");
+        expect(textured.imported - stated.imported == (256u << 10),
+               "a client's first texture wires one pool chunk of a sixteenth of the render server's");
     raw::CommandBuffer *cb = dev.begin();
     uint32_t seq = 0;
     const bool committed = cb && cb->commit(seq);

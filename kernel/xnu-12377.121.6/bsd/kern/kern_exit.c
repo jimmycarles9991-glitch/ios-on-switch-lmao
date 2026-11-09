@@ -164,6 +164,7 @@ void dtrace_proc_exit(proc_t p);
 #include <security/mac_mach_internal.h>
 #include <sys/syscall.h>
 #endif /* CONFIG_MACF */
+#include <switch/diag.h>
 
 #ifdef CONFIG_EXCLAVES
 void
@@ -2060,6 +2061,7 @@ proc_prepareexit(proc_t p, int rv, boolean_t perf_notify)
 	int create_corpse = FALSE;
 	bool corpse_source = false;
 	task_t task = proc_task(p);
+	switch_diag_proc_exit(p, rv);
 
 
 

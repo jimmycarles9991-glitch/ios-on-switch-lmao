@@ -8,12 +8,15 @@ so a reader sees a whole entry or none, and a second builder waits and then reus
 import fcntl
 import hashlib
 import json
+import os
+import pwd
 import shutil
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from pathlib import Path
 
-ROOT = Path.home() / 'Library/Caches/switch-ios'
+# The user's own home, not $HOME: Bazel gives a test its own HOME, and the tests read this Mac's builds too.
+ROOT = Path(pwd.getpwuid(os.getuid()).pw_dir) / 'Library/Caches/switch-ios'
 
 
 def digest(parts: dict) -> str:
@@ -40,6 +43,12 @@ def locked(kind: str) -> Iterator[Path]:
             yield base
         finally:
             fcntl.flock(lock, fcntl.LOCK_UN)
+
+
+def existing(kind: str, key: str) -> Path | None:
+    """Return the kind's entry for key if it has been built, without building it."""
+    done = ROOT / kind / 'entries' / key
+    return done if done.is_dir() else None
 
 
 def entry(kind: str, key: str, make: Callable[[Path, Path], None]) -> Path:

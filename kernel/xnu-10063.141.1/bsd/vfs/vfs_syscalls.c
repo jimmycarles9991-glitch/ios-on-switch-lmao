@@ -148,6 +148,7 @@
 #include <security/mac.h>
 #include <security/mac_framework.h>
 #endif
+#include <switch/identity.h>
 
 #if CONFIG_FSE
 #define GET_PATH(x) \
@@ -3509,7 +3510,7 @@ statfs(proc_t p, struct statfs_args *uap, __unused int32_t *retval)
 		return error;
 	}
 	vp = nd.ni_vp;
-	mp = vp->v_mount;
+	mp = switch_vfs_statfs_mount(vp);
 	nameidone(&nd);
 
 	error = statfs_internal(p, mp, uap->buf);
@@ -3538,7 +3539,7 @@ fstatfs(proc_t p, struct fstatfs_args *uap, __unused int32_t *retval)
 
 	AUDIT_ARG(vnpath_withref, vp, ARG_VNODE1);
 
-	mp = vp->v_mount;
+	mp = switch_vfs_statfs_mount(vp);
 	if (!mp) {
 		error = EBADF;
 		goto out_vnode;
@@ -3616,7 +3617,7 @@ statfs64(__unused struct proc *p, struct statfs64_args *uap, __unused int32_t *r
 		goto out;
 	}
 	vp = ndp->ni_vp;
-	mp = vp->v_mount;
+	mp = switch_vfs_statfs_mount(vp);
 	nameidone(ndp);
 
 #if CONFIG_MACF
@@ -3674,7 +3675,7 @@ fstatfs64(__unused struct proc *p, struct fstatfs64_args *uap, __unused int32_t 
 
 	AUDIT_ARG(vnpath_withref, vp, ARG_VNODE1);
 
-	mp = vp->v_mount;
+	mp = switch_vfs_statfs_mount(vp);
 	if (!mp) {
 		error = EBADF;
 		goto out;
@@ -10472,6 +10473,14 @@ unionread:
 	}
 
 #if CONFIG_UNION_MOUNTS
+	/*
+	 * libc ends a listing at GETDIRENTRIES64_EOF, but a union only moves
+	 * on to the lower directory on a call the upper one leaves empty.
+	 */
+	if (*eofflag && (user_ssize_t)bufsize != uio_resid(auio) &&
+	    (vp->v_mount->mnt_flag & MNT_UNION)) {
+		*eofflag = 0;
+	}
 	if ((user_ssize_t)bufsize == uio_resid(auio) &&
 	    (vp->v_mount->mnt_flag & MNT_UNION)) {
 		vnode_t uvp;

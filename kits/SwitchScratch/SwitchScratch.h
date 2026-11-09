@@ -2,9 +2,10 @@
 // Recycled, wired scratch memory for staging a surface's bytes between a hardware engine and the CPU (the GPU driver's
 // CPU views of block-linear surfaces). A scratch is cacheable pageable memory of its own VM object, wired for its life,
 // with its 4 KiB pages listed for the engine, and charged as graphics memory (XNU's ledger, as IOSurface charges its
-// own) to the task it is handed to, the kernel's while kept. A scratch given back is kept, volatile (out of every
-// footprint), for the next of a size it fits (a lock per frame reuses one instead of wiring 4 MiB each time) until it
-// has been idle kSwitchScratchIdleNs, or the kept ones pass kSwitchScratchKeepBytes.
+// own) to the task it is handed to, the kernel's while kept. A task XNU does not let move memory to the kernel (no
+// com.apple.private.memory.ownership_transfer) is charged in the kernel's place on its own threads. A scratch given back
+// is kept, volatile (out of every footprint), for the next of a size it fits (a lock per frame reuses one instead of
+// wiring 4 MiB each time) until it has been idle kSwitchScratchIdleNs, or the kept ones pass kSwitchScratchKeepBytes.
 #ifndef SWITCH_SCRATCH_H
 #define SWITCH_SCRATCH_H
 

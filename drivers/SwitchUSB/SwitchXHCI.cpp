@@ -19,11 +19,10 @@
 #include "XusbLanes.h"
 #include <IOKit/IOLib.h>
 #include <libkern/c++/OSKext.h>
-#include <mach/kmod.h>
 #include "../ArmGIC/SwitchInterrupts.h"
 
 extern "C" {
-extern kmod_info_t g_kernel_kmod_info;
+OSReturn switch_kernel_classes(void (*initialize)());
 void switchxhci_static_init(void) __asm__("__GLOBAL__sub_I_SwitchXHCI.cpp");
 }
 
@@ -231,13 +230,7 @@ bool switchxhci_start(char *why, size_t whySize)
         snprintf(why, whySize, "the loaded AppleUSBXHCI is not the " SWITCH_ABI_KIND " one");
         return false;
     }
-    void *handle = OSMetaClass::preModLoad(g_kernel_kmod_info.name);
-    if (!handle) {
-        snprintf(why, whySize, "preModLoad failed");
-        return false;
-    }
-    switchxhci_static_init();
-    if (OSMetaClass::postModLoad(handle) != KERN_SUCCESS ||
+    if (switch_kernel_classes(switchxhci_static_init) != KERN_SUCCESS ||
         xhost::lookupClass("SwitchXHCI") != &SwitchXHCI::gMetaClass ||
         SwitchXHCI::gMetaClass.getSuperClass() != parent) {
         snprintf(why, whySize, "SwitchXHCI class registration failed");

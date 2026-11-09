@@ -17,7 +17,7 @@ from collections.abc import Callable
 from types import ModuleType
 
 NONE_BLEND = 58  # BlendFunction "non"
-BOOL, UCHAR, UCHAR4 = 53, 49, 52  # MTLDataType
+BOOL, UCHAR, UCHAR2, UCHAR4 = 53, 49, 50, 52  # MTLDataType
 FLAG_BITS = {'g': 2, 'n': 3, 'h': 4, 'f': 5, 'x': 6, 'u': 7, 'p': 8, 'e': 9, 's': 10, 'c': 11, 'l': 12, 'r': 13}
 # CA::OGL::non_srgb_pixel_format
 NON_SRGB = {11: 10, 31: 30, 71: 70, 81: 80, 551: 550, 553: 552, 555: 554}
@@ -158,7 +158,8 @@ def decode(tables: Tables, name: str) -> Spec:
 
 
 def _const(name: str, dtype: int, value: int) -> Const:
-    width = 4 if dtype == UCHAR4 else 1
+    # at the type's size, as the device journals a constant and the raw runtime keys a state by it (constantBytes)
+    width = {UCHAR2: 2, UCHAR4: 4}.get(dtype, 1)
     return name, dtype, (value & ((1 << 8 * width) - 1)).to_bytes(width, 'little').hex()
 
 

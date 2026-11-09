@@ -710,7 +710,7 @@ static struct zone_bool_gen {
  *   Specific zones for which to enable probabilistic guard malloc.
  *   There must be no numbering gap (names after the gap will be ignored).
  */
-#if (DEBUG || DEVELOPMENT) && !(defined(SWITCH_XNU_DIAGNOSTICS) && SWITCH_XNU_DIAGNOSTICS)
+#if (DEBUG || DEVELOPMENT) && !(defined(SWITCH_XNU_BOARD) && SWITCH_XNU_BOARD)
 static TUNABLE(bool, pgz_all, "pgz", true);
 #else
 /* RELEASE, and Switch: a sampled allocation costs a guard-page pmap_enter, a kernel TLB shootdown at its free

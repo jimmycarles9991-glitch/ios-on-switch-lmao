@@ -1,24 +1,16 @@
 // SPDX-License-Identifier: BSD-2-Clause-Patent
 // See NVDECClient.h.
 #include "NVDECClient.h"
+#include <CoreFoundation/CoreFoundation.h>
 #include <IOKit/IOKitLib.h>
 #include <mach/mach.h>
-#include <os/lock.h>
 #include <os/log.h>
 #include <stdlib.h>
 #include <string.h>
 
-#define MAX_MAPPINGS 64
-
 struct NVDECClient {
     io_connect_t connection;
     uint32_t selector, codecs, features;
-    os_unfair_lock lock;
-
-    struct {
-        uint32_t handle;
-        mach_vm_address_t address;
-    } mappings[MAX_MAPPINGS];
 };
 
 static io_service_t service(void)
@@ -32,6 +24,31 @@ bool nvdec_service_present(void)
     if (s)
         IOObjectRelease(s);
     return s != 0;
+}
+
+static bool serviceDecodes(const char *property)
+{
+    CFMutableDictionaryRef matching = IOServiceMatching("TegraNVDEC");
+    if (!matching)
+        return false;
+    CFStringRef key = CFStringCreateWithCString(NULL, property, kCFStringEncodingASCII);
+    const void *keys[] = {key}, *values[] = {kCFBooleanTrue};
+    CFDictionaryRef match =
+        CFDictionaryCreate(NULL, keys, values, 1, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
+    CFDictionarySetValue(matching, CFSTR(kIOPropertyMatchKey), match);
+    CFRelease(match);
+    CFRelease(key);
+    const io_service_t s = IOServiceGetMatchingService(kIOMainPortDefault, matching);
+    if (s)
+        IOObjectRelease(s);
+    return s != 0;
+}
+
+uint32_t nvdec_service_codecs(void)
+{
+    return (serviceDecodes(TEGRA_NVDEC_DECODES_H264) ? 1u << TEGRA_NVDEC_CODEC_H264 : 0) |
+           (serviceDecodes(TEGRA_NVDEC_DECODES_VP9) ? 1u << TEGRA_NVDEC_CODEC_VP9 : 0) |
+           (serviceDecodes(TEGRA_NVDEC_DECODES_HEVC) ? 1u << TEGRA_NVDEC_CODEC_HEVC : 0);
 }
 
 static kern_return_t call(NVDECClient *c, uint32_t selector, uint32_t method, const void *in, size_t inSize, void *out,
@@ -86,7 +103,6 @@ NVDECClient *nvdec_open(int *error)
             *error = kr;
         return NULL;
     }
-    c->lock = OS_UNFAIR_LOCK_INIT;
     c->codecs = info.codecs;
     c->features = info.features;
     return c;
@@ -115,7 +131,7 @@ void nvdec_close(NVDECClient *c)
     free(c);
 }
 
-// The first failure of each kind is logged, which tells NVDEC's memory running out from a mapping the kernel refused.
+// The first failure is logged: its IOReturn tells NVDEC's memory running out from a mapping the kernel refused.
 static void logOnce(int *flag, const char *what, kern_return_t kr, uint64_t size)
 {
     if (__atomic_exchange_n(flag, 1, __ATOMIC_RELAXED))
@@ -126,53 +142,25 @@ static void logOnce(int *flag, const char *what, kern_return_t kr, uint64_t size
 
 int nvdec_alloc(void *ctx, uint64_t size, uint32_t *handle, void **va)
 {
-    static int allocLogged, mapLogged;
+    static int allocLogged;
     NVDECClient *c = ctx;
     const TegraNVDECBufferAlloc in = {size};
     TegraNVDECBufferReply reply;
-    kern_return_t kr = call(c, c->selector, TegraNVDECMethodBufferAlloc, &in, sizeof(in), &reply, sizeof(reply));
+    const kern_return_t kr = call(c, c->selector, TegraNVDECMethodBufferAlloc, &in, sizeof(in), &reply, sizeof(reply));
     if (kr) {
         logOnce(&allocLogged, "NVDEC buffer alloc failed", kr, size);
         return -1;
     }
-    mach_vm_address_t address = 0;
-    mach_vm_size_t mapped = 0;
-    os_unfair_lock_lock(&c->lock);
-    unsigned slot = 0;
-    while (slot < MAX_MAPPINGS && c->mappings[slot].handle)
-        slot++;
-    os_unfair_lock_unlock(&c->lock);
-    kr = slot == MAX_MAPPINGS
-             ? kIOReturnNoResources
-             : IOConnectMapMemory64(c->connection, reply.handle, mach_task_self(), &address, &mapped, kIOMapAnywhere);
-    if (kr) {
-        logOnce(&mapLogged, "NVDEC buffer map failed", kr, size);
-        const TegraNVDECBuffer b = {reply.handle, 0};
-        call(c, c->selector, TegraNVDECMethodBufferFree, &b, sizeof(b), NULL, 0);
-        return -1;
-    }
-    os_unfair_lock_lock(&c->lock);
-    c->mappings[slot].handle = reply.handle;
-    c->mappings[slot].address = address;
-    os_unfair_lock_unlock(&c->lock);
     *handle = reply.handle;
-    *va = (void *)(uintptr_t)address;
+    *va = (void *)(uintptr_t)reply.address;
     return 0;
 }
 
 void nvdec_free(void *ctx, uint32_t handle)
 {
     NVDECClient *c = ctx;
-    os_unfair_lock_lock(&c->lock);
-    for (unsigned i = 0; i < MAX_MAPPINGS; i++) {
-        if (c->mappings[i].handle != handle)
-            continue;
-        IOConnectUnmapMemory64(c->connection, handle, mach_task_self(), c->mappings[i].address);
-        c->mappings[i].handle = 0;
-    }
-    os_unfair_lock_unlock(&c->lock);
     const TegraNVDECBuffer b = {handle, 0};
-    call(c, c->selector, TegraNVDECMethodBufferFree, &b, sizeof(b), NULL, 0);
+    call(c, c->selector, TegraNVDECMethodBufferFree, &b, sizeof(b), NULL, 0);  // the kernel unmaps it from this task
 }
 
 int nvdec_submit(void *ctx, const TegraNVDECSubmit *submit, uint32_t *fence)

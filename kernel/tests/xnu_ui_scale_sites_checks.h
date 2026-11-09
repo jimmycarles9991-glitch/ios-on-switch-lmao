@@ -52,10 +52,10 @@ inline uint32_t Word(const uint8_t *bytes)
            static_cast<uint32_t>(bytes[2]) << 16 | static_cast<uint32_t>(bytes[3]) << 24;
 }
 
-// A branch's target from its address: b's imm26 or tbz/tbnz's imm14, in words.
+// A branch's target from its address: b's and bl's imm26 or tbz/tbnz's imm14, in words.
 inline uint64_t BranchTarget(uint64_t address, uint32_t insn)
 {
-    if ((insn & 0xfc000000u) == 0x14000000u) {
+    if ((insn & 0x7c000000u) == 0x14000000u) {
         const int64_t imm26 = static_cast<int64_t>(insn & 0x3ffffffu);
         return address + static_cast<uint64_t>((imm26 >= 0x2000000 ? imm26 - 0x4000000 : imm26) * 4);
     }
@@ -116,6 +116,8 @@ inline void ExpectEveryEditInItsSitesChunk(const switch_us_cache &cache, const s
             if (edit.kind == SWITCH_US_FIXED) {
                 EXPECT_LE(edit.size, sizeof(edit.patched)) << i;
             }
+            // at scale 1 the scale's kinds write nothing
+            EXPECT_TRUE(!site.every_scale || edit.kind == SWITCH_US_FIXED) << i;
         }
     }
 }

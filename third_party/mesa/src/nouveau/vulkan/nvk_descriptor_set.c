@@ -644,6 +644,11 @@ nvk_CreateDescriptorPool(VkDevice _device,
 
    list_inithead(&pool->sets);
 
+   /* Empty until the pool's memory exists: nvk_destroy_descriptor_pool
+    * finishes the heap on every failure path below.
+    */
+   util_vma_heap_init(&pool->heap, 0, 0);
+
    const VkMutableDescriptorTypeCreateInfoEXT *mutable_info =
       vk_find_struct_const(pCreateInfo->pNext,
                            MUTABLE_DESCRIPTOR_TYPE_CREATE_INFO_EXT);
@@ -711,9 +716,7 @@ nvk_CreateDescriptorPool(VkDevice _device,
          mem_size = pool->mem->size_B;
       }
 
-      util_vma_heap_init(&pool->heap, HEAP_START, mem_size);
-   } else {
-      util_vma_heap_init(&pool->heap, 0, 0);
+      util_vma_heap_free(&pool->heap, HEAP_START, mem_size);
    }
 
    pool->mem_size_B = mem_size;

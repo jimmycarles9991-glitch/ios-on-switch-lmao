@@ -321,6 +321,7 @@ pub trait SSABuilder: Builder {
             saturate: false,
             ftz: false,
             f32: false,
+            a_f32: false,
         });
         dst
     }

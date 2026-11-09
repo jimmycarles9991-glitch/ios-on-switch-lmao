@@ -1,6 +1,7 @@
 import Foundation
 import HWTestCore
 import UIKit
+import notify
 
 struct IdentityTest: HWTest {
     let id = "system.identity"
@@ -45,6 +46,39 @@ struct PowerStateTest: HWTest {
                 ("battery state known", state != .unknown),
                 ("battery level in 0...1", level >= 0 && level <= 1),
                 ("not thermally critical", thermal != .critical),
+            ], metrics)
+    }
+}
+
+/// thermalmonitord's verdict on a console at rest: the thermal pressure it publishes (what dasd, audiomxd and the
+/// charge and backlight caps follow) and the thermal state apps read from it. Boot 15 reached moderate pressure ten
+/// minutes in with the SoC at 44 C, from a bad PMU calibration offset on the board thermistors.
+struct ThermalTest: HWTest {
+    let id = "system.thermal"
+    let name = "Thermal pressure nominal at rest"
+    let subsystem = Subsystem.system
+
+    static let pressureKey = "com.apple.system.thermalpressurelevel"
+
+    static func pressure() -> UInt64? {
+        var token: Int32 = 0
+        guard notify_register_check(pressureKey, &token) == NOTIFY_STATUS_OK else { return nil }
+        defer { notify_cancel(token) }
+        var state: UInt64 = 0
+        return notify_get_state(token, &state) == NOTIFY_STATUS_OK ? state : nil
+    }
+
+    func run(_ context: TestContext) async throws -> Outcome {
+        let pressure = Self.pressure()
+        let thermal = ProcessInfo.processInfo.thermalState
+        var metrics = Metrics()
+        metrics.set("pressure", pressure.map { String($0) } ?? "unread")
+        metrics.set("thermal", CPUClock.thermal[thermal.rawValue])
+        return .judged(
+            [
+                ("thermal pressure published", pressure != nil),
+                ("thermal pressure nominal", pressure == 0),
+                ("thermal state nominal", thermal == .nominal),
             ], metrics)
     }
 }

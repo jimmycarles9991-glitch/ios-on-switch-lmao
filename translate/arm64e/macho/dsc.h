@@ -80,12 +80,15 @@ int a64x_dsc_apply(const struct a64x_plan *plan, const struct a64x_dsc_file *f, 
 
 /*
  * The whole translated cache against the original, from the output bytes only: no A12-baseline instruction left in
- * code (the plan's code ranges and every TEXT_STUBS mapping, whatever the plan says); every changed code word is a one-word rewrite, a `b ok`, a word freed by a dead check, or a stub site whose
- * every path stays in freed words until it returns to site + 4 (B) or RETs (BL); data bytes unchanged except
- * replaced cdhashes and FIPS integrity MACs, each as a64x_fips_rewrite leaves it; every file's signature checks.
+ * code (the plan's code ranges and every TEXT_STUBS mapping, whatever the plan says); every changed code word is a
+ * one-word rewrite, a `b ok`, a word freed by a dead check that no branch, ADR, ADRP+ADD or jump table of the original
+ * code enters, or a stub site whose every path stays in freed words until it returns to site + 4 (B) or RETs (BL);
+ * data bytes unchanged except replaced cdhashes and FIPS integrity MACs, each as a64x_fips_rewrite leaves it; every
+ * file's signature checks.
  */
 struct a64x_dsc_verify {
     uint64_t code_words, rewritten, dead_checks, stub_words, sites_ok, sites_bad, left_baseline, fips_macs;
+    uint64_t entered_stub_words;  /* stub words where the original code branches (each one fails the check) */
     uint64_t sites[64], left[64]; /* by class */
 };
 

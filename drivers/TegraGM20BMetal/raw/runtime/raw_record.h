@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: MIT
-// A render state's raw record made from its probe draws by pack/mkpack.py's rules, for a state the pack lacks: the runtime probes it
-// in process through m2v's twin and NVK, never submitted, and makes the record the pack generator would have. test/recordcheck
-// holds the two to each other.
+// A render state's raw record by pack/mkpack.py's rules, for a state the pack lacks: made directly (raw_direct.h) or from the
+// pack generator's probe draws (makeRecord, test/recordcheck holds it to the pack), as the pack generator would have.
 #pragma once
 #include <array>
 #include <cstdint>
@@ -11,11 +10,21 @@
 #include <string>
 #include <utility>
 #include <vector>
-#include "../pack/probe_record.h"
-#include "raw_capture.h"
+#include "../pack/probe_bind.h"
 #include "raw_pack.h"
 
+namespace nvdec {
+struct ProbeSubmission;
+}  // namespace nvdec
+
 namespace raw {
+
+// A program as a record holds it
+struct CapturedProgram {
+    std::string id;  // nvdec's name: the FNV-1a of its header, code and data
+    // header + code, NAK's shader data, each constant buffer's nvk_cbuf_type
+    std::vector<uint8_t> image, data, cbufTypes;
+};
 
 // What every record of a pack shares
 struct PackRules {
@@ -25,6 +34,8 @@ struct PackRules {
     std::vector<std::array<uint32_t, 8>> samplers;  // the pack's constexpr sampler headers
 
     static PackRules of(const Pack &pack, std::map<uint32_t, uint32_t> context);
+    // The context the pack's init template leaves: its 3D methods that take no address
+    static PackRules of(const Pack &pack);
 };
 
 struct RuntimeRecord {
@@ -39,20 +50,14 @@ struct RuntimeRecord {
 };
 
 // One state's probe: its submissions with tagged payloads of 256, 16 and 4096 bytes, the index its payloads are tagged with, and
-// its key; `bound`: with 256-byte payloads each bound at its slot's own offset (probe.mm PROBE_BIND_OFFSET), whose push words
-// name each uniform slot's SlotBindOffset residual (none: the record takes only aligned offsets)
+// its key; `bound`: with 256-byte payloads each bound at its slot's own offset (pack/probe_bind.h), whose push words name each
+// buffer slot's SlotBindOffset residual (none: the record takes only offsets on m2v's base alignment)
 struct ProbeRuns {
     const nvdec::ProbeSubmission *bytes256, *bytes16, *bytes4096;
     uint32_t index;
     std::string key;
     const nvdec::ProbeSubmission *bound = nullptr;
 };
-
-// The offset the probe's bind-offset run binds a slot's payload at: below 256, one of its own for each stage and slot
-constexpr uint32_t probeBindOffset(uint32_t stage, uint32_t slot)
-{
-    return 4 * (1 + slot + (stage == 2 ? 31 : 0));
-}
 
 using ProgramLookup = std::function<const CapturedProgram *(const std::string &id)>;
 

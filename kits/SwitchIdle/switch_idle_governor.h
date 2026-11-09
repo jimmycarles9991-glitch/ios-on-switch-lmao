@@ -6,8 +6,8 @@
  * The numbers are the T210B01 C7 state of the console's own device tree (/cpus/idle-states/c7: wakeup-latency 130 us,
  * min-residency 1000 us). Never slower: a core takes C7 only when it expects to stay idle past the state's break-even,
  * and while frames are being made (a frame line fired in the last 100 ms) only past two refresh periods, so a core that
- * takes part in every frame always wakes from WFI. Its wake timer fires the wake latency ahead of the deadline, so a
- * timer is never late for C7.
+ * takes part in every frame always wakes from WFI. Its wake timer fires ahead of the deadline by the longest exit the
+ * core has seen lately (switch_idle_c7_lead), so a timer is not late for C7.
  *
  * The prediction is how long until something other than the core's own timer wakes it. A wake by an interrupt or an
  * IPI sooner than predicted is believed at once (work has started: the next idle is short too); longer idles raise it
@@ -44,11 +44,33 @@ static inline uint32_t switch_idle_choose(uint64_t predicted, uint64_t now, uint
     return expect >= need ? SWITCH_IDLE_C7 : SWITCH_IDLE_WFI;
 }
 
-/* When C7's wake timer must fire, as an absolute time: the wake latency ahead of the deadline. Only for a deadline
+/* When C7's wake timer must fire, as an absolute time: `lead` ahead of the deadline. Only for a deadline
  * switch_idle_choose took C7 for. */
-static inline uint64_t switch_idle_c7_wake_at(uint64_t deadline)
+static inline uint64_t switch_idle_c7_wake_at(uint64_t deadline, uint64_t lead)
 {
-    return deadline - SWITCH_IDLE_C7_WAKE_LATENCY;
+    return deadline - lead;
+}
+
+/* The wake timer's lead, learned from the core's own C7 exits (switch_idle_c7_exit; 0 for an exit no timer ended). The
+ * device tree's 130 us is the floor, not the exit: boot 15's exits took 100-430 us and half of them came back after
+ * their deadline. An exit longer than the lead raises it to that exit at once, so the next deadline is met; shorter ones
+ * bring it down by a 256th of the difference, so it holds near the longest recent exit: waking early only costs C7
+ * residency. At most half the state's break-even. */
+#define SWITCH_IDLE_C7_LEAD_MAX (SWITCH_IDLE_C7_RESIDENCY / 2u)
+
+static inline uint64_t switch_idle_c7_lead(uint64_t lead, uint64_t exit)
+{
+    if (lead < SWITCH_IDLE_C7_WAKE_LATENCY) {
+        lead = SWITCH_IDLE_C7_WAKE_LATENCY;
+    }
+    if (exit > lead) {
+        return exit < SWITCH_IDLE_C7_LEAD_MAX ? exit : SWITCH_IDLE_C7_LEAD_MAX;
+    }
+    if (exit == 0) {
+        return lead;
+    }
+    const uint64_t lowered = lead - (lead - exit) / 256u;
+    return lowered > SWITCH_IDLE_C7_WAKE_LATENCY ? lowered : SWITCH_IDLE_C7_WAKE_LATENCY;
 }
 
 /* The wake timer's count for `wake_at`, in 1..max ticks: a deadline beyond the timer's reach wakes the core at its
@@ -69,7 +91,7 @@ static inline bool switch_idle_timer_bound(uint64_t now, uint64_t wake_at)
 }
 
 /* How long a core in C7 took to come back after its wake timer fired at `wake_at`: the state's exit latency as the
- * device sees it. 0 when an interrupt or IPI woke it before the timer could have. Over SWITCH_IDLE_C7_WAKE_LATENCY, the
+ * device sees it. 0 when an interrupt or IPI woke it before the timer could have. Over the lead that wake used, the
  * deadline the timer stood in for went by before the core was back. */
 static inline uint64_t switch_idle_c7_exit(uint64_t now, uint64_t wake_at)
 {

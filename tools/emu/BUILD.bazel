@@ -41,6 +41,7 @@ py_library(
         "monitor.py",
         "msgbuf.py",
         "qemu.py",
+        "qtest.py",
         "report.py",
         "sdcard.py",
     ],
@@ -96,6 +97,15 @@ py_test(
         "check_test.py",
     ],
     deps = [":boot_lib"],
+)
+
+# Display controller A and the SMMU of the patched tegra_qemu under qtest, run from the shared emulator build of the
+# current patches (bazel run //tools/emu:build makes it). A Mac that has never built tegra_qemu skips it.
+py_test(
+    name = "dc_test",
+    srcs = ["dc_test.py"],
+    tags = ["requires-darwin"],
+    deps = [":emu_lib"],
 )
 
 py_test(

@@ -57,6 +57,7 @@
 #if CONFIG_MACF
 #include <security/mac_framework.h>
 #endif
+#include <switch/pretranslated.h>
 
 #define ATTR_TIME_SIZE  -1
 
@@ -3526,6 +3527,7 @@ getattrlist_internal(vfs_context_t ctx, vnode_t vp, struct attrlist  *alp,
 			}
 		}
 		va->va_name = va_name;
+		switch_pretranslated_getattr(vp, va);
 	}
 
 	error = vfs_attr_pack_internal(vp->v_mount, vp, auio, alp, options, va, NULL, ctx,

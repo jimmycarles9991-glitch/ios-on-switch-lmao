@@ -7,8 +7,7 @@
 #include <libkern/c++/OSData.h>
 #include <libkern/c++/OSSymbol.h>
 #include <pexpert/pexpert.h>
-#include <mach/kmod.h>
-extern kmod_info_t g_kernel_kmod_info;
+extern "C" OSReturn switch_kernel_classes(void (*initialize)());
 extern "C" void native_keyevents_static_init(void) __asm__("__GLOBAL__sub_I_NativeKeyStoreEvents.cpp");
 extern "C" IOService *native_keyevents_allocate(void);
 extern "C" {
@@ -114,11 +113,7 @@ static void native_keyevents_probe()
     IOService *provider = IOService::getResourceService();
     if (!provider)
         return;
-    void *handle = OSMetaClass::preModLoad(g_kernel_kmod_info.name);
-    if (!handle)
-        return;
-    native_keyevents_static_init();
-    native_keyevents_status = OSMetaClass::postModLoad(handle);
+    native_keyevents_status = switch_kernel_classes(native_keyevents_static_init);
     if (native_keyevents_status)
         return;
     native_keyevents_stage = 2;

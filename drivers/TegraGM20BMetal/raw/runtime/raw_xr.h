@@ -5,7 +5,8 @@
 //  - BGR10_XR: one word, blue at bit 0, red at bit 20, bits 30 and 31 set by a write;
 //  - BGRA10_XR: four 16-bit fields, blue first, each code in the field's top 10 bits;
 //  - RGB10A8_2P_XR10: a word as BGR10_XR's (bits 30 and 31 clear) and the alpha byte, side by side in 8 bytes; not Metal's two
-//    planes, so only a texture of a descriptor is one (never a surface's or a buffer's).
+//    planes, so only a texture of a descriptor is one (never a surface's or a buffer's). Metal's blits between such a texture and
+//    a buffer move plane 0 alone, each texel's color word (bufferTexelBytes), and leave the alpha plane as it is.
 // A pass renders the codes through the format's unsigned-integer target: the pack's states encode them in the function (m2v's
 // encode, measured against Apple's GPUs). A draw samples a stand-in instead (Texture::standIn): an RGBA16Float image of the codes'
 // values, which a pass of the pack's conversion state (pack/xr.metal) draws before the work that samples it. Core Animation's
@@ -54,6 +55,12 @@ inline const char *xrConversion(XrForm f)
         break;
     }
     return nullptr;
+}
+
+// The bytes of each texel a blit between a texture of `mtlPixelFormat` (`bpp` bytes a texel) and a buffer moves in the buffer
+inline uint32_t bufferTexelBytes(uint32_t mtlPixelFormat, uint32_t bpp)
+{
+    return xrForm(mtlPixelFormat) == XrForm::Planes ? 4 : bpp;
 }
 
 constexpr uint32_t kXrStandInFormat = 115;  // RGBA16Float

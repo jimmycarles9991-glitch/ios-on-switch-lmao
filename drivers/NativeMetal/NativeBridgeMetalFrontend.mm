@@ -14,6 +14,7 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <map>
 #include <mutex>
 #include <pthread.h>
 #include <string>
@@ -32,6 +33,7 @@
 #include <mach/mach.h>
 #include <mach/mach_time.h>
 #include <os/proc.h>
+#include "bridge/NativeMetalDirect.h"
 #include "bridge/NativeMetalObjects.h"
 #include "NativeBridgeMetalFrontend.h"
 #include "AsyncPipelines.h"
@@ -1488,7 +1490,9 @@ extern "C" id native_bridge_metal_texture_tiled_in_place(id buffer, id descripto
 @end
 @interface NBFunction : NBObject
 @property (nonatomic) NmbFunction *handle;
-@property (nonatomic, copy) NSString *name;
+@property (nonatomic, copy) NSString *name;  // Metal's: the specialized name it was made under, else libraryName
+@property (nonatomic, copy)
+    NSString *libraryName;  // the library function it was made from, its AIR's name (name unless set)
 @property (nonatomic) MTLFunctionType functionType;
 @property (nonatomic)
     std::string constantsText;           // name:type:hex of each constant value it was specialized with (the journal's)
@@ -1541,15 +1545,18 @@ static std::string libraryJournalId(const void *bytes, size_t length)
     return std::string("data:") + sha;
 }
 
-// A function as the journal's S, R and C lines name it: its name, lib=<its library>, then its constants; "spec" for one specialized
-// with no constant values (newFunctionWithName:constantValues:, which is not newFunctionWithName:).
+// A function as the journal's S, R and C lines name it: its library function, lib=<its library>, as=<the specialized name it was
+// made under>, then its constants; "spec" for one specialized with no constant values (newFunctionWithName:constantValues:, which is
+// not newFunctionWithName:).
 static std::string stageText(NBFunction *f)
 {
     if (!f)
         return "- ";
-    std::string text = f.name.UTF8String ?: "?";
+    std::string text = f.libraryName.UTF8String ?: "?";
     if (f.library && !f.library.journalId.empty())
         text += " lib=" + f.library.journalId;
+    if (![f.name isEqualToString:f.libraryName])
+        text += " as=" + std::string(f.name.UTF8String ?: "?");
     if (f.specialized && f.constantsText.empty())
         text += " spec";
     return text + " " + f.constantsText;
@@ -1605,6 +1612,11 @@ static NSArray *functionAttributes(const NmbFunction *f, bool stageInput)
 - (void)dealloc
 {
     nmb_function_release(_handle);
+}
+
+- (NSString *)libraryName
+{
+    return _libraryName ?: _name;
 }
 
 // MPS reads its kernels' constants (kMPSDeviceCaps, MPSMaxBatchSize, ...) here before specializing them.
@@ -1742,6 +1754,16 @@ static bool systemCompiler();
                         constantValues:(MTLFunctionConstantValues *)values
                                  error:(NSError **)error
 {
+    return [self newFunctionWithName:name specializedName:nil constantValues:values error:error];
+}
+
+// `specialized`: MTLFunctionDescriptor.specializedName, which Metal's function answers as its name and a pipeline links it by
+// (RenderBox makes each icon effect custom_fn so)
+- (id<MTLFunction>)newFunctionWithName:(NSString *)name
+                       specializedName:(NSString *)specialized
+                        constantValues:(MTLFunctionConstantValues *)values
+                                 error:(NSError **)error
+{
     // No values are no constants set (Core Image asks its stitched kernels so), where Core Image's kernels are compiled.
     if (!values && systemCompiler())
         values = [MTLFunctionConstantValues new];
@@ -1787,8 +1809,10 @@ static bool systemCompiler();
         }
     }
     const uint64_t functionBegan = nowUs();
-    NmbFunction *handle =
-        nmb_function_new_specialized(_handle, name.UTF8String, constants.data(), (uint32_t)constants.size());
+    if (!specialized.length)
+        specialized = nil;
+    NmbFunction *handle = nmb_function_new_specialized(_handle, name.UTF8String, specialized.UTF8String,
+                                                       constants.data(), (uint32_t)constants.size());
     gTimeFunction.add(functionBegan);
     // One S line per specialization (int-155: every QuartzCore pipeline was made on its draw, and a refused generic function would leave its
     // generic pipeline unmade without a word): the function, its constants, the time, the refusal and QuartzCore's callers.
@@ -1799,6 +1823,7 @@ static bool systemCompiler();
                  (unsigned long long)(nowUs() - functionBegan), handle ? 1 : 0);
         journal(head + (_journalId.empty() ? std::string() : "lib=" + _journalId + " ") +
                 "name=" + std::string(name.UTF8String ?: "?") + " k=" + text +
+                (specialized ? " as=" + std::string(specialized.UTF8String) : std::string()) +
                 (handle ? std::string() : " err=" + std::string(lastError().UTF8String ?: "?")) + " | " +
                 quartzCoreCallers());
     }
@@ -1810,7 +1835,8 @@ static bool systemCompiler();
     }
     NBFunction *function = [NBFunction new];
     function.handle = handle;
-    function.name = name;
+    function.name = specialized ?: name;
+    function.libraryName = name;
     function.functionType = (MTLFunctionType)nmb_function_type(handle);
     function.constantsText = text;
     function.specialized = true;
@@ -1834,8 +1860,8 @@ static bool systemCompiler();
     return MTLLibraryTypeExecutable;
 }
 
-// The descriptor's name and constants; its specialized name only labels Metal's function and its options ask for compile-time work the
-// runtime does when the function is made.
+// The descriptor's name, specialized name and constants; its options ask for compile-time work the runtime does when the function is
+// made.
 - (id<MTLFunction>)newFunctionWithDescriptor:(MTLFunctionDescriptor *)d error:(NSError **)error
 {
     if (!d.name) {
@@ -1843,8 +1869,11 @@ static bool systemCompiler();
             *error = nbError(@"a function name is required");
         return nil;
     }
-    if (d.constantValues)
-        return [self newFunctionWithName:d.name constantValues:d.constantValues error:error];
+    if (d.constantValues || d.specializedName.length)
+        return [self newFunctionWithName:d.name
+                         specializedName:d.specializedName
+                          constantValues:d.constantValues ?: [MTLFunctionConstantValues new]
+                                   error:error];
     id<MTLFunction> function = [self newFunctionWithName:d.name];
     if (!function) {
         if (error)
@@ -1970,7 +1999,7 @@ static NSData *functionBitcode(NBFunction *function)
     NBLibrary *library = function.library;
     const uint8_t *file = library.bytes;
     const size_t length = library.length;
-    const std::string wanted = function.name.UTF8String ?: "";
+    const std::string wanted = function.libraryName.UTF8String ?: "";
     if (!file || wanted.empty() || length < 88)
         return nil;
     uint64_t bitcodeAt, bitcodeSize;
@@ -1995,11 +2024,16 @@ static NSData *functionBitcode(NBFunction *function)
 @interface NBComputePipeline : NBObject
 @property (nonatomic) NmbComputePipeline *handle;
 @property (nonatomic) std::string journalState;
-- (void)journalDispatch:(MTLSize)grid group:(MTLSize)group threads:(bool)threads;
+- (void)journalDispatch:(MTLSize)grid
+                  group:(MTLSize)group
+                threads:(bool)threads
+                 memory:(const std::string &)memory
+               textures:(const std::string &)textures
+               samplers:(const std::string &)samplers;
 @end
 @implementation NBComputePipeline {
     std::mutex _dispatchLock;
-    std::vector<std::array<uint32_t, 7>> _dispatched;
+    std::vector<std::pair<std::array<uint32_t, 7>, std::string>> _dispatched;
 }
 
 - (void)dealloc
@@ -2007,7 +2041,12 @@ static NSData *functionBitcode(NBFunction *function)
     nmb_compute_pipeline_release(_handle);
 }
 
-- (void)journalDispatch:(MTLSize)grid group:(MTLSize)group threads:(bool)threads
+- (void)journalDispatch:(MTLSize)grid
+                  group:(MTLSize)group
+                threads:(bool)threads
+                 memory:(const std::string &)memory
+               textures:(const std::string &)textures
+               samplers:(const std::string &)samplers
 {
     if (!journalOn() || _journalState.empty())
         return;
@@ -2018,14 +2057,17 @@ static NSData *functionBitcode(NBFunction *function)
         shape[3 + i] = g[i] ? (uint32_t)(n[i] % g[i]) : 0;
     {
         std::lock_guard<std::mutex> hold(_dispatchLock);
-        if (_dispatched.size() >= 16 || std::find(_dispatched.begin(), _dispatched.end(), shape) != _dispatched.end())
+        const auto seen = std::make_pair(shape, memory + "|" + textures + "|" + samplers);
+        if (_dispatched.size() >= 16 || std::find(_dispatched.begin(), _dispatched.end(), seen) != _dispatched.end())
             return;
-        _dispatched.push_back(shape);
+        _dispatched.push_back(seen);
     }
     char head[128];
-    snprintf(head, sizeof head, "D ok=1 tg=%u,%u,%u edge=%u,%u,%u threads=%u | ", shape[0], shape[1], shape[2],
-             shape[3], shape[4], shape[5], shape[6]);
-    journal(head + _journalState);
+    snprintf(head, sizeof head, "D ok=1 tg=%u,%u,%u edge=%u,%u,%u threads=%u", shape[0], shape[1], shape[2], shape[3],
+             shape[4], shape[5], shape[6]);
+    journal(head + (memory.empty() ? std::string() : " tgmem=" + memory) +
+            (textures.empty() ? std::string() : " tex=" + textures) +
+            (samplers.empty() ? std::string() : " smp=" + samplers) + " | " + _journalState);
 }
 
 - (NSUInteger)maxTotalThreadsPerThreadgroup
@@ -2103,6 +2145,14 @@ static bool asyncRenderPipelineWanted(MTLRenderPipelineDescriptor *d, MTLPipelin
         return false;
     if (![(id)d.vertexFunction isKindOfClass:[NBFunction class]])
         return false;
+    for (MTLLinkedFunctions *l : {d.vertexLinkedFunctions, d.fragmentLinkedFunctions}) {
+        for (id f in l.functions)
+            if (![f isKindOfClass:[NBFunction class]])
+                return false;
+        for (id f in l.privateFunctions)
+            if (![f isKindOfClass:[NBFunction class]])
+                return false;
+    }
     return !d.fragmentFunction || [(id)d.fragmentFunction isKindOfClass:[NBFunction class]];
 }
 
@@ -2136,6 +2186,11 @@ static id<MTLRenderPipelineState> asyncRenderPipeline(id device, MTLRenderPipeli
     return (id<MTLRenderPipelineState>)state;
 }
 
+extern "C" NSString *native_bridge_metal_function_library_name(id function)
+{
+    return [function isKindOfClass:[NBFunction class]] ? ((NBFunction *)function).libraryName : nil;
+}
+
 extern "C" id native_bridge_metal_function_metallib(id function, const void **bytes, size_t *length)
 {
     if (![function isKindOfClass:[NBFunction class]])
@@ -2146,6 +2201,22 @@ extern "C" id native_bridge_metal_function_metallib(id function, const void **by
     *bytes = library.bytes;
     *length = library.length;
     return library;
+}
+
+extern "C" void *native_bridge_metal_nvk_symbol(const char *name)
+{
+    return nvkSymbol(name);
+}
+
+extern "C" int native_bridge_metal_texture_memory(id texture, struct switch_nvk_image_memory *out)
+{
+    using Memory = int (*)(uint64_t, struct switch_nvk_image_memory *);
+    static const Memory memory = reinterpret_cast<Memory>(nvkSymbol("switch_nvk_image_memory"));
+    if (!memory)
+        return -1;
+    const uint64_t image =
+        [texture isKindOfClass:[NBTexture class]] ? nmb_texture_vk_image(((NBTexture *)texture).handle) : 0;
+    return image && out ? memory(image, out) : -2;
 }
 
 // TegraGM20BMetal: the m2v twin of a state its raw path draws, made at its first set (AsyncPipelines.h startLazy); made
@@ -2524,7 +2595,6 @@ struct PassTarget {
 }
 @property (nonatomic, strong) NSMutableArray *waitedEvents;
 @property (nonatomic) NmbCommandBuffer *handle;
-@property (nonatomic, strong) NSArray<NSNumber *> *capturedRaws;  // the VkCommandBuffers a capture read, in order
 @property (nonatomic, strong) NBQueue *queue;
 @property (atomic, copy) NSString *encodeFailure;
 @property (atomic) BOOL committed, failedLocally;
@@ -2750,7 +2820,69 @@ NB_RESIDENCY_SETS(use)
 @property (nonatomic) MTLDispatchType kind;
 @property (nonatomic, strong) NBComputePipeline *state;
 @end
-@implementation NBComputeEncoder
+@implementation NBComputeEncoder {
+    // setThreadgroupMemoryLength:'s lengths by index, rounded up to 16 as Metal takes them: a dispatch's D line names
+    // them (m2v compiles each into the kernel's program)
+    std::map<uint32_t, uint32_t> _threadgroupMemory;
+    // the textures bound, by index: m2v's program and push words follow their formats (texel_format), so a D line names them
+    NSMutableDictionary<NSNumber *, id<MTLTexture>> *_textures;
+    NSMutableDictionary<NSNumber *, id<MTLSamplerState>> *_samplers;  // and the samplers they are read through
+}
+
+// "<index>:<min>:<mag>:<mip>:<s>:<t>:<r>:<lodMin bits>:<lodMax bits>:<anisotropy>:<compare>:<border>:<normalized>:<average>,..."
+// of the samplers bound, the floats' bits in hex (raw/runtime/raw_compute_key.h computeSamplers)
+- (std::string)samplersText
+{
+    std::string text;
+    for (NSNumber *index in [_samplers.allKeys sortedArrayUsingSelector:@selector(compare:)]) {
+        id s = _samplers[index];
+        if (![s isKindOfClass:[NBSampler class]])
+            continue;
+        MTLSamplerDescriptor *d = ((NBSampler *)s).descriptor;
+        const float lo = d.lodMinClamp, hi = d.lodMaxClamp;
+        uint32_t loBits, hiBits;
+        memcpy(&loBits, &lo, 4);
+        memcpy(&hiBits, &hi, 4);
+        char one[192];
+        snprintf(one, sizeof one, "%s%u:%lu:%lu:%lu:%lu:%lu:%lu:%x:%x:%lu:%lu:%lu:%d:%d", text.empty() ? "" : ",",
+                 index.unsignedIntValue, (unsigned long)d.minFilter, (unsigned long)d.magFilter,
+                 (unsigned long)d.mipFilter, (unsigned long)d.sAddressMode, (unsigned long)d.tAddressMode,
+                 (unsigned long)d.rAddressMode, loBits, hiBits, (unsigned long)d.maxAnisotropy,
+                 (unsigned long)d.compareFunction, (unsigned long)d.borderColor, d.normalizedCoordinates ? 1 : 0,
+                 d.lodAverage ? 1 : 0);
+        text += one;
+    }
+    return text;
+}
+
+// "<index>:<pixelFormat>:<textureType>:<mipmapLevelCount>:<arrayLength>:<swizzle, 4 hex bytes>,..." of the
+// textures bound (the raw pack's key, raw/runtime/raw_compute_key.h computeTextures)
+- (std::string)texturesText
+{
+    std::string text;
+    for (NSNumber *index in [_textures.allKeys sortedArrayUsingSelector:@selector(compare:)]) {
+        id<MTLTexture> t = _textures[index];
+        if ([(id)t isKindOfClass:[NSNull class]])
+            continue;
+        const MTLTextureSwizzleChannels w = t.swizzle;
+        char one[96];
+        snprintf(one, sizeof one, "%s%u:%lu:%lu:%lu:%lu:%02x%02x%02x%02x", text.empty() ? "" : ",",
+                 index.unsignedIntValue, (unsigned long)t.pixelFormat, (unsigned long)t.textureType,
+                 (unsigned long)t.mipmapLevelCount, (unsigned long)t.arrayLength, w.red, w.green, w.blue, w.alpha);
+        text += one;
+    }
+    return text;
+}
+
+// "<index>:<length>,..." of the lengths set (the raw pack's key, raw/runtime/raw_compute_key.h)
+- (std::string)threadgroupMemoryText
+{
+    std::string text;
+    for (const auto &[index, length] : _threadgroupMemory)
+        if (length)
+            text += (text.empty() ? "" : ",") + std::to_string(index) + ":" + std::to_string(length);
+    return text;
+}
 
 - (MTLDispatchType)dispatchType
 {
@@ -2793,23 +2925,35 @@ NB_RESIDENCY_SETS(use)
 - (void)setTexture:(id<MTLTexture>)t atIndex:(NSUInteger)i
 {
     [self texture:t index:i stage:0];
+    if (journalOn()) {
+        if (!_textures)
+            _textures = [NSMutableDictionary dictionary];
+        _textures[@(i)] = t ?: (id<MTLTexture>)[NSNull null];
+    }
 }
 
 - (void)setTextures:(const id<MTLTexture> __unsafe_unretained[])t withRange:(NSRange)r
 {
     for (NSUInteger k = 0; k < r.length; k++)
-        [self texture:t[k] index:r.location + k stage:0];
+        [self setTexture:t[k] atIndex:r.location + k];
 }
 
 - (void)setSamplerState:(id<MTLSamplerState>)s atIndex:(NSUInteger)i
 {
     [self sampler:s index:i stage:0];
+    if (journalOn()) {
+        if (!_samplers)
+            _samplers = [NSMutableDictionary dictionary];
+        _samplers[@(i)] = s ?: (id<MTLSamplerState>)[NSNull null];
+    }
 }
 
 - (void)setThreadgroupMemoryLength:(NSUInteger)n atIndex:(NSUInteger)i
 {
     [self check:nmb_compute_set_threadgroup_memory(self.handle, (uint32_t)n, (uint32_t)i)
            what:"setThreadgroupMemoryLength"];
+    if (journalOn())
+        _threadgroupMemory[(uint32_t)i] = (uint32_t)((n + 15) & ~NSUInteger(15));
 }
 
 - (void)dispatch:(MTLSize)size group:(MTLSize)group threads:(bool)threads
@@ -2820,7 +2964,12 @@ NB_RESIDENCY_SETS(use)
     const uint64_t s[3] = {size.width, size.height, size.depth}, g[3] = {group.width, group.height, group.depth};
     [self check:nmb_compute_dispatch(self.handle, s, g, threads) what:"dispatch"];
     if (journalOn())
-        [self.state journalDispatch:size group:group threads:threads];
+        [self.state journalDispatch:size
+                              group:group
+                            threads:threads
+                             memory:[self threadgroupMemoryText]
+                           textures:[self texturesText]
+                           samplers:[self samplersText]];
 }
 
 - (void)dispatchThreads:(MTLSize)t threadsPerThreadgroup:(MTLSize)g
@@ -2849,7 +2998,12 @@ NB_RESIDENCY_SETS(use)
     [self check:nmb_compute_dispatch_indirect(self.handle, [(NBBuffer *)b handle], o, per)
            what:"dispatchThreadgroupsWithIndirectBuffer"];
     if (journalOn())
-        [self.state journalDispatch:MTLSizeMake(0, 0, 0) group:g threads:false];
+        [self.state journalDispatch:MTLSizeMake(0, 0, 0)
+                              group:g
+                            threads:false
+                             memory:[self threadgroupMemoryText]
+                           textures:[self texturesText]
+                           samplers:[self samplersText]];
 }
 
 // SPI (MTLDispatchThreadsIndirectArguments: the grid, then the threadgroup).
@@ -2932,7 +3086,7 @@ NB_RESIDENCY_SETS(use)
 - (void)setSamplerStates:(const id<MTLSamplerState> __unsafe_unretained[])s withRange:(NSRange)r
 {
     for (NSUInteger k = 0; k < r.length; k++)
-        [self sampler:s[k] index:r.location + k stage:0];
+        [self setSamplerState:s[k] atIndex:r.location + k];
 }
 
 - (void)setSamplerState:(id<MTLSamplerState>)s lodMinClamp:(float)lo lodMaxClamp:(float)hi atIndex:(NSUInteger)i
@@ -4452,85 +4606,6 @@ static bool heldBehindEvent()
 
 @end
 
-// The raw GM20B path's capture of a render state (NativeBridgeMetalFrontend.h): NVK's exports (nvk_switch_capture.c) over the
-// VkCommandBuffers the command buffer's encoders recorded
-namespace capture {
-using Segments = void (*)(uint64_t, void (*)(void *, uint64_t, const uint32_t *, uint32_t), void *);
-using Map = const void *(*)(uint64_t, uint64_t, uint64_t);
-using Program = bool (*)(uint64_t, uint32_t, const void **, uint32_t *, const void **, uint32_t *, const void **,
-                         uint32_t *, uint8_t *, uint32_t *);
-using Context = bool (*)(uint64_t, uint64_t *, uint64_t *, uint64_t *, uint64_t *, uint32_t *, uint64_t *, uint32_t *);
-
-template <class F> F nvk(const char *name)
-{
-    return reinterpret_cast<F>(nvkSymbol(name));
-}
-
-NSArray<NSNumber *> *raws(id commandBuffer)
-{
-    return [commandBuffer isKindOfClass:[NBCommandBuffer class]] ? ((NBCommandBuffer *)commandBuffer).capturedRaws
-                                                                 : nil;
-}
-}  // namespace capture
-
-extern "C" bool native_bridge_metal_capture(id commandBuffer,
-                                            void (^segment)(uint64_t addr, const uint32_t *cpu, uint32_t dwords),
-                                            NBCaptureContext *context)
-{
-    static const auto segments = capture::nvk<capture::Segments>("switch_nvk_capture_cmd_buffer");
-    static const auto contextOf = capture::nvk<capture::Context>("switch_nvk_capture_context");
-    static const bool complete = segments && contextOf && capture::nvk<capture::Map>("switch_nvk_capture_map") &&
-                                 capture::nvk<capture::Program>("switch_nvk_capture_program");
-    if (![commandBuffer isKindOfClass:[NBCommandBuffer class]] || !complete)
-        return false;
-    NBCommandBuffer *cb = (NBCommandBuffer *)commandBuffer;
-    NSMutableArray<NSNumber *> *raws = [NSMutableArray array];
-
-    struct Reading {
-        capture::Segments segments;
-        void (^segment)(uint64_t, const uint32_t *, uint32_t);
-        NSMutableArray<NSNumber *> *raws;
-    } reading = {segments, segment, raws};
-
-    const bool captured = nmb_command_buffer_capture(
-        cb.handle,
-        [](void *ctx, uint64_t raw) {
-            Reading &r = *static_cast<Reading *>(ctx);
-            [r.raws addObject:@(raw)];
-            r.segments(
-                raw,
-                [](void *inner, uint64_t addr, const uint32_t *cpu, uint32_t dwords) {
-                    static_cast<Reading *>(inner)->segment(addr, cpu, dwords);
-                },
-                ctx);
-        },
-        &reading);
-    cb.capturedRaws = raws;
-    if (!captured || !raws.count)
-        return false;
-    return !context || contextOf(raws[0].unsignedLongLongValue, &context->shaderHeap, &context->zeroPage, &context->cb0,
-                                 &context->images, &context->imageMax, &context->samplers, &context->samplerMax);
-}
-
-extern "C" const void *native_bridge_metal_capture_map(id commandBuffer, uint64_t va, uint64_t bytes)
-{
-    static const auto map = capture::nvk<capture::Map>("switch_nvk_capture_map");
-    NSArray<NSNumber *> *raws = capture::raws(commandBuffer);
-    return map && raws.count ? map(raws[0].unsignedLongLongValue, va, bytes) : nullptr;
-}
-
-extern "C" bool native_bridge_metal_capture_program(id commandBuffer, uint32_t program, NBCapturedProgram *out)
-{
-    static const auto programOf = capture::nvk<capture::Program>("switch_nvk_capture_program");
-    if (!programOf)
-        return false;
-    for (NSNumber *raw in capture::raws(commandBuffer))
-        if (programOf(raw.unsignedLongLongValue, program, &out->header, &out->headerBytes, &out->code, &out->codeBytes,
-                      &out->data, &out->dataBytes, out->cbufTypes, &out->cbufCount))
-            return true;
-    return false;
-}
-
 static void scheduled(void *context)
 {
     [(__bridge NBCommandBuffer *)context didSchedule];
@@ -4852,6 +4927,22 @@ struct NBCost {
     }
 };
 
+// A render descriptor's linked functions as its R line names them, after its stages: " | <vl|vp|fl|fp> <stage>" for each of the
+// vertex and fragment stages' functions and privateFunctions, in that order
+static std::string linkedText(MTLRenderPipelineDescriptor *d)
+{
+    std::string text;
+    const std::pair<const char *, NSArray *> lists[] = {{"vl", d.vertexLinkedFunctions.functions},
+                                                        {"vp", d.vertexLinkedFunctions.privateFunctions},
+                                                        {"fl", d.fragmentLinkedFunctions.functions},
+                                                        {"fp", d.fragmentLinkedFunctions.privateFunctions}};
+    for (const auto &[tag, functions] : lists)
+        for (id f in functions)
+            text += std::string(" | ") + tag + " " +
+                    stageText([f isKindOfClass:[NBFunction class]] ? (NBFunction *)f : nil);
+    return text;
+}
+
 // One journal line of a render pipeline creation begun at `began` (microseconds), `refused` its refusal or null. The label is the
 // caller's name for the pipeline (QuartzCore's: its spec's encoded name).
 static void journalRenderPipeline(MTLRenderPipelineDescriptor *d, MTLPipelineOption options, uint64_t began,
@@ -4900,6 +4991,7 @@ static void journalRenderPipeline(MTLRenderPipelineDescriptor *d, MTLPipelineOpt
     NBFunction *ff = [(id)d.fragmentFunction isKindOfClass:[NBFunction class]] ? (NBFunction *)d.fragmentFunction : nil;
     line += " | v " + stageText(vf);
     line += " | f " + stageText(ff);
+    line += linkedText(d);
     if (refused) {
         line += " | refused ";
         line += refused;
@@ -4957,8 +5049,38 @@ static std::string journalComputePipeline(MTLComputePipelineDescriptor *d, NBFun
     return refused ? std::string() : state + " | ";
 }
 
-// A render pipeline descriptor in the bridge's form; false, with the error, for a function of another device.
-static bool renderDescriptor(MTLRenderPipelineDescriptor *d, NmbRenderPipelineDescriptor *p, NSError **error)
+static bool linkedHandles(NSArray *functions, std::vector<NmbFunction *> &out);
+
+// A stage's visible and private linked functions appended to `linked`; false for what the bridge does not represent (binary
+// functions, function groups) or a function of another device.
+static bool stageLinked(MTLLinkedFunctions *functions, std::vector<NmbFunction *> &linked, size_t &visible,
+                        size_t &hidden, NSError **error)
+{
+    if (functions.binaryFunctions.count || functions.groups.count) {
+        if (error)
+            *error = nbError(@"render binary functions and function groups are not implemented");
+        return false;
+    }
+    const size_t before = linked.size();
+    if (!linkedHandles(functions.functions, linked)) {
+        if (error)
+            *error = nbError(@"foreign linked function");
+        return false;
+    }
+    visible = linked.size() - before;
+    if (!linkedHandles(functions.privateFunctions, linked)) {
+        if (error)
+            *error = nbError(@"foreign linked function");
+        return false;
+    }
+    hidden = linked.size() - before - visible;
+    return true;
+}
+
+// A render pipeline descriptor in the bridge's form; false, with the error, for a function of another device. `linked` holds
+// the stages' linked functions' handles that `p` points into: it outlives the creation call.
+static bool renderDescriptor(MTLRenderPipelineDescriptor *d, NmbRenderPipelineDescriptor *p,
+                             std::vector<NmbFunction *> &linked, NSError **error)
 {
     if (![(id)d.vertexFunction isKindOfClass:[NBFunction class]] ||
         (d.fragmentFunction && ![(id)d.fragmentFunction isKindOfClass:[NBFunction class]])) {
@@ -4966,6 +5088,20 @@ static bool renderDescriptor(MTLRenderPipelineDescriptor *d, NmbRenderPipelineDe
             *error = nbError(@"foreign function");
         return false;
     }
+    // Metal's functions that call a function by name (IconRendering's custom effects call custom_fn) get it from these
+    linked.clear();
+    size_t vertexVisible = 0, vertexHidden = 0, fragmentVisible = 0, fragmentHidden = 0;
+    if (!stageLinked(d.vertexLinkedFunctions, linked, vertexVisible, vertexHidden, error) ||
+        !stageLinked(d.fragmentLinkedFunctions, linked, fragmentVisible, fragmentHidden, error))
+        return false;
+    p->vertex_linked = linked.data();
+    p->vertex_linked_count = vertexVisible;
+    p->vertex_private_linked = linked.data() + vertexVisible;
+    p->vertex_private_count = vertexHidden;
+    p->fragment_linked = linked.data() + vertexVisible + vertexHidden;
+    p->fragment_linked_count = fragmentVisible;
+    p->fragment_private_linked = linked.data() + vertexVisible + vertexHidden + fragmentVisible;
+    p->fragment_private_count = fragmentHidden;
     p->vertex = [(NBFunction *)d.vertexFunction handle];
     p->fragment = d.fragmentFunction ? [(NBFunction *)d.fragmentFunction handle] : nullptr;
     for (unsigned i = 0; i < 8; i++) {
@@ -5316,6 +5452,24 @@ static bool linkedHandles(NSArray *functions, std::vector<NmbFunction *> &out)
     return true;
 }
 
+extern "C" bool native_bridge_metal_render_direct(id descriptor, bool barrier, NSUInteger textureFormat,
+                                                  NSUInteger textureSamples,
+                                                  bool (*each)(const struct NmbDirectState *, void *), void *ctx,
+                                                  const char **why)
+{
+    NmbRenderPipelineDescriptor p = {};
+    std::vector<NmbFunction *> linked;
+    NSError *error = nil;
+    if (!gDevice || !renderDescriptor((MTLRenderPipelineDescriptor *)descriptor, &p, linked, &error)) {
+        *why = gDevice ? "a function of another device" : "no device";
+        return false;
+    }
+    if (nmb_render_pipeline_direct(gDevice, &p, barrier, textureFormat, uint32_t(textureSamples), each, ctx))
+        return true;
+    *why = nmb_last_error();
+    return false;
+}
+
 // `linked` holds the linked functions' handles (functions, then privateFunctions) that `p` points into: it outlives the creation call.
 static bool computeDescriptor(MTLComputePipelineDescriptor *d, NmbComputePipelineDescriptor *p,
                               std::vector<NmbFunction *> &linked, NSError **error)
@@ -5395,7 +5549,8 @@ static bool computeDescriptor(MTLComputePipelineDescriptor *d, NmbComputePipelin
 - (BOOL)addRenderPipelineFunctionsWithDescriptor:(MTLRenderPipelineDescriptor *)d error:(NSError **)error
 {
     auto *p = new NmbRenderPipelineDescriptor();
-    const bool ok = renderDescriptor(d, p, error) && nmb_binary_archive_add_render(_handle, p);
+    std::vector<NmbFunction *> linked;
+    const bool ok = renderDescriptor(d, p, linked, error) && nmb_binary_archive_add_render(_handle, p);
     delete p;
     if (!ok)
         return failWith<BOOL>(error, @"archive render pipeline", NO);
@@ -6864,7 +7019,8 @@ static uint64_t askAnswer(SEL cmd, NSUInteger arg);
         return asyncRenderPipeline(self, d, options);
     }
     auto *p = new NmbRenderPipelineDescriptor();
-    if (!renderDescriptor(d, p, error)) {
+    std::vector<NmbFunction *> linked;
+    if (!renderDescriptor(d, p, linked, error)) {
         delete p;
         return nil;
     }

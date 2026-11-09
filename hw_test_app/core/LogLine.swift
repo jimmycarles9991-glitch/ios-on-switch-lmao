@@ -51,11 +51,14 @@ public enum LogLine {
         return fields.joined(separator: " ")
     }
 
-    public static func summary(_ records: [TestRecord], milliseconds: Double) -> String {
+    /// The run's counts and the iOS version the app is built for: tools/devicerun judges a version's own tests only
+    /// in a log whose summary names that version.
+    public static func summary(_ records: [TestRecord], ios: Int, milliseconds: Double) -> String {
         var metrics = Metrics()
         for verdict in Verdict.allCases {
             metrics.set(verdict.rawValue.lowercased(), records.filter { $0.outcome.verdict == verdict }.count)
         }
+        metrics.set("ios", ios)
         let failed = records.contains { $0.outcome.verdict == .fail }
         return format(id: suiteID, outcome: Outcome(failed ? .fail : .pass, metrics), milliseconds: milliseconds)
     }

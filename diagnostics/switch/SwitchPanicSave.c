@@ -104,6 +104,7 @@ extern unsigned char iso_font[256 * 16];
 #define WATCHDOG_REBOOT_S 60u
 #define DARK_REBOOT_S     15u
 #define SHUTDOWN_REBOOT_S 3u
+#define EARLY_REBOOT_S    15u
 #define MSGBUF_TAIL       (64u << 10)
 #define PMC_PA            UINT64_C(0x7000e000) /* the page; APBDEV_PMC at +0x400 (hekate t210.h PMC_BASE) */
 #define PMC_CNTRL         (0x400u + 0x000u)
@@ -535,6 +536,17 @@ static void __attribute__((noreturn)) pmc_reset(void)
         __asm__ volatile("wfe" ::: "memory");
 }
 
+/* A record a panic sealed, at region. */
+static int record_sealed(void)
+{
+    volatile struct switch_panic_record *r = record();
+    volatile struct switch_panic_console *c = console();
+    return r->magic == RECORD_MAGIC && r->version == 1 && r->bytes == sizeof(struct switch_panic_record) &&
+           r->header_crc == crc_of(r, offsetof(struct switch_panic_record, header_crc)) && r->text_bytes <= TEXT_MAX &&
+           r->blocks == (r->text_bytes + BLOCK_BYTES - 1) / BLOCK_BYTES && c->sig == CONSOLE_SIG &&
+           c->size == r->text_bytes;
+}
+
 /* --- hooks ------------------------------------------------------------------------------------------------- */
 
 void switch_panic_save_init(void)
@@ -564,13 +576,10 @@ void switch_panic_save_init(void)
     if (pmc[PMC_SCRATCH37 / 4] == TPAN)
         pmc[PMC_SCRATCH37 / 4] = 0; /* hekate clears it; never leave it for later */
     /* The last boot's record, checked now; written to Data by kern_exec.c (switch_panic_save_pending). */
+    if (!record_sealed())
+        return;
     volatile struct switch_panic_record *r = record();
     volatile struct switch_panic_console *c = console();
-    if (r->magic != RECORD_MAGIC || r->version != 1 || r->bytes != sizeof(struct switch_panic_record) ||
-        r->header_crc != crc_of(r, offsetof(struct switch_panic_record, header_crc)) || r->text_bytes > TEXT_MAX ||
-        r->blocks != (r->text_bytes + BLOCK_BYTES - 1) / BLOCK_BYTES || c->sig != CONSOLE_SIG ||
-        c->size != r->text_bytes)
-        return;
     pending = 1;
     for (uint32_t b = 0; b < r->blocks; ++b) {
         const uint32_t at = b * BLOCK_BYTES;
@@ -700,6 +709,67 @@ void switch_panic_logged(void)
     while (mach_absolute_time() < deadline)
         __asm__ volatile("isb" ::: "memory");
     switch_power_trail_flag_now(SWITCH_MARK_FLAG_PANIC_RESET);
+    pmc_reset();
+}
+
+int switch_panic_save_ready(void)
+{
+    return save_on && region;
+}
+
+int switch_panic_save_early_pending(volatile uint8_t *ramoops)
+{
+    volatile uint8_t *const mapped = region;
+    region = ramoops;
+    const int sealed = record_sealed();
+    region = mapped;
+    return sealed;
+}
+
+void switch_panic_save_early(const char *line, unsigned long caller, volatile uint8_t *ramoops, volatile uint32_t *fb,
+                             volatile uint32_t *pmc_page)
+{
+    region = ramoops;
+    screen = fb;
+    pmc = pmc_page;
+    save_on = 1;
+    begun = 1;
+    screen_taken = fb != NULL;
+    reboot_s = EARLY_REBOOT_S;
+    snprintf(panic_line, sizeof(panic_line), "%s", line);
+    char head[160];
+    snprintf(head, sizeof(head),
+             "SwitchPanic record 1: early boot, before the kernel's console\npanic(cpu 0 caller 0x%lx): ", caller);
+    text_at = 0;
+    shot()->magic = 0;
+    puts_(head);
+    puts_(panic_line);
+    puts_("\n");
+    volatile struct switch_panic_record *r = record();
+    r->cpu = 0;
+    r->caller = caller;
+    r->uptime_ns = 0;
+    r->time_s = 0;
+    r->time_ns = 0;
+    seal(1);
+    /* hekate saves the record to SD:/L4T_panic.txt on this magic: a RELEASE kernel has nothing that files it. */
+    pmc[PMC_SCRATCH37 / 4] = TPAN;
+    if (screen_taken) {
+        for (uint32_t i = 0; i < SWITCH_FB_BYTES / 4; ++i)
+            screen[i] = kBlack;
+        drawz(0, 1, "XNU PANIC   early boot, before the kernel's console", SWITCH_RED);
+        drawz(1, ROWS - 1, panic_line, SWITCH_WHITE);
+        char status[COLS + 1];
+        snprintf(status, sizeof(status),
+                 "Saved in RAM. Warm reset in %us: hekate shows it and writes SD:/L4T_panic.txt.", reboot_s);
+        drawz(ROWS - 1, ROWS, status, SWITCH_GREEN);
+        drain();
+    }
+    uint64_t deadline = 0;
+    nanoseconds_to_absolutetime((uint64_t)reboot_s * 1000000000ULL, &deadline);
+    deadline += mach_absolute_time();
+    while (mach_absolute_time() < deadline)
+        __asm__ volatile("yield" ::: "memory");
     pmc_reset();
 }
 

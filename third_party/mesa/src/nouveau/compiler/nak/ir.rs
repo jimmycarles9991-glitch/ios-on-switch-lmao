@@ -3362,6 +3362,9 @@ pub struct OpHAdd2 {
     pub saturate: bool,
     pub ftz: bool,
     pub f32: bool,
+    /// ios-on-switch-lmao: SM53 reads srcs[0] as an f32 for both lanes (the
+    /// F32 swizzle). Only the SM53 probe emits it, after copy-prop.
+    pub a_f32: bool,
 }
 
 impl DisplayOp for OpHAdd2 {
@@ -3372,7 +3375,8 @@ impl DisplayOp for OpHAdd2 {
         if self.ftz {
             write!(f, ".ftz")?;
         }
-        write!(f, " {} {}", self.srcs[0], self.srcs[1])
+        let a_f32 = if self.a_f32 { ".f32" } else { "" };
+        write!(f, " {}{a_f32} {}", self.srcs[0], self.srcs[1])
     }
 }
 impl_display_for_op!(OpHAdd2);

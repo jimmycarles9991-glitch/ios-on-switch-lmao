@@ -23,6 +23,11 @@ from tools.install import delta, host, overlay_index, owners as ownership, progr
 OVERLAY = renamed.DATA_FOLDER + '/pretranslated'
 OVERLAY_MANIFEST = OVERLAY + '.json'
 OVERLAY_INDEX = OVERLAY + '/' + overlay_index.NAME
+OVERLAY_ORIGINALS = OVERLAY + '/' + overlay_index.ORIGINALS_NAME
+# installd verifies each staged system app against Apple's detached signature (/System/Library/AppSignatures), whose
+# CodeDirectory hashes the original executable's pages: Data's copies keep Apple's bytes, the translations go to the
+# tree, root's (the System volume gives them mobile's owner), and the kernel finds them by the original's CDHash.
+STAGED_APPS = '/private/var/staged_system_apps/'
 COMPRESSED = 0x20
 
 ORDER = ('os', 'app_cryptex', 'system_cryptex')
@@ -33,6 +38,10 @@ KEPT = ('{role}.trustcache', '{role}.cdhash-pairs', 'a64x-cache-pretranslated.bi
 
 def _cdhash(cdhash: list[str]) -> bytes:
     return bytes.fromhex(cdhash[0]) if cdhash else b'\x00' * overlay_index.CDHASH
+
+
+def _owner(e: dict, original: os.stat_result) -> tuple[int, int]:
+    return (0, 0) if e['path'].startswith(STAGED_APPS) else (original.st_uid, original.st_gid)
 
 
 def _place(root: Path, e: dict, original: os.stat_result) -> Path:
@@ -97,6 +106,27 @@ class Deltas:
             )
         self.log(f'pretranslate: {len(pins)} files match the pins')
 
+    def _originals(self, translated: list[bytes]) -> list[tuple[bytes, bytes]]:
+        """Return (original, translation) for each translated CDHash, from the os role's pairs."""
+        pairs = (self.dirs['os'] / 'os.cdhash-pairs').read_text().split('\n')
+        original_of = {bytes.fromhex(new): bytes.fromhex(old) for old, new in (line.split() for line in pairs if line)}
+        missing = [cdhash.hex() for cdhash in translated if cdhash not in original_of]
+        if missing:
+            raise host.HostError(f'staged system app translations without an original CDHash: {missing[:3]}')
+        return [(original_of[cdhash], cdhash) for cdhash in translated]
+
+    def _write_tables(self, data: Path, ids: list, directories: list[Path]) -> list[Path]:
+        """Write the kernel's index of the tree and, for staged system apps, .originals; return the files written."""
+        staged = [cdhash for path, _, _, cdhash in ids if path.startswith(STAGED_APPS)]
+        tables = [data / OVERLAY_INDEX]
+        tables[0].write_bytes(overlay_index.encode(ids, [os.lstat(d).st_ino for d in directories]))
+        if staged:
+            tables.append(data / OVERLAY_ORIGINALS)
+            tables[1].write_bytes(overlay_index.encode_originals(self._originals(staged)))
+        for table in tables:
+            table.chmod(0o644)
+        return tables
+
     def overlay_system(
         self, data: Path, system: SystemStat, entries: list[dict], owners: ownership.Owners | None
     ) -> dict:
@@ -109,6 +139,7 @@ class Deltas:
 
         Hard links of one System file get one Data file, placed at the first of their paths, and an index entry for
         each path. A link on Data would give the kernel's redirect a Data file whose parent changes with each lookup.
+        The staged system apps' translations also get .originals, from the role's CDHash pairs.
         """
         root = Path(data) / OVERLAY
         files, ids, placed = [], [], []
@@ -126,7 +157,7 @@ class Deltas:
                     progress.advance(2 * e['source'].stat().st_size)
                 else:
                     target = _place(root, e, original)
-                    placed.append((target, original))
+                    placed.append((target, original, e))
                     data_id = os.lstat(target).st_ino
                     record = {
                         'trust': True,
@@ -146,14 +177,13 @@ class Deltas:
         directories = [root, *(p for p in root.rglob('*') if p.is_dir())]
         for directory in directories:
             directory.chmod(0o755)
-        index = Path(data) / OVERLAY_INDEX
-        index.write_bytes(overlay_index.encode(ids, [os.lstat(d).st_ino for d in directories]))
-        index.chmod(0o644)
+        tables = self._write_tables(Path(data), ids, directories)
         if owners:
-            for target, original in placed:
+            for target, original, e in placed:
                 flags = (original.st_flags & ~COMPRESSED) | stat.SF_IMMUTABLE
-                owners.set(target, original.st_uid, original.st_gid, original.st_mode & 0o7777, flags)
-            owners.set(index, 0, 0, 0o644, stat.SF_IMMUTABLE)
+                owners.set(target, *_owner(e, original), original.st_mode & 0o7777, flags)
+            for table in tables:
+                owners.set(table, 0, 0, 0o644, stat.SF_IMMUTABLE)
             for directory in reversed(directories):
                 owners.set(directory, 0, 0, 0o755, stat.SF_IMMUTABLE)
         self.log(f'System: {len(files)} translated files on Data under {OVERLAY}')

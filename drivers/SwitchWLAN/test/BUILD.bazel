@@ -112,3 +112,19 @@ host_test(
         ":switch_wlan_net",
     ],
 )
+
+# APPLE80211_IOC_ASSOCIATE as each IPSW kind's IO80211.framework lays it out (SwitchWLANAssoc.h), one test per kind.
+host_library(
+    name = "assoc",
+    hdrs = ["//drivers/SwitchWLAN:SwitchWLANAssoc.h"],
+)
+
+[
+    host_test(
+        name = "switch_wlan_assoc_{}_test".format(kind),
+        srcs = ["switch_wlan_assoc_test.cpp"],
+        defines = ["SWITCH_IPSW_KIND_{}=1".format(kind)],
+        deps = [":assoc"],
+    )
+    for kind in ("21H461", "24B119")
+]

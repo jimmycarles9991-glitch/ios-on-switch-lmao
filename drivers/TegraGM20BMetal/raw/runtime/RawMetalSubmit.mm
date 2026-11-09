@@ -142,7 +142,7 @@ static bool submitLocked(RMCommandBuffer *cb)
     // one line per reason kind (no string per command buffer: the predicates' own lines carry the values)
     SWITCH_REFUSE_DETAIL("raw", "cb.m2v", cb->_reason, "command buffer on m2v (%s): %s [first predicate %s]",
                          kReasonNames[cb->_reason], cb->_why.UTF8String ?: "-", kPredNames[cb->_pred0]);
-    cb->_m2v = true;
+    cb->_m2v = cb->_signalsOnM2v = true;
     const uint64_t replayBegan = nowUs();
 #if SWITCH_FRAME_TIMELINE
     cb->_frame.mark(switch_frame::ReplayStart);
@@ -227,9 +227,13 @@ static bool submitLocked(RMCommandBuffer *cb)
     return true;
 }
 
-// A command buffer some of whose encoders go to m2v and some do not, with no refusal of its own and no shared event: its segments
-// (each run of encoders of one driver), else none (it goes whole, as its reason says). m2v replays only the encoders it must: a
-// replayed draw costs m2v's encode (~0.28 ms each on the device, 11-06), so a whole frame for one refused pass cost tens of ms.
+// A command buffer some of whose encoders go to m2v and some do not, with no refusal of its own: its segments (each run of
+// encoders of one driver), else none (it goes whole, as its reason says). m2v replays only the encoders it must: a replayed draw
+// costs m2v's encode (~0.28 ms each on the device, 11-06), so a whole frame for one refused pass cost tens of ms.
+// Its shared event waits before its first encoder are the first segment's (its range starts at 0: an m2v one encodes them, a raw
+// one is submitted once they are covered, eventsReady/waitEvents), and its signals after its last encoder the last segment's (an
+// m2v one encodes them, on m2v's timeline as a whole replay would; a raw one's are made as the command buffer completes, finish).
+// A wait or signal between encoders keeps it whole.
 static void planSegments(RMCommandBuffer *cb)
 {
     cb->_segs.clear();
@@ -237,36 +241,53 @@ static void planSegments(RMCommandBuffer *cb)
     [cb closeEncoder];
     if (cb->_reason == WhyRaw || cb->_whole)
         return;
-    bool raw = false, m2v = false;
+    bool raw = false, m2v = false, events = false, between = false, signalSeen = false;
     for (size_t at = 0; at < cb->_tape.size(); at++) {
         const Cmd &c = cb->_tape[at];
-        if (c.op == OpSignalEvent || c.op == OpWaitEvent || (c.op == OpInvocation && c.stage == 0xff)) {
+        if (c.op == OpInvocation && c.stage == 0xff) {
             cb->_segs.clear();
             return;
+        }
+        if (c.op == OpWaitEvent || c.op == OpSignalEvent) {
+            events = true;
+            between |= c.op == OpWaitEvent && !cb->_segs.empty();
+            signalSeen |= c.op == OpSignalEvent;
+            continue;
         }
         if (c.op != OpRender && c.op != OpBlit && c.op != OpCompute) {
             if (cb->_segs.empty())
                 return;  // a command before the first encoder
             continue;
         }
+        between |= signalSeen;
         const bool r = !c.index;
         (r ? raw : m2v) = true;
         if (!cb->_segs.empty())
             cb->_segs.back().to = uint32_t(at);
         if (!cb->_segs.empty() && cb->_segs.back().raw == r)
             continue;
-        cb->_segs.push_back({uint32_t(at), uint32_t(cb->_tape.size()), r});
+        cb->_segs.push_back({uint32_t(cb->_segs.empty() ? 0 : at), uint32_t(cb->_tape.size()), r});
     }
     if (!cb->_segs.empty())
         cb->_segs.back().to = uint32_t(cb->_tape.size());
-    if (!raw || !m2v)
+    if (raw && m2v && between)
+        gRM->stats.eventWhole++;
+    if (!raw || !m2v || between)
         cb->_segs.clear();
+    else if (events)
+        gRM->stats.eventSplits++;
 }
 
 // Whether what `cb` submits next is raw work (it needs the m2v work before it scheduled: m2vClear)
 static bool nextRaw(RMCommandBuffer *cb)
 {
     return cb->_segs.empty() ? cb->_reason == WhyRaw : cb->_segNext < cb->_segs.size() && cb->_segs[cb->_segNext].raw;
+}
+
+// Whether what `cb` submits next is raw work that carries its shared event waits: its first submission (planSegments)
+static bool nextRawWaits(RMCommandBuffer *cb)
+{
+    return nextRaw(cb) && cb->_segNext == 0;
 }
 
 // submit lock held: a split command buffer's segments from the next one, in order, each as a command buffer of its driver would
@@ -315,6 +336,7 @@ static bool submitSegments(RMCommandBuffer *cb)
             r.rawSinceM2v = true;
             countDriver(1);
             if (last) {
+                noteSignals(cb, r.rawSignals);
                 {
                     std::lock_guard<std::mutex> l(r.doneLock);
                     r.inflight.push_back(cb);
@@ -358,6 +380,10 @@ static bool submitSegments(RMCommandBuffer *cb)
             r.rawSinceM2v = false;
             r.m2vSinceRaw = true;
             countDriver(2);
+            if (last) {
+                cb->_signalsOnM2v = true;
+                noteSignals(cb, r.m2vSignals);
+            }
             __block bool counted = false;
             {
                 std::lock_guard<std::mutex> l(r.m2vLock);
@@ -407,7 +433,9 @@ void commitBuffer(RMCommandBuffer *cb)
     raw::followers().committing();
     planSegments(cb);
     RawState &r = *gRM;
-    r.committed.fetch_add(1, std::memory_order_relaxed);
+    r.committed.fetch_add(1);
+    if (r.raw->purgedArenas())
+        restoreArenas(cb);
     if (waitsForEvent(cb)) {
         std::lock_guard<std::mutex> h(gHoldersLock);
         gHolders.insert(cb);
@@ -420,7 +448,7 @@ void commitBuffer(RMCommandBuffer *cb)
         if (!now && !r.gpuOrder)
             r.stats.cpuOrdered++;  // it waits for the m2v work before it to complete
     }
-    if (now && cb->_reason == WhyRaw)
+    if (now && nextRawWaits(cb))
         now = eventsReady(cb);
     if (now && submitLocked(cb))
         return;
@@ -452,7 +480,7 @@ void submitLoop()
                     waitTooLong("raw command buffer waiting for the m2v work before it, command buffer",
                                 (__bridge void *)cb);
             }
-            if (cb->_reason == WhyRaw)
+            if (nextRawWaits(cb))
                 waitEvents(cb);
         }
         std::lock_guard<std::mutex> l(r.submit);

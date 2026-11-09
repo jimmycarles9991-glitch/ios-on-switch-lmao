@@ -84,7 +84,7 @@ SWITCH_COPTS = {
         "-D",
         "XNU_NATIVE_ARCH_TIMER=1",
         "-D",
-        "SWITCH_XNU_DIAGNOSTICS=1",
+        "SWITCH_XNU_BOARD=1",
     ],
     "osfmk/kern/startup.c": [
         "-D",

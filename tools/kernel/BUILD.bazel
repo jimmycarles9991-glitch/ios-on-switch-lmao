@@ -37,16 +37,8 @@ py_library(
             ":kernel_names",
             "//tools/common:macho",
         ],
-        "trust_bundle": [":im4p_lib"],
     }.get(tool, []),
 ) for tool in KERNEL_TOOLS]
-
-# trust_bundle reads the IPSW's IMG4 payloads with im4p's parser.
-py_library(
-    name = "im4p_lib",
-    srcs = ["im4p.py"],
-    imports = ["."],
-)
 
 # bazel run //tools/kernel:hdr_deps [-- --write]: every kernel_driver's hdr_deps against what its sources include.
 py_binary(

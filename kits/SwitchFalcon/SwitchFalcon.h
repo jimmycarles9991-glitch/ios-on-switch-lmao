@@ -36,6 +36,9 @@ enum {
     SWITCH_FALCON_TRACEPC = 0x114c,
     SWITCH_FALCON_EXTERRADDR = 0x1168,
     SWITCH_FALCON_EXTERRSTAT = 0x116c,
+    // DMEM port 0 (nouveau falcon/gm200.c): DMEMC takes a 4-aligned byte address, DMEMD then reads that word.
+    SWITCH_FALCON_DMEMC = 0x11c0,
+    SWITCH_FALCON_DMEMD = 0x11c4,
     SWITCH_FALCON_ICD_CMD = 0x1200,
     SWITCH_FALCON_ICD_RDATA = 0x120c,
 };

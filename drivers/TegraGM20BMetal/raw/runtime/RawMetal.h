@@ -28,6 +28,8 @@ void raw_metal_complete_states(const char *cacheDir);
 // The pack key of a render pipeline descriptor whose functions are this facade's (the frontend journal's R-line fields but the label,
 // then " | l <framework>" for functions of a framework's default library other than QuartzCore's).
 NSString *raw_metal_pipeline_key(MTLRenderPipelineDescriptor *descriptor);
+// Whether every function the descriptor links is a framework library's, which the pack can name
+bool raw_metal_linked_packable(MTLRenderPipelineDescriptor *descriptor);
 // One rates line since the previous call (0 when the device did nothing): command buffers on each path and why, encode time,
 // draws, passes, copies, waits, memory; and the states the runtime made since the device opened (states=<records from the
 // cache>/<probes>/<refused>/<failed>/<ms making them>). The plugin logs it every 5 s with the m2v line (TEGRA_M2V_TELEMETRY).

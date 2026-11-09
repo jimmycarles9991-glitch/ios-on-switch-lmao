@@ -1,6 +1,7 @@
 load("//bazel/lint:defs.bzl", "lint_files")
 
 # drivers/SwitchWLAN: moved from out/native-a57/root-v1/tree/drivers/SwitchWLAN by the layout move.
+load("//kernel/rules:driver_flags.bzl", "IPSW_KIND_FLAGS")
 load("//kernel/rules:kernel.bzl", "kernel_driver", "kernel_headers")
 load("//kits/SwitchABI:defs.bzl", "switch_abi_bindings")
 
@@ -72,7 +73,7 @@ kernel_driver(
     copts = [
         "-mgeneral-regs-only",
         "-mstrict-align",
-    ],
+    ] + IPSW_KIND_FLAGS,
     hdr_deps = [
         "drivers/ArmGIC",
         "drivers/SwitchBluetooth",
@@ -115,6 +116,9 @@ switch_abi_bindings(
     out = "family-interface-bindings.S",
     classes = ["//kits/SwitchABI:IOEthernetInterface"],
     objects = [":SwitchWLAN_cc"],
-    own = ["performCommand"],
+    own = [
+        "attachToDataLinkLayer",
+        "performCommand",
+    ],
     subclass = "IO80211Interface",
 )

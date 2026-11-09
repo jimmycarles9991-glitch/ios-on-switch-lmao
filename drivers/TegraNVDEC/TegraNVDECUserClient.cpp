@@ -54,6 +54,7 @@ class AppleD5500UserClient : public IOUserClient {
         struct Buffer {
         uint32_t handle;  // 0: slot free
         TegraNVDECBlock block;
+        IOMemoryMap *map;  // the buffer in the task that allocated it
     };
 
     IOLock *lock_ = nullptr;
@@ -63,7 +64,7 @@ class AppleD5500UserClient : public IOUserClient {
 
     Buffer *find(uint32_t handle);
     bool quiesce() const;
-    void drop(Buffer *b, bool returnMemory);
+    static void drop(Buffer *b, bool returnMemory);
     IOReturn run(uint32_t method, const void *in, uint32_t inSize, void *out, uint32_t *outSize);
     static bool resolve(void *context, uint32_t handle, TegraNVDECBlock *block);
 
@@ -80,7 +81,6 @@ public:
 
     IOReturn clientClose() APPLE_KEXT_OVERRIDE;
     void free() APPLE_KEXT_OVERRIDE;
-    IOReturn clientMemoryForType(UInt32 type, IOOptionBits *options, IOMemoryDescriptor **memory) APPLE_KEXT_OVERRIDE;
     IOReturn externalMethod(uint32_t selector, IOExternalMethodArguments *arguments, IOExternalMethodDispatch *dispatch,
                             OSObject *target, void *reference) APPLE_KEXT_OVERRIDE;
 };
@@ -117,14 +117,13 @@ bool AppleD5500UserClient::quiesce() const
 // still write stays wired and mapped in NVDEC's address space for good.
 void AppleD5500UserClient::drop(Buffer *b, bool returnMemory)
 {
-    while (IOMemoryMap *map = removeMappingForDescriptor(b->block.pages.memory)) {
-        map->unmap();
-        map->release();
+    if (b->map) {
+        b->map->unmap();
+        b->map->release();
     }
     if (returnMemory)
         tegra_nvdec_buffer_free(&b->block);
-    b->handle = 0;
-    b->block = {};
+    *b = {};
 }
 
 IOReturn AppleD5500UserClient::clientClose()
@@ -155,19 +154,6 @@ void AppleD5500UserClient::free()
     if (counted_)
         __atomic_sub_fetch(&gConnections, 1, __ATOMIC_SEQ_CST);
     IOUserClient::free();
-}
-
-IOReturn AppleD5500UserClient::clientMemoryForType(UInt32 type, IOOptionBits *options, IOMemoryDescriptor **memory)
-{
-    IOLockLock(lock_);
-    const Buffer *b = find(type);
-    if (b) {
-        b->block.pages.memory->retain();
-        *memory = b->block.pages.memory;
-        *options = kIOMapAnywhere | kIOMapDefaultCache;
-    }
-    IOLockUnlock(lock_);
-    return b ? kIOReturnSuccess : kIOReturnBadArgument;
 }
 
 IOReturn AppleD5500UserClient::run(uint32_t method, const void *in, uint32_t inSize, void *out, uint32_t *outSize)
@@ -241,6 +227,14 @@ IOReturn AppleD5500UserClient::run(uint32_t method, const void *in, uint32_t inS
         ret = ioreturn(tegra_nvdec_buffer_alloc(size, &slot->block));
         if (ret)
             break;
+        slot->map =
+            slot->block.pages.memory->createMappingInTask(current_task(), 0, kIOMapAnywhere | kIOMapDefaultCache);
+        if (!slot->map) {
+            tegra_nvdec_buffer_free(&slot->block);
+            *slot = {};
+            ret = kIOReturnNoMemory;
+            break;
+        }
         slot->handle = nextHandle_++;
         if (!nextHandle_)
             nextHandle_ = 1;
@@ -248,6 +242,7 @@ IOReturn AppleD5500UserClient::run(uint32_t method, const void *in, uint32_t inS
         reply->handle = slot->handle;
         reply->reserved = 0;
         reply->size = slot->block.size;
+        reply->address = slot->map->getAddress();
         break;
     }
     case TegraNVDECMethodBufferFree: {
@@ -302,7 +297,8 @@ IOReturn AppleD5500UserClient::run(uint32_t method, const void *in, uint32_t inS
         }
         if (!p->pitch || p->pitch % 64 || !p->rows || p->rows % 32 || p->block_height_log2 != 1 ||
             p->chroma_offset % 256 || p->chroma_offset < luma || picture > b->block.size ||
-            static_cast<uint64_t>(p->crop_x) + p->width > p->pitch ||
+            (p->sample_bytes != 1 && p->sample_bytes != 2) || p->reserved ||
+            (static_cast<uint64_t>(p->crop_x) + p->width) * p->sample_bytes > p->pitch ||
             static_cast<uint64_t>(p->crop_y) + p->height > p->rows) {
             // As for any refusal: the caller copies on the CPU.
             switch_dcache_clean_invalidate(b->block.va, b->block.size);
@@ -324,6 +320,7 @@ IOReturn AppleD5500UserClient::run(uint32_t method, const void *in, uint32_t inS
         vic.dstX = p->dst_x;
         vic.dstY = p->dst_y;
         vic.surfaceID = p->surface_id;
+        vic.sampleBytes = p->sample_bytes;
         const char *why = nullptr;
         const int err = tegra_vic_present(&vic, current_task(), &why);
         if (err) {
@@ -426,6 +423,10 @@ extern "C" int tegra_nvdec_publish(void)
     service->setProperty("NativeSandboxGrantProcess",
                          "com.apple.WebKit,mediaplaybackd,mediaserverd,videocodecd,MobileSlideShow");
     service->setProperty("TegraNVDECABIVersion", (unsigned long long)TEGRA_NVDEC_ABI_VERSION, 32);
+    const uint32_t codecs = tegra_nvdec_codecs();
+    service->setProperty(TEGRA_NVDEC_DECODES_H264, (codecs & (1u << TEGRA_NVDEC_CODEC_H264)) != 0);
+    service->setProperty(TEGRA_NVDEC_DECODES_VP9, (codecs & (1u << TEGRA_NVDEC_CODEC_VP9)) != 0);
+    service->setProperty(TEGRA_NVDEC_DECODES_HEVC, (codecs & (1u << TEGRA_NVDEC_CODEC_HEVC)) != 0);
     if (!service->attach(resources)) {
         service->release();
         IOLog("TegraNVDEC: N3 FAIL could not attach the service\n");

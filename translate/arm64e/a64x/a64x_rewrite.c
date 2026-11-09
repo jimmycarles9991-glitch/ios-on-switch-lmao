@@ -519,9 +519,11 @@ uint32_t a64x_dead_regs_budget(const uint32_t *window, int n, int site, int budg
  * unconditional branches. A call (BL/BLR) writes x30 and clobbers x16/x17; RET reads x30 and ends the path for
  * the others; BRK/UDF end the path; anything that leaves the window or is not understood counts as a read.
  */
-static bool flow_dead(const uint32_t *w, int n, int site, uint32_t x, int budget, uint8_t *visited, bool tail_ok)
+static bool flow_dead(const uint32_t *w, int n, int site, uint32_t x, int budget, const struct a64x_walk *walk,
+                      bool tail_ok)
 {
-    int stack[512], sp = 0;
+    int *stack = walk->stack, sp = 0;
+    uint8_t *visited = walk->visited;
     if (site + 1 >= n) {
         return false;
     }
@@ -608,7 +610,7 @@ static bool flow_dead(const uint32_t *w, int n, int site, uint32_t x, int budget
                     i = (int)tgt;
                     continue;
                 }
-                if (sp >= 512) {
+                if (sp >= A64X_WALK_STACK) {
                     return false;
                 }
                 stack[sp++] = (int)tgt;
@@ -638,30 +640,42 @@ static bool flow_dead(const uint32_t *w, int n, int site, uint32_t x, int budget
     return true;
 }
 
-uint32_t a64x_dead_regs_flow(const uint32_t *window, int n, int site, uint32_t candidates, int budget)
+struct a64x_walk a64x_walk_in(void *buf, uint32_t words)
 {
-    uint8_t visited[(16384 + 7) / 8];
+    struct a64x_walk walk = {buf, (uint8_t *)buf + A64X_WALK_STACK * sizeof(int), words};
+    return walk;
+}
+
+uint32_t a64x_dead_regs_flow(const uint32_t *window, int n, int site, uint32_t candidates, int budget,
+                             const struct a64x_walk *walk)
+{
     uint32_t dead = 0;
     if (n > 16384) {
         n = 16384;
     }
+    if (n > (int)walk->words) {
+        return 0;
+    }
     for (uint32_t x = 0; x < 31; x++) {
-        if ((candidates & (1u << x)) && x != 18 && x != 29 && flow_dead(window, n, site, x, budget, visited, false)) {
+        if ((candidates & (1u << x)) && x != 18 && x != 29 && flow_dead(window, n, site, x, budget, walk, false)) {
             dead |= 1u << x;
         }
     }
     return dead;
 }
 
-uint32_t a64x_dead_regs_flow_fn(const uint32_t *fn, int n, int site, uint32_t candidates, int budget)
+uint32_t a64x_dead_regs_flow_fn(const uint32_t *fn, int n, int site, uint32_t candidates, int budget,
+                                const struct a64x_walk *walk)
 {
-    uint8_t visited[(65536 + 7) / 8];
     uint32_t dead = 0;
     if (n > 65536) {
         n = 65536;
     }
+    if (n > (int)walk->words) {
+        return 0;
+    }
     for (uint32_t x = 0; x < 31; x++) {
-        if ((candidates & (1u << x)) && x != 18 && x != 29 && flow_dead(fn, n, site, x, budget, visited, true)) {
+        if ((candidates & (1u << x)) && x != 18 && x != 29 && flow_dead(fn, n, site, x, budget, walk, true)) {
             dead |= 1u << x;
         }
     }

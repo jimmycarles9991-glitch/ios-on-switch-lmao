@@ -5,6 +5,7 @@
 #include <IOKit/IOLib.h>
 #include <IOKit/IOLocks.h>
 #include <kern/clock.h>
+#include <kern/task.h>
 #include "../SwitchTime/SwitchTime.h"
 
 namespace {
@@ -14,10 +15,16 @@ IOLock *gLock;
 switch_scratch *gKept;
 uint64_t gKeptBytes, gHeld, gPeak;
 
-// The one place a scratch's memory is charged: to `owner`'s graphics footprint
+// The one place a scratch's memory is charged: to `owner`'s graphics footprint. On a thread of a task without
+// com.apple.private.memory.ownership_transfer XNU lets the memory be charged to that task alone
+// (mach_memory_entry_ownership), and a purgeable object made there is that task's from the start: the kernel's charge
+// then falls to the task, whose surface the scratch is held for.
 IOReturn charge(IOBufferMemoryDescriptor *memory, task_t owner)
 {
-    return memory->setOwnership(owner, kIOMemoryLedgerTagGraphics, 0);
+    const IOReturn ret = memory->setOwnership(owner, kIOMemoryLedgerTagGraphics, 0);
+    if (ret == kIOReturnSuccess || owner == current_task())
+        return ret;
+    return memory->setOwnership(current_task(), kIOMemoryLedgerTagGraphics, 0);
 }
 
 void destroy(switch_scratch *s)

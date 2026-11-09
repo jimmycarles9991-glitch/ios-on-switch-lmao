@@ -237,7 +237,15 @@ commpage_populate(void)
 	*((uint8_t*)(_COMM_PAGE_APT_MSG_POLICY + _COMM_PAGE_RW_OFFSET)) = apt_msg_policy();
 #endif
 
-	commpage_set_erm_active(extended_research_mode_state());
+	/* Switch: user space reads this byte as libcryptex's eligible_for_supplemental_cryptex, and launchd bootstraps
+	 * /System/Cryptexes/Supplemental/System/Library/LaunchDaemons only when it is set: the one way 24B119 starts a
+	 * daemon of ours (the overlay shows its plist there, SwitchRawMount.h). Only the byte: extended_research_mode_state()
+	 * and every kernel policy that reads it stay off. Its other readers on 24B119 do nothing here: dyld uses it only
+	 * for ignition grafts (off), no process registers libsandbox's ERM callback, and Settings' Extended Research pane
+	 * needs a bundle under Supplemental that is never shipped. Foundation tries to dlopen
+	 * Supplemental/Frameworks/ERFoundationExtension.dylib once per process start, which tools/package/overlay.py
+	 * never lets exist. */
+	commpage_set_erm_active(true);
 }
 
 #define COMMPAGE_TEXT_SEGMENT "__TEXT_EXEC"

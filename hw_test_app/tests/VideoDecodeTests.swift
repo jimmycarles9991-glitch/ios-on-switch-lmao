@@ -31,6 +31,10 @@ struct VideoDecodeTest: HWTest {
     }
 
     func run(_ context: TestContext) async throws -> Outcome {
+        // iOS 26.2 offers VP9 only to processes that opt in; before it, only to entitled ones.
+        if clip.codec == .vp9, #available(iOS 26.2, *) {
+            VTRegisterSupplementalVideoDecoderIfAvailable(kCMVideoCodecType_VP9)
+        }
         guard VTIsHardwareDecodeSupported(codecType) else {
             if clip.codec == .vp9 { return .skip("VTIsHardwareDecodeSupported(VP9) is false") }
             return .fail("VTIsHardwareDecodeSupported is false: no hardware \(Self.codecName(clip.codec)) decoder")

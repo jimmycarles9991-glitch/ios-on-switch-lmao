@@ -13,6 +13,7 @@
 #include <utility>
 #include <vector>
 #include "../pack/probe_record.h"
+#include "raw_record.h"
 
 namespace nvdec {
 class Decoder;
@@ -23,12 +24,6 @@ namespace raw {
 
 class Pack;
 struct InitAddresses;
-
-struct CapturedProgram {
-    std::string id;  // nvdec's name: the FNV-1a of its header, code and data
-    // header + code, NAK's shader data, each constant buffer's nvk_cbuf_type
-    std::vector<uint8_t> image, data, cbufTypes;
-};
 
 class Capture {
 public:

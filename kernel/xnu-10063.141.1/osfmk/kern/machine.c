@@ -170,7 +170,7 @@ processor_up_update_counts(processor_t processor)
  *	Flag processor as up and running, and available
  *	for scheduling.
  */
-#if defined(SWITCH_XNU_DIAGNOSTICS) && SWITCH_XNU_DIAGNOSTICS
+#if defined(SWITCH_XNU_BOARD) && SWITCH_XNU_BOARD
 extern void switch_smp_scheduler_online(unsigned int cpu);
 #endif
 
@@ -230,7 +230,7 @@ processor_up(
 		(*dtrace_cpu_state_changed_hook)(processor->cpu_id, TRUE);
 	}
 #endif
-#if defined(SWITCH_XNU_DIAGNOSTICS) && SWITCH_XNU_DIAGNOSTICS
+#if defined(SWITCH_XNU_BOARD) && SWITCH_XNU_BOARD
 	switch_smp_scheduler_online(processor->cpu_id);
 #endif
 }

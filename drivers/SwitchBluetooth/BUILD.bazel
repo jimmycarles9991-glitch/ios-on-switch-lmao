@@ -52,7 +52,14 @@ ios_binary(
         "-Wall",
         "-Wextra",
         "-Werror",
-    ],
-    entitlements = "BlueTool/BlueTool.entitlements",
+    ] + select({
+        # 24B119 sandboxes BlueTool, so only 21H461's stand-in can start joyconpaird (BlueTool.c).
+        "//ipsw:21H461": ["-DSWITCH_BLUETOOL_PAIRING_AGENT=1"],
+        "//conditions:default": [],
+    }),
+    entitlements = select({
+        "//ipsw:24B119": "BlueTool/BlueTool27.entitlements",
+        "//conditions:default": "BlueTool/BlueTool.entitlements",
+    }),
     sign_identifier = "com.apple.BlueTool",
 )

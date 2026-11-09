@@ -240,8 +240,9 @@ impl LinkedList<'_> {
     }
 }
 
-/// One function of [`LinkedFunctions`]: a library function and the constant values it was
-/// specialized with (`newFunctionWithDescriptor:`; none for `newFunctionWithName:`).
+/// One function of [`LinkedFunctions`]: a library function, the constant values it was
+/// specialized with (`newFunctionWithDescriptor:`; none for `newFunctionWithName:`), and the name
+/// it was made under.
 #[non_exhaustive]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LinkedFunction {
@@ -252,6 +253,10 @@ pub struct LinkedFunction {
     /// made pipeline state; the runtime checks it, refusing one that is not as Metal does. The
     /// translation links the function's AIR either way, so it is not part of any key.
     pub precompiled: bool,
+    /// `MTLFunctionDescriptor.specializedName`: the name the function was made under, which
+    /// Metal's function answers and links it by (a visible-function reference to that name calls
+    /// it); `None` links it by its library function's own name.
+    pub link_name: Option<String>,
 }
 
 impl LinkedFunction {
@@ -261,7 +266,22 @@ impl LinkedFunction {
             function,
             constants: FunctionConstantValues::defaults(),
             precompiled: false,
+            link_name: None,
         }
+    }
+
+    /// The name a visible-function reference calls the function by: its specialized name, or else
+    /// its library function's.
+    pub fn linked_name(&self) -> &str {
+        self.link_name
+            .as_deref()
+            .unwrap_or(self.function.info().name)
+    }
+
+    /// This function made under the specialized name `name`.
+    pub fn with_link_name(mut self, name: Option<String>) -> LinkedFunction {
+        self.link_name = name;
+        self
     }
 
     /// This function specialized with `constants`.

@@ -107,6 +107,7 @@
 #if CONFIG_MACF
 #include <security/mac_framework.h>
 #endif
+#include <switch/pretranslated.h>
 
 #include <IOKit/IOBSD.h>
 #include <libkern/section_keywords.h>
@@ -1582,6 +1583,7 @@ vn_stat_noauth(struct vnode *vp, void *sbptr, kauth_filesec_t *xsec, int isstat6
 		goto out;
 	}
 #endif
+	switch_pretranslated_getattr(vp, &va);
 	/*
 	 * Copy from vattr table
 	 */

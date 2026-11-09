@@ -4,9 +4,11 @@
 Tiers, each name in the first that has it:
   corpus     every Core Animation state the device's journals hold (precompile/corpus.log), by name
   manifest   QuartzCore's offline compilation manifest (CA::OGL::MetalContext::offline_compilation_manifest: the states
-             Apple compiles ahead for its GPUs; warmup_shaders makes the ones of the device's GPU family at boot), but
-             its generic states: CA makes those only out of a binary archive (create_pipeline_state refuses a generic
-             spec without one), and this device has none
+             Apple compiles ahead for its GPUs; warmup_shaders makes the ones of the device's GPU family at boot). CA
+             makes a generic state (g: the uber shader) only out of its binary archive, failing on a miss; the raw
+             runtime answers such a creation from the pack as the device's archive would. QuartzCore 27 asks for every
+             generic state of its manifest at boot (17 F "Metal failed to load render pipeline" lines each iOS 27 boot
+             while they were left out); 21H461's are left out until a 17 boot shows the same
   variants   QuartzCore 27's: every member of the texture function families of the two above that a filter picks among
              at draw time (glass variants, blur passes: caspec27.VARIANT_FAMILIES), on the same pipeline
   blend      every fragment state of the tiers above under every blend CA puts in the pipeline (those
@@ -115,7 +117,11 @@ def _fetch_tier(tables: caspec.Tables, fragments: list[tuple[str, str]]) -> list
 
 def labels(tables: caspec.Tables, corpus: list[str], tiers: tuple[str, ...] = TIERS) -> dict[str, list[str]]:
     """Give every tier's names, in order, each name in the first tier that has it."""
-    manifest = [m[0] for m in tables.t['manifest'] if m[0][0] == 'P' and not caspec.decode(tables, m[0]).flag('g')]
+    manifest = [
+        m[0]
+        for m in tables.t['manifest']
+        if m[0][0] == 'P' and (tables.v27 or not caspec.decode(tables, m[0]).flag('g'))
+    ]
     variants = _variant_tier(tables, list(corpus) + manifest)
     fragments = _fragments(tables, list(corpus) + manifest + variants)
     made = {

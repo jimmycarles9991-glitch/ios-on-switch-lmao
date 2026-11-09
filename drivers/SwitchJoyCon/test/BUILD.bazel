@@ -1,6 +1,9 @@
 # drivers/SwitchJoyCon's HID session rule (SwitchJoyConSession.h, compiled as C by its harness) on the host, and the
 # gamecontrollerd connection storm it ends, reproduced by a model of gamecontrollerd, backboardd and the rail; and which
-# rail reports reach the HID device (SwitchJoyConForward.h).
+# rail reports reach the HID device (SwitchJoyConForward.h); what a take finds in the RX DMA ring
+# (SwitchJoyConRxRing.h); and which game-controller personalities each kernel's
+# build adds (SwitchJoyConHID.cpp); and joyconpaird's rules for importing Horizon's staged pairing dump
+# (helper/joycon_pairing_import.h).
 #
 #   bazel test //drivers/SwitchJoyCon/test:all
 load("//bazel/lint:defs.bzl", "lint_files")
@@ -37,4 +40,32 @@ host_test(
     name = "switch_joycon_forward_test",
     srcs = ["switch_joycon_forward_test.cpp"],
     deps = [":forward"],
+)
+
+host_library(
+    name = "rx_ring",
+    hdrs = ["//drivers/SwitchJoyCon:SwitchJoyConRxRing.h"],
+)
+
+host_test(
+    name = "switch_joycon_rx_ring_test",
+    srcs = ["switch_joycon_rx_ring_test.cpp"],
+    deps = [":rx_ring"],
+)
+
+host_test(
+    name = "switch_joycon_personality_test",
+    srcs = ["switch_joycon_personality_test.cpp"],
+    data = ["//drivers/SwitchJoyCon:SwitchJoyConHID.cpp"],
+)
+
+host_library(
+    name = "pairing_import",
+    hdrs = ["//drivers/SwitchJoyCon:helper/joycon_pairing_import.h"],
+)
+
+host_test(
+    name = "switch_joycon_pairing_import_test",
+    srcs = ["switch_joycon_pairing_import_test.cpp"],
+    deps = [":pairing_import"],
 )

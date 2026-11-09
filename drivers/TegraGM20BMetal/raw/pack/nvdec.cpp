@@ -243,6 +243,7 @@ void Decoder::submitEnd()
 {
     if (pendingMacro_ >= 0)
         runMacro();
+    landCopies();
     static const uint64_t trace = getenv("NVDEC_TRACE") ? strtoull(getenv("NVDEC_TRACE"), nullptr, 0) : 0;
     if (submits == trace) {
         for (int sc = 0; sc < 2; sc++) {
@@ -322,6 +323,8 @@ void Decoder::method(uint32_t subc, uint32_t mthd, uint32_t data, bool fromMme)
     }
     if (!fromMme && pendingMacro_ >= 0)
         runMacro();
+    if (subc != 4 || mthd < 0x100)
+        landCopies();
     if (mthd < 0x100) {  // host class methods on any subchannel
         reg_[subc][mthd >> 2] = data;
         if (mthd == 0x78)
@@ -334,10 +337,8 @@ void Decoder::method(uint32_t subc, uint32_t mthd, uint32_t data, bool fromMme)
     }
     if (subc != 0) {
         reg_[subc][mthd >> 2] = data;
-        if (subc == 1 && mthd == 0x02b4) {
-            dispatches++;
-            fprintf(out_, "DISPATCH\n");
-        }
+        if (subc == 1)
+            computeMethod(mthd, data);
         if (subc == 4 && mthd == 0x0300) {
             barrier("CE_COPY");
             copyEngine(data);
@@ -489,6 +490,50 @@ void Decoder::method(uint32_t subc, uint32_t mthd, uint32_t data, bool fromMme)
     reg_[0][mthd >> 2] = data;
 }
 
+void Decoder::landCopies()
+{
+    for (const CopyStore &s : copyStores_)
+        for (size_t k = 0; k < s.bytes.size();) {
+            size_t end = k + 1;
+            if (s.written.empty())
+                end = s.bytes.size();
+            else
+                while (end < s.bytes.size() && s.written[end] == s.written[k])
+                    end++;
+            if (s.written.empty() || s.written[k])
+                storeCopy(s.at + k, &s.bytes[k], end - k);
+            k = end;
+        }
+    copyStores_.clear();
+}
+
+// NVDEC_WRITETHROUGH: the copy lands in the memory behind the destination too, as the GPU's would, so a host test reads its
+// result back on the CPU (pack/cap.cpp maps every BO) (and not in the overlay: the CPU may rewrite that memory later, which the
+// overlay would hide from the next read)
+void Decoder::storeCopy(uint64_t at, const uint8_t *bytes, uint64_t n)
+{
+    static const bool through = getenv("NVDEC_WRITETHROUGH") != nullptr;
+    if (through && map_)
+        if (const uint8_t *h = map_(at, n)) {
+            memcpy(const_cast<uint8_t *>(h), bytes, n);
+            return;
+        }
+    for (uint64_t k = 0; k < n; k += 4) {
+        uint32_t w = 0;
+        if (k + 4 <= n && ((at + k) & 3) == 0)
+            memcpy(&w, &bytes[k], 4);
+        else {  // an unaligned edge: merge into the word
+            const uint64_t a = (at + k) & ~3ull;
+            read(a, &w, 4);
+            for (uint64_t b = 0; b < 4 && k + b < n; b++)
+                reinterpret_cast<uint8_t *>(&w)[((at + k) & 3) + b < 4 ? ((at + k) & 3) + b : 3] = bytes[k + b];
+            cbufWrites_[a] = w;
+            continue;
+        }
+        cbufWrites_[at + k] = w;
+    }
+}
+
 // MAXWELL_DMA_COPY_A LAUNCH_DMA: a copy (NVK's upload queue puts shaders and data in place with these; the raw path's
 // copies) or, with REMAP to constant A, a fill. Either side may be block-linear (SET_SRC/DST_BLOCK_SIZE: one GOB wide, its
 // block height, the surface's width in elements and height, the copy's origin), addressed as TegraGM20BLayout.h lays the
@@ -525,18 +570,22 @@ void Decoder::copyEngine(uint32_t launch)
     for (uint32_t c = 0; remap && c < ndst; c++)
         reads = reads || ((comp >> (4 * c)) & 7) < 4;
 
-    // where element e of line y lies: rows `pitch` apart from `base`, or a block-linear surface (its six block words at `at`)
+    // where element e of line y lies: rows `pitch` apart from `base`, or a block-linear surface (its six block words at `at`:
+    // block height and depth, width in elements, height, depth and the layer the copy reads or writes)
     struct Side {
         bool tiled;
         uint64_t base;
-        uint32_t pitch, yLog2, rowBytes, ox, oy;
+        uint32_t pitch, yLog2, rowBytes, ox, oy, zLog2 = 0, height = 0, layer = 0;
     };
 
     auto side = [&](bool isPitch, uint64_t base, uint32_t pitch, uint32_t at, uint32_t elemBytes) {
         Side d{!isPitch, base, pitch, 0, 0, 0, 0};
         if (d.tiled) {
             d.yLog2 = (r[at / 4] >> 4) & 0xf;
+            d.zLog2 = (r[at / 4] >> 8) & 0xf;
             d.rowBytes = r[at / 4 + 1] * elemBytes;
+            d.height = r[at / 4 + 2];
+            d.layer = r[at / 4 + 4];
             d.ox = r[at / 4 + 5] & 0xffff;
             d.oy = r[at / 4 + 5] >> 16;
         }
@@ -559,37 +608,38 @@ void Decoder::copyEngine(uint32_t launch)
     auto addr = [](const Side &d, uint32_t e, uint32_t y, uint32_t elemBytes) {
         if (!d.tiled)
             return d.base + uint64_t(y) * d.pitch + uint64_t(e) * elemBytes;
-        return d.base + tgm_layout_offset_of(d.rowBytes, uint8_t(d.yLog2), (d.ox + e) * elemBytes, d.oy + y);
+        if (!d.zLog2 && !d.layer)
+            return d.base + tgm_layout_offset_of(d.rowBytes, uint8_t(d.yLog2), (d.ox + e) * elemBytes, d.oy + y);
+        // a plane of a 3D surface: blocks along a row, down the plane, then through the depth; GOBs down a block, then
+        // through its planes
+        const uint32_t xB = (d.ox + e) * elemBytes, row = d.oy + y, blockRows = 8u << d.yLog2,
+                       blockPlanes = 1u << d.zLog2;
+        const uint64_t blocksDown = (d.height + blockRows - 1) / blockRows;
+        const uint64_t block =
+            (uint64_t(d.layer / blockPlanes) * blocksDown + row / blockRows) * (d.rowBytes / 64) + xB / 64;
+        const uint64_t gob = uint64_t(d.layer % blockPlanes) * (blockRows / 8) + (row % blockRows) / 8;
+        return d.base + block * (512ull << (d.yLog2 + d.zLog2)) + gob * 512 + tgm_layout_gob_offset(xB, row);
     };
-    // NVDEC_WRITETHROUGH: the copy lands in the memory behind the destination too, as the GPU's would, so a host test reads
-    // its result back on the CPU (pack/cap.cpp maps every BO)
-    // (and not in the overlay: the CPU may rewrite that memory later, which the overlay would hide from the next read)
-    static const bool through = getenv("NVDEC_WRITETHROUGH") != nullptr;
+    if ((launch & 3) != 1)  // not PIPELINED
+        landCopies();
+    // NO_WRITE and missing source components leave the destination's bytes as they are when the copy lands
+    std::vector<uint8_t> written;
+    for (uint32_t c = 0; remap && !plain && c < ndst; c++) {
+        const uint32_t sel = (comp >> (4 * c)) & 7;
+        written.insert(written.end(), csize, (sel < 4 && sel < nsrc) || sel == 4 || sel == 5);
+    }
+    const size_t first = copyStores_.size();
     auto store = [&](uint64_t at, const uint8_t *bytes, uint64_t n) {
-        if (through && map_)
-            if (const uint8_t *h = map_(at, n)) {
-                memcpy(const_cast<uint8_t *>(h), bytes, n);
-                return;
-            }
-        for (uint64_t k = 0; k < n; k += 4) {
-            uint32_t w = 0;
-            if (k + 4 <= n && ((at + k) & 3) == 0)
-                memcpy(&w, &bytes[k], 4);
-            else {  // an unaligned edge: merge into the word
-                const uint64_t a = (at + k) & ~3ull;
-                read(a, &w, 4);
-                for (uint64_t b = 0; b < 4 && k + b < n; b++)
-                    reinterpret_cast<uint8_t *>(&w)[((at + k) & 3) + b < 4 ? ((at + k) & 3) + b : 3] = bytes[k + b];
-                cbufWrites_[a] = w;
-                continue;
-            }
-            cbufWrites_[at + k] = w;
-        }
+        if (copyStores_.size() == first || copyStores_.back().at + copyStores_.back().bytes.size() != at)
+            copyStores_.push_back({at, {}, {}});
+        CopyStore &s = copyStores_.back();
+        s.bytes.insert(s.bytes.end(), bytes, bytes + n);
+        for (uint64_t k = 0; !written.empty() && k < n; k += elem)
+            s.written.insert(s.written.end(), written.begin(), written.end());
     };
     const uint64_t bytes = uint64_t(length) * elem;
     std::vector<uint8_t> line(bytes), from(uint64_t(length) * srcElem);
     for (uint32_t y = 0; y < lines; y++) {
-        // gather: the line's source elements, and the destination's where components are left or merged
         if (reads) {
             if (in.tiled)
                 for (uint32_t e = 0; e < length; e++)
@@ -598,11 +648,6 @@ void Decoder::copyEngine(uint32_t launch)
                 read(addr(in, 0, y, srcElem), from.data(), from.size());
         }
         if (remap && !plain) {
-            if (out.tiled)
-                for (uint32_t e = 0; e < length; e++)
-                    read(addr(out, e, y, elem), &line[uint64_t(e) * elem], elem);
-            else
-                read(addr(out, 0, y, elem), line.data(), bytes);
             for (uint32_t e = 0; e < length; e++)
                 for (uint32_t c = 0; c < ndst; c++) {
                     const uint32_t sel = (comp >> (4 * c)) & 7;
@@ -1353,6 +1398,8 @@ void Decoder::draw(const char *kind, uint32_t first, uint32_t count)
             l += b;
         }
         fprintf(out_, "%s\n", l.c_str());
+        // sampler header 0, which a handle naming no sampler names: NVK's texel-fetch sampler on every GPU (nvk_device.c)
+        fprintf(out_, "  tsc0=%s\n", tscEntry(0).c_str());
     }
     // render targets and depth target by name
     for (uint32_t j = 0; j < 8; j++) {

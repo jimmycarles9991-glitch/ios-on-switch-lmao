@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: BSD-2-Clause-Patent
 // The panic screen and the persistent panic record (SwitchPanicSave.c). Hooks, in the order they run:
+//   debug.c panic_trap_to_debugger, early   switch_panic_early     (before switch_panic_save_init, any configuration)
 //   arm_init.c, after switch_diag_init       switch_panic_save_init
 //   pe_init.c check_for_panic_log (no /pram)   switch_panic_save_xnu_buffer
 //   SwitchDiag.c switch_diag_panic         switch_panic_begin     (panic entry, other CPUs still running)
@@ -20,7 +21,20 @@ extern "C" {
 // switch_panic_save_pending. A no-op in kernels without the panic record.
 void switch_panic_save_thermal(int sensor, int millic);
 
-#if defined(SWITCH_XNU_DIAGNOSTICS) && SWITCH_XNU_DIAGNOSTICS
+// Every configuration, debug.c's panic path before switch_diag_panic: a panic before the kernel's console and before
+// switch_panic_save_init gets the record, the screen and a warm reset all the same (SwitchPanicEarly.c). Returns only
+// for any other panic, or when nothing can be mapped for it.
+void switch_panic_early(const char *format, va_list *args, unsigned long caller);
+// DEVELOPMENT and DEBUG, in arm_vm_init: switch-early-panic=<where> panics there (SwitchPanicEarly.c).
+void switch_panic_early_test(unsigned int where);
+// SwitchPanicEarly.c's side of SwitchPanicSave.c: the pstore RAM, hekate's framebuffer (or NULL) and the PMC, each mapped
+// at its physical address.
+int switch_panic_save_ready(void);
+int switch_panic_save_early_pending(volatile uint8_t *ramoops);
+void switch_panic_save_early(const char *line, unsigned long caller, volatile uint8_t *ramoops, volatile uint32_t *fb,
+                             volatile uint32_t *pmc_page) __attribute__((noreturn));
+
+#if defined(SWITCH_XNU_BOARD) && SWITCH_XNU_BOARD
 void switch_panic_save_init(void);
 int switch_panic_save_xnu_buffer(uintptr_t *base, unsigned int *bytes);
 int switch_panic_begin(const char *format, va_list *args, unsigned long caller, int take_screen);

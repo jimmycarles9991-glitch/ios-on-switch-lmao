@@ -167,6 +167,11 @@ enum switch_ui_scale_edit_kind {
 	/* 8 bytes each: expanded_battery_bits[0] and [1], little-endian; none where the scale has none */
 	SWITCH_US_EXPANDED_BATTERY_HEIGHT,
 	SWITCH_US_EXPANDED_BATTERY_LINE,
+	/*
+	 * 32 bytes: fmov d1, #(grid_num / grid_den); fabs d2, d2; fcmp d2, d3; fcsel d8, d1, d8, gt; fmul d0, d8, d2;
+	 * frinta d0, d0; fdiv d0, d0, d2; fminnm d0, d0, d2. None where SWITCH_US_GRID_SCALE has none.
+	 */
+	SWITCH_US_GRID_PAGE_SCALE,
 };
 
 /* Writes the edit's bytes for the scale; false when the kind's length is not size or the kind has none at the scale. */
@@ -231,6 +236,22 @@ switch_ui_scale_edit_bytes(enum switch_ui_scale_edit_kind kind, const struct swi
 			return false;
 		}
 		switch_put64(out, bits);
+		return true;
+	}
+	case SWITCH_US_GRID_PAGE_SCALE: {
+		uint32_t landscape_scale = 0;
+		if (size != 32 || scale->grid_den == 0 ||
+		    !switch_a64_fmov_d(1, scale->grid_num, scale->grid_den, &landscape_scale)) {
+			return false;
+		}
+		switch_a64_put(out, landscape_scale);
+		switch_a64_put(out + 4, 0x1e60c042u);  /* fabs d2, d2 */
+		switch_a64_put(out + 8, 0x1e632040u);  /* fcmp d2, d3 */
+		switch_a64_put(out + 12, 0x1e68cc28u); /* fcsel d8, d1, d8, gt */
+		switch_a64_put(out + 16, 0x1e620900u); /* fmul d0, d8, d2 */
+		switch_a64_put(out + 20, 0x1e664000u); /* frinta d0, d0 */
+		switch_a64_put(out + 24, 0x1e621800u); /* fdiv d0, d0, d2 */
+		switch_a64_put(out + 28, 0x1e627800u); /* fminnm d0, d0, d2 */
 		return true;
 	}
 	case SWITCH_US_FIXED:

@@ -20,3 +20,9 @@ envytools envydis -m falcon -V fuc5, the H.264 app at image offsets 0xc00-0xab00
 0xa00 with the magic check at 0x8d96, ME control to DMEM 0x540 (read up to its mbc_mb_size word, written to I/O 0x1010
 at 0x842a), MD to 0x600, quant to 0x1300, slice to 0x680 (per slice, 0x37c7-0x385a), hist_buf_size >> 7 to I/O 0xe0c
 (0x3333).
+
+End of an H.264 picture (tools/falcon, as SOURCE-H265): the app's ISR (0xf1b) adds I[0x1848] to DMEM 0x2e4 on each
+encoder interrupt (IRQSTAT bit 13, I[0x1870] bit 1) and records errors in DMEM 0x2c8 (GP timer 0xe2640010, I[0x1870]
+bit 0 0xe2640060, I[0x1ac4] bits 0-2 0xe2640200) without ending anything. fn 0x48b9 then spins at 0x4916-0x491b while
+DMEM 0x2e4 < DMEM 0x354, with no timeout and no error check. DMEM 0x354 is the slice control's num_mb (0x38df),
+clamped to the macroblocks left in the picture (0x38f7-0x390e) and given to the engine as I[0x191c] (0x39f5).

@@ -41,8 +41,20 @@ inline std::string differences(const raw::Pack &pack, const raw::PackPipeline &p
     const uint32_t *blob = pack.section<uint32_t>(raw::PackBlob) + pp.blob;
     if (pp.blobDwords != r.blob.size() || memcmp(blob, r.blob.data(), r.blob.size() * 4))
         why += " blob" + blobDifferences(blob, pp.blobDwords, r.blob);
-    if (pp.entries != rp.entries || memcmp(pp.entry, rp.entry, sizeof pp.entry))
-        why += " entries";
+    if (pp.entries != rp.entries || memcmp(pp.entry, rp.entry, sizeof pp.entry)) {
+        why += " entries[" + std::to_string(pp.entries) + "/" + std::to_string(rp.entries);
+        for (uint32_t k = 0; k < 16; k++)
+            if (memcmp(&pp.entry[k], &rp.entry[k], sizeof pp.entry[k])) {
+                const raw::PackEntry &a = pp.entry[k], &b = rp.entry[k];
+                char line[160];
+                snprintf(line, sizeof line, " %u: %u.%u.%u.%u.%u.%u.%u/%u.%u.%u.%u.%u.%u.%u", k, a.offset, a.kind,
+                         a.stage, a.slot, a.samplerKind, a.sampler, a.pad, b.offset, b.kind, b.stage, b.slot,
+                         b.samplerKind, b.sampler, b.pad);
+                why += line;
+                break;
+            }
+        why += " ]";
+    }
     if (pp.pushes != rp.pushes || pp.pushMask != rp.pushMask || memcmp(pp.pushWords, rp.pushWords, sizeof pp.pushWords))
         why += " push";
     if (pp.vertexSlot != rp.vertexSlot || pp.vertexStride != rp.vertexStride)

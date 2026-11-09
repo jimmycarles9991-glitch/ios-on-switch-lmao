@@ -51,6 +51,9 @@ typedef struct {
 
 extern os_log_t gAVDLog;
 
+// The factory every entry registers (AVDRegister.c).
+OSStatus avd_create_instance(FourCharCode codec, CFAllocatorRef allocator, VTVideoDecoderRef *out);
+
 void avd_set_number(CFMutableDictionaryRef dict, CFStringRef key, int32_t value);
 CFDataRef avd_copy_atom(CMVideoFormatDescriptionRef format, CFStringRef name);
 int avd_load_hvcc(Decoder *d, CFDataRef hvcC);

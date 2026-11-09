@@ -1,0 +1,14 @@
+# The boot package's sorted CDHash lists and their binary search (header-only), shared by the kernel
+# (kernel/switch/vfs/auth_fs.c and pretranslated.c, through //kernel/switch:headers) and the host tests in test/.
+#
+#   bazel test //kits/SwitchCDHash/test:all
+load("//bazel/lint:defs.bzl", "lint_files")
+load("//kernel/rules:kernel.bzl", "kernel_headers")
+
+package(default_visibility = ["//visibility:public"])
+
+lint_files()
+
+exports_files(["switch_cdhash.h"])
+
+kernel_headers()

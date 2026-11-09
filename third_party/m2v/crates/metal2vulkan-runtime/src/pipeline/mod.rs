@@ -652,7 +652,7 @@ impl ComputePipelineState {
 /// left to it.
 pub(super) fn duplicate_linked_name(linked: &LinkedFunctions) -> Option<String> {
     fn name(f: &LinkedFunction) -> &str {
-        f.function.info().name
+        f.linked_name()
     }
     fn repeated(list: &[LinkedFunction]) -> Option<&str> {
         let mut seen = HashSet::new();

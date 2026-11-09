@@ -31,6 +31,7 @@ BLOCK = 0x200000
 MIN_WINDOW = 0x10000000
 MAX_WINDOW = 0x200000000
 BOOT_ARGS_SIZE = 0x480
+XNU_PAGE = 0x4000
 
 
 class LayoutError(ValueError):
@@ -325,6 +326,8 @@ def source_record(path: Path, data: bytes) -> dict:
 
 @dataclass(frozen=True)
 class LayoutRequest:
+    """physical_base is where the window starts: the trust caches, then the kernel at the next address its VA allows."""
+
     physical_base: int
     window_size: int
     reserved_ranges: list[dict]
@@ -343,6 +346,7 @@ class _Window(NamedTuple):
 
 
 class _Addresses(NamedTuple):
+    kernel_pa: int
     args_pa: int
     tree_pa: int
     ramdisk_pa: int
@@ -389,9 +393,18 @@ def _reservations(reserved_ranges: list[dict], window: _Window) -> list[dict]:
     return reservations
 
 
+def kernel_phys_base(window_base: int, kernel_base: int, trustcache_bytes: int) -> int:
+    """Return where the kernel's lowest segment goes: above the trust caches, at its VA's offset modulo 2 MiB.
+
+    The trust caches' 16 KiB pages end where the kernel starts: XNU's arm_vm_init makes them EXTRADATA, the start of
+    the kernelcache, and a RELEASE kernel panics on a TrustCache above its lowest segment. Without KTRR or CTRR the
+    device tree is not EXTRADATA and stays after the kernel, where arm_vm_physmap_init slides it.
+    """
+    floor = window_base + align(trustcache_bytes, XNU_PAGE)
+    return floor + (kernel_base - floor) % BLOCK
+
+
 def _check_bases(request: LayoutRequest, kernel: Kernel, adt: Adt) -> None:
-    if request.physical_base % BLOCK != kernel.base % BLOCK:
-        raise LayoutError('physical and virtual bases must be congruent modulo 2 MiB')
     if kernel.base > U64_MAX - request.window_size:
         raise LayoutError('virtual window overflows uint64')
     if adt.window_size != ((4 << 30) if request.full_ram else request.window_size):
@@ -459,19 +472,22 @@ def _sidecars(request: LayoutRequest, adt: Adt, sources: dict) -> dict[str, byte
 
 
 def _addresses(request: LayoutRequest, kernel: Kernel, tree_size: int, sidecars: dict[str, bytes]) -> _Addresses:
-    args_pa = align(request.physical_base + kernel.end - kernel.base, 0x4000)
+    trustcache_size = len(sidecars.get('TrustCache', b''))
+    kernel_pa = kernel_phys_base(request.physical_base, kernel.base, trustcache_size)
+    trustcache_pa = kernel_pa - align(trustcache_size, XNU_PAGE)
+    args_pa = align(kernel_pa + kernel.end - kernel.base, XNU_PAGE)
     tree_pa = args_pa + PAGE
     ramdisk_pa = align(tree_pa + tree_size, PAGE)
     ramdisk_size = align(len(sidecars.get('RAMDisk', b'')), PAGE)
-    trustcache_pa = ramdisk_pa + ramdisk_size
-    trustcache_end = trustcache_pa + len(sidecars.get('TrustCache', b''))
-    data_seed_pa = align(trustcache_end, PAGE)
+    ramdisk_end = ramdisk_pa + ramdisk_size
+    data_seed_pa = ramdisk_end
     data_seed_size = len(sidecars.get('NativeDataSeed', b''))
     data_seed_span = align(data_seed_size, PAGE)
-    used_end = align(data_seed_pa + data_seed_span if data_seed_size else trustcache_end, 0x4000)
+    used_end = align(data_seed_pa + data_seed_span if data_seed_size else ramdisk_end, XNU_PAGE)
     if used_end - request.physical_base > request.window_size - BLOCK:
         raise LayoutError('layout exceeds window or leaves less than 2 MiB slack')
     return _Addresses(
+        kernel_pa,
         args_pa,
         tree_pa,
         ramdisk_pa,
@@ -496,15 +512,18 @@ def _patched_tree(tree_bytes: bytes, adt: Adt, at: _Addresses, sidecars: dict[st
     return tree
 
 
-def _boot_memory(request: LayoutRequest, kernel: Kernel, adt: Adt) -> _BootMemory:
+def _boot_memory(request: LayoutRequest, kernel: Kernel, adt: Adt, kernel_pa: int) -> _BootMemory:
     full_ram, physical_base, window_size = request.full_ram, request.physical_base, request.window_size
     boot_phys = 0x80000000 if full_ram else physical_base
-    boot_virt = kernel.base - physical_base + boot_phys
+    boot_virt = kernel.base - kernel_pa + boot_phys
     boot_size = (4 << 30) if full_ram else window_size
     boot_actual = ((4 << 30) - (3 << 20)) if full_ram else window_size
-    if full_ram and (
-        physical_base != 0xB207C000 or adt.properties.get(('/chosen', 'switch-ram-ledger'), (0, 0))[1] != 1584
-    ):
+    if full_ram and kernel_pa != 0xB207C000:
+        raise LayoutError(
+            f'full RAM puts the kernel at 0xB207C000 (boot_layout.h SWITCH_KERNEL_PHYS_BASE), not {kernel_pa:#x}: the '
+            f'trust caches must fit the {0xB207C000 - physical_base:#x} bytes below it'
+        )
+    if full_ram and adt.properties.get(('/chosen', 'switch-ram-ledger'), (0, 0))[1] != 1584:
         raise LayoutError('full RAM requires the measured native profile and runtime ledger')
     return _BootMemory(boot_phys, boot_virt, boot_size, boot_actual)
 
@@ -535,10 +554,10 @@ class _Payload:
             }
         )
 
-    def place_kernel(self, kernel: Kernel, image: bytes) -> list[dict]:
+    def place_kernel(self, kernel: Kernel, kernel_pa: int, image: bytes) -> list[dict]:
         segments = []
         for index, segment in enumerate(kernel.segments):
-            pa = self.physical_base + segment.vmaddr - kernel.base
+            pa = kernel_pa + segment.vmaddr - kernel.base
             self.place(
                 f'segment:{index}:{segment.name}',
                 pa,
@@ -599,14 +618,15 @@ def build_layout(kernel_path: Path, adt_path: Path, output_dir: Path, request: L
     at = _addresses(request, kernel, len(tree_bytes), sidecars)
     used = at.used_end - physical_base
     tree = _patched_tree(tree_bytes, adt, at, sidecars)
-    boot = _boot_memory(request, kernel, adt)
+    boot = _boot_memory(request, kernel, adt, at.kernel_pa)
+    adt_va = kernel.base + at.tree_pa - at.kernel_pa
     boot_args = bytearray(BOOT_ARGS_SIZE)
     struct.pack_into('<HHI4Q6Q', boot_args, 0, 2, 2, 0, boot.virt, boot.phys, boot.size, at.used_end, *video)
-    struct.pack_into('<QI', boot_args, 0x60, kernel.base + at.tree_pa - physical_base, len(tree))
+    struct.pack_into('<QI', boot_args, 0x60, adt_va, len(tree))
     boot_args[0x6C : 0x6C + len(command)] = command
     struct.pack_into('<Q', boot_args, 0x478, boot.actual)
     payload = _Payload(physical_base, used)
-    segments = payload.place_kernel(kernel, image)
+    segments = payload.place_kernel(kernel, at.kernel_pa, image)
     payload.place('boot_args', at.args_pa, boot_args, PAGE)
     payload.place('adt', at.tree_pa, tree, len(tree))
     payload.place_sidecars(at, sidecars)
@@ -626,15 +646,16 @@ def build_layout(kernel_path: Path, adt_path: Path, output_dir: Path, request: L
         ),
         'sources': sources,
         'phys_base': physical_base,
+        'kernel_phys_base': at.kernel_pa,
         'virt_base': kernel.base,
         'owned_window_size': window_size,
         'window_end': window.end,
-        'entry_pa': physical_base + kernel.entry - kernel.base,
+        'entry_pa': at.kernel_pa + kernel.entry - kernel.base,
         'entry_va': kernel.entry,
         'boot_args_pa': at.args_pa,
         'boot_args_size': BOOT_ARGS_SIZE,
         'adt_pa': at.tree_pa,
-        'adt_va': kernel.base + at.tree_pa - physical_base,
+        'adt_va': adt_va,
         'adt_size': len(tree),
         'adt_patched_sha256': hashlib.sha256(tree).hexdigest(),
         'used_extent': used,
@@ -667,7 +688,9 @@ def main() -> int:
     parser.add_argument('--kernel', required=True, type=Path)
     parser.add_argument('--adt', required=True, type=Path)
     parser.add_argument('--output', required=True, type=Path)
-    parser.add_argument('--physical-base', required=True, type=lambda value: int(value, 0))
+    parser.add_argument(
+        '--physical-base', required=True, type=lambda value: int(value, 0), help='where the window starts'
+    )
     parser.add_argument('--window-size', required=True, type=lambda value: int(value, 0))
     parser.add_argument(
         '--reserved-ranges',

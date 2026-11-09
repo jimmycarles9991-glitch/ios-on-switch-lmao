@@ -1006,6 +1006,7 @@ impl<'a> ShaderFromNir<'a> {
                         saturate: self.try_saturate_alu_dst(&alu.def),
                         ftz: self.float_ctl[ftype].ftz,
                         f32: false,
+                        a_f32: false,
                     });
                 } else {
                     panic!("Unsupported float type: f{}", alu.def.bit_size());
@@ -1319,15 +1320,35 @@ impl<'a> ShaderFromNir<'a> {
                 });
                 assert!(alu.def.bit_size() == 32);
                 let dst = b.alloc_ssa(RegFile::GPR);
-                b.push_op(OpF2F {
-                    dst: dst.into(),
-                    src: tmp.into(),
-                    src_type: FloatType::F16,
-                    dst_type: FloatType::F32,
-                    rnd_mode: FRndMode::NearestEven,
-                    ftz: true,
-                    integer_rnd: false,
-                });
+                if b.sm() >= 53 && b.sm() < 70 {
+                    // ios-on-switch-lmao: the half ALU widens at full rate,
+                    // where F2F is a quarter-rate conversion. HADD2.F32 gives
+                    // a half denormal as a zero of its sign (measured on
+                    // GM20B), but the select below takes that zero wherever
+                    // the half is a denormal; every other half plus -0 is
+                    // itself.
+                    b.push_op(OpHAdd2 {
+                        dst: dst.into(),
+                        srcs: [
+                            Src::from(tmp).swizzle(SrcSwizzle::Xx),
+                            Src::ZERO.fneg(),
+                        ],
+                        saturate: false,
+                        ftz: false,
+                        f32: true,
+                        a_f32: false,
+                    });
+                } else {
+                    b.push_op(OpF2F {
+                        dst: dst.into(),
+                        src: tmp.into(),
+                        src_type: FloatType::F16,
+                        dst_type: FloatType::F32,
+                        rnd_mode: FRndMode::NearestEven,
+                        ftz: true,
+                        integer_rnd: false,
+                    });
+                }
                 if b.sm() < 70 {
                     // Pre-Volta, F2F.ftz doesn't flush denorms so we need to do
                     // that manually
@@ -1385,6 +1406,7 @@ impl<'a> ShaderFromNir<'a> {
                         saturate: true,
                         ftz: self.float_ctl[ftype].ftz,
                         f32: false,
+                        a_f32: false,
                     });
                     dst.into()
                 } else {

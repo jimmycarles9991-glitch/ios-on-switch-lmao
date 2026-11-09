@@ -41,6 +41,14 @@ TEST(RawXr, TheLinearFormsAreKeptAndTheirSrgbTwinsAreNot)
     EXPECT_EQ(raw::xrConversion(raw::XrForm::None), nullptr);
 }
 
+TEST(RawXr, ABlitWithABufferMovesTheTwoPlaneFormsColorWordAlone)
+{
+    EXPECT_EQ(raw::bufferTexelBytes(550, 8), 4u);
+    EXPECT_EQ(raw::bufferTexelBytes(552, 8), 8u);
+    EXPECT_EQ(raw::bufferTexelBytes(554, 4), 4u);
+    EXPECT_EQ(raw::bufferTexelBytes(115, 8), 8u);
+}
+
 TEST(RawXr, ZeroIsCode384AndBgr10WritesItsTopBits)
 {
     expectTexel(clear(raw::XrForm::Bgr10, 0, 0, 0, 1), 0xd8060180, 0, 0, 0);

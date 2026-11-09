@@ -9,9 +9,8 @@ reads its attachments (fc_has_attachment_<k> are always false) but takes fc_pers
 it too.
 """
 
-from caspec import BOOL, UCHAR, UCHAR4, Const, _const, _Segment
+from caspec import BOOL, UCHAR, UCHAR2, UCHAR4, Const, _const, _Segment
 
-UCHAR2 = 50  # MTLDataTypeUChar2
 RGBA16_FLOAT, R32_FLOAT = 115, 55
 # fc_has_lod_bias: image functions with no LOD bias (create_function_constants' 0x420_00fffe00 mask)
 NO_LOD_BIAS = {*range(9, 24), 37, 42}

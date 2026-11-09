@@ -5,7 +5,7 @@
 load("@rules_python//python:py_binary.bzl", "py_binary")
 load("@rules_python//python:py_library.bzl", "py_library")
 load("//bazel/lint:defs.bzl", "lint_files")
-load(":defs.bzl", "ipsw_device_tree", "ipsw_kernelcache", "ipsw_pretranslated", "ipsw_static_trust")
+load(":defs.bzl", "ipsw_apple_trust", "ipsw_device_tree", "ipsw_kernelcache", "ipsw_pretranslated")
 load(":ipsw.bzl", "ipsw_kinds")
 load(":pins.bzl", "IPSWS")
 
@@ -36,25 +36,22 @@ ipsw_kernelcache(
     kind = "21H461",
 )
 
-# The static trust cache bundle for the root and the OS cryptex (vendor/unixnu's original-static-system.bundle).
-ipsw_static_trust(
-    name = "static_system_trust",
-    out = "original-static-system.bundle",
-    static = "@ipsw//:static_trust_cache",
-    system = "@ipsw//:system_cryptex_trust_cache",
-)
-
-# The App cryptex's trust cache (an IM4P 'trca'), as the package appends it.
-alias(
-    name = "app_cryptex_trust_cache",
-    actual = "@ipsw//:app_cryptex_trust_cache",
-)
-
-# The System cryptex's trust cache (an IM4P 'trcs'), for the UUID the kernel authenticates that cryptex's files by.
-alias(
-    name = "system_cryptex_trust_cache",
-    actual = "@ipsw//:system_cryptex_trust_cache",
-)
+# Apple's trust caches for the root and the two cryptexes, as the boot package's static module takes them, each checked
+# against the BuildManifest's Digest of it.
+[
+    ipsw_apple_trust(
+        name = name,
+        src = "@ipsw//:" + role,
+        out = name + ".trustcache",
+        fourcc = fourcc,
+        role = role,
+    )
+    for name, role, fourcc in (
+        ("static_trust", "static_trust_cache", "trst"),
+        ("system_cryptex_trust", "system_cryptex_trust_cache", "trcs"),
+        ("app_cryptex_trust", "app_cryptex_trust_cache", "trca"),
+    )
+]
 
 # iOS 27: what the boot package carries of the pretranslate run (pretranslated/<kind>/, made offline from the decrypted
 # images by //translate/arm64e/pretranslate's driver, which needs root to mount them): the trust modules, the dyld

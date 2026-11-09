@@ -44,6 +44,7 @@ kernel_driver(
         "kits/SwitchCAR",
         "kits/SwitchDMA",
         "kits/SwitchMMIO",
+        "kits/SwitchSysctl",
         "kits/SwitchTime",
     ],
     late = ["SwitchJoyConHID.cpp"],
@@ -56,6 +57,7 @@ kernel_driver(
     name = tool,
     srcs = ["helper/{}.c".format(tool)],
     out = "build/switch-joycon/" + tool,
+    hdrs = ["helper/joycon_pairing_import.h"] if tool == "joyconpaird" else [],
     copts = [
         "-O2",
         "-Wall",

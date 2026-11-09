@@ -121,6 +121,9 @@ int main(int argc, char **argv)
             {"RMBlitEncoder", "fillBuffer:range:value:"},
             {"RMCommandBuffer", "userDictionary"},
             {"RMCommandBuffer", "globalTraceObjectID"},
+            {"RMRenderEncoder", "globalTraceObjectID"},
+            {"RMBlitEncoder", "globalTraceObjectID"},
+            {"RMComputeEncoder", "globalTraceObjectID"},
             {"RMSampler", "pixelFormat"},
             {"RMPipeline", "maxTotalThreadsPerThreadgroup"},
             // residency sets (iOS 18 on, Core Animation 27's): everything is resident on the raw path; a set's allocatedSize

@@ -25,6 +25,12 @@ every checkout) it copies:
                                         decoded as the panic ones into wake-<UTC>.stackshot.ips and
                                         wake-<UTC>.threads.txt (SpringBoard's and backboardd's threads)
   com.apple.LaunchServices-*.csstore + lsdb-webkit.txt   (--no-csstore skips them)
+  <boot>-<stamp>.json, hwtest-summary.txt  HW Test's run reports (also kept in <state>/device-logs/hwtest) and the
+                                        newest new run of each app against the runs before it (tools/hwtest)
+  hwtest-gpu/<bundle id>/               HW Test's Documents/gpu: the GPU scenes' got, want and diff PNGs
+  lock-poster/                          the lock-screen poster's newest landscape render and its portrait one, as PNGs
+                                        (tools/hwtest/posters.py; its verdict is in the log and hwtest-summary.txt)
+  screenshots/                          the screenshots the user took on the device (Photos' DCIM)
   m2v/ (+ m2v-cache -> backboardd's)    with --harvest (or --//deploy:harvest): every process's m2v shader cache,
                                         whose journals are merged into the precompile corpus
                                         (drivers/TegraGM20BMetal/precompile/corpus.log, a source file in your checkout)
@@ -46,6 +52,7 @@ if __package__ in (None, ''):
     sys.path.insert(0, str(Path(os.path.abspath(__file__)).parents[2]))
 from tools.common import files, paths
 from tools.deploy import mkarchive
+from tools.hwtest import hwtest
 from tools.install import (
     card as cards,
     host,
@@ -282,6 +289,17 @@ def _saved(data: Path, out: Path, log: host.Log, kcdata: str | Path | None) -> N
                 decode(out, kcdata, log)
 
 
+def _screenshots(data: Path, out: Path, log: host.Log) -> None:
+    """Copy the screenshots in Photos' DCIM: the one view of what the panel showed that the device keeps."""
+    shots = sorted((data / 'mobile/Media/DCIM').glob('*/IMG_*.PNG'))
+    if not shots:
+        return
+    (out / 'screenshots').mkdir(exist_ok=True)
+    for shot in shots:
+        shutil.copyfile(shot, out / 'screenshots' / shot.name)
+    log('screenshots:', ', '.join(shot.name for shot in shots))
+
+
 def _migration_state(data: Path, out: Path) -> None:
     lines = []
     for name in ('staged_system_apps', 'datamigrator', 'Switch'):
@@ -319,6 +337,7 @@ def pull(data: str | Path, out: str | Path, log: host.Log, what: Pull = EVERYTHI
         log(f'{name}: {files} files ({size >> 20} MiB) new or changed since the last pull')
     _reports(data, out, log, what.launchd)
     _saved(data, out, log, what.kcdata)
+    _screenshots(data, out, log)
     _migration_state(data, out)
     if what.csstore:
         _csstore(data, out, log)
@@ -328,6 +347,7 @@ def pull(data: str | Path, out: str | Path, log: host.Log, what: Pull = EVERYTHI
             log('logarchive: {} ({} boots)'.format(out / 'boot.logarchive', len(boots)))
         except SystemExit as error:
             log('logarchive NOT built:', error)
+    hwtest.after_pull(data, renamed.data_folder(data), out, log)
     log('logs ->', out)
     return out
 

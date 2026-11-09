@@ -17005,3 +17005,25 @@ sysctl_willuserspacereboot
 static SYSCTL_PROC(_kern, OID_AUTO, willuserspacereboot,
     CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_LOCKED,
     NULL, 0, sysctl_willuserspacereboot, "I", "");
+
+/*
+ * Switch: an in-kernel driver's classes, whose superclasses come from a kext loaded at run time, registered for the
+ * kernel the way OSKext::start registers a kext's: sKextLock, then OSMetaClass::preModLoad's sStalledClassesLock,
+ * `initialize` (the classes' static initializers) and postModLoad. postModLoad looks the kext up under sKextLock, so
+ * without it held first a kext starting on another thread (holding sKextLock, waiting in preModLoad) deadlocks with
+ * this one.
+ */
+extern "C" OSReturn switch_kernel_classes(void (*initialize)(void));
+OSReturn
+switch_kernel_classes(void (*initialize)(void))
+{
+	OSReturn result = kOSMetaClassNoInit;
+	IORecursiveLockLock(sKextLock);
+	void *handle = OSMetaClass::preModLoad(g_kernel_kmod_info.name);
+	if (handle) {
+		initialize();
+		result = OSMetaClass::postModLoad(handle);
+	}
+	IORecursiveLockUnlock(sKextLock);
+	return result;
+}

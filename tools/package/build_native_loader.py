@@ -44,12 +44,12 @@ from loader_abi import (
     BOOT_MANIFEST_HASH_BYTES,
     BOOT_MANIFEST_HASH_PROPERTY,
     EXPORTER_RUN,
+    KERNEL_PHYS_BASE,
     LZ4_BLOCK,
     LZ4_MAGIC,
     NATIVE_FULL_RAM_EXCLUSIONS,
     PACK_MIN_GAP,
     PACK_PAGE,
-    PHYSICAL_BASE,
     SD_REFERENCE,
     SD_REFERENCE_BYTES,
     SEED_BYTES,
@@ -63,6 +63,8 @@ from loader_abi import (
     STAMPS_BYTES,
     STAMPS_PROPERTY,
     VIDEO,
+    WINDOW_BASE,
+    WINDOW_BYTES_MAX,
     WINDOW_SHARD_BYTES,
     WINDOW_SHARDS,
     WINDOW_SIZE,
@@ -70,8 +72,6 @@ from loader_abi import (
 )
 from native_oled_adt import root_matching
 from native_xnu_layout import LayoutRequest, build_layout, parse_adt, validate_data_seed, validate_trustcache
-
-LIMIT = 128 << 20
 
 
 def pack_window(payload: bytes) -> tuple[list[tuple[int, int]], bytes]:
@@ -302,12 +302,12 @@ def _check_layout(m: dict, payload: bytes) -> None:
         and hashlib.sha256(payload).hexdigest() == m['image']['sha256'],
         'layout image identity mismatch',
     )
-    _require(0 < len(payload) <= LIMIT and not len(payload) % 8, 'image exceeds aligned bounded staging region')
-    _require(
-        m['phys_base'] == PHYSICAL_BASE and m['owned_window_size'] == WINDOW_SIZE, 'not the 768 MiB root-boot layout'
-    )
+    _require(0 < len(payload) <= WINDOW_BYTES_MAX and not len(payload) % 8, 'image exceeds the bounded window')
+    _require(m['phys_base'] == WINDOW_BASE and m['owned_window_size'] == WINDOW_SIZE, 'not the root-boot window')
+    _require(m['kernel_phys_base'] == KERNEL_PHYS_BASE, 'the kernel is not at boot_layout.h SWITCH_KERNEL_PHYS_BASE')
     for key in (
         'phys_base',
+        'kernel_phys_base',
         'virt_base',
         'owned_window_size',
         'entry_pa',
@@ -326,10 +326,11 @@ def _check_layout(m: dict, payload: bytes) -> None:
         m['top_of_kernel_data'] == m['phys_base'] + len(payload)
         and m['used_end'] == m['top_of_kernel_data']
         and m['window_end'] == m['phys_base'] + m['owned_window_size']
-        and m['adt_va'] == m['virt_base'] + m['adt_pa'] - m['phys_base']
-        and m['entry_va'] == m['virt_base'] + m['entry_pa'] - m['phys_base']
+        and m['adt_va'] == m['virt_base'] + m['adt_pa'] - m['kernel_phys_base']
+        and m['entry_va'] == m['virt_base'] + m['entry_pa'] - m['kernel_phys_base']
         and m['virt_base'] + m['owned_window_size'] < 1 << 64
-        and m['phys_base'] % 0x200000 == m['virt_base'] % 0x200000
+        and m['phys_base'] <= m['kernel_phys_base']
+        and m['kernel_phys_base'] % 0x200000 == m['virt_base'] % 0x200000
         and not m['boot_args_pa'] % 0x4000
         and m['boot_args_size'] == 0x480
         and m['adt_pa'] == m['boot_args_pa'] + 0x1000
@@ -353,12 +354,17 @@ def _check_sidecars(m: dict, payload: bytes, properties: dict, start: int, sidec
         _require(length == 16, 'root_boot sidecar placeholder missing: ' + key)
         address, size = struct.unpack_from('<QQ', payload, start + pos)
         expected = m['sources'][key]
+        # arm_vm_init's EXTRADATA: the trust caches' pages end where the kernel starts. Everything else follows the ADT.
+        if key == 'TrustCache':
+            within = (
+                not address % 0x4000
+                and m['phys_base'] <= address
+                and address + size <= m['kernel_phys_base'] < address + size + 0x4000
+            )
+        else:
+            within = not address % 0x1000 and m['adt_pa'] + m['adt_size'] <= address <= m['used_end']
         _require(
-            not address % 0x1000
-            and size == expected['size_bytes']
-            and 0 < size <= 16 << 20
-            and m['adt_pa'] + m['adt_size'] <= address <= m['used_end']
-            and size <= m['used_end'] - address,
+            within and size == expected['size_bytes'] and 0 < size <= 16 << 20 and size <= m['used_end'] - address,
             'root_boot sidecar bounds changed: ' + key,
         )
         _require(
@@ -391,9 +397,9 @@ def _check_command_line(m: dict, payload: bytes) -> None:
 FULL_RAM_BANK = (0x80000000, 0x100000000, 0xFFD00000)
 
 
-def boot_virt_base(virt_base: int, phys_base: int, boot_phys: int) -> int:
-    """Return the virtual address XNU gives physical boot_phys: the kernel window maps virt_base at phys_base."""
-    return virt_base - phys_base + boot_phys
+def boot_virt_base(virt_base: int, kernel_phys_base: int, boot_phys: int) -> int:
+    """Return the virtual address XNU gives physical boot_phys: the kernel's virt_base is at kernel_phys_base."""
+    return virt_base - kernel_phys_base + boot_phys
 
 
 def _check_exporter(phys_base: int, window_bytes: int) -> None:
@@ -433,7 +439,7 @@ def _check_native_profile(m: dict, payload: bytes, pins: KindPins) -> None:
         'native experiment requires the exact reviewed exclusion ledger',
     )
     _require(
-        len(payload) <= 0x6000000 and m['video'] == VIDEO,
+        len(payload) <= WINDOW_BYTES_MAX and m['video'] == VIDEO,
         f'native staging or display contract mismatch (window {len(payload):#x} bytes)',
     )
     _require(not len(payload) % 0x1000, 'native cacheable copy requires a page-aligned payload')
@@ -467,7 +473,7 @@ def window_checks(m: dict, payload: bytes, adt: bytes, pins: KindPins, manifest_
     )
     _require(
         (m.get('boot_phys_base'), m.get('boot_memory_size'), m.get('boot_memory_actual')) == FULL_RAM_BANK
-        and m.get('boot_virt_base') == boot_virt_base(m['virt_base'], m['phys_base'], FULL_RAM_BANK[0]),
+        and m.get('boot_virt_base') == boot_virt_base(m['virt_base'], m['kernel_phys_base'], FULL_RAM_BANK[0]),
         'full RAM boot bases/span differ from measured bank profile',
     )
     start = m['adt_pa'] - m['phys_base']
@@ -659,7 +665,7 @@ def layout(args: argparse.Namespace) -> None:
             inputs['adt'],
             scratch / 'layout',
             LayoutRequest(
-                physical_base=PHYSICAL_BASE,
+                physical_base=WINDOW_BASE,
                 window_size=WINDOW_SIZE,
                 reserved_ranges=[{'name': n, 'start': s, 'size': z} for n, s, z in NATIVE_FULL_RAM_EXCLUSIONS],
                 command_line=command_line,
@@ -680,7 +686,7 @@ def layout(args: argparse.Namespace) -> None:
     runs, _ = pack_window(payload)
     blocks = lz4_blocks(runs)
     shards = sorted(p.name for p in args.blocks.iterdir())
-    if shards != [f'{i:02d}' for i in range(WINDOW_SHARDS)]:
+    if shards != sorted(shard_of(i * WINDOW_SHARD_BYTES) for i in range(WINDOW_SHARDS)):
         raise SystemExit(f'{args.blocks}: not the {WINDOW_SHARDS} shard directories (boot/defs.bzl _WINDOW_SHARDS)')
     for at, length in blocks:
         (args.blocks / shard_of(at) / block_name(at)).write_bytes(payload[at : at + length])

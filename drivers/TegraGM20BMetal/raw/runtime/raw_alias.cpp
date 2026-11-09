@@ -30,8 +30,11 @@ void describe(const Bo &bo, uint32_t kind, Lease *lease, Alias &a)
 
 Lease *Device::leaseSpan(Lease *&lease, const Span &span, Memory from)
 {
-    if (!lease)
+    if (!lease) {
         lease = new Lease{this, 1, from, span, nullptr};
+        if (from == Memory::Arena)
+            arenas_[span.chunk].leases++;
+    }
     lease->refs++;
     return lease;
 }
@@ -52,6 +55,10 @@ void Device::dropLocked(Lease *lease)
         break;
     case Memory::Bl:
         blFree(lease->span);
+        break;
+    case Memory::Arena:
+        arenas_[lease->span.chunk].leases--;
+        arenaFree(lease->span);
         break;
     }
     delete lease;
@@ -74,6 +81,9 @@ void Device::freeSpan(Span &span, Memory from, Lease *&lease)
         case Memory::Bl:
             blFree(span);
             break;
+        case Memory::Arena:
+            arenaFree(span);
+            break;
         }
     }
     span = {};
@@ -86,6 +96,8 @@ bool Device::alias(Texture &t, Alias &a)
         return false;
     std::lock_guard<std::mutex> l(lock_);
     const Memory from = memoryOf(t);
+    if (from == Memory::Arena)
+        return aliasArena(t.span, t.lease, a);
     const Chunk &ch = (from == Memory::Bl ? blChunks_ : from == Memory::Wc ? wcChunks_ : chunks_)[t.span.chunk];
     describe(ch.bo, from == Memory::Bl ? uint32_t(TGM_LAYOUT_KIND) : kPteKindPitch, leaseSpan(t.lease, t.span, from),
              a);
@@ -104,6 +116,8 @@ bool Device::alias(Buffer &b, Alias &a)
     }
     if (!b.span.valid())
         return false;
+    if (b.arena)
+        return aliasArena(b.span, b.lease, a);
     const Chunk &ch = (b.wc ? wcChunks_ : chunks_)[b.span.chunk];
     describe(ch.bo, kPteKindPitch, leaseSpan(b.lease, b.span, b.wc ? Memory::Wc : Memory::Pool), a);
     return true;

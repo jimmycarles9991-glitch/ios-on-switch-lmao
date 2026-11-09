@@ -7,6 +7,9 @@ package(default_visibility = ["//visibility:public"])
 
 lint_files()
 
-exports_files(["switch_pretranslated.h"])
+exports_files([
+    "switch_pretranslated.h",
+    "switch_pretranslated_originals.h",
+])
 
 kernel_headers()

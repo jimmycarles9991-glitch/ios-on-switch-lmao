@@ -15,8 +15,8 @@ extern "C" {
 // Controllers and, unless boot-arg switch-no-bt turns Bluetooth off, the rail pairs on attach: once SwitchBluetooth has
 // programmed the controller's address (switch_joycon_bluetooth_address), each rail Joy-Con's active pairing slot is
 // read, and the Joy-Con is paired to that address over the rail unless the slot already names it; the link key is
-// published for joyconpaird to hand to bluetoothd (helper/). iPadOS's own AppleGameControllerPersonality.kext
-// personalities are taken out of the catalogue at start when the kext is prelinked (SwitchJoyConHID.cpp).
+// published for joyconpaird to hand to bluetoothd (helper/). On iPadOS 17 our personalities replace the prelinked
+// AppleGameControllerPersonality.kext's at start; on iPadOS 27 the kext's own serve (SwitchJoyConHID.cpp).
 // Thread context, after bsd_autoconf() with the GIC up (the board thread). Idempotent. Returns 0; failures panic.
 int switch_joycon_start(void);
 

@@ -12,3 +12,13 @@ host_test(
         "//kits/SwitchPretranslated:switch_pretranslated.h",
     ],
 )
+
+host_test(
+    name = "switch_pretranslated_originals_test",
+    srcs = [
+        "index_builder.h",
+        "switch_pretranslated_originals_test.cpp",
+        "//kits/SwitchPretranslated:switch_pretranslated.h",
+        "//kits/SwitchPretranslated:switch_pretranslated_originals.h",
+    ],
+)

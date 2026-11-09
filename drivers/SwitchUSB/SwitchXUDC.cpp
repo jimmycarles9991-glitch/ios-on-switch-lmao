@@ -48,7 +48,6 @@
 #include <libkern/c++/OSSymbol.h>
 #include <kern/clock.h>
 #include <kern/thread_call.h>
-#include <mach/kmod.h>
 #include <os/log.h>
 #include <string.h>
 #include "../ArmGIC/SwitchInterrupts.h"
@@ -58,7 +57,7 @@
 using namespace xudc;
 
 extern "C" {
-extern kmod_info_t g_kernel_kmod_info;
+OSReturn switch_kernel_classes(void (*initialize)());
 void switchxudc_static_init(void) __asm__("__GLOBAL__sub_I_SwitchXUDC.cpp");
 }
 
@@ -1959,14 +1958,8 @@ bool switchxudc_start(IOService *provider, char *why, size_t whySize)
         snprintf(why, whySize, "the loaded IOUSBDeviceController is not the " SWITCH_ABI_KIND " one");
         return false;
     }
-    void *handle = OSMetaClass::preModLoad(g_kernel_kmod_info.name);
-    if (!handle) {
-        snprintf(why, whySize, "preModLoad failed");
-        return false;
-    }
-    switchxudc_static_init();
-    if (OSMetaClass::postModLoad(handle) != KERN_SUCCESS || lookupClass("SwitchXUDC") != &SwitchXUDC::gMetaClass ||
-        SwitchXUDC::gMetaClass.getSuperClass() != parent) {
+    if (switch_kernel_classes(switchxudc_static_init) != KERN_SUCCESS ||
+        lookupClass("SwitchXUDC") != &SwitchXUDC::gMetaClass || SwitchXUDC::gMetaClass.getSuperClass() != parent) {
         snprintf(why, whySize, "SwitchXUDC class registration failed");
         return false;
     }

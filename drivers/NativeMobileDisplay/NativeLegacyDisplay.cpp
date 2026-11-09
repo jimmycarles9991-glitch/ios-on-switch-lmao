@@ -33,6 +33,7 @@
 #include "../TegraSMMU/TegraSMMU.h"
 #include "../TegraSMMU/TegraSMMUDomain.h"
 #include "DisplaySmmuProbe.h"
+#include "NativePlaneFence.h"
 #include "NativePlanes.h"
 #include "SwitchFrameInfo.h"
 #include "SwitchFrameStall.h"
@@ -54,7 +55,6 @@ extern "C" void native_legacy_frame_end_release(void);
 // The last swap Core Animation offered (validateSwap, accepted or not; mach time): while swaps keep coming CA is
 // animating, and TegraGM20B's idle clock never drops the GPU (native_display_last_swap_ns below).
 static uint64_t gLastSwapAbs;
-extern "C" __attribute__((noreturn)) void native_legacy_backend_guard(unsigned, void *, void *);
 extern "C" IOService *native_legacy_display_allocate(void);
 extern "C" bool native_legacy_gop_mapping_observed(IOService *, IOMemoryMap *, uint32_t, uint32_t);
 extern "C" void native_legacy_registration_observed(IOService *);
@@ -127,6 +127,30 @@ extern "C" __attribute__((weak)) int tegra_gm20b_surface_tiled(uint64_t)
     return 0;
 }
 
+extern "C" __attribute__((weak)) int tegra_gm20b_scanout_fence(void *, uint64_t)
+{
+    return -1;
+}
+
+extern "C" __attribute__((weak)) int tegra_gm20b_scanout_outstanding(const void *)
+{
+    return 0;
+}
+
+extern "C" __attribute__((weak)) void *tegra_gm20b_surface_hold(uint64_t, int *tiled)
+{
+    *tiled = 0;
+    return nullptr;
+}
+
+extern "C" __attribute__((weak)) void tegra_gm20b_surface_unhold(void *)
+{}
+
+extern "C" __attribute__((weak)) int tegra_gm20b_surface_layout(uint64_t, struct tgm_layout *)
+{
+    return 0;
+}
+
 extern "C" __attribute__((weak)) void tegra_gm20b_frame_take(struct SwitchFrameGpu *out)
 {
     *out = {};
@@ -156,8 +180,8 @@ extern "C" __attribute__((weak)) int vc_tape_attach(vm_offset_t, uint32_t, uint3
 extern "C" __attribute__((weak)) void vc_tape_detach(void)
 {}
 
-// XNU (kern_exec.c) while the one-time data migration runs: the console stays on screen and the UI's frames are drawn and
-// retired but not shown (presentBlock), so the user watches the migration's progress lines. Weak: absent, never held.
+// XNU (kern_exec.c) while the one-time data migration runs: the console stays on screen and the UI's frames retire undrawn
+// (kickHeld), so the user watches the migration's progress lines. Weak: absent, never held.
 extern "C" __attribute__((weak)) volatile int switch_console_hold;
 // XNU (spec_vnops.c, temporary): ends the boot I/O census at the first client frame; it prints from a thread call.
 extern "C" __attribute__((weak)) void switch_boot_io_report(void);
@@ -753,7 +777,7 @@ class NativeLegacyDisplay : public IOMobileFramebufferLegacy {
     // GPU frame copy (double-buffered hardware rotation only; TegraScanoutCopy.h): the GPU driver's copy
     // engine writes the swapped surface into the buffer window A does not scan, and its completion flips window A to it, as the CPU
     // copy's end does. gpuScanout: the outstanding offer (gpuRequest) is such a copy, not the sheng presenter's. The completion comes
-    // through gpuDoneSource from any context; one not in by its deadline panics.
+    // through gpuDoneSource from any context; one not in by its deadline that the GPU driver no longer holds panics.
     bool gpuCopy = false, gpuScanout = false, gpuPresentDeferred = false;
     uint64_t gpuSequence = 0, gpuOfferedAt = 0;
     IOMemoryDescriptor *gpuSource = nullptr;  // retained from the offer to the completion
@@ -765,6 +789,11 @@ class NativeLegacyDisplay : public IOMobileFramebufferLegacy {
     bool gpuDonePending = false;  // written by native_legacy_gpu_complete before it signals gpuDoneSource
     uint64_t gpuDoneAt = 0;       // the frame timeline: when it came
     static constexpr unsigned kGpuCopyDeadlineMS = 1000;
+    // The GPU driver's verdict on a late offer (a named panic, or a hung client killed) comes within a second of its own
+    // deadline; an offer it still holds after this many of ours is one it lost track of.
+    static constexpr unsigned kGpuCopyDeadlines = 10;
+    unsigned gpuDeadlines = 0;
+    uint64_t gpuLostFrames = 0;
     // The refresh tick runs on the family's work loop, the loop of the command gate that registers and removes the vsync clients, so the
     // client queue (vsyncClientList) never changes while the sender walks it.
     IOTimerEventSource *vsyncTimer = nullptr;
@@ -871,8 +900,12 @@ class NativeLegacyDisplay : public IOMobileFramebufferLegacy {
                               kDirectUnderflowFrames = 3;
     static constexpr uint64_t kSlotSpan = 4ULL << 20;
 
+    // A slot keeps what window A may scan from it: the surface itself, its memory wired and its layout held
+    // (tegra_gm20b_surface_hold), until a later frame's slot replaces it and the slot is dropped. Its client may die meanwhile.
     struct DirectSlot {
         IOMemoryDescriptor *memory;
+        OSObject *surface;
+        void *layout;
         uint64_t stride, used;
         uint32_t pages;
         bool tiled;  // the GPU renders it block-linear (TegraScanoutCopy.h): window A scans it so
@@ -905,14 +938,18 @@ class NativeLegacyDisplay : public IOMobileFramebufferLegacy {
                               kPlaneSlot0 = kProbeSlot + static_cast<uint64_t>(kSlots) * kSlotSpan;
     static constexpr unsigned kPlaneUnderflowFrames = 3;
 
+    // As a DirectSlot: the surface retained, its memory prepared and its layout held while mapped.
     struct PlaneSlot {
-        IOMemoryDescriptor *memory;  // retained and prepared while mapped
-        uint64_t low, high;          // the surface bytes mapped (page-aligned) at the slot's IOVA
-        uint64_t used;
+        IOMemoryDescriptor *memory;
+        OSObject *surface;
+        void *layout;
+        uint64_t low, high;  // the surface bytes mapped (page-aligned) at the slot's IOVA
+        uint32_t used;
+        bool tiled;  // the GPU renders the surface block-linear: window B scans it so
     };
 
     PlaneSlot planeSlots[kPlaneSlots] = {};
-    uint64_t planeSlotUses = 0;
+    uint32_t planeSlotUses = 0;
 
     struct PlaneSet {
         bool on;
@@ -946,6 +983,7 @@ class NativeLegacyDisplay : public IOMobileFramebufferLegacy {
     IOTimerEventSource *flipTimer =
         nullptr;  // a flip's deadline: a lost DC A interrupt would otherwise stall the screen
     static constexpr unsigned kFlipDeadlineMS = 100;
+    bool settleArmed = false;  // flipTimer is armed to settle requests the stopped scanout cannot take (settleStopped)
     // XNU's console tape (startConsoleTape), from start until the first client frame scans: the pages, their write-combined view
     // and physical address, and whether the console draws there (window A scans it; read by the filter and the console's wait).
     switch_dma_buffer tapeBuffer = {};
@@ -1716,6 +1754,7 @@ private:
         }
         add("; planes %s: flips %u (b-only %u) latched %u, maps %u, dropped %u, underflow %u, unready %u", planesState,
             stPlaneFlips, stPlaneOnly, stPlaneLatched, stPlaneMaps, stPlaneDropped, stPlaneUnderflows, stPlaneUnready);
+        planeTotalsClose();
         stPlaneFlips = stPlaneOnly = stPlaneLatched = stPlaneMaps = stPlaneDropped = stPlaneUnderflows =
             stPlaneUnready = 0;
         add("; long %u: idle %u/%u ca %u/%u gpu %u/%u queue %u/%u latch %u/%u rate %u/%u",
@@ -2391,6 +2430,15 @@ private:
     // taken by the filter but not yet handled (the gate was busy, e.g. with a copy) only moves the deadline.
     void checkFlipDeadline()
     {
+        if (settleArmed) {
+            settleArmed = false;
+            if (!scanoutStopped) {
+                flipTimer->setTimeoutMS(kFlipDeadlineMS);  // restarted before the settle: the deadline runs from now
+            } else if (!hwSuspended && !gPanicRestore.panicking) {
+                settleStopped();
+            }
+            return;
+        }
         // r18-planes: a window B set still out counts while planes are on; once they are off it is planeFrameEnd's alone
         // (one line, never a panic: a path that has not run on hardware).
         if ((ring.pending == kNoBuffer && !probeRequest && !(planesOn && planeLatch.requested())) || hwSuspended ||
@@ -2554,7 +2602,17 @@ private:
         if (SWITCH_FRAME_TIMELINE)
             KDBG(SWITCH_KDBG_CODE(SWITCH_KDBG_FLIP), surfaceAddress(i));
         flipRequested = frameEnds;  // a replaced flip's boundary is this one's too
-        flipTimer->setTimeoutMS(kFlipDeadlineMS);
+        armFlipDeadline();
+    }
+
+    // Under the gate, a request just written: checkFlipDeadline looks at it kFlipDeadlineMS from now, or settles it at once while the
+    // scanout is stopped.
+    void armFlipDeadline()
+    {
+        if (!flipTimer)
+            return;
+        settleArmed = scanoutStopped;
+        flipTimer->setTimeoutMS(scanoutStopped ? 0 : kFlipDeadlineMS);
     }
 
     // Under the gate, a block-linear frame complete in drawSurface(): the first one switches window A to the rotated layout (and,
@@ -2565,8 +2623,6 @@ private:
             return;
         if (!rotated && &switch_boot_io_report)
             switch_boot_io_report();  // once; later calls return at once
-        if (!rotated && &switch_console_hold && switch_console_hold)
-            return;  // the console keeps the screen (migration)
         if (!rotated) {
             startRotation();
         } else if (doubleBuffer) {
@@ -2872,8 +2928,39 @@ private:
             // the last flip of every burst. The next writeFlip arms it again.
         } else if (ring.pending == kNoBuffer && !probeRequest && flipTimer) {
             flipTimer->cancelTimeout();
+            settleArmed = false;
         }
         if (kickDeferred) {
+            kickDeferred = false;
+            kickSwapQueue();
+        }
+    }
+
+    // Under the gate, with the scanout stopped (display power off): no boundary takes a request until the restart, whose first
+    // boundary takes the newest one. Every request written is therefore as shown as it will get: both windows' models take it now,
+    // and the swaps taken up to it retire instead of waiting for a latch only the restart brings (IOMFB's swap wait gives up on a
+    // swap after 5 s and cancels the queue).
+    // NOLINTNEXTLINE(misc-no-recursion): kickSwapQueue's kicking flag stops re-entry; a nested kick only loops
+    void settleStopped()
+    {
+        const int asked = ring.pending;
+        uint64_t seq = asked != kNoBuffer ? entrySeq[asked] : 0;
+        ring.settle();
+        if (planeLatch.requested()) {
+            planeLatch.settle();
+            const uint64_t planeSeq = planeSetOf(planeLatch.active).seq;
+            seq = planeSeq > seq ? planeSeq : seq;
+        }
+        if (seq)
+            retireThrough(seq, mach_absolute_time());
+        if (planeHeldSet && planeLatch.mayWrite()) {
+            planeHeldSet = false;
+            planeFlipOnly(planeHeld);
+        }
+        planeReleaseIdle();
+        if (asked != kNoBuffer) {
+            flipLatched();
+        } else if (kickDeferred) {
             kickDeferred = false;
             kickSwapQueue();
         }
@@ -3213,8 +3300,11 @@ public:
         dc[kDcIntStatus] = kVblankInt | kFrameEndInt | kWinAUnderflowInt;
         underflowRun = 0;
         scanoutStopped = !on;
-        if (on)
+        if (on) {
             writeIntMask(0, kFrameEndInt | (vsyncArmed ? kVblankInt : 0));
+        } else {
+            armFlipDeadline();  // what is in flight now settles
+        }
         if (!on && tapeAttached)
             thread_wakeup((event_t)&tapeFrames);  // no frame end comes now: the console scrolls without one
         return true;
@@ -3445,6 +3535,7 @@ public:
         if (primary) {
             __atomic_store_n(&primaryDisplay, this, __ATOMIC_RELEASE);
             columnScanRegister();
+            planeTotalsRegister();
         }
         return true;
     }
@@ -3579,6 +3670,10 @@ public:
         }
         PlaneDecision pd;
         planeDecide(request, pd);
+        if (consoleHolds()) {
+            kickHeld(request, mach_absolute_time());
+            return;
+        }
         if (!pd.uiNew) {
             kickPlaneOnly(request, pd, mach_absolute_time());
             return;
@@ -3680,6 +3775,7 @@ public:
                 return;
             }
             __asm__ volatile("dsb sy" ::: "memory");
+            planeNextUnfenced();
             noteTaken(request, kickAt);  // before the flip, which carries it to the present
             if (block && !colourBlank)
                 presentBlock();
@@ -3729,7 +3825,7 @@ public:
         }
         noteSurface(surface, memory);
         const bool tiled = surfaceTiled(memory);
-        if (direct && offerDirect(request, memory, sourceStride, allocation, width, height, tiled, kickAt))
+        if (direct && offerDirect(request, surface, memory, sourceStride, allocation, width, height, tiled, kickAt))
             return;
         if (direct && ring.target() == kNoBuffer) {  // no slot either: the frame end that frees a surface kicks again
             kickDeferred = true;
@@ -3738,6 +3834,7 @@ public:
         if (gpuCopy && !gpuBypass &&
             offerGpuCopy(request, memory, sourceStride, allocation, width, height, tiled, kickAt))
             return;
+        planeNextUnfenced();  // no GPU present carries this frame from here on
         if (!gpuBypass && native_legacy_gpu_offer(this, memory, sourceStride, width, height)) {
             // The GPU writes the scanout memory behind the CPU's back: the differential copy's picture of it is stale from now on.
             native_legacy_swap_stage(1);
@@ -3856,6 +3953,38 @@ public:
         transferred = true;
         native_legacy_transfer_observed(kIOReturnSuccess, request, length);
         finishTransfer(request);
+    }
+
+    // XNU's console keeps the screen until window A first shows a client frame, and the data migration holds it there
+    // (switch_console_hold). Released (native_legacy_prepare_scanout), the console stops drawing, so no kick may release it
+    // while the hold lasts.
+    bool consoleHolds() const
+    {
+        if (rotated || &switch_console_hold == nullptr)
+            return false;
+        return switch_console_hold != 0;
+    }
+
+    bool holdAnnounced = false;
+
+    // A swap kicked while the console holds the screen: nothing is drawn or flipped and the console keeps drawing; the swap
+    // retires as shown (with what is still out, retiring at the latch), so Core Animation keeps its pages.
+    // NOLINTNEXTLINE(misc-no-recursion): kickSwapQueue's kicking flag stops re-entry; a nested kick only loops
+    void kickHeld(const OriginalLegacySwapRequest *request, uint64_t kickAt)
+    {
+        if (!holdAnnounced) {
+            holdAnnounced = true;
+            IOLog("SwitchDisplay: the console keeps the screen while the data migration runs: client frames retire "
+                  "undrawn until it ends\n");
+        }
+        noteTaken(request, kickAt);
+        retireUnshown(seqOf(request));
+        if (!latchRetire) {
+            transferred = true;
+            finishTransfer(request, true);
+            return;
+        }
+        rekick = true;  // the next swap may already be queued behind this one: take it in the same kick
     }
 
     // A swap the kick has finished with (copied, filled or handed to the GPU), before it retires: its queue time and flip wait.
@@ -4138,6 +4267,10 @@ public:
     // The GPU client reported its copy (status 0) or lost it. Success retires the swap like a finished copy; anything else uses the CPU copy.
     void finishGpuSwap(int status)
     {
+        if (gpuScanout && planeFencePending) {
+            finishPlaneFence(status);
+            return;
+        }
         if (gpuScanout) {
             finishGpuCopy(status);
             return;
@@ -4237,6 +4370,7 @@ public:
         copy.targetPitch = static_cast<uint32_t>(kNativeBlockStride);
         copy.blockHeightLog2 = 4;  // kNativeBlockGobs, the DC's BLOCK_HEIGHT(4)
         copy.flags = tiled ? TEGRA_SCANOUT_COPY_SOURCE_BLOCK : 0;
+        copy.alsoWritten = planeNextAlsoWritten();
         memory->retain();
         if (tegra_gm20b_scanout_copy(&copy)) {
             memory->release();
@@ -4249,6 +4383,7 @@ public:
         gpuOfferedAt = mach_absolute_time();
         ring.claim(target);  // the GPU writes it until finishGpuCopy
         __atomic_store_n(&gpuScanout, true, __ATOMIC_RELEASE);
+        gpuDeadlines = 0;
         gpuDeadline->setTimeoutMS(kGpuCopyDeadlineMS);
         native_legacy_swap_stage(1);
         gpuRequest = request;
@@ -4270,24 +4405,42 @@ public:
         self->finishGpuSwap(__atomic_load_n(&self->gpuStatus, __ATOMIC_RELAXED));
     }
 
+    // A completion signalled but not handled yet (the gate was busy) only moves the deadline, as does an offer the GPU driver
+    // still holds: its own deadline names what the copy waits for and recovers or panics (TegraScanoutCopy.h). The
+    // completion is looked for again after the driver's answer, which may come between its release and the signal.
     static void gpuDeadlineFired(OSObject *owner, IOTimerEventSource *)
     {
         NativeLegacyDisplay *self = static_cast<NativeLegacyDisplay *>(owner);
         if (!self->gpuScanout)
             return;
-        // A completion signalled but not handled yet (the gate was busy) only moves the deadline.
-        if (__atomic_load_n(&self->gpuDonePending, __ATOMIC_ACQUIRE)) {
+        const bool held = tegra_gm20b_scanout_outstanding(self) != 0;
+        if (held)
+            self->gpuDeadlines += 1;
+        if (__atomic_load_n(&self->gpuDonePending, __ATOMIC_SEQ_CST) ||
+            (held && self->gpuDeadlines < kGpuCopyDeadlines)) {
             self->gpuDeadline->setTimeoutMS(kGpuCopyDeadlineMS);
             return;
         }
-        panic("SwitchDisplay: GPU frame copy %llu into %#x not completed in %u ms (tegra_gm20b_scanout_copy "
-              "accepted it)",
-              self->gpuSequence, self->surfaceAddress(self->ring.drawing), kGpuCopyDeadlineMS);
+        const unsigned waited = (held ? self->gpuDeadlines : self->gpuDeadlines + 1) * kGpuCopyDeadlineMS;
+        if (planeFencePending) {
+            panic("SwitchDisplay: GPU present %llu (window B's fence, slot %d) not completed in %u ms: %s",
+                  self->gpuSequence, planeFencing.slot, waited,
+                  held ? "the GPU driver still holds it" : "the GPU driver released it with no completion");
+        }
+        if (self->gpuDirect != kNoBuffer) {
+            panic("SwitchDisplay: GPU present %llu (fence only, direct slot %d) not completed in %u ms: %s",
+                  self->gpuSequence, self->gpuDirect - kSlot0, waited,
+                  held ? "the GPU driver still holds it" : "the GPU driver released it with no completion");
+        }
+        panic("SwitchDisplay: GPU frame copy %llu into %#x not completed in %u ms: %s", self->gpuSequence,
+              self->surfaceAddress(self->ring.drawing), waited,
+              held ? "the GPU driver still holds it" : "the GPU driver released it with no completion");
     }
 
     // Under the gate: the GPU frame copy is done (status 0) or failed. Done, window A flips to it (after SC7: at the resume) and the swap
     // retires, or, retired at the offer, the next one may go. Failed, nothing is flipped: a swap still queued is copied on the CPU at
-    // once, one retired at the offer is lost (the next frame replaces it), and the next kick uses the CPU copy either way.
+    // once, one retired at the offer is lost (the next frame replaces it), and the next kick uses the CPU copy either way. A source
+    // whose rendering was lost (dropLostFrame) is neither shown nor copied.
     void finishGpuCopy(int status)
     {
         const OriginalLegacySwapRequest *request = gpuRequest;
@@ -4302,6 +4455,10 @@ public:
         }
         const int directEntry = gpuDirect;
         gpuDirect = kNoBuffer;
+        if (status == TEGRA_SCANOUT_SOURCE_LOST) {
+            dropLostFrame(request, directEntry);
+            return;
+        }
         if (status &&
             directEntry != kNoBuffer) {  // the rendering never finished on the GPU: copy it on the CPU instead
             native_legacy_gpu_fallback_observed(status);
@@ -4335,6 +4492,26 @@ public:
             return;
         }  // the controller is unclocked: finishResume presents it
         presentGpuCopy();
+    }
+
+    // A frame whose rendering the GPU driver killed (TEGRA_SCANOUT_SOURCE_LOST): the copy's target is never flipped to, and the
+    // swap retires unshown, as a frame the console holds back does; the screen keeps the frame before it.
+    // NOLINTNEXTLINE(misc-no-recursion): kickSwapQueue's kicking flag stops re-entry; a nested kick only loops
+    void dropLostFrame(const OriginalLegacySwapRequest *request, int directEntry)
+    {
+        ++gpuLostFrames;
+        IOLog("SwitchDisplay: frame %llu not shown: its rendering was lost on the GPU (%llu so far)\n", gpuSequence,
+              gpuLostFrames);
+        if (directEntry == kNoBuffer)
+            ring.release();
+        if (latchRetire && request) {
+            retireUnshown(seqOf(request));
+        } else if (!latchRetire && !gpuRetired && request && pendingSwapRequest() == request) {
+            retireSwap(request, true);
+        }
+        gpuRetired = false;
+        transferred = false;
+        kickSwapQueue();
     }
 
     void presentGpuCopy()
@@ -4514,13 +4691,13 @@ public:
 
     // The slot entry holding memory (mapped now, into the least recently used slot neither scanned nor asked for, if not yet);
     // kNoBuffer when every slot is in use or the pages cannot be had.
-    int directSlotFor(IOMemoryDescriptor *memory, uint64_t stride, uint64_t allocation, bool tiled)
+    int directSlotFor(OSObject *surface, IOMemoryDescriptor *memory, uint64_t stride, uint64_t allocation, bool tiled)
     {
         int victim = -1;
         for (unsigned k = 0; k < kSlots; ++k) {
             if (slots[k].memory == memory && slots[k].stride == stride) {
                 slots[k].used = ++slotUses;
-                slots[k].tiled = tiled;
+                slots[k].tiled = holdLayout(slots[k], tiled);
                 return kSlot0 + static_cast<int>(k);
             }
             if (!ring.busy(kSlot0 + static_cast<int>(k)) && (victim < 0 || slots[k].used < slots[victim].used))
@@ -4558,9 +4735,26 @@ public:
             return kNoBuffer;
         }
         memory->retain();
-        slots[victim] = {memory, stride, ++slotUses, pages, tiled};
+        surface->retain();
+        slots[victim] = {memory, surface, nullptr, stride, ++slotUses, pages, tiled};
+        slots[victim].tiled = holdLayout(slots[victim], tiled);
         cleanDomain();
         return kSlot0 + victim;
+    }
+
+    // The slot's layout held for as long as the slot lives, once its surface's GPU client has decided it; the layout the
+    // kick read until then.
+    static bool holdLayout(DirectSlot &slot, bool tiled)
+    {
+        if (!slot.layout) {
+            IOByteCount length = 0;
+            const addr64_t pa = slot.memory->getPhysicalSegment(0, &length, kIOMemoryMapperNone);
+            int held = 0;
+            slot.layout = pa ? tegra_gm20b_surface_hold(pa & ~0xfffULL, &held) : nullptr;
+            if (slot.layout)
+                return held != 0;
+        }
+        return slot.layout ? slot.tiled : tiled;
     }
 
     // The GPU driver's word on whether the surface's pixels are block-linear (by its first page).
@@ -4577,10 +4771,13 @@ public:
         DirectSlot &slot = slots[k];
         if (slot.pages)
             probeDomain.unmap(kProbeSlot + static_cast<uint64_t>(k) * kSlotSpan, slot.pages);
+        if (slot.layout)
+            tegra_gm20b_surface_unhold(slot.layout);
         if (slot.memory) {
             slot.memory->complete(kIODirectionOut);
             slot.memory->release();
         }
+        OSSafeReleaseNULL(slot.surface);
         slot = {};
         cleanDomain();
     }
@@ -4597,12 +4794,12 @@ public:
 
     // Under the gate, in the kick: the swap's surface into its slot, and a fence-only GPU present for it; its completion flips
     // window A to the slot (finishGpuCopy). False: the copy path takes it.
-    bool offerDirect(const OriginalLegacySwapRequest *request, IOMemoryDescriptor *memory, uint64_t stride,
-                     uint64_t allocation, uint32_t width, uint32_t height, bool tiled, uint64_t kickAt)
+    bool offerDirect(const OriginalLegacySwapRequest *request, OSObject *surface, IOMemoryDescriptor *memory,
+                     uint64_t stride, uint64_t allocation, uint32_t width, uint32_t height, bool tiled, uint64_t kickAt)
     {
         if (!gpuCopy || !gpuDoneSource)
             return false;
-        const int entry = directSlotFor(memory, stride, allocation, tiled);
+        const int entry = directSlotFor(surface, memory, stride, allocation, tiled);
         if (entry == kNoBuffer)
             return false;
         TegraScanoutCopy copy = {};
@@ -4615,6 +4812,7 @@ public:
         copy.sourceStride = stride;
         copy.sourceBytes = allocation;
         copy.flags = TEGRA_SCANOUT_COPY_FENCE_ONLY;
+        copy.alsoWritten = planeNextAlsoWritten();
         memory->retain();
         if (tegra_gm20b_scanout_copy(&copy)) {
             memory->release();
@@ -4626,6 +4824,7 @@ public:
         gpuSource = memory;
         gpuOfferedAt = mach_absolute_time();
         __atomic_store_n(&gpuScanout, true, __ATOMIC_RELEASE);
+        gpuDeadlines = 0;
         gpuDeadline->setTimeoutMS(kGpuCopyDeadlineMS);
         gpuRequest = request;
         gpuLength = static_cast<uint64_t>(width) * height * 4;
@@ -4699,6 +4898,8 @@ public:
     }
 
 #include "NativePlanesDisplay.h"
+#include "NativePlaneFenceDisplay.h"
+#include "NativePlanesTotals.h"
 #include "NativeColumnScanDisplay.h"
 
     IOReturn collectCompletionReports(uint32_t, void *, uint32_t *count, uint32_t) override
@@ -4763,6 +4964,7 @@ public:
                 accepted = reason == 5;
             } else {
                 reason = native_planes::checkUpdated(updated, background, hasSurface, layers, width, height);
+                planeNoteRefused(reason, updated, hasSurface, layers, width, height);
                 // The UI's own memory: its rows within the descriptor (a surface larger than the display, rows or lines
                 // padded to the GPU's alignment, is accepted: only the visible rectangle is read).
                 for (unsigned i = 0; !reason && i < native_planes::kLayers; ++i) {
@@ -5033,7 +5235,11 @@ public:
     // (native_legacy_detach_ready false) nothing is detached and these change nothing.
     void publishPlaneLimits()
     {
-        const native_planes::Limits limits;
+#if SWITCH_IPSW_KIND_24B119
+        constexpr native_planes::Limits limits = native_planes::kLimits24B119;
+#else
+        constexpr native_planes::Limits limits;
+#endif
 
         struct Entry {
             const char *key;
@@ -5065,12 +5271,15 @@ public:
                                 {"MaxSrcBufferHeight", limits.maxSrcBuffer},
                                 {"MaxVideoSrcDownscalingWidth", limits.maxSrcRectWidth},
                                 {"VideoClock", 78000000},
-                                {"PixelClock", 78000000}};
-        publish("IOMFBMaxSrcPixels", source, 7, 64);
+                                {"PixelClock", 78000000},
+                                {"IOMFBCompressionSupport", 0}};
+        publish("IOMFBMaxSrcPixels", source, limits.compressionUnsupported ? 8 : 7, 64);
         const Entry base[] = {{"PlaneBaseAlignmentLinear", native_planes::kPublishedBaseAlignment}};
         publish("DisplayPipePlaneBaseAlignment", base, 1, 64);
         const Entry layers[] = {{"MaxNumLayers", limits.maxLayers}};
         publish("IOMFBNumLayers", layers, 1, 32);
+        if (limits.packedYuvUnsupported)
+            setProperty("IOMFBYUVPackedUnSupported", true);
     }
 
     IOReturn getGammaTable(void *table) override
@@ -5150,16 +5359,69 @@ public:
             frameInfo->clients.change(client, 0);
     }
 
-#define LEAF(name, n)                                                      \
-    __attribute__((noreturn, noinline)) void name() override               \
-    {                                                                      \
-        native_legacy_backend_guard(n, this, __builtin_return_address(0)); \
+    // DC A's timing generator, which display power (setScanout) and SC7 stop.
+    bool areTimingsEnabled() const override
+    {
+        if (SWITCH_FRAME_TIMELINE)
+            logHeldHead();
+        return dc && !scanoutStopped && !hwSuspended;
     }
-    LEAF(platformInternalPlug, 245)
-    LEAF(platformInternalUnplug, 246)
-    LEAF(platformRefreshRates, 338)
-    LEAF(platformIdleWithoutClients, 345)
-#undef LEAF
+
+    // Debug kernels. IOMFB asks for the timing state when a swap wait has gone 5 s without a completion (swap_wait_gated, just
+    // before it cancels the queue) and when its last client goes away: a swap at the queue head for over a second then gets one
+    // line of what holds it.
+    void logHeldHead() const
+    {
+        const OriginalLegacySwapRequest *head = pendingSwapRequest();
+        if (!head)
+            return;
+        const uint64_t accepted = submittedAt(head);
+        const uint64_t now = mach_absolute_time();
+        uint64_t second = 0;
+        nanoseconds_to_absolutetime(1000000000ULL, &second);
+        if (accepted != 0u && now - accepted < second)
+            return;
+        uint32_t id = 0;
+        memcpy(&id, reinterpret_cast<const unsigned char *>(head) + swapId, sizeof(id));
+        const auto flag = [](bool on) {
+            return on ? 1 : 0;
+        };
+        const char *scanout = "running";
+        if (hwSuspended) {
+            scanout = "suspended";
+        } else if (scanoutStopped) {
+            scanout = "stopped";
+        }
+        IOLog(
+            "SwitchDisplay: swap %u held at the queue head %llu ms (accepted %d, taken %llu of %llu): transferred %d, "
+            "deferred %d (probe %d, plane probe %d, column scan %d, tape %d, no surface %d), ring front %d pending %d "
+            "replaced %d drawing %d held %d, latch retire %d, direct %d, planes %d (armed %d, held %d), gpu %d%s, "
+            "copy %d%s, scanout %s, %llu frame ends, %llu since the last flip\n",
+            id, accepted != 0u ? static_cast<unsigned long long>(ticksNs(now - accepted) / 1000000) : 0ULL,
+            flag(isValidated(head)), static_cast<unsigned long long>(seqOf(head)),
+            static_cast<unsigned long long>(takeSeq), flag(transferred), flag(kickDeferred),
+            flag(probe.active() || probeRequest), flag(planeProbe.active()), flag(columnScanBusy()), flag(tapeSettle),
+            flag(ring.target() == kNoBuffer), ring.front, ring.pending, ring.superseded, ring.drawing, ring.held,
+            flag(latchRetire), flag(directOn), flag(planesOn), planeLatch.armed, flag(planeHeldSet),
+            flag(gpuRequest != nullptr), gpuRequest == head ? " (this swap)" : "", flag(copyQueued),
+            copyQueued && job.request == head ? " (this swap)" : "", scanout,
+            static_cast<unsigned long long>(frameEnds), static_cast<unsigned long long>(frameEnds - flipRequested));
+    }
+
+    // As J120's AppleCLCD and J181's UnifiedPipeline answer: the internal panel is never plugged or unplugged, and it has
+    // one refresh rate.
+    IOReturn platformInternalPlug() override
+    {
+        return kIOReturnUnsupported;
+    }
+
+    IOReturn platformInternalUnplug() override
+    {
+        return kIOReturnUnsupported;
+    }
+
+    void platformRefreshRates() override
+    {}
 };
 
 // OSDefineMetaClassAndStructors(NativeLegacyDisplay, IOMobileFramebufferLegacy), registered under the class name of J120's

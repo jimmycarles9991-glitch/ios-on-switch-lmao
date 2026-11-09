@@ -54,7 +54,7 @@ py_test(
         "//tools/package:loader_abi",
         "//tools/package:native_oled_adt",
         "//tools/package:native_xnu_layout",
-        "//tools/package:trust_lib",
+        "//tools/trustcache",
         "@rules_python//python/runfiles",
     ],
 )

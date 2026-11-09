@@ -445,10 +445,14 @@ kernel_archive(
     members = ["//kits/qemu:ShengPlatformPower"],
 )
 
+# A release kernel carries no debug work (AGENTS.md): its archive holds only what every config needs.
 kernel_archive(
     name = "libSwitchDiag",
     out = "build/switch-diag/libSwitchDiag.a",
-    members = ["//diagnostics/switch:SwitchDiag"],
+    members = ["//diagnostics/switch:SwitchDiag"] + select({
+        "//bazel:release": [],
+        "//conditions:default": ["//diagnostics/switch:SwitchDiagDebug"],
+    }),
 )
 
 kernel_archive(

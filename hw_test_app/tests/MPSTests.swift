@@ -21,6 +21,7 @@ struct MPSBlurTest: HWTest {
         let destination = try gpu.texture(.rgba8Unorm, size, size, usage: [.shaderRead, .shaderWrite])
         try await gpu.upload(bytes, to: source, bytesPerRow: size * 4)
         let blur = MPSImageGaussianBlur(device: gpu.device, sigma: 2)
+        blur.edgeMode = .clamp
         let timing = try await gpu.run { commands in
             blur.encode(commandBuffer: commands, sourceTexture: source, destinationTexture: destination)
         }

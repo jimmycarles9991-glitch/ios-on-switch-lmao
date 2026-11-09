@@ -145,6 +145,8 @@ bool nmb_texture_is_aliasable(const NmbTexture *);
 bool nmb_buffer_is_aliasable(const NmbBuffer *);
 void nmb_texture_release(NmbTexture *);
 void nmb_texture_describe(const NmbTexture *, struct NmbTextureDescriptor *out);
+/* The texture's VkImage handle (metal2vulkan Texture::vk_image), 0 where its texels are no one image's. */
+uint64_t nmb_texture_vk_image(const NmbTexture *);
 bool nmb_texture_replace(NmbTexture *, const uint64_t region[6], uint64_t level, uint64_t slice, const void *bytes,
                          uint64_t bytes_per_row, uint64_t bytes_per_image, uint64_t length);
 bool nmb_texture_get_bytes(const NmbTexture *, void *bytes, uint64_t bytes_per_row, uint64_t bytes_per_image,
@@ -166,8 +168,9 @@ struct NmbConstant {
     uint64_t length;
 };
 
-NmbFunction *nmb_function_new_specialized(NmbLibrary *, const char *name, const struct NmbConstant *constants,
-                                          uint32_t count);
+/* specialized_name: MTLFunctionDescriptor.specializedName, the name a pipeline links the function under (null: its own). */
+NmbFunction *nmb_function_new_specialized(NmbLibrary *, const char *name, const char *specialized_name,
+                                          const struct NmbConstant *constants, uint32_t count);
 void nmb_function_release(NmbFunction *);
 /* functionConstantsDictionary: the count, and the constant at `at` in name order (name into out; info: MTLDataType, index, required). */
 uint32_t nmb_function_constant_count(const NmbFunction *);
@@ -206,6 +209,16 @@ struct NmbRenderPipelineDescriptor {
     uint64_t vertex_inputs; /* 0: no vertex descriptor */
     struct NmbVertexAttribute attributes[31];
     struct NmbVertexLayout layouts[31];
+    /* vertexLinkedFunctions and fragmentLinkedFunctions: each stage's functions and privateFunctions, as
+     * NmbComputePipelineDescriptor's linked functions are */
+    NmbFunction *const *vertex_linked;
+    uint64_t vertex_linked_count;
+    NmbFunction *const *vertex_private_linked;
+    uint64_t vertex_private_count;
+    NmbFunction *const *fragment_linked;
+    uint64_t fragment_linked_count;
+    NmbFunction *const *fragment_private_linked;
+    uint64_t fragment_private_count;
 };
 
 NmbRenderPipeline *nmb_render_pipeline_new(NmbDevice *, const struct NmbRenderPipelineDescriptor *);
@@ -282,9 +295,6 @@ bool nmb_command_buffer_on_completed(NmbCommandBuffer *, void (*handler)(void *c
  * The caller keeps context alive until completion (or a refused commit). */
 bool nmb_command_buffer_on_scheduled(NmbCommandBuffer *, void (*handler)(void *context), void *context);
 bool nmb_command_buffer_commit(NmbCommandBuffer *);
-/* Each VkCommandBuffer the command buffer's encoders recorded, in order, to each(ctx, handle) instead of a commit: a capture the
- * driver never runs. The command buffer cannot be committed after. */
-bool nmb_command_buffer_capture(NmbCommandBuffer *, void (*each)(void *ctx, uint64_t command_buffer), void *ctx);
 /* Wait for scheduling and scheduled handlers only; false on a refused wait. */
 bool nmb_command_buffer_wait_scheduled(NmbCommandBuffer *);
 /* 0 completed in time, 1 timed out (timeout_ms 0 waits without a bound). */

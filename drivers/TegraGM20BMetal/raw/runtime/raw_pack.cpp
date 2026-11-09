@@ -44,8 +44,8 @@ bool Pack::load(const char *path, uint64_t stack, std::string &err)
     base_ = static_cast<const uint8_t *>(m);
     size_ = st.st_size;
     hdr_ = reinterpret_cast<const PackHeader *>(base_);
-    if (size_ < sizeof(PackHeader) || memcmp(hdr_->magic, "GM20BPK1", 8) || hdr_->version != 5) {
-        err = "not a version-5 pack";
+    if (size_ < sizeof(PackHeader) || memcmp(hdr_->magic, "GM20BPK1", 8) || hdr_->version != kPackVersion) {
+        err = "not a version-" + std::to_string(kPackVersion) + " pack";
         return false;
     }
     if (stack && hdr_->stack != stack) {
@@ -124,6 +124,17 @@ const PackPipeline *Pack::find(uint64_t keyHash, PackForm form) const
             return at;
     }
     return nullptr;
+}
+
+// mkpack.py writes the kernels in keyHash order
+const PackKernel *Pack::findKernel(uint64_t keyHash) const
+{
+    const PackKernel *k = section<PackKernel>(PackKernels);
+    const PackKernel *end = k + bytes(PackKernels) / sizeof(PackKernel);
+    const PackKernel *at = std::lower_bound(k, end, keyHash, [](const PackKernel &a, uint64_t h) {
+        return a.keyHash < h;
+    });
+    return at != end && at->keyHash == keyHash ? at : nullptr;
 }
 
 }  // namespace raw

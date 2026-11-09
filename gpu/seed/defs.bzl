@@ -278,13 +278,13 @@ metal_seed = rule(
     },
 )
 
-# rawpack.py's BUCKETS: the split writes this many bucket corpora, each probed by its own action.
+# rawpack.py's BUCKETS: the split writes this many bucket corpora, each made by its own action.
 _RAW_BUCKETS = 16
 
 # The generator's modules each step runs (rawpack.py imports or runs them by path, beside it).
 _RAW_SPLIT = ["rawpack.py", "ca/caset.py", "ca/caspec.py", "ca/caspec27.py"]
-_RAW_PROBE = ["rawpack.py", "mkprograms.py", "nvkshader.py", "probelog.py"]
-_RAW_LINK = ["rawpack.py", "mkpack.py", "layouts.py", "packfile.py", "probelog.py"]
+_RAW_PROBE = ["rawpack.py", "mkprograms.py", "nvkshader.py"]
+_RAW_LINK = ["rawpack.py", "directlink.py", "mkpack.py", "kernels.py", "layouts.py", "packfile.py", "probelog.py"]
 
 def _generator_files(ctx, names):
     here = ctx.file.generator.dirname + "/"
@@ -298,10 +298,13 @@ def _seed_raw_pack_impl(ctx):
     crawl = ctx.attr.crawl[CrawlInfo]
     qc = [crawl.qc]
     lines = ctx.actions.declare_file(_named(ctx, "_work/corpus.log"))
+    kind = ctx.attr.ipsw[IpswInfo].kind
+    archives = [f for f in ctx.files.archives if f.basename == kind + ".tsv"]
     ctx.actions.run(
         executable = ctx.executable._tool,
-        arguments = ["corpus", "--corpus", ctx.file.corpus.path, "--out", lines.path],
-        inputs = [ctx.file.corpus],
+        arguments = ["corpus", "--corpus", ctx.file.corpus.path, "--out", lines.path] +
+                    ["--archives=" + f.path for f in archives],
+        inputs = [ctx.file.corpus] + archives,
         outputs = [lines],
         mnemonic = "MetalRawCorpus",
         progress_message = "Picking the raw pack's corpus lines",
@@ -344,7 +347,7 @@ def _seed_raw_pack_impl(ctx):
             inputs = depset([bucket_corpus] + probe_inputs),
             outputs = [bucket],
             mnemonic = "MetalRawProbe",
-            progress_message = "Probing the raw pack's bucket {} of {}".format(i + 1, _RAW_BUCKETS),
+            progress_message = "Making the raw pack's bucket {} of {} directly".format(i + 1, _RAW_BUCKETS),
             execution_requirements = _DARWIN,
         )
         buckets.append(bucket)
@@ -381,16 +384,21 @@ def _seed_raw_pack_impl(ctx):
     )
     return [
         DefaultInfo(files = depset([out])),
-        OutputGroupInfo(report = depset([linked]), buckets = depset(buckets)),
+        # report: the link's pack and report, and each bucket's states (test/directcheck makes the pack's records from them)
+        OutputGroupInfo(report = depset([linked] + corpora), buckets = depset(buckets)),
     ]
 
 seed_raw_pack = rule(
     implementation = _seed_raw_pack_impl,
-    doc = "The raw GM20B path's pipeline pack: Core Animation's corpus states probed per bucket over the mock GM20B, linked, stamped.",
+    doc = "The raw GM20B path's pipeline pack: Core Animation's corpus states made directly per bucket, linked, stamped.",
     attrs = _IPSW | {
         "tools": attr.label(mandatory = True),
         "crawl": attr.label(mandatory = True, providers = [CrawlInfo]),
         "corpus": attr.label(mandatory = True, allow_single_file = True),
+        "archives": attr.label_list(
+            allow_files = [".tsv"],
+            doc = "the archive inventories (precompile/archives/<build>.tsv): the IPSW kind's, where there is one",
+        ),
         "generator": attr.label(mandatory = True, allow_single_file = True, doc = "raw/pack/rawpack.py"),
         "srcs": attr.label_list(allow_files = True, doc = "the generator's modules and QuartzCore tables (raw/pack)"),
         "_tool": attr.label(default = "//tools/gpu:rawpack", executable = True, cfg = "exec"),

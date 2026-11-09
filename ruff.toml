@@ -83,8 +83,9 @@ convention = "pep257"
 mypy-init-return = true
 
 [lint.isort]
-# tools/ is a namespace package imported as tools.<x>; stated so a lone file (one per check action) sorts the same.
-known-first-party = ["tools"]
+# tools/ and drivers/ are namespace packages imported as tools.<x> and drivers.<x>; stated so a lone file (one per
+# check action) sorts the same.
+known-first-party = ["drivers", "tools"]
 combine-as-imports = true
 
 [lint.per-file-ignores]

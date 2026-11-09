@@ -119,7 +119,7 @@ static int check_image(const uint8_t *base, uint64_t mh_off, uint64_t slice_off,
         puts("  loader: cannot lay out (not one executable segment)");
         return 1;
     }
-    struct a64x_code_map cm = {NULL, is_code, kernel ? A64X_MAP_KERNEL : subtype == 2 ? 0 : A64X_MAP_NO_PAC};
+    struct a64x_code_map cm = {NULL, is_code, kernel ? A64X_MAP_KERNEL : subtype == 2 ? 0 : A64X_MAP_NO_PAC, NULL};
     /* data islands exactly as the kernel finds them for an image without a plan (a64x_find_islands) */
     uint64_t nw_seg = (exec_size + 4095) / 4096 * 1024;
     uint8_t *fsb = calloc(nw_seg / 8 + 1, 1);
@@ -161,7 +161,7 @@ static int check_image(const uint8_t *base, uint64_t mh_off, uint64_t slice_off,
         }
         uint8_t *keep = island;
         island = NULL;
-        struct a64x_islands is = {keep, fsb, 0, 0, false, false, 0, 0};
+        struct a64x_islands is = {keep, fsb, 0, 0, false, false, 0, 0, 0, 0};
         for (uint64_t off = exec_off; off < exec_off + exec_size; off += 4096) {
             uint32_t in[1024] = {0};
             uint64_t n = exec_off + exec_size - off < 4096 ? exec_off + exec_size - off : 4096;
@@ -174,6 +174,8 @@ static int check_image(const uint8_t *base, uint64_t mh_off, uint64_t slice_off,
     }
     free(fsb);
     uint32_t cap = 1u << 24, *stubs = malloc(cap * 4), cursor = 0;
+    void *walk_buf = malloc(A64X_WALK_BYTES(1024));
+    struct a64x_walk walk = a64x_walk_in(walk_buf, 1024);
     uint64_t changed = 0, words = 0;
     struct a64x_stats st;
     memset(&st, 0, sizeof(st));
@@ -181,7 +183,7 @@ static int check_image(const uint8_t *base, uint64_t mh_off, uint64_t slice_off,
         uint32_t in[1024] = {0}, out[1024];
         uint64_t n = exec_off + exec_size - off < 4096 ? exec_off + exec_size - off : 4096;
         memcpy(in, base + off, n);
-        struct a64x_stub_region sr = {exec_off + exec_size + 0x4000, stubs, cap, 0};
+        struct a64x_stub_region sr = {exec_off + exec_size + 0x4000, stubs, cap, 0, &walk};
         cursor = a64x_translate_page(in, out, 1024, off, &cm, &sr, cursor, &st);
         for (int i = 0; i < 1024; i++)
             changed += in[i] != out[i];
@@ -194,6 +196,7 @@ static int check_image(const uint8_t *base, uint64_t mh_off, uint64_t slice_off,
         }
         words += n / 4;
     }
+    free(walk_buf);
     fs_stub_words += cursor;
     fs_changed += changed;
     for (int c = 1; c < A64X_NCLASSES; c++) {

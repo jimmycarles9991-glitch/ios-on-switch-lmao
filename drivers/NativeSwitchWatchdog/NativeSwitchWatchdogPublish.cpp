@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BSD-2-Clause-Patent
-// Publishes NativeSwitchWatchdog.cpp's IOWatchdog and PMU from the board thread (SwitchRootDiag.h), long before
+// Publishes NativeSwitchWatchdog.cpp's IOWatchdog and PMU from the board thread (SwitchRootBoot.c), long before
 // launchd: load AppleARMWatchdogTimer (prelinked; apfs depends on it) so the IOWatchdog metaclass exists, register our
-// classes inside preModLoad/postModLoad, then attach one instance of each to IOResources and start it (the original start
+// classes (switch_kernel_classes), then attach one instance of each to IOResources and start it (the original start
 // registers the watchdog). Same staging as SwitchAccelStubPublish.cpp. Only when both started does
 // switch_watchdog_ready() say so, and kern_exec.c's launchd policy leaves watchdogd enabled; a failure is logged once
 // and watchdogd stays disabled for the boot.
@@ -13,7 +13,7 @@
 #include "OriginalIOWatchdog.h"
 
 extern "C" {
-extern kmod_info_t g_kernel_kmod_info;
+OSReturn switch_kernel_classes(void (*initialize)());
 void switch_watchdog_static_init(void) __asm__("__GLOBAL__sub_I_NativeSwitchWatchdog.cpp");
 IOService *switch_watchdog_allocate(void);
 IOService *switch_pmu_allocate(void);
@@ -39,11 +39,7 @@ int switch_watchdog_publish(void)
               parent ? parent->getClassSize() : 0);
         return -1;
     }
-    void *handle = OSMetaClass::preModLoad(g_kernel_kmod_info.name);
-    if (!handle)
-        return -1;
-    switch_watchdog_static_init();
-    if (OSMetaClass::postModLoad(handle))
+    if (switch_kernel_classes(switch_watchdog_static_init))
         return -1;
     IOService *provider = IOService::getResourceService();
     IOService *watchdog = switch_watchdog_allocate();

@@ -5,7 +5,7 @@ import UIKit
 
 struct GameControllerTest: HWTest {
     let id = "input.gamecontroller"
-    let name = "Game controllers (Joy-Cons): attach and buttons"
+    let name = "Game controllers (Joy-Cons): attach, buttons and stick"
     let subsystem = Subsystem.input
     let interactive = true
     var timeout: TimeInterval { 120 }
@@ -48,6 +48,18 @@ struct GameControllerTest: HWTest {
         metrics.set("extended", controller.extendedGamepad != nil)
         guard let pressed else { return .skip("buttons not pressed (skipped or timed out)", metrics) }
         metrics.set("buttons", pressed.sorted().joined(separator: ","))
+        let pushed: Float? = await context.interact("Push the thumbstick all the way in any direction") { waiter in
+            controller.physicalInputProfile.valueDidChangeHandler = { _, element in
+                guard let stick = element as? GCControllerDirectionPad,
+                    !stick.aliases.isDisjoint(with: JoyConInputTest.thumbsticks)
+                else { return }
+                let reach = max(abs(stick.xAxis.value), abs(stick.yAxis.value))
+                if reach >= 0.8 { waiter.resume(reach) }
+            }
+        }
+        await MainActor.run { controller.physicalInputProfile.valueDidChangeHandler = nil }
+        guard let pushed else { return .skip("thumbstick not pushed (skipped or timed out)", metrics) }
+        metrics.set("stick_reach", Double(pushed), digits: 2)
         return .pass(metrics, proof: controller.productCategory)
     }
 }

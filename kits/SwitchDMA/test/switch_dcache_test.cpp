@@ -104,6 +104,31 @@ TEST(SwitchDcache, EveryRangeMatchesTheModel)
     }
 }
 
+// Ranges long enough for the eight-line turns and their remainders: every line once, ascending (the invalidate's
+// partial edges aside), whatever the length modulo eight lines.
+TEST(SwitchDcache, LongRangesCoverEveryLineOnce)
+{
+    std::mt19937_64 random(3);
+    for (int i = 0; i < 3000; ++i) {
+        const uintptr_t va = 0x200000 + (random() % 0x4000);
+        const size_t length = random() % 0x10000;
+        for (switch_dcache_op op : {SWITCH_DCACHE_CLEAN, SWITCH_DCACHE_CLEAN_INVALIDATE, SWITCH_DCACHE_INVALIDATE}) {
+            switch_dcache_lines(op, reinterpret_cast<void *>(va), length);
+            std::vector<Event> got = take(), want = expected(op, va, length);
+            if (op != SWITCH_DCACHE_INVALIDATE) {
+                ASSERT_EQ(got, want) << "op " << op << " va " << std::hex << va << " length " << std::dec << length;
+                continue;
+            }
+            sortByAddress(got);
+            ASSERT_EQ(got, want) << "va " << std::hex << va << " length " << std::dec << length;
+        }
+    }
+    for (size_t lines = 0; lines <= 17; ++lines) {
+        switch_dcache_clean_lines(reinterpret_cast<void *>(0x10000), lines * kLine);
+        ASSERT_EQ(take(), expected(SWITCH_DCACHE_CLEAN, 0x10000, lines * kLine)) << lines;
+    }
+}
+
 TEST(SwitchDcache, SpansShareOneBarrier)
 {
     const switch_dma_span spans[] = {{0x4000, 64}, {0x8020, 64}};

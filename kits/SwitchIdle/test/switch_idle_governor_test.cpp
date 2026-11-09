@@ -5,6 +5,7 @@
 
 #include <cstdint>
 #include <fstream>
+#include <random>
 #include <sstream>
 #include <string>
 
@@ -32,14 +33,14 @@ std::string Body(const std::string &source, const std::string &signature)
 
 // One core's idle periods: each ends at its timer (`deadline` after it starts) or, sooner, at `woken`.
 struct Core {
-    uint64_t predicted = 0, now = 1'000 * kMs, frame_at = 0;
+    uint64_t predicted = 0, now = 1'000 * kMs, frame_at = 0, lead = switch_idle_c7_lead(0, 0);
     unsigned c7 = 0, wfi = 0;
 
     uint32_t idle(uint64_t deadline, uint64_t woken = UINT64_MAX)
     {
         const uint64_t until = now + deadline;
         const uint32_t state = switch_idle_choose(predicted, now, until, frame_at);
-        const uint64_t wake_at = state == SWITCH_IDLE_C7 ? switch_idle_c7_wake_at(until) : until;
+        const uint64_t wake_at = state == SWITCH_IDLE_C7 ? switch_idle_c7_wake_at(until, lead) : until;
         const uint64_t end = woken < wake_at - now ? now + woken : wake_at;
         predicted = switch_idle_learn(predicted, end - now, switch_idle_timer_bound(end, wake_at));
         now = end;
@@ -196,14 +197,44 @@ TEST(SwitchIdleGovernor, FramesStopAndTheGuardLiftsAfterTheWindow)
     EXPECT_EQ(switch_idle_choose(1000 * kMs, now, now + 40 * kMs, now - kMs), SWITCH_IDLE_C7);
 }
 
-TEST(SwitchIdleGovernor, TheWakeTimerIsNeverLate)
+TEST(SwitchIdleGovernor, TheWakeTimerLeadsTheDeadlineByTheLead)
 {
-    for (const uint64_t deadline : {SWITCH_IDLE_C7_RESIDENCY, 5 * kMs, 100 * kMs, 27'000 * kMs}) {
-        const uint64_t now = 77 * kMs;
-        const uint64_t at = switch_idle_c7_wake_at(now + deadline);
-        const uint64_t ticks = switch_idle_timer_ticks(now, at, kTmrMax);
-        EXPECT_EQ(now + ticks + SWITCH_IDLE_C7_WAKE_LATENCY, now + deadline) << deadline;
+    for (const uint64_t lead : {SWITCH_IDLE_C7_WAKE_LATENCY, SWITCH_IDLE_C7_LEAD_MAX}) {
+        for (const uint64_t deadline : {SWITCH_IDLE_C7_RESIDENCY, 5 * kMs, 100 * kMs, 27'000 * kMs}) {
+            const uint64_t now = 77 * kMs;
+            const uint64_t at = switch_idle_c7_wake_at(now + deadline, lead);
+            const uint64_t ticks = switch_idle_timer_ticks(now, at, kTmrMax);
+            EXPECT_EQ(now + ticks + lead, now + deadline) << deadline;
+        }
     }
+}
+
+// Boot 15's C7 timer exits (SwitchPower lines): means of 79-129 us, the longest 428 us, and up to 585 of 1026 a window
+// back after their deadline with the device tree's 130 us lead.
+TEST(SwitchIdleGovernor, TheLeadFollowsTheLongestRecentExit)
+{
+    const uint64_t floor = SWITCH_IDLE_C7_WAKE_LATENCY;
+    EXPECT_EQ(switch_idle_c7_lead(0, 0), floor);
+    EXPECT_EQ(switch_idle_c7_lead(floor, SWITCH_IDLE_TICKS_US(428)), SWITCH_IDLE_TICKS_US(428));
+    EXPECT_EQ(switch_idle_c7_lead(floor, 50 * kMs), SWITCH_IDLE_C7_LEAD_MAX);
+    EXPECT_EQ(switch_idle_c7_lead(SWITCH_IDLE_TICKS_US(428), 0), SWITCH_IDLE_TICKS_US(428));
+
+    uint64_t lead = switch_idle_c7_lead(floor, SWITCH_IDLE_TICKS_US(428));
+    unsigned late = 0;
+    std::mt19937 random(15);
+    std::uniform_int_distribution<unsigned> exitUs(80, 430);
+    for (unsigned i = 0; i < 1000; ++i) {
+        const uint64_t exit = SWITCH_IDLE_TICKS_US(exitUs(random));
+        late += exit > lead ? 1 : 0;
+        lead = switch_idle_c7_lead(lead, exit);
+        ASSERT_GE(lead, floor);
+        ASSERT_LE(lead, SWITCH_IDLE_C7_LEAD_MAX);
+    }
+    EXPECT_LT(late, 80u);
+
+    for (unsigned i = 0; i < 2000; ++i)
+        lead = switch_idle_c7_lead(lead, SWITCH_IDLE_TICKS_US(90));
+    EXPECT_EQ(lead, floor);
 }
 
 TEST(SwitchIdleGovernor, ADeadlineBeyondTheTimerWakesAtItsReach)

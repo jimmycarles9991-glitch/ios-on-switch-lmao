@@ -3751,6 +3751,8 @@ vm_shared_region_slide_part_v5(
 				} else {
 					memcpy(rebaseLocation, &value, sizeof(value));
 				}
+#else /* !__has_feature(ptrauth_calls) */
+				memcpy(rebaseLocation, &value, sizeof(value));
 #endif /* __has_feature(ptrauth_calls) */
 			} else {
 				value += high8;

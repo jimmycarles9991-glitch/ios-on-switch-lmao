@@ -25,12 +25,34 @@
  *   the screen. The first entry's size becomes 0x0: every smaller screen is idiom 26, J181's class, whose keyboard
  *   _UIKeyboardGetDerivedKeyboardForSpecificOrientationAndLayoutClass derives to the screen's width. The table's one
  *   reader is that function; 720x1280 (scale 1) is 24 either way.
+ * - SpringBoardHome (.17), _defaultRootMetrics' row for screen type 0x68: 21H461's home grid, 3x5 portrait and 5x3
+ *   landscape on every page. _SBHScreenTypeLookup matches no screen type exactly at a fractional scale, and an iPad
+ *   without a Home button smaller than 768x1024 points then falls through SBDisplayMetrics' sizes to 0x68 (iPad
+ *   mini's row) at every scale. Every iPad type's row has the same 5x6 / 6x5 grid and 4x6 for pages with widgets,
+ *   so no answer from the ADT or MobileGestalt gives another grid. Applied at every scale, as 21H461's grid is.
+ * - SpringBoard (.36), -[SBGridLayoutSwitcherModifier scale]: 21H461's switcher card scale. The iPad switcher still
+ *   has two rows of gridSwitcherPageScale (0.3) cards 63 points apart, too tall for 16:9 in landscape. Across a
+ *   wider-than-tall container the scale is the scale's grid_num / grid_den; portrait keeps 0.3. The width is fabs'd
+ *   as CGRectGetWidth did, and BSFloatIsZero(width) becomes fminnm: a zero width makes 0 / 0, which fminnm drops for
+ *   the width, 0.
+ * - WidgetKit (.03), chronod's placeholder deadline: 21H461's SwitchWidgets (vm_unix.c), at every scale. Both copies
+ *   of the cases, WidgetExtensionSessionOperation.defaultTimeout's getter and the function
+ *   DefaultWatchdogTimeoutProvider returns (the one the watchdog arms), give getPlaceholders(n) max(n + 10, 20) s, a
+ *   budget for Apple's cores that one batch on the A57s overruns. Both become (n + 10) x 5 s: fmov d2, #20.0 becomes
+ *   fmov d2, #5.0 and fmaxnm d0, d0, d2 becomes fmul d0, d0, d2, before the fcsel that picks the case.
+ * - WidgetKit (.03), the archiver's image limit (the archive's image check and its auxiliary graphics both take it): an
+ *   image may be 2.2 x 2 times the widget's size in points, in pixels at the -scale of its environment, the display's.
+ *   J181's widgets are drawn with 2x images, its scale, and a widget here gets the same images at every UI scale: at
+ *   1.25 GameCenter's 310 x 310 pixel artwork in a 103.5 point lock screen widget is 96100 pixels over a limit of
+ *   73646.7, and the archive throws. Both -scale sends become fmov d0, #2.0, the limit J181 archives against.
  * 21H461's other sites are not here. 27's -[_UIBatteryView _fillLayerFrame:cornerRadius:] fills the body's own
  * frame (no inset), so SpringBoard's and Control Center's batteries have no gap to even out. +[PKIconImageCache
- * settingsIconCacheWithScale:] returns nil at every scale and 24B119 ships no iconCache artwork. The iPad switcher's
- * page scale moved to -[SBGridLayoutSwitcherModifier scale] (-[SBMixedGridSwitcherModifier _fullScreenCardScale] is
- * App Exposé's now), the home screen's grid to a table of 120 screen types (_getRootMetrics), and UIKit's own status
- * bar battery insets through UIRectInsetEdges, a call with no room beside it: not ported.
+ * settingsIconCacheWithScale:] returns nil at every scale and 24B119 ships no iconCache artwork. Control Center's
+ * battery (icon size 17, 21H461's 15) is 28x14 points with a 1.25 point line, and the 14 is an fmov immediate in
+ * both _batterySizeForIconSize: copies with two instructions to spare; 14.4 has no fmov encoding and no literal of
+ * it is in reach, and the encodable whole-pixel heights, 12 and 16, would not keep Apple's proportions. -[_UIStatusBarBatteryView _fillLayerFrame:cornerRadius:] still insets by twice the line through
+ * UIRectInsetEdges, with only its fadd d4, d13, d13 to spare; 1.6, the whole-pixel inset at 1.25, has no fmov
+ * encoding and no literal of it is in reach either: not ported.
  */
 static const struct switch_us_site switch_us_sites_24B119[] = {
 	{   /* dyld_shared_cache_arm64e.11 of 24B119 (text 0x1a8400000, file 0) */
@@ -43,7 +65,7 @@ static const struct switch_us_site switch_us_sites_24B119[] = {
 			  { 0xd7, 0xd9, 0xcb, 0x95, 0x08, 0xe4, 0x00, 0x6f, 0x80, 0x00, 0x00, 0x37, 0xe0, 0x03, 0x1a, 0xaa,
 			    0x5f, 0xfd, 0xcf, 0x95, 0x08, 0xc0, 0x22, 0x1e, 0xe0, 0x03, 0x1a, 0xaa }, { 0 } },
 		},
-		"FrontBoardServices", "main display scale override",
+		"FrontBoardServices", "main display scale override", false,
 	},
 	{   /* dyld_shared_cache_arm64e.13 of 24B119 (text 0x1b0400000, file 0) */
 		{ 0xa5, 0x8c, 0x59, 0x09, 0x8b, 0xb2, 0x30, 0x14, 0xa7, 0xb5, 0x28, 0xb4, 0x36, 0x43, 0x92, 0x5e },
@@ -57,7 +79,7 @@ static const struct switch_us_site switch_us_sites_24B119[] = {
 			  { 0xf4, 0x6b, 0x00, 0xb9, 0x60, 0x02, 0x22, 0x1e, 0xe0, 0xa3, 0x0d, 0x2d },
 			  { 0x60, 0x02, 0x27, 0x1e } },
 		},
-		"MobileGestalt", "main-screen-scale",
+		"MobileGestalt", "main-screen-scale", false,
 	},
 	{   /* .15 (text 0x1b8400000, file 0) */
 		{ 0x4f, 0x44, 0xc1, 0x4a, 0x9b, 0x0b, 0x35, 0x03, 0xaa, 0x96, 0x94, 0xef, 0xd6, 0x5b, 0xca, 0x4e },
@@ -70,7 +92,7 @@ static const struct switch_us_site switch_us_sites_24B119[] = {
 			    0x03, 0x00, 0x79, 0x9e },
 			  { 0x03, 0x7c, 0x18, 0x9b, 0x1f, 0x20, 0x03, 0xd5, 0x1f, 0x20, 0x03, 0xd5 } },
 		},
-		"CoreUI", "PDF vector image row bytes",
+		"CoreUI", "PDF vector image row bytes", false,
 	},
 	{   /* .15 */
 		{ 0x4f, 0x44, 0xc1, 0x4a, 0x9b, 0x0b, 0x35, 0x03, 0xaa, 0x96, 0x94, 0xef, 0xd6, 0x5b, 0xca, 0x4e },
@@ -82,7 +104,7 @@ static const struct switch_us_site switch_us_sites_24B119[] = {
 			    0x03, 0x00, 0x79, 0x9e },
 			  { 0x03, 0x7c, 0x18, 0x9b, 0x1f, 0x20, 0x03, 0xd5, 0x1f, 0x20, 0x03, 0xd5 } },
 		},
-		"CoreUI", "SVG vector image row bytes",
+		"CoreUI", "SVG vector image row bytes", false,
 	},
 	{   /* dyld_shared_cache_arm64e.65 of 24B119 (text 0x2a0400000, file 0) */
 		{ 0x06, 0x08, 0xbd, 0x6b, 0xfc, 0x49, 0x35, 0x50, 0xb8, 0xcd, 0x2f, 0x1f, 0x5d, 0x11, 0xc6, 0xcc },
@@ -92,7 +114,7 @@ static const struct switch_us_site switch_us_sites_24B119[] = {
 			{ 0x17049f8ULL, 8, 0, 8, SWITCH_US_PROGRESS_BAR,
 			  { 0x00, 0x00, 0x6f, 0x43, 0x00, 0x00, 0x80, 0x40 }, { 0 } },
 		},
-		"ProgressUI", "progress bar",
+		"ProgressUI", "progress bar", false,
 	},
 	{   /* .13 */
 		{ 0xa5, 0x8c, 0x59, 0x09, 0x8b, 0xb2, 0x30, 0x14, 0xa7, 0xb5, 0x28, 0xb4, 0x36, 0x43, 0x92, 0x5e },
@@ -104,7 +126,7 @@ static const struct switch_us_site switch_us_sites_24B119[] = {
 			  { 0xd9, 0xd3, 0xee, 0x94, 0xc0, 0x02, 0x00, 0x36, 0x20, 0x04, 0x80, 0x52 },
 			  { 0x1f, 0x20, 0x03, 0xd5 } },
 		},
-		"CoverSheetKit", "lock screen layout row",
+		"CoverSheetKit", "lock screen layout row", false,
 	},
 	{   /* dyld_shared_cache_arm64e.01 of 24B119 (text 0x180400000, file 0) */
 		{ 0xe7, 0xc1, 0xb4, 0x11, 0xdb, 0x39, 0x30, 0x4d, 0x91, 0x4a, 0x72, 0xe3, 0x1f, 0xa3, 0x1b, 0x86 },
@@ -116,7 +138,66 @@ static const struct switch_us_site switch_us_sites_24B119[] = {
 			    0x1a, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 },
 			  { 0 } },
 		},
-		"UIKitCore", "keyboard class of the 10.2-inch iPad",
+		"UIKitCore", "keyboard class of the 10.2-inch iPad", false,
+	},
+	{   /* dyld_shared_cache_arm64e.17 of 24B119 (text 0x1c0400000, file 0) */
+		{ 0x4a, 0x4b, 0x97, 0x5a, 0xb4, 0x57, 0x33, 0x56, 0x93, 0xa8, 0x4f, 0x80, 0xc9, 0x09, 0x55, 0x7d },
+		0x1c61e4000ULL, 0x5de4000ULL, 0x3000ULL, 0, 2,
+		{
+			/* 0x1c61e7660: _defaultRootMetrics (0x1c61e6580) + 0x10e0, screen type 0x68: {5, 6, 6, 5} -> {3, 5, 5, 3} */
+			{ 0x5de7660ULL, 8, 0, 4, SWITCH_US_FIXED,
+			  { 0x05, 0x06, 0x06, 0x05, 0x00, 0x00, 0x00, 0x00 },
+			  { 0x03, 0x05, 0x05, 0x03 } },
+			/* 0x1c61e76a8: its grid for pages with widgets, {4, 6} -> {3, 5} */
+			{ 0x5de76a8ULL, 8, 0, 2, SWITCH_US_FIXED,
+			  { 0x04, 0x06, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 },
+			  { 0x03, 0x05 } },
+		},
+		"SpringBoardHome", "home screen grid 3x5", true,
+	},
+	{   /* dyld_shared_cache_arm64e.36 of 24B119 (text 0x220400000, file 0) */
+		{ 0xd8, 0x79, 0x2a, 0xca, 0x66, 0xfc, 0x3c, 0xf6, 0xb5, 0x58, 0xc6, 0xf4, 0x75, 0x99, 0x92, 0x10 },
+		0x227ae0000ULL, 0x76e0000ULL, 0x0ULL, 0, 1,
+		{
+			/* 0x227ae0ad0, after bl containerViewBounds: bl CGRectGetWidth; mov v9.16b, v0.16b; bl BSFloatIsZero;
+			 * movi v0.2d, #0; tbnz w0, #0, +0x10; fmul d0, d8, d9; frinta d0, d0; fdiv d0, d0, d9 */
+			{ 0x76e0ad0ULL, 32, 0, 32, SWITCH_US_GRID_PAGE_SCALE,
+			  { 0x38, 0x4b, 0x19, 0x94, 0x09, 0x1c, 0xa0, 0x4e, 0xa2, 0xec, 0x19, 0x94, 0x00, 0xe4, 0x00, 0x6f,
+			    0x80, 0x00, 0x00, 0x37, 0x00, 0x09, 0x69, 0x1e, 0x00, 0x40, 0x66, 0x1e, 0x00, 0x18, 0x69, 0x1e },
+			  { 0 } },
+		},
+		"SpringBoard", "app switcher landscape card scale", false,
+	},
+	{   /* dyld_shared_cache_arm64e.03 of 24B119 (text 0x188400000, file 0) */
+		{ 0x8f, 0x50, 0x44, 0x24, 0x74, 0xa0, 0x3b, 0x04, 0xb1, 0x03, 0xe8, 0xd2, 0x5a, 0x06, 0xe3, 0x8b },
+		0x18bd50000ULL, 0x3950000ULL, 0x3000ULL, 0, 2,
+		{
+			/* 0x18bd5330c, the getter + 0x38: fadd d1, d0, d1; fmov d2, #10.0; fmaxnm d1, d1, d2; fadd d0, d0, d2;
+			 * fmov d2, #20.0; fmaxnm d0, d0, d2; cmp w9, #0; fcsel d0, d1, d0, eq */
+			{ 0x395330cULL, 32, 16, 8, SWITCH_US_FIXED,
+			  { 0x01, 0x28, 0x61, 0x1e, 0x02, 0x90, 0x64, 0x1e, 0x21, 0x68, 0x62, 0x1e, 0x00, 0x28, 0x62, 0x1e,
+			    0x02, 0x90, 0x66, 0x1e, 0x00, 0x68, 0x62, 0x1e, 0x3f, 0x01, 0x00, 0x71, 0x20, 0x0c, 0x60, 0x1e },
+			  { 0x02, 0x90, 0x62, 0x1e, 0x00, 0x08, 0x62, 0x1e } },
+			/* 0x18bd537f0, DefaultWatchdogTimeoutProvider's function + 0x38: the same eight instructions */
+			{ 0x39537f0ULL, 32, 16, 8, SWITCH_US_FIXED,
+			  { 0x01, 0x28, 0x61, 0x1e, 0x02, 0x90, 0x64, 0x1e, 0x21, 0x68, 0x62, 0x1e, 0x00, 0x28, 0x62, 0x1e,
+			    0x02, 0x90, 0x66, 0x1e, 0x00, 0x68, 0x62, 0x1e, 0x3f, 0x01, 0x00, 0x71, 0x20, 0x0c, 0x60, 0x1e },
+			  { 0x02, 0x90, 0x62, 0x1e, 0x00, 0x08, 0x62, 0x1e } },
+		},
+		"WidgetKit", "placeholder batch deadline (n + 10) x 5 s", true,
+	},
+	{   /* .03 */
+		{ 0x8f, 0x50, 0x44, 0x24, 0x74, 0xa0, 0x3b, 0x04, 0xb1, 0x03, 0xe8, 0xd2, 0x5a, 0x06, 0xe3, 0x8b },
+		0x18bc28000ULL, 0x3828000ULL, 0x3000ULL, 1, 1,
+		{
+			/* 0x18bc2b3b0: bl size; mov v10.16b, v0.16b; mov v11.16b, v1.16b; mov x0, x20; bl scale;
+			 * fmul d10, d10, d0; mov x0, x20; bl scale -> fmov d0, #2.0 for each bl scale */
+			{ 0x382b3b0ULL, 32, 16, 16, SWITCH_US_FIXED,
+			  { 0x3c, 0x63, 0x0f, 0x95, 0x0a, 0x1c, 0xa0, 0x4e, 0x2b, 0x1c, 0xa1, 0x4e, 0xe0, 0x03, 0x14, 0xaa,
+			    0x6c, 0x5e, 0x0f, 0x95, 0x4a, 0x09, 0x60, 0x1e, 0xe0, 0x03, 0x14, 0xaa, 0x69, 0x5e, 0x0f, 0x95 },
+			  { 0x00, 0x10, 0x60, 0x1e, 0x4a, 0x09, 0x60, 0x1e, 0xe0, 0x03, 0x14, 0xaa, 0x00, 0x10, 0x60, 0x1e } },
+		},
+		"WidgetKit", "archived image limit of a 2x screen", true,
 	},
 };
 

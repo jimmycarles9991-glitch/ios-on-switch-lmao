@@ -26,6 +26,7 @@ import funcnames
 import kc17
 import paths
 import pinned_names
+import shapes
 import shims
 import sysctls
 import vnodeops
@@ -492,6 +493,10 @@ def main():
             shim_conflicts.append((hex(a), n, names.get(a, "not in our kernel"), source.get(a, "")))
         else:
             assign(a, n, "shim")
+    checked = [a for a in set(need) | {a for a, s in source.items() if s == "pinned"}
+               if a in fset and source.get(a) not in (None, "shim") and names[a] in oname and ofunc(oname[names[a]])]
+    apple_code, our_code = shapes.Code(kc.d, kc.va2off, fstarts), shapes.Code(ours.d, ours.va2off, our_starts)
+    shape_mismatches = shapes.check(apple_code, our_code, checked, {a: (n, source[a]) for a, n in names.items()}, oname)
     viol = 0
     for key, ks in secs_k.items():
         kn = [names[a] for a in ks if a in names]
@@ -503,18 +508,21 @@ def main():
     print("conflicts", len(conflicts)); [print("  ", c) for c in conflicts[:10]]
     print("signatures rejected", len(rejected_signatures), "pins redundant", len(pins_redundant),
           "pin conflicts", len(pin_conflicts), "needed names out of GOT order", len(order_violations),
-          "retracted", len(retracted), "shim conflicts", len(shim_conflicts))
+          "retracted", len(retracted), "shim conflicts", len(shim_conflicts), "shapes checked", len(checked),
+          "shape mismatches", len(shape_mismatches))
     print("kept kexts need", len(need), "named", len(got), "by source", collections.Counter(source[a] for a in got))
     missing = [a for a in need if a not in names]
     json.dump({"names": {hex(a): n for a, n in names.items()}, "source": {hex(a): s for a, s in source.items()},
                "missing": [hex(a) for a in missing], "conflicts": conflicts, "vt_slots": vt_slots,
                "rejected_signatures": rejected_signatures, "pins_redundant": pins_redundant,
                "pin_conflicts": pin_conflicts, "order_violations": order_violations, "retracted": retracted,
-               "shim_conflicts": shim_conflicts},
+               "shim_conflicts": shim_conflicts, "shapes_checked": [hex(a) for a in sorted(checked)],
+               "shape_mismatches": shape_mismatches},
               open(paths.work("kernel-names.json"), "w"), indent=0)
-    if pin_conflicts or order_violations or shim_conflicts:
-        raise SystemExit("names.py: a pin or shim against what the kernelcache shows, or a name out of GOT order:\n" +
-                         "\n".join(map(str, pin_conflicts + order_violations + shim_conflicts)))
+    if pin_conflicts or order_violations or shim_conflicts or shape_mismatches:
+        raise SystemExit("names.py: a pin or shim against what the kernelcache shows, a name out of GOT order, or a "
+                         "binding whose instructions are not our function's:\n" +
+                         "\n".join(map(str, pin_conflicts + order_violations + shim_conflicts + shape_mismatches)))
 
 if __name__ == "__main__":
     main()

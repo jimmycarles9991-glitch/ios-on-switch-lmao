@@ -1,0 +1,60 @@
+# diagnostics/switch on the host:
+#   switch_diag_release_test  SwitchDiag.h as release and debug kernels include it: in release every debug hook is a
+#                             macro that never evaluates its arguments, in debug a function; the HUD is built for debug
+#                             kernels only
+#   switch_diag_link_test     the selected kind's libSwitchDiag and kernel under this build's profile: in release no debug
+#                             unit, symbol or text, in every config the panic record and the root boot
+#
+#   bazel test //diagnostics/switch/test:all
+#   bazel test --config=release //diagnostics/switch/test:switch_diag_link_test
+load("@rules_python//python:py_test.bzl", "py_test")
+load("//bazel/lint:defs.bzl", "lint_files")
+load("//bazel/testing:defs.bzl", "host_library", "host_test")
+
+lint_files()
+
+host_library(
+    name = "debug_view",
+    srcs = [
+        "switch_diag_debug_view.c",
+        "//diagnostics/switch:SwitchDiag.h",
+    ],
+    hdrs = ["switch_diag_debug_view.h"],
+    defines = [
+        "DEVELOPMENT=1",
+        "SWITCH_XNU_BOARD=1",
+        "XNU_SWITCH_VERIFIED_ROOT=1",
+    ],
+)
+
+host_test(
+    name = "switch_diag_release_test",
+    srcs = [
+        "switch_diag_release_test.cpp",
+        "//diagnostics/switch:SwitchDiag.h",
+    ],
+    data = ["//diagnostics/switch:SwitchDiagHud.c"],
+    defines = [
+        "SWITCH_XNU_BOARD=1",
+        "XNU_SWITCH_VERIFIED_ROOT=1",
+    ],
+    deps = [":debug_view"],
+)
+
+py_test(
+    name = "switch_diag_link_test",
+    srcs = ["switch_diag_link_test.py"],
+    args = select({
+        "//bazel:release": ["--profile=release"],
+        "//conditions:default": ["--profile=debug"],
+    }) + [
+        "--archive=$(rootpath //kernel:libSwitchDiag)",
+    ] + select({
+        "//kernel:xnu_12377_121_6": ["--kernel=$(rootpath //kernel:kernel_unprelinked_12377)"],
+        "//conditions:default": ["--kernel=$(rootpath //kernel:kernel_unprelinked)"],
+    }),
+    data = ["//kernel:libSwitchDiag"] + select({
+        "//kernel:xnu_12377_121_6": ["//kernel:kernel_unprelinked_12377"],
+        "//conditions:default": ["//kernel:kernel_unprelinked"],
+    }),
+)

@@ -177,7 +177,8 @@ TEST(Copy, WaitsComeFirstAndTheIncrementLast)
 	job.wait_syncpt = 21;
 	job.wait_threshold = 1234;
 	job.incr_syncpt = 22;
-	const std::vector<tgm_relayout_wait> waits = {{0x100000040ull, 7}, {0x100000080ull, 9}};
+	const std::vector<tgm_relayout_wait> waits = {{0x100000040ull, 7, 5},
+						      {0x100000080ull, 9, 6}};
 	const std::vector<uint8_t> src = pattern(768 * 4, 3);
 	std::vector<CopyEngine::Syncpt> syncpts;
 	const std::vector<uint8_t> d = copy(job, src, 0, 768 * 4, 0, waits, &syncpts);

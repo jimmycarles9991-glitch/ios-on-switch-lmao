@@ -17,6 +17,7 @@
 #include "../../kits/SwitchIdle/switch_idle.h"
 #include "../../kits/SwitchMMIO/SwitchMMIOKernel.h"
 #include "ArmCpuIdle.h"
+#include "ArmCpuTmr.h"
 
 // NOLINTNEXTLINE(readability-redundant-declaration): not every kernel configuration's headers declare it
 extern "C" vm_offset_t ml_static_vtop(vm_offset_t);
@@ -30,13 +31,8 @@ constexpr uint64_t kPsciFeatureExtendedStateId = 1U << 1;
 
 constexpr uint64_t kTmrPA = 0x60005000;
 constexpr uint32_t kTimerUsecConfig = 0x014;
-// TIMERUS_USEC_CFG for a 19.2 MHz clk_m ((95 + 1) / (4 + 1), L4T tegra210_timer.c): TMR10-13 count clk_m, so their
-// ticks are timebase ticks.
-constexpr uint32_t kUsecConfig19M2 = 0x045f;
 constexpr uint32_t kTmr10 = 0x090, kPtv = 0x0, kPcr = 0x4;
-constexpr uint32_t kPtvEnable = 1U << 31, kPcrInterruptClear = 1U << 30;
-// The count field is 29 bits in the n + 1 scheme.
-constexpr uint64_t kTmrTicksMax = UINT64_C(1) << 29;
+constexpr uint32_t kPcrInterruptClear = 1U << 30;
 constexpr uint32_t kTmr10Intid = 32 + 176;
 
 volatile uint8_t *gTmr = nullptr;
@@ -56,7 +52,7 @@ void disarm(uint32_t cpu)
 
 int64_t powerDown(uint32_t cpu, uint64_t ticks)
 {
-    tmrWrite(cpu, kPtv, kPtvEnable | static_cast<uint32_t>(ticks - 1));
+    tmrWrite(cpu, kPtv, armcpu::tmr::ptv(ticks));
     __asm__ volatile("dsb sy" ::: "memory");
     const int64_t rc = armcpu::psciSmc(kPsciCpuSuspend, kPowerStateC7, gEntryPA, gRecordPA[cpu]);
     disarm(cpu);
@@ -78,7 +74,7 @@ void timerInterrupt(OSObject *, void *refCon, IOService *, int)
 const switch_idle_platform kPlatform = {
     .power_down = powerDown,
     .resumed = resumed,
-    .wake_ticks_max = kTmrTicksMax,
+    .wake_ticks_max = armcpu::tmr::kTicksMax,
 };
 
 const char *check()
@@ -101,7 +97,7 @@ const char *check()
     gTmr = switch_mmio_map(kTmrPA, 0x400);
     if (!gTmr)
         return "TMR not mapped";
-    if (switch_mmio_read32(gTmr, kTimerUsecConfig) != kUsecConfig19M2)
+    if (switch_mmio_read32(gTmr, kTimerUsecConfig) != armcpu::tmr::kUsecConfig19M2)
         return "the timers' clock is not the 19.2 MHz timebase (TIMERUS_USEC_CFG)";
     gEntryPA = ml_static_vtop(reinterpret_cast<vm_offset_t>(switch_secondary_entry));
     if (!gEntryPA || gEntryPA >= UINT64_C(0x100000000))

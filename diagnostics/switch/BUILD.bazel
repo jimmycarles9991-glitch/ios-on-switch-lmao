@@ -27,12 +27,52 @@ filegroup(
 # This package's headers (kernel_headers): what other drivers' hdr_deps name.
 kernel_headers()
 
-# SwitchDiag: boot diagnostics, SD/FAT32/APFS storage (osfmk C recipe, no FP/SIMD).
+_C_COPTS = [
+    "-DSWITCH_XNU_BOARD=1",
+    "-DXNU_SWITCH_VERIFIED_ROOT=1",
+    "-DSWITCH_SD_MODEL=0",
+    "-mgeneral-regs-only",
+    "-mstrict-align",
+    "-fno-stack-protector",
+    "-fno-builtin",
+    "-Wall",
+    "-Wextra",
+    "-Werror",
+    "-Wno-unused-parameter",
+    "-I",
+    "{tree}/diagnostics/switch",
+    "-I",
+    "{tree}/kits/VerifiedRoot/include",
+]
+
+_HDR_DEPS = [
+    "drivers/SwitchSuspend",
+    "kits/SwitchDMA",
+    "kits/SwitchMMIO",
+    "kits/SwitchTime",
+    "kits/VerifiedRoot",
+]
+
+# What every kernel config links (osfmk C recipe, no FP/SIMD): the panic record and screens, the early exception
+# screen, and the root boot (the SD block device, NVRAM and the board drivers' thread).
 kernel_driver(
     name = "SwitchDiag",
     srcs = [
         "SwitchDiag.c",
+        "SwitchPanicEarly.c",
         "SwitchPanicSave.c",
+        "SwitchRootBoot.c",
+    ],
+    c_copts = _C_COPTS,
+    hdr_deps = _HDR_DEPS,
+)
+
+# Debug kernels only (//kernel:libSwitchDiag never links it in release): the single-CPU HUD and its observers, the
+# power trail, and the SD, FAT and raw APFS readers of the signed PID 1 fixture.
+kernel_driver(
+    name = "SwitchDiagDebug",
+    srcs = [
+        "SwitchDiagHud.c",
         "SwitchPowerTrail.c",
         "SwitchFiles.c",
         "SwitchSD.c",
@@ -46,28 +86,6 @@ kernel_driver(
         "storage/raw_apfs.c",
         "storage/sdmmc_dma.c",
     ],
-    c_copts = [
-        "-DSWITCH_XNU_DIAGNOSTICS=1",
-        "-DXNU_SWITCH_VERIFIED_ROOT=1",
-        "-DSWITCH_SD_MODEL=0",
-        "-mgeneral-regs-only",
-        "-mstrict-align",
-        "-fno-stack-protector",
-        "-fno-builtin",
-        "-Wall",
-        "-Wextra",
-        "-Werror",
-        "-Wno-unused-parameter",
-        "-I",
-        "{tree}/diagnostics/switch",
-        "-I",
-        "{tree}/kits/VerifiedRoot/include",
-    ],
-    hdr_deps = [
-        "drivers/SwitchSuspend",
-        "kits/SwitchDMA",
-        "kits/SwitchMMIO",
-        "kits/SwitchTime",
-        "kits/VerifiedRoot",
-    ],
+    c_copts = _C_COPTS,
+    hdr_deps = _HDR_DEPS,
 )

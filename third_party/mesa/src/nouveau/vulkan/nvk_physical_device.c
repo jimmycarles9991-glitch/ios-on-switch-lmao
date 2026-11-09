@@ -4,6 +4,10 @@
  */
 #include "nvk_physical_device.h"
 
+#if defined(__APPLE__) && SWITCH_DEBUG
+#include <os/log.h>
+#endif
+
 /* NVK_BUILD_ID_OVERRIDE: the compiler identity (third_party/mesa/bazel/compiler_identity.py) */
 #include "nvk_build_id.h"
 

@@ -40,11 +40,13 @@ int a64x_pretranslate(const struct a64x_macho *m, uint8_t *out, struct a64x_pt_r
 /*
  * A translated slice against its original, from the bytes: only the executable segment's code words, its tail,
  * reserved and a FIPS integrity MAC (that of the translated text) changed; no A12-baseline instruction in code or stubs; every changed word is a one-word rewrite, a
- * `b ok`, a stub word (in a freed check or the tail) or a site whose every path stays in stub words until it
- * returns to site + 4 (B) or RETs (BL); the signature checks. Returns the sites checked, or -1 with a message.
+ * `b ok`, a stub word (in a freed check nothing enters, a64x_pt_entries, or the tail) or a site whose every path
+ * stays in stub words until it returns to site + 4 (B) or RETs (BL); the signature checks. Returns the sites checked,
+ * or -1 with a message.
  */
 struct a64x_pt_check {
     uint64_t code_words, rewritten, dead_checks, stub_words, sites, left_baseline;
+    uint64_t entered_stub_words; /* stub words something branches to (each one fails the check) */
     uint8_t cdhash[A64X_CDHASH_SIZE];
 };
 
@@ -56,6 +58,14 @@ long a64x_pt_verify(const struct a64x_macho *m, const uint8_t *out, struct a64x_
  * no execution reaches them as code. lzfse's mask tables are such runs (64-bit masks, high halves zero).
  */
 int a64x_pt_code_map(const struct a64x_macho *m, uint32_t map_flags, struct a64x_image_xlate *x);
+
+/*
+ * The words of the executable segment entered other than by falling into them (pt_entries.c), 1 bit per word from
+ * exec_fileoff: function starts, the targets of direct branches, ADR and ADRP+ADD in code (data: the code map's data
+ * bits), hardened jump tables, and every rebase. No stub word goes there. NULL: out of memory or unreadable fixups.
+ */
+uint8_t *a64x_pt_entries(const struct a64x_macho *m, const uint8_t *data);
+bool a64x_pt_entered(const struct a64x_macho *m, const uint8_t *entries, uint64_t off);
 
 /* The stub space of a slice: the exec segment's tail after its last section, as [lo, hi) slice offsets. */
 void a64x_pt_tail(const struct a64x_macho *m, uint64_t *lo, uint64_t *hi);

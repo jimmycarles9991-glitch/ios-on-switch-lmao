@@ -3,8 +3,8 @@
 // parses every slice segment itself; this keeps the parameter sets, picture order counts (8.3.1), the reference
 // picture sets and marking (8.3.2), the decoded picture buffer with output by bumping (C.5.2), NVDEC's 16 picture
 // slots (a picture keeps its slot for its whole DPB life), the colocated motion, filter, tile size and scaling list
-// buffers, and fills nvdec_hevc_pic_s. Main 10 is written as 8-bit NV12 (disp_output_mode 2, or 3 for BT.2020; the
-// dithering patterns off, so the clip check can compare it with the reference >> 2).
+// buffers, and fills nvdec_hevc_pic_s. Main 10 is written in 16-bit samples (disp_output_mode 1, P010: the 10 bits
+// high), into surfaces and filter rows twice as wide.
 //
 // NVDEC-specific facts (buffer set and sizes, method stream, tile size table layout, the 4-byte start code before each
 // slice, sw_hdr_skip_length's extent) follow averne's FFmpeg nvtegra hwaccel (libavcodec/nvtegra_hevc.c and his

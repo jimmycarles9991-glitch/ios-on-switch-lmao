@@ -45,6 +45,20 @@ inline const char *refusal(uint64_t bytes, uint64_t held, uint64_t avail, const 
 	return nullptr;
 }
 
+// Why a compressible BO of `bytes` (pool chunks, TegraGM20BBoCompressible) is refused, or nullptr. Compressed memory
+// is the pool's last claim: whatever the client, it leaves the floor and the reserve free for coherent BOs and nvkm, and
+// a client other than the compositor stays within its share. A refusal is no failure: the target renders uncompressed
+// and its client asks again later.
+inline const char *compressibleRefusal(uint64_t bytes, uint64_t held, uint64_t avail,
+				       const Limits &l, bool compositor)
+{
+	if (avail < bytes + l.floorBytes + l.reserveBytes)
+		return "the pool's last 48 MiB stay for coherent BOs and nvkm";
+	if (!compositor && held + bytes > l.clientBytes)
+		return "past the client's share";
+	return nullptr;
+}
+
 enum Source : uint8_t {
 	FromPool,    // the GPU pool
 	FromSystem,  // ordinary pages, mapped write-combined

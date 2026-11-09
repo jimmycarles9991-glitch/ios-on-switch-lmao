@@ -19,6 +19,8 @@
 //    copy (which waits on the GPU for every channel that imports the surface) never runs before the frame's work is submitted.
 #import "RawMetalInternal.h"
 
+#include <mach/mach.h>
+
 #if SWITCH_FRAME_TIMELINE
 std::atomic<uint64_t> gSurfaceTextures{0}, gTwinsMade{0};  // the frame timeline's churn counts (SwitchFrameTimeline.h)
 #endif
@@ -84,31 +86,31 @@ RawState *gRM;
     return (id<MTLDevice>)_device;
 }
 
-// A selector this class does not answer goes to the twin (an m2v object: its answer is today's). respondsToSelector: says what the
-// twin's class says, so Core Animation's optional paths choose as they do on m2v.
-- (id)forwardingTargetForSelector:(SEL)selector
+// The m2v class this object stands in for: its twin's, or the one it would make
+- (Class)rmTwinClass
 {
-    id twin = [self rmTwin];
-    if (!twin)
-        SWITCH_REFUSE_DETAIL("raw", "twin.missing", uintptr_t(selector), "-[%s %s] with no m2v twin",
-                             class_getName(object_getClass(self)), sel_getName(selector));
-    else
-        SWITCH_REFUSE_DETAIL("raw", "twin.forward", uintptr_t(selector), "-[%s %s] answered by its m2v twin",
-                             class_getName(object_getClass(self)), sel_getName(selector));
-#if SWITCH_FRAME_TIMELINE
-    gRM->stats.twinForwards.fetch_add(1, std::memory_order_relaxed);
-#endif
-    return twin;
+    id twin = _twin;
+    return twin ? object_getClass(twin) : [[self class] twinClass];
 }
 
-- (BOOL)respondsToSelector:(SEL)selector
+// A selector this class does not answer is never forwarded to an m2v twin: it is answered zero here (forwardInvocation:). When
+// m2v's class does answer it, raw is missing a method (raw/test/selcover finds none any kind sends): answerMissing says so. An
+// RMTwinObject is the exception: it stands for the m2v object it carries.
+- (NSMethodSignature *)methodSignatureForSelector:(SEL)selector
 {
-    if ([super respondsToSelector:selector])
-        return YES;
-    if (_twin)
-        return [_twin respondsToSelector:selector];
-    Class c = [[self class] twinClass];
-    return c ? [c instancesRespondToSelector:selector] : NO;
+    if (NSMethodSignature *s = [super methodSignatureForSelector:selector])
+        return s;
+    if (const char *types = metalTypes(selector))
+        return [NSMethodSignature signatureWithObjCTypes:types];
+    return [[self rmTwinClass] instanceMethodSignatureForSelector:selector];
+}
+
+- (void)forwardInvocation:(NSInvocation *)invocation
+{
+    if (twinAnswers([self rmTwinClass], invocation.selector))
+        answerMissing(self, invocation);
+    else
+        answerZero(self, invocation);
 }
 
 + (Class)twinClass
@@ -148,6 +150,33 @@ RawState *gRM;
 }
 
 @end
+
+#if !defined(SWITCH_DEBUG) || SWITCH_DEBUG
+// What the process keeps once the GPU's idle memory went back: jetsam reads phys_footprint against the daemon's limits
+// (JetsamProperties: iconservicesagent's ActiveSoft 200 MB, InactiveHard 15 MB); the rest of it is mostly IOKit's mappings
+extern "C" bool native_bridge_metal_memory(uint64_t out[3]) __attribute__((weak_import));
+
+static void logGivenBack()
+{
+    task_vm_info_data_t vm = {};
+    mach_msg_type_number_t count = TASK_VM_INFO_COUNT;
+    if (task_info(mach_task_self(), TASK_VM_INFO, reinterpret_cast<task_info_t>(&vm), &count) != KERN_SUCCESS)
+        return;
+    raw::Device &d = *gRM->raw;
+    uint64_t m2v[3] = {};
+    if (native_bridge_metal_memory)
+        native_bridge_metal_memory(m2v);
+    const uint64_t footprint = vm.phys_footprint >> 20, internal = vm.internal >> 20, compressed = vm.compressed >> 20;
+    os_log(rawLog(),
+           "raw: idle memory given back: pool %llu MB in %llu chunks (heaps %llu MB), write-combined %llu MB, shader "
+           "heap %llu KB, m2v %llu MB; footprint %llu MB (internal %llu, compressed %llu, other %llu)",
+           (unsigned long long)(d.stats.poolBytes.load() >> 20), (unsigned long long)d.stats.poolChunks.load(),
+           (unsigned long long)(d.arenaBytes() >> 20), (unsigned long long)(d.wcChunkBytesHeld() >> 20),
+           (unsigned long long)(d.heapBytes() >> 10), (unsigned long long)(m2v[0] >> 20), (unsigned long long)footprint,
+           (unsigned long long)internal, (unsigned long long)compressed,
+           (unsigned long long)(footprint > internal + compressed ? footprint - internal - compressed : 0));
+}
+#endif
 
 // raw_metal_prepare's thread and what it made (taken once, by raw_metal_device_open)
 static struct {
@@ -194,8 +223,7 @@ void raw_metal_prepare(const char *packPath, uint64_t stack)
 void raw_metal_complete_states(const char *cacheDir)
 {
     if (gRM && gRM->fallback && !gRM->completion)
-        gRM->completion =
-            std::make_unique<raw::Completion>(*gRM->raw, gRM->fallback, cacheDir, gRM->raw->pack().header()->stack);
+        gRM->completion = std::make_unique<raw::Completion>(*gRM->raw, cacheDir, gRM->raw->pack().header()->stack);
 }
 
 // libdispatch SPI (dispatch/private/queue_private.h): a root queue over threads of its own, `configure` run on each as it
@@ -274,6 +302,7 @@ id<MTLDevice> raw_metal_device_open(const char *packPath, uint64_t stack, id<MTL
                             method_getTypeEncoding(methods[i]));
         free(methods);
     }
+    installDeviceAnswers(cls);
     objc_registerClassPair(cls);
     // Each facade class conforms to its Metal protocol, as the m2v objects it stands in for do (the frontend's adoptMetalProtocols).
     const std::pair<Class, Protocol *> classes[] = {
@@ -297,6 +326,8 @@ id<MTLDevice> raw_metal_device_open(const char *packPath, uint64_t stack, id<MTL
     r->raw = dev;
     r->fallback = fallback;
     r->device = [cls new];
+    // Before the limits fill: RMDevice's answers (name, maxBufferLength) read the kernel's info through gRM
+    gRM = r;
     // The base class's limits table (_MTLDevice's own accessors read it; the frontend's fillLimits filled the m2v device's from its
     // answers): the same for this device, then this device's own answers (RMDevice's) where the base class reads them there.
     static const SEL limits = NSSelectorFromString(@"limits");
@@ -322,12 +353,15 @@ id<MTLDevice> raw_metal_device_open(const char *packPath, uint64_t stack, id<MTL
         ::once(@"CPU-ordered: the kernel has no Order (TegraGM20BInfoOrder): raw and m2v command buffers wait for each "
                @"other's "
                @"work to complete");
-    gRM = r;
     if (fallback)
         rawAliasSurfaces(dev);
     gRawRelease.start(
         [](void *) {
             gRM->raw->trim();
+            gRM->raw->purgeArenas(gRM->committed);
+#if !defined(SWITCH_DEBUG) || SWITCH_DEBUG
+            logGivenBack();
+#endif
         },
         nullptr);
     const bool renderServer = dev->role() == raw::Device::Role::RenderServer;

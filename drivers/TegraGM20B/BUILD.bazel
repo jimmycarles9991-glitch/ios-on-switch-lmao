@@ -71,6 +71,7 @@ kernel_driver(
         "TegraGM20BExecSurfaces.cpp",
         "TegraGM20BSharedWiring.cpp",
         "TegraGM20BSurfacePrefault.cpp",
+        "TegraGM20BReadback.cpp",
         "TegraGM20BTiledCache.c",
         # Subclasses the original IOAcceleratorES: a late object, run by TegraGM20B.cpp after IOGPUFamily loads.
         "TegraGM20BAccelerator.cpp",

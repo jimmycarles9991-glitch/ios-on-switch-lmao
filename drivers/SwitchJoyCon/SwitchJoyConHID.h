@@ -47,6 +47,7 @@ void switch_joycon_hid_select_personalities();
 // DriverKit AppleUserHIDEventDriver turns the pad into keyboard/pointer events) and an IOHIDProviderPropertyMerger
 // that sets HIDServiceSupport on the IOHIDDevice (so the HID event system makes a user-space service for the device
 // and loads JoyConHIDServicePlugin on it). They match Bluetooth Joy-Cons (bluetoothd's IOHIDUserDevice) as well.
+// The iOS 27 build adds no Nintendo entries: its prelinked kext's own driver serves Joy-Cons (SwitchJoyConHID.cpp).
 // Idempotent; thread context; panics with the reason on failure.
 void switch_joycon_hid_prepare();
 

@@ -21,7 +21,10 @@ def build(src: str | Path, out: str | Path, copy: Callable = shutil.copy2) -> li
     if out.exists():
         shutil.rmtree(out)
     shutil.copytree(src / 'diagnostics', out, copy_function=copy)
-    shutil.copytree(src / 'uuidtext', out, dirs_exist_ok=True, copy_function=copy)
+    # Both trees carry logd's .migrated marker; os.link cannot replace the one diagnostics/ already put there.
+    shutil.copytree(
+        src / 'uuidtext', out, dirs_exist_ok=True, copy_function=copy, ignore=shutil.ignore_patterns('.migrated')
+    )
     boots = []  # (uuid, wall ns) in timesync order
     for f in sorted((out / 'timesync').glob('*.timesync')):
         d = f.read_bytes()

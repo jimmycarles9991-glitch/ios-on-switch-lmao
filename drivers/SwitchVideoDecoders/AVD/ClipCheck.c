@@ -38,9 +38,22 @@ static void output(void *refcon, void *frameRefcon, OSStatus status, VTDecodeInf
     CVPixelBufferLockBaseAddress(image, kCVPixelBufferLock_ReadOnly);
     const uint8_t *y = CVPixelBufferGetBaseAddressOfPlane(image, 0);
     const size_t pitch = CVPixelBufferGetBytesPerRowOfPlane(image, 0);
+    const OSType format = CVPixelBufferGetPixelFormatType(image);
+    const bool wide = format == kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange ||
+                      format == kCVPixelFormatType_420YpCbCr10BiPlanarFullRange;
     uint32_t crc = 0;
-    for (int row = 0; row < r->height; row++)
-        crc = switch_crc32(crc, y + (size_t)row * pitch, (size_t)r->width);
+    for (int row = 0; row < r->height; row++) {
+        const uint8_t *line = y + (size_t)row * pitch;
+        if (!wide) {
+            crc = switch_crc32(crc, line, (size_t)r->width);
+            continue;
+        }
+        // 'x420' holds 10 bits in the high bits of each little-endian 16-bit sample: its high byte is sample >> 2.
+        uint8_t high[4096];
+        for (int x = 0; x < r->width && x < 4096; x++)
+            high[x] = line[2 * x + 1];
+        crc = switch_crc32(crc, high, (size_t)r->width);
+    }
     CVPixelBufferUnlockBaseAddress(image, kCVPixelBufferLock_ReadOnly);
     const int index = (int)pts.value;
     if (index >= 0 && index < r->frames && crc == r->crcs[index]) {
@@ -198,7 +211,8 @@ static bool hevcSession(const HEVCClip *clip, CFDictionaryRef spec, bool hardwar
                      .height = clip->height,
                      .frames = clip->shown,
                      .crcs = clip->crc};
-    int32_t pixelFormat = kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange;
+    int32_t pixelFormat = clip->depth == 10 ? kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange
+                                            : kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange;
     CFNumberRef pf = CFNumberCreate(NULL, kCFNumberSInt32Type, &pixelFormat);
     const void *attrKeys[] = {kCVPixelBufferPixelFormatTypeKey}, *attrValues[] = {pf};
     CFDictionaryRef attrs = CFDictionaryCreate(NULL, attrKeys, attrValues, 1, &kCFTypeDictionaryKeyCallBacks,

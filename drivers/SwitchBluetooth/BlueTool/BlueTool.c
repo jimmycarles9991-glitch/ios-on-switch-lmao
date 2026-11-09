@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: BSD-2-Clause-Patent
 // Stand-in for /usr/sbin/BlueTool on the Switch, shown over the original through the Switch overlay
 // (/private/var/Switch/overlay/usr/sbin/BlueTool, see tree/overlay/manifest.json). Built for iOS arm64, ad hoc
-// signed as com.apple.BlueTool with the original's entitlements; its CDHash goes into the static trust cache.
+// signed as com.apple.BlueTool with the original's entitlements (iOS 17: BlueTool.entitlements, without its sandbox
+// profile; iOS 27: BlueTool27.entitlements, with it); its CDHash goes into the static trust cache.
 //
 // On an iPad, bluetoothd's chip boot (21H461 bluetoothd FUN_1002ef860 / FUN_1002f0268) sends XPC messages to the
 // Mach service com.apple.BlueTool, which launchd starts from com.apple.BlueTool.plist as "BlueTool -R" (user mobile):
@@ -25,12 +26,18 @@
 // stand-in has no sandbox profile (the original's com.apple.private.sandbox.profile:embedded "BlueTool" would refuse
 // the spawn); it touches nothing but its XPC listener and that one spawn. Children are not waited for (SIGCHLD
 // ignored): joyconpaird runs for the boot and keeps a single instance itself.
+//
+// iOS 27 sandboxes it either way. Without a seatbelt profile the kernel applies the original's learned autobox profile
+// ("apply-protobox", keyed by the executable name), so the 27 build carries the original's seatbelt-profiles
+// ["BlueTool"] and runs as the original does. Neither profile reaches bluetoothd or allows an exec, and 24B119 kills an
+// untrusted binary that launchd did not start, so the 27 build starts no agent (SWITCH_BLUETOOL_PAIRING_AGENT is 17's).
 #include <dispatch/dispatch.h>
 #include <errno.h>
 #include <notify.h>
 #include <os/log.h>
 #include <signal.h>
 #include <spawn.h>
+#include <stdbool.h>
 #include <stdint.h>
 #include <string.h>
 #include <sys/sysctl.h>
@@ -44,23 +51,32 @@ ios_xpc_connection_create_mach_service(const char *name, dispatch_queue_t queue,
 
 static const char kService[] = "com.apple.BlueTool";
 static const char kFirmware[] = "CYW4356A3_001.004.009.0092.0095.hcd";  // nx-firmware patch, loaded by the kernel
-static const char kPairingAgent[] = "/usr/libexec/joyconpaird";         // shown by the overlay unless switch-no-bt
+#if SWITCH_BLUETOOL_PAIRING_AGENT
+static const char kPairingAgent[] = "/usr/libexec/joyconpaird";  // shown by the overlay unless switch-no-bt
+#endif
 
 extern char **environ;
 
+#if SWITCH_BLUETOOL_PAIRING_AGENT
 // The pairing agent, after a chip-boot request has been answered (see the file comment): at every one, so a bluetoothd
 // restart (which ends the agent's session) gets a new agent; one already running keeps its lock and the new one exits.
-// Without the overlay's binary there is nothing to start.
+// The overlay shows the agent whenever it shows this stand-in (one boot-arg gates both), so a failed access is an error.
 static void startPairingAgent(void)
 {
-    if (access(kPairingAgent, X_OK))
+    if (access(kPairingAgent, X_OK)) {
+        static bool reported;
+        if (!reported)
+            os_log_error(OS_LOG_DEFAULT, "BlueTool: %{public}s not started: access: %{errno}d", kPairingAgent, errno);
+        reported = true;
         return;
+    }
     char *argv[] = {(char *)kPairingAgent, NULL};
     pid_t pid;
     const int error = posix_spawn(&pid, kPairingAgent, NULL, NULL, argv, environ);
     if (error)
         os_log_error(OS_LOG_DEFAULT, "BlueTool: %{public}s not started: %d", kPairingAgent, error);
 }
+#endif
 
 #if SWITCH_DEBUG
 // Debug builds: the GPU context-switch stress (drivers/TegraGM20BMetal/raw/test/fetchform.cpp), once per Darwin notification
@@ -150,8 +166,10 @@ static void answer(xpc_connection_t peer, xpc_object_t message)
     }
     xpc_connection_send_message(peer, reply);
     xpc_release(reply);
+#if SWITCH_BLUETOOL_PAIRING_AGENT
     if (id && !strcmp(id, "RunBuiltinScript"))
         startPairingAgent();
+#endif
 }
 
 int main(void)

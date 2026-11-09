@@ -43,18 +43,23 @@ void ExpectBefore(const std::string &text, const std::string &a, const std::stri
     EXPECT_LT(at, bt) << a << " before " << b;
 }
 
-// XNU's kern_exec.c (the vendored kernel/xnu-10063.141.1), by its runfiles path (XNU_KERN_EXEC, the BUILD's
-// $(rootpath)): not a file of this test's package.
-std::string XnuKernExec()
+// A file outside this test's package by its runfiles path (the BUILD's $(rootpath)).
+std::string Runfile(const char *path)
 {
-    std::ifstream file(XNU_KERN_EXEC, std::ios::binary);
+    std::ifstream file(path, std::ios::binary);
     if (!file) {
-        ADD_FAILURE() << "cannot read " << XNU_KERN_EXEC;
+        ADD_FAILURE() << "cannot read " << path;
         return {};
     }
     std::ostringstream text;
     text << file.rdbuf();
     return text.str();
+}
+
+// XNU's kern_exec.c (the vendored kernel/xnu-10063.141.1).
+std::string XnuKernExec()
+{
+    return Runfile(XNU_KERN_EXEC);
 }
 
 }  // namespace
@@ -127,12 +132,75 @@ TEST(DisplayPlanesSource, DriverFollowsTheRules)
     EXPECT_THAT(source, Not(HasSubstr("publishDetachAlignment")));
     EXPECT_THAT(Method(source, "    void publishStrideRequirements()\n"),
                 HasSubstr("OSNumber::withNumber(native_planes::kPublishedRowAlignment, 32)"));
-    EXPECT_THAT(Method(source, "    void publishPlaneLimits()\n"),
-                HasSubstr("{\"PlaneBaseAlignmentLinear\", native_planes::kPublishedBaseAlignment}"));
+    const std::string limits = Method(source, "    void publishPlaneLimits()\n");
+    EXPECT_THAT(limits, HasSubstr("{\"PlaneBaseAlignmentLinear\", native_planes::kPublishedBaseAlignment}"));
+    // iOS 27's own limits; iOS 17's dictionary has no key they add.
+    EXPECT_THAT(limits,
+                HasSubstr("publish(\"IOMFBMaxSrcPixels\", source, limits.compressionUnsupported ? 8 : 7, 64);"));
+    ExpectBefore(limits, "#if SWITCH_IPSW_KIND_24B119", "native_planes::kLimits24B119;");
+    EXPECT_THAT(
+        limits,
+        HasSubstr("if (limits.packedYuvUnsupported)\n            setProperty(\"IOMFBYUVPackedUnSupported\", true);"));
     // The service is found as J120's: IOServiceMatching("AppleCLCD").
     EXPECT_THAT(
         source,
         HasSubstr(": OSMetaClass(\"AppleCLCD\", NativeLegacyDisplay::superClass, sizeof(NativeLegacyDisplay))"));
+}
+
+// The first-boot data migration keeps XNU's console on screen (switch_console_hold). A released console stops drawing, so
+// a swap kicked under the hold releases nothing and draws nothing: it retires at once, or with what is still out when
+// retiring at the latch, before the kick reaches anything that takes the screen (native_legacy_prepare_scanout, a copy,
+// a flip or window B).
+TEST(DisplayPlanesSource, TheConsoleHoldKeepsTheScreen)
+{
+    const std::string source = SourceText("../NativeLegacyDisplay.cpp");
+    const std::string planes = SourceText("../NativePlanesDisplay.h");
+    EXPECT_EQ(Count(source, "switch_console_hold"), 4u);  // the declaration, consoleHolds and its comment
+    const std::string holds = Method(source, "    bool consoleHolds() const\n");
+    ExpectBefore(holds, "if (rotated || &switch_console_hold == nullptr)\n            return false;",
+                 "return switch_console_hold != 0;");
+    const std::string kick = Method(source, "    void kickOnce()\n");
+    ExpectBefore(kick, "planeDecide(request, pd);", "if (consoleHolds()) {\n            kickHeld(request,");
+    for (const char *taker : {"kickPlaneOnly(request, pd", "native_legacy_prepare_scanout()", "offerDirect(",
+                              "offerGpuCopy(", "startCopy(", "presentBlock();"})
+        ExpectBefore(kick, "kickHeld(request,", taker);
+    const std::string held =
+        Method(source, "    void kickHeld(const OriginalLegacySwapRequest *request, uint64_t kickAt)\n");
+    ExpectBefore(held, "noteTaken(request, kickAt);", "retireUnshown(seqOf(request));");
+    EXPECT_THAT(held, HasSubstr("finishTransfer(request, true);"));
+    for (const char *taker : {"native_legacy_prepare_scanout", "presentBlock", "flip", "ring.", "plane"})
+        EXPECT_THAT(held, Not(HasSubstr(taker))) << taker;
+    EXPECT_THAT(Method(source, "    void presentBlock()\n"), Not(HasSubstr("hold")));
+    const std::string unshown = Function(planes, "void retireUnshown(uint64_t seq)\n");
+    ExpectBefore(unshown, "if (!latchRetire)", "retireThrough(seq, mach_absolute_time());");
+    for (const char *outstanding : {"planeSetOf(planeLatch.armed).seq = seq;", "planeHeld.seq = seq;",
+                                    "entrySeq[ring.held] = seq;", "entrySeq[ring.pending] = seq;"})
+        ExpectBefore(unshown, outstanding, "retireThrough(seq, mach_absolute_time());");
+    EXPECT_THAT(Function(planes, "void kickPlaneOnly("), HasSubstr("retireUnshown(seq);"));
+}
+
+// A plane slot holds what window B scans from it as a direct slot does (the surface, its wired memory, its layout), and
+// window B scans a surface the GPU renders block-linear so: the image is made for the GPU's layout of it, and a slot whose
+// held layout is not that one is not used.
+TEST(DisplayPlanesSource, PlaneSlotsHoldTheSurfaceTheyScan)
+{
+    const std::string planes = SourceText("../NativePlanesDisplay.h");
+    const std::string make = Function(planes, "int planeSlotFor(");
+    EXPECT_THAT(make, HasSubstr("surface->retain();"));
+    EXPECT_THAT(make, HasSubstr("planeSlots[k].tiled == tiled"));
+    ExpectBefore(make, "tegra_gm20b_surface_hold(", "(held != 0) != tiled");
+    const std::string decide = Function(planes, "void planeDecide(");
+    ExpectBefore(decide, "surfaceLayout(r.surface, block)", "image.surfaceKind != 0);");
+    EXPECT_THAT(Function(planes, "static const tgm_layout *surfaceLayout("),
+                HasSubstr("tegra_gm20b_surface_layout(pa & ~0xfffULL, &block) == 1"));
+    const std::string write = Function(planes, "void planeWriteRegisters(const PlaneSet &p)");
+    EXPECT_THAT(write, HasSubstr("buf[kSurfaceKind] = m.surfaceKind;"));
+    EXPECT_THAT(write, HasSubstr("buf[kVOffset] = m.vOffset;"));
+    EXPECT_THAT(Function(planes, "static bool planeSame("), HasSubstr("x.surfaceKind == y.surfaceKind"));
+    const std::string drop = Function(planes, "void planeDropSlot(unsigned k)");
+    ExpectBefore(drop, "probeDomain.unmap(", "tegra_gm20b_surface_unhold(slot.layout);");
+    ExpectBefore(drop, "tegra_gm20b_surface_unhold(slot.layout);", "slot.memory->release();");
+    ExpectBefore(drop, "slot.memory->release();", "OSSafeReleaseNULL(slot.surface);");
 }
 
 TEST(DisplayPlanesSource, BackboarddDetachesOnlyWhenTheDisplaySaysSo)
@@ -145,4 +213,75 @@ TEST(DisplayPlanesSource, BackboarddDetachesOnlyWhenTheDisplaySaysSo)
     ASSERT_FALSE(exec.empty());
     EXPECT_THAT(exec, Not(HasSubstr("if (single_layer) {")));
     EXPECT_THAT(exec, Not(HasSubstr("if (vbl && single_layer) {")));
+}
+
+// Debug iOS 27 kernels have backboardd log why each layer was or was not detached; release kernels and iOS 17 do not.
+TEST(DisplayPlanesSource, DetachReasonsLoggedOnlyByDebugIos27Kernels)
+{
+    const std::string xnu27 = Runfile(XNU27_KERN_EXEC);
+    const std::string print =
+        Between(xnu27, "#if DEVELOPMENT || DEBUG\n#define NATIVE_SWITCH_CA_PRINT_DETACHING", "#endif");
+    EXPECT_THAT(print, HasSubstr("\"CA_PRINT_DETACHING=1\","));
+    EXPECT_THAT(print, HasSubstr("#else\n#define NATIVE_SWITCH_CA_PRINT_DETACHING\n"));
+    EXPECT_EQ(Count(xnu27, "CA_PRINT_DETACHING=1"), 1u);
+    EXPECT_EQ(Count(xnu27, "NATIVE_SWITCH_CA_PRINT_DETACHING NULL"), 2u);
+    EXPECT_THAT(XnuKernExec(), Not(HasSubstr("CA_PRINT_DETACHING")));
+}
+
+// iOS 27's CoreVideo registers no compressed pixel format (H12's AGX and HTPC tiled layouts), so nothing hands the display
+// a surface in one; iOS 17's MobileGestalt answers have none to begin with.
+TEST(DisplayPlanesSource, Ios27CoreVideoMakesNoCompressedSurfaces)
+{
+    const std::string setup = Between(Runfile(XNU27_KERN_EXEC), "\nnative_switch_setup_state(", "\n}\n");
+    EXPECT_THAT(setup,
+                HasSubstr("{\"com.apple.corevideo\", SWITCH_PLIST(\"<key>disable-buffer-compression</key><true/>\"), "
+                          "kSetupManaged},"));
+    EXPECT_THAT(XnuKernExec(), Not(HasSubstr("disable-buffer-compression")));
+}
+
+// A detached layer refused for its format or layout is logged with its surface's geometry on debug kernels only.
+TEST(DisplayPlanesSource, RefusedLayoutsLoggedOnlyByDebugKernels)
+{
+    const std::string source = SourceText("../NativeLegacyDisplay.cpp");
+    const std::string totals = SourceText("../NativePlanesTotals.h");
+    ExpectBefore(source,
+                 "reason = native_planes::checkUpdated(updated, background, hasSurface, layers, width, height);",
+                 "planeNoteRefused(reason, updated, hasSurface, layers, width, height);");
+    const std::string debug = Between(totals, "#if SWITCH_FRAME_TIMELINE\n", "#else\n");
+    EXPECT_THAT(debug, HasSubstr("switch_refusal_k(key, \"display\", \"plane-layout\","));
+    EXPECT_THAT(
+        Between(totals, "#else\n", "#endif\n"),
+        HasSubstr("static void planeNoteRefused(unsigned, uint32_t, const bool *, const native_planes::Layer *, "
+                  "uint32_t, uint32_t)\n{}"));
+}
+
+// Window B changes whose surface the GPU renders follow NativePlaneFence.h: they ride on the window A frame's present,
+// which also waits for the plane surface's writers, or on a fence of their own whose completion writes them; a frame no
+// present carries drops such a change; nothing writes them from the kick.
+TEST(DisplayPlanesSource, WindowBWaitsForTheGpuOnSurfacesItRenders)
+{
+    const std::string source = SourceText("../NativeLegacyDisplay.cpp");
+    const std::string planes = SourceText("../NativePlanesDisplay.h");
+    const std::string fence = SourceText("../NativePlaneFenceDisplay.h");
+    for (const char *offer : {"    bool offerGpuCopy(", "    bool offerDirect("}) {
+        const std::string body = Method(source, offer);
+        ExpectBefore(body, "copy.alsoWritten = planeNextAlsoWritten();", "tegra_gm20b_scanout_copy(&copy)");
+    }
+    const std::string kick = Method(source, "    void kickOnce()\n");
+    ExpectBefore(kick, "planeNextUnfenced();  // no GPU present carries this frame from here on",
+                 "native_legacy_gpu_offer(this, memory, sourceStride, width, height)");
+    ExpectBefore(kick, "offerGpuCopy(request, memory, sourceStride, allocation, width, height, tiled, kickAt)",
+                 "planeNextUnfenced();  // no GPU present carries this frame from here on");
+    const std::string only = Function(planes, "void kickPlaneOnly(");
+    ExpectBefore(only, "native_planes::planeRoute(planeFenced(p), false, false) == native_planes::PlaneRoute::kNow",
+                 "planeOut(p);");
+    ExpectBefore(only, "} else if (planeFence(p)) {", "transferred = true;");
+    EXPECT_THAT(Function(fence, "bool planeFence(const PlaneSet &p)"),
+                HasSubstr("tegra_gm20b_scanout_fence(this, pa)"));
+    const std::string done = Function(fence, "void finishPlaneFence(int status)");
+    ExpectBefore(done, "if (status || !planesOn) {", "planeOut(planeFencing);");
+    EXPECT_THAT(Method(source, "    void finishGpuSwap(int status)\n"),
+                HasSubstr("if (gpuScanout && planeFencePending) {\n            finishPlaneFence(status);"));
+    EXPECT_THAT(Function(fence, "uint64_t planeFencePa(const PlaneSet &p) const"),
+                HasSubstr("planeSlots[p.slot].memory->getPhysicalSegment(0, &length, kIOMemoryMapperNone)"));
 }

@@ -2,6 +2,7 @@
 // cache as the image ships it, translated offline with every subcache's UUID and mappings kept).
 #include <gtest/gtest.h>
 
+#include <cmath>
 #include <cstdint>
 #include <cstring>
 #include <string>
@@ -22,6 +23,11 @@ const std::vector<TextMapping> kMappings = {
      0x180400000,
      0x7d34000,
      0},
+    {".03",
+     {0x8f, 0x50, 0x44, 0x24, 0x74, 0xa0, 0x3b, 0x04, 0xb1, 0x03, 0xe8, 0xd2, 0x5a, 0x06, 0xe3, 0x8b},
+     0x188400000,
+     0x7cac000,
+     0},
     {".11",
      {0x13, 0xd1, 0x27, 0xbc, 0x9e, 0xd2, 0x36, 0x63, 0xa6, 0x80, 0xfd, 0x90, 0x2f, 0xbb, 0xd2, 0x51},
      0x1a8400000,
@@ -36,6 +42,16 @@ const std::vector<TextMapping> kMappings = {
      {0x4f, 0x44, 0xc1, 0x4a, 0x9b, 0x0b, 0x35, 0x03, 0xaa, 0x96, 0x94, 0xef, 0xd6, 0x5b, 0xca, 0x4e},
      0x1b8400000,
      0x7d04000,
+     0},
+    {".17",
+     {0x4a, 0x4b, 0x97, 0x5a, 0xb4, 0x57, 0x33, 0x56, 0x93, 0xa8, 0x4f, 0x80, 0xc9, 0x09, 0x55, 0x7d},
+     0x1c0400000,
+     0x7d14000,
+     0},
+    {".36",
+     {0xd8, 0x79, 0x2a, 0xca, 0x66, 0xfc, 0x3c, 0xf6, 0xb5, 0x58, 0xc6, 0xf4, 0x75, 0x99, 0x92, 0x10},
+     0x220400000,
+     0x7d24000,
      0},
     {".65",
      {0x06, 0x08, 0xbd, 0x6b, 0xfc, 0x49, 0x35, 0x50, 0xb8, 0xcd, 0x2f, 0x1f, 0x5d, 0x11, 0xc6, 0xcc},
@@ -205,5 +221,209 @@ TEST(XnuUiScaleSites24B119, KeyboardIsThe10Point2InchIPadsBelowItsSize)
         EXPECT_EQ(KeyboardIdiom(patched, screen.width, screen.height),
                   KeyboardIdiom(stock, screen.width, screen.height))
             << screen.width << "x" << screen.height;
+    }
+}
+
+namespace {
+struct Size {
+    double width, height;
+};
+
+// __SBHScreenTypeLookup's fallback for an iPad without a Home button, after no screen type matched exactly: the first
+// of SBDisplayMetrics' sizes the reference bounds are at least as wide and as tall as.
+unsigned NoHomeButtonIPadScreenType(Size bounds)
+{
+    const struct {
+        Size size;
+        unsigned type;
+    } ladder[] = {
+        {{1192, 1590}, 0x70}, {{1024, 1366}, 0x6e}, {{970, 1389}, 0x6d}, {{954, 1373}, 0x6b},
+        {{834, 1194}, 0x6c},  {{820, 1180}, 0x6a},  {{768, 1024}, 0x6f},
+    };
+
+    for (const auto &step : ladder) {
+        if (bounds.width >= step.size.width && bounds.height >= step.size.height) {
+            return step.type;
+        }
+    }
+    return 0x68;
+}
+
+constexpr uint64_t kDefaultRootMetrics = 0x1c61e6580;
+
+// b, bl, b.cond, cbz, cbnz, tbz, tbnz, br, blr or ret
+bool IsBranch(uint32_t insn)
+{
+    return (insn & 0x7c000000u) == 0x14000000u || (insn & 0xff000010u) == 0x54000000u ||
+           (insn & 0x7c000000u) == 0x34000000u || (insn & 0xfe000000u) == 0xd6000000u;
+}
+
+// -[SBGridLayoutSwitcherModifier scale] after the site: the landscape scale across a wider-than-tall container,
+// gridSwitcherPageScale otherwise, rounded to whole points of the width; 0 for a zero width.
+double PatchedPageScale(double page_scale, double width, double height, double landscape_scale)
+{
+    width = std::fabs(width);
+    const double scale = width > height ? landscape_scale : page_scale;
+    const double rounded = std::round(scale * width) / width;
+    return std::isnan(rounded) ? width : rounded;
+}
+}  // namespace
+
+TEST(XnuUiScaleSites24B119, HomeGridIsTheRowOfTheScreenTypeThisScreenGets)
+{
+    for (const char *name : {"1", "1.25", "1.6"}) {
+        const switch_ui_scale *scale = switch_ui_scale_named(name);
+        ASSERT_NE(scale, nullptr);
+        const Size bounds = {720.0 * scale->den / scale->num, 1280.0 * scale->den / scale->num};
+        EXPECT_EQ(NoHomeButtonIPadScreenType(bounds), 0x68u) << name;
+    }
+    EXPECT_EQ(NoHomeButtonIPadScreenType({744, 1133}), 0x68u);  // iPad mini
+    EXPECT_EQ(NoHomeButtonIPadScreenType({820, 1180}), 0x6au);
+
+    const switch_us_site *site = Named("SpringBoardHome home screen grid 3x5");
+    ASSERT_NE(site, nullptr);
+    ASSERT_EQ(site->edits, 2u);
+    const switch_us_edit &root = site->edit[0], &widgets = site->edit[1];
+    // _getRootMetrics' iPad rows are 0x90 bytes: the root grid (portrait columns and rows, then landscape) at +0, the
+    // grid for pages with widgets (portrait; landscape is its transpose) at +0x48
+    EXPECT_EQ(AddressOf(*site, root, 0), kDefaultRootMetrics + 0x10e0);
+    EXPECT_EQ(AddressOf(*site, widgets, 0), AddressOf(*site, root, 0) + 0x48);
+    EXPECT_EQ(std::vector<uint8_t>(root.stock, root.stock + root.length),
+              (std::vector<uint8_t>{5, 6, 6, 5, 0, 0, 0, 0}));
+    EXPECT_EQ(std::vector<uint8_t>(widgets.stock, widgets.stock + widgets.length),
+              (std::vector<uint8_t>{4, 6, 0, 0, 0, 0, 0, 0}));
+    EXPECT_EQ(std::vector<uint8_t>(root.patched, root.patched + root.size), (std::vector<uint8_t>{3, 5, 5, 3}));
+    EXPECT_EQ(std::vector<uint8_t>(widgets.patched, widgets.patched + widgets.size), (std::vector<uint8_t>{3, 5}));
+    EXPECT_TRUE(site->every_scale);  // as 21H461's grid, which its own pager maps at every scale
+}
+
+TEST(XnuUiScaleSites24B119, SwitcherPageScaleKeepsTheShippedCallsAndExit)
+{
+    const switch_us_site *site = Named("SpringBoard app switcher landscape card scale");
+    ASSERT_NE(site, nullptr);
+    ASSERT_EQ(site->edits, 1u);
+    const switch_us_edit &edit = site->edit[0];
+    ASSERT_EQ(edit.length, 32u);
+    EXPECT_EQ(AddressOf(*site, edit, 0), 0x227ae0a98u + 0x38);  // -[SBGridLayoutSwitcherModifier scale]
+    EXPECT_EQ(Word(edit.stock) >> 26, 0x25u);                   // bl CGRectGetWidth
+    EXPECT_EQ(Word(edit.stock + 4), 0x4ea01c09u);               // mov v9.16b, v0.16b
+    EXPECT_EQ(Word(edit.stock + 8) >> 26, 0x25u);               // bl BSFloatIsZero
+    EXPECT_EQ(Word(edit.stock + 12), 0x6f00e400u);              // movi v0.2d, #0
+    EXPECT_EQ(BranchTarget(AddressOf(*site, edit, 16), Word(edit.stock + 16)), AddressOf(*site, edit, 32));
+    EXPECT_EQ(Word(edit.stock + 20), 0x1e690900u);  // fmul d0, d8, d9
+    EXPECT_EQ(Word(edit.stock + 24), 0x1e664000u);  // frinta d0, d0
+    EXPECT_EQ(Word(edit.stock + 28), 0x1e691800u);  // fdiv d0, d0, d9
+    // the patched words fall through to the epilogue the tbnz left for, with the scale in d0
+    ASSERT_EQ(edit.at, 0u);
+    uint8_t out[32] = {};
+    ASSERT_TRUE(switch_ui_scale_edit_bytes(edit.kind, switch_ui_scale_named("1.25"), out, edit.size));
+    for (unsigned i = 0; i < 32; i += 4) {
+        EXPECT_FALSE(IsBranch(Word(out + i))) << i;
+    }
+}
+
+TEST(XnuUiScaleSites24B119, SwitcherCardsAreTheLandscapeScaleOnlyInLandscape)
+{
+    for (const char *name : {"1.25", "1.6"}) {
+        SCOPED_TRACE(name);
+        const switch_ui_scale *scale = switch_ui_scale_named(name);
+        ASSERT_NE(scale, nullptr);
+        const double pixels = static_cast<double>(scale->num) / scale->den;
+        const double width = 1280 / pixels, height = 720 / pixels;
+        const double landscape_scale = static_cast<double>(scale->grid_num) / scale->grid_den;
+        EXPECT_EQ(PatchedPageScale(0.3, width, height, landscape_scale), landscape_scale);
+        EXPECT_NEAR(PatchedPageScale(0.3, height, width, landscape_scale), 0.3, 0.5 / height);
+        EXPECT_EQ(PatchedPageScale(0.3, 0, 0, landscape_scale), 0);
+        EXPECT_EQ(PatchedPageScale(0.3, -width, height, landscape_scale), landscape_scale);
+    }
+    // 1.25: 256 x 144 point cards in landscape (320 x 180 pixels)
+    EXPECT_EQ(1024 * PatchedPageScale(0.3, 1024, 576, 0.25), 256);
+    EXPECT_EQ(576 * PatchedPageScale(0.3, 1024, 576, 0.25), 144);
+}
+
+TEST(XnuUiScaleSites24B119, PlaceholderBatchDeadlineIsNPlusTenTimesFiveInBothCopies)
+{
+    const switch_us_site *site = Named("WidgetKit placeholder batch deadline (n + 10) x 5 s");
+    ASSERT_NE(site, nullptr);
+    EXPECT_TRUE(site->every_scale);
+    ASSERT_EQ(site->edits, 2u);
+    // the getter and DefaultWatchdogTimeoutProvider's function, each + 0x38
+    EXPECT_EQ(AddressOf(*site, site->edit[0], 0), 0x18bd532d4u + 0x38);
+    EXPECT_EQ(AddressOf(*site, site->edit[1], 0), 0x18bd537b8u + 0x38);
+    // clang -arch arm64: fadd d1, d0, d1; fmov d2, #10.0; fmaxnm d1, d1, d2; fadd d0, d0, d2; fmov d2, #20.0;
+    // fmaxnm d0, d0, d2; cmp w9, #0; fcsel d0, d1, d0, eq -> fmov d2, #5.0; fmul d0, d0, d2 for the last two of six
+    const std::vector<uint32_t> stock = {0x1e612801u, 0x1e649002u, 0x1e626821u, 0x1e622800u,
+                                         0x1e669002u, 0x1e626800u, 0x7100013fu, 0x1e600c20u};
+    for (unsigned e = 0; e < site->edits; e++) {
+        SCOPED_TRACE(e);
+        const switch_us_edit &edit = site->edit[e];
+        ASSERT_EQ(edit.length, 4 * stock.size());
+        for (size_t i = 0; i < stock.size(); i++) {
+            EXPECT_EQ(Word(edit.stock + 4 * i), stock[i]) << i;
+        }
+        EXPECT_EQ(edit.kind, SWITCH_US_FIXED);
+        ASSERT_EQ(edit.at, 16u);
+        ASSERT_EQ(edit.size, 8u);
+        EXPECT_EQ(Word(edit.patched), 0x1e629002u);
+        EXPECT_EQ(Word(edit.patched + 4), 0x1e620800u);
+    }
+    // getPlaceholders(13): 23 s shipped, 115 s after
+    const double n = 13;
+    EXPECT_EQ(std::fmax(n + 10, 20), 23);
+    EXPECT_EQ((n + 10) * 5, 115);
+}
+
+namespace {
+// The archiver's limit in pixels for a widget of `points` and a display scale (the site's caller's arithmetic): 2.2
+// and 2 times the widget's pixels, each at least 80
+double ArchivedImageLimit(Size points, double scale)
+{
+    return std::fmax(2.2 * points.width * scale, 80) * std::fmax(2.0 * points.height * scale, 80);
+}
+}  // namespace
+
+TEST(XnuUiScaleSites24B119, ArchivedImageLimitIsAt2xInsteadOfTheDisplaysScale)
+{
+    const switch_us_site *site = Named("WidgetKit archived image limit of a 2x screen");
+    ASSERT_NE(site, nullptr);
+    EXPECT_TRUE(site->every_scale);
+    ASSERT_EQ(site->edits, 1u);
+    const switch_us_edit &edit = site->edit[0];
+    ASSERT_EQ(edit.length, 32u);
+    EXPECT_EQ(edit.kind, SWITCH_US_FIXED);
+    // bl size (its CGSize in d0, d1); mov v10.16b, v0.16b; mov v11.16b, v1.16b; mov x0, x20; bl scale;
+    // fmul d10, d10, d0; mov x0, x20; bl scale
+    EXPECT_EQ(Word(edit.stock) >> 26, 0x25u);
+    EXPECT_EQ(Word(edit.stock + 4), 0x4ea01c0au);
+    EXPECT_EQ(Word(edit.stock + 8), 0x4ea11c2bu);
+    EXPECT_EQ(Word(edit.stock + 12), 0xaa1403e0u);
+    EXPECT_EQ(Word(edit.stock + 16) >> 26, 0x25u);
+    EXPECT_EQ(Word(edit.stock + 20), 0x1e60094au);
+    EXPECT_EQ(Word(edit.stock + 24), 0xaa1403e0u);
+    EXPECT_EQ(Word(edit.stock + 28) >> 26, 0x25u);
+    // both sends go to the same objc stub
+    EXPECT_EQ(BranchTarget(AddressOf(*site, edit, 16), Word(edit.stock + 16)),
+              BranchTarget(AddressOf(*site, edit, 28), Word(edit.stock + 28)));
+    ASSERT_EQ(edit.at, 16u);
+    ASSERT_EQ(edit.size, 16u);
+    EXPECT_EQ(Word(edit.patched), switch_a64_fmov_d_int(0, 2));
+    EXPECT_EQ(std::memcmp(edit.patched + 4, edit.stock + 20, 8), 0);
+    EXPECT_EQ(Word(edit.patched + 12), switch_a64_fmov_d_int(0, 2));
+
+    // boot 15: GameCenter's 310 x 310 artwork in the lock screen's 103.5 point small widget
+    const Size widget = {103.5, 103.5};
+    EXPECT_NEAR(ArchivedImageLimit(widget, 1.25), 73646.71875, 1e-6);
+    EXPECT_GT(310.0 * 310.0, ArchivedImageLimit(widget, 1.25));
+    EXPECT_LE(310.0 * 310.0, ArchivedImageLimit(widget, 2));
+}
+
+TEST(XnuUiScaleSites24B119, OnlyTheGridAndWidgetKitApplyAtScaleOne)
+{
+    for (size_t i = 0; i < kCache.count; i++) {
+        const std::string name = switch_ui_scale_sites::NameOf(kCache.sites[i]);
+        const bool every_scale = name == "SpringBoardHome home screen grid 3x5" ||
+                                 name == "WidgetKit placeholder batch deadline (n + 10) x 5 s" ||
+                                 name == "WidgetKit archived image limit of a 2x screen";
+        EXPECT_EQ(kCache.sites[i].every_scale, every_scale) << name;
     }
 }

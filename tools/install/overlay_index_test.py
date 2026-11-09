@@ -13,6 +13,26 @@ FILES = [
 ]
 
 
+class OriginalsTest(unittest.TestCase):
+    def test_layout_sorted_by_original(self):
+        raw = overlay_index.encode_originals([(bytes([9] * 20), bytes([1] * 20)), (bytes([4] * 20), bytes([2] * 20))])
+        self.assertEqual(overlay_index.HEADER_ORIGINALS.unpack_from(raw), (b'SWOR', 1, 2, 0))
+        body = raw[overlay_index.HEADER_ORIGINALS.size :]
+        self.assertEqual(body, bytes([4] * 20) + bytes([2] * 20) + bytes([9] * 20) + bytes([1] * 20))
+
+    def test_a_pair_given_twice_is_written_once(self):
+        pair = (bytes([4] * 20), bytes([2] * 20))
+        self.assertEqual(overlay_index.encode_originals([pair, pair]), overlay_index.encode_originals([pair]))
+
+    def test_one_original_translated_two_ways_is_refused(self):
+        with self.assertRaises(overlay_index.OverlayIndexError):
+            overlay_index.encode_originals([(bytes(20), bytes([1] * 20)), (bytes(20), bytes([2] * 20))])
+
+    def test_short_cdhashes_are_refused(self):
+        with self.assertRaises(overlay_index.OverlayIndexError):
+            overlay_index.encode_originals([(bytes(19), bytes(20))])
+
+
 class OverlayIndexTest(unittest.TestCase):
     def test_layout(self):
         raw = overlay_index.encode(FILES, [7, 5])

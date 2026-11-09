@@ -20,6 +20,7 @@
 #include <set>
 #include <string>
 #include <thread>
+#include <unordered_map>
 #include <vector>
 #include "GpuMemoryRelease.h"
 #include "LimitsTable.h"
@@ -41,6 +42,10 @@ extern "C" id native_bridge_metal_texture_in_place(id buffer, id descriptor, NSU
 extern "C" id native_bridge_metal_texture_tiled_in_place(id buffer, id descriptor, NSUInteger offset)
     __attribute__((weak_import));
 extern "C" id native_bridge_metal_render_pipeline_lazy(id device, id descriptor, NSUInteger options)
+    __attribute__((weak_import));
+// Where NVK keeps a texture's texels (a stored depth/stencil texture the raw path renders and copies in place)
+struct switch_nvk_image_memory;
+extern "C" int native_bridge_metal_texture_memory(id texture, struct switch_nvk_image_memory *out)
     __attribute__((weak_import));
 
 // A wait the plugin bounds (r9-hang: r7n's and r7o's freezes were a userland wait with no end in backboardd's render thread):
@@ -64,8 +69,9 @@ struct Stats {
     // diagnostics (r10-rawsweep): the raw encode thrown away by aborted command buffers, the m2v replay's time on the committing
     // thread (replay + commit), and the bytes replay cleans
     std::atomic<uint64_t> abortUs{0}, replayUs{0}, replayClean{0};
-    // command buffers submitted in segments (planSegments), and their segments on m2v
-    std::atomic<uint64_t> splits{0}, splitM2v{0};
+    // command buffers submitted in segments (planSegments), and their segments on m2v; of those with both drivers' encoders, the
+    // ones split around their shared events, and the ones kept whole for an event wait or signal between encoders
+    std::atomic<uint64_t> splits{0}, splitM2v{0}, eventSplits{0}, eventWhole{0};
     // command buffers completed (finish): with the commits, what the stall line (rawStall) watches
     std::atomic<uint64_t> finished{0};
     // waitUntilScheduled / waitUntilCompleted calls that blocked, and the time they blocked: CPU waits on the caller's thread
@@ -78,7 +84,9 @@ struct Stats {
     std::atomic<uint64_t> replayDraws{0}, twinTextures{0}, twinBuffers{0}, twinOthers{0}, twinTextureUs{0};
     // command buffers completed before their submitting thread scheduled them (finish() ran their scheduled handlers)
     std::atomic<uint64_t> scheduledByFinish{0};
-    std::atomic<uint64_t> twinForwards{0};  // selectors a facade object forwarded to its m2v twin (RMObject)
+    std::atomic<uint64_t> twinForwards{
+        0};  // selectors m2v's object answers that a facade object has no method for (answerMissing)
+    std::atomic<uint64_t> zeroAnswers{0};  // selectors answered zero, as m2v's objects answer them (answerZero)
 #endif
 };
 
@@ -150,10 +158,24 @@ extern RawState *gRM;
 
 // RawMetalPredicates.mm
 const char *metalTypes(SEL selector);
+// m2v's object of `twinClass` has a method for `selector`: else it answers zero (the frontend's forwardZero), and so does the
+// facade's object, with no twin made and nothing sent to m2v (answerZero)
+bool twinAnswers(Class twinClass, SEL selector);
+void answerZero(id object, NSInvocation *invocation);
+// A selector m2v's object answers that raw has no method for: answered zero, a fault in debug builds and the rates line's tw=../f
+void answerMissing(id object, NSInvocation *invocation);
 bool rawShape(MTLTextureDescriptor *d);
 bool chainShape(MTLTextureDescriptor *d);
+bool lineShape(MTLTextureDescriptor *d);
+bool volumeShape(MTLTextureDescriptor *d);
+bool volumeRendered(MTLTextureDescriptor *d);
+uint32_t arrayType(MTLTextureDescriptor *d);
 bool zetaDescriptor(MTLTextureDescriptor *d);
+bool multisampleShape(MTLTextureDescriptor *d);
 uint32_t rawShapeTerm(MTLTextureDescriptor *d);
+bool identitySwizzle(MTLTextureSwizzleChannels s);
+// `t` reading its channels through `s` (a descriptor's swizzle, or a swizzled view's): its raw header, its descriptor
+id<MTLTexture> swizzled(id<MTLTexture> t, MTLTextureSwizzleChannels s);
 // A texture the raw path does not keep: its predicate, and the predicate's first line with the texture's details
 void refuseTexture(RMTexture *t, RMPred p, uint64_t a, uint64_t b, NSString *kind, NSString *extra);
 void keepExtendedRange(MTLTextureDescriptor *d, raw::Texture &t, bool overBuffer);
@@ -179,15 +201,30 @@ uint64_t bufferRow(const BufferRows &r, uint64_t offset, uint64_t bytesPerRow, u
 // RawMetalLibrary.mm
 RMLibrary *wrapLibrary(id device, id<MTLLibrary> twin, NSString *path);
 
+// RawMetalHeap.mm: the purged heaps a committed command buffer's resources lie in, given their pages back before it is encoded
+// (it counts as committed already, so no purge runs meanwhile)
+void restoreArenas(RMCommandBuffer *cb);
+
 // RawMetalTexture.mm
 void declareGpuWrites(RMTexture *t);
 #if SWITCH_FRAME_TIMELINE
 void traceSurfaceImage(RMTexture *t, const char *what, uint32_t seed);
 #endif
 
+// RawMetalEncode.mm: the imports a texture's or buffer's memory lies in, named to the submission
+void useTexture(raw::CommandBuffer *rc, RMTexture *t, bool write);
+void useBuffer(raw::CommandBuffer *rc, RMBuffer *b, bool write);
+
+// RawMetalEncodeBlit.mm: a blit encoder's command of the tape onto the raw path's copy engine; a texture it writes leaves
+// `fresh` and `standInFresh` (its pool image and its stand-in are refreshed again before a sample)
+void encodeBlit(RMCommandBuffer *cb, const Cmd &c, raw::CommandBuffer *rc, raw::BlitEncoder *be,
+                std::set<RMTexture *> &fresh, std::set<RMTexture *> &standInFresh);
+
 // RawMetalTextureCpu.mm
 void cpuTiled(RMTexture *t, MTLRegion r, uint8_t *bytes, NSUInteger row, bool write);
 void cpuLevel(RMTexture *t, MTLRegion r, NSUInteger level, uint8_t *bytes, NSUInteger row, bool write);
+void cpuVolume(RMTexture *t, MTLRegion r, uint8_t *bytes, NSUInteger row, NSUInteger image, bool write);
+void cpuLayer(RMTexture *t, MTLRegion r, NSUInteger slice, uint8_t *bytes, NSUInteger row, bool write);
 
 // RawMetalDevice.mm
 const char *ycbcrPlan(MTLTextureDescriptor *d, IOSurfaceRef s, NSUInteger plane, raw::YcbcrPlan &out);
@@ -221,6 +258,15 @@ void surfaceConverted(IOSurfaceRef s, bool made);  // a planar or YCbCr texture 
 uint64_t surfaceWrites(IOSurfaceRef s);
 void noteSurfaceWrite(IOSurfaceRef s);
 void noteSurfaceWrites(RMCommandBuffer *cb, size_t from, size_t to);  // after [from, to) of `cb` was submitted
+
+// RawMetalDeviceAnswers.mm: the per-kind capability answers (raw_device_answers.h) as methods of the device class `cls`, where
+// it has none of its own; and an argument query's answer
+void installDeviceAnswers(Class cls);
+uint64_t deviceAnswer(SEL selector, uint64_t argument);
+
+// RawMetalQueuePriority.mm
+void queuePriorityAdd(RMQueue *queue);
+void queuePriorityRemove(RMQueue *queue);
 
 // RawMetalSubmit.mm
 void orderRefused(const char *what, int kr);

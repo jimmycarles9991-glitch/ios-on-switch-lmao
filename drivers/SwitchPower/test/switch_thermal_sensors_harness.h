@@ -22,6 +22,8 @@ const char *j181_sensor_name(unsigned i);
 int j181_sensor_source(unsigned i);
 int j181_sensor_info_only(unsigned i);
 uint64_t j181_sensors_read_mask(void);
+int tcal_millic_j120(void);
+int tcal_millic_j181(void);
 int fixed_of(int milli_c);
 int cltm_centi(int fixed);
 int cltm_valid(int centi);

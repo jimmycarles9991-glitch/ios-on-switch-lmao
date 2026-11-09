@@ -41,7 +41,8 @@ extern "C" void native_aks_unsupported(uint32_t selector);
 
 namespace {
 constexpr uint32_t kSelLockState = 7, kSelWrapKey = 10, kSelUnwrapKey = 11, kSelGetSystem = 14, kSelDeviceState = 17,
-                   kSelGetBagUUID = 23, kSelGetConfiguration = 31, kSelExtendedDeviceState = 35, kSelMementoState = 139;
+                   kSelGetBagUUID = 23, kSelGetConfiguration = 31, kSelExtendedDeviceState = 35,
+                   kSelSeSupportInRecovery = 107, kSelMementoState = 139;
 constexpr uint64_t kUnlockedSinceBoot = 4;
 constexpr uint32_t kStateFlags = 4;
 constexpr uint64_t kSystemHandle = 0;
@@ -306,6 +307,15 @@ OSDeclareDefaultStructors(AppleKeyStoreUserClient) public : IOReturn clientClose
                     rc = writeStructure(args, uuid, sizeof uuid);
                 break;
             }
+            // aks_se_support_in_rm_is_set (iOS 27's keybagd): no Secure Enclave, so no SE support in recovery mode.
+            case kSelSeSupportInRecovery:
+                if (args->scalarInputCount != 0 || args->scalarOutputCount != 1 || !args->scalarOutput) {
+                    rc = kAksBadArgument;
+                    break;
+                }
+                args->scalarOutput[0] = 0;
+                rc = kIOReturnSuccess;
+                break;
             case kSelGetConfiguration:
             case kSelMementoState:
                 rc = (args->scalarInputCount == 1 && args->scalarOutputCount == 0) ? kAksNotFound : kAksBadArgument;

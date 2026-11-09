@@ -23,9 +23,13 @@
     "132": "message",
     "140": "newUserClient",
     "171": "newTransportString",
+    "172": "newManufacturerString",
     "173": "newProductString",
+    "174": "newVendorIDNumber",
+    "175": "newProductIDNumber",
     "180": "newReportDescriptor",
-    "181": "handleReport"
+    "181": "handleReport",
+    "191": "newSerialNumberString"
   },
   "fields": {},
   "addresses": {
@@ -49,10 +53,10 @@
     "newUserClient": "0xfffffff0098d9044",
     "message": "0xfffffff0098d9484",
     "newTransportString": "0xfffffff0098d9884",
-    "opaque172": "0xfffffff0098d9890",
+    "newManufacturerString": "0xfffffff0098d9890",
     "newProductString": "0xfffffff0098d989c",
-    "opaque174": "0xfffffff0098d98a8",
-    "opaque175": "0xfffffff0098d98b4",
+    "newVendorIDNumber": "0xfffffff0098d98a8",
+    "newProductIDNumber": "0xfffffff0098d98b4",
     "opaque176": "0xfffffff0098d98c0",
     "opaque177": "0xfffffff0098d98cc",
     "handleReport": "0xfffffff0098d98d8",
@@ -66,7 +70,7 @@
     "opaque188": "0xfffffff0098da15c",
     "opaque189": "0xfffffff0098da220",
     "opaque190": "0xfffffff0098da264",
-    "opaque191": "0xfffffff0098da2a4",
+    "newSerialNumberString": "0xfffffff0098da2a4",
     "opaque192": "0xfffffff0098da3a8",
     "opaque193": "0xfffffff0098da3b4",
     "opaque194": "0xfffffff0098da3d8",
@@ -103,8 +107,11 @@
     "init": "slot 21 by PAC of _ZN15IORegistryEntry4initEP12OSDictionary",
     "matchPropertyTable": "slot 101 by PAC of _ZN9IOService18matchPropertyTableEP12OSDictionaryPi",
     "message": "slot 132 by PAC of _ZN9IOService7messageEjPS_Pv",
+    "newManufacturerString": "slot 172 by PAC of _ZNK11IOHIDDevice21newManufacturerStringEv",
+    "newProductIDNumber": "slot 175 by PAC of _ZNK11IOHIDDevice18newProductIDNumberEv",
     "newProductString": "slot 173 by PAC of _ZNK11IOHIDDevice16newProductStringEv",
     "newReportDescriptor": "slot 180 by PAC of _ZNK11IOHIDDevice19newReportDescriptorEPP18IOMemoryDescriptor",
+    "newSerialNumberString": "slot 191 by PAC of _ZNK11IOHIDDevice21newSerialNumberStringEv",
     "newTransportString": "slot 171 by PAC of _ZNK11IOHIDDevice18newTransportStringEv",
     "newUserClient": "slot 140 by PAC of _ZN9IOService13newUserClientEP4taskPvjP12OSDictionaryPP12IOUserClient",
     "setProperty": "slot 23 by PAC of _ZN15IORegistryEntry11setPropertyEPK8OSSymbolP8OSObject",
@@ -114,5 +121,12 @@
     "vtable": "metaclass initialiser",
     "willTerminate": "slot 76 by PAC of _ZN9IOService13willTerminateEPS_j"
   },
-  "hints": {}
+  "hints": {
+    "layout": {
+      "174": "newVendorIDNumber"
+    },
+    "evidence": {
+      "newVendorIDNumber": "its PAC diversity (0x4897) is also IOService slot 85's; publishProperties (0xfffffff0098d75d4) calls slot 174 (vtable +0x570) for the VendorID it publishes"
+    }
+  }
 }

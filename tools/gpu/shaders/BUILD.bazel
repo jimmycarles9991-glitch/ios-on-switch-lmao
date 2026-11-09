@@ -12,6 +12,10 @@ lint_files()
 py_library(
     name = "metallib",
     srcs = ["metallib.py"],
+    visibility = [
+        "//drivers/TegraGM20BMetal:__pkg__",
+        "//gpu:__subpackages__",
+    ],
 )
 
 py_library(

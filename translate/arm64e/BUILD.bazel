@@ -15,6 +15,7 @@ load("@rules_cc//cc:cc_binary.bzl", "cc_binary")
 load("@rules_cc//cc:cc_library.bzl", "cc_library")
 load("@rules_python//python:py_binary.bzl", "py_binary")
 load("@rules_python//python:py_library.bzl", "py_library")
+load("@rules_python//python:py_test.bzl", "py_test")
 load("//bazel/lint:defs.bzl", "lint_files")
 
 package(default_visibility = ["//visibility:public"])
@@ -41,6 +42,7 @@ filegroup(
         "a64x/a64x_classify.c",
         "a64x/a64x_fp16.h",
         "a64x/a64x_image.c",
+        "a64x/a64x_refs.c",
         "a64x/a64x_rewrite.c",
         "a64x/a64x_vlive.h",
     ],
@@ -53,6 +55,7 @@ MACHO_SRCS = [
     "macho/fips.c",
     "macho/macho.c",
     "macho/pretranslate.c",
+    "macho/pt_entries.c",
     "macho/pt_verify.c",
     "macho/sha256.c",
     "macho/stub_split.c",
@@ -78,6 +81,7 @@ cc_library(
     srcs = [
         "a64x/a64x_classify.c",
         "a64x/a64x_image.c",
+        "a64x/a64x_refs.c",
         "a64x/a64x_rewrite.c",
     ],
     hdrs = ["a64x/a64x.h"],
@@ -122,7 +126,10 @@ filegroup(
 # (paths.py). bindings*.py and check_got_order_17.py are the 26.5.2 bindings run as it was, with that run's paths.
 py_library(
     name = "prelink26",
-    srcs = glob(["xnu/prelink26/*.py"]),
+    srcs = glob(
+        ["xnu/prelink26/*.py"],
+        exclude = ["xnu/prelink26/*_test.py"],
+    ),
     deps = [
         "//tools/common:macho",
         "//tools/prelink:native_prelink",
@@ -134,4 +141,22 @@ py_binary(
     srcs = ["xnu/prelink26/prelink.py"],
     main = "xnu/prelink26/prelink.py",
     deps = [":prelink26"],
+)
+
+# shapes.py with the instructions of the bindings it refuses (24B119's kalloc.c frees, port_name_to_task).
+py_test(
+    name = "shapes_test",
+    size = "small",
+    srcs = ["xnu/prelink26/shapes_test.py"],
+    imports = ["xnu/prelink26"],
+    deps = [":prelink26"],
+)
+
+# The selected kind's iOS 27 kernel names: no binding whose instructions are not our function's.
+py_test(
+    name = "prelink_shapes_test",
+    size = "small",
+    srcs = ["xnu/prelink26/prelink_shapes_test.py"],
+    data = ["//kernel:prelink_report"],
+    deps = ["@rules_python//python/runfiles"],
 )

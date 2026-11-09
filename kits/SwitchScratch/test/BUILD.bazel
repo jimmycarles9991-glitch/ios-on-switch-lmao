@@ -1,0 +1,39 @@
+# kits/SwitchScratch on the host, against a descriptor that keeps XNU's memory ownership rule.
+#
+#   bazel test //kits/SwitchScratch/test:all
+load("//bazel/lint:defs.bzl", "lint_files")
+load("//bazel/testing:defs.bzl", "host_library", "host_shims", "host_test")
+
+lint_files()
+
+host_shims(
+    name = "kernel",
+    headers = [
+        "IOKit/IOBufferMemoryDescriptor.h",
+        "IOKit/IOLib.h",
+        "IOKit/IOLocks.h",
+        "kern/clock.h",
+        "kern/task.h",
+        "mach/mach_types.h",
+    ],
+    stubs = "switch_scratch_stubs.h",
+)
+
+host_library(
+    name = "scratch",
+    srcs = [
+        "//kits/SwitchScratch:SwitchScratch.cpp",
+        "//kits/SwitchTime:SwitchTime.h",
+    ],
+    hdrs = ["//kits/SwitchScratch:SwitchScratch.h"],
+    deps = [":kernel"],
+)
+
+host_test(
+    name = "switch_scratch_test",
+    srcs = ["switch_scratch_test.cpp"],
+    deps = [
+        ":kernel",
+        ":scratch",
+    ],
+)

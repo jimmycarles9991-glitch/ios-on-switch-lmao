@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 // raw/runtime/raw_tiled_cache.h on the host: with the kernel's TegraGM20BInfoTiledCache the raw path's context gets
-// deko3d's tiled-cache configuration (gpu_3d_base.cpp:226-231, NVN's on the Tegra X1) and then the enable, and each
-// command buffer's tail is one TiledCacheFlush; without the bit nothing is emitted.
+// deko3d's tiled-cache configuration (gpu_3d_base.cpp:226-231, NVN's on the Tegra X1) and then the enable, each pass's
+// draws and each command buffer's tail end in one TiledCacheFlush; without the bit nothing is emitted.
 #include <gtest/gtest.h>
 
 #include <cstdint>
@@ -56,6 +56,17 @@ TEST(RawTiledCache, NothingWithoutTheKernelsTable)
     raw::tiledCacheInit(p, info(TegraGM20BInfoHostImport | TegraGM20BInfoOrder));
     EXPECT_EQ(p.at, words);
     EXPECT_FALSE(raw::tiledCache(info(0)));
+}
+
+TEST(RawTiledCache, PassEndDrainsTheCoalescer)
+{
+    uint32_t words[4];
+    raw::Push p{words, words + 4};
+    raw::tiledCacheDrain(p, info(TegraGM20BInfoHostImport | TegraGM20BInfoTiledCache));
+    EXPECT_EQ(decode(words, p.at), (Methods{{0x0f80, 0}}));
+    raw::Push off{words, words + 4};
+    raw::tiledCacheDrain(off, info(TegraGM20BInfoHostImport));
+    EXPECT_EQ(off.at, words);
 }
 
 TEST(RawTiledCache, TailIsOneFlush)

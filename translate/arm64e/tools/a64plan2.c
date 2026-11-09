@@ -322,7 +322,19 @@ static bool plan_is_code(void *ctx, uint64_t va)
     uint64_t x = (fm[q].off + va - fm[q].addr) / 4;
     return codebits[fm[q].file][x >> 3] & (1 << (x & 7));
 }
-static const struct a64x_code_map plan_code_map = {NULL, plan_is_code, 0};
+
+static uint8_t *refbits[512];
+
+static bool plan_is_target(void *ctx, uint64_t va)
+{
+    (void)ctx;
+    int q = map_of(va);
+    if (q < 0)
+        return false;
+    uint64_t x = (fm[q].off + va - fm[q].addr) / 4;
+    return refbits[fm[q].file] && (refbits[fm[q].file][x >> 3] & (1 << (x & 7)));
+}
+static const struct a64x_code_map plan_code_map = {NULL, plan_is_code, 0, plan_is_target};
 
 static uint32_t word_at(uint64_t va)
 {
@@ -538,41 +550,20 @@ static void load_landing_pads(const uint8_t *m)
 
 static uint64_t n_indirect_br, n_jt, n_jt_targets, n_jt_unresolved;
 
-/*
- * arm64e hardened jump table (BR_JumpTable):
- *   cmp x16, #N | csel x16, x16, xzr, ls | adrp x17, T | add x17, x17, T | ldrsw x16, [x17, x16, lsl #2] | adr x17, B |
- *   add x16, x17, x16 | br x16              -> targets B + (int32)T[i], i = 0..N
- * (N above 4095: mov x17, #N | cmp x16, x17). Returns the number of targets pushed, or -1 if va is no such dispatch.
- */
+/* The targets of the arm64e hardened jump table whose BR is at va (a64x_jump_table): how many were pushed, 0 for an
+ * unresolved one, -1 if va is no such dispatch. */
 static int jump_table(uint64_t va, uint64_t **stack, size_t *sp, size_t *cap)
 {
-    uint32_t w[8];
-    for (int k = 0; k < 8; k++)
-        w[k] = word_at(va - 4 * (7 - k));
-    if (w[7] != 0xD61F0200u || w[6] != 0x8B100230u || (w[5] & 0x9F00001Fu) != 0x10000011u || w[4] != 0xB8B07A30u ||
-        (w[3] & 0xFFC003FFu) != 0x91000231u || (w[2] & 0x9F00001Fu) != 0x90000011u || w[1] != 0x9A9F9210u) {
+    uint32_t w[9];
+    for (int k = 0; k < 9; k++)
+        w[k] = word_at(va - 4 * (8 - k));
+    uint64_t table, bse, n;
+    if (!a64x_jump_table(w, va, &table, &bse, &n))
         return -1;
-    }
-    uint64_t n;
-    if ((w[0] & 0xFFC003FFu) == 0xF100021Fu) {
-        n = (w[0] >> 10) & 0xFFF;
-    } else if (w[0] == 0xEB11021Fu) {
-        uint32_t mv = word_at(va - 32);
-        if ((mv & 0xFFE0001Fu) != 0xD2800011u)
-            return 0;
-        n = (mv >> 5) & 0xFFFF;
-    } else {
-        return 0;
-    }
-    uint64_t pc_adrp = va - 20, pc_adr = va - 8;
-    int64_t ah = (int64_t)(((w[2] >> 5) & 0x7FFFF) << 2 | ((w[2] >> 29) & 3)) << 43 >> 43;
-    uint64_t table = (pc_adrp & ~0xFFFull) + ((uint64_t)ah << 12) + ((w[3] >> 10) & 0xFFF);
-    int64_t al = (int64_t)(((w[5] >> 5) & 0x7FFFF) << 2 | ((w[5] >> 29) & 3)) << 43 >> 43;
-    uint64_t bse = pc_adr + (uint64_t)al;
-    const uint8_t *t = vmptr(table, 4 * (n + 1));
+    const uint8_t *t = n ? vmptr(table, 4 * n) : NULL;
     if (!t)
         return 0;
-    for (uint64_t i = 0; i <= n; i++) {
+    for (uint64_t i = 0; i < n; i++) {
         int32_t d;
         memcpy(&d, t + 4 * i, 4);
         if (*sp == *cap) {
@@ -581,7 +572,7 @@ static int jump_table(uint64_t va, uint64_t **stack, size_t *sp, size_t *cap)
         }
         (*stack)[(*sp)++] = bse + (int64_t)d;
     }
-    return (int)(n + 1);
+    return (int)n;
 }
 
 /* a word no A12-class code can hold: unallocated top-level groups, non-zero reserved space, SVE/SME, Apple AMX */
@@ -756,12 +747,13 @@ static void reach_pass(void)
  * Data islands in __text (assembler tables such as corecrypto's K256, libm's sincos coefficients, AudioCodecs' Hann
  * windows). Recursive descent from the validated function starts, the landing pads and the resolved jump tables marks code.
  * What it does not reach is cut into runs at UDF/zero padding; a run dense in unallocated encodings (at least one word in
- * 32), or starting at a function start that failed its probe, is data and leaves the code map: nothing in it is rewritten, here or by the
- * kernel, which takes its code ranges from the plan. Other unreached runs (dead __auth_stubs left by the cache builder's
- * stub elimination, code behind unresolved indirect branches) stay code.
+ * 32), starting at a function start that failed its probe, or running into padding without ending its code (lzfse's
+ * 64-bit mask table, single words between zero halves) is data and leaves the code map: nothing in it is rewritten, here
+ * or by the kernel, which takes its code ranges from the plan. Other unreached runs (dead __auth_stubs left by the cache
+ * builder's stub elimination, code behind unresolved indirect branches) stay code.
  */
 static uint64_t isl_runs, isl_words, isl_mod, isl_sites, code_runs, code_runs_mod, code_mod_words, code_sites,
-    reached_impossible;
+    reached_impossible, tail_runs, tail_words;
 static FILE *isl_out;
 static uint64_t ri_hist[4];
 static uint64_t cls_unreached_code[64];
@@ -837,6 +829,28 @@ static void drop_data_islands(void)
 			 */
             if (nun && (uint64_t)nun * 32 >= y - x)
                 bad = true;
+            /*
+			 * Into padding (not into reached code) without ending its code: the words after the last one that ends code
+			 * are data (a64x_ends_code), the code before them stays (dav1d's assembly keeps each jump table right behind
+			 * the blocks it dispatches to).
+			 */
+            const bool padded = y == xn || !BITV(codebits[f], y) || !(u32(fb[f], 4 * y) >> 16);
+            if (!bad && padded && !a64x_ends_code(u32(fb[f], 4 * (y - 1)))) {
+                uint64_t t = y - 1;
+                while (t > x && !a64x_ends_code(u32(fb[f], 4 * (t - 1))))
+                    t--;
+                if (t == x) {
+                    bad = true;
+                } else {
+                    tail_runs++;
+                    tail_words += y - t;
+                    if (isl_out)
+                        fprintf(isl_out, "TAIL %llx +%llu %s\n", (unsigned long long)(fm[q].addr + 4 * (t - x0)),
+                                (unsigned long long)(y - t), sec_of(va));
+                    for (uint64_t z = t; z < y; z++)
+                        codebits[f][z >> 3] &= (uint8_t)~(1 << (z & 7));
+                }
+            }
             if (bad) {
                 isl_runs++;
                 isl_words += y - x;
@@ -881,9 +895,11 @@ static void drop_data_islands(void)
     printf("impossible words in reached code: sve %llu sme %llu amx %llu unallocated %llu\n",
            (unsigned long long)ri_hist[0], (unsigned long long)ri_hist[1], (unsigned long long)ri_hist[2],
            (unsigned long long)ri_hist[3]);
-    printf("data islands: %llu runs, %llu words, %llu would-be-rewritten words (%llu LSE sites) left alone\n",
-           (unsigned long long)isl_runs, (unsigned long long)isl_words, (unsigned long long)isl_mod,
-           (unsigned long long)isl_sites);
+    printf(
+        "data islands: %llu runs, %llu words, %llu would-be-rewritten words (%llu LSE sites) left alone; data behind "
+        "code: %llu runs, %llu words\n",
+        (unsigned long long)isl_runs, (unsigned long long)isl_words, (unsigned long long)isl_mod,
+        (unsigned long long)isl_sites, (unsigned long long)tail_runs, (unsigned long long)tail_words);
     printf("unreached code-like runs: %llu (%llu with %llu rewrites, %llu LSE sites); by section:",
            (unsigned long long)code_runs, (unsigned long long)code_runs_mod, (unsigned long long)code_mod_words,
            (unsigned long long)code_sites);
@@ -923,6 +939,122 @@ static void ranges_from_codebits(void)
             x = y;
         }
     }
+}
+
+/*
+ * Every code address something enters other than by falling into it: function starts, landing pads, the targets of
+ * direct branches, ADR and ADRP+ADD in code, jump tables, and every rebase of the cache's data (slide info v5). No
+ * hole may hold one (plan_is_target): compilers share a tail-call PAC check between a signed path and an unsigned early
+ * return that branches straight to its EOR (libsystem_trace's _logDestructor in 24B119).
+ */
+static int xmaps[4096], nxmaps;
+static uint64_t n_ref_code, n_ref_data;
+
+static int cmp_xmap(const void *a, const void *b)
+{
+    const struct fmap *x = &fm[*(const int *)a], *y = &fm[*(const int *)b];
+    return x->addr < y->addr ? -1 : x->addr > y->addr;
+}
+
+static void mark_ref(uint64_t va)
+{
+    int lo = 0, hi = nxmaps;
+    while (lo < hi) {
+        int mid = (lo + hi) / 2;
+        if (fm[xmaps[mid]].addr + fm[xmaps[mid]].size <= va)
+            lo = mid + 1;
+        else
+            hi = mid;
+    }
+    if (lo == nxmaps || va < fm[xmaps[lo]].addr)
+        return;
+    const struct fmap *q = &fm[xmaps[lo]];
+    uint64_t x = (q->off + va - q->addr) / 4;
+    refbits[q->file][x >> 3] |= (uint8_t)(1 << (x & 7));
+}
+
+static void mark_jump_table(uint64_t va)
+{
+    uint32_t w[9];
+    for (int k = 0; k < 9; k++)
+        w[k] = word_at(va - 4 * (8 - k));
+    uint64_t table, bse, n;
+    const uint8_t *t;
+    if (!a64x_jump_table(w, va, &table, &bse, &n) || !n || !(t = vmptr(table, 4 * n)))
+        return;
+    for (uint64_t i = 0; i < n; i++) {
+        int32_t d;
+        memcpy(&d, t + 4 * i, 4);
+        mark_ref(bse + (int64_t)d);
+    }
+}
+
+static void mark_slide_rebases(int f)
+{
+    uint32_t so = u32(fb[f], 0x138), sc = u32(fb[f], 0x13C);
+    for (uint32_t i = 0; i < sc; i++) {
+        const uint8_t *e = fb[f] + so + 56 * i;
+        uint64_t fileoff = u64(e, 16), info = u64(e, 24), info_size = u64(e, 32);
+        if (info_size < 24 || u32(fb[f], info) != 5)
+            continue;
+        uint32_t page_size = u32(fb[f], info + 4), npages = u32(fb[f], info + 8);
+        uint64_t value_add = u64(fb[f], info + 16);
+        if (24 + 2ull * npages > info_size)
+            continue;
+        for (uint32_t p = 0; p < npages; p++) {
+            uint16_t start;
+            memcpy(&start, fb[f] + info + 24 + 2 * p, 2);
+            if (start == 0xFFFF)
+                continue;
+            uint64_t page = fileoff + (uint64_t)p * page_size, loc = page + start;
+            while (loc + 8 <= page + page_size && loc + 8 <= fsz[f]) {
+                uint64_t v = u64(fb[f], loc);
+                mark_ref(value_add + (v & 0x3FFFFFFFFull));
+                n_ref_data++;
+                uint64_t delta = ((v >> 52) & 0x7FF) * 8;
+                if (!delta)
+                    break;
+                loc += delta;
+            }
+        }
+    }
+}
+
+static void mark_refs(void)
+{
+    for (int f = 0; f < 512; f++)
+        if (fb[f])
+            refbits[f] = calloc(fsz[f] / 32 + 1, 1);
+    nxmaps = 0;
+    for (int q = 0; q < nfm; q++)
+        if (fm[q].prot & 4)
+            xmaps[nxmaps++] = q;
+    qsort(xmaps, (size_t)nxmaps, sizeof(*xmaps), cmp_xmap);
+    for (size_t i = 0; i < nfstarts; i++)
+        mark_ref(fstarts[i]);
+    for (size_t i = 0; i < nlpads; i++)
+        mark_ref(lpads[i]);
+    for (int i = 0; i < nxmaps; i++) {
+        const struct fmap *q = &fm[xmaps[i]];
+        const uint32_t *w = (const uint32_t *)(fb[q->file] + q->off);
+        uint32_t n = (uint32_t)(q->size / 4);
+        for (uint32_t k = 0; k < n; k++) {
+            uint64_t x = q->off / 4 + k, to[1];
+            if (!BITV(codebits[q->file], x))
+                continue;
+            if (w[k] == 0xD61F0200u)
+                mark_jump_table(q->addr + 4ull * k);
+            if (a64x_code_refs(w, n, k, q->addr, to)) {
+                mark_ref(to[0]);
+                n_ref_code++;
+            }
+        }
+    }
+    for (int f = 0; f < 512; f++)
+        if (fb[f])
+            mark_slide_rebases(f);
+    printf("entries: %llu code references, %llu data rebases, %zu function starts, %zu landing pads\n",
+           (unsigned long long)n_ref_code, (unsigned long long)n_ref_data, nfstarts, nlpads);
 }
 
 struct hole {
@@ -1618,7 +1750,7 @@ int a64x_cmd_plan2(int argc, char **argv)
             for (uint64_t k = 0; k < n; k++)
                 if (BITV(fsbits[f], x0 + k))
                     fsl[k >> 3] |= 1 << (k & 7);
-            struct a64x_islands is = {data, fsl, 0, 0, false, false, 0, 0};
+            struct a64x_islands is = {data, fsl, 0, 0, false, false, 0, 0, 0, 0};
 
             struct ctx_t {
                 uint8_t *bits;
@@ -1762,9 +1894,12 @@ int a64x_cmd_plan2(int argc, char **argv)
         return 0;
     }
 
+    mark_refs();
     /* holes and sites, page by page (the kernel's rule for holes) */
     struct site *sites = NULL;
     size_t nsites = 0, capsites = 0;
+    void *walk_buf = malloc(A64X_WALK_BYTES(65536));
+    struct a64x_walk walk = a64x_walk_in(walk_buf, 65536);
     for (int q = 0; q < nfm; q++) {
         if (!(fm[q].prot & 4))
             continue;
@@ -1807,10 +1942,10 @@ int a64x_cmd_plan2(int argc, char **argv)
                     /* the whole function: loops back to before the site and tail calls are understood */
                     const uint32_t *fp = (const uint32_t *)vmptr(fstart, fend - fstart);
                     lr = a64x_dead_regs_flow_fn(fp, (int)((fend - fstart) / 4), (int)((base + 4 * k0 - fstart) / 4),
-                                                cand, wide_budget);
+                                                cand, wide_budget, &walk);
                     if (cmp_out) {
                         static uint64_t nx30;
-                        uint32_t lw = a64x_dead_regs_flow(wp, wn, 0, cand, wide_budget);
+                        uint32_t lw = a64x_dead_regs_flow(wp, wn, 0, cand, wide_budget, &walk);
                         if (lw & ~lr)
                             fprintf(cmp_out, "LOST %llx %08x win %08x fn %08x\n", (unsigned long long)(base + 4 * k0),
                                     w, lw, lr);
@@ -1821,16 +1956,16 @@ int a64x_cmd_plan2(int argc, char **argv)
                         }
                     }
                 } else {
-                    lr = a64x_dead_regs_flow(wp, wn, 0, cand, wide_budget);
+                    lr = a64x_dead_regs_flow(wp, wn, 0, cand, wide_budget, &walk);
                 }
                 uint32_t vd = 0;
                 if (a64x_class_uses_vtemps(c)) {
                     if (q2 >= 0 && fend > fstart && fend <= fm[q2].addr + fm[q2].size && fend - fstart <= 4u * 65536) {
                         const uint32_t *fp = (const uint32_t *)vmptr(fstart, fend - fstart);
                         vd = a64x_dead_vregs_flow(fp, (int)((fend - fstart) / 4), (int)((base + 4 * k0 - fstart) / 4),
-                                                  0xFFFFFFFFu, wide_budget, true);
+                                                  0xFFFFFFFFu, wide_budget, true, &walk);
                     } else {
-                        vd = a64x_dead_vregs_flow(wp, wn, 0, 0xFFFFFFFFu, wide_budget, false);
+                        vd = a64x_dead_vregs_flow(wp, wn, 0, 0xFFFFFFFFu, wide_budget, false, &walk);
                     }
                     if (getenv("A64X_NO_VLIVE"))
                         vd = 0;
@@ -1851,6 +1986,7 @@ int a64x_cmd_plan2(int argc, char **argv)
             }
         }
     }
+    free(walk_buf);
     qsort(holes, nholes, sizeof(*holes), cmp_hole);
     {
         size_t dup = 0, o = 0;

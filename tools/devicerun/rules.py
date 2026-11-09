@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import PurePosixPath
 
-PASS, FAIL, NO_DATA, INFO = 'PASS', 'FAIL', 'NO-DATA', 'INFO'
+PASS, FAIL, NO_DATA, INFO, NA = 'PASS', 'FAIL', 'NO-DATA', 'INFO', 'N/A'
 
 # count | rate (per minute over the log's span) | boots (with a match) | agg(field) or agg(a/b*k): then OP number.
 RULE = re.compile(
@@ -36,7 +36,9 @@ class Check:
     `contains` (one literal or alternatives), `process`, `subsystem` (substring) and `level` become the `log show`
     predicate; `regex` (searched) narrows further and its named groups are the fields `rule`, `where` and `show` use.
     `needs` names a check that must have matched for this one to mean anything (a failure line of a feature that is
-    not running is NO-DATA, not PASS). `against` names a check whose `key` values this one's are looked up in.
+    not running is NO-DATA, not PASS). `applies` ('<check> <field>=<value>') limits the check to logs where that check
+    matched with that field (an iOS 27 app's test where the suite line says ios=27): in any other log it is N/A, never
+    PASS. `against` names a check whose `key` values this one's are looked up in.
     `boot` limits the check to one of the morning's boot labels (A, B tiled cache, K kprof).
     """
 
@@ -51,6 +53,7 @@ class Check:
     where: str = ''
     show: tuple[str, ...] = ()
     needs: str = ''
+    applies: str = ''
     against: str = ''
     key: str = ''
     source: str = ''
@@ -228,11 +231,20 @@ def measure(check: Check, matches: list[dict], minutes: float) -> tuple[float | 
     return got, f'{m["agg"]}({m["expr"]}) {fmt(got)} over {len(xs)} lines'
 
 
+def applicable(applies: str, by_name: dict[str, list[dict]]) -> bool:
+    """Whether a match of the check `applies` names has its field at its value ('<check> <field>=<value>')."""
+    name, _, condition = applies.partition(' ')
+    key, _, value = condition.partition('=')
+    return any(fields.get(key) == value for fields in by_name.get(name, []))
+
+
 def evaluate(check: Check, matches: list[dict], minutes: float, by_name: dict[str, list[dict]]) -> Result:
     """Return the check's verdict over the events it matched."""
     matches = filtered(check, matches)
     if check.needs and not by_name.get(check.needs):
         return Result(check, NO_DATA, f'no {check.needs} line', matches)
+    if check.applies and not applicable(check.applies, by_name):
+        return Result(check, NA, f'not run here: no {check.applies} line', matches)
     if check.rule == TIMELINE:
         return Result(check, INFO if matches else NO_DATA, timeline(matches) or 'no lines', matches)
     if check.rule == REPORT:
