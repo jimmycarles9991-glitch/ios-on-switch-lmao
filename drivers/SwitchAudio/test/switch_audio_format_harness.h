@@ -38,6 +38,9 @@
     void prefix##h_mix(int32_t *dst, const float *src, uint32_t samples, float gain);                                  \
     uint32_t prefix##h_ring_mix(int32_t *ring, uint32_t ring_frames, uint32_t channels, uint64_t first,                \
                                 const float *src, uint32_t frames, float gain);                                        \
+    void prefix##h_fold(int32_t *dst, const float *src, uint32_t frames, float gain);                                  \
+    uint32_t prefix##h_ring_fold(int32_t *ring, uint32_t ring_frames, uint64_t first, const float *src,                \
+                                 uint32_t frames, float gain);                                                         \
     float prefix##h_s32_to_float(int32_t v);                                                                           \
     int prefix##h_neon(void);
 

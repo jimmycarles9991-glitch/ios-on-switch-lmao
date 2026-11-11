@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-// A compute state's pack key at one threadgroup shape, as the pack's generator (pack/probecompute.mm) and the facade
+// A compute state's pack key at one threadgroup shape, as the pack's generator (pack/kernel_shapes.h) and the facade
 // (RawMetalCompute.mm) both make it: what m2v compiles a kernel's program from. Its function by its AIR (raw_metallib.h: the
 // same bitcode whatever library or path it came by), the function constants as the journal writes them, the descriptor's
 // thread limits, the threads per threadgroup (m2v's local size), the threadgroup memory lengths (m2v compiles each into

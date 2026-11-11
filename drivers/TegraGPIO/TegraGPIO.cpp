@@ -92,6 +92,9 @@ constexpr OutputMux kOutputMux[] = {
     {TEGRA_GPIO(X, 3), 0x228, PULL_DOWN},      // als_prox_int_px3: v_vdd5v3 enable on Fric (USB-C VBUS source),
                                                // rsvd0, pull-down, 937-943 (drivers/SwitchUSB SwitchPD)
     {TEGRA_GPIO(K, 5), 0x268, PULL_DOWN | 1},  // pk5 "USB-PD (BM92T36) VCONN Power Enable": rsvd1, 1087-1094
+    {TEGRA_GPIO(Z, 4), 0x28c, PULL_DOWN | 1},  // pz4: the RT5639's LDO1_EN (DTB rt5639 ldo1-en-gpios), rsvd1,
+                                               // pull-down; SwitchAudio raises it before the codec's first I2C read,
+                                               // and a tristate pad leaves the codec unpowered (NACK at 0x1c)
 };
 
 inline uint32_t portReg(unsigned gpio, uint32_t reg)

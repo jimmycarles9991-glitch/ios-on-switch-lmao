@@ -18,7 +18,7 @@ from collections.abc import Callable
 from pathlib import Path
 
 from drivers.TegraGM20BMetal.corpus.tools.archives import airp, desc, gpubin, script
-from drivers.TegraGM20BMetal.corpus.tools.archives.model import Function, Pipeline
+from drivers.TegraGM20BMetal.corpus.tools.archives.model import RENDER, UNSPECIALIZED, Function, Pipeline
 from tools.gpu.shaders import metallib
 
 OWNER_SUFFIXES = ('.framework', '.bundle', '.app', '.appex', '.cifilter', '.xpc')
@@ -65,6 +65,7 @@ class Libraries:
         self.by_hash: dict[bytes, str] = {}
         self.by_name: dict[str, list[str]] = {}
         self.constant_names: dict[str, dict[str, dict[int, str]]] = {}
+        self.required: dict[str, dict[str, tuple[metallib.Constant, ...]]] = {}
         for path, file in volume.files.items():
             if not path.endswith('.metallib'):
                 continue
@@ -72,10 +73,10 @@ class Libraries:
             library = _air(data)
             if library is None:
                 continue
+            functions = metallib.functions(library) or []
+            self.required[path] = {f.name: f.required() for f in functions}
             if path in NAMED_CONSTANTS:
-                self.constant_names[path] = {
-                    f.name: {c.index: c.name for c in f.constants} for f in metallib.functions(library) or ()
-                }
+                self.constant_names[path] = {f.name: {c.index: c.name for c in f.constants} for f in functions}
             for tags in gpubin.entries(library):
                 name = gpubin.name_of(tags)
                 if 'HASH' in tags:
@@ -107,6 +108,9 @@ class Libraries:
         for c in function.constants if names else ():
             if c.name is None and c.index in names:
                 c.name, c.index = names[c.index], None
+        given = {c.index for c in function.constants} | {c.name for c in function.constants}
+        required = self.required.get(function.library or '', {}).get(function.name, ())
+        function.lacks_required = any(c.index not in given and c.name not in given for c in required)
         return True
 
 
@@ -129,9 +133,12 @@ def gather(volume: Volume, libraries: Libraries) -> tuple[list[Pipeline], Counte
         if f'/{DRIVER_BUNDLE}' in path:
             continue
         for p, place in _declared(volume, libraries, path, file):
-            for f in (p.vertex, p.fragment, p.kernel, *p.vertex_linked):
-                if f is not None and not place(f):
+            functions = [f for f in (p.vertex, p.fragment, p.kernel, *p.vertex_linked) if f is not None]
+            for f in functions:
+                if not place(f):
                     unresolved[f'{p.owner} {f.name}'] += 1
+            if p.kind == RENDER and any(f.lacks_required for f in functions):
+                p.kind = UNSPECIALIZED
             states.append(p)
     return states, unresolved
 

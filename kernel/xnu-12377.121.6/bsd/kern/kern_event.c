@@ -8912,7 +8912,11 @@ kev_post_msg_internal(struct kev_msg *event_msg, int wait)
 	}
 #endif /* SKYWALK && XNU_TARGET_OS_OSX */
 
-	/* Verify the message is small enough to fit in one mbuf w/o cluster */
+	/*
+	 * Switch: a message too big for one mbuf takes one cluster instead of being refused. IO80211.framework's
+	 * kernel-event fallback reads APPLE80211_M_ASSOC_DONE's 540-byte join report (24B119) from this path; Apple's
+	 * drivers send it through IO80211's user-client event ring, which en0 does not have yet.
+	 */
 	total_size = KEV_MSG_HEADER_SIZE;
 
 	for (i = 0; i < 5; i++) {
@@ -8922,12 +8926,12 @@ kev_post_msg_internal(struct kev_msg *event_msg, int wait)
 		total_size += event_msg->dv[i].data_length;
 	}
 
-	if (total_size > MLEN) {
+	if (total_size > MCLBYTES) {
 		os_atomic_inc(&kevtstat.kes_toobig, relaxed);
 		return EMSGSIZE;
 	}
 
-	m = m_get(wait, MT_DATA);
+	m = total_size > MLEN ? m_getcl(wait, MT_DATA, 0) : m_get(wait, MT_DATA);
 	if (m == 0) {
 		os_atomic_inc(&kevtstat.kes_nomem, relaxed);
 		return ENOMEM;

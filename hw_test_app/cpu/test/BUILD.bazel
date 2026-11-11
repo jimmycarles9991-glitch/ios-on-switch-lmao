@@ -1,0 +1,21 @@
+# system.workloop_sync's probe on this Mac's kernel, whose workloops are Apple's own: no waiter may leave its
+# NOTE_WL_SYNC_WAIT before the waker hands it the workloop, and a waiter that keeps its knote must be caught doing so.
+#
+#   bazel test //hw_test_app/cpu/test:all
+load("//bazel/lint:defs.bzl", "lint_files")
+load("//bazel/testing:defs.bzl", "host_library", "host_test")
+
+lint_files()
+
+host_library(
+    name = "workloop_probe",
+    srcs = ["//hw_test_app:cpu/switch_workloop_probe.c"],
+    hdrs = ["//hw_test_app:cpu/switch_workloop_probe.h"],
+    copts = ["-O2"],
+)
+
+host_test(
+    name = "switch_workloop_probe_test",
+    srcs = ["switch_workloop_probe_test.cpp"],
+    deps = [":workloop_probe"],
+)

@@ -66,6 +66,27 @@ enum Audio {
         try session.setActive(true)
     }
 
+    /// Runs the input for `seconds`: the frames per second its tap received, and the input's own rate.
+    static func captureRate(seconds: Double) async throws -> (measured: Double, rate: Double) {
+        let engine = AVAudioEngine()
+        let input = engine.inputNode
+        let format = input.outputFormat(forBus: 0)
+        let counter = FrameCounter()
+        input.installTap(onBus: 0, bufferSize: 1024, format: format) { buffer, _ in
+            counter.add(Int(buffer.frameLength))
+        }
+        defer {
+            input.removeTap(onBus: 0)
+            engine.stop()
+        }
+        try engine.start()
+        try await Task.sleep(nanoseconds: 250_000_000)
+        let before = counter.snapshot.frames
+        let start = CFAbsoluteTimeGetCurrent()
+        try await Task.sleep(nanoseconds: UInt64(seconds * 1e9))
+        return (Double(counter.snapshot.frames - before) / (CFAbsoluteTimeGetCurrent() - start), format.sampleRate)
+    }
+
     static func outputs() -> String {
         AVAudioSession.sharedInstance().currentRoute.outputs.map { $0.portType.rawValue }.joined(separator: ",")
     }
@@ -138,8 +159,28 @@ struct AudioRouteTest: HWTest {
         metrics.set("inputs", route.inputs.map { $0.portType.rawValue }.joined(separator: ","))
         metrics.set("input_available", session.isInputAvailable)
         metrics.set("output_channels", session.outputNumberOfChannels)
-        return .judged(
-            [("an output port", !route.outputs.isEmpty), ("an input port", session.isInputAvailable)], metrics)
+        var checks = [
+            ("an output port", !route.outputs.isEmpty), ("an input port", session.isInputAvailable),
+            ("the route has an input", !route.inputs.isEmpty),
+        ]
+        // 27 plays as J181, whose built-in input is its Digital Mic: the Built-In Microphone port.
+        if ProcessInfo.processInfo.isOperatingSystemAtLeast(
+            OperatingSystemVersion(majorVersion: 27, minorVersion: 0, patchVersion: 0))
+        {
+            let builtIn = session.availableInputs?.contains { $0.portType == .builtInMic } ?? false
+            checks.append(("the built-in microphone is an input", builtIn))
+        }
+        // Capture needs the record permission, which only the interactive audio.microphone asks for.
+        if AVAudioApplication.shared.recordPermission == .granted {
+            let captured = try await Audio.captureRate(seconds: 1)
+            metrics.set("captured_rate", captured.measured, digits: 0)
+            checks.append(
+                (
+                    "input frames arrive at the input's rate (within 5%)",
+                    abs(captured.measured - captured.rate) <= captured.rate * 0.05
+                ))
+        }
+        return .judged(checks, metrics)
     }
 }
 

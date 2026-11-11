@@ -32,7 +32,6 @@ import struct
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import kernels
 import layouts
 import packfile
 import probelog
@@ -354,11 +353,19 @@ def disabled_stream(m: int, v: int) -> bool:
 
 
 def split_registers(simple: list[dict], post: dict[int, dict[int, int]]) -> tuple[list[int], dict[int, int]]:
-    # registers: varying across states -> per-pipeline blob; equal -> baseline (when it differs from post-init)
+    # registers: varying across states -> per-pipeline blob; equal -> baseline (when it differs from post-init). A
+    # register foreign to a state (a target it lacks) is not its, so it decides nothing: a state with no color target
+    # (Portrait's depth-only states) would otherwise move target 0's per-target blend (0x1e00) out of the baseline, and
+    # every record would take it from the warm-up draw where the runtime's direct compile takes the init template's
     allregs = set(post[0])
     for p in simple:
         allregs |= set(p['records'][0]['regs'])
-    vals = {m: {p['records'][0]['regs'].get(m, 0) for p in simple} for m in allregs if not owned(m)}
+    counts = {id(p): targets(p['key']) for p in simple}
+    vals = {
+        m: {p['records'][0]['regs'].get(m, 0) for p in simple if not foreign(m, counts[id(p)])}
+        for m in allregs
+        if not owned(m)
+    }
     varying = sorted(m for m, v in vals.items() if len(v) > 1)
     baseline = {m: next(iter(v)) for m, v in vals.items() if len(v) == 1 and next(iter(v)) != post[0].get(m, 0)}
     return varying, baseline
@@ -376,29 +383,7 @@ def lay_out_programs(
                 used.append(pid)
     heap, prog_index, prog_recs = bytearray(), {}, []
     for pid in used:
-        pr = programs[pid]
-        off = len(heap)
-        slot = bytearray(0x80 - 0x50) + pr['image'][:80]  # header at +0x30
-        slot += pr['image'][80:]  # code at +0x80
-        slot += bytes((-len(slot)) % 0x100)
-        data_offset = (
-            len(slot) if pr['data'] else 0
-        )  # NAK's shader data where NVK uploads it: 256-aligned after the code
-        slot += pr['data']
-        heap += slot
-        prog_index[pid] = len(prog_recs)
-        prog_recs.append(
-            {
-                'id': pid,
-                'heap_offset': off,
-                'program': off + 0x30,
-                'bytes': len(slot),
-                'code': len(pr['image']) - 80,
-                'cbufs': pr['cbufs'],
-                'data_offset': data_offset,
-                'data_bytes': len(pr['data']),
-            }
-        )
+        packfile.place_graphics(pid, programs, heap, prog_index, prog_recs)
     data = sum(1 for pr in prog_recs if pr['data_bytes'])
     report.append(f'{len(prog_recs)} programs ({data} with shader data), shader heap image {len(heap) // 1024} KiB')
     return heap, prog_index, prog_recs
@@ -573,19 +558,6 @@ def with_unnamed_ubos(rec: dict, p: dict, programs: dict[str, dict]) -> dict:
     return rec
 
 
-def compute_kernels(
-    dirs: list[str], constexpr_tsc: list[list[int]], programs: dict[str, dict], laid: tuple, report: list[str]
-) -> list[dict]:
-    """Give the buckets' compute kernels (kernels.py), their programs appended to the heap image `laid` holds."""
-    loaded, skipped = kernels.load(dirs, constexpr_tsc)
-    computes = [k for k in loaded if k['prog'] in programs]
-    skipped += [(k['key'], 'a program programs.bin lacks') for k in loaded if k['prog'] not in programs]
-    kernels.lay_out(computes, programs, *laid)
-    report.append(f'{len(computes)} compute kernels, {len(skipped)} dispatch shapes left out')
-    report += [f'  skipped kernel {key}: {why}' for key, why in skipped]
-    return computes
-
-
 def main() -> None:
     prog_path, out_dir = sys.argv[1], sys.argv[2]
     dirs = [x for d in sys.argv[3:] for x in (d, os.path.join(d, 'barrier')) if os.path.isdir(x)]
@@ -633,7 +605,7 @@ def main() -> None:
         pipes.append(rec)
     # the runtime binary-searches the pipelines in place (raw_pack.cpp Pack::find): no process keeps an index of its own
     pipes.sort(key=packfile.key_hash)
-    computes = compute_kernels(dirs, constexpr_tsc, programs, (heap, prog_index, prog_recs), report)
+    computes: list[dict] = []
     # init template with relocations (submissions 1-3 as NVK recorded them)
     init_recs = [(sc, m, d, RELOC_CODE.get(RELOC.get((sc, m)), 0)) for sc, m, d in init]
     report.append(f'init template: {len(init_recs)} methods, {sum(1 for x in init_recs if x[3])} relocated')

@@ -1492,6 +1492,10 @@ void Decoder::draw(const char *kind, uint32_t first, uint32_t count)
                     }
                     fprintf(out_, "%s\n", l.c_str());
                 }
+            } else if (type == kSplitFrontier) {
+                const auto launch = splitLaunches_.find(b.addr);
+                fprintf(out_, "    cb%zu frontier size=%x %s\n", s, b.size,
+                        launch == splitLaunches_.end() ? "written by no prologue" : launch->second.c_str());
             } else {
                 fprintf(out_, "    cb%zu type=%u size=%x data=%s\n", s, type, b.size,
                         contentHash(b.addr, b.size, type == 3 ? 1 : 2, type == 3, false).c_str());

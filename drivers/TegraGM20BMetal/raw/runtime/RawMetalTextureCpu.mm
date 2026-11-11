@@ -2,7 +2,7 @@
 #import "RawMetalInternal.h"
 #include "../fx/fx_image.h"
 
-static void cacheLines(const uint8_t *from, uint64_t bytes, bool invalidate)
+void cacheLines(const uint8_t *from, uint64_t bytes, bool invalidate)
 {
 #if defined(__aarch64__)
     for (uintptr_t a = uintptr_t(from) & ~uintptr_t(63); a < uintptr_t(from) + bytes; a += 64)

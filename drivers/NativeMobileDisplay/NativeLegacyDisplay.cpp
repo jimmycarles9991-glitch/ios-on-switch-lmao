@@ -38,6 +38,7 @@
 #include "SwitchFrameInfo.h"
 #include "SwitchFrameStall.h"
 #include "SwitchInteraction.h"
+#include "SwitchSBIM.h"
 #include "../SwitchSuspend/SwitchSleepSteps.h"
 #include "../TegraVIC/TegraVICConfig.h"
 #include "TegraDisplayColor.h"
@@ -5331,6 +5332,18 @@ public:
     {
         return color->setAccessibilityScale(scale);
     }
+
+#if SWITCH_IPSW_KIND_24B119
+    IOReturn setProperties(OSObject *properties) override
+    {
+        const OSDictionary *dict = OSDynamicCast(OSDictionary, properties);
+        const OSBoolean *enable = dict ? OSDynamicCast(OSBoolean, dict->getObject(switch_sbim::kEnableKey)) : nullptr;
+        IOReturn status = kIOReturnSuccess;
+        if (dict && switch_sbim::answer(dict->getCount(), enable ? static_cast<int>(enable->isTrue()) : -1, status))
+            return status;
+        return IOMobileFramebufferLegacy::setProperties(properties);
+    }
+#endif
 
     // thermalmonitord's TSFD. J120's LCD takes the panel temperature for its temperature and pixel response compensation;
     // DC A has neither and the OLED panel compensates for temperature itself, so the value is taken and reported once.

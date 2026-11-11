@@ -431,6 +431,9 @@ inline std::vector<Pass> passes(unsigned frameIndex, const Shape &s, size_t blur
             d.bytes.push_back({2, 3, s.uniformBytes});
             d.bytes.push_back({2, 4, s.uniformBytes});
         }
+        // FRAME_GLASS: fragment uniforms at 9 too, where iOS 27's Liquid Glass states read their material
+        if (getenv("FRAME_GLASS"))
+            d.bytes.push_back({2, 9, s.uniformBytes});
         // FRAME_DRAW_FORMS: also triangle lists, a nonzero vertexStart and two instances (the draw paths CA's strips never take)
         if (getenv("FRAME_DRAW_FORMS")) {
             if (i % 4 == 1) {

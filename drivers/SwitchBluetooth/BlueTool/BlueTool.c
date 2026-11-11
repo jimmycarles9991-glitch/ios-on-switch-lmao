@@ -22,15 +22,18 @@
 // It also starts the Joy-Con pairing agent, /usr/libexec/joyconpaird (../../SwitchJoyCon/helper/joyconpaird.c), after
 // answering each of bluetoothd's chip-boot requests: bluetoothd is then up, and this is the one process of ours launchd
 // starts (Apple's com.apple.BlueTool plist). launchd does not load LaunchDaemons plists from the Data overlay
-// (it bootstraps from its cache, launchd_cache_loader: com.brunostjohn.switch.joyconnfc never ran on 11-04). For that the
-// stand-in has no sandbox profile (the original's com.apple.private.sandbox.profile:embedded "BlueTool" would refuse
-// the spawn); it touches nothing but its XPC listener and that one spawn. Children are not waited for (SIGCHLD
-// ignored): joyconpaird runs for the boot and keeps a single instance itself.
+// (it bootstraps from its cache, launchd_cache_loader: com.brunostjohn.switch.joyconnfc never ran on 11-04). For the
+// same reason it starts /usr/libexec/switch-appregd (../../SwitchAppRegistration/appregd.mm) when launchd starts it,
+// which registers the apps a deploy changed. For that the stand-in has no sandbox profile (the original's
+// com.apple.private.sandbox.profile:embedded "BlueTool" would refuse the spawn); it touches nothing but its XPC
+// listener and those spawns. Children are not waited for (SIGCHLD ignored): joyconpaird runs for the boot and keeps a
+// single instance itself, and switch-appregd ends once it has applied the deploy's journal.
 //
 // iOS 27 sandboxes it either way. Without a seatbelt profile the kernel applies the original's learned autobox profile
 // ("apply-protobox", keyed by the executable name), so the 27 build carries the original's seatbelt-profiles
 // ["BlueTool"] and runs as the original does. Neither profile reaches bluetoothd or allows an exec, and 24B119 kills an
-// untrusted binary that launchd did not start, so the 27 build starts no agent (SWITCH_BLUETOOL_PAIRING_AGENT is 17's).
+// untrusted binary that launchd did not start, so the 27 build starts neither (SWITCH_BLUETOOL_STARTS_HELPERS is 17's);
+// launchd starts both there.
 #include <dispatch/dispatch.h>
 #include <errno.h>
 #include <notify.h>
@@ -51,30 +54,36 @@ ios_xpc_connection_create_mach_service(const char *name, dispatch_queue_t queue,
 
 static const char kService[] = "com.apple.BlueTool";
 static const char kFirmware[] = "CYW4356A3_001.004.009.0092.0095.hcd";  // nx-firmware patch, loaded by the kernel
-#if SWITCH_BLUETOOL_PAIRING_AGENT
-static const char kPairingAgent[] = "/usr/libexec/joyconpaird";  // shown by the overlay unless switch-no-bt
+#if SWITCH_BLUETOOL_STARTS_HELPERS
+static const char kPairingAgent[] = "/usr/libexec/joyconpaird";
+static const char kAppRegistration[] = "/usr/libexec/switch-appregd";
 #endif
 
 extern char **environ;
 
-#if SWITCH_BLUETOOL_PAIRING_AGENT
-// The pairing agent, after a chip-boot request has been answered (see the file comment): at every one, so a bluetoothd
-// restart (which ends the agent's session) gets a new agent; one already running keeps its lock and the new one exits.
-// The overlay shows the agent whenever it shows this stand-in (one boot-arg gates both), so a failed access is an error.
-static void startPairingAgent(void)
+#if SWITCH_BLUETOOL_STARTS_HELPERS
+// The overlay shows both helpers whenever it shows this stand-in, so a failed access is an error.
+static void startHelper(const char *path, bool *reported)
 {
-    if (access(kPairingAgent, X_OK)) {
-        static bool reported;
-        if (!reported)
-            os_log_error(OS_LOG_DEFAULT, "BlueTool: %{public}s not started: access: %{errno}d", kPairingAgent, errno);
-        reported = true;
+    if (access(path, X_OK)) {
+        if (!*reported)
+            os_log_error(OS_LOG_DEFAULT, "BlueTool: %{public}s not started: access: %{errno}d", path, errno);
+        *reported = true;
         return;
     }
-    char *argv[] = {(char *)kPairingAgent, NULL};
+    char *argv[] = {(char *)path, NULL};
     pid_t pid;
-    const int error = posix_spawn(&pid, kPairingAgent, NULL, NULL, argv, environ);
+    const int error = posix_spawn(&pid, path, NULL, NULL, argv, environ);
     if (error)
-        os_log_error(OS_LOG_DEFAULT, "BlueTool: %{public}s not started: %d", kPairingAgent, error);
+        os_log_error(OS_LOG_DEFAULT, "BlueTool: %{public}s not started: %d", path, error);
+}
+
+// The pairing agent, after a chip-boot request has been answered (see the file comment): at every one, so a bluetoothd
+// restart (which ends the agent's session) gets a new agent; one already running keeps its lock and the new one exits.
+static void startPairingAgent(void)
+{
+    static bool reported;
+    startHelper(kPairingAgent, &reported);
 }
 #endif
 
@@ -166,7 +175,7 @@ static void answer(xpc_connection_t peer, xpc_object_t message)
     }
     xpc_connection_send_message(peer, reply);
     xpc_release(reply);
-#if SWITCH_BLUETOOL_PAIRING_AGENT
+#if SWITCH_BLUETOOL_STARTS_HELPERS
     if (id && !strcmp(id, "RunBuiltinScript"))
         startPairingAgent();
 #endif
@@ -175,7 +184,11 @@ static void answer(xpc_connection_t peer, xpc_object_t message)
 int main(void)
 {
     // "-R" (server mode) is the only way launchd runs it; arguments are ignored.
-    signal(SIGCHLD, SIG_IGN);  // the pairing agent is never waited for
+    signal(SIGCHLD, SIG_IGN);  // the helpers are never waited for
+#if SWITCH_BLUETOOL_STARTS_HELPERS
+    static bool appRegistrationReported;
+    startHelper(kAppRegistration, &appRegistrationReported);
+#endif
     xpc_connection_t listener =
         ios_xpc_connection_create_mach_service(kService, NULL, XPC_CONNECTION_MACH_SERVICE_LISTENER);
     xpc_connection_set_event_handler(listener, ^(xpc_object_t peer) {

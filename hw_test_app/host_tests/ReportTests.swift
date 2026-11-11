@@ -51,16 +51,19 @@ final class ReportTests: XCTestCase {
         XCTAssertEqual(run.summary.pass, 2)
     }
 
-    func testOnlyThisBootsNewestUnfinishedRunResumes() {
+    func testOnlyTheNewestUnfinishedRunIsOffered() {
+        XCTAssertNil(Report.interrupted([]))
         var older = report(started: 0)
         older.plan(["a"])
         var newer = report(started: 60)
         newer.plan(["a", "b"])
         newer.begin("a")
-        XCTAssertEqual(Report.interrupted([older, newer], boot: boot)?.run.id, newer.run.id)
-        XCTAssertNil(Report.interrupted([older, newer], boot: "another boot"))
+        XCTAssertEqual(Report.interrupted([older, newer])?.run.id, newer.run.id)
         newer.finish(at: Date())
-        XCTAssertNil(Report.interrupted([older, newer], boot: boot), "the newest run finished; an older one is stale")
+        XCTAssertNil(Report.interrupted([older, newer]), "the newest run finished; an older one is stale")
+        var anotherBoot = Report(bootUUID: "another boot", ios: 27, started: Date(), identity: [:])
+        anotherBoot.plan(["c"])
+        XCTAssertEqual(Report.interrupted([older, newer, anotherBoot])?.run.id, anotherBoot.run.id)
     }
 
     func testTheTestAnEarlierBootWentDownInIsNamedOnlyByThatBootsLastRun() {
@@ -84,7 +87,7 @@ final class ReportTests: XCTestCase {
         run.interrupt("backgrounded")
         let saved = try Report.decoded(try run.encoded())
         XCTAssertEqual(saved.run.interruption, "backgrounded")
-        XCTAssertEqual(Report.interrupted([saved], boot: boot)?.run.current, "b")
+        XCTAssertEqual(Report.interrupted([saved])?.run.current, "b")
         var resumed = saved
         resumed.requeueInterrupted()
         XCTAssertEqual(resumed.remaining, ["b", "c"])
@@ -104,6 +107,87 @@ final class ReportTests: XCTestCase {
         XCTAssertEqual(run.summary.fail, 1)
         XCTAssertTrue(run.results[0].log.hasPrefix("HWTEST a FAIL crashed=1 ms=12.3 why=the_app's_process_ended"))
         XCTAssertTrue(try Report.decoded(try run.encoded()).results[0].crashed)
+    }
+
+    func testAnInterruptedRerunRetriesInsteadOfKeepingItsOlderResult() {
+        var run = report()
+        run.plan(["a", "b"])
+        run.record(record("a", .pass()))
+        run.record(record("b", .pass()))
+        run.begin("a")
+        run.interrupt("closed")
+        run.requeueInterrupted()
+        XCTAssertEqual(run.remaining, ["a"])
+        XCTAssertEqual(run.results.map(\.id), ["b"])
+        XCTAssertEqual(run.summary.pass, 1)
+    }
+
+    func testCancellationKeepsPartialResultsAndDoesNotOfferThemAgain() throws {
+        var run = report()
+        run.plan(["a", "b"])
+        run.record(record("a", .pass()))
+        run.begin("b")
+        run.interrupt("closed")
+        let results = run.results
+        run.cancel(at: Date(timeIntervalSince1970: 60))
+        let saved = try Report.decoded(try run.encoded())
+        XCTAssertEqual(saved.run.status, .cancelled)
+        XCTAssertEqual(saved.results, results)
+        XCTAssertEqual(saved.run.order, ["a", "b"])
+        XCTAssertEqual(saved.run.finished, "1970-01-01T00:01:00.000Z")
+        XCTAssertNil(saved.run.current)
+        XCTAssertNil(saved.run.interruption)
+        var older = report(started: -60)
+        older.plan(["a"])
+        XCTAssertNil(Report.interrupted([older, saved]))
+    }
+
+    func testResumingOnAnotherBootPreservesOriginAndAttributesNewResults() throws {
+        var run = report()
+        run.plan(["a", "b", "c"])
+        run.record(record("a", .pass()))
+        run.begin("b")
+        let origin = run.run
+        let results = run.results
+        let resumedIdentity = ["build": "24B119", "app_uuid": "new app"]
+        run.resume(bootUUID: "B2", at: Date(timeIntervalSince1970: 60), identity: resumedIdentity)
+        XCTAssertEqual(run.run, origin)
+        XCTAssertEqual(run.identity, ["build": "24B119"])
+        XCTAssertEqual(run.results, results)
+        XCTAssertEqual(run.latestBootUUID, "B2")
+        XCTAssertEqual(run.resumptions?.last?.identity, resumedIdentity)
+        XCTAssertEqual(run.resumptions?.last?.at, "1970-01-01T00:01:00.000Z")
+        XCTAssertNil(Report.lastBootStoppedIn([run], boot: "B2"))
+        XCTAssertEqual(Report.lastBootStoppedIn([run], boot: "B3"), "b")
+        run.resume(bootUUID: "B2", at: Date(), identity: resumedIdentity)
+        XCTAssertEqual(run.resumptions?.count, 1)
+        run.requeueInterrupted()
+        run.record(record("b", .pass()))
+        XCTAssertEqual(run.bootUUID(for: run.results[0]), boot)
+        XCTAssertEqual(run.bootUUID(for: run.results[1]), "B2")
+        run.record(record("a", .pass()))
+        XCTAssertEqual(run.bootUUID(for: run.results[0]), "B2", "a rerun belongs to the boot that reran it")
+        run.resume(bootUUID: "B3", at: Date(timeIntervalSince1970: 120), identity: ["build": "24B120"])
+        XCTAssertEqual(run.resumptions?.map(\.bootUUID), ["B2", "B3"])
+        XCTAssertEqual(run.latestBootUUID, "B3")
+        XCTAssertEqual(run.bootUUID(for: run.results[0]), "B2")
+        XCTAssertEqual(try Report.decoded(try run.encoded()), run)
+    }
+
+    func testOlderReportsWithoutResumeFieldsDecodeWithTheirOriginalBoot() throws {
+        var run = report()
+        run.plan(["a", "b"])
+        run.record(record("a", .pass()))
+        var json = try JSONSerialization.jsonObject(with: run.encoded()) as! [String: Any]
+        json.removeValue(forKey: "resumptions")
+        var entries = json["results"] as! [[String: Any]]
+        entries[0].removeValue(forKey: "boot_uuid")
+        json["results"] = entries
+        let saved = try Report.decoded(JSONSerialization.data(withJSONObject: json))
+        XCTAssertNil(saved.resumptions)
+        XCTAssertNil(saved.results[0].bootUUID)
+        XCTAssertEqual(saved.latestBootUUID, boot)
+        XCTAssertEqual(saved.bootUUID(for: saved.results[0]), boot)
     }
 
     func testRoundTripsThroughJSONWithSnakeCaseRunKeys() throws {

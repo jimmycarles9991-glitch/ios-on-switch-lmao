@@ -25,10 +25,11 @@ enum PackSectionId {
     PackStrings,
     PackHeap,
     PackKernels,
+    PackSplits,
     PackSectionCount
 };
 
-constexpr uint32_t kPackVersion = 8;
+constexpr uint32_t kPackVersion = 9;
 
 struct PackHeader {
     char magic[8];                                    // "GM20BPK1"
@@ -44,7 +45,9 @@ enum PackCbufType : uint8_t {
     CbufRoot = 1,
     CbufShaderData = 2,
     CbufSet = 3,
+    CbufSplitParams = 4,  // a split prologue's parameters (PackSplit): the draw's push words and its frontier's address
     CbufUbo = 5,
+    CbufFrontier = 6,  // a split fragment program's frontier (PackSplit): the draw's slice of its prologue's writes
     CbufUnbindable = 7
 };
 
@@ -189,6 +192,22 @@ struct PackKernel {
     PackKernelEntry entry[16];
 };
 
+// A fragment program split for the raw path (Mesa nvk_switch_split.h): what `whole` computes from per-draw values alone
+// moved into `prologue`, a compute program (code at its slot's start) a draw launches once, one thread with the draw's
+// constant buffers bound, which writes the values `fs` reads at constant buffer frontierCbuf (the frontier, frontierBytes
+// a draw). The prologue's constant buffers: 0 the draw's root-table push words [0x700, 0x780) at 0 and its frontier's
+// address (u64) at 128; 1 to uboCount the uniform buffers the draw binds at fs's constant buffers uboCbuf; then the
+// shader data at shaderDataCbuf where it is not 0. `fs` saves GPU time on draws of thresholdPixels pixels or more.
+struct PackSplit {
+    uint32_t thresholdPixels;
+    uint16_t whole, fs, prologue, frontierBytes;
+    uint8_t frontierCbuf, uboCount, shaderDataCbuf, prologueCbufs;
+    uint8_t uboCbuf[8];
+    uint32_t qmd[64];  // the prologue's QMD (QMDV01_07), its program offset and constant buffer addresses zero
+};
+
+constexpr uint32_t kSplitParamsBytes = 256, kSplitFrontierAddress = 128;
+
 struct PackInitMethod {
     uint16_t subc, mthd;
     uint32_t data, reloc;
@@ -223,6 +242,7 @@ uint32_t relocated(const PackInitMethod &m, const InitAddresses &a);
 static_assert(sizeof(PackPipeline) == 36 + kPackEntries * 8 + 4 + 32 * 4, "pack layout");
 static_assert(sizeof(PackProgram) == 32, "pack layout");
 static_assert(sizeof(PackKernel) == 16 + 256 + 8 + 128 + 128, "pack layout");
+static_assert(sizeof(PackSplit) == 24 + 256, "pack layout");
 
 class Pack {
 public:
@@ -247,6 +267,7 @@ public:
 
     const PackPipeline *find(uint64_t keyHash, PackForm form = PackForm::Default) const;  // nullptr: not in the pack
     const PackKernel *findKernel(uint64_t keyHash) const;                                 // nullptr: not in the pack
+    const PackSplit *split(uint16_t wholeProgram) const;                                  // nullptr: not split
 
     const char *string(uint32_t off) const
     {

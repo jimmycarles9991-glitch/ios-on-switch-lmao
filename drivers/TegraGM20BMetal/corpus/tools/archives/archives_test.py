@@ -7,8 +7,9 @@ their defaults, constants at their type's size).
 import struct
 import unittest
 
-from drivers.TegraGM20BMetal.corpus.tools.archives import airp, desc, gpubin
+from drivers.TegraGM20BMetal.corpus.tools.archives import airp, declared, desc, gpubin
 from drivers.TegraGM20BMetal.corpus.tools.archives.model import Constant, Function, Pipeline
+from tools.gpu.shaders.metallib import Constant as Declared
 
 
 class FlatBuffer:
@@ -127,6 +128,20 @@ class DescTest(unittest.TestCase):
             p.line(),
             'R ok=1 label=Card samples=1 topo=0 ds=252/0 c0=80:15:1:1:0:0:1:0:0 | v card_vertex  | f card_fragment  | ',
         )
+
+
+class RequiredTest(unittest.TestCase):
+    def test_a_function_lacking_a_required_constant_is_marked(self):
+        libraries = declared.Libraries.__new__(declared.Libraries)
+        libraries.by_hash, libraries.constant_names = {}, {}
+        libraries.by_name = {'sun_fsh': ['/L/default.metallib']}
+        libraries.required = {'/L/default.metallib': {'sun_fsh': (Declared('red', 16, 7, True),)}}
+        given = Function('sun_fsh', constants=[Constant(7, None, 16, bytes(2))])
+        lacking = Function('sun_fsh', constants=[Constant(8, None, 16, bytes(2))])
+        for f in (given, lacking):
+            self.assertTrue(libraries.place(f, '/L/archive.metallib'))
+        self.assertFalse(given.lacks_required)
+        self.assertTrue(lacking.lacks_required)
 
 
 class ModelTest(unittest.TestCase):

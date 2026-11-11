@@ -7,6 +7,7 @@
 
 #include <gtest/gtest.h>
 
+#include <sys/stat.h>
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
@@ -37,6 +38,22 @@ raw::RuntimeRecord madeUp(uint32_t n)
         r.extras = {{0x1340, n}};
         r.restore = {{0x1340, 0}};
         r.samplers.push_back({n, 1, 2, 3, 4, 5, 6, 7});
+    }
+    r.splitTried = n % 2 == 0;
+    if (n % 4 == 0) {
+        r.split = true;
+        r.splitRecord.thresholdPixels = 900 + n;
+        r.splitRecord.frontierBytes = 48;
+        r.splitRecord.frontierCbuf = 3;
+        r.splitRecord.uboCount = 1;
+        r.splitRecord.uboCbuf[0] = 1;
+        r.splitRecord.prologueCbufs = 3;
+        r.splitRecord.qmd[n % 64] = n;
+        for (int k = 0; k < 2; k++) {
+            r.splitPrograms[k].id = "split" + std::to_string(n * 2 + k);
+            r.splitPrograms[k].image.assign(80 + 32 * (n + 1), uint8_t(n + 7 * k));
+            r.splitPrograms[k].cbufTypes = {4, 1};
+        }
     }
     return r;
 }
@@ -129,6 +146,48 @@ TEST(RawCache, KeepsRecordsAcrossProcessesAndMakesEachStateOnce)
             {"samples=1 topo=0 ds=0/0 c0=80:15:0:1:0:0:1:0:0  | v v" + std::to_string(n) + " | f f", madeUp(n)});
     cachechecks::run(records, "samples=1 | v two_draws | f f", "2 draws", getenv("TEST_TMPDIR") ?: "/tmp");
     EXPECT_EQ(cachechecks::failures, 0);
+}
+
+TEST(RawCache, KeepsKernelsAndTheirRefusals)
+{
+    const std::string dir = std::string(getenv("TEST_TMPDIR") ?: "/tmp") + "/kernels";
+    mkdir(dir.c_str(), 0700);
+    raw::RecordCache cache;
+    ASSERT_TRUE(cache.open(dir, 0x77, 1 << 20));
+    raw::CacheKey made, refused;
+    made.stack = refused.stack = 0x77;
+    made.key = "kernel | 16ff | max=0 tgm=0 | tg=96,1,1 | tgmem= | tex= | smp=";
+    refused.key = "kernel | 16ff | max=0 tgm=0 | tg=32,32,1 | tgmem= | tex= | smp=";
+    raw::ComputeRecord r;
+    r.kernel.keyHash = 0xABCD;
+    r.kernel.regionWord = 4;
+    r.kernel.entries = 2;
+    r.kernel.entry[0] = {0, raw::KernelBuffer, 2, 0x3000040};
+    r.kernel.entry[1] = {16, raw::KernelSampler, 0x80, 0};
+    r.kernel.qmd[20] = 0x7;
+    r.code.assign(320, 0x11);
+    r.data.assign(256, 0x22);
+    r.cbufType[0] = raw::CbufRoot;
+    r.cbufType[1] = raw::CbufSet;
+    r.cbufs = 2;
+    r.keyString = made.key;
+    r.samplers.push_back({1, 2, 3, 4, 5, 6, 7, 8});
+    ASSERT_TRUE(cache.storeKernel(made, &r, ""));
+    ASSERT_TRUE(cache.storeKernel(refused, nullptr, "a texture slot the dispatch leaves unbound at 0"));
+    raw::ComputeRecord back;
+    std::string why;
+    ASSERT_EQ(cache.loadKernel(made, back, why), raw::RecordCache::Found::Record);
+    EXPECT_EQ(memcmp(&back.kernel, &r.kernel, sizeof r.kernel), 0);
+    EXPECT_EQ(back.code, r.code);
+    EXPECT_EQ(back.data, r.data);
+    EXPECT_EQ(memcmp(back.cbufType, r.cbufType, sizeof r.cbufType), 0);
+    EXPECT_EQ(back.cbufs, r.cbufs);
+    EXPECT_EQ(back.keyString, r.keyString);
+    EXPECT_EQ(back.samplers, r.samplers);
+    EXPECT_EQ(cache.loadKernel(refused, back, why), raw::RecordCache::Found::Refusal);
+    EXPECT_EQ(why, "a texture slot the dispatch leaves unbound at 0");
+    raw::RuntimeRecord state;
+    EXPECT_EQ(cache.load(made, state, why), raw::RecordCache::Found::None);
 }
 
 }  // namespace

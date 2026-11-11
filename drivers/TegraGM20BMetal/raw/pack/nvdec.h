@@ -164,9 +164,15 @@ private:
     void computeMethod(uint32_t mthd, uint32_t data);
     void dispatch(uint64_t qmd);
     void probeKernel(const uint32_t *qmd, const std::string &prog);
+    void splitPrologue(const uint32_t *q, const std::string &prog, const ProgramInfo &info);
+    // raw_pack.h PackCbufType: a split prologue's parameters, and the frontier a split draw reads
+    static constexpr uint8_t kSplitParams = 4, kSplitFrontier = 6;
     // the known programs by the hash of their code's first kComputeHead bytes (computeProgram)
     static constexpr size_t kComputeHead = 64;
     std::multimap<uint64_t, const ProgramInfo *> computeByHead_;
+    // a split prologue's launch (raw_pack.h PackSplit) by the frontier it writes: its program and what its constant buffers
+    // hold, which the draw that reads the frontier prints
+    std::map<uint64_t, std::string> splitLaunches_;
     void probeDump(uint32_t first, uint32_t count);
     void clear(uint32_t data);
     void countComp(uint32_t clearData);

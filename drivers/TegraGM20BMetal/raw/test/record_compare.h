@@ -81,4 +81,37 @@ inline std::string differences(const raw::Pack &pack, const raw::PackPipeline &p
     return why;
 }
 
+// How the split a record made with its split (Direct::make's `split`) differs from the pack's of the same state
+inline std::string splitDifferences(const raw::Pack &pack, const raw::PackPipeline &pp, const raw::RuntimeRecord &r)
+{
+    const raw::PackSplit *packed = pack.split(pp.fs);
+    if (!r.splitTried)
+        return " split-untried";
+    if (!packed || !r.split)
+        return packed ? " split-missing" : r.split ? " split-extra" : "";
+    std::string why;
+    const raw::PackSplit &m = r.splitRecord;
+    if (packed->thresholdPixels != m.thresholdPixels || packed->frontierBytes != m.frontierBytes ||
+        packed->frontierCbuf != m.frontierCbuf || packed->uboCount != m.uboCount ||
+        packed->shaderDataCbuf != m.shaderDataCbuf || packed->prologueCbufs != m.prologueCbufs ||
+        memcmp(packed->uboCbuf, m.uboCbuf, sizeof m.uboCbuf) || memcmp(packed->qmd, m.qmd, sizeof m.qmd))
+        why += " split-record";
+    const raw::PackProgram *programs = pack.section<raw::PackProgram>(raw::PackPrograms);
+    const uint8_t *heap = pack.section<uint8_t>(raw::PackHeap);
+    const raw::PackProgram &fs = programs[packed->fs];
+    raw::PackProgram made;
+    const std::vector<uint8_t> slot = raw::programSlot(r.splitPrograms[0], made);
+    if (fs.bytes != made.bytes || memcmp(heap + fs.heapOffset, slot.data(), slot.size()) ||
+        fs.program - fs.heapOffset != made.program || fs.cbufs != made.cbufs ||
+        memcmp(fs.cbufType, made.cbufType, sizeof made.cbufType))
+        why += " split-pixel-program";
+    const raw::PackProgram &prologue = programs[packed->prologue];
+    const raw::CapturedProgram &p = r.splitPrograms[1];
+    const size_t code = p.image.size() > 80 ? p.image.size() - 80 : 0;
+    if (!code || prologue.dataBytes < p.data.size() || memcmp(heap + prologue.program, p.image.data() + 80, code) ||
+        memcmp(heap + prologue.heapOffset + prologue.dataOffset, p.data.data(), p.data.size()))
+        why += " split-prologue";
+    return why;
+}
+
 }  // namespace recordcompare

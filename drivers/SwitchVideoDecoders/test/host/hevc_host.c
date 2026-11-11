@@ -114,6 +114,7 @@ typedef struct {
     uint8_t *va[MAX_BUFFERS + 1];
     uint64_t bytes[MAX_BUFFERS + 1];
     int out[64], outCount, discarded, jobs;
+    uint32_t pitch;  // the last picture handed out: bytes a row, as present and the CPU copy read it
     TegraNVDECSubmit last;
 } Fake;
 
@@ -172,7 +173,7 @@ static int fakeWait(void *ctx, const TegraNVDECWait *w)
 
 static void *fakeDecoded(void *ctx, const H264Picture *p)
 {
-    (void)ctx;
+    ((Fake *)ctx)->pitch = p->pitch;
     return (void *)(intptr_t)((intptr_t)p->token + 1);
 }
 
@@ -254,6 +255,12 @@ static void testDecode(void)
         CHECK(order, "clip %c: output order differs from FFmpeg's", clip->name);
         CHECK(!hevc_decoder_missing_refs(d), "clip %c: %u references missing", clip->name,
               hevc_decoder_missing_refs(d));
+        // framestride counts samples and mode 1 writes two bytes each (averne's nvtegra_hevc.c): the engine's rows
+        // must be the rows the picture is read with.
+        const nvdec_hevc_pic_s *setup = (const nvdec_hevc_pic_s *)f.last.setup;
+        const uint32_t engineRow = setup->framestride[0] * (setup->disp_output_mode == 1 ? 2u : 1u);
+        CHECK(engineRow == f.pitch, "clip %c: the engine writes %u-byte rows, the picture is read at %u", clip->name,
+              engineRow, f.pitch);
         // A Main 10 clip is refused while Main 10 is not proven.
         if (clip->depth == 10) {
             Fake g;
@@ -333,17 +340,27 @@ static void testDecode(void)
         if (clip->depth == 10) {  // Main 10: 16-bit samples, so 8-bit-sized surfaces and the 10-to-8 modes are refused
             const TegraNVDECSubmit good = f.last;
             const nvdec_hevc_pic_s *q = (const nvdec_hevc_pic_s *)good.setup;
-            CHECK(q->disp_output_mode == 1 && q->framestride[0] >= 2 * ((clip->width + 63u) & ~63u),
-                  "clip %c: mode %u, pitch %u", clip->name, q->disp_output_mode, q->framestride[0]);
+            const uint32_t columns = (clip->width + 63u) & ~63u, rows = (clip->height + 63u) & ~63u;
+            CHECK(q->disp_output_mode == 1 && q->framestride[0] == columns && f.pitch == 2 * columns,
+                  "clip %c: mode %u, framestride %u, picture pitch %u", clip->name, q->disp_output_mode,
+                  q->framestride[0], f.pitch);
             CHECK(!fakeCheck(&f, &good), "clip %c: the last submit", clip->name);
-            TegraNVDECSubmit narrow = good, eight = good, deblock = good;
+            TegraNVDECSubmit narrow = good, bytes = good, small = good, eight = good, deblock = good;
             nvdec_hevc_pic_s *p = (nvdec_hevc_pic_s *)narrow.setup;
-            p->framestride[0] = p->framestride[1] = (clip->width + 63u) & ~63u;
+            p->framestride[0] = p->framestride[1] = columns / 2;
+            p = (nvdec_hevc_pic_s *)bytes.setup;  // a byte pitch: the engine would write rows twice the surface's
+            p->framestride[0] = p->framestride[1] = 2 * columns;
+            for (uint32_t k = 0; k < small.entry_count; k++)  // the current slot's chroma plane sized for 8 bits
+                if (small.entries[k].method == NVC5B0_SET_PICTURE_CHROMA_OFFSET0 + 4 * q->curr_pic_idx)
+                    small.entries[k].offset = (uint32_t)(f.bytes[small.entries[k].value] - columns * rows / 2);
             ((nvdec_hevc_pic_s *)eight.setup)->disp_output_mode = 2;
-            ((nvdec_hevc_pic_s *)deblock.setup)->HevcSaoBufferOffset = 480 * ((clip->height + 63u) & ~63u) / 256;
-            CHECK(fakeCheck(&f, &narrow) && fakeCheck(&f, &eight) && fakeCheck(&f, &deblock),
-                  "clip %c: the checker took an 8-bit-sized Main 10 submit", clip->name);
-            printf("checker: Main 10 in 16-bit samples, 8-bit-sized surfaces and filter rows refused\n");
+            ((nvdec_hevc_pic_s *)deblock.setup)->HevcSaoBufferOffset = 480 * rows / 256;
+            CHECK(fakeCheck(&f, &narrow) && fakeCheck(&f, &bytes) && fakeCheck(&f, &small) && fakeCheck(&f, &eight) &&
+                      fakeCheck(&f, &deblock),
+                  "clip %c: the checker took a Main 10 submit the engine would write past", clip->name);
+            printf("checker: Main 10 at %u samples a row (%u bytes); byte strides, 8-bit-sized planes and filter rows "
+                   "refused\n",
+                   columns, 2 * columns);
         }
         hevc_decoder_destroy(d);
         for (int h = 1; h <= MAX_BUFFERS; h++)

@@ -12,10 +12,9 @@ extern "C" {
 // Rail Joy-Cons (UART-B right, UART-C left) are Joy-Con HID devices for GameController, with attach/detach detection
 // and rail charging (SwitchJoyConRail.cpp); their Home and Capture buttons are also the iPad's Home button and
 // screenshot key (SwitchJoyConHID.cpp). The game-controller HID personalities also serve Bluetooth Joy-Cons and Pro
-// Controllers and, unless boot-arg switch-no-bt turns Bluetooth off, the rail pairs on attach: once SwitchBluetooth has
-// programmed the controller's address (switch_joycon_bluetooth_address), each rail Joy-Con's active pairing slot is
-// read, and the Joy-Con is paired to that address over the rail unless the slot already names it; the link key is
-// published for joyconpaird to hand to bluetoothd (helper/). On iPadOS 17 our personalities replace the prelinked
+// Controllers and, unless boot-arg switch-no-bt turns Bluetooth off, the rail pairs each Joy-Con, as its rail session
+// opens, to the address SwitchBluetooth programmed into the controller (switch_joycon_bluetooth_address); the link key
+// is published for joyconpaird to hand to bluetoothd (helper/). On iPadOS 17 our personalities replace the prelinked
 // AppleGameControllerPersonality.kext's at start; on iPadOS 27 the kext's own serve (SwitchJoyConHID.cpp).
 // Thread context, after bsd_autoconf() with the GIC up (the board thread). Idempotent. Returns 0; failures panic.
 int switch_joycon_start(void);
@@ -38,7 +37,8 @@ void switch_joycon_display_power(bool on);
 
 // SwitchBluetooth, once it has programmed the controller's BD address (display order) for its first client: the address
 // rail Joy-Cons are paired to (SwitchJoyConRail.cpp, "Pairing"). Until then rail Joy-Cons run unpaired; any that are
-// running are paired now. Thread context, may sleep; any number of calls (the latest address wins).
+// running end their session and are handshaken again, the pairing opening the new one. Thread context, may sleep; any
+// number of calls (the latest address wins).
 void switch_joycon_bluetooth_address(const uint8_t address[6]);
 
 #ifdef __cplusplus

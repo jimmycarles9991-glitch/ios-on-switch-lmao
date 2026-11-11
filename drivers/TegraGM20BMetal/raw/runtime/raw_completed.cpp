@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MIT
 // Device::addRecord (raw_gpu.h): a state the runtime made a record of (raw_record.h), drawn from then on as the pack's states are.
+#include <algorithm>
 #include <cstring>
 #include "raw_gpu.h"
 #include "raw_record.h"
@@ -35,6 +36,62 @@ bool Device::placeCompleted(const CapturedProgram &p, PlacedProgram &out)
     return true;
 }
 
+bool Device::constexprSampler(const std::array<uint32_t, 8> &words, uint32_t &index)
+{
+    const uint32_t *pack = pack_.section<uint32_t>(PackSamplers);
+    for (uint32_t i = 0; i < pack_.header()->samplers; i++)
+        if (!memcmp(pack + 8 * i, words.data(), sizeof words)) {
+            index = i;
+            return true;
+        }
+    auto known = completedSamplers_.find(words);
+    if (known == completedSamplers_.end()) {
+        uint32_t tsc = 0;
+        if (constexprCount_ == kConstexprSamplers || !takeTsc(tsc))
+            return false;
+        memcpy(tsc_.cpu + 32 * tsc, words.data(), 32);
+        constexprTsc_[constexprCount_] = tsc;
+        known = completedSamplers_.emplace(words, uint8_t(constexprCount_++)).first;
+    }
+    index = known->second;
+    return true;
+}
+
+// lock_ held: a runtime record's split offered to its state (RuntimeRecord::split; the prologue's image an 80-byte header of
+// zeros before its code), its programs laid out as heap slots for the draw that first takes it
+void Device::offerCompletedSplit(Completed &c, const RuntimeRecord &r, const PlacedProgram &vs, bool caTransform)
+{
+    const CapturedProgram &prologue = r.splitPrograms[1];
+    if (prologue.image.size() <= 80 || r.splitPrograms[0].image.size() < sizeof CompletedProgram::header)
+        return;
+    SplitSource source;
+    source.rec = r.splitRecord;
+    source.fsSlot = programSlot(r.splitPrograms[0], source.fsInfo);
+    source.prologueSlot.assign(prologue.image.begin() + 80, prologue.image.end());
+    source.prologueSlot.resize((source.prologueSlot.size() + 0xFF) & ~size_t(0xFF));
+    source.prologueDataAt = uint32_t(source.prologueSlot.size());
+    source.prologueDataBytes = uint32_t(prologue.data.size());
+    source.prologueSlot.insert(source.prologueSlot.end(), prologue.data.begin(), prologue.data.end());
+    source.pp = &c.record;
+    source.blob = c.blob.data();
+    source.keyString = c.keyString.c_str();
+    source.vs = vs;
+    source.caTransform = caTransform;
+    offerSplit(c.pipeline, std::move(source));
+}
+
+void Device::addSplit(const RuntimeRecord &r)
+{
+    std::lock_guard<std::mutex> l(lock_);
+    for (Completed &c : completedStore_)
+        if (c.record.keyHash == r.pipeline.keyHash && !c.pipeline.splitSource && !c.pipeline.split && r.split) {
+            PlacedProgram vs;
+            if (placeCompleted(r.programs[0], vs))
+                offerCompletedSplit(c, r, vs, c.pipeline.caTransform);
+            return;
+        }
+}
+
 Pipeline *Device::addRecord(const RuntimeRecord &r, bool caTransform, std::string &why)
 {
     std::lock_guard<std::mutex> l(lock_);
@@ -62,19 +119,12 @@ Pipeline *Device::addRecord(const RuntimeRecord &r, bool caTransform, std::strin
         PackEntry &e = c.record.entry[k];
         if (e.kind == EntryUbo || e.samplerKind != SamplerConstexpr || e.sampler < packSamplers)
             continue;
-        const std::array<uint32_t, 8> &words = r.samplers.at(e.sampler - packSamplers);
-        auto known = completedSamplers_.find(words);
-        if (known == completedSamplers_.end()) {
-            uint32_t tsc = 0;
-            if (constexprCount_ == kConstexprSamplers || !takeTsc(tsc)) {
-                why = "no room for its sampler headers";
-                return nullptr;
-            }
-            memcpy(tsc_.cpu + 32 * tsc, words.data(), 32);
-            constexprTsc_[constexprCount_] = tsc;
-            known = completedSamplers_.emplace(words, uint8_t(constexprCount_++)).first;
+        uint32_t index = 0;
+        if (!constexprSampler(r.samplers.at(e.sampler - packSamplers), index)) {
+            why = "no room for its sampler headers";
+            return nullptr;
         }
-        e.sampler = known->second;
+        e.sampler = uint8_t(index);
     }
     Completed &stored = completedStore_.emplace_back(std::move(c));
     build(stored.pipeline, stored.record, vs, fs, stored.blob.data(), stored.keyString.c_str(), caTransform);
@@ -83,6 +133,8 @@ Pipeline *Device::addRecord(const RuntimeRecord &r, bool caTransform, std::strin
     for (const auto &[m, v] : r.restore)
         w.m(m, v);
     stored.pipeline.restore.assign(words.data(), w.at);
+    if (r.split)
+        offerCompletedSplit(stored, r, vs, caTransform);
     completed_[key] = &stored.pipeline;
     return &stored.pipeline;
 }

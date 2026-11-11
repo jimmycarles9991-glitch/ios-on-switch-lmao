@@ -72,6 +72,14 @@ def main() -> int:
     parser.add_argument('--until', choices=sorted(MILESTONES), default='launchd')
     parser.add_argument('--timeout', type=float, default=600, help='wall seconds before giving up')
     args = parser.parse_args()
+    if args.until in ('root', 'launchd', 'early-boot'):
+        image = None if args.sd == 'none' else Path(args.sd) if args.sd else boot.default_image(args.kind)
+        if image is None:
+            parser.error(
+                f'{args.kind} {args.until} requires an iOS filesystem image; supply --sd IMAGE '
+                f'or build //:image for {boot.KINDS[args.kind]}'
+            )
+        args.sd = str(image)
     run, inputs = boot.prepare(args)
     watch = Watch(run, inputs.kernel, re.compile(MILESTONES[args.until]))
     started = time.monotonic()

@@ -26,3 +26,22 @@ encoder interrupt (IRQSTAT bit 13, I[0x1870] bit 1) and records errors in DMEM 0
 bit 0 0xe2640060, I[0x1ac4] bits 0-2 0xe2640200) without ending anything. fn 0x48b9 then spins at 0x4916-0x491b while
 DMEM 0x2e4 < DMEM 0x354, with no timeout and no error check. DMEM 0x354 is the slice control's num_mb (0x38df),
 clamped to the macroblocks left in the picture (0x38f7-0x390e) and given to the engine as I[0x191c] (0x39f5).
+
+Picture size (tools/falcon flow_test): the app sizes the input fetch from input_cfg, (frame_*_minus1 + 1) >> 4
+macroblocks, rounded down, into I[0xe88] (0x85d6-0x861b), and the picture from outputpic_cfg, (frame_*_minus1 + 16)
+>> 4, rounded up, into DMEM 0x32c/0x32e, I[0x1808] (0x818c-0x81c3) and the slice target I[0x191c] (0x34d0). NVIDIA's
+driver gives every surface the coded size (its 1920x1080 H.265 setup has frame_height_minus1 1087, SOURCE-H265), and
+so does H264NVENC.c; the checker refuses any other. With 1080 the fetch stops a row short of the 68 macroblock rows the
+engine encodes: the one slice never ends, the GP timer error lands with 0 of 8160 macroblocks counted (the ISR counts
+when a slice ends, I[0x1870] bit 1 with the slice's bits in I[0x1ac4], 0xf6b-0xf8b) and the app spins at 0x4916 until
+the kernel's job bound.
+
+Where the OS keeps methods (tools/falcon on the OS overlay, 0x9f5-0xa51; the H.264 app reads them from DMEM 0x154, its
+copy at 0x2e00): 0x700-0x74c are words 0-0x13 (0x780-0x7cc share them), with a written-bit mask at word 0x23 that
+SET_APPLICATION_ID clears and the app's checks read (0x2f8d-0x3180); IN_REF_PIC0..15_LUMA are words 0x13-0x22. So on
+NVENC 5.0 OUT_REF_PIC_CHROMA (0x74c) is reference slot 0, IN_REF_PIC0_CHROMA (0x440) overwrites the mask (E3's P
+pictures' ucode error 0x120 on every boot of 11-06 is the app's 0xe2640120, CHROMA_V marked written but 0, which an
+address bit in the mask gives), and 0x444-0x47c are dropped. The app
+writes all 16 slots to I[0x1040-0x107c] on every picture (0x80a1, ME byte 0x8f bits 4-7 neither 1 nor 2, 0 here), and
+NVIDIA's driver names slot 0 in every job it was captured sending (the other reconstruction), so H264NVENC.c's IDR does
+too.

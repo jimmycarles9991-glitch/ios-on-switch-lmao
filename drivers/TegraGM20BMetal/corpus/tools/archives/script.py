@@ -55,9 +55,10 @@ class Script:
         spec = self.specialized.get(ref.get('name', ''))
         if not spec:
             return Function(ref['name'])
+        # a constant naming neither its index nor its name is the function's constant at its position
         constants = [
-            Constant(c.get('index') if 'name' not in c else None, c.get('name'), c['dataType'], _bytes(c))
-            for c in spec.get('constants', [])
+            Constant(c.get('index', i) if 'name' not in c else None, c.get('name'), c['dataType'], _bytes(c))
+            for i, c in enumerate(spec.get('constants', []))
         ]
         return Function(spec['baseFunction']['name'], constants=constants, specialized=True)
 

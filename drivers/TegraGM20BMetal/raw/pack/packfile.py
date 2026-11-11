@@ -1,15 +1,19 @@
 import json
-import re
 import struct
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 MAGIC = b'GM20BPK1'
 # 2: the header's stack key (rawpack.py --stack) after the section table; 3: barrier-form records; 4: programs' shader
-# data and constant buffer types; 6: compute kernels (runtime/raw_pack.h PackKernel); 8: a texture3d entry's Metal index
-VERSION = 8
-SECTIONS = 9  # runtime/raw_pack.h PackSectionCount
+# data and constant buffer types; 6: compute kernels (runtime/raw_pack.h PackKernel); 8: a texture3d entry's Metal
+# index; 9: split fragment programs (PackSplit)
+VERSION = 9
+SECTIONS = 10  # runtime/raw_pack.h PackSectionCount
 KERNEL_ENTRIES = 16  # PackKernel.entry's length
 PROGRAM_CBUFS = 11  # PackProgram.cbufType's length (runtime/raw_pack.h)
+
+
+# PackSplit (runtime/raw_pack.h)
+PACK_SPLIT = struct.Struct('<IHHHHBBBB8s64I')
 
 
 def fnv(b: bytes, h: int = 0xCBF29CE484222325) -> int:
@@ -68,9 +72,49 @@ def push_bytes(push: list[tuple[int, int]]) -> bytes:
 
 def key_hash(rec: dict) -> int:
     # the raw path's own states (probe.mm PROBE_OWN_LIB) by the name the runtime asks for (raw_gpu.cpp ycbcrPipeline and
-    # standInPipeline, runtime/raw_xr.h xrConversion, runtime/raw_samples.h resolveState)
-    own = re.search(r'\| f ((ycbcr|xr|two_plane|resolve)_\w+)', rec['key'])
-    return fnv(f'raw.{own.group(2)}.{own.group(1)}'.encode() if own else rec['key'].encode())
+    # standInPipeline, runtime/raw_xr.h xrConversion, runtime/raw_samples.h resolveState, runtime/raw_mip.h mipState)
+    parts = rec['key'].split(' | ')
+    pair = f'{parts[1].rstrip()} | {parts[2]}' if len(parts) == 3 else ''
+    for family, vertex, fragments in (
+        ('ycbcr', 'ycbcr_vert', ('converted_frag', 'srgb_frag', 'codes_frag', 'codes10_frag')),
+        ('xr', 'xr_vert', ('bgr10_frag', 'bgra10_frag', 'planes_frag')),
+        ('two_plane', 'two_plane_cover', ('load', 'store')),
+        (
+            'resolve',
+            'resolve_vert',
+            ('rgba8_frag', 'rgba8_srgb_frag', 'bgra8_frag', 'bgra8_srgb_frag', 'rg11b10f_frag', 'rgba16f_frag'),
+        ),
+        (
+            'mip',
+            'mip_vert',
+            tuple(
+                f'{name}_frag'
+                for name in (
+                    'a8',
+                    'r16',
+                    'r16f',
+                    'b5g6r5',
+                    'bgr5a1',
+                    'r32f',
+                    'rg16',
+                    'rg16f',
+                    'rgba8_srgb',
+                    'bgra8_srgb',
+                    'rgb10a2',
+                    'rg11b10f',
+                    'bgr10a2',
+                    'rg32f',
+                    'rgba16',
+                    'rgba32f',
+                )
+            ),
+        ),
+    ):
+        for fragment in fragments:
+            name = f'{family}_{fragment}'
+            if pair == f'v {vertex} | f {name}':
+                return fnv(f'raw.{family}.{name}'.encode())
+    return fnv(rec['key'].encode())
 
 
 def pipeline_bytes(rec: dict, key_offset: int, blob_off: int) -> bytes:
@@ -119,6 +163,71 @@ def kernel_bytes(k: dict, key_offset: int) -> bytes:
     )
 
 
+def program_name(program: dict) -> str:
+    """Give the name nvdec gives a bound program: the FNV-1a of its header, code and shader data.
+
+    The pack's ids hold its constant buffer types too (directlink.py program_id), which nvdec cannot see.
+    """
+    return f'{fnv(program["image"] + program["data"]):x}'
+
+
+def place_graphics(
+    pid: str, programs: dict[str, dict], heap: bytearray, prog_index: dict[str, int], prog_recs: list[dict]
+) -> None:
+    """Append a 3D program to the heap image as NVK uploads it pre-Turing: header at +0x30, code at +0x80."""
+    if pid in prog_index:
+        return
+    pr = programs[pid]
+    storage_id = pr.get('storage_id', pid)
+    shared = next((p for p in prog_recs if p.get('storage_id') == storage_id), None)
+    if shared:
+        prog_index[pid] = len(prog_recs)
+        prog_recs.append(dict(shared, id=pid))
+        return
+    off = len(heap)
+    slot = bytearray(0x80 - 0x50) + pr['image'][:80]
+    slot += pr['image'][80:]
+    slot += bytes((-len(slot)) % 0x100)
+    data_offset = len(slot) if pr['data'] else 0  # NAK's shader data where NVK uploads it: 256-aligned after the code
+    slot += pr['data']
+    heap += slot
+    prog_index[pid] = len(prog_recs)
+    prog_recs.append(
+        {
+            'id': pid,
+            'storage_id': storage_id,
+            'name': program_name(pr),
+            'heap_offset': off,
+            'program': off + 0x30,
+            'bytes': len(slot),
+            'code': len(pr['image']) - 80,
+            'cbufs': pr['cbufs'],
+            'data_offset': data_offset,
+            'data_bytes': len(pr['data']),
+        }
+    )
+
+
+def split_bytes(found: list[dict]) -> bytes:
+    """Give the PackSplit section: the splits in whole-program order (raw_pack.cpp Pack::split searches it)."""
+    return b''.join(
+        PACK_SPLIT.pack(
+            s['threshold'],
+            s['whole'],
+            s['fs'],
+            s['prologue'],
+            s['frontier_bytes'],
+            s['frontier_cbuf'],
+            len(s['ubo_cbufs']),
+            s['shader_data_cbuf'],
+            s['prologue_cbufs'],
+            bytes(s['ubo_cbufs']) + bytes(8 - len(s['ubo_cbufs'])),
+            *s['qmd'],
+        )
+        for s in found
+    )
+
+
 @dataclass
 class Pack:
     pipes: list[dict]
@@ -128,6 +237,7 @@ class Pack:
     init: list[tuple[int, int, int, int]]
     heap: bytearray
     kernels: list[dict]
+    splits: list[dict] = field(default_factory=list)
 
 
 def pipeline_sections(pipes: list[dict]) -> tuple[bytearray, list[int], bytearray]:
@@ -185,6 +295,7 @@ def pack_bytes(pack: Pack) -> tuple[bytes, list[int]]:
         bytes(strings),
         bytes(pack.heap),
         bytes(kernel_bin),
+        split_bytes(pack.splits),
     ]
     assert len(sections) == SECTIONS
     header_size = 8 + 4 * 4 + 8 * 2 * len(sections)
@@ -212,6 +323,7 @@ def write_json(path: str, pack: Pack, varying: list[int]) -> None:
         'varying': [f'{m:x}' for m in varying],
         'init_methods': len(pack.init),
         'kernels': pack.kernels,
+        'splits': pack.splits,
     }
     with open(path, 'w') as pack_json:
         json.dump(
@@ -227,10 +339,17 @@ def entry_kind(e: dict) -> str:
     return 'u' if e['kind'] in ('ubo', 'color_table') else ('h' if e.get('smp') else 't')
 
 
+def name(program: dict) -> str:
+    return program.get('name', program['id'])
+
+
 def write_layouts(path: str, pack: Pack) -> None:
     # decoder table: pipeline set-0 layouts by program pair, so nvdec compares only the bytes a layout defines
+    split = {s['whole']: s['fs'] for s in pack.splits}
     with open(path, 'w') as f:
         for rec in pack.pipes:
-            vs, fs = pack.programs[rec['vs']]['id'], pack.programs[rec['fs']]['id']
             slots = ' '.join(f'{e["off"]}:{entry_kind(e)}' for e in rec['entries'])
-            f.write(f'{vs} {fs} {rec["set_size"]:x} {slots}\n')
+            vs = name(pack.programs[rec['vs']])
+            for fs in (rec['fs'], split.get(rec['fs'])):
+                if fs is not None:
+                    f.write(f'{vs} {name(pack.programs[fs])} {rec["set_size"]:x} {slots}\n')

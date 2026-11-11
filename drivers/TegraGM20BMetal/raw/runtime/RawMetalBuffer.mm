@@ -35,7 +35,9 @@
     const NSUInteger length =
         _raw.import ? NSUInteger(_raw.length) : (NSUInteger(_raw.length) + page - 1) & ~(page - 1);
     raw::Alias a;
-    return twinPublish(self, _twin, gRM->raw->alias(_raw, a) ? rawAliasBuffer(a, _raw.cpu, length, options) : nil);
+    return twinPublish(self, _twin,
+                       heapResident(_heap) && gRM->raw->alias(_raw, a) ? rawAliasBuffer(a, _raw.cpu, length, options)
+                                                                       : nil);
 }
 
 // A CPU read after a GPU write: the GPU's bytes, not lines the CPU cached before (clean+invalidate keeps any CPU write)

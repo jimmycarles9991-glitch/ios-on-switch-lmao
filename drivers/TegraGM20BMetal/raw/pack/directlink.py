@@ -6,8 +6,8 @@ warm-up draw's registers (one probe draw: the context init and what NVK writes a
 state's own are laid as the probe saw them. mkpack.py's split_registers then tells the per-pipeline registers from the
 baseline, and the programs, constexpr samplers and records are laid out as mkpack.py lays out the probe's.
 
-usage: directlink.py <out dir> <bucket dir>... (rawpack.py's buckets: records.bin; bucket 0's warm.out and warm.log; a
-bucket's compute.out, compute.log and programs.bin where it probed kernels)
+usage: directlink.py <out dir> <bucket dir>...
+(rawpack.py's buckets: records.bin holds states and kernels; bucket 0 holds warm.out and warm.log)
 writes <out dir>/pack.bin, pack.json, layouts.txt, programs.bin (every render program, for nvdec) and report.txt
 """
 
@@ -16,9 +16,11 @@ import struct
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import kernels
 import mkpack
 import packfile
 import probelog
+import splits
 
 PIPELINE = struct.Struct('<QIHHIIBBBBHHI')
 # SET_PIPELINE_PROGRAM(vertex B, pixel): where each program sits in the shader heap, which the probe saw differ by state
@@ -47,26 +49,43 @@ class Reader:
         return self.at >= len(self.data)
 
 
-def load_records(path: str) -> list[dict]:
-    """Give a records.bin's states (directpack.mm's layout)."""
+def program(r: Reader) -> dict:
+    return {'image': r.blob(), 'data': r.blob(), 'cbufs': list(r.blob())}
+
+
+def headers(blob: bytes) -> list[list[int]]:
+    return [list(struct.unpack_from('<8I', blob, 32 * i)) for i in range(len(blob) // 32)]
+
+
+def load_records(path: str) -> tuple[list[dict], list[dict]]:
+    """Give a records.bin's states and kernels (directpack.mm's layout)."""
     with open(path, 'rb') as f:
         r = Reader(f.read())
-    out = []
+    states, kernel_recs = [], []
     while not r.done():
-        if r.take(4) != b'DREC':
+        tag = r.take(4)
+        if tag not in (b'DREC', b'DKRN'):
             raise ValueError(f'{path}: no record at byte {r.at - 4}')
         outcome = r.u32()
         rec = {'outcome': outcome, 'key': r.blob().decode(), 'why': r.blob().decode()}
+        if tag == b'DKRN':
+            if outcome == 0:
+                rec['kernel'] = r.blob()
+                rec['program'] = {'image': bytes(80) + r.blob(), 'data': r.blob(), 'cbufs': list(r.blob())}
+                rec['samplers'] = headers(r.blob())
+            kernel_recs.append(rec)
+            continue
         if outcome == 0:
             rec['pipeline'] = r.blob()
             rec['key_string'] = r.blob().decode()
             words = struct.unpack(f'<{len(b) // 4}I', b) if (b := r.blob()) else ()
             rec['regs'] = dict(zip(words[0::2], words[1::2], strict=True))
-            rec['programs'] = [{'image': r.blob(), 'data': r.blob(), 'cbufs': list(r.blob())} for _ in range(2)]
-            headers = r.blob()
-            rec['samplers'] = [list(struct.unpack_from('<8I', headers, 32 * i)) for i in range(len(headers) // 32)]
-        out.append(rec)
-    return out
+            rec['programs'] = [program(r) for _ in range(2)]
+            rec['samplers'] = headers(r.blob())
+            if r.u32():
+                rec['split'] = {'record': r.blob(), 'programs': [program(r) for _ in range(2)]}
+        states.append(rec)
+    return states, kernel_recs
 
 
 def program_id(program: dict) -> str:
@@ -75,7 +94,9 @@ def program_id(program: dict) -> str:
     One code can read its uniform buffers at other set-0 offsets in another state (its constant buffer types): each is
     a program of its own, so neither state binds the other's.
     """
-    return f'{packfile.fnv(program["image"] + program["data"] + bytes(program["cbufs"])):x}'
+    return (
+        f'{packfile.fnv(program["image"] + program["data"] + bytes(program["cbufs"]) + program.get("identity", b"")):x}'
+    )
 
 
 def entries_of(pipeline: bytes, count: int, samplers: list[list[int]], constexpr_tsc: list[list[int]]) -> list[dict]:
@@ -154,29 +175,79 @@ def gather(buckets: list[str], context: dict[int, int]) -> tuple[list[dict], lis
     """Give the buckets' made states, each (form, key) once, their registers laid over `context`, and those refused."""
     states, seen, refused = [], set(), []
     for d in buckets:
-        for rec in load_records(os.path.join(d, 'records.bin')):
+        for rec in load_records(os.path.join(d, 'records.bin'))[0]:
             form = 'barrier' if rec['outcome'] == 0 and PIPELINE.unpack_from(rec['pipeline'])[12] & 2 else ''
             if (form, rec['key']) in seen:
                 continue
             seen.add((form, rec['key']))
             if rec['outcome']:
                 refused.append(rec)
-                continue
-            n = mkpack.targets(rec['key'])
-            regs = dict(context)
-            regs.update(rec['regs'])
-            for method, program in zip(PROGRAM_OFFSETS, rec['programs'], strict=True):
-                regs[method] = int(program_id(program), 16) & 0xFFFFFFFF
-            regs = {m: 0 if mkpack.disabled_stream(m, v) else v for m, v in regs.items() if not mkpack.foreign(m, n)}
-            ids = [program_id(program) for program in rec['programs']]
-            rec['probe'] = {
-                'index': len(states),
-                'key': rec['key'],
-                'form': form,
-                'records': [{'regs': regs, 'prog': {1: (ids[0],), 5: (ids[1],)}}],
-            }
-            states.append(rec)
+            else:
+                rec['form'] = form
+                states.append(rec)
+    split_identities(states)
+    for index, rec in enumerate(states):
+        n = mkpack.targets(rec['key'])
+        regs = dict(context)
+        regs.update(rec['regs'])
+        for method, program in zip(PROGRAM_OFFSETS, rec['programs'], strict=True):
+            regs[method] = int(program_id(program), 16) & 0xFFFFFFFF
+        regs = {m: 0 if mkpack.disabled_stream(m, v) else v for m, v in regs.items() if not mkpack.foreign(m, n)}
+        ids = [program_id(program) for program in rec['programs']]
+        rec['probe'] = {
+            'index': index,
+            'key': rec['key'],
+            'form': rec['form'],
+            'records': [{'regs': regs, 'prog': {1: (ids[0],), 5: (ids[1],)}}],
+        }
     return states, refused
+
+
+def compute_kernels(buckets: list[str], constexpr_tsc: list[list[int]], laid: tuple, report: list[str]) -> list[dict]:
+    """Give the buckets' kernels (kernels.py), their programs appended to the heap image `laid` holds."""
+    records = [rec for d in buckets for rec in load_records(os.path.join(d, 'records.bin'))[1]]
+    programs = {}
+    for rec in records:
+        if rec['outcome'] == 0:
+            rec['program'], program = program_id(rec['program']), rec['program']
+            programs[rec['program']] = program
+    computes, skipped = kernels.from_records(records, constexpr_tsc)
+    kernels.lay_out(computes, programs, *laid)
+    report.append(f'{len(computes)} compute kernels, {len(skipped)} dispatch shapes left out')
+    report += [f'  skipped kernel {key}: {why}' for key, why in skipped]
+    return computes
+
+
+def split_identities(states: list[dict]) -> None:
+    """Keep distinct splits of identical whole programs addressable, with one shared whole-program heap slot."""
+    variants: dict[str, set[bytes]] = {}
+    identities = []
+    for rec in states:
+        whole = program_id(rec['programs'][1])
+        split = rec.get('split')
+        identity = (
+            split['record'] + b''.join(bytes.fromhex(program_id(p).zfill(16)) for p in split['programs'])
+            if split
+            else b''
+        )
+        variants.setdefault(whole, set()).add(identity)
+        identities.append((whole, identity))
+    for rec, (whole, identity) in zip(states, identities, strict=True):
+        if len(variants[whole]) > 1:
+            rec['programs'][1] = dict(rec['programs'][1], identity=identity, storage_id=whole)
+
+
+def split_programs(states: list[dict], programs: dict[str, dict]) -> dict[str, dict]:
+    """Give the states' splits by their whole program's id; their per-pixel programs and prologues join `programs`."""
+    found = {}
+    for rec in states:
+        if 'split' not in rec:
+            continue
+        fs, prologue = rec['split']['programs']
+        ids = [program_id(p) for p in (fs, prologue)]
+        programs.update(zip(ids, (fs, prologue), strict=True))
+        found[program_id(rec['programs'][1])] = splits.of_record(rec['split']['record'], *ids)
+    return found
 
 
 def write_programs(path: str, programs: dict[str, dict]) -> None:
@@ -194,6 +265,7 @@ def main() -> None:
     init, post = mkpack.load_init(warm_log)
     states, refused = gather(buckets, warm_registers(os.path.join(warm, 'warm.out'), warm_log))
     programs = {program_id(p): p for rec in states for p in rec['programs']}
+    found = split_programs(states, programs)
     simple = [rec['probe'] for rec in states]
     report = [f'{len(states) + len(refused)} states made directly, {len(states)} records, {len(refused)} refused']
     varying, baseline = mkpack.split_registers(simple, post)
@@ -203,13 +275,11 @@ def main() -> None:
     heap, prog_index, prog_recs = laid
     constexpr_tsc: list[list[int]] = []
     pipes = sorted((pipeline_of(rec, varying, prog_index, constexpr_tsc) for rec in states), key=packfile.key_hash)
-    kernel_programs = dict(programs)
-    for d in buckets:
-        if os.path.exists(os.path.join(d, 'programs.bin')):
-            kernel_programs.update(mkpack.load_programs(os.path.join(d, 'programs.bin')))
-    computes = mkpack.compute_kernels(buckets, constexpr_tsc, kernel_programs, laid, report)
+    computes = compute_kernels(buckets, constexpr_tsc, laid, report)
+    used = list(dict.fromkeys(prog_recs[rec['fs']]['id'] for rec in pipes))
+    split = splits.lay_out(used, found, programs, laid, report)
     init_recs = [(sc, m, d, mkpack.RELOC_CODE.get(mkpack.RELOC.get((sc, m)), 0)) for sc, m, d in init]
-    pack = packfile.Pack(pipes, prog_recs, constexpr_tsc, baseline, init_recs, heap, computes)
+    pack = packfile.Pack(pipes, prog_recs, constexpr_tsc, baseline, init_recs, heap, computes, split)
     data, blob = packfile.pack_bytes(pack)
     os.makedirs(out_dir, exist_ok=True)
     with open(os.path.join(out_dir, 'pack.bin'), 'wb') as f:
@@ -219,8 +289,8 @@ def main() -> None:
     write_programs(os.path.join(out_dir, 'programs.bin'), programs)
     report.append(
         f'pack.bin {len(data) // 1024} KiB: {len(pipes)} pipelines, {len(computes)} kernels, '
-        f'{len(prog_recs)} programs, {len(constexpr_tsc)} constexpr samplers, {len(blob)} blob dwords, '
-        f'{len(baseline)} baseline regs'
+        f'{len(prog_recs)} programs, {len(split)} splits, {len(constexpr_tsc)} constexpr samplers, '
+        f'{len(blob)} blob dwords, {len(baseline)} baseline regs'
     )
     report += [f'  refused ({rec["why"]}): {rec["key"][:150]}' for rec in refused]
     with open(os.path.join(out_dir, 'report.txt'), 'w') as f:

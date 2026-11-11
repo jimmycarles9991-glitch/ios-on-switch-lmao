@@ -78,6 +78,8 @@
 
 #include "bindfs.h"
 
+#include <switch/identity.h>
+
 volatile int native_bindfs_boot_mount = 0;
 
 #define BINDFS_ENTITLEMENT "com.apple.private.bindfs-allow"
@@ -559,3 +561,15 @@ struct vfsops bindfs_vfsops = {
 	.vfs_sysctl             = NULL,
 	.vfs_setattr            = NULL,
 };
+
+/* Switch: a union the boot made (native_bindfs_boot_mount) stands in for the directory it covers, so its files belong
+ * to that directory's volume (kernel/switch/vfs/identity.c). */
+mount_t
+bindfs_boot_union_host(mount_t mp)
+{
+	struct bind_mount * xmp = mp->mnt_op == &bindfs_vfsops ? MOUNTTOBINDMOUNT(mp) : NULL;
+	if (xmp == NULL || !(xmp->bindm_flags & BINDM_FORCE_ROOT) || mp->mnt_vnodecovered == NULLVP) {
+		return NULL;
+	}
+	return vnode_mount(mp->mnt_vnodecovered);
+}

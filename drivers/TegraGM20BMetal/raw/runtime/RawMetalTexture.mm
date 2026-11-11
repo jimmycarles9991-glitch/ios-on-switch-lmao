@@ -70,6 +70,7 @@ void traceSurfaceImage(RMTexture *t, const char *what, uint32_t seed)
     }
     id<MTLDevice> m2v = gRM->fallback;
     id made = nil;  // outside this object's lock (twinPublish)
+    const char *why = "m2v made none";
     {
         switch (_kind) {
         case RMTextureSurface:
@@ -78,11 +79,15 @@ void traceSurfaceImage(RMTexture *t, const char *what, uint32_t seed)
         case RMTexturePool: {  // m2v's in-place texture over the same pool memory (as an IOSurface's)
             const size_t page = size_t(getpagesize());
             raw::Alias a;
+            const bool shared = heapResident(_heap) && gRM->raw->alias(_raw, a);
             id<MTLBuffer> pages =
-                gRM->raw->alias(_raw, a)
-                    ? rawAliasBuffer(a, _raw.span.cpu, (NSUInteger(_raw.span.bytes) + page - 1) & ~(page - 1),
-                                     MTLResourceStorageModeShared)
-                    : nil;
+                shared ? rawAliasBuffer(a, _raw.span.cpu, (NSUInteger(_raw.span.bytes) + page - 1) & ~(page - 1),
+                                        MTLResourceStorageModeShared)
+                       : nil;
+            why = !_raw.span.valid() ? "it has no memory of its own"
+                  : !shared          ? "its memory could not be aliased (a purged heap's that did not come back)"
+                  : !pages           ? "m2v did not take its memory"
+                                     : "m2v made no texture over its memory";
             MTLTextureDescriptor *d = _descriptor;
             if (_raw.chain && d.storageMode == MTLStorageModeMemoryless) {  // every level, in place (memory here)
                 d = [_descriptor copy];
@@ -119,11 +124,13 @@ void traceSurfaceImage(RMTexture *t, const char *what, uint32_t seed)
             break;
         }
     }
+    const char *error = !made && nmb_last_error ? nmb_last_error() : nullptr;
     id twin = twinPublish(self, _twin, made);
     if (!twin)
         SWITCH_REFUSE_DETAIL("raw", "twin.texture", _descriptor.pixelFormat,
-                             "no m2v twin for a %ux%u texture of format %lu (kind %u)", _raw.width, _raw.height,
-                             (unsigned long)_descriptor.pixelFormat, unsigned(_kind));
+                             "no m2v twin for a %ux%u texture of format %lu (kind %u%s): %s (%s)", _raw.width,
+                             _raw.height, (unsigned long)_descriptor.pixelFormat, unsigned(_kind),
+                             _raw.arena ? ", in a heap" : "", why, error && *error ? error : "-");
     return twin;
 }
 

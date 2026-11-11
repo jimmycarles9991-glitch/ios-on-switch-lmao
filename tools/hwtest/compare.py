@@ -97,6 +97,8 @@ def compare(latest: Report, earlier: list[Report]) -> Changes:
 
 def stopped(latest: Report) -> list[str]:
     """Why an unfinished run stopped: the test that was running and what the boot's reports say."""
+    if latest.run.get('status') == 'cancelled':
+        return ['CANCELLED: the run was cancelled; completed results were kept']
     if latest.finished:
         return []
     health = latest.mac.get('health') or {}

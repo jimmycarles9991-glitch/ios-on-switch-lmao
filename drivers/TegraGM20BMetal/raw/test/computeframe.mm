@@ -39,7 +39,7 @@ std::vector<uint32_t> tag(uint32_t slot)
     return t;
 }
 
-// Texture slot t: (16 + t) x (8 + t) RGBA8 texels of a pattern; sampler slot s: max LOD clamp 1 + s / 2 (probecompute.mm's tags)
+// Texture slot t: (16 + t) x (8 + t) RGBA8 texels of a pattern; sampler slot s: max LOD clamp 1 + s / 2
 uint32_t texel(uint32_t t, uint32_t x, uint32_t y)
 {
     return 0x01000000u * t ^ x * 0x00010307u ^ y * 0x00070103u;
@@ -132,6 +132,9 @@ int runNvk(char **argv)
         fprintf(stderr, "NO FACADE %s\n", why.UTF8String);
         return 1;
     }
+    // FRAME_COMPLETE=<dir>|memory: a kernel the pack lacks is made at its first dispatch (RawComplete.h), kept in <dir>
+    if (const char *complete = getenv("FRAME_COMPLETE"))
+        raw_metal_complete_states(strcmp(complete, "memory") ? complete : nullptr);
 #endif
     NSError *e = nil;
     id<MTLLibrary> lib = [dev newLibraryWithURL:[NSURL fileURLWithPath:@(argv[4])] error:&e];

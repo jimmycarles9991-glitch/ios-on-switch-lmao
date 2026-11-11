@@ -86,12 +86,14 @@ TEST(RawLinkedSource, TheDescriptorsCAndRustFormsAgree)
 TEST(RawLinkedSource, TheRawRecordIsTheLinkedFunctionsToo)
 {
     const std::string states = SourceText("../raw/runtime/RawMetalStates.mm");
-    const std::string twin = Body(states, "static MTLRenderPipelineDescriptor *twinDescriptor(");
+    const std::string twin = Body(states, "MTLRenderPipelineDescriptor *twinDescriptor(");
     EXPECT_THAT(twin, HasSubstr("t.vertexLinkedFunctions = twinLinked(d.vertexLinkedFunctions);"));
     EXPECT_THAT(twin, HasSubstr("t.fragmentLinkedFunctions = twinLinked(d.fragmentLinkedFunctions);"));
     EXPECT_THAT(Body(states, "- (RMPipeline *)pipelineFor:"), HasSubstr("raw_metal_linked_packable(d)"));
     EXPECT_THAT(Body(SourceText("../raw/runtime/RawMetalLibrary.mm"), "NSString *raw_metal_pipeline_key("),
-                HasSubstr("key += linkedKey(d);"));
+                HasSubstr("raw::pipelineKey(d, vf ? &vertex : nullptr, ff ? &fragment : nullptr, linkedKey(d),"));
+    EXPECT_THAT(Body(SourceText("../raw/runtime/RawPipelineKey.h"), "inline std::string pipelineKey("),
+                HasSubstr("key += linked;"));
 
     const std::string key =
         Body(SourceText("../raw/runtime/RawComplete.mm"), "bool Completion::keyOf(Ask &a, CacheKey &k)");
@@ -100,6 +102,19 @@ TEST(RawLinkedSource, TheRawRecordIsTheLinkedFunctionsToo)
     EXPECT_THAT(key, HasSubstr("a.key += \" | linked\" + linked;"));
     // a specialized function's AIR is its library function's entry
     EXPECT_THAT(key, HasSubstr("native_bridge_metal_function_library_name(function)"));
+}
+
+// The pack generator files a state under the key the runtime computes of the descriptor it made, never under its corpus
+// line's text, so a line written otherwise than the device journals it (a constant's width, a "spec" mark) still hits.
+TEST(RawLinkedSource, ThePacksKeysAreTheRuntimes)
+{
+    const std::string parse = Body(SourceText("../raw/pack/probe_states.h"), "inline bool parseState(");
+    EXPECT_THAT(parse,
+                HasSubstr("s.key = raw::pipelineKey(d, &vertex, d.fragmentFunction ? &fragment : nullptr, linked,"));
+    EXPECT_THAT(Body(SourceText("../raw/pack/probe_states.h"), "inline id<MTLFunction> function("),
+                HasSubstr("key.constants = raw::constantsText(values);"));
+    EXPECT_THAT(Body(SourceText("../raw/runtime/RawMetalLibrary.mm"), "- (RMFunction *)wrap:"),
+                HasSubstr("f->_constants = raw::constantsText(values);"));
 }
 
 // A state the pack holds is this device's archive hit: every way the facade asks m2v for its twin (at once, with

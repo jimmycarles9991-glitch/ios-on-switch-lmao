@@ -51,7 +51,7 @@ from pathlib import Path
 if __package__ in (None, ''):
     sys.path.insert(0, str(Path(os.path.abspath(__file__)).parents[2]))
 from tools.common import files, paths
-from tools.deploy import mkarchive
+from tools.deploy import app_journal, mkarchive
 from tools.hwtest import hwtest
 from tools.install import (
     card as cards,
@@ -307,6 +307,8 @@ def _migration_state(data: Path, out: Path) -> None:
         lines.append('{}: {}'.format(name, sorted(p.name for p in path.iterdir()) if path.is_dir() else 'missing'))
     apps = data / 'containers/Bundle/Application'
     lines.append(f'installed apps: {sum(1 for _ in apps.iterdir()) if apps.is_dir() else 0}')
+    pending = [f'{stage} {path}' for stage, entries in app_journal.pending(data).items() for path in entries]
+    lines.append(f'app registrations pending: {", ".join(pending) or "none"}')
     (out / 'migration-state.txt').write_text('\n'.join(lines) + '\n')
 
 

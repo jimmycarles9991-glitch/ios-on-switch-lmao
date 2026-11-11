@@ -283,8 +283,8 @@ _RAW_BUCKETS = 16
 
 # The generator's modules each step runs (rawpack.py imports or runs them by path, beside it).
 _RAW_SPLIT = ["rawpack.py", "ca/caset.py", "ca/caspec.py", "ca/caspec27.py"]
-_RAW_PROBE = ["rawpack.py", "mkprograms.py", "nvkshader.py"]
-_RAW_LINK = ["rawpack.py", "directlink.py", "mkpack.py", "kernels.py", "layouts.py", "packfile.py", "probelog.py"]
+_RAW_PROBE = ["rawpack.py"]
+_RAW_LINK = ["rawpack.py", "directlink.py", "mkpack.py", "kernels.py", "layouts.py", "packfile.py", "probelog.py", "splits.py"]
 
 def _generator_files(ctx, names):
     here = ctx.file.generator.dirname + "/"
@@ -314,15 +314,17 @@ def _seed_raw_pack_impl(ctx):
     tables = [f for f in ctx.files.srcs if f.dirname.endswith("/ca") and f.extension == "json"]
     corpora = [ctx.actions.declare_file(_named(ctx, "_work/split/bucket{}.log".format(i))) for i in range(_RAW_BUCKETS)]
     args = ctx.actions.args()
+    names = [f for f in ctx.files.ca_names if f.basename == kind + ".txt"]
     args.add("split")
     args.add("--generator", ctx.file.generator)
     args.add("--qc", crawl.qc)
     args.add("--corpus", lines)
+    args.add_all(names, before_each = "--ca-names")
     args.add_all("--out", corpora)
     ctx.actions.run(
         executable = ctx.executable._tool,
         arguments = [args],
-        inputs = depset([lines] + qc + tables + _generator_files(ctx, _RAW_SPLIT)),
+        inputs = depset([lines] + qc + tables + names + _generator_files(ctx, _RAW_SPLIT)),
         outputs = corpora,
         mnemonic = "MetalRawSplit",
         progress_message = "Splitting the raw pack's states into buckets",
@@ -398,6 +400,10 @@ seed_raw_pack = rule(
         "archives": attr.label_list(
             allow_files = [".tsv"],
             doc = "the archive inventories (precompile/archives/<build>.tsv): the IPSW kind's, where there is one",
+        ),
+        "ca_names": attr.label_list(
+            allow_files = [".txt"],
+            doc = "Core Animation states devices named missing (precompile/ca-names/<build>.txt): the IPSW kind's",
         ),
         "generator": attr.label(mandatory = True, allow_single_file = True, doc = "raw/pack/rawpack.py"),
         "srcs": attr.label_list(allow_files = True, doc = "the generator's modules and QuartzCore tables (raw/pack)"),

@@ -176,3 +176,13 @@ TEST(CryptexSource, ARefusedListSaysWhy)
     EXPECT_THAT(body("void prefetchStart()"), HasSubstr("no list to replay (%s); this boot records one"));
     EXPECT_THAT(body("bool imageKeys(ListHeader *key)"), HasSubstr("key->version = kSwitchListVersion;"));
 }
+
+// AppleDiskImages2 completes an in-kernel image's requests on kernel_thread_start threads (81), and APFS hashes the
+// sealed volume's blocks in the completion: kernel-high would put that above every IOWorkLoop.
+TEST(CryptexSource, ACompletionRunsInTheKernelBand)
+{
+    EXPECT_THAT(cryptex(), Not(HasSubstr("THREAD_CALL_PRIORITY_KERNEL_HIGH")));
+    EXPECT_THAT(
+        body("Pending *takePending()"),
+        HasSubstr("p->call = thread_call_allocate_with_options(finishRequest, p, THREAD_CALL_PRIORITY_KERNEL, 0);"));
+}

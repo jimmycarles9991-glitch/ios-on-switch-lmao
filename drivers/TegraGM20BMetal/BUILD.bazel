@@ -49,11 +49,12 @@ filegroup(
     ) + [
         "raw/runtime/raw_owned.h",  # the methods the raw path owns (pack/mkpack.py reads them)
         "raw/runtime/raw_srgb_table.h",  # the colour table pack/layouts.py recognises
-        # the compute probe's key of a kernel (pack/probecompute.mm)
+        # a kernel's key (pack/kernel_shapes.h)
         "raw/runtime/raw_compute_key.h",
         "raw/runtime/raw_metallib.cpp",
         "raw/runtime/raw_metallib.h",
         "raw/runtime/raw_pack.h",
+        "raw/runtime/RawPipelineKey.h",  # the runtime's key of a state, which probe_states.h files records under
     ],
 )
 
@@ -65,8 +66,13 @@ filegroup(
         "raw/runtime/RawDirect.mm",
         "raw/runtime/raw_cache.h",
         "raw/runtime/raw_compiler.h",
+        "raw/runtime/raw_compute_record.h",
         "raw/runtime/raw_direct.cpp",
         "raw/runtime/raw_direct.h",
+        "raw/runtime/raw_direct_compute.cpp",
+        "raw/runtime/raw_direct_compute.h",
+        "raw/runtime/raw_direct_nvk.h",
+        "raw/runtime/raw_direct_push.h",
         "raw/runtime/raw_emit.cpp",
         "raw/runtime/raw_emit.h",
         "raw/runtime/raw_pack.cpp",
@@ -96,6 +102,7 @@ ios_binary(
         "raw/runtime/raw_gpu.cpp",
         "raw/runtime/raw_kernel.cpp",
         "raw/runtime/raw_pack.cpp",
+        "raw/runtime/raw_split.cpp",
         "raw/runtime/raw_zeta.cpp",
         "raw/test/fetchform.cpp",
     ],
@@ -191,6 +198,13 @@ filegroup(
     srcs = glob(["precompile/archives/*.tsv"]),
 )
 
+# The Core Animation states devices named missing from the pack, per IPSW kind (precompile/ca_names.py merges a boot's
+# logs in; //gpu/seed:raw_pack makes them from their names).
+filegroup(
+    name = "ca_name_lists",
+    srcs = glob(["precompile/ca-names/*.txt"]),
+)
+
 py_library(
     name = "archives",
     srcs = glob(
@@ -232,6 +246,7 @@ py_test(
         "raw/pack/ca/qc-21H461.json",
         "raw/pack/ca/qc-24B119.json",
         ":archive_inventories",
+        ":ca_name_lists",
     ],
     main = "corpus/tools/archives/coverage_test.py",
     deps = [
@@ -243,9 +258,15 @@ py_test(
 
 py_test(
     name = "archives_test",
-    srcs = ["corpus/tools/archives/archives_test.py"],
+    srcs = [
+        "corpus/tools/archives/archives_test.py",
+        "corpus/tools/archives/declared.py",
+    ],
     main = "corpus/tools/archives/archives_test.py",
-    deps = [":archives"],
+    deps = [
+        ":archives",
+        "//tools/gpu/shaders:metallib",
+    ],
 )
 
 py_binary(
@@ -279,11 +300,27 @@ py_binary(
     main = "precompile/harvest.py",
 )
 
+py_test(
+    name = "harvest_test",
+    srcs = [
+        "precompile/harvest.py",
+        "precompile/harvest_test.py",
+    ],
+    main = "precompile/harvest_test.py",
+)
+
 # The OS volume's library pins (pins), names.json (names: //gpu/seed:crawl) and the corpus's libraries (resolve: the seed).
 py_binary(
     name = "libraries",
     srcs = ["precompile/libraries.py"],
     main = "precompile/libraries.py",
+)
+
+# `bazel run //drivers/TegraGM20BMetal:ca_names -- <abs path>/precompile/ca-names/<build>.txt <decoded log>...`
+py_binary(
+    name = "ca_names",
+    srcs = ["precompile/ca_names.py"],
+    main = "precompile/ca_names.py",
 )
 
 # Stages a built bundle (//gpu:bundle's directory) onto a mounted Data volume (deploy --stage-gpu runs it).

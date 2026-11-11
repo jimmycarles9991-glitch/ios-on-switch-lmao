@@ -558,8 +558,10 @@ static void addButtonsPersonality()
     }
     OSObject *all[] = {page,        usage,     vendor, product, score,  bundle,
                        driverClass, interface, pair,   pairs,   driver, personalities};
-    for (const OSObject *object : all)
-        object->release();
+    for (const OSObject *object : all) {
+        if (object)
+            object->release();
+    }
 }
 
 #if !XNU_12377_121_6

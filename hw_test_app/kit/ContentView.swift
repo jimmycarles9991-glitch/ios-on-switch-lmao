@@ -32,10 +32,12 @@ public struct ContentView: View {
             .navigationTitle("Hardware tests")
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
-                    Button("Interactive") { suite.runInteractive() }.disabled(suite.running)
+                    Button("Interactive") { suite.runInteractive() }
+                        .disabled(suite.running || suite.pendingRun != nil)
                 }
                 ToolbarItem(placement: .topBarTrailing) {
-                    Button("Run All") { suite.runAll() }.disabled(suite.running).bold()
+                    Button("Run All") { suite.runAll() }
+                        .disabled(suite.running || suite.pendingRun != nil).bold()
                 }
             }
         }
@@ -50,6 +52,24 @@ public struct ContentView: View {
             }
         }
         .onAppear { suite.launch() }
+        .sheet(isPresented: Binding(get: { suite.pendingRun != nil }, set: { _ in })) {
+            VStack(alignment: .leading, spacing: 20) {
+                Text("Unfinished test run").font(.title2.bold())
+                if let run = suite.pendingRun {
+                    Text(
+                        "\(run.results.count) of \(run.summary.planned) tests completed. Continue this run, or cancel it and start a new one."
+                    )
+                }
+                if let error = suite.resumeError {
+                    Text(error).foregroundStyle(.red)
+                }
+                Button("Continue run") { suite.continueRun() }.buttonStyle(.borderedProminent)
+                Button("Start new run") { suite.startNewRun() }.buttonStyle(.bordered)
+            }
+            .padding(24)
+            .presentationDetents([.medium])
+            .interactiveDismissDisabled()
+        }
         .onReceive(NotificationCenter.default.publisher(for: UIApplication.didEnterBackgroundNotification)) { _ in
             suite.interrupted("backgrounded")
         }
@@ -72,7 +92,7 @@ public struct ContentView: View {
                 Section(subsystem.rawValue) {
                     ForEach(rows) { row in
                         TestRow(row: row).contentShape(Rectangle()).onTapGesture {
-                            if !suite.running { suite.rerun(row.id) }
+                            if !suite.running && suite.pendingRun == nil { suite.rerun(row.id) }
                         }
                     }
                 }

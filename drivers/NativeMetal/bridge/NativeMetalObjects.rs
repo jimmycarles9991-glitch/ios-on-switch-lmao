@@ -1712,7 +1712,9 @@ fn linked_functions(
         .collect()
 }
 
-fn compute_descriptor(descriptor: *const NmbComputePipelineDescriptor) -> Result<ComputePipelineDescriptor, String> {
+pub(crate) fn compute_descriptor(
+    descriptor: *const NmbComputePipelineDescriptor,
+) -> Result<ComputePipelineDescriptor, String> {
     let d = get(descriptor)?;
     // MTLLinkedFunctions' functions and privateFunctions: the external functions the kernel calls by name (MPS's ND-array kernels
     // import their prologue and epilogue functions, prefixPrimary_f and the like, this way).
@@ -2085,25 +2087,29 @@ pub struct NmbSamplerDescriptor {
 #[unsafe(no_mangle)]
 pub extern "C" fn nmb_sampler_new(device: *mut NmbDevice, descriptor: *const NmbSamplerDescriptor) -> *mut NmbSampler {
     guard(std::ptr::null_mut(), || {
-        let d = get(descriptor)?;
-        let mut out = SamplerDescriptor::new();
-        out.min_filter = raw::<SamplerMinMagFilter>(d.min_filter, "min filter")?;
-        out.mag_filter = raw::<SamplerMinMagFilter>(d.mag_filter, "mag filter")?;
-        out.mip_filter = raw::<SamplerMipFilter>(d.mip_filter, "mip filter")?;
-        out.s_address_mode = raw::<SamplerAddressMode>(d.s_address, "address mode")?;
-        out.t_address_mode = raw::<SamplerAddressMode>(d.t_address, "address mode")?;
-        out.r_address_mode = raw::<SamplerAddressMode>(d.r_address, "address mode")?;
-        out.border_color = raw::<SamplerBorderColor>(d.border_color, "border color")?;
-        out.normalized_coordinates = d.normalized != 0;
-        out.max_anisotropy = d.max_anisotropy.max(1) as u32;
-        out.compare_function = raw::<CompareFunction>(d.compare, "compare function")?;
-        out.lod_average = d.lod_average != 0;
-        out.lod_min_clamp = d.lod_min;
-        out.lod_max_clamp = d.lod_max;
+        let out = sampler_descriptor(get(descriptor)?)?;
         Ok(boxed(NmbSampler(
             get(device)?.0.new_sampler_state(&out).map_err(e("sampler"))?,
         )))
     })
+}
+
+pub(crate) fn sampler_descriptor(d: &NmbSamplerDescriptor) -> Result<SamplerDescriptor, String> {
+    let mut out = SamplerDescriptor::new();
+    out.min_filter = raw::<SamplerMinMagFilter>(d.min_filter, "min filter")?;
+    out.mag_filter = raw::<SamplerMinMagFilter>(d.mag_filter, "mag filter")?;
+    out.mip_filter = raw::<SamplerMipFilter>(d.mip_filter, "mip filter")?;
+    out.s_address_mode = raw::<SamplerAddressMode>(d.s_address, "address mode")?;
+    out.t_address_mode = raw::<SamplerAddressMode>(d.t_address, "address mode")?;
+    out.r_address_mode = raw::<SamplerAddressMode>(d.r_address, "address mode")?;
+    out.border_color = raw::<SamplerBorderColor>(d.border_color, "border color")?;
+    out.normalized_coordinates = d.normalized != 0;
+    out.max_anisotropy = d.max_anisotropy.max(1) as u32;
+    out.compare_function = raw::<CompareFunction>(d.compare, "compare function")?;
+    out.lod_average = d.lod_average != 0;
+    out.lod_min_clamp = d.lod_min;
+    out.lod_max_clamp = d.lod_max;
+    Ok(out)
 }
 
 #[unsafe(no_mangle)]

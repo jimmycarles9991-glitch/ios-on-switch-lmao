@@ -145,6 +145,22 @@ TEST(SwitchAudioSource, CodecUnmutedOnlyWhileTheI2sClocks)
     EXPECT_LT(sleep.find("codecStep(kCodecMute)"), sleep.find("&SwitchAudio::sleepGated"));
 }
 
+// The codec's first I2C read (present(), at the top of start, before tegraInit muxes the APE's pads) needs LDO1_EN
+// high on the pin, so driving PZ4 takes its pad out of tristate (TegraGPIO's output pads); a tristate pad leaves the
+// codec unpowered and the read NACKs at 0x1c.
+TEST(SwitchAudioSource, CodecPowerPadDrivenBeforeItsFirstRead)
+{
+    const std::string gpio = SourceText("../../TegraGPIO/TegraGPIO.cpp");
+    EXPECT_THAT(Between(gpio, "constexpr OutputMux kOutputMux[] = {", "};"),
+                HasSubstr("{TEGRA_GPIO(Z, 4), 0x28c, PULL_DOWN | 1}"));
+    const std::string present = Between(SourceText("../SwitchRT5639.cpp"), "bool SwitchRT5639::present()", "\n}\n");
+    const size_t raise = present.find("tegra_gpio_output(kLdo1Enable, 1)");
+    ASSERT_NE(raise, std::string::npos);
+    EXPECT_LT(raise, present.find("tegra_i2c_read("));
+    const std::string start = Between(Driver(), "bool SwitchAudio::start(IOService *provider)", "\n}\n");
+    EXPECT_LT(start.find("SwitchRT5639::present()"), start.find("tegraInit()"));
+}
+
 TEST(SwitchAudioSource, AbiIsS32)
 {
     const std::string driver = Driver();

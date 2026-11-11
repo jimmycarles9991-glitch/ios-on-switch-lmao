@@ -3,6 +3,7 @@
 // writes, the surface check, and the walk over a submit's methods that gathers how much each relocation may hold.
 #ifndef TEGRA_NVENC_CHECK_COMMON_H
 #define TEGRA_NVENC_CHECK_COMMON_H
+#include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 #include <string.h>

@@ -482,9 +482,9 @@ static void driverControls(void)
                 avail[i] = sizes[s.entries[i].value] - s.entries[i].offset;
         const char *why = tegra_nvenc_check(&s, avail);
         EXPECT(!why, "%s at 1280x720: the checker refuses it: %s", name, why ? why : "");
-        // The methods of NVIDIA's T210 driver's jobs (switch-frame-tap m79-runE, a P picture): the plug-in's, plus the
-        // two the kernel adds (the setup slot, the RC process state); the kernel writes 0 in every other address
-        // method, as that driver leaves them.
+        // The methods of NVIDIA's T210 driver's jobs (switch-frame-tap m79-runE; every one of its 68 captured jobs
+        // names reference slot 0): the plug-in's, plus the two the kernel adds (the setup slot, the RC process state);
+        // the kernel writes 0 in every other address method, as that driver leaves them.
         static const uint16_t kDriverMethods[] = {
             NVC5B7_SET_APPLICATION_ID,      NVC5B7_SET_CONTROL_PARAMS,   NVC5B7_SET_PICTURE_INDEX,
             NVC5B7_SET_IN_DRV_PIC_SETUP,    NVC5B7_SET_OUT_ENC_STATUS,   NVC5B7_SET_IO_RC_PROCESS,
@@ -492,7 +492,7 @@ static void driverControls(void)
             NVC5B7_SET_IN_CUR_PIC_CHROMA_U, NVC5B7_SET_OUT_REF_PIC_LUMA, NVC5B7_SET_IN_MEPRED_DATA,
             NVC5B7_SET_OUT_MEPRED_DATA,     NVC5B7_SET_IN_REF_PIC0_LUMA, NVC5B7_EXECUTE,
         };
-        const uint32_t driverCount = sizeof(kDriverMethods) / sizeof(kDriverMethods[0]) - (k ? 0 : 1);
+        const uint32_t driverCount = sizeof(kDriverMethods) / sizeof(kDriverMethods[0]);
         uint32_t matched = 2;  // the kernel's two
         bool extra = false;
         for (uint32_t i = 0; i < s.entry_count; i++) {

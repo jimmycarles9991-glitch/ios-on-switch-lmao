@@ -8,6 +8,7 @@
 
 #include <cmath>
 #include <limits>
+#include <utility>
 
 namespace {
 
@@ -141,6 +142,60 @@ TEST(RawSampler, OnlyATransparentBlackBorderIsTaken)
     raw::MetalSamplerFields noBorder;
     noBorder.borderColor = 2;
     EXPECT_TRUE(raw::takeSampler(noBorder, s));
+}
+
+// RenderBox's icon sampler (boot 16: normalized, Cubic min and mag, lodAverage)
+TEST(RawSampler, CubicSamplerIsTakenWithANearestHeader)
+{
+    const std::pair<uint64_t, uint64_t> filters[] = {
+        {raw::kFilterCubic, raw::kFilterCubic}, {raw::kFilterCubic, 1}, {1, raw::kFilterCubic}};
+    for (const auto &[minFilter, magFilter] : filters) {
+        raw::MetalSamplerFields m;
+        m.minFilter = minFilter;
+        m.magFilter = magFilter;
+        m.sAddress = raw::kAddressRepeat;
+        m.tAddress = raw::kAddressClampToBorderColor;
+        raw::SamplerDesc s;
+        ASSERT_TRUE(raw::takeSampler(m, s)) << minFilter << " " << magFilter;
+        EXPECT_TRUE(s.cubic);
+        EXPECT_EQ(s.minFilter, 0);
+        EXPECT_EQ(s.magFilter, 0);
+        EXPECT_EQ(s.sAddress, raw::kAddressRepeat);
+    }
+    raw::SamplerDesc linear;
+    raw::MetalSamplerFields l;
+    l.minFilter = l.magFilter = 1;
+    ASSERT_TRUE(raw::takeSampler(l, linear));
+    EXPECT_FALSE(linear.cubic);
+}
+
+TEST(RawSampler, CubicSamplerOutsideMetalsMeasuredFilterIsRefused)
+{
+    raw::SamplerDesc s;
+    const auto cubic = [] {
+        raw::MetalSamplerFields m;
+        m.minFilter = m.magFilter = raw::kFilterCubic;
+        return m;
+    };
+    raw::MetalSamplerFields mip = cubic();
+    mip.mipFilter = 1;
+    EXPECT_FALSE(raw::takeSampler(mip, s));
+    raw::MetalSamplerFields anisotropic = cubic();
+    anisotropic.maxAnisotropy = 4;
+    EXPECT_FALSE(raw::takeSampler(anisotropic, s));
+    raw::MetalSamplerFields unnamedBorder = cubic();
+    unnamedBorder.borderColor = 3;
+    EXPECT_FALSE(raw::takeSampler(unnamedBorder, s));
+    for (int axis = 0; axis < 3; axis++) {
+        raw::MetalSamplerFields mirrored = cubic();
+        (axis == 0   ? mirrored.sAddress
+         : axis == 1 ? mirrored.tAddress
+                     : mirrored.rAddress) = raw::kAddressMirrorClampToEdge;
+        EXPECT_FALSE(raw::takeSampler(mirrored, s)) << axis;
+    }
+    raw::MetalSamplerFields filter3;
+    filter3.minFilter = 3;
+    EXPECT_FALSE(raw::takeSampler(filter3, s));
 }
 
 }  // namespace

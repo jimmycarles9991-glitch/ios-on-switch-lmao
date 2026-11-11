@@ -14,6 +14,7 @@ import UIKit
 /// bar= is the bar's bottom edge in pixels. pocket= is the mean difference x 255 between the two pictures from the top
 /// to 40 points below the bar: 0 means the snapshot holds no edge effect, and without purple rows the test skips.
 /// Any purple row fails it. The list holds greys, white and system blue, none of which passes.
+/// strip_rgb and strip_range describe the first purple row; other_rgb samples the other run at that position.
 ///
 /// With the edge effect shown, a debug kernel's scanout read-back (ScanoutReadback) also gives the frame's
 /// framebuffer (what backboardd rendered for the panel, before the display's copy) and its scanout buffer (what window A
@@ -31,10 +32,12 @@ struct PocketStripTest: HWTest {
         var reasons: [String] = []
         var pictures: [Raster] = []
         var saved: [(String, Raster)] = []
+        var firstRows: [Int?] = []
         var bar = 0
         for (name, hidden) in [("shown", false), ("hidden", true)] {
             let (picture, barBottom, view) = await Self.snapshot(context, hidden: hidden)
             let rows = Self.purpleRows(picture)
+            firstRows.append(rows.first)
             metrics.set(name + "_rows", rows.count)
             metrics.set(name + "_at", Self.ranges(rows))
             if !rows.isEmpty { reasons.append("\(rows.count) purple rows with the edge effect \(name)") }
@@ -44,6 +47,12 @@ struct PocketStripTest: HWTest {
             if !hidden { saved += await Self.readBack(view, renderRows: rows, &metrics, &reasons) }
         }
         metrics.set("bar", bar)
+        if let run = firstRows.firstIndex(where: { $0 != nil }), let y = firstRows[run] {
+            let (strip, other) = (pictures[run], pictures[1 - run])
+            metrics.set("strip_rgb", Self.bytes(strip, strip.width / 2, y))
+            metrics.set("strip_range", Self.range(strip, y))
+            if y < other.height { metrics.set("other_rgb", Self.bytes(other, min(strip.width, other.width) / 2, y)) }
+        }
         let scale = await MainActor.run { UIScreen.main.scale }
         let band = min(pictures[0].height, pictures[1].height, bar + Int(40 * scale))
         let pocket = Self.meanDifference(pictures[0], pictures[1], rows: band)
@@ -148,6 +157,21 @@ struct PocketStripTest: HWTest {
             }
             return purple.count * 2 > picture.width
         }
+    }
+
+    static func byte(_ value: Float) -> Int { Int((value * 255).rounded()) }
+
+    static func bytes(_ picture: Raster, _ x: Int, _ y: Int) -> String {
+        (0..<3).map { String(byte(picture[x, y, $0])) }.joined(separator: ",")
+    }
+
+    /// "234-255,44-55,241-255": each channel's least and greatest along row `y`.
+    static func range(_ picture: Raster, _ y: Int) -> String {
+        (0..<3).map { c in
+            let values = (0..<picture.width).map { byte(picture[$0, y, c]) }
+            let (least, greatest) = (values.min() ?? 0, values.max() ?? 0)
+            return least == greatest ? "\(least)" : "\(least)-\(greatest)"
+        }.joined(separator: ",")
     }
 
     /// "412-413,500"; "-" for none.

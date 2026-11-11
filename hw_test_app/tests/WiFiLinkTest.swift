@@ -85,8 +85,11 @@ struct WiFiLinkTest: HWTest {
         metrics.set("ssid_len", ssidLength)
         if stateAnswer.length == nil { metrics.set("state_errno", Int(stateAnswer.error)) }
         if ssidAnswer.length == nil { metrics.set("ssid_errno", Int(ssidAnswer.error)) }
-        guard !wifi.ipv4.isEmpty else {
-            return .skip("en0 has no IPv4 address: not associated with a network", metrics)
+        // 169.254/16 is the address configd gives itself when no DHCP server answered.
+        let leased = !wifi.ipv4.isEmpty && !wifi.ipv4.hasPrefix("169.254.")
+        metrics.set("dhcp_lease", leased)
+        guard !wifi.ipv4.isEmpty || driverState == 4 else {
+            return .skip("en0 is not associated with a network", metrics)
         }
         return .judged(
             [
@@ -94,6 +97,7 @@ struct WiFiLinkTest: HWTest {
                 ("the driver reports a link rate", (wifi.data?.ifi_baudrate ?? 0) > 0),
                 ("the driver is associated (APPLE80211_IOC_STATE 4)", driverState == 4),
                 ("the driver names the joined network (1-32 bytes)", (1...32).contains(ssidLength)),
+                ("a DHCP lease (not a 169.254 link-local address)", leased),
             ], metrics)
     }
 }

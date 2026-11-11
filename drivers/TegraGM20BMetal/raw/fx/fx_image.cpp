@@ -133,5 +133,112 @@ void readVolume(const MipChain &c, const uint8_t *cpu, uint32_t l, const uint32_
     });
 }
 
+bool blockChainLayout(uint32_t width, uint32_t height, uint32_t levels, uint32_t layers, uint32_t blockW,
+                      uint32_t blockH, uint32_t bpp, MipChain &out)
+{
+    out = MipChain();
+    if (!width || !height || width > 16384 || height > 16384 || !levels || levels > kMaxLevels ||
+        levels > fullLevels(width, height) || !layers || layers > 2048 || !blockW || !blockH ||
+        !tgm_layout_tiles_bpp(bpp))
+        return false;
+    auto elements = [](uint32_t texels, uint32_t level, uint32_t block) {
+        return (std::max(1u, texels >> level) + block - 1) / block;
+    };
+    out.width = elements(width, 0, blockW);
+    out.height = elements(height, 0, blockH);
+    out.levels = levels;
+    out.layers = layers;
+    out.bpp = bpp;
+    const uint32_t y = std::min<uint32_t>(tgm_layout_y_log2(height), tgm_layout_log2_ceil((out.height + 7) / 8));
+    out.yLog2 = uint8_t(y);
+    uint64_t at = 0;
+    for (uint32_t l = 0; l < levels; l++) {
+        MipLevel &lv = out.level[l];
+        lv.width = elements(width, l, blockW);
+        lv.height = elements(height, l, blockH);
+        lv.yLog2 = uint8_t(std::min(y, tgm_layout_log2_ceil((lv.height + 7) / 8)));
+        lv.rowBytes = (lv.width * bpp + 63) & ~63u;
+        const uint32_t tileRows = 8u << lv.yLog2;
+        lv.rows = (lv.height + tileRows - 1) / tileRows * tileRows;
+        lv.offset = at;
+        at += uint64_t(lv.rowBytes) * lv.rows;
+    }
+    const uint64_t tile0 = 512ull << y;
+    out.arrayStride = (at + tile0 - 1) / tile0 * tile0;
+    out.align = std::max<uint64_t>(tile0, kChainAlign);
+    out.bytes = (out.arrayStride * layers + out.align - 1) / out.align * out.align;
+    return true;
+}
+
+namespace {
+
+// Byte offset of 16-byte line `q` (0..3 across) of row `r` (0..7) in a TegraColor GOB (tgm_layout_gob_offset)
+constexpr uint32_t gobLine(uint32_t q, uint32_t r)
+{
+    return (q >> 1) * 256 + (r >> 1) * 64 + (q & 1) * 32 + (r & 1) * 16;
+}
+
+// Each GOB of the rectangle: its first byte in memory, the rows [r0, r1) and bytes [b0, b1) of it the rectangle covers, and
+// where its first covered byte is in the linear rows
+template <class Gob>
+void eachGob(const MipChain &c, uint32_t layer, uint32_t level, uint32_t x, uint32_t y, uint32_t w, uint32_t h,
+             size_t rowBytes, Gob gob)
+{
+    const MipLevel &lv = c.level[level];
+    const uint64_t base = uint64_t(layer) * c.arrayStride + lv.offset, blockBytes = 512ull << lv.yLog2;
+    const uint32_t blockGobs = 1u << lv.yLog2, gobsAcross = lv.rowBytes / 64;
+    const uint32_t x0 = x * c.bpp, x1 = (x + w) * c.bpp, y1 = y + h;
+    for (uint32_t gy = y / 8; gy * 8 < y1; gy++) {
+        const uint32_t r0 = std::max(y, gy * 8) - gy * 8, r1 = std::min(y1, gy * 8 + 8) - gy * 8;
+        const uint64_t band =
+            base + uint64_t(gy / blockGobs) * gobsAcross * blockBytes + uint64_t(gy % blockGobs) * 512;
+        for (uint32_t gx = x0 / 64; gx * 64 < x1; gx++) {
+            const uint32_t b0 = std::max(x0, gx * 64) - gx * 64, b1 = std::min(x1, gx * 64 + 64) - gx * 64;
+            const size_t linear = size_t(gy * 8 + r0 - y) * rowBytes + (gx * 64 + b0 - x0);
+            gob(band + uint64_t(gx) * blockBytes, r0, r1, b0, b1, linear);
+        }
+    }
+}
+
+// One GOB's covered part: all 32 lines at fixed offsets where it is whole, else line by line, each line's covered bytes
+template <bool kIn>
+void moveGob(uint8_t *gob, uint8_t *linear, size_t rowBytes, uint32_t r0, uint32_t r1, uint32_t b0, uint32_t b1)
+{
+    if (r0 == 0 && r1 == 8 && b0 == 0 && b1 == 64) {
+        for (uint32_t r = 0; r < 8; r++)
+            for (uint32_t q = 0; q < 4; q++) {
+                uint8_t *line = gob + gobLine(q, r), *row = linear + r * rowBytes + q * 16;
+                kIn ? memcpy(line, row, 16) : memcpy(row, line, 16);
+            }
+        return;
+    }
+    for (uint32_t r = r0; r < r1; r++)
+        for (uint32_t q = b0 / 16; q * 16 < b1; q++) {
+            const uint32_t from = std::max(b0, q * 16), to = std::min(b1, q * 16 + 16);
+            uint8_t *line = gob + gobLine(q, r) + (from - q * 16), *row = linear + (r - r0) * rowBytes + (from - b0);
+            kIn ? memcpy(line, row, to - from) : memcpy(row, line, to - from);
+        }
+}
+
+}  // namespace
+
+void writeElements(const MipChain &c, uint8_t *memory, uint32_t layer, uint32_t level, uint32_t x, uint32_t y,
+                   uint32_t w, uint32_t h, const uint8_t *src, size_t rowBytes)
+{
+    eachGob(c, layer, level, x, y, w, h, rowBytes,
+            [&](uint64_t at, uint32_t r0, uint32_t r1, uint32_t b0, uint32_t b1, size_t linear) {
+                moveGob<true>(memory + at, const_cast<uint8_t *>(src) + linear, rowBytes, r0, r1, b0, b1);
+            });
+}
+
+void readElements(const MipChain &c, const uint8_t *memory, uint32_t layer, uint32_t level, uint32_t x, uint32_t y,
+                  uint32_t w, uint32_t h, uint8_t *dst, size_t rowBytes)
+{
+    eachGob(c, layer, level, x, y, w, h, rowBytes,
+            [&](uint64_t at, uint32_t r0, uint32_t r1, uint32_t b0, uint32_t b1, size_t linear) {
+                moveGob<false>(const_cast<uint8_t *>(memory) + at, dst + linear, rowBytes, r0, r1, b0, b1);
+            });
+}
+
 }  // namespace fx
 }  // namespace raw

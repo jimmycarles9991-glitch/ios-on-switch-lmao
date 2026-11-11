@@ -153,6 +153,7 @@
 
 #include <vfs/vfs_disk_conditioner.h>
 #include <libkern/section_keywords.h>
+#include <switch/protection.h>
 
 static LCK_GRP_DECLARE(vnode_lck_grp, "vnode");
 static LCK_ATTR_DECLARE(vnode_lck_attr, 0, 0);
@@ -5039,7 +5040,7 @@ sysctl_vfs_ctlbyfsid(__unused struct sysctl_oid *oidp, void *arg1, int arg2,
 			struct user64_statfs *sfs = &sfsbuf->osfs64;
 
 			bzero(sfs, sizeof(*sfs));
-			sfs->f_flags = mp->mnt_flag & MNT_VISFLAGMASK;
+			sfs->f_flags = (mp->mnt_flag & MNT_VISFLAGMASK) | switch_protection_mount_flags(mp);
 			sfs->f_type = (short)mp->mnt_vtable->vfc_typenum;
 			sfs->f_bsize = (user64_long_t)sp->f_bsize;
 			sfs->f_iosize = (user64_long_t)sp->f_iosize;
@@ -5060,7 +5061,7 @@ sysctl_vfs_ctlbyfsid(__unused struct sysctl_oid *oidp, void *arg1, int arg2,
 			long temp;
 
 			bzero(sfs, sizeof(*sfs));
-			sfs->f_flags = mp->mnt_flag & MNT_VISFLAGMASK;
+			sfs->f_flags = (mp->mnt_flag & MNT_VISFLAGMASK) | switch_protection_mount_flags(mp);
 			sfs->f_type = (short)mp->mnt_vtable->vfc_typenum;
 
 			/*
@@ -8019,6 +8020,7 @@ vn_create(vnode_t dvp, vnode_t *vpp, struct nameidata *ndp, struct vnode_attr *v
 	boolean_t batched;
 	struct componentname *cnp;
 	uint32_t defaulted;
+	int32_t switch_class;
 
 	cnp = &ndp->ni_cnd;
 	error = 0;
@@ -8047,6 +8049,9 @@ vn_create(vnode_t dvp, vnode_t *vpp, struct nameidata *ndp, struct vnode_attr *v
 		panic("Mode for open, but not trying to open...");
 	}
 
+	if ((error = switch_protection_create_begin(dvp, vap, &switch_class)) != 0) {
+		goto out;
+	}
 
 	/*
 	 * Create the requested node.
@@ -8082,6 +8087,9 @@ vn_create(vnode_t dvp, vnode_t *vpp, struct nameidata *ndp, struct vnode_attr *v
 	if ((error == 0) && !VATTR_ALL_SUPPORTED(vap) && *vpp) {
 		KAUTH_DEBUG("     CREATE - doing fallback with ACL %p", vap->va_acl);
 		error = vnode_setattr_fallback(*vpp, vap, ctx);
+	}
+	if (error == 0) {
+		error = switch_protection_create_end(dvp, *vpp, switch_class, ctx);
 	}
 
 #if CONFIG_MACF

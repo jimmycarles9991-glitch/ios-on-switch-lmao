@@ -1,8 +1,13 @@
 // SPDX-License-Identifier: BSD-2-Clause-Patent
-// The Switch's audio devices for iPadOS 17's audio server (audiomxd). Samples move through rings shared with the kernel
+// The Switch's audio devices for iPadOS's audio server (audiomxd). Samples move through rings shared with the kernel
 // service SwitchAudio (../SwitchAudioAbi.h). Three devices, as VirtualAudio (VirtualAudio.plugin, which turns HAL
-// devices into the ports routes are made of) knows a J120's by their UIDs (its DeviceFactory_Aspen):
-//  - "Speaker" (built in): the stereo output to the RT5639 (its speakers or the jack) and a silent stereo tap input.
+// devices into the ports routes are made of) knows the IPSW's iPad's by their UIDs (its DeviceFactory_Aspen); J120's
+// for 21H461, J181's for 24B119 (SWITCH_AUDIO_J181):
+//  - "Speaker" (built in): the output to the RT5639 (its speakers or the jack) and a silent stereo tap input. Stereo on
+//    J120. On J181 four channels, left, left, right, right, as its audio-speaker (num-channels 4) and as every one of
+//    24B119's speaker graphs (AID2003/VAD/speaker_*.dspg) ends; channels 0 and 2 are mixed into the stereo ring. With a
+//    stereo stream VirtualAudio converts the graph's four channels to two with no channel map, which keeps channels 0
+//    and 1: the left channel on both speakers.
 //    VirtualAudio makes it Device_Speaker_Aspen, whose port is the built-in speaker (pspk, "Speaker"): the route
 //    AVAudioSession calls BuiltInSpeaker and Control Center and the route picker show as the iPad itself. On 21H461 a
 //    speaker device must have a tap stream (an input whose 'taps' is 1): every product's speaker policy sets
@@ -16,14 +21,17 @@
 //    kernel's jack state (control page, then PropertiesChanged on this device). With no input data sources it has no
 //    built-in microphone, which is the Switch's case. The headphone volume is the codec's DAC volume (the level
 //    control on output element 1, which VirtualAudio reads as the port's hardware volume range); the kernel routes the
-//    RT5639 to the jack whenever a plug is in, so this device's output and the speaker's share one ring.
-//  - "Hawking" (built in): one silent mono input, the Hawking port (phki) of the J120's routing tables, which
-//    otherwise put the null input in its place. Published only where the IPSW's iPad has one (SWITCH_AUDIO_HAWKING):
-//    J120 does (audio-data,hawking), J181 has no such device or port and its kernel names none.
+//    RT5639 to the jack whenever a plug is in, so this device's output and the speaker's share one ring. On J181 the
+//    jacks and the input data source are control objects, as 24B119's audio server needs them (SwitchAudioControls.h).
+//  - the built-in input, silent (the Switch has no microphone): what a playAndRecord session's input is with no
+//    headset, without which no such session activates ('!res') and none of its playback starts. On J120 "Hawking", one
+//    mono channel, the Hawking port (phki) of J120's routing tables, which otherwise put the null input in its place.
+//    On J181 "Digital Mic", its built-in microphone (its ADT's /arm-io/alc0/audio-leap-mic device-uid), which
+//    VirtualAudio makes Device_DigitalMic_Aspen and its Built-In Microphone port (pmbi): two channels, as its two
+//    microphones and AID2003's mic graphs (two in, one out) have.
 // Speaker and Codec run on the service's one timeline (one clock domain, so their aggregate needs no drift
-// correction); Hawking keeps its own on the host clock and never starts the hardware.
-// Objects: the plug-in (1); Speaker (2) with its output (3), tap (4) and output volume (5); Codec (6) with its input
-// (7), output (10) and headphone volume (11); Hawking (8) and its input (9).
+// correction); the built-in input keeps its own on the host clock and never starts the hardware.
+// Objects: SwitchAudioObjects.h; the controls from 12 on exist only on J181.
 // VirtualAudio runs a port's DSP chain after the mix. For pspk on J120 the chain is compiled into VirtualAudio: nine AUs
 // (two AUNBandEQs, a compressor, AUVariableEQV2 'vrq2', a 400 Hz crossover, rotation shading to four channels, a
 // four-channel EQ, AUControlFreak, speaker protection V3), tuned for J120's four MAX98723 drivers.
@@ -50,7 +58,7 @@
 //     ln -sf "$(xcrun --sdk macosx --show-sdk-path)/System/Library/Frameworks/CoreAudio.framework/Headers/$h" H/CoreAudio/; done
 //   xcrun clang -target arm64-apple-ios17.0 -isysroot "$(xcrun --sdk iphoneos --show-sdk-path)" -IH -I.. -O2 -Wall \
 //     -Wextra -Werror -bundle -fvisibility=hidden -framework CoreFoundation -framework IOKit SwitchAudioPlugIn.c \
-//     -o SwitchAudio.driver/SwitchAudio
+//     -o SwitchAudio.driver/SwitchAudio   (24B119: also -DSWITCH_AUDIO_J181=1 SwitchAudioControls.c)
 //   codesign -f -s - --pagesize 4096 --identifier com.brunostjohn.switch.audio SwitchAudio.driver/SwitchAudio
 // The executable alone (the Data overlay ships it and Info.plist, no resource seal), with 4 KiB code pages as the
 // system's own binaries here; scripts/package_raw_boot.py puts its CDHash in the boot trust cache.
@@ -71,38 +79,43 @@
 #include "SwitchAudioAbi.h"
 #include "SwitchAudioConvert.h"
 #include "SwitchAudioFormat.h"
+#include "SwitchAudioObjects.h"
 #include "../../../kits/SwitchDMA/SwitchDcache.h"
 #include "../../../kits/SwitchRefusal/SwitchRefusal.h"
-
-enum {
-    kPlugIn = kAudioObjectPlugInObject,
-    kSpeaker = 2,
-    kSpeakerOut = 3,
-    kSpeakerTap = 4,
-    kVolume = 5,
-    kCodec = 6,
-    kCodecIn = 7,
-    kHawking = 8,
-    kHawkingIn = 9,
-    kCodecOut = 10,
-    kCodecVolume = 11,
-};
 
 // AudioHardware.h's kAudioDevicePropertyJackIsConnected (that header needs others the build does not stage).
 enum {
     kJackIsConnected = 'jack'
 };
 
-#ifndef SWITCH_AUDIO_HAWKING
-#define SWITCH_AUDIO_HAWKING 0
+#ifndef SWITCH_AUDIO_J181
+#define SWITCH_AUDIO_J181 0
+#endif
+
+#if SWITCH_AUDIO_J181
+#include "SwitchAudioControls.h"
+#define kMicUID    "Digital Mic"
+#define kMicName   "Digital Mic"
+#define kMicInName "Digital Mic"
+
+enum {
+    kDeviceObjects = 6,  // the Codec's: two streams, its volume, two jacks and a data source
+};
+#else
+#define kMicUID    "Hawking"
+#define kMicName   "Hawking"
+#define kMicInName "Hawking Input"
+
+enum {
+    kDeviceObjects = 3,
+};
 #endif
 
 #define kSpeakerUID "Speaker"  // VirtualAudio's names for an iPad's built-in devices (DeviceFactory_Aspen)
-#define kHawkingUID "Hawking"
 #define kCodecUID   "Codec"
 #define kModelUID   "SwitchAudioModel"
 static const UInt32 kClockDomain = SWITCH_AUDIO_MAGIC;  // speaker and microphone: the service's one clock
-static const Float64 kRate = SWITCH_AUDIO_RATE;  // Hawking's, and the service's until the audio server picks another
+static const Float64 kRate = SWITCH_AUDIO_RATE;  // the built-in input's, and the service's until another is picked
 static const UInt32 kZeroPeriod = SWITCH_AUDIO_RING_FRAMES;
 
 static AudioServerPlugInHostRef gHost;
@@ -111,7 +124,7 @@ static atomic_uint gRefs = 1;
 static io_connect_t gConnect;
 static SwitchAudioControl *gControl;
 static switch_audio_sample_t *gOut, *gIn;
-static UInt32 gSpeakerUsers, gCodecUsers, gHawkingUsers;  // IO clients per device (gLock)
+static UInt32 gSpeakerUsers, gCodecUsers, gMicUsers;  // IO clients per device (gLock)
 // The audio server marks the Codec's input stream inactive while no client reads it (kAudioStreamPropertyIsActive):
 // headphone playback alone then leaves the microphone's path (DMA, I2S TX, the codec's ADC and bias) off. gLock.
 static Boolean gCodecInActive = true, gCodecInRunning;
@@ -121,8 +134,8 @@ static IONotificationPortRef gJackPort;
 static io_object_t gJackNotification;
 static Float64 gRate = SWITCH_AUDIO_RATE;  // the service's clock: speaker and microphone (gLock)
 static Float64 gTicksPerFrame;             // the service's clock (its control page), nominal until it is mapped
-static Float64 gHostTicksPerFrame;         // the host clock's nominal rate: Hawking's
-static uint64_t gZeroOrigin, gZeroSeed, gHawkingOrigin, gHawkingSeed;
+static Float64 gHostTicksPerFrame;         // the host clock's nominal rate: the built-in input's
+static uint64_t gZeroOrigin, gZeroSeed, gMicOrigin, gMicSeed;
 
 static int mapType(uint32_t type, void **out)
 {
@@ -235,6 +248,16 @@ static void jackChanged(void *refcon, io_service_t service, uint32_t type, void 
         return;
     os_log(OS_LOG_DEFAULT, "SwitchAudio: jack: headphones %{public}s, microphone %{public}s",
            now & SwitchAudioJackHeadphones ? "in" : "out", now & SwitchAudioJackMicrophone ? "in" : "out");
+#if SWITCH_AUDIO_J181
+    // The audio server reads the device's 'jack' from these controls, but its listeners (VirtualAudio's
+    // HALJackStateHandler) are on the device's 'jack', which it does not derive from a control's change: both.
+    static const AudioObjectPropertyAddress value = {kAudioBooleanControlPropertyValue, kAudioObjectPropertyScopeGlobal,
+                                                     kAudioObjectPropertyElementMain};
+    if ((now ^ was) & SwitchAudioJackHeadphones)
+        gHost->PropertiesChanged(gHost, kCodecJackOut, 1, &value);
+    if ((now ^ was) & SwitchAudioJackMicrophone)
+        gHost->PropertiesChanged(gHost, kCodecJackIn, 1, &value);
+#endif
     gHost->PropertiesChanged(gHost, kCodec, n, changed);
 }
 
@@ -337,12 +360,12 @@ static Float32 gain(void)
 
 static Boolean isDevice(AudioObjectID o)
 {
-    return o == kSpeaker || o == kCodec || o == kHawking;
+    return o == kSpeaker || o == kCodec || o == kMic;
 }
 
 static Boolean isStream(AudioObjectID o)
 {
-    return o == kSpeakerOut || o == kSpeakerTap || o == kCodecIn || o == kCodecOut || o == kHawkingIn;
+    return o == kSpeakerOut || o == kSpeakerTap || o == kCodecIn || o == kCodecOut || o == kMicIn;
 }
 
 static Boolean isVolume(AudioObjectID o)
@@ -352,7 +375,7 @@ static Boolean isVolume(AudioObjectID o)
 
 static AudioObjectID deviceOf(AudioObjectID o)  // the device a stream or control belongs to
 {
-    return o == kCodecIn || o == kCodecOut || o == kCodecVolume ? kCodec : o == kHawkingIn ? kHawking : kSpeaker;
+    return o == kCodecIn || o == kCodecOut || o == kCodecVolume ? kCodec : o == kMicIn ? kMic : kSpeaker;
 }
 
 static AudioObjectID outputOf(AudioObjectID device)
@@ -362,29 +385,33 @@ static AudioObjectID outputOf(AudioObjectID device)
 
 static AudioObjectID inputOf(AudioObjectID device)
 {
-    return device == kSpeaker ? kSpeakerTap : device == kCodec ? kCodecIn : kHawkingIn;
+    return device == kSpeaker ? kSpeakerTap : device == kCodec ? kCodecIn : kMicIn;
 }
 
 static UInt32 channelsOf(AudioObjectID stream)
 {
+#if SWITCH_AUDIO_J181
+    return stream == kSpeakerOut ? 4 : stream == kCodecIn ? 1 : 2;
+#else
     return stream == kSpeakerOut || stream == kSpeakerTap || stream == kCodecOut ? 2 : 1;
+#endif
 }
 
 static UInt32 usersOf(AudioObjectID device)
 {
-    return device == kSpeaker ? gSpeakerUsers : device == kCodec ? gCodecUsers : gHawkingUsers;
+    return device == kSpeaker ? gSpeakerUsers : device == kCodec ? gCodecUsers : gMicUsers;
 }
 
 static Float64 rateOf(AudioObjectID device)
 {
-    return device == kHawking ? kRate : gRate;
+    return device == kMic ? kRate : gRate;
 }
 
 // The rates a device runs at: the service's (its control page) for the speaker and microphone, which share its clock.
 static UInt32 ratesOf(AudioObjectID device, Float64 rates[SWITCH_AUDIO_MAX_RATES])
 {
     rates[0] = kRate;
-    if (device == kHawking || connectServiceLocked())
+    if (device == kMic || connectServiceLocked())
         return 1;
     UInt32 n = 0;
     for (UInt32 i = 0; i < SWITCH_AUDIO_MAX_RATES && gControl->rates[i]; ++i)
@@ -474,7 +501,7 @@ static OSStatus PerformDeviceConfigurationChange(AudioServerPlugInDriverRef d, A
 {
     (void)d;
     (void)i;
-    if (o == kHawking || (Float64)a == gRate)
+    if (o == kMic || (Float64)a == gRate)
         return 0;
     const uint64_t rate = a;
     pthread_mutex_lock(&gLock);
@@ -631,8 +658,8 @@ static OSStatus GetPropertyData(AudioServerPlugInDriverRef d, AudioObjectID o, p
             REPLY_STR("Switch");
         case kAudioObjectPropertyOwnedObjects:
         case kAudioPlugInPropertyDeviceList: {
-            static const AudioObjectID devices[] = {kSpeaker, kCodec, kHawking};
-            UInt32 n = SWITCH_AUDIO_HAWKING ? 3 : 2;
+            static const AudioObjectID devices[] = {kSpeaker, kCodec, kMic};
+            UInt32 n = sizeof devices / sizeof devices[0];
             if (inDataSize / sizeof(AudioObjectID) < n)
                 n = inDataSize / (UInt32)sizeof(AudioObjectID);
             memcpy(outData, devices, n * sizeof(AudioObjectID));
@@ -646,8 +673,8 @@ static OSStatus GetPropertyData(AudioServerPlugInDriverRef d, AudioObjectID o, p
                 device = kSpeaker;
             if (uid && CFStringCompare(uid, CFSTR(kCodecUID), 0) == kCFCompareEqualTo)
                 device = kCodec;
-            if (SWITCH_AUDIO_HAWKING && uid && CFStringCompare(uid, CFSTR(kHawkingUID), 0) == kCFCompareEqualTo)
-                device = kHawking;
+            if (uid && CFStringCompare(uid, CFSTR(kMicUID), 0) == kCFCompareEqualTo)
+                device = kMic;
             REPLY(AudioObjectID, device);
         }
         case kAudioPlugInPropertyResourceBundle:
@@ -672,7 +699,7 @@ static OSStatus GetPropertyData(AudioServerPlugInDriverRef d, AudioObjectID o, p
                 REPLY_STR("Speaker");
             if (o == kCodec)
                 REPLY_STR("Headphones");
-            REPLY_STR("Hawking");
+            REPLY_STR(kMicName);
         case kAudioObjectPropertyManufacturer:
             REPLY_STR("Switch");
         case kAudioDevicePropertyDeviceUID:
@@ -680,7 +707,7 @@ static OSStatus GetPropertyData(AudioServerPlugInDriverRef d, AudioObjectID o, p
                 REPLY_STR(kSpeakerUID);
             if (o == kCodec)
                 REPLY_STR(kCodecUID);
-            REPLY_STR(kHawkingUID);
+            REPLY_STR(kMicUID);
         case kAudioDevicePropertyModelUID:
             REPLY_STR(kModelUID);
         case kAudioObjectPropertySerialNumber:
@@ -706,18 +733,18 @@ static OSStatus GetPropertyData(AudioServerPlugInDriverRef d, AudioObjectID o, p
         case kAudioDevicePropertyRelatedDevices:
             REPLY(AudioObjectID, o);
         case kAudioDevicePropertyClockDomain:
-            REPLY(UInt32, o == kHawking ? 0 : kClockDomain);
+            REPLY(UInt32, o == kMic ? 0 : kClockDomain);
         case kAudioDevicePropertyDeviceIsAlive:
             REPLY(UInt32, 1);
         case kAudioDevicePropertyDeviceIsRunning:
             REPLY(UInt32, usersOf(o) > 0);
         case kAudioDevicePropertyDeviceCanBeDefaultDevice:
         case kAudioDevicePropertyDeviceCanBeDefaultSystemDevice:
-            REPLY(UInt32, o != kHawking);
+            REPLY(UInt32, o != kMic);
         case kAudioDevicePropertyLatency:
-            REPLY(UInt32, o == kHawking ? 0 : latencyFrames());
+            REPLY(UInt32, o == kMic ? 0 : latencyFrames());
         case kAudioDevicePropertySafetyOffset:
-            if (o == kHawking)
+            if (o == kMic)
                 REPLY(UInt32, SWITCH_AUDIO_PERIOD_FRAMES);
             REPLY(UInt32, scopeIn ? inputSafetyFrames() : latencyFrames() + 2 * SWITCH_AUDIO_PERIOD_FRAMES);
         case kAudioDevicePropertyNominalSampleRate:
@@ -745,7 +772,7 @@ static OSStatus GetPropertyData(AudioServerPlugInDriverRef d, AudioObjectID o, p
                 return kAudioHardwareBadPropertySizeError;
             const UInt32 channels = channelsOf(scopeIn || !output ? input : output);
             ((UInt32 *)outData)[0] = 1;
-            ((UInt32 *)outData)[1] = channels;
+            ((UInt32 *)outData)[1] = SWITCH_AUDIO_J181 && channels == 4 ? 3 : channels;
             *outDataSize = 2 * sizeof(UInt32);
             return 0;
         }
@@ -763,13 +790,16 @@ static OSStatus GetPropertyData(AudioServerPlugInDriverRef d, AudioObjectID o, p
                 channels == 1 ? kAudioChannelLabel_Mono : kAudioChannelLabel_Left;
             if (channels == 2)
                 l->mChannelDescriptions[1].mChannelLabel = kAudioChannelLabel_Right;
+            // J181's speaker plays channels 0 and 2; 1 and 3 repeat them (top of file).
+            if (SWITCH_AUDIO_J181 && channels == 4)
+                l->mChannelDescriptions[2].mChannelLabel = kAudioChannelLabel_Right;
             *outDataSize = bytes;
             return 0;
         }
         case kAudioObjectPropertyOwnedObjects:
         case kAudioDevicePropertyStreams:
         case kAudioObjectPropertyControlList: {
-            AudioObjectID list[3];
+            AudioObjectID list[kDeviceObjects];
             UInt32 n = 0;
             const Boolean streams = s != kAudioObjectPropertyControlList, controls = s != kAudioDevicePropertyStreams;
             if (streams && output && !scopeIn)
@@ -780,6 +810,10 @@ static OSStatus GetPropertyData(AudioServerPlugInDriverRef d, AudioObjectID o, p
                 list[n++] = kVolume;
             if (controls && o == kCodec && !scopeIn)
                 list[n++] = kCodecVolume;
+#if SWITCH_AUDIO_J181
+            if (controls)
+                n += switch_audio_controls_of(o, a->mScope, list + n, kDeviceObjects - n);
+#endif
             if (inDataSize / sizeof(AudioObjectID) < n)
                 n = inDataSize / (UInt32)sizeof(AudioObjectID);
             memcpy(outData, list, n * sizeof(AudioObjectID));
@@ -808,7 +842,7 @@ static OSStatus GetPropertyData(AudioServerPlugInDriverRef d, AudioObjectID o, p
                 REPLY_STR("Headset Microphone");
             if (o == kCodecOut)
                 REPLY_STR("Headphones");
-            REPLY_STR("Hawking Input");
+            REPLY_STR(kMicInName);
         case kAudioObjectPropertyOwnedObjects:
             *outDataSize = 0;
             return 0;
@@ -885,6 +919,12 @@ static OSStatus GetPropertyData(AudioServerPlugInDriverRef d, AudioObjectID o, p
             return kAudioHardwareUnknownPropertyError;
         }
     }
+#if SWITCH_AUDIO_J181
+    if (switch_audio_is_control(o)) {
+        const uint32_t jack = o == kCodecJackOut || o == kCodecJackIn ? jackState() : 0;
+        return switch_audio_control_property(o, a, qs, q, jack, inDataSize, outDataSize, outData);
+    }
+#endif
     return kAudioHardwareBadObjectError;
 }
 
@@ -896,8 +936,8 @@ static uint64_t nowFrames(void)
 }
 
 // The speaker and the codec device start the service's output (syncCodecInput the microphone); the hardware runs while
-// either does, on one timeline that starts (new origin, new seed) when the first of them starts. Hawking only starts
-// its own clock.
+// either does, on one timeline that starts (new origin, new seed) when the first of them starts. The built-in input
+// only starts its own clock.
 static OSStatus StartIO(AudioServerPlugInDriverRef d, AudioObjectID o, UInt32 client)
 {
     (void)d;
@@ -906,10 +946,10 @@ static OSStatus StartIO(AudioServerPlugInDriverRef d, AudioObjectID o, UInt32 cl
         return kAudioHardwareBadObjectError;
     OSStatus r = 0;
     pthread_mutex_lock(&gLock);
-    if (o == kHawking) {
-        if (!gHawkingUsers++) {
-            gHawkingOrigin = mach_absolute_time();
-            gHawkingSeed++;
+    if (o == kMic) {
+        if (!gMicUsers++) {
+            gMicOrigin = mach_absolute_time();
+            gMicSeed++;
         }
         pthread_mutex_unlock(&gLock);
         return 0;
@@ -948,9 +988,9 @@ static OSStatus StopIO(AudioServerPlugInDriverRef d, AudioObjectID o, UInt32 cli
     if (!isDevice(o))
         return kAudioHardwareBadObjectError;
     pthread_mutex_lock(&gLock);
-    if (o == kHawking) {
-        if (gHawkingUsers)
-            --gHawkingUsers;
+    if (o == kMic) {
+        if (gMicUsers)
+            --gMicUsers;
     } else {
         UInt32 *users = o == kSpeaker ? &gSpeakerUsers : &gCodecUsers;
         if (*users && --*users == 0) {
@@ -965,19 +1005,19 @@ static OSStatus StopIO(AudioServerPlugInDriverRef d, AudioObjectID o, UInt32 cli
 }
 
 // Time stamps start at the frame IO started on and repeat every kZeroPeriod frames: on the service's timeline for the
-// speaker and microphone, on the host clock at the nominal rate for Hawking.
+// speaker and microphone, on the host clock at the nominal rate for the built-in input.
 static OSStatus GetZeroTimeStamp(AudioServerPlugInDriverRef d, AudioObjectID o, UInt32 client, Float64 *sampleTime,
                                  UInt64 *hostTime, UInt64 *seed)
 {
     (void)d;
     (void)client;
     const uint64_t now = mach_absolute_time();
-    if (o == kHawking) {
+    if (o == kMic) {
         const Float64 period = gHostTicksPerFrame * kZeroPeriod;
-        const uint64_t wraps = now > gHawkingOrigin ? (uint64_t)((Float64)(now - gHawkingOrigin) / period) : 0;
+        const uint64_t wraps = now > gMicOrigin ? (uint64_t)((Float64)(now - gMicOrigin) / period) : 0;
         *sampleTime = (Float64)(wraps * kZeroPeriod);
-        *hostTime = gHawkingOrigin + (uint64_t)((Float64)wraps * period);
-        *seed = gHawkingSeed;
+        *hostTime = gMicOrigin + (uint64_t)((Float64)wraps * period);
+        *seed = gMicSeed;
         return 0;
     }
     if (!gControl)
@@ -1022,7 +1062,7 @@ static OSStatus DoIOOperation(AudioServerPlugInDriverRef d, AudioObjectID o, Aud
     (void)o;
     (void)client;
     (void)secondary;
-    if (op == kAudioServerPlugInIOOperationReadInput && (stream == kSpeakerTap || stream == kHawkingIn)) {
+    if (op == kAudioServerPlugInIOOperationReadInput && (stream == kSpeakerTap || stream == kMicIn)) {
         memset(main, 0, (size_t)frames * channelsOf(stream) * sizeof(Float32));  // silent inputs (top of file)
         return 0;
     }
@@ -1036,8 +1076,14 @@ static OSStatus DoIOOperation(AudioServerPlugInDriverRef d, AudioObjectID o, Aud
         const uint64_t first = (uint64_t)info->mOutputTime.mSampleTime;
         const uint32_t total = frames < SWITCH_AUDIO_RING_FRAMES ? frames : SWITCH_AUDIO_RING_FRAMES;
         const uint32_t at = (uint32_t)(first % SWITCH_AUDIO_RING_FRAMES);
+#if SWITCH_AUDIO_J181
+        const uint32_t run = stream == kSpeakerOut
+                                 ? switch_audio_ring_fold(gOut, SWITCH_AUDIO_RING_FRAMES, first, main, frames, gain())
+                                 : switch_audio_ring_mix(gOut, SWITCH_AUDIO_RING_FRAMES, 2, first, main, frames, 1.0f);
+#else
         const uint32_t run = switch_audio_ring_mix(gOut, SWITCH_AUDIO_RING_FRAMES, 2, first, main, frames,
                                                    stream == kSpeakerOut ? gain() : 1.0f);
+#endif
         // The Tegra backend's DMA reads the ring from memory and does not snoop the caches: write back what was mixed.
         if (gControl->backend == SwitchAudioBackendTegraI2S && total) {
             switch_dcache_clean_lines(gOut + 2 * at, run * 2 * sizeof(switch_audio_sample_t));

@@ -491,11 +491,13 @@ static inline const char *tegra_nvdec_check_hevc(const TegraNVDECSubmit *s, cons
     if (p->num_tile_columns > 20 || p->num_tile_rows > 22 || p->curr_pic_idx >= SLOTS)
         return "tiles or slot";
     // Surfaces: the current one is written in whole CTUs (64-aligned rows); references are read within their own.
-    const uint32_t pitch = p->framestride[0];
-    if (pitch != p->framestride[1] || (pitch & 63) || pitch < ((w + 63) & ~63u) * sampleBytes || pitch > 16384)
+    // framestride counts samples; the engine's rows are framestride x sampleBytes bytes, in whole 64-byte GOBs.
+    const uint32_t stride = p->framestride[0];
+    const uint64_t pitch = (uint64_t)stride * sampleBytes;
+    if (stride != p->framestride[1] || (pitch & 63) || stride < ((w + 63) & ~63u) || pitch > 16384)
         return "pitch";
     const uint64_t rows = (h + 63) & ~63u;
-    const uint64_t lumaBytes = (uint64_t)pitch * rows;
+    const uint64_t lumaBytes = pitch * rows;
     for (uint32_t i = 0; i < SLOTS; i++) {
         if (luma[i] < lumaBytes || chroma[i] < lumaBytes / 2)
             return "surface too small";

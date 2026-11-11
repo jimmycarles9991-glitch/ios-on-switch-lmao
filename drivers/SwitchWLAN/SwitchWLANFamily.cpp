@@ -58,7 +58,7 @@ public:
 
     IOReturn enable(IONetworkInterface *interface) override
     {
-        return kIOReturnSuccess;
+        return swlan::net::enable(reinterpret_cast<IOEthernetInterface *>(interface));
     }
 
     IOReturn disable(IONetworkInterface *interface) override

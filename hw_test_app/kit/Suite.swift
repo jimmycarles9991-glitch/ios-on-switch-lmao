@@ -5,7 +5,7 @@ import os
 
 /// Runs tests one at a time off the main thread (benchmarks never share the machine with each other) and sends each
 /// result to the list, the log and the run's report (RunStore). The report is written before each test and after it:
-/// when the app's process ends mid-run, its next launch records the running test as crashed and runs the rest.
+/// when the app's process ends mid-run, its next launch offers to continue the saved run.
 @MainActor
 public final class Suite: ObservableObject {
     struct Row: Identifiable {
@@ -22,6 +22,8 @@ public final class Suite: ObservableObject {
     @Published private(set) var rows: [Row]
     @Published private(set) var running = false
     @Published private(set) var report: Report?
+    @Published private(set) var pendingRun: Report?
+    @Published private(set) var resumeError: String?
     /// What this launch found of the last one, shown above the results.
     @Published private(set) var notice = ""
 
@@ -45,32 +47,85 @@ public final class Suite: ObservableObject {
         store = RunStore(documents: documents)
     }
 
-    /// A boot's first launch runs everything; a launch after the app's process ended mid-run finishes that run;
+    /// A boot's first launch runs everything; an unfinished run waits for the person's choice;
     /// any other launch shows this boot's last run until Run All.
     func launch() {
         guard !launched else { return }
         launched = true
         let boot = DeviceInfo.bootUUID
         let reports = store.reports()
-        if let interrupted = Report.interrupted(reports, boot: boot) {
+        if let interrupted = Report.interrupted(reports) {
             show(interrupted)
-            if let current = interrupted.run.current, let reason = interrupted.run.interruption {
-                report?.requeueInterrupted()
-                let name = tests.first { $0.id == current }?.name ?? current
-                notice = "HW Test was \(reason) while \(name) ran: it runs again and the run goes on."
-            } else if let current = interrupted.run.current {
-                let crash = crashRecord(current)
-                finish(crash)
-                notice = "The app's process ended while \(crash.name) ran: recorded as a crash, the run goes on."
-            }
-            let byID = Dictionary(tests.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
-            let rest = (report?.remaining ?? []).compactMap { byID[$0] }
-            if rest.isEmpty { settle() } else { run(rest, summarize: true) }
-        } else if let last = reports.last(where: { $0.run.bootUUID == boot }) {
+            pendingRun = interrupted
+        } else if let last = reports.last(where: { $0.latestBootUUID == boot }) {
             show(last)
         } else {
             runAll()
         }
+    }
+
+    func continueRun() {
+        guard var continued = pendingRun, !running else { return }
+        let boot = DeviceInfo.bootUUID
+        let restarted = continued.latestBootUUID != boot
+        let current = continued.run.current
+        var crash: TestRecord?
+        var nextNotice = ""
+        if let current {
+            let name = tests.first { $0.id == current }?.name ?? current
+            if restarted {
+                continued.requeueInterrupted()
+                nextNotice = "The Switch restarted while \(name) ran. It will run last."
+            } else if let reason = continued.run.interruption {
+                continued.requeueInterrupted()
+                nextNotice = "HW Test was \(reason) while \(name) ran. It will run again."
+            } else {
+                let record = crashRecord(current)
+                continued.record(record)
+                crash = record
+                nextNotice =
+                    "The app's process ended while \(name) ran. Recorded as a crash; continuing the remaining tests."
+            }
+        }
+        continued.interrupt(nil)
+        continued.resume(bootUUID: boot, at: Date(), identity: DeviceInfo.identity(ios: ios))
+        let byID = Dictionary(tests.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+        for id in continued.remaining where byID[id] == nil {
+            continued.record(
+                TestRecord(
+                    id: id, subsystem: "", name: id, interactive: false,
+                    outcome: .skip("test is not available in this build"), milliseconds: 0, finished: Date()))
+        }
+        var rest = continued.remaining.compactMap { byID[$0] }
+        if restarted, let index = rest.firstIndex(where: { $0.id == current }) {
+            rest.append(rest.remove(at: index))
+        }
+        if rest.isEmpty { continued.finish(at: Date()) }
+        guard acceptRunChoice(continued) else { return }
+        notice = nextNotice
+        if let crash { logger.notice("\(LogLine.format(crash), privacy: .public)") }
+        if rest.isEmpty { settle() } else { run(rest, summarize: true) }
+    }
+
+    func startNewRun() {
+        guard var cancelled = pendingRun, !running else { return }
+        cancelled.cancel(at: Date())
+        guard acceptRunChoice(cancelled) else { return }
+        runAll()
+    }
+
+    private func acceptRunChoice(_ chosen: Report) -> Bool {
+        do {
+            try store.save(chosen)
+        } catch {
+            resumeError = "Could not save the run. Try again."
+            logger.error("Run choice not saved: \(String(describing: error), privacy: .public)")
+            return false
+        }
+        pendingRun = nil
+        resumeError = nil
+        show(chosen)
+        return true
     }
 
     /// The app going to the background or away while a run goes: written to the card at once, so the next launch
@@ -82,7 +137,7 @@ public final class Suite: ObservableObject {
     }
 
     func runAll() {
-        guard !running else { return }
+        guard !running, pendingRun == nil else { return }
         wedgedBy = nil
         report = newReport()
         for index in rows.indices { rows[index].record = nil }
@@ -108,7 +163,7 @@ public final class Suite: ObservableObject {
     }
 
     private func run(_ batch: [any HWTest], summarize: Bool) {
-        guard !running, !batch.isEmpty else { return }
+        guard !running, pendingRun == nil, !batch.isEmpty else { return }
         running = true
         UIApplication.shared.isIdleTimerDisabled = true
         if report == nil { report = newReport() }

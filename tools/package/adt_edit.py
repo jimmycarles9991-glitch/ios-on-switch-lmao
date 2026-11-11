@@ -39,6 +39,7 @@ USB_DEVICE_CONFIGURATION = 'unknownHardware'
 # USB 2.0 host mode on the same port (drivers/SwitchUSB SwitchXHCI): a keyboard, mouse or flash drive through a USB-C
 # OTG adapter or an unpowered hub. True writes /arm-io/usb-xhci, the driver's switch; the role then follows the BM92T36.
 USB_HOST = True
+USB_HOST_PORT_IDENTITY = ('port-type', 'port-number')
 # The panel's colour gamut as iOS learns it: /product artwork-display-gamut, MobileGestalt's ArtworkDisplayGamut, whose
 # HasExtendedColorDisplay is "== P3". 'sRGB' (what sRGB iPads carry) turns off deep colour everywhere: QuartzCore's
 # CADeviceUseCIF10 (so the display reports no extended colours, and CADisplayMode, FBSDisplayConfiguration and UIScreen
@@ -302,6 +303,31 @@ def _usb(tree: list) -> None:
             put(xhci, key, value)
 
 
+def apple_usb_host(apple: list) -> dict[str, bytes]:
+    """Return the properties of the iPad's USB host controller node: J181's /arm-io/usb-drd, J120's usb-xhci."""
+    nodes = [child(apple, 'arm-io')]
+    while nodes:
+        node = nodes.pop(0)
+        props = {p[0]: p[2] for p in node[0]}
+        if props.get('device_type', b'').split(b'\0')[0] in (b'usb-drd', b'usb-xhci'):
+            return props
+        nodes.extend(node[1])
+    raise SystemExit("Apple's device tree has no USB host controller node")
+
+
+def _usb_host_port(tree: list, apple: list) -> None:
+    # IOAccessoryManager names the connector of each root port from the "port-type" and "port-number" it finds above
+    # the port: J181's are on its usb-drd node (12, the Lightning port, number 1); J120's controller node has none.
+    # SwitchXHCI's nub takes them from /arm-io/usb-xhci.
+    if not USB_HOST:
+        return
+    host = apple_usb_host(apple)
+    xhci = child(child(tree, 'arm-io'), 'usb-xhci')
+    for key in USB_HOST_PORT_IDENTITY:
+        if key in host:
+            put(xhci, key, host[key])
+
+
 def _media_accel(tree: list) -> None:
     """Set the keys iOS's media frameworks read before they pick a hardware path."""
     # J120 has iommu-present (empty) on /arm-io. Its one reader in 21H461's dyld cache, VideoToolbox's
@@ -422,6 +448,7 @@ def with_ipad_identity(data: bytes, apple: bytes) -> bytes:
     # HEVCDecoder8bitSupported (H8) and HEVCDecoder10bitSupported (H9): absent, both answer false although NVDEC decodes
     # HEVC. Its other reader in the dyld cache is DeviceIdentity; the kernel only lists it as sandbox-readable.
     put(child(tree, 'arm-io'), 'soc-generation', apple_properties(ipad, '/arm-io')['soc-generation'])
+    _usb_host_port(tree, ipad)
     return adt_serialize(tree)
 
 

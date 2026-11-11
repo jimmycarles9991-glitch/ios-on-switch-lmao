@@ -2,8 +2,8 @@
 // Guards on how TegraGM20B's kernel code uses what gm20b_pool_policy_test and gm20b_push_scan_test exercise, and on the
 // pool's zeroing, which no host model runs (it lives in nvkm's shim and gpu.c's channels):
 //  - the user client decides a coherent BO's memory through TegraGM20BPoolPolicy.h, serves a BO the pool does not from
-//    ordinary pages under a write-combined physical view, never refuses a coherent BO for want of pool room, and the
-//    stats line names the pool's holders;
+//    a write-combined buffer of its own, never refuses a coherent BO for want of pool room, and the stats line names
+//    the pool's holders;
 //  - the CPU does not clear the reserved pool at boot; every page an allocation hands out is zero whether the CPU or
 //    the copy engine zeroed it; the scrubber gives a range back clean only from its fence's interrupt pass, never waits
 //    on the CPU, and panics with one line on a range not back in time;
@@ -98,49 +98,51 @@ TEST(GM20BPoolPolicySource, BoAllocNeverRefusesACoherentBoForPoolRoom)
 			    "if (!ret && bo->pool_va)"),
 		    Not(HasSubstr("kIOReturnNoMemory")));
 	EXPECT_THAT(client(), Not(HasSubstr("GPU pool BoAlloc of %llu KiB refused")));
-	// A system BO: a write-combined physical view over its pages.
+	// A system BO: a write-combined buffer of its own, mapped as itself. A physical view over its managed pages would set
+	// their cache attribute through a device pager whose private pages reset it to cacheable whenever they are freed.
+	EXPECT_THAT(Between(alloc, "} else if (!ret && !compressible) {", "if (!ret && bo->bmd) {"),
+		    HasSubstr("if (system) options |= kIOMapWriteCombineCache;"));
 	EXPECT_THAT(
-		Between(alloc, "if (!ret && bo->bmd && system) {", "} else if (!ret && bo->bmd) {"),
-		HasSubstr("kIOMemoryTypePhysical64) | kPoolCacheMode"));
+		alloc,
+		Not(HasSubstr(
+			"kIOMemoryTypePhysical64) | kPoolCacheMode, TASK_NULL); IODelete(ranges")));
+	EXPECT_THAT(alloc,
+		    HasSubstr("if (!ret && bo->bmd) { bo->view = bo->backing_pages == bo->npages"));
 }
 
-TEST(GM20BPoolPolicySource, SystemBosGoAsPoolViewsDo)
+TEST(GM20BPoolPolicySource, SystemBosGoAsCachedBosDo)
 {
 	const std::string release =
 		flat(definition(client(), "void AGXDeviceUserClient::releaseBo(Bo *bo)"));
-	EXPECT_THAT(release, HasSubstr("if ((bo->pool_va || bo->system) && bo->view) orphan = "
-				       "IONew(PoolOrphan, 1); if (orphan) {"));
-	EXPECT_THAT(release, HasSubstr("bo->system ? bo->bmd : nullptr"));
-	EXPECT_THAT(
-		release,
-		HasSubstr(
-			"!bo->system && !(bo->flags & TegraGM20BBoContiguous) &&"));  // its spare goes by its orphan
-	expectBefore(flat(definition(client(), "void releaseOrphans()")),
-		     "orphan->view->release();", "orphan->backing->release();");
-	// Never read through the cacheable alias: the stats and a hang's line both read pushes through pushView.
+	EXPECT_THAT(release, HasSubstr("if (bo->pool_va && bo->view) orphan = IONew(PoolOrphan, "
+				       "1); if (orphan) {"));
+	EXPECT_THAT(release, HasSubstr("!bo->system && !(bo->flags & TegraGM20BBoContiguous) &&"));
+	expectBefore(release, "spareKeep(", "bo->bmd->release();");
+	EXPECT_THAT(flat(definition(client(), "void releaseOrphans()")),
+		    Not(HasSubstr("spareKeep")));
+	// The kernel's mapping of a system BO is write-combined as its task's is: pushView reads it as a cached BO's.
 	EXPECT_THAT(flat(definition(client(), "const uint32_t *AGXDeviceUserClient::pushView(")),
-		    HasSubstr("if (hit && !hit->bo->system) {"));
+		    HasSubstr("if (hit) { if (hit->bo->pool_va) {"));
 	EXPECT_THAT(flat(definition(client(), "void AGXDeviceUserClient::scanPushes(")),
 		    HasSubstr("pushView(va, bytes, hit)"));
 	EXPECT_THAT(flat(definition(client(), "int AGXDeviceUserClient::hungInterlocks(")),
 		    HasSubstr("pushView(va[i], static_cast<uint64_t>(dwords[i]) * 4, hit)"));
 }
 
-// A system BO takes a ready spare as a cached BO does, and its pages go back to the spares once its view is released.
-// Every source leaves the pages in one state: zero in DRAM, no line in the cacheable kernel alias (cleanZeros: KMA_ZERO's
-// zeros cleaned and invalidated, or a recycled spare zeroed through the alias and then cleaned and invalidated).
-TEST(GM20BPoolPolicySource, SystemBosTakeAndReturnSpares)
+// A system BO neither takes a spare nor gives its pages to the spares, which are cacheable: it is made at its own size.
+// A cached BO's pages are in one state from every source: zero in DRAM, no line in the cacheable kernel alias
+// (cleanZeros: KMA_ZERO's zeros cleaned and invalidated, or a recycled spare zeroed through the alias and then cleaned
+// and invalidated).
+TEST(GM20BPoolPolicySource, SystemBosNeverUseSpares)
 {
 	const std::string alloc =
 		flat(definition(client(), "IOReturn AGXDeviceUserClient::boAlloc("));
 	EXPECT_THAT(
 		alloc,
-		HasSubstr("if (!ret && !bo->pool_va && !compressible && "
+		HasSubstr("if (!ret && !bo->pool_va && !compressible && !system && "
 			  "!(in->flags & TegraGM20BBoContiguous)) spare = spareTake(in->bytes);"));
-	EXPECT_THAT(alloc, Not(HasSubstr("|| system ? kClasses")));
-	EXPECT_THAT(
-		alloc,
-		HasSubstr("(in->flags & TegraGM20BBoContiguous) ? kClasses : classUp(in->bytes);"));
+	EXPECT_THAT(alloc, HasSubstr("(in->flags & TegraGM20BBoContiguous) || system ? kClasses : "
+				     "classUp(in->bytes);"));
 	EXPECT_THAT(alloc, HasSubstr("cleanZeros(va, backing, false);"));
 	EXPECT_THAT(flat(definition(client(), "Spare *spareMake(uint64_t bytes)")),
 		    HasSubstr("cleanZeros(bmd->getBytesNoCopy(), bytes, false);"));
@@ -151,22 +153,15 @@ TEST(GM20BPoolPolicySource, SystemBosTakeAndReturnSpares)
 	const std::string zeros =
 		flat(definition(client(), "void cleanZeros(void *va, uint64_t bytes, bool zero)"));
 	expectBefore(zeros, "bzero(va, bytes);", "switch_dcache_clean_invalidate(va, bytes);");
-	// A spare is only ever a BO's pages once no task maps them, nothing imports them (the view's release waits for
-	// every import's UPL) and the freeing connection's channels finished (reap).
+	// A pool view's pages go back only once no task maps the view; a cached BO's buffer is a spare only once nothing
+	// else holds it.
 	const std::string orphans = flat(definition(client(), "void releaseOrphans()"));
 	expectBefore(orphans, "if (orphan->view->getRetainCount() > 1) {",
 		     "orphan->view->release();");
-	expectBefore(orphans, "orphan->view->release();",
-		     "spareKeep(orphan->backing, orphan->backingPas, orphan->backingBytes)");
 	EXPECT_THAT(orphans, HasSubstr("orphan->zero &&"));
 	EXPECT_THAT(flat(definition(client(), "bool spareKeep(IOBufferMemoryDescriptor *bmd, "
 					      "uint64_t *pas, uint64_t bytes)")),
 		    HasSubstr("bmd->getRetainCount() == 1"));
-	const std::string release =
-		flat(definition(client(), "void AGXDeviceUserClient::releaseBo(Bo *bo)"));
-	expectBefore(release, "tgm_mem_del(&bo->mem);", "bo->system ? bo->pas : nullptr");
-	EXPECT_THAT(release,
-		    HasSubstr("bo->system ? static_cast<uint64_t>(bo->backing_pages) << 12 : 0"));
 	const std::string free =
 		flat(definition(client(), "IOReturn AGXDeviceUserClient::boFree("));
 	expectBefore(free, "unbindOverlaps(binds_[i].va, binds_[i].range, bo);", "reap(false);");

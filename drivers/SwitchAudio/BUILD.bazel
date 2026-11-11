@@ -56,12 +56,17 @@ ios_binary(
     srcs = [
         "hal/SwitchAudioPlugIn.c",
         "//kits/SwitchRefusal:SwitchRefusal.c",
-    ],
+    ] + select({
+        "//ipsw:24B119": ["hal/SwitchAudioControls.c"],
+        "//conditions:default": [],
+    }),
     out = "build/switch-audio/SwitchAudio.driver/SwitchAudio",
     hdrs = [
         "SwitchAudioAbi.h",
         "SwitchAudioFormat.h",
+        "hal/SwitchAudioControls.h",
         "hal/SwitchAudioConvert.h",
+        "hal/SwitchAudioObjects.h",
         "//kits/SwitchDMA:SwitchDcache.h",
         "//kits/SwitchRefusal:SwitchRefusal.h",
     ],
@@ -79,8 +84,8 @@ ios_binary(
         "-framework",
         "IOKit",
     ] + select({
-        # 21H461's iPad, J120, has a Hawking device; 24B119's, J181, has none.
-        "//ipsw:21H461": ["-DSWITCH_AUDIO_HAWKING=1"],
+        # The devices as the IPSW's iPad has them: J120's for 21H461, J181's for 24B119 (hal/SwitchAudioPlugIn.c).
+        "//ipsw:24B119": ["-DSWITCH_AUDIO_J181=1"],
         "//conditions:default": [],
     }),
     coreaudio_headers = True,

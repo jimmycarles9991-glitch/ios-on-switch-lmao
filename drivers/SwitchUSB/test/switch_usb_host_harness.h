@@ -42,6 +42,14 @@ int xhci_pending(uint32_t iman, uint32_t usbsts);
 int xhci_deliverable(uint32_t iman, uint32_t usbcmd);
 const char *portsc_link_name(uint32_t portsc);
 const char *portsc_speed_name(uint32_t portsc);
+// xusb_hold over one held state
+void hold_reset(void);
+uint32_t hold_usbcmd(uint32_t value);
+uint32_t hold_usbsts(uint32_t value);
+void hold_usbsts_write(uint32_t value);
+void hold_lost(void);
+int hold_keeps(uint64_t value, uint64_t current);
+uint32_t hold_erstba0(void);
 
 #ifdef __cplusplus
 }

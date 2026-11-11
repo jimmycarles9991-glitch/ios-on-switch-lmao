@@ -1,4 +1,4 @@
-"""The datamigrator sentinel the deploy writes when the overlay's /Applications changes."""
+"""What a deploy asks of the next boot when the overlay's /Applications changes: a registration or a migration."""
 
 import os
 import plistlib
@@ -7,7 +7,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from tools.deploy import system_apps
+from tools.deploy import app_journal, system_apps
 from tools.install import card as cards
 
 
@@ -91,83 +91,128 @@ class SystemAppsTest(unittest.TestCase):
         self.data = self.tmp / 'data'
         self.data.mkdir()
         self.sentinel = self.data / system_apps.SENTINEL
+        self.journal = self.data / app_journal.JOURNAL
 
-    def deploy(self, app: dict | None) -> bool:
+    def deploy(self, app: dict | None, ios: str = '27.2', boot_args: str = '', force: bool = False) -> bool:
         package_root = package(self.tmp / f'package-{len(list(self.tmp.iterdir()))}', app)
-        before = system_apps.digest(self.data)
+        before = system_apps.apps(self.data)
         cards.sync_overlay(self.data, package_root, Log())
-        return system_apps.request_migration(self.data, before, Log())
+        return system_apps.register(self.data, before, Log(), app_journal.NextBoot(ios, boot_args), force=force)
 
-    def redeploy(self, app: dict | None) -> bool:
-        self.sentinel.unlink(missing_ok=True)
-        return self.deploy(app)
+    def registered(self) -> dict:
+        return app_journal.pending(self.data)[app_journal.REGISTER]
 
-    def test_a_new_app_asks_for_the_migration(self):
-        self.assertTrue(self.deploy({'code': b'v1'}))
-        self.assertTrue(self.sentinel.is_file())
+    def booted(self) -> None:
+        """switch-appregd applied every pending entry."""
+        pending = app_journal.pending(self.data)
+        tokens = [entry[app_journal.TOKEN] for stage in pending.values() for entry in stage.values()]
+        (self.data / app_journal.APPLIED).parent.mkdir(parents=True, exist_ok=True)
+        (self.data / app_journal.APPLIED).write_bytes(plistlib.dumps(tokens))
 
-    def test_an_unchanged_app_does_not(self):
-        self.deploy({'code': b'v1'})
-        self.assertFalse(self.redeploy({'code': b'v1'}))
+    def redeploy(self, app: dict | None, **kwargs: object) -> dict:
+        self.booted()
+        self.assertFalse(self.deploy(app, **kwargs))
+        return app_journal.pending(self.data)
+
+    def test_a_new_app_is_registered_at_boot_without_a_migration(self):
+        self.assertFalse(self.deploy({'code': b'v1'}))
         self.assertFalse(self.sentinel.exists())
-
-    def test_a_rebuilt_executable_or_resource_alone_does_not(self):
-        self.deploy({'code': b'v1', 'files': {'default.metallib': b'a', 'media/clip.mp4': b'a'}})
-        self.assertFalse(
-            self.redeploy({'code': b'v2 longer', 'files': {'default.metallib': b'b', 'media/clip.mp4': b'b'}})
+        self.assertEqual(
+            {path: entry[app_journal.IDENTIFIER] for path, entry in self.registered().items()},
+            {'/Applications/SwitchHWTest.app': 'com.brunostjohn.switch.hwtest'},
         )
-        self.assertFalse(self.sentinel.exists())
 
-    def test_an_info_plist_change_does(self):
+    def test_an_unchanged_app_asks_for_nothing(self):
         self.deploy({'code': b'v1'})
-        self.assertTrue(self.redeploy({'code': b'v1', 'info': {'CFBundleDisplayName': 'HW Test 2'}}))
+        self.assertEqual(self.redeploy({'code': b'v1'}), {app_journal.UNREGISTER: {}, app_journal.REGISTER: {}})
+        self.assertFalse(self.journal.exists())
+
+    def test_a_rebuilt_executable_or_resource_alone_asks_for_nothing(self):
+        self.deploy({'code': b'v1', 'files': {'default.metallib': b'a', 'media/clip.mp4': b'a'}})
+        pending = self.redeploy({'code': b'v2 longer', 'files': {'default.metallib': b'b', 'media/clip.mp4': b'b'}})
+        self.assertFalse(pending[app_journal.REGISTER])
+
+    def test_an_info_plist_change_registers_the_app_again(self):
+        self.deploy({'code': b'v1'})
+        pending = self.redeploy({'code': b'v1', 'info': {'CFBundleDisplayName': 'HW Test 2'}})
+        self.assertIn('/Applications/SwitchHWTest.app', pending[app_journal.REGISTER])
 
     def test_a_localized_name_change_does(self):
         self.deploy({'code': b'v1', 'files': {'en.lproj/InfoPlist.strings': b'"CFBundleDisplayName" = "A";'}})
-        self.assertTrue(
-            self.redeploy({'code': b'v1', 'files': {'en.lproj/InfoPlist.strings': b'"CFBundleDisplayName" = "B";'}})
+        pending = self.redeploy(
+            {'code': b'v1', 'files': {'en.lproj/InfoPlist.strings': b'"CFBundleDisplayName" = "B";'}}
         )
+        self.assertTrue(pending[app_journal.REGISTER])
 
     def test_an_icon_or_its_asset_catalog_changing_does(self):
         icons = {'CFBundleIcons': {'CFBundlePrimaryIcon': {'CFBundleIconFiles': ['AppIcon60x60']}}}
         self.deploy({'code': b'v1', 'info': icons, 'files': {'AppIcon60x60@2x.png': b'a', 'Assets.car': b'a'}})
-        self.assertTrue(
-            self.redeploy({'code': b'v1', 'info': icons, 'files': {'AppIcon60x60@2x.png': b'b', 'Assets.car': b'a'}})
-        )
-        self.assertTrue(
-            self.redeploy({'code': b'v1', 'info': icons, 'files': {'AppIcon60x60@2x.png': b'b', 'Assets.car': b'b'}})
-        )
+        changed = {'code': b'v1', 'info': icons, 'files': {'AppIcon60x60@2x.png': b'b', 'Assets.car': b'a'}}
+        self.assertTrue(self.redeploy(changed)[app_journal.REGISTER])
+        changed['files'] = {'AppIcon60x60@2x.png': b'b', 'Assets.car': b'b'}
+        self.assertTrue(self.redeploy(changed)[app_journal.REGISTER])
 
     def test_an_entitlements_change_does(self):
         self.deploy({'code': b'v1'})
-        self.assertTrue(self.redeploy({'code': b'v1', 'entitlements': {**ENTITLEMENTS, 'com.apple.private.x': True}}))
+        pending = self.redeploy({'code': b'v1', 'entitlements': {**ENTITLEMENTS, 'com.apple.private.x': True}})
+        self.assertTrue(pending[app_journal.REGISTER])
 
     def test_an_added_extension_does(self):
         self.deploy({'code': b'v1'})
         extension = {'PlugIns/W.appex/Info.plist': plistlib.dumps({'CFBundleIdentifier': 'w'})}
-        self.assertTrue(self.redeploy({'code': b'v1', 'files': extension}))
+        self.assertTrue(self.redeploy({'code': b'v1', 'files': extension})[app_journal.REGISTER])
 
-    def test_a_removed_app_does(self):
+    def test_a_removed_app_is_unregistered(self):
         self.deploy({'code': b'v1'})
-        self.assertTrue(self.redeploy(None))
-        self.assertTrue(self.sentinel.is_file())
-
-    def test_no_apps_ever_leaves_migration_alone(self):
-        self.assertFalse(self.deploy(None))
+        pending = self.redeploy(None)
+        self.assertEqual(
+            {path: entry[app_journal.IDENTIFIER] for path, entry in pending[app_journal.UNREGISTER].items()},
+            {'/Applications/SwitchHWTest.app': 'com.brunostjohn.switch.hwtest'},
+        )
         self.assertFalse(self.sentinel.exists())
 
-    def test_a_request_clears_the_kernels_one_try_marker(self):
+    def test_no_apps_ever_leaves_everything_alone(self):
+        self.assertFalse(self.deploy(None))
+        self.assertFalse(self.sentinel.exists())
+        self.assertFalse(self.journal.exists())
+
+    def test_ios_27_keeps_launchservices_store_for_app_changes(self):
+        store = self.data / 'mobile/Containers/Data/InternalDaemon/1/Library/Caches/com.apple.LaunchServices-1.csstore'
+        store.parent.mkdir(parents=True)
+        store.write_bytes(b'store')
+        self.deploy({'code': b'v1'}, ios='27.2', boot_args='switch-no-bt')
+        self.assertTrue(store.exists())
+        self.assertFalse(self.sentinel.exists())
+
+    def test_ios_17_without_bluetooth_migrates_instead(self):
+        self.assertTrue(self.deploy({'code': b'v1'}, ios='17.7.11', boot_args='-v switch-no-bt'))
+        self.assertTrue(self.sentinel.is_file())
+        self.assertFalse(self.journal.exists())
+
+    def test_ios_17_without_bluetooth_and_no_change_asks_for_nothing(self):
+        self.deploy({'code': b'v1'}, ios='17.7.11')
+        self.booted()
+        self.assertFalse(self.deploy({'code': b'v1'}, ios='17.7.11', boot_args='switch-no-bt'))
+        self.assertFalse(self.sentinel.exists())
+
+    def test_ios_17_without_bluetooth_migrates_for_entries_still_pending(self):
+        self.deploy({'code': b'v1'}, ios='17.7.11')
+        self.assertTrue(self.deploy({'code': b'v1'}, ios='17.7.11', boot_args='switch-no-bt'))
+        self.assertTrue(self.sentinel.is_file())
+        self.assertFalse(self.journal.exists())
+
+    def test_ios_17_with_bluetooth_registers_at_boot(self):
+        self.assertFalse(self.deploy({'code': b'v1'}, ios='17.7.11', boot_args='switch-no-bt=0'))
+        self.assertTrue(self.registered())
+
+    def test_a_requested_migration_clears_the_kernels_one_try_marker_and_the_journal(self):
+        self.deploy({'code': b'v1'})
         marker = self.data / system_apps.MARKER
         marker.parent.mkdir(parents=True, exist_ok=True)
         marker.touch()
-        self.assertTrue(self.deploy({'code': b'v1'}))
+        self.assertTrue(self.deploy({'code': b'v2', 'info': {'CFBundleVersion': '2'}}, force=True))
         self.assertFalse(marker.exists())
-
-    def test_force_asks_with_unchanged_apps(self):
-        self.deploy({'code': b'v1'})
-        self.sentinel.unlink()
-        before = system_apps.digest(self.data)
-        self.assertTrue(system_apps.request_migration(self.data, before, Log(), force=True))
+        self.assertFalse(self.journal.exists())
         self.assertTrue(self.sentinel.is_file())
 
 
@@ -187,17 +232,18 @@ class LaunchServicesRebuildTest(unittest.TestCase):
         self.assertFalse(system_apps.rebuilds_launchservices(None))
 
     def test_a_requested_rebuild_removes_only_the_store(self):
-        system_apps.request_migration(self.data, None, Log(), force=True, rebuild=True)
+        system_apps.request_migration(self.data, Log(), rebuild=True)
         self.assertFalse(self.store.exists())
         self.assertTrue(self.other.exists())
         self.assertTrue((self.data / system_apps.SENTINEL).is_file())
 
     def test_a_migration_without_rebuild_keeps_the_store(self):
-        system_apps.request_migration(self.data, None, Log(), force=True)
+        system_apps.request_migration(self.data, Log())
         self.assertTrue(self.store.exists())
 
-    def test_no_migration_no_rebuild(self):
-        self.assertFalse(system_apps.request_migration(self.data, system_apps.digest(self.data), Log(), rebuild=True))
+    def test_no_change_no_rebuild(self):
+        boot = app_journal.NextBoot('27.2')
+        self.assertFalse(system_apps.register(self.data, system_apps.apps(self.data), Log(), boot))
         self.assertTrue(self.store.exists())
 
 
@@ -274,9 +320,10 @@ class RestageTest(unittest.TestCase):
         self.assertFalse((self.data / system_apps.STAGED / 'FaceTime.app/junk').exists())
 
     def test_restaging_asks_for_the_migration(self):
-        before = system_apps.digest(self.data)
+        before = system_apps.apps(self.data)
         restaged = system_apps.restage(self.system, self.data, Log())
-        self.assertTrue(system_apps.request_migration(self.data, before, Log(), force=restaged))
+        boot = app_journal.NextBoot('17.7.11')
+        self.assertTrue(system_apps.register(self.data, before, Log(), boot, force=restaged))
         self.assertTrue((self.data / system_apps.SENTINEL).is_file())
 
 

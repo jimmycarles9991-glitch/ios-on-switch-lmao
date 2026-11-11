@@ -432,8 +432,9 @@ static bool sameSizeLevels(id<MTLTexture> s, id<MTLTexture> d, NSUInteger &sl, N
     if (!x || !x->_rawOk || !x->_raw.chain) {  // a chain's levels are the 2D engine's (raw::BlitEncoder::generate)
         [_cb takeReason:WhyMipmaps why:@"generateMipmapsForTexture"];
         hit(_cb, PredMipmaps, t.pixelFormat, t.mipmapLevelCount);
-    } else if (!x->_raw.chain->fmt2d) {  // m2v generates them, into the same chain (its in-place twin)
-        [_cb takeReason:WhyMipmaps why:@"generateMipmapsForTexture of a format the 2D engine does not filter"];
+    } else if (!x->_raw.chain->fmt2d &&
+               !gRM->raw->mipPipeline(x->_raw.format)) {  // (the 3D engine's passes: mipPasses)
+        [_cb takeReason:WhyMipmaps why:@"generateMipmapsForTexture of a format neither engine filters"];
         hit(_cb, PredMipmapsFormat, t.pixelFormat, t.mipmapLevelCount);
     }
     setBinding(_cb, OpMipmaps, 0, 0, t, 0);

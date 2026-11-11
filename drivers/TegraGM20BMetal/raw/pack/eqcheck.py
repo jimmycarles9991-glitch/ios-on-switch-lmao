@@ -10,15 +10,20 @@ first-appearance name), the vertex data, each stage's program and register count
 buffers hold (pointers replaced by what they point to, handles by their texture/sampler headers). Barriers are compared
 as sets: the raw path must cover what NVK emitted before each draw that reads memory written earlier (PSB + TEXINV
 before a framebuffer fetch), but for a fetch barrier its harness build marks as left out (ELIDED). A draw the raw path
-drew in runs (SPLIT marks) is folded back into one draw first.
+drew in runs (SPLIT marks) is folded back into one draw first, and a draw of a split fragment program (--splits, the
+pack's pack.json: eqsplit.py) into NVK's draw of the whole program.
 
-usage: eqcheck.py <nvk.log> <raw.log> [--show N] [--flat] [--layouts] [--own]
+usage: eqcheck.py <nvk.log> <raw.log> [--show N] [--flat] [--layouts] [--own] [--splits <pack.json>]
 """
 
 import collections
+import os
 import re
 import sys
 from dataclasses import dataclass, field
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import eqsplit
 
 
 def frames(path: str) -> list[list[dict]]:
@@ -269,6 +274,7 @@ class Tally:
     same_dispatches: int = 0
     clears: int = 0
     elided: int = 0
+    splits: int = 0
 
     def wants(self, kind: str) -> bool:
         return len(self.examples[kind]) < self.show
@@ -339,7 +345,7 @@ def compare_draw(tally: Tally, fi: int, di: int, x: collections.OrderedDict, y: 
             if not compare_registers(tally, f'frame {fi} draw {di}', x.get('R', {}), y.get('R', {})):
                 ok = False
             continue
-        if x.get(k) != y.get(k):
+        if x.get(k) != y.get(k) and not split_program(x.get(k), y.get(k)):
             ok = False
             tally.mism[k] += 1
             if tally.wants(k):
@@ -347,6 +353,11 @@ def compare_draw(tally: Tally, fi: int, di: int, x: collections.OrderedDict, y: 
     if not compare_barriers(tally, f'frame {fi} draw {di}', x['barriers'], y['barriers']):
         ok = False
     return ok
+
+
+def split_program(x: str | None, y: str | None) -> bool:
+    """Whether stage line `y` is a split draw's (eqsplit.py: its own program's register count) of `x`'s program."""
+    return bool(x and y and 'regs=*' in y and re.sub(r'regs=\S+', 'regs=*', x) == y)
 
 
 # A fetch barrier the raw path left out because the draw's pixels meet none written since its last one
@@ -402,7 +413,7 @@ def report(tally: Tally) -> int:
     print(
         f'draws compared {tally.draws}, identical {tally.same}; clears compared {tally.clears}; '
         f'fetch barriers raw left out {tally.elided}; dispatches compared {tally.dispatches}, '
-        f'identical {tally.same_dispatches}'
+        f'identical {tally.same_dispatches}' + (f'; split draws {tally.splits}' if tally.splits else '')
     )
     for k, n in tally.mism.most_common():
         print(f'MISMATCH {k:<28} {n}')
@@ -430,6 +441,12 @@ def main() -> int:
         drop(b, a, 'raw')
     a, b = rename_all(a), rename_all(b)
     tally = Tally(show)
+    tally.splits, failed = eqsplit.fold(
+        b, eqsplit.load(sys.argv[sys.argv.index('--splits') + 1] if '--splits' in sys.argv else '')
+    )
+    if failed:
+        tally.mism['split'] += len(failed)
+        tally.examples['split'] += failed[:show]
     for fi, (fa, fb) in enumerate(zip(a, b, strict=False)):
         compare_frame(tally, fi, fa, fb)
     return report(tally)

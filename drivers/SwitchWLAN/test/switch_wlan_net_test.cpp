@@ -1,7 +1,8 @@
 // en0's data path (drivers/SwitchWLAN/SwitchWLANNet.cpp) between a model of the radio's transmit buffers and a model of
 // IONetworkingFamily's queues (switch_wlan_net_stubs.h): every frame crosses once, in order and intact, copied once
 // each way; frames wait in the stack's queue while the radio has no buffer; held frames survive a lost buffer and die
-// with a purge; the link goes to the controller as IOLinkStatus with the rate.
+// with a purge; the link goes to the controller as IOLinkStatus with the rate; bringing en0 up starts the family's
+// output thread, without which no frame ever reaches outputStart.
 #include <cstdint>
 #include <cstring>
 #include <vector>
@@ -56,6 +57,12 @@ void complete(unsigned n)
     gEvents->tx_ready();
 }
 
+// IONetworkInterface::if_start: outputStart only once the driver has started the thread.
+IOReturn familyStart(IOEthernetInterface &interface)
+{
+    return interface.outputHalted ? kIOReturnSuccess : swlan::net::output(&interface);
+}
+
 std::vector<uint8_t> received(mbuf_t m)
 {
     std::vector<uint8_t> out;
@@ -74,6 +81,7 @@ void reset()
     gMbufRoom = 2048;
     gMbufExhausted = false;
     gInterface.attached = true;
+    gInterface.outputHalted = true;
     gInterface.ifp = {};
     for (mbuf_t m : gInterface.delivered)
         mbuf_freem(m);
@@ -191,6 +199,32 @@ TEST_F(NetTest, UploadCrossesOnceInOrderWithTheRadioOutOfBuffers)
     EXPECT_EQ(gMbufLive, 0u);         // every mbuf freed
     EXPECT_EQ(gInterface.ifp.errorsOut, 0u);
     EXPECT_LE(gDoorbells, kFrames / 8 + 4);  // one doorbell per batch, not per frame
+}
+
+TEST_F(NetTest, BringingEn0UpStartsTheFamilysHaltedOutputThread)
+{
+    gInterface.output.push_back(packet(frame(0, 342)));
+    EXPECT_EQ(familyStart(gInterface), kIOReturnSuccess);
+    EXPECT_TRUE(gSent.empty());
+    gLog.clear();
+    EXPECT_EQ(swlan::net::enable(&gInterface), kIOReturnSuccess);
+    ASSERT_EQ(gLog.size(), 1u);
+    EXPECT_NE(gLog[0].find("output thread started"), std::string::npos) << gLog[0];
+    EXPECT_FALSE(gInterface.outputHalted);
+    EXPECT_EQ(gInterface.ifp.starts, 1u);
+    EXPECT_EQ(familyStart(gInterface), kIOReturnNoFrames);
+    ASSERT_EQ(gSent.size(), 1u);
+    EXPECT_EQ(gSent[0], frame(0, 342));
+    EXPECT_EQ(gMbufLive, 0u);
+}
+
+TEST_F(NetTest, AnEn0NoLongerAttachedIsNotEnabledAndSaysSo)
+{
+    gInterface.attached = false;
+    gLog.clear();
+    EXPECT_EQ(swlan::net::enable(&gInterface), kIOReturnNotAttached);
+    ASSERT_EQ(gLog.size(), 1u);
+    EXPECT_NE(gLog[0].find("output thread did not start"), std::string::npos) << gLog[0];
 }
 
 TEST_F(NetTest, FramesDequeuedButNotTakenAreHeldAndGoFirst)

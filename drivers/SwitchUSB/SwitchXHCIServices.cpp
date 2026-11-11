@@ -3,6 +3,7 @@
 #include "SwitchXHCIServices.h"
 #include <IOKit/IOCatalogue.h>
 #include <IOKit/IODeviceMemory.h>
+#include <IOKit/IODeviceTreeSupport.h>
 #include <IOKit/IOService.h>
 #include <libkern/c++/OSArray.h>
 #include <libkern/c++/OSData.h>
@@ -81,6 +82,49 @@ IOService *makeNub(uint64_t registers, uint64_t bytes, uint32_t intid)
     if (!ok)
         OSSafeReleaseNULL(nub);
     return nub;
+}
+
+void copyPortIdentity(IOService *nub, const char *path)
+{
+    static const char *const kKeys[] = {"port-type", "port-number"};
+    const IORegistryEntry *node = IORegistryEntry::fromPath(path, gIODTPlane);
+    for (const char *key : kKeys) {
+        OSObject *value = node != nullptr ? node->copyProperty(key) : nullptr;
+        if (value != nullptr)
+            nub->setProperty(key, value);
+        OSSafeReleaseNULL(value);
+    }
+    OSSafeReleaseNULL(node);
+}
+
+namespace {
+uint32_t numberProperty(const IOService *service, const char *key)
+{
+    const OSNumber *number = OSDynamicCast(OSNumber, service->getProperty(key));
+    return number != nullptr ? number->unsigned32BitValue() : 0;
+}
+
+// NOLINTNEXTLINE(misc-const-correctness): IOServiceMatchingNotificationHandler's signature
+bool deviceArrived(void *, void *, IOService *device, IONotifier *)
+{
+    const OSString *name = OSDynamicCast(OSString, device->getProperty("USB Product Name"));
+    IOLog("SwitchUSB: USB device %s (%04x:%04x) registered at location %#x\n",
+          name != nullptr ? name->getCStringNoCopy() : "without a name", numberProperty(device, "idVendor"),
+          numberProperty(device, "idProduct"), numberProperty(device, "locationID"));
+    return true;
+}
+}  // namespace
+
+IONotifier *logDeviceArrivals(IOService *controller)
+{
+    OSDictionary *matching = IOService::serviceMatching("IOUSBHostDevice");
+    const OSDictionary *parent = IOService::registryEntryIDMatching(controller->getRegistryEntryID());
+    IONotifier *notifier = nullptr;
+    if (matching != nullptr && parent != nullptr && matching->setObject(kIOParentMatchKey, parent))
+        notifier = IOService::addMatchingNotification(gIOFirstPublishNotification, matching, &deviceArrived, nullptr);
+    OSSafeReleaseNULL(parent);
+    OSSafeReleaseNULL(matching);
+    return notifier;
 }
 
 IOService *waitForRootPort(IOService *controller, unsigned number, uint64_t timeoutNS)

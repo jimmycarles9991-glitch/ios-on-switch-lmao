@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 // See raw_cache.h.
 #include "raw_cache.h"
+#include "raw_cache_io.h"
 
 #include <dirent.h>
 #include <fcntl.h>
@@ -15,9 +16,7 @@
 namespace raw {
 namespace {
 
-constexpr char kMagic[8] = {'S', 'W', 'R', 'A', 'W', 'R', 'E', 'C'};
-constexpr uint32_t kFormat = 1;
-constexpr uint32_t kKindRecord = 1, kKindRefusal = 2;
+constexpr uint8_t kSplitTried = 1, kSplit = 2;
 constexpr uint64_t kSizeLimit = 1u << 24;  // an entry larger than any record could be: a broken file
 constexpr time_t kStaleTemporarySeconds = 60;
 
@@ -27,90 +26,6 @@ std::string hex16(uint64_t v)
     snprintf(b, sizeof b, "%016llx", static_cast<unsigned long long>(v));
     return b;
 }
-
-class Writer {
-public:
-    std::string out;
-
-    void bytes(const void *p, size_t n)
-    {
-        out.append(static_cast<const char *>(p), n);
-    }
-
-    template <class T> void value(T v)
-    {
-        bytes(&v, sizeof v);
-    }
-
-    void text(const std::string &s)
-    {
-        value(uint32_t(s.size()));
-        bytes(s.data(), s.size());
-    }
-
-    template <class T> void list(const std::vector<T> &v)
-    {
-        value(uint32_t(v.size()));
-        bytes(v.data(), v.size() * sizeof(T));
-    }
-};
-
-class Reader {
-public:
-    explicit Reader(const std::string &in) : in_(in)
-    {}
-
-    bool bytes(void *p, size_t n)
-    {
-        if (n > in_.size() - at_)
-            return ok_ = false;
-        memcpy(p, in_.data() + at_, n);
-        at_ += n;
-        return true;
-    }
-
-    template <class T> T value()
-    {
-        T v{};
-        bytes(&v, sizeof v);
-        return v;
-    }
-
-    std::string text()
-    {
-        const uint32_t n = value<uint32_t>();
-        if (!ok_ || n > in_.size() - at_)
-            return ok_ = false, std::string();
-        std::string s = in_.substr(at_, n);
-        at_ += n;
-        return s;
-    }
-
-    template <class T> std::vector<T> list()
-    {
-        const uint32_t n = value<uint32_t>();
-        if (!ok_ || n > (in_.size() - at_) / sizeof(T))
-            return ok_ = false, std::vector<T>();
-        std::vector<T> v(n);
-        bytes(v.data(), n * sizeof(T));
-        return v;
-    }
-
-    bool ok() const
-    {
-        return ok_;
-    }
-
-    size_t at() const
-    {
-        return at_;
-    }
-
-private:
-    const std::string &in_;
-    size_t at_ = 0;
-    bool ok_ = true;
-};
 
 void writeProgram(Writer &w, const CapturedProgram &p)
 {
@@ -223,16 +138,43 @@ uint64_t CacheKey::name() const
     return Pack::fnv(all.data(), all.size());
 }
 
-std::string encodeEntry(const CacheKey &k, const RuntimeRecord *record, const std::string &refusal)
+void writeEntryHead(Writer &w, const CacheKey &k, uint32_t kind)
 {
-    Writer w;
-    w.bytes(kMagic, sizeof kMagic);
-    w.value(kFormat);
-    w.value(record ? kKindRecord : kKindRefusal);
+    w.bytes(kEntryMagic, sizeof kEntryMagic);
+    w.value(kEntryFormat);
+    w.value(kind);
     w.value(k.stack);
     w.bytes(k.vertexAir, sizeof k.vertexAir);
     w.bytes(k.fragmentAir, sizeof k.fragmentAir);
     w.text(k.key);
+}
+
+bool readEntryHead(const std::string &bytes, Reader &r, const CacheKey &k, uint32_t &kind)
+{
+    if (bytes.size() < sizeof kEntryMagic + 8)
+        return false;
+    uint64_t sum;
+    memcpy(&sum, bytes.data() + bytes.size() - 8, 8);
+    if (sum != Pack::fnv(bytes.data(), bytes.size() - 8))
+        return false;
+    char magic[sizeof kEntryMagic];
+    uint8_t vertexAir[32], fragmentAir[32];
+    r.bytes(magic, sizeof magic);
+    const uint32_t format = r.value<uint32_t>();
+    kind = r.value<uint32_t>();
+    const uint64_t stack = r.value<uint64_t>();
+    r.bytes(vertexAir, sizeof vertexAir);
+    r.bytes(fragmentAir, sizeof fragmentAir);
+    const std::string key = r.text();
+    return r.ok() && !memcmp(magic, kEntryMagic, sizeof kEntryMagic) && format == kEntryFormat && stack == k.stack &&
+           !memcmp(vertexAir, k.vertexAir, sizeof vertexAir) &&
+           !memcmp(fragmentAir, k.fragmentAir, sizeof fragmentAir) && key == k.key;
+}
+
+std::string encodeEntry(const CacheKey &k, const RuntimeRecord *record, const std::string &refusal)
+{
+    Writer w;
+    writeEntryHead(w, k, record ? kKindRecord : kKindRefusal);
     if (record) {
         w.value(record->pipeline);
         w.text(record->keyString);
@@ -242,6 +184,12 @@ std::string encodeEntry(const CacheKey &k, const RuntimeRecord *record, const st
         w.list(record->extras);
         w.list(record->restore);
         w.list(record->samplers);
+        w.value(uint8_t((record->splitTried ? kSplitTried : 0) | (record->split ? kSplit : 0)));
+        if (record->split) {
+            w.value(record->splitRecord);
+            writeProgram(w, record->splitPrograms[0]);
+            writeProgram(w, record->splitPrograms[1]);
+        }
     } else {
         w.text(refusal);
     }
@@ -251,24 +199,9 @@ std::string encodeEntry(const CacheKey &k, const RuntimeRecord *record, const st
 
 RecordCache::Found decodeEntry(const std::string &bytes, const CacheKey &k, RuntimeRecord &record, std::string &refusal)
 {
-    if (bytes.size() < sizeof kMagic + 8)
-        return RecordCache::Found::None;
-    uint64_t sum;
-    memcpy(&sum, bytes.data() + bytes.size() - 8, 8);
-    if (sum != Pack::fnv(bytes.data(), bytes.size() - 8))
-        return RecordCache::Found::None;
     Reader r(bytes);
-    char magic[sizeof kMagic];
-    uint8_t vertexAir[32], fragmentAir[32];
-    r.bytes(magic, sizeof magic);
-    const uint32_t format = r.value<uint32_t>(), kind = r.value<uint32_t>();
-    const uint64_t stack = r.value<uint64_t>();
-    r.bytes(vertexAir, sizeof vertexAir);
-    r.bytes(fragmentAir, sizeof fragmentAir);
-    const std::string key = r.text();
-    if (!r.ok() || memcmp(magic, kMagic, sizeof kMagic) || format != kFormat || stack != k.stack ||
-        memcmp(vertexAir, k.vertexAir, sizeof vertexAir) || memcmp(fragmentAir, k.fragmentAir, sizeof fragmentAir) ||
-        key != k.key)
+    uint32_t kind = 0;
+    if (!readEntryHead(bytes, r, k, kind))
         return RecordCache::Found::None;
     if (kind == kKindRefusal) {
         refusal = r.text();
@@ -285,6 +218,14 @@ RecordCache::Found decodeEntry(const std::string &bytes, const CacheKey &k, Runt
     rec.extras = r.list<std::pair<uint32_t, uint32_t>>();
     rec.restore = r.list<std::pair<uint32_t, uint32_t>>();
     rec.samplers = r.list<std::array<uint32_t, 8>>();
+    const uint8_t split = r.value<uint8_t>();
+    rec.splitTried = split & kSplitTried;
+    rec.split = split & kSplit;
+    if (rec.split) {
+        rec.splitRecord = r.value<PackSplit>();
+        rec.splitPrograms[0] = readProgram(r);
+        rec.splitPrograms[1] = readProgram(r);
+    }
     if (!r.ok() || r.at() != bytes.size() - 8)
         return RecordCache::Found::None;
     record = std::move(rec);
@@ -330,22 +271,37 @@ std::string RecordCache::path(const CacheKey &k) const
     return dir_ + "/" + hex16(k.name()) + ".rec";
 }
 
+bool RecordCache::loadBytes(const CacheKey &k, std::string &bytes)
+{
+    return !dir_.empty() && k.stack == stack_ && readFile(path(k), bytes);
+}
+
 RecordCache::Found RecordCache::load(const CacheKey &k, RuntimeRecord &record, std::string &refusal)
 {
-    if (dir_.empty() || k.stack != stack_)
-        return Found::None;
     std::string bytes;
-    if (!readFile(path(k), bytes))
-        return Found::None;
-    return decodeEntry(bytes, k, record, refusal);
+    return loadBytes(k, bytes) ? decodeEntry(bytes, k, record, refusal) : Found::None;
+}
+
+RecordCache::Found RecordCache::loadKernel(const CacheKey &k, ComputeRecord &record, std::string &refusal)
+{
+    std::string bytes;
+    return loadBytes(k, bytes) ? decodeKernelEntry(bytes, k, record, refusal) : Found::None;
 }
 
 bool RecordCache::store(const CacheKey &k, const RuntimeRecord *record, const std::string &refusal)
 {
+    return dir_.empty() || k.stack != stack_ ? false : storeBytes(k, encodeEntry(k, record, refusal));
+}
+
+bool RecordCache::storeKernel(const CacheKey &k, const ComputeRecord *record, const std::string &refusal)
+{
+    return dir_.empty() || k.stack != stack_ ? false : storeBytes(k, encodeKernelEntry(k, record, refusal));
+}
+
+bool RecordCache::storeBytes(const CacheKey &k, const std::string &bytes)
+{
     static std::atomic<uint32_t> serial{0};
-    if (dir_.empty() || k.stack != stack_)
-        return false;
-    const std::string bytes = encodeEntry(k, record, refusal), final = path(k);
+    const std::string final = path(k);
     std::lock_guard<std::mutex> l(lock_);
     if (cap_ && bytes.size() > cap_ / 4 * 3)
         return false;

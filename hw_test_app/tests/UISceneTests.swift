@@ -5,7 +5,7 @@ import SwiftUI
 import UIKit
 
 public enum UISceneTests {
-    static let all: [any HWTest] = [UITextTest(), UIBlurTest(), UIListTest(), UIRenderBoxTest()]
+    static let all: [any HWTest] = [UITextTest(), UIBlurTest(), UIListTest(), UIRenderBoxTest(), CompressedImageTest()]
 
     /// Shows `build`'s views full screen, waits for them to reach the screen, and returns what `measure` makes of them.
     public static func staged<V, R>(

@@ -4,6 +4,7 @@
 #import <Metal/Metal.h>
 #include <atomic>
 #include <condition_variable>
+#include <map>
 #include <mutex>
 #include <set>
 #include <string>
@@ -146,8 +147,13 @@ typedef NS_ENUM(uint8_t, RMTextureKind) {
     bool _packable;     // its functions are one framework's default library's (looked up in the pack)
     bool _completable;  // both its functions are this device's (the runtime makes its record if the pack has none)
     bool _caTransform;
-    bool _asked;       // its record asked of the runtime (completeLater)
-    std::string _key;  // its pack key (completable states')
+    bool _asked;                             // its record asked of the runtime (completeLater)
+    std::string _key;                        // its pack key (completable states')
+    MTLRenderPipelineDescriptor *_madeFrom;  // completable states': what its cubic variants are made of
+    // its cubic variants (raw_cubic.h) by their binds' name: null where the runtime refused one; `_variantsAsked`: being made
+    std::mutex _variantLock;
+    std::map<std::string, raw::Pipeline *> _variants;
+    std::set<std::string> _variantsAsked;
 }
 @end
 
@@ -367,11 +373,14 @@ uint64_t nextTraceId();
                    [31];  // stage 1 vertex, 2 fragment: the bound buffer's address plus offset (setBytes: 0, aligned)
     RMBuffer *_buf[3][31];
     RMTexture *_tex[16];   // fragment textures (unretained: the command buffer retains what it binds)
-    uint32_t _formats[8];  // the pass's color attachments' formats as the raw path holds them (0: none)
-    uint32_t _count;       // its attachment count (the last attachment's index + 1)
-    uint32_t _zeta;        // its depth/stencil attachment's format as the raw path holds it (0: none)
-    uint32_t _samples;     // its color attachments' samples a pixel
-    uint32_t _passAt;      // its pass's RMPass (the command buffer's _passes)
+    RMSampler *_samp[16];  // fragment samplers, alike; `_cubicMask`: the slots of those that are cubic (raw_cubic.h)
+    uint16_t _cubicMask;
+    raw::Pipeline *_drawn;  // the record its draws are recorded with: the state's, or a cubic variant of it
+    uint32_t _formats[8];   // the pass's color attachments' formats as the raw path holds them (0: none)
+    uint32_t _count;        // its attachment count (the last attachment's index + 1)
+    uint32_t _zeta;         // its depth/stencil attachment's format as the raw path holds it (0: none)
+    uint32_t _samples;      // its color attachments' samples a pixel
+    uint32_t _passAt;       // its pass's RMPass (the command buffer's _passes)
     raw::DepthStencilDesc _ds;
     MTLRenderPassDescriptor *_pass;  // the command buffer's copy, which the raw encode and m2v's replay read
 }
@@ -416,6 +425,10 @@ id<MTLSamplerState> clampedSampler(id<MTLSamplerState> s, float lodMin, float lo
 @interface RMRenderEncoder (Bindings)
 - (void)texture:(int)stage object:(id<MTLTexture>)t index:(NSUInteger)index;
 - (void)sampler:(int)stage object:(id<MTLSamplerState>)s index:(NSUInteger)index;
+@end
+
+@interface RMRenderEncoder (Cubic)
+- (const raw::Pipeline *)drawnRecord;  // (RawMetalCubic.mm)
 @end
 
 #if SWITCH_FRAME_TIMELINE

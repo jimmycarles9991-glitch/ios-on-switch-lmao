@@ -95,6 +95,15 @@ host_test(
     deps = [":switch_usb_host_harness"],
 )
 
+# XusbPorts.h xusb_hold under a model of AppleUSBXHCI's Save State and Restore State (24B119 disassembly) on a model
+# Tegra host that answers CSS with SRE: idle sleep and wake keep the halted controller's state and event ring, Off goes
+# through reset, and after SC7 the restore fails with SRE so AppleUSBXHCI's recovery resets the controller.
+host_test(
+    name = "switch_usb_hold_test",
+    srcs = ["switch_usb_hold_test.cpp"],
+    deps = [":switch_usb_host_harness"],
+)
+
 # What the headers cannot show: the interrupt routing (DT SPI 39/40 level-high, the LIC, IPFS as tegra_xusb_config,
 # checkFired's one panic), that the kernel files use the tested headers in the order the model assumes, and the
 # SuperSpeed lane's handshake with PCIe's UPHY PLL calibration.

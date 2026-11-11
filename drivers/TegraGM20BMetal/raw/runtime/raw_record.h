@@ -47,6 +47,13 @@ struct RuntimeRecord {
     // set them back)
     std::vector<std::pair<uint32_t, uint32_t>> extras, restore;
     std::vector<std::array<uint32_t, 8>> samplers;  // constexpr sampler headers the pack lacks, numbered after its own
+    // its fragment program's split (raw_pack.h PackSplit, whose program indices it does not use): the per-pixel program,
+    // then the prologue (an 80-byte header of zeros before its code, as programs.bin holds a kernel's). splitTried: the
+    // split was compiled for, and is here where it saves time
+    bool splitTried = false;
+    bool split = false;
+    PackSplit splitRecord = {};
+    CapturedProgram splitPrograms[2];
 };
 
 // One state's probe: its submissions with tagged payloads of 256, 16 and 4096 bytes, the index its payloads are tagged with, and

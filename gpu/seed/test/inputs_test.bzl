@@ -72,6 +72,7 @@ def _raw_impl(ctx):
         (action,) = _actions(env, mnemonic)
         asserts.equals(env, [], [p for p in _names(action) if p.endswith("MANIFEST.json")], mnemonic + " reads no key")
     (link,) = _actions(env, "MetalRawLink")
+    asserts.true(env, "gpu/seed/test/raw/splits.py" in _names(link), "the split layout generator")
     asserts.equals(env, 16, len([f for f in link.inputs.to_list() if f.is_directory]), "every bucket's probe runs")
     (stamp,) = _actions(env, "MetalRawStamp")
     asserts.true(env, [p for p in _names(stamp) if p.endswith("MANIFEST.json")] != [], "the stamp reads the key")

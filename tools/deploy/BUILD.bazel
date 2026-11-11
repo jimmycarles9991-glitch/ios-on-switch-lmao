@@ -14,6 +14,7 @@ exports_files([
 py_library(
     name = "lib",
     srcs = [
+        "app_journal.py",
         "deployed.py",
         "joycon_pairing.py",
         "mkarchive.py",
@@ -36,6 +37,13 @@ py_library(
     name = "deploy",
     srcs = ["deploy.py"],
     imports = ["../.."],
+    deps = [":lib"],
+)
+
+py_test(
+    name = "app_journal_test",
+    size = "small",
+    srcs = ["app_journal_test.py"],
     deps = [":lib"],
 )
 

@@ -161,6 +161,15 @@ def corpus_names(path: str, tables: caspec.Tables | None = None) -> list[str]:
     return list(names)
 
 
+def makes(tables: caspec.Tables, name: str) -> bool:
+    """Whether this QuartzCore makes a state of the name."""
+    try:
+        caspec.state_line(tables, name)
+    except (KeyError, IndexError, ValueError):
+        return False
+    return True
+
+
 def _made_here(tables: caspec.Tables, name: str, fields: str | None) -> bool:
     try:
         return caspec.state_fields(tables, name) == fields

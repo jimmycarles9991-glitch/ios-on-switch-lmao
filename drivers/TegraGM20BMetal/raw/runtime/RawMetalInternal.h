@@ -47,6 +47,8 @@ extern "C" id native_bridge_metal_render_pipeline_lazy(id device, id descriptor,
 struct switch_nvk_image_memory;
 extern "C" int native_bridge_metal_texture_memory(id texture, struct switch_nvk_image_memory *out)
     __attribute__((weak_import));
+// Why the bridge's last call on this thread failed (bridge/NativeMetalObjects.h)
+extern "C" const char *nmb_last_error(void) __attribute__((weak_import));
 
 // A wait the plugin bounds (r9-hang: r7n's and r7o's freezes were a userland wait with no end in backboardd's render thread):
 // past kWaitLimit, one line naming the wait and the object, then abort(), for a crash report with the stack instead of a silent
@@ -201,9 +203,19 @@ uint64_t bufferRow(const BufferRows &r, uint64_t offset, uint64_t bytesPerRow, u
 // RawMetalLibrary.mm
 RMLibrary *wrapLibrary(id device, id<MTLLibrary> twin, NSString *path);
 
+// RawMetalStates.mm: a descriptor whose functions are this device's, over their m2v twins
+MTLRenderPipelineDescriptor *twinDescriptor(MTLRenderPipelineDescriptor *d);
+
+// RawMetalCubic.mm: the cubic binds (raw_cubic.h) of a draw of `pl` with these fragment samplers and textures bound (empty: no
+// cubic sampler where it samples), and `p`'s variant for them: null where it is refused, or not made yet (*making: asked)
+raw::CubicBinds cubicBinds(const raw::Pipeline &pl, RMSampler *const samplers[16], RMTexture *const textures[16]);
+raw::Pipeline *cubicVariant(RMPipeline *p, const raw::CubicBinds &b, bool *making);
+
 // RawMetalHeap.mm: the purged heaps a committed command buffer's resources lie in, given their pages back before it is encoded
 // (it counts as committed already, so no purge runs meanwhile)
 void restoreArenas(RMCommandBuffer *cb);
+// A heap's pages back if it was purged (an m2v twin aliases them); true without a heap or an arena
+bool heapResident(RMHeap *h);
 
 // RawMetalTexture.mm
 void declareGpuWrites(RMTexture *t);
@@ -219,8 +231,12 @@ void useBuffer(raw::CommandBuffer *rc, RMBuffer *b, bool write);
 // `fresh` and `standInFresh` (its pool image and its stand-in are refreshed again before a sample)
 void encodeBlit(RMCommandBuffer *cb, const Cmd &c, raw::CommandBuffer *rc, raw::BlitEncoder *be,
                 std::set<RMTexture *> &fresh, std::set<RMTexture *> &standInFresh);
+// A chain's generateMipmapsForTexture: of a format the 2D engine does not filter as Metal does (fmt2d 0): a pass of the pack's
+// mip state a level (raw_mip.h); false where the pack has none or a pass is refused (*why)
+bool mipPasses(raw::CommandBuffer *rc, RMTexture *t, const char **why);
 
-// RawMetalTextureCpu.mm
+// RawMetalTextureCpu.mm: `bytes` from `from` cleaned to memory (or cleaned and invalidated), then a DSB
+void cacheLines(const uint8_t *from, uint64_t bytes, bool invalidate);
 void cpuTiled(RMTexture *t, MTLRegion r, uint8_t *bytes, NSUInteger row, bool write);
 void cpuLevel(RMTexture *t, MTLRegion r, NSUInteger level, uint8_t *bytes, NSUInteger row, bool write);
 void cpuVolume(RMTexture *t, MTLRegion r, uint8_t *bytes, NSUInteger row, NSUInteger image, bool write);

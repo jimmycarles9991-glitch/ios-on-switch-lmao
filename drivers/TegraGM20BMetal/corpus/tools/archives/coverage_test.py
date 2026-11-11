@@ -19,6 +19,7 @@ NOT_FROM_THE_PACK = {
     'compute': "the pack keys a kernel at its dispatch's threadgroup shape, which a descriptor never names",
     'tile': 'raw makes no tile render state',
     'tessellation': 'raw makes no tessellated render state (m2v refuses its patch draws)',
+    'unspecialized': "a function lacks a constant its library requires: the archive does not record the caller's value",
     'creation': "not a vertex and a fragment function of one framework's default.metallib (or it links another "
     "library's): the runtime makes it when created, never from the pack (RawMetalStates.mm _packable)",
     'family': 'declared only for GPU families the raw device does not answer for (Apple4 and later)',
@@ -47,6 +48,19 @@ def inventory(kind: str) -> list[tuple[str, str, str, str]]:
     return rows
 
 
+class CorpusLines(unittest.TestCase):
+    def test_the_pack_takes_every_framework_state_the_runtime_looks_up(self):
+        lib = ' lib=/System/Library/PrivateFrameworks/{}.framework/default.metallib'
+        vector = f'R ok=1 label=- samples=1 topo=0 ds=0/0 c0=80:15:0:1:0:0:1:0:0 | v a{lib.format("VectorKit")} '
+        both = vector + f' | f b{lib.format("VectorKit")} #0:53:01 | '
+        vertex_only = vector + ' | f -  | '
+        foreign_link = both[:-2] + '| fp c lib=/Applications/X.app/default.metallib | '
+        lines = steps.probe_lines('\n'.join((both, vertex_only, foreign_link)))
+        self.assertEqual(lines, [both])
+        self.assertTrue(packable(both))
+        self.assertFalse(packable(vertex_only) or packable(foreign_link))
+
+
 class Coverage(unittest.TestCase):
     def test_every_declared_render_state_is_the_packs_or_has_a_reason(self):
         for kind in KINDS:
@@ -62,7 +76,9 @@ class Coverage(unittest.TestCase):
                 self.assertEqual(set(fed), packable_elsewhere, 'the generator feeds what the runtime looks up')
                 pack = {rawpack.state_key(line) for line in fed}
                 tables = HERE / f'raw/pack/ca/qc-{kind}.json'
-                for _tier, lines in rawpack.ca_states(tables, HERE / 'precompile/corpus.log'):
+                names = HERE / f'precompile/ca-names/{kind}.txt'
+                named = names.read_text().split() if names.exists() else []
+                for _tier, lines in rawpack.ca_states(tables, HERE / 'precompile/corpus.log', named):
                     pack |= {rawpack.state_key(line) for line in lines}
                 left: dict[str, int] = {}
                 for what, owner, family, line in rows:

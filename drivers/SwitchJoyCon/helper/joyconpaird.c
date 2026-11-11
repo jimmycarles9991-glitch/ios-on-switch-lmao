@@ -10,7 +10,7 @@
 //     the kernel gives the controller that HostAddress (../../SwitchBluetooth/SwitchBluetooth.cpp), so those
 //     Joy-Cons reconnect without ever touching the rail. A dump is imported once (kImportedPath keeps a copy of the
 //     one imported): bluetoothd keeps the keys, and a later boot must not put back a key the rail has replaced since.
-//     A Joy-Con whose rail record is present is taken from the rail (it was just read from the Joy-Con itself).
+//     A Joy-Con whose rail record is present is taken from the rail (it was just paired there).
 // bluetoothd keeps classic link keys in the system keychain (generic password, service "MobileBluetooth", account =
 // address, access group com.apple.bluetooth: BTKCSetData in bluetoothd) and the device records in the
 // com.apple.MobileBluetooth.devices preferences domain. Neither is reachable from the kernel, and writing them behind

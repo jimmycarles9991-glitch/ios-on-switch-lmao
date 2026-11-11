@@ -4,6 +4,8 @@
 #                                       slow for any phase
 #   switch_interaction_test             SwitchInteraction.h: the presents of a touch interaction window, its line
 #   switch_frame_stall_test             SwitchFrameStall.h: the frame ends at which the screen stopped mid-animation
+#   switch_sbim_test                    SwitchSBIM.h: libEDR's enableSBIM dictionaries (iOS 27), as
+#                                       AppleMobileDispH12P answers them for a display without SBIM statistics
 #   switch_frame_info_test              SwitchFrameInfo.h: the frame-info keys, each present's entry decoded as
 #                                       IOMobileFramebuffer.framework decodes it, the client and pending-swap tables
 #                                       (iOS 17's J120 keys; switch_frame_info_24B119_test: iOS 27's J181 keys)
@@ -59,6 +61,15 @@ host_test(
         "switch_interaction_test.cpp",
         "//drivers/NativeMobileDisplay:SwitchInteraction.h",
     ],
+)
+
+host_test(
+    name = "switch_sbim_test",
+    srcs = [
+        "switch_sbim_test.cpp",
+        "//drivers/NativeMobileDisplay:SwitchSBIM.h",
+    ],
+    linkopts = ["-framework CoreFoundation"],
 )
 
 host_test(

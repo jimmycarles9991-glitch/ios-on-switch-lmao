@@ -150,7 +150,6 @@ constexpr Pin kPins[] = {
     {0x180, 0x00},  // aud_mclk_pbb0: aud (clk_out_1), driven
     {0x190, 0x54},  // gpio_x3_aud_pbb4: codec IRQ, pull-down, input
     {0x214, 0x50},  // touch_rst_pv6: the headphone-detect net, no pull, tristate, input
-    {0x28c, 0x05},  // pz4: rsvd1, pull-down, driven (codec LDO1_EN)
 };
 // Nothing in the boot chain (hekate, U-Boot's pinmux table, TegraGPIO) muxes PV6; L4T sets it as above. The value
 // found is logged with the first jack reading.

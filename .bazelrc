@@ -45,6 +45,9 @@ build:debug --strategy=RustcMetadata=sandboxed,local
 # allows, so its two actions (install/translated.bzl) run here.
 build --strategy=Pretranslate=local
 build --strategy=TranslatedCryptex=local
+# And rules_apple's actool (the HW Test apps' asset catalog), which asks CoreSimulator's services for its compile and is
+# marked no-sandbox.
+build --strategy=AssetCatalogCompile=local
 # No network inside actions (repository rules fetch; actions never do).
 build --sandbox_default_allow_network=false
 # Reuse sandbox directory trees between actions: faster sandbox setup, the same isolation.

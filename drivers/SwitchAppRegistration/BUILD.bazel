@@ -1,0 +1,43 @@
+load("//bazel/lint:defs.bzl", "lint_files")
+load("//kernel/rules:package.bzl", "ios_binary")
+
+package(default_visibility = ["//visibility:public"])
+
+lint_files()
+
+exports_files(glob(
+    ["**"],
+    exclude = ["BUILD.bazel"],
+))
+
+# Registers the overlay's changed apps with LaunchServices at boot (appregd.mm). 21H461 hands LaunchServices info
+# dictionaries, 24B119 installation records, as each one's installd does.
+ios_binary(
+    name = "switch-appregd",
+    srcs = [
+        "app_registration.mm",
+        "appregd.mm",
+    ],
+    out = "build/switch-apps/switch-appregd",
+    hdrs = ["app_registration.h"],
+    copts = [
+        "-O2",
+        "-Wall",
+        "-Wextra",
+        "-Werror",
+        "-fobjc-arc",
+        "-lc++",
+        "-framework",
+        "Foundation",
+    ] + select({
+        "//ipsw:24B119": ["-DSWITCH_APPREGD_INSTALLATION_RECORDS=1"],
+        "//conditions:default": [],
+    }),
+    entitlements = "appregd.entitlements",
+)
+
+# The overlay files of this package that overlay/manifest.json names.
+filegroup(
+    name = "overlay_files",
+    srcs = ["com.brunostjohn.switch.appregd.plist"],
+)

@@ -345,11 +345,15 @@ void h264enc_slice_header(const H264EncConfig *c, const H264EncPicture *p, H264B
     h264bits_se(b, 0);                    // slice_beta_offset_div2
 }
 
+// Every surface is the coded size, as NVIDIA's T210 driver gives it (1920x1088 for 1080p; the SPS crops). NVENC 5.0's
+// H.264 app sizes the input fetch from input_cfg rounding down (app 0x85d6-0x861b, I/O 0xe88) and the macroblock
+// pipeline from outputpic_cfg rounding up (0x818c, I/O 0x1808 and 0x191c): a height of 1080 fetches 67 macroblock rows
+// for a picture of 68, and the engine stalls on the missing row (TegraNVENC/nvidia/SOURCE).
 static void surfaceConfig(const H264EncConfig *c, const H264EncSurface *s, nvenc_h264_surface_cfg_s *cfg, bool input)
 {
     memset(cfg, 0, sizeof(*cfg));
-    cfg->frame_width_minus1 = (unsigned short)(c->width - 1);
-    cfg->frame_height_minus1 = (unsigned short)(c->height - 1);
+    cfg->frame_width_minus1 = (unsigned short)(h264enc_width_mbs(c) * 16 - 1);
+    cfg->frame_height_minus1 = (unsigned short)(h264enc_height_mbs(c) * 16 - 1);
     cfg->sfc_pitch = cfg->sfc_pitch_chroma = (unsigned short)s->pitch;
     cfg->chroma_top_frm_offset = c->chroma_mode == TEGRA_NVENC_CHROMA_OFFSET ? s->chroma_offset / 256 : 0;
     if (!input) {
@@ -571,8 +575,10 @@ void h264enc_fill_submit(const H264EncConfig *c, const H264EncLayout *l, const H
 #define RELOC(m, handle, offset) e[n++] = (TegraNVENCEntry){(uint16_t)(m), TEGRA_NVENC_ENTRY_RELOC, (handle), (offset)}
     VALUE(NVC5B7_SET_APPLICATION_ID, NVC5B7_SET_APPLICATION_ID_ID_NVENC_H264);
     // NVIDIA's T210 driver's stream (switch-frame-tap m79-runE): FORCE_OUTPIC with the GP timer, the ME predictor
-    // pair every picture, the reference's chroma at its config offset (no chroma methods in that reading), no
-    // colocated data (B pictures only); every address method it leaves unset the kernel writes 0.
+    // pair and reference slot 0 (the other reconstruction) in every job captured, the reference's chroma at its config
+    // offset (no chroma methods in that reading), no colocated data (B pictures only); every address method it leaves
+    // unset the kernel writes 0. Slot 0 goes in IDRs too: the app hands all 16 reference slots to the engine on every
+    // picture (H.264 app 0x80a1), and an IDR without it would hand it 0 or the address a previous job left there.
     VALUE(NVC5B7_SET_CONTROL_PARAMS,
           NVC5B7_SET_CONTROL_PARAMS_CODEC_TYPE_H264 | (1u << 8) /* FORCE_OUTPIC */ | (1u << 12) /* GPTIMER_ON */);
     VALUE(NVC5B7_SET_PICTURE_INDEX, p->picture_index);
@@ -583,11 +589,9 @@ void h264enc_fill_submit(const H264EncConfig *c, const H264EncLayout *l, const H
         RELOC(NVC5B7_SET_OUT_REF_PIC_CHROMA, h->recon, refChroma);
     RELOC(NVC5B7_SET_IN_MEPRED_DATA, h->mepred[p->picture_index & 1], 0);
     RELOC(NVC5B7_SET_OUT_MEPRED_DATA, h->mepred[~p->picture_index & 1], 0);
-    if (pPicture) {
-        RELOC(NVC5B7_SET_IN_REF_PIC0_LUMA, h->ref, 0);
-        if (method)
-            RELOC(NVC5B7_SET_IN_REF_PIC0_CHROMA, h->ref, refChroma);
-    }
+    RELOC(NVC5B7_SET_IN_REF_PIC0_LUMA, h->ref, 0);
+    if (method)
+        RELOC(NVC5B7_SET_IN_REF_PIC0_CHROMA, h->ref, refChroma);
     RELOC(NVC5B7_SET_OUT_BITSTREAM, h->bitstream, 0);
     RELOC(NVC5B7_SET_OUT_ENC_STATUS, h->aux, 0);
     RELOC(NVC5B7_SET_IOHISTORY, h->aux, l->history_offset);

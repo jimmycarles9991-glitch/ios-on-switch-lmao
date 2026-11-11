@@ -94,6 +94,7 @@
     "configureOutputPullModel": "0xfffffff00592fb34",
     "dequeueOutputPackets": "0xfffffff00592fd00",
     "opaque219": "0xfffffff00592fe7c",
+    "startOutputThread": "0xfffffff005930260",
     "opaque216": "0xfffffff0059304a0",
     "enqueueInputPacket": "0xfffffff005930644",
     "vtable": "0xfffffff006ca1330",
@@ -105,6 +106,11 @@
         "at": "0xfffffff00592dc78",
         "body": "f9404808 b5000068 f9408409 b9011921 f100011f 1a9f17e0 d65f03c0",
         "why": "if (_backingIfnet at +0x90) return false; _reserved (+0x108)->subType (+0x118) = subType"
+      },
+      "startOutputThread": {
+        "at": "0xfffffff005930260",
+        "body": "d10143ff a90257f6 a9034ff4 a9047bfd 910103fd aa0003f3 90010d75 910ba2b5 b94002a8 b0ffca74 9137b294",
+        "why": "names itself \"startOutputThread\" in its debug log; unless detached (0x200), clears the stop and halt bits (0x900) of txThreadState (_reserved +0xa8), which init sets to 0x801, then ifnet_start"
       }
     }
   }

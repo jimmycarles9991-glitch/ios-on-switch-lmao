@@ -60,9 +60,20 @@ NSString *native_bridge_metal_function_library_name(id function);
 // The raw GM20B path's direct compile of a render state (bridge/NativeMetalDirect.h) of this device's functions: false with
 // `why` (valid until the next call on the thread) when the translator refuses it or `each` returns false.
 struct NmbDirectState;
+struct NmbDirectBinds;
 bool native_bridge_metal_render_direct(id descriptor, bool barrier, NSUInteger textureFormat, NSUInteger textureSamples,
+                                       const struct NmbDirectBinds *binds,
                                        bool (*each)(const struct NmbDirectState *, void *), void *ctx,
                                        const char **why);
+// The same of a compute state at one dispatch shape (NmbDirectDispatch)
+struct NmbDirectDispatch;
+struct NmbDirectKernel;
+bool native_bridge_metal_compute_direct(id descriptor, const struct NmbDirectDispatch *dispatch,
+                                        bool (*each)(const struct NmbDirectKernel *, void *), void *ctx,
+                                        const char **why);
+// A dispatch of compute `state` (this device's) the raw GM20B path ran instead, journaled as its own dispatches are (a D line)
+void native_bridge_metal_journal_dispatch(id state, MTLSize grid, MTLSize group, bool threads, const char *memory,
+                                          const char *textures, const char *samplers);
 // A symbol of the NVK this device opened (null: none)
 void *native_bridge_metal_nvk_symbol(const char *name);
 

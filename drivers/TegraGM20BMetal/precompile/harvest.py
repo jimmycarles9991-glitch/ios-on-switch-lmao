@@ -16,7 +16,8 @@ usage: harvest.py <corpus.log> <pipelines.log>...
           Library/Caches/m2v, Library/Caches/m2v-<process> or tmp/m2v, tmp/m2v-<process>, a daemon's user cache or
           temp directory), its pipelines.log and pipelines.log.old. Read only, but for one write: a system container's
           Library and Library/Caches are mode 000, so for a container named by --open (default: backboardd's,
-          SpringBoard's and Preferences', SYSTEM_CACHES) or every one with --open-all, each closed directory on the
+          SpringBoard's, Preferences' and Spotlight's, by SYSTEM_CACHES' UUIDs or by their container manager
+          identifiers, SYSTEM_IDENTIFIERS) or every one with --open-all, each closed directory on the
           way is made u+rx for the read and given its mode back at once (and checked); other closed containers are
           skipped and counted.
 --save    also copy each m2v cache found, whole (v1/, msl/, libs/, the journals, makings.log), to <dir>/<where it was>,
@@ -47,6 +48,7 @@ usage: harvest.py <corpus.log> <pipelines.log>...
 import hashlib
 import io
 import os
+import plistlib
 import re
 import shutil
 import stat
@@ -67,12 +69,17 @@ DEVICE = (
 )
 # /private/var/containers/Data/System/<UUID>/Library/Caches/m2v of the system containers whose processes kept an m2v
 # cache there (the plugin's "device ... ready in" lines, r5d and r6h): their Library and Library/Caches are mode 000.
+# The UUIDs are one install's (21H461's, r5d); another install names the same containers otherwise (24B119's boot 15:
+# backboardd's CE929FE0-..., SpringBoard's 1809AE07-...), so a container is also known by the identifier its
+# container manager metadata gives it.
 SYSTEM_CACHES = {
     '6C7A65AF-CB18-421C-A07A-D724B05A7AB6': 'backboardd',
     '532E562F-2888-4C55-9BF8-E6F0B246BBDA': 'SpringBoard',
     '5BDBB9F1-C07A-4290-9D80-EA49A6BA2D68': 'Preferences',
     'AA90E4B6-B0E4-4776-8E70-A4444E65642F': 'Spotlight',
 }
+SYSTEM_IDENTIFIERS = {'com.apple.backboardd', 'com.apple.springboard', 'com.apple.Preferences', 'com.apple.Spotlight'}
+CONTAINER_METADATA = '.com.apple.mobile_container_manager.metadata.plist'
 JOURNALS = ('pipelines.log.old', 'pipelines.log')  # oldest first: the frontend renames the journal past 2 MiB
 CONTENT = (
     '529a20fd270ababa3e5ec2fe4d1674d93739ba5bcd61861674b4fb6db349af9f'  # m2v's content directory (seed.py's CONTENT)
@@ -167,11 +174,12 @@ def readable(d: Path) -> bool:
 
 
 def caches(
-    volume: Path, opens: set[str], open_all: bool, _log: Callable[[str], None]
+    volume: Path, opens: set[str], open_all: bool, _log: Callable[[str], None], explicit: bool = False
 ) -> tuple[list[tuple[str, Path, tuple[Path, ...]]], list[str]]:
     """Find every m2v cache on the volume, and the closed containers skipped.
 
-    Each cache as (where, m2v directory, the directories to open on the way).
+    Each cache as (where, m2v directory, the directories to open on the way). Without `explicit` opens (--open), a
+    system container of SYSTEM_IDENTIFIERS' is opened as SYSTEM_CACHES' are.
     """
     found, skipped = [], []
     for kind, base in (
@@ -180,7 +188,8 @@ def caches(
         ('PluginKitPlugin', volume / 'mobile/Containers/Data/PluginKitPlugin'),
     ):
         for c in _containers(base):
-            in_container, closed = _container_caches(f'{kind}/{c.name}', c, open_all or c.name in opens)
+            may_open = open_all or c.name in opens or (not explicit and _identifier(c) in SYSTEM_IDENTIFIERS)
+            in_container, closed = _container_caches(f'{kind}/{c.name}', c, may_open)
             found += in_container
             skipped += closed
     for pattern in (
@@ -196,6 +205,14 @@ def caches(
             if m2v.is_dir() and readable(m2v):
                 found.append((str(m2v.relative_to(volume)), m2v, ()))
     return found, skipped
+
+
+def _identifier(container: Path) -> str | None:
+    try:
+        with (container / CONTAINER_METADATA).open('rb') as f:
+            return plistlib.load(f).get('MCMMetadataIdentifier')
+    except (OSError, plistlib.InvalidFileException, AttributeError):
+        return None
 
 
 def _containers(base: Path) -> list[Path]:
@@ -414,7 +431,8 @@ def main() -> None:
         kept = sum(replies(msl.parent, store / 'msl') for d in records_from for msl in sorted(Path(d).rglob('msl')))
         print(f'{store / "msl"}: {kept} new compile replies')
         return
-    opens = set(option(args, '--open', many=True)) or set(SYSTEM_CACHES)
+    explicit = set(option(args, '--open', many=True))
+    opens = explicit or set(SYSTEM_CACHES)
     open_all = '--open-all' in args
     args = [a for a in args if a != '--open-all']
     if not args or (volume is None and len(args) < 2):
@@ -424,7 +442,7 @@ def main() -> None:
         volume = Path(volume)
         if not (volume / 'mobile').is_dir():
             sys.exit(f'{volume}: not a mounted iPad Data volume (no mobile/)')
-        found, skipped = caches(volume, opens, open_all, print)
+        found, skipped = caches(volume, opens, open_all, print, bool(explicit))
         for where, m2v, through in found:
             with opened((*through, m2v) if through else (), print):
                 if not m2v.is_dir():

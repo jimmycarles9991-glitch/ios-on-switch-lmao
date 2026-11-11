@@ -26,11 +26,18 @@
         "_ZN19IOEthernetInterface19setInterfaceSubTypeEj"
       ],
       "doc": "IONetworkInterface::setInterfaceSubType: the ifnet subfamily IONetworkStack's attach passes to ifnet_allocate_extended (IFNET_SUBFAMILY_WIFI for Wi-Fi); false once attached."
+    },
+    "startOutputThread": {
+      "symbols": [
+        "_ZN19IOEthernetInterface17startOutputThreadEj"
+      ],
+      "doc": "IONetworkInterface::startOutputThread: the pull model's start thread, which init leaves halted (txThreadState 0x801), calls outputStart only once the driver has started it; it clears the stop and halt and runs ifnet_start. kIOReturnNotAttached once detached."
     }
   },
   "members": [
     "using IOService::init",
-    "bool setInterfaceSubType(uint32_t subType)"
+    "bool setInterfaceSubType(uint32_t subType)",
+    "IOReturn startOutputThread(IOOptionBits options = 0)"
   ],
   "methods": {
     "free": {

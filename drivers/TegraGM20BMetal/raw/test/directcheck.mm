@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: MIT
 // directcheck: the direct compile (runtime/raw_direct.h) of every state of a corpus against the pack. Each state's record is made
 // from m2v's translation and plans and NVK's stage compile, with no pipeline, command buffer or capture: every state the pack holds
-// a record for must come out byte for byte the same (its barrier form made as on a device without the pixel interlock), every one
-// it set aside refused. The states are pack/probe.mm's: Core Animation's lines, another framework's (lib=, under PROBE_LIB_ROOT)
-// and, with PROBE_OWN_LIB, the raw path's own.
+// a record for must come out byte for byte the same (its barrier form made as on a device without the pixel interlock), with the
+// pack's split of its fragment program, every one it set aside refused. The states are pack/probe.mm's: Core Animation's
+// lines, another framework's (lib=, under PROBE_LIB_ROOT) and, with PROBE_OWN_LIB, the raw path's own.
 // usage: directcheck <nvk dylib> <cache dir> <default.metallib> <corpus.log> <pack.bin>
 //   DIRECTCHECK_MET=<file>: appends the key hash and form of each pack record made the same (a sweep over every bucket checks
 //   that it met every record of the pack)
@@ -65,7 +65,7 @@ int main(int argc, char **argv)
         }
         raw::Direct direct(pack);
         FILE *met = getenv("DIRECTCHECK_MET") ? fopen(getenv("DIRECTCHECK_MET"), "a") : nullptr;
-        uint32_t states = 0, same = 0, barriers = 0, refused = 0, bad = 0;
+        uint32_t states = 0, same = 0, barriers = 0, refused = 0, bad = 0, splits = 0;
         double ms = 0;
         std::map<std::string, uint32_t> differences, reasons;
         probe::eachState(
@@ -78,14 +78,17 @@ int main(int argc, char **argv)
                 raw::RuntimeRecord rec;
                 std::string why;
                 const auto began = std::chrono::steady_clock::now();
-                const raw::Compiler::Outcome outcome = direct.make(s.d, s.key, rec, why, textures);
+                const raw::Compiler::Outcome outcome = direct.make(s.d, s.key, rec, why, textures, nullptr, true);
                 ms += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - began).count();
                 std::string verdict;
                 if (outcome == raw::Compiler::Outcome::Failed) {
                     verdict = " failed (" + why + ")";
                 } else if (pp) {
-                    verdict = outcome == raw::Compiler::Outcome::Made ? recordcompare::differences(pack, *pp, rec)
-                                                                      : " refused (" + why + ")";
+                    verdict = outcome == raw::Compiler::Outcome::Made
+                                  ? recordcompare::differences(pack, *pp, rec) +
+                                        recordcompare::splitDifferences(pack, *pp, rec)
+                                  : " refused (" + why + ")";
+                    splits += verdict.empty() && rec.split;
                     (barrier ? barriers : same) += verdict.empty();
                     if (met && verdict.empty())
                         fprintf(met, "%016llx %u\n", (unsigned long long)pp->keyHash,
@@ -113,8 +116,8 @@ int main(int argc, char **argv)
             printf("  %u x refused: %s\n", n, why.c_str());
         printf("directcheck: %u states made directly: %u records the same as the pack's, %u the same as its barrier "
                "forms, "
-               "%u set aside and refused, %u differ; %.1f ms a state\n",
-               states, same, barriers, refused, bad, states ? ms / states : 0.0);
+               "%u set aside and refused, %u differ; %u with the pack's split; %.1f ms a state\n",
+               states, same, barriers, refused, bad, splits, states ? ms / states : 0.0);
         return bad || !states ? 1 : 0;
     }
 }

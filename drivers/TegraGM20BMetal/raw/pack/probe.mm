@@ -516,13 +516,11 @@ int main(int argc, char **argv)
                 refused++;
                 continue;
             }
-            if (!parseState(library, line, s)) {
+            if (!parseState(library, line, s, framework ? frameworkName(marked.substr(3, pathEnd - 3)) : "")) {
                 fprintf(stderr, "UNPARSED %s\n", line.substr(0, 80).c_str());
                 refused++;
                 continue;
             }
-            if (framework)
-                s.key += " | l " + frameworkName(marked.substr(3, pathEnd - 3));
             if (!seen.insert(s.key).second)
                 continue;
             const unsigned i = index++;

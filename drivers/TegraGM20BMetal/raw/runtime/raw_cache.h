@@ -13,6 +13,7 @@
 #include <vector>
 #include <mutex>
 #include <string>
+#include "raw_compute_record.h"
 #include "raw_record.h"
 
 namespace raw {
@@ -46,6 +47,9 @@ public:
     Found load(const CacheKey &k, RuntimeRecord &record, std::string &refusal);
     // `record` null: the state's refusal (`refusal`)
     bool store(const CacheKey &k, const RuntimeRecord *record, const std::string &refusal);
+    // A kernel's record at one compute key (raw_compute_key.h), or its refusal, as a state's
+    Found loadKernel(const CacheKey &k, ComputeRecord &record, std::string &refusal);
+    bool storeKernel(const CacheKey &k, const ComputeRecord *record, const std::string &refusal);
 
     uint64_t bytes() const
     {
@@ -59,11 +63,16 @@ private:
     std::string parent_;
     std::string path(const CacheKey &k) const;
     void evict(uint64_t room);
+    bool loadBytes(const CacheKey &k, std::string &bytes);
+    bool storeBytes(const CacheKey &k, const std::string &bytes);
 };
 
 // Turns the records' bytes into the entry format and back (raw_cache.cpp's own; exposed for the host test)
 std::string encodeEntry(const CacheKey &k, const RuntimeRecord *record, const std::string &refusal);
 RecordCache::Found decodeEntry(const std::string &bytes, const CacheKey &k, RuntimeRecord &record,
                                std::string &refusal);
+std::string encodeKernelEntry(const CacheKey &k, const ComputeRecord *record, const std::string &refusal);
+RecordCache::Found decodeKernelEntry(const std::string &bytes, const CacheKey &k, ComputeRecord &record,
+                                     std::string &refusal);
 
 }  // namespace raw

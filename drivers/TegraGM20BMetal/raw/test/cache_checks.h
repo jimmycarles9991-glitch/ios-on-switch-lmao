@@ -42,9 +42,13 @@ inline bool same(const raw::RuntimeRecord &a, const raw::RuntimeRecord &b)
     auto program = [](const raw::CapturedProgram &x, const raw::CapturedProgram &y) {
         return x.id == y.id && x.image == y.image && x.data == y.data && x.cbufTypes == y.cbufTypes;
     };
+    const bool split = a.split == b.split && a.splitTried == b.splitTried &&
+                       (!a.split || (!memcmp(&a.splitRecord, &b.splitRecord, sizeof a.splitRecord) &&
+                                     program(a.splitPrograms[0], b.splitPrograms[0]) &&
+                                     program(a.splitPrograms[1], b.splitPrograms[1])));
     return !memcmp(&a.pipeline, &b.pipeline, sizeof a.pipeline) && a.keyString == b.keyString &&
            program(a.programs[0], b.programs[0]) && program(a.programs[1], b.programs[1]) && a.blob == b.blob &&
-           a.extras == b.extras && a.restore == b.restore && a.samplers == b.samplers;
+           a.extras == b.extras && a.restore == b.restore && a.samplers == b.samplers && split;
 }
 
 inline raw::CacheKey keyOf(uint64_t stack, const std::string &key, uint8_t air)

@@ -205,8 +205,7 @@ static MTLLinkedFunctions *twinLinked(MTLLinkedFunctions *l)
     return t;
 }
 
-// A descriptor whose functions are this device's: a copy over their twins, for the m2v device
-static MTLRenderPipelineDescriptor *twinDescriptor(MTLRenderPipelineDescriptor *d)
+MTLRenderPipelineDescriptor *twinDescriptor(MTLRenderPipelineDescriptor *d)
 {
     MTLRenderPipelineDescriptor *t = [d copy];
     t.vertexFunction = twinOf(d.vertexFunction);
@@ -254,8 +253,10 @@ static void makeRecord(RMPipeline *p, MTLRenderPipelineDescriptor *d)
     p->_packable =
         vf && ff && !vf->_framework.empty() && vf->_framework == ff->_framework && raw_metal_linked_packable(d);
     p->_completable = vf && ff;
-    if (p->_completable)
+    if (p->_completable) {
         p->_key = raw_metal_pipeline_key(d).UTF8String;
+        p->_madeFrom = [d copy];
+    }
     if (p->_packable) {
         p->_caTransform =
             vf->_framework == "QuartzCore" && [vf.name hasPrefix:@"fixed_vert_"] && [vf.name hasSuffix:@"_spc"];

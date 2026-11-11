@@ -8,16 +8,19 @@ use crate::objects::{NmbDevice, NmbRenderPipelineDescriptor, e, get, guard, raw,
 use ash::vk as avk;
 use metal2vulkan::Budget;
 use metal2vulkan::bind::{
-    BindState, BindingPlan, BoundBuffer, BoundSampler, BoundTexture, DrawCall, DrawCommands, ImageSource,
-    NeutralResource, SamplerDescriptor, SamplerSource, StageTable, TextureFacts, WriteSource,
+    BindState, BindingPlan, BoundBuffer, BoundSampler, BoundTexture, DescriptorRange, DrawCall, DrawCommands,
+    ImageSource, NeutralResource, SamplerDescriptor, SamplerSource, StageTable, TextureFacts, WriteSource,
 };
 use metal2vulkan::cache::VariantKey;
 use metal2vulkan::device::{DeviceDescription, VkExtension, VkFeature};
 use metal2vulkan::error::Retry;
 use metal2vulkan::metal::{
-    PixelFormat, SamplerAddressMode, SamplerMinMagFilter, SamplerMipFilter, TextureType, TextureUsage,
+    PixelFormat, SamplerAddressMode, SamplerBorderColor, SamplerMinMagFilter, SamplerMipFilter, TextureType,
+    TextureUsage,
 };
-use metal2vulkan::pipeline::{RenderPipeline, RenderPipelineDescriptor, SlotClass, SlotInterface, SlotRef, Stage};
+use metal2vulkan::pipeline::{
+    PipelineLayout, RenderPipeline, RenderPipelineDescriptor, SlotClass, SlotInterface, SlotRef, Stage,
+};
 use std::ffi::{CString, c_char, c_void};
 use std::sync::{Arc, Mutex};
 
@@ -87,6 +90,79 @@ pub struct NmbDirectDraw {
 }
 
 #[repr(C)]
+#[derive(Clone, Copy)]
+pub struct NmbDirectCubicSampler {
+    pub slot: u32,
+    pub s_address: u32,
+    pub t_address: u32,
+    pub r_address: u32,
+    pub border_color: u32,
+    pub normalized: bool,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct NmbDirectTextureFormat {
+    pub slot: u32,
+    pub format: u64,
+}
+
+#[repr(C)]
+pub struct NmbDirectBinds {
+    pub cubic: *const NmbDirectCubicSampler,
+    pub cubic_count: u32,
+    pub textures: *const NmbDirectTextureFormat,
+    pub texture_count: u32,
+}
+
+/// What the probe binds besides its tagged textures and samplers: cubic sampler states, and other textures' formats, by slot
+#[derive(Default)]
+struct Binds {
+    cubic: Vec<(u32, SamplerDescriptor)>,
+    textures: Vec<(u32, PixelFormat)>,
+}
+
+impl Binds {
+    /// # Safety
+    /// `binds` is null or valid, its arrays of their counts
+    unsafe fn of(binds: *const NmbDirectBinds) -> Result<Binds, String> {
+        let mut out = Binds::default();
+        // SAFETY: the caller's contract.
+        let Some(b) = (unsafe { binds.as_ref() }) else {
+            return Ok(out);
+        };
+        let cubic: &[NmbDirectCubicSampler] = if b.cubic.is_null() {
+            &[]
+        } else {
+            // SAFETY: `cubic_count` records at `cubic`.
+            unsafe { std::slice::from_raw_parts(b.cubic, b.cubic_count as usize) }
+        };
+        for c in cubic {
+            let mut d = SamplerDescriptor::new();
+            d.min_filter = SamplerMinMagFilter::Cubic;
+            d.mag_filter = SamplerMinMagFilter::Cubic;
+            d.s_address_mode = raw::<SamplerAddressMode>(c.s_address.into(), "address mode")?;
+            d.t_address_mode = raw::<SamplerAddressMode>(c.t_address.into(), "address mode")?;
+            d.r_address_mode = raw::<SamplerAddressMode>(c.r_address.into(), "address mode")?;
+            d.border_color = raw::<SamplerBorderColor>(c.border_color.into(), "border color")?;
+            d.normalized_coordinates = c.normalized;
+            out.cubic.push((c.slot, d));
+        }
+        let textures: &[NmbDirectTextureFormat] = if b.textures.is_null() {
+            &[]
+        } else {
+            // SAFETY: `texture_count` records at `textures`.
+            unsafe { std::slice::from_raw_parts(b.textures, b.texture_count as usize) }
+        };
+        for t in textures {
+            out.textures
+                .push((t.slot, raw::<PixelFormat>(t.format, "texture format")?));
+        }
+        Ok(out)
+    }
+}
+
+#[repr(C)]
 pub struct NmbDirectState {
     pub device: u64,
     pub layout: u64,
@@ -100,7 +176,7 @@ pub struct NmbDirectState {
 
 /// A translation's failure as the caller's text; one the same request may get past (its deadline, the host's memory) starts
 /// "retry: ", which the caller does not keep as the state's refusal
-fn compile_error(what: &'static str) -> impl FnOnce(metal2vulkan::error::Error) -> String {
+pub(crate) fn compile_error(what: &'static str) -> impl FnOnce(metal2vulkan::error::Error) -> String {
     move |error| match error.retry() {
         Retry::Later => format!("retry: {what}: {error:?}"),
         _ => format!("{what}: {error:?}"),
@@ -199,8 +275,8 @@ fn volume_slots(pipeline: &RenderPipeline) -> Vec<u32> {
 
 /// The bind state of probe.mm's draw `run`: every buffer slot of both stages bound (inline bytes, or the bound run's
 /// buffers at each slot's own offset), 16 textures of `format` and `samples` (3D at `volumes`) and 16 samplers at the
-/// fragment stage
-fn probe_state(run: usize, format: PixelFormat, samples: u32, volumes: &[u32]) -> BindState {
+/// fragment stage, `binds`' in their places
+fn probe_state(run: usize, format: PixelFormat, samples: u32, volumes: &[u32], binds: &Binds) -> BindState {
     let mut state = BindState::default();
     for stage in [Stage::Vertex, Stage::Fragment] {
         let mut table = StageTable::default();
@@ -224,7 +300,8 @@ fn probe_state(run: usize, format: PixelFormat, samples: u32, volumes: &[u32]) -
         }
         if stage == Stage::Fragment {
             for t in 0..PROBE_TAGGED {
-                let mut facts = TextureFacts::new(TextureType::Type2D, format);
+                let own = binds.textures.iter().find(|(slot, _)| *slot == t).map(|(_, f)| *f);
+                let mut facts = TextureFacts::new(TextureType::Type2D, own.unwrap_or(format));
                 if volumes.contains(&t) {
                     facts.texture_type = TextureType::Type3D;
                 } else if samples > 1 {
@@ -239,7 +316,10 @@ fn probe_state(run: usize, format: PixelFormat, samples: u32, volumes: &[u32]) -
                         resource_id: None,
                     },
                 );
-                table.samplers.insert(t, BoundSampler::new(probe_sampler(t)));
+                let cubic = binds.cubic.iter().find(|(slot, _)| *slot == t).map(|(_, d)| *d);
+                table
+                    .samplers
+                    .insert(t, BoundSampler::new(cubic.unwrap_or_else(|| probe_sampler(t))));
             }
         }
         state.stages.insert(stage, table);
@@ -254,7 +334,7 @@ const PROBE_DRAW: DrawCall = DrawCall::Primitives {
     base_instance: 0,
 };
 
-fn slot_parts(slot: &SlotRef) -> (u32, u32) {
+pub(crate) fn slot_parts(slot: &SlotRef) -> (u32, u32) {
     (stage_number(slot.stage), slot.index)
 }
 
@@ -265,7 +345,7 @@ fn neutral_view(neutral: &NeutralResource) -> i32 {
     }
 }
 
-fn write_of(w: &metal2vulkan::bind::DescriptorWrite, commands: &DrawCommands) -> NmbDirectWrite {
+pub(crate) fn write_of(w: &metal2vulkan::bind::DescriptorWrite, ranges: &[DescriptorRange]) -> NmbDirectWrite {
     let mut out = NmbDirectWrite {
         set: w.set,
         binding: w.binding,
@@ -291,8 +371,7 @@ fn write_of(w: &metal2vulkan::bind::DescriptorWrite, commands: &DrawCommands) ->
                 NmbDirectSource::Bytes
             };
             (out.stage, out.slot) = slot_parts(slot);
-            out.range = commands
-                .descriptor_ranges
+            out.range = ranges
                 .iter()
                 .find(|r| r.set == w.set && r.binding == w.binding)
                 .map_or(0, |r| r.range.range);
@@ -343,22 +422,22 @@ fn write_of(w: &metal2vulkan::bind::DescriptorWrite, commands: &DrawCommands) ->
 }
 
 /// A variant's Vulkan layout on the runtime's device, as the runtime makes it (pipeline/objects.rs create_set_layout)
-struct Layout<'d> {
+pub(crate) struct Layout<'d> {
     device: &'d ash::Device,
     samplers: Vec<avk::Sampler>,
     sets: Vec<avk::DescriptorSetLayout>,
-    pipeline: avk::PipelineLayout,
+    pub(crate) pipeline: avk::PipelineLayout,
 }
 
 impl<'d> Layout<'d> {
-    fn new(device: &'d ash::Device, pipeline: &RenderPipeline) -> Result<Layout<'d>, String> {
+    pub(crate) fn new(device: &'d ash::Device, layout: &PipelineLayout) -> Result<Layout<'d>, String> {
         let mut made = Layout {
             device,
             samplers: Vec::new(),
             sets: Vec::new(),
             pipeline: avk::PipelineLayout::null(),
         };
-        for set in &pipeline.layout.sets {
+        for set in &layout.sets {
             let mut immutable: Vec<Vec<avk::Sampler>> = Vec::with_capacity(set.bindings.len());
             for binding in &set.bindings {
                 let Some(desc) = binding.immutable_sampler else {
@@ -402,8 +481,7 @@ impl<'d> Layout<'d> {
             made.sets
                 .push(unsafe { device.create_descriptor_set_layout(&info, None) }.map_err(e("set layout"))?);
         }
-        let push: Vec<avk::PushConstantRange> = pipeline
-            .layout
+        let push: Vec<avk::PushConstantRange> = layout
             .push_constants
             .iter()
             .map(|range| {
@@ -421,7 +499,7 @@ impl<'d> Layout<'d> {
         Ok(made)
     }
 
-    fn set0(&self) -> u64 {
+    pub(crate) fn set0(&self) -> u64 {
         self.sets.first().map_or(0, |s| avk::Handle::as_raw(*s))
     }
 }
@@ -531,10 +609,10 @@ fn draw_of(
 }
 
 /// `texture_format`, `texture_samples`: the probe's tagged textures' MTLPixelFormat (0: BGRA8Unorm) and sample count, as
-/// probe.mm binds them for the state.
+/// probe.mm binds them for the state; `binds` (null: none): what it binds besides.
 ///
 /// # Safety
-/// `descriptor` is a valid record; `each` is valid for `ctx` for the call's length.
+/// `descriptor` is a valid record; `binds` is null or valid; `each` is valid for `ctx` for the call's length.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn nmb_render_pipeline_direct(
     device: *mut NmbDevice,
@@ -542,10 +620,13 @@ pub unsafe extern "C" fn nmb_render_pipeline_direct(
     barrier: bool,
     texture_format: u64,
     texture_samples: u32,
+    binds: *const NmbDirectBinds,
     each: unsafe extern "C" fn(state: *const NmbDirectState, ctx: *mut c_void) -> bool,
     ctx: *mut c_void,
 ) -> bool {
     guard(false, || {
+        // SAFETY: the caller's contract.
+        let binds = unsafe { Binds::of(binds) }?;
         let nmb = get(device)?;
         let runtime = nmb.device();
         let descriptor = render_descriptor(descriptor)?;
@@ -567,7 +648,7 @@ pub unsafe extern "C" fn nmb_render_pipeline_direct(
                 compile,
                 &descriptor,
                 &mut variants,
-                &probe_state(run, format, texture_samples.max(1), &volumes),
+                &probe_state(run, format, texture_samples.max(1), &volumes, &binds),
                 &budget,
             )?);
         }
@@ -575,7 +656,7 @@ pub unsafe extern "C" fn nmb_render_pipeline_direct(
         let handles = unsafe { runtime.raw() };
         let layouts = variants
             .iter()
-            .map(|(_, pipeline)| Layout::new(handles.device, pipeline))
+            .map(|(_, pipeline)| Layout::new(handles.device, &pipeline.layout))
             .collect::<Result<Vec<_>, String>>()?;
         let writes: Vec<Vec<NmbDirectWrite>> = runs
             .iter()
@@ -584,7 +665,7 @@ pub unsafe extern "C" fn nmb_render_pipeline_direct(
                     .descriptors
                     .iter()
                     .take(MAX_WRITES)
-                    .map(|w| write_of(w, &run.commands))
+                    .map(|w| write_of(w, &run.commands.descriptor_ranges))
                     .collect()
             })
             .collect();

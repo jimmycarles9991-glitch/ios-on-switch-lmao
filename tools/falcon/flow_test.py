@@ -8,7 +8,7 @@ import sys
 import unittest
 from pathlib import Path
 
-from tools.falcon import image
+from tools.falcon import image, isa
 from tools.falcon.flow import Program
 
 FIRMWARE = Path(sys.argv[1]) if len(sys.argv) > 1 else None
@@ -46,6 +46,18 @@ class H264AppTest(unittest.TestCase):
     def test_io_writes(self):
         self.assertTrue(_found(self.program, 'iowr', 0x8433, 0x1010, '(D[0x5d0].16 & 0xff)'))
         self.assertTrue(_found(self.program, 'iowr', 0x3339, 0xE0C, '(D[0x4a0].32 >> 0x7)'))
+
+    def test_input_fetch_rounds_down_and_the_picture_rounds_up(self):
+        code = image.parse(FIRMWARE.read_bytes()).ucode
+        self.assertTrue(_found(self.program, 'ld', 0x85D9, 0xA26))
+        self.assertEqual(str(isa.decode(code, 0x8605, 0x8605)), 'add b32 $r14 $r14 0x1')
+        self.assertEqual(str(isa.decode(code, 0x860B, 0x860B)), 'extr $r14 $r14 4:9')
+        self.assertTrue(_found(self.program, 'iowr', 0x861B, 0xE88))
+        self.assertTrue(_found(self.program, 'ld', 0x818C, 0xA46))
+        self.assertEqual(str(isa.decode(code, 0x819C, 0x819C)), 'add b32 $r9 $r9 0x10')
+        self.assertEqual(str(isa.decode(code, 0x81A2, 0x81A2)), 'shr b32 $r9 0x4')
+        self.assertTrue(_found(self.program, 'iowr', 0x81C3, 0x1808))
+        self.assertTrue(_found(self.program, 'iowr', 0x34D0, 0x191C, '(D[0x32e].16 * D[0x32c].16)'))
 
 
 @unittest.skipIf(FIRMWARE is None, 'needs the firmware path')

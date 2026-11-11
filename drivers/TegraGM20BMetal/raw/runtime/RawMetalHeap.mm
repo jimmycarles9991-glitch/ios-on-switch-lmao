@@ -39,6 +39,11 @@ bool resident(RMHeap *h)
 
 }  // namespace
 
+bool heapResident(RMHeap *h)
+{
+    return resident(h);
+}
+
 @implementation RMHeap
 
 - (id)rmTwin

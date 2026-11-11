@@ -1,4 +1,4 @@
-"""What LaunchServices registers for the overlay's system apps, digested: a migration is worth only a change to it.
+"""What LaunchServices registers for each of the overlay's system apps, digested: only a change to it needs registering.
 
 Per bundle (each .app and the .appex bundles inside it), what LSBundleRecordBuilder reads on 21H461 and 24B119: its
 path, Info.plist, localized InfoPlist strings, icons (the files CFBundleIcons names and Assets.car), provisioning
@@ -6,7 +6,7 @@ profile, and its executable's entitlements, signing identifier and team, platfor
 executable's code, cdhash and Mach-O UUID and every other resource are left out: LaunchServices compares a record with
 the bundle on disk only during a MobileInstallation sync (_LSBundleNeedsRegistration's mod-date check behind the flag
 only that sync sets), never at boot or launch, so a rebuilt app at the same path launches on the record the last
-migration made. Only the record's Mach-O UUIDs go stale, which per-app network attribution alone reads.
+registration made. Only the record's Mach-O UUIDs go stale, which per-app network attribution alone reads.
 """
 
 import hashlib
@@ -14,6 +14,7 @@ import json
 import plistlib
 import struct
 from pathlib import Path
+from typing import NamedTuple
 
 from tools.common import macho
 
@@ -149,19 +150,24 @@ def bundle_record(bundle: Path, root: Path) -> dict:
     }
 
 
-def bundles(root: Path) -> list[Path]:
-    """Every .app directly in `root` and every .app or .appex inside one, outermost first."""
-    found = []
-    for app in sorted(path for path in root.glob('*.app') if path.is_dir()):
-        found.append(app)
-        found += sorted(path for path in app.rglob('*') if path.is_dir() and path.suffix in BUNDLE_SUFFIXES)
-    return found
+class App(NamedTuple):
+    identifier: str
+    digest: str
 
 
-def digest(root: Path) -> str | None:
-    """Return the digest of what LaunchServices registers for the apps in `root`, or None without a `root`."""
+def bundles(app: Path) -> list[Path]:
+    """Return the .app and every .app or .appex inside it, outermost first."""
+    return [app, *sorted(path for path in app.rglob('*') if path.is_dir() and path.suffix in BUNDLE_SUFFIXES)]
+
+
+def apps(root: Path) -> dict[str, App]:
+    """Each .app directly in `root`, by name: its identifier and the digest of what LaunchServices registers for it."""
     root = Path(root)
     if not root.is_dir():
-        return None
-    records = [bundle_record(bundle, root) for bundle in bundles(root)]
-    return hashlib.sha256(json.dumps(records, sort_keys=True).encode()).hexdigest()
+        return {}
+    found = {}
+    for app in sorted(path for path in root.glob('*.app') if path.is_dir()):
+        records = [bundle_record(bundle, root) for bundle in bundles(app)]
+        digest = hashlib.sha256(json.dumps(records, sort_keys=True).encode()).hexdigest()
+        found[app.name] = App(str(_info(app).get('CFBundleIdentifier', '')), digest)
+    return found

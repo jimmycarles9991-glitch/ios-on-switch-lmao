@@ -180,6 +180,11 @@ void recordBytes(RMCommandBuffer *cb, Cmd m, const void *bytes, NSUInteger lengt
         [_cb takeReason:WhyCall why:@"a vertex sampler"];
         hit(_cb, PredCallVertexSampler, index);
     }
+    if (stage == 2 && index < 16) {
+        RMSampler *r = [(id)s isKindOfClass:[RMSampler class]] ? (RMSampler *)s : nil;
+        _samp[index] = r;
+        _cubicMask = uint16_t(r && r->_raw.desc.cubic ? _cubicMask | 1u << index : _cubicMask & ~(1u << index));
+    }
     setBinding(_cb, OpSampler, stage, index, s, 0);
 }
 

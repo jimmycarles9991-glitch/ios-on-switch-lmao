@@ -62,6 +62,10 @@ enum {
     kRssiBounds = 106,
     kChannelsInfo = 207,
     kHwSupportedChannels = 254,
+    // IPConfiguration reads the association's ID at link up (4 bytes) and hands it back once it has cleaned up the
+    // previous network's addresses (WiFiAcknowledgeConnectionID).
+    kProtocolCleanupComplete = 560,
+    kConnectionId = 563,
     kFilterMonitorEvents = 564,
 };
 

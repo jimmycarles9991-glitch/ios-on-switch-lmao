@@ -44,12 +44,8 @@ void eachState(id<MTLDevice> dev, id<MTLLibrary> qc, id<MTLLibrary> own, id<MTLL
         id<MTLLibrary> library = !ours ? qc : line.find("| f two_plane_") != std::string::npos ? standIn : own;
         if (framework && !(library = frameworkLibrary(dev, marked.substr(3, pathEnd - 3))))
             continue;
-        if (!parseState(library, line, s))
+        if (!parseState(library, line, s, framework ? frameworkName(marked.substr(3, pathEnd - 3)) : ""))
             continue;
-        if (framework)
-            s.key += " | l " + frameworkName(marked.substr(3, pathEnd - 3));
-        while (!s.key.empty() && s.key.back() == ' ')
-            s.key.pop_back();
         if (seen.insert(s.key).second)
             each(line, ours, s);
     }

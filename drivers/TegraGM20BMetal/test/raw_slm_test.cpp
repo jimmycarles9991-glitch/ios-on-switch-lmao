@@ -149,9 +149,13 @@ TEST(SlmOwned, EveryPlacedProgramGetsTheAreaBeforeItsBind)
     const std::string pack = Body(gpu, "Pipeline *Device::pipeline(uint64_t keyHash, PackForm form, bool caTransform)");
     EXPECT_LT(at(pack, "slmNeed(std::max(slmPerWarpOfHeader(vs.header), slmPerWarpOfHeader(fs.header)))"),
               at(pack, "build(pl, pp, vs, fs,"));
-    EXPECT_THAT(Body(SourceText("../raw/runtime/raw_completed.cpp"),
-                     "bool Device::placeCompleted(const CapturedProgram &p, PlacedProgram &out)"),
+    const std::string completed = SourceText("../raw/runtime/raw_completed.cpp");
+    EXPECT_THAT(Body(completed, "bool Device::placeCompleted(const CapturedProgram &p, PlacedProgram &out)"),
                 HasSubstr("slmNeed(slmPerWarpOfHeader(p.image.data()))"));
+    const std::string split =
+        Body(SourceText("../raw/runtime/raw_split.cpp"), "SplitState *Device::makeSplit(Pipeline &pl)");
+    EXPECT_LT(at(split, "slmNeed(std::max(slmPerWarpOfHeader(fs.header), slmPerWarpOfQmd(source->rec.qmd)))"),
+              at(split, "build(s.pipeline,"));
     const std::string compute = SourceText("../raw/runtime/raw_compute.cpp");
     EXPECT_THAT(Body(compute, "const ComputeState *computeState(Device &dev, uint64_t keyHash)"),
                 HasSubstr("dev.slmNeed(slmPerWarpOfQmd(k->qmd))"));

@@ -15,6 +15,7 @@ owner, every distinct declared state (one per line, whichever GPU's directory or
   compute   a compute state: the pack keys a kernel by its dispatch's threadgroup shape, which no descriptor names
   tile      a tile render state
   tessellation  a render state with tessellation, which its line does not carry
+  unspecialized  a render state whose function lacks a constant its library requires (the archive does not record it)
 --harvest: the device journals; "seen" counts the declared states the device made. --missing: the packable states'
 lines, for the pack generator.
 """
@@ -30,7 +31,8 @@ from drivers.TegraGM20BMetal.corpus.tools.archives.model import packable
 from drivers.TegraGM20BMetal.raw.pack.rawpack import state_key
 
 CONSTANT = re.compile(r'(\S+):(\d+):([0-9a-f]*)(?= |$)')
-COLUMNS = ('declared', 'device', 'pack', 'near', 'packable', 'creation', 'compute', 'tile', 'tessellation', 'seen')
+COLUMNS = ('declared', 'device', 'pack', 'near', 'packable', 'creation', 'unspecialized', 'compute', 'tile')
+COLUMNS += ('tessellation', 'seen')
 
 
 def full_width(key: str) -> str:
@@ -61,7 +63,7 @@ def keys(paths: list[Path]) -> tuple[set[str], set[str]]:
 
 
 def classify(kind: str, line: str, pack: set[str], near: set[str]) -> str:
-    if kind in ('compute', 'tile', 'tessellation'):
+    if kind in ('compute', 'tile', 'tessellation', 'unspecialized'):
         return kind
     key = state_key(line)
     if key in pack:

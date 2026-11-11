@@ -277,14 +277,50 @@ bool assembleRecord(const RecordParts &parts, const std::string &key, const Pack
 
 uint64_t packKeyHash(const std::string &key)
 {
-    for (const char *lib : {"ycbcr", "xr", "two_plane", "resolve"}) {
-        const size_t own = key.find(std::string("| f ") + lib + "_");
-        if (own == std::string::npos)
+    const size_t vertexAt = key.find(" | v "), fragmentAt = key.find(" | f ");
+    std::string pair;
+    if (vertexAt != std::string::npos && fragmentAt != std::string::npos && fragmentAt > vertexAt) {
+        std::string vertex = key.substr(vertexAt + 5, fragmentAt - vertexAt - 5);
+        while (!vertex.empty() && vertex.back() == ' ')
+            vertex.pop_back();
+        pair = vertex + " | f " + key.substr(fragmentAt + 5);
+    }
+    for (const char *state : {"ycbcr_vert | f ycbcr_converted_frag",
+                              "ycbcr_vert | f ycbcr_srgb_frag",
+                              "ycbcr_vert | f ycbcr_codes_frag",
+                              "ycbcr_vert | f ycbcr_codes10_frag",
+                              "xr_vert | f xr_bgr10_frag",
+                              "xr_vert | f xr_bgra10_frag",
+                              "xr_vert | f xr_planes_frag",
+                              "two_plane_cover | f two_plane_load",
+                              "two_plane_cover | f two_plane_store",
+                              "resolve_vert | f resolve_rgba8_frag",
+                              "resolve_vert | f resolve_rgba8_srgb_frag",
+                              "resolve_vert | f resolve_bgra8_frag",
+                              "resolve_vert | f resolve_bgra8_srgb_frag",
+                              "resolve_vert | f resolve_rg11b10f_frag",
+                              "resolve_vert | f resolve_rgba16f_frag",
+                              "mip_vert | f mip_a8_frag",
+                              "mip_vert | f mip_r16_frag",
+                              "mip_vert | f mip_r16f_frag",
+                              "mip_vert | f mip_b5g6r5_frag",
+                              "mip_vert | f mip_bgr5a1_frag",
+                              "mip_vert | f mip_r32f_frag",
+                              "mip_vert | f mip_rg16_frag",
+                              "mip_vert | f mip_rg16f_frag",
+                              "mip_vert | f mip_rgba8_srgb_frag",
+                              "mip_vert | f mip_bgra8_srgb_frag",
+                              "mip_vert | f mip_rgb10a2_frag",
+                              "mip_vert | f mip_rg11b10f_frag",
+                              "mip_vert | f mip_bgr10a2_frag",
+                              "mip_vert | f mip_rg32f_frag",
+                              "mip_vert | f mip_rgba16_frag",
+                              "mip_vert | f mip_rgba32f_frag"}) {
+        if (pair != state)
             continue;
-        size_t end = own + 4;
-        while (end < key.size() && (isalnum(static_cast<unsigned char>(key[end])) || key[end] == '_'))
-            end++;
-        const std::string name = std::string("raw.") + lib + "." + key.substr(own + 4, end - own - 4);
+        const size_t vertexEnd = pair.find(" | f ");
+        const size_t familyEnd = pair.rfind('_', vertexEnd);
+        const std::string name = "raw." + pair.substr(0, familyEnd) + "." + pair.substr(vertexEnd + 5);
         return Pack::fnv(name.data(), name.size());
     }
     return Pack::fnv(key.data(), key.size());

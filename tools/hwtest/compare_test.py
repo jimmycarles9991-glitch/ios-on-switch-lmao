@@ -98,6 +98,13 @@ class Summary(unittest.TestCase):
         self.assertIn('INTERRUPTED at gpu.blur.coreimage: the app was closed, not a crash', text)
         self.assertNotIn('STOPPED', text)
 
+    def test_a_cancelled_run_is_not_reported_as_a_crash_or_hang(self):
+        latest = report(2, entry('a', 'PASS'), status='cancelled')
+        latest.data['run']['order'].append('b')
+        latest.mac = {'health': {'hwtest_crashes': ['old.ips'], 'panics': ['old.panic']}}
+        self.assertEqual(compare.stopped(latest), ['CANCELLED: the run was cancelled; completed results were kept'])
+        self.assertEqual(compare.compare(latest, [report(1, entry('b', 'PASS'))]).missing, [])
+
     def test_long_sections_are_cut(self):
         previous = report(1, *[entry(f't{i}', 'PASS') for i in range(15)])
         latest = report(2, *[entry(f't{i}', 'FAIL', 'bad') for i in range(15)])

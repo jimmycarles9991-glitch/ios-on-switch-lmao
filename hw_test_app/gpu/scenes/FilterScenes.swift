@@ -3,14 +3,20 @@ import HWTestCore
 import Metal
 
 /// generateMipmaps on power-of-two textures, every level against a 2x2 box filter of the level above as stored (in
-/// linear light for sRGB), and on a non-power-of-two one of a single colour, whose levels must all keep it.
+/// linear light for sRGB), and on a non-power-of-two one of a single colour, whose levels must all keep it. On the raw
+/// facade every generateMipmaps stays raw, on the 2D engine's formats and the 3D engine's mip states alike.
 struct MipmapScene: GPUScene {
     let id = "gpu.mipmaps"
     let name = "Mipmap generation, every level"
 
     func run(_ gpu: GPU) async throws -> SceneResult {
         var result = SceneResult()
-        for (format, size) in [(TexelFormat.rgba8Unorm, 256), (.r8Unorm, 128), (.rgba16Float, 64), (.bgra8Srgb, 64)] {
+        var paths: [String] = []
+        let formats: [(TexelFormat, Int)] = [
+            (.rgba8Unorm, 256), (.r8Unorm, 128), (.rgba16Float, 64), (.bgra8Srgb, 64), (.rgba8Srgb, 64),
+            (.r16Float, 64), (.rg16Float, 32),
+        ]
+        for (format, size) in formats {
             let levels = Int(log2(Double(size))) + 1
             let texture = try gpu.texture(
                 format.metal, size, size, usage: [.shaderRead, .renderTarget], mipmaps: levels)
@@ -19,11 +25,12 @@ struct MipmapScene: GPUScene {
             try await gpu.blitUpload(
                 [UploadRect(x: 0, y: 0, width: size, height: size)], [bytes], into: texture, texel: format.bytesPerTexel
             )
-            try await gpu.run { commands in
+            let generated = try await gpu.run { commands in
                 let blit = commands.makeBlitCommandEncoder()!
                 blit.generateMipmaps(for: texture)
                 blit.endEncoding()
             }
+            paths.append("\(format.rawValue):\(generated.path)")
             var reference = base
             for level in 1..<levels {
                 reference = Self.halved(reference, format)
@@ -48,6 +55,11 @@ struct MipmapScene: GPUScene {
             let want = Raster(width: got.width, height: got.height, channels: 4) { _, _, c in color[c] }
             result.compare(
                 "rgba8Unorm 100x60 level \(level)", got, TexelFormat.rgba8Unorm.quantized(want), tolerance: 1.01 / 255)
+        }
+        result.metrics.set("paths", paths.joined(separator: ","))
+        if RawFacade.kind(of: gpu.device) == "raw" {
+            let off = paths.filter { !$0.hasSuffix(":raw") }
+            result.expect(off.isEmpty, "generateMipmaps off the raw path: \(off.joined(separator: ","))")
         }
         return result
     }

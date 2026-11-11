@@ -54,6 +54,7 @@ rust_static_library(
     srcs = [
         METAL + ":bridge/NativeMetalBridge.rs",
         METAL + ":bridge/NativeMetalDirect.rs",
+        METAL + ":bridge/NativeMetalDirectCompute.rs",
         METAL + ":bridge/NativeMetalFailure.rs",
         METAL + ":bridge/NativeMetalObjects.rs",
         METAL + ":bridge/NativeMetalTarget.rs",
@@ -119,6 +120,7 @@ raw_stack(
     srcs = [
         METAL + ":bridge/NativeMetalBridge.rs",
         METAL + ":bridge/NativeMetalDirect.rs",
+        METAL + ":bridge/NativeMetalDirectCompute.rs",
         METAL + ":bridge/NativeMetalFailure.rs",
         METAL + ":bridge/NativeMetalObjects.rs",
         METAL + ":bridge/NativeMetalTarget.rs",
@@ -153,6 +155,7 @@ metal_plugin(
     bridge = ":bridge_ios",
     cc_srcs = [
         GM20B_METAL + ":raw/runtime/raw_gpu.cpp",
+        GM20B_METAL + ":raw/runtime/raw_split.cpp",
         GM20B_METAL + ":raw/runtime/raw_alias.cpp",
         GM20B_METAL + ":raw/runtime/raw_arena.cpp",
         GM20B_METAL + ":raw/fx/fx_mip.cpp",
@@ -164,8 +167,10 @@ metal_plugin(
         GM20B_METAL + ":raw/runtime/raw_comp.cpp",
         GM20B_METAL + ":raw/runtime/raw_record_parts.cpp",
         GM20B_METAL + ":raw/runtime/raw_direct.cpp",
+        GM20B_METAL + ":raw/runtime/raw_direct_compute.cpp",
         GM20B_METAL + ":raw/runtime/raw_emit.cpp",
         GM20B_METAL + ":raw/runtime/raw_cache.cpp",
+        GM20B_METAL + ":raw/runtime/raw_kernel_cache.cpp",
         GM20B_METAL + ":raw/runtime/raw_compiler.cpp",
         GM20B_METAL + ":raw/runtime/raw_metallib.cpp",
         GM20B_METAL + ":raw/runtime/raw_completed.cpp",

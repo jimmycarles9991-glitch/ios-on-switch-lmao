@@ -3,7 +3,7 @@
 import re
 from collections import Counter
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import PurePosixPath
 
 PASS, FAIL, NO_DATA, INFO, NA = 'PASS', 'FAIL', 'NO-DATA', 'INFO', 'N/A'
@@ -38,8 +38,11 @@ class Check:
     `needs` names a check that must have matched for this one to mean anything (a failure line of a feature that is
     not running is NO-DATA, not PASS). `applies` ('<check> <field>=<value>') limits the check to logs where that check
     matched with that field (an iOS 27 app's test where the suite line says ios=27): in any other log it is N/A, never
-    PASS. `against` names a check whose `key` values this one's are looked up in.
-    `boot` limits the check to one of the morning's boot labels (A, B tiled cache, K kprof).
+    PASS. `against` names a check whose `key` values this one's are looked up in. `followed` names a check one of whose
+    lines must come within `within` seconds of each of this check's (with the same `key` value, when `key` is set),
+    counted from the line's time less its `since` field in milliseconds: the rule then counts the lines without one.
+    `boot` limits the check to one of the morning's boot labels (A, B tiled cache, K kprof). `unless` names a check
+    whose lines excuse this one's in the same boot.
     """
 
     name: str
@@ -56,9 +59,13 @@ class Check:
     applies: str = ''
     against: str = ''
     key: str = ''
+    followed: str = ''
+    within: float = 0.0
+    since: str = ''
     source: str = ''
     note: str = ''
     boot: str = ''
+    unless: str = ''
 
     def literals(self) -> tuple[str, ...]:
         return (self.contains,) if isinstance(self.contains, str) else self.contains
@@ -204,6 +211,35 @@ def lookup(check: Check, matches: list[dict], others: list[dict]) -> str:
     )
 
 
+def unfollowed(check: Check, matches: list[dict], followers: list[dict]) -> list[dict]:
+    """Return the matches no `followed` line came within `within` seconds of."""
+    missed = []
+    for fields in matches:
+        start = fields['time']
+        if check.since in fields:
+            start -= timedelta(milliseconds=number(fields[check.since]))
+        end = start + timedelta(seconds=check.within)
+        if not any(
+            start <= f['time'] <= end and (not check.key or f.get(check.key) == fields.get(check.key))
+            for f in followers
+        ):
+            missed.append(fields)
+    return missed
+
+
+def follow(check: Check, matches: list[dict], minutes: float, by_name: dict[str, list[dict]]) -> Result:
+    """Return the verdict of a `followed` check: its rule over the lines nothing followed."""
+    if not matches:
+        return Result(check, NO_DATA, 'no lines', matches)
+    missed = unfollowed(check, matches, by_name.get(check.followed, []))
+    got, _ = measure(check, missed, minutes)
+    m = RULE.match(check.rule)
+    verdict = PASS if OPS[m['op']](got, float(m['value'])) else FAIL
+    listed = ' '.join(f'{f["time"]:%H:%M:%S}' + (f' {f[check.key]}' if check.key in f else '') for f in missed[:8])
+    observed = f'{len(matches)} lines, {len(missed)} without a {check.followed} line within {fmt(check.within)} s'
+    return Result(check, verdict, observed + (f': {listed}' if missed else ''), missed)
+
+
 def describe(check: Check, matches: list[dict], minutes: float) -> str:
     boots = len({f['boot'] for f in matches})
     parts = [f'{len(matches)} lines' + (f' in {boots} boots' if boots > 1 else '')]
@@ -238,20 +274,30 @@ def applicable(applies: str, by_name: dict[str, list[dict]]) -> bool:
     return any(fields.get(key) == value for fields in by_name.get(name, []))
 
 
+def informational(check: Check, matches: list[dict], minutes: float, by_name: dict[str, list[dict]]) -> Result:
+    """Return a 'timeline' or 'report' check's INFO row."""
+    if check.rule == TIMELINE:
+        return Result(check, INFO if matches else NO_DATA, timeline(matches) or 'no lines', matches)
+    observed = describe(check, matches, minutes)
+    if check.against:
+        observed += '; ' + lookup(check, matches, by_name.get(check.against, []))
+    return Result(check, INFO if matches else NO_DATA, observed, matches)
+
+
 def evaluate(check: Check, matches: list[dict], minutes: float, by_name: dict[str, list[dict]]) -> Result:
     """Return the check's verdict over the events it matched."""
     matches = filtered(check, matches)
+    if check.unless:
+        excused = {fields['boot'] for fields in by_name.get(check.unless, [])}
+        matches = [fields for fields in matches if fields['boot'] not in excused]
     if check.needs and not by_name.get(check.needs):
         return Result(check, NO_DATA, f'no {check.needs} line', matches)
     if check.applies and not applicable(check.applies, by_name):
         return Result(check, NA, f'not run here: no {check.applies} line', matches)
-    if check.rule == TIMELINE:
-        return Result(check, INFO if matches else NO_DATA, timeline(matches) or 'no lines', matches)
-    if check.rule == REPORT:
-        observed = describe(check, matches, minutes)
-        if check.against:
-            observed += '; ' + lookup(check, matches, by_name.get(check.against, []))
-        return Result(check, INFO if matches else NO_DATA, observed, matches)
+    if check.followed:
+        return follow(check, matches, minutes, by_name)
+    if check.rule in {TIMELINE, REPORT}:
+        return informational(check, matches, minutes, by_name)
     got, observed = measure(check, matches, minutes)
     if got is None:
         return Result(check, NO_DATA, observed, matches)

@@ -4,9 +4,14 @@
 'timeline' checks are INFO: open issues whose count is the baseline for their fix, and manual steps to read in order.
 """
 
+from tools.devicerun.apps import APPS
+from tools.devicerun.audio import AUDIO
+from tools.devicerun.dispatch import DISPATCH
 from tools.devicerun.hwtest import HWTEST
+from tools.devicerun.joycon import JOYCON
 from tools.devicerun.lockscreen import LOCKSCREEN
 from tools.devicerun.morning import MORNING
+from tools.devicerun.protection import PROTECTION
 from tools.devicerun.rules import REPORT, TIMELINE, Check
 from tools.devicerun.stutter import STUTTER
 
@@ -244,6 +249,16 @@ GROUPS: dict[str, list[Check]] = {
             regex='fault',
             source='drivers/TegraGM20B/gpu.c (nvkm fault reports)',
         ),
+        Check(
+            'gpu.pbentry',
+            'r121-crashgpu',
+            '[PBENTRY] ch ',
+            process=KERNEL,
+            regex=r'\.gpu: fifo: PBDMA\d: \w+ \[PBENTRY\] ch \d+ \[\w+ (?P<who>[^\]]+)\]',
+            show=('who',),
+            source='drivers/TegraGM20B/gpu.c (nvkm PBDMA interrupt)',
+            note='the GPU fetched a zero push word; boot 15: MercuryPosterExt x76, its raw push ring a system BO',
+        ),
     ],
     'display': [
         Check(
@@ -299,6 +314,19 @@ GROUPS: dict[str, list[Check]] = {
             note='open; was ~86/10 min',
         ),
         Check('display.thermal-iomfb', 'r32-color', 'IOMFB failure', REPORT, process='thermalmonitord'),
+        Check(
+            'display.sbim',
+            'r104-sbim',
+            'EDRServerEnableSBIM: IORegistryEntrySetCFProperty()',
+            process='backboardd',
+            regex=r'=> (?P<code>0x[0-9a-f]+)',
+            where='code != 3758097095',
+            show=('code',),
+            source='drivers/NativeMobileDisplay/NativeLegacyDisplay.cpp (setProperties, SwitchSBIM.h)',
+            note='libEDR setting enableSBIM on the framebuffer while EDR is engaged (iOS 27). kIOReturnUnsupported '
+            "(0xe00002c7, 3758097095) is J181's answer for a display without SBIM statistics: libEDR logs it once and "
+            "stops asking. Boot 15: kIOReturnBadArgument (0xe00002c2) x13, from the family's own setProperties",
+        ),
     ],
     'media': [
         Check(
@@ -430,6 +458,82 @@ GROUPS: dict[str, list[Check]] = {
             needs='usb.ss-lane',
             source='drivers/SwitchUSB/SwitchXHCIEvents.cpp',
         ),
+        Check(
+            'usb.host-up',
+            'r136-usbhost',
+            'SwitchUSB: host controller up',
+            TIMELINE,
+            process=KERNEL,
+            source='drivers/SwitchUSB/SwitchXHCI.cpp',
+        ),
+        Check(
+            'usb.host-save-state',
+            'r136-usbhost',
+            'AppleUSBHostController::setPowerStateGated: going to state',
+            process=KERNEL,
+            regex=r'going to state \d+ returned 0xe',
+            needs='usb.host-up',
+            source='IOUSBHostFamily (boot-1109-2145)',
+            note='AppleUSBXHCI saveState: Tegra answers CSS with SRE unless the hold takes it',
+        ),
+        Check(
+            'usb.host-exception',
+            'r136-usbhost',
+            'AppleUSBHostController::hardwareExceptionThreadCallGated: 0x',
+            process=KERNEL,
+            show=('exception',),
+            regex=r'\((?P<exception>[^)]+)\)$',
+            needs='usb.host-up',
+            unless='usb.host-sc7-restore',
+            source='IOUSBHostFamily (boot-1109-2145)',
+            note='a restore after SC7 is meant to fail once (usb.host-sc7-restore)',
+        ),
+        Check(
+            'usb.host-sc7-restore',
+            'r136-usbhost',
+            'SwitchUSB: XUSB host restore after SC7',
+            TIMELINE,
+            process=KERNEL,
+            source='drivers/SwitchUSB/SwitchXHCI.cpp',
+        ),
+        Check(
+            'usb.host-port-properties',
+            'r136-usbhost',
+            'Did not find port properties for registry entry',
+            process=KERNEL,
+            regex=r'SwitchXHCI@',
+            needs='usb.host-up',
+            source='IOAccessoryManager, iOS 27 (boot-1109-2145)',
+        ),
+        Check(
+            'usb.host-connect',
+            'r136-usbhost',
+            'SwitchUSB: host role +1 s',
+            'count > 0',
+            process=KERNEL,
+            regex=r'(?:pad 0|SS port 0) = port \d+ \([^)]*\): U0 ',
+            needs='usb.host-up',
+            source='drivers/SwitchUSB/SwitchUSB.cpp role +1 s line',
+            note='needs a device on the port',
+        ),
+        Check(
+            'usb.host-device',
+            'r136-usbhost',
+            'SwitchUSB: USB device ',
+            TIMELINE,
+            process=KERNEL,
+            source='drivers/SwitchUSB/SwitchXHCIServices.cpp',
+        ),
+        Check(
+            'usb.host-device-arrives',
+            'r136-usbhost',
+            'SwitchUSB: host role (a device on the port, VBUS on)',
+            process=KERNEL,
+            followed='usb.host-device',
+            within=10.0,
+            source='drivers/SwitchUSB/SwitchUSB.cpp',
+            note='a keyboard or stick on the port registers an IOUSBHostDevice',
+        ),
     ],
     'power': [
         Check(
@@ -524,6 +628,14 @@ GROUPS: dict[str, list[Check]] = {
     ],
     'refusals': [
         Check(
+            'refusal.bytesnocopy',
+            'r119-rawgaps',
+            'texture.bytesnocopy',
+            subsystem=REFUSAL_SUBSYSTEM,
+            note='a nil no-copy texture leaves a compressed image undrawn (Core Animation keeps no copy)',
+            source='drivers/TegraGM20BMetal/raw/runtime/RawMetalNoCopy.mm',
+        ),
+        Check(
             'refusal.user',
             'r33-platform',
             ']',
@@ -544,6 +656,26 @@ GROUPS: dict[str, list[Check]] = {
             show=('who', 'domain', 'reason'),
             source='kits/SwitchRefusal/SwitchRefusal.c (kernel default log)',
         ),
+        Check(
+            'refusal.mipmaps-format',
+            'r119-rawgaps',
+            'mipmaps.fmt',
+            subsystem=REFUSAL_SUBSYSTEM,
+            note='generateMipmaps of a format no engine filters sends its command buffer to m2v',
+            source='drivers/TegraGM20BMetal/raw/runtime/raw_mip.h',
+        ),
+        Check(
+            'refusal.compute-view',
+            'r126-computeview',
+            'compute.view',
+            subsystem=REFUSAL_SUBSYSTEM,
+            regex=r'^(?P<who>[^\[]+)\[\d+\] compute\.view: ',
+            show=('who',),
+            source='drivers/TegraGM20BMetal/raw/runtime/RawMetalCompute.mm',
+            note="a kernel's texture m2v views in a format of another texel size; boot 17 (half-float writes, before "
+            'raw bound their view): PosterBoard 216 of 222 command buffers on m2v, iconservicesagent 4, '
+            'SwitchHWTest 51 (the MPS and Core Image blurs among them)',
+        ),
     ],
     'io': [
         Check('io.hid-element-values', 'r33-io', 'updateElementValues failed', REPORT, process=KERNEL),
@@ -558,9 +690,204 @@ GROUPS: dict[str, list[Check]] = {
         ),
         Check('io.securityd-sos', 'r32-cpuhog', 'Source was stale because shmem was null', REPORT, process='securityd'),
     ],
+    'sched': [
+        Check(
+            'sched.stats', 'r116-sched', 'SwitchSched 1/2', REPORT, process=KERNEL, source='kernel/switch/sched/stats.c'
+        ),
+        Check(
+            'sched.failsafe',
+            'r116-sched',
+            'fail-safe',
+            'count == 0',
+            process=KERNEL,
+            regex=r'(?P<thread>[\w.\-]+)\[\d+\] \d+/\d+ [^;]*?, (?P<runs>\d+) fail-safe',
+            show=('thread',),
+            needs='sched.stats',
+            source='kernel/switch/sched/stats.c',
+            note='boot 15: display.primary 96 at 19:15:56, a 1.6 s m2v compile on the display thread (enc.notic)',
+        ),
+        Check(
+            'sched.backboardd-main',
+            'r116-sched',
+            'SwitchSched 1/2',
+            'p99(p99) <= 16384',
+            process=KERNEL,
+            regex=r'backboardd\.main\[\d+\] \d+/\d+ (?P<mode>\S+) (?P<qos>\S+) \S+: (?P<runs>\d+) runs '
+            r'(?P<p50>\d+)/(?P<p99>\d+)/(?P<max>\d+) us',
+            where='runs >= 20',
+            show=('mode', 'qos'),
+            source='kernel/switch/sched/stats.c',
+            note="runnable-to-running p99 per 10 s; boot 15 up to 275359 us. TS DF after startup is backboardd's own",
+        ),
+        Check(
+            'sched.kernel-high-cpu',
+            'r116-sched',
+            'SwitchSched 1/2',
+            'p99(ms) < 200',
+            process=KERNEL,
+            regex=r'thread call kernel-high #\d+ 92 (?P<ms>\d+) ms',
+            source='kernel/switch/sched/stats.c',
+            note='CPU per 10 s above every IOWorkLoop; boot 15 300-1343 ms, the cryptex completions among it',
+        ),
+    ],
+    'storage': [
+        Check(
+            'storage.sd-read-rate',
+            'r116-sched',
+            'SwitchSD: ',
+            'last(mib/secs) < 5',
+            process=KERNEL,
+            regex=r'SwitchSD: \d+ rq (?P<mib>\d+) MiB .*?% of (?P<secs>\d+)s',
+            where='secs >= 600',
+            source='drivers/NativeSwitchBlock/NativeSwitchBlock.cpp',
+            note='MiB read and written per second since the first request; boot 15 25.7 (22688 MiB in 883 s)',
+        ),
+        Check(
+            'storage.cryptex-completion',
+            'r116-sched',
+            'SwitchCryptex: ',
+            REPORT,
+            process=KERNEL,
+            regex=r'(?P<n>\d+) completions, client (?P<client_us>\d+) us \(max (?P<max_us>\d+) us\); '
+            r'copied (?P<kib>\d+) KiB in (?P<copy_us>\d+) us',
+            source='drivers/NativeSwitchBlock/SwitchCryptexStats.h',
+        ),
+    ],
+    'memory': [
+        Check(
+            'memory.gpu-live',
+            'r116-sched',
+            'tegra-gm20b: stats2',
+            'max(live) < 786432',
+            process=KERNEL,
+            regex=r'(?P<live>\d+) KiB live in \d+',
+            note='GPU KiB live; boot 15 peaked at 1.18 GB (backboardd) with 1.5 GB wired, pushing file pages out',
+        ),
+    ],
+    'joycon': JOYCON,
+    'apps': APPS,
+    'wifi': [
+        Check(
+            'wifi.join-asked',
+            'r107-wifijoin',
+            'SwitchWLAN: wifid asks to join',
+            REPORT,
+            process=KERNEL,
+            source='drivers/SwitchWLAN/SwitchWLANApple80211.cpp',
+        ),
+        Check(
+            'wifi.joined',
+            'r107-wifijoin',
+            'SwitchWLAN: joined',
+            'count >= 1',
+            process=KERNEL,
+            regex=r"joined '.*' \((?P<security>[^)]+)\) at (?P<mhz>\d+) MHz, (?P<dbm>-?\d+) dBm",
+            show=('security', 'mhz', 'dbm'),
+            needs='wifi.join-asked',
+            source='drivers/SwitchWLAN/SwitchWLAN.cpp',
+        ),
+        # -100 is a join tapped before its password was given: Settings asks for it and joins again.
+        Check(
+            'wifi.join-completion-failed',
+            'r107-wifijoin',
+            'Completed Apple80211AssociateAsync (-',
+            process='wifid',
+            regex=r'AssociateAsync \((?P<err>-\d+)',
+            where='err != -100',
+            show=('err',),
+            needs='wifi.join-asked',
+            note="boot 16: -3902 after the driver joined (ASSOC_DONE without 24B119's join report)",
+        ),
+        Check(
+            'wifi.join-report-unset',
+            'r107-wifijoin',
+            'join_status:-1431655766',
+            process='wifid',
+            needs='wifi.join-asked',
+            source='drivers/SwitchWLAN/SwitchWLANAssoc.h join_report',
+            note='IO80211 read ASSOC_DONE past what en0 posted (its read buffer is filled with 0xaa)',
+        ),
+        Check(
+            'wifi.event-not-posted',
+            'r107-wifijoin',
+            'not posted:',
+            process=KERNEL,
+            regex=r'SwitchWLAN: event (?P<code>\d+) \((?P<bytes>\d+) bytes\)',
+            show=('code', 'bytes'),
+            source='drivers/SwitchWLAN/SwitchWLANApple80211.cpp post_event',
+        ),
+        # Absent with wifi.en0-output failing: IFF_UP never reached IO80211Controller::enable.
+        Check(
+            'wifi.en0-up',
+            'r133-wifitx',
+            'SwitchWLAN: en0 up, its output thread started',
+            'count >= 1',
+            process=KERNEL,
+            needs='wifi.joined',
+            source='drivers/SwitchWLAN/SwitchWLANNet.cpp enable',
+        ),
+        Check(
+            'wifi.en0-output',
+            'r133-wifitx',
+            'SwitchWLAN: data ',
+            'max(batches) >= 1',
+            process=KERNEL,
+            regex=r'en0 (?P<starts>\d+) starts (?P<batches>\d+) batches',
+            needs='wifi.joined',
+            source='drivers/SwitchWLAN/SwitchWLAN.cpp stats',
+            note="boot 18: en0 0 starts in every window; IONetworkInterface's halted start thread was never started",
+        ),
+        Check(
+            'wifi.tx-frames',
+            'r133-wifitx',
+            'SwitchWLAN: stats ',
+            'max(tx) >= 1',
+            process=KERNEL,
+            regex=r'\), tx (?P<tx>\d+) \(',
+            needs='wifi.joined',
+            source='drivers/SwitchWLAN/SwitchWLAN.cpp stats',
+            note='every frame the radio sent, the key handshake included: wifi.en0-output is en0 alone',
+        ),
+        Check(
+            'wifi.dhcp-bound',
+            'r133-wifitx',
+            'DHCP en0: BOUND',
+            'count >= 1',
+            process='configd',
+            needs='wifi.joined',
+            note='boot 18: INIT retries, then "no server" and a 169.254 address',
+        ),
+        Check(
+            'wifi.connection-id-refused',
+            'r133-wifitx',
+            ('acknowledge Wi-Fi connection ID', 'APPLE80211_IOC_CONNECTION_ID)failed'),
+            process='configd',
+            source='drivers/SwitchWLAN/SwitchWLANApple80211.cpp',
+            note="boot 18: IPConfiguration's connection ID read and acknowledgement both answered -3903",
+        ),
+        Check(
+            'wifi.dhcp-link-local',
+            'r107-wifijoin',
+            'LINKLOCAL en0: setting 169.254.',
+            process='configd',
+            needs='wifi.joined',
+            note='no DHCP server answered en0; boot 16 after its join',
+        ),
+        Check(
+            'wifi.ipv6-solicit-failed',
+            'r107-wifijoin',
+            'RTADV en0: send Router Solicitation: failed',
+            process='configd',
+            needs='wifi.joined',
+            note='boot 16: "No route to host" from the first solicitation after the join',
+        ),
+    ],
+    'audio': AUDIO,
+    'dispatch': DISPATCH,
     'gpu-morning': MORNING,
     'hwtest': HWTEST,
     'lockscreen': LOCKSCREEN,
+    'protection': PROTECTION,
     'stutter': STUTTER,
 }
 

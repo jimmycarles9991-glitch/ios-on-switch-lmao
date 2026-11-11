@@ -2244,7 +2244,9 @@ fail_stages:
 /* ios-on-switch-lmao: one stage of a graphics pipeline library, compiled as
  * vk_graphics_pipeline_compile_shaders compiles a library's stage (the
  * precompile, then the stage alone in its partition, so no varyings are
- * linked), with no pipeline and no cache. The caller owns the shader.
+ * linked), with no pipeline and no cache; a compute stage as
+ * vk_pipeline_compile_compute_stage compiles one (`state` NULL). The caller
+ * owns the shader.
  */
 VkResult
 vk_pipeline_compile_library_stage(struct vk_device *device,
@@ -2284,7 +2286,8 @@ vk_pipeline_compile_library_stage(struct vk_device *device,
       .stage = stage.stage,
       .flags = vk_pipeline_to_shader_flags(pipeline_flags, stage.stage,
                                            pipeline_layout),
-      .next_stage_mask = stage.stage == MESA_SHADER_FRAGMENT ?
+      .next_stage_mask = stage.stage == MESA_SHADER_FRAGMENT ||
+                         stage.stage == MESA_SHADER_COMPUTE ?
                          0 : VK_SHADER_STAGE_FRAGMENT_BIT,
       .nir = nir,
       .robustness = &stage.precomp->rs,

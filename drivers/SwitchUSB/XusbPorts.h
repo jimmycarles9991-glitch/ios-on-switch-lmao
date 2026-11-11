@@ -243,4 +243,66 @@ static inline bool xusb_xhci_deliverable(uint32_t iman, uint32_t usbcmd)
     return ((iman & XHCI_IMAN_IE) != 0u) && ((usbcmd & XHCI_USBCMD_INTE) != 0u);
 }
 
+// --- Save State and Restore State (xHCI 1.2 4.23.2) -----------------------------------------------------------------
+// AppleUSBXHCI lowers an idle controller to its Sleep state by halting it and setting USBCMD.CSS, and raises it again
+// by rewriting the operational and interrupter registers and setting USBCMD.CRS. Tegra's XUSB firmware answers CSS with
+// USBSTS.SRE (boot 1109-2145: USBSTS 0x409), which AppleUSBXHCI takes as hardware exception 4. Outside SC7 the XUSB
+// partitions stay powered and the halted falcon keeps every slot, ring and port as they were, so the save is the
+// controller itself: CSS and CRS are not sent, and the restore leaves interrupter 0's ERSTBA alone, because writing it
+// rewinds the event ring's enqueue pointer to the segment start (xHCI 1.2 5.5.2.3.2) under AppleUSBXHCI's dequeue
+// pointer. SC7 takes the falcon's state: a restore after it reports SRE, as an xHC that lost power does, and AppleUSBXHCI
+// recovers the controller through a reset. HCRST ends whatever was held.
+#define XHCI_USBCMD_HCRST (1u << 1)
+#define XHCI_USBCMD_CSS   (1u << 8)
+#define XHCI_USBCMD_CRS   (1u << 9)
+#define XHCI_USBSTS_SRE   (1u << 10)
+#define XHCI_ERSTBA0      0x30u  // from the runtime registers: interrupter 0's ERSTBA (0x20 + 0x10)
+
+struct xusb_hold {
+    bool held;  // a Save State is held by the halted controller
+    bool lost;  // SC7 took the controller's state since
+    bool sre;   // the last Restore State failed; USBSTS.SRE until written 1 or HCRST
+};
+
+// What AppleUSBXHCI's USBCMD write becomes, CSS and CRS taken out.
+static inline uint32_t xusb_hold_usbcmd(struct xusb_hold *hold, uint32_t value)
+{
+    if (value & XHCI_USBCMD_HCRST) {
+        hold->held = false;
+        hold->lost = false;
+        hold->sre = false;
+    }
+    if (value & XHCI_USBCMD_CSS) {
+        hold->held = true;
+        hold->lost = false;
+    }
+    if (value & XHCI_USBCMD_CRS) {
+        hold->sre = !hold->held || hold->lost;
+        hold->held = false;
+    }
+    return value & ~(XHCI_USBCMD_CSS | XHCI_USBCMD_CRS);
+}
+
+static inline uint32_t xusb_hold_usbsts(const struct xusb_hold *hold, uint32_t value)
+{
+    return hold->sre ? (value | XHCI_USBSTS_SRE) : value;
+}
+
+static inline void xusb_hold_usbsts_write(struct xusb_hold *hold, uint32_t value)
+{
+    if (value & XHCI_USBSTS_SRE)
+        hold->sre = false;
+}
+
+static inline void xusb_hold_lost(struct xusb_hold *hold)
+{
+    hold->lost = true;
+}
+
+// Whether a write of interrupter 0's ERSTBA (either half) is the restore putting back what the controller still holds.
+static inline bool xusb_hold_keeps(const struct xusb_hold *hold, uint64_t value, uint64_t current)
+{
+    return hold->held && !hold->lost && value == current;
+}
+
 #endif

@@ -13,16 +13,18 @@ Steps:
                    images' NAME.SII.NNN parts), AppleDouble files by name; nothing else on the FAT. Refused
                    when the card's iOS is another kind than the build's (its System volume is not the IPSW's)
   3 overlay        <Data>/Switch/overlay := the package's overlay/; <Data>/Switch/deployed.json := the checkout's
-                   commit, which tools/hwtest joins HW Test's reports with (deployed.py); when the overlay's
-                   /Applications changed, writes <Data>/datamigrator/migrate so the next boot registers the apps
-                   (system_apps.py; --rerun-migration writes it regardless, e.g. after a migration the power cut short;
-                   from iOS 27 it also removes LaunchServices' store, whose rebuild is what registers the apps there);
-                   copies back from the System volume the staged system apps MobileInstallation still wants that the
-                   last migration consumed without installing, and asks for the migration that installs them; also
-                   removes the r3 Wi-Fi bring-up's configd Debug logging profile (STALE_LOGGING_PROFILES) if a card
-                   still has it; and stages hekate's "Dump Joy-Con BT" (the FAT's switchroot/joycon_mac.ini, only read)
-                   as <Data>/Switch/bluetooth/{host-address, joycon-pairing.plist}, removed when the FAT has none
-                   (joycon_pairing.py; --no-joycon-pairing skips it)
+                   commit, which tools/hwtest joins HW Test's reports with (deployed.py); each app the overlay's
+                   /Applications added, changed or removed goes into <Data>/Switch/app-registration.plist, which
+                   switch-appregd applies at the next boot without a migration (app_journal.py; on iOS 17 with
+                   switch-no-bt in bootargs.txt nothing starts it, so the deploy asks for the migration instead);
+                   --rerun-migration writes <Data>/datamigrator/migrate (system_apps.py, e.g. after a migration the
+                   power cut short; from iOS 27 it also removes LaunchServices' store, whose rebuild is what registers
+                   the apps there); copies back from the System volume the staged system apps MobileInstallation still
+                   wants that the last migration consumed without installing, and asks for the migration that installs
+                   them; also removes the r3 Wi-Fi bring-up's configd Debug logging profile (STALE_LOGGING_PROFILES)
+                   if a card still has it; and stages hekate's "Dump Joy-Con BT" (the FAT's switchroot/joycon_mac.ini,
+                   only read) as <Data>/Switch/bluetooth/{host-address, joycon-pairing.plist}, removed when the FAT has
+                   none (joycon_pairing.py; --no-joycon-pairing skips it)
   4 GPU bundle     <Data>/ngpu/addons/TegraGM20BMetal.{bundle,m2v-seed,raw} from --//deploy:gpu_bundle, via the
                    plugin's stager, which copies only the files whose sha256 the card does not already hold and
                    reads nothing more when the card's list matches the build (its CDHashes must be in the same
@@ -49,6 +51,7 @@ if __package__ in (None, ''):
     sys.path.insert(0, str(Path(os.path.abspath(__file__)).parents[2]))
 from tools.common import paths
 from tools.deploy import (
+    app_journal,
     deployed,
     joycon_pairing,
     poster_snapshots,
@@ -213,6 +216,14 @@ class Volumes(NamedTuple):
     system: str | None
 
 
+def _boot_args(fat_root: Path) -> str:
+    """Return the card's own boot-args, switchroot/ios/bootargs.txt, which the loader appends to the build's."""
+    try:
+        return (Path(fat_root) / cards.BOOT_ENTRY / cards.BOOT_ARGS).read_text(errors='replace')
+    except OSError:
+        return ''
+
+
 def _restage_system_apps(system: str | None, data_root: Path, log: host.Log) -> bool:
     if not system:
         return False
@@ -232,12 +243,13 @@ def _write(args: argparse.Namespace, data_root: Path, volumes: Volumes, pairing:
         pull_logs.harvest(data_root, out, log, harvest_dir, args.corpus)
     with cards.mounted(volumes.fat, log) as fat_root:
         cards.sync_boot_entry(fat_root, args.boot_package, log)
-    apps = system_apps.digest(data_root)
+        boot_args = _boot_args(fat_root)
+    apps = system_apps.apps(data_root)
     cards.sync_overlay(data_root, args.boot_package, log)
     deployed.record(data_root, paths.workspace(), _ios_build(args.ipsw), log)
     restaged = _restage_system_apps(volumes.system, data_root, log)
-    rebuild = system_apps.rebuilds_launchservices(_ios_version(args.ipsw))
-    system_apps.request_migration(data_root, apps, log, force=args.rerun_migration or restaged, rebuild=rebuild)
+    next_boot = app_journal.NextBoot(_ios_version(args.ipsw), boot_args)
+    system_apps.register(data_root, apps, log, next_boot, force=args.rerun_migration or restaged)
     remove_stale_logging_profiles(data_root, log)
     if not args.no_joycon_pairing:
         joycon_pairing.stage(data_root, pairing, log)

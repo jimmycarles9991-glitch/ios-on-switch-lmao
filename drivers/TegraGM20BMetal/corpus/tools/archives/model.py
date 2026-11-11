@@ -11,6 +11,9 @@ from dataclasses import dataclass, field
 from drivers.TegraGM20BMetal.corpus.tools.archives.gpubin import type_width
 
 RENDER, COMPUTE, TILE, TESSELLATION = 'render', 'compute', 'tile', 'tessellation'
+# A render state whose function lacks a constant its library requires: the archive does not record it, so the
+# state's own values are its caller's at run time
+UNSPECIALIZED = 'unspecialized'
 # MTLGPUFamilyApple1 .. Apple3: what the raw device answers supportsFamily: true for (raw_device_answers.h)
 DEVICE_FAMILIES = frozenset({1001, 1002, 1003})
 FRAMEWORK_LIBRARY = re.compile(r'^/System/Library/(?:Private)?Frameworks/\w+\.framework/default\.metallib$')
@@ -56,6 +59,7 @@ class Function:
     library: str | None = None
     constants: list[Constant] = field(default_factory=list)
     specialized: bool = False
+    lacks_required: bool = False
 
     def constants_text(self) -> str:
         """Give the constants as MTLFunctionConstantValues lists them: by index in index order, then by name."""

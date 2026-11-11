@@ -36,5 +36,5 @@ RAWCAP_LOG=${O}/${L}.facade.log FRAME_FALLBACK=${NVK} "${B}/facadeframe" "${P}/p
 }
 for side in raw facade; do
     echo "== ${L}: nvk vs ${side}"
-    python3 "${HERE}/../pack/eqcheck.py" "${O}/${L}.nvk.log" "${O}/${L}.${side}.log" --show 2 | tail -25 || true
+    python3 "${HERE}/../pack/eqcheck.py" "${O}/${L}.nvk.log" "${O}/${L}.${side}.log" --show 2 --splits "${P}/pack.json" | tail -25 || true
 done

@@ -161,3 +161,41 @@ void encodeBlit(RMCommandBuffer *cb, const Cmd &c, raw::CommandBuffer *rc, raw::
         break;
     }
 }
+
+// generateMipmapsForTexture: of a chain whose format has no 2D-engine filtering that matches Metal's: one pass a level of the
+// pack's mip state (raw_mip.h), level l + 1 drawn from a header of level l alone. Each pass's prologue barrier orders its reads
+// after the pass before wrote.
+bool mipPasses(raw::CommandBuffer *rc, RMTexture *t, const char **why)
+{
+    raw::Device &d = *gRM->raw;
+    raw::Pipeline *mip = d.mipPipeline(t->_raw.format);
+    const raw::fx::MipChain &c = t->_raw.chain->layout;
+    if (!mip)
+        return false;
+    useTexture(rc, t, true);
+    for (uint32_t l = 0; l + 1 < c.levels; l++) {
+        raw::Texture from = t->_raw, to;
+        from.tic = d.levelTic(t->_raw, l);
+        if (!from.tic || !raw::chainLevelTarget(t->_raw, l + 1, to))
+            return false;
+        to.tic = d.levelTic(t->_raw, l + 1);
+        raw::PassDesc p;
+        p.color[0].texture = &to;
+        p.color[0].load = raw::ColorAttachment::DontCare;
+        p.color[0].store = true;
+        p.count = 1;
+        p.width = c.level[l + 1].width;
+        p.height = c.level[l + 1].height;
+        raw::RenderEncoder *e = rc->render(p);
+        if (!e)
+            return false;
+        e->setPipeline(mip);
+        e->setTexture(0, &from);
+        const float inverseSize[2] = {1.0f / float(p.width), 1.0f / float(p.height)};
+        e->setBytes(2, 0, inverseSize, sizeof inverseSize);
+        if (!e->draw(4 /* MTLPrimitiveTypeTriangleStrip */, 0, 4, 1, 0, why))
+            return false;
+        e->end();
+    }
+    return true;
+}

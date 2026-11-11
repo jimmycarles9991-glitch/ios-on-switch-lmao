@@ -1,12 +1,58 @@
 """check.py's milestones against kernel log lines from emulator runs."""
 
+import contextlib
+import io
 import re
 import unittest
+from pathlib import Path
+from unittest import mock
 
 from tools.emu import check
 
 LAUNCHD = re.compile(check.MILESTONES['launchd'])
 EARLY_BOOT = re.compile(check.MILESTONES['early-boot'])
+
+
+class FilesystemImageTest(unittest.TestCase):
+    def test_filesystem_milestones_reject_a_missing_image_before_building(self):
+        for milestone in ('root', 'launchd', 'early-boot'):
+            for sd in ([], ['--sd=none']):
+                with self.subTest(milestone=milestone, sd=sd):
+                    argv = ['check', '--kind=ios27', f'--until={milestone}', *sd]
+                    error = io.StringIO()
+                    with (
+                        mock.patch.object(check.sys, 'argv', argv),
+                        mock.patch.object(check.boot, 'default_image', return_value=None),
+                        mock.patch.object(check.boot, 'prepare') as prepare,
+                        contextlib.redirect_stderr(error),
+                        self.assertRaises(SystemExit) as raised,
+                    ):
+                        check.main()
+                    self.assertEqual(raised.exception.code, 2)
+                    self.assertIn('requires an iOS filesystem image', error.getvalue())
+                    prepare.assert_not_called()
+
+    def test_default_image_is_passed_to_the_boot(self):
+        image = Path('/fixture/IOS27.SII.001')
+        with (
+            mock.patch.object(check.sys, 'argv', ['check', '--kind=ios27']),
+            mock.patch.object(check.boot, 'default_image', return_value=image),
+            mock.patch.object(check.boot, 'prepare', side_effect=RuntimeError('prepared')) as prepare,
+            self.assertRaisesRegex(RuntimeError, 'prepared'),
+        ):
+            check.main()
+        self.assertEqual(prepare.call_args.args[0].sd, str(image))
+
+    def test_early_hardware_milestones_allow_an_empty_card(self):
+        for milestone in ('cores', 'display', 'sd'):
+            with (
+                self.subTest(milestone=milestone),
+                mock.patch.object(check.sys, 'argv', ['check', '--kind=ios27', f'--until={milestone}', '--sd=none']),
+                mock.patch.object(check.boot, 'prepare', side_effect=RuntimeError('prepared')) as prepare,
+                self.assertRaisesRegex(RuntimeError, 'prepared'),
+            ):
+                check.main()
+            self.assertEqual(prepare.call_args.args[0].sd, 'none')
 
 
 class LaunchdMilestoneTest(unittest.TestCase):

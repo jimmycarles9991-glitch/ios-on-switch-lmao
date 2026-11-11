@@ -4,9 +4,12 @@
 // m2v's with the key's parts its function gives: its AIR, its constants and the descriptor's limits.
 #import "RawMetalInternal.h"
 #include "NativeBridgeMetalFrontend.h"
+#include "RawComplete.h"
+#include "RawDirect.h"
 #include "raw_compute.h"
 #include "raw_compute_key.h"
 #include "raw_metallib.h"
+#include "raw_view.h"
 
 @interface RMComputeState : RMTwinObject {
 @public
@@ -16,7 +19,9 @@
     uint32_t _maxThreads;
     bool _multipleOfWidth;
     std::mutex _lock;
-    std::map<std::string, const raw::ComputeState *> _kernels;  // by threadgroup shape and memory: the pack's, or null
+    // by threadgroup shape, memory and bindings: the pack's, one made at its first dispatch, or null
+    std::map<std::string, const raw::ComputeState *> _kernels;
+    MTLComputePipelineDescriptor *_direct;  // over m2v's functions: what a kernel the pack lacks is made from
 }
 @end
 
@@ -38,23 +43,28 @@
     return [(id<MTLComputePipelineState>)_twin staticThreadgroupMemoryLength];
 }
 
-// The pack's kernel of this state at `threads` threads a threadgroup, threadgroup memory `memory` and the textures and
-// samplers bound (raw_compute_key.h); null: none
+// This state's kernel at `threads` threads a threadgroup, threadgroup memory `memory` and the textures and samplers bound
+// (raw_compute_key.h): the pack's, else `make`'s of `_direct` at its key; null: none
 - (const raw::ComputeState *)kernel:(const uint32_t *)threads
                              memory:(const std::string &)memory
                            textures:(const std::string &)textures
                            samplers:(const std::string &)samplers
+                               make:(const raw::ComputeState * (^)(MTLComputePipelineDescriptor *,
+                                                                   const std::string &))make
 {
     if (!_keyed)
         return nullptr;
     char shape[48];
     snprintf(shape, sizeof shape, "%u,%u,%u|", threads[0], threads[1], threads[2]);
     std::lock_guard<std::mutex> hold(_lock);
-    const auto [at, made] = _kernels.emplace(shape + memory + "|" + textures + "|" + samplers, nullptr);
-    if (made)
-        at->second = raw::computeState(
-            *gRM->raw, raw::computeKeyHash(raw::computeKey(_air, _constants, _maxThreads, _multipleOfWidth, threads,
-                                                           memory, textures, samplers)));
+    const auto [at, inserted] = _kernels.emplace(shape + memory + "|" + textures + "|" + samplers, nullptr);
+    if (inserted) {
+        const std::string key =
+            raw::computeKey(_air, _constants, _maxThreads, _multipleOfWidth, threads, memory, textures, samplers);
+        at->second = raw::computeState(*gRM->raw, raw::computeKeyHash(key));
+        if (!at->second)
+            at->second = make(_direct, key);
+    }
     return at->second;
 }
 
@@ -89,6 +99,8 @@ id rmComputeState(id device, id twin, id<MTLFunction> function, MTLComputePipeli
     s->_constants = f ? f->_constants : "";
     s->_maxThreads = uint32_t(descriptor.maxTotalThreadsPerThreadgroup);
     s->_multipleOfWidth = descriptor.threadGroupSizeIsMultipleOfThreadExecutionWidth;
+    s->_direct = [descriptor copy];
+    s->_direct.computeFunction = twinOf(function);
     s.label = descriptor.label;
     return s;
 }
@@ -290,15 +302,44 @@ static bool plainTexture(RMTexture *t)
     return t->_rawOk && x.tic && !x.chain && !x.converted() && !x.standIn && !x.sampled && !x.memoryless;
 }
 
+// The kernel the pack lacks, of `descriptor` at `key`, made for this dispatch (RawComplete.h), and journaled as m2v journals a
+// dispatch it runs, so the next pack holds it
+- (const raw::ComputeState *)make:(MTLComputePipelineDescriptor *)descriptor
+                              key:(const std::string &)key
+                             grid:(MTLSize)grid
+                          threads:(MTLSize)threads
+                        perThread:(bool)perThread
+{
+    if (!gRM->completion)
+        return nullptr;
+    const uint32_t t[3] = {uint32_t(threads.width), uint32_t(threads.height), uint32_t(threads.depth)};
+    raw::KernelDispatch ask(t, _memory);
+    for (uint32_t slot = 0; slot < 31; slot++)
+        if (_textures[slot])
+            ask.texture(slot, _textures[slot]->_descriptor);
+    for (uint32_t slot = 0; slot < 16; slot++)
+        if (_samplers[slot])
+            ask.sampler(slot, _samplers[slot]->_descriptor);
+    const raw::ComputeState *k = gRM->completion->kernel(descriptor, ask.dispatch(), key);
+    if (k)
+        native_bridge_metal_journal_dispatch(_state->_twin, grid, threads, perThread, [self memoryText].c_str(),
+                                             [self texturesText].c_str(), [self samplersText].c_str());
+    return k;
+}
+
 - (void)dispatch:(MTLSize)grid threads:(MTLSize)threads perThread:(bool)perThread
 {
     uint32_t t[3] = {uint32_t(threads.width), uint32_t(threads.height), uint32_t(threads.depth)};
     uint64_t groups[3] = {grid.width, grid.height, grid.depth};
-    const raw::ComputeState *k = _state ? [_state kernel:t
-                                                  memory:[self memoryText]
-                                                textures:[self texturesText]
-                                                samplers:[self samplersText]]
-                                        : nullptr;
+    const raw::ComputeState *k =
+        _state ? [_state kernel:t
+                         memory:[self memoryText]
+                       textures:[self texturesText]
+                       samplers:[self samplersText]
+                           make:^(MTLComputePipelineDescriptor *descriptor, const std::string &key) {
+                               return [self make:descriptor key:key grid:grid threads:threads perThread:perThread];
+                           }]
+               : nullptr;
     bool refused = false;
     for (int i = 0; perThread && i < 3; i++) {
         if (!t[i] || groups[i] % t[i]) {
@@ -323,14 +364,13 @@ static bool plainTexture(RMTexture *t)
             k = nullptr;
             refused = true;
         }
-        // m2v binds its own view of another format there (a half texture's raw bits), which the raw path does not make
-        const raw::FormatInfo *f = x.kind == raw::KernelTexture && x.slot < 31 && _textures[x.slot]
-                                       ? raw::formatInfo(_textures[x.slot]->_raw.format)
-                                       : nullptr;
-        if (f && x.window && f->tic0 != x.window) {
+        RMTexture *viewed = x.kind == raw::KernelTexture && x.slot < 31 ? _textures[x.slot] : nil;
+        const raw::FormatInfo *f = viewed ? raw::formatInfo(viewed->_raw.format) : nullptr;
+        if (f && raw::slotView(x.window, f->tic0, raw::swizzledWord0(f->tic0, viewed->_raw.swizzle), f->bpp,
+                               raw::blockCompressed(f)) == raw::SlotView::None) {
             [self refuse:PredComputeView
                    value:x.slot
-                     why:@"a kernel m2v binds a view of another format at a texture slot"];
+                     why:@"a kernel m2v binds a view of another texel size at a texture slot"];
             k = nullptr;
             refused = true;
         }

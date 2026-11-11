@@ -359,7 +359,9 @@ static void fillSetup(const HEVCDecoder *d, nvdec_hevc_pic_s *p, const HEVCSPS *
     p->sw_start_code_e = 1;
     // 8-bit samples, or Main 10's in 16 bits (mode 1: P010, the 10 bits high, as 'x420' holds them)
     p->disp_output_mode = d->sample_bytes == 2 ? 1 : 0;
-    p->framestride[0] = p->framestride[1] = d->pitch;
+    // framestride counts samples: in mode 1 the engine's rows are framestride x 2 bytes (averne's nvtegra_hevc.c
+    // halves P010's linesize). Given in bytes, every block row lands at twice its offset.
+    p->framestride[0] = p->framestride[1] = d->pitch / d->sample_bytes;
     p->colMvBuffersize = d->colmv_bytes / 256;
     p->HevcSaoBufferOffset = kDeblockBytesPerRow * d->sample_bytes * d->rows / 256;
     p->HevcBsdCtrlOffset = (kDeblockBytesPerRow + kSaoBytesPerRow) * d->sample_bytes * d->rows / 256;

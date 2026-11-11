@@ -45,6 +45,7 @@ IOReturn SwitchXHCI::systemSleep(bool entering)
         checkStage = 0;
         mailbox->disable();
         gHost.lostPower();
+        xusb_hold_lost(&hold);
     } else {
         unclaimed = 0;
         mailbox->enable();

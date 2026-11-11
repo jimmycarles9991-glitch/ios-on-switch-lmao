@@ -8,11 +8,16 @@ lint_files()
 py_library(
     name = "lib",
     srcs = [
+        "apps.py",
+        "audio.py",
         "checks.py",
         "devicerun.py",
+        "dispatch.py",
         "hwtest.py",
+        "joycon.py",
         "lockscreen.py",
         "morning.py",
+        "protection.py",
         "raw_stats.py",
         "reports.py",
         "rules.py",
@@ -53,6 +58,14 @@ py_test(
     deps = [":lib"],
 )
 
+# audio.py's checks over boot 16's audiomxd lines.
+py_test(
+    name = "audio_test",
+    size = "small",
+    srcs = ["audio_test.py"],
+    deps = [":lib"],
+)
+
 # lockscreen.py's checks over boot 15's lock-screen lines.
 py_test(
     name = "lockscreen_test",
@@ -61,10 +74,42 @@ py_test(
     deps = [":lib"],
 )
 
+# dispatch.py's checks over boot 18's locationd starts and its kernel crash lines.
+py_test(
+    name = "dispatch_test",
+    size = "small",
+    srcs = ["dispatch_test.py"],
+    deps = [":lib"],
+)
+
+# protection.py's checks over boot 15's content-protection lines and a kernel that labels.
+py_test(
+    name = "protection_test",
+    size = "small",
+    srcs = ["protection_test.py"],
+    deps = [":lib"],
+)
+
 # stutter.py's frame-pacing checks over lines in the kernel's formats.
 py_test(
     name = "stutter_test",
     size = "small",
     srcs = ["stutter_test.py"],
+    deps = [":lib"],
+)
+
+# apps.py's checks over boot 16b's lsd and SpringBoard lines.
+py_test(
+    name = "apps_test",
+    size = "small",
+    srcs = ["apps_test.py"],
+    deps = [":lib"],
+)
+
+# joycon.py's checks over boot 18's Joy-Con lines.
+py_test(
+    name = "joycon_test",
+    size = "small",
+    srcs = ["joycon_test.py"],
     deps = [":lib"],
 )

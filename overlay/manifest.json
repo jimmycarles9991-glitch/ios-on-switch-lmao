@@ -34,9 +34,10 @@
     ".ca and images beneath. No gate.",
     "SwitchHWTest.app (hw_test_app, debug packages only) is a bundle entry: the whole .app from its .ipa, every Mach-O",
     "in the trust cache, in a union over /Applications. boot/BUILD.bazel gives each kind the app built for its iOS",
-    "version; iOS 27 also gets SwitchHWTest27e.app, the same app built arm64e. Deploy asks for an upgrade migration",
-    "when they change, so LaunchServices registers them the way it registers an OS update's system apps",
-    "(tools/deploy/system_apps.py).",
+    "version; iOS 27 also gets SwitchHWTest27e.app, the same app built arm64e. When they change, the deploy has",
+    "switch-appregd register them at the next boot as installd registers a built-in app (tools/deploy/app_journal.py).",
+    "switch-appregd and joyconpaird share /usr/libexec, which no boot-arg hides: only the BlueTool stand-in starts them",
+    "on iOS 17, and on iOS 27 the kernel disables joyconpaird's launchd job with switch-no-bt.",
     "Debug iOS 27 packages show iOS 27's com.apple.coreanimation logging profile with CADebug's info lines persisted, so the",
     "pulled log holds the render server's detach results (drivers/NativeMobileDisplay/logging).",
     "iOS 27's launchd bootstraps /System/Cryptexes/Supplemental/System/Library/LaunchDaemons when the commpage",
@@ -78,14 +79,23 @@
     {
       "path": "/usr/libexec/joyconpaird",
       "source": "build/switch-joycon/joyconpaird",
-      "trust": true,
-      "boot-arg": "switch-no-bt"
+      "trust": true
+    },
+    {
+      "path": "/usr/libexec/switch-appregd",
+      "source": "build/switch-apps/switch-appregd",
+      "trust": true
     },
     {
       "path": "/private/preboot/Cryptexes/Supplemental/System/Library/LaunchDaemons/com.brunostjohn.switch.joyconpaird.plist",
       "source": "drivers/SwitchJoyCon/helper/com.brunostjohn.switch.joyconpaird.plist",
       "union": "/private/preboot/Cryptexes/Supplemental",
-      "boot-arg": "switch-no-bt",
+      "kind": "24B119"
+    },
+    {
+      "path": "/private/preboot/Cryptexes/Supplemental/System/Library/LaunchDaemons/com.brunostjohn.switch.appregd.plist",
+      "source": "drivers/SwitchAppRegistration/com.brunostjohn.switch.appregd.plist",
+      "union": "/private/preboot/Cryptexes/Supplemental",
       "kind": "24B119"
     },
     {

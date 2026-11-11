@@ -218,6 +218,20 @@ void swlan::net::attached(IOEthernetController *controller, IOEthernetInterface 
     report_link();
 }
 
+// en0 brought up (IFF_UP), on the work loop. IONetworkInterface's start thread begins halted and never calls
+// outputStart until the driver starts it. The driver never stops it: stopOutputThread waits out a running outputStart,
+// which may be waiting for this work loop's gate.
+IOReturn swlan::net::enable(IOEthernetInterface *interface)
+{
+    const IOReturn r = interface->startOutputThread();
+    if (r == kIOReturnSuccess) {
+        IOLog("SwitchWLAN: en0 up, its output thread started\n");
+    } else {
+        IOLog("SwitchWLAN: en0's output thread did not start (%#x)\n", r);
+    }
+    return r;
+}
+
 // The start thread (one run at a time): frames from the stack's output queue into the radio, as many as it has
 // buffers for. With none, kIOReturnNoResources: the family stops until tx_ready's ifnet_start, and the frames wait in
 // the stack's queue meanwhile (its AQM and flow control decide what waits and what is dropped, not a full ring).

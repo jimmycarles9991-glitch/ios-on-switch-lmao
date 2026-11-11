@@ -202,6 +202,13 @@ swift_test(
     ],
 )
 
+# An image compiled GPU-compressed (ASTC), which CoreUI hands Core Animation as texture data: the render server makes its
+# texture over memory laid out by the device's texture layout (ui.compressed_image)
+apple_resource_group(
+    name = "compressed_assets",
+    resources = glob(["assets/Compressed.xcassets/**"]),
+)
+
 apple_resource_group(
     name = "media_resources",
     strip_structured_resources_prefixes = ["hw_test_app"],
@@ -253,6 +260,26 @@ cc_library(
     target_compatible_with = ["@platforms//os:ios"],
 )
 
+exports_files([
+    "cpu/switch_workloop_probe.c",
+    "cpu/switch_workloop_probe.h",
+])
+
+swift_interop_hint(
+    name = "workloop_probe_module",
+    module_name = "SwitchWorkloopProbe",
+)
+
+# system.workloop_sync's waiters and waker: its own syscalls and ARMv8.0 atomics (cpu/test runs it on the Mac).
+cc_library(
+    name = "workloop_probe",
+    srcs = ["cpu/switch_workloop_probe.c"],
+    hdrs = ["cpu/switch_workloop_probe.h"],
+    aspect_hints = [":workloop_probe_module"],
+    copts = ["-O2"],
+    target_compatible_with = ["@platforms//os:ios"],
+)
+
 swift_interop_hint(
     name = "a64x_probe_module",
     module_name = "SwitchA64XProbe",
@@ -280,6 +307,7 @@ swift_library(
     copts = SWIFT_COPTS,
     data = [
         ":ca_states_resources",
+        ":compressed_assets",
         ":media_resources",
     ],
     module_name = "HWTestKit",
@@ -291,6 +319,7 @@ swift_library(
         ":gpu",
         ":sched_probe",
         ":video",
+        ":workloop_probe",
     ],
 )
 

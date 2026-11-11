@@ -12,6 +12,8 @@
 namespace {
 
 using swlan::a80211::assoc_request;
+using swlan::a80211::bssid_changed;
+using swlan::a80211::join_report;
 
 struct Offsets {
     size_t authUpper, ssidLength, ssid, bssid, keyLength, keyCipher, key;
@@ -79,6 +81,45 @@ TEST(SwitchWLANAssoc, PairwiseMasterKey)
     EXPECT_EQ(a.key_length, 32u);
     EXPECT_EQ(a.key_cipher, 6u);
     EXPECT_EQ(memcmp(a.key, pmk.data(), 32), 0);
+}
+
+uint32_t word(const uint8_t *bytes, size_t at)
+{
+    uint32_t v;
+    memcpy(&v, bytes + at, 4);
+    return v;
+}
+
+// What 24B119's _dispatchAsyncAssocEvent and CoreWiFi read from the events, at their offsets.
+TEST(SwitchWLANAssoc, JoinEventsAsTheFrameworkReadsThem)
+{
+    join_report report = {};
+    report.bss[0].bssid[5] = 0x4a;
+    report.bss[0].rssi = -48;
+    report.result = 1;
+    report.result_valid = 1;
+    const auto *r = reinterpret_cast<const uint8_t *>(&report);
+    EXPECT_EQ(r[5], 0x4a);
+    EXPECT_EQ(static_cast<int32_t>(word(r, 0x2c)), -48);
+    EXPECT_EQ(word(r, 0x214), 1u);
+    EXPECT_NE(word(r, 0x218), 0u);
+    EXPECT_EQ(sizeof report, 0x21cu);
+
+    bssid_changed change = {};
+    change.reason = swlan::a80211::kBssidChangeLinkUpJoin;
+    EXPECT_EQ(sizeof change, 28u);
+    EXPECT_EQ(word(reinterpret_cast<const uint8_t *>(&change), 0x18), 3u);
+}
+
+TEST(SwitchWLANAssoc, OnlyTwentySevenSendsJoinData)
+{
+#ifdef SWITCH_IPSW_KIND_24B119
+    EXPECT_TRUE(swlan::a80211::kJoinEventData);
+    EXPECT_TRUE(swlan::a80211::kAnswersDeauthGet);
+#else
+    EXPECT_FALSE(swlan::a80211::kJoinEventData);
+    EXPECT_FALSE(swlan::a80211::kAnswersDeauthGet);
+#endif
 }
 
 }  // namespace

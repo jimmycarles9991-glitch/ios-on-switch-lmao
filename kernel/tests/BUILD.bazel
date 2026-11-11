@@ -49,6 +49,10 @@
 #                            and the shared region in the 16k kernel, and 4 KiB everywhere in the 4k one
 #   switch_pmap_test         <switch/pmap.h>: arm_clear_fast_fault skips the TLB invalidate only for a PTE whose one
 #                            change is setting the Access flag
+#   switch_protection_test   <switch/protection_rules.h>: an unlabelled vnode reads as D before the epoch and as a new one
+#                            after it, a new one is labelled only when it would read otherwise, listxattr loses only
+#                            the label; 12377's hooks label after authorization and the MAC check, a failed label fails
+#                            its call, bulk class requests on Data go through getattrlist
 #   switch_cpulimit_test     <switch/cpulimit.h>: a blocking per-thread CPU limit's share scaled to this CPU, lifted at
 #                            a whole core, and its hook in both trees' thread_set_cpulimit
 #   switch_commpage_test     <switch/commpage.h>: the ARMv8 crypto features from ID_AA64ISAR0_EL1 into the commpage and
@@ -144,6 +148,16 @@ host_test(
         "//kernel/switch:srcs",
         "//kernel/xnu-10063.141.1/libkern:c++/OSKext.cpp",
         "//kernel/xnu-12377.121.6/libkern:c++/OSKext.cpp",
+    ],
+)
+
+# iOS 27's kernel events may take one mbuf cluster (SwitchWLAN's 24B119 join report); iOS 17's are as Apple ships them.
+host_test(
+    name = "xnu_kev_cluster_source_test",
+    srcs = ["xnu_kev_cluster_source_test.cpp"],
+    data = [
+        "//kernel/xnu-10063.141.1/bsd:kern/kern_event.c",
+        "//kernel/xnu-12377.121.6/bsd:kern/kern_event.c",
     ],
 )
 
@@ -482,6 +496,35 @@ host_test(
     srcs = [
         "switch/pmap.h",
         "switch_pmap_test.cpp",
+    ],
+    includes = ["."],
+)
+
+copy_file(
+    name = "switch_protection_rules",
+    src = "//kernel/switch:include/switch/protection_rules.h",
+    out = "switch/protection_rules.h",
+)
+
+host_test(
+    name = "switch_protection_test",
+    srcs = [
+        "switch/protection_rules.h",
+        "switch_protection_test.cpp",
+    ],
+    data = [
+        "//kernel/xnu-12377.121.6/bsd:kern/kern_descrip.c",
+        "//kernel/xnu-12377.121.6/bsd:vfs/vfs_attrlist.c",
+        "//kernel/xnu-12377.121.6/bsd:vfs/vfs_subr.c",
+        "//kernel/xnu-12377.121.6/bsd:vfs/vfs_syscalls.c",
+        "//kernel/xnu-12377.121.6/bsd:vfs/vfs_xattr.c",
+    ],
+    defines = [
+        'KERN_DESCRIP_12377=\\"$(rootpath //kernel/xnu-12377.121.6/bsd:kern/kern_descrip.c)\\"',
+        'VFS_ATTRLIST_12377=\\"$(rootpath //kernel/xnu-12377.121.6/bsd:vfs/vfs_attrlist.c)\\"',
+        'VFS_SUBR_12377=\\"$(rootpath //kernel/xnu-12377.121.6/bsd:vfs/vfs_subr.c)\\"',
+        'VFS_SYSCALLS_12377=\\"$(rootpath //kernel/xnu-12377.121.6/bsd:vfs/vfs_syscalls.c)\\"',
+        'VFS_XATTR_12377=\\"$(rootpath //kernel/xnu-12377.121.6/bsd:vfs/vfs_xattr.c)\\"',
     ],
     includes = ["."],
 )

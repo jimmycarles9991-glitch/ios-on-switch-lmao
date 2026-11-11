@@ -40,6 +40,7 @@ APPLE_PREFIXES = (
     '-flto',
     '-mcpu=',
     '-march=',
+    '-mno-implicit-sme',
     '-fptrauth',
     '-ftrivial-auto-var-init',
     '-fbounds-safety',

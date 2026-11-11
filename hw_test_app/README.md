@@ -3,14 +3,17 @@
 A SwiftUI app that tests the Switch's hardware through public iOS APIs: Metal, the hardware video decoders and
 encoders, images, audio, display, sensors, input, networking, storage, CPU and crypto.
 
-The first launch on a boot runs every test that needs no person. Later launches on that boot show the last run's
-results until you tap Run All. Interactive runs the tests that need someone to plug, press or pick something. Each run
-writes `Documents/hwtest/<boot uuid>-<stamp>.json` with `F_FULLFSYNC` before every test and after it, so a run the app
-or the OS doesn't survive still keeps every result and the name of the test that was running (`run.current`). If the
-app's process dies mid-run, the next launch records that test as a FAIL with `crashed=1` and runs the rest. If the OS
-goes down, the next boot's run puts that test last. When a GPU test times out, a one-fill probe checks the app's Metal
-device; if the probe hangs too, the later tests that draw are skipped and named after the test that wedged it.
-`pull_logs` copies the reports off the card, and `//tools/hwtest` compares each run with the ones before it.
+The first launch on a boot runs every test that needs no person. If the latest run is unfinished, startup waits for
+Continue run or Start new run. Continue keeps completed results; Start new run saves the old run as cancelled before
+starting fresh. Other launches show this boot's last results until you tap Run All. Interactive runs the tests that need
+someone to plug, press or pick something. Each run writes `Documents/hwtest/<boot uuid>-<stamp>.json` with `F_FULLFSYNC`
+before every test and after it, so a run the app or the OS doesn't survive still keeps every result and the name of the
+test that was running (`run.current`). If the app's process dies mid-run, choosing Continue records that test as a FAIL
+with `crashed=1` and runs the rest. A test interrupted by closing/backgrounding the app runs again. Continuing after a
+reboot puts the interrupted test last and records the new boot's identity alongside the original run. When a GPU test
+times out, a one-fill probe checks the app's Metal device; if the probe hangs too, the later tests that draw are skipped
+and named after the test that wedged it. `pull_logs` copies the reports off the card, and `//tools/hwtest` compares each
+run with the ones before it.
 
 One library, `HWTestKit` (`kit/` and `tests/`), holds the tests, the runner, the log lines and the report. Each iOS
 version has an app that wraps it and adds the tests only that version has: `SwitchHWTest17` (`app17/`, built for iOS
@@ -21,9 +24,10 @@ that is an A12, so the 27 app carries LSE and FP16 code the A57 lacks, as any ap
 
 The apps only go on debug images. A kind's debug `//:boot` puts its app in `/Applications/SwitchHWTest.app` through
 the overlay, so the manifest and `//tools/devicerun` name a single app. A debug iOS 27 image also gets
-`SwitchHWTest27e.app`, the same app built for arm64e, which a64x translates whole. When the apps change,
-`bazel run //deploy:sd` leaves datamigrator's migration sentinel, and LaunchServices registers them on the next boot
-the way it registers an OS update's apps. `bazel build //hw_test_app:SwitchHWTest17` (or `:SwitchHWTest27`,
+`SwitchHWTest27e.app`, the same app built for arm64e, which a64x translates whole. When an app changes,
+`bazel run //deploy:sd` lists it for `switch-appregd`, which registers it on the next boot the way installd registers a
+built-in app, with no data migration. `system.overlay_app_records` checks that each app's record matches the bundle on
+disk. `bazel build //hw_test_app:SwitchHWTest17` (or `:SwitchHWTest27`,
 `:SwitchHWTest27e`) builds an app with rules_apple, signed ad hoc.
 
 The test clips and images are pinned in `bazel/pinned/hw_test_app/media`; every frame carries a barcode with its frame

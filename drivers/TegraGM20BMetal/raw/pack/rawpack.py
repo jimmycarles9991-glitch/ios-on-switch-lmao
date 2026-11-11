@@ -10,10 +10,11 @@ compilation manifest, and the closure over the blend CA puts in the pipeline and
 fragment (CA_TIERS).
 
   1. directpack.mm makes every state's record: its programs, the 3D registers raw_emit makes for it, its push words and
-     its set-0 layout; a state with a fetch the pixel interlock would order gets its barrier form;
+     its set-0 layout; a state with a fetch the pixel interlock would order gets its barrier form; and every compute
+     dispatch shape's kernel (runtime/raw_direct_compute.h);
   2. the probe (pack/probe.mm) draws one state, the warm-up, on a mock GM20B whose submissions nvdec executes
      (pack/nvdec.cpp, Mesa's Fermi MME simulator in pack/mesa): NVK's context init and the registers every record is
-     laid over; probecompute.mm probes the compute kernels the same way, named by mkprograms.py's programs;
+     laid over;
   3. directlink.py writes pack.bin by mkpack.py's rules: per state its programs, registers, push words and layout, plus
      the context init with the addresses to relocate.
 
@@ -21,18 +22,19 @@ usage: rawpack.py --bridge <host libnative_metal_bridge.a> --metal-abi <MetalABI
                   --qc <default.metallib> --corpus <corpus.log> --out <dir> [--stack <hex key>] [--prebuilt <dir>]
        rawpack.py --build-only --bridge <host libnative_metal_bridge.a> --metal-abi <MetalABI.h> --out <dir>
 writes <out>/pack.bin, pack.json, layouts.txt, report.txt and keeps the buckets in <out>/work (deleted with --clean).
---build-only compiles directpack, the probes, the mock GPU (libmock_iokit.dylib) and own.metallib into <dir> and stops;
+--build-only compiles directpack, the probe, the mock GPU (libmock_iokit.dylib) and own.metallib into <dir> and stops;
 --prebuilt <dir> runs those instead of compiling them (//gpu/seed:local_tools makes them its own action, so a corpus
 edit only reruns the buckets).
+--ca-names: Core Animation states a device's logs name as missing from the pack (precompile/ca_names.py), made from
+their names in the corpus tier, as the journal's own are.
 --stack: the build's stack key (the plugin is compiled with the same value), stamped into the pack header: the runtime
 refuses a pack of another build.
 The same work in three steps, for a build that caches each bucket's run (it depends on the bucket's state lines and the
 tools alone):
-       rawpack.py --split --qc <default.metallib> --corpus <corpus.log> --out <dir>
+       rawpack.py --split --qc <default.metallib> --corpus <corpus.log> [--ca-names <ca-names/<build>.txt>] --out <dir>
            writes <dir>/work/bucket0 .. bucket15, each a corpus.log of its states
        rawpack.py --probe-bucket <bucket dir> --prebuilt <dir> --nvk <host twin dylib> --qc <default.metallib>
-           makes one bucket in place: records.bin, bucket 0's warm.{out,log}, its kernels' compute.{out,log} and
-           programs.bin
+           makes one bucket in place: records.bin (its states' and kernels' records) and bucket 0's warm.{out,log}
        rawpack.py --link --out <dir> [--stack <hex key>] <bucket dir>...
            directlink.py over the buckets: <dir>/pack.bin and the rest, as the one-step form writes them
        rawpack.py --stamp <pack.bin> --stack <hex key>
@@ -88,7 +90,7 @@ def option(name: str, required: bool = True) -> str | None:
     return None
 
 
-BUILT = ('probe', 'probecompute', 'directpack', 'libmock_iokit.dylib', 'own.metallib')
+BUILT = ('probe', 'directpack', 'libmock_iokit.dylib', 'own.metallib')
 # Another framework's states (their lines keep lib=, tools/gpu/rawpack.py): the probe loads that library from the
 # crawl's root
 FRAMEWORK = re.compile(r' lib=/System/Library/(?:Private)?Frameworks/\w+\.framework/default\.metallib ')
@@ -112,7 +114,7 @@ def library_root(qc: Path) -> str:
 CA_TIERS = ('corpus', 'manifest', 'variants', 'blend', 'fetch')
 
 
-def ca_corpus(qc: Path, corpus: Path, work: Path) -> Path:
+def ca_corpus(qc: Path, corpus: Path, work: Path, names: list[str] = ()) -> Path:
     """Give the corpus with its Core Animation lines as harvested and those made from their names (ca/ tables).
 
     Without this QuartzCore's tables in ca/, the corpus as it is.
@@ -133,13 +135,13 @@ def ca_corpus(qc: Path, corpus: Path, work: Path) -> Path:
 
     with open(out, 'w') as dst:
         dst.writelines(line for line in lines if not caspec.corpus_fields(line)[0])
-        for tier, made in ca_states(path, corpus):
+        for tier, made in ca_states(path, corpus, names):
             dst.writelines(line + '\n' for line in made)
             print(f'rawpack: Core Animation states, {tier}: {len(made)}')
     return out
 
 
-def ca_states(tables_path: Path, corpus: Path) -> list[tuple[str, list[str]]]:
+def ca_states(tables_path: Path, corpus: Path, names: list[str] = ()) -> list[tuple[str, list[str]]]:
     """Give the Core Animation states the pack holds, each once by its key, by tier: those harvested, then caset's.
 
     Every state a device drew goes in as it drew it (QuartzCore makes some names otherwise than the journal holds them,
@@ -160,13 +162,14 @@ def ca_states(tables_path: Path, corpus: Path) -> list[tuple[str, list[str]]]:
     with open(corpus) as f:
         drawn = [line.rstrip('\n') for line in f if line.startswith('R ok=1 ') and caspec.corpus_fields(line)[0]]
     out = [('harvested', [line for line in drawn if fresh(line)])]
-    for tier, names in caset.labels(tables, caset.corpus_names(str(corpus), tables), CA_TIERS).items():
-        out.append((tier, [line for line in (caspec.state_line(tables, n) for n in names) if fresh(line)]))
+    named = caset.corpus_names(str(corpus), tables) + [n for n in names if caset.makes(tables, n)]
+    for tier, labels in caset.labels(tables, named, CA_TIERS).items():
+        out.append((tier, [line for line in (caspec.state_line(tables, n) for n in labels) if fresh(line)]))
     return out
 
 
 # The raw runtime's sources directpack.mm makes its records with (RawDirect.mm beside them)
-DIRECT_RUNTIME = ('raw_direct', 'raw_record_parts', 'raw_emit', 'raw_pack')
+DIRECT_RUNTIME = ('raw_direct', 'raw_direct_compute', 'raw_record_parts', 'raw_emit', 'raw_pack', 'raw_metallib')
 
 
 def build(work: Path, bridge: Path, metal_abi: Path) -> None:
@@ -252,13 +255,12 @@ def build(work: Path, bridge: Path, metal_abi: Path) -> None:
         )
 
     tool('probe', [HERE / 'probe.mm'])
-    tool('probecompute', [HERE / 'probecompute.mm'], (RAW / 'runtime/raw_metallib.cpp',))
     tool(
         'directpack',
         [HERE / 'directpack.mm', RAW / 'runtime/RawDirect.mm'],
         tuple(RAW / f'runtime/{name}.cpp' for name in DIRECT_RUNTIME),
     )
-    own = ('ycbcr', 'xr', 'resolve')
+    own = ('ycbcr', 'xr', 'resolve', 'mip')
     exact = {'resolve': ['-fno-fast-math']}  # its sums in sample order and its NaN tests kept (resolve.metal)
     for name in own:
         run(
@@ -300,7 +302,7 @@ def split_buckets(corpus: Path, work: Path, count: int) -> list[Path]:
             if line.startswith('R ') and (' label=com.apple.coreanimation.' in line or FRAMEWORK.search(line)):
                 lines[packfile.fnv(line.split(' ', 3)[3].encode()) % count].append(line)
                 warm = warm or (line if 'f downsample_4_frag' in line else '')
-            elif line.startswith('D ok=1 '):  # a compute dispatch shape (probecompute.mm)
+            elif line.startswith('D ok=1 '):  # a compute dispatch shape (directpack.mm's kernels)
                 lines[packfile.fnv(line.encode()) % count].append(line)
     dirs = []
     for i, part in enumerate(lines):
@@ -312,7 +314,10 @@ def split_buckets(corpus: Path, work: Path, count: int) -> list[Path]:
 
 
 def state_key(line: str) -> str:
-    """Give an R line's state key as probe.mm prints it: every descriptor field but the label, then its functions.
+    """Give an R line's state key as its text names it: every descriptor field but the label, then its functions.
+
+    The pack files a state under the key the runtime computes of the descriptor made of the line (probe_states.h,
+    runtime/RawPipelineKey.h), which is this for a line written as the device journals it.
 
     No lib= field is in it; the functions the state links follow its stages (probe_states.h linkedFunction); a line
     whose first library is another framework's default.metallib than QuartzCore's ends with " | l <framework>"
@@ -343,14 +348,13 @@ def state_key(line: str) -> str:
 
 
 def bucket(tools: Path, d: Path, nvk: Path, qc: Path, env: dict[str, str]) -> str:
-    """Make one bucket's records directly (directpack.mm: records.bin) and probe what the direct compile does not make.
+    """Make one bucket's records directly (directpack.mm: records.bin, its states' and its dispatch shapes' kernels).
 
     Bucket 0 draws its first state, the warm-up, once on the mock GPU (warm.out, warm.log): the context init and the
-    registers every record is laid over (directlink.py). A bucket with dispatch shapes probes its kernels (compute.out,
-    compute.log, named by the programs.bin mkprograms.py reads out of the run's cache).
+    registers every record is laid over (directlink.py).
     """
     root = library_root(qc)
-    env = dict(env, PROBE_LIB_ROOT=root)
+    env = dict(env, PROBE_LIB_ROOT=root, PROBE_DATA_LIBS=str(Path(root).parent / 'data'))
     corpus = d / 'corpus.log'
     cache = d / 'cache'
     said = []
@@ -377,13 +381,6 @@ def bucket(tools: Path, d: Path, nvk: Path, qc: Path, env: dict[str, str]) -> st
     if d.name == 'bucket0':
         warm = {'PROBE_BYTES': '256', 'RAWCAP_LOG': str(d / 'warm.log')}
         step('probe', [tools / 'probe', nvk, cache, qc, corpus, 0, 1], warm, d / 'warm.out')
-    if any(line.startswith('D ok=1 ') for line in corpus.read_text().splitlines()):
-        data = {'PROBE_DATA_LIBS': str(Path(root).parent / 'data')}
-        kernels = [tools / 'probecompute', nvk, cache, corpus]
-        step('probecompute warm', kernels, data, d / 'computewarm.out')
-        run([sys.executable, HERE / 'mkprograms.py', d / 'programs.bin', cache])
-        logs = {'NVDEC_KERNELS': '1', 'RAWCAP_LOG': str(d / 'compute.log'), 'RAWCAP_PROGRAMS': str(d / 'programs.bin')}
-        step('probecompute', kernels, dict(data, **logs), d / 'compute.out')
     shutil.rmtree(cache, ignore_errors=True)
     return f'rawpack: {d.name}: ' + '; '.join(said)
 
@@ -467,7 +464,8 @@ def main() -> None:
     work = out / 'work'
     shutil.rmtree(work, ignore_errors=True)
     work.mkdir(parents=True)
-    corpus = ca_corpus(qc, corpus, work)
+    names = Path(option('--ca-names', False) or os.devnull).read_text().split()
+    corpus = ca_corpus(qc, corpus, work, names)
     if '--split' in sys.argv[1:]:  # --split --qc <metallib> --corpus <corpus.log> --out <dir>: <dir>/work/bucket<i>
         split_buckets(corpus, work, BUCKETS)
         return

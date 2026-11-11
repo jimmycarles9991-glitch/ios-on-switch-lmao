@@ -443,8 +443,9 @@ bool encodeRaw(RMCommandBuffer *cb, size_t from, size_t to, const char **why)
             re = nullptr;
             be = nullptr;
             break;
-        case OpPipeline:
-            re->setPipeline(((__bridge RMPipeline *)c.obj)->_raw);
+        case OpPipeline:  // (c: a cubic variant of the state, raw_cubic.h)
+            re->setPipeline(c.c ? reinterpret_cast<raw::Pipeline *>(uintptr_t(c.c))
+                                : ((__bridge RMPipeline *)c.obj)->_raw);
             break;
         case OpBlendColor: {
             const float rgba[4] = {extraFloat(cb, c.x), extraFloat(cb, c.x + 1), extraFloat(cb, c.x + 2),
@@ -515,8 +516,17 @@ bool encodeRaw(RMCommandBuffer *cb, size_t from, size_t to, const char **why)
                                  uint32_t(extra(cb, c.x + 2)), why))
                 return refused();
             break;
-        case OpCopyTexture:
         case OpMipmaps:
+            if (!((__bridge RMTexture *)c.obj)->_raw.chain->fmt2d) {  // the 3D engine's passes (decided at record)
+                be->end();
+                if (!mipPasses(rc, (__bridge RMTexture *)c.obj, why))
+                    return refused();
+                be = rc->blit();
+                break;
+            }
+            encodeBlit(cb, c, rc, be, fresh, standInFresh);
+            break;
+        case OpCopyTexture:
         case OpCopyBuffer:
         case OpFillBuffer:
         case OpCopyBufferToTexture:

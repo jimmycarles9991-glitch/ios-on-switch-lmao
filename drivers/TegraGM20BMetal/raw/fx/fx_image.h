@@ -38,5 +38,20 @@ void writeVolume(const MipChain &c, uint8_t *cpu, uint32_t l, const uint32_t ori
 void readVolume(const MipChain &c, const uint8_t *cpu, uint32_t l, const uint32_t origin[3], const uint32_t size[3],
                 uint8_t *dst, size_t rowBytes, size_t planeBytes);
 
+// NIL's layout of a block-compressed 2D image (or 2D array of `layers`) of `levels` levels, in its elements: blocks of
+// blockW x blockH texels, `bpp` bytes each, tiled as a colour image of ceil(max(1, size >> level) / block) of them a level,
+// its block height chosen by the height in texels (Tiling::choose reads extent_px) and clamped at each level to its rows of
+// elements (Tiling::clamp reads extent_B). `width` and `height` are texels; the chain's are elements.
+bool blockChainLayout(uint32_t width, uint32_t height, uint32_t levels, uint32_t layers, uint32_t blockW,
+                      uint32_t blockH, uint32_t bpp, MipChain &out);
+
+// The CPU's copy of elements [x, x + w) x [y, y + h) of `level` of `layer` between the image's memory (in the CPU's view of
+// kind 0xFE memory: TegraColor GOBs) and rows `rowBytes` apart: a GOB the rectangle covers moves as its 32 lines, an edge
+// GOB line by line. The caller keeps the rectangle inside the level and handles the cache lines.
+void writeElements(const MipChain &c, uint8_t *memory, uint32_t layer, uint32_t level, uint32_t x, uint32_t y,
+                   uint32_t w, uint32_t h, const uint8_t *src, size_t rowBytes);
+void readElements(const MipChain &c, const uint8_t *memory, uint32_t layer, uint32_t level, uint32_t x, uint32_t y,
+                  uint32_t w, uint32_t h, uint8_t *dst, size_t rowBytes);
+
 }  // namespace fx
 }  // namespace raw

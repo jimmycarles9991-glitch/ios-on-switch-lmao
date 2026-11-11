@@ -8,6 +8,7 @@
 #include "raw_clear.h"
 #include "raw_follow.h"
 #include "raw_gpu.h"
+#include "raw_mip.h"
 #include "raw_owned.h"
 #include "raw_residual.h"
 #include "raw_samples.h"
@@ -16,6 +17,7 @@
 #include "raw_stamps.h"
 #include "raw_target.h"
 #include "raw_tiled_cache.h"
+#include "raw_view.h"
 #include "TegraGM20BLayout.h"
 
 #include <CoreFoundation/CoreFoundation.h>
@@ -739,6 +741,17 @@ Pipeline *Device::pipeline(uint64_t keyHash, PackForm form, bool caTransform)
         return nullptr;
     }
     build(pl, pp, vs, fs, pack_.section<uint32_t>(PackBlob) + pp.blob, pack_.string(pp.keyString), caTransform);
+    if (const PackSplit *split = pack_.split(pp.fs)) {
+        SplitSource source;
+        source.rec = *split;
+        source.packed = true;
+        source.pp = &pp;
+        source.blob = pack_.section<uint32_t>(PackBlob) + pp.blob;
+        source.keyString = pack_.string(pp.keyString);
+        source.vs = vs;
+        source.caTransform = caTransform;
+        offerSplit(pl, std::move(source));
+    }
     return &pl;
 }
 
@@ -1159,6 +1172,12 @@ void Device::freeTic(uint32_t tic)
 {
     memcpy(tic_.cpu + 32 * tic, tic_.cpu, 32);
     freeTic_.push_back(tic);
+    const auto views = viewTics_.equal_range(tic);
+    for (auto v = views.first; v != views.second; ++v) {
+        memcpy(tic_.cpu + 32 * v->second.second, tic_.cpu, 32);
+        freeTic_.push_back(v->second.second);
+    }
+    viewTics_.erase(views.first, views.second);
 }
 
 // Texture header of a pitch-linear 2D texture (Mesa NIL nvb097_fill_image_view_desc for a linear image: HEADER_VERSION PITCH,
@@ -1898,6 +1917,57 @@ bool Device::createMipTexture(uint32_t width, uint32_t height, uint32_t format, 
     return true;
 }
 
+bool Device::createBlockTextureOver(void *bytes, uint64_t length, uint32_t width, uint32_t height, uint32_t format,
+                                    const fx::MipChain &layout, Texture &t)
+{
+    const FormatInfo *f = formatInfo(format);
+    if (!blockCompressed(f) || !bytes || length < layout.bytes || (uintptr_t(bytes) & 511) || layout.bpp != f->bpp ||
+        !shape(width, height, format, t))
+        return false;
+    cleanToMemory(bytes, layout.bytes);
+    Import *i = new Import;
+    if (!k_.importPages(bytes, length, i->bo, 0, true)) {
+        delete i;
+        return false;
+    }
+    std::lock_guard<std::mutex> l(lock_);
+    if (!k_.bindImport(bytes, i->bo, TGM_LAYOUT_KIND)) {
+        delete i;
+        return false;
+    }
+    i->kind = TGM_LAYOUT_KIND;
+    i->refs = 1;
+    i->base = uintptr_t(bytes);
+    i->bytes = length;
+    stats.imports++;
+    stats.importsMade++;
+    stats.importBytes += i->bo.bytes;
+    if (!(t.tic = allocTic())) {
+        release(i);
+        return false;
+    }
+    t.import = i;
+    t.va = i->bo.va;
+    t.cpu = static_cast<uint8_t *>(bytes);
+    t.pitch = layout.level[0].rowBytes;
+    t.blockLinear = true;
+    t.blockHeight = layout.yLog2;
+    t.layers = layout.layers;
+    t.layerBytes = layout.arrayStride;
+    t.type = uint8_t(layout.layers > 1 ? fx::kTexTwoDArray : fx::kTexTwoD);
+    uint32_t w[8];
+    fx::mipChainTic(layout, t.va, f->tic0, f->srgb, 0, layout.levels, w, t.type);
+    setField(w, 143, 128, width - 1);  // WIDTH_MINUS_ONE in texels (NIL's extent_px)
+    setField(w, 175, 160, height - 1);
+    memcpy(tic_.cpu + 32 * t.tic, w, 32);
+    if (layout.levels > 1) {
+        t.chain = new Texture::Chain;
+        t.chain->layout = layout;
+        t.chain->va = t.va;
+    }
+    return true;
+}
+
 void Device::destroyTexture(Texture &t)
 {
     if (t.view) {
@@ -2293,6 +2363,12 @@ Pipeline *Device::xrPipeline(XrForm form)
 Pipeline *Device::resolvePipeline(uint32_t format)
 {
     const char *name = resolveState(format);
+    return name ? pipeline(Pack::fnv(name, strlen(name))) : nullptr;
+}
+
+Pipeline *Device::mipPipeline(uint32_t format)
+{
+    const char *name = mipState(format);
     return name ? pipeline(Pack::fnv(name, strlen(name))) : nullptr;
 }
 
@@ -2889,6 +2965,9 @@ CommandBuffer *Device::begin()
     p.m(INVALIDATE_SHADER_CACHES_NO_WFI, kInvalidateData);
     checkRoom(p, "a submission prologue");
     cb.segment(start, p.at);
+    cb.prologueDwords_ = uint32_t(p.at - start);
+    cb.splits_.clear();
+    cb.buffersWritten_ = false;
     return &cb;
 }
 
@@ -3048,6 +3127,7 @@ BlitEncoder *CommandBuffer::blit()
 bool CommandBuffer::commit(uint32_t &seqno)
 {
     Device &d = *dev_;
+    launchPrologues();
     if (d.overflowing_) {
         os_log_error(os_log_create("com.brunostjohn.switch.TegraGM20BMetal", "raw"),
                      "raw: a command buffer larger than its ring, with no memory for a larger one: not submitted");
@@ -3527,6 +3607,7 @@ bool RenderEncoder::prepare(Pipeline *pl, uint32_t primitive, int32_t first, uin
     const bool empty = vp_[2] == 0 || vp_[3] == 0;
     axis(vp_[0], empty ? 0 : vp_[2], areaW_, sc_[0], sc_[0] + sc_[2], x);
     axis(vp_[1], empty ? 0 : vp_[3], areaH_, sc_[1], sc_[1] + sc_[3], y);
+    pl = splitTwin(pl, primitive, first, indexed ? drawIndexCount_ : count, {x[0], y[0], x[1], y[1]});
     if (!whole_) {
         if (x[1] > x[0] && y[1] > y[0]) {
             const std::array<uint32_t, 4> r = {x[0], y[0], x[1], y[1]};
@@ -3603,6 +3684,7 @@ bool RenderEncoder::prepare(Pipeline *pl, uint32_t primitive, int32_t first, uin
         }
         if (e.kind == EntryUbo) {
             const Bound &b = bufs_[e.stage][e.slot];
+            cb_->buffersWritten_ |= bufferStorage(e);
             BufferDescriptor desc;
             if (!bufferDescriptor(e, b.va, b.size, desc)) {
                 *why = bufferStorage(e) ? "a storage buffer bound at an offset that is not a multiple of 16, with no "
@@ -3787,6 +3869,8 @@ bool RenderEncoder::prepare(Pipeline *pl, uint32_t primitive, int32_t first, uin
     }
     if (pl->setSlot[0] || pl->setSlot[1] || pl->uboCount)
         p.inc(CB_SELECTOR_A, {kRootBytes, uint32_t(d.root_.va >> 32), uint32_t(d.root_.va)});
+    if (pl->splitOf)
+        launchSplit(p, *pl, set);
 #if !defined(SWITCH_DEBUG) || SWITCH_DEBUG
     countRules(*pl);
 #endif
@@ -4069,6 +4153,26 @@ uint32_t Device::levelTic(Texture &t, uint32_t level)
     return tic;
 }
 
+uint32_t Device::viewTic(const Texture &t, uint32_t word0)
+{
+    std::lock_guard<std::mutex> l(lock_);
+    if (!t.tic)
+        return 0;
+    const auto views = viewTics_.equal_range(t.tic);
+    for (auto v = views.first; v != views.second; ++v)
+        if (v->second.first == word0)
+            return v->second.second;
+    const uint32_t tic = allocTic();
+    if (!tic)
+        return 0;
+    uint32_t own[8], w[8];
+    memcpy(own, tic_.cpu + 32 * t.tic, 32);
+    viewHeader(own, word0, w);
+    memcpy(tic_.cpu + 32 * tic, w, 32);  // visible at the next submission's header invalidate
+    viewTics_.emplace(t.tic, std::make_pair(word0, tic));
+    return tic;
+}
+
 static bool chainLevelView(const Texture &t, uint32_t level, uint32_t rtFormat, Texture &out)
 {
     ColorTargetDesc d;
@@ -4083,7 +4187,12 @@ static bool chainLevelView(const Texture &t, uint32_t level, uint32_t rtFormat, 
     out.bpp = t.bpp;
     out.blockLinear = true;
     out.blockHeight = d.blockHeight;
-    out.layerBytes = d.layerBytes;
+    out.layerBytes = t.chain->layout.layers > 1 ? t.chain->layout.arrayStride : d.layerBytes;
+    out.layers = t.chain->layout.layers;
+    out.blockW = t.blockW;
+    out.blockH = t.blockH;
+    out.texelWidth = std::max(1u, t.texelWidth >> level);
+    out.texelHeight = std::max(1u, t.texelHeight >> level);
     return true;
 }
 
@@ -4460,6 +4569,7 @@ void BlitEncoder::room(uint32_t words)
 
 void BlitEncoder::copyBytes(uint64_t src, uint64_t dst, uint64_t bytes)
 {
+    cb_->buffersWritten_ = true;
     for (uint64_t done = 0; done < bytes;) {
         room();
         const uint32_t n = uint32_t(std::min<uint64_t>(bytes - done, 1u << 17));
@@ -4476,6 +4586,7 @@ void BlitEncoder::copyBytes(uint64_t src, uint64_t dst, uint64_t bytes)
 
 void BlitEncoder::fillBytes(uint64_t dst, uint64_t bytes, uint8_t value)
 {
+    cb_->buffersWritten_ = true;
     // SET_REMAP_COMPONENTS: DST_X..W CONST_A (4), COMPONENT_SIZE ONE (0) or FOUR (3) bytes, one source and destination
     // component; LAUNCH_DMA: PIPELINED, FLUSH, pitch both sides, REMAP
     constexpr uint32_t kConstA = 0x4444, kRemap = 1u << 10, kMaxDim = 1u << 15;
@@ -4519,6 +4630,7 @@ void BlitEncoder::fillBytes(uint64_t dst, uint64_t bytes, uint8_t value)
 void BlitEncoder::copyRect(uint64_t src, uint32_t srcPitch, uint64_t dst, uint32_t dstPitch, uint32_t width,
                            uint32_t lines, uint32_t bpp)
 {
+    cb_->buffersWritten_ = true;
     if (!width || !lines || !bpp)
         return;
     room();
@@ -4535,6 +4647,7 @@ void BlitEncoder::copyTexels(const Texture &src, uint32_t sx, uint32_t sy, uint3
 void BlitEncoder::copyBufferTexels(uint64_t va, uint32_t pitch, const Texture &t, uint32_t x, uint32_t y, uint32_t z,
                                    uint32_t w, uint32_t h, bool toTexture, uint8_t aspect)
 {
+    cb_->buffersWritten_ |= !toTexture;
     room(48);
     const CopySide rows{va, pitch}, texels = sideOf(t, x, y, z);
     const CopySide &from = toTexture ? rows : texels, &to = toTexture ? texels : rows;
@@ -4631,7 +4744,7 @@ void BlitEncoder::barrier()
 void BlitEncoder::generate(Texture &t)
 {
     Texture::Chain *c = t.chain;
-    if (!c || !c->fmt2d)  // (the facade sends those to m2v: PredMipmapsFormat)
+    if (!c || !c->fmt2d)  // (the 3D engine's passes take those: mipPasses)
         return;
     const uint32_t last = c->layout.levels - 1;
     room(uint32_t(fx::generateWords(c->layout, 0, last)));

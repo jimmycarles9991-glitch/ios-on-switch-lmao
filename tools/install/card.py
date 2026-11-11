@@ -37,7 +37,8 @@ ICON = 'bootloader/res/icon_ios_hue.bmp'
 # The menu icon before Nyx tinted it (an untinted tile): hekate never reads it once the ini names ICON.
 FORMER_ICONS = ('bootloader/res/icon_ios.bmp',)
 # The user's own files in the entry's folder, which no package ships: the loader reads bootargs.txt at boot.
-USER_FILES = ('bootargs.txt',)
+BOOT_ARGS = 'bootargs.txt'
+USER_FILES = (BOOT_ARGS,)
 # The installer's image parts beside the boot files (folder.py writes them, install-ios.bin reads them): never a
 # boot package's, so a deploy keeps them.
 INSTALL_PART = re.compile(r'([A-Z0-9]+)\.SII\.([0-9]{3})')

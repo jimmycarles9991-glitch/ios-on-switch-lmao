@@ -59,6 +59,9 @@ NVK_SOURCES = (
     'nvk_shader.c',
     'nvk_switch_push.c',
     'nvk_switch_round.c',
+    'nvk_switch_split.c',
+    'nvk_switch_split_nir.c',
+    'nvk_switch_split_prologue.c',
     'nvkmd/nvkmd.h',
 )
 NVK_TREES = ('layers/',)

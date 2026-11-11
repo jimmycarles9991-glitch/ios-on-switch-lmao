@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 // raw/runtime/raw_residual.h and raw/pack/probe_bind.h: a buffer bound off m2v's descriptor base alignment draws on raw with its
 // SlotBindOffset residual in the push word the probe's bind-offset run names, a storage buffer's as a uniform one's, and a
-// kernel's buffer dispatches with it in the word probecompute.mm's bind-offset dispatch names.
+// kernel's buffer dispatches with it in the word the direct compile's bind-offset dispatch names.
 #include "../raw/pack/probe_bind.h"
 #include "../raw/runtime/raw_residual.h"
 

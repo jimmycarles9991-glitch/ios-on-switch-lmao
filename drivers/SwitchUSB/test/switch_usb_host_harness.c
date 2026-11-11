@@ -172,3 +172,41 @@ const char *portsc_speed_name(uint32_t portsc)
 {
     return xhci_portsc_speed_name(portsc);
 }
+
+// --- XusbPorts.h xusb_hold ---
+static struct xusb_hold hold;
+
+void hold_reset(void)
+{
+    memset(&hold, 0, sizeof(hold));
+}
+
+uint32_t hold_usbcmd(uint32_t value)
+{
+    return xusb_hold_usbcmd(&hold, value);
+}
+
+uint32_t hold_usbsts(uint32_t value)
+{
+    return xusb_hold_usbsts(&hold, value);
+}
+
+void hold_usbsts_write(uint32_t value)
+{
+    xusb_hold_usbsts_write(&hold, value);
+}
+
+void hold_lost(void)
+{
+    xusb_hold_lost(&hold);
+}
+
+int hold_keeps(uint64_t value, uint64_t current)
+{
+    return xusb_hold_keeps(&hold, value, current);
+}
+
+uint32_t hold_erstba0(void)
+{
+    return XHCI_ERSTBA0;
+}

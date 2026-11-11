@@ -15,6 +15,9 @@ struct SamplerDesc {                                      // the MTLSamplerDescr
     uint8_t maxAnisotropy = 1;                            // Metal's degree (metalAnisotropy), 1 to 32
     float lodMin = 0, lodMax = 3.402823466e+38f;
     bool pixel = false;  // normalizedCoordinates NO
+    // a min or mag filter Cubic (MTLSamplerMinMagFilterCubic): the header filters nearest, a placeholder no filtered read
+    // takes, and a state samples through it on its cubic variant (raw_cubic.h), which emulates Metal's bicubic filter
+    bool cubic = false;
 };
 
 // The MTLSamplerDescriptor's properties, as Metal answers them
@@ -25,6 +28,8 @@ struct MetalSamplerFields {
     float lodMin = 0, lodMax = 3.402823466e+38f;
     bool normalizedCoordinates = true;
 };
+
+constexpr uint64_t kFilterCubic = 2;
 
 enum : uint64_t {
     kAddressClampToEdge = 0,
@@ -68,9 +73,16 @@ inline uint8_t metalAnisotropy(uint64_t value)
 // Pixel coordinates are the texture unit's (samplerCoordinateBits): the sampler Metal samples them with is plain Metal's
 // (metal2vulkan-runtime sampler.rs taken_descriptor): its wrapping axes clamped to the edge, level 0 alone, no anisotropy.
 // lodAverage changes nothing m2v hands NVK.
+// A Cubic min or mag filter is m2v's (metal2vulkan metal/bicubic.rs runtime_cubic_measured): without a mip filter,
+// isotropic, mirrored once on no axis, a border colour Metal names; the header holds nearest filters.
 inline bool takeSampler(const MetalSamplerFields &m, SamplerDesc &s)
 {
     if (m.compareFunction != 0 || std::isnan(m.lodMin) || std::isnan(m.lodMax))
+        return false;
+    const bool cubic = m.minFilter == kFilterCubic || m.magFilter == kFilterCubic;
+    if (cubic && (m.mipFilter != 0 || metalAnisotropy(m.maxAnisotropy) != 1 || (m.borderColor & 3) == 3 ||
+                  m.sAddress == kAddressMirrorClampToEdge || m.tAddress == kAddressMirrorClampToEdge ||
+                  m.rAddress == kAddressMirrorClampToEdge))
         return false;
     if (!m.normalizedCoordinates &&
         (m.sAddress == kAddressMirrorClampToEdge || m.tAddress == kAddressMirrorClampToEdge))
@@ -80,11 +92,13 @@ inline bool takeSampler(const MetalSamplerFields &m, SamplerDesc &s)
     const uint64_t borderColor = m.borderColor & 3;
     if (border && borderColor != 0 && borderColor != 3)
         return false;
-    if (m.minFilter > 1 || m.magFilter > 1 || m.mipFilter > 2 || m.sAddress > kAddressClampToBorderColor ||
-        m.tAddress > kAddressClampToBorderColor || m.rAddress > kAddressClampToBorderColor)
+    if (m.minFilter > kFilterCubic || m.magFilter > kFilterCubic || m.mipFilter > 2 ||
+        m.sAddress > kAddressClampToBorderColor || m.tAddress > kAddressClampToBorderColor ||
+        m.rAddress > kAddressClampToBorderColor)
         return false;
-    s.minFilter = uint8_t(m.minFilter);
-    s.magFilter = uint8_t(m.magFilter);
+    s.cubic = cubic;
+    s.minFilter = cubic ? 0 : uint8_t(m.minFilter);
+    s.magFilter = cubic ? 0 : uint8_t(m.magFilter);
     s.mipFilter = uint8_t(m.mipFilter);
     s.sAddress = uint8_t(m.sAddress);
     s.tAddress = uint8_t(m.tAddress);

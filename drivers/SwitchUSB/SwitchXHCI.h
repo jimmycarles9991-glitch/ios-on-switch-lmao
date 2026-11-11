@@ -33,6 +33,8 @@ class SwitchXHCI : public AppleUSBXHCI {
     IOWorkLoop *tegraLoop;  // mailbox and the lost-interrupt check; AppleUSBXHCI keeps its own loop
     IOFilterInterruptEventSource *mailbox;
     IOTimerEventSource *check;
+    IONotifier *devices;
+    xusb_hold hold;  // AppleUSBXHCI's work loop, and systemSleep while AppleUSBXHCI is lowered
     volatile uint32_t mailboxInterrupts;
     uint32_t unclaimed;  // primary interrupt context only
     volatile bool mailboxStorm;
@@ -51,6 +53,8 @@ class SwitchXHCI : public AppleUSBXHCI {
     static xusb_irq_sample hostSample();
     xusb_irq_sample mailboxSample() const;
     uint32_t *shadowFor(uint64_t address);
+    uint32_t heldWrite32(uint64_t address, uint32_t value);
+    bool keepsEventRing(uint64_t address, uint64_t value, unsigned bytes);
 
 public:
     static SwitchXHCI *running;

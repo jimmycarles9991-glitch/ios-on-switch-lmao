@@ -110,6 +110,7 @@
 #include <sys/persona.h>
 #include <sys/reason.h>
 #include <switch/pretranslated.h>
+#include <switch/protection.h>
 #include <switch/a64x.h>
 #if SYSV_SHM
 #include <sys/shm_internal.h>           /* shmexec() */
@@ -9558,8 +9559,11 @@ native_switch_watchdog_policy(proc_t p, user_addr_t scratch)
 	/* Bluetooth needs drivers/SwitchBluetooth, which boot-arg switch-no-bt keeps off (the BlueTool stand-in in the
 	 * overlay and bluetoothd's transport, native_switch_exec_environment, follow it). Without it bluetoothd has no
 	 * controller and stays disabled, and so does audiomxd: its Bluetooth plug-in would retry bluetoothd's
-	 * com.apple.BTAudioHALPlugin.xpc in a tight loop (~520/s, 500k+ log lines a boot). */
-#define NATIVE_SWITCH_POLICY_BLUETOOTH "<key>com.apple.bluetoothd</key><true/>"
+	 * com.apple.BTAudioHALPlugin.xpc in a tight loop (~520/s, 500k+ log lines a boot). So does the Joy-Con pairing
+	 * agent, whose plist shares the overlay's Supplemental LaunchDaemons with switch-appregd's, which no boot-arg
+	 * hides. */
+#define NATIVE_SWITCH_POLICY_BLUETOOTH "<key>com.apple.bluetoothd</key><true/>" \
+	    "<key>com.brunostjohn.switch.joyconpaird</key><true/>"
 	/* watchdogd (the userspace watchdog: it pings backboardd, SpringBoard, logd, configd... every 10 s, and a hang
 	 * ends in a "userspace watchdog timeout" panic with a stackshot) runs once drivers/NativeSwitchWatchdog
 	 * published both its IOWatchdog and the primary PMU it requires (switch_watchdog_ready); otherwise it stays
@@ -9834,6 +9838,7 @@ load_init_program(proc_t p)
 	/* Owner overlay unions over sealed directories (SwitchRawMount.h), now that Data is mounted. */
 	native_switch_raw_overlay(p, (user_addr_t)scratch_addr);
 	switch_pretranslated_capture();
+	switch_protection_capture();
 #endif
 #endif
 #if CONFIG_MEMORYSTATUS

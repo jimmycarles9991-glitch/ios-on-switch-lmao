@@ -2086,6 +2086,19 @@ static NSData *functionBitcode(NBFunction *function)
 }
 
 @end
+
+extern "C" void native_bridge_metal_journal_dispatch(id state, MTLSize grid, MTLSize group, bool threads,
+                                                     const char *memory, const char *textures, const char *samplers)
+{
+    if (journalOn() && [state isKindOfClass:[NBComputePipeline class]])
+        [(NBComputePipeline *)state journalDispatch:grid
+                                              group:group
+                                            threads:threads
+                                             memory:memory
+                                           textures:textures
+                                           samplers:samplers];
+}
+
 @interface NBRenderPipeline : NBObject
 @property (nonatomic) NmbRenderPipeline *handle;
 @property (nonatomic) std::shared_ptr<nbasync::Making> making;  // being made on a worker (AsyncPipelines.h)
@@ -5453,7 +5466,7 @@ static bool linkedHandles(NSArray *functions, std::vector<NmbFunction *> &out)
 }
 
 extern "C" bool native_bridge_metal_render_direct(id descriptor, bool barrier, NSUInteger textureFormat,
-                                                  NSUInteger textureSamples,
+                                                  NSUInteger textureSamples, const struct NmbDirectBinds *binds,
                                                   bool (*each)(const struct NmbDirectState *, void *), void *ctx,
                                                   const char **why)
 {
@@ -5464,7 +5477,7 @@ extern "C" bool native_bridge_metal_render_direct(id descriptor, bool barrier, N
         *why = gDevice ? "a function of another device" : "no device";
         return false;
     }
-    if (nmb_render_pipeline_direct(gDevice, &p, barrier, textureFormat, uint32_t(textureSamples), each, ctx))
+    if (nmb_render_pipeline_direct(gDevice, &p, barrier, textureFormat, uint32_t(textureSamples), binds, each, ctx))
         return true;
     *why = nmb_last_error();
     return false;
@@ -5528,6 +5541,23 @@ static bool computeDescriptor(MTLComputePipelineDescriptor *d, NmbComputePipelin
     for (NSUInteger index = 0; index < 31; ++index)
         p->mutability[index] = d.buffers[index].mutability;
     return true;
+}
+
+extern "C" bool native_bridge_metal_compute_direct(id descriptor, const struct NmbDirectDispatch *dispatch,
+                                                   bool (*each)(const struct NmbDirectKernel *, void *), void *ctx,
+                                                   const char **why)
+{
+    NmbComputePipelineDescriptor p = {};
+    std::vector<NmbFunction *> linked;
+    NSError *error = nil;
+    if (!gDevice || !computeDescriptor((MTLComputePipelineDescriptor *)descriptor, &p, linked, &error)) {
+        *why = gDevice ? "a function of another device, or what the frontend does not represent" : "no device";
+        return false;
+    }
+    if (nmb_compute_pipeline_direct(gDevice, &p, dispatch, each, ctx))
+        return true;
+    *why = nmb_last_error();
+    return false;
 }
 
 // ---- binary archives ----

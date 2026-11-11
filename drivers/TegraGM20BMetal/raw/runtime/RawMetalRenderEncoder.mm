@@ -174,6 +174,7 @@ static void forwardCall(RMEncoder *e, SEL selector, const void *argument)
         hit(_cb, !p->_completable ? PredStateNotPackable : p->_asked ? PredStateBeingMade : PredStateNotInPack);
     }
     _pipe = [(id)p isKindOfClass:[RMPipeline class]] ? p : nil;
+    _drawn = _pipe ? _pipe->_raw : nullptr;
     setBinding(_cb, OpPipeline, 0, 0, state, 0);
 }
 
@@ -184,7 +185,10 @@ static void forwardCall(RMEncoder *e, SEL selector, const void *argument)
     // formats are not recorded, and every draw would hit enc.colorfmt for nothing, r7p5's "a=0 b=0")
     if (!_pipe || !_pipe->_raw || _cb->_encRefused)
         return;
-    const raw::Pipeline &pl = *_pipe->_raw;
+    const raw::Pipeline *drawn = [self drawnRecord];
+    if (!drawn)
+        return;
+    const raw::Pipeline &pl = *drawn;
     for (uint32_t j = 0; j < 8; j++) {
         const uint32_t f = j < _count ? _formats[j] : 0;
         if (f != pl.colorFormats[j] && !(f && pl.colorFormats[j] == 0)) {

@@ -26,7 +26,7 @@ using errno_t = int;
 constexpr IOReturn kIOReturnSuccess = 0;
 constexpr IOReturn kIOReturnNoResources = static_cast<IOReturn>(0xe00002be);
 constexpr IOReturn kIOReturnNoFrames = static_cast<IOReturn>(0xe00002d0);
-constexpr IOReturn kIOReturnNotAttached = static_cast<IOReturn>(0xe00002d8);
+constexpr IOReturn kIOReturnNotAttached = static_cast<IOReturn>(0xe00002d9);
 
 inline std::vector<std::string> gLog;
 
@@ -256,6 +256,7 @@ class IOEthernetInterface {
 public:
     ifnet ifp;
     bool attached = true;
+    bool outputHalted = true;  // IONetworkInterface::init leaves the start thread halted
     std::deque<mbuf_t> output;
     std::vector<mbuf_t> input, delivered;
     unsigned flushes = 0, dequeues = 0;
@@ -305,6 +306,15 @@ public:
             *count = n;
         if (bytes)
             *bytes = 0;
+        return kIOReturnSuccess;
+    }
+
+    IOReturn startOutputThread(IOOptionBits = 0)
+    {
+        if (!attached)
+            return kIOReturnNotAttached;
+        outputHalted = false;
+        ifnet_start(&ifp);
         return kIOReturnSuccess;
     }
 

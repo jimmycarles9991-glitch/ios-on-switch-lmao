@@ -65,6 +65,7 @@ host_test(
         "//drivers/SwitchAudio:SwitchAudioStream.cpp",
         "//drivers/SwitchAudio:SwitchRT5639.cpp",
         "//drivers/SwitchAudio:hal/SwitchAudioPlugIn.c",
+        "//drivers/TegraGPIO:TegraGPIO.cpp",
     ],
     deps = [":neon_harness"],
 )
@@ -80,4 +81,58 @@ py_test(
         "//overlay:manifest.json",
     ],
     deps = ["@rules_python//python/runfiles"],
+)
+
+# The plug-in as the audio server sees it, through its driver interface on the Mac (no kernel service there), once per
+# iPad it plays as: the devices, streams and controls each kind's VirtualAudio needs (switch_audio_plugin_test).
+PLUGIN_SRCS = [
+    "//drivers/SwitchAudio:SwitchAudioAbi.h",
+    "//drivers/SwitchAudio:SwitchAudioFormat.h",
+    "//drivers/SwitchAudio:hal/SwitchAudioControls.h",
+    "//drivers/SwitchAudio:hal/SwitchAudioConvert.h",
+    "//drivers/SwitchAudio:hal/SwitchAudioObjects.h",
+    "//drivers/SwitchAudio:hal/SwitchAudioPlugIn.c",
+    "//kits/SwitchDMA:SwitchDcache.h",
+    "//kits/SwitchRefusal:SwitchRefusal.c",
+    "//kits/SwitchRefusal:SwitchRefusal.h",
+]
+
+PLUGIN_COPTS = [
+    "-Idrivers/SwitchAudio",
+    "-Wno-four-char-constants",
+]
+
+PLUGIN_LINKOPTS = [
+    "-framework",
+    "CoreFoundation",
+    "-framework",
+    "IOKit",
+]
+
+host_library(
+    name = "plugin_j120",
+    srcs = PLUGIN_SRCS,
+    copts = PLUGIN_COPTS,
+)
+
+host_library(
+    name = "plugin_j181",
+    srcs = PLUGIN_SRCS + ["//drivers/SwitchAudio:hal/SwitchAudioControls.c"],
+    copts = PLUGIN_COPTS,
+    defines = ["SWITCH_AUDIO_J181=1"],
+)
+
+host_test(
+    name = "switch_audio_plugin_j120_test",
+    srcs = ["switch_audio_plugin_test.cpp"],
+    linkopts = PLUGIN_LINKOPTS,
+    deps = [":plugin_j120"],
+)
+
+host_test(
+    name = "switch_audio_plugin_j181_test",
+    srcs = ["switch_audio_plugin_test.cpp"],
+    defines = ["SWITCH_AUDIO_J181=1"],
+    linkopts = PLUGIN_LINKOPTS,
+    deps = [":plugin_j181"],
 )

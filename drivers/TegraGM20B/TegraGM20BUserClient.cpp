@@ -78,11 +78,6 @@ struct PoolOrphan {
 	void *va;
 	uint64_t pa, bytes;
 	bool zero;  // a BO a client had: its pages are zeroed before they go back (poolZeroLater)
-	// a coherent BO from ordinary pages (tgm_pool::FromSystem): its pages, released after the view instead of va's, to
-	// the spares when a client had it (spareKeep), with their page list
-	IOBufferMemoryDescriptor *backing;
-	uint64_t *backingPas;
-	uint64_t backingBytes;
 };
 
 PoolOrphan *gPoolOrphans;
@@ -102,7 +97,6 @@ void pushOrphan(PoolOrphan *orphan)
 }
 
 bool poolZeroLater(void *va, uint64_t pa, uint64_t bytes);
-bool spareKeep(IOBufferMemoryDescriptor *bmd, uint64_t *pas, uint64_t bytes);
 
 // A view only we hold is mapped nowhere (an IOMemoryMap holds its descriptor), and nothing can map it any more. But
 // releasing it destroys its device pager's VM object, which first waits (uninterruptibly, vm_object_destroy ->
@@ -130,22 +124,10 @@ void releaseOrphans()
 			continue;
 		}
 		orphan->view->release();
-		if (orphan->va) {
-			__atomic_sub_fetch(&gOrphanBytes, orphan->bytes, __ATOMIC_RELAXED);
-			__atomic_sub_fetch(&gOrphans, 1, __ATOMIC_RELAXED);
-		}
-		if (orphan->backing) {
-			// The view was its pages' only user mapping and import, so they go to the spares as a freed cached BO's do
-			if (!(orphan->zero && spareKeep(orphan->backing, orphan->backingPas,
-							orphan->backingBytes))) {
-				orphan->backing->complete();
-				orphan->backing->release();
-				IODelete(orphan->backingPas, uint64_t, orphan->backingBytes >> 12);
-			}
-		} else if (!(orphan->zero &&
-			     poolZeroLater(orphan->va, orphan->pa, orphan->bytes))) {
+		__atomic_sub_fetch(&gOrphanBytes, orphan->bytes, __ATOMIC_RELAXED);
+		__atomic_sub_fetch(&gOrphans, 1, __ATOMIC_RELAXED);
+		if (!(orphan->zero && poolZeroLater(orphan->va, orphan->pa, orphan->bytes)))
 			tgm_pool_free(orphan->va, orphan->bytes, orphan->pa);
-		}
 		IODelete(orphan, PoolOrphan, 1);
 	}
 }
@@ -782,7 +764,7 @@ class AGXDeviceUserClient : public IOUserClient
 		IOBufferMemoryDescriptor *bmd;  // cached BOs
 		IOMemoryDescriptor *wired;      // imports
 		IOMemoryDescriptor *view;       // cached clientMemoryForType descriptor
-		bool system;  // a coherent BO from ordinary pages (tgm_pool::FromSystem): bmd's pages under a physical view
+		bool system;  // a coherent BO from ordinary pages (tgm_pool::FromSystem): a write-combined bmd
 		bool compositorPool;  // a pool BO counted as the compositor's (critical_ when it was made)
 		tgm_mem *mem;
 		tgm_coh *coh;  // imports: the surface's coherency registry entry (gpu.c), held
@@ -1029,15 +1011,14 @@ void AGXDeviceUserClient::releaseBo(Bo *bo)
 		tgm_pool_free_chunks(bo->pas, bo->npages);
 	}
 	// A pool BO's view and pages go to the thread call (releaseOrphans: releasing the view can wait for an import on
-	// another connection), which keeps the pages while a task still maps the view. Cached BOs need no such care: their
-	// mappings hold the buffer itself, and releasing one waits for nothing.
+	// another connection), which keeps the pages while a task still maps the view. Cached and system BOs need no such
+	// care: their mappings hold the buffer itself, and releasing one waits for nothing.
 	PoolOrphan *orphan = nullptr;
 	if (bo->system && bo->handle) {
 		__atomic_sub_fetch(&gSystemCoherent, 1, __ATOMIC_RELAXED);
 		__atomic_sub_fetch(&gSystemCoherentBytes, bo->bytes, __ATOMIC_RELAXED);
 	}
-	// (a system BO's view is physical as a pool BO's is, and goes the same way, its backing pages released after it)
-	if ((bo->pool_va || bo->system) && bo->view)
+	if (bo->pool_va && bo->view)
 		orphan = IONew(PoolOrphan, 1);
 	if (orphan) {
 		if (!closing_ && bo->view->getRetainCount() > 1) {
@@ -1045,23 +1026,9 @@ void AGXDeviceUserClient::releaseBo(Bo *bo)
 			      "task: pages kept until unmapped\n",
 			      bo->handle, bo->bytes);
 		}
-		*orphan = {nullptr,
-			   bo->view,
-			   bo->pool_va,
-			   bo->pool_pa,
-			   bo->bytes,
-			   bo->handle != 0,
-			   bo->system ? bo->bmd : nullptr,
-			   bo->system ? bo->pas : nullptr,
-			   bo->system ? static_cast<uint64_t>(bo->backing_pages) << 12 : 0};
-		if (bo->pool_va) {
-			__atomic_add_fetch(&gOrphanBytes, bo->bytes, __ATOMIC_RELAXED);
-			__atomic_add_fetch(&gOrphans, 1, __ATOMIC_RELAXED);
-		}
-		if (bo->system) {  // the orphan's now
-			bo->bmd = nullptr;
-			bo->pas = nullptr;
-		}
+		*orphan = {nullptr, bo->view, bo->pool_va, bo->pool_pa, bo->bytes, bo->handle != 0};
+		__atomic_add_fetch(&gOrphanBytes, bo->bytes, __ATOMIC_RELAXED);
+		__atomic_add_fetch(&gOrphans, 1, __ATOMIC_RELAXED);
 		pushOrphan(orphan);
 		scheduleOrphanRelease();
 	} else {
@@ -1203,10 +1170,9 @@ IOReturn AGXDeviceUserClient::boAlloc(const TegraGM20BAbiBoAlloc *in,
 			compressibleLogged_ = true;
 		}
 	}
-	// A coherent BO the pool does not serve (its tiers keep it out, or the pool has no room) is not refused: ordinary pages,
-	// a spare's or made below as a cached BO's are, mapped write-combined (tgm_pool::FromSystem). A refusal would abort
-	// clients such as VectorKit (on Maps' first 4 MiB buffer). A spare is in the state the made path's cleanZeros leaves:
-	// zero in DRAM and no line in its cacheable kernel alias, which nothing writes through while the BO lives.
+	// A coherent BO the pool does not serve (its tiers keep it out, or the pool has no room) is not refused: it is a
+	// write-combined buffer of ordinary pages made below (tgm_pool::FromSystem). A refusal would abort clients such as
+	// VectorKit (on Maps' first 4 MiB buffer).
 	bool system = false;
 	if (!ret && (in->flags & TegraGM20BBoCoherent)) {
 		refused = poolRefusal(in->bytes, pool_bytes_, critical_);
@@ -1231,7 +1197,8 @@ IOReturn AGXDeviceUserClient::boAlloc(const TegraGM20BAbiBoAlloc *in,
 		}
 		systemLogged_ = systemLogged_ || system;
 	}
-	if (!ret && !bo->pool_va && !compressible && !(in->flags & TegraGM20BBoContiguous))
+	if (!ret && !bo->pool_va && !compressible && !system &&
+	    !(in->flags & TegraGM20BBoContiguous))
 		spare = spareTake(in->bytes);
 	if (!ret && bo->pool_va) {
 		for (uint32_t i = 0; i < bo->npages; i++)
@@ -1256,8 +1223,18 @@ IOReturn AGXDeviceUserClient::boAlloc(const TegraGM20BAbiBoAlloc *in,
 				       static_cast<IOOptionBits>(kIOMemoryMapperNone);
 		// Made here only when no spare was ready (the class is kept warm from now on), at its class's size so that it
 		// serves the class again once freed; the BO is its first pages.
-		const uint32_t c =
-			(in->flags & TegraGM20BBoContiguous) ? kClasses : classUp(in->bytes);
+		// A system BO is write-combined by its own buffer's VM object, which keeps the pages until its last mapping
+		// goes. Not by a physical view: a device pager's private pages set a managed page's cache attribute, and reset
+		// it to cacheable when they are freed, whenever that is (a dying task's mapping outlives the BO), under the
+		// next owner's write-combined mapping, whose CPU writes then stay in the cache while the GPU reads DRAM (the
+		// GPU fetched zeros from a raw push ring: PBENTRY). Nor from the spares, which are cacheable.
+		// (kIOMemoryMapperNone shares a bit with kIOMapCacheMask; IOBMD keeps the cache mode's low three bits, so this
+		// stays write-combined and the cached BOs stay default)
+		if (system)
+			options |= kIOMapWriteCombineCache;
+		const uint32_t c = (in->flags & TegraGM20BBoContiguous) || system
+					   ? kClasses
+					   : classUp(in->bytes);
 		const uint64_t backing = c < kClasses ? classBytes(c) : in->bytes;
 		if (backing != in->bytes) {
 			IODelete(bo->pas, uint64_t, bo->npages);
@@ -1297,40 +1274,9 @@ IOReturn AGXDeviceUserClient::boAlloc(const TegraGM20BAbiBoAlloc *in,
 			lap(2);
 		}
 	}
-	// A cached BO's view, which its task maps: the descriptor itself, or its first in->bytes when it is a spare's or
-	// a class's larger buffer.
-	if (!ret && bo->bmd && system) {
-		// a coherent BO from ordinary pages: its task's view is a physical descriptor over them, write-combined as a pool
-		// BO's (kPoolCacheMode: IOKit takes a physical descriptor's user cache mode from the descriptor), one range a run
-		// of contiguous pages. The pages' cacheable kernel mapping holds no line of them (cleanZeros dropped the zeros',
-		// here or when the spare was made or recycled), and nothing writes through it while the BO lives. Released as a
-		// pool view is (releaseBo: orphan, then its backing to the spares).
-		uint32_t runs = 0;
-		for (uint32_t i = 0; i < bo->npages; i++) {
-			runs += static_cast<uint32_t>((i == 0u) ||
-						      bo->pas[i] != bo->pas[i - 1] + 4096);
-		}
-		IOAddressRange *ranges = IONew(IOAddressRange, runs);
-		if (ranges) {
-			uint32_t r = 0;
-			for (uint32_t i = 0; i < bo->npages; i++) {
-				if (i && bo->pas[i] == bo->pas[i - 1] + 4096) {
-					ranges[r - 1].length += 4096;
-					continue;
-				}
-				ranges[r++] = {bo->pas[i], 4096};
-			}
-			bo->view = IOMemoryDescriptor::withAddressRanges(
-				ranges, runs,
-				static_cast<IOOptionBits>(kIODirectionInOut) |
-					static_cast<IOOptionBits>(kIOMemoryTypePhysical64) |
-					kPoolCacheMode,
-				TASK_NULL);
-			IODelete(ranges, IOAddressRange, runs);
-		}
-		if (!bo->view)
-			ret = kIOReturnNoMemory;
-	} else if (!ret && bo->bmd) {
+	// A cached or system BO's view, which its task maps: the descriptor itself, or its first in->bytes when it is a
+	// spare's or a class's larger buffer.
+	if (!ret && bo->bmd) {
 		bo->view = bo->backing_pages == bo->npages
 				   ? static_cast<IOMemoryDescriptor *>(bo->bmd)
 				   : IOSubMemoryDescriptor::withSubRange(bo->bmd, 0, in->bytes,
@@ -1710,9 +1656,8 @@ IOReturn AGXDeviceUserClient::channelDestroy(const TegraGM20BAbiChannel *in)
 }
 
 // The kernel's view of the push at [va, va + bytes) through the binding that holds it (`hit`: the last one found, tried
-// first): pool BOs write-combined, cached BOs their kernel mapping. Null for a host import (no kernel mapping) or a system
-// coherent BO (its task writes it write-combined, and a read through its cacheable kernel mapping could fill lines a later
-// read would find stale). lock_ held.
+// first): pool BOs write-combined, cached and system BOs their kernel mapping. Null for a host import (no kernel mapping).
+// lock_ held.
 const uint32_t *AGXDeviceUserClient::pushView(uint64_t va, uint64_t bytes,
 					      const Binding *&hit) const
 {
@@ -1724,7 +1669,7 @@ const uint32_t *AGXDeviceUserClient::pushView(uint64_t va, uint64_t bytes,
 		}
 	}
 	const void *base = nullptr;
-	if (hit && !hit->bo->system) {
+	if (hit) {
 		if (hit->bo->pool_va) {
 			base = hit->bo->pool_va;
 		} else if (hit->bo->bmd) {
@@ -2486,7 +2431,8 @@ IOReturn AGXDeviceUserClient::clientMemoryForType(UInt32 type, IOOptionBits *opt
 		// (populateDevicePager), but enters them in the pmap only for kernel_map, so a task's first CPU touch of each
 		// 4 KiB still faults (the "device" class on the kprof faults line), and IOKit drops kIOMapPrefault for device
 		// pager memory. A cached BO's buffer is prepared (BoAlloc), which kIOMapPrefault requires.
-		if (bo->bmd && bo->view == bo->bmd && bo->bytes <= kPrefaultMaxBytes) {
+		if (bo->bmd && bo->view == bo->bmd && !bo->system &&
+		    bo->bytes <= kPrefaultMaxBytes) {
 			*options |= kIOMapPrefault;
 			tgm_stats_prefault(bo->bytes);
 		}

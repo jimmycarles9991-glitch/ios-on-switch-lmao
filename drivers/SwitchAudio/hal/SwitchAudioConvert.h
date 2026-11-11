@@ -53,6 +53,40 @@ static inline uint32_t switch_audio_ring_mix(int32_t *ring, uint32_t ring_frames
     return run;
 }
 
+/* Four-channel frames (left, left, right, right: J181's speaker) mixed into stereo ones: channels 0 and 2, as
+ * switch_audio_mix_s32 mixes them. */
+static inline void switch_audio_fold_s32(int32_t *dst, const float *src, uint32_t frames, float gain)
+{
+    uint32_t i = 0;
+#if defined(__ARM_NEON)
+    const float32x4_t g = vdupq_n_f32(gain);
+    for (; i + 4 <= frames; i += 4) {
+        const float32x4x4_t f = vld4q_f32(src + 4 * i);
+        int32x4x2_t d = vld2q_s32(dst + 2 * i);
+        d.val[0] = vqaddq_s32(d.val[0], vcvtq_n_s32_f32(vmulq_f32(f.val[0], g), 31));
+        d.val[1] = vqaddq_s32(d.val[1], vcvtq_n_s32_f32(vmulq_f32(f.val[2], g), 31));
+        vst2q_s32(dst + 2 * i, d);
+    }
+#endif
+    for (; i < frames; ++i) {
+        switch_audio_mix_s32(dst + 2 * i, src + 4 * i, 1, gain);
+        switch_audio_mix_s32(dst + 2 * i + 1, src + 4 * i + 2, 1, gain);
+    }
+}
+
+/* switch_audio_ring_mix of four-channel frames into the stereo ring (switch_audio_fold_s32). */
+static inline uint32_t switch_audio_ring_fold(int32_t *ring, uint32_t ring_frames, uint64_t first, const float *src,
+                                              uint32_t frames, float gain)
+{
+    const uint32_t total = frames < ring_frames ? frames : ring_frames;
+    const uint32_t at = (uint32_t)(first % ring_frames);
+    const uint32_t run = total < ring_frames - at ? total : ring_frames - at;
+    switch_audio_fold_s32(ring + 2 * (uint64_t)at, src, run, gain);
+    if (run < total)
+        switch_audio_fold_s32(ring, src + 4 * (uint64_t)run, total - run, gain);
+    return run;
+}
+
 /* A captured S32 sample as float32 (exact for the codec's 24 bits). */
 static inline float switch_audio_s32_to_float(int32_t v)
 {

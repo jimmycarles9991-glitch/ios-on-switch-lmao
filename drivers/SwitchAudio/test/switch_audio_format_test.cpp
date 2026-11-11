@@ -7,8 +7,9 @@
 // clock at 47999.878 Hz on PLLA.
 //
 // Conversions: full scale 2^31 with saturation (+1.0 -> INT32_MAX, -1.0 -> INT32_MIN, NaN -> 0), two IO contexts sum
-// with saturation, ring wrap-around in two runs, capture back to float exactly for 24-bit samples; the NEON build (as
-// on the device) and the scalar fallback agree bit for bit.
+// with saturation, ring wrap-around in two runs, J181's four speaker channels folded to the stereo ring (channels 0 and
+// 2), capture back to float exactly for 24-bit samples; the NEON build (as on the device) and the scalar fallback agree
+// bit for bit.
 #include <gtest/gtest.h>
 
 #include <algorithm>
@@ -183,6 +184,62 @@ TEST(SwitchAudioFormat, RingWrap)
                 const uint64_t at = (first + i) % ringFrames;
                 for (uint32_t c = 0; c < channels; ++c)
                     expect[at * channels + c] += fcvtzs31(src[i * channels + c]);
+            }
+            EXPECT_EQ(std::vector<int64_t>(ring.begin(), ring.end()), expect)
+                << "first " << first << " frames " << frames;
+        }
+    }
+}
+
+// J181's speaker frames are left, left, right, right: channels 0 and 2 reach the ring, with the gain, saturating.
+TEST(SwitchAudioFormat, FoldEveryLengthNeonMatchesScalar)
+{
+    std::mt19937_64 rng(181);
+    std::uniform_real_distribution<double> sample(-1.3, 1.3), unit(0.0, 1.0);
+    std::uniform_int_distribution<int64_t> any(kInt32Min, kInt32Max - 1);
+    for (uint32_t frames : {0u, 1u, 2u, 3u, 4u, 5u, 7u, 8u, 9u, 1023u, 2048u}) {
+        std::vector<float> src(std::max(1u, frames * 4));
+        for (float &s : src)
+            s = (float)sample(rng);
+        if (frames > 2)
+            src[4 * 2 + 2] = std::numeric_limits<float>::quiet_NaN();
+        std::vector<int32_t> dst(std::max(1u, frames * 2));
+        for (int32_t &d : dst)
+            d = (int32_t)any(rng);
+        const float gain = (float)unit(rng);
+        std::vector<int32_t> neon = dst, scalar = dst;
+        neon_h_fold(neon.data(), src.data(), frames, gain);
+        scalar_h_fold(scalar.data(), src.data(), frames, gain);
+        EXPECT_EQ(neon, scalar) << "frames " << frames;
+        std::vector<int32_t> expect = dst;
+        for (uint32_t i = 0; i < frames; ++i) {
+            expect[2 * i] = saturate(dst[2 * i] + fcvtzs31(src[4 * i] * gain));
+            expect[2 * i + 1] = saturate(dst[2 * i + 1] + fcvtzs31(src[4 * i + 2] * gain));
+        }
+        EXPECT_EQ(neon, expect) << "frames " << frames;
+    }
+}
+
+TEST(SwitchAudioFormat, FoldRingWrap)
+{
+    constexpr uint32_t ringFrames = 16;
+    for (uint64_t first : {0ull, 5ull, 12ull, 15ull, 16ull, 16ull * 1000 + 13}) {
+        for (uint32_t frames : {0u, 1u, 3u, 4u, 11u, 16u, 20u}) {
+            std::vector<int32_t> ring(ringFrames * 2, 0);
+            std::vector<float> src(std::max(1u, frames * 4), 0.0f);
+            for (uint32_t i = 0; i < frames; ++i) {
+                src[4 * i] = src[4 * i + 1] = (float)((i + 1) / 64.0);
+                src[4 * i + 2] = src[4 * i + 3] = -(float)((i + 1) / 32.0);
+            }
+            const uint32_t run = neon_h_ring_fold(ring.data(), ringFrames, first, src.data(), frames, 1.0f);
+            const uint32_t total = std::min(frames, ringFrames);
+            EXPECT_EQ(run, std::min(total, ringFrames - (uint32_t)(first % ringFrames)))
+                << "first " << first << " frames " << frames;
+            std::vector<int64_t> expect(ringFrames * 2, 0);
+            for (uint32_t i = 0; i < total; ++i) {
+                const uint64_t at = (first + i) % ringFrames;
+                expect[at * 2] += fcvtzs31(src[i * 4]);
+                expect[at * 2 + 1] += fcvtzs31(src[i * 4 + 2]);
             }
             EXPECT_EQ(std::vector<int64_t>(ring.begin(), ring.end()), expect)
                 << "first " << first << " frames " << frames;

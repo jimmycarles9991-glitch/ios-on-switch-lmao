@@ -137,4 +137,14 @@ const PackKernel *Pack::findKernel(uint64_t keyHash) const
     return at != end && at->keyHash == keyHash ? at : nullptr;
 }
 
+const PackSplit *Pack::split(uint16_t wholeProgram) const
+{
+    const PackSplit *s = section<PackSplit>(PackSplits);
+    const PackSplit *end = s + bytes(PackSplits) / sizeof(PackSplit);
+    const PackSplit *at = std::lower_bound(s, end, wholeProgram, [](const PackSplit &x, uint16_t w) {
+        return x.whole < w;
+    });
+    return at != end && at->whole == wholeProgram ? at : nullptr;
+}
+
 }  // namespace raw

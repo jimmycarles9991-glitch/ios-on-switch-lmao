@@ -10,6 +10,8 @@
 
 #[path = "NativeMetalDirect.rs"]
 pub mod direct;
+#[path = "NativeMetalDirectCompute.rs"]
+pub mod direct_compute;
 #[path = "NativeMetalFailure.rs"]
 mod failure;
 #[path = "NativeMetalObjects.rs"]

@@ -95,6 +95,19 @@ class Identity(unittest.TestCase):
         self.assertEqual(chosen[self.adt_edit.WHITEPOINT_TYPE], apple['default-whitepoint-type'])
         self.assertFalse(any(p[0] == 'name' and p[2] == b'backlight\0' for c in self.tree[1] for p in c[0]))
 
+    def test_usb_host_port_identity_is_apples(self):
+        xhci = properties(find(self.tree, 'arm-io', 'usb-xhci'))
+        host = self.adt_edit.apple_usb_host(self.apple)
+        for key in self.adt_edit.USB_HOST_PORT_IDENTITY:
+            self.assertEqual(xhci.get(key), host.get(key), key)
+        if properties(self.apple)['model'] == b'iPad12,1\0':
+            self.assertEqual(host['device_type'], b'usb-drd\0')
+            self.assertEqual(xhci['port-type'], struct.pack('<I', 12))
+            self.assertEqual(xhci['port-number'], struct.pack('<I', 1))
+        else:
+            self.assertEqual(host['device_type'], b'usb-xhci\0')
+            self.assertNotIn('port-type', xhci)
+
     def test_audio_is_apples_acoustic_design(self):
         audio, apple = properties(find(self.tree, 'product', 'audio')), properties(find(self.apple, 'product', 'audio'))
         for key in self.adt_edit.AUDIO_IDENTITY:

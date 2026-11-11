@@ -34,6 +34,7 @@
 #include "SwitchCryptex.h"
 #include "SwitchCryptexCache.h"
 #include "SwitchCryptexMap.h"
+#include "SwitchCryptexStats.h"
 #include "../../kits/SwitchTime/SwitchTime.h"
 
 // NOLINTNEXTLINE(misc-use-internal-linkage): the layout bsd/vfs/vfs_cluster.c writes, named in its C interface
@@ -187,6 +188,10 @@ constexpr unsigned kWorkers = 4;  // prefetch threads: APFS pages a run in one b
 
 using Extent = SwitchExtent;  // bytes: image offset, offset on the SD APFS window, length
 
+// The client's completion runs on the request's thread call, and APFS hashes the sealed volume's blocks in it.
+// AppleDiskImages2 completes an in-kernel image's requests (attachDiskImages') on its DIO threads, which it starts with
+// kernel_thread_start: the kernel task's BASEPRI_KERNEL (81), THREAD_CALL_PRIORITY_KERNEL's band. Kernel-high (92) would
+// put the hashing above every IOWorkLoop, the SD driver's worker that feeds it included.
 struct Pending {
     Pending *next;
     thread_call_t call;
@@ -295,7 +300,7 @@ Pending *takePending()
     p = static_cast<Pending *>(IOMallocZero(sizeof(Pending)));
     if (!p)
         return nullptr;
-    p->call = thread_call_allocate_with_options(finishRequest, p, THREAD_CALL_PRIORITY_KERNEL_HIGH, 0);
+    p->call = thread_call_allocate_with_options(finishRequest, p, THREAD_CALL_PRIORITY_KERNEL, 0);
     if (!p->call) {
         IOFree(p, sizeof(Pending));
         return nullptr;
@@ -357,8 +362,18 @@ void failPending(Pending *p, IOReturn status)
 void finishRequest(thread_call_param_t parameter, thread_call_param_t)
 {
     auto *p = static_cast<Pending *>(parameter);
+#if DEVELOPMENT || DEBUG
+    const uint64_t copiedBytes = p->cached ? p->length : 0;
+    uint64_t copyAbs = 0;
+#endif
     if (p->cached) {
+#if DEVELOPMENT || DEBUG
+        const uint64_t copying = mach_absolute_time();
+#endif
         const bool copied = p->status == kIOReturnSuccess && !p->cache.failed && copyOut(p);
+#if DEVELOPMENT || DEBUG
+        copyAbs = mach_absolute_time() - copying;
+#endif
         if (!copied)
             failPending(p, kIOReturnIOError);
         IOLockLock(gCache.lock);
@@ -376,9 +391,15 @@ void finishRequest(thread_call_param_t parameter, thread_call_param_t)
     returnPending(p);
     if (counted)
         flowDone(counted);
+#if DEVELOPMENT || DEBUG
+    const uint64_t completing = mach_absolute_time();
+#endif
     // IOStorage::complete, without binding another original IOStorageFamily symbol (as NativeSwitchBlock).
     if (client.action)
         client.action(client.target, client.parameter, status, bytes);
+#if DEVELOPMENT || DEBUG
+    switch_cryptex_stats::note(copiedBytes, copyAbs, mach_absolute_time() - completing);
+#endif
 }
 
 // One piece's completion, on the SD driver's worker (or one more of the cache's: the request's windows are ready).

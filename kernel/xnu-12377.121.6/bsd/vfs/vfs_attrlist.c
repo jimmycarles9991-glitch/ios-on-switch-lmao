@@ -46,7 +46,7 @@
 #include <sys/uio_internal.h>
 #include <kern/kalloc.h>
 #include <sys/attr.h>
-#include <sys/cprotect.h>
+#include <switch/protection.h>
 #include <sys/sysproto.h>
 #include <sys/xattr.h>
 #include <sys/fsevents.h>
@@ -2584,30 +2584,6 @@ attr_pack_common_extended(mount_t mp, struct vnode *vp, struct attrlist *alp,
 	return 0;
 }
 
-/*
- * Switch: the Data volume is APFS without content protection (MNT_CPROTECT clear: no per-file keys), so
- * ATTR_CMN_DATA_PROTECT_FLAGS carries no class (1-4) and NSURLFileProtectionKey reads as nil. Every file there is
- * unprotected, which iOS calls class D (NSFileProtectionNone), and clients that check for it fail on nil:
- * PosterBoard requires its data store to read back as NSFileProtectionNone, never creates the store, and the
- * wallpaper gallery asserts on the missing store. On a writable local volume without content protection the
- * class is reported as D, whatever the filesystem said (kern_descrip.c makes F_SETPROTECTIONCLASS and this file's
- * setattrlist make a class change a no-op there for the same reason).
- */
-static void
-vattr_unprotected_volume_class(mount_t mp, struct attrlist *alp, struct vnode_attr *vap)
-{
-	if (!(alp->commonattr & ATTR_CMN_DATA_PROTECT_FLAGS) || !VATTR_IS_ACTIVE(vap, va_dataprotect_class) ||
-	    mp == NULL) {
-		return;
-	}
-	const uint64_t flags = vfs_flags(mp);
-	if ((flags & (MNT_CPROTECT | MNT_RDONLY)) || !(flags & MNT_LOCAL)) {
-		return;
-	}
-	vap->va_dataprotect_class = 4; /* PROTECTION_CLASS_D (sys/content_protection.h) */
-	VATTR_SET_SUPPORTED(vap, va_dataprotect_class);
-}
-
 static void
 vattr_get_alt_data(vnode_t vp, struct attrlist *alp, struct vnode_attr *vap,
     int return_valid, int is_bulk,
@@ -2935,7 +2911,7 @@ vfs_attr_pack_internal(mount_t mp, vnode_t vp, uio_t auio, struct attrlist *alp,
 		bcopy(&(alp->commonattr), &ab.valid, sizeof(attribute_set_t));
 	}
 
-	vattr_unprotected_volume_class(vp ? vnode_mount(vp) : mp, alp, vap);
+	switch_protection_getattr(vp ? vnode_mount(vp) : mp, is_bulk ? NULLVP : vp, alp->commonattr, vap, ctx);
 
 	/* did we ask for something the filesystem doesn't support? */
 	if (vap->va_active &&
@@ -4434,7 +4410,7 @@ unionread:
 	 */
 	if ((al.commonattr &
 	    (ATTR_CMN_UUID | ATTR_CMN_GRPUUID | ATTR_CMN_EXTENDED_SECURITY)) ||
-	    !(al.commonattr & ATTR_CMN_OBJTYPE)) {
+	    !(al.commonattr & ATTR_CMN_OBJTYPE) || switch_protection_bulk_by_entry(dvp, al.commonattr)) {
 		error = ENOTSUP;
 	} else {
 		struct vnode_attr *va;
@@ -4610,6 +4586,7 @@ setattrlist_internal(vnode_t vp, struct setattrlist_args *uap, proc_t p, vfs_con
 	char            *user_buf, *cursor, *bufend, *fndrinfo, *cp, *volname;
 	int             proc_is64, error;
 	kauth_filesec_t rfsec;
+	int32_t         switch_class;
 	size_t attr_max_buffer = proc_support_long_paths(vfs_context_proc(ctx)) ?
 	    ATTR_MAX_BUFFER_LONGPATHS : ATTR_MAX_BUFFER;
 
@@ -4830,20 +4807,12 @@ setattrlist_internal(vnode_t vp, struct setattrlist_args *uap, proc_t p, vfs_con
 	/* Support setattrlist of data protection class */
 	if (al.commonattr & ATTR_CMN_DATA_PROTECT_FLAGS) {
 		ATTR_UNPACK(va.va_dataprotect_class);
-		/* Switch: no content protection on the volume, so a valid class is a no-op (as F_SETPROTECTIONCLASS). */
-		if (!(vfs_flags(vnode_mount(vp)) & MNT_CPROTECT)) {
-			if (!cp_is_valid_class(vnode_isdir(vp), (int32_t)va.va_dataprotect_class)) {
-				error = EINVAL;
-				goto out;
-			}
-		} else {
-			VATTR_SET_ACTIVE(&va, va_dataprotect_class);
+		VATTR_SET_ACTIVE(&va, va_dataprotect_class);
 #if CONFIG_MACF
-			if ((error = mac_vnode_check_dataprotect_set(ctx, vp, &va.va_dataprotect_class))) {
-				goto out;
-			}
-#endif
+		if ((error = mac_vnode_check_dataprotect_set(ctx, vp, &va.va_dataprotect_class))) {
+			goto out;
 		}
+#endif
 	}
 
 	/* volume */
@@ -4918,6 +4887,9 @@ setattrlist_internal(vnode_t vp, struct setattrlist_args *uap, proc_t p, vfs_con
 		VFS_DEBUG(ctx, vp, "ATTRLIST - ERROR: authorization failed");
 		goto out_unbusy;
 	}
+	if ((error = switch_protection_setattr_begin(vp, &va, &switch_class, ctx)) != 0) {
+		goto out_unbusy;
+	}
 
 	/*
 	 * When we're setting both the access mask and the finder info, then
@@ -4942,6 +4914,9 @@ setattrlist_internal(vnode_t vp, struct setattrlist_args *uap, proc_t p, vfs_con
 	 */
 	if ((va.va_active != 0LL) && ((error = vnode_setattr(vp, &va, ctx)) != 0)) {
 		VFS_DEBUG(ctx, vp, "ATTRLIST - ERROR: filesystem returned %d", error);
+		goto out_unbusy;
+	}
+	if ((error = switch_protection_setattr_end(vp, switch_class, ctx)) != 0) {
 		goto out_unbusy;
 	}
 

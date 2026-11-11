@@ -19,6 +19,7 @@ struct nak_shader_bin;
 struct nvk_device;
 struct nvk_physical_device;
 struct nvk_pipeline_compilation_ctx;
+struct switch_nvk_split;
 struct vk_descriptor_set_layout;
 struct vk_graphics_pipeline_state;
 struct vk_pipeline_cache;
@@ -133,6 +134,9 @@ struct nvk_shader {
    uint16_t push_dw_count;
    uint16_t vtgm_push_dw_count;
    uint32_t *push_dw;
+
+   /* The raw path's split of a fragment program (nvk_switch_split.h) */
+   struct switch_nvk_split *switch_split;
 };
 
 VK_DEFINE_NONDISP_HANDLE_CASTS(nvk_shader, vk.base, VkShaderEXT,

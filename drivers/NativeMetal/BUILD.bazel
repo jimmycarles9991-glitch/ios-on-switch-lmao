@@ -36,6 +36,7 @@ filegroup(
     srcs = [
         "bridge/NativeMetalBridge.rs",
         "bridge/NativeMetalDirect.rs",
+        "bridge/NativeMetalDirectCompute.rs",
         "bridge/NativeMetalFailure.rs",
         "bridge/NativeMetalObjects.rs",
         "bridge/NativeMetalTarget.rs",

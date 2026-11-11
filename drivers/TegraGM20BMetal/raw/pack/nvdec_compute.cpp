@@ -157,8 +157,12 @@ void Decoder::dispatch(uint64_t qmd)
             field(q, 1528, 1535), field(q, 580, 583), field(q, 576, 579));
     const uint64_t region = (uint64_t(reg_[1][kProgramRegionA >> 2] & 0xff) << 32) | reg_[1][kProgramRegionB >> 2];
     std::string prog;
-    computeProgram(region + q[8], prog);
+    const ProgramInfo *info = computeProgram(region + q[8], prog);
     fprintf(out_, "  prog=%s\n", prog.c_str());
+    if (info && !info->cbufTypes.empty() && (info->cbufTypes[0] & 7) == kSplitParams) {
+        splitPrologue(q, prog, *info);
+        return;
+    }
     // set 0's handles whose sampler index is 0 read no sampler (a texture read: m2v's handle names none, and NVK hands
     // index 0 out like any other)
     Layout handles;
@@ -200,6 +204,28 @@ void Decoder::dispatch(uint64_t qmd)
     static const bool probe = getenv("NVDEC_KERNELS") != nullptr;
     if (probe)
         probeKernel(q, prog);
+}
+
+// A split prologue (raw_pack.h PackSplit): its parameters (the draw's push words and its frontier's address) and its
+// uniform buffers, hashed as a draw's are, kept for the draw that reads the frontier
+void Decoder::splitPrologue(const uint32_t *q, const std::string &prog, const ProgramInfo &info)
+{
+    std::string launch = "prologue=" + prog;
+    uint64_t frontier = 0;
+    for (unsigned i = 0; i < 8 && i < info.cbufTypes.size(); i++) {
+        if (!field(q, 640 + i, 640 + i))
+            continue;
+        const uint64_t addr = (uint64_t(field(q, 960 + 64 * i, 967 + 64 * i)) << 32) | q[29 + 2 * i];
+        const uint32_t size = field(q, 975 + 64 * i, 991 + 64 * i);
+        if (i == 0) {
+            read(addr + 128, &frontier, sizeof frontier);
+            launch += " push=" + contentHash(addr, 0x80, 1, false, false);
+        } else {
+            launch += " cb" + std::to_string(i) + "=" + contentHash(addr, size, 2, false, false);
+        }
+    }
+    fprintf(out_, "  split %s frontier=%llx\n", launch.c_str(), (unsigned long long)frontier);
+    splitLaunches_[frontier] = launch;
 }
 
 // NVDEC_KERNELS: what a probe dispatch shows of its kernel (raw_compute.h KernelRecord), for the pack's generator: the QMD, the

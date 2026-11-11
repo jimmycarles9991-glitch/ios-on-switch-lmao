@@ -143,6 +143,17 @@ uint32_t SWITCH_AUDIO_HARNESS(h_ring_mix)(int32_t *ring, uint32_t ring_frames, u
     return switch_audio_ring_mix(ring, ring_frames, channels, first, src, frames, gain);
 }
 
+void SWITCH_AUDIO_HARNESS(h_fold)(int32_t *dst, const float *src, uint32_t frames, float gain)
+{
+    switch_audio_fold_s32(dst, src, frames, gain);
+}
+
+uint32_t SWITCH_AUDIO_HARNESS(h_ring_fold)(int32_t *ring, uint32_t ring_frames, uint64_t first, const float *src,
+                                           uint32_t frames, float gain)
+{
+    return switch_audio_ring_fold(ring, ring_frames, first, src, frames, gain);
+}
+
 float SWITCH_AUDIO_HARNESS(h_s32_to_float)(int32_t v)
 {
     return switch_audio_s32_to_float(v);

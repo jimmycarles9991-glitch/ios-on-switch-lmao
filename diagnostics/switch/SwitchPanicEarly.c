@@ -28,8 +28,9 @@ extern int vsnprintf(char *, size_t, const char *, va_list);
 
 static uint64_t block(uint64_t pa, uint64_t attribute)
 {
+    const uint64_t switch_attributes = ARM_TTE_BLOCK_ATTRINDX(attribute);
     return pa | ARM_TTE_VALID | ARM_TTE_TYPE_BLOCK | ARM_TTE_BLOCK_AF | ARM_TTE_BLOCK_PNX | ARM_TTE_BLOCK_NX |
-           ARM_TTE_BLOCK_SH(SH_OUTER_MEMORY) | ARM_TTE_BLOCK_ATTRINDX(attribute);
+           ARM_TTE_BLOCK_SH(SH_OUTER_MEMORY) | switch_attributes;
 }
 
 static void flush_tlb(void)

@@ -262,8 +262,8 @@ void mipChainTic(const MipChain &c, uint64_t va, uint32_t tic0, bool srgb, uint3
 uint32_t twodFormat(uint32_t mtl)
 {
     // formats whose 2D-engine filtering is plain per-component unorm/float arithmetic, as Vulkan's linear blit does. The sRGB
-    // forms (BGRA8Unorm_sRGB 81 -> A8RL8GL8BL8 0xd0, RGBA8Unorm_sRGB 71 -> A8BL8GL8RL8 0xd6) are left out until a device check
-    // shows the 2D engine filters them in linear space as m2v's blit does (Core Animation's mip textures are BGRA8Unorm, 80).
+    // forms (BGRA8Unorm_sRGB 81 -> A8RL8GL8BL8 0xd0, RGBA8Unorm_sRGB 71 -> A8BL8GL8RL8 0xd6) are left out: nothing shows the 2D
+    // engine filters them in linear space as Metal does. They and the other formats are the 3D engine's (raw_mip.h).
     switch (mtl) {
     case 80:
         return 0xcf;  // BGRA8Unorm -> A8R8G8B8

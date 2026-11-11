@@ -8,6 +8,7 @@
 #include <cstdlib>
 #include <string>
 #include <vector>
+#import "../runtime/RawPipelineKey.h"
 
 namespace probe {
 
@@ -47,26 +48,27 @@ inline MTLFunctionConstantValues *constants(const std::vector<std::string> &item
     return v;
 }
 
-inline id<MTLFunction> function(id<MTLLibrary> qc, const std::vector<std::string> &stage)
+// `key`: the function as the runtime keys it (its library function and the text of the values it is made with)
+inline id<MTLFunction> function(id<MTLLibrary> qc, const std::vector<std::string> &stage, raw::StageKey &key)
 {
     if (stage.empty() || stage[0] == "-")
         return nil;
+    key.function = stage[0];
     if (stage.size() == 1)
         return [qc newFunctionWithName:@(stage[0].c_str())];
     NSError *e = nil;
-    return [qc newFunctionWithName:@(stage[0].c_str())
-                    constantValues:constants(std::vector<std::string>(stage.begin() + 1, stage.end()))
-                             error:&e];
+    MTLFunctionConstantValues *values = constants(std::vector<std::string>(stage.begin() + 1, stage.end()));
+    key.constants = raw::constantsText(values);
+    return [qc newFunctionWithName:@(stage[0].c_str()) constantValues:values error:&e];
 }
 
 inline id<MTLLibrary> frameworkLibrary(id<MTLDevice> dev, const std::string &path);
 
 // One linked function of an R line ("<vl|vp|fl|fp> <function> [from=<library>] [as=<specialized name>] <constants>", the
 // frontend's linkedText; corpusLines renames its lib= from=) added to its stage's list, made from the library from= names (`own`
-// without one) under its specialized name; its key part is the segment without from=, as the raw path keys it
-// (RawMetalLibrary.mm linkedKey)
+// without one) under its specialized name; `linked` gets its segment as the raw path keys it (raw::linkedSegment)
 inline bool linkedFunction(MTLRenderPipelineDescriptor *d, id<MTLLibrary> own, const std::string &segment,
-                           std::string &key)
+                           std::string &linked)
 {
     const std::vector<std::string> tokens = split(segment);
     if (tokens.size() < 2)
@@ -75,21 +77,21 @@ inline bool linkedFunction(MTLRenderPipelineDescriptor *d, id<MTLLibrary> own, c
     fd.name = @(tokens[1].c_str());
     id<MTLLibrary> library = own;
     std::vector<std::string> values;
-    std::string kept = tokens[0] + " " + tokens[1], text;
+    std::string name = tokens[1];
     for (size_t i = 2; i < tokens.size(); i++) {
         if (tokens[i].rfind("from=", 0) == 0)
             library = frameworkLibrary(own.device, tokens[i].substr(5));
         else if (tokens[i].rfind("as=", 0) == 0) {
-            fd.specializedName = @(tokens[i].c_str() + 3);
-            kept += " " + tokens[i];
-        } else {
+            name = tokens[i].substr(3);
+            fd.specializedName = @(name.c_str());
+        } else
             values.push_back(tokens[i]);
-            text += (text.empty() ? "" : " ") + tokens[i];
-        }
     }
-    kept += " " + text;
-    if (!values.empty())
+    raw::StageKey key{tokens[1], ""};
+    if (!values.empty()) {
         fd.constantValues = constants(values);
+        key.constants = raw::constantsText(fd.constantValues);
+    }
     NSError *e = nil;
     id<MTLFunction> f = [library newFunctionWithDescriptor:fd error:&e];
     if (!f)
@@ -99,7 +101,7 @@ inline bool linkedFunction(MTLRenderPipelineDescriptor *d, id<MTLLibrary> own, c
         l.functions = [(l.functions ?: @[]) arrayByAddingObject:f];
     else
         l.privateFunctions = [(l.privateFunctions ?: @[]) arrayByAddingObject:f];
-    key += " | " + kept;
+    linked += raw::linkedSegment(tokens[0].c_str(), key, name);
     return true;
 }
 
@@ -109,9 +111,9 @@ struct State {
     unsigned vertexBuffer = 99, vertexStride = 0;
 };
 
-// precompile.mm's R-line parser (the frontend's journal format), key = every descriptor field but the label, then the linked
-// functions after the stages.
-inline bool parseState(id<MTLLibrary> qc, const std::string &line, State &s)
+// precompile.mm's R-line parser (the frontend's journal format); the state's key is the one the runtime computes of the
+// descriptor made (raw::pipelineKey), `framework` the library's (<name>.framework/default.metallib), "" for QuartzCore's.
+inline bool parseState(id<MTLLibrary> qc, const std::string &line, State &s, const std::string &framework = "")
 {
     size_t bar1 = line.find(" | v "), bar2 = line.find(" | f "), bar3 = line.find(" | ", bar2 + 5);
     if (bar1 == std::string::npos || bar2 == std::string::npos)
@@ -122,7 +124,6 @@ inline bool parseState(id<MTLLibrary> qc, const std::string &line, State &s)
         split(line.substr(bar2 + 5, (bar3 == std::string::npos ? line.size() : bar3) - bar2 - 5));
     MTLRenderPipelineDescriptor *d = [MTLRenderPipelineDescriptor new];
     MTLVertexDescriptor *vd = nil;
-    std::string key;
     for (const std::string &h : head) {
         if (h.rfind("label=", 0) == 0) {
             s.label = h.substr(6);
@@ -168,26 +169,25 @@ inline bool parseState(id<MTLLibrary> qc, const std::string &line, State &s)
             vd.layouts[x[2]].stepRate = x[5];
             s.vertexBuffer = x[2];
             s.vertexStride = x[3];
-        } else
-            continue;
-        if (h.rfind("label=", 0) != 0)
-            key += h + " ";
+        }
     }
     d.vertexDescriptor = vd;
-    d.vertexFunction = function(qc, v);
-    d.fragmentFunction = function(qc, f);
+    raw::StageKey vertex, fragment;
+    d.vertexFunction = function(qc, v, vertex);
+    d.fragmentFunction = function(qc, f, fragment);
     if (!d.vertexFunction || (!d.fragmentFunction && !f.empty() && f[0] != "-"))
         return false;
-    s.key = key + line.substr(bar1, (bar3 == std::string::npos ? line.size() : bar3) - bar1);
+    std::string linked;
     for (size_t at = bar3; at != std::string::npos && at + 3 < line.size();) {
         const size_t next = line.find(" | ", at + 3);
         const std::string segment = line.substr(at + 3, (next == std::string::npos ? line.size() : next) - at - 3);
         const std::string tag = segment.substr(0, 3);
-        const bool linked = tag == "vl " || tag == "vp " || tag == "fl " || tag == "fp ";
-        if (linked && !linkedFunction(d, qc, segment, s.key))
+        const bool isLinked = tag == "vl " || tag == "vp " || tag == "fl " || tag == "fp ";
+        if (isLinked && !linkedFunction(d, qc, segment, linked))
             return false;
         at = next;
     }
+    s.key = raw::pipelineKey(d, &vertex, d.fragmentFunction ? &fragment : nullptr, linked, framework);
     s.d = d;
     return true;
 }
@@ -267,14 +267,35 @@ inline std::vector<std::string> corpusLines(NSString *text, bool own)
     }
     if (!own)
         return lines;
-    for (const char *out :
-         {"115 | v ycbcr_vert | f ycbcr_converted_frag", "125 | v ycbcr_vert | f ycbcr_srgb_frag",
-          "70 | v ycbcr_vert | f ycbcr_codes_frag", "90 | v ycbcr_vert | f ycbcr_codes10_frag",
-          "115 | v xr_vert | f xr_bgr10_frag", "115 | v xr_vert | f xr_bgra10_frag",
-          "115 | v xr_vert | f xr_planes_frag", "70 | v resolve_vert | f resolve_rgba8_frag",
-          "70 | v resolve_vert | f resolve_rgba8_srgb_frag", "80 | v resolve_vert | f resolve_bgra8_frag",
-          "80 | v resolve_vert | f resolve_bgra8_srgb_frag", "92 | v resolve_vert | f resolve_rg11b10f_frag",
-          "115 | v resolve_vert | f resolve_rgba16f_frag"}) {
+    for (const char *out : {"115 | v ycbcr_vert | f ycbcr_converted_frag",
+                            "125 | v ycbcr_vert | f ycbcr_srgb_frag",
+                            "70 | v ycbcr_vert | f ycbcr_codes_frag",
+                            "90 | v ycbcr_vert | f ycbcr_codes10_frag",
+                            "115 | v xr_vert | f xr_bgr10_frag",
+                            "115 | v xr_vert | f xr_bgra10_frag",
+                            "115 | v xr_vert | f xr_planes_frag",
+                            "70 | v resolve_vert | f resolve_rgba8_frag",
+                            "70 | v resolve_vert | f resolve_rgba8_srgb_frag",
+                            "80 | v resolve_vert | f resolve_bgra8_frag",
+                            "80 | v resolve_vert | f resolve_bgra8_srgb_frag",
+                            "92 | v resolve_vert | f resolve_rg11b10f_frag",
+                            "115 | v resolve_vert | f resolve_rgba16f_frag",
+                            "1 | v mip_vert | f mip_a8_frag",
+                            "20 | v mip_vert | f mip_r16_frag",
+                            "25 | v mip_vert | f mip_r16f_frag",
+                            "40 | v mip_vert | f mip_b5g6r5_frag",
+                            "43 | v mip_vert | f mip_bgr5a1_frag",
+                            "55 | v mip_vert | f mip_r32f_frag",
+                            "60 | v mip_vert | f mip_rg16_frag",
+                            "65 | v mip_vert | f mip_rg16f_frag",
+                            "71 | v mip_vert | f mip_rgba8_srgb_frag",
+                            "81 | v mip_vert | f mip_bgra8_srgb_frag",
+                            "90 | v mip_vert | f mip_rgb10a2_frag",
+                            "92 | v mip_vert | f mip_rg11b10f_frag",
+                            "94 | v mip_vert | f mip_bgr10a2_frag",
+                            "105 | v mip_vert | f mip_rg32f_frag",
+                            "110 | v mip_vert | f mip_rgba16_frag",
+                            "125 | v mip_vert | f mip_rgba32f_frag"}) {
         std::string o = out;
         const size_t bar = o.find(' ');
         lines.push_back("@O R ok=1 label=raw.own samples=1 topo=0 ds=0/0 c0=" + o.substr(0, bar) + ":15:0:1:0:0:1:0:0" +

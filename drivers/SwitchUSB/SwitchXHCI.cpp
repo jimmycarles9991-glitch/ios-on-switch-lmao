@@ -62,6 +62,7 @@ bool SwitchXHCI::start(IOService *provider)
     mailbox->enable();
     if (!AppleUSBXHCI::start(provider))
         return false;
+    devices = xhost::logDeviceArrivals(this);
     // xhci-tegra.c tegra_xusb_probe_finish: firmware messages on (USBCMD.EU3S is regWrite32's).
     if (!gHost.sendMailbox(xhost::MBOX_MSG_ENABLED, 0))
         IOLog("SwitchUSB: XUSB falcon did not take MSG_ENABLED\n");
@@ -70,6 +71,9 @@ bool SwitchXHCI::start(IOService *provider)
 
 void SwitchXHCI::stop(IOService *provider)
 {
+    if (devices)
+        devices->remove();
+    devices = nullptr;
     if (check)
         check->cancelTimeout();
     if (mailbox)
@@ -145,6 +149,8 @@ uint32_t SwitchXHCI::regRead32(uint64_t base, uint32_t offset)
     if (capBase && base + offset == capBase + 4 && hardwareInterrupters < kRequiredInterrupters) {
         value = (value & ~(0x7ffu << 8)) | kRequiredInterrupters << 8;
     }
+    if (capBase && base + offset == capBase + operationalOffset + 4)
+        value = xusb_hold_usbsts(&hold, value);
     return value;
 }
 
@@ -155,18 +161,52 @@ uint64_t SwitchXHCI::regRead64(uint64_t base, uint32_t offset)
     return AppleUSBXHCI::regRead64(base, offset);
 }
 
+// USBCMD and USBSTS writes through the held Save State (XusbPorts.h xusb_hold).
+uint32_t SwitchXHCI::heldWrite32(uint64_t address, uint32_t value)
+{
+    const uint64_t usbcmd = capBase + operationalOffset;
+    if (address == usbcmd + 4) {
+        xusb_hold_usbsts_write(&hold, value);
+        return value;
+    }
+    if (address != usbcmd)
+        return value;
+    const bool failed = hold.sre;
+    // xhci-tegra.c tegra_xusb_probe_finish: USBCMD.EU3S (MFINDEX stops in U3), on every write so that a reset or a
+    // controller AppleUSBXHCI reinitializes after SC7 keeps it.
+    value = xusb_hold_usbcmd(&hold, value) | XHCI_USBCMD_EU3S;
+    if (hold.sre && !failed)
+        IOLog("SwitchUSB: XUSB host restore after SC7: the controller's state went with the falcon, USBSTS.SRE\n");
+    return value;
+}
+
+// Interrupter 0's ERSTBA written back with what the halted controller still holds: not sent (XusbPorts.h xusb_hold).
+bool SwitchXHCI::keepsEventRing(uint64_t address, uint64_t value, unsigned bytes)
+{
+    const uint32_t erstba = runtimeOffset + XHCI_ERSTBA0;
+    if (address == capBase + erstba) {
+        const uint64_t current =
+            bytes == 8 ? AppleUSBXHCI::regRead64(capBase, erstba) : AppleUSBXHCI::regRead32(capBase, erstba);
+        return xusb_hold_keeps(&hold, value, current);
+    }
+    if (bytes == 4 && address == capBase + erstba + 4)
+        return xusb_hold_keeps(&hold, value, AppleUSBXHCI::regRead32(capBase, erstba + 4));
+    return false;
+}
+
 void SwitchXHCI::regWrite32(uint64_t base, uint32_t offset, uint32_t value)
 {
-    if (uint32_t *s = shadowFor(base + offset)) {
+    const uint64_t address = base + offset;
+    if (uint32_t *s = shadowFor(address)) {
         *s = value;
         return;
     }
-    if (capBase && base + offset >= capBase && base + offset - capBase < xhost::kXhciBytes)
-        value = adjustWrite(static_cast<uint32_t>(base + offset - capBase), value, runtimeOffset, hardwareInterrupters);
-    // xhci-tegra.c tegra_xusb_probe_finish: USBCMD.EU3S (MFINDEX stops in U3), on every write so that a reset or a
-    // controller AppleUSBXHCI reinitializes after SC7 keeps it.
-    if (capBase && base + offset == capBase + operationalOffset)
-        value |= XHCI_USBCMD_EU3S;
+    if (capBase && address >= capBase && address - capBase < xhost::kXhciBytes) {
+        value = adjustWrite(static_cast<uint32_t>(address - capBase), value, runtimeOffset, hardwareInterrupters);
+        value = heldWrite32(address, value);
+        if (keepsEventRing(address, value, 4))
+            return;
+    }
     AppleUSBXHCI::regWrite32(base, offset, value);
 }
 
@@ -177,6 +217,8 @@ void SwitchXHCI::regWrite64(uint64_t base, uint32_t offset, uint64_t value)
         s[1] = static_cast<uint32_t>(value >> 32);
         return;
     }
+    if (capBase && keepsEventRing(base + offset, value, 8))
+        return;
     AppleUSBXHCI::regWrite64(base, offset, value);
 }
 
@@ -238,6 +280,8 @@ bool switchxhci_start(char *why, size_t whySize)
     }
     const uint32_t interrupters = (gHost.xhci(4) >> 8) & 0x7ff;
     IOService *nub = xhost::makeNub(xhost::kXhciPA, xhost::kXhciBytes, xhost::kHostIntid);
+    if (nub)
+        xhost::copyPortIdentity(nub, "/arm-io/usb-xhci");
     auto *controller = OSTypeAlloc(SwitchXHCI);
     if (!nub || !controller || !controller->init(nullptr) || !controller->attach(nub)) {
         OSSafeReleaseNULL(controller);

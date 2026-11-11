@@ -22,6 +22,7 @@ bool publish(IOService *provider, IOWorkLoop *loop, const uint8_t mac[6]);
 
 // SwitchWLANNet.cpp, called by the family classes.
 void attached(IOEthernetController *controller, IOEthernetInterface *interface);
+IOReturn enable(IOEthernetInterface *interface);
 IOReturn output(IOEthernetInterface *interface);
 void multicast(const uint8_t (*groups)[6], unsigned count, bool all);
 void multicast_all(bool all);

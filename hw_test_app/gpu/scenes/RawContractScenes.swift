@@ -242,3 +242,103 @@ struct KernelOffsetScene: GPUScene {
         return result
     }
 }
+
+/// A runtime sampler with Cubic min and mag filters (MTLSamplerMinMagFilterCubic, raw value 2: RenderBox's icon sampler,
+/// which raw refused as call.sampler on boots 15 and 16), 4x magnified. A linear ramp comes out a linear ramp away from the
+/// clamped edges, as every bicubic filter does; one bright texel comes out neither the linear filter's tent nor the nearest
+/// filter's square (the program filters bicubically, it is no placeholder); hash_impulse= has to match between the raw
+/// facade's run and m2v's, whose emulation is measured against Apple's GPUs.
+struct CubicSamplerScene: GPUScene {
+    let id = "gpu.raw.cubic_sampler"
+    let name = "Samplers with cubic filters, magnified"
+
+    static let source = 16
+    static let target = 64
+
+    func run(_ gpu: GPU) async throws -> SceneResult {
+        var result = SceneResult()
+        let descriptor = MTLSamplerDescriptor()
+        descriptor.minFilter = MTLSamplerMinMagFilter(rawValue: 2)!
+        descriptor.magFilter = MTLSamplerMinMagFilter(rawValue: 2)!
+        descriptor.sAddressMode = .clampToEdge
+        descriptor.tAddressMode = .clampToEdge
+        descriptor.lodAverage = true
+        guard let sampler = gpu.device.makeSamplerState(descriptor: descriptor) else {
+            result.expect(false, "makeSamplerState returned nil for a cubic sampler")
+            return result
+        }
+        let pipeline = try gpu.render(vertex: "textured_vertex", fragment: "sampled_fragment", format: .rgba8Unorm)
+        let (s, t) = (Self.source, Self.target)
+        let ramp = Raster(width: s, height: s, channels: 4) { x, y, c in
+            [Float(x) + 0.5, Float(y) + 0.5, 0, Float(s)][c] / Float(s)
+        }
+        let impulse = Raster(width: s, height: s, channels: 4) { x, y, c in
+            c == 3 ? 1 : (x == s / 2 && y == s / 2 ? 1 : 0)
+        }
+        var paths: [String] = []
+        var drawn: [Raster] = []
+        for picture in [ramp, impulse] {
+            let texture = try gpu.texture(.rgba8Unorm, s, s, usage: [.shaderRead])
+            try await gpu.upload(picture.samples.map { UInt8(($0 * 255).rounded()) }, to: texture, bytesPerRow: s * 4)
+            let out = try gpu.texture(.rgba8Unorm, t, t)
+            let timing = try await gpu.run { commands in
+                let pass = MTLRenderPassDescriptor()
+                pass.colorAttachments[0].texture = out
+                pass.colorAttachments[0].loadAction = .dontCare
+                pass.colorAttachments[0].storeAction = .store
+                let encoder = commands.makeRenderCommandEncoder(descriptor: pass)!
+                encoder.setRenderPipelineState(pipeline)
+                var corners = GPU.fullScreen
+                var uvs: [SIMD2<Float>] = [SIMD2(0, 1), SIMD2(1, 1), SIMD2(0, 0), SIMD2(1, 0)]
+                encoder.setVertexBytes(&corners, length: MemoryLayout<SIMD4<Float>>.stride * 4, index: 0)
+                encoder.setVertexBytes(&uvs, length: MemoryLayout<SIMD2<Float>>.stride * 4, index: 1)
+                encoder.setFragmentTexture(texture, index: 0)
+                encoder.setFragmentSamplerState(sampler, index: 0)
+                encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
+                encoder.endEncoding()
+            }
+            paths.append(timing.path)
+            drawn.append(try await gpu.raster(out, .rgba8Unorm))
+        }
+        let (rampOut, impulseOut) = (drawn[0], drawn[1])
+        let inner = 8..<(t - 8)
+        let rampWant = Raster(width: t, height: t, channels: 4) { x, y, c in
+            [(Float(x) + 0.5) / Float(t), (Float(y) + 0.5) / Float(t), 0, 1][c]
+        }
+        var rampWrong = 0
+        for y in inner {
+            for x in inner where (0..<2).contains(where: { abs(rampOut[x, y, $0] - rampWant[x, y, $0]) > 2.01 / 255 }) {
+                rampWrong += 1
+            }
+        }
+        result.expect(rampWrong == 0, "the ramp is not a ramp at \(rampWrong) inner pixels")
+        let (linear, nearest) = (Self.magnified(impulse, linear: true), Self.magnified(impulse, linear: false))
+        let differs = { (other: Raster) in
+            (0..<t).contains { y in (0..<t).contains { x in abs(impulseOut[x, y, 0] - other[x, y, 0]) > 4.01 / 255 } }
+        }
+        result.expect(
+            differs(linear) && differs(nearest), "the impulse came out as a linear or nearest filter draws it")
+        let bytes = impulseOut.samples.map { UInt8(($0 * 255).rounded()) }
+        result.metrics.set("hash_impulse", String(FirstTiledSurfaceScene.fnv(bytes), radix: 16))
+        result.metrics.set("paths", paths.joined(separator: ","))
+        if RawFacade.kind(of: gpu.device) == "raw" {
+            result.expect(paths.allSatisfy { $0 == "raw" }, "drawn on \(paths.joined(separator: ","))")
+        }
+        return result
+    }
+
+    /// `image`'s red channel 4x magnified through a clamp-to-edge linear or nearest filter, sampled at pixel centres
+    static func magnified(_ image: Raster, linear: Bool) -> Raster {
+        let (s, t) = (Float(source), Float(target))
+        let at = { (x: Int, y: Int) in image[min(max(x, 0), source - 1), min(max(y, 0), source - 1), 0] }
+        return Raster(width: target, height: target, channels: 1) { x, y, _ in
+            let (u, v) = ((Float(x) + 0.5) / t * s - 0.5, (Float(y) + 0.5) / t * s - 0.5)
+            guard linear else { return at(Int((u + 0.5).rounded(.down)), Int((v + 0.5).rounded(.down))) }
+            let (x0, y0) = (Int(u.rounded(.down)), Int(v.rounded(.down)))
+            let (fx, fy) = (u - Float(x0), v - Float(y0))
+            let top = at(x0, y0) * (1 - fx) + at(x0 + 1, y0) * fx
+            let bottom = at(x0, y0 + 1) * (1 - fx) + at(x0 + 1, y0 + 1) * fx
+            return top * (1 - fy) + bottom * fy
+        }
+    }
+}

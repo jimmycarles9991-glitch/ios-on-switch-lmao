@@ -160,3 +160,35 @@ TEST(SwitchUsbHostSource, BringUpAcceptsItsOwnSmmuAsid)
     EXPECT_THAT(power, HasSubstr("xusb_host_asid_usable(asid, TEGRA_SMMU_ASID_XUSB_HOST)"));
     EXPECT_THAT(SourceText("../UsbSmmuMapper.cpp"), HasSubstr("kAsid = TEGRA_SMMU_ASID_XUSB_HOST"));
 }
+
+// switch_usb_hold_test's Switch layer is SwitchXHCI's: USBSTS reads and writes, USBCMD writes and interrupter 0's
+// ERSTBA (both widths) go through xusb_hold, and SC7 marks the held state lost.
+TEST(SwitchUsbHostSource, RegistersGoThroughTheHold)
+{
+    const std::string xhci = SourceText("../SwitchXHCI.cpp");
+    EXPECT_THAT(Body(xhci, "uint32_t SwitchXHCI::regRead32("), HasSubstr("xusb_hold_usbsts(&hold, value)"));
+    const std::string held = Body(xhci, "uint32_t SwitchXHCI::heldWrite32(");
+    EXPECT_THAT(held, HasSubstr("xusb_hold_usbsts_write(&hold, value)"));
+    EXPECT_THAT(held, HasSubstr("xusb_hold_usbcmd(&hold, value) | XHCI_USBCMD_EU3S"));
+    const std::string keeps = Body(xhci, "bool SwitchXHCI::keepsEventRing(");
+    EXPECT_THAT(keeps, HasSubstr("runtimeOffset + XHCI_ERSTBA0"));
+    EXPECT_EQ(Count(keeps, "xusb_hold_keeps(&hold, value"), 2u);
+    const std::string write32 = Body(xhci, "void SwitchXHCI::regWrite32(");
+    EXPECT_LT(at(write32, "heldWrite32(address, value)"), at(write32, "AppleUSBXHCI::regWrite32("));
+    EXPECT_LT(at(write32, "keepsEventRing(address, value, 4)"), at(write32, "AppleUSBXHCI::regWrite32("));
+    const std::string write64 = Body(xhci, "void SwitchXHCI::regWrite64(");
+    EXPECT_LT(at(write64, "keepsEventRing(base + offset, value, 8)"), at(write64, "AppleUSBXHCI::regWrite64("));
+    const std::string sleep = Body(SourceText("../SwitchXHCIEvents.cpp"), "IOReturn SwitchXHCI::systemSleep(");
+    EXPECT_LT(at(sleep, "gHost.lostPower()"), at(sleep, "xusb_hold_lost(&hold)"));
+}
+
+// The root ports' connector (IOPort::findPortPropertiesForRegistryEntry walks up to the controller's provider): the nub
+// takes the ADT node's port-type and port-number before AppleUSBXHCI::start publishes the ports.
+TEST(SwitchUsbHostSource, NubCarriesThePortIdentity)
+{
+    const std::string start = Body(SourceText("../SwitchXHCI.cpp"), "bool switchxhci_start(");
+    EXPECT_LT(at(start, "xhost::copyPortIdentity(nub, \"/arm-io/usb-xhci\")"), at(start, "controller->start(nub)"));
+    const std::string copy = Body(SourceText("../SwitchXHCIServices.cpp"), "void copyPortIdentity(");
+    EXPECT_THAT(copy, HasSubstr("{\"port-type\", \"port-number\"}"));
+    EXPECT_THAT(copy, HasSubstr("gIODTPlane"));
+}

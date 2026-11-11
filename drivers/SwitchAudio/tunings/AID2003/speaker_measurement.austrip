@@ -13,36 +13,6 @@
 			<array>
 				<dict>
 					<key>bypass</key>
-					<integer>0</integer>
-					<key>displayname</key>
-					<string>ZeroConstantBox</string>
-					<key>unit</key>
-					<dict>
-						<key>manufacturer</key>
-						<integer>1633841016</integer>
-						<key>subtype</key>
-						<integer>1668182900</integer>
-						<key>type</key>
-						<integer>1635083896</integer>
-					</dict>
-				</dict>
-				<dict>
-					<key>bypass</key>
-					<integer>0</integer>
-					<key>displayname</key>
-					<string>ZeroConstantInterleaveBox</string>
-					<key>unit</key>
-					<dict>
-						<key>manufacturer</key>
-						<integer>1633841016</integer>
-						<key>subtype</key>
-						<integer>1936878691</integer>
-						<key>type</key>
-						<integer>1635083896</integer>
-					</dict>
-				</dict>
-				<dict>
-					<key>bypass</key>
 					<integer>1</integer>
 					<key>displayname</key>
 					<string>AUNBEQ_1</string>
@@ -134,5 +104,7 @@
 			</array>
 		</dict>
 	</array>
+	<key>version</key>
+	<integer>2</integer>
 </dict>
 </plist>
