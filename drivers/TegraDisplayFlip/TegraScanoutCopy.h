@@ -13,19 +13,24 @@
 #pragma once
 #include <stdint.h>
 
-#define TEGRA_SCANOUT_COPY_VERSION 3u
+#define TEGRA_SCANOUT_COPY_VERSION      5u
+#define SWITCH_SCANOUT_MAX_DEPENDENCIES 32u
+struct switch_gpu_backing_token;
 // flags: no copy; the completion only says the compositor's GPU work on the source is done (direct scanout: the display
 // scans the source itself, through the SMMU). target, targetBytes, targetPitch and blockHeightLog2 are ignored.
 #define TEGRA_SCANOUT_COPY_FENCE_ONLY 1u
-// flags: the source is block-linear (tegra_gm20b_surface_tiled): GOBs of 64 bytes x 8 lines, blocks 1 GOB wide and
-// 2^TEGRA_SCANOUT_TILED_BLOCK_HEIGHT_LOG2 GOBs high, width x 4 bytes (whole GOBs) across.
+// flags: the source is block-linear (tegra_gm20b_surface_layout): GOBs of 64 bytes x 8 lines, blocks 1 GOB wide and
+// 2^sourceBlockHeightLog2 GOBs high, width x 4 bytes (whole GOBs) across.
 #define TEGRA_SCANOUT_COPY_SOURCE_BLOCK 2u
+// flags, with FENCE_ONLY: every job that wrote the source since the display began scanning it in place ended External
+// (switch_gpu_backing_scanout), so a sole GM20B producer's own completion may stand for the present: the GPU driver
+// queues no job and its interrupt pass completes the offer once the producer's writes are in DRAM.
+#define TEGRA_SCANOUT_COPY_PRODUCER_WATCH 4u
 // Tiled IOSurfaces (the GPU renders them block-linear, the display scans them as such): laid out by the GPU driver's one
-// rule (drivers/TegraGM20B/TegraGM20BLayout.h, NIL's) in the surface's own pages, under the generic 16Bx2 PTE kind; a
-// frame of 86 lines or more has blocks of 16 GOBs, rows of width x bytes per pixel rounded up to whole GOBs, and fits its
-// allocation (bytes per row is ignored).
-#define TEGRA_SCANOUT_TILED_KIND              0xfeu
-#define TEGRA_SCANOUT_TILED_BLOCK_HEIGHT_LOG2 4u
+// rule (drivers/TegraGM20B/TegraGM20BLayout.h, NIL's, its block height lowered to fit the allocation:
+// TegraGM20BLayoutFit.h) in the surface's own pages, under the generic 16Bx2 PTE kind; rows of width x bytes per pixel
+// rounded up to whole GOBs (bytes per row is ignored).
+#define TEGRA_SCANOUT_TILED_KIND 0xfeu
 
 struct TegraScanoutCopy {
     uint32_t version;        // TEGRA_SCANOUT_COPY_VERSION
@@ -47,9 +52,14 @@ struct TegraScanoutCopy {
     uint32_t targetPitch;      // 5120 bytes per line of pixels (80 GOBs across)
     uint32_t blockHeightLog2;  // 4: 16 GOBs per block
     uint32_t flags;            // TEGRA_SCANOUT_COPY_FENCE_ONLY (version 2)
+    // TEGRA_SCANOUT_COPY_SOURCE_BLOCK: the source layout's block height, log2 GOBs (version 5)
+    uint32_t sourceBlockHeightLog2;
     // The first page of another IOSurface the present also waits for the writers of, 0 for none (version 3): window B's
     // surface, when the GPU renders it and its change goes to the screen with this frame.
     uint64_t alsoWritten;
+    // Typed producers remain retained by the caller until admission; the GPU driver retains accepted dependencies.
+    const struct switch_gpu_backing_token *dependencies;
+    uint32_t dependencyCount;
 };
 
 #ifdef __cplusplus
@@ -68,9 +78,17 @@ int tegra_gm20b_scanout_copy(const struct TegraScanoutCopy *copy);
 int tegra_gm20b_scanout_fence(void *display, uint64_t pa);
 // Provided by NativeLegacyDisplay: the offer's copy is done (status 0: every byte of the target is in DRAM, the copy engine's writes
 // flushed past the GPU L2 before the semaphore release that raised the completion) or failed (status != 0: the target may hold a
-// partial frame; the display does not flip to it). Any context, the GPU's interrupt filter included; it only records the status
-// and signals the display's work loop.
+// partial frame; the display does not flip to it). Thread context with interrupts on (a producer's work loop or work item; its
+// interrupt filter calls tgm_present_filter_callout's fn instead); it records the status, writes window A's flip for a frame the
+// display armed (an IOSimpleLock and six registers, SwitchCompletionFlipDisplay.h) and signals the display's work loop, and never
+// sleeps.
 void native_legacy_gpu_complete(void *display, int status);
+// Provided by the GPU driver: fn(ctx, 0) runs in the GPU nonstall interrupt's primary filter (interrupts off, under a
+// simple lock) when an accepted watched offer's producer (TEGRA_SCANOUT_COPY_PRODUCER_WATCH) is complete with its
+// writes visible, before its native_legacy_gpu_complete, which follows with status 0 as ever. At most once per offer,
+// never after that offer's completion; offers the producer's own pass cannot finish (a present job, a semantic wait
+// in front) never call it. fn only stores to memory and registers under a simple lock. Registered once.
+void tgm_present_filter_callout(void (*fn)(void *ctx, int status), void *ctx);
 // status: the compositor's rendering of the source never finished (its channel faulted or hung and was killed): the source
 // holds a partial frame, and the display shows nothing of it, neither through the copy nor the CPU.
 #define TEGRA_SCANOUT_SOURCE_LOST (-5)

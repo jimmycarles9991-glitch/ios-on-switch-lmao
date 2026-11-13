@@ -1,0 +1,27 @@
+{
+  "format": "iterated-blend/1",
+  "name": "multiply-example",
+  "passes": 1,
+  "alpha": false,
+  "instructions": [
+    {
+      "operation": "ADD_PRODUCTS",
+      "operand_a": "SRC_RGB",
+      "operand_b": "DEST_RGB",
+      "operand_c": "SRC_RGB",
+      "operand_d": "ONE_MINUS_DEST_AAA",
+      "pass_output": "TEMP0"
+    },
+    {
+      "operation": "ADD_PRODUCTS",
+      "operand_a": "TEMP0_RGB",
+      "operand_b": "ONE",
+      "operand_c": "DEST_RGB",
+      "operand_d": "ONE_MINUS_SRC_AAA",
+      "pass_output": "NONE"
+    }
+  ],
+  "rgb": "src.rgb * dst.rgb + src.rgb * (1 - dst.a) + dst.rgb * (1 - src.a)",
+  "a": "src.a + dst.a - src.a * dst.a",
+  "tolerance": 1
+}

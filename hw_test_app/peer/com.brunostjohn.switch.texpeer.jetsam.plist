@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Version4</key>
+	<dict>
+		<key>Daemon</key>
+		<dict>
+			<key>Override</key>
+			<dict>
+				<key>com.brunostjohn.switch.texpeer</key>
+				<dict>
+					<key>ActiveSoftMemoryLimit</key>
+					<integer>40</integer>
+					<key>InactiveHardMemoryLimit</key>
+					<integer>40</integer>
+				</dict>
+			</dict>
+		</dict>
+	</dict>
+</dict>
+</plist>

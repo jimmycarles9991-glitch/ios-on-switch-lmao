@@ -1,0 +1,99 @@
+{
+  "class": "IOSurfaceSharedEvent",
+  "kind": "24B119",
+  "size": "0x68",
+  "first_slot": 0,
+  "slots": 16,
+  "slide": "-0x4088000",
+  "layout": {},
+  "fields": {},
+  "constants": {
+    "eventLock": "0x30",
+    "pendingHead": "0x40",
+    "pendingTail": "0x48",
+    "waiterNext": "0x28",
+    "waiterPrevious": "0x30"
+  },
+  "addresses": {
+    "listener_create": "0xfffffff009ae15c4",
+    "lookup": "0xfffffff009ae36b4",
+    "signal": "0xfffffff009ae3040",
+    "value": "0xfffffff009ae3790",
+    "waiter_arm": "0xfffffff009ae385c",
+    "waiter_create": "0xfffffff009ae3fc8"
+  },
+  "found": {
+    "eventLock": "value shown by f9401800 at 0xfffffff009ae387c",
+    "listener_create": "Retained asynchronous native listener; argument zero selects the default high-priority notification service.",
+    "lookup": "Retained event resolved from a Mach send right in the caller task.",
+    "pendingHead": "value shown by f9402278 at 0xfffffff009ae32c0",
+    "pendingTail": "value shown by f9402669 at 0xfffffff009ae388c",
+    "signal": "Monotonic value update and native listener notification.",
+    "value": "Acquire-load of the full 64-bit shared value.",
+    "waiterNext": "value shown by f8428d18 at 0xfffffff009ae32d0",
+    "waiterPrevious": "value shown by f9401ac9 at 0xfffffff009ae32f0",
+    "waiter_arm": "Queues the waiter once; a value already reached also delivers through the native listener.",
+    "waiter_create": "Retained waiter(event, listener, value, refcon, retained owner, callback); does not arm it."
+  },
+  "hints": {
+    "functions": {
+      "lookup": {
+        "at": "0xfffffff009ae36b4",
+        "body": "d503237f d100c3ff a9014ff4 a9027bfd 910083fd b0ff2b08 f9406908 f9400108 f90007e8 f90003ff 910003e2",
+        "why": "Retained event resolved from a Mach send right in the caller task."
+      },
+      "value": {
+        "at": "0xfffffff009ae3790",
+        "body": "f8420c10 aa0003f1 f2f97d71 dac11a30 aa1003f1 dac147f1 eb11021f 54000040 d4388e40 c8dffe00 d65f03c0",
+        "why": "Acquire-load of the full 64-bit shared value."
+      },
+      "signal": {
+        "at": "0xfffffff009ae3040",
+        "body": "d503237f a9bd57f6 a9014ff4 a9027bfd 910083fd aa0203f3 aa0103f5 aa0003f4 91008008 39414009 370003a9",
+        "why": "Monotonic value update and native listener notification."
+      },
+      "listener_create": {
+        "at": "0xfffffff009ae15c4",
+        "body": "aa0003e1 d2800000",
+        "why": "Retained asynchronous native listener; argument zero selects the default high-priority notification service."
+      },
+      "waiter_create": {
+        "at": "0xfffffff009ae3fc8",
+        "body": "d503237f a9bb67fa a9015ff8 a90257f6 a9034ff4 a9047bfd 910103fd aa0503f4 aa0403f5 aa0303f6 aa0203f7",
+        "why": "Retained waiter(event, listener, value, refcon, retained owner, callback); does not arm it."
+      },
+      "waiter_arm": {
+        "at": "0xfffffff009ae385c",
+        "body": "d503237f a9bd57f6 a9014ff4 a9027bfd 910083fd aa0103f4 aa0003f3 f9401800 9400c7f1 aa1403e8 f8028d1f",
+        "why": "Queues the waiter once; a value already reached also delivers through the native listener."
+      }
+    },
+    "constants": {
+      "eventLock": {
+        "at": "0xfffffff009ae387c",
+        "word": "f9401800",
+        "value": "0x30"
+      },
+      "pendingHead": {
+        "at": "0xfffffff009ae32c0",
+        "word": "f9402278",
+        "value": "0x40"
+      },
+      "pendingTail": {
+        "at": "0xfffffff009ae388c",
+        "word": "f9402669",
+        "value": "0x48"
+      },
+      "waiterNext": {
+        "at": "0xfffffff009ae32d0",
+        "word": "f8428d18",
+        "value": "0x28"
+      },
+      "waiterPrevious": {
+        "at": "0xfffffff009ae32f0",
+        "word": "f9401ac9",
+        "value": "0x30"
+      }
+    }
+  }
+}

@@ -9,16 +9,23 @@ device's.
 bazel run //tools/emu:boot -- --kind=ios27                   # build //:boot for iOS 27, boot it for 120 s
 bazel run //tools/emu:boot -- --kind=ios17 --sd none --seconds 60 --bootargs -v
 bazel run //tools/emu:check -- --kind=ios17 --until launchd  # a gate: 0 milestone, 1 panic, 2 timeout, 3 no kernel log
+bazel run //tools/emu:check -- --kind=ios27 --until gpu --sd none  # 4: the GPU kext or its kernel channels failed
 bazel run //tools/emu:build                                  # only the emulator: prints its path
 bazel test //tools/emu:dc_test                               # the display controller and SMMU under qtest
 ```
 
 `check` watches the live kernel log and the panic record every 3 s and stops at the first of the milestone (`cores`,
-`display`, `sd`, `root`, `launchd`, `early-boot`), a panic or `--timeout`. It prints the panic line or the last kernel
-lines, and keeps the run directory. `launchd` is reached at the first kernel line that names a process other than `init`
-(pid 1 before its exec) or `kernel_task`, such as launchd's dyld asking for the shared region (`[1(launchd)]`) or a
-mount requested by a job launchd spawned. If the kernel runs for 10 polls and no log line comes out, `check` stops with
-exit 3 and prints what the reader found: no msgbuf header, or one whose ring is still empty.
+`display`, `gpu`, `sd`, `root`, `launchd`, `early-boot`), a panic or `--timeout`. It prints the panic line or the last
+kernel lines, and keeps the run directory. `launchd` is reached at the first kernel line that names a process other than
+`init` (pid 1 before its exec) or `kernel_task`, such as launchd's dyld asking for the shared region (`[1(launchd)]`) or
+a mount requested by a job launchd spawned. `gpu` is reached when the GPU kext's M3 and M4 have passed and its boot pool
+scrub is queued, by which time the self-test's copy-engine fill and fence and the scrubber's pool fills have run on the
+model. Some boots never print the scrub's queued line (gpucheck.py says why), so a kernel line 2 s after M3, past the
+scrub's own 1 s deadline, also reaches it. Exit 4 means a bring-up FAIL line, a GPU error report from nvkm or the kext,
+a fault or stopped channel in `gpu-events.log`, a method its class lacks on GM20B (which the model runs but the GPU
+kills the channel for), or a run in which the GPU executed no method or the scrubber no fill. It needs no card
+(`--sd none`) and takes about 10 s of wall time. If the kernel runs for 10 polls and no log line comes out, `check`
+stops with exit 3 and prints what the reader found: no msgbuf header, or one whose ring is still empty.
 
 `--kind` builds `//:boot` with `--//ipsw:kind` in the output base `bazel run` itself uses. `--bazel-flag` passes flags
 to that build (for example `--bazel-flag=--config=agent`). `--package DIR` boots an existing `//:boot` output instead,
@@ -101,8 +108,12 @@ Different from the hardware:
 - The SD card stays in U-Boot's 48 MHz mode. The controller reports no SDR104, so SwitchSD's SDR104 bring-up does not
   run.
 - No BPMP firmware runs, so the EMC keeps its rate.
-- No GPU falcon code runs and nothing is drawn. The GMMU has no TLB, so stale-translation bugs don't show, and
-  channels run to completion in runlist order on one PBDMA, without timeslicing or preemption.
+- No GPU falcon code runs and nothing is drawn. The GMMU has no TLB, so stale-translation bugs don't show. A channel's
+  work runs to completion when its GP_PUT is written or the host's 200 us poll comes, in runlist order on one PBDMA,
+  without timeslicing or preemption, so PBDMA and engine status always read idle and a channel waiting on a semaphore
+  acquire looks idle to the kext's hang checks. There is no L2: every GPU access goes to DRAM, so a missing L2 flush or
+  invalidate goes unnoticed (M3's L2-cached target included). An invalid pushbuffer header stops its channel without the
+  PBDMA interrupt the hardware raises.
 - Missing: security engine keys, TSEC, audio, USB, and the Wi-Fi and Bluetooth radios behind their buses.
 
 A boot that gets further here is a hint. A panic here is a lead to check on the device.

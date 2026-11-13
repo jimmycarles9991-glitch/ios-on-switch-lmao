@@ -49,13 +49,17 @@ use crate::pipeline::lower_inputs::ChannelWrite;
 use crate::spirv::builder::FunctionBuilder;
 use crate::spirv::error::{BResult, BuildError, OperandRule};
 use crate::spirv::ids::{GlobalId, TypeId, Value};
-use crate::spirv::ir::{BinOp, ConvOp, GlslOp, Type, UnOp};
+use crate::spirv::ir::{BinOp, Contraction, ConvOp, GlslOp, Type, UnOp};
 
 /// How [`write`] writes one lane of a color output.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Lane {
     /// Rounded to the code Metal stores by the channel's rule ([`round`]).
     Rounded(ChannelWrite),
+    /// A unorm channel of this many bits, written as its code's value from two fused
+    /// multiply-adds ([`store_code`]) for a device whose store makes that value Metal's code
+    /// (`NativeShaderTarget::stores_unorm_code`).
+    StoreCode(u8),
     /// Written as computed, a NaN as the `f32` of these bits: the device converts every other
     /// value as Metal does (a measured driver deviation), and stores this NaN, or this value, as
     /// Metal stores the output's NaN.
@@ -66,6 +70,8 @@ pub enum Lane {
     Selected {
         /// How a half-float channel's lane is written from this output.
         half: HalfLane,
+        /// The 8-bit unorm channel's lane as [`Lane::StoreCode`] writes it.
+        store_code: bool,
     },
 }
 
@@ -86,19 +92,28 @@ pub enum HalfLane {
 pub fn lane_words(lane: Lane) -> u64 {
     match lane {
         Lane::Rounded(rule) => channel_words(rule),
+        Lane::StoreCode(_) => STORE_CODE_WORDS,
         // The NaN test and select, and the constant.
         Lane::NanAs(_) => 3 * 6,
         // The unorm rounding and the half lane, and each code's shift, mask, test and select.
-        Lane::Selected { half } => {
+        Lane::Selected { half, store_code } => {
             let half = match half {
                 HalfLane::AsComputed => 0,
                 HalfLane::Rounded => channel_words(HALF),
                 HalfLane::NanAs(_) => 3 * 6,
             };
-            channel_words(ChannelWrite::Unorm { bits: 8 }) + half + 2 * 5 * 6
+            let unorm = match store_code {
+                true => STORE_CODE_WORDS,
+                false => channel_words(ChannelWrite::Unorm { bits: 8 }),
+            };
+            unorm + half + 2 * 5 * 6
         }
     }
 }
+
+/// An upper estimate of the SPIR-V words of [`store_code`]: two `Fma`s, their decorations and four
+/// constants.
+const STORE_CODE_WORDS: u64 = 8 * 6;
 
 /// An upper estimate of the SPIR-V words of one channel's rounding by `rule`.
 pub fn channel_words(rule: ChannelWrite) -> u64 {
@@ -265,9 +280,13 @@ pub fn write(
                 written.push(nan_as(fb, s, v, *bits)?);
                 continue;
             }
-            Some(Lane::Selected { half }) => {
+            Some(Lane::StoreCode(bits)) => {
+                written.push(store_code(fb, s, v, unorm_bits(*bits)?)?);
+                continue;
+            }
+            Some(Lane::Selected { half, store_code }) => {
                 let word = word.ok_or_else(malformed)?;
-                written.push(selected(fb, s, v, (word, i as u32), *half)?);
+                written.push(selected(fb, s, v, (word, i as u32), (*half, *store_code))?);
                 continue;
             }
         };
@@ -298,15 +317,16 @@ pub fn write(
 }
 
 /// `v` (an `f32` lane of form `s`) written as channel `i`'s code in the rule word `word` selects
-/// ([`Lane::Selected`]): rounded as an 8-bit unorm channel (`UNORM8_CODE`), written as a
-/// half-float channel's lane is by `half` (`HALF_CODE`), else as computed. Each rule's value is
-/// computed and one selected, so the module is the same for every attachment.
+/// ([`Lane::Selected`]): rounded as an 8-bit unorm channel (`UNORM8_CODE`; as
+/// [`Lane::StoreCode`] writes it where `store_code`), written as a half-float channel's lane is
+/// by `half` (`HALF_CODE`), else as computed. Each rule's value is computed and one selected, so
+/// the module is the same for every attachment.
 fn selected(
     fb: &mut FunctionBuilder<'_>,
     s: Form,
     v: Value,
     (word, i): (Value, u32),
-    half: HalfLane,
+    (half, store_code_8): (HalfLane, bool),
 ) -> BResult<Value> {
     let u = Form {
         held: Held::Int {
@@ -319,7 +339,10 @@ fn selected(
     let code = fb.binary(BinOp::ShiftRightLogical, word, shift)?;
     let mask = splat(fb, u, u64::from(RULE_MASK))?;
     let code = fb.binary(BinOp::BitwiseAnd, code, mask)?;
-    let unorm = normalized(fb, s, v, unorm_bits(8)?, None)?;
+    let unorm = match store_code_8 {
+        true => store_code(fb, s, v, 8)?,
+        false => normalized(fb, s, v, unorm_bits(8)?, None)?,
+    };
     let unorm_code = splat(fb, u, u64::from(UNORM8_CODE))?;
     let is_unorm = fb.binary(BinOp::IEqual, code, unorm_code)?;
     let out = fb.select(is_unorm, unorm, v)?;
@@ -455,6 +478,25 @@ fn normalized(
     let negative = fb.binary(BinOp::FOrdLessThan, v, zero)?;
     let minus = fb.unary(UnOp::FNegate, q)?;
     fb.select(negative, minus, q)
+}
+
+/// A unorm channel of maximum code `m = 2^k - 1` (`k` in `1..=16`) written for a store that makes
+/// Metal's code of the value nearest a code ([`Lane::StoreCode`]): `t = fma(v, m, 2^23)` holds
+/// `2^23` plus the exact product rounded once to a whole number, to nearest even, which is Metal's
+/// rounding but at its one tie (`v = 1/2`, where even is away from zero), and `fma(t, r, -2^23 r)`
+/// with `r` the `f32` nearest `1 / m` (`2^23 r` exact) is that number times `r`, rounded once,
+/// the value [`normalized`] writes. A NaN stays one, and a value below 0 or above 1 lands below 0
+/// or above 1, which the store makes 0 and `m`, as Metal's clamp does.
+fn store_code(fb: &mut FunctionBuilder<'_>, s: Form, v: Value, k: u32) -> BResult<Value> {
+    let m = (1u32 << k) - 1;
+    let r = 1.0 / m as f32;
+    let exact = Contraction::Forbidden;
+    let top = fsplat(fb, s, f64::from(m))?;
+    let magic = fsplat(fb, s, f64::from(1u32 << 23))?;
+    let t = fb.glsl_with(GlslOp::Fma, &[v, top, magic], exact)?;
+    let r_value = fsplat(fb, s, f64::from(r))?;
+    let offset = fsplat(fb, s, f64::from(-8_388_608.0 * r))?;
+    fb.glsl_with(GlslOp::Fma, &[t, r_value, offset], exact)
 }
 
 /// An sRGB color channel: the linear value of the byte Metal's encode gives, from the color

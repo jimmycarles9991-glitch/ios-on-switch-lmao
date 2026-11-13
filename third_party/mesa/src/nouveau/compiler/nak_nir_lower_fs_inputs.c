@@ -201,6 +201,9 @@ lower_fs_input_intrin(nir_builder *b, nir_intrinsic_instr *intrin, void *data)
    case nir_intrinsic_load_barycentric_pixel: {
       if (!(ctx->fs_key && ctx->fs_key->force_sample_shading))
          return false;
+      if (ctx->fs_key->center_frag_depth &&
+          nir_intrinsic_interp_mode(intrin) == INTERP_MODE_NOPERSPECTIVE)
+         return false;
 
       intrin->intrinsic = nir_intrinsic_load_barycentric_sample;
       return true;
@@ -223,6 +226,15 @@ lower_fs_input_intrin(nir_builder *b, nir_intrinsic_instr *intrin, void *data)
                             NAK_INTERP_MODE_SCREEN_LINEAR,
                             interp_loc, NULL, NULL,
                             ctx->nak);
+      if (intrin->intrinsic == nir_intrinsic_load_frag_coord &&
+          intrin->def.num_components > 2 && ctx->fs_key &&
+          ctx->fs_key->center_frag_depth) {
+         nir_def *depth = interp_fs_input(b, 1, addr + 8,
+                                         NAK_INTERP_MODE_SCREEN_LINEAR,
+                                         NAK_INTERP_LOC_DEFAULT, NULL, NULL,
+                                         ctx->nak);
+         res = nir_vector_insert_imm(b, res, depth, 2);
+      }
       break;
    }
 

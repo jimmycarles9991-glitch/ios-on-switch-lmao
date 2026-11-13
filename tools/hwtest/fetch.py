@@ -35,10 +35,12 @@ def containers(data: Path) -> dict[str, Path]:
 
 
 def copy_gpu_files(container: Path, out: Path, identifier: str) -> None:
-    """Copy the GPU scenes' failed readbacks (got, want and diff PNGs, the CA sweep's states.txt) to out."""
-    gpu = container / 'Documents/gpu'
-    if gpu.is_dir():
-        shutil.copytree(gpu, out / 'hwtest-gpu' / identifier, copy_function=shutil.copyfile, dirs_exist_ok=True)
+    """Copy the GPU scenes' failed readbacks (got, want and diff PNGs, the CA sweep's states.txt) and the UI tests'
+    failed pictures (Documents/ui) to out."""
+    for folder, kind in (('gpu', 'hwtest-gpu'), ('ui', 'hwtest-ui')):
+        files = container / 'Documents' / folder
+        if files.is_dir():
+            shutil.copytree(files, out / kind / identifier, copy_function=shutil.copyfile, dirs_exist_ok=True)
 
 
 def sidecar(report: Report, data: Path, switch_folder: Path, archive: Path | None = None) -> dict:

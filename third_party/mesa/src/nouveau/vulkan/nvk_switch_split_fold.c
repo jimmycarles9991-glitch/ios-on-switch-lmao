@@ -19,6 +19,7 @@
 #include "nvk_switch_split_fold.h"
 
 #include "nir_builder.h"
+#include "nak_private.h"
 #include "util/half_float.h"
 #include "util/u_dynarray.h"
 
@@ -149,6 +150,9 @@ fold_memory(nir_builder *b, nir_intrinsic_instr *intrin,
    default:
       return false;
    }
+   if (m->check_alignment && nir_intrinsic_has_align_mul(intrin) &&
+       (at - nir_intrinsic_align_offset(intrin)) % nir_intrinsic_align_mul(intrin))
+      *ok = false;
    for (unsigned c = 0; c < intrin->def.num_components; c++) {
       values[c] = intrin->def.bit_size == 1
                      ? load_bytes(m, global, space, at + 4 * c, 4, ok) != 0
@@ -184,14 +188,28 @@ fold_value(nir_builder *b, nir_intrinsic_instr *intrin,
            const struct switch_fold_model *m, bool *ok)
 {
    switch (intrin->intrinsic) {
+   case nir_intrinsic_load_sysval_nv: {
+      const unsigned sv = nir_intrinsic_base(intrin);
+      uint64_t value;
+      if (sv >= NAK_SV_TID_X && sv <= NAK_SV_TID_Z)
+         value = m->local_id[sv - NAK_SV_TID_X];
+      else if (sv >= NAK_SV_CTAID_X && sv <= NAK_SV_CTAID_Z)
+         value = m->workgroup_id[sv - NAK_SV_CTAID_X];
+      else
+         return false;
+      replace(b, &intrin->def, &value);
+      return true;
+   }
    case nir_intrinsic_store_global:
    case nir_intrinsic_store_global_nv:
       store_global(intrin, m, ok);
       return true;
    case nir_intrinsic_load_workgroup_id:
    case nir_intrinsic_load_local_invocation_id: {
-      const uint64_t zero[NIR_MAX_VEC_COMPONENTS] = {0};
-      replace(b, &intrin->def, zero);
+      const uint32_t *id = intrin->intrinsic == nir_intrinsic_load_workgroup_id
+                             ? m->workgroup_id : m->local_id;
+      const uint64_t value[NIR_MAX_VEC_COMPONENTS] = {id[0], id[1], id[2]};
+      replace(b, &intrin->def, value);
       return true;
    }
    default:
@@ -265,6 +283,9 @@ substitute_values(nir_shader *s, const struct switch_fold_model *m, bool *ok)
             progress |= fold_bcsel(&b, nir_instr_as_alu(instr));
             break;
          case nir_instr_type_intrinsic:
+            /* Resolve control flow before observing memory effects. */
+            if (block->cf_node.parent->type != nir_cf_node_function)
+               break;
             if (nir_foreach_src(instr, srcs_const, NULL))
                progress |= fold_value(&b, nir_instr_as_intrinsic(instr), m, ok);
             break;
@@ -285,6 +306,11 @@ is_leaf(nir_instr *instr)
    if (instr->type != nir_instr_type_intrinsic)
       return false;
    switch (nir_instr_as_intrinsic(instr)->intrinsic) {
+   case nir_intrinsic_load_sysval_nv: {
+      const unsigned sv = nir_intrinsic_base(nir_instr_as_intrinsic(instr));
+      return !((sv >= NAK_SV_TID_X && sv <= NAK_SV_TID_Z) ||
+               (sv >= NAK_SV_CTAID_X && sv <= NAK_SV_CTAID_Z));
+   }
    case nir_intrinsic_ldc_nv:
    case nir_intrinsic_load_global:
    case nir_intrinsic_load_global_constant:

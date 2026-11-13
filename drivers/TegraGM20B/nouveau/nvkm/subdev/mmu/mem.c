@@ -85,11 +85,8 @@ nvkm_mem_dtor(struct nvkm_memory *memory)
 {
 	struct nvkm_mem *mem = nvkm_mem(memory);
 
-	/* Comptags belong to the memory from its first compressed raw map (uvmm.c) until now, whatever maps left on them. */
-	if (mem->memory.tags) {
-		refcount_set(&mem->memory.tags->refcount, 1);
+	if (mem->memory.switch_tags_held)
 		nvkm_memory_tags_put(&mem->memory, mem->mmu->subdev.device, &mem->memory.tags);
-	}
 	if (mem->mem) {
 		while (mem->pages--) {
 			dma_unmap_page(mem->mmu->subdev.device->dev,

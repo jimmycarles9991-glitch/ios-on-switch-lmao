@@ -241,7 +241,7 @@ void
 gf100_vmm_flush(struct nvkm_vmm *vmm, int depth)
 {
 	u32 type = 0x00000001; /* PAGE_ALL */
-	/* Switch: a GPU-ordered user map leaves the invalidate to its channels' next prologues (gpu.c chan_exec). */
+	/* Switch: a GPU-ordered user map leaves the invalidate to its channels' next prologues (gpu_exec.c chan_exec). */
 	if (vmm->managed.raw && nvxnu_gpu_ordered())
 		return;
 	if (atomic_read(&vmm->engref[NVKM_SUBDEV_BAR]))

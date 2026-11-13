@@ -134,12 +134,12 @@ final class PatternTests: XCTestCase {
 
     func testTheBuildPinsExactlyTheTablesMedia() {
         let listed = (ProcessInfo.processInfo.environment["HWTEST_MEDIA"] ?? "").split(separator: " ").map(String.init)
-        XCTAssertEqual(Set(listed), Set(Clip.all.map(\.file) + StillImage.all.map(\.file)))
+        XCTAssertEqual(Set(listed), Set(Clip.all.map(\.file) + [AlphaClip.file] + StillImage.all.map(\.file)))
         XCTAssertEqual(listed.count, Set(listed).count)
     }
 
     func testEveryClipAndImageHasItsOwnSaltAndFile() {
-        XCTAssertEqual(Set(Clip.all.map(\.clipID)).count, Clip.all.count)
+        XCTAssertEqual(Set(Clip.all.map(\.clipID) + [AlphaClip.pattern.clip]).count, Clip.all.count + 1)
         XCTAssertEqual(Set(Clip.all.map(\.file)).count, Clip.all.count)
         XCTAssertEqual(Set(StillImage.all.map(\.file)).count, StillImage.all.count)
         XCTAssertEqual(Clip.named("vp9_4k.ivf")?.height, 2160)

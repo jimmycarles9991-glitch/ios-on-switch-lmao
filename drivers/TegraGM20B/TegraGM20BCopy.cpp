@@ -1,320 +1,394 @@
 // SPDX-License-Identifier: MIT
-// See TegraGM20BCopy.h. Copies run on one channel of the kernel's own GPU client, made at the first copy: kJobs slots, each
-// with a push page and two VA windows (source, destination) that its plane's pages are mapped into for the copy. A copy
-// returns once its push is kicked; the channel's fence interrupt queues a thread call, which unmaps the finished slots and
-// calls their `done`. GPU-ordered mappings (tgm_vm_map_ordered) need no CPU wait: the next submission invalidates.
 #include <IOKit/IOLib.h>
 #include <IOKit/IOLocks.h>
 #include <IOKit/IOMemoryDescriptor.h>
 #include <kern/thread_call.h>
-#include <stdint.h>
 #include "TegraGM20BCopyPush.h"
 #include "TegraGM20BGpu.h"
 #include "TegraGM20BTiled.h"
-#include "../../kits/SwitchRefusal/SwitchRefusal.h"
+#include "SwitchGpuCopyMappings.h"
+#include "SwitchGpuEventClient.h"
+#include "SwitchGpuKqueue.h"
 
 namespace
 {
-constexpr uint32_t kJobs = 8;
-constexpr uint64_t kPage = 4096, kPushVa = 1ULL << 20, kWindow = 1ULL << 32,
-		   kFirstWindow = 8ULL << 32;
-
-struct Plane {
-	tgm_mem *mem;
-	uint64_t *pas;
-	uint32_t npages;
-	uint64_t va, bytes;
-};
+constexpr uint32_t Jobs = 8;
+constexpr uint64_t Page = 4096, PushVa = 1ULL << 20;
+constexpr SwitchGpuKqueueShape kShape = {"ce-copy", TGM_FENCE_KERNEL_COPY, Jobs, PushVa, 1, 0};
 
 struct Job {
 	bool busy;
-	uint32_t seqno;
-	Plane src, dst;
+	uint32_t dwords, order;
+	SwitchGpuCopyMapping *source, *destination;
+	switch_gpu_backing_token completion;
 	tegra_gm20b_ce_done done;
 };
 
 struct Copier {
 	IOLock *lock;
-	tgm_vm *vm;
-	tgm_chan *chan;
-	tgm_mem *push, *fence;
-	uint32_t *pushCpu;
-	volatile uint32_t *fenceCpu;
-	uint64_t pushPa, fenceGpu;
-	thread_call_t reap;
-	bool failed;
-	Job jobs[kJobs];
-} gCopy;
+	SwitchGpuKqueue space;
+	thread_call_t retirement;
+	bool semanticFailed, replaceChannel;
+	uint32_t waitingSources, order;
+	Job jobs[Jobs];
+	SwitchGpuCopyMappings mappings;
+	SwitchGpuEventChannel authority;
+	SwitchGpuEventJob events;
+	switch_gpu_backing_token *dependencies;
+} queue;
 
 void fenced(void *)
 {
-	thread_call_enter(gCopy.reap);
+	thread_call_enter(queue.retirement);
+}
+
+void discardSpace()
+{
+	queue.space.discardSpace(kShape);
+	IODelete(queue.dependencies, switch_gpu_backing_token, TegraGM20BMaxJobDependencies);
+	queue.dependencies = nullptr;
+	queue.authority.destroy();
 }
 
 bool openSpace()
 {
-	Copier &c = gCopy;
-	uint64_t pas[kJobs];
-	uint64_t fencePage = 0;
-	uint32_t fenceOffset = 0;
-	c.pushCpu = static_cast<uint32_t *>(tgm_pool_alloc(kPage * kJobs, 0, &c.pushPa));
-	if (!c.pushCpu ||
-	    tgm_fence_kernel(TGM_FENCE_KERNEL_COPY, &c.fenceCpu, &fencePage, &fenceOffset) ||
-	    tgm_vm_new(&c.vm))
+	queue.dependencies = IONew(switch_gpu_backing_token, TegraGM20BMaxJobDependencies);
+	if (!queue.dependencies || !queue.authority.initialize() ||
+	    !queue.space.openSpace(kShape, &queue)) {
+		discardSpace();
 		return false;
-	tgm_vm_claim(c.vm, &gCopy);
-	for (uint32_t i = 0; i < kJobs; i++)
-		pas[i] = c.pushPa + i * kPage;
-	if ((tgm_mem_new(c.vm, pas, kJobs, &c.push) != 0) ||
-	    (tgm_vm_map_ordered(c.vm, kPushVa, kPage * kJobs, c.push, 0, 0, 1, nullptr) != 0) ||
-	    (tgm_mem_new(c.vm, &fencePage, 1, &c.fence) != 0) ||
-	    (tgm_vm_kmap(c.vm, c.fence, kPage, &c.fenceGpu) != 0))
-		return false;
-	c.fenceGpu += fenceOffset;
+	}
 	return true;
 }
 
-// lock held: the channel, made again after a fault killed the last one (once its copies were reaped)
-tgm_chan *channel()
+// A copy whose own work is done while its event waits are not. Restarting the event order (authority.reset) would let
+// the copies after it complete first, and the order cannot put a copy behind it without also handing that copy the
+// failure that ended the old order, so a new copy is refused until it retires.
+bool awaitingEvents()
 {
-	Copier &c = gCopy;
-	if (c.chan && tgm_chan_error(c.chan)) {
-		for (const Job &j : c.jobs) {
-			if (j.busy)
-				return nullptr;
-		}
-		tgm_chan_del(&c.chan);
-	}
-	if (!c.vm && !c.failed && !openSpace())
-		c.failed = true;
-	if (!c.chan && c.vm &&
-	    !tgm_chan_new(c.vm, &gCopy, c.fenceCpu, c.fenceGpu, "ce-copy", 0, &c.chan))
-		tgm_chan_on_fence(c.chan, fenced, nullptr);
-	return c.chan;
+	for (const auto &job : queue.jobs)
+		if (job.busy && switch_gpu_backing_token_physical_status(&job.completion, 0) &&
+		    !switch_gpu_backing_token_external_status(&job.completion))
+			return true;
+	return false;
 }
 
-void unmap(Plane &p)
+bool idle()
 {
-	if (p.mem) {
-		tgm_vm_unmap(gCopy.vm, p.va & ~(kPage - 1),
-			     static_cast<uint64_t>(p.npages) * kPage);
-		tgm_mem_del(&p.mem);
-	}
-	if (p.pas)
-		IODelete(p.pas, uint64_t, p.npages);
-	p = {};
+	for (const auto &job : queue.jobs)
+		if (job.busy)
+			return false;
+	return true;
 }
 
-// The plane's pages, from the 4 KiB page holding its first byte, into `window` under `kind`; p.va is its first byte there
-int map(Plane &p, IOMemoryDescriptor *memory, uint64_t offset, uint64_t bytes, uint64_t window,
-	uint8_t kind)
+// A failure restarts the event order at once; copies of an earlier order that fail later (queue.order) do not restart
+// the new one. A killed channel's copies are settled (fence released, timeline failed: tgm_chan_killed has run once
+// tgm_chan_del returns) and retire through the tokens they hold, so it is replaced at once. A live channel whose order
+// failed keeps running its copies, and is replaced at its first idle moment, when deleting it waits for nothing: its
+// timeline keeps the failed seqno, and while any timeline does, every event job takes the semantic path
+// (switch_gpu_backing_has_semantics).
+int channel()
 {
-	const uint64_t first = offset & ~(kPage - 1);
-	if (!bytes || offset + bytes > memory->getLength() || offset + bytes - first > kWindow)
-		return -22;
-	p.npages = static_cast<uint32_t>((offset + bytes - first + kPage - 1) / kPage);
-	p.pas = IONew(uint64_t, p.npages);
-	if (!p.pas)
+	const bool killed = queue.space.channel && tgm_chan_error(queue.space.channel);
+	if (killed || queue.semanticFailed) {
+		if (awaitingEvents())
+			return -16;
+		queue.authority.reset();
+		queue.semanticFailed = false;
+		queue.replaceChannel = true;
+		++queue.order;
+	}
+	if (queue.replaceChannel && (killed || idle())) {
+		tgm_chan_del(&queue.space.channel);
+		queue.replaceChannel = false;
+	}
+	if (!queue.space.vm && !openSpace())
 		return -12;
-	for (uint32_t i = 0; i < p.npages; i++) {
-		p.pas[i] = memory->getPhysicalSegment(first + static_cast<uint64_t>(i) * kPage,
-						      nullptr, kIOMemoryMapperNone);
-		if (!p.pas[i])
-			return -22;
-	}
-	if (const int ret = tgm_mem_new(gCopy.vm, p.pas, p.npages, &p.mem))
-		return ret;
-	p.va = window + (offset - first);
-	p.bytes = bytes;
-	return tgm_vm_map_ordered(gCopy.vm, window, static_cast<uint64_t>(p.npages) * kPage, p.mem,
-				  0, kind, 0, nullptr);
+	return queue.space.openChannel(kShape, &queue, fenced);
 }
 
-void reapWork(thread_call_param_t, thread_call_param_t)
+#if DEVELOPMENT || DEBUG
+// What the CPU wrote for a failed job, beside the PBDMA's view of it in a PBENTRY report
+void logFailedPush(const Job &job, int result)
 {
-	Copier &c = gCopy;
-	tegra_gm20b_ce_done finished[kJobs];
-	int status[kJobs];
-	uint32_t n = 0;
-	IOLockLock(c.lock);
-	const uint32_t completed = c.chan ? tgm_chan_completed(c.chan) : 0;
-	const int error = c.chan && tgm_chan_error(c.chan) ? -5 : 0;
-	for (Job &j : c.jobs) {
-		if (!j.busy || (!error && static_cast<int32_t>(completed - j.seqno) < 0))
+	const auto slot = uint32_t(&job - queue.jobs);
+	const uint32_t *push = queue.space.words + slot * (Page / 4);
+	char words[9 * 32 + 1] = "";
+	for (uint32_t i = 0, at = 0; i < job.dwords && i < 32; ++i)
+		at += uint32_t(snprintf(words + at, sizeof(words) - at, " %08x", push[i]));
+	IOLog("SwitchGpu: ce-copy job %llu failed (%d): slot %u at %#llx, %u words:%s\n",
+	      job.completion.value, result, slot, PushVa + slot * Page, job.dwords, words);
+}
+#endif
+
+void retire(thread_call_param_t, thread_call_param_t)
+{
+	tegra_gm20b_ce_done callbacks[Jobs];
+	int results[Jobs];
+	uint32_t count = 0;
+	IOLockLock(queue.lock);
+	__atomic_store_n(&queue.waitingSources, 1u, __ATOMIC_RELEASE);
+	bool pending = false;
+	for (auto &job : queue.jobs) {
+		if (!job.busy)
 			continue;
-		unmap(j.src);
-		unmap(j.dst);
-		j.busy = false;
-		if (j.done.fn) {
-			finished[n] = j.done;
-			status[n++] = error;
+		const int result = switch_gpu_backing_token_external_status(&job.completion);
+		if (!result) {
+			pending = true;
+			continue;
 		}
+		if (result < 0) {
+			queue.semanticFailed |= job.order == queue.order;
+#if DEVELOPMENT || DEBUG
+			logFailedPush(job, result);
+#endif
+		}
+		switch_gpu_copy_mapping_put(job.source);
+		switch_gpu_copy_mapping_put(job.destination);
+		switch_gpu_backing_token_release(&job.completion);
+		if (job.done.fn) {
+			callbacks[count] = job.done;
+			results[count++] = result < 0 ? result : 0;
+		}
+		job = {};
 	}
-	IOLockUnlock(c.lock);
-	for (uint32_t i = 0; i < n; i++)
-		finished[i].fn(finished[i].arg, status[i]);
+	__atomic_store_n(&queue.waitingSources, pending, __ATOMIC_RELEASE);
+	IOLockUnlock(queue.lock);
+	for (uint32_t i = 0; i < count; ++i)
+		callbacks[i].fn(callbacks[i].arg, results[i]);
 }
 
-// The reap call is published before the lock, which says the copier is ready; a racing first call frees what it lost
-bool init()
+bool initialize()
 {
-	Copier &c = gCopy;
-	if (__atomic_load_n(&c.lock, __ATOMIC_ACQUIRE))
+	if (__atomic_load_n(&queue.lock, __ATOMIC_ACQUIRE))
 		return true;
-	thread_call_t reap =
-		thread_call_allocate_with_priority(reapWork, nullptr, THREAD_CALL_PRIORITY_KERNEL);
-	IOLock *lock = reap ? IOLockAlloc() : nullptr;
+	auto retirement = thread_call_allocate_with_options(
+		retire, nullptr, THREAD_CALL_PRIORITY_KERNEL, THREAD_CALL_OPTIONS_ONCE);
+	IOLock *lock = retirement ? IOLockAlloc() : nullptr;
 	if (!lock) {
-		if (reap)
-			thread_call_free(reap);
+		if (retirement)
+			thread_call_free(retirement);
 		return false;
 	}
 	thread_call_t noCall = nullptr;
-	if (!__atomic_compare_exchange_n(&c.reap, &noCall, reap, false, __ATOMIC_ACQ_REL,
-					 __ATOMIC_ACQUIRE))
-		thread_call_free(reap);
-	// NOLINTNEXTLINE(misc-const-correctness): the compare-and-swap writes the current value back into it
+	if (!__atomic_compare_exchange_n(&queue.retirement, &noCall, retirement, false,
+					 __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE))
+		thread_call_free(retirement);
 	IOLock *noLock = nullptr;
-	if (!__atomic_compare_exchange_n(&c.lock, &noLock, lock, false, __ATOMIC_ACQ_REL,
+	if (!__atomic_compare_exchange_n(&queue.lock, &noLock, lock, false, __ATOMIC_RELEASE,
 					 __ATOMIC_ACQUIRE))
 		IOLockFree(lock);
 	return true;
 }
 
-// An IOSurface a copy reads or writes, by the descriptor's first page: its coherency entry (a reference, or null when the
-// GPU driver never imported it) and its layout when the kernel made it block-linear
-struct Surface {
-	tgm_coh *coh = nullptr;
+struct Layout {
+	tgm_layout value{};
 	bool tiled = false;
-	tgm_layout layout = {};
-
-	explicit Surface(IOMemoryDescriptor *memory)
-	    : coh(tgm_coh_find_pa(memory->getPhysicalSegment(0, nullptr, kIOMemoryMapperNone)))
-	{
-		if (!coh)
-			return;
-		tgm_coh_lock(coh);
-		const tgm_tiled *t = __atomic_load_n(tgm_coh_tiled(coh), __ATOMIC_ACQUIRE);
-		if (t && t->tiled) {
-			tiled = true;
-			layout = t->layout;
-		}
-		tgm_coh_unlock(coh);
-	}
-
-	~Surface()
-	{
-		if (coh)
-			tgm_coherency_put(coh);
-	}
-
-	// lock held: its GPU writers' fences, appended at waits[n] (TegraGM20BRelayout.h tgm_relayout_waits)
-	void writers(uint32_t self, tgm_relayout_wait *waits, uint32_t &n) const
-	{
-		if (!coh)
-			return;
-		tgm_relayout_writer w[TGM_RELAYOUT_MAX_WAITS];
-		tgm_coh_lock(coh);
-		const uint32_t found = tgm_coh_writers(coh, w, TGM_RELAYOUT_MAX_WAITS - n);
-		tgm_coh_unlock(coh);
-		n = tgm_relayout_waits(gCopy.vm, self, w, found, waits, n);
-	}
-
-	bool whole(const tegra_gm20b_ce_plane &p, uint32_t rowBytes, uint32_t rows) const
-	{
-		return (p.offset == 0u) && rowBytes == layout.width * layout.bpp &&
-		       rows == layout.height;
-	}
 };
 
-bool shapeOk(const Surface &from, const Surface &to, const tegra_gm20b_ce_plane &src,
-	     const tegra_gm20b_ce_plane &dst, uint32_t rowBytes, uint32_t rows)
+int layout(switch_gpu_backing *backing, uint64_t offset, uint32_t rowBytes, uint32_t rows,
+	   Layout &out)
 {
-	if (from.tiled && to.tiled)
-		return false;
-	return (from.tiled ? from.whole(src, rowBytes, rows) : src.pitch >= rowBytes) &&
-	       (to.tiled ? to.whole(dst, rowBytes, rows) : dst.pitch >= rowBytes);
-}
-}  // namespace
-
-extern "C" int tegra_gm20b_ce_copy_plane(const struct tegra_gm20b_ce_plane *src,
-					 const struct tegra_gm20b_ce_plane *dst, uint32_t row_bytes,
-					 uint32_t rows, const struct tegra_gm20b_ce_wait *wait,
-					 const struct tegra_gm20b_ce_done *done)
-{
-	if (!src || !dst || !src->memory || !dst->memory || !row_bytes || !rows ||
-	    ((src->offset | dst->offset) & 15))
-		return -22;
-	if (!init())
-		return -12;
-	auto *srcMemory = static_cast<IOMemoryDescriptor *>(src->memory);
-	auto *dstMemory = static_cast<IOMemoryDescriptor *>(dst->memory);
-	Copier &c = gCopy;
-	IOLockLock(c.lock);
-	tgm_chan *chan = channel();
-	uint32_t slot = 0;
-	while (slot < kJobs && c.jobs[slot].busy)
-		slot++;
-	if (!chan || slot == kJobs) {
-		IOLockUnlock(c.lock);
-		if (chan) {
-			switch_refusal(
-				"gpu-copy", "busy",
-				"every one of the copy engine's %u plane copies is in flight",
-				kJobs);
+	switch_gpu_backing_info info{};
+	switch_gpu_backing_describe(backing, &info);
+	for (uint32_t i = 0; i < info.layout.plane_count; ++i) {
+		const auto &plane = info.layout.planes[i];
+		if (plane.offset != offset || plane.layout != SWITCH_GPU_BACKING_BLOCK_LINEAR)
+			continue;
+		if (!plane.bytes_per_element ||
+		    uint64_t(plane.width) * plane.bytes_per_element != rowBytes ||
+		    plane.height != rows || plane.block_height_log2 > 5 || (plane.pitch & 63) ||
+		    plane.pitch < rowBytes)
+			return -22;
+		out.tiled = true;
+		out.value = {plane.width,
+			     plane.height,
+			     plane.bytes_per_element,
+			     plane.pitch,
+			     (plane.height + (8u << plane.block_height_log2) - 1) &
+				     ~((8u << plane.block_height_log2) - 1),
+			     uint8_t(plane.block_height_log2),
+			     Page,
+			     plane.bytes};
+		return 0;
+	}
+	auto *coherency = info.page_count ? tgm_coh_find_pa(info.pages[0]) : nullptr;
+	if (coherency) {
+		tgm_coh_lock(coherency);
+		const auto *tiled = __atomic_load_n(tgm_coh_tiled(coherency), __ATOMIC_ACQUIRE);
+		if (tiled && tiled->tiled) {
+			out.tiled = true;
+			out.value = tiled->layout;
 		}
-		return chan ? -16 : -12;
+		tgm_coh_unlock(coherency);
+		tgm_coherency_put(coherency);
 	}
-	Job &j = c.jobs[slot];
-	const Surface from(srcMemory);
-	const Surface to(dstMemory);
-	tgm_relayout_wait waits[TGM_RELAYOUT_MAX_WAITS];
-	uint32_t nwaits = 0;
-	from.writers(tgm_chan_uid(chan), waits, nwaits);
-	to.writers(tgm_chan_uid(chan), waits, nwaits);
-	int ret = shapeOk(from, to, *src, *dst, row_bytes, rows) ? 0 : -22;
-	const uint64_t srcBytes =
-		from.tiled ? from.layout.bytes : uint64_t(src->pitch) * (rows - 1) + row_bytes;
-	const uint64_t dstBytes =
-		to.tiled ? to.layout.bytes : uint64_t(dst->pitch) * (rows - 1) + row_bytes;
-	const uint64_t windows = kFirstWindow + uint64_t(slot) * 2 * kWindow;
-	if (!ret) {
-		ret = map(j.src, srcMemory, src->offset, srcBytes, windows,
-			  from.tiled ? uint8_t(TGM_LAYOUT_KIND) : 0);
+	return out.tiled && (offset || uint64_t(out.value.width) * out.value.bpp != rowBytes ||
+			     out.value.height != rows)
+		       ? -22
+		       : 0;
+}
+
+int submit(Job &job, const tgm_push &push, switch_gpu_backing *source,
+	   switch_gpu_backing *destination, const switch_gpu_copy_ownership *ownership,
+	   const switch_gpu_event_submission *events)
+{
+	int result = queue.events.prepareKernel(events);
+	if (!result)
+		result = queue.events.sequence(queue.authority);
+	switch_gpu_backing_transaction transaction{};
+	switch_gpu_chan_submit_enter(queue.space.channel);
+	for (; !result;) {
+		switch_gpu_chan_next_token(queue.space.channel, &job.completion);
+		switch_gpu_backing_use uses[] = {{source, SWITCH_GPU_BACKING_READ, 0},
+						 {destination, SWITCH_GPU_BACKING_WRITE, 0}};
+		const auto *guards = ownership ? ownership->guards : nullptr;
+		const uint32_t guardCount = ownership ? ownership->guard_count : 0;
+		result = ownership && ownership->lease_count
+				 ? switch_gpu_backing_begin_conversion_checked(
+					   uses, 2, ownership->leases, ownership->lease_count,
+					   guards, guardCount, &job.completion, &transaction)
+				 : switch_gpu_backing_begin_checked(uses, 2, guards, guardCount,
+								    &job.completion, &transaction);
+		uint32_t count = 0;
+		if (!result)
+			result = switch_gpu_backing_dependencies(&transaction, queue.dependencies,
+								 TegraGM20BMaxJobDependencies,
+								 &count);
+		if (!result)
+			result = queue.events.append(queue.dependencies,
+						     TegraGM20BMaxJobDependencies, &count);
+		if (!result) {
+			const int captured =
+				queue.events.captureDependencies(queue.dependencies, count);
+			if (captured > 0) {
+				switch_gpu_backing_abort(&transaction);
+				result = queue.events.inheritDependencies();
+				continue;
+			}
+			result = captured;
+		}
+		if (!result)
+			result = queue.events.bind(&job.completion);
+		bool retained = false;
+		if (!result) {
+			result = switch_gpu_backing_token_retain(&job.completion);
+			retained = !result;
+		}
+		uint32_t sequence = 0;
+		if (!result)
+			result = switch_gpu_chan_exec_visibility(
+				queue.space.channel, &push, 1, queue.dependencies, count, &sequence,
+				nullptr,
+				SWITCH_GPU_SUBMIT_VISIBILITY_EXPLICIT |
+					SWITCH_GPU_SUBMIT_EXTERNAL_VISIBILITY |
+					(transaction.host_written ? SWITCH_GPU_SUBMIT_HOST_WRITTEN
+								  : 0u));
+		if (!result) {
+			switch_gpu_backing_commit(&transaction);
+			queue.events.commit();
+			break;
+		}
+		if (retained)
+			switch_gpu_backing_token_release(&job.completion);
+		switch_gpu_backing_abort(&transaction);
+		if (result != -11)
+			break;
+		result = switch_gpu_chan_wait_submission_room(queue.space.channel, &push, 1, count,
+							      nullptr);
 	}
-	if (!ret) {
-		ret = map(j.dst, dstMemory, dst->offset, dstBytes, windows + kWindow,
-			  to.tiled ? uint8_t(TGM_LAYOUT_KIND) : 0);
+	switch_gpu_backing_abort(&transaction);
+	queue.events.clear();
+	switch_gpu_chan_submit_leave();
+	return result;
+}
+}
+
+extern "C" void switch_gpu_copy_completed(void)
+{
+	if (__atomic_load_n(&queue.waitingSources, __ATOMIC_ACQUIRE))
+		thread_call_enter(queue.retirement);
+}
+
+extern "C" int tegra_gm20b_ce_copy_plane_checked(
+	const tegra_gm20b_ce_plane *src, const tegra_gm20b_ce_plane *dst, uint32_t rowBytes,
+	uint32_t rows, const tegra_gm20b_ce_wait *wait, const tegra_gm20b_ce_done *done,
+	switch_gpu_backing *source, uint64_t sourceOffset, switch_gpu_backing *destination,
+	uint64_t destinationOffset, const switch_gpu_copy_ownership *ownership,
+	const switch_gpu_event_submission *events)
+{
+	if (!src || !dst || !source || !destination || !src->memory || !dst->memory || !rowBytes ||
+	    !rows || ((src->offset | dst->offset | sourceOffset | destinationOffset) & 15) ||
+	    (ownership && (ownership->lease_count > 4 || ownership->guard_count > 8 ||
+			   (ownership->lease_count && !ownership->leases) ||
+			   (ownership->guard_count && !ownership->guards))))
+		return -22;
+	if (!initialize())
+		return -12;
+	IOLockLock(queue.lock);
+	uint32_t slot = 0;
+	while (slot < Jobs && queue.jobs[slot].busy)
+		++slot;
+	int result = slot == Jobs ? -16 : channel();
+	if (result) {
+		IOLockUnlock(queue.lock);
+		return result;
 	}
-	uint32_t seqno = 0;
-	if (!ret) {
-		const tgm_copy_job job = {j.src.va,
-					  j.dst.va,
-					  src->pitch,
-					  dst->pitch,
-					  row_bytes,
-					  rows,
-					  from.tiled ? &from.layout : nullptr,
-					  to.tiled ? &to.layout : nullptr,
-					  wait ? wait->syncpt : TEGRA_GM20B_CE_NO_SYNCPT,
-					  wait ? wait->threshold : 0,
-					  done ? done->syncpt : TEGRA_GM20B_CE_NO_SYNCPT};
-		uint32_t *words = c.pushCpu + slot * (kPage / 4);
-		const tgm_push push = {kPushVa + slot * kPage,
-				       tgm_copy_push(words, &job, waits, nwaits), 0};
-		ret = tgm_chan_exec(chan, &push, 1, &seqno, nullptr);
+	auto &job = queue.jobs[slot];
+	Layout from, to;
+	result = layout(source, sourceOffset, rowBytes, rows, from);
+	if (!result)
+		result = layout(destination, destinationOffset, rowBytes, rows, to);
+	if (!result && ((from.tiled && to.tiled) || (!from.tiled && src->pitch < rowBytes) ||
+			(!to.tiled && dst->pitch < rowBytes)))
+		result = -22;
+	const uint64_t sourceBytes =
+		from.tiled ? from.value.bytes : uint64_t(src->pitch) * (rows - 1) + rowBytes;
+	const uint64_t destinationBytes =
+		to.tiled ? to.value.bytes : uint64_t(dst->pitch) * (rows - 1) + rowBytes;
+	if (!result)
+		result = switch_gpu_copy_mapping(queue.space.vm, &queue.mappings,
+						 static_cast<IOMemoryDescriptor *>(src->memory),
+						 src->offset, source, sourceOffset, sourceBytes,
+						 from.tiled, &job.source);
+	if (!result)
+		result = switch_gpu_copy_mapping(queue.space.vm, &queue.mappings,
+						 static_cast<IOMemoryDescriptor *>(dst->memory),
+						 dst->offset, destination, destinationOffset,
+						 destinationBytes, to.tiled, &job.destination);
+	if (!result) {
+		const auto *a = job.source->mapping, *b = job.destination->mapping;
+		const tgm_copy_job copy = {(from.tiled ? a->tiled : a->pitch) + sourceOffset,
+					   (to.tiled ? b->tiled : b->pitch) + destinationOffset,
+					   src->pitch,
+					   dst->pitch,
+					   rowBytes,
+					   rows,
+					   from.tiled ? &from.value : nullptr,
+					   to.tiled ? &to.value : nullptr,
+					   wait ? wait->syncpt : TEGRA_GM20B_CE_NO_SYNCPT,
+					   wait ? wait->threshold : 0,
+					   done ? done->syncpt : TEGRA_GM20B_CE_NO_SYNCPT};
+		const tgm_push push = {
+			PushVa + slot * Page,
+			tgm_copy_push(queue.space.words + slot * (Page / 4), &copy, nullptr, 0),
+			0,
+			0,
+			0,
+			0};
+		result = submit(job, push, source, destination, ownership, events);
+		job.dwords = push.dwords;
 	}
-	if (ret) {
-		unmap(j.src);
-		unmap(j.dst);
+	if (!result) {
+		job.busy = true;
+		job.order = queue.order;
+		job.done = done ? *done
+				: tegra_gm20b_ce_done{TEGRA_GM20B_CE_NO_SYNCPT, nullptr, nullptr};
 	} else {
-		j.busy = true;
-		j.seqno = seqno;
-		j.done = done ? *done
-			      : tegra_gm20b_ce_done{TEGRA_GM20B_CE_NO_SYNCPT, nullptr, nullptr};
-		if (to.coh)
-			tgm_coherency_wrote(to.coh, 1, tgm_chan_uid(chan), seqno);
+		switch_gpu_copy_mapping_put(job.source);
+		switch_gpu_copy_mapping_put(job.destination);
+		job = {};
 	}
-	IOLockUnlock(c.lock);
-	return ret;
+	IOLockUnlock(queue.lock);
+	return result;
 }

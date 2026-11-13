@@ -12,6 +12,7 @@ public final class GPU: @unchecked Sendable {
     private let lock = NSLock()
     private var recorded = PathTally()
     private var failures: [String] = []
+    private var hostClocked = 0
 
     /// The app's precompiled default.metallib; the host tests compile the shaders' sources instead.
     nonisolated(unsafe) public static var makeLibrary: (MTLDevice) throws -> MTLLibrary = {
@@ -40,6 +41,8 @@ public final class GPU: @unchecked Sendable {
         /// The CPU's part: the encode closure, and the commit call (the raw path encodes and submits inside it).
         public var encodeMilliseconds = 0.0
         public var commitMilliseconds = 0.0
+        /// The raw facade's clock of gpuMilliseconds (RawFacade.gpuClock); nil off the facade.
+        public var gpuClock: String?
 
         /// GPU timestamps that advance prove the work ran on the GPU's clock, not a CPU fallback.
         public var gpuTimed: Bool { gpuMilliseconds > 0 }
@@ -47,6 +50,9 @@ public final class GPU: @unchecked Sendable {
 
     /// Every command buffer `run` committed, by the path the raw facade reports for it ("device" elsewhere).
     public var paths: PathTally { locked { recorded } }
+
+    /// Runs whose GPU time on the raw facade is the host's window, for want of a GPU stamp (RawFacade.gpuClock).
+    public var hostClockedRuns: Int { locked { hostClocked } }
 
     /// Command buffers that completed with an error, in order (their error's domain, code and text).
     public var commandBufferErrors: [String] { locked { failures } }
@@ -99,9 +105,11 @@ public final class GPU: @unchecked Sendable {
                 gpuMilliseconds: 0, wallMilliseconds: wall, path: "error:" + error, encodeMilliseconds: encodeMs,
                 commitMilliseconds: commitMs)
         }
+        let clock = RawFacade.gpuClock(of: buffer)
+        if clock == "host" { locked { hostClocked += 1 } }
         return Timing(
             gpuMilliseconds: max(0, buffer.gpuEndTime - buffer.gpuStartTime) * 1000, wallMilliseconds: wall, path: path,
-            encodeMilliseconds: encodeMs, commitMilliseconds: commitMs)
+            encodeMilliseconds: encodeMs, commitMilliseconds: commitMs, gpuClock: clock)
     }
 
     /// Commits one command buffer without waiting: `finish` waits for a batch of them, so work queued back to back
@@ -167,9 +175,11 @@ public final class GPU: @unchecked Sendable {
         return texture
     }
 
-    /// Copies a texture (any storage) into a shared buffer with the blit engine and returns its bytes, rows packed.
+    /// Copies a texture (any storage) into a shared buffer with the blit engine and returns its bytes, rows packed:
+    /// level `level` of slice `slice`, or of a 3D texture's depth plane `plane`.
     public func read(
-        _ texture: MTLTexture, bytesPerPixel: Int, level: Int = 0, slice: Int = 0, options: MTLBlitOption = []
+        _ texture: MTLTexture, bytesPerPixel: Int, level: Int = 0, slice: Int = 0, plane: Int = 0,
+        options: MTLBlitOption = []
     ) async throws -> [UInt8] {
         let width = max(1, texture.width >> level)
         let height = max(1, texture.height >> level)
@@ -178,14 +188,15 @@ public final class GPU: @unchecked Sendable {
         try await run { commands in
             let blit = commands.makeBlitCommandEncoder()!
             let size = MTLSize(width: width, height: height, depth: 1)
+            let origin = MTLOrigin(x: 0, y: 0, z: plane)
             // m2v's blit encoder has only the form without options: the other is answered zero and copies nothing
             if options.isEmpty {
                 blit.copy(
-                    from: texture, sourceSlice: slice, sourceLevel: level, sourceOrigin: MTLOrigin(), sourceSize: size,
+                    from: texture, sourceSlice: slice, sourceLevel: level, sourceOrigin: origin, sourceSize: size,
                     to: out, destinationOffset: 0, destinationBytesPerRow: rowBytes, destinationBytesPerImage: 0)
             } else {
                 blit.copy(
-                    from: texture, sourceSlice: slice, sourceLevel: level, sourceOrigin: MTLOrigin(), sourceSize: size,
+                    from: texture, sourceSlice: slice, sourceLevel: level, sourceOrigin: origin, sourceSize: size,
                     to: out, destinationOffset: 0, destinationBytesPerRow: rowBytes, destinationBytesPerImage: 0,
                     options: options)
             }
@@ -196,11 +207,12 @@ public final class GPU: @unchecked Sendable {
 
     /// The blit readback as a raster of `format`.
     public func raster(
-        _ texture: MTLTexture, _ format: TexelFormat, level: Int = 0, slice: Int = 0
+        _ texture: MTLTexture, _ format: TexelFormat, level: Int = 0, slice: Int = 0, plane: Int = 0
     ) async throws
         -> Raster
     {
-        let bytes = try await read(texture, bytesPerPixel: format.bytesPerTexel, level: level, slice: slice)
+        let bytes = try await read(
+            texture, bytesPerPixel: format.bytesPerTexel, level: level, slice: slice, plane: plane)
         return format.raster(bytes, width: max(1, texture.width >> level), height: max(1, texture.height >> level))
     }
 

@@ -4,7 +4,6 @@
 // (bridge/NativeMetalDirect.h nmb_compute_pipeline_direct). No pipeline, dispatch or capture.
 #pragma once
 #include <string>
-#include "raw_compiler.h"
 #include "raw_compute_record.h"
 #include "raw_direct.h"
 
@@ -13,7 +12,7 @@ struct NmbDirectKernel;
 namespace raw {
 
 // Refused: a kernel the raw path does not dispatch from a record (`why`); Failed: NVK could not compile it
-Compiler::Outcome directKernel(const NmbDirectKernel &kernel, const DirectNvk &nvk, const std::string &key,
-                               ComputeRecord &out, std::string &why);
+CompileOutcome directKernel(const NmbDirectKernel &kernel, const DirectNvk &nvk, const std::string &key,
+                            ComputeRecord &out, std::string &why);
 
 }  // namespace raw

@@ -8,8 +8,8 @@ import Metal
 /// into a 720x1280 BGRA8 IOSurface with Core Animation's framebuffer row of 3072 bytes, which the kernel makes
 /// block-linear, cleared first; then read back three ways (blit, shader, CPU lock). Three rounds, each on a new
 /// surface, so a round after a channel the kernel killed and the facade reopened runs too: reopens= counts those,
-/// cb_errors= the command buffers that failed. The fill's own pixels have no CPU model; hash_fill= is compared
-/// between the raw facade's run and the m2v device's.
+/// cb_errors= the command buffers that failed. The fill's own pixels have no CPU model: the first round's are held to
+/// the Mac's (fill), and the other rounds must draw the same bytes.
 struct FirstTiledSurfaceScene: GPUScene {
     let id = "gpu.ca.first_tiled_surface"
     let name = "First command buffer: CA fill into a block-linear 720x1280 surface"
@@ -70,6 +70,11 @@ struct FirstTiledSurfaceScene: GPUScene {
                 tolerance: 1.01 / 255)
             if let drawn {
                 let region = TexelImage(.bgra8Unorm, Self.width, Self.height, got).read(drawn)
+                if hashes.isEmpty {
+                    result.picture(
+                        "fill", bytes: region, metalFormat: MTLPixelFormat.bgra8Unorm.rawValue, width: drawn.width,
+                        height: drawn.height, cleared: Self.clear)
+                }
                 hashes.insert(Self.fnv(region))
                 result.metrics.set("fill_px\(round)", got.shown(got.pixel(drawn.x + 1, drawn.y + 1)))
             }
@@ -77,7 +82,6 @@ struct FirstTiledSurfaceScene: GPUScene {
         let end = RawFacade.counters(of: gpu.device)
         if !end.isEmpty { result.metrics.set("reopens", (end["reopens"] ?? 0) - (start["reopens"] ?? 0)) }
         result.metrics.set("cb_errors", gpu.commandBufferErrors.count)
-        if let hash = hashes.first { result.metrics.set("hash_fill", String(hash, radix: 16)) }
         result.expect(hashes.count <= 1, "the fill drew \(hashes.count) different pictures in three rounds")
         return result
     }

@@ -10,7 +10,10 @@
   "constants": {
     "baseOffset": "0x168",
     "clientMemory": "0x150",
-    "clientTask": "0x170"
+    "clientTask": "0x170",
+    "useCountFlags": "0x3b2",
+    "parent": "0x358",
+    "memoryRegions": "0x350"
   },
   "addresses": {
     "protection": "0xfffffff005b9d2fc",
@@ -28,7 +31,15 @@
     "prepare": "0xfffffff005b9fda0",
     "complete": "0xfffffff005b9ff64",
     "device_unlock": "0xfffffff005ba0fc8",
-    "lookup": "0xfffffff005baa72c"
+    "lookup": "0xfffffff005baa72c",
+    "copy_value": "0xfffffff005ba0ed4",
+    "bytes_per_element": "0xfffffff005b9ebdc",
+    "element_width": "0xfffffff005b9ebe4",
+    "element_height": "0xfffffff005b9ebec",
+    "use_count_increment": "0xfffffff005b9f758",
+    "use_count_decrement": "0xfffffff005b9f814",
+    "use_count": "0xfffffff005b9f9e0",
+    "seed": "0xfffffff005ba4f6c"
   },
   "hints": {
     "functions": {
@@ -111,6 +122,46 @@
         "at": "0xfffffff005ba0fc8",
         "body": "a9be4ff4 a9017bfd 910043fd aa0103f4 aa0003f3 f9402800 94005ca0 37000174 f940be68 b9400d09 11000529 b9000d09 b943b269 321e0929 b903b269 b9401109 11000529 b9001109",
         "why": "the device write end (surface, options): under the surface's IOLock (+0x50), unless options bit 0 (read), the seed (+0xc of the root entry at +0x178) and the write count (+0x10) go up and the cache flags (+0x3b0) get 0x1c; returns 0. AppleM2ScalerCSCDriver's GOT holds it at 0xfffffff006e5ea88: what Apple's media engines call on a job's destination"
+      },
+      "copy_value": {
+        "at": "0xfffffff005ba0ed4",
+        "body": "a9bd57f6 a9014ff4 a9027bfd 910083fd aa0203f3 aa0103f4 aa0003f5 f9402800 94005cdb aa1503e0 aa1403e1 aa1303e2 97ffff91 aa0003f3 f9402aa0 94005cda",
+        "why": "IOSurface::copyValue(OSSymbol const*, uint32_t*): takes the surface lock at +0x50, calls the retained dictionary-value accessor with key and seed output, then unlocks; the same wrapper around copyValue as 21H461"
+      },
+      "bytes_per_element": {
+        "at": "0xfffffff005b9ebdc",
+        "body": "7940e000 d65f03c0",
+        "why": "ldrh w0, [x0, #0x70]: IOSurfaceBytesPerElement; constructor stores the parsed property at this field"
+      },
+      "element_width": {
+        "at": "0xfffffff005b9ebe4",
+        "body": "3941c800 d65f03c0",
+        "why": "ldrb w0, [x0, #0x72]: IOSurfaceElementWidth; constructor stores the parsed property at this field"
+      },
+      "element_height": {
+        "at": "0xfffffff005b9ebec",
+        "body": "3941cc00 d65f03c0",
+        "why": "ldrb w0, [x0, #0x73]: IOSurfaceElementHeight; constructor stores the parsed property at this field"
+      },
+      "use_count_increment": {
+        "at": "0xfffffff005b9f758",
+        "body": "a9bf7bfd 910003fd 7100043f 54000508 d2c00028 b2607fe9 1280000a 394ec80b 3728036b f940bc0b 9100616b f940016d 92407dac 92607dae 8b0801cf eb0901bf 9a8931ef aa0c01ef 110005b0",
+        "why": "IOSurface::incrementUseCount(category): category above 1 refused, +0x3b2 bit 5 (kIOSurfaceProhibitUseCount) logs \"Attempt to change IOSurface useCount while kIOSurfaceProhibitUseCount is set, ignored.\", else an exclusive add of 1 to the low (category 0) or high word at +0x18 of the shared entry (+0x178), up the parent chain (+0x358); selector 14 reaches it (0xfffffff005bae1bc via 0xfffffff005bb0624); the wrapper at 0xfffffff005b9f750 (mov w1, #0) is AppleAVE2's GOT entry 0xfffffff006f79e80"
+      },
+      "use_count_decrement": {
+        "at": "0xfffffff005b9f814",
+        "body": "a9bd57f6 a9014ff4 a9027bfd 910083fd 7100043f 540007c8 aa0103f3 aa0003f4 b2607ff5 f000fa56 394eca88 37280608 f940be88 91006108 f940010b d360fd69 92607d6a 8b15014c 7100013f 9a8c03ec b3407d6c 5100056d",
+        "why": "IOSurface::decrementUseCount(category): the same checks, an exclusive take of 1 from the category's word at +0x18 (never below 0); selector 15 reaches it (0xfffffff005bae1cc via 0xfffffff005bb06c4); the wrapper at 0xfffffff005b9f80c is GOT entry 0xfffffff006f79e70, 0x10 before the increment's as in 24B119's AppleAVE2"
+      },
+      "use_count": {
+        "at": "0xfffffff005b9f9e0",
+        "body": "f940bc08 f9400d08 d360fd09 0b080120 d65f03c0",
+        "why": "IOSurface::getUseCount(): the shared entry's +0x18 low and high words added; selector 16 (0xfffffff005bae1dc) returns it; GOT entry 0xfffffff006f79ec8"
+      },
+      "seed": {
+        "at": "0xfffffff005ba4f6c",
+        "body": "f940bc08 b9400d00 d65f03c0",
+        "why": "IOSurface::getSeed(): ldr x8, [x0, #0x178] (the shared entry); ldr w0, [x8, #0xc]: the word IOSurface::lock (0xfffffff005b9d81c), the device write end (0xfffffff005ba0ff4), the allocation over client memory (0xfffffff005b9c408) and the seed increment pair (0xfffffff005b9d6b4, 0xfffffff005b9d704) add 1 to; between the +0x3b2 flag readers and the +0x10 reader, the accessor run 24B119 has at 0xfffffff009af6940. The 0xb8-byte shared entry is zeroed when made (0xfffffff005bac818..834)"
       }
     },
     "constants": {
@@ -131,6 +182,24 @@
         "at": "0xfffffff005ba5a3c",
         "word": "f940b809",
         "why": "ldr x9, [x0, #0x170] in the map-into-task, compared with the client's task"
+      },
+      "useCountFlags": {
+        "value": "0x3b2",
+        "at": "0xfffffff005b9f774",
+        "word": "394ec80b",
+        "why": "ldrb w11, [x0, #0x3b2] then tbnz w11, #5 in incrementUseCount: the prohibit flag every use-count change tests (24B119: +0x3d2)"
+      },
+      "parent": {
+        "value": "0x358",
+        "at": "0xfffffff005b9c240",
+        "word": "f941ac08",
+        "why": "ldr x8, [x0, #0x358] at the head of the memory allocation init calls (0xfffffff005b999e4): a child takes its parent's descriptor (+0x30 of the parent) and no seed moves; the use counts climb the same chain (24B119: +0x378)"
+      },
+      "memoryRegions": {
+        "value": "0x350",
+        "at": "0xfffffff005b9c31c",
+        "word": "f941aa68",
+        "why": "ldr x8, [x19, #0x350] in the memory allocation when clientMemory is 0: each 16-byte range of the creating task (+0x170) is checked page-aligned and the descriptor made over them (0xfffffff005b9c5b0), with no seed move, unlike the clientMemory branch (0xfffffff005b9c408) (24B119: +0x370)"
       }
     }
   }

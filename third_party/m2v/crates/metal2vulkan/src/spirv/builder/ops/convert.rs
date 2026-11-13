@@ -27,7 +27,15 @@ impl FunctionBuilder<'_> {
     /// - `Bitcast`: numeric scalars/vectors or `PhysicalStorageBuffer` pointers of equal total
     ///   width; a pointer converts only to another such pointer, a 64-bit integer, or a vector of
     ///   two 32-bit integers.
-    pub fn convert(&mut self, op: ConvOp, a: Value, to: TypeId) -> BResult<Value> {
+    pub fn convert(&mut self, mut op: ConvOp, a: Value, to: TypeId) -> BResult<Value> {
+        if op == ConvOp::FConvert
+            && self.mb().native_half_conversions()
+            && self
+                .num_of(to)?
+                .is_some_and(|t| t.is_float() && t.width == 16)
+        {
+            op = ConvOp::FConvertRte;
+        }
         let o = op.to_spirv();
         let result = err(o, OperandRule::ResultType);
         match op {
@@ -37,10 +45,14 @@ impl FunctionBuilder<'_> {
             | ConvOp::ConvertUToF
             | ConvOp::UConvert
             | ConvOp::SConvert
-            | ConvOp::FConvert => {
+            | ConvOp::FConvert
+            | ConvOp::FConvertRte => {
                 let from_float = matches!(
                     op,
-                    ConvOp::ConvertFToU | ConvOp::ConvertFToS | ConvOp::FConvert
+                    ConvOp::ConvertFToU
+                        | ConvOp::ConvertFToS
+                        | ConvOp::FConvert
+                        | ConvOp::FConvertRte
                 );
                 let x = self.want(
                     o,
@@ -63,6 +75,7 @@ impl FunctionBuilder<'_> {
                         ConvOp::UConvert => t.is_uint() && t.width != x.width,
                         ConvOp::SConvert => t.is_int() && t.width != x.width,
                         ConvOp::FConvert => t.is_float() && t.width != x.width,
+                        ConvOp::FConvertRte => t.is_float() && t.width == 16 && x.width == 32,
                         _ => false,
                     };
                 if !ok {

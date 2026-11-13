@@ -2,8 +2,9 @@
 
 raw/runtime/raw_zeta.h (with SET_ZT_FORMAT) and raw_gpu.cpp's kFormats rows that name NIL's format. NVK takes both
 words from NIL's row of the image's format (nil_formats.csv through nil_format_table_gen.py), and samples a depth
-aspect through a view that keeps the image's format (nvk_image_view.c). The words are rebuilt here from that row and
-the class headers by the generator's rules.
+aspect through a view that keeps the image's format and a stencil aspect through one of util_format_stencil_only's
+(nvk_image_view.c), raw_stencil_bits.h's kStencilViews. The words are rebuilt here from that row and the class headers
+by the generator's rules.
 """
 
 import re
@@ -13,11 +14,14 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[3]
 ZETA = ROOT / 'drivers/TegraGM20BMetal/raw/runtime/raw_zeta.h'
 FORMATS = ROOT / 'drivers/TegraGM20BMetal/raw/runtime/raw_gpu.cpp'
+STENCIL = ROOT / 'drivers/TegraGM20BMetal/raw/runtime/raw_stencil_bits.h'
 NIL = ROOT / 'third_party/mesa/src/nouveau/nil/nil_formats.csv'
 CLASSES = ROOT / 'third_party/mesa/src/nouveau/headers/nvidia/classes'
 
 # metal2vulkan's Vulkan format of each Metal depth/stencil format, as a pipe format
 PIPE = {250: 'Z16_UNORM', 252: 'Z32_FLOAT', 253: 'S8_UINT', 260: 'Z32_FLOAT_S8X24_UINT'}
+# util_format_stencil_only of each with stencil
+STENCIL_ONLY = {'S8_UINT': 'S8_UINT', 'Z32_FLOAT_S8X24_UINT': 'X32_S8X24_UINT'}
 
 
 def defines(path: Path) -> dict[str, int]:
@@ -69,6 +73,16 @@ class RawTicWordsTest(unittest.TestCase):
             with self.subTest(metal=metal, pipe=row[0]):
                 self.assertEqual(int(zt, 16), threed['NVB197_SET_ZT_FORMAT_V_' + row[1]])
                 self.assertEqual(int(word, 16), tic0(row, tex))
+
+    def test_stencil_views_are_nvks(self):
+        tex = defines(CLASSES / 'clb197tex.h') | defines(CLASSES / 'cl9097tex.h')
+        rows = nil_rows()
+        table = re.findall(r'\{(\d+), (0x[0-9a-f]+)\},\s*// \w+: (\w+)', STENCIL.read_text())
+        self.assertEqual(sorted(int(m) for m, _, _ in table), [253, 260])
+        for metal, word, pipe in table:
+            with self.subTest(metal=metal, pipe=pipe):
+                self.assertEqual(pipe, STENCIL_ONLY[PIPE[int(metal)]])
+                self.assertEqual(int(word, 16), tic0(rows[pipe], tex))
 
     def test_block_compressed_words_are_nils(self):
         tex = defines(CLASSES / 'clb097tex.h') | defines(CLASSES / 'cl9097tex.h')

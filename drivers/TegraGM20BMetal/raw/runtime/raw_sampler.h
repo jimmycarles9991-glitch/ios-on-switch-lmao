@@ -15,6 +15,8 @@ struct SamplerDesc {                                      // the MTLSamplerDescr
     uint8_t maxAnisotropy = 1;                            // Metal's degree (metalAnisotropy), 1 to 32
     float lodMin = 0, lodMax = 3.402823466e+38f;
     bool pixel = false;  // normalizedCoordinates NO
+    uint8_t compare =
+        0;  // MTLCompareFunction (NV9097 TEXSAMP0 DEPTH_COMPARE_FUNC's own numbering): its compare header's
     // a min or mag filter Cubic (MTLSamplerMinMagFilterCubic): the header filters nearest, a placeholder no filtered read
     // takes, and a state samples through it on its cubic variant (raw_cubic.h), which emulates Metal's bicubic filter
     bool cubic = false;
@@ -75,9 +77,16 @@ inline uint8_t metalAnisotropy(uint64_t value)
 // lodAverage changes nothing m2v hands NVK.
 // A Cubic min or mag filter is m2v's (metal2vulkan metal/bicubic.rs runtime_cubic_measured): without a mip filter,
 // isotropic, mirrored once on no axis, a border colour Metal names; the header holds nearest filters.
+// A sampler header with depth comparison on under `function` (TEXSAMP0 DEPTH_COMPARE, bit 9, and DEPTH_COMPARE_FUNC, bits
+// 12:10, whose ZC_ values are MTLCompareFunction's), as NVK writes a compare-enabled VkSampler's (nvk_sampler.c)
+inline void compareHeader(uint32_t w[8], uint8_t function)
+{
+    w[0] = (w[0] & ~0x1E00u) | 1u << 9 | uint32_t(function & 7) << 10;
+}
+
 inline bool takeSampler(const MetalSamplerFields &m, SamplerDesc &s)
 {
-    if (m.compareFunction != 0 || std::isnan(m.lodMin) || std::isnan(m.lodMax))
+    if (m.compareFunction > 7 || std::isnan(m.lodMin) || std::isnan(m.lodMax))
         return false;
     const bool cubic = m.minFilter == kFilterCubic || m.magFilter == kFilterCubic;
     if (cubic && (m.mipFilter != 0 || metalAnisotropy(m.maxAnisotropy) != 1 || (m.borderColor & 3) == 3 ||
@@ -107,6 +116,7 @@ inline bool takeSampler(const MetalSamplerFields &m, SamplerDesc &s)
     s.lodMax = m.lodMax;
     s.lodMin = m.lodMin > m.lodMax ? m.lodMax : m.lodMin;
     s.pixel = !m.normalizedCoordinates;
+    s.compare = uint8_t(m.compareFunction);
     if (s.pixel) {
         for (uint8_t *axis : {&s.sAddress, &s.tAddress, &s.rAddress})
             if (*axis == kAddressRepeat || *axis == kAddressMirrorRepeat ||

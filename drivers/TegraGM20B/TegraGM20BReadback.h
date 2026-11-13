@@ -18,7 +18,7 @@ void tgm_readback_closed(const void *owner);
 // The reads the present of `copy` runs when armed (0: none), from its mapped source and target; the read-back is then in
 // flight. A present that is refused gives it back with tgm_readback_refused; one that is queued completes through
 // tgm_readback_done, which completes the display's offer.
-uint32_t tgm_readback_take(const TegraScanoutCopy *copy, uint64_t source, bool sourceBlock,
+uint32_t tgm_readback_take(const TegraScanoutCopy *copy, uint64_t source, int32_t sourceBlockLog2,
 			   uint64_t target, tgm_present_read (&reads)[TGM_PRESENT_READS]);
 void tgm_readback_refused();
 void tgm_readback_done(void *display, int status);

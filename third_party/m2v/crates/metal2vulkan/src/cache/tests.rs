@@ -934,6 +934,7 @@ fn the_merged_members_round_trip_in_one_render_pipeline() {
         view: crate::pipeline::StorageAttachmentView::SamplePlanes { layers: 4 },
         uint_view: Some(vk::Format::R32_UINT),
         kept: vk::ColorComponentFlags::B,
+        blend_model: 13,
     });
     p.dependencies.push(RuntimeDependency {
         fact: RuntimeFact::InterlockedFramebufferFetch {

@@ -27,23 +27,32 @@ filegroup(
 # This package's headers (kernel_headers): what other drivers' hdr_deps name.
 kernel_headers()
 
-# TegraNVENC: the NVENC falcon, its SMMU address space, job engine and user client (E0..E3); its firmware by .incbin.
+# TegraNVENC: the NVENC falcon, its SMMU address space, job engine and user client (E0..E3), and input pictures VIC
+# writes from IOSurfaces; its firmware by .incbin.
 kernel_driver(
     name = "TegraNVENC",
     srcs = [
         "TegraNVENC.cpp",
+        "TegraNVENCDirect.cpp",
+        "TegraNVENCDump.cpp",
+        "TegraNVENCEngine.cpp",
         "TegraNVENCMemory.cpp",
+        "TegraNVENCSource.cpp",
         "TegraNVENCUserClient.cpp",
         "firmware.S",
     ],
     hdr_deps = [
+        "drivers/TegraGM20B",
         "drivers/TegraHost1x",
         "drivers/TegraSMMU",
+        "drivers/TegraVIC",
         "kits/SwitchBootArgs",
         "kits/SwitchCAR",
         "kits/SwitchDMA",
+        "kits/SwitchEngineGate",
         "kits/SwitchFalcon",
         "kits/SwitchMMIO",
+        "kits/SwitchRefusal",
         "kits/SwitchTime",
     ],
     stems = {"firmware.S": "nvenc_firmware"},

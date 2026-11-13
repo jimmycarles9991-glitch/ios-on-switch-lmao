@@ -30,4 +30,27 @@ DISPATCH = [
         source='kernel/switch/diag/crash.c',
         note='a crash whose fault address is in the dyld cache; boot 18: locationd x2, lr dsc 0x1af3cfbbc (24B119)',
     ),
+    Check(
+        'dispatch.early-sync-wait',
+        OWNER,
+        'returned at once on a knote already woken for',
+        process=KERNEL,
+        regex=r'SwitchWL: (?P<who>\S+\[\d+\]) thread .* woken for (?P<waiter>this|another) thread',
+        show=('who', 'waiter'),
+        source='kernel/switch/diag/workloop.c',
+        note="a sync waiter given ownership by an earlier wait's wake; before a locationd SwitchCrash, the kernel side",
+    ),
+    Check(
+        'dispatch.cpu-hog',
+        OWNER,
+        'SwitchCPU: user pc ',
+        process=KERNEL,
+        regex=r'user pc (?P<pc>(?:dsc |main\+)?0x[0-9a-f]+) lr (?P<lr>(?:dsc |main\+)?0x[0-9a-f]+)',
+        show=('pc', 'lr'),
+        source='kernel/switch/diag/crash.c',
+        note=(
+            'a thread over its CPU limit, where its loop runs; slice KU (11-10): locationd thread 0x624, 50% for 3 min, '
+            'before this line existed'
+        ),
+    ),
 ]

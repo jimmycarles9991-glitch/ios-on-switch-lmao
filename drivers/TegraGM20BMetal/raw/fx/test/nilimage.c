@@ -9,8 +9,9 @@
 //    or: nilimage <dylib> view WxHxL <levels> <bpp> <2d|2da|cube|cubea> <base level> <levels> <base layer> <layers>...
 // prints per view of a 2D image (array) of that many levels: its header at 0x100000, the image's base
 //    or: nilimage <dylib> ms WxH <bpp> <samples>...
-// prints per multisampled image: "WxH bpp samples layout | size align | row_stride y_log2 | header words | hash" (the pattern
-// copied in over its extent in samples)
+// prints per multisampled image: "WxH bpp samples layout | size align | row_stride y_log2 | header words | hash | storage
+// header words" (the hash of the pattern copied in over its extent in samples; the storage header NVK binds the image as a
+// storage image with)
 // build: nil.h from cbindgen (bazel build //third_party/mesa/src/nouveau/nil:nil_h), util/format/u_format_gen.h generated beside
 // it (uv run --with pyyaml python3 third_party/mesa/src/util/format/u_format_table.py <its u_format.yaml> --enums), then
 //   xcrun clang -O1 -DHAVE_FUNC_ATTRIBUTE_PACKED -I <that directory> -I third_party/mesa/include -I third_party/mesa/src
@@ -137,6 +138,8 @@ static int multisampled(const struct nv_device_info *dev, int n, char **v, typeo
         view.swizzle[2] = PIPE_SWIZZLE_Z;
         view.swizzle[3] = PIPE_SWIZZLE_W;
         const struct nil_descriptor desc = describe(dev, &img, &view, 0x100000);
+        view.access = NIL_VIEW_ACCESS_STORAGE;
+        const struct nil_descriptor storage = describe(dev, &img, &view, 0x100000);
         printf("%ux%u %u %u %u | %" PRIu64 " %u | %u %u |", w, h, bpp, samples, (unsigned)img.sample_layout, img.size_B,
                img.align_B, img.levels[0].row_stride_B, img.levels[0].tiling.y_log2);
         for (int k = 0; k < 8; k++)
@@ -151,7 +154,10 @@ static int multisampled(const struct nv_device_info *dev, int n, char **v, typeo
         uint64_t hash = 0xcbf29ce484222325ull;
         for (uint64_t k = 0; k < img.size_B; k++)
             hash = (hash ^ tiled[k]) * 0x100000001b3ull;
-        printf(" | %016" PRIx64 "\n", hash);
+        printf(" | %016" PRIx64 " |", hash);
+        for (int k = 0; k < 8; k++)
+            printf(" %08x", storage.bits[k]);
+        printf("\n");
         free(linear);
         free(tiled);
     }

@@ -1,0 +1,216 @@
+load("//bazel/lint:defs.bzl", "lint_files")
+load("//bazel/testing:defs.bzl", "host_library", "host_shims", "host_test")
+
+lint_files()
+
+host_test(
+    name = "switch_nvdec_jobs_test",
+    srcs = [
+        "switch_nvdec_jobs_test.cpp",
+        "//drivers/TegraNVDEC:SwitchNVDECAccess.h",
+        "//drivers/TegraNVDEC:SwitchNVDECQueue.h",
+        "//drivers/TegraNVDEC:TegraNVDECABI.h",
+        "//drivers/TegraNVDEC:nvidia/clc5b0.h",
+        "//drivers/TegraNVDEC:nvidia/nvdec_drv.h",
+    ],
+)
+
+host_test(
+    name = "switch_nvdec_display_probe_test",
+    srcs = [
+        "switch_nvdec_display_probe_test.cpp",
+        "//drivers/TegraNVDEC:SwitchNVDECAccess.h",
+        "//drivers/TegraNVDEC:SwitchNVDECDisplayProbe.h",
+        "//drivers/TegraNVDEC:TegraNVDECABI.h",
+        "//drivers/TegraNVDEC:TegraNVDECCheck.h",
+        "//drivers/TegraNVDEC:TegraNVDECCheckMPEG.h",
+        "//drivers/TegraNVDEC:nvidia/clc5b0.h",
+        "//drivers/TegraNVDEC:nvidia/nvdec_drv.h",
+    ],
+)
+
+host_shims(
+    name = "output_kernel",
+    headers = [
+        "IOKit/IOLib.h",
+        "IOKit/IOMemoryDescriptor.h",
+        "IOKit/IOBufferMemoryDescriptor.h",
+        "IOKit/IOTypes.h",
+        "kern/task.h",
+    ],
+    stubs = "switch_nvdec_output_stubs.h",
+)
+
+host_test(
+    name = "switch_nvdec_output_test",
+    srcs = [
+        "switch_nvdec_output_test.cpp",
+        "//drivers/TegraNVDEC:SwitchNVDECOutput.h",
+        "//drivers/TegraNVDEC:SwitchNVDECPark.h",
+        "//drivers/TegraNVDEC:TegraNVDEC.h",
+        "//drivers/TegraNVDEC:TegraNVDECABI.h",
+        "//drivers/TegraGM20B:SwitchGpuBacking.h",
+        "//drivers/TegraVIC:SwitchNativeSurface.h",
+        "//drivers/TegraVIC:SwitchVICPicture.h",
+        "//drivers/TegraVIC:TegraVICPresent.h",
+        "//drivers/TegraVIC:TegraVICSurface.h",
+        "//drivers/TegraVIC:TegraVICRequest.h",
+        "//drivers/TegraVIC:TegraVICConfig.h",
+        "//drivers/TegraVIC:TegraVICFormats.h",
+        "//drivers/TegraVIC:SwitchSurfaceColor.h",
+        "//kits/SwitchDMA:SwitchDMAPages.h",
+    ],
+    additional_compiler_inputs = [
+        "//drivers/TegraNVDEC:SwitchNVDECOutput.cpp",
+        "//drivers/TegraNVDEC:SwitchNVDECPark.cpp",
+    ],
+    deps = [":output_kernel"],
+)
+
+# SwitchNVDECPark.h: a decode session's buffers, a fixed set however many pictures its exports hold.
+host_test(
+    name = "switch_nvdec_park_test",
+    srcs = [
+        "switch_nvdec_park_test.cpp",
+        "//drivers/TegraNVDEC:SwitchNVDECOutput.h",
+        "//drivers/TegraNVDEC:SwitchNVDECPark.h",
+        "//drivers/TegraNVDEC:TegraNVDEC.h",
+        "//drivers/TegraNVDEC:TegraNVDECABI.h",
+        "//drivers/TegraGM20B:SwitchGpuBacking.h",
+        "//drivers/TegraVIC:SwitchNativeSurface.h",
+        "//drivers/TegraVIC:SwitchVICPicture.h",
+        "//drivers/TegraVIC:TegraVICPresent.h",
+        "//drivers/TegraVIC:TegraVICSurface.h",
+        "//drivers/TegraVIC:TegraVICRequest.h",
+        "//drivers/TegraVIC:TegraVICConfig.h",
+        "//drivers/TegraVIC:TegraVICFormats.h",
+        "//drivers/TegraVIC:SwitchSurfaceColor.h",
+        "//kits/SwitchDMA:SwitchDMAPages.h",
+    ],
+    additional_compiler_inputs = [
+        "//drivers/TegraNVDEC:SwitchNVDECOutput.cpp",
+        "//drivers/TegraNVDEC:SwitchNVDECPark.cpp",
+    ],
+    deps = [":output_kernel"],
+)
+
+host_shims(
+    name = "completions_kernel",
+    headers = [
+        "IOKit/IOUserClient.h",
+        "IOKit/IOLib.h",
+        "IOKit/IOLocks.h",
+        "IOKit/IOBufferMemoryDescriptor.h",
+    ],
+    stubs = "switch_nvdec_completions_stubs.h",
+)
+
+host_test(
+    name = "switch_nvdec_completions_test",
+    srcs = [
+        "switch_nvdec_completions_test.cpp",
+        "//drivers/TegraNVDEC:SwitchNVDECCompletions.h",
+        "//drivers/TegraNVDEC:SwitchNVDECQueue.h",
+        "//drivers/TegraNVDEC:TegraNVDEC.h",
+        "//drivers/TegraNVDEC:TegraNVDECABI.h",
+        "//drivers/TegraNVDEC:nvidia/clc5b0.h",
+        "//drivers/TegraNVDEC:nvidia/nvdec_drv.h",
+        "//drivers/TegraGM20B:SwitchGpuBacking.h",
+        "//kits/SwitchDMA:SwitchDMAPages.h",
+        "//kits/SwitchDMA:SwitchDcache.h",
+    ],
+    additional_compiler_inputs = ["//drivers/TegraNVDEC:SwitchNVDECCompletions.cpp"],
+    deps = [":completions_kernel"],
+)
+
+host_shims(
+    name = "submit_kernel",
+    headers = [
+        "IOKit/IOLib.h",
+        "IOKit/IOLocks.h",
+        "IOKit/IOBufferMemoryDescriptor.h",
+        "kern/thread.h",
+        "kern/thread_call.h",
+        "kern/clock.h",
+    ],
+    stubs = "switch_nvdec_submit_stubs.h",
+)
+
+host_test(
+    name = "switch_nvdec_submit_test",
+    srcs = [
+        "//drivers/TegraHost1x:SwitchHost1xResults.cpp",
+        "switch_nvdec_submit_test.cpp",
+        "//drivers/TegraNVDEC:SwitchNVDECJobs.h",
+        "//drivers/TegraNVDEC:SwitchNVDECQueue.h",
+        "//drivers/TegraNVDEC:SwitchNVDECSemantics.h",
+        "//drivers/TegraNVDEC:TegraNVDECEngine.h",
+        "//kits/SwitchEngineGate:SwitchEngineGate.h",
+        "//drivers/TegraNVDEC:SwitchNVDECAccess.h",
+        "//drivers/TegraNVDEC:SwitchNVDECDisplayProbe.h",
+        "//drivers/TegraNVDEC:TegraNVDEC.h",
+        "//drivers/TegraNVDEC:TegraNVDECABI.h",
+        "//drivers/TegraNVDEC:TegraNVDECCheck.h",
+        "//drivers/TegraNVDEC:TegraNVDECCheckMPEG.h",
+        "//drivers/TegraNVDEC:nvidia/clc5b0.h",
+        "//drivers/TegraNVDEC:nvidia/nvdec_drv.h",
+        "//drivers/TegraHost1x:SwitchHost1xDependencies.h",
+        "//drivers/TegraHost1x:SwitchHost1xFence.h",
+        "//drivers/TegraHost1x:SwitchHost1xResults.h",
+        "//drivers/TegraHost1x:SwitchHost1xStages.h",
+        "//drivers/TegraHost1x:TegraHost1x.h",
+        "//drivers/TegraGM20B:SwitchGpuBacking.h",
+        "//drivers/TegraGM20B:SwitchGpuBridge.h",
+        "//drivers/TegraGM20B:SwitchGpuSharedEvent.h",
+        "//kits/SwitchDMA:SwitchDMABuffer.h",
+        "//kits/SwitchDMA:SwitchDMAPages.h",
+        "//kits/SwitchDMA:SwitchDcache.h",
+        "//kits/SwitchTime:SwitchTime.h",
+    ],
+    additional_compiler_inputs = [
+        "//drivers/TegraNVDEC:SwitchNVDECJobs.cpp",
+        "//drivers/TegraNVDEC:TegraNVDECCancel.cpp",
+    ],
+    deps = [":submit_kernel"],
+)
+
+host_library(
+    name = "semantics",
+    srcs = [
+        "//drivers/TegraHost1x:SwitchHost1xResults.cpp",
+        "//drivers/TegraNVDEC:SwitchNVDECSemantics.cpp",
+    ],
+    hdrs = [
+        "//drivers/TegraNVDEC:SwitchNVDECSemantics.h",
+        "//drivers/TegraNVDEC:SwitchNVDECQueue.h",
+        "//drivers/TegraHost1x:SwitchHost1xSemantics.h",
+        "//drivers/TegraHost1x:SwitchHost1xResults.h",
+    ],
+    deps = [
+        "//drivers/TegraGM20B/test:switch_gpu_event",
+        "//drivers/TegraGM20B/test:event_kernel",
+    ],
+)
+
+host_test(
+    name = "switch_nvdec_semantics_test",
+    srcs = [
+        "switch_nvdec_semantics_test.cpp",
+        "//drivers/TegraGM20B/test:switch_gpu_event_fixture.h",
+    ],
+    deps = [
+        ":semantics",
+        "//drivers/TegraGM20B/test:event_kernel",
+    ],
+)
+
+host_test(
+    name = "switch_host1x_results_test",
+    srcs = [
+        "//drivers/TegraHost1x:SwitchHost1xResults.cpp",
+        "switch_host1x_results_test.cpp",
+        "//drivers/TegraHost1x:SwitchHost1xResults.h",
+        "//drivers/TegraGM20B:SwitchGpuBacking.h",
+    ],
+    deps = ["//drivers/TegraGM20B/test:event_kernel"],
+)

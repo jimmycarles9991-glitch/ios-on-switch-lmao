@@ -49,6 +49,12 @@ class Spec:
         return re.sub(r'\{(\w)\}', repl, value)
 
 
+def copy_writable(source: str, target: str) -> None:
+    """Copy a file with its mode, writable by its owner: a remote worker's inputs are read-only, the sandbox's not."""
+    shutil.copyfile(source, target)
+    os.chmod(target, (os.stat(source).st_mode & 0o777) | 0o200)
+
+
 def fail(message: str) -> None:
     sys.exit('xnu_ops: ' + message)
 
@@ -159,8 +165,15 @@ def do_mig(spec: Spec, step: dict[str, object], used: set[str]) -> bool:
         writable(spec.path(o))
     before = set(os.listdir(cwd))
     argv = ['-MD'] + [spec.text(a) for a in step['argv']]
-    tool = spec.roots['x'] + '/Toolchains/XcodeDefault.xctoolchain/usr/bin/mig'
-    result = run([tool, *argv], cwd=cwd, env=environment(spec, step))
+    toolchain = spec.roots['x'] + '/Toolchains/XcodeDefault.xctoolchain/usr'
+    env = environment(spec, step)
+    # What mig would otherwise look up itself: `xcrun -find cc`, and its own ../libexec/migcom.
+    env['MIGCC'] = toolchain + '/bin/cc'
+    env['MIGCOM'] = toolchain + '/libexec/migcom'
+    # Run by /bin/bash, not by mig's #!: exec'ing a script inside an app bundle puts the process in macOS's provenance
+    # sandbox for that bundle. On the Mac that runs the remote worker, every process mig then started sat at
+    # _dyld_start for seconds while the kernel waited on an App Management approval: 100 s per action, not 0.1 s.
+    result = run(['/bin/bash', toolchain + '/bin/mig', *argv], cwd=cwd, env=env)
     if result.returncode:
         fail(
             'mig {} failed:\n{}{}'.format(
@@ -368,7 +381,7 @@ def install_base(
             out / 'System/Library/Frameworks/Kernel.framework/Versions/A/PrivateHeaders/platform',
         ),
     ):
-        shutil.copytree(source, target, symlinks=False, dirs_exist_ok=True)
+        shutil.copytree(source, target, symlinks=False, dirs_exist_ok=True, copy_function=copy_writable)
     os_dir = out / 'usr/local/include/os'
     os_dir.mkdir(parents=True, exist_ok=True)
     unifdef = env['DEVELOPER_DIR'] + '/Toolchains/XcodeDefault.xctoolchain/usr/bin/unifdef'

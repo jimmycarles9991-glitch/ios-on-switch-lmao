@@ -21,6 +21,7 @@ enum {
     TEGRA_HOST1X_ENOMEM = -12,
     TEGRA_HOST1X_ETIMEDOUT = -60,  // the engine did not reach the threshold in time (its interrupt was not lost)
     TEGRA_HOST1X_ELOST = -5,       // the threshold was reached but its interrupt never came (before strict mode only)
+    TEGRA_HOST1X_EAGAIN = -35,     // no command arena room until earlier jobs' fences pass
 };
 
 // Host1x class IDs (Linux include/linux/host1x.h: HOST1X_CLASS_HOST1X, ..._NVENC, ..._VIC, ..._NVJPG, ..._NVDEC).
@@ -59,14 +60,17 @@ static inline uint32_t tegra_host1x_op_imm(uint32_t offset, uint32_t value)
     return (4u << 28) | (offset << 16) | (value & 0xffff);
 }
 
-// WAIT_SYNCPT (host1x class method 8, Linux hw_host1x05_uclass.h host1x_uclass_wait_syncpt_r): the channel stalls until
-// syncpoint `id` reaches `threshold` (low 24 bits), so an engine's stream starts only after another engine's work.
-// Writes two words; the stream's next SETCLASS returns it to its engine.
+// T210 host1x05 methods 0x4e/0x50 load the full threshold and wait on it; the legacy method 8 truncates to 24 bits.
+enum {
+    SWITCH_HOST1X_WAIT_WORDS = 3
+};
+
 static inline uint32_t tegra_host1x_op_wait_syncpt(uint32_t *w, uint32_t id, uint32_t threshold)
 {
-    w[0] = tegra_host1x_op_setclass(TEGRA_HOST1X_CLASS_HOST1X, 8, 1);
-    w[1] = ((id & 0xff) << 24) | (threshold & 0xffffff);
-    return 2;
+    w[0] = tegra_host1x_op_setclass(TEGRA_HOST1X_CLASS_HOST1X, 0x4e, 5);
+    w[1] = threshold;
+    w[2] = id;
+    return SWITCH_HOST1X_WAIT_WORDS;
 }
 
 // INCR_SYNCPT (method 0 of every class: the engine's THI implements the host methods) with a condition.
@@ -83,31 +87,78 @@ int tegra_host1x_start(void);
 // Syncpoints this driver hands out (above the IDs the boot chain and Horizon use: hekate di.c waits on 9).
 int tegra_host1x_syncpt_alloc(uint32_t *id);
 uint32_t tegra_host1x_syncpt_read(uint32_t id);
+// Only after the exclusive producer stopped and retained completion records say failed; this never publishes success.
+int tegra_host1x_syncpt_release_failed(uint32_t id, uint32_t threshold, uint32_t max_increments);
 
-// Sleeps until syncpoint `id` reaches `threshold` (wrapping compare) or `timeoutUs` pass. A threshold interrupt that
-// is pending at the controller but never reaches the CPU panics (one line, with the GIC's state) once a client has
+// A stopped engine's cancelled jobs' increments, done by the CPU up to `threshold` (two at a time, the most
+// tegra_host1x_syncpt_release_failed takes): another engine's stream waiting on one of them goes on, and the engine's
+// queue renumbers from the syncpoint.
+static inline int tegra_host1x_syncpt_release_through(uint32_t id, uint32_t threshold)
+{
+    for (uint32_t now = tegra_host1x_syncpt_read(id); (int32_t)(threshold - now) > 0;
+         now = tegra_host1x_syncpt_read(id)) {
+        const uint32_t step = threshold - now > 2 ? 2 : threshold - now;
+        const int error = tegra_host1x_syncpt_release_failed(id, now + step, step);
+        if (error)
+            return error;
+    }
+    return 0;
+}
+
+// Sleeps until syncpoint `id` reaches `threshold` (wrapping compare) or `timeoutUs` pass, on a fence of the
+// syncpoint's list (SwitchHost1xFence.h), so any number of waiters and fences share a syncpoint. A threshold the
+// syncpoint reached whose interrupt never reaches the CPU panics (one line, with the GIC's state) once a client has
 // proven its engine (tegra_host1x_set_strict); before that it returns TEGRA_HOST1X_ELOST, so a probe that meets a
 // missing interrupt logs its own failure line and leaves its engine unpublished instead of stopping the boot.
 int tegra_host1x_syncpt_wait(uint32_t id, uint32_t threshold, uint32_t timeoutUs);
 void tegra_host1x_set_strict(void);
 
-// Command DMA channels: VIC has its own, so a stream that waits for another engine (WAIT_SYNCPT) holds up only VIC;
-// the other engines share the default one.
+// Command DMA channels, one per engine as mainline gives every client its own (vic.c, nvdec.c, nvjpg.c
+// host1x_channel_request; T210 has 14): a stream that waits for another engine (WAIT_SYNCPT) holds up only its own
+// engine. NVDEC keeps channel 0.
 enum {
     TEGRA_HOST1X_CHANNEL_DEFAULT = 0,
     TEGRA_HOST1X_CHANNEL_VIC = 1,
-    TEGRA_HOST1X_CHANNELS = 2
+    TEGRA_HOST1X_CHANNEL_NVENC = 2,
+    TEGRA_HOST1X_CHANNEL_NVJPG = 3,
+    TEGRA_HOST1X_CHANNELS = 4
 };
 
-// Copies `count` opcode words into a channel's push buffer and starts them. The stream must leave its syncpoint
-// increments to the caller's wait; `count` must be below 4096. Serialised; returns at once.
+// A job's stream is written in place in its channel's command arena (below 4 GiB) and host1x gathers it from there, so
+// nothing copies it. Reserve room for up to `capacity` words, write the stream (it starts with a SETCLASS), then submit
+// the words [first, first + count) of the reservation with the job's own fence: its room is reused once `syncpt`
+// reaches `threshold`. Submit and cancel end the reservation; a channel has one open at a time.
+// Reserve never sleeps: TEGRA_HOST1X_EAGAIN means the room is held by jobs in flight or another reservation, and
+// wait_room sleeps until a reservation would succeed. A caller holding a lock that a fence callback takes (the job
+// queues retire from host1x's work loop) drops it before wait_room; begin is reserve and wait_room in a loop.
+enum {
+    SWITCH_HOST1X_ARENA_WORDS = 8192
+};
+
+int switch_host1x_job_reserve(uint32_t channel, uint32_t capacity, uint32_t **words);
+int switch_host1x_job_wait_room(uint32_t channel, uint32_t capacity);
+int switch_host1x_job_begin(uint32_t channel, uint32_t capacity, uint32_t **words);
+int switch_host1x_job_submit(uint32_t channel, const uint32_t *first, uint32_t count, uint32_t syncpt,
+                             uint32_t threshold);
+void switch_host1x_job_cancel(uint32_t channel);
+
+// Copies `count` opcode words into the channel's arena and gathers them with their fence, for one-off streams (an
+// engine's proof of life). Never sleeps: TEGRA_HOST1X_ENOMEM when there is no room.
+int switch_host1x_job_copy(uint32_t channel, const uint32_t *words, uint32_t count, uint32_t syncpt,
+                           uint32_t threshold);
+// The same without a fence: its room comes back with the channel's next fenced job, so a channel holds at most 63 of
+// these in a row.
 int tegra_host1x_submit_on(uint32_t channel, const uint32_t *words, uint32_t count);
 // The same on the default channel.
 int tegra_host1x_submit(const uint32_t *words, uint32_t count);
+// A job its engine stopped making progress on: teardown drops the channel's pending methods (its engine is reset next),
+// restart resumes it empty at its PUT. The caller holds off its own submits in between.
+void tegra_host1x_channel_teardown(uint32_t channel);
+void tegra_host1x_channel_restart(uint32_t channel);
 
 // Sleep (called through tegra_nvdec_suspend/resume below, after NVDEC has quiesced). Suspend saves the
-// handed-out syncpoint values and stops channel 0; resume re-adopts the clock, reconfigures the sync unit, restores
-// the values and restarts channel 0. Both are no-ops unless host1x is up.
+// handed-out syncpoint values and stops every channel; resume re-adopts the clock, reconfigures the sync unit, restores
+// the values and restarts the channels. Both are no-ops unless host1x is up.
 void tegra_host1x_suspend(void);
 void tegra_host1x_resume(void);
 

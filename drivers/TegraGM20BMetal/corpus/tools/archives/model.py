@@ -17,25 +17,28 @@ UNSPECIALIZED = 'unspecialized'
 # MTLGPUFamilyApple1 .. Apple3: what the raw device answers supportsFamily: true for (raw_device_answers.h)
 DEVICE_FAMILIES = frozenset({1001, 1002, 1003})
 FRAMEWORK_LIBRARY = re.compile(r'^/System/Library/(?:Private)?Frameworks/\w+\.framework/default\.metallib$')
+# A bundle's library or a framework resource library (tools/gpu/rawpack.py OS_LIBRARY), keyed by its functions' AIR
+BUNDLE_LIBRARY = re.compile(r'^/System/Library/\S+?\.(?:bundle|framework/Resources)/\S+\.metallib$')
 STAGE_LIBRARY = re.compile(r' \| [vf] \S+ lib=(\S+)')
 LINKED = re.compile(r' \| [vf][lp] \S+(?: lib=(\S+))?')
 
 
 def packable(line: str) -> bool:
-    """Whether the raw runtime looks a render state up in the pack (RawMetalStates.mm _packable).
+    """Whether the raw runtime looks a render state up in the pack (RawMetalStates.mm pipelineFor).
 
     It has both functions, from one framework's default.metallib, and every function it links is a framework
-    library's; the direct compile makes any other state when it is created (m2v one with no fragment function).
+    library's; or both from one bundle's or framework resource library, linking none (looked up by their AIR). The
+    direct compile makes any other state when it is created (m2v one with no fragment function).
     """
     stages = STAGE_LIBRARY.findall(line)
     libraries = set(stages)
     linked = LINKED.findall(line)
-    return (
-        len(stages) == 2
-        and len(libraries) == 1
-        and FRAMEWORK_LIBRARY.match(next(iter(libraries))) is not None
-        and all(FRAMEWORK_LIBRARY.match(library) for library in linked)
-    )
+    if len(stages) != 2 or len(libraries) != 1:
+        return False
+    library = next(iter(libraries))
+    if BUNDLE_LIBRARY.match(library) and '/QuartzCore.framework/' not in library:
+        return not linked
+    return FRAMEWORK_LIBRARY.match(library) is not None and all(FRAMEWORK_LIBRARY.match(lib) for lib in linked)
 
 
 @dataclass

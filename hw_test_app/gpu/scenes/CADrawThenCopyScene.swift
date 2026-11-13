@@ -7,13 +7,17 @@ import Metal
 /// the display's framebuffers are), and the same command buffer copies the surface into a texture with the blit
 /// engine; then the surface's own blit readback and its CPU lock must both equal the copy. Twenty rounds, each with
 /// other colours, so a copy that read what an earlier round left (draws still binned in the tiled cache, writes not
-/// yet in memory) differs from the surface. stale= counts the rounds whose copy differed; hash_round0= is compared
-/// between the raw facade's run and the m2v device's.
+/// yet in memory) differs from the surface. stale= counts the rounds whose copy differed; round 0's surface is held to
+/// the Mac's (round0).
 struct CADrawThenCopyScene: GPUScene {
     let id = "gpu.ca.draw_then_copy"
     let name = "CA fill draws then a blit copy in one command buffer: the copy reads every draw"
 
     static let (width, height, rounds, draws) = (720, 1280, 20, 64)
+    /// Cleared to a colour the fill draws none of (QuartzCore 27's fill comes out opaque black with zero uniforms), so a
+    /// draw that never ran leaves a picture unlike the Mac's
+    static let sentinel = MTLClearColor(red: 0.2, green: 0.4, blue: 0.6, alpha: 1)
+    static let sentinelTexel: [Float] = [0.2, 0.4, 0.6, 1]
 
     func run(_ gpu: GPU) async throws -> SceneResult {
         var result = SceneResult()
@@ -37,6 +41,7 @@ struct CADrawThenCopyScene: GPUScene {
                 let pass = MTLRenderPassDescriptor()
                 pass.colorAttachments[0].texture = target.texture
                 pass.colorAttachments[0].loadAction = .clear
+                pass.colorAttachments[0].clearColor = Self.sentinel
                 pass.colorAttachments[0].storeAction = .store
                 pass.colorAttachments[1].texture = colour1
                 pass.colorAttachments[1].loadAction = .clear
@@ -72,7 +77,11 @@ struct CADrawThenCopyScene: GPUScene {
                     "round \(round): the CPU lock against the surface", bytes: try target.cpuRead(), expected: drawn,
                     format: .bgra8Unorm, width: Self.width, height: Self.height, tolerance: 0)
             }
-            if round == 0 { result.metrics.set("hash_round0", String(FirstTiledSurfaceScene.fnv(drawn), radix: 16)) }
+            if round == 0 {
+                result.picture(
+                    "round0", bytes: drawn, metalFormat: MTLPixelFormat.bgra8Unorm.rawValue, width: Self.width,
+                    height: Self.height, cleared: Self.sentinelTexel)
+            }
             result.metrics.set("path\(round)", timing.path)
         }
         result.metrics.set("stale", stale)

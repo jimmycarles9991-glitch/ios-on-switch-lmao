@@ -112,6 +112,14 @@ class Fetch(unittest.TestCase):
         copied = self.root / 'out/hwtest-gpu/com.brunostjohn.switch.hwtest/gpu.xr_blend/raw-0-got.png'
         self.assertEqual(copied.read_bytes(), b'png')
 
+    def test_the_ui_tests_pictures_come_along(self):
+        test = self.card.reports.parent / 'ui/display.pocket_strip'
+        test.mkdir(parents=True)
+        (test / 'shown.png').write_bytes(b'png')
+        fetch.fetch(self.card.data, self.card.switch, self.history, self.root / 'out')
+        copied = self.root / 'out/hwtest-ui/com.brunostjohn.switch.hwtest/display.pocket_strip/shown.png'
+        self.assertEqual(copied.read_bytes(), b'png')
+
     def test_a_report_is_copied_once_with_its_boots_health(self):
         self.card.deployed('0123456789abcdef0123', '2026-11-08T21:50:00+00:00')
         self.card.run('r1.json', report(10, status='running', current='gpu.ca.sweep'))

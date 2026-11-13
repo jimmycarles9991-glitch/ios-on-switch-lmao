@@ -66,8 +66,11 @@ struct nvk_root_descriptor_table {
    /* Fragment shader interlock's ticket buffer: 256 tickets per GPC */
    uint64_t interlock_ticket_buffer;
 
+   /* Switch: a turned pass's frame of its plane (nvk_switch_turn.h) */
+   uint32_t switch_turn[8];
+
    /* enfore total structure alignment to 0x100 as needed pre pascal */
-   uint8_t __padding[0x98];
+   uint8_t __padding[0x78];
 
    /*
     * Arrays with dynamic (shader-provided) indices need to fit in a single
@@ -89,6 +92,10 @@ struct nvk_root_descriptor_table {
 /* Push constants should be aligned properly */
 static_assert(nvk_root_descriptor_offset(push) % 8 == 0,
               "Push constants should be aligned properly");
+static_assert(nvk_root_descriptor_offset(switch_turn) == 0x268,
+              "raw/runtime/raw_rotation.h kRootTurn");
+static_assert(nvk_root_descriptor_offset(dynamic_buffers) == 0x300,
+              "the turn words take the padding's room");
 
 #define nvk_hw_root_table_index(member)\
    (nvk_root_descriptor_offset(member) / NVK_HW_ROOT_TABLE_SIZE)

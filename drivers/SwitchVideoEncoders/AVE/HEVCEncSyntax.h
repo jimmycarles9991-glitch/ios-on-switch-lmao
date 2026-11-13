@@ -32,9 +32,10 @@ typedef struct {
 } HEVCEncConfig;
 
 typedef struct {
-    bool idr;      // IDR_W_RADL, an I slice; else TRAIL_R, a P slice predicting from the picture before
-    uint32_t poc;  // picture order count since the last IDR (0 at the IDR)
-    uint8_t qp;    // slice QP, 0..51
+    bool idr;                // IDR_W_RADL, an I slice; else TRAIL_R, a P slice predicting from the picture before
+    uint32_t poc;            // picture order count since the last IDR (0 at the IDR)
+    uint8_t qp;              // slice QP, 0..51
+    uint32_t picture_index;  // pictures since the session began, IDRs included (NVENC's SET_PICTURE_INDEX)
 } HEVCEncPicture;
 
 // Fills unset tree sizes with the defaults, picks level_idc when it is 0, and checks what this code can describe: 0,

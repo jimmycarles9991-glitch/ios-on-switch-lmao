@@ -207,8 +207,8 @@ pub(crate) fn selected_notes(sel: &SelectedWrite, word: u32) -> BTreeSet<Precisi
 /// ([`selected_notes`], [`selected_rounds`]), and `PrecisionNote::HalfOutputPrecision` where an
 /// attachment of `StageIo::half_blend_colors` blends ([`blends_output`]). Each sorted, each entry
 /// once. `None` where such an attachment has no rule word.
-pub(crate) fn pipeline_writes(
-    a: &FunctionArtifact,
+pub(crate) fn pipeline_writes<M>(
+    a: &FunctionArtifact<M>,
     rules: &[(u32, u32)],
     colors: &[Option<ColorAttachmentState>],
 ) -> Option<(Vec<PrecisionNote>, Vec<u32>)> {

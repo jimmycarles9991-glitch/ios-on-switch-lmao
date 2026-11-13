@@ -21,6 +21,11 @@ inline IOLock *IOLockAlloc()
     return new IOLock;
 }
 
+inline void IOLockFree(IOLock *lock)
+{
+    delete lock;
+}
+
 // A real mutex: the test drives the kit from several threads. Its lock/unlock pairs span the kit's calls, past
 // what -Wthread-safety can follow.
 __attribute__((no_thread_safety_analysis)) inline void IOLockLock(IOLock *lock)
@@ -54,6 +59,7 @@ extern "C" {
 #endif
 
 #define NSEC_PER_USEC 1000u
+__attribute__((format(printf, 1, 2))) void IOLog(const char *format, ...);
 uint64_t mach_absolute_time(void);
 void clock_interval_to_deadline(uint32_t interval, uint32_t scale_factor, uint64_t *result);
 uintptr_t ml_io_map(uintptr_t phys_addr, uintptr_t size);

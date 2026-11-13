@@ -13,12 +13,14 @@
 #include <vector>
 #include "../runtime/raw_compute_key.h"
 #import "../runtime/RawPipelineKey.h"
-#include "NativeBridgeMetalFrontend.h"
+#import "../runtime/RawRenderKey.h"
 
 namespace probe {
 
 struct Shape {
     uint32_t threads[3] = {};
+    uint32_t edge[3] = {};
+    bool regionMode = false;
     std::string form;  // "f" or "d"
     uint64_t options = 0;
     uint32_t maxThreads = 0;
@@ -29,6 +31,21 @@ struct Shape {
     std::vector<raw::BoundTexture> textures;
     std::vector<raw::BoundSampler> samplers;
 };
+
+template <typename Each> void eachRegionShape(const Shape &original, Each each)
+{
+    for (uint8_t mask = 0; mask < 8; ++mask) {
+        Shape shape = original;
+        bool present = true;
+        for (uint8_t axis = 0; axis < 3; ++axis)
+            if (mask & (1u << axis)) {
+                present &= original.edge[axis] != 0;
+                shape.threads[axis] = original.edge[axis];
+            }
+        if (present)
+            each(shape, mask);
+    }
+}
 
 // smp=<slot>:<min>:<mag>:<mip>:<s>:<t>:<r>:<lodMin bits>:<lodMax bits>:<anisotropy>:<compare>:<border>:<normalized>:<average>,...
 inline bool parseSamplers(const std::string &text, std::vector<raw::BoundSampler> &out, std::string &why)
@@ -125,18 +142,25 @@ inline bool field(const std::string &line, const char *name, std::string &out)
 }
 
 // A D line: "D ok=1 tg=x,y,z edge=a,b,c threads=t | form=... | k <name> lib=<library> [spec] <constants> | ..."; false where
-// the raw path dispatches no such shape (a grid with an edge, linked functions)
+// the raw path dispatches no such shape (linked functions or an invalid local size)
 inline bool parse(const std::string &line, Shape &s, std::string &why)
 {
-    uint32_t edge[3], threadsForm;
+    uint32_t threadsForm;
     if (sscanf(line.c_str(), "D ok=1 tg=%u,%u,%u edge=%u,%u,%u threads=%u", &s.threads[0], &s.threads[1], &s.threads[2],
-               &edge[0], &edge[1], &edge[2], &threadsForm) != 7) {
+               &s.edge[0], &s.edge[1], &s.edge[2], &threadsForm) != 7) {
         why = "not a D line";
         return false;
     }
-    if (edge[0] || edge[1] || edge[2]) {
-        why = "a grid with an edge";
+    if (threadsForm > 1) {
+        why = "an invalid dispatch form";
         return false;
+    }
+    for (uint32_t i = 0; i < 3; ++i) {
+        if (!s.threads[i] || s.threads[i] > 1024 || s.edge[i] >= s.threads[i] || (!threadsForm && s.edge[i])) {
+            why = "an invalid local size or edge";
+            return false;
+        }
+        s.regionMode |= s.edge[i] != 0;
     }
     std::string text;
     field(line, "tgmem", s.threadgroupMemory);
@@ -204,7 +228,7 @@ inline MTLFunctionConstantValues *constantValues(const std::string &text)
 inline id<MTLLibrary> library(id<MTLDevice> dev, const std::string &name)
 {
     static NSMutableDictionary<NSString *, id<MTLLibrary>> *loaded = [NSMutableDictionary dictionary];
-    NSString *key = @(name.c_str());
+    NSString *key = [NSString stringWithFormat:@"%p %s", (void *)dev, name.c_str()];
     if (!loaded[key]) {
         std::string path;
         if (name.rfind("data:", 0) == 0) {
@@ -233,8 +257,9 @@ inline id<MTLFunction> function(id<MTLDevice> dev, const Shape &s, raw::AirHash 
                                                                 : [lib newFunctionWithName:@(s.function.c_str())];
     const void *bytes = nullptr;
     size_t length = 0;
+    std::string entry;
     std::map<std::string, raw::AirHash> hashes;
-    if (!f || !native_bridge_metal_function_metallib(f, &bytes, &length) ||
+    if (!f || !raw::functionLibrary(f, bytes, length, entry) ||
         !raw::metallibAirHashes(static_cast<const uint8_t *>(bytes), length, hashes) || !hashes.count(s.function))
         return nil;
     air = hashes[s.function];
@@ -270,11 +295,11 @@ inline id<MTLComputePipelineState> state(id<MTLDevice> dev, const Shape &s, id<M
     return made;
 }
 
-// The shape's textures, each of its tag size, (16 + slot) x (8 + slot), read and written where its format allows
-inline NSArray<id<MTLTexture>> *textures(id<MTLDevice> dev, const std::vector<raw::BoundTexture> &bound,
-                                         std::string &why)
+// The shape's textures, each of its tag size, (16 + slot) x (8 + slot): read and written, but read only where swizzled
+// (Metal makes no swizzled texture shaders write)
+inline NSArray<MTLTextureDescriptor *> *textures(const std::vector<raw::BoundTexture> &bound)
 {
-    NSMutableArray<id<MTLTexture>> *out = [NSMutableArray array];
+    NSMutableArray<MTLTextureDescriptor *> *out = [NSMutableArray array];
     for (const raw::BoundTexture &b : bound) {
         MTLTextureDescriptor *d = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormat(b.pixelFormat)
                                                                                      width:16 + b.slot
@@ -282,17 +307,10 @@ inline NSArray<id<MTLTexture>> *textures(id<MTLDevice> dev, const std::vector<ra
                                                                                  mipmapped:NO];
         d.swizzle = MTLTextureSwizzleChannelsMake(MTLTextureSwizzle(b.swizzle[0]), MTLTextureSwizzle(b.swizzle[1]),
                                                   MTLTextureSwizzle(b.swizzle[2]), MTLTextureSwizzle(b.swizzle[3]));
-        d.usage = MTLTextureUsageShaderRead | MTLTextureUsageShaderWrite;
-        id<MTLTexture> t = [dev newTextureWithDescriptor:d];
-        if (!t) {
-            d.usage = MTLTextureUsageShaderRead;
-            t = [dev newTextureWithDescriptor:d];
-        }
-        if (!t) {
-            why = "no texture of format " + std::to_string(b.pixelFormat);
-            return nil;
-        }
-        [out addObject:t];
+        const bool swizzled = b.swizzle[0] != MTLTextureSwizzleRed || b.swizzle[1] != MTLTextureSwizzleGreen ||
+                              b.swizzle[2] != MTLTextureSwizzleBlue || b.swizzle[3] != MTLTextureSwizzleAlpha;
+        d.usage = MTLTextureUsageShaderRead | (swizzled ? 0 : MTLTextureUsageShaderWrite);
+        [out addObject:d];
     }
     return out;
 }
@@ -301,7 +319,7 @@ inline std::string key(const Shape &s, const raw::AirHash &air)
 {
     return raw::computeKey(air, raw::constantsText(constantValues(s.constants)), s.maxThreads, s.multipleOfWidth,
                            s.threads, s.threadgroupMemory, raw::computeTextures(s.textures.data(), s.textures.size()),
-                           raw::computeSamplers(s.samplers.data(), s.samplers.size()));
+                           raw::computeSamplers(s.samplers.data(), s.samplers.size()), s.regionMode);
 }
 
 }  // namespace probe

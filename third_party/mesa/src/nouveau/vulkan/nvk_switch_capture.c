@@ -163,12 +163,15 @@ switch_nvk_program_freed(struct nvk_device *dev,
 }
 
 /* A constant buffer as the raw path's pack names it (raw_pack.h PackCbufType):
- * the nvk_cbuf_type, and a UBO descriptor's set-0 offset / 16 in bits 3-7; a
+ * the nvk_cbuf_type, and a UBO descriptor's set-0 offset / 16 in bits 3-7 or
+ * a descriptor set's number in bits 3-7 (set 0's code is the bare type); a
  * UBO elsewhere is 7, which no raw draw binds.
  */
 uint8_t
 switch_nvk_cbuf_code(const struct nvk_cbuf *cbuf)
 {
+   if (cbuf->type == NVK_CBUF_TYPE_DESC_SET)
+      return cbuf->desc_set < 32 ? NVK_CBUF_TYPE_DESC_SET | cbuf->desc_set << 3 : 7;
    if (cbuf->type != NVK_CBUF_TYPE_UBO_DESC)
       return cbuf->type;
    if (cbuf->desc_set != 0 || cbuf->desc_offset % 16 || cbuf->desc_offset >= 512)

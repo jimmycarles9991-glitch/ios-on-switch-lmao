@@ -338,6 +338,10 @@ pub(super) struct Exports {
 /// refusal of its form is placed at the stencil attachment.
 pub(super) fn plan(cx: &mut SelectCx<'_>, exports: Exports) -> Result<(), Error> {
     let at_depth = |u: Unsupported| Error::from(u).at_attachment(Attachment::Depth);
+    // The stand-in is one 2D view: a layered pass's tests in the shader are not implemented.
+    if cx.inputs.layered_storage {
+        return Err(at_depth(not_implemented()));
+    }
     let returned = exports.depth;
     let form = depth_test_form(cx.profile, cx.inputs.multisampled, returned.is_some())
         .map_err(at_depth)?;

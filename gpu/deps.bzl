@@ -15,8 +15,8 @@
 # Without the tar the seed has no device records and lacks the corpus lines of Core Image's device-compiled kernels,
 # which the device compiles on first use.
 DEVICE_DATA = {
-    "file": "m2v-device-533beda1b80c203d.tar",
-    "sha256": "533beda1b80c203d6f5f52576c0254304cc80e2fe26a0a750e51e7172d8acf7a",
+    "file": "m2v-device-15a8018125e4fec3.tar",
+    "sha256": "15a8018125e4fec3be68057d5d7bac1963f71a4849b0168f0094e566e6108aa3",
 }
 
 def _run(rctx, args):

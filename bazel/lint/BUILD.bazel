@@ -7,3 +7,6 @@
 load("//bazel/lint:defs.bzl", "lint_files")
 
 lint_files()
+
+# //:format_test reads it
+exports_files(["format_exempt.txt"])

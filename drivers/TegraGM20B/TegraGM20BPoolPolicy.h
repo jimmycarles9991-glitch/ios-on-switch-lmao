@@ -11,6 +11,7 @@
 // refuses it.
 #pragma once
 #include <stdint.h>
+#include "SwitchGpuPoolAllocation.h"
 
 namespace tgm_pool
 {
@@ -57,6 +58,15 @@ inline const char *compressibleRefusal(uint64_t bytes, uint64_t held, uint64_t a
 	if (!compositor && held + bytes > l.clientBytes)
 		return "past the client's share";
 	return nullptr;
+}
+
+constexpr uint64_t ControlClientBytes = 16ULL << 20;
+constexpr uint64_t ControlReadyBytes = SWITCH_GPU_POOL_CONTROL_READY_BYTES;
+constexpr uint64_t KernelReadyBytes = 4ULL << 20;
+
+inline bool controlReserve(bool requested, uint64_t held, uint64_t bytes)
+{
+	return requested && held <= ControlClientBytes && bytes <= ControlClientBytes - held;
 }
 
 enum Source : uint8_t {

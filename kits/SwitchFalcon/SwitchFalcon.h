@@ -99,6 +99,13 @@ void switch_falcon_start(volatile uint8_t *engine);
 // One line of falcon state for a failure report; returns text.
 const char *switch_falcon_state(const volatile uint8_t *engine, char *text, size_t size);
 
+// A falcon that stopped finishing work, for its one line (nvgpu gk20a_falcon_dump_stats): CPUCTL (bit 4 halted, bit 5
+// stopped), IDLESTATE (bit 0 the falcon, bits 1.. engine units busy), interrupts, mailboxes, the exception register,
+// the DMA queue and external-error capture, the newest trace-buffer branch targets, and PC/SP read three times through
+// the in-circuit debugger (one PC three times: a tight wait or a stall). Only for an engine whose job is being cancelled:
+// the debugger reads disturb a running falcon.
+const char *switch_falcon_stall(volatile uint8_t *engine, char *text, size_t size);
+
 #ifdef __cplusplus
 }
 #endif

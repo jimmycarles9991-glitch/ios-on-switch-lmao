@@ -1,0 +1,89 @@
+# The planner on the host: each rule, the hazard table, the builder's implicit work, validation, lowering and the plan
+# cache, and golden graphs of recorded frames with their barrier counts against today's unconditional prologue.
+#
+#   bazel test --config=agent --config=ios17 //drivers/TegraGM20BMetal/raw/plan/test/...
+load("//bazel/lint:defs.bzl", "lint_files")
+load("//bazel/testing:defs.bzl", "host_library", "host_test")
+
+lint_files()
+
+host_library(
+    name = "plan",
+    srcs = ["//drivers/TegraGM20BMetal/raw/plan:srcs"],
+    hdrs = ["//drivers/TegraGM20BMetal/raw/plan:hdrs"],
+    cxx_std = "c++17",
+    deps = ["//kits/SwitchGM20B:caps"],
+)
+
+# Recordings of real and synthetic frames, and a model of the barriers today's encode emits for a graph
+host_library(
+    name = "fixtures",
+    srcs = [
+        "fixtures.cpp",
+        "today_model.cpp",
+    ],
+    hdrs = [
+        "fixtures.h",
+        "today_model.h",
+    ],
+    cxx_std = "c++17",
+    deps = [":plan"],
+)
+
+[host_test(
+    name = name,
+    srcs = [name + ".cpp"],
+    cxx_std = "c++17",
+    deps = [
+        ":fixtures",
+        ":plan",
+    ],
+) for name in [
+    "plan_build_test",
+    "plan_cache_test",
+    "plan_engine_test",
+    "plan_frames_test",
+    "plan_hazard_test",
+    "plan_lower_test",
+    "plan_property_test",
+    "plan_validate_test",
+]]
+
+host_test(
+    name = "plan_predicates_test",
+    srcs = ["plan_predicates_test.cpp"],
+    cxx_std = "c++17",
+    data = [
+        "//drivers/TegraGM20BMetal:raw/runtime/RawMetalPredicates.h",
+        "//drivers/TegraGM20BMetal/raw/plan:predicates.tsv",
+    ],
+    deps = [":plan"],
+)
+
+host_test(
+    name = "plan_rules_test",
+    srcs = ["plan_rules_test.cpp"],
+    cxx_std = "c++17",
+    data = ["//drivers/TegraGM20BMetal/raw/plan:predicates.tsv"],
+    deps = [
+        ":fixtures",
+        ":plan",
+    ],
+)
+
+# The hazard table's NVK citations against the vendored NVK sources
+host_test(
+    name = "plan_citations_test",
+    srcs = ["plan_citations_test.cpp"],
+    cxx_std = "c++17",
+    data = [
+        "//third_party/mesa/src/nouveau/vulkan:nvk_cmd_buffer.c",
+        "//third_party/mesa/src/nouveau/vulkan:nvk_cmd_dispatch.c",
+        "//third_party/mesa/src/nouveau/vulkan:nvk_cmd_draw.c",
+        "//third_party/mesa/src/nouveau/vulkan:nvk_event.c",
+        "//third_party/mesa/src/nouveau/vulkan:nvk_physical_device.c",
+        "//third_party/mesa/src/nouveau/vulkan:nvk_tiled_cache.h",
+    ],
+    tags = ["m2v"],
+    deps = [":plan"],
+)

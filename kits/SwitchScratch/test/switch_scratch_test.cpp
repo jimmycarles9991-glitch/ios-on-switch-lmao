@@ -67,4 +67,35 @@ TEST_F(SwitchScratch, AKeptScratchGoesToTheTaskThatTakesIt)
     switch_scratch_stats(&held, &peak);
     EXPECT_EQ(held, 0u);
 }
+
+// A lock that gives its rows back and locks again gets the same scratch, its rows kept unless the VM emptied it; one
+// another get took meanwhile is not reclaimed, whatever it holds now.
+TEST_F(SwitchScratch, AScratchGivenBackIsReclaimedOnlyIfNoOneTookItMeanwhile)
+{
+    constexpr uint64_t kRows = 6ULL << 20;
+    gCurrentTask = &gApp;
+    switch_scratch *s = switch_scratch_get(kRows, &gApp);
+    ASSERT_NE(s, nullptr);
+    const uint64_t handout = s->handout;
+    switch_scratch_put(s);
+    bool intact = false;
+    ASSERT_EQ(switch_scratch_reclaim(s, handout, &gApp, &intact), s);
+    EXPECT_TRUE(intact);
+    EXPECT_EQ(s->memory->purgeable, kIOMemoryPurgeableNonVolatile);
+    EXPECT_EQ(s->memory->owner, &gApp);
+    EXPECT_NE(s->handout, handout);
+    const uint64_t again = s->handout;
+    switch_scratch_put(s);
+    s->memory->purgeable = kIOMemoryPurgeableEmpty;
+    ASSERT_EQ(switch_scratch_reclaim(s, again, &gApp, &intact), s);
+    EXPECT_FALSE(intact);
+    const uint64_t third = s->handout;
+    switch_scratch_put(s);
+    switch_scratch *other = switch_scratch_get(kRows, &gOther);
+    ASSERT_EQ(other, s);
+    EXPECT_EQ(switch_scratch_reclaim(s, third, &gApp, &intact), nullptr);
+    switch_scratch_put(other);
+    EXPECT_EQ(switch_scratch_reclaim(s, third, &gApp, &intact), nullptr);
+    switch_scratch_discard(switch_scratch_get(kRows, &gApp));
+}
 }  // namespace

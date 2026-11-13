@@ -37,7 +37,7 @@ class FramesTest(unittest.TestCase):
         rows = frames.interactions([KERNEL, INTERACTION])
         self.assertEqual(len(rows), 2)
         self.assertIn('19:20:47.123  1310 ms (touch   610):   55 presents, 1:50 2:1 3:1 4+:1', rows[0])
-        self.assertIn('(94% one frame apart)', rows[0])
+        self.assertIn('(93% one frame apart)', rows[0])
         self.assertIn('worst 300.0 ms, still 1; long idle 0 ca 1 gpu 1 queue 0 latch 0 rate 1', rows[0])
         self.assertTrue(rows[1].strip().startswith('SpringBoard[27] 60 commits'))
 
@@ -45,6 +45,10 @@ class FramesTest(unittest.TestCase):
         rows = frames.interactions([INTERACTION, LATENCY])
         self.assertEqual(len(rows), 3)
         self.assertEqual(rows[2], '    latency: ' + LATENCY.split('SwitchFrames latency: ')[1])
+
+    def test_legacy_still_intervals_remain_in_the_denominator(self):
+        line = INTERACTION.replace('55 presents', '105 presents')
+        self.assertIn('(48% one frame apart)', frames.interactions([line])[0])
 
     def test_stages_and_join(self):
         got = frames.collect([KERNEL, USER])

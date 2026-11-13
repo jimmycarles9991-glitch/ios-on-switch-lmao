@@ -192,15 +192,30 @@ fi
 
 _TEST = """\
 #!/bin/bash
-# {name}: {count} checks ({checks}).
+# {name}: {count} checks ({checks}). A file the exempt list names may fail its checks, and must: one that passes
+# fails the test until it leaves the list, so the list only shrinks.
 failed=0
-while IFS= read -r report; do
+exempted=0
+exempt=$'\\n'"$(grep -v '^#' {exempt} 2> /dev/null)"$'\\n'
+while IFS=$'\\t' read -r report file; do
+    case "$exempt" in
+    *$'\\n'"$file"$'\\n'*)
+        if [ -s "$report" ]; then
+            exempted=$((exempted + 1))
+        else
+            echo "$file is formatted now: remove it from {exempt}"
+            failed=$((failed + 1))
+        fi
+        continue
+        ;;
+    esac
     if [ -s "$report" ]; then
         cat "$report"
         echo
         failed=$((failed + 1))
     fi
 done < {manifest}
+[ "$exempted" -eq 0 ] || echo "{name}: $exempted checks of files {exempt} exempts failed, as it expects."
 if [ "$failed" -ne 0 ]; then
     echo "{name}: $failed of {count} checks failed. \\`bazel run //:format\\` fixes formatting."
     exit 1
@@ -234,17 +249,20 @@ def _lint_test_impl(ctx):
                 mnemonic = "Lint" + "".join([p.capitalize() for p in check.split("_")]),
                 progress_message = "{} %{{label}}: {}".format(check, f.short_path),
             )
-            reports.append(report)
+            reports.append((report, f))
     manifest = ctx.actions.declare_file(ctx.label.name + ".reports")
-    ctx.actions.write(manifest, "".join([r.short_path + "\n" for r in reports]))
+    ctx.actions.write(manifest, "".join([r.short_path + "\t" + f.short_path + "\n" for r, f in reports]))
     script = ctx.actions.declare_file(ctx.label.name + ".sh")
+    exempt = ctx.file.exempt
     ctx.actions.write(script, _TEST.format(
         name = ctx.label.name,
         count = len(reports),
         checks = ", ".join(ctx.attr.checks),
         manifest = manifest.short_path,
+        exempt = exempt.short_path if exempt else "/dev/null",
     ), is_executable = True)
-    return [DefaultInfo(executable = script, runfiles = ctx.runfiles(files = [manifest] + reports))]
+    runfiles = [manifest] + [r for r, _ in reports] + ([exempt] if exempt else [])
+    return [DefaultInfo(executable = script, runfiles = ctx.runfiles(files = runfiles))]
 
 _TOOL_ATTRS = {
     "_actionlint": attr.label(default = "@actionlint//:actionlint", executable = True, cfg = "exec", allow_single_file = True),
@@ -273,6 +291,7 @@ lint_test = rule(
     doc = "Checks every file of srcs (lint_files() groups) that the named checks apply to; see CHECKS.",
     attrs = dict(_TOOL_ATTRS, **{
         "checks": attr.string_list(mandatory = True, doc = "names from CHECKS"),
+        "exempt": attr.label(allow_single_file = True, doc = "workspace paths, one a line, whose checks must fail"),
         "srcs": attr.label_list(allow_files = True, mandatory = True, doc = "lint_files() groups"),
     }),
     test = True,

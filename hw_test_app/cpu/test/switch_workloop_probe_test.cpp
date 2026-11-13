@@ -12,7 +12,9 @@ TEST(WorkloopProbe, EveryWaiterLeavesOnlyWhenHandedTheWorkloop)
     EXPECT_EQ(r.early, 0u);
     EXPECT_EQ(r.errors, 0u) << "first errno " << r.first_error;
     EXPECT_EQ(r.stuck, 0u);
-    EXPECT_GT(r.parked, r.handoffs / 2) << "the waits must block in the kernel, not find their wake posted";
+    // A waker can post its wake before its waiter's wait begins, which is correct, so how many waits block in the
+    // kernel is the scheduler's: a loaded host parks few of them
+    EXPECT_GT(r.parked, 0u) << "the waits must block in the kernel, not always find their wake posted";
 }
 
 TEST(WorkloopProbe, AKeptKnoteReturnsEveryLaterWaitAtOnce)

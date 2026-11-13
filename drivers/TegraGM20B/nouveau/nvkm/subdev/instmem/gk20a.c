@@ -237,7 +237,7 @@ gk20a_instobj_release_dma(struct nvkm_memory *memory)
 	/* in case we got a write-combined mapping */
 	wmb();
 	/* Switch: a GPU-ordered user map's page-table writes are invalidated in the L2 by the next submission's prologue
-	 * (gpu.c chan_exec), before its MMU TLB invalidate. */
+	 * (gpu_exec.c chan_exec), before its MMU TLB invalidate. */
 	if (!(memory->switch_page_table && nvxnu_gpu_ordered()))
 		nvkm_ltc_invalidate(ltc);
 }

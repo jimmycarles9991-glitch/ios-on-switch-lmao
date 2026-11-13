@@ -260,7 +260,7 @@ static TegraVICTraits traits(void)
     t.rotations = 0xff;
     t.subRects = 0xff;
     t.bilinear = 1;
-    t.pitchAlign = 64;
+    t.sourcePitchAlign = t.destinationPitchAlign = 64;
     t.fillThroughMatrix = 1;
     t.yccIn = TEGRA_VIC_YCC_IN_RGB | TEGRA_VIC_YCC_IN_COPY;
     return t;
@@ -604,10 +604,9 @@ static void requests(void)
               TEGRA_VIC_GET(job.config, TEGRA_VIC_OUTPUT_SURFACE, SURF_CHROMA_LOC_VERT) == 1 &&
               TEGRA_VIC_GET(job.config, TEGRA_VIC_OUTPUT_SURFACE, SURF_LUMA_WIDTH) == 767,
           "recording jobs: chroma siting Left, 768-byte luma rows");
-    // The same with a 256-byte pitch rule (a unit that did not prove 64-byte pitches): the 2880-byte LCD rows are
-    // refused as unsupported, so Core Animation falls back.
+    // The same with VIC's 256-byte source pitch rule: the LCD's 2880-byte rows are refused unless they are bounced.
     TegraVICTraits strict = t;
-    strict.pitchAlign = 256;
+    strict.sourcePitchAlign = 256;
     why = buildAll(&plan, &lcd, &wb, &strict, 1, &job);
     CHECK(why && !strcmp(why, "row pitch the engine cannot address"), "256-byte pitch rule: %s", why ? why : "ok");
 
@@ -673,12 +672,10 @@ static void requests(void)
         {1, TEGRA_VIC_PLAN_UNSUPPORTED, "histogram (none on VIC)"},
         {2, TEGRA_VIC_PLAN_UNSUPPORTED, "HDR or film grain (capabilities say no)"},
         {3, TEGRA_VIC_PLAN_UNSUPPORTED, "colour remap (capabilities say no)"},
-        {4, TEGRA_VIC_PLAN_UNSUPPORTED, "shared events"},
         {5, TEGRA_VIC_PLAN_UNSUPPORTED, "pixel format the scaler does not take"},
         {6, TEGRA_VIC_PLAN_UNSUPPORTED, "protected source into a less protected destination"},
         {7, TEGRA_VIC_PLAN_UNSUPPORTED, "alpha override into a surface with alpha"},
         {8, TEGRA_VIC_PLAN_UNSUPPORTED, "HDR or film grain (capabilities say no)"},
-        {9, TEGRA_VIC_PLAN_UNSUPPORTED, "shared events"},
     };
 
     for (unsigned i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
@@ -823,7 +820,7 @@ static void blockLinear(void)
         {1, "row pitch the engine cannot address"},
         {2, "block-linear plane of partial blocks"},
         {3, "plane extends past its mapping"},
-        {4, "block-linear destination"},
+        {4, "block-linear destination this engine has not proven"},
     };
 
     for (unsigned i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
@@ -843,6 +840,7 @@ static void blockLinear(void)
             s.span[1] = 1920 * 540;
             break;
         case 4:
+            tt.blockLinearOut = 0;
             d.blockLinear = 1;
             break;
         }

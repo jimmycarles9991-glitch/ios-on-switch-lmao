@@ -389,7 +389,7 @@ int main(int argc, char **argv)
         levels(run, 33, 17, 4);
         unalignedRows(run);
         formatLevels(run, MTLPixelFormat(43), 2, "96x40 BGR5A1Unorm");
-        formatLevels(run, MTLPixelFormatBGRA8Unorm_sRGB, 4, "96x40 BGRA8Unorm_sRGB");
+        formatLevels(run, MTLPixelFormatRGB10A2Unorm, 4, "96x40 RGB10A2Unorm");
         char rates[1024];
         if (raw_metal_rates(rates, sizeof rates))
             printf("RATES %s\n", rates);

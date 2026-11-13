@@ -27,10 +27,14 @@ public protocol HWTest: Sendable {
     var interactive: Bool { get }
     /// The longest a run may take before the suite records a FAIL and moves on.
     var timeout: TimeInterval { get }
+    /// Runs even after an earlier test left the app's GPU unanswering: a hardware probe that may itself kill the GPU
+    /// channel, whose own result is worth a timeout.
+    var runsWhenGPUWedged: Bool { get }
     func run(_ context: TestContext) async throws -> Outcome
 }
 
 extension HWTest {
     public var interactive: Bool { false }
     public var timeout: TimeInterval { 60 }
+    public var runsWhenGPUWedged: Bool { false }
 }

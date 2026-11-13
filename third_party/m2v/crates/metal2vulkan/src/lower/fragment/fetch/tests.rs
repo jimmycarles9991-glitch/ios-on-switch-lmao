@@ -173,8 +173,10 @@ fn unmodelled_states_are_not_implemented() {
         early_tests: false,
         ..WRITES
     };
+    // A blend the write stores is the device's, which the shader computes by its model.
+    let view = form(&blended, false, WRITES, &p).expect("the storage form");
+    assert!(view.rop && view.blend.is_some());
     for (what, inputs, use_) in [
-        ("blending", &blended, WRITES),
         ("signed normalized write mask", &rg, WRITES),
         ("alpha to coverage", &coverage, WRITES),
         ("depth without early tests", &depth, late),
@@ -199,11 +201,9 @@ fn unmodelled_states_are_not_implemented() {
 /// An 8-bit four-channel sRGB attachment takes the storage form through a view in `R32_UINT`,
 /// declared `R32ui` (without a format where the device grants that) with `uint` texels, which the
 /// function reads and writes as floats it decodes and encodes itself; a blend into one, a replacing
-/// blend too, is not measured, so a written attachment under it is `NotImplemented`, a read-only
-/// one is not.
+/// blend too, is the device's, which the shader computes in linear space by its model.
 #[test]
 fn a_four_channel_srgb_attachment_takes_a_uint_view() {
-    let ni = Err(Unsupported::not_implemented(Feature::FramebufferFetch));
     for stem in [
         "moltenvk-m3",
         "amd-rdna3-radv",
@@ -244,7 +244,8 @@ fn a_four_channel_srgb_attachment_takes_a_uint_view() {
                         c.destination_rgb_blend_factor = crate::metal::BlendFactor::One;
                     }
                 });
-                assert_eq!(form(&blended, false, WRITES, &p), ni, "{stem} {pf:?}");
+                let view = form(&blended, false, WRITES, &p).expect("the storage form");
+                assert!(view.rop && view.uint_view.is_some(), "{stem} {pf:?}");
                 assert!(form(&blended, false, READS, &p).is_ok(), "{stem} {pf:?}");
             }
         }

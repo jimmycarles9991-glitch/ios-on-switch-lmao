@@ -90,6 +90,9 @@ single_version_override(
     patches = ["//bazel/rust:rules_rust.patch"],
 )
 
+# Every action's execution platform, here or on a remote Mac worker (bazel/platforms).
+register_execution_platforms("//bazel/platforms:exec_darwin_arm64")
+
 # --- C/C++ toolchains, by target platform (bazel/platforms): the kernel's Apple clang with XNU's recipes ----------
 # First: none at all under --//install:prebuilt=release (bazel/toolchains/none).
 register_toolchains("//bazel/toolchains/none:cc")
@@ -235,10 +238,17 @@ http_archive(
 )
 
 # blacktop/symbolicator (MIT): the kernel function signatures (strings, callers) of each Darwin version, which ipsw
-# names the stripped kernelcache's functions with for the fileset prelink (translate/arm64e/xnu/prelink26).
+# names the stripped kernelcache's functions with for the fileset prelink (translate/arm64e/xnu/prelink26). :kernel is
+# what ipsw reads: every version's signatures below kernel/, where the prelink points it.
 http_archive(
     name = "symbolicator",
-    build_file_content = 'filegroup(name = "kernel_27_2", srcs = glob(["kernel/27.2/**"]), visibility = ["//visibility:public"])\n',
+    build_file_content = """\
+package(default_visibility = ["//visibility:public"])
+
+filegroup(name = "kernel_27_2", srcs = glob(["kernel/27.2/**"]))
+
+filegroup(name = "kernel", srcs = glob(["kernel/**"]))
+""",
     sha256 = "29e59a2b1a7ed1887ae59774b7e05143577bf3b5cc8396c7eb2b636f951dc4af",
     strip_prefix = "symbolicator-08dbc783663750530d655cb88c1e755aefa10950",
     urls = ["https://github.com/blacktop/symbolicator/archive/08dbc783663750530d655cb88c1e755aefa10950.tar.gz"],

@@ -96,6 +96,7 @@
 pub mod absent;
 pub mod atomic;
 pub mod blob;
+mod bound_leaf;
 pub mod buffer_table;
 pub mod cell;
 pub mod copy;

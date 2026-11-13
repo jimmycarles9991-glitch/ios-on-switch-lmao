@@ -152,7 +152,7 @@ TEST(SdCqSource, DriverGuards)
     EXPECT_THAT(run, HasSubstr("return &group[n - 1];"));
     EXPECT_THAT(body("void NativeSwitchBlock::worker("), HasSubstr("self->runGroup(group, tasks, pending, queue)"));
     // The first tasks of every boot are held and compared with legacy reads (out of CQ mode) before completing.
-    EXPECT_THAT(run, HasSubstr("const bool proving = cqProofs != 0;"));
+    EXPECT_THAT(run, HasSubstr("const bool proving = SwitchAdmaHigh::kLiveProofs && cqProofs != 0;"));
     EXPECT_THAT(run, HasSubstr("self->compareChain(group[i].first, group[i].sectors, &at)"));
     const std::string runner = Between(engine(), "Outcome run(Bus &bus, Host &host,", "\n    }\n\n");
     EXPECT_LT(Index(runner, "if (!leave(bus))"), Index(runner, "host.prove(i)"));
@@ -161,7 +161,8 @@ TEST(SdCqSource, DriverGuards)
     // a group whose retry failed while proving.
     EXPECT_TRUE(Search(runner, R"(if \(differs\) \{\s*\(void\)fail\(bus,)"));
     EXPECT_THAT(runner, HasSubstr("for (unsigned i = proving ? 0 : done; i < n; ++i) {"));
-    EXPECT_THAT(body("bool NativeSwitchBlock::setup()"), HasSubstr("cqProofs = kCqProofs;"));
+    EXPECT_THAT(body("bool NativeSwitchBlock::setup()"),
+                HasSubstr("cqProofs = SwitchAdmaHigh::kLiveProofs ? kCqProofs : 0;"));
     // An error: recovered, the group once more, then the legacy way; the stop is fail() for a proof that differs.
     EXPECT_EQ(Count(runner, "fail("), 1u);
     EXPECT_LT(Index(runner, "const Recovery r = recover(bus);"), Index(runner, "host.beginLegacy(i);"));

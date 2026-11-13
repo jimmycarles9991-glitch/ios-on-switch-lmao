@@ -8,9 +8,13 @@ journals only add. Each function names its library (lib=: the file's path, or da
 bytes); a line from before the journal named libraries has none, and precompile/libraries.py guesses it by the
 function's name.
 
-usage: harvest.py <corpus.log> <pipelines.log>...
-           e.g. harvest.py corpus.log <state>/device-logs/*/m2v-cache/pipelines.log
-       harvest.py <corpus.log> --volume <mounted Data volume> [--save <dir>] [--open <container UUID>]... [--open-all]
+usage: harvest.py <corpus.log> --build <IPSW build> <pipelines.log>...
+           e.g. harvest.py corpus.log --build 24B119 <state>/device-logs/*/m2v-cache/pipelines.log
+       harvest.py <corpus.log> --build <IPSW build> --volume <mounted Data volume> [--save <dir>]
+                  [--open <container UUID>]... [--open-all]
+
+--build   the OS build the journals were written under (a journal does not say): each render and dispatch line it adds
+          names it (os=<build>), as the raw pack keeps a line to the builds it names (tools/gpu/rawpack.py own_build)
 
 --volume  every process's m2v cache on the iPad's Data volume (the plugin's cacheCandidates: a container's
           Library/Caches/m2v, Library/Caches/m2v-<process> or tmp/m2v, tmp/m2v-<process>, a daemon's user cache or
@@ -58,7 +62,12 @@ from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
 from pathlib import Path
 
-DESCRIPTOR = re.compile(r'(samples|topo|ds|opt|c\d|a\d+)=')
+from tools.gpu.shaders import replies as compiler_replies
+
+# os=<build>: the OS build the journal was written under, which the raw pack keeps a line to (tools/gpu/rawpack.py
+# own_build)
+DESCRIPTOR = re.compile(r'(samples|topo|ds|opt|os|c\d|a\d+)=')
+OS_BUILD = re.compile(r' os=\S+')
 COMPUTE = re.compile(r'(form|opt|max|tgm|icb|depth|abf|mut)=')
 # The checkout: bazel run's (also what //deploy:pull_logs runs this in), else the one this file is in.
 PROJECT = Path(os.environ.get('BUILD_WORKSPACE_DIRECTORY') or Path(__file__).resolve().parents[3])
@@ -93,19 +102,33 @@ REPLY_HEADER = 48
 REPLY_NAME = re.compile(r'^[0-9a-f]{64}\.reply$')
 
 
-def normal(line: str) -> tuple[str | None, str | None]:
-    """Return a journal line's corpus form and the text it is deduplicated by (None for refusals and other lines)."""
+def normal(line: str, build: str | None = None) -> tuple[str | None, str | None]:
+    """Return a journal line's corpus form and the text it is deduplicated by (None for refusals and other lines).
+
+    A render or dispatch line that names no OS build takes `build`.
+    """
     if ' ok=1 ' not in line:
         return None, None
     if line.startswith('S '):
         return _normal_specialization(line)
     if line.startswith('C '):
         return _normal_compute(line)
+    if line.startswith(('D ', 'R ')) and build and not OS_BUILD.search(line.split(' | ', 1)[0]):
+        line = _with_build(line, build)
     if line.startswith('D '):
         return line.rstrip(), line.rstrip()
     if line.startswith('R '):
         return _normal_render(line)
     return None, None
+
+
+def _with_build(line: str, build: str) -> str:
+    head, sep, rest = line.partition(' | ')
+    if line.startswith('R '):
+        tokens = head.split(' ')
+        at = next((i + 1 for i, t in enumerate(tokens) if t.startswith('label=')), 2)
+        return ' '.join([*tokens[:at], f'os={build}', *tokens[at:]]) + sep + rest
+    return f'{head} os={build}{sep}{rest}'
 
 
 def _normal_specialization(line: str) -> tuple[str | None, str | None]:
@@ -134,8 +157,16 @@ def _normal_render(line: str) -> tuple[str | None, str | None]:
     end = line.find(' | ', f + 5) if f >= 0 else -1
     if v < 0 or f < 0:
         return None, None
-    # The functions the state links follow its stages (the frontend's linkedText: " | <vl|vp|fl|fp> <stage>")
-    while end >= 0 and line[end + 3 : end + 6] in ('vl ', 'vp ', 'fl ', 'fp '):
+    # The functions the state links follow its stages (the frontend's linkedText: " | <vl|vp|fl|fp> <stage>"), then
+    # the cubic samplers' binds of a state's variant (" | cubic ...", raw_cubic.h), then the slots its sampled two-plane
+    # variant reads two-plane textures at (" | xrs=<slots>", raw_xr_pass.h), then the formats its written variant stores
+    # (" | wtex=<slot>:<format>,...", raw_written_textures.h)
+    while end >= 0 and (
+        line[end + 3 : end + 6] in ('vl ', 'vp ', 'fl ', 'fp ')
+        or line[end + 3 : end + 9] == 'cubic '
+        or line[end + 3 : end + 7] == 'xrs='
+        or line[end + 3 : end + 8] == 'wtex='
+    ):
         end = line.find(' | ', end + 3)
     head = line[:v].split()
     label = next((t for t in head if t.startswith('label=')), 'label=-')
@@ -248,13 +279,13 @@ def _container_caches(
     return found, skipped
 
 
-def merge(corpus: Path, sources: list[tuple[str, str]]) -> list[str]:
+def merge(corpus: Path, sources: list[tuple[str, str]], build: str) -> list[str]:
     lines, seen = [], set()
-    kept = [(corpus, corpus.read_text(errors='replace'))] if corpus.is_file() else []
-    for name, text in kept + sources:
+    kept = [(corpus, corpus.read_text(errors='replace'), None)] if corpus.is_file() else []
+    for name, text, journaled in kept + [(n, t, build) for n, t in sources]:
         added = 0
         for raw in text.splitlines():
-            line, key = normal(raw.rstrip('\n'))
+            line, key = normal(raw.rstrip('\n'), journaled)
             if line and key not in seen:
                 seen.add(key)
                 lines.append(line)
@@ -279,30 +310,14 @@ def collect(m2v: Path, store: Path) -> None:
             shutil.copyfile(path, target)
 
 
-def reply_ok(data: bytes) -> bool:
-    """Return whether `data` is a whole compile reply (the frontend's NBCompileReplyHeader, then its payload)."""
-    if len(data) < REPLY_HEADER or data[:4] != REPLY_MAGIC:
-        return False
-    warnings, metallib = int.from_bytes(data[4:8], 'little'), int.from_bytes(data[8:16], 'little')
-    return (
-        metallib > 0
-        and REPLY_HEADER + warnings + metallib == len(data)
-        and hashlib.sha256(data[REPLY_HEADER:]).digest() == data[16:REPLY_HEADER]
-    )
+reply_ok = compiler_replies.reply_ok
 
 
 def replies(m2v: Path, store: Path) -> int:
-    """Copy a cache's compile replies whose envelope checks out into `store`; how many were new."""
-    copied = 0
-    for path in sorted((m2v / 'msl').glob('*.reply')) if (m2v / 'msl').is_dir() else []:
-        target = store / path.name
-        if target.is_file() or not REPLY_NAME.match(path.name):
-            continue
-        data = path.read_bytes()
-        if reply_ok(data):
-            store.mkdir(parents=True, exist_ok=True)
-            target.write_bytes(data)
-            copied += 1
+    source = m2v / 'msl'
+    report = compiler_replies.inventory(source, strict=True)
+    copied = compiler_replies.copy_inventory(source, store, report)
+    compiler_replies.inventory(store, strict=True)
     return copied
 
 
@@ -376,9 +391,8 @@ def pack(store: Path, corpus: Path) -> None:
         for p in (store / 'data').glob('*.metallib')
         if p.stem in named and p.stem not in own and hashlib.sha256(p.read_bytes()).hexdigest() == p.stem
     )
-    members += sorted(
-        p for p in (store / 'msl').glob('*.reply') if REPLY_NAME.match(p.name) and reply_ok(p.read_bytes())
-    )
+    reply_inventory = compiler_replies.inventory(store / 'msl', strict=True)
+    members += [store / 'msl' / name for name in sorted(reply_inventory['files'])]
     if not members:
         sys.exit(f'{store}: no driver records or libraries staged (harvest.py --volume or --records-from first)')
     data = io.BytesIO()
@@ -394,7 +408,7 @@ def pack(store: Path, corpus: Path) -> None:
     out.write_bytes(data.getvalue())
     record_count = sum(1 for p in members if p.parts[-3] == 'records')
     library_count = sum(1 for p in members if p.parts[-2] == 'data')
-    reply_count = sum(1 for p in members if p.parts[-2] == 'msl')
+    reply_count = reply_inventory['replies']
     print(
         f'{out}: {record_count} driver records, {library_count} libraries '
         f'(of {len(named)} made from bytes the corpus names), {reply_count} compile replies'
@@ -435,7 +449,8 @@ def main() -> None:
     opens = explicit or set(SYSTEM_CACHES)
     open_all = '--open-all' in args
     args = [a for a in args if a != '--open-all']
-    if not args or (volume is None and len(args) < 2):
+    build = option(args, '--build')
+    if not args or (volume is None and len(args) < 2) or not build:
         sys.exit(__doc__)
     corpus, sources = Path(args[0]), [(p, Path(p).read_text(errors='replace')) for p in args[1:]]
     if volume:
@@ -464,7 +479,7 @@ def main() -> None:
             f'{volume}: {len(found)} m2v caches, {journals} journals; {len(set(skipped))} closed containers not '
             'looked in (--open-all)'
         )
-    merge(corpus, sources)
+    merge(corpus, sources, build)
 
 
 if __name__ == '__main__':

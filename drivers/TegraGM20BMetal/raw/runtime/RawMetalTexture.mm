@@ -1,5 +1,61 @@
 // SPDX-License-Identifier: MIT
 #import "RawMetalInternal.h"
+#import "RawMetalMultisample.h"
+#include "raw_texture_cpu_range.h"
+
+namespace {
+class TextureCpuAccess {
+public:
+    TextureCpuAccess(RMTexture *texture, MTLRegion region, NSUInteger level, NSUInteger slice, bool write)
+    {
+        if (!texture->_rawOk || !texture->_raw.cpu)
+            return;
+        const auto &image = texture->_raw;
+        if (image.blockW > 1 || image.blockH > 1)
+            return;
+        const raw::TextureCpuShape shape = {image.width,
+                                            image.height,
+                                            image.depth,
+                                            image.layers,
+                                            image.pitch,
+                                            image.surfaceX,
+                                            image.surfaceY,
+                                            image.bpp,
+                                            image.blockDepth,
+                                            image.blockLinear,
+                                            image.type == raw::fx::kTexThreeD,
+                                            image.chain ? &image.chain->layout : nullptr,
+                                            textureCpuImportLayout(texture),
+                                            image.layerBytes};
+        const uint64_t origin[] = {region.origin.x, region.origin.y, region.origin.z};
+        const uint64_t size[] = {region.size.width, region.size.height, region.size.depth};
+        raw::TextureCpuRange range;
+        const auto planned = raw::textureCpuRange(shape, origin, size, level, slice, range);
+        if (planned == raw::TextureCpuRegion::Unsupported)
+            return;
+        if (planned != raw::TextureCpuRegion::Native || range.offset > UINTPTR_MAX - uintptr_t(image.cpu))
+            [NSException raise:NSInvalidArgumentException format:@"GPU texture CPU region is outside its image"];
+        const void *cpu = reinterpret_cast<const void *>(uintptr_t(image.cpu) + range.offset);
+        while (texture->_kind == RMTextureView && texture->_parent)
+            texture = texture->_parent;
+        const bool acquired = texture->_buffer
+                                  ? gRM->raw->hostAccess(texture->_buffer->_raw, cpu, range.bytes, write, access_)
+                                  : gRM->raw->hostAccess(texture->_raw, cpu, range.bytes, write, access_);
+        if (!acquired)
+            [NSException raise:NSInternalInconsistencyException format:@"GPU texture CPU ownership failed"];
+        native_ = true;
+    }
+
+    bool native() const
+    {
+        return native_;
+    }
+
+private:
+    raw::HostAccess access_;
+    bool native_ = false;
+};
+}  // namespace
 
 // Before the raw path first renders into a surface texture: the kernel takes the surface's imports as only sampled until
 // then, so a CPU lock of a surface the GPU never writes invalidates nothing.
@@ -51,15 +107,21 @@ void traceSurfaceImage(RMTexture *t, const char *what, uint32_t seed)
 - (void)dealloc
 {
     _twin = nil;
-    if (_heap && !_raw.arena)
+    if (_heap && !_raw.arena) {
         _heap->_used -= _heapBytes;
+        const raw::Texture::StorageRange storage = _raw.storageRange();
+        rmHeapForget(_heap, storage.bytes ? storage.va : _raw.va);
+    }
     if (_rawOk && _surface && _raw.converted())
-        surfaceConverted(_surface, false);
+        surfaceConverted(_surfaceWrites, false);
+    rmHeapForgetTexture(self);
     if (_rawOk)
         if (gRM)
             gRM->raw->destroyTexture(_raw);
-    if (_surface)
+    if (_surface) {
+        releaseSurfaceWrites(_surface, _surfaceWrites);
         CFRelease(_surface);
+    }
 }
 
 - (id)rmTwin
@@ -68,7 +130,7 @@ void traceSurfaceImage(RMTexture *t, const char *what, uint32_t seed)
         if (_twin)
             return _twin;
     }
-    id<MTLDevice> m2v = gRM->fallback;
+    id<MTLDevice> m2v = RM_M2V("a texture's twin");
     id made = nil;  // outside this object's lock (twinPublish)
     const char *why = "m2v made none";
     {
@@ -77,17 +139,42 @@ void traceSurfaceImage(RMTexture *t, const char *what, uint32_t seed)
             made = [m2v newTextureWithDescriptor:_descriptor iosurface:_surface plane:_plane];
             break;
         case RMTexturePool: {  // m2v's in-place texture over the same pool memory (as an IOSurface's)
+            rmTexturePlain(self);
+            // zeta memory of its own (raw::Device::createOwnedZeta): only a range that keeps none of it replays (ownedZetaIn)
+            if (_raw.zeta && (_raw.samples > 1 || _raw.arena)) {
+                made = [m2v newTextureWithDescriptor:_descriptor];
+                break;
+            }
+            if (zetaDescriptor(
+                    _descriptor)) {  // a stored one-sample zeta, moved into the twin's image (storedZetaTwin)
+                made = _rawOk ? storedZetaTwin(self, m2v, &why) : [m2v newTextureWithDescriptor:_descriptor];
+                break;
+            }
             const size_t page = size_t(getpagesize());
             raw::Alias a;
-            const bool shared = heapResident(_heap) && gRM->raw->alias(_raw, a);
-            id<MTLBuffer> pages =
-                shared ? rawAliasBuffer(a, _raw.span.cpu, (NSUInteger(_raw.span.bytes) + page - 1) & ~(page - 1),
-                                        MTLResourceStorageModeShared)
-                       : nil;
-            why = !_raw.span.valid() ? "it has no memory of its own"
-                  : !shared          ? "its memory could not be aliased (a purged heap's that did not come back)"
-                  : !pages           ? "m2v did not take its memory"
-                                     : "m2v made no texture over its memory";
+            // Made aliasable before its first replay: its placement is given back, its address and its heap's arena kept
+            const bool released = _raw.arena && !_raw.span.valid() && _heap && _heap->_arena;
+            uint8_t *cpu = released ? _raw.cpu : _raw.span.cpu;
+            uint64_t bytes = _raw.span.bytes, align;
+            const auto releasedBytes = [&] {
+                raw::TextureAsk ask;
+                if (!heapTextureAsk(_descriptor, _heap->_descriptor.storageMode == MTLStorageModePrivate, ask))
+                    return false;
+                ask.standIn = false;
+                return raw::Device::footprint(ask, bytes, align);
+            };
+            const bool shared =
+                heapResident(_heap) &&
+                (released ? releasedBytes() && gRM->raw->aliasArenaRange(_heap->_arena - 1, _raw.va, bytes, a)
+                          : gRM->raw->alias(_raw, a));
+            id<MTLBuffer> pages = shared ? rawAliasBuffer(a, cpu, (NSUInteger(bytes) + page - 1) & ~(page - 1),
+                                                          MTLResourceStorageModeShared)
+                                         : nil;
+            why = _raw.zeta && _raw.samples > 1     ? "NVK views no multisampled zeta memory the raw path owns"
+                  : !_raw.span.valid() && !released ? "it has no memory of its own"
+                  : !shared ? "its memory could not be aliased (a purged heap's that did not come back)"
+                  : !pages  ? "m2v did not take its memory"
+                            : "m2v made no texture over its memory";
             MTLTextureDescriptor *d = _descriptor;
             if (_raw.chain && d.storageMode == MTLStorageModeMemoryless) {  // every level, in place (memory here)
                 d = [_descriptor copy];
@@ -171,7 +258,7 @@ void traceSurfaceImage(RMTexture *t, const char *what, uint32_t seed)
     if (_raw.span.valid())
         return NSUInteger(_raw.span.bytes);
     id twin = _twin;
-    return twin ? [(id<MTLTexture>)twin allocatedSize] : 0;
+    return twin ? [(id<MTLTexture>)twin allocatedSize] : NSUInteger(_raw.storage.bytes);
 }
 
 - (MTLTextureType)textureType
@@ -289,11 +376,6 @@ void traceSurfaceImage(RMTexture *t, const char *what, uint32_t seed)
     return 0;
 }
 
-- (BOOL)isShareable
-{
-    return NO;
-}
-
 - (MTLPurgeableState)setPurgeableState:(MTLPurgeableState)state
 {
     if (_heap)
@@ -325,8 +407,6 @@ void traceSurfaceImage(RMTexture *t, const char *what, uint32_t seed)
     return (id<MTLHeap>)_heap;
 }
 
-// CPU writes into the texture's own pages (level 0, slice 0, a 2D texture), cleaned to memory at once: a later command buffer's
-// GPU reads see them. A shared mipmapped texture's levels: cpuLevel. Other textures are m2v's (their twin's replaceRegion).
 - (void)replaceRegion:(MTLRegion)r
           mipmapLevel:(NSUInteger)level
                 slice:(NSUInteger)slice
@@ -334,10 +414,31 @@ void traceSurfaceImage(RMTexture *t, const char *what, uint32_t seed)
           bytesPerRow:(NSUInteger)row
         bytesPerImage:(NSUInteger)image
 {
-    if (_surface)
-        noteSurfaceWrite(_surface);
-    if (_rawOk && _raw.chain && !slice && r.size.depth <= 1) {
-        cpuLevel(self, r, level, (uint8_t *)bytes, row, true);
+    if (!r.size.width || !r.size.height || !r.size.depth)
+        return;
+#if SWITCH_RAW_DIAGNOSTICS
+    _raw.probeWritten = true;
+#endif
+    if (_surfaceWrites)
+        noteSurfaceWrite(_surfaceWrites);
+    if (transferTexture(self, r, level, slice, const_cast<void *>(bytes), row, image, true))
+        return;
+    if (_rawOk && _raw.blockW * _raw.blockH > 1 && _raw.blockLinear) {
+        cpuBlocks(self, r, level, slice, (uint8_t *)bytes, row, true);
+        return;
+    }
+    TextureCpuAccess access(self, r, level, slice, true);
+    if (!access.native()) {
+        [(id<MTLTexture>)[self rmTwin] replaceRegion:r
+                                         mipmapLevel:level
+                                               slice:slice
+                                           withBytes:bytes
+                                         bytesPerRow:row
+                                       bytesPerImage:image];
+        return;
+    }
+    if (_rawOk && _raw.chain) {
+        cpuLevel(self, r, level, slice, (uint8_t *)bytes, row, image, true);
         return;
     }
     if (_rawOk && _raw.type == raw::fx::kTexThreeD && !level && !slice && r.origin.x + r.size.width <= _raw.width &&
@@ -350,15 +451,6 @@ void traceSurfaceImage(RMTexture *t, const char *what, uint32_t seed)
         cpuLayer(self, r, slice, (uint8_t *)bytes, row, true);
         return;
     }
-    if (!_rawOk || level || slice || r.size.depth > 1 || !_raw.cpu) {
-        [(id<MTLTexture>)[self rmTwin] replaceRegion:r
-                                         mipmapLevel:level
-                                               slice:slice
-                                           withBytes:bytes
-                                         bytesPerRow:row
-                                       bytesPerImage:image];
-        return;
-    }
     if (r.origin.x + r.size.width > _raw.width || r.origin.y + r.size.height > _raw.height)
         return;
     if (_raw.blockLinear) {
@@ -369,15 +461,7 @@ void traceSurfaceImage(RMTexture *t, const char *what, uint32_t seed)
     for (NSUInteger y = 0; y < r.size.height; y++) {
         uint8_t *to = _raw.cpu + (r.origin.y + y) * _raw.pitch + r.origin.x * _raw.bpp;
         memcpy(to, (const uint8_t *)bytes + y * row, line);
-#if defined(__aarch64__)
-        if (!_raw.wc)  // (write-combined: in memory once the DSB below drains it)
-            for (uintptr_t a = uintptr_t(to) & ~uintptr_t(63); a < uintptr_t(to) + line; a += 64)
-                __asm__ volatile("dc cvac, %0" ::"r"(a) : "memory");
-#endif
     }
-#if defined(__aarch64__)
-    __asm__ volatile("dsb sy" ::: "memory");
-#endif
 }
 
 - (void)replaceRegion:(MTLRegion)r
@@ -388,7 +472,6 @@ void traceSurfaceImage(RMTexture *t, const char *what, uint32_t seed)
     [self replaceRegion:r mipmapLevel:level slice:0 withBytes:bytes bytesPerRow:row bytesPerImage:0];
 }
 
-// CPU reads of what the GPU wrote: its lines invalidated first (once per GPU write), then the rows
 - (void)getBytes:(void *)bytes
       bytesPerRow:(NSUInteger)row
     bytesPerImage:(NSUInteger)image
@@ -396,8 +479,26 @@ void traceSurfaceImage(RMTexture *t, const char *what, uint32_t seed)
       mipmapLevel:(NSUInteger)level
             slice:(NSUInteger)slice
 {
-    if (_rawOk && _raw.chain && !slice && r.size.depth <= 1) {
-        cpuLevel(self, r, level, (uint8_t *)bytes, row, false);
+    if (!r.size.width || !r.size.height || !r.size.depth)
+        return;
+    if (transferTexture(self, r, level, slice, bytes, row, image, false))
+        return;
+    if (_rawOk && _raw.blockW * _raw.blockH > 1 && _raw.blockLinear) {
+        cpuBlocks(self, r, level, slice, (uint8_t *)bytes, row, false);
+        return;
+    }
+    TextureCpuAccess access(self, r, level, slice, false);
+    if (!access.native()) {
+        [(id<MTLTexture>)[self rmTwin] getBytes:bytes
+                                    bytesPerRow:row
+                                  bytesPerImage:image
+                                     fromRegion:r
+                                    mipmapLevel:level
+                                          slice:slice];
+        return;
+    }
+    if (_rawOk && _raw.chain) {
+        cpuLevel(self, r, level, slice, (uint8_t *)bytes, row, image, false);
         return;
     }
     if (_rawOk && _raw.type == raw::fx::kTexThreeD && !level && !slice && r.origin.x + r.size.width <= _raw.width &&
@@ -410,29 +511,12 @@ void traceSurfaceImage(RMTexture *t, const char *what, uint32_t seed)
         cpuLayer(self, r, slice, (uint8_t *)bytes, row, false);
         return;
     }
-    if (!_rawOk || level || slice || r.size.depth > 1 || !_raw.cpu) {
-        [(id<MTLTexture>)[self rmTwin] getBytes:bytes
-                                    bytesPerRow:row
-                                  bytesPerImage:image
-                                     fromRegion:r
-                                    mipmapLevel:level
-                                          slice:slice];
-        return;
-    }
     if (r.origin.x + r.size.width > _raw.width || r.origin.y + r.size.height > _raw.height)
         return;
     if (_raw.blockLinear) {
         cpuTiled(self, r, (uint8_t *)bytes, row, false);
         return;
     }
-#if defined(__aarch64__)
-    if (_gpuDirty.exchange(false) && !_raw.wc) {
-        for (uintptr_t a = uintptr_t(_raw.cpu) & ~uintptr_t(63);
-             a < uintptr_t(_raw.cpu) + uint64_t(_raw.pitch) * _raw.height; a += 64)
-            __asm__ volatile("dc civac, %0" ::"r"(a) : "memory");
-        __asm__ volatile("dsb sy" ::: "memory");
-    }
-#endif
     const size_t line = r.size.width * _raw.bpp;
     for (NSUInteger y = 0; y < r.size.height; y++)
         memcpy((uint8_t *)bytes + y * row, _raw.cpu + (r.origin.y + y) * _raw.pitch + r.origin.x * _raw.bpp, line);
@@ -490,9 +574,8 @@ static int viewHeaderType(MTLTextureType type)
                                          levels:(NSRange)levels
                                          slices:(NSRange)slices
 {
-    const bool cube =
-        _descriptor.textureType == MTLTextureTypeCube || _descriptor.textureType == MTLTextureTypeCubeArray;
-    const NSUInteger allSlices = std::max<NSUInteger>(_descriptor.arrayLength, 1) * (cube ? 6 : 1);
+    const NSUInteger allSlices = raw::textureLayers(uint32_t(_descriptor.textureType),
+                                                    uint32_t(std::min<NSUInteger>(_descriptor.arrayLength, 2048)));
     if (type == _descriptor.textureType && !levels.location && levels.length == _descriptor.mipmapLevelCount &&
         !slices.location && slices.length == allSlices)
         return [self newTextureViewWithPixelFormat:format];
@@ -514,6 +597,7 @@ static int viewHeaderType(MTLTextureType type)
     v->_viewLevels = levels;
     v->_viewSlices = slices;
     const int header = viewHeaderType(type);
+    rmTexturePlain(self);
     if (_rawOk && header >= 0 && raw::formatInfo(uint32_t(format)))
         v->_rawOk = gRM->raw->createPartView(_raw, uint32_t(format), uint32_t(header), uint32_t(levels.location),
                                              uint32_t(levels.length), uint32_t(slices.location),
@@ -557,6 +641,7 @@ static int viewHeaderType(MTLTextureType type)
     v->_descriptor.pixelFormat = format;
     v->_kind = RMTextureView;
     v->_parent = self;
+    rmTexturePlain(self);
     if (_rawOk && !_raw.memoryless && raw::formatInfo(uint32_t(format)))
         v->_rawOk = gRM->raw->createView(_raw, uint32_t(format), v->_raw);
     if (!v->_rawOk)

@@ -2,7 +2,7 @@
 // The on-demand clock governor's decisions, in plain C with no kernel dependency, so the host tests
 // (test/switch_governor_test.cpp) check this same header. Its one user is the A57 cluster's DFLL
 // (SwitchPerfGovernor.cpp, from the scheduler's perfcontrol callouts). The GPU does not use it: it runs
-// 768 MHz whenever it has work and drops only when truly idle (TegraGM20B gpu.c, "idle clock").
+// 768 MHz whenever it has work and drops only when truly idle (TegraGM20B gpu_clock.c, "idle clock").
 // The caller owns the time base (mach absolute time in the kernel, microseconds in the tests), the locking and the
 // hardware; this file only maps "how busy was the last window" plus hints and thermal limits to an index into an
 // ascending table of operating points, the way Linux's ondemand/schedutil governors and Horizon's boost mode do:

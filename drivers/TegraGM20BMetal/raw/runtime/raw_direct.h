@@ -7,31 +7,32 @@
 #include <map>
 #include <string>
 #include <vector>
-#include "raw_compiler.h"
 #include "raw_record.h"
 
 struct NmbDirectState;
 
 namespace raw {
 
-// The NVK exports the direct compile calls (nvk_switch_compile.h), found in the NVK the device opened
+// The NVK exports the direct compile calls (nvk_switch_offline.h), which create no device
 struct DirectNvk {
-    void *compileStage = nullptr, *stageFinish = nullptr, *setLayoutBinding = nullptr, *setLayoutSize = nullptr,
-         *immutableSamplerHeader = nullptr, *bufferDescriptorSize = nullptr, *samplerHeader = nullptr,
-         *computeQmd = nullptr, *viewHeaderWord0 = nullptr, *splitParts = nullptr;
+    void *splitParts = nullptr, *nakCompileStage = nullptr, *nakStageFinish = nullptr, *nakFreeze = nullptr;
+    const void *nakTarget = nullptr;  // the frozen table the compile takes (raw_nak_target.h)
     bool abiMatches = false;  // raw_direct.cpp's copies of NVK's structs are NVK's size (switch_nvk_compile_abi)
 
     static DirectNvk find(void *(*symbol)(const char *name));
     bool complete() const;
-    bool kernelComplete() const;
 };
 
 // The record of the state `state` describes, of pack key `key`; `attributes`: its vertex function's [[attribute(n)]] inputs
 // (the reflection's active vertexAttributes). Refused: a state the raw path does not draw from a record (`why`); Failed: NVK
 // could not compile it. `registers`: the 3D registers the record is made from (raw_emit's over the rules' baseline and context).
-// `split`: with its fragment program's split (RuntimeRecord::splitTried), which costs about one more compile of that stage
-Compiler::Outcome directRecord(const NmbDirectState &state, const DirectNvk &nvk, const PackRules &rules,
-                               const std::string &key, const std::vector<uint32_t> &attributes, RuntimeRecord &out,
-                               std::string &why, std::map<uint32_t, uint32_t> *registers = nullptr, bool split = false);
+// `split`: with its fragment program's split (RuntimeRecord::splitTried), which costs about one more compile of that stage.
+// `variants`: with its program variants (RuntimeRecord::variants), one more compile of both stages each: the pack builder's only.
+// `xrSlots`: the fragment texture slots its fragment programs read through two-plane RGB10A8_2P_XR10 header pairs
+// (raw_xr_pass.h, the record of its " | xrs=" variant)
+CompileOutcome directRecord(const NmbDirectState &state, const DirectNvk &nvk, const PackRules &rules,
+                            const std::string &key, const std::vector<uint32_t> &attributes, RuntimeRecord &out,
+                            std::string &why, std::map<uint32_t, uint32_t> *registers = nullptr, bool split = false,
+                            bool variants = false, uint16_t xrSlots = 0);
 
 }  // namespace raw

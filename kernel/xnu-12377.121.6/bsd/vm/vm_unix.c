@@ -122,6 +122,11 @@
 #if defined(XNU_SWITCH_VERIFIED_ROOT) && XNU_SWITCH_VERIFIED_ROOT && CONFIG_CODE_DECRYPTION
 #include <kern/page_decrypt.h>   /* SwitchHomeGrid pager */
 #include <vm/switch_ui_scale_sites.h>
+#if defined(SWITCH_IPSW_KIND_24B119)
+#include <kern/clock.h>
+#include <os/log.h>
+#include <vm/switch_timebase_24B119.h>
+#endif
 #endif
 #if defined(XNU_SWITCH_VERIFIED_ROOT) && XNU_SWITCH_VERIFIED_ROOT
 #include <pexpert/pexpert.h>
@@ -2019,6 +2024,61 @@ switch_ui_scale_pager(const struct switch_us_site *site, vm_object_t file_object
 	return mo;
 }
 
+#if defined(SWITCH_IPSW_KIND_24B119)
+static int switch_tb_cookie;
+static uint32_t switch_tb_failed;
+
+static int
+switch_timebase_page(const void *src, void *dst, unsigned long long src_offset, __unused void *ops)
+{
+	bcopy(src, dst, SWITCH_TB_CHUNK_SIZE);
+	if (!switch_tb_patch(dst, SWITCH_TB_CHUNK_SIZE, src_offset) &&
+	    !os_atomic_xchg(&switch_tb_failed, 1, relaxed)) {
+		os_log_error(OS_LOG_DEFAULT, "SwitchTimebase: 24B119 Swift deadline bytes differ, page left stock");
+	}
+	return 0;
+}
+
+static memory_object_t
+switch_timebase_pager(vm_object_t file_object, uint64_t object_base, uint64_t file_offset, uint64_t size,
+    uint64_t unslid_address, struct vnode *vp, uint64_t *range_offset, uint64_t *range_size)
+{
+	if (!switch_tb_mapping(unslid_address, size, file_offset, object_base) ||
+	    file_object == VM_OBJECT_NULL || vp == NULLVP) {
+		return MEMORY_OBJECT_NULL;
+	}
+	mach_timebase_info_data_t timebase;
+	clock_timebase_info(&timebase);
+	if (!switch_tb_eligible(timebase.numer, timebase.denom)) {
+		return MEMORY_OBJECT_NULL;
+	}
+	uint8_t header[SWITCH_TB_UUID_OFFSET + sizeof(switch_tb_uuid)];
+	int resid = 0;
+	int error = vn_rdwr(UIO_READ, vp, (caddr_t)header, sizeof(header), 0, UIO_SYSSPACE, IO_NODELOCKED,
+	    vfs_context_ucred(vfs_context_current()), &resid, current_proc());
+	if (error != 0 || resid != 0 || !switch_tb_header(header, sizeof(header))) {
+		os_log_error(OS_LOG_DEFAULT, "SwitchTimebase: Swift cache header mismatch or read failure (%d)", error);
+		return MEMORY_OBJECT_NULL;
+	}
+	struct pager_crypt_info crypt_info = {
+		.page_decrypt = switch_timebase_page,
+		.crypt_end = NULL,
+		.crypt_ops = &switch_tb_cookie,
+		.crypt_refcnt = 0,
+	};
+	memory_object_t mo = apple_protect_pager_setup(file_object, SWITCH_TB_PAGE_FILEOFF - object_base,
+	    SWITCH_TB_PAGE_FILEOFF + SWITCH_TB_CHUNK_OFFSET, &crypt_info,
+	    SWITCH_TB_CHUNK_OFFSET, SWITCH_TB_CHUNK_OFFSET + SWITCH_TB_CHUNK_SIZE, TRUE);
+	if (mo == MEMORY_OBJECT_NULL) {
+		os_log_error(OS_LOG_DEFAULT, "SwitchTimebase: Swift deadline pager setup failed");
+		return MEMORY_OBJECT_NULL;
+	}
+	*range_offset = SWITCH_TB_PAGE_VMADDR - unslid_address;
+	*range_size = SWITCH_TB_PAGE_SIZE;
+	return mo;
+}
+#endif
+
 /*
  * Called by vm_shared_region_map_file_setup() for each executable cache mapping it has just entered in a shared
  * region, once per slot (0 .. SWITCH_TEXT_SLOTS - 1 there). Returns an apple_protect pager for the slot's range to replace
@@ -2039,6 +2099,14 @@ switch_shared_cache_text_pager(vm_object_t file_object, uint64_t object_base, ui
     uint64_t unslid_address, struct vnode *vp, unsigned slot, uint64_t *range_offset, uint64_t *range_size)
 {
 	memory_object_t mo = MEMORY_OBJECT_NULL;
+#if defined(SWITCH_IPSW_KIND_24B119)
+	if (slot == SWITCH_TB_PAGER_SLOT) {
+		mo = switch_timebase_pager(file_object, object_base, file_offset, size, unslid_address, vp, range_offset, range_size);
+		if (mo != MEMORY_OBJECT_NULL) {
+			return mo;
+		}
+	}
+#endif
 	if (slot == 0) {
 		mo = switch_home_grid_pager(file_object, object_base, file_offset, size, unslid_address, vp, range_offset, range_size);
 		if (mo == MEMORY_OBJECT_NULL) {

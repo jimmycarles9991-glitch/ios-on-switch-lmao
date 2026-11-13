@@ -31,7 +31,7 @@ def main() -> None:
         scratch = Path(scratch_dir)
         # A writable libdispatch checkout next to "xnu-work" (its xcconfig names ../xnu-work/EXTERNAL_HEADERS).
         work = scratch / 'libdispatch-work'
-        shutil.copytree(args.libdispatch, work, symlinks=False)
+        shutil.copytree(args.libdispatch, work, symlinks=False, copy_function=common.copy_writable)
         os.symlink(Path(args.xnu).absolute(), scratch / 'xnu-work')
         config = work / 'xcodeconfig/libfirehose_kernel.xcconfig'
         text = config.read_text()

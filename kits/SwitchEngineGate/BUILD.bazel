@@ -1,0 +1,24 @@
+# A host1x engine that powers off when idle and on at its next use (header-only, kernel).
+#
+#   bazel test //kits/SwitchEngineGate/test:all
+load("//bazel/lint:defs.bzl", "lint_files")
+load("//kernel/rules:kernel.bzl", "kernel_headers")
+
+package(default_visibility = ["//visibility:public"])
+
+lint_files()
+
+exports_files(glob(
+    ["**"],
+    exclude = ["BUILD.bazel"],
+))
+
+filegroup(
+    name = "all_files",
+    srcs = glob(
+        ["**"],
+        exclude = ["BUILD.bazel"],
+    ),
+)
+
+kernel_headers()

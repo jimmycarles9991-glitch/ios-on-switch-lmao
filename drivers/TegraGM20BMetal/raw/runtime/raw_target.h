@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MIT
 // MAXWELL_B SET_COLOR_TARGET_A .. SET_COLOR_TARGET_LAYER for one target, the nine words NVK's nvk_CmdBeginRendering writes
-// (nvk_cmd_draw.c), in the two layouts the raw path renders:
+// (nvk_cmd_draw.c; kits/SwitchGM20BEmit's switch_gm20b_color_target), in the two layouts the raw path renders:
 //  - pitch (pool and surface textures): WIDTH the row's bytes, MEMORY LAYOUT_PITCH, one layer;
 //  - block-linear (a later level of a mipmapped texture's chain, raw/fx): the level where NIL puts it (fx::mipChainLayout: its
 //    offset, its block height clamped to the level as the hardware does, its rows aligned to one GOB's 64 bytes). WIDTH is
@@ -8,8 +8,13 @@
 //    ONE_GOB, BLOCK_HEIGHT the level's, BLOCK_DEPTH 0, LAYOUT_BLOCKLINEAR, THIRD_DIMENSION_DEFINES_ARRAY_SIZE; one layer,
 //    ARRAY_PITCH the image's layer size / 4, LAYER 0. The 2D engine's level writes (fx::emitCopyToLevel,
 //    emitGenerate) address the same level by the same base and block height.
+// A block-linear target of a layered pass binds its layers from the attachment's slice on (THIRD_DIMENSION, ARRAY_PITCH
+// the image's array stride); a 3D image's level binds its planes (THIRD_DIMENSION_DEFINES_DEPTH_SIZE, BLOCK_DEPTH the
+// level's), as nvk_CmdBeginRendering binds a view of either. NVIDIA renders a pitch target as one 2D layer only.
 #pragma once
+#include <algorithm>
 #include <cstdint>
+#include "../../../../kits/SwitchGM20BEmit/SwitchGM20BEmit3D.h"
 #include "../fx/fx_mip.h"
 
 namespace raw {
@@ -21,38 +26,40 @@ struct ColorTargetDesc {
     bool blockLinear = false;
     uint8_t blockHeight = 0;  // log2 GOBs (block-linear)
     uint64_t layerBytes = 0;  // the image's layer size (block-linear: ARRAY_PITCH)
+    uint32_t layers = 1;      // block-linear: THIRD_DIMENSION
+    bool depth = false;       // a 3D image's level: layers are its planes
+    uint8_t blockDepth = 0;   // log2 planes a block (a 3D image's level)
 };
 
-constexpr uint32_t kColorTargetWords = 9;
-constexpr uint32_t kTargetLayoutPitch = 0x1000;  // SET_COLOR_TARGET_MEMORY LAYOUT_PITCH (bit 12); 0 is BLOCKLINEAR
-
-inline void colorTargetWords(const ColorTargetDesc &d, uint32_t w[kColorTargetWords])
+// Texture `t` (raw_gpu.h, or any type of its fields) of render format `rtFormat` and `rows` rows as a target
+template <typename Texture> ColorTargetDesc colorTargetDesc(const Texture &t, uint32_t rtFormat, uint32_t rows)
 {
-    w[0] = uint32_t(d.va >> 32);
-    w[1] = uint32_t(d.va);
-    w[3] = d.height;
-    w[4] = d.rtFormat;
-    w[6] = 1;  // THIRD_DIMENSION: one layer
-    w[8] = 0;  // LAYER
-    if (!d.blockLinear) {
-        w[2] = d.pitch;
-        w[5] = kTargetLayoutPitch;
-        w[7] = 0;
-        return;
-    }
-    w[2] = d.bpp ? d.pitch / d.bpp : 0;
-    w[5] = uint32_t(d.blockHeight & 0xf) << 4;  // BLOCK_WIDTH ONE_GOB, BLOCK_DEPTH ONE_GOB, BLOCKLINEAR, ARRAY_SIZE
-    w[7] = uint32_t(d.layerBytes >> 2);
+    ColorTargetDesc d;
+    d.va = t.va;
+    d.pitch = t.pitch;
+    d.height = rows;
+    d.bpp = t.bpp;
+    d.rtFormat = rtFormat;
+    d.blockLinear = t.blockLinear;
+    d.blockHeight = t.blockHeight;
+    d.layerBytes = t.layerBytes;
+    return d;
 }
 
-// A slot with no target below the pass's last one, as NVK writes it (nvk_CmdBeginRendering): FORMAT DISABLED, VA 0. Left as it
-// was, the slot would still name the target of an earlier pass, which CT_SELECT's count makes the hardware render to.
-inline void disabledTargetWords(uint32_t w[kColorTargetWords])
+inline switch_gm20b_target kitTarget(const ColorTargetDesc &d)
 {
-    for (uint32_t i = 0; i < kColorTargetWords; i++)
-        w[i] = 0;
-    w[2] = 64;  // WIDTH
-    w[6] = 1;   // THIRD_DIMENSION
+    switch_gm20b_target k = {};
+    k.address = d.va;
+    k.width = d.blockLinear ? (d.bpp ? d.pitch / d.bpp : 0) : d.pitch;
+    k.height = d.height;
+    k.format = uint8_t(d.rtFormat);
+    k.pitch = !d.blockLinear;
+    k.block_height_log2 = uint8_t(d.blockHeight & 0xf);
+    k.layers = d.blockLinear ? std::max(d.layers, 1u) : 1;
+    k.array_pitch = d.blockLinear ? uint32_t(d.layerBytes >> 2) : 0;
+    k.depth = d.blockLinear && d.depth;
+    k.block_depth_log2 = d.blockLinear ? uint8_t(d.blockDepth & 0xf) : 0;
+    return k;
 }
 
 // Level `level` (1 .. levels - 1) of the chain at `chainVa` as a block-linear target; false: not a level of it

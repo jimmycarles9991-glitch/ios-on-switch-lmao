@@ -15,6 +15,7 @@ py_library(
     visibility = [
         "//drivers/TegraGM20BMetal:__pkg__",
         "//gpu:__subpackages__",
+        "//hw_test_app:__pkg__",
     ],
 )
 
@@ -35,8 +36,44 @@ py_binary(
 )
 
 py_binary(
+    name = "inputs",
+    srcs = ["inputs.py"],
+    deps = [":metallib"],
+)
+
+py_test(
+    name = "inputs_test",
+    srcs = [
+        "inputs.py",
+        "inputs_test.py",
+        "metallib_test.py",
+    ],
+    deps = [":metallib"],
+)
+
+py_binary(
     name = "precompile",
     srcs = ["precompile.py"],
+)
+
+py_binary(
+    name = "native_seed",
+    srcs = [
+        "native_seed.py",
+        "precompile.py",
+    ],
+    main = "native_seed.py",
+)
+
+py_test(
+    name = "native_seed_test",
+    srcs = [
+        "native_seed.py",
+        "native_seed_test.py",
+        "precompile.py",
+    ],
+    data = ["//kits/SwitchSeedPack:seedpack"],
+    deps = ["@rules_python//python/runfiles"],
 )
 
 py_binary(
@@ -45,10 +82,29 @@ py_binary(
     deps = [":metallib"],
 )
 
+py_library(
+    name = "replies",
+    srcs = ["replies.py"],
+    visibility = [
+        "//drivers/TegraGM20BMetal:__pkg__",
+        "//gpu:__subpackages__",
+    ],
+)
+
+py_test(
+    name = "replies_test",
+    srcs = ["replies_test.py"],
+    deps = [":replies"],
+)
+
 py_binary(
     name = "merge",
     srcs = ["merge.py"],
-    deps = ["//tools/gpu:nvk_twin"],
+    deps = [
+        ":replies",
+        "//tools/gpu:nvk_twin",
+        "//tools/gpu:seed_pack",
+    ],
 )
 
 [py_test(
@@ -68,5 +124,9 @@ py_test(
         "merge_test.py",
         "precompile.py",
     ],
-    deps = ["//tools/gpu:nvk_twin"],
+    deps = [
+        ":replies",
+        "//tools/gpu:nvk_twin",
+        "//tools/gpu:seed_pack",
+    ],
 )

@@ -34,7 +34,7 @@ def _kernel_prelink_fileset_impl(ctx):
     ctx.actions.run(
         executable = ctx.executable._prelink,
         arguments = [args],
-        inputs = [kernel, ctx.file.kernelcache, ctx.file.kernelcache_17, ctx.file.symbolsets] + ctx.files.signatures,
+        inputs = [kernel, ctx.file.kernelcache, ctx.file.kernelcache_17, ctx.file.symbolsets] + ctx.files._signature_tree,
         tools = [ctx.executable._arm64e, ctx.executable._ipsw],
         outputs = [out, report, names],
         env = {"DEVELOPER_DIR": DEVELOPER_DIR},
@@ -58,5 +58,9 @@ kernel_prelink_fileset = rule(
         "_arm64e": attr.label(default = "//translate/arm64e", executable = True, cfg = "exec"),
         "_ipsw": attr.label(default = "@ipsw_cli//:ipsw", executable = True, allow_single_file = True, cfg = "exec"),
         "_prelink": attr.label(default = "//translate/arm64e:prelink", executable = True, cfg = "exec"),
+        # ipsw reads every Darwin version's signatures below the directory that holds `signatures`. With 27.2's alone
+        # it names half the functions and the prelink refuses its GOT bindings. Only a remote worker, whose inputs are
+        # the declared files, showed it: in the sandbox, xnu.json's link led into the whole repository.
+        "_signature_tree": attr.label(default = "@symbolicator//:kernel", allow_files = True),
     },
 )

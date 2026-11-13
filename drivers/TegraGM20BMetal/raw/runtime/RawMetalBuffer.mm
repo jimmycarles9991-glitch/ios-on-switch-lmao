@@ -13,8 +13,10 @@
     _twin = nil;  // m2v's import over these pages goes first
     void *bytes = _raw.cpu;
     const NSUInteger length = NSUInteger(_raw.length);
-    if (_heap && !_raw.arena)
+    if (_heap && !_raw.arena) {
         _heap->_used -= _heapBytes;
+        rmHeapForget(_heap, _raw.va);
+    }
     if (gRM)
         gRM->raw->destroyBuffer(_raw);
     if (_deallocator)
@@ -36,26 +38,27 @@
         _raw.import ? NSUInteger(_raw.length) : (NSUInteger(_raw.length) + page - 1) & ~(page - 1);
     raw::Alias a;
     return twinPublish(self, _twin,
-                       heapResident(_heap) && gRM->raw->alias(_raw, a) ? rawAliasBuffer(a, _raw.cpu, length, options)
-                                                                       : nil);
+                       RM_M2V("a buffer's twin") && heapResident(_heap) && gRM->raw->alias(_raw, a)
+                           ? rawAliasBuffer(a, _raw.cpu, length, options)
+                           : nil);
 }
 
-// A CPU read after a GPU write: the GPU's bytes, not lines the CPU cached before (clean+invalidate keeps any CPU write)
-- (void)invalidateForCpu
+- (BOOL)invalidateForCpu
 {
-    if (!_gpuDirty.exchange(false) || _raw.wc)
-        return;  // (write-combined: the CPU reads memory itself)
-#if defined(__aarch64__)
-    for (uintptr_t a = uintptr_t(_raw.cpu) & ~uintptr_t(63); a < uintptr_t(_raw.cpu) + _raw.length; a += 64)
-        __asm__ volatile("dc civac, %0" ::"r"(a) : "memory");
-    __asm__ volatile("dsb sy" ::: "memory");
-#endif
+    if ((!_gpuDirty.load(std::memory_order_acquire) && !_raw.import) || _raw.wc)
+        return YES;
+    raw::HostAccess access;
+    if (!gRM->raw->hostAccess(_raw, false, access) || !access.finish())
+        return NO;
+    _gpuDirty.store(false, std::memory_order_release);
+    return YES;
 }
 
 - (void *)contents
 {
-    [self invalidateForCpu];
-    return _raw.cpu;
+    if (!_raw.hostVisible)
+        return nullptr;
+    return [self invalidateForCpu] ? _raw.cpu : nullptr;
 }
 
 - (NSUInteger)length

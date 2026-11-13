@@ -69,14 +69,13 @@ int main(int argc, char **argv)
         raw::Direct direct(pack);
         raw::RuntimeRecord linked, inlined, unlinked;
         std::string whyLinked, whyInlined, whyUnlinked;
-        const raw::Compiler::Outcome made =
+        const raw::CompileOutcome made =
             direct.make(descriptor(caller, @"linked_frag", custom), kKey, linked, whyLinked);
-        const raw::Compiler::Outcome inl =
-            direct.make(descriptor(caller, @"inline_frag", nil), kKey, inlined, whyInlined);
-        const raw::Compiler::Outcome alone =
+        const raw::CompileOutcome inl = direct.make(descriptor(caller, @"inline_frag", nil), kKey, inlined, whyInlined);
+        const raw::CompileOutcome alone =
             direct.make(descriptor(caller, @"linked_frag", nil), kKey, unlinked, whyUnlinked);
         int failed = 0;
-        if (made != raw::Compiler::Outcome::Made || inl != raw::Compiler::Outcome::Made) {
+        if (made != raw::CompileOutcome::Made || inl != raw::CompileOutcome::Made) {
             printf("FAIL: not made (linked: %s; inline: %s)\n", whyLinked.c_str(), whyInlined.c_str());
             return 1;
         }
@@ -91,7 +90,7 @@ int main(int argc, char **argv)
             printf("FAIL: the linked state's record is not the inline one's\n");
             failed = 1;
         }
-        if (alone != raw::Compiler::Outcome::Refused || whyUnlinked.find("LinkedFunction") == std::string::npos) {
+        if (alone != raw::CompileOutcome::Refused || whyUnlinked.find("LinkedFunction") == std::string::npos) {
             printf("FAIL: the state without its linked function was not refused for it (%s)\n", whyUnlinked.c_str());
             failed = 1;
         }

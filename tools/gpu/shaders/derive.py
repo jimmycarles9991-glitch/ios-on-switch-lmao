@@ -139,7 +139,7 @@ def targets(renders: list[Render]) -> list[Render]:
     for r in renders:
         seen[(r.vertex.lib, r.fragment.name if r.fragment else '-', r.colors())].add(r.target)
     return [
-        Render(target, r.layout, r.vertex, r.fragment, r.label)
+        Render(target, r.layout, r.vertex, r.fragment, r.label, r.linked)
         for r in renders
         for target in sorted(seen[(r.vertex.lib, r.fragment.name if r.fragment else '-', r.colors())])
         if target != r.target
@@ -149,7 +149,13 @@ def targets(renders: list[Render]) -> list[Render]:
 def _with(stage: Stage | None, key: str, token: str) -> Stage | None:
     if stage is None or key not in {constant_key(t) for t in stage.constants}:
         return stage
-    return Stage(stage.name, stage.lib, True, tuple(token if constant_key(t) == key else t for t in stage.constants))
+    return Stage(
+        stage.name,
+        stage.lib,
+        True,
+        tuple(token if constant_key(t) == key else t for t in stage.constants),
+        stage.specialized_name,
+    )
 
 
 def neighbours(renders: list[Render]) -> list[Render]:
@@ -169,7 +175,7 @@ def neighbours(renders: list[Render]) -> list[Render]:
                 pool |= values.get((stage.name, stage.lib, key), set()) if stage else set()
             for token in sorted(pool):
                 derived = Render(
-                    r.target, r.layout, _with(r.vertex, key, token), _with(r.fragment, key, token), r.label
+                    r.target, r.layout, _with(r.vertex, key, token), _with(r.fragment, key, token), r.label, r.linked
                 )
                 if derived.key() != r.key() and made < NEIGHBOURS:
                     out.append(derived)

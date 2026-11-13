@@ -29,6 +29,43 @@ TEST(KickVictim, GrMidSwitchIsLeftToTheHost)
 	EXPECT_EQ(tgm_kick_victim(kHangEng0, 0, 1, 26, 0), TGM_VICTIM_SWITCHING);
 }
 
+// deploy-2045's switch from backboardd's channel 3 to Maps' 26: the host picked an app while no high channel had work
+TEST(KickLoading, TheAppGrIsLoadingIsPreempted)
+{
+	EXPECT_EQ(tgm_kick_loading(kHangEng0, 0), 26);
+	EXPECT_EQ(tgm_kick_loading(PFIFO_ENG_BUSY | 5u << 13 | 26u << 16, 0), 26);
+}
+
+TEST(KickLoading, ASaveAloneASwitchToAHighChannelOrATsgIsLeftToTheHost)
+{
+	EXPECT_EQ(tgm_kick_loading(kHangEng0, 1), TGM_VICTIM_SWITCHING);
+	EXPECT_EQ(tgm_kick_loading(PFIFO_ENG_BUSY | 6u << 13 | 26u << 16 | 3u, 0),
+		  TGM_VICTIM_SWITCHING);
+	EXPECT_EQ(tgm_kick_loading(kHangEng0 | PFIFO_ENG_NEXT_ID_TSG, 0), TGM_VICTIM_SWITCHING);
+	EXPECT_EQ(tgm_kick_loading(kCtxValid | 26, 0), TGM_VICTIM_SWITCHING);
+}
+
+// The learned preemption latencies of F-v1's widget visit (deadline lines, "latency by channel"): the compositor's kick
+// alone serves a channel within a millisecond; the poster, widget and icon renderers are held; a channel at the 100 ms
+// cap is not.
+TEST(HoldWorth, OnlyChannelsBetweenTheSlackAndAFrameAreHeld)
+{
+	EXPECT_FALSE(tgm_hold_worth(TGM_PREEMPT_MIN_NS));
+	EXPECT_FALSE(tgm_hold_worth(TGM_HOLD_SLACK_NS));
+	EXPECT_TRUE(tgm_hold_worth(TGM_HOLD_SLACK_NS + 1));
+	for (const uint64_t us : {7836u, 7035u, 4480u})
+		EXPECT_TRUE(tgm_hold_worth(us * 1000)) << us;
+	EXPECT_TRUE(tgm_hold_worth(TGM_HOLD_CEILING_NS));
+	EXPECT_FALSE(tgm_hold_worth(TGM_HOLD_CEILING_NS + 1));
+	EXPECT_FALSE(tgm_hold_worth(TGM_INTERVAL_MAX_NS));
+}
+
+TEST(HoldWorth, AChannelDrawingInBandsIsLeftToTheCompositorsKick)
+{
+	EXPECT_FALSE(tgm_hold_worth(TGM_APP_BAND_NS));
+	EXPECT_LE(TGM_APP_BAND_NS, 2000ull * 1000);
+}
+
 TEST(KickVictim, AppOnGrIsPreempted)
 {
 	EXPECT_EQ(tgm_kick_victim(resident(26), 0, 1, 26, 0), 26);
@@ -256,7 +293,7 @@ TEST(Deadline, ErroredIsolatedOrRecoveringChannelsAreNeverHeldOrReleased)
 	EXPECT_TRUE(tgm_may_hold(kFg, 1, 0, 0, 0, 0, 0));
 	EXPECT_TRUE(tgm_may_hold(kBg, 1, 0, 0, 0, 0, 0));
 	EXPECT_FALSE(tgm_may_hold(kHigh, 1, 0, 0, 0, 0, 0));
-	EXPECT_FALSE(tgm_may_hold(kFg, 0, 0, 0, 0, 0, 0));  // not an app channel gpu.c registered
+	EXPECT_FALSE(tgm_may_hold(kFg, 0, 0, 0, 0, 0, 0));  // not registered by gpu_chan.c
 	EXPECT_FALSE(tgm_may_hold(kFg, 1, 1, 0, 0, 0, 0));  // the present in flight waits for it
 	EXPECT_FALSE(tgm_may_hold(kFg, 1, 0, 1, 0, 0, 0));
 	EXPECT_FALSE(tgm_may_hold(kFg, 1, 0, 0, 1, 0, 0));
@@ -347,25 +384,26 @@ TEST(Preempt, OneInFlightIsWaitedForOnlyByAThread)
 	EXPECT_EQ(tgm_preempt_how(1, 1), TGM_PREEMPT_RECOVER);
 }
 
-constexpr uint64_t kTick = 250 * kMs;  // recover.c's CTXSW_TIMEOUT_US
+constexpr uint64_t kTick = 100 * kMs;  // recover.c's CTXSW_TIMEOUT_US
 
 TEST(Stuck, ALongDrainOfTheOutgoingChannelIsWaitedOut)
 {
 	// backboardd's m2v pass of 144 ms, two a frame, while an app waits: its last completion 20 ms before the switch
-	// request, the first tick 250 ms after it, the pass done at 288 ms, the second tick at 500 ms
+	// request, a tick every 100 ms after it, the passes done at 144 and 288 ms
 	const uint64_t request = 1000 * kMs, lastDone = request - 20 * kMs;
 	EXPECT_FALSE(tgm_stuck(0, 90, 92, request + kTick, lastDone));
-	EXPECT_FALSE(tgm_stuck(0, 91, 92, request + 2 * kTick, request + 288 * kMs));
+	EXPECT_FALSE(tgm_stuck(0, 91, 92, request + 2 * kTick, request + 144 * kMs));
+	EXPECT_FALSE(tgm_stuck(0, 92, 93, request + 3 * kTick, request + 288 * kMs));
 	EXPECT_LT(2 * 144 * kMs, TGM_STUCK_NS);
 }
 
 TEST(Stuck, Deploy2045sSwitchThatNeverEndsIsKilled)
 {
-	// ENG0 801ae003 at both ticks; backboardd's fence 90/93, nothing completed since 20 ms before the request
+	// ENG0 801ae003 at every tick; backboardd's fence 90/93, nothing completed since 20 ms before the request
 	EXPECT_EQ(tgm_kick_victim(kHangEng0, 1, 1, 26, 0), TGM_VICTIM_SWITCHING);
 	const uint64_t request = 1000 * kMs, lastDone = request - 20 * kMs;
-	EXPECT_FALSE(tgm_stuck(0, 90, 93, request + kTick, lastDone));
-	EXPECT_TRUE(tgm_stuck(0, 90, 93, request + 2 * kTick, lastDone));
+	EXPECT_FALSE(tgm_stuck(0, 90, 93, request + 4 * kTick, lastDone));
+	EXPECT_TRUE(tgm_stuck(0, 90, 93, request + 5 * kTick, lastDone));
 }
 
 TEST(Stuck, IdleOrDeadChannelsNeverAre)
@@ -387,13 +425,138 @@ struct Candidates {
 	}
 };
 
-constexpr tgm_hang_candidate kStuckClient = {1, 1, 0}, kBusyClient = {1, 0, 0}, kNone = {0, 0, 0},
-			     kStuckKernel = {1, 1, 1}, kBusyKernel = {1, 0, 1};
+// live, stuck, kernel, resident (an engine or PBDMA is on it), moving (fence or GET), waits (1 + the source's index),
+// victim, dead (no live channel, or a killed one), loading (an engine stuck loading its context), saving (an engine
+// switching away from its context)
+constexpr tgm_hang_candidate kStuckClient = {1, 1, 0, 0, 0, 0, 0, 0, 0, 0},
+			     kBusyClient = {1, 0, 0, 0, 0, 0, 0, 0, 0, 0},
+			     kNone = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
+			     kStuckResident = {1, 1, 0, 1, 0, 0, 0, 0, 0, 0},
+			     kMovingResident = {1, 1, 0, 1, 1, 0, 0, 0, 0, 0},
+			     kStuckKernel = {1, 1, 1, 1, 0, 0, 0, 0, 0, 0},
+			     kBusyKernel = {1, 0, 1, 0, 0, 0, 0, 0, 0, 0};
+
+constexpr tgm_hang_candidate waiting(tgm_hang_candidate c, int source, int moving = 0)
+{
+	c.waits = uint8_t(source + 1);
+	c.moving = uint8_t(moving);
+	return c;
+}
 
 TEST(HangBlame, Deploy2045KillsTheContextGrCannotSwitch)
 {
 	// the present waited for backboardd; GR's switch blames Maps (restoring 26), PBDMA0 is on 26 too
-	Candidates k{{kStuckClient, kNone, kStuckClient}};
+	Candidates k{{kStuckResident, kNone, kStuckClient}};
+	int blame;
+	EXPECT_EQ(k.verdict(blame), TGM_HANG_RECOVERING);
+	EXPECT_EQ(blame, 0);
+}
+
+// T-v2 19:26:20: GR loading killed channel 20's context (a suspect that is no live channel), backboardd stuck behind it
+TEST(HangBlame, AnEngineLeftOnAKilledChannelIsResetNotTheCompositorBehindIt)
+{
+	tgm_hang_candidate killed = kNone;
+	killed.resident = killed.dead = 1;
+	Candidates k{{killed, kStuckClient}};
+	int blame;
+	EXPECT_EQ(k.verdict(blame), TGM_HANG_RESIDUE);
+	EXPECT_EQ(blame, 0);
+	k.c[0].dead = 0;
+	EXPECT_EQ(k.verdict(blame), TGM_HANG_RECOVERING) << "what T-v2 did: the compositor killed";
+	EXPECT_EQ(blame, 1);
+}
+
+// T-v3e, the present's deadline checks 1 s apart behind ENG0 0004a022 (GR loading backboardd's channel 4, BUSY clear)
+// and PBDMA0 on channel 4. nvkm's decode named killed SwitchHWTest 34 as GR's, so the suspects were 34 and 4: the residue
+// reset found no engine holding 34, and the second check killed backboardd.
+TEST(HangBlame, Tv3eKilledTheCompositorWhoseContextGrWasLoading)
+{
+	tgm_hang_candidate hwtest = kNone, present = kStuckKernel;
+	hwtest.live = hwtest.resident = hwtest.dead = 1;
+	present.resident = 0;
+	Candidates k{{hwtest, kStuckResident, present}};
+	k.late_kernel = 1;
+	int blame;
+	EXPECT_EQ(k.verdict(blame), TGM_HANG_RESIDUE);
+	EXPECT_EQ(blame, 0);
+	k.c[0].dead = 0;
+	EXPECT_EQ(k.verdict(blame), TGM_HANG_RECOVERING) << "the old fallback";
+	EXPECT_EQ(blame, 1) << "backboardd";
+	k.c[1].loading = 1;
+	EXPECT_EQ(k.verdict(blame), TGM_HANG_RELOAD)
+		<< "GR is loading 4: reset under it, kill no one";
+	EXPECT_EQ(blame, 1);
+}
+
+// T-v3g: GR saving the bench's channel 42 (nothing pending), PBDMA0 on backboardd's channel 4 behind it. The old rule
+// never found 42 stuck (no work pending) and blamed backboardd once two checks found it still. Now the channel an engine
+// is saving is the only one blamed, once two checks confirm the stall; until then nothing is.
+TEST(HangBlame, Tv3gBlamesTheChannelGrCannotSaveNeverTheCompositorBehindIt)
+{
+	tgm_hang_candidate bench = kBusyClient, present = kStuckKernel;
+	bench.resident = 1;
+	present.resident = 0;
+	Candidates k{{bench, kStuckResident, present}};
+	k.late_kernel = 1;
+	int blame;
+	EXPECT_EQ(k.verdict(blame), TGM_HANG_RECOVERING) << "the old rule";
+	EXPECT_EQ(blame, 1) << "backboardd";
+	k.c[0].saving = 1;
+	EXPECT_EQ(k.verdict(blame), TGM_HANG_PROGRESSING) << "first look: no one blamed";
+	EXPECT_EQ(blame, -1);
+	k.c[0].stuck = 1;
+	EXPECT_EQ(k.verdict(blame), TGM_HANG_RECOVERING);
+	EXPECT_EQ(blame, 0) << "the bench's channel alone";
+}
+
+TEST(HangBlame, AKernelChannelAnEngineCannotSaveIsNoClientsToKill)
+{
+	tgm_hang_candidate present = kStuckKernel;
+	present.saving = 1;
+	Candidates k{{present, kStuckResident}};
+	int blame;
+	EXPECT_EQ(k.verdict(blame), TGM_HANG_KERNEL) << "the present's engines are reset";
+	EXPECT_EQ(blame, 0);
+}
+
+// With NVIDIA's decode the suspects are channel 4 alone (GR loading it, PBDMA0 on it): no channel is killed.
+TEST(HangBlame, AnEngineLoadingALiveChannelsContextIsResetUnderIt)
+{
+	tgm_hang_candidate loading = kStuckResident, present = kStuckKernel;
+	loading.loading = 1;
+	present.resident = 0;
+	Candidates k{{loading, present}};
+	k.late_kernel = 1;
+	int blame;
+	EXPECT_EQ(k.verdict(blame), TGM_HANG_RELOAD);
+	EXPECT_EQ(blame, 0);
+	k.c[0].loading = 0;
+	EXPECT_EQ(k.verdict(blame), TGM_HANG_RECOVERING)
+		<< "only a load finished meanwhile leaves the old rule";
+}
+
+// T-v3e's last checks: backboardd killed too, GR still loading its context, killed 34 first among the suspects. Each
+// dead resident's reset is tried in turn; before, only the first was, and the engine on channel 4 never was.
+TEST(HangBlame, EveryDeadChannelAnEngineIsOnGetsItsResetTried)
+{
+	tgm_hang_candidate first = kNone, second = kNone;
+	first.live = first.resident = first.dead = 1;
+	second.live = second.resident = second.dead = second.loading = 1;
+	Candidates k{{first, second, kStuckKernel}};
+	int blame;
+	EXPECT_EQ(k.verdict(blame), TGM_HANG_RESIDUE);
+	EXPECT_EQ(blame, 0);
+	k.c[0].dead = 0;
+	EXPECT_EQ(k.verdict(blame), TGM_HANG_RESIDUE);
+	EXPECT_EQ(blame, 1);
+}
+
+TEST(HangBlame, ADeadChannelNoEngineIsOnIsNoResidue)
+{
+	tgm_hang_candidate gone = kStuckClient;
+	gone.dead = 1;
+	Candidates k{{gone}};
+	k.late_dead = 1;
 	int blame;
 	EXPECT_EQ(k.verdict(blame), TGM_HANG_RECOVERING);
 	EXPECT_EQ(blame, 0);
@@ -402,7 +565,7 @@ TEST(HangBlame, Deploy2045KillsTheContextGrCannotSwitch)
 TEST(HangBlame, TheCompositorIsRecoveredWhenItIsTheOneStuck)
 {
 	// GR stuck saving backboardd's context: suspects 3 (backboardd) then 26 (Maps), late is backboardd
-	Candidates k{{kStuckClient, kStuckClient, kNone, kStuckClient}};
+	Candidates k{{kStuckResident, kStuckResident, kNone, kStuckClient}};
 	int blame;
 	EXPECT_EQ(k.verdict(blame), TGM_HANG_RECOVERING);
 	EXPECT_EQ(blame, 0);
@@ -417,12 +580,90 @@ TEST(HangBlame, AChannelOnAnEndlessAcquireBlamesItself)
 	EXPECT_EQ(blame, 1);
 }
 
-TEST(HangBlame, TheTaskChannelItWaitsOnComesBeforeIt)
+constexpr tgm_hang_candidate victim(tgm_hang_candidate c)
 {
-	Candidates k{{kBusyClient, kStuckClient, kStuckClient}};
+	c.victim = 1;
+	return c;
+}
+
+// An acquire timeout (gpu_acquire.c): the waiter is the late channel and its RAMFC names the producer, which sits on no
+// engine and completes nothing: the producer is killed, never the waiter that waited for it.
+TEST(HangBlame, AnAcquireTimeoutKillsTheProducerNotTheWaiter)
+{
+	Candidates k{{kNone, kStuckClient, waiting(kStuckClient, 1)}};
 	int blame;
 	EXPECT_EQ(k.verdict(blame), TGM_HANG_RECOVERING);
 	EXPECT_EQ(blame, 1);
+}
+
+TEST(HangBlame, AWaiterOnAProducerThatMovesIsLeftAlone)
+{
+	Candidates k{{kNone, {1, 1, 0, 0, 1, 0, 0, 0, 0, 0}, waiting(kStuckClient, 1)}};
+	int blame;
+	EXPECT_EQ(k.verdict(blame), TGM_HANG_PROGRESSING);
+	EXPECT_EQ(blame, -1);
+}
+
+// A bind epoch the kernel's retirement releases, or a host1x syncpoint (a display that is off, a decoder): the channel
+// waits on no work of its own and is never killed for it.
+TEST(HangBlame, AChannelOnAKernelOrHost1xReleaseIsAVictim)
+{
+	Candidates k{{kNone, victim(kStuckClient)}};
+	int blame;
+	EXPECT_EQ(k.verdict(blame), TGM_HANG_PROGRESSING);
+	EXPECT_EQ(blame, -1);
+	Candidates chain{{kNone, victim(kStuckClient), waiting(kStuckClient, 1)}};
+	EXPECT_EQ(chain.verdict(blame), TGM_HANG_PROGRESSING);
+	EXPECT_EQ(blame, -1);
+}
+
+// A kernel channel on a display's syncpoint while the display is off: nothing else progresses, and nothing is wrong.
+TEST(HangBlame, ALateKernelVictimIsNeverFatal)
+{
+	Candidates k{{kNone, victim(kBusyKernel)}};
+	k.c[1].stuck = 1;
+	k.late_kernel = 1;
+	int blame;
+	EXPECT_EQ(k.verdict(blame), TGM_HANG_PROGRESSING);
+	EXPECT_EQ(blame, -1);
+	k.c[1].victim = 0;
+	EXPECT_EQ(k.verdict(blame), TGM_HANG_KERNEL);
+	EXPECT_EQ(blame, 1) << "the late kernel channel's own engines";
+}
+
+// iconservicesagent's channel 20 on slice B's boot: GR and PBDMA0 on another process's long 3D work that keeps going,
+// channel 20 not resident with work pending behind it, and the late sibling's order acquire on channel 20.
+TEST(HangBlame, ChannelsWaitingBehindAnEngineThatMovesAreNotKilled)
+{
+	Candidates k{{kMovingResident, kStuckClient, waiting(kStuckClient, 1)}};
+	int blame;
+	EXPECT_EQ(k.verdict(blame), TGM_HANG_PROGRESSING);
+	EXPECT_EQ(blame, -1);
+}
+
+TEST(HangBlame, AResidentChannelThatDoesNotMoveIsKilledNotItsWaiters)
+{
+	Candidates k{
+		{kStuckResident, kStuckClient, waiting(kStuckClient, 1), waiting(kStuckClient, 0)}};
+	int blame;
+	EXPECT_EQ(k.verdict(blame), TGM_HANG_RECOVERING);
+	EXPECT_EQ(blame, 0);
+}
+
+TEST(HangBlame, WithNoEngineOnThemTheBlameFollowsTheAcquiresToTheEnd)
+{
+	Candidates k{{kNone, waiting(kStuckClient, 2), kStuckClient, waiting(kStuckClient, 1)}};
+	int blame;
+	EXPECT_EQ(k.verdict(blame), TGM_HANG_RECOVERING);
+	EXPECT_EQ(blame, 2);
+}
+
+TEST(HangBlame, AnAcquireOnASourceThatMovesIsSlowWork)
+{
+	Candidates k{{kNone, {1, 1, 0, 0, 1, 0, 0, 0, 0, 0}, waiting(kStuckClient, 1)}};
+	int blame;
+	EXPECT_EQ(k.verdict(blame), TGM_HANG_PROGRESSING);
+	EXPECT_EQ(blame, -1);
 }
 
 TEST(HangBlame, SlowWorkIsNotKilled)
@@ -433,26 +674,44 @@ TEST(HangBlame, SlowWorkIsNotKilled)
 	EXPECT_EQ(blame, -1);
 }
 
-TEST(HangBlame, AStuckKernelChannelIsFatal)
+TEST(HangBlame, AStuckKernelChannelHasItsEnginesReset)
 {
 	Candidates k{{kStuckKernel, kNone, kStuckClient}};
 	int blame;
-	EXPECT_EQ(k.verdict(blame), TGM_HANG_STUCK);
+	EXPECT_EQ(k.verdict(blame), TGM_HANG_KERNEL);
+	EXPECT_EQ(blame, 0);
 }
 
-TEST(HangBlame, LateKernelWorkPanicsOnlyWhenNothingProgresses)
+// T-v5a 195.8 s: "scrub ch 0 ... fence 686/750 ... ENG0 001b201b (ch 27 -> ch 27, ctxsw valid), PBDMA0 00002000 ch 0
+// mthd 80040300": the scrubber on PBDMA0 alone (GR idle, not a suspect), the scrubber also the late channel
+TEST(HangBlame, Tv5asScrubberStuckOnThePbdmaWithEveryEngineIdleIsTheKernelsToRecover)
+{
+	tgm_hang_candidate late = kStuckKernel;
+	late.resident = 0;
+	Candidates k{{kStuckKernel, late}};
+	k.late_kernel = 1;
+	k.progress = 1;
+	int blame;
+	EXPECT_EQ(k.verdict(blame), TGM_HANG_KERNEL);
+	EXPECT_EQ(blame, 0);
+	k.c[0].stuck = k.c[1].stuck = 0;
+	EXPECT_EQ(k.verdict(blame), TGM_HANG_PROGRESSING) << "the first look: one strike";
+}
+
+TEST(HangBlame, LateKernelWorkWithNothingProgressingHasItsEnginesReset)
 {
 	Candidates k{{kNone, kBusyKernel}};
 	k.late_kernel = 1;
 	int blame;
-	EXPECT_EQ(k.verdict(blame), TGM_HANG_STUCK);
+	EXPECT_EQ(k.verdict(blame), TGM_HANG_KERNEL);
+	EXPECT_EQ(blame, 1);
 	k.progress = 1;
 	EXPECT_EQ(k.verdict(blame), TGM_HANG_PROGRESSING);
 }
 
 TEST(HangBlame, ALateChannelAlreadyKilledIsRecovering)
 {
-	Candidates k{{kNone, {1, 0, 0}}};
+	Candidates k{{kNone, kBusyClient}};
 	k.late_dead = 1;
 	int blame;
 	EXPECT_EQ(k.verdict(blame), TGM_HANG_RECOVERING);
@@ -498,3 +757,52 @@ TEST(FaultVa, NoneWithoutAFaultLine)
 }
 
 }  // namespace
+
+TEST(HangConfirm, AChannelIsBlamedOnlyAtTheSecondCheckThatFindsItStill)
+{
+	uint32_t strikes = 0, seen = 0;
+	EXPECT_FALSE(tgm_hang_confirm(1, 40, &strikes, &seen));
+	EXPECT_TRUE(tgm_hang_confirm(1, 40, &strikes, &seen));
+}
+
+TEST(HangConfirm, ALongJobThatCompletesBetweenChecksStartsOver)
+{
+	uint32_t strikes = 0, seen = 0;
+	EXPECT_FALSE(tgm_hang_confirm(1, 40, &strikes, &seen));
+	EXPECT_FALSE(tgm_hang_confirm(1, 41, &strikes, &seen));
+	EXPECT_TRUE(tgm_hang_confirm(1, 41, &strikes, &seen));
+	EXPECT_FALSE(tgm_hang_confirm(0, 41, &strikes, &seen));
+	EXPECT_FALSE(tgm_hang_confirm(1, 41, &strikes, &seen));
+}
+
+// PBDMA0 at sliceV boot 2's three hangs (METHOD0, DATA0): backboardd's channel and the present's, each on a
+// SEMAPHORED ACQ_GEQ with ACQUIRE_SWITCH.
+TEST(HangSuspects, APbdmaParkedOnASemaphoreAcquireNamesNoSuspect)
+{
+	EXPECT_TRUE(tgm_pbdma_acquiring(0x8000001d, 0x00001004));
+	EXPECT_TRUE(tgm_pbdma_acquiring(0x0000001d, 0x00001004));
+	EXPECT_TRUE(tgm_pbdma_acquiring(0x8000001d, 0x00000001));
+	EXPECT_TRUE(tgm_pbdma_acquiring(0x8000001d, 0x00001008));
+	EXPECT_FALSE(tgm_pbdma_acquiring(0x8000001d, 0x01100002));  // a release
+	EXPECT_FALSE(tgm_pbdma_acquiring(0x80000021, 0x00000000));  // NON_STALL_INTERRUPT
+	EXPECT_FALSE(
+		tgm_pbdma_acquiring(0x80010e01, 0x00001004));  // a 3D method with ACQ_GEQ-like data
+}
+
+// The panic: the present waited 2 s for backboardd's fence; GR idle, PBDMA0 between the two channels' acquires and on
+// the present's at two consecutive checks. As a suspect the present is a stuck kernel channel (fatal); left out, the
+// late channel is the one recovered.
+TEST(HangBlame, SliceVBoot2ThePresentOnItsAcquireLeavesTheBlameToItsProducer)
+{
+	const bool presentResident = !tgm_pbdma_acquiring(0x0000001d, 0x00001004);
+	Candidates k;
+	if (presentResident)
+		k.c.push_back(kStuckKernel);
+	k.c.push_back(kStuckClient);
+	int blame;
+	EXPECT_EQ(k.verdict(blame), TGM_HANG_RECOVERING);
+	EXPECT_EQ(blame, 0);
+	Candidates before{{kStuckKernel, kStuckClient}};
+	EXPECT_EQ(before.verdict(blame), TGM_HANG_KERNEL);
+	EXPECT_EQ(blame, 0);
+}

@@ -4,9 +4,10 @@
 // (metal2vulkan metal/format ExtendedRange::raw_format), so the two share its memory:
 //  - BGR10_XR: one word, blue at bit 0, red at bit 20, bits 30 and 31 set by a write;
 //  - BGRA10_XR: four 16-bit fields, blue first, each code in the field's top 10 bits;
-//  - RGB10A8_2P_XR10: a word as BGR10_XR's (bits 30 and 31 clear) and the alpha byte, side by side in 8 bytes; not Metal's two
-//    planes, so only a texture of a descriptor is one (never a surface's or a buffer's). Metal's blits between such a texture and
-//    a buffer move plane 0 alone, each texel's color word (bufferTexelBytes), and leave the alpha plane as it is.
+//  - RGB10A8_2P_XR10: a word as BGR10_XR's (bits 30 and 31 clear) and the alpha byte, side by side in 8 bytes, in a texture of a
+//    descriptor; one over a two-plane surface is held in Metal's two planes (raw_xr_pass.h), and a buffer's is never one.
+//    Metal's blits between such a texture and a buffer move plane 0 alone, each texel's color word (bufferTexelBytes), and
+//    leave the alpha plane as it is.
 // A pass renders the codes through the format's unsigned-integer target: the pack's states encode them in the function (m2v's
 // encode, measured against Apple's GPUs). A draw samples a stand-in instead (Texture::standIn): an RGBA16Float image of the codes'
 // values, which a pass of the pack's conversion state (pack/xr.metal) draws before the work that samples it. Core Animation's
@@ -41,12 +42,13 @@ inline XrForm xrForm(uint32_t mtlPixelFormat)
     }
 }
 
-// The pack's conversion state of a form (pack/xr.metal, keyed "raw.xr.<fragment function>"), null for none
-inline const char *xrConversion(XrForm f)
+// The pack's conversion state of a form (pack/xr.metal, keyed "raw.xr.<fragment function>"), null for none; `twoPlanes`:
+// RGB10A8_2P_XR10 held in its two planes (raw_xr_pass.h), read through both
+inline const char *xrConversion(XrForm f, bool twoPlanes = false)
 {
     switch (f) {
     case XrForm::Planes:
-        return "raw.xr.xr_planes_frag";
+        return twoPlanes ? "raw.xr.xr_two_planes_frag" : "raw.xr.xr_planes_frag";
     case XrForm::Bgra10:
         return "raw.xr.xr_bgra10_frag";
     case XrForm::Bgr10:

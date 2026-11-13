@@ -21,10 +21,7 @@ export DEVELOPER_DIR="$$(/usr/bin/sed -n 's/^DEVELOPER_DIR=//p' $(execpath @xcod
 $(execpath @llvm//:bin/ld.lld) -Ttext=0x40010000 -e _start $(@D)/regwrite.o -o $(@D)/regwrite.elf
 $(execpath @llvm//:bin/llvm-objcopy) -O binary $(@D)/regwrite.elf $@
 """,
-    tags = [
-        "no-remote-exec",
-        "requires-darwin",
-    ],
+    tags = ["requires-darwin"],
     tools = [
         "@llvm//:bin/ld.lld",
         "@llvm//:bin/llvm-objcopy",
@@ -35,6 +32,7 @@ py_library(
     name = "emu_lib",
     srcs = [
         "cache.py",
+        "gpucheck.py",
         "gpulog.py",
         "hekate.py",
         "machine.py",
@@ -52,22 +50,37 @@ py_library(
         ":regwrite",
         ":mesa_classes",
     ],
-    deps = ["//tools/install:lib"],
+    deps = [
+        "//kits/SwitchGM20B:methods_lib",
+        "//tools/install:lib",
+    ],
 )
 
-# What gpulog.py names the GPU's methods with: Mesa's class headers and its method array lengths.
+# What gpulog.py names the GPU's methods with: Mesa's class headers and its method array lengths, GM20B's MME arrays'
+# (limits.tsv) and the methods SwitchGM20BTegra.h adds.
 filegroup(
     name = "mesa_classes",
-    srcs = ["//third_party/mesa/src/nouveau/headers:class_parser.py"] + [
+    srcs = [
+        "//kits/SwitchGM20B:SwitchGM20BTegra.h",
+        "//kits/SwitchGM20B:caps/limits.tsv",
+        "//third_party/mesa/src/nouveau/headers:class_parser.py",
+    ] + [
         "//third_party/mesa/src/nouveau/headers:nvidia/classes/%s.h" % c
         for c in [
             "cl902d",
+            "cla140",
             "clb06f",
             "clb0b5",
             "clb197",
             "clb1c0",
         ]
     ],
+)
+
+py_test(
+    name = "gpucheck_test",
+    srcs = ["gpucheck_test.py"],
+    deps = [":emu_lib"],
 )
 
 py_test(
@@ -83,7 +96,8 @@ py_binary(
     deps = [":emu_lib"],
 )
 
-# bazel run //tools/emu:check -- --kind=ios17|ios27 [--until launchd]: boot to a milestone, nonzero on a panic or timeout.
+# bazel run //tools/emu:check -- --kind=ios17|ios27 [--until launchd|gpu]: boot to a milestone, nonzero on a panic, a
+# timeout or a failed GPU check.
 py_binary(
     name = "check",
     srcs = ["check.py"],

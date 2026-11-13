@@ -10,6 +10,8 @@ load(":inputs_test.bzl", "seed_inputs_tests")
 lint_files()
 
 RAW = [
+    "archives.py",
+    "draw_context.txt",
     "rawpack.py",
     "directlink.py",
     "mkpack.py",
@@ -20,10 +22,24 @@ RAW = [
     "splits.py",
     "eqcheck.py",
     "probe.mm",
+    "fetchfree_link.py",
     "ca/caset.py",
     "ca/caspec.py",
     "ca/caspec27.py",
+    "ca/deepcolour.py",
+    "ca/fetchfree.py",
     "ca/qc-21H461.json",
+    "iterated/programs.py",
+    "iterated/programs_long.py",
+    "iterated/table.py",
+    "iterated/ucode.py",
+]
+
+# What the generator reads beside its directory (defs.bzl _RAW_LINK's ../runtime/ headers).
+RAW_RUNTIME = [
+    "raw_owned.h",
+    "raw_srgb_table.h",
+    "raw_chip_facts.h",
 ]
 
 [write_file(
@@ -34,6 +50,8 @@ RAW = [
 ) for path in [
     "crawl/tree/" + QUARTZCORE,
     "crawl/tree/data/0.metallib",
+    "crawl/tree/root/System/Library/PrivateFrameworks/RenderBox.framework/default.metallib",
+    "device/1.metallib",
     "crawl/inventory.json",
     "base/TegraGM20BMetal.bundle/Info.plist",
     "tools/precompile",
@@ -43,7 +61,7 @@ RAW = [
     "tools/MANIFEST.json",
     "tools/raw/probe",
     "corpus/corpus.log",
-] + ["raw/" + name for name in RAW]]
+] + ["raw/" + name for name in RAW] + ["runtime/" + name for name in RAW_RUNTIME]]
 
 filegroup(
     name = "base",
@@ -69,6 +87,7 @@ filegroup(
     srcs = [
         ":crawl/tree/" + QUARTZCORE,
         ":crawl/tree/data/0.metallib",
+        ":crawl/tree/root/System/Library/PrivateFrameworks/RenderBox.framework/default.metallib",
     ],
     tags = ["manual"],
 )
@@ -94,9 +113,10 @@ metal_seed(
 
 seed_raw_pack(
     name = "raw_pack",
-    srcs = [":raw/" + name for name in RAW],
+    srcs = [":raw/" + name for name in RAW] + [":runtime/" + name for name in RAW_RUNTIME],
     corpus = ":corpus/corpus.log",
     crawl = ":crawl",
+    device_libraries = ":device/1.metallib",
     generator = ":raw/rawpack.py",
     tags = ["manual"],
     tools = ":tools",

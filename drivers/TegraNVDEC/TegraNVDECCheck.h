@@ -13,7 +13,7 @@
 // reference surfaces, the previous map and vectors) are bounded by their buffers too. Every job must run with the
 // engine's GP timer on and at most its default limit (1 << 27 cycles), which is what bounds a job whatever its
 // bitstream holds (TegraNVDEC.cpp kJobBoundUs). Content protection, histogram and hint dumps (outputs to addresses no
-// relocation names) are refused.
+// relocation names) are refused. MPEG-4 Part 2 and MPEG-1/2: TegraNVDECCheckMPEG.h.
 #ifndef TEGRA_NVDEC_CHECK_H
 #define TEGRA_NVDEC_CHECK_H
 #include <stdbool.h>
@@ -49,7 +49,9 @@ static inline const char *tegra_nvdec_check_value(const TegraNVDECSubmit *s, uin
         bit = 0;
         break;
     case NVC5B0_SET_CONTROL_PARAMS:  // codec type, GPTIMER_ON (required), RET_ERROR, ERR_CONCEAL_ON, MBTIMER_ON
-        if ((e->value & 0xf) != s->codec || (e->value & ~0x207fu) != 0 || !(e->value & 0x10))
+        if (((e->value & 0xf) != s->codec && !(s->codec == TEGRA_NVDEC_CODEC_MPEG12 &&
+                                               (e->value & 0xf) == NVC5B0_SET_CONTROL_PARAMS_CODEC_TYPE_MPEG1)) ||
+            (e->value & ~0x207fu) != 0 || !(e->value & 0x10))
             return "control params";
         bit = 1;
         break;
@@ -74,6 +76,8 @@ static inline const char *tegra_nvdec_check_value(const TegraNVDECSubmit *s, uin
     *seen |= 1u << bit;
     return NULL;  // NOLINT(modernize-use-nullptr): C too (avd_host.c)
 }
+
+#include "TegraNVDECCheckMPEG.h"  // needs tegra_nvdec_check_value
 
 static inline const char *tegra_nvdec_check_h264(const TegraNVDECSubmit *s, const uint64_t *avail)
 {
@@ -156,15 +160,22 @@ static inline const char *tegra_nvdec_check_h264(const TegraNVDECSubmit *s, cons
     }
     if (p->hint_dump_en)
         return "hint dump";
+    if (!tegra_nvdec_zero(&p->displayPara, sizeof(p->displayPara)))
+        return "display output or histogram";
     if (p->gptimer_timeout_value > (1u << 27))
         return "GP timer limit";  // 0: the firmware's 1 << 27
     const uint32_t w = (uint32_t)p->PicWidthInMbs;
     const uint32_t h = (uint32_t)p->FrameHeightInMbs;
     if (p->PicWidthInMbs < 3 || w > 256 || p->FrameHeightInMbs < 1 || h > 256)
         return "dimensions";
-    if (!p->frame_mbs_only_flag || p->field_pic_flag || p->MbaffFrameFlag)
-        return "not progressive";
-    if (p->tileFormat || p->gob_height || p->output_memory_layout || p->chroma_format_idc != 1)
+    // Interlaced: FrameHeightInMbs counts the frame's macroblock rows, two a map unit; a field picture or an MBAFF
+    // frame writes its rows within the frame's surface, both fields of a frame into one (libnvtvmr's NV12 setups keep
+    // every top/bottom/frame offset 0 and frame_surfaces clear for field pictures: 0x19770-0x197a4, 0x1a23c, 0x19850).
+    const bool interlaced = !p->frame_mbs_only_flag;
+    if ((p->field_pic_flag && !interlaced) || (p->MbaffFrameFlag && (!interlaced || p->field_pic_flag)) ||
+        ((p->bottom_field_flag || p->second_field) && !p->field_pic_flag) || (interlaced && (h & 1)))
+        return "picture structure";
+    if (p->tileFormat || p->gob_height || p->output_memory_layout || p->frame_surfaces || p->chroma_format_idc != 1)
         return "surface format";
     if (p->luma_top_offset || p->luma_bot_offset || p->luma_frame_offset || p->chroma_top_offset ||
         p->chroma_bot_offset || p->chroma_frame_offset)
@@ -180,7 +191,10 @@ static inline const char *tegra_nvdec_check_h264(const TegraNVDECSubmit *s, cons
     if (p->CurrPicIdx >= SLOTS || p->CurrColIdx >= SLOTS)
         return "picture index";
     for (uint32_t i = 0; i < 16; i++) {  // NOLINT(modernize-loop-convert): C too
-        if (p->dpb[i].index >= SLOTS || p->dpb[i].col_idx >= SLOTS || p->dpb[i].output_memory_layout)
+        const nvdec_dpb_entry_s *e = &p->dpb[i];
+        if (e->index >= SLOTS || e->col_idx >= SLOTS || e->output_memory_layout || (e->is_field && !interlaced) ||
+            e->top_field_marking > 2 || e->bottom_field_marking > 2 || !e->top_field_marking != !(e->state & 1) ||
+            !e->bottom_field_marking != !(e->state & 2))
             return "dpb entry";
         if (p->dpb[i].col_idx > cols)
             cols = p->dpb[i].col_idx;
@@ -381,12 +395,15 @@ static inline const char *tegra_nvdec_check_hevc(const TegraNVDECSubmit *s, cons
         TILES,
         FILTER,
         COLOC,
-        BUFFERS
+        BUFFERS,
+        DISPLAY_LUMA = BUFFERS,
+        DISPLAY_CHROMA,
+        ALL_BUFFERS
     };
 
     if (s->setup_bytes != sizeof(nvdec_hevc_pic_s))
         return "setup size";
-    uint64_t buf[BUFFERS] = {0};
+    uint64_t buf[ALL_BUFFERS] = {0};
     uint64_t luma[SLOTS] = {0};
     uint64_t chroma[SLOTS] = {0};
     uint32_t seen = 0;
@@ -423,6 +440,12 @@ static inline const char *tegra_nvdec_check_hevc(const TegraNVDECSubmit *s, cons
         case NVC5B0_SET_COLOC_DATA_OFFSET:
             slot = &buf[COLOC];
             break;
+        case NVC5B0_SET_DISPLAY_BUF_LUMA_OFFSET:
+            slot = &buf[DISPLAY_LUMA];
+            break;
+        case NVC5B0_SET_DISPLAY_BUF_CHROMA_OFFSET:
+            slot = &buf[DISPLAY_CHROMA];
+            break;
         default:
             if (m >= LUMA && m < LUMA + 4 * SLOTS && !(m & 3)) {
                 slot = &luma[(m - LUMA) / 4];
@@ -436,6 +459,9 @@ static inline const char *tegra_nvdec_check_hevc(const TegraNVDECSubmit *s, cons
             return "repeated relocation";
         *slot = avail[i] ? avail[i] : 1;
     }
+    const bool display = buf[DISPLAY_LUMA] || buf[DISPLAY_CHROMA];
+    if (display && (!buf[DISPLAY_LUMA] || !buf[DISPLAY_CHROMA]))
+        return "half a display buffer";
     if ((seen & 0x13) != 0x13)
         return "missing application id, control params or execute";
     for (uint32_t i = 0; i < BUFFERS; i++) {  // NOLINT(modernize-loop-convert): C too
@@ -477,11 +503,15 @@ static inline const char *tegra_nvdec_check_hevc(const TegraNVDECSubmit *s, cons
     if (p->chroma_format_idc != 1 || p->bit_depth_luma != p->bit_depth_chroma)
         return "chroma format";
     // Mode 0 writes 8-bit samples; mode 1, Main 10's only, writes 16-bit ones, so its surfaces and the pixel rows of
-    // the filter buffer are twice as wide.
+    // the filter buffer are twice as wide. Modes 2 and 3 take Main 10 to 8 bits (nvdec_drv.h: Rec.709, Rec.2020), into
+    // the pictures (averne's nvtegra_hevc.c, without a display buffer) or into the display buffer (NVDEC's
+    // DISPLAY_BUF, which no open driver binds); which, and how wide, is unknown, so both are bounded as 16-bit.
     const bool eightBit = p->bit_depth_luma == 8 && p->disp_output_mode == 0;
-    const bool tenBit = p->bit_depth_luma == 10 && p->disp_output_mode == 1;
+    const bool tenBit = p->bit_depth_luma == 10 && p->disp_output_mode >= 1 && p->disp_output_mode <= 3;
     if (!eightBit && !tenBit)
         return "output mode";
+    if (display && p->disp_output_mode < 2)
+        return "display buffer outside modes 2 and 3";
     const uint64_t sampleBytes = tenBit ? 2 : 1;
     if (p->log2_min_luma_coding_block_size < 3 || p->log2_max_luma_coding_block_size > 6 ||
         p->log2_min_luma_coding_block_size > p->log2_max_luma_coding_block_size ||
@@ -502,6 +532,9 @@ static inline const char *tegra_nvdec_check_hevc(const TegraNVDECSubmit *s, cons
         if (luma[i] < lumaBytes || chroma[i] < lumaBytes / 2)
             return "surface too small";
     }
+    // SET_DISPLAY_BUF_SIZE stays refused ("value method"): its unit is undocumented, so no bound on it can be proven.
+    if (display && (buf[DISPLAY_LUMA] < lumaBytes || buf[DISPLAY_CHROMA] < lumaBytes / 2))
+        return "display buffer too small";
     // Colocated motion: 17 slots of colMvBuffersize x 256 bytes, each at least (64-aligned width x height) / 16.
     const uint64_t colmv = (uint64_t)p->colMvBuffersize * 256;
     if (colmv < ((w + 63) & ~63u) * rows / 16 || buf[COLOC] < 17 * colmv)
@@ -537,6 +570,10 @@ static inline const char *tegra_nvdec_check(const TegraNVDECSubmit *s, const uin
         return tegra_nvdec_check_vp9(s, avail);
     case TEGRA_NVDEC_CODEC_HEVC:
         return tegra_nvdec_check_hevc(s, avail);
+    case TEGRA_NVDEC_CODEC_MPEG4:
+        return tegra_nvdec_check_mpeg4(s, avail);
+    case TEGRA_NVDEC_CODEC_MPEG12:
+        return tegra_nvdec_check_mpeg2(s, avail);
     default:
         return "codec";
     }

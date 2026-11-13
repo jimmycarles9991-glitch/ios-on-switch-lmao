@@ -36,21 +36,19 @@ public:
         }
         ++presents;
         last = nowUs;
-        if (intervalUs >= kStillUs) {
+        if (intervalUs >= kStillUs)
             ++still;
-        } else {
-            uint32_t bin = 3;
-            if (periods <= 1) {
-                bin = 0;
-            } else if (periods < 4) {
-                bin = periods - 1;
-            }
-            ++bins[bin];
-            if (periods >= 2) {
-                lost += periods - 1;
-                if (cause < kCauses)
-                    ++causes[cause];
-            }
+        uint32_t bin = 3;
+        if (periods <= 1) {
+            bin = 0;
+        } else if (periods < 4) {
+            bin = periods - 1;
+        }
+        ++bins[bin];
+        if (periods >= 2) {
+            lost += periods - 1;
+            if (cause < kCauses)
+                ++causes[cause];
         }
         if (intervalUs > worstUs)
             worstUs = intervalUs;

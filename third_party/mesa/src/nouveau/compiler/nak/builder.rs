@@ -31,7 +31,7 @@ pub trait Builder {
         assert!(x.is_predicate() == is_predicate);
         assert!(y.is_predicate() == is_predicate);
 
-        if self.sm() >= 70 {
+        if self.sm() >= 70 || (self.sm() >= 50 && !is_predicate) {
             let mut op = op.to_lut();
             if x.src_mod.is_bnot() {
                 op = LogicOp3::new_lut(&|x, y, _| op.eval(!x, y, 0));
@@ -380,6 +380,12 @@ pub trait SSABuilder: Builder {
                 srcs: [x, y, z],
                 overflow: [Dst::None, Dst::None],
             });
+        } else if !z.is_zero() && self.sm() >= 50 {
+            self.push_op(OpIAdd3 {
+                dst: dst.into(),
+                srcs: [x, y, z],
+                overflow: [Dst::None, Dst::None],
+            });
         } else {
             assert!(z.is_zero());
             self.push_op(OpIAdd2 {
@@ -464,46 +470,28 @@ pub trait SSABuilder: Builder {
     }
 
     fn imul(&mut self, x: Src, y: Src) -> SSAValue {
-        let dst = self.alloc_ssa(RegFile::GPR);
-        if self.sm() >= 70 {
-            self.push_op(OpIMad {
-                dst: dst.into(),
-                srcs: [x, y, 0.into()],
-                signed: false,
-            });
-        } else {
-            self.push_op(OpIMul {
-                dst: dst.into(),
-                srcs: [x, y],
-                signed: [false; 2],
-                high: false,
-            });
+        if self.sm() < 70 {
+            return crate::sm50::xmad::imul(self, x, y);
         }
+        let dst = self.alloc_ssa(RegFile::GPR);
+        self.push_op(OpIMad {
+            dst: dst.into(),
+            srcs: [x, y, 0.into()],
+            signed: false,
+        });
         dst
     }
 
     fn imul_2x32_64(&mut self, x: Src, y: Src, signed: bool) -> SSARef {
-        let dst = self.alloc_ssa_vec(RegFile::GPR, 2);
-        if self.sm() >= 70 {
-            self.push_op(OpIMad64 {
-                dst: dst.clone().into(),
-                srcs: [x, y, 0.into()],
-                signed,
-            });
-        } else {
-            self.push_op(OpIMul {
-                dst: dst[0].into(),
-                srcs: [x.clone(), y.clone()],
-                signed: [signed; 2],
-                high: false,
-            });
-            self.push_op(OpIMul {
-                dst: dst[1].into(),
-                srcs: [x, y],
-                signed: [signed; 2],
-                high: true,
-            });
+        if self.sm() < 70 {
+            return crate::sm50::xmad::imul_2x32_64(self, x, y, signed);
         }
+        let dst = self.alloc_ssa_vec(RegFile::GPR, 2);
+        self.push_op(OpIMad64 {
+            dst: dst.clone().into(),
+            srcs: [x, y, 0.into()],
+            signed,
+        });
         dst
     }
 
@@ -637,7 +625,7 @@ pub trait SSABuilder: Builder {
 
     fn lea(&mut self, a: Src, b: Src, shift: u8) -> SSAValue {
         let dst = self.alloc_ssa(RegFile::GPR);
-        assert!(self.sm() >= 70);
+        assert!(self.sm() >= 50);
 
         self.push_op(OpLea {
             dst: dst.into(),

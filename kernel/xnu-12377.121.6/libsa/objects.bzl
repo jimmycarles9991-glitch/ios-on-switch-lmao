@@ -17,3 +17,17 @@ DEVELOPMENT = struct(
         ],
     },
 )
+
+RELEASE = struct(
+    objects = [
+        "libsa/bootstrap.cpp",
+    ],
+    copts = {},
+    includes = {},
+    segments = {
+        "libsa/bootstrap.cpp": [
+            "-s __TEXT -n __KLD",
+            "-i __KLD -n __KLDDATA",
+        ],
+    },
+)

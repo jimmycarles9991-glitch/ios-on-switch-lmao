@@ -8,10 +8,14 @@ import HWTestVideo
 /// and the creation and modification times AVAssetWriter stamps into mvhd, tkhd and mdhd.
 enum MP4Writer {
     static func write(_ clip: CompressedClip, to url: URL) throws {
+        try write(clip.samples, format: clip.format, to: url)
+    }
+
+    static func write(_ compressed: [CMSampleBuffer], format: CMVideoFormatDescription, to url: URL) throws {
         try? FileManager.default.removeItem(at: url)
-        let samples = try clip.samples.map { try withoutSEI($0, hevc: clip.format.mediaSubType != .h264) }
+        let samples = try compressed.map { try withoutSEI($0, hevc: format.mediaSubType != .h264) }
         let writer = try AVAssetWriter(outputURL: url, fileType: .mp4)
-        let input = AVAssetWriterInput(mediaType: .video, outputSettings: nil, sourceFormatHint: clip.format)
+        let input = AVAssetWriterInput(mediaType: .video, outputSettings: nil, sourceFormatHint: format)
         input.expectsMediaDataInRealTime = false
         writer.add(input)
         guard writer.startWriting() else {

@@ -301,9 +301,14 @@ struct SwitchAdmaHigh {
         kOff
     };
 
+#if DEVELOPMENT || DEBUG
+    static constexpr bool kLiveProofs = true;
+#else
+    static constexpr bool kLiveProofs = false;
+#endif
     static constexpr uint32_t kProofs = 16, kWriteProofs = 16;
-    State state = kProving;
-    uint32_t proofsLeft = kProofs, writeProofsLeft = kWriteProofs;
+    State state = kLiveProofs ? kProving : kOn;
+    uint32_t proofsLeft = kLiveProofs ? kProofs : 0, writeProofsLeft = kLiveProofs ? kWriteProofs : 0;
     uint64_t provenBytes = 0;  // above 4 GiB, in the proofs that matched
 
     // The table's address limit for a command in this direction.

@@ -8,7 +8,7 @@
 
 namespace {
 
-std::mutex gLock;
+raw::Mutex gLock;
 switch_metal::QueuePriorities gPriorities;
 uint32_t gApplied = switch_metal::QueuePriorities::kDefault,
          gAppliedBackground = switch_metal::QueuePriorities::kDefaultBackground;
@@ -31,7 +31,7 @@ void apply()
 
 void queuePriorityAdd(RMQueue *queue)
 {
-    std::lock_guard<std::mutex> l(gLock);
+    std::lock_guard<raw::Mutex> l(gLock);
     queue->_gpuPriority = switch_metal::QueuePriorities::kDefault;
     queue->_backgroundGpuPriority = switch_metal::QueuePriorities::kDefaultBackground;
     gPriorities.add(queue->_gpuPriority, queue->_backgroundGpuPriority);
@@ -39,7 +39,7 @@ void queuePriorityAdd(RMQueue *queue)
 
 void queuePriorityRemove(RMQueue *queue)
 {
-    std::lock_guard<std::mutex> l(gLock);
+    std::lock_guard<raw::Mutex> l(gLock);
     gPriorities.remove(queue->_gpuPriority, queue->_backgroundGpuPriority);
     apply();
 }
@@ -49,7 +49,7 @@ static BOOL setPriority(RMQueue *queue, NSUInteger priority, bool background)
 {
     if (priority > switch_metal::QueuePriorities::kMax || !gRM || !gRM->raw->hasGpuPriority())
         return NO;
-    std::lock_guard<std::mutex> l(gLock);
+    std::lock_guard<raw::Mutex> l(gLock);
     gPriorities.remove(queue->_gpuPriority, queue->_backgroundGpuPriority);
     (background ? queue->_backgroundGpuPriority : queue->_gpuPriority) = uint32_t(priority);
     gPriorities.add(queue->_gpuPriority, queue->_backgroundGpuPriority);
@@ -73,13 +73,13 @@ static BOOL setPriority(RMQueue *queue, NSUInteger priority, bool background)
 
 - (NSUInteger)getGPUPriority
 {
-    std::lock_guard<std::mutex> l(gLock);
+    std::lock_guard<raw::Mutex> l(gLock);
     return _gpuPriority;
 }
 
 - (NSUInteger)getBackgroundGPUPriority
 {
-    std::lock_guard<std::mutex> l(gLock);
+    std::lock_guard<raw::Mutex> l(gLock);
     return _backgroundGpuPriority;
 }
 

@@ -33,6 +33,9 @@ int vp9_decoder_decode(VP9Decoder *decoder, const uint8_t *data, size_t size, vo
 
 // For the host test: the entropy state after the last frame (libvpx's cm->fc and frame_contexts).
 const VP9FrameContext *vp9_decoder_frame_context(const VP9Decoder *decoder);
+// The last frame's backward adaptation, which waits for its job's entropy counts: done now. The next frame does it
+// first itself; the frame context and the stored contexts include it only after. 0, or -2 when the job failed.
+int vp9_decoder_settle(VP9Decoder *decoder);
 const VP9State *vp9_decoder_state(const VP9Decoder *decoder);
 const VP9FrameHeader *vp9_decoder_last_header(const VP9Decoder *decoder);
 

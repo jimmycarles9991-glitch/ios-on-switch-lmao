@@ -13,8 +13,9 @@ The seed build (tools/gpu/seed.py) lays them out as the store precompile.mm read
 
 usage: libraries.py pins <mounted OS volume>
            the `shasum -a 256` listing of every Metal library of the volume with a function (gpu/apple-libs.sha256)
-       libraries.py names <root> <names.json> [<device path>...]
-           names.json of the libraries at <root>/<device path> (none given: every file below <root>)
+       libraries.py names --build <IPSW build> <root> <names.json> [<device path>...]
+           names.json of the libraries at <root>/<device path> (none given: every file below <root>), each by the
+           AIR slice that build's Metal loads of a universal file
        libraries.py resolve <names.json> <corpus.log> <out.log>
            the corpus with lib=<path> added to the stages of journal lines from before the journal named libraries
            (no lib=) whose function names are in exactly one library (QuartzCore's names stay QuartzCore's, the
@@ -34,19 +35,59 @@ import sys
 from collections import Counter, defaultdict
 from collections.abc import Callable
 from pathlib import Path
+from urllib.parse import quote, unquote
 
 QC = '/System/Library/Frameworks/QuartzCore.framework/default.metallib'
 
 
-def names(data: bytes) -> list[str] | None:
-    """Return the function names of a metallib's bytes (the first MTLB slice of a fat one), or None if not a library."""
-    if data[:4] == b'\xca\xfe\xba\xbe':
-        (count,) = struct.unpack_from('>I', data, 4)
-        for i in range(count):
-            _, _, offset, size, _ = struct.unpack_from('>IIIII', data, 8 + 20 * i)
+AIR64 = 0x01000017
+# drivers/NativeMetal/MetallibSlice.h's kAirSliceRules (libraries_test holds the two the same): per IPSW build, whether
+# its Metal loads the first AIR64 slice, else its AIR ceiling, whether the device is below featureProfile 8 and the
+# subtype of AIR 2.9
+AIR_SLICE_RULES = {
+    '21H461': (True, 0, False, 0),
+    '24B119': (False, 0x20009, True, 0xD),
+}
+
+
+def _picks(rule: tuple[bool, int, bool, int], current: int | None, candidate: int) -> bool:
+    _, ceiling, below_profile8, air29 = rule
+    if candidate > ceiling:
+        return False
+    if not below_profile8:
+        return current is None or candidate > current
+    if current is None:
+        return candidate <= air29
+    return candidate < air29 and (current >= air29 or candidate > current)
+
+
+def air_slice(data: bytes, build: str | None) -> bytes:
+    """Return the AIR slice of a universal metallib `build`'s Metal loads (MetallibSlice.h), `data` itself if thin.
+
+    No build: the first MTLB slice. b'' when none is taken.
+    """
+    if data[:4] != b'\xca\xfe\xba\xbe':
+        return data
+    rule = AIR_SLICE_RULES[build] if build else None
+    (count,) = struct.unpack_from('>I', data, 4)
+    picked, subtype = None, None
+    for i in range(count):
+        cpu, sub, offset, size, _ = struct.unpack_from('>IIIII', data, 8 + 20 * i)
+        if rule is None:
             if data[offset : offset + 4] == b'MTLB':
-                return names(data[offset : offset + size])
-        return None
+                return data[offset : offset + size]
+        elif cpu != AIR64:
+            continue
+        elif rule[0]:
+            return data[offset : offset + size]
+        elif _picks(rule, subtype, sub):
+            picked, subtype = (offset, size), sub
+    return data[picked[0] : picked[0] + picked[1]] if picked else b''
+
+
+def names(data: bytes, build: str | None = None) -> list[str] | None:
+    """Return the function names of a metallib's bytes (air_slice of a fat one), or None if not a library."""
+    data = air_slice(data, build)
     if data[:4] != b'MTLB' or len(data) < 0x58:
         return None
     offset, _ = struct.unpack_from('<QQ', data, 24)  # the function list: u32 count, then entries of u32 size and tags
@@ -79,14 +120,14 @@ def pins(volume: str) -> None:
             print(f'{hashlib.sha256(data).hexdigest()}  {path}')
 
 
-def index(root: str, out: str, devices: list[str]) -> None:
-    """Write names.json of the libraries at <root>/<device path>.
+def index(build: str, root: str, out: str, devices: list[str]) -> None:
+    """Write names.json of the libraries at <root>/<device path>, as IPSW `build`'s Metal loads them.
 
     Every function name -> the device paths of those that have it, each list in the order of the paths' components.
     """
     table = defaultdict(list)
     for device in sorted(('/' + d.lstrip('/') for d in devices), key=lambda d: Path(d).parts):
-        found = names((Path(root) / device.lstrip('/')).read_bytes())
+        found = names((Path(root) / device.lstrip('/')).read_bytes(), build)
         if found is None:
             sys.exit(f'{root}/{device} is not a Metal library')
         for name in set(found):
@@ -96,7 +137,31 @@ def index(root: str, out: str, devices: list[str]) -> None:
     print(f'{out}: {len(table)} function names in {libraries} libraries')
 
 
-STAGE = re.compile(r'\| ([vfklp]) (\S+)( [^|]*?)?(?= \|)')
+STAGE = re.compile(r'\| (vl|vp|fl|fp|[vfklp]) (\S+)( [^|]*?)?(?= \|)')
+INSTALLED_APP = re.compile(
+    r'^/private/var/containers/Bundle/Application/'
+    r'[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}/([^/]+\.app/.+)$'
+)
+
+
+def library_path(library: str, available: set[str]) -> str:
+    path = unquote(library)
+    if path.startswith('/System/Cryptexes/OS/'):
+        path = path[len('/System/Cryptexes/OS') :]
+    if path.startswith('/var/'):
+        path = '/private' + path
+    if path in available:
+        return quote(path, safe='/:')
+    installed = INSTALLED_APP.fullmatch(path)
+    if installed:
+        staged = '/private/var/staged_system_apps/' + installed[1]
+        if staged in available:
+            return quote(staged, safe='/:')
+    return library
+
+
+def relocate(line: str, available: set[str]) -> str:
+    return re.sub(r'(?<= )lib=(\S+)', lambda m: 'lib=' + library_path(m[1], available), line)
 
 
 GUESSES = (
@@ -155,6 +220,7 @@ def _with_library(line: str, kind: str, stages: list[Stage], choice: str | None)
 
 def resolve(index_json: str, corpus: str, out: str) -> None:
     table = json.loads(Path(index_json).read_text())
+    available = {path for paths in table.values() for path in paths}
     qc = {n for n, paths in table.items() if QC in paths}
     lines, rows = [], defaultdict(Counter)
 
@@ -165,11 +231,12 @@ def resolve(index_json: str, corpus: str, out: str) -> None:
         """
         return [None] if name in qc else table.get(name, [])
 
-    for line in Path(corpus).read_text().splitlines():
-        kind = line[:1]
-        if kind not in 'SRC':
-            lines.append(line)
+    for original in Path(corpus).read_text().splitlines():
+        kind = original[:1]
+        if kind not in 'SRCD':
+            lines.append(original)
             continue
+        line = relocate(original, available)
         stages = _stages(line, kind, candidates)
         how, choices = _choices(stages)
         for choice in choices:
@@ -191,10 +258,9 @@ def main() -> None:
     verb, rest = (sys.argv[1], sys.argv[2:]) if len(sys.argv) > 1 else (None, [])
     if verb == 'pins' and len(rest) == 1:
         pins(rest[0])
-    elif verb == 'names' and len(rest) >= 2:
-        index(
-            rest[0], rest[1], rest[2:] or [str(p.relative_to(rest[0])) for p in Path(rest[0]).rglob('*') if p.is_file()]
-        )
+    elif verb == 'names' and len(rest) >= 4 and rest[0] == '--build' and rest[1] in AIR_SLICE_RULES:
+        build, root, out, devices = rest[1], rest[2], rest[3], rest[4:]
+        index(build, root, out, devices or [str(p.relative_to(root)) for p in Path(root).rglob('*') if p.is_file()])
     elif verb == 'resolve' and len(rest) == 3:
         resolve(*rest)
     else:

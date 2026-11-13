@@ -131,7 +131,8 @@ difference(const struct switch_nvk_stage *a, const struct switch_nvk_stage *b)
    if (a->num_gprs != b->num_gprs ||
        a->early_fragment_tests != b->early_fragment_tests ||
        a->writes_depth != b->writes_depth ||
-       a->post_depth_coverage != b->post_depth_coverage)
+       a->post_depth_coverage != b->post_depth_coverage ||
+       a->interlock_control != b->interlock_control)
       return "program info";
    return NULL;
 }

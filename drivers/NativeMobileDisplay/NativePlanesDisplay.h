@@ -28,12 +28,17 @@ static uint32_t planeSlotIova(int k)
 
 PlaneSet &planeSetOf(int set)
 {
-    return planeSets[set >= 0 ? set : static_cast<int>(kPlaneSlots)];
+    return planeSets[set >= 0 ? set : static_cast<int>(PlaneCommits::kSlots)];
+}
+
+const PlaneSet &planeSetOf(int set) const
+{
+    return planeSets[set >= 0 ? set : static_cast<int>(PlaneCommits::kSlots)];
 }
 
 bool planesReady() const
 {
-    return __atomic_load_n(&planesOn, __ATOMIC_ACQUIRE);
+    return __atomic_load_n(&planesOn, __ATOMIC_ACQUIRE) && memoryAdmissionReady();
 }
 
 // --- A swap's layers ---------------------------------------------------------------------------------------------------
@@ -51,6 +56,13 @@ static native_planes::Surface planeSurfaceOf(OSObject *surface)
     const auto narrow = [](uint64_t v) {
         return v > 0xffffffffULL ? 0xffffffffu : static_cast<uint32_t>(v);
     };
+    TegraVICSurfaceDesc color = {};
+    switch_vic_surface_color(surface, &color);
+    f.colorMatrix = color.colorMatrix;
+    f.transfer = color.transfer;
+    f.primaries = color.primaries;
+    f.chromaTop = color.chromaTop;
+    f.chromaBottom = color.chromaBottom;
     if (f.planes >= 2) {
         for (uint32_t p = 0; p < 2; ++p) {
             f.offset[p] = native_planes_surface_plane_offset(surface, p);
@@ -79,100 +91,11 @@ static native_planes::Layer planeLayerOf(const unsigned char *bytes, unsigned i,
 struct PlaneDecision {
     OSObject *ui;
     bool uiNew, blank, planeChange;
+    bool waitSlot;
     PlaneSet set;
 };
 
-static bool planeSame(const PlaneSet &a, const PlaneSet &b)
-{
-    if (a.on != b.on)
-        return false;
-    if (!a.on)
-        return true;
-    const native_planes::Image &x = a.image;
-    const native_planes::Image &y = b.image;
-    return a.slot == b.slot && x.colorDepth == y.colorDepth && x.position == y.position && x.size == y.size &&
-           x.prescaled == y.prescaled && x.dda == y.dda && x.lineStride == y.lineStride && x.hOffset == y.hOffset &&
-           x.vOffset == y.vOffset && x.surfaceKind == y.surfaceKind && x.options == y.options &&
-           x.start[0] == y.start[0] && x.start[1] == y.start[1] && x.matrix == y.matrix && x.fullRange == y.fullRange;
-}
-
-void planeDecide(const OriginalLegacySwapRequest *request, PlaneDecision &d)
-{
-    d = {};
-    const unsigned char *bytes = reinterpret_cast<const unsigned char *>(request);
-    const uint32_t updated = native_planes::wordAt(bytes, swapUpdated);
-    // The real driver takes a swap only once every updated layer's IOSurface fence signalled (UnifiedPipeline's kick waits
-    // for 0x318 == 0x31c [V]). Here the GPU's work on the UI is ordered by the fence-only present, and the decoder's frames
-    // are in DRAM before Core Animation has them; a mismatch is only counted [I: no IOSurface fence here is ever pending].
-    if (stats && ((updated ^ native_planes::wordAt(bytes, swapReady)) & native_planes::kLayerBits))
-        ++stPlaneUnready;
-    OSObject *effective[native_planes::kLayers];
-    memcpy(effective, bytes + swapEffectiveSurfaces, sizeof(effective));
-    uint32_t width = 0;
-    uint32_t height = 0;
-    getDisplayDimensions(&width, &height);
-    bool present[native_planes::kLayers] = {};
-    native_planes::Layer layers[native_planes::kLayers];
-    for (unsigned i = 0; i < native_planes::kLayers; ++i) {
-        PlaneLayerRecord &r = planeLayers[i];
-        OSObject *e = effective[i] && effective[i]->metaCast("IOSurface") ? effective[i] : nullptr;
-        if (updated & (1u << i)) {
-            r.surface = e;
-            if (e)
-                r.layer = planeLayerOf(bytes, i, e);
-        } else if (e != r.surface) {
-            // The family's inherited surface is not the one recorded (a swap retired unshown before its kick): a full-frame
-            // BGRA one is the UI as it is; anything else cannot be placed and is not shown.
-            r.surface = nullptr;
-            if (e) {
-                native_planes::Layer l;
-                l.surface = planeSurfaceOf(e);
-                l.kind = native_planes::kindOf(l.surface.format, l.surface.planes);
-                l.src = l.dst = {0, 0, static_cast<int32_t>(width), static_cast<int32_t>(height)};
-                if (native_planes::isUi(l, width, height)) {
-                    r.surface = e;
-                    r.layer = l;
-                } else if (stats) {
-                    ++stPlaneDropped;
-                }
-            }
-        }
-        present[i] = r.surface != nullptr;
-        layers[i] = r.layer;
-    }
-    const native_planes::Roles roles = native_planes::rolesOf(present, layers, width, height);
-    if (stats)
-        stPlaneDropped += roles.extra;
-    bool any = false;
-    for (const bool p : present)
-        any = any || p;
-    d.blank = !any;
-    d.ui = roles.ui >= 0 ? planeLayers[roles.ui].surface : nullptr;
-    d.uiNew = d.blank || ((d.ui != nullptr) &&
-                          (((updated & (1u << static_cast<uint32_t>(roles.ui))) != 0u) || d.ui != planeShownUi));
-    if (any && roles.ui < 0 && stats)
-        ++stPlaneDropped;  // no UI layer: window A keeps the last one
-    PlaneSet want = {};
-    if (roles.plane >= 0) {
-        native_planes::Image image;
-        const PlaneLayerRecord &r = planeLayers[roles.plane];
-        tgm_layout block = {};
-        if (!planesOn || !native_planes::imageOf(r.layer, width, height, image, surfaceLayout(r.surface, block))) {
-            if (stats)
-                ++stPlaneDropped;
-        } else if (image.visible) {
-            const int slot = planeSlotFor(native_legacy_surface_descriptor(r.surface), image.readLow, image.readHigh,
-                                          !image.yuv, r.surface, image.surfaceKind != 0);
-            if (slot >= 0) {
-                want = {true, slot, image, 0};
-            } else if (stats) {
-                ++stPlaneDropped;
-            }
-        }
-    }
-    d.planeChange = !planeSame(want, planeTarget);
-    d.set = want;
-}
+#include "SwitchPlaneSelection.h"
 
 // The GPU driver's layout of a surface it renders block-linear (by its first page): `block` filled, or null for rows.
 static const tgm_layout *surfaceLayout(OSObject *surface, tgm_layout &block)
@@ -188,12 +111,13 @@ static const tgm_layout *surfaceLayout(OSObject *surface, tgm_layout &block)
 // --- IOVA slots ---------------------------------------------------------------------------------------------------------
 bool planeSlotBusy(int k) const
 {
-    if (planeLatch.busy(k) || (planeTarget.on && planeTarget.slot == k) ||
-        (planeFencePending && planeFencing.on && planeFencing.slot == k) ||
-        (planeNextSet && planeNext.on && planeNext.slot == k) || (planeHeldSet && planeHeld.on && planeHeld.slot == k))
+    if (planeRecovering || (planeBuildingSlots & (1u << unsigned(k))) || planeConversionUses(k) ||
+        planeCompositeUses(k) || planeLatch.uses(k) || planeTarget.uses(k) ||
+        (landscapeState.wanted && landscapeState.held.uses(k)) || (planeFencePending && planeFencing.uses(k)) ||
+        (planeNextSet && planeNext.uses(k)) || (planeHeldSet && planeHeld.uses(k)))
         return true;
     for (unsigned e = 0; e < TegraScanoutRing::kMaxEntries; ++e) {
-        if (entryPlaneSet[e] && entryPlane[e].on && entryPlane[e].slot == k)
+        if (entryPlaneSet[e] && entryPlane[e].uses(k))
             return true;
     }
     return false;
@@ -264,7 +188,7 @@ int planeSlotFor(IOMemoryDescriptor *memory, uint64_t low, uint64_t high, bool c
     memory->retain();
     if (surface)
         surface->retain();
-    planeSlots[victim] = {memory, surface, nullptr, low, end, ++planeSlotUses, tiled};
+    planeSlots[victim] = {memory, surface, nullptr, low, end, ++planeSlotUses, tiled, planeSlots[victim].native};
     cleanDomain();
     int held = 0;
     IOByteCount length = 0;
@@ -279,162 +203,16 @@ int planeSlotFor(IOMemoryDescriptor *memory, uint64_t low, uint64_t high, bool c
     return victim;
 }
 
-void planeDropSlot(unsigned k)
+bool planeWindowIdle() const
 {
-    PlaneSlot &slot = planeSlots[k];
-    if (slot.memory) {
-        probeDomain.unmap(planeSlotIova(static_cast<int>(k)), static_cast<uint32_t>((slot.high - slot.low) / 4096));
-        if (slot.layout)
-            tegra_gm20b_surface_unhold(slot.layout);
-        slot.memory->complete(kIODirectionOut);
-        slot.memory->release();
-        cleanDomain();
-    }
-    OSSafeReleaseNULL(slot.surface);
-    slot = {};
+    return !planeSetOf(planeLatch.active).on() && !planeLatch.requested() && !planeTarget.on() && !planeHeldSet;
 }
 
-// Window B is off and nothing about it is pending: the surfaces it showed go back to their owners.
-void planeReleaseIdle()
-{
-    if (planeLatch.active != native_planes::PlaneLatch::kOff || planeLatch.requested() || planeTarget.on ||
-        planeHeldSet)
-        return;
-    for (unsigned k = 0; k < kPlaneSlots; ++k) {
-        if (!planeSlotBusy(static_cast<int>(k)))
-            planeDropSlot(k);
-    }
-}
+#include "SwitchPlaneSlots.h"
 
 // --- Window B's registers ------------------------------------------------------------------------------------------------
 // Window B is (or may be) scanning: the live registers (CSC, filters) must not change now.
-bool planeOnScreen() const
-{
-    return planeLatch.active >= 0 || planeLatch.armed >= 0 || planeLatch.superseded >= 0;
-}
-
-void planeWriteCsc(const native_planes::Image &m)
-{
-    const uint32_t *k = native_planes::kCsc[m.matrix][m.fullRange ? 1 : 0];
-    for (unsigned i = 0; i < 8; ++i)
-        dc[kWincBBase + native_planes::kCscYof + i] = k[i];
-    planeCsc[0] = static_cast<int>(m.matrix);
-    planeCsc[1] = m.fullRange ? 1 : 0;
-}
-
-// Once while window B is off (the filter taps are live registers): the TRM's taps, frame-boundary latching for B and C,
-// window B's underflow latched (read at frame ends, never routed to the line).
-void planeStartRegisters()
-{
-    for (unsigned i = 0; i < 16; ++i) {
-        dc[kWincBBase + native_planes::kHFilter0 + i] = native_planes::kHFilterTaps[i];
-        dc[kWincBBase + native_planes::kVFilter0 + i] = native_planes::vFilterTap(i);
-    }
-    planeFiltersWritten = true;
-    dc[kDcRegActControl] = dc[kDcRegActControl] & ~(kWinBActHcntrSel | kWinCActHcntrSel);
-    // Every later write of hekate's REG_ACT_CONTROL keeps windows B and C on frame-boundary latching.
-    pitchActControl &= ~(kWinBActHcntrSel | kWinCActHcntrSel);
-    dc[kDcIntStatus] = kWinBUnderflowInt;
-    dc[kDcIntEnable] = dc[kDcIntEnable] | kWinBUnderflowInt;
-}
-
-void planeWriteRegisters(const PlaneSet &p)
-{
-    using namespace native_planes;
-    const SwitchMMIOWords win = dc + kWinBBase;
-    const SwitchMMIOWords buf = dc + kWinbufBBase;
-    if (!p.on) {
-        win[kOptions] = 0;
-        return;
-    }
-    const Image &m = p.image;
-    // A new matrix while window B is off goes in now; while it scans, at the frame end that shows the new set taken (the
-    // CSC is not shadowed: a write now would recolour the frame being scanned) [I: the action runs in the vertical blank].
-    if (m.yuv && !planeOnScreen() &&
-        (planeCsc[0] != static_cast<int>(m.matrix) || planeCsc[1] != (m.fullRange ? 1 : 0)))
-        planeWriteCsc(m);
-    if (!planeFiltersWritten && !planeOnScreen())
-        planeStartRegisters();
-    win[kColorDepth] = m.colorDepth;
-    win[kByteSwap] = 0;
-    win[kPosition] = m.position;
-    win[kSize] = m.size;
-    win[kPrescaled] = m.prescaled;
-    win[kHInitialDda] = m.hInitial;
-    win[kVInitialDda] = m.vInitial;
-    win[kDdaIncrement] = m.dda;
-    win[kLineStride] = m.lineStride;
-    win[kBufStride] = 0;
-    win[kUvBufStride] = 0;
-    const uint64_t base = static_cast<uint64_t>(planeSlotIova(p.slot)) - planeSlots[p.slot].low;
-    buf[kStartAddr] = static_cast<uint32_t>(base + m.start[0]);
-    buf[kStartAddrHi] = 0;
-    buf[kStartAddrU] = m.yuv ? static_cast<uint32_t>(base + m.start[1]) : 0;
-    buf[kStartAddrHiU] = 0;
-    buf[kHOffset] = m.hOffset;
-    buf[kVOffset] = m.vOffset;
-    buf[kSurfaceKind] = m.surfaceKind;
-    buf[kCdeControl] = 0;
-    win[kBlendLayer] = kBlendBypass | 2;  // opaque, behind window A (depth 0)
-    win[kBlendMatch] = 0;
-    win[kBlendNomatch] = 0;
-    win[kOptions] = m.options;
-}
-
-// Window A blends over window B (premultiplied, in front) while B shows something; opaque as hekate left it otherwise.
-void planeBlendA(bool over, uint32_t &update, uint32_t &request)
-{
-    if (over == planeBlending)
-        return;
-    const SwitchMMIOWords a = dc + kWinABase;
-    if (over) {
-        a[native_planes::kBlendLayer] = native_planes::kBlendPremultiplied;
-        a[native_planes::kBlendMatch] = native_planes::kBlendOver;
-        a[native_planes::kBlendNomatch] = native_planes::kBlendOver;
-    } else {
-        for (unsigned i = 0; i < 3; ++i)
-            a[native_planes::kBlendLayer + i] = planeBlendSaved[i];
-    }
-    planeBlending = over;
-    update |= kGeneralUpdate | kWinAUpdate;
-    request |= kGeneralActReq | kWinAActReq;
-}
-
-// Window B's set p into its assembly registers, with the request bits for the caller's one STATE_CONTROL write; or, while
-// which of the last two sets the boundary took is open, held for the frame end that settles it (newest wins).
-bool planeStage(const PlaneSet &p, uint32_t &update, uint32_t &request)
-{
-    planeTarget = p;
-    if (!planeLatch.mayWrite()) {
-        planeHeld = p;
-        planeHeldSet = true;
-        return false;
-    }
-    planeWriteRegisters(p);
-    planeBlendA(p.on, update, request);
-    update |= kGeneralUpdate | kWinBUpdate;
-    request |= kGeneralActReq | kWinBActReq;
-    const int set = p.on ? p.slot : native_planes::PlaneLatch::kOff;
-    planeLatch.write(set);
-    planeSetOf(set) = p;
-    planeRequestedAt = frameEnds;
-    armFlipDeadline();
-    if (stats)
-        ++stPlaneFlips;
-    return true;
-}
-
-// A change of window B alone, from the next frame boundary (no window A frame carries it).
-void planeFlipOnly(const PlaneSet &p)
-{
-    uint32_t update = 0;
-    uint32_t request = 0;
-    if (!planeStage(p, update, request))
-        return;
-    __asm__ volatile("dsb sy" ::: "memory");
-    dc[kDcStateControl] = update;
-    dc[kDcStateControl] = request;
-}
+#include "SwitchOverlayRegisters.h"
 
 // A swap that changes window B and not window A (a video frame under a still UI): no GPU work at all. Its set is written now,
 // or carried by the window A frame still held for a flip (which must reach the screen first), and the swap retires at the
@@ -473,6 +251,8 @@ void kickPlaneOnly(const OriginalLegacySwapRequest *request, const PlaneDecision
 // first).
 void planeOut(const PlaneSet &p)
 {
+    if (presentedByMediaFlip(p))
+        return;
     if (ring.held != kNoBuffer) {
         entryPlane[ring.held] = p;
         entryPlaneSet[ring.held] = true;
@@ -490,7 +270,9 @@ void retireUnshown(uint64_t seq)
 {
     if (!latchRetire)
         return;
-    if (planeLatch.requested()) {
+    if (planeRecovering) {
+        planeRecoveryTarget.seq = seq;
+    } else if (planeLatch.requested()) {
         planeSetOf(planeLatch.armed).seq = seq;
     } else if (planeHeldSet) {
         planeHeld.seq = seq;
@@ -504,112 +286,91 @@ void retireUnshown(uint64_t seq)
 }
 
 // Window B's active START_ADDR as a set (its slot), kOff when it is not enabled, kUnknown when it names no slot.
-int planeScannedSet()
-{
-    const uint32_t access = dc[kDcStateAccess] & ~(kReadMuxActive | kWriteMuxActive);
-    dc[kDcStateAccess] = access | kReadMuxActive;
-    const uint32_t options = dc[kWinBBase + native_planes::kOptions];
-    const uint32_t start = dc[kWinbufBBase + native_planes::kStartAddr];
-    dc[kDcStateAccess] = access;
-    if (!(options & kWinEnable))
-        return native_planes::PlaneLatch::kOff;
-    if (start < kPlaneSlot0 || start >= kPlaneSlot0 + static_cast<uint64_t>(kPlaneSlots) * kPlaneSlotSpan)
-        return native_planes::PlaneLatch::kUnknown;
-    return static_cast<int>((start - kPlaneSlot0) / kPlaneSlotSpan);
-}
+#include "SwitchCompositionRegisters.h"
+#include "SwitchOverlayRecovery.h"
 
 // Every DC A frame end, under the gate.
 void planeFrameEnd()
 {
-    if (planeProbeTick() || !planesAttached || hwSuspended || scanoutStopped || gPanicRestore.panicking)
+    if (planeProbeTick() || !planesAttached || planesAbandoned || hwSuspended || scanoutStopped ||
+        gPanicRestore.panicking)
         return;
-    if (planeLatch.requested()) {
-        const bool out = (dc[kDcStateControl] & kWinBActReq) != 0u;
-        if (planeLatch.latched(out, planeScannedSet())) {
+    if (planeRecoveryFrameEnd())
+        return;
+    if (planeLatchRequested()) {
+        if (planeLatchedAtFrameEnd()) {
             if (stats)
                 ++stPlaneLatched;
+            landscapeRunLatched(true, landscapeState.switching);
+            landscapeLatched();
             const PlaneSet now = planeSetOf(planeLatch.active);
-            if (now.on && now.image.yuv &&
-                (planeCsc[0] != static_cast<int>(now.image.matrix) || planeCsc[1] != (now.image.fullRange ? 1 : 0)))
-                planeWriteCsc(now.image);
+            planeDeliver(now);
             retireThrough(now.seq, __atomic_load_n(&feStamp, __ATOMIC_ACQUIRE));
             if (planeHeldSet && planeLatch.mayWrite()) {
                 planeHeldSet = false;
                 planeFlipOnly(planeHeld);
             }
             planeReleaseIdle();
+            planeRetireBandwidth();
             if (kickDeferred) {
                 kickDeferred = false;
                 kickSwapQueue();
             }
-        } else if (out && frameEnds - planeRequestedAt >= kLatchFrames) {
-            planesOff("window B did not take its registers in 4 frames", true);
+        } else if (frameEnds - planeRequestedAt >= kLatchFrames) {
+            beginPlaneRecovery("overlay registers did not latch in 4 frames");
+            return;
         }
     }
-    const uint32_t underflow = dc[kDcIntStatus] & kWinBUnderflowInt;
+    const uint32_t underflow = dc[kDcIntStatus] & switch_landscape::overlayUnderflows(landscapeOn());
+    landscapeRunUnderflow(underflow);
     if (!underflow) {
         planeUnderflowRun = 0;
         return;
     }
     dc[kDcIntStatus] = underflow;
+    noteLatchedUnderflow(underflow);
     if (stats)
         ++stPlaneUnderflows;
-    if (planeLatch.active >= 0 && ++planeUnderflowRun >= kPlaneUnderflowFrames)
-        planesOff("window B underflowed 3 frames in a row", false);
-}
-
-// One line, window B off from the next boundary and for the rest of the boot: detached layers are not shown from here
-// (counted as dropped; Core Animation, which read the limits at its start, may still send them: never refused). `stuck`:
-// window B takes no registers at all; the off set is written once more and nothing about it is followed from here (its
-// surfaces stay mapped until the display stops, since window B may still be reading the last set it took).
-void planesOff(const char *why, bool stuck)
-{
-    if (!planesOn)
-        return;
-    if (why)
-        IOLog("SwitchDisplay: planes off: %s; detached layers are not shown for the rest of this boot\n", why);
-    __atomic_store_n(&planesOn, false, __ATOMIC_RELEASE);
-    planeHeldSet = planeNextSet = false;
-    for (bool &set : entryPlaneSet)
-        set = false;
-    if (hwSuspended) {
-        planeTarget = {};
-        planeLatch.settle();
-        planeLatch.active = native_planes::PlaneLatch::kOff;
-        return;
-    }
-    const PlaneSet off = {};
-    planeLatch.superseded = native_planes::PlaneLatch::kNone;  // let the off set be written at once
-    planeFlipOnly(off);
-    if (stuck) {
-        planeLatch = native_planes::PlaneLatch();
-        planeTarget = {};  // nothing is requested now: planeFrameEnd and the flip deadline leave window B alone
-    }
+    if (planeSetOf(planeLatch.active).on() && ++planeUnderflowRun >= kPlaneUnderflowFrames)
+        beginPlaneRecovery("overlay underflowed 3 frames in a row");
 }
 
 // The display stops: window B off, every slot given back (the caller detaches the domain).
 void stopPlanes()
 {
+    mediaFlipFromGate();
     if (planeProbe.active()) {
         PlaneProbeIo io = {this};
         planeProbe.perform(planeProbe.fail("the display stopped"), io);
     }
+    if (dc && planesAttached && !hwSuspended)
+        landscapeLeaveNow("the display stopped");
+    landscapeForget();
     if (dc && planesAttached && !hwSuspended) {
         dc[kWinBBase + native_planes::kOptions] = 0;
+        dc[kWinCBase + native_planes::kOptions] = 0;
         for (unsigned i = 0; i < 3; ++i)
             dc[kWinABase + native_planes::kBlendLayer + i] = planeBlendSaved[i];
-        dc[kDcStateControl] = kGeneralUpdate | kWinAUpdate | kWinBUpdate;
-        dc[kDcStateControl] = kGeneralActReq | kWinAActReq | kWinBActReq;
+        dc[kDcStateControl] = kGeneralUpdate | kWinAUpdate | kWinBUpdate | kWinCUpdate;
+        dc[kDcStateControl] = kGeneralActReq | kWinAActReq | kWinBActReq | kWinCActReq;
     }
     gPanicRestore.planes = false;
     __atomic_store_n(&planesOn, false, __ATOMIC_RELEASE);
-    planeLatch = native_planes::PlaneLatch();
+    planeLatch.reset();
+    planeRecovering = false;
+    planeRecoveryTarget = {};
     planeTarget = {};
     planeHeldSet = planeNextSet = planeBlending = false;
     for (bool &set : entryPlaneSet)
         set = false;
-    for (unsigned k = 0; k < kPlaneSlots; ++k)
+    for (unsigned k = 0; k < kPlaneSlots; ++k) {
         planeDropSlot(k);
+        if (planeSlots[k].native) {
+            IODelete(planeSlots[k].native, SwitchNativeScanout, 1);
+            planeSlots[k].native = nullptr;
+        }
+    }
+    convertedStop();
 }
 
 // SC7, before the power-down (under the gate, registers still clocked): a running probe is undone; the last request is what
@@ -622,33 +383,11 @@ void planesQuiesce()
         planeProbeFinish();
     }
     planeLatch.settle();
-    planeCsc[0] = planeCsc[1] = -1;
-    planeFiltersWritten = false;
+    landscapeLeaveNow("the display suspended (SC7)");
+    planeForgetUnshadowed();
 }
 
-// SC7, after the cold re-init and the domain's re-attach: window B and window A's blending as they were.
-void planesResume()
-{
-    if (!planesOn)
-        return;
-    planeStartRegisters();
-    const PlaneSet now = planeSetOf(planeLatch.active);
-    uint32_t update = kGeneralUpdate | kWinAUpdate | kWinBUpdate;
-    uint32_t request = kGeneralActReq | kWinAActReq | kWinBActReq;
-    if (now.on && now.image.yuv)
-        planeWriteCsc(now.image);
-    planeWriteRegisters(now);
-    const bool over = now.on;
-    planeBlending = !over;  // force the write: the cold init put hekate's values back
-    planeBlendA(over, update, request);
-    __asm__ volatile("dsb sy" ::: "memory");
-    dc[kDcStateControl] = update;
-    dc[kDcStateControl] = request;
-    if (planeHeldSet) {
-        planeHeldSet = false;
-        planeFlipOnly(planeHeld);
-    }
-}
+#include "SwitchPlanesResume.h"
 
 // --- The plane probe (window B through the SMMU, before backboardd starts) ----------------------------------------------
 struct PlaneProbeIo {
@@ -697,6 +436,9 @@ void planeProbeWritePixel(uint32_t value)
 // framebuffer), so the CRC depends on window B alone and the console seems to pause for about 20 frames.
 bool planeProbeTick()
 {
+#if (defined(DEVELOPMENT) && DEVELOPMENT) || (defined(DEBUG) && DEBUG)
+    if (!scanoutQualification)
+        return false;
     if (planeProbe.active()) {
         const uint32_t underflow = dc[kDcIntStatus] & kWinBUnderflowInt;
         if (underflow)
@@ -721,6 +463,9 @@ bool planeProbeTick()
     planeProbeRan = true;
     planeProbeStart();
     return planeProbe.active();
+#else
+    return false;
+#endif
 }
 
 void planeProbeStart()
@@ -816,8 +561,8 @@ bool planeDomainAttach()
         switch_dcache_clean_invalidate(reinterpret_cast<const void *>(low), high - low);
     if (tegra_smmu_attach(TEGRA_SMMU_ASID_DISPLAY, probeDomain.ptb(), TEGRA_SMMU_DC_ASID,
                           TEGRA_SMMU_TRANSLATION_ENABLE_0,
-                          kDisplay0bTranslation | (directAttached ? kDisplay0aTranslation : 0), planeProbeLine,
-                          sizeof(planeProbeLine)))
+                          kDisplay0bTranslation | kDisplay0cTranslation | (directAttached ? kDisplay0aTranslation : 0),
+                          planeProbeLine, sizeof(planeProbeLine)))
         return false;
     planesAttached = true;
     return true;

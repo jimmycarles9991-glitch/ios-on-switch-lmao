@@ -93,6 +93,13 @@ public:
         WindowPoint pt;
         if (!project(s, vertex, pt))
             return false;
+        addProjected(pt);
+        return true;
+    }
+
+    // Geometry snapshots project once, then share these points with bounds, coverage and overlap tests.
+    void addProjected(const WindowPoint &pt)
+    {
         unclipped_ &= pt.unclipped;
         lo_[0] = std::min(lo_[0], pt.x - pt.slack);
         hi_[0] = std::max(hi_[0], pt.x + pt.slack);
@@ -101,7 +108,6 @@ public:
         if (count_ < kMaxCorners)
             points_[count_] = pt;
         count_++;
-        return true;
     }
 
     // The pixels whose centres may fall in the box of every vertex added, and a pixel of guard on each side, within `limit`

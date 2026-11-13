@@ -21,6 +21,10 @@ func run(_ arguments: [String]) async throws {
         let url = out.appendingPathComponent(clip.file)
         if clip.codec == .vp9 {
             try VP9Writer.write(clip, to: url)
+        } else if [.mpeg4, .mpeg2, .mpeg1, .h264Mbaff].contains(clip.codec) {
+            try FFmpegWriter.write(clip, to: url)
+        } else if clip.codec == .h264Paff {
+            try H264FieldWriter.write(clip, to: url)
         } else {
             // The Mac's hardware encoder spreads a 4K frame over however many encode engines are free, so a 4K clip's
             // bytes differ from run to run; the frames it decodes to do not. That is why the clips are pinned.
@@ -30,6 +34,9 @@ func run(_ arguments: [String]) async throws {
         }
         try printPin(url)
     }
+    let alpha = out.appendingPathComponent(AlphaClip.file)
+    try MP4Writer.write(try AlphaVideo.encode(), to: alpha)
+    try printPin(alpha)
     for image in StillImage.all {
         let url = out.appendingPathComponent(image.file)
         try StillWriter.write(image, to: url)
@@ -59,6 +66,17 @@ func verify(_ directory: URL) async throws {
         } catch {
             print(clip.file, "not decoded here: \(error)")
         }
+    }
+    let alpha = directory.appendingPathComponent(AlphaClip.file)
+    if FileManager.default.fileExists(atPath: alpha.path) {
+        let demuxed = try await Demux.mp4(alpha)
+        let result = try AlphaVideo.decode(
+            demuxed.samples, format: demuxed.format,
+            flags: [._EnableAsynchronousDecompression, ._EnableTemporalProcessing])
+        print(
+            AlphaClip.file, "\(result.matched)/\(AlphaClip.frames) frames match", result.firstMismatch ?? "",
+            "\(result.outOfDisplayOrder) out of display order",
+            String(format: "luma %.1f chroma %.1f alpha %.1f", result.worstLuma, result.worstChroma, result.worstAlpha))
     }
     for image in StillImage.all {
         let url = directory.appendingPathComponent(image.file)

@@ -1,119 +1,32 @@
 // SPDX-License-Identifier: MIT
-// The facade's compute encoders (raw_compute.h): a dispatch the pack holds the kernel of (raw_compute_key.h) runs on the raw
-// channel; any other one is the command buffer's reason for m2v, which replays the encoder's commands. A compute state is
-// m2v's with the key's parts its function gives: its AIR, its constants and the descriptor's limits.
 #import "RawMetalInternal.h"
 #include "NativeBridgeMetalFrontend.h"
 #include "RawComplete.h"
 #include "RawDirect.h"
 #include "raw_compute.h"
 #include "raw_compute_key.h"
-#include "raw_metallib.h"
+#include "raw_compute_lookup.h"
+#import "RawMetalComputeState.h"
+#import "RawMetalResolveAsk.h"
+#include "raw_predication.h"
+#import "RawMetalCounters.h"
+#include "TegraGM20BClockABI.h"
+#import "RawMetalIndirectCompute.h"
 #include "raw_view.h"
+#include "raw_surface_view.h"
 
-@interface RMComputeState : RMTwinObject {
-@public
-    bool _keyed;  // its function's AIR is known: the pack may hold its kernels
-    raw::AirHash _air;
-    std::string _constants;
-    uint32_t _maxThreads;
-    bool _multipleOfWidth;
-    std::mutex _lock;
-    // by threadgroup shape, memory and bindings: the pack's, one made at its first dispatch, or null
-    std::map<std::string, const raw::ComputeState *> _kernels;
-    MTLComputePipelineDescriptor *_direct;  // over m2v's functions: what a kernel the pack lacks is made from
-}
-@end
-
-@implementation RMComputeState
-
-// What NAK made of the kernel, as the m2v state it carries compiled it
-- (NSUInteger)maxTotalThreadsPerThreadgroup
-{
-    return [(id<MTLComputePipelineState>)_twin maxTotalThreadsPerThreadgroup];
-}
-
-- (NSUInteger)threadExecutionWidth
-{
-    return [(id<MTLComputePipelineState>)_twin threadExecutionWidth];
-}
-
-- (NSUInteger)staticThreadgroupMemoryLength
-{
-    return [(id<MTLComputePipelineState>)_twin staticThreadgroupMemoryLength];
-}
-
-// This state's kernel at `threads` threads a threadgroup, threadgroup memory `memory` and the textures and samplers bound
-// (raw_compute_key.h): the pack's, else `make`'s of `_direct` at its key; null: none
-- (const raw::ComputeState *)kernel:(const uint32_t *)threads
-                             memory:(const std::string &)memory
-                           textures:(const std::string &)textures
-                           samplers:(const std::string &)samplers
-                               make:(const raw::ComputeState * (^)(MTLComputePipelineDescriptor *,
-                                                                   const std::string &))make
-{
-    if (!_keyed)
-        return nullptr;
-    char shape[48];
-    snprintf(shape, sizeof shape, "%u,%u,%u|", threads[0], threads[1], threads[2]);
-    std::lock_guard<std::mutex> hold(_lock);
-    const auto [at, inserted] = _kernels.emplace(shape + memory + "|" + textures + "|" + samplers, nullptr);
-    if (inserted) {
-        const std::string key =
-            raw::computeKey(_air, _constants, _maxThreads, _multipleOfWidth, threads, memory, textures, samplers);
-        at->second = raw::computeState(*gRM->raw, raw::computeKeyHash(key));
-        if (!at->second)
-            at->second = make(_direct, key);
-    }
-    return at->second;
-}
-
-@end
-
-static bool airOf(id<MTLFunction> function, raw::AirHash &out)
-{
-    const void *bytes = nullptr;
-    size_t length = 0;
-    std::map<std::string, raw::AirHash> hashes;
-    if (!native_bridge_metal_function_metallib(twinOf(function), &bytes, &length) ||
-        !raw::metallibAirHashes(static_cast<const uint8_t *>(bytes), length, hashes))
-        return false;
-    const auto f = hashes.find(native_bridge_metal_function_library_name(twinOf(function)).UTF8String ?: "");
-    if (f == hashes.end())
-        return false;
-    out = f->second;
-    return true;
-}
-
-id rmComputeState(id device, id twin, id<MTLFunction> function, MTLComputePipelineDescriptor *descriptor)
-{
-    if (!twin)
-        return nil;
-    RMComputeState *s = [RMComputeState new];
-    s->_device = device;
-    s->_twin = twin;
-    RMFunction *f = [(id)function isKindOfClass:[RMFunction class]] ? (RMFunction *)function : nil;
-    // linked functions are no part of the key: such a state's dispatches stay m2v's
-    s->_keyed = f && !descriptor.linkedFunctions.functions.count &&
-                !descriptor.linkedFunctions.privateFunctions.count && airOf(function, s->_air);
-    s->_constants = f ? f->_constants : "";
-    s->_maxThreads = uint32_t(descriptor.maxTotalThreadsPerThreadgroup);
-    s->_multipleOfWidth = descriptor.threadGroupSizeIsMultipleOfThreadExecutionWidth;
-    s->_direct = [descriptor copy];
-    s->_direct.computeFunction = twinOf(function);
-    s.label = descriptor.label;
-    return s;
-}
+using RMKernelJob = raw::ComputeKernelJob<raw::ComputeState>;
 
 @interface RMComputeEncoder () {
     RMComputeState *_state;
-    std::map<uint32_t, uint32_t> _memory;  // threadgroup memory lengths by index, rounded up to 16
+    raw::ComputeSpecialization _specialization;
+    std::shared_ptr<RMKernelSet> _kernel;
+    raw::ComputeDispatch _shape;
+    bool _kernelCurrent;
     // what the dispatches' kernels may read (unretained: the command buffer retains them): the textures, and the buffers'
     // addresses (0: setBytes:, which the raw path uploads aligned)
     RMTexture *_textures[31];
     RMSampler *_samplers[16];
-    RMBuffer *_buffers[31];
-    uint64_t _offsets[31];
 }
 
 @end
@@ -138,14 +51,16 @@ id rmComputeState(id device, id twin, id<MTLFunction> function, MTLComputePipeli
 
 - (void)setComputePipelineState:(id<MTLComputePipelineState>)state
 {
-    _state = [(id)state isKindOfClass:[RMComputeState class]] ? (RMComputeState *)state : nil;
+    RMComputeState *next = [(id)state isKindOfClass:[RMComputeState class]] ? (RMComputeState *)state : nil;
+    if (_state != next) {
+        _state = next;
+        _kernelCurrent = false;
+    }
     setBinding(_cb, OpKernelState, 3, 0, state, 0);
 }
 
 - (void)setBytes:(const void *)bytes length:(NSUInteger)length atIndex:(NSUInteger)index
 {
-    if (index < 31)
-        _buffers[index] = nil;
     recordBytes(_cb, cmd(OpKernelBytes, 3, uint16_t(index)), bytes, length);
 }
 
@@ -153,17 +68,11 @@ id rmComputeState(id device, id twin, id<MTLFunction> function, MTLComputePipeli
 {
     if (buffer && ![(id)buffer isKindOfClass:[RMBuffer class]])
         [self refuse:PredCompute value:index why:@"a kernel's buffer not made by this device"];
-    if (index < 31) {
-        _buffers[index] = [(id)buffer isKindOfClass:[RMBuffer class]] ? (RMBuffer *)buffer : nil;
-        _offsets[index] = offset;
-    }
     setBinding(_cb, OpKernelBuffer, 3, index, buffer, offset);
 }
 
 - (void)setBufferOffset:(NSUInteger)offset atIndex:(NSUInteger)index
 {
-    if (index < 31)
-        _offsets[index] = offset;
     Cmd m = cmd(OpKernelBufferOffset, 3, uint16_t(index));
     m.c = offset;
     [_cb record:m];
@@ -180,10 +89,22 @@ id rmComputeState(id device, id twin, id<MTLFunction> function, MTLComputePipeli
 - (void)setTexture:(id<MTLTexture>)texture atIndex:(NSUInteger)index
 {
     RMTexture *t = [(id)texture isKindOfClass:[RMTexture class]] ? (RMTexture *)texture : nil;
-    if (index < 31)
+    if (index < 31 && _textures[index] != t) {
         _textures[index] = t;
+        raw::BoundTexture bound = {};
+        if (t) {
+            MTLTextureDescriptor *d = t->_descriptor;
+            const MTLTextureSwizzleChannels w = d.swizzle;
+            bound = {uint32_t(index),    d.pixelFormat, d.textureType,
+                     d.mipmapLevelCount, d.arrayLength, {w.red, w.green, w.blue, w.alpha}};
+        }
+        if (_specialization.bindTexture(uint32_t(index), t ? &bound : nullptr))
+            _kernelCurrent = false;
+    }
     if (texture && !t)
         [self refuse:PredCompute value:index why:@"a kernel's texture not made by this device"];
+    if (t)
+        noteReadAsData(texture);
     setBinding(_cb, OpKernelTexture, 3, index, texture, 0);
 }
 
@@ -197,8 +118,30 @@ id rmComputeState(id device, id twin, id<MTLFunction> function, MTLComputePipeli
 {
     if (sampler && ![(id)sampler isKindOfClass:[RMSampler class]])
         [self refuse:PredCompute value:index why:@"a kernel's sampler not made by this device"];
-    if (index < 16)
-        _samplers[index] = [(id)sampler isKindOfClass:[RMSampler class]] ? (RMSampler *)sampler : nil;
+    RMSampler *s = [(id)sampler isKindOfClass:[RMSampler class]] ? (RMSampler *)sampler : nil;
+    if (index < 16 && _samplers[index] != s) {
+        _samplers[index] = s;
+        raw::BoundSampler bound = {};
+        if (s) {
+            MTLSamplerDescriptor *d = s->_descriptor;
+            bound = {uint32_t(index),
+                     d.minFilter,
+                     d.magFilter,
+                     d.mipFilter,
+                     d.sAddressMode,
+                     d.tAddressMode,
+                     d.rAddressMode,
+                     d.maxAnisotropy,
+                     d.compareFunction,
+                     d.borderColor,
+                     d.lodMinClamp,
+                     d.lodMaxClamp,
+                     bool(d.normalizedCoordinates),
+                     bool(d.lodAverage)};
+        }
+        if (_specialization.bindSampler(uint32_t(index), s ? &bound : nullptr))
+            _kernelCurrent = false;
+    }
     setBinding(_cb, OpKernelSampler, 3, index, sampler, 0);
 }
 
@@ -210,7 +153,8 @@ id rmComputeState(id device, id twin, id<MTLFunction> function, MTLComputePipeli
 
 - (void)setThreadgroupMemoryLength:(NSUInteger)length atIndex:(NSUInteger)index
 {
-    _memory[uint32_t(index)] = uint32_t((length + 15) & ~NSUInteger(15));
+    if (_specialization.bindMemory(uint32_t(index), uint32_t((length + 15) & ~NSUInteger(15))))
+        _kernelCurrent = false;
     Cmd m = cmd(OpKernelMemory, 3, uint16_t(index));
     m.a = uint32_t(length);
     [_cb record:m];
@@ -242,161 +186,186 @@ id rmComputeState(id device, id twin, id<MTLFunction> function, MTLComputePipeli
     [_cb record:cmd(OpKernelBarrier, 3)];
 }
 
-// The textures bound (raw_compute_key.h computeTextures), as the frontend's journal names a dispatch's
-- (std::string)texturesText
-{
-    raw::BoundTexture bound[31];
-    size_t count = 0;
-    for (uint32_t slot = 0; slot < 31; slot++)
-        if (RMTexture *t = _textures[slot]) {
-            MTLTextureDescriptor *d = t->_descriptor;
-            const MTLTextureSwizzleChannels w = d.swizzle;
-            bound[count++] = {slot,          d.pixelFormat,
-                              d.textureType, d.mipmapLevelCount,
-                              d.arrayLength, {w.red, w.green, w.blue, w.alpha}};
-        }
-    return raw::computeTextures(bound, count);
-}
-
-// The samplers bound (raw_compute_key.h computeSamplers)
-- (std::string)samplersText
-{
-    raw::BoundSampler bound[16];
-    size_t count = 0;
-    for (uint32_t slot = 0; slot < 16; slot++)
-        if (RMSampler *s = _samplers[slot]) {
-            MTLSamplerDescriptor *d = s->_descriptor;
-            bound[count++] = {slot,
-                              d.minFilter,
-                              d.magFilter,
-                              d.mipFilter,
-                              d.sAddressMode,
-                              d.tAddressMode,
-                              d.rAddressMode,
-                              d.maxAnisotropy,
-                              d.compareFunction,
-                              d.borderColor,
-                              d.lodMinClamp,
-                              d.lodMaxClamp,
-                              bool(d.normalizedCoordinates),
-                              bool(d.lodAverage)};
-        }
-    return raw::computeSamplers(bound, count);
-}
-
-// "<index>:<length>,..." of the lengths set (raw_compute_key.h)
-- (std::string)memoryText
-{
-    std::string text;
-    for (const auto &[index, length] : _memory)
-        if (length)
-            text += (text.empty() ? "" : ",") + std::to_string(index) + ":" + std::to_string(length);
-    return text;
-}
-
-// A texture a raw kernel samples as it is: no image of its own the raw path would refresh first (a chain's levels, planes
-// converted, an extended-range stand-in, a shadow of rows the texture header cannot take)
-static bool plainTexture(RMTexture *t)
-{
-    const raw::Texture &x = t->_raw;
-    return t->_rawOk && x.tic && !x.chain && !x.converted() && !x.standIn && !x.sampled && !x.memoryless;
-}
-
-// The kernel the pack lacks, of `descriptor` at `key`, made for this dispatch (RawComplete.h), and journaled as m2v journals a
-// dispatch it runs, so the next pack holds it
-- (const raw::ComputeState *)make:(MTLComputePipelineDescriptor *)descriptor
-                              key:(const std::string &)key
-                             grid:(MTLSize)grid
-                          threads:(MTLSize)threads
-                        perThread:(bool)perThread
-{
-    if (!gRM->completion)
-        return nullptr;
-    const uint32_t t[3] = {uint32_t(threads.width), uint32_t(threads.height), uint32_t(threads.depth)};
-    raw::KernelDispatch ask(t, _memory);
-    for (uint32_t slot = 0; slot < 31; slot++)
-        if (_textures[slot])
-            ask.texture(slot, _textures[slot]->_descriptor);
-    for (uint32_t slot = 0; slot < 16; slot++)
-        if (_samplers[slot])
-            ask.sampler(slot, _samplers[slot]->_descriptor);
-    const raw::ComputeState *k = gRM->completion->kernel(descriptor, ask.dispatch(), key);
-    if (k)
-        native_bridge_metal_journal_dispatch(_state->_twin, grid, threads, perThread, [self memoryText].c_str(),
-                                             [self texturesText].c_str(), [self samplersText].c_str());
-    return k;
-}
-
 - (void)dispatch:(MTLSize)grid threads:(MTLSize)threads perThread:(bool)perThread
 {
-    uint32_t t[3] = {uint32_t(threads.width), uint32_t(threads.height), uint32_t(threads.depth)};
-    uint64_t groups[3] = {grid.width, grid.height, grid.depth};
-    const raw::ComputeState *k =
-        _state ? [_state kernel:t
-                         memory:[self memoryText]
-                       textures:[self texturesText]
-                       samplers:[self samplersText]
-                           make:^(MTLComputePipelineDescriptor *descriptor, const std::string &key) {
-                               return [self make:descriptor key:key grid:grid threads:threads perThread:perThread];
-                           }]
-               : nullptr;
-    bool refused = false;
-    for (int i = 0; perThread && i < 3; i++) {
-        if (!t[i] || groups[i] % t[i]) {
-            k = nullptr;
-            refused = true;
-            [self refuse:PredComputeEdge value:groups[i] why:@"dispatchThreads: of a grid with an edge threadgroup"];
-            break;
+    const std::array<uint32_t, 3> t = {uint32_t(threads.width), uint32_t(threads.height), uint32_t(threads.depth)};
+    const auto dispatch =
+        raw::computeDispatch({grid.width, grid.height, grid.depth}, t, perThread, _state ? _state->_threadLimit : 1024);
+    const auto &groups = dispatch.groups;
+    const bool refused = dispatch.reason != raw::ComputeDispatch::Ready || threads.width > 1024 ||
+                         threads.height > 1024 || threads.depth > 1024;
+    if (refused)
+        [self refuse:PredComputeKernel value:groups[0] why:@"a dispatch outside the raw grid or local-size limits"];
+    bool sameShape = _shape.count == dispatch.count && _shape.multi == dispatch.multi;
+    for (uint8_t i = 0; sameShape && i < dispatch.count; ++i)
+        sameShape = _shape.regions[i].local == dispatch.regions[i].local;
+    if (!sameShape)
+        _kernelCurrent = false;
+    std::shared_ptr<RMKernelSet> kernels;
+    if (!refused && _state && _state->_keyed) {
+        if (!_kernelCurrent || (_kernel && _kernel->retryable())) {
+            _kernel = std::make_shared<RMKernelSet>();
+            _kernel->count = dispatch.count;
+            for (uint8_t region = 0; region < dispatch.count; ++region) {
+                auto specialization = _specialization;
+                specialization.threads = dispatch.regions[region].local;
+                specialization.regionMode = dispatch.multi;
+                _kernel->jobs[region] = _state->_kernels.request(specialization, [&](auto pending) {
+                    raw::Completion *completion = gRM->completion.get();
+                    if (!completion) {
+                        pending->publish({nullptr, true});
+                        return;
+                    }
+                    const std::map<uint32_t, uint32_t> memory(specialization.memory.begin(),
+                                                              specialization.memory.end());
+                    auto ask = std::make_shared<raw::KernelDispatch>(specialization.threads.data(), memory,
+                                                                     specialization.regionMode);
+                    for (uint32_t slot = 0; slot < 31; ++slot)
+                        if (_textures[slot])
+                            ask->texture(slot, _textures[slot]->_descriptor);
+                    for (uint32_t slot = 0; slot < 16; ++slot)
+                        if (_samplers[slot])
+                            ask->sampler(slot, _samplers[slot]->_descriptor);
+                    RMComputeState *state = _state;
+                    completion->backgroundKernel([pending, ask, specialization, state, completion, grid, threads,
+                                                  perThread, region] {
+                        RMKernelJob::Run run{pending};
+                        const auto text = specialization.text();
+                        const auto key =
+                            raw::computeKey(state->_air, state->_constants, state->_maxThreads, state->_multipleOfWidth,
+                                            specialization.threads.data(), text.memory, text.textures, text.samplers,
+                                            specialization.regionMode);
+                        run.result.state = raw::computeState(*gRM->raw, raw::computeKeyHash(key));
+                        if (run.result.state) {
+                            run.result.retry = false;
+                            return;
+                        }
+                        uint64_t retryAtUs = 0;
+                        run.result.state = completion->kernel(state->_direct, ask->dispatch(), key, &run.result.retry,
+                                                              &retryAtUs, state->_function, &run.result.gone);
+                        if (run.result.retry && retryAtUs) {
+                            run.result.deferredRetry = true;
+                            const uint64_t now = nowUs(), delay = retryAtUs > now ? retryAtUs - now : 0;
+                            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, int64_t(delay * NSEC_PER_USEC)),
+                                           dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+                                               pending->allowRetry();
+                                           });
+                        }
+                        // the journal names m2v's state: a state the pack answered has none
+                        if (run.result.state && !region && state->_metadata)
+                            native_bridge_metal_journal_dispatch(state->_metadata, grid, threads, perThread,
+                                                                 text.memory.c_str(), text.textures.c_str(),
+                                                                 text.samplers.c_str());
+                    });
+                });
+            }
+            _shape = dispatch;
+            _kernelCurrent = true;
         }
-        groups[i] /= t[i];
+        kernels = _kernel;
     }
-    if (!k && _state)
-        SWITCH_REFUSE_DETAIL("raw", "compute.kernel", uint64_t(t[0]) << 32 | t[1] << 16 | t[2],
-                             "a kernel the pack lacks (%s, threads %u,%u,%u, threadgroup memory %s, textures %s)",
-                             _state.label.UTF8String ?: "-", t[0], t[1], t[2], [self memoryText].c_str(),
-                             [self texturesText].c_str());
-    for (uint32_t e = 0; k && e < k->rec->entries; e++) {
-        const raw::PackKernelEntry &x = k->rec->entry[e];
-        if (x.kind == raw::KernelTexture && x.slot < 31 && _textures[x.slot] && !plainTexture(_textures[x.slot])) {
-            [self refuse:PredComputeImage
-                   value:x.slot
-                     why:@"a kernel's texture the raw path samples through an image of its own"];
-            k = nullptr;
-            refused = true;
-        }
-        RMTexture *viewed = x.kind == raw::KernelTexture && x.slot < 31 ? _textures[x.slot] : nil;
-        const raw::FormatInfo *f = viewed ? raw::formatInfo(viewed->_raw.format) : nullptr;
-        if (f && raw::slotView(x.window, f->tic0, raw::swizzledWord0(f->tic0, viewed->_raw.swizzle), f->bpp,
-                               raw::blockCompressed(f)) == raw::SlotView::None) {
-            [self refuse:PredComputeView
-                   value:x.slot
-                     why:@"a kernel m2v binds a view of another texel size at a texture slot"];
-            k = nullptr;
-            refused = true;
-        }
-        // m2v's descriptor starts at the bind offset rounded down to 16, the rest in a push word the record names
-        if (x.kind == raw::KernelBuffer && raw::kernelResidualWord(x) < 0 && x.slot < 31 && _buffers[x.slot] &&
-            ((_buffers[x.slot]->_raw.va + _offsets[x.slot]) & 15)) {
-            [self refuse:PredComputeOff16
-                   value:x.slot
-                     why:@"a kernel's buffer bound at an offset that is not a multiple of 16"];
-            k = nullptr;
-            refused = true;
-        }
-    }
-    if (!refused && (!k || groups[0] > 0x7fffffff || groups[1] > 0xffff || groups[2] > 0xffff)) {
+    const auto kernelState = kernels ? kernels->state() : RMKernelSet::State::Refused;
+    // a kernel no compiler made fails its command buffer at submission (computeReadiness), as one still being made waits
+    const bool pending = kernelState == RMKernelSet::State::Pending || kernelState == RMKernelSet::State::Failed;
+    const bool ready = kernelState == RMKernelSet::State::Ready;
+    if (!refused && !ready && !pending)
         [self refuse:PredComputeKernel value:groups[0] why:@"a dispatch the raw path has no kernel for"];
-        k = nullptr;
-    }
-    // extras: Metal's grid (threadgroups, or threads for dispatchThreads:), then the threadgroups the raw path dispatches
     Cmd m = cmd(OpDispatch, 3, perThread);
     m.c = uint64_t(t[0]) | uint64_t(t[1]) << 16 | uint64_t(t[2]) << 32;
     m.x = _cb->_extra.size();
-    for (uint64_t v :
-         {uint64_t(grid.width), uint64_t(grid.height), uint64_t(grid.depth), groups[0], groups[1], groups[2]})
+    for (uint64_t v : {uint64_t(grid.width), uint64_t(grid.height), uint64_t(grid.depth), groups[0], groups[1],
+                       groups[2], uint64_t(_stageIn.origin.x), uint64_t(_stageIn.origin.y), uint64_t(_stageIn.origin.z),
+                       uint64_t(_stageIn.size.width), uint64_t(_stageIn.size.height), uint64_t(_stageIn.size.depth)})
         _cb->_extra.push_back(v);
-    m.obj2 = const_cast<raw::ComputeState *>(k);
+    if (kernels) {
+        _cb->_computeJobs.try_emplace(kernels.get(), kernels);
+        if (pending)
+            m.obj = kernels.get();
+        if (ready)
+            m.obj2 = kernels.get();
+    }
     [_cb record:m];
+}
+
+- (BOOL)predicate:(raw::PredicateRecords::Kind)kind
+           buffer:(id<MTLBuffer>)buffer
+           offset:(NSUInteger)offset
+       comparison:(uint64_t)comparison
+        reference:(uint32_t)reference
+{
+    _cb->_predicates.record(kind);
+    const bool rawBuffer = [(id)buffer isKindOfClass:[RMBuffer class]];
+    const bool readsWord = kind == raw::PredicateRecords::StartIf || kind == raw::PredicateRecords::StartWhile ||
+                           kind == raw::PredicateRecords::EndDoWhile;
+    if (!buffer && (kind == raw::PredicateRecords::StartIf || kind == raw::PredicateRecords::StartWhile))
+        _predicateWithoutBuffer = true;
+    if (_cb->_predicates.misused())
+        hit(_cb, PredComputePredicate, kind);
+    else if (readsWord && (!rawBuffer || (offset & ~3ull) + 4 > ((RMBuffer *)buffer)->_raw.length))
+        [self refuse:PredComputePredicate value:offset why:@"a predicate word outside a raw buffer"];
+    Cmd m = cmd(OpPredicate, uint8_t(kind));
+    m.obj = (__bridge void *)buffer;
+    m.c = offset & ~3ull;
+    m.a = uint32_t(raw::predicateCompare(comparison));
+    m.b = reference;
+    [_cb record:m];
+    return !_predicateWithoutBuffer;
+}
+
+- (void)encodeStartIf:(id<MTLBuffer>)buffer
+               offset:(NSUInteger)offset
+           comparison:(NSUInteger)comparison
+       referenceValue:(uint32_t)reference
+{
+    [self predicate:raw::PredicateRecords::StartIf
+             buffer:buffer
+             offset:offset
+         comparison:comparison
+          reference:reference];
+}
+
+- (void)encodeStartElse
+{
+    [self predicate:raw::PredicateRecords::StartElse buffer:nil offset:0 comparison:0 reference:0];
+}
+
+- (BOOL)encodeEndIf
+{
+    return [self predicate:raw::PredicateRecords::EndIf buffer:nil offset:0 comparison:0 reference:0];
+}
+
+- (void)encodeStartWhile:(id<MTLBuffer>)buffer
+                  offset:(NSUInteger)offset
+              comparison:(NSUInteger)comparison
+          referenceValue:(uint32_t)reference
+{
+    [self predicate:raw::PredicateRecords::StartWhile
+             buffer:buffer
+             offset:offset
+         comparison:comparison
+          reference:reference];
+}
+
+- (BOOL)encodeEndWhile
+{
+    return [self predicate:raw::PredicateRecords::EndWhile buffer:nil offset:0 comparison:0 reference:0];
+}
+
+- (void)encodeStartDoWhile
+{
+    [self predicate:raw::PredicateRecords::StartDoWhile buffer:nil offset:0 comparison:0 reference:0];
+}
+
+- (BOOL)encodeEndDoWhile:(id<MTLBuffer>)buffer
+                  offset:(NSUInteger)offset
+              comparison:(NSUInteger)comparison
+          referenceValue:(uint32_t)reference
+{
+    return [self predicate:raw::PredicateRecords::EndDoWhile
+                    buffer:buffer
+                    offset:offset
+                comparison:comparison
+                 reference:reference];
 }
 
 - (void)dispatchThreadgroups:(MTLSize)groups threadsPerThreadgroup:(MTLSize)threads
@@ -411,9 +380,24 @@ static bool plainTexture(RMTexture *t)
 
 @end
 
+@implementation RMComputeEncoder (State)
+
+- (RMComputeState *)rmState
+{
+    return _state;
+}
+
+@end
+
 bool isKernelCommand(Op op)
 {
-    return op >= OpKernelState && op <= OpDispatch;
+    return (op >= OpKernelState && op <= OpDispatch) || op == OpPredicate || op == OpExecuteKernels;
+}
+
+// A binding command's attributeStride (RawMetalStrides.mm: its x the stride + 1, 0 none)
+static uint32_t commandStride(const Cmd &c)
+{
+    return c.x && c.x <= UINT32_MAX ? uint32_t(c.x - 1) : UINT32_MAX;
 }
 
 void replayKernel(id encoder, RMCommandBuffer *cb, const Cmd &c, std::set<RMBuffer *> &buffers)
@@ -425,16 +409,30 @@ void replayKernel(id encoder, RMCommandBuffer *cb, const Cmd &c, std::set<RMBuff
         [e setComputePipelineState:twinOf(object)];
         break;
     case OpKernelBytes:
-        [e setBytes:cb->_bytes.chunks[c.c].cpu + c.a length:c.b atIndex:c.index];
+        if (c.x)
+            [e setBytes:cb->_bytes.chunks[c.c].cpu + c.a length:c.b attributeStride:commandStride(c) atIndex:c.index];
+        else
+            [e setBytes:cb->_bytes.chunks[c.c].cpu + c.a length:c.b atIndex:c.index];
         break;
     case OpKernelBuffer:
         if ([object isKindOfClass:[RMBuffer class]])
             buffers.insert((RMBuffer *)object);
-        [e setBuffer:twinOf(object) offset:c.c atIndex:c.index];
+        if (c.x)
+            [e setBuffer:twinOf(object) offset:c.c attributeStride:commandStride(c) atIndex:c.index];
+        else
+            [e setBuffer:twinOf(object) offset:c.c atIndex:c.index];
         break;
     case OpKernelBufferOffset:
-        [e setBufferOffset:c.c atIndex:c.index];
+        if (c.x)
+            [e setBufferOffset:c.c attributeStride:commandStride(c) atIndex:c.index];
+        else
+            [e setBufferOffset:c.c atIndex:c.index];
         break;
+    case OpKernelClockAnchors: {
+        const TegraGM20BAbiClockAnchors anchors = rmClockAnchorsNow();
+        [e setBytes:&anchors length:sizeof anchors atIndex:c.index];
+        break;
+    }
     case OpKernelTexture:
         [e setTexture:twinOf(object) atIndex:c.index];
         break;
@@ -447,7 +445,8 @@ void replayKernel(id encoder, RMCommandBuffer *cb, const Cmd &c, std::set<RMBuff
     case OpKernelUse:
         if ([object isKindOfClass:[RMBuffer class]])
             buffers.insert((RMBuffer *)object);
-        [e useResource:twinOf(object) usage:MTLResourceUsage(c.c)];
+        if (![object isKindOfClass:[RMHeap class]])
+            [e useResource:twinOf(object) usage:MTLResourceUsage(c.c)];
         break;
     case OpKernelBarrier:
         [e memoryBarrierWithScope:MTLBarrierScopeBuffers | MTLBarrierScopeTextures];
@@ -455,42 +454,87 @@ void replayKernel(id encoder, RMCommandBuffer *cb, const Cmd &c, std::set<RMBuff
     case OpDispatch: {
         const MTLSize grid = MTLSizeMake(extra(cb, c.x), extra(cb, c.x + 1), extra(cb, c.x + 2)),
                       threads = MTLSizeMake(c.c & 0xffff, (c.c >> 16) & 0xffff, c.c >> 32);
+        [e setStageInRegion:MTLRegionMake3D(extra(cb, c.x + 6), extra(cb, c.x + 7), extra(cb, c.x + 8),
+                                            extra(cb, c.x + 9), extra(cb, c.x + 10), extra(cb, c.x + 11))];
         if (c.index)
             [e dispatchThreads:grid threadsPerThreadgroup:threads];
         else
             [e dispatchThreadgroups:grid threadsPerThreadgroup:threads];
         break;
     }
+    case OpExecuteKernels:
+        replayKernelCommands(e, (__bridge RMKernelExecute *)c.obj, buffers);
+        break;
     default:
         break;
     }
 }
 
-bool encodeKernel(raw::ComputeEncoder &e, raw::CommandBuffer &rc, RMCommandBuffer *cb, const Cmd &c, const char **why)
+static bool encodePredicate(raw::ComputeEncoder &e, const Cmd &c, size_t at, const char **why)
+{
+    const uint64_t wordVa = c.obj ? ((__bridge RMBuffer *)c.obj)->_raw.va + c.c : 0;
+    const auto compare = raw::PredicateCompare(c.a);
+    raw::Predication::Answer answer = raw::Predication::Answer::Misused;
+    switch (c.stage) {
+    case raw::PredicateRecords::StartIf:
+        answer = e.startIf(wordVa, compare, c.b);
+        break;
+    case raw::PredicateRecords::StartElse:
+        answer = e.startElse();
+        break;
+    case raw::PredicateRecords::EndIf:
+        answer = e.endIf();
+        break;
+    case raw::PredicateRecords::StartWhile:
+        answer = e.startWhile(wordVa, compare, c.b);
+        break;
+    case raw::PredicateRecords::EndWhile:
+        answer = e.endWhile(uint32_t(at));
+        break;
+    case raw::PredicateRecords::StartDoWhile:
+        answer = e.startDoWhile();
+        break;
+    case raw::PredicateRecords::EndDoWhile:
+        answer = e.endDoWhile(wordVa, compare, c.b, uint32_t(at));
+        break;
+    default:
+        break;
+    }
+    if (answer != raw::Predication::Answer::Done)
+        *why = c.stage >= raw::PredicateRecords::StartWhile
+                   ? "a predicated loop the raw path cannot lay down (deeper than eight, a body of more than 32 push "
+                     "segments, one its unit ended inside, or more GP entries than one nest takes)"
+                   : "a predication record the raw path cannot run";
+    return answer == raw::Predication::Answer::Done;
+}
+
+bool encodeKernel(raw::ComputeEncoder &e, raw::CommandBuffer &rc, RMCommandBuffer *cb, const Cmd &c, size_t at,
+                  const char **why)
 {
     id object = (__bridge id)c.obj;
+    if (c.op == OpKernelBytes || c.op == OpKernelBuffer || c.op == OpKernelBufferOffset)
+        e.setBufferStride(c.index, commandStride(c));
     switch (c.op) {
     case OpKernelBytes: {
         const raw::Buffer &k = cb->_bytes.chunks[c.c];
         if (!k.wc)
             rc.clean(k.cpu + c.a, std::max<uint32_t>((c.b + 255) & ~255u, 256));
-        e.setBytesAt(c.index, k.va + c.a, c.b);
+        e.setBytesAt(c.index, k.va + c.a, c.b, &k);
         break;
     }
     case OpKernelBuffer: {
         RMBuffer *b = (RMBuffer *)object;
-        if (b)
-            rc.use(b->_raw.import, true);
         e.setBuffer(c.index, b ? &b->_raw : nullptr, c.c);
         break;
     }
     case OpKernelBufferOffset:
         e.setBufferOffset(c.index, c.c);
         break;
+    case OpKernelClockAnchors:
+        e.setBytesAt(c.index, c.c, c.b);
+        break;
     case OpKernelTexture: {
         RMTexture *t = (RMTexture *)object;
-        if (t)
-            rc.use(t->_raw.import, true);
         e.setTexture(c.index, t ? &t->_raw : nullptr);
         break;
     }
@@ -500,13 +544,20 @@ bool encodeKernel(raw::ComputeEncoder &e, raw::CommandBuffer &rc, RMCommandBuffe
     case OpKernelBarrier:
         e.barrier();
         break;
+    case OpPredicate:
+        return encodePredicate(e, c, at, why);
     case OpDispatch: {
         const uint32_t groups[3] = {uint32_t(extra(cb, c.x + 3)), uint32_t(extra(cb, c.x + 4)),
                                     uint32_t(extra(cb, c.x + 5))},
                        threads[3] = {uint32_t(c.c & 0xffff), uint32_t(c.c >> 16) & 0xffff, uint32_t(c.c >> 32)};
         e.setState(static_cast<const raw::ComputeState *>(c.obj2));
+        e.setStageInRegion({uint32_t(extra(cb, c.x + 6)), uint32_t(extra(cb, c.x + 7)), uint32_t(extra(cb, c.x + 8)),
+                            uint32_t(extra(cb, c.x + 9)), uint32_t(extra(cb, c.x + 10)),
+                            uint32_t(extra(cb, c.x + 11))});
         return e.dispatch(groups, threads, why);
     }
+    case OpExecuteKernels:
+        return encodeKernelCommands(e, rc, (RMKernelExecute *)object, why);
     default:  // the state and threadgroup memory are the dispatch's kernel's; residency is every buffer's already
         break;
     }

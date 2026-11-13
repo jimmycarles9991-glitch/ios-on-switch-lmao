@@ -166,8 +166,10 @@ TEST(DisplayBlend, WindowAIsInFrontOfWindowB)
 
 TEST(DisplayBlend, TheDriverWritesTheseValues)
 {
-    const std::string driver = switch_ios::test::SourceText("../NativePlanesDisplay.h");
-    EXPECT_NE(driver.find("win[kBlendLayer] = kBlendBypass | 2;"), std::string::npos);
+    const std::string driver = (switch_ios::test::SourceText("../NativePlanesDisplay.h") +
+                                switch_ios::test::SourceText("../SwitchOverlayRegisters.h"));
+    EXPECT_NE(driver.find("win[kBlendLayer] = m.yuv ? kBlendBypass | p.depth : kBlendPremultiplied | p.depth;"),
+              std::string::npos);
     const std::string blendA = switch_ios::test::Between(driver, "void planeBlendA(bool over", "\n}\n");
     EXPECT_NE(blendA.find("a[native_planes::kBlendLayer] = native_planes::kBlendPremultiplied;"), std::string::npos);
     EXPECT_NE(blendA.find("a[native_planes::kBlendMatch] = native_planes::kBlendOver;"), std::string::npos);

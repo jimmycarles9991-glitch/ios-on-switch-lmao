@@ -102,7 +102,7 @@ static void checkCase(const Case *t)
     CHECK(q->valid && !q->tiles && !q->cu_qp_delta && q->init_qp_minus26 == 0 && !q->dependent_slice_segments &&
               q->num_ref_idx_l0_default == 1 && !q->lists_modification_present && !q->range_extension,
           "%s: PPS fields", t->name);
-    const HEVCEncPicture idr = {true, 0, 30}, p = {false, 1, 28}, far = {false, 70000, 24};
+    const HEVCEncPicture idr = {.idr = true, .qp = 30}, p = {.poc = 1, .qp = 28}, far = {.poc = 70000, .qp = 24};
     checkSlice(&configured, &params, &idr);
     checkSlice(&configured, &params, &p);
     HEVCEncPicture wrapped = far;

@@ -1,4 +1,4 @@
-// hevcnvenc_host.c: HEVCNVENC.c's IDR setups against NVIDIA's T210 driver's, and the kernel's H.265 checker.
+// hevcnvenc_host.c: HEVCNVENC.c's IDR and P setups against NVIDIA's T210 driver's, and the kernel's H.265 checker.
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
 

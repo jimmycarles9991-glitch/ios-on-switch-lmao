@@ -4,9 +4,9 @@
 # source recompiles that object and relinks the kernel (//kernel/xnu-12377.121.6/config:xnu_objects.bzl). A new
 # source: add it to objects.bzl where conf/files would put it, with any flags its conf/Makefile.* entry adds.
 load("//bazel/lint:defs.bzl", "lint_files")
-load("//kernel/xnu-12377.121.6/config:switch_objects.bzl", "PTHREAD_BOOTSTRAP")
+load("//kernel/xnu-12377.121.6/config:switch_objects.bzl", "PTHREAD_BOOTSTRAP", "PTHREAD_BOOTSTRAP_RELEASE")
 load("//kernel/xnu-12377.121.6/config:xnu_objects.bzl", "xnu_objects")
-load(":objects.bzl", "DEVELOPMENT")
+load(":objects.bzl", "DEVELOPMENT", "RELEASE")
 
 package(default_visibility = ["//visibility:public"])
 
@@ -75,6 +75,7 @@ xnu_objects(
     component = "osfmk",
     # assym.s, which osfmk's assembly includes: genassym.c's constants (osfmk/conf/Makefile.template).
     genassym = "arm64/genassym.c",
+    release = RELEASE,
     table = DEVELOPMENT,
 )
 
@@ -83,5 +84,6 @@ xnu_objects(
     name = "pthread_bootstrap",
     srcs = ["//kernel/xnu-12377.121.6/bsd:kern/source_pthread_bootstrap.c"],
     component = "osfmk",
+    release = PTHREAD_BOOTSTRAP_RELEASE,
     table = PTHREAD_BOOTSTRAP,
 )

@@ -2,7 +2,7 @@
 // TegraGM20BTlb.h over a GMMU model: PTEs in DRAM, the L2's copies of them, one TLB per address space shared by its
 // channels, and work already running that walks and refills at any time. Maps are GPU-ordered (PTE writes, then the
 // generation moves); unmaps are synchronous (PTE cleared, then L2 and TLB invalidated before the call returns), as
-// gpu.c does them. No access may ever reach a page the space no longer owns.
+// gpu_exec.c does them. No access may ever reach a page the space no longer owns.
 #include <cstdint>
 #include <map>
 #include <optional>

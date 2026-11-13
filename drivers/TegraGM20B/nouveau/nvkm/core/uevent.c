@@ -42,7 +42,6 @@ nvkm_uevent_mthd_block(struct nvkm_uevent *uevent, union nvif_event_block_args *
 		return -ENOSYS;
 
 	nvkm_event_ntfy_block(&uevent->ntfy);
-	atomic_set(&uevent->allowed, 0);
 	return 0;
 }
 
@@ -53,7 +52,6 @@ nvkm_uevent_mthd_allow(struct nvkm_uevent *uevent, union nvif_event_allow_args *
 		return -ENOSYS;
 
 	nvkm_event_ntfy_allow(&uevent->ntfy);
-	atomic_set(&uevent->allowed, 1);
 	return 0;
 }
 
@@ -77,7 +75,7 @@ nvkm_uevent_fini(struct nvkm_object *object, enum nvkm_suspend_state suspend)
 {
 	struct nvkm_uevent *uevent = nvkm_uevent(object);
 
-	nvkm_event_ntfy_block(&uevent->ntfy);
+	atomic_set(&uevent->allowed, nvkm_event_ntfy_suspend(&uevent->ntfy));
 	return 0;
 }
 
@@ -115,10 +113,10 @@ nvkm_uevent_ntfy(struct nvkm_event_ntfy *ntfy, u32 bits)
 	struct nvkm_uevent *uevent = container_of(ntfy, typeof(*uevent), ntfy);
 	struct nvkm_client *client = uevent->object.client;
 
-	if (uevent->func)
-		return uevent->func(uevent->parent, uevent->object.object, bits);
-
-	return client->event(uevent->object.object, NULL, 0);
+    const int result = uevent->func
+        ? uevent->func(uevent->parent, uevent->object.object, bits)
+        : client->event(uevent->object.object, NULL, 0);
+    return result;
 }
 
 int

@@ -47,6 +47,7 @@
 //! metered on the per-attempt [`Meter`] and every table is charged to its ledger.
 
 mod cfg;
+mod native_half;
 mod rules;
 
 #[cfg(test)]
@@ -58,7 +59,7 @@ use crate::budget::Meter;
 use crate::device::profile::DeviceProfile;
 use crate::error::{Capability, Error, InternalError, InternalKind};
 use crate::spirv::error::{BuildError, Dangling};
-use crate::spirv::ids::{BlockId, FuncId, GlobalId, Value};
+use crate::spirv::ids::{BlockId, FuncId, GlobalId, TypeId, Value};
 use crate::spirv::ir::TypedModule;
 
 /// What a successful verification covered.
@@ -79,6 +80,8 @@ pub struct VerifyReport {
 #[non_exhaustive]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Violation {
+    NativeHalfType(TypeId),
+    NativeHalfOperation(BlockId),
     /// An id outside the module's arenas.
     Dangling(Dangling),
     /// Re-deriving the interface or requirements failed.
@@ -89,7 +92,10 @@ pub enum Violation {
     /// A block listed by no function, by two, or by a function it does not name.
     BlockOwnership(BlockId),
     /// A branch, merge, or continue target in another function.
-    ForeignTarget { from: BlockId, to: BlockId },
+    ForeignTarget {
+        from: BlockId,
+        to: BlockId,
+    },
     /// A function's first block is a branch target.
     EntryBlockTarget(BlockId),
     // ---- SSA ----
@@ -99,13 +105,25 @@ pub enum Violation {
     /// A value defined twice.
     DefinedTwice(Value),
     /// A use of an instruction or phi result that nothing defines.
-    Undefined { value: Value, block: BlockId },
+    Undefined {
+        value: Value,
+        block: BlockId,
+    },
     /// A use of a parameter, variable, or result of another function.
-    ForeignValue { value: Value, block: BlockId },
+    ForeignValue {
+        value: Value,
+        block: BlockId,
+    },
     /// A use not dominated by its definition.
-    NotDominated { value: Value, block: BlockId },
+    NotDominated {
+        value: Value,
+        block: BlockId,
+    },
     /// An `OpPhi` whose incoming blocks are not exactly the block's predecessors, each once.
-    PhiIncoming { phi: Value, block: BlockId },
+    PhiIncoming {
+        phi: Value,
+        block: BlockId,
+    },
     // ---- Structured control flow ----
     /// A merge declaration that does not fit the terminator (`OpSelectionMerge` needs a
     /// conditional branch or switch, `OpLoopMerge` an unconditional branch).
@@ -122,18 +140,33 @@ pub enum Violation {
     LayoutDominance(BlockId),
     /// A construct header that does not dominate this reachable block of its construct, its
     /// merge, or its continue target.
-    HeaderDominance { header: BlockId, block: BlockId },
+    HeaderDominance {
+        header: BlockId,
+        block: BlockId,
+    },
     /// A backward branch that is not a loop's continue block returning to its header.
-    BackEdge { from: BlockId, to: BlockId },
+    BackEdge {
+        from: BlockId,
+        to: BlockId,
+    },
     /// A branch into a construct other than to its header.
-    ConstructEntry { from: BlockId, to: BlockId },
+    ConstructEntry {
+        from: BlockId,
+        to: BlockId,
+    },
     /// A branch out of a construct other than to its merge or the innermost loop's merge or
     /// continue target.
-    ConstructExit { from: BlockId, to: BlockId },
+    ConstructExit {
+        from: BlockId,
+        to: BlockId,
+    },
     /// A switch literal listed twice or outside the selector's width.
     SwitchLiterals(BlockId),
     /// A case arm reached from somewhere other than its switch (fall-through).
-    CaseFallthrough { header: BlockId, case: BlockId },
+    CaseFallthrough {
+        header: BlockId,
+        case: BlockId,
+    },
     // ---- Loops ----
     /// An `OpLoopMerge` with no `LoopMeta`.
     LoopMetaMissing(BlockId),
@@ -145,9 +178,15 @@ pub enum Violation {
     /// A switch-at-use record that names no switch header.
     SwitchAtUseHeader(BlockId),
     /// A tangled instruction inside a switch-at-use.
-    TangledInSwitchAtUse { header: BlockId, block: BlockId },
+    TangledInSwitchAtUse {
+        header: BlockId,
+        block: BlockId,
+    },
     /// A call inside a switch-at-use to a function that executes a tangled instruction.
-    TangledCallInSwitchAtUse { header: BlockId, callee: FuncId },
+    TangledCallInSwitchAtUse {
+        header: BlockId,
+        callee: FuncId,
+    },
     // ---- Functions and stages ----
     /// A function on a cycle of the static call graph.
     Recursion(FuncId),
@@ -172,7 +211,10 @@ pub enum Violation {
     WorkgroupInitializer(GlobalId),
     /// An atomic in `block` whose pointer operand `ptr` is not a place (a variable, an access
     /// chain, or a texel pointer).
-    AtomicNotPlace { ptr: Value, block: BlockId },
+    AtomicNotPlace {
+        ptr: Value,
+        block: BlockId,
+    },
 }
 
 /// Why verification failed.

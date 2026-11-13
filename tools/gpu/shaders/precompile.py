@@ -33,6 +33,8 @@ KINDS = 'SRCD'
 CRASHES = 64
 TIMEOUT = 3600
 CONTENT = '529a20fd270ababa3e5ec2fe4d1674d93739ba5bcd61861674b4fb6db349af9f'
+TIMING = re.compile(r' in [0-9.]+ ms')
+SUMMARIES = ('precompile:', 'rates:')
 
 
 def store_view(store: Path, root: Path, by_sha: dict[str, str], embedded: list[Path]) -> None:
@@ -154,8 +156,11 @@ def make(work: Path, args: argparse.Namespace, corpus: dict, derived: dict) -> d
             died, output = result.returncode < 0, result.stdout + result.stderr
         except subprocess.TimeoutExpired as expired:
             died, output = True, str(expired.stdout or '') + str(expired.stderr or '')
+        # The report holds no path of this run's directory and no timing: a bucket made again, here or on another
+        # machine, reports the same bytes.
+        output = output.replace(str(work) + '/', '')
         refusals += [line.split(' ', 1)[1] for line in output.splitlines() if line.startswith('REFUSED')]
-        summaries += [line for line in output.splitlines() if line.startswith(('precompile:', 'rates:'))]
+        summaries += [TIMING.sub('', line) for line in output.splitlines() if line.startswith(SUMMARIES)]
         if not died:
             if result.returncode:
                 sys.exit(f'precompile failed ({result.returncode}): {failure(output)}')
@@ -211,7 +216,7 @@ def main() -> None:
     store_view(work / 'store', args.root, json.loads(args.store.read_text()), args.embedded)
     began = time.monotonic()
     report = make(work, args, corpus, derived) if any(corpus.values()) or any(derived.values()) else {'runs': []}
-    report['seconds'] = round(time.monotonic() - began, 1)
+    seconds = round(time.monotonic() - began, 1)
     report['lines'] = sum(map(len, corpus.values())) + sum(map(len, derived.values()))
     lines, report['identity'] = pack(work / 'cache', args.out)
     args.index.write_text(''.join(lines))
@@ -220,7 +225,7 @@ def main() -> None:
         args.unused_list.write_text(''.join(path + '\n' for path in args.unused))
     shutil.rmtree(work)
     crashed, refused = len(report.get('crashed', [])), len(report.get('refused', []))
-    made = f'{report["lines"]} lines in {report["seconds"]} s'
+    made = f'{report["lines"]} lines in {seconds} s'
     print(f'bucket {args.lines.stem}: {made}, {refused} refused, {crashed} crashed')
 
 

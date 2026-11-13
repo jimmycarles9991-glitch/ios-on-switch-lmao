@@ -18,6 +18,7 @@ std::string encodeKernelEntry(const CacheKey &k, const ComputeRecord *record, co
         w.bytes(record->cbufType, sizeof record->cbufType);
         w.value(record->cbufs);
         w.list(record->samplers);
+        w.list(record->spill);
     } else {
         w.text(refusal);
     }
@@ -46,7 +47,9 @@ RecordCache::Found decodeKernelEntry(const std::string &bytes, const CacheKey &k
     r.bytes(rec.cbufType, sizeof rec.cbufType);
     rec.cbufs = r.value<uint8_t>();
     rec.samplers = r.list<std::array<uint32_t, 8>>();
+    rec.spill = r.list<uint32_t>();
     if (!r.ok() || r.at() != bytes.size() - 8 || rec.cbufs > sizeof rec.cbufType ||
+        rec.spill.size() != rec.kernel.spillWords ||
         rec.kernel.entries > sizeof rec.kernel.entry / sizeof rec.kernel.entry[0])
         return RecordCache::Found::None;
     record = std::move(rec);

@@ -1349,10 +1349,12 @@ pub(super) fn prepare_variants(
     device: &Device,
     tables: &DispatchTables<'_>,
 ) -> Result<Vec<Arc<Variant>>, Error> {
-    let mut state = tables.bind_state(
-        &device.argument_samplers(),
-        &tables.pipeline.function_tables(),
-    );
+    let argument_samplers = if heap_sets::uses_argument_samplers(tables.pipeline.base_layout()) {
+        device.argument_samplers()
+    } else {
+        Vec::new()
+    };
+    let mut state = tables.bind_state(&argument_samplers, &tables.pipeline.function_tables());
     tables.sampler_maps()?.apply(&mut state);
     let prepared = tables.pipeline.prepare(&state.shape(), tables.forms)?;
     let mut variants = Vec::with_capacity(prepared.len());
@@ -1429,7 +1431,11 @@ fn record(
     // The device's sampler states, less those at IDs no set-1 sampler array of the variant
     // holds (each array has the variant's heap capacity of elements): a degradation where
     // the variant has sampler arrays, and nothing reads them where it has none.
-    let mut argument_samplers = core.device().argument_samplers();
+    let mut argument_samplers = if heap_sets::uses_argument_samplers(pipeline.base_layout()) {
+        core.device().argument_samplers()
+    } else {
+        Vec::new()
+    };
     // The live visible-function tables the pipeline state made: the encoder's, or an indirect
     // command's own state's.
     let function_tables = pipeline.function_tables();

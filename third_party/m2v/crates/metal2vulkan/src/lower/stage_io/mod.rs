@@ -105,6 +105,7 @@ pub(crate) mod extended_color;
 pub mod fetch;
 mod plan;
 mod stage_in;
+mod two_plane;
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -337,6 +338,10 @@ pub struct StageIoPlan {
     /// as the raw texel Metal stores (`extended_color::encode`), with the form each is held in
     /// (and, a bfloat one's rounding).
     pub extended: BTreeMap<u32, crate::pipeline::lower_inputs::ExtendedRangeColor>,
+    /// The two-plane extended-range color attachments among `extended` whose alpha byte each
+    /// return stores through an output variable of its own (`two_plane`), the variable's object
+    /// by the attachment's index.
+    pub two_plane: BTreeMap<u32, usize>,
     /// A vertex function's viewport compensation (`LoweringInputs::viewport_compensation`).
     pub compensation: Option<Compensation>,
     /// A fragment function's depth output, which each return gives Metal's answer
@@ -747,6 +752,12 @@ pub fn sample_id(cx: &mut SelectCx<'_>) -> usize {
         Shape::U32,
         crate::pipeline::stage_io::StageBuiltin::SampleId,
     )
+}
+
+/// Plan the fragment's `Layer` input for the layered storage form
+/// (`LoweringInputs::layered_storage`): the index of its object.
+pub fn layer(cx: &mut SelectCx<'_>) -> Result<usize, Error> {
+    plan::layer_input(cx)
 }
 
 /// Plan the fragment's `FrontFacing` input for a family that reads the fragment's face (the
@@ -1336,7 +1347,10 @@ pub fn emit_return(
                     }
                     None => part,
                 };
-                store(cx, fb, &o.link, part)?;
+                match o.color.and_then(|c| cx.plan.families.stage_io.two_plane.get(&c).copied()) {
+                    Some(alpha) => two_plane::store(cx, fb, &o.link, alpha, part)?,
+                    None => store(cx, fb, &o.link, part)?,
+                }
             }
             if let (Some(c), Some(clip)) = (capture, clip) {
                 store_capture(cx, fb, c, clip, size)?;

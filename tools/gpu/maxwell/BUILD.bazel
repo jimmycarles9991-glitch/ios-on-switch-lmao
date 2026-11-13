@@ -1,0 +1,273 @@
+# Maxwell machine-code tools: nakstat, the raw path's shader scoreboard, and gate, which runs two compilers' programs
+# of the same states on the host (interp.py) and compares their outputs bit for bit.
+#
+#   bazel run //tools/gpu/maxwell:nakstat -- --pack <pack.bin> --corpus $PWD/tools/gpu/maxwell/scoreboard.log
+#   bazel run //tools/gpu/maxwell:nakstat -- --dump <dir> --corpus ...   (directcheck's DIRECTCHECK_DUMP)
+#   bazel run //tools/gpu/maxwell:gate -- <before dump> <after dump> --corpus $PWD/tools/gpu/maxwell/scoreboard.log
+#   bazel run //tools/gpu/maxwell:blendcheck -- <dump dir>   (storage forms whose shader computes the blend)
+#   bazel run //tools/gpu/maxwell:gate -- --rungs <dump dir> --corpus ...   (fetch-free forms through the ROP: rungcheck.py)
+#   bazel run //tools/gpu/maxwell:storecheck -- <pack.bin> --corpus ...   (what storage forms do with each fetched colour)
+#
+# direct_exec_test runs the raw path's direct compile of direct/exec.metal's states and kernels and the counter resolve
+# kernel (direct/directrun.mm, built on this Mac beside the shader tools' mock GM20B) and executes their programs here.
+#
+# opcodes.txt is yuzu's maxwell.inc, verbatim (GPL-2.0-or-later, its notice kept).
+load("@rules_python//python:py_binary.bzl", "py_binary")
+load("@rules_python//python:py_library.bzl", "py_library")
+load("@rules_python//python:py_test.bzl", "py_test")
+load("//bazel/lint:defs.bzl", "lint_files")
+load(":direct/runner.bzl", "direct_runner")
+
+lint_files(exclude = [
+    "opcodes.txt",
+    "testdata/rop_blend/rop_blend.metal",
+    "testdata/rop_blend/states.json",
+])
+
+exports_files(
+    ["testdata/image_draw_fragment.hex"],
+    visibility = ["//tools:__subpackages__"],
+)
+
+py_library(
+    name = "isa",
+    srcs = ["isa.py"],
+    data = ["opcodes.txt"],
+    visibility = [
+        "//drivers/TegraGM20BMetal:__pkg__",
+        "//drivers/TegraGM20BMetal/test/eq:__pkg__",
+        "//tools:__subpackages__",
+    ],
+)
+
+py_library(
+    name = "cost",
+    srcs = ["cost.py"],
+    visibility = ["//tools:__subpackages__"],
+    deps = [":isa"],
+)
+
+py_test(
+    name = "cost_test",
+    size = "small",
+    srcs = ["cost_test.py"],
+    data = ["testdata/image_draw_fragment.hex"],
+    deps = [
+        ":cost",
+        ":isa",
+    ],
+)
+
+py_binary(
+    name = "nakstat",
+    srcs = ["nakstat.py"],
+    data = ["scoreboard.log"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":cost",
+        ":isa",
+    ],
+)
+
+py_test(
+    name = "nakstat_test",
+    size = "small",
+    srcs = ["nakstat_test.py"],
+    data = ["testdata/image_draw_fragment.hex"],
+    deps = [
+        ":isa",
+        ":nakstat",
+    ],
+)
+
+py_library(
+    name = "rop",
+    srcs = ["rop.py"],
+    visibility = ["//tools:__subpackages__"],
+)
+
+py_test(
+    name = "rop_test",
+    size = "small",
+    srcs = ["rop_test.py"],
+    deps = [":rop"],
+)
+
+py_library(
+    name = "interp",
+    srcs = [
+        "execute.py",
+        "floats.py",
+        "interp.py",
+        "quad.py",
+        "stage.py",
+        "texture.py",
+    ],
+    visibility = [
+        "//drivers/TegraGM20BMetal:__pkg__",
+        "//drivers/TegraGM20BMetal/test/eq:__pkg__",
+        "//tools:__subpackages__",
+    ],
+    deps = [":isa"],
+)
+
+py_library(
+    name = "rungcheck_lib",
+    srcs = ["rungcheck.py"],
+    deps = [
+        ":interp",
+        ":isa",
+        ":nakstat",
+        "//drivers/TegraGM20BMetal:raw_pack",
+        "//tools/benchloop:lib",
+    ],
+)
+
+py_binary(
+    name = "gate",
+    srcs = ["gate.py"],
+    data = ["scoreboard.log"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":interp",
+        ":isa",
+        ":nakstat",
+        ":rungcheck_lib",
+        ":rop",
+    ],
+)
+
+py_binary(
+    name = "rungcheck",
+    srcs = ["rungcheck.py"],
+    data = ["scoreboard.log"],
+    visibility = ["//visibility:public"],
+    deps = [":rungcheck_lib"],
+)
+
+py_library(
+    name = "storecheck_lib",
+    srcs = ["storecheck.py"],
+    deps = [":rungcheck_lib"],
+)
+
+py_binary(
+    name = "storecheck",
+    srcs = ["storecheck.py"],
+    deps = [":storecheck_lib"],
+)
+
+py_test(
+    name = "storecheck_test",
+    size = "small",
+    srcs = ["storecheck_test.py"],
+    deps = [":storecheck_lib"],
+)
+
+py_test(
+    name = "rungcheck_test",
+    size = "small",
+    srcs = ["rungcheck_test.py"],
+    deps = [":rungcheck_lib"],
+)
+
+py_test(
+    name = "interp_test",
+    size = "small",
+    srcs = ["interp_test.py"],
+    data = ["testdata/image_draw_fragment.hex"],
+    deps = [
+        ":gate",
+        ":interp",
+        ":isa",
+    ],
+)
+
+py_test(
+    name = "msaa_storage_test",
+    size = "medium",
+    srcs = ["msaa_storage_test.py"],
+    data = ["testdata/fetch_order_msaa4.hex"],
+    deps = [
+        ":interp",
+        ":isa",
+    ],
+)
+
+py_test(
+    name = "xmad_test",
+    size = "small",
+    srcs = ["xmad_test.py"],
+    deps = [
+        ":interp",
+        ":isa",
+    ],
+)
+
+py_binary(
+    name = "blendcheck",
+    srcs = ["blendcheck.py"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":interp",
+        ":isa",
+    ],
+)
+
+py_test(
+    name = "blendcheck_test",
+    size = "small",
+    srcs = ["blendcheck_test.py"],
+    data = ["testdata/rop_blend/states.json"],
+    deps = [
+        ":blendcheck",
+        ":interp",
+        ":isa",
+    ],
+)
+
+py_binary(
+    name = "direct_build",
+    srcs = ["direct/build.py"],
+    main = "direct/build.py",
+)
+
+direct_runner(
+    name = "direct_runner",
+    srcs = [
+        "direct/directrun.mm",
+        "direct/exec.metal",
+        "//drivers/TegraGM20BMetal:raw_runtime_headers",
+        "//drivers/TegraGM20B:TegraGM20BClockABI.h",
+        "//drivers/TegraGM20BMetal:raw_stack_sources",
+        "//kits/SwitchGM20B:class_headers",
+    ],
+    host_bridge = "//gpu:bridge_host",
+    metal_abi = "//drivers/NativeMetal/abi:MetalABI.h",
+    tools = "//gpu/seed:local_tools",
+)
+
+py_test(
+    name = "direct_exec_test",
+    size = "medium",
+    srcs = [
+        "direct_exec_test.py",
+        "direct_records.py",
+    ],
+    args = [
+        "$(rootpath :direct_runner)",
+        "$(rootpath //gpu/seed:local_tools)",
+    ],
+    data = [
+        ":direct_runner",
+        "//gpu/seed:local_tools",
+    ],
+    tags = [
+        "no-remote-exec",
+        "requires-darwin",
+    ],
+    deps = [
+        ":interp",
+        ":isa",
+    ],
+)

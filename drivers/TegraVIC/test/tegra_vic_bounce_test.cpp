@@ -1,5 +1,5 @@
 // drivers/TegraVIC/TegraVICBounce.h on the host: which surfaces need the copy-engine bounce, the scratch's geometry, and
-// how the copy engine and VIC order each other (the fences each waits for, and VIC's channel wait words).
+// VIC's channel wait words.
 #include <gtest/gtest.h>
 
 #include <cstdint>
@@ -32,6 +32,15 @@ TEST(VicBounce, OnlyRowsVicCannotAddressBounce)
     TegraVICSurfaceDesc odd = tall;
     odd.planeOffset[1] += 8;
     EXPECT_EQ(tegra_vic_bounce_needed(&odd, 256), -1) << "a plane offset the copy engine cannot take";
+}
+
+TEST(VicBounce, PlanesVicCannotAddressBounce)
+{
+    TegraVICSurfaceDesc d = nv12(300, 534, 320);
+    d.planeOffset[1] = 320 * 534;
+    EXPECT_EQ(tegra_vic_bounce_needed(&d, 64), 0) << "a chroma plane off 256 bytes";
+    d.planeOffset[1] = 320 * 536;
+    EXPECT_EQ(tegra_vic_bounce_needed(&d, 64), 1);
 }
 
 TEST(VicBounce, ScratchIsTheSamePixelsAtVicPitches)
@@ -69,47 +78,13 @@ TEST(VicBounce, RowBytesAreThePixelsNotThePitch)
     EXPECT_EQ(s.length, (3584ull * 600 + 4095) / 4096 * 4096);
 }
 
-TEST(VicBounceOrder, VicWaitsForTheLastFillAndTheCopyBackFinishesTheJob)
+TEST(VicBounceOrder, VicChannelWaitPreservesFullThresholdAndExactWordBound)
 {
-    uint32_t next = 100;
-    const TegraVICBounceOrder both = tegra_vic_bounce_order(1, 1, &next);
-    EXPECT_EQ(both.fills, 2u);
-    EXPECT_TRUE(both.vicWaits);
-    EXPECT_TRUE(both.copiesBack);
-    EXPECT_EQ(both.vicAcquire, 102u) << "only the last fill signals: one release, two increments";
-    EXPECT_EQ(both.done, 104u);
-    EXPECT_EQ(next, 104u);
-
-    const TegraVICBounceOrder source = tegra_vic_bounce_order(1, 0, &next);
-    EXPECT_EQ(source.fills, 1u);
-    EXPECT_TRUE(source.vicWaits);
-    EXPECT_FALSE(source.copiesBack) << "VIC's own fence finishes the job";
-    EXPECT_EQ(source.vicAcquire, 106u);
-    EXPECT_EQ(next, 106u);
-
-    const TegraVICBounceOrder destination = tegra_vic_bounce_order(0, 1, &next);
-    EXPECT_EQ(destination.fills, 1u) << "the destination's own pixels, for those VIC leaves";
-    EXPECT_EQ(destination.vicAcquire, 108u);
-    EXPECT_EQ(destination.done, 110u);
-
-    const TegraVICBounceOrder none = tegra_vic_bounce_order(0, 0, &next);
-    EXPECT_FALSE(none.vicWaits);
-    EXPECT_FALSE(none.copiesBack);
-    EXPECT_EQ(next, 110u) << "a job without a bounce queues no copy and moves no fence";
-}
-
-TEST(VicBounceOrder, FencesWrapWithTheSyncpoint)
-{
-    uint32_t next = 0xfffffffeu;
-    const TegraVICBounceOrder o = tegra_vic_bounce_order(1, 1, &next);
-    EXPECT_EQ(o.vicAcquire, 0u);
-    EXPECT_EQ(o.done, 2u);
-}
-
-TEST(VicBounceOrder, VicChannelWaitWords)
-{
-    uint32_t w[2];
-    EXPECT_EQ(tegra_host1x_op_wait_syncpt(w, 37, 0x1234567), 2u);
-    EXPECT_EQ(w[0], tegra_host1x_op_setclass(TEGRA_HOST1X_CLASS_HOST1X, 8, 1)) << "host1x class, WAIT_SYNCPT";
-    EXPECT_EQ(w[1], (37u << 24) | 0x234567u) << "index in 31:24, threshold in 23:0";
+    for (const uint32_t threshold : {0u, 0x00ffffffu, 0x01000000u, 0x81234567u, 0xffffffffu}) {
+        uint32_t words[SWITCH_HOST1X_WAIT_WORDS] = {};
+        EXPECT_EQ(tegra_host1x_op_wait_syncpt(words, 37, threshold), SWITCH_HOST1X_WAIT_WORDS);
+        EXPECT_EQ(words[0], tegra_host1x_op_setclass(TEGRA_HOST1X_CLASS_HOST1X, 0x4e, 5));
+        EXPECT_EQ(words[1], threshold);
+        EXPECT_EQ(words[2], 37u);
+    }
 }

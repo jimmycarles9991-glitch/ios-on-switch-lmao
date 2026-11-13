@@ -66,18 +66,20 @@ public enum PatternPixels {
             rowBytes: CVPixelBufferGetBytesPerRowOfPlane(buffer, index), sampleBytes: sampleBytes)
     }
 
-    /// Checks a decoded 4:2:0 biplanar buffer (8-bit or P010) against the pattern.
+    /// Checks a decoded 4:2:0 or 4:2:2 biplanar buffer (8-bit or P010) against the pattern.
     public static func check(_ buffer: CVPixelBuffer, pattern: Pattern, expected: Int) -> FrameCheck {
         CVPixelBufferLockBaseAddress(buffer, .readOnly)
         defer { CVPixelBufferUnlockBaseAddress(buffer, .readOnly) }
         let sampleBytes = sampleBytes(of: buffer)
         let luma = Reader(buffer: buffer, plane: 0, sampleBytes: sampleBytes)
         let chroma = Reader(buffer: buffer, plane: 1, sampleBytes: sampleBytes)
+        let rowShift = CVPixelBufferGetHeightOfPlane(buffer, 1) == CVPixelBufferGetHeight(buffer) ? 0 : 1
         return PatternChecker(pattern).check(
             expected: expected,
             luma: { luma.mean($0.x, $0.y, $0.width, $0.height, step: 1, offset: 0) },
             chroma: { region in
-                let (x, y, w, h) = (region.x / 2, region.y / 2, max(1, region.width / 2), max(1, region.height / 2))
+                let (x, w) = (region.x / 2, max(1, region.width / 2))
+                let (y, h) = (region.y >> rowShift, max(1, region.height >> rowShift))
                 return (
                     chroma.mean(x * 2, y, w, h, step: 2, offset: 0), chroma.mean(x * 2, y, w, h, step: 2, offset: 1)
                 )

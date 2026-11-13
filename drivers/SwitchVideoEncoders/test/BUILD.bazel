@@ -2,14 +2,23 @@
 #   ave_host_test  AVE (H264H7.videoencoder) itself on this Mac's VideoToolbox over a fake TegraNVENC client whose
 #                  engine is a lossless stand-in for NVENC: every submit accepted by the kernel's own checker
 #                  (TegraNVENCCheck.h), the encode check (EncodeCheck.c, the one the Switch runs once per boot) decoding
-#                  every frame back exactly with Apple's decoder in three input layouts, sync samples where they
-#                  belong, P_Skip from the reference the setup names; the SPS/PPS/avcC parsing back with AVD's
-#                  H264Syntax.c; the checker refusing each kind of bad submit; the rate control on a synthetic encoder
+#                  every frame back exactly with Apple's decoder in three input layouts the CPU copies into, VIC's
+#                  BL16 from IOSurfaces and its refusal, sync samples where they belong, P_Skip from the reference the
+#                  setup names; B pictures where the session allows reordering (ReorderCheck.c: decode order, decode
+#                  times, picture types, exact decode back, an engine that refuses B pictures); the SPS/PPS/avcC
+#                  parsing back with AVD's H264Syntax.c; the checker refusing each kind of bad submit; the rate control
+#                  on a synthetic encoder; the HEVC tile slots through VTTileCompressionSession as CMPhoto drives them
+#                  (TileCheck.c); the layout probe's IDRs decoded back (ProbeCheck.c)
 #   h264nvenc_host_test  H264NVENC.c's surfaces at the coded size where it is not the display size (1080p), the
-#                  kernel's checker taking those submits and refusing the display size
-#   hevcnvenc_host_test  HEVCNVENC.c's H.265 IDR setups byte for byte against NVIDIA's T210 driver's (three sizes),
-#                  the kernel's H.265 checker taking them and refusing each kind of bad submit, the SPS/PPS stating
-#                  the coding tools the setup does
+#                  kernel's checker taking those submits and refusing the display size; a reordering session's P and B
+#                  setups against NVIDIA's T210 driver's, the checker's B rules, the SPS and B slice header parsed back
+#   nvenclatch_host_test  what TegraNVENC writes in the colocated and reference slot methods a job leaves out
+#   nvencdirect_host_test  NVDEC's native 720p/1080p pictures as H.264 and H.265 input in place, the kernel's checker
+#                  taking them and the plan refusing other blocks, formats, crops, pitches and short pictures; which
+#                  producers of the picture the job waits for on the hardware
+#   hevcnvenc_host_test  HEVCNVENC.c's H.265 IDR and P setups byte for byte against NVIDIA's T210 driver's (three
+#                  sizes), the kernel's H.265 checker taking them and refusing each kind of bad submit, the SPS/PPS
+#                  and P slice header stating what the setup does
 #   hevcenc_host_test  HEVCEncSyntax.c's VPS, SPS, PPS and slice headers parsed back by AVD's HEVCSyntax.c and taken by
 #                  CoreMedia, the level each size and rate gets
 #
@@ -28,6 +37,8 @@ FRAMEWORKS = [
     "CoreVideo",
     "-framework",
     "VideoToolbox",
+    "-framework",
+    "IOSurface",
 ]
 
 # The plug-in's H.264 bitstream and NVENC setup code, and AVD's H.264 syntax (the SPS/PPS/avcC parse-back).
@@ -57,6 +68,22 @@ host_library(
         "ave_host.c",
         "EncodeCheck.c",
         "EncodeCheck.h",
+        "ProbeCheck.c",
+        "ProbeCheck.h",
+        "ReorderCheck.c",
+        "ReorderCheck.h",
+        "TileCheck.c",
+        "TileCheck.h",
+        "//drivers/SwitchVideoEncoders:AVE/AVEEncoder.h",
+        "//drivers/SwitchVideoEncoders:AVE/AVEInput.c",
+        "//drivers/SwitchVideoEncoders:AVE/AVELayoutProbe.c",
+        "//drivers/SwitchVideoEncoders:AVE/AVEReorder.c",
+        "//drivers/SwitchVideoEncoders:AVE/AVEReorder.h",
+        "//drivers/SwitchVideoEncoders:AVE/AVETiles.c",
+        "//drivers/SwitchVideoEncoders:AVE/HEVCEncSyntax.c",
+        "//drivers/SwitchVideoEncoders:AVE/HEVCEncSyntax.h",
+        "//drivers/SwitchVideoEncoders:AVE/HEVCNVENC.c",
+        "//drivers/SwitchVideoEncoders:AVE/HEVCNVENC.h",
         "//drivers/SwitchVideoEncoders:AVE/NVENCClient.h",
         "//drivers/SwitchVideoEncoders:AVE/RateControl.h",
         "//drivers/SwitchVideoEncoders:AVE/VTEncoderSPI.h",
@@ -80,6 +107,34 @@ host_library(
     deps = [":h264_nvenc"],
 )
 
+# What the kernel writes in the latched methods a job leaves out (tegra_nvenc_latch).
+host_library(
+    name = "nvenclatch_host",
+    srcs = ["nvenclatch_host.c"],
+    copts = ["-O1"],
+    defines = ["main=nvenclatch_host_main"],
+    deps = [":h264_nvenc"],
+)
+
+# A native NVDEC picture as NVENC's input in place (TegraNVENCDirectPlan.h), through the kernel's checker.
+host_library(
+    name = "nvencdirect_host",
+    srcs = [
+        "nvencdirect_host.c",
+        "//drivers/SwitchVideoEncoders:AVE/HEVCEncSyntax.c",
+        "//drivers/SwitchVideoEncoders:AVE/HEVCNVENC.c",
+        "//drivers/TegraGM20B:SwitchGpuBacking.h",
+        "//drivers/TegraNVENC:TegraNVENCDirectPlan.h",
+    ],
+    hdrs = [
+        "//drivers/SwitchVideoEncoders:AVE/HEVCEncSyntax.h",
+        "//drivers/SwitchVideoEncoders:AVE/HEVCNVENC.h",
+    ],
+    copts = ["-O1"],
+    defines = ["main=nvencdirect_host_main"],
+    deps = [":h264_nvenc"],
+)
+
 # The HEVC parameter set and slice header writer, parsed back with AVD's HEVC syntax.
 host_library(
     name = "hevcenc_host",
@@ -98,11 +153,12 @@ host_library(
     deps = [":h264_nvenc"],
 )
 
-# HEVCNVENC.c's IDR setups against NVIDIA's T210 driver's, the kernel's H.265 checker, and the parameter sets agreeing
-# with the setup.
+# HEVCNVENC.c's IDR and P setups against NVIDIA's T210 driver's, the kernel's H.265 checker, and the parameter sets
+# agreeing with the setup.
 host_library(
     name = "hevcnvenc_host",
     srcs = [
+        "hevcnvenc_goldens.h",
         "hevcnvenc_host.c",
         "//drivers/SwitchVideoDecoders:AVD/HEVCSyntax.c",
         "//drivers/SwitchVideoEncoders:AVE/HEVCEncSyntax.c",
@@ -122,6 +178,18 @@ host_test(
     name = "h264nvenc_host_test",
     srcs = ["h264nvenc_host_test.cpp"],
     deps = [":h264nvenc_host"],
+)
+
+host_test(
+    name = "nvencdirect_host_test",
+    srcs = ["nvencdirect_host_test.cpp"],
+    deps = [":nvencdirect_host"],
+)
+
+host_test(
+    name = "nvenclatch_host_test",
+    srcs = ["nvenclatch_host_test.cpp"],
+    deps = [":nvenclatch_host"],
 )
 
 host_test(

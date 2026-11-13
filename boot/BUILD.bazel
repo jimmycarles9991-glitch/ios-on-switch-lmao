@@ -184,7 +184,10 @@ boot_package(
         "//install:from_release": {"@switch_release//:overlay/" + source: source for source in OVERLAY_BINARIES.values()},
         "//conditions:default": OVERLAY_BINARIES,
     }) | select({
-        ":local_debug": {"//drivers/TegraGM20BMetal:fetchform": "build/switch-gpu/fetchform"},
+        ":local_debug": {
+            "//drivers/TegraGM20BMetal:fetchform": "build/switch-gpu/fetchform",
+            "//hw_test_app:switch-texpeer": "build/switch-hwtest/switch-texpeer",
+        },
         "//conditions:default": {},
     }) | select({
         ":local_debug_21H461": {"//hw_test_app:SwitchHWTest17": "build/switch-hwtest/SwitchHWTest.ipa"},

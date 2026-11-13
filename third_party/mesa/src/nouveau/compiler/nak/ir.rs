@@ -4058,6 +4058,50 @@ impl DisplayOp for OpIMul {
     }
 }
 
+/// Maxwell's 16x16-bit multiply-add, unsigned (SM50 only): one 16-bit half
+/// of srcs[0] times one of srcs[1], `psl` shifting the product left by 16,
+/// plus srcs[2], plus srcs[1] << 16 where `cbcc`; `mrg` then replaces the
+/// result's high half with srcs[1]'s low half.
+#[repr(C)]
+#[derive(SrcsAsSlice, DstsAsSlice)]
+pub struct OpXmad {
+    #[dst_type(GPR)]
+    pub dst: Dst,
+
+    #[src_type(ALU)]
+    pub srcs: [Src; 3],
+
+    pub hi: [bool; 2],
+    pub psl: bool,
+    pub mrg: bool,
+    pub cbcc: bool,
+}
+
+impl DisplayOp for OpXmad {
+    fn fmt_op(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "xmad")?;
+        if self.psl {
+            write!(f, ".psl")?;
+        }
+        if self.mrg {
+            write!(f, ".mrg")?;
+        }
+        if self.cbcc {
+            write!(f, ".cbcc")?;
+        }
+        let half = |hi| if hi { ".h1" } else { "" };
+        write!(
+            f,
+            " {}{} {}{} {}",
+            self.srcs[0],
+            half(self.hi[0]),
+            self.srcs[1],
+            half(self.hi[1]),
+            self.srcs[2]
+        )
+    }
+}
+
 #[repr(C)]
 #[derive(SrcsAsSlice, DstsAsSlice)]
 pub struct OpIMad64 {
@@ -5454,6 +5498,8 @@ pub struct OpTex {
     pub nodep: bool,
     pub channel_mask: ChannelMask,
     pub scalar: bool,
+    /// SM50 scalar forms: halves, two to a register
+    pub f16: bool,
 }
 
 impl DisplayOp for OpTex {
@@ -5469,6 +5515,9 @@ impl DisplayOp for OpTex {
         write!(f, "{}", self.mem_eviction_priority)?;
         if self.scalar {
             write!(f, ".scr")?;
+        }
+        if self.f16 {
+            write!(f, ".f16")?;
         }
         if self.nodep {
             write!(f, ".nodep")?;
@@ -5498,6 +5547,8 @@ pub struct OpTld {
     pub nodep: bool,
     pub channel_mask: ChannelMask,
     pub scalar: bool,
+    /// SM50 scalar forms: halves, two to a register
+    pub f16: bool,
 }
 
 impl DisplayOp for OpTld {
@@ -5509,6 +5560,9 @@ impl DisplayOp for OpTld {
         write!(f, "{}", self.mem_eviction_priority)?;
         if self.scalar {
             write!(f, ".scr")?;
+        }
+        if self.f16 {
+            write!(f, ".f16")?;
         }
         if self.nodep {
             write!(f, ".nodep")?;
@@ -5538,6 +5592,8 @@ pub struct OpTld4 {
     pub nodep: bool,
     pub channel_mask: ChannelMask,
     pub scalar: bool,
+    /// SM50 scalar forms: halves, two to a register
+    pub f16: bool,
 }
 
 impl DisplayOp for OpTld4 {
@@ -5549,6 +5605,9 @@ impl DisplayOp for OpTld4 {
         write!(f, "{}", self.mem_eviction_priority)?;
         if self.scalar {
             write!(f, ".scr")?;
+        }
+        if self.f16 {
+            write!(f, ".f16")?;
         }
         if self.nodep {
             write!(f, ".nodep")?;
@@ -8122,6 +8181,7 @@ pub enum Op {
     IMad(Box<OpIMad>),
     IMad64(Box<OpIMad64>),
     IMul(Box<OpIMul>),
+    Xmad(Box<OpXmad>),
     IMnMx(Box<OpIMnMx>),
     ISetP(Box<OpISetP>),
     Lea(Box<OpLea>),
@@ -8286,6 +8346,7 @@ impl Op {
             // Integer ALU
             Op::BRev(_) | Op::Flo(_) | Op::PopC(_) => false,
             Op::IMad(_) | Op::IMul(_) => sm >= 70,
+            Op::Xmad(_) => false,
             Op::BMsk(_)
             | Op::IAbs(_)
             | Op::IAdd2(_)
@@ -8468,6 +8529,7 @@ impl Op {
             | Op::PopC(_)
             | Op::IMad(_)
             | Op::IMul(_)
+            | Op::Xmad(_)
             | Op::BMsk(_)
             | Op::IAbs(_)
             | Op::IAdd2(_)
@@ -9037,6 +9099,7 @@ impl Instr {
             | Op::IMad(_)
             | Op::IMad64(_)
             | Op::IMul(_)
+            | Op::Xmad(_)
             | Op::IMnMx(_)
             | Op::ISetP(_)
             | Op::Lea(_)
@@ -9776,11 +9839,31 @@ pub trait ShaderModel {
 pub struct ShaderModelInfo {
     sm: u8,
     warps_per_sm: u8,
+    first_fit_regs: bool,
 }
 
 impl ShaderModelInfo {
     pub fn new(sm: u8, warps_per_sm: u8) -> Self {
-        ShaderModelInfo { sm, warps_per_sm }
+        ShaderModelInfo {
+            sm,
+            warps_per_sm,
+            first_fit_regs: false,
+        }
+    }
+
+    /// The same model with register allocation taking the lowest free
+    /// register, register banks aside
+    pub fn first_fit(&self) -> Self {
+        ShaderModelInfo {
+            first_fit_regs: true,
+            ..*self
+        }
+    }
+
+    /// Whether register allocation spreads an instruction's sources over
+    /// register banks (reg_banks.rs)
+    pub fn reg_banks(&self) -> bool {
+        self.sm >= 50 && self.sm < 70 && !self.first_fit_regs
     }
 }
 

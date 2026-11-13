@@ -21,7 +21,8 @@ nvif_chan_gpfifo_push_kick(struct nvif_push *push)
 	cnt = push->cur - push->bgn;
 
 	chan->func->gpfifo.push(chan, true, chan->push.addr + (put << 2), cnt << 2, false);
-	chan->func->gpfifo.kick(chan);
+	if (!chan->defer_kick)
+		chan->func->gpfifo.kick(chan);
 }
 
 static int

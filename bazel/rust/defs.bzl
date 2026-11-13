@@ -29,6 +29,7 @@ IOS_PLATFORM = "//bazel/platforms:ios_arm64"
 
 _PLATFORMS = "//command_line_option:platforms"
 _PROFILE = "//bazel:profile"
+_INCREMENTAL = "//bazel/rust:incremental"
 _EXTRA_FLAGS = "@rules_rust//rust/settings:extra_rustc_flags"
 _EXTRA_ENV = "@rules_rust//rust/settings:extra_rustc_env"
 _PER_CRATE = "@rules_rust//rust/settings:per_crate_rustc_flag"
@@ -128,7 +129,7 @@ def _rust_transition_impl(settings, attr):
         _EXTRA_FLAGS: REMAP_FLAGS + _CRATE_FLAGS[key] + ["-Cstrip=none"],
         _EXTRA_ENV: _DEPLOYMENT_ENV,
         _PER_CRATE: ["{}@{}".format(_filter(attr.crate), flag) for flag in _ROOT_FLAGS.get(key, [])] + (
-            ["{}@{}".format(crate, flag) for crate in INCREMENTAL_CRATES for flag in _INCREMENTAL_FLAGS] if settings[_PROFILE] == "debug" else []
+            ["{}@{}".format(crate, flag) for crate in INCREMENTAL_CRATES for flag in _INCREMENTAL_FLAGS] if settings[_PROFILE] == "debug" and settings[_INCREMENTAL] else []
         ),
         # Each crate's LTO form is the flags' above; rules_rust adds none of its own.
         _LTO: "manual",
@@ -138,7 +139,7 @@ def _rust_transition_impl(settings, attr):
 
 _rust_transition = transition(
     implementation = _rust_transition_impl,
-    inputs = [_PLATFORMS, _PROFILE],
+    inputs = [_PLATFORMS, _PROFILE, _INCREMENTAL],
     outputs = [_PLATFORMS, _EXTRA_FLAGS, _EXTRA_ENV, _PER_CRATE, _LTO, _PIPELINED],
 )
 

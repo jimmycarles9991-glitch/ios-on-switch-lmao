@@ -3,6 +3,7 @@
 
 load("@bazel_skylib//rules:common_settings.bzl", "string_flag")
 load("@rules_python//python:py_binary.bzl", "py_binary")
+load("@rules_python//python:py_test.bzl", "py_test")
 load("//bazel/lint:defs.bzl", "lint_files")
 
 package(default_visibility = ["//visibility:public"])
@@ -20,6 +21,15 @@ exports_files([
 py_binary(
     name = "xnu_compile_record",
     srcs = ["xnu_compile_record.py"],
+)
+
+py_test(
+    name = "xnu_compile_record_test",
+    size = "small",
+    srcs = [
+        "xnu_compile_record.py",
+        "xnu_compile_record_test.py",
+    ],
 )
 
 # Where build paths appear to be in the outputs (__FILE__ strings, debug info). The default is machine independent;

@@ -10,9 +10,15 @@ state's split with its record (directpack.mm); directlink.py packs the split of 
 import kernels
 import packfile
 
-PROGRAM_CBUFS = 11
+PROGRAM_CBUFS = packfile.PROGRAM_CBUFS
 QMD_CBUFS = 8
 FRONTIER = 6  # runtime/raw_pack.h CbufFrontier
+MAX_FRONTIER_BYTES = 4096  # runtime/raw_split_metadata.h usableSplitMetadata
+
+
+def usable_frontier(s: dict) -> bool:
+    """Whether the runtime takes the split's frontier: 16-byte steps up to 4 KiB (bound in whole 256-byte units)."""
+    return 0 < s.get('frontier_bytes', 0) <= MAX_FRONTIER_BYTES and s['frontier_bytes'] % 16 == 0
 
 
 def of_record(record: bytes, fs: str, prologue: str) -> dict:
@@ -28,7 +34,10 @@ def of_record(record: bytes, fs: str, prologue: str) -> dict:
         'shader_data_cbuf': shader_data_cbuf,
         'ubo_cbufs': list(ubo[:ubos]),
         'threshold': fields[0],
-        'qmd': list(fields[10:]),
+        'batch_version': fields[10],
+        'batch_threads': fields[11],
+        'qmd': list(fields[12:76]),
+        'cost': dict(zip(packfile.SPLIT_COST_FIELDS, fields[76:], strict=True)),
     }
 
 
@@ -61,6 +70,9 @@ def lay_out(
         if len(programs[fs]['cbufs']) > PROGRAM_CBUFS or s['prologue_cbufs'] > QMD_CBUFS:
             continue
         if not binds_as_whole(s, whole, programs):
+            continue
+        if not usable_frontier(s):
+            report.append(f'{whole}: split left out, a frontier of {s.get("frontier_bytes")} bytes the runtime refuses')
             continue
         packfile.place_graphics(fs, programs, heap, prog_index, prog_recs)
         kernel = {'prog': s['prologue']}

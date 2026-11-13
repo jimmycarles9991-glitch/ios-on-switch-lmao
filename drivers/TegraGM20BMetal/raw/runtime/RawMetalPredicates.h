@@ -46,17 +46,18 @@ enum RMPred : uint8_t {
     PredCallCBInvocation,  // a command buffer selector recorded as an invocation
     PredCallBlitOptions,
     PredCallBufCopyRange,
-    PredCallBytes,  // setBytes with no GPU pool memory for its bytes: a = length
     PredBlitTexCopy,
     PredBlitBufToTex,
     PredBlitTexToBuf,
     PredBlitWholeTexCopy,
-    PredCompute,        // a kernel's buffer, texture or sampler not made by this device
-    PredComputeOff16,   // a buffer off 16 bytes where the kernel's record names no residual word: a = slot
-    PredComputeKernel,  // no pack kernel at the dispatch's shape, memory, textures and samplers
-    PredComputeImage,   // a texture sampled through an image of its own: a = slot
-    PredComputeView,    // a texture where m2v binds a view of another texel size: a = slot
-    PredComputeEdge,    // dispatchThreads: of a grid with an edge threadgroup: a = the grid's edge
+    PredBlitTexFill,       // a fillTexture: the raw path does not draw: a = pixel format, b = level or other format
+    PredCompute,           // a kernel's buffer, texture or sampler not made by this device
+    PredComputeOff16,      // a buffer off 16 bytes where the kernel's record names no residual word: a = slot
+    PredComputeKernel,     // no pack kernel at the dispatch's shape, memory, textures and samplers
+    PredComputeImage,      // a texture sampled through an image of its own: a = slot
+    PredComputeView,       // a texture where m2v binds a view of another texel size: a = slot
+    PredComputeEdge,       // dispatchThreads: of a grid with an edge threadgroup: a = the grid's edge
+    PredComputePredicate,  // predication raw cannot run (a loop, a misused record, a word outside a raw buffer): the command buffer fails; a = kind or offset
     PredMipmaps,
     PredMipmapsFormat,  // a mipmapped texture's generateMipmaps in a format neither the 2D engine nor a mip state filters: a = format
     PredEvent,
@@ -73,6 +74,9 @@ enum RMPred : uint8_t {
     PredEncDepthStencil,  // a = the state's depth format, b = the pass's | a state that tests without the attachment << 32
     PredEncSamples,       // a = the state's samples, b = the pass's | the state's shading passes << 32
     PredEncNoChannel,     // the kernel refused the channel or its context (logged with its answer)
+    PredEncGeometry,      // a = primitive, b = count | instances << 32; no native raster-order plan
+    PredEncStorageView,  // a = attachment, b = format | width << 32: no storage view and no barrier form to take
+    PredPassRotated,     // a = raw::RotatedRefusal, b = the rotation (a pass's, or the state's at encode)
     PredCount
 };
 
@@ -109,17 +113,18 @@ static constexpr const char *kPredNames[] = {"-",
                                              "call.cbinv",
                                              "call.blitopt",
                                              "call.bufcopy",
-                                             "call.bytes",
                                              "blit.tex",
                                              "blit.b2t",
                                              "blit.t2b",
                                              "blit.whole",
+                                             "blit.fill",
                                              "compute",
                                              "compute.off16",
                                              "compute.nokernel",
                                              "compute.image",
                                              "compute.view",
                                              "compute.edge",
+                                             "compute.predicate",
                                              "mipmaps",
                                              "mipmaps.fmt",
                                              "event",
@@ -134,7 +139,10 @@ static constexpr const char *kPredNames[] = {"-",
                                              "enc.notic",
                                              "enc.ds",
                                              "enc.samples",
-                                             "enc.nochannel"};
+                                             "enc.nochannel",
+                                             "enc.geometry",
+                                             "enc.storage",
+                                             "pass.rotated"};
 static_assert(sizeof kPredNames / sizeof *kPredNames == PredCount, "a name for each predicate");
 
 // What makes a command buffer go to m2v (counted, one log line each kind)
@@ -154,7 +162,10 @@ enum RMReason : uint8_t {
 static const char *const kReasonNames[WhyCount] = {"raw",     "state",   "texture", "pass",  "call",
                                                    "compute", "mipmaps", "event",   "encode"};
 
-extern std::atomic<uint64_t> gPredCbs[PredCount], gPredOnly[PredCount], gPredLogged;
+#if !defined(SWITCH_DEBUG) || SWITCH_DEBUG
+extern std::atomic<uint64_t> gPredCbs[PredCount], gPredOnly[PredCount];
+#endif
+extern std::atomic<uint64_t> gPredLogged;
 
 static inline bool predLogged(RMPred p)
 {

@@ -1439,6 +1439,24 @@ fn same(a: &Info, b: &Info) -> bool {
     }
 }
 
+pub(super) fn uses_argument_samplers(layout: &PipelineLayout) -> bool {
+    layout
+        .sets
+        .iter()
+        .flat_map(|set| &set.bindings)
+        .any(|binding| argument_sampler_source(binding.source))
+}
+
+pub(super) fn argument_sampler_source(source: BindingSource) -> bool {
+    matches!(
+        source,
+        BindingSource::Synthetic {
+            binding: SyntheticBinding::SamplerTable,
+            ..
+        }
+    )
+}
+
 /// `samplers` as the bind state's argument samplers, each at its element of the sampler arrays
 /// (`resource_ids.rs`; one past every array's capacity at `u32::MAX`, which [`fit_samplers`]
 /// leaves out).

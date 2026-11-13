@@ -128,7 +128,7 @@ constexpr uint32_t kListBytes = 0x1000, kInList = 0x000, kOutList = 0x800, kScra
 constexpr unsigned kMaxEntries = 220;
 constexpr uint32_t kOpTimeoutMs = 200;
 constexpr size_t kHookMinBytes = 1024;  // smaller compresses (finals, short updates) stay on the CPU
-constexpr uint32_t kCheckFirst = 32, kCheckEvery = 512;
+constexpr uint32_t kCheckFirst = 32;
 
 struct Dma {
     switch_dma_buffer buffer;
@@ -722,8 +722,16 @@ bool cpuAes(tegra_se_mode mode, bool encrypt, const uint8_t *key, unsigned keyBy
 
 bool shouldCheck(unsigned alg)
 {
+#if DEVELOPMENT || DEBUG
+    constexpr uint32_t kCheckEvery = 512;
     const uint32_t n = __atomic_fetch_add(&gAlg[alg].ops, 1, __ATOMIC_RELAXED);
     return n < kCheckFirst || n % kCheckEvery == 0;
+#else
+    // Boot known-answer and loaded-state qualification still run. Production requests use the qualified engine once;
+    // a second full CPU encryption/hash is development diagnostics, not completion or hardware-error handling.
+    (void)alg;
+    return false;
+#endif
 }
 
 void algOff(unsigned alg, const char *what)

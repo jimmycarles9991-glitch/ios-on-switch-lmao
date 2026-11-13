@@ -1,7 +1,7 @@
 """overlay.py's bundle entries and its Supplemental cryptex rule.
 
 A bundle's .ipa app directory is staged whole, every Mach-O in it trusted; the Supplemental cryptex path holds launchd
-plists only.
+plists and launchd's jetsam properties overlay only.
 """
 
 import hashlib
@@ -119,7 +119,7 @@ class BundleTest(unittest.TestCase):
 
 
 class SupplementalTest(unittest.TestCase):
-    """iOS 27's Supplemental cryptex path takes launchd plists and nothing else.
+    """iOS 27's Supplemental cryptex path takes launchd plists and launchd's jetsam properties overlay, nothing else.
 
     The commpage byte that makes launchd read it also makes Foundation dlopen Frameworks/ERFoundationExtension.dylib
     from it into every process and Settings show a PreferenceBundles pane from it (and from /private/var/RPSupport).
@@ -134,12 +134,18 @@ class SupplementalTest(unittest.TestCase):
         plan = overlay.plan(self.manifest(path), portrait=False, kind='24B119')
         self.assertEqual(plan['dirs'], [[SUPPLEMENTAL, '']])
 
+    def test_the_jetsam_properties_overlay_is_allowed(self):
+        path = SUPPLEMENTAL + '/System/Library/JetsamProperties/com.apple.jetsamproperties.cryptex.plist'
+        plan = overlay.plan(self.manifest(path), portrait=False, kind='24B119')
+        self.assertEqual([f['path'] for f in plan['files']], [path])
+
     def test_anything_else_is_refused(self):
         refused = [
             (SUPPLEMENTAL + '/Frameworks/ERFoundationExtension.dylib', SUPPLEMENTAL),
             (SUPPLEMENTAL + '/System/Library/PreferenceBundles/SecurityResearchDeviceERMSettings.bundle', SUPPLEMENTAL),
             (SUPPLEMENTAL + '/System/Library/LaunchDaemons/joyconpaird', SUPPLEMENTAL),
-            (SUPPLEMENTAL + '/System/Library/JetsamProperties/com.apple.jetsamproperties.cryptex.plist', SUPPLEMENTAL),
+            (SUPPLEMENTAL + '/System/Library/JetsamProperties/com.apple.jetsamproperties.J181.plist', SUPPLEMENTAL),
+            (SUPPLEMENTAL + '/System/Library/JetsamProperties/other.plist', SUPPLEMENTAL),
             (SUPPLEMENTAL, '/private/preboot/Cryptexes'),
             ('/System/Cryptexes/Supplemental/Frameworks/ERFoundationExtension.dylib', '/System/Cryptexes/Supplemental'),
             ('/private/var/RPSupport/System/Library/PreferenceBundles/X.bundle', '/private/var/RPSupport'),

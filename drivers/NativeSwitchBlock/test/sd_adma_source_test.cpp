@@ -80,7 +80,8 @@ TEST(SdAdmaSource, DriverGuards)
                 HasSubstr("const uint32_t limit = first->write ? writeSectors : maxSectors;"));
     EXPECT_THAT(body("bool NativeSwitchBlock::bounceChain("),
                 HasSubstr("const uint32_t limit = write ? kSafeSectors : sdmaReadSectors;"));
-    EXPECT_THAT(source, HasSubstr("largeWriteChecks = checkBuffer ? kLargeWriteChecks : 0;"));
+    EXPECT_THAT(source,
+                HasSubstr("largeWriteChecks = SwitchAdmaHigh::kLiveProofs && checkBuffer ? kLargeWriteChecks : 0;"));
     EXPECT_THAT(source, HasSubstr("writeSectors = admaWrites ? kDirectWriteSectors : kSafeSectors;"));
     // Cache maintenance is by line over the table's own ranges: no set/way or whole-cache operation.
     EXPECT_FALSE(Search(source, R"(dc\s+(c?isw|csw)|FlushPoC_Dcache\b|CleanPoC_Dcache\b)"));

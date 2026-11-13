@@ -314,8 +314,7 @@ pub(super) fn prepare(
 
 /// Load `leaf` from `p`, contained: the value, or 0 out of bounds.
 fn load_one(fb: &mut FunctionBuilder<'_>, leaf: &Leaf, p: Prepared) -> BResult<SValue> {
-    let mut mem = p.mem;
-    let v = leaf::load(fb, &mut mem, leaf, p.off)?;
+    let v = super::bound_leaf::load(fb, p.mem, *leaf, p.off)?;
     match p.inb {
         None => Ok(v),
         Some(inb) => {
@@ -328,20 +327,18 @@ fn load_one(fb: &mut FunctionBuilder<'_>, leaf: &Leaf, p: Prepared) -> BResult<S
 /// Store `v` as `leaf` at `p`, contained. Returns whether the store merges a partial word
 /// ([`leaf::store`]).
 fn store_one(fb: &mut FunctionBuilder<'_>, leaf: &Leaf, p: Prepared, v: SValue) -> BResult<bool> {
-    let mut mem = p.mem;
     match (p.inb, p.guard_store) {
         (Some(inb), true) => {
             let leaf = *leaf;
             let then: ArmFn<'_, bool> = Box::new(move |fb, merged| {
-                let mut mem = p.mem;
-                *merged = leaf::store(fb, &mut mem, &leaf, p.off, v)?;
+                *merged = super::bound_leaf::store(fb, p.mem, leaf, p.off, v)?;
                 Ok(ArmEnd::FallThrough(Vec::new()))
             });
             let mut merged = false;
             fb.if_(&mut merged, inb, then, None)?;
             Ok(merged)
         }
-        _ => leaf::store(fb, &mut mem, leaf, p.off, v),
+        _ => super::bound_leaf::store(fb, p.mem, *leaf, p.off, v),
     }
 }
 

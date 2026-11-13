@@ -45,10 +45,11 @@
 //
 // The raw GM20B path (raw/runtime/RawMetal.h): when the build's pipeline pack is staged beside the bundle
 // (<Extensions>/TegraGM20BMetal.raw/pack.bin, build-tegra-gm20b-metal.py makes it, stage-tegra-gm20b-metal.py copies it) and the
-// process's sandbox lets it read it, the device every process gets is the raw facade over the m2v device: its command buffers go
-// straight to MAXWELL_B methods, and any the raw path cannot draw exactly as m2v (a state not in the pack, an extended-range
-// format, compute, mipmaps...) are replayed on m2v whole. The render server's raw device is made beside the m2v device's open,
-// every other process's memory, channel and shader heap at their first use (raw_gpu.h Device::Role). A pack of another build is
+// process's sandbox lets it read it, the device every process gets is the raw facade: its command buffers go straight to
+// MAXWELL_B methods, and any the raw path cannot draw exactly as m2v (a state not in the pack, an extended-range format,
+// compute, mipmaps...) are replayed on m2v whole, its m2v device opened at the first such need (RawM2V). The render server's
+// raw device is made beside the m2v device's open, every other process's memory, channel and shader heap at their first use
+// (raw_gpu.h Device::Role). A pack of another build is
 // refused (its stack key, TEGRA_RAW_STACK, differs). Off for a boot: remove or rename <Data>/ngpu/addons/TegraGM20BMetal.raw
 // (stage-tegra-gm20b-metal.py --no-raw does); for a process: TEGRA_RAW_METAL=0 in its environment.
 #import <Foundation/Foundation.h>
@@ -57,12 +58,15 @@
 #include <atomic>
 #include <initializer_list>
 #include <mutex>
+#include <thread>
 #include <dlfcn.h>
+#include <mach-o/dyld.h>
 #include <notify.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <objc/runtime.h>
 #include <os/log.h>
+#include <pthread.h>
 #include <sys/stat.h>
 #include <string.h>
 #include <unistd.h>
@@ -317,6 +321,19 @@ const char *rawPackRefusal(char *path, size_t size)
     if (!sandboxAllows("file-read-data", kSandboxFilterPath, path))
         return "its sandbox does not let it read the pack";
     return access(path, R_OK) == 0 ? nullptr : "no pack staged";
+}
+
+// The installed native records beside the pack at `pack` (<Extensions>/TegraGM20BMetal.raw/native, RecordCache::attachSeed) into
+// `seed`; false if this process's sandbox may not read their index (asked without a report).
+bool rawNativeSeed(const char *pack, char *seed, size_t size)
+{
+    const char *slash = strrchr(pack, '/');
+    if (!slash)
+        return false;
+    snprintf(seed, size, "%.*s/native", int(slash - pack), pack);
+    char index[1200];
+    snprintf(index, sizeof index, "%s/raw-%016llx/index", seed, (unsigned long long)TEGRA_RAW_STACK);
+    return sandboxAllows("file-read-data", kSandboxFilterPath, index);
 }
 
 bool gRaw;  // this process's device is the raw facade
@@ -582,6 +599,11 @@ void startRates()
     observeDisplayLinkRates();
     observeRedrawCauses();
     observeRf16Request();
+    // kprof keys a user PC as main+<offset from the process's main header> within 256 MiB of it, else as "other": the
+    // plugin's base beside its main header turns a main+ sample into an offset in this bundle's binary
+    if (Dl_info self = {}; dladdr(reinterpret_cast<const void *>(&startRates), &self) && self.dli_fbase)
+        os_log(logger(), "TegraGM20BMetal: %{public}s image base 0x%lx, main header 0x%lx", processWord(),
+               (unsigned long)(uintptr_t)self.dli_fbase, (unsigned long)(uintptr_t)_dyld_get_image_header(0));
     static dispatch_source_t timer;
     timer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, dispatch_get_global_queue(QOS_CLASS_UTILITY, 0));
     dispatch_source_set_timer(timer, dispatch_time(DISPATCH_TIME_NOW, 5 * NSEC_PER_SEC), 5 * NSEC_PER_SEC,
@@ -596,6 +618,12 @@ void startRates()
             os_log(logger(), "TegraGM20BMetal: %{public}s %{public}s", processWord(), line);
         // The raw path's own: command buffers on each path and why, encode, draws, memory.
         if (gRaw && raw_metal_rates(line, sizeof line))
+            os_log(logger(), "TegraGM20BMetal: %{public}s %{public}s", processWord(), line);
+        if (gRaw && raw_metal_fetch_rates(line, sizeof line))
+            os_log(logger(), "TegraGM20BMetal: %{public}s %{public}s", processWord(), line);
+        if (gRaw && raw_metal_encode_rates(line, sizeof line))
+            os_log(logger(), "TegraGM20BMetal: %{public}s %{public}s", processWord(), line);
+        if (gRaw && raw_metal_fetch_keys(line, sizeof line))
             os_log(logger(), "TegraGM20BMetal: %{public}s %{public}s", processWord(), line);
     });
     dispatch_resume(timer);
@@ -630,6 +658,130 @@ void answeredZero(const char *cls, const char *selector)
     os_log_error(logger(), "TegraGM20BMetal: unimplemented -[%{public}s %{public}s] answered zero", cls, selector);
 }
 
+// The m2v device (the frontend over the bridge: NVK's device and m2v's runtime), opened once by its first user: the raw
+// device's first need, the render server's open, or a process the raw path is off in. The runtime keeps its shader cache
+// across reboots where the directory lasts: the first candidate (cacheCandidates) that takes a write, or
+// TEGRA_M2V_CACHE_DIR, which the raw path's records share. A device that does not open for another reason than its cache is
+// not tried again with the next one. With none writable the cache is the runtime's memory alone (a bridge without that
+// mode refuses, and the process gets no device as before).
+class M2VOpening {
+public:
+    M2VOpening(const char *loader, uint64_t registryID) : registryID_(registryID)
+    {
+        strlcpy(loader_, loader, sizeof loader_);
+        const char *chosen = getenv("TEGRA_M2V_CACHE_DIR");
+        if (chosen && strcmp(chosen, "memory") && sandboxMayCreate(chosen))
+            strlcpy(candidates_[count_++], chosen, sizeof candidates_[0]);
+        else if (!chosen)
+            count_ = cacheCandidates(candidates_, 6);
+        for (; first_ < count_ && !writable(candidates_[first_]); first_++)
+            noteCacheRefusal(candidates_[first_], strerror(errno));
+        seeded_ = sharedSeed(seedName_, sizeof seedName_);
+    }
+
+    const char *cacheDir() const
+    {
+        return first_ < count_ ? candidates_[first_] : nullptr;
+    }
+
+    // Opens it now on a thread of its own: device() then waits for that open
+    void start()
+    {
+        std::thread([this] {
+            pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0);
+            pthread_setname_np("com.brunostjohn.switch.m2v.open");
+            device();
+        }).detach();
+    }
+
+    id device()
+    {
+        std::call_once(once_, [this] {
+            opened_ = open();
+        });
+        return opened_;
+    }
+
+private:
+    id open()
+    {
+        const uint64_t began = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
+        id made = nil;
+        const char *cache = nullptr;
+        for (unsigned i = first_; i < count_ && !made; ++i) {
+            if (i > first_ && !writable(candidates_[i])) {
+                noteCacheRefusal(candidates_[i], strerror(errno));
+                continue;
+            }
+            cache = candidates_[i];
+#if SWITCH_DEBUG
+            // The runtime's making log (m2v 0118): one line per driver record this process writes (a pipeline compiled here,
+            // which neither its cache nor the seed held), naming the record and the making's description, beside the journal
+            // so harvest.py --save takes it; past 2 MiB it starts again, the previous kept as makings.log.old.
+            char makings[600];
+            snprintf(makings, sizeof makings, "%s/makings.log", candidates_[i]);
+            struct stat makingsStat;
+            if (stat(makings, &makingsStat) == 0 && makingsStat.st_size > (2 << 20)) {
+                char old[620];
+                snprintf(old, sizeof old, "%s.old", makings);
+                rename(makings, old);
+            }
+            setenv("METAL2VULKAN_MAKING_LOG", makings, 1);
+#endif
+            made = bridgeOpen(cache);
+            if (!made && !strstr(nmb_last_error(), "ShaderCache"))
+                break;
+        }
+        if (!made && (!cache || strstr(nmb_last_error(), "ShaderCache"))) {
+            cache = nullptr;
+            made = bridgeOpen(nullptr);
+        }
+        if (!made) {
+            os_log_error(logger(), "TegraGM20BMetal: no m2v device in %{public}s: %{public}s", getprogname(),
+                         nmb_last_error());
+            return nil;
+        }
+        // Every frontend object (NBObject), then the device.
+        native_bridge_metal_answer_unimplemented(NSClassFromString(@"NBObject"), answeredZero);
+        native_bridge_metal_answer_unimplemented(object_getClass(made), answeredZero);
+        // seed: "shared (<its SEED line>)" (the runtime reads the shared seed beneath the cache), "none" (no readable seed,
+        // or off)
+        os_log(logger(),
+               "TegraGM20BMetal: m2v device %{public}s open in %{public}s, cache "
+               "%{public}s%{public}s%{public}s%{public}s, "
+               "seed %{public}s%{public}s%{public}s, open %llu ms (bridge %llu ms)",
+               [[(id<MTLDevice>)made name] UTF8String], getprogname(), cache ? cache : "memory only",
+               !cache ? " (" : "", !cache ? (gCacheRefusals[0] ? gCacheRefusals : "no candidate") : "",
+               !cache ? ")" : "", seeded_ ? "shared (" : "none", seeded_ ? seedName_ : "", seeded_ ? ")" : "",
+               (unsigned long long)((clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - began) / 1000000),
+               (unsigned long long)(bridgeNs_ / 1000000));
+        return made;
+    }
+
+    id bridgeOpen(const char *cache)
+    {
+        const uint64_t began = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
+        id made = nil;
+        @try {
+            made = native_bridge_metal_open(loader_, cache, registryID_, missing);
+        } @catch (NSException *exception) {
+            made = nil;
+        }
+        bridgeNs_ += clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - began;
+        return made;
+    }
+
+    char loader_[1024] = {};
+    uint64_t registryID_ = 0;
+    char candidates_[6][512] = {};
+    unsigned count_ = 0, first_ = 0;
+    char seedName_[128] = {};
+    bool seeded_ = false;
+    uint64_t bridgeNs_ = 0;
+    std::once_flag once_;
+    id opened_ = nil;
+};
+
 id openDevice(unsigned port)
 {
     static id device;
@@ -647,13 +799,9 @@ id openDevice(unsigned port)
         // (drivers/SwitchAccelStub) that only ends QuartzCore's accelerator poll. Set before the raw path's setup below, which
         // may be the first to open NVK's connection.
         setenv("NVK_DARWIN_SERVICE", "AGXAccelerator", 0);
-        // The render server's raw GM20B path's own setup (its pack, channel and context, the first pool chunk) starts now, beside
-        // the m2v device's open below; raw_metal_device_open takes what it made, so its first frame waits for neither twice.
         const bool rawWanted = knobOn("TEGRA_RAW_METAL", true);
         char pack[1100] = "";
         const char *packRefusal = rawWanted ? rawPackRefusal(pack, sizeof pack) : nullptr;
-        if (renderServer && rawWanted && !packRefusal)
-            raw_metal_prepare(pack, uint64_t(TEGRA_RAW_STACK));
         if (!renderServer)
             setenv("NMB_MEMO_MB", "32", 0);  // read by the bridge
         // Read by the runtime. In the render server too: its pools double their blocks, and each block is one BoAlloc on the
@@ -686,82 +834,26 @@ id openDevice(unsigned port)
             CFPreferencesSetAppValue(CFSTR("CAEnableIOSurfaceCompression"), kCFBooleanFalse,
                                      kCFPreferencesCurrentApplication);
         }
-        // The runtime keeps its shader cache across reboots where the directory lasts: the first candidate (cacheCandidates)
-        // that takes a write, or TEGRA_M2V_CACHE_DIR. A device that does not open for another reason than its cache is not tried
-        // again with the next one. With none writable the cache is the runtime's memory alone (a bridge without that mode
-        // refuses, and the process gets no device as before).
-        // The opening's cost, one line (the ready line's "open" field): the cache directory's choice and probe, then the bridge's
-        // device (NVK loaded and its device made, the runtime's device and priming), on the thread that asked for the device
-        // (a process's main thread, often: Chrono's WidgetRenderer and the screenshot service wait on it).
         const uint64_t openBegan = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
 #if !SWITCH_DEBUG
         setenv("NMB_SHADOW_LOG", "0",
                0);  // the bridge's shadow.log and its every-texture announcements: nothing reads them
 #endif
-        uint64_t bridgeNs = 0;
-        char candidates[6][512] = {};
-        unsigned count = 0;
-        const char *chosen = getenv("TEGRA_M2V_CACHE_DIR");
-        if (chosen && strcmp(chosen, "memory") && sandboxMayCreate(chosen))
-            strlcpy(candidates[count++], chosen, sizeof candidates[0]);
-        else if (!chosen)
-            count = cacheCandidates(candidates, 6);
-        const char *cache = nullptr;
-        char seedName[128] = {};
-        const bool seeded = sharedSeed(seedName, sizeof seedName);
-        for (unsigned i = 0; i < count && !device; ++i) {
-            if (!writable(candidates[i])) {
-                noteCacheRefusal(candidates[i], strerror(errno));
-                continue;
-            }
-            cache = candidates[i];
-#if SWITCH_DEBUG
-            // The runtime's making log (m2v 0118): one line per driver record this process writes (a pipeline compiled here,
-            // which neither its cache nor the seed held), naming the record and the making's description, beside the journal so
-            // harvest.py --save takes it; past 2 MiB it starts again, the previous kept as makings.log.old. A precompile's own
-            // log beside a device's shows where a seeded making and the device's part (host and device must name each alike).
-            {
-                char makings[600];
-                snprintf(makings, sizeof makings, "%s/makings.log", candidates[i]);
-                struct stat makingsStat;
-                if (stat(makings, &makingsStat) == 0 && makingsStat.st_size > (2 << 20)) {
-                    char old[620];
-                    snprintf(old, sizeof old, "%s.old", makings);
-                    rename(makings, old);
-                }
-                setenv("METAL2VULKAN_MAKING_LOG", makings, 1);
-            }
-#endif
-            const uint64_t bridgeBegan = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
-            @try {
-                device = native_bridge_metal_open(loader, cache, registryID, missing);
-            } @catch (NSException *exception) {
-                device = nil;
-            }
-            bridgeNs += clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - bridgeBegan;
-            if (!device && !strstr(nmb_last_error(), "ShaderCache"))
-                break;
-        }
-        if (!device && (!cache || strstr(nmb_last_error(), "ShaderCache"))) {
-            cache = nullptr;
-            const uint64_t bridgeBegan = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
-            @try {
-                device = native_bridge_metal_open(loader, nullptr, registryID, missing);
-            } @catch (NSException *exception) {
-                device = nil;
-            }
-            bridgeNs += clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - bridgeBegan;
-        }
-        if (!device) {
-            os_log_error(logger(), "TegraGM20BMetal: no device in %{public}s: %{public}s", getprogname(),
-                         nmb_last_error());
+        // NVK holds the process's one GPU connection, which the raw path shares: loaded here, once, with the
+        // environment set, before the raw path's setup looks for it on its own thread, so that lookup never races
+        // the m2v device's load of the same image.
+        if (!dlopen(loader, RTLD_NOW | RTLD_LOCAL)) {
+            os_log_error(logger(), "TegraGM20BMetal: no device in %{public}s: %{public}s", getprogname(), dlerror());
             return nil;
         }
-        // Every frontend object (NBObject), then the device.
-        native_bridge_metal_answer_unimplemented(NSClassFromString(@"NBObject"), answeredZero);
-        native_bridge_metal_answer_unimplemented(object_getClass(device), answeredZero);
-        // Every process draws through the raw GM20B path when the build's pack is staged and readable (above); the m2v device
-        // stays inside it for every answer, object and command buffer the raw path has no own for.
+        // The render server's raw GM20B path's own setup (its pack, channel and context, the first pool chunk) starts now, beside
+        // the m2v device's open below; raw_metal_device_open_lazy takes what it made, so its first frame waits for neither twice.
+        if (renderServer && rawWanted && !packRefusal)
+            raw_metal_prepare(pack, uint64_t(TEGRA_RAW_STACK));
+        M2VOpening &m2v = *new M2VOpening(loader, registryID);
+        // Every process draws through the raw GM20B path when the build's pack is staged and readable (above). Its m2v device is
+        // opened at the first thing only m2v does, so a process that draws only packed states never has one; the render server's
+        // opens beside the raw path's setup, as before, so no first need of its waits for it on Core Animation's render thread.
         // One line either way, so a boot shows which device each process got.
         if (!rawWanted) {
             os_log(logger(), "TegraGM20BMetal: raw GM20B path off in %{public}s (TEGRA_RAW_METAL=0): m2v device kept",
@@ -771,29 +863,37 @@ id openDevice(unsigned port)
                    "TegraGM20BMetal: raw GM20B path off in %{public}s (%{public}s at %{public}s): m2v device kept",
                    getprogname(), packRefusal, pack);
         } else {
+            if (renderServer)
+                m2v.start();
+            RawM2V lazy;
+            lazy.open = ^{
+                return m2v.device();
+            };
+            lazy.methods = NSClassFromString(@"NBDeviceMethods");
+            lazy.answerSelector = nmb_device_answer_selector;
             NSString *why = nil;
-            if (id raw = raw_metal_device_open(pack, uint64_t(TEGRA_RAW_STACK), (id<MTLDevice>)device, &why)) {
+            if (id raw = raw_metal_device_open_lazy(pack, uint64_t(TEGRA_RAW_STACK), registryID, lazy, &why)) {
                 os_log(logger(), "TegraGM20BMetal: raw GM20B path on in %{public}s (pack %{public}s, stack %016llx)",
                        getprogname(), pack, (unsigned long long)TEGRA_RAW_STACK);
                 device = raw;
                 gRaw = true;
-                raw_metal_complete_states(cache);
+                char nativeSeed[1100];
+                raw_metal_complete_states(m2v.cacheDir(),
+                                          rawNativeSeed(pack, nativeSeed, sizeof nativeSeed) ? nativeSeed : nullptr);
             } else {
                 os_log_error(logger(),
                              "TegraGM20BMetal: raw GM20B path off in %{public}s (%{public}@): m2v device kept",
                              getprogname(), why);
             }
         }
-        // seed: "shared (<its SEED line>)" (the runtime reads the shared seed beneath the cache), "none" (no readable seed, or off)
+        if (!device)
+            device = m2v.device();
+        if (!device)
+            return nil;
         const uint64_t openNs = clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - openBegan;
-        os_log(logger(),
-               "TegraGM20BMetal: device %{public}s ready in %{public}s, cache "
-               "%{public}s%{public}s%{public}s%{public}s, seed "
-               "%{public}s%{public}s%{public}s, open %llu ms (bridge %llu ms)",
-               [[(id<MTLDevice>)device name] UTF8String], getprogname(), cache ? cache : "memory only",
-               !cache ? " (" : "", !cache ? (gCacheRefusals[0] ? gCacheRefusals : "no candidate") : "",
-               !cache ? ")" : "", seeded ? "shared (" : "none", seeded ? seedName : "", seeded ? ")" : "",
-               (unsigned long long)(openNs / 1000000), (unsigned long long)(bridgeNs / 1000000));
+        os_log(logger(), "TegraGM20BMetal: device %{public}s ready in %{public}s, open %llu ms%{public}s",
+               [[(id<MTLDevice>)device name] UTF8String], getprogname(), (unsigned long long)(openNs / 1000000),
+               gRaw ? " (m2v device at its first need)" : "");
 #if SWITCH_DEBUG
         startRates();
 #endif

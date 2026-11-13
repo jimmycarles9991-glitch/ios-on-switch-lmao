@@ -31,14 +31,22 @@ struct Buffer {
 struct Readback {
 	const void *owner;  // null after the arming connection closed with its present in flight
 	Buffer buffers[kBuffers];
-	bool invalidated;
+	bool invalidated, live;
 	// Written by the display's path while in flight, read once the state says done or failed.
 	int state, status;
-	uint32_t width, height, flags;
+	uint32_t width, height, flags, previousSequence;
+	uint64_t sequence;
+};
+
+// What window A scans for the frame offered last: its surface on direct scanout, else the scanout buffer its copy
+// wrote. Written by the display's path only, whose offers come one at a time (gPresentLock).
+struct Shown {
+	tgm_present_read read;
 	uint64_t sequence;
 };
 
 Readback gReadback;
+Shown gShown;
 IOLock *gReadbackLock;
 
 IOLock *readbackLock()
@@ -121,7 +129,7 @@ void reapOrphan()
 	}
 }
 
-IOReturn arm(const void *owner)
+IOReturn arm(const void *owner, bool live)
 {
 	Readback &r = gReadback;
 	if (r.owner && r.owner != owner)
@@ -138,6 +146,7 @@ IOReturn arm(const void *owner)
 		tgm_cpu_clean_pages(b.pas, b.npages);
 	r.owner = owner;
 	r.invalidated = false;
+	r.live = live;
 	r.status = 0;
 	__atomic_store_n(&r.state, TegraGM20BReadbackArmed, __ATOMIC_RELEASE);
 	return kIOReturnSuccess;
@@ -167,6 +176,7 @@ void query(const void *owner, TegraGM20BAbiReadbackReply *out)
 	out->width = r.width;
 	out->height = r.height;
 	out->flags = r.flags;
+	out->previous_sequence = r.previousSequence;
 	out->sequence = r.sequence;
 	if (state != TegraGM20BReadbackDone || r.owner != owner)
 		return;
@@ -183,7 +193,7 @@ void query(const void *owner, TegraGM20BAbiReadbackReply *out)
 IOReturn tgm_readback_call(const void *owner, const TegraGM20BAbiReadback *in,
 			   TegraGM20BAbiReadbackReply *out)
 {
-	if (in->reserved)
+	if (in->reserved > 1 || (in->reserved && in->op != TegraGM20BReadbackArm))
 		return kIOReturnBadArgument;
 	IOLock *lock = readbackLock();
 	if (!lock)
@@ -193,7 +203,7 @@ IOReturn tgm_readback_call(const void *owner, const TegraGM20BAbiReadback *in,
 	IOReturn ret = kIOReturnSuccess;
 	switch (in->op) {
 	case TegraGM20BReadbackArm:
-		ret = arm(owner);
+		ret = arm(owner, in->reserved == 1);
 		break;
 	case TegraGM20BReadbackDisarm:
 		ret = disarm(owner);
@@ -242,17 +252,38 @@ void tgm_readback_closed(const void *owner)
 	IOLockUnlock(lock);
 }
 
-uint32_t tgm_readback_take(const TegraScanoutCopy *copy, uint64_t source, bool sourceBlock,
+uint32_t tgm_readback_take(const TegraScanoutCopy *copy, uint64_t source, int32_t sourceBlockLog2,
 			   uint64_t target, tgm_present_read (&reads)[TGM_PRESENT_READS])
 {
 	Readback &r = gReadback;
+	const bool direct = (copy->flags & TEGRA_SCANOUT_COPY_FENCE_ONLY) != 0u;
+	const bool sourceBlock = sourceBlockLog2 >= 0;
+	const uint32_t pitch = copy->width * 4;
+	const Shown before = gShown;
+	gShown.read =
+		direct ? tgm_present_read{source,
+					  0,
+					  sourceBlock ? pitch
+						      : static_cast<uint32_t>(copy->sourceStride),
+					  pitch,
+					  copy->width,
+					  copy->height,
+					  sourceBlockLog2,
+					  0}
+		       : tgm_present_read{target,
+					  0,
+					  copy->targetPitch,
+					  pitch,
+					  copy->width,
+					  copy->height,
+					  static_cast<int32_t>(copy->blockHeightLog2),
+					  0};
+	gShown.sequence = copy->sequence;
 	int armed = TegraGM20BReadbackArmed;
 	if (__atomic_load_n(&r.state, __ATOMIC_RELAXED) != armed ||
 	    !__atomic_compare_exchange_n(&r.state, &armed, TegraGM20BReadbackInFlight, false,
 					 __ATOMIC_ACQUIRE, __ATOMIC_RELAXED))
 		return 0;
-	const bool direct = (copy->flags & TEGRA_SCANOUT_COPY_FENCE_ONLY) != 0u;
-	const uint32_t pitch = copy->width * 4;
 	if (static_cast<uint64_t>(pitch) * copy->height > kReadbackBytes) {
 		r.status = EFBIG;
 		__atomic_store_n(&r.state, TegraGM20BReadbackFailed, __ATOMIC_RELEASE);
@@ -263,6 +294,7 @@ uint32_t tgm_readback_take(const TegraScanoutCopy *copy, uint64_t source, bool s
 	r.sequence = copy->sequence;
 	r.flags = (direct ? TegraGM20BReadbackDirect : 0u) |
 		  (sourceBlock ? TegraGM20BReadbackSourceBlock : 0u);
+	r.previousSequence = 0;
 	r.status = 0;
 	const tgm_present_read framebuffer = {
 		source,
@@ -271,7 +303,7 @@ uint32_t tgm_readback_take(const TegraScanoutCopy *copy, uint64_t source, bool s
 		pitch,
 		copy->width,
 		copy->height,
-		sourceBlock ? static_cast<int32_t>(TEGRA_SCANOUT_TILED_BLOCK_HEIGHT_LOG2) : -1,
+		sourceBlockLog2,
 		0,
 	};
 	reads[0] = framebuffer;
@@ -285,6 +317,12 @@ uint32_t tgm_readback_take(const TegraScanoutCopy *copy, uint64_t source, bool s
 					     copy->height,
 					     static_cast<int32_t>(copy->blockHeightLog2),
 					     0};
+	if (r.live && before.read.src_va && before.read.width == copy->width &&
+	    before.read.height == copy->height) {
+		reads[1] = before.read;
+		r.flags |= TegraGM20BReadbackPrevious;
+		r.previousSequence = static_cast<uint32_t>(before.sequence);
+	}
 	reads[1].dst_va = bufferVa(1);
 	return kBuffers;
 }

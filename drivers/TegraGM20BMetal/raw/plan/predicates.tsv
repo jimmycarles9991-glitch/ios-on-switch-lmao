@@ -1,0 +1,69 @@
+# What each refusal predicate of raw/runtime/RawMetalPredicates.h becomes once the planner decides before emission.
+# fate: rule (a planner node rule or ladder rung covers it; covered_by names rules of plan_graph.h kRuleNames),
+# client / query (validate() answers ClientError / QueryGated; covered_by names plan_validate.h kProblemNames),
+# cb-error (the command buffer fails with MTLCommandBufferErrorDomain), gap (Metal allows it and no GPU-side rung exists
+# yet: the work left before the slow backend can go), layer (owned below or above the planner: L3 resources, L4
+# programs, L6 the Metal API), nil (L6 answers nil at creation, as Metal does for that descriptor), m2v (an m2v object
+# reached raw: gone with m2v), growth (a pool grows or the GPU work waits; never a refusal).
+# tag	fires	fate	covered_by	note
+tex.shape	create	gap	rotated_target,stored_multisample,two_plane_extended_range,planar_target	terms 5 rotation (R1, probe gpu.x1.rotated_target), 3 samples (R3), 6 format 550 over two planes (R2) and planar YCbCr (R4); terms 1, 2, 4 (type, levels, arrays) are L3 layouts from NIL
+tex.pool	create	growth	-	pool span or header slot: the pool grows (L3), the GPU work waits
+tex.surf.plane	create	layer	L3	a plane of a planar surface as a texture of its own: a plane TIC over the surface's memory
+tex.surf.pitch	create	layer	L3	L3 gives such a surface a conforming pool image; the planner's shadow.refresh then fills it on the copy engine before each pass that samples it
+tex.surf.bounds	create	nil	-	rows past the surface's allocation: newTextureWithDescriptor:iosurface:plane: answers nil
+tex.surf.base	create	layer	L3	a base off a page: a pool image L3 makes, filled by shadow.refresh
+tex.surf.imp	create	layer	L3	the kernel refused the import or the header slot: a resource failure at creation
+tex.planar	create	rule	planar.codes	the 4:4:4 two-plane code texture: copy-engine remaps from its planes when stale
+tex.buf.base	create	layer	L3	a base 16 but not 32 bytes into the buffer while the device answers 16 (iosurfaceReadOnlyTextureAlignmentBytes held at 16): a pool image L3 makes, filled by shadow.refresh; below the answered alignment it is a client error
+tex.buf.pitch	create	layer	L3	bytesPerRow 16 but not 32 apart: as tex.buf.base
+tex.buf.other	create	nil	-	memoryless, or past the buffer: newTextureWithDescriptor:offset:bytesPerRow: answers nil
+tex.view	create	layer	L3	views of another texel size or of a part of a 3D texture: TIC views made at view creation
+tex.foreign	record	m2v	-	m2v's own texture
+pass.fmt	record	gap	rotated_target,stored_multisample,two_plane_extended_range,planar_target	R1 (~1,400 HW Test cbs), R2, R3, R4 as tex.shape
+pass.level	record	layer	L3	levels, slices and depth planes of the textures the raw path keeps, and levels of format views of mipmapped ones, are attachment targets (raw_attachment_target.h), for attachments and resolves alike; left: a resolve into a texture the raw path does not keep or render, a planar or YCbCr one, or a format with no resolve state, a resolve from a part of a texture, and what Metal's validation refuses (past the texture, a slice of a 3D texture or a plane of an array)
+pass.rtsize	record	client	render_target_size	-
+pass.ds	record	gap	stored_multisample	a stored depth/stencil attachment (zetaDescriptor keeps one-sample depth only)
+pass.other	record	query	layered_rendering,rasterization_rate_map,sample_positions	the device answers no for all three at the claimed family
+pass.rotated	record	gap	rotated_target	a turned attachment beside one of another rotation or size or a loaded or stored one not turned, a rotation-4 Load, and at encode a state whose turned variant could not be made (PipelineTurnRefused)
+state.foreign	record	m2v	-	an m2v pipeline state
+state.notpack	record	m2v	-	functions from another device's library: with one backend every function is this device's
+state.pack	record	layer	L4	a state the pack lacks: made at creation (compiler daemon) or the archive-miss error FailOnBinaryArchiveMiss asks for
+state.making	record	growth	-	the record completes before the command buffer's first job runs: the GPU work waits, never the CPU
+call.vis	record	gap	-	Counting and Boolean results on the copy engine (raw_visibility.h); accumulated results (MTLVisibilityResultTypeAccumulate): REPORT_SEMAPHORE with reduction ADD (probe gpu.x1.visibility, d17), no planner node yet
+call.buf	record	m2v	-	an m2v buffer
+call.sampler	record	gap	sampler_address_mode	mirror-clamp-to-edge and opaque borders: an address-lowering program variant (L4)
+call.vsampler	record	layer	L4	a cubic vertex sampler, which m2v filters in the shader: a vertex-stage cubic variant (raw records bind every other vertex sampler)
+call.dbias	record	layer	L4	an infinite or NaN depth bias: the state program's viewport Z offset, as m2v's render_state.rs does
+call.inv	record	layer	L6	an encoder selector raw does not implement: implemented, or failed at creation per Metal
+call.cbinv	record	layer	L6	a command buffer selector raw does not implement: as call.inv
+call.blitopt	record	rule	copy.ce	depth or stencil of a combined format: copy-engine remap of the aspect
+call.bufcopy	record	client	buffer_range	a copy or fill past the buffer
+blit.tex	record	rule	copy.ce	levels, slices and 3D planes: one copy rectangle per layer; texel sizes that differ are client error copy_texel_size
+blit.b2t	record	rule	copy.ce	buffer rows into a texture: copy rectangles, one per plane
+blit.t2b	record	rule	copy.ce	texture rows into a buffer: as blit.b2t
+blit.whole	record	rule	copy.ce	a whole-texture copy of several levels or slices: one rectangle each
+blit.fill	record	m2v	-	a fillTexture: of a level, slice, view or region the raw path does not draw (level 0, slice 0 of a 2D texture it renders: CLEAR_SURFACE, or clear.twod)
+compute	record	m2v	-	a kernel's buffer, texture or sampler from m2v
+compute.off16	record	layer	L4	a kernel buffer off 16 bytes with no residual word: the binding ABI's residual words for kernels
+compute.nokernel	record	layer	L4	no pack kernel at the dispatch's shape: a kernel record per shape
+compute.image	record	rule	compute.shadow_load,compute.shadow_store	a texture sampled through an image of its own; the cropped-surface-view alias case is not tested
+compute.view	record	layer	L3	a view of another texel size at a kernel's texture slot: a shadow in the kernel's format L3 makes, then compute.shadow_load and compute.shadow_store
+compute.edge	record	query	non_uniform_threadgroups	dispatchThreads: with an edge threadgroup at the claimed family
+compute.predicate	record	cb-error	-	predication raw cannot run fails the command buffer, since m2v's encoders take no records (NativeBridgeMetalFrontend.mm withholds supportsCommandBufferJump): a loop (While, DoWhile), a misused record, or records in a command buffer with refused work; If/Else/End run on render enable (raw_predication.h)
+mipmaps	record	layer	L3	a mipmapped texture made with no chain: every mipmapped texture gets NIL's chain
+mipmaps.fmt	record	rule	mip.twod,mip.twod_probed,mip.draw	formats with neither engine nor a pack mip state stay gap mip_format
+event	record	rule	recorded	MTLEvent waits and signals: Wait and Signal nodes (GPU semaphore acquire, release)
+enc.planarcopy	record	gap	-	copies to or from a planar texture move its planes' bytes: copy.ce per plane, not built
+enc.planarclamp	encode	gap	sampler_address_mode	a sampler header under a planar texture's address map
+enc.planarrt	encode	rule	planar.standin_load,planar.standin_store	a planar target through its stand-in; sampled and rendered in one command buffer: its codes converted again after the store (edges order it)
+enc.pass	encode	rule	resolve.draw,ycbcr.image,xr.standin	a pass raw could not begin: resolve, YCbCr and extended-range targets are nodes with their rule decided before emission
+enc.kernel	encode	cb-error	-	the kernel refused the submission: a commit-time outcome, the command buffer's error (MTLCommandBufferErrorInternal)
+enc.idxrange	encode	client	index_buffer_offset	-
+enc.colorfmt	encode	client	pipeline_color_format	-
+enc.ubo	encode	layer	L4	a uniform buffer bound off the descriptor base: the record's residual words (E9)
+enc.notic	encode	layer	L3	a texture with no header at the draw: every view gets its header slot when made
+enc.ds	encode	client	pipeline_depth_format	a state testing depth or stencil the pass lacks; shader-side tests (copyShaderTests) stay the pass's own work
+enc.samples	encode	client	pipeline_sample_count	-
+enc.nochannel	encode	cb-error	channel_lost	MTLCommandBufferErrorInternal
+enc.geometry	encode	rule	fetch.interlock	fetch ladder rung 4 for any geometry; the states with no storage form stay gap fetch_without_storage_form (11 on iOS 27, 53 on iOS 17 per x1-f1)
+enc.storage	encode	rule	fetch.barrier,fetch.interlock	a fetched colour with neither form stays gap fetch_without_storage_form

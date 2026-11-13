@@ -15,6 +15,12 @@ enum class SlotView : uint8_t {
     None,  // m2v's view reads texels of another size, or the texture's are blocks
 };
 
+// NIL's view access (nil_view.access): a storage view of a multisampled image spans its sample grid (viewHeader)
+enum class ViewAccess : uint8_t {
+    Texture,
+    Storage,
+};
+
 // Bytes of a texel under header word 0's COMPONENTS (clb097tex.h); 0 for a block-compressed, depth or video layout
 inline uint32_t texelBytes(uint32_t word0)
 {
@@ -65,12 +71,20 @@ inline SlotView slotView(uint32_t window, uint32_t tic0, uint32_t own, uint32_t 
 // The header of the texture headed by `own` viewed as word 0 `word0`. No sRGB conversion: m2v reads and writes an
 // sRGB texture in a kernel through its UNORM twin, encoding in the shader, and NVK's view of a format of other data
 // types converts none.
-inline void viewHeader(const uint32_t own[8], uint32_t word0, uint32_t out[8])
+//
+// A storage view of a multisampled texture whose samples run 1 << sxLog2 across and 1 << syLog2 down a pixel spans the
+// sample grid, as NIL's storage descriptor does (descriptor.rs normalize_extent). The surface unit ignores
+// MULTI_SAMPLE_COUNT and bounds each load and store by WIDTH and HEIGHT alone, while NAK addresses each sample at its
+// place in the grid (nak_nir_lower_tex.c lower_msaa_image_access, which reads MULTI_SAMPLE_COUNT through TXQ). At the
+// pixel extent every surface op outside the grid's top-left width x height is dropped.
+inline void viewHeader(const uint32_t own[8], uint32_t word0, uint32_t out[8], uint8_t sxLog2 = 0, uint8_t syLog2 = 0)
 {
     for (int i = 0; i < 8; i++)
         out[i] = own[i];
     out[0] = word0;
-    out[4] &= ~(1u << 22);  // S_R_G_B_CONVERSION (bit 150)
+    out[4] &= ~(1u << 22);                                                     // S_R_G_B_CONVERSION (bit 150)
+    out[4] = (out[4] & ~0xffffu) | ((((out[4] & 0xffff) + 1) << sxLog2) - 1);  // WIDTH_MINUS_ONE (143:128)
+    out[5] = (out[5] & ~0xffffu) | ((((out[5] & 0xffff) + 1) << syLog2) - 1);  // HEIGHT_MINUS_ONE (175:160)
 }
 
 }  // namespace raw

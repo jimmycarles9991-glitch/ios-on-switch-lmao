@@ -69,9 +69,9 @@ void directVariants(const char *pack, id<MTLLibrary> library)
     cubicHalf.cubic = binds(MTLPixelFormatRGBA16Float);
     MTLRenderPipelineDescriptor *d = descriptor(library);
     const bool made =
-        direct.make(d, kKey, own, whyOwn, plain) == raw::Compiler::Outcome::Made &&
-        direct.make(d, kKey + cubicBgra.cubic.key(), bgra, whyBgra, cubicBgra) == raw::Compiler::Outcome::Made &&
-        direct.make(d, kKey + cubicHalf.cubic.key(), half, whyHalf, cubicHalf) == raw::Compiler::Outcome::Made;
+        direct.make(d, kKey, own, whyOwn, plain) == raw::CompileOutcome::Made &&
+        direct.make(d, kKey + cubicBgra.cubic.key(), bgra, whyBgra, cubicBgra) == raw::CompileOutcome::Made &&
+        direct.make(d, kKey + cubicHalf.cubic.key(), half, whyHalf, cubicHalf) == raw::CompileOutcome::Made;
     printf("     own %s; cubic BGRA8 %s; cubic RGBA16Float %s\n", whyOwn.c_str(), whyBgra.c_str(), whyHalf.c_str());
     expect(made, "the state and its two cubic variants are made directly");
     if (!made)
@@ -85,7 +85,7 @@ void directVariants(const char *pack, id<MTLLibrary> library)
         raw::RuntimeRecord split;
         std::string why;
         const bool madeSplit = direct.make(d, kKey + textures.cubic.key(), split, why, textures, nullptr, true) ==
-                               raw::Compiler::Outcome::Made;
+                               raw::CompileOutcome::Made;
         expect(madeSplit && split.splitTried, "the cubic variant is compiled with its split requested");
         if (!madeSplit)
             continue;

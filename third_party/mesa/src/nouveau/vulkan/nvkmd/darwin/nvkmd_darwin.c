@@ -406,6 +406,8 @@ darwin_point_done(const struct nvkmd_darwin_sync_point *p)
 static uint32_t
 darwin_point_error(const struct nvkmd_darwin_sync_point *p)
 {
+   if (p->error)
+      return p->error;
    if (p->dev == NULL)
       return 0;
    simple_mtx_lock(&p->dev->channels_mutex);
@@ -457,8 +459,8 @@ darwin_timeline_point_locked(struct nvkmd_darwin_sync *s, uint64_t value,
    return found;
 }
 
-/* A timeline signal: by the CPU (dev NULL) or pending on channel/seqno. A CPU
- * signal with an error is that of work a killed channel refused.
+/* A rejected submission may have an accepted prefix: its failure retires
+ * with that prefix's fence, so completion cannot release live resources.
  */
 static void
 darwin_timeline_signal(struct nvkmd_darwin_sync *s, uint64_t value,
@@ -474,6 +476,7 @@ darwin_timeline_signal(struct nvkmd_darwin_sync *s, uint64_t value,
    } else if (value > s->value) {
       const struct nvkmd_darwin_sync_point point = {
          .value = value, .dev = dev, .channel = channel, .seqno = seqno,
+         .error = error,
       };
       util_dynarray_append_typed(&s->points, struct nvkmd_darwin_sync_point, point);
    }
@@ -1914,8 +1917,8 @@ static uint32_t
 darwin_ctx_kill_error(struct nvkmd_darwin_exec_ctx *ctx)
 {
    struct nvkmd_darwin_dev *dev = nvkmd_darwin_dev(ctx->base.dev);
-   if (ctx->dead != 0)
-      return ctx->dead;
+   if (ctx->submission.dead != 0)
+      return ctx->submission.dead;
    if (!dev->conn.kill_record)
       return 0;
    simple_mtx_lock(&dev->channels_mutex);
@@ -1941,7 +1944,7 @@ darwin_ctx_died(struct nvkmd_darwin_exec_ctx *ctx)
                       &status, sizeof(status)) == KERN_SUCCESS)
          error = status.error;
    }
-   return error != 0 ? error : 3;
+   return error;
 }
 
 bool
@@ -1984,8 +1987,7 @@ nvkmd_darwin_ctx_reopen(struct nvkmd_ctx *_ctx, struct vk_object_base *log_obj)
    ctx->req.count = 0;
    ctx->last_seqno = 0;
    ctx->submitted = false;
-   ctx->dead = 0;
-   ctx->refused = 0;
+   ctx->submission = (struct darwin_submit_state){0};
    return VK_SUCCESS;
 }
 
@@ -2091,11 +2093,10 @@ nvkmd_darwin_exec_ctx_flush(struct nvkmd_ctx *_ctx,
 
    if (ctx->req.count == 0)
       return VK_SUCCESS;
-   /* Never run again on another channel: the work that faulted would fault
-    * again.
+   /* Drop the remainder until its signal. Earlier chunks may already be
+    * executing; replaying the submission would execute them twice.
     */
-   if (ctx->dead != 0) {
-      ctx->refused = ctx->dead;
+   if (darwin_submit_blocked(&ctx->submission)) {
       ctx->req.count = 0;
       return VK_SUCCESS;
    }
@@ -2121,9 +2122,8 @@ nvkmd_darwin_exec_ctx_flush(struct nvkmd_ctx *_ctx,
          ctx->submitted = true;
          break;
       }
-      if (kr == kIOReturnNotResponding) {
-         ctx->dead = darwin_ctx_died(ctx);
-         ctx->refused = ctx->dead;
+      if (kr == kIOReturnNotResponding || kr == kIOReturnAborted) {
+         darwin_submit_reject(&ctx->submission, darwin_ctx_died(ctx));
          break;
       }
       if (kr != kIOReturnBusy)
@@ -2193,32 +2193,19 @@ nvkmd_darwin_exec_ctx_signal(struct nvkmd_ctx *_ctx,
    if (result != VK_SUCCESS)
       return result;
 
-   /* Work the dead channel refused never runs: its signals come now, failed. */
-   const uint32_t refused = ctx->refused;
-   ctx->refused = 0;
-   for (uint32_t i = 0; i < signal_count && refused != 0; i++) {
-      struct nvkmd_darwin_sync *s = to_darwin_sync(signals[i].sync);
-      if (darwin_is_timeline(s))
-         darwin_timeline_signal(s, signals[i].signal_value, NULL, 0, 0,
-                                refused);
-      else
-         darwin_sync_set(s, NVKMD_DARWIN_SYNC_SIGNALED, NULL, 0, 0);
-   }
-   if (refused != 0)
-      return VK_SUCCESS;
-
-   /* Everything this channel was given before now is behind last_seqno. */
+   const struct darwin_submit_completion completion =
+      darwin_submit_finish(&ctx->submission, ctx->submitted, ctx->last_seqno);
    for (uint32_t i = 0; i < signal_count; i++) {
       struct nvkmd_darwin_sync *s = to_darwin_sync(signals[i].sync);
       if (darwin_is_timeline(s))
          darwin_timeline_signal(s, signals[i].signal_value,
-                                ctx->last_seqno ? dev : NULL, ctx->channel,
-                                ctx->last_seqno, 0);
-      else if (ctx->last_seqno == 0)
+                                completion.pending ? dev : NULL, ctx->channel,
+                                completion.seqno, completion.error);
+      else if (!completion.pending)
          darwin_sync_set(s, NVKMD_DARWIN_SYNC_SIGNALED, NULL, 0, 0);
       else
          darwin_sync_set(s, NVKMD_DARWIN_SYNC_FENCE, dev, ctx->channel,
-                         ctx->last_seqno);
+                         completion.seqno);
    }
 
    return VK_SUCCESS;
@@ -2235,7 +2222,7 @@ nvkmd_darwin_exec_ctx_sync(struct nvkmd_ctx *_ctx,
    if (result != VK_SUCCESS)
       return result;
 
-   if (ctx->last_seqno != 0) {
+   if (ctx->submitted) {
       result = darwin_wait_seqno(dev, ctx->channel, ctx->last_seqno,
                                  NVKMD_DARWIN_FOREVER_NS);
       if (result != VK_SUCCESS)
@@ -2250,8 +2237,8 @@ nvkmd_darwin_exec_ctx_sync(struct nvkmd_ctx *_ctx,
    if (kr != KERN_SUCCESS)
       return vk_errorf(log_obj, VK_ERROR_DEVICE_LOST,
                        "channel %u: GetStatus failed: 0x%x", ctx->channel, kr);
-   if (status.error != 0 && ctx->dead == 0)
-      ctx->dead = status.error;
+   if (status.error != 0 && ctx->submission.dead == 0)
+      ctx->submission.dead = status.error;
 
    return VK_SUCCESS;
 }

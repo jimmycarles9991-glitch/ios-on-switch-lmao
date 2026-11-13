@@ -411,8 +411,20 @@ impl Cx<'_> {
         b: &BufferArg,
         argument_buffer: bool,
     ) -> Result<BufferBinding, Error> {
-        let (size, align) = self.size_align(arg, ty)?;
-        let (data_type, detail) = self.pointee(arg, ty, b.layout, argument_buffer)?;
+        let untyped = !argument_buffer
+            && b.layout.is_none()
+            && ty.name.as_ref().is_some_and(|name| name.to_string() == "void");
+        let (size, align) = if untyped && ty.size.is_none() && ty.align.is_none() {
+            // Metal exposes generated void buffers without AIR layout metadata as 0B/4B.
+            (0, 4)
+        } else {
+            self.size_align(arg, ty)?
+        };
+        let (data_type, detail) = if untyped {
+            (DataType::None, TypeDetail::Plain)
+        } else {
+            self.pointee(arg, ty, b.layout, argument_buffer)?
+        };
         let struct_type = detail.struct_type().cloned();
         let pointer = PointerType::new(
             data_type,

@@ -175,7 +175,8 @@ static int interleave(struct nvkm_device *device, struct nvkm_runl *runl)
 	runl->func = &rl[runl->id].func;
 	atomic_set(&runl->changed, 1);
 	mutex_unlock(&runl->mutex);
-	__atomic_fetch_add(&st.interleaved, 1, __ATOMIC_RELAXED);
+	if (TGM_STATS)
+		__atomic_fetch_add(&st.interleaved, 1, __ATOMIC_RELAXED);
 	return 1;
 }
 
@@ -270,21 +271,26 @@ static enum tgm_sched_kick counted(enum tgm_sched_kick kick)
 	return kick;
 }
 
-/* The app channel GR or the PBDMA serving the runlist is on (TegraGM20BSchedPolicy.h) */
-static int sched_victim(struct nvkm_device *device, struct nvkm_runl *runl)
+/* GR's engine status on the runlist (0: no GR on it) */
+static u32 sched_gr_status(struct nvkm_device *device, struct nvkm_runl *runl)
 {
 	struct nvkm_engn *engn = NULL;
-	u32 eng = 0;
-	u32 pbdma = 0;
-	u32 chid = 0;
 
 	nvkm_runl_foreach_engn(engn, runl)
 	{
-		if (engn->engine->subdev.type == NVKM_ENGINE_GR) {
-			eng = nvkm_rd32(device, PFIFO_ENG_STATUS(engn->id));
-			break;
-		}
+		if (engn->engine->subdev.type == NVKM_ENGINE_GR)
+			return nvkm_rd32(device, PFIFO_ENG_STATUS(engn->id));
 	}
+	return 0;
+}
+
+/* The app channel GR or the PBDMA serving the runlist is on (TegraGM20BSchedPolicy.h) */
+static int sched_victim(struct nvkm_device *device, struct nvkm_runl *runl)
+{
+	u32 eng = sched_gr_status(device, runl);
+	u32 pbdma = 0;
+	u32 chid = 0;
+
 	if (runl->runq_nr && runl->runq[0]) {
 		pbdma = nvkm_rd32(device, PBDMA_STATUS(runl->runq[0]->id)) & PBDMA_BUSY;
 		chid = PBDMA_CHID(nvkm_rd32(device, PBDMA_CHANNEL(runl->runq[0]->id)));
@@ -364,6 +370,11 @@ enum tgm_sched_kick tgm_sched_kicked(struct nvkm_device *device, unsigned int ch
 		    (int)chid >= runl->chid->nr || !test_bit(chid, runl->chid->used))
 			continue;
 		victim = sched_victim(device, runl);
+		if (victim == TGM_VICTIM_SWITCHING) {
+			const u32 eng = sched_gr_status(device, runl);
+
+			victim = tgm_kick_loading(eng, is_high(PFIFO_ENG_NEXT_ID(eng)));
+		}
 		if (victim == TGM_VICTIM_SWITCHING)
 			return counted(TGM_KICK_SWITCHING);
 		if (victim == TGM_VICTIM_NONE)

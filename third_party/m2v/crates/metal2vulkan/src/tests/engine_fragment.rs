@@ -14,7 +14,7 @@
 
 use std::path::Path;
 
-use crate::bind::{BindState, WriteSource};
+use crate::bind::{BindState, VertexAmplification, WriteSource};
 use crate::budget::Budget;
 use crate::device::profile::FramebufferFetchPolicy;
 use crate::device::requirements::VkFeature;
@@ -703,10 +703,12 @@ fn an_srgb_input_attachment_is_read_through_metals_decode() {
 }
 
 /// On a device that orders fetch only through the pixel interlock (`moltenvk-m3`), the binder
-/// writes a storage-form attachment to its fragment binding as the attachment's own storage view,
-/// and refuses a pass of more than one layer, whose layers one 2D view does not reach.
+/// writes a storage-form attachment to its fragment binding as the attachment's own storage view.
+/// In a pass of more than one layer the draw runs the layered storage variant, whose storage image
+/// is an array of the pass's layers addressed at the primitive's layer (its `LayeredStorage`
+/// fact); an amplified draw is refused.
 #[test]
-fn the_binder_writes_storage_attachments_and_refuses_layered_passes() {
+fn the_binder_writes_storage_attachments_and_layers_them_in_layered_passes() {
     let (Some(io), Some(fetch)) = (fixture("stage_io"), fixture("fragment_fetch")) else {
         return;
     };
@@ -753,11 +755,32 @@ fn the_binder_writes_storage_attachments_and_refuses_layered_passes() {
         .expect("binding");
     assert_eq!(b.ty, vk::DescriptorType::STORAGE_IMAGE);
     assert_eq!(b.source, BindingSource::TileAttachment(0));
+    assert!(!plan.variant.layered_storage);
     let layered = BindState {
         render_target_array_length: 2,
         ..Default::default()
     };
-    match p.plan(&dev, &layered.shape()) {
+    let plan = p.plan(&dev, &layered.shape()).expect("layered plan");
+    assert!(plan.variant.layered_storage);
+    let variant = dev
+        .compile_render_variant(&d, &plan.variant, &Budget::standard())
+        .expect("layered variant");
+    assert!(variant
+        .dependencies
+        .iter()
+        .any(|d| matches!(d.fact, RuntimeFact::LayeredStorage)));
+    let again = variant.plan(&dev, &layered.shape()).expect("variant plan");
+    assert_eq!(again.variant, plan.variant, "a fixed point");
+    assert!(again
+        .graphics
+        .as_ref()
+        .is_some_and(|t| !t.other_layer_variant));
+    let amplified = BindState {
+        render_target_array_length: 2,
+        vertex_amplification: VertexAmplification::new(2, Vec::new()),
+        ..Default::default()
+    };
+    match p.plan(&dev, &amplified.shape()) {
         Err(BindError::Unsupported(u)) => assert_eq!(
             (u.feature, u.needs),
             (Feature::FramebufferFetch, Needs::NotImplemented)

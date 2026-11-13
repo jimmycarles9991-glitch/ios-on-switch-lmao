@@ -156,6 +156,18 @@ impl Device {
         self.compile_function_with_report(f, inp, b).0
     }
 
+    /// Compile a kernel while retaining the verified typed operations for a native consumer.
+    /// The portable artifact remains available when the native operation set is incomplete.
+    pub fn compile_native_function(
+        &self,
+        f: &FunctionDescriptor,
+        inp: &LoweringInputs,
+        b: &Budget,
+    ) -> Result<crate::pipeline::NativeFunction, Error> {
+        let mut m = Meter::new(b);
+        crate::pipeline::compile::compile_native_stage(f, self.profile(), InputsFrom::Given(inp), &mut m)
+    }
+
     /// [`Device::compile_function`], and what the compile cost against `b`
     /// ([`CompileReport`]), whether it compiled or not.
     pub fn compile_function_with_report(
@@ -580,7 +592,7 @@ impl Device {
         let profile = self.profile_fingerprint();
         let key = pipeline_key(b"compute", &profile, &[a.key], &compute_fields(d));
         let metal_info = self.metal_info(
-            &kernel,
+            a,
             d.max_total_threads_per_threadgroup,
             d.support_indirect_command_buffers,
         );
@@ -626,7 +638,7 @@ impl Device {
             .max_total_threads_per_threadgroup
             .filter(|&n| n > 0)
             .map_or(TILE_MAX_THREADS, |n| n.min(TILE_MAX_THREADS));
-        let mut metal_info = self.metal_info(&kernel, Some(max_threads), false);
+        let mut metal_info = self.metal_info(a, Some(max_threads), false);
         metal_info.max_total_threads_per_threadgroup =
             tile_threads_within(metal_info.max_total_threads_per_threadgroup);
         metal_info.metal_max_total_threads_per_threadgroup =
@@ -764,14 +776,13 @@ impl Device {
     /// Answers to Metal's per-pipeline compute queries, under the descriptor's
     /// `maxTotalThreadsPerThreadgroup` (`max_threads`) and `supportIndirectCommandBuffers`
     /// (`icb`).
-    fn metal_info(
+    pub(crate) fn metal_info<M>(
         &self,
-        kernel: &CompiledFunction,
+        c: &FunctionArtifact<M>,
         max_threads: Option<u32>,
         icb: bool,
     ) -> ComputePipelineMetalInfo {
         let f = self.profile().fields();
-        let c = kernel.artifact();
         let mut max = self.metal_properties().max_total_threads_per_threadgroup;
         if c.kernel.flat_local_size {
             // The flattened tiers put the whole local size on X.
@@ -1134,7 +1145,7 @@ fn tile_fields(d: &TileRenderPipelineDescriptor) -> String {
 /// `InvalidDescriptor(StageInputAttribute)`, and one reading a stage input without a descriptor
 /// `NeedsInput(StageInputDescriptor)` (a `Function` kernel is compiled under `d`'s descriptor, so
 /// its fetches are `d`'s).
-fn check_stage_in(a: &FunctionArtifact, d: &ComputePipelineDescriptor) -> Result<(), Error> {
+pub(crate) fn check_stage_in<M>(a: &FunctionArtifact<M>, d: &ComputePipelineDescriptor) -> Result<(), Error> {
     for s in &a.interface.io.stage_in {
         let Some(desc) = d.stage_input.as_ref() else {
             return Err(Error::NeedsInput(RuntimeInput::StageInputDescriptor {
@@ -1153,7 +1164,7 @@ fn check_stage_in(a: &FunctionArtifact, d: &ComputePipelineDescriptor) -> Result
 /// The stage of artifact `a` has the call stack its pipeline's `maxCallStackDepth` for it,
 /// `given`, sizes: a `Compiled` stage whose stack was sized for another depth is
 /// `InvalidDescriptor(MaxCallStackDepth)` (a `Function` stage is compiled under `given`).
-fn check_call_stack(a: &FunctionArtifact, given: u32) -> Result<(), Error> {
+pub(crate) fn check_call_stack<M>(a: &FunctionArtifact<M>, given: u32) -> Result<(), Error> {
     for fact in &a.facts {
         if let RuntimeFact::CallStackDepth { depth } = *fact {
             if depth != given.max(1) {
@@ -1170,7 +1181,7 @@ fn check_call_stack(a: &FunctionArtifact, given: u32) -> Result<(), Error> {
 }
 
 /// The compute descriptor fields the artifact depends on (its Metal info).
-fn compute_fields(d: &ComputePipelineDescriptor) -> String {
+pub(crate) fn compute_fields(d: &ComputePipelineDescriptor) -> String {
     let fields = format!(
         "{:?}",
         (
@@ -1212,6 +1223,11 @@ fn render_fields(d: &RenderPipelineDescriptor) -> String {
 /// Stage `i` of a linked pipeline as its final module.
 fn stage_module(a: &FunctionArtifact, linked: &Linked, i: usize) -> Result<StageModule, Error> {
     let words = relocate(a, linked)?;
+    stage_metadata(a, linked, i, words.into())
+}
+
+pub(crate) fn stage_metadata<M>(a: &FunctionArtifact<M>, linked: &Linked, i: usize,
+                               words: std::sync::Arc<[u32]>) -> Result<StageModule, Error> {
     let specialization = linked
         .specialization
         .get(i)
@@ -1243,7 +1259,7 @@ fn stage_module(a: &FunctionArtifact, linked: &Linked, i: usize) -> Result<Stage
     Ok(StageModule {
         stage: a.interface.vk_stage(),
         entry_point: ENTRY_NAME.to_owned(),
-        spirv: words.into(),
+        spirv: words,
         specialization,
         required_subgroup_size: a.subgroup.size,
         stage_flags,
@@ -1379,7 +1395,7 @@ fn note_sample_position(
 }
 
 /// Every runtime fact of the stages, once, with the mechanism this profile honors it by.
-fn dependencies(stages: &[&FunctionArtifact], dev: &Device) -> Vec<RuntimeDependency> {
+pub(crate) fn dependencies<M>(stages: &[&FunctionArtifact<M>], dev: &Device) -> Vec<RuntimeDependency> {
     let mut out: Vec<RuntimeDependency> = Vec::new();
     for a in stages {
         for fact in &a.facts {

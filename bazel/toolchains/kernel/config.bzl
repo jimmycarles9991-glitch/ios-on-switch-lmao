@@ -37,6 +37,7 @@ load("//kernel/rules:layout.bzl", "compat_prefix_maps")
 load("//kernel/rules:sdk.bzl", "KernelSdkInfo")
 load(":recipes.bzl", DEVELOPMENT_RECIPES = "RECIPES")
 load(":recipes_12377.bzl", DEVELOPMENT_RECIPES_12377 = "RECIPES")
+load(":recipes_12377_release.bzl", RELEASE_RECIPES_12377 = "RECIPES")
 load(":recipes_release.bzl", RELEASE_RECIPES = "RECIPES")
 
 # Per XNU: its recipes by kernel config, the iOS target its plain C and assembly build for, and what pins the core.
@@ -48,7 +49,7 @@ XNU_TARGETS = {
         cpu = [],
     ),
     "12377.121.6": struct(
-        recipes = {"DEVELOPMENT": DEVELOPMENT_RECIPES_12377},
+        recipes = {"DEVELOPMENT": DEVELOPMENT_RECIPES_12377, "RELEASE": RELEASE_RECIPES_12377},
         ios_min = "26.0",
         cpu = ["-mcpu=cortex-a57"],
     ),

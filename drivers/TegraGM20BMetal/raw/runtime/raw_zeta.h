@@ -8,14 +8,12 @@
 //    interior is the hardware's, set by the PTE kind (nil nvc0_choose_pte_kind: Z16, ZF32 or ZF32_X24S8 whatever the samples;
 //    one-sample Depth32Float_Stencil8 also its compressible ZF32_X24S8_2CSZV on compressed memory, raw_comp.h). The CPU never
 //    reads it.
-//  - Target: nvk_CmdBeginRendering's SET_ZT_* for one layer. NVK keeps no zcull here (the kext reports no zcull info), so
-//    SET_ACTIVE_ZCULL_REGION stays the baseline's 0x3f.
-//  - State: metal2vulkan state.rs depth_stencil_state (a depth test where the compare is not Always or depth writes, a
-//    stencil test where either face is not a no-op), then nvk_flush_ds_state: the enables only with an attachment of the
-//    aspect, masks cut to 8 bits by Mesa's dynamic state, references saturated at 255 (metal2vulkan render_state.rs, as
-//    Metal measured).
+//  - Target: nvk_CmdBeginRendering's SET_ZT_* for one layer; its zcull region, or none, raw_zcull.h's.
+//  - State: its register values are raw_depth_stencil_state.h's.
 #pragma once
+#include <algorithm>
 #include <cstdint>
+#include "../../../../kits/SwitchGM20B/SwitchGM20B.h"
 #include "raw_push.h"
 
 namespace raw {
@@ -67,9 +65,26 @@ inline bool zetaHasStencil(uint32_t metal)
 bool zetaShape(uint32_t width, uint32_t height, uint32_t format, uint32_t samples, Texture &t, uint64_t &bytes,
                uint64_t &align);
 
-// SET_ZT_A .. SET_STENCIL_COMPRESSION and SET_ZT_SPARSE for zeta `z`, or SET_ZT_SELECT 0 for none
+// SET_ZT_A .. SET_STENCIL_COMPRESSION and SET_ZT_SPARSE for zeta `z` (its `layers` layers, layerBytes apart), or
+// SET_ZT_SELECT 0 for none
 constexpr uint32_t kZetaTargetWords = 24;
-void zetaTargetWords(Push &p, const Texture *z);
+void zetaTargetWords(Push &p, const Texture *z, uint32_t layers = 1);
+
+// The values of SET_ZT_A .. SET_ZT_ARRAY_PITCH and SET_ZT_SIZE_A .. C that zetaTargetWords writes for zeta `z` of `rows`
+// rows (raw_samples.h sampleRows)
+struct ZetaTargetValues {
+    uint32_t a[5], size[3];
+};
+
+template <typename Zeta> ZetaTargetValues zetaTargetValues(const Zeta &z, uint32_t rows)
+{
+    return {{uint32_t(z.va >> 32), uint32_t(z.va), kZetaFormatInfo[zetaFormatIndex(z.format)].zt,
+             uint32_t(z.blockHeight & 0xf) << 4,  // WIDTH ONE_GOB, HEIGHT, DEPTH ONE_GOB
+             uint32_t(z.layerBytes >> 2)},
+            // SIZE_A the row stride in texels (NVK: the Z/S hardware has no tile width), C one layer,
+            // THIRD_DIMENSION_DEFINES_ARRAY_SIZE
+            {z.pitch / z.bpp, rows, 1}};
+}
 
 // MTLStencilDescriptor and MTLDepthStencilDescriptor, enums as Metal numbers them (MTLCompareFunction, MTLStencilOperation)
 struct StencilFace {
@@ -77,6 +92,11 @@ struct StencilFace {
     uint8_t fail = 0, depthFail = 0, pass = 0;  // Keep
     uint32_t readMask = ~0u, writeMask = ~0u;
 };
+
+inline bool stencilNoop(const StencilFace &s)
+{
+    return s.compare == 7 && s.depthFail == 0 && s.pass == 0;
+}
 
 struct DepthStencilDesc {
     uint8_t depthCompare = 7;  // Always
@@ -90,19 +110,56 @@ struct DepthStencilDesc {
 // The depth/stencil registers' values (kDepthStencilMethods order)
 constexpr uint32_t kDepthStencilRegs = 18;
 
+inline constexpr uint32_t kDepthStencilMethods[kDepthStencilRegs] = {NVB197_SET_DEPTH_TEST,
+                                                                     NVB197_SET_DEPTH_WRITE,
+                                                                     NVB197_SET_DEPTH_FUNC,
+                                                                     NVB197_SET_STENCIL_TEST,
+                                                                     NVB197_SET_STENCIL_OP_FAIL,
+                                                                     NVB197_SET_STENCIL_OP_ZFAIL,
+                                                                     NVB197_SET_STENCIL_OP_ZPASS,
+                                                                     NVB197_SET_STENCIL_FUNC,
+                                                                     NVB197_SET_STENCIL_FUNC_REF,
+                                                                     NVB197_SET_STENCIL_FUNC_MASK,
+                                                                     NVB197_SET_STENCIL_MASK,
+                                                                     NVB197_SET_BACK_STENCIL_OP_FAIL,
+                                                                     NVB197_SET_BACK_STENCIL_OP_ZFAIL,
+                                                                     NVB197_SET_BACK_STENCIL_OP_ZPASS,
+                                                                     NVB197_SET_BACK_STENCIL_FUNC,
+                                                                     NVB197_SET_BACK_STENCIL_FUNC_REF,
+                                                                     NVB197_SET_BACK_STENCIL_MASK,
+                                                                     NVB197_SET_BACK_STENCIL_FUNC_MASK};
+
 struct DepthStencilRegs {
     uint32_t v[kDepthStencilRegs] = {};
 
     bool operator==(const DepthStencilRegs &o) const;
 };
 
-// What the GPU holds at a draw of a pass with a depth/stencil attachment of the aspects `depth` and `stencil`, or without one,
-// under state `d` and stencil references `refFront`/`refBack` (setStencilFrontReferenceValue:backReferenceValue:)
-DepthStencilRegs depthStencilRegs(const DepthStencilDesc &d, uint32_t refFront, uint32_t refBack, bool depth,
-                                  bool stencil);
-// The methods that take `held` (what the GPU holds) to `want`, then held = want
+// The most words emitDepthStencil (raw_depth_stencil_state.h) writes
 constexpr uint32_t kDepthStencilWords = 2 * kDepthStencilRegs;
-void emitDepthStencil(Push &p, const DepthStencilRegs &want, DepthStencilRegs &held);
+
+// The registers of `regs` but the two stencil references as one absolute method stream, kDepthStencilMethods order: what a
+// GPU-resident state segment holds whole. Every value fits an immediate method. The references are a draw's own
+// (setStencilFrontReferenceValue:backReferenceValue:), set by stencilReferenceWords.
+constexpr uint32_t kDepthStencilBlockWords = kDepthStencilRegs - 2;
+using DepthStencilBlock = uint32_t[kDepthStencilBlockWords];
+
+inline void depthStencilBlock(const DepthStencilRegs &regs, DepthStencilBlock &out)
+{
+    uint32_t n = 0;
+    for (uint32_t i = 0; i < kDepthStencilRegs; i++)
+        if (kDepthStencilMethods[i] != NVB197_SET_STENCIL_FUNC_REF &&
+            kDepthStencilMethods[i] != NVB197_SET_BACK_STENCIL_FUNC_REF)
+            out[n++] = Push::hdr(4, SUBC_3D, kDepthStencilMethods[i], regs.v[i] & 0x1fff);
+}
+
+constexpr uint32_t kStencilReferenceWords = 2;
+
+inline void stencilReferenceWords(Push &p, uint32_t front, uint32_t back)
+{
+    *p.at++ = Push::hdr(4, SUBC_3D, NVB197_SET_STENCIL_FUNC_REF, std::min(front, 0xffu));
+    *p.at++ = Push::hdr(4, SUBC_3D, NVB197_SET_BACK_STENCIL_FUNC_REF, std::min(back, 0xffu));
+}
 
 // A depth/stencil clear before a pass's draws (nvk_CmdClearAttachments): its values, then the CLEAR_SURFACE bits of its aspects
 constexpr uint32_t kZetaClearWords = 4;

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 // raw GM20B path: pack/ycbcr.metal's conversion and raw_ycbcr.cpp's plan of it, run on this Mac's own GPU, against what this Mac's
-// Metal reads of the same two-plane YCbCr textures (every one m2v takes: 8- and 10-bit, video and full range, 4:2:0, 4:2:2 and
-// 4:4:4 surfaces and formats, converted, sRGB and codes, no matrix, BT.709 and BT.2020, over plane 0 and plane 1), over CoreVideo
+// Metal reads of the same two-plane YCbCr textures (8- and 10-bit and packed, video and full range, 4:2:0, 4:2:2 and 4:4:4
+// surfaces and formats, converted, sRGB and codes, no matrix, BT.709 and BT.2020, over plane 0 and plane 1), over CoreVideo
 // surfaces of random codes: every texel's channels must be Metal's. The raw path runs the same conversion on the GM20B.
 // usage: ycbcroracle <pack/ycbcr.metal>
 #import <CoreVideo/CoreVideo.h>
@@ -44,7 +44,8 @@ struct Case {
 
 const char *outputName(raw::YcbcrOutput o)
 {
-    static const char *const names[] = {"", "converted", "srgb", "codes8", "codes10"};
+    static const char *const names[] = {"",        "converted",        "srgb",        "codes8",
+                                        "codes10", "converted packed", "srgb packed", "codes10 packed"};
     return names[o];
 }
 
@@ -63,9 +64,9 @@ std::vector<uint32_t> metalTexels(id<MTLDevice> dev, id<MTLCommandQueue> q, id<M
     [en endEncoding];
     [cb commit];
     [cb waitUntilCompleted];
-    const float scale = p.output == raw::YcbcrConverted ? 2048.0f
-                        : p.output == raw::YcbcrSrgb    ? 8192.0f
-                                                        : float(p.shape[12]);
+    const bool converted = p.output == raw::YcbcrConverted || p.output == raw::YcbcrConvertedPacked;
+    const bool srgb = p.output == raw::YcbcrSrgb || p.output == raw::YcbcrSrgbPacked;
+    const float scale = converted ? 2048.0f : srgb ? 8192.0f : float(p.shape[12]);
     std::vector<uint32_t> v;
     const float *f = static_cast<const float *>(out.contents);
     for (NSUInteger i = 0; i < n; i++)
@@ -88,11 +89,17 @@ std::vector<uint32_t> ourTexels(id<MTLDevice> dev, id<MTLCommandQueue> q, id<MTL
         [t replaceRegion:MTLRegionMake2D(0, 0, pw, ph) mipmapLevel:0 withBytes:base + at bytesPerRow:pitch];
         return t;
     };
-    id<MTLTexture> luma = plane(p.lumaFormat, p.luma, p.lumaPitch, w, h);
+    id<MTLTexture> luma = plane(p.lumaFormat, p.luma, p.lumaPitch, p.lumaWidth, h);
     id<MTLTexture> chroma =
         p.chromaWidth ? plane(p.chromaFormat, p.chroma, p.chromaPitch, p.chromaWidth, p.chromaHeight) : luma;
-    static const char *const frags[] = {"", "ycbcr_converted_frag", "ycbcr_srgb_frag", "ycbcr_codes_frag",
-                                        "ycbcr_codes10_frag"};
+    static const char *const frags[] = {"",
+                                        "ycbcr_converted_frag",
+                                        "ycbcr_srgb_frag",
+                                        "ycbcr_codes_frag",
+                                        "ycbcr_codes10_frag",
+                                        "ycbcr_packed_converted_frag",
+                                        "ycbcr_packed_srgb_frag",
+                                        "ycbcr_packed_codes10_frag"};
     MTLRenderPipelineDescriptor *pd = [MTLRenderPipelineDescriptor new];
     pd.vertexFunction = [lib newFunctionWithName:@"ycbcr_vert"];
     pd.fragmentFunction = [lib newFunctionWithName:@(frags[p.output])];
@@ -198,13 +205,14 @@ std::vector<Case> cases()
 {
     struct Surface {
         OSType fourcc;
-        bool tenBit;
-        int sub;  // 0 4:2:0, 1 4:2:2, 2 4:4:4
+        int bits;  // 8, 10, or 30: 10-bit codes packed three to a word
+        int sub;   // 0 4:2:0, 1 4:2:2, 2 4:4:4
     };
 
-    const Surface surfaces[] = {{'420v', false, 0}, {'420f', false, 0}, {'422v', false, 1}, {'422f', false, 1},
-                                {'444v', false, 2}, {'444f', false, 2}, {'x420', true, 0},  {'xf20', true, 0},
-                                {'x422', true, 1},  {'xf22', true, 1},  {'x444', true, 2},  {'xf44', true, 2}};
+    const Surface surfaces[] = {{'420v', 8, 0},  {'420f', 8, 0},  {'422v', 8, 1},  {'422f', 8, 1},  {'444v', 8, 2},
+                                {'444f', 8, 2},  {'x420', 10, 0}, {'xf20', 10, 0}, {'x422', 10, 1}, {'xf22', 10, 1},
+                                {'x444', 10, 2}, {'xf44', 10, 2}, {'p420', 30, 0}, {'pf20', 30, 0}, {'p422', 30, 1},
+                                {'pf22', 30, 1}, {'p444', 30, 2}, {'pf44', 30, 2}};
     const char *const matrices[] = {nullptr, "ITU_R_709_2", "ITU_R_2020"};
     const uint32_t sizes[][2] = {{33, 17}, {64, 48}, {7, 5}};
     std::vector<Case> out;
@@ -212,10 +220,10 @@ std::vector<Case> cases()
     for (const Surface &s : surfaces)
         for (int sub = 0; sub <= s.sub; sub++)  // the format's chroma no finer than the surface's
             for (int reads = 0; reads < 3; reads++) {
-                static const uint32_t formats[3][2][3] = {{{500, 502, 503}, {505, 506, 507}},
-                                                          {{520, 522, 523}, {525, 526, 527}},
-                                                          {{540, 541, 542}, {543, 544, 545}}};
-                const uint32_t format = formats[reads][s.tenBit][sub];
+                static const uint32_t formats[3][3][3] = {{{500, 502, 503}, {505, 506, 507}, {508, 509, 510}},
+                                                          {{520, 522, 523}, {525, 526, 527}, {528, 529, 530}},
+                                                          {{540, 541, 542}, {543, 544, 545}, {546, 547, 548}}};
+                const uint32_t format = formats[reads][s.bits == 8 ? 0 : s.bits == 10 ? 1 : 2][sub];
                 for (const char *m : matrices) {
                     const uint32_t *size = sizes[n++ % 3];
                     out.push_back({s.fourcc, format, 0, size[0], size[1], m});

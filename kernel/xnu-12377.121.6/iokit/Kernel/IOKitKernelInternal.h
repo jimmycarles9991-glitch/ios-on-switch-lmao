@@ -174,6 +174,11 @@ struct IOMemoryDescriptorReserved {
 	vm_tag_t                      userTag;
 	task_t                        creator;
 	OSPtr<OSDictionary>           contextObjects;
+	OSObject                    * switchAttachment;
+	OSObject                    * switchGpuRecord;
+	uint32_t                      switchCpuUsers;
+	bool                          switchExclusive;
+	uint64_t                      switchGeneration;
 };
 
 #if defined(__x86_64__)

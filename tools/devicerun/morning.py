@@ -103,8 +103,8 @@ CHECKLIST = {
         '4 Spotlight typing, 20 s   5 App switcher, 20 s   6 Control Center x5, then Notification Center x5',
         '7 Home folder open/close x5   8 App Library scroll again, 15 s',
         (
-            'Then the same steps on the iOS 27 image, pulled separately: its stutter.* rows hold too (CA_FORCE_TIMER '
-            "as QuartzCore's vblank switch is proven on 21H461 only)"
+            'Then the same steps on the iOS 27 image, pulled separately: its stutter.* rows hold too '
+            "(stutter.vsync-delivered reads NO-DATA on both: Core Animation's frame clock follows frame info)"
         ),
     ],
     'A': [

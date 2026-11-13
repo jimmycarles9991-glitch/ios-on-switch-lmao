@@ -24,6 +24,7 @@ struct nvkm_memory {
 	const struct nvkm_memory_ptrs *ptrs;
 	struct kref kref;
 	struct nvkm_tags *tags;
+	bool switch_tags_held;
 	/* Switch: page directories and tables (nvkm_mmu_ptc_get), which the GPU only reads: no GPU L2 line of them is
 	 * ever dirty, so a CPU write needs no L2 flush first (gk20a instobj acquire). */
 	bool switch_page_table;
@@ -59,6 +60,8 @@ int nvkm_memory_tags_get(struct nvkm_memory *, struct nvkm_device *, u32 tags,
 			 struct nvkm_tags **);
 void nvkm_memory_tags_put(struct nvkm_memory *, struct nvkm_device *,
 			  struct nvkm_tags **);
+void nvkm_memory_tags_hold(struct nvkm_memory *, struct nvkm_device *,
+			   struct nvkm_tags **);
 
 #define nvkm_memory_target(p) (p)->func->target(p)
 #define nvkm_memory_page(p) (p)->func->page(p)

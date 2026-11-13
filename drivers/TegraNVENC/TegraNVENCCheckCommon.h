@@ -50,15 +50,69 @@ static inline uint32_t tegra_nvenc_history_bytes(uint32_t width, uint32_t height
     return row > picture ? row : picture;
 }
 
-// Luma rows a surface spans: its height rounded to 64, which covers 16x16 tiles and block-linear blocks of up to
-// eight GOBs.
-static inline uint32_t tegra_nvenc_surface_rows(uint32_t height)
+// Both apps give the engine a block-linear block height as a code (H.264 app 0x8643-0x8664, H.265 0x1417e-0x1419f, to
+// I/O 0xe8c): 32 GOBs 4, 16 GOBs 3, 8 GOBs 2, 4 GOBs 1, any other block_height 0. Code k is 2 << k GOBs of 8 rows.
+static inline uint32_t tegra_nvenc_block_code(uint32_t blockHeight)
 {
-    return tegra_nvenc_align(height, 64);
+    switch (blockHeight & 0x7f) {
+    case 32:
+        return 4;
+    case 16:
+        return 3;
+    case 8:
+        return 2;
+    case 4:
+        return 1;
+    default:
+        return 0;
+    }
+}
+
+// The block_height a layout puts in input_cfg (TegraNVENCABI.h): GOBs a block, 0 for pitch and 16x16 tiles.
+static inline uint32_t tegra_nvenc_layout_gobs(uint32_t layout)
+{
+    switch (layout) {
+    case TEGRA_NVENC_LAYOUT_BL2:
+        return 2;
+    case TEGRA_NVENC_LAYOUT_BL4:
+        return 4;
+    case TEGRA_NVENC_LAYOUT_BL8:
+        return 8;
+    case TEGRA_NVENC_LAYOUT_BL16:
+        return 16;
+    default:
+        return 0;
+    }
+}
+
+// Rows of one block of a plane: a 16x16 tile row, or 2 << code GOBs (code 0 read as two GOBs covers pitch rows too).
+static inline uint32_t tegra_nvenc_block_rows(bool tiled, uint32_t blockHeight)
+{
+    return tiled ? 16 : 16u << tegra_nvenc_block_code(blockHeight);
+}
+
+// Luma and chroma rows a surface is laid out with: its plane heights rounded to whole blocks, and luma to at least 64
+// and chroma to 32 rows as every surface has been laid out since E3.
+static inline uint32_t tegra_nvenc_luma_rows(uint32_t height, uint32_t blockRows)
+{
+    return tegra_nvenc_align(height, blockRows > 64 ? blockRows : 64);
+}
+
+// Rows the engine reads or writes: whole blocks of the picture's planes, nothing past the last block.
+static inline uint32_t tegra_nvenc_read_rows(uint32_t planeHeight, uint32_t blockRows)
+{
+    return tegra_nvenc_align(planeHeight, blockRows);
+}
+
+static inline uint32_t tegra_nvenc_chroma_rows(uint32_t height, uint32_t blockRows)
+{
+    return tegra_nvenc_align((height + 1) / 2, blockRows > 32 ? blockRows : 32);
 }
 
 // A surface: luma at its relocation, chroma `chromaOffset` bytes into the luma buffer (surface config) or at its own
 // relocation. Every reading is bounded: the config offset alone, the chroma relocation alone, and the two added.
+// block_height is a GOB count with an unambiguous code (TegraNVENCABI.h), or 0 or 2; the apps take the pitch in 16-byte
+// units in a 9-bit field (I/O 0xe88 bits 18-26, 0xeb8), so 8176 bytes at most.
 static inline const char *tegra_nvenc_check_surface(const nvenc_h264_surface_cfg_s *c, uint32_t width, uint32_t height,
                                                     uint64_t lumaAvail, uint64_t chromaAvail, bool reference)
 {
@@ -70,14 +124,19 @@ static inline const char *tegra_nvenc_check_surface(const nvenc_h264_surface_cfg
         return "surface field offsets";
     if (reference ? (!c->tiled_16x16 || c->block_height) : (c->tiled_16x16 && c->block_height))
         return "surface tiling";
-    if (c->block_height > 2)
+    if (c->block_height && c->block_height != 2 && !tegra_nvenc_block_code(c->block_height))
         return "block height";
     const uint32_t pitch = c->sfc_pitch;
-    if (pitch != c->sfc_pitch_chroma || (pitch & 63) || pitch < tegra_nvenc_align(width, 16) || pitch > 16384)
+    if (pitch != c->sfc_pitch_chroma || (pitch & 63) || pitch < tegra_nvenc_align(width, 16) || pitch > 8176)
         return "surface pitch";
-    const uint64_t rows = tegra_nvenc_surface_rows(height);
-    const uint64_t luma = (uint64_t)pitch * rows;
-    const uint64_t chroma = luma / 2;
+    // A block-linear picture is bounded by the blocks the engine reads (a decoder's picture has no more); a 16x16-tiled
+    // one, which references and reconstructions are, keeps the 64-row margin of the layout every buffer has.
+    const uint32_t blockRows = tegra_nvenc_block_rows(c->tiled_16x16, c->block_height);
+    const bool exact = !c->tiled_16x16;
+    const uint64_t luma =
+        (uint64_t)pitch * (exact ? tegra_nvenc_read_rows(height, blockRows) : tegra_nvenc_luma_rows(height, blockRows));
+    const uint64_t chroma = (uint64_t)pitch * (exact ? tegra_nvenc_read_rows((height + 1) / 2, blockRows)
+                                                     : tegra_nvenc_chroma_rows(height, blockRows));
     const uint64_t offset = (uint64_t)c->chroma_top_frm_offset * 256;
     if (offset && offset < luma)
         return "chroma overlaps luma";
@@ -90,9 +149,47 @@ enum {
     TEGRA_NVENC_REFS = 16
 };
 
+// Address methods a submit may name or leave out: the colocated motion (a reordering H.264 session's) and reference
+// slots 1-15 (H.265 P pictures name slot 1 on alternate pictures, H.264 B pictures name it too). The OS keeps a
+// method's value across jobs, and the H.264 app programs the engine's colocated registers only from a non-zero value
+// (0x333e-0x3398, 0x5866-0x58b0), which then stay as they were; a written 0 in OUT_COLOC_DATA is its error 0xe2640180
+// for an IDR or P picture (0x315f-0x319e). So until the falcon next boots, the kernel gives a job that leaves out one
+// an earlier job named its scratch buffer there, never the earlier client's address; IN_COLOC_DATA is 0 until then.
+enum {
+    TEGRA_NVENC_LATCHED = 17,
+    TEGRA_NVENC_LATCH_NONE = 0,
+    TEGRA_NVENC_LATCH_ZERO = 1,
+    TEGRA_NVENC_LATCH_SCRATCH = 2,
+};
+
+static inline uint16_t tegra_nvenc_latched_method(uint32_t k)
+{
+    return k == 0   ? (uint16_t)NVC5B7_SET_IN_COLOC_DATA
+           : k == 1 ? (uint16_t)NVC5B7_SET_OUT_COLOC_DATA
+                    : (uint16_t)(NVC5B7_SET_IN_REF_PIC0_LUMA + 4 * (k - 1));
+}
+
+// What to write in each latched method `s` leaves out (TEGRA_NVENC_LATCH_*), given `latched` (bit k: method k held a
+// client's address since the falcon booted), which it updates.
+static inline void tegra_nvenc_latch(const TegraNVENCSubmit *s, uint32_t *latched, uint8_t action[TEGRA_NVENC_LATCHED])
+{
+    uint32_t named = 0;
+    for (uint32_t i = 0; i < s->entry_count; i++) {
+        for (uint32_t k = 0; k < TEGRA_NVENC_LATCHED; k++)
+            named |= (uint32_t)(s->entries[i].method == tegra_nvenc_latched_method(k)) << k;
+    }
+    for (uint32_t k = 0; k < TEGRA_NVENC_LATCHED; k++) {
+        action[k] = named & (1u << k)      ? (uint8_t)TEGRA_NVENC_LATCH_NONE
+                    : *latched & (1u << k) ? (uint8_t)TEGRA_NVENC_LATCH_SCRATCH
+                    : k == 0               ? (uint8_t)TEGRA_NVENC_LATCH_ZERO
+                                           : (uint8_t)TEGRA_NVENC_LATCH_NONE;
+    }
+    *latched |= named;
+}
+
 // Bytes from each relocation to the end of its buffer (1 for one exactly at a buffer's end; 0 for none).
 typedef struct {
-    uint64_t cur, curChroma, out, outChroma, bits, status, history, colocOut, mepredIn, mepredOut;
+    uint64_t cur, curChroma, out, outChroma, bits, status, history, colocIn, colocOut, mepredIn, mepredOut;
     uint64_t refLuma[TEGRA_NVENC_REFS], refChroma[TEGRA_NVENC_REFS];
     uint32_t control;  // SET_CONTROL_PARAMS
 } TegraNVENCRelocs;
@@ -173,6 +270,9 @@ static inline const char *tegra_nvenc_relocs(const TegraNVENCSubmit *s, const ui
             break;
         case NVC5B7_SET_IOHISTORY:
             slot = &r->history;
+            break;
+        case NVC5B7_SET_IN_COLOC_DATA:
+            slot = &r->colocIn;
             break;
         case NVC5B7_SET_OUT_COLOC_DATA:
             slot = &r->colocOut;

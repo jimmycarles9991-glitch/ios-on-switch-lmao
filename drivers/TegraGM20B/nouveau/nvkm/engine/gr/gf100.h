@@ -288,6 +288,9 @@ struct gf100_gr_chan {
 	struct nvkm_memory *mmio;
 	struct nvkm_vma *mmio_vma;
 	int mmio_nr;
+
+	struct nvkm_memory *zcull;
+	struct nvkm_vma *zcull_vma;
 };
 
 void gf100_gr_ctxctl_debug(struct gf100_gr *);

@@ -1,14 +1,16 @@
 // SPDX-License-Identifier: BSD-2-Clause-Patent
-// Host test for HEVCNVENC.c: its IDR setups against NVIDIA's T210 driver's (L4T 32.7.6 libnvtvmr's H.265 path read
-// at 1280x720, 1920x1080 and 640x360; TegraNVENC/nvidia/SOURCE-H265) byte for byte, every field but the surfaces'
-// pitches and chroma offsets, the control offsets and the two fields the firmware never reads; the kernel's H.265
-// checker accepting them and refusing each kind of bad submit; and HEVCEncSyntax.c's SPS and PPS, parsed back with
-// AVD's parser, stating the coding tools the setup does. Prints "PASS hevcnvenc" when all hold.
+// Host test for HEVCNVENC.c: its IDR and first two P setups against NVIDIA's T210 driver's (L4T 32.7.6 libnvtvmr's
+// H.265 path read at 1280x720, 1920x1080 and 640x360; TegraNVENC/nvidia/SOURCE-H265) byte for byte, every field but
+// the surfaces' pitches and chroma offsets, the control offsets and the two fields the firmware never reads, and the P
+// pictures' reference, ME predictor and picture index methods; the kernel's H.265 checker accepting them and refusing
+// each kind of bad submit; and HEVCEncSyntax.c's SPS, PPS and P slice header, parsed back with AVD's parser, stating
+// what the setup does. Prints "PASS hevcnvenc" when all hold.
 #include <stdio.h>
 #include <string.h>
 #include "../../SwitchVideoDecoders/AVD/HEVCSyntax.h"
 #include "../../TegraNVENC/TegraNVENCCheck.h"
 #include "../AVE/HEVCNVENC.h"
+#include "hevcnvenc_goldens.h"
 
 static int gFailures;
 
@@ -20,95 +22,6 @@ static int gFailures;
             gFailures++;                  \
         }                                 \
     } while (0)
-
-// The driver's buffers, byte by byte in hex; ".." where it took the value from the surface it was given.
-static const char kHeader1280[] =
-    "0600b7d0ff04df02........000000000000000000000000......000000000080000000ff04df0200000000000000000000000000000000"
-    "000000000000000000..0000ff04df02........000000000000000000000000......00000000008000000021648f020000000000005000"
-    "0000000002191c170000003333330603000000000000000000000000000000000000000000000000000000000000000000000000ff0f0000"
-    "0000000000000000000000000000000000000000000000010002010000000000000000000000000000000000fefefefefefefefefefefefe"
-    "fefefefeffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
-    "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
-    "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff0000000000000000980300000000000002000000"
-    "0000000000040000000e0000000c0000000d000000040b0000202b0000000000a70a00000000000080000000b00010003002900001131000"
-    "0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
-    "0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
-    "0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
-    "0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
-    "00000000000000000000000000000000000f0000000000000000000000000000000000000000000000000000000000000000000000000000"
-    "0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
-    "0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
-    "0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
-    "0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
-    "0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
-    "00000000000000000000000000000000";
-
-static const char kSlice1280[] =
-    "9803b8000402cc00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
-    "0000000000000000";
-
-static const char kHeader1920[] =
-    "0600b7d07f073f04........000000000000000000000000......0000000000800000007f073f0400000000000000000000000000000000"
-    "000000000000000000..00007f073f04........000000000000000000000000......00000000008000000021648f020000000000005000"
-    "0000000002191c170000003333330603000000000000000000000000000000000000000000000000000000000000000000000000ff0f0000"
-    "0000000000000000000000000000000000000000000000010002010000000000000000000000000000000000fefefefefefefefefefefefe"
-    "fefefefeffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
-    "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
-    "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff0000000000000000f80700000000000002000000"
-    "0000000000040000000e0000000c0000000d00000042180000a05f0000000000a70b00000000000080000000b00010003002900001131000"
-    "0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
-    "0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
-    "0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
-    "0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
-    "00000000000000000000000000000000000f0000000000000000000000000000000000000000000000000000000000000000000000000000"
-    "0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
-    "0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
-    "0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
-    "0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
-    "0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
-    "00000000000000000000000000000000";
-
-static const char kSlice1920[] =
-    "f807b8000402cc00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
-    "0000000000000000";
-
-static const char kHeader640[] =
-    "0600b7d07f027f01........000000000000000000000000......0000000000800000007f027f0100000000000000000000000000000000"
-    "000000000000000000..00007f027f01........000000000000000000000000......00000000008000000021648f020000000000005000"
-    "0000000002191c170000003333330603000000000000000000000000000000000000000000000000000000000000000000000000ff0f0000"
-    "0000000000000000000000000000000000000000000000010002010000000000000000000000000000000000fefefefefefefefefefefefe"
-    "fefefefeffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
-    "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
-    "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff0000000000000000f00000000000000002000000"
-    "0000000000040000000e0000000c0000000d000000ee020000400b0000000000a70800000000000080000000b00010003002900001131000"
-    "0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
-    "0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
-    "0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
-    "0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
-    "00000000000000000000000000000000000f0000000000000000000000000000000000000000000000000000000000000000000000000000"
-    "0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
-    "0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
-    "0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
-    "0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
-    "0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
-    "00000000000000000000000000000000";
-
-static const char kSlice640[] =
-    "f000b8000402cc00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
-    "0000000000000000";
-
-static const char kMe[] =
-    "024007000160000cff0fff038002002800000000000040a2000000000000000000000000000000000000000000001c1c1c00000000000000"
-    "891c1c7f1c1c0881000000000000000000000000000000000000000000000000000000000008081c08080000000000000000000000000000"
-    "00000000000000000000000000000000000000000000000000000000000000006e7c00000000000000000000000000000000000000000000"
-    "000000000000000000000000000000000000000000000000";
-
-static const char kMd[] =
-    "0000000000000000575555555755555507080404000000006d0b00000ff7000eff7901000000000000000000000000000000000000000000"
-    "000000000000000000000000000000000000000000003a020000000000000000000000000000000000000000000000000000000000000000"
-    "00000000000000000000000000000000";
-
-static const char kQuant[] = "6b05ffaaaaff0f000f0f0f0000000000";
 
 // Setup bytes the driver's values do not bind: surface pitches and chroma offsets (each session's own), the control
 // offsets (where this setup puts its controls), wp_control_offset and gpTimer_timeout_val (unread by app 3).
@@ -143,29 +56,98 @@ static int compare(const char *what, const char *hex, const uint8_t *ours, size_
     return differ;
 }
 
+static const H264EncHandles kHandles = {.input = 1, .recon = 2, .ref = 3, .bitstream = 4, .aux = 5, .mepred = {6, 7}};
+
+static const char *check(const TegraNVENCSubmit *s)
+{
+    uint64_t avail[TEGRA_NVENC_MAX_ENTRIES];
+    for (uint32_t i = 0; i < TEGRA_NVENC_MAX_ENTRIES; i++)
+        avail[i] = 64u << 20;
+    return tegra_nvenc_check(s, avail);
+}
+
+// `hex` (a driver setup) with `patches` written over it, into `out`.
+static const char *patched(const char *hex, const Patch *patches, size_t count, char *out, size_t cap)
+{
+    snprintf(out, cap, "%s", hex);
+    for (size_t i = 0; i < count; i++)
+        memcpy(out + 2 * patches[i].offset, patches[i].hex, strlen(patches[i].hex));
+    return out;
+}
+
+static int compareSetup(const TegraNVENCSubmit *s, const char *header, const char *slice)
+{
+    const nvenc_h265_pic_control_s *pc = &((const nvenc_h265_drv_pic_setup_s *)s->setup)->pic_control;
+    int differ = compare("setup", header, s->setup, TEGRA_NVENC_H265_SETUP_HEADER, true);
+    differ += compare("slice", slice, s->setup + pc->slice_control_offset, 64, false);
+    differ += compare("ME", kMe, s->setup + pc->me_control_offset, 192, false);
+    differ += compare("MD", kMd, s->setup + pc->md_control_offset, 128, false);
+    differ += compare("quant", kQuant, s->setup + pc->q_control_offset, 16, false);
+    return differ;
+}
+
+static const TegraNVENCEntry *entry(const TegraNVENCSubmit *s, uint16_t method)
+{
+    for (uint32_t i = 0; i < s->entry_count; i++) {
+        if (s->entries[i].method == method)
+            return &s->entries[i];
+    }
+    return NULL;
+}
+
+// A P picture's methods as the driver's (SOURCE-H265): the reference's luma in the slot its list entry names, the ME
+// predictors the picture before wrote in and the other buffer out, the picture index.
+static void checkPMethods(const TegraNVENCSubmit *s, const HEVCEncPicture *p, uint32_t slot, const char *what)
+{
+    uint32_t refs = 0;
+    for (uint32_t i = 0; i < s->entry_count; i++) {
+        const uint16_t m = s->entries[i].method;
+        refs += m >= NVC5B7_SET_IN_REF_PIC0_LUMA && m < NVC5B7_SET_IN_REF_PIC0_CHROMA + 64;
+    }
+    const TegraNVENCEntry *ref = entry(s, (uint16_t)(NVC5B7_SET_IN_REF_PIC0_LUMA + 4 * slot));
+    const TegraNVENCEntry *in = entry(s, NVC5B7_SET_IN_MEPRED_DATA), *out = entry(s, NVC5B7_SET_OUT_MEPRED_DATA);
+    const TegraNVENCEntry *recon = entry(s, NVC5B7_SET_OUT_REF_PIC_LUMA), *index = entry(s, NVC5B7_SET_PICTURE_INDEX);
+    CHECK(refs == 1 && ref && ref->value == kHandles.ref && ref->offset == 0 && recon && recon->value == kHandles.recon,
+          "%s: the reference in slot %u, the reconstruction", what, slot);
+    CHECK(in && out && in->value == kHandles.mepred[~p->poc & 1] && out->value == kHandles.mepred[p->poc & 1],
+          "%s: ME predictors", what);
+    CHECK(index && index->value == p->picture_index, "%s: picture index", what);
+}
+
 static void checkSize(uint32_t width, uint32_t height, const char *header, const char *slice)
 {
     HEVCEncConfig c = {.width = width, .height = height, .fps_num = 30, .fps_den = 1};
     CHECK(hevcnvenc_configure(&c) == 0, "%ux%u: configure", width, height);
     H264EncLayout l;
-    hevcnvenc_layout(&c, &l);
-    const H264EncHandles h = {1, 2, 3, 4, 5, {6, 7}};
-    const HEVCEncPicture idr = {true, 0, 23};
+    hevcnvenc_layout(&c, TEGRA_NVENC_LAYOUT_TILED16, &l);
+    const HEVCEncPicture idr = {.idr = true, .qp = 23};
     static TegraNVENCSubmit s;
-    hevcnvenc_fill_submit(&c, TEGRA_NVENC_LAYOUT_TILED16, TEGRA_NVENC_CHROMA_OFFSET, &l, &idr, &h, &s);
-    const nvenc_h265_pic_control_s *pc = &((const nvenc_h265_drv_pic_setup_s *)s.setup)->pic_control;
-    int differ = compare("setup", header, s.setup, TEGRA_NVENC_H265_SETUP_HEADER, true);
-    differ += compare("slice", slice, s.setup + pc->slice_control_offset, 64, false);
-    differ += compare("ME", kMe, s.setup + pc->me_control_offset, 192, false);
-    differ += compare("MD", kMd, s.setup + pc->md_control_offset, 128, false);
-    differ += compare("quant", kQuant, s.setup + pc->q_control_offset, 16, false);
-    CHECK(!differ, "%ux%u: %d bytes differ from the driver's setup", width, height, differ);
+    hevcnvenc_fill_submit(&c, TEGRA_NVENC_LAYOUT_TILED16, TEGRA_NVENC_CHROMA_OFFSET, &l, &idr, &kHandles, &s);
+    int differ = compareSetup(&s, header, slice);
+    CHECK(!differ, "%ux%u: %d bytes differ from the driver's IDR setup", width, height, differ);
+    CHECK(!entry(&s, NVC5B7_SET_IN_MEPRED_DATA) && !entry(&s, NVC5B7_SET_OUT_MEPRED_DATA),
+          "%ux%u: ME predictors on an IDR (the driver gives none, libnvtvmr 0x3f370)", width, height);
+    const char *why = check(&s);
+    CHECK(!why, "%ux%u: the checker refused the IDR: %s", width, height, why ? why : "");
 
-    uint64_t avail[TEGRA_NVENC_MAX_ENTRIES] = {0};
-    for (uint32_t i = 0; i < s.entry_count; i++)
-        avail[i] = 64u << 20;
-    const char *why = tegra_nvenc_check(&s, avail);
-    CHECK(!why, "%ux%u: the checker refused the setup: %s", width, height, why ? why : "");
+    // The driver's first and second P pictures: its IDR setup with what they change (hevcnvenc_goldens.h).
+    static char pHeader[2 * TEGRA_NVENC_H265_SETUP_HEADER + 1], pSlice[2 * 64 + 1], p2Header[sizeof(pHeader)];
+    patched(header, kPSetup, sizeof(kPSetup) / sizeof(kPSetup[0]), pHeader, sizeof(pHeader));
+    patched(slice, kPSlice, sizeof(kPSlice) / sizeof(kPSlice[0]), pSlice, sizeof(pSlice));
+    patched(pHeader, kP2Setup, sizeof(kP2Setup) / sizeof(kP2Setup[0]), p2Header, sizeof(p2Header));
+    const HEVCEncPicture p1 = {.poc = 1, .qp = 25, .picture_index = 1}, p2 = {.poc = 2, .qp = 25, .picture_index = 2};
+    hevcnvenc_fill_submit(&c, TEGRA_NVENC_LAYOUT_TILED16, TEGRA_NVENC_CHROMA_OFFSET, &l, &p1, &kHandles, &s);
+    differ = compareSetup(&s, pHeader, pSlice);
+    CHECK(!differ, "%ux%u: %d bytes differ from the driver's first P setup", width, height, differ);
+    checkPMethods(&s, &p1, 0, "first P");
+    why = check(&s);
+    CHECK(!why, "%ux%u: the checker refused the first P: %s", width, height, why ? why : "");
+    hevcnvenc_fill_submit(&c, TEGRA_NVENC_LAYOUT_TILED16, TEGRA_NVENC_CHROMA_OFFSET, &l, &p2, &kHandles, &s);
+    differ = compareSetup(&s, p2Header, pSlice);
+    CHECK(!differ, "%ux%u: %d bytes differ from the driver's second P setup", width, height, differ);
+    checkPMethods(&s, &p2, 1, "second P");
+    why = check(&s);
+    CHECK(!why, "%ux%u: the checker refused the second P: %s", width, height, why ? why : "");
 }
 
 typedef void (*Break)(TegraNVENCSubmit *s);
@@ -173,6 +155,23 @@ typedef void (*Break)(TegraNVENCSubmit *s);
 static nvenc_h265_drv_pic_setup_s *setupOf(TegraNVENCSubmit *s)
 {
     return (nvenc_h265_drv_pic_setup_s *)s->setup;
+}
+
+static nvenc_h265_slice_control_s *sliceOf(TegraNVENCSubmit *s)
+{
+    return (nvenc_h265_slice_control_s *)(s->setup + setupOf(s)->pic_control.slice_control_offset);
+}
+
+static void insertBeforeExecute(TegraNVENCSubmit *s, TegraNVENCEntry e)
+{
+    s->entries[s->entry_count] = s->entries[s->entry_count - 1];
+    s->entries[s->entry_count - 1] = e;
+    s->entry_count++;
+}
+
+static void reloc(TegraNVENCSubmit *s, uint16_t method)
+{
+    insertBeforeExecute(s, (TegraNVENCEntry){method, TEGRA_NVENC_ENTRY_RELOC, 2, 0});
 }
 
 static void pPicture(TegraNVENCSubmit *s)
@@ -202,7 +201,7 @@ static void meMisaligned(TegraNVENCSubmit *s)
 
 static void fewCtus(TegraNVENCSubmit *s)
 {
-    ((nvenc_h265_slice_control_s *)(s->setup + 1024))->num_ctus = 1;
+    sliceOf(s)->num_ctus = 1;
 }
 
 static void noBitstream(TegraNVENCSubmit *s)
@@ -227,9 +226,90 @@ static void twoPass(TegraNVENCSubmit *s)
 
 static void refRelocation(TegraNVENCSubmit *s)
 {
-    s->entries[s->entry_count] = s->entries[s->entry_count - 1];
-    s->entries[s->entry_count - 1] = (TegraNVENCEntry){NVC5B7_SET_IN_REF_PIC0_LUMA, TEGRA_NVENC_ENTRY_RELOC, 2, 0};
-    s->entry_count++;
+    reloc(s, NVC5B7_SET_IN_REF_PIC0_LUMA);
+}
+
+static void reconChromaMethod(TegraNVENCSubmit *s)
+{
+    reloc(s, NVC5B7_SET_OUT_REF_PIC_CHROMA);
+}
+
+static void refChromaMethod(TegraNVENCSubmit *s)
+{
+    reloc(s, NVC5B7_SET_IN_REF_PIC0_CHROMA);
+}
+
+static void noReconChromaOffset(TegraNVENCSubmit *s)
+{
+    setupOf(s)->outputpic_cfg.chroma_top_frm_offset = 0;
+}
+
+// Broken P pictures (the first P: its reference in slot 0).
+static void pNoReference(TegraNVENCSubmit *s)
+{
+    for (uint32_t i = 0; i < s->entry_count; i++) {
+        if (s->entries[i].method == NVC5B7_SET_IN_REF_PIC0_LUMA) {
+            memmove(&s->entries[i], &s->entries[i + 1], (s->entry_count - i - 1) * sizeof(s->entries[0]));
+            s->entry_count--;
+            return;
+        }
+    }
+}
+
+static void pOtherSlot(TegraNVENCSubmit *s)
+{
+    setupOf(s)->pic_control.l0[0] = 2;
+}
+
+static void pExtraSlot(TegraNVENCSubmit *s)
+{
+    reloc(s, NVC5B7_SET_IN_REF_PIC0_LUMA + 4 * 5);
+}
+
+static void pField(TegraNVENCSubmit *s)
+{
+    setupOf(s)->pic_control.l0[0] = 1;
+}
+
+static void pSecondEntry(TegraNVENCSubmit *s)
+{
+    setupOf(s)->pic_control.l0[1] = 0;
+}
+
+static void pList1(TegraNVENCSubmit *s)
+{
+    setupOf(s)->pic_control.l1[0] = 0;
+}
+
+static void pISlice(TegraNVENCSubmit *s)
+{
+    sliceOf(s)->slice_type = 2;
+}
+
+static void pIdrNal(TegraNVENCSubmit *s)
+{
+    setupOf(s)->pic_control.nal_unit_type = 19;
+}
+
+static void pBPicture(TegraNVENCSubmit *s)
+{
+    setupOf(s)->pic_control.pic_type = 1;
+}
+
+static void pExplicitRps(TegraNVENCSubmit *s)
+{
+    setupOf(s)->pic_control.short_term_ref_pic_set_sps_flag = 0;
+}
+
+static void pNoPocTotal(TegraNVENCSubmit *s)
+{
+    setupOf(s)->pic_control.ref_pic_list_modification.NumPocTotalCurr = 0;
+}
+
+static void pTwoByOverride(TegraNVENCSubmit *s)
+{
+    sliceOf(s)->num_ref_idx_active_override_flag = 1;
+    sliceOf(s)->num_ref_idx_l0_active_minus1 = 1;
 }
 
 static void checkRefusals(void)
@@ -237,35 +317,125 @@ static void checkRefusals(void)
     static const struct {
         const char *name;
         Break apply;
+        bool p;  // applied to a P picture's submit, else an IDR's
     } kBreaks[] = {
-        {"a P picture", pPicture},
-        {"a reference in list 0", reference},
-        {"temporal MVP", temporalMvp},
-        {"SAO", sao},
-        {"a misaligned ME control", meMisaligned},
-        {"one CTB a slice", fewCtus},
-        {"a bitstream past its buffer", noBitstream},
-        {"another magic", magic},
-        {"a width not of whole CTBs", oddWidth},
-        {"two-pass RC", twoPass},
-        {"a reference relocation", refRelocation},
+        {"a P picture", pPicture, false},
+        {"a reference in list 0", reference, false},
+        {"temporal MVP", temporalMvp, false},
+        {"SAO", sao, false},
+        {"a misaligned ME control", meMisaligned, false},
+        {"one CTB a slice", fewCtus, false},
+        {"a bitstream past its buffer", noBitstream, false},
+        {"another magic", magic, false},
+        {"a width not of whole CTBs", oddWidth, false},
+        {"two-pass RC", twoPass, false},
+        {"a reference relocation", refRelocation, false},
+        {"a reconstruction chroma method", reconChromaMethod, false},
+        {"a reference chroma method", refChromaMethod, false},
+        {"a reconstruction without its chroma offset", noReconChromaOffset, false},
+        {"a P picture without its reference", pNoReference, true},
+        {"a P picture naming a slot not relocated", pOtherSlot, true},
+        {"a P picture with a slot relocated it does not name", pExtraSlot, true},
+        {"a field reference", pField, true},
+        {"a second list-0 entry", pSecondEntry, true},
+        {"a list-1 entry", pList1, true},
+        {"a P picture with an I slice", pISlice, true},
+        {"a P picture with an IDR NAL type", pIdrNal, true},
+        {"a B picture", pBPicture, true},
+        {"an explicit reference picture set", pExplicitRps, true},
+        {"a P picture with no reference counted", pNoPocTotal, true},
+        {"two references by override", pTwoByOverride, true},
+        {"a P reference chroma method", refChromaMethod, true},
     };
 
     HEVCEncConfig c = {.width = 1280, .height = 720};
     hevcnvenc_configure(&c);
     H264EncLayout l;
-    hevcnvenc_layout(&c, &l);
-    const H264EncHandles h = {1, 2, 3, 4, 5, {6, 7}};
-    const HEVCEncPicture idr = {true, 0, 30};
-    uint64_t avail[TEGRA_NVENC_MAX_ENTRIES];
+    hevcnvenc_layout(&c, TEGRA_NVENC_LAYOUT_TILED16, &l);
+    const HEVCEncPicture idr = {.idr = true, .qp = 30}, p = {.poc = 1, .qp = 32, .picture_index = 1};
     for (size_t k = 0; k < sizeof(kBreaks) / sizeof(kBreaks[0]); k++) {
         static TegraNVENCSubmit s;
-        hevcnvenc_fill_submit(&c, TEGRA_NVENC_LAYOUT_TILED16, TEGRA_NVENC_CHROMA_OFFSET, &l, &idr, &h, &s);
+        hevcnvenc_fill_submit(&c, TEGRA_NVENC_LAYOUT_TILED16, TEGRA_NVENC_CHROMA_OFFSET, &l, kBreaks[k].p ? &p : &idr,
+                              &kHandles, &s);
         kBreaks[k].apply(&s);
-        for (uint32_t i = 0; i < TEGRA_NVENC_MAX_ENTRIES; i++)
-            avail[i] = 64u << 20;
-        CHECK(tegra_nvenc_check(&s, avail) != NULL, "the checker took %s", kBreaks[k].name);
+        CHECK(check(&s) != NULL, "the checker took %s", kBreaks[k].name);
     }
+}
+
+// A P picture's reference is bounded as a reference surface: one byte short of its chroma, it is refused.
+static void checkReferenceBound(void)
+{
+    HEVCEncConfig c = {.width = 1280, .height = 720};
+    hevcnvenc_configure(&c);
+    H264EncLayout l;
+    hevcnvenc_layout(&c, TEGRA_NVENC_LAYOUT_TILED16, &l);
+    const HEVCEncPicture p = {.poc = 1, .qp = 30, .picture_index = 1};
+    static TegraNVENCSubmit s;
+    hevcnvenc_fill_submit(&c, TEGRA_NVENC_LAYOUT_TILED16, TEGRA_NVENC_CHROMA_OFFSET, &l, &p, &kHandles, &s);
+    uint64_t avail[TEGRA_NVENC_MAX_ENTRIES];
+    for (uint32_t i = 0; i < TEGRA_NVENC_MAX_ENTRIES; i++) {
+        const bool ref = i < s.entry_count && s.entries[i].method == NVC5B7_SET_IN_REF_PIC0_LUMA;
+        avail[i] = ref ? l.recon.bytes : 64u << 20;
+    }
+    const char *why = tegra_nvenc_check(&s, avail);
+    CHECK(!why, "a reference of recon.bytes: %s", why ? why : "");
+    for (uint32_t i = 0; i < s.entry_count; i++) {
+        if (s.entries[i].method == NVC5B7_SET_IN_REF_PIC0_LUMA)
+            avail[i] = l.recon.bytes - 1;
+    }
+    CHECK(tegra_nvenc_check(&s, avail) != NULL, "the checker took a reference one byte short");
+}
+
+// With the input's chroma by method, the reconstruction's is still at its config offset: app 3 reads no other.
+static void checkChromaMethodInput(void)
+{
+    HEVCEncConfig c = {.width = 1280, .height = 720};
+    hevcnvenc_configure(&c);
+    H264EncLayout l;
+    hevcnvenc_layout(&c, TEGRA_NVENC_LAYOUT_TILED16, &l);
+    const HEVCEncPicture idr = {.idr = true, .qp = 30}, p = {.poc = 7, .qp = 30, .picture_index = 7};
+    static TegraNVENCSubmit s;
+    hevcnvenc_fill_submit(&c, TEGRA_NVENC_LAYOUT_TILED16, TEGRA_NVENC_CHROMA_METHOD, &l, &idr, &kHandles, &s);
+    const nvenc_h265_drv_pic_setup_s *q = setupOf(&s);
+    CHECK(q->outputpic_cfg.chroma_top_frm_offset == l.recon.chroma_offset / 256 && !q->input_cfg.chroma_top_frm_offset,
+          "chroma by method: the reconstruction's chroma offset");
+    const char *why = check(&s);
+    CHECK(!why, "chroma by method: the checker refused the IDR: %s", why ? why : "");
+    hevcnvenc_fill_submit(&c, TEGRA_NVENC_LAYOUT_TILED16, TEGRA_NVENC_CHROMA_METHOD, &l, &p, &kHandles, &s);
+    why = check(&s);
+    CHECK(!why, "chroma by method: the checker refused a P: %s", why ? why : "");
+}
+
+// A P picture's reference as the SPS, PPS and slice header state it (NVENC writes the slice header from the setup):
+// the SPS's one set, one picture back and used; one active reference by the PPS's default; the slice's NAL type, POC
+// LSB and the SPS's set named.
+static void checkPSyntax(const HEVCEncConfig *c, const HEVCParams *params, const H264EncLayout *l)
+{
+    const HEVCEncPicture p = {.poc = 300, .qp = 30, .picture_index = 300};
+    static TegraNVENCSubmit s;
+    hevcnvenc_fill_submit(c, TEGRA_NVENC_LAYOUT_TILED16, TEGRA_NVENC_CHROMA_OFFSET, l, &p, &kHandles, &s);
+    const nvenc_h265_pic_control_s *pc = &setupOf(&s)->pic_control;
+    const HEVCShortTermRPS *rps = &params->sps[0].st_rps[0];
+    CHECK(rps->num_negative == 1 && !rps->num_positive && rps->delta[0][0] == -pc->temp_dist_l0[0] && rps->used[0][0] &&
+              pc->short_term_ref_pic_set_sps_flag && !pc->short_term_ref_pic_set_idx &&
+              pc->ref_pic_list_modification.NumPocTotalCurr == 1,
+          "P: the SPS's reference picture set");
+    CHECK(params->pps[0].num_ref_idx_l0_default == setupOf(&s)->pps_data.num_ref_idx_l0_active_minus1 + 1u &&
+              !sliceOf(&s)->num_ref_idx_active_override_flag,
+          "P: one active reference");
+    uint8_t rbsp[64], nal[80];
+    H264Bits b;
+    h264bits_init(&b, rbsp, sizeof(rbsp));
+    hevcenc_slice_header(c, &p, &b);
+    h264bits_trailing(&b);
+    const size_t size = h264bits_size(&b);
+    nal[0] = (uint8_t)(hevcenc_nal_type(&p) << 1);
+    nal[1] = 1;
+    memcpy(nal + 2, rbsp, size);
+    HEVCSliceHeader sh;
+    CHECK(hevc_parse_slice_header(params, nal, size + 2, &sh) == 0 && sh.nal_type == pc->nal_unit_type &&
+              sh.poc_lsb == pc->pic_order_cnt_lsb && sh.st_rps_from_sps == pc->short_term_ref_pic_set_sps_flag,
+          "P: slice header NAL type %u POC LSB %u", sh.nal_type, sh.poc_lsb);
 }
 
 // HEVCEncSyntax.c's SPS and PPS state the tools the setup does (the firmware codes the slices by the setup, decoders
@@ -281,11 +451,10 @@ static void checkSyntax(void)
     CHECK(hevc_parse_sps(&params, sps, spsSize) == 0 && hevc_parse_pps(&params, pps, ppsSize) == 0,
           "AVD's parser refused the SPS or PPS");
     H264EncLayout l;
-    hevcnvenc_layout(&c, &l);
-    const H264EncHandles h = {1, 2, 3, 4, 5, {6, 7}};
-    const HEVCEncPicture idr = {true, 0, 30};
+    hevcnvenc_layout(&c, TEGRA_NVENC_LAYOUT_TILED16, &l);
+    const HEVCEncPicture idr = {.idr = true, .qp = 30};
     static TegraNVENCSubmit s;
-    hevcnvenc_fill_submit(&c, TEGRA_NVENC_LAYOUT_TILED16, TEGRA_NVENC_CHROMA_OFFSET, &l, &idr, &h, &s);
+    hevcnvenc_fill_submit(&c, TEGRA_NVENC_LAYOUT_TILED16, TEGRA_NVENC_CHROMA_OFFSET, &l, &idr, &kHandles, &s);
     const nvenc_h265_drv_pic_setup_s *p = (const nvenc_h265_drv_pic_setup_s *)s.setup;
     const HEVCSPS *q = &params.sps[0];
     CHECK(q->width == p->input_cfg.frame_width_minus1 + 1u && q->height == p->input_cfg.frame_height_minus1 + 1u,
@@ -309,6 +478,7 @@ static void checkSyntax(void)
               r->cu_qp_delta == p->pps_data.cu_qp_delta_enabled_flag && !r->sign_data_hiding &&
               !r->constrained_intra_pred,
           "PPS tools");
+    checkPSyntax(&c, &params, &l);
 }
 
 int main(void)
@@ -317,6 +487,8 @@ int main(void)
     checkSize(1920, 1080, kHeader1920, kSlice1920);
     checkSize(640, 360, kHeader640, kSlice640);
     checkRefusals();
+    checkReferenceBound();
+    checkChromaMethodInput();
     checkSyntax();
     if (gFailures) {
         printf("FAIL hevcnvenc: %d failures\n", gFailures);

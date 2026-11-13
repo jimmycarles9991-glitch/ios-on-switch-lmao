@@ -1,0 +1,65 @@
+{
+  "format": "iterated-blend/1",
+  "name": "rung3-llt",
+  "passes": 9,
+  "alpha": false,
+  "instructions": [
+    "0x30102029",
+    "0x30603031",
+    "0x00375409",
+    "0x30384201",
+    "0x00609029",
+    "0x303a4601",
+    "0x300f6401",
+    "0x30001e11",
+    "0x0000c811"
+  ],
+  "constants": [],
+  "methods": [
+    [
+      4836,
+      0
+    ],
+    [
+      4924,
+      1
+    ],
+    [
+      4928,
+      32774
+    ],
+    [
+      4932,
+      16385
+    ],
+    [
+      4936,
+      16384
+    ],
+    [
+      4940,
+      32774
+    ],
+    [
+      4944,
+      16385
+    ],
+    [
+      4952,
+      17155
+    ],
+    [
+      4960,
+      1
+    ]
+  ],
+  "restore": [
+    [
+      4836,
+      1
+    ]
+  ],
+  "rgb": "min(src.a * dst.rgb - (src.a - 2 * src.rgb) * dst.a + dst.rgb * (1 - src.a) + src.rgb * (1 - dst.a), saturate(src.a + dst.a - src.a * dst.a))",
+  "a": "saturate(src.a + dst.a - src.a * dst.a)",
+  "tolerance": 2
+}

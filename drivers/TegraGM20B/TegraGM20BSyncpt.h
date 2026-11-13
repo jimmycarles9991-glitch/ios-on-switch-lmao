@@ -10,7 +10,7 @@
 extern "C" {
 #endif
 
-#define TGM_SYNCPT_INCR_DWORDS 14u
+#define TGM_SYNCPT_INCR_DWORDS (12u + 2u * TGM_SYNCPT_INCRS)
 #define TGM_SYNCPT_WAIT_DWORDS 4u
 /* nvgpu increments twice per release (gk20a_channel_get_syncpt_incr_per_release): wait for value + 2 */
 #define TGM_SYNCPT_INCRS 2u

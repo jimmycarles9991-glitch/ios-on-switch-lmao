@@ -17,7 +17,7 @@ using addr64_t = uint64_t;
 constexpr IOReturn kIOReturnSuccess = 0, kIOReturnNotPermitted = static_cast<IOReturn>(0xe00002e2);
 constexpr IOOptionBits kIODirectionInOut = 3, kIOMemoryPageable = 0x400, kIOMemoryPurgeable = 0x40,
                        kIOMemoryMapperNone = 0x800;
-constexpr IOOptionBits kIOMemoryPurgeableNonVolatile = 2, kIOMemoryPurgeableVolatile = 3;
+constexpr IOOptionBits kIOMemoryPurgeableNonVolatile = 2, kIOMemoryPurgeableVolatile = 3, kIOMemoryPurgeableEmpty = 4;
 constexpr int kIOMemoryLedgerTagGraphics = 3;
 
 #define NSEC_PER_USEC 1000ull

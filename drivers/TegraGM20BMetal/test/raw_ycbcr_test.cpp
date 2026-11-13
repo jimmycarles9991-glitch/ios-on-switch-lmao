@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MIT
-// raw/runtime/raw_ycbcr.cpp: which two-plane YCbCr textures the raw path converts, by m2v's rules, and the conversion's shape.
+// raw/runtime/raw_ycbcr.cpp: which two-plane YCbCr textures the raw path converts, by m2v's rules, and the conversion's shape
+// (packed planes: three 10-bit codes a 32-bit word, m2v bind/ycbcr_convert.rs).
 // The conversion's texels against Metal's own reads: raw/test/ycbcroracle.mm (this Mac's GPU).
 #include "../raw/runtime/raw_ycbcr.h"
 
@@ -40,6 +41,7 @@ TEST(RawYcbcr, TipsTenBitVideoIsConvertedFromItsSixteenBitPlanes)
     EXPECT_EQ(p.output, raw::YcbcrConverted);
     EXPECT_EQ(p.image, 115u);
     EXPECT_EQ(p.lumaFormat, 20u);
+    EXPECT_EQ(p.lumaWidth, 2500u);
     EXPECT_EQ(p.chromaFormat, 60u);
     EXPECT_EQ(p.chromaWidth, 1250u);
     EXPECT_EQ(p.chromaHeight, 750u);
@@ -111,13 +113,42 @@ TEST(RawYcbcr, PlaneOneOfFullHeightChromaReadsItsCodesAsLuma)
     EXPECT_STREQ(raw::planYcbcr(g, p), "plane 1 of a 4:2:0 surface (Metal reads its rows past the plane)");
 }
 
+TEST(RawYcbcr, PackedPlanesAreWordsOfThreeCodes)
+{
+    raw::YcbcrPlan p;
+    raw::YcbcrFacts f = surface(508, "p420", 33, 17, 64, 9);
+    ASSERT_EQ(raw::planYcbcr(f, p), nullptr);
+    EXPECT_EQ(p.output, raw::YcbcrConvertedPacked);
+    EXPECT_EQ(p.image, 115u);
+    EXPECT_EQ(p.lumaFormat, 53u);
+    EXPECT_EQ(p.chromaFormat, 53u);
+    EXPECT_EQ(p.lumaWidth, 11u);    // 33 codes
+    EXPECT_EQ(p.chromaWidth, 12u);  // 17 pairs: 34 codes
+    EXPECT_EQ(p.chromaHeight, 9u);
+    EXPECT_EQ(p.shape[11], 0u);
+    EXPECT_EQ(p.shape[12], 1023u);
+
+    f = surface(529, "pf22", 33, 17, 64, 17);
+    ASSERT_EQ(raw::planYcbcr(f, p), nullptr);
+    EXPECT_EQ(p.output, raw::YcbcrSrgbPacked);
+    f = surface(548, "p444", 33, 17, 96, 17);
+    ASSERT_EQ(raw::planYcbcr(f, p), nullptr);
+    EXPECT_EQ(p.output, raw::YcbcrCodes10Packed);
+    EXPECT_EQ(p.image, 90u);
+    EXPECT_EQ(p.chromaWidth, 22u);  // 33 pairs: 66 codes
+
+    f = surface(548, "p444", 33, 17, 80, 17);
+    EXPECT_STREQ(raw::planYcbcr(f, p), "row shorter than its codes");
+    f = surface(546, "x420", 33, 17, 128, 9);
+    EXPECT_STREQ(raw::planYcbcr(f, p), "pixel format");
+    f = surface(543, "p420", 33, 17, 128, 9);
+    EXPECT_STREQ(raw::planYcbcr(f, p), "pixel format");
+}
+
 TEST(RawYcbcr, RefusesWhatM2vRefuses)
 {
     raw::YcbcrPlan p;
-    raw::YcbcrFacts f = surface(508, "p420", 33, 17, 128, 9);
-    EXPECT_STREQ(raw::planYcbcr(f, p), "packed 10-bit codes (p420 and its kin)");
-
-    f = surface(505, "420v", 33, 17, 128, 9);
+    raw::YcbcrFacts f = surface(505, "420v", 33, 17, 128, 9);
     EXPECT_STREQ(raw::planYcbcr(f, p), "pixel format");
 
     f = surface(500, "422v", 33, 17, 64, 17);

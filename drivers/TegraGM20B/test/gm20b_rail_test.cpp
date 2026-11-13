@@ -1,5 +1,5 @@
-// TegraGM20BRail.h: when the GPU's rail goes down and comes back up around the display's power; and gpu.c's rail
-// protocol on threads (tgm_rail_down, gpu_lock, gate_enter's railed path) with a std::mutex and condition variables in
+// TegraGM20BRail.h: when the GPU's rail goes down and comes back up around the display's power; and gpu_power.c's rail
+// protocol on threads (tgm_rail_down, tgm_gpu_lock, tgm_gate_enter's railed path) with a std::mutex and condition variables in
 // place of lck_mtx and thread_wakeup.
 #include "drivers/TegraGM20B/TegraGM20BRail.h"
 #include "drivers/TegraGM20B/TegraGM20BSleepGate.h"
@@ -59,7 +59,7 @@ TEST(Gm20bRail, TheHoldDoublesWithEachDemandUpToItsCap)
 	EXPECT_EQ(tgm_rail_hold_ns(UINT32_MAX), 64000000000ull);
 }
 
-// gpu.c's GPU time across rail cycles: PTIMER runs on the GPU's own clock (ahead of ktime here), restarts from ktime at
+// gpu_bringup.c's GPU time across rail cycles: PTIMER runs on the GPU's own clock (ahead of ktime here), restarts from ktime at
 // every wake (nvkm_timer_init, then stamp_reseed), and tgm_timestamp_ns answers ktime while the GPU is down.
 struct GpuTime {
 	uint64_t ktime = 1000000000, ptimer = 1000000000, last = 0;
@@ -83,9 +83,11 @@ struct GpuTime {
 		railed = true;
 	}
 
-	void up()  // wake_m1
+	void up()  // wake_m1: nvkm_timer_init, then stamp_reseed
 	{
-		ptimer = tgm_stamp_monotonic(last, ktime);
+		ptimer = ktime;
+		if (const uint64_t floor = tgm_stamp_reseed(last, ptimer))
+			ptimer = floor;
 		railed = false;
 	}
 };
@@ -115,8 +117,8 @@ TEST(Gm20bRail, GpuTimeNeverGoesBackwardsAcrossRailCycles)
 			prev = s;
 		}
 		t.up();
-		ASSERT_GE(t.ptimer, gpuWritten)
-			<< "cycle " << cycle << ": PTIMER reseeded behind its last value";
+		ASSERT_GT(t.ptimer, gpuWritten)
+			<< "cycle " << cycle << ": PTIMER reseeded at or behind its last value";
 		ASSERT_GE(t.ptimer, prev)
 			<< "cycle " << cycle << ": PTIMER reseeded behind a time handed out";
 	}
@@ -127,10 +129,13 @@ TEST(Gm20bRail, PtimerFollowsKtimeOnceKtimeIsAhead)
 	EXPECT_EQ(tgm_stamp_monotonic(5, 9), 9u);
 	EXPECT_EQ(tgm_stamp_monotonic(9, 5), 9u);
 	EXPECT_EQ(tgm_stamp_monotonic(7, 7), 7u);
+	EXPECT_EQ(tgm_stamp_reseed(5, 9), 0u);
+	EXPECT_EQ(tgm_stamp_reseed(9, 9), 10u);
+	EXPECT_EQ(tgm_stamp_reseed(9, 5), 10u);
 }
 
-// gpu.c: gpu.lock (`gpuLock`, owned by whoever takes it, as lck_mtx is), gate_lock with the gate's two events, and
-// gpu.railed. rail_up_locked runs in whichever caller finds the GPU down, under the gpu.lock it took itself.
+// gpu_bringup.c: tgm_gpu.lock (`gpuLock`, owned by whoever takes it, as lck_mtx is), tgm_gate_lock with the gate's two events, and
+// tgm_gpu.railed. tgm_rail_up_locked runs in whichever caller finds the GPU down, under the tgm_gpu.lock it took itself.
 struct RailKernel {
 	tgm_gate gate = {};
 	std::mutex gateLock, gpuLock;
@@ -151,7 +156,7 @@ struct RailKernel {
 		railed = 0;
 	}
 
-	// gpu_lock: returns holding gpuLock, as the kernel's does (the analysis cannot follow a lock across calls)
+	// tgm_gpu_lock: returns holding gpuLock, as the kernel's does (the analysis cannot follow a lock across calls)
 	void lockGpu() __attribute__((no_thread_safety_analysis))
 	{
 		gpuLock.lock();
@@ -164,7 +169,7 @@ struct RailKernel {
 		gpuLock.unlock();
 	}
 
-	void enter()  // gate_enter
+	void enter()  // tgm_gate_enter
 	{
 		tgm_gate_entry entry;
 		while ((entry = tgm_gate_try_enter(&gate)) != TGM_GATE_IN) {
@@ -195,7 +200,7 @@ struct RailKernel {
 	}
 
 	void
-	down()  // tgm_rail_down: sleep_gate, sleep_fences, gpu.lock, the power-down, railed, the waiters told
+	down()  // tgm_rail_down: sleep_gate, sleep_fences, tgm_gpu.lock, the power-down, railed, the waiters told
 	{
 		{
 			std::unique_lock<std::mutex> hold(gateLock);
@@ -236,7 +241,7 @@ TEST(Gm20bRail, EveryRailDownIsWokenOnceByAnyCallerAndNothingTouchesTheGpuWhileD
 				k.leave();
 			}
 		});
-	for (int i = 0; i < kAtLock; i++)  // the nvif calls under gpu.lock
+	for (int i = 0; i < kAtLock; i++)  // the nvif calls under tgm_gpu.lock
 		threads.emplace_back([&] {
 			while (!stop.load()) {
 				k.lockGpu();

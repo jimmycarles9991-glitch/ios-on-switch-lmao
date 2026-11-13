@@ -1,0 +1,155 @@
+# The bench loop's SM53 instruction experiments: Maxwell programs for latency, throughput, dual issue and operand
+# reuse (latency), the cycle model the fake device runs them on (timing_sim), and the fit of the device's results.
+load("@rules_python//python:py_library.bzl", "py_library")
+load("@rules_python//python:py_test.bzl", "py_test")
+load("//bazel/lint:defs.bzl", "lint_files")
+
+package(default_visibility = ["//tools:__subpackages__"])
+
+lint_files()
+
+py_library(
+    name = "encode",
+    srcs = [
+        "encode.py",
+        "operands.py",
+    ],
+    deps = ["//tools/gpu/maxwell:isa"],
+)
+
+py_library(
+    name = "sph",
+    srcs = ["sph.py"],
+)
+
+py_library(
+    name = "program",
+    srcs = ["program.py"],
+    deps = [
+        ":encode",
+        ":sph",
+        "//tools/benchloop:protocol",
+        "//tools/gpu/maxwell:interp",
+    ],
+)
+
+py_library(
+    name = "timing_sim",
+    srcs = ["timing_sim.py"],
+    deps = [
+        ":encode",
+        ":program",
+        "//tools/gpu/maxwell:interp",
+    ],
+)
+
+py_library(
+    name = "latency",
+    srcs = [
+        "latency.py",
+        "ops.py",
+    ],
+    deps = [
+        ":encode",
+        ":program",
+        "//tools/benchloop:protocol",
+    ],
+)
+
+py_library(
+    name = "fit",
+    srcs = [
+        "fit.py",
+        "measure.py",
+        "nak.py",
+        "stats.py",
+    ],
+    deps = [
+        ":latency",
+        ":program",
+        ":timing_sim",
+        "//tools/benchloop:protocol",
+    ],
+)
+
+py_test(
+    name = "encode_test",
+    size = "small",
+    srcs = ["encode_test.py"],
+    data = ["//tools/gpu/maxwell:testdata/image_draw_fragment.hex"],
+    deps = [
+        ":encode",
+        ":program",
+        "//tools/gpu/maxwell:isa",
+    ],
+)
+
+py_test(
+    name = "sph_test",
+    size = "small",
+    srcs = ["sph_test.py"],
+    data = [
+        "//third_party/mesa/src/nouveau/headers:nvidia/classes/cla097sph.h",
+        "//third_party/mesa/src/nouveau/headers:nvidia/classes/clcb97sph.h",
+    ],
+    deps = [":sph"],
+)
+
+py_test(
+    name = "program_test",
+    size = "small",
+    srcs = ["program_test.py"],
+    deps = [
+        ":encode",
+        ":program",
+        "//tools/benchloop:protocol",
+        "//tools/gpu/maxwell:isa",
+    ],
+)
+
+py_test(
+    name = "timing_sim_test",
+    size = "small",
+    srcs = ["timing_sim_test.py"],
+    deps = [
+        ":encode",
+        ":program",
+        ":timing_sim",
+    ],
+)
+
+py_test(
+    name = "latency_test",
+    size = "small",
+    srcs = ["latency_test.py"],
+    deps = [
+        ":encode",
+        ":latency",
+        ":program",
+        ":timing_sim",
+        "//tools/benchloop:protocol",
+    ],
+)
+
+py_test(
+    name = "loop_test",
+    size = "small",
+    srcs = ["loop_test.py"],
+    deps = [
+        ":fit",
+        ":latency",
+        ":program",
+        ":timing_sim",
+        "//tools/benchloop:protocol",
+    ],
+)
+
+py_test(
+    name = "fit_test",
+    size = "small",
+    srcs = ["fit_test.py"],
+    deps = [
+        ":fit",
+        ":latency",
+    ],
+)

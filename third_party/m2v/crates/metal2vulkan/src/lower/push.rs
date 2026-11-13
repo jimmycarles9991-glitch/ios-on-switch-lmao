@@ -124,7 +124,8 @@ pub const fn shape(f: PushField) -> FieldShape {
         // A draw of one amplification's id and offsets.
         PushField::AmplificationId
         | PushField::AmplificationLayerOffset
-        | PushField::AmplificationViewportOffset => FieldShape::U32,
+        | PushField::AmplificationViewportOffset
+        | PushField::AmplificationCount => FieldShape::U32,
         // A synthesized tessellation control stage's words: the scale is a `float`'s bits.
         PushField::TessellationFactorOffset
         | PushField::TessellationFactorInstanceStride

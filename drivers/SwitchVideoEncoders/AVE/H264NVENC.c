@@ -132,7 +132,7 @@ int h264enc_configure(H264EncConfig *c)
         c->profile_idc != H264_PROFILE_HIGH)
         return -1;
     if (c->profile_idc == H264_PROFILE_BASELINE)
-        c->cabac = false;
+        c->cabac = c->reorder = false;
     if (c->profile_idc != H264_PROFILE_HIGH)
         c->transform8x8 = false;
     if (c->input_layout >= TEGRA_NVENC_LAYOUTS || c->chroma_mode > TEGRA_NVENC_CHROMA_METHOD)
@@ -163,15 +163,22 @@ int h264enc_configure(H264EncConfig *c)
     return 0;
 }
 
+void h264enc_surface(uint32_t layout, uint32_t width, uint32_t height, H264EncSurface *s)
+{
+    const uint32_t blockRows =
+        tegra_nvenc_block_rows(layout == TEGRA_NVENC_LAYOUT_TILED16, tegra_nvenc_layout_gobs(layout));
+    s->pitch = ALIGN(width, 64);
+    s->rows = tegra_nvenc_luma_rows(height, blockRows);
+    s->chroma_offset = s->pitch * s->rows;
+    s->bytes = s->chroma_offset + s->pitch * tegra_nvenc_chroma_rows(height, blockRows);
+}
+
 void h264enc_layout(const H264EncConfig *c, H264EncLayout *l)
 {
     memset(l, 0, sizeof(*l));
     const uint32_t wmbs = h264enc_width_mbs(c), hmbs = h264enc_height_mbs(c), mbs = wmbs * hmbs;
-    const uint32_t pitch = ALIGN(wmbs * 16, 64), rows = tegra_nvenc_surface_rows(c->height);
-    l->input.pitch = l->recon.pitch = pitch;
-    l->input.rows = l->recon.rows = rows;
-    l->input.chroma_offset = l->recon.chroma_offset = pitch * rows;
-    l->input.bytes = l->recon.bytes = pitch * rows + pitch * rows / 2;
+    h264enc_surface(c->input_layout, wmbs * 16, hmbs * 16, &l->input);
+    h264enc_surface(TEGRA_NVENC_LAYOUT_TILED16, wmbs * 16, hmbs * 16, &l->recon);
     // At most 3200 bits per macroblock (A.3.1 item j, the I_PCM bound) plus headers: NVENC's output never outgrows it.
     l->bitstream_bytes = ALIGN(mbs * 400 + 4096, 65536);
     l->status_bytes = 4096;
@@ -179,6 +186,7 @@ void h264enc_layout(const H264EncConfig *c, H264EncLayout *l)
     l->history_offset = l->status_bytes;
     l->aux_bytes = l->history_offset + l->history_bytes;
     l->mepred_bytes = ALIGN(mbs * TEGRA_NVENC_MEPRED_BYTES_PER_MB, 65536);
+    l->coloc_bytes = ALIGN(mbs * (uint32_t)sizeof(nvenc_h264_coloc_mb_s), 256);
 }
 
 static size_t finish(H264Bits *b, uint8_t header, uint8_t *out, size_t cap)
@@ -209,8 +217,8 @@ size_t h264enc_write_sps(const H264EncConfig *c, uint8_t *out, size_t cap)
     h264bits_ue(&b, LOG2_MAX_FRAME_NUM - 4);
     h264bits_ue(&b, 0);  // pic_order_cnt_type
     h264bits_ue(&b, LOG2_MAX_POC_LSB - 4);
-    h264bits_ue(&b, 1);    // max_num_ref_frames
-    h264bits_u(&b, 0, 1);  // gaps_in_frame_num_value_allowed_flag
+    h264bits_ue(&b, c->reorder ? 2 : 1);  // max_num_ref_frames: the two anchors a B picture reads
+    h264bits_u(&b, 0, 1);                 // gaps_in_frame_num_value_allowed_flag
     h264bits_ue(&b, wmbs - 1);
     h264bits_ue(&b, hmbs - 1);
     h264bits_u(&b, 1, 1);  // frame_mbs_only_flag
@@ -243,18 +251,20 @@ size_t h264enc_write_sps(const H264EncConfig *c, uint8_t *out, size_t cap)
         h264bits_u(&b, 2 * c->fps_num, 32);  // time_scale (two ticks a frame)
         h264bits_u(&b, 0, 1);                // fixed_frame_rate_flag
     }
-    h264bits_u(&b, 0, 1);               // nal_hrd_parameters_present_flag
-    h264bits_u(&b, 0, 1);               // vcl_hrd_parameters_present_flag
-    h264bits_u(&b, 0, 1);               // pic_struct_present_flag
-    h264bits_u(&b, 1, 1);               // bitstream_restriction_flag: no reordering, so decoders output at once
-    h264bits_u(&b, 1, 1);               // motion_vectors_over_pic_boundaries_flag
-    h264bits_ue(&b, 0);                 // max_bytes_per_pic_denom
-    h264bits_ue(&b, 0);                 // max_bits_per_mb_denom
-    h264bits_ue(&b, 15);                // log2_max_mv_length_horizontal
-    h264bits_ue(&b, 15);                // log2_max_mv_length_vertical
-    h264bits_ue(&b, 0);                 // max_num_reorder_frames
-    h264bits_ue(&b, 1);                 // max_dec_frame_buffering
-    return finish(&b, 0x67, out, cap);  // nal_ref_idc 3, SPS
+    h264bits_u(&b, 0, 1);  // nal_hrd_parameters_present_flag
+    h264bits_u(&b, 0, 1);  // vcl_hrd_parameters_present_flag
+    h264bits_u(&b, 0, 1);  // pic_struct_present_flag
+    // bitstream_restriction_flag: decoders hold no picture without reordering, one with it (an anchor waits for the B
+    // pictures before it).
+    h264bits_u(&b, 1, 1);
+    h264bits_u(&b, 1, 1);                 // motion_vectors_over_pic_boundaries_flag
+    h264bits_ue(&b, 0);                   // max_bytes_per_pic_denom
+    h264bits_ue(&b, 0);                   // max_bits_per_mb_denom
+    h264bits_ue(&b, 15);                  // log2_max_mv_length_horizontal
+    h264bits_ue(&b, 15);                  // log2_max_mv_length_vertical
+    h264bits_ue(&b, c->reorder ? 1 : 0);  // max_num_reorder_frames
+    h264bits_ue(&b, c->reorder ? 2 : 1);  // max_dec_frame_buffering
+    return finish(&b, 0x67, out, cap);    // nal_ref_idc 3, SPS
 }
 
 size_t h264enc_write_pps(const H264EncConfig *c, uint8_t *out, size_t cap)
@@ -319,22 +329,26 @@ size_t h264enc_write_avcc(const H264EncConfig *c, uint8_t *out, size_t cap)
 
 void h264enc_slice_header(const H264EncConfig *c, const H264EncPicture *p, H264Bits *b)
 {
-    const bool idr = p->type == H264ENC_IDR, intra = p->type != H264ENC_P;
-    h264bits_ue(b, 0);              // first_mb_in_slice
-    h264bits_ue(b, intra ? 7 : 5);  // slice_type: every slice of the picture I (7) or P (5)
-    h264bits_ue(b, 0);              // pic_parameter_set_id
+    const bool idr = p->type == H264ENC_IDR, intra = idr || p->type == H264ENC_I, bPicture = p->type == H264ENC_B;
+    h264bits_ue(b, 0);                             // first_mb_in_slice
+    h264bits_ue(b, intra ? 7 : bPicture ? 6 : 5);  // slice_type: every slice of the picture I (7), B (6) or P (5)
+    h264bits_ue(b, 0);                             // pic_parameter_set_id
     h264bits_u(b, p->frame_num & 0xffff, LOG2_MAX_FRAME_NUM);
     if (idr)
         h264bits_ue(b, p->idr_pic_id);
     h264bits_u(b, p->poc_lsb & 0xffff, LOG2_MAX_POC_LSB);
+    if (bPicture)
+        h264bits_u(b, 1, 1);  // direct_spatial_mv_pred_flag (the MD control's bdirect_mode 1)
     if (!intra) {
         h264bits_u(b, 0, 1);  // num_ref_idx_active_override_flag
         h264bits_u(b, 0, 1);  // ref_pic_list_modification_flag_l0
     }
+    if (bPicture)
+        h264bits_u(b, 0, 1);  // ref_pic_list_modification_flag_l1
     if (idr) {
         h264bits_u(b, 0, 1);  // no_output_of_prior_pics_flag
         h264bits_u(b, 0, 1);  // long_term_reference_flag
-    } else {
+    } else if (!bPicture && !p->unreferenced) {
         h264bits_u(b, 0, 1);  // adaptive_ref_pic_marking_mode_flag: sliding window
     }
     if (c->cabac && !intra)
@@ -360,20 +374,8 @@ static void surfaceConfig(const H264EncConfig *c, const H264EncSurface *s, nvenc
         cfg->tiled_16x16 = 1;  // references are always 16x16 tiled (nvenc_drv.h 1.5)
         return;
     }
-    switch (c->input_layout) {
-    case TEGRA_NVENC_LAYOUT_BL2_LOG:
-        cfg->block_height = 1;
-        break;
-    case TEGRA_NVENC_LAYOUT_BL2_RAW:
-    case TEGRA_NVENC_LAYOUT_BL4_LOG:
-        cfg->block_height = 2;
-        break;
-    case TEGRA_NVENC_LAYOUT_TILED16:
-        cfg->tiled_16x16 = 1;
-        break;
-    default:
-        break;  // PITCH and BL1: block_height 0
-    }
+    cfg->tiled_16x16 = c->input_layout == TEGRA_NVENC_LAYOUT_TILED16;
+    cfg->block_height = tegra_nvenc_layout_gobs(c->input_layout);
 }
 
 // The slice, motion search, mode decision and quantisation controls: the values NVIDIA's own T210 driver gives NVENC
@@ -387,7 +389,7 @@ static void surfaceConfig(const H264EncConfig *c, const H264EncSurface *s, nvenc
 static void controls(const H264EncConfig *c, const H264EncPicture *p, uint8_t *setup)
 {
     const uint32_t mbs = h264enc_width_mbs(c) * h264enc_height_mbs(c);
-    const bool intra = p->type != H264ENC_P;
+    const bool intra = p->type == H264ENC_IDR || p->type == H264ENC_I, bPicture = p->type == H264ENC_B;
     // One slice: the one control, under slice_mode 0, covers every macroblock (h264enc_fill_submit).
     nvenc_h264_slice_control_s *slice = (nvenc_h264_slice_control_s *)(setup + SLICE_OFF);
     slice->num_mb = mbs;
@@ -422,9 +424,10 @@ static void controls(const H264EncConfig *c, const H264EncPicture *p, uint8_t *s
     me->predsrc.self_spatial_stamp_l0 = me->predsrc.self_spatial_stamp_l1 = 1;
     me->predsrc.self_spatial_search = 1;
     me->predsrc.self_spatial_enable = 1;
-    me->predsrc.const_mv_stamp_l0 = me->predsrc.const_mv_stamp_l1 = 2;
+    me->predsrc.const_mv_stamp_l0 = me->predsrc.const_mv_stamp_l1 = bPicture ? 3 : 2;
     me->predsrc.const_mv_search = 1;
     me->predsrc.const_mv_enable = 1;
+    me->predsrc.coloc_enable = bPicture;  // the list-1 reference's colocated vectors as a hint
     static const uint32_t kShapes[5][2] = {
         {0x0c0c0000u, 0x00000000u}, {0x1c1c0000u, 0x0000001cu}, {0x3e3e0000u, 0x0000003eu},
         {0x7f3e0800u, 0x0000083eu}, {0x7f1c1c89u, 0x81081c1cu},
@@ -463,6 +466,7 @@ static void controls(const H264EncConfig *c, const H264EncPicture *p, uint8_t *s
     md->l1_part_16x16_enable = md->l1_part_16x8_enable = md->l1_part_8x16_enable = md->l1_part_8x8_enable = 1;
     md->bi_part_16x16_enable = md->bi_part_16x8_enable = md->bi_part_8x16_enable = md->bi_part_8x8_enable = 1;
     md->pskip_enable = 1;
+    md->bdirect_mode = bPicture ? 1 : 0;  // spatial, NVIDIA's default where B pictures are on
     md->intra_nxn_bias_multiplier = 24;
     md->intra_most_prob_bias_multiplier = 4;
     md->mv_cost_enable = 1;
@@ -508,7 +512,7 @@ void h264enc_fill_submit(const H264EncConfig *c, const H264EncLayout *l, const H
     s->codec = TEGRA_NVENC_CODEC_H264;
     s->setup_bytes = SETUP_BYTES;
     nvenc_h264_drv_pic_setup_s *setup = (nvenc_h264_drv_pic_setup_s *)s->setup;
-    const bool pPicture = p->type == H264ENC_P;
+    const bool bPicture = p->type == H264ENC_B, inter = bPicture || p->type == H264ENC_P;
     setup->magic = 0xd0b70006u;  // NV_NVENC_5_0
     surfaceConfig(c, &l->recon, &setup->refpic_cfg, false);
     surfaceConfig(c, &l->input, &setup->input_cfg, true);
@@ -531,16 +535,23 @@ void h264enc_fill_submit(const H264EncConfig *c, const H264EncLayout *l, const H
     rc->framerate = c->fps_num && c->fps_den ? (int)(c->fps_num / c->fps_den) : 30;
     rc->gop_length = 0xffffffffu;
     // The lists and distances as NVIDIA's T210 driver writes them (TegraNVENC/nvidia/SOURCE): unused list entries -2,
-    // unused distances and scale factors -1; a P picture's one reference at distance 1, its scale factor 256.
+    // unused distances and scale factors -1; an entry is its slot << 1. A P picture's one reference ahead with scale
+    // factor 256; a B picture's references ahead and behind, the scale factor of that pair (8-203).
     nvenc_h264_pic_control_s *pc = &setup->pic_control;
     memset(pc->l0, -2, sizeof(pc->l0));
     memset(pc->l1, -2, sizeof(pc->l1));
     memset(pc->temp_dist_l0, -1, sizeof(pc->temp_dist_l0));
     memset(pc->temp_dist_l1, -1, sizeof(pc->temp_dist_l1));
     memset(pc->dist_scale_factor, -1, sizeof(pc->dist_scale_factor));
-    if (pPicture) {
-        pc->l0[0] = 0;  // the previous picture, in reference slot 0
-        pc->temp_dist_l0[0] = 1;
+    if (inter) {
+        pc->l0[0] = (char)(p->ref_slot[0] << 1);
+        pc->temp_dist_l0[0] = (char)(p->gap[0] + 1);
+    }
+    if (bPicture) {
+        pc->l1[0] = (char)(p->ref_slot[1] << 1);
+        pc->temp_dist_l1[0] = (char)-(p->gap[1] + 1);
+        pc->dist_scale_factor[0][0] = (short)tegra_nvenc_h264_dist_scale(p->gap[0] + 1, -(p->gap[1] + 1));
+    } else if (inter) {
         for (int i = 0; i < 8; i++)
             pc->dist_scale_factor[i][0] = 256;
     }
@@ -557,7 +568,7 @@ void h264enc_fill_submit(const H264EncConfig *c, const H264EncLayout *l, const H
     pc->max_byte_count_before_resid_zero = l->bitstream_bytes - 4096;
     pc->pic_struct = 0;
     pc->pic_type = p->type;
-    pc->ref_pic_flag = 1;
+    pc->ref_pic_flag = !bPicture && !p->unreferenced;
     // Slicing as NVIDIA's T210 driver does it: slice_mode 0, the firmware walking the slice control array (one control,
     // every macroblock), max_slice_size the macroblock count (TegraNVENCCheck.h refuses slice_mode 1).
     pc->slice_mode = 0;
@@ -576,8 +587,9 @@ void h264enc_fill_submit(const H264EncConfig *c, const H264EncLayout *l, const H
     VALUE(NVC5B7_SET_APPLICATION_ID, NVC5B7_SET_APPLICATION_ID_ID_NVENC_H264);
     // NVIDIA's T210 driver's stream (switch-frame-tap m79-runE): FORCE_OUTPIC with the GP timer, the ME predictor
     // pair and reference slot 0 (the other reconstruction) in every job captured, the reference's chroma at its config
-    // offset (no chroma methods in that reading), no colocated data (B pictures only); every address method it leaves
-    // unset the kernel writes 0. Slot 0 goes in IDRs too: the app hands all 16 reference slots to the engine on every
+    // offset (no chroma methods in that reading), no colocated data in that P-only session. With B pictures that driver
+    // names the slots the lists use, every picture's colocated output and a B picture's colocated input (libnvtvmr,
+    // TegraNVENC/nvidia/SOURCE). Slot 0 goes in IDRs too: the app hands all 16 reference slots to the engine on every
     // picture (H.264 app 0x80a1), and an IDR without it would hand it 0 or the address a previous job left there.
     VALUE(NVC5B7_SET_CONTROL_PARAMS,
           NVC5B7_SET_CONTROL_PARAMS_CODEC_TYPE_H264 | (1u << 8) /* FORCE_OUTPIC */ | (1u << 12) /* GPTIMER_ON */);
@@ -589,9 +601,18 @@ void h264enc_fill_submit(const H264EncConfig *c, const H264EncLayout *l, const H
         RELOC(NVC5B7_SET_OUT_REF_PIC_CHROMA, h->recon, refChroma);
     RELOC(NVC5B7_SET_IN_MEPRED_DATA, h->mepred[p->picture_index & 1], 0);
     RELOC(NVC5B7_SET_OUT_MEPRED_DATA, h->mepred[~p->picture_index & 1], 0);
-    RELOC(NVC5B7_SET_IN_REF_PIC0_LUMA, h->ref, 0);
-    if (method)
+    if (h->ref)
+        RELOC(NVC5B7_SET_IN_REF_PIC0_LUMA, h->ref, 0);
+    if (h->ref && method)
         RELOC(NVC5B7_SET_IN_REF_PIC0_CHROMA, h->ref, refChroma);
+    if (h->ref1)
+        RELOC(NVC5B7_SET_IN_REF_PIC1_LUMA, h->ref1, 0);
+    if (h->ref1 && method)
+        RELOC(NVC5B7_SET_IN_REF_PIC1_CHROMA, h->ref1, refChroma);
+    if (h->coloc_in)
+        RELOC(NVC5B7_SET_IN_COLOC_DATA, h->coloc_in, 0);
+    if (h->coloc_out)
+        RELOC(NVC5B7_SET_OUT_COLOC_DATA, h->coloc_out, 0);
     RELOC(NVC5B7_SET_OUT_BITSTREAM, h->bitstream, 0);
     RELOC(NVC5B7_SET_OUT_ENC_STATUS, h->aux, 0);
     RELOC(NVC5B7_SET_IOHISTORY, h->aux, l->history_offset);
@@ -618,19 +639,10 @@ static size_t blockLinear(uint32_t gobs, uint32_t pitch, uint32_t x, uint32_t y)
 
 size_t h264enc_surface_offset(uint32_t layout, uint32_t pitch, uint32_t x, uint32_t y)
 {
-    switch (layout) {
-    case TEGRA_NVENC_LAYOUT_BL2_LOG:
-    case TEGRA_NVENC_LAYOUT_BL2_RAW:
-        return blockLinear(2, pitch, x, y);
-    case TEGRA_NVENC_LAYOUT_BL4_LOG:
-        return blockLinear(4, pitch, x, y);
-    case TEGRA_NVENC_LAYOUT_BL1:
-        return blockLinear(1, pitch, x, y);
-    case TEGRA_NVENC_LAYOUT_TILED16:
+    if (layout == TEGRA_NVENC_LAYOUT_TILED16)
         return (size_t)(y / 16) * pitch * 16 + (x / 16) * 256 + (y % 16) * 16 + x % 16;
-    default:
-        return (size_t)y * pitch + x;
-    }
+    const uint32_t gobs = tegra_nvenc_layout_gobs(layout);
+    return gobs ? blockLinear(gobs, pitch, x, y) : (size_t)y * pitch + x;
 }
 
 // One plane: `rows` x `bytes` samples from `src` (edge-replicated past `w` x `h`), 16 bytes at a time: each 16-byte
@@ -663,10 +675,17 @@ static void putPlane(uint32_t layout, uint32_t pitch, uint8_t *dst, const uint8_
 void h264enc_put_input(const H264EncConfig *c, const H264EncLayout *l, uint8_t *buffer, const uint8_t *luma,
                        size_t lumaStride, const uint8_t *chroma, size_t chromaStride)
 {
-    const uint32_t codedW = h264enc_width_mbs(c) * 16, codedH = h264enc_height_mbs(c) * 16;
-    putPlane(c->input_layout, l->input.pitch, buffer, luma, lumaStride, c->width, c->height, codedW, codedH, 0);
-    putPlane(c->input_layout, l->input.pitch, buffer + l->input.chroma_offset, chroma, chromaStride, c->width,
-             c->height / 2, codedW, codedH / 2, 1);
+    h264enc_put_region(c->input_layout, &l->input, buffer, luma, lumaStride, chroma, chromaStride, c->width, c->height,
+                       h264enc_width_mbs(c) * 16, h264enc_height_mbs(c) * 16);
+}
+
+void h264enc_put_region(uint32_t layout, const H264EncSurface *input, uint8_t *buffer, const uint8_t *luma,
+                        size_t lumaStride, const uint8_t *chroma, size_t chromaStride, uint32_t width, uint32_t height,
+                        uint32_t codedWidth, uint32_t codedHeight)
+{
+    putPlane(layout, input->pitch, buffer, luma, lumaStride, width, height, codedWidth, codedHeight, 0);
+    putPlane(layout, input->pitch, buffer + input->chroma_offset, chroma, chromaStride, (width + 1) & ~1u,
+             (height + 1) / 2, codedWidth, codedHeight / 2, 1);
 }
 
 size_t h264enc_annexb_to_avcc(const uint8_t *in, size_t size, uint8_t *out, size_t cap)

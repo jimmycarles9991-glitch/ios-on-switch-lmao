@@ -186,8 +186,14 @@ try_scalarize_tex(nir_tex_instr *tex, const struct nak_compiler *nak,
    return false;
 }
 
+struct lower_tex_state {
+   const struct nak_compiler *nak;
+   int bound_cbuf; /* nak_nir_sm50_bound_texture_cbuf */
+};
+
 static bool
-lower_tex(nir_builder *b, nir_tex_instr *tex, const struct nak_compiler *nak)
+lower_tex(nir_builder *b, nir_tex_instr *tex, const struct nak_compiler *nak,
+          int bound_cbuf)
 {
    b->cursor = nir_before_instr(&tex->instr);
 
@@ -218,14 +224,21 @@ lower_tex(nir_builder *b, nir_tex_instr *tex, const struct nak_compiler *nak)
    }
    tex->num_srcs = 0;
 
+   enum nak_nir_tex_ref_type ref_type = NAK_NIR_TEX_REF_TYPE_BINDLESS;
+   if (nak_nir_sm50_bound_texture(tex, tex_h, samp_h, bound_cbuf,
+                                  &tex->texture_index)) {
+      ref_type = NAK_NIR_TEX_REF_TYPE_CBUF;
+      tex_h = samp_h = NULL;
+   }
+
    /* Combine sampler and texture into one if needed */
    if (samp_h != NULL && samp_h != tex_h) {
       tex_h = nir_ior(b, nir_iand_imm(b, tex_h,  0x000fffff),
                          nir_iand_imm(b, samp_h, 0xfff00000));
    }
 
-   enum nak_nir_tex_ref_type ref_type = NAK_NIR_TEX_REF_TYPE_BINDLESS;
-   if (has_cbuf_tex(nak) && tex_handle_as_cbuf(tex_h, &tex->texture_index)) {
+   if (ref_type == NAK_NIR_TEX_REF_TYPE_BINDLESS && has_cbuf_tex(nak) &&
+       tex_handle_as_cbuf(tex_h, &tex->texture_index)) {
       ref_type = NAK_NIR_TEX_REF_TYPE_CBUF;
       tex_h = NULL;
    }
@@ -378,7 +391,11 @@ lower_tex(nir_builder *b, nir_tex_instr *tex, const struct nak_compiler *nak)
             PUSH(src1, ms_idx);
       }
 
-      scalar = try_scalarize_tex(tex, nak, src0, &src0_comps, src1, &src1_comps);
+      if (nak->sm >= 70)
+         scalar = try_scalarize_tex(tex, nak, src0, &src0_comps, src1, &src1_comps);
+      else if (ref_type == NAK_NIR_TEX_REF_TYPE_CBUF && !tex->is_sparse)
+         scalar = nak_nir_sm50_scalarize_tex(tex, lod_mode, offset_mode, arr_idx != NULL,
+                                             src0, &src0_comps, src1, &src1_comps);
 
       nir_tex_instr_add_src(tex, nir_tex_src_backend1,
                             nir_vec(b, src0, src0_comps));
@@ -871,7 +888,8 @@ lower_image_txq(nir_builder *b, nir_intrinsic_instr *intrin,
 static bool
 lower_tex_instr(nir_builder *b, nir_instr *instr, void *_data)
 {
-   const struct nak_compiler *nak = _data;
+   const struct lower_tex_state *state = _data;
+   const struct nak_compiler *nak = state->nak;
 
    switch (instr->type) {
    case nir_instr_type_tex: {
@@ -885,7 +903,7 @@ lower_tex_instr(nir_builder *b, nir_instr *instr, void *_data)
       case nir_texop_txf_ms:
       case nir_texop_tg4:
       case nir_texop_lod:
-         return lower_tex(b, tex, nak);
+         return lower_tex(b, tex, nak, state->bound_cbuf);
       case nir_texop_txs:
       case nir_texop_query_levels:
       case nir_texop_texture_samples:
@@ -936,7 +954,10 @@ lower_tex_instr(nir_builder *b, nir_instr *instr, void *_data)
 bool
 nak_nir_lower_tex(nir_shader *nir, const struct nak_compiler *nak)
 {
+   struct lower_tex_state state = {
+      .nak = nak,
+      .bound_cbuf = nak_nir_sm50_bound_texture_cbuf(nir, nak),
+   };
    return nir_shader_instructions_pass(nir, lower_tex_instr,
-                                       nir_metadata_control_flow,
-                                       (void *)nak);
+                                       nir_metadata_control_flow, &state);
 }

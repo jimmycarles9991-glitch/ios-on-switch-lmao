@@ -426,7 +426,7 @@ nvkm_device_ctor(const struct nvkm_device_func *func,
 	switch (device->chipset) {
 	case 0x12b: device->chip = &nv12b_chipset; break;
 	/* T210B01 (Switch OLED) reports GM20B_B; nvgpu runs it on the same gm20b HAL (hal_init.c GK20A_GPUID_GM20B_B,
-	 * gk20a.h 0x12E). Its GPCPLL differs (C1), which gpu.c handles by keeping speedo id 0 (fixed-frequency path). */
+	 * gk20a.h 0x12E). Its GPCPLL differs (C1), which gpu_bringup.c handles by keeping speedo id 0 (fixed-frequency path). */
 	case 0x12e: device->chip = &nv12b_chipset; break;
 	default:
 		if (!device->chip) {

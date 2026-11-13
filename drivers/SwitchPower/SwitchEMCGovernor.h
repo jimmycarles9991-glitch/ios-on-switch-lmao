@@ -29,6 +29,15 @@
 #define SWITCH_EMC_EVENT_UP   1u
 #define SWITCH_EMC_EVENT_DOWN 2u
 
+/* What asked for a rate move (the debug move line names it). */
+enum switch_emc_reason {
+    SWITCH_EMC_REASON_ACTMON,
+    SWITCH_EMC_REASON_HINT,
+    SWITCH_EMC_REASON_DISPLAY,
+    SWITCH_EMC_REASON_DISPLAY_MEMORY,
+    SWITCH_EMC_REASON_GOVERN,
+};
+
 struct switch_emc_wmarks {
     uint32_t up, down;
     bool up_on, down_on;

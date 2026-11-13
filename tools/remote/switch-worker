@@ -1,0 +1,58 @@
+#!/bin/sh
+# This Mac's Bazel remote-execution worker: `switch-worker runner`, `switch-worker worker` and `switch-worker floor`, one
+# LaunchAgent each (install.sh). The worker advertises the Xcode at /Applications/Xcode.app, the path every client's
+# actions name. `floor` runs every minute and takes the runner out of service while the disk has less than the floor
+# free; the worker then finishes what it has and takes nothing new until there is room again.
+set -eu
+
+here=$(cd "$(dirname "$0")" && pwd)
+dir=${SWITCH_WORKER_DIR:?}
+floor_gib=${SWITCH_WORKER_FLOOR_GIB:-20}
+xcode=/Applications/Xcode.app
+
+# launchd restarts a job that exits; the pause keeps a refusal from becoming a restart loop.
+refuse() {
+    echo "switch-worker: $*" >&2
+    sleep 300
+    exit 1
+}
+
+mkdir -p "$dir/build" "$dir/cache"
+touch "$dir/.metadata_never_index"
+
+if [ "${1:-}" = floor ]; then
+    free=$(df -g "$dir" | awk 'NR==2 {print $4}')
+    if [ "$free" -ge "$floor_gib" ]; then
+        touch "$dir/disk-ok"
+    elif [ -e "$dir/disk-ok" ]; then
+        echo "switch-worker: $free GiB free, under the ${floor_gib} GiB floor: taking no work" >&2
+        rm -f "$dir/disk-ok"
+    fi
+    exit 0
+fi
+
+plist=$xcode/Contents/version.plist
+build=$(/usr/libexec/PlistBuddy -c 'Print :ProductBuildVersion' "$plist" 2>/dev/null) || refuse "no $plist"
+version=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$plist")
+selected=$(/usr/bin/xcode-select -p)
+[ "$selected" = "$xcode/Contents/Developer" ] || refuse "xcode-select points at $selected, not $xcode"
+# Bazel's XCODE_VERSION_OVERRIDE spelling: major.minor.patch.build.
+case $version in
+    *.*.*) ;;
+    *.*) version=$version.0 ;;
+    *) version=$version.0.0 ;;
+esac
+SWITCH_WORKER_XCODE_BUILD=$build
+SWITCH_WORKER_XCODE_VERSION=$version.$build
+export SWITCH_WORKER_XCODE_BUILD SWITCH_WORKER_XCODE_VERSION
+
+# exec, so that launchd stops the process it started: a worker left behind by a wrapper kept taking work beside the
+# next one, in the same build directory.
+case ${1:-} in
+    runner) exec "$here/bb_runner" "$here/runner.jsonnet" ;;
+    worker) exec "$here/bb_worker" "$here/worker.jsonnet" ;;
+    *)
+        echo "usage: switch-worker runner|worker|floor" >&2
+        exit 2
+        ;;
+esac

@@ -16,11 +16,24 @@
 #include "raw_compute_record.h"
 #include "raw_record.h"
 
+namespace switch_seed_pack {
+class Seed;
+}
+
 namespace raw {
 
-// What a made record depends on: the build (its stack key hashes the pack, m2v, NVK and NAK, the frontend and the raw path's own
-// sources, so a new compiler or pack is a new stack), the functions' AIR (their metallib HASH tags: SHA-256 of each one's bitcode)
-// and the state's key (every descriptor field and function constant the probe draws with)
+// The installed native records' name of a program slot's entry (RecordCache::findSeedSlot): its bytes' FNV-1a, moved off
+// the records' names (a name both took would fail the seed's write); a find compares the bytes
+inline uint64_t seedSlotName(const void *slot, size_t size)
+{
+    constexpr uint64_t kSlotDomain = 0x736c6f7400000000ull;
+    return Pack::fnv(slot, size) ^ kSlotDomain;
+}
+
+// What a made record depends on: the build (its stack key hashes what records are made and read by: the pack generator, m2v, NVK
+// and NAK, the frontend and the raw runtime's direct compile and codecs, so a new compiler or pack generator is a new stack), the
+// functions' AIR (their metallib HASH tags: SHA-256 of each one's bitcode) and the state's key (every descriptor field and function
+// constant the probe draws with)
 struct CacheKey {
     uint64_t stack = 0;
     uint8_t vertexAir[32] = {}, fragmentAir[32] = {};
@@ -31,11 +44,19 @@ struct CacheKey {
 
 class RecordCache {
 public:
+    RecordCache();
+    ~RecordCache();
     // false: no entry can be kept (`dir` unusable); loads miss and stores do nothing then. attach() then tidy().
     bool open(const std::string &dir, uint64_t stack, uint64_t capBytes);
     // The directory taken for loads and stores at once (a mkdir); tidy() removes another build's entries and a dead writer's
     // temporaries and counts the bytes kept, which stores need for the cap: it may run later, on another thread
     bool attach(const std::string &dir, uint64_t stack, uint64_t capBytes);
+    // The installed native records, <dir>/raw-<stack>/ packed (kits/SwitchSeedPack), are mapped here and read in place
+    // before the directory's own entries; attach before any compiler worker starts.
+    bool attachSeed(const std::string &dir, uint64_t stack);
+    // A program slot the installed native records hold as an entry of its own pages (seedSlotName, raw_program_pages.h
+    // programSlotEntryBytes): its bytes in place, with the seed's pack mapping holding them; null: none
+    const uint8_t *findSeedSlot(const uint8_t *slot, size_t size, const uint8_t *&mapping, uint64_t &bytes) const;
     void tidy();
 
     enum class Found : uint8_t {
@@ -44,7 +65,8 @@ public:
         Refusal
     };
 
-    Found load(const CacheKey &k, RuntimeRecord &record, std::string &refusal);
+    // *seeded: whether the entry came from the installed seed rather than this process's own directory
+    Found load(const CacheKey &k, RuntimeRecord &record, std::string &refusal, bool *seeded = nullptr);
     // `record` null: the state's refusal (`refusal`)
     bool store(const CacheKey &k, const RuntimeRecord *record, const std::string &refusal);
     // A kernel's record at one compute key (raw_compute_key.h), or its refusal, as a state's
@@ -53,17 +75,19 @@ public:
 
     uint64_t bytes() const
     {
+        std::lock_guard<std::mutex> l(lock_);
         return bytes_;
     }
 
 private:
     std::string dir_;
+    std::unique_ptr<switch_seed_pack::Seed> seed_;
     uint64_t stack_ = 0, cap_ = 0, bytes_ = 0;
-    std::mutex lock_;
+    mutable std::mutex lock_;
     std::string parent_;
     std::string path(const CacheKey &k) const;
     void evict(uint64_t room);
-    bool loadBytes(const CacheKey &k, std::string &bytes);
+    bool loadBytes(bool seed, const CacheKey &k, std::string &bytes) const;
     bool storeBytes(const CacheKey &k, const std::string &bytes);
 };
 

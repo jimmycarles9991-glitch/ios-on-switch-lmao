@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: MIT
 // A blit encoder's commands of the tape onto the copy engine (and the 2D engine's mip chains): see encodeRaw.
 #import "RawMetalInternal.h"
+#include "../fx/fx_mip_route.h"
+#include "raw_twod_fill.h"
 
 // What stands for a texture's memory in its blit encoder's order (raw::BlitEncoder::access): its surface, its buffer, or the
 // texture a view views
@@ -60,6 +62,20 @@ static void copyPlanes(raw::BlitEncoder *be, raw::CommandBuffer *rc, const raw::
     }
 }
 
+// A no-copy texture copied into a pool image (raw::Texture::callerPages): what a copy wrote into the image goes on to the
+// caller's memory, which stays the texture's contents, after it on the copy engine
+static void copyToCallerPages(raw::BlitEncoder *be, raw::CommandBuffer *rc, RMTexture *t)
+{
+    while (t->_kind == RMTextureView && t->_parent)
+        t = t->_parent;
+    const raw::Texture &x = t->_raw;
+    if (!x.callerPages)
+        return;
+    be->access(memoryOf(t), x.callerPages);
+    rc->clean(x.callerPages->bo.cpu, x.storage.bytes, true);
+    be->copyBytes(x.imagePitchVa, x.callerPages->bo.va, x.storage.bytes);
+}
+
 void encodeBlit(RMCommandBuffer *cb, const Cmd &c, raw::CommandBuffer *rc, raw::BlitEncoder *be,
                 std::set<RMTexture *> &fresh, std::set<RMTexture *> &standInFresh)
 {
@@ -88,13 +104,7 @@ void encodeBlit(RMCommandBuffer *cb, const Cmd &c, raw::CommandBuffer *rc, raw::
         for (uint32_t k = 0; k < std::max(d, 1u); k++)
             be->copyTexels(sl ? fromLevel : s->_raw, ex, ey, layerOrPlane(s->_raw, ss, sz + k), dl ? toLevel : t->_raw,
                            fx, fy, layerOrPlane(t->_raw, ds, dz + k), ew, eh);
-        break;
-    }
-    case OpMipmaps: {  // a chain's levels from level 0 (decided at record)
-        RMTexture *t = (__bridge RMTexture *)c.obj;
-        useTexture(rc, t, true);
-        be->access(memoryOf(t), memoryOf(t));
-        be->generate(t->_raw);
+        copyToCallerPages(be, rc, t);
         break;
     }
     case OpCopyBuffer: {
@@ -138,6 +148,7 @@ void encodeBlit(RMCommandBuffer *cb, const Cmd &c, raw::CommandBuffer *rc, raw::
             raw::chainLevelImage(t->_raw, uint32_t(dl), level);
         copyPlanes(be, rc, s->_raw, so, row, image, dl ? level : t->_raw, uint32_t(o), uint32_t(o >> 32), uint32_t(dz),
                    uint32_t(w), uint32_t(h), uint32_t(d), true, uint8_t(c.a));
+        copyToCallerPages(be, rc, t);
         break;
     }
     case OpCopyTextureToBuffer: {
@@ -162,18 +173,53 @@ void encodeBlit(RMCommandBuffer *cb, const Cmd &c, raw::CommandBuffer *rc, raw::
     }
 }
 
-// generateMipmapsForTexture: of a chain whose format has no 2D-engine filtering that matches Metal's: one pass a level of the
-// pack's mip state (raw_mip.h), level l + 1 drawn from a header of level l alone. Each pass's prologue barrier orders its reads
-// after the pass before wrote.
-bool mipPasses(raw::CommandBuffer *rc, RMTexture *t, const char **why)
+// fillTexture:level:slice:region:color: (OpFillTexture): the 2D engine's solid rectangle where rule clear.twod holds for the
+// format (raw_twod_fill.h), else CLEAR_SURFACE over the region in a pass of its own that loads the rest
+bool fillTexturePass(RMCommandBuffer *cb, const Cmd &c, raw::CommandBuffer *rc)
+{
+    RMTexture *t = (__bridge RMTexture *)c.obj;
+    const uint32_t x0 = uint32_t(extra(cb, c.x)), y0 = uint32_t(extra(cb, c.x + 1));
+    const uint32_t x1 = x0 + uint32_t(extra(cb, c.x + 2)), y1 = y0 + uint32_t(extra(cb, c.x + 3));
+    float rgba[4];
+    for (int k = 0; k < 4; k++) {
+        const uint32_t bits = uint32_t(extra(cb, c.x + 4 + k));
+        memcpy(&rgba[k], &bits, sizeof bits);
+    }
+    useTexture(rc, t, true);
+    if (x0 >= x1 || y0 >= y1)
+        return true;
+    if (raw::twodFillHolds(t->_raw.format)) {
+        raw::BlitEncoder *b = rc->blit();
+        b->fillTwod(t->_raw, x0, y0, x1, y1, raw::twodFillWord(t->_raw.format, rgba));
+        b->end();
+        return true;
+    }
+    raw::PassDesc p;
+    p.color[0].texture = &t->_raw;
+    p.color[0].load = raw::ColorAttachment::Load;
+    p.color[0].store = true;
+    p.count = 1;
+    p.width = t->_raw.width;
+    p.height = t->_raw.height;
+    raw::RenderEncoder *e = rc->render(p);
+    if (!e)
+        return false;
+    e->clearRegion(x0, y0, x1, y1, rgba);
+    e->end();
+    return true;
+}
+
+// Levels first + 1 .. last of a chain by the pack's mip state (raw_mip.h): one pass a level, level l + 1 drawn from a header of
+// level l alone. Each pass's prologue barrier orders its reads after the pass before wrote.
+bool mipPasses(raw::CommandBuffer *rc, RMTexture *t, uint32_t first, uint32_t last, const char **why)
 {
     raw::Device &d = *gRM->raw;
     raw::Pipeline *mip = d.mipPipeline(t->_raw.format);
     const raw::fx::MipChain &c = t->_raw.chain->layout;
-    if (!mip)
+    if (!mip || last >= c.levels)
         return false;
     useTexture(rc, t, true);
-    for (uint32_t l = 0; l + 1 < c.levels; l++) {
+    for (uint32_t l = first; l < last; l++) {
         raw::Texture from = t->_raw, to;
         from.tic = d.levelTic(t->_raw, l);
         if (!from.tic || !raw::chainLevelTarget(t->_raw, l + 1, to))
@@ -197,5 +243,32 @@ bool mipPasses(raw::CommandBuffer *rc, RMTexture *t, const char **why)
             return false;
         e->end();
     }
+    RAW_DIAGNOSTIC(d.stats.mip3dLevels += last - first);
     return true;
+}
+
+// generateMipmapsForTexture: each run of the chain's steps on its engine (fx_mip_route.h, decided at record), the blit
+// encoder ended around 3D runs and `be` the one encoding goes on with. `probe2d`: a debug build's probe of a format no probe
+// covered yet, every step on the 2D engine as that surface format (fx_mip_probe.h)
+bool encodeMipmaps(raw::CommandBuffer *rc, RMTexture *t, uint32_t probe2d, raw::BlitEncoder *&be, const char **why)
+{
+    const raw::Texture::Chain &chain = *t->_raw.chain;
+    const uint32_t fmt2d = probe2d ? probe2d : chain.fmt2d;
+    bool ok = true;
+    const bool routed =
+        raw::fx::eachMipRun(chain.layout, fmt2d != 0, !probe2d && gRM->raw->mipPipeline(t->_raw.format) != nullptr,
+                            [&](const raw::fx::MipRun &run) {
+                                if (!ok)
+                                    return;
+                                if (run.engine == raw::fx::MipEngine::TwoD) {
+                                    useTexture(rc, t, true);
+                                    be->access(memoryOf(t), memoryOf(t));
+                                    be->generate(t->_raw, fmt2d, run.first, run.last, run.unproven);
+                                    return;
+                                }
+                                be->end();
+                                ok = mipPasses(rc, t, run.first, run.last, why);
+                                be = rc->blit();
+                            });
+    return routed && ok;
 }

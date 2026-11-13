@@ -1,7 +1,9 @@
 # The GPU bundle's build steps (gpu/defs.bzl runs them as actions).
 load("@rules_python//python:py_binary.bzl", "py_binary")
 load("@rules_python//python:py_library.bzl", "py_library")
+load("@rules_python//python:py_test.bzl", "py_test")
 load("//bazel/lint:defs.bzl", "lint_files")
+load("//ipsw:pins.bzl", "IPSWS")
 
 package(default_visibility = ["//gpu:__subpackages__"])
 
@@ -42,6 +44,15 @@ py_binary(
     srcs = ["rawpack.py"],
 )
 
+# The compile profile the shader tools' bridge is built with, held to their runtime device
+py_test(
+    name = "compile_profile_test",
+    srcs = ["compile_profile_test.py"],
+    data = ["//gpu/seed:local_tools"],
+    env = {"COMPILE_PROFILE_TOOLS": "$(rootpath //gpu/seed:local_tools)"},
+    tags = ["requires-darwin"],
+)
+
 # Its steps, for the pack's coverage test (//drivers/TegraGM20BMetal:archive_coverage_test: archive_lines)
 py_library(
     name = "rawpack_steps",
@@ -49,9 +60,53 @@ py_library(
     visibility = ["//drivers/TegraGM20BMetal:__pkg__"],
 )
 
+py_test(
+    name = "rawpack_test",
+    srcs = ["rawpack_test.py"],
+    data = [
+        "//drivers/TegraGM20BMetal:precompile/corpus.log",
+        "//drivers/TegraGM20BMetal:raw/runtime/raw_ycbcr_store.h",
+    ],
+    env = {
+        "RAWPACK_BUILDS": " ".join(IPSWS.keys()),
+        "RAWPACK_CORPUS": "$(rootpath //drivers/TegraGM20BMetal:precompile/corpus.log)",
+    },
+    deps = [":rawpack_steps"],
+)
+
+# Adds the states a device made at run time to the precompile corpus, from a pulled logarchive (logharvest.py)
+py_binary(
+    name = "logharvest",
+    srcs = ["logharvest.py"],
+    deps = ["//drivers/TegraGM20BMetal:raw_pack"],
+)
+
+py_test(
+    name = "logharvest_test",
+    srcs = [
+        "logharvest.py",
+        "logharvest_test.py",
+    ],
+    deps = ["//drivers/TegraGM20BMetal:raw_pack"],
+)
+
 py_binary(
     name = "raw_stack",
     srcs = ["raw_stack.py"],
+)
+
+py_test(
+    name = "raw_stack_test",
+    srcs = [
+        "raw_stack.py",
+        "raw_stack_test.py",
+    ],
+    data = [
+        "//drivers/TegraGM20BMetal:raw_stack_sources",
+        "//drivers/TegraGM20BMetal:raw_tree",
+        "//gpu:raw_stack_inputs",
+    ],
+    tags = ["m2v"],
 )
 
 py_binary(
@@ -59,8 +114,29 @@ py_binary(
     srcs = ["assemble.py"],
 )
 
+py_library(
+    name = "seed_pack",
+    srcs = ["seed_pack.py"],
+    visibility = ["//tools/gpu/shaders:__pkg__"],
+)
+
 py_binary(
     name = "stage_manifest",
     srcs = ["stage_manifest.py"],
-    deps = ["//tools/common:hashing"],
+    deps = [
+        ":seed_pack",
+        "//tools/common:hashing",
+    ],
+)
+
+py_test(
+    name = "stage_manifest_test",
+    srcs = [
+        "stage_manifest.py",
+        "stage_manifest_test.py",
+    ],
+    deps = [
+        ":seed_pack",
+        "//tools/common:hashing",
+    ],
 )

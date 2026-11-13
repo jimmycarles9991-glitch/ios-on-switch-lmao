@@ -445,6 +445,23 @@ pub fn compile_stage(
     })
 }
 
+pub(crate) fn compile_native_stage(
+    f: &FunctionDescriptor,
+    p: &DeviceProfile,
+    inputs: InputsFrom<'_>,
+    m: &mut Meter,
+) -> Result<crate::pipeline::NativeFunction, Error> {
+    guarded(|| with_request(&f.function, &f.constants, (&f.linked, &f.libraries), inputs, |r| {
+        let (artifact, _, mut program) = compile_payload(r, p, m, SPIRV_WORDS,
+            crate::pipeline::native::capture, |module, _, _, _| Ok(module))?;
+        if let Some(program) = &mut program {
+            let linked = crate::pipeline::link::link_compute(&artifact.interface, p)?;
+            program.link(&linked.table)?;
+        }
+        Ok(crate::pipeline::NativeFunction { artifact, program })
+    }))
+}
+
 /// [`compile_stage`] of stage `fd`, reading its specialized entry from `entries` (the one a check
 /// or key of the same creation made, else one made there now): the same compile, which decodes
 /// and specializes nothing a creation already did.
@@ -1026,7 +1043,7 @@ pub(crate) fn compile_bitcode_kept(
     guarded(|| {
         let consts = FunctionConstantValues::defaults();
         let r = Request::bitcode(bitcode, entry, &consts, &[], inputs);
-        compile_kept(&r, p, m, word_cap, TypedModule::clone)
+        compile_kept(&r, p, m, word_cap, |module, _| Ok(module.clone()))
             .map(|(artifact, plan, module)| (CompiledFunction::new(artifact), plan, module))
     })
 }
@@ -1047,7 +1064,7 @@ pub(crate) fn compile_stage_kept(
             &fd.constants,
             (&fd.linked, &fd.libraries),
             InputsFrom::Given(&inputs),
-            |r| compile_kept(r, p, m, SPIRV_WORDS, TypedModule::clone).map(|(_, _, t)| t),
+            |r| compile_kept(r, p, m, SPIRV_WORDS, |module, _| Ok(module.clone())).map(|(_, _, t)| t),
         )
     })
 }
@@ -1642,6 +1659,7 @@ pub(crate) fn fragment_inputs(
         d.color_attachments,
         d.texture_write_rounding_mode,
     );
+    out.two_plane_alphas = crate::pipeline::two_plane::alphas(d.color_attachments, p);
     out.rotated_colors = crate::pipeline::color_writes::rotated_colors(d.color_attachments);
     out.rotated_factors = crate::pipeline::color_writes::rotated_factors(d.color_attachments, p);
     out.rotated_blends = crate::pipeline::color_writes::rotated_blends(d.color_attachments, p);
@@ -1993,7 +2011,7 @@ fn compile_one(
     m: &mut Meter,
     word_cap: u64,
 ) -> Result<Arc<FunctionArtifact>, Error> {
-    compile_kept(r, p, m, word_cap, |_| ()).map(|(artifact, _, ())| artifact)
+    compile_kept(r, p, m, word_cap, |_, _| Ok(())).map(|(artifact, _, ())| artifact)
 }
 
 /// [`compile_one`], also returning the plan and what `keep` takes of the finished typed module
@@ -2003,8 +2021,34 @@ fn compile_kept<K>(
     p: &DeviceProfile,
     m: &mut Meter,
     word_cap: u64,
-    keep: impl FnOnce(&TypedModule) -> K,
+    keep: impl FnOnce(&TypedModule, &mut Meter) -> Result<K, Error>,
 ) -> Result<(Arc<FunctionArtifact>, Plan, K), Error> {
+    compile_payload(r, p, m, word_cap, keep, serialize_module)
+}
+
+pub(crate) fn serialize_module(
+    module: TypedModule,
+    p: &DeviceProfile,
+    m: &mut Meter,
+    word_cap: u64,
+) -> Result<crate::spirv::serialize::RelocatableModule, Error> {
+    let ids = crate::spirv::serialize::id_table_bytes(&module, p);
+    m.charge(ids)?;
+    let module = crate::spirv::serialize::serialize_for(module, p)?;
+    m.release(ids);
+    m.charge(module.footprint())?;
+    crate::lower::estimate::check_emitted(module.words.len(), word_cap)?;
+    Ok(module)
+}
+
+fn compile_payload<K, M>(
+    r: &Request<'_>,
+    p: &DeviceProfile,
+    m: &mut Meter,
+    word_cap: u64,
+    keep: impl FnOnce(&TypedModule, &mut Meter) -> Result<K, Error>,
+    finish: impl FnOnce(TypedModule, &DeviceProfile, &mut Meter, u64) -> Result<M, Error>,
+) -> Result<(Arc<FunctionArtifact<M>>, Plan, K), Error> {
     let Planned {
         key,
         spec,
@@ -2101,20 +2145,13 @@ fn compile_kept<K>(
         precision.sort_unstable();
     }
     crate::spirv::verify::verify(&module, p, m)?;
-    let kept = keep(&module);
+    let kept = keep(&module, m)?;
     let mut symbols =
         crate::pipeline::link::contract::stage_symbols(&module, &plan.families.stage_io.interface)?;
     // The bits of each specialization constant the module never reads.
     crate::spirv::spec_bits::mark_unread(&module, &mut symbols.spec, &specialized, m)?;
-    // The serializer's id tables live while it writes.
-    let ids = crate::spirv::serialize::id_table_bytes(&module, p);
-    m.charge(ids)?;
-    let module = crate::spirv::serialize::serialize_for(module, p)?;
-    m.release(ids);
-    m.charge(module.footprint())?; // The retained words and relocations.
-
-    // The estimate refused early; the cap holds on what was emitted.
-    crate::lower::estimate::check_emitted(module.words.len(), word_cap)?;
+    let mut requirements = module.requirements().clone();
+    let module = finish(module, p, m, word_cap)?;
     let interface = stage_interface(
         &plan,
         symbols,
@@ -2124,7 +2161,6 @@ fn compile_kept<K>(
         reaches_command_buffers,
         (writes_textures, numbered_samplers),
     );
-    let mut requirements = module.requirements.clone();
     // Pairs only the device's simdgroup lockstep orders.
     if plan.families.simd.device_lockstep != 0 {
         requirements
@@ -2156,7 +2192,12 @@ fn compile_kept<K>(
             .insert(crate::device::requirements::VkProperty::Unorm8LinearFilter);
     }
     // A `half` fused multiply-add left to the device's 16-bit `Fma` because it is Metal's.
-    if plan.families.arith.f16_fma {
+    if plan.families.arith.sm53_half {
+        requirements
+            .properties
+            .insert(crate::device::requirements::VkProperty::NativeSm53Half);
+    }
+    if plan.families.arith.f16_fma && !plan.families.arith.sm53_half {
         requirements
             .properties
             .insert(crate::device::requirements::VkProperty::MetalHalfFma);
@@ -2169,7 +2210,7 @@ fn compile_kept<K>(
             .insert(crate::device::requirements::VkProperty::MetalMinMax);
     }
     // `half` `+ - * /` left to the device's 16-bit arithmetic because it is Metal's.
-    if plan.families.arith.f16_arith {
+    if plan.families.arith.f16_arith && !plan.families.arith.sm53_half {
         requirements
             .properties
             .insert(crate::device::requirements::VkProperty::MetalHalfArithmetic);
@@ -2194,7 +2235,7 @@ fn compile_kept<K>(
             .insert(crate::device::requirements::VkProperty::MetalHalfQuantize);
     }
     // A `half` rounding left to the device's conversion because it is Metal's.
-    if converts && native_half.is_none() {
+    if converts && native_half.is_none() && !plan.families.arith.sm53_half {
         requirements
             .properties
             .insert(crate::device::requirements::VkProperty::MetalHalfConversion);

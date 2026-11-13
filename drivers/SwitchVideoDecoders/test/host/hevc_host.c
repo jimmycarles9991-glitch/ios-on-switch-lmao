@@ -11,6 +11,7 @@
 #include "../../AVD/HEVCNVDEC.h"
 #include "../../AVD/HEVCSyntax.h"
 #include "../../../TegraNVDEC/TegraNVDECCheck.h"
+#include "fake_engine.h"
 #include "../HEVCClip.h"
 #include "../HEVCTrace.h"
 
@@ -107,15 +108,17 @@ static void testSyntax(void)
 }
 
 enum {
-    MAX_BUFFERS = 40
+    MAX_BUFFERS = 64
 };
 
 typedef struct {
     uint8_t *va[MAX_BUFFERS + 1];
     uint64_t bytes[MAX_BUFFERS + 1];
     int out[64], outCount, discarded, jobs;
+    unsigned recycled;
     uint32_t pitch;  // the last picture handed out: bytes a row, as present and the CPU copy read it
     TegraNVDECSubmit last;
+    FakeEngine engine;
 } Fake;
 
 static int fakeAlloc(void *ctx, uint64_t size, uint32_t *handle, void **va)
@@ -126,11 +129,27 @@ static int fakeAlloc(void *ctx, uint64_t size, uint32_t *handle, void **va)
             continue;
         f->va[h] = calloc(1, size);
         f->bytes[h] = size;
+        fake_engine_allocated(&f->engine, h);
         *handle = h;
         *va = f->va[h];
         return f->va[h] ? 0 : -1;
     }
     return -1;
+}
+
+static int switch_fake_recycle(void *ctx, uint32_t handle, uint64_t bytes, void **address)
+{
+    Fake *f = ctx;
+    if (!handle || handle >= MAX_BUFFERS + 1 || !f->va[handle] || bytes != f->bytes[handle])
+        return -1;
+    void *next = calloc(1, bytes);
+    if (!next)
+        return -1;
+    free(f->va[handle]);
+    f->va[handle] = next;
+    *address = next;
+    ++f->recycled;
+    return 0;
 }
 
 static void fakeFree(void *ctx, uint32_t handle)
@@ -161,19 +180,22 @@ static int fakeSubmit(void *ctx, const TegraNVDECSubmit *s, uint32_t *fence)
     const char *why = fakeCheck(f, s);
     CHECK(!why, "job %d refused by the kernel checker: %s", f->jobs, why ? why : "");
     f->last = *s;
-    *fence = (uint32_t)++f->jobs;
+    f->jobs++;
+    *fence = fake_engine_submit(&f->engine, s);
     return why ? -1 : 0;
 }
 
 static int fakeWait(void *ctx, const TegraNVDECWait *w)
 {
-    (void)ctx, (void)w;
+    fake_engine_wait(&((Fake *)ctx)->engine, w->fence);
     return 0;
 }
 
 static void *fakeDecoded(void *ctx, const H264Picture *p)
 {
-    ((Fake *)ctx)->pitch = p->pitch;
+    Fake *f = ctx;
+    CHECK(p->luma == f->va[p->handle], "recycled picture retains old CPU address");
+    f->pitch = p->pitch;
     return (void *)(intptr_t)((intptr_t)p->token + 1);
 }
 
@@ -225,16 +247,25 @@ static HEVCDecoder *decodeClip(Fake *f, const uint8_t *data, size_t size, int *a
     static uint8_t buffer[64 * 1024];
     uint8_t *sample[64];
     size_t sizes[64];
-    const H264Backend backend = {f,           fakeAlloc, fakeFree,    fakeSubmit, fakeWait,
-                                 fakeDecoded, fakeEmit,  fakeDiscard, NULL};
+    const H264Backend backend = {.ctx = f,
+                                 .alloc = fakeAlloc,
+                                 .free = fakeFree,
+                                 .submit = fakeSubmit,
+                                 .wait = fakeWait,
+                                 .decoded = fakeDecoded,
+                                 .emit = fakeEmit,
+                                 .discard = fakeDiscard,
+                                 .recycle = switch_fake_recycle,
+                                 .inputs = FAKE_ENGINE_DEPTH + 1};
     HEVCDecoder *d = hevc_decoder_create(&backend);
     hevc_decoder_allow_10bit(d, tenBit);
     *aus = samples(data, size, buffer, sample, sizes, 64);
     for (int i = 0; i < *aus; i++) {
-        const int ret = hevc_decoder_decode(d, sample[i], sizes[i], 4, (void *)(intptr_t)i);
+        const int ret = hevc_decoder_decode(d, sample[i], sizes[i], 4, (void *)(intptr_t)i, true);
         CHECK(ret == 1, "access unit %d: hevc_decoder_decode %d", i, ret);
     }
     hevc_decoder_flush(d);
+    CHECK(f->recycled != 0, "output allocations never recycled");
     return d;
 }
 
@@ -255,6 +286,8 @@ static void testDecode(void)
         CHECK(order, "clip %c: output order differs from FFmpeg's", clip->name);
         CHECK(!hevc_decoder_missing_refs(d), "clip %c: %u references missing", clip->name,
               hevc_decoder_missing_refs(d));
+        CHECK(!f.engine.waits && !f.engine.busyWrites, "clip %c: %u waits, %u CPU writes into a buffer a job uses",
+              clip->name, f.engine.waits, f.engine.busyWrites);
         // framestride counts samples and mode 1 writes two bytes each (averne's nvtegra_hevc.c): the engine's rows
         // must be the rows the picture is read with.
         const nvdec_hevc_pic_s *setup = (const nvdec_hevc_pic_s *)f.last.setup;
@@ -265,14 +298,23 @@ static void testDecode(void)
         if (clip->depth == 10) {
             Fake g;
             memset(&g, 0, sizeof(g));
-            const H264Backend backend = {&g,          fakeAlloc, fakeFree,    fakeSubmit, fakeWait,
-                                         fakeDecoded, fakeEmit,  fakeDiscard, NULL};
+            const H264Backend backend = {.ctx = &g,
+                                         .alloc = fakeAlloc,
+                                         .free = fakeFree,
+                                         .submit = fakeSubmit,
+                                         .wait = fakeWait,
+                                         .decoded = fakeDecoded,
+                                         .emit = fakeEmit,
+                                         .discard = fakeDiscard,
+                                         .recycle = switch_fake_recycle,
+                                         .inputs = FAKE_ENGINE_DEPTH + 1};
             HEVCDecoder *e = hevc_decoder_create(&backend);
             static uint8_t buffer[64 * 1024];
             uint8_t *sample[64];
             size_t sizes[64];
             samples(clip->data, clip->size, buffer, sample, sizes, 64);
-            CHECK(hevc_decoder_decode(e, sample[0], sizes[0], 4, NULL) == -1 && !g.jobs, "Main 10 taken while off");
+            CHECK(hevc_decoder_decode(e, sample[0], sizes[0], 4, NULL, true) == -1 && !g.jobs,
+                  "Main 10 taken while off");
             hevc_decoder_destroy(e);
         }
         printf("decode: clip %c %dx%d %d-bit, %d access units, every job accepted by the kernel checker, %d pictures "
@@ -355,9 +397,9 @@ static void testDecode(void)
                     small.entries[k].offset = (uint32_t)(f.bytes[small.entries[k].value] - columns * rows / 2);
             ((nvdec_hevc_pic_s *)eight.setup)->disp_output_mode = 2;
             ((nvdec_hevc_pic_s *)deblock.setup)->HevcSaoBufferOffset = 480 * rows / 256;
-            CHECK(fakeCheck(&f, &narrow) && fakeCheck(&f, &bytes) && fakeCheck(&f, &small) && fakeCheck(&f, &eight) &&
-                      fakeCheck(&f, &deblock),
+            CHECK(fakeCheck(&f, &narrow) && fakeCheck(&f, &bytes) && fakeCheck(&f, &small) && fakeCheck(&f, &deblock),
                   "clip %c: the checker took a Main 10 submit the engine would write past", clip->name);
+            CHECK(!fakeCheck(&f, &eight), "clip %c: mode 2 into 16-bit-sized pictures refused", clip->name);
             printf("checker: Main 10 at %u samples a row (%u bytes); byte strides, 8-bit-sized planes and filter rows "
                    "refused\n",
                    columns, 2 * columns);
@@ -368,11 +410,89 @@ static void testDecode(void)
     }
 }
 
+static size_t gobOffset(uint32_t x, uint32_t y, uint32_t pitch)
+{
+    return (size_t)(y / 16) * (pitch / 64) * 1024 + (x / 64) * 1024 + ((y % 16) / 8) * 512 + ((x % 64) / 32) * 256 +
+           ((y % 8) / 2) * 64 + ((x % 32) / 16) * 32 + (y % 2) * 16 + x % 16;
+}
+
+// Without reordering every picture goes out before its decode call returns, as Apple's HEVC decoders do on a clip with
+// B pictures: none is held for display order.
+static void testDecodeOrder(void)
+{
+    const HEVCClip *clip = &kHEVCClips[0];
+    Fake f;
+    memset(&f, 0, sizeof(f));
+    const H264Backend backend = {.ctx = &f,
+                                 .alloc = fakeAlloc,
+                                 .free = fakeFree,
+                                 .submit = fakeSubmit,
+                                 .wait = fakeWait,
+                                 .decoded = fakeDecoded,
+                                 .emit = fakeEmit,
+                                 .discard = fakeDiscard,
+                                 .recycle = switch_fake_recycle,
+                                 .inputs = FAKE_ENGINE_DEPTH + 1};
+    HEVCDecoder *d = hevc_decoder_create(&backend);
+    static uint8_t buffer[64 * 1024];
+    uint8_t *sample[64];
+    size_t sizes[64];
+    const int aus = samples(clip->data, clip->size, buffer, sample, sizes, 64);
+    bool held = false, reordered = false;
+    for (int i = 0; i < aus; i++) {
+        CHECK(hevc_decoder_decode(d, sample[i], sizes[i], 4, (void *)(intptr_t)i, false) == 1,
+              "decode order: access unit %d", i);
+        held |= f.outCount != i + 1;
+        reordered |= clip->display[i] != i;
+    }
+    hevc_decoder_flush(d);
+    bool order = f.outCount == aus;
+    for (int k = 0; order && k < f.outCount; k++)
+        order = f.out[k] == k;
+    CHECK(reordered, "decode order: clip %c has no B pictures to hold", clip->name);
+    CHECK(!held && order, "decode order: clip %c held a picture past its decode (%d out of %d)", clip->name, f.outCount,
+          aus);
+    CHECK(!hevc_decoder_missing_refs(d), "decode order: %u references missing", hevc_decoder_missing_refs(d));
+    hevc_decoder_destroy(d);
+    printf("decode order: clip %c, %d pictures each out before its decode call returned\n", clip->name, aus);
+}
+
+// HEVCDisplayProbe's reading: a display buffer written as pitch-linear 8-bit truncation of a block-linear P010 picture
+// is found as that layout, exact; a buffer left poisoned is "not written".
+static void testDisplayProbeCompare(void)
+{
+    enum {
+        W = 64,
+        H = 32,
+        PITCH16 = 128
+    };
+
+    static uint8_t ref[PITCH16 * H], display[PITCH16 * H * 3 / 2];
+    for (uint32_t y = 0; y < H; y++)
+        for (uint32_t x = 0; x < W; x++) {
+            const uint16_t sample = (uint16_t)(((x * 7 + y * 13) % 1024) << 6);
+            ref[gobOffset(2 * x, y, PITCH16)] = (uint8_t)sample;
+            ref[gobOffset(2 * x + 1, y, PITCH16)] = (uint8_t)(sample >> 8);
+        }
+    HEVCDisplayProbeResult r = {0};
+    memset(display, HEVC_DISPLAY_POISON, sizeof(display));
+    hevc_display_probe_compare(display, sizeof(display), ref, PITCH16, H, W, H, &r);
+    CHECK(r.layout == HEVC_DISPLAY_NOT_WRITTEN, "display probe: a poisoned buffer read as layout %u", r.layout);
+    for (uint32_t y = 0; y < H; y++)
+        for (uint32_t x = 0; x < W; x++)
+            display[y * (PITCH16 / 2) + x] = (uint8_t)(((x * 7 + y * 13) % 1024) >> 2);
+    hevc_display_probe_compare(display, sizeof(display), ref, PITCH16, H, W, H, &r);
+    CHECK(r.layout == HEVC_DISPLAY_PITCH_8 && r.max_diff == 0 && r.trunc_milli == 1000,
+          "display probe: layout %u max %u trunc %u", r.layout, r.max_diff, r.trunc_milli);
+}
+
 int main(int argc, char **argv)
 {
     (void)argc, (void)argv;
     testSyntax();
     testDecode();
+    testDecodeOrder();
+    testDisplayProbeCompare();
     if (gFailures) {
         printf("FAIL hevc: %d failures\n", gFailures);
         return 1;

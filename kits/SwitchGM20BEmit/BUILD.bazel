@@ -1,0 +1,166 @@
+# GM20B push words: Mesa's push builder and generated class helpers, the copy engine's rectangle copy, the 3D state
+# sequences, the barrier vocabulary and the macro (MME) programs, one set for the kernel and user space.
+#
+#   bazel test //kits/SwitchGM20BEmit/...
+load("@rules_cc//cc:cc_binary.bzl", "cc_binary")
+load("@rules_cc//cc:cc_library.bzl", "cc_library")
+load("@rules_python//python:py_binary.bzl", "py_binary")
+load("//bazel/lint:defs.bzl", "lint_files")
+load("//kernel/rules:kernel.bzl", "kernel_headers")
+load("//kits/SwitchGM20B:defs.bzl", "SWITCH_GM20B_MESA_HEADERS")
+load(":defs.bzl", "EMIT_SOURCES", "MESA_MME_COPTS", "MESA_MME_HEADERS", "MESA_MME_SOURCES", "push_headers")
+
+package(default_visibility = ["//visibility:public"])
+
+lint_files(exclude = ["mesa/**"])
+
+exports_files(glob(
+    ["**"],
+    exclude = ["BUILD.bazel"],
+))
+
+filegroup(
+    name = "all_files",
+    srcs = glob(
+        ["**"],
+        exclude = ["BUILD.bazel"],
+    ),
+)
+
+py_binary(
+    name = "kernel_safe_push_header",
+    srcs = ["mesa/kernel_safe_push_header.py"],
+    main = "mesa/kernel_safe_push_header.py",
+)
+
+push_headers(name = "push_headers")
+
+# The method names Mesa's MME simulator prints with (its nv_push_cl9097.c, class_parser.py's), for host tools only.
+genrule(
+    name = "nv_push_cl9097_dump",
+    srcs = ["//third_party/mesa/src/nouveau/headers:nvidia/classes/cl9097.h"],
+    outs = [
+        "mesa_gen/dump/nv_push_cl9097.c",
+        "mesa_gen/dump/nv_push_cl9097.h",
+    ],
+    cmd = "$(execpath //third_party/mesa/src/nouveau/headers:class_parser) --in-h $(execpath " +
+          "//third_party/mesa/src/nouveau/headers:nvidia/classes/cl9097.h) --out-h $(execpath " +
+          "mesa_gen/dump/nv_push_cl9097.h) --out-c $(execpath mesa_gen/dump/nv_push_cl9097.c)",
+    tools = ["//third_party/mesa/src/nouveau/headers:class_parser"],
+)
+
+# Kernel drivers: hdr_deps "kits/SwitchGM20BEmit" and "kits/SwitchGM20B", SWITCH_GM20B_EMIT_INCLUDES in their flags.
+kernel_headers(extra = SWITCH_GM20B_MESA_HEADERS + [
+    ":macros",
+    ":push_headers",
+])
+
+# The emitters' headers and the push builder's, with the generated class helpers their sources include, as files: for
+# rules that take headers and -I directories of their own (the Metal plugin, ios_binary). They add -I mesa and gen.
+filegroup(
+    name = "emit_headers",
+    srcs = glob([
+        "SwitchGM20B*.h",
+        "mesa/*.h",
+    ]) + [":push_headers"],
+)
+
+cc_library(
+    name = "push",
+    hdrs = [
+        "mesa/nv_push.h",
+        "mesa/nv_push_compat.h",
+        ":push_headers",
+    ],
+    includes = [
+        "gen",
+        "mesa",
+    ],
+    deps = ["//kits/SwitchGM20B:classes"],
+)
+
+# NVK's copy, lifted: Mesa's code, never ours to lint.
+cc_library(
+    name = "copy_rect",
+    srcs = ["mesa/nouveau_copy_rect.c"],
+    hdrs = ["SwitchGM20BEmitCopy.h"],
+    tags = ["no-lint"],
+    deps = [":push"],
+)
+
+cc_library(
+    name = "emit",
+    srcs = [s for s in EMIT_SOURCES if not s.startswith("mesa/")],
+    hdrs = glob(["SwitchGM20B*.h"]),
+    deps = [
+        ":copy_rect",
+        ":push",
+    ],
+)
+
+# The emitters as the Metal plugin builds them, NDEBUG: for raw's host harnesses (and the bench library beside them), whose
+# addresses are host pointers, wider than the 40-bit address fields the debug checks hold them to.
+cc_library(
+    name = "emit_ndebug",
+    srcs = EMIT_SOURCES,
+    hdrs = glob(["SwitchGM20B*.h"]),
+    local_defines = ["NDEBUG"],
+    tags = ["no-lint"],
+    deps = [":push"],
+)
+
+# The raw path's draw macros, built with Mesa's MME builder (mme/switch_gm20b_macros.c): gen/SwitchGM20BMacros.h.
+cc_binary(
+    name = "gen_macros",
+    srcs = MESA_MME_SOURCES + MESA_MME_HEADERS + SWITCH_GM20B_MESA_HEADERS + [
+        "SwitchGM20BMacroSlots.h",
+        "mme/switch_gm20b_macros.c",
+        ":push_headers_mesa",
+        "//kits/SwitchGM20B:SwitchGM20BTegra.h",
+    ],
+    copts = MESA_MME_COPTS,
+    tags = ["no-lint"],
+)
+
+genrule(
+    name = "macros",
+    outs = ["gen/SwitchGM20BMacros.h"],
+    cmd = "$(execpath :gen_macros) $@",
+    tools = [":gen_macros"],
+)
+
+cc_library(
+    name = "macros_h",
+    hdrs = [
+        "SwitchGM20BMacroSlots.h",
+        ":macros",
+    ],
+    includes = ["gen"],
+)
+
+# The channel's context init: context/context.tsv and NVK's macros (context/macros.txt) as gen/SwitchGM20BContext.h.
+py_binary(
+    name = "gen_context",
+    srcs = ["context/gen_context.py"],
+    main = "context/gen_context.py",
+)
+
+genrule(
+    name = "context",
+    srcs = [
+        "context/context.tsv",
+        "context/macros.txt",
+        "//third_party/mesa/src/nouveau/headers:nvidia/classes/clb197.h",
+        "//third_party/mesa/src/nouveau/headers:nvidia/classes/clb1c0.h",
+    ],
+    outs = ["gen/SwitchGM20BContext.h"],
+    cmd = "$(execpath :gen_context) --table $(execpath context/context.tsv) --macros $(execpath context/macros.txt) " +
+          "--classes $$(dirname $(execpath //third_party/mesa/src/nouveau/headers:nvidia/classes/clb197.h)) --out $@",
+    tools = [":gen_context"],
+)
+
+cc_library(
+    name = "context_h",
+    hdrs = [":context"],
+    includes = ["gen"],
+)

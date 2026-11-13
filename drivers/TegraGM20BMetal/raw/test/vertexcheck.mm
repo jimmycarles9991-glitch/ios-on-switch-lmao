@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: MIT
-// vertexcheck: runtime/raw_emit.h's vertex input registers against every probed state of a pack. Each state's vertex function
-// is made from its key with this Mac's Metal and the IPSW's library, and its reflection's active vertexAttributes are
-// the attribute inputs raw_emit numbers; the registers must be the pack's wherever the hardware reads them.
-// usage: vertexcheck <pack.bin> <the IPSW's QuartzCore default.metallib> <bucket dir>...
+// vertexcheck: runtime/raw_emit.h's vertex input registers against the pack's record of each QuartzCore state of a corpus.
+// Each state's vertex function is made from its line with this Mac's Metal and the IPSW's library, and its reflection's
+// active vertexAttributes are the attribute inputs raw_emit numbers; the registers must be the pack's wherever the
+// hardware reads them. Lines of another framework's library are left out.
+// usage: vertexcheck <pack.bin> <the IPSW's QuartzCore default.metallib> <corpus>...
 #import <Foundation/Foundation.h>
 #import <Metal/Metal.h>
 #include <cstdio>
@@ -25,21 +26,17 @@ std::map<uint32_t, uint32_t> registers(const raw::Pack &pack, const raw::PackPip
     return regs;
 }
 
-// The state keys a bucket's probe runs drew ("PROBE <i> <key>" lines of probe256.out), trailing space dropped as probelog.py
-void keysOf(const std::string &bucket, std::set<std::string> &keys)
+// A corpus's R lines of QuartzCore's states, each once; `others` counts those of another library
+void linesOf(const std::string &corpus, std::set<std::string> &lines, uint64_t &others)
 {
-    for (const char *run : {"/probe256.out", "/barrier/probe256.out"}) {
-        std::ifstream in(bucket + run);
-        for (std::string line; std::getline(in, line);) {
-            if (line.rfind("PROBE ", 0))
-                continue;
-            const size_t at = line.find(' ', 6);
-            std::string key = at == std::string::npos ? "" : line.substr(at + 1);
-            while (!key.empty() && key.back() == ' ')
-                key.pop_back();
-            if (!key.empty())
-                keys.insert(key);
-        }
+    std::ifstream in(corpus);
+    for (std::string line; std::getline(in, line);) {
+        if (line.rfind("R ", 0))
+            continue;
+        if (line.find(" lib=") != std::string::npos)
+            others++;
+        else
+            lines.insert(line);
     }
 }
 
@@ -49,7 +46,7 @@ int main(int argc, char **argv)
 {
     @autoreleasepool {
         if (argc < 4) {
-            fprintf(stderr, "usage: vertexcheck <pack.bin> <default.metallib> <bucket dir>...\n");
+            fprintf(stderr, "usage: vertexcheck <pack.bin> <default.metallib> <corpus>...\n");
             return 2;
         }
         raw::Pack pack;
@@ -65,18 +62,22 @@ int main(int argc, char **argv)
             fprintf(stderr, "vertexcheck: %s\n", error.localizedDescription.UTF8String);
             return 1;
         }
-        std::set<std::string> keys;
-        for (int b = 3; b < argc; b++)
-            keysOf(argv[b], keys);
-        uint64_t states = 0, unmade = 0, refused = 0, compared = 0, differ = 0, unreadDiffer = 0;
+        std::set<std::string> lines;
+        uint64_t others = 0;
+        for (int c = 3; c < argc; c++)
+            linesOf(argv[c], lines, others);
+        uint64_t states = 0, unmade = 0, unpacked = 0, refused = 0, compared = 0, differ = 0, unreadDiffer = 0;
         std::map<std::string, uint64_t> reasons;
-        for (const std::string &key : keys) {
-            const raw::PackPipeline *pp = pack.find(raw::Pack::fnv(key.data(), key.size()));
-            if (!pp)
-                continue;
+        for (const std::string &line : lines) {
             probe::State s;
-            if (!probe::parseState(library, "R ok=1 " + key + " | ", s)) {
+            if (!probe::parseState(library, line, s)) {
                 unmade++;
+                continue;
+            }
+            const std::string &key = s.key;
+            const raw::PackPipeline *pp = pack.find(raw::Pack::fnv(key.data(), key.size()));
+            if (!pp) {
+                unpacked++;
                 continue;
             }
             states++;
@@ -108,13 +109,14 @@ int main(int argc, char **argv)
                            key.substr(0, 200).c_str());
             }
         }
-        printf("vertexcheck %s: %zu keys probed, %llu states of the pack made with this Mac's Metal (%llu not), %llu "
-               "refused, %llu values compared: %llu read ones differ, %llu unread ones differ\n",
-               argv[1], keys.size(), (unsigned long long)states, (unsigned long long)unmade,
-               (unsigned long long)refused, (unsigned long long)compared, (unsigned long long)differ,
-               (unsigned long long)unreadDiffer);
+        printf("vertexcheck %s: %zu QuartzCore lines (%llu of other libraries left out), %llu states of the pack made "
+               "with this Mac's Metal (%llu not made, %llu not in the pack), %llu refused, %llu values compared: %llu "
+               "read ones differ, %llu unread ones differ\n",
+               argv[1], lines.size(), (unsigned long long)others, (unsigned long long)states,
+               (unsigned long long)unmade, (unsigned long long)unpacked, (unsigned long long)refused,
+               (unsigned long long)compared, (unsigned long long)differ, (unsigned long long)unreadDiffer);
         for (const auto &[why, n] : reasons)
             printf("  refused x%llu: %s\n", (unsigned long long)n, why.c_str());
-        return differ ? 1 : 0;
+        return differ || !states ? 1 : 0;
     }
 }

@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: MIT */
 /* Implicit GPU order between processes over host imports (TegraGM20BABI.h method 17), as decisions apart from the locks and
- * lists they run under (TegraGM20BExecSurfaces.cpp, gpu.c tgm_chan_follow), so a host test runs them.
+ * lists they run under (TegraGM20BExecSurfaces.cpp, gpu_sync.c tgm_chan_follow), so a host test runs them.
  * A writer is one submission that may have written a surface, as the coherency registry keeps it: channel uid << 32 | seqno,
  * 0 none. An Exec with a list counts as a writer of the surfaces it lists for writing only, and waits on the GPU for every
  * listed surface's listed writers on other channels that have not completed. One without (or with
@@ -52,7 +52,7 @@ static inline int tgm_fence_merge(uint64_t *acc, uint32_t *n, uint32_t max, uint
 
 /* How a kernel copy on channel `self` (the copy engine's, a tiling move's) follows a surface writer `uid` still running:
  * its own channel runs it in order; another channel's fence in its space's fence view (every channel's is, the kernel's own
- * client channels' included: gpu.c tgm_fence_kernel) is a semaphore acquire in its push. One it cannot acquire on is a
+ * client channels' included: gpu_chan.c tgm_fence_kernel) is a semaphore acquire in its push. One it cannot acquire on is a
  * refusal, never a CPU wait: the copy goes ahead unordered and says so. */
 enum tgm_writer_order {
 	TGM_WRITER_IN_CHANNEL,
@@ -67,7 +67,7 @@ static inline enum tgm_writer_order tgm_writer_order(uint32_t self, uint32_t uid
 	return acquirable != 0 ? TGM_WRITER_GPU_ACQUIRE : TGM_WRITER_REFUSED;
 }
 
-/* A writer's channel as gpu.c finds it under live_lock (a channel that is gone needs no wait): the follower itself, killed
+/* A writer's channel as gpu_sync.c finds it under tgm_live_lock (a channel that is gone needs no wait): the follower itself, killed
  * (its fence word passed every seqno it gave out), and its completed seqno. */
 struct tgm_fence_source {
 	int self;
@@ -85,7 +85,7 @@ static inline int tgm_fence_wanted(uint64_t writer, const struct tgm_fence_sourc
 }
 
 /* Whether a wait on `seqno` of a channel whose fence word is `fence` passed only because the channel was killed with that
- * submission unfinished (its kill record, gpu.c chan_killed): what the waiter ordered after never ran to its end. */
+ * submission unfinished (its kill record, gpu_hang.c tgm_chan_killed): what the waiter ordered after never ran to its end. */
 static inline int tgm_fence_lost(const volatile struct TegraGM20BAbiFence *fence, uint32_t seqno)
 {
 	return (fence->error != 0 && (int32_t)(seqno - fence->killed_first) >= 0 &&

@@ -4,25 +4,29 @@
 //! checked conversions; a value it does not know fails the call (never a substitute). Failures leave their reason in a per-thread
 //! string, and no call unwinds into C.
 
+use crate::functions::{FunctionOf, LibraryOf};
 use metal2vulkan::bind::{ArgumentDescriptor, SamplerDescriptor};
 use metal2vulkan::library::{FunctionConstantValue, FunctionConstantValues};
 use metal2vulkan::metal::state::{DepthStencilDescriptor, StencilDescriptor};
 use metal2vulkan::metal::{
-    BarrierScope, BindingAccess, BlendFactor, BlendOperation, ColorWriteMask, CompareFunction, CullMode, DataType,
-    DepthClipMode, DispatchType, IndexType, PixelFormat, PrimitiveTopologyClass, PrimitiveType, RenderStages,
-    ResourceUsage, SamplerAddressMode, SamplerBorderColor, SamplerMinMagFilter, SamplerMipFilter, StencilOperation,
-    TextureType, TextureUsage, TriangleFillMode, VertexFormat, VertexStepFunction, Winding,
+    AttributeFormat, BarrierScope, BindingAccess, BlendFactor, BlendOperation, ColorWriteMask, CompareFunction,
+    CullMode, DataType, DepthClipMode, DispatchType, IndexType, PixelFormat, PrimitiveTopologyClass, PrimitiveType,
+    RenderStages, ResourceUsage, SamplerAddressMode, SamplerBorderColor, SamplerMinMagFilter, SamplerMipFilter,
+    StencilOperation, StepFunction, TessellationControlPointIndexType, TessellationFactorFormat,
+    TessellationFactorStepFunction, TessellationPartitionMode, TextureType, TextureUsage, TriangleFillMode,
+    VertexFormat, VertexStepFunction, Winding,
 };
 use metal2vulkan::pipeline::{
-    ColorAttachmentDescriptor, ComputePipelineDescriptor, LinkedFunctions, RenderPipelineDescriptor, StageSource,
-    VertexAttributeDescriptor, VertexBufferLayoutDescriptor, VertexDescriptor,
+    ColorAttachmentDescriptor, ComputePipelineDescriptor, FunctionDescriptor, LinkedFunction, LinkedFunctions,
+    RenderPipelineDescriptor, StageInputAttributeDescriptor, StageInputDescriptor, StageInputLayoutDescriptor,
+    StageSource, TessellationDescriptor, VertexAttributeDescriptor, VertexBufferLayoutDescriptor, VertexDescriptor,
 };
 use metal2vulkan_runtime::{
     ArgumentEncoder, BinaryArchive, BinaryArchiveDescriptor, BlitCommandEncoder, BlitOption, Buffer, ClearColor,
     CommandBuffer, CommandQueue, ComputeCommandEncoder, ComputePipelineState, DebugMessage, DepthStencilState, Device,
     DeviceOptions, Event, EventRef, FamilyRow, FeatureRow, Fence, Function, GpuFamily, Heap, HeapDescriptor, HeapType,
-    HostMemory, IoSurfacePlane, IoSurfaceYCbCr, Library, LoadAction, MAX_COLOR_ATTACHMENTS, MessageSeverity,
-    MessageSink, MetalLevel, MultisampleDepthResolveFilter, MultisampleStencilResolveFilter, Origin, PipelineOption,
+    HostMemory, IoSurfacePlane, IoSurfaceYCbCr, LoadAction, MAX_COLOR_ATTACHMENTS, MessageSeverity, MessageSink,
+    MetalLevel, MultisampleDepthResolveFilter, MultisampleStencilResolveFilter, Origin, PipelineOption,
     PipelineOptions, PrivateCount, PrivateFlag, PrivateProperties, PurgeableState, Region, RenderCommandEncoder,
     RenderPassDescriptor, RenderPipelineState, ResourceOptions, ResourceRef, RowState, SamplerState, ScissorRect,
     SharedEvent, SharedEventListener, Size, StoreAction, SubmissionMemoryHook, SurfaceYCbCrMatrix, Texture,
@@ -77,7 +81,7 @@ fn get_mut<'a, T>(handle: *mut T) -> Result<&'a mut T, String> {
     unsafe { handle.as_mut() }.ok_or_else(|| "null handle".to_string())
 }
 
-fn release<T>(handle: *mut T) {
+pub(crate) fn release<T>(handle: *mut T) {
     if !handle.is_null() {
         // SAFETY: from `boxed`, released once.
         drop(unsafe { Box::from_raw(handle) });
@@ -1394,9 +1398,15 @@ pub unsafe extern "C" fn nmb_texture_get_bytes(
 
 // ---- libraries and functions ----
 
-pub struct NmbLibrary(Library, Vec<String>);
+pub struct NmbLibrary(LibraryOf, Vec<String>);
 /// A function and the specialized name a pipeline links it under, where it was made with one.
-pub struct NmbFunction(Function, Option<String>);
+pub struct NmbFunction(FunctionOf, Option<String>);
+
+impl NmbFunction {
+    pub(crate) fn function(&self) -> Result<&Function, String> {
+        self.0.runtime()
+    }
+}
 
 /// # Safety
 /// `bytes` holds `length` bytes.
@@ -1421,9 +1431,13 @@ pub unsafe extern "C" fn nmb_library_new(
                 .new_library_with_data(crate::air_slice(bytes).ok_or("metallib without an AIR64 slice")?)
                 .map_err(e("metallib"))?
         };
-        let names = library.function_names();
-        Ok(boxed(NmbLibrary(library, names)))
+        Ok(library_handle(LibraryOf::Runtime(library)))
     })
+}
+
+pub(crate) fn library_handle(library: LibraryOf) -> *mut NmbLibrary {
+    let names = library.function_names();
+    boxed(NmbLibrary(library, names))
 }
 
 #[unsafe(no_mangle)]
@@ -1459,10 +1473,7 @@ pub unsafe extern "C" fn nmb_function_new(library: *mut NmbLibrary, name: *const
         }
         // SAFETY: the caller's contract.
         let name = unsafe { CStr::from_ptr(name) }.to_str().map_err(e("function name"))?;
-        Ok(boxed(NmbFunction(
-            get(library)?.0.new_function_with_name(name).map_err(e("function"))?,
-            None,
-        )))
+        Ok(boxed(NmbFunction(get(library)?.0.function(name, "function")?, None)))
     })
 }
 
@@ -1487,49 +1498,61 @@ pub unsafe extern "C" fn nmb_function_new_specialized(
     count: u32,
 ) -> *mut NmbFunction {
     guard(std::ptr::null_mut(), || {
-        if name.is_null() || (constants.is_null() && count > 0) {
-            return Err("null function name or constants".into());
-        }
         // SAFETY: the caller's contract.
-        let name = unsafe { CStr::from_ptr(name) }.to_str().map_err(e("function name"))?;
-        let constants = if count == 0 {
-            &[][..]
-        } else {
-            unsafe { std::slice::from_raw_parts(constants, count as usize) }
-        };
-        let mut values = FunctionConstantValues::defaults();
-        for c in constants {
-            if c.bytes.is_null() {
-                return Err("constant without bytes".into());
-            }
-            // SAFETY: the caller's contract.
-            let bytes = unsafe { std::slice::from_raw_parts(c.bytes as *const u8, c.length as usize) };
-            let value = FunctionConstantValue::new(raw::<DataType>(c.kind, "constant type")?, bytes.to_vec());
-            if c.name.is_null() {
-                values
-                    .by_index
-                    .insert(u32::try_from(c.index).map_err(e("constant index"))?, value);
-            } else {
-                // SAFETY: the caller's contract.
-                let key = unsafe { CStr::from_ptr(c.name) }.to_str().map_err(e("constant name"))?;
-                values.by_name.insert(key.to_string(), value);
-            }
-        }
-        let function = get(library)?
-            .0
-            .new_function_with_name_constant_values(name, &values)
-            .map_err(e("specialized function"))?;
-        let specialized = if specialized_name.is_null() {
-            None
-        } else {
-            // SAFETY: the caller's contract.
-            let s = unsafe { CStr::from_ptr(specialized_name) }
-                .to_str()
-                .map_err(e("specialized name"))?;
-            Some(s.to_string())
-        };
+        let (name, values, specialized) = unsafe { specialization(name, specialized_name, constants, count) }?;
+        let function = get(library)?.0.specialized(name, &values, "specialized function")?;
         Ok(boxed(NmbFunction(function, specialized)))
     })
+}
+
+/// nmb_function_new_specialized's arguments: the function's name, its constant values and the name it links under
+///
+/// # Safety
+/// As nmb_function_new_specialized's.
+pub(crate) unsafe fn specialization<'a>(
+    name: *const c_char,
+    specialized_name: *const c_char,
+    constants: *const NmbConstant,
+    count: u32,
+) -> Result<(&'a str, FunctionConstantValues, Option<String>), String> {
+    if name.is_null() || (constants.is_null() && count > 0) {
+        return Err("null function name or constants".into());
+    }
+    // SAFETY: the caller's contract.
+    let name = unsafe { CStr::from_ptr(name) }.to_str().map_err(e("function name"))?;
+    let constants = if count == 0 {
+        &[][..]
+    } else {
+        unsafe { std::slice::from_raw_parts(constants, count as usize) }
+    };
+    let mut values = FunctionConstantValues::defaults();
+    for c in constants {
+        if c.bytes.is_null() {
+            return Err("constant without bytes".into());
+        }
+        // SAFETY: the caller's contract.
+        let bytes = unsafe { std::slice::from_raw_parts(c.bytes as *const u8, c.length as usize) };
+        let value = FunctionConstantValue::new(raw::<DataType>(c.kind, "constant type")?, bytes.to_vec());
+        if c.name.is_null() {
+            values
+                .by_index
+                .insert(u32::try_from(c.index).map_err(e("constant index"))?, value);
+        } else {
+            // SAFETY: the caller's contract.
+            let key = unsafe { CStr::from_ptr(c.name) }.to_str().map_err(e("constant name"))?;
+            values.by_name.insert(key.to_string(), value);
+        }
+    }
+    let specialized = if specialized_name.is_null() {
+        None
+    } else {
+        // SAFETY: the caller's contract.
+        let s = unsafe { CStr::from_ptr(specialized_name) }
+            .to_str()
+            .map_err(e("specialized name"))?;
+        Some(s.to_string())
+    };
+    Ok((name, values, specialized))
 }
 
 /// The function's constants (`functionConstantsDictionary`): how many, and the one at `at` in name order (its name into
@@ -1539,8 +1562,7 @@ pub extern "C" fn nmb_function_constant_count(function: *const NmbFunction) -> u
     guard(0, || {
         Ok(get(function)?
             .0
-            .function_constants_dictionary()
-            .map_err(e("function constants"))?
+            .function_constants_dictionary("function constants")?
             .len() as u32)
     })
 }
@@ -1557,10 +1579,7 @@ pub extern "C" fn nmb_function_constant(
         if info.is_null() {
             return Err("null constant info".into());
         }
-        let constants = get(function)?
-            .0
-            .function_constants_dictionary()
-            .map_err(e("function constants"))?;
+        let constants = get(function)?.0.function_constants_dictionary("function constants")?;
         let c = constants
             .values()
             .nth(at as usize)
@@ -1581,13 +1600,12 @@ fn attributes(
     function: *const NmbFunction,
     stage_input: bool,
 ) -> Result<Option<Vec<metal2vulkan::reflection::Attribute>>, String> {
-    let f = &get(function)?.0;
-    let attributes = if stage_input {
-        f.stage_input_attributes().map_err(e("stage input attributes"))?
+    let what = if stage_input {
+        "stage input attributes"
     } else {
-        f.vertex_attributes().map_err(e("vertex attributes"))?
+        "vertex attributes"
     };
-    Ok(attributes)
+    get(function)?.0.attributes(stage_input, what)
 }
 
 /// How many attributes `vertexAttributes` (`stage_input` false) or `stageInputAttributes` (true)
@@ -1611,23 +1629,39 @@ pub extern "C" fn nmb_function_attribute(
     info: *mut u64,
 ) -> usize {
     guard(0, || {
-        if info.is_null() {
-            return Err("null attribute info".into());
-        }
-        let attributes = attributes(function, stage_input)?.unwrap_or_default();
-        let a = attributes
-            .get(at as usize)
-            .ok_or_else(|| format!("no attribute {at}"))?;
-        // SAFETY: the header's five words.
-        unsafe { std::slice::from_raw_parts_mut(info, 5) }.copy_from_slice(&[
-            u64::from(a.attribute_index()),
-            u64::from(a.attribute_type().as_raw()),
-            u64::from(a.is_active()),
-            u64::from(a.is_patch_data()),
-            u64::from(a.is_patch_control_point_data()),
-        ]);
-        Ok(copy_out(a.name(), out, size))
+        attribute_out(
+            &attributes(function, stage_input)?.unwrap_or_default(),
+            at,
+            out,
+            size,
+            info,
+        )
     })
+}
+
+/// Attribute `at` of `attributes` as nmb_function_attribute answers it
+pub(crate) fn attribute_out(
+    attributes: &[metal2vulkan::reflection::Attribute],
+    at: u32,
+    out: *mut c_char,
+    size: usize,
+    info: *mut u64,
+) -> Result<usize, String> {
+    if info.is_null() {
+        return Err("null attribute info".into());
+    }
+    let a = attributes
+        .get(at as usize)
+        .ok_or_else(|| format!("no attribute {at}"))?;
+    // SAFETY: the header's five words.
+    unsafe { std::slice::from_raw_parts_mut(info, 5) }.copy_from_slice(&[
+        u64::from(a.attribute_index()),
+        u64::from(a.attribute_type().as_raw()),
+        u64::from(a.is_active()),
+        u64::from(a.is_patch_data()),
+        u64::from(a.is_patch_control_point_data()),
+    ]);
+    Ok(copy_out(a.name(), out, size))
 }
 
 #[unsafe(no_mangle)]
@@ -1638,7 +1672,7 @@ pub extern "C" fn nmb_function_release(function: *mut NmbFunction) {
 #[unsafe(no_mangle)]
 pub extern "C" fn nmb_function_type(function: *const NmbFunction) -> u64 {
     guard(0, || {
-        Ok(get(function)?.0.function_type().map_err(e("function type"))?.as_raw() as u64)
+        Ok(get(function)?.0.function_type("function type")?.as_raw() as u64)
     })
 }
 
@@ -1670,31 +1704,88 @@ pub unsafe extern "C" fn nmb_compute_pipeline_new_with_options(
         let resolved = unsafe { pipeline_options(options)? };
         let state = get(device)?
             .0
-            .new_compute_pipeline_state_with_function(&get(function)?.0, &resolved);
+            .new_compute_pipeline_state_with_function(get(function)?.0.runtime()?, &resolved);
         Ok(boxed(NmbComputePipeline(state.map_err(e("compute pipeline"))?)))
     })
 }
 
+/// A pipeline descriptor's function handle as the translator takes it: the runtime's function, or the offline compile's
+/// (offline.rs)
+pub(crate) trait DescriptorFunction {
+    fn stage_function(&self) -> FunctionDescriptor;
+    /// The function as a stage links it, under its specialized name
+    fn linked_function(&self) -> LinkedFunction;
+}
+
+impl DescriptorFunction for NmbFunction {
+    fn stage_function(&self) -> FunctionDescriptor {
+        self.0.function_descriptor()
+    }
+
+    fn linked_function(&self) -> LinkedFunction {
+        self.0.linked_function().with_link_name(self.1.clone())
+    }
+}
+
 #[repr(C)]
-pub struct NmbComputePipelineDescriptor {
-    pub function: *mut NmbFunction,
+pub struct NmbComputePipelineDescriptorOf<F> {
+    pub function: *mut F,
     pub max_threads: u64,
     pub multiple_of_execution_width: u64,
     pub indirect: u64,
     pub max_call_stack_depth: u64,
     pub adding_binary_functions: u64,
     pub mutability: [u64; 31],
-    pub linked: *const *mut NmbFunction,
+    pub linked: *const *mut F,
     pub linked_count: u64,
-    pub private_linked: *const *mut NmbFunction,
+    pub private_linked: *const *mut F,
     pub private_count: u64,
+    pub stage_inputs: u64,
+    pub stage_attributes: [NmbVertexAttribute; 31],
+    pub stage_layouts: [NmbVertexLayout; 31],
+    pub stage_index_type: u64,
+    pub stage_index_buffer: u64,
 }
 
-/// The functions of a counted handle array, each as a stage links it (`Function::linked_function`), under its specialized name.
-fn linked_functions(
-    functions: *const *mut NmbFunction,
+/// A compute descriptor's stage input (`stageInputDescriptor`): its set attributes, their layouts (a dynamic stride as
+/// `None`), its index type and index buffer
+fn stage_input<F>(d: &NmbComputePipelineDescriptorOf<F>) -> Result<StageInputDescriptor, String> {
+    let mut out = StageInputDescriptor::new();
+    for (i, a) in d.stage_attributes.iter().enumerate() {
+        if a.format == 0 {
+            continue;
+        }
+        let buffer = u32::try_from(a.buffer).map_err(e("stage input buffer"))?;
+        out.attributes.insert(
+            i as u32,
+            StageInputAttributeDescriptor::new(
+                raw::<AttributeFormat>(a.format, "attribute format")?,
+                u32::try_from(a.offset).map_err(e("stage input offset"))?,
+                buffer,
+            ),
+        );
+        let l = d
+            .stage_layouts
+            .get(buffer as usize)
+            .ok_or("a stage input buffer past 30")?;
+        let stride = (l.stride != u64::MAX).then_some(l.stride as u32);
+        let mut layout = StageInputLayoutDescriptor::new(stride);
+        layout.step_function = raw::<StepFunction>(l.step_function, "step function")?;
+        layout.step_rate = l.step_rate as u32;
+        out.layouts.insert(buffer, layout);
+    }
+    out.index_type = raw::<IndexType>(d.stage_index_type, "stage input index type")?;
+    out.index_buffer_index = u32::try_from(d.stage_index_buffer).map_err(e("stage input index buffer"))?;
+    Ok(out)
+}
+
+pub type NmbComputePipelineDescriptor = NmbComputePipelineDescriptorOf<NmbFunction>;
+
+/// The functions of a counted handle array, each as a stage links it
+fn linked_functions<F: DescriptorFunction>(
+    functions: *const *mut F,
     count: u64,
-) -> Result<Vec<metal2vulkan::pipeline::LinkedFunction>, String> {
+) -> Result<Vec<LinkedFunction>, String> {
     if count == 0 {
         return Ok(Vec::new());
     }
@@ -1703,17 +1794,11 @@ fn linked_functions(
     }
     // SAFETY: the header's counted array of live function handles.
     let handles = unsafe { std::slice::from_raw_parts(functions, usize::try_from(count).map_err(e("linked count"))?) };
-    handles
-        .iter()
-        .map(|&f| {
-            let NmbFunction(function, specialized) = get(f)?;
-            Ok(function.linked_function().with_link_name(specialized.clone()))
-        })
-        .collect()
+    handles.iter().map(|&f| Ok(get(f)?.linked_function())).collect()
 }
 
-pub(crate) fn compute_descriptor(
-    descriptor: *const NmbComputePipelineDescriptor,
+pub(crate) fn compute_descriptor<F: DescriptorFunction>(
+    descriptor: *const NmbComputePipelineDescriptorOf<F>,
 ) -> Result<ComputePipelineDescriptor, String> {
     let d = get(descriptor)?;
     // MTLLinkedFunctions' functions and privateFunctions: the external functions the kernel calls by name (MPS's ND-array kernels
@@ -1722,7 +1807,7 @@ pub(crate) fn compute_descriptor(
     linked.functions = linked_functions(d.linked, d.linked_count)?;
     linked.private_functions = linked_functions(d.private_linked, d.private_count)?;
     let mut out = ComputePipelineDescriptor::new(StageSource::Function(
-        get(d.function)?.0.function_descriptor().with_linked(linked),
+        get(d.function)?.stage_function().with_linked(linked),
     ));
     out.max_total_threads_per_threadgroup = if d.max_threads == 0 {
         None
@@ -1733,6 +1818,9 @@ pub(crate) fn compute_descriptor(
     out.support_indirect_command_buffers = d.indirect != 0;
     out.max_call_stack_depth = u32::try_from(d.max_call_stack_depth).map_err(e("compute stack depth"))?;
     out.support_adding_binary_functions = d.adding_binary_functions != 0;
+    if d.stage_inputs != 0 {
+        out.stage_input = Some(stage_input(d)?);
+    }
     for (index, &mutability) in d.mutability.iter().enumerate() {
         if mutability != 0 {
             out.buffers.insert(
@@ -1811,9 +1899,9 @@ pub struct NmbVertexLayout {
 }
 
 #[repr(C)]
-pub struct NmbRenderPipelineDescriptor {
-    pub vertex: *mut NmbFunction,
-    pub fragment: *mut NmbFunction,
+pub struct NmbRenderPipelineDescriptorOf<F> {
+    pub vertex: *mut F,
+    pub fragment: *mut F,
     pub colors: [NmbColorAttachment; 8],
     pub depth_format: u64,
     pub stencil_format: u64,
@@ -1823,15 +1911,26 @@ pub struct NmbRenderPipelineDescriptor {
     pub vertex_inputs: u64,
     pub attributes: [NmbVertexAttribute; 31],
     pub layouts: [NmbVertexLayout; 31],
-    pub vertex_linked: *const *mut NmbFunction,
+    pub vertex_linked: *const *mut F,
     pub vertex_linked_count: u64,
-    pub vertex_private_linked: *const *mut NmbFunction,
+    pub vertex_private_linked: *const *mut F,
     pub vertex_private_count: u64,
-    pub fragment_linked: *const *mut NmbFunction,
+    pub fragment_linked: *const *mut F,
     pub fragment_linked_count: u64,
-    pub fragment_private_linked: *const *mut NmbFunction,
+    pub fragment_private_linked: *const *mut F,
     pub fragment_private_count: u64,
+    pub tessellation: u64,
+    pub max_tessellation_factor: u64,
+    pub partition_mode: u64,
+    pub factor_format: u64,
+    pub factor_step_function: u64,
+    pub winding: u64,
+    pub control_point_index_type: u64,
+    pub factor_scale_enabled: u64,
+    pub max_amplification: u64,
 }
+
+pub type NmbRenderPipelineDescriptor = NmbRenderPipelineDescriptorOf<NmbFunction>;
 
 fn optional_format(value: u64) -> Result<Option<PixelFormat>, String> {
     if value == 0 {
@@ -1897,10 +1996,10 @@ pub unsafe extern "C" fn nmb_render_pipeline_new_with_options(
 }
 
 /// A stage's MTLLinkedFunctions: its functions and privateFunctions.
-fn stage_linked(
-    functions: *const *mut NmbFunction,
+fn stage_linked<F: DescriptorFunction>(
+    functions: *const *mut F,
     count: u64,
-    private: *const *mut NmbFunction,
+    private: *const *mut F,
     private_count: u64,
 ) -> Result<LinkedFunctions, String> {
     let mut linked = LinkedFunctions::new();
@@ -1909,8 +2008,8 @@ fn stage_linked(
     Ok(linked)
 }
 
-pub(crate) fn render_descriptor(
-    descriptor: *const NmbRenderPipelineDescriptor,
+pub(crate) fn render_descriptor<F: DescriptorFunction>(
+    descriptor: *const NmbRenderPipelineDescriptorOf<F>,
 ) -> Result<RenderPipelineDescriptor, String> {
     let d = get(descriptor)?;
     let vertex_linked = stage_linked(
@@ -1920,7 +2019,7 @@ pub(crate) fn render_descriptor(
         d.vertex_private_count,
     )?;
     let mut out = RenderPipelineDescriptor::new(StageSource::Function(
-        get(d.vertex)?.0.function_descriptor().with_linked(vertex_linked),
+        get(d.vertex)?.stage_function().with_linked(vertex_linked),
     ));
     if !d.fragment.is_null() {
         let fragment_linked = stage_linked(
@@ -1930,7 +2029,7 @@ pub(crate) fn render_descriptor(
             d.fragment_private_count,
         )?;
         out.fragment = Some(StageSource::Function(
-            get(d.fragment)?.0.function_descriptor().with_linked(fragment_linked),
+            get(d.fragment)?.stage_function().with_linked(fragment_linked),
         ));
     }
     for (slot, c) in out.color_attachments.iter_mut().zip(d.colors.iter()) {
@@ -1968,7 +2067,9 @@ pub(crate) fn render_descriptor(
                 ),
             );
             if let Some(l) = d.layouts.get(a.buffer as usize) {
-                let mut layout = VertexBufferLayoutDescriptor::new(Some(l.stride as u32));
+                // MTLBufferLayoutStrideDynamic (NSUIntegerMax): the stride each bind sets
+                let stride = (l.stride != u64::MAX).then_some(l.stride as u32);
+                let mut layout = VertexBufferLayoutDescriptor::new(stride);
                 layout.step_function = raw::<VertexStepFunction>(l.step_function, "step function")?;
                 layout.step_rate = l.step_rate as u32;
                 inputs.layouts.insert(a.buffer as u32, layout);
@@ -1976,6 +2077,19 @@ pub(crate) fn render_descriptor(
         }
         out.vertex_descriptor = Some(inputs);
     }
+    if d.tessellation != 0 {
+        let mut t = TessellationDescriptor::default();
+        t.max_tessellation_factor = d.max_tessellation_factor as u32;
+        t.partition_mode = raw::<TessellationPartitionMode>(d.partition_mode, "partition mode")?;
+        t.factor_format = raw::<TessellationFactorFormat>(d.factor_format, "factor format")?;
+        t.factor_step_function = raw::<TessellationFactorStepFunction>(d.factor_step_function, "factor step")?;
+        t.output_winding_order = raw::<Winding>(d.winding, "winding")?;
+        t.control_point_index_type =
+            raw::<TessellationControlPointIndexType>(d.control_point_index_type, "control point index type")?;
+        t.factor_scale_enabled = d.factor_scale_enabled != 0;
+        out.tessellation = Some(t);
+    }
+    out.max_vertex_amplification_count = d.max_amplification.max(1) as u32;
     Ok(out)
 }
 
@@ -3456,6 +3570,7 @@ pub extern "C" fn nmb_function_new_argument_encoder(function: *mut NmbFunction, 
         Ok(boxed(NmbArgumentEncoder(
             get(function)?
                 .0
+                .runtime()?
                 .new_argument_encoder_with_buffer_index(index)
                 .map_err(e("argument encoder"))?,
         )))

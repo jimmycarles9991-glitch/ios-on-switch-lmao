@@ -392,12 +392,33 @@ def state_fields(tables: Tables, name: str) -> str:
     return corpus_fields(state_line(tables, name))[1]
 
 
+def made_of_name(tables: Tables, line: str) -> bool:
+    """Whether a Core Animation line's function constants are those this QuartzCore makes of its name.
+
+    Another build's journal names states this one makes with other constants (a memoryless index past the pass's
+    attachments, another blend function code). A name these tables do not decode, or a line that is not Core
+    Animation's, is not judged: True.
+    """
+    name, fields = corpus_fields(line)
+    if not name:
+        return True
+    try:
+        made = state_fields(tables, name)
+    except (KeyError, IndexError, ValueError):
+        return True
+    return _constants(made) == _constants(fields)
+
+
+def _constants(fields: str) -> list[str]:
+    return sorted(t for t in fields.split() if t.startswith('fc_'))
+
+
 def corpus_fields(line: str) -> tuple[str | None, str | None]:
     """Give a Core Animation corpus R line's name and its fields as state_fields gives them."""
     m = re.match(r'R ok=\d+ label=com\.apple\.coreanimation\.(\S+) (.*)$', line)
     if not m:
         return None, None
-    rest = re.sub(r' lib=\S+', '', m.group(2))
+    rest = re.sub(r' (lib|os)=\S+', '', ' ' + m.group(2))  # os=: the OS build the line was journaled under
     return m.group(1), re.sub(r'( \|)+$', '', ' '.join(rest.split()))
 
 

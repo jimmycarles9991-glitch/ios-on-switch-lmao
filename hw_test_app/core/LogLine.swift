@@ -44,7 +44,7 @@ public enum LogLine {
     public static func format(id: String, outcome: Outcome, milliseconds: Double) -> String {
         precondition(isValidID(id), "test id \(id) is not dotted [a-z0-9_]+")
         var fields = [prefix, id, outcome.verdict.rawValue]
-        fields += outcome.metrics.ordered.map { "\($0.0)=\($0.1.logText)" }
+        fields += outcome.metrics.logged.map { "\($0.0)=\($0.1.logText)" }
         if !outcome.proof.isEmpty { fields.append("hw=" + sanitized(outcome.proof)) }
         fields.append("ms=" + MetricValue.format(milliseconds, digits: 1))
         if !outcome.detail.isEmpty { fields.append("why=" + sanitized(outcome.detail)) }

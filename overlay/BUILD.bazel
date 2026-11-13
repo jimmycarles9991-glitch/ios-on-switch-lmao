@@ -5,16 +5,37 @@ package(default_visibility = ["//visibility:public"])
 
 lint_files()
 
-exports_files(["manifest.json"])
+exports_files([
+    "manifest.json",
+    "supplemental/com.brunostjohn.switch.shadercompiler.jetsam.plist",
+])
 
-# The overlay files the manifest names by their path below the kernel tree (plists, tunings), from their drivers.
+# The jetsam properties overlay iOS 27's launchd reads for our daemons in the Supplemental cryptex's LaunchDaemons, one
+# file (tools/package/jetsam_overlay.py): the shader compiler's limits, and in debug the texture peer's, which the
+# manifest stages in debug alone.
+genrule(
+    name = "jetsam_properties",
+    srcs = ["supplemental/com.brunostjohn.switch.shadercompiler.jetsam.plist"] + select({
+        "//bazel:debug": ["//hw_test_app:peer/com.brunostjohn.switch.texpeer.jetsam.plist"],
+        "//conditions:default": [],
+    }),
+    outs = ["supplemental/com.apple.jetsamproperties.cryptex.plist"],
+    cmd = "$(execpath //tools/package:jetsam_overlay) --out $@ $(SRCS)",
+    tools = ["//tools/package:jetsam_overlay"],
+)
+
+# The overlay files the manifest names by their path below the kernel tree (plists, tunings), from their drivers, and the
+# jetsam properties overlay.
 filegroup(
     name = "overlay_sources",
     srcs = [
+        ":jetsam_properties",
         "//drivers/NativeMobileDisplay:overlay_files",
         "//drivers/SwitchAppRegistration:overlay_files",
         "//drivers/SwitchAudio:overlay_files",
         "//drivers/SwitchCapture:overlay_files",
         "//drivers/SwitchJoyCon:overlay_files",
+        "//drivers/TegraGM20BMetal:overlay_files",
+        "//hw_test_app:overlay_files",
     ],
 )

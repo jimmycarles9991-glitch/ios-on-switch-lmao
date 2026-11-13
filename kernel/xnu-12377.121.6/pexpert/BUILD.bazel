@@ -5,7 +5,7 @@
 # source: add it to objects.bzl where conf/files would put it, with any flags its conf/Makefile.* entry adds.
 load("//bazel/lint:defs.bzl", "lint_files")
 load("//kernel/xnu-12377.121.6/config:xnu_objects.bzl", "xnu_objects")
-load(":objects.bzl", "DEVELOPMENT")
+load(":objects.bzl", "DEVELOPMENT", "RELEASE")
 
 package(default_visibility = ["//visibility:public"])
 
@@ -67,5 +67,6 @@ filegroup(
 xnu_objects(
     name = "objects",
     component = "pexpert",
+    release = RELEASE,
     table = DEVELOPMENT,
 )

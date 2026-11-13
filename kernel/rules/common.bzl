@@ -5,9 +5,9 @@ load("@bazel_skylib//rules:common_settings.bzl", "BuildSettingInfo")
 
 PY_TOOLCHAIN = "@rules_python//python:toolchain_type"
 
-# Every action that runs an Xcode tool: macOS only, never on a remote executor (Xcode cannot be shipped there), but
-# its results may be cached remotely (the action key includes @xcode//:identity).
-XCODE_EXECUTION = {"requires-darwin": "", "no-remote-exec": ""}
+# Every action that runs an Xcode tool: macOS only, here or on a Mac remote worker with the same Xcode at the same path
+# (the exec platform's "xcode" property; the action key includes @xcode//:identity).
+XCODE_EXECUTION = {"requires-darwin": ""}
 
 def python(ctx):
     runtime = ctx.toolchains[PY_TOOLCHAIN].py3_runtime

@@ -1,11 +1,14 @@
 # drivers/SwitchJoyCon's HID session rule (SwitchJoyConSession.h, compiled as C by its harness) on the host, and the
-# gamecontrollerd connection storm it ends, reproduced by a model of gamecontrollerd, backboardd and the rail; and which
-# rail reports reach the HID device (SwitchJoyConForward.h); what a take finds in the RX DMA ring
-# (SwitchJoyConRxRing.h); how a Joy-Con's pairing log is read (SwitchJoyConPairingSlot.h); the rail's packets and
-# pairing request against Horizon's captured attach (SwitchJoyConRailPacket.h); that the pairing opens every rail session
-# and joyconpaird hands each rail key on (SwitchJoyConRail.cpp, helper/joyconpaird.c); which game-controller
-# personalities each kernel's build adds (SwitchJoyConHID.cpp); and joyconpaird's rules for importing Horizon's staged
-# pairing dump (helper/joycon_pairing_import.h).
+# gamecontrollerd connection storm it ends, reproduced by a model of gamecontrollerd, backboardd and the rail; a
+# Joy-Con's stick calibration (SwitchJoyConStick.h), which rail reports reach the HID device (SwitchJoyConForward.h),
+# when the rail pair is a game controller in use (SwitchJoyConUse.h) and how often a Joy-Con is asked
+# (SwitchJoyConCadence.h), against a captured Joy-Con's own calibration and resting stick (switch_joycon_capture.h);
+# what a take finds in the RX DMA ring (SwitchJoyConRxRing.h); how a Joy-Con's pairing log is read
+# (SwitchJoyConPairingSlot.h); the rail's packets and pairing request against Horizon's captured attach
+# (SwitchJoyConRailPacket.h); that the pairing opens every rail session and joyconpaird hands each rail key on
+# (SwitchJoyConRail.cpp, helper/joyconpaird.c); which game-controller personalities each kernel's build adds
+# (SwitchJoyConHID.cpp); joyconpaird's rules for importing Horizon's staged pairing dump
+# (helper/joycon_pairing_import.h); and the rail probe's stages against model Joy-Cons (SwitchJoyConProbe.h).
 #
 #   bazel test //drivers/SwitchJoyCon/test:all
 load("//bazel/lint:defs.bzl", "lint_files")
@@ -34,14 +37,37 @@ host_test(
 )
 
 host_library(
-    name = "forward",
-    hdrs = ["//drivers/SwitchJoyCon:SwitchJoyConForward.h"],
+    name = "reports",
+    hdrs = [
+        "switch_joycon_capture.h",
+        "switch_joycon_fixture.h",
+        "//drivers/SwitchJoyCon:SwitchJoyConCadence.h",
+        "//drivers/SwitchJoyCon:SwitchJoyConForward.h",
+        "//drivers/SwitchJoyCon:SwitchJoyConStick.h",
+        "//drivers/SwitchJoyCon:SwitchJoyConUse.h",
+    ],
+)
+
+[host_test(
+    name = "switch_joycon_{}_test".format(name),
+    srcs = ["switch_joycon_{}_test.cpp".format(name)],
+    deps = [":reports"],
+) for name in [
+    "cadence",
+    "forward",
+    "stick",
+    "use",
+]]
+
+host_library(
+    name = "probe",
+    hdrs = ["//drivers/SwitchJoyCon:SwitchJoyConProbe.h"],
 )
 
 host_test(
-    name = "switch_joycon_forward_test",
-    srcs = ["switch_joycon_forward_test.cpp"],
-    deps = [":forward"],
+    name = "switch_joycon_probe_test",
+    srcs = ["switch_joycon_probe_test.cpp"],
+    deps = [":probe"],
 )
 
 host_library(

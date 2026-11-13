@@ -181,6 +181,12 @@
       "mangled": "__ZN25IOMobileFramebufferLegacy21setAccessibilityScaleEj",
       "doc": "SetParameter 3 (selector 68), which QuartzCore sends after its accessibility matrix: a 16.16 scale, Reduce White Point's. The family answers kIOReturnUnsupported."
     },
+    "setEdrFactor": {
+      "decl": "virtual void setEdrFactor(float factor)",
+      "pac": "_ZN25IOMobileFramebufferLegacy12setEdrFactorEf",
+      "mangled": "__ZN25IOMobileFramebufferLegacy12setEdrFactorEf",
+      "doc": "SetParameter 6 (selector 68, one value) after the family's gated action: Core Animation's SDR dimming factor f = value / 65536 as a float, 0 when EDR is off. Reached only when edrScalingEnabled is set. Apple's name is unknown (24B119 PAC 0x3b8d); translated kexts do not authenticate it. The family's default does nothing."
+    },
     "setDisplayTemperature": {
       "decl": "virtual IOReturn setDisplayTemperature(const uint32_t *temperatures)",
       "pac": "_ZN25IOMobileFramebufferLegacy21setDisplayTemperatureEPKj",
@@ -233,6 +239,11 @@
       "type": "uint32_t",
       "access": "set",
       "doc": "The mode height getDisplayDimensions returns."
+    },
+    "edrScalingEnabled": {
+      "type": "bool",
+      "access": "set",
+      "doc": "The gate the family's parameter 6 action tests before it reaches setEdrFactor; init sets it from the debug boot-arg iomfb_enable_edr_scaling only."
     }
   },
   "constants": {

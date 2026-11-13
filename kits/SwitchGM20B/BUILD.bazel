@@ -1,0 +1,167 @@
+# GM20B as the hardware describes it: NVIDIA's class headers (Mesa's vendored copy, in place) behind one umbrella header
+# per engine class, and the capability table generated from caps/*.tsv.
+#
+#   bazel test //kits/SwitchGM20B/...
+#   bazel run //kits/SwitchGM20B:caps_report
+load("@rules_cc//cc:cc_library.bzl", "cc_library")
+load("@rules_python//python:py_binary.bzl", "py_binary")
+load("@rules_python//python:py_library.bzl", "py_library")
+load("@rules_python//python:py_test.bzl", "py_test")
+load("//bazel/lint:defs.bzl", "lint_files")
+load("//kernel/rules:kernel.bzl", "kernel_headers")
+load(":defs.bzl", "SWITCH_GM20B_CAPS_INPUTS", "SWITCH_GM20B_MESA_HEADERS", "caps_args")
+
+package(default_visibility = ["//visibility:public"])
+
+# SwitchGM20BVkFormats.h is gen_vk_formats.py's output byte for byte (vk_formats_test), not formatted text
+lint_files(exclude = ["SwitchGM20BVkFormats.h"])
+
+exports_files(glob(
+    ["**"],
+    exclude = ["BUILD.bazel"],
+))
+
+filegroup(
+    name = "all_files",
+    srcs = glob(
+        ["**"],
+        exclude = ["BUILD.bazel"],
+    ),
+)
+
+# Kernel drivers: hdr_deps "kits/SwitchGM20B" and SWITCH_GM20B_INCLUDES in their flags.
+kernel_headers(extra = SWITCH_GM20B_MESA_HEADERS)
+
+cc_library(
+    name = "classes",
+    hdrs = glob(["SwitchGM20B*.h"]) + SWITCH_GM20B_MESA_HEADERS,
+    includes = ["../../third_party/mesa/src/nouveau/headers"],
+)
+
+# :classes' headers as files, for rules that take headers and -I directories of their own (the Metal plugin, ios_binary):
+# they add -I third_party/mesa/src/nouveau/headers, where NVIDIA's headers find "nvtypes.h".
+filegroup(
+    name = "class_headers",
+    srcs = glob(["SwitchGM20B*.h"]) + SWITCH_GM20B_MESA_HEADERS,
+)
+
+py_library(
+    name = "caps_lib",
+    srcs = [
+        "caps/caps.py",
+        "caps/formats.py",
+        "caps/gen_caps.py",
+    ],
+    imports = ["caps"],
+    deps = [
+        "@switch_pypi//mako",
+        "@switch_pypi//pyyaml",
+    ],
+)
+
+py_binary(
+    name = "gen_caps",
+    srcs = ["caps/gen_caps.py"],
+    main = "caps/gen_caps.py",
+    deps = [":caps_lib"],
+)
+
+genrule(
+    name = "caps_gen",
+    srcs = SWITCH_GM20B_CAPS_INPUTS,
+    outs = [
+        "SwitchGM20BCaps.h",
+        "gm20b_caps.json",
+    ],
+    cmd = "$(execpath :gen_caps) " + caps_args() + " --out-h $(execpath SwitchGM20BCaps.h) --out-json $(execpath gm20b_caps.json)",
+    tools = [":gen_caps"],
+)
+
+# The capability table: #include "kits/SwitchGM20B/SwitchGM20BCaps.h" (a kernel driver adds -I$(GENDIR)).
+cc_library(
+    name = "caps",
+    hdrs = [":SwitchGM20BCaps.h"],
+)
+
+# Rows graded below chip, and where the device's answers and the raw path's format table disagree with the table. Run
+# from the workspace, it also checks that every cited file and line exists.
+py_binary(
+    name = "caps_report",
+    srcs = ["caps/caps_report.py"],
+    data = SWITCH_GM20B_CAPS_INPUTS + [
+        "//drivers/TegraGM20BMetal:raw/runtime/raw_device_answers.h",
+        "//drivers/TegraGM20BMetal:raw/runtime/raw_gpu.cpp",
+        "//drivers/TegraGM20BMetal:raw/runtime/raw_zeta.h",
+    ],
+    main = "caps/caps_report.py",
+    deps = [":caps_lib"],
+)
+
+_VK_FORMATS_INPUTS = [
+    "//third_party/mesa:include/vulkan/vulkan_core.h",
+    "//third_party/mesa/src/vulkan/util:vk_format.c",
+] + SWITCH_GM20B_CAPS_INPUTS
+
+_VK_FORMATS_ARGS = [
+    "--vk-format $(rootpath //third_party/mesa/src/vulkan/util:vk_format.c)",
+    "--vulkan-core $(rootpath //third_party/mesa:include/vulkan/vulkan_core.h)",
+    "--classes $(rootpath //third_party/mesa/src/nouveau/headers:nvidia/classes/clb197.h)",
+    "--tegra $(rootpath SwitchGM20BTegra.h)",
+    "--nil-csv $(rootpath //third_party/mesa/src/nouveau/nil:nil_formats.csv)",
+    "--nil-gen $(rootpath //third_party/mesa/src/nouveau/nil:nil_format_table_gen.py)",
+    "--u-format $(rootpath //third_party/mesa/src/util/format:u_format.yaml)",
+]
+
+# SwitchGM20BVkFormats.h, the texture header word 0 of each VkFormat a view takes, is checked in and written by
+#   bazel run //kits/SwitchGM20B:gen_vk_formats -- --out $PWD/kits/SwitchGM20B/SwitchGM20BVkFormats.h
+py_binary(
+    name = "gen_vk_formats",
+    srcs = ["caps/gen_vk_formats.py"],
+    args = _VK_FORMATS_ARGS,
+    data = _VK_FORMATS_INPUTS,
+    main = "caps/gen_vk_formats.py",
+    deps = [":caps_lib"],
+)
+
+py_test(
+    name = "vk_formats_test",
+    srcs = ["caps/gen_vk_formats.py"],
+    args = _VK_FORMATS_ARGS + ["--check $(rootpath SwitchGM20BVkFormats.h)"],
+    data = _VK_FORMATS_INPUTS + ["SwitchGM20BVkFormats.h"],
+    main = "caps/gen_vk_formats.py",
+    deps = [":caps_lib"],
+)
+
+# Every method each class takes on GM20B (caps/gen_methods.py): SwitchGM20BMethods.h, which host tests check pushes and
+# macros against, and the emulator's method log names methods with.
+py_library(
+    name = "methods_lib",
+    srcs = ["caps/gen_methods.py"],
+    imports = ["caps"],
+)
+
+py_binary(
+    name = "gen_methods",
+    srcs = ["caps/gen_methods.py"],
+    main = "caps/gen_methods.py",
+)
+
+genrule(
+    name = "methods_gen",
+    srcs = [
+        "caps/limits.tsv",
+        "SwitchGM20BTegra.h",
+        "//third_party/mesa/src/nouveau/headers:class_parser.py",
+    ] + SWITCH_GM20B_MESA_HEADERS,
+    outs = ["SwitchGM20BMethods.h"],
+    cmd = "$(execpath :gen_methods) --classes $$(dirname $(execpath //third_party/mesa/src/nouveau/headers:nvidia/classes/clb197.h)) " +
+          "--class-parser $(execpath //third_party/mesa/src/nouveau/headers:class_parser.py) " +
+          "--tegra $(execpath SwitchGM20BTegra.h) --limits $(execpath caps/limits.tsv) --out $@",
+    tools = [":gen_methods"],
+)
+
+# #include "kits/SwitchGM20B/SwitchGM20BMethods.h"
+cc_library(
+    name = "methods",
+    hdrs = [":SwitchGM20BMethods.h"],
+)

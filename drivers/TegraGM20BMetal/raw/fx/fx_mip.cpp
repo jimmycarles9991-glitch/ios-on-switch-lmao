@@ -4,6 +4,7 @@
 // nvc0_2d_texture_set / nvc0_blit_eng2d, nvc0_screen.c's 2D init (MIT).
 #include "fx_mip.h"
 
+#include "../../../../kits/SwitchGM20B/SwitchGM20B.h"
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
@@ -15,49 +16,51 @@ namespace {
 
 // FERMI_TWOD_A (cl902d.h)
 enum : uint32_t {
-    TWOD_WAIT_FOR_IDLE = 0x0110,
+    TWOD_WAIT_FOR_IDLE = NV902D_WAIT_FOR_IDLE,
     TWOD_SET_DST_FORMAT =
-        0x0200,  // +4 MEMORY_LAYOUT, +8 BLOCK_SIZE, +c DEPTH, +10 LAYER, +14 PITCH, +18 WIDTH, +1c HEIGHT,
-                 // +20 OFFSET_UPPER, +24 OFFSET_LOWER
+        NV902D_SET_DST_FORMAT,  // +4 MEMORY_LAYOUT, +8 BLOCK_SIZE, +c DEPTH, +10 LAYER, +14 PITCH, +18 WIDTH, +1c HEIGHT,
+                                // +20 OFFSET_UPPER, +24 OFFSET_LOWER
     TWOD_SET_SRC_FORMAT =
-        0x0230,  // +4 MEMORY_LAYOUT, +8 BLOCK_SIZE, +c DEPTH, (+10 is TWOD_INVALIDATE_TEXTURE_DATA_CACHE),
-                 // +14 PITCH, +18 WIDTH, +1c HEIGHT, +20 OFFSET_UPPER, +24 OFFSET_LOWER
-    TWOD_INVALIDATE_TEXTURE_DATA_CACHE = 0x0240,
-    TWOD_SET_NUM_PROCESSING_CLUSTERS = 0x0260,
-    TWOD_SET_RENDER_ENABLE_C = 0x026c,
-    TWOD_SET_CLIP_ENABLE = 0x0290,
-    TWOD_SET_COLOR_KEY_ENABLE = 0x029c,
-    TWOD_SET_OPERATION = 0x02ac,
-    TWOD_SET_DST_COLOR_RENDER_TO_ZETA_SURFACE = 0x02b8,
-    TWOD_SET_PIXELS_FROM_MEMORY_CORRAL_SIZE = 0x0884,
-    TWOD_SET_PIXELS_FROM_MEMORY_SAFE_OVERLAP = 0x0888,
-    TWOD_SET_PIXELS_FROM_MEMORY_SAMPLE_MODE = 0x088c,
-    TWOD_SET_PIXELS_FROM_MEMORY_DST_X0 = 0x08b0,       // X0, Y0, WIDTH, HEIGHT
-    TWOD_SET_PIXELS_FROM_MEMORY_DU_DX_FRAC = 0x08c0,   // DU_DX_FRAC, DU_DX_INT, DV_DY_FRAC, DV_DY_INT
-    TWOD_SET_PIXELS_FROM_MEMORY_SRC_X0_FRAC = 0x08d0,  // SRC_X0_FRAC, SRC_X0_INT, SRC_Y0_FRAC, SRC_Y0_INT (the launch)
+        NV902D_SET_SRC_FORMAT,  // +4 MEMORY_LAYOUT, +8 BLOCK_SIZE, +c DEPTH, (+10 is TWOD_INVALIDATE_TEXTURE_DATA_CACHE),
+                                // +14 PITCH, +18 WIDTH, +1c HEIGHT, +20 OFFSET_UPPER, +24 OFFSET_LOWER
+    TWOD_INVALIDATE_TEXTURE_DATA_CACHE = NV902D_TWOD_INVALIDATE_TEXTURE_DATA_CACHE,
+    TWOD_SET_NUM_PROCESSING_CLUSTERS = NV902D_SET_NUM_PROCESSING_CLUSTERS,
+    TWOD_SET_RENDER_ENABLE_C = NV902D_SET_RENDER_ENABLE_C,
+    TWOD_SET_CLIP_ENABLE = NV902D_SET_CLIP_ENABLE,
+    TWOD_SET_COLOR_KEY_ENABLE = NV902D_SET_COLOR_KEY_ENABLE,
+    TWOD_SET_OPERATION = NV902D_SET_OPERATION,
+    TWOD_SET_DST_COLOR_RENDER_TO_ZETA_SURFACE = NV902D_SET_DST_COLOR_RENDER_TO_ZETA_SURFACE,
+    TWOD_SET_PIXELS_FROM_MEMORY_CORRAL_SIZE = NV902D_SET_PIXELS_FROM_MEMORY_CORRAL_SIZE,
+    TWOD_SET_PIXELS_FROM_MEMORY_SAFE_OVERLAP = NV902D_SET_PIXELS_FROM_MEMORY_SAFE_OVERLAP,
+    TWOD_SET_PIXELS_FROM_MEMORY_SAMPLE_MODE = NV902D_SET_PIXELS_FROM_MEMORY_SAMPLE_MODE,
+    TWOD_SET_PIXELS_FROM_MEMORY_DST_X0 = NV902D_SET_PIXELS_FROM_MEMORY_DST_X0,  // X0, Y0, WIDTH, HEIGHT
+    TWOD_SET_PIXELS_FROM_MEMORY_DU_DX_FRAC =
+        NV902D_SET_PIXELS_FROM_MEMORY_DU_DX_FRAC,  // DU_DX_FRAC, DU_DX_INT, DV_DY_FRAC, DV_DY_INT
+    TWOD_SET_PIXELS_FROM_MEMORY_SRC_X0_FRAC =
+        NV902D_SET_PIXELS_FROM_MEMORY_SRC_X0_FRAC,  // SRC_X0_FRAC, SRC_X0_INT, SRC_Y0_FRAC, SRC_Y0_INT (the launch)
 };
 
 enum : uint32_t {
-    LAYOUT_BLOCKLINEAR = 0,
-    LAYOUT_PITCH = 1
+    LAYOUT_BLOCKLINEAR = NV902D_SET_DST_MEMORY_LAYOUT_V_BLOCKLINEAR,
+    LAYOUT_PITCH = NV902D_SET_DST_MEMORY_LAYOUT_V_PITCH
 };
 
 enum : uint32_t {
-    SAMPLE_CENTER = 0,
-    FILTER_POINT = 0,
-    FILTER_BILINEAR = 1u << 4
+    SAMPLE_CENTER = NVDEF(NV902D, SET_PIXELS_FROM_MEMORY_SAMPLE_MODE, ORIGIN, CENTER),
+    FILTER_POINT = NVDEF(NV902D, SET_PIXELS_FROM_MEMORY_SAMPLE_MODE, FILTER, POINT),
+    FILTER_BILINEAR = NVDEF(NV902D, SET_PIXELS_FROM_MEMORY_SAMPLE_MODE, FILTER, BILINEAR)
 };
 
 enum : uint32_t {
-    OPERATION_SRCCOPY = 3,
-    RENDER_ENABLE_TRUE = 1,
-    TEXCACHE_L1 = 0
+    OPERATION_SRCCOPY = NV902D_SET_OPERATION_V_SRCCOPY,
+    RENDER_ENABLE_TRUE = NV902D_SET_RENDER_ENABLE_C_MODE_TRUE,
+    TEXCACHE_L1 = NVDEF(NV902D, TWOD_INVALIDATE_TEXTURE_DATA_CACHE, V, L1_ONLY)
 };
 
 // MAXWELL_B (clb197.h), as raw_gpu.cpp names them
 enum : uint32_t {
-    M3D_WAIT_FOR_IDLE = 0x0110,
-    M3D_INVALIDATE_TEXTURE_DATA_CACHE_NO_WFI = 0x1288
+    M3D_WAIT_FOR_IDLE = NVB197_WAIT_FOR_IDLE,
+    M3D_INVALIDATE_TEXTURE_DATA_CACHE_NO_WFI = NVB197_INVALIDATE_TEXTURE_DATA_CACHE_NO_WFI
 };
 
 constexpr uint32_t kSubc2D = SUBC_2D, kSubc3D = SUBC_3D;
@@ -125,6 +128,13 @@ constexpr size_t kBeginWords = 2, kEndWords = 2, kStepWaitWords = 1;
 uint64_t ratio(uint32_t from, uint32_t to)
 {
     return (uint64_t(from) << 32) / to;
+}
+
+// The source origin of a scaled step of `step` (32.32) as `sampling` reads it, two's complement where it is negative
+uint64_t origin(const Sampling &sampling, uint64_t step)
+{
+    const int64_t half = int64_t(1) << 31;
+    return uint64_t(int64_t(sampling.halfDu) * int64_t(step / 2) + int64_t(sampling.halfTexel) * half);
 }
 
 }  // namespace
@@ -261,10 +271,15 @@ void mipChainTic(const MipChain &c, uint64_t va, uint32_t tic0, bool srgb, uint3
 
 uint32_t twodFormat(uint32_t mtl)
 {
-    // formats whose 2D-engine filtering is plain per-component unorm/float arithmetic, as Vulkan's linear blit does. The sRGB
-    // forms (BGRA8Unorm_sRGB 81 -> A8RL8GL8BL8 0xd0, RGBA8Unorm_sRGB 71 -> A8BL8GL8RL8 0xd6) are left out: nothing shows the 2D
-    // engine filters them in linear space as Metal does. They and the other formats are the 3D engine's (raw_mip.h).
+    // formats whose 2D-engine filtering is plain per-component unorm/float arithmetic, as Vulkan's linear blit does, and the
+    // sRGB forms, which it decodes before it filters and encodes after, as Metal does: gpu.x1.twod_scale's 2:1 bilinear cells
+    // bgra8srgb and rgba8srgb are within one code of the texture unit's linear-space filtering at every texel (637 by one),
+    // where filtering the codes would put all 4,096 of them 2-62 codes off. The other formats are the 3D engine's (raw_mip.h).
     switch (mtl) {
+    case 81:
+        return 0xd0;  // BGRA8Unorm_sRGB -> A8RL8GL8BL8
+    case 71:
+        return 0xd6;  // RGBA8Unorm_sRGB -> A8BL8GL8RL8
     case 80:
         return 0xcf;  // BGRA8Unorm -> A8R8G8B8
     case 70:
@@ -322,11 +337,8 @@ void emitGenerate(Push &p, const MipChain &c, uint64_t chainVa, const Pitch *lev
         surface(p, TWOD_SET_DST_FORMAT, fmt2d, true, d.yLog2, 0, d.width, d.height, chainVa + d.offset);
         surface(p, TWOD_SET_SRC_FORMAT, fmt2d, true, s.yLog2, 0, s.width, s.height, chainVa + s.offset);
         const uint64_t du = ratio(s.width, d.width), dv = ratio(s.height, d.height);
-        // the source origin as `sampling` reads it (32.32, two's complement where it is negative)
-        const int64_t half = int64_t(1) << 31;
-        const uint64_t sx = uint64_t(int64_t(sampling.halfDu) * int64_t(du / 2) + int64_t(sampling.halfTexel) * half),
-                       sy = uint64_t(int64_t(sampling.halfDu) * int64_t(dv / 2) + int64_t(sampling.halfTexel) * half);
-        blit(p, FILTER_BILINEAR, 0, 0, d.width, d.height, du, dv, sx, sy, sampling.corner ? 1u : SAMPLE_CENTER);
+        blit(p, FILTER_BILINEAR, 0, 0, d.width, d.height, du, dv, origin(sampling, du), origin(sampling, dv),
+             sampling.corner ? 1u : SAMPLE_CENTER);
     }
     end(p);
 }

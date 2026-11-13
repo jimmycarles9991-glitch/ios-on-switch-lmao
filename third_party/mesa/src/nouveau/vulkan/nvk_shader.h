@@ -142,21 +142,39 @@ struct nvk_shader {
 VK_DEFINE_NONDISP_HANDLE_CASTS(nvk_shader, vk.base, VkShaderEXT,
                                VK_OBJECT_TYPE_SHADER_EXT);
 
+/* The tile coalescer's conflict detection for an interlocked fragment shader
+ * that `per_sample` runs one pass per sample (SET_HYBRID_ANTI_ALIAS_CONTROL
+ * passes = samples), whether the pipeline's sample shading or a SampleId read
+ * asks for it: sample, never pixel. Upstream's note had pixel detection fault
+ * the GPU under the pipeline's sample shading; on GM20B m2v's per-sample
+ * fetch, a SampleId read under pixel detection, is the draw whose channel
+ * dies with DATA_ERROR INVALID_A_A_COMBINATION03 (gpu.m2v.msaa_fetch). Sample
+ * detection orders each sample's invocations, not the pixel's.
+ */
+static inline enum nak_fs_interlock_mode
+nvk_fs_interlock_mode(enum nak_fs_interlock_mode mode, bool per_sample)
+{
+   return per_sample && mode == NAK_FS_INTERLOCK_MODE_PIXEL ?
+          NAK_FS_INTERLOCK_MODE_SAMPLE : mode;
+}
+
 extern const struct vk_device_shader_ops nvk_device_shader_ops;
+
+#include "nvk_switch_target.h"
 
 uint64_t
 nvk_physical_device_compiler_flags(const struct nvk_physical_device *pdev);
 
 nir_address_format
-nvk_ubo_addr_format(const struct nvk_physical_device *pdev,
+nvk_ubo_addr_format(const struct nv_device_info *info,
                     const struct vk_pipeline_robustness_state *rs);
 nir_address_format
-nvk_ssbo_addr_format(const struct nvk_physical_device *pdev,
-                     const struct vk_pipeline_robustness_state *rs);
+nvk_ssbo_addr_format(const struct vk_pipeline_robustness_state *rs);
 
 bool
 nvk_nir_lower_descriptors(nir_shader *nir,
-                          const struct nvk_physical_device *pdev,
+                          const struct nv_device_info *info,
+                          bool edb_buffer_views,
                           VkShaderCreateFlagsEXT shader_flags,
                           const struct vk_pipeline_robustness_state *rs,
                           uint32_t set_layout_count,
@@ -170,6 +188,10 @@ VkResult
 nvk_compile_nir_shader(struct nvk_device *dev, nir_shader *nir,
                        const VkAllocationCallbacks *alloc,
                        struct nvk_shader **shader_out);
+
+VkResult
+nvk_shader_fill_push(struct nvk_device *dev, struct nvk_shader *shader,
+                     const VkAllocationCallbacks *pAllocator);
 
 uint32_t mesa_to_nv9097_shader_type(mesa_shader_stage stage, bool has_task_shader);
 uint32_t nvk_pipeline_bind_group(mesa_shader_stage stage, bool has_task_shader);

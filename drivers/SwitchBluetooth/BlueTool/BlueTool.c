@@ -27,7 +27,14 @@
 // which registers the apps a deploy changed. For that the stand-in has no sandbox profile (the original's
 // com.apple.private.sandbox.profile:embedded "BlueTool" would refuse the spawn); it touches nothing but its XPC
 // listener and those spawns. Children are not waited for (SIGCHLD ignored): joyconpaird runs for the boot and keeps a
-// single instance itself, and switch-appregd ends once it has applied the deploy's journal.
+// single instance itself, and switch-appregd ends once it has applied the deploy's journal. It starts the system shader
+// compiler, /usr/libexec/SwitchShaderCompiler (../../TegraGM20BMetal/compiler), as soon as it runs and again at each chip
+// boot (one still running keeps its lock and the new one exits), as an interactive daemon: a compile runs at the class of
+// the GPU client waiting on it. It gives it the compiler's jetsam band and limits (SwitchShaderCompilerJetsam.h), which a
+// child spawned without them lacks: it would sit in JETSAM_PRIORITY_DEFAULT (180, above backboardd) with the system's
+// task limit. It watches each compiler it starts and starts it again when one dies (killed, or a
+// failing exit), up to the kernel's three losses (SwitchGpuShaderCompilerPolicy.h kLosses); an exit of 0 is one that
+// found another running or declined, and is left alone.
 //
 // iOS 27 sandboxes it either way. Without a seatbelt profile the kernel applies the original's learned autobox profile
 // ("apply-protobox", keyed by the executable name), so the 27 build carries the original's seatbelt-profiles
@@ -37,15 +44,22 @@
 #include <dispatch/dispatch.h>
 #include <errno.h>
 #include <notify.h>
+#include <os/lock.h>
 #include <os/log.h>
 #include <signal.h>
 #include <spawn.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <string.h>
+#include <sys/event.h>
 #include <sys/sysctl.h>
+#include <sys/wait.h>
+#include <time.h>
 #include <unistd.h>
 #include <xpc/xpc.h>
+#if SWITCH_BLUETOOL_STARTS_HELPERS
+#include "../../TegraGM20BMetal/compiler/SwitchShaderCompilerJetsam.h"
+#endif
 
 // Public on macOS, private (but exported by libxpc and used by every iOS daemon) on iOS.
 extern xpc_connection_t
@@ -57,6 +71,18 @@ static const char kFirmware[] = "CYW4356A3_001.004.009.0092.0095.hcd";  // nx-fi
 #if SWITCH_BLUETOOL_STARTS_HELPERS
 static const char kPairingAgent[] = "/usr/libexec/joyconpaird";
 static const char kAppRegistration[] = "/usr/libexec/switch-appregd";
+static const char kShaderCompiler[] = "/usr/libexec/SwitchShaderCompiler";
+// compiler_service.mm: the compiler started with it set says nothing starts it again
+static const char kShaderCompilerLastStart[] = "SWITCH_SHADER_COMPILER_LAST_START";
+
+// libsystem_kernel (spawn_private.h) and xnu's bsd/sys/spawn_internal.h POSIX_SPAWN_PROC_TYPE_DAEMON_INTERACTIVE: a daemon
+// whose threads may run at the class of the client threads waiting on it, as launchd's ProcessType Interactive
+extern int posix_spawnattr_setprocesstype_np(posix_spawnattr_t *attr, const int type);
+static const int kDaemonInteractive = 0x400;
+// spawn_private.h; flags: xnu's spawn_internal.h POSIX_SPAWN_JETSAM_MEMLIMIT_INACTIVE_FATAL, the active limit soft
+extern int posix_spawnattr_setjetsam_ext(posix_spawnattr_t *attr, short flags, int priority, int memlimit_active,
+                                         int memlimit_inactive);
+static const short kInactiveLimitFatal = 0x08;
 #endif
 
 extern char **environ;
@@ -76,6 +102,82 @@ static void startHelper(const char *path, bool *reported)
     const int error = posix_spawn(&pid, path, NULL, NULL, argv, environ);
     if (error)
         os_log_error(OS_LOG_DEFAULT, "BlueTool: %{public}s not started: %d", path, error);
+}
+
+// As launchd's KeepAlive, the compiler is started again whenever it dies, but for a crash loop: three deaths in a row each
+// within launchd's throttle interval of its start. The start that could be the loop's last tells the kernel nothing
+// starts it again, so the kernel ends what waits on it when it dies (SwitchGpuShaderCompilerPolicy.h).
+static const int kCompilerDeaths = 3;
+static const uint64_t kCompilerThrottleNs = 10ull * NSEC_PER_SEC;
+static int compilerDeaths;
+static uint64_t compilerStartedNs;
+
+static void startShaderCompiler(void);
+
+// The child's exit, from a kqueue the main queue reads when it fires: its wait status comes with it (NOTE_EXITSTATUS, as
+// its parent), whatever SIGCHLD's disposition reaps. A child gone before the watch is set is left alone.
+static void watchShaderCompiler(pid_t pid)
+{
+    const int kq = kqueue();
+    if (kq < 0)
+        return;
+    struct kevent watch;
+    EV_SET(&watch, pid, EVFILT_PROC, EV_ADD | EV_ONESHOT, NOTE_EXIT | NOTE_EXITSTATUS, 0, NULL);
+    if (kevent(kq, &watch, 1, NULL, 0, NULL) < 0) {
+        close(kq);
+        return;
+    }
+    dispatch_source_t exited =
+        dispatch_source_create(DISPATCH_SOURCE_TYPE_READ, (uintptr_t)kq, 0, dispatch_get_main_queue());
+    dispatch_source_set_event_handler(exited, ^{
+        struct kevent event;
+        const struct timespec none = {0, 0};
+        if (kevent(kq, NULL, 0, &event, 1, &none) != 1)
+            return;
+        dispatch_source_cancel(exited);
+        const int status = (int)event.data;
+        if (WIFEXITED(status) && WEXITSTATUS(status) == 0)
+            return;
+        const bool quick = clock_gettime_nsec_np(CLOCK_MONOTONIC) - compilerStartedNs < kCompilerThrottleNs;
+        compilerDeaths = quick ? compilerDeaths + 1 : 0;
+        os_log_error(OS_LOG_DEFAULT, "BlueTool: %{public}s (pid %d) died (status 0x%x), death %d of %d",
+                     kShaderCompiler, pid, status, compilerDeaths, kCompilerDeaths);
+        startShaderCompiler();
+    });
+    dispatch_source_set_cancel_handler(exited, ^{
+        close(kq);
+    });
+    dispatch_resume(exited);
+}
+
+static void startShaderCompiler(void)
+{
+    if (compilerDeaths >= kCompilerDeaths)
+        return;
+    char *argv[] = {(char *)kShaderCompiler, NULL};
+    posix_spawnattr_t attributes;
+    pid_t pid;
+    const bool last = compilerDeaths == kCompilerDeaths - 1;
+    if (last)
+        setenv(kShaderCompilerLastStart, "1", 1);
+    int error = posix_spawnattr_init(&attributes);
+    if (!error) {
+        error = posix_spawnattr_setprocesstype_np(&attributes, kDaemonInteractive);
+        if (!error)
+            error = posix_spawnattr_setjetsam_ext(
+                &attributes, kInactiveLimitFatal, SWITCH_SHADER_COMPILER_JETSAM_PRIORITY,
+                SWITCH_SHADER_COMPILER_ACTIVE_LIMIT_MB, SWITCH_SHADER_COMPILER_INACTIVE_LIMIT_MB);
+        if (!error)
+            error = posix_spawn(&pid, kShaderCompiler, NULL, &attributes, argv, environ);
+        posix_spawnattr_destroy(&attributes);
+    }
+    if (last)
+        unsetenv(kShaderCompilerLastStart);
+    compilerStartedNs = clock_gettime_nsec_np(CLOCK_MONOTONIC);
+    if (error)
+        os_log_error(OS_LOG_DEFAULT, "BlueTool: %{public}s not started: %d", kShaderCompiler, error);
+    else
+        watchShaderCompiler(pid);
 }
 
 // The pairing agent, after a chip-boot request has been answered (see the file comment): at every one, so a bluetoothd
@@ -143,6 +245,53 @@ static void watchColumnScan(const char *name, int blockHeightLog2)
 }
 #endif
 
+#if SWITCH_DEBUG && SWITCH_BLUETOOL_STARTS_HELPERS
+// Debug builds: HW Test's second process for shared textures (hw_test_app/peer/texpeer.mm). The sandboxed app can start no
+// process, so it sends {kMsgId: "SwitchTexturePeer", endpoint: its anonymous listener's}; this starts the peer and keeps
+// the endpoint until that process asks for it ({kMsgId: "SwitchTexturePeerEndpoint"}), then the peer connects to the app.
+extern pid_t ios_xpc_connection_get_pid(xpc_connection_t connection) __asm__("_xpc_connection_get_pid");
+
+static const char kTexturePeer[] = "/usr/bin/switch-texpeer";
+static os_unfair_lock gPeerLock = OS_UNFAIR_LOCK_INIT;
+static xpc_object_t gPeerEndpoint;
+static pid_t gPeerPid;
+
+static void startTexturePeer(xpc_object_t message, xpc_object_t reply)
+{
+    xpc_object_t endpoint = xpc_dictionary_get_value(message, "endpoint");
+    int error = endpoint && xpc_get_type(endpoint) == XPC_TYPE_ENDPOINT ? 0 : EINVAL;
+    pid_t pid = 0;
+    os_unfair_lock_lock(&gPeerLock);
+    if (!error) {
+        char *argv[] = {(char *)kTexturePeer, NULL};
+        error = posix_spawn(&pid, kTexturePeer, NULL, NULL, argv, environ);
+    }
+    if (!error) {
+        if (gPeerEndpoint)
+            xpc_release(gPeerEndpoint);
+        gPeerEndpoint = xpc_retain(endpoint);
+        gPeerPid = pid;
+    }
+    os_unfair_lock_unlock(&gPeerLock);
+    os_log(OS_LOG_DEFAULT, "BlueTool: texture peer %{public}s: %d (pid %d)", kTexturePeer, error, pid);
+    xpc_dictionary_set_int64(reply, "result", error);
+    xpc_dictionary_set_int64(reply, "pid", pid);
+}
+
+static void giveTexturePeerEndpoint(xpc_connection_t peer, xpc_object_t reply)
+{
+    os_unfair_lock_lock(&gPeerLock);
+    const bool started = gPeerEndpoint && ios_xpc_connection_get_pid(peer) == gPeerPid;
+    if (started) {
+        xpc_dictionary_set_value(reply, "endpoint", gPeerEndpoint);
+        xpc_release(gPeerEndpoint);
+        gPeerEndpoint = NULL;
+    }
+    os_unfair_lock_unlock(&gPeerLock);
+    xpc_dictionary_set_int64(reply, "result", started ? 0 : EPERM);
+}
+#endif
+
 #if SWITCH_DEBUG
 // Debug builds: the GPU's clock gating off and on again for a frame-time A/B within one boot (drivers/TegraGM20B
 // debug.switch_gpu_clkgate), once per Darwin notification the Mac posts
@@ -173,11 +322,19 @@ static void answer(xpc_connection_t peer, xpc_object_t message)
         xpc_dictionary_set_int64(reply, "manufacturer", 0);
         xpc_dictionary_set_string(reply, "firmware", kFirmware);
     }
+#if SWITCH_DEBUG && SWITCH_BLUETOOL_STARTS_HELPERS
+    if (id && !strcmp(id, "SwitchTexturePeer"))
+        startTexturePeer(message, reply);
+    if (id && !strcmp(id, "SwitchTexturePeerEndpoint"))
+        giveTexturePeerEndpoint(peer, reply);
+#endif
     xpc_connection_send_message(peer, reply);
     xpc_release(reply);
 #if SWITCH_BLUETOOL_STARTS_HELPERS
-    if (id && !strcmp(id, "RunBuiltinScript"))
+    if (id && !strcmp(id, "RunBuiltinScript")) {
         startPairingAgent();
+        startShaderCompiler();
+    }
 #endif
 }
 
@@ -186,6 +343,7 @@ int main(void)
     // "-R" (server mode) is the only way launchd runs it; arguments are ignored.
     signal(SIGCHLD, SIG_IGN);  // the helpers are never waited for
 #if SWITCH_BLUETOOL_STARTS_HELPERS
+    startShaderCompiler();
     static bool appRegistrationReported;
     startHelper(kAppRegistration, &appRegistrationReported);
 #endif

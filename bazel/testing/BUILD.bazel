@@ -3,7 +3,7 @@
 # (source_text.h), and checks in C test code reported through GoogleTest (c_check.h).
 load("@rules_cc//cc:cc_library.bzl", "cc_library")
 load("//bazel/lint:defs.bzl", "lint_files")
-load(":defs.bzl", "host_library")
+load(":defs.bzl", "host_library", "host_test")
 
 package(default_visibility = ["//visibility:public"])
 
@@ -27,4 +27,9 @@ host_library(
     srcs = ["c_check.cpp"],
     hdrs = ["c_check.h"],
     deps = ["@googletest//:gtest"],
+)
+
+host_test(
+    name = "source_text_test",
+    srcs = ["source_text_test.cpp"],
 )

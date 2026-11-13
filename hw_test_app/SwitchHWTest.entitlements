@@ -10,7 +10,65 @@
 	</array>
 	<key>platform-application</key>
 	<true/>
+	<key>com.apple.frontboard.launchapplications</key>
+	<true/>
+	<key>com.apple.private.memorystatus</key>
+	<true/>
 	<key>com.apple.private.security.container-required</key>
 	<true/>
+	<key>com.apple.security.exception.mach-lookup.global-name</key>
+	<array>
+		<string>com.apple.BlueTool</string>
+	</array>
+	<key>com.apple.security.exception.files.absolute-path.read-write</key>
+	<array>
+		<string>/private/var/mobile/Media/Switch/benchloop/</string>
+	</array>
+	<key>com.apple.security.exception.sysctl.read-only</key>
+	<array>
+		<string>kern.switch_planes_flips</string>
+		<string>kern.switch_planes_latched</string>
+		<string>kern.switch_planes_maps</string>
+		<string>kern.switch_planes_dropped</string>
+		<string>kern.switch_joycon</string>
+		<string>kern.switch_gpu_paths</string>
+		<string>kern.switch_gpu_promises</string>
+		<string>kern.a64x.images</string>
+		<string>kern.a64x.images_native</string>
+		<string>kern.a64x.images_marked</string>
+		<string>kern.a64x.text_pages</string>
+		<string>kern.a64x.stub_words</string>
+		<string>kern.a64x.stub_mismatch</string>
+		<string>kern.a64x.traps</string>
+		<string>kern.a64x.traps_unhandled</string>
+		<string>kern.switch_flips_completion</string>
+		<string>kern.switch_flips_gate</string>
+		<string>kern.switch_flips_lead_us</string>
+		<string>kern.switch_flips_withdrawn</string>
+		<string>kern.switch_flips_refused</string>
+		<string>kern.switch_flips_filter</string>
+		<string>kern.switch_flips_filter_lead_us</string>
+		<string>kern.switch_flips_filter_declined</string>
+		<string>kern.switch_media_flips_completion</string>
+		<string>kern.switch_media_flips_withdrawn</string>
+		<string>kern.switch_media_flips_refused</string>
+		<string>kern.switch_media_flips_lead_us</string>
+		<string>kern.switch_media_flips_armed</string>
+		<string>kern.switch_media_flips_filter</string>
+		<string>kern.switch_media_flips_filter_declined</string>
+		<string>debug.switch_display_dc_host1x_class</string>
+		<string>debug.switch_joycon_probe</string>
+		<string>kern.switch_scanout_cpu</string>
+		<string>kern.switch_scanout_unshown</string>
+		<string>kern.switch_scanout_vic</string>
+		<string>kern.switch_scanout_vic_up</string>
+		<string>kern.memorystatus_level</string>
+		<string>kern.switch_shader_compiler</string>
+	</array>
+	<key>com.apple.security.exception.sysctl.read-write</key>
+	<array>
+		<string>debug.switch_display_dc_host1x_class</string>
+		<string>debug.switch_joycon_probe</string>
+	</array>
 </dict>
 </plist>

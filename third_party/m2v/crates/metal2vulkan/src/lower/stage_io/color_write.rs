@@ -118,7 +118,10 @@ pub(crate) fn plan(cx: &mut SelectCx<'_>, color: u32, f: Form) {
     let mut selected = None;
     for (slot, rule) in lanes.iter_mut().zip(rules).take(usize::from(f.lanes)) {
         let Some(rule) = rule else { continue };
-        half_nans |= color_writes::half_float(rule) && !metal_nans && !half;
+        half_nans |= color_writes::half_float(rule)
+            && !metal_nans
+            && !half
+            && !(rule == color_writes::HALF && stores_half(cx, f.float_fmt(), half || storage));
         if metal && rule == color_writes::HALF {
             continue;
         }
@@ -192,9 +195,12 @@ pub(crate) fn plan(cx: &mut SelectCx<'_>, color: u32, f: Form) {
         ]);
     }
     cx.families.stage_io.color_properties.extend(relied);
-    let rounds = lanes
-        .iter()
-        .any(|l| matches!(l, Some(color_write::Lane::Rounded(_))));
+    let rounds = lanes.iter().any(|l| {
+        matches!(
+            l,
+            Some(color_write::Lane::Rounded(_) | color_write::Lane::StoreCode(_))
+        )
+    });
     // The color table, once: its buffer counts in the stage's limits.
     if lanes.contains(&Some(color_write::Lane::Rounded(ChannelWrite::Srgb)))
         && cx.families.arith.color_table.is_none()
@@ -250,11 +256,17 @@ fn lane(
     use color_write::Lane;
     let takes = |d| !own && cx.profile.takes_driver_deviation(d);
     match rule {
+        rule if rule == color_writes::HALF && stores_half(cx, Some(fmt), own) => {
+            Some(Lane::NanAs(QUIET_NAN))
+        }
         ChannelWrite::FloatTowardZero { signed, .. }
             if fmt == FloatFmt::F32 && takes(DriverDeviation::MetalSmallFloatColorWrites) =>
         {
             relied.insert(VkProperty::MetalSmallFloatColorWrites);
             (!signed || metal_nans).then_some(Lane::NanAs(QUIET_NAN))
+        }
+        ChannelWrite::Unorm { bits } if stores_unorm_code(cx, own, bits) => {
+            Some(Lane::StoreCode(bits))
         }
         ChannelWrite::Unorm { bits: 16 } | ChannelWrite::Snorm { bits: 16, .. }
             if takes(DriverDeviation::MetalNorm16ColorWrites) =>
@@ -287,7 +299,7 @@ fn selected_lane(
         _ => match lane(cx, color_writes::HALF, fmt, (metal_nans, own), relied) {
             Some(Lane::Rounded(_)) => HalfLane::Rounded,
             Some(Lane::NanAs(bits)) => HalfLane::NanAs(bits),
-            Some(Lane::Selected { .. }) | None => HalfLane::AsComputed,
+            Some(Lane::StoreCode(_) | Lane::Selected { .. }) | None => HalfLane::AsComputed,
         },
     };
     let bit = |code: u32| 1u8 << code;
@@ -303,7 +315,26 @@ fn selected_lane(
             false => bit(color_writes::HALF_CODE),
         },
     };
-    (Lane::Selected { half }, write)
+    let store_code = stores_unorm_code(cx, own, 8);
+    (Lane::Selected { half, store_code }, write)
+}
+
+/// Whether a `float` output variable's lane to a half-float channel that rounds toward zero
+/// ([`color_writes::HALF`]) is written as computed, its NaN as the rounding's `0x7fc00000`: the
+/// device's store makes Metal's half of it (`NativeShaderTarget::stores_half_toward_zero`). Not
+/// where the function writes the output itself (`own`).
+fn stores_half(cx: &SelectCx<'_>, fmt: Option<FloatFmt>, own: bool) -> bool {
+    fmt == Some(FloatFmt::F32)
+        && !own
+        && cx.profile.fields().native_target.stores_half_toward_zero()
+}
+
+/// Whether a lane of an output variable to an `bits`-bit unorm channel is written for the
+/// device's store to make Metal's code ([`color_write::Lane::StoreCode`]): not where the function
+/// writes the output itself (`own`), as a storage texel or a half's bits, which no color store
+/// converts.
+fn stores_unorm_code(cx: &SelectCx<'_>, own: bool, bits: u8) -> bool {
+    !own && cx.profile.fields().native_target.stores_unorm_code(bits)
 }
 
 /// Whether the device stores the NaN of a fragment function's output of form `f` to a

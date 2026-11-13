@@ -3,23 +3,13 @@
 #include <string.h>
 #include "TegraGM20BExecSurfaces.h"
 #include "TegraGM20BFences.h"
+#include "TegraGM20BJobABI.h"
 
 namespace tgm_fences
 {
 namespace
 {
 constexpr uint32_t kFirstCapacity = 64;
-constexpr int kNoSpace = -28;  // gpu.c's errno values are Linux's: ENOSPC
-
-void unqueued(int error)
-{
-	static bool logged;
-	if (__atomic_exchange_n(&logged, true, __ATOMIC_RELAXED))
-		return;
-	IOLog("tegra-gm20b: ExecSurfaces: a listed surface's writer is not waited for (%d: %s)\n",
-	      error,
-	      error == kNoSpace ? "the channel has its most acquires queued" : "no fence view");
-}
 }  // namespace
 
 bool ExecSurfaces::reserve()
@@ -106,7 +96,102 @@ bool ExecSurfaces::valid(const TegraGM20BAbiExecSurfaces *in)
 	return true;
 }
 
+bool ExecSurfaces::validSubmit(const TegraGM20BAbiSubmit *in, uint32_t bytes, bool addressed)
+{
+	if (bytes < sizeof(*in) || (!addressed && bytes > TegraGM20BMaxSubmitBytes) ||
+	    in->push_count > uint32_t(addressed ? TegraGM20BMaxJobPushes : TegraGM20BMaxPushes) ||
+	    in->surface_count >
+		    uint32_t(addressed ? TegraGM20BMaxJobUses : TegraGM20BMaxExecSurfaces) ||
+	    (in->surface_flags &
+	     ~static_cast<uint32_t>(TegraGM20BExecSurfacesAll |
+				    (addressed ? uint32_t(TegraGM20BSubmitVisibilityExplicit |
+							  TegraGM20BSubmitExternalVisibility |
+							  TegraGM20BSubmitHasEvents |
+							  TegraGM20BSubmitAdmissionBegin |
+							  TegraGM20BSubmitAdmissionContinue |
+							  TegraGM20BSubmitAdmissionEnd |
+							  TegraGM20BSubmitAdmissionCancel |
+							  TegraGM20BSubmitEventReleases)
+					       : 0u))) ||
+	    ((in->surface_flags & TegraGM20BSubmitEventReleases) &&
+	     !(in->surface_flags & TegraGM20BSubmitHasEvents)) ||
+	    ((in->surface_flags & TegraGM20BSubmitExternalVisibility) &&
+	     !(in->surface_flags & TegraGM20BSubmitVisibilityExplicit)) ||
+	    ((in->surface_flags & TegraGM20BSubmitVisibilityExplicit) &&
+	     (in->surface_flags & TegraGM20BExecSurfacesAll)))
+		return false;
+	auto expected = sizeof(*in) + in->push_count * sizeof(TegraGM20BAbiPush) +
+			in->surface_count * sizeof(TegraGM20BAbiSurfaceUse);
+
+	constexpr uint32_t admissionMask =
+		TegraGM20BSubmitAdmissionBegin | TegraGM20BSubmitAdmissionContinue |
+		TegraGM20BSubmitAdmissionEnd | TegraGM20BSubmitAdmissionCancel;
+	const uint32_t admissionFlags = in->surface_flags & admissionMask;
+	if (admissionFlags) {
+		const bool begin = admissionFlags & TegraGM20BSubmitAdmissionBegin;
+		const bool next = admissionFlags & TegraGM20BSubmitAdmissionContinue;
+		const bool cancel = admissionFlags & TegraGM20BSubmitAdmissionCancel;
+		if ((cancel &&
+		     (admissionFlags != TegraGM20BSubmitAdmissionCancel || in->push_count ||
+		      in->surface_count || (in->surface_flags & TegraGM20BSubmitHasEvents))) ||
+		    (!cancel && begin == next) ||
+		    bytes < expected + sizeof(TegraGM20BAbiSubmitAdmission))
+			return false;
+		const auto *admission = reinterpret_cast<const TegraGM20BAbiSubmitAdmission *>(
+			reinterpret_cast<const uint8_t *>(in) + expected);
+		if (!admission->cookie || admission->reserved)
+			return false;
+		expected += sizeof(*admission);
+	}
+	if (in->surface_flags & TegraGM20BSubmitHasEvents) {
+		if (bytes < expected + sizeof(TegraGM20BAbiSubmitEvents))
+			return false;
+		const auto *events = reinterpret_cast<const TegraGM20BAbiSubmitEvents *>(
+			reinterpret_cast<const uint8_t *>(in) + expected);
+		if (events->reserved || events->wait_count > TegraGM20BMaxJobEvents ||
+		    events->signal_count > TegraGM20BMaxJobEvents - events->wait_count)
+			return false;
+		expected += sizeof(*events) + (events->wait_count + events->signal_count) *
+						      sizeof(TegraGM20BAbiEventUse);
+		if (in->surface_flags & TegraGM20BSubmitEventReleases)
+			expected += events->signal_count * sizeof(TegraGM20BAbiSignalRelease);
+		if (bytes != expected)
+			return false;
+		const auto *records = reinterpret_cast<const TegraGM20BAbiEventUse *>(events + 1);
+		for (uint32_t i = 0; i < events->wait_count + events->signal_count; ++i)
+			if (!records[i].handle)
+				return false;
+	}
+	if (bytes != expected)
+		return false;
+	const auto *pushes = reinterpret_cast<const TegraGM20BAbiPush *>(in + 1);
+	const auto *uses =
+		reinterpret_cast<const TegraGM20BAbiSurfaceUse *>(pushes + in->push_count);
+	for (uint32_t i = 0; i < in->surface_count; i++) {
+		const uint32_t allowed =
+			TegraGM20BSurfaceRead | TegraGM20BSurfaceWrite |
+			(addressed ? uint32_t(TegraGM20BSurfaceGpuAddress | TegraGM20BSurfaceRange)
+				   : 0u) |
+			((in->surface_flags & TegraGM20BSubmitVisibilityExplicit)
+				 ? uint32_t(TegraGM20BSurfaceHostWritten)
+				 : 0u);
+		const bool ranged = uses[i].access & TegraGM20BSurfaceRange;
+		if (!(uses[i].access & (TegraGM20BSurfaceRead | TegraGM20BSurfaceWrite)) ||
+		    (ranged ? !(uses[i].access & TegraGM20BSurfaceGpuAddress) || !uses[i].reserved
+			    : uses[i].reserved != 0) ||
+		    (uses[i].access & ~allowed))
+			return false;
+	}
+	return true;
+}
+
 bool ExecSurfaces::set(uint32_t slot, const TegraGM20BAbiExecSurfaces *in)
+{
+	return set(slot, in->uses, in->count, in->flags);
+}
+
+bool ExecSurfaces::set(uint32_t slot, const TegraGM20BAbiSurfaceUse *uses, uint32_t count,
+		       uint32_t flags)
 {
 	if (slot >= kChannels)
 		return false;
@@ -117,19 +202,36 @@ bool ExecSurfaces::set(uint32_t slot, const TegraGM20BAbiExecSurfaces *in)
 			return false;
 	}
 	l->given = true;
-	l->count = in->count;
-	l->flags = in->flags;
+	l->count = count;
+	l->flags = flags;
 	l->writes = 0;
-	for (uint32_t i = 0; i < in->count; i++) {
-		l->handles[i] = in->uses[i].handle;
-		if (in->uses[i].access & TegraGM20BSurfaceWrite)
+	l->reads = 0;
+	for (uint32_t i = 0; i < count; i++) {
+		l->handles[i] = uses[i].handle;
+		if (uses[i].access & TegraGM20BSurfaceWrite)
 			l->writes |= static_cast<uint64_t>(1) << i;
+		if (uses[i].access & TegraGM20BSurfaceRead)
+			l->reads |= static_cast<uint64_t>(1) << i;
 	}
 	return true;
 }
 
+uint32_t ExecSurfaces::listedAccess(uint64_t handle) const
+{
+	uint32_t access = 0;
+	for (uint32_t i = 0; taken_ && i < taken_->count; i++) {
+		if (taken_->handles[i] != handle)
+			continue;
+		if ((taken_->writes >> i) & 1)
+			access |= TegraGM20BSurfaceWrite;
+		if ((taken_->reads >> i) & 1)
+			access |= TegraGM20BSurfaceRead;
+	}
+	return access;
+}
+
 // The writers of other channels, merged per channel into at most TGM_ORDER_MAX at a time (as many acquires as a submission
-// can queue), then handed to gpu.c under one hold of its lock.
+// can queue), then handed to gpu_sync.c under one hold of its lock.
 int ExecSurfaces::follow(tgm_chan *chan, const List &list)
 {
 	const uint32_t self = tgm_chan_uid(chan);
@@ -163,7 +265,7 @@ int ExecSurfaces::follow(tgm_chan *chan, const List &list)
 	return ret;
 }
 
-bool ExecSurfaces::before(uint32_t slot, tgm_chan *chan, uint32_t pushes)
+int ExecSurfaces::before(uint32_t slot, tgm_chan *chan, uint32_t pushes, bool dependencies)
 {
 	List *l = slot < kChannels ? lists_[slot] : nullptr;
 	const bool given = (l != nullptr) && l->given;
@@ -173,8 +275,10 @@ bool ExecSurfaces::before(uint32_t slot, tgm_chan *chan, uint32_t pushes)
 	if (!tgm_fence_listed(static_cast<int>(given), given ? l->flags : 0, pushes))
 		return false;
 	taken_ = l;
-	if (const int ret = follow(chan, *l))
-		unqueued(ret);
+	if (const int ret = dependencies ? follow(chan, *l) : 0) {
+		taken_ = nullptr;
+		return ret;
+	}
 	return true;
 }
 

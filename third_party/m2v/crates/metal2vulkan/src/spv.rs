@@ -5865,6 +5865,7 @@ pub enum Decoration {
     Binding = 33,
     DescriptorSet = 34,
     Offset = 35,
+    FPRoundingMode = 39,
     #[cfg(test)]
     FPFastMathMode = 40,
     NoContraction = 42,
@@ -5972,6 +5973,13 @@ impl std::ops::BitOr for FPFastMathMode {
     fn bitor(self, other: Self) -> Self {
         Self(self.0 | other.0)
     }
+}
+
+/// SPIR-V's `FPRoundingMode`, by its grammar values.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[repr(u32)]
+pub enum FPRoundingMode {
+    RTE = 0,
 }
 
 /// SPIR-V's `GlslStd450Op`, by its grammar values.

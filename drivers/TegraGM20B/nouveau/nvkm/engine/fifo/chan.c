@@ -229,14 +229,15 @@ nvkm_chan_error(struct nvkm_chan *chan, bool preempt)
 	unsigned long flags;
 
 	spin_lock_irqsave(&chan->lock, flags);
-	if (atomic_inc_return(&chan->errored) == 1) {
+	if (atomic_cmpxchg(&chan->errored, 0, 1) == 0) {
 		CHAN_ERROR(chan, "errored - disabling channel");
 		nvkm_chan_block_locked(chan);
 		if (preempt)
 			chan->func->preempt(chan);
-		nvkm_event_ntfy(&chan->cgrp->runl->chid->event, chan->id, NVKM_CHAN_EVENT_ERRORED);
 	}
 	spin_unlock_irqrestore(&chan->lock, flags);
+	if (preempt)
+		nvkm_runl_rc_cgrp(chan->cgrp);
 }
 
 void

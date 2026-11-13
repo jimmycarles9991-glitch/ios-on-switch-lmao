@@ -7,6 +7,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <string>
 
 namespace raw {
 
@@ -21,6 +22,24 @@ inline bool appleGpuBinary(const uint8_t *head, size_t bytes)
     memcpy(&magic, head, 4);
     memcpy(&cpu, head + 4, 4);
     return magic == kMachMagic64 && cpu == kAppleGpuCpuType;
+}
+
+// A file m2v's binary archive wrote ("M2VBARCH", metal2vulkan-runtime binary_archive/container.rs): it holds nothing of this
+// device's (raw_archive_keys.h archiveFile)
+inline bool m2vArchive(const uint8_t *head, size_t bytes)
+{
+    return bytes >= 8 && !memcmp(head, "M2VBARCH", 8);
+}
+
+// A file's path as an archive inventory names it: on the OS volume, whichever cryptex mount or /var link it was opened through
+inline std::string inventoryPath(std::string path)
+{
+    for (const char *mount : {"/System/Cryptexes/OS/", "/private/preboot/Cryptexes/OS/"})
+        if (path.rfind(mount, 0) == 0)
+            path.erase(0, strlen(mount) - 1);
+    if (path.rfind("/var/", 0) == 0)
+        path.insert(0, "/private");
+    return path;
 }
 
 }  // namespace raw

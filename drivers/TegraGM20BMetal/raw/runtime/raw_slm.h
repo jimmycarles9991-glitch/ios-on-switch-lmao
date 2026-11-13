@@ -50,10 +50,13 @@ inline bool headerIsStage(const std::vector<uint8_t> &image, bool pixel)
     return (w0 & 0x1f) == (pixel ? 2u : 1u) && ((w0 >> 10) & 0xf) == (pixel ? 5u : 1u);
 }
 
-// A kernel's QMD (QMDV01_07): SHADER_LOCAL_MEMORY_LOW_SIZE 1463:1440, HIGH_SIZE 1495:1472, CRS_SIZE 1527:1504
-constexpr uint64_t slmPerWarpOfQmd(const uint32_t qmd[64])
+// A kernel's QMD (QMDV01_07): SHADER_LOCAL_MEMORY_LOW_SIZE 1463:1440, HIGH_SIZE 1495:1472, CRS_SIZE 1527:1504. Read
+// bytewise: the packed pack records hold their QMDs at even offsets (PackKernel's at 18).
+inline uint64_t slmPerWarpOfQmd(const void *qmd)
 {
-    return slmPerWarp((qmd[45] & 0xffffff) | uint64_t(qmd[46] & 0xffffff) << 32, qmd[47] & 0xffffff);
+    uint32_t w[3];
+    memcpy(w, static_cast<const uint8_t *>(qmd) + 45 * sizeof(uint32_t), sizeof w);
+    return slmPerWarp((w[0] & 0xffffff) | uint64_t(w[1] & 0xffffff) << 32, w[2] & 0xffffff);
 }
 
 struct SlmArea {

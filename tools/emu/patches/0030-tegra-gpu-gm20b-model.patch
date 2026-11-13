@@ -1,5 +1,5 @@
 diff --git a/hw/arm/tegra2/meson.build b/hw/arm/tegra2/meson.build
-index 9852ea9..7e5251c 100644
+index 0154807..b966cd3 100644
 --- a/hw/arm/tegra2/meson.build
 +++ b/hw/arm/tegra2/meson.build
 @@ -43,6 +43,10 @@ arm_ss.add(files(
@@ -15,10 +15,10 @@ index 9852ea9..7e5251c 100644
    'apb/fuse/fuse.c',
 diff --git a/hw/arm/tegra2/ahb/gpu/gm20b.h b/hw/arm/tegra2/ahb/gpu/gm20b.h
 new file mode 100644
-index 0000000..675e407
+index 0000000..f4d450b
 --- /dev/null
 +++ b/hw/arm/tegra2/ahb/gpu/gm20b.h
-@@ -0,0 +1,114 @@
+@@ -0,0 +1,115 @@
 +/*
 + * NVIDIA GM20B (Tegra X1 GPU) model: shared state of gpu.c, gm20b_falcon.c, gm20b_mmu.c and gm20b_fifo.c.
 + *
@@ -36,7 +36,7 @@ index 0000000..675e407
 +#define GM20B_REGS_BYTES     0x1000000
 +#define GM20B_BAR1_OFFSET    0x1000000
 +#define GM20B_BAR_BYTES      0x2000000
-+#define GM20B_CHANNELS       2048
++#define GM20B_CHANNELS       512
 +#define GM20B_SUBCHANNELS    8
 +
 +enum { GM20B_PMU, GM20B_FECS, GM20B_GPCCS, GM20B_FALCONS };
@@ -127,6 +127,7 @@ index 0000000..675e407
 +void gm20b_bar1_rw(tegra_gpu *s, uint64_t offset, uint64_t *value, unsigned size, bool write);
 +
 +void gm20b_fifo_reset(tegra_gpu *s);
++uint32_t gm20b_fifo_intr0(tegra_gpu *s);
 +bool gm20b_fifo_read(tegra_gpu *s, hwaddr offset, uint32_t *value);
 +bool gm20b_fifo_write(tegra_gpu *s, hwaddr offset, uint32_t value);
 +void gm20b_fifo_kick(tegra_gpu *s);
@@ -769,10 +770,10 @@ index 0000000..116cb49
 +}
 diff --git a/hw/arm/tegra2/ahb/gpu/gm20b_fifo.c b/hw/arm/tegra2/ahb/gpu/gm20b_fifo.c
 new file mode 100644
-index 0000000..a7eaf1d
+index 0000000..f2b4d44
 --- /dev/null
 +++ b/hw/arm/tegra2/ahb/gpu/gm20b_fifo.c
-@@ -0,0 +1,455 @@
+@@ -0,0 +1,464 @@
 +/*
 + * NVIDIA GM20B host (PFIFO, one PBDMA): runlists, channels, GPFIFO and pushbuffer parsing, host methods, the copy
 + * engine, and the method log.
@@ -1159,6 +1160,12 @@ index 0000000..a7eaf1d
 +    timer_del(s->host_poll);
 +}
 +
++/* MMU_FAULT is not a latch: it stays set while any unit's MMU_FAULT_ID bit does (nouveau's handler clears only those). */
++uint32_t gm20b_fifo_intr0(tegra_gpu *s)
++{
++    return GM20B_REG(s, 0x002100) | (GM20B_REG(s, 0x00259c) ? PFIFO_INTR_MMU_FAULT : 0);
++}
++
 +bool gm20b_fifo_read(tegra_gpu *s, hwaddr offset, uint32_t *value)
 +{
 +    if (offset >= CCSR(0) && offset < CCSR(GM20B_CHANNELS)) {
@@ -1166,6 +1173,9 @@ index 0000000..a7eaf1d
 +        return true;
 +    }
 +    switch (offset) {
++    case 0x002100:
++        *value = gm20b_fifo_intr0(s);
++        return true;
 +    case 0x002284: /* runlist 0 info: never pending */
 +    case 0x00228c:
 +        *value = GM20B_REG(s, offset) & ~(1u << 20);
@@ -1230,7 +1240,7 @@ index 0000000..a7eaf1d
 +}
 diff --git a/hw/arm/tegra2/ahb/gpu/gm20b_mmu.c b/hw/arm/tegra2/ahb/gpu/gm20b_mmu.c
 new file mode 100644
-index 0000000..c7690fb
+index 0000000..926b6e4
 --- /dev/null
 +++ b/hw/arm/tegra2/ahb/gpu/gm20b_mmu.c
 @@ -0,0 +1,174 @@
@@ -1252,8 +1262,9 @@ index 0000000..c7690fb
 + *  PTE: bit 0 valid, 1 privileged, 2 read-only, address >> 8 in 31:4, bit 32 volatile, 34:33 aperture, kind 43:36.
 + *       An invalid PTE with only the volatile bit is sparse on GM20x: reads return zero, writes are dropped.
 + * There is no TLB: invalidates have nothing to drop, so a stale-translation bug cannot show here.
-+ * A fault fills the unit's NV_PFIFO_INTR_MMU_FAULT_* record (instance, VA, type/client/access), sets its bit in
-+ * MMU_FAULT_ID and PFIFO_INTR_0 MMU_FAULT; a record that is still pending is kept, as the hardware keeps the first.
++ * A fault fills the unit's NV_PFIFO_INTR_MMU_FAULT_* record (instance, VA, type/client/access) and sets its bit in
++ * MMU_FAULT_ID, which PFIFO_INTR_0 MMU_FAULT reflects; a record that is still pending is kept, as the hardware keeps
++ * the first.
 + */
 +
 +#include "tegra_common.h"
@@ -1294,7 +1305,6 @@ index 0000000..c7690fb
 +    GM20B_REG(s, rec + 0x8) = va >> 32;
 +    GM20B_REG(s, rec + 0xc) = type | (write ? 0x80 : 0) | 0x40 /* hub */ | (a->client << 8);
 +    GM20B_REG(s, 0x00259c) |= 1u << a->unit;
-+    GM20B_REG(s, 0x002100) |= PFIFO_INTR_MMU_FAULT;
 +    gm20b_update_irqs(s);
 +}
 +
@@ -1409,7 +1419,7 @@ index 0000000..c7690fb
 +    *value = ldq_le_p(buf) & (size == 8 ? ~0ull : (1ull << (size * 8)) - 1);
 +}
 diff --git a/hw/arm/tegra2/ahb/gpu/gpu.c b/hw/arm/tegra2/ahb/gpu/gpu.c
-index 2f05a53..f122627 100644
+index 2f05a53..22e3964 100644
 --- a/hw/arm/tegra2/ahb/gpu/gpu.c
 +++ b/hw/arm/tegra2/ahb/gpu/gpu.c
 @@ -1,5 +1,5 @@
@@ -1419,7 +1429,7 @@ index 2f05a53..f122627 100644
   *
   * Copyright (c) yellows8
   *
-@@ -17,606 +17,317 @@
+@@ -17,606 +17,324 @@
   *  with this program; if not, see <http://www.gnu.org/licenses/>.
   */
  
@@ -1686,7 +1696,7 @@ index 2f05a53..f122627 100644
 -        }
 -    }
 +    uint32_t stall = 0, nonstall = 0;
-+    uint32_t fifo = GM20B_REG(s, PFIFO_INTR_0) & GM20B_REG(s, PFIFO_INTR_EN_0);
++    uint32_t fifo = gm20b_fifo_intr0(s) & GM20B_REG(s, PFIFO_INTR_EN_0);
 +
 +    if (fifo)
 +        stall |= MC_INTR_FIFO;
@@ -2015,6 +2025,9 @@ index 2f05a53..f122627 100644
 +    case 0x13701c: /* GPCPLL_NDIV_SLOWDOWN: a dynamic ramp is done at once */
 +        GM20B_REG(s, 0x1328a0) |= 1u << 24;
 +        break;
++    case 0x404170: /* FE_PWR_MODE: a requested power mode (REQ, bit 4) is reached at once */
++        GM20B_REG(s, offset) = value & ~0x10u;
++        break;
 +    case 0x17e8c8: /* LTC CBC_CTRL1: clear, clean and invalidate are done */
 +        GM20B_REG(s, offset) = value & ~0x7u;
 +        break;
@@ -2201,6 +2214,10 @@ index 2f05a53..f122627 100644
 +    GM20B_REG(s, 0x022430) = 0x1;        /* TOP_NUM_GPCS */
 +    GM20B_REG(s, 0x022434) = 0x2;        /* TOP_TPC_PER_GPC */
 +    GM20B_REG(s, 0x022438) = 0x1;        /* TOP_NUM_FBPS */
++    /* PBDMAs in bits 7:0 (gm200_fifo_runq_nr) and channels (gm200_fifo_chid_nr): GM20B has one PBDMA and 512 channels
++     * (nvgpu hw_fifo_gm20b.h fifo_pbdma_status__size_1_v, hw_ccsr_gm20b.h ccsr_channel__size_1_v) */
++    GM20B_REG(s, 0x002004) = 1;
++    GM20B_REG(s, 0x002008) = GM20B_CHANNELS;
 +    GM20B_REG(s, 0x409604) = 0x00010001; /* GR: 1 GPC, 1 ROP */
 +    GM20B_REG(s, 0x502608) = 0x2;        /* GPC0: 2 TPCs */
 +    GM20B_REG(s, 0x17e280) = 0x22000004; /* CBC_PARAM: 2 slices, 2 KiB lines, 4 comptags a line */

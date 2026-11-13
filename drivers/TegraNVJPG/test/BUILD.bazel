@@ -5,7 +5,7 @@
 #   request_host_test   the AppleJPEGDriver decode request's translation and refusals (request_host.c)
 #   tegra_nvjpg_vendored_test  the vendored firmware and NVIDIA headers are the files their SOURCE files name
 load("//bazel/lint:defs.bzl", "lint_files")
-load("//bazel/testing:defs.bzl", "host_library", "host_test")
+load("//bazel/testing:defs.bzl", "host_library", "host_shims", "host_test")
 
 lint_files()
 
@@ -60,4 +60,52 @@ host_test(
         "//drivers/TegraNVJPG:nvidia/cle7d0.h",
         "//drivers/TegraNVJPG:nvidia/nvjpg_drv.h",
     ],
+)
+
+host_shims(
+    name = "gate_kernel",
+    headers = [
+        "IOKit/IOLib.h",
+        "IOKit/IOLocks.h",
+        "IOKit/IOBufferMemoryDescriptor.h",
+        "kern/clock.h",
+        "kern/thread.h",
+        "kern/thread_call.h",
+        "os/log.h",
+    ],
+    stubs = "switch_nvjpg_gate_stubs.h",
+)
+
+# TegraNVJPG.cpp against a model of the engine: a job after the idle power-off powers the partition on, boots and
+# proves the falcon and runs; a job past its bound is cancelled (channel torn down, engine reset and rebooted) and the
+# next job runs; an engine the reset does not bring back refuses the next job.
+host_test(
+    name = "switch_nvjpg_gate_test",
+    srcs = [
+        "switch_nvjpg_gate_test.cpp",
+        "//drivers/TegraHost1x:TegraHost1x.h",
+        "//drivers/TegraNVJPG:TegraNVJPG.h",
+        "//drivers/TegraNVJPG:TegraNVJPGJpeg.h",
+        "//drivers/TegraNVJPG:nvidia/cle7d0.h",
+        "//drivers/TegraNVJPG:nvidia/nvjpg_drv.h",
+        "//drivers/TegraSMMU:TegraSMMU.h",
+        "//drivers/TegraSMMU:TegraSMMUDomain.h",
+        "//kits/SwitchCAR:SwitchCAR.h",
+        "//kits/SwitchCAR:SwitchEngineClock.h",
+        "//kits/SwitchCAR:SwitchEngineClockPlan.h",
+        "//kits/SwitchCAR:SwitchPMC.h",
+        "//kits/SwitchDMA:SwitchDMABuffer.h",
+        "//kits/SwitchDMA:SwitchDcache.h",
+        "//kits/SwitchDMA:SwitchHwPage.h",
+        "//kits/SwitchEngineGate:SwitchEngineGate.h",
+        "//kits/SwitchEngineGate:SwitchEngineGateKernel.h",
+        "//kits/SwitchEngineGate:SwitchEnginePower.h",
+        "//kits/SwitchFalcon:SwitchFalcon.h",
+        "//kits/SwitchMath:SwitchMath.h",
+        "//kits/SwitchMMIO:SwitchMMIO.h",
+        "//kits/SwitchMMIO:SwitchMMIOKernel.h",
+        "//kits/SwitchTime:SwitchTime.h",
+    ],
+    additional_compiler_inputs = ["//drivers/TegraNVJPG:TegraNVJPG.cpp"],
+    deps = [":gate_kernel"],
 )

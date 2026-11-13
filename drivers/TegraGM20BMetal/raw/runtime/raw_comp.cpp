@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MIT
 // Compressed memory for the raw path's memoryless attachments (raw_comp.h)
+#include "raw_lock.h"
 #include "raw_comp.h"
 
 #include <os/log.h>
@@ -8,6 +9,7 @@
 #include <chrono>
 #include <cstddef>
 #include <cstring>
+#include "../fx/fx_image.h"
 #include "raw_follow.h"
 #include "raw_gpu.h"
 #include "raw_zeta.h"
@@ -21,7 +23,8 @@ os_log_t compLog()
     return log;
 }
 
-// A memoryless attachment's backing layout as Device::backing makes it: the zeta's, or one block-linear level of colour
+// A memoryless attachment's backing layout as Device::backing makes it: the zeta's, or one block-linear level of colour at
+// its sample count (plainBacking's)
 bool backingLayout(const Texture &m, Texture &t, fx::MipChain &c, uint64_t &bytes)
 {
     t = Texture();
@@ -30,12 +33,14 @@ bool backingLayout(const Texture &m, Texture &t, fx::MipChain &c, uint64_t &byte
         return zetaShape(m.width, m.height, m.format, m.samples, t, bytes, align);
     }
     const FormatInfo *f = formatInfo(m.format);
-    if (!f || !fx::mipChainLayout(m.width, m.height, 1, m.bpp, c))
+    if (!f || !(m.samples > 1 ? fx::msLayout(m.width, m.height, m.samples, m.bpp, c)
+                              : fx::mipChainLayout(m.width, m.height, 1, m.bpp, c)))
         return false;
     t.width = m.width;
     t.height = m.height;
     t.format = m.format;
     t.bpp = m.bpp;
+    t.samples = m.samples;
     t.renderable = f->rt != 0;
     t.pitch = c.level[0].rowBytes;
     t.blockLinear = true;
@@ -78,17 +83,23 @@ int Kernel::bindCompressed(Bo &bo, uint32_t kind)
     return KERN_SUCCESS;
 }
 
-uint32_t Device::compKind(const Texture &m, uint32_t tag, bool blockLinear) const
+uint32_t Device::compKind(const Texture &m, bool blockLinear, bool copied) const
 {
-    if (m.zeta && m.format != kZetaFormat)  // ZF32_X24S8_2CSZV is D32S8's layout alone
+    bool zetaProbe = false;
+#if SWITCH_RAW_DIAGNOSTICS
+    zetaProbe = probeZetaKinds.load(std::memory_order_relaxed);
+#endif
+#if !defined(SWITCH_DEBUG) || SWITCH_DEBUG
+    if (probePlainMemory.load(std::memory_order_relaxed))
         return 0;
-    return backingKind((k_.info().flags & TegraGM20BInfoCompression) != 0, blockLinear, m.zeta, m.bpp, m.samples, tag,
-                       kMemorylessTag);
+#endif
+    return backingKind((k_.info().flags & TegraGM20BInfoCompression) != 0, blockLinear, m.zeta ? m.format : 0, m.bpp,
+                       std::max<uint32_t>(m.samples, 1), copied, zetaProbe);
 }
 
 void Device::compAsk(const CompWant &w)
 {
-    if (comp_.asked(w, commitCount_))
+    if (comp_.asked(w, commits()))
         return;
     comp_.wanted.push_back(w);
     compStart();
@@ -101,9 +112,9 @@ void Device::compStart()
             pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0);
             pthread_setname_np("com.brunostjohn.switch.raw.comp");
             followers().join();  // it binds under lock_, which the committer's render thread waits for
-            std::unique_lock<std::mutex> l(lock_);
+            std::unique_lock<raw::Mutex> l(lock_);
             const auto asked = [&] {
-                return stopping_ || !comp_.wanted.empty() || compRearm_;
+                return stopping_ || !comp_.wanted.empty() || compRearm_ || zbc_.pending();
             };
             for (;;) {
                 // what a process that commits nothing stopped using goes when it turns stale, not at its next commit
@@ -115,10 +126,27 @@ void Device::compStart()
                     return;
                 compRearm_ = false;
                 compMake(l);
+                zbcMake(l);
                 trimBackings();
             }
         });
     compWake_.notify_one();
+}
+
+void Device::compPrearm(const Texture &m)
+{
+    if (m.samples < 2)
+        return;
+    std::lock_guard<raw::Mutex> l(lock_);
+    const uint32_t kind = compKind(m, kMemorylessTag, true);
+    Texture t;
+    fx::MipChain c;
+    uint64_t bytes = 0;
+    if (!kind || !backingLayout(m, t, c, bytes))
+        return;
+    const uint64_t need = compBytes(bytes);
+    if (comp_.fit(need, kind) == comp_.ready.end())
+        compAsk({compClassBytes(need), kind});
 }
 
 Device::Backing *Device::compBacking(const Texture &m, uint32_t tag, uint32_t kind)
@@ -134,13 +162,16 @@ Device::Backing *Device::compBacking(const Texture &m, uint32_t tag, uint32_t ki
         auto it = comp_.fit(need, kind);
         if (it == comp_.ready.end()) {
             compAsk({compClassBytes(need), kind});
+            RAW_DIAGNOSTIC(stats.compMisses++);
             return nullptr;
         }
         comp_.mems.push_back(std::make_unique<CompMem>(CompMem{it->bo, kind, tag, 0}));
         mem = comp_.mems.back().get();
         comp_.ready.erase(it);
+        backingsChanged();
     }
     t.va = mem->bo.va;
+    t.storage = {t.va, bytes, false};
     t.comptags = true;
     if (!m.zeta) {
         const FormatInfo *f = formatInfo(m.format);
@@ -156,43 +187,52 @@ Device::Backing *Device::compBacking(const Texture &m, uint32_t tag, uint32_t ki
     b->comp = mem;
     b->usedNs = compClock();
     mem->views++;
-    stats.compViews++;
+    RAW_DIAGNOSTIC(stats.compViews++);
+#if SWITCH_RAW_DIAGNOSTICS
     if (!comp_.loggedOn) {
         comp_.loggedOn = true;
         os_log(compLog(), "raw: compression on: first backing %ux%u format %u kind 0x%x (%llu KiB)", t.width, t.height,
                t.format, kind, (unsigned long long)(mem->bo.bytes >> 10));
     }
+#endif
     return b;
 }
 
-void Device::compMake(std::unique_lock<std::mutex> &l)
+void Device::compMake(std::unique_lock<raw::Mutex> &l)
 {
     while (!comp_.wanted.empty() && !stopping_) {
         const CompWant w = comp_.wanted.front();
         Bo bo;
         l.unlock();
+#if SWITCH_RAW_DIAGNOSTICS
         const auto start = std::chrono::steady_clock::now();
+#endif
         int kr = k_.allocCompressible(w.bytes, bo);
         const bool made = kr == KERN_SUCCESS;
+#if SWITCH_RAW_DIAGNOSTICS
         const auto us =
             std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - start).count();
+#endif
         l.lock();
         comp_.wanted.erase(std::find(comp_.wanted.begin(), comp_.wanted.end(), w));
         if (made && (kr = k_.bindCompressed(bo, w.kind)) == KERN_SUCCESS) {
+            set_.add(k_, bo, TegraGM20BSurfaceWrite);
             comp_.made(w);
-            comp_.ready.push_back({bo, w.kind, commitCount_, compClock()});
-            stats.compMade++;
-            stats.compHeld++;
-            stats.compHeldBytes += bo.bytes;
-            os_log_debug(compLog(), "raw: compressed memory %llu KiB kind 0x%x made in %lld us",
-                         (unsigned long long)(w.bytes >> 10), w.kind, (long long)us);
+            comp_.ready.push_back({bo, w.kind, commits(), compClock()});
+            backingsChanged();
+            RAW_DIAGNOSTIC(stats.compMade++);
+            RAW_DIAGNOSTIC(stats.compHeld++);
+            RAW_DIAGNOSTIC(stats.compHeldBytes += bo.bytes);
+            RAW_DIAGNOSTIC(glassMemEvent("compressed memory made", bo.bytes));
+            RAW_DIAGNOSTIC(os_log_debug(compLog(), "raw: compressed memory %llu KiB kind 0x%x made in %lld us",
+                                        (unsigned long long)(w.bytes >> 10), w.kind, (long long)us));
             continue;
         }
         if (made)
             k_.free(bo);
-        stats.compFailed++;
+        RAW_DIAGNOSTIC(stats.compFailed++);
         const bool lasting = compLasting(kr);
-        if (comp_.refuse(w, commitCount_, lasting))
+        if (comp_.refuse(w, commits(), lasting))
             os_log_error(compLog(),
                          "raw: compressed memory %llu KiB kind 0x%x not made (%{public}s, 0x%x): those backings stay "
                          "uncompressed%{public}s",
@@ -214,22 +254,21 @@ void Device::compStop()
 
 void Device::compFree(Backing &b)
 {
-    if (b.texture.tic) {
-        memset(tic_.cpu + 32 * b.texture.tic, 0, 32);
-        freeTic_.push_back(b.texture.tic);
-    }
-    stats.compViews--;
+    if (b.texture.tic)
+        freeTic(b.texture.tic);
+    RAW_DIAGNOSTIC(stats.compViews--);
     CompMem *mem = b.comp;
     b.comp = nullptr;
     if (--mem->views)
         return;
-    stats.compHeld--;
-    stats.compHeldBytes -= mem->bo.bytes;
+    RAW_DIAGNOSTIC(stats.compHeld--);
+    RAW_DIAGNOSTIC(stats.compHeldBytes -= mem->bo.bytes);
+    RAW_DIAGNOSTIC(glassMemEvent("compressed memory freed", mem->bo.bytes));
     k_.free(mem->bo);
     comp_.mems.erase(std::find_if(comp_.mems.begin(), comp_.mems.end(), [&](const std::unique_ptr<CompMem> &m) {
         return m.get() == mem;
     }));
-    comp_.freed(commitCount_);
+    comp_.freed(commits());
 }
 
 uint64_t Device::compDeadline() const
@@ -240,9 +279,9 @@ uint64_t Device::compDeadline() const
     };
     for (const Backing *b : backings_)
         if (b->retired)
-            due(b->usedNs);  // once its last use completed
+            due(b->usedNs.load(std::memory_order_relaxed));  // once its last use completed
         else if (b->comp || b->plain)
-            due(b->usedNs + kCompIdleNs);
+            due(b->usedNs.load(std::memory_order_relaxed) + kCompIdleNs);
     for (const CompBo &r : comp_.ready)
         due(r.readyNs + kCompIdleNs);
     return at ? std::max(at, compClock() + kCompRecheckNs) : 0;
@@ -251,23 +290,79 @@ uint64_t Device::compDeadline() const
 void Device::compTrim(uint64_t now)
 {
     for (auto it = comp_.ready.begin(); it != comp_.ready.end();) {
-        if (readyStale(commitCount_, it->madeAt, now, it->readyNs)) {
-            stats.compHeld--;
-            stats.compHeldBytes -= it->bo.bytes;
+        if (readyStale(commits(), it->madeAt, now, it->readyNs)) {
+            RAW_DIAGNOSTIC(stats.compHeld--);
+            RAW_DIAGNOSTIC(stats.compHeldBytes -= it->bo.bytes);
+            RAW_DIAGNOSTIC(glassMemEvent("compressed memory freed unused", it->bo.bytes));
             k_.free(it->bo);
             it = comp_.ready.erase(it);
-            comp_.freed(commitCount_);
+            comp_.freed(commits());
             continue;
         }
         ++it;
     }
 }
 
-void Device::countZbc(const Texture &t, bool full, bool boot)
+int Kernel::zbcAdd(const TegraGM20BAbiZbc &entry)
+{
+    TegraGM20BAbiZbcReply r = {};
+    return call(TegraGM20BMethodZbc, &entry, sizeof entry, &r, sizeof r);
+}
+
+bool Device::zbcHeld(const TegraGM20BAbiZbc &e)
+{
+    bool wanted = false;
+    const bool held = zbc_.lookup(e, wanted);
+    if (wanted) {
+        std::lock_guard<raw::Mutex> l(lock_);
+        compStart();
+    }
+    return held;
+}
+
+void Device::clearZbc(const Texture &t, bool full, const uint32_t v[4])
 {
     if (!t.comptags)
         return;
-    (full && boot ? stats.zbcHits : stats.zbcMisses)++;
+    bool held = zbcBootColor(t.format, v);
+    TegraGM20BAbiZbc e;
+    if (!held && full) {
+        if (zbcColorEntry(t.format, v, e))
+            held = zbcHeld(e);
+        else
+            RAW_DIAGNOSTIC(stats.zbcInexact++);
+    }
+    RAW_DIAGNOSTIC((full && held ? stats.zbcHits : stats.zbcMisses)++);
+}
+
+void Device::clearZbcDepth(const Texture &t, bool full, float depth)
+{
+    if (!t.comptags)
+        return;
+    bool held = zbcBootDepth(depth);
+    TegraGM20BAbiZbc e;
+    if (!held && full) {
+        if (zbcDepthEntry(t.format, depth, e))
+            held = zbcHeld(e);
+        else
+            RAW_DIAGNOSTIC(stats.zbcInexact++);
+    }
+    RAW_DIAGNOSTIC((full && held ? stats.zbcHits : stats.zbcMisses)++);
+}
+
+void Device::zbcMake(std::unique_lock<raw::Mutex> &l)
+{
+    TegraGM20BAbiZbc e;
+    while (!stopping_ && zbc_.next(e)) {
+        l.unlock();
+        const int kr = k_.zbcAdd(e);
+        l.lock();
+        zbc_.answer(e, kr == KERN_SUCCESS);
+        RAW_DIAGNOSTIC((kr == KERN_SUCCESS ? stats.zbcAdded : stats.zbcFull)++);
+        if (kr != KERN_SUCCESS && kr != kIOReturnNoResources)
+            os_log_error(compLog(), "raw: ZBC entry format 0x%x not added (0x%x): those clears write their texels",
+                         e.format, unsigned(kr));
+    }
 }
 
 }  // namespace raw

@@ -7,6 +7,7 @@
 #include <gtest/gtest.h>
 
 #include <cstdint>
+#include <cstring>
 #include <fstream>
 #include <regex>
 #include <sstream>
@@ -38,12 +39,12 @@ std::vector<uint32_t> kernelKindTable()
 
 TEST(RawComp, KindsAreNvnsAndTheKernelDemotesThemAsSaid)
 {
-    EXPECT_EQ(raw::compressedKind(4, false), 0xdbu);
-    EXPECT_EQ(raw::compressedKind(8, false), 0xe9u);
-    EXPECT_EQ(raw::compressedKind(16, false), 0xf5u);
-    EXPECT_EQ(raw::compressedKind(8, true), 0xceu);
-    EXPECT_EQ(raw::compressedKind(1, false), 0u);
-    EXPECT_EQ(raw::compressedKind(2, false), 0u);
+    EXPECT_EQ(raw::compressedKind(4, 0), 0xdbu);
+    EXPECT_EQ(raw::compressedKind(8, 0), 0xe9u);
+    EXPECT_EQ(raw::compressedKind(16, 0), 0xf5u);
+    EXPECT_EQ(raw::compressedKind(8, 260), 0xceu);
+    EXPECT_EQ(raw::compressedKind(1, 0), 0u);
+    EXPECT_EQ(raw::compressedKind(2, 0), 0u);
     const std::vector<uint32_t> table = kernelKindTable();
     ASSERT_EQ(table.size(), 256u);
     for (uint32_t kind : {0xdbu, 0xe9u, 0xf5u, 0xceu}) {
@@ -54,6 +55,33 @@ TEST(RawComp, KindsAreNvnsAndTheKernelDemotesThemAsSaid)
     }
     EXPECT_EQ(table[raw::demotedKind(0xce)], 0xc3u);  // the zeta's uncompressed kind, raw_zeta.h kZetaPteKind
     EXPECT_EQ(table[raw::demotedKind(0xdb)], 0xfeu);  // block-linear colour's, TGM_LAYOUT_KIND
+}
+
+// Maxwell's dev_mmu.h numbers (gm107): every sample count a target takes (1, 2, 4) and every depth format with a
+// compressible kind, each one the kernel compresses and demotes to the kind raw_zeta.h binds that format with uncompressed
+TEST(RawComp, SampleCountsAndDepthFormatsHaveTheirKinds)
+{
+    const std::vector<uint32_t> table = kernelKindTable();
+    ASSERT_EQ(table.size(), 256u);
+    const uint32_t colour[3][3] = {{0xdb, 0xcc, 0xe2}, {0xe9, 0xcd, 0xf0}, {0xf5, 0xf7, 0xf9}};
+    const uint32_t bpps[3] = {4, 8, 16}, samples[3] = {1, 2, 4};
+    for (uint32_t b = 0; b < 3; b++)
+        for (uint32_t s = 0; s < 3; s++) {
+            const uint32_t kind = raw::compressedKind(bpps[b], 0, samples[s]);
+            EXPECT_EQ(kind, colour[b][s]) << bpps[b] << " " << samples[s];
+            EXPECT_EQ(table[kind], 0xfeu) << std::hex << kind;
+            EXPECT_EQ(raw::demotedKind(kind), 0xfeu) << std::hex << kind;
+        }
+    const std::pair<uint32_t, uint32_t> zeta[] = {{250, 0x01}, {252, 0x7b}, {260, 0xc3}};  // raw_zeta.h plain kinds
+    for (const auto &[format, plain] : zeta)
+        for (uint32_t s : samples) {
+            const uint32_t kind = raw::compressedKind(8, format, s);
+            ASSERT_NE(kind, 0u) << format << " " << s;
+            EXPECT_EQ(table[kind], plain) << std::hex << kind;
+            EXPECT_EQ(raw::demotedKind(kind), plain) << std::hex << kind;
+        }
+    EXPECT_EQ(raw::compressedKind(1, 253), 0u);  // Stencil8: none
+    EXPECT_EQ(raw::compressedKind(4, 0, 8), 0u);
 }
 
 TEST(RawComp, BootTableValuesAgreeAcrossMetalAndNvFormats)
@@ -85,19 +113,112 @@ TEST(RawComp, MemoryIsWholeComptagLines)
     EXPECT_EQ(raw::compBytes(1280u * 720u * 8u), 0x720000u);
 }
 
-TEST(RawComp, OnlyZetaAndMemorylessColourBackingsCompress)
+// What the copy engine fills or drains compresses only at the kinds gpu.x1.ce_compressed proved (one-sample C32 and C64)
+TEST(RawComp, CopiedBackingsCompressOnlyAtProvenKinds)
 {
-    constexpr uint32_t memoryless = 9;
-    EXPECT_EQ(raw::backingKind(true, true, true, 8, 1, 0, memoryless), 0xceu);
-    EXPECT_EQ(raw::backingKind(true, true, false, 8, 1, memoryless, memoryless), 0xe9u);
-    EXPECT_EQ(raw::backingKind(true, true, false, 4, 1, memoryless + 7, memoryless), 0xdbu);
-    for (uint32_t shadow = 1; shadow < memoryless; shadow++)  // the copy engine fills and drains a shadow
-        EXPECT_EQ(raw::backingKind(true, true, false, 4, 1, shadow, memoryless), 0u) << shadow;
-    EXPECT_EQ(raw::backingKind(true, false, false, 4, 1, memoryless, memoryless), 0u);  // pitch
-    EXPECT_EQ(raw::backingKind(false, true, true, 8, 1, 0, memoryless), 0u);            // compression off
-    EXPECT_EQ(raw::backingKind(true, true, false, 2, 1, memoryless, memoryless), 0u);   // no compressible kind
-    EXPECT_EQ(raw::backingKind(true, true, false, 4, 4, memoryless, memoryless), 0u);   // multisampled
-    EXPECT_EQ(raw::backingKind(true, true, true, 8, 2, 0, memoryless), 0u);
+    EXPECT_TRUE(raw::copyEngineReadsCompressed(0xdb));
+    EXPECT_TRUE(raw::copyEngineReadsCompressed(0xe9));
+    for (uint32_t kind : {0xf5u, 0xccu, 0xe2u, 0xcdu, 0xf0u, 0xf7u, 0xf9u, 0x02u, 0x86u, 0xceu, 0xcfu, 0xd0u})
+        EXPECT_FALSE(raw::copyEngineReadsCompressed(kind)) << std::hex << kind;
+
+    // memoryless: the copy engine never reaches them
+    EXPECT_EQ(raw::backingKind(true, true, 0, 4, 1, false), 0xdbu);
+    EXPECT_EQ(raw::backingKind(true, true, 0, 8, 1, false), 0xe9u);
+    EXPECT_EQ(raw::backingKind(true, true, 0, 16, 1, false), 0xf5u);
+    EXPECT_EQ(raw::backingKind(true, true, 0, 4, 4, false), 0xe2u);
+    EXPECT_EQ(raw::backingKind(true, true, 0, 8, 2, false), 0xcdu);
+    EXPECT_EQ(raw::backingKind(true, true, 260, 8, 1, false), 0xceu);
+    EXPECT_EQ(raw::backingKind(true, true, 250, 2, 4, false), 0x04u);
+    // shadows: the copy engine fills and stores them
+    EXPECT_EQ(raw::backingKind(true, true, 0, 4, 1, true), 0xdbu);
+    EXPECT_EQ(raw::backingKind(true, true, 0, 8, 1, true), 0xe9u);
+    EXPECT_EQ(raw::backingKind(true, true, 0, 16, 1, true), 0u);
+    EXPECT_EQ(raw::backingKind(true, true, 0, 4, 2, true), 0u);
+    EXPECT_EQ(raw::backingKind(true, true, 0, 8, 4, true), 0u);
+    // zetas the shader's depth tests copy with the copy engine: no zeta kind is proven
+    EXPECT_EQ(raw::backingKind(true, true, 252, 4, 1, false), 0u);
+    EXPECT_EQ(raw::backingKind(true, true, 252, 4, 4, false), 0u);
+    EXPECT_EQ(raw::backingKind(true, true, 260, 8, 2, false), 0u);
+    EXPECT_EQ(raw::backingKind(true, true, 260, 8, 1, true), 0u);
+
+    // a debug build's gpu.x1.ce_compressed_depth probe gives those zetas their kinds, and nothing else
+    EXPECT_EQ(raw::backingKind(true, true, 252, 4, 1, false, true), 0x86u);
+    EXPECT_EQ(raw::backingKind(true, true, 260, 8, 2, false, true), 0xcfu);
+    EXPECT_EQ(raw::backingKind(true, true, 0, 16, 1, true, true), 0u);
+    EXPECT_EQ(raw::backingKind(true, true, 0, 4, 2, true, true), 0u);
+
+    EXPECT_EQ(raw::backingKind(true, false, 0, 4, 1, false), 0u);    // pitch
+    EXPECT_EQ(raw::backingKind(false, true, 260, 8, 1, false), 0u);  // compression off
+    EXPECT_EQ(raw::backingKind(true, true, 0, 2, 1, false), 0u);     // no compressible kind
+    EXPECT_EQ(raw::backingKind(true, true, 253, 1, 1, false), 0u);   // Stencil8
+}
+
+// A ZBC entry holds the texel the ROP writes for the clear: packed in the format's channel order, unorm channels only at
+// exact codes, halves rounded to nearest even
+TEST(RawComp, ZbcEntriesHoldTheTexelTheRopWrites)
+{
+    const auto bits = [](float f) {
+        uint32_t u;
+        memcpy(&u, &f, 4);
+        return u;
+    };
+    TegraGM20BAbiZbc e;
+    const uint32_t quarter[4] = {bits(0.0f), bits(64 / 255.0f), bits(128 / 255.0f), bits(1.0f)};
+    ASSERT_TRUE(raw::zbcColorEntry(80, quarter, e));  // BGRA8Unorm
+    EXPECT_EQ(e.format, raw::kZbcA8R8G8B8);
+    EXPECT_EQ(e.l2[0], 0xff004080u);
+    ASSERT_TRUE(raw::zbcColorEntry(70, quarter, e));  // RGBA8Unorm
+    EXPECT_EQ(e.format, raw::kZbcA8B8G8R8);
+    EXPECT_EQ(e.l2[0], 0xff804000u);
+    EXPECT_EQ(memcmp(e.ds, quarter, sizeof e.ds), 0);
+    const uint32_t tie[4] = {bits(0.5f), 0, 0, bits(1.0f)};  // 127.5: the ROP's tie, not Apple's
+    EXPECT_FALSE(raw::zbcColorEntry(80, tie, e));
+    EXPECT_FALSE(raw::zbcColorEntry(81, quarter, e));  // sRGB
+    EXPECT_FALSE(raw::zbcColorEntry(55, quarter, e));  // R32Float: no ZBC format
+    const uint32_t halves[4] = {bits(0.5f), bits(-2.0f), bits(65504.0f), bits(1.0f / 3)};
+    ASSERT_TRUE(raw::zbcColorEntry(115, halves, e));
+    EXPECT_EQ(e.l2[0], 0x3800u | 0xc000u << 16);
+    EXPECT_EQ(e.l2[1], 0x7bffu | 0x3555u << 16);
+    EXPECT_EQ(raw::zbcHalf(bits(1e-8f)), 0u);
+    EXPECT_EQ(raw::zbcHalf(bits(65520.0f)), 0x7c00u);
+    EXPECT_EQ(raw::zbcHalf(bits(5.9604645e-8f)), 1u);
+    const uint32_t tenBit[4] = {bits(1.0f), bits(0.0f), bits(512 / 1023.0f), bits(2 / 3.0f)};
+    EXPECT_FALSE(raw::zbcColorEntry(90, tenBit, e));    // RGB10A2Unorm: its packing never read back
+    EXPECT_FALSE(raw::zbcColorEntry(125, quarter, e));  // RGBA32Float: the boot table's 0 and 1 alone
+    ASSERT_TRUE(raw::zbcDepthEntry(252, 0.5f, e));
+    EXPECT_EQ(e.type, uint32_t(TegraGM20BZbcDepth));
+    EXPECT_EQ(e.ds[0], bits(0.5f));
+    EXPECT_EQ(e.l2[0], bits(0.5f));
+    EXPECT_FALSE(raw::zbcDepthEntry(250, 0.5f, e));  // Depth16Unorm: the table holds 32-bit float depths
+}
+
+TEST(RawComp, ZbcValuesAreAskedForOnceRepeated)
+{
+    raw::ZbcTable table;
+    TegraGM20BAbiZbc e = {}, asked;
+    e.type = TegraGM20BZbcColor;
+    e.format = raw::kZbcA8R8G8B8;
+    bool wanted = false;
+    for (uint8_t i = 1; i < raw::ZbcTable::kZbcRepeats; i++) {
+        EXPECT_FALSE(table.lookup(e, wanted));
+        EXPECT_FALSE(wanted);
+    }
+    EXPECT_FALSE(table.lookup(e, wanted));
+    EXPECT_TRUE(wanted);
+    EXPECT_TRUE(table.pending());
+    ASSERT_TRUE(table.next(asked));
+    EXPECT_FALSE(table.pending());
+    table.answer(asked, true);
+    EXPECT_TRUE(table.lookup(e, wanted));
+    EXPECT_FALSE(wanted);
+    // one-off values (an animated clear colour) never fill it: each takes the place of an older one seen once
+    for (uint32_t v = 0; v < 1000; v++) {
+        TegraGM20BAbiZbc once = e;
+        once.ds[0] = v + 1;
+        EXPECT_FALSE(table.lookup(once, wanted));
+        EXPECT_FALSE(wanted);
+    }
+    EXPECT_TRUE(table.lookup(e, wanted));
 }
 
 TEST(RawComp, ShortagesPassAndContractRefusalsDoNot)

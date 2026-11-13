@@ -13,9 +13,10 @@
 namespace raw {
 namespace {
 
-constexpr uint32_t kInterlockControl = 0x1224;  // SET_PIXEL_SHADER_INTERLOCK_CONTROL
-constexpr uint32_t kTextureType3D = 2;          // TEXHEAD's TEXTURE_TYPE (word 4 bits 26:23)
-constexpr uint32_t kTagBuffer = 0xC0DE;         // pack/probe.mm's payload tag
+constexpr uint32_t kInterlockControl = 0x1224;                                   // SET_PIXEL_SHADER_INTERLOCK_CONTROL
+constexpr uint32_t kRegisterCountVertex = 0x204c, kRegisterCountPixel = 0x214c;  // SET_PIPELINE_REGISTER_COUNT
+constexpr uint32_t kTextureType3D = 2;   // TEXHEAD's TEXTURE_TYPE (word 4 bits 26:23)
+constexpr uint32_t kTagBuffer = 0xC0DE;  // pack/probe.mm's payload tag
 
 std::string hex(uint64_t v)
 {
@@ -157,6 +158,8 @@ bool layout(const nvdec::ProbeSubmission &s, uint32_t index, std::vector<LayoutE
                 e.smp = Smp::None;  // NVK's reserved sampler (nvk_device.c): the handle names no sampler
             else
                 e.smp = smp == r.tsc.end() ? Smp::Constexpr : samplerKind(smp->second, e.smpSlot);
+            // m2v binds a slot the state samples by comparison with its compare header (TEXSAMP0 DEPTH_COMPARE, bit 9)
+            e.smpCompare = e.smp == Smp::Slot && (smp->second[0] >> 9 & 1);
             if (e.smp == Smp::Constexpr && smp != r.tsc.end()) {
                 e.headerKnown = true;
                 e.header = smp->second;
@@ -224,7 +227,7 @@ bool makeRecord(const ProbeRuns &runs, const PackRules &rules, const ProgramLook
         return false;
     const nvdec::ProbeRecord &r = s.records[0];
     if (valueOf(r.regs, kInterlockControl) & 3) {
-        why = "storage form (its barrier form needs NVK's interlock hidden)";
+        why = "storage form: capture lacks qualified storage attachment metadata";
         return false;
     }
     RecordParts parts;
@@ -247,6 +250,8 @@ bool makeRecord(const ProbeRuns &runs, const PackRules &rules, const ProgramLook
     parts.setBytes = r.sets[0].words.empty() || root.size() <= 0x38 / 4 + 2 ? 0 : uint16_t(root[0x38 / 4 + 2]);
     if (!assembleRecord(parts, runs.key, rules, out, why))
         return false;
+    out.programs[0].gprs = uint8_t(valueOf(r.regs, kRegisterCountVertex));
+    out.programs[1].gprs = uint8_t(valueOf(r.regs, kRegisterCountPixel));
     if (!streams) {
         why = streamWhy;
         return false;

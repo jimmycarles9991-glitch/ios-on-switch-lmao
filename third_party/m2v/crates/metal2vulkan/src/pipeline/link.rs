@@ -392,6 +392,18 @@ pub fn link(
     })
 }
 
+pub(crate) fn link_compute(interface: &StageInterface, p: &DeviceProfile) -> Result<Linked, Error> {
+    let ifaces = [interface];
+    check_stages(&ifaces, &LinkInputs::compute())?;
+    let mut table = LinkTable::default();
+    let layout = layout(&ifaces, &[], &mut table, p)?;
+    let specialization = specialize(&ifaces, &mut table)?;
+    Ok(Linked {
+        table, layout, specialization, interface: pipeline_interface(&ifaces),
+        vertex_input: VertexInputState::default(), graphics: None, control: None,
+    })
+}
+
 /// The graphics state of a render or mesh render pipeline whose geometry stage (its vertex or
 /// mesh stage) is `geometry`, with its fragment stage's.
 fn render_state(
@@ -426,6 +438,10 @@ fn render_state(
         (r.alpha_to_coverage, r.texture_write_rounding_mode),
         p,
     )?;
+    crate::pipeline::two_plane::check(fragment, &r.color_attachments, p)?;
+    let alphas = crate::pipeline::two_plane::alphas(&r.color_attachments, p);
+    crate::pipeline::two_plane::split_colors(&mut gs.color_attachments, &alphas);
+    let storage = crate::pipeline::two_plane::split_storage(storage, &alphas);
     gs.fragment_imageblock = ib;
     gs.color_outputs = color_outputs(fs, &storage)?;
     gs.storage_attachments = storage;
@@ -921,6 +937,9 @@ fn heap_capacity(
         ),
     ];
     let mut capacity = u64::from(crate::memory::handles::TABLE_CAPACITY);
+    if p.fields().descriptors.heap_elements != 0 {
+        capacity = capacity.min(u64::from(p.fields().descriptors.heap_elements));
+    }
     // `limit` holds `used + arrays · capacity`.
     let mut bound = |limit: VkLimit, available: u32, used: u64, arrays: u64| -> Result<(), Error> {
         if arrays == 0 {

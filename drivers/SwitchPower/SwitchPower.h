@@ -26,7 +26,7 @@ void switch_thermal_cpu_quiesce(void);
 // held for a while after the last hint (BOOT_DONE instead ends the boot window: the CPU's floor at its ceiling and
 // the GPU's idle-clock hold, once per boot, one line). The GPU has no load governor: it
 // runs its full clock whenever it has work, and a touch, missed frame or launch brings it back at once from its idle
-// clock (TegraGM20B gpu.c, entered only after 500 ms with no submission and no swap). Any context: thread, work loop,
+// clock (TegraGM20B gpu_clock.c, entered only after 500 ms with no submission and no swap). Any context: thread, work loop,
 // primary interrupt, the scheduler's; a few stores under a spin lock, nothing when the governor is off (BOOT_DONE:
 // thread context, it logs). Callers: SwitchTouch (each touch interrupt), NativeLegacyDisplay (a present two or more
 // refresh periods after the last one, while frames keep coming), XNU exec_activate_image (LAUNCH) and IOPMrootDomain at

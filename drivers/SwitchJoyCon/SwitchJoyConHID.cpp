@@ -196,11 +196,6 @@ public:
         return (outputLock != nullptr) && init();
     }
 
-    bool isLeft() const
-    {
-        return left;
-    }
-
     IOWorkLoop *getWorkLoop() const override
     {
         return loop;
@@ -651,20 +646,39 @@ void switch_joycon_hid_prepare()
 
 static SwitchJoyConButtons *gButtons;  // rail work loop only (see the class)
 
+static SwitchJoyConButtons *systemButtons()
+{
+    if (gButtons)
+        return gButtons;
+    switch_joycon_hid_prepare();
+    IOService *resources = IOService::getResourceService();
+    auto *buttons = OSTypeAlloc(SwitchJoyConButtons);
+    if (!resources || !buttons || !buttons->init() || !buttons->attach(resources))
+        panic("SwitchJoyCon: system-buttons HID device: attach failed");
+    if (!buttons->start(resources))
+        panic("SwitchJoyCon: system-buttons HID device: IOHIDDevice::start failed");
+    gButtons = buttons;  // kept for the boot
+    return gButtons;
+}
+
+void switch_joycon_hid_buttons(bool left, const uint8_t *report, size_t length)
+{
+    // Reports 0x21, 0x30 and 0x31 start with the standard input (timer, battery, three button bytes); 0x3F does not.
+    if (length > kSharedButtons && (report[0] == 0x21 || report[0] == 0x30 || report[0] == 0x31))
+        systemButtons()->update(left, report[kSharedButtons] & (left ? kCapture : kHome));
+}
+
+void switch_joycon_hid_buttons_release(bool left)
+{
+    if (gButtons)
+        gButtons->update(left, 0);
+}
+
 IOService *switch_joycon_hid_create(bool left, const uint8_t mac[6], SwitchJoyConOutput output,
                                     SwitchJoyConSessionEnded ended, void *context)
 {
     switch_joycon_hid_prepare();
     IOService *resources = IOService::getResourceService();
-    if (!gButtons) {
-        auto *buttons = OSTypeAlloc(SwitchJoyConButtons);
-        if (!resources || !buttons || !buttons->init() || !buttons->attach(resources)) {
-            panic("SwitchJoyCon: system-buttons HID device: attach failed");
-        }
-        if (!buttons->start(resources))
-            panic("SwitchJoyCon: system-buttons HID device: IOHIDDevice::start failed");
-        gButtons = buttons;  // kept for the boot
-    }
     auto *device = OSTypeAlloc(SwitchJoyConDevice);
     if (!resources || !device || !device->initWith(left, mac, output, ended, context) || !device->attach(resources)) {
         panic("SwitchJoyCon: Joy-Con (%c) HID device: attach failed", left ? 'L' : 'R');
@@ -679,12 +693,7 @@ IOReturn switch_joycon_hid_input(const IOService *device, const uint8_t *report,
     auto *joycon = OSDynamicCast(SwitchJoyConDevice, device);
     if (!joycon)
         return kIOReturnBadArgument;
-    const IOReturn result = joycon->deliver(report, length);
-    // Reports 0x21, 0x30 and 0x31 start with the standard input (timer, battery, three button bytes); 0x3F does not.
-    if (gButtons && length > kSharedButtons && (report[0] == 0x21 || report[0] == 0x30 || report[0] == 0x31)) {
-        gButtons->update(joycon->isLeft(), report[kSharedButtons] & (joycon->isLeft() ? kCapture : kHome));
-    }
-    return result;
+    return joycon->deliver(report, length);
 }
 
 void switch_joycon_hid_destroy(const IOService *device)
@@ -692,8 +701,6 @@ void switch_joycon_hid_destroy(const IOService *device)
     auto *joycon = OSDynamicCast(SwitchJoyConDevice, device);
     if (!joycon)
         return;
-    if (gButtons)
-        gButtons->update(joycon->isLeft(), 0);  // a Joy-Con pulled off with its button down releases it
     joycon->detachOutput();
     joycon->terminate();
     // NOLINTNEXTLINE(clang-analyzer-osx.cocoa.RetainCount): drops switch_joycon_hid_create's reference (see the header)

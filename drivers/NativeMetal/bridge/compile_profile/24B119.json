@@ -1,0 +1,1216 @@
+{
+  "enabled": {
+    "api_version": {
+      "major": 1,
+      "minor": 2
+    },
+    "driver_id": 24,
+    "driver_version": 109457507,
+    "vendor_id": 4318,
+    "device_id": 0,
+    "device_type": 1,
+    "extensions": [
+      "ExtRobustness2",
+      "ExtImageRobustness",
+      "ExtShaderAtomicFloat",
+      "ExtShaderImageAtomicInt64",
+      "ExtShaderDemoteToHelperInvocation",
+      "ExtFragmentShaderInterlock",
+      "ExtSubgroupSizeControl",
+      "ExtVertexAttributeDivisor",
+      "ExtExternalMemoryHost",
+      "ExtExtendedDynamicState",
+      "KhrShaderTerminateInvocation",
+      "KhrShaderMaximalReconvergence",
+      "KhrShaderSubgroupUniformControlFlow",
+      "KhrWorkgroupMemoryExplicitLayout",
+      "KhrZeroInitializeWorkgroupMemory",
+      "KhrDynamicRenderingLocalRead",
+      "KhrVertexAttributeDivisor",
+      "KhrPushDescriptor",
+      "KhrMaintenance4",
+      "KhrSynchronization2",
+      "KhrShaderSubgroupRotate",
+      "KhrMaintenance8",
+      "KhrMaintenance5",
+      "ExtBorderColorSwizzle",
+      "ExtCustomBorderColor",
+      "KhrDynamicRendering",
+      "KhrShaderFma",
+      "ExtDepthBiasControl",
+      "ExtDepthClipEnable",
+      "ExtDepthClampControl",
+      "ExtSampleLocations",
+      "ExtPrimitiveTopologyListRestart",
+      "ExtExtendedDynamicState2",
+      "KhrShaderQuadControl"
+    ],
+    "features": [
+      "RobustBufferAccess",
+      "RobustBufferAccess2",
+      "RobustImageAccess",
+      "RobustImageAccess2",
+      "NullDescriptor",
+      "ShaderInt8",
+      "ShaderInt16",
+      "ShaderInt64",
+      "ShaderFloat64",
+      "StorageBuffer8BitAccess",
+      "UniformAndStorageBuffer8BitAccess",
+      "StoragePushConstant8",
+      "StorageBuffer16BitAccess",
+      "UniformAndStorageBuffer16BitAccess",
+      "StoragePushConstant16",
+      "ShaderBufferInt64Atomics",
+      "ShaderSharedInt64Atomics",
+      "ShaderImageInt64Atomics",
+      "ShaderBufferFloat32Atomics",
+      "ShaderBufferFloat32AtomicAdd",
+      "ShaderSharedFloat32Atomics",
+      "ShaderSharedFloat32AtomicAdd",
+      "ShaderImageFloat32Atomics",
+      "ShaderImageFloat32AtomicAdd",
+      "BufferDeviceAddress",
+      "ScalarBlockLayout",
+      "UniformBufferStandardLayout",
+      "VulkanMemoryModel",
+      "VulkanMemoryModelDeviceScope",
+      "WorkgroupMemoryExplicitLayout",
+      "WorkgroupMemoryExplicitLayout8BitAccess",
+      "WorkgroupMemoryExplicitLayout16BitAccess",
+      "ShaderZeroInitializeWorkgroupMemory",
+      "VertexPipelineStoresAndAtomics",
+      "FragmentStoresAndAtomics",
+      "ShaderDrawParameters",
+      "GeometryShader",
+      "TessellationShader",
+      "SampleRateShading",
+      "DualSrcBlend",
+      "IndependentBlend",
+      "ShaderClipDistance",
+      "ShaderCullDistance",
+      "ShaderOutputLayer",
+      "ShaderOutputViewportIndex",
+      "Multiview",
+      "FragmentShaderPixelInterlock",
+      "FragmentShaderSampleInterlock",
+      "ShaderDemoteToHelperInvocation",
+      "ShaderTerminateInvocation",
+      "DynamicRenderingLocalRead",
+      "VertexAttributeInstanceRateDivisor",
+      "VertexAttributeInstanceRateZeroDivisor",
+      "DrawIndirectFirstInstance",
+      "MultiDrawIndirect",
+      "DepthClamp",
+      "FillModeNonSolid",
+      "ImageCubeArray",
+      "ShaderImageGatherExtended",
+      "SamplerAnisotropy",
+      "SamplerFilterMinmax",
+      "SamplerMirrorClampToEdge",
+      "ShaderStorageImageMultisample",
+      "ShaderStorageImageExtendedFormats",
+      "ShaderStorageImageReadWithoutFormat",
+      "ShaderStorageImageWriteWithoutFormat",
+      "RuntimeDescriptorArray",
+      "DescriptorBindingPartiallyBound",
+      "DescriptorBindingVariableDescriptorCount",
+      "DescriptorBindingSampledImageUpdateAfterBind",
+      "DescriptorBindingStorageImageUpdateAfterBind",
+      "DescriptorBindingStorageBufferUpdateAfterBind",
+      "DescriptorBindingUniformTexelBufferUpdateAfterBind",
+      "DescriptorBindingStorageTexelBufferUpdateAfterBind",
+      "ShaderSampledImageArrayNonUniformIndexing",
+      "ShaderStorageImageArrayNonUniformIndexing",
+      "ShaderStorageBufferArrayNonUniformIndexing",
+      "ShaderUniformTexelBufferArrayNonUniformIndexing",
+      "ShaderStorageTexelBufferArrayNonUniformIndexing",
+      "SubgroupSizeControl",
+      "ComputeFullSubgroups",
+      "ShaderSubgroupExtendedTypes",
+      "ShaderMaximalReconvergence",
+      "ShaderSubgroupUniformControlFlow",
+      "Maintenance4",
+      "Synchronization2",
+      "ExtendedDynamicState",
+      "ShaderUniformBufferArrayDynamicIndexing",
+      "ShaderSampledImageArrayDynamicIndexing",
+      "ShaderStorageBufferArrayDynamicIndexing",
+      "ShaderStorageImageArrayDynamicIndexing",
+      "ShaderUniformTexelBufferArrayDynamicIndexing",
+      "ShaderStorageTexelBufferArrayDynamicIndexing",
+      "ShaderInputAttachmentArrayDynamicIndexing",
+      "ShaderBufferFloat64Atomics",
+      "ShaderBufferFloat64AtomicAdd",
+      "ShaderSharedFloat64Atomics",
+      "ShaderSharedFloat64AtomicAdd",
+      "WorkgroupMemoryExplicitLayoutScalarBlockLayout",
+      "ShaderSubgroupRotate",
+      "ShaderSubgroupRotateClustered",
+      "MultiViewport",
+      "Maintenance8",
+      "BorderColorSwizzle",
+      "MultiviewTessellationShader",
+      "DepthBiasClamp",
+      "ShaderFmaFloat32",
+      "Maintenance5",
+      "OcclusionQueryPrecise",
+      "DepthBiasControl",
+      "DepthBiasExact",
+      "FullDrawIndexUint32",
+      "DepthClipEnable",
+      "DepthClampControl",
+      "PrimitiveTopologyListRestart",
+      "PrimitiveTopologyPatchListRestart",
+      "DescriptorBindingUpdateUnusedWhilePending",
+      "ExtendedDynamicState2",
+      "ShaderQuadControl"
+    ],
+    "limits": {
+      "max_compute_work_group_size": [
+        1024,
+        1024,
+        64
+      ],
+      "max_compute_work_group_count": [
+        2147483647,
+        65535,
+        65535
+      ],
+      "max_compute_work_group_invocations": 1024,
+      "max_compute_shared_memory_size": 49152,
+      "max_push_constants_size": 256,
+      "max_push_descriptors": 32,
+      "max_bound_descriptor_sets": 32,
+      "max_per_stage_descriptor_samplers": 1048576,
+      "max_per_stage_descriptor_uniform_buffers": 1048576,
+      "max_per_stage_descriptor_storage_buffers": 1048576,
+      "max_per_stage_descriptor_sampled_images": 1048576,
+      "max_per_stage_descriptor_storage_images": 1048576,
+      "max_per_stage_descriptor_input_attachments": 1048576,
+      "max_per_stage_resources": 4294967295,
+      "max_descriptor_set_samplers": 1048576,
+      "max_descriptor_set_uniform_buffers": 1048576,
+      "max_descriptor_set_storage_buffers": 1048576,
+      "max_descriptor_set_sampled_images": 1048576,
+      "max_descriptor_set_storage_images": 1048576,
+      "max_descriptor_set_input_attachments": 1048576,
+      "max_descriptor_set_update_after_bind_samplers": 1048576,
+      "max_descriptor_set_update_after_bind_sampled_images": 1048576,
+      "max_descriptor_set_update_after_bind_storage_images": 1048576,
+      "max_descriptor_set_update_after_bind_storage_buffers": 1048576,
+      "max_per_stage_descriptor_update_after_bind_samplers": 1048576,
+      "max_per_stage_descriptor_update_after_bind_sampled_images": 1048576,
+      "max_per_stage_descriptor_update_after_bind_storage_images": 1048576,
+      "max_per_stage_descriptor_update_after_bind_storage_buffers": 1048576,
+      "max_per_stage_update_after_bind_resources": 4294967295,
+      "max_storage_buffer_range": 4294967295,
+      "max_uniform_buffer_range": 65536,
+      "min_storage_buffer_offset_alignment": 16,
+      "min_uniform_buffer_offset_alignment": 256,
+      "min_texel_buffer_offset_alignment": 16,
+      "max_texel_buffer_elements": 134217728,
+      "max_sampler_lod_bias_bits": 1097859072,
+      "max_sampler_anisotropy_bits": 1098907648,
+      "min_texel_offset": -8,
+      "max_texel_offset": 7,
+      "min_texel_gather_offset": -32,
+      "max_texel_gather_offset": 31,
+      "min_interpolation_offset_bits": 3204448256,
+      "max_interpolation_offset_bits": 1054867456,
+      "max_image_dimension_1d": 16384,
+      "max_image_dimension_2d": 16384,
+      "max_image_dimension_3d": 16384,
+      "max_image_dimension_cube": 32768,
+      "max_image_array_layers": 2048,
+      "max_vertex_input_attributes": 32,
+      "max_vertex_input_bindings": 32,
+      "max_vertex_input_attribute_offset": 2047,
+      "max_vertex_input_binding_stride": 2048,
+      "max_vertex_output_components": 128,
+      "max_tessellation_generation_level": 64,
+      "max_tessellation_evaluation_output_components": 128,
+      "max_fragment_input_components": 128,
+      "max_fragment_output_attachments": 8,
+      "max_fragment_dual_src_attachments": 1,
+      "max_fragment_combined_output_resources": 1048584,
+      "max_color_attachments": 8,
+      "max_clip_distances": 8,
+      "max_cull_distances": 8,
+      "max_combined_clip_and_cull_distances": 8,
+      "max_vertex_attrib_divisor": 4294967295,
+      "max_per_stage_descriptor_acceleration_structures": 0,
+      "max_descriptor_set_acceleration_structures": 0,
+      "supports_non_zero_first_instance": true,
+      "min_vertex_input_binding_stride_alignment": null,
+      "framebuffer_color_sample_counts": 15,
+      "framebuffer_depth_sample_counts": 15,
+      "max_multiview_view_count": 32,
+      "max_multiview_instance_index": 4294967295,
+      "framebuffer_integer_color_sample_counts": 15,
+      "framebuffer_stencil_sample_counts": 15,
+      "framebuffer_no_attachments_sample_counts": 15,
+      "storage_image_sample_counts": 15,
+      "max_framebuffer_width": 16384,
+      "max_framebuffer_height": 16384,
+      "max_framebuffer_layers": 2048,
+      "max_draw_indexed_index_value": 4294967295,
+      "max_tessellation_patch_size": 32,
+      "supported_depth_resolve_modes": 15,
+      "supported_stencil_resolve_modes": 13,
+      "independent_resolve_none": true,
+      "independent_resolve": true,
+      "sample_location_sample_counts": 14,
+      "variable_sample_locations": true,
+      "mesh": {
+        "max_task_work_group_total_count": 0,
+        "max_task_work_group_count": [
+          0,
+          0,
+          0
+        ],
+        "max_task_work_group_invocations": 0,
+        "max_task_work_group_size": [
+          0,
+          0,
+          0
+        ],
+        "max_task_payload_size": 0,
+        "max_task_shared_memory_size": 0,
+        "max_task_payload_and_shared_memory_size": 0,
+        "max_mesh_work_group_total_count": 0,
+        "max_mesh_work_group_count": [
+          0,
+          0,
+          0
+        ],
+        "max_mesh_work_group_invocations": 0,
+        "max_mesh_work_group_size": [
+          0,
+          0,
+          0
+        ],
+        "max_mesh_shared_memory_size": 0,
+        "max_mesh_payload_and_shared_memory_size": 0,
+        "max_mesh_output_memory_size": 0,
+        "max_mesh_payload_and_output_memory_size": 0,
+        "max_mesh_output_components": 0,
+        "max_mesh_output_vertices": 0,
+        "max_mesh_output_primitives": 0,
+        "max_mesh_output_layers": 0,
+        "max_mesh_multiview_view_count": 0
+      },
+      "max_point_size": 2047
+    },
+    "subgroup": {
+      "size": 32,
+      "supported_stages": 63,
+      "supported_operations": 1791,
+      "quad_operations_in_all_stages": true,
+      "min_size": 32,
+      "max_size": 32,
+      "max_compute_workgroup_subgroups": 32,
+      "required_size_stages": 0
+    },
+    "float_controls": {
+      "f16": {
+        "denorm_preserve": true,
+        "denorm_flush_to_zero": false,
+        "rounding_rte": true,
+        "rounding_rtz": false,
+        "signed_zero_inf_nan_preserve": true
+      },
+      "f32": {
+        "denorm_preserve": true,
+        "denorm_flush_to_zero": true,
+        "rounding_rte": true,
+        "rounding_rtz": true,
+        "signed_zero_inf_nan_preserve": true
+      },
+      "f64": {
+        "denorm_preserve": true,
+        "denorm_flush_to_zero": false,
+        "rounding_rte": true,
+        "rounding_rtz": true,
+        "signed_zero_inf_nan_preserve": true
+      },
+      "denorm_independence": "All",
+      "rounding_independence": "All"
+    },
+    "filter_minmax_single_component_formats": true,
+    "formats": {
+      "formats": {
+        "2": {
+          "linear_tiling": 70368744297473,
+          "optimal_tiling": 70368744297473,
+          "buffer": 8,
+          "color_attachment_sample_counts": 0
+        },
+        "3": {
+          "linear_tiling": 70368744297473,
+          "optimal_tiling": 70368744297473,
+          "buffer": 8,
+          "color_attachment_sample_counts": 0
+        },
+        "4": {
+          "linear_tiling": 70643622206721,
+          "optimal_tiling": 70368744299905,
+          "buffer": 8,
+          "color_attachment_sample_counts": 15
+        },
+        "5": {
+          "linear_tiling": 70368744297473,
+          "optimal_tiling": 70368744297473,
+          "buffer": 8,
+          "color_attachment_sample_counts": 0
+        },
+        "6": {
+          "linear_tiling": 70368744297473,
+          "optimal_tiling": 70368744297473,
+          "buffer": 8,
+          "color_attachment_sample_counts": 0
+        },
+        "7": {
+          "linear_tiling": 70368744297473,
+          "optimal_tiling": 70368744297473,
+          "buffer": 8,
+          "color_attachment_sample_counts": 0
+        },
+        "8": {
+          "linear_tiling": 70643622206721,
+          "optimal_tiling": 70368744299905,
+          "buffer": 8,
+          "color_attachment_sample_counts": 15
+        },
+        "9": {
+          "linear_tiling": 70650064657667,
+          "optimal_tiling": 70375186750851,
+          "buffer": 6442451032,
+          "color_attachment_sample_counts": 15
+        },
+        "10": {
+          "linear_tiling": 70650064657667,
+          "optimal_tiling": 70375186750851,
+          "buffer": 6442451032,
+          "color_attachment_sample_counts": 15
+        },
+        "11": {
+          "linear_tiling": 0,
+          "optimal_tiling": 0,
+          "buffer": 64,
+          "color_attachment_sample_counts": 0
+        },
+        "12": {
+          "linear_tiling": 0,
+          "optimal_tiling": 0,
+          "buffer": 64,
+          "color_attachment_sample_counts": 0
+        },
+        "13": {
+          "linear_tiling": 70650064653315,
+          "optimal_tiling": 70376260488323,
+          "buffer": 6442451032,
+          "color_attachment_sample_counts": 15
+        },
+        "14": {
+          "linear_tiling": 70650064653315,
+          "optimal_tiling": 70375186746499,
+          "buffer": 6442451032,
+          "color_attachment_sample_counts": 15
+        },
+        "15": {
+          "linear_tiling": 70368744297473,
+          "optimal_tiling": 70368744297473,
+          "buffer": 8,
+          "color_attachment_sample_counts": 0
+        },
+        "16": {
+          "linear_tiling": 70650064657667,
+          "optimal_tiling": 70375186750851,
+          "buffer": 6442451032,
+          "color_attachment_sample_counts": 15
+        },
+        "17": {
+          "linear_tiling": 70650064657667,
+          "optimal_tiling": 70375186750851,
+          "buffer": 6442451032,
+          "color_attachment_sample_counts": 15
+        },
+        "18": {
+          "linear_tiling": 0,
+          "optimal_tiling": 0,
+          "buffer": 64,
+          "color_attachment_sample_counts": 0
+        },
+        "19": {
+          "linear_tiling": 0,
+          "optimal_tiling": 0,
+          "buffer": 64,
+          "color_attachment_sample_counts": 0
+        },
+        "20": {
+          "linear_tiling": 70650064653315,
+          "optimal_tiling": 70375186746499,
+          "buffer": 6442451032,
+          "color_attachment_sample_counts": 15
+        },
+        "21": {
+          "linear_tiling": 70650064653315,
+          "optimal_tiling": 70375186746499,
+          "buffer": 6442451032,
+          "color_attachment_sample_counts": 15
+        },
+        "23": {
+          "linear_tiling": 0,
+          "optimal_tiling": 0,
+          "buffer": 64,
+          "color_attachment_sample_counts": 0
+        },
+        "24": {
+          "linear_tiling": 0,
+          "optimal_tiling": 0,
+          "buffer": 64,
+          "color_attachment_sample_counts": 0
+        },
+        "25": {
+          "linear_tiling": 0,
+          "optimal_tiling": 0,
+          "buffer": 64,
+          "color_attachment_sample_counts": 0
+        },
+        "26": {
+          "linear_tiling": 0,
+          "optimal_tiling": 0,
+          "buffer": 64,
+          "color_attachment_sample_counts": 0
+        },
+        "27": {
+          "linear_tiling": 0,
+          "optimal_tiling": 0,
+          "buffer": 64,
+          "color_attachment_sample_counts": 0
+        },
+        "28": {
+          "linear_tiling": 0,
+          "optimal_tiling": 0,
+          "buffer": 64,
+          "color_attachment_sample_counts": 0
+        },
+        "37": {
+          "linear_tiling": 70650064657667,
+          "optimal_tiling": 70375186750851,
+          "buffer": 6442451032,
+          "color_attachment_sample_counts": 15
+        },
+        "38": {
+          "linear_tiling": 70650064657667,
+          "optimal_tiling": 70375186750851,
+          "buffer": 6442451032,
+          "color_attachment_sample_counts": 15
+        },
+        "39": {
+          "linear_tiling": 0,
+          "optimal_tiling": 0,
+          "buffer": 64,
+          "color_attachment_sample_counts": 0
+        },
+        "40": {
+          "linear_tiling": 0,
+          "optimal_tiling": 0,
+          "buffer": 64,
+          "color_attachment_sample_counts": 0
+        },
+        "41": {
+          "linear_tiling": 70650064653315,
+          "optimal_tiling": 70375186746499,
+          "buffer": 6442451032,
+          "color_attachment_sample_counts": 15
+        },
+        "42": {
+          "linear_tiling": 70650064653315,
+          "optimal_tiling": 70375186746499,
+          "buffer": 6442451032,
+          "color_attachment_sample_counts": 15
+        },
+        "43": {
+          "linear_tiling": 70643622206721,
+          "optimal_tiling": 70368744299905,
+          "buffer": 8,
+          "color_attachment_sample_counts": 15
+        },
+        "44": {
+          "linear_tiling": 70650064657667,
+          "optimal_tiling": 70375186750851,
+          "buffer": 6442451032,
+          "color_attachment_sample_counts": 15
+        },
+        "50": {
+          "linear_tiling": 70643622206721,
+          "optimal_tiling": 70368744299905,
+          "buffer": 8,
+          "color_attachment_sample_counts": 15
+        },
+        "58": {
+          "linear_tiling": 70643622206721,
+          "optimal_tiling": 70368744299905,
+          "buffer": 72,
+          "color_attachment_sample_counts": 15
+        },
+        "62": {
+          "linear_tiling": 70368744293377,
+          "optimal_tiling": 70368744293377,
+          "buffer": 72,
+          "color_attachment_sample_counts": 0
+        },
+        "64": {
+          "linear_tiling": 70650064657667,
+          "optimal_tiling": 70375186750851,
+          "buffer": 6442451032,
+          "color_attachment_sample_counts": 15
+        },
+        "65": {
+          "linear_tiling": 0,
+          "optimal_tiling": 0,
+          "buffer": 64,
+          "color_attachment_sample_counts": 0
+        },
+        "68": {
+          "linear_tiling": 70650064653315,
+          "optimal_tiling": 70375186746499,
+          "buffer": 6442451032,
+          "color_attachment_sample_counts": 15
+        },
+        "70": {
+          "linear_tiling": 70650064657667,
+          "optimal_tiling": 70375186750851,
+          "buffer": 6442451032,
+          "color_attachment_sample_counts": 15
+        },
+        "71": {
+          "linear_tiling": 70650064657667,
+          "optimal_tiling": 70375186750851,
+          "buffer": 6442451032,
+          "color_attachment_sample_counts": 15
+        },
+        "72": {
+          "linear_tiling": 0,
+          "optimal_tiling": 0,
+          "buffer": 64,
+          "color_attachment_sample_counts": 0
+        },
+        "73": {
+          "linear_tiling": 0,
+          "optimal_tiling": 0,
+          "buffer": 64,
+          "color_attachment_sample_counts": 0
+        },
+        "74": {
+          "linear_tiling": 70650064653315,
+          "optimal_tiling": 70375186746499,
+          "buffer": 6442451032,
+          "color_attachment_sample_counts": 15
+        },
+        "75": {
+          "linear_tiling": 70650064653315,
+          "optimal_tiling": 70375186746499,
+          "buffer": 6442451032,
+          "color_attachment_sample_counts": 15
+        },
+        "76": {
+          "linear_tiling": 70650064657667,
+          "optimal_tiling": 70375186750851,
+          "buffer": 6442451032,
+          "color_attachment_sample_counts": 15
+        },
+        "77": {
+          "linear_tiling": 70650064657667,
+          "optimal_tiling": 70375186750851,
+          "buffer": 6442451032,
+          "color_attachment_sample_counts": 15
+        },
+        "78": {
+          "linear_tiling": 70650064657667,
+          "optimal_tiling": 70375186750851,
+          "buffer": 6442451032,
+          "color_attachment_sample_counts": 15
+        },
+        "79": {
+          "linear_tiling": 0,
+          "optimal_tiling": 0,
+          "buffer": 64,
+          "color_attachment_sample_counts": 0
+        },
+        "80": {
+          "linear_tiling": 0,
+          "optimal_tiling": 0,
+          "buffer": 64,
+          "color_attachment_sample_counts": 0
+        },
+        "81": {
+          "linear_tiling": 70650064653315,
+          "optimal_tiling": 70375186746499,
+          "buffer": 6442451032,
+          "color_attachment_sample_counts": 15
+        },
+        "82": {
+          "linear_tiling": 70650064653315,
+          "optimal_tiling": 70375186746499,
+          "buffer": 6442451032,
+          "color_attachment_sample_counts": 15
+        },
+        "83": {
+          "linear_tiling": 70650064657667,
+          "optimal_tiling": 70375186750851,
+          "buffer": 6442451032,
+          "color_attachment_sample_counts": 15
+        },
+        "84": {
+          "linear_tiling": 0,
+          "optimal_tiling": 0,
+          "buffer": 64,
+          "color_attachment_sample_counts": 0
+        },
+        "85": {
+          "linear_tiling": 0,
+          "optimal_tiling": 0,
+          "buffer": 64,
+          "color_attachment_sample_counts": 0
+        },
+        "86": {
+          "linear_tiling": 0,
+          "optimal_tiling": 0,
+          "buffer": 64,
+          "color_attachment_sample_counts": 0
+        },
+        "87": {
+          "linear_tiling": 0,
+          "optimal_tiling": 0,
+          "buffer": 64,
+          "color_attachment_sample_counts": 0
+        },
+        "88": {
+          "linear_tiling": 0,
+          "optimal_tiling": 0,
+          "buffer": 64,
+          "color_attachment_sample_counts": 0
+        },
+        "89": {
+          "linear_tiling": 0,
+          "optimal_tiling": 0,
+          "buffer": 64,
+          "color_attachment_sample_counts": 0
+        },
+        "90": {
+          "linear_tiling": 0,
+          "optimal_tiling": 0,
+          "buffer": 64,
+          "color_attachment_sample_counts": 0
+        },
+        "91": {
+          "linear_tiling": 70650064657667,
+          "optimal_tiling": 70375186750851,
+          "buffer": 6442451032,
+          "color_attachment_sample_counts": 15
+        },
+        "92": {
+          "linear_tiling": 70650064657667,
+          "optimal_tiling": 70375186750851,
+          "buffer": 6442451032,
+          "color_attachment_sample_counts": 15
+        },
+        "93": {
+          "linear_tiling": 0,
+          "optimal_tiling": 0,
+          "buffer": 64,
+          "color_attachment_sample_counts": 0
+        },
+        "94": {
+          "linear_tiling": 0,
+          "optimal_tiling": 0,
+          "buffer": 64,
+          "color_attachment_sample_counts": 0
+        },
+        "95": {
+          "linear_tiling": 70650064653315,
+          "optimal_tiling": 70375186746499,
+          "buffer": 6442451032,
+          "color_attachment_sample_counts": 15
+        },
+        "96": {
+          "linear_tiling": 70650064653315,
+          "optimal_tiling": 70375186746499,
+          "buffer": 6442451032,
+          "color_attachment_sample_counts": 15
+        },
+        "97": {
+          "linear_tiling": 70650064657667,
+          "optimal_tiling": 70375186750851,
+          "buffer": 6442451032,
+          "color_attachment_sample_counts": 15
+        },
+        "98": {
+          "linear_tiling": 70650064653319,
+          "optimal_tiling": 70375186746503,
+          "buffer": 6442451064,
+          "color_attachment_sample_counts": 15
+        },
+        "99": {
+          "linear_tiling": 70650064653319,
+          "optimal_tiling": 70375186746503,
+          "buffer": 6442451064,
+          "color_attachment_sample_counts": 15
+        },
+        "100": {
+          "linear_tiling": 70650064657671,
+          "optimal_tiling": 70375186750855,
+          "buffer": 6442451064,
+          "color_attachment_sample_counts": 15
+        },
+        "101": {
+          "linear_tiling": 70650064653315,
+          "optimal_tiling": 70375186746499,
+          "buffer": 6442451032,
+          "color_attachment_sample_counts": 15
+        },
+        "102": {
+          "linear_tiling": 70650064653315,
+          "optimal_tiling": 70375186746499,
+          "buffer": 6442451032,
+          "color_attachment_sample_counts": 15
+        },
+        "103": {
+          "linear_tiling": 70650064657667,
+          "optimal_tiling": 70375186750851,
+          "buffer": 6442451032,
+          "color_attachment_sample_counts": 15
+        },
+        "104": {
+          "linear_tiling": 0,
+          "optimal_tiling": 0,
+          "buffer": 72,
+          "color_attachment_sample_counts": 0
+        },
+        "105": {
+          "linear_tiling": 0,
+          "optimal_tiling": 0,
+          "buffer": 72,
+          "color_attachment_sample_counts": 0
+        },
+        "106": {
+          "linear_tiling": 0,
+          "optimal_tiling": 0,
+          "buffer": 72,
+          "color_attachment_sample_counts": 0
+        },
+        "107": {
+          "linear_tiling": 70650064653315,
+          "optimal_tiling": 70375186746499,
+          "buffer": 6442451032,
+          "color_attachment_sample_counts": 15
+        },
+        "108": {
+          "linear_tiling": 70650064653315,
+          "optimal_tiling": 70375186746499,
+          "buffer": 6442451032,
+          "color_attachment_sample_counts": 15
+        },
+        "109": {
+          "linear_tiling": 70650064657667,
+          "optimal_tiling": 70375186750851,
+          "buffer": 6442451032,
+          "color_attachment_sample_counts": 15
+        },
+        "110": {
+          "linear_tiling": 70375186677766,
+          "optimal_tiling": 70375186677766,
+          "buffer": 6442451056,
+          "color_attachment_sample_counts": 0
+        },
+        "122": {
+          "linear_tiling": 70650064657667,
+          "optimal_tiling": 70375186750851,
+          "buffer": 6442451032,
+          "color_attachment_sample_counts": 15
+        },
+        "123": {
+          "linear_tiling": 70368744297473,
+          "optimal_tiling": 70368744297473,
+          "buffer": 8,
+          "color_attachment_sample_counts": 0
+        },
+        "124": {
+          "linear_tiling": 0,
+          "optimal_tiling": 13510807472168449,
+          "buffer": 0,
+          "color_attachment_sample_counts": 0
+        },
+        "126": {
+          "linear_tiling": 0,
+          "optimal_tiling": 13510807472168449,
+          "buffer": 0,
+          "color_attachment_sample_counts": 0
+        },
+        "127": {
+          "linear_tiling": 0,
+          "optimal_tiling": 54043195528564225,
+          "buffer": 0,
+          "color_attachment_sample_counts": 0
+        },
+        "129": {
+          "linear_tiling": 0,
+          "optimal_tiling": 67554003000614401,
+          "buffer": 0,
+          "color_attachment_sample_counts": 0
+        },
+        "130": {
+          "linear_tiling": 0,
+          "optimal_tiling": 67554003000614401,
+          "buffer": 0,
+          "color_attachment_sample_counts": 0
+        },
+        "133": {
+          "linear_tiling": 70368744297473,
+          "optimal_tiling": 70368744297473,
+          "buffer": 0,
+          "color_attachment_sample_counts": 0
+        },
+        "134": {
+          "linear_tiling": 70368744297473,
+          "optimal_tiling": 70368744297473,
+          "buffer": 0,
+          "color_attachment_sample_counts": 0
+        },
+        "135": {
+          "linear_tiling": 70368744297473,
+          "optimal_tiling": 70368744297473,
+          "buffer": 0,
+          "color_attachment_sample_counts": 0
+        },
+        "136": {
+          "linear_tiling": 70368744297473,
+          "optimal_tiling": 70368744297473,
+          "buffer": 0,
+          "color_attachment_sample_counts": 0
+        },
+        "137": {
+          "linear_tiling": 70368744297473,
+          "optimal_tiling": 70368744297473,
+          "buffer": 0,
+          "color_attachment_sample_counts": 0
+        },
+        "138": {
+          "linear_tiling": 70368744297473,
+          "optimal_tiling": 70368744297473,
+          "buffer": 0,
+          "color_attachment_sample_counts": 0
+        },
+        "139": {
+          "linear_tiling": 70368744297473,
+          "optimal_tiling": 70368744297473,
+          "buffer": 0,
+          "color_attachment_sample_counts": 0
+        },
+        "140": {
+          "linear_tiling": 70368744297473,
+          "optimal_tiling": 70368744297473,
+          "buffer": 0,
+          "color_attachment_sample_counts": 0
+        },
+        "141": {
+          "linear_tiling": 70368744297473,
+          "optimal_tiling": 70368744297473,
+          "buffer": 0,
+          "color_attachment_sample_counts": 0
+        },
+        "142": {
+          "linear_tiling": 70368744297473,
+          "optimal_tiling": 70368744297473,
+          "buffer": 0,
+          "color_attachment_sample_counts": 0
+        },
+        "143": {
+          "linear_tiling": 70368744297473,
+          "optimal_tiling": 70368744297473,
+          "buffer": 0,
+          "color_attachment_sample_counts": 0
+        },
+        "144": {
+          "linear_tiling": 70368744297473,
+          "optimal_tiling": 70368744297473,
+          "buffer": 0,
+          "color_attachment_sample_counts": 0
+        },
+        "145": {
+          "linear_tiling": 70368744297473,
+          "optimal_tiling": 70368744297473,
+          "buffer": 0,
+          "color_attachment_sample_counts": 0
+        },
+        "146": {
+          "linear_tiling": 70368744297473,
+          "optimal_tiling": 70368744297473,
+          "buffer": 0,
+          "color_attachment_sample_counts": 0
+        },
+        "147": {
+          "linear_tiling": 70368744297473,
+          "optimal_tiling": 70368744297473,
+          "buffer": 0,
+          "color_attachment_sample_counts": 0
+        },
+        "148": {
+          "linear_tiling": 70368744297473,
+          "optimal_tiling": 70368744297473,
+          "buffer": 0,
+          "color_attachment_sample_counts": 0
+        },
+        "149": {
+          "linear_tiling": 70368744297473,
+          "optimal_tiling": 70368744297473,
+          "buffer": 0,
+          "color_attachment_sample_counts": 0
+        },
+        "150": {
+          "linear_tiling": 70368744297473,
+          "optimal_tiling": 70368744297473,
+          "buffer": 0,
+          "color_attachment_sample_counts": 0
+        },
+        "151": {
+          "linear_tiling": 70368744297473,
+          "optimal_tiling": 70368744297473,
+          "buffer": 0,
+          "color_attachment_sample_counts": 0
+        },
+        "152": {
+          "linear_tiling": 70368744297473,
+          "optimal_tiling": 70368744297473,
+          "buffer": 0,
+          "color_attachment_sample_counts": 0
+        },
+        "153": {
+          "linear_tiling": 70368744297473,
+          "optimal_tiling": 70368744297473,
+          "buffer": 0,
+          "color_attachment_sample_counts": 0
+        },
+        "154": {
+          "linear_tiling": 70368744297473,
+          "optimal_tiling": 70368744297473,
+          "buffer": 0,
+          "color_attachment_sample_counts": 0
+        },
+        "155": {
+          "linear_tiling": 70368744297473,
+          "optimal_tiling": 70368744297473,
+          "buffer": 0,
+          "color_attachment_sample_counts": 0
+        },
+        "156": {
+          "linear_tiling": 70368744297473,
+          "optimal_tiling": 70368744297473,
+          "buffer": 0,
+          "color_attachment_sample_counts": 0
+        },
+        "157": {
+          "linear_tiling": 70368744297473,
+          "optimal_tiling": 70368744297473,
+          "buffer": 0,
+          "color_attachment_sample_counts": 0
+        },
+        "158": {
+          "linear_tiling": 70368744297473,
+          "optimal_tiling": 70368744297473,
+          "buffer": 0,
+          "color_attachment_sample_counts": 0
+        },
+        "159": {
+          "linear_tiling": 70368744297473,
+          "optimal_tiling": 70368744297473,
+          "buffer": 0,
+          "color_attachment_sample_counts": 0
+        },
+        "160": {
+          "linear_tiling": 70368744297473,
+          "optimal_tiling": 70368744297473,
+          "buffer": 0,
+          "color_attachment_sample_counts": 0
+        },
+        "161": {
+          "linear_tiling": 70368744297473,
+          "optimal_tiling": 70368744297473,
+          "buffer": 0,
+          "color_attachment_sample_counts": 0
+        },
+        "162": {
+          "linear_tiling": 70368744297473,
+          "optimal_tiling": 70368744297473,
+          "buffer": 0,
+          "color_attachment_sample_counts": 0
+        },
+        "163": {
+          "linear_tiling": 70368744297473,
+          "optimal_tiling": 70368744297473,
+          "buffer": 0,
+          "color_attachment_sample_counts": 0
+        },
+        "164": {
+          "linear_tiling": 70368744297473,
+          "optimal_tiling": 70368744297473,
+          "buffer": 0,
+          "color_attachment_sample_counts": 0
+        },
+        "165": {
+          "linear_tiling": 70368744297473,
+          "optimal_tiling": 70368744297473,
+          "buffer": 0,
+          "color_attachment_sample_counts": 0
+        },
+        "166": {
+          "linear_tiling": 70368744297473,
+          "optimal_tiling": 70368744297473,
+          "buffer": 0,
+          "color_attachment_sample_counts": 0
+        },
+        "167": {
+          "linear_tiling": 70368744297473,
+          "optimal_tiling": 70368744297473,
+          "buffer": 0,
+          "color_attachment_sample_counts": 0
+        },
+        "168": {
+          "linear_tiling": 70368744297473,
+          "optimal_tiling": 70368744297473,
+          "buffer": 0,
+          "color_attachment_sample_counts": 0
+        },
+        "169": {
+          "linear_tiling": 70368744297473,
+          "optimal_tiling": 70368744297473,
+          "buffer": 0,
+          "color_attachment_sample_counts": 0
+        },
+        "170": {
+          "linear_tiling": 70368744297473,
+          "optimal_tiling": 70368744297473,
+          "buffer": 0,
+          "color_attachment_sample_counts": 0
+        },
+        "171": {
+          "linear_tiling": 70368744297473,
+          "optimal_tiling": 70368744297473,
+          "buffer": 0,
+          "color_attachment_sample_counts": 0
+        },
+        "172": {
+          "linear_tiling": 70368744297473,
+          "optimal_tiling": 70368744297473,
+          "buffer": 0,
+          "color_attachment_sample_counts": 0
+        },
+        "173": {
+          "linear_tiling": 70368744297473,
+          "optimal_tiling": 70368744297473,
+          "buffer": 0,
+          "color_attachment_sample_counts": 0
+        },
+        "174": {
+          "linear_tiling": 70368744297473,
+          "optimal_tiling": 70368744297473,
+          "buffer": 0,
+          "color_attachment_sample_counts": 0
+        },
+        "175": {
+          "linear_tiling": 70368744297473,
+          "optimal_tiling": 70368744297473,
+          "buffer": 0,
+          "color_attachment_sample_counts": 0
+        },
+        "176": {
+          "linear_tiling": 70368744297473,
+          "optimal_tiling": 70368744297473,
+          "buffer": 0,
+          "color_attachment_sample_counts": 0
+        },
+        "177": {
+          "linear_tiling": 70368744297473,
+          "optimal_tiling": 70368744297473,
+          "buffer": 0,
+          "color_attachment_sample_counts": 0
+        },
+        "178": {
+          "linear_tiling": 70368744297473,
+          "optimal_tiling": 70368744297473,
+          "buffer": 0,
+          "color_attachment_sample_counts": 0
+        },
+        "179": {
+          "linear_tiling": 70368744297473,
+          "optimal_tiling": 70368744297473,
+          "buffer": 0,
+          "color_attachment_sample_counts": 0
+        },
+        "180": {
+          "linear_tiling": 70368744297473,
+          "optimal_tiling": 70368744297473,
+          "buffer": 0,
+          "color_attachment_sample_counts": 0
+        },
+        "181": {
+          "linear_tiling": 70368744297473,
+          "optimal_tiling": 70368744297473,
+          "buffer": 0,
+          "color_attachment_sample_counts": 0
+        },
+        "182": {
+          "linear_tiling": 70368744297473,
+          "optimal_tiling": 70368744297473,
+          "buffer": 0,
+          "color_attachment_sample_counts": 0
+        },
+        "183": {
+          "linear_tiling": 70368744297473,
+          "optimal_tiling": 70368744297473,
+          "buffer": 0,
+          "color_attachment_sample_counts": 0
+        },
+        "184": {
+          "linear_tiling": 70368744297473,
+          "optimal_tiling": 70368744297473,
+          "buffer": 0,
+          "color_attachment_sample_counts": 0
+        },
+        "1000470001": {
+          "linear_tiling": 70650064657667,
+          "optimal_tiling": 70375186750851,
+          "buffer": 6442450968,
+          "color_attachment_sample_counts": 15
+        }
+      }
+    },
+    "rgba4_opaque_black_swizzled": true,
+    "robust_buffer_access_update_after_bind": true,
+    "khr_format_feature_flags2": true,
+    "generated_commands": null,
+    "allocation": {
+      "max_memory_allocation_size": 2147483648,
+      "max_buffer_size": 4294967296
+    }
+  },
+  "policy": {
+    "pointer_domain": "ResidentTable",
+    "handle_domain": "Table",
+    "containment": "Contained",
+    "isolation": "On",
+    "framebuffer_fetch": "AcceptUnordered",
+    "unorm8_linear_filter": "Exact",
+    "sampling": "NativeDevice",
+    "float_maths": "Native",
+    "texel_conversion": "Device",
+    "half_rounding": "Native",
+    "nan_and_min_max": "Native",
+    "rounding_order": "Native",
+    "half_blend": "Device",
+    "padded_reads": "Alias"
+  }
+}

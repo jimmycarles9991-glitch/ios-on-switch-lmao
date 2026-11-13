@@ -15,15 +15,15 @@ void
 nvif_chan506f_gpfifo_push(struct nvif_chan *chan, bool main, u64 addr, u32 size, bool no_prefetch)
 {
 	u32 gpptr = chan->gpfifo.cur << 3;
+	u32 *entry = (u32 *)((u8 *)chan->gpfifo.map.ptr + gpptr);
 
 	if (WARN_ON(!chan->gpfifo.free))
 		return;
 
-	nvif_wr32(&chan->gpfifo, gpptr + 0, lower_32_bits(addr));
-	nvif_wr32(&chan->gpfifo, gpptr + 4, upper_32_bits(addr) |
-					    (main ? 0 : BIT(9)) |
-					    (size >> 2) << 10 |
-					    (no_prefetch ? BIT(31) : 0));
+	/* The ring is Normal WC memory; the kick publishes both words before GP_PUT. */
+	entry[0] = lower_32_bits(addr);
+	entry[1] = upper_32_bits(addr) | (main ? 0 : BIT(9)) | (size >> 2) << 10 |
+		   (no_prefetch ? BIT(31) : 0);
 
 	chan->gpfifo.cur = (chan->gpfifo.cur + 1) & chan->gpfifo.max;
 	chan->gpfifo.free--;

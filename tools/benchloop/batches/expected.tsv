@@ -1,0 +1,23 @@
+batch	experiment	row	what the result shows when the row holds
+cc1	cc-off	3D-G13	texels = the program's (control)
+cc1	cc-float	3D-G13	every texel 0.8,0.1,0.3,1.0 (SET_CONSTANT_COLOR_RENDERING with RF32 colour replaces the program's output)
+cc1	cc-unorm	3D-G13	every texel the constant in the encoding the kill name implies; a class error 0x138 names a missing pre-PS coverage setup
+cc1	cc-half	3D-G13	as cc-unorm, half colour
+cc1	cc-float-blend	3D-G13	source-over of the constant onto the fill
+cc1	cc-time-*	3D-G13	gpu ns per draw: on below off at 16 and 64 draws
+fvt1	fvt-disabled	3D-D6	one source over the fill (fill via triangle off)
+fvt1	fvt-all	3D-D6	two sources over the fill where both triangles widen to the quad
+fvt1	fvt-bbox	3D-D6	as fvt-all, bounding-box mode
+fvt1	fvt-time-*	3D-D6	gpu ns per draw: bbox below off
+decompress1	dec-none	3D-G10	texels = the program's (control)
+decompress1	dec-mrt0	3D-G10	texels = the program's and no class error: DECOMPRESS_SURFACE (0x02e0) MRT 0 is legal on the bound target
+decompress1	dec-mrt0-twice	3D-G10	as dec-mrt0
+resolvetie2	rt-*-2x-prod	2D-11	benchloop/4, run from an x1-hw3-bench checkout (resolve_verdict.py reads it): models.down 0 is one ties-down rounding of the pair mean, the store rule resolve.exact's 2x rests on
+resolvetie2	rt-*-4x-prod*	2D-11	models.down 0 on prod, -xpairs and -ypairs is one rounding (with the 4x sandwich cells, flips twodResolveSingleRounding4x); pair_x_down or pair_y_down 0 is two 2:1 steps, and 4x stays on resolve.twod
+resolvetie2	rt-*-sandwich*	2D-11	metal_mismatches 0 and a compare histogram of "0" only: the complement route is exact at that sample count
+resolvetie2	rt-*-not-1to1, rt-*-notonly, rt-*-invpoint	2D-11	controls, each an exact complement and a form carrying its rop and invert_grid; any miss means the ROP or the grid reading is wrong and the batch decides nothing
+resolvetie2	rt-sweep2-*, rt-sweep4-*	2D-11	a bilinear cell with models.up 0 gives Metal's rule directly at its origin; none means no sample mode, filter or origin does
+qmdchain	qc-ab	CS-3	benchloop qmdchain from an x1-hw4-t4 checkout and app: output words 0xa0, 0xb0 and counter 2, so one launch ran a dependent QMD (NAK's QMD 1.7 fields)
+qmdchain	qc-ab-off	CS-3	control: 0xa0 only and counter 1, a pointer without SCHEDULE_ENABLE schedules nothing
+qmdchain	qc-abc	CS-3	0xa0, 0xb0, 0xc0 and counter 3: a dependent QMD schedules its own
+qmdchain	qc-steer	CS-3	0xa0, 0xb0, 0xd0 and counter 3 (analyse: expected) means the scheduler read the pointer QMD 0's kernel wrote, so a kernel can steer and end a GPU-side loop of dispatches; 0xc0 instead (otherwise) means it kept the CPU's

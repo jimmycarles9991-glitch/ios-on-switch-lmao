@@ -47,6 +47,7 @@ struct Inputs {
     Matrix accessibility = kIdentity;        // SwapSetColorMatrix, location 2: colour filters
     uint32_t correction = kUnity16;          // SetBrightnessCorrection, 16.16
     uint32_t accessibilityScale = kUnity16;  // SetParameter 3, 16.16: Reduce White Point
+    uint32_t edrScale = kUnity16;            // SetParameter 6, 16.16: Core Animation's SDR dimming (1/EDR headroom)
     uint32_t remapMode = kRemapNormal;
     uint32_t contrast = kUnity16;  // SetContrast, 16.16; 0 is neutral
     bool blank = false;            // a blank swap: the head shows black whatever the windows scan
@@ -236,6 +237,7 @@ inline void build(const Inputs &in, Tables &out)
         matrix = multiply(in.harmony, matrix);
     uint64_t scale = static_cast<uint64_t>(in.correction ? in.correction : kUnity16) *
                      (in.accessibilityScale ? in.accessibilityScale : kUnity16);
+    scale = scale * (in.edrScale ? in.edrScale : kUnity16) >> 16;
     if (scale > static_cast<uint64_t>(kOne))
         scale = static_cast<uint64_t>(kOne);
     matrix = scaled(matrix, static_cast<Q32>(scale));

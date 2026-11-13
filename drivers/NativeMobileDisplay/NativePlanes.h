@@ -41,8 +41,11 @@
 //    the frame boundary: mainline dc.c tegra_dc_commit's comment, L4T "assemby -> arm -> active"): one UPDATE write and one
 //    ACT_REQ write for several windows latch them at one boundary, never half-written. The CSC and filter registers (0x500-
 //    0x638) are not shadowed (hekate di.h): written only while the window is off.
-//  - [T] YCbCr 4:2:0 semi-planar with Cb first (NV12, IOSurface '420v'/'420f') is COLOR_DEPTH 43 (mainline plane.c and hekate
-//    di.h; L4T's tegra_dc_ext.h names 42 and 43 the other way round).
+//  - [V] YCbCr 4:2:0 semi-planar with Cb first (NV12, IOSurface '420v'/'420f') is COLOR_DEPTH 43 (mainline plane.c and
+//    hekate di.h; L4T's tegra_dc_ext.h agrees once its names are read from the word's top, SwitchWindowCaps.h; HW Test
+//    display.x1.window_formats shows it on the panel); 4:2:2 semi-planar with Cb first (NV16, '422v'/'422f',
+//    what Core Animation's IOSurfaceAccelerator copies of a detached video are on iPadOS 27) is 45 by the same table, and
+//    mainline's T210 overlay windows list NV16 (dc.c: tegra210_dc_soc_info takes tegra114_overlay_formats).
 //  - [T] a block-linear surface (WINBUF_SURFACE_KIND BLOCK with its block height; LINE_STRIDE its bytes across) is fetched
 //    from START with the source origin in ADDR_H_OFFSET (bytes) and ADDR_V_OFFSET (lines), as mainline dc.c programs one
 //    whenever supports_block_linear (T210 sets it); window A already scans one so (kBlockSurfaceKind).
@@ -51,6 +54,8 @@
 #include <string.h>
 
 #include "../TegraGM20B/TegraGM20BLayout.h"
+#include "../TegraVIC/SwitchSurfaceColor.h"
+#include "SwitchWindowCaps.h"
 
 namespace native_planes {
 
@@ -95,6 +100,7 @@ constexpr uint32_t fourcc(char a, char b, char c, char d)
 // An IOSurface as the kernel's IOSurface describes it (plane fields for planar formats only).
 struct Surface {
     uint32_t format = 0, planes = 0, width = 0, height = 0;
+    uint32_t colorMatrix = 0, transfer = 0, primaries = 0, chromaTop = 0, chromaBottom = 0;
     uint64_t allocation = 0, descriptorBytes = 0;
     uint64_t offset[2] = {};
     uint32_t stride[2] = {}, planeHeight[2] = {};
@@ -105,12 +111,15 @@ enum Kind {
     kKindBgra,
     kKindRgba,
     kKindNv12Video,
-    kKindNv12Full
+    kKindNv12Full,
+    kKindNv16Video,
+    kKindNv16Full,
+    kKindExtraYuv  // SwitchWindowCaps.h
 };
 
 // The formats a window scans: 32-bit BGRA (also its lossless-compressed spelling '&BGA', which the GPU here writes as plain
-// rows), RGBA, and 8-bit 4:2:0 two-plane video or full range. Anything else (10-bit 'x420'/'xf20', 4:2:2, 'w30r', compressed
-// YUV) has no window format on T210.
+// rows), RGBA, and 8-bit 4:2:0 and 4:2:2 two-plane video or full range. Anything else (10-bit 'x420'/'xf20', 'w30r',
+// compressed YUV) has no window format on T210.
 inline Kind kindOf(uint32_t format, uint32_t planes)
 {
     if ((format == fourcc('B', 'G', 'R', 'A') && !planes) || (format == fourcc('&', 'B', 'G', 'A') && planes <= 1))
@@ -121,6 +130,12 @@ inline Kind kindOf(uint32_t format, uint32_t planes)
         return kKindNv12Video;
     if (format == fourcc('4', '2', '0', 'f') && planes == 2)
         return kKindNv12Full;
+    if (format == fourcc('4', '2', '2', 'v') && planes == 2)
+        return kKindNv16Video;
+    if (format == fourcc('4', '2', '2', 'f') && planes == 2)
+        return kKindNv16Full;
+    if (switch_window_caps::find(format, planes))
+        return kKindExtraYuv;
     return kKindNone;
 }
 
@@ -129,18 +144,29 @@ inline bool isNv12(Kind k)
     return k == kKindNv12Video || k == kKindNv12Full;
 }
 
+inline bool isNv16(Kind k)
+{
+    return k == kKindNv16Video || k == kKindNv16Full;
+}
+
+inline bool isYuv(Kind k)
+{
+    return isNv12(k) || isNv16(k) || k == kKindExtraYuv;
+}
+
 // --- What the display publishes (and so what Core Animation can send) ------------------------------------------------------
-// A10X's own values where the DC can do as much (IOMFBScalingLimits 4/4/4/4 [V]); MaxSrcRectWidth 1920 (CA's own default)
-// because the V filter's line buffer on T210 is not documented in any source, so wider sources are scaled by the IOSA copy
-// first, and buffers up to 2048 x 2048 (a 1080p frame; anything bigger is copied by it too); plane bases 64-byte aligned (the DC's pitch alignment, mainline pitch_align); rows 128-byte aligned (what the GPU
-// renders in place, already published; video pool rows are 256). Two layers, as A10X: the UI and one detached layer.
+// A10X's own scaling where the DC can do as much (IOMFBScalingLimits 4/4/4/4 [V]), YUV down to SwitchWindowCaps.h's
+// fraction; sources and buffers up to its 4096 x 2304; plane bases 64-byte aligned (the DC's pitch alignment, mainline
+// pitch_align); rows 128-byte aligned (what the GPU renders in place, already published; video pool rows are 256).
+// Three windows: the UI and two independently fenced detached layers.
 struct Limits {
     uint32_t minScaleFraction = 4, maxScale = 4;  // 1/4 .. 4x on each axis
-    uint32_t maxSrcRectWidth = 1920;
-    uint64_t maxSrcRectTotal = 1920ULL * 1088;
-    uint32_t maxSrcBuffer = 2048;  // so rows x stride of any source fits one 20 MiB slot (8 KiB x 2048 = 16 MiB)
+    uint32_t yuvMinScaleFraction = switch_window_caps::kYuvMinScaleFraction;
+    uint32_t maxSrcRectWidth = switch_window_caps::kSourceWidth;
+    uint64_t maxSrcRectTotal = switch_window_caps::kSourcePixels;
+    uint32_t maxSrcBuffer = switch_window_caps::kSourceWidth, maxSrcBufferHeight = switch_window_caps::kSourceHeight;
     uint32_t planeBaseAlignment = 64, strideAlignment = 128;
-    uint32_t maxLayers = 2;
+    uint32_t maxLayers = 3;
     bool packedYuvUnsupported = false;    // published as IOMFBYUVPackedUnSupported (24B119 only, see kLimits24B119)
     bool compressionUnsupported = false;  // published as IOMFBMaxSrcPixels' IOMFBCompressionSupport 0 (24B119 only)
 };
@@ -156,6 +182,16 @@ struct Limits {
 //    IOMFBCompressionSupport is 0.
 // Window B scans neither, so 24B119 publishes both. 10-bit biplanar ('x420') and 'RGhA' have no such key: 24B119 gates
 // the first by IOMFBYUVSupportKey alone (all YUV) and the second by chip id and the surface's transfer function.
+// IOMFBYUVPackedUnSupported also makes every scaler copy of a 4:2:0 detached layer 4:2:2 ('422v', '422f'): detach_layer
+// (0x18443c44c) converts the copy's format when detachable_layer_impl asks for a copy (mode 2) and supports_packed_yuv
+// (display+0x75d6, update_display_limits 0x1844e9844) is false; backboardd logs it as "CADisplay 1 Packed YUV Support
+// Enabled: NO". Window B and VIC take 4:2:2 for that. The display+0x6bf4 chroma mode that detach_layer also reads
+// (0x18443ba04) comes from the chip id alone (update_display_limits 0x1844e9828: 2, 4:4:4, on 0x7000; otherwise 0).
+// detach_layer's other two 4:2:2 triggers never fire on this display: needs_420_transform (0x18443c3c4) takes the copy's
+// width (0x18443b9b8) and wants more than display+0x7700, 2160 for chip 0x8030 (0x1844e9640), and nothing in 24B119
+// sets the flag bit 29 that 0x18443c378 tests (render_contents_background builds the flags at 0x18437cc6c-0x18437ce98,
+// OGLDisplay::detach_layer adds bit 22, detach_layer keeps bits 31-27, 7 and 3-0 of the layer's earlier flags and
+// detachable_layer_impl adds bits 7 and 23-27).
 constexpr Limits kLimits24B119 = {.packedYuvUnsupported = true, .compressionUnsupported = true};
 
 // The row and plane-base alignment published for every surface iPadOS sizes for this display (Core Animation's
@@ -238,7 +274,7 @@ enum : uint32_t {
 constexpr uint32_t kWinEnable = 1u << 30, kCscEnable = 1u << 18, kHFilterOn = 1u << 8, kVFilterOn = 1u << 10;
 // WINBUF_SURFACE_KIND: BLOCK, with the block height (GOBs, log2) in bits 6:4 (mainline dc.c DC_WINBUF_SURFACE_KIND_*).
 constexpr uint32_t kSurfaceKindBlock = 2, kSurfaceKindBlockHeightShift = 4;
-constexpr uint32_t kDepthB8G8R8A8 = 12, kDepthR8G8B8A8 = 13, kDepthYCbCr420SP = 43;
+constexpr uint32_t kDepthB8G8R8A8 = 12, kDepthR8G8B8A8 = 13, kDepthYCbCr420SP = 43, kDepthYCbCr422SP = 45;
 constexpr uint32_t kBlendBypass = 1u << 24, kBlendPremultiplied = 0x00ffff00u, kBlendOver = 0x262;
 // The TRM's default filter taps (mainline dc.c tegra_dc_setup_window): 6-tap H, 2-tap V (128 - 8i).
 constexpr uint32_t kHFilterTaps[16] = {0x00008000, 0x3e087ce1, 0x3b117ac1, 0x591b73aa, 0x57256d9a, 0x552f668b,
@@ -253,23 +289,25 @@ inline uint32_t vFilterTap(unsigned i)
 // Y'CbCr to RGB (WIN_CSC_YOF..KVB, 0x611-0x618): YOF s.7.0, KYRGB 2.8, KUR/KVR/KUB/KVB s.2.8, KUG/KVG s.1.8 (tegra_dc_ext.h).
 // Rounded from the standards' Kr/Kb with video range scaled by 255/219 (luma) and 255/224 (chroma); tests check them against
 // the float conversion, and BT.601 video range within one step of the TRM default every source programs (f0 12a 0 198 39b 32f
-// 204 0). Which standard: BT.709 from 1280 wide or 720 high up, BT.601 below (CoreVideo's default for untagged buffers, the
-// rule TegraVIC uses) [I: the kernel does not read the surface's YCbCrMatrix attachment].
+// 204 0). Untagged input uses the same conservative BT.601 policy as VIC.
 enum Matrix {
     kBt601,
-    kBt709
+    kBt709,
+    kBt2020
 };
 
-constexpr uint32_t kCsc[2][2][8] = {
+constexpr uint32_t kCsc[3][2][8] = {
     {{0x0f0, 0x12a, 0x000, 0x199, 0x39c, 0x330, 0x204, 0x000},
      {0x000, 0x100, 0x000, 0x167, 0x3a8, 0x349, 0x1c6, 0x000}},
     {{0x0f0, 0x12a, 0x000, 0x1cb, 0x3c9, 0x378, 0x21d, 0x000},
      {0x000, 0x100, 0x000, 0x193, 0x3d0, 0x388, 0x1db, 0x000}},
+    {{0x0f0, 0x12a, 0x000, 0x1ae, 0x3d0, 0x359, 0x224, 0x000},
+     {0x000, 0x100, 0x000, 0x179, 0x3d6, 0x36e, 0x1e2, 0x000}},
 };
 
 inline Matrix matrixOf(const Surface &s)
 {
-    return s.width >= 1280 || s.height >= 720 ? kBt709 : kBt601;
+    return s.colorMatrix == 2 ? kBt709 : s.colorMatrix == 3 ? kBt2020 : kBt601;
 }
 
 // DDA increment, 4.12, as L4T computes it (in / out, window.c compute_dda_inc), so a 4x layer is exactly 4.0 (mainline's
@@ -292,6 +330,8 @@ struct Image {
     bool yuv = false;
     Matrix matrix = kBt601;
     bool fullRange = false;
+    bool convert = false;  // chroma sited where the window does not sample it: VIC resamples it into BGRA first
+    uint8_t byteSwap = 0, lumaBytes = 0, fetchBytes = 0;  // SwitchWindowCaps.h's formats; 0 for the other kinds
 };
 
 // One axis of a window: the destination [d, d + dn) on a screen [0, screen), the source [s, s + sn) of a surface `limit`
@@ -333,16 +373,18 @@ inline bool axisOf(int32_t s, int32_t sn, int32_t d, int32_t dn, uint32_t screen
     return a.initial <= 0xffff;
 }
 
-// A pitch surface's planes: each one's first source row, and the bytes the window reads from them.
-inline void pitchReads(const Surface &f, const Axis &x, const Axis &y, uint32_t bpp, Image &image)
+// A pitch surface's planes: each one's first source row, and the bytes the window reads from them. halfRows: the chroma
+// plane has a row for every two of luma (4:2:0).
+inline void pitchReads(const Surface &f, const Axis &x, const Axis &y, uint32_t bpp, bool halfRows, Image &image)
 {
     uint64_t low = UINT64_MAX;
     uint64_t high = 0;
     for (unsigned p = 0; p < (image.yuv ? 2u : 1u); ++p) {
         const uint64_t base = image.yuv ? f.offset[p] : 0;
         const uint64_t stride = f.stride[p];
-        const uint64_t row0 = p ? static_cast<uint64_t>(y.first) / 2 : static_cast<uint64_t>(y.first);
-        const uint64_t rows = p ? (static_cast<uint64_t>(y.count) + 1) / 2 : static_cast<uint64_t>(y.count);
+        const bool half = p && halfRows;
+        const uint64_t row0 = half ? static_cast<uint64_t>(y.first) / 2 : static_cast<uint64_t>(y.first);
+        const uint64_t rows = half ? (static_cast<uint64_t>(y.count) + 1) / 2 : static_cast<uint64_t>(y.count);
         image.start[p] = base + row0 * stride;
         const uint64_t a = image.start[p] + image.hOffset;
         const uint64_t b =
@@ -378,25 +420,30 @@ inline bool blockReads(const tgm_layout &b, const Surface &f, const Axis &y, Ima
     return image.readHigh <= ((f.descriptorBytes + 4095) & ~4095ULL);
 }
 
+#include "SwitchWindowFormatImage.h"
+
 // The image of a layer checkDetached accepted: the destination clipped to the display with the source cut exactly where
 // the clipped edge samples it. block: the surface's layout when the GPU renders it block-linear.
 inline bool imageOf(const Layer &l, uint32_t width, uint32_t height, Image &image, const tgm_layout *block = nullptr)
 {
+    if (l.kind == kKindExtraYuv)
+        return extraImageOf(l, width, height, image, block);
     image = Image();
-    image.yuv = isNv12(l.kind);
+    image.yuv = isYuv(l.kind);
+    image.convert = image.yuv && !switch_surface_dc_siting(l.surface.chromaTop, l.surface.chromaBottom);
     const uint32_t bpp = image.yuv ? 1 : 4;  // bytes per pixel the offsets and PRESCALED count (luma)
     const uint32_t hMax = image.yuv ? 8 : 4;
-    const uint32_t vMax = 15;  // DDA limits (4:2:0 counts as 2 bytes per pixel)
+    const uint32_t vMax = 15;  // DDA limits (4:2:0 and 4:2:2 count as 2 bytes per pixel)
     Axis x;
     Axis y;
     if (!axisOf(l.src.x, l.src.w, l.dst.x, l.dst.w, width, l.surface.width, hMax, image.yuv, x) ||
-        !axisOf(l.src.y, l.src.h, l.dst.y, l.dst.h, height, l.surface.height, vMax, image.yuv, y))
+        !axisOf(l.src.y, l.src.h, l.dst.y, l.dst.h, height, l.surface.height, vMax, isNv12(l.kind), y))
         return false;
     if (!x.visible || !y.visible)
         return true;
     image.visible = true;
     if (image.yuv) {
-        image.colorDepth = kDepthYCbCr420SP;
+        image.colorDepth = isNv12(l.kind) ? kDepthYCbCr420SP : kDepthYCbCr422SP;
     } else {
         image.colorDepth = l.kind == kKindRgba ? kDepthR8G8B8A8 : kDepthB8G8R8A8;
     }
@@ -409,15 +456,16 @@ inline bool imageOf(const Layer &l, uint32_t width, uint32_t height, Image &imag
     image.hOffset = x.first * bpp;
     const bool scaledX = x.inc != 4096 || (x.initial != 0u);
     const bool scaledY = y.inc != 4096 || (y.initial != 0u);
-    image.options = kWinEnable | (image.yuv ? kCscEnable : 0) | (scaledX ? kHFilterOn : 0) | (scaledY ? kVFilterOn : 0);
+    image.options = kWinEnable | (image.yuv ? kCscEnable : 0) | (scaledX ? kHFilterOn : 0) |
+                    (scaledY ? kVFilterOn : 0) | (image.yuv ? 0 : switch_window_palette::options());
     if (block) {
         if (image.yuv || !blockReads(*block, l.surface, y, image))
             return false;
     } else {
-        pitchReads(l.surface, x, y, bpp, image);
+        pitchReads(l.surface, x, y, bpp, isNv12(l.kind), image);
     }
     image.matrix = matrixOf(l.surface);
-    image.fullRange = l.kind == kKindNv12Full;
+    image.fullRange = l.kind == kKindNv12Full || l.kind == kKindNv16Full;
     return true;
 }
 
@@ -433,13 +481,13 @@ inline unsigned checkDetached(const Layer &l, uint32_t width, uint32_t height, c
     if (s.x < 0 || s.y < 0 || s.w <= 0 || s.h <= 0 || d.w <= 0 || d.h <= 0 ||
         static_cast<uint64_t>(s.x) + static_cast<uint64_t>(s.w) > l.surface.width ||
         static_cast<uint64_t>(s.y) + static_cast<uint64_t>(s.h) > l.surface.height ||
-        l.surface.width > limits.maxSrcBuffer || l.surface.height > limits.maxSrcBuffer)
+        l.surface.width > limits.maxSrcBuffer || l.surface.height > limits.maxSrcBufferHeight)
         return kGeometry;
     // Window coordinates are 13 bits; a layer wholly off the screen is accepted and shown as nothing.
     if (static_cast<int64_t>(d.x) + d.w > 8191 || static_cast<int64_t>(d.y) + d.h > 8191 || d.x < -8191 || d.y < -8191)
         return kGeometry;
     const uint64_t up = limits.maxScale;
-    const uint64_t down = limits.minScaleFraction;
+    const uint64_t down = isYuv(l.kind) ? limits.yuvMinScaleFraction : limits.minScaleFraction;
     if (static_cast<uint64_t>(d.w) > static_cast<uint64_t>(s.w) * up ||
         static_cast<uint64_t>(d.h) > static_cast<uint64_t>(s.h) * up ||
         static_cast<uint64_t>(s.w) > static_cast<uint64_t>(d.w) * down ||
@@ -447,7 +495,9 @@ inline unsigned checkDetached(const Layer &l, uint32_t width, uint32_t height, c
         static_cast<uint32_t>(s.w) > limits.maxSrcRectWidth ||
         static_cast<uint64_t>(s.w) * static_cast<uint64_t>(s.h) > limits.maxSrcRectTotal)
         return kScale;
-    const unsigned planes = isNv12(l.kind) ? 2 : 1;
+    if (l.kind == kKindExtraYuv)
+        return extraCheck(l, width, height, limits);
+    const unsigned planes = isYuv(l.kind) ? 2 : 1;
     for (unsigned p = 0; p < planes; ++p) {
         const uint64_t base = planes == 1 ? 0 : l.surface.offset[p];
         const uint64_t rows = planes == 1 ? l.surface.height : l.surface.planeHeight[p];
@@ -456,7 +506,8 @@ inline unsigned checkDetached(const Layer &l, uint32_t width, uint32_t height, c
             return kAlignment;
         const uint64_t minRow =
             static_cast<uint64_t>(planes == 1 ? l.surface.width * 4 : (l.surface.width + 1) / 2 * 2);
-        if (l.surface.stride[p] < minRow || rows < (p ? (l.surface.height + 1) / 2 : l.surface.height) ||
+        const uint64_t needRows = p && isNv12(l.kind) ? (l.surface.height + 1) / 2 : l.surface.height;
+        if (l.surface.stride[p] < minRow || rows < needRows ||
             base + rows * l.surface.stride[p] > l.surface.allocation ||
             l.surface.allocation > l.surface.descriptorBytes)
             return kSurface;
@@ -466,37 +517,33 @@ inline unsigned checkDetached(const Layer &l, uint32_t width, uint32_t height, c
 }
 
 // --- The swap's layers --------------------------------------------------------------------------------------------------
-// Which layer window A shows (the UI) and which one window B shows, for the effective set of a swap: the UI is the topmost
-// full-frame BGRA layer, window B the topmost other one below it. Anything more (a third layer, a layer above the UI) is not
-// something Core Animation sends under MaxNumLayers 2; it is not shown and counted.
+// The full-frame UI is above up to two detached layers in the family's stack order.
 struct Roles {
-    int ui = -1, plane = -1;
-    unsigned extra = 0;  // present layers neither window shows
+    int ui = -1, plane = -1, second = -1;
+    unsigned extra = 0;
 };
 
 inline Roles rolesOf(const bool present[kLayers], const Layer layers[kLayers], uint32_t width, uint32_t height)
 {
     Roles r;
-    unsigned uiPosition = 0;
+    for (unsigned i = 0; i < kLayers; ++i)
+        if (present[i] && isUi(layers[i], width, height) &&
+            (r.ui < 0 || stackPosition(i) > stackPosition(unsigned(r.ui))))
+            r.ui = int(i);
     for (unsigned i = 0; i < kLayers; ++i) {
-        if (present[i] && isUi(layers[i], width, height) && (r.ui < 0 || stackPosition(i) > uiPosition)) {
-            r.ui = static_cast<int>(i);
-            uiPosition = stackPosition(i);
-        }
-    }
-    unsigned planePosition = 0;
-    for (unsigned i = 0; i < kLayers; ++i) {
-        if (!present[i] || static_cast<int>(i) == r.ui)
+        if (!present[i] || int(i) == r.ui)
             continue;
-        if (r.ui >= 0 && stackPosition(i) > uiPosition) {
+        if (r.ui >= 0 && stackPosition(i) > stackPosition(unsigned(r.ui))) {
             ++r.extra;
-            continue;
-        }
-        if (r.plane < 0 || stackPosition(i) > planePosition) {
-            if (r.plane >= 0)
+        } else if (r.plane < 0 || stackPosition(i) > stackPosition(unsigned(r.plane))) {
+            if (r.second >= 0)
                 ++r.extra;
-            r.plane = static_cast<int>(i);
-            planePosition = stackPosition(i);
+            r.second = r.plane;
+            r.plane = int(i);
+        } else if (r.second < 0 || stackPosition(i) > stackPosition(unsigned(r.second))) {
+            if (r.second >= 0)
+                ++r.extra;
+            r.second = int(i);
         } else {
             ++r.extra;
         }

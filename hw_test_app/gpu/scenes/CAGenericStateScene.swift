@@ -8,8 +8,9 @@ import Metal
 /// render thread waited for it to be scheduled. Each case draws the state into a 256x256 BGRA8 target (its second
 /// colour memoryless) after binding what that case leaves at indices 12-14: nothing, a 2D texture, one cube, one cube
 /// at all three, three distinct cubes. On the raw facade path_<case>= must be "raw" for every case (wait_ms_<case>= is
-/// the command buffer's commit to completion); hash_<case>= is the target's bytes, to compare between the raw facade's
-/// and the m2v device's runs. iOS 17's QuartzCore has no such state, so the scene draws nothing there.
+/// the command buffer's commit to completion). Each case's target is held to the Mac's drawing of it, the mistyped 2D
+/// texture to the Mac's case with nothing bound (a Mac's Metal draws no mistyped case). iOS 17's QuartzCore has no such
+/// state, so the scene draws nothing there.
 struct CAGenericStateScene: GPUScene {
     let id = "gpu.ca.generic_texture3d"
     let name = "Core Animation's generic state with its colour cubes bound, unbound and mistyped"
@@ -26,14 +27,11 @@ struct CAGenericStateScene: GPUScene {
             + "fc_has_noise_tex:53:01 fc_has_ycbcr_matrix:53:01 fc_vertex_layout:49:00 | ")!
     static let size = 256
     static let warmups = 20
+    static let mistyped = "leftover_2d"
 
     func run(_ gpu: GPU) async throws -> SceneResult {
         var result = SceneResult()
         let kind = RawFacade.kind(of: gpu.device)
-        if kind == "apple" {
-            result.notes.append("a Mac's Metal: textures bound at another type's argument are the facade's case only")
-            return result
-        }
         let pipeline: MTLRenderPipelineState
         do {
             let library = try gpu.device.makeLibrary(URL: CAState.library)
@@ -49,7 +47,7 @@ struct CAGenericStateScene: GPUScene {
         let cases: [(String, [MTLTexture?])] = [
             ("nothing", [nil, nil, nil]), ("leftover_2d", [leftover, nil, nil]), ("one_cube", [cube, nil, nil]),
             ("same_cube", [cube, cube, cube]), ("distinct_cubes", [cube, other, lut]),
-        ]
+        ].filter { kind != "apple" || $0.0 != Self.mistyped }
         let raw = kind == "raw"
         let zeros = [UInt8](repeating: 0, count: 256)
         for (label, cubes) in cases {
@@ -83,7 +81,9 @@ struct CAGenericStateScene: GPUScene {
             result.metrics.set("wait_ms_" + label, timing.wallMilliseconds, digits: 2)
             if !timing.path.hasPrefix("error:") {
                 let pixels = try await gpu.read(target, bytesPerPixel: 4)
-                result.metrics.set("hash_" + label, String(Signature.fnv1a(pixels), radix: 16))
+                result.picture(
+                    label, bytes: pixels, metalFormat: target.pixelFormat.rawValue, width: Self.size,
+                    height: Self.size, golden: label == Self.mistyped ? "nothing" : label, cleared: [0, 0, 0, 1])
             }
             guard raw else { continue }
             result.expect(!timing.path.hasPrefix("error:"), "\(label): \(timing.path)")

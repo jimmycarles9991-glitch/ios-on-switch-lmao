@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: MIT */
 /*
- * GPU-ordered TLB invalidates for user raw maps (gpu.c). A map writes its PTEs with no L2 or TLB maintenance on the CPU
+ * GPU-ordered TLB invalidates for user raw maps (gpu_exec.c). A map writes its PTEs with no L2 or TLB maintenance on the CPU
  * and moves its address space's generation on. Each channel of that space remembers the generation it last
  * invalidated at, and a channel behind it starts its next submission with the host's L2 invalidate and then an MMU
  * TLB invalidate, so its walks see the new PTEs. A map only adds translations to pages its own process owns.

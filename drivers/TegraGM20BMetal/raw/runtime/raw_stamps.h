@@ -2,7 +2,7 @@
 // A raw command buffer's GPU time, Metal's GPUStartTime and GPUEndTime: two 16-byte host semaphore releases in its own push
 // (NV906F SEMAPHORED, RELEASE_WFI EN, as the kernel's stats stamps), the first ahead of its prologue and the last after its final
 // work, each writing the payload and PTIMER. The last one's wait for idle is the one the kernel's fence release makes right after
-// it (drivers/TegraGM20B/gpu.c tgm_chan_exec: WFI, the L2 flush, then the fence with RELEASE_WFI), so it holds the GPU no longer.
+// it (drivers/TegraGM20B/gpu_exec.c tgm_chan_exec: WFI, the L2 flush, then the fence with RELEASE_WFI), so it holds the GPU no longer.
 //
 // PTIMER does not count nanoseconds here: its source is the 19.2 MHz oscillator and each tick adds 32, a step that assumes
 // 31.25 MHz, so one unit is 31.25 / 19.2 = 625/384 ns. GK20A-family PTIMERs have no rate registers to set it right (nouveau's
@@ -10,14 +10,17 @@
 #pragma once
 #include <algorithm>
 #include <atomic>
+#include <cstddef>
 #include <cstdint>
+#include "../../../../kits/SwitchGM20B/SwitchGM20B.h"
 #include "raw_push.h"
 
 namespace raw {
 
 enum : uint32_t {
-    HOST_SEMAPHORE_A = 0x0010,
-    HOST_SEMAPHORE_RELEASE_16_WFI = 0x2,  // OPERATION RELEASE, RELEASE_WFI EN (0), RELEASE_SIZE 16BYTE (0)
+    HOST_SEMAPHORE_A = NVB06F_SEMAPHOREA,
+    HOST_SEMAPHORE_RELEASE_16_WFI = NVDEF(NVB06F, SEMAPHORED, OPERATION, RELEASE) |
+        NVDEF(NVB06F, SEMAPHORED, RELEASE_WFI, EN) | NVDEF(NVB06F, SEMAPHORED, RELEASE_SIZE, 16BYTE),
 };
 
 constexpr uint32_t kStampWords = 5;
@@ -48,6 +51,52 @@ inline uint64_t stampOffset(uint32_t stamp)
 inline void emitStamp(Push &p, uint64_t va, uint32_t stamp)
 {
     p.inc(HOST_SEMAPHORE_A, {uint32_t(va >> 32) & 0xff, uint32_t(va), stamp, HOST_SEMAPHORE_RELEASE_16_WFI});
+}
+
+// A command buffer's two releases into its slot of the stamp page at `slots`: the first ahead of its prologue, the last
+// after its final work
+inline void emitStartStamp(Push &p, uint64_t slots, uint32_t stamp)
+{
+    emitStamp(p, slots + stampOffset(stamp) + offsetof(StampSlot, start), stamp);
+}
+
+inline void emitEndStamp(Push &p, uint64_t slots, uint32_t stamp)
+{
+    emitStamp(p, slots + stampOffset(stamp) + offsetof(StampSlot, end), stamp);
+}
+
+// A measured draw's stamps (raw_band_rates.h), after the command buffers' slots in the same page set: 3D report semaphore
+// releases at the end of the pipeline, after every earlier draw's writes, with PTIMER, so neither stalls the front end as a
+// wait for idle would. The tiled cache is flushed ahead of each, or a binned draw's pixels could land after its stamp.
+constexpr uint32_t kDrawStampSlots = 256;
+constexpr uint64_t kDrawStampBase = kStampSlots * sizeof(StampSlot);
+// After the measured draws' stamps, a record per command buffer slot: the stamp of the command buffer one of whose
+// predicated loops would run past its copies, and that loop's tag (raw_predication.h endLoop)
+constexpr uint64_t kLoopWordsBase = kDrawStampBase + kDrawStampSlots * sizeof(StampSlot);
+constexpr uint64_t kStampBytes = kLoopWordsBase + kStampSlots * 8;
+constexpr uint32_t kDrawStampWords = 5;
+constexpr uint32_t kDrawStampRelease =
+    NVDEF(NVB197, SET_REPORT_SEMAPHORE_D, OPERATION, RELEASE) |
+    NVDEF(NVB197, SET_REPORT_SEMAPHORE_D, RELEASE, AFTER_ALL_PRECEEDING_WRITES_COMPLETE) |
+    NVDEF(NVB197, SET_REPORT_SEMAPHORE_D, PIPELINE_LOCATION, ALL) |
+    NVDEF(NVB197, SET_REPORT_SEMAPHORE_D, STRUCTURE_SIZE, FOUR_WORDS) |
+    NVDEF(NVB197, SET_REPORT_SEMAPHORE_D, FLUSH_DISABLE, TRUE);
+
+inline uint64_t drawStampOffset(uint32_t slot, bool end)
+{
+    return kDrawStampBase + uint64_t(slot % kDrawStampSlots) * sizeof(StampSlot) +
+           (end ? offsetof(StampSlot, end) : offsetof(StampSlot, start));
+}
+
+inline uint64_t loopRecordOffset(uint32_t stamp)
+{
+    return kLoopWordsBase + uint64_t((stamp - 1) % kStampSlots) * 8;
+}
+
+inline void emitDrawStamp(Push &p, uint64_t stampsVa, uint32_t slot, bool end, uint32_t payload)
+{
+    const uint64_t va = stampsVa + drawStampOffset(slot, end);
+    p.inc(NVB197_SET_REPORT_SEMAPHORE_A, {uint32_t(va >> 32) & 0xff, uint32_t(va), payload, kDrawStampRelease});
 }
 
 inline uint64_t ptimerNanoseconds(uint64_t units)

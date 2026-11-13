@@ -14,6 +14,15 @@
     },
     "baseOffset": {
       "doc": "The surface's byte offset in its memory descriptor, added to a client map's address for its base."
+    },
+    "useCountFlags": {
+      "doc": "The byte whose bit 5 is kIOSurfaceProhibitUseCount: a surface made with it logs and ignores every use-count change (the IOSurface log line 'Attempt to change IOSurface useCount while kIOSurfaceProhibitUseCount is set, ignored')."
+    },
+    "parent": {
+      "doc": "The parent surface whose memory descriptor a child surface was made over (0: none): the child's own seed does not move when its parent is written."
+    },
+    "memoryRegions": {
+      "doc": "The address ranges of the creating task's memory a surface was made over (0: none), which that task writes without IOSurfaceLock; IOSurface moves no seed for them."
     }
   },
   "functions": {
@@ -125,6 +134,54 @@
       "doc": "the device write end (surface, options): seed +1 under the surface lock",
       "symbols": [
         "tegra_vic_ios_device_unlock"
+      ]
+    },
+    "copy_value": {
+      "doc": "Retained metadata value by OSSymbol key and seed output; takes the surface lock internally.",
+      "symbols": [
+        "switch_surface_copy_value"
+      ]
+    },
+    "bytes_per_element": {
+      "doc": "Bytes per element of a packed IOSurface.",
+      "symbols": [
+        "tegra_gm20b_ios_bpe"
+      ]
+    },
+    "element_width": {
+      "doc": "Pixels in one packed element horizontally.",
+      "symbols": [
+        "tegra_gm20b_ios_element_width"
+      ]
+    },
+    "element_height": {
+      "doc": "Pixels in one packed element vertically.",
+      "symbols": [
+        "tegra_gm20b_ios_element_height"
+      ]
+    },
+    "use_count_increment": {
+      "doc": "IOSurface::incrementUseCount(category): the shared entry's count for category 0 or 1 goes up, the count IOSurfaceIsInUse reads; IOSurfaceIncrementUseCount and AppleAVE2's holds use category 0",
+      "symbols": [
+        "switch_surface_use_increment"
+      ]
+    },
+    "use_count_decrement": {
+      "doc": "IOSurface::decrementUseCount(category): the count goes down; at zero the surface may take its own lock (purgeable and use-count notifications), so thread context only",
+      "symbols": [
+        "switch_surface_use_decrement"
+      ]
+    },
+    "use_count": {
+      "doc": "IOSurface::getUseCount(): both categories' counts summed, what IOSurfaceIsInUse tests for nonzero",
+      "symbols": [
+        "switch_surface_use_count"
+      ]
+    },
+    "seed": {
+      "doc": "IOSurface::getSeed(): the shared entry's +0xc word, which IOSurface::lock moves for a lock without kIOSurfaceLockReadOnly, the device write end moves for an engine's write, and a surface made over its creator's memory starts at 1; the entry is zeroed when made, so a surface nothing wrote reads 0",
+      "symbols": [
+        "tegra_gm20b_ios_seed"
       ]
     }
   }

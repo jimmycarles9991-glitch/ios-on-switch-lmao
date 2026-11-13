@@ -1,0 +1,73 @@
+{
+  "format": "iterated-blend/1",
+  "name": "rung3-slt",
+  "passes": 11,
+  "alpha": false,
+  "instructions": [
+    "0x10102029",
+    "0x20005201",
+    "0x3018a031",
+    "0x2000be01",
+    "0x3000d619",
+    "0x30000e21",
+    "0x2000cc01",
+    "0x30005a01",
+    "0x0058c031",
+    "0x30384201",
+    "0x00609029"
+  ],
+  "constants": [
+    [
+      1678,
+      1678,
+      1678
+    ]
+  ],
+  "methods": [
+    [
+      4836,
+      0
+    ],
+    [
+      4924,
+      1
+    ],
+    [
+      4928,
+      32774
+    ],
+    [
+      4932,
+      16385
+    ],
+    [
+      4936,
+      16384
+    ],
+    [
+      4940,
+      32774
+    ],
+    [
+      4944,
+      16385
+    ],
+    [
+      4952,
+      17155
+    ],
+    [
+      4960,
+      1
+    ]
+  ],
+  "restore": [
+    [
+      4836,
+      1
+    ]
+  ],
+  "rgb": "2 * src.rgb * dst.rgb - (2 * src.rgb - src.a) * dst.rgb * dst.rgb / max(dst.a, 0.0001) + dst.rgb * (1 - src.a) + src.rgb * (1 - dst.a)",
+  "a": "saturate(src.a + dst.a - src.a * dst.a)",
+  "tolerance": 2
+}

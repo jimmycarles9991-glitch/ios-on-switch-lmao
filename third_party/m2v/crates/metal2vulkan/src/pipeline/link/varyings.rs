@@ -17,7 +17,10 @@
 //!   stage writes, is `NeedsInput(ViewportIndex)`. The raw render target slice index
 //!   (`IoRole::RenderTargetArrayIndex`) is the same for `[[render_target_array_index]]`
 //!   (`LoweringInputs::render_target_array_index_varying`, `NeedsInput(RenderTargetArrayIndex)`),
-//!   which a vertex function writes in every variant, the one without `Layer` included. The window
+//!   which a vertex function writes in every variant, the one without `Layer` included. A fragment
+//!   function of the layered storage form (`RuntimeFact::LayeredStorage`) reads `Layer`, the layer
+//!   its primitive renders, to address its storage images, whatever vertex function it links
+//!   with: that read is not one of `[[render_target_array_index]]`. The window
 //!   depth (`IoRole::WindowDepth`) is such a varying too, read without perspective: a fragment
 //!   function that reads it was compiled for a draw whose vertex function writes it
 //!   (`LoweringInputs::window_depth_varying`), and one linked with another vertex function is
@@ -60,6 +63,7 @@ use crate::error::{
     Capability, Error, Feature, InternalError, InternalKind, RuntimeInput, Unsupported,
 };
 use crate::library::FunctionArtifact;
+use crate::pipeline::facts::RuntimeFact;
 use crate::pipeline::stage_io::{Interpolation, IoNumeric, IoRole, IoType, StageBuiltin, StageIo};
 use crate::pipeline::sym::{Stage, Symbol, VaryingKey};
 
@@ -161,8 +165,9 @@ fn check_roles(stage: Stage, io: &StageIo) -> Result<(), Error> {
 /// The fragment function `f` reads an index from its raw varying exactly when it was compiled
 /// for a vertex or mesh function that writes the index, as `v` does when it declares the varying
 /// among its outputs (see the module docs): `[[viewport_array_index]]` and
-/// `[[render_target_array_index]]`, each read otherwise from its builtin.
-fn check_raw_indices(v: &StageIo, f: &StageIo) -> Result<(), Error> {
+/// `[[render_target_array_index]]`, each read otherwise from its builtin. `layered_storage`: `f`
+/// reads `Layer` for its storage images too.
+fn check_raw_indices(v: &StageIo, f: &StageIo, layered_storage: bool) -> Result<(), Error> {
     for (role, builtin, input) in [
         (
             IoRole::ViewportIndex,
@@ -177,7 +182,8 @@ fn check_raw_indices(v: &StageIo, f: &StageIo) -> Result<(), Error> {
     ] {
         let writes = v.outputs.iter().any(|x| x.role == role);
         let reads_varying = f.inputs.iter().any(|x| x.role == role);
-        let reads_builtin = f.builtins.contains(&builtin);
+        let reads_builtin =
+            f.builtins.contains(&builtin) && !(layered_storage && builtin == StageBuiltin::Layer);
         if (writes && reads_builtin) || (!writes && reads_varying) {
             return Err(Error::NeedsInput(input));
         }
@@ -284,12 +290,16 @@ pub fn assign(stages: &[&FunctionArtifact], p: &DeviceProfile) -> Result<Locatio
     let mut fragment: Option<&StageIo> = None;
     let mut mesh: Option<&StageIo> = None;
     let mut emulated_mesh = false;
+    let mut layered_storage = false;
     for a in stages {
         let io = &a.interface.io;
         check_roles(a.interface.stage, io)?;
         match a.interface.stage {
             Stage::Vertex => vertex = Some(io),
-            Stage::Fragment => fragment = Some(io),
+            Stage::Fragment => {
+                fragment = Some(io);
+                layered_storage = a.facts.contains(&RuntimeFact::LayeredStorage);
+            }
             Stage::Mesh => {
                 mesh = Some(io);
                 emulated_mesh = a.interface.mesh_records.is_some();
@@ -299,7 +309,7 @@ pub fn assign(stages: &[&FunctionArtifact], p: &DeviceProfile) -> Result<Locatio
     }
     if let Some(f) = fragment {
         if let Some(g) = mesh.or(vertex) {
-            check_raw_indices(g, f)?;
+            check_raw_indices(g, f, layered_storage)?;
             check_uniform_inputs(g, f)?;
         }
         check_primitive_inputs(mesh, f)?;

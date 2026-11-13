@@ -40,3 +40,11 @@ host_test(
         "//drivers/TegraDisplayFlip:SwitchDeferredScale.h",
     ],
 )
+
+host_test(
+    name = "switch_display_priority_test",
+    srcs = [
+        "switch_display_priority_test.cpp",
+        "//drivers/TegraDisplayFlip:SwitchDisplayPriority.h",
+    ],
+)

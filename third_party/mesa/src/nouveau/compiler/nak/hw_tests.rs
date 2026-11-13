@@ -259,7 +259,7 @@ impl<'a> TestShaderBuilder<'a> {
         s.remove_annotations();
 
         let code = self.sm.encode_shader(&s);
-        Box::new(ShaderBin::new(self.sm, &s.info, None, code, ""))
+        Box::new(ShaderBin::new(self.sm, &s.info, None, code, "", 0))
     }
 
     pub fn compile(self) -> Box<ShaderBin> {

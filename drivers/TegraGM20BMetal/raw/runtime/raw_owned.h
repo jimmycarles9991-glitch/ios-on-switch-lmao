@@ -68,6 +68,19 @@ constexpr MethodRange kOwnedMethods[] = {
     // attachments' sample count
     {0x11E0, 0x11F0},
     {0x15D0, 0x15D4},
+    // a program's register count and the slot its bound textures read handles from: its record's (PackProgram), set with the
+    // program, so a state's methods hold no program's
+    {0x204C, 0x2050},
+    {0x214C, 0x2150},
+    {0x2608, 0x260C},
+    // the iterated blend (raw_fetch_free.h): SET_ITERATED_BLEND and its pass count, the program's loads, its constants, the
+    // per-target blend switch and the common blend block it takes alpha from, a rung-3 fetch-free form's
+    {0x0DD0, 0x0DD8},
+    {0x0DF0, 0x0DF8},
+    {0x1480, 0x1500},
+    {0x12E4, 0x12E8},
+    {0x133C, 0x1354},
+    {0x1358, 0x135C},
 };
 // clang-format on
 

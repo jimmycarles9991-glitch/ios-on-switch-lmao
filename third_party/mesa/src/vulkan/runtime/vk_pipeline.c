@@ -1234,7 +1234,7 @@ vk_graphics_pipeline_cmd_bind(struct vk_command_buffer *cmd_buffer,
    }
 }
 
-static VkShaderCreateFlagsEXT
+VkShaderCreateFlagsEXT
 vk_pipeline_to_shader_flags(VkPipelineCreateFlags2KHR pipeline_flags,
                             mesa_shader_stage stage,
                             struct vk_pipeline_layout *pipeline_layout)
@@ -2241,67 +2241,103 @@ fail_stages:
    return result;
 }
 
-/* ios-on-switch-lmao: one stage of a graphics pipeline library, compiled as
- * vk_graphics_pipeline_compile_shaders compiles a library's stage (the
- * precompile, then the stage alone in its partition, so no varyings are
- * linked), with no pipeline and no cache; a compute stage as
- * vk_pipeline_compile_compute_stage compiles one (`state` NULL). The caller
- * owns the shader.
+/* Native stages retain library-stage linking semantics. Their NIR has one
+ * consumer, so it need not pass through a serialized precompile cache object.
  */
 VkResult
-vk_pipeline_compile_library_stage(struct vk_device *device,
+vk_pipeline_compile_native_stage(struct vk_device *device,
                                   VkPipelineCreateFlags2KHR pipeline_flags,
                                   const void *pipeline_info_pNext,
                                   const VkPipelineShaderStageCreateInfo *info,
                                   VkPipelineLayout layout,
                                   const struct vk_graphics_pipeline_state *state,
+                                  vk_native_nir_builder native_builder,
+                                  const void *native_program,
+                                  bool *native_used,
                                   struct vk_shader **shader_out)
 {
    VK_FROM_HANDLE(vk_pipeline_layout, pipeline_layout, layout);
    const struct vk_device_shader_ops *ops = device->shader_ops;
-   struct vk_pipeline_stage stage = {
-      .stage = vk_to_mesa_shader_stage(info->stage),
-   };
+   const mesa_shader_stage stage = vk_to_mesa_shader_stage(info->stage);
+   *shader_out = NULL;
+   *native_used = false;
 
-   vk_pipeline_hash_precomp_shader_stage(device, pipeline_flags,
-                                         pipeline_info_pNext, info, &stage);
-   VkResult result =
-      vk_pipeline_precompile_shader(device, NULL, pipeline_flags,
-                                    pipeline_info_pNext, info, &stage);
+   if (pipeline_flags &
+       VK_PIPELINE_CREATE_2_FAIL_ON_PIPELINE_COMPILE_REQUIRED_BIT_KHR)
+      return VK_PIPELINE_COMPILE_REQUIRED;
+
+   struct vk_pipeline_robustness_state rs;
+   vk_pipeline_robustness_state_fill(&device->robustness_state, &rs,
+                                     pipeline_info_pNext, info->pNext);
+
+   const struct nir_shader_compiler_options *nir_options =
+      ops->get_nir_options(device->physical, stage, &rs);
+   const struct spirv_to_nir_options spirv_options =
+      ops->get_spirv_options(device->physical, stage, &rs);
+   nir_shader *nir = native_builder && native_program ?
+      native_builder(native_program, nir_options, &spirv_options,
+                     info->pSpecializationInfo) : NULL;
+   *native_used = nir != NULL;
+   if (*native_used) {
+      const struct vk_properties *p = &device->physical->properties;
+      vk_set_subgroup_size(nir, p->subgroupSize, p->minSubgroupSize,
+                          p->maxSubgroupSize, 0x10500, info->pNext,
+                          info->flags & VK_PIPELINE_SHADER_STAGE_CREATE_ALLOW_VARYING_SUBGROUP_SIZE_BIT,
+                          info->flags & VK_PIPELINE_SHADER_STAGE_CREATE_REQUIRE_FULL_SUBGROUPS_BIT);
+      if (pipeline_flags & VK_PIPELINE_CREATE_2_VIEW_INDEX_FROM_DEVICE_INDEX_BIT_KHR)
+         NIR_PASS(_, nir, nir_lower_view_index_to_device_index);
+   }
+   VkResult result = VK_SUCCESS;
+   if (nir == NULL) {
+      const VkShaderModuleCreateInfo *module =
+         vk_find_struct_const(info->pNext, SHADER_MODULE_CREATE_INFO);
+      if (info->module == VK_NULL_HANDLE && (!module || !module->pCode || module->codeSize < 20))
+         return VK_PIPELINE_COMPILE_REQUIRED;
+      result = vk_pipeline_shader_stage_to_nir(device, pipeline_flags,
+                                                     info, &spirv_options,
+                                                     nir_options, NULL, &nir);
+   }
    if (result != VK_SUCCESS)
       return result;
 
-   const struct nir_shader_compiler_options *nir_options =
-      ops->get_nir_options(device->physical, stage.stage, &stage.precomp->rs);
-   nir_shader *nir =
-      vk_pipeline_precomp_shader_get_nir(stage.precomp, nir_options);
-   if (nir == NULL) {
-      vk_pipeline_precomp_shader_unref(device, stage.precomp);
-      return vk_error(device, VK_ERROR_OUT_OF_HOST_MEMORY);
+   if (ops->preprocess_nir != NULL)
+      ops->preprocess_nir(device->physical, nir, &rs);
+
+   const VkShaderDescriptorSetAndBindingMappingInfoEXT *desc_map =
+      vk_find_struct_const(info->pNext,
+                           SHADER_DESCRIPTOR_SET_AND_BINDING_MAPPING_INFO_EXT);
+   struct vk_sampler_state_array embedded_samplers;
+   bool heaps_progress = false;
+   NIR_PASS(heaps_progress, nir, vk_nir_lower_descriptor_heaps,
+            desc_map, NULL, &embedded_samplers);
+   if (heaps_progress) {
+      NIR_PASS(_, nir, nir_remove_dead_variables,
+               nir_var_uniform | nir_var_image, NULL);
+      NIR_PASS(_, nir, nir_opt_dce);
    }
 
    const VkPushConstantRange *push_range =
-      get_push_range_for_stage(pipeline_layout, stage.stage);
+      get_push_range_for_stage(pipeline_layout, stage);
    struct vk_shader_compile_info compile = {
-      .stage = stage.stage,
-      .flags = vk_pipeline_to_shader_flags(pipeline_flags, stage.stage,
+      .stage = stage,
+      .flags = vk_pipeline_to_shader_flags(pipeline_flags, stage,
                                            pipeline_layout),
-      .next_stage_mask = stage.stage == MESA_SHADER_FRAGMENT ||
-                         stage.stage == MESA_SHADER_COMPUTE ?
+      .next_stage_mask = stage == MESA_SHADER_FRAGMENT ||
+                         stage == MESA_SHADER_COMPUTE ?
                          0 : VK_SHADER_STAGE_FRAGMENT_BIT,
       .nir = nir,
-      .robustness = &stage.precomp->rs,
+      .robustness = &rs,
       .set_layout_count = pipeline_layout != NULL ? pipeline_layout->set_count : 0,
       .set_layouts = pipeline_layout != NULL ? pipeline_layout->set_layouts : NULL,
-      .embedded_sampler_count = stage.precomp->embedded_sampler_count,
-      .embedded_samplers = stage.precomp->embedded_samplers,
+      .embedded_sampler_count = embedded_samplers.sampler_count,
+      .embedded_samplers = embedded_samplers.samplers,
       .push_constant_range_count = push_range != NULL,
       .push_constant_ranges = push_range,
    };
    result = vk_compile_shaders(device, 1, &compile, state,
                                &device->enabled_features, &device->alloc,
                                shader_out);
-   vk_pipeline_precomp_shader_unref(device, stage.precomp);
+   vk_sampler_state_array_finish(&embedded_samplers);
    return result;
 }
 

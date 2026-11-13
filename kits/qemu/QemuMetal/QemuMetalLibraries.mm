@@ -6,8 +6,9 @@
 //     a pipeline from ("foreign function"), and the command buffer stays empty. The source goes to the Mac (QM_SOURCE_LIBRARY);
 //   - function stitching (newLibraryWithStitchedDescriptor:…), which Core Image uses where the GPU family has it. The graph goes to the Mac
 //     whole (QM_STITCHED_LIBRARY), where Metal stitches it from the same functions;
-//   - externFunctionNames, by which Core Image finds a kernel's own library, and Metal's own error for a name a library has not, on which
-//     it goes on to the next library.
+//   - externFunctionNames, by which Core Image finds a kernel's own library: the Mac's library's answer, in place of the frontend's (read
+//     from the library's bytes, which a source or stitched library here has none of); and Metal's own error for a name a library has
+//     not, on which it goes on to the next library.
 // Each library that comes back is the frontend's own NBLibrary.
 #import <Foundation/Foundation.h>
 #import <Metal/Metal.h>
@@ -267,7 +268,7 @@ extern "C" void qemu_metal_add_libraries(Class device)
     Class library = objc_getClass("NBLibrary");
     if (!library)
         return;
-    class_addMethod(library, sel_registerName("externFunctionNames"), (IMP)externNames, "@16@0:8");
+    class_replaceMethod(library, sel_registerName("externFunctionNames"), (IMP)externNames, "@16@0:8");
     if (!gSpecialized)
         gSpecialized = method_setImplementation(
             class_getInstanceMethod(library, @selector(newFunctionWithName:constantValues:error:)), (IMP)specialized);

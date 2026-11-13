@@ -62,7 +62,7 @@
 //     tegra210-dvfs.c:187), and a rung only if this chip's L4T CVB voltage for it plus kPllMarginPct
 //     (20 %) fits under 1120 mV. A fixed clock cannot slow down under droop as the DFLL does; on T210,
 //     where L4T has both tables, the raw PLL characterization asks 5-17 % more than the DFLL CVB at
-//     1734 MHz (CPU_PLL_CVB_TABLE vs CPU_CVB_TABLE), and the GPU uses the same 20 % (TegraGM20B gpu.c
+//     1734 MHz (CPU_PLL_CVB_TABLE vs CPU_CVB_TABLE), and the GPU uses the same 20 % (TegraGM20B gpu_clock.c
 //     FIXED_PLL_MARGIN_PCT). The CPU speedo is FUSE_CPU_SPEEDO_0 as L4T's speedo-tegra210.c:273,292-293
 //     reads it on T210B01 (process 0 below 1650, :52; speedo ID 3 for SKU 0x87, else 0, :180-207; both
 //     IDs use CPUB01_CVB_TABLE). Typical speedos (1600-1700) reach 1683 or 1785 MHz; a slow chip stops

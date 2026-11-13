@@ -3,6 +3,7 @@ load("//bazel/lint:defs.bzl", "lint_files")
 # drivers/TegraGM20B: moved from out/native-a57/root-v1/tree/drivers/TegraGM20B by the layout move.
 load("//kernel/rules:driver_flags.bzl", "GPU_C_FLAGS", "LINUX_RELAXATIONS")
 load("//kernel/rules:kernel.bzl", "kernel_driver", "kernel_headers")
+load("//kits/SwitchGM20BEmit:defs.bzl", "SWITCH_GM20B_EMIT_INCLUDES")
 
 package(default_visibility = ["//visibility:public"])
 
@@ -18,6 +19,14 @@ exports_files(glob(
 ))
 
 filegroup(
+    name = "gpu_sources",
+    srcs = glob([
+        "gpu_*.c",
+        "gpu_*.h",
+    ]),
+)
+
+filegroup(
     name = "all_files",
     srcs = glob(
         ["**"],
@@ -31,7 +40,7 @@ kernel_headers()
 kernel_driver(
     name = "TegraGM20B_nvkm",
     srcs = [":" + f for f in glob(["nouveau/**/*.c"])],
-    # TegraGM20BComp.h: compression numbers shared with gpu.c and test/gm20b_comp_test.cpp
+    # TegraGM20BComp.h: compression numbers shared with gpu_mem.c and test/gm20b_comp_test.cpp
     c_copts = GPU_C_FLAGS + LINUX_RELAXATIONS + [
         "-I",
         "{tree}/drivers/TegraGM20B",
@@ -44,6 +53,21 @@ kernel_driver(
     object_names = "path",
 )
 
+# The kernel's copy-engine pushes on kits/SwitchGM20BEmit, with XNU's C headers (the kit's), not the nouveau units' shim.
+kernel_driver(
+    name = "TegraGM20B_emit",
+    srcs = [
+        "TegraGM20BCopyEmit.c",
+        "//kits/SwitchGM20BEmit:mesa/nouveau_copy_rect.c",
+    ],
+    c_copts = SWITCH_GM20B_EMIT_INCLUDES,
+    hdr_deps = [
+        "kits/SwitchGM20B",
+        "kits/SwitchGM20BEmit",
+    ],
+    object_names = "path",
+)
+
 kernel_driver(
     name = "TegraGM20B",
     srcs = [
@@ -52,22 +76,97 @@ kernel_driver(
         "shim/stubs.c",
         "shim/nvif_nvkm.c",
         "platform.c",
-        "gpu.c",
+        "gpu_bringup.c",
+        "gpu_anchor.c",
+        "gpu_clock.c",
+        "gpu_mem.c",
+        "gpu_hang.c",
+        "gpu_reload.c",
+        "gpu_describe.c",
+        "gpu_acquire.c",
+        "gpu_stats.c",
+        "gpu_stats_tick.c",
+        "gpu_stats_clock.c",
+        "gpu_stats_ctx.c",
+        "gpu_fault.c",
+        "gpu_chan.c",
+        "gpu_sync.c",
+        "gpu_exec.c",
+        "gpu_quiet.c",
+        "gpu_promise.c",
+        "gpu_promise_giveup.c",
+        "gpu_present.c",
+        "gpu_present_deadline.c",
+        "gpu_present_redo.c",
+        "gpu_copy_reset.c",
+        "gpu_scrub.c",
+        "gpu_power.c",
+        "gpu_zcull.c",
         "clkgate.c",
         "recover.c",
+        "recover_engine.c",
+        "recover_held.c",
         "sched.c",
         "hold.c",
         "deadline.c",
+        "regdump.c",
         "shim/xnu_glue.cpp",
         "TegraGM20B.cpp",
         "TegraGM20BUserClient.cpp",
+        "TegraGM20BUserClientPool.cpp",
+        "TegraGM20BUserClientBo.cpp",
+        "TegraGM20BUserClientChannel.cpp",
+        "TegraGM20BUserClientSubmit.cpp",
+        "TegraGM20BUserClientDispatch.cpp",
+        "TegraGM20BUserClientPresent.cpp",
+        "TegraGM20BUserClientJob.cpp",
+        "TegraGM20BUserClientJobSubmit.cpp",
+        "TegraGM20BUserClientWake.cpp",
+        "TegraGM20BUserClientPromise.cpp",
         "TegraGM20BDeviceClient.cpp",
         "TegraGM20BCoherency.cpp",
+        "SwitchGpuBacking.cpp",
+        "SwitchGpuBackingMemory.cpp",
+        "SwitchGpuAdmission.cpp",
+        "SwitchGpuReady.cpp",
+        "SwitchGpuResourceClient.cpp",
+        "SwitchGpuOwnership.cpp",
+        "SwitchGpuResourceSet.cpp",
+        "SwitchGpuWriters.cpp",
+        "SwitchGpuWriterPromise.cpp",
+        "SwitchGpuPromiseSleepers.cpp",
+        "SwitchGpuCpuAccess.cpp",
+        "SwitchGpuCpuComplete.cpp",
+        "SwitchGpuPathStats.cpp",
+        "SwitchGpuJobStats.cpp",
+        "SwitchGpuCpuLease.cpp",
+        "SwitchGpuTimeline.cpp",
+        "SwitchGpuPresentFilter.cpp",
+        "SwitchGpuBridge.cpp",
+        "SwitchGpuPin.cpp",
+        "SwitchGpuSurfaceAccess.cpp",
         "TegraGM20BRelayout.cpp",
+        "SwitchGpuRelayoutCache.cpp",
+        "SwitchGpuCachedZero.cpp",
+        "SwitchGpuEventClient.cpp",
+        "SwitchGpuShaderCompiler.cpp",
+        "SwitchGpuShaderCompilerQueue.cpp",
+        "SwitchGpuShaderCompilerSysctl.cpp",
+        "SwitchGpuEventChannel.cpp",
+        "SwitchGpuEventJob.cpp",
+        "SwitchGpuSharedEventNative.cpp",
+        "SwitchGpuSharedEvent.cpp",
+        "SwitchGpuEventWatch.cpp",
+        "SwitchGpuEventWaits.cpp",
+        "SwitchGpuEventDisposal.cpp",
+        "SwitchGpuEventWord.cpp",
+        "SwitchGpuEventClientWords.cpp",
         "TegraGM20BCopy.cpp",
+        "SwitchGpuCopyMappings.cpp",
         "TegraGM20BSurfaceClient.cpp",
         "TegraGM20BTiled.cpp",
         "TegraGM20BViews.cpp",
+        "TegraGM20BRecord.cpp",
         "TegraGM20BExecSurfaces.cpp",
         "TegraGM20BSharedWiring.cpp",
         "TegraGM20BSurfacePrefault.cpp",
@@ -78,8 +177,10 @@ kernel_driver(
         # GM20B falcon firmware (linux-firmware nvidia/gm20b) by .incbin.
         "firmware.S",
     ],
+    hdrs = ["//kernel/switch:include/switch/memory_attachment.h"],
     abi = [
         "IOSurface",
+        "IOSurfaceSharedEvent",
         "IOSurfaceClient",
         "IOSurfaceRootUserClient",
     ],
@@ -88,13 +189,17 @@ kernel_driver(
     copts = [
         "-I",
         "{tree}/drivers/TegraGM20B",
+        "-I",
+        "{tree}/kernel/switch/include",
     ],
     hdr_deps = [
         "drivers/ArmGIC",
         "drivers/SwitchSuspend",
         "drivers/TegraDisplayFlip",
         "drivers/TegraI2C",
+        "drivers/TegraHost1x",
         "kits/SwitchDMA",
+        "kits/SwitchGM20BEmit",
         "kits/SwitchIdle",
         "kits/SwitchLinux",
         "kits/SwitchMMIO",

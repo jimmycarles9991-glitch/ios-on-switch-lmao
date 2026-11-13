@@ -43,8 +43,18 @@ TEST(SwitchInteraction, CountsIntervalsBetweenItsOwnPresents)
     w.present(t += 5 * kPeriod, 5 * kPeriod, 5, 1, 1990000);  // ca
     w.present(t += 300000, 300000, 18, 0, 1990000);           // the screen went still for 300 ms
     EXPECT_EQ(closed(w, 2600000),
-              "1310 ms (touch 610 ms), 55 presents: 1:50 2:1 3:1 4+:1, 7 periods lost, worst 300.0 ms, still 1; "
-              "long idle 0 ca 1 gpu 1 queue 0 latch 0 rate 1");
+              "1310 ms (touch 610 ms), 55 presents: 1:50 2:1 3:1 4+:2, 24 periods lost, worst 300.0 ms, still 1; "
+              "long idle 1 ca 1 gpu 1 queue 0 latch 0 rate 1");
+}
+
+TEST(SwitchInteraction, LongStallsRemainInTheDeliveryDenominator)
+{
+    SwitchInteraction w;
+    w.present(1000000, 0, 0, 6, 1000000);
+    w.present(2000000, 1000000, 60, 2, 1000000);
+    EXPECT_EQ(closed(w, 1900000),
+              "1000 ms (touch 900 ms), 2 presents: 1:0 2:0 3:0 4+:1, 59 periods lost, worst 1000.0 ms, still 1; "
+              "long idle 0 ca 0 gpu 1 queue 0 latch 0 rate 0");
 }
 
 TEST(SwitchInteraction, ANewWindowStartsClean)

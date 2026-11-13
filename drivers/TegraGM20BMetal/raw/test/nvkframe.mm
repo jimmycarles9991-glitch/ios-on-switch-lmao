@@ -555,6 +555,8 @@ int main(int argc, char **argv)
                              options:MTLResourceStorageModeShared | MTLResourceCPUCacheModeWriteCombined];
         NSUInteger ringAt = 0;
         id<MTLBuffer> indices = [dev newBufferWithLength:65536 options:MTLResourceStorageModeShared];
+        id<MTLBuffer> zeros = [dev newBufferWithLength:frame::kZeroBytes options:MTLResourceStorageModeShared];
+        memset(zeros.contents, 0, frame::kZeroBytes);
         // FRAME_SPLIT_PASS=mip: the extra pass renders into a texture of two levels instead (a twin-only attachment: refused at
         // the pass, pass.fmt, as Core Animation's average-luma pass into its mipmapped surface is)
         id<MTLTexture> mipTarget = nil;
@@ -841,6 +843,12 @@ int main(int argc, char **argv)
 #ifdef RAW_FACADE
                         [e setColorStoreAction:store atIndex:0];
 #endif
+                    }
+                    for (int slot = 0; slot < frame::kBufferSlots; slot++) {
+                        if (!frame::slotFilled(pass, 1, slot))
+                            [e setVertexBuffer:zeros offset:0 atIndex:NSUInteger(slot)];
+                        if (!frame::slotFilled(pass, 2, slot))
+                            [e setFragmentBuffer:zeros offset:0 atIndex:NSUInteger(slot)];
                     }
                     bool bound[3][31] = {};
                     for (const frame::Draw &d : pass.draws) {

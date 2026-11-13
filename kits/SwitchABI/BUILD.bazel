@@ -161,6 +161,8 @@ switch_abi_class(
 
 switch_abi_class(name = "IOSurface")
 
+switch_abi_class(name = "IOSurfaceSharedEvent")
+
 switch_abi_class(name = "IOSurfaceClient")
 
 switch_abi_class(name = "IOSurfaceRootUserClient")

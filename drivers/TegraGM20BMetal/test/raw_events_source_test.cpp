@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: MIT
 // Guards on how the raw path keeps a command buffer with a Metal event on raw, which no host model runs (the facade, the
 // frontend and m2v's events):
-//  - a plain MTLEvent stays on raw as a shared one does: the frontend's plain event answers a shared event's value, set and
-//    notifications (m2v's Event::host_view through the bridge), and RawMetal asks for exactly those, not for MTLSharedEvent;
+//  - a plain MTLEvent stays on raw as a shared one does: RawMetal asks an event for a shared event's value, set and
+//    notifications, not for MTLSharedEvent (m2v_source_test holds the frontend's plain event to answering them);
 //  - a request for a cross-process shared event is one SwitchRefusal line (frontend, sharedevent.handle).
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
@@ -27,18 +27,6 @@ TEST(RawEventsSource, APlainEventStaysOnRawAsASharedOneDoes)
     for (const char *selector :
          {"@selector(signaledValue)", "@selector(setSignaledValue:)", "@selector(notifyListener:atValue:block:)"})
         EXPECT_THAT(record, HasSubstr(selector));
-
-    const std::string frontend = SourceText("../../NativeMetal/NativeBridgeMetalFrontend.mm");
-    const std::string plain = Between(frontend, "@implementation NBEvent\n", "@end");
-    for (const char *method : {"- (uint64_t)signaledValue", "- (void)setSignaledValue:(uint64_t)value",
-                               "- (void)notifyListener:(MTLSharedEventListener *)listener"})
-        EXPECT_THAT(plain, HasSubstr(method));
-
-    const std::string bridge = SourceText("../../NativeMetal/bridge/NativeMetalObjects.rs");
-    EXPECT_THAT(Between(bridge, "fn shared(event: *const NmbEvent)", "\n}\n"),
-                HasSubstr("NmbEvent::Event(e) => Ok(e.host_view()),"));
-    EXPECT_THAT(SourceText("../../../third_party/m2v/crates/metal2vulkan-runtime/src/event.rs"),
-                HasSubstr("pub fn host_view(&self) -> SharedEvent {"));
 }
 
 TEST(RawEventsSource, ACrossProcessSharedEventIsARefusalLine)

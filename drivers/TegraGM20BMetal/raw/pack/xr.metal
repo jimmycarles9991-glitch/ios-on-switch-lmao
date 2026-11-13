@@ -5,7 +5,9 @@
 // float lies nowhere near one, so Metal's read through float rounds to the same half. BGRA10_XR's alpha code is clamped to
 // [384, 894], the codes of [0, 1]; BGR10_XR's alpha is 1.
 // Texture 0 is the codes through the raw path's integer header (raw_gpu.cpp kFormats): R32Uint (BGR10_XR), RGBA16Uint
-// (BGRA10_XR: blue's field first) or RG32Uint (RGB10A8_2P_XR10: the color word, then the alpha byte).
+// (BGRA10_XR: blue's field first) or RG32Uint (RGB10A8_2P_XR10: the color word, then the alpha byte); an RGB10A8_2P_XR10
+// texture held in Metal's two planes (runtime/raw_xr_pass.h) is plane 0's words as R32Uint and plane 1's bytes, texture 1, as
+// R8Uint.
 #include <metal_stdlib>
 using namespace metal;
 
@@ -67,4 +69,11 @@ fragment half4 xr_planes_frag(Out in [[stage_in]], texture2d<uint, access::read>
 {
     const uint2 t = codes.read(uint2(in.position.xy)).rg;
     return half4(word(t.x), quotient(int(t.y & 0xff), 255));
+}
+
+fragment half4 xr_two_planes_frag(Out in [[stage_in]], texture2d<uint, access::read> words [[texture(0)]],
+                                  texture2d<uint, access::read> alphas [[texture(1)]])
+{
+    const uint2 at = uint2(in.position.xy);
+    return half4(word(words.read(at).r), quotient(int(alphas.read(at).r & 0xff), 255));
 }

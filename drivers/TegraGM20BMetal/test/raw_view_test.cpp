@@ -1,8 +1,10 @@
 // SPDX-License-Identifier: MIT
 // raw_view.h: which header a kernel's texture slot binds, and the header of m2v's view of a texture in another format.
-// Word 0 values are NVK's for the views m2v makes (raw/test/viewframe's decode of m2v's dispatches on the mock GPU).
+// Word 0 values are NVK's for the views m2v makes (raw/test/viewframe's decode of m2v's dispatches on the mock GPU); the
+// multisampled views' headers are NIL's.
 #include <cstdint>
 #include <gtest/gtest.h>
+#include "drivers/TegraGM20BMetal/raw/fx/fx_image.h"
 #include "drivers/TegraGM20BMetal/raw/runtime/raw_view.h"
 
 namespace {
@@ -55,6 +57,61 @@ TEST(ViewHeader, TheTexturesHeaderWithM2vsWordZeroAndNoSrgbConversion)
     EXPECT_EQ(view[4], 0xe080001fu);
     for (int i : {1, 2, 3, 5, 6, 7})
         EXPECT_EQ(view[i], own[i]) << "word " << i;
+}
+
+// NIL's headers of a multisampled image at 0x100000 (raw/fx/test/nilimage.c ms), as a texture and as a storage image: the
+// storage header's WIDTH and HEIGHT are the sample grid's
+struct NilStorageView {
+    uint32_t width, height, bpp, samples;
+    uint32_t texture[8], storage[8];
+};
+
+// clang-format off
+const NilStorageView kNilStorageViews[] = {
+    {64, 64, 4, 4,
+     {0x58d24908, 0x00100000, 0x00600000, 0x00070018, 0xe080003f, 0x8000003f, 0x03000000, 0x00000200},
+     {0x58d24908, 0x00100000, 0x00600000, 0x00070018, 0xe080007f, 0x8000007f, 0x03000000, 0x00000200}},
+    {64, 64, 4, 2,
+     {0x58d24908, 0x00100000, 0x00600000, 0x00070018, 0xe080003f, 0x8000003f, 0x03000000, 0x00000500},
+     {0x58d24908, 0x00100000, 0x00600000, 0x00070018, 0xe080007f, 0x8000003f, 0x03000000, 0x00000500}},
+    {32, 32, 4, 2,
+     {0x58d24908, 0x00100000, 0x00600000, 0x00070010, 0xe080001f, 0x8000001f, 0x03000000, 0x00000500},
+     {0x58d24908, 0x00100000, 0x00600000, 0x00070010, 0xe080003f, 0x8000001f, 0x03000000, 0x00000500}},
+    {32, 32, 4, 4,
+     {0x58d24908, 0x00100000, 0x00600000, 0x00070010, 0xe080001f, 0x8000001f, 0x03000000, 0x00000200},
+     {0x58d24908, 0x00100000, 0x00600000, 0x00070010, 0xe080003f, 0x8000003f, 0x03000000, 0x00000200}},
+    {720, 1280, 4, 4,
+     {0x58d24908, 0x00100000, 0x00600000, 0x00070020, 0xe08002cf, 0x800004ff, 0x03000000, 0x00000200},
+     {0x58d24908, 0x00100000, 0x00600000, 0x00070020, 0xe080059f, 0x800009ff, 0x03000000, 0x00000200}},
+    {33, 9, 4, 4,
+     {0x58d24908, 0x00100000, 0x00600000, 0x00070000, 0xe0800020, 0x80000008, 0x03000000, 0x00000200},
+     {0x58d24908, 0x00100000, 0x00600000, 0x00070000, 0xe0800041, 0x80000011, 0x03000000, 0x00000200}},
+    {100, 50, 16, 8,
+     {0x58d7ff81, 0x00100000, 0x00600000, 0x00070018, 0xe0800063, 0x80000031, 0x03000000, 0x00000400},
+     {0x58d7ff81, 0x00100000, 0x00600000, 0x00070018, 0xe080018f, 0x80000063, 0x03000000, 0x00000400}},
+    {720, 1280, 4, 1,
+     {0x58d24908, 0x00100000, 0x00600000, 0x00070020, 0xe08002cf, 0x800004ff, 0x03000000, 0x00000000},
+     {0x58d24908, 0x00100000, 0x00600000, 0x00070020, 0xe08002cf, 0x800004ff, 0x03000000, 0x00000000}},
+};
+// clang-format on
+
+// The raw path's own header of a multisampled texture (Device::writeTic) is NIL's texture view; its storage view
+// (Device::viewTic, which the storage form's fetched attachments and shader depth/stencil tests bind) is NIL's storage view
+TEST(ViewHeader, AMultisampledStorageViewSpansTheSampleGridAsNilsDoes)
+{
+    for (const NilStorageView &n : kNilStorageViews) {
+        fx::MipChain c;
+        ASSERT_TRUE(fx::msLayout(n.width, n.height, n.samples, n.bpp, c)) << n.width << "x" << n.height;
+        uint32_t own[8], texture[8], storage[8];
+        fx::mipChainTic(c, 0x100000, n.texture[0], false, 0, 1, own);
+        viewHeader(own, n.texture[0], texture);
+        viewHeader(own, n.storage[0], storage, c.sxLog2, c.syLog2);
+        for (int w = 0; w < 8; w++) {
+            EXPECT_EQ(own[w], n.texture[w]) << n.width << "x" << n.height << " x" << n.samples << " word " << w;
+            EXPECT_EQ(texture[w], n.texture[w]) << n.width << "x" << n.height << " x" << n.samples << " word " << w;
+            EXPECT_EQ(storage[w], n.storage[w]) << n.width << "x" << n.height << " x" << n.samples << " word " << w;
+        }
+    }
 }
 
 }  // namespace

@@ -45,3 +45,55 @@ address bit in the mask gives), and 0x444-0x47c are dropped. The app
 writes all 16 slots to I[0x1040-0x107c] on every picture (0x80a1, ME byte 0x8f bits 4-7 neither 1 nor 2, 0 here), and
 NVIDIA's driver names slot 0 in every job it was captured sending (the other reconstruction), so H264NVENC.c's IDR does
 too.
+
+B pictures (libnvtvmr 32.7.6, the H.265 evaluation's library and method, see SOURCE-H265; H.264 create 0x30950, set
+configuration 0x32e70, feed 0x31eb8, frame 0x2ce58; read and evaluated, never run). The caller states each picture's
+type and, on an anchor, how many B pictures precede it in display order (feed record +0 and +8): an anchor's POC is the
+previous anchor's plus 2 x (that count + 1) (0x2fa24-0x2fa58), each B's 2 more than the picture before (0x2efb8). A B
+needs maxNumRefFrames >= 2 (0x2d0ac, create record +0xe) and is not a reference. Evaluated at 1280x720 High CABAC 8x8,
+constant QP, maxNumRefFrames 2, in coding order I0 P2 B1 P4 B3 and I0 P3 B1 B2 P6 B4 B5, a B differs from the P before
+it exactly in: pic_type 1 and ref_pic_flag 0; l0[0] and l1[0] the past and future anchors' slots << 1 (the H.264 app
+gives the engine an entry's bits 1-4 as the slot and bit 0 as the parity, 0x895d-0x89a2 into I[0x1884], as app 3
+does); temp_dist_l0[0] and temp_dist_l1[0] the POC differences / 2 (1 and -2, 2 and -1 in IBBP); dist_scale_factor[0][0]
+by H.264 8-203 (85, 171; 128 in IBP) and every other scale factor -1 (a P's are all 256); frame_num the previous
+reference's + 1; in the ME control predsrc.coloc_enable 1 and const_mv_stamp_l0/l1 3 (0x2ebd8-0x2ec3c); the slice QP.
+MD control, quant control and the rest of the slice control are the P's. bdirect_mode is session configuration
+(config +0x3c: 0 spatial, the default, 1 off, 2 temporal; 0x32f00-0x32f30) written into every picture (0x2e37c); the
+captured P-only session has it off. An anchor's td_l0 is its distance to the previous anchor (3 in IBBP).
+Methods (the P's set plus): every picture names OUT_COLOC_DATA, the colocated buffer paired with its reconstruction
+(0x2e8c4-0x2e8f0); a B names IN_COLOC_DATA, its list-1 reference's (0x2efdc, 0x30260), and IN_REF_PIC<slot>_LUMA for both
+references (0x2e784-0x2e884, one method a reference on chip 6). Buffers: maxNumRefFrames + 1 reconstructions with a
+colocated buffer each of (macroblocks x 64 + 255) & ~255 bytes (0x30dd4-0x30e14); a picture is coded into the one
+holding no picture of the DPB, a new anchor takes the slot of the one it evicts (anchor n in slot n & 1).
+Firmware: the app copies the method words to DMEM 0x380 (0x2e41-0x2ece), IN_COLOC_DATA at 0x3a4 and OUT_COLOC_DATA at
+0x3a8. Non-zero IN_COLOC_DATA goes to I[0xd00] with the macroblock count in I[0xd04], non-zero OUT_COLOC_DATA to
+I[0x1864] with the size in macroblocks in I[0x98c]/I[0x990] (0x333e-0x3398); a zero value leaves those registers as
+they were. With IN_COLOC_DATA the ME's colocated hint (I[0xd0c]) is the ME control's coloc_enable for a P or B, off
+for an I or IDR; with OUT_COLOC_DATA the engine writes colocated motion (I[0x1860]) for every picture but a B
+(0x5866-0x58b0). The checks: IN_COLOC_DATA written as 0 in a P or B with coloc_enable, or OUT_COLOC_DATA written as 0
+in an I, IDR or P, is error 0xe2640180 (0x311a-0x319e). The app reads l1 at 0x8a01-0x8a62 and temp_dist_l1 into
+I[0x478] (0x83b4-0x83d9).
+
+Input pictures (tools/falcon accesses with --region 0xa24:0x20, input_cfg at setup + 0x24; both apps alike, H.264 at
+0x85d3-0x86d5, H.265 at 0x1411b-0x141ee): of the surface config the apps read the size, both pitches, sfc_trans_mode,
+the four offsets, byte 0x40 (block_height bits 0-6, tiled_16x16 bit 7) and bits 0-1 of byte 0x41 (memory_mode); no
+app reads nv21_enable or input_bl_mode. I[0xe88] gets width and height in macroblocks (bits 0-8, 9-17), sfc_pitch >> 4
+(9 bits from 18: at most 8176 bytes), tiled_16x16 at bit 27 and memory_mode at bits 29-30 (0x85d3-0x861b); I[0xeb8]
+sfc_pitch_chroma >> 4 (0x8622); I[0xeac] sfc_trans_mode & 7 (0x8633); I[0xe8c] a block-height code, block_height
+32 -> 4, 16 -> 3, 8 -> 2, 4 -> 1, anything else 0 (0x8643-0x8664); I[0xe80] luma_top_frm_offset + IN_CUR_PIC
+(0x8686-0x8695); I[0xe84] chroma_top_frm_offset + CHROMA_U for memory_mode 0 and 2, else planar input with
+I[0xeb0] chroma_top_frm_offset + CHROMA_U and I[0xeb4] chroma_bot_offset + CHROMA_V (0x8698-0x86d5). No bit picks
+pitch linear: a surface is 16x16 tiles or block linear by its block-height code, block_height 0 and 2 giving the same
+code 0.
+NVIDIA's T210 driver (libnvtvmr, above) at create sets input_cfg memory_mode 1 and byte 0x40 to 0x80, 16x16 tiles
+(0x311a8-0x311b8); per picture (0x2d4cc-0x2d520), for an input NvRmSurface of layout 3 (Blocklinear, +0x10) it clears
+the chroma offsets and sets block_height to 1 << BlockHeightLog2 (+0x24), masked to 7 bits, and tiled_16x16 0; for
+every layout memory_mode becomes 1 when the chroma plane's colour format's low byte is 8, else 0, and nv21_enable 0;
+any other layout keeps the 16x16 tiles.
+TVMRVideoSurfaceCreate (0x42a8) makes each plane an NvRmSurface: layout 3 at +0x10, kind 0xfe at +0x20 and
+BlockHeightLog2 at +0x24 for a block-linear surface (0x43fc-0x4414), BlockHeightLog2 1 unless the caller's flags bits
+6-8 name 1..5 (0x43a4-0x43c0, 0x4508-0x4514), layout 2 for the 16x16-tiled one (0x44c4-0x44d0); pitch rows are 64-byte
+multiples (0x441c-0x4430). So block_height counts 64Bx8 GOBs, code k is 2 << k GOBs, and NVIDIA's own block-linear
+surfaces reach NVENC as block_height 2, code 0: code 0 reads 2-GOB blocks, the layout NVDEC writes. NVIDIA's stack
+hands NVENC 16x16 tiles or block linear and never pitch linear, which no field selects. HW Test
+encode.nvenc_input_layouts checks this on the unit, one IDR from each layout decoded back.

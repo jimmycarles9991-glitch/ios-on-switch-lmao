@@ -95,6 +95,10 @@ extern OSStatus VTSelectAndCreateVideoDecoderInstance(FourCharCode codecType, CF
                                                       CFDictionaryRef specification, VTVideoDecoderRef *out);
 extern OSStatus VTDecoderSessionSetPixelBufferAttributes(VTVideoDecoderSession session, CFDictionaryRef attributes);
 extern CVPixelBufferPoolRef VTDecoderSessionGetPixelBufferPool(VTVideoDecoderSession session);
+// A pixel buffer for `frame` from the session's pool, or, in a session another one feeds, the buffer VideoToolbox
+// remembered for that session's frame (24B119 0x18f00861c; 21H461 exports it too, 0x1978dbd58).
+extern OSStatus VTDecoderSessionCreatePixelBuffer(VTVideoDecoderSession session, VTVideoDecoderFrame frame,
+                                                  CVPixelBufferRef *out);
 extern OSStatus VTDecoderSessionEmitDecodedFrame(VTVideoDecoderSession session, VTVideoDecoderFrame frame,
                                                  OSStatus status, VTDecodeInfoFlags flags, CVImageBufferRef image);
 // A tile session's answer for frameID; a NULL image means the destination the tile was decoded into.

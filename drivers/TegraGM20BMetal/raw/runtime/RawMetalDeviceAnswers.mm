@@ -1,11 +1,13 @@
 // SPDX-License-Identifier: MIT
 // The raw device's answers to Metal's capability and identity queries, which its class inherited from m2v's device class
 // before: the per-kind table (raw_device_answers.h) and the identity below, each equal to m2v's answer today
-// (raw/test/selcover holds them so on the host).
+// (raw/test/selcover holds them so on the host), and the identity's GPU architecture, which m2v's device answers with no
+// Apple GPU subtype.
 #import "RawMetalInternal.h"
 #include <mach/vm_page_size.h>
 #include <os/proc.h>
 #include <algorithm>
+#include "raw_archive.h"
 #include "raw_device_answers.h"
 
 namespace {
@@ -92,25 +94,54 @@ void installDeviceAnswers(Class cls)
     }
 }
 
+@interface MTLArchitecture (Private)
+- (instancetype)initWithCPUType:(int)type cpuSubtype:(int)subtype;
+@end
+
 @interface RMDevice (Identity)
 @end
 @implementation RMDevice (Identity)
 
-// NVK's form of the kernel's names (nvk_physical_device.c), the name the device has had
-- (NSString *)name
+// targetDeviceArchitecture stays the base class's nil: Metal picks AGX slices of libraries and archives by it, and this GPU
+// runs none of them
+- (MTLArchitecture *)architecture
 {
-    const TegraGM20BAbiInfo &info = gRM->raw->kernelInfo();
-    return [NSString stringWithFormat:@"%s (NVK %s)", info.device_name, info.chip_name];
+    static MTLArchitecture *const architecture = [[MTLArchitecture alloc] initWithCPUType:int(raw::kAppleGpuCpuType)
+                                                                               cpuSubtype:int(kKind.gpuSubtype)];
+    return architecture;
 }
 
-- (NSString *)productName
+// The identity's GPU name, its vendor, family and product names joined as -[_MTLDevice name] joins them. Frameworks key
+// Apple's per-GPU data on it: CMImaging opens its per-GPU archives only for a name containing Apple, MPSCore's
+// GetMPSDevice takes its tuning by the exact name within the families supportsFamily: answers.
+- (NSString *)name
 {
-    return [self name];
+    static NSString *const name =
+        [NSString stringWithFormat:@"%.*s %.*s %.*s", int(kKind.gpuVendor.size()), kKind.gpuVendor.data(),
+                                   int(kKind.gpuFamily.size()), kKind.gpuFamily.data(), int(kKind.gpuProduct.size()),
+                                   kKind.gpuProduct.data()];
+    return name;
 }
 
 - (NSString *)vendorName
 {
-    return @"NVIDIA";
+    return [[NSString alloc] initWithBytes:kKind.gpuVendor.data()
+                                    length:kKind.gpuVendor.size()
+                                  encoding:NSUTF8StringEncoding];
+}
+
+- (NSString *)familyName
+{
+    return [[NSString alloc] initWithBytes:kKind.gpuFamily.data()
+                                    length:kKind.gpuFamily.size()
+                                  encoding:NSUTF8StringEncoding];
+}
+
+- (NSString *)productName
+{
+    return [[NSString alloc] initWithBytes:kKind.gpuProduct.data()
+                                    length:kKind.gpuProduct.size()
+                                  encoding:NSUTF8StringEncoding];
 }
 
 // The kernel's largest buffer object: MPS and MPSGraph size their tiles and scratch from it
@@ -185,6 +216,20 @@ void installDeviceAnswers(Class cls)
 {
     const NSUInteger s = NSUInteger(set);
     return s <= 14 && s != 11;
+}
+
+// (SPI) A linear texture's row of `width` texels rounded up to the format's linear alignment, as m2v answers: 0 for a format
+// of blocks, which has no texel size
+- (NSUInteger)requiredLinearTextureBytesPerRowForDescriptor:(MTLTextureDescriptor *)d
+{
+    const raw::FormatInfo *f = raw::formatInfo(uint32_t(d.pixelFormat));
+    const uint64_t align = [(id<MTLDevice>)self minimumLinearTextureAlignmentForPixelFormat:d.pixelFormat];
+    if (raw::blockCompressed(f))
+        return 0;
+    if (!f || !align)
+        return [(id<RMDeviceSPI>)RM_M2V("a linear row of a format raw does not lay out")
+            requiredLinearTextureBytesPerRowForDescriptor:d];
+    return NSUInteger((uint64_t(d.width) * f->bpp + align - 1) / align * align);
 }
 
 // The linear alignment m2v's texel rows take (IconRendering's textures over buffers)

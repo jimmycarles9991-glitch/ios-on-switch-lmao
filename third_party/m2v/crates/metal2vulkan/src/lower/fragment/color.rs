@@ -214,6 +214,20 @@ pub(super) fn select_param(cx: &mut SelectCx<'_>, b: &ParamBinding) -> Result<Co
             .interface
             .extended_range_colors
             .insert(color, e);
+        // A two-plane attachment held in its two planes reads them both, at its alpha index too.
+        if matches!(e.form, ExtendedRange::Planes { .. })
+            && crate::pipeline::two_plane::held(cx.profile)
+        {
+            let Some(&alpha) = cx.inputs.two_plane_alphas.get(&color) else {
+                let refused = Unsupported::not_implemented(Feature::Format);
+                return Err(refused.at_attachment(Attachment::Color(color)).into());
+            };
+            cx.families
+                .stage_io
+                .interface
+                .two_plane_alphas
+                .insert(color, alpha);
+        }
     }
     // An 8-bit four-channel sRGB attachment's input reads the device's decode, which the read
     // snaps back to its byte and decodes by Metal's table: a float (an integer read is Metal's
@@ -310,7 +324,8 @@ pub(super) fn words(cx: &SelectCx<'_>, colors: &[ColorInput]) -> u64 {
 /// function (`multisampled`), or its storage image in the interlocked storage form (`fetch`), which
 /// holds the samples as its view states; the storage image of every other attachment in that form
 /// (one the function only writes); and the input attachment of every extended-range attachment
-/// whose blend the function computes over it (`input_blend`).
+/// whose blend the function computes over it (`input_blend`). Storage images are arrays of the
+/// pass's layers under the layered storage form (`layered`).
 pub(super) fn declare(
     mb: &mut ModuleBuilder,
     colors: &[ColorInput],
@@ -318,31 +333,62 @@ pub(super) fn declare(
         &BTreeMap<u32, super::fetch::StorageColor>,
         &BTreeMap<u32, super::InputBlend>,
     ),
+    two_plane: &BTreeMap<u32, u32>,
     multisampled: bool,
+    layered: bool,
 ) -> BResult<BTreeMap<u32, GlobalId>> {
     let mut out = BTreeMap::new();
+    let storage_view = |mb: &mut ModuleBuilder,
+                            out: &mut BTreeMap<u32, GlobalId>,
+                            color: u32,
+                            sc: &super::fetch::StorageColor|
+     -> BResult<()> {
+        match two_plane.get(&color) {
+            Some(&alpha) => {
+                let [word, byte] =
+                    super::two_plane::declare_storage(mb, (color, alpha), sc, layered)?;
+                out.insert(color, word);
+                out.insert(alpha, byte);
+            }
+            None => {
+                out.insert(color, super::fetch::declare(mb, color, sc, layered)?);
+            }
+        }
+        Ok(())
+    };
+    // An extended-range attachment's image holds the raw format's `uint` texels, a two-plane
+    // one's in two images.
+    let inputs = |mb: &mut ModuleBuilder,
+                  out: &mut BTreeMap<u32, GlobalId>,
+                  color: u32,
+                  float: bool|
+     -> BResult<()> {
+        out.insert(color, input_attachment(mb, color, float, multisampled)?);
+        if let Some(&alpha) = two_plane.get(&color) {
+            out.insert(alpha, input_attachment(mb, alpha, false, multisampled)?);
+        }
+        Ok(())
+    };
     for c in colors {
         if out.contains_key(&c.color) {
             continue;
         }
         if let Some(sc) = storage.get(&c.color) {
-            out.insert(c.color, super::fetch::declare(mb, c.color, sc)?);
+            storage_view(mb, &mut out, c.color, sc)?;
             continue;
         }
-        // An extended-range attachment's image holds the raw format's `uint` texels.
-        let float = c.form.is_float() && c.extended.is_none();
-        out.insert(c.color, input_attachment(mb, c.color, float, multisampled)?);
+        inputs(mb, &mut out, c.color, c.form.is_float() && c.extended.is_none())?;
     }
     // A storage-form attachment the function writes without reading it: an extended-range
     // attachment whose blend the shader computes from the texel.
     for (&color, sc) in storage {
-        if let std::collections::btree_map::Entry::Vacant(e) = out.entry(color) {
-            e.insert(super::fetch::declare(mb, color, sc)?);
+        if !out.contains_key(&color) {
+            storage_view(mb, &mut out, color, sc)?;
         }
     }
     for (&color, _) in blends.iter().filter(|(_, ib)| ib.blend.is_some()) {
-        if let std::collections::btree_map::Entry::Vacant(e) = out.entry(color) {
-            e.insert(input_attachment(mb, color, false, multisampled)?);
+        if !out.contains_key(&color) {
+            inputs(mb, &mut out, color, false)?;
         }
     }
     Ok(out)
@@ -428,6 +474,20 @@ pub(super) fn value(
 /// The texel of color `color`'s input attachment, as the image reads it: at the calling
 /// fragment's own texel, at the invocation's sample for a per-sample function.
 pub(super) fn input_texel(
+    cx: &mut EmitCx<'_>,
+    fb: &mut FunctionBuilder<'_>,
+    color: u32,
+) -> BResult<SValue> {
+    if let Some(alpha) = super::two_plane::alpha(cx, color) {
+        let word = image_texel(cx, fb, color)?;
+        let byte = image_texel(cx, fb, alpha)?;
+        return super::two_plane::join(fb, word, byte);
+    }
+    image_texel(cx, fb, color)
+}
+
+/// The texel of the input attachment at color index `color` ([`input_texel`]).
+fn image_texel(
     cx: &mut EmitCx<'_>,
     fb: &mut FunctionBuilder<'_>,
     color: u32,

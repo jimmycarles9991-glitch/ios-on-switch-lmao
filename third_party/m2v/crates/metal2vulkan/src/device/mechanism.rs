@@ -90,6 +90,8 @@ pub fn mechanism(fact: &RuntimeFact, profile: &DeviceProfile) -> Mechanism {
         RuntimeFact::ImageblockSize { .. } => Mechanism::Specialization,
         // A separate compile of the vertex function, which a pass of one layer asks for.
         RuntimeFact::RenderTargetArrayLength { .. } => Mechanism::Variant,
+        // A separate compile of the fragment function, which a layered pass asks for.
+        RuntimeFact::LayeredStorage => Mechanism::Variant,
         // The binder writes the region's origin and size per dispatch and checks the axes whose
         // origin must be 0.
         RuntimeFact::StageInRegion => Mechanism::PushConstant,

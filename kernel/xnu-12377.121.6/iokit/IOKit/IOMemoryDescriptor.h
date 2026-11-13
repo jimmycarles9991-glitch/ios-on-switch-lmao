@@ -287,6 +287,7 @@ class IOMemoryDescriptor : public OSObject
 {
 	friend class IOMemoryMap;
 	friend class IOMultiMemoryDescriptor;
+	friend class SwitchMemoryAttachment;
 
 	OSDeclareDefaultStructorsWithDispatch(IOMemoryDescriptor);
 

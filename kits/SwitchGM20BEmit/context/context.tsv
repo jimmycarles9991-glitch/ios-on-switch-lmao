@@ -1,0 +1,161 @@
+# class	method	value	reloc	reason
+b197	SET_OBJECT	0xb197	-	MAXWELL_B on subchannel 0
+b197	macro	SELECT_CB0	-	runs below: selects the root table as the constant buffer LOAD_CONSTANT_BUFFER writes
+b197	macro	BIND_CBUF_DESC	-	NVK's descriptor-set cbuf bind; no raw stream calls its slot
+b197	macro	CLEAR	-	NVK's layered clear; no raw stream calls its slot
+b197	macro	UPDATE_WINDOW_CLIP	-	runs below: turns window clipping off
+b197	macro	BIND_IB	-	NVK's index buffer bind; no raw stream calls its slot
+b197	macro	BIND_VB	-	NVK's vertex buffer bind; no raw stream calls its slot
+b197	macro	SET_VB_ENABLES	-	NVK's vertex stream enables; no raw stream calls its slot
+b197	macro	SET_VB_STRIDE	-	NVK's vertex stride; no raw stream calls its slot
+b197	macro	SET_TESS_PARAMS	-	NVK's tessellation state; no raw stream calls its slot
+b197	macro	SET_SHADING_RATE_CONTROL	-	NVK's shading rate (Turing only, two words of no-op here)
+b197	macro	SET_ANTI_ALIAS	-	NVK's sample-shading state; no raw stream calls its slot
+b197	macro	DRAW	-	NVK's draw; slot 11, which raw's own draw macro takes over (raw_mme.h install)
+b197	macro	DRAW_INDEXED	-	NVK's indexed draw; slot 12, which raw's own macro takes over
+b197	macro	DRAW_INDIRECT	-	NVK's indirect draw; slot 13, which raw's own macro takes over
+b197	macro	DRAW_INDEXED_INDIRECT	-	NVK's indexed indirect draw; slot 14, which raw's own macro takes over
+b197	macro	DRAW_INDIRECT_COUNT	-	NVK's draw-count draw (Turing only, a no-op here); slot 15, which raw's own macro takes over
+b197	macro	DRAW_INDEXED_INDIRECT_COUNT	-	as the row above; slot 16, which raw's own macro takes over
+b197	macro	BEGIN_COND_RENDER	-	NVK's conditional rendering (a no-op here); slot 17, which raw's colour-matrix macro takes over
+b197	macro	ADD_CS_INVOCATIONS	-	NVK's compute statistics; no raw stream calls its slot
+b197	macro	WRITE_CS_INVOCATIONS	-	NVK's compute statistics; no raw stream calls its slot
+b197	macro	XFB_COUNTER_LOAD	-	NVK's transform feedback; no raw stream calls its slot
+b197	macro	XFB_DRAW_INDIRECT	-	NVK's transform feedback draw; no raw stream calls its slot
+b197	macro	SET_PRIV_REG	-	runs below: FECS writes two SM registers through the falcon methods
+b197	macro	SET_WRITE_MASK	-	NVK's colour write masks; no raw stream calls its slot
+b197	macro	SET_CONSERVATIVE_RASTER_STATE	-	NVK's conservative raster; no raw stream calls its slot
+b197	macro	SET_VIEWPORT_MIN_MAX_Z	-	NVK's depth clamp range; no raw stream calls its slot
+b197	macro	SET_Z_CLAMP	-	NVK's depth clamp; no raw stream calls its slot
+b197	macro	SET_STATISTICS_COUNTERS	-	NVK's pipeline statistics; no raw stream calls its slot
+b197	macro	DRAW_MESH	-	NVK's mesh draw (Turing only, a no-op here)
+b197	macro	DRAW_MESH_INDIRECT	-	as the row above
+b197	macro	DRAW_MESH_INDIRECT_COUNT	-	as the row above
+b197	CALL_MME_MACRO(22)	0x0	-	SET_PRIV_REG: the register's value
+b197	CALL_MME_DATA(22)	0x8	-	its mask: bit 3 of gr_gpcs_tpcs_sm_disp_ctrl, cleared so helper invocations may load memory
+b197	CALL_MME_DATA(22)	0x419f78	-	gr_gpcs_tpcs_sm_disp_ctrl
+b197	CALL_MME_MACRO(22)	0x0	-	SET_PRIV_REG: the register's value
+b197	CALL_MME_DATA(22)	0x4000	-	its mask: bit 14 of the warp error report mask, so an output past the next stage's inputs is not an exception
+b197	CALL_MME_DATA(22)	0x419e44	-	gr_gpcs_tpcs_sms_hww_warp_esr_report_mask
+b197	SET_MME_SHADOW_SCRATCH(11)	0xffffffff	-	NVK macro state: conservative raster "never set", so its macro writes it the first time
+b197	SET_MME_SHADOW_SCRATCH(15)	0x0	-	NVK macro state: tessellation parameters
+b197	SET_TESSELLATION_PARAMETERS	0x100	-	isolines, integer spacing, lines: a defined value though nothing tessellates
+b197	SET_RENDER_ENABLE_C	0x1	-	rendering on unconditionally
+b197	SET_Z_COMPRESSION	0x1	-	depth compression on for compressible zeta kinds
+b197	SET_STENCIL_COMPRESSION	0x1	-	stencil compression on for compressible zeta kinds
+b197	SET_COLOR_COMPRESSION(0..7)	0x1	-	colour compression on for compressible kinds, every target
+b197	SET_CT_SELECT	0x1	-	one target until a pass sets its own
+b197	SET_ALIASED_LINE_WIDTH_ENABLE	0x1	-	lines use the aliased width
+b197	SET_DA_PRIMITIVE_RESTART_VERTEX_ARRAY	0x0	-	no primitive restart in non-indexed draws
+b197	SET_BLEND_SEPARATE_FOR_ALPHA	0x1	-	alpha has its own blend equation, as Metal's
+b197	SET_SINGLE_CT_WRITE_CONTROL	0x1	-	one output writes every target only when the shader says so
+b197	SET_SINGLE_ROP_CONTROL	0x0	-	ROPs work in parallel
+b197	SET_TWO_SIDED_STENCIL_TEST	0x1	-	front and back stencil state are separate, as Metal's
+b197	SET_ALPHA_TO_COVERAGE_OVERRIDE	0x1	-	alpha to coverage only with anti-aliasing on, never from the shader's sample mask
+b197	SET_SHADE_MODE	0x1d01	-	smooth shading
+b197	SET_API_VISIBLE_CALL_LIMIT	0x8	-	128 calls, the class's value for an unlimited API
+b197	SET_ZCULL_STATS	0x1	-	zcull statistics counted
+b197	SET_REDUCE_COLOR_THRESHOLDS_ENABLE	0x0	-	no colour reduction (the golden context holds 1)
+b197	SET_REDUCE_COLOR_THRESHOLDS_UNORM8	0x4	-	reduction thresholds NVK copies from the blob, inert while reduction is off
+b197	SET_REDUCE_COLOR_THRESHOLDS_UNORM10	0xff	-	as the row above
+b197	SET_REDUCE_COLOR_THRESHOLDS_UNORM16	0xff	-	as the row above
+b197	SET_REDUCE_COLOR_THRESHOLDS_FP11	0x3f	-	as the row above
+b197	SET_REDUCE_COLOR_THRESHOLDS_FP16	0xff	-	as the row above
+b197	SET_REDUCE_COLOR_THRESHOLDS_SRGB8	0x4	-	as the row above
+b197	SET_SHADER_CACHE_CONTROL	0x0	-	the shader cache's default (NVK sets 1 from Ada only)
+b197	SET_ALPHA_FRACTION	0x3f	-	pre-Volta alpha fraction NVK takes from nvc0
+b197	CHECK_SPH_VERSION	0x30003	-	shader program header version 3, what NAK writes
+b197	CHECK_AAM_VERSION	0x20002	-	attribute address map version 2, what NAK writes
+b197	SET_L2_CACHE_CONTROL_FOR_VAF_REQUESTS	0x10	-	vertex fetch: normal L2 eviction, not volatile
+b197	SET_L2_CACHE_CONTROL_FOR_ROP_PREFETCH_READ_REQUESTS	0x10	-	ROP prefetch reads: normal L2 eviction
+b197	SET_L2_CACHE_CONTROL_FOR_ROP_NONINTERLOCKED_READ_REQUESTS	0x10	-	ROP reads: normal L2 eviction
+b197	SET_L2_CACHE_CONTROL_FOR_ROP_INTERLOCKED_READ_REQUESTS	0x10	-	ROP interlocked reads: normal L2 eviction
+b197	SET_L2_CACHE_CONTROL_FOR_ROP_NONINTERLOCKED_WRITE_REQUESTS	0x10	-	ROP writes: normal L2 eviction
+b197	SET_L2_CACHE_CONTROL_FOR_ROP_INTERLOCKED_WRITE_REQUESTS	0x10	-	ROP interlocked writes: normal L2 eviction
+b197	SET_BLEND_PER_FORMAT_ENABLE	0x10	-	snorm8, unorm16 and snorm16 targets blend at their own precision (the golden context holds 0)
+b197	SET_ATTRIBUTE_DEFAULT	0xe	-	unwritten vertex attributes read (0,0,0,1)
+b197	SET_DA_OUTPUT	0x1000	-	the vertex id counts from the draw's first vertex, as Metal's vertex_id
+b197	SET_RENDER_ENABLE_CONTROL	0x0	-	LOAD_CONSTANT_BUFFER never depends on the render enable
+b197	SET_PS_OUTPUT_SAMPLE_MASK_USAGE	0x3	-	the fragment shader's sample mask output is used, qualified by anti-aliasing
+b197	SET_PRIM_CIRCULAR_BUFFER_THROTTLE	0x3fffff	-	pre-Volta primitive buffer throttle NVK takes from nvc0
+b197	SET_BLEND_OPT_CONTROL	0x1	-	float pixels whose blend leaves the target unchanged may be killed
+b197	SET_BLEND_FLOAT_OPTION	0x1	-	0 * anything is 0 in float blends, as Metal's (the golden context holds 0)
+b197	SET_BLEND_STATE_PER_TARGET	0x1	-	each target has its own blend state, as Metal's
+b197	SET_ALPHA_TEST	0x0	-	no fixed-function alpha test
+b197	SET_TWO_SIDED_LIGHT	0x0	-	no fixed-function two-sided lighting
+b197	SET_COLOR_CLAMP	0x1	-	fixed-point targets clamp (the golden context holds 0)
+b197	SET_PS_SATURATE	0x0	-	the fragment shader's outputs are not saturated
+b197	SET_ZPASS_PIXEL_COUNT	0x0	-	no occlusion counting until a query asks
+b197	SET_STATISTICS_COUNTER	0x0	-	no pipeline statistics counted
+b197	SET_POINT_SIZE	0x3f800000	-	point size 1.0
+b197	SET_ATTRIBUTE_POINT_SIZE	0x1	-	the vertex shader's point size is used, as Metal's point_size
+b197	SET_POINT_SPRITE	0x1	-	square points with point coordinates, as Metal's points
+b197	SET_POINT_SPRITE_SELECT	0x4	-	point coordinates from the top, texture coordinates passed through
+b197	SET_ANTI_ALIASED_POINT	0x0	-	no smooth (round) points
+b197	SET_FILL_VIA_TRIANGLE	0x0	-	polygon fill without the triangle emulation path
+b197	SET_POLY_SMOOTH	0x0	-	no polygon smoothing
+b197	SET_VIEWPORT_PIXEL	0x0	-	pixel centres at half integers, as Metal's
+b197	SET_MME_SHADOW_SCRATCH(25)	0x0	-	NVK macro state: shading rate control
+b197	SET_MME_SHADOW_SCRATCH(24)	0xf	-	NVK macro state: anti-alias state as nvk_mme_anti_alias_init makes it
+b197	SET_ANTI_ALIAS_ENABLE	0x1	-	multisample rasterization even at one sample, for strict lines. The golden context holds 0, and NVIDIA's userspace also writes 0x15b4 = 0, which no row writes: a lead for the DATA_ERROR 0x134 (INVALID_A_A_COMBINATION03) kills, unchanged until a device run decides it
+b197	SET_POST_PS_INITIAL_COVERAGE	0x1	-	coverage after the fragment shader starts from the rasterized coverage
+b197	SET_OFFSET_RENDER_TARGET_INDEX	0x0	-	the render target array index is not offset by the viewport index
+b197	SET_WINDOW_ORIGIN	0x0	-	upper-left origin, no flip, as Metal's
+b197	SET_WINDOW_OFFSET_X	0x0	-	no window offset
+b197	SET_WINDOW_OFFSET_Y	0x0	-	no window offset
+b197	SET_ZCULL_BOUNDS	0x0	-	zcull bounded by the depth range
+b197	SET_ZCULL	0x1	-	zcull on for depth, off for stencil
+b197	CALL_MME_MACRO(3)	0x1	-	UPDATE_WINDOW_CLIP: window clipping off
+b197	SET_CLIP_ID_TEST	0x0	-	no clip id test
+b197	SET_VIEWPORT_SCALE_OFFSET	0x1	-	the viewport transform applies
+b197	SET_VIEWPORT_CLIP_CONTROL	0x18	-	depth clamped to the pixel range, 256x guard bands, clip at w = 0
+b197	SET_SCISSOR_ENABLE(0..15)	0x0	-	scissors off until a pass sets its own
+b197	SET_CT_MRT_ENABLE	0x1	-	every target takes its own output
+b197	SET_PROGRAM_REGION_A	0x0	heap_hi	the shader heap, which program offsets count from
+b197	SET_PROGRAM_REGION_B	0x0	heap_lo	as the row above
+b197	SET_SHADER_LOCAL_MEMORY_WINDOW	0xff000000	-	local memory's window at the top of the 4 GiB range, as nvc0 placed it
+b197	BIND_GROUP_CONSTANT_BUFFER(0..4)	0x0..0xf0/0x10	-	every stage's 16 constant buffer slots unbound
+b197	SET_RT_LAYER	0x0	-	layer 0, the shader may choose its own
+b197	SET_POINT_CENTER_MODE	0x0	-	point centres as OpenGL places them
+b197	SET_EDGE_FLAG	0x1	-	every edge is a boundary edge
+b197	SET_SAMPLER_BINDING	0x0	-	texture and sampler indices are independent, as Metal binds them
+b197	SET_PRIMITIVE_TOPOLOGY_CONTROL	0x1	-	the topology comes from BEGIN, not a separate state
+b197	SET_VERTEX_STREAM_SUBSTITUTE_A	0x0	zero_hi	the zero page stands in for a disabled vertex stream
+b197	SET_VERTEX_STREAM_SUBSTITUTE_B	0x0	zero_lo	as the row above
+b197	SET_MME_SHADOW_SCRATCH(14)	0x0	-	NVK macro state: vertex buffer enables
+b197	SET_VERTEX_STREAM_A_FORMAT(0..15)	0x0	-	vertex streams 0-15 off
+b197	SET_VERTEX_STREAM_B_FORMAT(0..15)	0x0	-	vertex streams 16-31 off
+b197	SET_MME_SHADOW_SCRATCH(26)	0x0	root_hi	NVK macro state: the root table, which SELECT_CB0 selects
+b197	SET_MME_SHADOW_SCRATCH(27)	0x0	root_lo	as the row above
+b197	SET_MME_SHADOW_SCRATCH(28)	0x0	zero_hi	NVK macro state: the zero page
+b197	SET_MME_SHADOW_SCRATCH(29)	0x0	zero_lo	as the row above
+b197	CALL_MME_MACRO(0)	0x0	-	SELECT_CB0: the root table becomes the selected constant buffer
+b197	BIND_GROUP_CONSTANT_BUFFER(0..4)	0x1	-	the root table bound at slot 0 of every stage
+b197	LOAD_CONSTANT_BUFFER_OFFSET	0x0	-	the root table from its start
+b197	LOAD_CONSTANT_BUFFER(0)	0x0*512	-	the 2 KiB root table zeroed
+b197	LOAD_CONSTANT_BUFFER_OFFSET	0x260	-	the root table's interlock_ticket_buffer
+b197	LOAD_CONSTANT_BUFFER(0)	0x0	tickets_lo	the pixel interlock's ticket buffer, which NAK's interlock waits on
+b197	LOAD_CONSTANT_BUFFER(0)	0x0	tickets_hi	as the row above
+b197	SET_GLOBAL_BASE_INSTANCE_INDEX	0x0	-	base instance 0, which the root table shadows
+b197	SET_MME_SHADOW_SCRATCH(30..35)	0x0	-	NVK macro state: the root table's shadowed draw parameters
+b1c0	SET_OBJECT	0xb1c0	-	MAXWELL_COMPUTE_B on subchannel 1
+b1c0	SET_PROGRAM_REGION_A	0x0	heap_hi	the shader heap, which kernel program offsets count from
+b1c0	SET_PROGRAM_REGION_B	0x0	heap_lo	as the row above
+b1c0	SET_SHADER_LOCAL_MEMORY_WINDOW	0xff000000	-	local memory's window, where 3D's is
+b1c0	SET_SHADER_SHARED_MEMORY_WINDOW	0xfe000000	-	shared memory's window, 16 MiB below local memory's
+b1c0	SET_TEX_HEADER_POOL_A	0x0	tic_hi	the texture header pool
+b1c0	SET_TEX_HEADER_POOL_B	0x0	tic_lo	as the row above
+b1c0	SET_TEX_HEADER_POOL_C	0x0	tic_max	its last index
+b1c0	INVALIDATE_TEXTURE_HEADER_CACHE_NO_WFI	0x0	-	headers re-read from the new pool
+b197	SET_TEX_HEADER_POOL_A	0x0	tic_hi	the texture header pool, shared with compute
+b197	SET_TEX_HEADER_POOL_B	0x0	tic_lo	as the row above
+b197	SET_TEX_HEADER_POOL_C	0x0	tic_max	its last index
+b197	INVALIDATE_TEXTURE_HEADER_CACHE_NO_WFI	0x0	-	headers re-read from the new pool
+b1c0	SET_TEX_SAMPLER_POOL_A	0x0	tsc_hi	the sampler header pool
+b1c0	SET_TEX_SAMPLER_POOL_B	0x0	tsc_lo	as the row above
+b1c0	SET_TEX_SAMPLER_POOL_C	0x0	tsc_max	its last index
+b1c0	INVALIDATE_SAMPLER_CACHE_NO_WFI	0x0	-	samplers re-read from the new pool
+b197	SET_TEX_SAMPLER_POOL_A	0x0	tsc_hi	the sampler header pool, shared with compute
+b197	SET_TEX_SAMPLER_POOL_B	0x0	tsc_lo	as the row above
+b197	SET_TEX_SAMPLER_POOL_C	0x0	tsc_max	its last index
+b197	INVALIDATE_SAMPLER_CACHE_NO_WFI	0x0	-	samplers re-read from the new pool

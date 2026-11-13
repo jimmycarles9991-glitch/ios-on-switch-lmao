@@ -98,6 +98,24 @@ RELOC_CODE = {
     'tsc_max': 12,
 }
 
+# The root table's interlock ticket buffer (nvk_root_descriptor_table.interlock_ticket_buffer): the two words NVK's init
+# loads after LOAD_CONSTANT_BUFFER_OFFSET 0x260, PackReloc 13 and 14 (the kit's context.tsv tickets_lo and tickets_hi)
+RELOC_TICKETS = (13, 14)
+
+
+def init_relocations(init: list[tuple[int, int, int]]) -> list[tuple[int, int, int, int]]:
+    """Give the init's methods with their PackReloc codes: RELOC's by method, the ticket words by their place."""
+    out, ticket = [], None
+    for sc, m, d in init:
+        code = RELOC_CODE.get(RELOC.get((sc, m)), 0)
+        if sc == 0 and m == 0x238C:
+            ticket = 0 if d == 0x260 else None
+        elif sc == 0 and m == 0x2390 and ticket is not None and ticket < len(RELOC_TICKETS):
+            code = RELOC_TICKETS[ticket]
+            ticket += 1
+        out.append((sc, m, d, code))
+    return out
+
 
 def load_programs(path: str) -> dict[str, dict[str, bytes | list[int]]]:
     """Give mkprograms.py's programs by the id nvdec names a bound one with: the FNV-1a of its header, code and data."""
@@ -176,6 +194,7 @@ def default_forms(simple: list[dict], storage: set[str]) -> tuple[list[dict], li
 # set 0, and set 0's uniform buffers (mkprograms.py cbuf_code: the type in bits 0-2, the descriptor's offset / 16 above)
 # at the slots the program names (raw_gpu.cpp)
 CBUF_ROOT, CBUF_SHADER_DATA, CBUF_SET, CBUF_UBO = 1, 2, 3, 5
+CBUF_HEAP_SET = CBUF_SET | 1 << 3  # runtime/raw_pack.h kCbufHeapSet: set 1, a heap's arrays
 
 
 def ubo_offsets(program: dict) -> list[int]:
@@ -183,9 +202,10 @@ def ubo_offsets(program: dict) -> list[int]:
     return [(c >> 3) * 16 for c in program['cbufs'][1:] if c & 7 == CBUF_UBO]
 
 
-def raw_bindable(program: dict) -> bool:
+def raw_bindable(program: dict, heap: bool = False) -> bool:
+    """Give whether a raw draw binds every constant buffer `program` reads; set 1 only with a heap (`heap`)."""
     cbufs = program['cbufs']
-    rest = [c for c in cbufs[1:] if c & 7 != CBUF_UBO]
+    rest = [c for c in cbufs[1:] if c & 7 != CBUF_UBO and not (heap and c == CBUF_HEAP_SET)]
     offsets = ubo_offsets(program)
     return (
         bool(cbufs)
@@ -335,15 +355,57 @@ def split_probes(probes: list[dict]) -> tuple[list[dict], list[tuple[dict, str]]
 # so neither in its blob nor in deciding what varies (r8-rawca: two states with a third target made targets 2's blend
 # "vary" for every other state)
 def targets(key: str) -> int:
-    return sum(1 for t in key.split() if t[:1] == 'c' and t[1:2].isdigit() and '=' in t)
+    """Give the color attachments a key names, bit j its c<j>."""
+    return sum(1 << int(t[1]) for t in key.split() if t[:1] == 'c' and t[1:2].isdigit() and '=' in t)
 
 
-def foreign(m: int, n: int) -> bool:
-    return (
-        (0x1E00 <= m < 0x1F00 and (m - 0x1E00) // 0x20 >= n)
-        or (0x1A00 <= m < 0x1A20 and (m - 0x1A00) // 4 >= n)
-        or (0x1360 <= m < 0x1380 and (m - 0x1360) // 4 >= n)
-    )
+XR_PLANES = 550  # RGB10A8_2P_XR10 (runtime/raw_xr.h XrForm::Planes)
+
+
+def colour_formats(key: str) -> list[int]:
+    """Give the MTLPixelFormat of each colour a key names, by index, 0 for none."""
+    formats = [0] * 8
+    for t in key.partition(' | ')[0].split():
+        if t[:1] == 'c' and t[1:2].isdigit() and t[2:3] == '=':
+            formats[int(t[1])] = int(t[3:].partition(':')[0])
+    return formats
+
+
+def xr_alpha_slots(formats: list[int]) -> list[int]:
+    """Give each colour's alpha index as runtime/raw_xr_pass.h xrAlphaSlots does, -1 for none.
+
+    A two-plane RGB10A8_2P_XR10 colour's alpha byte is a target of its own: the lowest index no colour holds and no
+    earlier colour's alpha took. mkpack_owned_test holds this to raw_xr_pass_test's cases.
+    """
+    alpha, free = [-1] * 8, 0
+    for j, f in enumerate(formats):
+        if f != XR_PLANES:
+            continue
+        while free < 8 and formats[free]:
+            free += 1
+        if free == 8:
+            break
+        alpha[j] = free
+        free += 1
+    return alpha
+
+
+def target_mask(key: str, two_plane: bool) -> int:
+    """Give the targets a state's draw writes, bit j target j.
+
+    Those are its key's colours and, in its two-plane form (PipelineTwoPlane), each RGB10A8_2P_XR10 colour's alpha
+    target.
+    """
+    alpha = xr_alpha_slots(colour_formats(key)) if two_plane else []
+    return targets(key) | sum(1 << a for a in alpha if a >= 0)
+
+
+def foreign(m: int, mask: int) -> bool:
+    """Whether `m` is a color target's own register for a target `mask` lacks, past its last or between two."""
+    for base, stride in ((0x1E00, 0x20), (0x1A00, 4), (0x1360, 4)):
+        if base <= m < base + 8 * stride and not mask >> ((m - base) // stride) & 1:
+            return True
+    return False
 
 
 # SET_VERTEX_STREAM_A_FORMAT(j) with ENABLE (bit 12) clear: a stream the hardware does not fetch, whose stride the probe
@@ -356,13 +418,13 @@ def split_registers(simple: list[dict], post: dict[int, dict[int, int]]) -> tupl
     # registers: varying across states -> per-pipeline blob; equal -> baseline (when it differs from post-init). A
     # register foreign to a state (a target it lacks) is not its, so it decides nothing: a state with no color target
     # (Portrait's depth-only states) would otherwise move target 0's per-target blend (0x1e00) out of the baseline, and
-    # every record would take it from the warm-up draw where the runtime's direct compile takes the init template's
+    # every record would take it from the warm-up draw where the runtime's direct compile takes the init template's.
+    # A state's targets are its maker's mask (p['targets']): a two-plane state's alpha targets are its own too
     allregs = set(post[0])
     for p in simple:
         allregs |= set(p['records'][0]['regs'])
-    counts = {id(p): targets(p['key']) for p in simple}
     vals = {
-        m: {p['records'][0]['regs'].get(m, 0) for p in simple if not foreign(m, counts[id(p)])}
+        m: {p['records'][0]['regs'].get(m, 0) for p in simple if not foreign(m, p['targets'])}
         for m in allregs
         if not owned(m)
     }
@@ -387,6 +449,19 @@ def lay_out_programs(
     data = sum(1 for pr in prog_recs if pr['data_bytes'])
     report.append(f'{len(prog_recs)} programs ({data} with shader data), shader heap image {len(heap) // 1024} KiB')
     return heap, prog_index, prog_recs
+
+
+# SET_PIPELINE_REGISTER_COUNT(vertex B, pixel): the probe's register count of each program it bound
+REGISTER_COUNTS = {1: 0x204C, 5: 0x214C}
+
+
+def probed_register_counts(simple: list[dict], programs: dict[str, dict]) -> dict[str, dict]:
+    """Give each program the register count its states' draws set (PackProgram.gprs: owned, so in no blob)."""
+    for p in simple:
+        record = p['records'][0]
+        for stage, method in REGISTER_COUNTS.items():
+            programs[record['prog'][stage][0]]['gprs'] = record['regs'].get(method, 0)
+    return programs
 
 
 FRAGMENT_CODES = (1, 2, 3, 5, 6, 7, 9, 10, 11, 13, 14, 15)
@@ -481,6 +556,8 @@ def handle_entry(e: tuple, tsc: dict[int, list[int]], constexpr_tsc: list[list[i
         ent['smp'] = None
     elif sk[0] == 'smp':
         ent['smp'] = ('slot', sk[1])
+        # m2v binds a slot the state samples by comparison with its compare header (TEXSAMP0 DEPTH_COMPARE, bit 9)
+        ent['compare'] = bool(tsc[e[4] >> 20][0] >> 9 & 1)
     elif sk[0] == 'tsc?derived':
         problems.append('a sampler m2v derives from a bound one (YCbCr conversion)')
     else:
@@ -519,7 +596,7 @@ def pipeline(
         'fs': prog_index[r['prog'][5][0]],
     }
     rec['blob'] = [
-        (m, r['regs'].get(m, 0)) for m in varying if m not in (0x2044, 0x2144) and not foreign(m, targets(p['key']))
+        (m, r['regs'].get(m, 0)) for m in varying if m not in (0x2044, 0x2144) and not foreign(m, p['targets'])
     ]
     root = r['root'][1]
     rec['push'] = [(int(o, 16), int(x, 16)) for o, x in (w.split('=') for w in r.get('pushw', []))]
@@ -582,7 +659,7 @@ def main() -> None:
     simple, aside = raw_bound(simple, programs)
     skipped += aside
     for p in simple:
-        n = targets(p['key'])
+        n = p['targets'] = targets(p['key'])
         p['records'][0]['regs'] = {
             m: 0 if disabled_stream(m, v) else v for m, v in p['records'][0]['regs'].items() if not foreign(m, n)
         }
@@ -594,7 +671,7 @@ def main() -> None:
     names = ' '.join(f'{m:x}' for m in varying)
     report.append(f'{len(varying)} per-pipeline registers: {names}')
     report.append(f'{len(baseline)} baseline registers over post-init')
-    heap, prog_index, prog_recs = lay_out_programs(simple, programs, report)
+    heap, prog_index, prog_recs = lay_out_programs(simple, probed_register_counts(simple, programs), report)
     # pipelines
     pipes, constexpr_tsc = [], []
     for p in simple:
@@ -607,7 +684,7 @@ def main() -> None:
     pipes.sort(key=packfile.key_hash)
     computes: list[dict] = []
     # init template with relocations (submissions 1-3 as NVK recorded them)
-    init_recs = [(sc, m, d, RELOC_CODE.get(RELOC.get((sc, m)), 0)) for sc, m, d in init]
+    init_recs = init_relocations(init)
     report.append(f'init template: {len(init_recs)} methods, {sum(1 for x in init_recs if x[3])} relocated')
     pack = packfile.Pack(pipes, prog_recs, constexpr_tsc, baseline, init_recs, heap, computes)
     data, blob = packfile.pack_bytes(pack)

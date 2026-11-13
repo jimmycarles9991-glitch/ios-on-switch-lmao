@@ -1,87 +1,84 @@
 // SPDX-License-Identifier: BSD-2-Clause-Patent
-// Which of a rail Joy-Con's 0x30 reports reach its HID device (SwitchJoyConRail.cpp runningReport; the host test
+// Which of a rail Joy-Con's reports reach its HID device (SwitchJoyConRail.cpp runningReport; the host test
 // test/switch_joycon_forward_test.cpp drives this header).
 //
-// The rail asks for a report every 15 ms because a rail Joy-Con only speaks when spoken to, so two seated Joy-Cons
-// answer about 133 times a second. While JoyConHIDServicePlugin has the Joy-Con in input report mode 0x3F ("simple
-// HID"), a Bluetooth Joy-Con sends a report only when a button or the stick changes; each report handed to the HID
-// device wakes backboardd's HID event system. So in that mode a report goes on when its buttons, battery or a stick
-// axis (by more than the stick's resting noise) differ from the last one handed on, and at least once a second.
-// In the full mode (0x30, which the plugin asks for when a game wants every report) and while the IMU is on
-// (subcommand 0x40: its samples change every report), every report goes on.
+// The rail asks for a report every 15 or 30 ms (SwitchJoyConCadence.h) because a rail Joy-Con only speaks when spoken
+// to, and each report handed to the HID device wakes backboardd's HID event system and JoyConHIDServicePlugin. So a
+// 0x30 report goes on only when it says something new: its buttons, its battery level or charging, or its stick moved
+// from where it was in the last one handed on, by the Joy-Con's own dead zone (SwitchJoyConStick.h) over 16 while it is
+// out of the dead zone (10 counts for 0xAE, about L4T's stick fuzz: joycon-serdev.c 140, 250 of 32767 is 10 counts of a
+// Joy-Con's ~1270-count half axis), and over 4 while it rests in it (43 counts: a stick at rest jitters over 7, deku
+// packet_parse/j2c.txt 1837-1844 x 2086-2092, and a worn one more; a client sees the dead zone as the centre, so
+// nothing in it is news but drift that adds up). The connection bits (byte 2's low nibble) and the timer (byte 1) are
+// not news.
+//
+// No report goes on just to keep the device alive. JoyConHIDServicePlugin's idle clock follows input, not reports
+// (boot 17, 24B119: its "isIdle for N seconds" grew to 300 s with the plugin in 0x30 mode and all ~66 reports a second
+// handed on), and a Bluetooth Joy-Con in 0x3F sends only on a button change (deku bluetooth_hid_subcommands_notes.md
+// 81). That it takes a 0x30-mode Joy-Con falling silent for minutes is the device's to show: HW Test input.joycon_idle,
+// and the plugin's log keeping "isIdle" growing with no "Cancel" or "Device not active". While a client wants motion (the plugin's
+// subcommand 0x40 with a non-zero argument), every 0x30 report goes on: its IMU samples change every time. Replies (0x21)
+// and MCU reports (0x31) always go on.
 #pragma once
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
+#include "SwitchJoyConStick.h"
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
-#define SWITCH_JOYCON_FORWARD_STICK_NOISE  8u  // of 4096: above the stick's jitter at rest, far below one degree
-#define SWITCH_JOYCON_FORWARD_KEEPALIVE_MS 1000u
-
 struct switch_joycon_forward {
-    bool simple;       // the plugin's last input report mode was 0x3F
-    bool imu;          // the plugin's last IMU subcommand turned it on
+    bool imu;          // a client asked for motion: the plugin's last subcommand 0x40 was non-zero
     bool primed;       // `last` holds a report handed on since the device was published
-    uint8_t last[10];  // its battery byte, buttons (3) and sticks (6): report bytes 2..11
-    uint64_t last_ms;
+    uint8_t last[12];  // the last report handed on, up to its sticks
 };
 
-static inline unsigned switch_joycon_axis(const uint8_t *stick, unsigned axis)
+// How far the stick may move from `was` to `now` (reports) without news.
+static inline unsigned switch_joycon_stick_noise(const struct switch_joycon_stick *s, const uint8_t *was,
+                                                 const uint8_t *now)
 {
-    return axis == 0 ? (stick[0] | (stick[1] & 0x0fu) << 8) : ((unsigned)stick[1] >> 4 | (unsigned)stick[2] << 4);
+    const bool resting = switch_joycon_stick_within(s, was, s->centre, s->dead_zone) &&
+                         switch_joycon_stick_within(s, now, s->centre, s->dead_zone);
+    return resting ? s->dead_zone / 4u : s->dead_zone / 16u;
 }
 
-static inline bool switch_joycon_forward_moved(const uint8_t *was, const uint8_t *now)
+// Buttons, battery or the stick differ in a way the plugin would see (both reports at least 12 bytes).
+static inline bool switch_joycon_report_news(const struct switch_joycon_stick *s, const uint8_t *was,
+                                             const uint8_t *now)
 {
-    for (unsigned stick = 0; stick < 2; ++stick) {
-        for (unsigned axis = 0; axis < 2; ++axis) {
-            const unsigned a = switch_joycon_axis(was + static_cast<size_t>(3) * stick, axis);
-            const unsigned b = switch_joycon_axis(now + static_cast<size_t>(3) * stick, axis);
-            if ((a > b ? a - b : b - a) > SWITCH_JOYCON_FORWARD_STICK_NOISE)
-                return true;
-        }
-    }
-    return false;
+    if (was[2] >> 4 != now[2] >> 4 || was[3] != now[3] || was[4] != now[4] || was[5] != now[5])
+        return true;
+    const uint16_t at[2] = {(uint16_t)switch_joycon_stick_axis(s, was, 0),
+                            (uint16_t)switch_joycon_stick_axis(s, was, 1)};
+    return !switch_joycon_stick_within(s, now, at, switch_joycon_stick_noise(s, was, now));
 }
 
-// A new HID device starts in the full mode, as the Joy-Con does.
+// A new HID device: its plugin has asked for nothing yet.
 static inline void switch_joycon_forward_reset(struct switch_joycon_forward *f)
 {
-    f->simple = false;
     f->imu = false;
     f->primed = false;
-    f->last_ms = 0;
 }
 
-// An output report the plugin sent: subcommand 0x03 sets the input report mode, 0x40 the IMU.
+// An output report the plugin sent: subcommand 0x40 turns the IMU on or off.
 static inline void switch_joycon_forward_output(struct switch_joycon_forward *f, const uint8_t *report, size_t length)
 {
-    if (length < 12 || report[0] != 0x01)
-        return;
-    if (report[10] == 0x03) {
-        f->simple = report[11] == 0x3f;
-    } else if (report[10] == 0x40) {
+    if (length >= 12 && report[0] == 0x01 && report[10] == 0x40)
         f->imu = report[11] != 0;
-    }
 }
 
 // True: hand this input report to the HID device. Only 0x30 reports are ever held back.
-static inline bool switch_joycon_forward_report(struct switch_joycon_forward *f, const uint8_t *report, size_t length,
-                                                uint64_t now_ms)
+static inline bool switch_joycon_forward_report(struct switch_joycon_forward *f, const struct switch_joycon_stick *s,
+                                                const uint8_t *report, size_t length)
 {
-    if (length < 12 || report[0] != 0x30 || !f->simple || f->imu)
+    if (length < sizeof(f->last) || report[0] != 0x30 || f->imu)
         return true;
-    const uint8_t *now = report + 2;
-    const bool changed = !f->primed || f->last[0] >> 4 != now[0] >> 4 || f->last[1] != now[1] || f->last[2] != now[2] ||
-                         f->last[3] != now[3] || switch_joycon_forward_moved(f->last + 4, now + 4);
-    if (!changed && now_ms - f->last_ms < SWITCH_JOYCON_FORWARD_KEEPALIVE_MS)
+    if (f->primed && !switch_joycon_report_news(s, f->last, report))
         return false;
     for (unsigned i = 0; i < sizeof(f->last); ++i)
-        f->last[i] = now[i];
-    f->last_ms = now_ms;
+        f->last[i] = report[i];
     f->primed = true;
     return true;
 }

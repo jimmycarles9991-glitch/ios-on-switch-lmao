@@ -14,6 +14,7 @@ struct SurfaceLockScene: GPUScene {
 
     static let shapes: [(TexelFormat, Int, Int)] = [
         (.bgra8Unorm, 256, 256), (.r8Unorm, 512, 64), (.rgba16Float, 128, 128), (.bgra8Unorm, 333, 77),
+        (.rgba16Float, 72, 72), (.rgba16Float, 136, 136),
     ]
     static let writes = [
         UploadRect(x: 37, y: 11, width: 12, height: 14), UploadRect(x: 63, y: 7, width: 3, height: 9),

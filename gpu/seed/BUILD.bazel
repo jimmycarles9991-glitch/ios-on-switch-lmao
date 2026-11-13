@@ -51,10 +51,14 @@ seed_tools(
     name = "local_tools",
     hdrs = [
         METAL + ":frontend_headers",
+        GM20B_METAL + ":precompile/PrecompileCompute.h",
+        GM20B_METAL + ":precompile/PrecompileInputs.h",
+        "//drivers/TegraGM20B:TegraGM20BJobABI.h",
         "//kits/SwitchRefusal:SwitchRefusal.h",
         "//kits/SwitchRefusal:SwitchRefusalSite.h",
     ],
     abi_header = "//drivers/TegraGM20B:TegraGM20BABI.h",
+    context_header = "//kits/SwitchGM20BEmit:context",
     frontend = METAL + ":NativeBridgeMetalFrontend.mm",
     host_bridge = "//gpu:bridge_host",
     metal_abi = METAL + "/abi:MetalABI.h",
@@ -67,16 +71,7 @@ seed_tools(
     ],
     precompile = GM20B_METAL + ":precompile/precompile.mm",
     raw_generator = GM20B_METAL + ":raw/pack/rawpack.py",
-    raw_srcs = [
-        GM20B_METAL + ":raw_direct_sources",
-        GM20B_METAL + ":raw_pack_generator",
-        METAL + ":NativeBridgeMetalFrontend.mm",
-        METAL + ":frontend_headers",
-        "//drivers/TegraGM20B:TegraGM20BABI.h",
-        "//drivers/TegraGM20B:TegraGM20BLayout.h",
-        "//kits/SwitchRefusal:SwitchRefusal.h",
-        "//kits/SwitchRefusal:SwitchRefusalSite.h",
-    ],
+    raw_srcs = [GM20B_METAL + ":raw_stack_sources"],
     stack = "//gpu:raw_stack",
     twin = "//gpu/nvk:twin",
 )
@@ -88,6 +83,14 @@ tools_archive(
 
 shader_crawl(
     name = "crawl",
+    applications = select({
+        "//ipsw:ios17": ["//hw_test_app:SwitchHWTest17"],
+        "//ipsw:ios27": [
+            "//hw_test_app:SwitchHWTest27",
+            "//hw_test_app:SwitchHWTest27e",
+        ],
+    }),
+    embedded = [METAL + ":TwoPlaneStandIn.h"],
     inventory = "@ipsw//:crawl_inventory",
     qc = "@ipsw//:crawl_qc",
     tags = ["manual"],
@@ -101,7 +104,6 @@ metal_seed(
     crawl = ":crawl",
     depth = ":depth",
     device_libraries = "@gpu_device_data//:libraries",
-    embedded = [METAL + ":TwoPlaneStandIn.h"],
     records = "@gpu_device_data//:records",
     replies = "@gpu_device_data//:replies",
     tags = ["manual"],
@@ -111,10 +113,12 @@ metal_seed(
 seed_raw_pack(
     name = "raw_pack",
     srcs = [GM20B_METAL + ":raw_pack_generator"],
+    app_states = [GM20B_METAL + ":app_state_lists"],
     archives = [GM20B_METAL + ":archive_inventories"],
     ca_names = [GM20B_METAL + ":ca_name_lists"],
     corpus = GM20B_METAL + ":precompile/corpus.log",
     crawl = ":crawl",
+    device_libraries = "@gpu_device_data//:libraries",
     generator = GM20B_METAL + ":raw/pack/rawpack.py",
     tags = ["manual"],
     tools = ":tools",

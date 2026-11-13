@@ -1,21 +1,21 @@
 // SPDX-License-Identifier: MIT
-// GM20B colour and depth compression for the raw path's memoryless attachments (Device::backing: the zeta and memoryless
-// colour targets). The kernel gives comptags only to BoAlloc memory in physically contiguous, 128 KiB-aligned runs, bound
+// GM20B colour and depth compression for the raw path's pass backings (Device::backing: the zeta and memoryless colour
+// targets, one sample or several, and the block-linear image a pass renders a pitch target through). The kernel gives comptags only to BoAlloc memory in physically contiguous, 128 KiB-aligned runs, bound
 // with a compressible kind at 128 KiB granularity (TegraGM20BABI.h, drivers/TegraGM20B/TegraGM20BComp.h): a Compressible
 // BO, 128 KiB chunks of the kernel's GPU pool, which a fragmented pool serves as well as an empty one. Every engine
 // reaching memory through such a binding sees plain texels (the L2 decompresses); anything else (the CPU, the display,
-// another binding of the same pages) would see compressed bytes. These targets are written and read only by the 3D engine
-// and the texture unit, through their one compressed binding, inside a pass: never CPU-mapped, never scanned out, never
-// an m2v twin's memory (a memoryless texture's twin has its own), never copied by the copy engine. So none of them is
-// ever resolved. A texture the app made does not qualify while it can reach m2v (a replayed command buffer twins it in
-// place) or a blit (the copy engine): both name its memory through another binding.
+// another binding of the same pages) would see compressed bytes. These targets are written and read only by the 3D engine,
+// the texture unit and the copy engine (copyEngineReadsCompressed), through their one compressed binding: never CPU-mapped,
+// never scanned out, never an m2v twin's memory (a memoryless texture's twin has its own). So none of them is ever resolved.
+// A texture the app made does not qualify while it can reach m2v: a replayed command buffer twins it in place, another
+// binding of its memory.
 //
-// Kinds are NVN's on the Tegra X1 (deko3d pickImageMemoryKind, one sample); the kernel's table (nvkm gm200_mmu_kind)
-// demotes each to the kind an uncompressed binding of the same layout takes.
+// Kinds are NVN's on the Tegra X1 (deko3d pickImageMemoryKind; NIL nvc0_choose_pte_kind for the depth formats and sample
+// counts it adds), numbered as Maxwell's dev_mmu.h; the kernel's table (nvkm gm200_mmu_kind) demotes each to the kind an
+// uncompressed binding of the same layout takes.
 //
 // A full-target clear of a compressed target to a value the GPU's ZBC table holds writes comptags and no texels. The table
-// is the boot one (nvkm gf100_gr_zbc_init and the kernel's opaque black, TegraGM20BABI.h method 19); zbcBoot* say whether
-// a clear is one of its values, for the hit and miss counts that tell whether more entries would pay.
+// is the boot one (nvkm gf100_gr_zbc_init and the kernel's opaque black) and what processes added (raw_zbc.h).
 #pragma once
 #include <IOKit/IOReturn.h>
 #include <algorithm>
@@ -24,6 +24,7 @@
 #include <memory>
 #include <vector>
 #include "raw_kernel.h"
+#include "raw_zbc.h"
 
 namespace raw {
 
@@ -37,27 +38,68 @@ enum : uint32_t {
     kCompKindZeta = 0xce,  // NV_MMU_PTE_KIND_ZF32_X24S8_2CSZV
 };
 
-// The compressible kind of a block-linear target of `bpp`-byte texels (the D32S8 zeta when `zeta`), 0 when it has none
-inline uint32_t compressedKind(uint32_t bpp, bool zeta)
+// Whether the copy engine reads and writes kind `kind`'s texels through that binding as plain ones. Proven for one-sample
+// C32_2CRA and C64_2CRA by HW Test gpu.x1.ce_compressed (rule copy.ce_compressed; boot 6, stack-F-v1, 11 Nov): BGRA8 and
+// RGBA16Float at 256x256, 320x180 and 1280x720, 24 repeats, every case exact: rendered tiles, ZBC and other full clears and
+// clear-plus-half-draw tiles read by it; its whole and half-height writes over rendered and ZBC-cleared tiles read by it and
+// the texture unit; copies both ways between a compressed and a plain target. Its rectangles started at the origin, as a
+// shadow's do. Not asked: C128, the multisampled colour kinds and every zeta kind (gpu.x1.ce_compressed_depth's cells).
+// Rule flip pending: a stored one-sample depth/stencil texture (Device::createOwnedZeta) stays on plain zeta memory, as
+// its readback and aspect copies are the copy engine's, until HW Test gpu.raw.stored_depth reads
+// compressed_readback_wrong=0 with compressed_readback_facts comptags=1 (T-v3g's gpu.x1.ce_compressed_depth ran no
+// one-sample compressed round: d32f_1x_compressed_rounds=0).
+constexpr bool copyEngineReadsCompressed(uint32_t kind)
 {
-    if (zeta)
-        return kCompKindZeta;
+    return kind == kCompKindC32 || kind == kCompKindC64;
+}
+
+// The compressible kind of a block-linear colour target of `bpp`-byte texels at `samples` samples, or of the depth/stencil
+// target of Metal format `zeta` (0: colour); 0 when it has none
+inline uint32_t compressedKind(uint32_t bpp, uint32_t zeta, uint32_t samples = 1)
+{
+    const uint32_t ms = samples == 1 ? 0 : samples == 2 ? 1 : samples == 4 ? 2 : 3;
+    if (ms > 2)
+        return 0;
+    switch (zeta) {
+    case 0:
+        break;
+    case 250:  // Depth16Unorm: Z16_2C, _MS2_2C, _MS4_2C
+        return 0x02 + ms;
+    case 252:  // Depth32Float: ZF32_2CZ, _MS2_2CZ, _MS4_2CZ
+        return 0x86 + ms;
+    case 260:  // Depth32Float_Stencil8: ZF32_X24S8_2CSZV, _MS2_2CSZV, _MS4_2CSZV
+        return kCompKindZeta + ms;
+    default:
+        return 0;
+    }
+    static constexpr uint32_t kColour[3][3] = {
+        {kCompKindC32, 0xcc, 0xe2},   // C32_2CRA, C32_MS2_2CRA, C32_MS4_2CRA
+        {kCompKindC64, 0xcd, 0xf0},   // C64_2CRA, C64_MS2_2CRA, C64_MS4_2CRA
+        {kCompKindC128, 0xf7, 0xf9},  // C128_2CR, C128_MS2_2CR, C128_MS4_2CR
+    };
     switch (bpp) {
     case 4:
-        return kCompKindC32;
+        return kColour[0][ms];
     case 8:
-        return kCompKindC64;
+        return kColour[1][ms];
     case 16:
-        return kCompKindC128;
+        return kColour[2][ms];
     default:
         return 0;
     }
 }
 
-// The kind gm200_mmu_kind demotes a compressible one to
+// The kind gm200_mmu_kind demotes a compressible one to: the zeta format's plain kind (raw_zeta.h kZetaFormatInfo), else
+// block-linear colour's
 inline uint32_t demotedKind(uint32_t kind)
 {
-    return kind == kCompKindZeta ? 0xc3u : 0xfeu;
+    if (kind >= 0x02 && kind <= 0x04)
+        return 0x01;  // Z16
+    if (kind >= 0x86 && kind <= 0x88)
+        return 0x7b;  // ZF32
+    if (kind >= kCompKindZeta && kind <= kCompKindZeta + 2)
+        return 0xc3;  // ZF32_X24S8
+    return 0xfe;
 }
 
 inline uint64_t compBytes(uint64_t bytes)
@@ -65,17 +107,21 @@ inline uint64_t compBytes(uint64_t bytes)
     return (bytes + kCompGranule - 1) & ~(kCompGranule - 1);
 }
 
-// The compressible kind of a Device::backing of `bpp`-byte texels with the kernel's compression on: the zeta's, or a
-// memoryless colour target's (tags from memorylessTag). A shadow (a lower tag) is filled and drained by the copy engine,
-// and a pitch or multisampled backing has no compressible kind here (the kinds above are one sample's).
-inline uint32_t backingKind(bool compression, bool blockLinear, bool zeta, uint32_t bpp, uint32_t samples, uint32_t tag,
-                            uint32_t memorylessTag)
+// The compressible kind of a Device::backing of `bpp`-byte texels with the kernel's compression on: a memoryless zeta's of
+// Metal format `zeta`, or a colour target's. The copy engine fills and drains a shadow (`copied`) and the zeta of a pass
+// whose draws test in the shader (Depth32Float and multisampled Depth32Float_Stencil8: raw_shader_tests.h), so those
+// compress only where copyEngineReadsCompressed holds for their kind. A pitch backing has no compressible kind.
+// `zetaProbe`: a debug build's probe of those zetas (gpu.x1.ce_compressed_depth) gives them their kind.
+inline uint32_t backingKind(bool compression, bool blockLinear, uint32_t zeta, uint32_t bpp, uint32_t samples,
+                            bool copied, bool zetaProbe = false)
 {
-    if (!compression || !blockLinear || samples > 1)
+    if (!compression || !blockLinear)
         return 0;
-    if (zeta)
-        return kCompKindZeta;
-    return tag >= memorylessTag ? compressedKind(bpp, false) : 0;
+    const uint32_t kind = compressedKind(bpp, zeta, samples);
+    const bool shaderTestCopied = zeta == 252 || (zeta == 260 && samples > 1);
+    if (shaderTestCopied && zetaProbe)
+        return kind;
+    return (copied || shaderTestCopied) && !copyEngineReadsCompressed(kind) ? 0 : kind;
 }
 
 // A refusal of compressed memory (the BoAlloc's or the VmBind's kern_return_t, kIOReturnNoSpace for no VA) that asking

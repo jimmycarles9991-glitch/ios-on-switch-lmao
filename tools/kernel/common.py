@@ -130,9 +130,19 @@ def prefix_maps(path_root: str, bin_dir: str, xnu_dir: str) -> list[str]:
     return maps
 
 
+def copy_writable(source: str | Path, target: str | Path) -> None:
+    """Copy a file with its mode, writable by its owner.
+
+    A remote worker hands an action read-only inputs where the local sandbox's are writable: a copy made with the
+    input's mode could not be written over, or written to, there.
+    """
+    shutil.copyfile(source, target)
+    os.chmod(target, (os.stat(source).st_mode & 0o777) | 0o200)
+
+
 def copy_tree(source: str | Path, target: str | Path) -> None:
     """Copy a tree's contents (files Bazel stages as symlinks become files; links inside it become copies)."""
-    shutil.copytree(source, target, symlinks=False, dirs_exist_ok=True)
+    shutil.copytree(source, target, symlinks=False, dirs_exist_ok=True, copy_function=copy_writable)
 
 
 def resolve_links(root: str | Path) -> None:

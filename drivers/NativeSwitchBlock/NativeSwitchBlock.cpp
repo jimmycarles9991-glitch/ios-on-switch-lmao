@@ -840,6 +840,7 @@ class NativeSwitchBlock : public IOService {
     void finishDirect(bool write);
     bool stageChain(Request *first, uint32_t from, uint32_t length, uint8_t *buffer, bool toClient);
     bool bounceChain(Request *first, uint32_t sectors);
+#if DEVELOPMENT || DEBUG
     bool proveWrite(Request *first, uint32_t sectors, bool cmd23);
     bool proveHigh(Request *first, uint32_t sectors);
     bool proveGaps(Request *first, uint32_t sectors);
@@ -853,6 +854,7 @@ class NativeSwitchBlock : public IOService {
     };
 
     ChainProof compareChain(Request *first, uint32_t sectors, uint64_t *at);
+#endif
     void releaseChecks();
     bool copyStaged();
     const char *checkAdma(const uint8_t *reference, uint32_t *descriptors, uint32_t *highPages, uint32_t *highOk,
@@ -1807,6 +1809,7 @@ bool NativeSwitchBlock::bounceChain(Request *first, uint32_t sectors)
     return true;
 }
 
+#if DEVELOPMENT || DEBUG
 // The first kWriteChecks ADMA2 writes of a boot, and the first writes from pages above 4 GiB (high), are read back by SDMA
 // (the proven path) and compared with the requests' memory. False only for data that differs: the caller then writes the
 // chain again through the bounce buffer and ADMA2 writes stay off until reboot. A read-back that fails proves nothing
@@ -1991,6 +1994,8 @@ bool NativeSwitchBlock::proveGaps(Request *first, uint32_t sectors)
     return proof != kChainBroken;
 }
 
+#endif
+
 // The proofs' SDMA buffer, once neither the first writes nor ADMA2 above 4 GiB need one.
 void NativeSwitchBlock::releaseChecks()
 {
@@ -2037,7 +2042,7 @@ void NativeSwitchBlock::beginBatch(Batch &b)
     b.direct = adma && (!b.write || (admaWrites && sectors <= writeSectors)) &&
                (b.why = buildTable(first, sectors, b.write)) == kAdmaOk;
     // r12-sdio: a read that reaches above 4 GiB while that is unproven is compared with SDMA before it completes.
-    b.proving = b.direct && high.proofDue(b.write, table.high);
+    b.proving = SwitchAdmaHigh::kLiveProofs && b.direct && high.proofDue(b.write, table.high);
     b.staged = b.direct && (staging.count != 0u);
     b.cmd23 = b.direct && sectors > 1 && (b.write ? cmd23Writes : cmd23Reads);
     if (!b.direct)
@@ -2091,6 +2096,7 @@ void NativeSwitchBlock::endBatch(Batch &b)
             IOLog("SwitchSD: ADMA2 off until reboot (step %d); requests go through the bounce buffer\n", step);
         } else if (step) {
             result = kIOReturnIOError;
+#if DEVELOPMENT || DEBUG
         } else if (b.proving) {
             if (!proveHigh(first, sectors))
                 result = kIOReturnIOError;
@@ -2102,6 +2108,7 @@ void NativeSwitchBlock::endBatch(Batch &b)
                     (sectors > kSafeSectors && largeWriteChecks) || (b.cmd23 && cmd23WriteChecks)) &&
                    !proveWrite(first, sectors, b.cmd23)) {
             b.direct = false;
+#endif
         }
     }
     if (b.direct) {
@@ -2685,6 +2692,7 @@ Batch *NativeSwitchBlock::runGroup(Batch *group, unsigned n, Batch *pending, boo
 
         uint8_t prove(unsigned i) const
         {
+#if DEVELOPMENT || DEBUG
             uint64_t at = 0;
             const ChainProof proof = self->compareChain(group[i].first, group[i].sectors, &at);
             if (proof == kChainMatches)
@@ -2701,6 +2709,10 @@ Batch *NativeSwitchBlock::runGroup(Batch *group, unsigned n, Batch *pending, boo
                      "task %u (lba %llu n %u) differs from the legacy read at byte %llu", i, group[i].first->lba,
                      group[i].sectors, at);
             return CqEngine::kProofDiffers;
+#else
+            (void)i;
+            return CqEngine::kProofUnproven;
+#endif
         }
 
         void recovered(const SwitchCqError &e) const
@@ -2730,7 +2742,7 @@ Batch *NativeSwitchBlock::runGroup(Batch *group, unsigned n, Batch *pending, boo
         }
         tasks[i] = {first->lba, sectors};
     }
-    const bool proving = cqProofs != 0;
+    const bool proving = SwitchAdmaHigh::kLiveProofs && cqProofs != 0;
     unsigned proven = 0;
     const CqEngine::Outcome outcome = cq.run(cqBus, host, tasks, n, proving, &proven);
     if (proving) {
@@ -4147,7 +4159,7 @@ const char *NativeSwitchBlock::checkAdma(const uint8_t *reference, uint32_t *des
     if (highMissing) {
         high.state = SwitchAdmaHigh::kOff;
     } else {
-        high.state = *highPages ? SwitchAdmaHigh::kOn : SwitchAdmaHigh::kProving;
+        high.state = *highPages || !SwitchAdmaHigh::kLiveProofs ? SwitchAdmaHigh::kOn : SwitchAdmaHigh::kProving;
     }
     return why;
 }
@@ -4516,9 +4528,9 @@ bool NativeSwitchBlock::setup()
             maxSectors = kBounceSectors;
             maxWriteSectors = kDirectWriteSectors;
             checkBuffer = static_cast<uint8_t *>(IOMallocData(kBounceBytes));
-            writeChecks = checkBuffer ? kWriteChecks : 0;
-            largeWriteChecks = checkBuffer ? kLargeWriteChecks : 0;
-            admaWrites = checkBuffer != nullptr;
+            writeChecks = SwitchAdmaHigh::kLiveProofs && checkBuffer ? kWriteChecks : 0;
+            largeWriteChecks = SwitchAdmaHigh::kLiveProofs && checkBuffer ? kLargeWriteChecks : 0;
+            admaWrites = !SwitchAdmaHigh::kLiveProofs || checkBuffer != nullptr;
             // Writes over 256 KiB only by ADMA2 with their read-backs; without the buffer for those, 256 KiB commands.
             writeSectors = admaWrites ? kDirectWriteSectors : kSafeSectors;
             // Without the buffer nothing above 4 GiB can be proven: it stays below.
@@ -4532,7 +4544,9 @@ bool NativeSwitchBlock::setup()
                   "4 GiB right%s; commands up to %u KiB read, %u KiB write%s%s\n",
                   descriptors, highOk, highPages, states[high.state], maxSectors * kSector / 1024,
                   maxWriteSectors * kSector / 1024,
-                  admaWrites ? ", the first writes read back" : ", writes through the bounce buffer", stagingReason);
+                  admaWrites ? (SwitchAdmaHigh::kLiveProofs ? ", the first writes read back" : "")
+                             : ", writes through the bounce buffer",
+                  stagingReason);
             // r14-sdcq: Auto CMD23 when the card's SCR lists CMD23 and both framings read the same bytes.
             if (!haveScr || !(scr.cmdSupport & kSdCmd23)) {
                 IOLog("SwitchSD: CMD23 not used (%s); multi-block commands stop by CMD12\n",
@@ -4545,7 +4559,7 @@ bool NativeSwitchBlock::setup()
                 } else {
                     cmd23Reads = true;
                     cmd23Writes = admaWrites;
-                    cmd23WriteChecks = cmd23Writes ? kCmd23WriteChecks : 0;
+                    cmd23WriteChecks = SwitchAdmaHigh::kLiveProofs && cmd23Writes ? kCmd23WriteChecks : 0;
                     const uint64_t with = withNs / kCmd23Pairs;
                     const uint64_t without = withoutNs / kCmd23Pairs;
                     IOLog("SwitchSD: CMD23 on: %u 4 KiB reads match CMD12's; %llu.%llu us per read with CMD23, "
@@ -4553,24 +4567,25 @@ bool NativeSwitchBlock::setup()
                           "length%s\n",
                           kCmd23Pairs, with / 1000, with / 100 % 10, without / 1000, without / 100 % 10,
                           static_cast<long long>(without) - static_cast<long long>(with),
-                          cmd23Writes ? " and writes" : "", cmd23Writes ? ", the first CMD23 writes read back" : "");
+                          cmd23Writes ? " and writes" : "",
+                          cmd23WriteChecks ? ", the first CMD23 writes read back" : "");
                 }
             }
             // r14-sdcq: gap reads need the sink and, for their proofs, checkBuffer; queue merging must be on.
             // switch_dma_alloc leaves no line of the sink dirty in the cache: the engine's writes there are never
             // overwritten by an eviction, and nobody reads them.
-            if (checkBuffer && merge &&
+            if ((!SwitchAdmaHigh::kLiveProofs || checkBuffer) && merge &&
                 switch_dma_alloc(&sinkMemory, static_cast<size_t>(kGapSectors) * kSector,
                                  0x00000000ffffffffULL & ~(kAdmaPage - 1)) &&
                 !(sinkMemory.pa & (kAdmaPage - 1)) && cacheableRam(sinkMemory.pa)) {
                 sinkPA = sinkMemory.pa;
             }
             gapsOn = sinkPA != 0;
-            gapProofs = gapsOn ? kGapProofs : 0;
+            gapProofs = SwitchAdmaHigh::kLiveProofs && gapsOn ? kGapProofs : 0;
             if (gapsOn) {
                 IOLog("SwitchSD: gap reads on: a read chain takes queued reads up to %u KiB beyond it (%u KiB per "
                       "command), the card reading through the gap; the first %u such chains are compared with SDMA\n",
-                      kGapSectors * kSector / 1024, kGapBudget * kSector / 1024, kGapProofs);
+                      kGapSectors * kSector / 1024, kGapBudget * kSector / 1024, gapProofs);
             } else {
                 const char *gapsOff = "no sink page below 4 GiB";
                 if (!checkBuffer) {
@@ -4605,7 +4620,7 @@ bool NativeSwitchBlock::setup()
             if (cqOff) {
                 IOLog("SwitchSD: command queue not used (%s); reads stay one command at a time\n", cqOff);
             } else {
-                cqProofs = kCqProofs;
+                cqProofs = SwitchAdmaHigh::kLiveProofs ? kCqProofs : 0;
                 cqMinChains = need < 2 ? 2 : static_cast<unsigned>(need);
                 IOLog("SwitchSD: command queue on (sequential mode, depth %u, cache %s): %u queued 4 KiB reads match "
                       "the legacy path's; they took %llu us queued against %llu us one at a time (%llu us saved per "
@@ -4613,7 +4628,7 @@ bool NativeSwitchBlock::setup()
                       "first %u tasks read again the legacy way\n",
                       static_cast<unsigned>(cq.depth), cq.useCache ? "on in CQ mode only, off for every write" : "off",
                       tested, queuedNs / 1000, serialNs / 1000, saving / 1000, enterNs / 1000, leaveNs / 1000,
-                      cqMinChains, kCqProofs);
+                      cqMinChains, cqProofs);
             }
         } else {
             IOLog("SwitchSD: ADMA2 off (%s); every request through the bounce buffer\n", why);
@@ -4641,6 +4656,7 @@ bool NativeSwitchBlock::setup()
             IOFreeData(reference, kBounceBytes);
     }
 
+    releaseChecks();
     thread_t thread = THREAD_NULL;
     if (kernel_thread_start(&NativeSwitchBlock::worker, this, &thread) != KERN_SUCCESS) {
         IOLog("SwitchSD: worker start failed\n");

@@ -73,12 +73,17 @@ static inline void tegra_smmu_ids_distinct(enum tegra_smmu_asid asid, enum tegra
 // swgroup is translated by another ASID, or a register did not take.
 int tegra_smmu_attach(uint32_t asid, uint32_t ptb, uint32_t asidReg, uint32_t translationReg, uint32_t translationBits,
                       char *line, size_t size);
+// Restore a retained attachment after reset, before that client resumes DMA. A different or detached identity is refused.
+int switch_smmu_restore(uint32_t asid, uint32_t ptb, uint32_t asidReg, char *line, size_t size);
 // The swgroup back to bypass, the ASID's directory cleared, a flush.
 void tegra_smmu_detach(uint32_t asid, uint32_t asidReg);
 // After a change to the ASID's tables (cleaned to memory first): PTC all, then the ASID's TLB entries.
 void tegra_smmu_flush(uint32_t asid);
 // The MC register at offset (for a driver's own checks and FAIL lines).
 uint32_t tegra_smmu_read(uint32_t offset);
+// Sets or clears a memory client's hot-reset bit in MC_CLIENT_HOTRESET_CTRL (0x200) or CTRL_1 (0x970); the flush has
+// drained once its bit reads set in the matching STATUS register (tegra_smmu_read).
+void tegra_mc_hot_reset(uint32_t ctrl, uint32_t bit, bool on);
 // After SC7, before any translated client runs (SwitchSuspend's wake): every attached swgroup programmed again.
 // Returns how many could not be (one line each); their clients then fault at the MC instead of translating.
 int tegra_smmu_resume(void);

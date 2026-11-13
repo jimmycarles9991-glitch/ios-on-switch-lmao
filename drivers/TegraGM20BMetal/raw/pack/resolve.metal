@@ -7,7 +7,9 @@
 //    so and encoded by Metal's thresholds, written as the code through the target's UNORM twin;
 //  - a half channel: the mean rounded to a half with a tie toward +infinity (halfMean);
 //  - an RG11B10Float channel: that half mean rounded to the channel's float, ties to even.
-// One function a target format: the pack keys an own state by its function's name. The sample count comes in buffer 0, as the
+// A depth attachment's resolve writes its fragment's depth, MTLMultisampleDepthResolveFilter's sample 0, the samples' minimum or
+// their maximum, as read: each the stored code of the target's format, written back unchanged. One function a target format
+// and filter: the pack keys an own state by its function's name. The sample count comes in buffer 0, as the
 // attachment's (the shader does not query the texture). Built without fast math (rawpack.py), so the sums keep their order and
 // the bit tests their NaNs.
 #include <metal_stdlib>
@@ -52,6 +54,18 @@ static float4 unorm8(Samples s, uint n, uint2 at)
     for (uint k = 0; k < n; k++)
         sum += uint4(s.read(at, k) * 255.0 + 0.5);
     return float4(sum / n) * as_type<float>(0x3b808081u);  // 1 / 255
+}
+
+// The same with the sample count built in, in floats: an 8-bit unorm sample reads as the float nearest code / 255, so
+// rint(x * 255) is its code, the codes and half the count sum exactly, and dividing by a power of two and flooring is the
+// integer quotient. With the count from a buffer the loop runs to eight guarded fetches and each conversion to an integer
+// carries its range and NaN guards, the 642 instructions of resolve_*8_frag.
+template <uint N> static float4 unorm8Of(Samples s, uint2 at)
+{
+    float4 sum = float4(N / 2);
+    for (uint k = 0; k < N; k++)
+        sum += rint(s.read(at, k) * 255.0);
+    return floor(sum * (1.0 / N)) * as_type<float>(0x3b808081u);  // 1 / 255
 }
 
 static float4 srgb8(Samples s, uint n, uint2 at)
@@ -139,6 +153,26 @@ fragment float4 resolve_bgra8_frag(Out in [[stage_in]], Samples s [[texture(0)]]
     return unorm8(s, n, uint2(in.position.xy));
 }
 
+fragment float4 resolve_rgba8_2x_frag(Out in [[stage_in]], Samples s [[texture(0)]])
+{
+    return unorm8Of<2>(s, uint2(in.position.xy));
+}
+
+fragment float4 resolve_rgba8_4x_frag(Out in [[stage_in]], Samples s [[texture(0)]])
+{
+    return unorm8Of<4>(s, uint2(in.position.xy));
+}
+
+fragment float4 resolve_bgra8_2x_frag(Out in [[stage_in]], Samples s [[texture(0)]])
+{
+    return unorm8Of<2>(s, uint2(in.position.xy));
+}
+
+fragment float4 resolve_bgra8_4x_frag(Out in [[stage_in]], Samples s [[texture(0)]])
+{
+    return unorm8Of<4>(s, uint2(in.position.xy));
+}
+
 fragment float4 resolve_bgra8_srgb_frag(Out in [[stage_in]], Samples s [[texture(0)]], constant uint &n [[buffer(0)]])
 {
     return srgb8(s, n, uint2(in.position.xy));
@@ -153,3 +187,34 @@ fragment float4 resolve_rgba16f_frag(Out in [[stage_in]], Samples s [[texture(0)
 {
     return halfMean(s, n, uint2(in.position.xy));
 }
+
+typedef depth2d_ms<float, access::read> DepthSamples;
+
+struct Depth {
+    float depth [[depth(any)]];
+};
+
+static Depth depthOf(DepthSamples s, uint n, uint2 at, uint filter)
+{
+    float d = s.read(at, 0);
+    for (uint k = 1; filter && k < n; k++)
+        d = filter == 1 ? min(d, s.read(at, k)) : max(d, s.read(at, k));
+    return {d};
+}
+
+#define DEPTH_RESOLVE(format, filter, index)                                                                               \
+    fragment Depth resolve_##format##_##filter##_frag(Out in [[stage_in]], DepthSamples s [[texture(0)]],                \
+                                                      constant uint &n [[buffer(0)]])                                     \
+    {                                                                                                                      \
+        return depthOf(s, n, uint2(in.position.xy), index);                                                               \
+    }
+
+DEPTH_RESOLVE(depth16, sample0, 0)
+DEPTH_RESOLVE(depth16, min, 1)
+DEPTH_RESOLVE(depth16, max, 2)
+DEPTH_RESOLVE(depth32f, sample0, 0)
+DEPTH_RESOLVE(depth32f, min, 1)
+DEPTH_RESOLVE(depth32f, max, 2)
+DEPTH_RESOLVE(depth32fs8, sample0, 0)
+DEPTH_RESOLVE(depth32fs8, min, 1)
+DEPTH_RESOLVE(depth32fs8, max, 2)

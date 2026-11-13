@@ -172,6 +172,7 @@
 
 #include <pthread/workqueue_trace.h>
 #include <switch/sched.h>
+#include <switch/diag.h>
 
 #if CONFIG_EXCLAVES
 #include <mach/exclaves.h>
@@ -2628,6 +2629,7 @@ SENDING_NOTIFICATION__THIS_THREAD_IS_CONSUMING_TOO_MUCH_CPU(void)
 	printf("  mabs limit: %llu; mabs period: %llu ns; last refill: %llu ns%s.\n",
 	    lei.lei_limit, lei.lei_refill_period, lei.lei_last_refill,
 	    (fatal ? " [fatal violation]" : ""));
+	switch_diag_cpu_hog(task, procname, pid);
 
 	/*
 	 *  For now, send RESOURCE_NOTIFY in parallel with EXC_RESOURCE.  Once

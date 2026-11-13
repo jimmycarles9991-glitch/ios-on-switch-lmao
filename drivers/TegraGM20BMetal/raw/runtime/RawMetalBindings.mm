@@ -6,16 +6,15 @@
 // Room for `padded` bytes in the command buffer's setBytes chunks (RMBytes): false when only heap memory had it
 static bool bytesRoom(RMBytes &s, uint32_t padded, uint32_t &chunk, uint32_t &offset)
 {
-    constexpr uint32_t kChunk = 64 << 10;  // a Core Animation frame's setBytes (~55 KB of 256-byte copies)
     while (s.at < s.chunks.size() && s.used + padded > s.chunks[s.at].length) {
         s.at++;
         s.used = 0;
     }
     if (s.at == s.chunks.size()) {
         raw::Buffer b;
-        if (!gRM->raw->createBuffer(std::max(padded, kChunk), b, true)) {
+        if (!rmTakeBytesChunk(std::max(padded, kRMBytesChunk), b)) {
             b = {};
-            b.length = std::max(padded, kChunk);
+            b.length = std::max(padded, kRMBytesChunk);
             b.cpu = static_cast<uint8_t *>(malloc(size_t(b.length)));
         }
         s.chunks.push_back(b);
@@ -27,13 +26,26 @@ static bool bytesRoom(RMBytes &s, uint32_t padded, uint32_t &chunk, uint32_t &of
     return s.chunks[s.at].va != 0;
 }
 
-void recordBytes(RMCommandBuffer *cb, Cmd m, const void *bytes, NSUInteger length)
+void recordBytes(RMCommandBuffer *cb, Cmd m, const void *bytes, NSUInteger length, bool shadow)
 {
+    constexpr NSUInteger kShadowed = 1024;  // a Core Animation draw's vertices and its transform
+    if (shadow && length <= kShadowed) {
+        m.x = cb->_shadow.size() + 1;
+        cb->_shadow.insert(cb->_shadow.end(), static_cast<const uint8_t *>(bytes),
+                           static_cast<const uint8_t *>(bytes) + length);
+    }
     const uint32_t padded = std::max<uint32_t>((uint32_t(length) + 255) & ~255u, 256);
     uint32_t chunk, offset;
+    // Out of memory as Metal reports it: the command buffer fails (its bytes go to the heap meanwhile, so recording goes
+    // on), never another backend
     if (!bytesRoom(cb->_bytes, padded, chunk, offset)) {
-        [cb takeReason:WhyCall why:@"setBytes with no GPU pool memory for its bytes"];
-        hit(cb, PredCallBytes, length);
+        static std::atomic<bool> said{false};
+        if (!said.exchange(true))
+            os_log_error(rawLog(),
+                         "raw: setBytes of %lu bytes: no GPU memory for its chunk (%{public}s): its command "
+                         "buffer fails out of memory; later ones not logged",
+                         (unsigned long)length, gRM->raw->kernel().error().c_str());
+        failCommandBuffer(cb, @"no GPU memory for setBytes", MTLCommandBufferErrorOutOfMemory);
     }
     uint8_t *to = cb->_bytes.chunks[chunk].cpu + offset;
     memcpy(to, bytes, length);
@@ -51,7 +63,7 @@ void recordBytes(RMCommandBuffer *cb, Cmd m, const void *bytes, NSUInteger lengt
         _bufVa[stage][index] = 0;  // its own 256-byte-aligned upload chunk
         _buf[stage][index] = nil;
     }
-    recordBytes(_cb, cmd(OpBytes, uint8_t(stage), uint16_t(index)), bytes, length);
+    recordBytes(_cb, cmd(OpBytes, uint8_t(stage), uint16_t(index)), bytes, length, stage == 1 && !_drew);
 }
 
 - (void)setVertexBytes:(const void *)bytes length:(NSUInteger)length atIndex:(NSUInteger)index
@@ -127,7 +139,7 @@ void recordBytes(RMCommandBuffer *cb, Cmd m, const void *bytes, NSUInteger lengt
     RMTexture *x = [(id)t isKindOfClass:[RMTexture class]] ? (RMTexture *)t : nil;
     // an extended-range texture is sampled through its stand-in (raw_xr.h): one without (no ShaderRead usage) is m2v's to sample
     const bool unsampled = x && !x->_raw.standIn && raw::xrForm(x->_raw.format) != raw::XrForm::None;
-    if (t && (!x || !x->_rawOk || !x->_raw.tic || unsampled)) {
+    if (t && (!x || !x->_rawOk || !x->_raw.tic || unsampled || x->_raw.rotation)) {
         [_cb takeReason:WhyTexture why:@"a texture the raw path does not keep"];
         if (!x) {
             if (!predLogged(PredTexForeign))
@@ -135,11 +147,11 @@ void recordBytes(RMCommandBuffer *cb, Cmd m, const void *bytes, NSUInteger lengt
                         [NSString stringWithFormat:@"class %s", class_getName(object_getClass(t))]);
             hit(_cb, PredTexForeign, t.pixelFormat);
         } else
-            hit(_cb, RMPred(x->_pred ?: (x->_rawOk ? PredEncNoTic : PredTexShape)), x->_descriptor.pixelFormat,
-                x->_kind);
+            hit(_cb, RMPred(x->_pred ?: (x->_rawOk && !x->_raw.rotation ? PredEncNoTic : PredTexShape)),
+                x->_descriptor.pixelFormat, x->_kind);
     }
-    if (stage == 2 && index < 16)
-        _tex[index] = x;
+    if ((stage == 1 || stage == 2) && index < raw::kStageTextures)
+        _tex[stage - 1][index] = x;
     if (x && x->_raw.sampled)
         _cb->_sampledShadows = true;
     if (x && x->_raw.standIn)
@@ -176,8 +188,10 @@ void recordBytes(RMCommandBuffer *cb, Cmd m, const void *bytes, NSUInteger lengt
         [_cb takeReason:WhyCall why:@"a sampler not made by this device"];
         hit(_cb, PredCallSamplerForeign, index);
     }
-    if (stage == 1 && s) {
-        [_cb takeReason:WhyCall why:@"a vertex sampler"];
+    // m2v filters through a cubic sampler in the shader, which only the fragment stage's records have variants of
+    // (RawMetalCubic.mm)
+    if (stage == 1 && [(id)s isKindOfClass:[RMSampler class]] && ((RMSampler *)s)->_raw.desc.cubic) {
+        [_cb takeReason:WhyCall why:@"a cubic vertex sampler"];
         hit(_cb, PredCallVertexSampler, index);
     }
     if (stage == 2 && index < 16) {
@@ -202,6 +216,12 @@ void recordBytes(RMCommandBuffer *cb, Cmd m, const void *bytes, NSUInteger lengt
 {
     for (NSUInteger k = 0; k < r.length; k++)
         [self sampler:2 object:s[k] index:r.location + k];
+}
+
+- (void)setVertexSamplerStates:(const id<MTLSamplerState> __unsafe_unretained[])s withRange:(NSRange)r
+{
+    for (NSUInteger k = 0; k < r.length; k++)
+        [self sampler:1 object:s[k] index:r.location + k];
 }
 
 // A bind's LOD clamps replace the state's (Metal's rule): the state of its descriptor with those clamps, made once per state and
@@ -251,6 +271,15 @@ id<MTLSamplerState> clampedSampler(id<MTLSamplerState> s, float lodMin, float lo
 {
     for (NSUInteger k = 0; k < r.length; k++)
         [self sampler:2 object:clampedSampler(s[k], lodMin[k], lodMax[k]) index:r.location + k];
+}
+
+- (void)setVertexSamplerStates:(const id<MTLSamplerState> __unsafe_unretained[])s
+                  lodMinClamps:(const float[])lodMin
+                  lodMaxClamps:(const float[])lodMax
+                     withRange:(NSRange)r
+{
+    for (NSUInteger k = 0; k < r.length; k++)
+        [self sampler:1 object:clampedSampler(s[k], lodMin[k], lodMax[k]) index:r.location + k];
 }
 
 @end

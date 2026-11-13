@@ -11,7 +11,7 @@
 namespace raw {
 
 constexpr char kEntryMagic[8] = {'S', 'W', 'R', 'A', 'W', 'R', 'E', 'C'};
-constexpr uint32_t kEntryFormat = 2;
+constexpr uint32_t kEntryFormat = 17;
 constexpr uint32_t kKindRecord = 1, kKindRefusal = 2, kKindKernel = 3, kKindKernelRefusal = 4;
 
 class Writer {

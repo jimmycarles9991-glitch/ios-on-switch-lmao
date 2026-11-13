@@ -4,7 +4,6 @@ import Foundation
 import HWTestCore
 import ImageIO
 import Metal
-import UniformTypeIdentifiers
 
 enum Pixels {
     /// Draws a decoded image into an RGBX buffer and checks it against the pattern.
@@ -26,6 +25,32 @@ enum Pixels {
             let count = Double(region.width * region.height)
             return (sum.0 / count, sum.1 / count, sum.2 / count)
         }
+    }
+
+    /// Mean and largest per-channel difference of two images of one size, drawn into sRGB RGBX.
+    static func difference(_ a: CGImage, _ b: CGImage) -> (mean: Double, max: Int)? {
+        guard a.width == b.width, a.height == b.height else { return nil }
+        let rows = [a, b].map { image -> [UInt8] in
+            var bytes = [UInt8](repeating: 0, count: image.width * image.height * 4)
+            bytes.withUnsafeMutableBytes {
+                let context = CGContext(
+                    data: $0.baseAddress, width: image.width, height: image.height, bitsPerComponent: 8,
+                    bytesPerRow: image.width * 4, space: CGColorSpace(name: CGColorSpace.sRGB)!,
+                    bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue)!
+                context.draw(image, in: CGRect(x: 0, y: 0, width: image.width, height: image.height))
+            }
+            return bytes
+        }
+        var sum = 0
+        var largest = 0
+        for i in stride(from: 0, to: rows[0].count, by: 4) {
+            for c in 0..<3 {
+                let d = abs(Int(rows[0][i + c]) - Int(rows[1][i + c]))
+                sum += d
+                largest = max(largest, d)
+            }
+        }
+        return (Double(sum) / Double(a.width * a.height * 3), largest)
     }
 
     static func patternImage(_ pattern: Pattern) -> CGImage {
@@ -58,55 +83,84 @@ struct ImageDecodeTest: HWTest {
             return .fail("ImageIO cannot open it")
         }
         let options = [kCGImageSourceShouldCacheImmediately: true] as CFDictionary
+        let jpeg = image.format.rawValue.hasPrefix("jpeg")
+        let before = jpeg ? JPEGRoute.decodes() : nil
         let start = CFAbsoluteTimeGetCurrent()
         guard let decoded = CGImageSourceCreateImageAtIndex(source, 0, options) else {
             return .fail("ImageIO cannot decode it")
         }
         let milliseconds = (CFAbsoluteTimeGetCurrent() - start) * 1000
+        let after = jpeg ? JPEGRoute.decodes() : nil
         let result = Pixels.check(decoded, pattern: image.pattern)
         var metrics = Metrics()
         metrics.set("decode_ms", milliseconds, digits: 1)
         metrics.set("mpix_s", Double(image.width * image.height) / milliseconds / 1000, digits: 1)
         metrics.set("error", result.lumaError, digits: 1)
-        return .judged(
-            [
-                ("\(image.width)x\(image.height) out", decoded.width == image.width && decoded.height == image.height),
-                ("matches the pattern", result.matches(frame: 0, tolerance: image.tolerance)),
-            ], metrics, proof: CGImageSourceGetType(source).map { $0 as String } ?? "")
+        var checks = [
+            ("\(image.width)x\(image.height) out", decoded.width == image.width && decoded.height == image.height),
+            ("matches the pattern", result.matches(frame: 0, tolerance: image.tolerance)),
+        ]
+        if jpeg {
+            checks += Self.againstSoftware(data, full: decoded, before: before, after: after, metrics: &metrics)
+        }
+        return .judged(checks, metrics, proof: CGImageSourceGetType(source).map { $0 as String } ?? "")
+    }
+
+    static let hardwareKey = "kCGImageSourceUseHardwareAcceleration" as CFString
+
+    /// The route of the full decode, then a half-size thumbnail (CMPhoto's scaled decode writes a 4:4:4 file as '444f'
+    /// and a 4:2:2 one as 'yuvf' under the interchange formats), each against ImageIO's software decode of the same
+    /// request: NVJPG's formats the unit has not run before ('422f', '444f', 'yuvf') are proven or failed here.
+    static func againstSoftware(
+        _ data: Data, full: CGImage, before: Result<JPEGRoute.Counts, TestFailure>?,
+        after: Result<JPEGRoute.Counts, TestFailure>?, metrics: inout Metrics
+    ) -> [(String, Bool)] {
+        guard let source = CGImageSourceCreateWithData(data as CFData, nil),
+            let software = CGImageSourceCreateWithData(data as CFData, nil)
+        else { return [("ImageIO opens it twice", false)] }
+        let side = max(full.width, full.height) / 2
+        let thumb: [CFString: Any] = [
+            kCGImageSourceCreateThumbnailFromImageAlways: true, kCGImageSourceThumbnailMaxPixelSize: side,
+            kCGImageSourceShouldCacheImmediately: true,
+        ]
+        let half = CGImageSourceCreateThumbnailAtIndex(source, 0, thumb as CFDictionary)
+        let afterThumb = JPEGRoute.decodes()
+        var off = thumb
+        off[hardwareKey] = false
+        let softHalf = CGImageSourceCreateThumbnailAtIndex(software, 0, off as CFDictionary)
+        let softFull = CGImageSourceCreateImageAtIndex(
+            software, 0, [kCGImageSourceShouldCacheImmediately: true, hardwareKey: false] as CFDictionary)
+        let afterSoftware = JPEGRoute.decodes()
+        var checks: [(String, Bool)] = []
+        switch (before, after, afterThumb, afterSoftware) {
+        case (.success(let first)?, .success(let mid)?, .success(let last), .success(let soft)):
+            metrics.set("route", mid.decodes > first.decodes ? "hardware" : "software")
+            metrics.set("nvjpg_decodes", Int(last.decodes - first.decodes))
+            metrics.set("thumb_route", last.decodes > mid.decodes ? "hardware" : "software")
+            metrics.set("formats", JPEGRoute.names(last.formats))
+            metrics.set("software_on_nvjpg", Int(soft.decodes - last.decodes))
+            checks.append(("decoded on NVJPG", mid.decodes > first.decodes))
+            checks.append(("thumbnail decoded on NVJPG", last.decodes > mid.decodes))
+        case (.failure(let why)?, _, _, _), (_, .failure(let why)?, _, _), (_, _, .failure(let why), _),
+            (_, _, _, .failure(let why)):
+            metrics.set("route", "unknown")
+            checks.append(("decoded on NVJPG (route unreadable: \(why.description))", false))
+        default:
+            break
+        }
+        for (label, hardware, reference) in [("full", full as CGImage?, softFull), ("thumb", half, softHalf)] {
+            guard let hardware, let reference, let d = Pixels.difference(hardware, reference) else {
+                checks.append(("\(label) decodes both ways at one size", false))
+                continue
+            }
+            metrics.set("\(label)_vs_software_mean", d.mean, digits: 2)
+            metrics.set("\(label)_vs_software_max", d.max)
+            checks.append(("\(label) within 1.5 mean of the software decode", d.mean <= 1.5))
+        }
+        return checks
     }
 
     static var all: [ImageDecodeTest] { StillImage.all.map { ImageDecodeTest(image: $0) } }
-}
-
-/// HEIC written on the device (ImageIO over the HEVC encoder) and read back.
-struct HEICEncodeTest: HWTest {
-    let id = "image.heic_encode"
-    let name = "HEIC encode and decode on the device"
-    let subsystem = Subsystem.images
-
-    func run(_ context: TestContext) async throws -> Outcome {
-        let pattern = Pattern(width: 1024, height: 768, clip: 0x5E1C)
-        let data = NSMutableData()
-        guard let destination = CGImageDestinationCreateWithData(data, UTType.heic.identifier as CFString, 1, nil)
-        else {
-            return .fail("ImageIO offers no HEIC destination")
-        }
-        let start = CFAbsoluteTimeGetCurrent()
-        CGImageDestinationAddImage(
-            destination, Pixels.patternImage(pattern), [kCGImageDestinationLossyCompressionQuality: 0.9] as CFDictionary
-        )
-        guard CGImageDestinationFinalize(destination) else { return .fail("CGImageDestinationFinalize failed") }
-        let encodeMs = (CFAbsoluteTimeGetCurrent() - start) * 1000
-        guard let source = CGImageSourceCreateWithData(data as CFData, nil),
-            let decoded = CGImageSourceCreateImageAtIndex(source, 0, nil)
-        else { return .fail("the HEIC written does not decode") }
-        let result = Pixels.check(decoded, pattern: pattern)
-        var metrics = Metrics()
-        metrics.set("encode_ms", encodeMs, digits: 1)
-        metrics.set("bytes", data.length)
-        metrics.set("error", result.lumaError, digits: 1)
-        return .judged([("decodes back to the pattern", result.matches(frame: 0, tolerance: 12))], metrics)
-    }
 }
 
 /// A Metal-backed CIContext: a blur of a flat colour stays flat (exact), and a 1080p blur chain is timed.

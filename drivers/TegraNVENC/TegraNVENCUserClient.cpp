@@ -21,7 +21,9 @@
 #include <string.h>
 #include "TegraNVENC.h"
 #include "TegraNVENCABI.h"
+#include "TegraNVENCDirect.h"
 #include "../../kits/SwitchDMA/SwitchDcache.h"
+#include "../../kits/SwitchRefusal/SwitchRefusal.h"
 
 namespace {
 constexpr uint32_t kMaxBuffers = 64, kMaxConnections = 16;
@@ -59,6 +61,8 @@ class AppleAVE2UserClient : public IOUserClient {
     };
 
     IOLock *lock_ = nullptr;
+    alignas(8) uint8_t input_[sizeof(TegraNVENCSubmit)] = {};  // under lock_: the record of a locked call
+    TegraNVENCSubmit direct_ = {};                             // under lock_: a submit reading a native picture
     Buffer buffers_[kMaxBuffers] = {};
     uint32_t nextHandle_ = 1, lastFence_ = 0;
     bool submitted_ = false, counted_ = false;
@@ -66,8 +70,11 @@ class AppleAVE2UserClient : public IOUserClient {
     Buffer *find(uint32_t handle);
     bool quiesce() const;
     static void drop(Buffer *b, bool returnMemory);
+    // Wait takes lock_ itself; every other method runs with the caller holding it.
     IOReturn run(uint32_t method, const void *in, uint32_t inSize, void *out, uint32_t *outSize);
     static bool resolve(void *context, uint32_t handle, TegraNVENCBlock *block);
+    static bool resolveDirect(void *context, uint32_t handle, TegraNVENCBlock *block);
+    int submitDirect(const TegraNVENCSubmit *submit, uint32_t *fence, const char **why);
 
 public:
     bool setUp()
@@ -105,13 +112,44 @@ bool AppleAVE2UserClient::resolve(void *context, uint32_t handle, TegraNVENCBloc
     return b != nullptr;
 }
 
-// The connection's jobs are done (or the engine is wedged and will never touch memory again before a resume resets it).
+struct DirectContext {
+    AppleAVE2UserClient *client;
+    const TegraNVENCDirect *direct;
+};
+
+bool AppleAVE2UserClient::resolveDirect(void *context, uint32_t handle, TegraNVENCBlock *block)
+{
+    const auto *c = static_cast<const DirectContext *>(context);
+    if (handle != TEGRA_NVENC_DIRECT_HANDLE)
+        return resolve(c->client, handle, block);
+    *block = c->direct->block;
+    return true;
+}
+
+// The source as its native NVDEC picture, read in place: 0, or -95 when NVENC cannot (VIC takes it), -11 when the
+// picture's producers are not ones NVENC's stream can wait for, else the job's error.
+int AppleAVE2UserClient::submitDirect(const TegraNVENCSubmit *submit, uint32_t *fence, const char **why)
+{
+    if (!tegra_nvenc_engine_ready())
+        return -95;
+    TegraNVENCDirect direct;
+    int err = tegra_nvenc_direct_prepare(submit, current_task(), &direct, &direct_, why);
+    if (!err) {
+        DirectContext context = {this, &direct};
+        err = tegra_nvenc_run(&direct_, resolveDirect, &context, nullptr, &direct.order, fence, why);
+    }
+    tegra_nvenc_direct_release(&direct);
+    return err;
+}
+
+// The connection's jobs are done, or were cancelled (-5: the engine was reset and its memory client flushed before the
+// failure was published), or the engine is wedged and will never touch memory again before a resume resets it.
 bool AppleAVE2UserClient::quiesce() const
 {
     if (!submitted_)
         return true;
     const int ret = tegra_nvenc_wait(lastFence_);
-    return ret == 0 || !tegra_nvenc_ready();
+    return ret == 0 || ret == -5 || !tegra_nvenc_ready();
 }
 
 // The client's mappings of the buffer are revoked before its pages can go to anyone else. A buffer a wedged job may
@@ -180,7 +218,9 @@ IOReturn AppleAVE2UserClient::run(uint32_t method, const void *in, uint32_t inSi
         // NOLINTNEXTLINE(clang-analyzer-core.NullDereference): input size checked above
         if (w->invalidate_count > TEGRA_NVENC_MAX_RANGES)
             return kIOReturnBadArgument;
-        const int ret = tegra_nvenc_wait(w->fence);  // bounded by the kernel, whatever timeout_us says
+        int ret = tegra_nvenc_wait(w->fence);  // bounded by the kernel, whatever timeout_us says
+        if (!ret)
+            ret = tegra_nvenc_input_failure(w->fence);
         if (ret)
             return ioreturn(ret);
         IOLockLock(lock_);
@@ -198,7 +238,6 @@ IOReturn AppleAVE2UserClient::run(uint32_t method, const void *in, uint32_t inSi
         return result;
     }
 
-    IOLockLock(lock_);
     IOReturn ret = kIOReturnSuccess;
     switch (method) {
     case TegraNVENCMethodGetInfo: {
@@ -212,6 +251,8 @@ IOReturn AppleAVE2UserClient::run(uint32_t method, const void *in, uint32_t inSi
         info->input_layout = TEGRA_NVENC_LAYOUT_TILED16;
         info->chroma_mode = TEGRA_NVENC_CHROMA_OFFSET;
         info->p_frames = 1;
+        info->features = tegra_nvenc_source_ready() ? TEGRA_NVENC_FEATURE_SURFACE_INPUT : 0;
+        info->surface_row_align = info->features ? tegra_nvenc_source_row_align() : 0;
         tegra_nvenc_memory_usage(&info->memory_limit, &info->memory_free);
         break;
     }
@@ -259,9 +300,49 @@ IOReturn AppleAVE2UserClient::run(uint32_t method, const void *in, uint32_t inSi
         break;
     }
     case TegraNVENCMethodSubmit: {
+        const auto *submit = static_cast<const TegraNVENCSubmit *>(in);
         uint32_t fence = 0;
         const char *why = nullptr;
-        const int err = tegra_nvenc_run(static_cast<const TegraNVENCSubmit *>(in), resolve, this, &fence, &why);
+        TegraNVENCAfter after = {};
+        uint32_t route = TEGRA_NVENC_INPUT_CPU;
+        const bool sourced = submit->source.surface_id != 0;
+        if (sourced) {
+            if (const int err = tegra_nvenc_check_submit(submit, resolve, this, &why)) {
+                ret = ioreturn(err);
+                break;
+            }
+            const char *nativeWhy = nullptr;
+            const int direct = submitDirect(submit, &fence, &nativeWhy);
+            if (!direct) {
+                submitted_ = true;
+                lastFence_ = fence;
+                TegraNVENCFence *reply = static_cast<TegraNVENCFence *>(out);
+                reply->fence = fence;
+                reply->input = TEGRA_NVENC_INPUT_DIRECT;
+                break;
+            }
+            if (direct != -95 && direct != -11) {
+                ret = ioreturn(direct);
+                break;
+            }
+            if (nativeWhy)
+                switch_refusal("TegraNVENC", nativeWhy, "the native picture goes through VIC: %s", nativeWhy);
+            else if (direct == -11)
+                switch_refusal(
+                    "TegraNVENC", "native picture not orderable",
+                    "the native picture goes through VIC: a GPU job still writes it, it changed since it was "
+                    "looked up, or more than %u engines wrote it",
+                    static_cast<unsigned>(TEGRA_NVENC_ORDER_WAITS));
+            const int err = tegra_nvenc_source(submit, resolve, this, current_task(),
+                                               submitted_ ? &lastFence_ : nullptr, &after, &route, &why);
+            if (err) {
+                switch_refusal("TegraNVENC", why ? why : "source surface", "the input picture is not VIC's: %s",
+                               why ? why : "refused");
+                ret = err == -95 ? kIOReturnUnsupported : kIOReturnNotReady;
+                break;
+            }
+        }
+        const int err = tegra_nvenc_run(submit, resolve, this, sourced ? &after : nullptr, nullptr, &fence, &why);
         if (err) {
             static volatile int logged;
             if (why &&
@@ -274,14 +355,13 @@ IOReturn AppleAVE2UserClient::run(uint32_t method, const void *in, uint32_t inSi
         lastFence_ = fence;
         TegraNVENCFence *reply = static_cast<TegraNVENCFence *>(out);
         reply->fence = fence;
-        reply->reserved = 0;
+        reply->input = route;
         break;
     }
     default:
         ret = kIOReturnUnsupported;
         break;
     }
-    IOLockUnlock(lock_);
     return ret;
 }
 
@@ -297,17 +377,26 @@ IOReturn AppleAVE2UserClient::externalMethod(uint32_t selector, IOExternalMethod
         return kIOReturnBadArgument;
     if (header[1] == TEGRA_NVENC_TUNNEL_PROBE)
         return kIOReturnSuccess;
-    // Records are naturally aligned structs and the caller's buffer may not be: copy the input (Submit is the largest).
+    // Records are naturally aligned structs and the caller's buffer may not be: each is copied, a Wait (which sleeps
+    // without the lock) onto the stack, every other call into the connection's own record under the lock.
+    const uint32_t method = header[1];
     const uint32_t inSize = arguments->structureInputSize - 8;
-    void *copy = inSize ? IOMallocData(inSize) : nullptr;
-    if (inSize && !copy)
-        return kIOReturnNoMemory;
-    if (inSize)
-        memcpy(copy, header + 2, inSize);
     uint32_t outSize = arguments->structureOutputSize;
-    const IOReturn ret = run(header[1], copy, inSize, arguments->structureOutput, &outSize);
-    if (copy)
-        IOFreeData(copy, inSize);
+    IOReturn ret;
+    if (method == TegraNVENCMethodWait) {
+        alignas(8) uint8_t record[sizeof(TegraNVENCWait)];
+        if (inSize > sizeof(record))
+            return kIOReturnBadArgument;
+        memcpy(record, header + 2, inSize);
+        ret = run(method, record, inSize, arguments->structureOutput, &outSize);
+    } else {
+        if (inSize > sizeof(input_))
+            return kIOReturnBadArgument;
+        IOLockLock(lock_);
+        memcpy(input_, header + 2, inSize);
+        ret = run(method, inSize ? input_ : nullptr, inSize, arguments->structureOutput, &outSize);
+        IOLockUnlock(lock_);
+    }
     arguments->structureOutputSize = ret ? 0 : outSize;
     return ret;
 }

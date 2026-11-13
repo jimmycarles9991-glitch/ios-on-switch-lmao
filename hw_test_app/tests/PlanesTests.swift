@@ -16,8 +16,12 @@ struct PlanesTest: HWTest {
     static let counters = ["flips", "latched", "maps", "dropped"]
 
     func run(_ context: TestContext) async throws -> Outcome {
-        let before = Self.totals()
-        guard !before.isEmpty else { return .skip("the kernel has no kern.switch_planes_* (a release kernel)") }
+        let (before, unread) = Self.totals()
+        guard !before.isEmpty else {
+            var metrics = Metrics()
+            metrics.set("sysctl", KernelSysctl.code(unread))
+            return .skip(KernelSysctl.unreadable("kern.switch_planes_*", unread), metrics)
+        }
         guard let clip = Clip.all.first(where: { $0.codec == .h264 && $0.height == 1080 }) else {
             return .skip("no H.264 1080p clip")
         }
@@ -43,7 +47,7 @@ struct PlanesTest: HWTest {
         await MainActor.run { player.play() }
         let finished = await ended.wait(timeout: duration.seconds + 15)
         await MainActor.run { player.pause() }
-        let after = Self.totals()
+        let after = Self.totals().values
         let delta = { (name: String) in (after[name] ?? 0) - (before[name] ?? 0) }
 
         var metrics = Metrics()
@@ -57,15 +61,17 @@ struct PlanesTest: HWTest {
             ], metrics)
     }
 
-    /// kern.switch_planes_* by name; empty on a kernel without them.
-    static func totals() -> [String: Int] {
+    /// kern.switch_planes_* by name, and the errno of the first that could not be read.
+    static func totals() -> (values: [String: Int], unread: Int32) {
         var values: [String: Int] = [:]
+        var unread: Int32 = 0
         for name in counters {
-            var value: Int32 = 0
-            var size = MemoryLayout<Int32>.size
-            if sysctlbyname("kern.switch_planes_" + name, &value, &size, nil, 0) == 0 { values[name] = Int(value) }
+            switch KernelSysctl.integer("kern.switch_planes_" + name, as: Int32.self) {
+            case .value(let value): values[name] = Int(value)
+            case .failed(let error): if unread == 0 { unread = error }
+            }
         }
-        return values
+        return (values, unread)
     }
 }
 

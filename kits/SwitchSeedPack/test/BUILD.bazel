@@ -1,0 +1,27 @@
+# kits/SwitchSeedPack on the host.
+#
+#   bazel test //kits/SwitchSeedPack/test:all
+load("//bazel/lint:defs.bzl", "lint_files")
+load("//bazel/testing:defs.bzl", "host_test")
+
+lint_files()
+
+host_test(
+    name = "switch_seed_pack_test",
+    srcs = [
+        "switch_seed_pack_test.cpp",
+        "//kits/SwitchSeedPack:SwitchSeedPack.h",
+        "//kits/SwitchSeedPack:SwitchSeedPackWriter.h",
+    ],
+    cxx_std = "c++17",
+)
+
+host_test(
+    name = "switch_seed_store_test",
+    srcs = [
+        "switch_seed_store_test.cpp",
+        "//kits/SwitchSeedPack:SwitchSeedPack.h",
+        "//kits/SwitchSeedPack:SwitchSeedStore.h",
+    ],
+    cxx_std = "c++17",
+)

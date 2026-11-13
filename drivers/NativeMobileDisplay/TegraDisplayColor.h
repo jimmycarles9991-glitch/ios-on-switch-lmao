@@ -15,6 +15,7 @@
 #include <IOKit/IOReturn.h>
 #include "TegraDisplayColorMath.h"
 #include "TegraDisplayColorSequence.h"
+#include "TegraDisplayPalette.h"
 #include "../../kits/SwitchMMIO/SwitchMMIOWords.h"
 
 class TegraDisplayColor {
@@ -36,6 +37,11 @@ public:
     IOReturn setBrightnessCorrection(uint32_t correction);
     IOReturn swapSetColorMatrix(const void *matrix, uint32_t location, uint32_t flags);
     IOReturn setAccessibilityScale(uint32_t scale);
+    // The family's SetParameter 6 (EDRDisplayFactor.h): the whole output times `factor` from the next frame end.
+    void setEdrFactor(float factor);
+
+    // CP_ENABLE once a per-channel gamma table is in the windows' palettes (TegraDisplayPalette.h), else 0.
+    uint32_t windowOptions();
 
     // Under the gate: a blank swap's black, from the next frame on, and its end at the first flip latched after it.
     void setBlank(bool blank);
@@ -58,6 +64,7 @@ private:
     void writeTables(const switch_color::Tables &tables, const switch_color::Tables *written);
     void writeCsc(const switch_color::Tables &tables, const switch_color::Tables &written);
     void writeEnable(bool enable);
+    void writePalettes();
 
     IOSimpleLock *lock = nullptr;
     SwitchMMIOWords dc;
@@ -68,5 +75,7 @@ private:
     bool announced = false;  // the last enable was logged (a blank alone is not)
     switch_color::Inputs inputs;
     uint32_t gammaTable[switch_color::kGammaWords];
+    uint32_t palette[switch_color::kPaletteWords];
+    bool paletteOn = false, paletteDirty = false, paletteShown = false;
     switch_color::Tables pending, active;
 };

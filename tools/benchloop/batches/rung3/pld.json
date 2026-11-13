@@ -1,0 +1,61 @@
+{
+  "format": "iterated-blend/1",
+  "name": "rung3-pld",
+  "passes": 5,
+  "alpha": false,
+  "instructions": [
+    "0x20303029",
+    "0x10001c11",
+    "0x2058a031",
+    "0x30282029",
+    "0x0060b029"
+  ],
+  "constants": [],
+  "methods": [
+    [
+      4836,
+      0
+    ],
+    [
+      4924,
+      1
+    ],
+    [
+      4928,
+      32774
+    ],
+    [
+      4932,
+      16385
+    ],
+    [
+      4936,
+      16384
+    ],
+    [
+      4940,
+      32774
+    ],
+    [
+      4944,
+      16385
+    ],
+    [
+      4952,
+      16385
+    ],
+    [
+      4960,
+      1
+    ]
+  ],
+  "restore": [
+    [
+      4836,
+      1
+    ]
+  ],
+  "rgb": "src.rgb + dst.rgb + min(1, src.a + dst.a) - (src.a + dst.a)",
+  "a": "min(1, src.a + dst.a)",
+  "tolerance": 2
+}

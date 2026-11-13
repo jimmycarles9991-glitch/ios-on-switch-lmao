@@ -33,18 +33,32 @@ struct tegra_gm20b_ce_done {
 	void *arg;
 };
 
+struct switch_gpu_backing;
+struct switch_gpu_event_submission;
+struct switch_gpu_cpu_lease;
+struct switch_gpu_backing_guard;
+
+struct switch_gpu_copy_ownership {
+	struct switch_gpu_cpu_lease *const *leases;
+	uint32_t lease_count;
+	const struct switch_gpu_backing_guard *guards;
+	uint32_t guard_count;
+};
+
 /* Copies `rows` rows of `row_bytes` bytes from `src` into `dst` at dst->pitch, after the GPU's writes to either IOSurface
- * (semaphore acquires on the GPU) and `wait` (null: none); a destination IOSurface then counts the copy among its GPU
- * writers, which a CPU lock of it waits for. A block-linear surface (TegraGM20BLayout.h) on either side, never both, is a
- * whole surface: offset 0, row_bytes its width in bytes, rows its height; its texels are read or written as its rows.
- * Copies run in call order on one channel, so only a plane's last copy needs `done`. Thread context; may sleep briefly for the GPU mappings, never for the GPU. Returns 0,
- * or -EINVAL, -ENOMEM or -EBUSY (every copy slot in flight) with nothing queued and `done` never called. The syncpoint
- * fields order on hardware once a device run has shown the GPU host reaching host1x's syncpoints (TegraGM20BSyncpt.h);
- * until then `done.fn` and a call from VIC's completion order them. */
-int tegra_gm20b_ce_copy_plane(const struct tegra_gm20b_ce_plane *src,
-			      const struct tegra_gm20b_ce_plane *dst, uint32_t row_bytes,
-			      uint32_t rows, const struct tegra_gm20b_ce_wait *wait,
-			      const struct tegra_gm20b_ce_done *done);
+ * (semaphore acquires on the GPU) and `wait` (null: none); the destination then counts the copy among its GPU writers.
+ * A block-linear surface (TegraGM20BLayout.h) on either side, never both, is a whole surface: offset 0, row_bytes its
+ * width in bytes, rows its height; its texels are read or written as its rows. Thread context; may sleep briefly for the
+ * GPU mappings, never for the GPU. Backing offsets identify each plane's first byte; the descriptor pages are checked
+ * against that retained allocation. Mappings persist between copies. Returns 0, or an error with nothing queued: a
+ * failed admission consumes no callback or signal reservation. */
+int tegra_gm20b_ce_copy_plane_checked(
+	const struct tegra_gm20b_ce_plane *src, const struct tegra_gm20b_ce_plane *dst,
+	uint32_t row_bytes, uint32_t rows, const struct tegra_gm20b_ce_wait *wait,
+	const struct tegra_gm20b_ce_done *done, struct switch_gpu_backing *src_backing,
+	uint64_t src_backing_offset, struct switch_gpu_backing *dst_backing,
+	uint64_t dst_backing_offset, const struct switch_gpu_copy_ownership *ownership,
+	const struct switch_gpu_event_submission *events);
 
 #ifdef __cplusplus
 }

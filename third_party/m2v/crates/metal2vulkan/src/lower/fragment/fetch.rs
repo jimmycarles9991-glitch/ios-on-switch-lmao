@@ -62,7 +62,9 @@
 //!   `unorm4x8_srgb`; EV XRR2-srgb1-m4 on the M4: every byte read, a texel an earlier draw of the
 //!   pass wrote read as the decode of its stored byte, every encode threshold, 4, 194, 304 floats
 //!   and every half written). The one- and two-channel sRGB formats are not measured, and stay
-//!   refused.
+//!   refused. `BGR5A1Unorm` and `BGR10A2Unorm`, where the device grants `A1R5G5B5_UNORM_PACK16`
+//!   and `A2R10G10B10_UNORM_PACK32` no storage access (NVK), are viewed in `R16_UINT` and
+//!   `R32_UINT` alike, their channels unpacked and packed by the function (`packed`).
 //!
 //! **Per sample**. Metal runs a function that reads a color attachment of a multisampled pass once
 //! per covered sample, reading its own sample, in draw order per sample, with `[[position]]`'s x
@@ -352,14 +354,19 @@ pub struct StorageView {
     /// declaration's texels are the raw format's `uint`s ([`numeric`](Self::numeric)), and a read
     /// decodes Metal's tile value. `None` for a format held directly.
     pub extended: Option<ExtendedRange>,
-    /// The blend a write of an extended-range attachment computes in the shader, from the texel
-    /// it reads first (`extended_range::blend::blend`): the pipeline's, where it enables blending
-    /// there. `None` for an unblended write, no write, or another format.
+    /// The blend a write computes in the shader, from the texel it reads first: an
+    /// extended-range attachment's (`extended_range::blend::blend`), a 16-bit float one's under
+    /// Metal's `half` blend, or ([`rop`](Self::rop)) the device's fixed-function blend of any
+    /// other directly held format. `None` for an unblended write, no write, or one the device
+    /// blends.
     pub blend: Option<BlendEquation>,
-    /// The unsigned-integer format of the texel size an sRGB attachment is viewed in
-    /// (`StorageAttachmentUse::uint_view`): the declaration's texels are its `uint`s, which a
-    /// read unpacks and decodes and a write encodes and packs, by Metal's measured conversions.
-    /// `None` for another format.
+    /// [`blend`](Self::blend) is the device's fixed-function blend, computed in the shader by its
+    /// model (`rop_blend`), the attachment's device blend off.
+    pub rop: bool,
+    /// The unsigned-integer format of the texel size an sRGB or `BGR5A1Unorm` attachment is
+    /// viewed in (`StorageAttachmentUse::uint_view`): the declaration's texels are its `uint`s,
+    /// which a read unpacks and decodes and a write encodes and packs, by Metal's measured
+    /// conversions. `None` for another format.
     pub uint_view: Option<vk::Format>,
 }
 
@@ -532,8 +539,11 @@ pub(crate) fn storage_form(
     // twelve-bit decode of the stored byte, `math::unpack`'s, even after an earlier draw of the
     // pass wrote it, and a write stores `math::pack`'s encode). The one- and two-channel sRGB
     // formats are not measured, nor is a blend into one.
+    // A `BGR5A1Unorm` or `BGR10A2Unorm` attachment, which NVK grants no storage access, is viewed
+    // in `R16_UINT` or `R32_UINT`, its channels unpacked and packed by the function (`packed`).
     let uint_view = StorageAttachmentUse::uint_view_of(format).filter(|&u| {
-        srgb && u == vk::Format::R32_UINT && mapping.emulation == FormatEmulation::Direct
+        mapping.emulation == FormatEmulation::Direct
+            && ((srgb && u == vk::Format::R32_UINT) || packed::is_packed(format))
     });
     let viewed = uint_view.unwrap_or(format);
     let writes = use_.writes;
@@ -569,10 +579,22 @@ pub(crate) fn storage_form(
         && use_.math == extended_range::blend::BlendMath::Rounded
         && half_float_format(pf)
         && attachment.blending_enabled;
+    // Any other blend of a directly held attachment the write stores: the device's fixed-function
+    // blend, computed in the shader by its model (`rop_blend`), so that the read, the blend and
+    // the store are one step inside the interlock. A replacing blend stores the source as no
+    // blending does, but into an sRGB attachment, whose blend runs in linear space.
+    let rop = attachment.blending_enabled
+        && extended.is_none()
+        && !half_blend
+        && stores
+        && (!attachment.replaces || snorm || uint_view.is_some())
+        && attachment
+            .equation
+            .is_some_and(|eq| super::rop_blend::RopBlend::of(&eq, format).is_ok());
     let blend = attachment
         .equation
-        .filter(|_| (extended.is_some_and(|e| !e.padded()) || half_blend) && stores);
-    if let Some(eq) = blend {
+        .filter(|_| (extended.is_some_and(|e| !e.padded()) || half_blend || rop) && stores);
+    if let Some(eq) = blend.filter(|_| !rop) {
         let written = all.intersection(attachment.write_mask);
         let planned = match extended {
             Some(form) => extended_range::Blend::of(&eq, form, written, use_.math),
@@ -596,8 +618,9 @@ pub(crate) fn storage_form(
             && !shader_blends
             && (attachment.blending_enabled || !kept.is_empty()))
         || (srgb && uint_view.is_none())
-        // Metal's blend into an sRGB attachment, a replacing one too, is not measured.
-        || (uint_view.is_some() && stores && attachment.blending_enabled)
+        // Metal's blend into an sRGB attachment, a replacing one too, is not measured: the device's
+        // is modelled.
+        || (uint_view.is_some() && stores && attachment.blending_enabled && !rop)
         || (writes
             && attachment
                 .write_mask
@@ -681,6 +704,7 @@ pub(crate) fn storage_form(
             kept_at_draw: kept_draw,
             extended,
             blend,
+            rop,
             uint_view,
         })),
         _ => Ok(Err(Unsupported::needs_any_of(
@@ -949,7 +973,8 @@ pub(super) fn plan(cx: &mut SelectCx<'_>) -> Result<(), Error> {
         let refused = Unsupported::not_implemented(Feature::Format);
         return Err(refused.at_attachment(Attachment::Color(color)).into());
     }
-    let mut read = colors_read(cx, &body.used)?;
+    let fetched = colors_read(cx, &body.used)?;
+    let mut read = fetched.clone();
     read.extend(blended.iter().map(|&(color, _)| color));
     let blends: BTreeSet<u32> = blended.iter().map(|&(color, _)| color).collect();
     // Every other attachment the pipeline's state names that the function writes through its
@@ -1069,8 +1094,21 @@ pub(super) fn plan(cx: &mut SelectCx<'_>) -> Result<(), Error> {
         let tied = |e: Error| e.at_attachment(Attachment::Color(color));
         let form =
             storage_form(color, &inputs, cx.inputs.multisampled, use_, cx.profile).map_err(tied)?;
+        // The device blends a color the function writes but never reads: its blend stays the
+        // device's, outside the interlock.
+        let form = match form {
+            Ok(view) if view.rop && !fetched.contains(&color) => Err(not_implemented()),
+            form => form,
+        };
         let form = match form {
             // Metal's 16-bit float blend, modelled for a `half4` output alone.
+            Ok(view) if view.rop => match rop_of(&view).is_some_and(|b| b.reads_second()) {
+                false => Ok((view, None)),
+                true => match second_output4(cx, color)? {
+                    Some(Some(_)) => Ok((view, None)),
+                    _ => Err(not_implemented()),
+                },
+            },
             Ok(view) if view.blend.is_some() && view.extended.is_none() => {
                 match half4_output(cx.entry, color) {
                     true => Ok((view, None)),
@@ -1125,10 +1163,18 @@ pub(super) fn plan(cx: &mut SelectCx<'_>) -> Result<(), Error> {
                 // The blend color as the encoder set it, where Metal's 16-bit float blend reads
                 // it.
                 if let (Some(eq), None) = (view.blend, view.extended) {
-                    let half = extended_range::Blend::half_float(&eq, written(view.kept));
-                    if half.is_ok_and(|h| h.reads_constant()) {
+                    let reads = match view.rop {
+                        true => rop_of(&view).is_some_and(|b| b.reads_constant()),
+                        false => extended_range::Blend::half_float(&eq, written(view.kept))
+                            .is_ok_and(|h| h.reads_constant()),
+                    };
+                    if reads {
                         cx.push.insert(PushField::HalfBlendColor);
                     }
+                }
+                // The device's blend, by its model: the stored value stands for the device's.
+                if view.rop {
+                    cx.precision.insert(PrecisionNote::DeviceColorConversion);
                 }
                 // The channels a partial write mask keeps, as the draw's word.
                 if view.kept_at_draw {
@@ -1242,6 +1288,22 @@ pub(super) fn plan_sample(cx: &mut SelectCx<'_>) -> Result<(), Error> {
     Ok(())
 }
 
+/// Plan the invocation's layer for a function compiled for a layered pass
+/// (`LoweringInputs::layered_storage`), at which each storage-form image is addressed; nothing
+/// otherwise. A multisampled function's storage form in a layered pass is not implemented (its
+/// sample planes are an image's layers already).
+pub(super) fn plan_layer(cx: &mut SelectCx<'_>) -> Result<(), Error> {
+    if !cx.inputs.layered_storage || cx.families.fragment.fetch_layer.is_some() {
+        return Ok(());
+    }
+    if cx.inputs.multisampled {
+        return Err(not_implemented().into());
+    }
+    cx.families.fragment.fetch_layer = Some(stage_io::layer(cx)?);
+    cx.facts.insert(RuntimeFact::LayeredStorage);
+    Ok(())
+}
+
 /// Whether the function reads color attachment `color` in the storage form.
 pub(crate) fn is_storage(cx: &SelectCx<'_>, color: u32) -> bool {
     cx.families.fragment.fetch.contains_key(&color)
@@ -1282,10 +1344,11 @@ pub(super) fn select_read(cx: &mut SelectCx<'_>, c: ColorInput) -> Result<(), Er
         cx.families.arith.converts(e);
     }
     // An sRGB texel decodes through Metal's twelve-bit table.
-    if sc.view.uint_view.is_some() {
+    if sc.view.uint_view.is_some() && !packed::is_packed(sc.view.format) {
         cx.families.arith.srgb.get_or_insert(PackDir::Unpack);
     }
     plan_sample(cx)?;
+    plan_layer(cx)?;
     let coord = stage_io::frag_coord(cx);
     cx.families.fragment.fetch_coord = Some(coord);
     Ok(())
@@ -1331,7 +1394,7 @@ pub(crate) fn blends_second(cx: &SelectCx<'_>, color: u32) -> bool {
         .fragment
         .fetch
         .get(&color)
-        .is_some_and(|sc| sc.view.extended.is_some() && sc.view.blend.is_some())
+        .is_some_and(|sc| (sc.view.extended.is_some() || sc.view.rop) && sc.view.blend.is_some())
 }
 
 /// Plan the second (index-1) output of AIR type `ty` held in field `field` of the returned value
@@ -1367,6 +1430,14 @@ pub fn select_output(
         return Err(cx.invariant("a storage-form output of an attachment of another form"));
     };
     class_of(form, sc.view.read_class(), color, true)?;
+    // The device's blend of a float attachment, computed by its model in `f32`, keeps a product
+    // with a zero and a sum with one as IEEE has them: a lane the output (or its widening to four
+    // lanes) holds constant would otherwise fold away a `0 * inf` or a `-0 + 0` the ROP keeps.
+    if rop::rop_of(&sc.view)
+        .is_some_and(|b| matches!(b.channels, super::rop_blend::Channels::Float { .. }))
+    {
+        cx.families.arith.preserve.insert(32);
+    }
     // An extended-range attachment's blend is of a `half4` output, or of a `float4` one where
     // the blend takes it ([`plan`]), and an `_sRGB` one's encodes through Metal's table.
     let output4 = (form.lanes == 4).then(|| form.float_fmt()).flatten();
@@ -1398,6 +1469,7 @@ pub fn select_output(
         }));
     }
     plan_sample(cx)?;
+    plan_layer(cx)?;
     // The write rounds to the code Metal stores where the format converts it; an sRGB attachment's
     // write encodes its bytes itself (`math::pack` of a `float` or `half` output), and records the
     // pipeline's map, which link checks, without rounding a lane.
@@ -1409,7 +1481,9 @@ pub fn select_output(
         if !measured || form.lanes != 4 {
             return Err(Unsupported::not_implemented(Feature::Format).into());
         }
-        cx.families.arith.srgb.get_or_insert(PackDir::Pack);
+        if !packed::is_packed(sc.view.format) {
+            cx.families.arith.srgb.get_or_insert(PackDir::Pack);
+        }
         if let Some(rules) = cx.inputs.color_writes.get(&color).copied() {
             cx.families
                 .stage_io
@@ -1498,6 +1572,8 @@ pub(super) fn words(cx: &SelectCx<'_>, uses: u64, rets: u64) -> u64 {
         .values()
         .filter(|sc| sc.writes && sc.view.extended.is_some() && sc.view.blend.is_none())
         .count() as u64;
+    // The device's blend by its model: the texel read, decoded, and the blend's lanes.
+    let modelled = fetch.values().filter(|sc| sc.view.rop).count() as u64;
     // A shadowed attachment's object, and a read and a write of its shadow at each return.
     let shadowed = fetch.values().filter(|sc| sc.shadowed).count() as u64;
     // An extended-range attachment's read decodes its texel, an sRGB one's reorders its bytes and
@@ -1522,6 +1598,7 @@ pub(super) fn words(cx: &SelectCx<'_>, uses: u64, rets: u64) -> u64 {
         .saturating_add(READ.saturating_mul(merged))
         .saturating_add(KEPT_AT_DRAW.saturating_mul(at_draw))
         .saturating_add(blend)
+        .saturating_add((READ + rop::WORDS).saturating_mul(modelled))
         .saturating_add(stage_io::extended_color::WORDS.saturating_mul(unblended))
         .saturating_add(srgb_write.saturating_mul(srgb_writes))
         .saturating_add((READ + WRITE + 8).saturating_mul(shadowed))
@@ -1534,14 +1611,19 @@ pub(super) fn words(cx: &SelectCx<'_>, uses: u64, rets: u64) -> u64 {
 
 /// Declare storage-form attachment `color`'s storage image: a 2D storage image of its declared
 /// format and its numeric type, multisampled or arrayed as it holds the samples
-/// ([`StorageSamples`]).
-pub(super) fn declare(mb: &mut ModuleBuilder, color: u32, sc: &StorageColor) -> BResult<GlobalId> {
+/// ([`StorageSamples`]), or arrayed over a layered pass's layers (`layered`).
+pub(super) fn declare(
+    mb: &mut ModuleBuilder,
+    color: u32,
+    sc: &StorageColor,
+    layered: bool,
+) -> BResult<GlobalId> {
     let sampled_type = scalar_type(mb, sc.view.numeric)?;
     let ty = mb.ty(SType::Image(ImageType {
         sampled_type,
         dim: Dim::D2,
         depth: false,
-        arrayed: sc.view.samples == StorageSamples::Planes,
+        arrayed: sc.view.samples == StorageSamples::Planes || layered,
         multisampled: sc.view.samples == StorageSamples::Multisampled,
         usage: ImageUsage::Storage,
         format: sc.view.declared,
@@ -1635,6 +1717,27 @@ fn scalar_type(mb: &mut ModuleBuilder, numeric: SampledType) -> BResult<crate::s
 /// The storage image of attachment `color` held as `samples`, the texel of the invocation's
 /// sample, and the access's image operands: the invocation's [`pixel`] with its [`operands`],
 /// or, for planes, the pixel and the invocation's `SampleId` as the layer.
+/// The texel of storage-form attachment `color` at the invocation's pixel (at its sample as
+/// `samples` holds them), read inside the interlock: a two-plane attachment's raw texel joined
+/// from its two views.
+fn read_texel(
+    cx: &mut EmitCx<'_>,
+    fb: &mut FunctionBuilder<'_>,
+    color: u32,
+    samples: StorageSamples,
+) -> BResult<SValue> {
+    let (image, at, ops) = image_and_texel(cx, fb, color, samples)?;
+    let mem = memory_model::coherence(cx.plan).texel(fb)?;
+    let texel = fb.read(image, at, &ops, mem)?;
+    let Some(alpha) = super::two_plane::alpha(cx, color) else {
+        return Ok(texel);
+    };
+    let (image, at, ops) = image_and_texel(cx, fb, alpha, samples)?;
+    let mem = memory_model::coherence(cx.plan).texel(fb)?;
+    let byte = fb.read(image, at, &ops, mem)?;
+    super::two_plane::join(fb, texel, byte)
+}
+
 fn image_and_texel(
     cx: &mut EmitCx<'_>,
     fb: &mut FunctionBuilder<'_>,
@@ -1646,7 +1749,7 @@ fn image_and_texel(
     };
     let p = fb.module().global_value(g)?;
     let image = fb.load(p, MemAccess::default())?;
-    let pixel = pixel(cx, fb)?;
+    let pixel = storage_texel(cx, fb)?;
     if samples != StorageSamples::Planes {
         let ops = operands(cx, fb)?;
         return Ok((image, pixel, ops));
@@ -1712,6 +1815,26 @@ pub(super) fn pixel(cx: &mut EmitCx<'_>, fb: &mut FunctionBuilder<'_>) -> BResul
     fb.composite_construct(uvec2, &[x, y])
 }
 
+/// The texel of a storage-form image at the invocation's pixel: the [`pixel`], and under the
+/// layered storage form (`FragmentPlan::fetch_layer`) the layer its primitive renders as well.
+pub(super) fn storage_texel(cx: &mut EmitCx<'_>, fb: &mut FunctionBuilder<'_>) -> BResult<SValue> {
+    let pixel = pixel(cx, fb)?;
+    let Some(object) = cx.plan.families.fragment.fetch_layer else {
+        return Ok(pixel);
+    };
+    let g = stage_io::object_global(cx, object)?;
+    let p = fb.module().global_value(g)?;
+    let layer = fb.load(p, MemAccess::default())?;
+    let u32_ = fb.module().ty(SType::Int {
+        width: 32,
+        signed: false,
+    })?;
+    let uvec3 = fb.module().ty(SType::Vector { elem: u32_, len: 3 })?;
+    let x = fb.composite_extract(pixel, &[0])?;
+    let y = fb.composite_extract(pixel, &[1])?;
+    fb.composite_construct(uvec3, &[x, y, layer])
+}
+
 /// A `uvec4` of a signed-integer texel's bits, or the texel itself.
 fn as_held(fb: &mut FunctionBuilder<'_>, texel: SValue, numeric: SampledType) -> BResult<SValue> {
     if numeric != SampledType::Sint {
@@ -1743,17 +1866,17 @@ pub(super) fn value(
     };
     let texel = match texel {
         Some(held) => held,
-        None => {
-            let (image, at, ops) = image_and_texel(cx, fb, c.color, sc.view.samples)?;
-            let mem = memory_model::coherence(cx.plan).texel(fb)?;
-            fb.read(image, at, &ops, mem)?
-        }
+        None => read_texel(cx, fb, c.color, sc.view.samples)?,
     };
     let texel = match (sc.view.extended, sc.view.uint_view) {
         (Some(_), _) if sc.shadowed => texel,
         (Some(form), _) => {
             let table = crate::lower::texture::extended_table(cx, form)?;
             extended_range::tile_value(fb, form, texel, table)?
+        }
+        (None, Some(_)) if packed::is_packed(sc.view.format) => {
+            let word = fb.composite_extract(texel, &[0])?;
+            packed::decode(fb, sc.view.format, word)?
         }
         (None, Some(_)) => {
             let Some(table) = cx.decl.families.arith.srgb else {
@@ -1832,24 +1955,51 @@ pub(super) fn emit_return(
                 let table = crate::lower::texture::extended_table(cx, range)?;
                 extended_range::encode(fb, range, v, table)?
             }
-            (None, _) if sc.view.uint_view.is_some() => srgb_texel(cx, fb, color, &sc, form, part)?,
+            (None, _) if sc.view.uint_view.is_some() => {
+                let (form, part) = match sc.view.rop {
+                    true => rop_blended(cx, fb, color, &sc, (form, part), second)?,
+                    false => (form, part),
+                };
+                if packed::is_packed(sc.view.format) {
+                    packed::texel(cx, fb, color, &sc, form, part)?
+                } else {
+                    srgb_texel(cx, fb, color, &sc, form, part)?
+                }
+            }
             (None, _) => {
-                // Metal's 16-bit float blend of a `half4` output, over the texel.
-                let part = match sc.view.blend {
-                    Some(eq) => half_blended(cx, fb, color, &sc, eq, part)?,
-                    None => part,
+                // Metal's 16-bit float blend of a `half4` output, or the device's blend by its
+                // model, over the texel.
+                let (form, part) = match (sc.view.blend, sc.view.rop) {
+                    (Some(_), true) => rop_blended(cx, fb, color, &sc, (form, part), second)?,
+                    (Some(eq), false) => (form, half_blended(cx, fb, color, &sc, eq, part)?),
+                    (None, _) => (form, part),
                 };
                 let part = if sc.view.merges() {
                     merge(cx, fb, color, &sc, form, part)?
                 } else {
                     part
                 };
-                let part = stage_io::color_write::round(cx, fb, color, form, part)?;
+                // The device's blend stores through the image's conversion, as its blender's.
+                let part = match sc.view.rop {
+                    true => part,
+                    false => stage_io::color_write::round(cx, fb, color, form, part)?,
+                };
                 texel_of(fb, part, form, sc.view.numeric)?
             }
         };
-        let (image, at, ops) = image_and_texel(cx, fb, color, sc.view.samples)?;
-        texels.push((image, at, texel, ops));
+        match super::two_plane::alpha(cx, color) {
+            Some(alpha) => {
+                let [word, byte] = super::two_plane::split(fb, texel)?;
+                let (image, at, ops) = image_and_texel(cx, fb, color, sc.view.samples)?;
+                texels.push((image, at, word, ops));
+                let (image, at, ops) = image_and_texel(cx, fb, alpha, sc.view.samples)?;
+                texels.push((image, at, byte, ops));
+            }
+            None => {
+                let (image, at, ops) = image_and_texel(cx, fb, color, sc.view.samples)?;
+                texels.push((image, at, texel, ops));
+            }
+        }
         if let Some(held) = held {
             let (image, at) = shadow_and_texel(cx, fb, color)?;
             texels.push((image, at, held, ImageOperands::default()));
@@ -1933,7 +2083,7 @@ pub(super) fn blends_half(cx: &SelectCx<'_>, color: u32) -> bool {
         .fragment
         .fetch
         .get(&color)
-        .is_some_and(|sc| sc.view.blend.is_some() && sc.view.extended.is_none())
+        .is_some_and(|sc| sc.view.blend.is_some() && sc.view.extended.is_none() && !sc.view.rop)
 }
 
 /// Output `part` (of `form`, in its lowered representation) of storage-form attachment `color`
@@ -2087,9 +2237,7 @@ fn blended(
         if let Some(texel) = codes {
             return Ok(texel);
         }
-        let (image, at, ops) = image_and_texel(cx, fb, color, sc.view.samples)?;
-        let mem = memory_model::coherence(cx.plan).texel(fb)?;
-        let texel = fb.read(image, at, &ops, mem)?;
+        let texel = read_texel(cx, fb, color, sc.view.samples)?;
         codes = Some(texel);
         Ok(texel)
     };
@@ -2357,6 +2505,16 @@ fn texel_of(
     let i32_ = scalar_type(fb.module(), SampledType::Sint)?;
     let ivec4 = fb.module().ty(SType::Vector { elem: i32_, len: 4 })?;
     fb.convert(ConvOp::Bitcast, texel, ivec4)
+}
+
+mod packed;
+mod rop;
+
+use rop::{rop_blended, rop_of};
+
+/// The device's blend `view`'s write computes by its model, where it does.
+pub(crate) fn modelled_blend(view: &StorageView) -> Option<super::rop_blend::RopBlend> {
+    rop_of(view)
 }
 
 #[cfg(test)]

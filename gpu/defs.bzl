@@ -8,6 +8,7 @@ The shader seed and the raw pack are gpu/seed's.
 
 load("//bazel:profile.bzl", "PROFILE_ATTR", "switch_debug_define")
 load("//gpu/seed:defs.bzl", "SeedInfo")
+load("//ipsw:ipsw.bzl", "IpswInfo")
 load("//kernel/rules:layout.bzl", "MOVED_ROOTS", "OLD_TREE", "TREE_ROOT")
 
 _XCODE = {
@@ -105,7 +106,9 @@ def _metal_plugin_impl(ctx):
         cflags = [f for f in _PLUGIN_CFLAGS if language == "objective-c++" or f != "-fno-objc-msgsend-selector-stubs"]
         compiler = "clang++"
         if language == "c":
-            cflags = [f for f in cflags if f not in ("-std=c++17", "-fobjc-arc")] + ["-std=c11"]
+            # The C units are kits/SwitchGM20BEmit's emitters: their asserts are Mesa's debug checks, off as in Mesa's
+            # release builds rather than new ways for a render server to abort.
+            cflags = [f for f in cflags if f not in ("-std=c++17", "-fobjc-arc")] + ["-std=c11", "-DNDEBUG"]
             compiler = "clang"
         for src in sources:
             obj = ctx.actions.declare_file("%s_objs/%s.o" % (ctx.attr.name, src.basename))
@@ -144,7 +147,7 @@ def _metal_plugin_impl(ctx):
     )
     return [
         DefaultInfo(files = depset([out])),
-        OutputGroupInfo(debug = depset([dsym])),
+        OutputGroupInfo(debug = depset([dsym]), objects = depset(objects)),
     ]
 
 metal_plugin = rule(
@@ -165,38 +168,117 @@ metal_plugin = rule(
 
 # --- The raw GM20B path's stack key --------------------------------------------------------------------------------
 
+_CrateSourcesInfo = provider(
+    doc = "What a crate graph is compiled from: each crate's and build script's sources and compile data.",
+    fields = {"files": "depset of File"},
+)
+
+_CRATE_EDGES = ("deps", "proc_macro_deps", "script")
+
+def _crate_sources_impl(_target, ctx):
+    files = []
+    for name in ("srcs", "compile_data", "data"):
+        files += getattr(ctx.rule.files, name, [])
+    transitive = []
+    for name in _CRATE_EDGES:
+        edge = getattr(ctx.rule.attr, name, None)
+        for dep in (edge if type(edge) == "list" else [edge] if edge else []):
+            if _CrateSourcesInfo in dep:
+                transitive.append(dep[_CrateSourcesInfo].files)
+    return [_CrateSourcesInfo(files = depset(files, transitive = transitive))]
+
+_crate_sources = aspect(
+    implementation = _crate_sources_impl,
+    attr_aspects = list(_CRATE_EDGES),
+)
+
+# A file by its path below the tree, never File.path: a generated file's names its configuration's output directory.
+def _hashed_as(f):
+    return "{}={}".format(f.short_path, f.path)
+
+def _short_path(f):
+    return f.short_path
+
+# The preprocessor of each kind of unit, as the shader tools compile it (raw/pack/rawpack.py build)
+_UNITS = {
+    "c": ["clang", "-isysroot", "@MACOSX_SDK@", "-x", "c", "-std=c11"],
+    "cpp": ["clang++", "-isysroot", "@MACOSX_SDK@", "-x", "c++", "-std=c++17"],
+    "mm": ["clang++", "-isysroot", "@MACOSX_SDK@", "-x", "objective-c++", "-std=c++17", "-fobjc-arc"],
+}
+
+# Each unit's includes with the hashed files its only inputs: a header outside them is not found and the build fails.
+def _includes_checked(ctx):
+    headers = ctx.files.srcs + [ctx.file.metal_abi]
+    includes = []
+    for marker in ctx.files.include_markers + [ctx.file.metal_abi]:
+        includes += ["-I", marker.dirname]
+    checked = []
+    for src in ctx.files.srcs:
+        if src.extension not in _UNITS:
+            continue
+        out = ctx.actions.declare_file("{}_includes/{}.d".format(ctx.attr.name, src.short_path))
+        _xcode_run(
+            ctx,
+            "RawStackIncludes",
+            "Checking that %s includes only the raw stack key's files" % src.short_path,
+            _UNITS[src.extension] + includes + ["-MM", "-MF", out.path, src.path],
+            [src] + headers,
+            [out],
+        )
+        checked.append(out)
+    return checked
+
 def _raw_stack_impl(ctx):
     out = ctx.actions.declare_file(ctx.attr.name + ".txt")
-    bridge = [f for f in ctx.files.srcs if f.basename == "NativeMetalBridge.rs"]
-    if len(bridge) != 1:
-        fail("srcs must name NativeMetal's bridge/NativeMetalBridge.rs once")
-    drivers = bridge[0].dirname.rsplit("/NativeMetal/", 1)[0]
-    m2v_root = ctx.attr.m2v_root.label.package
+    files = depset(
+        ctx.files.srcs + ctx.files.readers + [ctx.file.metal_abi, ctx.file.nvk],
+        transitive = [ctx.attr.bridge[_CrateSourcesInfo].files],
+    )
     args = ctx.actions.args()
-    args.add("--nvk", ctx.file.nvk)
-    args.add("--drivers", drivers)
-    args.add("--m2v-root", m2v_root)
-    args.add_all(ctx.files.m2v, before_each = "--m2v")
-    args.add("--raw", drivers + "/TegraGM20BMetal/raw")
+    args.use_param_file("@%s", use_always = True)
+    args.set_param_file_format("multiline")
+    args.add("--ipsw", ctx.attr.ipsw[IpswInfo].build)
     args.add("--out", out)
+    args.add_all(files, map_each = _hashed_as, before_each = "--file")
     ctx.actions.run(
         executable = ctx.executable._tool,
         arguments = [args],
-        inputs = [ctx.file.nvk] + ctx.files.m2v + ctx.files.srcs,
+        inputs = files,
         outputs = [out],
         mnemonic = "RawStack",
         progress_message = "Hashing the raw path's stack key",
     )
-    return [DefaultInfo(files = depset([out]))]
+    listing = ctx.actions.declare_file(ctx.attr.name + ".inputs")
+    names = ctx.actions.args()
+    names.set_param_file_format("multiline")
+    names.add_all(files, map_each = _short_path)
+    ctx.actions.write(listing, names)
+    return [
+        DefaultInfo(files = depset([out])),
+        OutputGroupInfo(inputs = depset([listing]), _validation = depset(_includes_checked(ctx))),
+    ]
 
 raw_stack = rule(
     implementation = _raw_stack_impl,
-    attrs = {
+    doc = """The raw path's stack key (tools/gpu/raw_stack.py): what its records are made and read by.
+
+    srcs and readers, by path and bytes, with NVK, MetalABI.h, every crate the Metal bridge compiles (its sources,
+    compile data and build scripts) and the IPSW build. Each C, C++ and Objective-C++ unit of srcs is checked to
+    include only srcs and MetalABI.h; the hashed files' paths are the output group `inputs`.""",
+    attrs = _XCODE | {
+        "srcs": attr.label_list(
+            mandatory = True,
+            allow_files = True,
+            doc = "what records, pack entries and native records are made by",
+        ),
+        "readers": attr.label_list(allow_files = True, doc = "files that only read the records the device made"),
+        "bridge": attr.label(mandatory = True, aspects = [_crate_sources], doc = "the Metal bridge (its crate graph)"),
+        "include_markers": attr.label_list(allow_files = True, doc = "one file per -I directory of srcs' units"),
+        "metal_abi": attr.label(mandatory = True, allow_single_file = True, doc = "the IPSW kind's MetalABI.h"),
         "nvk": attr.label(mandatory = True, allow_single_file = True),
-        "m2v": attr.label_list(allow_files = True, doc = "the source files of the m2v crates the bridge links"),
-        "m2v_root": attr.label(mandatory = True, allow_single_file = True, doc = "the m2v tree's package (its files are hashed by their path below it)"),
-        "srcs": attr.label_list(allow_files = True, doc = "the bridge sources, the frontend, every raw/ source"),
+        "ipsw": attr.label(default = "//ipsw:current", providers = [IpswInfo]),
         "_tool": attr.label(default = "//tools/gpu:raw_stack", executable = True, cfg = "exec"),
+        "_xcode_run": attr.label(default = "//tools/gpu:xcode_run", executable = True, cfg = "exec"),
     },
 )
 
@@ -275,25 +357,43 @@ def _rlocation(ctx, f):
 def _gpu_stage_impl(ctx):
     seed = ctx.attr.seed[SeedInfo]
     base = [f for f in ctx.files.base if f.is_directory][0]
-    manifest = ctx.actions.declare_file(ctx.attr.name + ".stage")
+
+    # The seed's lines on their own, so that the plugin, which most edits change, is all the manifest hashes again.
+    part = ctx.actions.declare_file(ctx.attr.name + ".stage.seed")
     args = ctx.actions.args()
-    args.add("--self", _rlocation(ctx, manifest))
-    for flag, tree in (("--base", base), ("--seed", seed.meta), ("--raw", ctx.file.raw)):
+    args.add("--part")
+    for flag, tree in (("--seed", seed.meta), ("--raw", ctx.file.raw), ("--native", seed.native)):
         args.add(flag, tree.path)
         args.add(flag + "-rlocation", _rlocation(ctx, tree))
     for pack in seed.packs:
         args.add("--pack", pack)
         args.add("--pack-rlocation", _rlocation(ctx, pack))
+    args.add("--out", part)
+    ctx.actions.run(
+        executable = ctx.executable._tool,
+        arguments = [args],
+        inputs = [seed.meta, seed.native, ctx.file.raw] + seed.packs,
+        outputs = [part],
+        mnemonic = "GpuStageSeed",
+        progress_message = "Listing the shader seed and the raw pack for the Data volume",
+    )
+
+    manifest = ctx.actions.declare_file(ctx.attr.name + ".stage")
+    args = ctx.actions.args()
+    args.add("--self", _rlocation(ctx, manifest))
+    args.add("--base", base.path)
+    args.add("--base-rlocation", _rlocation(ctx, base))
+    args.add("--from-part", part)
     args.add("--out", manifest)
     ctx.actions.run(
         executable = ctx.executable._tool,
         arguments = [args],
-        inputs = [base, seed.meta, ctx.file.raw] + seed.packs,
+        inputs = [base, part],
         outputs = [manifest],
         mnemonic = "GpuStageManifest",
         progress_message = "Listing the GPU bundle, the shader seed and the raw pack for the Data volume",
     )
-    files = [manifest, base, seed.meta, ctx.file.raw] + seed.packs
+    files = [manifest, base, seed.meta, seed.native, ctx.file.raw] + seed.packs
     return [DefaultInfo(files = depset([manifest]), runfiles = ctx.runfiles(files = files))]
 
 gpu_stage = rule(

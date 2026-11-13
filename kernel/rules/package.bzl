@@ -30,7 +30,7 @@ def _ios_binary_impl(ctx):
         args.append("--strip")
     args += ["--", switch_debug_define(ctx)]
     for flag in ctx.attr.copts:
-        args.append(flag.replace("{tree}", ctx.label.package))
+        args.append(flag.replace("{tree}", ctx.label.package).replace("{bin}", ctx.bin_dir.path))
     args += ctx.attr.linkopts
     args += [f.path for f in ctx.files.srcs]
     run_tool(

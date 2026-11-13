@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MIT
 // raw GM20B path, over the mock GPU, built with -fsanitize=thread: what the completion queue adds to the device while the
-// submit thread draws. addRecord numbers a runtime record's constexpr samplers after the pack's (Device::constexprTsc_), and
+// submit thread draws. addRecord places a runtime record's constexpr samplers after the pack's (Device::constexprTsc_), and
 // a draw reads its own's slot without the device lock: two hundred records, each with a constexpr sampler of its own, are made
 // on one thread while another draws one made before them.
 // usage: racecheck <pack.bin>
@@ -29,7 +29,7 @@ raw::RuntimeRecord record(const raw::Device &dev, const raw::Pipeline &like, uin
         p.image.assign(96, 0);
     }
     raw::PackEntry &e = r.pipeline.entry[r.pipeline.entries < 16 ? r.pipeline.entries++ : 15];
-    e = {0xf0, raw::EntryTexture, 2, 0, raw::SamplerConstexpr, uint8_t(dev.pack().header()->samplers), 0};
+    e = {0xf0, raw::EntryTexture, 2, 0, raw::SamplerConstexpr, 0, 0};
     r.samplers.push_back({0x26092, 0x291, 0xfff000, n, 0, 0, 0, 0});
     return r;
 }

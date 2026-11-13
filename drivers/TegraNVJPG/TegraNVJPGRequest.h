@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: BSD-2-Clause-Patent
 // AppleJPEGDriverUserClient's decode requests as the kernel receives them (selector 1, 0x58 bytes, from CMPhoto's and
-// JPEGH1.videodecoder's JPEGDeviceInterface_decodeJPEG; selector 5, 0x1000 bytes, CMPhoto's decodeJPEGExt), and their
+// JPEGH1.videodecoder's JPEGDeviceInterface_decodeJPEG; selector 5, 0x1000 bytes, CMPhoto's decodeJPEGExt; selector 7,
+// 0xda0 bytes, every decode on 24B119), and their
 // translation into one NVJPG decode. Plain C, header only: TegraNVJPGUserClient.cpp and the host test
 // (test/request_host.c) compile the same code. CONTRACT.md has the whole contract and where each part was read.
 #ifndef TEGRA_NVJPG_REQUEST_H
@@ -48,7 +49,33 @@ typedef struct {
     uint8_t header[0x1000 - 0x84];            // 0x84 Apple's codec registers (ignored: NVJPG parses the file itself)
 } TegraNVJPGDecodeRequestExt;
 
+// Selector 7, AppleJPEGDriverIOStruct2024 (0xda0 bytes): every synchronous CMPhoto decode on 24B119
+// (JPEGDecompressSurfaceHelper 0x1a6b80c9c -> decodeJPEG2024 0x1a6b80d90) and JPEGH1.videodecoder's (0x2c4988d48).
+// 0x00..0x57 are selector 1's, the crop selector 5's; the strip fields are written only on CMPhoto's multi-core path,
+// which needs AppleJPEGNumCores >= 2. Apple's kernel (startDecoder2024 0xfffffff008b06178) writes back +0x4c/+0x50
+// (the region decoded) and +0xc94 (microseconds); no caller reads them.
+typedef struct {
+    TegraNVJPGDecodeRequest base;             // 0x00..0x57 (0x54 MCUs per row, cropped decodes only)
+    uint32_t mcu_rows;                        // 0x58
+    uint32_t crop;                            // 0x5c
+    uint32_t crop_x, crop_y, crop_w, crop_h;  // 0x60 in MCUs
+    uint32_t strip_index, strip_more;         // 0x70
+    uint32_t strip_entropy_bytes;             // 0x78
+    uint32_t header_bytes;                    // 0x7c strip header blob length
+    uint32_t entropy_offset;                  // 0x80
+    uint8_t header[0xc00];                    // 0x84
+    uint32_t core;                            // 0xc84 0 auto
+    uint32_t stats[0x24 / 4];                 // 0xc88 out: engine statistics, +0xc94 microseconds
+    uint32_t rsvdcac;                         // 0xcac
+    uint8_t rsvd[0xda0 - 0xcb0];
+} TegraNVJPGDecodeRequest2024;
+
 #ifdef __cplusplus
+static_assert(sizeof(TegraNVJPGDecodeRequest2024) == 0xda0 && offsetof(TegraNVJPGDecodeRequest2024, crop) == 0x5c &&
+                  offsetof(TegraNVJPGDecodeRequest2024, header_bytes) == 0x7c &&
+                  offsetof(TegraNVJPGDecodeRequest2024, core) == 0xc84 &&
+                  offsetof(TegraNVJPGDecodeRequest2024, rsvdcac) == 0xcac,
+              "decode request (2024)");
 static_assert(sizeof(TegraNVJPGDecodeRequest) == 0x58 && offsetof(TegraNVJPGDecodeRequest, callback) == 0x30 &&
                   offsetof(TegraNVJPGDecodeRequest, out_width) == 0x4c,
               "decode request");
@@ -56,6 +83,11 @@ static_assert(sizeof(TegraNVJPGDecodeRequestExt) == 0x1000 && offsetof(TegraNVJP
                   offsetof(TegraNVJPGDecodeRequestExt, header) == 0x84,
               "decode request (Ext)");
 #else
+_Static_assert(sizeof(TegraNVJPGDecodeRequest2024) == 0xda0 && offsetof(TegraNVJPGDecodeRequest2024, crop) == 0x5c &&
+                   offsetof(TegraNVJPGDecodeRequest2024, header_bytes) == 0x7c &&
+                   offsetof(TegraNVJPGDecodeRequest2024, core) == 0xc84 &&
+                   offsetof(TegraNVJPGDecodeRequest2024, rsvdcac) == 0xcac,
+               "decode request (2024)");
 _Static_assert(sizeof(TegraNVJPGDecodeRequest) == 0x58 && offsetof(TegraNVJPGDecodeRequest, callback) == 0x30 &&
                    offsetof(TegraNVJPGDecodeRequest, out_width) == 0x4c,
                "decode request");

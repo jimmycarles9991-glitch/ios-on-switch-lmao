@@ -1,0 +1,25 @@
+# The raw path's planner (L5): a command buffer's recording turned into a work graph of engine nodes with barriers from
+# their dependency edges, validated before emission, lowered as data and cached by structure. Pure C++17 with no Metal or
+# kernel calls; the Metal plugin compiles :srcs itself once it is wired in. Tests: //drivers/TegraGM20BMetal/raw/plan/test.
+load("//bazel/lint:defs.bzl", "lint_files")
+
+package(default_visibility = ["//visibility:public"])
+
+lint_files()
+
+exports_files(["predicates.tsv"])
+
+filegroup(
+    name = "srcs",
+    srcs = glob(["*.cpp"]),
+)
+
+# The planner's headers, the two rule modules of the raw runtime it reuses, and the capability table it reads
+# (//kits/SwitchGM20B:caps, generated: a rule that takes headers of its own lists that target too)
+filegroup(
+    name = "hdrs",
+    srcs = glob(["*.h"]) + [
+        "//drivers/TegraGM20BMetal:raw/runtime/raw_attachment_order.h",
+        "//drivers/TegraGM20BMetal:raw/runtime/raw_pass_fusion.h",
+    ],
+)

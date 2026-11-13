@@ -27,6 +27,7 @@ load("//ipsw:ipsw.bzl", "kernel_virt_base")
 load("//kernel/rules:layout.bzl", "MOVED_ROOTS", "OLD_TREE", "PATH_ROOT", "tree_path")
 load("//kernel/switch:objects.bzl", "SWITCH_ROOT", "switch_copts", "switch_objects", "with_kprof")
 load(":recipes_development.bzl", "DEVELOPMENT_RECIPES")
+load(":recipes_release.bzl", "RELEASE_RECIPES")
 load(":selected.bzl", "selected_only")
 load(":switch_objects.bzl", "SWITCH_COPTS")
 
@@ -43,6 +44,7 @@ XnuObjectsInfo = provider(
 
 RECIPES = {
     "DEVELOPMENT": DEVELOPMENT_RECIPES,
+    "RELEASE": RELEASE_RECIPES,
 }
 
 # make's spellings (main's kernel, built by make's xnu_build.py with -ffile-prefix-map=<execroot>=/switch-ios).
@@ -173,7 +175,7 @@ def _symbols(ctx, obj, base):
         env = {"DEVELOPER_DIR": DEVELOPER_DIR, "LC_ALL": "C", "PATH": "/usr/bin:/bin"},
         mnemonic = "XnuSymbols",
         progress_message = "Listing the names {} defines".format(base),
-        execution_requirements = {"no-remote-exec": "", "requires-darwin": ""},
+        execution_requirements = {"requires-darwin": ""},
     )
     return out
 
@@ -383,14 +385,15 @@ def by_profile(development, release):
         "//conditions:default": development,
     })
 
-def xnu_objects(name, component, table, srcs = None, **kwargs):
-    """A component's objects for DEVELOPMENT (no RELEASE tables are recorded for this tree yet).
+def xnu_objects(name, component, table, release, srcs = None, **kwargs):
+    """A component's objects for the build profile's XNU configuration.
 
     Args:
         name: the target (every component's is "objects").
         component: osfmk, bsd, ... or config (the kernel's own objects).
         table: the component's DEVELOPMENT table (objects.bzl struct: objects, copts, includes, segments); each
             object's SWITCH_COPTS go before its copts.
+        release: its RELEASE table, with the same SWITCH_COPTS ordering.
         srcs: the vendored sources the tables name (default: the package's .c, .cpp and .s files).
         **kwargs: input overrides (config's objects: gen_srcs = version.c, gen_hdrs = None, gen_relative = False).
     """
@@ -403,17 +406,19 @@ def xnu_objects(name, component, table, srcs = None, **kwargs):
     # kernel/switch's objects join each component's own objects, not pthread_bootstrap's one.
     ours = component if name == "objects" else None
     own_copts = {k: SWITCH_COPTS.get(k, []) + table.copts.get(k, []) for k in table.objects}
+    release_copts = {k: SWITCH_COPTS.get(k, []) + release.copts.get(k, []) for k in release.objects}
     xnu_objects_rule(
         name = name,
         component = component,
-        config = "DEVELOPMENT",
-        objects = switch_objects(ours, table.objects),
+        config = by_profile("DEVELOPMENT", "RELEASE"),
+        objects = by_profile(switch_objects(ours, table.objects), switch_objects(ours, release.objects)),
         copts = select({
             "//kernel:kprof_debug": with_kprof(component, switch_copts(ours, own_copts)),
+            "//bazel:release": switch_copts(ours, release_copts),
             "//conditions:default": switch_copts(ours, own_copts),
         }),
-        includes = table.includes,
-        segments = table.segments,
+        includes = by_profile(table.includes, release.includes),
+        segments = by_profile(table.segments, release.segments),
         target_compatible_with = selected_only(),
         srcs = srcs if srcs != None else native.glob(["**/*.c", "**/*.cpp", "**/*.s"], allow_empty = True),
         switch_srcs = ["//kernel/switch:srcs"],

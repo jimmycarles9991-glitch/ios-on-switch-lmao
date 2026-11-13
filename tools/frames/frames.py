@@ -185,7 +185,7 @@ def interactions(lines: list[str]) -> list[str]:
         if not m:
             continue
         g = m.groupdict()
-        intervals = int(g['f1']) + int(g['f2']) + int(g['f3']) + int(g['f4'])
+        intervals = max(0, int(g['presents']) - 1)
         locked = 100 * int(g['f1']) / intervals if intervals else 0
         out.append(
             f'{g["time"][11:23]} {g["ms"]:>5} ms (touch {g["touch"]:>5}): {g["presents"]:>4} presents, '

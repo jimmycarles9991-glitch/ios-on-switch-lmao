@@ -1,5 +1,6 @@
 """hwtest.py's checks over synthetic app lines, and its test IDs against hw_test_app's sources."""
 
+import plistlib
 import re
 import unittest
 from pathlib import Path
@@ -9,7 +10,7 @@ from tools.devicerun.rules import FAIL, INFO, NA, NO_DATA, PASS
 
 APP = Path(__file__).resolve().parents[2] / 'hw_test_app'
 SHARED = (APP / 'tests', APP / 'gpu/scenes')
-BY_IOS = {'17': (APP / 'app17',), '27': (APP / 'app27',)}
+BY_IOS = {'17': (APP / 'app17',), '27': (APP / 'app27', APP / 'gpu/scenes27')}
 PARAMETERIZED = re.compile(
     r'^(decode\.|playback\.|encode\.|audio\.playback_|image\.(' + '|'.join(hwtest.STILLS) + r')$)'
 )
@@ -130,6 +131,31 @@ class AppSources(unittest.TestCase):
             declared = self.declared(directories)
             self.assertEqual(declared, hwtest.BY_IOS.get(ios, {}), ios)
             self.assertFalse(set(declared) & set(hwtest.TESTS), ios)
+
+
+# A sysctl name a test reads: a literal "kern.x"/"debug.x", or such a prefix joined to each of the file's
+# `static let counters` (CompletionFlipTest's "kern.switch_flips_" + name).
+SYSCTL_NAME = re.compile(r'"((?:kern|debug)\.[a-z0-9_.]+)"(\s*\+)?')
+COUNTERS = re.compile(r'static let counters = \[([^\]]*)\]')
+
+
+class SandboxSysctls(unittest.TestCase):
+    def test_every_sysctl_a_test_reads_is_in_both_sandbox_exceptions(self):
+        names = set()
+        for directory in SHARED + tuple(path for paths in BY_IOS.values() for path in paths):
+            for source in directory.glob('*.swift'):
+                text = source.read_text()
+                counters = [name for block in COUNTERS.findall(text) for name in re.findall(r'"([a-z0-9_]+)"', block)]
+                for match in SYSCTL_NAME.finditer(text):
+                    if match.group(2):
+                        names.update(match.group(1) + name for name in counters)
+                    else:
+                        names.add(match.group(1))
+        self.assertGreater(len(names), 20)
+        for entitlements in ('SwitchHWTest.entitlements', 'SwitchHWTest27.entitlements'):
+            plist = plistlib.loads((APP / entitlements).read_bytes())
+            listed = set(plist['com.apple.security.exception.sysctl.read-only'])
+            self.assertEqual(sorted(names - listed), [], entitlements)
 
 
 # A literal first argument of Metrics.set: "key", prefix + "key" or an interpolated "\\(label)_key".

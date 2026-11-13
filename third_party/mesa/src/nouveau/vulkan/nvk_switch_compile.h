@@ -58,7 +58,25 @@ struct switch_nvk_stage_info {
    /* Root push words [0x700, 0x780) constant across draws (bit i: word i). */
    uint32_t const_push_mask;
    uint32_t const_push_words[32];
+   uint64_t center_frag_depth;
+   const struct switch_nvk_ir *semantic;
+   const void *portable_context;
+   bool (*portable)(const void *context, const uint32_t **words, size_t *bytes);
+   /* A fragment stage's fetches rounded to half take TEXS's F16 forms (a chip
+    * fact the pack builder holds: raw_chip_facts.h AssumeTexsF16)
+    */
+   bool texs_f16;
+   /* A fragment stage drawn into a turned plane (nvk_switch_turn.h) */
+   bool turned;
+   /* A fragment stage's set-0 bindings of two-plane RGB10A8_2P_XR10 textures
+    * (bit b: binding b), each read through its header pair
+    * (nvk_switch_xr_planes.h)
+    */
+   uint64_t xr_plane_bindings;
 };
+
+extern _Thread_local bool switch_nvk_center_frag_depth_current;
+extern _Thread_local bool switch_nvk_texs_f16_current;
 
 struct switch_nvk_stage {
    uint8_t header[80];
@@ -77,12 +95,36 @@ struct switch_nvk_stage {
     */
    const struct switch_nvk_split *split;
    void *owner; /* holds code and data until switch_nvk_stage_finish */
+   uint32_t interlock_control; /* SET_PIXEL_SHADER_INTERLOCK_CONTROL */
+   uint64_t uses_sample_shading;
+   uint32_t semantic_version;
+   uint8_t bound_textures; /* nak_shader_info's: SET_BINDLESS_TEXTURE + 1, 0 none */
+   /* What nak_fill_qmd reads of a compute program's nak_shader_info, and
+    * each NVK_CBUF_TYPE_DESC_SET constant buffer's set
+    */
+   uint8_t num_barriers;
+   uint16_t local_size[3];
+   uint16_t smem_size;
+   uint32_t slm_size, crs_size;
+   uint8_t cbuf_sets[16];
 };
 
 VkResult switch_nvk_compile_stage(VkDevice device,
                                   const struct switch_nvk_stage_info *info,
                                   struct switch_nvk_stage *out);
 void switch_nvk_stage_finish(VkDevice device, struct switch_nvk_stage *stage);
+
+struct switch_nvk_stage_metrics {
+   uint32_t version, code_bytes, instructions, gprs, max_warps;
+   uint32_t scratch_bytes, memory_spills, memory_fills, register_spills, register_fills;
+   uint64_t static_cycles;
+};
+
+bool switch_nvk_stage_metrics(const struct switch_nvk_stage *stage,
+                              struct switch_nvk_stage_metrics *out, size_t bytes);
+VkResult switch_nvk_compile_ranked_stage(VkDevice device,
+                                         const struct switch_nvk_stage_info *info,
+                                         struct switch_nvk_stage *out);
 
 /* A stage's split as the raw path records one: its per-pixel program and its
  * prologue as stages (the prologue's header zeros, as programs.bin holds a
@@ -94,6 +136,7 @@ struct switch_nvk_split_parts {
    struct switch_nvk_split_layout layout;
    uint32_t qmd[64];
    uint32_t threshold_pixels;
+   struct switch_nvk_split_cost cost;
 };
 
 void switch_nvk_split_parts(const struct switch_nvk_split *split,
@@ -103,50 +146,6 @@ void switch_nvk_split_parts(const struct switch_nvk_split *split,
  * the plugin's copies of them are checked against these
  */
 void switch_nvk_compile_abi(uint32_t sizes[3]);
-
-/* Where a descriptor set layout's binding lives in a set's descriptor buffer */
-struct switch_nvk_set_binding {
-   uint32_t offset;
-   uint32_t stride;
-   uint32_t array_size;
-   bool immutable_samplers;
-};
-
-/* Binding `binding` of `layout`; false past its bindings */
-bool switch_nvk_set_layout_binding(VkDescriptorSetLayout layout,
-                                   uint32_t binding,
-                                   struct switch_nvk_set_binding *out);
-/* The bytes a set of `layout` binds in the root table (its fixed part) */
-uint32_t switch_nvk_set_layout_size(VkDevice device,
-                                    VkDescriptorSetLayout layout);
-/* The sampler header NVK made for `layout`'s immutable sampler at `binding`
- * and `element`; false where it has none
- */
-bool switch_nvk_immutable_sampler_header(VkDevice device,
-                                         VkDescriptorSetLayout layout,
-                                         uint32_t binding, uint32_t element,
-                                         uint32_t header[8]);
-/* The header NVK made for `sampler` */
-bool switch_nvk_sampler_header(VkDevice device, VkSampler sampler,
-                               uint32_t header[8]);
-/* The QMD NVK fills for a dispatch of compute `stage` with set 0 of
- * `set_bytes`, its program offset, grid and constant buffer addresses 0;
- * false where the stage reads another constant buffer than the root table,
- * set 0 and its shader data
- */
-bool switch_nvk_compute_qmd(VkDevice device,
-                            const struct switch_nvk_stage *stage,
-                            uint32_t set_bytes, uint32_t qmd[64]);
-/* Word 0 of the texture header of a view of `format` with `components`, as
- * a sampled or storage image (format and swizzle alone)
- */
-bool switch_nvk_view_header_word0(VkDevice device, VkFormat format,
-                                  const VkComponentMapping *components,
-                                  bool storage, uint32_t *word0);
-/* The size a buffer descriptor of `type` over `range` bytes holds */
-uint32_t switch_nvk_buffer_descriptor_size(VkDevice device,
-                                           VkDescriptorType type,
-                                           uint64_t range);
 
 #ifdef __cplusplus
 }

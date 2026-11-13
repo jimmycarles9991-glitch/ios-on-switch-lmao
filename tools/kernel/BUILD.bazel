@@ -2,6 +2,7 @@
 # them (run_tool in kernel/rules/common.bzl); nobody runs them by hand.
 load("@rules_python//python:py_binary.bzl", "py_binary")
 load("@rules_python//python:py_library.bzl", "py_library")
+load("@rules_python//python:py_test.bzl", "py_test")
 load("//bazel/lint:defs.bzl", "lint_files")
 load("//kernel/rules:common.bzl", "KERNEL_TOOLS")
 
@@ -46,4 +47,19 @@ py_binary(
     srcs = ["hdr_deps.py"],
     args = ["--buildifier=$(rootpath @buildifier//file)"],
     data = ["@buildifier//file"],
+)
+
+py_test(
+    name = "libpthread_test",
+    size = "small",
+    srcs = [
+        "libpthread.py",
+        "libpthread_test.py",
+    ],
+    tags = ["requires-darwin"],
+    deps = [
+        ":common",
+        ":kernel_names",
+        "//tools/common:macho",
+    ],
 )

@@ -52,7 +52,7 @@ proof_samples(void)
 }
 
 static bool
-copy_program(const struct nvk_physical_device *pdev,
+copy_program(const struct nv_device_info *info,
              const struct nak_shader_bin *bin, const nir_shader *nir,
              struct switch_nvk_program *out)
 {
@@ -65,7 +65,7 @@ copy_program(const struct nvk_physical_device *pdev,
    if (nir->constant_data_size == 0)
       return true;
    out->data_bytes = align(nir->constant_data_size,
-                           nvk_min_cbuf_alignment(&pdev->info));
+                           nvk_min_cbuf_alignment(info));
    out->data = calloc(1, out->data_bytes);
    if (out->data == NULL)
       return false;
@@ -74,32 +74,30 @@ copy_program(const struct nvk_physical_device *pdev,
 }
 
 static bool
-compile_program(struct nvk_device *dev, nir_shader *nir,
+compile_program(const struct switch_nvk_target *t, nir_shader *nir,
                 nir_variable_mode robust2_modes,
                 const struct nak_fs_key *fs_key,
                 struct switch_nvk_program *out)
 {
-   const struct nvk_physical_device *pdev = nvk_device_physical(dev);
    struct nak_shader_bin *bin =
-      nak_compile_shader(nir, false, pdev->nak, robust2_modes, fs_key, false);
+      nak_compile_shader(nir, false, t->nak, robust2_modes, fs_key, false);
    if (bin == NULL)
       return false;
-   const bool copied = copy_program(pdev, bin, nir, out);
+   const bool copied = copy_program(t->info, bin, nir, out);
    nak_shader_bin_destroy(bin);
    return copied;
 }
 
 static void
-fill_qmd(struct nvk_device *dev, struct switch_nvk_split *split)
+fill_qmd(const struct switch_nvk_target *t, struct switch_nvk_split *split)
 {
-   const struct nvk_physical_device *pdev = nvk_device_physical(dev);
    struct nak_qmd_info info = {
       .global_size = {1, 1, 1},
       .num_cbufs = split->prologue.cbuf_count,
    };
    for (uint32_t c = 0; c < info.num_cbufs; c++)
       info.cbufs[c] = (struct nak_qmd_cbuf){.index = c, .size = 256};
-   nak_fill_qmd(&pdev->info, &split->prologue.info, &info, split->qmd,
+   nak_fill_qmd(t->info, &split->prologue.info, &info, split->qmd,
                 sizeof(split->qmd));
 }
 
@@ -134,14 +132,12 @@ name_cbufs(const struct nvk_cbuf_map *map, struct switch_nvk_split *split)
 
    split->prologue.cbuf_count = l->prologue_cbufs;
    split->prologue.cbuf_types[SWITCH_SPLIT_PARAMS_CBUF] = SWITCH_SPLIT_CBUF_PARAMS;
-   for (uint32_t u = 0; u < l->ubo_count; u++)
-      split->prologue.cbuf_types[1 + u] = split->fs.cbuf_types[l->ubo_cbuf[u]];
    if (l->shader_data_cbuf)
       split->prologue.cbuf_types[l->shader_data_cbuf] = NVK_CBUF_TYPE_SHADER_DATA;
 }
 
 struct switch_nvk_split *
-switch_nvk_split_compile(struct nvk_device *dev, const nir_shader *fs,
+switch_nvk_split_compile(const struct switch_nvk_target *t, const nir_shader *fs,
                          const struct nvk_cbuf_map *map,
                          nir_variable_mode robust2_modes,
                          const struct nak_fs_key *fs_key,
@@ -155,7 +151,7 @@ switch_nvk_split_compile(struct nvk_device *dev, const nir_shader *fs,
    const struct switch_nvk_split_proof proof = {
       .samples = proof_samples(),
       .whole_id = whole_id,
-      .nak = nvk_device_physical(dev)->nak,
+      .nak = t->nak,
       .robust2_modes = robust2_modes,
       .fs_key = fs_key,
    };
@@ -166,18 +162,30 @@ switch_nvk_split_compile(struct nvk_device *dev, const nir_shader *fs,
    bool ok = split != NULL;
    if (ok) {
       split->layout = nir.layout;
-      ok = compile_program(dev, nir.fs, robust2_modes, fs_key, &split->fs) &&
-           compile_program(dev, nir.prologue, 0, NULL, &split->prologue);
+      ok = compile_program(t, nir.fs, robust2_modes, fs_key, &split->fs) &&
+           compile_program(t, nir.prologue, 0, NULL, &split->prologue);
    }
    ralloc_free(nir.fs);
    ralloc_free(nir.prologue);
-   if (!ok || !wins(whole, &split->fs.info)) {
+   if (!ok || !wins(whole, &split->fs.info) ||
+       split->prologue.info.num_static_cycles > UINT32_MAX) {
       switch_nvk_split_free(split);
       return NULL;
    }
    name_cbufs(map, split);
-   fill_qmd(dev, split);
+   fill_qmd(t, split);
    split->threshold_pixels = threshold_pixels(whole, split);
+   /* Fixed launch/drain costs are conservative heuristics, not device measurements. */
+   split->cost = (struct switch_nvk_split_cost) {
+      .version = 1,
+      .launch_cycles = SWITCH_SPLIT_DRAW_CYCLES,
+      .drain_cycles = SWITCH_SPLIT_DRAW_CYCLES,
+      .prologue_warp_cycles = split->prologue.info.num_static_cycles,
+      .prologue_instructions = split->prologue.info.num_instrs,
+      .saved_pixel_instructions = whole->num_instrs - split->fs.info.num_instrs,
+      .saved_pixel_cycles = MIN2(whole->num_static_cycles - split->fs.info.num_static_cycles, UINT32_MAX),
+      .frontier_values = split->layout.frontier_values,
+   };
    return split;
 }
 

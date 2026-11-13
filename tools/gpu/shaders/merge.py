@@ -4,7 +4,8 @@ usage: merge.py join --index <bucket index>... --report <bucket report>... [--re
                      [--replies <compile reply store>] --ipsw <build> --plan <plan.json> --inventory <inventory.json>
                      --out <dir>
        merge.py check --tools-manifest <MANIFEST.json> --twin <tools' libvulkan_nouveau.dylib> --base <path>... --out F
-       merge.py tree --seed <join's dir> --pack <bucket pack>... [--raw <raw pack dir>] --out <tree dir> --size F
+       merge.py tree --seed <join's dir> --pack <bucket pack>... [--raw <raw pack dir>] [--native <packed native dir>]
+                     --out <tree dir> --size F
 
 join: the seed is every bucket's cache directory laid over one another (an entry's name is what it holds, so two
 buckets' entries of one name are the same bytes), the device's driver records of the tools' NVK identity beside them,
@@ -19,9 +20,10 @@ check: refuses tools that are not the GPU bundle's (--base: its tree or files): 
 NVK's LC_UUID (nvk_twin.py gives the twin the iOS dylib's), and the bundle's Info.plist must name the tools' stack key
 (NVK, m2v, the bridge and the frontend); a seed of other tools would never be hit. A validation action: the seed does
 not wait for it.
-tree: ngpu/addons/TegraGM20BMetal.m2v-seed/shared (the join's files and packs/<NNN>) and
-ngpu/addons/TegraGM20BMetal.raw, directories 0755 and files 0644 (APFS clones of the sources), and size.json (bytes,
-files, blocks4k: what the tree takes on APFS) beside it.
+tree: ngpu/addons/TegraGM20BMetal.m2v-seed/shared (the join's files and packs/<NNN>, and the packed native seed's
+native-analysis/) and ngpu/addons/TegraGM20BMetal.raw (with the packed native seed's raw-<stack>/ in native/; of the
+packed native seed, only each index and its observed packs go: tools/gpu/seed_pack.py), directories 0755 and files
+0644 (APFS clones of the sources), and size.json (bytes, files, blocks4k: what the tree takes on APFS) beside it.
 """
 
 import argparse
@@ -37,7 +39,9 @@ import sys
 from collections import Counter
 from pathlib import Path
 
+from tools.gpu import seed_pack
 from tools.gpu.nvk_twin import lc_uuid
+from tools.gpu.shaders import replies as compiler_replies
 
 CONTENT = '529a20fd270ababa3e5ec2fe4d1674d93739ba5bcd61861674b4fb6db349af9f'
 RECORD_MAGIC = b'M2VPPLC\0'
@@ -73,30 +77,16 @@ def record_ok(data: bytes) -> bool:
     )
 
 
-def reply_ok(data: bytes) -> bool:
-    """Check a compile reply's envelope (NBCompileReplyHeader): magic, the lengths ending the file, the digest."""
-    if len(data) < REPLY_HEADER or data[:4] != REPLY_MAGIC:
-        return False
-    warnings, metallib = struct.unpack_from('<IQ', data, 4)
-    return (
-        metallib > 0
-        and REPLY_HEADER + warnings + metallib == len(data)
-        and hashlib.sha256(data[REPLY_HEADER:]).digest() == data[16:REPLY_HEADER]
-    )
+reply_ok = compiler_replies.reply_ok
 
 
-def copy_replies(store: Path | None, out: Path) -> tuple[dict[str, int], list[str]]:
-    """Copy the store's compile replies whose name and envelope hold into <out>; the counts and each kept one's line."""
-    counts, kept = dict.fromkeys(('kept', 'refused'), 0), []
-    for path in sorted(store.glob('*.reply')) if store and store.is_dir() else []:
-        data = path.read_bytes()
-        if not REPLY_NAME.match(path.name) or not reply_ok(data):
-            counts['refused'] += 1
-            continue
-        out.mkdir(parents=True, exist_ok=True)
-        (out / path.name).write_bytes(data)
-        kept.append(f'msl/{path.name}\0{hashlib.sha256(data).hexdigest()}\n')
-        counts['kept'] += 1
+def copy_replies(store: Path | None, out: Path, report: dict | None = None) -> tuple[dict[str, int], list[str]]:
+    report = report if report is not None else compiler_replies.inventory(store)
+    if store:
+        compiler_replies.copy_inventory(store, out, report)
+        compiler_replies.verify(out, report)
+    counts = {'kept': report['replies'], 'refused': len(report['refused'])}
+    kept = [f'msl/{relative}\0{digest}\n' for relative, digest in sorted(report['files'].items())]
     return counts, kept
 
 
@@ -177,12 +167,14 @@ def crawled(inventory: dict) -> dict:
 
 
 STORE_PATH = re.compile(r'^.*/(store|crawl)/root/')
+# The library as the bucket saw it, below its own directory (an older report's absolute sandbox path included).
+STORE_IN_LINE = re.compile(r'\((?:[^()\s]*/)?(?:store|crawl)/root/')
 
 
 def refusals(lines: list[str]) -> dict[str, dict]:
     """Group the tool's refusals (`<kind> <what> (<library>): <error>`) by library: a count and the first few."""
     grouped: dict[str, dict] = {}
-    for line in lines:
+    for line in (STORE_IN_LINE.sub('(/', raw) for raw in lines):
         library = line[line.find(' (') + 2 : line.find('): ')] if ' (' in line and '): ' in line else '?'
         library = STORE_PATH.sub('/', library)
         entry = grouped.setdefault(library, {'count': 0, 'first': []})
@@ -212,7 +204,10 @@ def join(args: argparse.Namespace) -> None:
     digest = hashlib.sha256()
     for relative in sorted(entries):
         digest.update(f'{relative}\0{entries[relative][0]}\n'.encode())
-    replies, kept = copy_replies(args.replies, out / 'msl')
+    reply_inventory = compiler_replies.inventory(
+        args.replies, getattr(args, 'reply_input', None), getattr(args, 'strict_replies', False)
+    )
+    replies, kept = copy_replies(args.replies, out / 'msl', reply_inventory)
     for reply in kept:
         digest.update(reply.encode())
     line = f'generated m2v-build {build[:8]} nvk {identity[12:28].hex()[:8]} content {digest.hexdigest()[:8]}'
@@ -226,6 +221,7 @@ def join(args: argparse.Namespace) -> None:
                 'crawl': crawled(json.loads(args.inventory.read_text())),
                 'device_records': device,
                 'compile_replies': replies,
+                'compiler_reply_inventory': reply_inventory,
                 'disagreeing_names': disagree,
                 'crashed': [line for r in reports for line in r.get('crashed', [])],
                 'refused': refusals([line for r in reports for line in r.get('refused', [])]),
@@ -269,6 +265,28 @@ def clone(source: Path, target: Path) -> None:
     target.chmod(0o644)
 
 
+def native_pairs(native: Path, out: Path) -> list[tuple[Path, Path]]:
+    """Return the packed native seed's staged files and where they go.
+
+    The host's manifest and coverage beside them and the derived entries' packs stay.
+    """
+    pairs = []
+    for path in sorted(native.rglob('*')):
+        relative = path.relative_to(native)
+        if not path.is_file() or len(relative.parts) < 2:
+            continue
+        top = relative.parts[0]
+        if top == 'native-analysis':
+            under = out / SEED
+        elif top.startswith('raw-'):
+            under = out / RAW / 'native'
+        else:
+            continue
+        if seed_pack.staged(native / top, relative.relative_to(top).as_posix()):
+            pairs.append((path, under / relative))
+    return pairs
+
+
 def tree(args: argparse.Namespace) -> None:
     """Lay the seed and the raw pack out under ngpu/addons, and write the size."""
     out = args.out
@@ -277,11 +295,18 @@ def tree(args: argparse.Namespace) -> None:
     pairs += [(pack, out / SEED / 'packs' / f'{number:03d}') for number, pack in enumerate(args.pack)]
     if args.raw:
         pairs += [(p, out / RAW / p.relative_to(args.raw)) for p in sorted(args.raw.rglob('*')) if p.is_file()]
+    if args.native:
+        pairs += native_pairs(args.native, out)
     for source, target in pairs:
         target.parent.mkdir(parents=True, exist_ok=True)
         clone(source, target)
     for path in [out, *(p for p in out.rglob('*') if p.is_dir())]:
         path.chmod(0o755)
+    manifest_path = out / SEED / 'MANIFEST.json'
+    if manifest_path.is_file():
+        reply_inventory = json.loads(manifest_path.read_text()).get('compiler_reply_inventory')
+        if reply_inventory is not None:
+            compiler_replies.verify(out / SEED / 'msl', reply_inventory)
     sizes = [target.stat().st_size for _, target in pairs]
     args.size.write_text(
         json.dumps({'bytes': sum(sizes), 'files': len(sizes), 'blocks4k': sum((s + 4095) // 4096 for s in sizes)})
@@ -298,6 +323,8 @@ def main() -> None:
     j.add_argument('--report', type=Path, action='append', required=True)
     j.add_argument('--records', type=Path)
     j.add_argument('--replies', type=Path)
+    j.add_argument('--reply-input', type=Path, action='append')
+    j.add_argument('--strict-replies', action='store_true')
     for name in ('plan', 'inventory', 'out'):
         j.add_argument('--' + name, type=Path, required=True)
     j.add_argument('--ipsw', required=True)
@@ -309,6 +336,7 @@ def main() -> None:
     t.add_argument('--seed', type=Path, required=True)
     t.add_argument('--pack', type=Path, action='append', required=True)
     t.add_argument('--raw', type=Path)
+    t.add_argument('--native', type=Path)
     t.add_argument('--out', type=Path, required=True)
     t.add_argument('--size', type=Path, required=True)
     args = parser.parse_args()

@@ -1,14 +1,96 @@
+load("@rules_rust//rust:defs.bzl", "rust_test")
+
 # drivers/NativeMetal on the host:
 #   limits_table_test       LimitsTable.h: the device's answers in the base class's limits table, past a field the base
 #                           class reads elsewhere (21H461's minConstantBufferAlignmentBytes)
 #   queue_priority_test     QueuePriority.h: the process's GPU priority from its Metal queues' (Core Animation's)
+#   gpu_memory_release_test GpuMemoryRelease.h: the idle release waits for the command buffers in flight and comes at the
+#                           deadline their drain sets; a release asked for (memory pressure's) runs with work in flight
 #   image_filter_link_test  ImageFilterLink.h: Core Image's filter-function link request for the system's Metal compiler
+#   native_artifact_seed_test  NativeComputeArtifactStorage.h: the process's own analyses, then the seed's packed ones
+#                           (SWITCH_SEED_TREE=<an image's ngpu/addons> with --test_env also reads back some of a built seed's)
+#   metallib_entries_test   MetallibEntries.h: a metallib's function list, which entries Metal answers as extern, and a
+#                           function's patch from its TESS tag (Xcode's bytes for it)
+#   metallib_slice_test     MetallibSlice.h: the AIR slice of a universal metallib each IPSW's Metal loads, on its own
+#                           CoreImage.metallib and QuartzCore library
+#   core_image_probe_test   the selected IPSW's Core Image libraries: the kernels Core Image asks ci_stdlib for first are
+#                           ci_filters', so a real device misses there too (NBLibrary answers that miss as Metal does)
+#   native_tess_modes_test  NativeMetalTessModes.rs: a tessellation state's SET_TESSELLATION_PARAMETERS, and its evaluation
+#                           stage's module with the control stage's modes, as the raw path's direct compile needs them
+#   journal_source_test     NativeBridgeMetalFrontend.mm: a raw-made state's journal line is written on the persist queue,
+#                           not on its creating thread
 #
 #   bazel test //drivers/NativeMetal/test:all
 load("//bazel/lint:defs.bzl", "lint_files")
 load("//bazel/testing:defs.bzl", "host_test")
 
 lint_files()
+
+rust_test(
+    name = "native_variants_test",
+    srcs = ["//drivers/NativeMetal:bridge/NativeMetalVariants.rs"],
+    edition = "2024",
+)
+
+rust_test(
+    name = "native_tess_modes_test",
+    srcs = ["//drivers/NativeMetal:bridge/NativeMetalTessModes.rs"],
+    edition = "2024",
+)
+
+host_test(
+    name = "native_artifact_cache_test",
+    srcs = [
+        "native_artifact_cache_test.cpp",
+        "//drivers/NativeMetal:NativeMetalArtifactCache.h",
+        "//kits/SwitchSeedPack:SwitchSeedPack.h",
+    ],
+    cxx_std = "c++17",
+)
+
+host_test(
+    name = "native_artifact_seed_test",
+    srcs = [
+        "native_artifact_seed_test.cpp",
+        "//drivers/NativeMetal:NativeComputeArtifactStorage.h",
+        "//drivers/NativeMetal:NativeMetalArtifactCache.h",
+        "//drivers/NativeMetal:bridge/NativeMetalComputeArtifact.h",
+        "//kits/SwitchSeedPack:SwitchSeedPack.h",
+        "//kits/SwitchSeedPack:SwitchSeedPackWriter.h",
+    ],
+    cxx_std = "c++17",
+)
+
+host_test(
+    name = "core_image_probe_test",
+    srcs = [
+        "core_image_probe_test.cpp",
+        "//drivers/NativeMetal:MetallibEntries.h",
+    ],
+    cxx_std = "c++17",
+    data = [
+        "@ipsw//:crawl_qc",
+        "@ipsw//:crawl_tree",
+    ],
+    env = {"SWITCH_QUARTZCORE": "$(rootpath @ipsw//:crawl_qc)"},
+    deps = ["//drivers/NativeMetal/abi:metal_abi"],
+)
+
+host_test(
+    name = "metallib_slice_test",
+    srcs = [
+        "metallib_slice_test.cpp",
+        "//drivers/NativeMetal:MetallibEntries.h",
+        "//drivers/NativeMetal:MetallibSlice.h",
+    ],
+    cxx_std = "c++17",
+    data = [
+        "@ipsw//:crawl_qc",
+        "@ipsw//:crawl_tree",
+    ],
+    env = {"SWITCH_QUARTZCORE": "$(rootpath @ipsw//:crawl_qc)"},
+    deps = ["//drivers/NativeMetal/abi:metal_abi"],
+)
 
 host_test(
     name = "limits_table_test",
@@ -30,10 +112,81 @@ host_test(
 )
 
 host_test(
+    name = "gpu_memory_release_test",
+    srcs = [
+        "gpu_memory_release_test.cpp",
+        "//drivers/NativeMetal:GpuMemoryRelease.h",
+        "//drivers/NativeMetal:bridge/NativeMetalObjects.h",
+    ],
+    cxx_std = "c++17",
+)
+
+host_test(
     name = "image_filter_link_test",
     srcs = [
         "image_filter_link_test.cpp",
         "//drivers/NativeMetal:ImageFilterLink.h",
     ],
     cxx_std = "c++17",
+)
+
+host_test(
+    name = "metallib_entries_test",
+    srcs = [
+        "metallib_entries_test.cpp",
+        "//drivers/NativeMetal:MetallibEntries.h",
+    ],
+    cxx_std = "c++17",
+)
+
+[host_test(
+    name = name,
+    srcs = [
+        "async_pipelines_test.cpp",
+        "//drivers/NativeMetal:AsyncPipelines.h",
+    ],
+    copts = [
+        "-x",
+        "objective-c++",
+        "-fobjc-arc",
+    ] + defines,
+    cxx_std = "c++17",
+    linkopts = [
+        "-framework",
+        "Foundation",
+    ],
+) for name, defines in [
+    ("async_pipelines_test", []),
+    (
+        "async_pipelines_release_test",
+        ["-DSWITCH_DEBUG=0"],
+    ),
+]]
+
+host_test(
+    name = "switch_compile_reply_test",
+    srcs = [
+        "switch_compile_reply_test.cpp",
+        "//drivers/NativeMetal:SwitchCompileReply.h",
+    ],
+    copts = [
+        "-x",
+        "objective-c++",
+        "-fobjc-arc",
+        "-Wno-deprecated-declarations",
+    ],
+    cxx_std = "c++17",
+    linkopts = [
+        "-framework",
+        "Foundation",
+    ],
+)
+
+host_test(
+    name = "journal_source_test",
+    srcs = ["journal_source_test.cpp"],
+    data = [
+        "//drivers/NativeMetal:NativeBridgeMetalFrontend.mm",
+        "//drivers/TegraGM20BMetal:raw/runtime/RawMetalStates.mm",
+    ],
 )

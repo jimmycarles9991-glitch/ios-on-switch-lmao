@@ -105,6 +105,17 @@ gm20b_gr_init_gpc_mmu(struct gf100_gr *gr)
 	nvkm_wr32(device, 0x4188ac, nvkm_rd32(device, 0x100800));
 }
 
+/* nvgpu's gr_gm20b_init_fs_state: ZROP and CROP count the L2 slices (num_active_ltcs, 2 on the X1), written whole;
+ * gk104's helper gives them the FBP count (1) and keeps sw_nonctx's 0x30 above it. */
+static void
+gm20b_gr_init_rop_active_ltcs(struct gf100_gr *gr)
+{
+	struct nvkm_device *device = gr->base.engine.subdev.device;
+	const u32 ltc_count = nvkm_rd32(device, 0x12006c);
+	nvkm_wr32(device, 0x408850, ltc_count); /* zrop */
+	nvkm_wr32(device, 0x408958, ltc_count); /* crop */
+}
+
 static void
 gm20b_gr_set_hww_esr_report_mask(struct gf100_gr *gr)
 {
@@ -120,7 +131,7 @@ gm20b_gr = {
 	.init = gk20a_gr_init,
 	.init_zcull = gf117_gr_init_zcull,
 	.init_gpc_mmu = gm20b_gr_init_gpc_mmu,
-	.init_rop_active_fbps = gk104_gr_init_rop_active_fbps,
+	.init_rop_active_fbps = gm20b_gr_init_rop_active_ltcs,
 	.trap_mp = gf100_gr_trap_mp,
 	.set_hww_esr_report_mask = gm20b_gr_set_hww_esr_report_mask,
 	.fecs.reset = gf100_gr_fecs_reset,

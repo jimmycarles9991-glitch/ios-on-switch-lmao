@@ -169,7 +169,13 @@ def host_test(
         # libc++'s container annotations then disagree between the two copies of a std::vector function the linker
         # keeps, and ASan reports an overflow in GoogleTest's own test registration (seen under --config=release).
         # Every other ASan check stays on; the code under test is kernel C/C++ without std containers.
-        kwargs["env"] = dict({"ASAN_OPTIONS": "detect_container_overflow=0"}, **kwargs.get("env", {}))
+        # Driver and kit code also gets ASan's stack-use-after-return check: a pointer kept into a frame that returned
+        # (a use array an ownership transaction keeps past its caller's return) faults in the host test instead of
+        # reading whatever the stack holds by then.
+        options = "detect_container_overflow=0"
+        if native.package_name().startswith(("drivers/", "kits/")):
+            options += ":detect_stack_use_after_return=1"
+        kwargs["env"] = dict({"ASAN_OPTIONS": options}, **kwargs.get("env", {}))
     if debug_only:
         kwargs["target_compatible_with"] = kwargs.get("target_compatible_with", []) + select({
             Label("//bazel:release"): ["@platforms//:incompatible"],

@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: BSD-2-Clause-Patent
 #include "TegraDisplayColor.h"
+#include "EDRDisplayFactor.h"
 #include <string.h>
 
 using namespace switch_color;
@@ -33,7 +34,7 @@ static void logMatrix(const char *call, uint32_t location, const Matrix &m)
           v[2], v[3], v[4], v[5], v[6], v[7], v[8]);
 }
 
-// The first CSCs those requests program, signed, 256 being one, KRR KGR KBR (red out) first, with the two 16.16 scales
+// The first CSCs those requests program, signed, 256 being one, KRR KGR KBR (red out) first, with the three 16.16 scales
 // folded into them: what the panel's channels get.
 static void logCsc(const Tables &tables, const Inputs &in)
 {
@@ -46,8 +47,9 @@ static void logCsc(const Tables &tables, const Inputs &in)
         const int word = tables.csc[i];
         v[i] = word >= 0x200 ? word - 0x400 : word;
     }
-    IOLog("SwitchDisplay: colour CSC: %d %d %d / %d %d %d / %d %d %d (correction %#x, scale %#x%s)\n", v[0], v[1], v[2],
-          v[3], v[4], v[5], v[6], v[7], v[8], in.correction, in.accessibilityScale, in.blank ? ", blank" : "");
+    IOLog("SwitchDisplay: colour CSC: %d %d %d / %d %d %d / %d %d %d (correction %#x, scale %#x, edr %#x%s)\n", v[0],
+          v[1], v[2], v[3], v[4], v[5], v[6], v[7], v[8], in.correction, in.accessibilityScale, in.edrScale,
+          in.blank ? ", blank" : "");
 }
 #endif
 
@@ -157,25 +159,29 @@ static uint32_t gammaWord(const void *table, unsigned index)
     return word;
 }
 
-// LUT2 is one table for all three channels: a table whose channels differ cannot be shown.
+// LUT2 is one table for all three channels; a table whose channels differ goes into the windows' palettes instead.
 IOReturn TegraDisplayColor::setGammaTable(const void *table)
 {
     if (!table)
         return kIOReturnBadArgument;
-    for (unsigned point = 0; point < kGammaPoints; ++point) {
-        const uint32_t red = gammaWord(table, point);
-        if (red != gammaWord(table, kGammaPoints + point) || red != gammaWord(table, 2 * kGammaPoints + point))
-            return kIOReturnUnsupported;
-    }
+    const bool perChannel = switch_color::channelsDiffer(table);
     uint8_t curve[256];
-    for (unsigned i = 0; i < 256; ++i) {
-        const uint32_t word = gammaWord(table, i);
-        const uint32_t value = (word > kGammaMax ? kGammaMax : word) + 2;
-        curve[i] = static_cast<uint8_t>(value >> 2 > 255 ? 255 : value >> 2);
+    uint32_t words[switch_color::kPaletteWords];
+    if (perChannel) {
+        identityGamma(curve);
+        switch_color::paletteOf(table, words);
+    } else {
+        for (unsigned i = 0; i < 256; ++i)
+            curve[i] = switch_color::gammaByte(gammaWord(table, i));
     }
     const IOReturn status = change(lock, generation, [&] {
         memcpy(gammaTable, table, sizeof(gammaTable));
         memcpy(inputs.gamma, curve, sizeof(curve));
+        if (perChannel)
+            memcpy(palette, words, sizeof(palette));
+        paletteDirty = perChannel;
+        paletteShown = paletteShown && perChannel;
+        paletteOn = perChannel;
         return kIOReturnSuccess;
     });
     commit();
@@ -309,6 +315,19 @@ IOReturn TegraDisplayColor::setAccessibilityScale(uint32_t scale)
     return status;
 }
 
+void TegraDisplayColor::setEdrFactor(float factor)
+{
+    const uint32_t scale = switch_edr_display_scale(factor);
+    const IOReturn status = change(lock, generation, [&] {
+        if (inputs.edrScale == scale)
+            return kIOReturnNotReady;
+        inputs.edrScale = scale;
+        return kIOReturnSuccess;
+    });
+    if (status == kIOReturnSuccess)
+        commit();
+}
+
 void TegraDisplayColor::writeTables(const Tables &tables, const Tables *written)
 {
     for (unsigned i = 0; i < kLut1Entries; ++i) {
@@ -359,8 +378,29 @@ void TegraDisplayColor::frameEndFilter()
         }
         if (write != Write::kNothing)
             active = pending;
+        if (paletteDirty && inBlank()) {
+            writePalettes();
+            paletteDirty = false;
+            paletteShown = paletteOn;
+        }
     }
     IOSimpleLockUnlock(lock);
+}
+
+void TegraDisplayColor::writePalettes()
+{
+    for (const uint32_t base : switch_color::kPaletteBase) {
+        for (uint32_t i = 0; i < switch_color::kPaletteWords; ++i)
+            dc[base + i] = palette[i];
+    }
+}
+
+uint32_t TegraDisplayColor::windowOptions()
+{
+    const IOInterruptState state = IOSimpleLockLockDisableInterrupt(lock);
+    const uint32_t options = paletteOn && paletteShown ? switch_color::kCpEnable : 0;
+    IOSimpleLockUnlockEnableInterrupt(lock, state);
+    return options;
 }
 
 // mayRequest false: a window A request is out, and the flip, rotation and probe checks read GENERAL_ACT_REQ as part of
@@ -403,6 +443,11 @@ void TegraDisplayColor::restoreAfterPowerUp()
 {
     const IOInterruptState state = IOSimpleLockLockDisableInterrupt(lock);
     sequence = Sequence();
+    if (dc && paletteOn) {
+        writePalettes();
+        paletteDirty = false;
+        paletteShown = true;
+    }
     if (dc && pending.enabled) {
         writeTables(pending, nullptr);
         active = pending;

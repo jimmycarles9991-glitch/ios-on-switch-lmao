@@ -5,6 +5,8 @@
 //! `llvm-as` assembles the owned fixtures; a missing tool skips a test visibly. SPIR-V is checked
 //! with L3 (`spirv-val` under the profile, requirements ⊆ profile) when `spirv-val` is present.
 
+mod native;
+
 use std::path::Path;
 
 use crate::air::container::sha256;

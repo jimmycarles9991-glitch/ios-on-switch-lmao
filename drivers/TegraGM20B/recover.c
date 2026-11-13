@@ -14,18 +14,17 @@
 
 /* PFIFO_ENG_TIMEOUT (nvgpu hw_fifo_gm20b.h fifo_eng_timeout_r): nouveau leaves it as reset, and with it off a context
  * switch that never completes stalls every channel with no interrupt at all. Its period counts PTIMER microseconds, and
- * PTIMER runs at 19.2/31.25 of real time on this Tegra (gpu.c "stats"; nvgpu scales it the same way, scale_ptimer). The
- * period is a detection tick, not a limit: a graphics context saves only at a wait-for-idle, so a switch waits for the
- * work in flight, and the hardware raises SCHED_ERROR CTXSW_TIMEOUT again each period the switch stays pending (nvgpu
- * gk20a_fifo_check_ch_ctxsw_timeout adds up these ticks). A tick recovers the context only once its channel is stuck by
- * gpu.c's rule (tgm_ctxsw_decide: nothing completed for TGM_STUCK_NS), so a long but finite drain, as backboardd's m2v
- * passes of 144 ms, two a frame, is waited out. */
+ * PTIMER runs at 19.2/31.25 of real time on this Tegra (gpu_stats.c "stats"; nvgpu scales it the same way, scale_ptimer),
+ * and its period is nvgpu's (GRFIFO_TIMEOUT_CHECK_PERIOD_US). The period is a detection tick, not a limit: a graphics
+ * context saves only at a wait-for-idle, so a switch waits for the work in flight, and the hardware raises SCHED_ERROR
+ * CTXSW_TIMEOUT again each period the switch stays pending (nvgpu gk20a_fifo_check_ch_ctxsw_timeout adds up these ticks).
+ * A tick recovers the context only once its channel is stuck by gpu_hang.c's rule (tgm_ctxsw_decide): at the first tick
+ * when it has nothing pending or the engine is a copy engine, after TGM_STUCK_NS with nothing completed on GR, so a long
+ * but finite GR drain is waited out. */
 #define ENG_TIMEOUT 0x002a0c
 #define ENG_TIMEOUT_DETECTION 0x80000000
-#define CTXSW_TIMEOUT_US 250000
+#define CTXSW_TIMEOUT_US 100000
 #define PTIMER_US(us) ((us) * 1920u / 3125u)
-/* written 1 to clear (gk104_runl_fault_clear); a runlist's bit stops its scheduling */
-#define ERROR_SCHED_DISABLE 0x00262c
 #define PFIFO_INTR_0 0x002100
 #define PFIFO_INTR_0_BIND_ERROR 0x00000001
 #define PFIFO_INTR_0_SCHED_ERROR 0x00000100
@@ -46,7 +45,8 @@ static struct {
 	void *work;
 	u32 engm;   /* engines whose switch timed out since the work last ran (atomic) */
 	u32 resume; /* a scheduler error came since the work last ran (atomic) */
-	u32 waited, recovered, reset;
+	u32 waited, recovered, redone;
+	struct nvkm_engn_func engn, engn_ce; /* nvkm's, the context decode replaced (engn_cxid) */
 } ctxsw;
 
 struct nvkm_fifo_func *tgm_fifo_func(struct nvkm_fifo *fifo)
@@ -58,7 +58,7 @@ struct nvkm_fifo_func *tgm_fifo_func(struct nvkm_fifo *fifo)
 	return &ctxsw.func;
 }
 
-/* From nvkm's interrupt pass, which holds its interrupt spinlock: gpu.c's rule needs its channel list's mutex, so the
+/* From nvkm's interrupt pass, which holds its interrupt spinlock: gpu_hang.c's rule needs its channel list's mutex, so the
  * decision runs in ctxsw_work. */
 static void ctxsw_tick(struct nvkm_fifo *fifo, u32 engm)
 {
@@ -69,6 +69,7 @@ static void ctxsw_tick(struct nvkm_fifo *fifo, u32 engm)
 
 static u32 engines_switching(struct nvkm_fifo *fifo)
 {
+	struct nvkm_device *device = fifo->engine.subdev.device;
 	struct nvkm_runl *runl = NULL;
 	struct nvkm_engn *engn = NULL;
 	u32 engm = 0;
@@ -77,18 +78,44 @@ static u32 engines_switching(struct nvkm_fifo *fifo)
 	{
 		/* nouveau's runlist walk takes each engine by container_of. */
 		/* NOLINTNEXTLINE(clang-analyzer-security.ArrayBound) */
-		nvkm_runl_foreach_engn_cond(engn, runl, engn->func->chsw)
+		nvkm_runl_foreach_engn_cond(engn, runl, engn->func->cxid && engn->fault >= 0)
 		{
-			if (engn->fault >= 0 && engn->func->chsw(engn))
+			if (tgm_engine_switch_pending(
+				    nvkm_rd32(device, PFIFO_ENG_STATUS(engn->id))))
 				engm |= BIT((u32)engn->id);
 		}
 	}
 	return engm;
 }
 
+/* nvkm's engine context decode replaced by NVIDIA's (tgm_engine_chid): nvkm_runl_rc resets an engine for a channel
+ * group only while that group's context is on it, never because it was the last one before a load. */
+static int engn_cxid(struct nvkm_engn *engn, bool *cgid)
+{
+	struct nvkm_device *device = engn->runl->fifo->engine.subdev.device;
+	const u32 status = nvkm_rd32(device, PFIFO_ENG_STATUS(engn->id));
+	const int switching = PFIFO_ENG_CTX_STATUS(status) == PFIFO_ENG_CTX_SWITCH;
+	int tsg = 0;
+	const int id =
+		tgm_engine_chid(status, switching && nvkm_engine_chsw_load(engn->engine), &tsg);
+
+	*cgid = tsg != 0;
+	return id < 0 ? -ENODEV : id;
+}
+
+static const struct nvkm_engn_func *engn_func(struct nvkm_engn_func *copy,
+					      const struct nvkm_engn_func *nvkm)
+{
+	if (!nvkm || !nvkm->cxid)
+		return nvkm;
+	*copy = *nvkm;
+	copy->cxid = engn_cxid;
+	return copy;
+}
+
 /* Every SCHED_ERROR code is handled as nvgpu's gk20a_fifo_handle_sched_error handles it: the engines busy mid-switch
  * get a context-switch timeout's decision, and with none there is nothing to recover. nvkm's own handler names only
- * CTXSW_TIMEOUT and does nothing for the rest, and a report naming no channel would be fatal to gpu.c. */
+ * CTXSW_TIMEOUT and does nothing for the rest, and a report naming no channel would be fatal to gpu_hang.c. */
 static void sched_error(struct nvkm_device *device)
 {
 	u32 code = nvkm_rd32(device, PFIFO_INTR_SCHED_ERROR) & 0xff;
@@ -141,12 +168,12 @@ static bool runq_intr(struct nvkm_runq *runq, struct nvkm_runl *runl)
 	u32 intr1 = nvkm_rd32(device, PBDMA_INTR_1(runq->id)) &
 		    nvkm_rd32(device, PBDMA_INTR_EN_1(runq->id));
 
-	if (intr0 & TGM_PBDMA_ENG_RESET) {
-		nvkm_wr32(device, PBDMA_INTR_0(runq->id), TGM_PBDMA_ENG_RESET);
-		nvxnu_log("tegra-gm20b: PBDMA%d was on channel %u when a recovery reset its engine "
-			  "(ENG_RESET): cleared\n",
-			  runq->id, PBDMA_CHID(nvkm_rd32(device, PBDMA_CHANNEL(runq->id))));
+	if (intr0 & TGM_PBDMA_INTR_ACQUIRE) {
+		tgm_acquire_intr(device, runq->id);
+		nvkm_wr32(device, PBDMA_INTR_0(runq->id), TGM_PBDMA_INTR_ACQUIRE);
 	}
+	if (intr0 & TGM_PBDMA_ENG_RESET)
+		tgm_eng_reset_intr(device, runq);
 	if (!tgm_pbdma_for_nvkm(intr0) && !intr1)
 		return true;
 	return ctxsw.runq_nvkm->intr(runq, runl);
@@ -177,21 +204,6 @@ static void sched_disable_clear(struct nvkm_device *device, u32 runlm)
 	}
 }
 
-/* As nvkm_runl_rc resets an engine: runlist blocked, the engine reset, exception state cleared, runlist let go. runl->mutex
- * held, and the engine found holding hardware channel id under it (nvkm's own recovery may have reset it meanwhile). */
-static void engine_reset_locked(struct nvkm_runl *runl, struct nvkm_engn *engn, int id,
-				const char *why)
-{
-	nvxnu_log("tegra-gm20b: engine %d %s channel %d: reset\n", engn->id, why, id);
-	nvkm_runl_block(runl);
-	WARN_ON(nvkm_engine_reset(engn->engine));
-	if (runl->func->fault_clear)
-		runl->func->fault_clear(runl);
-	nvkm_runl_allow(runl);
-	if (TGM_STATS)
-		__atomic_fetch_add(&ctxsw.reset, 1, __ATOMIC_RELAXED);
-}
-
 /* nvkm unbinds a channel after its preempt even when the preempt timed out (nvkm_chan_remove does not look at
  * nvkm_runl_preempt_wait's answer), and an engine still on the channel then raises BIND_ERROR UNBIND_WHILE_RUNNING. As
  * nvgpu's teardown recovers a channel its preempt could not take off an engine, that engine is reset before the unbind. */
@@ -207,11 +219,44 @@ static void chan_unbind(struct nvkm_chan *chan)
 	nvkm_runl_foreach_engn_cond(engn, runl, engn->func->cxid)
 	{
 		if (tgm_engine_holds(nvkm_rd32(device, PFIFO_ENG_STATUS(engn->id)), chan->id))
-			engine_reset_locked(runl, engn, chan->id, "still on unbound");
+			tgm_engine_reset_locked(runl, engn, chan->id, "still on unbound");
 	}
 	mutex_unlock(&runl->mutex);
 	ctxsw.chan_nvkm->unbind(chan);
 }
+
+#if TGM_STATS
+int tgm_recover_copy_reset(int chid, void (*mark)(void), uint32_t *status)
+{
+	struct nvkm_device *device = ctxsw.fifo->engine.subdev.device;
+	struct nvkm_runl *runl = NULL;
+	struct nvkm_engn *engn = NULL;
+	int reset = 0;
+
+	nvkm_runl_foreach(runl, ctxsw.fifo)
+	{
+		/* nouveau's runlist walk takes each engine by container_of. */
+		/* NOLINTNEXTLINE(clang-analyzer-security.ArrayBound) */
+		nvkm_runl_foreach_engn_cond(
+			engn, runl, engn->func->cxid && engn->engine->subdev.type == NVKM_ENGINE_CE)
+		{
+			*status = nvkm_rd32(device, PFIFO_ENG_STATUS(engn->id));
+			if (!tgm_engine_holds(*status, chid))
+				continue;
+			mark();
+			mutex_lock(&runl->mutex);
+			if (tgm_engine_holds(nvkm_rd32(device, PFIFO_ENG_STATUS(engn->id)), chid)) {
+				tgm_engine_reset_locked(runl, engn, chid,
+							"busy (HW Test) with kernel");
+				__atomic_fetch_add(&ctxsw.redone, 1, __ATOMIC_RELAXED);
+				reset = 1;
+			}
+			mutex_unlock(&runl->mutex);
+		}
+	}
+	return reset;
+}
+#endif
 
 static void ctxsw_work(void *arg)
 {
@@ -224,6 +269,7 @@ static void ctxsw_work(void *arg)
 	struct nvkm_engn *engn = NULL;
 	enum tgm_ctxsw verdict = TGM_CTXSW_WAIT;
 	bool cgid = false;
+	u32 status = 0;
 	int id = 0;
 
 	(void)arg;
@@ -231,27 +277,51 @@ static void ctxsw_work(void *arg)
 	{
 		/* nouveau's runlist walk takes each engine by container_of. */
 		/* NOLINTNEXTLINE(clang-analyzer-security.ArrayBound) */
-		nvkm_runl_foreach_engn_cond(engn, runl, engm & BIT((u32)engn->id))
+		nvkm_runl_foreach_engn_cond(engn, runl,
+					    engn->func->cxid && (engm & BIT((u32)engn->id)))
 		{
-			if (!engn->func->chsw || !engn->func->chsw(engn))
+			status = nvkm_rd32(device, PFIFO_ENG_STATUS(engn->id));
+			if (!tgm_engine_switch_pending(status))
 				continue; /* the switch completed meanwhile */
 			id = engn->func->cxid(engn, &cgid);
 			if (id < 0)
 				continue;
-			verdict = cgid ? TGM_CTXSW_KILL : tgm_ctxsw_decide(id);
+			if (cgid)
+				verdict = TGM_CTXSW_KILL;
+			else if (tgm_engine_load_stuck(status))
+				verdict = tgm_ctxsw_load_decide(id, engn->engine->subdev.name);
+			else
+				verdict = tgm_ctxsw_decide(id, engn->engine->subdev.name,
+							   engn->engine->subdev.type ==
+								   NVKM_ENGINE_GR);
 			switch (verdict) {
 			case TGM_CTXSW_KILL:
 				stuck |= BIT((u32)engn->id);
 				resume &= ~BIT((u32)runl->id);
 				break;
 			case TGM_CTXSW_RESET:
+			case TGM_CTXSW_REDO:
 				mutex_lock(&runl->mutex);
 				if (tgm_engine_holds(nvkm_rd32(device, PFIFO_ENG_STATUS(engn->id)),
 						     id)) {
-					engine_reset_locked(
+					tgm_engine_reset_locked(
 						runl, engn, id,
-						"stuck switching the context of killed or "
-						"unknown");
+						verdict == TGM_CTXSW_REDO
+							? "stuck switching the context of kernel"
+							: "stuck switching the context of killed, "
+							  "unknown or idle kernel");
+				}
+				mutex_unlock(&runl->mutex);
+				if (verdict == TGM_CTXSW_REDO && TGM_STATS)
+					__atomic_fetch_add(&ctxsw.redone, 1, __ATOMIC_RELAXED);
+				break;
+			case TGM_CTXSW_RELOAD:
+				mutex_lock(&runl->mutex);
+				status = nvkm_rd32(device, PFIFO_ENG_STATUS(engn->id));
+				if (tgm_engine_load_stuck(status) && tgm_engine_holds(status, id)) {
+					tgm_engine_reset_locked(
+						runl, engn, id,
+						"stuck loading the context of live");
 				}
 				mutex_unlock(&runl->mutex);
 				break;
@@ -279,7 +349,10 @@ void tgm_recover_init(struct nvkm_device *device)
 {
 	struct nvkm_fifo_func *func = tgm_fifo_func(device->fifo);
 	struct nvkm_inth *inth = &device->fifo->engine.subdev.inth;
+	const struct nvkm_engn_func *gr = NULL, *ce = NULL;
 	struct nvkm_runq *runq = NULL;
+	struct nvkm_runl *runl = NULL;
+	struct nvkm_engn *engn = NULL;
 
 	if (ctxsw.work)
 		return;
@@ -294,6 +367,7 @@ void tgm_recover_init(struct nvkm_device *device)
 	ctxsw.work = nvxnu_work_alloc(ctxsw_work, NULL);
 	if (!ctxsw.work)
 		return;
+	tgm_acquire_init();
 	ctxsw.nvkm = func->intr_ctxsw_timeout;
 	func->intr_ctxsw_timeout = ctxsw_tick;
 	ctxsw.fifo_intr = func->intr;
@@ -313,15 +387,33 @@ void tgm_recover_init(struct nvkm_device *device)
 	ctxsw.chan = *func->chan.func;
 	ctxsw.chan.unbind = chan_unbind;
 	func->chan.func = &ctxsw.chan;
+	gr = func->engn;
+	ce = func->engn_ce;
+	func->engn = engn_func(&ctxsw.engn, gr);
+	func->engn_ce = engn_func(&ctxsw.engn_ce, ce);
+	nvkm_runl_foreach(runl, device->fifo)
+	{
+		/* nouveau's runlist walk takes each engine by container_of. */
+		/* NOLINTNEXTLINE(clang-analyzer-security.ArrayBound) */
+		nvkm_runl_foreach_engn(engn, runl)
+		{
+			if (engn->func == gr)
+				engn->func = func->engn;
+			else if (engn->func == ce)
+				engn->func = func->engn_ce;
+		}
+	}
 }
 
 void tgm_recover_suspend(void)
 {
+	tgm_promise_suspend();
 	if (!ctxsw.work)
 		return;
 	nvxnu_work_cancel_wait(ctxsw.work);
 	__atomic_store_n(&ctxsw.engm, 0, __ATOMIC_RELAXED);
 	__atomic_store_n(&ctxsw.resume, 0, __ATOMIC_RELAXED);
+	tgm_acquire_suspend();
 }
 
 void tgm_recover_arm(struct nvkm_device *device)
@@ -354,10 +446,12 @@ void tgm_recover_fault(struct nvkm_device *device, int chid)
 void tgm_recover_stats(char *buf, unsigned int len)
 {
 	scnprintf(buf, len,
-		  "%u context-switch timeout ticks waited out, %u recovered, %u engines reset",
+		  "%u context-switch timeout ticks waited out, %u recovered, %u engines reset, "
+		  "%u kernel works redone",
 		  __atomic_exchange_n(&ctxsw.waited, 0, __ATOMIC_RELAXED),
 		  __atomic_exchange_n(&ctxsw.recovered, 0, __ATOMIC_RELAXED),
-		  __atomic_exchange_n(&ctxsw.reset, 0, __ATOMIC_RELAXED));
+		  tgm_engine_resets_take(),
+		  __atomic_exchange_n(&ctxsw.redone, 0, __ATOMIC_RELAXED));
 }
 
 static int add(int *chids, int n, int max, int chid)
@@ -388,7 +482,8 @@ int tgm_recover_suspects(struct nvkm_device *device, int *chids, int max)
 		/* NOLINTNEXTLINE(clang-analyzer-security.ArrayBound) */
 		nvkm_runl_foreach_engn_cond(engn, runl, engn->func->cxid)
 		{
-			if (!(nvkm_rd32(device, PFIFO_ENG_STATUS(engn->id)) & PFIFO_ENG_BUSY))
+			if (!(nvkm_rd32(device, PFIFO_ENG_STATUS(engn->id)) &
+			      (PFIFO_ENG_BUSY | PFIFO_ENG_CHSW)))
 				continue;
 			id = engn->func->cxid(engn, &cgid);
 			if (id >= 0 && !cgid)
@@ -399,7 +494,9 @@ int tgm_recover_suspects(struct nvkm_device *device, int *chids, int max)
 	{
 		for (i = 0; i < runl->runq_nr; i++) {
 			if (!runl->runq[i] ||
-			    !(nvkm_rd32(device, PBDMA_STATUS(runl->runq[i]->id)) & PBDMA_BUSY))
+			    !(nvkm_rd32(device, PBDMA_STATUS(runl->runq[i]->id)) & PBDMA_BUSY) ||
+			    tgm_pbdma_acquiring(nvkm_rd32(device, PBDMA_METHOD0(runl->runq[i]->id)),
+						nvkm_rd32(device, PBDMA_DATA0(runl->runq[i]->id))))
 				continue;
 			n = add(chids, n, max,
 				PBDMA_CHID(nvkm_rd32(device, PBDMA_CHANNEL(runl->runq[i]->id))));

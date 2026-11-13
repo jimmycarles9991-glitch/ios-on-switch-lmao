@@ -66,11 +66,24 @@ size, no async IOKit calls (completions travel on the notification port, §5).
 | 3 | 0x58 | startEncoder | kIOReturnUnsupported |
 | 4 | 0x1000 | startEncoderExt | kIOReturnUnsupported |
 | 5 | 0x1000 | startDecoderExt 0x46890 | decode (§4); a crop rectangle is refused |
-| 6, 7 | 0xda0 | 2024 encode/decode | kIOReturnUnsupported (no caller found) |
+| 6 | 0xda0 | 2024 encode | kIOReturnUnsupported |
+| 7 | 0xda0 | 2024 decode | decode (§4): bytes 0..0x57 as selector 1, crop as selector 5, sync or async by +0x30 |
 | 8, 9 | 0 | power on/off, entitlement com.apple.applejpegdriver.poweron else 0xe00002bc | the same check; a no-op |
 
 Callers seen [V]: decode sel 1 (CMPhoto 0x1aaf45c78, JPEGH1 0x2011216e0), decode sel 5 (CMPhoto 0x1aaeed13c), encode
 sel 3 (CMPhoto 0x1aaf45f30, JPEGH1enc 0x215db2f00), encode sel 4 (CMPhoto 0x1aaeed260).
+
+**24B119 (iOS 27) [V].** Every synchronous CMPhoto decode is selector 7 (JPEGDecompressSurfaceHelper 0x1a6b80c9c ->
+decodeJPEG2024 0x1a6b80d90), and so are JPEGH1.videodecoder's ('jpeg' sync, 'sjpg' async; 0x2c4988d48). Selector 5 has
+no caller; selector 1 survives only on CMPhoto's async decode session (EnableAsyncDecode). Callers zero the 0xda0 bytes
+and fill 0x00..0x57 as selector 1 (crop at 0x54..0x6c as selector 5); 0x70..0xc83 (strip index, entropy offset, a marker
+blob) are written only on the multi-core strip path, which needs AppleJPEGNumCores >= 2. Apple's kext (startDecoder2024
+0xfffffff008b06178) writes back +0x4c/+0x50 (the region) and +0xc94 (microseconds); no caller reads the output. JPEGH1
+sends the destination's width and height as the picture's, which this driver refuses as BadArgument when they differ
+from the file's (that frame then decodes in software). Properties, formats and the per-image fallback are as on 21H461;
+nothing chooses the selector. Debug kernels answer HW Test's route question on selector 7 itself: +0xcac = 0x5050 with
+no source surface returns, at out+0, the decodes NVJPG finished for the calling process and at out+8 the output formats
+they wrote (bit n: TEGRA_NVJPG_OUT_n).
 
 ## 4. The decode request
 
@@ -196,7 +209,7 @@ Colour: NVJPG converts with JFIF's full-range BT.601 (T.871), programmed in its 
 | interface | nvjpg_dec_drv_pic_setup_s 0xb2c bytes, nvjpg_dec_status 0x20, cle7d0.h methods | nvidia/SOURCE [V]; works per averne's FFmpeg/oss-nvjpg [I]; on this unit [T] |
 | table order | huffTab[0] DC, [1] AC; codeNum = BITS, symbol = HUFFVAL, min codes 0; quant zig-zag | FFmpeg nvtegra_mjpeg.c, oss-nvjpg [I]; [T] |
 | outputs | NV12 (memory mode 0), planar, RGB (memory mode 3), downscale 1/2..1/8, pitch linear, strides 64 B | nvjpg_drv.h comments [I]; [T] |
-| clock | PLLP 408 MHz | below the T210B01 DVFS floor, as TegraNVDEC [I] |
+| clock | PLLC2 at the 637 mV point of this SoC process (422.4 MHz for process 1), else PLLP 408 MHz | tegra210b01-core-dvfs.c "nvjpg" row, kits/SwitchCAR/SwitchEngineClock.h [I] |
 
 Stages: J0 host1x + buffers, J1 SMMU (ASID 125 through TegraSMMU; VIC 127, display 126) + power + falcon, J2
 IMMEDIATE/OP_DONE by interrupt, J3 publish. Before J3 every failure is one line and the engine is parked (reset, clock
@@ -230,8 +243,9 @@ Pull logs read-only after boot (`idevicesyslog -u <udid> archive boot.tar --age-
 also in the boot console).
 
 1. **Bring-up**, in order, one line each, within a few seconds of NVDEC's N3 line:
-   `TegraNVJPG: J0 ok firmware 16640 bytes ...`, `J1 ok ASID 125 ... partition 26 ... 408 MHz, falcon started (OS code
-   0+0x300 data 0x3d00+0x200, 13 apps)`, `J2 ok host interface and falcon incremented syncpoint ...`,
+   `TegraNVJPG: J0 ok firmware 16640 bytes ...`,
+   `J1 ok ASID 125 ... partition 26 ... 422400 kHz, falcon started (OS code 0+0x300 data 0x3d00+0x200, 13 apps)`,
+   `J2 ok host interface and falcon incremented syncpoint ...`,
    `J3 ok AppleJPEGDriver published (... interchange formats 1, ...)`.
    - A `J<n> FAIL` line ends the bring-up: nothing is published and JPEG stays on the CPU, as before. A
      `J2 FAIL ... no interrupt came` points at host1x/GIC.

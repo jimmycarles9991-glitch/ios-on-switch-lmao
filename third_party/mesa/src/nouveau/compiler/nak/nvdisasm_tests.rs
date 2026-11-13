@@ -611,6 +611,7 @@ pub fn test_texture() {
                     nodep: true,
                     channel_mask: ChannelMask::for_comps(3),
                     scalar: scalar,
+                    f16: false,
                 };
                 c.push(
                     instr,
@@ -636,6 +637,7 @@ pub fn test_texture() {
                         nodep: true,
                         channel_mask: ChannelMask::for_comps(3),
                         scalar: scalar,
+                        f16: false,
                     };
                     c.push(
                         instr,
@@ -669,6 +671,7 @@ pub fn test_texture() {
                     nodep: true,
                     channel_mask: ChannelMask::for_comps(3),
                     scalar: scalar,
+                    f16: false,
                 };
                 c.push(
                     instr,

@@ -85,14 +85,14 @@ public struct CAStateSweepTest: HWTest {
             for (color, bytes) in zip(line.colors.sorted(by: { $0.index < $1.index }), drawn.attachments) {
                 let ours = Signature(
                     bytes: bytes, metalFormat: color.format, width: CAStateSweep.width, height: CAStateSweep.height)
-                guard let theirs = golden[color.index] else { return "no_golden" }
-                if ours.hash == theirs.hash { continue }
-                let step = Signature.format(metal: color.format)?.step() ?? 0
-                guard ours.matches(theirs, absolute: max(3 * step, 0.004), relative: 0.01) else {
+                switch GoldenVerdict.of(ours, against: golden[color.index], metalFormat: color.format) {
+                case .exact: continue
+                case .close: verdict = .close
+                case .missing: return "no_golden"
+                case .wrong:
                     save(line, color: color, bytes: bytes, directory: directory)
                     return Verdict.wrong.rawValue
                 }
-                verdict = .close
             }
             return verdict.rawValue
         } catch let unsupported as CAStateSweep.Unsupported {

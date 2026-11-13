@@ -15,7 +15,7 @@
 namespace probe {
 
 // `s`'s dispatch at `threads` threads a threadgroup over its textures `bound` (textures()' of its own)
-inline void dispatchOf(const Shape &s, const uint32_t threads[3], NSArray<id<MTLTexture>> *bound,
+inline void dispatchOf(const Shape &s, const uint32_t threads[3], NSArray<MTLTextureDescriptor *> *bound,
                        std::unique_ptr<raw::KernelDispatch> &out)
 {
     std::map<uint32_t, uint32_t> memory;
@@ -24,7 +24,7 @@ inline void dispatchOf(const Shape &s, const uint32_t threads[3], NSArray<id<MTL
     while (std::getline(text, pair, ','))
         memory[uint32_t(strtoul(pair.c_str(), nullptr, 10))] =
             uint32_t(strtoul(pair.c_str() + pair.find(':') + 1, nullptr, 10));
-    out = std::make_unique<raw::KernelDispatch>(threads, memory);
+    out = std::make_unique<raw::KernelDispatch>(threads, memory, s.regionMode);
     for (size_t i = 0; i < s.textures.size(); i++) {
         MTLTextureDescriptor *d = [MTLTextureDescriptor new];
         d.pixelFormat = bound[i].pixelFormat;
@@ -43,13 +43,14 @@ struct Kernel {
     std::string line, key;
     Shape shape;
     MTLComputePipelineDescriptor *descriptor = nil;
-    NSArray<id<MTLTexture>> *textures = nil;
+    NSArray<MTLTextureDescriptor *> *textures = nil;
 };
 
 // Each dispatch shape of `text`'s D lines the kernel probe made (its state made, its key once): `each(kernel)`, and
-// `refused(line, why)` for one it would not make
-template <typename Each, typename Refused>
-void eachKernel(id<MTLDevice> dev, NSString *text, Each each, Refused refused)
+// `refused(line, why)` for one it would not make. `dev` makes its functions, and `made(kernel, why)` says whether
+// its state is made.
+template <typename Made, typename Each, typename Refused>
+void eachKernel(id<MTLDevice> dev, NSString *text, Made made, Each each, Refused refused)
 {
     std::set<std::string> seen;
     for (NSString *l in [text componentsSeparatedByString:@"\n"]) {
@@ -60,16 +61,23 @@ void eachKernel(id<MTLDevice> dev, NSString *text, Each each, Refused refused)
         std::string why;
         raw::AirHash air;
         id<MTLFunction> f = nil;
-        if (!parse(k.line, k.shape, why) || !(f = function(dev, k.shape, air)) || !state(dev, k.shape, f, why) ||
-            !(k.textures = textures(dev, k.shape.textures, why))) {
+        if (!parse(k.line, k.shape, why) || !(f = function(dev, k.shape, air))) {
             refused(k.line, why.empty() ? "no function " + k.shape.function : why);
             continue;
         }
-        k.key = key(k.shape, air);
-        if (!seen.insert(k.key).second)
-            continue;
         k.descriptor = descriptor(k.shape, f);
-        each(k);
+        k.textures = textures(k.shape.textures);
+        if (!made(k, why)) {
+            refused(k.line, why);
+            continue;
+        }
+        const Shape original = k.shape;
+        eachRegionShape(original, [&](const Shape &shape, uint8_t) {
+            k.shape = shape;
+            k.key = key(k.shape, air);
+            if (seen.insert(k.key).second)
+                each(k);
+        });
     }
 }
 

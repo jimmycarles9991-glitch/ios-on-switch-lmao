@@ -854,7 +854,11 @@ static uint64_t reg(arm_saved_state_t *s, uint32_t r)
 static void set_reg(arm_saved_state_t *s, uint32_t r, uint64_t v)
 {
     if (r != 31) {
+#if XNU_12377_121_6
+        set_user_saved_state_reg(s, r, v);
+#else
         set_saved_state_reg(s, r, v);
+#endif
     }
 }
 
@@ -924,7 +928,11 @@ int a64x_emulate_user(arm_saved_state_t *state, uint32_t w)
     if (error) {
         return 0; /* the fault is reported as the undefined instruction it was */
     }
+#if XNU_12377_121_6
+    add_user_saved_state_pc(state, 4);
+#else
     add_saved_state_pc(state, 4);
+#endif
     OSIncrementAtomic64((SInt64 *)&a64x_traps);
     return 1;
 }

@@ -392,6 +392,7 @@ impl DeviceProfile {
 /// Every field of a profile, policy included. The fingerprint hashes all of them.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ProfileFields {
+    pub native_target: crate::device::NativeShaderTarget,
     /// Memory's A/F split.
     pub buffer_access: BufferAccess,
     pub pointer_domain: PointerDomain,
@@ -824,6 +825,12 @@ pub struct DescriptorCaps {
     pub non_uniform_storage_texel_buffer: bool,
     pub push_descriptor: bool,
     pub null_descriptor: bool,
+    /// The most elements a set-1 heap array takes beside the limits' own, 0 for none: a consumer
+    /// whose heap holds a texture at its header index ([`Device::with_heap_elements`]) sizes its
+    /// arrays by its header pool.
+    ///
+    /// [`Device::with_heap_elements`]: crate::device::Device::with_heap_elements
+    pub heap_elements: u32,
 }
 
 /// Fragment-stage and fixed-function capabilities ([`DeviceProfile::fragment`]). Each field is the

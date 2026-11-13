@@ -27,7 +27,7 @@ struct A64XSelfTest: HWTest {
     )
 
     func run(_ context: TestContext) async throws -> Outcome {
-        let before = Self.sysctls()
+        let before = Self.sysctls().values
         let (rewritten, words) = try Self.rewrittenTextWords()
         nonisolated(unsafe) let counter = UnsafeMutablePointer<UInt64>.allocate(capacity: 1)
         counter.initialize(to: 0)
@@ -36,11 +36,12 @@ struct A64XSelfTest: HWTest {
             switch_a64x_hammer(counter, UInt64(Self.adds))
         }
         let sum = switch_a64x_fp16_mul_add(Self.fp16A, Self.fp16B, Self.fp16C)
-        let after = Self.sysctls()
+        let (after, unread) = Self.sysctls()
         let delta = { (name: String) in (after[name] ?? 0) - (before[name] ?? 0) }
 
         var metrics = Metrics()
         metrics.set("a64x", !after.isEmpty)
+        if after.isEmpty { metrics.set("sysctl", KernelSysctl.code(unread)) }
         metrics.set("translated", rewritten > 0)
         metrics.set("rewritten", rewritten)
         metrics.set("text_words", words)
@@ -60,7 +61,11 @@ struct A64XSelfTest: HWTest {
         ]
         if context.ios >= 26 {
             checks += [
-                ("the kernel has a64x (kern.a64x.*)", !after.isEmpty),
+                (
+                    after.isEmpty && unread != ENOENT
+                        ? KernelSysctl.unreadable("kern.a64x.*", unread) : "the kernel has a64x (kern.a64x.*)",
+                    !after.isEmpty
+                ),
                 ("the app's A12 code was translated (rewritten > 0)", rewritten > 0),
                 ("no LSE site took the trap path (d_traps 0)", delta("traps") == 0),
                 ("no unhandled instruction (d_traps_unhandled 0)", delta("traps_unhandled") == 0),
@@ -72,15 +77,17 @@ struct A64XSelfTest: HWTest {
         return .judged(checks, metrics)
     }
 
-    /// kern.a64x.* by name; empty on a kernel without a64x.
-    static func sysctls() -> [String: Int] {
+    /// kern.a64x.* by name, and the errno of the first that could not be read.
+    static func sysctls() -> (values: [String: Int], unread: Int32) {
         var values: [String: Int] = [:]
+        var unread: Int32 = 0
         for name in counters {
-            var value: UInt64 = 0
-            var size = MemoryLayout<UInt64>.size
-            if sysctlbyname("kern.a64x." + name, &value, &size, nil, 0) == 0 { values[name] = Int(value) }
+            switch KernelSysctl.integer("kern.a64x." + name, as: UInt64.self) {
+            case .value(let value): values[name] = Int(value)
+            case .failed(let error): if unread == 0 { unread = error }
+            }
         }
-        return values
+        return (values, unread)
     }
 
     /// The words of this image's __TEXT,__text that differ between memory and the executable file, and how many

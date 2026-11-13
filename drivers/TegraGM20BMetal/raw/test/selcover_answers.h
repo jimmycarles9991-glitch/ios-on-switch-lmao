@@ -2,7 +2,9 @@
 // selcover's check of the raw device's capability and identity answers (RawMetalDeviceAnswers.mm) against m2v's device,
 // whose class the raw device class still subclasses: every query the bridge installs (nmb_device_answer_selector), each
 // argument query over formats 0-1023 and the GPU families, and the identity the frontend answers. The answers raw gives on
-// purpose for its own layouts (constant buffer and linear texture alignments, RawMetalDevice.mm) are not compared.
+// purpose for its own layouts (constant buffer and linear texture alignments, RawMetalDevice.mm), those it takes from a
+// chip-graded capability row (raw_device_answers.h chipFeature) and the features it has no form of where m2v's answers claim
+// them (raw_device_answers.h) are not compared.
 #pragma once
 #import <Foundation/Foundation.h>
 #import <Metal/Metal.h>
@@ -52,7 +54,16 @@ inline unsigned differ(id raw, id m2v, unsigned &compared)
 {
     static const std::set<std::string> rawOwn = {"minConstantBufferAlignmentBytes",
                                                  "deviceLinearReadOnlyTextureAlignmentBytes",
-                                                 "minimumLinearTextureAlignmentForPixelFormat:"};
+                                                 "minimumLinearTextureAlignmentForPixelFormat:",
+                                                 "supports32BitFloatFiltering",
+                                                 "maxVertexAmplificationCount",
+                                                 "maxVertexAmplificationFactor",
+                                                 "supportsVertexAmplificationCount:",
+                                                 "maxPredicatedNestingDepth",
+                                                 "supportsDynamicAttributeStride",
+                                                 "supportsTessellation",
+                                                 "supportsIndirectTessellation",
+                                                 "maxTessellationFactor"};
     unsigned bad = 0;
     auto check = [&](const char *name, NSUInteger a, uint64_t r, uint64_t m) {
         compared++;

@@ -62,7 +62,10 @@ public enum CAStateSweep {
         return "\(colors) \(line.depthFormat)/\(line.stencilFormat) \(line.vertex.name) \(line.fragment.name)"
     }
 
-    public static func draw(_ line: PipelineLine, library: MTLLibrary, gpu: GPU) async throws -> Drawn {
+    /// `premultiplied`: every colour premultiplied (vertices, pattern, clear), the only colours Core Animation blends
+    public static func draw(
+        _ line: PipelineLine, library: MTLLibrary, gpu: GPU, premultiplied: Bool = false
+    ) async throws -> Drawn {
         guard line.samples == 1, line.depthFormat == 0, line.stencilFormat == 0 else {
             throw Unsupported(description: "samples \(line.samples), depth/stencil \(line.depthFormat)")
         }
@@ -82,21 +85,21 @@ public enum CAStateSweep {
             }
             targets.append(try gpu.texture(format, width, height))
         }
-        let source = try patternTexture(gpu)
+        let source = try patternTexture(gpu, premultiplied: premultiplied)
         let sampler = try linearSampler(gpu.device)
         let timing = try await gpu.run(tolerateError: true) { commands in
             let pass = MTLRenderPassDescriptor()
             for (index, target) in targets.enumerated() {
                 pass.colorAttachments[index].texture = target
                 pass.colorAttachments[index].loadAction = .clear
-                pass.colorAttachments[index].clearColor = clear
+                pass.colorAttachments[index].clearColor = premultiplied ? premultipliedClear : clear
                 pass.colorAttachments[index].storeAction = .store
             }
             let encoder = commands.makeRenderCommandEncoder(descriptor: pass)!
             encoder.setRenderPipelineState(pipeline)
             bind(encoder, source: source, sampler: sampler)
             for vertices in [strip(), rectangle()] {
-                var vertices = vertices
+                var vertices = premultiplied ? vertices.map(premultiply) : vertices
                 encoder.setVertexBytes(
                     &vertices, length: MemoryLayout<CAState.Vertex>.stride * vertices.count, index: 1)
                 encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: vertices.count)
@@ -129,6 +132,13 @@ public enum CAStateSweep {
     }
 
     static let clear = MTLClearColor(red: 0.25, green: 0.5, blue: 0.75, alpha: 0.625)
+    static let premultipliedClear = MTLClearColor(red: 0.125, green: 0.25, blue: 0.375, alpha: 0.625)
+
+    static func premultiply(_ v: CAState.Vertex) -> CAState.Vertex {
+        var out = v
+        out.color = SIMD4(v.color.x * v.color.w, v.color.y * v.color.w, v.color.z * v.color.w, v.color.w)
+        return out
+    }
 
     static func rectangle() -> [CAState.Vertex] {
         CAState.rectangle(x0: 0.4, y0: -0.9, x1: 0.85, y1: -0.3, color: SIMD4(0.9, 0.2, 0.6, 0.5))
@@ -174,12 +184,14 @@ public enum CAStateSweep {
         }
     }
 
-    static func patternTexture(_ gpu: GPU) throws -> MTLTexture {
+    static func patternTexture(_ gpu: GPU, premultiplied: Bool = false) throws -> MTLTexture {
         let size = 32
         let texture = try gpu.texture(.bgra8Unorm, size, size, usage: [.shaderRead], storage: .shared)
         let texels = (0..<(size * size)).flatMap { i -> [UInt8] in
             let (x, y) = (i % size, i / size)
-            return [UInt8(x * 8), UInt8(y * 8), UInt8((x ^ y) * 8 & 0xff), UInt8(128 + (x + y) * 2)]
+            let alpha = 128 + (x + y) * 2
+            let colour = [x * 8, y * 8, (x ^ y) * 8 & 0xff].map { premultiplied ? $0 * alpha / 255 : $0 }
+            return colour.map { UInt8($0) } + [UInt8(alpha)]
         }
         texture.replace(
             region: MTLRegionMake2D(0, 0, size, size), mipmapLevel: 0, withBytes: texels, bytesPerRow: size * 4)

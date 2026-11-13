@@ -56,7 +56,9 @@ pub(crate) mod fetch;
 mod imageblock;
 mod input_blend;
 mod rog;
+mod rop_blend;
 mod stencil;
+mod two_plane;
 
 use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
@@ -200,6 +202,10 @@ pub struct FragmentPlan {
     /// writes each storage-form color: Metal runs such a function once per covered sample and
     /// reads its own sample.
     pub fetch_sample: Option<usize>,
+    /// The stage interface's `Layer` object, at which a function compiled for a layered pass
+    /// (`LoweringInputs::layered_storage`) addresses its storage-form images: the layer its
+    /// primitive renders.
+    pub fetch_layer: Option<usize>,
     /// The field of the returned value holding the function's `[[sample_mask]]` output, which
     /// gates each storage-form write of a per-sample function on the invocation's own sample bit,
     /// and of a function at one sample on bit 0.
@@ -215,6 +221,10 @@ pub struct FragmentPlan {
     /// The function returns a `[[depth(...)]]` output (`StageIoPlan::depth_clamp`). Inside an
     /// interlocked body each return records a positive NaN depth as discarded.
     pub depth_output: bool,
+    /// The pipeline's two-plane extended-range attachments by index, with the index each one's
+    /// alpha byte is held at (`LoweringInputs::two_plane_alphas`): their input attachments and
+    /// storage views are pairs (`two_plane`).
+    pub two_plane: BTreeMap<u32, u32>,
 }
 
 impl FragmentPlan {
@@ -486,7 +496,9 @@ pub fn declare(
         mb,
         &fp.colors,
         (&fp.fetch, &fp.input_blends),
+        &fp.two_plane,
         fp.fetch_sample.is_some(),
+        fp.fetch_layer.is_some(),
     )?;
     for (&color, sc) in &fp.fetch {
         if sc.shadowed {
@@ -582,8 +594,32 @@ pub fn select_param(cx: &mut SelectCx<'_>, b: &ParamBinding) -> Result<(), Error
 /// in the storage form is no interface variable. Then the loop over the covered samples, which
 /// decides how the stage interface reads `[[sample_id]]` and the sample-qualified varyings.
 pub fn plan_entry(cx: &mut SelectCx<'_>) -> Result<(), Error> {
+    cx.families.fragment.two_plane = cx.inputs.two_plane_alphas.clone();
     fetch::plan(cx)?;
     input_blend::plan(cx)?;
+    let fp = &cx.families.fragment;
+    let fetched = |c: &u32| fp.fetch.contains_key(c) || fp.input_blends.contains_key(c);
+    // A two-plane attachment past the last free index has no alpha to fetch from.
+    let unpaired = cx.inputs.extended_range_colors.iter().any(|(c, e)| {
+        matches!(e.form, crate::metal::format::ExtendedRange::Planes { .. })
+            && crate::pipeline::two_plane::held(cx.profile)
+            && !fp.two_plane.contains_key(c)
+            && fetched(c)
+    });
+    if unpaired {
+        return Err(Unsupported::not_implemented(Feature::Format).into());
+    }
+    let paired: Vec<(u32, u32)> = fp
+        .two_plane
+        .iter()
+        .filter(|(c, _)| fetched(c))
+        .map(|(&c, &a)| (c, a))
+        .collect();
+    cx.families
+        .stage_io
+        .interface
+        .two_plane_alphas
+        .extend(paired);
     coverage::plan(cx)
 }
 
@@ -602,6 +638,12 @@ pub fn writes_through_storage(cx: &SelectCx<'_>, color: u32) -> bool {
 /// Whether the function writes color attachment `color` in the storage form under Metal's
 /// 16-bit float blend of a `half4` output, which the shader computes
 /// (`DevicePolicy::half_blend`): the attachment stores Metal's value.
+/// The assumptions of the device's blend a storage form computes by its model (`rop_blend`), as
+/// `StorageAttachmentUse::blend_model` holds them: 0 where it computes none.
+pub(crate) fn blend_model(view: &fetch::StorageView) -> u8 {
+    fetch::modelled_blend(view).map_or(0, |b| b.assumptions())
+}
+
 pub fn blends_half_in_storage(cx: &SelectCx<'_>, color: u32) -> bool {
     fetch::blends_half(cx, color)
 }

@@ -136,6 +136,12 @@ pub fn round(fb: &mut FunctionBuilder<'_>, f: Form, x: Value) -> BResult<Value> 
 /// ([`native_rounding`]); under `HalfRoundingPolicy::Exact`, integer arithmetic, Metal's on every
 /// device.
 pub fn quantize_form(p: &DeviceProfile) -> QuantizeForm {
+    if p.fields()
+        .native_target
+        .half(crate::device::native::HalfOperation::Convert)
+    {
+        return QuantizeForm::Converted;
+    }
     let float16 = p.fields().leaf.float16;
     if p.takes_driver_deviation(DriverDeviation::MetalHalfConversion) && float16 {
         QuantizeForm::Converted
@@ -157,6 +163,12 @@ pub fn quantize_form(p: &DeviceProfile) -> QuantizeForm {
 /// (native half rounding, [`quantize_form`]). `None` where the form is Metal's: the measured forms,
 /// whose fact the module then requires, and the integer form.
 pub fn native_rounding(p: &DeviceProfile, form: QuantizeForm) -> Option<PrecisionNote> {
+    if p.fields()
+        .native_target
+        .half(crate::device::native::HalfOperation::Convert)
+    {
+        return None;
+    }
     match form {
         QuantizeForm::Converted
             if !p.takes_driver_deviation(DriverDeviation::MetalHalfConversion) =>
@@ -946,6 +958,9 @@ pub fn f32_of_half_bits(h: u32) -> u32 {
 /// other value takes the truncation, within the native conversion's bound (`NativeHalfConversion`:
 /// one ulp, and 65504 where Metal answers infinity).
 fn f32_bits_to_half_bits(fb: &mut FunctionBuilder<'_>, u: Form, b: Value) -> BResult<Value> {
+    if fb.module().native_half_conversions() {
+        return super::half_bits::encode(fb, u, b);
+    }
     let c = |fb: &mut FunctionBuilder<'_>, k: u64| splat(fb, u, k);
     let abs_mask = c(fb, 0x7FFF_FFFF)?;
     let a = bin(fb, BinOp::BitwiseAnd, b, abs_mask)?;
@@ -1007,6 +1022,12 @@ fn f32_bits_to_half_bits(fb: &mut FunctionBuilder<'_>, u: Form, b: Value) -> BRe
 /// (`FunctionBuilder::offer_outside_loops`): NVIDIA's compiler makes a module faster with the
 /// device's widening outside loops and slower with it inside one.
 pub fn from_bits(fb: &mut FunctionBuilder<'_>, f: Form, h: Value) -> BResult<Value> {
+    if f.held == Held::Float(FloatFmt::Half) && fb.module().native_half_conversions() {
+        let x = super::half_bits::decode(fb, f, h)?;
+        let all = u32::MAX >> (32 - u32::from(f.lanes).clamp(1, 32));
+        fb.note_bits(NarrowFmt::Half, x, h, all, true);
+        return Ok(x);
+    }
     // The device's decode is emitted first: an offered value precedes the one it stands for.
     let native = match f.held {
         Held::Float(FloatFmt::Half) if native_decode(fb) => Some(native_from_bits(fb, f, h)?),

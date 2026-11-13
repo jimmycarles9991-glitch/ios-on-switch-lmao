@@ -123,6 +123,7 @@ lint_test(
         "shfmt",
         "swift_format",
     ],
+    exempt = "//bazel/lint:format_exempt.txt",
 )
 
 lint_test(

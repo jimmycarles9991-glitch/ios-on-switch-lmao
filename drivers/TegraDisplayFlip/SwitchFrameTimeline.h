@@ -17,11 +17,12 @@ enum {
     SWITCH_KDBG_VSYNC = 0x3f0,  // a vsync notification went to the render server (arg: frame ends)
     SWITCH_KDBG_SUBMIT,         // a user GPU submission was kicked (hardware channel, seqno, compositor)
     SWITCH_KDBG_GPU_DONE,       // a user channel's fence moved, seen by the interrupt pass (channel, seqno)
-    SWITCH_KDBG_SWAP,           // a swap was accepted (frame ends)
-    SWITCH_KDBG_PRESENT,        // the swap's present was queued on the GPU (sequence)
+    SWITCH_KDBG_SWAP,           // accepted display ticket, CA swap ID, requested presentation, frame ends
+    SWITCH_KDBG_PRESENT,        // GPU present sequence, display ticket, CA swap ID, take sequence
     SWITCH_KDBG_PRESENT_DONE,   // the GPU completed it (sequence, status)
     SWITCH_KDBG_FLIP,           // window A was asked to flip (surface)
     SWITCH_KDBG_LATCH,          // the flip latched at a frame end (surface, frames since the request)
+    SWITCH_KDBG_FRAME_TICKET,   // latched display ticket, CA swap ID, take sequence, GPU present sequence
 };
 
 #define SWITCH_KDBG_CODE(code) ((6u << 24) | (18u << 16) | ((uint32_t)(code) << 2))

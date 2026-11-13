@@ -1,0 +1,58 @@
+{
+  "format": "iterated-blend/1",
+  "name": "rung3-mpy",
+  "passes": 2,
+  "alpha": false,
+  "instructions": [
+    "0x30104029",
+    "0x00385e01"
+  ],
+  "constants": [],
+  "methods": [
+    [
+      4836,
+      0
+    ],
+    [
+      4924,
+      1
+    ],
+    [
+      4928,
+      32774
+    ],
+    [
+      4932,
+      16385
+    ],
+    [
+      4936,
+      16384
+    ],
+    [
+      4940,
+      32774
+    ],
+    [
+      4944,
+      16385
+    ],
+    [
+      4952,
+      17155
+    ],
+    [
+      4960,
+      1
+    ]
+  ],
+  "restore": [
+    [
+      4836,
+      1
+    ]
+  ],
+  "rgb": "src.rgb * (1 - dst.a) + ((1 - src.a) + src.rgb) * dst.rgb",
+  "a": "saturate(src.a * (1 - dst.a) + dst.a)",
+  "tolerance": 2
+}

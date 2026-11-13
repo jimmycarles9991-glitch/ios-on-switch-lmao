@@ -83,7 +83,8 @@ struct Bench {
 TegraVICTraits baseTraits()
 {
     TegraVICTraits t = {};
-    t.pitchAlign = 256;
+    t.sourcePitchAlign = 256;
+    t.destinationPitchAlign = 64;
     t.in = t.out = kMeasured;
     return t;
 }
@@ -97,7 +98,7 @@ TegraVICTraits provenTraits(uint32_t flips)
     char line[300] = "";
     EXPECT_TRUE(tegra_vic_probe_transforms(&e, &t, line, sizeof(line))) << line;
     tegra_vic_probe_placement(&e, &t);
-    t.pitchAlign = 64;
+    t.sourcePitchAlign = 64;
     t.bilinear = 1;
     t.fillThroughMatrix = 1;
     t.yccIn = TEGRA_VIC_YCC_IN_RGB | TEGRA_VIC_YCC_IN_COPY;

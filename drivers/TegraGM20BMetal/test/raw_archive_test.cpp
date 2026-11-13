@@ -30,4 +30,25 @@ TEST(RawArchive, EverythingElseIsM2vsToRead)
     EXPECT_FALSE(raw::appleGpuBinary(kIconRendering, 7)) << "a file shorter than the header";
 }
 
+TEST(RawArchive, OnlyM2vsOwnArchiveFilesAreM2vs)
+{
+    const uint8_t m2v[8] = {'M', '2', 'V', 'B', 'A', 'R', 'C', 'H'};
+    const uint8_t fat[8] = {0xca, 0xfe, 0xba, 0xbe, 0, 0, 0, 2};
+    EXPECT_TRUE(raw::m2vArchive(m2v, 8));
+    EXPECT_FALSE(raw::m2vArchive(m2v, 7));
+    EXPECT_FALSE(raw::m2vArchive(fat, 8)) << "QuartzCore's default.metallib";
+    EXPECT_FALSE(raw::m2vArchive(kIconRendering, 8)) << "an Apple GPU binary";
+}
+
+TEST(RawArchive, AnArchiveIsNamedByItsPathOnTheOsVolume)
+{
+    const std::string g12p = "/System/Library/PrivateFrameworks/CMImaging.framework/binaryArchive.g12p";
+    EXPECT_EQ(raw::inventoryPath(g12p), g12p);
+    EXPECT_EQ(raw::inventoryPath("/System/Cryptexes/OS" + g12p), g12p);
+    EXPECT_EQ(raw::inventoryPath("/private/preboot/Cryptexes/OS" + g12p), g12p);
+    EXPECT_EQ(raw::inventoryPath("/var/staged_system_apps/A.app/a.metallib"),
+              "/private/var/staged_system_apps/A.app/a.metallib");
+    EXPECT_EQ(raw::inventoryPath("/private/var/mobile/a.metallib"), "/private/var/mobile/a.metallib");
+}
+
 }  // namespace

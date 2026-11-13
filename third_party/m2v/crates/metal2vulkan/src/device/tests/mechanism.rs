@@ -60,6 +60,7 @@ fn every_fact() -> Vec<RuntimeFact> {
         RuntimeFact::RenderTargetArrayLength {
             layer_dropped: true,
         },
+        RuntimeFact::LayeredStorage,
         RuntimeFact::StageInRegion,
         RuntimeFact::StageInStride { layout: 2 },
         RuntimeFact::UniformViewRange {
@@ -328,6 +329,7 @@ fn variant(f: &RuntimeFact) -> usize {
         RuntimeFact::StorageTextureIntegerChannels { .. } => 81,
         RuntimeFact::HeapHalfTexelWrites { .. } => 82,
         RuntimeFact::MovableStorageWrites { .. } => 83,
+        RuntimeFact::LayeredStorage => 84,
     }
 }
 
@@ -335,7 +337,7 @@ fn variant(f: &RuntimeFact) -> usize {
 fn mechanism_is_total_over_every_fact_and_profile() {
     let facts = every_fact();
     let covered: std::collections::BTreeSet<usize> = facts.iter().map(variant).collect();
-    assert_eq!(covered, (0..84).collect(), "every_fact misses a variant");
+    assert_eq!(covered, (0..85).collect(), "every_fact misses a variant");
     for (stem, _) in super::committed_profiles() {
         let dev = device(&stem);
         let p = dev.profile();
@@ -397,6 +399,7 @@ fn mechanism_is_total_over_every_fact_and_profile() {
                 | RuntimeFact::StorageTextureNumericType { .. }
                 | RuntimeFact::EmulatedSimdgroups
                 | RuntimeFact::RenderTargetArrayLength { .. }
+                | RuntimeFact::LayeredStorage
                 | RuntimeFact::UniformViewRange { .. }
                 | RuntimeFact::SrgbTexture { .. }
                 | RuntimeFact::CrossClassReads { .. }

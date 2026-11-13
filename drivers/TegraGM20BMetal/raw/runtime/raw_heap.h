@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: MIT
-// Where an MTLHeap's resources lie in its one span (Device::arenaTexture, arenaBuffer): first fit at the resource's alignment,
-// a range back at once when its resource dies or is made aliasable, which is Metal's heap contract (makeAliasable: later
-// placements may take the memory). What is placed never exceeds the heap's size, so a full heap answers nil, as Metal's does.
+// Automatic heaps reserve nonoverlapping ranges until release. Placement heaps validate caller-owned offsets and allow
+// immediate aliasing without automatic occupancy accounting. Both stay within the heap's logical size.
 #pragma once
 #include <cstdint>
 #include <iterator>
@@ -11,18 +10,21 @@ namespace raw {
 
 class HeapPlacement {
 public:
-    explicit HeapPlacement(uint64_t bytes = 0) : bytes_(bytes)
+    explicit HeapPlacement(uint64_t bytes = 0, bool explicitPlacement = false)
+        : bytes_(bytes), explicitPlacement_(explicitPlacement)
     {
-        if (bytes)
+        if (bytes && !explicitPlacement)
             free_[0] = bytes;
     }
 
     // `align` a power of two
     bool place(uint64_t bytes, uint64_t align, uint64_t &offset)
     {
-        if (!bytes)
+        if (explicitPlacement_ || !bytes || !align || (align & (align - 1)))
             return false;
         for (auto it = free_.begin(); it != free_.end(); ++it) {
+            if (it->first > UINT64_MAX - (align - 1))
+                continue;
             const uint64_t start = it->first, end = start + it->second, at = (start + align - 1) & ~(align - 1);
             if (at > end || end - at < bytes)
                 continue;
@@ -38,8 +40,17 @@ public:
         return false;
     }
 
+    // Placement resources may overlap from creation; their owner orders alias use on the GPU.
+    bool placeAt(uint64_t bytes, uint64_t align, uint64_t offset) const
+    {
+        return explicitPlacement_ && bytes && align && !(align & (align - 1)) && !(offset & (align - 1)) &&
+               offset <= bytes_ && bytes <= bytes_ - offset;
+    }
+
     void release(uint64_t offset, uint64_t bytes)
     {
+        if (explicitPlacement_)
+            return;
         used_ -= bytes;
         auto next = free_.lower_bound(offset);
         if (next != free_.end() && offset + bytes == next->first) {
@@ -66,11 +77,27 @@ public:
         return bytes_;
     }
 
+    bool explicitPlacement() const
+    {
+        return explicitPlacement_;
+    }
+
+    // Each free range in offset order: f(offset, bytes)
+    template <class F> void forEachFree(F &&f) const
+    {
+        for (const auto &[start, length] : free_)
+            f(start, length);
+    }
+
     // The largest placement `align` allows (maxAvailableSizeWithAlignment)
     uint64_t largestFree(uint64_t align) const
     {
+        if (!align || (align & (align - 1)))
+            return 0;
         uint64_t best = 0;
         for (const auto &[start, length] : free_) {
+            if (start > UINT64_MAX - (align - 1))
+                continue;
             const uint64_t at = (start + align - 1) & ~(align - 1);
             if (at < start + length && start + length - at > best)
                 best = start + length - at;
@@ -80,6 +107,7 @@ public:
 
 private:
     uint64_t bytes_ = 0, used_ = 0;
+    bool explicitPlacement_ = false;
     std::map<uint64_t, uint64_t> free_;  // offset -> bytes, coalesced
 };
 

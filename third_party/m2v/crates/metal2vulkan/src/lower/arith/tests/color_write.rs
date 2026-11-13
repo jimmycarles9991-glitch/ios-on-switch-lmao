@@ -797,7 +797,10 @@ fn selected_lanes_write_the_rule_their_code_selects() {
         HalfLane::AsComputed,
         HalfLane::NanAs(0x7fc0_0000),
     ] {
-        let lanes = [Some(Lane::Selected { half }); 4];
+        let lanes = [Some(Lane::Selected {
+            half,
+            store_code: false,
+        }); 4];
         check_accept(
             &format!("selected lanes, half {half:?}"),
             &[f, int(32)],

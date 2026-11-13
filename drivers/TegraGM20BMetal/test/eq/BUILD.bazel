@@ -1,0 +1,204 @@
+# eq: raw's frame against the NVK side's, draw by draw, with no NVK, m2v or mock kernel: rawframe draws over the kernel
+# model, eq_capture.cpp decodes what it submits with nvdec, and draw_goldens.py holds the log to per-draw goldens written
+# from raw's log where it differed from NVK's (eq.sh's settings) only as eq_rules.py allows, while NVK could still be run
+# (testdata: each IPSW kind's frame corpus and goldens).
+#
+#   bazel test --config=ios27 //drivers/TegraGM20BMetal/test/eq:eq_test   builds the full pack
+load("@rules_cc//cc:cc_binary.bzl", "cc_binary")
+load("@rules_python//python:py_library.bzl", "py_library")
+load("@rules_python//python:py_test.bzl", "py_test")
+load("//bazel/lint:defs.bzl", "lint_files")
+
+lint_files()
+
+GM20B_METAL = "//drivers/TegraGM20BMetal"
+
+# What decodes raw's submissions (eq_capture.cpp over the kernel model, nvdec with the MME simulator and the 2D engine)
+CAPTURE_SRCS = [
+    "eq_capture.cpp",
+    "//drivers/TegraGM20BMetal/test:raw_kernel_model.h",
+] + [GM20B_METAL + ":raw/" + f for f in [
+    "fx/test/twod_sim.cpp",
+    "fx/test/twod_sim.h",
+    "pack/nvdec.cpp",
+    "pack/nvdec.h",
+    "pack/nvdec_comp.h",
+    "pack/nvdec_compute.cpp",
+    "pack/probe_record.h",
+    "pack/mesa/mme_bitpack_helpers.h",
+    "pack/mesa/mme_fermi.c",
+    "pack/mesa/mme_fermi.h",
+    "pack/mesa/mme_fermi_sim.c",
+    "pack/mesa/mme_fermi_sim.h",
+    "pack/mesa/mme_sim.h",
+    "pack/mesa/nv_device_info.h",
+    "pack/mesa/nv_push_cl902d.h",
+    "pack/mesa/nv_push_cl9097.h",
+    "pack/mesa/util/bitpack_helpers.h",
+    "pack/mesa/util/macros.h",
+    "pack/mesa/util/u_math.h",
+]]
+
+CAPTURE_CONLYOPTS = [
+    "-Wno-unused-parameter",
+    "-Wno-sign-compare",
+]
+
+CAPTURE_COPTS = [
+    "-DSWITCH_RAW_HARNESS_MARKS",
+    "-DNVDEC_TWOD",
+    "-Idrivers/TegraGM20B",
+    "-Idrivers/TegraGM20BMetal/raw/runtime",
+    "-Ikits/SwitchGM20BEmit/mesa",
+    "-I$(GENDIR)/kits/SwitchGM20BEmit/gen",
+    "-Ithird_party/mesa/src/nouveau/headers",
+    "-Wno-deprecated-declarations",
+]
+
+CAPTURE_LINKOPTS = [
+    "-framework",
+    "IOKit",
+    "-framework",
+    "IOSurface",
+    "-framework",
+    "CoreFoundation",
+]
+
+CAPTURE_DEPS = [
+    "//drivers/TegraGM20BMetal/test:raw_runtime_marked",
+    "//kits/SwitchGM20B:classes",
+    "//kits/SwitchGM20BEmit:emit_ndebug",
+    "//kits/SwitchGM20BEmit:macros_h",
+]
+
+cc_binary(
+    name = "rawframe",
+    testonly = True,
+    srcs = CAPTURE_SRCS + [
+        GM20B_METAL + ":raw/test/frame.h",
+        GM20B_METAL + ":raw/test/rawframe.cpp",
+    ],
+    conlyopts = CAPTURE_CONLYOPTS,
+    copts = CAPTURE_COPTS,
+    cxxopts = ["-std=c++17"],
+    linkopts = CAPTURE_LINKOPTS,
+    deps = CAPTURE_DEPS,
+)
+
+# computeeq's raw side: computeframe's raw mode (an NVK run's kernel record and program through raw's compute encoder)
+cc_binary(
+    name = "computeframe",
+    testonly = True,
+    srcs = CAPTURE_SRCS + [
+        "computeframe_main.cpp",
+        GM20B_METAL + ":raw/test/computeframe.h",
+        GM20B_METAL + ":raw/test/computeframe_raw.cpp",
+    ],
+    conlyopts = CAPTURE_CONLYOPTS,
+    copts = CAPTURE_COPTS,
+    cxxopts = ["-std=c++17"],
+    linkopts = CAPTURE_LINKOPTS,
+    deps = CAPTURE_DEPS,
+)
+
+py_library(
+    name = "draw_goldens",
+    srcs = [
+        "compute_goldens.py",
+        "draw_goldens.py",
+        "eq_fields.py",
+        "eq_rules.py",
+    ],
+    data = [GM20B_METAL + ":raw_pack_generator"],
+    imports = ["."],
+)
+
+# the pack link's pack.json, layouts.txt and programs.bin (its `report` output group), which name raw's programs for nvdec
+filegroup(
+    name = "raw_pack_report",
+    testonly = True,
+    srcs = ["//gpu/seed:raw_pack"],
+    output_group = "report",
+)
+
+py_test(
+    name = "eq_rules_test",
+    size = "small",
+    srcs = ["eq_rules_test.py"],
+    deps = [":draw_goldens"],
+)
+
+# eq_rules.py's unread class on the states it was ruled for: their barrier programs on the Maxwell interpreter
+py_test(
+    name = "unread_uniforms_test",
+    size = "small",
+    srcs = ["unread_uniforms_test.py"],
+    data = glob(["testdata/unread/*"]),
+    deps = [
+        "//tools/gpu/maxwell:interp",
+        "//tools/gpu/maxwell:isa",
+    ],
+)
+
+# rawframe over 2,000 draws of the kernel model's capture took 249 s of a moderate timeout's 300 on the laptop
+py_test(
+    name = "eq_test",
+    timeout = "long",
+    srcs = ["eq_test.py"],
+    args = [
+        "$(rootpath :rawframe)",
+        "$(rootpath //gpu/seed:raw_pack)/pack.bin",
+    ] + select({
+        "//ipsw:21H461": [
+            "21H461",
+            "drivers/TegraGM20BMetal/test/eq/testdata",
+        ],
+        "//ipsw:24B119": [
+            "24B119",
+            "drivers/TegraGM20BMetal/test/eq/testdata",
+            "--qc27",
+        ],
+    }) + ["$(rootpaths :raw_pack_report)"],
+    data = [
+        ":raw_pack_report",
+        ":rawframe",
+        "//gpu/seed:raw_pack",
+    ] + glob(
+        ["testdata/*"],
+        exclude = ["testdata/compute_*"],
+    ),
+    # m2v: //gpu/seed:raw_pack's probe runs NVK until the pack generator stops needing it
+    tags = [
+        "m2v",
+        "pack",
+    ],
+    deps = [":draw_goldens"],
+)
+
+py_test(
+    name = "computeeq_test",
+    srcs = ["computeeq_test.py"],
+    args = [
+        "$(rootpath :computeframe)",
+        "$(rootpath //gpu/seed:raw_pack)/pack.bin",
+    ] + select({
+        "//ipsw:21H461": [
+            "21H461",
+            "drivers/TegraGM20BMetal/test/eq/testdata",
+        ],
+        "//ipsw:24B119": [
+            "24B119",
+            "drivers/TegraGM20BMetal/test/eq/testdata",
+        ],
+    }),
+    data = [
+        ":computeframe",
+        "//gpu/seed:raw_pack",
+    ] + glob(["testdata/**"]),
+    # m2v: //gpu/seed:raw_pack's probe runs NVK until the pack generator stops needing it
+    tags = [
+        "m2v",
+        "pack",
+    ],
+    deps = [":draw_goldens"],
+)

@@ -94,18 +94,29 @@ nvkm_event_ntfy_insert(struct nvkm_event_ntfy *ntfy)
 	write_unlock_irq(&ntfy->event->list_lock);
 }
 
-static void
+static bool
 nvkm_event_ntfy_block_(struct nvkm_event_ntfy *ntfy, bool wait)
 {
 	struct nvkm_subdev *subdev = ntfy->event->subdev;
 
 	nvkm_trace(subdev, "event: ntfy block %08x on %d wait:%d\n", ntfy->bits, ntfy->id, wait);
 
-	if (atomic_xchg(&ntfy->allowed, 0) == 1) {
-		nvkm_event_ntfy_state(ntfy);
-		if (wait)
-			nvkm_event_ntfy_remove(ntfy);
-	}
+    bool allowed;
+    if (wait) {
+        unsigned long flags;
+        write_lock_irqsave(&ntfy->event->list_lock, flags);
+        allowed = atomic_xchg(&ntfy->allowed, 0) == 1;
+        if (allowed) {
+            nvkm_event_ntfy_state(ntfy);
+            list_del_init(&ntfy->head);
+        }
+        write_unlock_irqrestore(&ntfy->event->list_lock, flags);
+    } else {
+        allowed = atomic_xchg(&ntfy->allowed, 0) == 1;
+        if (allowed)
+            nvkm_event_ntfy_state(ntfy);
+    }
+    return allowed;
 }
 
 void
@@ -115,16 +126,28 @@ nvkm_event_ntfy_block(struct nvkm_event_ntfy *ntfy)
 		nvkm_event_ntfy_block_(ntfy, ntfy->wait);
 }
 
+bool
+nvkm_event_ntfy_suspend(struct nvkm_event_ntfy *ntfy)
+{
+    return ntfy->event && nvkm_event_ntfy_block_(ntfy, ntfy->wait);
+}
+
 void
 nvkm_event_ntfy_allow(struct nvkm_event_ntfy *ntfy)
 {
 	nvkm_trace(ntfy->event->subdev, "event: ntfy allow %08x on %d\n", ntfy->bits, ntfy->id);
 
-	if (atomic_xchg(&ntfy->allowed, 1) == 0) {
-		nvkm_event_ntfy_state(ntfy);
-		if (ntfy->wait)
-			nvkm_event_ntfy_insert(ntfy);
-	}
+    if (ntfy->wait) {
+        unsigned long flags;
+        write_lock_irqsave(&ntfy->event->list_lock, flags);
+        if (atomic_xchg(&ntfy->allowed, 1) == 0) {
+            nvkm_event_ntfy_state(ntfy);
+            list_add_tail(&ntfy->head, &ntfy->event->ntfy);
+        }
+        write_unlock_irqrestore(&ntfy->event->list_lock, flags);
+    } else if (atomic_xchg(&ntfy->allowed, 1) == 0) {
+        nvkm_event_ntfy_state(ntfy);
+    }
 }
 
 void
@@ -186,6 +209,26 @@ nvkm_event_ntfy(struct nvkm_event *event, int id, u32 bits)
 	}
 
 	read_unlock_irqrestore(&event->list_lock, flags);
+}
+
+void
+nvkm_event_ntfy_active(struct nvkm_event *event, int id, u32 bits)
+{
+    struct nvkm_event_ntfy *ntfy, *next;
+    unsigned long flags;
+    if (!event->refs || WARN_ON(id >= event->index_nr))
+        return;
+    write_lock_irqsave(&event->list_lock, flags);
+    list_for_each_entry_safe(ntfy, next, &event->ntfy, head) {
+        if (ntfy->id != id || !(ntfy->bits & bits) || !atomic_read(&ntfy->allowed))
+            continue;
+        if (ntfy->func(ntfy, ntfy->bits & bits) == NVKM_EVENT_DROP && ntfy->wait) {
+            atomic_set(&ntfy->allowed, 0);
+            nvkm_event_ntfy_state(ntfy);
+            list_del_init(&ntfy->head);
+        }
+    }
+    write_unlock_irqrestore(&event->list_lock, flags);
 }
 
 void

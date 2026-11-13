@@ -11,13 +11,15 @@ load("//kernel/rules:common.bzl", "XCODE_EXECUTION")
 load("//kernel/rules:kernel.bzl", "KernelObjectsInfo")
 load("//kernel/rules:layout.bzl", "old_output_spelling")
 load(":recipes_development.bzl", "DEVELOPMENT_LINK")
+load(":recipes_release.bzl", "RELEASE_LINK", "RELEASE_LINK_LTO")
 load(":selected.bzl", "selected_only")
-load(":xnu_objects.bzl", "XnuObjectsInfo")
+load(":xnu_objects.bzl", "XnuObjectsInfo", "by_profile")
 
 # Per XNU config: (the LTO step, or None; the link). RELEASE is MakeInc.kernel's PRE_LTO pair: the bitcode objects and
 # nonlto.o linked -r into one machine-code object (justlto.o), then the link of the machine-code objects and justlto.o.
 LINKS = {
     "DEVELOPMENT": (None, DEVELOPMENT_LINK),
+    "RELEASE": (RELEASE_LINK_LTO, RELEASE_LINK),
 }
 
 # The paths below the link tree's root, as make's (main's) kernel link named them.
@@ -370,10 +372,10 @@ _xnu_kernel = rule(
 )
 
 def xnu_kernel(name, **kwargs):
-    """The kernel link (_xnu_kernel), DEVELOPMENT, when the selected XNU is 12377."""
+    """The selected profile's kernel link when the selected XNU is 12377."""
     _xnu_kernel(
         name = name,
-        config = "DEVELOPMENT",
+        config = by_profile("DEVELOPMENT", "RELEASE"),
         target_compatible_with = selected_only(),
         **kwargs
     )

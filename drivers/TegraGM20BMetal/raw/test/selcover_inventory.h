@@ -83,7 +83,7 @@ inline std::vector<std::string> propertySelectors(const std::string &container, 
 }
 
 // Every source file of the raw runtime, as one text (a class's property counts as read where its getter appears after a '.'
-// or a blank and before a non-identifier character)
+// or a blank and before a non-identifier character, or its own name after a '.': dot syntax of a getter named isX)
 inline std::string runtimeText(const std::string &dir)
 {
     std::string text;
@@ -97,12 +97,12 @@ inline std::string runtimeText(const std::string &dir)
     return text;
 }
 
-inline bool named(const std::string &text, const std::string &getter)
+inline bool named(const std::string &text, const std::string &getter, bool dotOnly = false)
 {
     for (size_t at = text.find(getter); at != std::string::npos; at = text.find(getter, at + 1)) {
         const char before = at ? text[at - 1] : ' ',
                    after = at + getter.size() < text.size() ? text[at + getter.size()] : ' ';
-        if ((before == '.' || before == ' ') && !isalnum(after) && after != '_' && after != ':')
+        if ((before == '.' || (before == ' ' && !dotOnly)) && !isalnum(after) && after != '_' && after != ':')
             return true;
     }
     return false;
@@ -163,7 +163,7 @@ inline std::vector<Row> make(const std::string &coverage, const std::string &ref
             else if (protocol)
                 r.raw = answer(container, selector);
             else
-                r.raw = named(text, selectors[0]) ? "read" : "unread";
+                r.raw = named(text, selectors[0]) || named(text, name, true) ? "read" : "unread";
             const auto s = sent.find({container, selector});
             r.sent = s == sent.end() ? "" : s->second;
             rows[{container, name, selector}] = r;

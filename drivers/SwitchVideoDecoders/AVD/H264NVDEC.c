@@ -2,6 +2,8 @@
 // H.264 on NVDEC 2.0; see H264NVDEC.h. Clause numbers are ITU-T H.264 (08/2021).
 #include "H264NVDEC.h"
 #include <stdlib.h>
+#include "H264DPB.h"
+#include "NVDECRing.h"
 #include <string.h>
 #include "../../TegraNVDEC/nvidia/nvdec_drv.h"
 #include "../../TegraNVDEC/nvidia/clc5b0.h"
@@ -9,21 +11,6 @@
 #define MAX_SURFACES 17
 #define MAX_PENDING  34
 #define ALIGN(v, a)  (((v) + (a) - 1) / (a) * (a))
-
-enum {
-    REF_NONE,
-    REF_SHORT,
-    REF_LONG
-};
-
-typedef struct {
-    uint8_t ref;        // REF_NONE: slot free
-    bool non_existing;  // 8.2.5.2 frame_num gap filler
-    uint8_t pic_idx;    // surface, picture slot and colocated slot
-    uint8_t slot;       // entry in nvdec_h264_pic_s.dpb[]
-    uint32_t frame_num, long_term_frame_idx;
-    int32_t top_poc, bottom_poc;
-} RefFrame;
 
 typedef struct {
     int32_t poc;
@@ -41,16 +28,14 @@ struct H264Decoder {
     uint32_t surface[MAX_SURFACES];
     uint8_t *surface_va[MAX_SURFACES];
     uint32_t aux, mbhist_off, mbhist_bytes, history_off, history_bytes;
-    uint32_t input, slices_off, bits_off, max_slices;
-    uint8_t *input_va;
-    uint64_t input_bytes;
-    // Reference frames (8.2.5) and their NVDEC DPB slots
-    RefFrame refs[16];
-    int32_t max_long_term_frame_idx;  // -1: "no long-term frame indices"
+    uint32_t slices_off, bits_off, max_slices;
+    NVDECRing ring;  // each picture's status record, slice offsets and bitstream
+    H264DPB dpb;
     uint8_t last_pic_idx;
-    // Picture order count state (8.2.1)
-    int32_t prev_poc_msb, prev_poc_lsb;
-    uint32_t prev_frame_num_offset, prev_frame_num, prev_ref_frame_num;
+    // A first field's sample and its job, until its frame goes out; refused: its second field's job was refused.
+    void *held_token;
+    uint32_t held_job;
+    bool held_refused;
     // Display order
     Pending pending[MAX_PENDING];
     uint32_t pending_count, reorder;
@@ -65,7 +50,6 @@ H264Decoder *h264_decoder_create(const H264Backend *backend)
     if (!d)
         return NULL;
     d->b = *backend;
-    d->max_long_term_frame_idx = -1;
     return d;
 }
 
@@ -75,10 +59,8 @@ static void releaseBuffers(H264Decoder *d)
         d->b.free(d->b.ctx, d->surface[i]);
     if (d->aux)
         d->b.free(d->b.ctx, d->aux);
-    if (d->input)
-        d->b.free(d->b.ctx, d->input);
-    d->surfaces = d->aux = d->input = 0;
-    d->input_va = NULL;
+    nvdec_ring_release(&d->ring, &d->b);
+    d->surfaces = d->aux = 0;
     d->configured = false;
 }
 
@@ -159,7 +141,7 @@ static uint32_t maxDpbFrames(const H264SPS *s)
         mbs = 696320;
         break;
     }
-    const uint32_t frames = mbs / ((uint32_t)s->width_mbs * s->height_map_units);
+    const uint32_t frames = mbs / ((uint32_t)s->width_mbs * s->height_mbs);
     return frames < 1 ? 1 : frames > 16 ? 16 : frames;
 }
 
@@ -177,18 +159,17 @@ static uint32_t reorderDepth(const H264SPS *s)
 static bool supported(const H264SPS *s)
 {
     return s->valid && s->chroma_format_idc == 1 && s->bit_depth_luma == 8 && s->bit_depth_chroma == 8 &&
-           !s->separate_colour_plane && s->frame_mbs_only && s->width_mbs >= 3 && s->width_mbs * 16 <= 4096 &&
-           s->height_map_units * 16 <= 4096;
+           !s->separate_colour_plane && s->width_mbs >= 3 && s->width_mbs * 16 <= 4096 && s->height_mbs * 16 <= 4096;
 }
 
 // Picture buffers as averne's decoder sizes them: block-linear NV12 surfaces (pitch 64-aligned, height 32-aligned),
-// one colocated-motion area per surface, the MB history and the history buffer, and the input buffer holding the
-// engine's status, the slice offsets and the bitstream.
+// one colocated-motion area per surface, the MB history and the history buffer, and the input buffers (NVDECRing.h),
+// each holding a picture's status record, slice offsets and bitstream.
 static int allocate(H264Decoder *d, const H264SPS *s)
 {
     releaseBuffers(d);
     d->width_mbs = s->width_mbs;
-    d->height_mbs = s->height_map_units;
+    d->height_mbs = s->height_mbs;
     d->refs_allocated = s->max_num_ref_frames;
     d->pitch = ALIGN(d->width_mbs * 16, 64);
     d->aligned_height = ALIGN(d->height_mbs * 16, 32);
@@ -213,11 +194,7 @@ static int allocate(H264Decoder *d, const H264SPS *s)
     d->max_slices = d->width_mbs * d->height_mbs;
     d->slices_off = 256;
     d->bits_off = ALIGN(d->slices_off + (d->max_slices + 1) * 4, 256);
-    d->input_bytes = d->bits_off + (d->width_mbs * d->height_mbs >= 3600 ? 0x100000 : 0x40000);
-    if (d->b.alloc(d->b.ctx, d->input_bytes, &d->input, &va))
-        return -1;
-    d->input_va = va;
-    return 0;
+    return nvdec_ring_alloc(&d->ring, &d->b, d->bits_off + (d->width_mbs * d->height_mbs >= 3600 ? 0x100000 : 0x40000));
 }
 
 // The first SPS a PPS refers to (avcC carries one of each in practice).
@@ -234,8 +211,7 @@ int h264_decoder_configure(H264Decoder *d)
             releaseBuffers(d);
             return -3;
         }
-        memset(d->refs, 0, sizeof(d->refs));
-        d->max_long_term_frame_idx = -1;
+        h264_dpb_reset(&d->dpb, s);
         d->configured = true;
         return 0;
     }
@@ -260,11 +236,6 @@ static void bump(H264Decoder *d, uint32_t keep)
         emitFirst(d);
 }
 
-void h264_decoder_flush(H264Decoder *d)
-{
-    bump(d, 0);
-}
-
 static void discardPending(H264Decoder *d)
 {
     for (uint32_t i = 0; i < d->pending_count; i++)
@@ -272,214 +243,63 @@ static void discardPending(H264Decoder *d)
     d->pending_count = 0;
 }
 
-static int32_t frameNumWrap(const H264Decoder *d, const RefFrame *f, uint32_t current)
+// How the frame's rows interleave in time: a field pair's first field first; a frame's earlier field first.
+static uint8_t fieldOrder(const H264Decoder *d, uint8_t firstField, int32_t top, int32_t bottom)
 {
-    return f->frame_num > current ? (int32_t)f->frame_num - (1 << d->sps.log2_max_frame_num) : (int32_t)f->frame_num;
+    if (d->sps.frame_mbs_only)
+        return AVD_FIELDS_UNSAID;
+    if (firstField != H264_FRAME)
+        return firstField == H264_TOP ? AVD_FIELDS_TOP_FIRST : AVD_FIELDS_BOTTOM_FIRST;
+    return top < bottom ? AVD_FIELDS_TOP_FIRST : top > bottom ? AVD_FIELDS_BOTTOM_FIRST : AVD_FIELDS_PROGRESSIVE;
 }
 
-static unsigned refCount(const H264Decoder *d)
+// The frame in surface picIdx to `decoded`, then into the display queue: decoded by `job` (and `firstField`'s job).
+static void output(H264Decoder *d, uint8_t picIdx, void *token, int32_t poc, uint8_t fields, uint32_t job,
+                   uint32_t firstField, bool refused)
 {
-    unsigned n = 0;
-    for (unsigned i = 0; i < 16; i++)
-        n += d->refs[i].ref != REF_NONE;
-    return n;
-}
-
-// 8.2.5.3: the short-term frame with the smallest FrameNumWrap goes once the DPB holds max_num_ref_frames.
-static void slidingWindow(H264Decoder *d, uint32_t current, unsigned limit)
-{
-    while (refCount(d) >= limit) {
-        RefFrame *oldest = NULL;
-        for (unsigned i = 0; i < 16; i++) {
-            RefFrame *f = &d->refs[i];
-            if (f->ref == REF_SHORT && (!oldest || frameNumWrap(d, f, current) < frameNumWrap(d, oldest, current)))
-                oldest = f;
-        }
-        if (!oldest)
-            break;
-        oldest->ref = REF_NONE;
-    }
-}
-
-static unsigned refLimit(const H264Decoder *d)
-{
-    return d->sps.max_num_ref_frames ? d->sps.max_num_ref_frames : 1;
-}
-
-static RefFrame *addRef(H264Decoder *d, const RefFrame *frame)
-{
-    bool taken[16] = {false};
-    RefFrame *free = NULL;
-    for (unsigned i = 0; i < 16; i++) {
-        if (d->refs[i].ref != REF_NONE)
-            taken[d->refs[i].slot] = true;
-        else if (!free)
-            free = &d->refs[i];
-    }
-    if (!free)
-        return NULL;
-    *free = *frame;
-    for (uint8_t s = 0; s < 16; s++) {
-        if (!taken[s]) {
-            free->slot = s;
-            break;
-        }
-    }
-    return free;
-}
-
-static RefFrame *findShort(H264Decoder *d, int32_t picNum, uint32_t current)
-{
-    for (unsigned i = 0; i < 16; i++)
-        if (d->refs[i].ref == REF_SHORT && frameNumWrap(d, &d->refs[i], current) == picNum)
-            return &d->refs[i];
-    return NULL;
-}
-
-static void dropLong(H264Decoder *d, uint32_t idx, const RefFrame *keep)
-{
-    for (unsigned i = 0; i < 16; i++)
-        if (d->refs[i].ref == REF_LONG && d->refs[i].long_term_frame_idx == idx && &d->refs[i] != keep)
-            d->refs[i].ref = REF_NONE;
-}
-
-// Marks after decoding a reference picture and adds it. Returns true for memory_management_control_operation 5.
-static bool mark(H264Decoder *d, const H264Slice *sh, RefFrame *current)
-{
-    bool mmco5 = false;
-    if (sh->nal_unit_type == H264_NAL_IDR) {
-        if (sh->long_term_reference) {
-            current->ref = REF_LONG;
-            current->long_term_frame_idx = 0;
-            d->max_long_term_frame_idx = 0;
-        } else {
-            d->max_long_term_frame_idx = -1;
-        }
-    } else if (sh->adaptive_ref_pic_marking) {
-        const int32_t currPicNum = (int32_t)sh->frame_num;
-        for (unsigned i = 0; i < sh->mmco_count; i++) {
-            const H264MMCO *m = &sh->mmco[i];
-            RefFrame *f;
-            switch (m->type) {
-            case 1:
-                if ((f = findShort(d, currPicNum - (int32_t)(m->difference_of_pic_nums_minus1 + 1), sh->frame_num)))
-                    f->ref = REF_NONE;
-                break;
-            case 2:
-                for (unsigned j = 0; j < 16; j++)
-                    if (d->refs[j].ref == REF_LONG && d->refs[j].long_term_frame_idx == m->long_term_pic_num)
-                        d->refs[j].ref = REF_NONE;
-                break;
-            case 3:
-                if ((f = findShort(d, currPicNum - (int32_t)(m->difference_of_pic_nums_minus1 + 1), sh->frame_num))) {
-                    dropLong(d, m->long_term_frame_idx, f);
-                    f->ref = REF_LONG;
-                    f->long_term_frame_idx = m->long_term_frame_idx;
-                }
-                break;
-            case 4:
-                d->max_long_term_frame_idx = (int32_t)m->max_long_term_frame_idx_plus1 - 1;
-                for (unsigned j = 0; j < 16; j++)
-                    if (d->refs[j].ref == REF_LONG &&
-                        (int32_t)d->refs[j].long_term_frame_idx > d->max_long_term_frame_idx)
-                        d->refs[j].ref = REF_NONE;
-                break;
-            case 5:
-                for (unsigned j = 0; j < 16; j++)
-                    d->refs[j].ref = REF_NONE;
-                d->max_long_term_frame_idx = -1;
-                mmco5 = true;
-                break;
-            case 6:
-                dropLong(d, m->long_term_frame_idx, NULL);
-                current->ref = REF_LONG;
-                current->long_term_frame_idx = m->long_term_frame_idx;
-                break;
-            }
-        }
-    } else {
-        slidingWindow(d, sh->frame_num, refLimit(d));
-    }
-    if (mmco5)
-        current->frame_num = 0;
-    // A stream that keeps more references than it declared loses its oldest short-term ones.
-    slidingWindow(d, current->frame_num, refLimit(d));
-    if (refCount(d) >= 16)
-        slidingWindow(d, current->frame_num, 16);
-    addRef(d, current);
-    return mmco5;
-}
-
-// 8.2.5.2: frames skipped by frame_num become "non-existing" short-term references, slid in like decoded ones.
-static void fillGap(H264Decoder *d, uint32_t frameNum)
-{
-    const uint32_t max = 1u << d->sps.log2_max_frame_num;
-    uint32_t unused = (d->prev_ref_frame_num + 1) % max;
-    if ((frameNum - unused + max) % max > refLimit(d)) {
-        for (unsigned i = 0; i < 16; i++)
-            if (d->refs[i].ref == REF_SHORT)
-                d->refs[i].ref = REF_NONE;
-        unused = (frameNum + max - refLimit(d)) % max;
-    }
-    for (; unused != frameNum; unused = (unused + 1) % max) {
-        slidingWindow(d, unused, refLimit(d));
-        const RefFrame filler = {
-            .ref = REF_SHORT, .non_existing = true, .pic_idx = d->last_pic_idx, .frame_num = unused};
-        addRef(d, &filler);
-        if (unused < d->prev_frame_num)
-            d->prev_frame_num_offset += max;
-        d->prev_frame_num = d->prev_ref_frame_num = unused;
-    }
-}
-
-static void pictureOrder(H264Decoder *d, const H264Slice *sh, int32_t *top, int32_t *bottom, int32_t *msbOut,
-                         uint32_t *offsetOut)
-{
-    const H264SPS *s = &d->sps;
-    const bool idr = sh->nal_unit_type == H264_NAL_IDR;
-    const uint32_t maxFrameNum = 1u << s->log2_max_frame_num;
-    *msbOut = 0;
-    *offsetOut = 0;
-    if (s->poc_type == 0) {
-        const int32_t maxLsb = 1 << s->log2_max_poc_lsb, lsb = (int32_t)sh->poc_lsb;
-        const int32_t prevMsb = idr ? 0 : d->prev_poc_msb, prevLsb = idr ? 0 : d->prev_poc_lsb;
-        int32_t msb = prevMsb;
-        if (lsb < prevLsb && prevLsb - lsb >= maxLsb / 2)
-            msb = prevMsb + maxLsb;
-        else if (lsb > prevLsb && lsb - prevLsb > maxLsb / 2)
-            msb = prevMsb - maxLsb;
-        *msbOut = msb;
-        *top = msb + lsb;
-        *bottom = *top + sh->delta_poc_bottom;
+    const H264Picture picture = {
+        .luma = d->surface_va[picIdx],
+        .chroma = d->surface_va[picIdx] + d->luma_bytes,
+        .pitch = d->pitch,
+        .handle = d->surface[picIdx],
+        .chroma_offset = d->luma_bytes,
+        .rows = d->aligned_height,
+        .coded_width = d->width_mbs * 16,
+        .coded_height = d->height_mbs * 16,
+        .crop_x = d->sps.crop_left,
+        .crop_y = d->sps.crop_top,
+        .width = d->width_mbs * 16 - d->sps.crop_left - d->sps.crop_right,
+        .height = d->height_mbs * 16 - d->sps.crop_top - d->sps.crop_bottom,
+        .fields = fields,
+        .poc = poc,
+        .job = job,
+        .first_field_job = firstField,
+        .refused = refused,
+        .token = token,
+    };
+    void *item = d->b.decoded(d->b.ctx, &picture);
+    if (!item)
         return;
-    }
-    const uint32_t offset = idr                                 ? 0
-                            : d->prev_frame_num > sh->frame_num ? d->prev_frame_num_offset + maxFrameNum
-                                                                : d->prev_frame_num_offset;
-    *offsetOut = offset;
-    if (s->poc_type == 1) {
-        uint32_t abs = s->num_ref_frames_in_poc_cycle ? offset + sh->frame_num : 0;
-        if (!sh->nal_ref_idc && abs)
-            abs--;
-        int32_t expected = 0;
-        if (abs) {
-            int32_t perCycle = 0;
-            for (unsigned i = 0; i < s->num_ref_frames_in_poc_cycle; i++)
-                perCycle += s->offset_for_ref_frame[i];
-            const uint32_t cycle = (abs - 1) / s->num_ref_frames_in_poc_cycle;
-            const uint32_t inCycle = (abs - 1) % s->num_ref_frames_in_poc_cycle;
-            expected = (int32_t)cycle * perCycle;
-            for (uint32_t i = 0; i <= inCycle; i++)
-                expected += s->offset_for_ref_frame[i];
-        }
-        if (!sh->nal_ref_idc)
-            expected += s->offset_for_non_ref_pic;
-        *top = expected + sh->delta_poc[0];
-        *bottom = *top + s->offset_for_top_to_bottom_field + sh->delta_poc[1];
+    if (d->pending_count == MAX_PENDING)
+        emitFirst(d);
+    d->pending[d->pending_count++] = (Pending){poc, item};
+}
+
+// A first field whose second field did not follow goes out alone, as its frame, under its own sample.
+static void finishUnpaired(H264Decoder *d)
+{
+    H264DPB *dpb = &d->dpb;
+    if (!dpb->pairing)
         return;
-    }
-    const int32_t poc = idr ? 0 : 2 * (int32_t)(offset + sh->frame_num) - (sh->nal_ref_idc ? 0 : 1);
-    *top = *bottom = poc;
+    dpb->pairing = false;
+    output(d, dpb->pair_idx, d->held_token, dpb->pair_poc,
+           fieldOrder(d, dpb->pair_parity, dpb->pair_poc, dpb->pair_poc), d->held_job, 0, d->held_refused);
+}
+
+void h264_decoder_flush(H264Decoder *d)
+{
+    finishUnpaired(d);
+    bump(d, 0);
 }
 
 static void entry(TegraNVDECSubmit *s, uint16_t method, uint16_t kind, uint32_t value, uint32_t offset)
@@ -491,8 +311,7 @@ static void entry(TegraNVDECSubmit *s, uint16_t method, uint16_t kind, uint32_t 
     e->offset = offset;
 }
 
-static void fillSetup(const H264Decoder *d, nvdec_h264_pic_s *p, const H264Slice *sh, uint8_t picIdx, int32_t top,
-                      int32_t bottom)
+static void fillSetup(const H264Decoder *d, nvdec_h264_pic_s *p, const H264Slice *sh, const H264Current *cur)
 {
     const H264SPS *s = &d->sps;
     const H264PPS *pps = &d->sets.pps[sh->pps_id];
@@ -527,29 +346,17 @@ static void fillSetup(const H264Decoder *d, nvdec_h264_pic_s *p, const H264Slice
     p->chroma_qp_index_offset = pps->chroma_qp_index_offset;
     p->second_chroma_qp_index_offset = pps->second_chroma_qp_index_offset;
     p->weighted_bipred_idc = pps->weighted_bipred_idc;
-    p->CurrPicIdx = picIdx;
-    p->CurrColIdx = picIdx;
+    // Both fields of a frame go into one surface and one colocated slot; the second names its first's surface with
+    // second_field set and the other parity (libnvtvmr 0x18e18-0x18e40, 0x1a2a0-0x1a2dc; averne's nvtegra_h264.c:242).
+    p->MbaffFrameFlag = s->mb_adaptive_frame_field && cur->structure == H264_FRAME;
+    p->field_pic_flag = cur->structure != H264_FRAME;
+    p->bottom_field_flag = cur->structure == H264_BOTTOM;
+    p->second_field = cur->second;
+    p->CurrPicIdx = cur->pic_idx;
+    p->CurrColIdx = cur->pic_idx;
     p->frame_num = sh->frame_num;
     p->output_memory_layout = 0;  // NV12
-    p->CurrFieldOrderCnt[0] = top;
-    p->CurrFieldOrderCnt[1] = bottom;
-    for (unsigned i = 0; i < 16; i++) {
-        const RefFrame *f = &d->refs[i];
-        if (f->ref == REF_NONE)
-            continue;
-        nvdec_dpb_entry_s *e = &p->dpb[f->slot];
-        const unsigned marking = f->ref == REF_LONG ? 2 : 1;
-        e->index = f->pic_idx;
-        e->col_idx = f->pic_idx;
-        e->state = 3;  // both fields of the frame are used for reference
-        e->is_long_term = f->ref == REF_LONG;
-        e->not_existing = f->non_existing;
-        e->top_field_marking = marking;
-        e->bottom_field_marking = marking;
-        e->FieldOrderCnt[0] = (unsigned)f->top_poc;
-        e->FieldOrderCnt[1] = (unsigned)f->bottom_poc;
-        e->FrameIdx = f->ref == REF_LONG ? (int)f->long_term_frame_idx : (int)f->frame_num;
-    }
+    h264_dpb_fill(&d->dpb, cur, p->dpb, p->CurrFieldOrderCnt);
     memcpy(p->WeightScale, pps->scaling4, sizeof(p->WeightScale));
     memcpy(p->WeightScale8x8, pps->scaling8, sizeof(p->WeightScale8x8));
     p->lossless_ipred8x8_filter_enable = 1;
@@ -565,9 +372,10 @@ static void fillSubmit(H264Decoder *d, TegraNVDECSubmit *s, uint8_t picIdx)
     entry(s, NVC5B0_SET_CONTROL_PARAMS, TEGRA_NVDEC_ENTRY_VALUE,
           NVC5B0_SET_CONTROL_PARAMS_CODEC_TYPE_H264 | (1u << 4) /* GPTIMER_ON */ | (1u << 6) /* ERR_CONCEAL_ON */, 0);
     entry(s, NVC5B0_SET_PICTURE_INDEX, TEGRA_NVDEC_ENTRY_VALUE, d->picture_index++, 0);
-    entry(s, NVC5B0_SET_IN_BUF_BASE_OFFSET, TEGRA_NVDEC_ENTRY_RELOC, d->input, d->bits_off);
-    entry(s, NVC5B0_SET_SLICE_OFFSETS_BUF_OFFSET, TEGRA_NVDEC_ENTRY_RELOC, d->input, d->slices_off);
-    entry(s, NVC5B0_SET_NVDEC_STATUS_OFFSET, TEGRA_NVDEC_ENTRY_RELOC, d->input, 0);
+    const uint32_t input = nvdec_ring_current(&d->ring)->handle;
+    entry(s, NVC5B0_SET_IN_BUF_BASE_OFFSET, TEGRA_NVDEC_ENTRY_RELOC, input, d->bits_off);
+    entry(s, NVC5B0_SET_SLICE_OFFSETS_BUF_OFFSET, TEGRA_NVDEC_ENTRY_RELOC, input, d->slices_off);
+    entry(s, NVC5B0_SET_NVDEC_STATUS_OFFSET, TEGRA_NVDEC_ENTRY_RELOC, input, 0);
     entry(s, NVC5B0_SET_COLOC_DATA_OFFSET, TEGRA_NVDEC_ENTRY_RELOC, d->aux, 0);
     entry(s, NVC5B0_H264_SET_MBHIST_BUF_OFFSET, TEGRA_NVDEC_ENTRY_RELOC, d->aux, d->mbhist_off);
     entry(s, NVC5B0_SET_HISTORY_OFFSET, TEGRA_NVDEC_ENTRY_RELOC, d->aux, d->history_off);
@@ -578,137 +386,88 @@ static void fillSubmit(H264Decoder *d, TegraNVDECSubmit *s, uint8_t picIdx)
               d->luma_bytes);
     }
     entry(s, NVC5B0_EXECUTE, TEGRA_NVDEC_ENTRY_VALUE, 1u << 8 /* AWAKEN */, 0);
-    s->clean[0] = (TegraNVDECRange){d->input, d->slices_off, (d->slices + 1) * 4, 0};
-    s->clean[1] = (TegraNVDECRange){d->input, d->bits_off, d->bits_len + 16, 0};
+    s->clean[0] = (TegraNVDECRange){input, d->slices_off, (d->slices + 1) * 4, 0};
+    s->clean[1] = (TegraNVDECRange){input, d->bits_off, d->bits_len + 16, 0};
     s->clean_count = 2;
 }
 
 static int freeSurface(const H264Decoder *d)
 {
-    for (uint32_t i = 0; i < d->surfaces; i++) {
-        bool used = false;
-        for (unsigned j = 0; j < 16 && !used; j++)
-            used = d->refs[j].ref != REF_NONE && !d->refs[j].non_existing && d->refs[j].pic_idx == i;
-        if (!used)
+    for (uint32_t i = 0; i < d->surfaces; i++)
+        if (!h264_dpb_holds(&d->dpb, (uint8_t)i))
             return (int)i;
-    }
     return -1;
 }
 
+// One picture: a frame, or one field. Returns 1 when the picture took `token` (a frame, or a first field whose frame
+// goes out later under it), 0 when it did not (a second field: its frame goes out under its first field's sample),
+// -1 for no surface, -2 when the NVDEC job failed, -3 when a surface could not be recycled.
 static int decodePicture(H264Decoder *d, const H264Slice *sh, void *token, bool reorder)
 {
-    const bool idr = sh->nal_unit_type == H264_NAL_IDR;
+    H264DPB *dpb = &d->dpb;
+    const bool second = h264_dpb_second_field(dpb, sh);
     const uint32_t maxFrameNum = 1u << d->sps.log2_max_frame_num;
-    if (idr) {
+    if (!second)
+        finishUnpaired(d);
+    if (sh->nal_unit_type == H264_NAL_IDR) {
         if (sh->no_output_of_prior_pics)
             discardPending(d);
         else
             bump(d, 0);
-        memset(d->refs, 0, sizeof(d->refs));
-        d->prev_poc_msb = d->prev_poc_lsb = 0;
-        d->prev_frame_num_offset = d->prev_frame_num = d->prev_ref_frame_num = 0;
-    } else if (sh->frame_num != d->prev_ref_frame_num && sh->frame_num != (d->prev_ref_frame_num + 1) % maxFrameNum) {
-        fillGap(d, sh->frame_num);
+        h264_dpb_reset(dpb, &d->sps);
+    } else if (!second && sh->frame_num != dpb->prev_ref_frame_num &&
+               sh->frame_num != (dpb->prev_ref_frame_num + 1) % maxFrameNum) {
+        h264_dpb_fill_gap(dpb, sh->frame_num, d->last_pic_idx);
     }
-    int32_t top, bottom, msb;
-    uint32_t frameNumOffset;
-    pictureOrder(d, sh, &top, &bottom, &msb, &frameNumOffset);
+    H264Current cur;
+    h264_dpb_order(dpb, &d->sps, sh, &cur);
 
-    int picIdx = freeSurface(d);
+    int picIdx = second ? dpb->pair_idx : freeSurface(d);
     if (picIdx < 0) {  // more references than declared: make room
-        slidingWindow(d, sh->frame_num, refCount(d));
+        h264_dpb_drop_oldest(dpb, sh->frame_num);
         if ((picIdx = freeSurface(d)) < 0)
             return -1;
     }
+    if (!second && d->b.recycle) {
+        void *address = d->surface_va[picIdx];
+        if (d->b.recycle(d->b.ctx, d->surface[picIdx], d->surface_bytes, &address))
+            return -3;
+        d->surface_va[picIdx] = address;
+    }
+    cur.pic_idx = (uint8_t)picIdx;
     static const uint8_t endOfStream[16] = {0, 0, 1, 0x0b, 0, 0, 0, 0, 0, 0, 1, 0x0b, 0, 0, 0, 0};
-    memcpy(d->input_va + d->bits_off + d->bits_len, endOfStream, sizeof(endOfStream));
-    ((uint32_t *)(d->input_va + d->slices_off))[d->slices] = d->bits_len;
+    const NVDECInput *input = nvdec_ring_current(&d->ring);
+    memcpy(input->va + d->bits_off + d->bits_len, endOfStream, sizeof(endOfStream));
+    ((uint32_t *)(input->va + d->slices_off))[d->slices] = d->bits_len;
 
     TegraNVDECSubmit submit;
     memset(&submit, 0, sizeof(submit));
-    fillSetup(d, (nvdec_h264_pic_s *)submit.setup, sh, (uint8_t)picIdx, top, bottom);
+    fillSetup(d, (nvdec_h264_pic_s *)submit.setup, sh, &cur);
     fillSubmit(d, &submit, (uint8_t)picIdx);
-    TegraNVDECWait wait = {.timeout_us = 1000000, .invalidate_count = 1};
-    wait.invalidate[0] = (TegraNVDECRange){d->input, 0, sizeof(nvdec_status_s), 0};
-    if (!d->b.cpu_reads || d->b.cpu_reads(d->b.ctx))
-        wait.invalidate[wait.invalidate_count++] = (TegraNVDECRange){d->surface[picIdx], 0, d->surface_bytes, 0};
-    if (d->b.submit(d->b.ctx, &submit, &wait.fence) || d->b.wait(d->b.ctx, &wait))
-        return -2;
-    const nvdec_status_s *status = (const nvdec_status_s *)d->input_va;
-    d->last_pic_idx = (uint8_t)picIdx;
-
-    const H264Picture picture = {
-        .luma = d->surface_va[picIdx],
-        .chroma = d->surface_va[picIdx] + d->luma_bytes,
-        .pitch = d->pitch,
-        .handle = d->surface[picIdx],
-        .chroma_offset = d->luma_bytes,
-        .rows = d->aligned_height,
-        .coded_width = d->width_mbs * 16,
-        .coded_height = d->height_mbs * 16,
-        .crop_x = d->sps.crop_left,
-        .crop_y = d->sps.crop_top,
-        .width = d->width_mbs * 16 - d->sps.crop_left - d->sps.crop_right,
-        .height = d->height_mbs * 16 - d->sps.crop_top - d->sps.crop_bottom,
-        .poc = top < bottom ? top : bottom,
-        .status = status->error_status && !status->mbs_correctly_decoded ? (int)status->error_status : 0,
-        .token = token,
-    };
-    void *item = d->b.decoded(d->b.ctx, &picture);
-
-    bool mmco5 = false;
-    if (sh->nal_ref_idc) {
-        RefFrame current = {.ref = REF_SHORT,
-                            .pic_idx = (uint8_t)picIdx,
-                            .frame_num = sh->frame_num,
-                            .top_poc = top,
-                            .bottom_poc = bottom};
-        mmco5 = mark(d, sh, &current);
-        if (mmco5) {  // 8.2.1: the picture's order counts restart from it
-            const int32_t temp = top < bottom ? top : bottom;
-            top -= temp;
-            bottom -= temp;
-            for (unsigned i = 0; i < 16; i++) {
-                if (d->refs[i].ref != REF_NONE && d->refs[i].pic_idx == picIdx && !d->refs[i].non_existing) {
-                    d->refs[i].top_poc = top;
-                    d->refs[i].bottom_poc = bottom;
-                }
-            }
-            bump(d, 0);  // C.4.4: no_output_of_prior_pics_flag inferred 0
+    uint32_t fence = 0;
+    if (d->b.submit(d->b.ctx, &submit, &fence)) {
+        if (second) {  // the first field's frame goes out marked bad, so its sample is answered
+            d->held_refused = true;
+            finishUnpaired(d);
         }
-        d->prev_poc_msb = mmco5 ? 0 : msb;
-        d->prev_poc_lsb = mmco5 ? top : (int32_t)sh->poc_lsb;
-        d->prev_ref_frame_num = mmco5 ? 0 : sh->frame_num;
+        return -2;
     }
-    d->prev_frame_num_offset = mmco5 ? 0 : frameNumOffset;
-    d->prev_frame_num = mmco5 ? 0 : sh->frame_num;
-
-    if (item) {
-        if (d->pending_count == MAX_PENDING)
-            emitFirst(d);
-        d->pending[d->pending_count++] = (Pending){top < bottom ? top : bottom, item};
+    nvdec_ring_advance(&d->ring);
+    d->last_pic_idx = (uint8_t)picIdx;
+    if (h264_dpb_finish(dpb, sh, &cur))
+        bump(d, 0);  // C.4.4: memory_management_control_operation 5 infers no_output_of_prior_pics_flag 0
+    if (dpb->pairing) {
+        d->held_token = token;
+        d->held_job = fence;
+        d->held_refused = false;
+        return 1;
     }
+    const int32_t poc = cur.poc[0] < cur.poc[1] ? cur.poc[0] : cur.poc[1];
+    const uint8_t first = second ? (uint8_t)(H264_FRAME ^ cur.structure) : H264_FRAME;
+    output(d, (uint8_t)picIdx, second ? d->held_token : token, poc, fieldOrder(d, first, cur.poc[0], cur.poc[1]), fence,
+           second ? d->held_job : 0, false);
     bump(d, reorder ? d->reorder : 0);
-    return 1;
-}
-
-static int growInput(H264Decoder *d, uint64_t needed)
-{
-    uint64_t bytes = d->input_bytes;
-    while (bytes < needed)
-        bytes *= 2;
-    if (bytes > (32u << 20))
-        return -1;
-    uint32_t handle;
-    void *va;
-    if (d->b.alloc(d->b.ctx, bytes, &handle, &va))
-        return -1;
-    memcpy(va, d->input_va, d->bits_off + d->bits_len);
-    d->b.free(d->b.ctx, d->input);
-    d->input = handle;
-    d->input_va = va;
-    d->input_bytes = bytes;
-    return 0;
+    return !second;
 }
 
 static int appendSlice(H264Decoder *d, const uint8_t *nal, size_t size)
@@ -716,10 +475,12 @@ static int appendSlice(H264Decoder *d, const uint8_t *nal, size_t size)
     if (d->slices >= d->max_slices)
         return -1;
     const uint64_t needed = (uint64_t)d->bits_off + d->bits_len + 3 + size + 16;
-    if (needed > d->input_bytes && growInput(d, needed))
+    if (needed > nvdec_ring_current(&d->ring)->bytes &&
+        nvdec_ring_grow(&d->ring, &d->b, needed, (uint64_t)d->bits_off + d->bits_len))
         return -1;
-    ((uint32_t *)(d->input_va + d->slices_off))[d->slices++] = d->bits_len;
-    uint8_t *dst = d->input_va + d->bits_off + d->bits_len;
+    uint8_t *input = nvdec_ring_current(&d->ring)->va;
+    ((uint32_t *)(input + d->slices_off))[d->slices++] = d->bits_len;
+    uint8_t *dst = input + d->bits_off + d->bits_len;
     dst[0] = dst[1] = 0;
     dst[2] = 1;
     memcpy(dst + 3, nal, size);
@@ -729,62 +490,33 @@ static int appendSlice(H264Decoder *d, const uint8_t *nal, size_t size)
 
 static bool sameGeometry(const H264Decoder *d, const H264SPS *s)
 {
-    return s->width_mbs == d->width_mbs && s->height_map_units == d->height_mbs &&
-           s->max_num_ref_frames <= d->refs_allocated;
+    return s->width_mbs == d->width_mbs && s->height_mbs == d->height_mbs && s->max_num_ref_frames <= d->refs_allocated;
 }
 
-int h264_decoder_decode(H264Decoder *d, const uint8_t *data, size_t size, unsigned lengthSize, void *token,
-                        bool reorder)
+// The picture whose slices were collected, under its own SPS: decodePicture's answer.
+static int finishPicture(H264Decoder *d, const H264Slice *first, void *token, bool reorder)
 {
-    if (!d->configured || lengthSize < 1 || lengthSize > 4)
-        return -1;
-    H264Slice first, slice;
-    bool have = false;
-    d->bits_len = d->slices = 0;
-    for (size_t pos = 0; pos + lengthSize <= size;) {
-        uint32_t length = 0;
-        for (unsigned i = 0; i < lengthSize; i++)
-            length = (length << 8) | data[pos + i];
-        pos += lengthSize;
-        if (!length || length > size - pos)
-            return -1;
-        const uint8_t *nal = data + pos;
-        pos += length;
-        const uint8_t type = nal[0] & 0x1f;
-        if (type == H264_NAL_SPS || type == H264_NAL_PPS) {
-            if (have || h264_decoder_parameter_set(d, nal, length))
-                return -1;
-        } else if (type == H264_NAL_SLICE || type == H264_NAL_IDR) {
-            H264Slice *sh = have ? &slice : &first;
-            if (h264_parse_slice(&d->sets, nal, length, sh))
-                return -1;
-            if (have && (!sh->first_mb_in_slice || sh->frame_num != first.frame_num || sh->pps_id != first.pps_id))
-                break;  // a second picture in one sample: only the first is decoded
-            have = true;
-            if (appendSlice(d, nal, length))
-                return -1;
-        }
-    }
-    if (!have)
-        return 0;
-    const H264PPS *pps = &d->sets.pps[first.pps_id];
+    const H264PPS *pps = &d->sets.pps[first->pps_id];
     const H264SPS *sps = &d->sets.sps[pps->sps_id];
     if (pps->num_slice_groups != 1 || !supported(sps))
         return -1;
     if (!sameGeometry(d, sps)) {  // new sequence with other dimensions: start over at its IDR
-        if (first.nal_unit_type != H264_NAL_IDR)
+        if (first->nal_unit_type != H264_NAL_IDR)
             return -1;
+        finishUnpaired(d);
         bump(d, 0);
         const uint32_t bits = d->bits_len, slices = d->slices;
         uint8_t *saved = malloc(bits + (slices + 1) * 4);
         if (!saved)
             return -1;
-        memcpy(saved, d->input_va + d->bits_off, bits);
-        memcpy(saved + bits, d->input_va + d->slices_off, (slices + 1) * 4);
+        const uint8_t *input = nvdec_ring_current(&d->ring)->va;
+        memcpy(saved, input + d->bits_off, bits);
+        memcpy(saved + bits, input + d->slices_off, (slices + 1) * 4);
         const int ret = allocate(d, sps);
-        if (!ret && (uint64_t)d->bits_off + bits + 16 <= d->input_bytes && slices <= d->max_slices) {
-            memcpy(d->input_va + d->bits_off, saved, bits);
-            memcpy(d->input_va + d->slices_off, saved + bits, (slices + 1) * 4);
+        const NVDECInput *fresh = nvdec_ring_current(&d->ring);
+        if (!ret && (uint64_t)d->bits_off + bits + 16 <= fresh->bytes && slices <= d->max_slices) {
+            memcpy(fresh->va + d->bits_off, saved, bits);
+            memcpy(fresh->va + d->slices_off, saved + bits, (slices + 1) * 4);
         }
         free(saved);
         if (ret) {
@@ -796,6 +528,64 @@ int h264_decoder_decode(H264Decoder *d, const uint8_t *data, size_t size, unsign
         d->slices = slices;
     }
     d->sps = *sps;
+    h264_dpb_use_sps(&d->dpb, sps);
     d->reorder = reorderDepth(sps);
-    return decodePicture(d, &first, token, reorder);
+    return decodePicture(d, first, token, reorder);
+}
+
+// A sample holds one frame: a frame picture, or a field pair, and may first complete the frame a field of the
+// previous sample started. VideoToolbox answers a sample whose token no picture took (0) as dropped, so the token
+// goes to at most one frame and a picture that would start a second frame in the sample is not decoded. Once the token
+// is taken, an error later in the sample returns 1: the token's frame goes out (marked bad if its second field failed).
+int h264_decoder_decode(H264Decoder *d, const uint8_t *data, size_t size, unsigned lengthSize, void *token,
+                        bool reorder)
+{
+    if (!d->configured || lengthSize < 1 || lengthSize > 4)
+        return -1;
+    H264Slice first, slice;
+    bool have = false, taken = false;
+    d->bits_len = d->slices = 0;
+    for (size_t pos = 0; pos + lengthSize <= size;) {
+        uint32_t length = 0;
+        for (unsigned i = 0; i < lengthSize; i++)
+            length = (length << 8) | data[pos + i];
+        pos += lengthSize;
+        if (!length || length > size - pos)
+            return taken ? 1 : -1;
+        const uint8_t *nal = data + pos;
+        pos += length;
+        const uint8_t type = nal[0] & 0x1f;
+        const bool isSlice = type == H264_NAL_SLICE || type == H264_NAL_IDR;
+        if (!isSlice && type != H264_NAL_SPS && type != H264_NAL_PPS)
+            continue;
+        if (isSlice && h264_parse_slice(&d->sets, nal, length, &slice))
+            return taken ? 1 : -1;
+        if (have && (!isSlice || h264_slice_new_picture(&first, &slice))) {
+            const int ret = finishPicture(d, &first, token, reorder);
+            if (ret < 0)
+                return taken ? 1 : ret;
+            taken |= ret == 1;
+            have = false;
+            d->bits_len = d->slices = 0;
+            if (taken && isSlice && !h264_dpb_second_field(&d->dpb, &slice))
+                return 1;
+        }
+        if (!isSlice) {
+            if (h264_decoder_parameter_set(d, nal, length))
+                return taken ? 1 : -1;
+            continue;
+        }
+        if (!have)
+            first = slice;
+        have = true;
+        if (appendSlice(d, nal, length))
+            return taken ? 1 : -1;
+    }
+    if (have) {
+        const int ret = finishPicture(d, &first, token, reorder);
+        if (ret < 0)
+            return taken ? 1 : ret;
+        taken |= ret == 1;
+    }
+    return taken;
 }

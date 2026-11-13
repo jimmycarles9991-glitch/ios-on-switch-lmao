@@ -9,6 +9,7 @@
 #include <stdint.h>
 #include <string.h>
 #include "TegraVICConfig.h"
+#include "SwitchSurfaceColor.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -79,15 +80,32 @@ _Static_assert(offsetof(TegraVICRequest, dst_x) == 0x60 && offsetof(TegraVICRequ
 // What the kernel reads from an IOSurface (TegraVICSurface.cpp), or what the host test makes up.
 typedef struct {
     uint32_t fourcc, width, height, planes;
-    uint64_t planeOffset[2], planeBytesPerRow[2], planeWidth[2], planeHeight[2];
+    uint64_t planeOffset[TEGRA_VIC_MAX_PLANES], planeBytesPerRow[TEGRA_VIC_MAX_PLANES];
+    uint64_t planeWidth[TEGRA_VIC_MAX_PLANES], planeHeight[TEGRA_VIC_MAX_PLANES];
     uint64_t length;      // the surface's memory descriptor
     uint64_t protection;  // IOSurface protection options
+    uint32_t colorMatrix, transfer, primaries, chromaTop, chromaBottom;
 } TegraVICSurfaceDesc;
 
-// Colour standard of an untagged 4:2:0 surface: BT.709 for HD sizes, BT.601 below (CoreVideo's default).
-static inline uint32_t tegra_vic_standard_for(uint32_t width, uint32_t height)
+enum {
+    SWITCH_VIC_MATRIX_UNTAGGED,
+    SWITCH_VIC_MATRIX_601,
+    SWITCH_VIC_MATRIX_709,
+    SWITCH_VIC_MATRIX_2020,
+    SWITCH_VIC_MATRIX_UNSUPPORTED
+};
+
+static inline uint32_t switch_vic_matrix_tag(const char *tag)
 {
-    return (width >= 1280 || height >= 720) ? TEGRA_VIC_YCC_709 : TEGRA_VIC_YCC_601;
+    if (!tag)
+        return SWITCH_VIC_MATRIX_UNTAGGED;
+    if (!strcmp(tag, "ITU_R_601_4"))
+        return SWITCH_VIC_MATRIX_601;
+    if (!strcmp(tag, "ITU_R_709_2"))
+        return SWITCH_VIC_MATRIX_709;
+    if (!strcmp(tag, "ITU_R_2020"))
+        return SWITCH_VIC_MATRIX_2020;
+    return SWITCH_VIC_MATRIX_UNSUPPORTED;
 }
 
 // Bytes of the surface's memory the engine may touch: the end of its furthest plane.
@@ -95,7 +113,9 @@ static inline uint64_t tegra_vic_surface_extent(const TegraVICSurfaceDesc *d)
 {
     uint64_t end = 0;
     const uint32_t planes = d->planes ? d->planes : 1;  // a surface without a plane array is one plane
-    for (uint32_t p = 0; p < planes && p < 2; p++) {
+    for (uint32_t p = 0; p < planes && p < TEGRA_VIC_MAX_PLANES; p++) {
+        if (d->planeHeight[p] && d->planeBytesPerRow[p] > (UINT64_MAX - d->planeOffset[p]) / d->planeHeight[p])
+            return UINT64_MAX;
         const uint64_t e = d->planeOffset[p] + d->planeBytesPerRow[p] * d->planeHeight[p];
         if (e > end)
             end = e;
@@ -114,18 +134,27 @@ static inline const char *tegra_vic_image_from(const TegraVICSurfaceDesc *d, uin
         return "plane count does not match the pixel format";
     im->width = d->width;
     im->height = d->height;
-    const uint64_t extent = tegra_vic_surface_extent(d);
-    if (extent > d->length)
-        return "planes extend past the surface's memory";
-    for (uint32_t p = 0; p < im->format->planes && p < 2; p++) {
+    for (uint32_t p = 0; p < im->format->planes; p++) {
         if (d->planeBytesPerRow[p] > 0xffffffffu || d->planeHeight[p] > 0xffffffffu)
             return "plane geometry";
+        if (d->planeOffset[p] > d->length || d->planeBytesPerRow[p] * d->planeHeight[p] > d->length - d->planeOffset[p])
+            return "planes extend past the surface's memory";
+        if (window > UINT64_MAX - d->planeOffset[p])
+            return "plane address overflow";
         im->pitch[p] = (uint32_t)d->planeBytesPerRow[p];
         im->rows[p] = (uint32_t)d->planeHeight[p];
         im->base[p] = window + d->planeOffset[p];
         im->span[p] = d->length - d->planeOffset[p];
     }
-    im->standard = tegra_vic_standard_for(d->width, d->height);
+    if (im->format->kind != TEGRA_VIC_KIND_RGB && d->colorMatrix >= SWITCH_VIC_MATRIX_UNSUPPORTED)
+        return "unsupported YCbCr matrix attachment";
+    // Untagged surfaces use BT.601; dimensions never override producer color metadata.
+    im->standard = d->colorMatrix ? d->colorMatrix - 1 : TEGRA_VIC_YCC_601;
+    im->transfer = d->transfer;
+    im->primaries = d->primaries;
+    if (im->format->kind != TEGRA_VIC_KIND_RGB &&
+        !switch_surface_chroma_site(d->chromaTop, d->chromaBottom, &im->chromaSite))
+        return "unsupported chroma location attachment";
     return NULL;  // NOLINT(modernize-use-nullptr): C too (vic_host.c)
 }
 
@@ -152,20 +181,22 @@ static inline void tegra_vic_rgb_fill(TegraVICOp *op, uint32_t r8, uint32_t g8, 
     op->fillAlpha10 = a8 >= 255 ? 1023 : a8 << 2;
 }
 
-// A fill of a 4:2:0 surface covers whole chroma samples: its rectangle widened to even coordinates (Apple's driver
-// rounds a border fill the same way), within the surface.
+// A fill of a subsampled surface covers whole chroma samples: its rectangle widened to even coordinates on each
+// subsampled axis (Apple's driver rounds a border fill the same way), within the surface.
 static inline void tegra_vic_even_rect(const TegraVICFormat *f, const TegraVICSurfaceDesc *d, TegraVICOp *o)
 {
-    if (!f->subsampled)
+    if (!f->subX && !f->subY)
         return;
-    const uint32_t x0 = o->dstX & ~1u;
-    const uint32_t y0 = o->dstY & ~1u;
-    uint32_t x1 = (o->dstX + o->dstW + 1) & ~1u;
-    uint32_t y1 = (o->dstY + o->dstH + 1) & ~1u;
+    const uint32_t mx = f->subX ? ~1u : ~0u;
+    const uint32_t my = f->subY ? ~1u : ~0u;
+    const uint32_t x0 = o->dstX & mx;
+    const uint32_t y0 = o->dstY & my;
+    uint32_t x1 = (o->dstX + o->dstW + (f->subX ? 1 : 0)) & mx;
+    uint32_t y1 = (o->dstY + o->dstH + (f->subY ? 1 : 0)) & my;
     if (x1 > d->width)
-        x1 = d->width & ~1u;
+        x1 = d->width & mx;
     if (y1 > d->height)
-        y1 = d->height & ~1u;
+        y1 = d->height & my;
     o->dstX = x0;
     o->dstY = y0;
     o->dstW = x1 > x0 ? x1 - x0 : 0;
@@ -190,8 +221,6 @@ static inline const char *tegra_vic_plan(const TegraVICRequest *r, const TegraVI
         return "HDR or film grain (capabilities say no)";
     if (f & TEGRA_VIC_REQ_COLOR_REMAP)
         return "colour remap (capabilities say no)";
-    if (r->src_event_port || r->dst_event_port)
-        return "shared events";
     const TegraVICFormat *df = tegra_vic_format(dst->fourcc);
     const bool writeOnly = (f & TEGRA_VIC_REQ_WRITE_ONLY) != 0;
     if (!df || (!writeOnly && !tegra_vic_format(src->fourcc)))

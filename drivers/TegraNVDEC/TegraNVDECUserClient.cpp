@@ -17,10 +17,20 @@
 #include <IOKit/IOService.h>
 #include <IOKit/IOUserClient.h>
 #include <string.h>
+#include "../TegraGM20B/SwitchGpuBacking.h"
 #include "../TegraVIC/TegraVICPresent.h"
+#include "SwitchNVDECCompletions.h"
+#include "SwitchNVDECOutput.h"
+#include "SwitchNVDECPark.h"
+#include "SwitchNVDECProbeABI.h"
 #include "TegraNVDEC.h"
 #include "nvidia/nvdec_drv.h"
 #include "../../kits/SwitchDMA/SwitchDcache.h"
+#include "../../kits/SwitchRefusal/SwitchRefusal.h"
+
+#if SWITCH_NVDEC_PROBES
+extern "C" void switch_native_surface_publications(uint64_t *published, uint64_t *allocated) __attribute__((weak));
+#endif
 
 namespace {
 constexpr uint32_t kMaxBuffers = 64, kMaxConnections = 16;
@@ -51,27 +61,49 @@ class AppleD5500UserClient : public IOUserClient {
     // NOLINTNEXTLINE(misc-explicit-constructor): IOKit's structors macro declares the metaclass constructor
     OSDeclareDefaultStructors(AppleD5500UserClient)
 
-        struct Buffer {
-        uint32_t handle;  // 0: slot free
-        TegraNVDECBlock block;
-        IOMemoryMap *map;  // the buffer in the task that allocated it
-    };
+        using Buffer = SwitchNVDECBuffer;
 
     IOLock *lock_ = nullptr;
+    SwitchNVDECCompletions *completions_ = nullptr;
     Buffer buffers_[kMaxBuffers] = {};
+    SwitchNVDECPark park_ = {};
+#if SWITCH_NVDEC_PROBES
+    uint64_t recycles_ = 0, exports_ = 0, exportObjects_ = 0;
+    IOReturn bufferStats(uint32_t inSize, void *out, uint32_t *outSize) const;
+#endif
+    alignas(8) uint8_t input_[sizeof(TegraNVDECSubmit)] = {};  // under lock_: the record of a locked call
     uint32_t nextHandle_ = 1, lastFence_ = 0;
     bool submitted_ = false, counted_ = false;
+#if SWITCH_NVDEC_PROBES
+    bool displayProbe_ = false;
+    IOReturn armDisplayProbe(const void *in, uint32_t inSize, uint32_t *outSize);
+#endif
 
     Buffer *find(uint32_t handle);
     bool quiesce() const;
+    bool bufferIdle(const Buffer &b) const;
     static void drop(Buffer *b, bool returnMemory);
+    void dropAll(bool returnMemory);
+    // Wait and the probe arm take lock_ themselves; every other method runs with the caller holding it.
     IOReturn run(uint32_t method, const void *in, uint32_t inSize, void *out, uint32_t *outSize);
     static bool resolve(void *context, uint32_t handle, TegraNVDECBlock *block);
+
+    static IOReturn sendCompletion(OSAsyncReference64 reference, IOReturn result, io_user_reference_t *arguments,
+                                   UInt32 count)
+    {
+        return sendAsyncResult64(reference, result, arguments, count);
+    }
+
+    static void referCompletion(OSAsyncReference64 reference, mach_port_t port, task_t task)
+    {
+        setAsyncReference64(reference, port, 0, 0, task);
+    }
 
 public:
     bool setUp()
     {
-        return (lock_ = IOLockAlloc()) != nullptr;
+        return (lock_ = IOLockAlloc()) != nullptr &&
+               (completions_ = switch_nvdec_completions_create({sendCompletion, referCompletion})) != nullptr;
     }
 
     void countConnection()
@@ -81,6 +113,7 @@ public:
 
     IOReturn clientClose() APPLE_KEXT_OVERRIDE;
     void free() APPLE_KEXT_OVERRIDE;
+    IOReturn registerNotificationPort(mach_port_t port, UInt32 type, UInt32 refCon) APPLE_KEXT_OVERRIDE;
     IOReturn externalMethod(uint32_t selector, IOExternalMethodArguments *arguments, IOExternalMethodDispatch *dispatch,
                             OSObject *target, void *reference) APPLE_KEXT_OVERRIDE;
 };
@@ -105,12 +138,24 @@ bool AppleD5500UserClient::resolve(void *context, uint32_t handle, TegraNVDECBlo
 }
 
 // The connection's jobs are done (or the engine is wedged and will never touch memory again before a resume resets it).
+// A cancelled job (-5) is done too: its engine was reset with its memory client flushed before it failed.
 bool AppleD5500UserClient::quiesce() const
 {
     if (!submitted_)
         return true;
     const int ret = tegra_nvdec_wait(lastFence_);
-    return ret == 0 || !tegra_nvdec_ready();
+    return ret == 0 || ret == -5 || !tegra_nvdec_ready();
+}
+
+// A buffer no NVDEC job still uses goes at once, whatever else of the connection runs; one a job uses, once the
+// connection's jobs are done (quiesce). A VIC copy or a scanout still reading it holds its own reference to the pages.
+bool AppleD5500UserClient::bufferIdle(const Buffer &b) const
+{
+    uint32_t engines = 0, owners = 0;
+    if (!switch_gpu_backing_pending(b.block.backing, SWITCH_GPU_BACKING_WRITE, &engines, &owners) &&
+        !(engines & (1u << SWITCH_GPU_ENGINE_NVDEC)))
+        return true;
+    return quiesce();
 }
 
 // The client's mappings of the buffer are revoked before its pages can go to anyone else. A buffer a wedged job may
@@ -126,16 +171,46 @@ void AppleD5500UserClient::drop(Buffer *b, bool returnMemory)
     *b = {};
 }
 
+IOReturn AppleD5500UserClient::registerNotificationPort(mach_port_t port, UInt32 type, UInt32 refCon)
+{
+    (void)refCon;
+    // A refused port's right is the MIG server's to destroy: it does so when this returns an error.
+    if (type != SWITCH_NVDEC_COMPLETION_PORT || !completions_)
+        return kIOReturnBadArgument;
+    return switch_nvdec_completions_listen(completions_, port, current_task());
+}
+
+// The parked buffers too (SwitchNVDECPark.h).
+void AppleD5500UserClient::dropAll(bool returnMemory)
+{
+    for (Buffer &b : buffers_) {
+        if (b.handle)
+            drop(&b, returnMemory);
+    }
+    switch_nvdec_park_drop(&park_, returnMemory);
+}
+
 IOReturn AppleD5500UserClient::clientClose()
 {
+    if (completions_)
+        switch_nvdec_completions_close(completions_);
     IOLockLock(lock_);
     const bool idle = quiesce();
     if (!idle)
         IOLog("TegraNVDEC: a closing client's job never finished; its buffers stay wired\n");
-    for (Buffer &b : buffers_) {
-        if (b.handle)
-            drop(&b, idle);
+#if SWITCH_NVDEC_PROBES
+    if (recycles_) {
+        uint64_t published = 0, objects = 0;
+        if (switch_native_surface_publications)
+            switch_native_surface_publications(&published, &objects);
+        IOLog("TegraNVDEC: client closed: %llu recycles, %llu of an exported picture's buffer: %llu took a parked "
+              "buffer, %llu allocated one (%u parked at most); %llu exports, %llu new surface objects; since boot %llu "
+              "native publications, %llu new surface objects\n",
+              recycles_, park_.recycled, park_.taken, park_.allocated, park_.most, exports_, exportObjects_, published,
+              objects);
     }
+#endif
+    dropAll(idle);
     IOLockUnlock(lock_);
     terminate();
     return kIOReturnSuccess;
@@ -144,17 +219,43 @@ IOReturn AppleD5500UserClient::clientClose()
 void AppleD5500UserClient::free()
 {
     if (lock_) {
-        for (Buffer &b : buffers_) {
-            if (b.handle)
-                drop(&b, quiesce());
-        }
+        dropAll(quiesce());
         IOLockFree(lock_);
         lock_ = nullptr;
     }
+    switch_nvdec_completions_release(completions_);
+    completions_ = nullptr;
     if (counted_)
         __atomic_sub_fetch(&gConnections, 1, __ATOMIC_SEQ_CST);
     IOUserClient::free();
 }
+
+#if SWITCH_NVDEC_PROBES
+IOReturn AppleD5500UserClient::armDisplayProbe(const void *in, uint32_t inSize, uint32_t *outSize)
+{
+    const auto *probe = static_cast<const SwitchNVDECDisplayProbe *>(in);
+    if (inSize != sizeof(*probe) || !probe || probe->op != SwitchNVDECDisplayProbeArm || probe->reserved)
+        return kIOReturnBadArgument;
+    *outSize = 0;
+    IOLockLock(lock_);
+    displayProbe_ = true;
+    IOLockUnlock(lock_);
+    return kIOReturnSuccess;
+}
+#endif
+
+#if SWITCH_NVDEC_PROBES
+// Under lock_, as every method but Wait.
+IOReturn AppleD5500UserClient::bufferStats(uint32_t inSize, void *out, uint32_t *outSize) const
+{
+    if (inSize || !out || *outSize < sizeof(SwitchNVDECBufferStats))
+        return kIOReturnBadArgument;
+    *static_cast<SwitchNVDECBufferStats *>(out) = {recycles_, park_.recycled, park_.taken, park_.allocated,
+                                                   exports_,  exportObjects_, park_.most,  0};
+    *outSize = sizeof(SwitchNVDECBufferStats);
+    return kIOReturnSuccess;
+}
+#endif
 
 IOReturn AppleD5500UserClient::run(uint32_t method, const void *in, uint32_t inSize, void *out, uint32_t *outSize)
 {
@@ -168,9 +269,17 @@ IOReturn AppleD5500UserClient::run(uint32_t method, const void *in, uint32_t inS
         {sizeof(TegraNVDECSubmit), sizeof(TegraNVDECFence)},
         {sizeof(TegraNVDECWait), 0},
         {sizeof(TegraNVDECPresent), 0},
+        {sizeof(TegraNVDECBuffer), sizeof(TegraNVDECBufferReply)},
+        {sizeof(TegraNVDECPresent), 0},
     };
 
-    if (method < TegraNVDECMethodGetInfo || method > TegraNVDECMethodPresent || inSize != kSizes[method].in ||
+#if SWITCH_NVDEC_PROBES
+    if (method == SwitchNVDECMethodDisplayProbe)
+        return armDisplayProbe(in, inSize, outSize);
+    if (method == SwitchNVDECMethodBufferStats)
+        return bufferStats(inSize, out, outSize);
+#endif
+    if (method < TegraNVDECMethodGetInfo || method > SwitchNVDECMethodExport || inSize != kSizes[method].in ||
         *outSize < kSizes[method].out || (inSize && !in) || (kSizes[method].out && !out))
         return kIOReturnBadArgument;
     *outSize = kSizes[method].out;
@@ -198,7 +307,6 @@ IOReturn AppleD5500UserClient::run(uint32_t method, const void *in, uint32_t inS
         return result;
     }
 
-    IOLockLock(lock_);
     IOReturn ret = kIOReturnSuccess;
     switch (method) {
     case TegraNVDECMethodGetInfo: {
@@ -208,7 +316,10 @@ IOReturn AppleD5500UserClient::run(uint32_t method, const void *in, uint32_t inS
         info->nvdec_version = 0x20;
         info->codecs = tegra_nvdec_codecs();
         info->max_width = info->max_height = 4096;
-        info->features = tegra_vic_present_ready() ? TEGRA_NVDEC_FEATURE_PRESENT : 0;
+        info->features = TEGRA_NVDEC_FEATURE_COMPLETION | (tegra_vic_present_ready() ? TEGRA_NVDEC_FEATURE_PRESENT : 0);
+        if (switch_nvdec_native_output_ready())
+            info->features |= SWITCH_NVDEC_FEATURE_NATIVE_OUTPUT;
+        info->jobs_in_flight = SwitchNVDECQueue::kSlots;
         tegra_nvdec_memory_usage(&info->memory_limit, &info->memory_free);
         break;
     }
@@ -252,11 +363,12 @@ IOReturn AppleD5500UserClient::run(uint32_t method, const void *in, uint32_t inS
             ret = kIOReturnBadArgument;
             break;
         }
-        drop(b, quiesce());
+        drop(b, bufferIdle(*b));
         break;
     }
     case TegraNVDECMethodSubmit: {
         uint32_t fence = 0;
+        bool waitedForRoom = false;
         const char *why = nullptr;
         const TegraNVDECSubmit *submit = static_cast<const TegraNVDECSubmit *>(in);
         int err = -22;
@@ -265,12 +377,30 @@ IOReturn AppleD5500UserClient::run(uint32_t method, const void *in, uint32_t inS
         const bool tenBit = submit->codec == TEGRA_NVDEC_CODEC_HEVC &&
                             submit->setup_bytes >= sizeof(nvdec_hevc_pic_s) &&
                             reinterpret_cast<const nvdec_hevc_pic_s *>(submit->setup)->bit_depth_luma > 8;
+#if SWITCH_NVDEC_PROBES
+        const bool probe = displayProbe_;
+        displayProbe_ = false;
+#endif
+        SwitchNVDECCompletion completion = {};
+        if (const int armed = switch_nvdec_completions_arm(completions_, submit, resolve, this, &completion)) {
+            ret = ioreturn(armed);
+            break;
+        }
         if (submit->codec < 32 && (codecs & (1u << submit->codec)) && (!tenBit || (codecs & TEGRA_NVDEC_HEVC_MAIN10))) {
-            err = tegra_nvdec_run(submit, resolve, this, &fence, &why);
+#if SWITCH_NVDEC_PROBES
+            if (probe) {
+                err = switch_nvdec_run_display_probe(submit, resolve, this, &completion, &fence, &waitedForRoom, &why);
+                IOLog("TegraNVDEC: display-buffer probe: mode %u submit %s (%d)\n",
+                      reinterpret_cast<const nvdec_hevc_pic_s *>(submit->setup)->disp_output_mode,
+                      err ? (why ? why : "failed") : "queued", err);
+            } else
+#endif
+                err = tegra_nvdec_run(submit, resolve, this, &completion, &fence, &waitedForRoom, &why);
         } else {
             why = "codec not decoded on NVDEC";
         }
         if (err) {
+            switch_nvdec_completions_disarm(&completion);
             static volatile int logged;
             if (why &&
                 !__atomic_exchange_n(&logged, 1, __ATOMIC_SEQ_CST))  // one line per boot is enough to debug a client
@@ -282,51 +412,61 @@ IOReturn AppleD5500UserClient::run(uint32_t method, const void *in, uint32_t inS
         lastFence_ = fence;
         TegraNVDECFence *reply = static_cast<TegraNVDECFence *>(out);
         reply->fence = fence;
-        reply->reserved = 0;
+        reply->flags = waitedForRoom ? SWITCH_NVDEC_FENCE_WAITED_FOR_ROOM : 0;
+        break;
+    }
+    case SwitchNVDECMethodBufferRecycle: {
+        const auto *request = static_cast<const TegraNVDECBuffer *>(in);
+        auto *buffer = find(request->handle);
+#if SWITCH_NVDEC_PROBES
+        ++recycles_;
+#endif
+        ret = !buffer || request->reserved ? kIOReturnBadArgument
+                                           : ioreturn(switch_nvdec_output_recycle(buffer, current_task(), &park_));
+        if (!ret)
+            *static_cast<TegraNVDECBufferReply *>(out) = {buffer->handle, 0, buffer->block.size,
+                                                          buffer->map->getAddress()};
+        break;
+    }
+    case SwitchNVDECMethodExport: {
+        const auto *request = static_cast<const TegraNVDECPresent *>(in);
+        const auto *buffer = find(request->handle);
+        SwitchNVDECExportRefusal refusal = {"native export of a buffer the connection does not hold", 0, 0, 0};
+        bool fresh = false;
+        const int error =
+            buffer ? switch_nvdec_output_export(&buffer->block, request, current_task(), &refusal, &fresh) : -22;
+#if SWITCH_NVDEC_PROBES
+        exports_ += !error;
+        exportObjects_ += !error && fresh;
+#endif
+        if (error) {
+            const uint64_t key =
+                switch_refusal_key_with(switch_refusal_key("TegraNVDEC", refusal.why), uint32_t(error));
+            switch_refusal_k(key, "TegraNVDEC", refusal.why,
+                             "a %ux%u %u-bit picture stays VIC's copy into surface %u (%d): allocation %llu bytes, "
+                             "descriptor %llu, base offset %llu",
+                             request->width, request->height, request->sample_bytes * 8, request->surface_id, error,
+                             refusal.allocationBytes, refusal.descriptorBytes, refusal.baseOffset);
+        }
+        ret = error == -95 ? kIOReturnUnsupported : ioreturn(error);
         break;
     }
     case TegraNVDECMethodPresent: {
-        // Under the connection's lock: the buffer cannot be freed while VIC reads it.
-        const TegraNVDECPresent *p = static_cast<const TegraNVDECPresent *>(in);
-        const Buffer *b = find(p->handle);  // NOLINT(clang-analyzer-core.NullDereference): input size checked above
-        const uint64_t luma = static_cast<uint64_t>(p->pitch) * p->rows;
-        const uint64_t picture = static_cast<uint64_t>(p->chroma_offset) + luma / 2;
-        if (!b) {
-            ret = kIOReturnBadArgument;
+        const auto *request = static_cast<const TegraNVDECPresent *>(in);
+        const auto *buffer = find(request->handle);
+        TegraVICPicture picture = {};
+        const int checked = switch_nvdec_output_picture(buffer ? &buffer->block : nullptr, request, &picture);
+        if (checked) {
+            if (buffer)
+                switch_dcache_clean_invalidate(buffer->block.va, buffer->block.size);
+            ret = ioreturn(checked);
             break;
         }
-        if (!p->pitch || p->pitch % 64 || !p->rows || p->rows % 32 || p->block_height_log2 != 1 ||
-            p->chroma_offset % 256 || p->chroma_offset < luma || picture > b->block.size ||
-            (p->sample_bytes != 1 && p->sample_bytes != 2) || p->reserved ||
-            (static_cast<uint64_t>(p->crop_x) + p->width) * p->sample_bytes > p->pitch ||
-            static_cast<uint64_t>(p->crop_y) + p->height > p->rows) {
-            // As for any refusal: the caller copies on the CPU.
-            switch_dcache_clean_invalidate(b->block.va, b->block.size);
-            ret = kIOReturnBadArgument;
-            break;
-        }
-        TegraVICPicture vic;
-        vic.pages = b->block.pages.pages;
-        vic.pageCount = b->block.pages.count;
-        vic.bytes = picture;
-        vic.pitch = p->pitch;
-        vic.rows = p->rows;
-        vic.chromaOffset = p->chroma_offset;
-        vic.blockHeightLog2 = p->block_height_log2;
-        vic.cropX = p->crop_x;
-        vic.cropY = p->crop_y;
-        vic.width = p->width;
-        vic.height = p->height;
-        vic.dstX = p->dst_x;
-        vic.dstY = p->dst_y;
-        vic.surfaceID = p->surface_id;
-        vic.sampleBytes = p->sample_bytes;
         const char *why = nullptr;
-        const int err = tegra_vic_present(&vic, current_task(), &why);
-        if (err) {
-            // The caller copies the picture on the CPU now: it must read DRAM (what NVDEC wrote), as after Wait.
-            switch_dcache_clean_invalidate(b->block.va, picture);
-            ret = (err == -22 || err == -12) ? ioreturn(err) : kIOReturnUnsupported;
+        const int error = tegra_vic_present(&picture, current_task(), &why);
+        if (error) {
+            switch_dcache_clean_invalidate(buffer->block.va, picture.bytes);
+            ret = (error == -22 || error == -12) ? ioreturn(error) : kIOReturnUnsupported;
         }
         break;
     }
@@ -334,9 +474,14 @@ IOReturn AppleD5500UserClient::run(uint32_t method, const void *in, uint32_t inS
         ret = kIOReturnUnsupported;
         break;
     }
-    IOLockUnlock(lock_);
     return ret;
 }
+
+#if SWITCH_NVDEC_PROBES
+static constexpr uint32_t kUnlockedProbe = SwitchNVDECMethodDisplayProbe;
+#else
+static constexpr uint32_t kUnlockedProbe = TegraNVDECMethodWait;
+#endif
 
 IOReturn AppleD5500UserClient::externalMethod(uint32_t selector, IOExternalMethodArguments *arguments,
                                               IOExternalMethodDispatch *dispatch, OSObject *target, void *reference)
@@ -350,17 +495,26 @@ IOReturn AppleD5500UserClient::externalMethod(uint32_t selector, IOExternalMetho
         return kIOReturnBadArgument;
     if (header[1] == TEGRA_NVDEC_TUNNEL_PROBE)
         return kIOReturnSuccess;
-    // Records are naturally aligned structs and the caller's buffer may not be: copy the input (Submit is the largest).
+    // Records are naturally aligned structs and the caller's buffer may not be: each is copied, a Wait (which sleeps
+    // without the lock) onto the stack, every other call into the connection's own record under the lock.
+    const uint32_t method = header[1];
     const uint32_t inSize = arguments->structureInputSize - 8;
-    void *copy = inSize ? IOMallocData(inSize) : nullptr;
-    if (inSize && !copy)
-        return kIOReturnNoMemory;
-    if (inSize)
-        memcpy(copy, header + 2, inSize);
     uint32_t outSize = arguments->structureOutputSize;
-    const IOReturn ret = run(header[1], copy, inSize, arguments->structureOutput, &outSize);
-    if (copy)
-        IOFreeData(copy, inSize);
+    IOReturn ret;
+    if (method == TegraNVDECMethodWait || method == kUnlockedProbe) {
+        alignas(8) uint8_t record[sizeof(TegraNVDECWait)];
+        if (inSize > sizeof(record))
+            return kIOReturnBadArgument;
+        memcpy(record, header + 2, inSize);
+        ret = run(method, record, inSize, arguments->structureOutput, &outSize);
+    } else {
+        if (inSize > sizeof(input_))
+            return kIOReturnBadArgument;
+        IOLockLock(lock_);
+        memcpy(input_, header + 2, inSize);
+        ret = run(method, inSize ? input_ : nullptr, inSize, arguments->structureOutput, &outSize);
+        IOLockUnlock(lock_);
+    }
     arguments->structureOutputSize = ret ? 0 : outSize;
     return ret;
 }
@@ -427,6 +581,8 @@ extern "C" int tegra_nvdec_publish(void)
     service->setProperty(TEGRA_NVDEC_DECODES_H264, (codecs & (1u << TEGRA_NVDEC_CODEC_H264)) != 0);
     service->setProperty(TEGRA_NVDEC_DECODES_VP9, (codecs & (1u << TEGRA_NVDEC_CODEC_VP9)) != 0);
     service->setProperty(TEGRA_NVDEC_DECODES_HEVC, (codecs & (1u << TEGRA_NVDEC_CODEC_HEVC)) != 0);
+    service->setProperty(TEGRA_NVDEC_DECODES_MPEG4, (codecs & (1u << TEGRA_NVDEC_CODEC_MPEG4)) != 0);
+    service->setProperty(TEGRA_NVDEC_DECODES_MPEG2, (codecs & (1u << TEGRA_NVDEC_CODEC_MPEG12)) != 0);
     if (!service->attach(resources)) {
         service->release();
         IOLog("TegraNVDEC: N3 FAIL could not attach the service\n");

@@ -1,5 +1,8 @@
 // SPDX-License-Identifier: MIT
 #import "RawMetalInternal.h"
+#import "RawMetalResolveAsk.h"
+#include "../fx/fx_mip_probe.h"
+#include "../fx/fx_mip_route.h"
 
 bool bufferRows(uint64_t offset, uint64_t bytesPerRow, uint32_t rows, uint32_t rowBytes, uint32_t bpp, bool intoTexture,
                 BufferRows &out)
@@ -79,7 +82,7 @@ static bool inElements(RMTexture *t, MTLOrigin &o, MTLSize &size)
 // In elements (inElements)
 static bool copySideOk(RMTexture *t, NSUInteger slice, NSUInteger level, MTLOrigin o, MTLSize size)
 {
-    if (!t->_rawOk || t->_raw.memoryless || !inElements(t, o, size))
+    if (!t->_rawOk || t->_raw.memoryless || t->_raw.samples > 1 || !inElements(t, o, size))
         return false;
     raw::Texture view;
     if (level && (level >= raw::fx::kMaxLevels || !raw::chainLevelImage(t->_raw, uint32_t(level), view)))
@@ -113,9 +116,7 @@ static MTLSize levelSize(id<MTLTexture> t, NSUInteger level)
 
 static NSUInteger sliceCount(id<MTLTexture> t)
 {
-    const MTLTextureType type = t.textureType;
-    return (type == MTLTextureTypeCube || type == MTLTextureTypeCubeArray ? 6 : 1) *
-           std::max<NSUInteger>(1, t.arrayLength);
+    return raw::textureLayers(uint32_t(t.textureType), uint32_t(std::min<NSUInteger>(t.arrayLength, 2048)));
 }
 
 // The levels a whole-texture copy starts at: the smaller's first, and the larger's of its size. False: neither has a level
@@ -166,13 +167,16 @@ static bool sameSizeLevels(id<MTLTexture> s, id<MTLTexture> d, NSUInteger &sl, N
         [_cb takeReason:WhyTexture why:@"a texture copy the raw path does not do (levels, slices, formats)"];
         hit(_cb, PredBlitTexCopy, ss | sl << 8 | ds << 16 | dl << 24,
             uint64_t(size.width) << 32 | uint32_t(size.height));
-    } else if (a->_raw.converted() || b->_raw.converted()) {
-        // Metal's copies move a planar texture's planes' bytes: m2v's
+    } else if (const bool from = a->_raw.converted() || a->_raw.xrPlanes, to = b->_raw.converted() || b->_raw.xrPlanes;
+               from || to) {
+        // Metal's copies move a planar texture's planes' bytes, an RGB10A8_2P_XR10 surface texture's both planes at plane
+        // 0's rows (m2v two_planes.rs): m2v's
         [_cb takeReason:WhyTexture why:@"a copy to or from a planar texture"];
-        hit(_cb, PredEncPlanarCopy, a->_raw.converted(), b->_raw.converted());
+        hit(_cb, PredEncPlanarCopy, from, to);
     }
     [_cb retain:s];
     [_cb retain:d];
+    noteReadAsData(s);
     if ([(id)d isKindOfClass:[RMTexture class]])
         declareGpuWrites((RMTexture *)d);
     Cmd m = cmd(OpCopyTexture);
@@ -413,6 +417,7 @@ static bool sameSizeLevels(id<MTLTexture> s, id<MTLTexture> d, NSUInteger &sl, N
     }
     [_cb retain:s];
     [_cb retain:d];
+    noteReadAsData(s);
     Cmd m = cmd(OpCopyTextureToBuffer);
     m.obj = (__bridge void *)s;
     m.obj2 = (__bridge void *)d;
@@ -422,6 +427,17 @@ static bool sameSizeLevels(id<MTLTexture> s, id<MTLTexture> d, NSUInteger &sl, N
         ss, sl, uint64_t(so.x) | uint64_t(so.y) << 32, so.z, size.width, size.height, size.depth, dof, row, image};
     _cb->_extra.insert(_cb->_extra.end(), e, e + 10);
     [_cb record:m];
+}
+
+// Whether generateMipmaps of `t`'s chain takes a step on the 3D engine (encodeMipmaps' route)
+static bool threeDSteps(const raw::Texture &t)
+{
+    bool threeD = false;
+    raw::fx::eachMipRun(t.chain->layout, t.chain->fmt2d != 0, gRM->raw->mipPipeline(t.format) != nullptr,
+                        [&](const raw::fx::MipRun &run) {
+                            threeD |= run.engine == raw::fx::MipEngine::ThreeD;
+                        });
+    return threeD;
 }
 
 - (void)generateMipmapsForTexture:(id<MTLTexture>)t
@@ -436,8 +452,63 @@ static bool sameSizeLevels(id<MTLTexture> s, id<MTLTexture> d, NSUInteger &sl, N
                !gRM->raw->mipPipeline(x->_raw.format)) {  // (the 3D engine's passes: mipPasses)
         [_cb takeReason:WhyMipmaps why:@"generateMipmapsForTexture of a format neither engine filters"];
         hit(_cb, PredMipmapsFormat, t.pixelFormat, t.mipmapLevelCount);
+    } else if (x->_raw.type == raw::fx::kTexThreeD || (x->_raw.chain->layout.layers > 1 && threeDSteps(x->_raw))) {
+        // the 2D engine halves each layer in place (fx::emitGenerateLayers); the 3D engine's passes draw one 2D layer
+        [_cb takeReason:WhyMipmaps why:@"generateMipmapsForTexture of a 3D texture, or of layers the 3D engine steps"];
+        hit(_cb, PredMipmaps, t.pixelFormat, t.mipmapLevelCount);
     }
-    setBinding(_cb, OpMipmaps, 0, 0, t, 0);
+    uint64_t probe2d = 0;
+#if SWITCH_RAW_DIAGNOSTICS
+    if (x && x->_rawOk && x->_raw.chain && !x->_raw.chain->fmt2d &&
+        gRM->raw->probeMipCandidates.load(std::memory_order_acquire))
+        probe2d = raw::fx::twodCandidateFormat(x->_raw.format);
+#endif
+    setBinding(_cb, OpMipmaps, 0, 0, t, probe2d);
+}
+
+// fillTexture:level:slice:region:color: (SPI): level 0, slice 0 of a one-sample 2D texture the raw path renders, its
+// colour in the texture's own format; drawn at encode (fillTexturePass)
+- (void)fillTexture:(id<MTLTexture>)t
+              level:(NSUInteger)level
+              slice:(NSUInteger)slice
+             region:(MTLRegion)region
+              color:(MTLClearColor)color
+{
+    RMTexture *x = [(id)t isKindOfClass:[RMTexture class]] ? (RMTexture *)t : nil;
+    if (x)
+        declareGpuWrites(x);
+    if (!x || !x->_rawOk || level || slice || x->_kind == RMTextureView || t.textureType != MTLTextureType2D ||
+        t.sampleCount > 1 || !x->_raw.renderable || region.origin.z || region.size.depth != 1 ||
+        region.origin.x + region.size.width > x->_raw.width || region.origin.y + region.size.height > x->_raw.height) {
+        [_cb takeReason:WhyTexture why:@"a texture fill the raw path does not draw (level, slice, view or region)"];
+        hit(_cb, PredBlitTexFill, t.pixelFormat, level);
+    }
+    [_cb retain:t];
+    Cmd m = cmd(OpFillTexture);
+    m.obj = (__bridge void *)t;
+    m.x = _cb->_extra.size();
+    const float rgba[4] = {float(color.red), float(color.green), float(color.blue), float(color.alpha)};
+    _cb->_extra.insert(_cb->_extra.end(), {region.origin.x, region.origin.y, region.size.width, region.size.height});
+    for (float v : rgba) {
+        uint32_t bits;
+        memcpy(&bits, &v, sizeof bits);
+        _cb->_extra.push_back(bits);
+    }
+    [_cb record:m];
+}
+
+- (void)fillTexture:(id<MTLTexture>)t
+              level:(NSUInteger)level
+              slice:(NSUInteger)slice
+             region:(MTLRegion)region
+              color:(MTLClearColor)color
+        pixelFormat:(MTLPixelFormat)format
+{
+    if (format != t.pixelFormat) {
+        [_cb takeReason:WhyTexture why:@"a texture fill through another pixel format"];
+        hit(_cb, PredBlitTexFill, format, t.pixelFormat);
+    }
+    [self fillTexture:t level:level slice:slice region:region color:color];
 }
 
 - (void)synchronizeResource:(id<MTLResource>)r

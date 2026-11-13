@@ -5865,22 +5865,17 @@ bad:
  * transport-encoding 3, BT_WAKE through SwitchBluetooth's /dev/btwake): plain "H4" crashed every stack terminate.
  */
 /*
- * r6-lows: CA_FORCE_TIMER=1 for backboardd (NATIVE_SWITCH_CA_VBL, a build-time switch). QuartzCore
- * 21H461 CADeviceUseVBL() (dispatch_once at 0x189582620, read at the start of CA::WindowServer::AccelServer's constructor, before
- * the Metal plug-in loads, hence the exec environment) is true only for MobileGestalt chip ids 0x7000 and 0x8010, or with this
- * variable non-zero. True, IOMFBServer::add_vsync_source takes IOMobileFramebufferGetVSyncRunLoopSource: the render server's frame
- * clock is NativeLegacyDisplay's vsync, sent from DC A's V_BLANK interrupt. False (A10X, 0x8011, this build's ADT), it makes a
- * CADisplayTimer at the nominal refresh whose phase timer_callback aligns from IOMFBDisplay::timing_reference, display+0x6530,
- * shared timing memory the legacy family never provides: a free-running 60 Hz timer at a random phase to DC A's flip latch
- * (every boot's display stats: "vsync 0 sent", flip-wait mean 4-12 ms). With VBL, IOMFBDisplay::can_update_ also waits for the
- * previous swap (IOMobileFramebufferSwapWait), which NativeLegacyDisplay retires when its GPU copy is offered.
- * r8-landscape (11-04): on. Every build so far ran on that free timer: "vsync 0 sent" in every stats line, presents a random
- * 1-4 DC A frames apart (r7l: 20/s idle from the animated Astronomy poster, "frames 2:6 3:91 4+:3"). NativeLegacyDisplay finds
- * the registration at the next frame end (watchVsync) and panics if V_BLANK stops while it is armed.
+ * No CA_FORCE_TIMER for backboardd: a J120 paces Core Animation by a CADisplayTimer, not by vsync. QuartzCore 21H461's
+ * CADeviceUseVBL (its dispatch_once block at 0x189582620) is true only with that variable non-zero or a MobileGestalt
+ * ChipID of 0x7000 or 0x8010; J120's A10X is 0x8011. AccelServer's constructor copies it into bit 1 of +0x39d
+ * (0x1895c5600), which IOMFBServer::add_vsync_source (0x189510f9c) reads: clear, it makes the CADisplayTimer whose
+ * timer_callback (0x1894f5a0c) takes its phase from IOMFBDisplay::timing_reference (0x1894f5c90). That reads timings in
+ * Core Animation's own shared memory (initialize_timings 0x1894f1770 makes it), which IOMFBDisplay::add_timing
+ * (0x1894f5dec) fills from frame info's Presentation_time; IOMFBServer::frame_info_callback (0x1894f36c0, 0x1894f3980)
+ * is its only caller. NativeLegacyDisplay answers frame info as J120's pipe does (SwitchFrameInfo.h). r6-lows forced the
+ * vsync path on 11-01 because the timer then ran at a random phase to DC A's latch: the display had no frame info until
+ * 11-07.
  */
-#ifndef NATIVE_SWITCH_CA_VBL
-#define NATIVE_SWITCH_CA_VBL 1
-#endif
 
 /*
  * r6-lows (r6h hangs, 11-01): CA_DISABLE_DETACHED=1 for backboardd whenever NativeLegacyDisplay's validator is the one: it
@@ -5914,11 +5909,7 @@ native_switch_disabled(const char *name)
 static const char *const native_switch_bluetoothd_environment[] = {
 	"BT_HCI_TRANSPORT=H4BC:POSIX:com.apple.uart.bluetooth,3000000", NULL
 };
-#if NATIVE_SWITCH_CA_VBL
-static const char *const native_switch_backboardd_vbl_environment[] = {"CA_DISABLE_DETACHED=1", "CA_FORCE_TIMER=1", NULL};
-#else
 static const char *const native_switch_backboardd_environment[] = {"CA_DISABLE_DETACHED=1", NULL};
-#endif
 
 /* The extra environment strings for imgp's executable, NULL-terminated, or NULL for none. */
 static const char *const *
@@ -5935,17 +5926,9 @@ native_switch_exec_environment(const struct image_params *imgp)
 	}
 	static const char backboardd[] = "/usr/libexec/backboardd";
 	if (!strncmp(executable, backboardd, sizeof(backboardd))) {
-		const int single = !native_legacy_detach_ready();
-#if NATIVE_SWITCH_CA_VBL
-		if (single) {
-			return native_switch_backboardd_vbl_environment;
-		}
-		return native_switch_backboardd_vbl_environment + 1;
-#else
-		if (single) {
+		if (!native_legacy_detach_ready()) {
 			return native_switch_backboardd_environment;
 		}
-#endif
 	}
 	return NULL;
 }
@@ -7815,6 +7798,12 @@ native_switch_mkdir(proc_t p, user_addr_t scratch, const char *path, uid_t owner
  * switch_console_hold keeps the console on screen instead of backboardd's progress bar (drivers/NativeMobileDisplay retires
  * the UI's frames undrawn), for at most an hour; the migration itself carries on either way. */
 volatile int switch_console_hold = 0;
+/* drivers/NativeMobileDisplay shows the compositor's current frame once the hold drops (SwitchConsoleRelease.h); weak for a
+ * kernel without the display. */
+__attribute__((weak)) void
+native_legacy_console_released(void)
+{
+}
 #define NATIVE_MIGRATION_TICK_S 15
 #define NATIVE_MIGRATION_HOLD_S 3600
 static struct {
@@ -7843,6 +7832,7 @@ native_migration_tick(thread_call_param_t p0 __unused, thread_call_param_t p1 __
 	if (!present) {
 		native_migration.active = 0;
 		switch_console_hold = 0;
+		native_legacy_console_released();
 		printf("SwitchMigration: FINISHED after %llum%02llus (%u plugin runs, %u failed): the home screen comes next\n",
 		    s / 60, s % 60, native_migration.plugins_done, native_migration.plugins_failed);
 		return;
@@ -7851,6 +7841,7 @@ native_migration_tick(thread_call_param_t p0 __unused, thread_call_param_t p1 __
 	    s / 60, s % 60, native_migration.plugins_started, native_migration.plugins_done, native_migration.plugins_failed);
 	if (switch_console_hold && s >= NATIVE_MIGRATION_HOLD_S) {
 		switch_console_hold = 0;
+		native_legacy_console_released();
 		printf("SwitchMigration: still running after %u min: the screen goes to the UI (the migration carries on)\n",
 		    NATIVE_MIGRATION_HOLD_S / 60);
 	}

@@ -20,6 +20,7 @@
 
 #include "TegraGM20BABI.h"
 #include "nvkmd_darwin_kill.h"
+#include "nvkmd_darwin_submit_state.h"
 
 #include <IOKit/IOKitLib.h>
 
@@ -106,12 +107,7 @@ struct nvkmd_darwin_exec_ctx {
    uint32_t last_seqno;  /* last submitted; 0 before the first submission */
    bool submitted;       /* an Exec of it went through (a seqno may wrap to 0) */
 
-   /* The kernel killed the channel: method 11's error, 0 while it lives. Its
-    * Execs are refused until nvkmd_darwin_ctx_reopen; `refused` is the error
-    * of the pushes given since the last signal that never ran.
-    */
-   uint32_t dead;
-   uint32_t refused;
+   struct darwin_submit_state submission;
 
    struct TegraGM20BAbiExec req;
 
@@ -163,6 +159,7 @@ struct nvkmd_darwin_sync_point {
    struct nvkmd_darwin_dev *dev;
    uint32_t channel;
    uint32_t seqno;
+   uint32_t error;
 };
 
 /* The IOSurface the next host import on this thread covers, from the Metal frontend (dlsym: the Vulkan loader opened

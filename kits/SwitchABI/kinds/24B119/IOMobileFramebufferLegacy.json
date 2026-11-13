@@ -40,6 +40,7 @@
     "313": "validateSwap",
     "324": "platformFrameInfoNotify",
     "325": "sendFrameInfo",
+    "344": "setEdrFactor",
     "358": "collectCompletionReports",
     "359": "platformRefreshRates",
     "366": "areTimingsEnabled",
@@ -47,7 +48,8 @@
   },
   "fields": {
     "displayHeight": "0x1bf4",
-    "displayWidth": "0x1bf0"
+    "displayWidth": "0x1bf0",
+    "edrScalingEnabled": "0x1db8"
   },
   "constants": {
     "frameInfoClientOwner": "0x10",
@@ -292,7 +294,8 @@
     "opaque373": "0xfffffff009982070",
     "opaque374": "0xfffffff009982078",
     "opaque376": "0xfffffff009982080",
-    "gMetaClass": "0xfffffff00aeaf830"
+    "gMetaClass": "0xfffffff00aeaf830",
+    "setEdrFactor": "0xfffffff009981fc0"
   },
   "found": {
     "C2": "stores the vtable",
@@ -363,7 +366,8 @@
     "systemWillShutdown": "slot 79 by PAC of _ZN9IOService18systemWillShutdownEj",
     "validateSwap": "slot 313 by hint",
     "vsyncClientList": "value shown by f94d5e68 at 0xfffffff009975894",
-    "vtable": "metaclass initialiser"
+    "vtable": "metaclass initialiser",
+    "setEdrFactor": "slot 344 by hint"
   },
   "hints": {
     "layout": {
@@ -391,6 +395,7 @@
       "313": "validateSwap",
       "324": "platformFrameInfoNotify",
       "325": "sendFrameInfo",
+      "344": "setEdrFactor",
       "358": "collectCompletionReports",
       "359": "platformRefreshRates",
       "375": "setDisplayPowerState"
@@ -422,6 +427,11 @@
         "offset": "0x1bf4",
         "at": "0xfffffff009981d24",
         "word": "b95bf408"
+      },
+      "edrScalingEnabled": {
+        "offset": "0x1db8",
+        "at": "0xfffffff0099824b8",
+        "word": "3976e109"
       }
     },
     "constants": {

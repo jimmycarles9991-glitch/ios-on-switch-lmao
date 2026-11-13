@@ -69,19 +69,37 @@ inline std::string computeSamplers(const BoundSampler *s, size_t count)
     return text;
 }
 
-inline std::string computeKey(const AirHash &air, const std::string &constants, uint32_t maxThreads,
-                              bool multipleOfWidth, const uint32_t threads[3], const std::string &threadgroupMemory,
-                              const std::string &textures, const std::string &samplers)
+// What a compute state is made from, as its creation names it: every dispatch shape's key starts with it
+inline std::string computeStateKey(const AirHash &air, const std::string &constants, uint32_t maxThreads,
+                                   bool multipleOfWidth)
 {
     std::string key;
-    char b[96];
+    char b[48];
     for (uint8_t x : air) {
         snprintf(b, sizeof b, "%02x", x);
         key += b;
     }
-    snprintf(b, sizeof b, " | max=%u tgm=%d | tg=%u,%u,%u | tgmem=", maxThreads, multipleOfWidth ? 1 : 0, threads[0],
-             threads[1], threads[2]);
-    return key + " | " + constants + b + threadgroupMemory + " | tex=" + textures + " | smp=" + samplers;
+    snprintf(b, sizeof b, " | max=%u tgm=%d", maxThreads, multipleOfWidth ? 1 : 0);
+    return key + " | " + constants + b;
+}
+
+// A compute state as an archive inventory names it (pack/archives.py): its library function, not its AIR
+inline std::string computeArchiveKey(const std::string &function, const std::string &constants, uint32_t maxThreads,
+                                     bool multipleOfWidth)
+{
+    char b[48];
+    snprintf(b, sizeof b, " | max=%u tgm=%d", maxThreads, multipleOfWidth ? 1 : 0);
+    return "k " + function + (constants.empty() ? "" : " " + constants) + b;
+}
+
+inline std::string computeKey(const AirHash &air, const std::string &constants, uint32_t maxThreads,
+                              bool multipleOfWidth, const uint32_t threads[3], const std::string &threadgroupMemory,
+                              const std::string &textures, const std::string &samplers, bool regionMode = false)
+{
+    char b[64];
+    snprintf(b, sizeof b, " | tg=%u,%u,%u | tgmem=", threads[0], threads[1], threads[2]);
+    return computeStateKey(air, constants, maxThreads, multipleOfWidth) + b + threadgroupMemory + " | tex=" + textures +
+           " | smp=" + samplers + (regionMode ? " | region=1" : "");
 }
 
 inline uint64_t computeKeyHash(const std::string &key)

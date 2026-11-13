@@ -140,6 +140,7 @@ pub struct ModuleBuilder {
     /// Whether that rounding is the device's own rather than one measured to be Metal's
     /// ([`ModuleBuilder::native_half`]).
     native_half: bool,
+    native_half_conversions: bool,
     /// Whether a `half` texel keeps the NaN the device decoded under native half rounding too
     /// ([`ModuleBuilder::texel_nans`]).
     texel_nans: bool,
@@ -271,6 +272,14 @@ impl ModuleBuilder {
     /// ([`ModuleBuilder::set_native_half`]).
     pub fn native_half(&self) -> bool {
         self.native_half
+    }
+
+    pub(crate) fn set_native_half_conversions(&mut self, enabled: bool) {
+        self.native_half_conversions = enabled;
+    }
+
+    pub(crate) fn native_half_conversions(&self) -> bool {
+        self.native_half_conversions
     }
 
     /// Whether a `half` texel keeps the NaN the device decoded even where the module's `half`

@@ -1,0 +1,31 @@
+# A read-only seed of many small files packed into a few large ones, mapped once and searched in memory: the GPU
+# plugin's native records and analyses. seedpack writes one on the host (gpu/seed). SwitchSeedStore.h is its append-only
+# sibling: the system shader compiler's store, one writer and readers that mapped it once.
+#
+#   bazel test //kits/SwitchSeedPack/test:all
+load("@rules_cc//cc:cc_binary.bzl", "cc_binary")
+load("//bazel/lint:defs.bzl", "lint_files")
+
+package(default_visibility = ["//visibility:public"])
+
+lint_files()
+
+exports_files(glob(
+    ["**"],
+    exclude = ["BUILD.bazel"],
+))
+
+cc_binary(
+    name = "seedpack",
+    srcs = [
+        "SwitchSeedPack.h",
+        "SwitchSeedPackWriter.h",
+        "seedpack.cpp",
+    ],
+    copts = [
+        "-std=c++17",
+        "-Wall",
+        "-Wextra",
+        "-Werror",
+    ],
+)

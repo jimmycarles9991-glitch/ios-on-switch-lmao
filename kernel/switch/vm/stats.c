@@ -15,7 +15,9 @@
 _Static_assert(SWITCH_HOST_VM_INFO64_COUNT == 104, "iOS 27's HOST_VM_INFO64_COUNT");
 _Static_assert(SWITCH_HOST_VM_INFO64_COUNT <= HOST_INFO_MAX, "host_info64 reply size");
 
+#if DEVELOPMENT || DEBUG
 extern unsigned int vm_page_speculative_created;
+#endif
 extern unsigned int vm_swapfile_total_segs_used;
 extern uint32_t c_seg_bufsize;
 
@@ -27,8 +29,10 @@ mach_msg_type_number_t switch_vm_stats_newer(void *info, mach_msg_type_number_t 
     if (count < SWITCH_HOST_VM_INFO64_REV4_COUNT) {
         return HOST_VM_INFO64_REV3_COUNT;
     }
+#if DEVELOPMENT || DEBUG
     s.speculative_pages_created = vm_page_speculative_created;
     s.speculative_pages_activated = vm_page_speculative_used;
+#endif
     s.swap_count = (uint64_t)vm_swapfile_total_segs_used * (c_seg_bufsize / PAGE_SIZE);
     s.executable_count = vm_page_xpmapped_external_count;
     s.boot_stolen_count = vm_page_stolen_count;

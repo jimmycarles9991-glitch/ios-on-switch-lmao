@@ -133,7 +133,11 @@ pub fn float_route(p: &DeviceProfile) -> Route {
 /// is enabled, else the device's `float` `Fma` rounded to `half` under native device maths, else
 /// [`Route::HalfOdd`].
 pub fn half_route(p: &DeviceProfile) -> Route {
-    if p.takes_driver_deviation(DriverDeviation::MetalHalfFma) && p.fields().leaf.float16 {
+    if (p.takes_driver_deviation(DriverDeviation::MetalHalfFma) && p.fields().leaf.float16)
+        || p.fields()
+            .native_target
+            .half(crate::device::native::HalfOperation::FusedMultiplyAdd)
+    {
         Route::F16
     } else if p.fields().float_functions == FloatFunctions::Native {
         Route::Native
@@ -440,7 +444,16 @@ fn f16(fb: &mut FunctionBuilder<'_>, lanes: u8, a: Value, b: Value, c: Value) ->
     let (h, w) = (lanes_of(fb, 16)?, lanes_of(fb, 32)?);
     let narrow = |fb: &mut FunctionBuilder<'_>, x: Value| fb.convert(ConvOp::FConvert, x, h);
     let (a, b, c) = (narrow(fb, a)?, narrow(fb, b)?, narrow(fb, c)?);
-    let r = fb.glsl(GlslOp::Fma, &[a, b, c])?;
+    let r = if fb.module().native_half_conversions() {
+        // Mesa may split weak GLSL Fma; the raw target promises one rounding for explicit AIR fma.
+        fb.glsl_with(
+            GlslOp::Fma,
+            &[a, b, c],
+            crate::spirv::ir::Contraction::Forbidden,
+        )?
+    } else {
+        fb.glsl(GlslOp::Fma, &[a, b, c])?
+    };
     fb.convert(ConvOp::FConvert, r, w)
 }
 

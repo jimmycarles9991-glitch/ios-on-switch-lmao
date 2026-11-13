@@ -1,8 +1,8 @@
 /* SPDX-License-Identifier: MIT */
 /*
- * System sleep's two pure pieces (gpu.c "system sleep"), kept here so the host test runs them (test/gm20b_sleep_test.cpp):
+ * System sleep's two pure pieces (gpu_power.c "system sleep"), kept here so the host test runs them (test/gm20b_sleep_test.cpp):
  *
- * The gate. Every path that touches the GPU without holding gpu.lock (a submission's kick, a new channel's first push, the
+ * The gate. Every path that touches the GPU without holding tgm_gpu.lock (a submission's kick, a new channel's first push, the
  * present, the pool scrubber) runs between tgm_gate_try_enter() and tgm_gate_leave(). Open, that costs two atomic
  * operations and no lock. tgm_gate_close() turns new callers back; once tgm_gate_drained() says nobody is inside, the GPU
  * may be powered down. The kernel adds the sleeping around it under one mutex: a caller turned back sleeps until the open
@@ -81,7 +81,7 @@ enum tgm_sleep_plan {
 	TGM_SLEEP_FULL = 2,
 };
 
-/* `stage`: the last bring-up stage that finished (gpu.c gpu.stage); `powered`: the GPU was powered (its nvkm device made). */
+/* `stage`: the last bring-up stage that finished (gpu_bringup.c tgm_gpu.stage); `powered`: the GPU was powered (its nvkm device made). */
 static inline enum tgm_sleep_plan tgm_sleep_plan(int stage, int powered)
 {
 	if (!powered)

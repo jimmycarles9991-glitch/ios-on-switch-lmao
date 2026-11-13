@@ -2,8 +2,11 @@
 // See raw_emit.h. The rules are NVK's (nvk_cmd_draw.c: blend, the write-mask macro, viewport clip control; nvk_shader.c: the
 // fragment program's push) applied to what m2v makes of a Metal descriptor.
 #include "raw_emit.h"
+#include "raw_sample_shading.h"
+#include "raw_xr_pass.h"
 
 #include <algorithm>
+#include <array>
 #include <cstdio>
 #include <iterator>
 #include <map>
@@ -142,6 +145,21 @@ VertexFormat vertexFormat(unsigned format)
     }
 }
 
+// Each RGB10A8_2P_XR10 colour's alpha byte as the R8Uint target at its alpha index (raw_xr_pass.h), written where Metal's mask
+// writes alpha (MTLColorWriteMaskAlpha, bit 0) and never blended; returns those targets (xrAlphaTargets)
+uint32_t addAlphaPlanes(std::map<unsigned, Color> &colors)
+{
+    uint32_t formats[8] = {};
+    for (const auto &[j, c] : colors)
+        if (j < 8)
+            formats[j] = c.format;
+    const std::array<int8_t, 8> alpha = xrAlphaSlots(formats);
+    for (uint32_t j = 0; j < 8; j++)
+        if (alpha[j] >= 0)
+            colors[unsigned(alpha[j])] = {kXrAlphaFormat, colors[j].writeMask & 1 ? 8u : 0u, 0, {1, 0, 0, 1, 0, 0}};
+    return xrAlphaTargets(formats);
+}
+
 // "a<i>=format:offset:buffer:stride:stepFunction:stepRate"
 struct Attribute {
     unsigned format, offset, buffer, stride, step, rate;
@@ -151,6 +169,13 @@ struct Attribute {
 
 bool emitVertexInput(const std::string &keyFields, const std::vector<uint32_t> &attributes,
                      std::vector<EmitRegister> &out, std::string &why)
+{
+    std::vector<EmitStream> streams;
+    return emitVertexInput(keyFields, attributes, out, streams, why);
+}
+
+bool emitVertexInput(const std::string &keyFields, const std::vector<uint32_t> &attributes,
+                     std::vector<EmitRegister> &out, std::vector<EmitStream> &laidOut, std::string &why)
 {
     constexpr uint32_t kStreamEnable = 1u << 12, kStepPerVertex = 1;
     constexpr uint32_t kSourceInactive = 1u << 6, kInactive = kSourceInactive | 0x01u << 21 | 7u << 27;
@@ -201,23 +226,35 @@ bool emitVertexInput(const std::string &keyFields, const std::vector<uint32_t> &
     // a stream no attribute reads is off, its stride unread
     if (streams.empty())
         out.push_back({kStreamFormat, 0, false});
+    laidOut.clear();
     for (const auto &[buffer, stream] : streams) {
         unsigned stride = 0;
         for (const auto &[i, a] : descriptor)
             if (a.buffer == buffer)
                 stride = a.stride;
-        out.push_back({kStreamFormat + 0x10 * stream, kStreamEnable | (stride & 0xfff), true});
+        const bool bindStride = stride == UINT32_MAX;  // RawPipelineKey.h's dynamic stride: the draw's
+        // SET_VERTEX_STREAM_A_FORMAT's STRIDE is bits 11:0; m2v pulls a layout past maxVertexInputBindingStride (2048)
+        if (!bindStride && stride > 0xfff) {
+            why = "vertex buffer " + std::to_string(buffer) + " fetched by fixed function at a stride past 12 bits";
+            return false;
+        }
+        out.push_back({kStreamFormat + 0x10 * stream, kStreamEnable | (bindStride ? 0 : stride), true});
+        laidOut.push_back({uint8_t(buffer), bindStride});
     }
     return true;
 }
 
 bool emitState(const std::string &keyFields, const EmitProgram &vertex, const EmitProgram &fragment,
-               std::vector<EmitRegister> &out, std::string &why, const uint32_t *blended)
+               std::vector<EmitRegister> &out, std::string &why, const uint32_t *blended, bool twoPlane,
+               uint32_t *alphaTargets)
 {
     std::map<unsigned, Color> colors;
     unsigned depthFormat = 0;
     if (!parse(keyFields, colors, depthFormat, why))
         return false;
+    const uint32_t alpha = twoPlane ? addAlphaPlanes(colors) : 0;
+    if (alphaTargets)
+        *alphaTargets = alpha;
     // the fragment program's output map: 4 components per target, from bit 576 of its header (NAK sph.rs omap_target)
     const uint32_t outputs = fragment.header ? bits(fragment.header, 576, 32) : 0;
     out.clear();
@@ -236,8 +273,8 @@ bool emitState(const std::string &keyFields, const EmitProgram &vertex, const Em
         const bool vulkanBlend = blended ? (*blended >> j & 1) : c.blending && !identityBlend(c);
         const bool blends = vulkanBlend && c.writeMask && !extendedRange(c.format);
         out.push_back({kBlend + 4 * j, blends, writes[j] && !(c.blending && identityBlend(c))});
-        if (j)
-            out.push_back({kBlendPerTarget + 0x20 * j, 1, true});
+        // Metal's alpha factors are always their own; target 0's too, so no record takes it from what the pack leaves
+        out.push_back({kBlendPerTarget + 0x20 * j, 1, true});
         const uint32_t values[6] = {kOps[c.factor[2]], kFactors[c.factor[0]], kFactors[c.factor[1]],
                                     kOps[c.factor[5]], kFactors[c.factor[3]], kFactors[c.factor[4]]};
         const uint32_t off[6] = {kOpAdd, kZero, kZero, kOpAdd, kZero, kZero};
@@ -252,6 +289,15 @@ bool emitState(const std::string &keyFields, const EmitProgram &vertex, const Em
     const bool floatDepth = depthFormat == 252 || depthFormat == 260;  // Depth32Float, Depth32Float_Stencil8
     out.push_back({kViewportClip, kViewportClipBase | !floatDepth, true});
     out.push_back({kEarlyZ, fragment.earlyFragmentTests, true});
+    out.push_back({0x1224, fragment.interlockControl, true});
+    unsigned samples = 1;
+    if (const size_t field = keyFields.find("samples="); field != std::string::npos)
+        sscanf(keyFields.c_str() + field, "samples=%u", &samples);
+    if (!nativeSamples(samples)) {
+        why = "an unsupported raster sample count";
+        return false;
+    }
+    out.push_back({0x0754, sampleShadingControl(fragment.usesSampleShading ? samples : 1), true});
     out.push_back({kRegisterCount[0], vertex.gprs, true});
     out.push_back({kRegisterCount[1], fragment.gprs, true});
     return true;
@@ -260,10 +306,11 @@ bool emitState(const std::string &keyFields, const EmitProgram &vertex, const Em
 std::set<uint32_t> emittableMethods()
 {
     constexpr uint32_t kTargets = 8, kStreams = 32;
-    std::set<uint32_t> out = {kEarlyZ, kSingleCtWrite, kViewportClip, kRegisterCount[0], kRegisterCount[1]};
+    std::set<uint32_t> out = {kEarlyZ,           kSingleCtWrite, kViewportClip, kRegisterCount[0],
+                              kRegisterCount[1], 0x1224,         0x0754};
     for (uint32_t j = 0; j < kTargets; j++) {
         out.insert({kCtWrite + 4 * j, kBlend + 4 * j});
-        for (uint32_t k = j ? 0 : 1; k < 7; k++)
+        for (uint32_t k = 0; k < 7; k++)
             out.insert(kBlendPerTarget + 0x20 * j + 4 * k);
     }
     for (uint32_t location = 0; location < 32; location++)

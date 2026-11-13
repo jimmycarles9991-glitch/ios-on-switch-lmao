@@ -12,3 +12,11 @@ DEVELOPMENT = struct(
     includes = {},
     segments = {},
 )
+
+RELEASE = struct(
+    objects = [
+    ],
+    copts = {},
+    includes = {},
+    segments = {},
+)

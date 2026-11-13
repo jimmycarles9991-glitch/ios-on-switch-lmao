@@ -33,7 +33,10 @@
 #include <stdint.h>
 #include <string.h>
 #include "TegraGM20BGpu.h"
+#include "TegraGM20BRecord.h"
 #include "TegraGM20BTiled.h"
+#include "SwitchGpuBacking.h"
+#include "SwitchGpuPathStats.h"
 #if TGM_STATS
 #include <os/log.h>
 #endif
@@ -44,14 +47,26 @@ struct tgm_coh {
 	tgm_coh *idNext;  // surface-ID chain, while surfaceId != 0
 	uint64_t pa;      // the surface's first physical page
 	uint32_t surfaceId;
-	uint32_t refs;  // registry lock
+	uint32_t refs;    // registry lock
+	uint32_t askers;  // registry lock: refs held across a layout decision (tgm_coh_hold_asker)
+	bool parked;
+	// registry lock: an import with the surface noted the entry; it was the entry's only import and the first GPU import
+	// of memory nothing had written (TegraGM20BRecord.h); its last import went while it was block-linear and its one
+	// reference is the record's (the record's memory lives on: it may still be read through a lock or imported again)
+	bool noted, fresh, deferred;
+	// registry lock; valid while `surface` is held or the entry is deferred on it
+	tgm_record *record;
+	switch_gpu_backing *backing;
+	void *surface;
+	void (*releaseSurface)(void *);
 	IOLock *lock;   // pas, npages: the cache ops and a larger import's list
 	uint64_t *pas;  // the largest page list imported for it
 	uint32_t npages;
 	int writable;  // some import lets the GPU write it
 	int gpuWrites;  // atomic: an import or a SurfaceWrites says the GPU may write it, so submissions mark it
-	int cleaned;   // atomic: an import of it finished its own clean
-	int gpuDirty;  // atomic: the GPU may have written it since the last CPU lock
+	int cleaned;       // atomic: an import of it finished its own clean
+	int gpuDirty;      // atomic: the GPU may have written it since the last CPU lock
+	uint64_t written;  // atomic: submissions that may have written it
 	// atomic: the surface's layout once decided (TegraGM20BTiled.cpp), null before
 	tgm_tiled *tiled;
 	uint32_t
@@ -76,6 +91,8 @@ constexpr uint32_t kBatch = 4;
 IOLock *gRegistryLock;
 tgm_coh *gByPage[kBuckets], *gById[kBuckets];
 uint32_t gWithId;  // atomic: entries reachable by surface ID; 0 lets every trap return at once
+uint32_t
+	gDeferred;  // atomic: entries deferred on their records; 0 lets every import and engine go on at once
 
 #if TGM_STATS
 struct {
@@ -121,22 +138,25 @@ void idUnlink(const tgm_coh *c)
 
 void entryFree(tgm_coh *c)
 {
+	switch_gpu_backing_release(c->backing);
+	if (c->releaseSurface)
+		c->releaseSurface(c->surface);
 	tgm_tiled_free(c->tiled);
 	IOLockFree(c->lock);
 	IODelete(c->pas, uint64_t, c->npages);
 	IODelete(c, tgm_coh, 1);
 }
 
-void release(tgm_coh *c)  // registry lock held
+bool release(tgm_coh *c)  // registry lock held
 {
 	if (--c->refs)
-		return;
+		return false;
 	tgm_coh **p = pageSlot(c->pa);
 	if (*p == c)
 		*p = c->next;
 	if (c->surfaceId)
 		idUnlink(c);
-	entryFree(c);
+	return true;
 }
 
 bool tiledNow(const tgm_coh *c)
@@ -145,27 +165,66 @@ bool tiledNow(const tgm_coh *c)
 	return (t != nullptr) && (t->tiled != 0);
 }
 
+// registry lock held: the entry keeps its texels and its one reference passes to its memory's record, giving up its
+// hold on the surface (*surface, for the caller to release outside the lock), so the surface can go
+bool defer(tgm_coh *c, void **surface, void (**releaseSurface)(void *))
+{
+	if (!c->record || !c->surface || c->parked)
+		return false;
+	c->deferred = true;
+	__atomic_add_fetch(&gDeferred, 1, __ATOMIC_RELAXED);
+	tgm_record_park(c->record, c);
+	*surface = c->surface;
+	*releaseSurface = c->releaseSurface;
+	c->surface = nullptr;
+	c->releaseSurface = nullptr;
+	tgm_tiled_count(TGM_RELAYOUT_DEFERRED);
+	return true;
+}
+
 // Drops one reference to each of `n` entries (at most kBatch). An entry whose last reference this is while its surface is
-// block-linear is made pitch again first (TegraGM20BTiled.cpp: its texels back to rows), outside the registry lock: no
-// GPU client imports it any more, and a CPU lock finds no entry to move it for.
+// block-linear stays block-linear on its record when it has one (the move back to rows waits for a CPU lock that asks
+// for rows, TegraGM20BViews.cpp, and never comes if the memory goes first); without one it is made pitch again
+// (TegraGM20BTiled.cpp: its texels back to rows), outside the registry lock, since a CPU lock would find no entry.
 void drop(tgm_coh *const *cs, uint32_t n)
 {
-	tgm_coh *last[kBatch];
-	uint32_t nlast = 0;
+	tgm_coh *last[kBatch], *dead[kBatch];
+	void *surfaces[kBatch];
+	void (*releases[kBatch])(void *);
+	uint32_t nlast = 0, ndead = 0, ndeferred = 0;
 	IOLockLock(gRegistryLock);
 	for (uint32_t i = 0; i < n; i++) {
-		if (cs[i]->refs == 1 && tiledNow(cs[i]) && nlast < kBatch) {
-			last[nlast++] = cs[i];
-		} else {
-			release(cs[i]);
+		auto *c = cs[i];
+		if (c->parked && c->refs == 2) {
+			c->parked = false;
+			--c->refs;
+		}
+		if (c->refs == 1 && tiledNow(c)) {
+			if (defer(c, &surfaces[ndeferred], &releases[ndeferred]))
+				ndeferred++;
+			else
+				last[nlast++] = c;
+		} else if (release(c)) {
+			dead[ndead++] = c;
 		}
 	}
 	IOLockUnlock(gRegistryLock);
+	// the surface's last reference may be this one: its record goes with its memory, and the entry with the record
+	for (uint32_t i = 0; i < ndeferred; ++i)
+		releases[i](surfaces[i]);
+	for (uint32_t i = 0; i < ndead; ++i)
+		entryFree(dead[i]);
 	for (uint32_t i = 0; i < nlast; i++) {
-		tgm_tiled_untile(last[i]);
+		const int result = tgm_tiled_untile(last[i]);
 		IOLockLock(gRegistryLock);
-		release(last[i]);
+		bool destroy = false;
+		if (result && last[i]->refs == 1)
+			last[i]->parked = true;
+		else
+			destroy = release(last[i]);
 		IOLockUnlock(gRegistryLock);
+		if (destroy)
+			entryFree(last[i]);
 	}
 }
 
@@ -245,12 +304,16 @@ void surfaceTrapped(uint32_t surfaceId, bool unlock, bool readOnly)
 			if (tiledNow(found[i]))
 				continue;
 			const bool maintained =
-				unlock || (__atomic_exchange_n(&found[i]->gpuDirty, 0,
-							       __ATOMIC_ACQ_REL) != 0);
-			if (maintained) {
+				(unlock && !readOnly) ||
+				(!unlock && __atomic_exchange_n(&found[i]->gpuDirty, 0,
+								__ATOMIC_ACQ_REL) != 0);
+			auto *backing = switch_gpu_backing_find_pa(found[i]->pa);
+			if (maintained && !backing) {
 				bytes += maintain(found[i]);
 				done++;
 			}
+			if (backing)
+				switch_gpu_backing_release(backing);
 #if TGM_STATS
 			trace(found[i], surfaceId, unlock, readOnly, maintained);
 #else
@@ -327,7 +390,15 @@ extern "C" struct tgm_coh *tgm_coherency_add(uint64_t pa, uint32_t surface_id, c
 		fresh = nullptr;
 	}
 	if (c) {
-		c->refs++;
+		if (c->parked) {
+			c->parked = false;
+		} else if (c->deferred) {
+			c->deferred = false;
+			__atomic_sub_fetch(&gDeferred, 1, __ATOMIC_RELAXED);
+			tgm_record_take(c->record);
+		} else {
+			c->refs++;
+		}
 		if (writable)
 			c->writable = 1;
 		if (gpu_writes)
@@ -356,6 +427,33 @@ extern "C" struct tgm_coh *tgm_coherency_add(uint64_t pa, uint32_t surface_id, c
 		IOLockUnlock(c->lock);
 	}
 	return c;
+}
+
+extern "C" int tgm_coherency_pin(struct tgm_coh *c, struct switch_gpu_backing *backing,
+				 void *surface, void (*release_surface)(void *))
+{
+	if (!c || !backing || (surface != nullptr) != (release_surface != nullptr))
+		return -22;
+	IOLockLock(c->lock);
+	const int result = c->backing && c->backing != backing ? -22 : 0;
+	if (!result && !c->backing) {
+		switch_gpu_backing_retain(backing);
+		c->backing = backing;
+	}
+	if (!result && surface && !c->surface) {
+		c->surface = surface;
+		c->releaseSurface = release_surface;
+		surface = nullptr;
+	}
+	IOLockUnlock(c->lock);
+	if (!result && surface)
+		release_surface(surface);
+	return result;
+}
+
+extern "C" int tgm_coh_pinned(const struct tgm_coh *c)
+{
+	return c->backing != nullptr;
 }
 
 extern "C" void tgm_coherency_cleaned(struct tgm_coh *c)
@@ -411,6 +509,7 @@ static void wrote(tgm_coh *c, uint32_t uid, uint32_t seqno)
 {
 	if (!noteWriter(c->writers, uid, seqno))
 		__atomic_store_n(&c->writersLost, 1, __ATOMIC_RELEASE);
+	__atomic_add_fetch(&c->written, 1, __ATOMIC_ACQ_REL);
 	__atomic_store_n(&c->gpuDirty, 1, __ATOMIC_RELEASE);
 }
 
@@ -595,13 +694,23 @@ extern "C" struct tgm_tiled **tgm_coh_tiled(struct tgm_coh *c)
 	return &c->tiled;
 }
 
-extern "C" int tgm_coh_alone(struct tgm_coh *c)
+extern "C" int tgm_coh_alone(struct tgm_coh *c, uint32_t refs)
 {
 	IOLockLock(gRegistryLock);
-	const int alone = static_cast<int>(c->refs == 1 &&
+	const int alone = static_cast<int>(c->refs == refs &&
 					   (__atomic_load_n(&c->cpuLocks, __ATOMIC_ACQUIRE)) == 0u);
 	IOLockUnlock(gRegistryLock);
 	return alone;
+}
+
+extern "C" int tgm_coh_unshared(const struct tgm_coh *c)
+{
+	IOLockLock(gRegistryLock);
+	const int unshared =
+		static_cast<int>(c->refs - c->askers == 1 &&
+				 (__atomic_load_n(&c->cpuLocks, __ATOMIC_ACQUIRE)) == 0u);
+	IOLockUnlock(gRegistryLock);
+	return unshared;
 }
 
 extern "C" struct tgm_relayout_pages tgm_coh_pages(const struct tgm_coh *c)
@@ -616,8 +725,9 @@ extern "C" struct tgm_coh *tgm_coh_find_tiled(uint32_t id)
 	tgm_coh *found[kBatch];
 	tgm_coh *tiled = nullptr;
 	const uint32_t n = id && gRegistryLock ? findById(id, 0, found) : 0;
+	// a deferred entry of a surface that is going may still carry an ID a new surface has taken
 	for (uint32_t i = 0; i < n; i++) {
-		if (!tiled && tiledNow(found[i]))
+		if (tiledNow(found[i]) && (!tiled || (tiled->deferred && !found[i]->deferred)))
 			tiled = found[i];
 	}
 	tgm_coh *others[kBatch];
@@ -674,9 +784,43 @@ extern "C" void tgm_coh_hold(struct tgm_coh *c)
 	IOLockUnlock(gRegistryLock);
 }
 
+extern "C" void tgm_coh_hold_asker(struct tgm_coh *c)
+{
+	IOLockLock(gRegistryLock);
+	c->refs++;
+	c->askers++;
+	IOLockUnlock(gRegistryLock);
+}
+
+// The count drops before the reference, which may be the entry's last: in between, the asker counts as another user of
+// the surface (a decision then says pitch), never the other way round.
+extern "C" void tgm_coh_put_asker(struct tgm_coh *c)
+{
+	IOLockLock(gRegistryLock);
+	c->askers--;
+	IOLockUnlock(gRegistryLock);
+	tgm_coherency_put(c);
+}
+
 extern "C" uint32_t tgm_coh_surface_id(const struct tgm_coh *c)
 {
 	return c->surfaceId;
+}
+
+extern "C" uint64_t tgm_coh_written(const struct tgm_coh *c)
+{
+	switch_gpu_backing_info info = {};
+	if (c->backing)
+		switch_gpu_backing_describe(c->backing, &info);
+	return __atomic_load_n(&c->written, __ATOMIC_ACQUIRE) + info.content_generation;
+}
+
+extern "C" void tgm_coh_wait_visible(struct tgm_coh *c)
+{
+	if (!c->backing)
+		return;
+	switch_gpu_path_taken(SWITCH_GPU_PATH_VISIBLE_WAIT, 1);
+	(void)switch_gpu_backing_wait_visible(c->backing);
 }
 
 extern "C" uint32_t tgm_coh_writers(struct tgm_coh *c, struct tgm_relayout_writer *out,
@@ -724,7 +868,119 @@ extern "C" void tegra_gm20b_iosurface_trap(uint32_t index, uint32_t surface_id, 
 		return;
 	if (index == kTrapLock) {
 		surfaceTrapped(surface_id, false, (options & kLockReadOnly) != 0u);
-	} else if (index == kTrapUnlock && !(options & kLockReadOnly)) {
-		surfaceTrapped(surface_id, true, false);
+	} else if (index == kTrapUnlock) {
+		surfaceTrapped(surface_id, true, (options & kLockReadOnly) != 0u);
+	}
+}
+
+extern "C" void tgm_coherency_import(struct tgm_coh *c, struct tgm_record *record, int fresh)
+{
+	if (!c)
+		return;
+	IOLockLock(c->lock);
+	const bool held = c->surface != nullptr;
+	IOLockLock(gRegistryLock);
+	if (held && !c->record)
+		c->record = record;
+	if (!c->noted) {
+		c->noted = true;
+		c->fresh = fresh && c->refs == 1 && !__atomic_load_n(&c->tiled, __ATOMIC_ACQUIRE);
+	}
+	IOLockUnlock(gRegistryLock);
+	IOLockUnlock(c->lock);
+}
+
+extern "C" int tgm_coh_fresh(const struct tgm_coh *c)
+{
+	return static_cast<int>(c->fresh && c->surface && tgm_coh_written(c) == 0 &&
+				tgm_surface_unwritten(c->surface));
+}
+
+extern "C" int tgm_coh_deferred_for(struct tgm_coh *c, uint32_t id)
+{
+	IOLockLock(gRegistryLock);
+	const tgm_record *record = c->deferred ? c->record : nullptr;
+	IOLockUnlock(gRegistryLock);
+	if (!record)
+		return 0;
+	return tgm_record_is_surface(record, id) ? 1 : -1;
+}
+
+extern "C" void tgm_coh_undefer(struct tgm_coh *c)
+{
+	IOLockLock(gRegistryLock);
+	const bool deferred = c->deferred;
+	if (deferred) {
+		c->deferred = false;
+		__atomic_sub_fetch(&gDeferred, 1, __ATOMIC_RELAXED);
+		tgm_record_take(c->record);
+	}
+	IOLockUnlock(gRegistryLock);
+	if (deferred)
+		drop(&c, 1);
+}
+
+namespace
+{
+// The caller's reference on a deferred entry: its texels back to rows unless another holder reads them block-linear
+void rowsFor(tgm_coh *c)
+{
+	if (!tgm_tiled_untile_deferred(c))
+		tgm_coh_undefer(c);
+	tgm_coherency_put(c);
+}
+}  // namespace
+
+extern "C" int tgm_coh_any_deferred(void)
+{
+	return static_cast<int>(__atomic_load_n(&gDeferred, __ATOMIC_RELAXED) != 0);
+}
+
+extern "C" void tgm_coherency_rows_at(uint64_t pa)
+{
+	if (!__atomic_load_n(&gDeferred, __ATOMIC_RELAXED) || !gRegistryLock)
+		return;
+	IOLockLock(gRegistryLock);
+	tgm_coh *c = *pageSlot(pa);
+	if (c && c->deferred)
+		c->refs++;
+	else
+		c = nullptr;
+	IOLockUnlock(gRegistryLock);
+	if (c)
+		rowsFor(c);
+}
+
+extern "C" void tgm_coherency_engine_rows(struct tgm_record *record)
+{
+	if (!__atomic_load_n(&gDeferred, __ATOMIC_RELAXED))
+		return;
+	IOLockLock(gRegistryLock);
+	tgm_coh *c = tgm_record_take(record);
+	tgm_record_park(record, c);
+	if (c)
+		c->refs++;
+	IOLockUnlock(gRegistryLock);
+	if (c)
+		rowsFor(c);
+}
+
+extern "C" void tgm_coherency_record_gone(struct tgm_record *record)
+{
+	if (!gRegistryLock)
+		return;
+	IOLockLock(gRegistryLock);
+	tgm_coh *c = tgm_record_take(record);
+	bool dead = false;
+	if (c && c->deferred) {
+		c->deferred = false;
+		__atomic_sub_fetch(&gDeferred, 1, __ATOMIC_RELAXED);
+		c->record = nullptr;
+		dead = release(c);
+	}
+	IOLockUnlock(gRegistryLock);
+	if (dead) {
+		tgm_tiled_count(TGM_RELAYOUT_NEVER_UNTILED);
+		entryFree(c);
 	}
 }

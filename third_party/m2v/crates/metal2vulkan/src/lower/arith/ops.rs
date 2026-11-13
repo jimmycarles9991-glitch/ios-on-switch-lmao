@@ -292,6 +292,27 @@ pub fn f16_binary(
     a: Value,
     b: Value,
 ) -> BResult<Value> {
+    f16_binary_inner(fb, op, lanes, a, b, false)
+}
+
+pub fn sm53_binary(
+    fb: &mut FunctionBuilder<'_>,
+    op: AirBin,
+    lanes: u8,
+    a: Value,
+    b: Value,
+) -> BResult<Value> {
+    f16_binary_inner(fb, op, lanes, a, b, true)
+}
+
+fn f16_binary_inner(
+    fb: &mut FunctionBuilder<'_>,
+    op: AirBin,
+    lanes: u8,
+    a: Value,
+    b: Value,
+    native_product: bool,
+) -> BResult<Value> {
     let float_ty = |fb: &mut FunctionBuilder<'_>, width: u8| -> BResult<TypeId> {
         let e = fb.module().ty(Type::Float { width })?;
         match lanes {
@@ -305,6 +326,7 @@ pub fn f16_binary(
     let r = match op {
         AirBin::FAdd => fb.binary_no_contraction(BinOp::FAdd, x, y)?,
         AirBin::FSub => fb.binary_no_contraction(BinOp::FSub, x, y)?,
+        AirBin::FMul if native_product => fb.binary_no_contraction(BinOp::FMul, x, y)?,
         AirBin::FMul => {
             let e = fb.module().ty(Type::Float { width: 16 })?;
             let s = fb.module().constant(Constant::Scalar {

@@ -4,22 +4,34 @@ import QuartzCore
 import UIKit
 
 /// Records CADisplayLink timestamps while a full-screen view changes colour every frame, so every frame is a real
-/// commit through the render server and the display.
+/// commit through the render server and the display. Measuring starts once the link runs at the 60 Hz it asked for:
+/// the render server runs at the rate its clients' arbitration yields (20 Hz between tests on device) and applies a
+/// raised rate only at the next frame boundary of its old cadence (24B119 IOMFBDisplay::
+/// recompute_server_frame_interval_locked enqueues the new interval at a time aligned to the old one,
+/// 0x1846b33ac-0x1846b34fc).
 @MainActor
 final class PacingRecorder: NSObject {
     private(set) var timestamps: [CFTimeInterval] = []
+    /// From the link's start to its second frame at the granted 60 Hz
+    private(set) var settled: CFTimeInterval = 0
     private var link: CADisplayLink?
     private let view: UIView
     private let done: Waiter<Bool>
-    private let until: CFTimeInterval
+    private let seconds: Double
+    private var started: CFTimeInterval = 0
+    private var until: CFTimeInterval = 0
+    private var granted = 0
+    private var ticks = 0
+    private static let settleLimit: CFTimeInterval = 2
 
     init(view: UIView, seconds: Double, done: Waiter<Bool>) {
         self.view = view
         self.done = done
-        until = CACurrentMediaTime() + seconds
+        self.seconds = seconds
     }
 
     func start() {
+        started = CACurrentMediaTime()
         let link = CADisplayLink(target: self, selector: #selector(tick))
         link.preferredFrameRateRange = CAFrameRateRange(minimum: 60, maximum: 60, preferred: 60)
         link.add(to: .main, forMode: .common)
@@ -27,9 +39,17 @@ final class PacingRecorder: NSObject {
     }
 
     @objc private func tick(_ link: CADisplayLink) {
-        timestamps.append(link.timestamp)
-        let hue = CGFloat(timestamps.count % 120) / 120
+        ticks += 1
+        let hue = CGFloat(ticks % 120) / 120
         view.backgroundColor = UIColor(hue: hue, saturation: 0.6, brightness: 0.9, alpha: 1)
+        if until == 0 {
+            let atRate = abs(link.targetTimestamp - link.timestamp - 1.0 / 60) < 0.002
+            granted = atRate ? granted + 1 : 0
+            if granted < 2 && link.timestamp - started < Self.settleLimit { return }
+            settled = link.timestamp - started
+            until = link.timestamp + seconds
+        }
+        timestamps.append(link.timestamp)
         if link.timestamp >= until {
             link.invalidate()
             self.link = nil
@@ -53,15 +73,22 @@ struct DisplayPacingTest: HWTest {
         }
         await MainActor.run { recorder.start() }
         _ = await done.wait(timeout: 20)
-        let stamps = await MainActor.run { recorder.timestamps }
+        let (stamps, settle) = await MainActor.run { (recorder.timestamps, recorder.settled) }
         let intervals = zip(stamps.dropFirst(), stamps).map { ($0 - $1) * 1000 }
         let period = 1000.0 / 60
         let dropped = Stats.droppedFrames(intervals: intervals, period: period)
+        let worst = intervals.indices.max { intervals[$0] < intervals[$1] }
+        let settled = stamps.firstIndex { $0 - (stamps.first ?? 0) > 0.5 } ?? stamps.count
         var metrics = Metrics()
         metrics.set("frames", stamps.count)
+        metrics.set("settle_ms", settle * 1000, digits: 1)
         metrics.set("p50_ms", Stats.percentile(intervals, 0.5), digits: 2)
         metrics.set("p99_ms", Stats.percentile(intervals, 0.99), digits: 2)
         metrics.set("max_ms", intervals.max() ?? 0, digits: 2)
+        metrics.set("max_at_ms", worst.map { (stamps[$0 + 1] - stamps[0]) * 1000 } ?? 0, digits: 1)
+        metrics.set(
+            "dropped_first_500ms",
+            Stats.droppedFrames(intervals: Array(intervals.prefix(max(settled - 1, 0))), period: period))
         metrics.set("dropped", dropped)
         return .judged(
             [

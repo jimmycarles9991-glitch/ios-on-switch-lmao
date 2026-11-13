@@ -103,7 +103,7 @@ values *
 enum Decoration
 values SpecId Block ColMajor ArrayStride MatrixStride BuiltIn NoPerspective Flat Patch Centroid
 values Sample Invariant Aliased Volatile Coherent NonWritable Location Component Index Binding
-values DescriptorSet Offset NoContraction InputAttachmentIndex PerPrimitiveEXT NonUniform
+values DescriptorSet Offset FPRoundingMode NoContraction InputAttachmentIndex PerPrimitiveEXT NonUniform
 values AliasedPointer
 test-values FPFastMathMode
 
@@ -126,6 +126,9 @@ values Reduce InclusiveScan ExclusiveScan ClusteredReduce
 
 enum FPFastMathMode test
 values NOT_NAN NOT_INF NSZ ALLOW_RECIP ALLOW_REASSOC ALLOW_CONTRACT
+
+enum FPRoundingMode
+values RTE
 
 enum GlslStd450Op
 values Round RoundEven Trunc FAbs SAbs FSign SSign Floor Ceil Fract Radians Degrees Sin Cos Tan

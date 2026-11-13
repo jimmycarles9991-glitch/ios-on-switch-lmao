@@ -38,6 +38,8 @@
 #include <stdlib.h>
 
 #define FRONTIER_VA 0x200000000ull
+#define RECORDS_VA 0x300000000ull
+#define UBO_VA 0x400000000ull
 #define UBO_BYTES 4096u
 #define ROOT_BYTES 0x800u
 #define SET_BYTES 256u
@@ -141,12 +143,31 @@ static int
 prologue_byte(const struct model *m, bool global, uint64_t space, uint64_t at)
 {
    const struct switch_nvk_split_layout *l = m->layout;
-   if (global)
+   if (global) {
+      if (at >= RECORDS_VA && at < RECORDS_VA + SWITCH_SPLIT_BATCH_RECORD_BYTES) {
+         at -= RECORDS_VA;
+         if (at < SWITCH_SPLIT_BATCH_BUFFERS)
+            return params_byte(m, at);
+         const uint32_t ordinal = (at - SWITCH_SPLIT_BATCH_BUFFERS) / 16;
+         const uint32_t byte = (at - SWITCH_SPLIT_BATCH_BUFFERS) % 16;
+         if (!ordinal || ordinal > l->ubo_count)
+            return 0;
+         const uint64_t value = byte < 8 ? UBO_VA + (ordinal - 1) * 0x10000ull : UBO_BYTES;
+         return (value >> (8 * (byte % 8))) & 0xff;
+      }
+      if (at >= UBO_VA && at < UBO_VA + l->ubo_count * 0x10000ull) {
+         at -= UBO_VA;
+         return cbuf_byte(m, l->ubo_cbuf[at / 0x10000], at % 0x10000);
+      }
       return -1;
-   if (space == SWITCH_SPLIT_PARAMS_CBUF)
-      return params_byte(m, at);
-   if (space >= 1 && space <= l->ubo_count)
-      return cbuf_byte(m, l->ubo_cbuf[space - 1], at);
+   }
+   if (space == SWITCH_SPLIT_PARAMS_CBUF) {
+      if (at < 8)
+         return (RECORDS_VA >> (8 * at)) & 0xff;
+      if (at < 12)
+         return model_byte(1, at - 8);
+      return at < 16 ? model_byte(SWITCH_SPLIT_BATCH_RECORD_BYTES, at - 12) : 0;
+   }
    if (l->shader_data_cbuf && space == l->shader_data_cbuf) {
       return at < m->fs->constant_data_size
                 ? ((const uint8_t *)m->fs->constant_data)[at] : 0;

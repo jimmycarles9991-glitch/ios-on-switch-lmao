@@ -11,6 +11,7 @@
 #include <vector>
 #include <gtest/gtest.h>
 #include "drivers/TegraGM20B/TegraGM20BGpu.h"
+#include "drivers/TegraGM20B/TegraGM20BTiled.h"
 #include "drivers/TegraGM20B/TegraGM20BLayout.h"
 #include "drivers/TegraGM20B/TegraGM20BRelayout.h"
 #include "drivers/TegraGM20B/TegraGM20BTiled.h"
@@ -60,6 +61,13 @@ extern "C" void tgm_writer_wait(uint32_t uid, uint32_t seqno)
 {
 	gGpu.waits.emplace_back(uid, seqno);
 	gGpu.completed[uid] = seqno;
+}
+
+extern "C" int switch_gpu_backing_wait_visible(switch_gpu_backing *)
+{
+	gGpu.visibleWaits++;
+	gGpu.l2Dirty = false;
+	return 0;
 }
 
 extern "C" int tgm_writers_all_done(void)
@@ -149,8 +157,14 @@ extern "C" void tgm_relayout_by_cpu(const struct tgm_relayout_pages *surface,
 				    const struct tgm_relayout_writer *, uint32_t)
 {
 	gCpuMoves++;
+	gGpu.staleCpuMoves += gGpu.l2Dirty;
 	tgm_relayout_cpu(surface, rows, l, bytes_per_row, op == TGM_RELAYOUT_TO_ROWS, modelPage);
 }
+
+uint64_t gScratchHandouts;
+std::set<tgm_scratch *> gScratchesKept;
+int gScratchesReclaimed;
+bool gScratchPurged;
 
 extern "C" struct tgm_scratch *tgm_scratch_get(uint64_t bytes, int,
 					       struct tgm_relayout_pages *pages)
@@ -159,6 +173,7 @@ extern "C" struct tgm_scratch *tgm_scratch_get(uint64_t bytes, int,
 		return nullptr;
 	static uint64_t next = 0x200000000ull;
 	auto *s = new tgm_scratch;
+	s->handout = ++gScratchHandouts;
 	std::lock_guard<std::mutex> hold(gCleanLock);
 	for (uint64_t at = 0; at < bytes; at += 4096, next += 4096) {
 		s->pas.push_back(next);
@@ -168,10 +183,29 @@ extern "C" struct tgm_scratch *tgm_scratch_get(uint64_t bytes, int,
 	return s;
 }
 
+// A scratch given back stays kept for a reclaim (the pool's), its bytes as they were unless a test purges them
 extern "C" void tgm_scratch_put(struct tgm_scratch *s)
 {
 	gViews.scratchesPut++;
-	delete s;
+	gScratchesKept.insert(s);
+}
+
+extern "C" struct tgm_scratch *tgm_scratch_reclaim(struct tgm_scratch *s, uint64_t handout,
+						   int *intact)
+{
+	*intact = 0;
+	if (!gScratchesKept.count(s) || s->handout != handout)
+		return nullptr;
+	gScratchesKept.erase(s);
+	gScratchesReclaimed++;
+	s->handout = ++gScratchHandouts;
+	*intact = gScratchPurged ? 0 : 1;
+	return s;
+}
+
+extern "C" uint64_t tgm_scratch_handout(const struct tgm_scratch *s)
+{
+	return s->handout;
 }
 
 extern "C" void tgm_scratch_discard(struct tgm_scratch *s)
@@ -193,6 +227,27 @@ extern "C" void *tgm_scratch_memory(struct tgm_scratch *s)
 extern "C" void tgm_scratch_pages(const struct tgm_scratch *s, struct tgm_relayout_pages *pages)
 {
 	*pages = {s->pas.data(), uint32_t(s->pas.size())};
+}
+
+// A kernel mapping of a scratch: its pages' bytes in one buffer, written back to the pages at the unmap.
+struct ScratchMap {
+	tgm_relayout_pages pages;
+	std::vector<uint8_t> bytes;
+};
+
+extern "C" void *tgm_scratch_map(struct tgm_scratch *s, void **map)
+{
+	const tgm_relayout_pages pages = {s->pas.data(), uint32_t(s->pas.size())};
+	auto *m = new ScratchMap{pages, gather(pages)};
+	*map = m;
+	return m->bytes.data();
+}
+
+extern "C" void tgm_scratch_unmap(void *map)
+{
+	auto *m = static_cast<ScratchMap *>(map);
+	scatter(m->pages, m->bytes);
+	delete m;
 }
 
 extern "C" int tgm_cpu_view_of(void *client, uint32_t id, struct tgm_cpu_view *out)
@@ -266,8 +321,11 @@ tgm_coh *add(uint64_t pa, uint32_t surfaceId, const uint64_t *pas, uint32_t npag
 	     int *covered = nullptr)
 {
 	int ignored = 0;
-	return tgm_coherency_add(pa, surfaceId, pas, npages, writable, writable,
-				 covered ? covered : &ignored);
+	auto *c = tgm_coherency_add(pa, surfaceId, pas, npages, writable, writable,
+				    covered ? covered : &ignored);
+	EXPECT_EQ(tgm_coherency_pin(c, reinterpret_cast<switch_gpu_backing *>(1), nullptr, nullptr),
+		  0);
+	return c;
 }
 
 tgm_coh *sampled(uint64_t pa, uint32_t surfaceId, const uint64_t *pas, uint32_t npages)
@@ -550,6 +608,72 @@ TEST_F(Coherency, TilingMovesStartOnAScratchWithNoCpuLines)
 	EXPECT_TRUE(gMoves[0].rowsClean);
 	EXPECT_EQ(gMoves[1].op, TGM_RELAYOUT_UNTILE_IN_PLACE);
 	EXPECT_TRUE(gMoves[1].rowsClean);
+}
+
+TEST_F(Coherency, FailedFinalUntileKeepsLayoutUntilSuccessfulRetry)
+{
+	const auto p = pages(0x85400000, 5);
+	auto *c = add(p[0], 35, p.data(), 5, 1);
+	ASSERT_EQ(tgm_coherency_layout(c, kW, kH, kBpp, kRow, 1), 1);
+	gMoveFails = true;
+	tgm_coherency_put(c);
+	EXPECT_TRUE(tegra_gm20b_surface_tiled(p[0]));
+	auto *next = add(p[0], 35, p.data(), 5, 1);
+	EXPECT_EQ(next, c);
+	EXPECT_EQ(tgm_coherency_layout(next, kW, kH, kBpp, kRow, 1), 1);
+	gMoveFails = false;
+	tgm_coherency_put(next);
+	EXPECT_FALSE(tegra_gm20b_surface_tiled(p[0]));
+}
+
+TEST_F(Coherency, ParkedLayoutRetainsActualSurfaceIdentityUntilUntile)
+{
+	const auto p = pages(0x85700000, 5);
+	auto *c = add(p[0], 38, p.data(), 5, 1);
+	unsigned releases = 0;
+	const auto released = [](void *owner) {
+		++*static_cast<unsigned *>(owner);
+	};
+	ASSERT_EQ(tgm_coherency_pin(c, reinterpret_cast<switch_gpu_backing *>(1), &releases,
+				    released),
+		  0);
+	ASSERT_EQ(tgm_coherency_layout(c, kW, kH, kBpp, kRow, 1), 1);
+	gScratchFails = true;
+	tgm_coherency_put(c);
+	EXPECT_EQ(releases, 0u);
+	auto *held = tgm_coh_find_pa(p[0]);
+	gScratchFails = false;
+	tgm_coherency_put(held);
+	EXPECT_EQ(releases, 1u);
+}
+
+TEST_F(Coherency, ImportArrivingBeforeFinalUntileKeepsItsLayout)
+{
+	const auto p = pages(0x85600000, 5);
+	auto *first = add(p[0], 37, p.data(), 5, 1);
+	ASSERT_EQ(tgm_coherency_layout(first, kW, kH, kBpp, kRow, 1), 1);
+	auto *second = add(p[0], 37, p.data(), 5, 1);
+	EXPECT_EQ(tgm_tiled_untile(first), 0);
+	EXPECT_TRUE(tegra_gm20b_surface_tiled(p[0]));
+	tgm_coherency_put(first);
+	EXPECT_EQ(tgm_coherency_layout(second, kW, kH, kBpp, kRow, 1), 1);
+	tgm_coherency_put(second);
+	EXPECT_FALSE(tegra_gm20b_surface_tiled(p[0]));
+}
+
+TEST_F(Coherency, ScratchFailureAtFinalDropKeepsRegistryReachable)
+{
+	const auto p = pages(0x85500000, 5);
+	auto *c = add(p[0], 36, p.data(), 5, 1);
+	ASSERT_EQ(tgm_coherency_layout(c, kW, kH, kBpp, kRow, 1), 1);
+	gScratchFails = true;
+	tgm_coherency_put(c);
+	ASSERT_TRUE(tegra_gm20b_surface_tiled(p[0]));
+	auto *held = tgm_coh_find_pa(p[0]);
+	ASSERT_EQ(held, c);
+	gScratchFails = false;
+	tgm_coherency_put(held);
+	EXPECT_FALSE(tegra_gm20b_surface_tiled(p[0]));
 }
 
 TEST_F(Coherency, PitchForGoodUnlessTheFirstAskerWritesItAlone)

@@ -6,14 +6,10 @@
  * per-draw values alone (constants and uniform reads) moves to a compute
  * prologue that writes the values the per-pixel code reads (the frontier);
  * the fragment program reads them from a constant buffer of its own. The raw
- * GM20B path launches a split draw's prologue, one thread with the draw's
- * constant buffers bound, in one compute segment per command buffer ahead of
- * its 3D work.
- *
- * The prologue's constant buffers: 0 the draw's root-table push words
- * [0x700, 0x780) at 0 and its frontier's address (u64) at 128; 1 to ubo_count
- * the uniform buffers ubo_cbuf names, as the draw binds them; then the shader
- * data where shader_data_cbuf is not 0.
+ * GM20B path batches compatible draws, one invocation per record. CB0 holds
+ * {recordsVA:u64, count:u32, stride:u32}; CB1 holds shared shader constants.
+ * Each 272-byte record holds push words at 0, frontierVA at 128 and eight
+ * {VA:u64, bytes:u32, reserved:u32} views at 144. UBO k uses view 1+k.
  */
 
 #ifndef NVK_SWITCH_SPLIT_H
@@ -24,6 +20,7 @@
 
 #include "nak.h"
 #include "nir.h"
+#include "nvk_switch_target.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -37,6 +34,10 @@ struct nvk_device;
 #define SWITCH_SPLIT_PARAMS_CBUF 0
 #define SWITCH_SPLIT_FRONTIER_ADDRESS 128
 #define SWITCH_SPLIT_MAX_FRONTIER_BYTES 4096
+#define SWITCH_SPLIT_BATCH_VERSION 1
+#define SWITCH_SPLIT_BATCH_THREADS 32
+#define SWITCH_SPLIT_BATCH_RECORD_BYTES 272
+#define SWITCH_SPLIT_BATCH_BUFFERS 144
 
 struct switch_nvk_split_layout {
    uint32_t frontier_bytes;
@@ -45,6 +46,8 @@ struct switch_nvk_split_layout {
    uint8_t shader_data_cbuf;
    uint8_t ubo_count;
    uint8_t ubo_cbuf[SWITCH_SPLIT_MAX_UBOS];
+   uint16_t batch_version;
+   uint16_t batch_threads;
    uint32_t frontier_values;
    uint32_t prologue_instrs;
 };
@@ -72,6 +75,13 @@ struct switch_nvk_program {
    uint32_t cbuf_count;
 };
 
+struct switch_nvk_split_cost {
+   uint16_t version, reserved;
+   uint32_t launch_cycles, drain_cycles;
+   uint32_t prologue_warp_cycles, prologue_instructions;
+   uint32_t saved_pixel_instructions, saved_pixel_cycles, frontier_values;
+};
+
 struct switch_nvk_split {
    struct switch_nvk_program fs;
    struct switch_nvk_program prologue;
@@ -79,6 +89,7 @@ struct switch_nvk_split {
    uint32_t qmd[64];
    /* the draw's pixels from which the split saves GPU time */
    uint32_t threshold_pixels;
+   struct switch_nvk_split_cost cost;
 };
 
 /* A program as raw/pack/mkpack.py names it: FNV-1a 64 of its 80-byte header,
@@ -93,7 +104,7 @@ uint64_t switch_nvk_program_id(const struct nak_shader_info *info,
  * than `whole`, the stage's own program (`whole_id` names it in the proof).
  */
 struct switch_nvk_split *
-switch_nvk_split_compile(struct nvk_device *dev, const nir_shader *fs,
+switch_nvk_split_compile(const struct switch_nvk_target *t, const nir_shader *fs,
                          const struct nvk_cbuf_map *map,
                          nir_variable_mode robust2_modes,
                          const struct nak_fs_key *fs_key,

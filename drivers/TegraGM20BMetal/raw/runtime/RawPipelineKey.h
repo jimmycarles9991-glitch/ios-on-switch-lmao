@@ -143,11 +143,25 @@ inline std::string pipelineKey(MTLRenderPipelineDescriptor *d, const StageKey *v
             if (a.format == MTLVertexFormatInvalid)
                 continue;
             MTLVertexBufferLayoutDescriptor *l = v.layouts[a.bufferIndex < 31 ? a.bufferIndex : 0];
+            // MTLBufferLayoutStrideDynamic as UINT32_MAX, which raw_emit.cpp emitVertexInput reads back as the bind's
+            const unsigned long stride = l.stride == MTLBufferLayoutStrideDynamic ? UINT32_MAX : l.stride;
             snprintf(head, sizeof head, "a%u=%lu:%lu:%lu:%lu:%lu:%lu ", i, (unsigned long)a.format,
-                     (unsigned long)a.offset, (unsigned long)a.bufferIndex, (unsigned long)l.stride,
-                     (unsigned long)l.stepFunction, (unsigned long)l.stepRate);
+                     (unsigned long)a.offset, (unsigned long)a.bufferIndex, stride, (unsigned long)l.stepFunction,
+                     (unsigned long)l.stepRate);
             key += head;
         }
+    // a tessellation state's tessellator state, and a vertex amplification count above Metal's default: no other key has them
+    if (d.vertexFunction.patchType != MTLPatchTypeNone) {
+        snprintf(head, sizeof head, "t=%lu:%lu:%lu:%lu:%lu:%lu:%d ", (unsigned long)d.tessellationPartitionMode,
+                 (unsigned long)d.tessellationFactorFormat, (unsigned long)d.tessellationFactorStepFunction,
+                 (unsigned long)d.tessellationOutputWindingOrder, (unsigned long)d.tessellationControlPointIndexType,
+                 (unsigned long)d.maxTessellationFactor, (int)d.tessellationFactorScaleEnabled);
+        key += head;
+    }
+    if (d.maxVertexAmplificationCount > 1) {
+        snprintf(head, sizeof head, "amp=%lu ", (unsigned long)d.maxVertexAmplificationCount);
+        key += head;
+    }
     key += " | v " + (vertex ? vertex->function : std::string("-")) + " " + (vertex ? vertex->constants : "");
     key += " | f " + (fragment ? fragment->function : std::string("-")) + " " + (fragment ? fragment->constants : "");
     key += linked;

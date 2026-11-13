@@ -1,0 +1,31 @@
+diff --git a/pkg/cas/hardlinking_file_fetcher.go b/pkg/cas/hardlinking_file_fetcher.go
+index 838f7f0..54e33bb 100644
+--- a/pkg/cas/hardlinking_file_fetcher.go
++++ b/pkg/cas/hardlinking_file_fetcher.go
+@@ -138,7 +138,7 @@ func (ff *hardlinkingFileFetcher) GetFile(ctx context.Context, blobDigest digest
+ 		}
+ 
+ 		// Hardlink the file into the cache.
+-		if err := directory.Link(name, ff.cacheDirectory, path.MustNewComponent(key)); err != nil && !os.IsExist(err) {
++		if err := directory.Clonefile(name, ff.cacheDirectory, path.MustNewComponent(key)); err != nil && !os.IsExist(err) {
+ 			return util.StatusWrapfWithCode(err, codes.Internal, "Failed to add cached file %#v", key)
+ 		}
+ 		ff.evictionSet.Insert(key)
+@@ -147,7 +147,7 @@ func (ff *hardlinkingFileFetcher) GetFile(ctx context.Context, blobDigest digest
+ 	} else {
+ 		// Even though the file is part of our bookkeeping, we
+ 		// observed it didn't exist. Repair this inconsistency.
+-		if err := directory.Link(name, ff.cacheDirectory, path.MustNewComponent(key)); err != nil && !os.IsExist(err) {
++		if err := directory.Clonefile(name, ff.cacheDirectory, path.MustNewComponent(key)); err != nil && !os.IsExist(err) {
+ 			return util.StatusWrapfWithCode(err, codes.Internal, "Failed to repair cached file %#v", key)
+ 		}
+ 	}
+@@ -167,7 +167,7 @@ func (ff *hardlinkingFileFetcher) tryLinkFromCache(key string, directory filesys
+ 		ff.evictionSet.Touch(key)
+ 		ff.evictionLock.Unlock()
+ 
+-		if err := ff.cacheDirectory.Link(path.MustNewComponent(key), directory, name); err == nil {
++		if err := ff.cacheDirectory.Clonefile(path.MustNewComponent(key), directory, name); err == nil {
+ 			// Successfully hardlinked the file to its destination.
+ 			return nil
+ 		} else if !os.IsNotExist(err) {

@@ -436,6 +436,8 @@ pub enum FloatControl {
 #[non_exhaustive]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum VkProperty {
+    /// The native SM53 backend accepts the restricted half-operation profile.
+    NativeSm53Half,
     /// `subgroupSupportedStages` contains the stage.
     SubgroupStage(Stage),
     /// `subgroupSupportedOperations` contains the operation class.
@@ -695,6 +697,12 @@ pub enum VkProperty {
     /// leaves a sample to the device's sampler there requires it and records
     /// [`PrecisionNote::DeviceSampling`](crate::pipeline::PrecisionNote::DeviceSampling).
     DeviceSampling,
+    /// A compile-only profile's consumer holds an `RGB10A8_2P_XR10` attachment (or its `_sRGB`
+    /// twin) in Metal's two planes, as two attachments: the color word at the attachment's own
+    /// index as `R32_UINT` and the alpha byte at another as `R8_UINT`
+    /// (`LoweringInputs::two_plane_alphas`). No Vulkan query reports it: the consumer asks for it
+    /// ([`Device::with_two_plane_extended_range`](crate::device::Device::with_two_plane_extended_range)).
+    TwoPlaneExtendedRange,
 }
 
 /// One depth or stencil resolve mode (`VkResolveModeFlagBits`), named by

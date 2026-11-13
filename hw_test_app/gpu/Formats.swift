@@ -18,6 +18,7 @@ extension TexelFormat {
         case .rgba32Float: return .rgba32Float
         case .r32Float: return .r32Float
         case .rgb10a2Unorm: return .rgb10a2Unorm
+        case .bgr10a2Unorm: return .bgr10a2Unorm
         case .bgr10XR: return .bgr10_xr
         case .bgra10XR: return .bgra10_xr
         case .depth32Float: return .depth32Float

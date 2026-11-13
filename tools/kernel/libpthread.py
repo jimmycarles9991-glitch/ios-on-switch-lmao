@@ -27,8 +27,25 @@ def check(path: Path) -> None:
         sys.exit('Unexpected pthread object architecture: ' + path.name)
 
 
+def configuration_flags(config: str) -> list[str]:
+    if config == 'DEVELOPMENT':
+        return ['-DMACH_ASSERT=1', '-DDEBUG=1']
+    if config == 'RELEASE':
+        return [
+            '-DMACH_ASSERT=0',
+            '-DDEBUG=0',
+            '-DDEVELOPMENT=0',
+            '-DRELEASE=1',
+            '-DIST_KDEBUG=1',
+            '-DCONFIG_NO_PRINTF_STRINGS=1',
+            '-DCONFIG_NO_KPRINTF_STRINGS=1',
+        ]
+    raise ValueError(f'unsupported kernel configuration: {config}')
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
+    parser.add_argument('--config', choices=('DEVELOPMENT', 'RELEASE'), default='DEVELOPMENT')
     for name in (
         'xcode-env',
         'source',
@@ -56,7 +73,7 @@ def main() -> None:
         # make's osfmk object directory, where these were compiled when the kernel came from make.
         (
             f'-fdebug-compilation-dir={root}/{args.bin_dir}/out/native-a57/root-v1/tree/build/xnu/ios-obj/'
-            'DEVELOPMENT_ARM64_BCM2837/osfmk/DEVELOPMENT'
+            f'{args.config}_ARM64_BCM2837/osfmk/{args.config}'
         ),
     ]
 
@@ -82,8 +99,7 @@ def main() -> None:
             '-DKERNEL_PRIVATE=1',
             '-DXNU_KERNEL_PRIVATE=1',
             '-DMACH_KERNEL_PRIVATE=1',
-            '-DMACH_ASSERT=1',
-            '-DDEBUG=1',
+            *configuration_flags(args.config),
             '-D__PTHREAD_EXPOSE_INTERNALS__=1',
             '-DABSOLUTETIME_SCALAR_TYPE=1',
             '-DNEEDS_SCHED_CALL_T=1',

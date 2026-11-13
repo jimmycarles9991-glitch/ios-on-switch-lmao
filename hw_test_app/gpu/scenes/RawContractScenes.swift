@@ -246,8 +246,8 @@ struct KernelOffsetScene: GPUScene {
 /// A runtime sampler with Cubic min and mag filters (MTLSamplerMinMagFilterCubic, raw value 2: RenderBox's icon sampler,
 /// which raw refused as call.sampler on boots 15 and 16), 4x magnified. A linear ramp comes out a linear ramp away from the
 /// clamped edges, as every bicubic filter does; one bright texel comes out neither the linear filter's tent nor the nearest
-/// filter's square (the program filters bicubically, it is no placeholder); hash_impulse= has to match between the raw
-/// facade's run and m2v's, whose emulation is measured against Apple's GPUs.
+/// filter's square (the program filters bicubically, it is no placeholder), and its picture is held to an Apple GPU's
+/// (impulse).
 struct CubicSamplerScene: GPUScene {
     let id = "gpu.raw.cubic_sampler"
     let name = "Samplers with cubic filters, magnified"
@@ -319,7 +319,7 @@ struct CubicSamplerScene: GPUScene {
         result.expect(
             differs(linear) && differs(nearest), "the impulse came out as a linear or nearest filter draws it")
         let bytes = impulseOut.samples.map { UInt8(($0 * 255).rounded()) }
-        result.metrics.set("hash_impulse", String(FirstTiledSurfaceScene.fnv(bytes), radix: 16))
+        result.picture("impulse", bytes: bytes, metalFormat: MTLPixelFormat.rgba8Unorm.rawValue, width: t, height: t)
         result.metrics.set("paths", paths.joined(separator: ","))
         if RawFacade.kind(of: gpu.device) == "raw" {
             result.expect(paths.allSatisfy { $0 == "raw" }, "drawn on \(paths.joined(separator: ","))")

@@ -466,7 +466,7 @@ define void @kP(ptr addrspace(1) %p) {
 
 /// The layout of the argument buffer `kernel` of [`MODULE`] takes at `index`; `None` where
 /// `llvm-as` is missing.
-fn function_layout(
+pub(super) fn function_layout(
     kernel: &str,
     index: u32,
 ) -> Option<Result<ArgumentBufferLayout, ArgumentLayoutError>> {

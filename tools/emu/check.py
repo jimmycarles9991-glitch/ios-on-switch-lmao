@@ -3,18 +3,19 @@
     bazel run //tools/emu:check -- --kind=ios17|ios27 [--until launchd] [--timeout 600] [boot.py's options]
 
 Exits 0 once the kernel log shows the milestone, 1 on a panic (its line printed), 2 when the time runs out first (the
-last kernel lines printed), 3 when the kernel runs but no log line comes out of it (what the reader found printed).
-The run directory is kept as boot.py writes it.
+last kernel lines printed), 3 when the kernel runs but no log line comes out of it (what the reader found printed),
+4 when the `gpu` milestone's checks fail (gpucheck.py). The run directory is kept as boot.py writes it.
 """
 
 import argparse
 import re
 import sys
 import time
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from tools.emu import boot, msgbuf, report
+from tools.emu import boot, gpucheck, msgbuf, report
 from tools.emu.monitor import Monitor
 
 MILESTONES = {
@@ -34,13 +35,22 @@ PANIC_TEXT = (report.RAMOOPS[0] + 0x180000, 0x80000)
 QUIET_POLLS = 10
 
 
+Finder = Callable[[Sequence[str]], str | None]
+
+
+def first_match(pattern: re.Pattern) -> Finder:
+    return lambda log: next((line for line in log if pattern.search(line)), None)
+
+
 @dataclass
 class Watch:
     run: Path
     kernel: Path | None
-    milestone: re.Pattern
+    reach: Finder
+    fail: Finder = lambda log: None
     panic: str | None = None
     reached: str | None = None
+    failed: str | None = None
     log: list[str] = field(default_factory=list)
     ring: msgbuf.Ring | None = None
     quiet: int = 0
@@ -57,8 +67,9 @@ class Watch:
             self.ring, self.log = ring, sorted(set(self.log).union(report.kernel_log(ring.data)))
         if not self.log and msgbuf.kernel_cpu(registers) is not None:
             self.quiet += 1
-        self.reached = next((line for line in self.log if self.milestone.search(line)), None)
-        return bool(self.panic or self.reached or self.quiet >= QUIET_POLLS)
+        self.reached = self.reach(self.log)
+        self.failed = self.fail(self.log)
+        return bool(self.panic or self.reached or self.failed or self.quiet >= QUIET_POLLS)
 
     def unread(self) -> str:
         if self.ring is None:
@@ -69,7 +80,7 @@ class Watch:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     boot.add_arguments(parser)
-    parser.add_argument('--until', choices=sorted(MILESTONES), default='launchd')
+    parser.add_argument('--until', choices=sorted([*MILESTONES, 'gpu']), default='launchd')
     parser.add_argument('--timeout', type=float, default=600, help='wall seconds before giving up')
     args = parser.parse_args()
     if args.until in ('root', 'launchd', 'early-boot'):
@@ -81,15 +92,27 @@ def main() -> int:
             )
         args.sd = str(image)
     run, inputs = boot.prepare(args)
-    watch = Watch(run, inputs.kernel, re.compile(MILESTONES[args.until]))
+    if args.until == 'gpu':
+        watch = Watch(run, inputs.kernel, gpucheck.reached, gpucheck.failure)
+    else:
+        watch = Watch(run, inputs.kernel, first_match(re.compile(MILESTONES[args.until])))
     started = time.monotonic()
     boot.run_machine(run, inputs, args.timeout, watch)
     wall = time.monotonic() - started
     report.summarize(run, watch.log)
+    if args.until == 'gpu' and not watch.failed:
+        watch.failed = gpucheck.failure((run / 'kernel.log').read_text().splitlines())
     panic = watch.panic or report.panic_text((run / 'ramoops.raw').read_bytes())
     if panic:
         print(f'PANIC after {wall:.0f} s wall ({run}):\n{panic}')
         return 1
+    if watch.failed:
+        print(f'GPU FAIL after {wall:.0f} s wall ({run}): {watch.failed}')
+        return 4
+    problems = gpucheck.after_run(run) if watch.reached and args.until == 'gpu' else []
+    if problems:
+        print(f'GPU FAIL after {wall:.0f} s wall ({run}):', *problems[:8], sep='\n')
+        return 4
     if watch.reached:
         print(f'reached {args.until} after {wall:.0f} s wall: {watch.reached} ({run})')
         return 0

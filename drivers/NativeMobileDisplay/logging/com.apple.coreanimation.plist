@@ -1,8 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <!-- iOS 27's own com.apple.coreanimation profile (24B119 /System/Library/Preferences/Logging/Subsystems) with CADebug's info
-     messages persisted as well as enabled: the render server's "detach result" lines that CA_PRINT_DETACHING turns on (the
-     debug kernel's backboardd environment, kern_exec.c) reach the pulled log. Debug boot packages only (overlay/manifest.json),
+     messages persisted as well as enabled, so they reach the pulled log. Debug boot packages only (overlay/manifest.json),
      shown over the sealed profile. -->
 <plist version="1.0">
 <dict>

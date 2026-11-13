@@ -20,6 +20,7 @@
 #pragma once
 #include <stddef.h>
 #include <stdint.h>
+#include "SwitchFrameTickets.h"
 
 #ifndef SWITCH_IPSW_BUILD
 #error "SwitchFrameInfo.h: the key set is the IPSW kind's; compile with -include switch_ipsw_volumes.h"
@@ -224,6 +225,7 @@ private:
 struct State {
     Clients clients;
     Pending pending;
+    SwitchFrameTickets tickets;
 };
 
 }  // namespace switch_frame_info

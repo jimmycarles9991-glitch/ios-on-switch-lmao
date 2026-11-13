@@ -83,6 +83,9 @@ pub(super) fn plan(
         .insert(color, e);
     cx.families.arith.converts(e.form);
     cx.families.stage_io.extended.insert(color, e);
+    if let Some(word) = super::two_plane::plan(cx, color, e)? {
+        return Ok(Some(word));
+    }
     Ok(Some(IoType {
         numeric: IoNumeric::Uint,
         components: e.form.raw_components() as u8,

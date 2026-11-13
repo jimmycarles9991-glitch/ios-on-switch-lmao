@@ -27,10 +27,38 @@ void tgm_memory_release(void *memory);
 class OSObject;
 /* IOSurfaceRoot::lookupSurface(id, task): the surface, retained for the caller, or null */
 OSObject *tgm_surface_lookup(uint32_t id, void *task);
+OSObject *switch_gpu_surface_hold(uint32_t id, void *task, const uint64_t *pages, uint32_t count);
+const volatile uint64_t *switch_gpu_surface_generation(OSObject *surface);
+int switch_gpu_surface_client_memory(const OSObject *surface);
 #endif
 /* Whether surface `id` (looked up for `task`) lies in its creator's own memory, or cannot be looked up: such a surface
  * stays pitch */
 int tgm_surface_client_memory(uint32_t id, void *task);
+int switch_gpu_surface_pages_match(uint32_t id, void *task, const uint64_t *pages, uint32_t count);
+struct SwitchGpuSurfaceGeometry;
+struct switch_gpu_backing;
+struct switch_gpu_cpu_lease;
+int switch_gpu_surface_geometry(uint32_t id, void *task, const uint64_t *pages, uint32_t count,
+				struct SwitchGpuSurfaceGeometry *geometry);
+int switch_gpu_surface_backing(uint32_t id, void *task, struct switch_gpu_backing **backing);
+int switch_gpu_surface_prepare(uint32_t id, void *task, uint32_t options,
+			       struct switch_gpu_backing **backing,
+			       struct switch_gpu_cpu_lease **owned, void **descriptor);
+int switch_gpu_surface_prepare_cpu(void *surface, uint32_t id, void *task, uint32_t access,
+				   struct switch_gpu_backing **backing,
+				   struct switch_gpu_cpu_lease **owned, void **descriptor);
+int switch_gpu_surface_prepare_gpu(void *surface, uint32_t id, void *task, uint32_t access,
+				   struct switch_gpu_backing **backing,
+				   struct switch_gpu_cpu_lease **owned, void **descriptor);
+int switch_gpu_surface_gpu_admission(void *surface, struct switch_gpu_backing *expected,
+				     uint32_t access);
+void switch_gpu_surface_finish(void *descriptor);
+int switch_gpu_surface_adopt(void *descriptor, struct switch_gpu_backing *backing);
+void switch_gpu_surface_idle(void *descriptor);
+uint32_t switch_gpu_surface_users(void *descriptor);
+void switch_gpu_surface_descriptor_hold(void *descriptor, int hold);
+int switch_gpu_surface_imported(void *surface, struct switch_gpu_backing *backing);
+int switch_gpu_surface_layout_exclusive(void *surface, int enter);
 /* Whether the user client behind a view still lives (its task may have died holding the lock) */
 int tgm_cpu_view_live(const struct tgm_cpu_view *view);
 void tgm_cpu_view_hold(struct tgm_cpu_view *view, int hold);
@@ -44,6 +72,12 @@ void tgm_scratch_discard(struct tgm_scratch *scratch);
  * nonzero refuses the lock (kIOReturnCannotLock: kIOSurfaceLockAvoidSync and the GPU still writes it). Nothing for a
  * surface that is not block-linear. */
 int tgm_views_trap(void *client, uint32_t index, uint32_t id, uint32_t options);
+/* Before a GPU submission that writes the surface of `c` (any may be null): a write lock's rows kept to merge at its
+ * unlock. One atomic load when no lock is held. Sleeps on the copy engine's fence interrupt while it copies. */
+void tgm_views_gpu_writes(struct tgm_coh *c);
+/* tgm_views_gpu_writes for each surface a job writes: every GPU submission path (Submit, SubmitJob) calls it once its
+ * uses are resolved and before its job is kicked, since the kept rows are read behind the surface's earlier writers. */
+void tgm_views_job_writes(struct tgm_coh *const *written, uint32_t count);
 
 #ifdef __cplusplus
 }

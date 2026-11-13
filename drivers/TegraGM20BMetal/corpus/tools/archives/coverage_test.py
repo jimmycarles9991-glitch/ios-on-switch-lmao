@@ -21,7 +21,8 @@ NOT_FROM_THE_PACK = {
     'tessellation': 'raw makes no tessellated render state (m2v refuses its patch draws)',
     'unspecialized': "a function lacks a constant its library requires: the archive does not record the caller's value",
     'creation': "not a vertex and a fragment function of one framework's default.metallib (or it links another "
-    "library's): the runtime makes it when created, never from the pack (RawMetalStates.mm _packable)",
+    "library's) nor of one bundle's library linking none: the runtime makes it when created, never from the pack "
+    '(RawMetalStates.mm pipelineFor)',
     'family': 'declared only for GPU families the raw device does not answer for (Apple4 and later)',
 }
 # QuartzCore's archive states whose key no QuartzCore descriptor on the device has, by why

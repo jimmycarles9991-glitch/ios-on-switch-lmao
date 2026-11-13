@@ -5,22 +5,27 @@
 //   h264_host --clip                   test/VDECClip.h's clip: every submit accepted, pictures out in x264's display
 //                                      order, and the checker refusing each kind of bad submit derived from the first
 //                                      one; prints "PASS h264 clip ..." (h264_host_test)
-// Build: cc -O1 -o h264_host h264_host.c ../../AVD/H264Syntax.c ../../AVD/H264NVDEC.c
+//   h264_host --mbaff                  test/H264MbaffClip.h's MBAFF clip: every submit an MBAFF frame the checker
+//                                      accepts, pictures out in FFmpeg's display order tagged top field first
+// Build: cc -O1 -o h264_host h264_host.c ../../AVD/H264Syntax.c ../../AVD/H264NVDEC.c ../../AVD/H264DPB.c
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include "../../AVD/H264NVDEC.h"
 #include "../../../TegraNVDEC/TegraNVDECCheck.h"
 #include "../VDECClip.h"
+#include "../H264MbaffClip.h"
+#include "fake_engine.h"
 
 typedef struct {
     uint8_t *va[64];
     uint64_t size[64];
-    unsigned decoded, failures;
-    bool clip, haveFirst;
+    unsigned decoded, failures, recycled, notMbaff;
+    bool clip, mbaff, haveFirst;
     TegraNVDECSubmit first;  // the first submit and its relocations' room, for the refusal cases
     uint64_t firstAvail[TEGRA_NVDEC_MAX_ENTRIES];
     unsigned order[64], outputs;
+    FakeEngine engine;
 } Fake;
 
 static int fakeAlloc(void *ctx, uint64_t size, uint32_t *handle, void **va)
@@ -31,11 +36,27 @@ static int fakeAlloc(void *ctx, uint64_t size, uint32_t *handle, void **va)
             continue;
         f->va[h] = calloc(1, size);
         f->size[h] = size;
+        fake_engine_allocated(&f->engine, h);
         *handle = h;
         *va = f->va[h];
         return f->va[h] ? 0 : -1;
     }
     return -1;
+}
+
+static int switch_fake_recycle(void *ctx, uint32_t handle, uint64_t bytes, void **address)
+{
+    Fake *f = ctx;
+    if (!handle || handle >= 64 || !f->va[handle] || bytes != f->size[handle])
+        return -1;
+    void *next = calloc(1, bytes);
+    if (!next)
+        return -1;
+    free(f->va[handle]);
+    f->va[handle] = next;
+    *address = next;
+    ++f->recycled;
+    return 0;
 }
 
 static void fakeFree(void *ctx, uint32_t handle)
@@ -65,18 +86,21 @@ static int fakeSubmit(void *ctx, const TegraNVDECSubmit *s, uint32_t *fence)
         f->failures++;
         return -1;
     }
+    const nvdec_h264_pic_s *p = (const nvdec_h264_pic_s *)s->setup;
+    if (f->mbaff && (!p->MbaffFrameFlag || p->frame_mbs_only_flag || p->field_pic_flag || p->FrameHeightInMbs != 4))
+        f->notMbaff++;
     if (!f->haveFirst) {
         f->first = *s;
         memcpy(f->firstAvail, avail, sizeof(avail));
         f->haveFirst = true;
     }
-    *fence = f->decoded;
+    *fence = fake_engine_submit(&f->engine, s);
     return 0;
 }
 
 static int fakeWait(void *ctx, const TegraNVDECWait *w)
 {
-    (void)ctx, (void)w;
+    fake_engine_wait(&((Fake *)ctx)->engine, w->fence);
     return 0;
 }
 
@@ -88,6 +112,8 @@ typedef struct {
 static void *fakeDecoded(void *ctx, const H264Picture *pic)
 {
     Fake *f = ctx;
+    if (pic->luma != f->va[pic->handle] || (f->mbaff && pic->fields != AVD_FIELDS_TOP_FIRST))
+        ++f->failures;
     Item *it = malloc(sizeof(*it));
     it->index = (unsigned)(uintptr_t)pic->token;
     it->poc = pic->poc;
@@ -123,7 +149,7 @@ static int entryOf(const TegraNVDECSubmit *s, uint16_t method)
 static int refusals(const Fake *f)
 {
     int bad = 0;
-    for (int c = 0; c <= 12; c++) {
+    for (int c = 0; c <= 13; c++) {
         TegraNVDECSubmit s = f->first;
         uint64_t avail[TEGRA_NVDEC_MAX_ENTRIES];
         memcpy(avail, f->firstAvail, sizeof(avail));
@@ -137,7 +163,7 @@ static int refusals(const Fake *f)
         case 0:
             break;  // as decoded: accepted
         case 1:
-            s.codec = 4, expected = "codec";
+            s.codec = 2, expected = "codec";  // VC-1, which NVDEC is not given
             break;
         case 2:
             s.entries[control].value &= ~0x10u, expected = "control params";
@@ -179,6 +205,9 @@ static int refusals(const Fake *f)
         case 12:
             s.setup_bytes -= 4, expected = "setup size";
             break;
+        case 13:
+            p->displayPara.enableTFOutput = 1, expected = "display output or histogram";
+            break;
         }
         const char *why = tegra_nvdec_check(&s, avail);
         if ((why == NULL) != (expected == NULL) || (why && strcmp(why, expected))) {
@@ -195,11 +224,14 @@ int main(int argc, char **argv)
     if (argc < 2)
         return 2;
     static uint8_t data[64 << 20];
-    Fake fake = {.clip = !strcmp(argv[1], "--clip")};
+    Fake fake = {.mbaff = !strcmp(argv[1], "--mbaff")};
+    fake.clip = fake.mbaff || !strcmp(argv[1], "--clip");
+    const int frames = fake.mbaff ? kMbaffFrames : kClipFrames;
+    const int *display = fake.mbaff ? kMbaffDisplay : kClipDisplay;
     size_t size;
     if (fake.clip) {
-        memcpy(data, kClip, sizeof(kClip));
-        size = sizeof(kClip);
+        size = fake.mbaff ? sizeof(kMbaffClip) : sizeof(kClip);
+        memcpy(data, fake.mbaff ? kMbaffClip : kClip, size);
     } else {
         FILE *fp = fopen(argv[1], "rb");
         if (!fp)
@@ -207,8 +239,16 @@ int main(int argc, char **argv)
         size = fread(data, 1, sizeof(data), fp);
         fclose(fp);
     }
-    const H264Backend backend = {&fake,       fakeAlloc, fakeFree,    fakeSubmit, fakeWait,
-                                 fakeDecoded, fakeEmit,  fakeDiscard, NULL};
+    const H264Backend backend = {.ctx = &fake,
+                                 .alloc = fakeAlloc,
+                                 .free = fakeFree,
+                                 .submit = fakeSubmit,
+                                 .wait = fakeWait,
+                                 .decoded = fakeDecoded,
+                                 .emit = fakeEmit,
+                                 .discard = fakeDiscard,
+                                 .recycle = switch_fake_recycle,
+                                 .inputs = FAKE_ENGINE_DEPTH + 1};
     H264Decoder *d = h264_decoder_create(&backend);
 
     // Split into NAL units, then access units (7.4.1.2.3: a new one starts at an AUD, a parameter set or SEI after
@@ -278,16 +318,19 @@ int main(int argc, char **argv)
     h264_decoder_flush(d);
     h264_decoder_destroy(d);
     if (fake.clip) {
-        // Display position p is the access unit i with kClipDisplay[i] == p.
-        int misordered = fake.outputs != (unsigned)kClipFrames;
-        for (unsigned p = 0; p < fake.outputs && p < (unsigned)kClipFrames; p++)
-            if (fake.order[p] >= (unsigned)kClipFrames || kClipDisplay[fake.order[p]] != (int)p)
+        // Display position p is the access unit i with display[i] == p.
+        int misordered = fake.outputs != (unsigned)frames;
+        for (unsigned p = 0; p < fake.outputs && p < (unsigned)frames; p++)
+            if (fake.order[p] >= (unsigned)frames || display[fake.order[p]] != (int)p)
                 misordered++;
-        const int refused = fake.haveFirst ? refusals(&fake) : 1;
-        const bool pass = !errors && !fake.failures && !misordered && !refused && index == (unsigned)kClipFrames;
-        printf("%s h264 clip: %u access units, %u pictures, %d errors, %u refused by the checker, %d out of display "
-               "order, %d refusal cases wrong\n",
-               pass ? "PASS" : "FAIL", index, fake.decoded, errors, fake.failures, misordered, refused);
+        const int refused = fake.mbaff ? (int)fake.notMbaff : fake.haveFirst ? refusals(&fake) : 1;
+        const bool pass = !errors && !fake.failures && !misordered && !refused && index == (unsigned)frames &&
+                          fake.recycled == fake.decoded && !fake.engine.waits && !fake.engine.busyWrites;
+        printf("%s h264 %s: %u access units, %u pictures, %d errors, %u refused by the checker, %d out of display "
+               "order, %d %s, %u waits, %u CPU writes into a buffer a queued job uses\n",
+               pass ? "PASS" : "FAIL", fake.mbaff ? "mbaff clip" : "clip", index, fake.decoded, errors, fake.failures,
+               misordered, refused, fake.mbaff ? "not MBAFF frames" : "refusal cases wrong", fake.engine.waits,
+               fake.engine.busyWrites);
         return pass ? 0 : 1;
     }
     fprintf(stderr, "%u access units, %u pictures, %d errors, %u refused\n", index, fake.decoded, errors,

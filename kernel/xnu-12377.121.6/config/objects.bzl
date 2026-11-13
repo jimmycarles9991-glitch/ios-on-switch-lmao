@@ -19,3 +19,26 @@ DEVELOPMENT = struct(
         ],
     },
 )
+
+RELEASE = struct(
+    objects = [
+        "libsa/lastkerneldataconst.c",
+        "libsa/lastkernelconstructor.c",
+        "libsa/nonlto.c",
+        "gen:version.c",
+    ],
+    copts = {},
+    includes = {
+        "libsa/lastkernelconstructor.c": [
+            "-fno-lto",
+        ],
+        "libsa/nonlto.c": [
+            "-fno-lto",
+        ],
+    },
+    segments = {
+        "libsa/lastkernelconstructor.c": [
+            "-s __DATA -n __LASTDATA_CONST",
+        ],
+    },
+)

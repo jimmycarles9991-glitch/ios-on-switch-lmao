@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MIT
-// drivers/TegraGM20B/TegraGM20BSleepGate.h on the host: the gate every GPU-touching path outside gpu.lock goes through for
-// system sleep, single-threaded (each transition) and on threads with the kernel's protocol around it (gpu.c gate_enter,
+// drivers/TegraGM20B/TegraGM20BSleepGate.h on the host: the gate every GPU-touching path outside tgm_gpu.lock goes through for
+// system sleep, single-threaded (each transition) and on threads with the kernel's protocol around it (gpu_bringup.c tgm_gate_enter,
 // gate_try, gate_leave, sleep_gate, wake_open) on a std::mutex and condition variables in place of lck_mtx_sleep and
 // thread_wakeup; and the sleep plan for each bring-up stage.
 #include <gtest/gtest.h>
@@ -84,8 +84,8 @@ TEST(GM20BSleepGate, OpenAgainAfterTheWake)
 	EXPECT_TRUE(tgm_gate_drained(&g));
 }
 
-// gpu.c's protocol on host primitives: one mutex, `shutCv` for callers waiting for the open (event &gate.shut), `insideCv`
-// for the closer (event &gate.inside). Every wake is under the mutex, as gate_wake_closer and wake_open take gate_lock.
+// gpu_bringup.c's protocol on host primitives: one mutex, `shutCv` for callers waiting for the open (event &gate.shut), `insideCv`
+// for the closer (event &gate.inside). Every wake is under the mutex, as gate_wake_closer and wake_open take tgm_gate_lock.
 struct Kernel {
 	tgm_gate gate = {};
 	std::mutex lock;
@@ -97,7 +97,7 @@ struct Kernel {
 		insideCv.notify_all();
 	}
 
-	void enter()  // gate_enter
+	void enter()  // tgm_gate_enter
 	{
 		tgm_gate_entry entry;
 		while ((entry = tgm_gate_try_enter(&gate)) != TGM_GATE_IN) {

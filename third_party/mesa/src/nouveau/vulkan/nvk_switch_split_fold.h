@@ -17,6 +17,8 @@
 struct switch_fold_model {
    void *ctx;
    uint64_t sample;
+   uint32_t workgroup_id[3], local_id[3];
+   bool check_alignment;
    /* The byte at `at` of constant buffer `cbuf`, or of global memory: -1
     * where the model has none (the fold fails)
     */

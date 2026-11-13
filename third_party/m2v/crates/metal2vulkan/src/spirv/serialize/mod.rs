@@ -34,10 +34,10 @@ use crate::spirv::builder::mesh_per_primitive;
 use crate::spirv::error::{BResult, BuildError, ControlRule, Dangling, RelocRule};
 use crate::spirv::ids::{BlockId, ConstId, FuncId, TypeId, Value};
 use crate::spirv::ir::{
-    BinOp, Block, ConstKind, Constant, Contraction, Decl, Dim, ExecMode, ExecModel, GlobalKind,
-    GlslOp, GroupInst, GroupOperation, ImageOperands, ImageQuery, ImageUsage, Inst, Interpolation,
-    IoDir, MemAccess, Merge, RayQueryInst, Sampling, SpecOp, StorageClass, Terminator, TexelMemory,
-    Type, TypedModule, UnOp, ValueOrigin,
+    BinOp, Block, ConstKind, Constant, Contraction, ConvOp, Decl, Dim, ExecMode, ExecModel,
+    GlobalKind, GlslOp, GroupInst, GroupOperation, ImageOperands, ImageQuery, ImageUsage, Inst,
+    Interpolation, IoDir, MemAccess, Merge, RayQueryInst, Sampling, SpecOp, StorageClass,
+    Terminator, TexelMemory, Type, TypedModule, UnOp, ValueOrigin,
 };
 use crate::spirv::requirements::{
     spirv_extension_name, uses_physical_storage_buffer, uses_vulkan_memory_model,
@@ -150,17 +150,23 @@ pub fn serialize(m: TypedModule) -> BResult<RelocatableModule> {
 /// `DriverWorkaround::DontInlineKeepsCalls` (a measured cost fact of NVIDIA's driver), each
 /// sampling routine (`ModuleBuilder::sampling_routine`) is declared `DontInline` too.
 pub fn serialize_for(m: TypedModule, p: &DeviceProfile) -> BResult<RelocatableModule> {
-    write(
-        m,
-        Options {
+    write(m, options_for(p))
+}
+
+pub(crate) fn serialize_ref_for(m: &TypedModule, p: &DeviceProfile) -> BResult<RelocatableModule> {
+    let (words, relocs) = write_ref(m, options_for(p))?;
+    Ok(RelocatableModule { words, relocs, requirements: m.requirements.clone() })
+}
+
+fn options_for(p: &DeviceProfile) -> Options {
+    Options {
             forwarding: Forwarding::of(p),
             dont_inline: states_dont_inline(p),
             keeps_calls: p
                 .fields()
                 .workarounds
                 .contains(&DriverWorkaround::DontInlineKeepsCalls),
-        },
-    )
+    }
 }
 
 /// What [`serialize_for`] writes for a profile beyond [`serialize`]'s words.
@@ -221,6 +227,11 @@ fn states_dont_inline(p: &DeviceProfile) -> bool {
 /// Serialize `m` by `options` ([`serialize_for`]): with `options.forwarding`, the encodings its
 /// workarounds ask for; with `dont_inline`, each routine is declared `DontInline`.
 fn write(m: TypedModule, options: Options) -> BResult<RelocatableModule> {
+    let (words, relocs) = write_ref(&m, options)?;
+    Ok(RelocatableModule { words, relocs, requirements: m.requirements })
+}
+
+fn write_ref(m: &TypedModule, options: Options) -> BResult<(Vec<u32>, Vec<(Symbol, u32)>)> {
     let ids = Ids::assign(&m, options.forwarding)?;
     let mut w = Writer::default();
     // Header; the bound is patched below.
@@ -249,11 +260,7 @@ fn write(m: TypedModule, options: Options) -> BResult<RelocatableModule> {
     if let Some(b) = w.words.get_mut(3) {
         *b = ids.bound;
     }
-    Ok(RelocatableModule {
-        words: w.words,
-        relocs: w.relocs,
-        requirements: m.requirements,
-    })
+    Ok((w.words, w.relocs))
 }
 
 /// The heap bytes of the id tables [`serialize_for`] holds while it writes `m` for `p`, for the
@@ -1643,6 +1650,20 @@ impl Ser<'_> {
                     } = &n.inst
                     {
                         self.decorate(w, self.val(r)?, Decoration::NoContraction, &[])?;
+                    }
+                    if matches!(
+                        n.inst,
+                        Inst::Convert {
+                            op: ConvOp::FConvertRte,
+                            ..
+                        }
+                    ) {
+                        self.decorate(
+                            w,
+                            self.val(r)?,
+                            Decoration::FPRoundingMode,
+                            &[crate::spv::FPRoundingMode::RTE as u32],
+                        )?;
                     }
                     // A value carrying a non-uniform descriptor element to its consumer
                     // (VUID-RuntimeSpirv-NonUniform-06274).

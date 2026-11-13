@@ -67,7 +67,7 @@ bool bound(uint64_t va, uint64_t bytes)
 // instruction prefetch's reach past its end is bound, checked as each state is made (its programs the heap's newest)
 uint32_t prefetchCrossings;  // programs whose prefetch reach crosses into the next 256 KiB heap step
 
-bool programAt(const raw::Pack &pack, uint64_t region, uint16_t prog, uint32_t program)
+bool programAt(const raw::Pack &pack, uint64_t region, uint32_t prog, uint32_t program)
 {
     const raw::PackProgram &p = pack.section<raw::PackProgram>(raw::PackPrograms)[prog];
     const uint64_t slot = region + program - (p.program - p.heapOffset);
@@ -104,11 +104,13 @@ int main(int argc, char **argv)
     const raw::PackPipeline *records = pack.section<raw::PackPipeline>(raw::PackPipelines);
     const uint32_t count = pack.header()->pipelines;
     uint32_t made = 0, programsRight = 0;
-    std::set<uint16_t> named;
+    std::set<uint32_t> named;
     for (uint32_t i = 0; i < count; i++) {
-        const raw::PackForm form =
-            records[i].flags & raw::PipelineBarrierForm ? raw::PackForm::Barrier : raw::PackForm::Default;
+        const raw::PackForm form = raw::recordForm(records[i]);
         const raw::Pipeline *pl = dev.pipeline(records[i].keyHash, form);
+        if (records[i].flags & raw::PipelineVariantRecord)
+            for (const auto &[name, variant] : dev.variantPipelines(records[i].keyHash, false))
+                pl = name == pack.string(records[i].variantName) ? variant : pl;
         if (!pl)
             continue;
         made++;

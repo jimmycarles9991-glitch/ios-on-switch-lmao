@@ -31,7 +31,7 @@ public final class Suite: ObservableObject {
     let stage = Stage()
     let documents: URL
     private let tests: [any HWTest]
-    private let ios: Int
+    let ios: Int
     private let store: RunStore
     private let logger = Logger(subsystem: Suite.logSubsystem, category: "results")
     private var launched = false
@@ -177,12 +177,15 @@ public final class Suite: ObservableObject {
             for test in batch {
                 guard let self else { return }
                 let record: TestRecord
-                if let wedged = await self.begin(test.id), test.drawsWithGPU {
+                if let wedged = await self.begin(test.id), test.drawsWithGPU, !test.runsWhenGPUWedged {
                     record = Suite.record(test, .skip("the app's GPU stopped answering after \(wedged) timed out"), 0)
+                } else if GlassMemWatch.measuresFrames(test.id), let left = GlassMemWatch.armedSeconds() {
+                    record = Suite.record(test, .fail(GlassMemWatch.refusal(left)), 0)
                 } else {
                     let executed = await Suite.execute(test, context)
                     record = await Suite.checked(test, executed)
                 }
+                if GlassMemWatch.armsTheProbe(test.id) { GlassMemWatch.endGlassTest() }
                 await self.finish(record)
             }
             await self?.done(summarize: summarize, milliseconds: (CFAbsoluteTimeGetCurrent() - start) * 1000)

@@ -188,7 +188,7 @@ fn color_type(cx: &SelectCx<'_>, attachment: u32, f: Form) -> Result<IoType, Err
     })
 }
 
-fn user(
+pub(super) fn user(
     sp: &mut StageIoPlan,
     key: VaryingKey,
     dir: IoDir,
@@ -238,6 +238,21 @@ pub(super) fn builtin_object(
         shape,
         enabler: None,
     })
+}
+
+/// The fragment's `Layer` input, at which the layered storage form
+/// (`LoweringInputs::layered_storage`) addresses its images: its object, shared with a
+/// `[[render_target_array_index]]` read of `Layer`, declared through its enabling capability.
+pub(super) fn layer_input(cx: &mut SelectCx<'_>) -> Result<usize, Error> {
+    let enabler = enabler(cx, crate::spv::BuiltIn::Layer, Feature::LayeredRendering)?;
+    Ok(builtin_through(
+        &mut cx.families.stage_io,
+        crate::spv::BuiltIn::Layer,
+        IoDir::Input,
+        Shape::U32,
+        StageBuiltin::Layer,
+        enabler,
+    ))
 }
 
 /// [`builtin`], declared through enabling capability `enabler` when the builtin has
@@ -594,6 +609,13 @@ pub fn param(cx: &mut SelectCx<'_>, b: &ParamBinding) -> Result<(), Error> {
                 source: Source::LoopSample(f),
             });
             return Ok(());
+        }
+        // Drawn one amplification at a time, a stage reads the count from the push word the binder
+        // writes with each amplification's, so one pipeline draws at every count.
+        (ParamRole::Builtin(Builtin::AmplificationCount), Stage::Vertex | Stage::Fragment)
+            if cx.inputs.amplification_draws.is_some() =>
+        {
+            return pushed(cx, b, ty, PushField::AmplificationCount);
         }
         // Vulkan has no builtin for the count: the binder specializes it.
         (ParamRole::Builtin(Builtin::AmplificationCount), _) => {
@@ -1073,7 +1095,7 @@ fn rotated_second(
     })
 }
 
-fn push_var(list: &mut Vec<IoVariable>, v: IoVariable) {
+pub(super) fn push_var(list: &mut Vec<IoVariable>, v: IoVariable) {
     if !list.contains(&v) {
         list.push(v);
     }

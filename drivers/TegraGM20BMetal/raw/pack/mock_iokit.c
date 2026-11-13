@@ -35,6 +35,7 @@
 #include <fcntl.h>
 #include <pthread.h>
 #include <stdatomic.h>
+#include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -58,6 +59,7 @@ enum {
     kConn = 0x7e58, /* the first connection; the next ones follow it */
     kConns = 5,
     kFenceToken = 0xfe000001,
+    kFenceWords = 16, /* a channel's fence record: 64 bytes */
     kMaxBo = 65536
 };
 
@@ -78,7 +80,9 @@ static struct bo bos[kMaxBo];
 static pthread_mutex_t bo_lock = PTHREAD_MUTEX_INITIALIZER;
 static uint64_t bo_serial;
 static uint32_t submitted[16];
-static uint32_t *fence;   /* the fence page, a TegraGM20BAbiFence per channel at slot*16 */
+/* The fence page: per channel slot, at slot*64, its TegraGM20BAbiFence, TegraGM20BAbiFenceSemantic and
+ * TegraGM20BAbiFenceIdentity, as the kext lays them out */
+static uint32_t *fence;
 static uint32_t dead[16]; /* method 11's error of a killed channel */
 static uint32_t made[16]; /* channels made in each slot: a wait on one destroyed and made again answers NotResponding */
 static uint64_t dead_va[16]; /* and its fault VA */
@@ -113,10 +117,11 @@ static unsigned bo_new(struct bo o)
 }
 
 static uint64_t kill_next_va;
-static atomic_ulong calls[32];
-static atomic_uint fail_left[32]; /* mock_iokit_fail_next's, by method */
-static atomic_uint fail_skip[32]; /* mock_iokit_fail_after's calls that go through first */
-static atomic_int fail_kr[32];
+enum { kMethods = 64 };
+static atomic_ulong calls[kMethods];
+static atomic_uint fail_left[kMethods]; /* mock_iokit_fail_next's, by method */
+static atomic_uint fail_skip[kMethods]; /* mock_iokit_fail_after's calls that go through first */
+static atomic_int fail_kr[kMethods];
 static atomic_uint priority_now[2] = {2, 4}; /* Priority's (method 18): the connection's foreground and background */
 static atomic_ulong import_maps;             /* VmBind map ops onto imported pages */
 static atomic_ulong kind_maps[256];          /* VmBind map ops by PTE kind */
@@ -190,6 +195,7 @@ enum {
 };
 static struct job queue[16][kQueue]; /* per channel, in kick order: [head, tail) */
 static uint32_t qhead[16], qtail[16], running;
+static bool paused[16];
 static struct run runs[kJobs];
 static uint32_t nruns;
 static unsigned long order_calls, order_queued, waits_total, waits_submit;
@@ -218,7 +224,7 @@ static uint64_t now_us(void)
 
 static int passed(uint32_t ch, uint32_t seqno)
 {
-    return (int32_t)(fence[ch * 4] - seqno) >= 0;
+    return (int32_t)(fence[ch * kFenceWords] - seqno) >= 0;
 }
 
 static int async_gpu(void)
@@ -226,6 +232,25 @@ static int async_gpu(void)
     if (gpu_us < 0)
         gpu_us = getenv("MOCK_GPU_US") ? atoi(getenv("MOCK_GPU_US")) : 0;
     return gpu_us > 0;
+}
+
+bool mock_iokit_seed_sequence(uint32_t channel, uint32_t sequence)
+{
+    pthread_mutex_lock(&gpu_lock);
+    const bool ready = channel < 16 && live[channel] && !dead[channel] &&
+                       qhead[channel] == qtail[channel] && passed(channel, submitted[channel]);
+    if (ready)
+        submitted[channel] = fence[channel * kFenceWords] = sequence;
+    pthread_mutex_unlock(&gpu_lock);
+    return ready;
+}
+
+void mock_iokit_pause(uint32_t channel, bool pause)
+{
+    pthread_mutex_lock(&gpu_lock);
+    paused[channel] = pause;
+    pthread_cond_broadcast(&gpu_cond);
+    pthread_mutex_unlock(&gpu_lock);
 }
 
 /* gpu_lock held: `waiter`'s next submission waits for `source` to pass `seqno` (one per source, the later seqno) */
@@ -271,7 +296,7 @@ static void surface_acquires(uint32_t ch, uint32_t seqno)
 /* gpu_lock held: the head of channel ch's queue may run (its acquires passed; MOCK_IGNORE_ACQUIRES: always) */
 static int head_ready(uint32_t ch, int ignore_acquires)
 {
-    if (qhead[ch] == qtail[ch])
+    if (qhead[ch] == qtail[ch] || paused[ch])
         return 0;
     const struct job *j = &queue[ch][qhead[ch] % kQueue];
     for (uint32_t k = 0; k < j->nacq && !ignore_acquires; k++)
@@ -292,14 +317,14 @@ static void *gpu_thread(void *arg)
     pthread_mutex_lock(&gpu_lock);
     for (;;) {
         if (!head_ready(ch, ignore_acquires)) {
-            if (qhead[ch] != qtail[ch] && !running) { /* nothing runs that could move a fence: none ever will */
+            if (qhead[ch] != qtail[ch] && !running && !paused[ch]) { /* nothing runs that could move a fence: none ever will */
                 int any = 0;
                 for (uint32_t c = 1; c < 16 && !any; c++)
                     any = head_ready(c, ignore_acquires);
                 if (!any) {
                     const struct job *j = &queue[ch][qhead[ch] % kQueue];
                     fprintf(stderr, "mock GPU: deadlock: ch %u seqno %u waits on ch %u fence %u (at %u)\n", j->ch,
-                            j->seqno, j->acq[0].ch, j->acq[0].seqno, fence[j->acq[0].ch * 4]);
+                            j->seqno, j->acq[0].ch, j->acq[0].seqno, fence[j->acq[0].ch * kFenceWords]);
                     abort();
                 }
             }
@@ -325,7 +350,7 @@ static void *gpu_thread(void *arg)
         running--;
         qhead[ch]++;
         if (!dead[ch])
-            fence[ch * 4] = j.seqno;
+            fence[ch * kFenceWords] = j.seqno;
         if (nruns < kJobs)
             runs[nruns++] = (struct run){j.ch, j.seqno, j.nacq, j.kick, start, end};
         pthread_cond_broadcast(&gpu_cond);
@@ -337,12 +362,12 @@ static void *gpu_thread(void *arg)
 static void kill_channel(uint32_t ch, uint32_t error)
 {
     if (!getenv("MOCK_NO_KILL_RECORD")) {
-        fence[ch * 4 + 1] = fence[ch * 4] + 1;
-        fence[ch * 4 + 2] = submitted[ch];
-        fence[ch * 4 + 3] = error;
+        fence[ch * kFenceWords + 1] = fence[ch * kFenceWords] + 1;
+        fence[ch * kFenceWords + 2] = submitted[ch];
+        fence[ch * kFenceWords + 3] = error;
     }
     dead[ch] = error;
-    fence[ch * 4] = submitted[ch];
+    fence[ch * kFenceWords] = submitted[ch];
     pthread_cond_broadcast(&gpu_cond);
 }
 
@@ -454,6 +479,18 @@ static uint32_t surface_layout(const struct bo *bo, const struct TegraGM20BAbiSu
     return layout;
 }
 
+static uint32_t *fence_page(void)
+{
+    if (!fence)
+        fence = mmap(NULL, 4096, PROT_READ | PROT_WRITE, MAP_ANON | MAP_SHARED, -1, 0);
+    return fence;
+}
+
+#include "mock_submission.h"
+#ifdef SWITCH_MOCK_JOB_INTERFACE
+#include "mock_jobs.h"
+#endif
+
 static kern_return_t mock_call(mach_port_t c, uint32_t sel, const void *in, size_t insz, void *out, size_t *outsz)
 {
     static atomic_int logged;
@@ -470,9 +507,9 @@ static kern_return_t mock_call(mach_port_t c, uint32_t sel, const void *in, size
     }
     if (sel == TegraGM20BTunnelProbe)
         return KERN_SUCCESS;
-    if (sel < 32)
+    if (sel < kMethods)
         atomic_fetch_add(&calls[sel], 1);
-    if (sel < 32 && atomic_load(&fail_left[sel])) {
+    if (sel < kMethods && atomic_load(&fail_left[sel])) {
         if (atomic_load(&fail_skip[sel])) {
             atomic_fetch_sub(&fail_skip[sel], 1);
         } else {
@@ -490,7 +527,7 @@ static kern_return_t mock_call(mach_port_t c, uint32_t sel, const void *in, size
                                 : getenv("MOCK_TASK_WINDOWS") ? 1ull << 38
                                                               : 1ull << 39;
         struct TegraGM20BAbiInfo i = {.abi_version = TegraGM20BAbiVersion,
-                                      .flags = TegraGM20BInfoHostImport |
+                                      .flags = TegraGM20BInfoHostImport | TegraGM20BInfoCpuAccess |
                                                (getenv("MOCK_NO_EXEC_SURFACES") ? 0 : TegraGM20BInfoExecSurfaces) |
                                                (getenv("MOCK_NO_KERNEL_MAP") ? 0 : TegraGM20BInfoKernelMap) |
                                                (getenv("MOCK_NO_ORDER") ? 0 : TegraGM20BInfoOrder) |
@@ -498,7 +535,8 @@ static kern_return_t mock_call(mach_port_t c, uint32_t sel, const void *in, size
                                                (getenv("MOCK_NO_KILL_RECORD") ? 0 : TegraGM20BInfoKillRecord) |
                                                (getenv("MOCK_TILED_CACHE") ? TegraGM20BInfoTiledCache : 0) |
                                                (getenv("MOCK_COMPRESSION") ? TegraGM20BInfoCompression : 0) |
-                                               (getenv("MOCK_NO_PRIORITY") ? 0 : TegraGM20BInfoPriority),
+                                               (getenv("MOCK_NO_PRIORITY") ? 0 : TegraGM20BInfoPriority) |
+                                               (getenv("MOCK_NATIVE_JOBS") ? TegraGM20BInfoSubmitAddress : 0),
                                       .chipset = 0x12e,
                                       .gpc_count = 1,
                                       .tpc_count = 2,
@@ -591,7 +629,8 @@ static kern_return_t mock_call(mach_port_t c, uint32_t sel, const void *in, size
         const struct TegraGM20BAbiVmBind *b = in;
         for (uint32_t i = 0; i < b->count && i < TegraGM20BMaxBindOps; i++) {
             const struct TegraGM20BAbiBindOp *op = &b->ops[i];
-            const unsigned h = op->op == TegraGM20BBindMap ? slot_of(op->handle) : 0;
+            const int map = op->op == TegraGM20BBindMap || op->op == TegraGM20BBindMapVolatile;
+            const unsigned h = map ? slot_of(op->handle) : 0;
             struct bo *o = h ? &bos[h] : NULL;
             if (o) {
                 const kern_return_t kr = comp_bind(h, o, op);
@@ -602,7 +641,7 @@ static kern_return_t mock_call(mach_port_t c, uint32_t sel, const void *in, size
             }
             if (o && o->import)
                 atomic_fetch_add(&import_maps, 1);
-            if (op->op == TegraGM20BBindMap)
+            if (map)
                 atomic_fetch_add(&kind_maps[op->kind & 255], 1);
             pushcount_bind(op->va, op->range, o ? o->fd : -1, o ? o->import : NULL, op->bo_offset, o ? o->bytes : 0);
         }
@@ -616,8 +655,7 @@ static kern_return_t mock_call(mach_port_t c, uint32_t sel, const void *in, size
         return KERN_SUCCESS;
     }
     case TegraGM20BMethodChannelCreate: {
-        if (!fence)
-            fence = mmap(NULL, 4096, PROT_READ | PROT_WRITE, MAP_ANON | MAP_SHARED, -1, 0);
+        fence_page();
         pthread_mutex_lock(&gpu_lock);
         uint32_t ch = 1;
         while (ch < 16 && (live[ch] || (chan_conn[ch] && chan_conn[ch] != c)))
@@ -634,13 +672,26 @@ static kern_return_t mock_call(mach_port_t c, uint32_t sel, const void *in, size
         dead[ch & 15] = 0;
         dead_va[ch & 15] = 0;
         made[ch & 15]++;
-        fence[(ch & 15) * 4 + 1] = fence[(ch & 15) * 4 + 2] = fence[(ch & 15) * 4 + 3] = 0;
+        memset(&fence[(ch & 15) * kFenceWords + 1], 0, (kFenceWords - 1) * sizeof(uint32_t));
+        const uint64_t uid = (uint64_t)made[ch & 15] << 4 | (ch & 15);
+        memcpy(&fence[(ch & 15) * kFenceWords + 8], &uid, sizeof uid);
         pthread_cond_broadcast(&gpu_cond);
         pthread_mutex_unlock(&gpu_lock);
-        struct TegraGM20BAbiChannelCreateReply r = {.channel = ch, .fence_token = kFenceToken, .fence_offset = ch * 16};
+        struct TegraGM20BAbiChannelCreateReply r = {
+            .channel = ch, .fence_token = kFenceToken, .fence_offset = ch * kFenceWords * 4};
         memcpy(out, &r, sizeof(r));
         return KERN_SUCCESS;
     }
+    case TegraGM20BMethodSubmitAddress:
+        return mock_submit(c, in, insz, out, outsz);
+#ifdef SWITCH_MOCK_JOB_INTERFACE
+    case TegraGM20BMethodResourceSetCreate:
+        return mock_set_create(in, insz, out);
+    case TegraGM20BMethodResourceSetRelease:
+        return mock_set_release(in, insz);
+    case TegraGM20BMethodSubmitJob:
+        return mock_job(c, in, insz, out, outsz);
+#endif
     case TegraGM20BMethodExec: {
         const struct TegraGM20BAbiExec *e = in;
         uint32_t ch = e->channel & 15;
@@ -677,7 +728,7 @@ static kern_return_t mock_call(mach_port_t c, uint32_t sel, const void *in, size
             memcpy(out, &r, sizeof(r));
             return KERN_SUCCESS;
         }
-        if (async_gpu()) {
+        if (async_gpu() || paused[ch]) {
             static pthread_t threads[16];
             if (!threads[ch])
                 pthread_create(&threads[ch], NULL, gpu_thread, (void *)(uintptr_t)ch);
@@ -694,7 +745,7 @@ static kern_return_t mock_call(mach_port_t c, uint32_t sel, const void *in, size
             pthread_mutex_unlock(&gpu_lock);
             pushcount_exec(e);
             pthread_mutex_lock(&gpu_lock);
-            fence[ch * 4] = j.seqno;
+            fence[ch * kFenceWords] = j.seqno;
             pthread_mutex_unlock(&gpu_lock);
         }
         memcpy(out, &r, sizeof(r));
@@ -776,6 +827,21 @@ static kern_return_t mock_call(mach_port_t c, uint32_t sel, const void *in, size
         memcpy(out, &r, sizeof(r));
         return bad ? kIOReturnNoResources : KERN_SUCCESS;
     }
+    case TegraGM20BMethodCpuAcquire:
+    case TegraGM20BMethodCpuRelease: {
+        const struct TegraGM20BAbiCpuAccess *a = in;
+        if (insz < sizeof(*a) || !slot_of(a->handle))
+            return kIOReturnBadArgument;
+        return KERN_SUCCESS;
+    }
+    case TegraGM20BMethodCpuComplete: {
+        const struct TegraGM20BAbiCpuComplete *q = in;
+        if (insz < sizeof(*q) || *outsz != sizeof(struct TegraGM20BAbiCpuCompleteReply))
+            return kIOReturnBadArgument;
+        const struct TegraGM20BAbiCpuCompleteReply r = {.current_count = q->range_count};
+        memcpy(out, &r, sizeof(r));
+        return KERN_SUCCESS;
+    }
     case TegraGM20BMethodMap: {
         const struct TegraGM20BAbiMap *m = in;
         if (getenv("MOCK_NO_KERNEL_MAP"))
@@ -809,7 +875,7 @@ static kern_return_t mock_call(mach_port_t c, uint32_t sel, const void *in, size
     }
     case TegraGM20BMethodGetStatus: {
         const struct TegraGM20BAbiChannel *ch = in;
-        struct TegraGM20BAbiStatus s = {.completed = fence[(ch->channel & 15) * 4],
+        struct TegraGM20BAbiStatus s = {.completed = fence[(ch->channel & 15) * kFenceWords],
                                         .submitted = submitted[ch->channel & 15],
                                         .error = dead[ch->channel & 15],
                                         .fault_va = dead_va[ch->channel & 15]};
@@ -879,7 +945,7 @@ void mock_iokit_kill_next_at(uint32_t error, uint64_t fault_va)
  * ChannelCreate, a WaitFence that fails with no kill) */
 void mock_iokit_fail_after(unsigned method, unsigned skip, unsigned count, int kr)
 {
-    if (method >= 32)
+    if (method >= kMethods)
         return;
     atomic_store(&fail_kr[method], kr);
     atomic_store(&fail_skip[method], skip);
@@ -893,7 +959,7 @@ void mock_iokit_fail_next(unsigned method, unsigned count, int kr)
 
 unsigned long mock_iokit_calls(unsigned method)
 {
-    return method < 32 ? calls[method] : 0;
+    return method < kMethods ? calls[method] : 0;
 }
 
 void mock_iokit_priority(uint32_t out[2])

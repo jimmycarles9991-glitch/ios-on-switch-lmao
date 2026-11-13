@@ -54,4 +54,5 @@ Bazel's action cache does this through the shard's unused inputs list, so it hol
 output base still misses the disk cache.
 
 The raw pack is probed in buckets too, one action each. Only the last step, which stamps the stack key into the pack,
-reads the key that every `raw/` edit changes, so such an edit restamps the pack instead of probing again.
+reads the key. The key changes only with what the raw path's records are made and read by (`//gpu:raw_stack`), so an
+edit to the rest of the raw runtime leaves the pack and every record on the device as they are.

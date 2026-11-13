@@ -169,6 +169,56 @@ py_test(
     ],
 )
 
+py_binary(
+    name = "jetsam_overlay",
+    srcs = ["jetsam_overlay.py"],
+)
+
+# The jetsam overlay in the build's profile: run it in both (--//bazel:profile=release too)
+py_test(
+    name = "jetsam_overlay_test",
+    size = "small",
+    srcs = [
+        "jetsam_overlay.py",
+        "jetsam_overlay_test.py",
+    ],
+    data = [
+        "//hw_test_app:peer/com.brunostjohn.switch.texpeer.jetsam.plist",
+        "//overlay:manifest.json",
+        "//overlay:supplemental/com.apple.jetsamproperties.cryptex.plist",
+        "//overlay:supplemental/com.brunostjohn.switch.shadercompiler.jetsam.plist",
+    ],
+    env = select({
+        "//bazel:debug": {"SWITCH_PROFILE": "debug"},
+        "//conditions:default": {"SWITCH_PROFILE": "release"},
+    }),
+    imports = ["."],
+)
+
+# The shader compiler's launch on each iOS version: 27's launchd plist and the jetsam properties overlay launchd takes
+# its band and limits from (staged where launchd reads it, on 24B119 only), 17's BlueTool spawn, both held to
+# SwitchShaderCompilerJetsam.h.
+py_test(
+    name = "shader_compiler_launch_test",
+    size = "small",
+    srcs = [
+        "overlay.py",
+        "shader_compiler_launch_test.py",
+    ],
+    data = [
+        "//drivers/SwitchBluetooth:BlueTool/BlueTool.c",
+        "//drivers/TegraGM20BMetal:compiler/SwitchShaderCompilerJetsam.h",
+        "//overlay:manifest.json",
+        "//overlay:overlay_sources",
+    ],
+    imports = ["."],
+    deps = [
+        ":boot_config",
+        "//tools/common:macho",
+        "//tools/trustcache",
+    ],
+)
+
 py_test(
     name = "wallpaper_1x_test",
     srcs = [

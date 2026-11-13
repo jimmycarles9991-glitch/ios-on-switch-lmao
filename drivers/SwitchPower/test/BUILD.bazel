@@ -123,3 +123,39 @@ host_test(
         "//drivers/SwitchPower:SwitchMonotonicBase.h",
     ],
 )
+
+host_test(
+    name = "switch_display_bandwidth_test",
+    srcs = [
+        "switch_display_bandwidth_test.cpp",
+        "//drivers/SwitchPower:SwitchDisplayBandwidth.h",
+    ],
+)
+
+host_test(
+    name = "switch_display_memory_test",
+    srcs = [
+        "switch_display_memory_test.cpp",
+        "//drivers/SwitchPower:SwitchDisplayMemory.h",
+        "//drivers/SwitchPower:SwitchDisplayMemoryMath.h",
+        "//drivers/SwitchPower:SwitchDisplayMemoryRegisters.h",
+        "//drivers/SwitchPower:SwitchDisplayMemoryState.h",
+    ],
+)
+
+host_test(
+    name = "switch_display_memory_adapter_test",
+    srcs = [
+        "switch_display_memory_adapter_test.cpp",
+        "//drivers/SwitchPower:SwitchDisplayBandwidth.h",
+        "//drivers/SwitchPower:SwitchDisplayMemory.h",
+        "//drivers/SwitchPower:SwitchDisplayMemoryMath.h",
+        "//drivers/SwitchPower:SwitchDisplayMemoryRegisters.h",
+        "//drivers/SwitchPower:SwitchDisplayMemoryState.h",
+        "//drivers/SwitchPower:SwitchDisplayMemoryEMC.h",
+        "//drivers/SwitchPower:SwitchEMCGovernor.h",
+        "//drivers/SwitchPower:SwitchEMCClock.h",
+        "//drivers/SwitchPower:SwitchEMCFixed.h",
+    ],
+    defines = ["DEVELOPMENT=1"],
+)

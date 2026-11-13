@@ -6,6 +6,7 @@
 #include "nvk_descriptor_set_layout.h"
 #include "nvk_descriptor_types.h"
 #include "nvk_shader.h"
+#include "nvk_switch_xr_planes.h"
 
 #include "vk_pipeline.h"
 
@@ -1319,6 +1320,12 @@ lower_tex(nir_builder *b, nir_tex_instr *tex,
       }
    }
 
+   /* The next header: a two-plane texture's alpha plane (nvk_switch_xr_planes.h) */
+   if (tex->backend_flags & SWITCH_NVK_TEX_ALPHA_PLANE) {
+      combined_handle = nir_iadd_imm(b, combined_handle, 1);
+      tex->backend_flags &= ~SWITCH_NVK_TEX_ALPHA_PLANE;
+   }
+
    nir_tex_instr_add_src(tex, nir_tex_src_texture_handle, combined_handle);
 
    return true;
@@ -1546,7 +1553,8 @@ lower_ssbo_descriptor_instr(nir_builder *b, nir_instr *instr,
 
 bool
 nvk_nir_lower_descriptors(nir_shader *nir,
-                          const struct nvk_physical_device *pdev,
+                          const struct nv_device_info *info,
+                          bool edb_buffer_views,
                           VkShaderCreateFlagsEXT shader_flags,
                           const struct vk_pipeline_robustness_state *rs,
                           uint32_t set_layout_count,
@@ -1554,10 +1562,10 @@ nvk_nir_lower_descriptors(nir_shader *nir,
                           struct nvk_cbuf_map *cbuf_map_out)
 {
    struct lower_descriptors_ctx ctx = {
-      .dev_info = &pdev->info,
-      .use_bindless_cbuf = nvk_use_bindless_cbuf(&pdev->info),
-      .use_bindless_cbuf_2 = nvk_use_bindless_cbuf_2(&pdev->info),
-      .use_edb_buffer_views = nvk_use_edb_buffer_views(pdev),
+      .dev_info = info,
+      .use_bindless_cbuf = nvk_use_bindless_cbuf(info),
+      .use_bindless_cbuf_2 = nvk_use_bindless_cbuf_2(info),
+      .use_edb_buffer_views = edb_buffer_views,
       .clamp_desc_array_bounds =
          rs->storage_buffers != VK_PIPELINE_ROBUSTNESS_BUFFER_BEHAVIOR_DISABLED_EXT ||
          rs->uniform_buffers != VK_PIPELINE_ROBUSTNESS_BUFFER_BEHAVIOR_DISABLED_EXT ||
@@ -1565,8 +1573,8 @@ nvk_nir_lower_descriptors(nir_shader *nir,
       .indirect_bind =
          shader_flags & VK_SHADER_CREATE_INDIRECT_BINDABLE_BIT_EXT,
       .has_task_shader = (shader_flags & VK_SHADER_CREATE_NO_TASK_SHADER_BIT_EXT) == 0,
-      .ssbo_addr_format = nvk_ssbo_addr_format(pdev, rs),
-      .ubo_addr_format = nvk_ubo_addr_format(pdev, rs),
+      .ssbo_addr_format = nvk_ssbo_addr_format(rs),
+      .ubo_addr_format = nvk_ubo_addr_format(info, rs),
    };
 
    assert(set_layout_count <= NVK_MAX_SETS);

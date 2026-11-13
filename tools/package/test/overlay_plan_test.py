@@ -87,7 +87,7 @@ class KindTest(unittest.TestCase):
         for kind in self.kinded():
             given = [e['source'] for e in self.manifest['files'] if e.get('kind', kind) == kind]
             self.plan(kind, given)
-            mine = next(e['source'] for e in self.manifest['files'] if e.get('kind') == kind)
+            mine = next(e['source'] for e in self.released() if e.get('kind') == kind)
             with self.assertRaises(SystemExit):
                 self.plan(kind, [s for s in given if s != mine])
 

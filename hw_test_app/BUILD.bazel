@@ -2,10 +2,14 @@
 load("@rules_apple//apple:macos.bzl", "macos_command_line_application")
 load("@rules_apple//apple:resources.bzl", "apple_resource_group")
 load("@rules_cc//cc:cc_library.bzl", "cc_library")
+load("@rules_python//python:py_binary.bzl", "py_binary")
+load("@rules_python//python:py_test.bzl", "py_test")
 load("@rules_swift//swift:swift_interop_hint.bzl", "swift_interop_hint")
 load("@rules_swift//swift:swift_library.bzl", "swift_library")
 load("@rules_swift//swift:swift_test.bzl", "swift_test")
 load("//bazel/lint:defs.bzl", "lint_files")
+load("//bazel/testing:defs.bzl", "host_test")
+load("//kernel/rules:package.bzl", "ios_binary")
 load(":apps.bzl", "hwtest_app", "ios_arm64e")
 
 package(default_visibility = ["//visibility:public"])
@@ -41,6 +45,8 @@ swift_library(
     srcs = glob([
         "gpu/*.swift",
         "gpu/scenes/*.swift",
+        "gpu/scenes27/*.swift",
+        "gpu/x1/*.swift",
     ]),
     copts = SWIFT_COPTS,
     module_name = "HWTestGPU",
@@ -82,6 +88,15 @@ MEDIA = [
         "4k",
     ]
 ] + [
+    "mpeg4_720p.mp4",
+    "mpeg4_1080p.mp4",
+    "mpeg2_720p.mp4",
+    "mpeg2_1080p.mp4",
+    "mpeg1_720p.mp4",
+    "h264_paff_256p.mp4",
+    "h264_mbaff_1080p.mp4",
+] + [
+    "hevc_alpha.mp4",
     "jpeg_420.jpg",
     "jpeg_422.jpg",
     "jpeg_444.jpg",
@@ -95,7 +110,17 @@ swift_test(
     size = "small",
     srcs = glob(["host_tests/*.swift"]),
     copts = SWIFT_COPTS,
-    env = {"HWTEST_MEDIA": " ".join(MEDIA)},
+    data = [
+        "//tools/benchloop:generated_batches.json",
+        "//tools/benchloop:testdata/golden_batch.json",
+        "//tools/benchloop:testdata/split_capture_batch.json",
+    ],
+    env = {
+        "BENCH_GENERATED": "$(rlocationpath //tools/benchloop:generated_batches.json)",
+        "BENCH_GOLDEN": "$(rlocationpath //tools/benchloop:testdata/golden_batch.json)",
+        "BENCH_CAPTURE": "$(rlocationpath //tools/benchloop:testdata/split_capture_batch.json)",
+        "HWTEST_MEDIA": " ".join(MEDIA),
+    },
     deps = [":core"],
 )
 
@@ -148,12 +173,87 @@ macos_command_line_application(
     deps = [":media_lib"],
 )
 
-# The raw pack corpus's Core Animation states, which gpu.ca.sweep draws on the raw facade and on m2v.
+# The raw pack corpus's Core Animation states this IPSW's QuartzCore makes (ca_states.py), which gpu.ca.sweep draws on
+# the raw facade and on m2v.
+py_binary(
+    name = "ca_states_filter",
+    srcs = ["ca_states.py"],
+    main = "ca_states.py",
+    deps = [
+        "//drivers/TegraGM20BMetal:raw_pack",
+        "//tools/gpu/shaders:metallib",
+    ],
+)
+
+QC_TABLES = {kind: "//drivers/TegraGM20BMetal:raw/pack/ca/qc-" + kind + ".json" for kind in ("21H461", "24B119")}
+
 genrule(
     name = "ca_states",
-    srcs = ["//drivers/TegraGM20BMetal:precompile/corpus.log"],
+    srcs = [
+        "//drivers/TegraGM20BMetal:precompile/corpus.log",
+        "@ipsw//:crawl_qc",
+    ] + select({"//ipsw:" + kind: [tables] for kind, tables in QC_TABLES.items()}),
     outs = ["ca_states.log"],
-    cmd = "grep '^R ok=1 label=com.apple.coreanimation[.]' $< > $@",
+    cmd = select({
+        "//ipsw:" + kind: "$(execpath :ca_states_filter) $(execpath //drivers/TegraGM20BMetal:precompile/corpus.log) " +
+                          "$(execpath @ipsw//:crawl_qc) $(execpath " + tables + ") $@"
+        for kind, tables in QC_TABLES.items()
+    }),
+    tools = [":ca_states_filter"],
+)
+
+# The states this device's QuartzCore asks for where the offline compilation manifest names another colour precision
+# (ca_asked.py), which gpu.ca.asked_forms makes on the raw facade.
+py_binary(
+    name = "ca_asked_forms",
+    srcs = ["ca_asked.py"],
+    main = "ca_asked.py",
+    deps = ["//drivers/TegraGM20BMetal:raw_pack"],
+)
+
+# The Core Animation states a device's logs named as made at run time, per IPSW kind (precompile/ca_names.py)
+CA_NAMES = {"24B119": "//drivers/TegraGM20BMetal:precompile/ca-names/24B119.txt"}
+
+genrule(
+    name = "ca_asked",
+    srcs = ["//drivers/TegraGM20BMetal:stage-tegra-gm20b-metal.py"] + select({
+        "//ipsw:" + kind: [tables] + ([CA_NAMES[kind]] if kind in CA_NAMES else [])
+        for kind, tables in QC_TABLES.items()
+    }),
+    outs = ["ca_asked.log"],
+    cmd = select({
+        "//ipsw:" + kind: "$(execpath :ca_asked_forms) $(execpath " + tables + ") " +
+                          "$(execpath //drivers/TegraGM20BMetal:stage-tegra-gm20b-metal.py) $@" +
+                          (" $(execpath " + CA_NAMES[kind] + ")" if kind in CA_NAMES else "")
+        for kind, tables in QC_TABLES.items()
+    }),
+    tools = [":ca_asked_forms"],
+)
+
+py_test(
+    name = "ca_states_test",
+    size = "small",
+    srcs = [
+        "ca_states.py",
+        "ca_states_test.py",
+    ],
+    data = [
+        "//drivers/TegraGM20BMetal:precompile/corpus.log",
+        "@ipsw//:crawl_qc",
+    ] + QC_TABLES.values(),
+    env = select({
+        "//ipsw:" + kind: {
+            "CA_BUILD": kind,
+            "CA_CORPUS": "$(rootpath //drivers/TegraGM20BMetal:precompile/corpus.log)",
+            "CA_LIBRARY": "$(rootpath @ipsw//:crawl_qc)",
+            "CA_TABLES": "$(rootpath " + tables + ")",
+        }
+        for kind, tables in QC_TABLES.items()
+    }),
+    deps = [
+        "//drivers/TegraGM20BMetal:raw_pack",
+        "//tools/gpu/shaders:metallib",
+    ],
 )
 
 # gpu.ca.sweep's reference for the build's IPSW: the corpus states drawn on a Mac's GPU with that IPSW's QuartzCore
@@ -171,6 +271,7 @@ genrule(
 apple_resource_group(
     name = "ca_states_resources",
     resources = [
+        ":ca_asked",
         ":ca_goldens_txt",
         ":ca_states",
     ],
@@ -202,6 +303,45 @@ swift_test(
     ],
 )
 
+# The GPU scenes' pictures with no CPU model (SceneResult.picture) for the build's IPSW, which GPUSceneTest holds the
+# Switch's to: drawn on a Mac's GPU with that IPSW's QuartzCore (scene_goldens/SceneGoldensWriter.swift) and written into
+# goldens/ by `bazel run //hw_test_app:scene_goldens` (and with --config=ios27). Run it after changing a scene's picture.
+# Manual: it needs a Mac GPU.
+swift_test(
+    name = "scene_goldens",
+    size = "medium",
+    srcs = ["scene_goldens/SceneGoldensWriter.swift"],
+    copts = SWIFT_COPTS,
+    data = glob(["shaders/*.metal"]) + ["@ipsw//:crawl_qc"],
+    env = select({
+        "//ipsw:" + kind: {
+            "CA_BUILD": kind,
+            "CA_LIBRARY": "$(rlocationpath @ipsw//:crawl_qc)",
+        }
+        for kind in ("21H461", "24B119")
+    }),
+    tags = ["manual"],
+    deps = [
+        ":core",
+        ":gpu",
+    ],
+)
+
+genrule(
+    name = "scene_goldens_txt",
+    srcs = select({
+        "//ipsw:21H461": ["goldens/scenes_21H461.txt"],
+        "//ipsw:24B119": ["goldens/scenes_24B119.txt"],
+    }),
+    outs = ["scene_goldens.txt"],
+    cmd = "cp $< $@",
+)
+
+apple_resource_group(
+    name = "scene_goldens_resources",
+    resources = [":scene_goldens_txt"],
+)
+
 # An image compiled GPU-compressed (ASTC), which CoreUI hands Core Animation as texture data: the render server makes its
 # texture over memory laid out by the device's texture layout (ui.compressed_image)
 apple_resource_group(
@@ -225,6 +365,8 @@ filegroup(
         "core/*.swift",
         "gpu/*.swift",
         "gpu/scenes/*.swift",
+        "gpu/scenes27/*.swift",
+        "gpu/x1/*.swift",
         "kit/*.swift",
         "tests/*.swift",
     ]),
@@ -281,6 +423,67 @@ cc_library(
 )
 
 swift_interop_hint(
+    name = "texpeer_pattern_module",
+    module_name = "SwitchTexturePattern",
+)
+
+# What metal.native.shared_texture_peer's second process writes and the app reads back (peer/texpeer_pattern.h)
+cc_library(
+    name = "texpeer_pattern",
+    hdrs = ["peer/texpeer_pattern.h"],
+    aspect_hints = [":texpeer_pattern_module"],
+    target_compatible_with = ["@platforms//os:ios"],
+)
+
+# metal.native.shared_texture_peer's second process (peer/texpeer.mm): debug boot packages stage it at /usr/bin/switch-texpeer;
+# the 21H461 BlueTool stand-in starts it for the app, 24B119's launchd for its Mach service (com.brunostjohn.switch.texpeer.plist).
+ios_binary(
+    name = "switch-texpeer",
+    srcs = ["peer/texpeer.mm"],
+    out = "build/switch-hwtest/switch-texpeer",
+    hdrs = ["peer/texpeer_pattern.h"],
+    copts = [
+        "-O2",
+        "-Wall",
+        "-Wextra",
+        "-Werror",
+        "-fobjc-arc",
+        "-lc++",
+        "-framework",
+        "Foundation",
+        "-framework",
+        "Metal",
+    ] + select({
+        "//ipsw:24B119": ["-DSWITCH_TEXPEER_LAUNCHD=1"],
+        "//conditions:default": [],
+    }),
+)
+
+# The overlay files of this package that overlay/manifest.json names.
+filegroup(
+    name = "overlay_files",
+    srcs = ["peer/com.brunostjohn.switch.texpeer.plist"],
+)
+
+swift_interop_hint(
+    name = "compiler_probe_module",
+    module_name = "SwitchCompilerProbe",
+)
+
+# system.compiler_alive's reads of the shader compiler: the GPU kext's broker line and the compiler's memorystatus.
+cc_library(
+    name = "compiler_probe",
+    srcs = [
+        "system/switch_compiler_probe.c",
+        "//drivers/TegraGM20BMetal:compiler/SwitchShaderCompilerJetsam.h",
+    ],
+    hdrs = ["system/switch_compiler_probe.h"],
+    aspect_hints = [":compiler_probe_module"],
+    copts = ["-O2"],
+    target_compatible_with = ["@platforms//os:ios"],
+)
+
+swift_interop_hint(
     name = "a64x_probe_module",
     module_name = "SwitchA64XProbe",
 )
@@ -296,6 +499,131 @@ cc_library(
     target_compatible_with = ["@platforms//os:ios"],
 )
 
+# The texture peer's jetsam limits, which //overlay:jetsam_properties merges into iOS 27's overlay in debug
+exports_files(["peer/com.brunostjohn.switch.texpeer.jetsam.plist"])
+
+# tools/benchloop's tests hold the app's known program and method ranges to the host's
+exports_files(
+    [
+        "bench/bench_known.h",
+        "bench/bench_records.cpp",
+    ],
+    visibility = ["//tools/benchloop:__pkg__"],
+)
+
+swift_interop_hint(
+    name = "bench_module",
+    module_name = "SwitchBench",
+)
+
+# The bench loop's GPU side (bench/switch_bench.h, tools/benchloop): the raw runtime compiled in again, as fetchform
+# links it, with SWITCH_RAW_OWN_CONNECTION so its device opens a connection and GPU VM of its own beside the facade's.
+# Hidden visibility keeps this copy's inline functions from being coalesced with the plugin's.
+# bench_completed.cpp compiles raw_completed.cpp in place of the runtime's unit, so this copy alone takes a record that
+# sets the pixel interlock without a storage form, in debug builds only; the raw stack key hashes raw_completed.cpp.
+cc_library(
+    name = "bench",
+    srcs = [
+        "bench/bench_completed.cpp",
+        "bench/bench_device.h",
+        "bench/bench_known.h",
+        "bench/bench_records.cpp",
+        "bench/bench_records.h",
+        "bench/bench_pack.cpp",
+        "bench/bench_twod.cpp",
+        "bench/switch_bench.cpp",
+        "//drivers/NativeMetal:bridge/NativeMetalBlend.h",
+        "//drivers/TegraGM20BMetal:raw/runtime/raw_blend_color.h",
+        "//drivers/TegraGM20B:TegraGM20BABI.h",
+        "//drivers/TegraGM20B:TegraGM20BClockABI.h",
+        "//drivers/TegraGM20B:TegraGM20BHost.h",
+        "//drivers/TegraGM20B:TegraGM20BJobABI.h",
+        "//drivers/TegraGM20B:TegraGM20BLayout.h",
+        "//drivers/TegraGM20B:TegraGM20BSchedPolicy.h",
+        "//drivers/TegraGM20B:TegraGM20BZcullABI.h",
+        "//drivers/TegraGM20BMetal:raw/fx/fx_image.cpp",
+        "//drivers/TegraGM20BMetal:raw/fx/fx_mip.cpp",
+        "//drivers/TegraGM20BMetal:raw/runtime/raw_alias.cpp",
+        "//drivers/TegraGM20BMetal:raw/runtime/raw_amplification.cpp",
+        "//drivers/TegraGM20BMetal:raw/runtime/raw_arena.cpp",
+        "//drivers/TegraGM20BMetal:raw/runtime/raw_comp.cpp",
+        "//drivers/TegraGM20BMetal:raw/runtime/raw_compute.cpp",
+        "//drivers/TegraGM20BMetal:raw/runtime/raw_draw_bands.cpp",
+        "//drivers/TegraGM20BMetal:raw/runtime/raw_compute_loops.cpp",
+        "//drivers/TegraGM20BMetal:raw/runtime/raw_loop_copies.cpp",
+        "//drivers/TegraGM20BMetal:raw/runtime/raw_predication.cpp",
+        "//drivers/TegraGM20BMetal:raw/runtime/raw_predicate_loops.cpp",
+        "//drivers/TegraGM20BMetal:raw/runtime/raw_gpu.cpp",
+        "//drivers/TegraGM20BMetal:raw/runtime/raw_job_uses.cpp",
+        "//drivers/TegraGM20BMetal:raw/runtime/raw_kernel.cpp",
+        "//drivers/TegraGM20BMetal:raw/runtime/raw_kernel_job.cpp",
+        "//drivers/TegraGM20BMetal:raw/runtime/raw_multisample.cpp",
+        "//drivers/TegraGM20BMetal:raw/runtime/raw_private_comp.cpp",
+        "//drivers/TegraGM20BMetal:raw/runtime/raw_draw_shortcuts.cpp",
+        "//drivers/TegraGM20BMetal:raw/runtime/raw_resolve_twod.cpp",
+        "//drivers/TegraGM20BMetal:raw/runtime/raw_pack.cpp",
+        "//drivers/TegraGM20BMetal:raw/runtime/raw_record_parts.cpp",
+        "//drivers/TegraGM20BMetal:raw/runtime/raw_resource_set.cpp",
+        "//drivers/TegraGM20BMetal:raw/runtime/raw_encoder_state.cpp",
+        "//drivers/TegraGM20BMetal:raw/runtime/raw_state_segment.cpp",
+        "//drivers/TegraGM20BMetal:raw/runtime/raw_shared_events.cpp",
+        "//drivers/TegraGM20BMetal:raw/runtime/raw_split.cpp",
+        "//drivers/TegraGM20BMetal:raw/runtime/raw_tessellation.cpp",
+        "//drivers/TegraGM20BMetal:raw/runtime/raw_transfer.cpp",
+        "//drivers/TegraGM20BMetal:raw/runtime/raw_variants.cpp",
+        "//drivers/TegraGM20BMetal:raw/runtime/raw_vertex_streams.cpp",
+        "//drivers/TegraGM20BMetal:raw/runtime/raw_zeta.cpp",
+        "//drivers/TegraGM20BMetal:raw_runtime_headers",
+    ],
+    hdrs = ["bench/switch_bench.h"],
+    additional_compiler_inputs = ["//drivers/TegraGM20BMetal:raw/runtime/raw_completed.cpp"],
+    aspect_hints = [":bench_module"],
+    copts = [
+        "-O2",
+        "-std=c++17",
+        "-fvisibility=hidden",
+        "-fvisibility-inlines-hidden",
+        "-DSWITCH_RAW_HARNESS_MARKS",
+        "-DSWITCH_RAW_OWN_CONNECTION",
+        "-Idrivers/TegraGM20B",
+    ],
+    linkopts = [
+        "-framework",
+        "CoreFoundation",
+        "-framework",
+        "IOKit",
+    ],
+    target_compatible_with = ["@platforms//os:ios"],
+    deps = [
+        "//kits/SwitchGM20B:classes",
+        "//kits/SwitchGM20BEmit:emit_ndebug",
+        "//kits/SwitchGM20BEmit:macros_h",
+    ],
+)
+
+# The bench's records on the host, over a pack with the template state the Switch's pack gave it
+host_test(
+    name = "bench_records_test",
+    srcs = [
+        "bench/bench_known.h",
+        "bench/bench_records.cpp",
+        "bench/bench_records.h",
+        "bench/bench_records_test.cpp",
+        "//drivers/TegraGM20BMetal:raw/pack/probe_bind.h",
+        "//drivers/TegraGM20BMetal:raw/runtime/raw_compute_record.h",
+        "//drivers/TegraGM20BMetal:raw/runtime/raw_owned.h",
+        "//drivers/TegraGM20BMetal:raw/runtime/raw_pack.cpp",
+        "//drivers/TegraGM20BMetal:raw/runtime/raw_pack.h",
+        "//drivers/TegraGM20BMetal:raw/runtime/raw_record.h",
+        "//drivers/TegraGM20BMetal:raw/runtime/raw_record_parts.cpp",
+        "//drivers/TegraGM20BMetal:raw/runtime/raw_descriptors.h",
+        "//drivers/TegraGM20BMetal:raw/runtime/raw_record_parts.h",
+        "//drivers/TegraGM20BMetal:raw/runtime/raw_set_reads.h",
+        "//drivers/TegraGM20BMetal:raw/runtime/raw_spill_table.h",
+    ],
+    cxx_std = "c++17",
+)
+
 # Every test every iOS version runs, the runner, the list, the log lines and the run reports. UIKit: built only under an
 # ios_application's transition, never for the host by `bazel build //hw_test_app/...`.
 swift_library(
@@ -307,6 +635,7 @@ swift_library(
     copts = SWIFT_COPTS,
     data = [
         ":ca_states_resources",
+        ":scene_goldens_resources",
         ":compressed_assets",
         ":media_resources",
     ],
@@ -314,10 +643,13 @@ swift_library(
     target_compatible_with = ["@platforms//os:ios"],
     deps = [
         ":a64x_probe",
+        ":bench",
+        ":compiler_probe",
         ":core",
         ":cpu_clock",
         ":gpu",
         ":sched_probe",
+        ":texpeer_pattern",
         ":video",
         ":workloop_probe",
     ],

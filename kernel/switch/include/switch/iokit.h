@@ -39,6 +39,8 @@ enum {
 void switch_iokit_iosurface_trap(IOUserClient *client, uint32_t index, void *p1, void *p2);
 kern_return_t switch_iokit_iosurface_lock_will(IOUserClient *client, void *p1, void *p2);
 void switch_iokit_iosurface_lock_failed(IOUserClient *client, void *p1, void *p2);
+void switch_iokit_iosurface_ownership_done(IOUserClient *client, uint32_t index, void *p1, void *p2,
+                                           kern_return_t result);
 void switch_iokit_iosurface_method_done(IOUserClient *client, uint32_t selector,
                                         const struct IOExternalMethodArguments *args);
 
@@ -75,6 +77,7 @@ static inline kern_return_t switch_iokit_trap_will(IOUserClient *client, uint32_
 static inline void switch_iokit_trap_done(IOUserClient *client, uint32_t index, void *p1, void *p2,
                                           kern_return_t result)
 {
+    switch_iokit_iosurface_ownership_done(client, index, p1, p2, result);
     if (result == KERN_SUCCESS && index == kSwitchIOSurfaceTrapLock) {
         switch_iokit_iosurface_trap(client, index, p1, p2);
     } else if (index == kSwitchIOSurfaceTrapLock && result != kIOReturnCannotLock) {

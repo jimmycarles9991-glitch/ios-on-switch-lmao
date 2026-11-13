@@ -318,7 +318,7 @@ int hevc_parse_sps(HEVCParams *params, const uint8_t *nal, size_t size)
             s.lt_poc_lsb_sps[i] = (uint16_t)u(&b, s.log2_max_poc_lsb), s.lt_used_sps[i] = (uint8_t)u(&b, 1);
     }
     s.temporal_mvp = u(&b, 1), s.strong_intra_smoothing = u(&b, 1);
-    if (u(&b, 1)) {  // vui_parameters_present_flag: up to the colour description, all the decoder needs of it
+    if (u(&b, 1)) {  // vui_parameters_present_flag
         if (u(&b, 1) && u(&b, 8) == 255)
             u(&b, 16), u(&b, 16);  // aspect_ratio_idc, EXTENDED_SAR
         if (u(&b, 1))
@@ -328,6 +328,10 @@ int hevc_parse_sps(HEVCParams *params, const uint8_t *nal, size_t size)
             s.full_range = u(&b, 1);
             if ((s.colour_description = u(&b, 1)))
                 s.colour_primaries = (uint8_t)u(&b, 8), s.transfer = (uint8_t)u(&b, 8), s.matrix = (uint8_t)u(&b, 8);
+        }
+        if ((s.chroma_location = u(&b, 1))) {
+            s.chroma_top = ue(&b);
+            s.chroma_bottom = ue(&b);
         }
     }
     if (b.bad)

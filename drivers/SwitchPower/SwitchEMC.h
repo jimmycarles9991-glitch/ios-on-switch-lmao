@@ -2,6 +2,7 @@
 // The EMC clock on demand (SwitchEMC.cpp, SwitchEMCGovernor.h).
 #pragma once
 #include <stddef.h>
+#include <stdint.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -16,6 +17,9 @@ void switch_emc_hint(unsigned int hint);
 // SC7, from switch_thermal_suspend/resume (thread context).
 void switch_emc_suspend(void);
 void switch_emc_resume(void);
+
+// Thread context. Raise before arming a larger scanout; lower only after the old scanout retires.
+int switch_emc_display_reserve(uint64_t bytes_per_second);
 
 #if DEVELOPMENT || DEBUG
 // The power stats line's EMC part since the last call: rate changes and the share of time at each rate.

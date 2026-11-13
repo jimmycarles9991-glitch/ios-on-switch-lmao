@@ -20,6 +20,17 @@ namespace {
 using raw::ColorTargetDesc;
 using raw::fx::MipChain;
 
+// The nine SET_COLOR_TARGET_* values the raw path writes for `d`
+std::vector<uint32_t> targetWords(const ColorTargetDesc &d)
+{
+    const switch_gm20b_target k = raw::kitTarget(d);
+    std::vector<uint32_t> words(SWITCH_GM20B_COLOR_TARGET_WORDS);
+    nv_push p;
+    nv_push_init(&p, words.data(), words.size(), SUBC_MASK_ALL);
+    switch_gm20b_color_target(&p, 0, &k, false);
+    return std::vector<uint32_t>(words.begin() + 1, words.begin() + 10);
+}
+
 // Tegra block-linear addressing of a surface with blocks one GOB (64 B x 8 rows) wide and 1 << blockHeight GOBs tall, rows of
 // rowBytes: blocks row by row, GOBs top to bottom in a block, TegraColor order inside a GOB
 uint64_t blockLinearOffset(uint32_t rowBytes, uint32_t blockHeight, uint32_t xB, uint32_t y)
@@ -41,16 +52,12 @@ const Size kSizes[] = {{2, 2, 2},       {3, 5, 3},       {776, 24, 10},    {180,
 TEST(RawTarget, PitchWordsAsBefore)
 {
     ColorTargetDesc d;
-    d.va = 0x12345678000ull;
+    d.va = 0x2345678000ull;  // the GPU's 40-bit address space
     d.pitch = 5120;
     d.height = 720;
     d.bpp = 4;
     d.rtFormat = 0xcf;
-    uint32_t w[raw::kColorTargetWords];
-    raw::colorTargetWords(d, w);
-    const uint32_t want[raw::kColorTargetWords] = {0x123, 0x45678000, 5120, 720, 0xcf, 0x1000, 1, 0, 0};
-    for (uint32_t i = 0; i < raw::kColorTargetWords; i++)
-        EXPECT_EQ(w[i], want[i]) << "word " << i;
+    EXPECT_EQ(targetWords(d), (std::vector<uint32_t>{0x23, 0x45678000, 5120, 720, 0xcf, 0x1000, 1, 0, 0}));
 }
 
 TEST(RawTarget, OnlyLaterLevels)
@@ -77,8 +84,7 @@ TEST(RawTarget, ChainLevelAddressesTheLayout)
                 const raw::fx::MipLevel &lv = c.level[l];
                 ColorTargetDesc d;
                 ASSERT_TRUE(raw::chainLevelDesc(c, chainVa, l, 0xcf, d));
-                uint32_t w[raw::kColorTargetWords];
-                raw::colorTargetWords(d, w);
+                const std::vector<uint32_t> w = targetWords(d);
                 const uint64_t va = uint64_t(w[0]) << 32 | w[1];
                 EXPECT_EQ(va, chainVa + lv.offset);
                 EXPECT_EQ(va % 512, 0u) << "a level starts on a GOB";
@@ -218,8 +224,7 @@ TEST(RawTarget, BackdropChainLevelsAreWhereTheHeaderSamplesThem)
             if (l) {
                 raw::ColorTargetDesc d;
                 ASSERT_TRUE(raw::chainLevelDesc(c, chainVa, l, 0xcf, d));
-                uint32_t w[raw::kColorTargetWords];
-                raw::colorTargetWords(d, w);
+                const std::vector<uint32_t> w = targetWords(d);
                 EXPECT_EQ(uint64_t(w[0]) << 32 | w[1], chainVa + at) << "bpp " << bpp << " level " << l;
                 EXPECT_EQ(w[2] * bpp, rowBytes) << "bpp " << bpp << " level " << l;
                 EXPECT_EQ(w[3], lh) << "bpp " << bpp << " level " << l;

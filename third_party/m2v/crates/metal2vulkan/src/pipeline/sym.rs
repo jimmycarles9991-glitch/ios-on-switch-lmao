@@ -798,6 +798,10 @@ pub enum PushField {
     /// That amplification's `viewportArrayIndexOffset` (`u32`), added to the viewport index and
     /// read as `AmplificationLayerOffset` is.
     AmplificationViewportOffset,
+    /// The draw's amplification count (`u32`), which a function compiled under
+    /// `LoweringInputs::amplification_draws` reads as its `[[amplification_count]]`, so one
+    /// pipeline draws at every count up to its `maxVertexAmplificationCount`.
+    AmplificationCount,
     /// Region base and grid of a multi-region dispatch.
     DispatchRegion,
     /// Device address (`u64`) of the region record a device-replay variant's dispatch reads its

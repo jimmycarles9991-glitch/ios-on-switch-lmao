@@ -111,3 +111,13 @@ PTHREAD_BOOTSTRAP = struct(
     includes = {},
     segments = {},
 )
+
+# This archive is linked after XNU's LTO pass and requires a machine-code bootstrap object.
+PTHREAD_BOOTSTRAP_RELEASE = struct(
+    objects = PTHREAD_BOOTSTRAP.objects,
+    copts = {
+        "bsd/kern/source_pthread_bootstrap.c": PTHREAD_BOOTSTRAP.copts["bsd/kern/source_pthread_bootstrap.c"] + ["-fno-lto"],
+    },
+    includes = {},
+    segments = {},
+)

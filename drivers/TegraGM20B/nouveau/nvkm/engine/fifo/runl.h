@@ -110,6 +110,8 @@ void nvkm_runl_update_locked(struct nvkm_runl *, bool wait);
 bool nvkm_runl_update_pending(struct nvkm_runl *);
 int nvkm_runl_preempt_wait(struct nvkm_runl *);
 
+struct nvkm_cgrp *nvkm_engn_cgrp_get(struct nvkm_engn *, unsigned long *irqflags);
+void nvkm_runl_rc(struct nvkm_runl *);
 void nvkm_runl_rc_engn(struct nvkm_runl *, struct nvkm_engn *);
 void nvkm_runl_rc_cgrp(struct nvkm_cgrp *);
 

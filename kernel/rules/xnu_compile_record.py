@@ -132,15 +132,84 @@ def segments(log: str) -> dict[str, list[str]]:
     return out
 
 
-def link(log: str, places: Places) -> list[str]:
-    """Return the kernel's link (MakeInc.kernel), its archives (what follows -lcc_kext) as @KERNEL_ARCHIVES@."""
-    for line in Path(log).read_text(errors='replace').splitlines():
-        if '-filelist link.filelist' not in line or '.unstripped' not in line:
+class LinkRecipes(NamedTuple):
+    lto: list[str] | None
+    final: list[str]
+
+
+def shell_commands(text: str) -> Iterable[list[str]]:
+    pending = ''
+    for line in text.splitlines():
+        pending += line.strip()
+        if pending.endswith('\\'):
+            pending = pending[:-1] + ' '
             continue
-        argv = shlex.split(line)[1:]
-        argv = [*argv[: argv.index('-lcc_kext') + 1], '@KERNEL_ARCHIVES@']
-        return [places.spell(t, None) for t in argv]
-    raise SystemExit('no kernel link in the log')
+        if '-filelist' not in pending:
+            pending = ''
+            continue
+        lexer = shlex.shlex(pending, posix=True, punctuation_chars=';&|')
+        lexer.whitespace_split = True
+        command = []
+        for token in lexer:
+            if token and all(c in ';&|' for c in token):
+                if command:
+                    yield command
+                    command = []
+            else:
+                command.append(token)
+        if command:
+            yield command
+        pending = ''
+    if '-filelist' in pending:
+        raise SystemExit('unfinished shell continuation in the make log')
+
+
+def link_command(command: list[str]) -> tuple[str, list[str]] | None:
+    if '-filelist' not in command:
+        return None
+    at = command.index('-filelist')
+    listing = Path(command[at + 1]).name if at + 1 < len(command) else ''
+    if listing not in ('link.filelist', 'ltolink.filelist', 'nonltolink.filelist'):
+        return None
+    compiler = re.compile(r'(clang(?:\+\+)?(?:-[0-9]+)?|cc|c\+\+|ld)$')
+    executable = next((i for i, word in enumerate(command[:at]) if compiler.fullmatch(Path(word).name)), None)
+    if executable is None:
+        return None
+    argv = command[executable + 1 :]
+    if listing == 'ltolink.filelist':
+        if '-r' not in argv:
+            raise SystemExit('the LTO link is not relocatable')
+        return listing, argv
+    output = argv.index('-o') if '-o' in argv else len(argv)
+    if output + 1 >= len(argv) or '.unstripped' not in argv[output + 1]:
+        return None
+    if '-lcc_kext' not in argv:
+        raise SystemExit('the kernel link has no -lcc_kext archive boundary')
+    return listing, [*argv[: argv.index('-lcc_kext') + 1], '@KERNEL_ARCHIVES@']
+
+
+def link(log: str, places: Places) -> LinkRecipes:
+    candidates: dict[str, list[list[str]]] = collections.defaultdict(list)
+    for command in shell_commands(Path(log).read_text(errors='replace')):
+        parsed = link_command(command)
+        if parsed:
+            listing, argv = parsed
+            if argv not in candidates[listing]:
+                candidates[listing].append(argv)
+    lto = candidates['ltolink.filelist']
+    final = candidates['link.filelist']
+    if lto:
+        # Make prints both branches of its shell conditional. Bazel links the single justlto.o output.
+        final = [
+            args for args in candidates['nonltolink.filelist'] if any(Path(arg).name == 'justlto.o' for arg in args)
+        ]
+    if len(lto) > 1 or len(final) != 1:
+        raise SystemExit(f'expected one kernel link and at most one LTO link; found {len(final)} and {len(lto)}')
+
+    def spell(args: list[str]) -> list[str]:
+        return [places.spell(arg, None) for arg in args]
+
+    return LinkRecipes(spell(lto[0]) if lto else None, spell(final[0]))
 
 
 def gen_root(cwd: str, objdir: str) -> Path:
@@ -247,7 +316,7 @@ def object_table(
     return table
 
 
-def recipes_text(config: str, recipes: dict[str, tuple[list[str], list[str]]], link_argv: list[str]) -> str:
+def recipes_text(config: str, recipes: dict[str, tuple[list[str], list[str]]], links: LinkRecipes) -> str:
     lines = [
         (
             f'"""XNU\'s compile recipes for config {config}: per component and language, CFLAGS+CWARNFLAGS (flags) and'
@@ -263,7 +332,9 @@ def recipes_text(config: str, recipes: dict[str, tuple[list[str], list[str]]], l
             f'        includes = {bzl_list(inc, 8)},\n    ),'
         )
     lines.append('}')
-    lines += ['', f'{config}_LINK = {bzl_list(link_argv, 0)}']
+    if links.lto is not None:
+        lines += ['', f'{config}_LINK_LTO = {bzl_list(links.lto, 0)}']
+    lines += ['', f'{config}_LINK = {bzl_list(links.final, 0)}']
     return '\n'.join(lines) + '\n'
 
 

@@ -18,8 +18,8 @@
 //! - What multiview cannot express (view mappings that offset the viewport or name layers out of
 //!   order, more amplifications than the device's views, a `Layer` in either stage) draws one
 //!   amplification at a time: the plan's variant is `amplification_draws`, whose stages read the
-//!   amplification's id and offsets from push fields, and the draw's commands write each
-//!   amplification's before its draw. The variant's modules pass L3, its plan settles on itself, a
+//!   amplification's id and offsets and the draw's count from push fields, and the draw's commands
+//!   write each amplification's before its draw. The variant's modules pass L3, its plan settles on itself, a
 //!   profile without `shaderOutputLayer` refuses the layered variant, a tessellation pipeline's
 //!   such draws are not implemented, and on the CPU interpreter each draw reads the amplification
 //!   its push data names.
@@ -641,6 +641,7 @@ fn amplification_fields(p: &RenderPipeline) -> Vec<(Stage, PushField, u32)> {
                 PushField::AmplificationId
                     | PushField::AmplificationLayerOffset
                     | PushField::AmplificationViewportOffset
+                    | PushField::AmplificationCount
             )
         })
         .map(|(stage, f)| match f.loc {
@@ -749,6 +750,7 @@ fn a_variant_draws_each_amplification_with_its_push_fields() {
                         let want = match field {
                             PushField::AmplificationId => a,
                             PushField::AmplificationLayerOffset => layer,
+                            PushField::AmplificationCount => count,
                             _ => viewport,
                         };
                         let writes = commands
@@ -904,6 +906,7 @@ fn each_amplification_draw_reads_its_pushed_id() {
                     a
                 }
                 PushField::AmplificationLayerOffset => a,
+                PushField::AmplificationCount => count,
                 PushField::RenderTargetArrayLength => 4,
                 PushField::AmplificationViewportOffset | PushField::ViewportCount => 1,
                 _ => 0,

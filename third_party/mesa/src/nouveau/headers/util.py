@@ -23,15 +23,9 @@ def write_template(out_file, template, environment):
 
 def write_template_rs(out_file, template, environment):
     contents = _render_template(template, environment)
-
-    try:
-        contents = subprocess.check_output(
-            ["rustfmt"],
-            input=contents,
-            text=True,
-        )
-    except (subprocess.CalledProcessError, FileNotFoundError, PermissionError):
-        pass
+    # The layout reaches NAK's binary through panic locations: unformatted output on a machine without rustfmt would be
+    # a different binary under the same action key.
+    contents = subprocess.check_output(["rustfmt"], input=contents, text=True)
 
     with open(out_file, "w", encoding="utf-8") as f:
         f.write(contents)

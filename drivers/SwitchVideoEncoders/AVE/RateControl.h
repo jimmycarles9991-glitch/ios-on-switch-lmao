@@ -5,7 +5,8 @@
 //
 // Modes: bit rate (VBR: AverageBitRate, a 1 s virtual buffer), constant bit rate (ConstantBitRate, a 0.5 s buffer and
 // faster correction), or constant quality (Quality 0..1, or neither set: 0.6). DataRateLimits caps the bytes in any
-// window of the given length on top of either bit-rate mode. Key frames are coded 2 QP finer than P pictures.
+// window of the given length on top of either bit-rate mode. Key frames are coded 2 QP finer than P pictures, B
+// pictures 3 coarser (NVIDIA's T210 driver's constant QPs: I 23, P 25, B 28).
 #ifndef AVE_RATE_CONTROL_H
 #define AVE_RATE_CONTROL_H
 #include <math.h>
@@ -60,6 +61,11 @@ static inline void rc_set_limit(RateControl *rc, double bytes, double seconds)
 static inline int rc_qp(const RateControl *rc, bool key)
 {
     return rc_clamp(rc->qp - (key ? 2 : 0), 0, 51);
+}
+
+static inline int rc_qp_b(const RateControl *rc)
+{
+    return rc_clamp(rc->qp + 3, 0, 51);
 }
 
 // Bytes in the last `seconds` of pictures (at the nominal frame rate).

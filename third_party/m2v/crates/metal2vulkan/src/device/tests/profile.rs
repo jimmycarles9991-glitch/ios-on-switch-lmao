@@ -12,6 +12,105 @@ pub(crate) fn device(stem: &str) -> Device {
 }
 
 #[test]
+fn native_sm53_target_keeps_vulkan_features_and_center_depth_contract() {
+    use crate::device::native::{HalfInstruction, HalfOperation};
+    use crate::device::NativeShaderTarget;
+    for version in [ApiVersion::V1_2, ApiVersion::V1_3] {
+        let ordinary = Device::new_with_center_fragment_depth(
+            DeviceDescription::new(version),
+            DevicePolicy::default(),
+        )
+        .unwrap();
+        let native = ordinary.with_native_target(NativeShaderTarget::Sm53);
+        assert_eq!(
+            native.profile().fields().enabled.features,
+            ordinary.profile().fields().enabled.features
+        );
+        assert_eq!(
+            native.profile().fields().leaf,
+            ordinary.profile().fields().leaf
+        );
+        assert!(native
+            .profile()
+            .fields()
+            .enabled
+            .properties
+            .contains(&VkProperty::CenterFragCoordDepth));
+        assert!(!native
+            .profile()
+            .fields()
+            .enabled
+            .features
+            .contains(&VkFeature::ShaderFloat16));
+        assert_ne!(native.profile_fingerprint(), ordinary.profile_fingerprint());
+        assert_eq!(
+            native
+                .with_native_target(NativeShaderTarget::Vulkan)
+                .profile(),
+            ordinary.profile()
+        );
+        for (op, instruction) in [
+            (HalfOperation::Convert, HalfInstruction::Convert),
+            (HalfOperation::Add, HalfInstruction::Add2),
+            (HalfOperation::Subtract, HalfInstruction::Add2),
+            (HalfOperation::Multiply, HalfInstruction::Multiply2),
+            (
+                HalfOperation::FusedMultiplyAdd,
+                HalfInstruction::FusedMultiplyAdd2,
+            ),
+        ] {
+            let rules = native
+                .profile()
+                .fields()
+                .native_target
+                .half_rules(op)
+                .unwrap();
+            assert_eq!(rules.instruction, instruction);
+            assert!(rules.nearest_even && rules.preserve_denormals && rules.overflow_to_infinity);
+            assert!(!rules.nan_payload_preserved);
+            assert_eq!(
+                rules.separate_rounding,
+                op != HalfOperation::FusedMultiplyAdd
+            );
+            assert!(ordinary
+                .profile()
+                .fields()
+                .native_target
+                .half_rules(op)
+                .is_none());
+        }
+    }
+}
+
+#[test]
+fn center_fragment_depth_contract_is_explicit_and_keys_the_profile() {
+    for version in [ApiVersion::V1_2, ApiVersion::V1_3] {
+        let desc = DeviceDescription::new(version);
+        let policy = DevicePolicy::default();
+        let ordinary = Device::new(desc.clone(), policy).unwrap();
+        let center = Device::new_with_center_fragment_depth(desc.clone(), policy).unwrap();
+        let mut expected = ordinary.profile().fields().clone();
+        expected
+            .enabled
+            .properties
+            .remove(&VkProperty::SampleFragCoordDepth);
+        expected
+            .enabled
+            .properties
+            .insert(VkProperty::CenterFragCoordDepth);
+        assert_eq!(center.profile().fields(), &expected, "{version:?}");
+        assert_eq!(center.profile_fingerprint(), center.profile().fingerprint());
+        if ordinary.profile().fields() != &expected {
+            assert_ne!(center.profile_fingerprint(), ordinary.profile_fingerprint());
+        }
+        assert_eq!(
+            ordinary.profile(),
+            Device::new(desc, policy).unwrap().profile()
+        );
+    }
+}
+
+#[test]
 fn every_committed_profile_derives() {
     for (stem, text) in committed_profiles() {
         let desc = DeviceDescription::from_khronos_json(&text, None).unwrap();

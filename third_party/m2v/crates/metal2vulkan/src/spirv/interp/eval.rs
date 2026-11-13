@@ -894,7 +894,7 @@ fn numeric(op: ConvOp, from: Num, to: Num, x: u64) -> IResult<u64> {
     match op {
         ConvOp::UConvert => Ok(x & mask(tw)),
         ConvOp::SConvert => Ok(sext(x, fw) as u64 & mask(tw)),
-        ConvOp::FConvert => float::from_f64(float::to_f64(x, fw)?, tw),
+        ConvOp::FConvert | ConvOp::FConvertRte => float::from_f64(float::to_f64(x, fw)?, tw),
         ConvOp::ConvertSToF => int_to_float(i128::from(sext(x, fw)), tw),
         ConvOp::ConvertUToF => int_to_float(i128::from(x), tw),
         ConvOp::ConvertFToU | ConvOp::ConvertFToS => {

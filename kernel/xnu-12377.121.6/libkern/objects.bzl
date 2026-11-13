@@ -215,3 +215,218 @@ DEVELOPMENT = struct(
     },
     segments = {},
 )
+
+RELEASE = struct(
+    objects = [
+        "libkern/gen/OSAtomicOperations.c",
+        "libkern/gen/OSSpinLock.c",
+        "libkern/gen/OSDebug.cpp",
+        "libkern/c++/OSMetaClass.cpp",
+        "libkern/c++/OSObject.cpp",
+        "libkern/c++/OSArray.cpp",
+        "libkern/c++/OSBoolean.cpp",
+        "libkern/c++/OSCollection.cpp",
+        "libkern/c++/OSCollectionIterator.cpp",
+        "libkern/c++/OSData.cpp",
+        "libkern/c++/OSDictionary.cpp",
+        "libkern/c++/OSIterator.cpp",
+        "libkern/c++/OSKext.cpp",
+        "libkern/c++/OSNumber.cpp",
+        "libkern/c++/OSOrderedSet.cpp",
+        "libkern/c++/OSRuntime.cpp",
+        "libkern/c++/OSRuntimeSupport.c",
+        "libkern/c++/OSSerialize.cpp",
+        "libkern/c++/OSSet.cpp",
+        "libkern/c++/OSString.cpp",
+        "libkern/c++/OSSymbol.cpp",
+        "libkern/c++/OSUnserialize.cpp",
+        "libkern/c++/OSUnserializeXML.cpp",
+        "libkern/c++/OSSerializeBinary.cpp",
+        "libkern/c++/OSValueObject.cpp",
+        "libkern/c++/priority_queue.cpp",
+        "libkern/coreanalytics/coreanalytics_shim.cpp",
+        "libkern/OSKextLib.cpp",
+        "libkern/mkext.c",
+        "libkern/OSKextVersion.c",
+        "libkern/net/inet_aton.c",
+        "libkern/net/inet_ntoa.c",
+        "libkern/net/inet_ntop.c",
+        "libkern/net/inet_pton.c",
+        "libkern/stdio/scanf.c",
+        "libkern/uuid/uuid.c",
+        "libkern/os/log.c",
+        "libkern/os/log_encode.c",
+        "libkern/os/log_mem.c",
+        "libkern/os/log_queue.c",
+        "libkern/os/object.c",
+        "libkern/os/internal.c",
+        "libkern/os/refcnt.c",
+        "libkern/os/system_event_log.c",
+        "libkern/kernel_mach_header.c",
+        "libkern/zlib/adler32.c",
+        "libkern/zlib/compress.c",
+        "libkern/zlib/z_crc32.c",
+        "libkern/zlib/deflate.c",
+        "libkern/zlib/infback.c",
+        "libkern/zlib/inffast.c",
+        "libkern/zlib/inflate.c",
+        "libkern/zlib/inftrees.c",
+        "libkern/zlib/trees.c",
+        "libkern/zlib/uncompr.c",
+        "libkern/zlib/zutil.c",
+        "libkern/crypto/register_crypto.c",
+        "libkern/crypto/corecrypto_sha2.c",
+        "libkern/crypto/corecrypto_sha1.c",
+        "libkern/crypto/corecrypto_md5.c",
+        "libkern/crypto/corecrypto_des.c",
+        "libkern/crypto/corecrypto_aes.c",
+        "libkern/crypto/corecrypto_aesxts.c",
+        "libkern/crypto/corecrypto_rand.c",
+        "libkern/crypto/corecrypto_rsa.c",
+        "libkern/crypto/corecrypto_chacha20poly1305.c",
+        "libkern/coretrust/coretrust.c",
+        "libkern/apple_encrypted_archive/apple_encrypted_archive.c",
+        "libkern/img4/interface.c",
+        "libkern/image4/dlxk.c",
+        "libkern/image4/image4_v2.c",
+        "libkern/amfi/amfi.c",
+        "libkern/stack_protector.c",
+        "libkern/ptrauth_utils.c",
+        "libkern/libclosure/runtime.cpp",
+        "libkern/libclosure/libclosuredata.c",
+        "libkern/compression/compression.c",
+    ],
+    copts = {
+        "libkern/OSKextLib.cpp": [
+            "-Wno-cast-align",
+        ],
+        "libkern/OSKextVersion.c": [
+            "-Wno-sign-conversion",
+        ],
+        "libkern/c++/OSCollection.cpp": [
+            "-Wno-sign-conversion",
+        ],
+        "libkern/c++/OSData.cpp": [
+            "-Wno-sign-conversion",
+        ],
+        "libkern/c++/OSKext.cpp": [
+            "-Wno-cast-align",
+            "-Wno-cast-qual",
+            "-Wno-shorten-64-to-32",
+            "-Wno-sign-conversion",
+        ],
+        "libkern/c++/OSMetaClass.cpp": [
+            "-Wno-cast-align",
+            "-Wno-sign-conversion",
+        ],
+        "libkern/c++/OSNumber.cpp": [
+            "-Wno-sign-conversion",
+        ],
+        "libkern/c++/OSObject.cpp": [
+            "-Wno-sign-conversion",
+        ],
+        "libkern/c++/OSRuntime.cpp": [
+            "-Wno-missing-prototypes",
+            "-Wno-sign-conversion",
+        ],
+        "libkern/c++/OSSerializeBinary.cpp": [
+            "-Wno-sign-conversion",
+        ],
+        "libkern/c++/OSSet.cpp": [
+            "-Wno-sign-conversion",
+        ],
+        "libkern/c++/OSString.cpp": [
+            "-Wno-sign-conversion",
+        ],
+        "libkern/c++/OSUnserialize.cpp": [
+            "-Wno-cast-align",
+            "-Wno-implicit-int-conversion",
+            "-Wno-shorten-64-to-32",
+            "-Wno-sign-conversion",
+            "-Wno-unreachable-code",
+            "-Wno-unreachable-code-break",
+            "-Wno-zero-as-null-pointer-constant",
+        ],
+        "libkern/c++/OSUnserializeXML.cpp": [
+            "-Wno-implicit-int-conversion",
+            "-Wno-shorten-64-to-32",
+            "-Wno-sign-conversion",
+            "-Wno-unreachable-code",
+            "-Wno-unreachable-code-break",
+            "-Wno-zero-as-null-pointer-constant",
+        ],
+        "libkern/c++/OSValueObject.cpp": [
+            "-Wno-sign-conversion",
+        ],
+        "libkern/crypto/corecrypto_aes.c": [
+            "-Wno-sign-conversion",
+        ],
+        "libkern/crypto/corecrypto_aesxts.c": [
+            "-Wno-sign-conversion",
+        ],
+        "libkern/crypto/corecrypto_md5.c": [
+            "-Wno-cast-align",
+        ],
+        "libkern/crypto/corecrypto_sha1.c": [
+            "-Wno-cast-align",
+        ],
+        "libkern/gen/OSDebug.cpp": [
+            "-Wno-sign-conversion",
+        ],
+        "libkern/libclosure/runtime.cpp": [
+            "-Wno-cast-qual",
+        ],
+        "libkern/net/inet_aton.c": [
+            "-Wno-sign-conversion",
+        ],
+        "libkern/os/log.c": [
+            "-Wno-implicit-int-conversion",
+            "-Wno-shorten-64-to-32",
+            "-Wno-sign-conversion",
+        ],
+        "libkern/os/refcnt.c": [
+            "-Wno-sign-conversion",
+        ],
+        "libkern/stack_protector.c": [
+            "-fno-lto",
+        ],
+        "libkern/stdio/scanf.c": [
+            "-Wno-implicit-int-conversion",
+            "-Wno-shorten-64-to-32",
+            "-Wno-sign-conversion",
+        ],
+        "libkern/uuid/uuid.c": [
+            "-Wno-sign-conversion",
+        ],
+        "libkern/zlib/adler32.c": [
+            "-Wno-sign-conversion",
+        ],
+        "libkern/zlib/compress.c": [
+            "-Wno-cast-qual",
+        ],
+        "libkern/zlib/deflate.c": [
+            "-Wno-cast-qual",
+            "-Wno-sign-conversion",
+        ],
+        "libkern/zlib/infback.c": [
+            "-Wno-sign-conversion",
+        ],
+        "libkern/zlib/inflate.c": [
+            "-Wno-sign-conversion",
+        ],
+        "libkern/zlib/trees.c": [
+            "-Wno-cast-qual",
+            "-Wno-sign-conversion",
+        ],
+        "libkern/zlib/uncompr.c": [
+            "-Wno-cast-qual",
+        ],
+    },
+    includes = {
+        "libkern/c++/OSSymbol.cpp": [
+            "-I",
+            "{xnu}/osfmk",
+        ],
+    },
+    segments = {},
+)

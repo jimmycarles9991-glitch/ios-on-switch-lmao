@@ -45,6 +45,14 @@ pub struct LoweringInputs {
     /// function compiles as without it.
     #[cfg_attr(feature = "serde", serde(default))]
     pub dropped_vertex_layer: bool,
+    /// A fragment function's storage-form images (its interlocked attachments, their extended-range
+    /// shadows, the shader-side stencil's shadow) are 2D arrays of a layered pass's layers, each
+    /// access at the texel of the invocation's pixel in the layer its primitive renders (its
+    /// `Layer` input; `VariantKey::layered_storage`): the variant a pass of more than one layer
+    /// runs on. Such a function depends on `RuntimeFact::LayeredStorage`; any other compiles as
+    /// without it.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub layered_storage: bool,
     /// A kernel's stage-input descriptor (`MTLComputePipelineDescriptor.stageInputDescriptor`): how
     /// each `[[stage_in]]` attribute is fetched from its buffer. A kernel reading a stage-in
     /// attribute needs it (`NeedsInput(StageInputDescriptor)` without it);
@@ -303,6 +311,16 @@ pub struct LoweringInputs {
     /// one compiled under another as `NeedsInput(ColorWrites)`. Empty for any other function.
     #[cfg_attr(feature = "serde", serde(default))]
     pub extended_range_colors: BTreeMap<u32, ExtendedRangeColor>,
+    /// On a profile whose consumer holds `RGB10A8_2P_XR10` in Metal's two planes
+    /// (`VkProperty::TwoPlaneExtendedRange`), the color index each such attachment's alpha byte
+    /// is held at, by the attachment's own index (`color_writes::two_plane_alphas`): the raw
+    /// texel's color word goes to the attachment's own index as `R32_UINT` and its alpha byte to
+    /// this one as `R8_UINT`, for its writes, its input attachment and its storage form alike.
+    /// `Device::compile_render_pipeline` sets it from the pipeline's color attachments, and link
+    /// refuses a fragment compiled under another map as `NeedsInput(ColorWrites)`. Empty
+    /// elsewhere.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub two_plane_alphas: BTreeMap<u32, u32>,
     /// The color attachments the fragment function reads (`[[color(n)]]`) that its render
     /// pipeline gives an 8-bit four-channel sRGB format (`RGBA8Unorm_sRGB`, `BGRA8Unorm_sRGB`),
     /// by color index. Read through an input attachment, such an attachment's value is the

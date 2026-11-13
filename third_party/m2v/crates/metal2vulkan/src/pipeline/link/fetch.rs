@@ -151,6 +151,7 @@ pub fn storage_attachments(
                     view: view_of,
                     uint_view: view.uint_view,
                     kept,
+                    blend_model: crate::lower::fragment::blend_model(&view),
                 });
             }
             _ => return Err(Error::NeedsInput(RuntimeInput::FramebufferFetch)),

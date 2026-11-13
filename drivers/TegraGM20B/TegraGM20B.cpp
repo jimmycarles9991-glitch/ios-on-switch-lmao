@@ -22,6 +22,8 @@
 #include "../../kits/SwitchSysctl/SwitchSysctl.h"
 #include "../SwitchSuspend/SwitchWake.h"
 #include "TegraGM20BGpu.h"
+#include "SwitchGpuPathStats.h"
+#include "SwitchGpuShaderCompiler.h"
 #include "TegraGM20BRail.h"
 #include "TegraGM20BSleep.h"
 #include "shim/include/switch_tiled_cache.h"
@@ -57,9 +59,9 @@ volatile int gStarted, gBringupDone;
 volatile int gSleeping;
 
 // Rail-gating with the display off (TegraGM20BRail.h). gRailLock orders the worker's moves against system sleep, which
-// holds gpu.lock across SC7 with the GPU already down (gRailSC7Held). gRailMoving counts the moves under way (the
+// holds tgm_gpu.lock across SC7 with the GPU already down (gRailSC7Held). gRailMoving counts the moves under way (the
 // worker's rail-down and a caller's rail-up can overlap) and holds SwitchThermal's CPU raise as gSleeping does across
-// SC7; a rail-up made under some caller's gpu.lock leaves gRailMoved for the worker, which lets the raise go.
+// SC7; a rail-up made under some caller's tgm_gpu.lock leaves gRailMoved for the worker, which lets the raise go.
 // gRailExpected: a wake source fired with the panel off, so the worker brings the GPU up once ahead of the panel
 // (consumed by that move; the display stays off as far as the rail knows). gRailDemands counts the wakes by work since
 // the display went off, the last at gRailDemandAt (mach time), for the hold; gRailHoldCall looks again when it ends
@@ -181,6 +183,27 @@ int clkgateSysctl SYSCTL_HANDLER_ARGS
 
 struct sysctl_oid gClkgateOid;
 
+// debug.switch_gpu_regdump (debug kernels, read-only): the registers L4T's capture.sh reads, as text for diff_regs.py
+// (TegraGM20BRegDump.h). Reading it wakes the GPU if it is rail-gated.
+int regdumpSysctl SYSCTL_HANDLER_ARGS
+{
+	if (req->newptr)
+		return EPERM;
+	const size_t cap = tgm_regdump_bytes();
+	if (!req->oldptr)
+		return SYSCTL_OUT(req, nullptr, cap);
+	auto *buf = static_cast<char *>(IOMallocData(cap));
+	if (!buf)
+		return ENOMEM;
+	size_t len = 0;
+	const int ret = tgm_regdump(buf, cap, &len);
+	const int error = ret ? -ret : SYSCTL_OUT(req, buf, len);
+	IOFreeData(buf, cap);
+	return error;
+}
+
+struct sysctl_oid gRegdumpOid;
+
 void registerClkgateSysctl()
 {
 	switch_sysctl_oid(
@@ -188,6 +211,11 @@ void registerClkgateSysctl()
 		static_cast<int>(CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_KERN | CTLFLAG_LOCKED),
 		clkgateSysctl, "I", "GPU clock gating on (1) or off (0), debug A/B");
 	sysctl_register_oid(&gClkgateOid);
+	switch_sysctl_oid(
+		&gRegdumpOid, &sysctl__debug_children, "switch_gpu_regdump",
+		static_cast<int>(CTLTYPE_STRING | CTLFLAG_RD | CTLFLAG_KERN | CTLFLAG_LOCKED),
+		regdumpSysctl, "A", "GM20B registers for the L4T diff");
+	sysctl_register_oid(&gRegdumpOid);
 }
 #endif
 
@@ -204,7 +232,7 @@ void bringup(void *arg, wait_result_t)
 		}
 		// Bring-up: the text console lags the log, and logd flushes every few seconds; let both catch up so a stage
 		// that hangs the machine still leaves the previous stage's result on screen and on Data.
-		if (nvxnu_trace_paced())
+		if (TGM_STATS && nvxnu_trace_paced())
 			IOSleep(3000);
 	}
 	if (stage >= 4) {
@@ -218,6 +246,10 @@ void bringup(void *arg, wait_result_t)
 	}
 #if TGM_STATS
 	registerClkgateSysctl();
+	switch_gpu_path_register();
+#endif
+#if SWITCH_GPU_COMPILER_LINE
+	switch_gpu_compiler_register_sysctl();
 #endif
 	bringupDone();
 }
@@ -262,7 +294,8 @@ extern "C" int switch_gpu_compression_on(void)
 	return static_cast<int>(on);
 }
 
-extern "C" void tgm_journal(const char *fmt, ...)
+#if DEVELOPMENT || DEBUG
+extern "C" void tgm_journal_impl(const char *fmt, ...)
 {
 	char line[256];
 	va_list ap;  // NOLINT(cppcoreguidelines-init-variables): va_start initializes it
@@ -271,6 +304,8 @@ extern "C" void tgm_journal(const char *fmt, ...)
 	va_end(ap);
 	switch_power_journal("%s", line);
 }
+
+#endif
 
 extern "C" void tegra_gm20b_suspend(void)
 {

@@ -399,6 +399,7 @@ pub(super) fn profile_rules(m: &TypedModule, p: &DeviceProfile) -> Result<(), Ve
             return Err(Violation::WorkgroupInitializer(GlobalId::new(gi as u32)).into());
         }
     }
+    super::native_half::check(m, p.fields().native_target)?;
     p.check(&m.requirements)
         .map_err(VerifyError::ExceedsProfile)
 }

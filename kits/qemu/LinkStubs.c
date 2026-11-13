@@ -53,4 +53,13 @@ STUB int boot_progress_pulse_anchor(uintptr_t address, uint64_t bytes, unsigned 
     return 0;
 }
 
+// Called weakly and answered as the absent component does: the scheduler's render-dependency trace (TegraGM20B: nothing
+// traced). The component that defines it replaces this.
+void switch_sched_render_dependency(int entering);
+
+STUB void switch_sched_render_dependency(int entering)
+{
+    (void)entering;
+}
+
 // NOLINTEND(misc-use-internal-linkage, readability-non-const-parameter)

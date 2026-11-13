@@ -69,7 +69,8 @@ typedef struct {
     uint16_t lt_poc_lsb_sps[32];
     uint8_t lt_used_sps[32];
     bool temporal_mvp, strong_intra_smoothing;
-    bool full_range, colour_description;
+    bool full_range, colour_description, chroma_location;
+    uint32_t chroma_top, chroma_bottom;
     uint8_t colour_primaries, transfer, matrix;
 } HEVCSPS;
 

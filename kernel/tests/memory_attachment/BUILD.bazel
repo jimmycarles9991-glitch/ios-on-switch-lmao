@@ -1,0 +1,47 @@
+load("//bazel/lint:defs.bzl", "lint_files")
+load("//bazel/testing:defs.bzl", "host_library", "host_shims", "host_test")
+
+lint_files()
+
+host_library(
+    name = "interface",
+    hdrs = ["//kernel/switch:include/switch/memory_attachment.h"],
+    visibility = ["//drivers/TegraVIC/test:__pkg__"],
+)
+
+host_shims(
+    name = "kernel",
+    headers = [
+        "IOKit/IOLib.h",
+        "IOKit/IOLocks.h",
+        "IOKit/IOMemoryDescriptor.h",
+        "Kernel/IOKitKernelInternal.h",
+        "kern/thread.h",
+    ],
+    stubs = "memory_attachment_stubs.h",
+    deps = [":interface"],
+)
+
+host_library(
+    name = "attachment",
+    srcs = ["//kernel/switch:iokit/memory_attachment.cpp"],
+    hdrs = ["//kernel/switch:include/switch/memory_attachment.h"],
+    copts = [
+        "-I",
+        "kernel/switch/include",
+    ],
+    deps = [":kernel"],
+)
+
+host_test(
+    name = "memory_attachment_test",
+    srcs = ["memory_attachment_test.cpp"],
+    copts = [
+        "-I",
+        "kernel/switch/include",
+    ],
+    deps = [
+        ":attachment",
+        ":kernel",
+    ],
+)

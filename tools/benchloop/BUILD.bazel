@@ -1,0 +1,175 @@
+# The GPU experiment loop with HW Test's Bench screen (README.md): batches over USB, results back, the analyses.
+load("@rules_python//python:py_binary.bzl", "py_binary")
+load("@rules_python//python:py_library.bzl", "py_library")
+load("@rules_python//python:py_test.bzl", "py_test")
+load("//bazel/lint:defs.bzl", "lint_files")
+
+package(default_visibility = ["//tools:__subpackages__"])
+
+# The golden batches are protocol.py's output, which golden_test and capture_test compare byte for byte: no formatter's.
+lint_files(exclude = [
+    "testdata/golden_batch.json",
+    "testdata/split_capture_batch.json",
+])
+
+exports_files(
+    [
+        "testdata/golden_batch.json",
+        "testdata/split_capture_batch.json",
+    ],
+    visibility = ["//hw_test_app:__pkg__"],
+)
+
+exports_files(
+    ["testdata/split_capture.log"],
+    visibility = ["//drivers/TegraGM20BMetal/test:__pkg__"],
+)
+
+py_library(
+    name = "protocol",
+    srcs = [
+        "ibprogram.py",
+        "protocol.py",
+        "ticket.py",
+    ],
+    deps = ["//tools/gpu/maxwell:isa"],
+)
+
+py_library(
+    name = "lib",
+    srcs = [
+        "blend.py",
+        "blend_models.py",
+        "capture.py",
+        "cbufsize.py",
+        "columns.py",
+        "doctor.py",
+        "fakeblend.py",
+        "fakedevice.py",
+        "fakegpu.py",
+        "floatadd.py",
+        "formula.py",
+        "generators.py",
+        "golden.py",
+        "gr_errors.py",
+        "known.py",
+        "loop.py",
+        "qmdchain.py",
+        "report.py",
+        "rop.py",
+        "sampling.py",
+        "session.py",
+        "sweeps.py",
+        "texels.py",
+        "transport.py",
+        "twod.py",
+        "units.py",
+    ],
+    data = ["gr_class_errors.txt"],
+    deps = [
+        ":protocol",
+        "//tools/benchloop/sm53:encode",
+        "//tools/benchloop/sm53:fit",
+        "//tools/benchloop/sm53:latency",
+        "//tools/benchloop/sm53:program",
+        "//tools/benchloop/sm53:sph",
+        "//tools/benchloop/sm53:timing_sim",
+        "//tools/gpu/maxwell:interp",
+    ],
+)
+
+# bazel run //tools/benchloop -- doctor | latency | blend <table> | rop | floatadd | run <batch> (README.md)
+py_binary(
+    name = "benchloop",
+    srcs = ["benchloop.py"],
+    deps = [":lib"],
+)
+
+# bazel run //tools/benchloop:capture -- <log> <batch.json> [--key <hex>]: the render server's split captures as pack
+# experiments (capture.py)
+py_binary(
+    name = "capture",
+    srcs = ["capture.py"],
+    deps = [":lib"],
+)
+
+py_binary(
+    name = "emit_batches",
+    srcs = ["emit_batches.py"],
+    deps = [":lib"],
+)
+
+# Every generated command's batches, for the app's decoder to hold to (hw_test_app:core_test)
+genrule(
+    name = "generated_batches",
+    outs = ["generated_batches.json"],
+    cmd = "$(execpath :emit_batches) > $@",
+    tools = [":emit_batches"],
+    visibility = ["//hw_test_app:__pkg__"],
+)
+
+# The app's side of the format: its decoder's limits (Swift), its GPU side's method ranges (C++), its known program
+APP_SOURCES = [
+    "//hw_test_app:bench/bench_known.h",
+    "//hw_test_app:bench/bench_records.cpp",
+    "//hw_test_app:test_sources",
+]
+
+[
+    py_test(
+        name = name,
+        size = "small",
+        srcs = [name + ".py"],
+        data = APP_SOURCES + glob(["testdata/*"]),
+        deps = [
+            ":lib",
+            "//tools/gpu/maxwell:interp",
+            "//tools/gpu/maxwell:isa",
+        ],
+    )
+    for name in [
+        "agreement_test",
+        "blend_models_test",
+        "blend_test",
+        "capture_test",
+        "cbufsize_test",
+        "floatadd_test",
+        "golden_test",
+        "gr_errors_test",
+        "ibprogram_test",
+        "known_test",
+        "loop_test",
+        "pack_test",
+        "qmdchain_test",
+        "rop_test",
+        "sampling_test",
+        "sweeps_test",
+        "ticket_test",
+        "transport_test",
+        "twod_test",
+        "units_test",
+    ]
+]
+
+# bazel run //tools/benchloop:rung3 -- <dir>: fetch rung 3's iterated blend programs as bench tables (rung3.py)
+py_library(
+    name = "rung3_lib",
+    srcs = ["rung3.py"],
+    deps = ["//drivers/TegraGM20BMetal:raw_pack"],
+)
+
+py_binary(
+    name = "rung3",
+    srcs = ["rung3.py"],
+    deps = [":rung3_lib"],
+)
+
+py_test(
+    name = "rung3_test",
+    size = "small",
+    srcs = ["rung3_test.py"],
+    deps = [
+        ":lib",
+        ":rung3_lib",
+    ],
+)

@@ -12,3 +12,10 @@ TEST(SwitchVideoDecoders, H264ClipThroughTheKernelChecker)
     EXPECT_EQ(run.code, 0) << run.out;
     EXPECT_THAT(run.out, testing::HasSubstr("PASS h264 clip: 30 access units, 30 pictures"));
 }
+
+TEST(SwitchVideoDecoders, H264MbaffClipThroughTheKernelChecker)
+{
+    const HostRun run = RunHost(h264_host_main, {"h264_host", "--mbaff"});
+    EXPECT_EQ(run.code, 0) << run.out;
+    EXPECT_THAT(run.out, testing::HasSubstr("PASS h264 mbaff clip: 30 access units, 30 pictures"));
+}

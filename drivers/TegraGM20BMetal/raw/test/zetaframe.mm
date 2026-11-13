@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: MIT
 // raw GM20B path: stored depth/stencil render targets through the facade (HW Test's metal.render.depth_stencil), over
-// the mock GPU (NVDEC_WRITETHROUGH, whose copy engine runs and whose 3D engine does not). Each is one allocation, NVK's image,
-// which the raw path renders and copies in place. Interleaved: the raw path writes texture A's depth and stencil from buffers
+// the mock GPU (NVDEC_WRITETHROUGH, whose copy engine runs and whose 3D engine does not). Each is made in the raw path's own zeta
+// memory with no twin; m2v's twin, asked for as a replay asks, is NVK's image, the texels moved into it and the raw path over it
+// from then on. Interleaved: the raw path writes texture A's depth and stencil from buffers
 // (MTLBlitOptionDepthFromDepthStencil, StencilFromDepthStencil), m2v copies A into B, the raw path reads B's back; then the
 // raw path writes B, m2v copies it into A, the raw path reads A: each driver sees the texels the other wrote. A pass that loads
 // and stores one takes the raw path, and, given HW Test's shader library, its test's pass (three quads under depth and stencil
@@ -141,14 +142,17 @@ int main(int argc, char **argv)
         id<MTLTexture> textures[2] = {[dev newTextureWithDescriptor:d], [dev newTextureWithDescriptor:d]};
         for (id<MTLTexture> t : textures) {
             RMTexture *x = (RMTexture *)t;
+            const bool owned = [(id)t isKindOfClass:[RMTexture class]] && x->_rawOk && x->_raw.zeta &&
+                               !x->_raw.memoryless && !x->_twin;
+            expect(owned, "a stored Depth32Float_Stencil8 render target is the raw path's own, with no twin", nil);
             struct switch_nvk_image_memory m = {};
-            const bool one = [(id)t isKindOfClass:[RMTexture class]] && x->_rawOk && x->_raw.zeta &&
-                             !x->_raw.memoryless && !x->_raw.span.valid() && x->_twin &&
-                             native_bridge_metal_texture_memory(x->_twin, &m) == 0 && x->_raw.va == m.addr &&
-                             x->_raw.pitch == m.row_stride_B && x->_raw.blockHeight == m.y_log2;
-            expect(one, "a stored Depth32Float_Stencil8 render target is one allocation: m2v's texture, raw in place",
+            const bool moved = owned && [x rmTwin] && native_bridge_metal_texture_memory(x->_twin, &m) == 0 &&
+                               x->_raw.va == m.addr && x->_raw.pitch == m.row_stride_B &&
+                               x->_raw.blockHeight == m.y_log2;
+            expect(moved,
+                   "its twin, asked for as a replay asks, is NVK's image, which the raw path is over from then on",
                    nil);
-            if (!one)
+            if (!moved)
                 return 1;
         }
 

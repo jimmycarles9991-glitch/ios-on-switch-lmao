@@ -1,18 +1,14 @@
 // SPDX-License-Identifier: MIT
-// The copy engine's moves of block-linear IOSurfaces (TegraGM20BRelayout.h) on the kernel's own GPU client: one address
-// space and copy channel made at the first move, a push page and a fence page from the GPU pool; a move maps the
-// surface's pages twice (TGM_LAYOUT_KIND and kind 0) and the scratch once, and unmaps them after it. Moves are
-// serialised; the caller sleeps on the move's fence interrupt (tgm_copy_wait, which recovers a writer the move's
-// acquires sit on, or a copy that stops progressing, as it does a stuck writer), so the bytes are in DRAM where they
-// were asked for when it returns. The channel is a client channel to the rest of the driver (kernel 0): the present's
-// acquires and a lock's wait for every channel include it, and a fault on it kills it alone (the next move makes
-// another).
 #include <IOKit/IOLib.h>
+#include <IOKit/IOBufferMemoryDescriptor.h>
 #include <IOKit/IOLocks.h>
 #include <kern/task.h>
 #include <stdint.h>
 #include <string.h>
 #include "TegraGM20BFences.h"
+#include "SwitchGpuKqueue.h"
+#include "SwitchGpuPin.h"
+#include "SwitchGpuRelayoutCache.h"
 #include "TegraGM20BGpu.h"
 #include "TegraGM20BRelayout.h"
 #include "TegraGM20BTiled.h"
@@ -22,53 +18,64 @@
 namespace
 {
 constexpr uint64_t kPage = 4096;
-constexpr uint64_t kPushVa = 1ULL << 20, kSurfaceVa = 1ULL << 32, kSurfaceRowsVa = 2ULL << 32,
-		   kRowsVa = 3ULL << 32;
+constexpr uint64_t kPushVa = 1ULL << 20;
+constexpr uint32_t kCheckpointWord = 1023;
+// The push page is GPU-writable: its last word receives the GPU's recovery checkpoint.
+constexpr SwitchGpuKqueueShape kShape = {"relayout", TGM_FENCE_KERNEL_RELAYOUT, 1, kPushVa, 0, 1};
 
 struct Relayout {
 	IOLock *lock;
-	tgm_vm *vm;
-	tgm_chan *chan;
-	tgm_mem *push, *fence;
-	uint32_t *pushCpu;
-	volatile uint32_t *fenceCpu;
-	uint64_t pushPa, fenceGpu;
-	bool failed;  // no address space: every move is refused
+	SwitchGpuKqueue space;
+	bool unavailable;  // the last open failed (logged once until one succeeds)
+	SwitchGpuRelayoutCache mappings;
 } gRelayout;
-
-bool openSpace()
-{
-	Relayout &r = gRelayout;
-	uint64_t fencePage = 0;
-	uint32_t fenceOffset = 0;
-	r.pushCpu = static_cast<uint32_t *>(tgm_pool_alloc(kPage, 0, &r.pushPa));
-	if (!r.pushCpu ||
-	    tgm_fence_kernel(TGM_FENCE_KERNEL_RELAYOUT, &r.fenceCpu, &fencePage, &fenceOffset) ||
-	    tgm_vm_new(&r.vm))
-		return false;
-	tgm_vm_claim(r.vm, &gRelayout);
-	if ((tgm_mem_new(r.vm, &r.pushPa, 1, &r.push) != 0) ||
-	    (tgm_vm_map_ordered(r.vm, kPushVa, kPage, r.push, 0, 0, 1, nullptr) != 0) ||
-	    (tgm_mem_new(r.vm, &fencePage, 1, &r.fence) != 0) ||
-	    (tgm_vm_kmap(r.vm, r.fence, kPage, &r.fenceGpu) != 0))
-		return false;
-	r.fenceGpu += fenceOffset;
-	return true;
-}
 
 tgm_chan *channel()
 {
 	Relayout &r = gRelayout;
-	if (r.chan && tgm_chan_error(r.chan))
-		tgm_chan_del(&r.chan);
-	if (!r.vm && !r.failed && !openSpace()) {
-		r.failed = true;
-		IOLog("tegra-gm20b: block-linear surfaces cannot be moved: no address space\n");
+	if (r.space.channel && tgm_chan_error(r.space.channel))
+		tgm_chan_del(&r.space.channel);
+	if (!r.space.vm && !r.space.openSpace(kShape, &gRelayout)) {
+		r.space.discardSpace(kShape);
+		if (!r.unavailable)
+			IOLog("tegra-gm20b: block-linear surfaces cannot be moved: no address "
+			      "space\n");
+		r.unavailable = true;
+		return nullptr;
 	}
-	if (!r.chan && !r.failed) {
-		tgm_chan_new(r.vm, &gRelayout, r.fenceCpu, r.fenceGpu, "relayout", 1, &r.chan);
+	r.unavailable = false;
+	r.space.openChannel(kShape, &gRelayout, nullptr);
+	return r.space.channel;
+}
+
+void tgm_relayout_finish_cpu(const tgm_relayout_pages *, const tgm_relayout_pages *,
+			     const tgm_layout *, uint32_t, tgm_relayout_op);
+
+// A copy that faulted leaves its own partial writes, and its writers' (complete, an Internal job's possibly still there),
+// in the GPU's L2, behind which the CPU would read and write: this move's finish, or the caller's tgm_relayout_by_cpu. The faulted channel is gone: a new one's empty
+// External job flushes the whole L2. Without a channel only the LTC's MMIO flush could, which polls.
+bool flushForCpu()
+{
+	tgm_chan *chan = channel();
+	if (!chan)
+		return false;
+	uint32_t seqno = 0;
+	int ret = 0;
+	switch_gpu_chan_submit_enter(chan);
+	for (;;) {
+		ret = switch_gpu_chan_exec_visibility(chan, nullptr, 0, nullptr, 0, &seqno, nullptr,
+						      SWITCH_GPU_SUBMIT_FORCE_FENCE);
+		if (ret != -11)
+			break;
+		ret = switch_gpu_chan_wait_submission_room(chan, nullptr, 0, 0, nullptr);
+		if (ret)
+			break;
 	}
-	return r.chan;
+	switch_gpu_chan_submit_leave();
+	if (ret)
+		return false;
+	tgm_copy_wait(tgm_chan_uid(chan), seqno, nullptr, 0);
+	return !tgm_chan_error(chan);
 }
 
 int move(const tgm_relayout_pages &surface, const tgm_relayout_pages &rows, const tgm_layout &l,
@@ -87,27 +94,28 @@ int move(const tgm_relayout_pages &surface, const tgm_relayout_pages &rows, cons
 		return -12;
 	tgm_relayout_wait waits[TGM_RELAYOUT_MAX_WAITS];
 	const uint32_t nwaits =
-		tgm_relayout_waits(r.vm, tgm_chan_uid(chan), writers, nwriters, waits, 0);
-	tgm_mem *surfaceMem = nullptr;
-	tgm_mem *rowsMem = nullptr;
-	int ret = tgm_mem_new(r.vm, surface.pas, surface.npages, &surfaceMem);
+		tgm_relayout_waits(r.space.vm, tgm_chan_uid(chan), writers, nwriters, waits, 0);
+	if (nwaits == TGM_RELAYOUT_WAIT_FAILED)
+		return -75;
+	SwitchGpuRelayoutMapping *surfaceMap = nullptr, *rowsMap = nullptr;
+	bool finish = false;
+	int ret = switch_gpu_relayout_mapping(r.space.vm, &gRelayout.mappings, surface.pas,
+					      surface.npages, true, &surfaceMap);
 	if (!ret)
-		ret = tgm_mem_new(r.vm, rows.pas, rows.npages, &rowsMem);
+		ret = switch_gpu_relayout_mapping(r.space.vm, &gRelayout.mappings, rows.pas,
+						  rows.npages, false, &rowsMap);
 	if (!ret) {
-		ret = tgm_vm_map_ordered(r.vm, kSurfaceVa, surfaceBytes, surfaceMem, 0,
-					 TGM_LAYOUT_KIND, 0, nullptr);
-	}
-	if (!ret) {
-		ret = tgm_vm_map_ordered(r.vm, kSurfaceRowsVa, surfaceBytes, surfaceMem, 0, 0, 0,
-					 nullptr);
-	}
-	if (!ret)
-		ret = tgm_vm_map_ordered(r.vm, kRowsVa, rowsBytes, rowsMem, 0, 0, 0, nullptr);
-	if (!ret) {
-		const tgm_relayout_move m = {kSurfaceVa, kSurfaceRowsVa, kRowsVa, bytesPerRow,
-					     op,         rowsBytes};
-		const tgm_push push = {kPushVa, tgm_relayout_push(r.pushCpu, &l, &m, waits, nwaits),
-				       0};
+		__atomic_store_n(r.space.words + kCheckpointWord, 0u, __ATOMIC_RELEASE);
+		const tgm_relayout_move m = {surfaceMap->tiled,
+					     surfaceMap->pitch,
+					     rowsMap->pitch,
+					     bytesPerRow,
+					     op,
+					     rowsBytes,
+					     kPushVa + uint64_t(kCheckpointWord) * 4};
+		const tgm_push push = {
+			kPushVa, tgm_relayout_push(r.space.words, &l, &m, waits, nwaits), 0, 0, 0,
+			0};
 		uint32_t seqno = 0;
 		ret = tgm_chan_exec(chan, &push, 1, &seqno, nullptr);
 		if (!ret) {
@@ -116,13 +124,25 @@ int move(const tgm_relayout_pages &surface, const tgm_relayout_pages &rows, cons
 				acquired[i] = {waits[i].uid, waits[i].seqno};
 			tgm_copy_wait(tgm_chan_uid(chan), seqno, acquired, nwaits);
 			ret = tgm_chan_error(chan) ? -5 : 0;
+			finish = ret &&
+				 __atomic_load_n(r.space.words + kCheckpointWord, __ATOMIC_ACQUIRE);
 		}
 	}
-	tgm_vm_unmap(r.vm, kRowsVa, rowsBytes);
-	tgm_vm_unmap(r.vm, kSurfaceRowsVa, surfaceBytes);
-	tgm_vm_unmap(r.vm, kSurfaceVa, surfaceBytes);
-	tgm_mem_del(&rowsMem);
-	tgm_mem_del(&surfaceMem);
+	switch_gpu_relayout_mapping_put(rowsMap);
+	switch_gpu_relayout_mapping_put(surfaceMap);
+	if (ret && tgm_chan_error(chan)) {
+		switch_gpu_relayout_cache_clear(r.space.vm, &gRelayout.mappings);
+		if (!flushForCpu())
+			switch_refusal("iosurface-layout", "fault-unflushed",
+				       "a faulted relayout leaves the GPU's L2 unflushed for the "
+				       "CPU's move: "
+				       "no copy channel");
+	}
+	if (finish) {
+		tgm_cpu_clean_pages(rows.pas, rows.npages);
+		tgm_relayout_finish_cpu(&surface, &rows, &l, bytesPerRow, op);
+		ret = 0;
+	}
 	return ret;
 }
 }  // namespace
@@ -146,10 +166,10 @@ extern "C" uint32_t tgm_relayout_waits(struct tgm_vm *vm, uint32_t self,
 		nwriters > TGM_RELAYOUT_MAX_WAITS ? nwriters - TGM_RELAYOUT_MAX_WAITS : 0;
 	nwaits = tgm_relayout_follow(self, running, fenceVa, n, waits, nwaits, &refused);
 	if (refused) {
-		switch_refusal(
-			"gpu-order", "writer-unordered",
-			"a kernel copy goes ahead of %u surface writers it cannot acquire on",
-			refused);
+		switch_refusal("gpu-order", "writer-unordered",
+			       "a kernel copy cannot acquire %u surface writers and was refused",
+			       refused);
+		return TGM_RELAYOUT_WAIT_FAILED;
 	}
 	return nwaits;
 }
@@ -162,6 +182,29 @@ uint8_t *physical(uint64_t pa)
 {
 	return reinterpret_cast<uint8_t *>(phystokv(pa));
 }
+
+uint64_t cpuMoves, cpuMoveBytes;
+
+void countCpuMove(const tgm_relayout_pages &surface)
+{
+	if (TGM_STATS) {
+		__atomic_fetch_add(&cpuMoves, 1, __ATOMIC_RELAXED);
+		__atomic_fetch_add(&cpuMoveBytes, uint64_t(surface.npages) * kPage,
+				   __ATOMIC_RELAXED);
+	}
+}
+
+void tgm_relayout_finish_cpu(const tgm_relayout_pages *surface, const tgm_relayout_pages *rows,
+			     const tgm_layout *layout, uint32_t bytesPerRow, tgm_relayout_op op)
+{
+	countCpuMove(*surface);
+	tgm_cpu_clean_pages(surface->pas, surface->npages);
+	if (op == TGM_RELAYOUT_TILE_IN_PLACE)
+		tgm_relayout_cpu(surface, rows, layout, bytesPerRow, 0, physical);
+	else if (op == TGM_RELAYOUT_UNTILE_IN_PLACE)
+		tgm_relayout_rows_cpu(surface, rows, layout, bytesPerRow, physical);
+	tgm_cpu_clean_pages(surface->pas, surface->npages);
+}
 }  // namespace
 
 extern "C" void tgm_relayout_by_cpu(const struct tgm_relayout_pages *surface,
@@ -173,10 +216,17 @@ extern "C" void tgm_relayout_by_cpu(const struct tgm_relayout_pages *surface,
 		tgm_writer_wait(writers[i].uid, writers[i].seqno);
 	const bool toRows = op == TGM_RELAYOUT_TO_ROWS;
 	const tgm_relayout_pages &to = toRows ? *rows : *surface;
+	countCpuMove(*surface);
 	tgm_cpu_clean_pages(surface->pas, surface->npages);
 	tgm_cpu_clean_pages(rows->pas, rows->npages);
 	tgm_relayout_cpu(surface, rows, layout, bytes_per_row, static_cast<int>(toRows), physical);
 	tgm_cpu_clean_pages(to.pas, to.npages);
+}
+
+extern "C" void tgm_relayout_cpu_stats(uint64_t *moves, uint64_t *bytes)
+{
+	*moves = __atomic_exchange_n(&cpuMoves, 0, __ATOMIC_RELAXED);
+	*bytes = __atomic_exchange_n(&cpuMoveBytes, 0, __ATOMIC_RELAXED);
 }
 
 extern "C" int tgm_relayout_init(void)
@@ -202,12 +252,28 @@ extern "C" int tgm_relayout(const struct tgm_relayout_pages *surface,
 
 struct tgm_scratch : switch_scratch {};
 
+namespace
+{
+void releaseScratchBacking(void *backing)
+{
+	switch_gpu_backing_release(static_cast<switch_gpu_backing *>(backing));
+}
+}
+
 // kits/SwitchScratch's recycled, wired, cacheable memory: the copy engine writes it, a locking task maps it
 extern "C" struct tgm_scratch *tgm_scratch_get(uint64_t bytes, int for_task,
 					       struct tgm_relayout_pages *pages)
 {
 	auto *s = static_cast<tgm_scratch *>(
 		switch_scratch_get(bytes, for_task ? current_task() : kernel_task));
+	if (s && !s->deviceBacking) {
+		s->deviceBacking = switch_gpu_pin_memory(s->pas, s->npages, 0, s->memory, true);
+		if (!s->deviceBacking) {
+			switch_scratch_put(s);
+			return nullptr;
+		}
+		s->releaseDeviceBacking = releaseScratchBacking;
+	}
 	if (s)
 		*pages = {s->pas, s->npages};
 	return s;
@@ -216,6 +282,21 @@ extern "C" struct tgm_scratch *tgm_scratch_get(uint64_t bytes, int for_task,
 extern "C" void tgm_scratch_put(struct tgm_scratch *s)
 {
 	switch_scratch_put(s);
+}
+
+extern "C" struct tgm_scratch *tgm_scratch_reclaim(struct tgm_scratch *s, uint64_t handout,
+						   int *intact)
+{
+	bool kept = false;
+	auto *again = static_cast<tgm_scratch *>(
+		switch_scratch_reclaim(s, handout, current_task(), &kept));
+	*intact = kept;
+	return again;
+}
+
+extern "C" uint64_t tgm_scratch_handout(const struct tgm_scratch *s)
+{
+	return s->handout;
 }
 
 extern "C" void tgm_scratch_discard(struct tgm_scratch *s)
@@ -231,6 +312,19 @@ extern "C" void *tgm_scratch_memory(const struct tgm_scratch *s)
 extern "C" void tgm_scratch_pages(const struct tgm_scratch *s, struct tgm_relayout_pages *pages)
 {
 	*pages = {s->pas, s->npages};
+}
+
+extern "C" void *tgm_scratch_map(struct tgm_scratch *s, void **map)
+{
+	IOMemoryMap *mapped = s->memory->map();
+	*map = mapped;
+	return mapped ? reinterpret_cast<void *>(mapped->getVirtualAddress()) : nullptr;
+}
+
+extern "C" void tgm_scratch_unmap(void *map)
+{
+	if (map)
+		static_cast<IOMemoryMap *>(map)->release();
 }
 
 extern "C" void tgm_scratch_stats(uint64_t *held, uint64_t *peak)

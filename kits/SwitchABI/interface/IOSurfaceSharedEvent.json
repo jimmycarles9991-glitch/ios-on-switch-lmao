@@ -1,0 +1,62 @@
+{
+  "class": "IOSurfaceSharedEvent",
+  "superclass": "OSObject",
+  "kext": "com.apple.iokit.IOSurface",
+  "functions_only": true,
+  "methods": {},
+  "constants": {
+    "eventLock": {
+      "doc": "The same IOLock held while native notification detaches pending waiters."
+    },
+    "pendingHead": {
+      "doc": "Head of the native pending waiter queue."
+    },
+    "pendingTail": {
+      "doc": "Pointer to the last next field in the native pending waiter queue."
+    },
+    "waiterNext": {
+      "doc": "Intrusive next pointer reused by the native listener only after event dequeue."
+    },
+    "waiterPrevious": {
+      "doc": "Pointer to the preceding next field."
+    }
+  },
+  "functions": {
+    "lookup": {
+      "symbols": [
+        "switch_gpu_event_native_lookup"
+      ],
+      "doc": "Retained event resolved from a Mach send right in the caller task."
+    },
+    "value": {
+      "symbols": [
+        "switch_gpu_event_native_value"
+      ],
+      "doc": "Acquire-load of the full 64-bit shared value."
+    },
+    "signal": {
+      "symbols": [
+        "switch_gpu_event_native_signal"
+      ],
+      "doc": "Monotonic value update and native listener notification."
+    },
+    "listener_create": {
+      "symbols": [
+        "switch_gpu_event_native_listener_create"
+      ],
+      "doc": "Retained asynchronous native listener; argument zero selects the default high-priority notification service."
+    },
+    "waiter_create": {
+      "symbols": [
+        "switch_gpu_event_native_waiter_create"
+      ],
+      "doc": "Retained waiter(event, listener, value, refcon, retained owner, callback); does not arm it."
+    },
+    "waiter_arm": {
+      "symbols": [
+        "switch_gpu_event_native_waiter_arm"
+      ],
+      "doc": "Queues the waiter once; a value already reached also delivers through the native listener."
+    }
+  }
+}

@@ -172,10 +172,10 @@ impl CompiledFunction {
 /// decoded AIR, plan, or typed module is retained.
 #[non_exhaustive]
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct FunctionArtifact {
+pub struct FunctionArtifact<Module = RelocatableModule> {
     pub key: FunctionCompileKey,
     /// SPIR-V words with their link-assigned literals still symbolic.
-    pub module: RelocatableModule,
+    pub module: Module,
     /// The function's slots, push placement, and declared link symbols.
     pub interface: StageInterface,
     /// Runtime facts the function depends on.

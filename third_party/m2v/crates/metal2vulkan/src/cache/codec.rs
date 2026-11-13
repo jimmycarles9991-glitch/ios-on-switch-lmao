@@ -835,6 +835,7 @@ codec_enum! {
         Specialized(f0),
         ColorWriteRule(f0),
         HalfBlendColor,
+        AmplificationCount,
     }
     Symbol { Binding(f0), DescriptorSet(f0), Location(f0), Component(f0), SpecId(f0) }
 }
@@ -958,7 +959,8 @@ codec_enum! {
         MetalCenterVaryings, MetalSmallFloatColorWrites, MetalNorm16ColorWrites, MetalMinMax,
         MetalHalfArithmetic, MetalHalfStorageWrites, MetalHalfStorageNans, MetalFloatStorageNans,
         MetalFragmentSimdgroups, MetalVertexSimdgroups, CenterFragCoordDepth, SampleFragCoordDepth,
-        MetalHalfTexelWrites, MetalNormStorageWrites, Unorm8LinearFilter, DeviceSampling,
+        MetalHalfTexelWrites, MetalNormStorageWrites, Unorm8LinearFilter, DeviceSampling, NativeSm53Half,
+        TwoPlaneExtendedRange,
     }
     VkLimit {
         MaxComputeWorkGroupSize(f0), MaxComputeWorkGroupCount(f0), MaxComputeWorkGroupInvocations,
@@ -1049,7 +1051,7 @@ codec_struct! {
         early_fragment_tests, extended_range_colors, unattached_colors, half_bit_colors,
         sample_mask, rotated_colors, rotated_factors, rotated_blends, srgb_fetches,
         half_output_lanes, texture_write_rounding, uniform_outputs, uniform_inputs,
-        instanced_attributes, selected_colors, half_blend_colors,
+        instanced_attributes, selected_colors, half_blend_colors, two_plane_alphas,
     }
     SelectedWrite { lanes, rounds, nans }
     ExtendedRangeColor { form, blended, nearest_even }
@@ -1176,6 +1178,7 @@ codec_enum! {
         StorageTextureIntegerChannels { slot },
         HeapHalfTexelWrites { stage, packed },
         MovableStorageWrites { early_variant },
+        LayeredStorage,
     }
     UniformViewChoice { Viewed, Spare, Kept }
     Mechanism {
@@ -1271,7 +1274,7 @@ codec_struct! {
     ColorAttachmentState { format, write_mask, blend }
     BlendState { src_color, dst_color, color_op, src_alpha, dst_alpha, alpha_op }
     InputAttachmentUse { color_index, input_attachment_index, format_class }
-    StorageAttachmentUse { color_index, format, writes, formatless, view, uint_view, kept }
+    StorageAttachmentUse { color_index, format, writes, formatless, view, uint_view, kept, blend_model }
     ShadowStencilUse { format, formatless, samples }
     ShaderTestsUse { depth, stencil }
     StandInUse { format, formatless, samples, view }

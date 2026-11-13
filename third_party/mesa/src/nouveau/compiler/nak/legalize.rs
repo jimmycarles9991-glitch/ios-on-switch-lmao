@@ -404,7 +404,7 @@ pub struct LegalizeBuilder<'a> {
 }
 
 impl<'a> LegalizeBuilder<'a> {
-    fn new(
+    pub(crate) fn new(
         sm: &'a ShaderModelInfo,
         alloc: &'a mut SSAValueAllocator,
         const_tracker: &'a mut ConstTracker,

@@ -39,8 +39,8 @@ cargo_tool(
     manifest = "@nvk_cbindgen_src//:src/Cargo.toml",
 )
 
-# The generators format the Rust they write with rustfmt 1.96.1 from PATH (they skip formatting without it, and the
-# line numbers reach the binary through panic locations); bindgen loads libclang 23.1.4.
+# The generators format the Rust they write with rustfmt 1.96.1 from PATH and fail without it (the line numbers reach
+# the binary through panic locations); bindgen loads libclang 23.1.4.
 alias(
     name = "rustfmt",
     actual = "@nvk_rust//:rustfmt",

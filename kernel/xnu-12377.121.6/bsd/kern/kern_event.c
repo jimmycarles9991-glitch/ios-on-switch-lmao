@@ -127,6 +127,7 @@ extern bool net_check_compatible_alf(void);
 #if CONFIG_MEMORYSTATUS
 #include <sys/kern_memorystatus.h>
 #endif
+#include <switch/diag.h>
 
 #if DEVELOPMENT || DEBUG
 #define KEVENT_PANIC_ON_WORKLOOP_OWNERSHIP_LEAK  (1U << 0)
@@ -2741,6 +2742,7 @@ out:
 		kev->data = error;
 		return result;
 	}
+	switch_diag_wl_touched(command, kn->kn_sfflags, kqwl->kqwl_dynamicid, kn->kn_id, kn->kn_thread);
 	if (command == NOTE_WL_SYNC_WAIT && !(kn->kn_sfflags & NOTE_WL_SYNC_WAKE)) {
 		return kevent_register_wait_prepare(kn, kev, result);
 	}

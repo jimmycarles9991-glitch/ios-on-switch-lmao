@@ -8,20 +8,23 @@
 //  - a task's last unlock puts its mapping back;
 //  - the last unlock (any task) after a lock that may have written cleans the scratch's lines and has the copy engine
 //    write the rows back into the texels, behind the GPU's writers, before IOSurface's unlock moves the seed, then gives
-//    the scratch back.
+//    the scratch back;
+//  - a GPU submission that writes the surface while a write lock holds its rows (tgm_views_gpu_writes) first reads the
+//    texels back as rows once more (base: what the lock found, the GPU's write not in yet), so that unlock lays only what
+//    the CPU changed over what the GPU wrote (TegraGM20BViewMerge.h): a CPU lock does not hold the GPU back, as on
+//    Apple's GPUs.
 // A view whose user client died (its task exited holding the lock) is dropped at the next trap of the surface. While any
 // lock is held the entry holds a reference of its own, so its surface stays block-linear and its scratch stays put.
 #include <IOKit/IOLib.h>
+#include <os/log.h>
 #include <stdint.h>
 #include <string.h>
 #include "TegraGM20BRelayout.h"
+#include "TegraGM20BViewMerge.h"
 #include "TegraGM20BViews.h"
 #include "../../kits/SwitchRefusal/SwitchRefusal.h"
-#if TGM_STATS
-#include <os/log.h>
 extern "C" void proc_selfname(char *buf, int size);
 extern "C" int proc_selfpid(void);
-#endif
 
 namespace
 {
@@ -80,12 +83,30 @@ void noteBusy(tgm_tiled &t, uint32_t id)
 		os_log(OS_LOG_DEFAULT,
 		       "tegra-gm20b: IOSurface %u is block-linear and CPU-locked more than %u "
 		       "times a second (%s[%d]): "
-		       "each lock moves its texels",
+		       "a lock after each GPU write moves its texels",
 		       id, kBusyLocks, name, proc_selfpid());
 	}
 #else
 	(void)t;
 	(void)id;
+#endif
+}
+
+void noteReused(const tgm_coh *c, bool same)
+{
+#if TGM_STATS
+	static int announced;
+	if (!same || __atomic_exchange_n(&announced, 1, __ATOMIC_RELAXED))
+		return;
+	char name[32];
+	proc_selfname(name, sizeof(name));
+	os_log(OS_LOG_DEFAULT,
+	       "tegra-gm20b: IOSurface %u: a CPU lock reused the rows its last lock moved, no "
+	       "texels moved (%s[%d])",
+	       tgm_coh_surface_id(c), name, proc_selfpid());
+#else
+	(void)c;
+	(void)same;
 #endif
 }
 
@@ -102,8 +123,26 @@ void move(tgm_coh *c, const tgm_tiled &t, const tgm_relayout_pages &rows, int op
 			"IOSurface %u: the copy engine did not move its texels for the CPU (%d): "
 			"the CPU did",
 			tgm_coh_surface_id(c), ret);
+		tgm_coh_wait_visible(c);
 		tgm_relayout_by_cpu(&pages, &rows, &t.layout, t.bytes_per_row, op, writers, n);
 	}
+}
+
+// The rows the last read-only locks gave back, if no GPU submission may have written the texels since they were moved
+// and the scratch still holds them (iconservicesagent reads each icon render back with three locks in a row): no move.
+tgm_scratch *reuse(tgm_coh *c, tgm_tiled &t, uint64_t written, tgm_relayout_pages &rows, bool &same)
+{
+	same = false;
+	tgm_scratch *kept = t.kept;
+	t.kept = nullptr;
+	int intact = 0;
+	tgm_scratch *scratch = kept ? tgm_scratch_reclaim(kept, t.kept_handout, &intact) : nullptr;
+	if (!scratch)
+		return nullptr;
+	tgm_scratch_pages(scratch, &rows);
+	same = intact && t.kept_written == written;
+	noteReused(c, same);
+	return scratch;
 }
 
 // The first lock: the texels into a cleared scratch as rows, behind the GPU's writers. Nonzero: refused, with nothing
@@ -113,9 +152,18 @@ int fill(tgm_coh *c, tgm_tiled &t, uint32_t options)
 	tgm_relayout_writer writers[TGM_RELAYOUT_MAX_WAITS];
 	if ((options & kLockAvoidSync) && tgm_coh_writers(c, writers, TGM_RELAYOUT_MAX_WAITS))
 		return 1;
+	const uint64_t written = tgm_coh_written(c);
 	tgm_relayout_pages rows;
-	tgm_scratch *scratch =
-		tgm_scratch_get(static_cast<uint64_t>(tgm_coh_pages(c).npages) << 12, 1, &rows);
+	bool same = false;
+	tgm_scratch *scratch = reuse(c, t, written, rows, same);
+	t.filled_written = written;
+	if (same) {
+		t.scratch = scratch;
+		return 0;
+	}
+	if (!scratch)
+		scratch = tgm_scratch_get(static_cast<uint64_t>(tgm_coh_pages(c).npages) << 12, 1,
+					  &rows);
 	if (!scratch) {
 		switch_refusal("iosurface-layout", "no-scratch",
 			       "IOSurface %u: no memory for a CPU lock's rows: the lock is refused",
@@ -129,6 +177,35 @@ int fill(tgm_coh *c, tgm_tiled &t, uint32_t options)
 	return 0;
 }
 
+// The texels as the GPU left them, as rows, with every byte the CPU changed since base laid over them, back into the
+// texels. False, with nothing moved back, when there is no memory for it.
+bool mergeBack(tgm_coh *c, const tgm_tiled &t)
+{
+	const uint64_t bytes = static_cast<uint64_t>(tgm_coh_pages(c).npages) << 12;
+	tgm_relayout_pages gpuRows;
+	tgm_scratch *gpu = tgm_scratch_get(bytes, 0, &gpuRows);
+	if (!gpu)
+		return false;
+	tgm_cpu_clean_pages(gpuRows.pas, gpuRows.npages);
+	move(c, t, gpuRows, TGM_RELAYOUT_TO_ROWS);
+	tgm_cpu_clean_pages(gpuRows.pas, gpuRows.npages);
+	void *maps[3] = {};
+	auto *merged = static_cast<uint64_t *>(tgm_scratch_map(gpu, &maps[0]));
+	const auto *rows = static_cast<const uint64_t *>(tgm_scratch_map(t.scratch, &maps[1]));
+	const auto *base = static_cast<const uint64_t *>(tgm_scratch_map(t.base, &maps[2]));
+	const bool mapped = merged && rows && base;
+	if (mapped)
+		tgm_view_merge(merged, rows, base, bytes / sizeof(uint64_t));
+	for (void *map : maps)
+		tgm_scratch_unmap(map);
+	if (mapped) {
+		tgm_cpu_clean_pages(gpuRows.pas, gpuRows.npages);
+		move(c, t, gpuRows, TGM_RELAYOUT_TO_TILED);
+	}
+	tgm_scratch_put(gpu);
+	return mapped;
+}
+
 // The last unlock: what a writer left in the scratch back into the texels, behind the GPU's writers
 void drain(tgm_coh *c, tgm_tiled &t)
 {
@@ -136,11 +213,27 @@ void drain(tgm_coh *c, tgm_tiled &t)
 		tgm_relayout_pages rows;
 		tgm_scratch_pages(t.scratch, &rows);
 		tgm_cpu_clean_pages(rows.pas, rows.npages);
-		move(c, t, rows, TGM_RELAYOUT_TO_TILED);
+		const bool merged = t.base && mergeBack(c, t);
+		if (t.base && !merged) {
+			switch_refusal("iosurface-layout", "merge-failed",
+				       "IOSurface %u: no memory or mapping to merge a GPU write "
+				       "made under a "
+				       "CPU write lock: the unlock writes the lock's rows over it",
+				       tgm_coh_surface_id(c));
+		}
+		if (!merged)
+			move(c, t, rows, TGM_RELAYOUT_TO_TILED);
+	}
+	if (t.base) {
+		tgm_scratch_put(t.base);
+		t.base = nullptr;
 	}
 	if (t.stranded) {
 		tgm_scratch_discard(t.scratch);
 	} else {
+		t.kept = t.wrote ? nullptr : t.scratch;
+		t.kept_handout = tgm_scratch_handout(t.scratch);
+		t.kept_written = t.filled_written;
 		tgm_scratch_put(t.scratch);
 	}
 	t.scratch = nullptr;
@@ -229,13 +322,45 @@ void unlock(tgm_coh *c, tgm_tiled &t, void *client, uint32_t id, uint32_t option
 		released = true;
 	}
 }
+
+// A deferred surface (TegraGM20BCoherency.cpp: its last GPU import went while it was block-linear) has its texels moved
+// back to rows in place at its first lock, and is pitch from then on: the move its last import's release would have made.
+// A deferred entry another surface's ID finds is that surface's no longer: nothing to do for this lock.
+// A kIOSurfaceLockAvoidSync lock while its GPU writers still run goes to the view, which refuses it.
+bool lockedDeferred(tgm_coh *c, uint32_t index, uint32_t id, uint32_t options)
+{
+	const int deferred = tgm_coh_deferred_for(c, id);
+	if (deferred <= 0 || index != kLock)
+		return deferred < 0;
+	tgm_relayout_writer writers[TGM_RELAYOUT_MAX_WAITS];
+	if ((options & kLockAvoidSync) && tgm_coh_writers(c, writers, TGM_RELAYOUT_MAX_WAITS))
+		return false;
+	if (tgm_tiled_untile_deferred(c))
+		return false;
+	tgm_coh_undefer(c);
+	return true;
+}
 }  // namespace
+
+extern "C" void tgm_views_deferred_lock(uint32_t id, uint32_t options)
+{
+	if (!tgm_coh_any_deferred())
+		return;
+	if (tgm_coh *c = tgm_coh_find_tiled(id)) {
+		lockedDeferred(c, kLock, id, options);
+		tgm_coherency_put(c);
+	}
+}
 
 extern "C" int tgm_views_trap(void *client, uint32_t index, uint32_t id, uint32_t options)
 {
 	tgm_coh *c = tgm_coh_find_tiled(id);
 	if (!c)
 		return 0;
+	if (lockedDeferred(c, index, id, options)) {
+		tgm_coherency_put(c);
+		return 0;
+	}
 	int refused = 0;
 	bool held = false;
 	bool released = false;
@@ -260,6 +385,50 @@ extern "C" int tgm_views_trap(void *client, uint32_t index, uint32_t id, uint32_
 		tgm_coherency_put(c);
 	tgm_coherency_put(c);
 	return refused;
+}
+
+extern "C" void tgm_views_gpu_writes(struct tgm_coh *c)
+{
+	const tgm_tiled *seen = c ? __atomic_load_n(tgm_coh_tiled(c), __ATOMIC_ACQUIRE) : nullptr;
+	if (!seen || !__atomic_load_n(&seen->locks, __ATOMIC_ACQUIRE) ||
+	    !__atomic_load_n(&seen->wrote, __ATOMIC_ACQUIRE))
+		return;
+	tgm_coh_lock(c);
+	tgm_tiled *t = __atomic_load_n(tgm_coh_tiled(c), __ATOMIC_ACQUIRE);
+	if (t && t->tiled && t->locks && t->wrote && t->scratch && !t->base) {
+		tgm_relayout_pages rows;
+		tgm_scratch *base = tgm_scratch_get(
+			static_cast<uint64_t>(tgm_coh_pages(c).npages) << 12, 0, &rows);
+		if (base) {
+			tgm_cpu_clean_pages(rows.pas, rows.npages);
+			move(c, *t, rows, TGM_RELAYOUT_TO_ROWS);
+			tgm_cpu_clean_pages(rows.pas, rows.npages);
+			t->base = base;
+			if (!t->merged) {
+				t->merged = 1;
+				char name[32];
+				proc_selfname(name, sizeof(name));
+				os_log(OS_LOG_DEFAULT,
+				       "tegra-gm20b: IOSurface %u written on the GPU by %s while a "
+				       "CPU "
+				       "write lock holds it: its unlock keeps both writers' bytes",
+				       tgm_coh_surface_id(c), name);
+			}
+		} else {
+			switch_refusal(
+				"iosurface-layout", "no-merge-scratch",
+				"IOSurface %u: no memory to keep a CPU lock's rows beside a GPU "
+				"write: its unlock writes the rows over it",
+				tgm_coh_surface_id(c));
+		}
+	}
+	tgm_coh_unlock(c);
+}
+
+extern "C" void tgm_views_job_writes(struct tgm_coh *const *written, uint32_t count)
+{
+	for (uint32_t i = 0; i < count; ++i)
+		tgm_views_gpu_writes(written[i]);
 }
 
 extern "C" int tegra_gm20b_iosurface_view(void *client, uint32_t index, uint32_t surface_id,

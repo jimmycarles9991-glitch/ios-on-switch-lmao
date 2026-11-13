@@ -4,6 +4,7 @@
 use crate::api::{GetDebugFlags, DEBUG};
 use crate::ir::*;
 use crate::liveness::{BlockLiveness, Liveness, SimpleLiveness};
+use crate::reg_banks::{bank, defines_values_out, BankPartners, NUM_BANKS};
 
 use compiler::bitset::BitSet;
 use compiler::union_find::UnionFind;
@@ -84,12 +85,15 @@ enum SSAUse {
 
 struct SSAUseMap {
     ssa_map: FxHashMap<SSAValue, Vec<(usize, SSAUse)>>,
+    banks: Option<BankPartners>,
+    fixed_regs: FxHashSet<u32>,
 }
 
 impl SSAUseMap {
     fn add_fixed_reg_use(&mut self, ip: usize, ssa: SSAValue, reg: u32) {
         let v = self.ssa_map.entry(ssa).or_default();
         v.push((ip, SSAUse::FixedReg(reg)));
+        self.fixed_regs.insert(reg);
     }
 
     fn add_vec_use(&mut self, ip: usize, vec: &[SSAValue]) {
@@ -117,6 +121,12 @@ impl SSAUseMap {
         }
     }
 
+    /// Whether `ssa` is ever a component of a vector source or read from a
+    /// fixed register: its register is best left to that placement.
+    fn has_placed_use(&self, ssa: SSAValue) -> bool {
+        self.ssa_map.get(&ssa).is_some_and(|uses| !uses.is_empty())
+    }
+
     pub fn add_block(&mut self, b: &BasicBlock) {
         for (ip, instr) in b.instrs.iter().enumerate() {
             match &instr.op {
@@ -141,9 +151,16 @@ impl SSAUseMap {
         }
     }
 
-    pub fn for_block(b: &BasicBlock) -> SSAUseMap {
+    pub fn for_block(
+        b: &BasicBlock,
+        bank_sm: Option<u8>,
+        live_out: impl Fn(&SSAValue) -> bool,
+    ) -> SSAUseMap {
         let mut am = SSAUseMap {
             ssa_map: Default::default(),
+            banks: bank_sm
+                .and_then(|sm| BankPartners::for_block(b, sm, live_out)),
+            fixed_regs: Default::default(),
         };
         am.add_block(b);
         am
@@ -166,11 +183,13 @@ impl SSAUseMap {
 struct PhiWebs {
     uf: UnionFind<SSAValue, FxBuildHasher>,
     assignments: FxHashMap<SSAValue, u32>,
+    members: FxHashSet<SSAValue>,
 }
 
 impl PhiWebs {
     pub fn new(f: &Function) -> Self {
         let mut uf = UnionFind::new();
+        let mut members = FxHashSet::default();
 
         // Populate uf with phi equivalence classes
         //
@@ -201,6 +220,8 @@ impl PhiWebs {
                     assert_eq!(b.comps(), 1);
 
                     uf.union(a[0], b[0]);
+                    members.insert(a[0]);
+                    members.insert(b[0]);
                 }
             }
         }
@@ -208,7 +229,12 @@ impl PhiWebs {
         PhiWebs {
             uf,
             assignments: Default::default(),
+            members,
         }
+    }
+
+    pub fn contains(&self, ssa: SSAValue) -> bool {
+        self.members.contains(&ssa)
     }
 
     pub fn get(&mut self, ssa: SSAValue) -> Option<u32> {
@@ -473,11 +499,45 @@ impl RegAllocator {
             }
         }
 
+        if let Some(banks) = sum
+            .banks
+            .as_ref()
+            .filter(|_| !sum.has_placed_use(ssa) && !phi_webs.contains(ssa))
+        {
+            let taken = banks.taken_banks(ssa, ip, |p| self.try_get_reg(p));
+            if taken != 0 {
+                if let Some(reg) =
+                    self.try_find_unused_reg_outside(taken, &sum.fixed_regs)
+                {
+                    self.assign_reg(ssa, reg);
+                    return reg;
+                }
+            }
+        }
+
         let reg = self
             .try_find_unused_reg_range(0, 1, 1, 0)
             .expect("Failed to find free register");
         self.assign_reg(ssa, reg);
         reg
+    }
+
+    /// The lowest unused register whose bank is not in `taken` (one bit a
+    /// bank), leaving alone the registers the block's fixed-register uses
+    /// (its outputs) wait for.
+    fn try_find_unused_reg_outside(
+        &self,
+        taken: u32,
+        fixed: &FxHashSet<u32>,
+    ) -> Option<u32> {
+        if taken.count_ones() == NUM_BANKS {
+            return None;
+        }
+        (0..self.num_regs).find(|&reg| {
+            !self.reg_is_used(reg)
+                && taken & (1 << bank(reg)) == 0
+                && !fixed.contains(&reg)
+        })
     }
 }
 
@@ -1280,6 +1340,7 @@ impl AssignRegsBlock {
         bl: &BL,
         pred_ra: Option<&PerRegFile<RegAllocator>>,
         phi_webs: &mut PhiWebs,
+        bank_sm: Option<u8>,
     ) {
         // Populate live in from the register file we're handed.  We'll add more
         // live in when we process the OpPhiDst, if any.
@@ -1300,7 +1361,7 @@ impl AssignRegsBlock {
             }
         }
 
-        let sum = SSAUseMap::for_block(b);
+        let sum = SSAUseMap::for_block(b, bank_sm, |ssa| bl.is_live_out(ssa));
 
         let mut instrs = Vec::new();
         let mut srcs_killed = KillSet::new();
@@ -1536,7 +1597,25 @@ impl Shader<'_> {
             let bl = live.block_live(b_idx);
 
             let mut arb = AssignRegsBlock::new(&limit, tmp_gprs);
-            arb.first_pass(&mut f.blocks[b_idx], bl, pred_ra, &mut phi_webs);
+            // A block flowing into a merge must leave the values it defines
+            // for later blocks where the merge expects them, so those keep
+            // first-fit registers
+            let into_merge = f
+                .blocks
+                .succ_indices(b_idx)
+                .iter()
+                .any(|&s| f.blocks.pred_indices(s).len() > 1);
+            let leaves =
+                defines_values_out(&f.blocks[b_idx], |ssa| bl.is_live_out(ssa));
+            let bank_sm = (self.sm.reg_banks() && (!into_merge || !leaves))
+                .then_some(self.sm.sm());
+            arb.first_pass(
+                &mut f.blocks[b_idx],
+                bl,
+                pred_ra,
+                &mut phi_webs,
+                bank_sm,
+            );
 
             assert!(blocks.len() == b_idx);
             blocks.push(arb);

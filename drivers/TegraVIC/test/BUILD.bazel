@@ -2,18 +2,128 @@
 # matrices through the engine's arithmetic against the float BT.601/BT.709 conversions, the jobs for Screen Recording's
 # and AirPlay's clone requests and Core Animation's border clears, IOSurfaceAccelerator requests (0x1b0 bytes)
 # translated, and every refusal of the request translator and the checker (tegra_vic_test); the rows a placed picture
-# covers (tegra_vic_band_test); the copy-engine bounce's scratch geometry and engine ordering (tegra_vic_bounce_test); the vendored firmware is the file firmware/SOURCE names, with the falcon and FCE
+# covers (tegra_vic_band_test); the copy-engine bounce's scratch geometry (tegra_vic_bounce_test); the vendored firmware is the file firmware/SOURCE names, with the falcon and FCE
 # headers TegraVIC.cpp parses (tegra_vic_firmware_test); a
 # TransformSurface destination's seed moves when its job is done, through a pinned binding (tegra_vic_seed_source_test);
 # transposed jobs on vic_model.h, the output layout model pinned to the unit's V4 diag lines and hekate's rotation, with
-# the probes that measured the unit's transform traits (TegraVICProbe.h) run on it (tegra_vic_transpose_test).
+# the probes that measured the unit's transform traits (TegraVICProbe.h) run on it (tegra_vic_transpose_test); 4:2:2
+# biplanar requests, configurations, bounce geometry and model output (tegra_vic_422_test).
 #
 #   bazel test //drivers/TegraVIC/test:all
 load("//bazel/lint:defs.bzl", "lint_files")
-load("//bazel/testing:defs.bzl", "host_library", "host_test")
+load("//bazel/testing:defs.bzl", "host_library", "host_shims", "host_test")
 
 # libdrm/ is NVIDIA's (MIT), kept as upstream has it.
 lint_files(exclude = ["libdrm/**"])
+
+exports_files([
+    "TegraVICProbe.h",
+    "vic_model.h",
+])
+
+host_test(
+    name = "switch_vic_queue_test",
+    srcs = [
+        "switch_vic_queue_test.cpp",
+        "//drivers/TegraVIC:SwitchVICQueue.h",
+    ],
+)
+
+host_test(
+    name = "switch_vic_requests_test",
+    srcs = [
+        "switch_vic_requests_test.cpp",
+        "//drivers/TegraVIC:SwitchVICRequests.h",
+    ],
+)
+
+host_test(
+    name = "switch_vic_pitch_probe_test",
+    srcs = [
+        "switch_vic_pitch_probe_test.cpp",
+        "//drivers/TegraVIC:SwitchVICPitchProbe.h",
+    ],
+)
+
+host_library(
+    name = "block_linear",
+    srcs = ["//drivers/SwitchVideoDecoders:AVD/BlockLinear.c"],
+    hdrs = ["//drivers/SwitchVideoDecoders:AVD/BlockLinear.h"],
+)
+
+host_test(
+    name = "switch_vic_layout_probe_test",
+    srcs = [
+        "switch_vic_layout_probe_test.cpp",
+        "//drivers/TegraVIC:SwitchVICLayoutProbe.h",
+        "//drivers/TegraVIC:TegraVICConfig.h",
+        "//drivers/TegraVIC:TegraVICFormats.h",
+    ],
+    deps = [":block_linear"],
+)
+
+host_test(
+    name = "switch_vic_fraction_probe_test",
+    srcs = [
+        "switch_vic_fraction_probe_test.cpp",
+        "//drivers/TegraVIC:SwitchVICFractionProbe.h",
+        "//drivers/TegraVIC:TegraVICConfig.h",
+        "//drivers/TegraVIC:TegraVICFormats.h",
+    ],
+)
+
+host_test(
+    name = "switch_vic_packed_probe_test",
+    srcs = [
+        "switch_vic_packed_probe_test.cpp",
+        "//drivers/TegraVIC:SwitchVICPackedProbe.h",
+        "//drivers/TegraVIC:TegraVICConfig.h",
+        "//drivers/TegraVIC:TegraVICFormats.h",
+    ],
+)
+
+host_test(
+    name = "switch_vic_compose_probe_test",
+    srcs = [
+        "switch_vic_compose_probe_test.cpp",
+        "//drivers/TegraGM20B:TegraGM20BLayout.h",
+        "//drivers/TegraVIC:SwitchVICComposeProbe.h",
+        "//drivers/TegraVIC:TegraVICCompose.h",
+        "//drivers/TegraVIC:TegraVICConfig.h",
+        "//drivers/TegraVIC:TegraVICFormats.h",
+    ],
+)
+
+host_test(
+    name = "switch_vic_transpose_probe_test",
+    srcs = [
+        "switch_vic_transpose_probe_test.cpp",
+        "vic_model.h",
+        "//drivers/TegraVIC:SwitchVICTransposeProbe.h",
+        "//drivers/TegraVIC:TegraVICConfig.h",
+        "//drivers/TegraVIC:TegraVICFormats.h",
+    ],
+)
+
+host_test(
+    name = "switch_vic_large_probe_test",
+    srcs = [
+        "switch_vic_large_probe_test.cpp",
+        "vic_model.h",
+        "//drivers/TegraGM20B:TegraGM20BLayout.h",
+        "//drivers/TegraVIC:SwitchVICLargeProbe.h",
+        "//drivers/TegraVIC:TegraVICConfig.h",
+        "//drivers/TegraVIC:TegraVICFormats.h",
+    ],
+)
+
+host_test(
+    name = "switch_vic_stats_test",
+    srcs = [
+        "switch_vic_stats_test.cpp",
+        "//drivers/TegraVIC:SwitchVICStats.h",
+    ],
+)
 
 # vic_host.c's checks, its main() renamed so the test calls it.
 host_library(
@@ -22,7 +132,9 @@ host_library(
         "libdrm/vic40.h",
         "vic_host.c",
         "//drivers/TegraVIC:TegraVICConfig.h",
+        "//drivers/TegraVIC:TegraVICFormats.h",
         "//drivers/TegraVIC:TegraVICRequest.h",
+        "//drivers/TegraVIC:SwitchSurfaceColor.h",
     ],
     copts = ["-O1"],
     defines = ["main=vic_host_main"],
@@ -32,6 +144,17 @@ host_test(
     name = "tegra_vic_test",
     srcs = ["tegra_vic_test.cpp"],
     deps = [":vic_host"],
+)
+
+host_test(
+    name = "tegra_vic_compose_test",
+    srcs = [
+        "libdrm/vic40.h",
+        "tegra_vic_compose_test.cpp",
+        "//drivers/TegraVIC:TegraVICCompose.h",
+        "//drivers/TegraVIC:TegraVICConfig.h",
+        "//drivers/TegraVIC:TegraVICFormats.h",
+    ],
 )
 
 host_test(
@@ -49,7 +172,9 @@ host_test(
         "//drivers/TegraHost1x:TegraHost1x.h",
         "//drivers/TegraVIC:TegraVICBounce.h",
         "//drivers/TegraVIC:TegraVICConfig.h",
+        "//drivers/TegraVIC:TegraVICFormats.h",
         "//drivers/TegraVIC:TegraVICRequest.h",
+        "//drivers/TegraVIC:SwitchSurfaceColor.h",
     ],
 )
 
@@ -59,6 +184,19 @@ host_test(
     data = [
         "//drivers/TegraVIC:firmware/SOURCE",
         "//drivers/TegraVIC:firmware/nvidia/tegra210/vic04_ucode.bin",
+    ],
+)
+
+host_test(
+    name = "switch_vic_ownership_source_test",
+    srcs = ["switch_vic_ownership_source_test.cpp"],
+    data = [
+        "//drivers/TegraGM20B:SwitchGpuCopyMappings.h",
+        "//drivers/TegraGM20B:TegraGM20BCopy.h",
+        "//drivers/TegraVIC:SwitchVICBounceSubmit.cpp",
+        "//drivers/TegraVIC:SwitchVICJobs.h",
+        "//drivers/TegraVIC:TegraVIC.cpp",
+        "//drivers/TegraVIC:TegraVIC.h",
     ],
 )
 
@@ -74,11 +212,527 @@ host_test(
 )
 
 host_test(
+    name = "tegra_vic_formats_test",
+    srcs = [
+        "tegra_vic_formats_test.cpp",
+        "//drivers/TegraVIC:SwitchSurfaceColor.h",
+        "//drivers/TegraVIC:TegraVICConfig.h",
+        "//drivers/TegraVIC:TegraVICFormats.h",
+        "//drivers/TegraVIC:TegraVICRequest.h",
+    ],
+)
+
+host_test(
+    name = "tegra_vic_422_test",
+    srcs = [
+        "TegraVICProbe.h",
+        "tegra_vic_422_test.cpp",
+        "vic_model.h",
+        "//drivers/TegraVIC:SwitchSurfaceColor.h",
+        "//drivers/TegraVIC:TegraVICBounce.h",
+        "//drivers/TegraVIC:TegraVICConfig.h",
+        "//drivers/TegraVIC:TegraVICFormats.h",
+        "//drivers/TegraVIC:TegraVICRequest.h",
+    ],
+)
+
+host_test(
     name = "tegra_vic_transpose_test",
     srcs = [
         "tegra_vic_transpose_test.cpp",
         "vic_model.h",
         "//drivers/TegraVIC:TegraVICConfig.h",
+        "//drivers/TegraVIC:TegraVICFormats.h",
         "TegraVICProbe.h",
     ],
+)
+
+host_test(
+    name = "switch_vic_picture_test",
+    srcs = [
+        "switch_vic_picture_test.cpp",
+        "//drivers/TegraVIC:SwitchVICPicture.h",
+        "//drivers/TegraVIC:SwitchVICPicturePlan.h",
+        "//drivers/TegraVIC:SwitchVICSurfaceRange.h",
+        "//drivers/TegraVIC:TegraVICBand.h",
+        "//drivers/TegraVIC:TegraVICConfig.h",
+        "//drivers/TegraVIC:TegraVICFormats.h",
+        "//drivers/TegraVIC:TegraVICRequest.h",
+        "//drivers/TegraVIC:SwitchSurfaceColor.h",
+    ],
+)
+
+host_shims(
+    name = "backing_kernel",
+    headers = [
+        "IOKit/IOLib.h",
+        "IOKit/IOLocks.h",
+        "IOKit/IOMemoryDescriptor.h",
+        "IOKit/IOTypes.h",
+        "kern/task.h",
+        "libkern/c++/OSObject.h",
+    ],
+    stubs = "switch_vic_backing_stubs.h",
+)
+
+host_test(
+    name = "switch_vic_backing_test",
+    srcs = [
+        "switch_vic_backing_test.cpp",
+        "//drivers/TegraVIC:TegraVICSurface.h",
+        "//drivers/TegraVIC:TegraVICRequest.h",
+        "//drivers/TegraVIC:SwitchSurfaceColor.h",
+        "//drivers/TegraVIC:TegraVICConfig.h",
+        "//drivers/TegraVIC:TegraVICFormats.h",
+        "//drivers/TegraVIC:TegraVIC.h",
+        "//drivers/TegraGM20B:SwitchGpuBacking.h",
+        "//drivers/TegraGM20B:TegraGM20BGpu.h",
+        "//drivers/TegraGM20B:TegraGM20BLayout.h",
+        "//drivers/TegraGM20B:TegraGM20BTiled.h",
+        "//drivers/TegraGM20B:TegraGM20BViews.h",
+        "//kits/SwitchDMA:SwitchDcache.h",
+    ],
+    additional_compiler_inputs = ["//drivers/TegraVIC:SwitchVICSurfaceBacking.cpp"],
+    deps = [":backing_kernel"],
+)
+
+host_test(
+    name = "switch_vic_present_test",
+    srcs = [
+        "switch_vic_present_test.cpp",
+        "//drivers/TegraVIC:TegraVIC.h",
+        "//drivers/TegraVIC:TegraVICPresent.h",
+        "//drivers/TegraVIC:TegraVICSurface.h",
+        "//drivers/TegraVIC:SwitchVICSurfaceAccess.h",
+        "//drivers/TegraVIC:TegraVICRequest.h",
+        "//drivers/TegraVIC:SwitchSurfaceColor.h",
+        "//drivers/TegraVIC:TegraVICConfig.h",
+        "//drivers/TegraVIC:TegraVICFormats.h",
+        "//drivers/TegraVIC:TegraVICBand.h",
+        "//drivers/TegraVIC:SwitchVICJobs.h",
+        "//drivers/TegraVIC:SwitchVICEvents.h",
+        "//drivers/TegraVIC:SwitchVICSemantics.h",
+        "//drivers/TegraGM20B:SwitchGpuSharedEvent.h",
+        "//drivers/TegraVIC:SwitchVICQueue.h",
+        "//drivers/TegraVIC:SwitchVICMapping.h",
+        "//drivers/TegraVIC:SwitchVICPicture.h",
+        "//drivers/TegraVIC:SwitchVICPicturePlan.h",
+        "//drivers/TegraGM20B:SwitchGpuBacking.h",
+        "//kits/SwitchDMA:SwitchDcache.h",
+        "//kits/SwitchRefusal:SwitchRefusal.h",
+    ],
+    additional_compiler_inputs = ["//drivers/TegraVIC:TegraVICPresent.cpp"],
+    deps = [":backing_kernel"],
+)
+
+host_test(
+    name = "switch_vic_mapping_test",
+    srcs = [
+        "switch_vic_mapping_test.cpp",
+        "//drivers/TegraVIC:SwitchVICMapping.h",
+        "//drivers/TegraGM20B:SwitchGpuBacking.h",
+        "//drivers/TegraGM20B:SwitchGpuBackingMaps.h",
+    ],
+    additional_compiler_inputs = ["//drivers/TegraVIC:SwitchVICMapping.cpp"],
+    deps = [":backing_kernel"],
+)
+
+host_test(
+    name = "switch_vic_color_test",
+    srcs = [
+        "switch_vic_color_test.cpp",
+        "//drivers/TegraVIC:TegraVICRequest.h",
+        "//drivers/TegraVIC:SwitchSurfaceColor.h",
+        "//drivers/TegraVIC:TegraVICConfig.h",
+        "//drivers/TegraVIC:TegraVICFormats.h",
+        "//drivers/TegraVIC:TegraVICBand.h",
+        "//drivers/TegraVIC:SwitchVICPicture.h",
+        "//drivers/TegraVIC:SwitchVICPicturePlan.h",
+    ],
+)
+
+host_shims(
+    name = "native_surface_kernel",
+    headers = [
+        "IOKit/IOLib.h",
+        "IOKit/IOLocks.h",
+        "IOKit/IOMemoryDescriptor.h",
+        "IOKit/IOTypes.h",
+        "Kernel/IOKitKernelInternal.h",
+        "kern/task.h",
+        "kern/thread.h",
+    ],
+    stubs = "switch_native_surface_stubs.h",
+    deps = ["//kernel/tests/memory_attachment:interface"],
+)
+
+host_test(
+    name = "switch_native_surface_test",
+    srcs = [
+        "switch_native_surface_test.cpp",
+        "switch_native_picture_test.cpp",
+        "//drivers/NativeMobileDisplay:SwitchDisplayTraits.h",
+        "//drivers/TegraVIC:SwitchNativeSurface.h",
+        "//drivers/TegraVIC:SwitchVICEvents.h",
+        "//drivers/TegraGM20B:SwitchGpuSharedEvent.h",
+        "//drivers/TegraVIC:SwitchVICTurn.h",
+        "//drivers/TegraVIC:SwitchNativeScanout.h",
+        "//drivers/TegraVIC:SwitchVICSurfaceAccess.h",
+        "//drivers/TegraVIC:SwitchNativePicture.h",
+        "//drivers/TegraVIC:SwitchNativeVICImage.h",
+        "//drivers/TegraVIC:SwitchVICPicture.h",
+        "//drivers/TegraVIC:SwitchVICPicturePlan.h",
+        "//drivers/TegraVIC:SwitchVICSurfaceRange.h",
+        "//drivers/TegraVIC:TegraVICSurface.h",
+        "//drivers/TegraVIC:TegraVICPresent.h",
+        "//drivers/TegraVIC:TegraVICRequest.h",
+        "//drivers/TegraVIC:SwitchSurfaceColor.h",
+        "//drivers/TegraVIC:TegraVICConfig.h",
+        "//drivers/TegraVIC:TegraVICFormats.h",
+        "//drivers/TegraVIC:TegraVICBand.h",
+        "//drivers/TegraGM20B:SwitchGpuBacking.h",
+        "//drivers/TegraGM20B:SwitchGpuAdmission.h",
+        "//drivers/TegraGM20B:SwitchGpuNativeSurface.h",
+        "//drivers/TegraGM20B:TegraGM20BGpu.h",
+        "//drivers/TegraGM20B:TegraGM20BLayout.h",
+        "//drivers/TegraGM20B:TegraGM20BTiled.h",
+        "//drivers/TegraGM20B:TegraGM20BViews.h",
+    ],
+    additional_compiler_inputs = [
+        "//drivers/TegraVIC:SwitchNativeSurface.cpp",
+        "//drivers/TegraVIC:SwitchNativeGpuView.cpp",
+        "//drivers/TegraVIC:SwitchNativeScanout.cpp",
+        "//drivers/TegraVIC:SwitchVICSurfaceAccess.cpp",
+        "//kernel/switch:iokit/memory_attachment.cpp",
+    ],
+    copts = [
+        "-I",
+        "kernel/switch/include",
+    ],
+    deps = [":native_surface_kernel"],
+)
+
+host_test(
+    name = "switch_vic_transform_test",
+    srcs = [
+        "switch_vic_transform_test.cpp",
+        "//drivers/NativeMobileDisplay:SwitchDisplayTraits.h",
+        "//drivers/NativeMobileDisplay:SwitchLandscapeRunABI.h",
+        "//drivers/TegraVIC:SwitchVICTransform.h",
+        "//drivers/TegraVIC:SwitchVICTurn.h",
+        "//drivers/TegraVIC:SwitchVICSurfaceAccess.h",
+        "//drivers/TegraVIC:SwitchNativeSurface.h",
+        "//drivers/TegraVIC:SwitchNativePicture.h",
+        "//drivers/TegraVIC:SwitchNativeVICImage.h",
+        "//drivers/TegraVIC:SwitchVICPicture.h",
+        "//drivers/TegraVIC:SwitchVICJobs.h",
+        "//drivers/TegraVIC:SwitchVICEvents.h",
+        "//drivers/TegraVIC:SwitchVICSemantics.h",
+        "//drivers/TegraVIC:TegraVICRequest.h",
+        "//drivers/TegraVIC:SwitchSurfaceColor.h",
+        "//drivers/TegraGM20B:SwitchGpuSharedEvent.h",
+        "//drivers/TegraVIC:SwitchVICQueue.h",
+        "//drivers/TegraVIC:SwitchVICMapping.h",
+        "//drivers/TegraVIC:TegraVIC.h",
+        "//drivers/TegraVIC:TegraVICSurface.h",
+        "//drivers/TegraVIC:TegraVICConfig.h",
+        "//drivers/TegraVIC:TegraVICFormats.h",
+        "//drivers/TegraGM20B:SwitchGpuBacking.h",
+        "//drivers/TegraGM20B:TegraGM20BLayout.h",
+        "//kits/SwitchDMA:SwitchDcache.h",
+    ],
+    additional_compiler_inputs = [
+        "//drivers/TegraVIC:SwitchVICTransform.cpp",
+        "//drivers/TegraVIC:SwitchVICTurn.cpp",
+    ],
+    deps = [":backing_kernel"],
+)
+
+# An encoder's input picture written by VIC (SwitchVICEncodeInput.cpp): block-linear output at the buffer's planes, the
+# region 1:1 at the origin, a checked read and a recorded write, after the encoder's last job; rows off VIC's grid
+# through the copy engine's bounce first.
+host_test(
+    name = "switch_vic_encode_input_test",
+    srcs = [
+        "switch_vic_encode_input_test.cpp",
+        "//drivers/TegraVIC:SwitchVICEncodeInput.h",
+        "//drivers/TegraVIC:SwitchVICBouncePool.h",
+        "//drivers/TegraVIC:TegraVICBounce.h",
+        "//drivers/TegraGM20B:TegraGM20BCopy.h",
+        "//drivers/TegraVIC:SwitchVICTransform.h",
+        "//drivers/TegraVIC:SwitchVICSurfaceAccess.h",
+        "//drivers/TegraVIC:SwitchNativeSurface.h",
+        "//drivers/TegraVIC:SwitchNativePicture.h",
+        "//drivers/TegraVIC:SwitchNativeVICImage.h",
+        "//drivers/TegraVIC:SwitchVICPicture.h",
+        "//drivers/TegraVIC:SwitchVICJobs.h",
+        "//drivers/TegraVIC:SwitchVICEvents.h",
+        "//drivers/TegraVIC:SwitchVICSemantics.h",
+        "//drivers/TegraVIC:TegraVICRequest.h",
+        "//drivers/TegraVIC:SwitchSurfaceColor.h",
+        "//drivers/TegraGM20B:SwitchGpuSharedEvent.h",
+        "//drivers/TegraVIC:SwitchVICQueue.h",
+        "//drivers/TegraVIC:SwitchVICMapping.h",
+        "//drivers/TegraVIC:TegraVIC.h",
+        "//drivers/TegraVIC:TegraVICSurface.h",
+        "//drivers/TegraVIC:TegraVICConfig.h",
+        "//drivers/TegraVIC:TegraVICFormats.h",
+        "//drivers/TegraGM20B:SwitchGpuBacking.h",
+        "//kits/SwitchDMA:SwitchDcache.h",
+    ],
+    additional_compiler_inputs = ["//drivers/TegraVIC:SwitchVICEncodeInput.cpp"],
+    deps = [":backing_kernel"],
+)
+
+host_test(
+    name = "switch_vic_access_test",
+    srcs = [
+        "switch_vic_access_test.cpp",
+        "//drivers/TegraVIC:SwitchVICSurfaceAccess.h",
+        "//drivers/TegraVIC:SwitchNativeSurface.h",
+        "//drivers/TegraVIC:SwitchVICPicture.h",
+        "//drivers/TegraVIC:TegraVICSurface.h",
+        "//drivers/TegraVIC:TegraVICRequest.h",
+        "//drivers/TegraVIC:SwitchSurfaceColor.h",
+        "//drivers/TegraVIC:TegraVICConfig.h",
+        "//drivers/TegraVIC:TegraVICFormats.h",
+        "//drivers/TegraGM20B:SwitchGpuBacking.h",
+        "//drivers/TegraGM20B:TegraGM20BGpu.h",
+        "//drivers/TegraGM20B:TegraGM20BLayout.h",
+        "//drivers/TegraGM20B:TegraGM20BTiled.h",
+        "//drivers/TegraGM20B:TegraGM20BViews.h",
+    ],
+    additional_compiler_inputs = [
+        "//drivers/TegraVIC:SwitchVICSurfaceAccess.cpp",
+        "//kernel/switch:iokit/memory_attachment.cpp",
+    ],
+    copts = [
+        "-I",
+        "kernel/switch/include",
+    ],
+    deps = [":native_surface_kernel"],
+)
+
+host_shims(
+    name = "jobs_kernel",
+    headers = [
+        "IOKit/IOLib.h",
+        "IOKit/IOLocks.h",
+        "kern/thread.h",
+        "kern/thread_call.h",
+        "kern/clock.h",
+    ],
+    stubs = "switch_vic_jobs_stubs.h",
+)
+
+host_test(
+    name = "switch_vic_jobs_test",
+    srcs = [
+        "//drivers/TegraHost1x:SwitchHost1xResults.cpp",
+        "switch_vic_jobs_test.cpp",
+        "//drivers/TegraVIC:SwitchVICJobs.h",
+        "//drivers/TegraVIC:TegraVICEngine.h",
+        "//kits/SwitchEngineGate:SwitchEngineGate.h",
+        "//drivers/TegraVIC:SwitchVICEvents.h",
+        "//drivers/TegraVIC:SwitchVICSemantics.h",
+        "//drivers/TegraVIC:TegraVICRequest.h",
+        "//drivers/TegraVIC:SwitchSurfaceColor.h",
+        "//drivers/TegraGM20B:SwitchGpuSharedEvent.h",
+        "//drivers/TegraVIC:SwitchVICQueue.h",
+        "//drivers/TegraVIC:SwitchVICDependencies.h",
+        "//drivers/TegraHost1x:SwitchHost1xDependencies.h",
+        "//drivers/TegraHost1x:SwitchHost1xFence.h",
+        "//drivers/TegraHost1x:SwitchHost1xResults.h",
+        "//drivers/TegraHost1x:SwitchHost1xStages.h",
+        "//drivers/TegraVIC:TegraVIC.h",
+        "//drivers/TegraVIC:TegraVICConfig.h",
+        "//drivers/TegraVIC:TegraVICFormats.h",
+        "//drivers/TegraGM20B:SwitchGpuBacking.h",
+        "//drivers/TegraGM20B:SwitchGpuBridge.h",
+        "//drivers/TegraHost1x:TegraHost1x.h",
+        "//kits/SwitchDMA:SwitchDcache.h",
+        "//kits/SwitchTime:SwitchTime.h",
+    ],
+    additional_compiler_inputs = [
+        "//drivers/TegraVIC:SwitchVICJobs.cpp",
+        "//drivers/TegraVIC:TegraVICCancel.cpp",
+    ],
+    deps = [":jobs_kernel"],
+)
+
+host_test(
+    name = "switch_vic_scanout_compose_test",
+    srcs = [
+        "switch_vic_scanout_compose_test.cpp",
+        "//drivers/TegraVIC:SwitchVICScanoutCompose.h",
+        "//drivers/TegraVIC:TegraVICCompose.h",
+        "//drivers/TegraVIC:SwitchNativeScanout.h",
+        "//drivers/TegraVIC:SwitchNativeSurface.h",
+        "//drivers/TegraVIC:SwitchVICPicture.h",
+        "//drivers/TegraVIC:SwitchVICPicturePlan.h",
+        "//drivers/TegraVIC:TegraVIC.h",
+        "//drivers/TegraVIC:TegraVICSurface.h",
+        "//drivers/TegraVIC:TegraVICRequest.h",
+        "//drivers/TegraVIC:SwitchSurfaceColor.h",
+        "//drivers/TegraVIC:TegraVICConfig.h",
+        "//drivers/TegraVIC:TegraVICFormats.h",
+        "//drivers/TegraVIC:TegraVICBand.h",
+        "//drivers/TegraVIC:SwitchVICJobs.h",
+        "//drivers/TegraVIC:SwitchVICEvents.h",
+        "//drivers/TegraVIC:SwitchVICSemantics.h",
+        "//drivers/TegraGM20B:SwitchGpuSharedEvent.h",
+        "//drivers/TegraVIC:SwitchVICQueue.h",
+        "//drivers/TegraVIC:SwitchVICMapping.h",
+        "//drivers/TegraGM20B:SwitchGpuBacking.h",
+        "//kits/SwitchDMA:SwitchDcache.h",
+    ],
+    additional_compiler_inputs = ["//drivers/TegraVIC:SwitchVICScanoutCompose.cpp"],
+    deps = [":backing_kernel"],
+)
+
+host_test(
+    name = "switch_vic_scanout_convert_test",
+    srcs = [
+        "switch_vic_scanout_convert_test.cpp",
+        "//drivers/TegraVIC:SwitchVICScanoutConvert.h",
+        "//drivers/TegraVIC:SwitchNativeScanout.h",
+        "//drivers/TegraVIC:SwitchNativeSurface.h",
+        "//drivers/TegraVIC:SwitchVICPicture.h",
+        "//drivers/TegraVIC:SwitchVICPicturePlan.h",
+        "//drivers/TegraVIC:TegraVIC.h",
+        "//drivers/TegraVIC:TegraVICSurface.h",
+        "//drivers/TegraVIC:TegraVICRequest.h",
+        "//drivers/TegraVIC:SwitchSurfaceColor.h",
+        "//drivers/TegraVIC:TegraVICConfig.h",
+        "//drivers/TegraVIC:TegraVICFormats.h",
+        "//drivers/TegraVIC:TegraVICBand.h",
+        "//drivers/TegraVIC:SwitchVICJobs.h",
+        "//drivers/TegraVIC:SwitchVICEvents.h",
+        "//drivers/TegraVIC:SwitchVICSemantics.h",
+        "//drivers/TegraGM20B:SwitchGpuSharedEvent.h",
+        "//drivers/TegraVIC:SwitchVICQueue.h",
+        "//drivers/TegraVIC:SwitchVICMapping.h",
+        "//drivers/TegraGM20B:SwitchGpuBacking.h",
+        "//kits/SwitchDMA:SwitchDcache.h",
+    ],
+    additional_compiler_inputs = ["//drivers/TegraVIC:SwitchVICScanoutConvert.cpp"],
+    deps = [":backing_kernel"],
+)
+
+host_library(
+    name = "switch_vic_events",
+    srcs = [
+        "//drivers/TegraHost1x:SwitchHost1xResults.cpp",
+        "//drivers/TegraVIC:SwitchVICEvents.cpp",
+        "//drivers/TegraVIC:SwitchVICSemantics.cpp",
+    ],
+    hdrs = [
+        "//drivers/TegraHost1x:SwitchHost1xSemantics.h",
+        "//drivers/TegraHost1x:SwitchHost1xResults.h",
+        "//drivers/TegraVIC:SwitchVICEvents.h",
+        "//drivers/TegraVIC:SwitchVICSemantics.h",
+        "//drivers/TegraVIC:SwitchVICQueue.h",
+        "//drivers/TegraVIC:TegraVICRequest.h",
+        "//drivers/TegraVIC:SwitchSurfaceColor.h",
+        "//drivers/TegraVIC:TegraVICConfig.h",
+        "//drivers/TegraVIC:TegraVICFormats.h",
+    ],
+    deps = [
+        "//drivers/TegraGM20B/test:switch_gpu_event",
+        "//drivers/TegraGM20B/test:event_kernel",
+    ],
+)
+
+host_test(
+    name = "switch_vic_events_test",
+    srcs = [
+        "switch_vic_events_test.cpp",
+        "//drivers/TegraGM20B/test:switch_gpu_event_fixture.h",
+    ],
+    deps = [
+        ":switch_vic_events",
+        "//drivers/TegraGM20B/test:event_kernel",
+    ],
+)
+
+host_test(
+    name = "switch_vic_bounce_submit_test",
+    srcs = [
+        "switch_vic_bounce_submit_test.cpp",
+        "//drivers/TegraVIC:SwitchVICBounceSubmit.h",
+        "//drivers/TegraVIC:SwitchVICBouncePool.h",
+        "//drivers/TegraVIC:SwitchVICOverwrite.h",
+        "//drivers/TegraVIC:TegraVICBounce.h",
+        "//drivers/TegraGM20B:TegraGM20BCopy.h",
+        "//drivers/TegraVIC:SwitchVICSurfaceAccess.h",
+        "//drivers/TegraVIC:SwitchNativeSurface.h",
+        "//drivers/TegraVIC:SwitchNativePicture.h",
+        "//drivers/TegraVIC:SwitchNativeVICImage.h",
+        "//drivers/TegraVIC:SwitchVICPicture.h",
+        "//drivers/TegraVIC:SwitchVICJobs.h",
+        "//drivers/TegraVIC:SwitchVICEvents.h",
+        "//drivers/TegraVIC:SwitchVICSemantics.h",
+        "//drivers/TegraVIC:TegraVICRequest.h",
+        "//drivers/TegraVIC:SwitchSurfaceColor.h",
+        "//drivers/TegraGM20B:SwitchGpuSharedEvent.h",
+        "//drivers/TegraVIC:SwitchVICQueue.h",
+        "//drivers/TegraVIC:SwitchVICMapping.h",
+        "//drivers/TegraVIC:TegraVIC.h",
+        "//drivers/TegraVIC:TegraVICSurface.h",
+        "//drivers/TegraVIC:TegraVICConfig.h",
+        "//drivers/TegraVIC:TegraVICFormats.h",
+        "//drivers/TegraGM20B:SwitchGpuBacking.h",
+        "//drivers/TegraGM20B:TegraGM20BLayout.h",
+        "//kits/SwitchDMA:SwitchDcache.h",
+    ],
+    additional_compiler_inputs = ["//drivers/TegraVIC:SwitchVICBounceSubmit.cpp"],
+    deps = [":backing_kernel"],
+)
+
+host_shims(
+    name = "bounce_pool_kernel",
+    headers = [
+        "IOKit/IOLib.h",
+        "IOKit/IOLocks.h",
+        "IOKit/IOBufferMemoryDescriptor.h",
+        "kern/thread.h",
+    ],
+    stubs = "switch_vic_bounce_pool_stubs.h",
+)
+
+host_test(
+    name = "switch_vic_bounce_pool_test",
+    srcs = [
+        "switch_vic_bounce_pool_test.cpp",
+        "//drivers/TegraVIC:SwitchVICBouncePool.h",
+        "//drivers/TegraVIC:SwitchVICMapping.h",
+        "//drivers/TegraVIC:TegraVIC.h",
+        "//drivers/TegraVIC:TegraVICBounce.h",
+        "//drivers/TegraVIC:TegraVICRequest.h",
+        "//drivers/TegraVIC:SwitchSurfaceColor.h",
+        "//drivers/TegraVIC:TegraVICConfig.h",
+        "//drivers/TegraVIC:TegraVICFormats.h",
+        "//drivers/TegraGM20B:SwitchGpuBacking.h",
+        "//kits/SwitchDMA:SwitchDMAPages.h",
+        "//kits/SwitchDMA:SwitchDcache.h",
+    ],
+    additional_compiler_inputs = ["//drivers/TegraVIC:SwitchVICBouncePool.cpp"],
+    deps = [":bounce_pool_kernel"],
+)
+
+host_test(
+    name = "switch_vic_subrect_test",
+    srcs = [
+        "switch_vic_subrect_test.cpp",
+        "vic_model.h",
+        "TegraVICProbe.h",
+        "//drivers/TegraVIC:TegraVICConfig.h",
+        "//drivers/TegraVIC:TegraVICFormats.h",
+    ],
+)
+
+host_test(
+    name = "switch_vic_first_failure_source_test",
+    srcs = ["switch_vic_first_failure_source_test.cpp"],
+    data = ["//drivers/TegraVIC:TegraVICUserClient.cpp"],
 )

@@ -191,3 +191,17 @@ host_test(
     ],
     deps = [":source_checks"],
 )
+
+host_test(
+    name = "sd_release_dma_test",
+    srcs = [
+        "sd_release_dma_test.cpp",
+        "//drivers/NativeSwitchBlock:SwitchAdma.h",
+    ],
+    copts = [
+        "-UDEVELOPMENT",
+        "-DDEVELOPMENT=0",
+        "-UDEBUG",
+        "-DDEBUG=0",
+    ],
+)

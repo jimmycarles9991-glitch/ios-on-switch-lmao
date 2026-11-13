@@ -48,6 +48,7 @@ struct ReplaceRegionScene: GPUScene {
     func run(_ gpu: GPU) async throws -> SceneResult {
         var result = SceneResult()
         let kind = RawFacade.kind(of: gpu.device)
+        let before = RawFacade.counters(of: gpu.device)
         for format in [TexelFormat.r8Unorm, .a8Unorm, .bgra8Unorm, .rgba8Unorm, .rgba16Float] {
             let (width, height) = (333, 77)
             var storages: [MTLStorageMode] = [.shared]
@@ -82,7 +83,19 @@ struct ReplaceRegionScene: GPUScene {
                 try await result.compareBothWays(label + " copied to private", copy, model, gpu: gpu)
             }
         }
-        if kind != "raw" { result.notes.append("private-texture replaceRegion only on the raw facade") }
+        if kind == "raw" {
+            let after = RawFacade.counters(of: gpu.device)
+            for key in ["texture_uploads", "texture_readbacks"] {
+                if let first = before[key], let last = after[key] {
+                    result.metrics.set(key, last - first)
+                    result.expect(last > first, "\(key) did not exercise the native copy-engine route")
+                } else {
+                    result.notes.append("\(key) route counters unavailable in this build")
+                }
+            }
+        } else {
+            result.notes.append("private-texture replaceRegion only on the raw facade")
+        }
         return result
     }
 }

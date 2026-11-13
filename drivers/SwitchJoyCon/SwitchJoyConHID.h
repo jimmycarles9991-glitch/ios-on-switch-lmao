@@ -9,10 +9,11 @@
 // VID 0x057e with PID 0x2006/0x2007/0x2009/0x2017/0x2019, opens the device, sends subcommands with setReport and
 // hands the parsed controller to gamecontrollerd, which publishes the GCController. So the kernel only carries
 // reports: setReport bytes go to the rail as the Joy-Con's UART encapsulation (cmd 0x92), and every 0x92 reply's
-// payload comes back through handleReport. One iOS code path serves the rail and Bluetooth.
+// payload comes back through handleReport. One iOS code path serves the rail and Bluetooth. On iPadOS 27 the device
+// exists only while the rail pair is in use, as a Bluetooth one is connected (SwitchJoyConUse.h).
 //
 // The rail Joy-Cons' Home (R) and Capture (L) buttons are also the iPad's Home button and screenshot key: a built-in
-// Consumer Control device (SwitchJoyConButtons, made with the first rail Joy-Con) reports them as Consumer Menu
+// Consumer Control device (SwitchJoyConButtons, made with the first rail Joy-Con report) reports them as Consumer Menu
 // (0x0C/0x40) and Snapshot (0x0C/0x65), which SpringBoard handles itself (SwitchJoyConHID.cpp, "System buttons").
 #pragma once
 #include <stddef.h>
@@ -51,18 +52,25 @@ void switch_joycon_hid_select_personalities();
 // Idempotent; thread context; panics with the reason on failure.
 void switch_joycon_hid_prepare();
 
-// Creates, attaches (under IOResources) and starts a Joy-Con device, and with the first one the system-buttons device.
-// `mac` is the Joy-Con's BD_ADDR in display order. Output reports go to `output(context, ...)`, and the end of its
-// backboardd session to `ended(context, ...)`, until switch_joycon_hid_destroy(). Rail work loop; panics on failure.
+// The Home (R) or Capture (L) bit of a running rail Joy-Con's 0x21/0x30/0x31 report to the system-buttons device, made
+// by the first call and kept for the boot; whether or not the Joy-Con's game controller device exists. Rail work loop.
+void switch_joycon_hid_buttons(bool left, const uint8_t *report, size_t length);
+
+// The Joy-Con's system button up, if it was down (its session ended). Rail work loop.
+void switch_joycon_hid_buttons_release(bool left);
+
+// Creates, attaches (under IOResources) and starts a Joy-Con device. `mac` is the Joy-Con's BD_ADDR in display order.
+// Output reports go to `output(context, ...)`, and the end of its backboardd session to `ended(context, ...)`, until
+// switch_joycon_hid_destroy(). Rail work loop; panics on failure.
 IOService *switch_joycon_hid_create(bool left, const uint8_t mac[6], SwitchJoyConOutput output,
                                     SwitchJoyConSessionEnded ended, void *context);
 
 // Hands one input report (report ID first) to the device; 0x21 and 0x30 are padded to the descriptor's 49 bytes,
-// longer reports are cut to the descriptor's size (0x31-0x33: 362 bytes with the ID). The Home or Capture bit of
-// 0x21/0x30/0x31 also goes to the system-buttons device. Call from the rail driver's work loop.
+// longer reports are cut to the descriptor's size (0x31-0x33: 362 bytes with the ID). Call from the rail driver's work
+// loop.
 IOReturn switch_joycon_hid_input(const IOService *device, const uint8_t *report, size_t length);
 
-// Releases the Joy-Con's system button if it was down, stops output and session callbacks (output returns
-// kIOReturnOffline from here on; the closes the termination causes report nothing), terminates the device and drops
-// the creator's reference. gamecontrollerd sees the controller disconnect. Rail work loop.
+// Stops output and session callbacks (output returns kIOReturnOffline from here on; the closes the termination causes
+// report nothing), terminates the device and drops the creator's reference. gamecontrollerd sees the controller
+// disconnect. Rail work loop.
 void switch_joycon_hid_destroy(const IOService *device);

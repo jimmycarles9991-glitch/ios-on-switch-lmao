@@ -1,6 +1,6 @@
-//! `Device::new`: the only producer of a `DeviceProfile`.
+//! Device constructors derive the immutable `DeviceProfile`.
 //!
-//! The profile is a pure function of the description and the policy. Memory's A/F split is the
+//! The profile is a pure function of the description, policy and explicit stage contract. Memory's A/F split is the
 //! only field that selects a pointer model; every other field selects leaf encodings or feeds the
 //! requirement check.
 
@@ -37,7 +37,7 @@ use crate::vk;
 #[derive(Clone, Debug)]
 pub struct Device(Arc<DeviceInner>);
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 struct DeviceInner {
     profile: DeviceProfile,
     /// `profile`'s fingerprint, computed once: every key and artifact check takes it.
@@ -67,7 +67,18 @@ impl Device {
     pub fn new(desc: DeviceDescription, policy: DevicePolicy) -> Result<Device, Error> {
         // The driver's measured deviations at its release, never its name.
         let deviations = super::driver_facts::deviations(&desc);
-        Device::with_deviations(desc, policy, deviations)
+        Device::with_deviations(desc, policy, deviations, false)
+    }
+
+    /// Derives a profile for a stage compiler that explicitly interpolates `FragCoord.z`
+    /// and no-perspective pixel barycentrics at the pixel center under sample shading.
+    /// The consumer must enforce both operations when compiling this profile's shaders.
+    pub fn new_with_center_fragment_depth(
+        desc: DeviceDescription,
+        policy: DevicePolicy,
+    ) -> Result<Device, Error> {
+        let deviations = super::driver_facts::deviations(&desc);
+        Device::with_deviations(desc, policy, deviations, true)
     }
 
     /// [`Device::new`] with `deviation` taken (at its measured standing where the driver's
@@ -89,13 +100,14 @@ impl Device {
                 deviations.remove(&deviation);
             }
         }
-        Device::with_deviations(desc, policy, deviations)
+        Device::with_deviations(desc, policy, deviations, false)
     }
 
     fn with_deviations(
         desc: DeviceDescription,
         policy: DevicePolicy,
         deviations: BTreeMap<DriverDeviation, Standing>,
+        center_fragment_depth: bool,
     ) -> Result<Device, Error> {
         if desc.api_version < ApiVersion::V1_2 {
             return Err(Unsupported::needs(
@@ -115,7 +127,17 @@ impl Device {
             ));
         }
         let deviations = accepted(deviations, &policy);
-        let fields = derive_fields(&desc, &policy, &deviations);
+        let mut fields = derive_fields(&desc, &policy, &deviations);
+        if center_fragment_depth {
+            fields
+                .enabled
+                .properties
+                .remove(&VkProperty::SampleFragCoordDepth);
+            fields
+                .enabled
+                .properties
+                .insert(VkProperty::CenterFragCoordDepth);
+        }
         let profile = DeviceProfile { fields };
         let metal = MetalDeviceProperties::derive(&profile, &desc.allocation);
         Ok(Device(Arc::new(DeviceInner {
@@ -127,6 +149,55 @@ impl Device {
             generated_commands: desc.generated_commands,
             allocation: desc.allocation,
         })))
+    }
+
+    /// A compile-only profile for a native backend. Its artifacts must not be submitted to Vulkan.
+    /// Public Metal properties and the Vulkan feature set remain those of the original device.
+    pub fn with_native_target(&self, target: crate::device::NativeShaderTarget) -> Device {
+        let mut inner = (*self.0).clone();
+        inner.profile.fields.native_target = target;
+        if target == crate::device::NativeShaderTarget::Sm53 {
+            inner
+                .profile
+                .fields
+                .enabled
+                .properties
+                .insert(VkProperty::NativeSm53Half);
+        } else {
+            inner
+                .profile
+                .fields
+                .enabled
+                .properties
+                .remove(&VkProperty::NativeSm53Half);
+        }
+        inner.fingerprint = inner.profile.fingerprint();
+        Device(Arc::new(inner))
+    }
+
+    /// This device with every set-1 heap array at most `elements` long (0: the limits' own), as
+    /// a consumer whose heap holds each texture at its header index and each sampler at its
+    /// sampler header's needs no more: its arrays then take that many elements.
+    pub fn with_heap_elements(&self, elements: u32) -> Device {
+        let mut inner = (*self.0).clone();
+        inner.profile.fields.descriptors.heap_elements = elements;
+        inner.fingerprint = inner.profile.fingerprint();
+        Device(Arc::new(inner))
+    }
+
+    /// A compile-only profile whose consumer holds each `RGB10A8_2P_XR10` attachment in Metal's
+    /// two planes (`VkProperty::TwoPlaneExtendedRange`). Its artifacts must not be submitted to
+    /// Vulkan: their color attachments are not the descriptor's.
+    pub fn with_two_plane_extended_range(&self) -> Device {
+        let mut inner = (*self.0).clone();
+        inner
+            .profile
+            .fields
+            .enabled
+            .properties
+            .insert(VkProperty::TwoPlaneExtendedRange);
+        inner.fingerprint = inner.profile.fingerprint();
+        Device(Arc::new(inner))
     }
 
     /// The translation-relevant profile.
@@ -292,6 +363,7 @@ fn derive_fields(
         // Push descriptors are unconditionally required by Vulkan 1.4 (vk.xml VK_VERSION_1_4).
         push_descriptor: ext(VkExtension::KhrPushDescriptor) || v1_4,
         null_descriptor: has(VkFeature::NullDescriptor),
+        heap_elements: 0,
     };
     let fragment = FragmentCaps {
         demote_to_helper: has(VkFeature::ShaderDemoteToHelperInvocation),
@@ -323,6 +395,7 @@ fn derive_fields(
     let (vertex_formats, storage_formats, image_formats) = format_tables(desc);
     let deviates = |d: DriverDeviation| deviations.contains_key(&d);
     ProfileFields {
+        native_target: crate::device::NativeShaderTarget::Vulkan,
         buffer_access,
         pointer_domain: policy.pointer_domain,
         handle_domain: policy.handle_domain,

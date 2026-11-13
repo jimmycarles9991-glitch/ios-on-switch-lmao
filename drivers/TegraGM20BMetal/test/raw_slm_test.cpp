@@ -56,6 +56,15 @@ TEST(SlmNeed, AKernelsQmdFields)
     EXPECT_EQ(slmPerWarpOfQmd(qmd), 0u);
 }
 
+TEST(SlmNeed, AQmdAtAnEvenOffset)
+{
+    alignas(4) uint8_t record[2 + sizeof(uint32_t) * 64] = {};
+    const uint32_t low = 128, crs = 1024;
+    memcpy(record + 2 + 45 * 4, &low, sizeof low);
+    memcpy(record + 2 + 47 * 4, &crs, sizeof crs);
+    EXPECT_EQ(slmPerWarpOfQmd(record + 2), 128u * 32 + 1024);
+}
+
 TEST(SlmArea, NvksSizesOnTwoTpcs)
 {
     const SlmArea crs = slmArea(1024, kTpcs);
@@ -146,7 +155,7 @@ size_t at(const std::string &text, const std::string &what)
 TEST(SlmOwned, EveryPlacedProgramGetsTheAreaBeforeItsBind)
 {
     const std::string gpu = SourceText("../raw/runtime/raw_gpu.cpp");
-    const std::string pack = Body(gpu, "Pipeline *Device::pipeline(uint64_t keyHash, PackForm form, bool caTransform)");
+    const std::string pack = Body(gpu, "Pipeline *Device::placeRecord(const PackPipeline &pp, bool caTransform)");
     EXPECT_LT(at(pack, "slmNeed(std::max(slmPerWarpOfHeader(vs.header), slmPerWarpOfHeader(fs.header)))"),
               at(pack, "build(pl, pp, vs, fs,"));
     const std::string completed = SourceText("../raw/runtime/raw_completed.cpp");
@@ -162,9 +171,9 @@ TEST(SlmOwned, EveryPlacedProgramGetsTheAreaBeforeItsBind)
     EXPECT_THAT(Body(compute, "const ComputeState *placeCompute(Device &dev, const ComputeRecord &r)"),
                 HasSubstr("dev.slmNeed(slmPerWarpOfQmd(r.kernel.qmd))"));
     const std::string commit = Body(gpu, "bool CommandBuffer::commit(uint32_t &seqno)");
-    EXPECT_THAT(commit, HasSubstr("segments_.insert(segments_.begin(),"));
-    EXPECT_LT(at(commit, "emitSlm(p, slmVa,"), at(commit, "d.k_.exec("));
+    EXPECT_THAT(commit, HasSubstr("segments_.insert(0,"));
+    EXPECT_LT(at(commit, "emitSlm(p, slmVa,"), at(commit, "d.job(d.setView_, d.channel_,"));
     const std::string build = Body(gpu, "void Device::build(Pipeline &pl, const PackPipeline &pp,");
-    EXPECT_LT(at(build, "if (ownedMethod(m))"), at(build, "w.m(m, v);"));
+    EXPECT_LT(at(build, "if (ownedMethod(m) || swizzleMethod(m))"), at(build, "w.m(m, v);"));
 }
 }  // namespace

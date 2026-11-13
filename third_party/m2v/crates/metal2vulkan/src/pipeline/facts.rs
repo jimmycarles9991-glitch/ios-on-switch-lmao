@@ -97,6 +97,10 @@ pub enum RuntimeFact {
     /// `PushField::RenderTargetArrayLength`, which the binder writes per draw, and stores 0 for an
     /// index at or past it, where Metal renders the pass's first layer.
     RenderTargetArrayLength { layer_dropped: bool },
+    /// The fragment function's storage-form images are 2D arrays addressed at its primitive's
+    /// layer (`LoweringInputs::layered_storage`): the binder views each attachment, and each
+    /// shadow, over the pass's layers.
+    LayeredStorage,
     /// The kernel reads the compute encoder's stage-in region (`setStageInRegion:`): a
     /// `[[stage_in]]` attribute stepping by thread position clamps its element to the region and
     /// adds the region's origin, and `[[grid_origin]]`/`[[grid_size]]` read the region

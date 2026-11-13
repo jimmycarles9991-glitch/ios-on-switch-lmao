@@ -8,15 +8,15 @@ import Foundation
 public enum TexelFormat: String, CaseIterable, Sendable {
     case rgba8Unorm, bgra8Unorm, rgba8Srgb, bgra8Srgb, r8Unorm, a8Unorm, rg8Unorm
     case rgba16Float, r16Float, rg16Float, rgba32Float, r32Float
-    case rgb10a2Unorm, bgr10XR, bgra10XR
+    case rgb10a2Unorm, bgr10a2Unorm, bgr10XR, bgra10XR
     case depth32Float, depth16Unorm, stencil8
 
     public var bytesPerTexel: Int {
         switch self {
         case .r8Unorm, .a8Unorm, .stencil8: return 1
         case .rg8Unorm, .r16Float, .depth16Unorm: return 2
-        case .rgba8Unorm, .bgra8Unorm, .rgba8Srgb, .bgra8Srgb, .rg16Float, .r32Float, .rgb10a2Unorm, .bgr10XR,
-            .depth32Float:
+        case .rgba8Unorm, .bgra8Unorm, .rgba8Srgb, .bgra8Srgb, .rg16Float, .r32Float, .rgb10a2Unorm, .bgr10a2Unorm,
+            .bgr10XR, .depth32Float:
             return 4
         case .rgba16Float, .bgra10XR: return 8
         case .rgba32Float: return 16
@@ -51,7 +51,7 @@ public enum TexelFormat: String, CaseIterable, Sendable {
     public func step(near value: Float = 1) -> Float {
         switch self {
         case .rgba8Unorm, .bgra8Unorm, .rgba8Srgb, .bgra8Srgb, .r8Unorm, .a8Unorm, .rg8Unorm: return 1 / 255
-        case .rgb10a2Unorm: return 1 / 1023
+        case .rgb10a2Unorm, .bgr10a2Unorm: return 1 / 1023
         case .bgr10XR, .bgra10XR: return 1 / 510
         case .depth16Unorm: return 1 / 65535
         case .stencil8: return 0
@@ -77,6 +77,9 @@ public enum TexelFormat: String, CaseIterable, Sendable {
         case .rgb10a2Unorm:
             let (r, g, b) = (Self.unorm(value[0], 1023), Self.unorm(value[1], 1023), Self.unorm(value[2], 1023))
             return Self.bytes(r | g << 10 | b << 20 | Self.unorm(value[3], 3) << 30)
+        case .bgr10a2Unorm:
+            let (r, g, b) = (Self.unorm(value[0], 1023), Self.unorm(value[1], 1023), Self.unorm(value[2], 1023))
+            return Self.bytes(b | g << 10 | r << 20 | Self.unorm(value[3], 3) << 30)
         case .bgr10XR:
             return Self.bytes(Self.xr(value[2]) | Self.xr(value[1]) << 10 | Self.xr(value[0]) << 20)
         case .bgra10XR:
@@ -100,6 +103,9 @@ public enum TexelFormat: String, CaseIterable, Sendable {
         case .rgb10a2Unorm:
             let w = Self.word(b, 0, 4)
             return [w & 1023, w >> 10 & 1023, w >> 20 & 1023].map { Float($0) / 1023 } + [Float(w >> 30) / 3]
+        case .bgr10a2Unorm:
+            let w = Self.word(b, 0, 4)
+            return [w >> 20 & 1023, w >> 10 & 1023, w & 1023].map { Float($0) / 1023 } + [Float(w >> 30) / 3]
         case .bgr10XR:
             let w = Self.word(b, 0, 4)
             return [w >> 20 & 1023, w >> 10 & 1023, w & 1023].map(Self.xrValue)

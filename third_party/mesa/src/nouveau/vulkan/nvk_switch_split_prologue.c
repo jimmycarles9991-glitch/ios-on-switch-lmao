@@ -3,17 +3,13 @@
  * SPDX-License-Identifier: MIT
  *
  * Switch: the prologue of a split fragment program (nvk_switch_split.h), the
- * per-draw values the fragment program's per-pixel code reads computed once
- * for a draw and written to its frontier. It reads what the fragment program
- * read through constant buffers of its own bound as the draw binds them: a
- * uniform buffer at the draw's address and size, the root table's push words
- * from the draw's copy, the shader data. Constant buffer reads cost the
- * prologue what they cost the fragment program (an operand, a read past the
- * bound size is 0), where global loads would need an address and a bounds
- * test each.
+ * per-draw values the fragment program's per-pixel code reads computed by
+ * one lane per draw. Records hold push words, a frontier address and bounded
+ * UBO views. Shader constants remain shared in CB1 across the batch.
  */
 
 #include "nvk_switch_split_private.h"
+#include "nvk_switch_split_load.h"
 
 #include "nir_builder.h"
 #include "util/hash_table.h"
@@ -21,6 +17,7 @@
 struct prologue {
    nir_builder b;
    nir_def *frontier_va;
+   nir_def *record_va;
    struct hash_table *remap;
    int8_t shader_data_cbuf;
 };
@@ -33,23 +30,28 @@ prologue_ldc(struct split *s, struct prologue *p, nir_intrinsic_instr *ldc)
    const struct nvk_cbuf *c = &s->map->cbufs[cbuf];
    nir_def *offset = _mesa_hash_table_search(p->remap, ldc->src[1].ssa)->data;
    uint32_t base = nir_intrinsic_base(ldc);
-   uint32_t prologue_cbuf;
+   nir_def *address, *size;
    switch (c->type) {
    case NVK_CBUF_TYPE_ROOT_DESC:
-      prologue_cbuf = SWITCH_SPLIT_PARAMS_CBUF;
+      address = p->record_va;
+      size = nir_imm_int(b, SWITCH_SPLIT_PUSH_BYTES);
       base -= PUSH_START;
       break;
    case NVK_CBUF_TYPE_SHADER_DATA:
-      prologue_cbuf = p->shader_data_cbuf;
-      break;
-   default:
-      prologue_cbuf = 1 + s->ubo_of_cbuf[cbuf];
+      return nir_ldc_nv(b, ldc->def.num_components, ldc->def.bit_size,
+                         nir_imm_int(b, p->shader_data_cbuf), offset, .base = base,
+                         .align_mul = nir_intrinsic_align_mul(ldc),
+                         .align_offset = nir_intrinsic_align_offset(ldc));
+   default: {
+      const unsigned descriptor = SWITCH_SPLIT_BATCH_BUFFERS + 16 * (1 + s->ubo_of_cbuf[cbuf]);
+      address = nir_load_global(b, 1, 64, nir_iadd_imm(b, p->record_va, descriptor), .align_mul = 16);
+      size = nir_load_global(b, 1, 32, nir_iadd_imm(b, p->record_va, descriptor + 8), .align_mul = 8);
       break;
    }
-   return nir_ldc_nv(b, ldc->def.num_components, ldc->def.bit_size,
-                     nir_imm_int(b, prologue_cbuf), offset, .base = base,
-                     .align_mul = nir_intrinsic_align_mul(ldc),
-                     .align_offset = nir_intrinsic_align_offset(ldc));
+   }
+   return switch_split_load(b, address, size, nir_iadd_imm(b, nir_u2u64(b, offset), base),
+                             ldc->def.num_components, ldc->def.bit_size,
+                             MIN2(nir_intrinsic_align(ldc), 16));
 }
 
 /* The frontier is 256-byte aligned: the alignment lets NAK merge stores */
@@ -132,7 +134,9 @@ switch_split_lay_out_cbufs(struct split *s)
          }
       }
    }
-   l->prologue_cbufs = 1 + l->ubo_count;
+   l->batch_version = SWITCH_SPLIT_BATCH_VERSION;
+   l->batch_threads = SWITCH_SPLIT_BATCH_THREADS;
+   l->prologue_cbufs = 1;
    if (reads_cbuf_type(s, NVK_CBUF_TYPE_SHADER_DATA))
       l->shader_data_cbuf = l->prologue_cbufs++;
    return true;
@@ -149,7 +153,7 @@ switch_split_build_prologue(struct split *s)
    };
    nir_builder *b = &p.b;
    nir_shader *pro = b->shader;
-   pro->info.workgroup_size[0] = 1;
+   pro->info.workgroup_size[0] = s->layout->batch_threads;
    pro->info.workgroup_size[1] = 1;
    pro->info.workgroup_size[2] = 1;
    pro->info.float_controls_execution_mode =
@@ -161,11 +165,21 @@ switch_split_build_prologue(struct split *s)
                                          s->fs->constant_data_size);
    }
 
-   p.frontier_va = nir_ldc_nv(b, 1, 64, nir_imm_int(b, SWITCH_SPLIT_PARAMS_CBUF),
-                              nir_imm_int(b, 0),
-                              .base = SWITCH_SPLIT_FRONTIER_ADDRESS,
-                              .align_mul = 8);
+   nir_def *header = nir_ldc_nv(b, 4, 32, nir_imm_int(b, SWITCH_SPLIT_PARAMS_CBUF),
+                               nir_imm_int(b, 0), .align_mul = 16);
+   nir_def *lane = nir_iadd(b, nir_imul_imm(b, nir_channel(b, nir_load_workgroup_id(b), 0),
+                                          s->layout->batch_threads),
+                           nir_channel(b, nir_load_local_invocation_id(b), 0));
+   nir_def *count = nir_channel(b, header, 2);
+   nir_def *stride = nir_channel(b, header, 3);
+   nir_def *valid = nir_iand(b, nir_ult(b, lane, count),
+                            nir_ieq_imm(b, stride, SWITCH_SPLIT_BATCH_RECORD_BYTES));
+   nir_if *active = nir_push_if(b, valid);
+   p.record_va = nir_iadd(b, nir_pack_64_2x32_split(b, nir_channel(b, header, 0), nir_channel(b, header, 1)),
+                          nir_imul(b, nir_u2u64(b, lane), nir_u2u64(b, stride)));
+   p.frontier_va = nir_load_global(b, 1, 64, nir_iadd_imm(b, p.record_va, SWITCH_SPLIT_FRONTIER_ADDRESS), .align_mul = 16);
    build_prologue_body(s, &p);
+   nir_pop_if(b, active);
 
    _mesa_hash_table_destroy(p.remap, NULL);
    nir_validate_shader(pro, "switch split prologue");

@@ -60,12 +60,13 @@ Surface makeSurface(Kind kind, uint32_t width, uint32_t height)
     Surface s;
     s.width = width;
     s.height = height;
-    if (kind == kKindNv12Video || kind == kKindNv12Full) {
-        s.format = kind == kKindNv12Video ? fourcc('4', '2', '0', 'v') : fourcc('4', '2', '0', 'f');
+    if (isYuv(kind)) {
+        const bool full = kind == kKindNv12Full || kind == kKindNv16Full;
+        s.format = fourcc('4', '2', isNv12(kind) ? '0' : '2', full ? 'f' : 'v');
         s.planes = 2;
         s.stride[0] = s.stride[1] = roundUp(width, 256);  // VideoToolbox's pool: 256-byte rows and planes
         s.planeHeight[0] = height;
-        s.planeHeight[1] = (height + 1) / 2;
+        s.planeHeight[1] = isNv12(kind) ? (height + 1) / 2 : height;
         s.offset[0] = 0;
         s.offset[1] = roundUp((uint32_t)(s.stride[0] * (uint64_t)height), 256);
         s.allocation = s.offset[1] + (uint64_t)s.stride[1] * s.planeHeight[1];
@@ -92,11 +93,11 @@ Layer uiLayer()
 // a destination scaled 1/4..4x on each axis, anywhere on (or partly off) the screen.
 Layer randomDetached()
 {
-    static const Kind kinds[] = {kKindNv12Video, kKindNv12Full, kKindBgra, kKindRgba};
+    static const Kind kinds[] = {kKindNv12Video, kKindNv12Full, kKindNv16Video, kKindNv16Full, kKindBgra, kKindRgba};
     const Limits limits;
     Layer l;
-    l.kind = kinds[rnd(4)];
-    const uint32_t sw = 32 + rnd(limits.maxSrcBuffer - 32), sh = 32 + rnd(limits.maxSrcBuffer - 32);
+    l.kind = kinds[rnd(6)];
+    const uint32_t sw = 32 + rnd(limits.maxSrcBuffer - 32), sh = 32 + rnd(limits.maxSrcBufferHeight - 32);
     l.surface = makeSurface(l.kind, sw, sh);
     int32_t w = 1 + (int32_t)rnd(limits.maxSrcRectWidth < sw ? limits.maxSrcRectWidth : sw);
     int32_t h = 1 + (int32_t)rnd(sh);
@@ -129,7 +130,7 @@ void testAcceptance()
         if ((uint64_t)d.dst.w * 4 < (uint64_t)d.src.w || (uint64_t)d.dst.h * 4 < (uint64_t)d.src.h ||
             (uint64_t)d.dst.w > 4ull * d.src.w || (uint64_t)d.dst.h > 4ull * d.src.h)
             continue;
-        const unsigned slot = isNv12(d.kind) ? 2 : 0;  // YUV in layer 2, RGB in layer 0 (QuartzCore [V])
+        const unsigned slot = isYuv(d.kind) ? 2 : 0;  // YUV in layer 2, RGB in layer 0 (QuartzCore [V])
         layers[slot] = d;
         has[slot] = true;
         const bool withUi = rnd(4) != 0;  // video-only swaps: the UI persists
@@ -163,8 +164,8 @@ void testAcceptance()
         CHECK(image.readHigh <= ((d.surface.allocation + 4095) & ~4095ull) && image.readLow < image.readHigh,
               "read range %#llx-%#llx outside %#llx", (unsigned long long)image.readLow,
               (unsigned long long)image.readHigh, (unsigned long long)d.surface.allocation);
-        CHECK(image.readHigh - image.readLow <= (20ull << 20), "read range %llu bytes exceeds a slot",
-              (unsigned long long)(image.readHigh - image.readLow));
+        CHECK(image.readHigh - image.readLow <= switch_window_caps::kPlaneSlotSpan,
+              "read range %llu bytes exceeds a slot", (unsigned long long)(image.readHigh - image.readLow));
         CHECK(!(image.start[0] % 64) && (!image.yuv || !(image.start[1] % 64)), "plane start not 64-aligned");
         CHECK(!image.yuv || !(image.hOffset & 1), "4:2:0 window starts on an odd column");
     }
@@ -198,15 +199,19 @@ void testRefusals()
     CHECK(checkUpdated(6, 0, has, layers, W, H) == kAlignment, "a row not 128-aligned");
     d = keep;
     d.dst = {0, 0, 200, 100};  // 6.4x / 7.2x down
-    CHECK(checkUpdated(6, 0, has, layers, W, H) == kScale, "a scale past 1/4");
+    CHECK(checkUpdated(6, 0, has, layers, W, H) == kScale, "a YUV scale past 1/6");
     d = keep;
-    d.surface = makeSurface(kKindNv12Video, 2048, 1152);
-    d.src = {0, 0, 2048, 1152};
-    d.dst = {0, 0, 720, 405};
-    CHECK(checkUpdated(6, 0, has, layers, W, H) == kScale, "a source wider than MaxSrcRectWidth");
     d.surface = makeSurface(kKindNv12Video, 3840, 2160);
+    d.src = {0, 0, 3840, 2160};
+    d.dst = {0, 437, 720, 405};
+    CHECK(checkUpdated(6, 0, has, layers, W, H) == kAccepted, "a 4K picture across the panel, 5.3x down");
+    d.kind = kKindBgra;
+    d.surface = makeSurface(kKindBgra, 3840, 2160);
+    CHECK(checkUpdated(6, 0, has, layers, W, H) == kScale, "an RGB scale past 1/4");
+    d.kind = kKindNv12Video;
+    d.surface = makeSurface(kKindNv12Video, 3840, 2400);
     d.src = {0, 0, 1920, 1080};
-    CHECK(checkUpdated(6, 0, has, layers, W, H) == kGeometry, "a buffer past MaxSrcBufferWidth/Height");
+    CHECK(checkUpdated(6, 0, has, layers, W, H) == kGeometry, "a buffer past MaxSrcBufferHeight");
     d = keep;
     CHECK(checkUpdated(6, 0x00ff0000u, has, layers, W, H) == kLayerState, "a coloured background");
     CHECK(checkUpdated(6 | 0x100, 0, has, layers, W, H) == kLayerState, "an unknown mask bit");
@@ -216,7 +221,10 @@ void testRefusals()
     layers[0].surface = makeSurface(kKindBgra, 512, 512);
     layers[0].src = {0, 0, 512, 512};
     layers[0].dst = {0, 0, 512, 512};
-    CHECK(checkUpdated(7, 0, has, layers, W, H) == kTwoUi, "three layers with surfaces (IOMFBNumLayers 2)");
+    CHECK(checkUpdated(7, 0, has, layers, W, H) == kAccepted, "UI plus two detached layers");
+    has[3] = true;
+    layers[3] = layers[0];
+    CHECK(checkUpdated(15, 0, has, layers, W, H) == kTwoUi, "four layers exceed the three physical windows");
     // Today's swap (one full-frame BGRA layer in layer 0) is still accepted, as before r18.
     bool one[kLayers] = {true, false, false, false};
     Layer ui[kLayers];
@@ -230,6 +238,7 @@ void testImage()
     Layer l;
     l.kind = kKindNv12Video;
     l.surface = makeSurface(kKindNv12Video, 1280, 720);
+    l.surface.colorMatrix = 2;
     l.src = {0, 0, 1280, 720};
     l.dst = {0, 437, 720, 405};
     Image m;
@@ -286,15 +295,27 @@ void testImage()
               m.vInitial >= 4096,
           "odd crop: hOffset %u start %llu/%llu initial %#x %#x", m.hOffset, (unsigned long long)m.start[0],
           (unsigned long long)m.start[1], m.hInitial, m.vInitial);
+    // 4:2:2 (Core Animation's copy of a detached video on iPadOS 27): NV16's depth, and the same crop's chroma starts on
+    // its own row, the column still on a pair.
+    l.kind = kKindNv16Full;
+    l.surface = makeSurface(kKindNv16Full, 1280, 720);
+    CHECK(imageOf(l, W, H, m) && m.colorDepth == kDepthYCbCr422SP && m.fullRange && !(m.hOffset & 1) &&
+              m.start[0] == 5ull * l.surface.stride[0] &&
+              m.start[1] == l.surface.offset[1] + 5ull * l.surface.stride[1],
+          "4:2:2 crop: depth %u hOffset %u start %llu/%llu", m.colorDepth, m.hOffset, (unsigned long long)m.start[0],
+          (unsigned long long)m.start[1]);
+    l.surface.planeHeight[1] = 360;
+    l.src = {0, 0, 1280, 720};
+    CHECK(checkDetached(l, W, H) == kSurface, "a 4:2:2 chroma plane of half the rows");
 }
 
 void testCsc()
 {
     struct Std {
         double kr, kb;
-    } const stds[2] = {{0.299, 0.114}, {0.2126, 0.0722}};
+    } const stds[3] = {{0.299, 0.114}, {0.2126, 0.0722}, {0.2627, 0.0593}};
 
-    for (unsigned s = 0; s < 2; ++s)
+    for (unsigned s = 0; s < 3; ++s)
         for (unsigned full = 0; full < 2; ++full) {
             const double kg = 1 - stds[s].kr - stds[s].kb, cy = full ? 1.0 : 255.0 / 219, cc = full ? 1.0 : 255.0 / 224;
             const double want[8] = {full ? 0.0 : -16.0,
@@ -342,7 +363,8 @@ void testRoles()
     CHECK(r.ui == 1 && r.plane == 0 && !r.extra, "two full-frame layers: %d %d", r.ui, r.plane);
     bool three[kLayers] = {true, true, true, false};
     r = rolesOf(three, layers, W, H);
-    CHECK(r.ui == 1 && r.plane == 0 && r.extra == 1, "three layers: the lower detached one is not shown");
+    CHECK(r.ui == 1 && r.plane == 0 && r.second == 2 && !r.extra,
+          "three layers retain both detached layers in stack order");
 }
 
 // DC A's window B with the ARM copy: writes go to assembly; UPDATE copies assembly to ARM; at a boundary with ACT_REQ out,
@@ -477,7 +499,58 @@ TEST(DisplayPlanes, Limits24B119AreIos17sWithoutPackedOrCompressed)
     EXPECT_EQ(ios27.maxSrcRectWidth, ios17.maxSrcRectWidth);
     EXPECT_EQ(ios27.maxSrcRectTotal, ios17.maxSrcRectTotal);
     EXPECT_EQ(ios27.maxSrcBuffer, ios17.maxSrcBuffer);
+    EXPECT_EQ(ios27.maxSrcBufferHeight, ios17.maxSrcBufferHeight);
+    EXPECT_EQ(ios27.yuvMinScaleFraction, ios17.yuvMinScaleFraction);
     EXPECT_EQ(ios27.planeBaseAlignment, ios17.planeBaseAlignment);
     EXPECT_EQ(ios27.strideAlignment, ios17.strideAlignment);
     EXPECT_EQ(ios27.maxLayers, ios17.maxLayers);
+    EXPECT_EQ(ios27.maxLayers, 3u);
+}
+
+TEST(DisplayPlanes, MatrixFollowsMetadataWithoutResolutionInference)
+{
+    Surface surface = makeSurface(kKindNv12Video, 1920, 1080);
+    EXPECT_EQ(matrixOf(surface), kBt601);
+    surface.colorMatrix = 1;
+    EXPECT_EQ(matrixOf(surface), kBt601);
+    surface.width = surface.height = 32;
+    surface.colorMatrix = 2;
+    EXPECT_EQ(matrixOf(surface), kBt709);
+    surface.colorMatrix = 3;
+    EXPECT_EQ(matrixOf(surface), kBt2020);
+}
+
+TEST(DisplayPlanes, WindowSitingDecidesConversionAndNoColourTagRefusesTheSwap)
+{
+    EXPECT_TRUE(switch_surface_dc_siting(0, 0));
+    EXPECT_TRUE(switch_surface_dc_siting(1, 1));
+    EXPECT_FALSE(switch_surface_dc_siting(2, 2));
+    EXPECT_FALSE(switch_surface_dc_siting(1, 3));
+    Layer l;
+    l.kind = kKindNv12Video;
+    l.surface = makeSurface(l.kind, 1920, 1080);
+    l.src = {0, 0, 1920, 1080};
+    l.dst = {0, 0, 720, 405};
+    const uint32_t tags[][5] = {{16, 9, 3, 1, 1}, {18, 9, 3, 1, 1}, {1, 12, 2, 1, 1},
+                                {1, 1, 7, 1, 1},  {1, 1, 2, 2, 2},  {1, 1, 2, 1, 3}};
+    for (const auto &tag : tags) {
+        l.surface.transfer = tag[0];
+        l.surface.primaries = tag[1];
+        l.surface.colorMatrix = tag[2];
+        l.surface.chromaTop = tag[3];
+        l.surface.chromaBottom = tag[4];
+        EXPECT_EQ(checkDetached(l, W, H), kAccepted) << tag[0] << " " << tag[1] << " " << tag[3];
+        Image image;
+        ASSERT_TRUE(imageOf(l, W, H, image));
+        EXPECT_EQ(image.convert, tag[3] != 1 || tag[4] != 1);
+        EXPECT_EQ(image.matrix, tag[2] == 3 ? kBt2020 : tag[2] == 2 ? kBt709 : kBt601);
+    }
+    l.kind = kKindBgra;
+    l.surface = makeSurface(l.kind, 720, 405);
+    l.surface.transfer = 16;
+    l.surface.primaries = 12;
+    l.src = {0, 0, 720, 405};
+    Image image;
+    ASSERT_TRUE(imageOf(l, W, H, image));
+    EXPECT_FALSE(image.convert);
 }

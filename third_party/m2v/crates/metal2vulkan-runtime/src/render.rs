@@ -6007,9 +6007,13 @@ impl RenderCommandEncoder {
         // The device's sampler states, less those at IDs no set-1 sampler array of the variant
         // holds (`heap_sets::fit_samplers`).
         let mut argument_samplers = std::mem::take(&mut self.argument_samplers_room);
-        self.core
-            .device()
-            .argument_samplers_into(&mut argument_samplers);
+        if heap_sets::uses_argument_samplers(&pipeline.base().layout) {
+            self.core
+                .device()
+                .argument_samplers_into(&mut argument_samplers);
+        } else {
+            argument_samplers.clear();
+        }
         let function_tables = pipeline.function_tables();
         let mut unlisted = None;
         let reads_tile_memory = pipeline.reads_tile_memory();
@@ -6128,7 +6132,10 @@ impl RenderCommandEncoder {
                 return Err(Error::NotImplemented(RuntimeGap::ImageblockMasters));
             }
         }
-        let mut commands = self.draw_commands.take().unwrap_or_else(DrawCommands::empty);
+        let mut commands = self
+            .draw_commands
+            .take()
+            .unwrap_or_else(DrawCommands::empty);
         plan.instantiate_draw_into(&live.state, &draw, &mut commands)
             .map_err(Error::Bind)?;
         self.reaches_unnamed |= !commands.root_tables.is_empty() || reads_handles(&plan);
@@ -6867,7 +6874,8 @@ impl RenderCommandEncoder {
             binding::bind(call, &device, &mut state, &plan, &command, &tables, memo)?
         };
         // The draw's push bytes, filled in place.
-        let push = binding::push_writes(std::mem::take(&mut commands.push_constants), &bound.holes)?;
+        let push =
+            binding::push_writes(std::mem::take(&mut commands.push_constants), &bound.holes)?;
         // A plan that draws one amplification at a time records the draw once per amplification,
         // in order, each after that amplification's push writes.
         let amplified = commands

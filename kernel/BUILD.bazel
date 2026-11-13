@@ -137,6 +137,7 @@ filegroup(
         "//kits/SwitchCRC:all_files",
         "//kits/SwitchDMA:all_files",
         "//kits/SwitchDT:all_files",
+        "//kits/SwitchEngineGate:all_files",
         "//kits/SwitchFalcon:all_files",
         "//kits/SwitchIdle:all_files",
         "//kits/SwitchLinux:all_files",
@@ -324,7 +325,10 @@ tool_output(
         "--bootstrap-out={out1}",
         "--path-root={path_root}",
         "--bin-dir={bin_dir}",
-    ],
+    ] + select({
+        "//bazel:release": ["--config=RELEASE"],
+        "//conditions:default": ["--config=DEVELOPMENT"],
+    }),
     message = "Compiling libpthread-519.120.4's kernel component",
     mnemonic = "KernelLibpthread",
     tool = "libpthread.py",
@@ -349,6 +353,7 @@ kernel_archive(
         "//drivers/SwitchAudio:SwitchAudio",
         "//drivers/SwitchWLAN:SwitchWLAN",
         "//drivers/TegraGM20B:TegraGM20B_nvkm",
+        "//drivers/TegraGM20B:TegraGM20B_emit",
         "//drivers/TegraGM20B:TegraGM20B",
         "//drivers/TegraBPMP:TegraBPMP",
         "//drivers/TegraDFLL:TegraDFLL_linux",
@@ -508,7 +513,10 @@ xnu_kernel(
 
 xnu_kernel_12377(
     name = "kernel_unprelinked_12377",
-    out = "build/xnu-12377/mach.development.bcm2837.unstripped.noctf",
+    out = select({
+        "//bazel:release": "build/xnu-12377/mach.release.bcm2837.unstripped.noctf",
+        "//conditions:default": "build/xnu-12377/mach.development.bcm2837.unstripped.noctf",
+    }),
     extra_exports = [
         "prelink.exports",
         "prelink26.exports",

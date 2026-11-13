@@ -32,10 +32,29 @@ inline std::string blobDifferences(const uint32_t *packed, uint32_t packedDwords
     return "[" + out + " ]";
 }
 
+// The made record with its constexpr samplers numbered as the pack's; false: a header the pack lacks
+inline bool inPackSamplers(const raw::Pack &pack, const raw::RuntimeRecord &r, raw::PackPipeline &out)
+{
+    out = r.pipeline;
+    const uint32_t *headers = pack.section<uint32_t>(raw::PackSamplers);
+    bool unknown = false;
+    return raw::placeConstexprSamplers(
+        out, r.samplers,
+        [&](const std::array<uint32_t, 8> &words, uint32_t &index) {
+            for (index = 0; index < pack.header()->samplers; index++)
+                if (!memcmp(headers + 8 * index, words.data(), sizeof words))
+                    return true;
+            return false;
+        },
+        unknown);
+}
+
 inline std::string differences(const raw::Pack &pack, const raw::PackPipeline &pp, const raw::RuntimeRecord &r)
 {
     std::string why;
-    const raw::PackPipeline &rp = r.pipeline;
+    raw::PackPipeline rp;
+    if (!inPackSamplers(pack, r, rp))
+        why += " samplers";
     if (pack.string(pp.keyString) != r.keyString)
         why += " key-fields";
     const uint32_t *blob = pack.section<uint32_t>(raw::PackBlob) + pp.blob;
@@ -57,6 +76,12 @@ inline std::string differences(const raw::Pack &pack, const raw::PackPipeline &p
     }
     if (pp.pushes != rp.pushes || pp.pushMask != rp.pushMask || memcmp(pp.pushWords, rp.pushWords, sizeof pp.pushWords))
         why += " push";
+    const uint32_t spillWords = uint32_t(pp.spillWords[0]) + pp.spillWords[1];
+    const uint32_t *spills = pack.spills(pp);
+    if (memcmp(pp.spillEntry, rp.spillEntry, sizeof pp.spillEntry) ||
+        memcmp(pp.spillWords, rp.spillWords, sizeof pp.spillWords) || r.spill.size() != spillWords ||
+        (spillWords && (!spills || memcmp(spills, r.spill.data(), 4 * spillWords))))
+        why += " spills";
     if (pp.vertexSlot != rp.vertexSlot || pp.vertexStride != rp.vertexStride)
         why += " vertex";
     if (pp.setBytes != rp.setBytes)
@@ -65,8 +90,17 @@ inline std::string differences(const raw::Pack &pack, const raw::PackPipeline &p
         why += " flags";
     if (pp.keyHash != rp.keyHash)
         why += " key";
-    if (!r.extras.empty() || !r.samplers.empty())
+    if (!r.extras.empty())
         why += " extras";
+    // the pack's candidate rungs are its generator's (directpack.mm markCandidates), which no runtime record has
+    bool rungs = true;
+    for (uint32_t c = 0; c < 8; c++)
+        rungs &= (pp.fetchRung[c] & raw::kFetchRungMask) == rp.fetchRung[c];
+    if (pp.boundEntries != rp.boundEntries || pp.memoryEntries != rp.memoryEntries ||
+        memcmp(pp.uniform, rp.uniform, sizeof pp.uniform) || !rungs)
+        why += " reads";
+    if (pp.variantCount[0] != rp.variantCount[0] || pp.variantCount[1] != rp.variantCount[1])
+        why += " variants";
     for (int k = 0; k < 2; k++) {
         const raw::PackProgram &packed = pack.section<raw::PackProgram>(raw::PackPrograms)[k ? pp.fs : pp.vs];
         raw::PackProgram made;
@@ -75,7 +109,8 @@ inline std::string differences(const raw::Pack &pack, const raw::PackPipeline &p
         if (packed.bytes != made.bytes || memcmp(heap, slot.data(), slot.size()) ||
             packed.program - packed.heapOffset != made.program || packed.dataOffset != made.dataOffset ||
             packed.dataBytes != made.dataBytes || packed.cbufs != made.cbufs ||
-            memcmp(packed.cbufType, made.cbufType, sizeof made.cbufType))
+            memcmp(packed.cbufType, made.cbufType, sizeof made.cbufType) || packed.gprs != made.gprs ||
+            packed.boundTextures != made.boundTextures)
             why += k ? " pixel-program" : " vertex-program";
     }
     return why;
@@ -94,7 +129,9 @@ inline std::string splitDifferences(const raw::Pack &pack, const raw::PackPipeli
     if (packed->thresholdPixels != m.thresholdPixels || packed->frontierBytes != m.frontierBytes ||
         packed->frontierCbuf != m.frontierCbuf || packed->uboCount != m.uboCount ||
         packed->shaderDataCbuf != m.shaderDataCbuf || packed->prologueCbufs != m.prologueCbufs ||
-        memcmp(packed->uboCbuf, m.uboCbuf, sizeof m.uboCbuf) || memcmp(packed->qmd, m.qmd, sizeof m.qmd))
+        packed->batchVersion != m.batchVersion || packed->batchThreads != m.batchThreads ||
+        memcmp(packed->uboCbuf, m.uboCbuf, sizeof m.uboCbuf) || memcmp(packed->qmd, m.qmd, sizeof m.qmd) ||
+        memcmp(&packed->cost, &m.cost, sizeof m.cost))
         why += " split-record";
     const raw::PackProgram *programs = pack.section<raw::PackProgram>(raw::PackPrograms);
     const uint8_t *heap = pack.section<uint8_t>(raw::PackHeap);

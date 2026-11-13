@@ -1,0 +1,80 @@
+load("//bazel/lint:defs.bzl", "lint_files")
+load("//bazel/testing:defs.bzl", "host_shims", "host_test")
+
+lint_files()
+
+host_shims(
+    name = "inputs_kernel",
+    headers = ["IOKit/IOLocks.h"],
+    stubs = "tegra_nvenc_inputs_stubs.h",
+)
+
+# An encode's verdict on what it read: VIC's input picture, a native picture's NVDEC and VIC producers.
+host_test(
+    name = "tegra_nvenc_inputs_test",
+    srcs = [
+        "tegra_nvenc_inputs_test.cpp",
+        "//drivers/TegraGM20B:SwitchGpuBacking.h",
+        "//drivers/TegraNVENC:TegraNVENCInputs.h",
+    ],
+    deps = [":inputs_kernel"],
+)
+
+# The producers reach each job's record, and the client's Wait asks for their verdict (TegraNVENC.cpp itself builds
+# in no host test).
+host_test(
+    name = "tegra_nvenc_inputs_source_test",
+    srcs = ["tegra_nvenc_inputs_source_test.cpp"],
+    data = [
+        "//drivers/TegraNVENC:TegraNVENC.cpp",
+        "//drivers/TegraNVENC:TegraNVENCDirect.cpp",
+        "//drivers/TegraNVENC:TegraNVENCSource.cpp",
+        "//drivers/TegraNVENC:TegraNVENCUserClient.cpp",
+    ],
+)
+
+host_shims(
+    name = "direct_kernel",
+    headers = [
+        "IOKit/IOBufferMemoryDescriptor.h",
+        "IOKit/IOTypes.h",
+        "kern/task.h",
+    ],
+    stubs = "tegra_nvenc_direct_stubs.h",
+)
+
+# A native picture NVENC reads in place: TegraNVENCDirect.cpp's begin and end over the real ownership code, with the
+# stack between them reused as tegra_nvenc_run reuses it.
+host_test(
+    name = "tegra_nvenc_direct_test",
+    srcs = [
+        "tegra_nvenc_direct_test.cpp",
+        "//drivers/TegraGM20B:SwitchGpuBacking.h",
+        "//drivers/TegraGM20B:SwitchGpuNativeSurface.h",
+        "//drivers/TegraGM20B:SwitchGpuNativeUse.h",
+        "//drivers/TegraGM20B/test:switch_gpu_backing_fixture.h",
+        "//drivers/TegraHost1x:SwitchHost1xFence.h",
+        "//drivers/TegraHost1x:TegraHost1x.h",
+        "//drivers/TegraNVENC:TegraNVENC.h",
+        "//drivers/TegraNVENC:TegraNVENCABI.h",
+        "//drivers/TegraNVENC:TegraNVENCCheckCommon.h",
+        "//drivers/TegraNVENC:TegraNVENCDirect.h",
+        "//drivers/TegraNVENC:TegraNVENCDirectPlan.h",
+        "//drivers/TegraNVENC:nvidia/clc5b7.h",
+        "//drivers/TegraNVENC:nvidia/nvenc_drv.h",
+        "//drivers/TegraVIC:SwitchNativeSurface.h",
+        "//drivers/TegraVIC:SwitchSurfaceColor.h",
+        "//drivers/TegraVIC:SwitchVICPicture.h",
+        "//drivers/TegraVIC:TegraVICConfig.h",
+        "//drivers/TegraVIC:TegraVICFormats.h",
+        "//drivers/TegraVIC:TegraVICRequest.h",
+        "//drivers/TegraVIC:TegraVICSurface.h",
+        "//kits/SwitchDMA:SwitchDMAPages.h",
+    ],
+    additional_compiler_inputs = ["//drivers/TegraNVENC:TegraNVENCDirect.cpp"],
+    deps = [
+        ":direct_kernel",
+        "//drivers/TegraGM20B/test:backing",
+        "//drivers/TegraGM20B/test:coherency_kernel",
+    ],
+)

@@ -55,6 +55,9 @@ def main() -> None:
     target.chmod(0o755)
     if args.gpu and not args.no_gpu:
         shutil.copytree(paths.located(args.gpu_base), target / 'gpu', symlinks=False)
+        for path in [target / 'gpu', *(target / 'gpu').rglob('*')]:
+            if path.is_dir():
+                path.chmod(0o755)
         # Located, not resolved: the manifest names the runfiles root from where it sits in the tree.
         materialize(Path(paths.located(args.gpu)), target / 'gpu')
     if args.kernel:

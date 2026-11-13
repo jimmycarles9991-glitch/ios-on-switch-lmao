@@ -52,12 +52,16 @@ inline uint32_t Word(const uint8_t *bytes)
            static_cast<uint32_t>(bytes[2]) << 16 | static_cast<uint32_t>(bytes[3]) << 24;
 }
 
-// A branch's target from its address: b's and bl's imm26 or tbz/tbnz's imm14, in words.
+// A branch's target from its address: b's and bl's imm26, b.cond's imm19 or tbz/tbnz's imm14, in words.
 inline uint64_t BranchTarget(uint64_t address, uint32_t insn)
 {
     if ((insn & 0x7c000000u) == 0x14000000u) {
         const int64_t imm26 = static_cast<int64_t>(insn & 0x3ffffffu);
         return address + static_cast<uint64_t>((imm26 >= 0x2000000 ? imm26 - 0x4000000 : imm26) * 4);
+    }
+    if ((insn & 0xff000010u) == 0x54000000u) {
+        const int64_t imm19 = static_cast<int64_t>((insn >> 5) & 0x7ffff);
+        return address + static_cast<uint64_t>((imm19 >= 0x40000 ? imm19 - 0x80000 : imm19) * 4);
     }
     const int64_t imm14 = static_cast<int64_t>((insn >> 5) & 0x3fff);
     return address + static_cast<uint64_t>((imm14 >= 0x2000 ? imm14 - 0x4000 : imm14) * 4);

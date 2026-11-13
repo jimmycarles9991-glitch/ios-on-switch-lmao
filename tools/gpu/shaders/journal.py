@@ -21,12 +21,15 @@ class Stage:
     lib: str | None = None
     spec: bool = False
     constants: tuple[str, ...] = ()
+    specialized_name: str | None = None
 
     def text(self) -> str:
         """Return the stage as the journal writes it."""
         parts = [self.name]
         if self.lib:
             parts.append('lib=' + self.lib)
+        if self.specialized_name:
+            parts.append('as=' + self.specialized_name)
         if self.spec and not self.constants:
             parts.append('spec')
         return ' '.join(parts + list(self.constants))
@@ -45,16 +48,18 @@ class Render:
     vertex: Stage
     fragment: Stage | None
     label: str = '-'
+    linked: tuple[tuple[str, Stage], ...] = ()
 
     def text(self) -> str:
         """Return the line as the corpus holds it."""
         head = ' '.join((*self.target, *self.layout))
         fragment = self.fragment.text() if self.fragment else '-'
-        return f'R ok=1 label={self.label} {head} | v {self.vertex.text()} | f {fragment} | '
+        linked = ''.join(f'{tag} {stage.text()} | ' for tag, stage in self.linked)
+        return f'R ok=1 label={self.label} {head} | v {self.vertex.text()} | f {fragment} | {linked}'
 
     def key(self) -> tuple:
         """Return what the line makes: everything but the label."""
-        return (self.target, self.layout, self.vertex, self.fragment)
+        return (self.target, self.layout, self.vertex, self.fragment, self.linked)
 
     def colors(self) -> int:
         """Count its color attachments."""
@@ -81,15 +86,17 @@ def parse_stage(text: str) -> Stage | None:
     tokens = text.split()
     if not tokens or tokens[0] == '-':
         return None
-    lib, spec, constants = None, False, []
+    lib, spec, constants, specialized_name = None, False, [], None
     for token in tokens[1:]:
         if token.startswith('lib='):
             lib = token[4:]
+        elif token.startswith('as='):
+            specialized_name = token[3:]
         elif token == 'spec':
             spec = True
         elif token.count(':') >= 2:
             constants.append(token)
-    return Stage(tokens[0], lib, spec or bool(constants), tuple(constants))
+    return Stage(tokens[0], lib, spec or bool(constants), tuple(constants), specialized_name)
 
 
 def parse_render(line: str) -> Render | None:
@@ -102,12 +109,19 @@ def parse_render(line: str) -> Render | None:
     if vertex is None:
         return None
     label = next((t[6:] for t in head if t.startswith('label=')), '-')
+    linked = tuple(
+        (part[:2], stage)
+        for part in parts[3:]
+        if part[:3] in ('vl ', 'vp ', 'fl ', 'fp ')
+        if (stage := parse_stage(part[3:])) is not None
+    )
     return Render(
         tuple(t for t in head if TARGET.match(t)),
         tuple(t for t in head if LAYOUT.match(t)),
         vertex,
         parse_stage(parts[2][2:]),
         label,
+        linked,
     )
 
 
@@ -123,6 +137,15 @@ def parse_kernel(line: str) -> tuple[str, Stage] | None:
     return (fields, kernel) if kernel else None
 
 
+def kernel_links(line: str) -> tuple[tuple[str, Stage], ...]:
+    return tuple(
+        (part[0], stage)
+        for part in line.split(' | ')[1:]
+        if part[:2] in ('l ', 'p ')
+        if (stage := parse_stage(part[2:])) is not None
+    )
+
+
 def compute_line(fields: str, kernel: Stage) -> str:
     """Write a C line making `kernel` with `fields` (form=f opt=0: newComputePipelineStateWithFunction)."""
     return f'C ok=1 {fields} | k {kernel.text()} | '
@@ -133,4 +156,5 @@ def parse_specialization(line: str) -> Stage | None:
     m = re.match(r'S ok=1 (?:lib=(\S+) )?name=(\S+) k=(.*?)( \| |$)', line)
     if not m:
         return None
-    return Stage(m[2], m[1], True, tuple(t for t in m[3].split() if t.count(':') >= 2))
+    stage = parse_stage(' '.join([m[2], *(['lib=' + m[1]] if m[1] else []), m[3]]))
+    return replace(stage, spec=True)

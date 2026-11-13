@@ -69,6 +69,8 @@ public struct Metrics: Equatable, Sendable {
     /// Keys the log line cannot carry (not [a-z0-9_]+, or one of LogLine.reservedKeys), left out: the test's
     /// outcome becomes a harness FAIL naming them (Outcome.withHarnessFaults) and the run goes on.
     public private(set) var faults: [String] = []
+    /// Keys the report keeps and the log line leaves out (LogLine.format): fields too long for os_log's ~1 KiB.
+    public private(set) var reportOnly: [String] = []
 
     public init() {}
 
@@ -92,9 +94,29 @@ public struct Metrics: Equatable, Sendable {
     public mutating func merge(_ other: Metrics, prefix: String = "") {
         for key in other.keys { set(prefix + key, other.values[key]!) }
         for key in other.faults where !faults.contains(prefix + key) { faults.append(prefix + key) }
+        for key in other.reportOnly { keepInReportOnly(prefix + key) }
+    }
+
+    public mutating func keepInReportOnly(_ key: String) {
+        if values[key] != nil && !reportOnly.contains(key) { reportOnly.append(key) }
     }
 
     public var ordered: [(String, MetricValue)] { keys.map { ($0, values[$0]!) } }
+
+    /// The fields the log line carries, in order.
+    public var logged: [(String, MetricValue)] { keys.filter { !reportOnly.contains($0) }.map { ($0, values[$0]!) } }
+
+    /// Moves the longest fields but `kept` to the report until the line's fields fit in `budget` characters, and
+    /// counts them in report_only=.
+    public mutating func fitLog(within budget: Int, keeping kept: Set<String>) {
+        let width = { (field: (String, MetricValue)) in field.0.count + field.1.logText.count + 2 }
+        var total = logged.map(width).reduce(0, +)
+        while total > budget, let longest = logged.filter({ !kept.contains($0.0) }).max(by: { width($0) < width($1) }) {
+            keepInReportOnly(longest.0)
+            total -= width(longest)
+        }
+        if !reportOnly.isEmpty { set("report_only", reportOnly.count) }
+    }
 }
 
 /// What one test reports: its verdict, measurements, why it failed or was skipped, and the evidence that the

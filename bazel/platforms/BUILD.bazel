@@ -7,6 +7,7 @@
 #   macos_user_arm64   macOS user space as iOS user space builds: host twins of iOS code, e.g. NVK's (bazel/toolchains/apple)
 #   macos_arm64        this Mac: host tests and tools (the host toolchain)
 load("@bazel_skylib//rules:common_settings.bzl", "string_flag")
+load("@xcode//:defs.bzl", "XCODE_BUILD")
 load("//bazel/lint:defs.bzl", "lint_files")
 
 package(default_visibility = ["//visibility:public"])
@@ -67,6 +68,22 @@ platform(
         "@platforms//cpu:arm64",
         ":host",
     ],
+)
+
+# Where every action runs: this Mac, or a Mac remote worker (--config=rbe, tools/remote) that advertises exactly these
+# properties and has this Xcode build at the same path. The properties are part of every action's remote cache key
+# whichever of the two runs it, so both share one set of entries.
+platform(
+    name = "exec_darwin_arm64",
+    constraint_values = [
+        "@platforms//os:osx",
+        "@platforms//cpu:arm64",
+    ],
+    exec_properties = {
+        "ISA": "arm64",
+        "OSFamily": "darwin",
+        "xcode": XCODE_BUILD,
+    },
 )
 
 # The platforms a kernel_transition came from (bazel/platforms/transitions.bzl); empty outside the kernel's compiles.

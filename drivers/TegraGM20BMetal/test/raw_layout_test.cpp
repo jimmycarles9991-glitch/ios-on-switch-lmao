@@ -523,7 +523,7 @@ TEST(Layout, IsTheDisplaysTiledFramebuffer)
 {
     tgm_layout l;
     ASSERT_TRUE(tgm_layout_tiled(720, 1280, 4, &l));
-    EXPECT_EQ(l.y_log2, TEGRA_SCANOUT_TILED_BLOCK_HEIGHT_LOG2);
+    EXPECT_EQ(l.y_log2, 4);  // the DC's BLOCK_HEIGHT(4), NativeScanout.h kNativeBlockGobs
     EXPECT_EQ(l.row_bytes, 720u * 4);
     EXPECT_LE(l.bytes, 3932160u);
     for (uint32_t y = 0; y < 8; y++)

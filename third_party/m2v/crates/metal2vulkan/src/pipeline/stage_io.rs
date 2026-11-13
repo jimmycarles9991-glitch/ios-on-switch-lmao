@@ -282,6 +282,14 @@ pub struct StageIo {
     /// no math mode, records its note itself and lists none. Empty for any other function.
     #[cfg_attr(feature = "serde", serde(default))]
     pub half_blend_colors: Vec<u32>,
+    /// The two-plane extended-range attachments the fragment function writes or reads, by the
+    /// attachment's index, with the index its alpha byte is held at
+    /// (`LoweringInputs::two_plane_alphas`): its output variable there holds the raw texel's color
+    /// word alone ([`StageIo::declared_type`]) and the alpha byte's, a `uint`, is listed among
+    /// `outputs` at the alpha's index. Link refuses a stage compiled for another map than the
+    /// pipeline's (`NeedsInput(ColorWrites)`).
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub two_plane_alphas: BTreeMap<u32, u32>,
 }
 
 /// What a fragment function's write of a color attachment whose rules the draw selects does
@@ -422,7 +430,8 @@ impl StageIo {
 
     /// The type variable `v` is declared with: its `ty`, but for a color output of dual-source
     /// index 0 to an attachment among `extended_range_colors` the raw texel's, the raw format's
-    /// unsigned 32-bit components.
+    /// unsigned 32-bit components (its color word alone where `two_plane_alphas` holds its alpha
+    /// elsewhere).
     pub(crate) fn declared_type(&self, v: &IoVariable) -> IoType {
         let IoRole::Color {
             attachment,
@@ -434,7 +443,10 @@ impl StageIo {
         match self.extended_range_colors.get(&attachment) {
             Some(e) => IoType {
                 numeric: IoNumeric::Uint,
-                components: e.form.raw_components() as u8,
+                components: match self.two_plane_alphas.contains_key(&attachment) {
+                    true => 1,
+                    false => e.form.raw_components() as u8,
+                },
                 source_bits: 32,
                 bits: 32,
             },

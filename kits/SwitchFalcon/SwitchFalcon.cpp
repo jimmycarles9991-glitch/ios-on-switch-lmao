@@ -41,6 +41,38 @@ switch_falcon_result switch_falcon_load(volatile uint8_t *engine, uint64_t firmw
     return SWITCH_FALCON_OK;
 }
 
+const char *switch_falcon_stall(volatile uint8_t *engine, char *text, size_t size)
+{
+    constexpr uint32_t kIcdReadRegister = 0x8, kRegisterSp = 20, kRegisterPc = 21;
+    const uint32_t cpuctl = switch_mmio_read32(engine, SWITCH_FALCON_CPUCTL);
+    int n = snprintf(
+        text, size,
+        "falcon CPUCTL %#x IDLESTATE %#x IRQSTAT %#x MAILBOX %#x %#x EXCI %#x OS %#x DEBUGINFO %#x "
+        "DMATRFCMD %#x EXTERR %#x@%#x",
+        cpuctl, switch_mmio_read32(engine, SWITCH_FALCON_IDLESTATE), switch_mmio_read32(engine, SWITCH_FALCON_IRQSTAT),
+        switch_mmio_read32(engine, SWITCH_FALCON_MAILBOX0), switch_mmio_read32(engine, SWITCH_FALCON_MAILBOX1),
+        switch_mmio_read32(engine, SWITCH_FALCON_EXCI), switch_mmio_read32(engine, SWITCH_FALCON_OS),
+        switch_mmio_read32(engine, SWITCH_FALCON_DEBUGINFO), switch_mmio_read32(engine, SWITCH_FALCON_DMATRFCMD),
+        switch_mmio_read32(engine, SWITCH_FALCON_EXTERRSTAT), switch_mmio_read32(engine, SWITCH_FALCON_EXTERRADDR));
+    const auto room = [&] {
+        return n < 0 || static_cast<size_t>(n) >= size ? size_t(0) : size - static_cast<size_t>(n);
+    };
+    const uint32_t traced = (switch_mmio_read32(engine, SWITCH_FALCON_TRACEIDX) >> 16) & 0xff;
+    n += snprintf(text + n, room(), " trace(%u)", traced);
+    for (uint32_t i = 0; i < traced && i < 6 && room(); i++) {
+        switch_mmio_write32(engine, SWITCH_FALCON_TRACEIDX, i);
+        n += snprintf(text + n, room(), " %#x", switch_mmio_read32(engine, SWITCH_FALCON_TRACEPC) & 0xffffff);
+    }
+    n += snprintf(text + n, room(), " PC/SP");
+    for (int i = 0; i < 3 && room(); i++) {
+        switch_mmio_write32(engine, SWITCH_FALCON_ICD_CMD, kIcdReadRegister | kRegisterPc << 8);
+        const uint32_t pc = switch_mmio_read32(engine, SWITCH_FALCON_ICD_RDATA);
+        switch_mmio_write32(engine, SWITCH_FALCON_ICD_CMD, kIcdReadRegister | kRegisterSp << 8);
+        n += snprintf(text + n, room(), " %#x/%#x", pc, switch_mmio_read32(engine, SWITCH_FALCON_ICD_RDATA));
+    }
+    return text;
+}
+
 void switch_falcon_start(volatile uint8_t *engine)
 {
     switch_mmio_write32(engine, SWITCH_FALCON_IRQMSET, kIrqmsetBoot);

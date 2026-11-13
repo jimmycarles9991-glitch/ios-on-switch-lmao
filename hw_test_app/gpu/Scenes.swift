@@ -7,11 +7,14 @@ public enum Scenes {
 
     public static let all: [any GPUScene] = [
         firstSurface, CABlurChainScene(), CAVariableBlurChainScene(), CADrawThenCopyScene(), CAHotStatesScene(),
-        CAGenericStateScene(),
+        CAGenericStateScene(), FramebufferFetchScene(), FramebufferFetchDepthScene(), FetchBlendOrderScene(),
+        PassFusionScene(),
         GlyphAtlasScene(), ReplaceRegionScene(), BlitUploadScene(), SurfaceLockScene(), ClearFormatsScene(),
         ClearThenDrawScene(), InstancedDrawScene(), DepthBiasScene(), RenderThenSampleScene(), UnormBlendScene(),
         ExtendedBlendScene(), MipmapScene(), MSAAResolveScene(), MPSBlurScene(), CoreImageBlurScene(),
-        HalfArithmeticScene(), SM53ProbeScene(), XRBlendScene(), TextureKindsScene(), LatencyScene(),
+        HalfArithmeticScene(), SM53ProbeScene(), TexsF16Scene(), XRBlendScene(), TextureKindsScene(),
+        AstcInPlaceCopyScene(), AstcLayoutScene(),
+        LatencyScene(),
         LinkedFunctionScene(),
         StorageOffsetScene(),
         PixelSamplerScene(),
@@ -21,6 +24,16 @@ public enum Scenes {
         MemorylessBurstScene(),
         KernelDirectScene(),
         KernelViewScene(),
+        SharedPointerScene(),
         HeapTwinScene(),
+        PlacementHeapScene(),
+        HeapKindsScene(),
+        ArchiveMissScene(),
+        StoredMSAAScene(),
+        FreshTextureScene(),
     ]
+
+    /// QuartzCore 27's Liquid Glass (scenes27), which only iOS 27's app runs.
+    public static let glass: any GPUScene = CAGlassScene()
+    public static let glassSplit: any GPUScene = CAGlassSplitScene()
 }

@@ -109,6 +109,38 @@ TEST(RawClear, FloatNansAreQuieted)
     EXPECT_EQ(v[2], 0u);
 }
 
+TEST(RawClear, IntegerChannelsTruncateAndSaturate)
+{
+    const double in[4] = {300.9, -5.0, std::nan(""), 7.99};
+    float slots[4];
+    ASSERT_TRUE(raw::integerClearSlots(73, in, slots));  // RGBA8Uint
+    uint32_t v[4];
+    ASSERT_TRUE(raw::clearValue(73, slots, v));
+    EXPECT_EQ(v[0], 255u);
+    EXPECT_EQ(v[1], 0u);
+    EXPECT_EQ(v[2], 0u);
+    EXPECT_EQ(v[3], 7u);
+    const double wide[4] = {-200.5, 1e12, -1e12, 3.0};
+    ASSERT_TRUE(raw::integerClearSlots(114, wide, slots));  // RGBA16Sint
+    ASSERT_TRUE(raw::clearValue(114, slots, v));
+    EXPECT_EQ(v[0], uint32_t(-200));
+    EXPECT_EQ(v[1], 32767u);
+    EXPECT_EQ(v[2], uint32_t(-32768));
+    EXPECT_EQ(v[3], 3u);
+    const double big[4] = {16777217.0, 4294967296.0, 0, 0};
+    ASSERT_TRUE(raw::integerClearSlots(103, big, slots));  // RG32Uint: past a float's exact range
+    ASSERT_TRUE(raw::clearValue(103, slots, v));
+    EXPECT_EQ(v[0], 16777217u);
+    EXPECT_EQ(v[1], 0xffffffffu);
+    EXPECT_EQ(v[2], 0u);
+    const double ten[4] = {1500, 2.0, 3.0, 9.0};
+    ASSERT_TRUE(raw::integerClearSlots(91, ten, slots));  // RGB10A2Uint
+    ASSERT_TRUE(raw::clearValue(91, slots, v));
+    EXPECT_EQ(v[0], 1023u);
+    EXPECT_EQ(v[3], 3u);
+    EXPECT_FALSE(raw::integerClearSlots(80, ten, slots));
+}
+
 TEST(RawClear, AFormatNotRenderedIsRefused)
 {
     const float in[4] = {};

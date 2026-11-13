@@ -398,7 +398,6 @@ nvkm_uvmm_mthd_raw_map(struct nvkm_uvmm *uvmm, struct nvif_vmm_raw_v0 *args)
 		.mapref = false,
 	};
 	struct nvkm_memory *memory;
-	struct nvkm_tags *held;
 	void *argv = (void *)(uintptr_t)args->argv;
 	unsigned int argc = args->argc;
 	u64 handle = args->memory;
@@ -420,13 +419,9 @@ nvkm_uvmm_mthd_raw_map(struct nvkm_uvmm *uvmm, struct nvif_vmm_raw_v0 *args)
 		return PTR_ERR(memory);
 	}
 
-	/* A raw map keeps no vma to hold comptags. They stay with the memory from its first compressed map until it is
-	 * destroyed (mem.c), so every map of that memory, in any space and at any time, names the same lines (nvgpu ties them
-	 * to the dma-buf alike): the reference a map takes on tags the memory already had goes straight back. */
-	held = memory->tags;
+	/* Raw maps retain one memory-owned tag reference across every VM and remap. */
 	ret = nvkm_memory_map(memory, args->offset, vmm, &vma, argv, argc);
-	if (vma.tags && held)
-		nvkm_memory_tags_put(memory, vmm->mmu->subdev.device, &vma.tags);
+	nvkm_memory_tags_hold(memory, vmm->mmu->subdev.device, &vma.tags);
 
 	nvkm_memory_unref(&vma.memory);
 	nvkm_memory_unref(&memory);

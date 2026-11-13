@@ -37,13 +37,24 @@ impl DeviceProfile {
                 return Err(Capability::ApiVersion(v));
             }
         }
-        if let Some(&x) = req.features.difference(&f.enabled.features).next() {
+        if let Some(&x) = req
+            .features
+            .difference(&f.enabled.features)
+            .find(|&&feature| {
+                feature != VkFeature::ShaderFloat16
+                    || f.native_target != crate::device::NativeShaderTarget::Sm53
+            })
+        {
             return Err(Capability::Feature(x));
         }
         if let Some(&x) = req.extensions.difference(&f.enabled.extensions).next() {
             return Err(Capability::Extension(x));
         }
-        if let Some(&x) = req.properties.difference(&f.enabled.properties).next() {
+        if let Some(&x) = req
+            .properties
+            .difference(&f.enabled.properties)
+            .find(|&&property| !f.native_target.property(property))
+        {
             return Err(Capability::Property(x));
         }
         for (required, available, [partial, all]) in [

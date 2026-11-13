@@ -312,9 +312,10 @@ def _xnu_host_tool_impl(ctx):
             ))
             srcs.append(gen.path + "/lexer.yy.c")
 
-    # No debug information: the tool's bytes (part of every action key that runs it) name no sandbox path.
+    # No debug information: the tool's bytes (part of every action key that runs it) name no sandbox path. -Wl,-O1:
+    # given the driver's -O0, Apple's ld writes a random LC_UUID, so every build of the tool had other bytes.
     lines.append(" ".join([_TOOLCHAIN + "/clang", "-isysroot", MACOSX_SDK, "-mmacosx-version-min=14.0", "-O0", "-g0"] +
-                          ctx.attr.copts + includes + srcs + ["-o", out.path] + ctx.attr.linkopts))
+                          ctx.attr.copts + includes + srcs + ["-o", out.path, "-Wl,-O1"] + ctx.attr.linkopts))
     ctx.actions.run_shell(
         command = "\n".join(lines),
         inputs = ctx.files.srcs + ctx.files.hdrs + ctx.files.yacc + ctx.files.lex + [ctx.file._xcode_identity],

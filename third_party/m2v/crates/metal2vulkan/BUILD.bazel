@@ -1,7 +1,7 @@
 # metal2vulkan, the translator (lib metal2vulkan): crates/metal2vulkan/Cargo.toml, with the `ash` feature (the runtime's
 # and the Metal bridge's).
 load("@rules_rust//cargo:defs.bzl", "cargo_build_script")
-load("@rules_rust//rust:defs.bzl", "rust_library")
+load("@rules_rust//rust:defs.bzl", "rust_library", "rust_test")
 load("//bazel/lint:defs.bzl", "lint_files")
 load("//bazel/rust:defs.bzl", "THIRD_PARTY_LINT_EXCLUDE", "cargo_ids")
 
@@ -22,6 +22,7 @@ cargo_build_script(
     crate_features = [
         "ash",
         "default",
+        "serde",
     ],
     crate_root = "build.rs",
     data = [
@@ -47,6 +48,7 @@ rust_library(
     crate_features = [
         "ash",
         "default",
+        "serde",
     ],
     crate_root = "src/lib.rs",
     edition = "2021",
@@ -56,6 +58,7 @@ rust_library(
         ":build_script",
         "//third_party/m2v/crates/metal2vulkan-air",
         "@rust_crates//:ash",
+        "@rust_crates//:serde",
         "@rust_crates//:serde_json",
         "@rust_crates//:sha2",
     ],
@@ -69,4 +72,102 @@ filegroup(
         "build.rs",
         "build_support.rs",
     ] + glob(["src/**"]),
+)
+
+rust_test(
+    name = "bound_alignment_test",
+    args = ["tests::engine_bound_alignment::"],
+    compile_data = glob(["tests/**"]),
+    crate = ":metal2vulkan",
+    data = ["@gpu_llvm_as//:bin/llvm-as"],
+    env = {"METAL2VULKAN_LLVM_AS": "$(rootpath @gpu_llvm_as//:bin/llvm-as)"},
+    deps = ["//third_party/m2v/crates/metal2vulkan-devtools"],
+)
+
+# The raw path's argument buffers: a layout's flat runs against its own lookup, and a heap class's word
+rust_test(
+    name = "argument_runs_test",
+    args = [
+        "argument_runs",
+        "heap_code",
+    ],
+    compile_data = glob(["tests/**"]),
+    crate = ":metal2vulkan",
+    data = ["@gpu_llvm_as//:bin/llvm-as"],
+    env = {"METAL2VULKAN_LLVM_AS": "$(rootpath @gpu_llvm_as//:bin/llvm-as)"},
+    deps = ["//third_party/m2v/crates/metal2vulkan-devtools"],
+)
+
+rust_test(
+    name = "center_fragment_depth_test",
+    args = ["device::tests::profile::center_fragment_depth_contract_is_explicit_and_keys_the_profile"],
+    compile_data = glob(["tests/**"]),
+    crate = ":metal2vulkan",
+    deps = ["//third_party/m2v/crates/metal2vulkan-devtools"],
+)
+
+rust_test(
+    name = "rop_blend_test",
+    args = ["lower::fragment::rop_blend::"],
+    compile_data = glob(["tests/**"]),
+    crate = ":metal2vulkan",
+    deps = ["//third_party/m2v/crates/metal2vulkan-devtools"],
+)
+
+rust_test(
+    name = "packed_storage_test",
+    args = ["lower::fragment::fetch::packed::"],
+    compile_data = glob(["tests/**"]),
+    crate = ":metal2vulkan",
+    deps = ["//third_party/m2v/crates/metal2vulkan-devtools"],
+)
+
+rust_test(
+    name = "native_sm53_test",
+    args = ["native_sm53"],
+    compile_data = glob(["tests/**"]),
+    crate = ":metal2vulkan",
+    deps = ["//third_party/m2v/crates/metal2vulkan-devtools"],
+)
+
+rust_test(
+    name = "store_code_test",
+    args = ["lower::arith::tests::store_code::"],
+    compile_data = glob(["tests/**"]),
+    crate = ":metal2vulkan",
+    deps = ["//third_party/m2v/crates/metal2vulkan-devtools"],
+)
+
+rust_test(
+    name = "native_artifact_test",
+    args = ["pipeline::compile::tests::native::"],
+    compile_data = glob(["tests/**"]),
+    crate = ":metal2vulkan",
+    data = ["@gpu_llvm_as//:bin/llvm-as"],
+    env = {"METAL2VULKAN_LLVM_AS": "$(rootpath @gpu_llvm_as//:bin/llvm-as)"},
+    deps = ["//third_party/m2v/crates/metal2vulkan-devtools"],
+)
+
+# A slice-choosing vertex function links with the layered storage form, and a slice-reading fragment function compiled
+# for another vertex function stays refused (pipeline/link/varyings.rs)
+rust_test(
+    name = "layered_storage_link_test",
+    args = ["tests::engine_layered_storage_link::"],
+    compile_data = glob(["tests/**"]),
+    crate = ":metal2vulkan",
+    data = ["@gpu_llvm_as//:bin/llvm-as"],
+    env = {"METAL2VULKAN_LLVM_AS": "$(rootpath @gpu_llvm_as//:bin/llvm-as)"},
+    deps = ["//third_party/m2v/crates/metal2vulkan-devtools"],
+)
+
+# RGB10A8_2P_XR10 in its two planes (pipeline/two_plane.rs): the output split, the input attachments and storage views
+# of a fetch, the alpha index
+rust_test(
+    name = "two_plane_test",
+    args = ["tests::engine_extended_range::two_plane::"],
+    compile_data = glob(["tests/**"]),
+    crate = ":metal2vulkan",
+    data = ["@gpu_llvm_as//:bin/llvm-as"],
+    env = {"METAL2VULKAN_LLVM_AS": "$(rootpath @gpu_llvm_as//:bin/llvm-as)"},
+    deps = ["//third_party/m2v/crates/metal2vulkan-devtools"],
 )

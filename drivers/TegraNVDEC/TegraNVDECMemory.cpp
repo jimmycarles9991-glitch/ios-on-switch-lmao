@@ -8,6 +8,7 @@
 #include "TegraNVDEC.h"
 #include "../TegraSMMU/TegraSMMU.h"
 #include "../TegraSMMU/TegraSMMUEngine.h"
+#include "../TegraGM20B/SwitchGpuBacking.h"
 #include "../../kits/SwitchDMA/SwitchDMABuffer.h"
 
 namespace {
@@ -24,6 +25,20 @@ const TegraSMMUSwgroup kGroups[] = {
 
 TegraSMMUEngine gSpace;
 uint64_t gWired;  // atomic: bytes of every live buffer
+
+struct SwitchNVDECAllocation {
+    switch_dma_pages pages;
+    uint64_t iova, bytes;
+};
+
+void releaseAllocation(void *context)
+{
+    auto *allocation = static_cast<SwitchNVDECAllocation *>(context);
+    gSpace.unmap(allocation->iova, allocation->pages.count);
+    switch_dma_pages_free(&allocation->pages);
+    __atomic_sub_fetch(&gWired, allocation->bytes, __ATOMIC_RELAXED);
+    IODelete(allocation, SwitchNVDECAllocation, 1);
+}
 }  // namespace
 
 extern "C" int tegra_nvdec_memory_init(const switch_dma_buffer *firmware, const switch_dma_buffer *setup, char *line,
@@ -84,6 +99,23 @@ extern "C" int tegra_nvdec_buffer_alloc(uint64_t size, TegraNVDECBlock *block)
     }
     block->size = bytes;
     block->va = block->pages.va;
+    auto *allocation = IONew(SwitchNVDECAllocation, 1);
+    if (allocation) {
+        *allocation = {block->pages, block->iova, bytes};
+        block->backing =
+            switch_gpu_backing_register(block->pages.pages, block->pages.count, 0, allocation, releaseAllocation);
+    }
+    if (!block->backing) {
+        if (allocation) {
+            releaseAllocation(allocation);
+        } else {
+            gSpace.unmap(block->iova, block->pages.count);
+            switch_dma_pages_free(&block->pages);
+            __atomic_sub_fetch(&gWired, bytes, __ATOMIC_RELAXED);
+        }
+        *block = {};
+        return -12;
+    }
     return 0;
 }
 
@@ -91,9 +123,7 @@ extern "C" void tegra_nvdec_buffer_free(TegraNVDECBlock *block)
 {
     if (!block->iova)
         return;
-    gSpace.unmap(block->iova, block->pages.count);
-    switch_dma_pages_free(&block->pages);
-    __atomic_sub_fetch(&gWired, block->size, __ATOMIC_RELAXED);
+    switch_gpu_backing_release(block->backing);
     *block = {};
 }
 

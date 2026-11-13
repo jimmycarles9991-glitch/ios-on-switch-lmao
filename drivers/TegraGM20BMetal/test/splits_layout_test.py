@@ -29,8 +29,15 @@ def program(fill: int, cbufs: list[int]) -> dict:
     return {'image': bytes([fill]) * 96, 'cbufs': cbufs, 'data': b''}
 
 
-def split(fs: str, frontier_cbuf: int = 3) -> dict:
-    return {'fs': fs, 'prologue': 'p', 'frontier_cbuf': frontier_cbuf, 'prologue_cbufs': 2, 'ubo_cbufs': [2]}
+def split(fs: str, frontier_cbuf: int = 3, frontier_bytes: int = 64) -> dict:
+    return {
+        'fs': fs,
+        'prologue': 'p',
+        'frontier_cbuf': frontier_cbuf,
+        'frontier_bytes': frontier_bytes,
+        'prologue_cbufs': 2,
+        'ubo_cbufs': [2],
+    }
 
 
 class LayOutTest(unittest.TestCase):
@@ -59,12 +66,36 @@ class LayOutTest(unittest.TestCase):
     def test_a_frontier_not_after_the_wholes_buffers_is_left_out(self) -> None:
         self.assertEqual(self.lay_out({'a': split('fa', frontier_cbuf=2)}), [])
 
+    def test_a_frontier_the_runtime_refuses_is_left_out(self) -> None:
+        for frontier_bytes in (0, 24, 4112):
+            self.assertEqual(self.lay_out({'a': split('fa', frontier_bytes=frontier_bytes)}), [], frontier_bytes)
+        self.assertEqual(self.lay_out({'a': split('fa', frontier_bytes=4096)}), ['a'])
+
 
 class SplitIdentityTest(unittest.TestCase):
+    def test_batch_metadata_and_qmd_roundtrip(self):
+        qmd = [0x01020300 + i for i in range(64)]
+        for version, threads in ((0, 0), (1, 32), (1, 64)):
+            cost = (1, 0, 4000, 4000, 111, 92, 11, 7, 4) if version else (0,) * 9
+            encoded = packfile.PACK_SPLIT.pack(
+                40, 1, 2, 3, 16, 7, 6, 1, 2, bytes(range(2, 8)) + bytes(2), version, threads, *qmd, *cost
+            )
+            self.assertEqual(len(encoded), 322)
+            decoded = splits.of_record(encoded, 'fs', 'prologue')
+            self.assertEqual(decoded['batch_version'], version)
+            self.assertEqual(decoded['batch_threads'], threads)
+            self.assertEqual(decoded['ubo_cbufs'], list(range(2, 8)))
+            self.assertEqual(decoded['qmd'], qmd)
+            self.assertEqual(tuple(decoded['cost'].values()), cost)
+            decoded.update(whole=1, fs=2, prologue=3)
+            self.assertEqual(packfile.split_bytes([decoded]), encoded)
+
     def test_distinct_splits_share_whole_storage_and_keep_their_own_records(self):
         states = []
         for fill in (3, 4):
-            split_record = packfile.PACK_SPLIT.pack(40, 0, 0, 0, 16, 3, 1, 0, 2, bytes([2]) + bytes(7), *([0] * 64))
+            split_record = packfile.PACK_SPLIT.pack(
+                40, 0, 0, 0, 16, 3, 1, 0, 2, bytes([2]) + bytes(7), 0, 0, *([0] * 73)
+            )
             states.append(
                 {
                     'programs': [program(1, [ROOT]), program(2, [ROOT, SET, ubo(48)])],

@@ -6,7 +6,7 @@
 load("//bazel/lint:defs.bzl", "lint_files")
 load("//ipsw:ipsw.bzl", "ipsw_volumes_header")
 load("//kernel/xnu-12377.121.6/config:xnu_objects.bzl", "xnu_objects")
-load(":objects.bzl", "DEVELOPMENT")
+load(":objects.bzl", "DEVELOPMENT", "RELEASE")
 
 package(default_visibility = ["//visibility:public"])
 
@@ -82,5 +82,6 @@ xnu_objects(
         "**/*.s",
     ]) + ["//kernel/xnu-12377.121.6/osfmk:kperf/kperfbsd.c"],
     component = "bsd",
+    release = RELEASE,
     table = DEVELOPMENT,
 )

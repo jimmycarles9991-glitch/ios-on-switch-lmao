@@ -54,11 +54,20 @@ class RenderTest(unittest.TestCase):
                 a.layout,
                 parse_stage(f'v lib={LIB} #0:53:01 #1:53:00'),
                 parse_stage(f'f lib={LIB} #0:53:01'),
+                (),
             ),
             derived,
         )
         self.assertNotIn(a.key(), derived)
         self.assertNotIn(b.key(), derived)
+
+    def test_derived_render_keeps_linked_functions_and_specialized_names(self):
+        a = parse_render(_render('samples=1', 'v as=selected #0:53:00', 'f') + 'fl helper as=helper_selected | ')
+        b = parse_render(_render('samples=4', 'v as=selected #0:53:01', 'f') + 'fl helper as=helper_selected | ')
+        for render in [*derive.targets([a, b]), *derive.neighbours([a, b])]:
+            self.assertEqual(render.vertex.specialized_name, 'selected')
+            self.assertEqual(render.linked, a.linked)
+            self.assertEqual(parse_render(render.text()), render)
 
 
 class DispatchTest(unittest.TestCase):

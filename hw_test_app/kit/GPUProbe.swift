@@ -3,8 +3,8 @@ import Metal
 
 /// Whether the process's GPU still answers after a GPU test timed out: one fill on a fresh queue. A test that hangs
 /// keeps waiting on its own queue; when the probe hangs too, every later test that draws would only time out after it.
-enum GPUProbe {
-    static func answers(within seconds: TimeInterval = 5) async -> Bool {
+public enum GPUProbe {
+    public static func answers(within seconds: TimeInterval = 5) async -> Bool {
         let waiter = Waiter<Bool>()
         DispatchQueue.global(qos: .userInitiated).async {
             guard let device = MTLCreateSystemDefaultDevice(), let queue = device.makeCommandQueue(),

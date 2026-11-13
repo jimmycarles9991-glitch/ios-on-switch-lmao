@@ -1,0 +1,248 @@
+# The raw pack's records held to checked-in goldens (golden_files.h): the identity oracle of a pack generator change (a
+# compile path, encoders or context init made without NVK) once nothing else can make the records to compare with.
+#
+#   bazel test //drivers/TegraGM20BMetal/test/records:record_digest_test        the digest itself, over packs it writes
+#   bazel test --config=ios27 //drivers/TegraGM20BMetal/test/records:record_sample_test   the sample pack: the sampled
+#                                                                               records, section by section
+#   bazel test --config=ios27 //drivers/TegraGM20BMetal/test/records:record_corpus_test   builds the full pack: every
+#                                                                               record (manual)
+#   bazel run --config=ios27 //drivers/TegraGM20BMetal/test/records:record_goldens   builds the full pack and rewrites
+#                                                                               the kind's goldens and sample corpus
+#                                                                               (-- --out <dir>: there instead)
+#
+# The goldens are T-v5a's packs (6979fe6e5: pack v23, the direct generator with no Vulkan device); 9da14c602's (v19),
+# made while NVK's compile still vouched for every record, came before them. The sample pack
+# makes only the sampled records' states (their split corpus lines, records_<kind>_sample.corpus) with the full pack's
+# probe and link (//gpu/seed:defs.bzl), a few minutes where the full pack takes an hour.
+load("@rules_cc//cc:cc_binary.bzl", "cc_binary")
+load("@rules_cc//cc:cc_library.bzl", "cc_library")
+load("@rules_cc//cc:cc_test.bzl", "cc_test")
+load("@rules_python//python:py_binary.bzl", "py_binary")
+load("//bazel/lint:defs.bzl", "lint_files")
+load("//bazel/testing:defs.bzl", "host_test")
+load("//gpu/seed:defs.bzl", "sample_raw_pack")
+
+lint_files()
+
+KINDS = ("21H461", "24B119")
+
+GM20B_METAL = "//drivers/TegraGM20BMetal"
+
+cc_library(
+    name = "records",
+    srcs = [
+        "golden_files.cpp",
+        "record_digest.cpp",
+        "//drivers/TegraGM20BMetal:raw/runtime/raw_pack.cpp",
+    ],
+    hdrs = [
+        "golden_files.h",
+        "record_digest.h",
+        "//drivers/TegraGM20BMetal:raw/runtime/raw_pack.h",
+    ],
+    copts = [
+        "-std=c++17",
+        "-Wall",
+        "-Wextra",
+        "-Werror",
+    ],
+)
+
+cc_binary(
+    name = "write_goldens",
+    srcs = ["write_goldens.cpp"],
+    copts = ["-std=c++17"],
+    deps = [":records"],
+)
+
+filegroup(
+    name = "raw_pack_report",
+    srcs = ["//gpu/seed:raw_pack"],
+    output_group = "report",
+    tags = ["manual"],
+)
+
+py_binary(
+    name = "record_goldens",
+    srcs = ["record_goldens.py"],
+    args = select({
+        "//ipsw:" + kind: [
+            "$(rootpath :write_goldens)",
+            "$(rootpath //gpu/seed:raw_pack)",
+            kind,
+            "$(rootpaths :raw_pack_report)",
+        ]
+        for kind in KINDS
+    }),
+    data = [
+        ":raw_pack_report",
+        ":write_goldens",
+        "//gpu/seed:raw_pack",
+        GM20B_METAL + ":raw_pack_generator",
+    ],
+    tags = ["manual"],
+)
+
+cc_binary(
+    name = "record_check",
+    srcs = ["record_check.cpp"],
+    copts = ["-std=c++17"],
+    deps = [":records"],
+)
+
+host_test(
+    name = "record_digest_test",
+    srcs = ["record_digest_test.cpp"],
+    cxx_std = "c++17",
+    deps = [":records"],
+)
+
+sample_raw_pack(
+    name = "sample_pack",
+    srcs = [GM20B_METAL + ":raw_pack_generator"],
+    corpus = select({"//ipsw:" + kind: "testdata/records_%s_sample.corpus" % kind for kind in KINDS}),
+    crawl = "//gpu/seed:crawl",
+    device_libraries = "@gpu_device_data//:libraries",
+    generator = GM20B_METAL + ":raw/pack/rawpack.py",
+    tools = "//gpu/seed:tools",
+)
+
+GOLDENS = select({
+    "//ipsw:" + kind: [
+        "testdata/records_%s.bin" % kind,
+        "testdata/records_%s_sample.tsv" % kind,
+    ]
+    for kind in KINDS
+})
+
+SAMPLE_ARGS = select({
+    "//ipsw:" + kind: [
+        "$(rootpath :sample_pack)/pack.bin",
+        "$(rootpath testdata/records_%s.bin)" % kind,
+        "$(rootpath testdata/records_%s_sample.tsv)" % kind,
+        kind,
+        "--sample",
+    ]
+    for kind in KINDS
+})
+
+CORPUS_ARGS = select({
+    "//ipsw:" + kind: [
+        "$(rootpath //gpu/seed:raw_pack)/pack.bin",
+        "$(rootpath testdata/records_%s.bin)" % kind,
+        "$(rootpath testdata/records_%s_sample.tsv)" % kind,
+        kind,
+    ]
+    for kind in KINDS
+})
+
+# The sample pack's tools are the full pack's, NVK's host twin among them (until x1-nomvk replaces its compile): m2v
+cc_test(
+    name = "record_sample_test",
+    srcs = ["record_check.cpp"],
+    args = SAMPLE_ARGS,
+    copts = ["-std=c++17"],
+    data = GOLDENS + [":sample_pack"],
+    tags = ["m2v"],
+    deps = [":records"],
+)
+
+# The sample pack's fetch-free and storage records hold their forms' contracts (form_contracts.cpp)
+cc_test(
+    name = "form_contracts_test",
+    srcs = ["form_contracts.cpp"],
+    args = ["$(rootpath :sample_pack)/pack.bin"],
+    copts = ["-std=c++17"],
+    data = [":sample_pack"],
+    tags = ["m2v"],
+    deps = [":records"],
+)
+
+# raw_emit's registers of each record of the sample pack but its form records, made from the record's key fields and
+# programs as a direct compile makes them, against the record (raw/test/emitcheck.cpp)
+cc_test(
+    name = "emitcheck_test",
+    srcs = [
+        GM20B_METAL + ":raw/runtime/raw_emit.cpp",
+        GM20B_METAL + ":raw/runtime/raw_emit.h",
+        GM20B_METAL + ":raw/runtime/raw_pack.cpp",
+        GM20B_METAL + ":raw/runtime/raw_pack.h",
+        GM20B_METAL + ":raw/runtime/raw_sample_shading.h",
+        GM20B_METAL + ":raw/runtime/raw_xr.h",
+        GM20B_METAL + ":raw/runtime/raw_xr_pass.h",
+        GM20B_METAL + ":raw/test/emitcheck.cpp",
+    ],
+    args = ["$(rootpath :sample_pack)/pack.bin"],
+    copts = ["-std=c++17"],
+    data = [":sample_pack"],
+    tags = ["m2v"],
+)
+
+# raw_emit's vertex input registers of each QuartzCore state of the sample corpus, its vertex function made with this
+# Mac's Metal, against the sample pack's record (raw/test/vertexcheck.mm). cc_test takes no .mm: a copy as .cpp,
+# compiled as Objective-C++, its ../pack and ../runtime includes found from raw/runtime.
+genrule(
+    name = "vertexcheck_source",
+    srcs = [GM20B_METAL + ":raw/test/vertexcheck.mm"],
+    outs = ["vertexcheck_objc.cpp"],
+    cmd = "cp $< $@",
+)
+
+cc_test(
+    name = "vertexcheck_test",
+    srcs = [
+        ":vertexcheck_source",
+        GM20B_METAL + ":raw/pack/probe_states.h",
+        GM20B_METAL + ":raw/runtime/RawPipelineKey.h",
+        GM20B_METAL + ":raw/runtime/raw_cubic.h",
+        GM20B_METAL + ":raw/runtime/raw_emit.cpp",
+        GM20B_METAL + ":raw/runtime/raw_emit.h",
+        GM20B_METAL + ":raw/runtime/raw_pack.cpp",
+        GM20B_METAL + ":raw/runtime/raw_pack.h",
+        GM20B_METAL + ":raw/runtime/raw_sample_shading.h",
+        GM20B_METAL + ":raw/runtime/raw_written_textures.h",
+        GM20B_METAL + ":raw/runtime/raw_xr.h",
+        GM20B_METAL + ":raw/runtime/raw_xr_pass.h",
+    ],
+    args = select({
+        "//ipsw:" + kind: [
+            "$(rootpath :sample_pack)/pack.bin",
+            "$(rootpath @ipsw//:crawl_qc)",
+            "$(rootpath testdata/records_%s_sample.corpus)" % kind,
+        ]
+        for kind in KINDS
+    }),
+    copts = [
+        "-x",
+        "objective-c++",
+        "-std=c++17",
+        "-fobjc-arc",
+        "-Idrivers/TegraGM20BMetal/raw/runtime",
+    ],
+    data = [
+        ":sample_pack",
+        "@ipsw//:crawl_qc",
+    ] + select({"//ipsw:" + kind: ["testdata/records_%s_sample.corpus" % kind] for kind in KINDS}),
+    linkopts = [
+        "-framework",
+        "Foundation",
+        "-framework",
+        "Metal",
+    ],
+    tags = ["m2v"],
+)
+
+# The full pack (//gpu/seed:raw_pack): manual, run by the gate that packages a build
+cc_test(
+    name = "record_corpus_test",
+    size = "medium",
+    srcs = ["record_check.cpp"],
+    args = CORPUS_ARGS,
+    copts = ["-std=c++17"],
+    data = GOLDENS + ["//gpu/seed:raw_pack"],
+    tags = [
+        "manual",
+        "pack",
+    ],
+    deps = [":records"],
+)

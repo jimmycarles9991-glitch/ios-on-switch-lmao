@@ -38,10 +38,12 @@ typedef struct {
     uint8_t max_num_ref_frames;
     bool gaps_in_frame_num_allowed;
     uint16_t width_mbs, height_map_units;
+    uint16_t height_mbs;  // FrameHeightInMbs (7-18): (2 - frame_mbs_only_flag) * PicHeightInMapUnits
     bool frame_mbs_only, mb_adaptive_frame_field, direct_8x8_inference;
     uint32_t crop_left, crop_right, crop_top, crop_bottom;  // in luma samples
     // VUI
-    bool full_range, colour_description;
+    bool full_range, colour_description, chroma_location;
+    uint32_t chroma_top, chroma_bottom;
     uint8_t colour_primaries, transfer, matrix;
     bool bitstream_restriction;
     uint8_t max_num_reorder_frames, max_dec_frame_buffering;
@@ -91,5 +93,7 @@ typedef struct {
 int h264_parse_sps(H264ParamSets *sets, const uint8_t *nal, size_t size, uint8_t *idOut);
 int h264_parse_pps(H264ParamSets *sets, const uint8_t *nal, size_t size, uint8_t *idOut);
 int h264_parse_slice(const H264ParamSets *sets, const uint8_t *nal, size_t size, H264Slice *out);
+// 7.4.1.2.4: whether `next` starts another primary coded picture than `previous`'s (or restarts at macroblock 0).
+bool h264_slice_new_picture(const H264Slice *previous, const H264Slice *next);
 
 #endif

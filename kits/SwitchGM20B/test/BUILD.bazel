@@ -1,0 +1,116 @@
+# kits/SwitchGM20B on the host.
+#
+#   bazel test //kits/SwitchGM20B/test:all
+load("@rules_python//python:py_binary.bzl", "py_binary")
+load("@rules_python//python:py_test.bzl", "py_test")
+load("//bazel/lint:defs.bzl", "lint_files")
+load("//bazel/testing:defs.bzl", "host_library", "host_test")
+load("//kernel/rules:kernel.bzl", "kernel_driver")
+load("//kits/SwitchGM20B:defs.bzl", "SWITCH_GM20B_CAPS_INPUTS", "SWITCH_GM20B_INCLUDES")
+
+lint_files()
+
+host_test(
+    name = "classes_compile_test",
+    srcs = ["classes_compile_test.cpp"],
+    deps = ["//kits/SwitchGM20B:classes"],
+)
+
+py_binary(
+    name = "driver_constants",
+    srcs = ["driver_constants.py"],
+)
+
+GPU_SOURCES = [
+    "gpu_internal.h",
+    "gpu_inline.h",
+    "gpu_fenced.h",
+    "gpu_bringup.c",
+    "gpu_clock.c",
+    "gpu_mem.c",
+    "gpu_hang.c",
+    "gpu_stats.c",
+    "gpu_stats_tick.c",
+    "gpu_chan.c",
+    "gpu_sync.c",
+    "gpu_exec.c",
+    "gpu_present.c",
+    "gpu_scrub.c",
+    "gpu_power.c",
+]
+
+# The drivers' hand-written method numbers and fields (STRUCTURE.md D4/D5), read as text: none of these files is
+# compiled or edited here. A define prefix limits a C file to its class constants.
+DRIVER_SOURCES = {
+    "raw_gpu.cpp": "//drivers/TegraGM20BMetal:raw/runtime/raw_gpu.cpp",
+    "raw_compute.cpp": "//drivers/TegraGM20BMetal:raw/runtime/raw_compute.cpp",
+    "raw_split.cpp": "//drivers/TegraGM20BMetal:raw/runtime/raw_split.cpp",
+    "raw_cbuf.h": "//drivers/TegraGM20BMetal:raw/runtime/raw_cbuf.h",
+    "raw_zeta.cpp": "//drivers/TegraGM20BMetal:raw/runtime/raw_zeta.cpp",
+    "raw_emit.cpp": "//drivers/TegraGM20BMetal:raw/runtime/raw_emit.cpp",
+    "raw_tiled_cache.h": "//drivers/TegraGM20BMetal:raw/runtime/raw_tiled_cache.h",
+    "raw_stamps.h": "//drivers/TegraGM20BMetal:raw/runtime/raw_stamps.h",
+    "raw_counters.h": "//drivers/TegraGM20BMetal:raw/runtime/raw_counters.h",
+    "raw_mme.h": "//drivers/TegraGM20BMetal:raw/runtime/raw_mme.h",
+    "fx_mip.cpp": "//drivers/TegraGM20BMetal:raw/fx/fx_mip.cpp",
+    "nvdec.cpp": "//drivers/TegraGM20BMetal:raw/pack/nvdec.cpp",
+} | {f: "//drivers/TegraGM20B:" + f for f in GPU_SOURCES}
+
+DEFINE_PREFIXES = {f: "NVB0B5_" for f in GPU_SOURCES}
+
+genrule(
+    name = "driver_constants_h",
+    srcs = ["driver_constants.tsv"] + DRIVER_SOURCES.values(),
+    outs = ["driver_constants.h"],
+    cmd = "$(execpath :driver_constants) --rows $(execpath driver_constants.tsv) --out $@ " + " ".join([
+        "--source {}=$(execpath {}){}".format(
+            short,
+            label,
+            ":" + DEFINE_PREFIXES[short] if short in DEFINE_PREFIXES else "",
+        )
+        for short, label in DRIVER_SOURCES.items()
+    ]),
+    tools = [":driver_constants"],
+    visibility = ["//kits/SwitchGM20BEmit/test:__pkg__"],
+)
+
+host_test(
+    name = "driver_constants_test",
+    srcs = [
+        "driver_constants_test.cpp",
+        ":driver_constants_h",
+    ],
+    deps = ["//kits/SwitchGM20B:classes"],
+)
+
+py_test(
+    name = "caps_test",
+    srcs = ["caps_test.py"],
+    data = SWITCH_GM20B_CAPS_INPUTS + ["//kits/SwitchGM20B:caps_gen"],
+    deps = ["//kits/SwitchGM20B:caps_lib"],
+)
+
+host_library(
+    name = "caps_header_c",
+    srcs = ["caps_header_c.c"],
+    deps = ["//kits/SwitchGM20B:caps"],
+)
+
+host_test(
+    name = "caps_header_test",
+    srcs = ["caps_header_test.cpp"],
+    deps = [
+        ":caps_header_c",
+        "//kits/SwitchGM20B:caps",
+        "//kits/SwitchGM20B:classes",
+    ],
+)
+
+# The class headers and the capability table compiled by the kernel toolchain: never linked.
+kernel_driver(
+    name = "SwitchGM20BKernelCheck",
+    srcs = ["kernel_check.c"],
+    hdrs = ["//kits/SwitchGM20B:SwitchGM20BCaps.h"],
+    c_copts = SWITCH_GM20B_INCLUDES + ["-I$(GENDIR)/kits/SwitchGM20B"],
+    hdr_deps = ["kits/SwitchGM20B"],
+)

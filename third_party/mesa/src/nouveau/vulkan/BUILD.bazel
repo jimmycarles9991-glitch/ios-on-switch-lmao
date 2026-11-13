@@ -2,11 +2,13 @@
 # Translated from the compile, archive and generator commands of the meson builds that reproduce main's NVK dylibs.
 
 load("@rules_python//python:py_binary.bzl", "py_binary")
+load("@rules_python//python:py_test.bzl", "py_test")
 load("//bazel/lint:defs.bzl", "lint_files")
-load("//third_party/mesa/bazel:defs.bzl", "MESA_LINT_EXCLUDE", "MESA_PY_DEPS", "mesa_archive", "mesa_args", "mesa_cc_library", "mesa_file", "mesa_genrule")
+load("//third_party/mesa/bazel:defs.bzl", "MESA_LINT_EXCLUDE", "MESA_PY_DEPS", "mesa_archive", "mesa_args", "mesa_cc_library", "mesa_file", "mesa_files", "mesa_genrule")
 load("//third_party/mesa/bazel:identity.bzl", "mesa_identity_files", "nvk_compiler_identity")
 load("//third_party/mesa/bazel:link.bzl", "mesa_dylib")
 load("//third_party/mesa/bazel:rust.bzl", "NOUVEAU_RUST_ARGS", "mesa_rust_library")
+load("//third_party/mesa/src/nouveau/compiler:fs_depth_test.bzl", "fs_depth_test_binary")
 
 package(default_visibility = ["//visibility:public"])
 
@@ -318,6 +320,17 @@ mesa_cc_library(
         "nvk_switch_capture.c",
         "nvk_switch_compile.c",
         "nvk_switch_directcheck.c",
+        "nvk_switch_ir.c",
+        "nvk_switch_ir_alu.c",
+        "nvk_switch_ir_barrier.c",
+        "nvk_switch_ir_decl.c",
+        "nvk_switch_ir_glsl.c",
+        "nvk_switch_ir_instr.c",
+        "nvk_switch_ir_image.c",
+        "nvk_switch_ir_image_types.c",
+        "nvk_switch_ir_values.c",
+        "nvk_switch_offline.c",
+        "nvk_switch_rank.c",
         "nvk_switch_push.c",
         "nvk_switch_round.c",
         "nvk_switch_split.c",
@@ -325,6 +338,8 @@ mesa_cc_library(
         "nvk_switch_split_nir.c",
         "nvk_switch_split_prologue.c",
         "nvk_switch_split_proof.c",
+        "nvk_switch_turn.c",
+        "nvk_switch_xr_planes.c",
         "nvk_upload_queue.c",
         "nvk_video_session.c",
         "nvk_wsi.c",
@@ -788,4 +803,220 @@ mesa_dylib(
         "//conditions:default": "macos",
     }),
     stubs = "nvk-absent-entrypoints",
+)
+
+mesa_cc_library(
+    name = "split_batch_test_objects",
+    testonly = True,
+    c_args = NVK_C_ARGS,
+    sources = [
+        "nvk_switch_split_batch_test.c",
+        "nvk_switch_split_fold.c",
+        "nvk_switch_split_prologue.c",
+    ],
+)
+
+fs_depth_test_binary(
+    name = "split_batch_test_bin",
+    testonly = True,
+    archives = [
+        ":split_batch_test_objects",
+        "//third_party/mesa/src/compiler/nir:nir",
+        "//third_party/mesa/src/compiler:compiler",
+        "//third_party/mesa/src/util:mesa_util",
+        "//third_party/mesa/src/util:mesa_util_simd",
+        "//third_party/mesa/src/c11/impl:mesa_util_c11",
+        "//third_party/mesa/src/util/blake3",
+    ],
+)
+
+mesa_files(
+    name = "split_batch_test_host",
+    testonly = True,
+    srcs = [":split_batch_test_bin"],
+    platform = "macos",
+)
+
+py_test(
+    name = "split_batch_test",
+    size = "small",
+    srcs = ["//third_party/mesa/src/nouveau/compiler:run_host_test.py"],
+    args = [
+        "$(rootpath :split_batch_test_host)",
+        "split-batch",
+    ],
+    data = [":split_batch_test_host"],
+    main = "//third_party/mesa/src/nouveau/compiler:run_host_test.py",
+)
+
+mesa_cc_library(
+    name = "turn_test_objects",
+    testonly = True,
+    c_args = NVK_C_ARGS,
+    sources = [
+        "nvk_switch_turn.c",
+        "nvk_switch_turn_test.c",
+    ],
+)
+
+fs_depth_test_binary(
+    name = "turn_test_bin",
+    testonly = True,
+    archives = [
+        ":turn_test_objects",
+        "//third_party/mesa/src/compiler/nir:nir",
+        "//third_party/mesa/src/compiler:compiler",
+        "//third_party/mesa/src/util:mesa_util",
+        "//third_party/mesa/src/util:mesa_util_simd",
+        "//third_party/mesa/src/c11/impl:mesa_util_c11",
+        "//third_party/mesa/src/util/blake3",
+    ],
+)
+
+mesa_files(
+    name = "turn_test_host",
+    testonly = True,
+    srcs = [":turn_test_bin"],
+    platform = "macos",
+)
+
+py_test(
+    name = "turn_test",
+    size = "small",
+    srcs = ["//third_party/mesa/src/nouveau/compiler:run_host_test.py"],
+    args = [
+        "$(rootpath :turn_test_host)",
+        "turn",
+    ],
+    data = [":turn_test_host"],
+    main = "//third_party/mesa/src/nouveau/compiler:run_host_test.py",
+)
+
+mesa_cc_library(
+    name = "xr_planes_test_objects",
+    testonly = True,
+    c_args = NVK_C_ARGS,
+    sources = [
+        "nvk_switch_xr_planes.c",
+        "nvk_switch_xr_planes_test.c",
+    ],
+)
+
+fs_depth_test_binary(
+    name = "xr_planes_test_bin",
+    testonly = True,
+    archives = [
+        ":xr_planes_test_objects",
+        "//third_party/mesa/src/compiler/nir:nir",
+        "//third_party/mesa/src/compiler:compiler",
+        "//third_party/mesa/src/util:mesa_util",
+        "//third_party/mesa/src/util:mesa_util_simd",
+        "//third_party/mesa/src/c11/impl:mesa_util_c11",
+        "//third_party/mesa/src/util/blake3",
+    ],
+)
+
+mesa_files(
+    name = "xr_planes_test_host",
+    testonly = True,
+    srcs = [":xr_planes_test_bin"],
+    platform = "macos",
+)
+
+py_test(
+    name = "xr_planes_test",
+    size = "small",
+    srcs = ["//third_party/mesa/src/nouveau/compiler:run_host_test.py"],
+    args = [
+        "$(rootpath :xr_planes_test_host)",
+        "xr-planes",
+    ],
+    data = [":xr_planes_test_host"],
+    main = "//third_party/mesa/src/nouveau/compiler:run_host_test.py",
+)
+
+mesa_cc_library(
+    name = "bound_textures_test_objects",
+    testonly = True,
+    c_args = NVK_C_ARGS,
+    sources = ["nvk_switch_bound_textures_test.c"],
+)
+
+fs_depth_test_binary(
+    name = "bound_textures_test_bin",
+    testonly = True,
+    archives = [
+        ":bound_textures_test_objects",
+        ":nvk",
+    ] + NVK_ARCHIVES,
+    # the entry-point tables' weak references nothing defines, as the dylib's first link leaves them (bazel/link.bzl)
+    linkopts = [
+        "-Wl,-undefined,dynamic_lookup",
+        "-framework",
+        "IOKit",
+        "-framework",
+        "CoreFoundation",
+    ],
+)
+
+mesa_files(
+    name = "bound_textures_test_host",
+    testonly = True,
+    srcs = [":bound_textures_test_bin"],
+    platform = "macos",
+)
+
+py_test(
+    name = "bound_textures_test",
+    size = "small",
+    srcs = ["//third_party/mesa/src/nouveau/compiler:run_host_test.py"],
+    args = [
+        "$(rootpath :bound_textures_test_host)",
+        "bound-textures",
+    ],
+    data = [":bound_textures_test_host"],
+    main = "//third_party/mesa/src/nouveau/compiler:run_host_test.py",
+)
+
+mesa_cc_library(
+    name = "interlock_test_objects",
+    testonly = True,
+    c_args = NVK_C_ARGS,
+    sources = ["nvk_switch_interlock_test.c"],
+)
+
+fs_depth_test_binary(
+    name = "interlock_test_bin",
+    testonly = True,
+    archives = [
+        ":interlock_test_objects",
+        ":nvk",
+    ] + NVK_ARCHIVES,
+    # the entry-point tables' weak references nothing defines, as the dylib's first link leaves them (bazel/link.bzl)
+    linkopts = [
+        "-Wl,-undefined,dynamic_lookup",
+        "-framework",
+        "IOKit",
+        "-framework",
+        "CoreFoundation",
+    ],
+)
+
+mesa_files(
+    name = "interlock_test_host",
+    testonly = True,
+    srcs = [":interlock_test_bin"],
+    platform = "macos",
+)
+
+py_test(
+    name = "interlock_test",
+    size = "small",
+    srcs = ["//third_party/mesa/src/nouveau/compiler:run_host_test.py"],
+    args = [
+        "$(rootpath :interlock_test_host)",
+        "interlock",
+    ],
+    data = [":interlock_test_host"],
+    main = "//third_party/mesa/src/nouveau/compiler:run_host_test.py",
 )

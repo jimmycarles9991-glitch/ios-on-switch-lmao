@@ -60,12 +60,28 @@ TEST(RawSampler, InvertedClampsReadTheUpperOne)
     EXPECT_EQ(s.lodMax, 1.5f);
 }
 
+// m2v enables comparison per use (metal/sampler.rs SamplerUse::compare): a sampler keeps a compare header beside its own,
+// under its compare function, for the states that sample its slot by comparison
+TEST(RawSampler, ACompareFunctionIsTakenForItsCompareHeader)
+{
+    raw::MetalSamplerFields m;
+    m.compareFunction = 1;  // MTLCompareFunctionLess
+    raw::SamplerDesc s;
+    ASSERT_TRUE(raw::takeSampler(m, s));
+    EXPECT_EQ(s.compare, 1);
+    uint32_t w[8] = {0x26092, 0x291, 0xfff000, 0, 0, 0, 0, 0};
+    raw::compareHeader(w, s.compare);
+    EXPECT_EQ(w[0], 0x26092u | 1u << 9 | 1u << 10);
+    raw::compareHeader(w, 6);  // GreaterEqual: ZC_GEQUAL
+    EXPECT_EQ(w[0] >> 10 & 7, 6u);
+    EXPECT_EQ(w[1], 0x291u);
+    m.compareFunction = 8;
+    EXPECT_FALSE(raw::takeSampler(m, s));
+}
+
 TEST(RawSampler, WhatTheHeaderDoesNotExpressIsRefused)
 {
     raw::SamplerDesc s;
-    raw::MetalSamplerFields compare;
-    compare.compareFunction = 1;
-    EXPECT_FALSE(raw::takeSampler(compare, s));
     raw::MetalSamplerFields nan;
     nan.lodMax = std::numeric_limits<float>::quiet_NaN();
     EXPECT_FALSE(raw::takeSampler(nan, s));

@@ -48,9 +48,9 @@ struct Surface {
 		bytesPerRow = c.w * c.bpp + c.pad;
 		surface.assign(std::max<uint64_t>(l.bytes, uint64_t(bytesPerRow) * c.h), 0);
 		rows.assign((uint64_t(bytesPerRow) * c.h + 4095) & ~4095ull, 0);
-		memory.regions[kSurfaceVa] = &surface;
-		memory.regions[kSurfaceRowsVa] = &surface;
-		memory.regions[kRowsVa] = &rows;
+		memory.map(kSurfaceVa, surface);
+		memory.map(kSurfaceRowsVa, surface);
+		memory.map(kRowsVa, rows);
 	}
 
 	void move(tgm_relayout_op op, const std::vector<tgm_relayout_wait> &waits = {})
@@ -58,7 +58,7 @@ struct Surface {
 		CopyEngine ce(memory);
 		uint32_t w[TGM_RELAYOUT_DWORDS];
 		const tgm_relayout_move m = {kSurfaceVa, kSurfaceRowsVa, kRowsVa, bytesPerRow,
-					     op,         rows.size()};
+					     op,         rows.size(),    0};
 		const uint32_t n =
 			tgm_relayout_push(w, &l, &m, waits.data(), uint32_t(waits.size()));
 		ASSERT_LE(n, TGM_RELAYOUT_DWORDS);
@@ -148,7 +148,7 @@ TEST(Relayout, RoundTripIsIdentity)
 }
 
 // A tiling move follows the surface's running writers in its own push: a connection's channel and the copy engine's (whose
-// fence is in every space's fence view, gpu.c tgm_fence_kernel) are semaphore acquires ahead of its copies; its own
+// fence is in every space's fence view, gpu_chan.c tgm_fence_kernel) are semaphore acquires ahead of its copies; its own
 // channel's work needs none; a writer with no fence in the view, or past the push's acquires, is refused, never waited for.
 TEST(Relayout, TheMovesPushCarriesItsWritersAcquires)
 {
@@ -189,18 +189,96 @@ TEST(Relayout, WritersPastThePushsAcquiresAreRefused)
 	s.move(TGM_RELAYOUT_TO_ROWS, {waits, waits + n});
 }
 
+Memory *cpuMemory;
+
+uint8_t *cpuPage(uint64_t page)
+{
+	return cpuMemory->at(page);
+}
+
+TEST(Relayout, CheckpointMakesPartialInPlaceOverwriteRecoverable)
+{
+	for (const auto operation : {TGM_RELAYOUT_TILE_IN_PLACE, TGM_RELAYOUT_UNTILE_IN_PLACE}) {
+		Surface s({64, 64, 4, 64});
+		s.surface = pattern(s.surface.size(), 27);
+		if (operation == TGM_RELAYOUT_UNTILE_IN_PLACE)
+			s.move(TGM_RELAYOUT_TILE_IN_PLACE);
+		const auto before = s.surface;
+		auto expected = before;
+		if (operation == TGM_RELAYOUT_TILE_IN_PLACE)
+			tgm_layout_write(&s.l, expected.data(), 0, 0, 64, 64, before.data(),
+					 s.bytesPerRow);
+		else
+			tgm_layout_read(&s.l, before.data(), 0, 0, 64, 64, expected.data(),
+					s.bytesPerRow);
+		std::vector<uint8_t> checkpoint(4, 0);
+		constexpr uint64_t checkpointVa = 4ULL << 32;
+		s.memory.map(checkpointVa, checkpoint);
+		const tgm_relayout_move move = {kSurfaceVa,    kSurfaceRowsVa, kRowsVa,
+						s.bytesPerRow, operation,      s.rows.size(),
+						checkpointVa};
+		uint32_t words[TGM_RELAYOUT_DWORDS];
+		const uint32_t count = tgm_relayout_push(words, &s.l, &move, nullptr, 0);
+		ASSERT_LE(count, TGM_RELAYOUT_DWORDS);
+		CopyEngine ce(s.memory);
+		ce.failLaunch = 2;
+		ce.failAfterBytes = 23;
+		ce.run(words, count);
+		ASSERT_TRUE(ce.fault);
+		ASSERT_EQ(checkpoint[0], 1);
+		std::vector<uint64_t> surfacePages, rowPages;
+		for (size_t offset = 0; offset < s.surface.size(); offset += 4096)
+			surfacePages.push_back(kSurfaceVa + offset);
+		for (size_t offset = 0; offset < s.rows.size(); offset += 4096)
+			rowPages.push_back(kRowsVa + offset);
+		const tgm_relayout_pages surface = {surfacePages.data(),
+						    uint32_t(surfacePages.size())};
+		const tgm_relayout_pages rows = {rowPages.data(), uint32_t(rowPages.size())};
+		cpuMemory = &s.memory;
+		if (operation == TGM_RELAYOUT_TILE_IN_PLACE)
+			tgm_relayout_cpu(&surface, &rows, &s.l, s.bytesPerRow, 0, cpuPage);
+		else
+			tgm_relayout_rows_cpu(&surface, &rows, &s.l, s.bytesPerRow, cpuPage);
+		EXPECT_EQ(s.surface, expected);
+	}
+}
+
+TEST(Relayout, FailureBeforeCheckpointLeavesOriginalLayoutUntouched)
+{
+	Surface s({64, 64, 4, 64});
+	s.surface = pattern(s.surface.size(), 57);
+	const auto before = s.surface;
+	std::vector<uint8_t> checkpoint(4, 0);
+	constexpr uint64_t checkpointVa = 4ULL << 32;
+	s.memory.map(checkpointVa, checkpoint);
+	const tgm_relayout_move move = {
+		kSurfaceVa,    kSurfaceRowsVa, kRowsVa, s.bytesPerRow, TGM_RELAYOUT_TILE_IN_PLACE,
+		s.rows.size(), checkpointVa};
+	uint32_t words[TGM_RELAYOUT_DWORDS];
+	const uint32_t count = tgm_relayout_push(words, &s.l, &move, nullptr, 0);
+	CopyEngine ce(s.memory);
+	ce.failLaunch = 1;
+	ce.failAfterBytes = 23;
+	ce.run(words, count);
+	EXPECT_TRUE(ce.fault);
+	EXPECT_EQ(checkpoint[0], 0);
+	EXPECT_EQ(s.surface, before);
+}
+
 TEST(Relayout, WaitsForEveryWriterFirst)
 {
+	constexpr uint32_t kSemaphoreRun =
+		1u << 29 | 4u << 16 | 0x0010 >> 2;  // SEMAPHOREA..D on subchannel 0
 	Surface s(kCases[2]);
 	s.move(TGM_RELAYOUT_TO_ROWS, {{0x1000040, 7, 5}, {0x1004040, 0xfffffffe, 6}});
 	uint32_t w[TGM_RELAYOUT_DWORDS];
 	const tgm_relayout_wait waits[] = {{0x10, 1, 5}, {0x20, 2, 6}};
-	const tgm_relayout_move m = {kSurfaceVa,    kSurfaceRowsVa,       kRowsVa,
-				     s.bytesPerRow, TGM_RELAYOUT_TO_ROWS, s.rows.size()};
+	const tgm_relayout_move m = {kSurfaceVa,           kSurfaceRowsVa, kRowsVa, s.bytesPerRow,
+				     TGM_RELAYOUT_TO_ROWS, s.rows.size(),  0};
 	tgm_relayout_push(w, &s.l, &m, waits, 2);
-	EXPECT_EQ(w[0], tgm_relayout_header(0, 0x0010, 4));
-	EXPECT_EQ(w[5], tgm_relayout_header(0, 0x0010, 4));
-	EXPECT_EQ(w[10] >> 13 & 7, TGM_RELAYOUT_SUBC_COPY);
+	EXPECT_EQ(w[0], kSemaphoreRun);
+	EXPECT_EQ(w[5], kSemaphoreRun);
+	EXPECT_EQ(w[10] >> 13 & 7, kCopySubchannel);
 }
 
 }  // namespace

@@ -109,6 +109,7 @@
 
 pub(crate) mod acceleration;
 pub(crate) mod argument_buffer;
+pub(crate) mod argument_runs;
 pub(crate) mod block_decode;
 pub(crate) mod capture_assembly;
 pub(crate) mod color_resolve;
@@ -119,6 +120,7 @@ pub(crate) mod dispatch;
 pub(crate) mod extended_shadow;
 pub(crate) mod graphics;
 pub(crate) mod heap;
+pub(crate) mod heap_code;
 pub(crate) mod index_bounds;
 pub(crate) mod index_rewrite;
 pub(crate) mod indirect_clamp;
@@ -159,6 +161,7 @@ pub use argument_buffer::{
     ArgumentBufferLayout, ArgumentDescriptor, ArgumentLayoutError, ArgumentMember, ArgumentPlace,
     ArgumentType, ARGUMENT_HANDLE_BYTES,
 };
+pub use argument_runs::{flat_layouts, ArgumentRun, FlatLayout};
 pub use block_decode::{block_decode_module, BlockDecode, BlockDecodeModule};
 pub use capture_assembly::{
     capture_assembly_module, capture_settle_module, CaptureAssemblyModule, CaptureSettleModule,
@@ -189,6 +192,7 @@ pub use heap::{
     heap_write_nans_converted, HeapElement, HeapElements, HeapSource, HANDLE_ENTRY_BYTES,
     HANDLE_TABLE_CAPACITY, NEUTRAL_HEAP_ELEMENT,
 };
+pub use heap_code::{heap_class_code, heap_code_class, heap_code_holds};
 pub use index_bounds::{
     index_bounds_fill_module, index_bounds_plan_module, IndexBoundsFillModule, IndexBoundsPass,
     IndexBoundsPlanModule,
@@ -274,3 +278,10 @@ pub use ycbcr_convert::{
     YCbCrOutput, YCbCrPlanes, YCbCrRange,
 };
 pub use ycbcr_write::{ycbcr_store, ycbcr_write, ycbcr_write_module, YCbCrWriteModule};
+
+/// The two float-bit vectors for Metal's `setBlendColorRed:green:blue:alpha:` when
+/// shader blending reads [`PushField::BlendColor`](crate::pipeline::PushField::BlendColor).
+/// They include the extended-range clamps and half rounding, including the one-minus values.
+pub fn extended_blend_color_words(color: [f32; 4]) -> [u32; 8] {
+    crate::lower::arith::extended_range::blend_color::constant_words(color)
+}

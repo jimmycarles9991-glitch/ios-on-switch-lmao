@@ -40,10 +40,11 @@ void switch_idle_note_frame(void);
 /* When a frame line last fired (timebase ticks; 0: never), and, for the EMC governor, a function run in primary
  * interrupt context when one fires after none for 100 ms (frames start again). */
 uint64_t switch_idle_last_frame(void);
-void switch_idle_set_frames_started(void (*started)(void));  // NOLINT(modernize-redundant-void-arg): C too (gpu.c)
+void switch_idle_set_frames_started(void (*started)(void));  // NOLINT(modernize-redundant-void-arg): C too (gpu_exec.c)
 
-/* TegraGM20B, any context, before a channel's doorbell: the EMC governor (drivers/SwitchPower/SwitchEMC.cpp) raises
- * the memory clock ahead of the GPU's traffic. One atomic load when it is already up; never blocks. */
+/* TegraGM20B and TegraHost1x (NVDEC, VIC, NVENC, NVJPG), any context, before a channel's doorbell: the EMC governor
+ * (drivers/SwitchPower/SwitchEMC.cpp) raises the memory clock ahead of the engine's traffic. One atomic load when it
+ * is already up; never blocks. */
 void switch_emc_gpu_submit(void);
 
 /* Debug kernels: time in each state (timebase ticks), entries, and C7 requests the firmware returned from at once,

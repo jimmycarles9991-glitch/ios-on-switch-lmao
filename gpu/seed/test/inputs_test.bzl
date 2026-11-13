@@ -7,7 +7,7 @@
 - the join reads the buckets' indexes and reports, never their packs or the tools;
 - the bundle check is a validation action, so the GPU bundle is no input of anything that makes the seed;
 - the raw pack's probes read their bucket's states, the probe tools, the twin and QuartzCore's library, and only the
-  stamp reads the tools' manifest (the stack key, which every raw/ edit changes).
+  stamp reads the tools' manifest (the stack key).
 """
 
 load("@bazel_skylib//lib:unittest.bzl", "analysistest", "asserts")
@@ -52,10 +52,44 @@ def _seed_impl(ctx):
     (check,) = _actions(env, "MetalSeedCheck")
     asserts.true(env, [p for p in _names(check) if "/base/" in p] != [], "the bundle is checked")
     validation = analysistest.target_under_test(env)[OutputGroupInfo]._validation.to_list()
-    asserts.equals(env, check.outputs.to_list(), validation, "the check is a validation action")
+    (native_check,) = _actions(env, "MetalNativeCoverage")
+    asserts.equals(
+        env,
+        check.outputs.to_list() + native_check.outputs.to_list(),
+        validation,
+        "compiler identity and native coverage are validation actions",
+    )
+    native_buckets = _actions(env, "MetalNativeBucket")
+    asserts.equals(env, 4, len(native_buckets))
+    for bucket in native_buckets:
+        names = _names(bucket)
+        asserts.equals(
+            env,
+            [],
+            [p for p in names if p.endswith("MANIFEST.json")],
+            "native compilation does not read the runtime stack",
+        )
+        asserts.true(env, "--store" in bucket.argv, "native compilation sees generic libraries")
+        asserts.equals(env, 1, len([p for p in names if p.endswith(".log")]), "one native bucket input")
+    (native_stamp,) = _actions(env, "MetalNativeStamp")
+    asserts.true(
+        env,
+        [p for p in _names(native_stamp) if p.endswith("MANIFEST.json")] != [],
+        "native stamping reads the current runtime identity",
+    )
     return analysistest.end(env)
 
 _seed_test = analysistest.make(_seed_impl)
+
+def _seed_release_impl(ctx):
+    env = analysistest.begin(ctx)
+    (check,) = _actions(env, "MetalNativeCoverage")
+    asserts.true(env, "--strict" in check.argv, "release requires complete observed native render coverage")
+    return analysistest.end(env)
+
+_seed_release_test = analysistest.make(_seed_release_impl, config_settings = {
+    str(Label("//bazel:profile")): "release",
+})
 
 def _raw_impl(ctx):
     env = analysistest.begin(ctx)
@@ -67,6 +101,13 @@ def _raw_impl(ctx):
         asserts.equals(env, ["bucket{}.log".format(i)], [p.rpartition("/")[2] for p in lines], "one bucket's states")
         asserts.equals(env, [], [p for p in names if p.endswith("MANIFEST.json")], "a probe reads no stack key")
         asserts.true(env, [p for p in names if p.endswith("libvulkan_nouveau.dylib")] != [], "the twin")
+        for library in (
+            "crawl/tree/data/0.metallib",
+            "device/1.metallib",
+            "crawl/tree/root/System/Library/PrivateFrameworks/RenderBox.framework/default.metallib",
+        ):
+            asserts.true(env, "gpu/seed/test/" + library in names, "native compiler input " + library)
+        asserts.true(env, "--data" in probe.argv, "harvested libraries reach the native probe")
         asserts.true(env, probe.outputs.to_list()[0].basename == "bucket{}".format(i), "named as rawpack.py knows it")
     for mnemonic in ("MetalRawSplit", "MetalRawLink"):
         (action,) = _actions(env, mnemonic)
@@ -91,5 +132,6 @@ def seed_inputs_tests(name, crawl, raw_pack, seed):
     """
     _crawl_test(name = name + "_crawl", target_under_test = crawl)
     _seed_test(name = name + "_seed", target_under_test = seed)
+    _seed_release_test(name = name + "_release", target_under_test = seed)
     _raw_test(name = name + "_raw", target_under_test = raw_pack)
-    native.test_suite(name = name, tests = [name + "_crawl", name + "_seed", name + "_raw"])
+    native.test_suite(name = name, tests = [name + "_crawl", name + "_seed", name + "_raw", name + "_release"])

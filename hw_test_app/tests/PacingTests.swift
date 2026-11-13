@@ -21,6 +21,10 @@ final class PacingRun: NSObject {
     private var frame = 0
     private(set) var linkTimes: [CFTimeInterval] = []
     private(set) var late = 0
+    private(set) var nilDrawables = 0
+    /// The first drawable's texture and its IOSurface, as "WxH/WxH": a quarter-turned drawable on the portrait panel
+    /// shows as 1280x720/720x1280.
+    private(set) var drawableShape = "-"
     let seconds: Double
 
     init(seconds: Double, animate: @escaping (Int) -> Void, done: Waiter<Bool>) {
@@ -67,7 +71,17 @@ final class PacingRun: NSObject {
     }
 
     private func present(_ measuring: Bool) {
-        guard let queue, let drawable = probe.nextDrawable(), let commands = queue.makeCommandBuffer() else { return }
+        guard let queue else { return }
+        guard let drawable = probe.nextDrawable() else {
+            if measuring { nilDrawables += 1 }
+            return
+        }
+        if drawableShape == "-" {
+            let texture = drawable.texture
+            let surface = texture.iosurface.map { "\(IOSurfaceGetWidth($0))x\(IOSurfaceGetHeight($0))" } ?? "none"
+            drawableShape = "\(texture.width)x\(texture.height)/\(surface)"
+        }
+        guard let commands = queue.makeCommandBuffer() else { return }
         let pass = MTLRenderPassDescriptor()
         pass.colorAttachments[0].texture = drawable.texture
         pass.colorAttachments[0].loadAction = .clear
@@ -152,8 +166,11 @@ public struct PacingTest: HWTest {
         await MainActor.run { recorder.start() }
         _ = await done.wait(timeout: 15)
         try await Task.sleep(nanoseconds: 200_000_000)
-        let (linkTimes, presented, late, latencies) = await MainActor.run {
-            (recorder.linkTimes, recorder.presented, recorder.late, recorder.presentLatencies)
+        let (linkTimes, presented, late, latencies, nilDrawables, drawableShape) = await MainActor.run {
+            (
+                recorder.linkTimes, recorder.presented, recorder.late, recorder.presentLatencies,
+                recorder.nilDrawables, recorder.drawableShape
+            )
         }
         let link = Pacing(times: linkTimes, period: 1.0 / 60)
         let shown = Pacing(times: presented.sorted(), period: 1.0 / 60)
@@ -164,12 +181,15 @@ public struct PacingTest: HWTest {
         metrics.set("unshown", presented.filter { $0 <= 0 }.count)
         metrics.set("present_latency_p50_ms", Stats.percentile(latencies, 0.5), digits: 2)
         metrics.set("present_latency_p95_ms", Stats.percentile(latencies, 0.95), digits: 2)
+        metrics.set("nil_drawables", nilDrawables)
+        metrics.set("drawable", drawableShape)
         return .judged(
             [
-                ("5 s of display-link frames", link.frames >= 290),
-                ("the app missed no frame (link_missed 0)", link.missed == 0),
-                ("most probe frames presented with a time", shown.frames >= link.frames / 2),
-                ("the display missed no frame (present_missed 0)", shown.missed == 0),
+                ("nextDrawable returned nil \(nilDrawables) times (nil_drawables)", nilDrawables == 0),
+                ("\(link.frames) display-link frames in 5 s, under 290", link.frames >= 290),
+                ("the app missed \(link.missed) frames (link_missed)", link.missed == 0),
+                ("\(shown.frames) of \(link.frames) probe frames shown with a time", shown.frames >= link.frames / 2),
+                ("the display missed \(shown.missed) frames (present_missed)", shown.missed == 0),
             ], metrics)
     }
 }

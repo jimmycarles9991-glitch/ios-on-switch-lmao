@@ -24,6 +24,18 @@ public enum DurableFile {
         guard fcntl(fd, F_FULLFSYNC) == 0 else { throw failure("F_FULLFSYNC", url) }
     }
 
+    /// Appends `text` and flushes it to the card before returning: a journal line that names what runs next.
+    public static func append(_ text: String, to url: URL) throws {
+        let fd = open(url.path, O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0o644)
+        guard fd >= 0 else { throw failure("open", url) }
+        defer { close(fd) }
+        let bytes = Array(text.utf8)
+        guard bytes.withUnsafeBytes({ Darwin.write(fd, $0.baseAddress!, $0.count) }) == bytes.count else {
+            throw failure("write", url)
+        }
+        guard fcntl(fd, F_FULLFSYNC) == 0 else { throw failure("F_FULLFSYNC", url) }
+    }
+
     static func failure(_ call: String, _ url: URL) -> TestFailure {
         TestFailure("\(call) \(url.lastPathComponent): \(String(cString: strerror(errno)))")
     }

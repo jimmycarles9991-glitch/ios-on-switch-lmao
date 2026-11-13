@@ -338,6 +338,10 @@ impl ComputePipelineDescriptor {
     pub fn reflection(&self, budget: &crate::Budget) -> Result<ComputePipelineReflection, Error> {
         let mut m = Meter::new(budget);
         let kernel = stage(&self.kernel, self.max_call_stack_depth, &mut m)?;
+        self.reflection_from(kernel)
+    }
+
+    pub(crate) fn reflection_from(&self, kernel: StageReflection) -> Result<ComputePipelineReflection, Error> {
         let mut bindings = match &self.stage_input {
             Some(s) => {
                 s.check_layouts()?;

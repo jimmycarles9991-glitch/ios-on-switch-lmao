@@ -40,15 +40,23 @@ inline void check(bool ok, const char *what)
 inline bool same(const raw::RuntimeRecord &a, const raw::RuntimeRecord &b)
 {
     auto program = [](const raw::CapturedProgram &x, const raw::CapturedProgram &y) {
-        return x.id == y.id && x.image == y.image && x.data == y.data && x.cbufTypes == y.cbufTypes;
+        return x.id == y.id && x.image == y.image && x.data == y.data && x.cbufTypes == y.cbufTypes &&
+               x.gprs == y.gprs && x.boundTextures == y.boundTextures;
     };
+    bool variants = a.variants.size() == b.variants.size();
+    for (size_t i = 0; variants && i < a.variants.size(); i++)
+        variants =
+            a.variants[i].assume == b.variants[i].assume && program(a.variants[i].program, b.variants[i].program);
     const bool split = a.split == b.split && a.splitTried == b.splitTried &&
                        (!a.split || (!memcmp(&a.splitRecord, &b.splitRecord, sizeof a.splitRecord) &&
                                      program(a.splitPrograms[0], b.splitPrograms[0]) &&
                                      program(a.splitPrograms[1], b.splitPrograms[1])));
+    const bool twins = !a.strideTwin == !b.strideTwin && (!a.strideTwin || same(*a.strideTwin, *b.strideTwin));
     return !memcmp(&a.pipeline, &b.pipeline, sizeof a.pipeline) && a.keyString == b.keyString &&
-           program(a.programs[0], b.programs[0]) && program(a.programs[1], b.programs[1]) && a.blob == b.blob &&
-           a.extras == b.extras && a.restore == b.restore && a.samplers == b.samplers && split;
+           program(a.programs[0], b.programs[0]) && program(a.programs[1], b.programs[1]) &&
+           program(a.tessPrograms[0], b.tessPrograms[0]) && program(a.tessPrograms[1], b.tessPrograms[1]) &&
+           a.blob == b.blob && a.extras == b.extras && a.restore == b.restore && a.samplers == b.samplers &&
+           a.spill == b.spill && split && variants && twins;
 }
 
 inline raw::CacheKey keyOf(uint64_t stack, const std::string &key, uint8_t air)
@@ -125,7 +133,7 @@ inline void run(const std::vector<std::pair<std::string, raw::RuntimeRecord>> &r
                 _exit(0);
             } else
                 writers.push_back(pid);
-        for (int round = 0; round < 200 && getpid() == me; round++)
+        const auto readAll = [&] {
             for (const auto &[key, rec] : records) {
                 raw::RuntimeRecord back;
                 std::string why;
@@ -134,12 +142,26 @@ inline void run(const std::vector<std::pair<std::string, raw::RuntimeRecord>> &r
                 seen += found == raw::RecordCache::Found::Record;
                 torn += found == raw::RecordCache::Found::Record && !same(rec, back);
             }
-        for (pid_t pid : writers) {
-            int status = 0;
-            waitpid(pid, &status, 0);
-            check(WIFEXITED(status) && WEXITSTATUS(status) == 0, "a writer process exits");
+        };
+        // the reader reads for as long as any writer runs, and once after: a fixed number of rounds can end before the
+        // writer processes are scheduled at all
+        std::vector<int> statuses(writers.size(), -1);
+        size_t running = writers.size();
+        for (int round = 0; getpid() == me && (running || round < 200); round++) {
+            readAll();
+            for (size_t w = 0; w < writers.size(); w++) {
+                int status = 0;
+                if (statuses[w] < 0 && waitpid(writers[w], &status, WNOHANG) == writers[w]) {
+                    statuses[w] = status;
+                    running--;
+                }
+            }
         }
-        check(torn == 0 && seen > 0, "no reader sees a torn entry while four processes write");
+        readAll();
+        for (int status : statuses)
+            check(WIFEXITED(status) && WEXITSTATUS(status) == 0, "a writer process exits");
+        check(seen > 0, "the reader sees the writers' entries while four processes write");
+        check(torn == 0, "no reader sees a torn entry while four processes write");
         check(cache.store(keyOf(stack, refusedKey, 7), nullptr, refusal), "a refusal stored");
     }
     char tmp[64];

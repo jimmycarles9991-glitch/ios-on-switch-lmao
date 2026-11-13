@@ -1,0 +1,16 @@
+# kits/SwitchEngineGate on the host, over a model platform (no locks, a recorded timer, a settable clock).
+#
+#   bazel test //kits/SwitchEngineGate/test:all
+load("//bazel/lint:defs.bzl", "lint_files")
+load("//bazel/testing:defs.bzl", "host_test")
+
+lint_files()
+
+host_test(
+    name = "switch_engine_gate_test",
+    srcs = [
+        "switch_engine_gate_test.cpp",
+        "//kits/SwitchEngineGate:SwitchEngineGate.h",
+    ],
+    copts = ["-DDEVELOPMENT=1"],
+)

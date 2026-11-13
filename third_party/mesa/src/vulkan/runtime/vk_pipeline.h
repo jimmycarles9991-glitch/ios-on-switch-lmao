@@ -238,14 +238,32 @@ vk_pipeline_get_rt_ray_queries(struct vk_pipeline *pipeline);
 
 struct vk_graphics_pipeline_state;
 struct vk_shader;
+struct nir_shader;
+struct nir_shader_compiler_options;
+struct spirv_to_nir_options;
+typedef struct nir_shader *(*vk_native_nir_builder)(
+   const void *program, const struct nir_shader_compiler_options *options,
+   const struct spirv_to_nir_options *address_options,
+   const VkSpecializationInfo *specialization);
+
+struct vk_pipeline_layout;
+
+/* ios-on-switch-lmao: the shader flags a pipeline's stage compiles with */
+VkShaderCreateFlagsEXT
+vk_pipeline_to_shader_flags(VkPipelineCreateFlags2KHR pipeline_flags,
+                            mesa_shader_stage stage,
+                            struct vk_pipeline_layout *pipeline_layout);
 
 VkResult
-vk_pipeline_compile_library_stage(struct vk_device *device,
+vk_pipeline_compile_native_stage(struct vk_device *device,
                                   VkPipelineCreateFlags2KHR pipeline_flags,
                                   const void *pipeline_info_pNext,
                                   const VkPipelineShaderStageCreateInfo *info,
                                   VkPipelineLayout layout,
                                   const struct vk_graphics_pipeline_state *state,
+                                  vk_native_nir_builder native_builder,
+                                  const void *native_program,
+                                  bool *native_used,
                                   struct vk_shader **shader_out);
 
 struct vk_shader *

@@ -28,6 +28,7 @@ every checkout) it copies:
   <boot>-<stamp>.json, hwtest-summary.txt  HW Test's run reports (also kept in <state>/device-logs/hwtest) and the
                                         newest new run of each app against the runs before it (tools/hwtest)
   hwtest-gpu/<bundle id>/               HW Test's Documents/gpu: the GPU scenes' got, want and diff PNGs
+  hwtest-ui/<bundle id>/                HW Test's Documents/ui: the UI tests' failed pictures (display.pocket_strip's)
   lock-poster/                          the lock-screen poster's newest landscape render and its portrait one, as PNGs
                                         (tools/hwtest/posters.py; its verdict is in the log and hwtest-summary.txt)
   screenshots/                          the screenshots the user took on the device (Photos' DCIM)
@@ -51,7 +52,7 @@ from pathlib import Path
 if __package__ in (None, ''):
     sys.path.insert(0, str(Path(os.path.abspath(__file__)).parents[2]))
 from tools.common import files, paths
-from tools.deploy import app_journal, mkarchive
+from tools.deploy import app_journal, deployed, mkarchive
 from tools.hwtest import hwtest
 from tools.install import (
     card as cards,
@@ -221,6 +222,14 @@ def decode_panics(out: Path, kcdata: str | Path | None, log: host.Log) -> None:
             log('hung process', process, '->', summary)
 
 
+def deployed_build(data: Path) -> str:
+    """Give the IPSW build the last deploy installed on the card (deployed.json), '' where it names none."""
+    try:
+        return json.loads((renamed.data_folder(data) / deployed.NAME).read_text()).get('build', '')
+    except (OSError, ValueError):
+        return ''
+
+
 def harvest(data: Path, out: Path, log: host.Log, harvest_dir: str | None, corpus: str | None = None) -> None:
     """Merge the m2v journals of every process's cache into the checkout's corpus.log (harvest.py)."""
     # harvest_dir: the checkout's precompile directory (harvest.py and the corpus.log it merges into), relative to the
@@ -230,9 +239,14 @@ def harvest(data: Path, out: Path, log: host.Log, harvest_dir: str | None, corpu
         log('m2v harvest skipped: no', script)
         return
     corpus_file = Path(corpus or script.parent / 'corpus.log')
+    build = deployed_build(data)
+    if not build:
+        log(f"m2v harvest skipped: {deployed.NAME} names no OS build, so the journals' lines would name none")
+        return
     out.mkdir(parents=True, exist_ok=True)
+    save = ['--save', str(out / 'm2v')]
     result = subprocess.run(
-        [sys.executable, str(script), str(corpus_file), '--volume', str(data), '--save', str(out / 'm2v')],
+        [sys.executable, str(script), str(corpus_file), '--build', build, '--volume', str(data), *save],
         capture_output=True,
         text=True,
         check=False,

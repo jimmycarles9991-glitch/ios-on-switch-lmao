@@ -116,7 +116,7 @@ void switch_sleep_mark(unsigned step);
 #define switch_sleep_trail(step) switch_power_trail("step %#04x %s", (unsigned)(step), switch_sleep_step_name(step))
 
 // A step's name, or 0 for a code that is none.
-// NOLINTBEGIN(modernize-use-nullptr): C (TegraGM20B's gpu.c) reads this header too
+// NOLINTBEGIN(modernize-use-nullptr): C (TegraGM20B's gpu_*.c) reads this header too
 static inline const char *switch_sleep_step_name(unsigned step)
 {
     static const char *const names[0x40] = {

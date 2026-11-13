@@ -4,34 +4,16 @@
 // addressed by TegraGM20BLayout.h's offsets), constant fills, NON_PIPELINED launches, semaphore acquires and host1x syncpoint
 // waits and increments as the host reads them.
 #pragma once
+#include <algorithm>
 #include <cstdint>
 #include <map>
 #include <utility>
 #include <vector>
 #include <gtest/gtest.h>
 #include "drivers/TegraGM20B/TegraGM20BLayout.h"
+#include "gm20b_gpu_memory.h"
 
-// GPU memory as the model sees it: regions by GPU address
-struct Memory {
-	std::map<uint64_t, std::vector<uint8_t> *> regions;
-	uint64_t lastBase = 0;
-	std::vector<uint8_t> *last = nullptr;
-
-	uint8_t *at(uint64_t va)
-	{
-		if (last && va - lastBase < last->size())
-			return last->data() + (va - lastBase);
-		auto it = regions.upper_bound(va);
-		if (it == regions.begin())
-			return nullptr;
-		--it;
-		if (va - it->first >= it->second->size())
-			return nullptr;
-		lastBase = it->first;
-		last = it->second;
-		return last->data() + (va - lastBase);
-	}
-};
+constexpr uint32_t kCopySubchannel = 4;  // MAXWELL_DMA_COPY_A, as the kernel's channels bind it
 
 struct Side {
 	uint32_t blockSize = 0, width = 0, height = 0, depth = 0, layer = 0, origin = 0;
@@ -55,15 +37,17 @@ struct CopyEngine {
 	bool flushed = false;
 	uint32_t launches = 0;
 	bool fault = false;
+	uint32_t failLaunch = 0, failAfterBytes = 0;
 
 	explicit CopyEngine(Memory &mem) : memory(mem)
 	{
 	}
 
-	uint64_t blockLinear(const Side &s, uint32_t xB, uint32_t y) const
+	// `texelBytes`: the remap's texel, bpp()
+	uint64_t blockLinear(const Side &s, uint32_t texelBytes, uint32_t xB, uint32_t y) const
 	{
 		const uint32_t yLog2 = (s.blockSize >> 4) & 0xf;
-		return tgm_layout_offset_of(s.width * bpp(), uint8_t(yLog2), xB, y);
+		return tgm_layout_offset_of(s.width * texelBytes, uint8_t(yLog2), xB, y);
 	}
 
 	uint32_t bpp() const
@@ -90,7 +74,8 @@ struct CopyEngine {
 			ASSERT_TRUE(dstPitch);
 			for (uint32_t y = 0; y < h; y++)
 				for (uint32_t x = 0; x < w * b; x++) {
-					uint8_t *pd = memory.at(out + uint64_t(y) * m[0x0414] + x);
+					uint8_t *pd =
+						memory.at(out + uint64_t(y) * m[0x0414] + x, true);
 					if (!pd) {
 						fault = true;
 						return;
@@ -99,18 +84,24 @@ struct CopyEngine {
 				}
 			return;
 		}
+		uint32_t copied = 0;
+		const uint32_t pitchIn = m[0x0410], pitchOut = m[0x0414];
 		for (uint32_t y = 0; y < h; y++)
 			for (uint32_t x = 0; x < w * b; x++) {
-				const uint64_t s = srcPitch ? in + uint64_t(y) * m[0x0410] + x
-							    : in + blockLinear(src, x, y);
-				const uint64_t d = dstPitch ? out + uint64_t(y) * m[0x0414] + x
-							    : out + blockLinear(dst, x, y);
-				uint8_t *ps = memory.at(s), *pd = memory.at(d);
+				const uint64_t s = srcPitch ? in + uint64_t(y) * pitchIn + x
+							    : in + blockLinear(src, b, x, y);
+				const uint64_t d = dstPitch ? out + uint64_t(y) * pitchOut + x
+							    : out + blockLinear(dst, b, x, y);
+				uint8_t *ps = memory.at(s), *pd = memory.at(d, true);
 				if (!ps || !pd) {
 					fault = true;
 					return;
 				}
 				*pd = *ps;
+				if (launches == failLaunch && ++copied == failAfterBytes) {
+					fault = true;
+					return;
+				}
 			}
 	}
 
@@ -130,13 +121,25 @@ struct CopyEngine {
 						{id, m[0x0070], false, launches, flushed});
 			}
 			if (mthd == 0x001c) {
+				if (data == (2u | 1u << 24)) {
+					uint8_t *target = memory.at(
+						uint64_t(m[0x0010]) << 32 | m[0x0014], true);
+					if (!target) {
+						fault = true;
+						return;
+					}
+					ASSERT_TRUE(flushed);
+					const uint32_t value = m[0x0018];
+					__builtin_memcpy(target, &value, sizeof(value));
+					return;
+				}
 				ASSERT_EQ(data, 0x4u | 1u << 12) << "ACQ_GEQ, ACQUIRE_SWITCH";
 				acquires.emplace_back(uint64_t(m[0x0010]) << 32 | m[0x0014],
 						      m[0x0018]);
 			}
 			return;
 		}
-		ASSERT_EQ(subc, TGM_RELAYOUT_SUBC_COPY);
+		ASSERT_EQ(subc, kCopySubchannel);
 		m[mthd] = data;
 		if (mthd >= 0x0728 && mthd < 0x0740)
 			setSide(src, mthd - 0x0728, data);
@@ -152,14 +155,36 @@ struct CopyEngine {
 		*f[at / 4] = data;
 	}
 
+	// The pushbuffer at GPU address `va`, fetched through the page table: an unmapped push faults.
+	void runAt(uint64_t va, uint32_t dwords)
+	{
+		std::vector<uint32_t> words;
+		if (!memory.fetch(va, dwords, words)) {
+			fault = true;
+			return;
+		}
+		run(words.data(), dwords);
+	}
+
 	void run(const uint32_t *w, uint32_t n)
 	{
 		for (uint32_t i = 0; i < n;) {
 			const uint32_t h = w[i++], op = h >> 29, count = (h >> 16) & 0x1fff,
 				       subc = (h >> 13) & 7, mthd = (h & 0xfff) << 2;
-			ASSERT_EQ(op, 1u) << "INC headers only";
-			for (uint32_t k = 0; k < count; k++)
+			if (op == 4) {  // IMMD_DATA_METHOD: the count field is the value
+				method(subc, mthd, count);
+				if (fault)
+					return;
+				continue;
+			}
+			ASSERT_EQ(op, 1u) << "INC and immediate headers only: the host raises "
+					     "PBENTRY on header "
+					  << std::hex << h << " at word " << std::dec << i - 1;
+			for (uint32_t k = 0; k < count; k++) {
 				method(subc, mthd + 4 * k, w[i++]);
+				if (fault)
+					return;
+			}
 		}
 	}
 };

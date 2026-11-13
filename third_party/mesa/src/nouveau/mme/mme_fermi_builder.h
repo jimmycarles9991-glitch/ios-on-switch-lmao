@@ -16,7 +16,7 @@
 extern "C" {
 #endif
 
-#define MME_FERMI_BUILDER_MAX_INSTS 128
+#define MME_FERMI_BUILDER_MAX_INSTS 512
 
 enum mme_fermi_instr_parts {
    MME_FERMI_INSTR_PART_OP     = BITFIELD_BIT(0),

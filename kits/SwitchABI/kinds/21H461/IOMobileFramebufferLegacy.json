@@ -40,6 +40,7 @@
     "296": "validateSwap",
     "306": "platformFrameInfoNotify",
     "307": "sendFrameInfo",
+    "326": "setEdrFactor",
     "337": "collectCompletionReports",
     "338": "platformRefreshRates",
     "345": "areTimingsEnabled",
@@ -47,7 +48,8 @@
   },
   "fields": {
     "displayWidth": "0x16b0",
-    "displayHeight": "0x16b4"
+    "displayHeight": "0x16b4",
+    "edrScalingEnabled": "0x1878"
   },
   "constants": {
     "swapQueueCurrent": "0x1560",
@@ -271,6 +273,7 @@
     "vtable": "0xfffffff006f38560",
     "gMetaClass": "0xfffffff007b35940",
     "native_legacy_frame_info_notify": "0xfffffff0067968b4",
-    "native_legacy_frame_info_enqueue": "0xfffffff00677ae18"
+    "native_legacy_frame_info_enqueue": "0xfffffff00677ae18",
+    "setEdrFactor": "0xfffffff0067a017c"
   }
 }

@@ -44,7 +44,7 @@ class FilesystemImageTest(unittest.TestCase):
         self.assertEqual(prepare.call_args.args[0].sd, str(image))
 
     def test_early_hardware_milestones_allow_an_empty_card(self):
-        for milestone in ('cores', 'display', 'sd'):
+        for milestone in ('cores', 'display', 'gpu', 'sd'):
             with (
                 self.subTest(milestone=milestone),
                 mock.patch.object(check.sys, 'argv', ['check', '--kind=ios27', f'--until={milestone}', '--sd=none']),

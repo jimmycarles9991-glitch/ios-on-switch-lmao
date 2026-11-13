@@ -36,9 +36,9 @@ common --incompatible_strict_action_env
 # Every action runs sandboxed (darwin-sandbox: read-only declared inputs, declared outputs only). No action needs an
 # unsandboxed fallback, so there is none: a new one that tries to read undeclared inputs fails instead of passing.
 build --spawn_strategy=sandboxed
-# One exception, debug only: the crates the debug profile compiles incrementally (bazel/rust/defs.bzl, INCREMENTAL_CRATES)
-# keep rustc's sessions below the output base, so their two Rust actions are tagged no-sandbox and run here unsandboxed;
-# every other Rust action (and every action of release) stays sandboxed.
+# One exception, debug only and off by default (--//bazel/rust:incremental): crates compiled incrementally
+# (bazel/rust/defs.bzl, INCREMENTAL_CRATES) keep rustc's sessions below the output base, so their two Rust actions are
+# tagged no-sandbox and run here unsandboxed; every other Rust action (and every action of release) stays sandboxed.
 build:debug --strategy=Rustc=sandboxed,local
 build:debug --strategy=RustcMetadata=sandboxed,local
 # The other exception: iOS 27's translation attaches and mounts disk images (hdiutil, diskutil), which no sandbox
@@ -113,8 +113,9 @@ build:dev --config=debug
 # xnu-10063, iPad7,1), ios27 is iPadOS 27.2 on xnu-12377 for iPad12,1.
 common:ios17 --//ipsw:kind=21H461
 common:ios27 --//ipsw:kind=24B119
-# agent: what an agent worktree adds on the shared machine (16 cores, many agents at once): fewer parallel actions.
-build:agent --jobs=4
+# agent: what an agent worktree adds on the shared machine (16 cores, many agents at once): four cores of local work.
+# --jobs bounds the actions in flight, remote ones included; local_resources alone keeps local work to four at a time.
+build:agent --jobs=32
 build:agent --local_resources=cpu=4
 # reproducible-check: ignore every cache so each action really runs, and write an execution log; `bazel run
 # //tools/repro:check` builds twice like this in two fresh output bases and diffs every artifact bit for bit.
@@ -128,6 +129,32 @@ build:remote --remote_upload_local_results=true
 build:remote --remote_timeout=120s
 build:remote --remote_cache_compression
 build:remote --experimental_remote_cache_eviction_retries=5
+build:remote --config=rbe
+# rbe: actions run on the remote workers behind that cache (tools/remote), and only top-level outputs come back here.
+# The per-user file names the executor (`build:rbe --remote_executor=grpc://host:port`); without one the remote
+# strategy is skipped and actions build here.
+build:rbe --spawn_strategy=remote,sandboxed
+build:rbe --strategy=Rustc=remote,sandboxed,local
+build:rbe --strategy=RustcMetadata=remote,sandboxed,local
+# A worker that is gone, or a scheduler with none left, costs one failed request per action, then it builds here.
+# Bazel runs that fallback unsandboxed and has no flag to sandbox it; tools/remote/README.md keeps its results out of
+# the shared cache on the Macs that name an executor (every cache user expands rbe through remote, executor or not).
+build:rbe --remote_local_fallback
+build:rbe --remote_download_outputs=toplevel
+# rules_rust's process_wrapper is stripped (-Cstrip=symbols) with rust-objcopy from the toolchain's sysroot, and NVK's
+# 1.96.1 toolchain (third_party/mesa/bazel/repos.bzl) does not declare it: a worker has no such file, while the
+# sandbox's links lead into the repository that does. Declaring it there would change NVK's compiler identity, so that
+# one small compile stays here.
+build:rbe "--strategy_regexp=^Compiling Rust .without process_wrapper=sandboxed"
+
+# nom2v: the m2v deletion's dry run. Bazel loads m2v's runtime crate, Mesa's NVK and its dylibs (//gpu/nvk) as deleted
+# packages, and leaves out the tests tagged m2v (they test the fallback itself, or still need it). With --keep_going,
+# whatever else fails to load, build or pass is what the deletion still has to move:
+#   bazel test --config=nom2v //drivers/... //kits/... //hw_test_app/... //tools/... //gpu/...
+common:nom2v --deleted_packages=third_party/m2v/crates/metal2vulkan-runtime,third_party/mesa/src/nouveau/vulkan,gpu/nvk
+test:nom2v --build_tests_only
+test:nom2v --test_tag_filters=-m2v
+build:nom2v --keep_going
 
 # The default preset.
 build --config=debug

@@ -41,7 +41,8 @@
 #                            below 768x1024 and every other screen's unchanged; the home grid the row of screen type
 #                            0x68, the one every scale's screen falls through to; the switcher's landscape-only card
 #                            scale keeping the shipped calls and exit; both copies of WidgetKit's placeholder deadline;
-#                            WidgetKit's archived image limit at 2x; only the grid and WidgetKit's two applied at scale 1
+#                            WidgetKit's archived image limit at 2x; the scroll edge keyline's two ladders sending every
+#                            scale but 3 to the 2x row; only the grid and WidgetKit's two applied at scale 1
 #   xnu_page_ratio_test      16 KiB VM pages over the 4 KiB granule: pmap.c's write_pte_fast (both trees) writes a
 #                            VM page as four consecutive 4 KiB frames, repeats empty and compressed entries, refuses an
 #                            unaligned PTE
@@ -364,6 +365,22 @@ _UI_SCALE_SITES_DATA = [
     "//kernel/xnu-12377.121.6/osfmk:vm/vm_shared_region.c",
 ]
 
+copy_file(
+    name = "switch_timebase_24B119",
+    src = "//kernel/xnu-12377.121.6/bsd:vm/switch_timebase_24B119.h",
+    out = "vm/switch_timebase_24B119.h",
+)
+
+host_test(
+    name = "xnu_timebase_24B119_test",
+    srcs = _UI_SCALE_SITES_HDRS + [
+        "vm/switch_timebase_24B119.h",
+        "xnu_timebase_24B119_test.cpp",
+    ],
+    includes = ["."],
+    target_compatible_with = ["@platforms//cpu:arm64"],
+)
+
 host_test(
     name = "xnu_ui_scale_sites_test",
     srcs = _UI_SCALE_SITES_HDRS + ["xnu_ui_scale_sites_test.cpp"],
@@ -653,4 +670,20 @@ host_test(
         "CoreFoundation",
     ],
     deps = [":prefs"],
+)
+
+copy_file(
+    name = "switch_timebase_21H461",
+    src = "//kernel/xnu-10063.141.1/bsd:vm/switch_timebase_21H461.h",
+    out = "vm/switch_timebase_21H461.h",
+)
+
+host_test(
+    name = "xnu_timebase_21H461_test",
+    srcs = _UI_SCALE_SITES_HDRS + [
+        "vm/switch_timebase_21H461.h",
+        "xnu_timebase_21H461_test.cpp",
+    ],
+    includes = ["."],
+    target_compatible_with = ["@platforms//cpu:arm64"],
 )

@@ -33,6 +33,7 @@
 #include <IOKit/system.h>
 #include <IOKit/IOLib.h>
 #include <IOKit/IOMemoryDescriptor.h>
+#include <switch/memory_attachment.h>
 /* Native board kernels map driver-owned (managed) pages through physical descriptors on purpose: GPU buffer views and the
  * scanout hand-off. The DEVELOPMENT report below then ran once per segment of every such mapping, with a backtrace, hundreds of
  * times a second while the UI animates (int-148 msgbuf), and pushed every other message out of the 128 KiB buffer. */
@@ -2720,6 +2721,7 @@ IOGeneralMemoryDescriptor::getPreparationID( void )
 void
 IOMemoryDescriptor::cleanKernelReserved( IOMemoryDescriptorReserved * reserved )
 {
+	SwitchMemoryAttachment::clear(reserved);
 	if (reserved->creator) {
 		task_deallocate(reserved->creator);
 		reserved->creator = NULL;
@@ -2734,10 +2736,7 @@ IOMemoryDescriptor::cleanKernelReserved( IOMemoryDescriptorReserved * reserved )
 IOMemoryDescriptorReserved *
 IOMemoryDescriptor::getKernelReserved( void )
 {
-	if (!reserved) {
-		reserved = IOMallocType(IOMemoryDescriptorReserved);
-	}
-	return reserved;
+	return SwitchMemoryAttachment::prepare(this);
 }
 
 void

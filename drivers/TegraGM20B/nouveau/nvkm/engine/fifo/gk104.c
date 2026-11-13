@@ -716,7 +716,7 @@ gk104_fifo_intr(struct nvkm_inth *inth)
 
 	if (stat & 0x80000000) {
 		nvkm_wr32(device, 0x002100, 0x80000000);
-		nvkm_event_ntfy(&fifo->nonstall.event, 0, NVKM_FIFO_NONSTALL_EVENT);
+		nvkm_event_ntfy_active(&fifo->nonstall.event, 0, NVKM_FIFO_NONSTALL_EVENT);
 		stat &= ~0x80000000;
 	}
 

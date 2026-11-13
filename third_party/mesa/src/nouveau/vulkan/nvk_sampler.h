@@ -24,6 +24,11 @@ struct nvk_sampler {
 
    struct {
       uint32_t desc_index;
+      /* Switch: the header the sampler table holds at desc_index, kept for
+       * a device of no queues, which has no table: the raw GM20B path's
+       * direct compile reads it there (nvk_switch_compile.c).
+       */
+      struct nvk_sampler_header header;
    } planes[NVK_MAX_SAMPLER_PLANES];
 };
 

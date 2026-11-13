@@ -1,0 +1,61 @@
+{
+  "format": "iterated-blend/1",
+  "name": "rung3-sbt.u",
+  "passes": 5,
+  "alpha": false,
+  "instructions": [
+    "0x00006001",
+    "0x30005401",
+    "0x00609031",
+    "0x30384201",
+    "0x00609029"
+  ],
+  "constants": [],
+  "methods": [
+    [
+      4836,
+      0
+    ],
+    [
+      4924,
+      1
+    ],
+    [
+      4928,
+      32774
+    ],
+    [
+      4932,
+      16385
+    ],
+    [
+      4936,
+      16384
+    ],
+    [
+      4940,
+      32774
+    ],
+    [
+      4944,
+      16385
+    ],
+    [
+      4952,
+      17155
+    ],
+    [
+      4960,
+      1
+    ]
+  ],
+  "restore": [
+    [
+      4836,
+      1
+    ]
+  ],
+  "rgb": "src.rgb * dst.a - src.a * dst.rgb + dst.rgb * (1 - src.a) + src.rgb * (1 - dst.a)",
+  "a": "saturate(src.a + dst.a - src.a * dst.a)",
+  "tolerance": 2
+}

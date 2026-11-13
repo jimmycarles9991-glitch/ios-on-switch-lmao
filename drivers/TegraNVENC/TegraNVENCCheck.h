@@ -10,8 +10,12 @@
 // references) are bounded by their buffers too. Surfaces are bounded for every reading of the chroma methods
 // (TegraNVENCABI.h TEGRA_NVENC_CHROMA_*), and for block-linear heights up to four GOBs.
 // Everything that would make the firmware write elsewhere is refused: ME-only and hybrid outputs, MPEC/AQ/stats-FIFO
-// dumps, two-pass and picture-level RC state, weighted prediction tables, B pictures, fields, MVC, encryption.
-// Every job must run with the engine's GP timer on and at most 1 << 27 cycles, as NVDEC's.
+// dumps, two-pass and picture-level RC state, weighted prediction tables, fields, MVC, encryption.
+// B pictures are NVIDIA's T210 driver's (libnvtvmr, TegraNVENC/nvidia/SOURCE): not references, one list-0 and one
+// list-1 reference in two slots, spatial direct prediction, the colocated motion of the list-1 reference read through
+// IN_COLOC_DATA (bounded as the colocated output is), its temporal distances and direct scale factor.
+// Every job must run with the engine's GP timer on. Both apps arm it with width x height x 24 cycles, at most 0x1600000
+// (H.264 app 0x3217-0x3256); neither reads gpTimer_timeout_val, which is bounded below as NVDEC's is.
 // Only progressive 4:2:0 8-bit H.264 frames, one slice, one control of each kind.
 // Slicing is the one NVIDIA's own T210 driver uses (TegraNVENC/nvidia/SOURCE): slice_mode 0 (the firmware walks the
 // slice control array, here one control of exactly the picture's macroblocks, as the H.265 checker requires of its
@@ -29,14 +33,49 @@
 extern "C" {
 #endif
 
+// A list entry's reference slot, or -1: the slot << 1 with bit 0 the bottom field (H.264 app 0x895d-0x89a2 gives the
+// engine an entry's bits 1-4 as the slot and bit 0 as the parity, as app 3 does), here a frame, with its luma relocated
+// and its chroma relocated or at the config offset.
+static inline int tegra_nvenc_h264_slot(int entry, const TegraNVENCRelocs *r, const nvenc_h264_surface_cfg_s *refpic)
+{
+    if (entry < 0 || (entry & 1) || entry >= 2 * TEGRA_NVENC_REFS)
+        return -1;
+    const int slot = entry >> 1;
+    return r->refLuma[slot] && (r->refChroma[slot] || refpic->chroma_top_frm_offset) ? slot : -1;
+}
+
+// H.264 8-201..8-203 from the temporal distances in frames (NVIDIA's driver states POC differences / 2).
+static inline int tegra_nvenc_h264_dist_scale(int l0, int l1)
+{
+    const int tb = 2 * l0, td = 2 * (l0 - l1);
+    const int tx = (16384 + td / 2) / td;
+    const int scale = (tb * tx + 32) >> 6;
+    return scale < -1024 ? -1024 : scale > 1023 ? 1023 : scale;
+}
+
+// A B picture's temporal distances (list 0 ahead, list 1 behind) and the direct scale factor of that pair, every
+// other entry -1, as NVIDIA's T210 driver writes them (libnvtvmr eval, TegraNVENC/nvidia/SOURCE).
+static inline bool tegra_nvenc_h264_b_distances(const nvenc_h264_pic_control_s *pc)
+{
+    const int l0 = (signed char)pc->temp_dist_l0[0], l1 = (signed char)pc->temp_dist_l1[0];
+    if (l0 < 1 || l1 > -1)
+        return false;
+    for (uint32_t i = 1; i < 8; i++) {
+        if ((signed char)pc->temp_dist_l0[i] != -1 || (signed char)pc->temp_dist_l1[i] != -1)
+            return false;
+    }
+    for (uint32_t i = 0; i < 64; i++) {
+        const short expected = i ? -1 : (short)tegra_nvenc_h264_dist_scale(l0, l1);
+        if (pc->dist_scale_factor[i / 8][i % 8] != expected)
+            return false;
+    }
+    return true;
+}
+
 // avail[i]: bytes from entry i's relocated address to the end of its buffer (ignored for values).
 // Returns NULL when the submit is acceptable, else the reason.
 static inline const char *tegra_nvenc_check(const TegraNVENCSubmit *s, const uint64_t *avail)
 {
-    enum {
-        REFS = 16
-    };
-
     if (s->codec == TEGRA_NVENC_CODEC_H265)
         return tegra_nvenc_check_h265(s, avail);
     if (s->codec != TEGRA_NVENC_CODEC_H264)
@@ -95,7 +134,7 @@ static inline const char *tegra_nvenc_check(const TegraNVENCSubmit *s, const uin
         return "sequence parameters";
     const nvenc_h264_pps_data_s *pps = &p->pps_data;
     if (pps->weighted_bipred_idc || pps->weighted_pred_flag || pps->num_ref_idx_l1_active_minus1 ||
-        pps->num_ref_idx_l0_active_minus1 >= REFS || pps->reserved0)
+        pps->num_ref_idx_l0_active_minus1 >= TEGRA_NVENC_REFS || pps->reserved0)
         return "picture parameters";
 
     const nvenc_h264_rc_s *rc = &p->rate_control;
@@ -108,7 +147,8 @@ static inline const char *tegra_nvenc_check(const TegraNVENCSubmit *s, const uin
         return "rate control mode";
 
     const nvenc_h264_pic_control_s *pc = &p->pic_control;
-    if (pc->pic_struct || pc->pic_type == 1)
+    const bool b = pc->pic_type == 1;
+    if (pc->pic_struct || (b && pc->ref_pic_flag))
         return "picture structure or type";
     if (pc->base_view != 0 || pc->view_id || pc->priority_id || pc->temporal_id || pc->anchor_pic_flag ||
         pc->inter_view_flag || pc->opm_enable)
@@ -148,34 +188,44 @@ static inline const char *tegra_nvenc_check(const TegraNVENCSubmit *s, const uin
     const nvenc_h264_me_control_s *me = (const nvenc_h264_me_control_s *)(s->setup + pc->me_control_offset);
     if (me->me_only_mode || me->mv_only_enable)
         return "ME-only";
-    // List-1 and bi-predicted partition enables pass (NVIDIA's T210 driver sets them in IDR and P pictures): with B
-    // pictures refused and every list-1 entry unused (below) they name no reference. Direct and B skip do not.
+    // The colocated motion hint reads IN_COLOC_DATA (H.264 app 0x5866-0x588a, its check 0x311a-0x315c): a B picture's,
+    // as NVIDIA's T210 driver sets it (libnvtvmr 0x2ebd8-0x2ebe4), and only there.
+    if (me->predsrc.coloc_enable != b)
+        return "ME colocated hint";
+    // List-1 and bi-predicted partition enables pass in IDR and P pictures too (NVIDIA's T210 driver sets them there):
+    // every list-1 entry of those is unused (below), so they name no reference. Spatial direct prediction is a B
+    // picture's, from that driver's default bdirectMode (libnvtvmr 0x32f00-0x32f30, written per picture at 0x2e37c);
+    // temporal direct and B_Skip are off, as there.
     const nvenc_h264_md_control_s *md = (const nvenc_h264_md_control_s *)(s->setup + pc->md_control_offset);
-    if (md->bdirect_mode || md->bskip_enable || md->ssim_rdo || md->calc_ssim)
+    if (md->bdirect_mode != (b ? 1u : 0u) || md->bskip_enable || md->ssim_rdo || md->calc_ssim)
         return "mode decision";
 
-    // References: every list-0 entry a P picture may use names a slot with both planes relocated. An unused entry is
-    // -2, as NVIDIA's T210 driver writes it (the firmware keeps an entry's low 5 bits as its DPB index, H.264 app
-    // 0x8951: -2 is 30, no slot this checker admits). Every relocated slot is bounded, used or not: the app hands all
-    // 16 to the engine on every picture (0x80a1).
-    const uint32_t refs = pc->pic_type == 0 ? pps->num_ref_idx_l0_active_minus1 + 1u : 0u;
-    if (refs && slice->num_ref_idx_active_override_flag &&
-        slice->num_ref_idx_l0_active_minus1 != pps->num_ref_idx_l0_active_minus1)
+    // References: every list-0 entry a P picture may use, and a B picture's one list-0 and one list-1 entry in two
+    // different slots (tegra_nvenc_h264_slot). An unused entry is -2, as NVIDIA's T210 driver writes it. Every
+    // relocated slot is bounded, used or not: the app hands all 16 to the engine on every picture (0x80a1).
+    const uint32_t refs0 = pc->pic_type == 0 ? pps->num_ref_idx_l0_active_minus1 + 1u : b ? 1u : 0u;
+    const uint32_t refs1 = b ? 1u : 0u;
+    if (b && pps->num_ref_idx_l0_active_minus1)
+        return "reference count";
+    if (refs0 && slice->num_ref_idx_active_override_flag &&
+        (slice->num_ref_idx_l0_active_minus1 != pps->num_ref_idx_l0_active_minus1 ||
+         slice->num_ref_idx_l1_active_minus1))
         return "reference count override";
+    int slots[2] = {-1, -1};
     for (uint32_t i = 0; i < 8; i++) {
-        if ((signed char)pc->l1[i] != -2)
-            return "list 1";  // char's signedness is the ABI's
-        if (i >= refs) {
-            if ((signed char)pc->l0[i] != -2)
-                return "list 0 length";
-            continue;
-        }
-        const int slot = (signed char)pc->l0[i];  // NOLINT(bugprone-signed-char-misuse): signed, -2 is unused
-        if (slot < 0 || slot >= REFS || !r.refLuma[slot] ||
-            (!r.refChroma[slot] && !p->refpic_cfg.chroma_top_frm_offset))
+        const int l0 = (signed char)pc->l0[i], l1 = (signed char)pc->l1[i];  // char's signedness is the ABI's
+        if (i >= refs1 && l1 != -2)
+            return "list 1";
+        if (i >= refs0 && l0 != -2)
+            return "list 0 length";
+        if (i < refs0 && (slots[0] = tegra_nvenc_h264_slot(l0, &r, &p->refpic_cfg)) < 0)
+            return "reference slot";
+        if (i < refs1 && (slots[1] = tegra_nvenc_h264_slot(l1, &r, &p->refpic_cfg)) < 0)
             return "reference slot";
     }
-    for (uint32_t slot = 0; slot < REFS; slot++) {
+    if (b && (slots[0] == slots[1] || !tegra_nvenc_h264_b_distances(pc)))
+        return "B references";
+    for (uint32_t slot = 0; slot < TEGRA_NVENC_REFS; slot++) {
         if (!r.refLuma[slot] && !r.refChroma[slot])
             continue;
         if (!r.refLuma[slot])
@@ -191,7 +241,10 @@ static inline const char *tegra_nvenc_check(const TegraNVENCSubmit *s, const uin
         return "bitstream";
     if (pc->hist_buf_size < tegra_nvenc_history_bytes(width, height) || pc->hist_buf_size > r.history)
         return "history";
-    if (r.colocOut && r.colocOut < (uint64_t)mbs * sizeof(nvenc_h264_coloc_mb_s))
+    if (b != (r.colocIn != 0))
+        return "colocated input";
+    if ((r.colocOut && r.colocOut < (uint64_t)mbs * sizeof(nvenc_h264_coloc_mb_s)) ||
+        (r.colocIn && r.colocIn < (uint64_t)mbs * sizeof(nvenc_h264_coloc_mb_s)))
         return "colocated buffer";
     if (r.mepredIn && (r.mepredIn < (uint64_t)mbs * TEGRA_NVENC_MEPRED_BYTES_PER_MB ||
                        r.mepredOut < (uint64_t)mbs * TEGRA_NVENC_MEPRED_BYTES_PER_MB))

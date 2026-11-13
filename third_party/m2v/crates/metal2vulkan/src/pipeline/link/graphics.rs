@@ -445,8 +445,18 @@ pub fn graphics_state(
         None => None,
     };
     let mut input_attachments = Vec::new();
+    let alphas = crate::pipeline::two_plane::alphas(&r.color_attachments, p);
     for d in fs.map(|f| f.descriptors.as_slice()).unwrap_or_default() {
         if let ResourceKind::InputAttachment(color) = d.slot.kind {
+            // A two-plane attachment's alpha byte, read beside its word.
+            if crate::pipeline::two_plane::plane_of(&alphas, color).is_some() {
+                input_attachments.push(InputAttachmentUse {
+                    color_index: color,
+                    input_attachment_index: color,
+                    format_class: SampledType::Uint,
+                });
+                continue;
+            }
             let attachment = r
                 .color_attachments
                 .get(color as usize)

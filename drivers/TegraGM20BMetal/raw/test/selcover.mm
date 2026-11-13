@@ -4,7 +4,8 @@
 //   raw     a method of the facade's class (the device: of the raw device class itself, not one it inherits);
 //   zero    the facade answers it zero (answerZero), as m2v's object would: neither class has a method for it;
 //   m2v     m2v's class has a method the facade's lacks: an encoder or command buffer records it for m2v's replay, any other
-//           facade object answers it zero with a fault (answerMissing), and the raw device class inherits the m2v device's;
+//           facade object answers it zero with a fault (answerMissing), and the raw device class forwards it to the m2v
+//           device, which it opens for it (RawMetalM2V.mm);
 //   m2vobj  the device hands out m2v's own object for the protocol (argument encoders, events, fences, binary archives);
 //   base    the device only: _MTLDevice's own method on the iPad (the kind's table, "base"), which the host does not have
 //           (NMB_DEVICE_BASE_NSOBJECT);
@@ -20,6 +21,7 @@
 // usage: selcover <pack> <cache> <nvk dylib> <default.metallib> <tree> <tree>/drivers/NativeMetal/abi/kinds/<kind>.json...
 #import <Foundation/Foundation.h>
 #import <Metal/Metal.h>
+#import <objc/message.h>
 #import <objc/runtime.h>
 #include <cstdio>
 #include <cstring>
@@ -47,10 +49,11 @@ bool answers(Class cls, SEL sel)
     return !root || method_getImplementation(root) != method_getImplementation(m);
 }
 
+// The facade's classes: RM*, the device class, and the kernel events the device makes itself (SwitchSharedEvent)
 bool facadeClass(Class cls)
 {
     const char *name = class_getName(cls);
-    return !strncmp(name, "RM", 2) || !strcmp(name, "RawGM20BMetalDevice");
+    return !strncmp(name, "RM", 2) || !strcmp(name, "RawGM20BMetalDevice") || !strcmp(name, "SwitchSharedEvent");
 }
 
 struct Object {
@@ -125,6 +128,23 @@ struct Objects {
         put("MTLFence", [dev newFence]);
         put("MTLArgumentEncoder", [dev newArgumentEncoderWithArguments:@[ argument ]]);
         put("MTLBinaryArchive", [dev newBinaryArchiveWithDescriptor:[MTLBinaryArchiveDescriptor new] error:&error]);
+        MTLIndirectCommandBufferDescriptor *icb = [MTLIndirectCommandBufferDescriptor new];
+        icb.commandTypes = MTLIndirectCommandTypeDraw | MTLIndirectCommandTypeDrawIndexed;
+        icb.inheritPipelineState = YES;
+        icb.inheritBuffers = YES;
+        id<MTLIndirectCommandBuffer> commands = [dev newIndirectCommandBufferWithDescriptor:icb
+                                                                            maxCommandCount:1
+                                                                                    options:0];
+        put("MTLIndirectCommandBuffer", commands);
+        put("MTLIndirectRenderCommand", [commands indirectRenderCommandAtIndex:0]);
+        MTLIndirectCommandBufferDescriptor *dispatches = [MTLIndirectCommandBufferDescriptor new];
+        dispatches.commandTypes =
+            MTLIndirectCommandTypeConcurrentDispatch | MTLIndirectCommandTypeConcurrentDispatchThreads;
+        dispatches.inheritPipelineState = NO;
+        dispatches.inheritBuffers = NO;
+        put("MTLIndirectComputeCommand",
+            [[dev newIndirectCommandBufferWithDescriptor:dispatches maxCommandCount:1
+                                                 options:0] indirectComputeCommandAtIndex:0]);
         // Made only from a pack state or a kernel the host corpus lacks: the facade's classes, with the m2v class each carries
         put("MTLRenderPipelineState", class_createInstance(NSClassFromString(@"RMPipeline"), 0),
             NSClassFromString(@"NBRenderPipeline"));
@@ -150,6 +170,8 @@ const char *who(const Object &o, SEL sel, NSDictionary *base)
     if (strcmp(class_getName(cls), "RawGM20BMetalDevice") == 0) {
         Class inherited = class_getSuperclass(cls);
         Method own = class_getInstanceMethod(cls, sel);
+        if (own && method_getImplementation(own) == _objc_msgForward)
+            return "m2v";  // a forwarder: m2v's device class's method, the m2v device opened for it (RawMetalM2V.mm)
         if (own && (!answers(inherited, sel) ||
                     method_getImplementation(own) != class_getMethodImplementation(inherited, sel)))
             return "raw";

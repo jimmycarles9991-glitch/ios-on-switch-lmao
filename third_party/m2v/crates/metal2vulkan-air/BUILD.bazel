@@ -15,13 +15,19 @@ rust_library(
         allow_empty = True,
         exclude = ["src/**/*.rs"],
     ),
-    crate_features = ["default"],
+    crate_features = [
+        "default",
+        "serde",
+    ],
     crate_name = "metal2vulkan_air",
     crate_root = "src/lib.rs",
     edition = "2021",
     rustc_flags = cargo_ids("e1da67ec9623747f", "59e1cd7e4c7e7a75") + ["--cap-lints=allow"],
     version = "0.2.0",
-    deps = ["@rust_crates//:sha2"],
+    deps = [
+        "@rust_crates//:serde",
+        "@rust_crates//:sha2",
+    ],
 )
 
 # What metal2vulkan's build script hashes of this crate (its source fingerprint follows the product into the front end).

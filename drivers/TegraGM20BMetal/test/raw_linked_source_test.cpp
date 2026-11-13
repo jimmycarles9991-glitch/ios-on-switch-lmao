@@ -41,9 +41,9 @@ TEST(RawLinkedSource, TheFrontendHandsEachStagesLinkedFunctionsToTheBridge)
                 HasSubstr("d.vertexLinkedFunctions, d.fragmentLinkedFunctions"));
 
     const std::string bridge = SourceText("../../NativeMetal/bridge/NativeMetalObjects.rs");
-    const std::string convert = Body(bridge, "fn render_descriptor(");
-    EXPECT_THAT(convert, HasSubstr("function_descriptor().with_linked(vertex_linked)"));
-    EXPECT_THAT(convert, HasSubstr("function_descriptor().with_linked(fragment_linked)"));
+    const std::string convert = Body(bridge, "fn render_descriptor<F: DescriptorFunction>(");
+    EXPECT_THAT(convert, HasSubstr("stage_function().with_linked(vertex_linked)"));
+    EXPECT_THAT(convert, HasSubstr("stage_function().with_linked(fragment_linked)"));
 }
 
 TEST(RawLinkedSource, AFunctionKeepsTheSpecializedNameItWasMadeUnder)
@@ -58,10 +58,11 @@ TEST(RawLinkedSource, AFunctionKeepsTheSpecializedNameItWasMadeUnder)
     EXPECT_THAT(made, HasSubstr("function.libraryName = name;"));
     // the journal names the library function, and the specialized name beside it
     EXPECT_THAT(Body(frontend, "static std::string stageText(NBFunction *f)"), HasSubstr("\" as=\""));
-    EXPECT_THAT(Body(frontend, "static void journalRenderPipeline("), HasSubstr("line += linkedText(d);"));
+    EXPECT_THAT(Body(frontend, "static std::string renderPipelineLine("), HasSubstr("line += linkedText(d);"));
 
     const std::string bridge = SourceText("../../NativeMetal/bridge/NativeMetalObjects.rs");
-    EXPECT_THAT(Body(bridge, "fn linked_functions("), HasSubstr(".with_link_name(specialized.clone())"));
+    EXPECT_THAT(Body(bridge, "impl DescriptorFunction for NmbFunction {"),
+                HasSubstr("self.0.linked_function().with_link_name(self.1.clone())"));
 }
 
 std::vector<std::string> fields(const std::string &body, const std::regex &field)
@@ -75,9 +76,9 @@ std::vector<std::string> fields(const std::string &body, const std::regex &field
 TEST(RawLinkedSource, TheDescriptorsCAndRustFormsAgree)
 {
     const std::string c = Between(SourceText("../../NativeMetal/bridge/NativeMetalObjects.h"),
-                                  "struct NmbRenderPipelineDescriptor {", "};");
+                                  "#define NMB_RENDER_PIPELINE_DESCRIPTOR_FIELDS(Function)", "\n\n");
     const std::string rust = Between(SourceText("../../NativeMetal/bridge/NativeMetalObjects.rs"),
-                                     "pub struct NmbRenderPipelineDescriptor {", "\n}");
+                                     "pub struct NmbRenderPipelineDescriptorOf<F> {", "\n}");
     const std::vector<std::string> namesC = fields(c, std::regex(R"((\w+_(?:linked|count));)"));
     EXPECT_EQ(namesC, fields(rust, std::regex(R"(pub (\w+_(?:linked|count)):)")));
     EXPECT_EQ(namesC.size(), 8u);
@@ -89,17 +90,20 @@ TEST(RawLinkedSource, TheRawRecordIsTheLinkedFunctionsToo)
     const std::string twin = Body(states, "MTLRenderPipelineDescriptor *twinDescriptor(");
     EXPECT_THAT(twin, HasSubstr("t.vertexLinkedFunctions = twinLinked(d.vertexLinkedFunctions);"));
     EXPECT_THAT(twin, HasSubstr("t.fragmentLinkedFunctions = twinLinked(d.fragmentLinkedFunctions);"));
-    EXPECT_THAT(Body(states, "- (RMPipeline *)pipelineFor:"), HasSubstr("raw_metal_linked_packable(d)"));
+    EXPECT_THAT(Body(states, "RMPipeline *rmPipelineShell("), HasSubstr("raw_metal_linked_packable(d)"));
     EXPECT_THAT(Body(SourceText("../raw/runtime/RawMetalLibrary.mm"), "NSString *raw_metal_pipeline_key("),
                 HasSubstr("raw::pipelineKey(d, vf ? &vertex : nullptr, ff ? &fragment : nullptr, linkedKey(d),"));
     EXPECT_THAT(Body(SourceText("../raw/runtime/RawPipelineKey.h"), "inline std::string pipelineKey("),
                 HasSubstr("key += linked;"));
 
-    const std::string key =
-        Body(SourceText("../raw/runtime/RawComplete.mm"), "bool Completion::keyOf(Ask &a, CacheKey &k)");
-    EXPECT_THAT(key, HasSubstr("a.descriptor.vertexLinkedFunctions"));
-    EXPECT_THAT(key, HasSubstr("a.descriptor.fragmentLinkedFunctions"));
-    EXPECT_THAT(key, HasSubstr("a.key += \" | linked\" + linked;"));
+    EXPECT_THAT(Body(SourceText("../raw/runtime/RawComplete.mm"), "bool Completion::keyOf(Ask &a, CacheKey &k)"),
+                HasSubstr("renderCacheKey(a.facade ?: a.descriptor, a.key, a.own, stack_, k, a.facade ? "
+                          "rmFunctionSource : nullptr)"));
+    const std::string key = SourceText("../raw/runtime/RawRenderKey.mm");
+    EXPECT_THAT(key, HasSubstr("descriptor.vertexLinkedFunctions"));
+    EXPECT_THAT(key, HasSubstr("descriptor.fragmentLinkedFunctions"));
+    EXPECT_THAT(Body(SourceText("../raw/runtime/raw_render_key.h"), "inline CacheKey renderCacheKey("),
+                HasSubstr("key += \" | linked\";"));
     // a specialized function's AIR is its library function's entry
     EXPECT_THAT(key, HasSubstr("native_bridge_metal_function_library_name(function)"));
 }
@@ -118,7 +122,7 @@ TEST(RawLinkedSource, ThePacksKeysAreTheRuntimes)
 }
 
 // A state the pack holds is this device's archive hit: every way the facade asks m2v for its twin (at once, with
-// reflection; a completion handler's creation is the synchronous one, on a worker) drops the creation's archives and
+// reflection; a completion handler's creation finishes as the synchronous one does) drops the creation's archives and
 // FailOnBinaryArchiveMiss, so a command buffer that falls back never meets a twin m2v refused (device boot 10: "foreign
 // render pipeline", 833 failed frames).
 TEST(RawLinkedSource, APackedStatesTwinNeverFailsOnTheArchive)
@@ -130,13 +134,17 @@ TEST(RawLinkedSource, APackedStatesTwinNeverFailsOnTheArchive)
                 HasSubstr("o & ~MTLPipelineOptionFailOnBinaryArchiveMiss"));
     EXPECT_THAT(Body(states, "static id<MTLRenderPipelineState> pipelineTwin("),
                 HasSubstr("packedTwinOptions(o, true)"));
-    const std::string reflected = Between(states, "    if (reflection) {", "\n    }\n");
-    EXPECT_THAT(reflected, HasSubstr("packedTwinOptions(o, packed)"));
+    const std::string finish = Body(states, "id<MTLRenderPipelineState> rmFinishState(");
+    EXPECT_THAT(finish, HasSubstr("packedTwinOptions(o, packed)"));
+    EXPECT_THAT(finish, HasSubstr("pipelineTwin(d, o, packed, error)"));
+    EXPECT_THAT(Body(states, "static id<MTLRenderPipelineState> makeState("), HasSubstr("rmFinishState(p, d, o"));
+    const std::string later = SourceText("../raw/runtime/RawMetalStatesLater.mm");
+    EXPECT_THAT(Body(later, "static void finishState("), HasSubstr("rmFinishState(p, d, o"));
     for (const char *handlerType : {"(MTLNewRenderPipelineStateCompletionHandler)handler",
                                     "(MTLNewRenderPipelineStateWithReflectionCompletionHandler)handler"}) {
-        const std::string handler = Between(states, std::string("completionHandler:") + handlerType, "\n}\n");
-        EXPECT_THAT(handler, HasSubstr("dispatch_async(creationQueue(), ^{"));
-        EXPECT_THAT(handler, HasSubstr("newRenderPipelineStateWithDescriptor:copy"));
+        const std::string handler = Between(later, std::string("completionHandler:") + handlerType, "\n}\n");
+        EXPECT_THAT(handler, HasSubstr("createLater("));
+        EXPECT_THAT(handler, HasSubstr("self, [d copy]"));
     }
 }
 

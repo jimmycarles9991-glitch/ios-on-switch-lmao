@@ -26,7 +26,7 @@ uint32_t rnd(uint32_t n)
 }
 
 constexpr uint32_t W = 720, H = 1280;
-constexpr uint64_t kSlotSpan = 20ULL << 20;  // NativeLegacyDisplay's kPlaneSlotSpan
+constexpr uint64_t kSlotSpan = switch_window_caps::kPlaneSlotSpan;
 
 uint8_t blockHeight(const Image &m)
 {

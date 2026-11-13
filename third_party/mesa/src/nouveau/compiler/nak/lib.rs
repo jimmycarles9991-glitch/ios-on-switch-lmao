@@ -26,6 +26,7 @@ mod opt_prmt;
 mod opt_sm53_half_probe;
 mod opt_uniform_instrs;
 mod qmd;
+mod reg_banks;
 mod reg_tracker;
 mod repair_ssa;
 mod sm120_instr_latencies;

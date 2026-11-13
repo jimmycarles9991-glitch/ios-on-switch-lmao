@@ -620,14 +620,16 @@ struct rb_node *rb_prev(const struct rb_node *n)
 }
 
 /* GPU pool pages, DMA, vmap: one physically contiguous pool (nvxnu_pool_*); struct page is an entry of a descriptor
- * array so page_to_phys()/page_address() are O(1). Allocation is first-fit over a bitmap, under a spinlock. */
+ * array so page_to_phys()/page_address() are O(1). Recent free extents and the fallback bitmap share one spinlock. */
+#include "../SwitchGpuPoolAllocation.h"
 static struct page *pool_pages;
 static unsigned long *pool_map;
 /* Free pages not known to hold zeros: set by a free that did not zero (nvkm's, a BO's freed straight back), clear for a
- * page the pool's initial clear or nvxnu_pool_free_zeroed left zero. nvxnu_pool_alloc_clean zeroes only these, so a BO
- * whose pages the GPU driver zeroed when it was freed (off the allocating thread) costs its next owner no memset. */
+ * page the pool's initial clear or nvxnu_pool_free_zeroed left zero. Client BOs take only ready pages; cold nvkm
+ * allocations may claim dirty pages and clear them before exposure. */
 static unsigned long *pool_dirty;
-static unsigned long pool_npages, pool_used;
+static unsigned long pool_npages, pool_used, pool_clean_free;
+static struct switch_gpu_pool_extents pool_extents;
 static DEFINE_SPINLOCK(pool_lock);
 
 int nvxnu_pool_setup(void)
@@ -644,14 +646,15 @@ int nvxnu_pool_setup(void)
 		return -ENOMEM;
 	for (unsigned long i = 0; i < pool_npages; i++)
 		pool_pages[i].pa = nvxnu_pool_base_pa() + (i << PAGE_SHIFT);
-	/* nothing zeroed them yet: the GPU's scrubber will (gpu.c "pool scrub") */
+	/* nothing zeroed them yet: the GPU's scrubber will (gpu_scrub.c "pool scrub") */
 	if (!zeroed)
 		bitmap_set(pool_dirty, 0, pool_npages);
+	switch_gpu_pool_remember(&pool_extents, 0, pool_npages, zeroed);
+	pool_clean_free = zeroed ? pool_npages : 0;
 	return 0;
 }
 
-/* Zero the pages of [first, first + n) a free left dirty (all of them with `all`), then mark the range clean: what every
- * allocation does, so a page is zero when handed out whether the CPU or the GPU (the scrubber) zeroed it. */
+/* Cold kernel allocations retain a CPU clear path before the CE scrubber is available. */
 static void pool_zero_dirty(unsigned long first, unsigned long n, int all)
 {
 	unsigned long k = 0;
@@ -664,25 +667,36 @@ static void pool_zero_dirty(unsigned long first, unsigned long n, int all)
 	spin_unlock(&pool_lock);
 }
 
-static long pool_alloc(unsigned long n, unsigned long align)
+static long pool_take(unsigned long n, unsigned long align, int ready_only, unsigned long reserve)
 {
-	unsigned long start = 0;
-	unsigned long i = 0;
+	long start = -1;
+	if (!n || !align || (align & (align - 1)))
+		return -EINVAL;
 	spin_lock(&pool_lock);
-	while ((start = find_next_zero_bit(pool_map, pool_npages, start)) + n <= pool_npages) {
-		start = ALIGN(start, align);
-		for (i = 0; i < n && start + i < pool_npages && !test_bit(start + i, pool_map); i++)
-			;
-		if (i == n) {
-			bitmap_set(pool_map, start, n);
-			pool_used += n;
-			spin_unlock(&pool_lock);
-			return start;
-		}
-		start += i + 1;
+	if (ready_only && (n > pool_clean_free || reserve > pool_clean_free - n)) {
+		spin_unlock(&pool_lock);
+		return -ENOMEM;
+	}
+	start = switch_gpu_pool_cached(&pool_extents, n, align, 1);
+	if (start < 0)
+		start = switch_gpu_pool_find(pool_map, pool_dirty, pool_npages, n, align, 1);
+	if (start < 0 && !ready_only)
+		start = switch_gpu_pool_cached(&pool_extents, n, align, 0);
+	if (start < 0 && !ready_only)
+		start = switch_gpu_pool_find(pool_map, pool_dirty, pool_npages, n, align, 0);
+	if (start >= 0) {
+		switch_gpu_pool_claim(&pool_extents, (unsigned long)start, n);
+		pool_clean_free -= switch_gpu_pool_clean_count(pool_dirty, (unsigned long)start, n);
+		bitmap_set(pool_map, (unsigned long)start, n);
+		pool_used += n;
 	}
 	spin_unlock(&pool_lock);
-	return -ENOMEM;
+	return start < 0 ? -ENOMEM : start;
+}
+
+static long pool_alloc(unsigned long n, unsigned long align)
+{
+	return pool_take(n, align, 0, 0);
 }
 
 static void pool_free(unsigned long first, unsigned long n)
@@ -690,6 +704,7 @@ static void pool_free(unsigned long first, unsigned long n)
 	spin_lock(&pool_lock);
 	bitmap_clear(pool_map, first, n);
 	bitmap_set(pool_dirty, first, n);
+	switch_gpu_pool_remember(&pool_extents, first, n, 0);
 	pool_used -= n;
 	spin_unlock(&pool_lock);
 }
@@ -697,6 +712,11 @@ static void pool_free(unsigned long first, unsigned long n)
 unsigned long nvxnu_pool_used_pages(void)
 {
 	return READ_ONCE(pool_used);
+}
+
+unsigned long nvxnu_pool_ready_pages(void)
+{
+	return READ_ONCE(pool_clean_free);
 }
 
 static long pool_index(u64 pa)
@@ -779,8 +799,7 @@ void dma_free_attrs(struct device *dev, size_t size, void *va, dma_addr_t handle
 		pool_free(i, PAGE_ALIGN(size) >> PAGE_SHIFT);
 }
 
-/* The GPU driver's BOs in the pool (tgm_pool_alloc): first fit, then only the pages a free left dirty are zeroed, so a
- * range nvxnu_pool_free_zeroed gave back costs nothing to hand out again. Zeroed memory either way. */
+/* Kernel-owned buffers may fall back to a CPU clear; client BOs use nvxnu_pool_alloc_ready. */
 void *nvxnu_pool_alloc_clean(unsigned long size, unsigned long align, unsigned long long *pa)
 {
 	unsigned long n = PAGE_ALIGN(size) >> PAGE_SHIFT;
@@ -788,6 +807,19 @@ void *nvxnu_pool_alloc_clean(unsigned long size, unsigned long align, unsigned l
 	if (i < 0)
 		return NULL;
 	pool_zero_dirty(i, n, 0);
+	*pa = pool_pages[i].pa;
+	return page_address(&pool_pages[i]);
+}
+
+void *nvxnu_pool_alloc_ready(unsigned long size, unsigned long align, unsigned long reserve,
+			     unsigned long long *pa)
+{
+	const unsigned long n = PAGE_ALIGN(size) >> PAGE_SHIFT;
+	const long i = pool_map ? pool_take(n, align > PAGE_SIZE ? align >> PAGE_SHIFT : 1, 1,
+					    reserve >> PAGE_SHIFT)
+				: -ENOMEM;
+	if (i < 0)
+		return NULL;
 	*pa = pool_pages[i].pa;
 	return page_address(&pool_pages[i]);
 }
@@ -803,15 +835,21 @@ int nvxnu_pool_alloc_chunks(unsigned long count, unsigned long long *pas)
 	 * last chunk down never overwrites an index not read yet */
 	spin_lock(&pool_lock);
 	dirty = tgm_comp_pick_chunks(pool_map, pool_dirty, pool_npages, (uint32_t)count, pas);
-	for (i = 0; dirty >= 0 && i < count; i++)
+	if (dirty > 0 || count > pool_clean_free / TGM_COMP_PAGES ||
+	    pool_clean_free - count * TGM_COMP_PAGES <
+		    SWITCH_GPU_POOL_CONTROL_READY_BYTES / PAGE_SIZE)
+		dirty = -ENOMEM;
+	for (i = 0; dirty >= 0 && i < count; i++) {
+		switch_gpu_pool_claim(&pool_extents, pas[i] * TGM_COMP_PAGES, TGM_COMP_PAGES);
 		bitmap_set(pool_map, pas[i] * TGM_COMP_PAGES, TGM_COMP_PAGES);
-	if (dirty >= 0)
+	}
+	if (dirty >= 0) {
 		pool_used += count * TGM_COMP_PAGES;
+		pool_clean_free -= count * TGM_COMP_PAGES;
+	}
 	spin_unlock(&pool_lock);
 	if (dirty < 0)
 		return -ENOMEM;
-	for (i = count - (unsigned long)dirty; i < count; i++)
-		pool_zero_dirty(pas[i] * TGM_COMP_PAGES, TGM_COMP_PAGES, 0);
 	for (i = count; i-- > 0;) {
 		const unsigned long first = pas[i] * TGM_COMP_PAGES;
 		for (k = 0; k < TGM_COMP_PAGES; k++)
@@ -842,6 +880,7 @@ unsigned long nvxnu_pool_claim_dirty(unsigned long max_bytes, unsigned long long
 		while (n < max && first + n < pool_npages && test_bit(first + n, pool_dirty) &&
 		       !test_bit(first + n, pool_map))
 			n++;
+		switch_gpu_pool_claim(&pool_extents, first, n);
 		bitmap_set(pool_map, first, n);
 		pool_used += n;
 	}
@@ -875,8 +914,18 @@ void nvxnu_pool_free_zeroed(unsigned long long pa, unsigned long size)
 	spin_lock(&pool_lock);
 	bitmap_clear(pool_map, i, n);
 	bitmap_clear(pool_dirty, i, n);
+	switch_gpu_pool_remember(&pool_extents, (unsigned long)i, n, 1);
+	pool_clean_free += n;
 	pool_used -= n;
 	spin_unlock(&pool_lock);
+}
+
+/* A range a scrub claimed but cannot vouch for goes back dirty, to be claimed and zeroed again. */
+void nvxnu_pool_free_dirty(unsigned long long pa, unsigned long size)
+{
+	long i = pool_index(pa);
+	if (i >= 0)
+		pool_free((unsigned long)i, PAGE_ALIGN(size) >> PAGE_SHIFT);
 }
 
 dma_addr_t dma_map_page(struct device *dev, struct page *page, size_t off, size_t size,

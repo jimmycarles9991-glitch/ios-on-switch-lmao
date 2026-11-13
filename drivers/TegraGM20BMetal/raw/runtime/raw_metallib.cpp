@@ -3,42 +3,16 @@
 #include "raw_metallib.h"
 
 #include <fcntl.h>
+#include <sys/mman.h>
 #include <sys/stat.h>
 #include <unistd.h>
-#include <algorithm>
 #include <cstring>
-#include <vector>
+#include "MetallibSlice.h"
 
 namespace raw {
 namespace {
 
 constexpr size_t kHeaderBytes = 0x58, kFunctionListAt = 24;
-constexpr uint32_t kUniversal = 0xCAFEBABE, kAir64 = 0x01000017;
-constexpr uint32_t kMostSlices = 16;
-
-uint32_t bigEndian(const uint8_t *w)
-{
-    return uint32_t(w[0]) << 24 | uint32_t(w[1]) << 16 | uint32_t(w[2]) << 8 | w[3];
-}
-
-// A universal metallib's AIR64 slice, as Metal picks it (the frameworks ship one beside an Apple GPU binary): [*offset, + *size)
-// of the file; `head` holds its first 8 + 20 x slices bytes. A thin metallib is its own slice.
-bool airSlice(const uint8_t *head, size_t headBytes, uint64_t fileBytes, uint64_t &offset, uint64_t &size)
-{
-    if (headBytes < 8 || bigEndian(head) != kUniversal) {
-        offset = 0;
-        size = fileBytes;
-        return true;
-    }
-    const uint32_t count = bigEndian(head + 4);
-    for (uint32_t i = 0; i < count && i < kMostSlices && 8 + 20 * (i + 1) <= headBytes; i++)
-        if (bigEndian(head + 8 + 20 * i) == kAir64) {
-            offset = bigEndian(head + 8 + 20 * i + 8);
-            size = bigEndian(head + 8 + 20 * i + 12);
-            return offset <= fileBytes && size <= fileBytes - offset;
-        }
-    return false;
-}
 
 template <class T> bool readAt(const uint8_t *file, size_t size, size_t at, T &v)
 {
@@ -75,14 +49,14 @@ bool entry(const uint8_t *file, size_t at, size_t end, std::map<std::string, Air
 
 }  // namespace
 
+// The slice the IPSW's Metal loads (MetallibSlice.h), which the frontend hands the runtime and the pack's tools key by
 bool metallibAirHashes(const uint8_t *whole, size_t wholeBytes, std::map<std::string, AirHash> &out)
 {
     out.clear();
-    uint64_t sliceAt = 0, sliceBytes = 0;
-    if (!airSlice(whole, std::min<size_t>(wholeBytes, 8 + 20 * kMostSlices), wholeBytes, sliceAt, sliceBytes))
+    size_t sliceAt = 0, size = 0;
+    if (!switch_metal::airSlice(whole, wholeBytes, sliceAt, size))
         return false;
     const uint8_t *file = whole + sliceAt;
-    const size_t size = size_t(sliceBytes);
     uint64_t listAt = 0, listBytes = 0;
     uint32_t count = 0;
     if (size < kHeaderBytes || memcmp(file, "MTLB", 4) || !readAt(file, size, kFunctionListAt, listAt) ||
@@ -102,6 +76,7 @@ bool metallibAirHashes(const uint8_t *whole, size_t wholeBytes, std::map<std::st
     return true;
 }
 
+// Mapped, not read: only the pages of the fat header, the slice's header and its function list are touched
 bool metallibAirHashes(const std::string &path, std::map<std::string, AirHash> &out)
 {
     out.clear();
@@ -109,27 +84,15 @@ bool metallibAirHashes(const std::string &path, std::map<std::string, AirHash> &
     if (fd < 0)
         return false;
     struct stat st;
-    uint8_t head[8 + 20 * kMostSlices] = {}, header[kHeaderBytes];
-    uint64_t sliceAt = 0, sliceBytes = 0, listAt = 0, listBytes = 0;
-    bool ok = fstat(fd, &st) == 0;
-    const ssize_t headBytes = ok ? pread(fd, head, sizeof head, 0) : -1;
-    ok = headBytes > 0 && airSlice(head, size_t(headBytes), uint64_t(st.st_size), sliceAt, sliceBytes) &&
-         pread(fd, header, sizeof header, off_t(sliceAt)) == ssize_t(sizeof header) && !memcmp(header, "MTLB", 4);
-    if (ok) {
-        memcpy(&listAt, header + kFunctionListAt, 8);
-        memcpy(&listBytes, header + kFunctionListAt + 8, 8);
-        ok = listAt >= kHeaderBytes && listAt < sliceBytes && listBytes <= sliceBytes - listAt - 4;
-    }
-    std::vector<uint8_t> slice;
-    if (ok) {
-        // the header and the function list, at their offsets in the slice (the parser takes the slice's offsets)
-        slice.resize(size_t(listAt + 4 + listBytes));
-        memcpy(slice.data(), header, sizeof header);
-        const size_t want = size_t(4 + listBytes);
-        ok = pread(fd, slice.data() + listAt, want, off_t(sliceAt + listAt)) == ssize_t(want);
-    }
+    void *mapped = fstat(fd, &st) == 0 && st.st_size > 0
+                       ? mmap(nullptr, size_t(st.st_size), PROT_READ, MAP_PRIVATE, fd, 0)
+                       : MAP_FAILED;
     close(fd);
-    return ok && metallibAirHashes(slice.data(), slice.size(), out);
+    if (mapped == MAP_FAILED)
+        return false;
+    const bool ok = metallibAirHashes(static_cast<const uint8_t *>(mapped), size_t(st.st_size), out);
+    munmap(mapped, size_t(st.st_size));
+    return ok;
 }
 
 }  // namespace raw

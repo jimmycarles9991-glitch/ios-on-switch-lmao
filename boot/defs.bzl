@@ -35,9 +35,8 @@ load("@bazel_skylib//rules:common_settings.bzl", "BuildSettingInfo")
 load("//ipsw:defs.bzl", "PretranslatedPinsInfo")
 load("//ipsw:ipsw.bzl", "ios_version", "kernel_virt_base", "os_volume_uuid")
 
-# Xcode's tools: macOS only, never on a remote executor (Xcode cannot be shipped there); the results may be cached
-# remotely (the key includes @xcode//:identity).
-_XCODE_EXECUTION = {"no-remote-exec": "", "requires-darwin": ""}
+# Xcode's tools: macOS only, here or on a Mac remote worker with the same Xcode (the key includes @xcode//:identity).
+_XCODE_EXECUTION = {"requires-darwin": ""}
 
 # The loader is freestanding AArch64 code entered by U-Boot's bootm with the MMU and caches off (boot/loader).
 # PROBE_QUIET: the shared handoff probe draws nothing and skips its FDT CRC/walk unless it refuses (the loader checks

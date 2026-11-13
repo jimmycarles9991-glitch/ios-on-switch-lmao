@@ -252,9 +252,6 @@ vk_spirv_to_nir(struct vk_device *device,
                 bool internal,
                 void *mem_ctx)
 {
-   assert(spirv_size_B >= 4 && spirv_size_B % 4 == 0);
-   assert(spirv_data[0] == SPIR_V_MAGIC_NUMBER);
-
    const struct spirv_capabilities spirv_caps =
       vk_physical_device_get_spirv_capabilities(device->physical);
 
@@ -276,12 +273,32 @@ vk_spirv_to_nir(struct vk_device *device,
    spirv_options_local.buffer_descriptor_alignment =
       device->physical->properties.bufferDescriptorAlignment;
 
+   return vk_spirv_to_nir_with(spirv_data, spirv_size_B, stage,
+                               entrypoint_name, spec_info,
+                               &spirv_options_local, nir_options, internal,
+                               mem_ctx);
+}
+
+/* ios-on-switch-lmao: vk_spirv_to_nir with the device's capabilities and
+ * descriptor sizes already in spirv_options, for a compile with no device
+ */
+nir_shader *
+vk_spirv_to_nir_with(const uint32_t *spirv_data, size_t spirv_size_B,
+                     mesa_shader_stage stage, const char *entrypoint_name,
+                     const VkSpecializationInfo *spec_info,
+                     const struct spirv_to_nir_options *spirv_options,
+                     const struct nir_shader_compiler_options *nir_options,
+                     bool internal, void *mem_ctx)
+{
+   assert(spirv_size_B >= 4 && spirv_size_B % 4 == 0);
+   assert(spirv_data[0] == SPIR_V_MAGIC_NUMBER);
+
    struct nir_spirv_specialization *spec =
       vk_spec_info_to_nir_spirv(spec_info);
 
    nir_shader *nir = spirv_to_nir(spirv_data, spirv_size_B / 4,
                                   spec, stage, entrypoint_name,
-                                  &spirv_options_local, nir_options);
+                                  spirv_options, nir_options);
    vtn_free_specialization(spec);
 
    if (nir == NULL)

@@ -1,5 +1,6 @@
 # Tegra210 CAR clocks and resets and PMC power partitions and pads, one copy of their registers and lock; the UPHY PLL's
-# calibration announcements between PCIe and SuperSpeed USB (SwitchUPHY.h).
+# calibration announcements between PCIe and SuperSpeed USB (SwitchUPHY.h); the PLLs L4T clocks NVDEC, NVENC and NVJPG
+# from (SwitchEngineClock.h).
 #
 #   bazel test //kits/SwitchCAR/test:all
 load("//bazel/lint:defs.bzl", "lint_files")
@@ -28,6 +29,7 @@ kernel_driver(
     name = "SwitchCAR",
     srcs = [
         "SwitchCAR.cpp",
+        "SwitchEngineClock.cpp",
         "SwitchUPHY.cpp",
     ],
     hdr_deps = ["kits/SwitchMMIO"],

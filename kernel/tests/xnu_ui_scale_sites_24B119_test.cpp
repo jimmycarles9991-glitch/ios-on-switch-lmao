@@ -16,13 +16,14 @@ using switch_ui_scale_sites::TextMapping;
 using switch_ui_scale_sites::Word;
 
 namespace {
-// 24B119's subcaches with a patched page. No other cache text pager answers in them: those are keyed to 21H461.
+// 24B119's subcaches with a patched page. SwitchTimebase's pager (switch_timebase_24B119.h) answers .01's slot 1; the
+// other cache text pagers are keyed to 21H461.
 const std::vector<TextMapping> kMappings = {
     {".01",
      {0xe7, 0xc1, 0xb4, 0x11, 0xdb, 0x39, 0x30, 0x4d, 0x91, 0x4a, 0x72, 0xe3, 0x1f, 0xa3, 0x1b, 0x86},
      0x180400000,
      0x7d34000,
-     0},
+     1u << 1},
     {".03",
      {0x8f, 0x50, 0x44, 0x24, 0x74, 0xa0, 0x3b, 0x04, 0xb1, 0x03, 0xe8, 0xd2, 0x5a, 0x06, 0xe3, 0x8b},
      0x188400000,
@@ -57,6 +58,11 @@ const std::vector<TextMapping> kMappings = {
      {0x06, 0x08, 0xbd, 0x6b, 0xfc, 0x49, 0x35, 0x50, 0xb8, 0xcd, 0x2f, 0x1f, 0x5d, 0x11, 0xc6, 0xcc},
      0x2a0400000,
      0x7c60000,
+     0},
+    {".30",
+     {0xff, 0x9f, 0xc5, 0x5c, 0xee, 0x05, 0x3e, 0x45, 0xba, 0x2d, 0x82, 0x65, 0xba, 0xb4, 0x57, 0xee},
+     0x208400000,
+     0x7ca0000,
      0},
 };
 
@@ -417,13 +423,95 @@ TEST(XnuUiScaleSites24B119, ArchivedImageLimitIsAt2xInsteadOfTheDisplaysScale)
     EXPECT_LE(310.0 * 310.0, ArchivedImageLimit(widget, 2));
 }
 
-TEST(XnuUiScaleSites24B119, OnlyTheGridAndWidgetKitApplyAtScaleOne)
+namespace {
+enum class KeylineRow {
+    k1xOr2x,
+    k3x,
+    kMagenta
+};
+
+// The keyline's ladder for one interface style: 1.0 and 2.0 share a row, 3.0 has its own, and stock UIKit fills any
+// other scale with opaque magenta.
+KeylineRow KeylineRowFor(double scale, bool patched)
+{
+    if (scale == 1.0 || scale == 2.0) {
+        return KeylineRow::k1xOr2x;
+    }
+    if (scale == 3.0) {
+        return KeylineRow::k3x;
+    }
+    return patched ? KeylineRow::k1xOr2x : KeylineRow::kMagenta;
+}
+}  // namespace
+
+TEST(XnuUiScaleSites24B119, ScrollEdgeKeylineTakesThe2xRowAtEveryScaleBut3)
+{
+    const switch_us_site *site = Named("UIKitCore scroll edge keyline of a 2x screen");
+    ASSERT_NE(site, nullptr);
+    ASSERT_EQ(site->edits, 2u);
+    EXPECT_FALSE(site->every_scale);
+    const switch_us_edit &dark = site->edit[0], &light = site->edit[1];
+    for (const switch_us_edit *edit : {&dark, &light}) {
+        SCOPED_TRACE(edit == &dark ? "dark" : "light");
+        ASSERT_EQ(edit->length, 24u);
+        ASSERT_EQ(edit->kind, SWITCH_US_FIXED);
+        EXPECT_EQ(Word(edit->stock), switch_a64_fmov_d_int(0, 2));
+        EXPECT_EQ(Word(edit->stock + 4), 0x1e602140u);                // fcmp d10, d0
+        EXPECT_EQ(Word(edit->stock + 8) & 0xff00001fu, 0x54000000u);  // b.eq
+        EXPECT_EQ(Word(edit->stock + 12), switch_a64_fmov_d_int(0, 3));
+        EXPECT_EQ(Word(edit->stock + 16), 0x1e602140u);
+        EXPECT_EQ(Word(edit->stock + 20) & 0xff00001fu, 0x54000001u);  // b.ne
+        ASSERT_EQ(edit->at, 20u);
+        ASSERT_EQ(edit->size, 4u);
+        EXPECT_EQ(Word(edit->patched) & 0xff00001fu, 0x54000001u);
+        // past 3.0, to where 2.0 goes
+        EXPECT_EQ(BranchTarget(AddressOf(*site, *edit, 20), Word(edit->patched)),
+                  BranchTarget(AddressOf(*site, *edit, 8), Word(edit->stock + 8)));
+    }
+    // stock dark goes on to the light ladder's 1.0 test (fmov d0, #1.0; fcmp d10, d0; b.eq), whose last b.ne is the
+    // magenta fill
+    EXPECT_EQ(BranchTarget(AddressOf(*site, dark, 20), Word(dark.stock + 20)), AddressOf(*site, light, 0) - 12);
+    EXPECT_GT(BranchTarget(AddressOf(*site, light, 20), Word(light.stock + 20)), AddressOf(*site, light, 24));
+
+    for (const char *name : {"1.25", "1.6"}) {
+        const switch_ui_scale *scale = switch_ui_scale_named(name);
+        ASSERT_NE(scale, nullptr);
+        const double pixels = static_cast<double>(scale->num) / scale->den;
+        EXPECT_EQ(KeylineRowFor(pixels, false), KeylineRow::kMagenta) << name;
+        EXPECT_EQ(KeylineRowFor(pixels, true), KeylineRow::k1xOr2x) << name;
+    }
+    for (const double apple : {1.0, 2.0, 3.0}) {
+        EXPECT_EQ(KeylineRowFor(apple, true), KeylineRowFor(apple, false)) << apple;
+    }
+}
+
+TEST(XnuUiScaleSites24B119, OnlyTheGridWidgetKitAndTheTimebaseApplyAtScaleOne)
 {
     for (size_t i = 0; i < kCache.count; i++) {
         const std::string name = switch_ui_scale_sites::NameOf(kCache.sites[i]);
         const bool every_scale = name == "SpringBoardHome home screen grid 3x5" ||
                                  name == "WidgetKit placeholder batch deadline (n + 10) x 5 s" ||
-                                 name == "WidgetKit archived image limit of a 2x screen";
+                                 name == "WidgetKit archived image limit of a 2x screen" ||
+                                 name == "SampleAnalysis mach timebase of a 19.2 MHz counter";
         EXPECT_EQ(kCache.sites[i].every_scale, every_scale) << name;
     }
+}
+
+TEST(XnuUiScaleSites24B119, SampleAnalysisKnowsTheX1Timebase)
+{
+    const switch_us_site *site = Named("SampleAnalysis mach timebase of a 19.2 MHz counter");
+    ASSERT_NE(site, nullptr);
+    ASSERT_EQ(site->edits, 2u);
+    EXPECT_TRUE(site->every_scale);
+    const switch_us_edit &pairs = site->edit[0], &rates = site->edit[1];
+    uint32_t stock[4] = {}, patched[2] = {};
+    std::memcpy(stock, pairs.stock, sizeof(stock));
+    std::memcpy(patched, pairs.patched, sizeof(patched));
+    EXPECT_EQ(stock[0], 1u);
+    EXPECT_EQ(stock[1], 1u);
+    EXPECT_EQ(static_cast<double>(stock[2]) / stock[3], 1e9 / 24e6);
+    EXPECT_EQ(static_cast<double>(patched[0]) / patched[1], 1e9 / 19.2e6);
+    EXPECT_EQ(Double(rates.stock), 1e-7);
+    EXPECT_EQ(Double(rates.stock + 8), 24e6);
+    EXPECT_EQ(Double(rates.patched), 19.2e6);
 }

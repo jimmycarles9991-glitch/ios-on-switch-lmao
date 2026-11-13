@@ -1,7 +1,7 @@
 /* SPDX-License-Identifier: MIT */
 /*
  * GM20B colour and depth compression as pure functions: the compbit backing store (nouveau/nvkm/subdev/ltc/gm20b.c),
- * which memory and binds may compress (gpu.c), the GPU pool chunks a compressible BO is made of (shim/linux.c), and the PTE
+ * which memory and binds may compress (gpu_mem.c), the GPU pool chunks a compressible BO is made of (shim/linux.c), and the PTE
  * fields a compressed bind writes (nvkm/subdev/mmu/vmmgf100.c).
  * test/gm20b_comp_test.cpp checks them against nvgpu's gm20b numbers.
  *
@@ -12,7 +12,7 @@
 #define TEGRA_GM20B_COMP_H
 #include <stdint.h>
 
-/* One comptag line covers 128 KiB. A compressed bind uses the spaces' 128 KiB big pages (gpu.c tgm_vm_new), so each PTE
+/* One comptag line covers 128 KiB. A compressed bind uses the spaces' 128 KiB big pages (gpu_mem.c tgm_vm_new), so each PTE
  * names one whole line: the half-line select that USE_FULL_COMP_TAG_LINE gives 64 KiB pages (the PTE's top COMPTAGLINE
  * bit) never comes into play. */
 #define TGM_COMP_SHIFT 17

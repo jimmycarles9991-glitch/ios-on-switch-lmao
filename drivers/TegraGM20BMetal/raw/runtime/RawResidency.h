@@ -4,6 +4,7 @@
 // itself and stays raw. Only m2v work of that command buffer uses them: the queue's and the command buffer's sets on each m2v
 // command buffer the replay makes, so the queue's m2v twin is never made or told for them.
 #pragma once
+#include "raw_lock.h"
 #import <Metal/Metal.h>
 #import <objc/message.h>
 #include <algorithm>
@@ -16,7 +17,7 @@ class ResidencySets {
 public:
     void add(const id __unsafe_unretained *sets, NSUInteger count)
     {
-        std::lock_guard<std::mutex> l(lock_);
+        std::lock_guard<raw::Mutex> l(lock_);
         for (NSUInteger i = 0; i < count; i++)
             if (sets[i] && std::find(sets_.begin(), sets_.end(), sets[i]) == sets_.end())
                 sets_.push_back(sets[i]);
@@ -24,7 +25,7 @@ public:
 
     void remove(const id __unsafe_unretained *sets, NSUInteger count)
     {
-        std::lock_guard<std::mutex> l(lock_);
+        std::lock_guard<raw::Mutex> l(lock_);
         for (NSUInteger i = 0; i < count; i++)
             sets_.erase(std::remove(sets_.begin(), sets_.end(), sets[i]), sets_.end());
     }
@@ -33,7 +34,7 @@ public:
     {
         std::vector<id> now;
         {
-            std::lock_guard<std::mutex> l(lock_);
+            std::lock_guard<raw::Mutex> l(lock_);
             if (sets_.empty())
                 return;
             now = sets_;
@@ -48,7 +49,7 @@ public:
     }
 
 private:
-    mutable std::mutex lock_;
+    mutable raw::Mutex lock_;
     std::vector<id> sets_;
 };
 

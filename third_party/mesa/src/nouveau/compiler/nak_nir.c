@@ -263,13 +263,23 @@ lower_bit_size_cb(const nir_instr *instr, void *data)
                                 : alu->def.bit_size;
 
       switch (alu->op) {
-      /* ios-on-switch-lmao: SM53 has HADD2, HMUL2 and HFMA2 (nak/sm50.rs) */
+      /* ios-on-switch-lmao: SM53 has HADD2, HMUL2, HFMA2 and HSETP2
+       * (nak/sm50.rs, nak/sm50/hsetp2.rs)
+       */
       case nir_op_fabs:
       case nir_op_fadd:
       case nir_op_fneg:
       case nir_op_fmul:
       case nir_op_ffma:
       case nir_op_fsat:
+      case nir_op_feq:
+      case nir_op_fequ:
+      case nir_op_fge:
+      case nir_op_fgeu:
+      case nir_op_flt:
+      case nir_op_fltu:
+      case nir_op_fneo:
+      case nir_op_fneu:
          if (bit_size == 16 && nak->sm >= 53 && nak->sm < 70)
             return 0;
          break;
@@ -967,7 +977,37 @@ struct interlock_data {
    nir_variable *alive_mask_var;
    nir_variable *ticket_updated_var;
    const struct nak_compiler *nak;
+   bool load_spin;
 };
+
+/* The bench's interlock spin A/B (tools/benchloop/batches): a fragment
+ * shader holding this constant waits for its ticket with loads that read L2
+ * instead of atomics, in debug builds only; shipped shaders keep the atomic
+ * until the bench proves the load form loses no update.
+ */
+#define INTERLOCK_LOAD_SPIN_MARKER 0x7fa54c53u
+
+static bool
+interlock_load_spin_probe(nir_shader *nir)
+{
+#if defined(SWITCH_DEBUG) && SWITCH_DEBUG
+   nir_foreach_function_impl(impl, nir) {
+      nir_foreach_block(block, impl) {
+         nir_foreach_instr(instr, block) {
+            if (instr->type != nir_instr_type_load_const)
+               continue;
+            nir_load_const_instr *c = nir_instr_as_load_const(instr);
+            for (unsigned i = 0; i < c->def.num_components; i++) {
+               if (c->def.bit_size == 32 &&
+                   c->value[i].u32 == INTERLOCK_LOAD_SPIN_MARKER)
+                  return true;
+            }
+         }
+      }
+   }
+#endif
+   return false;
+}
 
 static bool
 nak_nir_lower_fs_interlock_intrin(nir_builder *b, nir_intrinsic_instr *intrin,
@@ -1078,9 +1118,13 @@ nak_nir_lower_fs_interlock_intrin(nir_builder *b, nir_intrinsic_instr *intrin,
          nir_loop *loop = nir_push_loop(b);
          {
             nir_def *current_gpc_ticket =
-               nir_global_atomic(b, 32, interlock_ticket_buffer_addr,
-                                 nir_imm_int(b, 0),
-                                 .atomic_op = nir_atomic_op_iadd);
+               tdata->load_spin
+                  ? nir_load_global(b, 1, 32, interlock_ticket_buffer_addr,
+                                    .align_mul = 4,
+                                    .access = ACCESS_COHERENT | ACCESS_VOLATILE)
+                  : nir_global_atomic(b, 32, interlock_ticket_buffer_addr,
+                                      nir_imm_int(b, 0),
+                                      .atomic_op = nir_atomic_op_iadd);
 
             nir_break_if(b, nir_ieq(b, nir_ushr_imm(b, current_gpc_ticket, 16),
                                     ticket_value));
@@ -1147,6 +1191,7 @@ nak_nir_lower_fs_interlock(nir_shader *nir, const void *data)
 
       const struct interlock_data pass_data = {
          .nak = nak,
+         .load_spin = interlock_load_spin_probe(nir),
          .alive_mask_var = alive_mask_var,
          .ticket_updated_var = ticket_updated_var,
       };
@@ -1907,6 +1952,13 @@ nak_lower_nir_before_linking(nir_shader *nir, const struct nak_compiler *nak)
 }
 
 void
+nak_release_nir_body(nir_shader *nir)
+{
+   exec_list_make_empty(&nir->functions);
+   nir_sweep(nir);
+}
+
+void
 nak_postprocess_nir(nir_shader *nir,
                     const struct nak_compiler *nak,
                     nir_variable_mode robust2_modes,
@@ -1920,8 +1972,13 @@ nak_postprocess_nir(nir_shader *nir,
    if (mesa_shader_stage_is_mesh(nir->info.stage))
       OPT(nir, nak_nir_lower_mesh_stages_shared_atomics);
 
-   if (nir->info.stage == MESA_SHADER_FRAGMENT)
+   if (nir->info.stage == MESA_SHADER_FRAGMENT) {
+      /* ios-on-switch-lmao: the critical section holds only the ordered
+       * accesses and what depends on them (nak_nir_shrink_interlock.c)
+       */
+      OPT(nir, nak_nir_shrink_interlock);
       OPT(nir, nak_nir_lower_fs_interlock, nak);
+   }
 
    nak_optimize_nir(nir, nak);
 
@@ -2119,6 +2176,13 @@ nak_postprocess_nir(nir_shader *nir,
       }
    } while (progress);
 
+   /* After the late rules, which leave a texel metal2vulkan rounds to half as
+    * one f2f16_rtne
+    */
+   if (OPT(nir, nak_nir_sm50_fold_f16_fetches, nak,
+           fs_key != NULL && fs_key->texs_f16))
+      OPT(nir, nir_opt_copy_prop);
+
    OPT(nir, nir_opt_move, nir_move_comparisons | nir_move_load_ubo);
 
    if (nak->sm < 70) {
@@ -2128,6 +2192,14 @@ nak_postprocess_nir(nir_shader *nir,
       };
       OPT(nir, nir_split_conversions, &split_conv_opts);
    }
+
+   /* ios-on-switch-lmao: SM50 has no uniform registers and seven predicates
+    * (nak_nir_rematerialize_uniforms.c, nak_nir_rematerialize_compares.c)
+    */
+   if (nak->sm < 70 && OPT(nir, nak_nir_rematerialize_uniforms))
+      OPT(nir, nir_opt_dce);
+   if (nak->sm < 70 && OPT(nir, nak_nir_rematerialize_compares))
+      OPT(nir, nir_opt_dce);
 
    /* Re-materialize load_const instructions in the blocks that use them.
     * This is both a register pressure optimization and a ensures correctness

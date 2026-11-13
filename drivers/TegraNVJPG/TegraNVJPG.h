@@ -50,7 +50,8 @@ struct TegraNVJPGJob {
     uint64_t bitstream;
     uint64_t plane[3];
     uint32_t planes;
-    uint64_t pixels;  // the grid's pixels: the wait bound
+    uint64_t pixels;            // the grid's pixels: the wait bound
+    uint32_t selector, target;  // the AppleJPEGDriver selector it came through, its destination's format code
 };
 
 extern "C" {

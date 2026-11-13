@@ -8,6 +8,7 @@ load("//bazel/lint:defs.bzl", "lint_files")
 load("//third_party/mesa/bazel:defs.bzl", "MESA_LINT_EXCLUDE", "MESA_PY_DEPS", "mesa_args", "mesa_cc_library", "mesa_files", "mesa_genrule")
 load("//third_party/mesa/bazel:identity.bzl", "mesa_identity_files")
 load("//third_party/mesa/bazel:rust.bzl", "NOUVEAU_RUST_ARGS", "RUST_GLOBAL_ARGS", "mesa_rust_library")
+load(":fs_depth_test.bzl", "fs_depth_test_binary")
 
 package(default_visibility = ["//visibility:public"])
 
@@ -61,7 +62,11 @@ mesa_cc_library(
             "gen:src/util",
             "gen:src/util/format",
         ],
-    ),
+    ) + select({
+        # nak_nir_lower_tex_sm50.c's TEXS.F16 probe, debug builds only
+        "//bazel:release": ["-DSWITCH_DEBUG=0"],
+        "//conditions:default": ["-DSWITCH_DEBUG=1"],
+    }),
     sources = [
         "nak_nir_algebraic.c",
         "//third_party/mesa/src/nouveau/headers:nv_push_cl85b5.c",
@@ -140,9 +145,13 @@ mesa_cc_library(
         "nak_nir_lower_scan_reduce.c",
         "nak_nir_lower_shared_atomics.c",
         "nak_nir_lower_tex.c",
+        "nak_nir_lower_tex_sm50.c",
         "nak_nir_lower_vtg_io.c",
         "nak_nir_mark_lcssa_invariants.c",
+        "nak_nir_rematerialize_compares.c",
         "nak_nir_rematerialize_load_const.c",
+        "nak_nir_rematerialize_uniforms.c",
+        "nak_nir_shrink_interlock.c",
         "//third_party/mesa/src/nouveau/headers:nv_push.c",
     ],
 )
@@ -307,5 +316,176 @@ py_test(
         "sm53_half_tests",
     ],
     data = [":nak_sm53_half_test_bin"],
+    main = "run_host_test.py",
+)
+
+# ios-on-switch-lmao: NAK's SM50 TEXS/TLDS/TLD4S and bound TEX encodings (nak/sm50/texs.rs sm53_texs_tests), from the same binary
+py_test(
+    name = "sm53_texs_test",
+    size = "small",
+    srcs = ["run_host_test.py"],
+    args = [
+        "$(rootpath :nak_sm53_half_test_bin)",
+        "sm53_texs_tests",
+    ],
+    data = [":nak_sm53_half_test_bin"],
+    main = "run_host_test.py",
+)
+
+# ios-on-switch-lmao: NAK's SM50 XMAD encodings and multiply sequences (nak/sm50/xmad.rs sm53_xmad_tests), from the same binary
+py_test(
+    name = "sm53_xmad_test",
+    size = "small",
+    srcs = ["run_host_test.py"],
+    args = [
+        "$(rootpath :nak_sm53_half_test_bin)",
+        "sm53_xmad_tests",
+    ],
+    data = [":nak_sm53_half_test_bin"],
+    main = "run_host_test.py",
+)
+
+# ios-on-switch-lmao: NAK's SM50 FADD/F2F immediates (nak/sm50/alu_tests.rs), from the same binary
+py_test(
+    name = "sm50_alu_test",
+    size = "small",
+    srcs = ["run_host_test.py"],
+    args = [
+        "$(rootpath :nak_sm53_half_test_bin)",
+        "sm50::alu_tests",
+    ],
+    data = [":nak_sm53_half_test_bin"],
+    main = "run_host_test.py",
+)
+
+# ios-on-switch-lmao: NAK's SM50 LOP3/IADD3/ISCADD encodings (nak/sm50/int3.rs sm53_int3_tests), from the same binary
+py_test(
+    name = "sm53_int3_test",
+    size = "small",
+    srcs = ["run_host_test.py"],
+    args = [
+        "$(rootpath :nak_sm53_half_test_bin)",
+        "sm53_int3_tests",
+    ],
+    data = [":nak_sm53_half_test_bin"],
+    main = "run_host_test.py",
+)
+
+# ios-on-switch-lmao: NAK's SM50 HSETP2 encoding (nak/sm50/hsetp2.rs sm53_hsetp2_tests), from the same binary
+py_test(
+    name = "sm53_hsetp2_test",
+    size = "small",
+    srcs = ["run_host_test.py"],
+    args = [
+        "$(rootpath :nak_sm53_half_test_bin)",
+        "sm53_hsetp2_tests",
+    ],
+    data = [":nak_sm53_half_test_bin"],
+    main = "run_host_test.py",
+)
+
+mesa_cc_library(
+    name = "nak_fs_depth_test_objects",
+    testonly = True,
+    sources = [
+        "nak_fs_depth_test.c",
+        "nak_nir_lower_fs_inputs.c",
+    ],
+    c_args = mesa_args("c", include_dirs = [
+        "src/nouveau/compiler",
+        "gen:src/nouveau/compiler",
+        "include",
+        "gen:include",
+        "src",
+        "gen:src",
+        "src/compiler",
+        "gen:src/compiler",
+        "src/compiler/nir",
+        "gen:src/compiler/nir",
+        "src/nouveau/nil",
+        "gen:src/nouveau/nil",
+        "src/nouveau/headers",
+        "gen:src/nouveau/headers",
+        "src/nouveau/headers/nvidia/classes",
+        "gen:src/util",
+        "gen:src/util/format",
+    ]),
+)
+
+fs_depth_test_binary(
+    name = "nak_fs_depth_test_bin",
+    testonly = True,
+    archives = [
+        ":nak_fs_depth_test_objects",
+        "//third_party/mesa/src/compiler/nir:nir",
+        "//third_party/mesa/src/compiler:compiler",
+        "//third_party/mesa/src/util:mesa_util",
+        "//third_party/mesa/src/util:mesa_util_simd",
+        "//third_party/mesa/src/c11/impl:mesa_util_c11",
+        "//third_party/mesa/src/util/blake3",
+    ],
+)
+
+mesa_files(
+    name = "nak_fs_depth_test_host",
+    testonly = True,
+    srcs = [":nak_fs_depth_test_bin"],
+    platform = "macos",
+)
+
+py_test(
+    name = "fs_depth_test",
+    size = "small",
+    srcs = ["run_host_test.py"],
+    args = ["$(rootpath :nak_fs_depth_test_host)", "depth"],
+    data = [":nak_fs_depth_test_host"],
+    main = "run_host_test.py",
+)
+
+mesa_cc_library(
+    name = "nak_half_contract_test_objects",
+    testonly = True,
+    sources = ["nak_half_contract_test.c"],
+    c_args = mesa_args("c", include_dirs = [
+        "include",
+        "gen:include",
+        "src",
+        "gen:src",
+        "src/compiler",
+        "gen:src/compiler",
+        "src/compiler/nir",
+        "gen:src/compiler/nir",
+        "gen:src/util",
+        "gen:src/util/format",
+    ]),
+)
+
+fs_depth_test_binary(
+    name = "nak_half_contract_test_bin",
+    testonly = True,
+    archives = [
+        ":nak_half_contract_test_objects",
+        "//third_party/mesa/src/compiler/nir:nir",
+        "//third_party/mesa/src/compiler:compiler",
+        "//third_party/mesa/src/util:mesa_util",
+        "//third_party/mesa/src/util:mesa_util_simd",
+        "//third_party/mesa/src/c11/impl:mesa_util_c11",
+        "//third_party/mesa/src/util/blake3",
+    ],
+)
+
+mesa_files(
+    name = "nak_half_contract_test_host",
+    testonly = True,
+    srcs = [":nak_half_contract_test_bin"],
+    platform = "macos",
+)
+
+py_test(
+    name = "half_contract_test",
+    size = "small",
+    srcs = ["run_host_test.py"],
+    args = ["$(rootpath :nak_half_contract_test_host)", "half-contract"],
+    data = [":nak_half_contract_test_host"],
     main = "run_host_test.py",
 )

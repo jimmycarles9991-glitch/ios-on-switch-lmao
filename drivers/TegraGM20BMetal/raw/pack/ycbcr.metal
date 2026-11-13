@@ -2,7 +2,9 @@
 // raw GM20B path (r8-rawca): a two-plane YCbCr surface's texture as Metal reads it, drawn into the image the raw path samples in
 // its place, one texel a fragment. The arithmetic is m2v's (metal2vulkan bind/ycbcr_convert.rs, its kernel and `ycbcr_read`),
 // which reproduces an Apple M4's measured reads exactly:
-//  - codes: a byte, or the high 10 bits of a 16-bit word;
+//  - codes: a byte, or the high 10 bits of a 16-bit word, or (the _packed functions, R32Uint planes) one of three 10-bit codes
+//    of a little-endian 32-bit word at its bits 0, 10 and 20: luma code x in word x / 3, chroma pair x as codes 2 x and
+//    2 x + 1, read as the unpacked formats' of the same codes;
 //  - chroma along a halved axis: the two nearest chroma texels weighted 3/1 (column x/2 and the next for an odd x, the one before
 //    for an even x, each clamped to the plane), along a whole one its own texel weighted 4; the 2x2 sum S of weight 16 rounds
 //    to a code, C = (S + 8) >> 4 (4:2:0's 9/3/3/1, 4:2:2's (S' + 2) >> 2, 4:4:4's own pair alike);
@@ -46,6 +48,37 @@ static uint code(float v, constant Shape &s)
     return uint(rint(v * float(s.unit))) >> s.drop;
 }
 
+typedef texture2d<float, access::read> Plane;
+typedef texture2d<uint, access::read> PackedPlane;
+
+// code x of row y of a packed plane
+static uint packedCode(PackedPlane p, uint x, uint y)
+{
+    return (p.read(uint2(x / 3, y)).r >> (10 * (x % 3))) & 1023;
+}
+
+static uint lumaCode(Plane luma, constant Shape &s, uint2 at)
+{
+    return code(luma.read(at).r, s);
+}
+
+static uint lumaCode(PackedPlane luma, constant Shape &, uint2 at)
+{
+    return packedCode(luma, at.x, at.y);
+}
+
+// chroma pair `at`'s Cb and Cr codes
+static uint2 pairCodes(Plane chroma, constant Shape &s, uint2 at)
+{
+    const float2 pair = chroma.read(at).rg;
+    return uint2(code(pair.x, s), code(pair.y, s));
+}
+
+static uint2 pairCodes(PackedPlane chroma, constant Shape &, uint2 at)
+{
+    return uint2(packedCode(chroma, 2 * at.x, at.y), packedCode(chroma, 2 * at.x + 1, at.y));
+}
+
 // the two chroma texels of luma column (or row) p of a plane n across, and the first one's weight (the second's is 4 less it)
 static uint3 taps(uint p, uint n, bool halved)
 {
@@ -58,9 +91,9 @@ static uint3 taps(uint p, uint n, bool halved)
 }
 
 // the texel's luma code and its filtered chroma codes (Cb, Cr)
-static uint3 codes(texture2d<float, access::read> luma, texture2d<float, access::read> chroma, constant Shape &s, uint2 at)
+template <typename P> static uint3 codes(P luma, P chroma, constant Shape &s, uint2 at)
 {
-    const uint y = code(luma.read(at).r, s);
+    const uint y = lumaCode(luma, s, at);
     if (!s.chroma)
         return uint3(y, 0, 0);
     const bool across = s.halved & 1, down = s.halved & 2;
@@ -71,10 +104,10 @@ static uint3 codes(texture2d<float, access::read> luma, texture2d<float, access:
     uint cb = 0, cr = 0;
     for (uint j = 0; j < 2; j++)
         for (uint i = 0; i < 2; i++) {
-            const float2 pair = chroma.read(uint2(cx[i], cy[j])).rg;
+            const uint2 pair = pairCodes(chroma, s, uint2(cx[i], cy[j]));
             const uint w = wx[i] * wy[j];
-            cb += w * code(pair.x, s);
-            cr += w * code(pair.y, s);
+            cb += w * pair.x;
+            cr += w * pair.y;
         }
     return uint3(y, (cb + 8) >> 4, (cr + 8) >> 4);
 }
@@ -116,8 +149,7 @@ fragment float4 ycbcr_srgb_frag(Out in [[stage_in]], texture2d<float, access::re
     return float4(srgbStep(t.x), srgbStep(t.y), srgbStep(t.z), 1.0f);
 }
 
-static float4 codesTexel(texture2d<float, access::read> luma, texture2d<float, access::read> chroma, constant Shape &s,
-                         uint2 at)
+template <typename P> static float4 codesTexel(P luma, P chroma, constant Shape &s, uint2 at)
 {
     const float3 c = float3(codes(luma, chroma, s, at)) / float(s.max);
     return float4(c.z, c.x, c.y, 1.0f);
@@ -135,4 +167,41 @@ fragment float4 ycbcr_codes10_frag(Out in [[stage_in]], texture2d<float, access:
                                    texture2d<float, access::read> chroma [[texture(1)]], constant Shape &s [[buffer(0)]])
 {
     return codesTexel(luma, chroma, s, uint2(in.position.xy));
+}
+
+fragment float4 ycbcr_packed_converted_frag(Out in [[stage_in]], PackedPlane luma [[texture(0)]],
+                                            PackedPlane chroma [[texture(1)]], constant Shape &s [[buffer(0)]])
+{
+    const int3 t = sums(codes(luma, chroma, s, uint2(in.position.xy)), s);
+    const int3 v = clamp((t + 2048) >> 12, 0, 2048);
+    return float4(float3(v) / 2048.0f, 1.0f);
+}
+
+fragment float4 ycbcr_packed_srgb_frag(Out in [[stage_in]], PackedPlane luma [[texture(0)]],
+                                       PackedPlane chroma [[texture(1)]], constant Shape &s [[buffer(0)]])
+{
+    const int3 t = sums(codes(luma, chroma, s, uint2(in.position.xy)), s);
+    return float4(srgbStep(t.x), srgbStep(t.y), srgbStep(t.z), 1.0f);
+}
+
+fragment float4 ycbcr_packed_codes10_frag(Out in [[stage_in]], PackedPlane luma [[texture(0)]],
+                                          PackedPlane chroma [[texture(1)]], constant Shape &s [[buffer(0)]])
+{
+    return codesTexel(luma, chroma, s, uint2(in.position.xy));
+}
+
+// R10Unorm_PACKED's and RG10Unorm_PACKED's image (runtime/raw_packed_plane.h): texture 0 the plane's words, buffer 0 the
+// texture's width, height and codes a texel (k); texel x's codes are codes k x and k x + 1 of its row
+struct PlaneShape {
+    uint width, height, channels;
+};
+
+fragment float4 ycbcr_packed_plane_frag(Out in [[stage_in]], PackedPlane words [[texture(0)]],
+                                        constant PlaneShape &s [[buffer(0)]])
+{
+    const uint2 at = uint2(in.position.xy);
+    const uint first = s.channels * at.x;
+    const float r = float(packedCode(words, first, at.y)) / 1023.0f;
+    const float g = s.channels == 2 ? float(packedCode(words, first + 1, at.y)) / 1023.0f : 0.0f;
+    return float4(r, g, 0.0f, 1.0f);
 }

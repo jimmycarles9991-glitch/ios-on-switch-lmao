@@ -72,10 +72,9 @@
 //! **Volatile**. A volatile access is the same leaf through a word memory whose [`WordOps`] carry
 //! `volatile`: every word or unit it loads or stores has the `Volatile` memory operand.
 //!
-//! The alignment is a promise about the Metal address; it carries to the offset in a word memory
-//! because every word memory's base is 4-byte aligned in the Metal address space (the binder's
-//! descriptor bases are), and to a `uvec4` unit's index because a descriptor view's base is 16-byte
-//! aligned there.
+//! The path requires alignment of the effective word-memory offset. AIR alignment is relative
+//! to the Metal binding; descriptor access lowering checks the binding residual before choosing
+//! a `uvec4` unit instead of four words.
 
 use crate::air::ir::{Type, TypeId as AirTypeId, TypeLayouts};
 use crate::air::Entry;

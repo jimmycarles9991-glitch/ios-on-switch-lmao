@@ -70,7 +70,7 @@ int columnScanTrigger(uint8_t yLog2)
         return ENODEV;
     int result = EBUSY;
     columnScanOnLoop([&] {
-        if (columnScan.run.stage == native_column_scan::Run::kIdle) {
+        if (columnScan.run.stage == native_column_scan::Run::kIdle && !windowProbeBusy()) {
             columnScan.run.stage = native_column_scan::Run::kPreparing;
             result = 0;
         }
@@ -245,6 +245,7 @@ bool columnScanRestoredOk()
 // Window A's assembly registers (WIN_OPTIONS last) and the CRC unit, latched together at the next frame boundary.
 void columnScanShow(const native_column_scan::Window &w)
 {
+    withdrawCompletionFlip();
     dc[kDcStateAccess] = dc[kDcStateAccess] & ~(kReadMuxActive | kWriteMuxActive);
     dc[kDcWindowHeader] = kWindowASelect;
     dc[kWinColorDepth] = w.depth;
@@ -276,6 +277,7 @@ void columnScanRequest()
 
 void columnScanRestoreWindow()
 {
+    withdrawCompletionFlip();
     const ColumnScanState &s = columnScan;
     dc[kDcStateAccess] = dc[kDcStateAccess] & ~(kReadMuxActive | kWriteMuxActive);
     dc[kDcWindowHeader] = kWindowASelect;

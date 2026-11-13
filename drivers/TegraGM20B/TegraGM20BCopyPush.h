@@ -11,8 +11,9 @@
 extern "C" {
 #endif
 
-#define TGM_COPY_DWORDS \
-	(TGM_RELAYOUT_MAX_WAITS * 5u + TGM_SYNCPT_WAIT_DWORDS + 40u + TGM_SYNCPT_INCR_DWORDS)
+#define TGM_COPY_DWORDS                                                                  \
+	(TGM_RELAYOUT_MAX_WAITS * TGM_RELAYOUT_ACQUIRE_DWORDS + TGM_SYNCPT_WAIT_DWORDS + \
+	 TGM_COPY_RECT_DWORDS + TGM_SYNCPT_INCR_DWORDS)
 
 struct tgm_copy_job {
 	uint64_t src_va, dst_va; /* each plane's first byte */
@@ -21,27 +22,6 @@ struct tgm_copy_job {
 	const struct tgm_layout *src_tiled, *dst_tiled;
 	uint32_t wait_syncpt, wait_threshold, incr_syncpt; /* TEGRA_GM20B_CE_NO_SYNCPT: none */
 };
-
-/* `rows` lines of `row_bytes` bytes, pitch to pitch, no remap: lengths count bytes */
-static inline uint32_t tgm_copy_rows(uint32_t *w, uint64_t src, uint32_t src_pitch, uint64_t dst,
-				     uint32_t dst_pitch, uint32_t row_bytes, uint32_t rows)
-{
-	uint32_t i = 0;
-	w[i++] = tgm_relayout_header(TGM_RELAYOUT_SUBC_COPY, 0x0400,
-				     8);  // OFFSET_IN_UPPER .. LINE_COUNT
-	w[i++] = (uint32_t)(src >> 32);
-	w[i++] = (uint32_t)src;
-	w[i++] = (uint32_t)(dst >> 32);
-	w[i++] = (uint32_t)dst;
-	w[i++] = src_pitch;
-	w[i++] = dst_pitch;
-	w[i++] = row_bytes;
-	w[i++] = rows;
-	w[i++] = tgm_relayout_header(TGM_RELAYOUT_SUBC_COPY, 0x0300, 1);
-	w[i++] = 2u | 1u << 2 | 1u << 7 | 1u << 8 |
-		 1u << 9;  // NON_PIPELINED, FLUSH, PITCH both, MULTI_LINE
-	return i;
-}
 
 /* At most TGM_COPY_DWORDS words; `nwaits` at most TGM_RELAYOUT_MAX_WAITS */
 static inline uint32_t tgm_copy_push(uint32_t *w, const struct tgm_copy_job *j,

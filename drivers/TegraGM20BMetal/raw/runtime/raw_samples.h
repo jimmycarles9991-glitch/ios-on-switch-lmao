@@ -5,7 +5,7 @@
 // lowering read. Metal's default positions are Vulkan's standard ones.
 #pragma once
 #include <cstdint>
-#include "raw_gpu.h"
+#include "raw_sample_shading.h"
 
 namespace raw {
 
@@ -61,11 +61,25 @@ inline bool sampleLayout(uint32_t samples, SampleLayout &out)
     return true;
 }
 
-// The pack's resolve state into a target of MTLPixelFormat `format` (pack/resolve.metal), keyed "raw.resolve.<fragment
-// function>"; null for a format it has none for. An 8-bit sRGB target's state writes codes, into its UNORM twin
-// (resolveTargetFormat).
-inline const char *resolveState(uint32_t format)
+// The pack's resolve state into a target of MTLPixelFormat `format` from `samples` samples (pack/resolve.metal), keyed
+// "raw.resolve.<fragment function>"; null for a format it has none for. 8-bit unorm at 2 and 4 samples has entries of its
+// own with the count built in; every other takes the count from buffer 0. An 8-bit sRGB target's state writes codes, into
+// its UNORM twin (resolveTargetFormat).
+inline const char *resolveState(uint32_t format, uint32_t samples)
 {
+    const bool two = samples == 2, four = samples == 4;
+    switch (format) {
+    case 70:
+        return four  ? "raw.resolve.resolve_rgba8_4x_frag"
+               : two ? "raw.resolve.resolve_rgba8_2x_frag"
+                     : "raw.resolve.resolve_rgba8_frag";
+    case 80:
+        return four  ? "raw.resolve.resolve_bgra8_4x_frag"
+               : two ? "raw.resolve.resolve_bgra8_2x_frag"
+                     : "raw.resolve.resolve_bgra8_frag";
+    default:
+        break;
+    }
     switch (format) {
     case 70:
         return "raw.resolve.resolve_rgba8_frag";
@@ -84,8 +98,23 @@ inline const char *resolveState(uint32_t format)
     }
 }
 
+// The pack's depth resolve state into a depth/stencil target of MTLPixelFormat `format` under MTLMultisampleDepthResolveFilter
+// `filter` (pack/resolve.metal: sample 0, the minimum, the maximum), keyed as resolveState's; null for none
+inline const char *depthResolveState(uint32_t format, uint32_t filter)
+{
+    static const char *const names[3][3] = {
+        {"raw.resolve.resolve_depth16_sample0_frag", "raw.resolve.resolve_depth16_min_frag",
+         "raw.resolve.resolve_depth16_max_frag"},
+        {"raw.resolve.resolve_depth32f_sample0_frag", "raw.resolve.resolve_depth32f_min_frag",
+         "raw.resolve.resolve_depth32f_max_frag"},
+        {"raw.resolve.resolve_depth32fs8_sample0_frag", "raw.resolve.resolve_depth32fs8_min_frag",
+         "raw.resolve.resolve_depth32fs8_max_frag"}};
+    const int row = format == 250 ? 0 : format == 252 ? 1 : format == 260 ? 2 : -1;
+    return row < 0 || filter > 2 ? nullptr : names[row][filter];
+}
+
 // The rows of a multisampled target's sample grid (NIL's px_extent_sa: two down for 4 and 8 samples), as NVK's HEIGHT counts
-inline uint32_t sampleRows(const Texture &t)
+template <class Image> inline uint32_t sampleRows(const Image &t)
 {
     return t.samples >= 4 ? t.height * 2 : t.height;
 }

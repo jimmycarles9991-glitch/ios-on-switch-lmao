@@ -65,7 +65,7 @@ struct KernelViewScene: GPUScene {
                 got[$0 * bytesPerTexel..<($0 + 1) * bytesPerTexel]
                     != want[$0 * bytesPerTexel..<($0 + 1) * bytesPerTexel]
             }
-            result.metrics.set(label.replacingOccurrences(of: " ", with: "_") + "_wrong", wrong.count)
+            result.metrics.set(label.lowercased().replacingOccurrences(of: " ", with: "_") + "_wrong", wrong.count)
             result.expect(wrong.isEmpty, "\(label): \(wrong.count) texels wrong, the first at \(wrong.first ?? -1)")
         }
         result.metrics.set("paths", paths.joined(separator: ","))

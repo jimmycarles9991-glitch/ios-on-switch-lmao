@@ -81,7 +81,7 @@ fn choices() -> Vec<Choice> {
         choice!(p.nan_and_min_max: NanMinMaxPolicy { Native, Exact }),
         choice!(p.rounding_order: RoundingOrderPolicy { Native, Exact }),
         choice!(p.half_blend: HalfBlendPolicy { Device, Exact }),
-        choice!(p.padded_reads: PaddedReadsPolicy { Alias, Shadow }),
+        choice!(p.padded_reads: PaddedReadsPolicy { Alias, AliasWrites, Shadow }),
     ]
 }
 

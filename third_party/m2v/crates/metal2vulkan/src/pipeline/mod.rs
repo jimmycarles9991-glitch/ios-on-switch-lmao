@@ -89,6 +89,7 @@ pub(crate) mod interface;
 pub(crate) mod layout;
 pub(crate) mod link;
 pub(crate) mod lower_inputs;
+pub(crate) mod native;
 pub(crate) mod private_state;
 pub(crate) mod relocate;
 pub(crate) mod rotated_blend;
@@ -101,6 +102,7 @@ pub(crate) mod table;
 #[cfg(test)]
 pub(crate) mod testing;
 pub(crate) mod tile_map;
+pub(crate) mod two_plane;
 pub(crate) mod vertex;
 
 pub use artifact::{
@@ -140,6 +142,7 @@ pub use table::FunctionHandle;
 // The vocabulary the pipeline surface reaches: render-pipeline keys, runtime facts and their
 // mechanisms, and the link symbols artifacts, layouts, and plans name.
 pub use compile::api::{CompileReport, RenderPipelineKeys};
+pub use native::{NativeFunction, NativePipeline, NativeProgram, NativeRecord};
 // Translating one entry of a bare module.
 pub use compile::{
     EntryDescriptor, EntryPlan, EntryRef, LinkedSource, StageEntries, StandaloneModule,

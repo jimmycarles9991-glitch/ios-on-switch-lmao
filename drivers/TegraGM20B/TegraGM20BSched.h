@@ -41,15 +41,15 @@ enum tgm_sched_kick tgm_sched_kicked(struct nvkm_device *device, unsigned int ch
 /* Debug kernels: this window's kicks by what they found, for the stats line. */
 void tgm_sched_stats(char *buf, unsigned int len);
 
-/* The hold (hold.c). Only channels gpu.c registered (an app's) are held, never one errored, isolated or in recovery. */
+/* The hold (hold.c). Only channels gpu_chan.c registered (an app's) are held, never one errored, isolated or in recovery. */
 struct tgm_window {
 	uint64_t now, vblank, interval, expected;
 };
 
 void tgm_hold_init(void);
-/* gpu.c: an app channel was made (on) or is being torn down (off: released first, so its drain is not held). */
+/* gpu_chan.c: an app channel was made (on) or is being torn down (off: released first, so its drain is not held). */
 void tgm_hold_track(struct nvkm_device *device, unsigned int chid, int on);
-/* gpu.c: the channel is being isolated (its kill is under way): forgotten without a release (nvkm's recovery owns it). */
+/* gpu_hang.c: the channel is being isolated (its kill is under way): forgotten without a release (nvkm's recovery owns it). */
 void tgm_hold_drop(unsigned int chid);
 /* High work (the present, or a compositor submission through an acquire) waits for this channel's work: released at once,
  * and left alone until a present queued after this completes (it follows that work). */
@@ -68,9 +68,19 @@ int tgm_hold_preempt(struct nvkm_device *device, unsigned int chid);
 uint64_t tgm_hold_asked(unsigned int chid, uint64_t asked_pt);
 /* The compositor's submission queued behind `chid` started at start_pt (its start stamp): an exact sample. */
 void tgm_hold_sampled(unsigned int chid, uint64_t asked_pt, uint64_t start_pt);
+/* Debug kernels: how many preemption latencies were sampled for process `pid`'s channels since its last call, the
+ * longest, and where they landed with their buckets (SwitchGpuPreemptLanding.h; hw_test_app gpu.sched.long_draw_bands,
+ * through SwitchGpuPathStats' line) */
+struct switch_gpu_preempt_counts;
+void tgm_hold_samples_take(int pid, uint32_t *n, uint64_t *max_ns,
+			   struct switch_gpu_preempt_counts *counts);
+/* Debug kernels: an app channel's batch ending at end_pt, the job's last or not: where a preempt lands */
+void tgm_hold_released(unsigned int chid, uint64_t end_pt, int job_last);
 /* Half its preemption latency after a preempt: if `chid` has left the GPU, the latency comes down. */
 void tgm_hold_check(struct nvkm_device *device, unsigned int chid);
 uint64_t tgm_hold_latency(unsigned int chid);
+/* Whether any tracked app channel is slow enough to be held (tgm_hold_worth); lockless, for opening a window. */
+int tgm_hold_wanted(void);
 /* The window ends (the present completed, or it expired): every held channel is released. */
 void tgm_hold_release(struct nvkm_device *device, uint64_t now);
 /* The channel's cumulative time held, for the stuck timers (tgm_unheld_ns). */
@@ -81,17 +91,17 @@ void tgm_hold_stats(char *buf, unsigned int len);
 
 /* The deadline (deadline.c). */
 void tgm_deadline_init(struct nvkm_device *device);
-/* gpu.c: a high channel kicked (compositor: one of the compositor's, not the present's); app: it found an app on the GPU. */
+/* gpu_exec.c: a high channel kicked (compositor: one of the compositor's, not the present's); app: it found an app on the GPU. */
 void tgm_deadline_kicked(int compositor, int app);
-/* gpu.c, interrupt pass: a high channel's fence moved past `ns` of GPU time (tgm_gpu_span); `biased` when that is
+/* gpu_fenced.h, interrupt pass: a high channel's fence moved past `ns` of GPU time (tgm_gpu_span); `biased` when that is
  * timed from a kick that found an app on the GPU (the frame's time is then not learned). */
 void tgm_deadline_progress(uint64_t ns, int biased);
-/* gpu.c, interrupt pass: both clocks now (PTIMER calibration), and a PTIMER span in nanoseconds (0 until calibrated). */
+/* gpu_fenced.h, interrupt pass: both clocks now (PTIMER calibration), and a PTIMER span in nanoseconds (0 until calibrated). */
 void tgm_deadline_clock(uint64_t ns, uint64_t pt);
 uint64_t tgm_deadline_pt_ns(uint64_t pt_span);
-/* gpu.c, interrupt pass: the present queued at `queued` completed. */
+/* gpu_fenced.h, interrupt pass: the present queued at `queued` completed. */
 void tgm_deadline_presented(uint64_t queued);
-/* gpu.c: system sleep and rail-down (every hold released, no callout touching the GPU until the wake or rail-up), and
+/* gpu_power.c: system sleep and rail-down (every hold released, no callout touching the GPU until the wake or rail-up), and
  * the wake and rail-up. */
 void tgm_deadline_suspend(void);
 void tgm_deadline_resume(void);

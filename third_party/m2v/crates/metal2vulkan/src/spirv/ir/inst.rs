@@ -208,6 +208,7 @@ pub enum ConvOp {
     UConvert,
     SConvert,
     FConvert,
+    FConvertRte,
     /// Integer to `PhysicalStorageBuffer` pointer.
     ConvertUToPtr,
     Bitcast,
@@ -224,7 +225,7 @@ impl ConvOp {
             ConvOp::ConvertUToF => Op::ConvertUToF,
             ConvOp::UConvert => Op::UConvert,
             ConvOp::SConvert => Op::SConvert,
-            ConvOp::FConvert => Op::FConvert,
+            ConvOp::FConvert | ConvOp::FConvertRte => Op::FConvert,
             ConvOp::ConvertUToPtr => Op::ConvertUToPtr,
             ConvOp::Bitcast => Op::Bitcast,
         }

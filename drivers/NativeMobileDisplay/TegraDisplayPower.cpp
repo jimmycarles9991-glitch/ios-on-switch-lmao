@@ -1,9 +1,15 @@
-// SPDX-License-Identifier: BSD-2-Clause-Patent
+// SPDX-License-Identifier: GPL-2.0-only
+// Copyright (c) 2018 naehrwert
+// Copyright (c) 2018-2025 CTCaer
+// The register tables are taken from hekate (github.com/CTCaer/hekate, GPL-2.0-only): bdk/display/di.inl, with the
+// register names of bdk/display/di.h.
+//
 // Cold power-up and power-down of the Switch OLED display pipeline around SC7; see TegraDisplayPower.h.
 // Register indices are 32-bit word indices as in hekate bdk/display/di.h (DISPLAY_A, DSI and MIPI_CAL are base + index * 4);
 // CAR, PMC and APB_MISC offsets are bytes (hekate bdk/soc/clock.h, pmc_t210.h, t210.h, pinmux.h). Tables are hekate's
 // bdk/display/di.inl, T210B01 variants, in the same order.
 #include <IOKit/IOLib.h>
+#include "../TegraDisplayFlip/SwitchDisplayPriority.h"
 #include "TegraDisplayPower.h"
 #include "../SwitchSuspend/SwitchSleepSteps.h"
 #include "../TegraGPIO/TegraGPIO.h"
@@ -156,8 +162,8 @@ constexpr Reg kDcInit[] = {
     {DC_CMD_STATE_CONTROL, kGeneralUpdate},
     {DC_CMD_STATE_CONTROL, kGeneralActReq},
     {DC_DISP_DC_MCCIF_FIFOCTRL, 0},
-    {DC_DISP_DISP_MEM_HIGH_PRIORITY, 0},
-    {DC_DISP_DISP_MEM_HIGH_PRIORITY_TIMER, 0},
+    {DC_DISP_DISP_MEM_HIGH_PRIORITY, SwitchDisplayPriority::kThresholds},
+    {DC_DISP_DISP_MEM_HIGH_PRIORITY_TIMER, SwitchDisplayPriority::kDelays},
     {DC_CMD_DISPLAY_POWER_CONTROL, 0x50155},
     {DC_CMD_GENERAL_INCR_SYNCPT_CNTRL, 1u << 8},
     {DC_CMD_CONT_SYNCPT_VSYNC, (1u << 8) | 9},

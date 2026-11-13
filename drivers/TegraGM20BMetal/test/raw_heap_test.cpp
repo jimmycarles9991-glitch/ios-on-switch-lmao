@@ -72,4 +72,35 @@ TEST(RawHeap, LargestFreeHonoursAlignment)
     EXPECT_EQ(h.largestFree(64 * kKiB), 64 * kKiB);
 }
 
+TEST(RawHeap, ExplicitPlacementsMayOverlapWithoutConsumingAutomaticSpace)
+{
+    raw::HeapPlacement h(128 * kKiB, true);
+    EXPECT_TRUE(h.placeAt(64 * kKiB, 256, 256));
+    EXPECT_TRUE(h.placeAt(32 * kKiB, 256, 256));
+    EXPECT_TRUE(h.placeAt(64 * kKiB, 256, 512));
+    EXPECT_EQ(h.used(), 0u);
+    EXPECT_EQ(h.largestFree(256), 0u);
+    uint64_t automatic = UINT64_MAX;
+    EXPECT_FALSE(h.place(256, 256, automatic));
+    EXPECT_EQ(automatic, UINT64_MAX);
+    h.release(256, 64 * kKiB);
+    EXPECT_EQ(h.used(), 0u);
+    EXPECT_TRUE(h.placeAt(64 * kKiB, 256, 256));
+}
+
+TEST(RawHeap, ExplicitPlacementChecksExactBoundsAlignmentAndOverflow)
+{
+    raw::HeapPlacement h(65537, true);
+    EXPECT_TRUE(h.placeAt(1, 1, 65536));
+    EXPECT_FALSE(h.placeAt(2, 1, 65536));
+    EXPECT_FALSE(h.placeAt(256, 256, 1));
+    EXPECT_FALSE(h.placeAt(0, 256, 0));
+    EXPECT_FALSE(h.placeAt(256, 0, 0));
+    EXPECT_FALSE(h.placeAt(256, 3, 0));
+    EXPECT_FALSE(h.placeAt(256, 256, UINT64_MAX - 255));
+    EXPECT_FALSE(h.placeAt(UINT64_MAX, 1, 1));
+    raw::HeapPlacement automatic(65537);
+    EXPECT_FALSE(automatic.placeAt(256, 256, 0));
+}
+
 }  // namespace

@@ -545,6 +545,7 @@ mod serde_round_trips {
                 view: StorageAttachmentView::SamplePlanes { layers: 4 },
                 uint_view: Some(vk::Format::R32_UINT),
                 kept: vk::ColorComponentFlags::G | vk::ColorComponentFlags::A,
+                blend_model: 0,
             }],
             shadow_stencil: Some(ShadowStencilUse {
                 format: vk::Format::R8_UINT,

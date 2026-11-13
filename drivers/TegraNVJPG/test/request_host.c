@@ -249,6 +249,33 @@ int main(void)
     r = request(3, 512, TEGRA_NVJPG_SUB_420, 0);
     expect("width 3", &r, &img, &d, &kAll, TEGRA_NVJPG_PLAN_BAD, "bounds", &p);
 
+    // Selector 7's 0xda0 struct carries selector 1's request at 0x00..0x57, and the user client plans every selector
+    // from that prefix: a photo asked for through either gives the same plan and the same picture setup.
+    {
+        static TegraNVJPGDecodeRequest2024 v2024;
+        memset(&v2024, 0, sizeof(v2024));
+        const TegraNVJPGDecodeRequest r1 = request(4032, 3024, TEGRA_NVJPG_SUB_420, 0);
+        memcpy(&v2024, &r1, sizeof(r1));
+        const TegraNVJPGImage photo = image(4032, 3024, TEGRA_NVJPG_CHROMA_420);
+        const TegraNVJPGSurface out = surface(f420, 4032, 3024);
+        TegraNVJPGPlan p1, p7;
+        memset(&p1, 0, sizeof(p1));
+        memset(&p7, 0, sizeof(p7));
+        expect("selector 1 photo", &r1, &photo, &out, &kAll, TEGRA_NVJPG_PLAN_OK, NULL, &p1);
+        expect("selector 7 photo", &v2024.base, &photo, &out, &kAll, TEGRA_NVJPG_PLAN_OK, NULL, &p7);
+        CHECK(memcmp(&p1, &p7, sizeof(p1)) == 0, "selector 7's plan differs from selector 1's");
+        nvjpg_dec_drv_pic_setup_s s1, s7;
+        memset(&s1, 0, sizeof(s1));
+        memset(&s7, 0, sizeof(s7));
+        TegraNVJPGExtent e1, e7;
+        tegra_nvjpg_setup_image(&photo, 1 << 20, &s1);
+        tegra_nvjpg_setup_image(&photo, 1 << 20, &s7);
+        CHECK(!tegra_nvjpg_setup_output(&photo, &p1.target, true, &s1, &e1) &&
+                  !tegra_nvjpg_setup_output(&photo, &p7.target, true, &s7, &e7),
+              "selector photo setups refused");
+        CHECK(memcmp(&s1, &s7, sizeof(s1)) == 0, "selector 7's picture setup differs from selector 1's");
+    }
+
     if (failures) {
         printf("FAIL request: %d failures\n", failures);
         return 1;

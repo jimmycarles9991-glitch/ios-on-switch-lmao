@@ -10,14 +10,16 @@
 //               270-degree job (OutLumaWidth 1279, OutLumaHeight 719 into a 720-pixel-stride framebuffer) and the unit's
 //               128-byte row stride from LumaHeight 31 into 256-byte rows; 4:2:0 chroma the same way, one CbCr pair for
 //               each 2x2 written pixels (from the top-left one); writes outside the surface size or the luma geometry
-//               are dropped (counted as clipped)
+//               are dropped (counted as clipped). N422 and N422R chroma are taken to follow the same law: a pair for
+//               each 2x1 across or 1x2 down the composed picture, so a transposed N422R plane is 4:2:2 in memory (an
+//               inference from the 4:2:0 measurements, not itself measured)
 //   flips       mirror where each composed pixel is written, within the target rectangle before the transpose
 //               (VIC_MODEL_FLIP_RECT), or, the other models V4's probes must cope with, around the whole surface
 //               (VIC_MODEL_FLIP_SURFACE: a sub-rectangle lands at its mirror image) or after the transpose
 //               (VIC_MODEL_FLIP_AFTER): where VIC's flips act is measured on the unit, not assumed
 //   sampling    composed pixel centre x + 0.5 reads source column floor(left + (x + 0.5) * srcW / dstW) (nearest); a
 //               2-tap job is modelled as 1-tap (the same at 1:1)
-//   colour      10-bit pipeline: RGB in as x << 2, 4:2:0 in as x << 2 | x >> 6 (V4's measured widening), the slot and
+//   colour      10-bit pipeline: RGB in as x << 2, Y'CbCr in as x << 2 | x >> 6 (V4's measured widening), the slot and
 //               output matrices through tegra_vic_matrix_apply, out as x >> 2; Cb in pipeline channel 2, Cr in 1
 //               (T210B01, as V4 measures it)
 // Every access is checked against the regions the test maps; one outside them counts as a fault. Pitch linear only.
@@ -134,9 +136,10 @@ static inline int vic_model_read(VicModel *m, const VicModelSlot *s, uint32_t x,
         p->c[1] = ((w >> 8) & 0xff) << 2;
         p->c[2] = b << 2;
         p->a = vic_model_widen(w >> 24);
-    } else if (s->format == TEGRA_VIC_T_Y8___U8V8_N420) {
+    } else if (s->format == TEGRA_VIC_T_Y8___U8V8_N420 || s->format == TEGRA_VIC_T_Y8___U8V8_N422) {
+        const uint32_t cy = s->format == TEGRA_VIC_T_Y8___U8V8_N420 ? y / 2 : y;
         const uint8_t *yq = vic_model_at(m, s->luma + (uint64_t)y * s->lw + x, 1);
-        const uint8_t *cq = vic_model_at(m, s->chroma + ((uint64_t)(y / 2) * s->cw + x / 2) * 2, 2);
+        const uint8_t *cq = vic_model_at(m, s->chroma + ((uint64_t)cy * s->cw + x / 2) * 2, 2);
         if (!yq || !cq)
             return 0;
         p->c[0] = vic_model_widen(yq[0]);
@@ -240,19 +243,24 @@ static inline void vic_model_run(VicModel *m, const TegraVICJob *job)
                     a << 24 | (format == TEGRA_VIC_T_A8R8G8B8 ? (r << 16 | g << 8 | b) : (b << 16 | g << 8 | r));
                 memcpy(q, &w, 4);
                 m->writes++;
-            } else if (format == TEGRA_VIC_T_Y8___U8V8_N420) {
+            } else if (format == TEGRA_VIC_T_Y8___U8V8_N420 || format == TEGRA_VIC_T_Y8___U8V8_N422 ||
+                       format == TEGRA_VIC_T_Y8___U8V8_N422R) {
                 uint8_t *q = vic_model_at(m, outLuma + at, 1);
                 if (!q)
                     continue;
                 q[0] = (uint8_t)(p.c[0] >> 2);
                 m->writes++;
-                if ((wx | wy) & 1)
-                    continue;  // one CbCr pair for each 2x2: the top-left written pixel's
-                if (wx / 2 >= cw || wy / 2 >= ch) {
+                const uint32_t halfX = format != TEGRA_VIC_T_Y8___U8V8_N422R;
+                const uint32_t halfY = format != TEGRA_VIC_T_Y8___U8V8_N422;
+                if ((halfX && (wx & 1)) || (halfY && (wy & 1)))
+                    continue;  // one CbCr pair for each 2x2, 2x1 or 1x2: the top-left written pixel's
+                const uint32_t cx = halfX ? wx / 2 : wx;
+                const uint32_t cy = halfY ? wy / 2 : wy;
+                if (cx >= cw || cy >= ch) {
                     m->clipped++;
                     continue;
                 }
-                const uint64_t cat = tr ? (uint64_t)(wx / 2) * ch + wy / 2 : (uint64_t)(wy / 2) * cw + wx / 2;
+                const uint64_t cat = tr ? (uint64_t)cx * ch + cy : (uint64_t)cy * cw + cx;
                 uint8_t *cq = vic_model_at(m, outChroma + cat * 2, 2);
                 if (!cq)
                     continue;

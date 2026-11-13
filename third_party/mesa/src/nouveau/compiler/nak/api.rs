@@ -3,8 +3,8 @@
 
 use crate::from_nir::*;
 use crate::ir::{
-    max_warps_per_sm, ShaderInfo, ShaderIoInfo, ShaderModel, ShaderModelInfo,
-    ShaderStageInfo,
+    max_warps_per_sm, Shader, ShaderInfo, ShaderIoInfo, ShaderModel,
+    ShaderModelInfo, ShaderStageInfo,
 };
 use crate::sph;
 
@@ -170,7 +170,7 @@ fn nir_options(dev: &nv_device_info) -> nir_shader_compiler_options {
         lower_scmp: true,
         has_rotate32: dev.sm >= 32,
         has_shfr32: dev.sm >= 32,
-        has_iadd3: dev.sm >= 70,
+        has_iadd3: dev.sm >= 50,
         has_imad32: dev.sm >= 70,
         has_sdot_4x8: dev.sm >= 70,
         has_udot_4x8: dev.sm >= 70,
@@ -254,6 +254,7 @@ impl ShaderBin {
         fs_key: Option<&nak_fs_key>,
         code: Vec<u32>,
         asm: &str,
+        bound_textures: u8,
     ) -> ShaderBin {
         let asm = CString::new(asm)
             .expect("NAK assembly has unexpected null characters");
@@ -277,7 +278,7 @@ impl ShaderBin {
                     .unwrap()
             },
             num_control_barriers: info.num_control_barriers,
-            _pad0: Default::default(),
+            bound_textures,
             _pad1: Default::default(),
             max_warps_per_sm: info.max_warps_per_sm,
             num_instrs: info.num_instrs,
@@ -488,35 +489,32 @@ fn eprint_hex(label: &str, data: &[u32]) {
 }
 
 macro_rules! pass {
-    ($s: expr, $pass: ident) => {
-        $s.$pass();
+    ($s: expr, $pass: ident) => {{
+        let result = $s.$pass();
         if DEBUG.print() {
             eprintln!("NAK IR after {}:\n{}", stringify!($pass), $s);
         }
-    };
+        result
+    }};
 }
 
-fn nak_compile_shader_internal(
-    nir: *mut nir_shader,
-    dump_asm: bool,
-    nak: *const nak_compiler,
-    robust2_modes: nir_variable_mode,
-    fs_key: *const nak_fs_key,
-    has_task_shader: bool,
-) -> *mut nak_shader_bin {
-    unsafe {
-        nak_postprocess_nir(nir, nak, robust2_modes, fs_key, has_task_shader)
-    };
-    let nak = unsafe { &*nak };
-    let nir = unsafe { &*nir };
-    let fs_key = if fs_key.is_null() {
-        None
-    } else {
-        Some(unsafe { &*fs_key })
-    };
+fn cost(s: &Shader<'_>) -> (usize, usize) {
+    let instrs: usize = s
+        .functions
+        .iter()
+        .flat_map(|f| f.blocks.iter())
+        .map(|b| b.instrs.len())
+        .sum();
+    (instrs + crate::reg_banks::extra_reads(s), instrs)
+}
 
-    let sm = ShaderModelInfo::new(nak.sm, nak.warps_per_sm);
-    let mut s = nak_shader_from_nir(nak, nir, &sm, has_task_shader);
+fn compile_backend<'a>(
+    nak: &nak_compiler,
+    nir: &'a nir_shader,
+    sm: &'a ShaderModelInfo,
+    has_task_shader: bool,
+) -> (Shader<'a>, bool) {
+    let mut s = nak_shader_from_nir(nak, nir, sm, has_task_shader);
 
     if DEBUG.print() {
         eprintln!("NAK IR:\n{}", &s);
@@ -533,20 +531,24 @@ fn nak_compile_shader_internal(
     pass!(s, opt_uniform_instrs);
     pass!(s, opt_copy_prop);
     pass!(s, opt_prmt);
-    if sm53_probe {
-        pass!(s, opt_sm53_half_probe);
-    }
+    let half_rewrites = if sm53_probe {
+        pass!(s, opt_sm53_half_probe)
+    } else {
+        0
+    };
     pass!(s, opt_lop);
     pass!(s, opt_copy_prop);
     pass!(s, opt_dce);
     pass!(s, opt_out);
     if sm53_probe {
-        pass!(s, opt_sm53_f32_source_probe);
+        let source_rewrites = pass!(s, opt_sm53_f32_source_probe);
+        s.stamp_sm53_probe(half_rewrites, source_rewrites);
     }
     pass!(s, legalize);
     pass!(s, opt_dce);
     pass!(s, opt_instr_sched_prepass);
     pass!(s, assign_regs);
+    let moved = crate::reg_banks::moves_values(&s);
     pass!(s, lower_par_copies);
     pass!(s, lower_copy_swap);
     if nak.sm >= 70 {
@@ -561,14 +563,70 @@ fn nak_compile_shader_internal(
     pass!(s, calc_instr_deps);
 
     s.gather_info();
+    (s, moved)
+}
+
+fn nak_compile_shader_internal(
+    nir: *mut nir_shader,
+    dump_asm: bool,
+    nak: *const nak_compiler,
+    robust2_modes: nir_variable_mode,
+    fs_key: *const nak_fs_key,
+    has_task_shader: bool,
+) -> *mut nak_shader_bin {
+    unsafe {
+        nak_postprocess_nir(nir, nak, robust2_modes, fs_key, has_task_shader)
+    };
+    let nak = unsafe { &*nak };
+    let nir_body = nir;
+    let nir = unsafe { &*nir };
+    let fs_key = if fs_key.is_null() {
+        None
+    } else {
+        Some(unsafe { &*fs_key })
+    };
+
+    let sm = ShaderModelInfo::new(nak.sm, nak.warps_per_sm);
+    let first_fit = sm.first_fit();
+    let (mut s, moved) = compile_backend(nak, nir, &sm, has_task_shader);
+    // Spreading sources over register banks can cost a parallel copy that
+    // first-fit avoids: where the allocation moved any value, compile again
+    // first-fit and keep the cheaper program (an extra MOV and an extra
+    // same-bank read each cost a cycle on GM20B), the shorter on a tie
+    if sm.reg_banks() && moved {
+        let (f, _) = compile_backend(nak, nir, &first_fit, has_task_shader);
+        if cost(&f) < cost(&s) {
+            s = f;
+        }
+    }
+
+    // ios-on-switch-lmao: the shader is NAK's own from here; its NIR is the
+    // largest thing a big shader's compile holds (an uber shader's tens of
+    // MB). It goes once both register allocations have read it; the dump
+    // prints it, so it stays then.
+    if !dump_asm {
+        unsafe { nak_release_nir_body(nir_body) };
+    }
 
     let mut asm = String::new();
     if dump_asm {
         write!(asm, "{}", s).expect("Failed to dump assembly");
     }
 
+    let bound_textures = if nak.sm < 70 {
+        crate::sm50::bound_texture_cbuf(&s)
+    } else {
+        0
+    };
     let code = sm.encode_shader(&s);
-    let bin = Box::new(ShaderBin::new(&sm, &s.info, fs_key, code, &asm));
+    let bin = Box::new(ShaderBin::new(
+        &sm,
+        &s.info,
+        fs_key,
+        code,
+        &asm,
+        bound_textures,
+    ));
     Box::into_raw(bin) as *mut nak_shader_bin
 }
 

@@ -15,7 +15,8 @@
     "ProgressUI's boot logo (backboardd's Apple logo overlay) is boot/logo's, the same pixels hekate's bootlogo.bmp puts",
     "on the panel, under each name ProgressUI looks for at a truncated main-screen-scale of 1 or 2 (iPadOS 17 and 27).",
     "portrait (optional): staged only for a portrait-native kernel (drivers/NativeMobileDisplay/SwitchPortrait.h).",
-    "debug (optional): staged only in debug boot packages (switch-fetchform, which the BlueTool stand-in runs on request).",
+    "debug (optional): staged only in debug boot packages (switch-fetchform, which the BlueTool stand-in runs on request;",
+    "switch-texpeer, HW Test's second process for shared textures, which 21H461's stand-in and 24B119's launchd start).",
     "kind (optional): staged only for that IPSW kind (--//ipsw:kind), for paths only that kind has or loads.",
     "J120's speaker strips give the presets and bypass flags of VirtualAudio's built-in DSP chain for the speaker port",
     "(nine AUs tuned for J120's four MAX98723 drivers). drivers/SwitchAudio/tunings has same-named ones, gated like the",
@@ -38,12 +39,18 @@
     "switch-appregd register them at the next boot as installd registers a built-in app (tools/deploy/app_journal.py).",
     "switch-appregd and joyconpaird share /usr/libexec, which no boot-arg hides: only the BlueTool stand-in starts them",
     "on iOS 17, and on iOS 27 the kernel disables joyconpaird's launchd job with switch-no-bt.",
-    "Debug iOS 27 packages show iOS 27's com.apple.coreanimation logging profile with CADebug's info lines persisted, so the",
-    "pulled log holds the render server's detach results (drivers/NativeMobileDisplay/logging).",
+    "SwitchShaderCompiler (drivers/TegraGM20BMetal/compiler) compiles every GPU client's states the pack lacks into one",
+    "store: launchd starts it on iOS 27, the BlueTool stand-in on iOS 17 (so with switch-no-bt there it does not run, and",
+    "the kernel then tells clients no compiler will come).",
+    "Debug iOS 27 packages show iOS 27's com.apple.coreanimation logging profile with CADebug's info lines persisted",
+    "(drivers/NativeMobileDisplay/logging).",
     "iOS 27's launchd bootstraps /System/Cryptexes/Supplemental/System/Library/LaunchDaemons when the commpage",
     "byte it checks is set, which the 27 kernel does (commpage.c). That path is a symlink to",
     "/private/preboot/Cryptexes/Supplemental, which the 27 kernel creates as this union's point: our daemons' plists go",
-    "there, and overlay.py refuses anything else under it.",
+    "there, and overlay.py refuses anything else under it but one file: the jetsam properties overlay launchd reads",
+    "from there (its SupplementalJetsamProperties). 27's launchd ignores a plist's JetsamProperties: a daemon's band",
+    "and limits come from the jetsam properties tables alone, where J181's Daemon Override Global gives 6 MB to any",
+    "daemon they do not name.",
     "iOS 27's camera description of J181 (CMCapture.framework/J181/AVCaptureSession.plist, which CMCapture finds by",
     "MobileGestalt's HWModelDescriptionForCamera) lists its cameras and the video effects cameracaptured compiles",
     "shaders for at every launch (FigCapturePreloadShaders). The Switch has none, so its J181 description is empty:",
@@ -77,6 +84,20 @@
       "boot-arg": "switch-no-bt"
     },
     {
+      "path": "/usr/bin/switch-texpeer",
+      "source": "build/switch-hwtest/switch-texpeer",
+      "trust": true,
+      "debug": true,
+      "boot-arg": "switch-no-bt"
+    },
+    {
+      "path": "/private/preboot/Cryptexes/Supplemental/System/Library/LaunchDaemons/com.brunostjohn.switch.texpeer.plist",
+      "source": "hw_test_app/peer/com.brunostjohn.switch.texpeer.plist",
+      "union": "/private/preboot/Cryptexes/Supplemental",
+      "debug": true,
+      "kind": "24B119"
+    },
+    {
       "path": "/usr/libexec/joyconpaird",
       "source": "build/switch-joycon/joyconpaird",
       "trust": true
@@ -95,6 +116,23 @@
     {
       "path": "/private/preboot/Cryptexes/Supplemental/System/Library/LaunchDaemons/com.brunostjohn.switch.appregd.plist",
       "source": "drivers/SwitchAppRegistration/com.brunostjohn.switch.appregd.plist",
+      "union": "/private/preboot/Cryptexes/Supplemental",
+      "kind": "24B119"
+    },
+    {
+      "path": "/usr/libexec/SwitchShaderCompiler",
+      "source": "build/switch-gpu/SwitchShaderCompiler",
+      "trust": true
+    },
+    {
+      "path": "/private/preboot/Cryptexes/Supplemental/System/Library/LaunchDaemons/com.brunostjohn.switch.shadercompiler.plist",
+      "source": "drivers/TegraGM20BMetal/compiler/com.brunostjohn.switch.shadercompiler.plist",
+      "union": "/private/preboot/Cryptexes/Supplemental",
+      "kind": "24B119"
+    },
+    {
+      "path": "/private/preboot/Cryptexes/Supplemental/System/Library/JetsamProperties/com.apple.jetsamproperties.cryptex.plist",
+      "source": "overlay/supplemental/com.apple.jetsamproperties.cryptex.plist",
       "union": "/private/preboot/Cryptexes/Supplemental",
       "kind": "24B119"
     },

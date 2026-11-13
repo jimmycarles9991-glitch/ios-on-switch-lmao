@@ -114,9 +114,13 @@ camera frameworks (no camera here). ReplayKit, AVFoundation, CoreImage, CoreVide
 min 4, max 16384 (dest height 16382), up 4x, down 8x H / 4x V, filter taps 9 V / 15 H, 32 phases, coefficient bits
 4.12, rotation, identity CSC, histogram, colour manager, accessibility, many formats. TegraVIC publishes what VIC does
 [T]: min 4, max 8192, 16x up and down, Apple's filter geometry (so CA's tables keep their shape; VIC ignores custom
-coefficients), rotation iff all 8 transforms proved, IdentityCSC 1, formats ARGB8888, RGBA8888, 2Planes420 in and out,
-and 0 for HDR, film grain, enhancement, directional scaling, colour manager, accessibility, histogram, tiling,
-fractional offsets/dimensions, 4:2:2/4:4:4, luma-only, 10-bit and compressed formats.
+coefficients), rotation iff all 8 transforms proved, IdentityCSC 1, FractionalXYOffsetsSupported 1 (16.16 source
+offsets reach SourceRectLeft/Top; probe gpu.x1.vic_fractional decides it), formats ARGB8888, RGBA8888, 2Planes420,
+2Planes422, 2Planes444, LumaOnlyL008 and ARGB2101010 in and out, Interleaved422 once its trait is proven, and 0 for
+HDR, film grain, enhancement, directional scaling, colour manager, accessibility, histogram, tiling (Apple's GPU
+tiling), fractional dimensions, 10-bit YCbCr and compressed formats.
+Core Animation reads none of the format keys. On iPadOS 27 its detached-layer copy (`IOMFBDisplay::detach_layer`,
+QuartzCore 24B119) asks for '422v'/'422f' from a '420v'/'420f' layer regardless [V].
 
 ## 7. The service's identity [V]
 
@@ -152,10 +156,10 @@ Apple's code that still runs: the classes' constructors, `getMetaClass`, the ser
    estimation, directional scaling, pixel averaging, edge mirroring, pseudo-linear, fix-upscaling, fractional precision,
    blit clip, lock-in, read-only, unwire, power, coalescing, Comm records) are accepted and ignored. Refused as
    **kIOReturnUnsupported** (callers fall back): histogram, HDR, film grain, colour remap, shared events, alpha override
-   into a surface with alpha, formats other than BGRA/RGBA/420v/420f, protected-to-less-protected, and any shape the
-   checker refuses (pitch the unit cannot address, odd 4:2:0 rects, >16x scaling, sizes outside 2..8192, a destination
-   sub-rectangle under a transform other than 0 and 6, whose placement is not in place on the unit). Refused as
-   **kIOReturnBadArgument**: unknown surface IDs, Transform bits 3-5.
+   into a surface with alpha, formats other than BGRA/RGBA/420v/420f/422v/422f, protected-to-less-protected, and any
+   shape the checker refuses (pitch the unit cannot address, odd 4:2:0 rects or 4:2:2 columns, >16x scaling, sizes
+   outside 2..8192, a destination sub-rectangle under a transform other than 0 and 6, whose placement is not in place on
+   the unit). Refused as **kIOReturnBadArgument**: unknown surface IDs, Transform bits 3-5.
 3. Build and check every VIC job in the calling thread (`tegra_vic_build`, `TegraVICConfig.h`), so refusals are the
    call's own result; then queue (16 deep, FIFO) for the engine thread. Sync calls sleep until their jobs are done.
 4. Engine thread: `IOSurface::prepare`, map each surface page by page into its SMMU window (source read-only), clean
@@ -177,7 +181,12 @@ are generated in its encoding (`tegra_vic_matrix_*`) and checked on the host aga
   caller falls back"). Supporting them needs the IOSurface kext's IOSurfaceSharedEvent lookup/listener/signal
   (0x5b974d8, 0x5b97400, 0x5b97718, 0x5b96c88 [V], semantics [I]).
 - Colour standard by size, not by the surfaces' YCbCrMatrix attachment.
-- 4:2:2, 4:4:4, L565, l10r, RGhA, 10-bit: refused (VideoToolbox falls back per call).
+- Packed 4:2:2 (until `packedYcc` is proven), RGhA, 10-bit YCbCr: refused (VideoToolbox falls back per call). L008,
+  L565, l10r, NV24 and three-plane 4:2:0 are table rows that have not run on the unit.
+- 4:2:2 biplanar (`Y8___U8V8_N422`, NVB0B6 code 63) has not run on the unit. Like every transposed output, a
+  transposed 4:2:2 one is described before the transpose, where chroma halved across memory rows is halved down:
+  `Y8___U8V8_N422R` (65), with the siting exchanged (`TegraVICFormats.h`). This rests on the law measured for 4:2:0,
+  which cannot tell the two apart. If it is wrong, a turned 4:2:2 picture shows correct luma and misplaced colour.
 - GetHistogram, GetTransformEstimation, CaptureSurface: unsupported.
 - Rotation direction: TegraVIC takes bit 2 as a clockwise quarter turn applied after the flips (Android's HAL order)
   [I]; which VIC flip/transpose bits implement each IOSA transform was measured on the unit (`vicFlips` [T]), so only
@@ -189,9 +198,11 @@ are generated in its encoding (`tegra_vic_matrix_*`) and checked on the host aga
   a row stride of `OutLumaHeight` + 1 pixels]. Of the four conventions (rectangles × surface, before or after the
   transpose) the unit copied the card with rectangles and surface before [T]; transposed 4:2:0 output (a BGRA patch
   card into 420f, transforms 4 and 7) matched too [T].
-- Destination sub-rectangles under a flip or quarter turn: VIC mirrors around the whole surface, so a sub-rectangle
-  lands in place only under transforms 0 and 6 (`subRects` 0x41 [T]; test/vic_model.h reproduces the unit's diag lines);
-  under the others the checker allows whole-surface jobs only.
+- Destination subrectangles: VIC mirrors around the complete output surface. The measured unadjusted placement mask
+  is `subRects` 0x41 [T]. For each flipped axis, the builder now places the pre-transpose target at
+  `surface extent - requested origin - rectangle extent`. The same correction applies to the slot destination.
+  All eight transforms pass asymmetric cropped RGB/NV12 model checks with padded rows and scaling; the model
+  reproduces the unit's original placement diagnostics. New physical subrectangle/filter validation remains.
 
 ## 10. NVDEC's pictures (not IOSurfaceAccelerator)
 

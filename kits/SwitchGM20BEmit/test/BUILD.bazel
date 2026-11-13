@@ -1,0 +1,330 @@
+# kits/SwitchGM20BEmit on the host: its words against the drivers' emitters for the same inputs.
+#
+#   bazel test //kits/SwitchGM20BEmit/test:all
+load("@rules_cc//cc:cc_library.bzl", "cc_library")
+load("@rules_python//python:py_test.bzl", "py_test")
+load("//bazel/lint:defs.bzl", "lint_files")
+load("//bazel/testing:defs.bzl", "host_library", "host_test")
+load("//kernel/rules:kernel.bzl", "kernel_driver")
+load("//kits/SwitchGM20B:defs.bzl", "SWITCH_GM20B_MESA_HEADERS")
+load("//kits/SwitchGM20BEmit:defs.bzl", "EMIT_SOURCES", "MESA_MME", "MESA_MME_COPTS", "MESA_MME_HEADERS", "SWITCH_GM20B_EMIT_INCLUDES")
+
+lint_files()
+
+# The kit's C, with the tests' flags (warnings as errors, sanitizers).
+host_library(
+    name = "emit",
+    srcs = [
+        "//kits/SwitchGM20BEmit:SwitchGM20BEmit2D.c",
+        "//kits/SwitchGM20BEmit:SwitchGM20BEmit3D.c",
+        "//kits/SwitchGM20BEmit:SwitchGM20BEmitBarrier.c",
+        "//kits/SwitchGM20BEmit:SwitchGM20BEmitDecompress.c",
+        "//kits/SwitchGM20BEmit:SwitchGM20BEmitIterated.c",
+        "//kits/SwitchGM20BEmit:SwitchGM20BEmitPredicate.c",
+        "//kits/SwitchGM20BEmit:SwitchGM20BEmitRaster.c",
+        "//kits/SwitchGM20BEmit:SwitchGM20BEmitReport.c",
+        "//kits/SwitchGM20BEmit:mesa/nouveau_copy_rect.c",
+    ],
+    hdrs = [
+        "//kits/SwitchGM20BEmit:SwitchGM20BEmit2D.h",
+        "//kits/SwitchGM20BEmit:SwitchGM20BEmit3D.h",
+        "//kits/SwitchGM20BEmit:SwitchGM20BEmitBarrier.h",
+        "//kits/SwitchGM20BEmit:SwitchGM20BEmitCopy.h",
+        "//kits/SwitchGM20BEmit:SwitchGM20BEmitDecompress.h",
+        "//kits/SwitchGM20BEmit:SwitchGM20BEmitIterated.h",
+        "//kits/SwitchGM20BEmit:SwitchGM20BEmitPredicate.h",
+        "//kits/SwitchGM20BEmit:SwitchGM20BEmitRaster.h",
+        "//kits/SwitchGM20BEmit:SwitchGM20BEmitReport.h",
+        "//kits/SwitchGM20BEmit:SwitchGM20BPushDecode.h",
+    ],
+    deps = ["//kits/SwitchGM20BEmit:push"],
+)
+
+host_test(
+    name = "emit_2d_test",
+    srcs = [
+        "emit_2d_test.cpp",
+        "push_words.h",
+    ],
+    deps = [
+        ":emit",
+        "//kits/SwitchGM20B:classes",
+        ":method_checks",
+    ],
+)
+
+host_test(
+    name = "emit_decompress_test",
+    srcs = [
+        "emit_decompress_test.cpp",
+        "push_words.h",
+    ],
+    deps = [
+        ":emit",
+        "//kits/SwitchGM20B:classes",
+        ":method_checks",
+    ],
+)
+
+host_test(
+    name = "emit_iterated_test",
+    srcs = [
+        "emit_iterated_test.cpp",
+        "push_words.h",
+    ],
+    deps = [
+        ":emit",
+        "//kits/SwitchGM20B:classes",
+        ":method_checks",
+    ],
+)
+
+host_test(
+    name = "emit_raster_test",
+    srcs = [
+        "emit_raster_test.cpp",
+        "push_words.h",
+    ],
+    deps = [
+        ":emit",
+        "//kits/SwitchGM20B:classes",
+        ":method_checks",
+    ],
+)
+
+host_test(
+    name = "emit_report_test",
+    srcs = [
+        "emit_report_test.cpp",
+        "push_words.h",
+    ],
+    deps = [
+        ":emit",
+        "//kits/SwitchGM20B:classes",
+        ":method_checks",
+    ],
+)
+
+host_test(
+    name = "emit_predicate_test",
+    srcs = [
+        "emit_predicate_test.cpp",
+        "push_words.h",
+    ],
+    deps = [
+        ":emit",
+        "//kits/SwitchGM20B:classes",
+        ":method_checks",
+    ],
+)
+
+host_test(
+    name = "emit_copy_test",
+    srcs = [
+        "emit_copy_test.cpp",
+        "push_words.h",
+        "//drivers/TegraGM20B:TegraGM20BABI.h",
+        "//drivers/TegraGM20B:TegraGM20BCopy.h",
+        "//drivers/TegraGM20B:TegraGM20BCopyPush.h",
+        "//drivers/TegraGM20B:TegraGM20BFences.h",
+        "//drivers/TegraGM20B:TegraGM20BGpu.h",
+        "//drivers/TegraGM20B:TegraGM20BLayout.h",
+        "//drivers/TegraGM20B:TegraGM20BRelayout.h",
+        "//drivers/TegraGM20B:TegraGM20BSyncpt.h",
+        "//drivers/TegraGM20BMetal:raw_runtime_headers",
+    ],
+    copts = ["-Idrivers/TegraGM20B"],
+    deps = [
+        ":emit",
+        "//drivers/TegraGM20B/test:copy_emit",
+        ":method_checks",
+    ],
+)
+
+host_test(
+    name = "fresh_fill_test",
+    srcs = [
+        "fresh_fill_test.cpp",
+        "push_words.h",
+        "//drivers/TegraGM20B:TegraGM20BABI.h",
+        "//drivers/TegraGM20B:TegraGM20BCopy.h",
+        "//drivers/TegraGM20B:TegraGM20BCopyPush.h",
+        "//drivers/TegraGM20B:TegraGM20BFences.h",
+        "//drivers/TegraGM20B:TegraGM20BGpu.h",
+        "//drivers/TegraGM20B:TegraGM20BLayout.h",
+        "//drivers/TegraGM20B:TegraGM20BRelayout.h",
+        "//drivers/TegraGM20B:TegraGM20BSyncpt.h",
+        "//drivers/TegraGM20BMetal:raw_runtime_headers",
+    ],
+    copts = ["-Idrivers/TegraGM20B"],
+    deps = [
+        ":emit",
+        ":method_checks",
+    ],
+)
+
+host_test(
+    name = "emit_kernel_test",
+    srcs = [
+        "emit_kernel_test.cpp",
+        "push_words.h",
+        "//drivers/TegraGM20B:TegraGM20BABI.h",
+        "//drivers/TegraGM20B:TegraGM20BFences.h",
+        "//drivers/TegraGM20B:TegraGM20BGpu.h",
+        "//drivers/TegraGM20B:TegraGM20BLayout.h",
+        "//drivers/TegraGM20B:TegraGM20BRelayout.h",
+        "//drivers/TegraGM20B:TegraGM20BSyncpt.h",
+    ],
+    deps = [
+        ":emit",
+        "//drivers/TegraGM20B/test:copy_emit",
+        "//kits/SwitchGM20B:classes",
+        ":method_checks",
+    ],
+)
+
+host_test(
+    name = "emit_3d_test",
+    srcs = [
+        "emit_3d_test.cpp",
+        "push_words.h",
+        "//drivers/TegraGM20B:TegraGM20BLayout.h",
+        "//drivers/TegraGM20BMetal:raw/fx/fx_mip.h",
+        "//drivers/TegraGM20BMetal:raw/runtime/raw_emit.cpp",
+        "//drivers/TegraGM20BMetal:raw/runtime/raw_emit.h",
+        "//drivers/TegraGM20BMetal:raw/runtime/raw_push.h",
+        "//drivers/TegraGM20BMetal:raw/runtime/raw_sample_shading.h",
+        "//drivers/TegraGM20BMetal:raw/runtime/raw_target.h",
+        "//drivers/TegraGM20BMetal:raw/runtime/raw_xr.h",
+        "//drivers/TegraGM20BMetal:raw/runtime/raw_xr_pass.h",
+        "//kits/SwitchGM20B/test:driver_constants_h",
+    ],
+    copts = ["-Idrivers/TegraGM20B"],
+    data = ["//drivers/TegraGM20BMetal:raw/runtime/raw_gpu.cpp"],
+    deps = [
+        ":emit",
+        "//kits/SwitchGM20B:classes",
+        ":method_checks",
+    ],
+)
+
+# Mesa's Fermi MME decoder and simulator, from Mesa's tree (raw/pack/mesa holds a copy of the same files).
+host_library(
+    name = "mesa_mme_sim",
+    srcs = [
+        MESA_MME + "mme_fermi.c",
+        MESA_MME + "mme_fermi_sim.c",
+        "//kits/SwitchGM20BEmit:nv_push_cl9097_dump",
+        "//kits/SwitchGM20BEmit:push_headers_mesa",
+    ] + MESA_MME_HEADERS + SWITCH_GM20B_MESA_HEADERS,
+    copts = MESA_MME_COPTS + ["-Wno-unused-variable"],
+)
+
+# What GM20B's classes take, for every test that decodes a push or runs a macro: a method its class lacks or a scratch
+# word past the Fermi MME's 128 fails the test.
+cc_library(
+    name = "method_checks",
+    testonly = True,
+    hdrs = ["method_checks.h"],
+    visibility = ["//drivers/TegraGM20BMetal/test:__pkg__"],
+    deps = [
+        "//kits/SwitchGM20B:methods",
+        "//kits/SwitchGM20BEmit:macros_h",
+        "@googletest//:gtest",
+    ],
+)
+
+# The gate on the hardware's method ranges: the table against the Fermi MME's limits, and every method the context init
+# writes and every raw macro names or writes against the class that takes it.
+host_test(
+    name = "method_ranges_test",
+    srcs = [
+        "method_ranges_test.cpp",
+    ] + MESA_MME_HEADERS,
+    copts = MESA_MME_COPTS,
+    deps = [
+        ":mesa_mme_sim",
+        ":method_checks",
+        "//kits/SwitchGM20B:caps",
+        "//kits/SwitchGM20B:classes",
+        "//kits/SwitchGM20BEmit:context_h",
+        "//kits/SwitchGM20BEmit:macros_h",
+    ],
+)
+
+host_test(
+    name = "emit_mme_test",
+    srcs = [
+        "emit_mme_test.cpp",
+    ] + MESA_MME_HEADERS,
+    copts = MESA_MME_COPTS,
+    deps = [
+        ":mesa_mme_sim",
+        "//kits/SwitchGM20B:classes",
+        "//kits/SwitchGM20BEmit:macros_h",
+        ":method_checks",
+    ],
+)
+
+host_test(
+    name = "context_test",
+    srcs = ["context_test.cpp"],
+    data = ["testdata/context_capture.txt"],
+    deps = ["//kits/SwitchGM20BEmit:context_h"],
+)
+
+host_test(
+    name = "emit_amplify_test",
+    srcs = [
+        "emit_amplify_test.cpp",
+    ] + MESA_MME_HEADERS,
+    copts = MESA_MME_COPTS,
+    deps = [
+        ":mesa_mme_sim",
+        "//kits/SwitchGM20B:classes",
+        "//kits/SwitchGM20BEmit:macros_h",
+        ":method_checks",
+    ],
+)
+
+host_test(
+    name = "emit_icb_bind_test",
+    srcs = [
+        "emit_icb_bind_test.cpp",
+        "//drivers/TegraGM20BMetal:raw_runtime_headers",
+    ] + MESA_MME_HEADERS,
+    copts = MESA_MME_COPTS,
+    deps = [
+        ":mesa_mme_sim",
+        "//kits/SwitchGM20B:classes",
+        "//kits/SwitchGM20BEmit:macros_h",
+        ":method_checks",
+    ],
+)
+
+# The kit compiled by the kernel toolchain, C and C++: never linked, built so the kernel's headers and flags keep taking it.
+kernel_driver(
+    name = "SwitchGM20BEmitKernelCheck",
+    srcs = ["//kits/SwitchGM20BEmit:" + s for s in EMIT_SOURCES] + [
+        "kernel_check.c",
+        "kernel_check_cxx.cpp",
+    ],
+    c_copts = SWITCH_GM20B_EMIT_INCLUDES,
+    copts = SWITCH_GM20B_EMIT_INCLUDES,
+    hdr_deps = [
+        "kits/SwitchGM20B",
+        "kits/SwitchGM20BEmit",
+    ],
+    tags = ["no-lint"],
+)
+
+# kits/SwitchGM20BEmit/SwitchGM20BMacroSlots.h's NVK slots and scratch words against nvk_mme.h's and context.tsv's
+py_test(
+    name = "macro_slots_test",
+    srcs = ["macro_slots_test.py"],
+    data = [
+        "//kits/SwitchGM20BEmit:SwitchGM20BMacroSlots.h",
+        "//kits/SwitchGM20BEmit:context/context.tsv",
+        "//third_party/mesa/src/nouveau/vulkan:nvk_mme.h",
+    ],
+)

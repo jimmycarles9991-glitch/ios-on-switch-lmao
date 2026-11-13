@@ -5,7 +5,7 @@
  * nvkm's own counted block (chan->blocked under chan->lock: gk104_chan_stop's ENABLE_CLR, gk104_chan_start's ENABLE_SET
  * once the count is back at zero), so it composes with nvkm's blocks for a teardown or a context bind; the runlist is
  * never rebuilt for it (nv50_runl_wait polls). The channel the GPU is on is preempted too, and leaves at its next
- * wait-for-idle: its preemption latency is learned from the compositor's start stamp after it (gpu.c), and brought down
+ * wait-for-idle: its preemption latency is learned from the compositor's start stamp after it (gpu_fenced.h), and brought down
  * when a check half that latency after a preempt finds it gone.
  */
 #include <core/device.h>
@@ -19,21 +19,23 @@
 #include "TegraGM20BHost.h"
 #include "TegraGM20BSched.h"
 #include "TegraGM20BSchedPolicy.h"
+#include "SwitchGpuPreemptLanding.h"
 
 #define HOLD_CHIDS 512 /* GM20B's channels (CCSR_CHANNEL__SIZE_1) */
 #define HOLD_LATENCY_MAX TGM_INTERVAL_MAX_NS
 
 static struct {
 	spinlock_t lock;
-	DECLARE_BITMAP(tracked, HOLD_CHIDS); /* gpu.c's app channels */
+	DECLARE_BITMAP(tracked, HOLD_CHIDS); /* gpu_chan.c's app channels */
 	DECLARE_BITMAP(needed, HOLD_CHIDS);  /* high work waits for them, since need_ns */
 	DECLARE_BITMAP(held, HOLD_CHIDS);
 	DECLARE_BITMAP(held_last, HOLD_CHIDS); /* held in the last window, not yet given its turn */
 	DECLARE_BITMAP(turned, HOLD_CHIDS);    /* given its turn this window */
 	DECLARE_BITMAP(hopeless,
 		       HOLD_CHIDS); /* stats: its hold put off to the next vblank this window */
-	DECLARE_BITMAP(isolating, HOLD_CHIDS); /* gpu.c is killing it (tgm_hold_drop) */
-	u32 latency[HOLD_CHIDS];               /* preemption latency, ns */
+	DECLARE_BITMAP(isolating, HOLD_CHIDS); /* gpu_hang.c is killing it (tgm_hold_drop) */
+	DECLARE_BITMAP(slow, HOLD_CHIDS); /* tracked, its latency worth a hold (tgm_hold_worth) */
+	u32 latency[HOLD_CHIDS];          /* preemption latency, ns */
 	u64 asked_pt[HOLD_CHIDS],
 		asked_ns[HOLD_CHIDS]; /* our ask to leave the GPU not yet sampled: PTIMER, kernel clock */
 	u64 held_since[HOLD_CHIDS], held_total[HOLD_CHIDS], need_ns[HOLD_CHIDS];
@@ -41,6 +43,21 @@ static struct {
 	u16 turns[HOLD_CHIDS];
 	u32 holds, preempts, busy, turned_n, hopeless_n, samples, checks;
 } hold;
+
+#if TGM_STATS
+extern int proc_selfpid(void);
+
+/* Each tracked channel's process and the preemption latencies sampled for it since that process last read them
+ * (tgm_hold_samples_take) */
+static struct {
+	int pid[HOLD_CHIDS];
+	u32 n[HOLD_CHIDS];
+	u64 max_ns[HOLD_CHIDS];
+	struct switch_gpu_batch_release
+		last[HOLD_CHIDS]; /* each app channel's last batch release (hold.lock) */
+	struct switch_gpu_preempt_counts counts[HOLD_CHIDS];
+} sampled;
+#endif
 
 void tgm_hold_init(void)
 {
@@ -70,6 +87,17 @@ static struct nvkm_chan *chan_get(struct nvkm_device *device, unsigned int chid,
 			return chan;
 	}
 	return NULL;
+}
+
+/* hold.lock held */
+static void latency_set(unsigned int chid, u64 ns)
+{
+	hold.latency[chid] = (u32)ns;
+	if (tgm_hold_worth(ns) && test_bit(chid, hold.tracked)) {
+		__set_bit(chid, hold.slow);
+	} else {
+		__clear_bit(chid, hold.slow);
+	}
 }
 
 /* hold.lock held */
@@ -143,9 +171,12 @@ void tgm_hold_track(struct nvkm_device *device, unsigned int chid, int on)
 		return;
 	spin_lock_irqsave(&hold.lock, flags);
 	if (on) {
+#if TGM_STATS
+		WRITE_ONCE(sampled.pid[chid], proc_selfpid());
+#endif
 		__set_bit(chid, hold.tracked);
 		__clear_bit(chid, hold.isolating);
-		hold.latency[chid] = TGM_PREEMPT_MIN_NS;
+		latency_set(chid, TGM_PREEMPT_MIN_NS);
 		hold.asked_pt[chid] = 0;
 		__clear_bit(chid, hold.needed);
 		__clear_bit(chid, hold.held_last);
@@ -153,6 +184,7 @@ void tgm_hold_track(struct nvkm_device *device, unsigned int chid, int on)
 	} else {
 		chan_release(device, chid, nvxnu_nanotime());
 		__clear_bit(chid, hold.tracked);
+		__clear_bit(chid, hold.slow);
 	}
 	spin_unlock_irqrestore(&hold.lock, flags);
 }
@@ -213,7 +245,7 @@ uint64_t tgm_hold_due(struct nvkm_device *device, const struct tgm_window *w, in
 
 	*preempt = -1;
 	spin_lock_irqsave(&hold.lock, flags);
-	for_each_set_bit(chid, hold.tracked, HOLD_CHIDS)
+	for_each_set_bit(chid, hold.slow, HOLD_CHIDS)
 	{
 		if (test_bit(chid, hold.held) || test_bit(chid, hold.turned) ||
 		    test_bit(chid, hold.needed))
@@ -313,13 +345,63 @@ void tgm_hold_sampled(unsigned int chid, uint64_t asked_pt, uint64_t start_pt)
 	if (hold.asked_pt[chid] == asked_pt && start_pt > asked_pt)
 		sample = tgm_deadline_pt_ns(start_pt - asked_pt);
 	if (sample) {
-		hold.latency[chid] =
-			tgm_preempt_sampled(hold.latency[chid], sample, HOLD_LATENCY_MAX);
+		latency_set(chid,
+			    tgm_preempt_sampled(hold.latency[chid], sample, HOLD_LATENCY_MAX));
 		hold.asked_pt[chid] = 0;
 		if (TGM_STATS)
 			hold.samples++;
+#if TGM_STATS
+		__atomic_fetch_add(&sampled.n[chid], 1, __ATOMIC_RELAXED);
+		if (sample > __atomic_load_n(&sampled.max_ns[chid], __ATOMIC_RELAXED))
+			__atomic_store_n(&sampled.max_ns[chid], sample, __ATOMIC_RELAXED);
+		sampled.counts[chid].landed[switch_gpu_preempt_landing(&sampled.last[chid],
+								       asked_pt, start_pt)]++;
+		sampled.counts[chid].bucket[switch_gpu_preempt_bucket(sample)]++;
+#endif
 	}
 	spin_unlock_irqrestore(&hold.lock, flags);
+}
+
+#if TGM_STATS
+void tgm_hold_samples_take(int pid, uint32_t *n, uint64_t *max_ns,
+			   struct switch_gpu_preempt_counts *counts)
+{
+	unsigned long flags = 0;
+	unsigned int i = 0;
+	u64 max = 0;
+
+	*n = 0;
+	memset(counts, 0, sizeof(*counts));
+	for (i = 0; i < HOLD_CHIDS; i++) {
+		if (READ_ONCE(sampled.pid[i]) != pid)
+			continue;
+		*n += __atomic_exchange_n(&sampled.n[i], 0, __ATOMIC_RELAXED);
+		max = max_t(u64, max, __atomic_exchange_n(&sampled.max_ns[i], 0, __ATOMIC_RELAXED));
+		spin_lock_irqsave(&hold.lock, flags);
+		switch_gpu_preempt_add(counts, &sampled.counts[i]);
+		memset(&sampled.counts[i], 0, sizeof(sampled.counts[i]));
+		spin_unlock_irqrestore(&hold.lock, flags);
+	}
+	*max_ns = max;
+}
+#endif
+
+void tgm_hold_released(unsigned int chid, uint64_t end_pt, int job_last)
+{
+#if TGM_STATS
+	unsigned long flags = 0;
+
+	if (chid >= HOLD_CHIDS)
+		return;
+	spin_lock_irqsave(&hold.lock, flags);
+	sampled.last[chid].end_pt = end_pt;
+	sampled.last[chid].job_last = job_last != 0;
+	spin_unlock_irqrestore(&hold.lock, flags);
+#else
+	(void)chid;
+	(void)end_pt;
+	(void)job_last;
+#endif
 }
 
 void tgm_hold_check(struct nvkm_device *device, unsigned int chid)
@@ -331,12 +413,17 @@ void tgm_hold_check(struct nvkm_device *device, unsigned int chid)
 		return;
 	spin_lock_irqsave(&hold.lock, flags);
 	if (hold.asked_pt[chid]) {
-		hold.latency[chid] = tgm_preempt_left_early(hold.latency[chid]);
+		latency_set(chid, tgm_preempt_left_early(hold.latency[chid]));
 		hold.asked_pt[chid] = 0;
 		if (TGM_STATS)
 			hold.checks++;
 	}
 	spin_unlock_irqrestore(&hold.lock, flags);
+}
+
+int tgm_hold_wanted(void)
+{
+	return !bitmap_empty(hold.slow, HOLD_CHIDS);
 }
 
 uint64_t tgm_hold_latency(unsigned int chid)

@@ -1,0 +1,92 @@
+# file	name	nv|tegra|mismatch|policy	expression or reason	note
+raw_gpu.cpp	kRootBytes	policy	NVK's root descriptor table size (nvk_cmd_buffer.h)
+raw_gpu.cpp	kUboChunk	policy	upload granule
+raw_gpu.cpp	kSetGroups	policy	nvk_pipeline_bind_group of the vertex, pixel, tessellation init and tessellation programs
+raw_gpu.cpp	kTicCount	policy	texture header pool size the runtime allocates
+raw_gpu.cpp	kTscCount	policy	sampler pool size the runtime allocates
+raw_gpu.cpp	kEngines	policy	TegraGM20BABI.h engine mask
+raw_gpu.cpp	kProgramWindow	policy	SET_PIPELINE_PROGRAM is a 32-bit offset from SET_PROGRAM_REGION
+raw_gpu.cpp	kHeapStep	policy	heap growth step
+raw_gpu.cpp	kHeapSlack	policy	instruction prefetch slack
+raw_gpu.cpp	kHeapAtOpen	policy	heap bound at open
+raw_gpu.cpp	kHeapCopiesWindow	policy	the program window after the pack's region that copied programs may take
+raw_gpu.cpp	kClientFirstShare	policy	allocation policy
+raw_gpu.cpp	kClientHeapFirstShare	policy	allocation policy
+raw_gpu.cpp	kInstanceWords	policy	push words per instance
+raw_gpu.cpp	kShortcutWords	policy	push words a draw's ROP shortcuts add around its BEGIN/END (raw_draw_shortcuts.cpp)
+raw_gpu.cpp	kSampleWords	policy	push words of a sample layout
+raw_gpu.cpp	kFillConstA	policy	NVB0B5_SET_REMAP_COMPONENTS DST_X..W CONST_A (NVK nvk_cmd_fill_memory_ce)
+raw_gpu.cpp	kFillMaxDim	policy	the copy engine's line length and count per launch NVK fills with
+raw_gpu.cpp	kFillLaunch	policy	NVB0B5_LAUNCH_DMA PIPELINED, FLUSH, pitch both sides, REMAP (NVK nvk_cmd_fill_memory_ce)
+raw_gpu.cpp	kTurnWordsMethods	policy	push words of a turned pass's root-table turn words
+raw_compute.cpp	kRootBytes	policy	NVK's root descriptor table size (nvk_cmd_buffer.h)
+raw_compute.cpp	kRootSets	policy	NVK root table offset
+raw_compute.cpp	kRootPush	policy	NVK root table offset
+raw_compute.cpp	kUploadChunk	policy	upload granule
+raw_compute.cpp	kEncoderWords	policy	push reservation
+raw_compute.cpp	kConstexprSampler	policy	pack's constexpr sampler slot flag
+raw_split.cpp	kRootBytes	policy	NVK's root descriptor table size (nvk_cmd_buffer.h)
+raw_split.cpp	kMaxCbufBytes	policy	NVK_MAX_CBUF_SIZE (the class takes up to 64 KiB per binding)
+raw_split.cpp	kPixelGroup	policy	NVK's pixel bind group
+raw_cbuf.h	kCbufUnit	policy	constant buffers bound in whole 256-byte units
+raw_cbuf.h	kCbufMaxBytes	policy	NVK_MAX_CBUF_SIZE (the class takes up to 64 KiB per binding)
+raw_emit.cpp	kEarlyZ	nv	NVB197_SET_API_MANDATED_EARLY_Z
+raw_emit.cpp	kSingleCtWrite	nv	NVB197_SET_SINGLE_CT_WRITE_CONTROL
+raw_emit.cpp	kBlend	nv	NVB197_SET_BLEND(0)
+raw_emit.cpp	kViewportClip	nv	NVB197_SET_VIEWPORT_CLIP_CONTROL
+raw_emit.cpp	kCtWrite	nv	NVB197_SET_CT_WRITE(0)
+raw_emit.cpp	kBlendPerTarget	nv	NVB197_SET_BLEND_PER_TARGET_SEPARATE_FOR_ALPHA(0)
+raw_emit.cpp	kRegisterCount	nv	{NVB197_SET_PIPELINE_REGISTER_COUNT(1), NVB197_SET_PIPELINE_REGISTER_COUNT(5)}
+raw_emit.cpp	kAttribute	nv	NVB197_SET_VERTEX_ATTRIBUTE_A(0)
+raw_emit.cpp	kStreamFormat	nv	NVB197_SET_VERTEX_STREAM_A_FORMAT(0)
+raw_emit.cpp	kOpAdd	nv	NVB197_SET_BLEND_PER_TARGET_COLOR_OP_V_OGL_FUNC_ADD
+raw_emit.cpp	kZero	nv	NVB197_SET_BLEND_PER_TARGET_COLOR_SOURCE_COEFF_V_OGL_ZERO
+raw_emit.cpp	kViewportClipBase	nv	NVDEF(NVB197, SET_VIEWPORT_CLIP_CONTROL, PIXEL_MIN_Z, CLAMP) | NVDEF(NVB197, SET_VIEWPORT_CLIP_CONTROL, PIXEL_MAX_Z, CLAMP) | NVDEF(NVB197, SET_VIEWPORT_CLIP_CONTROL, GEOMETRY_CLIP, FRUSTUM_XYZ_CLIP) | NVDEF(NVB197, SET_VIEWPORT_CLIP_CONTROL, GEOMETRY_GUARDBAND_Z, SCALE_1)
+raw_emit.cpp	kOps	nv	{NVB197_SET_BLEND_PER_TARGET_COLOR_OP_V_OGL_FUNC_ADD, NVB197_SET_BLEND_PER_TARGET_COLOR_OP_V_OGL_FUNC_SUBTRACT, NVB197_SET_BLEND_PER_TARGET_COLOR_OP_V_OGL_FUNC_REVERSE_SUBTRACT, NVB197_SET_BLEND_PER_TARGET_COLOR_OP_V_OGL_MIN, NVB197_SET_BLEND_PER_TARGET_COLOR_OP_V_OGL_MAX}
+raw_emit.cpp	kFactors	nv	{NVB197_SET_BLEND_PER_TARGET_COLOR_SOURCE_COEFF_V_OGL_ZERO, NVB197_SET_BLEND_PER_TARGET_COLOR_SOURCE_COEFF_V_OGL_ONE, NVB197_SET_BLEND_PER_TARGET_COLOR_SOURCE_COEFF_V_OGL_SRC_COLOR, NVB197_SET_BLEND_PER_TARGET_COLOR_SOURCE_COEFF_V_OGL_ONE_MINUS_SRC_COLOR, NVB197_SET_BLEND_PER_TARGET_COLOR_SOURCE_COEFF_V_OGL_SRC_ALPHA, NVB197_SET_BLEND_PER_TARGET_COLOR_SOURCE_COEFF_V_OGL_ONE_MINUS_SRC_ALPHA, NVB197_SET_BLEND_PER_TARGET_COLOR_SOURCE_COEFF_V_OGL_DST_COLOR, NVB197_SET_BLEND_PER_TARGET_COLOR_SOURCE_COEFF_V_OGL_ONE_MINUS_DST_COLOR, NVB197_SET_BLEND_PER_TARGET_COLOR_SOURCE_COEFF_V_OGL_DST_ALPHA, NVB197_SET_BLEND_PER_TARGET_COLOR_SOURCE_COEFF_V_OGL_ONE_MINUS_DST_ALPHA, NVB197_SET_BLEND_PER_TARGET_COLOR_SOURCE_COEFF_V_OGL_SRC_ALPHA_SATURATE, NVB197_SET_BLEND_PER_TARGET_COLOR_SOURCE_COEFF_V_OGL_CONSTANT_COLOR, NVB197_SET_BLEND_PER_TARGET_COLOR_SOURCE_COEFF_V_OGL_ONE_MINUS_CONSTANT_COLOR, NVB197_SET_BLEND_PER_TARGET_COLOR_SOURCE_COEFF_V_OGL_CONSTANT_ALPHA, NVB197_SET_BLEND_PER_TARGET_COLOR_SOURCE_COEFF_V_OGL_ONE_MINUS_CONSTANT_ALPHA, NVB197_SET_BLEND_PER_TARGET_COLOR_SOURCE_COEFF_V_OGL_SRC1COLOR, NVB197_SET_BLEND_PER_TARGET_COLOR_SOURCE_COEFF_V_OGL_INVSRC1COLOR, NVB197_SET_BLEND_PER_TARGET_COLOR_SOURCE_COEFF_V_OGL_SRC1ALPHA, NVB197_SET_BLEND_PER_TARGET_COLOR_SOURCE_COEFF_V_OGL_INVSRC1ALPHA}
+raw_tiled_cache.h	kTiledCacheFlushWords	policy	push words of a flush
+raw_stamps.h	kStampWords	policy	push words of a stamp
+raw_stamps.h	kPtimerNsNum	policy	PTIMER to ns on this part (raw_stamps.h)
+raw_stamps.h	kPtimerNsDen	policy	PTIMER to ns on this part (raw_stamps.h)
+raw_stamps.h	kStampSlots	policy	stamp page layout
+raw_stamps.h	kDrawStampSlots	policy	measured draws' stamp ring (raw_band_rates.h)
+raw_stamps.h	kDrawStampBase	policy	stamp page layout
+raw_stamps.h	kLoopWordsBase	policy	stamp page layout: the predicated-loop records after the draw stamps
+raw_stamps.h	kStampBytes	policy	stamp page layout: the slots, the draw stamps and a predicated-loop record (stamp, tag) per slot
+raw_stamps.h	kDrawStampWords	policy	push words of a draw stamp
+raw_counters.h	kSampleBytes	policy	Metal's sample (AGXMTLCounterSampleBuffer sampleSize)
+raw_counters.h	kRecordBytes	policy	the four-word report structure a sample is written in
+raw_counters.h	kMaxBufferBytes	policy	the AGX driver's largest sample buffer (counterSampleBufferLimits maxBufferSize)
+raw_counters.h	kPayload	policy	a written record's payload
+raw_counters.h	kErrorValue	policy	Metal's MTLCounterErrorValue
+raw_counters.h	kTimestampWords	policy	push words of a sample's report
+raw_mme.h	kAbi	policy	raw macro ABI version
+raw_mme.h	kDraw	policy	raw macro slot
+raw_mme.h	kDrawIndexed	policy	raw macro slot
+raw_mme.h	kIndirect	policy	raw macro slot
+raw_mme.h	kIndexedIndirect	policy	raw macro slot
+raw_mme.h	kMatrix	policy	raw macro slot
+raw_mme.h	kDrawParams	policy	raw macro slot
+raw_mme.h	kIndexedParams	policy	raw macro slot
+raw_mme.h	kIcbRange	policy	raw macro slot
+raw_mme.h	kIcbDraw	policy	raw macro slot
+raw_mme.h	kIcbDrawIndexed	policy	raw macro slot
+raw_mme.h	kIcbGate	policy	raw macro slot
+raw_mme.h	kIcbBind	policy	raw macro slot
+raw_mme.h	kClearLayers	policy	raw macro slot
+raw_mme.h	kScratchLocation	policy	MME shadow scratch word of an indirect command buffer range, past FECS's mailbox
+raw_mme.h	kScratchLength	policy	MME shadow scratch word of an indirect command buffer range, past FECS's mailbox
+raw_mme.h	kIcbPatches	policy	raw macro slot
+raw_mme.h	kScratchSetHi	policy	MME shadow scratch words of a patch execute's layout, after the range's
+raw_mme.h	kNoEntry	policy	a patch execute's layout word for a control-stage buffer its state names no entry of
+raw_mme.h	kIcbSetBytes	policy	NVK's descriptor set slot, as the patch macro selects it
+raw_mme.h	kIcbRootBytes	policy	NVK's root descriptor table size (raw_gpu.cpp kRootBytes), as the patch macro selects it
+raw_mme.h	kIcbPatchesArguments	policy	the patch macro's call data words
+raw_mme.h	kScratchBuffers	policy	first MME shadow scratch word of an execute's inherited buffers, the top 93 of 128
+raw_mme.h	kAmplify	policy	raw macro slot
+raw_mme.h	kAmplifyIndexed	policy	raw macro slot
+raw_mme.h	kAmplifyCallWords	policy	push words of an amplify call: its header and an indexed draw's five words
+raw_mme.h	kAmplificationScratchWords	policy	push words of the amplify macros' scratch writes: the count, both maps, a state's words
+fx_mip.cpp	kSubc2D	policy	raw::SUBC_2D, the kernel binding of FERMI_TWOD_A (gpu_chan.c)
+fx_mip.cpp	kSubc3D	policy	raw::SUBC_3D, the kernel binding of MAXWELL_B (gpu_chan.c)
+nvdec.cpp	kListedIndices	policy	decoder table size

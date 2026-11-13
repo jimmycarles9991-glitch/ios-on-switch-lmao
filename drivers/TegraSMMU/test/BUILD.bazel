@@ -40,3 +40,12 @@ host_test(
     srcs = ["smmu_owner_source_test.cpp"],
     data = ["//kernel:lint_sources"],
 )
+
+host_test(
+    name = "switch_smmu_restore_test",
+    srcs = [
+        "switch_smmu_restore_test.cpp",
+        "//drivers/TegraSMMU:SwitchSmmuRegisters.h",
+        "//drivers/TegraSMMU:TegraSMMUAttachments.h",
+    ],
+)

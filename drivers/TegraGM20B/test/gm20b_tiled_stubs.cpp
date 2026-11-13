@@ -34,6 +34,11 @@ void tgm_relayout_by_cpu(const struct tgm_relayout_pages *, const struct tgm_rel
 {
 }
 
+int switch_gpu_backing_wait_visible(struct switch_gpu_backing *)
+{
+	return 0;
+}
+
 struct tgm_scratch *tgm_scratch_get(uint64_t, int, struct tgm_relayout_pages *)
 {
 	return nullptr;
@@ -47,6 +52,17 @@ void tgm_scratch_discard(struct tgm_scratch *)
 {
 }
 
+struct tgm_scratch *tgm_scratch_reclaim(struct tgm_scratch *, uint64_t, int *intact)
+{
+	*intact = 0;
+	return nullptr;
+}
+
+uint64_t tgm_scratch_handout(const struct tgm_scratch *)
+{
+	return 0;
+}
+
 void tgm_scratch_stats(uint64_t *held, uint64_t *peak)
 {
 	*held = *peak = 0;
@@ -56,6 +72,16 @@ void tgm_scratch_pages(const struct tgm_scratch *, struct tgm_relayout_pages *pa
 {
 	pages->pas = nullptr;
 	pages->npages = 0;
+}
+
+void *tgm_scratch_map(struct tgm_scratch *, void **map)
+{
+	*map = nullptr;
+	return nullptr;
+}
+
+void tgm_scratch_unmap(void *)
+{
 }
 
 void *tgm_scratch_memory(struct tgm_scratch *)

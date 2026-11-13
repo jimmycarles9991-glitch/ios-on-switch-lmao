@@ -63,12 +63,14 @@ struct nvkm_event_ntfy {
 };
 
 void nvkm_event_ntfy(struct nvkm_event *, int id, u32 bits);
+void nvkm_event_ntfy_active(struct nvkm_event *, int id, u32 bits);
 bool nvkm_event_ntfy_valid(struct nvkm_event *, int id, u32 bits);
 void nvkm_event_ntfy_add(struct nvkm_event *, int id, u32 bits, bool wait, nvkm_event_func,
 			 struct nvkm_event_ntfy *);
 void nvkm_event_ntfy_del(struct nvkm_event_ntfy *);
 void nvkm_event_ntfy_allow(struct nvkm_event_ntfy *);
 void nvkm_event_ntfy_block(struct nvkm_event_ntfy *);
+bool nvkm_event_ntfy_suspend(struct nvkm_event_ntfy *);
 
 typedef int (*nvkm_uevent_func)(struct nvkm_object *, u64 token, u32 bits);
 

@@ -1,5 +1,5 @@
 // Window B's ordering against the GPU (NativePlaneFence.h), on the host against a model of the GPU present
-// (TegraScanoutCopy.h, gpu.c present_copy): a present completes once the work its surfaces' writers had submitted is done,
+// (TegraScanoutCopy.h, gpu_present.c present_copy): a present completes once the work its surfaces' writers had submitted is done,
 // and its completion interrupt is when the display writes the registers. Over random swaps (a surface the GPU renders or
 // not, a window A frame or not, that frame on a GPU present or the CPU copy), no window B write of a surface the GPU renders
 // comes before its writer's work is done, none comes later than the present that orders it, and a surface nothing on the

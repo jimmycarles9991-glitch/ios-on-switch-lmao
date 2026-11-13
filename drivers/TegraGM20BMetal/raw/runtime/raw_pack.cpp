@@ -44,8 +44,13 @@ bool Pack::load(const char *path, uint64_t stack, std::string &err)
     base_ = static_cast<const uint8_t *>(m);
     size_ = st.st_size;
     hdr_ = reinterpret_cast<const PackHeader *>(base_);
-    if (size_ < sizeof(PackHeader) || memcmp(hdr_->magic, "GM20BPK1", 8) || hdr_->version != kPackVersion) {
-        err = "not a version-" + std::to_string(kPackVersion) + " pack";
+    if (size_ < sizeof(PackHeader) || memcmp(hdr_->magic, "GM20BPK1", 8)) {
+        err = "not a raw pack";
+        return false;
+    }
+    if (hdr_->version != kPackVersion) {
+        err = "a version-" + std::to_string(hdr_->version) + " pack: this runtime reads version " +
+              std::to_string(kPackVersion) + " only";
         return false;
     }
     if (stack && hdr_->stack != stack) {
@@ -98,6 +103,10 @@ uint32_t relocated(const PackInitMethod &m, const InitAddresses &a)
         return uint32_t(a.tsc);
     case RelocTscMax:
         return a.tscMax;
+    case RelocTicketsLo:
+        return uint32_t(a.tickets);
+    case RelocTicketsHi:
+        return uint32_t(a.tickets >> 32);
     default:
         return m.data;
     }
@@ -118,11 +127,54 @@ const PackPipeline *Pack::find(uint64_t keyHash, PackForm form) const
         else
             hi = mid;
     }
+    const PackPipeline *fallback = nullptr;
     for (; lo < n && keyAt(lo) == keyHash; lo++) {
         const PackPipeline *at = p + (index_.empty() ? lo : index_[lo]);
-        if (form == PackForm::Default || (at->flags & PipelineBarrierForm))
-            return at;
+        if (at->flags & PipelineVariantRecord)
+            continue;
+        if (form == PackForm::FetchFree || (at->flags & PipelineFetchFreeForm)) {
+            if (form == PackForm::FetchFree && (at->flags & PipelineFetchFreeForm))
+                return at;
+        } else if (form == PackForm::Barrier) {
+            if (at->flags & PipelineBarrierForm)
+                return at;
+        } else {
+            if (at->flags & PipelineStorageMetadata)
+                return at;
+            if (!fallback)
+                fallback = at;
+        }
     }
+    return fallback;
+}
+
+std::vector<const PackPipeline *> Pack::variantRecords(uint64_t keyHash) const
+{
+    const PackPipeline *p = section<PackPipeline>(PackPipelines);
+    const uint32_t n = hdr_->pipelines;
+    const auto at = [&](uint32_t i) {
+        return p + (index_.empty() ? i : index_[i]);
+    };
+    uint32_t lo = 0, hi = n;
+    while (lo < hi) {
+        const uint32_t mid = lo + (hi - lo) / 2;
+        if (at(mid)->keyHash < keyHash)
+            lo = mid + 1;
+        else
+            hi = mid;
+    }
+    std::vector<const PackPipeline *> out;
+    for (; lo < n && at(lo)->keyHash == keyHash; lo++)
+        if (at(lo)->flags & PipelineVariantRecord)
+            out.push_back(at(lo));
+    return out;
+}
+
+const PackPipeline *Pack::variantRecord(uint64_t keyHash, const std::string &name, PackForm form) const
+{
+    for (const PackPipeline *rec : variantRecords(keyHash))
+        if (name == string(rec->variantName) && bool(rec->flags & PipelineBarrierForm) == (form == PackForm::Barrier))
+            return rec;
     return nullptr;
 }
 
@@ -137,14 +189,91 @@ const PackKernel *Pack::findKernel(uint64_t keyHash) const
     return at != end && at->keyHash == keyHash ? at : nullptr;
 }
 
-const PackSplit *Pack::split(uint16_t wholeProgram) const
+const PackSplit *Pack::split(uint32_t wholeProgram) const
 {
     const PackSplit *s = section<PackSplit>(PackSplits);
     const PackSplit *end = s + bytes(PackSplits) / sizeof(PackSplit);
-    const PackSplit *at = std::lower_bound(s, end, wholeProgram, [](const PackSplit &x, uint16_t w) {
+    const PackSplit *at = std::lower_bound(s, end, wholeProgram, [](const PackSplit &x, uint32_t w) {
         return x.whole < w;
     });
     return at != end && at->whole == wholeProgram ? at : nullptr;
+}
+
+PackForm recordForm(const PackPipeline &pp)
+{
+    return pp.flags & PipelineFetchFreeForm ? PackForm::FetchFree
+           : pp.flags & PipelineBarrierForm ? PackForm::Barrier
+                                            : PackForm::Default;
+}
+
+const PackIteratedBlend *Pack::iterated(const PackPipeline &pp) const
+{
+    if (!pp.iterated || uint64_t(pp.iterated) * sizeof(PackIteratedBlend) > bytes(PackIterated))
+        return nullptr;
+    return section<PackIteratedBlend>(PackIterated) + pp.iterated - 1;
+}
+
+namespace {
+const uint32_t *spillWords(const Pack &pack, uint32_t at, uint32_t words)
+{
+    if (!words || (uint64_t(at) + words) * sizeof(uint32_t) > pack.bytes(PackBlob))
+        return nullptr;
+    return pack.section<uint32_t>(PackBlob) + at;
+}
+}  // namespace
+
+const uint32_t *Pack::spills(const PackPipeline &pp) const
+{
+    return spillWords(*this, pp.spillAt, uint32_t(pp.spillWords[0]) + pp.spillWords[1]);
+}
+
+const uint32_t *Pack::spills(const PackKernel &k) const
+{
+    return spillWords(*this, k.spillAt, k.spillWords);
+}
+
+const PackVariant *Pack::variants(const PackPipeline &pp, uint32_t stage, uint32_t &count) const
+{
+    count = pp.variantCount[stage];
+    const uint64_t first = uint64_t(pp.variants) + (stage ? pp.variantCount[0] : 0);
+    if (!count || (first + count) * sizeof(PackVariant) > bytes(PackVariants)) {
+        count = 0;
+        return nullptr;
+    }
+    return section<PackVariant>(PackVariants) + first;
+}
+
+const PackArchive *Pack::archive(uint64_t pathHash) const
+{
+    if (bytes(PackArchives) < 8)
+        return nullptr;
+    const uint32_t *counts = section<uint32_t>(PackArchives);
+    if (8 + uint64_t(counts[0]) * sizeof(PackArchive) + uint64_t(counts[1]) * 8 > bytes(PackArchives))
+        return nullptr;
+    const PackArchive *a = reinterpret_cast<const PackArchive *>(counts + 2), *end = a + counts[0];
+    const PackArchive *at = std::lower_bound(a, end, pathHash, [](const PackArchive &x, uint64_t h) {
+        return x.pathHash < h;
+    });
+    return at != end && at->pathHash == pathHash && uint64_t(at->first) + at->count <= counts[1] ? at : nullptr;
+}
+
+const PackComputeFacts *Pack::computeFacts(uint64_t keyHash) const
+{
+    const PackComputeFacts *f = section<PackComputeFacts>(PackComputeStates);
+    const PackComputeFacts *end = f + bytes(PackComputeStates) / sizeof *f;
+    const PackComputeFacts *at = std::lower_bound(f, end, keyHash, [](const PackComputeFacts &x, uint64_t h) {
+        return x.keyHash < h;
+    });
+    return at != end && at->keyHash == keyHash ? at : nullptr;
+}
+
+bool Pack::declares(const PackArchive &archive, uint64_t keyHash) const
+{
+    const uint32_t *counts = section<uint32_t>(PackArchives);
+    const uint64_t *keys =
+        reinterpret_cast<const uint64_t *>(reinterpret_cast<const PackArchive *>(counts + 2) + counts[0]) +
+        archive.first;
+    return std::binary_search(keys, keys + archive.count, keyHash);
 }
 
 }  // namespace raw

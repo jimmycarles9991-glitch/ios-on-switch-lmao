@@ -264,6 +264,14 @@ extern "C" bool cap_read(uint64_t va, void *out, uint64_t bytes)
     return h != nullptr;
 }
 
+// The constant buffer the last channel's decoder holds at `slot` of binding group `group` (0 vertex, 4 pixel); false: none
+extern "C" bool cap_cbuf(int group, int slot, uint64_t *va, uint32_t *bytes)
+{
+    std::lock_guard<std::mutex> l(gLock);
+    const auto it = gChannels.find(gLastChannel);
+    return it != gChannels.end() && it->second->bound(group, slot, *va, *bytes);
+}
+
 extern "C" uint32_t cap_reg3d(uint32_t mthd)
 {
     std::lock_guard<std::mutex> l(gLock);

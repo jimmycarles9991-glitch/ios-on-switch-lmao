@@ -159,6 +159,9 @@ pub fn function_key(
     if inputs.dropped_vertex_layer {
         h.bytes(b"dropped-vertex-layer");
     }
+    if inputs.layered_storage {
+        h.bytes(b"layered-storage");
+    }
     // Appended only when set, canonical, in its derived `Debug` form (ordered maps of plain enums
     // and integers, a total encoding as `inputs_encoding`'s).
     if let Some(d) = &inputs.stage_input {
@@ -212,6 +215,11 @@ pub fn function_key(
     if !inputs.extended_range_colors.is_empty() {
         h.bytes(b"extended-range-colors")
             .bytes(format!("{:?}", inputs.extended_range_colors).as_bytes());
+    }
+    // Appended only when set, as `storage_view_slots`.
+    if !inputs.two_plane_alphas.is_empty() {
+        h.bytes(b"two-plane-alphas")
+            .bytes(format!("{:?}", inputs.two_plane_alphas).as_bytes());
     }
     // Appended only when set, as `storage_view_slots`.
     if !inputs.srgb_fetches.is_empty() {

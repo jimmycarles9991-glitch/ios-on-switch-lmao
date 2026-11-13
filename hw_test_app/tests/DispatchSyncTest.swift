@@ -1,11 +1,11 @@
 import Foundation
 import HWTestCore
 
-/// One serial hierarchy driven the way locationd's silos drive their cohort queue: plain threads (not workqueue
-/// ones) each dispatch_sync onto a serial queue whose target is one shared serial queue, while blocks async'd onto the
-/// shared queue keep a workqueue thread draining it and handing it to the waiters. The shared queue targets a root
-/// queue, so it is its own workloop and a contended sync waits in kevent_id (NOTE_WL_SYNC_WAIT) until the drainer
-/// hands it over.
+/// One serial hierarchy driven the way locationd's silos drive their cohort queue: waiters (here plain threads,
+/// workqueue threads in system.dispatch_sync_workloops) each dispatch_sync onto a serial queue whose target is one
+/// shared serial queue, while blocks async'd onto the shared queue keep a workqueue thread draining it and handing it
+/// to the waiters. The shared queue targets a root queue, so it is its own workloop and a contended sync waits in
+/// kevent_id (NOTE_WL_SYNC_WAIT) until the drainer hands it over.
 final class SyncHierarchy: @unchecked Sendable {
     let shared: DispatchQueue
     let silos: [DispatchQueue]

@@ -56,11 +56,10 @@ void switch_cluster_record_start(struct switch_record_entry *log, uint32_t capac
 uint32_t switch_cluster_record_stop(void);                                             // bsd/vfs/vfs_cluster.c
 #if DEVELOPMENT || DEBUG
 void switch_cluster_image_direct(uint64_t bytes, uint32_t cardReads);  // bsd/vfs/vfs_cluster.c
+#endif
 // NOLINTNEXTLINE(readability-redundant-declaration): not every kernel configuration's headers declare it
 int vnode_pagein(vnode_t, upl_t, upl_offset_t, vm_object_offset_t, upl_size_t, int, int *);  // bsd/vm/vnode_pager.c
-#endif
-// bsd/vm/vnode_pager.c
-int VFS_VGET(mount_t, ino64_t, vnode_t *, vfs_context_t);  // bsd/vfs/kpi_vfs.c
+int VFS_VGET(mount_t, ino64_t, vnode_t *, vfs_context_t);                                    // bsd/vfs/kpi_vfs.c
 LIBKERN_RETURNS_NOT_RETAINED IOBlockStorageDevice *
 switch_block_device(IOService **controller, dev_t *whole, uint64_t *sectors,
                     uint32_t *maxReadSectors);  // NativeSwitchBlock.cpp

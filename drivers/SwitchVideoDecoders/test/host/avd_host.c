@@ -18,21 +18,48 @@
 //           HEVCNVDEC and the kernel's checker, all out of a hardware session; clip T again with VIC's present on,
 //           every picture handed over as 16-bit samples into an 'x420' buffer; then with every buffer refused, Apple's
 //           software HEVC decoder in it, matching FFmpeg.
+//   mp4v:   MPEG4Clip.h's clip A (Advanced Simple) as 'mp4v' with its 'esds' (mpeg_session.c) on the fake engine:
+//           all 18 VOPs through MPEG4NVDEC and the kernel's checker out of a hardware session; then with every buffer
+//           refused, clip B (Simple: the Mac's MPEG-4 decoder refuses clip A) on Apple's software decoder in the
+//           instance.
+//   mp2v:   MPEG2Clip.h's MPEG-2 clip A as 'mp2v' and its MPEG-1 clip C as 'mp1v', described without extensions as
+//           MediaToolbox's MPEG-2 stream readers describe them, every picture through MPEG2NVDEC and the kernel's
+//           checker out of a hardware session; asynchronously, every frame from the completions in decode order, and
+//           with three jobs the engine cancels, those three frames out with an error and the rest decoded.
+//   alpha:  clip A's first picture through sessions opened as MuxedAlphaDecoder opens its layer sessions (AVDAlpha.c):
+//           asked nothing, a '420v' picture and no plane; asked for planes 0 or 2, a 'v0a8' picture, that plane
+//           answered and the picture handed to VIC for those planes.
 // Prints "PASS avd ..." when all hold (avd_host_test).
 #include "../../AVD/AVDDecoder.c"
 #include "../../AVD/ClipCheck.h"
+#include <stdatomic.h>
 #include <stdio.h>
 #include "../HEVCClip.h"
+#include "mpeg_session.h"
 #include "../../../TegraNVDEC/TegraNVDECCheck.h"
+
+// The fake engine's completions: each job's, on the session's queue a little after its Submit, as NVDEC reports a job
+// it finished while the decode thread went on. Held by every completion still to come, so a client closed meanwhile
+// is not touched.
+typedef struct {
+    atomic_int references;
+    atomic_bool stopped;
+    dispatch_queue_t queue;
+    NVDECDone done;
+    void *context;
+} FakeListener;
 
 struct NVDECClient {
     uint8_t *va[64];
     uint64_t size[64];
+    FakeListener *listener;
 };
 
-static bool gFull, gPresentOn;
-static int gOpens, gSubmits, gRefused, gPresents, gPresentBad, gWaitRanges, gWidePresents;
+static bool gFull, gPresentOn, gNativeOn, gEarlyCompletions;
+static uint32_t gFailFrom, gFailCount;  // jobs the fake engine cancels: a stalled one and those queued behind it
+static int gOpens, gSubmits, gRefused, gPresents, gPresentBad, gWaitRanges, gWidePresents, gWaits, gSurfaceWaits;
 static uint32_t gLastDstX, gLastDstY;
+static unsigned gNativeExports, gRecycled, gAlphaPresents[2];
 
 bool nvdec_service_present(void)
 {
@@ -46,20 +73,98 @@ NVDECClient *nvdec_open(int *error)
     return calloc(1, sizeof(NVDECClient));
 }
 
+static const char kOnQueue = 0;
+
+static void listenerRelease(FakeListener *l)
+{
+    if (atomic_fetch_sub(&l->references, 1) != 1)
+        return;
+    dispatch_release(l->queue);
+    free(l);
+}
+
+typedef struct {
+    FakeListener *listener;
+    uint32_t fence;
+} FakeCompletion;
+
+static void fakeCompleted(void *context)
+{
+    FakeCompletion *c = context;
+    const bool cancelled = gFailFrom && c->fence - gFailFrom < gFailCount;
+    if (!atomic_load(&c->listener->stopped))
+        c->listener->done(c->listener->context, c->fence, cancelled ? -5 : 0, 0, 0);
+    listenerRelease(c->listener);
+    free(c);
+}
+
+static void nothing(void *context)
+{
+    (void)context;
+}
+
+bool nvdec_listen(NVDECClient *c, dispatch_queue_t queue, NVDECDone done, void *context)
+{
+    FakeListener *l = calloc(1, sizeof(*l));
+    if (!l)
+        return false;
+    dispatch_retain(queue);
+    *l = (FakeListener){.queue = queue, .done = done, .context = context};
+    atomic_init(&l->references, 1);
+    dispatch_queue_set_specific(queue, &kOnQueue, l, NULL);
+    c->listener = l;
+    return true;
+}
+
+bool nvdec_completions_on_port(const NVDECClient *c)
+{
+    return c->listener != NULL;
+}
+
+bool nvdec_buffer_stats(const NVDECClient *c, SwitchNVDECBufferStats *stats)  // a release kernel's answer
+{
+    (void)c, (void)stats;
+    return false;
+}
+
+void nvdec_stop_listening(NVDECClient *c)
+{
+    FakeListener *l = c->listener;
+    if (!l)
+        return;
+    c->listener = NULL;
+    atomic_store(&l->stopped, true);
+    if (dispatch_get_specific(&kOnQueue) != l)
+        dispatch_sync_f(l->queue, NULL, nothing);
+    listenerRelease(l);
+}
+
+void *nvdec_buffer_va(const NVDECClient *c, uint32_t handle)
+{
+    return handle < 64 ? c->va[handle] : NULL;
+}
+
 void nvdec_close(NVDECClient *c)
 {
     if (!c)
         return;
+    nvdec_stop_listening(c);
     for (int i = 0; i < 64; i++)
         free(c->va[i]);
     free(c);
+}
+
+uint32_t nvdec_jobs_in_flight(const NVDECClient *c)
+{
+    (void)c;
+    return 8;
 }
 
 uint32_t nvdec_codecs(const NVDECClient *c)
 {
     (void)c;
     return 1u << TEGRA_NVDEC_CODEC_H264 | 1u << TEGRA_NVDEC_CODEC_VP9 | 1u << TEGRA_NVDEC_CODEC_HEVC |
-           TEGRA_NVDEC_HEVC_MAIN10;
+           TEGRA_NVDEC_HEVC_MAIN10 | 1u << TEGRA_NVDEC_CODEC_MPEG4 | 1u << TEGRA_NVDEC_CODEC_MPEG12;
 }
 
 bool nvdec_can_present(const NVDECClient *c)
@@ -71,6 +176,60 @@ bool nvdec_can_present(const NVDECClient *c)
 // The fake VIC: TegraNVDECUserClient's geometry checks and TegraVICConfig.h's address rules for the destination, then
 // the copy (BlockLinear.c, as VIC's pass-through would leave it). 16-bit samples ('x420') go as bytes, as the kernel
 // sends them to VIC: an 8-bit picture of twice the width.
+bool switch_nvdec_can_export(const NVDECClient *client)
+{
+    (void)client;
+    return gNativeOn;
+}
+
+int switch_nvdec_export(NVDECClient *client, const TegraNVDECPresent *picture)
+{
+    if (!gNativeOn || picture->sample_bytes != 1 || picture->dst_x || picture->dst_y || picture->handle >= 64 ||
+        !client->va[picture->handle])
+        return kIOReturnUnsupported;
+    ++gNativeExports;
+    return 0;
+}
+
+int switch_nvdec_recycle(void *client, uint32_t handle, uint64_t bytes, void **address)
+{
+    NVDECClient *owner = client;
+    if (!gNativeOn)
+        return 0;
+    if (!handle || handle >= 64 || bytes != owner->size[handle])
+        return -1;
+    void *replacement = calloc(1, bytes);
+    if (!replacement)
+        return -1;
+    free(owner->va[handle]);
+    owner->va[handle] = replacement;
+    *address = replacement;
+    ++gRecycled;
+    return 0;
+}
+
+// A 'v0a8' surface takes plane 0 (its Y and CbCr planes) or plane 2 (the picture's luma alone into its alpha plane).
+static bool alphaPresent(NVDECClient *c, const TegraNVDECPresent *p, IOSurfaceRef s)
+{
+    const uint32_t first = p->plane;
+    if (IOSurfaceGetPlaneCount(s) != 3 || (first != 0 && first != 2) || p->sample_bytes != 1)
+        return false;
+    for (uint32_t k = 0; k < 3; k++)
+        if (IOSurfaceGetBytesPerRowOfPlane(s, k) % 256 ||
+            ((uintptr_t)IOSurfaceGetBaseAddressOfPlane(s, k) - (uintptr_t)IOSurfaceGetBaseAddress(s)) % 256)
+            return false;
+    IOSurfaceLock(s, 0, NULL);
+    const uint8_t *picture = c->va[p->handle];
+    block_linear_copy(IOSurfaceGetBaseAddressOfPlane(s, first), IOSurfaceGetBytesPerRowOfPlane(s, first), picture,
+                      p->pitch, p->crop_x, p->crop_y, p->width, p->height);
+    if (!first)
+        block_linear_copy(IOSurfaceGetBaseAddressOfPlane(s, 1), IOSurfaceGetBytesPerRowOfPlane(s, 1),
+                          picture + p->chroma_offset, p->pitch, p->crop_x, p->crop_y / 2, p->width, p->height / 2);
+    IOSurfaceUnlock(s, 0, NULL);
+    gAlphaPresents[first ? 1 : 0]++;
+    return true;
+}
+
 int nvdec_present(NVDECClient *c, const TegraNVDECPresent *p)
 {
     gPresents++;
@@ -80,10 +239,18 @@ int nvdec_present(NVDECClient *c, const TegraNVDECPresent *p)
     const OSType format = s ? IOSurfaceGetPixelFormat(s) : 0;
     bool ok = p->handle < 64 && c->va[p->handle] && p->pitch && !(p->pitch % 64) && p->rows && !(p->rows % 32) &&
               p->block_height_log2 == 1 && !(p->chroma_offset % 256) && p->chroma_offset >= luma &&
-              p->chroma_offset + luma / 2 <= c->size[p->handle] && s && !p->reserved &&
-              (bytes == 2 ? format == kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange ||
-                                format == kCVPixelFormatType_420YpCbCr10BiPlanarFullRange
-                          : bytes == 1);
+              p->chroma_offset + luma / 2 <= c->size[p->handle] && s;
+    if (ok && format == kCVPixelFormatType_420YpCbCr8VideoRange_8A_TriPlanar) {
+        ok = alphaPresent(c, p, s);
+        if (!ok)
+            gPresentBad++;
+        CFRelease(s);
+        return ok ? 0 : kIOReturnUnsupported;
+    }
+    ok = ok && !p->plane &&
+         (bytes == 2 ? format == kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange ||
+                           format == kCVPixelFormatType_420YpCbCr10BiPlanarFullRange
+                     : bytes == 1);
     if (ok) {
         const uintptr_t base = (uintptr_t)IOSurfaceGetBaseAddress(s);
         ok = !(IOSurfaceGetBytesPerRowOfPlane(s, 0) % 256) && !(IOSurfaceGetBytesPerRowOfPlane(s, 1) % 256) &&
@@ -142,7 +309,7 @@ void nvdec_free(void *ctx, uint32_t handle)
     c->va[handle] = NULL;
 }
 
-int nvdec_submit(void *ctx, const TegraNVDECSubmit *s, uint32_t *fence)
+int nvdec_submit(void *ctx, const TegraNVDECSubmit *s, TegraNVDECFence *reply)
 {
     NVDECClient *c = ctx;
     uint64_t avail[TEGRA_NVDEC_MAX_ENTRIES] = {0};
@@ -158,14 +325,27 @@ int nvdec_submit(void *ctx, const TegraNVDECSubmit *s, uint32_t *fence)
         gRefused++;
         return -1;
     }
-    *fence = (uint32_t)++gSubmits;
+    *reply = (TegraNVDECFence){(uint32_t)++gSubmits, 0};
+    FakeCompletion *completion = c->listener ? malloc(sizeof(*completion)) : NULL;
+    if (completion) {
+        *completion = (FakeCompletion){c->listener, reply->fence};
+        atomic_fetch_add(&c->listener->references, 1);
+        if (gEarlyCompletions)  // the job retires before its Submit returns to the plug-in
+            dispatch_sync_f(c->listener->queue, completion, fakeCompleted);
+        else
+            dispatch_after_f(dispatch_time(DISPATCH_TIME_NOW, 20 * NSEC_PER_MSEC), c->listener->queue, completion,
+                             fakeCompleted);
+    }
     return 0;
 }
 
 int nvdec_wait(void *ctx, const TegraNVDECWait *w)
 {
     (void)ctx;
+    gWaits++;
     gWaitRanges += (int)w->invalidate_count;
+    for (uint32_t i = 0; i < w->invalidate_count; i++)
+        gSurfaceWaits += w->invalidate[i].length > NVDEC_STATUS_BYTES;
     return 0;
 }
 
@@ -303,6 +483,71 @@ static bool tileCheck(CFDictionaryRef spec, bool vic, char *line, size_t size)
     return ok;
 }
 
+extern OSStatus VTDecompressionSessionCreateWithOptions(CFAllocatorRef, CMVideoFormatDescriptionRef, CFDictionaryRef,
+                                                        CFDictionaryRef, const VTDecompressionOutputCallbackRecord *,
+                                                        CFDictionaryRef, VTDecompressionSessionRef *);
+
+// One layer session as MuxedAlphaDecoder opens it (session options SelectPixelFormatWithAlpha and
+// WriteDirectlyToPlanesOfTargetCVPixelBuffer = `plane`; -1: neither), clip A's first picture through it with VIC on.
+static bool alphaCheck(CFDictionaryRef spec, int32_t plane, char *line, size_t size)
+{
+    static uint8_t sampleBytes[sizeof(kHEVCClipAData) + 64];
+    size_t bytes = 0;
+    CMVideoFormatDescriptionRef format = firstPicture(sampleBytes, &bytes);
+    CFMutableDictionaryRef options =
+        CFDictionaryCreateMutable(NULL, 0, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
+    if (plane >= 0) {
+        CFNumberRef number = CFNumberCreate(NULL, kCFNumberSInt32Type, &plane);
+        CFDictionarySetValue(options, CFSTR("SelectPixelFormatWithAlpha"), kCFBooleanTrue);
+        CFDictionarySetValue(options, CFSTR("WriteDirectlyToPlanesOfTargetCVPixelBuffer"), number);
+        CFRelease(number);
+    }
+    gPresentOn = true;
+    const unsigned before[2] = {gAlphaPresents[0], gAlphaPresents[1]};
+    VTDecompressionSessionRef session = NULL;
+    const OSStatus created =
+        format ? VTDecompressionSessionCreateWithOptions(NULL, format, spec, NULL, NULL, options, &session) : -1;
+    __block OSType out = 0;
+    __block OSStatus decoded = -1;
+    int32_t answer = -1;
+    if (!created) {
+        CMBlockBufferRef block = NULL;
+        CMSampleBufferRef sample = NULL;
+        CMBlockBufferCreateWithMemoryBlock(NULL, sampleBytes, bytes, kCFAllocatorNull, NULL, 0, bytes, 0, &block);
+        CMSampleBufferCreateReady(NULL, block, format, 1, 0, NULL, 1, &bytes, &sample);
+        VTDecompressionSessionDecodeFrameWithOutputHandler(
+            session, sample, 0, NULL,
+            ^(OSStatus status, VTDecodeInfoFlags flags, CVImageBufferRef image, CMTime pts, CMTime duration) {
+                (void)flags, (void)pts, (void)duration;
+                decoded = status;
+                out = image ? CVPixelBufferGetPixelFormatType(image) : 0;
+            });
+        VTDecompressionSessionWaitForAsynchronousFrames(session);
+        CFTypeRef value = NULL;
+        VTSessionCopyProperty(session, CFSTR("WriteDirectlyToPlanesOfTargetCVPixelBuffer"), NULL, &value);
+        if (value && CFGetTypeID(value) == CFNumberGetTypeID())
+            CFNumberGetValue(value, kCFNumberSInt32Type, &answer);
+        if (value)
+            CFRelease(value);
+        CFRelease(sample), CFRelease(block);
+        VTDecompressionSessionInvalidate(session);
+        CFRelease(session);
+    }
+    gPresentOn = false;
+    CFRelease(options);
+    if (format)
+        CFRelease(format);
+    const unsigned colour = gAlphaPresents[0] - before[0], alpha = gAlphaPresents[1] - before[1];
+    snprintf(line, size,
+             "alpha (plane %d): create %d, decoded %d into '%.4s', answered plane %d, presents %u colour %u alpha",
+             (int)plane, (int)created, (int)decoded, (const char *)&(uint32_t){CFSwapInt32HostToBig(out)}, (int)answer,
+             colour, alpha);
+    return !created && !decoded && answer == plane &&
+           (plane < 0 ? out == kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange && !colour && !alpha
+                      : out == kCVPixelFormatType_420YpCbCr8VideoRange_8A_TriPlanar && colour == (plane == 0) &&
+                            alpha == (plane == 2));
+}
+
 int main(void)
 {
     gAVDLog = os_log_create("com.brunostjohn.switch.avd", "host-test");
@@ -312,9 +557,12 @@ int main(void)
     const void *keys[] = {CFSTR("CMClassImplementationID")}, *values[] = {CFSTR("com.brunostjohn.switch.avd-host")};
     CFDictionaryRef info =
         CFDictionaryCreate(NULL, keys, values, 1, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
-    const OSStatus registered = VTRegisterVideoDecoderWithInfo(kCMVideoCodecType_H264, info, avd_create_instance) ||
-                                VTRegisterVideoDecoderWithInfo(kCMVideoCodecType_VP9, info, avd_create_instance) ||
-                                VTRegisterVideoDecoderWithInfo(kCMVideoCodecType_HEVC, info, avd_create_instance);
+    const FourCharCode codecs[] = {kCMVideoCodecType_H264,       kCMVideoCodecType_VP9,
+                                   kCMVideoCodecType_HEVC,       kCMVideoCodecType_MPEG4Video,
+                                   kCMVideoCodecType_MPEG2Video, kCMVideoCodecType_MPEG1Video};
+    OSStatus registered = noErr;
+    for (unsigned i = 0; i < sizeof(codecs) / sizeof(codecs[0]) && !registered; i++)
+        registered = VTRegisterVideoDecoderWithInfo(codecs[i], info, avd_create_instance);
     CFRelease(info);
     if (registered) {
         printf("FAIL avd: VTRegisterVideoDecoderWithInfo %d\n", (int)registered);
@@ -329,17 +577,17 @@ int main(void)
     const int engineOpens = gOpens, engineSubmits = gSubmits;
     // VIC's present: the same session with the feature on.
     gPresentOn = true;
-    const int presentSubmits = gSubmits, presentWaits = gWaitRanges;
+    const int presentSubmits = gSubmits, presentWaits = gWaitRanges, presentSurfaceWaits = gSurfaceWaits;
     clip_check(ClipCheckHardware, spec, present, sizeof(present));
     gPresentOn = false;
+    // ClipCheck decodes synchronously: each frame's status waited for, never its surface.
     const bool presentOk = strstr(present, "hardware: hardware decoder") && strstr(present, " 30 out (") &&
                            gSubmits - presentSubmits == 30 && gPresents == 30 && !gPresentBad &&
-                           gWaitRanges - presentWaits == 30;  // the status alone, no surface
+                           gWaitRanges - presentWaits <= 30 && gSurfaceWaits == presentSurfaceWaits;
     printf("present: %s (presents %d, refused %d, wait ranges %d)\n", present, gPresents, gPresentBad,
            gWaitRanges - presentWaits);
     gFull = true;
     clip_check(ClipCheckHardware, spec, full, sizeof(full));
-    CFRelease(spec);
     gFull = false;
     char vp9[512];
     const int vp9Submits = gSubmits;
@@ -382,6 +630,12 @@ int main(void)
     const bool tilesOk =
         tileCheck(hevcSpec, true, tiles, sizeof(tiles)) && tileCheck(hevcSpec, false, tilesOff, sizeof(tilesOff));
     printf("%s\n%s\n", tiles, tilesOff);
+    bool alphaOk = true;
+    for (int32_t plane = -1; plane <= 2; plane += plane < 0 ? 1 : 2) {
+        char alpha[256];
+        alphaOk &= alphaCheck(hevcSpec, plane, alpha, sizeof(alpha));
+        printf("%s\n", alpha);
+    }
     CFRelease(hevcSpec);
     printf("hevc: %s (submits %d)\nhevc10: %s (submits %d)\nhevc full: %s\n", hevc, hevcMain, hevc10, hevcTen,
            hevcFull);
@@ -392,13 +646,93 @@ int main(void)
                         strstr(hevcFull, "A 20/20, V 14/14") && hevc10VicOk;
     printf("engine: %s (opens %d, submits %d, refused %d)\nfull: %s (opens %d)\n", engine, engineOpens, engineSubmits,
            gRefused, full, gOpens - engineOpens);
+    char mp4v[256], mp4vFull[256];
+    const int mp4vSubmits = gSubmits, mp4vRefused = gRefused;
+    const void *mp4vKeys[] = {kVTVideoDecoderSpecification_DecoderID},
+               *mp4vValues[] = {CFSTR("com.brunostjohn.switch.avd-host.mp4v")};
+    CFDictionaryRef mp4vSpec = CFDictionaryCreate(NULL, mp4vKeys, mp4vValues, 1, &kCFTypeDictionaryKeyCallBacks,
+                                                  &kCFTypeDictionaryValueCallBacks);
+    const bool mp4vEngine = mpeg4_session_check(mp4vSpec, false, true, mp4v, sizeof(mp4v)) &&
+                            gSubmits - mp4vSubmits == 18 && gRefused == mp4vRefused;
+    gFull = true;
+    const bool mp4vSoftware = mpeg4_session_check(mp4vSpec, true, false, mp4vFull, sizeof(mp4vFull));
+    gFull = false;
+    CFRelease(mp4vSpec);
+    printf("%s (submits %d)\nmp4v full: %s\n", mp4v, gSubmits - mp4vSubmits, mp4vFull);
+    char mp2v[256], mp1v[256];
+    const int mp2vSubmits = gSubmits;
+    const void *mp2vKeys[] = {kVTVideoDecoderSpecification_DecoderID},
+               *mp2vValues[] = {CFSTR("com.brunostjohn.switch.avd-host.mp2v")},
+               *mp1vValues[] = {CFSTR("com.brunostjohn.switch.avd-host.mp1v")};
+    CFDictionaryRef mp2vSpec = CFDictionaryCreate(NULL, mp2vKeys, mp2vValues, 1, &kCFTypeDictionaryKeyCallBacks,
+                                                  &kCFTypeDictionaryValueCallBacks);
+    CFDictionaryRef mp1vSpec = CFDictionaryCreate(NULL, mp2vKeys, mp1vValues, 1, &kCFTypeDictionaryKeyCallBacks,
+                                                  &kCFTypeDictionaryValueCallBacks);
+    const bool mpeg2Engine = mpeg2_session_check(mp2vSpec, false, mp2v, sizeof(mp2v)) &&
+                             mpeg2_session_check(mp1vSpec, true, mp1v, sizeof(mp1v)) &&
+                             gSubmits - mp2vSubmits == 18 + 15 && gRefused == mp4vRefused;
+    // Asynchronous decode with VIC placing every picture: the fake engine reports each job 20 ms after its Submit, and
+    // the decode thread never waits; every frame comes out of the completions, in decode order.
+    static const char *const kAsyncKeys[] = {"picture_waits", "sync_waits", "in_flight_max", "frames"};
+    int32_t asyncRoutes[4];
+    char async[256];
+    const int asyncWaits = gWaits;
+    gPresentOn = true;
+    const bool asyncRun = mpeg2_session_order(mp2vSpec, kVTDecodeFrame_EnableAsynchronousDecompression, kAsyncKeys,
+                                              asyncRoutes, 4, async, sizeof(async));
+    gPresentOn = false;
+    // Again with each completion delivered before the plug-in's Submit call returns, ahead of the job's registration.
+    char early[256];
+    int32_t earlyRoutes[4];
+    gPresentOn = gEarlyCompletions = true;
+    const bool earlyRun = mpeg2_session_order(mp2vSpec, kVTDecodeFrame_EnableAsynchronousDecompression, kAsyncKeys,
+                                              earlyRoutes, 4, early, sizeof(early));
+    gPresentOn = gEarlyCompletions = false;
+    const bool asyncOk = asyncRun && earlyRun && gWaits == asyncWaits && !asyncRoutes[0] && !asyncRoutes[1] &&
+                         asyncRoutes[2] >= 2 && asyncRoutes[3] == 18 && !earlyRoutes[0] && !earlyRoutes[1] &&
+                         earlyRoutes[3] == 18;
+    // Again with a decode NVDEC cancels at its bound and the two queued behind it (TegraNVDECCancel.cpp): their
+    // completions come with the failure, those three frames come out failed and the session goes on.
+    char cancelled[256];
+    int32_t cancelledRoutes[4];
+    gPresentOn = true;
+    gFailFrom = (uint32_t)gSubmits + 6;
+    gFailCount = 3;
+    mpeg2_session_order(mp2vSpec, kVTDecodeFrame_EnableAsynchronousDecompression, kAsyncKeys, cancelledRoutes, 4,
+                        cancelled, sizeof(cancelled));
+    gPresentOn = false;
+    gFailFrom = gFailCount = 0;
+    const bool cancelledOk =
+        strstr(cancelled, "hardware decoder, 15 of 18 out, 3 errors, 0 refused, 0 out of decode order") &&
+        !cancelledRoutes[0] && !cancelledRoutes[1];
+    printf("async, a cancelled decode and the two behind it: %s\n", cancelled);
+    printf("async %s (decode-thread waits %d; SwitchPictureRoutes picture_waits %d, sync_waits %d, in_flight_max %d, "
+           "frames %d)\nasync, completions before Submit returns: %s\n",
+           async, gWaits - asyncWaits, asyncRoutes[0], asyncRoutes[1], asyncRoutes[2], asyncRoutes[3], early);
+    CFRelease(mp2vSpec);
+    CFRelease(mp1vSpec);
+    printf("%s\n%s (submits %d)\n", mp2v, mp1v, gSubmits - mp2vSubmits);
+    char native[512];
+    gPresentOn = gNativeOn = true;
+    const unsigned exportsBefore = gNativeExports, recycleBefore = gRecycled;
+    const int copiesBefore = gPresents, nativeWaits = gWaitRanges, nativeSurfaceWaits = gSurfaceWaits;
+    clip_check(ClipCheckHardware, spec, native, sizeof(native));
+    gPresentOn = gNativeOn = false;
+    CFRelease(spec);
+    const bool nativeOk = strstr(native, "hardware: hardware decoder") && strstr(native, " 30 out (") &&
+                          gNativeExports - exportsBefore == 30 && gRecycled - recycleBefore == 30 &&
+                          gPresents == copiesBefore && gWaitRanges - nativeWaits <= 30 &&
+                          gSurfaceWaits == nativeSurfaceWaits;
+    printf("native: %s (exports %u, recycled %u, pitch copies %d)\n", native, gNativeExports - exportsBefore,
+           gRecycled - recycleBefore, gPresents - copiesBefore);
     const bool ok = engineOpens >= 1 && engineSubmits == 30 && !gRefused &&
                     strstr(engine, "hardware: hardware decoder") && strstr(engine, " 30 out (") &&
                     gOpens > engineOpens && strstr(full, "hardware: software decoder, 30/30 frames match x264") &&
                     strstr(vp9, "vp9: hardware decoder") && strstr(vp9, " 16 out (") &&
-                    hevcSubmits - vp9Submits == 18 && presentOk && hevcOk && tilesOk;
-    printf("%s avd: plug-in on VideoToolbox (H.264, VP9 and HEVC on a fake NVDEC, then Apple's software H.264 and "
-           "HEVC in the instance)\n",
+                    hevcSubmits - vp9Submits == 18 && presentOk && hevcOk && tilesOk && alphaOk && nativeOk &&
+                    mp4vEngine && mp4vSoftware && mpeg2Engine && asyncOk && cancelledOk;
+    printf("%s avd: plug-in on VideoToolbox (H.264, VP9, HEVC, HEVC with alpha, MPEG-4 Part 2 and MPEG-1/2 on a fake "
+           "NVDEC, then Apple's software H.264, HEVC and MPEG-4 Part 2 in the instance)\n",
            ok ? "PASS" : "FAIL");
     return ok ? 0 : 1;
 }

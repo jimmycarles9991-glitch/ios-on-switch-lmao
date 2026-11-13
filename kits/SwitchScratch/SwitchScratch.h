@@ -24,12 +24,19 @@ struct switch_scratch {
     uint64_t bytes;
     uint64_t idleSince;  // ns, while kept
     switch_scratch *next;
+    void *deviceBacking;
+    void (*releaseDeviceBacking)(void *);
+    uint64_t handout;  // which handing out this is, of every scratch's: no two are the same
 };
 
 // At least `bytes` (whole 64 KiB), charged to `owner`: a kept one that fits and is no more than twice as large, else a
 // new one. Thread context.
 switch_scratch *switch_scratch_get(uint64_t bytes, task_t owner);
 void switch_scratch_put(switch_scratch *scratch);
+// The scratch given back after its handing out `handout`, if no get took it since and no trim freed it: handed out to
+// `owner` again, *intact when its pages still hold what they held (a kept scratch is volatile: the VM may empty it).
+// Null: gone. Thread context.
+switch_scratch *switch_scratch_reclaim(switch_scratch *scratch, uint64_t handout, task_t owner, bool *intact);
 // Releases a scratch that may still be mapped somewhere (its VM object then lives on in that mapping) instead of keeping it
 void switch_scratch_discard(switch_scratch *scratch);
 // Bytes handed out now, and the most ever (debug lines)

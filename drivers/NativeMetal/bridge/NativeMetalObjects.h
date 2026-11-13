@@ -202,23 +202,33 @@ struct NmbVertexLayout {
     uint64_t stride, step_function, step_rate;
 };
 
+/* A render pipeline descriptor's fields over handles of `Function` (NmbFunction, or the offline compile's
+ * NmbOfflineFunction: NativeMetalDirect.h), as the bridge's NmbRenderPipelineDescriptorOf takes them. vertex_inputs 0: no
+ * vertex descriptor. The linked arrays are vertexLinkedFunctions' and fragmentLinkedFunctions' functions and
+ * privateFunctions, as NmbComputePipelineDescriptor's linked functions are. tessellation through
+ * factor_scale_enabled are the descriptor's tessellator state, as MTLRenderPipelineDescriptor's (0: Metal's defaults),
+ * and max_amplification its maxVertexAmplificationCount. */
+#define NMB_RENDER_PIPELINE_DESCRIPTOR_FIELDS(Function)                                                           \
+    Function *vertex, *fragment;                                                                                  \
+    struct NmbColorAttachment colors[8];                                                                          \
+    uint64_t depth_format, stencil_format, samples, topology, rasterization;                                      \
+    uint64_t vertex_inputs;                                                                                       \
+    struct NmbVertexAttribute attributes[31];                                                                     \
+    struct NmbVertexLayout layouts[31];                                                                           \
+    Function *const *vertex_linked;                                                                               \
+    uint64_t vertex_linked_count;                                                                                 \
+    Function *const *vertex_private_linked;                                                                       \
+    uint64_t vertex_private_count;                                                                                \
+    Function *const *fragment_linked;                                                                             \
+    uint64_t fragment_linked_count;                                                                               \
+    Function *const *fragment_private_linked;                                                                     \
+    uint64_t fragment_private_count;                                                                              \
+    uint64_t tessellation, max_tessellation_factor, partition_mode, factor_format, factor_step_function, winding, \
+        control_point_index_type, factor_scale_enabled;                                                           \
+    uint64_t max_amplification;
+
 struct NmbRenderPipelineDescriptor {
-    NmbFunction *vertex, *fragment;
-    struct NmbColorAttachment colors[8];
-    uint64_t depth_format, stencil_format, samples, topology, rasterization;
-    uint64_t vertex_inputs; /* 0: no vertex descriptor */
-    struct NmbVertexAttribute attributes[31];
-    struct NmbVertexLayout layouts[31];
-    /* vertexLinkedFunctions and fragmentLinkedFunctions: each stage's functions and privateFunctions, as
-     * NmbComputePipelineDescriptor's linked functions are */
-    NmbFunction *const *vertex_linked;
-    uint64_t vertex_linked_count;
-    NmbFunction *const *vertex_private_linked;
-    uint64_t vertex_private_count;
-    NmbFunction *const *fragment_linked;
-    uint64_t fragment_linked_count;
-    NmbFunction *const *fragment_private_linked;
-    uint64_t fragment_private_count;
+    NMB_RENDER_PIPELINE_DESCRIPTOR_FIELDS(NmbFunction)
 };
 
 NmbRenderPipeline *nmb_render_pipeline_new(NmbDevice *, const struct NmbRenderPipelineDescriptor *);
@@ -231,16 +241,26 @@ struct NmbPipelineOptions {
     size_t archive_count;
 };
 
+/* As NMB_RENDER_PIPELINE_DESCRIPTOR_FIELDS, a compute pipeline descriptor's. The linked arrays are MTLLinkedFunctions'
+ * functions and privateFunctions, the external functions the kernel calls by name (counted arrays of live handles for
+ * the duration of the call; none where the count is 0). The stage_ fields are the stageInputDescriptor (stage_inputs 0:
+ * none): its attributes by index (format 0: none) and layouts by buffer index (stride UINT64_MAX:
+ * MTLBufferLayoutStrideDynamic), its index type and index buffer. */
+#define NMB_COMPUTE_PIPELINE_DESCRIPTOR_FIELDS(Function)                                                        \
+    Function *function;                                                                                         \
+    uint64_t max_threads, multiple_of_execution_width, indirect, max_call_stack_depth, adding_binary_functions; \
+    uint64_t mutability[31];                                                                                    \
+    Function *const *linked;                                                                                    \
+    uint64_t linked_count;                                                                                      \
+    Function *const *private_linked;                                                                            \
+    uint64_t private_count;                                                                                     \
+    uint64_t stage_inputs;                                                                                      \
+    struct NmbVertexAttribute stage_attributes[31];                                                             \
+    struct NmbVertexLayout stage_layouts[31];                                                                   \
+    uint64_t stage_index_type, stage_index_buffer;
+
 struct NmbComputePipelineDescriptor {
-    NmbFunction *function;
-    uint64_t max_threads, multiple_of_execution_width, indirect, max_call_stack_depth, adding_binary_functions;
-    uint64_t mutability[31];
-    /* MTLLinkedFunctions: functions and privateFunctions, the external functions the kernel calls by name (counted arrays of live
-     * handles for the duration of the call; none where the count is 0). */
-    NmbFunction *const *linked;
-    uint64_t linked_count;
-    NmbFunction *const *private_linked;
-    uint64_t private_count;
+    NMB_COMPUTE_PIPELINE_DESCRIPTOR_FIELDS(NmbFunction)
 };
 
 NmbComputePipeline *nmb_compute_pipeline_new_with_options(NmbDevice *, NmbFunction *,
@@ -433,6 +453,26 @@ bool nmb_argument_encoder_set_compute_pipeline(NmbArgumentEncoder *, NmbComputeP
 void *nmb_argument_encoder_constant_data(const NmbArgumentEncoder *,
                                          uint32_t index); /* NULL before an argument buffer is set */
 NmbArgumentEncoder *nmb_argument_encoder_new_nested(const NmbArgumentEncoder *, uint32_t index);
+
+/* The raw path's encoder of a function's argument buffer (raw_argument_layout.h): the layout of the one the function takes at
+ * buffer_index, then each one its pointers point to, as flat runs of leaf arguments (metal2vulkan bind/argument_runs.rs).
+ * A run covers `count` elements of `ids_per_element` ids from `id`, the first `width` of them arguments of `kind`
+ * (raw::ArgumentKind) at offset + element * stride + w * element_stride; `nested`: a pointer's layout index + 1, 0 none.
+ * The layouts are valid during `each`; false with nmb_last_error where Metal makes no encoder, or each's false. */
+struct NmbArgumentRun {
+    uint32_t id, count, ids_per_element, width, kind, nested;
+    uint64_t offset, stride, element_stride, size;
+};
+
+struct NmbArgumentLayout {
+    uint64_t encoded_length, alignment;
+    const struct NmbArgumentRun *runs;
+    uint32_t run_count, reserved;
+};
+
+bool nmb_function_argument_layouts(NmbFunction *, uint32_t buffer_index,
+                                   bool (*each)(const struct NmbArgumentLayout *layouts, uint32_t count, void *ctx),
+                                   void *ctx);
 #ifdef __cplusplus
 }
 #endif

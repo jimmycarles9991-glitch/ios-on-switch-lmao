@@ -35,8 +35,9 @@ STUTTER = [
         regex=r'vsync (?P<sent>\d+) sent [\d.]+/s of (?P<vblanks>\d+) vblanks',
         where='vblanks >= 30',
         source=DISPLAY,
-        note='Core Animation paced by DC A V_BLANK: CA_FORCE_TIMER=1 is what makes CADeviceUseVBL true; '
-        '"vsync 0 sent" is the free-running timer. 11-06: 298 of 299',
+        note='a vsync client paced by DC A V_BLANK. 11-06: 298 of 299, when the 21H461 kernel forced CA onto vsync with '
+        "CA_FORCE_TIMER=1. Neither kernel does now: a J120's and a J181's CA run a CADisplayTimer phased by frame info "
+        '(kern_exec.c), so this reads NO-DATA unless another client asks for vsync',
     ),
     Check(
         'stutter.vsync-late',
@@ -163,7 +164,7 @@ STUTTER = [
         'max(max) <= 100000',
         process=KERNEL,
         regex=r'raise mean (?P<mean>\d+) ns max (?P<max>\d+) ns',
-        source='drivers/TegraGM20B/gpu.c',
+        source='drivers/TegraGM20B/gpu_inline.h idle_stats',
         note='76.8 -> 768 MHz before the kick that needs it, ns: a PL change and two 2 us delays',
     ),
     Check(

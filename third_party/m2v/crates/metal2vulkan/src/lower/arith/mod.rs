@@ -67,6 +67,7 @@ pub mod divide;
 pub mod exact_division;
 pub mod extended_range;
 pub mod fma;
+mod half_bits;
 pub mod legal;
 pub mod libm;
 pub mod math;
@@ -920,6 +921,7 @@ pub struct ArithPlan {
     /// ([`ArithStrategy::F16`]), measured to be Metal's (`DriverDeviation::MetalHalfArithmetic`),
     /// recorded at selection: the module then requires `VkProperty::MetalHalfArithmetic`.
     pub f16_arith: bool,
+    pub sm53_half: bool,
     /// The precision notes the plan's operations record unless their entry's quotient and
     /// functions are Metal's own ([`ArithPlan::device_quotient`]), recorded at selection
     /// ([`OpNotes::unless_metal_fast`]); [`finish`] records them where they are not.
@@ -1053,6 +1055,8 @@ pub const FOLDED: &str = "arith.float.folded";
 /// ([`ArithPlan::libm_fma`]), and which fused multiply-add routines are defined per lane
 /// ([`fma::complete`]).
 pub fn finish(cx: &mut SelectCx<'_>) -> Result<(), Error> {
+    cx.families.arith.sm53_half =
+        cx.profile.fields().native_target == crate::device::NativeShaderTarget::Sm53;
     cx.families.arith.wide = legal::holds_wide(cx.profile);
     cx.families.arith.quantize = narrow::quantize_form(cx.profile);
     cx.families.arith.native_half =
@@ -1183,6 +1187,9 @@ pub fn declare(
 ) -> BResult<Declared> {
     for w in &plan.families.arith.modes {
         modes.push(ExecMode::SignedZeroInfNanPreserve { width: *w });
+    }
+    if plan.families.arith.sm53_half {
+        modes.push(ExecMode::SignedZeroInfNanPreserve { width: 16 });
     }
     let mut decl = Declared::default();
     for d in &plan.families.arith.divides {
@@ -2753,8 +2760,13 @@ fn f16_arithmetic(p: &DeviceProfile, op: AirBin, f: Form) -> bool {
     matches!(op, AirBin::FAdd | AirBin::FSub | AirBin::FMul)
         && f.float_fmt() == Some(FloatFmt::Half)
         && (1..=4).contains(&f.lanes)
-        && p.takes_driver_deviation(DriverDeviation::MetalHalfArithmetic)
-        && p.fields().leaf.float16
+        && ((p.takes_driver_deviation(DriverDeviation::MetalHalfArithmetic)
+            && p.fields().leaf.float16)
+            || p.fields().native_target.half(match op {
+                AirBin::FAdd => crate::device::native::HalfOperation::Add,
+                AirBin::FSub => crate::device::native::HalfOperation::Subtract,
+                _ => crate::device::native::HalfOperation::Multiply,
+            }))
 }
 
 /// The fast division routine a float function call of form `f` lowered as `how` calls:
@@ -3720,7 +3732,11 @@ fn value(
         }
         S::F16 { op, form } => {
             let (p, q) = (a(cx, 0)?, a(cx, 1)?);
-            ops::f16_binary(fb, *op, form.lanes, p, q)?
+            if cx.plan.families.arith.sm53_half {
+                ops::sm53_binary(fb, *op, form.lanes, p, q)?
+            } else {
+                ops::f16_binary(fb, *op, form.lanes, p, q)?
+            }
         }
         S::FastDivide { routine, .. } => {
             let (p, q) = (a(cx, 0)?, a(cx, 1)?);

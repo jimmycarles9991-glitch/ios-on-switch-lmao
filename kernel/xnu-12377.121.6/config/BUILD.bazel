@@ -4,9 +4,9 @@
 # has them (APPLE_LICENSE); only BUILD.bazel and .bzl files are ours.
 load("@rules_python//python:py_test.bzl", "py_test")
 load("//bazel/lint:defs.bzl", "lint_files")
-load(":objects.bzl", "DEVELOPMENT")
+load(":objects.bzl", "DEVELOPMENT", "RELEASE")
 load(":xnu_kernel.bzl", "xnu_exports", "xnu_link_objects", "xnu_object_names", "xnu_version_c")
-load(":xnu_objects.bzl", "xnu_objects")
+load(":xnu_objects.bzl", "by_profile", "xnu_objects")
 
 package(default_visibility = ["//visibility:public"])
 
@@ -43,7 +43,7 @@ filegroup(
 # --- The kernel's own objects (makedefs/MakeInc.kernel) ------------------------------------------------------------
 xnu_version_c(
     name = "version_c",
-    config = "DEVELOPMENT",
+    config = by_profile("DEVELOPMENT", "RELEASE"),
 )
 
 xnu_objects(
@@ -57,6 +57,7 @@ xnu_objects(
     gen_hdrs = None,
     gen_relative = False,
     gen_srcs = ":version_c",
+    release = RELEASE,
     table = DEVELOPMENT,
 )
 

@@ -14,6 +14,7 @@
 #ifndef HEVC_NVDEC_H
 #define HEVC_NVDEC_H
 #include "H264NVDEC.h"
+#include "HEVCDisplayProbe.h"
 #include "HEVCSyntax.h"
 
 typedef struct HEVCDecoder HEVCDecoder;
@@ -30,11 +31,21 @@ const HEVCSPS *hevc_decoder_sps(const HEVCDecoder *decoder);
 int hevc_decoder_configure(HEVCDecoder *decoder);
 // Whether Main 10 pictures are decoded (TEGRA_NVDEC_HEVC_MAIN10); 8-bit only when false.
 void hevc_decoder_allow_10bit(HEVCDecoder *decoder, bool allow);
+// Main 10 pictures go out as the 8-bit NV12 NVDEC writes into a display buffer in the same job (disp_output_mode 2: the
+// samples truncated to 8 bits, HW Test decode.display_buffer; Rec.709 only), the references staying 16-bit.
+void hevc_decoder_display_8bit(HEVCDecoder *decoder, bool on);
+#if !defined(SWITCH_DEBUG) || SWITCH_DEBUG
+// HEVCDisplayProbe.h on the session's first Main 10 IDR picture; false until it has run.
+void hevc_decoder_want_display_probe(HEVCDecoder *decoder);
+bool hevc_decoder_display_probe(const HEVCDecoder *decoder, HEVCDisplayProbeResult out[2]);
+#endif
 
 // One access unit of length-prefixed NAL units (lengthSize 1..4). Returns 1 when a picture was decoded (it reaches
-// `decoded` now and `emit` when it is bumped out), 0 when the sample had none to decode (parameter sets, a skipped
-// RASL picture), -1 for unsupported or corrupt data, -2 when an NVDEC job failed, -3 when buffers failed.
-int hevc_decoder_decode(HEVCDecoder *decoder, const uint8_t *data, size_t size, unsigned lengthSize, void *token);
+// `decoded` now and `emit` when it is bumped out, or at once when `reorder` is false), 0 when the sample had none to
+// decode (parameter sets, a skipped RASL picture), -1 for unsupported or corrupt data, -2 when an NVDEC job failed, -3
+// when buffers failed.
+int hevc_decoder_decode(HEVCDecoder *decoder, const uint8_t *data, size_t size, unsigned lengthSize, void *token,
+                        bool reorder);
 // End of stream: every picture still waiting goes out, in output order.
 void hevc_decoder_flush(HEVCDecoder *decoder);
 

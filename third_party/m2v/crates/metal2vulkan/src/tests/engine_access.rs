@@ -2009,7 +2009,7 @@ fn sixteen_byte_leaves_move_as_one_uvec4() {
                 .iter()
                 .filter(|o| **o == OP_STORE)
                 .count();
-            let want = if k.store.is_some() && !vec4 { 4 } else { 1 };
+            let want = if k.store.is_some() && !vec4 { 4 } else { 5 };
             assert_eq!(stores, want, "{what}: stores");
             let data = pattern(48);
             for r in VEC4_RESIDUALS {

@@ -221,8 +221,9 @@ def _ipsw_inflate_impl(ctx):
         outputs = [out],
         mnemonic = "IpswInflate",
         progress_message = "Inflating the IPSW's " + ctx.attr.filename,
-        # A multi-GB output (the system cryptex) would evict everything else from the 10 GB disk cache.
-        execution_requirements = {"no-cache": ""} if ctx.attr.large else {},
+        # A multi-GB output (the system cryptex) would evict everything else from the 10 GB disk cache, and its input,
+        # from the repository cache, is no remote worker's to read.
+        execution_requirements = {"no-cache": "", "no-remote": ""} if ctx.attr.large else {},
         resource_set = _inflate_resources,
     )
     return [DefaultInfo(files = depset([out]))]
@@ -248,7 +249,8 @@ def _ipsw_aea_decrypt_impl(ctx):
         outputs = [out],
         mnemonic = "IpswAeaDecrypt",
         progress_message = "Decrypting the IPSW's " + ctx.attr.filename,
-        execution_requirements = {"no-cache": "", "requires-darwin": ""},
+        # A multi-GB member of the repository cache: decrypted here, never uploaded for a remote worker.
+        execution_requirements = {"no-cache": "", "no-remote": "", "requires-darwin": ""},
     )
     return [DefaultInfo(files = depset([out]))]
 

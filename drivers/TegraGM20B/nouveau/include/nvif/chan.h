@@ -43,6 +43,7 @@ struct nvif_chan {
 	} sema;
 
 	struct nvif_push push;
+	bool defer_kick;
 
 	struct nvif_user *usermode;
 	u32 doorbell_token;

@@ -50,9 +50,20 @@
 #include "../../kits/SwitchRefusal/SwitchRefusal.h"
 #include "../../kits/SwitchTime/SwitchTime.h"
 #include "TegraVICBounce.h"
-#include "TegraVICBounceEngine.h"
+#include "TegraVICBounce.h"
+#include "SwitchVICBounceSubmit.h"
 #include "TegraVICPresent.h"
 #include "TegraVICSurface.h"
+#include "SwitchVICTransform.h"
+#include "SwitchVICMapping.h"
+#include "SwitchVICJobs.h"
+#include "SwitchVICEvents.h"
+#include "SwitchVICRequests.h"
+#include "../NativeMobileDisplay/DisplayWindowProbeABI.h"
+#include "SwitchVICStats.h"
+#include "SwitchVICTurn.h"
+#include "SwitchVICTurnRun.h"
+#include "../NativeMobileDisplay/SwitchLandscapeRunABI.h"
 #include "../TegraGM20B/TegraGM20BLayout.h"
 
 // The kernel's IOService/IOUserClient implementations, called directly (they are the defaults the vtable copies
@@ -90,18 +101,19 @@ void iouc_release_port(mach_port_t) __asm__("__ZN12IOUserClient23releaseNotifica
 }
 
 namespace {
-constexpr uint32_t kQueueMax = 16, kMaxConnections = 64;
-constexpr uint32_t kWindowPages = static_cast<uint32_t>(kTegraVICWindowBytes >> 12);
+constexpr uint32_t kMaxConnections = 64;
 constexpr uint32_t kVtableSlots = 200;  // both classes have under 192; copying a little more reads only data
 
 // One connection's state, beside Apple's IOSurfaceAcceleratorClient object it belongs to.
 struct Conn {
     IOUserClient *client;  // not retained: set in newUserClient, cleared in its free
     task_t task;
-    mach_port_t port;  // registered with IOConnectSetNotificationPort; queued replies carry it, a replaced one's
-                       // replies fail harmlessly (the port right is released when replaced)
+    mach_port_t port;  // registered with IOConnectSetNotificationPort; queued replies carry it without a right of
+                       // their own, so it is not replaced while a job is pending
     IOLock *lock;
     uint32_t pending;  // jobs queued or running
+    uint32_t waiting;  // queued jobs whose events have not fired, under gQueueLock
+    bool closing;
 };
 
 Conn gConns[kMaxConnections];
@@ -144,6 +156,11 @@ IOReturn ioreturn(int err)
         return kIOReturnTimeout;
     case -19:
         return kIOReturnNotReady;
+    case -125:
+    case -5:
+        return kIOReturnAborted;
+    case -95:
+        return kIOReturnUnsupported;
     default:
         return kIOReturnIOError;
     }
@@ -151,25 +168,28 @@ IOReturn ioreturn(int err)
 
 struct Job;
 IOLock *gQueueLock;
-Job *gHead, *gTail;
-uint32_t gQueued;
-uint64_t *gPages[TEGRA_VIC_WINDOWS];
+SwitchVICRequests<Job> gRequests;
 
 #if TEGRA_VIC_STATS
-// Stats for the unified log (one line per 5 s window with work). `pitch`: refusals for a row pitch VIC cannot address,
-// which CoreVideo's buffers sized by the display pipe's stride requirement never have.
-struct {
-    uint64_t windowStart, jobs, ops, refused, pitch, failed, engineUs, mapUs, bytes;
-} gStats;
+// `pitch`: refusals for a row pitch VIC cannot address, which CoreVideo's buffers sized by the display pipe's stride
+// requirement never have.
+SwitchVICStats gStats;
 #endif
 
-// `why` is a literal: the refusal's key as well as its text.
-void refused(IOReturn ret, const char *why)
+char fourccChar(uint32_t fourcc, unsigned shift)
+{
+    const char c = static_cast<char>(fourcc >> shift);
+    return c >= ' ' && c <= '~' ? c : '?';
+}
+
+// `why` is a literal: the refusal's key as well as its text. Each pair of formats is a reason of its own, so every
+// pairing the callers try is named once.
+void refused(IOReturn ret, const char *why, const TegraVICSurfaceDesc &src, const TegraVICSurfaceDesc &dst)
 {
 #if TEGRA_VIC_STATS
-    __atomic_add_fetch(&gStats.refused, 1, __ATOMIC_RELAXED);
+    gStats.add(gStats.refused, 1);
     if (!strncmp(why, "row pitch", 9))
-        __atomic_add_fetch(&gStats.pitch, 1, __ATOMIC_RELAXED);
+        gStats.add(gStats.pitch, 1);
 #endif
     const char *kind = "surface lookup";
     if (ret == kIOReturnUnsupported) {
@@ -177,7 +197,15 @@ void refused(IOReturn ret, const char *why)
     } else if (ret == kIOReturnBadArgument) {
         kind = "bad request";
     }
-    switch_refusal("TegraVIC", why, "IOSurfaceAccelerator transform refused (%s), the caller falls back", kind);
+    const uint64_t key =
+        switch_refusal_key_with(switch_refusal_key("TegraVIC", why), (uint64_t(src.fourcc) << 32) | dst.fourcc);
+    switch_refusal_k(key, "TegraVIC", why,
+                     "IOSurfaceAccelerator transform refused (%s), the caller falls back: '%c%c%c%c' %ux%u to "
+                     "'%c%c%c%c' %ux%u",
+                     kind, fourccChar(src.fourcc, 24), fourccChar(src.fourcc, 16), fourccChar(src.fourcc, 8),
+                     fourccChar(src.fourcc, 0), src.width, src.height, fourccChar(dst.fourcc, 24),
+                     fourccChar(dst.fourcc, 16), fourccChar(dst.fourcc, 8), fourccChar(dst.fourcc, 0), dst.width,
+                     dst.height);
 }
 
 #if TEGRA_VIC_STATS
@@ -185,8 +213,8 @@ extern "C" void proc_selfname(char *buf, int size);
 extern "C" int proc_selfpid(void);
 
 // Who allocates surfaces VIC cannot address, once a boot: each one costs the copy engine two copies a job, and the
-// fix is that allocator's row alignment.
-void firstBounce(const TegraVICSurfaceDesc *d, const char *side)
+// fix is that allocator's row or plane alignment.
+void firstBounce(const TegraVICSurfaceDesc *d, bool source)
 {
     static int logged;
     if (__atomic_exchange_n(&logged, 1, __ATOMIC_RELAXED))
@@ -194,54 +222,44 @@ void firstBounce(const TegraVICSurfaceDesc *d, const char *side)
     char name[32];
     proc_selfname(name, sizeof(name));
     os_log(OS_LOG_DEFAULT,
-           "TegraVIC: first bounce this boot: %s[%d] %s '%c%c%c%c' %ux%u, row pitch %llu (VIC takes multiples of 256)",
-           name, proc_selfpid(), side, static_cast<char>(d->fourcc >> 24), static_cast<char>(d->fourcc >> 16),
-           static_cast<char>(d->fourcc >> 8), static_cast<char>(d->fourcc), d->width, d->height,
-           static_cast<unsigned long long>(d->planeBytesPerRow[0]));
+           "TegraVIC: first bounce this boot: %s[%d] %s '%c%c%c%c' %ux%u, row pitch %llu, chroma at %llu (VIC takes "
+           "rows on multiples of %u, planes on 256)",
+           name, proc_selfpid(), source ? "source" : "destination", static_cast<char>(d->fourcc >> 24),
+           static_cast<char>(d->fourcc >> 16), static_cast<char>(d->fourcc >> 8), static_cast<char>(d->fourcc),
+           d->width, d->height, static_cast<unsigned long long>(d->planeBytesPerRow[0]),
+           static_cast<unsigned long long>(d->planeOffset[1]), tegra_vic_pitch_align(tegra_vic_traits(), source));
 }
 #endif
 
 struct Job {
     Job *next;
+    SwitchVICEvents *events;
+    bool eventReady, listed;
+    int eventStatus;
     IOUserClient *client;  // retained
     struct Conn *conn;
     TegraVICSurface src, dst;
     TegraVICPlan plan;
     uint32_t chromaSite;
     bool bounceSrc, bounceDst;  // through the copy engine's scratch (TegraVICBounce.h)
-    TegraVICBounce *backFrom;   // a destination's copy back in flight: its scratch, and the destination's pages
-    uint64_t *dstPages;
-    uint32_t dstPageCount;
     bool async, reply;
     OSAsyncReference64 ref;
     uint64_t info;
     IOReturn status;
-    bool done;
-    TegraVICJob check;  // the submitting thread's check of each operation
+    bool done, detached;  // detached: its synchronous caller was interrupted and finishJob frees it
+    TegraVICJob check;    // the submitting thread's check of each operation
+#if TEGRA_VIC_STATS
+    uint64_t submittedUs;
+    int pid;  // the transform caller's (the job runs on the engine thread)
+    uint8_t origin;
+#endif
 };
 
-// The pages the window maps for a side, and the geometry VIC reads them with: the surface's own, or its bounce scratch.
-struct Side {
-    uint64_t *pages;
-    uint32_t count;
-    const TegraVICSurfaceDesc *desc;
-};
-
-Side sideOf(const TegraVICSurface *s, bool bounced, const TegraVICBounce *b, uint64_t *pages, uint32_t count)
+// How VIC will see a surface: as it is, or (rows or planes it cannot address) as its bounce scratch.
+const char *staged(const TegraVICSurfaceDesc *d, bool source, TegraVICSurfaceDesc *stage,
+                   const TegraVICSurfaceDesc **as, bool *bounced)
 {
-    return bounced ? Side{b->scratch.pages, b->pages, &b->desc} : Side{pages, count, &s->desc};
-}
-
-uint32_t pitchAlign()
-{
-    return tegra_vic_traits()->pitchAlign ? tegra_vic_traits()->pitchAlign : 256;
-}
-
-// How VIC will see a surface: as it is, or (rows it cannot address) as its bounce scratch.
-const char *staged(const TegraVICSurfaceDesc *d, TegraVICSurfaceDesc *stage, const TegraVICSurfaceDesc **as,
-                   bool *bounced)
-{
-    const uint32_t align = pitchAlign();
+    const uint32_t align = tegra_vic_pitch_align(tegra_vic_traits(), source);
     const int needed = tegra_vic_bounce_needed(d, align);
     *bounced = needed == 0;
     if (needed < 0)
@@ -255,190 +273,110 @@ const char *staged(const TegraVICSurfaceDesc *d, TegraVICSurfaceDesc *stage, con
 
 void finishJob(Job *job, IOReturn status);
 
-// A destination's copy back has landed (the copy engine's completion, a thread call): the job finishes here.
-void copiedBack(void *arg, int err)
+#if TEGRA_VIC_STATS
+void firstFailure(const Job *job, const char *stage, int status)
 {
-    Job *job = static_cast<Job *>(arg);
-    tegra_vic_bounce_back_landed(job->backFrom);
-    // The CPU may have pulled destination lines in while the engines wrote: readers must see DRAM.
-    switch_dcache_hw_pages(SWITCH_DCACHE_CLEAN_INVALIDATE, job->dstPages, job->dstPageCount);
-    switch_dcache_sync();
-    IODelete(job->dstPages, uint64_t, job->dstPageCount);
-    job->dstPages = nullptr;
-    tegra_vic_surface_complete(&job->dst);
-    tegra_vic_surface_complete(&job->src);
-    finishJob(job, err ? kIOReturnIOError : kIOReturnSuccess);
+    char line[160];
+    if (gStats.firstFailure(stage, status, job->src.desc.fourcc, job->dst.desc.fourcc, job->pid, line, sizeof(line))) {
+        const char *refusal = status < 0 ? switch_vic_last_refusal() : nullptr;
+        os_log(OS_LOG_DEFAULT, "%s%s%s", line, refusal ? ", refused at " : "", refusal ? refusal : "");
+    }
+}
+#endif
+
+void transformed(void *context, int status)
+{
+    auto *job = static_cast<Job *>(context);
+#if TEGRA_VIC_STATS
+    firstFailure(job, "completion", status);
+#endif
+    finishJob(job, ioreturn(status));
 }
 
-// Engine thread side: one job, all its operations, under the engine lock. A side whose rows VIC cannot address goes
-// through its bounce scratch, and the engines order each other: the copy engine fills the scratches (a destination's
-// with its own pixels, for those VIC leaves), VIC's channel waits for the fills on the hardware, and a destination's
-// copy back waits on the hardware for VIC's fence. The thread never waits for a copy: a job with a copy back is
-// finished by that copy's completion (false), any other here (true, *status).
 bool runJob(Job *job, IOReturn *status)
 {
-    static TegraVICJob vj;
-    static TegraVICBounce bounce[TEGRA_VIC_WINDOWS];
-    [[maybe_unused]] const uint64_t t0 = switch_now_us();
-    uint32_t pages[TEGRA_VIC_WINDOWS] = {};
-    TegraVICImage dst;
-    TegraVICImage src;
-    const char *why = nullptr;
-    const bool readsSource = job->plan.readsSource != 0u;
-    const uint32_t align = pitchAlign();
-    IOReturn ret = tegra_vic_surface_prepare(&job->dst, tegra_vic_surface_extent(&job->dst.desc),
-                                             gPages[TEGRA_VIC_WINDOW_DST], kWindowPages, &pages[1]);
-    if (!ret && readsSource) {
-        ret = tegra_vic_surface_prepare(&job->src, tegra_vic_surface_extent(&job->src.desc),
-                                        gPages[TEGRA_VIC_WINDOW_SRC], kWindowPages, &pages[0]);
-    }
-    if (ret) {
-        *status = ret;
+    const int prepared = job->eventStatus ? job->eventStatus : switch_vic_events_prepare(job->events);
+    if (prepared) {
+#if TEGRA_VIC_STATS
+        firstFailure(job, "events", prepared);
+#endif
+        *status = ioreturn(prepared);
         return true;
     }
-    // A GPU-rendered surface may be block-linear (TegraGM20BLayout.h): the copy engine reads one as its rows into the
-    // scratch, and writes the scratch's rows back into one's texels.
-    tgm_layout layout;
-    const bool bounceSrc =
-        readsSource && (job->bounceSrc || tegra_gm20b_surface_layout(gPages[TEGRA_VIC_WINDOW_SRC][0], &layout) == 1);
-    const bool bounceDst = job->bounceDst || tegra_gm20b_surface_layout(gPages[TEGRA_VIC_WINDOW_DST][0], &layout) == 1;
-    // VIC and the copy engine do not snoop the CPU's caches: what the CPU wrote to the source must be in DRAM, and no
-    // dirty line of the destination may be written back over what they write.
-    if (readsSource)
-        switch_dcache_hw_pages(SWITCH_DCACHE_CLEAN, gPages[TEGRA_VIC_WINDOW_SRC], pages[0]);
-    switch_dcache_hw_pages(SWITCH_DCACHE_CLEAN_INVALIDATE, gPages[TEGRA_VIC_WINDOW_DST], pages[1]);
-    switch_dcache_sync();
-    TegraVICBounce *srcBounce = &bounce[TEGRA_VIC_WINDOW_SRC];
-    TegraVICBounce *dstBounce = &bounce[TEGRA_VIC_WINDOW_DST];
-    TegraVICBounceOrder order = {};
-    if (bounceSrc || bounceDst) {
-        ret = tegra_vic_bounce_start();
-        uint32_t next = *tegra_vic_bounce_next();
-        order = tegra_vic_bounce_order(static_cast<int>(bounceSrc), static_cast<int>(bounceDst), &next);
-    }
-    if (!ret && bounceSrc) {
-        ret = tegra_vic_bounce_stage(srcBounce, &job->src.desc, align);
-        if (!ret) {
-            ret = tegra_vic_bounce_queue(job->src.memory, &job->src.desc, srcBounce->scratch.memory, &srcBounce->desc,
-                                         nullptr, !bounceDst, nullptr, nullptr);
-        }
-    }
-    if (!ret && bounceDst) {
-        ret = tegra_vic_bounce_stage(dstBounce, &job->dst.desc, align);
-        if (!ret) {
-            ret = tegra_vic_bounce_queue(job->dst.memory, &job->dst.desc, dstBounce->scratch.memory, &dstBounce->desc,
-                                         nullptr, true, nullptr, nullptr);
-        }
-    }
-    if (!ret && order.vicWaits)
-        *tegra_vic_bounce_next() = order.vicAcquire;
-    const Side dstSide = sideOf(&job->dst, bounceDst, dstBounce, gPages[TEGRA_VIC_WINDOW_DST], pages[1]);
-    const Side srcSide = sideOf(&job->src, bounceSrc, srcBounce, gPages[TEGRA_VIC_WINDOW_SRC], pages[0]);
-    tegra_vic_lock();
-    if (!ret) {
-        const uint64_t dstBase = tegra_vic_window_map(TEGRA_VIC_WINDOW_DST, dstSide.pages, dstSide.count, true);
-        const uint64_t srcBase =
-            readsSource ? tegra_vic_window_map(TEGRA_VIC_WINDOW_SRC, srcSide.pages, srcSide.count, false) : 0;
-        why = tegra_vic_image_from(dstSide.desc, dstBase, &dst);
-        dst.chromaSite = job->chromaSite;
-        if (!why && readsSource)
-            why = tegra_vic_image_from(srcSide.desc, srcBase, &src);
-        if (why)
-            ret = kIOReturnBadArgument;
-    }
-    [[maybe_unused]] const uint64_t t1 = switch_now_us();
-    [[maybe_unused]] uint64_t busy = 0;
-    const TegraVICAcquire fills = {order.vicWaits ? tegra_vic_bounce_syncpt() : 0, order.vicAcquire};
-    uint32_t fence = 0;
-    for (uint32_t i = 0; !ret && i < job->plan.count; i++) {
-        const TegraVICOp *op = &job->plan.op[i];
-        why = tegra_vic_build(op->fill ? nullptr : &src, &dst, op, tegra_vic_traits(), tegra_vic_config_address(),
-                              tegra_vic_filter_address(), &vj);
-        if (why) {
-            ret = kIOReturnBadArgument;
-            break;
-        }
-        uint64_t us = 0;
-        ret = ioreturn(tegra_vic_run_after(&vj, i == 0 && order.vicWaits ? &fills : nullptr, &us, &fence));
-        busy += us;
 #if TEGRA_VIC_STATS
-        __atomic_add_fetch(&gStats.ops, 1, __ATOMIC_RELAXED);
+    const uint64_t entered = mach_absolute_time();
+    const bool eventTurn = job->events && job->plan.count == 1 && (job->plan.op[0].transform & TEGRA_VIC_ROT90);
+    const uint8_t origin = job->origin;
 #endif
-    }
-    tegra_vic_window_clear(TEGRA_VIC_WINDOW_DST);
-    tegra_vic_window_clear(TEGRA_VIC_WINDOW_SRC);
-    tegra_vic_unlock();
+    // A quarter turn of a decoder's picture window A scans itself: recorded on the destination, nothing to submit.
+    SwitchDisplayTraits traits = switch_display_traits();
+    traits.columnScanYuv = traits.columnScanYuv && switch_display_landscape_ready();
+    if (!job->bounceSrc && !job->bounceDst &&
+        switch_vic_turn_defer(&job->src, &job->dst, &job->plan, job->chromaSite, &job->events, traits)) {
 #if TEGRA_VIC_STATS
-    gStats.engineUs += busy;
-    gStats.mapUs += (t1 - t0) + (switch_now_us() - t1 - busy);
-    gStats.bytes += (static_cast<uint64_t>(pages[0]) + pages[1]) << 12;
+        switch_vic_turn_count(job->origin, false, true, eventTurn, mach_absolute_time() - entered);
 #endif
-    if (why)
-        IOLog("TegraVIC: a checked job was refused on the engine thread: %s\n", why);
-    if (!ret && order.copiesBack) {
-        job->dstPages = IONew(uint64_t, pages[1]);
-        ret = job->dstPages ? kIOReturnSuccess : kIOReturnNoMemory;
+        *status = kIOReturnSuccess;
+        return true;
     }
-    if (!ret && order.copiesBack) {
-        memcpy(job->dstPages, gPages[TEGRA_VIC_WINDOW_DST], static_cast<size_t>(pages[1]) * sizeof(uint64_t));
-        job->dstPageCount = pages[1];
-        job->backFrom = dstBounce;
-        const tegra_gm20b_ce_wait afterVic = {tegra_vic_syncpt(), fence};
-        tegra_vic_bounce_back_queued(dstBounce);
-        ret = tegra_vic_bounce_queue(dstBounce->scratch.memory, &dstBounce->desc, job->dst.memory, &job->dst.desc,
-                                     &afterVic, true, copiedBack, job);
-        if (!ret) {
-            *tegra_vic_bounce_next() = order.done;
-            return false;
-        }
-        tegra_vic_bounce_back_landed(dstBounce);
-        IODelete(job->dstPages, uint64_t, pages[1]);
-        job->dstPages = nullptr;
+    int submitted = 0;
+#if TEGRA_VIC_STATS
+    // Read before submitting: the job may complete and be freed before the submission returns.
+    const uint64_t began = switch_now_us();
+    job->submittedUs = began;
+    const uint32_t operations = job->plan.count;
+    const uint64_t addressed = tegra_vic_surface_extent(&job->dst.desc) +
+                               (job->plan.readsSource ? tegra_vic_surface_extent(&job->src.desc) : 0);
+#endif
+    if (!job->bounceSrc && !job->bounceDst)
+        submitted =
+            switch_vic_transform(&job->src, &job->dst, &job->plan, job->chromaSite, transformed, job, job->events);
+    const bool bounced = !submitted;
+    if (bounced)
+        submitted =
+            switch_vic_bounce_submit(&job->src, &job->dst, &job->plan, job->chromaSite, transformed, job, job->events);
+    if (submitted <= 0) {
+#if TEGRA_VIC_STATS
+        firstFailure(job, bounced ? "bounce submission" : "direct submission", submitted);
+#endif
+        *status = ioreturn(submitted);
+        return true;
     }
-    // The CPU may have pulled destination lines in while VIC wrote: readers must see DRAM.
-    switch_dcache_hw_pages(SWITCH_DCACHE_CLEAN_INVALIDATE, gPages[TEGRA_VIC_WINDOW_DST], pages[1]);
-    switch_dcache_sync();
-    tegra_vic_surface_complete(&job->dst);
-    tegra_vic_surface_complete(&job->src);
-    *status = ret;
-    return true;
+#if TEGRA_VIC_STATS
+    gStats.submission(operations, bounced, switch_now_us() - began, addressed);
+    switch_vic_turn_count(origin, true, false, eventTurn, mach_absolute_time() - entered);
+#endif
+    return false;
 }
 
 #if TEGRA_VIC_STATS
 void statsLine()
 {
-    const uint64_t now = switch_now_us();
-    if (!gStats.windowStart)
-        gStats.windowStart = now;
-    if (now - gStats.windowStart < 5000000)
-        return;
-    char line[200];
-    snprintf(line, sizeof(line),
-             "TegraVIC: %llus jobs=%llu ops=%llu refused=%llu pitch=%llu failed=%llu engine=%lluus/job "
-             "cpu=%lluus/job mapped=%lluKB/job",
-             (now - gStats.windowStart) / 1000000, gStats.jobs, gStats.ops, gStats.refused, gStats.pitch, gStats.failed,
-             gStats.jobs ? gStats.engineUs / gStats.jobs : 0, gStats.jobs ? gStats.mapUs / gStats.jobs : 0,
-             gStats.jobs ? (gStats.bytes >> 10) / gStats.jobs : 0);
-    os_log(OS_LOG_DEFAULT, "%s", line);
-    bzero(&gStats, sizeof(gStats));
-    gStats.windowStart = now;
+    char line[240];
+    gStats.add(gStats.maps, switch_vic_mapping_take_made());
+    if (gStats.line(switch_now_us(), line, sizeof(line)))
+        os_log(OS_LOG_DEFAULT, "%s", line);
 }
 #endif
+
+void eventsReady(void *context, int status)
+{
+    auto *job = static_cast<Job *>(context);
+    IOLockLock(gQueueLock);
+    gRequests.ready(job, status);
+    IOLockWakeup(gQueueLock, &gRequests, false);
+    IOLockUnlock(gQueueLock);
+}
 
 void engineThread(void *, wait_result_t)
 {
     for (;;) {
         IOLockLock(gQueueLock);
-        while (!gHead)
-            IOLockSleep(gQueueLock, &gHead, THREAD_UNINT);
-        Job *job = gHead;
-        gHead = job->next;
-        if (!gHead)
-            gTail = nullptr;
-        gQueued--;
-        IOLockWakeup(gQueueLock, &gQueued, false);
+        Job *job = nullptr;
+        while (!(job = gRequests.pop()))
+            IOLockSleep(gQueueLock, &gRequests, THREAD_UNINT);
+        IOLockWakeup(gQueueLock, &gRequests, false);
         IOLockUnlock(gQueueLock);
-
         IOReturn status = kIOReturnSuccess;
         if (runJob(job, &status))
             finishJob(job, status);
@@ -450,11 +388,10 @@ void engineThread(void *, wait_result_t)
 void finishJob(Job *job, IOReturn status)
 {
 #if TEGRA_VIC_STATS
-    gStats.jobs++;
-    if (status)
-        gStats.failed++;
+    gStats.finished(status, job->submittedUs ? switch_now_us() - job->submittedUs : 0);
     statsLine();
 #endif
+    switch_vic_events_release(&job->events);
     tegra_vic_surface_written(&job->dst);
     tegra_vic_surface_release(&job->src);
     tegra_vic_surface_release(&job->dst);
@@ -470,8 +407,11 @@ void finishJob(Job *job, IOReturn status)
         IOLockLock(conn->lock);
         job->status = status;
         job->done = true;
+        const bool detached = job->detached;
         IOLockWakeup(conn->lock, job, false);
         IOLockUnlock(conn->lock);
+        if (detached)
+            IODelete(job, Job, 1);
     }
     IOLockLock(conn->lock);
     conn->pending--;
@@ -483,25 +423,83 @@ void finishJob(Job *job, IOReturn status)
 }  // namespace
 
 namespace {
-void queueJob(Job *job)
+// Interruptible, so a client stalled behind its own events that never fire can still be killed; its close then fails
+// those jobs.
+bool queueJob(Job *job)
 {
     IOLockLock(gQueueLock);
-    while (gQueued >= kQueueMax)
-        IOLockSleep(gQueueLock, &gQueued, THREAD_UNINT);
-    job->next = nullptr;
-    if (gTail) {
-        gTail->next = job;
-    } else {
-        gHead = job;
+    bool interrupted = false;
+    while (!__atomic_load_n(&job->conn->closing, __ATOMIC_ACQUIRE) && !gRequests.admits(*job) && !interrupted)
+        interrupted = IOLockSleep(gQueueLock, &gRequests, THREAD_ABORTSAFE) == THREAD_INTERRUPTED;
+    if (!interrupted) {
+        if (__atomic_load_n(&job->conn->closing, __ATOMIC_ACQUIRE))
+            gRequests.fail(job, -125);
+        gRequests.push(job);
+        IOLockWakeup(gQueueLock, &gRequests, false);
     }
-    gTail = job;
-    gQueued++;
-    IOLockWakeup(gQueueLock, &gHead, false);
     IOLockUnlock(gQueueLock);
+    return !interrupted;
+}
+
+void abandonUnqueued(Job *job)
+{
+    switch_vic_events_release(&job->events);
+    tegra_vic_surface_release(&job->src);
+    tegra_vic_surface_release(&job->dst);
+    IOLockLock(job->conn->lock);
+    job->conn->pending--;
+    IOLockWakeup(job->conn->lock, &job->conn->pending, false);
+    IOLockUnlock(job->conn->lock);
+    job->client->release();
+    IODelete(job, Job, 1);
+}
+
+IOReturn awaitJob(Conn *conn, Job *job)
+{
+    IOLockLock(conn->lock);
+    bool interrupted = false;
+    while (!job->done && !interrupted)
+        interrupted = IOLockSleep(conn->lock, job, THREAD_ABORTSAFE) == THREAD_INTERRUPTED;
+    IOLockUnlock(conn->lock);
+    if (interrupted) {
+        IOLockLock(gQueueLock);
+        if (job->listed) {
+            gRequests.fail(job, -125);
+            IOLockWakeup(gQueueLock, &gRequests, false);
+        }
+        IOLockUnlock(gQueueLock);
+        IOLockLock(conn->lock);
+        job->detached = !job->done;
+        const bool detached = job->detached;
+        IOLockUnlock(conn->lock);
+        if (detached)
+            return kIOReturnAborted;
+    }
+    const IOReturn status = job->status;
+    IODelete(job, Job, 1);
+    return status;
 }
 
 IOReturn transform(Conn *conn, const void *in, uint32_t size)
 {
+#if TEGRA_VIC_STATS
+    struct Charge {
+        uint64_t at = mach_absolute_time();
+
+        void stop()
+        {
+            if (at)
+                switch_vic_turn_count(SWITCH_DISPLAY_LANDSCAPE_ORIGIN_OTHER, false, false, false,
+                                      mach_absolute_time() - at);
+            at = 0;
+        }
+
+        ~Charge()
+        {
+            stop();
+        }
+    } charge;
+#endif
     if (size != sizeof(TegraVICRequest))
         return kIOReturnBadArgument;
     if (!tegra_vic_ready())
@@ -511,6 +509,10 @@ IOReturn transform(Conn *conn, const void *in, uint32_t size)
     Job *job = IONewZero(Job, 1);
     if (!job)
         return kIOReturnNoMemory;
+#if TEGRA_VIC_STATS
+    job->pid = proc_selfpid();
+    job->origin = switch_vic_turn_origin(job->pid);
+#endif
     // Surfaces in the caller's task, as Apple's driver looks them up (not the task that opened the connection).
     IOReturn ret = tegra_vic_surface_lookup(r.dst_id, current_task(), &job->dst);
     const bool writeOnly = (r.flags & TEGRA_VIC_REQ_WRITE_ONLY) != 0;
@@ -522,6 +524,10 @@ IOReturn transform(Conn *conn, const void *in, uint32_t size)
         why = tegra_vic_plan(&r, &job->src.desc, &job->dst.desc, &job->plan, &kind);
         if (why)
             ret = kind == TEGRA_VIC_PLAN_UNSUPPORTED ? kIOReturnUnsupported : kIOReturnBadArgument;
+#if TEGRA_VIC_STATS
+        else
+            switch_vic_turn_request_seen(r, job->src.desc, job->dst.desc, job->pid);
+#endif
     }
     // Every job checked now, against the surfaces as they will be mapped (window addresses are page-aligned, like the
     // real ones), so a refusal is this call's result and the caller can fall back at once.
@@ -532,12 +538,12 @@ IOReturn transform(Conn *conn, const void *in, uint32_t size)
         TegraVICSurfaceDesc dstStage;
         const TegraVICSurfaceDesc *srcAs = &job->src.desc;
         const TegraVICSurfaceDesc *dstAs = &job->dst.desc;
-        why = staged(&job->dst.desc, &dstStage, &dstAs, &job->bounceDst);
+        why = staged(&job->dst.desc, false, &dstStage, &dstAs, &job->bounceDst);
         if (!why && job->plan.readsSource)
-            why = staged(&job->src.desc, &srcStage, &srcAs, &job->bounceSrc);
+            why = staged(&job->src.desc, true, &srcStage, &srcAs, &job->bounceSrc);
 #if TEGRA_VIC_STATS
         if (!why && (job->bounceSrc || job->bounceDst))
-            firstBounce(job->bounceSrc ? &job->src.desc : &job->dst.desc, job->bounceSrc ? "source" : "destination");
+            firstBounce(job->bounceSrc ? &job->src.desc : &job->dst.desc, job->bounceSrc);
 #endif
         if (!why)
             why = tegra_vic_image_from(dstAs, kTegraVICWindowBase + TEGRA_VIC_WINDOW_DST * kTegraVICWindowBytes, &dst);
@@ -546,7 +552,8 @@ IOReturn transform(Conn *conn, const void *in, uint32_t size)
         if (!why && (tegra_vic_surface_extent(dstAs) > kTegraVICWindowBytes ||
                      (job->plan.readsSource && tegra_vic_surface_extent(srcAs) > kTegraVICWindowBytes)))
             why = "surface larger than a 128 MiB window";
-        dst.chromaSite = TEGRA_VIC_REQ_CHROMA_SITE(r.flags);
+        if (TEGRA_VIC_REQ_CHROMA_SITE(r.flags))
+            dst.chromaSite = TEGRA_VIC_REQ_CHROMA_SITE(r.flags);
         for (uint32_t i = 0; !why && i < job->plan.count; i++) {
             why = tegra_vic_build(job->plan.op[i].fill ? nullptr : &src, &dst, &job->plan.op[i], tegra_vic_traits(),
                                   tegra_vic_config_address(), tegra_vic_filter_address(), &job->check);
@@ -554,8 +561,12 @@ IOReturn transform(Conn *conn, const void *in, uint32_t size)
         if (why)
             ret = kIOReturnUnsupported;  // a shape VIC does not do (kTegraVICTraits)
     }
+
+    if (!ret)
+        ret = ioreturn(switch_vic_events_create(current_task(), r, eventsReady, job, &job->events));
     if (ret) {
-        refused(ret, why ? why : "surface lookup");
+        switch_vic_events_release(&job->events);
+        refused(ret, why ? why : "surface lookup", job->src.desc, job->dst.desc);
         tegra_vic_surface_release(&job->src);
         tegra_vic_surface_release(&job->dst);
         IODelete(job, Job, 1);
@@ -565,28 +576,57 @@ IOReturn transform(Conn *conn, const void *in, uint32_t size)
     // Apple's driver: a callback makes the call asynchronous; setAsyncReference64(port, callback, refcon) from the
     // request and one reply argument, cb_info. SkipAsyncCallback, or no registered port, runs it without a reply.
     job->async = r.cb_fn != 0;
-    const mach_port_t port = conn->port;
-    job->reply = job->async && (job->plan.callback != 0u) && port != MACH_PORT_NULL;
-    if (job->reply)
-        iouc_set_async_reference64(job->ref, port, r.cb_fn, r.cb_refcon, conn->task);
     job->info = r.cb_info;
     conn->client->retain();
     job->client = conn->client;
     job->conn = conn;
     IOLockLock(conn->lock);
+    if (__atomic_load_n(&conn->closing, __ATOMIC_ACQUIRE)) {
+        IOLockUnlock(conn->lock);
+        switch_vic_events_release(&job->events);
+        tegra_vic_surface_release(&job->src);
+        tegra_vic_surface_release(&job->dst);
+        job->client->release();
+        IODelete(job, Job, 1);
+        return kIOReturnAborted;
+    }
     conn->pending++;
+    // The reply holds no right of its own: the port is read with the job counted, and tegra_vic_register_port keeps
+    // the right while a job is pending
+    const mach_port_t port = conn->port;
+    job->reply = job->async && (job->plan.callback != 0u) && port != MACH_PORT_NULL;
+    if (job->reply)
+        iouc_set_async_reference64(job->ref, port, r.cb_fn, r.cb_refcon, conn->task);
     IOLockUnlock(conn->lock);
-    queueJob(job);
-    if (job->async)
-        return kIOReturnSuccess;
-    IOLockLock(conn->lock);
-    while (!job->done)
-        IOLockSleep(conn->lock, job, THREAD_UNINT);
-    IOLockUnlock(conn->lock);
-    ret = job->status;
-    IODelete(job, Job, 1);
-    return ret;
+    job->eventReady = job->events == nullptr;
+    const bool async = job->async;
+    switch_vic_events_arm(job->events);
+    if (!queueJob(job)) {
+        abandonUnqueued(job);
+        return kIOReturnAborted;
+    }
+#if TEGRA_VIC_STATS
+    charge.stop();
+#endif
+    return async ? kIOReturnSuccess : awaitJob(conn, job);
 }
+
+#if TEGRA_VIC_STATS
+// The display's window probes come through here too: the app's sandbox admits this client, not the display's.
+extern "C" IOReturn switch_display_window_probe_call(const IOExternalMethodArguments *) __attribute__((weak));
+
+static IOReturn kernelTest(const Conn *conn, const IOExternalMethodArguments *a)
+{
+    uint32_t magic = 0;
+    if (a->structureInput && a->structureInputSize >= sizeof(magic))
+        memcpy(&magic, a->structureInput, sizeof(magic));
+    if (magic == SWITCH_DISPLAY_LANDSCAPE_RUN_MAGIC)
+        return switch_vic_landscape_call(conn, a);
+    if (magic == SWITCH_DISPLAY_WINDOW_PROBE_MAGIC)
+        return switch_display_window_probe_call ? switch_display_window_probe_call(a) : kIOReturnUnsupported;
+    return switch_vic_kernel_test_call(a);
+}
+#endif
 
 // --- The client's vtable slots ------------------------------------------------------------------------------------
 IOReturn tegra_vic_external_method(const IOUserClient *self, uint32_t selector, const IOExternalMethodArguments *a,
@@ -612,14 +652,18 @@ IOReturn tegra_vic_external_method(const IOUserClient *self, uint32_t selector, 
         return a->structureInputSize == 0x18 ? kIOReturnSuccess : kIOReturnBadArgument;
     case 4:  // custom filter coefficients: accepted, VIC uses its own filter
         return a->structureInputSize == 0x20 ? kIOReturnSuccess : kIOReturnBadArgument;
-    case 6:
-        return kIOReturnNotPermitted;  // kernel tests (Apple's: release kernels refuse)
-    case 0:                            // capture
-    case 2:                            // abort transfers
-    case 3:                            // abort captures
-    case 7:                            // histogram
-    case 8:                            // diagnostics
-    case 9:                            // transform estimation
+    case 6:  // kernel tests (Apple's: release kernels refuse)
+#if TEGRA_VIC_STATS
+        return kernelTest(conn, a);
+#else
+        return kIOReturnNotPermitted;
+#endif
+    case 0:  // capture
+    case 2:  // abort transfers
+    case 3:  // abort captures
+    case 7:  // histogram
+    case 8:  // diagnostics
+    case 9:  // transform estimation
         return kIOReturnUnsupported;
     default:
         return kIOReturnBadArgument;
@@ -634,9 +678,15 @@ IOReturn tegra_vic_register_port(const IOUserClient *self, mach_port_t port, UIn
         return kIOReturnBadArgument;
     IOLockLock(conn->lock);
     const mach_port_t old = conn->port;
-    conn->port = port;
+    const bool busy = old != MACH_PORT_NULL && old != port && conn->pending;
+    if (!busy)
+        conn->port = port;
     IOLockUnlock(conn->lock);
-    if (old != MACH_PORT_NULL && old != port)
+    // A refused right is the MIG server's to release: it does so when this returns an error
+    if (busy)
+        return kIOReturnBusy;
+    // The replaced port's right, or this call's second right to the port already kept
+    if (old != MACH_PORT_NULL)
         iouc_release_port(old);
     return kIOReturnSuccess;
 }
@@ -646,6 +696,14 @@ IOReturn tegra_vic_register_port(const IOUserClient *self, mach_port_t port, UIn
 IOReturn tegra_vic_client_close(IOUserClient *self)
 {
     if (Conn *conn = connOf(self)) {
+#if TEGRA_VIC_STATS
+        switch_display_traits_release(conn);
+#endif
+        __atomic_store_n(&conn->closing, true, __ATOMIC_RELEASE);
+        IOLockLock(gQueueLock);
+        gRequests.cancel(conn, -125);
+        IOLockWakeup(gQueueLock, &gRequests, false);
+        IOLockUnlock(gQueueLock);
         IOLockLock(conn->lock);
         while (conn->pending)
             IOLockSleep(conn->lock, &conn->pending, THREAD_UNINT);
@@ -784,7 +842,8 @@ OSDictionary *capabilities(const TegraVICTraits *t)
     // VideoToolbox gates 420f<->420v pairs on it: range conversion reads 4:2:0 through the slot matrix.
     putNumber(d, "IOSurfaceAcceleratorCapabilitiesIdentityCSC", (t->yccIn & TEGRA_VIC_YCC_IN_RGB) ? 1 : 0);
     putNumber(d, "IOSurfaceAcceleratorCapabilitiesTiling", 0);
-    putNumber(d, "IOSurfaceAcceleratorCapabilitiesFractionalXYOffsetsSupported", 0);
+    // gpu.x1.vic_fractional (SwitchVICFractionProbe.h) decides it: quarter-pixel offsets against the interpolation.
+    putNumber(d, "IOSurfaceAcceleratorCapabilitiesFractionalXYOffsetsSupported", 1);
     putNumber(d, "IOSurfaceAcceleratorCapabilitiesFractionalDimensions", 0);
     putNumber(d, "IOSurfaceAcceleratorCapabilitiesDirectionalScaling", 0);
     putNumber(d, "IOSurfaceAcceleratorCapabilitiesHDR", 0);
@@ -795,23 +854,24 @@ OSDictionary *capabilities(const TegraVICTraits *t)
     putNumber(d, "kSurfaceAcceleratorCapabilitiesHistogram", 0);
     putNumber(d, "kSurfaceAcceleratorCapabilitiesHistogramValues", 0);
     putNumber(d, "kSurfaceAcceleratorCapabilitiesVERF", 0);
-    static const char *const kFormats[] = {"ARGB8888", "RGBA8888", "2Planes420"};
+
+    // VIC 4.0 has no 10- or 16-bit YCbCr and no 8:10:10:10 layout (vic_ceb6_types.h adds them in VIC 5.1).
+    const struct {
+        const char *name;
+        uint64_t on;
+    } kFormats[] = {
+        {"ARGB8888", 1},     {"RGBA8888", 1},     {"2Planes420", 1},   {"2Planes422", 1},
+        {"2Planes444", 1},   {"LumaOnlyL008", 1}, {"ARGB2101010", 1},  {"Interleaved422", t->packedYcc},
+        {"LumaOnlyL010", 0}, {"LumaOnlyL012", 0}, {"LumaOnlyL016", 0}, {"ARGB8101010", 0},
+        {"2Planes42010", 0}, {"2Planes42210", 0}, {"2Planes44410", 0}, {"1PlaneYCBCR10444", 0},
+    };
+
     char key[64];
-    for (const char *f : kFormats) {
-        snprintf(key, sizeof(key), "IOSurfaceAcceleratorFormatIn%s", f);
-        putNumber(d, key, 1);
-        snprintf(key, sizeof(key), "IOSurfaceAcceleratorFormatOut%s", f);
-        putNumber(d, key, 1);
-    }
-    static const char *const kOff[] = {"Interleaved422", "LumaOnlyL008", "LumaOnlyL010",     "LumaOnlyL012",
-                                       "LumaOnlyL016",   "ARGB2101010",  "ARGB8101010",      "2Planes42010",
-                                       "2Planes42210",   "2Planes44410", "1PlaneYCBCR10444", "2Planes422",
-                                       "2Planes444"};
-    for (const char *f : kOff) {
-        snprintf(key, sizeof(key), "IOSurfaceAcceleratorFormatIn%s", f);
-        putNumber(d, key, 0);
-        snprintf(key, sizeof(key), "IOSurfaceAcceleratorFormatOut%s", f);
-        putNumber(d, key, 0);
+    for (const auto &f : kFormats) {
+        snprintf(key, sizeof(key), "IOSurfaceAcceleratorFormatIn%s", f.name);
+        putNumber(d, key, f.on);
+        snprintf(key, sizeof(key), "IOSurfaceAcceleratorFormatOut%s", f.name);
+        putNumber(d, key, f.on);
     }
     return d;
 }
@@ -864,10 +924,8 @@ extern "C" int tegra_vic_publish(void)
     gConnLock = IOLockAlloc();
     probe->release();  // through the copy's free (IOUserClient's): Apple's would release state its start never made
     gQueueLock = IOLockAlloc();
-    for (uint64_t *&pages : gPages)
-        pages = IONew(uint64_t, kWindowPages);
     OSDictionary *caps = capabilities(tegra_vic_traits());
-    if (!gConnLock || !gQueueLock || !gPages[0] || !gPages[1] || !caps || !service->init()) {
+    if (!gConnLock || !gQueueLock || !caps || !service->init()) {
         OSSafeReleaseNULL(caps);
         IOLog("TegraVIC: V3 FAIL no memory for the service\n");
         return -12;
@@ -885,7 +943,9 @@ extern "C" int tegra_vic_publish(void)
     service->setProperty("NativeSandboxGrantProcess",
                          "backboardd,mediaserverd,replayd,videocodecd,mediaplaybackd,cameracaptured,com.apple.WebKit");
     service->setProperty("TegraVICTraitRotations", (unsigned long long)tegra_vic_traits()->rotations, 32);
-    service->setProperty("TegraVICTraitPitchAlign", (unsigned long long)tegra_vic_traits()->pitchAlign, 32);
+    service->setProperty("TegraVICTraitSourcePitchAlign", (unsigned long long)tegra_vic_traits()->sourcePitchAlign, 32);
+    service->setProperty("TegraVICTraitDestinationPitchAlign",
+                         (unsigned long long)tegra_vic_traits()->destinationPitchAlign, 32);
     IOService *resources = IOService::getResourceService();
     if (!resources || !service->attach(resources)) {
         IOLog("TegraVIC: V3 FAIL could not attach the service\n");
@@ -905,9 +965,17 @@ extern "C" int tegra_vic_publish(void)
         present = "off (no memory for its page lists)";
     }
     IOLog("TegraVIC: V3 ok AppleM2ScalerCSCDriver published (Apple's classes, VIC's slots: newUserClient %d; "
-          "IOSurfaceAcceleratorClient; BGRA, RGBA, 420v, 420f; transforms %#x; up to %ux%u, %ux up, %ux down); "
+          "IOSurfaceAcceleratorClient; BGRA, RGBA, 420v, 420f, 422v, 422f; transforms %#x; up to %ux%u, %ux up, %ux "
+          "down); "
           "NVDEC present %s\n",
           s0, tegra_vic_traits()->rotations, TEGRA_VIC_MAX_DIM, TEGRA_VIC_MAX_DIM, TEGRA_VIC_MAX_UPSCALE,
           TEGRA_VIC_MAX_DOWNSCALE, present);
     return 0;  // the service stays: the attachment and the creation reference
 }
+
+#if TEGRA_VIC_STATS
+extern "C" void switch_vic_stats_present(bool waited)
+{
+    gStats.present(waited);
+}
+#endif

@@ -16,6 +16,8 @@ FAULT = (
     'dsc 0x1af3df6b0 dsc 0x18053c238 dsc 0x18053b910; far dsc 0x1e2069874'
 )
 UNMAPPED = 'SwitchCrash: user pc dsc 0x1af3e5f80 lr dsc 0x1af3e5f80, frames dsc 0x1af3d4b74; far 0x87bb85ff0'
+# Synthetic: no device has printed a SwitchCPU line yet. This is the yield loop the KU burn is suspected to be.
+HOG = 'SwitchCPU: user pc dsc 0x23c991a54 lr dsc 0x18054264c, frames dsc 0x1af3e5f80 dsc 0x1af3d4b74'
 
 
 def record(process: str, message: str, second: int = 0) -> dict:
@@ -66,6 +68,22 @@ class Dispatch(unittest.TestCase):
         got = results(record('locationd', SETUP, 1), record('kernel', UNMAPPED, 2))
         self.assertEqual(got['dispatch.locationd-starts'].verdict, PASS)
         self.assertEqual(got['dispatch.shared-cache-fault'].verdict, PASS)
+
+    def test_a_thread_over_its_cpu_limit_fails_with_where_it_loops(self):
+        got = results(record('locationd', SETUP, 1), record('kernel', HOG, 2))
+        self.assertEqual(got['dispatch.cpu-hog'].verdict, FAIL)
+        self.assertIn('0x18054264c', got['dispatch.cpu-hog'].observed)
+        self.assertEqual(results(record('locationd', SETUP, 1))['dispatch.cpu-hog'].verdict, PASS)
+
+    def test_a_sync_wait_on_an_earlier_waits_knote_fails(self):
+        early = (
+            'SwitchWL: locationd[73] thread 0x336: sync wait on workloop 0xc1d0a4000 (ident 0x4c03) returned at once '
+            'on a knote already woken for this thread 0x336 (sfflags 0xc)'
+        )
+        got = results(record('locationd', SETUP, 1), record('kernel', early, 2))
+        self.assertEqual(got['dispatch.early-sync-wait'].verdict, FAIL)
+        self.assertIn('locationd[73]', got['dispatch.early-sync-wait'].observed)
+        self.assertEqual(results(record('locationd', SETUP, 1))['dispatch.early-sync-wait'].verdict, PASS)
 
 
 class StaleSyncWaiter(unittest.TestCase):

@@ -13,7 +13,7 @@ constexpr uint64_t kPage = 4096, kGrain = 64 << 10;
 
 IOLock *gLock;
 switch_scratch *gKept;
-uint64_t gKeptBytes, gHeld, gPeak;
+uint64_t gKeptBytes, gHeld, gPeak, gHandouts;
 
 // The one place a scratch's memory is charged: to `owner`'s graphics footprint. On a thread of a task without
 // com.apple.private.memory.ownership_transfer XNU lets the memory be charged to that task alone
@@ -29,6 +29,8 @@ IOReturn charge(IOBufferMemoryDescriptor *memory, task_t owner)
 
 void destroy(switch_scratch *s)
 {
+    if (s->releaseDeviceBacking)
+        s->releaseDeviceBacking(s->deviceBacking);
     s->memory->complete();
     s->memory->release();
     IODelete(s->pas, uint64_t, s->npages);
@@ -126,8 +128,40 @@ switch_scratch *switch_scratch_get(uint64_t bytes, task_t owner)
     IOLockLock(gLock);
     gHeld += found->bytes;
     gPeak = gHeld > gPeak ? gHeld : gPeak;
+    found->handout = ++gHandouts;
     IOLockUnlock(gLock);
     return found;
+}
+
+switch_scratch *switch_scratch_reclaim(switch_scratch *s, uint64_t handout, task_t owner, bool *intact)
+{
+    *intact = false;
+    if (!s || !gLock)
+        return nullptr;
+    bool kept = false;
+    IOLockLock(gLock);
+    for (switch_scratch **p = &gKept; *p; p = &(*p)->next) {
+        if (*p == s && s->handout == handout) {
+            *p = s->next;
+            gKeptBytes -= s->bytes;
+            kept = true;
+            break;
+        }
+    }
+    IOLockUnlock(gLock);
+    if (!kept)
+        return nullptr;
+    s->next = nullptr;
+    IOOptionBits was = 0;
+    s->memory->setPurgeable(kIOMemoryPurgeableNonVolatile, &was);
+    *intact = was != kIOMemoryPurgeableEmpty;
+    charge(s->memory, owner);
+    IOLockLock(gLock);
+    gHeld += s->bytes;
+    gPeak = gHeld > gPeak ? gHeld : gPeak;
+    s->handout = ++gHandouts;
+    IOLockUnlock(gLock);
+    return s;
 }
 
 void switch_scratch_put(switch_scratch *s)

@@ -10,6 +10,12 @@ extern "C" {
 // accelerator service's registry entry. missing (may be null) is told the class and selector of every unimplemented call.
 id native_bridge_metal_open(const char *loader, const char *cache, uint64_t registryID,
                             void (*missing)(const char *, const char *));
+// The system shader compiler's: no device, only what the direct compiles below need (bridge/NativeMetalCompile.h), over NVK
+// at `loader`. False with nmb_last_error. A process opens this or the device, never both
+bool native_bridge_metal_compile_open(const char *loader);
+// A library of a metallib file or of `data`'s bytes (nil `path`) to compile directly over the compile context: its functions
+// answer as a device library's do, and make no pipeline state. Nil with `error`
+id native_bridge_metal_compile_library(const char *path, dispatch_data_t data, NSError **error);
 // Every Metal selector `cls` (and its subclasses) lacks that an MTL* protocol declares is answered zero/nil/NO through message
 // forwarding, `answered` (may be null) told each class and selector once; respondsToSelector: still answers NO. Each selector's
 // protocols are looked up once: a forwarded call costs an NSInvocation. Counted in the rates line (fwd=).
@@ -51,6 +57,10 @@ id native_bridge_metal_texture_tiled_in_place(id buffer, id descriptor, NSUInteg
 // A render pipeline state of this device made at its first set (AsyncPipelines.h startLazy): the raw path's m2v twin of a
 // state it draws itself.
 id native_bridge_metal_render_pipeline_lazy(id device, id descriptor, NSUInteger options);
+int native_bridge_metal_render_pipeline_ready(id pipeline, void (^observer)(void));
+// As _ready, for a state a committed command buffer waits for: it is made on `queue` at once, ahead of the workers' queue,
+// unless a worker is making it already, which then runs at that queue's class (AsyncPipelines.h claim, urge).
+int native_bridge_metal_render_pipeline_urge(id pipeline, void (^observer)(void), dispatch_queue_t queue);
 // The metallib a function of this device was made from: its library, which keeps `bytes` while it lives; nil when the
 // function has none (the raw path names a function's AIR by its entry there).
 id native_bridge_metal_function_metallib(id function, const void **bytes, size_t *length);
@@ -68,12 +78,26 @@ bool native_bridge_metal_render_direct(id descriptor, bool barrier, NSUInteger t
 // The same of a compute state at one dispatch shape (NmbDirectDispatch)
 struct NmbDirectDispatch;
 struct NmbDirectKernel;
+// The caller retains this descriptor unchanged; its native semantic artifact is reused by later direct dispatches.
+id native_bridge_metal_compute_prepare(id descriptor, NSUInteger options, id *reflection, NSError **error);
+bool native_bridge_metal_compute_save(id artifact, const char *directory, char *name, size_t name_size);
 bool native_bridge_metal_compute_direct(id descriptor, const struct NmbDirectDispatch *dispatch,
                                         bool (*each)(const struct NmbDirectKernel *, void *), void *ctx,
                                         const char **why);
+// The layouts of the argument buffer `function` (this device's) takes at buffer `index`, as its AIR lays them out, for the raw
+// GM20B path's encoder (bridge/NativeMetalObjects.h nmb_function_argument_layouts): false with `why` (valid until the next
+// call on the thread) where Metal makes no encoder, or `each` returns false
+struct NmbArgumentLayout;
+bool native_bridge_metal_argument_layouts(id function, NSUInteger index,
+                                          bool (*each)(const struct NmbArgumentLayout *, uint32_t count, void *),
+                                          void *ctx, const char **why);
 // A dispatch of compute `state` (this device's) the raw GM20B path ran instead, journaled as its own dispatches are (a D line)
 void native_bridge_metal_journal_dispatch(id state, MTLSize grid, MTLSize group, bool threads, const char *memory,
                                           const char *textures, const char *samplers);
+// A render state of this device's functions the raw GM20B path draws from a record it completed itself, journaled as a
+// creation is (an R line): its m2v twin is made only if a command buffer falls back, and the harvest learns states from
+// the journal alone
+void native_bridge_metal_journal_render(id descriptor, NSUInteger options);
 // A symbol of the NVK this device opened (null: none)
 void *native_bridge_metal_nvk_symbol(const char *name);
 

@@ -46,3 +46,30 @@ fn tickets_of_one_epoch_are_counted() {
     assert_eq!(retirement.give(first), Vec::<char>::new());
     assert_eq!(retirement.give(second), ['a']);
 }
+
+#[test]
+fn only_argument_sampler_tables_need_the_live_sampler_registry() {
+    use crate::heap_sets::{argument_sampler_source, uses_argument_samplers};
+    use metal2vulkan::pipeline::{
+        BindingSource, HandleClass, PipelineLayout, Stage, SyntheticBinding,
+    };
+    assert!(!uses_argument_samplers(&PipelineLayout::default()));
+    for stage in [Stage::Vertex, Stage::Fragment, Stage::Kernel] {
+        assert!(argument_sampler_source(BindingSource::Synthetic {
+            stage,
+            binding: SyntheticBinding::SamplerTable,
+        }));
+        assert!(!argument_sampler_source(BindingSource::Synthetic {
+            stage,
+            binding: SyntheticBinding::HandleTable,
+        }));
+    }
+    assert!(!argument_sampler_source(BindingSource::Heap(
+        HandleClass::Sampler {
+            compare: false,
+            integer: false,
+            cube_gradient: false,
+        }
+    )));
+    assert!(!argument_sampler_source(BindingSource::InputAttachment(0)));
+}

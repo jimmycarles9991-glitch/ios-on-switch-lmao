@@ -210,12 +210,12 @@ static inline uint32_t tgm_elcg_gate_ctrl_run(uint32_t gate_ctrl)
 
 struct nvkm_device;
 /* nvgpu's order around the golden context (gk20a_init_gr_prepare, then gk20a_init_gr_setup_hw): load writes every
- * list and the FECS/HUBMMU idle filters once GR is up and before its golden context is made, so the image captures
- * the gating; enable loads them again once it exists and then turns ELCG on for GR and the copy engines. After the SC7
- * wake (GR re-initialized from the same golden image) enable alone. */
+ * list, the FECS/HUBMMU idle filters and THERM's slowdown (TegraGM20BTherm.h) once GR is up and before its golden
+ * context is made, so the image captures the gating; enable loads them again once it exists and then turns ELCG on for
+ * GR and the copy engines. After the SC7 wake or a rail-up (GR re-initialized from the same golden image) enable alone. */
 void tgm_clkgate_load(struct nvkm_device *device);
 void tgm_clkgate_enable(struct nvkm_device *device);
-/* Debug kernels' A/B (gpu.c tgm_clkgate_switch): every list's "disable" value and ELCG run, as nvgpu turns gating off. */
+/* Debug kernels' A/B (gpu_bringup.c tgm_clkgate_switch): every list's "disable" value and ELCG run, as nvgpu turns gating off. */
 void tgm_clkgate_disable(struct nvkm_device *device);
 /* Once GR exists (M2): GR's reset in a channel's recovery (nouveau's nvkm_runl_rc) runs with gating off and gets every list
  * back with ELCG on after it, as nvgpu resets GR (gk20a_fifo_handle_mmu_fault_locked between nvgpu_cg_pg_disable and

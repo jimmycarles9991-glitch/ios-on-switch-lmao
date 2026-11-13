@@ -17,6 +17,10 @@ enum class ClearChannel : uint8_t {
     Half,       // the float's nearest half
     Float,
     Ufloat,  // an unsigned small float of `bits` mantissa bits, truncated
+    // an integer of `bits` bits: Metal's double truncated toward zero and saturated (a NaN 0), handed as the integer's bits
+    // (integerClear: the encoder puts them in the clear's float slots, which a target of such a format passes through)
+    Uint,
+    Sint,
 };
 
 struct ClearFormat {
@@ -79,7 +83,7 @@ inline float ufloat(float v, unsigned mantissa)
 
 constexpr ClearChannel kNone = ClearChannel::Unused, kUnorm = ClearChannel::Unorm, kHalfUnorm = ClearChannel::HalfUnorm,
                        kSrgb = ClearChannel::Srgb, kHalf = ClearChannel::Half, kFloat = ClearChannel::Float,
-                       kUfloat = ClearChannel::Ufloat;
+                       kUfloat = ClearChannel::Ufloat, kUint = ClearChannel::Uint, kSint = ClearChannel::Sint;
 
 inline constexpr ClearFormat kClearFormats[] = {
     {1, {kNone, kNone, kNone, kUnorm}, {0, 0, 0, 8}},                      // A8Unorm
@@ -103,6 +107,25 @@ inline constexpr ClearFormat kClearFormats[] = {
     {110, {kUnorm, kUnorm, kUnorm, kUnorm}, {16, 16, 16, 16}},             // RGBA16Unorm
     {115, {kHalf, kHalf, kHalf, kHalf}, {0, 0, 0, 0}},                     // RGBA16Float
     {125, {kFloat, kFloat, kFloat, kFloat}, {0, 0, 0, 0}},                 // RGBA32Float
+    {13, {kUint, kNone, kNone, kNone}, {8, 0, 0, 0}},                      // R8Uint
+    {14, {kSint, kNone, kNone, kNone}, {8, 0, 0, 0}},                      // R8Sint
+    {23, {kUint, kNone, kNone, kNone}, {16, 0, 0, 0}},                     // R16Uint
+    {24, {kSint, kNone, kNone, kNone}, {16, 0, 0, 0}},                     // R16Sint
+    {33, {kUint, kUint, kNone, kNone}, {8, 8, 0, 0}},                      // RG8Uint
+    {34, {kSint, kSint, kNone, kNone}, {8, 8, 0, 0}},                      // RG8Sint
+    {53, {kUint, kNone, kNone, kNone}, {32, 0, 0, 0}},                     // R32Uint
+    {54, {kSint, kNone, kNone, kNone}, {32, 0, 0, 0}},                     // R32Sint
+    {63, {kUint, kUint, kNone, kNone}, {16, 16, 0, 0}},                    // RG16Uint
+    {64, {kSint, kSint, kNone, kNone}, {16, 16, 0, 0}},                    // RG16Sint
+    {73, {kUint, kUint, kUint, kUint}, {8, 8, 8, 8}},                      // RGBA8Uint
+    {74, {kSint, kSint, kSint, kSint}, {8, 8, 8, 8}},                      // RGBA8Sint
+    {91, {kUint, kUint, kUint, kUint}, {10, 10, 10, 2}},                   // RGB10A2Uint
+    {103, {kUint, kUint, kNone, kNone}, {32, 32, 0, 0}},                   // RG32Uint
+    {104, {kSint, kSint, kNone, kNone}, {32, 32, 0, 0}},                   // RG32Sint
+    {113, {kUint, kUint, kUint, kUint}, {16, 16, 16, 16}},                 // RGBA16Uint
+    {114, {kSint, kSint, kSint, kSint}, {16, 16, 16, 16}},                 // RGBA16Sint
+    {123, {kUint, kUint, kUint, kUint}, {32, 32, 32, 32}},                 // RGBA32Uint
+    {124, {kSint, kSint, kSint, kSint}, {32, 32, 32, 32}},                 // RGBA32Sint
 };
 
 inline const ClearFormat *clearFormat(uint32_t mtl)
@@ -146,7 +169,37 @@ inline bool clearValue(uint32_t format, const float in[4], uint32_t out[4])
         case ClearChannel::Ufloat:
             out[i] = bitsOf(ufloat(x, f->bits[i]));
             break;
+        case ClearChannel::Uint:
+        case ClearChannel::Sint:
+            out[i] = bitsOf(x);
+            break;
         }
+    }
+    return true;
+}
+
+// A Metal clear's integer channel (m2v clear_value.rs): truncated toward zero, saturated to the channel, a NaN 0
+inline uint32_t integerClear(double v, bool sign, unsigned bits)
+{
+    if (std::isnan(v))
+        return 0;
+    const double lo = sign ? -std::ldexp(1.0, int(bits) - 1) : 0.0;
+    const double hi = sign ? std::ldexp(1.0, int(bits) - 1) - 1 : std::ldexp(1.0, int(bits)) - 1;
+    const int64_t k = int64_t(std::clamp(std::trunc(v), lo, hi));
+    return uint32_t(k);
+}
+
+// An integer format's clear as the float slots clearValue passes through (each the channel's word's bits); false for a format
+// whose channels are not integers
+inline bool integerClearSlots(uint32_t format, const double in[4], float out[4])
+{
+    const ClearFormat *f = clearFormat(format);
+    if (!f || (f->kind[0] != ClearChannel::Uint && f->kind[0] != ClearChannel::Sint))
+        return false;
+    for (int i = 0; i < 4; i++) {
+        const uint32_t word =
+            f->kind[i] == ClearChannel::Unused ? 0 : integerClear(in[i], f->kind[i] == ClearChannel::Sint, f->bits[i]);
+        memcpy(&out[i], &word, 4);
     }
     return true;
 }

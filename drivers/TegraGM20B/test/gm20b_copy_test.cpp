@@ -32,8 +32,8 @@ std::vector<uint8_t> copy(tgm_copy_job job, const std::vector<uint8_t> &src, uin
 {
 	std::vector<uint8_t> s = src, d(dstBytes, kUntouched);
 	Memory memory;
-	memory.regions[kSrcVa] = &s;
-	memory.regions[kDstVa] = &d;
+	memory.map(kSrcVa, s);
+	memory.map(kDstVa, d);
 	job.src_va = kSrcVa + srcOffset;
 	job.dst_va = kDstVa + dstOffset;
 	uint32_t w[TGM_COPY_DWORDS];
@@ -203,3 +203,59 @@ TEST(Copy, NoSyncpointMethodsWhenNoneIsAsked)
 	EXPECT_TRUE(syncpts.empty());
 }
 }  // namespace
+
+TEST(Copy, SyncpointReleaseFitsItsExactAdvertisedStorage)
+{
+	std::vector<uint32_t> words(TGM_SYNCPT_INCR_DWORDS);
+	EXPECT_EQ(tgm_syncpt_incr(words.data(), 22), words.size());
+	EXPECT_EQ(words[words.size() - 2], tgm_syncpt_header(0x0074));
+	EXPECT_EQ(words.back(), (22u << 8) | 1u);
+}
+
+namespace
+{
+void checkLeanChannel(const uint32_t *words, uint32_t count)
+{
+	for (uint32_t at = 0; at < count;) {
+		const uint32_t header = words[at++];
+		const uint32_t subchannel = (header >> 13) & 7;
+		const uint32_t method = (header & 0x1fff) * 4;
+		const bool immediate = header >> 29 == 4;
+		const uint32_t arguments = immediate ? 1 : (header >> 16) & 0x1fff;
+		ASSERT_TRUE(immediate || header >> 29 == 1u);
+		ASSERT_GT(arguments, 0u);
+		ASSERT_LE(immediate ? 0 : arguments, count - at);
+		if (subchannel == 0)
+			EXPECT_LT(method + (arguments - 1) * 4, 0x100u);
+		else {
+			EXPECT_EQ(subchannel, 4u);
+			EXPECT_GE(method, 0x100u);
+		}
+		at += immediate ? 0 : arguments;
+	}
+}
+}
+
+TEST(Copy, AllCopyAndRelayoutPacketsUseOnlyFifoMethodsAndCeSubchannel)
+{
+	const tgm_relayout_wait waits[] = {{0x400000, 7, 1}, {0x800000, 9, 2}};
+	uint32_t words[TGM_COPY_DWORDS + TGM_RELAYOUT_DWORDS] = {};
+	auto job = rowsJob(256, 256, 128, 16);
+	job.wait_syncpt = 165;
+	job.wait_threshold = 0xf0100000;
+	job.incr_syncpt = 166;
+	tgm_layout layout = {};
+	ASSERT_TRUE(tgm_layout_tiled(64, 32, 4, &layout));
+	for (unsigned variant = 0; variant < 3; ++variant) {
+		job.src_tiled = variant == 1 ? &layout : nullptr;
+		job.dst_tiled = variant == 2 ? &layout : nullptr;
+		checkLeanChannel(words, tgm_copy_push(words, &job, waits, 2));
+	}
+	for (unsigned operation = TGM_RELAYOUT_TO_ROWS; operation <= TGM_RELAYOUT_UNTILE_IN_PLACE;
+	     ++operation) {
+		const tgm_relayout_move move = {
+			0x100000, 0x200000, 0x300000, 256, tgm_relayout_op(operation),
+			16384,    0x400000};
+		checkLeanChannel(words, tgm_relayout_push(words, &layout, &move, waits, 2));
+	}
+}

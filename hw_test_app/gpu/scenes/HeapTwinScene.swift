@@ -2,8 +2,9 @@ import Foundation
 import HWTestCore
 import Metal
 
-// The fallback must make a heap texture's twin after its backing was purged. A white border sampler forces
-// the fallback without depending on cubic support; sampling stays inside the texture.
+// A heap texture drawn after its backing was purged keeps its contents. A white border sampler is one raw refuses
+// (call.sampler) while the facade wraps an m2v device, which then makes the texture's twin; with no m2v device the same
+// draw has to be raw's. Sampling stays inside the texture.
 struct HeapTwinScene: GPUScene {
     let id = "gpu.heap.m2v_target"
     let name = "A heap texture drawn by an m2v command buffer, before and after the heap is purged"
@@ -62,7 +63,8 @@ struct HeapTwinScene: GPUScene {
             }
             paths.append(timing.path)
             if RawFacade.kind(of: gpu.device) == "raw" {
-                result.expect(timing.path.hasPrefix("m2v:"), "fallback draw used \(timing.path)")
+                let route = RawFacade.wrapsM2V(gpu.device) ? "m2v:" : "raw"
+                result.expect(timing.path.hasPrefix(route), "the sampled draw took \(timing.path), not \(route)")
             }
             result.compare(round, try await gpu.raster(target, .bgra8Unorm), want, tolerance: 1.51 / 255)
             heap.setPurgeableState(.nonVolatile)

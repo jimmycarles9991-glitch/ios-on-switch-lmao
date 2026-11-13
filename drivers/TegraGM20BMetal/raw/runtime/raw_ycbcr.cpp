@@ -4,6 +4,9 @@
 
 #include <cstring>
 
+#include "raw_packed_plane.h"
+#include "raw_ycbcr_store.h"
+
 namespace raw {
 namespace {
 
@@ -105,28 +108,38 @@ YcbcrOutput outputOf(const Format &f)
 {
     switch (f.reads) {
     case Converted:
-        return YcbcrConverted;
+        return f.packed ? YcbcrConvertedPacked : YcbcrConverted;
     case Srgb:
-        return YcbcrSrgb;
+        return f.packed ? YcbcrSrgbPacked : YcbcrSrgb;
     case Codes:
         break;
     }
-    return f.bits == 8 ? YcbcrCodes8 : YcbcrCodes10;
+    return f.packed ? YcbcrCodes10Packed : f.bits == 8 ? YcbcrCodes8 : YcbcrCodes10;
 }
 
 uint32_t imageFormat(YcbcrOutput o)
 {
     switch (o) {
     case YcbcrConverted:
+    case YcbcrConvertedPacked:
         return 115;  // RGBA16Float
     case YcbcrSrgb:
+    case YcbcrSrgbPacked:
         return 125;  // RGBA32Float
     case YcbcrCodes8:
         return 70;  // RGBA8Unorm
     case YcbcrCodes10:
+    case YcbcrCodes10Packed:
+    case YcbcrPackedPlane:
         break;
     }
     return 90;  // RGB10A2Unorm
+}
+
+// The bytes of a plane row's `codes`: a byte or a 16-bit word each, or packed three to a 32-bit word
+uint64_t rowBytes(const Format &f, uint32_t codes)
+{
+    return f.packed ? uint64_t(codes + 2) / 3 * 4 : uint64_t(codes) * (f.bits == 8 ? 1 : 2);
 }
 
 // m2v texture/ycbcr_image.rs `ycbcr_modes`
@@ -145,11 +158,11 @@ bool isYcbcrFormat(uint32_t pixelFormat)
 
 const char *planYcbcr(const YcbcrFacts &f, YcbcrPlan &out)
 {
+    if (packedPlaneChannels(f.pixelFormat))
+        return planPackedPlane(f, out);
     const Format *format = findFormat(f.pixelFormat);
     if (!format)
         return "not a two-plane YCbCr format";
-    if (format->packed)
-        return "packed 10-bit codes (p420 and its kin)";
     if (f.planes != 2)
         return "not two planes";
     const Surface *surface = nullptr;
@@ -178,6 +191,14 @@ const char *planYcbcr(const YcbcrFacts &f, YcbcrPlan &out)
         return "shape or usage";
     if (f.width != f.surfaceWidth || f.height != f.surfaceHeight || !f.width || !f.height)
         return "texture size not the surface's";
+    if (f.target) {
+        if (const char *why = ycbcrTargetRefusal(f.pixelFormat))
+            return why;
+        if (planeOne || surface->sub != format->sub || (halvedAcross(format->sub) && (f.width & 1)) ||
+            (halvedDown(format->sub) && (f.height & 1)))
+            return "a render target over plane 1, of other chroma than its surface's, or of a size its blocks do not "
+                   "tile";
+    }
     const uint32_t bytes = format->bits == 8 ? 1 : 2;
     const uint32_t cw = halvedAcross(format->sub) ? (f.width + 1) / 2 : f.width;
     const uint32_t ch = halvedDown(format->sub) ? (f.height + 1) / 2 : f.height;
@@ -185,25 +206,29 @@ const char *planYcbcr(const YcbcrFacts &f, YcbcrPlan &out)
     const uint32_t lumaPitch = f.pitch[planeOne ? 1 : 0], chromaPitch = f.pitch[1];
     if (((luma | chroma) & 15) || ((lumaPitch | chromaPitch) & 15))
         return "plane offset or row not 16-byte";
-    if (lumaPitch < uint64_t(f.width) * bytes || (!planeOne && chromaPitch < uint64_t(2) * cw * bytes))
+    const uint64_t lumaRow = rowBytes(*format, f.width), chromaRow = rowBytes(*format, 2 * cw);
+    if (lumaPitch < lumaRow || (!planeOne && chromaPitch < chromaRow))
         return "row shorter than its codes";
-    const uint64_t lumaEnd = luma + uint64_t(lumaPitch) * (f.height - 1) + uint64_t(f.width) * bytes;
-    const uint64_t chromaEnd = chroma + uint64_t(chromaPitch) * (ch - 1) + uint64_t(2) * cw * bytes;
+    const uint64_t lumaEnd = luma + uint64_t(lumaPitch) * (f.height - 1) + lumaRow;
+    const uint64_t chromaEnd = chroma + uint64_t(chromaPitch) * (ch - 1) + chromaRow;
     if (lumaEnd > f.allocBytes || (!planeOne && chromaEnd > f.allocBytes))
         return "planes past the allocation";
 
     out = {};
+    out.nativePlanes = f.fourcc == fourcc("420v") || f.fourcc == fourcc("420f");
+    out.target = f.target;
     out.output = outputOf(*format);
     out.addressMap = addressMapOf(*format);
     out.image = imageFormat(out.output);
-    out.lumaFormat = bytes == 1 ? 10 : 20;    // R8Unorm, R16Unorm
-    out.chromaFormat = bytes == 1 ? 30 : 60;  // RG8Unorm, RG16Unorm
+    out.lumaFormat = format->packed ? 53 : bytes == 1 ? 10 : 20;    // R32Uint, R8Unorm, R16Unorm
+    out.chromaFormat = format->packed ? 53 : bytes == 1 ? 30 : 60;  // R32Uint, RG8Unorm, RG16Unorm
     out.luma = luma;
     out.lumaPitch = lumaPitch;
+    out.lumaWidth = format->packed ? uint32_t(lumaRow / 4) : f.width;
     if (!planeOne) {
         out.chroma = chroma;
         out.chromaPitch = chromaPitch;
-        out.chromaWidth = cw;
+        out.chromaWidth = format->packed ? uint32_t(chromaRow / 4) : cw;
         out.chromaHeight = ch;
     }
     uint32_t *s = out.shape;
@@ -213,11 +238,19 @@ const char *planYcbcr(const YcbcrFacts &f, YcbcrPlan &out)
     for (int i = 0; i < 6; i++)
         s[3 + i] = uint32_t(kCoefficients[surface->full][matrix][i]);
     s[9] = bytes == 1 ? 255 : 65535;
-    s[10] = 8 * bytes - format->bits;  // a 10-bit code is a 16-bit word's high bits
+    s[10] = 8 * bytes - format->bits;  // a 10-bit code is a 16-bit word's high bits (packed: unread)
     s[11] = 10 - format->bits;
     s[12] = (1u << format->bits) - 1;
     s[13] = (halvedAcross(format->sub) ? 1u : 0u) | (halvedDown(format->sub) ? 2u : 0u);
     s[14] = !planeOne;
+    if (f.target) {
+        const bool across = halvedAcross(format->sub), down = halvedDown(format->sub);
+        out.store = format->reads == Codes ? ycbcrCodesShape(format->bits, across, down)
+                                           : ycbcrConvertedShape({format->bits, format->reads == Srgb, surface->full,
+                                                                  YcbcrMatrix(matrix), across, down});
+        if (format->packed)
+            out.store = ycbcrPackedShape(out.store);
+    }
     return nullptr;
 }
 

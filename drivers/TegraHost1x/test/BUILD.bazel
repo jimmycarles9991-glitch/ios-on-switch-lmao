@@ -1,0 +1,197 @@
+load("//bazel/lint:defs.bzl", "lint_files")
+load("//bazel/testing:defs.bzl", "host_library", "host_shims", "host_test")
+
+lint_files()
+
+host_test(
+    name = "switch_host1x_release_test",
+    srcs = [
+        "switch_host1x_release_test.cpp",
+        "//drivers/TegraHost1x:SwitchHost1xFailureRelease.h",
+    ],
+)
+
+host_shims(
+    name = "results_kernel",
+    headers = [
+        "IOKit/IOLib.h",
+        "IOKit/IOLocks.h",
+        "kern/thread.h",
+    ],
+    stubs = "switch_host1x_results_stubs.h",
+)
+
+host_library(
+    name = "results_linkage",
+    srcs = [
+        "switch_host1x_results_producer.cpp",
+        "switch_host1x_results_consumer.cpp",
+        "//drivers/TegraHost1x:SwitchHost1xResults.cpp",
+    ],
+    hdrs = [
+        "switch_host1x_results_calls.h",
+        "//drivers/TegraHost1x:SwitchHost1xResults.h",
+        "//drivers/TegraGM20B:SwitchGpuBacking.h",
+    ],
+    copts = [
+        "-fapple-kext",
+        "-mkernel",
+        "-O2",
+        "-fno-common",
+    ],
+    sanitize = False,
+    deps = [":results_kernel"],
+)
+
+host_test(
+    name = "switch_host1x_results_linkage_test",
+    srcs = ["switch_host1x_results_linkage_test.cpp"],
+    sanitize = False,
+    deps = [
+        ":results_linkage",
+        ":results_kernel",
+    ],
+)
+
+host_shims(
+    name = "submit_kernel",
+    headers = [
+        "IOKit/IOBufferMemoryDescriptor.h",
+        "IOKit/IOFilterInterruptEventSource.h",
+        "IOKit/IOInterruptEventSource.h",
+        "IOKit/IOLib.h",
+        "IOKit/IOLocks.h",
+        "IOKit/IOWorkLoop.h",
+        "kern/clock.h",
+        "kern/thread.h",
+        "os/log.h",
+    ],
+    stubs = "switch_host1x_submit_stubs.h",
+)
+
+host_test(
+    name = "switch_host1x_arena_test",
+    srcs = [
+        "switch_host1x_arena_test.cpp",
+        "//drivers/TegraHost1x:SwitchHost1xArena.h",
+        "//drivers/TegraHost1x:SwitchHost1xGatherStats.h",
+    ],
+)
+
+# TegraHost1x.cpp and SwitchHost1xChannels.cpp with a memory register file: GATHERs of the arena words engines wrote,
+# room given back by fences, and every engine's doorbell preceded by EMC demand.
+host_test(
+    name = "switch_host1x_submit_test",
+    srcs = [
+        "switch_host1x_submit_test.cpp",
+        "//drivers/ArmGIC:SwitchInterrupts.h",
+        "//drivers/TegraHost1x:SwitchHost1xArena.h",
+        "//drivers/TegraHost1x:SwitchHost1xChannels.h",
+        "//drivers/TegraHost1x:SwitchHost1xGatherStats.h",
+        "//drivers/TegraHost1x:SwitchHost1xFailureRelease.h",
+        "//drivers/TegraHost1x:SwitchHost1xFence.h",
+        "//drivers/TegraHost1x:SwitchHost1xIntr.h",
+        "//drivers/TegraHost1x:TegraHost1x.h",
+        "//kits/SwitchCAR:SwitchCAR.h",
+        "//kits/SwitchDMA:SwitchDMABuffer.h",
+        "//kits/SwitchDMA:SwitchDcache.h",
+        "//kits/SwitchIdle:switch_idle.h",
+        "//kits/SwitchMMIO:SwitchMMIO.h",
+        "//kits/SwitchMMIO:SwitchMMIOKernel.h",
+        "//kits/SwitchTime:SwitchTime.h",
+    ],
+    additional_compiler_inputs = [
+        "//drivers/TegraHost1x:SwitchHost1xChannels.cpp",
+        "//drivers/TegraHost1x:TegraHost1x.cpp",
+    ],
+    data = [
+        "//drivers/TegraNVDEC:SwitchNVDECJobs.cpp",
+        "//drivers/TegraNVDEC:TegraNVDEC.cpp",
+        "//drivers/TegraNVENC:TegraNVENC.cpp",
+        "//drivers/TegraNVJPG:TegraNVJPG.cpp",
+        "//drivers/TegraVIC:SwitchVICJobs.cpp",
+        "//drivers/TegraVIC:TegraVIC.cpp",
+    ],
+    deps = [":submit_kernel"],
+)
+
+host_test(
+    name = "switch_host1x_fence_list_test",
+    srcs = [
+        "switch_host1x_fence_list_test.cpp",
+        "//drivers/TegraHost1x:SwitchHost1xFence.h",
+        "//drivers/TegraHost1x:SwitchHost1xFenceList.h",
+    ],
+)
+
+host_shims(
+    name = "fence_kernel",
+    headers = [
+        "IOKit/IOBufferMemoryDescriptor.h",
+        "IOKit/IOFilterInterruptEventSource.h",
+        "IOKit/IOInterruptEventSource.h",
+        "IOKit/IOLib.h",
+        "IOKit/IOLocks.h",
+        "IOKit/IOWorkLoop.h",
+        "kern/clock.h",
+        "kern/thread_call.h",
+        "os/log.h",
+    ],
+    stubs = "switch_host1x_fence_stubs.h",
+)
+
+# TegraHost1x.cpp, SwitchHost1xChannels.cpp and SwitchHost1xFence.cpp with a memory register file: waits, the
+# work-loop hand-off, bounds, SC7, and a submitter sleeping for arena room until a job's fence interrupt.
+host_test(
+    name = "switch_host1x_fence_test",
+    srcs = [
+        "switch_host1x_fence_test.cpp",
+        "//drivers/ArmGIC:SwitchInterrupts.h",
+        "//drivers/TegraHost1x:SwitchHost1xArena.h",
+        "//drivers/TegraHost1x:SwitchHost1xChannels.h",
+        "//drivers/TegraHost1x:SwitchHost1xGatherStats.h",
+        "//drivers/TegraHost1x:SwitchHost1xFailureRelease.h",
+        "//drivers/TegraHost1x:SwitchHost1xFence.h",
+        "//drivers/TegraHost1x:SwitchHost1xFenceList.h",
+        "//drivers/TegraHost1x:SwitchHost1xIntr.h",
+        "//drivers/TegraHost1x:TegraHost1x.h",
+        "//kits/SwitchCAR:SwitchCAR.h",
+        "//kits/SwitchDMA:SwitchDMABuffer.h",
+        "//kits/SwitchDMA:SwitchDcache.h",
+        "//kits/SwitchIdle:switch_idle.h",
+        "//kits/SwitchMMIO:SwitchMMIO.h",
+        "//kits/SwitchMMIO:SwitchMMIOKernel.h",
+        "//kits/SwitchTime:SwitchTime.h",
+    ],
+    additional_compiler_inputs = [
+        "//drivers/TegraHost1x:SwitchHost1xChannels.cpp",
+        "//drivers/TegraHost1x:SwitchHost1xFence.cpp",
+        "//drivers/TegraHost1x:TegraHost1x.cpp",
+    ],
+    deps = [":fence_kernel"],
+)
+
+host_shims(
+    name = "token_fence_kernel",
+    headers = [
+        "IOKit/IOLib.h",
+        "IOKit/IOLocks.h",
+        "kern/thread.h",
+    ],
+    stubs = "switch_host1x_token_fence_stubs.h",
+)
+
+# The display's syncpoint-armed flip: VIC and NVDEC producers, joined, delivered by the fences' callbacks.
+host_test(
+    name = "switch_host1x_token_fence_test",
+    srcs = [
+        "switch_host1x_token_fence_test.cpp",
+        "//drivers/TegraGM20B:SwitchGpuBacking.h",
+        "//drivers/TegraHost1x:SwitchHost1xFence.h",
+        "//drivers/TegraHost1x:SwitchHost1xResults.h",
+        "//drivers/TegraHost1x:SwitchHost1xTokenFence.h",
+        "//drivers/TegraHost1x:TegraHost1x.h",
+    ],
+    additional_compiler_inputs = ["//drivers/TegraHost1x:SwitchHost1xTokenFence.cpp"],
+    deps = [":token_fence_kernel"],
+)

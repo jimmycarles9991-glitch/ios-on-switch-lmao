@@ -53,6 +53,14 @@ vk_spirv_to_nir(struct vk_device *device,
                 bool internal,
                 void *mem_ctx);
 
+nir_shader *
+vk_spirv_to_nir_with(const uint32_t *spirv_data, size_t spirv_size_B,
+                     mesa_shader_stage stage, const char *entrypoint_name,
+                     const VkSpecializationInfo *spec_info,
+                     const struct spirv_to_nir_options *spirv_options,
+                     const struct nir_shader_compiler_options *nir_options,
+                     bool internal, void *mem_ctx);
+
 #ifdef __cplusplus
 }
 #endif

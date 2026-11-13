@@ -1,22 +1,9 @@
 // Copyright © 2026 Bruno St John
 // SPDX-License-Identifier: MIT
 
-//! ios-on-switch-lmao: SM53's half ALU with an f32 result (OFMT F32), in the
-//! two readings the device has to tell apart, for SwitchHWTest's
-//! gpu.sm53_probe (never in release builds). They apply only to a shader
-//! carrying SM53_PROBE_MARKER, which the probe's Metal source compares its
-//! thread index with:
-//!
-//! - the f32 widening of a half sum, product or fma is the op with an f32
-//!   result, if the op rounds to half before it widens;
-//! - an f32 sum, product or fma of widened halves is the half op with an f32
-//!   result, if the op rounds the exact result once to f32.
-//!
-//! At most one of them holds. Its kernels match the CPU and the other's do
-//! not; the one that holds becomes a rule of its own.
-//!
-//! opt_sm53_f32_source_probe asks the same of HADD2's F32 swizzle: an f32
-//! narrowed to half, and its round trip through half, as one HADD2 each.
+//! Debug-only instruction probes selected by a shader marker. These rewrites
+//! deliberately change shader semantics; their outputs distinguish rounding,
+//! conversion, and denormal hypotheses rather than establish equivalence.
 
 use crate::ir::*;
 
@@ -25,6 +12,21 @@ use rustc_hash::FxHashMap;
 /// hw_test_app/shaders/Scenes.metal SM53_PROBE_MARKER: a signalling NaN's
 /// bits, a value no other shader has a use for
 const SM53_PROBE_MARKER: u32 = 0x7fa5_5353;
+const SM53_PROOF_MARKER: u32 = 0x7fa5_5354;
+
+fn proof_word(half_rewrites: usize, source_rewrites: usize) -> u32 {
+    0x5353_0000
+        | ((half_rewrites.min(255) as u32) << 8)
+        | source_rewrites.min(255) as u32
+}
+
+fn stamp_proof(instr: &mut Instr, proof: u32) {
+    for src in instr.op.srcs_as_mut_slice() {
+        if matches!(src.src_ref, SrcRef::Imm32(SM53_PROOF_MARKER)) {
+            src.src_ref = SrcRef::Imm32(proof);
+        }
+    }
+}
 
 #[derive(Clone, Copy, PartialEq)]
 enum Half {
@@ -46,7 +48,11 @@ enum Def {
 
 fn ssa(src: &Src) -> Option<SSAValue> {
     let ssa = src.src_ref.as_ssa()?;
-    if ssa.comps() == 1 { Some(ssa[0]) } else { None }
+    if ssa.comps() == 1 {
+        Some(ssa[0])
+    } else {
+        None
+    }
 }
 
 fn widening(op: &OpF2F) -> bool {
@@ -75,7 +81,12 @@ fn half_of(defs: &FxHashMap<SSAValue, Def>, src: &Src) -> Option<Src> {
 
 /// The half op `kind` of `srcs` with an f32 result: a product as an fma
 /// adding -0, which leaves every product as it is
-fn with_f32_result(dst: Dst, kind: Half, srcs: &[Src], saturate: bool) -> Option<Op> {
+fn with_f32_result(
+    dst: Dst,
+    kind: Half,
+    srcs: &[Src],
+    saturate: bool,
+) -> Option<Op> {
     if kind != Half::Add && srcs.iter().any(|s| s.src_mod.has_fabs()) {
         return None;
     }
@@ -119,21 +130,42 @@ fn rewrite(defs: &FxHashMap<SSAValue, Def>, op: &Op) -> Option<Op> {
     match op {
         Op::F2F(f)
             if widening(f)
-                && matches!(f.src.src_swizzle, SrcSwizzle::None | SrcSwizzle::Xx) =>
+                && matches!(
+                    f.src.src_swizzle,
+                    SrcSwizzle::None | SrcSwizzle::Xx
+                ) =>
         {
-            let Def::Half { kind, srcs, saturate } = defs.get(&ssa(&f.src)?)? else {
+            let Def::Half {
+                kind,
+                srcs,
+                saturate,
+            } = defs.get(&ssa(&f.src)?)?
+            else {
                 return None;
             };
             with_f32_result(f.dst.clone(), *kind, srcs, *saturate)
         }
-        Op::FAdd(o) if o.rnd_mode == FRndMode::NearestEven => {
-            with_f32_result(o.dst.clone(), Half::Add, &halves(defs, &o.srcs)?, o.saturate)
-        }
+        Op::FAdd(o) if o.rnd_mode == FRndMode::NearestEven => with_f32_result(
+            o.dst.clone(),
+            Half::Add,
+            &halves(defs, &o.srcs)?,
+            o.saturate,
+        ),
         Op::FMul(o) if o.rnd_mode == FRndMode::NearestEven && !o.dnz => {
-            with_f32_result(o.dst.clone(), Half::Mul, &halves(defs, &o.srcs)?, o.saturate)
+            with_f32_result(
+                o.dst.clone(),
+                Half::Mul,
+                &halves(defs, &o.srcs)?,
+                o.saturate,
+            )
         }
         Op::FFma(o) if o.rnd_mode == FRndMode::NearestEven && !o.dnz => {
-            with_f32_result(o.dst.clone(), Half::Fma, &halves(defs, &o.srcs)?, o.saturate)
+            with_f32_result(
+                o.dst.clone(),
+                Half::Fma,
+                &halves(defs, &o.srcs)?,
+                o.saturate,
+            )
         }
         _ => None,
     }
@@ -146,15 +178,27 @@ fn record(defs: &mut FxHashMap<SSAValue, Def>, op: &Op) {
         }
         Op::HAdd2(h) if !h.f32 && !h.ftz => (
             &h.dst,
-            Def::Half { kind: Half::Add, srcs: h.srcs.to_vec(), saturate: h.saturate },
+            Def::Half {
+                kind: Half::Add,
+                srcs: h.srcs.to_vec(),
+                saturate: h.saturate,
+            },
         ),
         Op::HMul2(h) if !h.ftz && !h.dnz => (
             &h.dst,
-            Def::Half { kind: Half::Mul, srcs: h.srcs.to_vec(), saturate: h.saturate },
+            Def::Half {
+                kind: Half::Mul,
+                srcs: h.srcs.to_vec(),
+                saturate: h.saturate,
+            },
         ),
         Op::HFma2(h) if !h.f32 && !h.ftz && !h.dnz => (
             &h.dst,
-            Def::Half { kind: Half::Fma, srcs: h.srcs.to_vec(), saturate: h.saturate },
+            Def::Half {
+                kind: Half::Fma,
+                srcs: h.srcs.to_vec(),
+                saturate: h.saturate,
+            },
         ),
         _ => return,
     };
@@ -175,18 +219,192 @@ impl Shader<'_> {
             .any(|s| matches!(s.src_ref, SrcRef::Imm32(SM53_PROBE_MARKER)))
     }
 
-    pub fn opt_sm53_half_probe(&mut self) {
+    pub fn opt_sm53_half_probe(&mut self) -> usize {
+        let mut rewritten = 0;
         for f in &mut self.functions {
             let mut defs = FxHashMap::default();
             for b in &mut f.blocks {
                 for instr in &mut b.instrs {
                     if let Some(op) = rewrite(&defs, &instr.op) {
                         instr.op = op;
+                        rewritten += 1;
                     }
                     record(&mut defs, &instr.op);
                 }
             }
         }
+        rewritten
+    }
+
+    pub fn stamp_sm53_probe(
+        &mut self,
+        half_rewrites: usize,
+        source_rewrites: usize,
+    ) {
+        let proof = proof_word(half_rewrites, source_rewrites);
+        for f in &mut self.functions {
+            for b in &mut f.blocks {
+                for instr in &mut b.instrs {
+                    stamp_proof(instr, proof);
+                }
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod sm53_half_tests {
+    use super::*;
+    use compiler::cfg::CFGBuilder;
+    use rustc_hash::FxBuildHasher;
+
+    fn shader(sm: &ShaderModelInfo, instrs: Vec<Instr>) -> Shader<'_> {
+        let mut labels = LabelAllocator::new();
+        let mut cfg = CFGBuilder::<_, _, FxBuildHasher>::new();
+        cfg.add_node(
+            0,
+            BasicBlock {
+                label: labels.alloc(),
+                uniform: true,
+                instrs,
+            },
+        );
+        Shader {
+            sm,
+            info: ShaderInfo {
+                max_warps_per_sm: 0,
+                num_gprs: 0,
+                num_control_barriers: 0,
+                num_instrs: 0,
+                num_static_cycles: 0,
+                num_spills_to_mem: 0,
+                num_fills_from_mem: 0,
+                num_spills_to_reg: 0,
+                num_fills_from_reg: 0,
+                slm_size: 0,
+                max_crs_depth: 0,
+                uses_global_mem: true,
+                writes_global_mem: true,
+                uses_fp64: false,
+                stage: ShaderStageInfo::Compute(ComputeShaderInfo {
+                    local_size: [32, 1, 1],
+                    smem_size: 0,
+                }),
+                io: ShaderIoInfo::None,
+            },
+            functions: vec![Function {
+                ssa_alloc: SSAValueAllocator::new(),
+                phi_alloc: PhiAllocator::new(),
+                blocks: cfg.as_cfg(true),
+            }],
+        }
+    }
+
+    fn copy(dst: SSAValue, value: u32) -> Instr {
+        Instr::new(OpCopy {
+            dst: dst.into(),
+            src: value.into(),
+        })
+    }
+
+    fn convert(dst: SSAValue, src: SSAValue, narrow: bool) -> Instr {
+        Instr::new(OpF2F {
+            dst: dst.into(),
+            src: src.into(),
+            src_type: if narrow {
+                FloatType::F32
+            } else {
+                FloatType::F16
+            },
+            dst_type: if narrow {
+                FloatType::F16
+            } else {
+                FloatType::F32
+            },
+            rnd_mode: FRndMode::NearestEven,
+            ftz: false,
+            integer_rnd: false,
+        })
+    }
+
+    #[test]
+    fn proof_counts_actual_source_rewrites_and_preserves_other_literals() {
+        let sm = ShaderModelInfo::new(53, 64);
+        let mut alloc = SSAValueAllocator::new();
+        let values: Vec<_> =
+            (0..6).map(|_| alloc.alloc(RegFile::GPR)).collect();
+        let mut s = shader(
+            &sm,
+            vec![
+                copy(values[0], SM53_PROBE_MARKER),
+                copy(values[1], SM53_PROOF_MARKER),
+                copy(values[2], 0x1234_5678),
+                convert(values[3], values[2], true),
+                convert(values[4], values[3], false),
+            ],
+        );
+        assert!(s.carries_sm53_probe_marker());
+        let half = s.opt_sm53_half_probe();
+        let source = s.opt_sm53_f32_source_probe();
+        assert_eq!((half, source), (0, 2));
+        s.stamp_sm53_probe(half, source);
+        let ops = &s.functions[0].blocks[0].instrs;
+        for (i, word) in
+            [(0, SM53_PROBE_MARKER), (1, 0x5353_0002), (2, 0x1234_5678)]
+        {
+            assert!(
+                matches!(&ops[i].op, Op::Copy(c) if c.src.src_ref == SrcRef::Imm32(word))
+            );
+        }
+        for (i, f32) in [(3, false), (4, true)] {
+            let Op::HAdd2(h) = &ops[i].op else {
+                panic!("missing source probe");
+            };
+            assert!(h.a_f32 && !h.ftz && !h.saturate);
+            assert_eq!(h.f32, f32);
+            assert_eq!(ssa(&h.srcs[0]), Some(values[2]));
+            assert!(h.srcs[0].src_swizzle.is_none());
+            assert!(h.srcs[1].src_mod.has_fneg());
+        }
+    }
+
+    #[test]
+    fn half_result_proof_counts_only_eligible_rewrite() {
+        let sm = ShaderModelInfo::new(53, 64);
+        let mut alloc = SSAValueAllocator::new();
+        let v: Vec<_> = (0..6).map(|_| alloc.alloc(RegFile::GPR)).collect();
+        let mut s = shader(
+            &sm,
+            vec![
+                Instr::new(OpHAdd2 {
+                    dst: v[2].into(),
+                    srcs: [v[0].into(), v[1].into()],
+                    saturate: false,
+                    ftz: false,
+                    f32: false,
+                    a_f32: false,
+                }),
+                convert(v[3], v[2], false),
+                Instr::new(OpHAdd2 {
+                    dst: v[4].into(),
+                    srcs: [v[0].into(), v[1].into()],
+                    saturate: false,
+                    ftz: true,
+                    f32: false,
+                    a_f32: false,
+                }),
+                convert(v[5], v[4], false),
+            ],
+        );
+        assert!(!s.carries_sm53_probe_marker());
+        assert_eq!(s.opt_sm53_half_probe(), 1);
+        let ops = &s.functions[0].blocks[0].instrs;
+        assert!(
+            matches!(&ops[1].op, Op::HAdd2(h) if h.f32 && !h.a_f32 && !h.ftz)
+        );
+        assert!(matches!(&ops[3].op, Op::F2F(_)));
+        assert_eq!(proof_word(1, 0), 0x5353_0100);
+        assert_eq!(proof_word(256, usize::MAX), 0x5353_ffff);
     }
 }
 
@@ -227,12 +445,8 @@ fn widened_low(op: &OpF2F) -> Option<SSAValue> {
 }
 
 impl Shader<'_> {
-    /// SM53's F32 swizzle, after copy-prop. HADD2 of an f32 and -0 with a half
-    /// result is the f32 rounded to half if the ALU rounds to nearest even,
-    /// whether it converts the f32 first or rounds the exact sum; with an f32
-    /// result it is the round trip through half only if it converts the f32 to
-    /// half first.
-    pub fn opt_sm53_f32_source_probe(&mut self) {
+    pub fn opt_sm53_f32_source_probe(&mut self) -> usize {
+        let mut rewritten = 0;
         for f in &mut self.functions {
             let mut narrowed: FxHashMap<SSAValue, Src> = FxHashMap::default();
             for b in &mut f.blocks {
@@ -255,8 +469,10 @@ impl Shader<'_> {
                         _ => continue,
                     };
                     instr.op = op;
+                    rewritten += 1;
                 }
             }
         }
+        rewritten
     }
 }

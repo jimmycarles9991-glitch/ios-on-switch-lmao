@@ -55,3 +55,55 @@ DEVELOPMENT = struct(
     includes = {},
     segments = {},
 )
+
+RELEASE = struct(
+    objects = [
+        "security/mac_audit.c",
+        "security/mac_base.c",
+        "security/mac_data.c",
+        "security/mac_label.c",
+        "security/mac_necp.c",
+        "security/mac_process.c",
+        "security/mac_vfs.c",
+        "security/mac_vfs_subr.c",
+        "security/mac_skywalk.c",
+        "security/mac_system.c",
+        "security/mac_sysv_sem.c",
+        "security/mac_sysv_shm.c",
+        "security/mac_sysv_msg.c",
+        "security/mac_posix_sem.c",
+        "security/mac_posix_shm.c",
+        "security/mac_socket.c",
+        "security/mac_pipe.c",
+        "security/mac_iokit.c",
+        "security/mac_file.c",
+        "security/mac_priv.c",
+        "security/mac_pty.c",
+        "security/mac_kext.c",
+        "security/mac_mach.c",
+    ],
+    copts = {
+        "security/mac_audit.c": [
+            "-Wno-shorten-64-to-32",
+        ],
+        "security/mac_base.c": [
+            "-Wno-cast-align",
+            "-Wno-shorten-64-to-32",
+            "-Wno-sign-conversion",
+        ],
+        "security/mac_mach.c": [
+            "-Wno-sign-conversion",
+        ],
+        "security/mac_process.c": [
+            "-Wno-shorten-64-to-32",
+        ],
+        "security/mac_vfs.c": [
+            "-Wno-sign-conversion",
+        ],
+        "security/mac_vfs_subr.c": [
+            "-Wno-sign-conversion",
+        ],
+    },
+    includes = {},
+    segments = {},
+)

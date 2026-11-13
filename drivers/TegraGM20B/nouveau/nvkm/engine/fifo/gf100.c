@@ -337,6 +337,21 @@ gf100_runq_intr(struct nvkm_runq *runq, struct nvkm_runl *null)
 				   "subc %d mthd %04x data %08x\n",
 			   runq->id, show, msg, chid, chan ? chan->inst->addr : 0,
 			   chan ? chan->name : "unknown", subc, mthd, data);
+#if DEVELOPMENT || DEBUG
+		/* GP_GET, GP_PUT, GP_SHADOW_0/1 (the entry being fetched), GET/GET_HI (the header's address), PB_HEADER and
+		 * HDR_SHADOW (nvgpu hw_pbdma_gm20b.h), read before the METHOD0 reset below */
+		if (show & 0x00040000)
+			nvkm_error(subdev, "PBDMA%d: PBENTRY ch %d: gp get %08x put %08x entry %08x %08x, "
+					   "pb get %02x%08x header %08x shadow %08x\n",
+				   runq->id, chid, nvkm_rd32(device, 0x040014 + (runq->id * 0x2000)),
+				   nvkm_rd32(device, 0x040000 + (runq->id * 0x2000)),
+				   nvkm_rd32(device, 0x040110 + (runq->id * 0x2000)),
+				   nvkm_rd32(device, 0x040114 + (runq->id * 0x2000)),
+				   nvkm_rd32(device, 0x04001c + (runq->id * 0x2000)) & 0xff,
+				   nvkm_rd32(device, 0x040018 + (runq->id * 0x2000)),
+				   nvkm_rd32(device, 0x040084 + (runq->id * 0x2000)),
+				   nvkm_rd32(device, 0x040118 + (runq->id * 0x2000)));
+#endif
 
 		/*TODO: use proper procedure for clearing each exception / debug output */
 		if ((stat & 0xc67fe000) && chan)

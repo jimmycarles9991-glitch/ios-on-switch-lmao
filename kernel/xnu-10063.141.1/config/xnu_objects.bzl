@@ -173,7 +173,7 @@ def _symbols(ctx, obj, base):
         env = {"DEVELOPER_DIR": DEVELOPER_DIR, "LC_ALL": "C", "PATH": "/usr/bin:/bin"},
         mnemonic = "XnuSymbols",
         progress_message = "Listing the names {} defines".format(base),
-        execution_requirements = {"no-remote-exec": "", "requires-darwin": ""},
+        execution_requirements = {"requires-darwin": ""},
     )
     return out
 

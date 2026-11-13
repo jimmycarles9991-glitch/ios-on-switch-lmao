@@ -45,6 +45,17 @@
  *   J181's widgets are drawn with 2x images, its scale, and a widget here gets the same images at every UI scale: at
  *   1.25 GameCenter's 310 x 310 pixel artwork in a 103.5 point lock screen widget is 96100 pixels over a limit of
  *   73646.7, and the archive throws. Both -scale sends become fmov d0, #2.0, the limit J181 archives against.
+ * - UIKitCore (.01), the keyline of the hard scroll edge effect (ScrollEdgeEffectView.v8, 0x185f5f004): a ladder per
+ *   interface style tests Input.displayScale against 1.0 and 2.0 (one row: the separator's 2x thickness, 1 pixel, and
+ *   its alpha, sRGB white 0.1 in dark and black 0.1 in light) and 3.0, and any other scale fills the keyline layer
+ *   with opaque sRGB magenta, Int(scale) pixels tall: every bar with a hard edge effect drew a purple line at 1.25 and
+ *   1.6. Each ladder's last b.ne (dark 0x185f5f25c, light 0x185f5f2b8) goes to its own 1x/2x row instead, so every
+ *   scale but 3 draws J181's keyline. Slot 2: .01's slot 0 is the keyboard table's, slot 1 SwitchTimebase's.
+ * - SampleAnalysis (.30), the mach timebases -[SATimestamp guessMissingTimesBasedOnTimestamp:] knows: it measures the
+ *   tick rate from two timestamps and takes 1/1 within 1e-7 of 1 GHz or 125/3 of 24 MHz, Apple's counters; X1's
+ *   counter is the 19.2 MHz oscillator's (625/12), which no clock divides to 24 MHz. Unknown, it logs a fault per
+ *   timestamp of every hang analysis watchdogd runs and leaves the times unconverted. The 24 MHz row becomes 19.2 MHz
+ *   and 625/12; the block is the only reader of both. At every scale.
  * 21H461's other sites are not here. 27's -[_UIBatteryView _fillLayerFrame:cornerRadius:] fills the body's own
  * frame (no inset), so SpringBoard's and Control Center's batteries have no gap to even out. +[PKIconImageCache
  * settingsIconCacheWithScale:] returns nil at every scale and 24B119 ships no iconCache artwork. Control Center's
@@ -198,6 +209,39 @@ static const struct switch_us_site switch_us_sites_24B119[] = {
 			  { 0x00, 0x10, 0x60, 0x1e, 0x4a, 0x09, 0x60, 0x1e, 0xe0, 0x03, 0x14, 0xaa, 0x00, 0x10, 0x60, 0x1e } },
 		},
 		"WidgetKit", "archived image limit of a 2x screen", true,
+	},
+	{   /* .01 */
+		{ 0xe7, 0xc1, 0xb4, 0x11, 0xdb, 0x39, 0x30, 0x4d, 0x91, 0x4a, 0x72, 0xe3, 0x1f, 0xa3, 0x1b, 0x86 },
+		0x185f5c000ULL, 0x5b5c000ULL, 0x3000ULL, 2, 2,
+		{
+			/* 0x185f5f248, dark: fmov d0, #2.0; fcmp d10, d0; b.eq (1x/2x); fmov d0, #3.0; fcmp d10, d0;
+			 * b.ne (the light ladder) -> b.ne (1x/2x) */
+			{ 0x5b5f248ULL, 24, 20, 4, SWITCH_US_FIXED,
+			  { 0x00, 0x10, 0x60, 0x1e, 0x40, 0x21, 0x60, 0x1e, 0x00, 0x08, 0x00, 0x54, 0x00, 0x10, 0x61, 0x1e,
+			    0x40, 0x21, 0x60, 0x1e, 0xe1, 0x01, 0x00, 0x54 },
+			  { 0xa1, 0x07, 0x00, 0x54 } },
+			/* 0x185f5f2a4, light: the same, b.ne (magenta) -> b.ne (1x/2x) */
+			{ 0x5b5f2a4ULL, 24, 20, 4, SWITCH_US_FIXED,
+			  { 0x00, 0x10, 0x60, 0x1e, 0x40, 0x21, 0x60, 0x1e, 0x20, 0x03, 0x00, 0x54, 0x00, 0x10, 0x61, 0x1e,
+			    0x40, 0x21, 0x60, 0x1e, 0xa1, 0x07, 0x00, 0x54 },
+			  { 0xc1, 0x02, 0x00, 0x54 } },
+		},
+		"UIKitCore", "scroll edge keyline of a 2x screen", false,
+	},
+	{   /* .30 */
+		{ 0xff, 0x9f, 0xc5, 0x5c, 0xee, 0x05, 0x3e, 0x45, 0xba, 0x2d, 0x82, 0x65, 0xba, 0xb4, 0x57, 0xee },
+		0x209208000ULL, 0xe08000ULL, 0x1000ULL, 0, 2,
+		{
+			/* 0x209209510: knownMachTimebases {1, 1}, {125, 3} -> {625, 12} */
+			{ 0xe09510ULL, 16, 8, 8, SWITCH_US_FIXED,
+			  { 0x01, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x7d, 0x00, 0x00, 0x00, 0x03, 0x00, 0x00, 0x00 },
+			  { 0x71, 0x02, 0x00, 0x00, 0x0c, 0x00, 0x00, 0x00 } },
+			/* 0x2092096e0: the match tolerance 1e-7, then 24e6 -> 19.2e6 */
+			{ 0xe096e0ULL, 16, 8, 8, SWITCH_US_FIXED,
+			  { 0x48, 0xaf, 0xbc, 0x9a, 0xf2, 0xd7, 0x7a, 0x3e, 0x00, 0x00, 0x00, 0x00, 0x60, 0xe3, 0x76, 0x41 },
+			  { 0x00, 0x00, 0x00, 0x00, 0x80, 0x4f, 0x72, 0x41 } },
+		},
+		"SampleAnalysis", "mach timebase of a 19.2 MHz counter", true,
 	},
 };
 

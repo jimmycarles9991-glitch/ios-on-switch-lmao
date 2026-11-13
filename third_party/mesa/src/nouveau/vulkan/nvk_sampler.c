@@ -334,10 +334,10 @@ nvk_CreateSampler(VkDevice device,
 
    {
       sampler->plane_count = 1;
+      const struct nvk_sampler_header samp =
+         nvk_sampler_get_header(pdev, &state);
+      sampler->planes[0].header = samp;
       if (dev->nvkmd) {
-         const struct nvk_sampler_header samp =
-            nvk_sampler_get_header(pdev, &state);
-
          uint32_t desc_index = 0;
          if (cap_info != NULL) {
             desc_index = cap.planes[0].desc_index;
@@ -376,10 +376,10 @@ nvk_CreateSampler(VkDevice device,
          chroma_state.min_filter = chroma_filter;
 
          sampler->plane_count = 2;
+         const struct nvk_sampler_header samp =
+            nvk_sampler_get_header(pdev, &chroma_state);
+         sampler->planes[1].header = samp;
          if (dev->nvkmd) {
-            const struct nvk_sampler_header samp =
-               nvk_sampler_get_header(pdev, &chroma_state);
-
             uint32_t desc_index = 0;
             if (cap_info != NULL) {
                desc_index = cap.planes[1].desc_index;

@@ -7,11 +7,12 @@ import simd
 /// the corpus line records them. The raw facade looks up a state whose functions are one framework library's in
 /// its pack, so these are the app's way onto the raw path's draws (the app's own shaders always go to m2v).
 public enum CAState {
+    /// The system's QuartzCore library; the Mac's goldens writers point it at the IPSW's.
     #if os(macOS)
-        public static let library = URL(
+        nonisolated(unsafe) public static var library = URL(
             fileURLWithPath: "/System/Library/Frameworks/QuartzCore.framework/Versions/A/Resources/default.metallib")
     #else
-        public static let library = URL(
+        nonisolated(unsafe) public static var library = URL(
             fileURLWithPath: "/System/Library/Frameworks/QuartzCore.framework/default.metallib")
     #endif
 

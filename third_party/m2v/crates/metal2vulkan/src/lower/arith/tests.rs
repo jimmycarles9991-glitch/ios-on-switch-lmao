@@ -27,6 +27,8 @@ use crate::spirv::ir::{
 };
 use crate::spirv::testing::{assert_valid, committed_profiles};
 
+mod native_sm53;
+
 // ---- Forms ----
 
 fn int(bits: u8) -> Form {
@@ -4111,6 +4113,7 @@ mod narrow;
 mod norm_write;
 mod round_texel;
 mod specials;
+mod store_code;
 mod texel_round;
 mod wide;
 

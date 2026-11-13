@@ -51,3 +51,36 @@ host_test(
         "//kits/SwitchCAR:SwitchUPHY.h",
     ],
 )
+
+# SwitchEngineClock.h: the 637 mV rate per SoC process and PLLC2/PLLC3's bring-up against a model of their registers.
+host_library(
+    name = "engine_clock",
+    srcs = [
+        "//kits/SwitchCAR:SwitchCAR.cpp",
+        "//kits/SwitchCAR:SwitchCAR.h",
+        "//kits/SwitchCAR:SwitchEngineClock.cpp",
+        "//kits/SwitchCAR:SwitchEngineClock.h",
+        "//kits/SwitchCAR:SwitchEngineClockPlan.h",
+        "//kits/SwitchCAR:SwitchPMC.h",
+        "//kits/SwitchMMIO:SwitchMMIO.h",
+        "//kits/SwitchMMIO:SwitchMMIOKernel.h",
+    ],
+    defines = [
+        "DEVELOPMENT=1",
+        "SWITCH_MMIO_HOST_MODEL=1",
+    ],
+    deps = [":kernel"],
+)
+
+host_test(
+    name = "switch_engine_clock_test",
+    srcs = [
+        "switch_engine_clock_test.cpp",
+        "//kits/SwitchCAR:SwitchEngineClock.h",
+        "//kits/SwitchCAR:SwitchEngineClockPlan.h",
+    ],
+    deps = [
+        ":engine_clock",
+        ":kernel",
+    ],
+)

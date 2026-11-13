@@ -8,16 +8,36 @@
 //! host pages imported without a copy (the IOSurface path), and translation of the target's own QuartzCore library into
 //! A740 pipelines. Each step reports a marker before it starts so a hang names the step.
 
+#[path = "NativeMetalArguments.rs"]
+mod arguments;
+#[path = "NativeMetalCompile.rs"]
+pub mod compile;
+#[path = "NativeMetalComputeArtifact.rs"]
+pub mod compute_artifact;
 #[path = "NativeMetalDirect.rs"]
 pub mod direct;
 #[path = "NativeMetalDirectCompute.rs"]
 pub mod direct_compute;
+#[path = "NativeMetalDirectTess.rs"]
+mod direct_tess;
 #[path = "NativeMetalFailure.rs"]
 mod failure;
+#[path = "NativeMetalFunctions.rs"]
+mod functions;
+#[path = "NativeMetalHeap.rs"]
+mod heap;
 #[path = "NativeMetalObjects.rs"]
 pub mod objects;
+#[path = "NativeMetalOffline.rs"]
+pub mod offline;
+#[path = "NativeMetalReflection.rs"]
+mod reflection;
 #[path = "NativeMetalTarget.rs"]
 mod target;
+#[path = "NativeMetalTessModes.rs"]
+mod tess_modes;
+#[path = "NativeMetalVariants.rs"]
+mod variants;
 
 use metal2vulkan::metal::{PixelFormat, PrimitiveType, TextureUsage};
 use metal2vulkan::pipeline::{ColorAttachmentDescriptor, RenderPipelineDescriptor, StageSource};

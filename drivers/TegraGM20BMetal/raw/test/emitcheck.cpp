@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: MIT
-// emitcheck: runtime/raw_emit.h's registers against every record of a pack, the ones NVK emitted when the pack was probed. A
-// program's register count and early-fragment-tests (what NAK's shader info will give a direct compile) are read off the
-// records that name it, and must agree among them. Every register the hardware reads must be the pack's; one it doesn't
-// read may hold what the probe left there.
+// emitcheck: runtime/raw_emit.h's registers against every record of a pack but its form records, as a direct compile
+// would make them for a state the pack lacks. A program's register count is its PackProgram's; its early-fragment-tests
+// (what NAK's shader info will give a direct compile) are read off the records that name it, and must agree among them.
+// Every register the hardware reads must be the pack's; one it doesn't read may hold what another state left there.
 // usage: emitcheck <pack.bin>
 #include <cstdio>
 #include <map>
@@ -14,7 +14,15 @@
 
 namespace {
 
-constexpr uint32_t kEarlyZ = 0x0210, kVertexCount = 0x204c, kPixelCount = 0x214c;
+constexpr uint32_t kEarlyZ = 0x0210;
+
+// A fetch-free form's record is its form's (pack/fetch_free_make.h: its pipeline blend, colour targets and fetch
+// registers), as a storage record's early tests, sample control, interlock and storage writes are (raw_storage.h
+// usableStorageMetadata): neither is what the state's key emits. The record goldens hold them (test/records).
+bool formRecord(const raw::PackPipeline &pp)
+{
+    return raw::recordForm(pp) == raw::PackForm::FetchFree || pp.storageMask;
+}
 
 std::map<uint32_t, uint32_t> registers(const raw::Pack &pack, const raw::PackPipeline &pp)
 {
@@ -46,31 +54,43 @@ int main(int argc, char **argv)
 
     std::map<uint32_t, raw::EmitProgram> info;
     uint32_t disagree = 0;
-    auto learn = [&](uint32_t prog, uint32_t gprs, bool earlyZ, bool fragment) {
+    auto learn = [&](uint32_t prog, uint32_t gprs, bool earlyZ, bool fragment, uint32_t interlock, bool sampleShading) {
         const auto [it, first] = info.try_emplace(prog);
         if (first) {
             it->second.header = heap + programs[prog].program;
             it->second.gprs = gprs;
             it->second.earlyFragmentTests = earlyZ;
+            it->second.interlockControl = interlock;
+            it->second.usesSampleShading = sampleShading;
         } else {
-            disagree += it->second.gprs != gprs || (fragment && it->second.earlyFragmentTests != earlyZ);
+            disagree +=
+                it->second.gprs != gprs ||
+                (fragment && (it->second.earlyFragmentTests != earlyZ || it->second.interlockControl != interlock));
         }
     };
+    uint32_t forms = 0;
     for (uint32_t i = 0; i < count; i++) {
+        if (formRecord(pipes[i])) {
+            forms++;
+            continue;
+        }
         const std::map<uint32_t, uint32_t> regs = registers(pack, pipes[i]);
-        learn(pipes[i].vs, regs.count(kVertexCount) ? regs.at(kVertexCount) : 0, false, false);
-        learn(pipes[i].fs, regs.count(kPixelCount) ? regs.at(kPixelCount) : 0, regs.count(kEarlyZ) && regs.at(kEarlyZ),
-              true);
+        learn(pipes[i].vs, programs[pipes[i].vs].gprs, false, false, 0, false);
+        learn(pipes[i].fs, programs[pipes[i].fs].gprs, regs.count(kEarlyZ) && regs.at(kEarlyZ), true,
+              regs.count(0x1224) ? regs.at(0x1224) : 0, regs.count(0x0754) && (regs.at(0x0754) & 15) > 1);
     }
 
     uint64_t compared = 0, read = 0, unread = 0, unparsed = 0;
     std::map<uint32_t, uint64_t> readBad, unreadBad;
     std::set<uint32_t> covered, left;
     for (uint32_t i = 0; i < count; i++) {
+        if (formRecord(pipes[i]))
+            continue;
         const std::map<uint32_t, uint32_t> regs = registers(pack, pipes[i]);
         std::vector<raw::EmitRegister> made;
         std::string why;
-        if (!raw::emitState(pack.string(pipes[i].keyString), info[pipes[i].vs], info[pipes[i].fs], made, why)) {
+        if (!raw::emitState(pack.string(pipes[i].keyString), info[pipes[i].vs], info[pipes[i].fs], made, why, nullptr,
+                            pipes[i].flags & raw::PipelineTwoPlane)) {
             if (!unparsed++)
                 printf("emitcheck: %s\n", why.c_str());
             continue;
@@ -100,10 +120,10 @@ int main(int argc, char **argv)
                 left.insert(m);
     }
     printf(
-        "emitcheck %s: %u records, %zu programs (%u disagree on their info), %zu registers made, %llu values compared: "
-        "%llu read ones differ, %llu unread ones differ, %llu keys unread\n",
-        argv[1], count, info.size(), disagree, covered.size(), (unsigned long long)compared, (unsigned long long)read,
-        (unsigned long long)unread, (unsigned long long)unparsed);
+        "emitcheck %s: %u records (%u fetch-free or storage forms left out), %zu programs (%u disagree on their info), "
+        "%zu registers made, %llu values compared: %llu read ones differ, %llu unread ones differ, %llu keys unread\n",
+        argv[1], count, forms, info.size(), disagree, covered.size(), (unsigned long long)compared,
+        (unsigned long long)read, (unsigned long long)unread, (unsigned long long)unparsed);
     printf("  not made yet:");
     for (uint32_t m : left)
         printf(" %04x", m);

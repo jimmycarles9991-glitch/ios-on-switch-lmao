@@ -13,6 +13,7 @@
 load("@rules_rust//rust:defs.bzl", "rust_static_library")
 load("//bazel/lint:defs.bzl", "lint_files")
 load("//bazel/rust:defs.bzl", "cargo_ids", "rust_artifact")
+load("//kits/SwitchGM20BEmit:defs.bzl", "EMIT_SOURCES")
 load("//translate/arm64e:target.bzl", "a64x_target_linkopts")
 load(":defs.bzl", "gpu_stage", "gpu_tree", "llvm_as", "metal_bundle", "metal_plugin", "raw_stack")
 
@@ -46,6 +47,16 @@ llvm_as(
     out = "air/function_constant.air",
 )
 
+# The selected IPSW build's compile profile: the m2v runtime device the bridge's offline compile makes its translator
+# devices of (bridge/NativeMetalOffline.rs). Another build needs its own, frozen from its runtime.
+alias(
+    name = "compile_profile",
+    actual = select({
+        "//ipsw:21H461": METAL + ":bridge/compile_profile/21H461.json",
+        "//ipsw:24B119": METAL + ":bridge/compile_profile/24B119.json",
+    }),
+)
+
 # The Metal bridge: NativeMetal's bridge (drivers/NativeMetal/bridge) over m2v's runtime and translator, a static
 # library the plugin links. One crate graph, built per crate (bazel/rust/defs.bzl): each m2v crate and crates.io crate is
 # its own cached rustc action, so an edit recompiles that crate and its dependents only.
@@ -53,14 +64,27 @@ rust_static_library(
     name = "bridge",
     srcs = [
         METAL + ":bridge/NativeMetalBridge.rs",
+        METAL + ":bridge/NativeMetalCompile.rs",
         METAL + ":bridge/NativeMetalDirect.rs",
         METAL + ":bridge/NativeMetalDirectCompute.rs",
+        METAL + ":bridge/NativeMetalOffline.rs",
+        METAL + ":bridge/NativeMetalHeap.rs",
+        METAL + ":bridge/NativeMetalArguments.rs",
+        METAL + ":bridge/NativeMetalDirectTess.rs",
+        METAL + ":bridge/NativeMetalTessModes.rs",
+        METAL + ":bridge/NativeMetalComputeArtifact.rs",
+        METAL + ":bridge/NativeMetalArtifactCodec.rs",
+        METAL + ":bridge/NativeMetalReflection.rs",
+        METAL + ":bridge/NativeMetalVariants.rs",
         METAL + ":bridge/NativeMetalFailure.rs",
+        METAL + ":bridge/NativeMetalFunctions.rs",
         METAL + ":bridge/NativeMetalObjects.rs",
         METAL + ":bridge/NativeMetalTarget.rs",
     ],
-    # The AIR fixtures it compiles in (include_bytes!(env!(...)); rules_rust makes $(execpath) absolute).
+    # The AIR fixtures and the compile profile it compiles in (include_bytes!(env!(...)); rules_rust makes $(execpath)
+    # absolute).
     compile_data = [
+        ":compile_profile",
         ":function_constant_air",
         ":runtime_examples_air",
     ],
@@ -68,6 +92,7 @@ rust_static_library(
     crate_root = METAL + ":bridge/NativeMetalBridge.rs",
     edition = "2024",
     rustc_env = {
+        "NMB_COMPILE_PROFILE": "$(execpath :compile_profile)",
         "NMB_FC_AIR": "$(execpath :function_constant_air)",
         "NMB_FIXTURE_AIR": "$(execpath :runtime_examples_air)",
     },
@@ -87,6 +112,8 @@ rust_static_library(
         "//third_party/m2v/crates/metal2vulkan-runtime",
         "@rust_crates//:ash",
         "@rust_crates//:libc",
+        "@rust_crates//:serde",
+        "@rust_crates//:serde_json",
         "@rust_crates//:sha2",
     ],
 )
@@ -113,27 +140,30 @@ rust_artifact(
     kind = "device_mac",
 )
 
-# The raw GM20B path's stack key: compiled into the plugin and stamped into the raw pack (a pack of another build is
-# refused on the device). Hashes NVK, m2v's sources, the bridge sources, the frontend and raw/'s sources.
+# The raw GM20B path's stack key: compiled into the plugin and stamped into the raw pack and the native seed, whose
+# records a plugin of another key refuses, and naming each process's record cache. What a record is made and read by
+# (gpu/defs.bzl raw_stack), so an edit to the rest of the raw runtime keeps every record made.
 raw_stack(
     name = "raw_stack",
-    srcs = [
-        METAL + ":bridge/NativeMetalBridge.rs",
-        METAL + ":bridge/NativeMetalDirect.rs",
-        METAL + ":bridge/NativeMetalDirectCompute.rs",
-        METAL + ":bridge/NativeMetalFailure.rs",
-        METAL + ":bridge/NativeMetalObjects.rs",
-        METAL + ":bridge/NativeMetalTarget.rs",
-        METAL + ":NativeBridgeMetalFrontend.mm",
-        GM20B_METAL + ":raw_stack_sources",
+    srcs = [GM20B_METAL + ":raw_stack_sources"],
+    bridge = ":bridge",
+    include_markers = [
+        METAL + ":NativeBridgeMetalFrontend.h",
+        GM20B_ABI,
+        "//kits/SwitchGM20BEmit:context",
+        # where NVIDIA's class headers find "nvtypes.h" (raw/pack/nvdec.cpp)
+        "//third_party/mesa/src/nouveau/headers:nvtypes.h",
     ],
-    m2v = [
-        "//third_party/m2v/crates/metal2vulkan:sources",
-        "//third_party/m2v/crates/metal2vulkan-air:sources",
-        "//third_party/m2v/crates/metal2vulkan-runtime:sources",
-    ],
-    m2v_root = "//third_party/m2v:Cargo.toml",
+    metal_abi = METAL_ABI,
     nvk = NVK,
+    readers = [GM20B_METAL + ":raw/runtime/raw_completed.cpp"],
+)
+
+# The paths the stack key hashes (tools/gpu/raw_stack_test.py)
+filegroup(
+    name = "raw_stack_inputs",
+    srcs = [":raw_stack"],
+    output_group = "inputs",
 )
 
 metal_plugin(
@@ -142,28 +172,72 @@ metal_plugin(
         GM20B_METAL + ":TegraGM20BMetalPlugin.mm",
         METAL + ":NativeBridgeMetalFrontend.mm",
         GM20B_METAL + ":raw_facade_srcs",
+        GM20B_METAL + ":compiler_srcs",
     ],
     hdrs = [
         METAL + ":frontend_headers",
         METAL_ABI,
         GM20B_METAL + ":raw_runtime_headers",
+        GM20B_METAL + ":compiler_headers",
         GM20B_ABI,
+        "//drivers/TegraGM20B:TegraGM20BJobABI.h",
+        "//drivers/TegraGM20B:TegraGM20BCompilerABI.h",
+        "//kits/SwitchSeedPack:SwitchSeedStore.h",
         GM20B_LAYOUT,
+        "//drivers/TegraGM20B:TegraGM20BClockABI.h",
+        "//drivers/TegraGM20B:TegraGM20BHost.h",
+        "//drivers/TegraGM20B:TegraGM20BPathsABI.h",
+        "//drivers/TegraGM20B:TegraGM20BSchedPolicy.h",
+        "//drivers/TegraGM20B:TegraGM20BZcullABI.h",
+        "//kits/SwitchGM20B:class_headers",
+        "//kits/SwitchGM20B:SwitchGM20BCaps.h",
+        "//kits/SwitchGM20BEmit:emit_headers",
+        "//kits/SwitchGM20BEmit:macros",
         "//kits/SwitchRefusal:SwitchRefusal.h",
         "//kits/SwitchRefusal:SwitchRefusalSite.h",
     ],
     bridge = ":bridge_ios",
+    c_srcs = ["//kits/SwitchGM20BEmit:" + s for s in EMIT_SOURCES],
     cc_srcs = [
+        GM20B_METAL + ":raw/runtime/raw_amplification.cpp",
+        GM20B_METAL + ":raw/runtime/raw_vertex_streams.cpp",
         GM20B_METAL + ":raw/runtime/raw_gpu.cpp",
+        GM20B_METAL + ":raw/runtime/raw_draw_bands.cpp",
+        GM20B_METAL + ":raw/runtime/raw_job_uses.cpp",
+        GM20B_METAL + ":raw/runtime/raw_tessellation.cpp",
+        GM20B_METAL + ":raw/runtime/raw_transfer.cpp",
         GM20B_METAL + ":raw/runtime/raw_split.cpp",
+        GM20B_METAL + ":raw/runtime/raw_variants.cpp",
         GM20B_METAL + ":raw/runtime/raw_alias.cpp",
         GM20B_METAL + ":raw/runtime/raw_arena.cpp",
         GM20B_METAL + ":raw/fx/fx_mip.cpp",
         GM20B_METAL + ":raw/fx/fx_image.cpp",
         GM20B_METAL + ":raw/runtime/raw_kernel.cpp",
+        GM20B_METAL + ":raw/runtime/raw_kernel_job.cpp",
+        GM20B_METAL + ":raw/runtime/raw_resource_set.cpp",
+        GM20B_METAL + ":raw/runtime/raw_encoder_state.cpp",
+        GM20B_METAL + ":raw/runtime/raw_state_segment.cpp",
+        GM20B_METAL + ":raw/runtime/raw_shared_events.cpp",
         GM20B_METAL + ":raw/runtime/raw_pack.cpp",
         GM20B_METAL + ":raw/runtime/raw_ycbcr.cpp",
+        GM20B_METAL + ":raw/runtime/raw_xr_texture.cpp",
         GM20B_METAL + ":raw/runtime/raw_zeta.cpp",
+        GM20B_METAL + ":raw/runtime/raw_visibility.cpp",
+        GM20B_METAL + ":raw/runtime/raw_visibility_pass.cpp",
+        GM20B_METAL + ":raw/runtime/raw_predication.cpp",
+        GM20B_METAL + ":raw/runtime/raw_predicate_loops.cpp",
+        GM20B_METAL + ":raw/runtime/raw_private_comp.cpp",
+        GM20B_METAL + ":raw/runtime/raw_draw_shortcuts.cpp",
+        GM20B_METAL + ":raw/runtime/raw_resolve_twod.cpp",
+        GM20B_METAL + ":raw/runtime/raw_multisample.cpp",
+        GM20B_METAL + ":raw/runtime/raw_object_pool.cpp",
+        GM20B_METAL + ":raw/runtime/raw_surface_image.cpp",
+        GM20B_METAL + ":raw/runtime/raw_turn_copy.cpp",
+        GM20B_METAL + ":raw/runtime/raw_stencil_bits.cpp",
+        GM20B_METAL + ":raw/runtime/raw_zeta_colour.cpp",
+        GM20B_METAL + ":raw/runtime/raw_turned_pass.cpp",
+        GM20B_METAL + ":raw/runtime/raw_area_load.cpp",
+        GM20B_METAL + ":raw/runtime/raw_reach.cpp",
         GM20B_METAL + ":raw/runtime/raw_comp.cpp",
         GM20B_METAL + ":raw/runtime/raw_record_parts.cpp",
         GM20B_METAL + ":raw/runtime/raw_direct.cpp",
@@ -175,6 +249,15 @@ metal_plugin(
         GM20B_METAL + ":raw/runtime/raw_metallib.cpp",
         GM20B_METAL + ":raw/runtime/raw_completed.cpp",
         GM20B_METAL + ":raw/runtime/raw_compute.cpp",
+        GM20B_METAL + ":raw/runtime/raw_compute_loops.cpp",
+        GM20B_METAL + ":raw/runtime/raw_loop_copies.cpp",
+        GM20B_METAL + ":raw/runtime/raw_icb_compute.cpp",
+        GM20B_METAL + ":raw/runtime/raw_semantic_plan.cpp",
+        GM20B_METAL + ":raw/runtime/raw_semantic_resources.cpp",
+        GM20B_METAL + ":raw/runtime/raw_semantic_setters.cpp",
+        GM20B_METAL + ":raw/runtime/raw_compile_request.cpp",
+        GM20B_METAL + ":raw/runtime/raw_remote.cpp",
+        GM20B_METAL + ":compiler_cc_srcs",
     ],
     frameworks = [
         "Foundation",
@@ -188,6 +271,12 @@ metal_plugin(
         GM20B_METAL + ":raw/runtime/RawMetal.h",
         GM20B_ABI,
         "//kits/SwitchRefusal:SwitchRefusal.h",
+        # the kit's nv_push.h ahead of Mesa's own, in the directory NVIDIA's headers find "nvtypes.h" in
+        "//kits/SwitchGM20BEmit:mesa/nv_push.h",
+        "//kits/SwitchGM20BEmit:gen/nv_push_clb197.h",
+        "//third_party/mesa/src/nouveau/headers:nvtypes.h",
+        # the generated capability table (raw_device_answers.h chipFeature)
+        "//kits/SwitchGM20B:SwitchGM20BCaps.h",
     ],
     linkopts = a64x_target_linkopts(),
     stack = ":raw_stack",

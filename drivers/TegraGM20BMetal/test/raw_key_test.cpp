@@ -14,6 +14,8 @@ TEST(RawKey, InternalLookupsFindCanonicalOwnStates)
 {
     for (const auto &[pair, alias] : std::initializer_list<std::pair<const char *, const char *>>{
              {"ycbcr_vert  | f ycbcr_converted_frag", "raw.ycbcr.ycbcr_converted_frag"},
+             {"ycbcr_vert  | f ycbcr_packed_plane_frag", "raw.ycbcr.ycbcr_packed_plane_frag"},
+             {"ycbcr_store_vert  | f ycbcr_store_plane_packed_frag", "raw.ycbcr_store.ycbcr_store_plane_packed_frag"},
              {"xr_vert  | f xr_bgra10_frag", "raw.xr.xr_bgra10_frag"},
              {"two_plane_cover  | f two_plane_load", "raw.two_plane.two_plane_load"},
              {"resolve_vert  | f resolve_bgra8_frag", "raw.resolve.resolve_bgra8_frag"}}) {

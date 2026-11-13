@@ -6,62 +6,78 @@
 // CPU write under IOSurfaceLock does. A write the seed does not show is counted here per surface, for the surfaces a converted
 // texture is over: one through another texture over the surface (a video player's plane textures), on either driver, or a
 // CPU write through Metal. The submit lock orders the counts as the work.
-struct SurfaceConversions {
-    uint32_t textures = 0;
-    uint64_t writes = 0;
+// Every texture over a surface holds its surface's count from its creation (RMTexture::_surfaceWrites), so a submitted
+// range counts its written surfaces from its resources' facts, with no lock and no message.
+struct SurfaceWriteCount {
+    uint32_t holders = 0;  // gLock
+    std::atomic<uint32_t> converted{0};
+    std::atomic<uint64_t> writes{0};
 };
 
-static std::mutex gLock;
-static std::unordered_map<uint32_t, SurfaceConversions>
-    gSurfaces;  // IOSurfaceID -> its converted textures and the writes since
+static raw::Mutex gLock;
+// IOSurfaceID -> its count, while a texture holds it
+static std::unordered_map<uint32_t, SurfaceWriteCount *> gSurfaces;
 static std::atomic<uint32_t> gConverted{0};
 
-void surfaceConverted(IOSurfaceRef s, bool made)
+SurfaceWriteCount *holdSurfaceWrites(IOSurfaceRef s)
 {
-    std::lock_guard<std::mutex> l(gLock);
-    const uint32_t id = IOSurfaceGetID(s);
+    std::lock_guard<raw::Mutex> l(gLock);
+    SurfaceWriteCount *&count = gSurfaces[IOSurfaceGetID(s)];
+    if (!count)
+        count = new SurfaceWriteCount;
+    count->holders++;
+    return count;
+}
+
+void releaseSurfaceWrites(IOSurfaceRef s, SurfaceWriteCount *count)
+{
+    std::lock_guard<raw::Mutex> l(gLock);
+    if (--count->holders)
+        return;
+    gSurfaces.erase(IOSurfaceGetID(s));
+    delete count;
+}
+
+void surfaceConverted(SurfaceWriteCount *count, bool made)
+{
     if (made) {
-        gSurfaces[id].textures++;
+        count->converted.fetch_add(1, std::memory_order_relaxed);
         gConverted.fetch_add(1, std::memory_order_relaxed);
         return;
     }
+    count->converted.fetch_sub(1, std::memory_order_relaxed);
     gConverted.fetch_sub(1, std::memory_order_relaxed);
-    auto it = gSurfaces.find(id);
-    if (it != gSurfaces.end() && !--it->second.textures)
-        gSurfaces.erase(it);
 }
 
-uint64_t surfaceWrites(IOSurfaceRef s)
+uint64_t surfaceWrites(const SurfaceWriteCount *count)
 {
-    std::lock_guard<std::mutex> l(gLock);
-    auto it = gSurfaces.find(IOSurfaceGetID(s));
-    return it == gSurfaces.end() ? 0 : it->second.writes;
+    return count ? count->writes.load(std::memory_order_acquire) : 0;
 }
 
-void noteSurfaceWrite(IOSurfaceRef s)
+static void noteWrite(SurfaceWriteCount *count)
 {
-    if (!gConverted.load(std::memory_order_relaxed))
-        return;
-    std::lock_guard<std::mutex> l(gLock);
-    auto it = gSurfaces.find(IOSurfaceGetID(s));
-    if (it != gSurfaces.end())
-        it->second.writes++;
+    if (count && count->converted.load(std::memory_order_relaxed))
+        count->writes.fetch_add(1, std::memory_order_release);
 }
 
-static void written(void *o)
+void noteSurfaceWrite(SurfaceWriteCount *count)
 {
-    id object = (__bridge id)o;
-    if (![object isKindOfClass:[RMTexture class]])
-        return;
-    RMTexture *t = (RMTexture *)object;
-    while (t->_kind == RMTextureView && t->_parent)
-        t = t->_parent;
-    if (t->_surface)
-        noteSurfaceWrite(t->_surface);
+    if (gConverted.load(std::memory_order_relaxed))
+        noteWrite(count);
 }
 
 void noteSurfaceWrites(RMCommandBuffer *cb, size_t from, size_t to)
 {
-    if (gConverted.load(std::memory_order_relaxed))
-        forEachWritten(cb, from, to, written);
+    if (!gConverted.load(std::memory_order_relaxed))
+        return;
+    const RMCommandPlan &plan = cb->_plan;
+    const bool cached = plan.forEachRangeResource(from, to, [](const RMRangeResource &resource) {
+        if (resource.access & raw::ResourceUse::Write)
+            noteWrite(static_cast<SurfaceWriteCount *>(resource.facts.surfaceWrites));
+    });
+    if (!cached)
+        plan.forEachWritten(from, to, [&](void *object) {
+            if (const RMResourceFacts *facts = plan.factsOf(object))
+                noteWrite(static_cast<SurfaceWriteCount *>(facts->surfaceWrites));
+        });
 }

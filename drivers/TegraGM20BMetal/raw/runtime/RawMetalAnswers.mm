@@ -31,37 +31,6 @@
 
 @end
 
-static bool faceWritesStencil(const raw::StencilFace &f)
-{
-    return f.writeMask && (f.fail || f.depthFail || f.pass);
-}
-
-@interface RMDepthStencil (Answers)
-@end
-@implementation RMDepthStencil (Answers)
-
-- (BOOL)readsDepth
-{
-    return _raw.depthCompare != MTLCompareFunctionAlways;
-}
-
-- (BOOL)writesDepth
-{
-    return _raw.depthWrite;
-}
-
-- (BOOL)readsStencil
-{
-    return _raw.front.compare != MTLCompareFunctionAlways || _raw.back.compare != MTLCompareFunctionAlways;
-}
-
-- (BOOL)writesStencil
-{
-    return faceWritesStencil(_raw.front) || faceWritesStencil(_raw.back);
-}
-
-@end
-
 // No statistics, counters or profiling on this device (m2v's queue answers each zero)
 @interface RMQueue (Answers)
 @end
@@ -125,20 +94,21 @@ static bool faceWritesStencil(const raw::StencilFace &f)
 
 @end
 
-// The facade's heaps hold ordinary resources: nothing to make resident (RMRenderEncoder's are the same)
+// The heap as one use for reading, as RMRenderEncoder's
 @interface RMComputeEncoder (Answers)
 @end
 @implementation RMComputeEncoder (Answers)
 
 - (void)useHeap:(id<MTLHeap>)heap
 {
-    (void)heap;
+    if ([(id)heap isKindOfClass:[RMHeap class]])
+        [(id<MTLComputeCommandEncoder>)self useResource:(id<MTLResource>)heap usage:MTLResourceUsageRead];
 }
 
 - (void)useHeaps:(const id<MTLHeap> __unsafe_unretained[])heaps count:(NSUInteger)count
 {
-    (void)heaps;
-    (void)count;
+    for (NSUInteger k = 0; k < count; k++)
+        [self useHeap:heaps[k]];
 }
 
 - (void)setSamplerState:(id<MTLSamplerState>)sampler

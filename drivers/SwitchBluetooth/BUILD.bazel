@@ -47,6 +47,7 @@ ios_binary(
     name = "BlueTool",
     srcs = ["BlueTool/BlueTool.c"],
     out = "build/switch-bluetooth/BlueTool",
+    hdrs = ["//drivers/TegraGM20BMetal:compiler/SwitchShaderCompilerJetsam.h"],
     copts = [
         "-Os",
         "-Wall",

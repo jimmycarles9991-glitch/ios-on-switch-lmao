@@ -343,6 +343,21 @@ struct Shape {
 
 constexpr uint32_t kRingBytes = 8 << 20;
 
+// Every buffer slot (Metal's 31 a stage) a pass's draws leave empty is bound to kZeroBytes of zeros at the pass's start: a
+// state that reads a slot the frame does not fill reads zeros on either driver (m2v binds its own zeros there; raw binds
+// nothing, so a read would be the GPU's of an invalid buffer)
+constexpr int kBufferSlots = 31;
+constexpr uint32_t kZeroBytes = 65536;
+
+inline bool slotFilled(const Pass &pass, int stage, int slot)
+{
+    for (const Draw &d : pass.draws)
+        for (const Bytes &b : d.bytes)
+            if (b.stage == stage && b.slot == slot)
+                return true;
+    return false;
+}
+
 // FRAME_FILL: each frame's command buffer first fills a buffer over [kFillFrom, kFillBytes) with a byte of the frame
 // (fillBuffer:range:value:: whole words, and ends that are not), and every main-pass draw reads its first fragment uniform
 // slot from that buffer, so what the fill wrote is in the draws' decode

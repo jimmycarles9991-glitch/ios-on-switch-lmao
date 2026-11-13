@@ -1319,6 +1319,7 @@ fn an_interlocked_fetch_links_only_into_the_state_it_was_compiled_for() {
             view: StorageAttachmentView::Attachment,
             uint_view: None,
             kept: vk::ColorComponentFlags::empty(),
+            blend_model: 0,
         }]
     );
     assert_eq!(g.color_attachments, [None]);

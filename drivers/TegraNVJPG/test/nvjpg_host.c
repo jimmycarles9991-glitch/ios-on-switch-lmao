@@ -313,6 +313,30 @@ static void targets(void)
     }
     t = (TegraNVJPGTarget){TEGRA_NVJPG_OUT_I420, 0, {128, 64, 128}, 0};
     CHECK(tegra_nvjpg_setup_output(&img, &t, 1, &s, &e) != NULL, "I420 with different chroma strides accepted");
+    // CMPhoto's interchange-format destinations ('422f', '444f', 'yuvf': 24B119 and 21H461 alike since the client's
+    // format filter went): NVJPG writes them itself, semi-planar or packed, at 4:2:2 or 4:4:4.
+    {
+        TegraNVJPGImage four22 = img, four44 = img;
+        four22.chroma = TEGRA_NVJPG_CHROMA_422H, four22.mcuW = 16, four22.mcuH = 8, four22.mcusY = 10;
+        four44.chroma = TEGRA_NVJPG_CHROMA_444, four44.mcuW = four44.mcuH = 8, four44.mcusX = 13, four44.mcusY = 10;
+        TegraNVJPGTarget n16 = {TEGRA_NVJPG_OUT_NV16, 0, {128, 128, 0}, 0};
+        CHECK(!tegra_nvjpg_setup_output(&four22, &n16, 1, &s, &e), "422 to 422f refused");
+        CHECK(s.output_chroma_mode == TEGRA_NVJPG_CHROMA_422H && s.memory_mode == TEGRA_NVJPG_MEMORY_NV12 &&
+                  e.planes == 2 && e.rows[0] == 80 && e.rows[1] == 80 && e.rowBytes[1] == 128,
+              "422f setup: chroma rows at full height");
+        TegraNVJPGTarget yuy2 = {TEGRA_NVJPG_OUT_YUY2, 0, {256, 0, 0}, 0};
+        CHECK(!tegra_nvjpg_setup_output(&four22, &yuy2, 1, &s, &e), "422 to yuvf refused");
+        CHECK(s.output_chroma_mode == TEGRA_NVJPG_CHROMA_422H && s.memory_mode == TEGRA_NVJPG_MEMORY_YUY2 &&
+                  e.planes == 1 && e.rowBytes[0] == 256,
+              "yuvf setup: one packed plane, two bytes a sample");
+        TegraNVJPGTarget n24 = {TEGRA_NVJPG_OUT_NV24, 0, {128, 256, 0}, 0};
+        CHECK(!tegra_nvjpg_setup_output(&four44, &n24, 1, &s, &e), "444 to 444f refused");
+        CHECK(s.output_chroma_mode == TEGRA_NVJPG_CHROMA_444 && s.memory_mode == TEGRA_NVJPG_MEMORY_NV12 &&
+                  e.planes == 2 && e.rows[1] == 80 && e.rowBytes[1] == 256,
+              "444f setup: chroma rows twice the luma's bytes");
+        n24.pitch[1] = 128;
+        CHECK(tegra_nvjpg_setup_output(&four44, &n24, 1, &s, &e) != NULL, "444f chroma stride below its row accepted");
+    }
     // The JFIF matrix in 16.16 against the float formula over the whole cube (corners and a lattice).
     int worst = 0;
     for (int y = 0; y < 256; y += 5)

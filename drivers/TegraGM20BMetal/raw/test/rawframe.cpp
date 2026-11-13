@@ -108,16 +108,19 @@ int main(int argc, char **argv)
             return 1;
         }
     }
-    raw::DepthStencilDesc dss[frame::kDsSpecs];
+    std::vector<raw::DepthStencilState> dss;
     for (unsigned i = 0; i < frame::kDsSpecs; i++) {
         const frame::DsSpec spec = frame::dsSpec(i);
-        dss[i].depthCompare = spec.depthCompare;
-        dss[i].depthWrite = spec.depthWrite;
-        raw::StencilFace *faces[2] = {&dss[i].front, &dss[i].back};
+        raw::DepthStencilDesc desc;
+        desc.depthCompare = spec.depthCompare;
+        desc.depthWrite = spec.depthWrite;
+        raw::StencilFace *faces[2] = {&desc.front, &desc.back};
         for (int k = 0; k < 2; k++) {
             *faces[k] = {spec.face[k][0], spec.face[k][1],  spec.face[k][2],
                          spec.face[k][3], spec.readMask[k], spec.writeMask[k]};
         }
+        dss.emplace_back(desc);
+        dev.placeSegments(dss.back());
     }
     raw::Sampler smp[2];
     for (int s = 0; s < 2; s++) {
@@ -143,9 +146,11 @@ int main(int argc, char **argv)
             }
         cpu.push_back((threadNs() - c0) / 1e6);
     }
-    raw::Buffer ring, indices, fills;
+    raw::Buffer ring, indices, fills, zeros;
     dev.createBuffer(frame::kRingBytes, ring);
     dev.createBuffer(65536, indices);
+    dev.createBuffer(frame::kZeroBytes, zeros);
+    memset(zeros.cpu, 0, frame::kZeroBytes);
     const bool filling = frame::fillUniforms() && dev.createBuffer(frame::kFillBytes, fills);  // FRAME_FILL (frame.h)
     if (filling)
         memset(fills.cpu, 0, frame::kFillBytes);
@@ -187,6 +192,10 @@ int main(int argc, char **argv)
                 fprintf(stderr, "pass refused\n");
                 return 1;
             }
+            for (int stage = 1; stage <= 2; stage++)
+                for (int slot = 0; slot < frame::kBufferSlots; slot++)
+                    if (!frame::slotFilled(pass, stage, slot))
+                        e->setBuffer(stage, slot, &zeros, 0);
             bool bound[3][31] = {};
             for (const frame::Draw &d : pass.draws) {
                 e->setPipeline(d.blur ? blur[d.state] : uber[d.state]);
@@ -267,6 +276,9 @@ int main(int argc, char **argv)
                harness ? "harness" : "raw", c.size(), shape.blurPasses, shape.draws, sum / c.size(), c[c.size() / 2],
                c[c.size() * 9 / 10], dev.stats.pushBytes.load() / 1024.0 / frames,
                dev.stats.uploadBytes.load() / 1024.0 / frames, (unsigned long long)dev.stats.ringWaits.load());
+    printf("state segments per frame: %.1f binds, %.1f binds of the held segment, %.0f words not copied\n",
+           double(dev.stats.segmentBinds.load()) / frames, double(dev.stats.segmentSkips.load()) / frames,
+           double(dev.stats.segmentWords.load()) / frames);
     if (dev.stats.compMade.load() || dev.stats.compFailed.load()) {
         unsigned long m[5];
         mock_iokit_comp_stats(m);

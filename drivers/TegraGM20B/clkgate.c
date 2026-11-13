@@ -4,6 +4,19 @@
 #include <core/engine.h>
 #include <subdev/top.h>
 #include "TegraGM20BClkgate.h"
+#include "TegraGM20BTherm.h"
+
+void tgm_therm_arm(struct nvkm_device *device)
+{
+	unsigned int i = 0;
+
+	for (i = 0; i < ARRAY_SIZE(tgm_therm_setup); i++) {
+		const struct tgm_therm_write *w = &tgm_therm_setup[i];
+		const u32 old = w->keep ? nvkm_rd32(device, w->addr) : 0;
+
+		nvkm_wr32(device, w->addr, tgm_therm_value(w, old));
+	}
+}
 
 void tgm_clkgate_load(struct nvkm_device *device)
 {
@@ -18,6 +31,7 @@ void tgm_clkgate_load(struct nvkm_device *device)
 	}
 	nvkm_wr32(device, TGM_THERM_FECS_IDLE_FILTER, 0);
 	nvkm_wr32(device, TGM_THERM_HUBMMU_IDLE_FILTER, 0);
+	tgm_therm_arm(device);
 }
 
 void tgm_clkgate_enable(struct nvkm_device *device)
@@ -40,8 +54,8 @@ void tgm_clkgate_enable(struct nvkm_device *device)
 	}
 	if (!logged) {
 		nvxnu_log("tegra-gm20b: clock gating: SLCG/BLCG (nvgpu gm20b prod lists), ELCG on "
-			  "engines %#x\n",
-			  engines);
+			  "engines %#x; THERM slowdown armed: CONFIG2 %08x USE_A %08x\n",
+			  engines, nvkm_rd32(device, 0x00020130), nvkm_rd32(device, 0x00020798));
 	}
 	logged = 1;
 }

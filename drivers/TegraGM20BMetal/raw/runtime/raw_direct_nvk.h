@@ -23,6 +23,13 @@ struct NvkStageInfo {
     uint32_t halfTargets;
     uint32_t constPushMask;
     uint32_t constPushWords[32];
+    uint64_t centerFragDepth;
+    const void *semantic;
+    const void *portableContext;
+    bool (*portable)(const void *context, const uint32_t **words, size_t *bytes);
+    bool texsF16 = false;
+    bool turned = false;
+    uint64_t xrPlaneBindings = 0;  // nvk_switch_xr_planes.h: set-0 bindings read through a header pair
 };
 
 struct NvkStage {
@@ -37,11 +44,42 @@ struct NvkStage {
     bool earlyFragmentTests, writesDepth, postDepthCoverage;
     const void *split;
     void *owner;
+    uint32_t interlockControl;
+    uint64_t usesSampleShading;
+    uint32_t semanticVersion;
+    uint8_t boundTextures;
+    uint8_t numBarriers;
+    uint16_t localSize[3];
+    uint16_t smemSize;
+    uint32_t slmSize, crsSize;
+    uint8_t cbufSets[16];
 };
 
-struct NvkSetBinding {
-    uint32_t offset, stride, arraySize;
-    bool immutableSamplers;
+struct NvkStageMetrics {
+    uint32_t version, codeBytes, instructions, gprs, maxWarps;
+    uint32_t scratchBytes, memorySpills, memoryFills, registerSpills, registerFills;
+    uint64_t staticCycles;
+};
+
+static_assert(sizeof(NvkStageMetrics) == 48);
+
+// nvk_switch_offline.h's layout as data: each binding with the offset and stride raw lays it out at (raw_set_layout.h)
+struct NakBinding {
+    uint32_t binding;
+    int32_t type;
+    uint32_t count, flags, offset, stride;
+};
+
+struct NakSet {
+    const NakBinding *bindings;
+    uint32_t bindingCount, flags;
+};
+
+struct NakLayout {
+    const NakSet *sets;
+    uint32_t setCount, createFlags;
+    const void *pushRanges;  // VkPushConstantRange
+    uint32_t pushRangeCount;
 };
 
 // VkPipelineShaderStageRequiredSubgroupSizeCreateInfo
@@ -49,11 +87,6 @@ struct SubgroupSize {
     uint32_t sType = 1000225001;
     const void *next = nullptr;
     uint32_t size;
-};
-
-// VkComponentMapping
-struct NvkComponents {
-    uint32_t r, g, b, a;
 };
 
 enum DescriptorType : int32_t {
@@ -82,55 +115,17 @@ inline void *handle(uint64_t h)
 
 namespace nvk {
 
-inline int32_t compileStage(const DirectNvk &n, void *device, const NvkStageInfo &info, NvkStage &out)
+// switch_nak_compile_stage: the stage compiled with no device, from the frozen table and the layout as data
+inline int32_t nakCompileStage(const DirectNvk &n, const void *frozen, const NvkStageInfo &info,
+                               const NakLayout &layout, NvkStage &out)
 {
-    return reinterpret_cast<int32_t (*)(void *, const NvkStageInfo *, NvkStage *)>(n.compileStage)(device, &info, &out);
+    return reinterpret_cast<int32_t (*)(const void *, const NvkStageInfo *, const NakLayout *, NvkStage *)>(
+        n.nakCompileStage)(frozen, &info, &layout, &out);
 }
 
-inline void stageFinish(const DirectNvk &n, void *device, NvkStage &stage)
+inline void nakStageFinish(const DirectNvk &n, NvkStage &stage)
 {
-    reinterpret_cast<void (*)(void *, NvkStage *)>(n.stageFinish)(device, &stage);
-}
-
-inline bool setLayoutBinding(const DirectNvk &n, uint64_t layout, uint32_t binding, NvkSetBinding &out)
-{
-    return reinterpret_cast<bool (*)(void *, uint32_t, NvkSetBinding *)>(n.setLayoutBinding)(handle(layout), binding,
-                                                                                             &out);
-}
-
-inline uint32_t setLayoutSize(const DirectNvk &n, void *device, uint64_t layout)
-{
-    return reinterpret_cast<uint32_t (*)(void *, void *)>(n.setLayoutSize)(device, handle(layout));
-}
-
-inline bool immutableSamplerHeader(const DirectNvk &n, void *device, uint64_t layout, uint32_t binding,
-                                   uint32_t element, uint32_t *header)
-{
-    return reinterpret_cast<bool (*)(void *, void *, uint32_t, uint32_t, uint32_t *)>(n.immutableSamplerHeader)(
-        device, handle(layout), binding, element, header);
-}
-
-inline uint32_t bufferDescriptorSize(const DirectNvk &n, void *device, int32_t type, uint64_t range)
-{
-    return reinterpret_cast<uint32_t (*)(void *, int32_t, uint64_t)>(n.bufferDescriptorSize)(device, type, range);
-}
-
-inline bool samplerHeader(const DirectNvk &n, void *device, uint64_t sampler, uint32_t *header)
-{
-    return reinterpret_cast<bool (*)(void *, void *, uint32_t *)>(n.samplerHeader)(device, handle(sampler), header);
-}
-
-inline bool computeQmd(const DirectNvk &n, void *device, const NvkStage &stage, uint32_t setBytes, uint32_t *qmd)
-{
-    return reinterpret_cast<bool (*)(void *, const NvkStage *, uint32_t, uint32_t *)>(n.computeQmd)(device, &stage,
-                                                                                                    setBytes, qmd);
-}
-
-inline bool viewHeaderWord0(const DirectNvk &n, void *device, uint32_t format, const NvkComponents &components,
-                            bool storage, uint32_t &word0)
-{
-    return reinterpret_cast<bool (*)(void *, uint32_t, const NvkComponents *, bool, uint32_t *)>(n.viewHeaderWord0)(
-        device, format, &components, storage, &word0);
+    reinterpret_cast<void (*)(NvkStage *)>(n.nakStageFinish)(&stage);
 }
 
 }  // namespace nvk

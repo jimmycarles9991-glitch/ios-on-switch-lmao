@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 // Implicit GPU order between processes over host imports (TegraGM20BABI.h method 17) on the host: TegraGM20BExecSurfaces.cpp
-// and the coherency registry's writer records (TegraGM20BCoherency.cpp) over a model of gpu.c's channels, whose acquire
-// queue runs TegraGM20BFences.h's decision as tgm_chan_follow does under live_lock. Writers here are listed writes unless a
+// and the coherency registry's writer records (TegraGM20BCoherency.cpp) over a model of gpu_*.c's channels, whose acquire
+// queue runs TegraGM20BFences.h's decision as tgm_chan_follow does under tgm_live_lock. Writers here are listed writes unless a
 // test says otherwise: an Exec without a list is a writer for the CPU lock's wait only.
 #include <cstdio>
 #include <map>
@@ -34,7 +34,7 @@ extern "C" void tgm_cpu_clean_pages(const uint64_t *pas, uint32_t npages)
 	cleanCalls().emplace_back(pas, pas + npages);
 }
 
-// gpu.c's live channels by uid (one not listed is gone): completed and submitted seqnos, killed, and the first pages its
+// gpu_*.c's live channels by uid (one not listed is gone): completed and submitted seqnos, killed, and the first pages its
 // address space imports. queued is order_add's queue: one acquire per waiter and source, the later seqno, at most
 // TGM_ORDER_MAX sources per waiter.
 struct FakeChannel {
@@ -47,6 +47,7 @@ struct FakeGpu {
 	std::map<uint32_t, FakeChannel> channels;
 	std::map<uint32_t, std::map<uint32_t, uint32_t>> queued;  // waiter -> source -> seqno
 	int follows = 0;
+	int followError = 0;
 };
 
 static FakeGpu gGpu;
@@ -70,8 +71,16 @@ static int orderAdd(uint32_t waiter, uint32_t source, uint32_t seqno)
 			it->second = seqno;
 		return 0;
 	}
-	if (q.size() == TGM_ORDER_MAX)
-		return -28;
+	if (q.size() == TGM_ORDER_MAX) {
+		for (auto i = q.begin(); i != q.end();) {
+			if (int32_t(gGpu.channels[i->first].completed - i->second) >= 0)
+				i = q.erase(i);
+			else
+				++i;
+		}
+		if (q.size() == TGM_ORDER_MAX)
+			return -28;
+	}
 	q[source] = seqno;
 	return 0;
 }
@@ -84,6 +93,8 @@ static tgm_fence_source state(uint32_t waiter, uint32_t uid, const FakeChannel &
 extern "C" int tgm_chan_follow(struct tgm_chan *c, const uint64_t *writers, uint32_t n)
 {
 	gGpu.follows++;
+	if (gGpu.followError)
+		return gGpu.followError;
 	const uint32_t waiter = tgm_chan_uid(c);
 	for (uint32_t i = 0; i < n; i++) {
 		const auto it = gGpu.channels.find(tgm_fence_uid(writers[i]));
@@ -155,9 +166,11 @@ struct Connection : tgm_fences::ExecSurfaces {
 	}
 
 	// One Exec of channel uid in slot 0 with `pushes` pushes, submitted as `seqno`.
-	bool exec(uint32_t uid, uint32_t seqno, bool importsWritten = false, uint32_t pushes = 1)
+	int exec(uint32_t uid, uint32_t seqno, bool importsWritten = false, uint32_t pushes = 1)
 	{
-		const bool listed = before(0, chan(uid), pushes);
+		const int listed = before(0, chan(uid), pushes);
+		if (listed < 0)
+			return listed;
 		if (pushes)
 			after(listed, importsWritten, uid, seqno);
 		gGpu.channels[uid].submitted = seqno;
@@ -487,7 +500,7 @@ TEST_F(Fences, TheIndexFindsEveryLiveImportPastItsFirstSize)
 	}
 }
 
-TEST_F(Fences, WritersOfMoreChannelsThanASubmissionQueuesFillItsQueueOnce)
+TEST_F(Fences, TooManyProducerChannelsRejectTheSubmission)
 {
 	std::vector<Surface *> surfaces;
 	Connection server;
@@ -502,9 +515,10 @@ TEST_F(Fences, WritersOfMoreChannelsThanASubmissionQueuesFillItsQueueOnce)
 	for (uint32_t i = 0; i < 20; i++)
 		uses.push_back(reads(10 + i));
 	server.list(uses);
-	server.exec(kServer, 3);
+	EXPECT_EQ(server.exec(kServer, 3), -28);
+	EXPECT_EQ(gGpu.channels[kServer].submitted, 0u);
 	EXPECT_EQ(queued(kServer).size(), size_t(TGM_ORDER_MAX));
-	EXPECT_EQ(ioLogLines(), 1);
+	EXPECT_EQ(ioLogLines(), 0);
 	for (Surface *s : surfaces)
 		delete s;
 }
@@ -558,6 +572,145 @@ TEST_F(Fences, LostWritersAreWaitedForThroughEveryImporterOfTheSurfaceUntilAllCo
 	EXPECT_EQ(lost, 0u);
 }
 
+TEST_F(Fences, ProducerOverflowDoesNotPublishAWritableConsumer)
+{
+	std::vector<Surface *> sources;
+	Surface output(0xf0000000, 9000);
+	Connection consumer;
+	std::vector<TegraGM20BAbiSurfaceUse> uses;
+	for (uint32_t i = 0; i < 20; i++) {
+		sources.push_back(new Surface(0xc0000000 + uint64_t(i) * 0x100000, 8000 + i));
+		Connection producer;
+		producer.import(1, sources.back()->coh);
+		producer.write(100 + i, 5, 1);
+		consumer.import(10 + i, sources.back()->coh);
+		uses.push_back(reads(10 + i));
+	}
+	consumer.import(40, output.coh);
+	uses.push_back(writes(40));
+	consumer.list(uses);
+	EXPECT_EQ(consumer.exec(kServer, 3), -28);
+	EXPECT_TRUE(writersOf(output.coh).empty());
+	for (uint32_t i = 0; i < 16; i++)
+		gGpu.channels[100 + i].completed = 5;
+	consumer.list(uses);
+	EXPECT_EQ(consumer.exec(kServer, 3), 1);
+	EXPECT_EQ(writersOf(output.coh), (std::set<uint64_t>{writer(kServer, 3)}));
+	for (Surface *surface : sources)
+		delete surface;
+}
+
+TEST_F(Fences, MissingFenceViewRejectsWithoutPublishingConsumerWrites)
+{
+	Surface input(0xe0000000, 9100), output(0xe1000000, 9101);
+	Connection producer, consumer;
+	producer.import(1, input.coh);
+	producer.write(kApp, 5, 1);
+	consumer.import(1, input.coh);
+	consumer.import(2, output.coh);
+	consumer.list({reads(1), writes(2)});
+	gGpu.followError = -19;
+	EXPECT_EQ(consumer.exec(kServer, 1), -19);
+	EXPECT_EQ(gGpu.channels[kServer].submitted, 0u);
+	EXPECT_TRUE(writersOf(output.coh).empty());
+}
+
+TEST_F(Fences, OverflowedSurfaceWritersCannotBypassTheAcquireLimit)
+{
+	Surface input(0xe2000000, 9200);
+	for (uint32_t uid = 100; uid < 120; uid++) {
+		Connection producer;
+		producer.import(1, input.coh);
+		producer.write(uid, 1, 1);
+		gGpu.channels[uid].imports.insert(input.pas[0]);
+	}
+	Connection consumer;
+	consumer.import(1, input.coh);
+	consumer.list({reads(1)});
+	EXPECT_EQ(consumer.exec(kServer, 1), -28);
+	EXPECT_EQ(gGpu.channels[kServer].submitted, 0u);
+}
+
+TEST_F(Fences, AtomicSubmitAcceptsTheLargestInlineRecordAndEmptyWork)
+{
+	alignas(8) unsigned char storage[TegraGM20BMaxSubmitBytes] = {};
+	auto *in = reinterpret_cast<TegraGM20BAbiSubmit *>(storage);
+	in->channel = 1;
+	EXPECT_TRUE(tgm_fences::ExecSurfaces::validSubmit(in, sizeof(*in)));
+	in->surface_count = TegraGM20BMaxExecSurfaces;
+	in->push_count = (TegraGM20BMaxSubmitBytes - sizeof(*in) -
+			  in->surface_count * sizeof(TegraGM20BAbiSurfaceUse)) /
+			 sizeof(TegraGM20BAbiPush);
+	auto *uses = reinterpret_cast<TegraGM20BAbiSurfaceUse *>(
+		storage + sizeof(*in) + in->push_count * sizeof(TegraGM20BAbiPush));
+	for (uint32_t i = 0; i < in->surface_count; i++)
+		uses[i] = reads(i + 1);
+	const uint32_t bytes = sizeof(*in) + in->push_count * sizeof(TegraGM20BAbiPush) +
+			       in->surface_count * sizeof(TegraGM20BAbiSurfaceUse);
+	EXPECT_EQ(in->push_count, 190u);
+	EXPECT_TRUE(tgm_fences::ExecSurfaces::validSubmit(in, bytes));
+	in->push_count++;
+	EXPECT_FALSE(tgm_fences::ExecSurfaces::validSubmit(in, bytes + sizeof(TegraGM20BAbiPush)));
+}
+
+TEST_F(Fences, AtomicSubmitRejectsMalformedPayloadBeforeReadingUses)
+{
+	alignas(8) unsigned char storage[TegraGM20BMaxSubmitBytes] = {};
+	auto *in = reinterpret_cast<TegraGM20BAbiSubmit *>(storage);
+	in->channel = 1;
+	in->push_count = 2;
+	in->surface_count = 1;
+	auto *uses = reinterpret_cast<TegraGM20BAbiSurfaceUse *>(storage + sizeof(*in) +
+								 2 * sizeof(TegraGM20BAbiPush));
+	uses[0] = reads(1);
+	const uint32_t bytes = sizeof(*in) + 2 * sizeof(TegraGM20BAbiPush) + sizeof(uses[0]);
+	EXPECT_TRUE(tgm_fences::ExecSurfaces::validSubmit(in, bytes));
+	EXPECT_FALSE(tgm_fences::ExecSurfaces::validSubmit(in, bytes - 1));
+	EXPECT_FALSE(tgm_fences::ExecSurfaces::validSubmit(in, bytes + 1));
+	EXPECT_FALSE(tgm_fences::ExecSurfaces::validSubmit(in, sizeof(*in) - 1));
+	uses[0].access = 0;
+	EXPECT_FALSE(tgm_fences::ExecSurfaces::validSubmit(in, bytes));
+	uses[0] = reads(1);
+	uses[0].reserved = 1;
+	EXPECT_FALSE(tgm_fences::ExecSurfaces::validSubmit(in, bytes));
+	uses[0] = reads(1);
+	in->surface_flags = 2;
+	EXPECT_FALSE(tgm_fences::ExecSurfaces::validSubmit(in, bytes));
+	in->surface_flags = 0;
+	in->push_count = UINT32_MAX;
+	EXPECT_FALSE(tgm_fences::ExecSurfaces::validSubmit(in, bytes));
+	in->push_count = 2;
+	in->surface_count = UINT32_MAX;
+	EXPECT_FALSE(tgm_fences::ExecSurfaces::validSubmit(in, bytes));
+	in->push_count = TegraGM20BMaxPushes;
+	in->surface_count = 1;
+	EXPECT_FALSE(tgm_fences::ExecSurfaces::validSubmit(in, TegraGM20BMaxSubmitBytes));
+}
+
+TEST_F(Fences, AddressedJobCarriesEveryResourceAndAllowsOnlyTypedGpuAddresses)
+{
+	const uint32_t bytes = sizeof(TegraGM20BAbiSubmit) +
+			       TegraGM20BMaxJobPushes * sizeof(TegraGM20BAbiPush) +
+			       TegraGM20BMaxJobUses * sizeof(TegraGM20BAbiSurfaceUse);
+	std::vector<uint64_t> storage((bytes + 7) / 8);
+	auto *job = reinterpret_cast<TegraGM20BAbiSubmit *>(storage.data());
+	*job = {1, TegraGM20BMaxJobPushes, TegraGM20BMaxJobUses, 0};
+	auto *pushes = reinterpret_cast<TegraGM20BAbiPush *>(job + 1);
+	auto *uses = reinterpret_cast<TegraGM20BAbiSurfaceUse *>(pushes + job->push_count);
+	for (uint32_t i = 0; i < job->surface_count; ++i)
+		uses[i] = {0x100000u + uint64_t(i) * 4096,
+			   TegraGM20BSurfaceRead | TegraGM20BSurfaceGpuAddress, 0};
+	EXPECT_TRUE(tgm_fences::ExecSurfaces::validSubmit(job, bytes, true));
+	EXPECT_FALSE(tgm_fences::ExecSurfaces::validSubmit(job, bytes));
+	uses[0].access = TegraGM20BSurfaceGpuAddress;
+	EXPECT_FALSE(tgm_fences::ExecSurfaces::validSubmit(job, bytes, true));
+	uses[0].access = TegraGM20BSurfaceWrite | (1u << 8);
+	EXPECT_FALSE(tgm_fences::ExecSurfaces::validSubmit(job, bytes, true));
+	uses[0].access = TegraGM20BSurfaceWrite;
+	++job->push_count;
+	EXPECT_FALSE(tgm_fences::ExecSurfaces::validSubmit(job, bytes, true));
+}
+
 TEST_F(Fences, MalformedListsAreRefused)
 {
 	TegraGM20BAbiExecSurfaces in = {};
@@ -607,7 +760,7 @@ TEST(FenceDecisions, WaitOnlyForAnUnfinishedWriteOfALiveOtherChannel)
 	EXPECT_FALSE(tgm_fence_wanted(0, &running));
 }
 
-// A present's wait passed on a killed writer's release (gpu.c present_fenced): the frame is lost only when the submission it
+// A present's wait passed on a killed writer's release (gpu_fenced.h present_fenced): the frame is lost only when the submission it
 // waited for was among those the kill left unfinished, across the seqno wrap too.
 TEST(FenceDecisions, AWaitIsLostOnlyOnASubmissionTheKillLeftUnfinished)
 {
@@ -624,3 +777,164 @@ TEST(FenceDecisions, AWaitIsLostOnlyOnASubmissionTheKillLeftUnfinished)
 	EXPECT_TRUE(tgm_fence_lost(&wrapped, 2));
 }
 }  // namespace
+
+TEST_F(Fences, ExplicitVisibilityRequiresAddressedSubmissionAndCoherentFlags)
+{
+	struct {
+		TegraGM20BAbiSubmit job;
+		TegraGM20BAbiPush push;
+		TegraGM20BAbiSurfaceUse use;
+	} input{};
+
+	input.job = {1, 1, 1, TegraGM20BSubmitVisibilityExplicit};
+	input.use = {1, TegraGM20BSurfaceRead | TegraGM20BSurfaceHostWritten, 0};
+	EXPECT_TRUE(tgm_fences::ExecSurfaces::validSubmit(&input.job, sizeof(input), true));
+	EXPECT_FALSE(tgm_fences::ExecSurfaces::validSubmit(&input.job, sizeof(input), false));
+	input.job.surface_flags |= TegraGM20BSubmitExternalVisibility;
+	EXPECT_TRUE(tgm_fences::ExecSurfaces::validSubmit(&input.job, sizeof(input), true));
+	input.job.surface_flags = TegraGM20BSubmitExternalVisibility;
+	EXPECT_FALSE(tgm_fences::ExecSurfaces::validSubmit(&input.job, sizeof(input), true));
+	input.job.surface_flags = 0;
+	EXPECT_FALSE(tgm_fences::ExecSurfaces::validSubmit(&input.job, sizeof(input), true));
+	input.use.access &= ~uint32_t(TegraGM20BSurfaceHostWritten);
+	EXPECT_TRUE(tgm_fences::ExecSurfaces::validSubmit(&input.job, sizeof(input), true));
+	input.job.surface_flags =
+		uint32_t(TegraGM20BSubmitVisibilityExplicit) | TegraGM20BExecSurfacesAll;
+	EXPECT_FALSE(tgm_fences::ExecSurfaces::validSubmit(&input.job, sizeof(input), true));
+}
+
+TEST_F(Fences, RangeExtentRequiresAddressedGpuVaAndNonzeroLength)
+{
+	struct {
+		TegraGM20BAbiSubmit job;
+		TegraGM20BAbiPush push;
+		TegraGM20BAbiSurfaceUse use;
+	} input{};
+
+	input.job = {1, 1, 1, TegraGM20BSubmitVisibilityExplicit};
+	input.use = {0x10000,
+		     TegraGM20BSurfaceWrite | TegraGM20BSurfaceGpuAddress | TegraGM20BSurfaceRange,
+		     4096};
+	EXPECT_TRUE(tgm_fences::ExecSurfaces::validSubmit(&input.job, sizeof(input), true));
+	EXPECT_FALSE(tgm_fences::ExecSurfaces::validSubmit(&input.job, sizeof(input), false));
+	input.use.reserved = 0;
+	EXPECT_FALSE(tgm_fences::ExecSurfaces::validSubmit(&input.job, sizeof(input), true));
+	input.use.reserved = 4096;
+	input.use.access &= ~uint32_t(TegraGM20BSurfaceGpuAddress);
+	EXPECT_FALSE(tgm_fences::ExecSurfaces::validSubmit(&input.job, sizeof(input), true));
+	input.use.access = TegraGM20BSurfaceWrite | TegraGM20BSurfaceGpuAddress;
+	EXPECT_FALSE(tgm_fences::ExecSurfaces::validSubmit(&input.job, sizeof(input), true));
+	input.use.reserved = 0;
+	EXPECT_TRUE(tgm_fences::ExecSurfaces::validSubmit(&input.job, sizeof(input), true));
+}
+
+TEST_F(Fences, AddressedEventOnlyJobCarriesFullWidthWaitsAndSignals)
+{
+	struct {
+		TegraGM20BAbiSubmit job;
+		TegraGM20BAbiSubmitEvents events;
+		TegraGM20BAbiEventUse uses[2];
+	} input = {{1, 0, 0, TegraGM20BSubmitHasEvents},
+		   {1, 1, 0},
+		   {{UINT64_C(0x100000001), UINT64_MAX - 1}, {2, UINT64_MAX}}};
+
+	EXPECT_TRUE(tgm_fences::ExecSurfaces::validSubmit(&input.job, sizeof(input), true));
+	EXPECT_FALSE(tgm_fences::ExecSurfaces::validSubmit(&input.job, sizeof(input), false));
+	EXPECT_FALSE(tgm_fences::ExecSurfaces::validSubmit(&input.job, sizeof(input) - 1, true));
+	EXPECT_FALSE(tgm_fences::ExecSurfaces::validSubmit(&input.job, sizeof(input) + 1, true));
+	input.events.reserved = 1;
+	EXPECT_FALSE(tgm_fences::ExecSurfaces::validSubmit(&input.job, sizeof(input), true));
+	input.events.reserved = 0;
+	input.uses[0].handle = 0;
+	EXPECT_FALSE(tgm_fences::ExecSurfaces::validSubmit(&input.job, sizeof(input), true));
+}
+
+TEST_F(Fences, EventCountsAreBoundedBeforeReadingAnyRecord)
+{
+	struct {
+		TegraGM20BAbiSubmit job;
+		TegraGM20BAbiSubmitEvents events;
+	} input = {{1, 0, 0, TegraGM20BSubmitHasEvents}, {UINT32_MAX, 1, 0}};
+
+	EXPECT_FALSE(tgm_fences::ExecSurfaces::validSubmit(&input.job, sizeof(input), true));
+	input.events = {1, UINT32_MAX, 0};
+	EXPECT_FALSE(tgm_fences::ExecSurfaces::validSubmit(&input.job, sizeof(input), true));
+	input.events = {16, 17, 0};
+	EXPECT_FALSE(tgm_fences::ExecSurfaces::validSubmit(&input.job, sizeof(input), true));
+	input.events = {0, 0, 0};
+	EXPECT_TRUE(tgm_fences::ExecSurfaces::validSubmit(&input.job, sizeof(input), true));
+	EXPECT_FALSE(tgm_fences::ExecSurfaces::validSubmit(&input.job, sizeof(input.job), true));
+}
+
+TEST_F(Fences, EventTrailerFollowsEveryPushAndResource)
+{
+	struct {
+		TegraGM20BAbiSubmit job;
+		TegraGM20BAbiPush push;
+		TegraGM20BAbiSurfaceUse surface;
+		TegraGM20BAbiSubmitEvents events;
+		TegraGM20BAbiEventUse uses[TegraGM20BMaxJobEvents];
+	} input = {};
+
+	input.job = {1, 1, 1, TegraGM20BSubmitHasEvents | TegraGM20BSubmitVisibilityExplicit};
+	input.push = {0x1000, 1, 0};
+	input.surface = {1, TegraGM20BSurfaceRead, 0};
+	input.events = {16, 16, 0};
+	for (auto &use : input.uses)
+		use = {1, UINT64_MAX};
+	EXPECT_TRUE(tgm_fences::ExecSurfaces::validSubmit(&input.job, sizeof(input), true));
+	input.job.surface_flags &= ~TegraGM20BSubmitHasEvents;
+	EXPECT_FALSE(tgm_fences::ExecSurfaces::validSubmit(&input.job, sizeof(input), true));
+}
+
+TEST_F(Fences, AdmissionTrailerPrecedesEventsAndRequiresExactFraming)
+{
+	struct {
+		TegraGM20BAbiSubmit job;
+		TegraGM20BAbiSurfaceUse use;
+		TegraGM20BAbiSubmitAdmission admission;
+		TegraGM20BAbiSubmitEvents events;
+		TegraGM20BAbiEventUse wait;
+	} input = {{1, 0, 1, TegraGM20BSubmitAdmissionBegin | TegraGM20BSubmitHasEvents},
+		   {1, TegraGM20BSurfaceRead, 0},
+		   {UINT64_MAX, 0},
+		   {1, 0, 0},
+		   {1, 100}};
+
+	EXPECT_TRUE(tgm_fences::ExecSurfaces::validSubmit(&input.job, sizeof(input), true));
+	EXPECT_FALSE(tgm_fences::ExecSurfaces::validSubmit(&input.job, sizeof(input) - 1, true));
+	EXPECT_FALSE(tgm_fences::ExecSurfaces::validSubmit(&input.job, sizeof(input), false));
+	input.admission.cookie = 0;
+	EXPECT_FALSE(tgm_fences::ExecSurfaces::validSubmit(&input.job, sizeof(input), true));
+	input.admission.cookie = 1;
+	input.admission.reserved = 1;
+	EXPECT_FALSE(tgm_fences::ExecSurfaces::validSubmit(&input.job, sizeof(input), true));
+}
+
+TEST_F(Fences, AdmissionFlagsRejectMixedAndIncompleteSequences)
+{
+	struct {
+		TegraGM20BAbiSubmit job;
+		TegraGM20BAbiSubmitAdmission admission;
+	} input = {{1, 0, 0, 0}, {1, 0}};
+
+	constexpr uint32_t accepted[] = {
+		TegraGM20BSubmitAdmissionBegin, TegraGM20BSubmitAdmissionContinue,
+		TegraGM20BSubmitAdmissionBegin | TegraGM20BSubmitAdmissionEnd,
+		TegraGM20BSubmitAdmissionContinue | TegraGM20BSubmitAdmissionEnd,
+		TegraGM20BSubmitAdmissionCancel};
+	for (const auto flags : accepted) {
+		input.job.surface_flags = flags;
+		EXPECT_TRUE(tgm_fences::ExecSurfaces::validSubmit(&input.job, sizeof(input), true));
+	}
+	constexpr uint32_t refused[] = {
+		0, TegraGM20BSubmitAdmissionEnd,
+		TegraGM20BSubmitAdmissionBegin | TegraGM20BSubmitAdmissionContinue,
+		TegraGM20BSubmitAdmissionCancel | TegraGM20BSubmitAdmissionBegin,
+		TegraGM20BSubmitAdmissionCancel | TegraGM20BSubmitHasEvents};
+	for (const auto flags : refused) {
+		input.job.surface_flags = flags;
+		EXPECT_FALSE(
+			tgm_fences::ExecSurfaces::validSubmit(&input.job, sizeof(input), true));
+	}
+}
