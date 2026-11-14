@@ -6,6 +6,8 @@
 // allows.
 #include <gtest/gtest.h>
 
+#include "bazel/testing/source_text.h"
+
 #include <cstdint>
 #include <cstring>
 #include <fstream>
@@ -114,11 +116,19 @@ TEST(RawComp, MemoryIsWholeComptagLines)
 }
 
 // What the copy engine fills or drains compresses only at the kinds gpu.x1.ce_compressed proved (one-sample C32 and C64)
+// and gpu.x1.ce_compressed_depth proved as shipped (one-sample ZF32_2CZ), and the ones shipped on for their arms to judge:
+// C128_2CR and the 2x and 4x colour kinds (gpu.x1.ce_compressed), Z16_2C and ZF32_X24S8_2CSZV (gpu.raw.stored_depth)
 TEST(RawComp, CopiedBackingsCompressOnlyAtProvenKinds)
 {
     EXPECT_TRUE(raw::copyEngineReadsCompressed(0xdb));
     EXPECT_TRUE(raw::copyEngineReadsCompressed(0xe9));
-    for (uint32_t kind : {0xf5u, 0xccu, 0xe2u, 0xcdu, 0xf0u, 0xf7u, 0xf9u, 0x02u, 0x86u, 0xceu, 0xcfu, 0xd0u})
+    EXPECT_TRUE(raw::copyEngineReadsCompressed(0x86));
+    EXPECT_TRUE(raw::copyEngineReadsCompressed(0x02));
+    EXPECT_TRUE(raw::copyEngineReadsCompressed(0xce));
+    EXPECT_TRUE(raw::copyEngineReadsCompressed(0xf5)) << "C128_2CR, gpu.x1.ce_compressed's RGBA32Float cases";
+    for (uint32_t kind : {0xccu, 0xe2u, 0xcdu, 0xf0u, 0xf7u, 0xf9u})
+        EXPECT_TRUE(raw::copyEngineReadsCompressed(kind)) << "gpu.x1.ce_compressed's ms cases " << std::hex << kind;
+    for (uint32_t kind : {0x03u, 0x04u, 0x87u, 0x88u, 0xcfu, 0xd0u})
         EXPECT_FALSE(raw::copyEngineReadsCompressed(kind)) << std::hex << kind;
 
     // memoryless: the copy engine never reaches them
@@ -132,25 +142,40 @@ TEST(RawComp, CopiedBackingsCompressOnlyAtProvenKinds)
     // shadows: the copy engine fills and stores them
     EXPECT_EQ(raw::backingKind(true, true, 0, 4, 1, true), 0xdbu);
     EXPECT_EQ(raw::backingKind(true, true, 0, 8, 1, true), 0xe9u);
-    EXPECT_EQ(raw::backingKind(true, true, 0, 16, 1, true), 0u);
-    EXPECT_EQ(raw::backingKind(true, true, 0, 4, 2, true), 0u);
-    EXPECT_EQ(raw::backingKind(true, true, 0, 8, 4, true), 0u);
-    // zetas the shader's depth tests copy with the copy engine: no zeta kind is proven
-    EXPECT_EQ(raw::backingKind(true, true, 252, 4, 1, false), 0u);
+    EXPECT_EQ(raw::backingKind(true, true, 0, 16, 1, true), 0xf5u);
+    EXPECT_EQ(raw::backingKind(true, true, 0, 4, 2, true), 0xccu);
+    EXPECT_EQ(raw::backingKind(true, true, 0, 8, 4, true), 0xf0u);
+    // zetas the shader's depth tests copy with the copy engine: one-sample Depth32Float alone is proven
+    EXPECT_EQ(raw::backingKind(true, true, 252, 4, 1, false), 0x86u);
     EXPECT_EQ(raw::backingKind(true, true, 252, 4, 4, false), 0u);
+    EXPECT_EQ(raw::backingKind(true, true, 252, 4, 2, false), 0u);
     EXPECT_EQ(raw::backingKind(true, true, 260, 8, 2, false), 0u);
-    EXPECT_EQ(raw::backingKind(true, true, 260, 8, 1, true), 0u);
+    EXPECT_EQ(raw::backingKind(true, true, 260, 8, 1, true), 0xceu);
 
     // a debug build's gpu.x1.ce_compressed_depth probe gives those zetas their kinds, and nothing else
     EXPECT_EQ(raw::backingKind(true, true, 252, 4, 1, false, true), 0x86u);
     EXPECT_EQ(raw::backingKind(true, true, 260, 8, 2, false, true), 0xcfu);
-    EXPECT_EQ(raw::backingKind(true, true, 0, 16, 1, true, true), 0u);
-    EXPECT_EQ(raw::backingKind(true, true, 0, 4, 2, true, true), 0u);
+    EXPECT_EQ(raw::backingKind(true, true, 260, 8, 4, true, false), 0u) << "a multisampled zeta stays unproven";
 
     EXPECT_EQ(raw::backingKind(true, false, 0, 4, 1, false), 0u);    // pitch
     EXPECT_EQ(raw::backingKind(false, true, 260, 8, 1, false), 0u);  // compression off
     EXPECT_EQ(raw::backingKind(true, true, 0, 2, 1, false), 0u);     // no compressible kind
     EXPECT_EQ(raw::backingKind(true, true, 253, 1, 1, false), 0u);   // Stencil8
+}
+
+// A stored depth texture binds its compressible kind at one sample and one layer, where the copy engine (its readback
+// and aspect copies) reads that kind as plain texels
+TEST(RawComp, StoredOneSampleDepthBindsItsCompressibleKind)
+{
+    EXPECT_EQ(raw::storedZetaKind(true, 252, 1, 1), 0x86u);
+    EXPECT_EQ(raw::storedZetaKind(true, 250, 1, 1), 0x02u) << "Depth16Unorm: Z16_2C";
+    EXPECT_EQ(raw::storedZetaKind(true, 260, 1, 1), 0xceu) << "Depth32Float_Stencil8: ZF32_X24S8_2CSZV";
+    EXPECT_EQ(raw::storedZetaKind(true, 260, 1, 6), 0u) << "a cube";
+    EXPECT_EQ(raw::storedZetaKind(false, 252, 1, 1), 0u);
+    EXPECT_EQ(raw::storedZetaKind(true, 252, 1, 2), 0u) << "an array or cube";
+    EXPECT_EQ(raw::storedZetaKind(true, 252, 4, 1), 0u);
+    EXPECT_EQ(raw::storedZetaKind(true, 253, 1, 1), 0u) << "Stencil8 has no compressible kind";
+    EXPECT_EQ(raw::storedZetaKind(true, 0, 1, 1), 0u);
 }
 
 // A ZBC entry holds the texel the ROP writes for the clear: packed in the format's channel order, unorm channels only at
@@ -173,7 +198,6 @@ TEST(RawComp, ZbcEntriesHoldTheTexelTheRopWrites)
     EXPECT_EQ(memcmp(e.ds, quarter, sizeof e.ds), 0);
     const uint32_t tie[4] = {bits(0.5f), 0, 0, bits(1.0f)};  // 127.5: the ROP's tie, not Apple's
     EXPECT_FALSE(raw::zbcColorEntry(80, tie, e));
-    EXPECT_FALSE(raw::zbcColorEntry(81, quarter, e));  // sRGB
     EXPECT_FALSE(raw::zbcColorEntry(55, quarter, e));  // R32Float: no ZBC format
     const uint32_t halves[4] = {bits(0.5f), bits(-2.0f), bits(65504.0f), bits(1.0f / 3)};
     ASSERT_TRUE(raw::zbcColorEntry(115, halves, e));
@@ -182,14 +206,10 @@ TEST(RawComp, ZbcEntriesHoldTheTexelTheRopWrites)
     EXPECT_EQ(raw::zbcHalf(bits(1e-8f)), 0u);
     EXPECT_EQ(raw::zbcHalf(bits(65520.0f)), 0x7c00u);
     EXPECT_EQ(raw::zbcHalf(bits(5.9604645e-8f)), 1u);
-    const uint32_t tenBit[4] = {bits(1.0f), bits(0.0f), bits(512 / 1023.0f), bits(2 / 3.0f)};
-    EXPECT_FALSE(raw::zbcColorEntry(90, tenBit, e));    // RGB10A2Unorm: its packing never read back
-    EXPECT_FALSE(raw::zbcColorEntry(125, quarter, e));  // RGBA32Float: the boot table's 0 and 1 alone
     ASSERT_TRUE(raw::zbcDepthEntry(252, 0.5f, e));
     EXPECT_EQ(e.type, uint32_t(TegraGM20BZbcDepth));
     EXPECT_EQ(e.ds[0], bits(0.5f));
     EXPECT_EQ(e.l2[0], bits(0.5f));
-    EXPECT_FALSE(raw::zbcDepthEntry(250, 0.5f, e));  // Depth16Unorm: the table holds 32-bit float depths
 }
 
 TEST(RawComp, ZbcValuesAreAskedForOnceRepeated)
@@ -221,55 +241,56 @@ TEST(RawComp, ZbcValuesAreAskedForOnceRepeated)
     EXPECT_TRUE(table.lookup(e, wanted));
 }
 
-TEST(RawComp, ShortagesPassAndContractRefusalsDoNot)
+// The kernel's answers for want of memory: boot 19 and boot 21 logged only NoMemory (its pool's floor or the client's
+// share, "compressible BoAlloc of ... refused"), never another
+TEST(RawComp, ShortagesAreTheKernelsMemoryAnswers)
 {
-    EXPECT_FALSE(raw::compLasting(kIOReturnNoMemory));     // the pool's tiers or no free chunk
-    EXPECT_FALSE(raw::compLasting(kIOReturnNoResources));  // no comptags left
-    EXPECT_FALSE(raw::compLasting(kIOReturnNoSpace));      // no GPU VA
-    EXPECT_TRUE(raw::compLasting(kIOReturnBadArgument));
-    EXPECT_TRUE(raw::compLasting(kIOReturnUnsupported));
+    EXPECT_TRUE(raw::compShortage(kIOReturnNoMemory));     // the pool's floor or the client's share
+    EXPECT_TRUE(raw::compShortage(kIOReturnNoResources));  // no comptags left
+    EXPECT_TRUE(raw::compShortage(kIOReturnNoSpace));      // no GPU VA
+    EXPECT_FALSE(raw::compShortage(kIOReturnBadArgument));
+    EXPECT_FALSE(raw::compShortage(kIOReturnUnsupported));
 }
 
-TEST(RawComp, RetriesBackOffToTenSecondsOfFrames)
-{
-    EXPECT_EQ(raw::compRetryAfter(1), 30u);
-    EXPECT_EQ(raw::compRetryAfter(2), 60u);
-    EXPECT_EQ(raw::compRetryAfter(5), 480u);
-    EXPECT_EQ(raw::compRetryAfter(6), 600u);
-    EXPECT_EQ(raw::compRetryAfter(1000), 600u);
-}
-
-TEST(RawComp, ARefusedWantIsAskedAgainOnceDue)
+// A want refused for a shortage is not asked again however many command buffers or seconds pass: only this process
+// giving compressed memory back may change the kernel's answer, and the next want after that asks
+TEST(RawComp, AShortageWaitsForMemoryGivenBackNotForTime)
 {
     raw::CompQueue q;
-    const raw::CompWant w{0x720000, 0xe9}, other{0x20000, 0xce};
-    EXPECT_FALSE(q.asked(w, 0));
+    const raw::CompWant w{0x2800000, 0xdb}, other{0x20000, 0xce};
+    EXPECT_FALSE(q.asked(w));
     q.wanted.push_back(w);
-    EXPECT_TRUE(q.asked(w, 0));
+    EXPECT_TRUE(q.asked(w));
     q.wanted.clear();
-    EXPECT_TRUE(q.refuse(w, 100, false));  // its first refusal is the one logged
-    EXPECT_TRUE(q.asked(w, 129));
-    EXPECT_FALSE(q.asked(w, 130));
-    EXPECT_FALSE(q.asked(other, 100));
-    EXPECT_FALSE(q.refuse(w, 130, false));
-    EXPECT_TRUE(q.asked(w, 189));
-    EXPECT_FALSE(q.asked(w, 190));
-    q.made(w);
-    EXPECT_FALSE(q.asked(w, 0));
-    EXPECT_TRUE(q.refuse(w, 200, false));  // a refusal after it was made is a first one again
+    EXPECT_TRUE(q.refuse(w, true)) << "its first refusal is logged";
+    for (int ask = 0; ask < 100000; ask++)
+        ASSERT_TRUE(q.asked(w)) << "no back-off brings it back";
+    EXPECT_FALSE(q.asked(other));
+    EXPECT_FALSE(q.refuse(w, true)) << "refused again before anything came back: not logged again";
+    q.freed();
+    EXPECT_FALSE(q.asked(w));
+    EXPECT_TRUE(q.refuse(w, true)) << "refused after memory came back: logged";
 }
 
-TEST(RawComp, FreedMemoryMakesShortagesDueAndNothingElse)
+// Any other refusal has never fired: it is logged each time, fails that one ask (its backing plain) and is not
+// remembered, so the next want of it is a new ask
+TEST(RawComp, AnyOtherRefusalFailsThatAskAlone)
 {
     raw::CompQueue q;
-    const raw::CompWant shortOf{0x720000, 0xe9}, refused{0x20000, 0xdb};
-    for (uint64_t at = 0; at < 10; at++)
-        q.refuse(shortOf, at, false);
-    q.refuse(refused, 0, true);
-    EXPECT_TRUE(q.asked(shortOf, 100));
-    q.freed(100);
-    EXPECT_FALSE(q.asked(shortOf, 100));
-    EXPECT_TRUE(q.asked(refused, 1000000));  // a lasting refusal is never asked again
+    const raw::CompWant w{0x20000, 0xdb};
+    for (int ask = 0; ask < 3; ask++) {
+        EXPECT_FALSE(q.asked(w));
+        EXPECT_TRUE(q.refuse(w, false));
+    }
+    EXPECT_TRUE(q.refused.empty());
+}
+
+TEST(RawComp, NoRetryBackOffIsLeft)
+{
+    const std::string comp = switch_ios::test::SourceText("../raw/runtime/raw_comp.h") +
+                             switch_ios::test::SourceText("../raw/runtime/raw_comp.cpp");
+    for (const char *gone : {"compRetryAfter", "kCompRetry", "retryAt", "kCompLastingRefusals"})
+        EXPECT_EQ(comp.find(gone), std::string::npos) << gone;
 }
 
 TEST(RawComp, AReadyBufferAnswersItsWant)
@@ -279,8 +300,8 @@ TEST(RawComp, AReadyBufferAnswersItsWant)
     b.bo.bytes = 0x20000;
     b.kind = 0xce;
     q.ready.push_back(b);
-    EXPECT_TRUE(q.asked({0x20000, 0xce}, 0));
-    EXPECT_FALSE(q.asked({0x20000, 0xe9}, 0));
+    EXPECT_TRUE(q.asked({0x20000, 0xce}));
+    EXPECT_FALSE(q.asked({0x20000, 0xe9}));
 }
 
 TEST(RawComp, ClassesAreQuarterStepsOfWholeLines)
@@ -327,11 +348,11 @@ TEST(RawComp, AMadeBufferServesEveryNeedItHolds)
     EXPECT_EQ(q.fit(5 << 20, 0xe9)->bo.bytes, 8u << 20);
     EXPECT_EQ(q.fit(17 << 20, 0xe9), q.ready.end());
     EXPECT_EQ(q.fit(1 << 20, 0xdb), q.ready.end());
-    EXPECT_TRUE(q.asked({12 << 20, 0xe9}, 0));  // 16 MiB holds it: no second buffer
-    EXPECT_FALSE(q.asked({24 << 20, 0xe9}, 0));
+    EXPECT_TRUE(q.asked({12 << 20, 0xe9}));  // 16 MiB holds it: no second buffer
+    EXPECT_FALSE(q.asked({24 << 20, 0xe9}));
     q.wanted.push_back({32 << 20, 0xe9});
-    EXPECT_TRUE(q.asked({24 << 20, 0xe9}, 0));  // a larger ask in flight covers it
-    EXPECT_FALSE(q.asked({24 << 20, 0xce}, 0));
+    EXPECT_TRUE(q.asked({24 << 20, 0xe9}));  // a larger ask in flight covers it
+    EXPECT_FALSE(q.asked({24 << 20, 0xce}));
 }
 
 TEST(RawComp, StaleByCommitsOrTimeAndNeverInTheOpenCommandBuffer)

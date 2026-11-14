@@ -6,6 +6,7 @@
 #include <os/log.h>
 #include <stdlib.h>
 #include <string.h>
+#include "../../../kits/SwitchServiceWait/SwitchServiceWait.h"
 
 struct NVENCClient {
     io_connect_t connection;
@@ -17,12 +18,9 @@ static io_service_t service(void)
     return IOServiceGetMatchingService(kIOMainPortDefault, IOServiceMatching("TegraNVENC"));
 }
 
-bool nvenc_service_present(void)
+bool nvenc_service_wait(void)
 {
-    const io_service_t s = service();
-    if (s)
-        IOObjectRelease(s);
-    return s != 0;
+    return switch_service_wait("TegraNVENC", TEGRA_NVENC_ABSENT_RESOURCE, 20000);  // E3 comes seconds into boot
 }
 
 static kern_return_t call(NVENCClient *c, uint32_t selector, uint32_t method, const void *in, size_t inSize, void *out,

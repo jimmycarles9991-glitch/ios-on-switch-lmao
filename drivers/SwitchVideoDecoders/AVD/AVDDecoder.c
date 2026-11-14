@@ -500,6 +500,19 @@ static bool clientWantsEightBit(VTVideoDecoderSession session)
     return eightBit420(formats);
 }
 
+// Mode 3's pictures are Rec.709 (hevc_display_mode_for).
+static void retagRec709(Decoder *d)
+{
+    CFTypeRef *tags[] = {&d->matrix, &d->primaries, &d->transfer};
+    CFTypeRef rec709[] = {kCVImageBufferYCbCrMatrix_ITU_R_709_2, kCVImageBufferColorPrimaries_ITU_R_709_2,
+                          kCVImageBufferTransferFunction_ITU_R_709_2};
+    for (int i = 0; i < 3; i++) {
+        if (*tags[i])
+            CFRelease(*tags[i]);
+        *tags[i] = CFRetain(rec709[i]);
+    }
+}
+
 static OSStatus startHEVC(Decoder *d, VTVideoDecoderSession session, CMVideoFormatDescriptionRef format)
 {
     d->avcC = avd_copy_atom(format, CFSTR("hvcC"));
@@ -532,11 +545,15 @@ static OSStatus startHEVC(Decoder *d, VTVideoDecoderSession session, CMVideoForm
                                            sps->chroma_location, sps->chroma_top);
     d->chromaBottom = switch_video_chroma_tag(format, kCMFormatDescriptionExtension_ChromaLocationBottomField,
                                               sps->chroma_location, sps->chroma_bottom);
-    // Mode 2 truncates Rec.709-coded samples; PQ and HLG pictures stay 10-bit for whoever maps their range.
     const bool hdr = d->transfer && (CFEqual(d->transfer, kCVImageBufferTransferFunction_SMPTE_ST_2084_PQ) ||
                                      CFEqual(d->transfer, kCVImageBufferTransferFunction_ITU_R_2100_HLG));
-    const bool display8 = sps->bit_depth == 10 && !hdr && clientWantsEightBit(session);
-    hevc_decoder_display_8bit(d->hevc, display8);
+    const bool rec2020 = d->primaries && CFEqual(d->primaries, kCVImageBufferColorPrimaries_ITU_R_2020);
+    const uint32_t displayMode =
+        hevc_display_mode_for(sps->bit_depth, rec2020, hdr, sps->bit_depth == 10 && clientWantsEightBit(session));
+    const bool display8 = displayMode != 0;
+    hevc_decoder_display_mode(d->hevc, displayMode);
+    if (displayMode == 3)
+        retagRec709(d);
     avd_alpha_start(d, sps->bit_depth == 8);
     OSStatus status;
     avd_set_attributes(d, session, sps->full_range, sps->bit_depth == 10 && !display8, &status);

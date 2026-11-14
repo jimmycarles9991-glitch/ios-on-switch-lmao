@@ -169,48 +169,78 @@ int tgm_order_waits(struct tgm_chan *chan)
 
 static int sync_wait(u64 id, u32 seqno, u64 end)
 {
+	const u32 waiter = (u32)(id % TGM_WAITERS);
+
 	tgm_chan_need_id(id, seqno);
 	for (;;) {
-		u32 seq = nvxnu_wake_seq();
+		u32 seq = tgm_waiter_seq(waiter);
+		tgm_chan_wanted((u32)id, seqno);
 		if (sync_done(id, seqno))
 			return 0;
 		if (nvxnu_nanotime() >= end)
 			return -ETIMEDOUT;
-		if (!nvxnu_idle(seq, end) && tgm_chan_announced_id(id, seqno))
-			nvxnu_wake_due(seq, "fence", seqno);
+		if (!tgm_waiter_idle(waiter, seq, end) && tgm_chan_announced_id(id, seqno))
+			tgm_waiter_unwoken(waiter, seq, seqno);
 	}
 }
 
+static unsigned int live_count(void)
+{
+	struct tgm_chan *chan = NULL;
+	unsigned int n = 0;
+
+	mutex_lock(&tgm_live_lock);
+	list_for_each_entry(chan, &tgm_live_chans, live)
+	{
+		if (n < TGM_SYNC_MAX)
+			n++;
+	}
+	mutex_unlock(&tgm_live_lock);
+	return n;
+}
+
+#if TGM_STATS
+static u32 syncs_inside;
+#endif
+
+/* Each caller's own snapshot: no lock is held while it sleeps, and a sync never waits for work submitted after it
+ * started. Channels are appended to tgm_live_chans, so every channel counted and still live is among the first `n`. */
 int tegra_gm20b_sync_for_cpu(const void *va, uint64_t bytes, uint64_t timeout_ns)
 {
-	static struct {
+	struct sync_want {
 		u64 id;
 		u32 seqno;
-	} want[TGM_SYNC_MAX]; /* 8 KiB: not on the kernel stack; sync_lock */
-
-	static DEFINE_MUTEX(sync_lock);
+	} *want = NULL;
 	struct tgm_chan *chan = NULL;
 	enum tgm_hang verdict = TGM_HANG_STUCK;
+	unsigned int capacity = live_count();
 	unsigned int n = 0;
 	unsigned int i = 0;
 	int ret = 0;
 	u64 end = 0;
 
-	mutex_lock(&sync_lock);
+	if (!capacity)
+		return 0;
+	want = kmalloc_array(capacity, sizeof(*want), GFP_KERNEL);
+	if (!want) {
+		nvxnu_log("tegra-gm20b: CPU sync refused: no memory for %u channels' seqnos\n",
+			  capacity);
+		return -ENOMEM;
+	}
+#if TGM_STATS
+	if (__atomic_fetch_add(&syncs_inside, 1, __ATOMIC_RELAXED))
+		tgm_stats_unlocked(TGM_UNLOCKED_SYNC_BESIDE, 0);
+#endif
 	mutex_lock(&tgm_live_lock);
 	list_for_each_entry(chan, &tgm_live_chans, live)
 	{
-		if (n < TGM_SYNC_MAX) {
+		if (n < capacity) {
 			want[n].id = chan->id;
 			want[n].seqno = READ_ONCE(chan->submitted);
 			n++;
 		}
 	}
 	mutex_unlock(&tgm_live_lock);
-	if (!n) {
-		mutex_unlock(&sync_lock);
-		return 0;
-	}
 	end = nvxnu_nanotime() + timeout_ns;
 	for (i = 0; i < n && !ret; i++) {
 		ret = sync_wait(want[i].id, want[i].seqno, end);
@@ -231,7 +261,10 @@ int tegra_gm20b_sync_for_cpu(const void *va, uint64_t bytes, uint64_t timeout_ns
 					nvxnu_nanotime() + 2 * TGM_ISOLATE_NS);
 		}
 	}
-	mutex_unlock(&sync_lock);
+	kfree(want);
+#if TGM_STATS
+	__atomic_fetch_sub(&syncs_inside, 1, __ATOMIC_RELAXED);
+#endif
 	nvxnu_dcache_clean_inval(va, bytes);
 	return ret;
 }
@@ -283,6 +316,7 @@ static void writer_wait(u32 uid, u32 seqno, const struct tgm_relayout_writer *ac
 			u32 nacquired)
 {
 	const u64 start = nvxnu_nanotime();
+	const u32 waiter = uid % TGM_WAITERS;
 	struct tgm_chan *chan = NULL;
 	enum tgm_hang verdict = TGM_HANG_STUCK;
 	u32 late = 0;
@@ -292,14 +326,16 @@ static void writer_wait(u32 uid, u32 seqno, const struct tgm_relayout_writer *ac
 		const u64 end = nvxnu_nanotime() + TGM_WRITER_HANG_NS;
 
 		for (;;) {
-			const u32 seq = nvxnu_wake_seq();
+			const u32 seq = tgm_waiter_seq(waiter);
 
+			tgm_chan_wanted(uid, seqno);
 			if (tgm_writer_done(uid, seqno))
 				return;
 			if (nvxnu_nanotime() >= end)
 				break;
-			if (!nvxnu_idle(seq, end) && tgm_chan_announced_uid(uid, seqno))
-				nvxnu_wake_due(seq, "fence", seqno);
+			if (!tgm_waiter_idle(waiter, seq, end) &&
+			    tgm_chan_announced_uid(uid, seqno))
+				tgm_waiter_unwoken(waiter, seq, seqno);
 		}
 		if (tgm_gpu.stage < 3)
 			continue;

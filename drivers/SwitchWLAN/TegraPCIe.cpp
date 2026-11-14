@@ -88,12 +88,12 @@ enum : uint32_t {
     PMC_PWRGATE_TOGGLE = 0x430,
     PMC_REMOVE_CLAMPING = 0x434,
     PMC_PWRGATE_STATUS = 0x438,
-    PMC_IO_DPD_REQ = 0x5B8,
     PMC_IO_DPD_STATUS = 0x5BC,
 };
 
-constexpr uint32_t kPartPcie = 3;                              // TEGRA_POWERGATE_PCIE
-constexpr uint32_t kDpdPexPads = 7u << 4, kDpdOff = 1u << 30;  // PEX_BIAS, PEX_CLK1, PEX_CLK2 (Linux pmc.c)
+constexpr uint32_t kPartPcie = 3;             // TEGRA_POWERGATE_PCIE
+constexpr uint32_t kDpdPexPads = 7u << 4;     // PEX_BIAS, PEX_CLK1, PEX_CLK2 (Linux pmc.c)
+constexpr unsigned kDpdPexPad[] = {4, 5, 6};  // the same, as the kit's pad numbers
 
 // MC SMMU (hekate bdk/mem/mc_t210.h): bit 31 of a client's ASID register routes its DMA through the SMMU.
 constexpr uint32_t kMcSmmuAfiAsid = 0x238, kAsidEnable = 1u << 31;
@@ -360,8 +360,13 @@ bool TegraPcie::powerUp(char *why, size_t whyLength)
     if (!plle(why, whyLength))
         return false;
     if (pmc_.r32(PMC_IO_DPD_STATUS) & kDpdPexPads) {
-        pmc_.w32(PMC_IO_DPD_REQ, kDpdOff | kDpdPexPads);
-        pmc_.wait(PMC_IO_DPD_STATUS, kDpdPexPads, 0, 250000);
+        for (const unsigned pad : kDpdPexPad) {
+            if (!switch_pmc_io_pad_on(pad)) {
+                snprintf(why, whyLength, "PEX pad %u stays in deep power-down (PMC IO_DPD_STATUS %08x)", pad,
+                         pmc_.r32(PMC_IO_DPD_STATUS));
+                return false;
+            }
+        }
     }
     // The pad control block is shared with XUSB (drivers/SwitchUSB): released, never put back in reset.
     car_.w32(RST_DEV_W_CLR, kWPadctl);

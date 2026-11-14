@@ -45,6 +45,7 @@ uint32_t memoryCount, syncpointCount = 160, maps, execs, roomWaits, failureRelea
 int vmFailures, releaseFailures;
 volatile uint32_t fence;
 std::vector<switch_gpu_backing_token> submittedTokens;
+std::vector<uint64_t> execOrder;
 uint32_t submittedWords[TGM_SYNCPT_INCR_DWORDS];
 int nextExecError;
 bool pushVolatile;
@@ -163,6 +164,10 @@ extern "C" int tgm_vm_new(tgm_vm **out)
 	}
 	*out = &space;
 	return 0;
+}
+
+extern "C" void tgm_stats_unlocked(enum tgm_unlocked, uint64_t)
+{
 }
 
 extern "C" void tgm_vm_del(tgm_vm **vm)
@@ -310,11 +315,13 @@ extern "C" void switch_gpu_chan_submit_leave()
 {
 }
 
+std::function<int()> roomWait;
+
 extern "C" int switch_gpu_chan_wait_submission_room(tgm_chan *, const tgm_push *, uint32_t,
 						    uint32_t, const tgm_prof *)
 {
 	++roomWaits;
-	return 0;
+	return roomWait ? roomWait() : 0;
 }
 
 extern "C" int switch_gpu_chan_exec_visibility(tgm_chan *chan, const tgm_push *push, uint32_t count,
@@ -334,6 +341,7 @@ extern "C" int switch_gpu_chan_exec_visibility(tgm_chan *chan, const tgm_push *p
 	std::copy_n(pushWords.data() + (push->va - (1ULL << 20)) / 4, TGM_SYNCPT_INCR_DWORDS,
 		    submittedWords);
 	submittedTokens.assign(dependencies, dependencies + dependencyCount);
+	execOrder.push_back(dependencies[0].value);
 	*sequence = ++chan->submitted;
 	return 0;
 }
@@ -873,4 +881,81 @@ TEST_F(Bridge, ANotifyOnAFinishedBridgeIsDeliveredByRetirementNotInline)
 	pump();
 	EXPECT_EQ(heard, -5);
 	release(bridge);
+}
+
+// A submission sleeping for ring room holds the queue's turn, not its lock
+class BridgeRoom : public Bridge
+{
+protected:
+	std::promise<void> waiting, room;
+
+	std::future<switch_gpu_bridge *> submitWaitingForRoom(switch_gpu_backing_token source)
+	{
+		nextExecError = -11;
+		roomWait = [this] {
+			waiting.set_value();
+			room.get_future().wait();
+			return 0;
+		};
+		auto submitted = std::async(std::launch::async, [source] {
+			switch_gpu_bridge *bridge = nullptr;
+			EXPECT_EQ(switch_gpu_bridge_submit(&source, 1, &bridge), 0);
+			return bridge;
+		});
+		waiting.get_future().wait();
+		return submitted;
+	}
+
+	void TearDown() override
+	{
+		roomWait = nullptr;
+		Bridge::TearDown();
+	}
+};
+
+TEST_F(BridgeRoom, TheQueueLockIsFreeWhileASubmissionWaitsForRoom)
+{
+	using namespace std::chrono_literals;
+	auto first = token(170), second = token(171);
+	statuses[key(first)] = 0;
+	statuses[key(second)] = 0;
+	auto *earlier = submit({first});
+	ASSERT_NE(earlier, nullptr);
+	auto waiter = submitWaitingForRoom(second);
+	auto status = std::async(std::launch::async, [earlier] {
+		return switch_gpu_bridge_status(earlier);
+	});
+	// base 1: a status read waited behind the room wait
+	const int statusWaited = status.wait_for(500ms) == std::future_status::timeout ? 1 : 0;
+	room.set_value();
+	EXPECT_EQ(statusWaited, 0);
+	EXPECT_EQ(status.get(), 0);
+	auto *later = waiter.get();
+	ASSERT_NE(later, nullptr);
+	held.push_back(later);
+	EXPECT_EQ(roomWaits, 1u);
+}
+
+TEST_F(BridgeRoom, ASubmissionThatArrivesDuringARoomWaitGoesAfterIt)
+{
+	using namespace std::chrono_literals;
+	auto first = token(172), second = token(173);
+	statuses[key(first)] = 0;
+	statuses[key(second)] = 0;
+	auto waiter = submitWaitingForRoom(first);
+	auto behind = std::async(std::launch::async, [second] {
+		switch_gpu_bridge *bridge = nullptr;
+		EXPECT_EQ(switch_gpu_bridge_submit(&second, 1, &bridge), 0);
+		return bridge;
+	});
+	EXPECT_EQ(behind.wait_for(100ms), std::future_status::timeout);
+	room.set_value();
+	auto *earlier = waiter.get(), *later = behind.get();
+	ASSERT_NE(earlier, nullptr);
+	ASSERT_NE(later, nullptr);
+	held.push_back(earlier);
+	held.push_back(later);
+	ASSERT_GE(execOrder.size(), 2u);
+	EXPECT_EQ(execOrder[execOrder.size() - 2], first.value);
+	EXPECT_EQ(execOrder.back(), second.value);
 }

@@ -4,15 +4,20 @@
 // either side of the temperature last reported; when the group leaves it, the interrupt's work-loop action re-centres
 // the window on the new reading, as L4T's tegra_thermctl_set_trips does (the group's interrupts off, thresholds written,
 // back on), and hands the reading to every listener. Each arming also sets THERMTRIP and the PMC's reset on it, the last
-// resort above SwitchThermal's own shutdown (SwitchThermalLimits.h), which SC7 loses with the rest of SOC_THERM.
+// resort above SwitchThermal's own shutdown (SwitchThermalLimits.h), and L4T's hardware throttle
+// (SwitchSocThermThrottle.h), both of which SC7 loses with the rest of SOC_THERM.
 #include <IOKit/IOInterruptEventSource.h>
 #include <IOKit/IOLib.h>
 #include <IOKit/IOWorkLoop.h>
+#include <sys/sysctl.h>
 #include "../ArmGIC/SwitchInterrupts.h"
+#include "../../kits/SwitchCAR/SwitchCAR.h"
 #include "../../kits/SwitchCAR/SwitchPMC.h"
 #include "../../kits/SwitchMMIO/SwitchMMIO.h"
+#include "../../kits/SwitchSysctl/SwitchSysctl.h"
 #include "SwitchSensors.h"
 #include "SwitchSocTherm.h"
+#include "SwitchSocThermThrottle.h"
 #include "SwitchSocThermWindow.h"
 
 namespace {
@@ -48,10 +53,11 @@ class SwitchSocTherm : public OSObject {
     } listeners[kListeners] = {};
 
     unsigned listenerCount = 0;
-    bool unexpectedLogged = false, thermtripLogged = false;
+    bool unexpectedLogged = false, thermtripLogged = false, throttleLogged = false;
 
     static void fired(OSObject *owner, IOInterruptEventSource *, int);
     void armThermtrip(volatile uint8_t *mapped);
+    void armThrottle(volatile uint8_t *mapped);
     static IOReturn armAction(OSObject *owner, void *mapped, void *, void *, void *);
     static IOReturn listenAction(OSObject *owner, void *moved, void *ctx, void *added, void *);
     void tell(unsigned group, int millic);
@@ -123,6 +129,7 @@ void SwitchSocTherm::fired(OSObject *owner, IOInterruptEventSource *, int)
         centre(regs, group, millic);
         self->tell(group, millic);
     }
+    status &= ~SWITCH_SOCTHERM_INTR_THROTTLE_LEVELS;
     if (status) {
         switch_mmio_write32(regs, SWITCH_SOCTHERM_THERMCTL_INTR_STATUS, status);
         if (!self->unexpectedLogged)
@@ -150,13 +157,33 @@ void SwitchSocTherm::armThermtrip(volatile uint8_t *mapped)
           SWITCH_THERMAL_SHUTDOWN_PLLX_MILLIC % 1000 / 100, ctl, sensor);
 }
 
+void SwitchSocTherm::armThrottle(volatile uint8_t *mapped)
+{
+    switch_soctherm_throttle_vectors(mapped);
+    switch_car_rmw(SWITCH_CAR_SUPER_CCLKG_DIVIDER, 0, SWITCH_CAR_CDIV_USE_THERM);
+    switch_soctherm_throttle_monitors(mapped);
+    if (throttleLogged)
+        return;
+    throttleLogged = true;
+    char line[320];
+    const switch_soctherm_throttle_state state =
+        switch_soctherm_throttle_read(mapped, switch_car_read(SWITCH_CAR_SUPER_CCLKG_DIVIDER));
+    switch_soctherm_throttle_format(&state, line, sizeof(line));
+    IOLog("SwitchSocTherm: hardware throttle as L4T sets it on T210B01: %s\n", line);
+}
+
 IOReturn SwitchSocTherm::armAction(OSObject *owner, void *mapped, void *, void *, void *)
 {
     auto *self = static_cast<SwitchSocTherm *>(owner);
     volatile uint8_t *regs = static_cast<volatile uint8_t *>(mapped);
     __atomic_store_n(&self->regs, regs, __ATOMIC_RELEASE);
-    if (regs)
+    if (regs) {
         self->armThermtrip(regs);
+        self->armThrottle(regs);
+    } else {
+        // The wake's bring-up resets SOC_THERM next: the CPU's divider leaves its pulse skipper first, as at boot.
+        switch_car_rmw(SWITCH_CAR_SUPER_CCLKG_DIVIDER, SWITCH_CAR_CDIV_USE_THERM, 0);
+    }
     for (unsigned group = 0; regs && group < SWITCH_SOCTHERM_GROUPS; ++group) {
         const int millic = groupMillic(regs, group);
         switch_mmio_write32(regs, SWITCH_SOCTHERM_THERMCTL_INTR_STATUS,
@@ -194,6 +221,36 @@ bool SwitchSocTherm::listen(switch_soctherm_moved moved, void *ctx)
 }
 
 namespace {
+volatile uint8_t *armedSocTherm()
+{
+    const SwitchSocTherm *socTherm = __atomic_load_n(&gSocTherm, __ATOMIC_ACQUIRE);
+    return socTherm ? socTherm->armedRegs() : nullptr;
+}
+
+#if DEVELOPMENT || DEBUG
+int throttleSysctl(struct sysctl_oid *, void *, int, struct sysctl_req *req)
+{
+    char line[320] = "down";
+    if (volatile uint8_t *regs = armedSocTherm()) {
+        const switch_soctherm_throttle_state state =
+            switch_soctherm_throttle_read(regs, switch_car_read(SWITCH_CAR_SUPER_CCLKG_DIVIDER));
+        switch_soctherm_throttle_format(&state, line, sizeof(line));
+    }
+    return SYSCTL_OUT(req, line, strlen(line) + 1);
+}
+
+struct sysctl_oid gThrottleOid;
+
+void registerThrottleSysctl()
+{
+    switch_sysctl_oid(&gThrottleOid, &sysctl__kern_children, "switch_soctherm",
+                      static_cast<int>(CTLTYPE_STRING | CTLFLAG_RD | CTLFLAG_LOCKED), throttleSysctl, "A",
+                      "SOC_THERM's hardware throttle: its vectors, the CPU and GPU throttle now, heavy entries and OC "
+                      "events since boot");
+    sysctl_register_oid(&gThrottleOid);
+}
+#endif
+
 // SwitchThermal may listen before SwitchSensors arms SOC_THERM: whichever comes first makes it.
 SwitchSocTherm *shared()
 {
@@ -204,8 +261,12 @@ SwitchSocTherm *shared()
     SwitchSocTherm *none = nullptr;
     if (!fresh)
         return nullptr;
-    if (__atomic_compare_exchange_n(&gSocTherm, &none, fresh, false, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE))
+    if (__atomic_compare_exchange_n(&gSocTherm, &none, fresh, false, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
+#if DEVELOPMENT || DEBUG
+        registerThrottleSysctl();
+#endif
         return fresh;
+    }
     fresh->release();
     return none;
 }
@@ -219,8 +280,7 @@ extern "C" void switch_soctherm_armed(volatile unsigned char *regs)
 
 extern "C" int switch_soctherm_read(enum switch_soctherm_group group, int *millic)
 {
-    const SwitchSocTherm *socTherm = __atomic_load_n(&gSocTherm, __ATOMIC_ACQUIRE);
-    volatile uint8_t *regs = socTherm ? socTherm->armedRegs() : nullptr;
+    volatile uint8_t *regs = armedSocTherm();
     if (!regs || group >= SWITCH_SOCTHERM_GROUPS)
         return -1;
     *millic = groupMillic(regs, group);
@@ -232,3 +292,11 @@ extern "C" int switch_soctherm_listen(switch_soctherm_moved moved, void *ctx)
     SwitchSocTherm *socTherm = shared();
     return socTherm && socTherm->listen(moved, ctx) ? 0 : -1;
 }
+
+#if DEVELOPMENT || DEBUG
+extern "C" unsigned int switch_soctherm_gpu_throttle_status(void)
+{
+    volatile uint8_t *regs = armedSocTherm();
+    return regs ? switch_mmio_read32(regs, SWITCH_SOCTHERM_GPU_PSKIP_STATUS) : ~0u;
+}
+#endif

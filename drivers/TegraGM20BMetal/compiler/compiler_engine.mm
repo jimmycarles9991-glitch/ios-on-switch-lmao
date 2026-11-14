@@ -57,8 +57,6 @@ raw::Digest rulesDigest(const raw::PackRules &r)
 
 struct Engine::State {
     std::mutex opening;
-    bool opened = false, compiles = false;
-    std::string openRefusal;
     EngineInputs inputs;
     uint64_t stack = 0;
     raw::Pack pack;
@@ -94,18 +92,16 @@ bool Engine::openCompiler(std::string &why)
 {
     State &s = *state_;
     std::lock_guard<std::mutex> l(s.opening);
-    if (s.opened)
-        return s.compiles ? true : (why = s.openRefusal, false);
-    s.opened = true;
+    if (s.direct)
+        return true;
 #if SWITCH_DEBUG
     const uint64_t began = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
 #endif
     if (!native_bridge_metal_compile_open(s.inputs.nvk.c_str())) {
-        s.openRefusal = std::string("no compile context: ") + nmb_last_error();
-        return why = s.openRefusal, false;
+        why = std::string("no compile context: ") + nmb_last_error();
+        return false;
     }
     s.direct = std::make_unique<raw::Direct>(s.pack);
-    s.compiles = true;
 #if SWITCH_DEBUG
     os_log(logger(), "SwitchShaderCompiler: compile context opened for its first compile in %llu ms",
            (unsigned long long)((clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - began) / 1000000));
@@ -121,7 +117,7 @@ raw::Digest Engine::rules() const
 int32_t Engine::compile(const Prepared &p, std::string &entry, std::string &why)
 {
     if (!openCompiler(why))
-        return TegraGM20BCompileUnavailable;
+        return TegraGM20BCompileFailed;
     State &s = *state_;
     LibraryCache &cache = *s.libraries;
     const Libraries libraries = [&cache](const raw::RequestLibrary &l, std::string &failed) {

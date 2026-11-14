@@ -277,6 +277,28 @@ std::vector<Layout> layouts()
 }
 
 // Each layout's copies on the textures the raw path holds; the rest listed
+// RAW-31: a one-level 2D texture of shared storage in memory of its own is block-linear, as a private one is; one over a
+// buffer stays pitch (the buffer's binding names its rows)
+TEST_F(FacadeCopies, ASharedTextureOfItsOwnMemoryIsBlockLinear)
+{
+    MTLTextureDescriptor *d = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatBGRA8Unorm
+                                                                                 width:64
+                                                                                height:64
+                                                                             mipmapped:NO];
+    d.storageMode = MTLStorageModeShared;
+    d.usage = MTLTextureUsageShaderRead;
+    id<MTLTexture> shared = [gDevice newTextureWithDescriptor:d];
+    ASSERT_TRUE([(id)shared isKindOfClass:[RMTexture class]]);
+    const RMTexture *t = (RMTexture *)shared;
+    ASSERT_TRUE(t->_rawOk);
+    EXPECT_TRUE(t->_raw.blockLinear);
+    EXPECT_FALSE(t->_raw.wc);
+    id<MTLBuffer> rows = [gDevice newBufferWithLength:256 * 64 options:MTLResourceStorageModeShared];
+    id<MTLTexture> over = [rows newTextureWithDescriptor:d offset:0 bytesPerRow:256];
+    ASSERT_TRUE([(id)over isKindOfClass:[RMTexture class]]);
+    EXPECT_FALSE(((RMTexture *)over)->_raw.blockLinear);
+}
+
 TEST_F(FacadeCopies, EveryLayoutMetalTakesOnATextureTheRawPathHoldsIsItsToo)
 {
     std::vector<std::string> refused, held, notHeld;

@@ -11,10 +11,12 @@
 namespace raw {
 namespace {
 
+#if SWITCH_RAW_DIAGNOSTICS
 uint64_t nowUs()
 {
     return clock_gettime_nsec_np(CLOCK_UPTIME_RAW) / 1000;
 }
+#endif
 
 #if SWITCH_RAW_DIAGNOSTICS
 thread_local uint64_t tSlotWaitUs;
@@ -149,8 +151,8 @@ void Compiler::runTask(void *context)
     task->work();
 }
 
-Compiler::Compiler(RecordCache *cache, Make make, uint64_t retryUs)
-    : cache_(cache), make_(std::move(make)), retryUs_(retryUs),
+Compiler::Compiler(RecordCache *cache, Make make)
+    : cache_(cache), make_(std::move(make)),
       queue_(dispatch_queue_create(
           "com.brunostjohn.switch.raw.compile",
           dispatch_queue_attr_make_with_qos_class(DISPATCH_QUEUE_CONCURRENT, QOS_CLASS_USER_INITIATED, 0))),
@@ -172,8 +174,7 @@ Compiler::State Compiler::ask(const CacheKey &k, Done done, const RuntimeRecord 
     std::lock_guard<raw::Mutex> l(lock_);
     const auto [it, first] = entries_.try_emplace(k.name());
     Entry &e = it->second;
-    uint64_t wait = 0;
-    if (first || (retryable(e, wait) && wait == 0)) {
+    if (first || e.state == State::Failed) {
         e.state = State::Pending;
         if (done)
             e.waiters.push_back(std::move(done));
@@ -185,16 +186,6 @@ Compiler::State Compiler::ask(const CacheKey &k, Done done, const RuntimeRecord 
     if (record)
         *record = e.record.get();
     return e.state;
-}
-
-// lock_ held: whether `e` failed and may be tried again, and in `wait` how long until then
-bool Compiler::retryable(const Entry &e, uint64_t &wait) const
-{
-    if (e.state != State::Failed || e.failures > kRetries)
-        return false;
-    const uint64_t due = e.failedUs + (retryUs_ << (2 * (e.failures - 1))), now = nowUs();
-    wait = due > now ? due - now : 0;
-    return true;
 }
 
 RecordCache::Found Compiler::lookup(const CacheKey &k, RuntimeRecord &record, std::string &why)
@@ -247,13 +238,6 @@ void Compiler::keep(const CacheKey &k, RecordCache::Found found, const RuntimeRe
     it->second.why = why;
     if (found == RecordCache::Found::Record)
         it->second.record = std::make_unique<RuntimeRecord>(record);
-}
-
-bool Compiler::retryAfter(const CacheKey &k, uint64_t &us) const
-{
-    std::lock_guard<raw::Mutex> l(lock_);
-    const auto it = entries_.find(k.name());
-    return it != entries_.end() && retryable(it->second, us);
 }
 
 // lock_ held
@@ -312,10 +296,6 @@ std::vector<Compiler::Done> Compiler::settle(const CacheKey &k, Outcome outcome,
     (void)found;
     (void)began;
 #endif
-    if (outcome == Outcome::Failed) {
-        e.failures++;
-        e.failedUs = nowUs();
-    }
     e.state = outcome == Outcome::Made ? State::Ready : outcome == Outcome::Refused ? State::Refused : State::Failed;
     e.maker = nullptr;
     settled_.notify_all();
@@ -350,7 +330,7 @@ void Compiler::run(void *context)
     c.idle_.notify_all();
 }
 
-Compiler::State Compiler::makeNow(const CacheKey &k, RuntimeRecord &record, std::string &why, bool again)
+Compiler::State Compiler::makeNow(const CacheKey &k, RuntimeRecord &record, std::string &why)
 {
     switch (lookup(k, record, why)) {
     case RecordCache::Found::Record:
@@ -366,9 +346,7 @@ Compiler::State Compiler::makeNow(const CacheKey &k, RuntimeRecord &record, std:
         Entry &e = it->second;
         if (!first && e.state == State::Pending && e.maker)
             waitForMaker(l, e);
-        uint64_t wait = 0;
-        if (!first && e.state != State::Pending &&
-            (e.state != State::Failed || !retryable(e, wait) || (wait && !again))) {
+        if (!first && e.state != State::Pending && e.state != State::Failed) {
             if (e.state == State::Ready)
                 record = *e.record;
             return e.state;

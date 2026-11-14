@@ -9,8 +9,8 @@
 //     L4T's soctherm.c does for "nvidia,tegra210b01-soctherm" (tegra210-soctherm.c tegra210b01_tsensors, fuse
 //     calibration from tsensor-fuse.c; clocks 51 MHz from PLLP and 400 kHz from CLK_M, tegra210-soc-base.dtsi). The
 //     hardware converts continuously; a read is the TS_*_STATUS1 register at the moment thermalmonitord asks (its own
-//     5 s cadence, through its read path: no timer here). Once up, SOC_THERM's group thresholds and their interrupt
-//     belong to SwitchSocTherm.cpp; no throttle or THERMTRIP is set up.
+//     5 s cadence, through its read path: no timer here). Once up, SOC_THERM's group thresholds and their interrupt,
+//     THERMTRIP and the hardware throttle belong to SwitchSocTherm.cpp.
 //   * TMP451 (SwitchThermal): SwitchThermal's last good reading of the SoC diode and the PCB, which it takes on every
 //     ALERT (the sensor's window around the fan levels) and every degree SOC_THERM's die groups move; once SwitchThermal
 //     loses the sensor it is a read failure. One reader of the chip, the fan's.
@@ -41,6 +41,7 @@
 #include "SwitchPower.h"
 #include "SwitchSensors.h"
 #include "SwitchSocTherm.h"
+#include "../../kits/SwitchCAR/SwitchCAR.h"
 #include "../../kits/SwitchMMIO/SwitchMMIOKernel.h"
 
 #ifndef SWITCH_IPSW_BUILD
@@ -56,10 +57,8 @@ constexpr vm_offset_t kCarPA = 0x60006000, kFusePA = 0x7000F800, kSocThermPA = 0
 enum : uint32_t {
     RST_DEVICES_U = 0x00c,
     CLK_OUT_ENB_U = 0x018,
-    MISC_CLK_ENB = 0x048,
     RST_DEV_U_SET = 0x310,
     RST_DEV_U_CLR = 0x314,
-    CLK_ENB_H_SET = 0x328,
     CLK_ENB_U_SET = 0x330,
     CLK_OUT_ENB_V = 0x360,
     CLK_SOURCE_TSENSOR = 0x3b8,
@@ -70,7 +69,6 @@ enum : uint32_t {
 constexpr uint32_t kSocThermBit = 1u << 14, kTsensorBit = 1u << 4;
 constexpr uint32_t kSocThermSource = (2u << 29) | ((408000 / 51000 - 1) * 2u);  // PLLP / 8 = 51 MHz
 constexpr uint32_t kTsensorSource = (2u << 30) | ((19200 / 400 - 1) * 2u);      // CLK_M / 48 = 400 kHz
-constexpr uint32_t kFuseClock = 1u << 7, kFuseVisible = 1u << 28;  // as SwitchThermal, TegraDFLL, TegraGM20B
 constexpr uint32_t FUSE_CACHE = 0x100;
 
 // SOC_THERM (Linux soctherm.h / soctherm.c).
@@ -138,9 +136,7 @@ bool socThermStart()
         return false;
     }
     // Fuses readable (the fuse clock and the fuse cache's visibility), then the calibration words.
-    switch_mmio_write32(car, CLK_ENB_H_SET, kFuseClock);
-    switch_mmio_write32(car, MISC_CLK_ENB, switch_mmio_read32(car, MISC_CLK_ENB) | kFuseVisible);
-    (void)switch_mmio_read32(car, MISC_CLK_ENB);
+    switch_car_fuse_readable();
     const uint32_t common = switch_mmio_read32(fuse, FUSE_CACHE + SWITCH_FUSE_TSENSOR_COMMON);
     const switch_tsensor_shared shared = switch_tsensor_shared_calib(common);
     uint32_t calib[SWITCH_SOCTHERM_SENSORS];

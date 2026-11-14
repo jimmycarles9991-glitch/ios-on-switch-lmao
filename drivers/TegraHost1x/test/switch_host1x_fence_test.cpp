@@ -111,6 +111,9 @@ extern "C" void switch_car_clock_enable(unsigned)
 extern "C" void switch_car_reset_deassert(unsigned)
 {}
 
+extern "C" void tegra_mc_hot_reset(uint32_t, uint32_t, bool)
+{}
+
 bool switch_dma_alloc(switch_dma_buffer *out, size_t size, uint64_t, IOOptionBits)
 {
     if (gChannelAllocated == 2 * TEGRA_HOST1X_CHANNELS || size > sizeof(gChannelBuffers[0]))
@@ -191,6 +194,31 @@ TEST_F(Host1xFence, AWaitTheEngineNeverFinishesTimesOutAndDisarms)
     };
     EXPECT_EQ(tegra_host1x_syncpt_wait(167, 1, 1000), TEGRA_HOST1X_ETIMEDOUT);
     EXPECT_EQ(reg(0xf00 + 4 * (167 / 32)) & (1u << (167 % 32)), 1u << (167 % 32));
+}
+
+// An engine whose falcon parked on an error never reaches the threshold: the error line moves the engine's error word
+// and kicks the syncpoint, which wakes its thread waiters; the wait ends at once with TEGRA_HOST1X_EFALCON, its fence
+// taken off the list. A word unmoved since the caller's epoch ends nothing.
+TEST_F(Host1xFence, AWaitEndsAtOnceWhenTheEnginesFalconErrorWordMovesAndItsSyncpointIsKicked)
+{
+    value(175) = 0;
+    static uint32_t errors;
+    static unsigned kicked;
+    errors = 4;
+    switch_test_sleep = [](uint64_t) {
+        const unsigned before = switch_test_wakeups;
+        __atomic_store_n(&errors, 5u, __ATOMIC_RELEASE);
+        tegra_host1x_syncpt_kick(175);
+        kicked = switch_test_wakeups - before;
+        return THREAD_AWAKENED;
+    };
+    EXPECT_EQ(tegra_host1x_syncpt_wait_unless(175, 1, 1000, &errors, 4), TEGRA_HOST1X_EFALCON);
+    EXPECT_EQ(kicked, 1u) << "the kick wakes the syncpoint's waiter";
+    EXPECT_EQ(reg(0xf00 + 4 * (175 / 32)) & (1u << (175 % 32)), 1u << (175 % 32)) << "its threshold disarmed";
+    switch_test_sleep = [](uint64_t) {
+        return THREAD_TIMED_OUT;
+    };
+    EXPECT_EQ(tegra_host1x_syncpt_wait_unless(175, 1, 1000, &errors, 5), TEGRA_HOST1X_ETIMEDOUT);
 }
 
 TEST_F(Host1xFence, AReachedWaitTheInterruptMissedIsLostAfterOneGrace)

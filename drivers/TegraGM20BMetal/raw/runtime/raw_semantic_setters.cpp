@@ -7,7 +7,7 @@ static uint32_t bindStride(const Cmd &c)
     return c.x && c.x <= raw::kStaticStride ? uint32_t(c.x - 1) : raw::kStaticStride;
 }
 
-bool RMCommandPlan::setter(const Cmd &c, const std::vector<uint64_t> &extra)
+bool RMCommandPlan::setter(const Cmd &c, const uint64_t *extra)
 {
     const bool compute = c.op >= OpKernelState && c.op <= OpKernelMemory;
     const uint32_t stage = compute ? 2 : c.stage ? c.stage - 1 : 0;
@@ -31,7 +31,7 @@ bool RMCommandPlan::setter(const Cmd &c, const std::vector<uint64_t> &extra)
                 if (value.source == raw::BufferBinding::Source::Buffer)
                     value.chunk = 0;
                 else
-                    value.shadow = uint32_t(c.x);
+                    value.shadow = c.shadow;
                 const auto resource = [](const auto &binding) {
                     return binding.source == raw::BufferBinding::Source::Buffer ? binding.object : nullptr;
                 };
@@ -133,7 +133,7 @@ bool RMCommandPlan::setter(const Cmd &c, const std::vector<uint64_t> &extra)
                     for (size_t i = 0; i < value.size(); ++i)
                         value[i] = uint32_t(extra[c.x + i]);
                     at = uint32_t(viewArrays.size());
-                    viewArrays.insert(viewArrays.end(), extra.begin() + c.x, extra.begin() + c.x + 4 * count);
+                    viewArrays.append(extra + c.x, extra + c.x + 4 * count);
                 }
                 difference = raw::assignState(state.scissor, value);
                 difference |= raw::assignState(state.scissors, count);
@@ -144,11 +144,11 @@ bool RMCommandPlan::setter(const Cmd &c, const std::vector<uint64_t> &extra)
                 bit = R::Viewport;
                 const uint16_t count = std::max<uint16_t>(c.index, 1);
                 std::array<uint64_t, 6> value;
-                std::copy_n(extra.begin() + c.x, value.size(), value.begin());
+                std::copy_n(extra + c.x, value.size(), value.begin());
                 uint32_t at = 0;
                 if (count > 1) {
                     at = uint32_t(viewArrays.size());
-                    viewArrays.insert(viewArrays.end(), extra.begin() + c.x, extra.begin() + c.x + 6 * count);
+                    viewArrays.append(extra + c.x, extra + c.x + 6 * count);
                 }
                 difference = raw::assignState(state.viewport, value);
                 difference |= raw::assignState(state.viewports, count);

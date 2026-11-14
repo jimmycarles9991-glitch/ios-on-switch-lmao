@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MIT
 #import "RawMetalInternal.h"
+#import "RawMetalPassCache.h"
 #include "raw_object_pool.h"
 #include "raw_resolve_rule.h"
 
@@ -154,11 +155,14 @@ size_t raw_metal_rates(char *out, size_t size)
     gRates.rtMixed = k.rtMixed.load();
     gRates.levelPasses = k.levelPasses.load();
     const raw::ResourceSet::Counts sets = gRM->raw->setCounts();
+    const raw::Device::Trimmed kept = gRM->raw->keptImports();
+    const RMPassTrim passes = rmPassHeld();
     const int n = snprintf(
         out, size,
         "raw %.0fs c=%llu(%.1f/s) m2v=%llu%s%s%s sw=%llu cpu=%llu acq=%llu enc=%.0fus/c d=%.1f p=%.1f b=%.2f "
         "defer=%llu abort=%llu rw=%llu pool=%lluMB/%llu grow=%llu imp=%llu/%lluMB clean=%.1fKB/c ce=%llu/%.0fKB "
-        "ev=%llu/%llu sig=%llu/%llu/%llu ws=%llu/%lluus wc=%llu/%lluus here=%llu set_refusals=%u set_rebuilds=%u%s",
+        "ev=%llu/%llu sig=%llu/%llu/%llu ws=%llu/%lluus wc=%llu/%lluus set_refusals=%u set_rebuilds=%u "
+        "kept=%zu/%lluKB passes=%zu/%zu%s",
         secs, (unsigned long long)c, c / secs, (unsigned long long)f, *reasons ? "(" : "", reasons, *reasons ? ")" : "",
         (unsigned long long)(s.switches.load() - gRates.switches),
         (unsigned long long)(s.cpuOrdered.load() - gRates.cpuOrdered),
@@ -178,9 +182,8 @@ size_t raw_metal_rates(char *out, size_t size)
         (unsigned long long)(s.scheduledWaits.load() - gRates.scheduledWaits),
         (unsigned long long)(s.scheduledWaitUs.load() - gRates.scheduledWaitUs),
         (unsigned long long)(s.completedWaits.load() - gRates.completedWaits),
-        (unsigned long long)(s.completedWaitUs.load() - gRates.completedWaitUs),
-        (unsigned long long)(gRM->completion ? gRM->completion->compiledHere() : 0), sets.refusals, sets.rebuilds,
-        diag);
+        (unsigned long long)(s.completedWaitUs.load() - gRates.completedWaitUs), sets.refusals, sets.rebuilds,
+        kept.keptImports, (unsigned long long)(kept.keptImportBytes >> 10), passes.passes, passes.textures, diag);
     gRates.raw = raw;
     gRates.m2v = m2v;
     gRates.encodeUs = s.encodeUs.load();

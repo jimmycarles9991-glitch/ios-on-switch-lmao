@@ -2,12 +2,16 @@
 // HW Test's display.x1.landscape_video as it calls the kernel (debug kernels): TegraVIC's kernel-test selector, the one
 // IOKit path the app's sandbox admits, takes requests with this magic. FORCE holds traits (SwitchDisplayTraits.h) for
 // the calling connection until it closes; SAMPLE has the display record its next frame ends (DC A's CRC, the mode,
-// what scanned and what it cost); QUERY returns the last sample. A release kernel answers kIOReturnNotPermitted. C.
+// what scanned and what it cost); QUERY returns the last sample; PORTRAIT holds landscape off for the next value frame
+// ends (0 ends it), so the copy route can be sampled whatever the traits; FAIL makes the next change into landscape
+// fail as a reservation that could not be armed (the forced-failure arm). A release kernel answers
+// kIOReturnNotPermitted. C.
 #pragma once
 #include <stdint.h>
 
-#define SWITCH_DISPLAY_LANDSCAPE_RUN_MAGIC  0x444c5356u  // 'DLSV'
-#define SWITCH_DISPLAY_LANDSCAPE_RUN_FRAMES 240
+#define SWITCH_DISPLAY_LANDSCAPE_RUN_MAGIC       0x444c5356u  // 'DLSV'
+#define SWITCH_DISPLAY_LANDSCAPE_RUN_FRAMES      240
+#define SWITCH_DISPLAY_LANDSCAPE_PORTRAIT_FRAMES 3600
 
 // Who asked TegraVIC for a job: Core Animation's display server (backboardd: the route under test), the HW Test process
 // making these requests, anyone else.
@@ -23,6 +27,8 @@ enum {
     SWITCH_DISPLAY_LANDSCAPE_FORCE = 1,   // value: SWITCH_DISPLAY_TRAIT_* (0 drops them)
     SWITCH_DISPLAY_LANDSCAPE_SAMPLE = 2,  // value: frame ends to record, at most SWITCH_DISPLAY_LANDSCAPE_RUN_FRAMES
     SWITCH_DISPLAY_LANDSCAPE_QUERY = 3,
+    SWITCH_DISPLAY_LANDSCAPE_PORTRAIT = 4,  // value: frame ends, at most SWITCH_DISPLAY_LANDSCAPE_PORTRAIT_FRAMES
+    SWITCH_DISPLAY_LANDSCAPE_FAIL = 5,      // value: 1 arms it, 0 disarms it
 };
 
 enum {
@@ -60,10 +66,12 @@ typedef struct {
     uint64_t vicNs;             // CPU in TegraVIC's requests and engine thread
     uint32_t crc[SWITCH_DISPLAY_LANDSCAPE_RUN_FRAMES];
     uint8_t mode[SWITCH_DISPLAY_LANDSCAPE_RUN_FRAMES];
+    uint32_t failures;  // failed changes of mode since boot
+    uint32_t reserved2;
 } SwitchDisplayLandscapeReply;
 
 #ifdef __cplusplus
 static_assert(sizeof(SwitchDisplayLandscapeReply) ==
-                  96 + 4 * SWITCH_DISPLAY_LANDSCAPE_RUN_FRAMES + SWITCH_DISPLAY_LANDSCAPE_RUN_FRAMES,
+                  96 + 4 * SWITCH_DISPLAY_LANDSCAPE_RUN_FRAMES + SWITCH_DISPLAY_LANDSCAPE_RUN_FRAMES + 8,
               "the app reads the reply at these offsets");
 #endif

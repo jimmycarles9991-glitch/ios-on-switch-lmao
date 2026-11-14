@@ -3635,6 +3635,7 @@ thread_dispatch(
 			}
 
 			thread->computation_metered += (processor->last_dispatch - thread->computation_epoch);
+			switch_sched_off_core(thread, processor->last_dispatch);
 
 			if (!(thread->state & TH_WAIT)) {
 				/*

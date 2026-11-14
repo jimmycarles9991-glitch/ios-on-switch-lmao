@@ -2,6 +2,7 @@ import Darwin
 import Foundation
 import HWTestCore
 import HWTestGPU
+import IOSurface
 import Metal
 import SwitchTexturePattern
 import XPC
@@ -11,6 +12,9 @@ import XPC
 /// footprint_kb=<now> peak_kb=<its peak>" once that work completed, or "fail=<why> ...".
 @objc protocol SharedTexturePeer {
     func write(_ handle: MTLSharedTextureHandle, reply: @escaping (String) -> Void)
+    func renderSurface(_ surface: IOSurface, keep: Bool, reply: @escaping (String) -> Void)
+    func makeSurfaceWidth(_ width: Int, height: Int, keep: Bool, reply: @escaping (IOSurface?, String) -> Void)
+    func dropSurfaces(_ reply: @escaping (String) -> Void)
 }
 
 /// The peer's first message, which brings its connection to the app's listener (an NSXPC connection reaches the listener
@@ -39,6 +43,13 @@ final class TexturePeerAcceptor: NSObject, NSXPCListenerDelegate, SharedTextureP
         let classes = NSSet(object: MTLSharedTextureHandle.self) as! Set<AnyHashable>
         interface.setClasses(
             classes, for: #selector(SharedTexturePeer.write(_:reply:)), argumentIndex: 0, ofReply: false)
+        let surfaces = NSSet(object: IOSurface.self) as! Set<AnyHashable>
+        interface.setClasses(
+            surfaces, for: #selector(SharedTexturePeer.renderSurface(_:keep:reply:)), argumentIndex: 0,
+            ofReply: false)
+        interface.setClasses(
+            surfaces, for: #selector(SharedTexturePeer.makeSurfaceWidth(_:height:keep:reply:)), argumentIndex: 0,
+            ofReply: true)
         connection.remoteObjectInterface = interface
         connection.exportedInterface = NSXPCInterface(with: SharedTexturePeerHost.self)
         connection.exportedObject = self

@@ -35,7 +35,7 @@ struct PackedSpareBitsTest: HWTest {
         let reader = try gpu.render(fragment: "texel_read", format: .rgba32Float)
         var session: VTPixelTransferSession?
         VTPixelTransferSessionCreate(allocator: nil, pixelTransferSessionOut: &session)
-        guard let session else { return .fail("no VTPixelTransferSession", Metrics()) }
+        guard let session else { return .fail("no VTPixelTransferSession", Metrics()).onRawPath(gpu) }
         defer { VTPixelTransferSessionInvalidate(session) }
         let images = CIContext(options: [.workingFormat: CIFormat.RGBAh])
         var metrics = Metrics()
@@ -66,7 +66,7 @@ struct PackedSpareBitsTest: HWTest {
                 checks.append(("'\(key)' \(reader): read alike with the spare bits set", !bytes.isEmpty && !moved))
             }
         }
-        return .judged(checks, metrics, proof: gpu.proof)
+        return .judged(checks, metrics, proof: gpu.proof).onRawPath(gpu)
     }
 
     /// Random codes in every word of both planes, the spare bits all clear or all set.

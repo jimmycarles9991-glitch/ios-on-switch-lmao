@@ -97,10 +97,22 @@ TEST_F(NVENCInputs, ANativePicturesFailedProducerFailsTheEncode)
 TEST_F(NVENCInputs, OnlyTheEnginesThatWroteTheInputAreAsked)
 {
     const switch_gpu_backing_token nvenc = {499, 1, SWITCH_GPU_ENGINE_NVENC, 170};
-    const switch_gpu_backing_token producers[] = {kGpu, nvenc, {}};
-    gPhysical[key(kGpu)] = gPhysical[key(nvenc)] = -5;
+    const switch_gpu_backing_token promise = {7, 1, SWITCH_GPU_ENGINE_PROMISE, 4};
+    const switch_gpu_backing_token producers[] = {promise, nvenc, {}};
+    gPhysical[key(promise)] = gPhysical[key(nvenc)] = -5;
     inputs.record(502, producers, 3);
-    EXPECT_EQ(inputs.failure(502), 0) << "the GPU's go through VIC, NVENC's own last job is no producer";
+    EXPECT_EQ(inputs.failure(502), 0) << "NVENC's own last job is no producer, a promise is its writer's job's";
+}
+
+// A native picture the GPU rendered, read behind the GPU-to-host1x bridge: the render failing fails the encode, and a
+// render still running holds NVENC's stall bound back as an upstream producer does.
+TEST_F(NVENCInputs, AGpuRenderTheJobWaitedForIsAProducer)
+{
+    inputs.record(507, &kGpu, 1);
+    gPhysical[key(kGpu)] = 0;
+    EXPECT_FALSE(inputs.ready(506, 507));
+    gPhysical[key(kGpu)] = -5;
+    EXPECT_EQ(inputs.failure(507), -5);
 }
 
 TEST_F(NVENCInputs, AProducerWhoseRecordIsGoneIsNoFailure)

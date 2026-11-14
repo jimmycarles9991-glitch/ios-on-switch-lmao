@@ -10,6 +10,7 @@
 // for every client while leaving every swgroup in bypass. The global SMMU enable is secure-only (reads back garbage), so a
 // whether translation is on is known from what the unit's engines did (TegraVIC.cpp), not read back.
 #pragma once
+#include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 
@@ -82,11 +83,26 @@ void tegra_smmu_flush(uint32_t asid);
 // The MC register at offset (for a driver's own checks and FAIL lines).
 uint32_t tegra_smmu_read(uint32_t offset);
 // Sets or clears a memory client's hot-reset bit in MC_CLIENT_HOTRESET_CTRL (0x200) or CTRL_1 (0x970); the flush has
-// drained once its bit reads set in the matching STATUS register (tegra_smmu_read).
+// drained once its bit reads set in the matching STATUS register (tegra_smmu_read). The only writer of both registers:
+// each holds the bits of clients that different drivers power (CTRL: VIC, NVENC, HC, DCB; CTRL_1: GPU, NVDEC, NVJPG),
+// and a read-modify-write anywhere else can put back a bit another driver just changed. STATUS reads done for a client
+// with no flush requested (TRM 18.11.1.114), so the bit is read back: one error line names the client when it did not
+// take, and a flush trusts STATUS only while its request bit still reads set.
 void tegra_mc_hot_reset(uint32_t ctrl, uint32_t bit, bool on);
-// After SC7, before any translated client runs (SwitchSuspend's wake): every attached swgroup programmed again.
-// Returns how many could not be (one line each); their clients then fault at the MC instead of translating.
+// After SC7, before any translated client runs (SwitchSuspend's wake): every attached swgroup programmed again, and the
+// error interrupt's mask (SC7 resets the MC). Returns how many swgroups could not be (one line each); their clients
+// then fault at the MC instead of translating.
 int tegra_smmu_resume(void);
+
+// The memory controller's error interrupt (TegraMCErrors.cpp), the one owner of MC_INTSTATUS, INTMASK, ERR_STATUS and
+// ERR_ADR: each decode, security or SMMU error a client raises is one line naming its kind, client, direction and
+// address, and its INTSTATUS bit is cleared so the next is captured. Nobody else clears INTSTATUS: a driver that wants
+// the MC's errors in its own line reads tegra_mc_error_latest. Thread context, at boot; -1 with one line when the
+// interrupt cannot be had.
+int tegra_mc_errors_start(void);
+// How many errors the interrupt took since boot, and the latest one (zeros before the first). Any context.
+uint32_t tegra_mc_error_latest(uint32_t *intstatus, uint32_t *status, uint32_t *address);
+void switch_mc_errors_resume(void);
 
 #ifdef __cplusplus
 }

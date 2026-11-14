@@ -4,9 +4,9 @@ import HWTestGPU
 import Metal
 
 /// Compute stage-in: a kernel whose [[stage_in]] float2 comes from buffer 1 per thread position, over the dispatch's
-/// whole grid as its stage-in region, writes x + y of each element. A static layout of stride 16 runs on both kinds; on
-/// 24B119's A13 a layout of MTLBufferLayoutStrideDynamic runs at the bind's attributeStride, 16 and then 24 (21H461's
-/// A10X answers supportsDynamicAttributeStride NO and refuses that state). Each runs again as an indirect command buffer's
+/// whole grid as its stage-in region, writes x + y of each element. A static layout of stride 16 and a layout of
+/// MTLBufferLayoutStrideDynamic at the bind's attributeStride, 16 and then 24, run on both builds, which answer
+/// supportsDynamicAttributeStride YES (NativeAnswers). Each runs again as an indirect command buffer's
 /// dispatch command that sets its own pipeline, buffers (the per-bind stride by setKernelBuffer:offset:attributeStride:)
 /// and stage-in region. Each result is compared with the CPU's; every command buffer stays raw.
 struct NativeStageInTest: NativeObjectTest {
@@ -64,8 +64,8 @@ struct NativeStageInTest: NativeObjectTest {
         if dynamic {
             let state = try make(Self.descriptor(function, stride: dynamicStride))
             cases += [("dynamic16", state, 16, true), ("dynamic24", state, 24, true)]
-        } else if (try? make(Self.descriptor(function, stride: dynamicStride))) != nil {
-            work.failures.append("a dynamic-stride stage-in state was made where the device answers it NO")
+        } else {
+            work.failures.append("supportsDynamicAttributeStride answers NO")
         }
         let groups = MTLSize(width: Self.count + 1, height: 1, depth: 1)
         let one = MTLSize(width: 1, height: 1, depth: 1)

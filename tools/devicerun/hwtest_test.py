@@ -209,6 +209,43 @@ class MetricKeys(unittest.TestCase):
         found = [swift_string(text, match.end() - 1)[:2] for match in METRIC_SET.finditer(text)]
         self.assertEqual(found, [('err__ms', True), ('frames', False), ('ms', False)])
 
+    def test_no_arm_name_is_malformed(self):
+        bad = []
+        for source in sorted(APP.rglob('*.swift')):
+            if source.relative_to(APP).parts[0].startswith('host_'):
+                continue
+            text = source.read_text()
+            for name, at in arm_names(text):
+                if not re.fullmatch(r'[a-z0-9_]+', name):
+                    bad.append(f'{source.relative_to(APP)}:{text.count(chr(10), 0, at) + 1} {name!r}')
+        self.assertEqual(bad, [], 'arm names, which tests interpolate into metric keys, the log line cannot carry')
+
+    def test_the_arm_scan_reads_names_and_skips_forms(self):
+        text = 'static let arms: [(rung: Int, name: String)] = [(5, "twin1"), (6, "twinW")]\nlet x = ["Up"]'
+        self.assertEqual([n for n, _ in arm_names(text)], ['twin1', 'twinW'])
+        self.assertEqual([n for n, _ in arm_names('let arms = [("control", "pass=today")]')], ['control'])
+
+
+# The initializer of a test's arms table (`static let arms ... = [`, `let arms: ... = [`)
+ARMS = re.compile(r'\blet arms\b[^=\n]*=\s*\[')
+
+
+def arm_names(text: str) -> list[tuple[str, int]]:
+    """Return the identifier-like literals (an arm's name, a shader's) of every arms table, with their offsets."""
+    names = []
+    for match in ARMS.finditer(text):
+        at, depth = match.end(), 1
+        while depth and at < len(text):
+            if text[at] == '"':
+                literal, interpolated, end = swift_string(text, at)
+                if not interpolated and re.fullmatch(r'[A-Za-z0-9_]+', literal):
+                    names.append((literal, at))
+                at = end
+                continue
+            depth += {'[': 1, ']': -1}.get(text[at], 0)
+            at += 1
+    return names
+
 
 if __name__ == '__main__':
     unittest.main()

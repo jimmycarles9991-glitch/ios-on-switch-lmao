@@ -8,8 +8,9 @@ enum NativeCallTests {
         NativeComputeCommandsTest(), NativeSharedTextureTest(), NativeSharedTexturePeerTest(), NativeCountersTest(),
         NativeCounterObjectsTest(), NativeTessellationTest(), NativeAmplificationTest(), NativeAmplificationCountTest(),
         NativeAmplificationMappingsTest(), NativeDynamicStrideTest(), NativeStageInTest(), NativeVertexStreamsTest(),
-        NativeWideStrideTest(), NativeM2vMissingTest(), NativeTargetPartsTest(), NativeLayeredClearTest(),
+        NativeWideStrideTest(), NativeTargetPartsTest(), NativeLayeredClearTest(),
         NativeLayeredMemorylessTest(), NativeLayeredVertexTest(), NativeLayeredFetchTest(), NativeViewportsTest(),
-        NativeViewportIndexTest(), NativeBlockTexturesTest(), NativeDepthSlicesTest(),
+        NativeViewportIndexTest(), NativeBlockTexturesTest(), NativeDepthSlicesTest(), NativeWideTargetsTest(),
+        NativeInterpolantsTest(), NativeThreadgroupMemoryTest(), NativeArgumentTier2Test(),
     ]
 }

@@ -5,6 +5,7 @@
 #   als_source_test  TegraI2C.cpp's I2C2 row and pads, SwitchALS.cpp's BH1730FVC commands, the properties CoreBrightness
 #                    reads from SwitchHIDDevice.cpp and SwitchBacklight.cpp, SwitchBacklight::start's publishing order
 #   panel_steps_test TegraPanelSteps.h: a DCS command's frame-end and step-timer order, its deferrals and its settle times
+#   panel_filter_source_test  TegraPanel.cpp's frame-end step in the DC A filter: no lock, sleep, log, allocation or RMW
 #
 #   bazel test //drivers/SwitchBrightness/test:all
 load("//bazel/lint:defs.bzl", "lint_files")
@@ -38,4 +39,10 @@ host_test(
         "panel_steps_test.cpp",
         "//drivers/SwitchBrightness:TegraPanelSteps.h",
     ],
+)
+
+host_test(
+    name = "panel_filter_source_test",
+    srcs = ["panel_filter_source_test.cpp"],
+    data = ["//drivers/SwitchBrightness:TegraPanel.cpp"],
 )

@@ -7,7 +7,7 @@ import Metal
 /// One hardware probe of the X1 research (out/agent-scratch/x1-probe/PROBES.md names each claim, its source and what
 /// each outcome means), on the process's default device. Its line carries probe=, claim_verdict=, the probe's numbers,
 /// paths= (each command buffer's path on the facade) and reopens= (GPU channels the kernel killed while it ran and the
-/// facade opened again). A risky probe programs methods no driver has run on this chip: it runs even after an earlier
+/// facade opened again). On the facade a command buffer of the probe's own off the raw path fails it, named by its path. A risky probe programs methods no driver has run on this chip: it runs even after an earlier
 /// test left the GPU unanswering, and ends with a fill on a fresh queue, so gpu_after=0 names the probe that wedged it.
 /// It starts by disarming what a probe that timed out left armed (stale_emitted= draws carried those methods).
 struct X1Probe: HWTest {
@@ -41,10 +41,15 @@ struct X1Probe: HWTest {
             base.set("gpu_after", await GPUProbe.answers())
             base.set("stale_emitted", stale)
         }
-        guard let finding else {
+        let offRaw = gpu.paths.offRaw
+        if RawFacade.kind(of: gpu.device) == "raw" && !offRaw.isEmpty {
+            failure = "command buffers off the raw path: \(offRaw.text)" + (failure.map { "; \($0)" } ?? "")
+        }
+        guard let finding, failure == nil else {
             var metrics = Metrics()
             metrics.set("probe", probe)
             metrics.merge(base)
+            if let finding { metrics.merge(finding.metrics) }
             return .fail(failure ?? "no finding", metrics, proof: gpu.proof)
         }
         return finding.outcome(probe: probe, base: base, proof: gpu.proof)
@@ -95,10 +100,11 @@ enum X1Probes {
         X1PassBarrierProbe.probe, X1JobBoundaryProbe.probe, X1SwitchDrainProbe.probe,
         X1RawProbes.blendKills, X1RawProbes.viewportSwizzle, X1PrecisionProbe.probe, X1IteratedBlendProbe.probe,
         X1CompressedCopyProbe.probe, X1CompressedDepthProbe.probe, X1TwodProbes.scale, X1TwodProbes.clear,
-        X1TwodProbes.resolve, X1ConstantColourProbe.probe, X1FillBoxProbe.probe, M2VMSAAFetchProbe.probe,
+        X1TwodProbes.resolve, X1ConstantColourProbe.probe, X1FillBoxProbe.probe,
         X1VICPitchProbe.probe, X1VICLayoutProbe.probe, X1VICFractionProbe.probe,
         X1VICPackedProbe.probe, X1VICTransposeProbe.probe, X1VICLargeProbe.probe, X1VICComposeProbe.probe,
         X1VICComposeProbe.display,
+        X1VICOddProbe.probe,
     ]
     /// The probe that runs after every other test of the app: its draw reads memory no other test's does
     static let last: [any HWTest] = [X1IndexLimitProbe.probe]

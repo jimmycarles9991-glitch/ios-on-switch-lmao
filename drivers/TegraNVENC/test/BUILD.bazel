@@ -33,6 +33,27 @@ host_test(
     ],
 )
 
+# An engine a stall's reset, a power-on or a resume lost goes back to the idle gate, which powers it on at a later encode.
+host_test(
+    name = "tegra_nvenc_layout_source_test",
+    srcs = ["tegra_nvenc_layout_source_test.cpp"],
+    data = [
+        "//drivers/TegraNVENC:TegraNVENC.cpp",
+        "//drivers/TegraNVENC:TegraNVENCDirect.cpp",
+        "//drivers/TegraNVENC:TegraNVENCSource.cpp",
+        "//drivers/TegraNVENC:TegraNVENCUserClient.cpp",
+    ],
+)
+
+host_test(
+    name = "tegra_nvenc_recover_source_test",
+    srcs = ["tegra_nvenc_recover_source_test.cpp"],
+    data = [
+        "//drivers/TegraNVENC:TegraNVENC.cpp",
+        "//drivers/TegraNVENC:TegraNVENCUserClient.cpp",
+    ],
+)
+
 host_shims(
     name = "direct_kernel",
     headers = [
@@ -50,9 +71,11 @@ host_test(
     srcs = [
         "tegra_nvenc_direct_test.cpp",
         "//drivers/TegraGM20B:SwitchGpuBacking.h",
+        "//drivers/TegraGM20B:SwitchGpuBridge.h",
         "//drivers/TegraGM20B:SwitchGpuNativeSurface.h",
         "//drivers/TegraGM20B:SwitchGpuNativeUse.h",
         "//drivers/TegraGM20B/test:switch_gpu_backing_fixture.h",
+        "//drivers/TegraHost1x:SwitchHost1xDependencies.h",
         "//drivers/TegraHost1x:SwitchHost1xFence.h",
         "//drivers/TegraHost1x:TegraHost1x.h",
         "//drivers/TegraNVENC:TegraNVENC.h",

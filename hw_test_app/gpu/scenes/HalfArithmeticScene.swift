@@ -96,6 +96,12 @@ struct HalfArithmeticScene: GPUScene {
         if !RawFacade.counters(of: gpu.device).isEmpty {
             result.expect(timing.path == "raw", "Half arithmetic left raw: \(timing.path)")
         }
+        if RawFacade.kind(of: gpu.device) == "raw" {
+            let object = gpu.device as AnyObject as! NSObject
+            let native = (object.value(forKey: "supportsNativeHardwareFP16") as? NSNumber)?.intValue ?? -1
+            result.metrics.set("native_answer", native)
+            result.expect(native == 1, "supportsNativeHardwareFP16 answers \(native)")
+        }
         result.metrics.set("fma_separate_rounding_witnesses", fusedWitnesses)
         for (form, count) in zip(Self.forms, wrong) { result.metrics.set(form + "_wrong", count) }
         result.expect(fusedWitnesses > 0, "FMA inputs must distinguish fused and separately rounded arithmetic")

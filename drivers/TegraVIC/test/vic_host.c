@@ -428,7 +428,7 @@ static void jobs(void)
         {0, "plane extends past its mapping"},
         {1, "row pitch the engine cannot address"},
         {2, "plane not 256-byte aligned"},
-        {3, "4:2:0 surface with an odd size"},
+        {3, "plane shorter than the surface"},
         {4, "destination rectangle outside the destination"},
         {5, "source rectangle outside the source"},
         {6, "transform this engine has not proven"},
@@ -466,8 +466,10 @@ static void jobs(void)
         case 2:
             d2.base[1] += 64;
             break;
-        case 3:
-            d2.width = 1279;
+        case 3:  // an odd height's chroma plane holds the padded pair's row too
+            d2.height = 719;
+            o2.dstH = 719;
+            d2.rows[1] = 359;
             break;
         case 4:
             o2.dstX = 2;
@@ -674,7 +676,6 @@ static void requests(void)
         {3, TEGRA_VIC_PLAN_UNSUPPORTED, "colour remap (capabilities say no)"},
         {5, TEGRA_VIC_PLAN_UNSUPPORTED, "pixel format the scaler does not take"},
         {6, TEGRA_VIC_PLAN_UNSUPPORTED, "protected source into a less protected destination"},
-        {7, TEGRA_VIC_PLAN_UNSUPPORTED, "alpha override into a surface with alpha"},
         {8, TEGRA_VIC_PLAN_UNSUPPORTED, "HDR or film grain (capabilities say no)"},
     };
 
@@ -703,10 +704,6 @@ static void requests(void)
         case 6:
             sd.protection = 1;
             break;
-        case 7:
-            q.flags |= TEGRA_VIC_REQ_ALPHA_OVERRIDE;
-            dd = lcd;
-            break;
         case 8:
             q.flags |= TEGRA_VIC_REQ_FILM_GRAIN;
             break;
@@ -718,6 +715,23 @@ static void requests(void)
         CHECK(why && !strcmp(why, cases[i].why) && kind == (uint32_t)cases[i].kind, "request case %d: got \"%s\"",
               cases[i].what, why ? why : "accepted");
     }
+    // AlphaOverride into a surface with alpha: AlphaFillMode BACKGROUND, the request's 8-bit alpha widened; into one
+    // without alpha it changes nothing.
+    r = cloneRequest(0);
+    r.flags |= TEGRA_VIC_REQ_ALPHA_OVERRIDE;
+    r.alpha_override = 0x80;
+    why = tegra_vic_plan(&r, &lcd, &lcd, &plan, &kind);
+    CHECK(!why && kind == TEGRA_VIC_PLAN_OK && plan.op[0].alphaOverride && plan.op[0].alphaOverride8 == 0x80,
+          "alpha override plan: %s", why ? why : "op");
+    why = buildAll(&plan, &lcd, &lcd, &t, 0, &job);
+    CHECK(!why && TEGRA_VIC_GET(job.config, TEGRA_VIC_OUTPUT, OUT_ALPHA_FILL_MODE) == TEGRA_VIC_ALPHA_BACKGROUND &&
+              TEGRA_VIC_GET(job.config, TEGRA_VIC_OUTPUT, OUT_BACKGROUND_ALPHA) == 0x202,
+          "alpha override job: %s", why ? why : "alpha fill");
+    why = tegra_vic_plan(&r, &lcd, &wb, &plan, &kind);
+    CHECK(!why, "alpha override into 420f plan: %s", why);
+    why = buildAll(&plan, &lcd, &wb, &t, 1, &job);
+    CHECK(!why && TEGRA_VIC_GET(job.config, TEGRA_VIC_OUTPUT, OUT_ALPHA_FILL_MODE) == TEGRA_VIC_ALPHA_OPAQUE,
+          "alpha override into 420f job: %s", why ? why : "alpha fill");
     // Geometry the plan accepts but the checker refuses: a source rectangle past the source, a plane past its memory.
     r = cloneRequest(0);
     r.src_x = 1u << 16;

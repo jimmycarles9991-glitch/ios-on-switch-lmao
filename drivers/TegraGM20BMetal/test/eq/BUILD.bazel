@@ -107,6 +107,7 @@ py_library(
         "compute_goldens.py",
         "draw_goldens.py",
         "eq_fields.py",
+        "eq_rebase.py",
         "eq_rules.py",
     ],
     data = [GM20B_METAL + ":raw_pack_generator"],
@@ -125,6 +126,20 @@ py_test(
     name = "eq_rules_test",
     size = "small",
     srcs = ["eq_rules_test.py"],
+    deps = [":draw_goldens"],
+)
+
+py_test(
+    name = "eq_fields_test",
+    size = "small",
+    srcs = ["eq_fields_test.py"],
+    deps = [":draw_goldens"],
+)
+
+py_test(
+    name = "eq_rebase_test",
+    size = "small",
+    srcs = ["eq_rebase_test.py"],
     deps = [":draw_goldens"],
 )
 

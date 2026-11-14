@@ -59,7 +59,7 @@ void mark_current(switch_gpu_backing *backing, uint64_t first, uint64_t end)
 int complete(const switch_gpu_backing_token &prefix, const SwitchGpuCpuRange &range)
 {
 	auto *backing = range.backing;
-	IOLockLock(backing->lock);
+	switch_gpu_backing_claim(backing);
 	switch_gpu_backing_prune_locked(backing);
 	int result = 0;
 	const switch_gpu_backing_token *writer = nullptr;
@@ -87,7 +87,7 @@ int complete(const switch_gpu_backing_token &prefix, const SwitchGpuCpuRange &ra
 			switch_gpu_backing_cpu_cache_locked(backing, range.offset, range.bytes,
 							    SWITCH_GPU_CACHE_CLEAN_INVALIDATE);
 	}
-	IOLockUnlock(backing->lock);
+	switch_gpu_backing_unclaim(backing);
 	return result;
 }
 }  // namespace
@@ -182,9 +182,9 @@ int switch_gpu_cpu_complete(const switch_gpu_backing_token &prefix, const Switch
 	for (uint32_t i = 0; i < count; ++i) {
 		if (!ranges[i].backing)
 			return -22;
-		IOLockLock(ranges[i].backing->lock);
+		const bool claimed = switch_gpu_backing_enter(ranges[i].backing);
 		const bool accepted = valid(ranges[i]);
-		IOLockUnlock(ranges[i].backing->lock);
+		switch_gpu_backing_leave(ranges[i].backing, claimed);
 		if (!accepted)
 			return -22;
 	}

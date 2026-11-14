@@ -59,10 +59,12 @@ void tegra_vic_describe(char *buffer, size_t size);  // the falcon's state, for 
 int tegra_vic_publish(void);
 
 // Idle power gating (TegraVIC.cpp): a submission holds the powered engine (on again first if it was off), and the
-// queue draining starts the idle timer.
+// queue draining starts the idle timer. Lost: the engine a cancellation's reset did not bring back, which the next
+// submission powers on.
 int switch_vic_power_use(void);
 void switch_vic_power_done(void);
 void switch_vic_power_idle(void);
+void switch_vic_power_lost(void);
 }
 
 struct SwitchVICPowerUse {

@@ -177,7 +177,8 @@ TEST(PlanResources, PendingComputeDoesNotRefuseItsConservativeWritableSummary)
     Cmd dispatch = cmd(OpDispatch);
     dispatch.obj = object(2);
     dispatch.c = UINT64_C(1) | UINT64_C(1) << 16 | UINT64_C(1) << 32;
-    plan.record(dispatch, {1, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0});
+    const uint64_t dimensions[] = {1, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0};
+    plan.record(dispatch, dimensions);
     plan.record(cmd(OpEnd), {});
     plan.prepareRange(0, 3);
     EXPECT_EQ(plan.nativeRangeRefusal(0, 3), nullptr);

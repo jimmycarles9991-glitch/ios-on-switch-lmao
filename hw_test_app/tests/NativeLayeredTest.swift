@@ -3,12 +3,9 @@ import HWTestCore
 import HWTestGPU
 import Metal
 
-/// The identity's layered rendering and viewports: 24B119's A13 (Apple6) renders a pass of several layers and a vertex
-/// function's choice of 16 viewports. 21H461's A10X (Apple3) has neither feature (Metal Feature Set Tables: Apple5), though
-/// its driver keeps every viewport an encoder sets (metal.native.viewports).
+/// Layered rendering and viewports: raw renders a pass of several layers and a vertex function's choice of 16 viewports
+/// on both builds, and 21H461 answers both above its A10X (NativeAnswers).
 enum Layering {
-    static var a13: Bool { ProcessInfo.processInfo.operatingSystemVersion.majorVersion >= 27 }
-
     static func rgba(_ c: [UInt8]) -> SIMD4<Float> { SIMD4<Float>(c.map { Float($0) / 255 }) }
 
     static func array(_ gpu: GPU, _ size: Int, layers: Int) throws -> MTLTexture {
@@ -55,7 +52,6 @@ enum Layering {
 struct NativeLayeredClearTest: NativeObjectTest {
     let id = "metal.native.layered_clear"
     let name = "A layered pass clears every layer of every attachment from its slice, and no other"
-    var unavailable: String? { Layering.a13 ? nil : "21H461's A10X has no layered rendering" }
 
     func exercise(_ gpu: GPU, _ metrics: inout Metrics) async throws -> NativeWork {
         let a = try Layering.array(gpu, 32, layers: 6), b = try Layering.array(gpu, 32, layers: 6)
@@ -99,7 +95,6 @@ struct NativeLayeredClearTest: NativeObjectTest {
 struct NativeLayeredMemorylessTest: NativeObjectTest {
     let id = "metal.native.layered_memoryless"
     let name = "A layered pass backs its memoryless array attachments with its layers"
-    var unavailable: String? { Layering.a13 ? nil : "21H461's A10X has no layered rendering" }
 
     func exercise(_ gpu: GPU, _ metrics: inout Metrics) async throws -> NativeWork {
         let stored = try Layering.array(gpu, 32, layers: 6)
@@ -145,7 +140,6 @@ struct NativeLayeredMemorylessTest: NativeObjectTest {
 struct NativeLayeredVertexTest: NativeObjectTest {
     let id = "metal.native.layered_vertex"
     let name = "A vertex function chooses the layer of a layered pass, every layer its own instance's"
-    var unavailable: String? { Layering.a13 ? nil : "21H461's A10X has no layered rendering" }
 
     static func color(_ i: Int) -> [UInt8] { [UInt8(40 * i + 30), 255 - UInt8(30 * i), 64, 255] }
 
@@ -153,6 +147,11 @@ struct NativeLayeredVertexTest: NativeObjectTest {
         let t = try Layering.array(gpu, 32, layers: 4)
         let pipeline = try gpu.render(vertex: "layered_vertex", fragment: "flat_color_fragment", format: .rgba8Unorm)
         var work = NativeWork(objects: [t])
+        let layered = NativeAnswers.answer(gpu.device, "supportsLayeredRendering")
+        metrics.set("layered", layered ?? -1)
+        if let want = NativeAnswers.layeredRendering, layered != want {
+            work.failures.append("supportsLayeredRendering answers \(layered.map(String.init) ?? "nothing")")
+        }
         let clear: [UInt8] = [0, 0, 0, 255]
         let timing = try await gpu.run { commands in
             let pass = MTLRenderPassDescriptor()

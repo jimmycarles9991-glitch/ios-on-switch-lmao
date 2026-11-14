@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: BSD-2-Clause-Patent
 // The power stats line (debug kernels only, os_log): every 10 s, each core's time in C7, in WFI and busy over the
 // window, with its C7 entries, the requests the firmware returned from at once and the frame lines that found it in C7;
-// the C7 exits wake timers ended (mean, largest since boot, and those back after their deadline); the EMC's rate changes
-// and time at each rate, then the battery's draw.
+// the C7 exits wake timers ended (mean, largest since boot, and those back after their deadline); the interrupts each
+// core took by class (timer PPI, IPI, SPI); the EMC's rate changes and time at each rate, then the battery's draw.
 #include "SwitchPowerStats.h"
 
 #if DEVELOPMENT || DEBUG
@@ -12,6 +12,9 @@
 #include "../../kits/SwitchIdle/switch_idle.h"
 #include "../SwitchBattery/SwitchBattery.h"
 #include "SwitchEMC.h"
+
+// ArmCpu's per-core interrupt counts, each written only by its own core (ArmCpu.cpp).
+extern "C" volatile uint32_t armcpu_core_timer[8], armcpu_core_sgi[8], armcpu_core_spi[8];
 
 namespace {
 constexpr uint32_t kCores = 4;
@@ -64,6 +67,25 @@ size_t appendIdle(char *line, size_t size, size_t n, uint64_t window)
     return n;
 }
 
+uint32_t gIrqSeen[3][kCores];
+
+size_t appendInterrupts(char *line, size_t size, size_t n)
+{
+    volatile uint32_t *const counts[3] = {armcpu_core_timer, armcpu_core_sgi, armcpu_core_spi};
+    for (uint32_t cpu = 0; cpu < kCores && n < size; ++cpu) {
+        uint32_t now[3];
+        for (unsigned kind = 0; kind < 3; ++kind) {
+            now[kind] = __atomic_load_n(&counts[kind][cpu], __ATOMIC_RELAXED);
+            const uint32_t seen = gIrqSeen[kind][cpu];
+            gIrqSeen[kind][cpu] = now[kind];
+            now[kind] -= seen;
+        }
+        n += static_cast<size_t>(snprintf(line + n, size - n, "%scpu%u %u timer %u ipi %u spi", cpu ? ", " : "; irq ",
+                                          cpu, now[0], now[1], now[2]));
+    }
+    return n;
+}
+
 size_t appendBattery(char *line, size_t size, size_t n)
 {
     switch_battery_gauge gauge = {};
@@ -84,6 +106,7 @@ void switch_power_stats_tick()
     char line[768];
     size_t n = static_cast<size_t>(snprintf(line, sizeof(line), "SwitchPower: %llu ms: ", window / 19200));
     n = appendIdle(line, sizeof(line), n, window);
+    n = appendInterrupts(line, sizeof(line), n);
     if (n + 2 < sizeof(line)) {
         n += static_cast<size_t>(snprintf(line + n, sizeof(line) - n, "; "));
         n += switch_emc_stats(line + n, sizeof(line) - n);

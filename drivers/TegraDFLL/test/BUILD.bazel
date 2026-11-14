@@ -1,0 +1,110 @@
+# drivers/TegraDFLL on the host: tegra_dfll_cpu_prepare() as the kernel builds it (dfll.c, platform.c, the shim's
+# clock tree, with the driver's own Linux prelude) against a console in memory with TegraI2C and kits/SwitchLinux
+# (tegra_dfll_console.c: its CAR model applies the _SET/_CLR registers, logs every write and delay, and counts any
+# moment CL-DVFS is out of reset with its clock stopped, TRM 35.4) and stand-ins for the vendored L4T code
+# (tegra_dfll_fakes.c).
+# And the vendored clk-dfll.c itself in closed loop (tegra_dfll_landing_model.c includes it whole) over a DFLL whose
+# loop settles at once: the rate the CPU gets for each rate asked.
+#
+#   bazel test //drivers/TegraDFLL/test:all
+load("//bazel/lint:defs.bzl", "lint_files")
+load("//bazel/testing:defs.bzl", "host_library", "host_test")
+load("//kernel/rules:driver_flags.bzl", "LINUX_RELAXATIONS")
+
+lint_files()
+
+DFLL_HEADERS = [
+    "tegra_dfll_fake.h",
+    "//drivers/TegraDFLL:headers",
+    "//drivers/TegraI2C:headers",
+    "//kits/SwitchCAR:headers",
+    "//kits/SwitchLinux:headers",
+    "//kits/SwitchMMIO:headers",
+]
+
+host_library(
+    name = "console",
+    srcs = ["tegra_dfll_console.c"] + DFLL_HEADERS,
+    copts = ["-Wno-unused-parameter"],
+    defines = [
+        "SWITCH_LINUX_HOST_MODEL=1",
+        "SWITCH_MMIO_HOST_MODEL=1",
+    ],
+    target_compatible_with = ["@platforms//cpu:arm64"],
+)
+
+host_library(
+    name = "dfll",
+    srcs = [
+        "tegra_dfll_fakes.c",
+        "//drivers/TegraDFLL:dfll.c",
+        "//drivers/TegraDFLL:platform.c",
+        "//drivers/TegraDFLL:shim/linux.c",
+    ] + DFLL_HEADERS,
+    c_std = "gnu11",
+    copts = LINUX_RELAXATIONS + [
+        "-Wno-unused-parameter",
+        "-Wno-macro-redefined",
+        "-Idrivers/TegraDFLL/shim/include",
+        "-Idrivers/TegraDFLL/linux/include",
+        "-include",
+        "drivers/TegraDFLL/shim/include/tdfll_prelude.h",
+    ],
+    defines = [
+        "SWITCH_LINUX_HOST_MODEL=1",
+        "SWITCH_MMIO_HOST_MODEL=1",
+    ],
+    target_compatible_with = ["@platforms//cpu:arm64"],
+)
+
+host_test(
+    name = "tegra_dfll_prepare_test",
+    srcs = ["tegra_dfll_prepare_test.cpp"] + DFLL_HEADERS,
+    target_compatible_with = ["@platforms//cpu:arm64"],
+    deps = [
+        ":console",
+        ":dfll",
+    ],
+)
+
+host_test(
+    name = "tegra_dfll_cl_dvfs_test",
+    srcs = ["tegra_dfll_cl_dvfs_test.cpp"] + DFLL_HEADERS,
+    target_compatible_with = ["@platforms//cpu:arm64"],
+    deps = [
+        ":console",
+        ":dfll",
+    ],
+)
+
+host_library(
+    name = "landing_model",
+    srcs = [
+        "tegra_dfll_landing_model.c",
+        "//drivers/TegraDFLL:shim/linux.c",
+    ] + DFLL_HEADERS,
+    hdrs = ["tegra_dfll_landing_model.h"],
+    c_std = "gnu11",
+    copts = LINUX_RELAXATIONS + [
+        "-Wno-unused-parameter",
+        "-Wno-unused-function",
+        "-Wno-macro-redefined",
+        "-Idrivers/TegraDFLL/shim/include",
+        "-Idrivers/TegraDFLL/linux/include",
+        "-include",
+        "drivers/TegraDFLL/shim/include/tdfll_prelude.h",
+    ],
+    defines = [
+        "SWITCH_LINUX_HOST_MODEL=1",
+        "SWITCH_MMIO_HOST_MODEL=1",
+    ],
+    target_compatible_with = ["@platforms//cpu:arm64"],
+    textual_hdrs = ["//drivers/TegraDFLL:linux/drivers/clk/tegra/clk-dfll.c"],
+)
+
+host_test(
+    name = "tegra_dfll_landing_test",
+    srcs = ["tegra_dfll_landing_test.cpp"],
+    target_compatible_with = ["@platforms//cpu:arm64"],
+    deps = [":landing_model"],
+)

@@ -165,8 +165,10 @@ struct MetalPixelFormatTest: HWTest {
         var metrics = Metrics()
         metrics.set("formats", Self.cases.count + 2)
         metrics.set("failed", failed.count)
-        return failed.isEmpty
+        let outcome: Outcome =
+            failed.isEmpty
             ? .pass(metrics, proof: gpu.proof) : .fail(failed.joined(separator: "; "), metrics, proof: gpu.proof)
+        return outcome.onRawPath(gpu)
     }
 }
 
@@ -201,7 +203,8 @@ struct MetalHalfRoundingTest: HWTest {
         let text = halves.map { String(format: "%04x", $0) }.joined(separator: "_")
         var metrics = Metrics()
         metrics.set("halves", text)
-        return .judged([("reads 3800_3800_37ff_3800", halves == Self.expected)], metrics, proof: gpu.proof)
+        return .judged([("reads 3800_3800_37ff_3800", halves == Self.expected)], metrics, proof: gpu.proof).onRawPath(
+            gpu)
     }
 }
 
@@ -250,6 +253,6 @@ struct MetalCompressedTest: HWTest {
             checks.append(("BC1 reads color0", (0..<3).allSatisfy { abs(bc1[$0] - expected[$0]) < 2 / 255 }))
         }
         metrics.set("bc_supported", gpu.device.supportsBCTextureCompression)
-        return .judged(checks, metrics, proof: gpu.proof)
+        return .judged(checks, metrics, proof: gpu.proof).onRawPath(gpu)
     }
 }

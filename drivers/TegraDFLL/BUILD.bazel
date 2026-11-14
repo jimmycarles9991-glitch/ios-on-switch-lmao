@@ -56,6 +56,7 @@ kernel_driver(
     c_recipe = ":freestanding_c",
     hdr_deps = [
         "drivers/TegraI2C",
+        "kits/SwitchCAR",
         "kits/SwitchLinux",
         "kits/SwitchMMIO",
     ],

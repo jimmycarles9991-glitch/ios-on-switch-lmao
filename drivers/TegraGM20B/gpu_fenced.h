@@ -218,9 +218,10 @@ static inline void high_fenced(struct tgm_chan *chan, u32 from, u32 done)
 	}
 }
 
-/* From the present channel's nonstall interrupt (the interrupt pass, nvkm's event lock held): a present whose fence passed
- * is done, and its completion work item reads its producers' result and calls back. completing covers the claim to the
- * callback's return, so tgm_present_outstanding never answers 0 for a present whose completion is not delivered yet. */
+/* From the present channel's completion in the interrupt pass's scan: a present whose fence passed is done. The pass's end
+ * (tgm_present_pass) learns its frame, once every channel the scan completes has added its GPU time, and its completion
+ * work item reads its producers' result and calls back. completing covers the claim to the callback's return, so
+ * tgm_present_outstanding never answers 0 for a present whose completion is not delivered yet. */
 static inline void present_fenced(struct tgm_chan *chan)
 {
 	u32 pending = __atomic_load_n(&tgm_present.pending, __ATOMIC_ACQUIRE);
@@ -256,8 +257,8 @@ static inline void present_fenced(struct tgm_chan *chan)
 		stats_add(&tgm_present.lat_sum, &tgm_present.lat_max,
 			  nvxnu_nanotime() - tgm_present.queued);
 	}
-	tgm_deadline_presented(queued);
-	nvxnu_work_schedule(tgm_present.completion_work);
+	tgm_present.fenced_queued = queued;
+	tgm_present.fenced_due = 1;
 }
 
 /* A user channel's fence moved, in its interrupt pass or by its kill: a present watching its producer is due

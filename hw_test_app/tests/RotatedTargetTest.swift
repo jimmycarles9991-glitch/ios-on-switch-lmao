@@ -38,6 +38,7 @@ struct RotatedTargetTest: HWTest {
     func run(_ context: TestContext) async throws -> Outcome {
         let gpu = try GPU.make()
         let raw = RawFacade.kind(of: gpu.device) == "raw"
+        let heapFullBefore = RawFacade.counters(of: gpu.device)["heap_full"] ?? 0
         let states = try RotatedStates(gpu)
         var metrics = Metrics()
         var failures: [String] = []
@@ -57,8 +58,7 @@ struct RotatedTargetTest: HWTest {
                     if cell == .load && turn == 4 { r4Load.add(result.path) }
                     switch cell.kind {
                     case .native:
-                        let required = raw && (cell != .fetch || result.referencePath == "raw")
-                        if required {
+                        if raw {
                             native += 1
                             if result.path == "raw" {
                                 nativeRaw += 1
@@ -79,6 +79,7 @@ struct RotatedTargetTest: HWTest {
         metrics.set("r4_edge_wrong", edgeWrong)
         metrics.set("r4_load_paths", r4Load.isEmpty ? "-" : r4Load.text)
         metrics.set("paths", gpu.paths.text)
+        metrics.set("heap_full", (RawFacade.counters(of: gpu.device)["heap_full"] ?? 0) - heapFullBefore)
         return failures.isEmpty
             ? .pass(metrics, proof: gpu.proof) : .fail(failures.joined(separator: "; "), metrics, proof: gpu.proof)
     }

@@ -80,15 +80,6 @@ fragment float4 fetch_blend_fragment(FetchBlendVertex v [[stage_in]], float4 fet
     return fetch_blend_step(fetched, v.tag, scale);
 }
 
-fragment float4 fetch_blend_atomic_fragment(FetchBlendVertex v [[stage_in]], float4 fetched [[color(0)]],
-                                            constant float &scale [[buffer(0)]])
-{
-    // NAK's debug-only atomic-wait marker must survive constant folding; the test's tags are 0..3.
-    if (v.tag == 0x7fa54c54u)
-        discard_fragment();
-    return fetch_blend_step(fetched, v.tag, scale);
-}
-
 // a rectangle's two triangles share primitive_id >> 1, so the pixels on its diagonal take the same step either way
 fragment float4 fetch_blend_primitive_fragment(FetchBlendVertex v [[stage_in]], uint primitive [[primitive_id]],
                                                float4 fetched [[color(0)]], constant float &scale [[buffer(0)]])
@@ -109,4 +100,17 @@ fragment FetchBlendSecond fetch_blend_second_fragment(FetchBlendVertex v [[stage
 fragment float4 fetch_blend_resolve_fragment(float4 second [[color(1)]])
 {
     return second;
+}
+
+struct FetchPosition {
+    float4 position [[position]];
+};
+
+/// RenderBox's coverage takes fwidth of a distance (RB::Shader::primitive_shape): a fetching program's derivatives of
+/// x / 4 + y / 2 in its window, scaled to codes the target holds exactly (dfdx 0.25 as 0.5, |dfdy| 0.5, fwidth 0.75 as
+/// 0.375), alpha the fetched one so the colour is read
+fragment float4 fetch_derivative_fragment(FetchPosition v [[stage_in]], float4 previous [[color(0)]])
+{
+    const float f = v.position.x * 0.25f + v.position.y * 0.5f;
+    return float4(dfdx(f) * 2.0f, abs(dfdy(f)), fwidth(f) * 0.5f, previous.a);
 }

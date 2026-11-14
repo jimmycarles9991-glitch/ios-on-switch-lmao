@@ -1,0 +1,20 @@
+load("//bazel/lint:defs.bzl", "lint_files")
+load("//bazel/testing:defs.bzl", "host_test")
+
+lint_files()
+
+# Against the host's own IOKit registry: a published service and a published resource end the wait at once, neither
+# waits out the bound.
+host_test(
+    name = "switch_service_wait_test",
+    srcs = [
+        "switch_service_wait_test.cpp",
+        "//kits/SwitchServiceWait:SwitchServiceWait.h",
+    ],
+    linkopts = [
+        "-framework",
+        "CoreFoundation",
+        "-framework",
+        "IOKit",
+    ],
+)

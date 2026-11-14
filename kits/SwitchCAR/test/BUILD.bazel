@@ -84,3 +84,72 @@ host_test(
         ":kernel",
     ],
 )
+
+# The kit as the one writer of shared CAR and PMC words, against a register file on a clock whose lock lets a second
+# driver's step land inside another's (switch_car_owner_model.h), and every driver's and kit's source.
+host_shims(
+    name = "owner_kernel",
+    headers = [
+        "IOKit/IOLib.h",
+        "kern/clock.h",
+    ],
+    stubs = "switch_car_owner_stubs.h",
+)
+
+host_library(
+    name = "owner_car",
+    srcs = [
+        "//kits/SwitchCAR:SwitchCAR.cpp",
+        "//kits/SwitchCAR:SwitchCAR.h",
+        "//kits/SwitchCAR:SwitchPMC.h",
+        "//kits/SwitchMMIO:SwitchMMIO.h",
+        "//kits/SwitchMMIO:SwitchMMIOKernel.h",
+    ],
+    defines = ["SWITCH_MMIO_HOST_MODEL=1"],
+    deps = [":owner_kernel"],
+)
+
+host_test(
+    name = "switch_car_fuse_owner_test",
+    srcs = [
+        "switch_car_fuse_owner_test.cpp",
+        "switch_car_owner_model.cpp",
+        "switch_car_owner_model.h",
+        "//kits/SwitchCAR:SwitchCAR.h",
+    ],
+    data = ["//kernel:lint_sources"],
+    deps = [
+        ":owner_car",
+        ":owner_kernel",
+    ],
+)
+
+host_test(
+    name = "switch_pmc_pads_owner_test",
+    srcs = [
+        "switch_car_owner_model.cpp",
+        "switch_car_owner_model.h",
+        "switch_pmc_pads_owner_test.cpp",
+        "//kits/SwitchCAR:SwitchPMC.h",
+    ],
+    data = ["//kernel:lint_sources"],
+    deps = [
+        ":owner_car",
+        ":owner_kernel",
+    ],
+)
+
+host_test(
+    name = "switch_pmc_dpd_owner_test",
+    srcs = [
+        "switch_car_owner_model.cpp",
+        "switch_car_owner_model.h",
+        "switch_pmc_dpd_owner_test.cpp",
+        "//kits/SwitchCAR:SwitchPMC.h",
+    ],
+    data = ["//kernel:lint_sources"],
+    deps = [
+        ":owner_car",
+        ":owner_kernel",
+    ],
+)

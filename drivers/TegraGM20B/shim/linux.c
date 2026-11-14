@@ -66,8 +66,6 @@ static struct {
 	unsigned int irq;
 } irq_slot;
 
-static int irq_polling;
-
 int request_irq(unsigned int irq, irq_handler_t h, unsigned long flags, const char *name, void *dev)
 {
 	(void)flags;
@@ -87,19 +85,13 @@ const void *free_irq(unsigned int irq, void *dev)
 }
 
 /* Run the GPU's interrupt handler (nvkm_intr: every MC leaf) once. Returns its irqreturn_t, or -1 when no handler
- * is registered or another thread is already in it (the line is level-triggered, so what that one missed fires
- * again). */
+ * is registered. Its one caller is the GPU interrupt work loop's action (shim/xnu_glue.cpp gpuInterrupt), whose runs
+ * never overlap. */
 int nvxnu_poll_irqs(void)
 {
 	irq_handler_t h = __atomic_load_n(&irq_slot.handler, __ATOMIC_ACQUIRE);
-	int idle = 0;
-	int ret = 0;
-	if (!h || !__atomic_compare_exchange_n(&irq_polling, &idle, 1, false, __ATOMIC_ACQUIRE,
-					       __ATOMIC_RELAXED))
-		return -1;
-	ret = (int)h(irq_slot.irq, irq_slot.dev);
-	__atomic_store_n(&irq_polling, 0, __ATOMIC_RELEASE);
-	return ret;
+
+	return h ? (int)h(irq_slot.irq, irq_slot.dev) : -1;
 }
 
 char *kstrdup(const char *s, gfp_t gfp)

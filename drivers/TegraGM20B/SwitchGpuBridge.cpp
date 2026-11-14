@@ -9,6 +9,7 @@
 #include "TegraGM20BGpu.h"
 #include "TegraGM20BSyncpt.h"
 #include "SwitchGpuKqueue.h"
+#include "SwitchGpuSubmitTurn.h"
 #include "../TegraHost1x/TegraHost1x.h"
 
 struct switch_gpu_bridge {
@@ -32,6 +33,7 @@ struct BridgeQueue {
 	thread_call_t retirement, hangCheck;
 	uint64_t checkAt;
 	SwitchGpuKqueue space;
+	SwitchGpuSubmitTurn turn;
 	uint32_t waitingSources;
 	switch_gpu_bridge jobs[kSlots];
 } queue;
@@ -253,6 +255,7 @@ extern "C" int switch_gpu_bridge_submit(const switch_gpu_backing_token *tokens, 
 	if (!initialize())
 		return -12;
 	IOLockLock(queue.lock);
+	queue.turn.enter(queue.lock);
 	int error = channel();
 	uint32_t slot = 0;
 	while (slot < kSlots && queue.jobs[slot].refs)
@@ -287,19 +290,24 @@ extern "C" int switch_gpu_bridge_submit(const switch_gpu_backing_token *tokens, 
 			0,
 			0,
 			0};
-		switch_gpu_chan_submit_enter(queue.space.channel);
+		tgm_chan *const chan = queue.space.channel;
+		switch_gpu_chan_submit_enter(chan);
 		for (;;) {
 			// No L2 invalidate ahead of it: the job reads no memory, its push slots are volatile, and the push's own
 			// flush (tgm_syncpt_incr) puts the producers' writes in DRAM before host1x sees the increment.
 			error = switch_gpu_chan_exec_visibility(
-				queue.space.channel, &push, 1, job.tokens, job.count, &job.sequence,
-				nullptr,
+				chan, &push, 1, job.tokens, job.count, &job.sequence, nullptr,
 				SWITCH_GPU_SUBMIT_VISIBILITY_EXPLICIT |
 					SWITCH_GPU_SUBMIT_EXTERNAL_VISIBILITY);
 			if (error != -11)
 				break;
-			error = switch_gpu_chan_wait_submission_room(queue.space.channel, &push, 1,
-								     job.count, nullptr);
+			error = queue.turn.waitForRoom(queue.lock, [&] {
+#if TGM_STATS
+				tgm_stats_unlocked(TGM_UNLOCKED_BRIDGE_ROOM, 0);
+#endif
+				return switch_gpu_chan_wait_submission_room(chan, &push, 1,
+									    job.count, nullptr);
+			});
 			if (error)
 				break;
 		}

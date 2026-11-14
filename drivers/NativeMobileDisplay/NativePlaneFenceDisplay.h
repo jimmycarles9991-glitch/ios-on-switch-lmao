@@ -57,7 +57,7 @@ bool planeFence(const PlaneSet &p)
          p.seq);
 #endif
     gpuOfferedAt = mach_absolute_time();
-    __atomic_store_n(&gpuScanout, true, __ATOMIC_RELEASE);
+    gpuScanout = true;
     gpuDeadlines = 0;
     gpuDeadline->setTimeoutMS(kGpuCopyDeadlineMS);
     if (!planeMediaFence(p)) {
@@ -73,7 +73,7 @@ void finishPlaneFence(int status)
 {
     mediaFlipPass();
     gpuDeadline->cancelTimeout();
-    __atomic_store_n(&gpuScanout, false, __ATOMIC_RELEASE);
+    gpuScanout = false;
     planeFencePending = false;
     if (copyPlaneJoined) {
         copiedPlaneFenceFinished(status);

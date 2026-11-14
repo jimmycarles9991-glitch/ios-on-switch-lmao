@@ -22,6 +22,8 @@ final class LandscapeRunTests: XCTestCase {
         put(1, 84)
         for (i, value) in crc.enumerated() { put(value, 96 + 4 * i) }
         for (i, value) in mode.enumerated() { bytes[96 + 4 * LandscapeSample.maxFrames + i] = value }
+        put(4, 96 + 5 * LandscapeSample.maxFrames)
+        put(3, 100 + 5 * LandscapeSample.maxFrames)
         return bytes
     }
 
@@ -58,6 +60,7 @@ final class LandscapeRunTests: XCTestCase {
         XCTAssertEqual(parsed.vicEventTurns, [7, 0, 0])
         XCTAssertEqual(parsed.displayNs, 0x1_0000_0002)
         XCTAssertEqual(parsed.landscapeFrames, 2)
+        XCTAssertEqual(parsed.failures, 4)
         XCTAssertNil(LandscapeSample([UInt8](repeating: 0, count: LandscapeSample.size)))
     }
 
@@ -121,6 +124,34 @@ final class LandscapeRunTests: XCTestCase {
         let (checks, metrics) = LandscapeJudge.judge(samples(enter: enter), dropped: 0)
         XCTAssertEqual(checks.filter { !$0.1 }.map(\.0), [])
         XCTAssertEqual(metrics["stray_enter"], .integer(0))
+    }
+
+    /// Boot 21's run: the change into landscape came after its sample (all 90 readings the copy route's), and the change
+    /// back came 3 frames into its sample, after which the copy route never showed crc_vic. The landscape CRC is the held
+    /// landscape frame's, so only the frames after the leave are stray, and the change that missed its sample says so.
+    func testAChangeAfterItsSampleIsTimingAndTheLeaveIsJudgedOnItsOwnFrames() {
+        var s = samples()
+        s.vicHeld = sample(Array(repeating: 0x8a0c_21db, count: 30), Array(repeating: 0, count: 30))
+        s.enter = sample(Array(repeating: 0x8a0c_21db, count: 90), Array(repeating: 0, count: 90))
+        s.landscapeHeld = sample(Array(repeating: 0xcccc, count: 30), Array(repeating: 1, count: 30))
+        s.leave = sample(
+            Array(repeating: 0xcccc, count: 3) + Array(repeating: 0xdddd, count: 87),
+            Array(repeating: 1, count: 3) + Array(repeating: 0, count: 87), switches: 1)
+        let (checks, metrics) = LandscapeJudge.judge(s, dropped: 0)
+        XCTAssertEqual(metrics["crc_landscape"], .text("0000cccc"))
+        XCTAssertEqual(metrics["crc_back"], .text("0000dddd"))
+        XCTAssertEqual(metrics["enter_switched"], .flag(false))
+        XCTAssertEqual(metrics["leave_switched"], .flag(true))
+        XCTAssertEqual(metrics["stray_enter"], .integer(0))
+        XCTAssertEqual(metrics["stray_leave"], .integer(87))
+        XCTAssertEqual(metrics["leave_vic_jobs"], .integer(0))
+        XCTAssertEqual(metrics["leave_vic_turns"], .integer(0))
+        XCTAssertEqual(
+            checks.filter { !$0.1 }.map(\.0),
+            [
+                "the display went landscape on that frame (switches, crc_landscape settled)",
+                "back to the VIC route's very frame (crc_vic again, stray_leave 0)",
+            ])
     }
 
     func testDroppedFramesFail() {

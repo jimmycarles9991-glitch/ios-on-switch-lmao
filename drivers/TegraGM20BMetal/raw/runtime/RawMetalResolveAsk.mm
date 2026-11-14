@@ -25,7 +25,7 @@ raw::ResolveTarget resolveTarget(RMTexture *into)
 }
 
 #if SWITCH_RAW_DIAGNOSTICS
-// Once a reason: what made a screen-format resolve take the exact route, so the device log names the fact
+// Once a reason: what made a screen-format resolve take the pass, so the device log names the fact
 static void sayReadable(RMTexture *into, const raw::ResolveTarget &t, uint32_t samples)
 {
     static std::atomic<uint32_t> said{0};
@@ -33,7 +33,7 @@ static void sayReadable(RMTexture *into, const raw::ResolveTarget &t, uint32_t s
     if (said.fetch_or(why) & why)
         return;
     os_log(rawLog(),
-           "raw: a %ux %ux%u format %u resolve is read as data, so exact: shared=%d imported=%d buffer=%d "
+           "raw: a %ux %ux%u format %u resolve is read as data, so the pass: shared=%d imported=%d buffer=%d "
            "storage=%d read=%d usage=0x%lx kind=%u",
            samples, into->_raw.width, into->_raw.height, into->_raw.format, t.sharedStorage, t.imported, t.overBuffer,
            t.storage, t.readAsData, (unsigned long)into->_descriptor.usage, unsigned(into->_kind));
@@ -54,6 +54,5 @@ raw::ResolveAsk resolveAsk(RMTexture *into, const raw::Texture &target, const ra
 #endif
     a.wholeTarget = width == target.width && height == target.height;
     a.shadowTarget = target.shadowTarget;
-    a.compressedSamples = rendered.comptags;
     return a;
 }

@@ -48,8 +48,7 @@ int SwitchGpuAdmission::begin(const switch_gpu_backing_use *uses, uint32_t count
 			if (leases[j] == leases[i])
 				return -22;
 	}
-	for (uint32_t i = 0; i < unique; ++i)
-		IOLockLock(uses_[i].backing->lock);
+	const bool claimed = switch_gpu_backing_enter_uses(uses_, unique);
 	int result = 0;
 	for (uint32_t i = 0; !result && i < guardCount; ++i) {
 		const auto &guard = guards[i];
@@ -111,8 +110,7 @@ int SwitchGpuAdmission::begin(const switch_gpu_backing_use *uses, uint32_t count
 		count_ = unique;
 		active_ = true;
 	}
-	for (uint32_t i = unique; i; --i)
-		IOLockUnlock(uses_[i - 1].backing->lock);
+	switch_gpu_backing_leave_uses(uses_, unique, claimed);
 	if (!result)
 		for (uint32_t i = 0; i < unique; ++i)
 			switch_gpu_backing_retain(uses_[i].backing);
@@ -149,11 +147,11 @@ void SwitchGpuAdmission::end()
 	active_ = false;
 	for (uint32_t i = 0; i < count_; ++i) {
 		auto *backing = uses_[i].backing;
-		IOLockLock(backing->lock);
+		const bool claimed = switch_gpu_backing_enter(backing);
 		--(uses_[i].access & SWITCH_GPU_BACKING_WRITE ? backing->gpu_admission_writers
 							      : backing->gpu_admission_readers);
 		IOLockWakeup(backing->lock, &backing->cpu_writers, false);
-		IOLockUnlock(backing->lock);
+		switch_gpu_backing_leave(backing, claimed);
 		switch_gpu_backing_release(backing);
 	}
 	count_ = 0;
@@ -164,11 +162,11 @@ extern "C" int switch_gpu_backing_admission_ready(switch_gpu_backing *backing, u
 {
 	if (!backing || !(access & accessMask) || (access & ~accessMask))
 		return -22;
-	IOLockLock(backing->lock);
+	const bool claimed = switch_gpu_backing_enter(backing);
 	const bool ready =
 		!backing->cpu_writers && (!(access & SWITCH_GPU_BACKING_WRITE) ||
 					  !switch_gpu_backing_exclusive_readers(backing));
-	IOLockUnlock(backing->lock);
+	switch_gpu_backing_leave(backing, claimed);
 	return ready ? 1 : 0;
 }
 
@@ -176,11 +174,11 @@ extern "C" int switch_gpu_backing_conversion_ready(switch_gpu_backing *backing, 
 {
 	if (!backing || !(access & accessMask) || (access & ~accessMask))
 		return -22;
-	IOLockLock(backing->lock);
+	const bool claimed = switch_gpu_backing_enter(backing);
 	const bool ready = !backing->cpu_writers && !backing->gpu_admission_writers &&
 			   (!(access & SWITCH_GPU_BACKING_WRITE) ||
 			    (!switch_gpu_backing_exclusive_readers(backing) &&
 			     !backing->gpu_admission_readers));
-	IOLockUnlock(backing->lock);
+	switch_gpu_backing_leave(backing, claimed);
 	return ready ? 1 : 0;
 }

@@ -1,10 +1,17 @@
 // SPDX-License-Identifier: BSD-2-Clause-Patent
 // The slot entry holding memory (mapped now, into the least recently used slot neither scanned nor asked for, if not yet);
-// kNoBuffer when every slot is in use or the pages cannot be had.
+// kNoBuffer when every slot is in use or the pages cannot be had. A surface a slot already holds is snapshotted through
+// the backing the slot holds scanned, not looked up in the IOSurface cache again (its lock, every swap).
 int directSlotFor(OSObject *surface, IOMemoryDescriptor *memory, uint64_t stride, uint64_t allocation, bool tiled)
 {
     SwitchNativeScanout snapshot = {};
-    if (switch_native_scanout_pitch(surface, &snapshot))
+    switch_gpu_backing *held = nullptr;
+    for (unsigned k = 0; k < kSlots && !held; ++k) {
+        if (slots[k].memory == memory && slots[k].surface == surface)
+            held = scanoutHeld[k];
+    }
+    if ((!held || switch_native_scanout_pitch_held(surface, held, &snapshot)) &&
+        switch_native_scanout_pitch(surface, &snapshot))
         return kNoBuffer;
     const uint64_t offset = snapshot.pitchOffset;
     const uint32_t pages = static_cast<uint32_t>((allocation + 4095) / 4096);

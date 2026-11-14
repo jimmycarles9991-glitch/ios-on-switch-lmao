@@ -24,7 +24,7 @@ enum switch_bench_kind {
 // How a pack experiment's draws take a state with a split (raw_split_reuse.h SplitProbe). Every form but whole takes
 // the split plan's draws without a plan, so a bench-sized quad splits as a screen-sized one would.
 enum switch_bench_pack_form {
-    SWITCH_BENCH_PACK_WHOLE,          // whole programs, the fact-selected variant (the debug switch whole-programs)
+    SWITCH_BENCH_PACK_WHOLE,          // whole programs, the fact-selected variant (forceWholePrograms)
     SWITCH_BENCH_PACK_WHOLE_GENERIC,  // the generic whole program the split twin is made from, no prologue
     SWITCH_BENCH_PACK_SPLIT,          // the split twin, its frontier from its prologue
     SWITCH_BENCH_PACK_SPLIT_WHOLE,    // the prologue launched and its frontier written, the generic whole program drawn

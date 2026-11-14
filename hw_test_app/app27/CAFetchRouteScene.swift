@@ -7,10 +7,9 @@ import Metal
 /// one before it left), in the shapes whose raster order the raw path keeps differently: three instances in the middle of
 /// three render encoders of one command buffer, a strip of six vertices whose four triangles cover each other, and twelve
 /// overlapping triangles in one draw over a depth attachment and into four and two samples. Each pass must match the
-/// result of its triangles applied in order, and on the facade the fetch counters must show how the raw path took
-/// them: inside the pixel interlock (fetch_interlocked), or refused as recorded or at encoding (its encoder then on
-/// m2v), or ordered on the GPU a triangle a draw (sequential) or on the CPU's proof (whole). A pass that moves none of
-/// them did not fetch its own colour.
+/// result of its triangles applied in order, and on the facade each pass must take the raw path and the fetch counters
+/// show how it kept their order: inside the pixel interlock (fetch_interlocked), ordered on the GPU a triangle a draw
+/// (sequential) or on the CPU's proof (whole). A pass that moves none of them did not fetch its own colour.
 struct CAFetchRouteScene: GPUScene {
     let id = "gpu.ca.fetch_routes"
     let name = "Draws fetching their own colour: instanced, folded strip, depth and multisample routes and pixels"
@@ -110,30 +109,17 @@ struct CAFetchRouteScene: GPUScene {
         result.expect(!timing.path.hasPrefix("error:"), "\(name): \(timing.path)")
         if RawFacade.kind(of: gpu.device) == "raw" {
             let interlocked = moved("fetch_interlocked")
-            let refused = after.keys.filter { $0.hasPrefix("fetch_record.") || $0.hasPrefix("fetch_encode.") }
-                .reduce(0) { $0 + moved($1) }
-            let ordered = moved("fetch_sequential")
-            // a pass the raw path refuses as it begins (m2v:pass:...) records no draw, so no fetch counter can move
+            let ordered = moved("fetch_sequential") + moved("fetch_whole")
+            result.expect(timing.path == "raw", "\(name): not drawn on the raw path: \(timing.path)")
             result.expect(
-                timing.path.hasPrefix("m2v:pass:") || interlocked + refused + ordered > 0,
-                "\(name): no fetch counter moved: the pipeline did not fetch the colour it writes")
-            if interlocked == 0 && refused > 0 {
-                result.expect(!timing.path.hasPrefix("raw"), "\(name): refused, yet drawn raw: \(timing.path)")
-            }
+                interlocked + ordered > 0,
+                "\(name): no fetch counter moved: the pipeline did not fetch the colour it writes in order")
             // twelve overlapping triangles over a depth attachment: one draw each behind the fetch barrier, no vertex read
             if pass == .depth {
                 result.expect(
                     timing.path == "raw" && interlocked + moved("fetch_sequential") > 0,
                     "depth: not ordered on the raw path: \(timing.path) \(RawFacade.fetchRoutes(before: before, after: after))"
                 )
-            }
-            if pass == .msaa || pass == .msaa2 {
-                result.expect(timing.path == "raw", "\(name): not drawn on the raw path: \(timing.path)")
-            }
-            if pass == .instanced && moved("fetch_record.instances") > 0 {
-                result.expect(
-                    timing.path.hasPrefix("split:2+1:"),
-                    "the instanced draw's encoder went to m2v, and its neighbours with it: \(timing.path)")
             }
         }
         let picture = try await gpu.read(resolved, bytesPerPixel: 4)

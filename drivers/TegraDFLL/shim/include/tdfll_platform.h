@@ -37,8 +37,9 @@ struct reset_control *tdfll_platform_reset(struct device *dev, const char *id);
 /*
  * platform.c, for dfll.c. tdfll_platform_init() maps the blocks, identifies the chip and reads its fuses (L4T
  * speedo-tegra210.c), finds VDD_CPU's MAX77812, programs the DFLL reference clocks as L4T's clock init table does and
- * registers the clock tree; it never touches the CPU clock or VDD_CPU. Idempotent (a failure is remembered). Each
- * returns 0 or a negative errno with a one-line reason in `why`.
+ * registers the clock tree; it never touches the CPU clock or VDD_CPU. Idempotent: -ENODEV (the chip's revision or
+ * its CPU speedo fuses) is remembered, any other failure is tried again by the next call. Each returns 0 or a negative
+ * errno with a one-line reason in `why`.
  */
 int tdfll_platform_init(char *why, size_t len);
 /* After SC7, before tegra_dfll_resume(): the DFLL's CAR gate, reset and sources as init left them. 0 if never inited. */
@@ -50,7 +51,7 @@ int tdfll_platform_cpu_on_pllx(char *why, size_t len);
 bool tdfll_platform_pllx_locked(void);
 /* I2C5 is clocked, out of reset and in multi-master mode, so the DFLL's own I2C master may share PWR_I2C with it. */
 int tdfll_platform_i2c5_shareable(char *why, size_t len);
-/* VDD_CPU's MAX77812 M4_VOUT code over TegraI2C (one retry on arbitration loss); write reads back. 0 or TEGRA_I2C_E* */
+/* VDD_CPU's MAX77812 M4_VOUT code over TegraI2C; write reads back. 0 or TEGRA_I2C_E* */
 int tdfll_platform_vout_read(u8 *code);
 int tdfll_platform_vout_write(u8 code);
 u8 tdfll_platform_pmic_address(void);

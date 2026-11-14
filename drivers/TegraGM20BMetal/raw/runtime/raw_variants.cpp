@@ -11,8 +11,9 @@
 #include "raw_variants.h"
 #if SWITCH_RAW_DIAGNOSTICS
 #include <os/log.h>
+#include <time.h>
 #include <mutex>
-#include <unordered_map>
+#include "raw_uniform_tuples.h"
 #endif
 
 namespace raw {
@@ -134,68 +135,38 @@ uint32_t RenderEncoder::bindingFacts(const Pipeline &pl)
 }
 
 #if SWITCH_RAW_DIAGNOSTICS
-// For a pack pipeline whose fragment program leaves 20 warps per SM or fewer (more than 96 registers: Core Animation's
-// generic Xghfc states, whose branches test uniform words), each distinct tuple of its uniform buffers' bytes, its bytes
-// at its first draw and its count at the 10th, 100th...: what a variant specialised on uniform values would cover
+// A draw of a generic merge state: its tuple of the uniform bytes its record reads, counted in its 5 s window
+// (raw_uniform_tuples.h), each window logged as it closes
 void RenderEncoder::logUniformTuple(const Pipeline &pl) const
 {
-    constexpr uint8_t kLowOccupancyGprs = 96;
-    constexpr size_t kTuplesPerKey = 64, kLogBytes = 1024, kLineBytes = 128;
-    if (!pl.rec || dev_->pack().section<PackProgram>(PackPrograms)[pl.rec->fs].gprs <= kLowOccupancyGprs)
+    if (!pl.rec)
         return;
     const PackPipeline &r = *pl.rec;
-    uint64_t tuple = 0xcbf29ce484222325ull;
-    for (uint32_t k = 0; k < kUniformRanges; k++) {
-        const PackUniformRange &u = r.uniform[k];
-        if (u.entry >= r.entries)
-            continue;
-        const PackEntry &e = r.entry[u.entry];
-        const Bound &b = bufs_[e.stage][e.slot];
-        const uint8_t *bytes = b.cpu;
-        for (uint32_t i = 0; bytes && i < std::min<size_t>(b.size, kLogBytes); i++)
-            tuple = (tuple ^ bytes[i]) * 0x100000001b3ull;
-        tuple = (tuple ^ k) * 0x100000001b3ull;
-    }
+    uint64_t tuple = 0;
+    const bool mapped = uniformTuple(
+        r,
+        [&](uint8_t stage, uint8_t slot) {
+            const Bound &b = bufs_[stage][slot];
+            return BoundBytes{b.cpu, b.size};
+        },
+        tuple);
     static std::mutex lock;
-    static std::unordered_map<uint64_t, std::unordered_map<uint64_t, uint64_t>> draws;
-    uint64_t n;
+    static UniformTuples tuples;
+    std::vector<UniformTuples::Window> closed;
     {
         std::lock_guard<std::mutex> l(lock);
-        auto &tuples = draws[r.keyHash];
-        auto it = tuples.find(tuple);
-        if (it == tuples.end()) {
-            if (tuples.size() >= kTuplesPerKey)
-                return;
-            it = tuples.emplace(tuple, 0).first;
-        }
-        n = ++it->second;
+        tuples.note(r.keyHash, mapped, tuple, clock_gettime_nsec_np(CLOCK_UPTIME_RAW) / 1000, closed);
     }
-    uint64_t power = 1;
-    while (power < n)
-        power *= 10;
-    if (power != n)
-        return;
     static os_log_t log = os_log_create("com.brunostjohn.switch.TegraGM20BMetal", "raw");
-    os_log(log, "raw: uniform tuple key=%016llx tuple=%016llx draws=%llu", (unsigned long long)r.keyHash,
-           (unsigned long long)tuple, (unsigned long long)n);
-    if (n != 1)
-        return;
-    for (uint32_t k = 0; k < kUniformRanges; k++) {
-        const PackUniformRange &u = r.uniform[k];
-        if (u.entry >= r.entries)
-            continue;
-        const PackEntry &e = r.entry[u.entry];
-        const Bound &b = bufs_[e.stage][e.slot];
-        const size_t size = b.cpu ? std::min<size_t>(b.size, kLogBytes) : 0;
-        for (size_t at = 0; at < size; at += kLineBytes) {
-            char hex[2 * kLineBytes + 1];
-            const size_t line = std::min(kLineBytes, size - at);
-            for (size_t i = 0; i < line; i++)
-                snprintf(hex + 2 * i, 3, "%02x", b.cpu[at + i]);
-            os_log(log, "raw: uniform tuple key=%016llx tuple=%016llx stage=%u slot=%u bank=%u at=%zu %{public}s",
-                   (unsigned long long)r.keyHash, (unsigned long long)tuple, e.stage, e.slot, u.bank, at, hex);
-        }
-    }
+    for (const UniformTuples::Window &w : closed)
+        os_log(log,
+               "raw: uniform tuples key=%016llx in 5 s: %llu draws, %zu tuples (drawn once %llu, 2-9 times %llu, "
+               "10-99 times %llu, 100 or more %llu; the most %llu draws, tuple %016llx), %llu draws of tuples past "
+               "the first %zu, %llu draws of a range the CPU does not map",
+               (unsigned long long)w.keyHash, (unsigned long long)w.draws, w.tuples, (unsigned long long)w.drawnOnce,
+               (unsigned long long)w.drawnUnder10, (unsigned long long)w.drawnUnder100, (unsigned long long)w.drawnMore,
+               (unsigned long long)w.most, (unsigned long long)w.mostTuple, (unsigned long long)w.beyond,
+               UniformTuples::kTuplesPerState, (unsigned long long)w.unmapped);
 }
 #endif
 

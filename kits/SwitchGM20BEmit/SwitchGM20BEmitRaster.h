@@ -12,9 +12,11 @@
 extern "C" {
 #endif
 
-#define SWITCH_GM20B_CONSTANT_COLOR_WORDS 6u
+#define SWITCH_GM20B_CONSTANT_COLOR_WORDS 7u
 
-// The ROP writes `rgba` (the methods' 32-bit words, red first) for every covered sample until switched off
+// The ROP writes `rgba` (the methods' 32-bit words, red first) for every covered sample until switched off, the pixel
+// stage off meanwhile: gpu.x1.constant_colour read the method accepted and the program's colour written with the stage
+// on (boot 19, every covered texel). Off switches the pixel stage back on with the program the draw state set.
 void switch_gm20b_constant_color(struct nv_push *p, const uint32_t rgba[4]);
 void switch_gm20b_constant_color_off(struct nv_push *p);
 

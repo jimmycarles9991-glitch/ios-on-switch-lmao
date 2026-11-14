@@ -16,7 +16,6 @@
     // job released into it, and the one the range being encoded (`wordStamp`) did
     uint64_t wordAddress, wordBase, wordGeneration, wordStamp;
     uint32_t wordFloor, wordPending;
-    bool wordSpent;  // the kernel answered kIOReturnNoResources: the word passed half its range
 }
 @end
 @implementation SwitchSharedEventBinding
@@ -57,7 +56,7 @@ std::shared_ptr<raw::SharedEventLease> sharedEventLease(id event)
 bool sharedEventWord(id event, uint64_t value, uint64_t inlineStamp, uint64_t &address, uint32_t &payload)
 {
     SwitchSharedEventBinding *b = eventBinding(event);
-    if (!b || b->wordSpent || !gRM->eventWords.load(std::memory_order_relaxed))
+    if (!b || !gRM->eventWords.load(std::memory_order_relaxed))
         return false;
     const uint64_t generation = gRM->raw->channelGeneration();
     const bool encoding = b->wordStamp == inlineStamp;
@@ -70,7 +69,6 @@ bool sharedEventWord(id event, uint64_t value, uint64_t inlineStamp, uint64_t &a
         const int kr = gRM->raw->eventWord(b->lease->handle(), address, base, floor);
         if (kr == kIOReturnUnsupported)
             gRM->eventWords.store(false, std::memory_order_relaxed);
-        b->wordSpent = kr == kIOReturnNoResources;
         if (kr != KERN_SUCCESS) {
             once([NSString stringWithFormat:@"event word refused (0x%x): the signal goes at its job's end", kr]);
             return false;

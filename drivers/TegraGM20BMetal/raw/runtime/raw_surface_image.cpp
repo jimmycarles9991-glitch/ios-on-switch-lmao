@@ -7,6 +7,7 @@
 #include <CoreFoundation/CoreFoundation.h>
 #include <unistd.h>
 #include <cstring>
+#include "../fx/fx_mip_probe.h"
 #include "raw_gpu.h"
 
 namespace raw {
@@ -63,7 +64,7 @@ bool Device::createSurfaceImage(uint64_t surfaceId, void *base, uint64_t allocBy
         t.chain = new Texture::Chain;
         t.chain->layout = c;
         t.chain->va = t.va;
-        t.chain->fmt2d = fx::twodFormat(format);
+        t.chain->fmt2d = fx::twodChainFormat(format);
         uint32_t w[8];
         fx::mipChainTic(c, t.va, f->tic0, f->srgb, 0, c.levels, w);
         memcpy(tic_.cpu + 32 * t.tic, w, 32);

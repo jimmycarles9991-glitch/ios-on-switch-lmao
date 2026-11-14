@@ -134,8 +134,6 @@ const Mapping kMappings[] = {
 
 // Functions that read, modify and write through a pointer argument: their calls are checked argument by argument
 const char *const kWrappers[] = {"nvxnu_word_wake",
-				 "switch_gpu_irq_arm",
-				 "switch_gpu_irq_complete",
 				 "switch_gpu_waiter_want",
 				 "switch_gpu_waiter_reached",
 				 "switch_gpu_quiet_need",

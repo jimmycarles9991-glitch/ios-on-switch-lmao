@@ -50,15 +50,21 @@ TEST(FetchOrder, ListsAndStripsAreDrawnATriangleAtATime)
     EXPECT_EQ(refusal(true, {kTriangle, 6, 1, false, true}), FetchRefusal::None);
 }
 
-// RenderBox's quad, an indexed strip of four vertices, is refused only where its state has no storage form: a
-// state drawn inside the pixel interlock (fetchesOwnColor false) takes any shape whole
+// RenderBox's quad, an indexed strip of four vertices (its uber_fragment over an icon), is drawn a triangle at a time
+// where its state's storage form cannot view the target; it is refused only where its faces decide its pixels, as a
+// restart would leave the faces past it to its indices
 TEST(FetchOrder, OnlyWhatOneTriangleADrawCannotKeepIsRefused)
 {
-    EXPECT_EQ(refusal(true, {kStrip, 4, 1, false, true}), FetchRefusal::Restart);
+    EXPECT_EQ(refusal(true, {kStrip, 4, 1, false, true}), FetchRefusal::None);
+    EXPECT_EQ(raw::sequentialRefusal(false, {kStrip, 4, 1, false, true}), FetchRefusal::None);
+    EXPECT_EQ(raw::sequentialRefusal(false, {kStrip, 4, 1, false, true, true}), FetchRefusal::Restart);
+    EXPECT_EQ(raw::sequentialRefusal(false, {kStrip, 4, 1, false, false, true}), FetchRefusal::None);
+    EXPECT_EQ(raw::sequentialRefusal(false, {kTriangle, 6, 1, false, true, true}), FetchRefusal::None);
     EXPECT_EQ(refusal(raw::fetchesOwnColor(1, 1, 1), {kStrip, 4, 1, false, true}), FetchRefusal::None);
     EXPECT_EQ(refusal(true, {kTriangle, 3 * raw::kSequentialTriangles, 1}), FetchRefusal::None);
     EXPECT_EQ(refusal(true, {kTriangle, 3 * raw::kSequentialTriangles + 3, 1}), FetchRefusal::Long);
     EXPECT_EQ(refusal(true, {kStrip, raw::kSequentialTriangles + 3, 1}), FetchRefusal::Long);
+    EXPECT_EQ(refusal(true, {kStrip, raw::kSequentialTriangles + 3, 1, false, true}), FetchRefusal::Long);
     EXPECT_EQ(refusal(true, {kTriangle, 6, 1}, true), FetchRefusal::PrimitiveId);
     EXPECT_EQ(refusal(true, {kTriangle, 3, 1}, true), FetchRefusal::None);
 }

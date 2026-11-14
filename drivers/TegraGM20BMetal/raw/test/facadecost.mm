@@ -132,22 +132,25 @@ double blocksInUse()
     return double(stats.blocks_in_use);
 }
 
-// PBGRAXm_A2Xhf's functions and their constants, as drivers/TegraGM20BMetal/precompile/corpus.log records them
-const char *kFillVertex = "fixed_vert_lph_spc fc_generic:53:00 fc_texcoord_count0:49:00 fc_texcoord_count1:49:00 "
-                          "fc_vertex_layout:49:00";
+// PBGRAXm_A2Xhf's functions and their constants as QuartzCore 27 makes the name (raw/pack/ca/caspec.py, 24B119's
+// tables): the metallib and pack this harness takes are 24B119's, and its colour 1 is RGBA16Float
+const char *kFillVertex = "fixed_vert_lph_spc fc_generic:53:00 fc_perspective:53:00 fc_texcoord_count0:49:00 "
+                          "fc_texcoord_count1:49:00 fc_vertex_layout:49:00";
 const char *kFillFragment =
-    "fixed_frag_lph_cph fc_attachment_count:49:02 fc_blend_function:49:3a fc_clamp_color:53:00 fc_color_inputs0:49:00 "
-    "fc_color_inputs1:49:00 fc_color_opaque0:53:00 fc_color_opaque1:53:00 fc_color_opcodes0:52:00000000 "
-    "fc_color_opcodes1:52:00000000 fc_coord_function0:49:00 fc_coord_function1:49:00 fc_debug_xr:53:00 "
-    "fc_dest_count:49:00 fc_dest_index:49:00 fc_destination_function:49:00 fc_extended_range:53:00 fc_filter0:49:00 "
-    "fc_filter1:49:00 fc_framebuffer_fetch:53:01 fc_generic:53:00 fc_has_asg_77_weights:53:00 "
-    "fc_has_attachment_0:53:00 fc_has_attachment_1:53:00 fc_has_attachment_2:53:00 fc_has_color_cube0:53:00 "
-    "fc_has_color_cube1:53:00 fc_has_color_params:53:00 fc_has_color_trc0:53:00 fc_has_color_trc1:53:00 "
-    "fc_has_edr_factor:53:00 fc_has_gamma_luts:53:00 fc_has_hdr_scale:53:00 fc_has_image_0A:53:00 "
-    "fc_has_image_0B:53:00 fc_has_image_0C:53:00 fc_has_image_1A:53:00 fc_has_image_1B:53:00 fc_has_image_1C:53:00 "
-    "fc_has_lod_bias:53:00 fc_has_lut_tex:53:00 fc_has_noise_scale:53:00 fc_has_noise_tex:53:00 "
-    "fc_has_premultiply:53:00 fc_has_ycbcr_matrix:53:00 fc_image_count:49:00 fc_image_function0:49:00 "
-    "fc_image_function1:49:00 fc_memoryless_index0:49:00 fc_memoryless_index1:49:00 fc_noise_width:49:00 "
+    "fixed_frag_lph_cph fc_attachment_count:49:02 fc_blend_function:49:3f fc_clamp_color:53:00 "
+    "fc_color_inputs0:49:00 fc_color_inputs1:49:00 fc_color_opaque0:53:00 fc_color_opaque1:53:00 "
+    "fc_color_opcodes0:52:00000000 fc_color_opcodes1:52:00000000 fc_color_opcodes_ext0:50:0000 "
+    "fc_color_opcodes_ext1:50:0000 fc_coord_function0:49:00 fc_coord_function1:49:00 fc_debug_xr:53:00 "
+    "fc_dest_count:49:00 fc_dest_index:49:00 fc_destination_function:49:00 fc_extended_range:53:00 "
+    "fc_filter0:49:00 fc_filter1:49:00 fc_framebuffer_fetch:53:01 fc_generic:53:00 "
+    "fc_has_asg_77_weights:53:00 fc_has_attachment_0:53:00 fc_has_attachment_1:53:00 "
+    "fc_has_attachment_2:53:00 fc_has_color_cube0:53:00 fc_has_color_cube1:53:00 fc_has_color_params:53:00 "
+    "fc_has_color_trc0:53:00 fc_has_color_trc1:53:00 fc_has_edr_factor:53:00 fc_has_gamma_luts:53:00 "
+    "fc_has_hdr_scale:53:00 fc_has_image_0A:53:00 fc_has_image_0B:53:00 fc_has_image_0C:53:00 "
+    "fc_has_image_1A:53:00 fc_has_image_1B:53:00 fc_has_image_1C:53:00 fc_has_lod_bias:53:00 "
+    "fc_has_lut_tex:53:00 fc_has_noise_scale:53:00 fc_has_noise_tex:53:00 fc_has_premultiply:53:00 "
+    "fc_has_ycbcr_matrix:53:00 fc_image_count:49:00 fc_image_function0:49:00 fc_image_function1:49:00 "
+    "fc_memoryless_index0:49:00 fc_memoryless_index1:49:00 fc_noise_width:49:00 fc_perspective:53:00 "
     "fc_plane_count0:49:00 fc_plane_count1:49:00 fc_texcoord_count0:49:00 fc_texcoord_count1:49:00 "
     "fc_texture_function:49:00 fc_unbounded_range:53:00 fc_vertex_layout:49:00";
 
@@ -197,7 +200,7 @@ id<MTLRenderPipelineState> fillState(id<MTLDevice> device, id<MTLLibrary> librar
     MTLRenderPipelineDescriptor *d = [MTLRenderPipelineDescriptor new];
     d.label = @"com.apple.coreanimation.PBGRAXm_A2Xhf";
     d.colorAttachments[0].pixelFormat = MTLPixelFormatBGRA8Unorm;
-    d.colorAttachments[1].pixelFormat = MTLPixelFormatBGRA8Unorm;
+    d.colorAttachments[1].pixelFormat = MTLPixelFormatRGBA16Float;
     d.colorAttachments[1].writeMask = MTLColorWriteMaskNone;
     MTLVertexDescriptor *vd = [MTLVertexDescriptor vertexDescriptor];
     const MTLVertexFormat formats[4] = {MTLVertexFormatFloat4, MTLVertexFormatFloat2, MTLVertexFormatFloat2,
@@ -323,6 +326,7 @@ int main(int argc, char **argv)
         id<MTLTexture> target = [device newTextureWithDescriptor:td];
         td.usage = MTLTextureUsageRenderTarget;
         td.storageMode = MTLStorageModeMemoryless;
+        td.pixelFormat = MTLPixelFormatRGBA16Float;
         id<MTLTexture> scratch = [device newTextureWithDescriptor:td];
         MTLRenderPassDescriptor *passes[kPasses];
         for (unsigned p = 0; p < kPasses; p++) {

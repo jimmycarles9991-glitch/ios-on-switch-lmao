@@ -2,9 +2,21 @@
 #include <gtest/gtest.h>
 #include <vector>
 #include "../SwitchVICFractionProbe.h"
+#include "vic_model.h"
 
 namespace {
 using namespace switch_vic_fraction_probe;
+
+constexpr uint64_t kSrcIova = 0x40000000, kDstIova = 0x40100000;
+
+TegraVICJob built(const Case &c)
+{
+    const TegraVICImage in = image(kSrcIova, false), out = image(kDstIova, true);
+    const TegraVICOp op = operation(c);
+    TegraVICJob job = {};
+    EXPECT_EQ(tegra_vic_build(&in, &out, &op, &kTegraVICTraits, 0x1000, 0x2000, &job), nullptr);
+    return job;
+}
 
 enum class Offsets {
     Interpolated,
@@ -25,16 +37,19 @@ uint32_t channel(const std::vector<uint8_t> &source, uint32_t x, uint32_t y, uin
     return (p >> shift) & 0xff;
 }
 
-// An engine that reads the source at the job's 16.16 rectangle, 2-tap in the 10-bit pipeline (in << 2, out >> 2,
-// truncating), with the offset kept, truncated or rounded, and alpha as told.
-std::vector<uint8_t> engine(const Case &c, Offsets offsets, Alpha alpha)
+enum class Dimensions {
+    Kept,
+    Truncated,  // the rectangle's width and height dropped to whole pixels
+};
+
+// An engine that reads the source at the job's 16.16 rectangle, each output pixel's centre scaled into it, 2-tap in the
+// 10-bit pipeline (in << 2, out >> 2, truncating), with the offset kept, truncated or rounded, and alpha as told.
+std::vector<uint8_t> engine(const Case &c, Offsets offsets, Alpha alpha, Dimensions dimensions = Dimensions::Kept)
 {
     std::vector<uint8_t> source(kBufferBytes), destination(kBufferBytes, kPoison);
     fillSource(source.data(), c);
     const TegraVICOp op = operation(c);
-    TegraVICJob job = {};
-    if (c.mode == kBackgroundAlpha)
-        overrideAlpha(&job, kOverride);
+    const TegraVICJob job = built(c);
     const auto at = [offsets](uint64_t fixed) {
         if (offsets == Offsets::Truncated)
             return fixed & ~0xffffull;
@@ -44,7 +59,11 @@ std::vector<uint8_t> engine(const Case &c, Offsets offsets, Alpha alpha)
     };
     for (uint32_t y = 0; y < kSize; y++) {
         for (uint32_t x = 0; x < kSize; x++) {
-            const uint64_t sx = at(op.srcX + (uint64_t(x) << 16)), sy = at(op.srcY + (uint64_t(y) << 16));
+            const uint64_t mask = dimensions == Dimensions::Truncated ? ~0xffffull : ~0ull;
+            const auto scaled = [](uint64_t origin, uint64_t size, uint32_t i) {
+                return origin + ((2 * i + 1) * size - (uint64_t(kSize) << 16)) / (2 * kSize);
+            };
+            const uint64_t sx = at(scaled(op.srcX, op.srcW & mask, x)), sy = at(scaled(op.srcY, op.srcH & mask, y));
             const uint32_t x0 = uint32_t(sx >> 16), y0 = uint32_t(sy >> 16);
             const uint64_t fx = op.nearest ? 0 : sx & 0xffff, fy = op.nearest ? 0 : sy & 0xffff;
             uint32_t out = 0;
@@ -79,19 +98,42 @@ SwitchVICFractionResult judge(const Case &c, const std::vector<uint8_t> &destina
 TEST(SwitchVICFractionProbe, EveryCaseBuildsWithTheShippedTraitsAndKeepsItsFraction)
 {
     for (const Case &c : kCases) {
-        const TegraVICImage in = image(0x40000000, false), out = image(0x40100000, true);
         const TegraVICOp op = operation(c);
-        TegraVICJob job;
-        ASSERT_EQ(tegra_vic_build(&in, &out, &op, &kTegraVICTraits, 0x1000, 0x2000, &job), nullptr);
+        const TegraVICJob job = built(c);
         EXPECT_EQ(TEGRA_VIC_GET(job.config, TEGRA_VIC_SLOTS, SLOT_SOURCE_LEFT), op.srcX);
         EXPECT_EQ(TEGRA_VIC_GET(job.config, TEGRA_VIC_SLOTS, SLOT_SOURCE_TOP), op.srcY);
+        EXPECT_EQ(TEGRA_VIC_GET(job.config, TEGRA_VIC_SLOTS, SLOT_SOURCE_RIGHT), op.srcX + op.srcW - 0x10000);
+        EXPECT_EQ(TEGRA_VIC_GET(job.config, TEGRA_VIC_SLOTS, SLOT_SOURCE_BOTTOM), op.srcY + op.srcH - 0x10000);
         EXPECT_EQ(TEGRA_VIC_GET(job.config, TEGRA_VIC_SLOTS, SLOT_FILTER_X),
-                  c.mode == kFraction ? uint64_t(TEGRA_VIC_FILTER_2TAP) : uint64_t(TEGRA_VIC_FILTER_1TAP));
+                  op.nearest ? uint64_t(TEGRA_VIC_FILTER_1TAP) : uint64_t(TEGRA_VIC_FILTER_2TAP));
+        const bool overridden = c.mode == kBackgroundAlpha;
         EXPECT_EQ(TEGRA_VIC_GET(job.config, TEGRA_VIC_OUTPUT, OUT_ALPHA_FILL_MODE),
-                  uint64_t(TEGRA_VIC_ALPHA_SOURCE_STREAM));
-        overrideAlpha(&job, kOverride);
-        EXPECT_EQ(TEGRA_VIC_GET(job.config, TEGRA_VIC_OUTPUT, OUT_ALPHA_FILL_MODE), 1u);
-        EXPECT_EQ(TEGRA_VIC_GET(job.config, TEGRA_VIC_OUTPUT, OUT_BACKGROUND_ALPHA) >> 2, kOverride);
+                  uint64_t(overridden ? TEGRA_VIC_ALPHA_BACKGROUND : TEGRA_VIC_ALPHA_SOURCE_STREAM));
+        if (overridden)
+            EXPECT_EQ(TEGRA_VIC_GET(job.config, TEGRA_VIC_OUTPUT, OUT_BACKGROUND_ALPHA),
+                      kOverride << 2 | kOverride >> 6);
+    }
+}
+
+// The alpha cases through tegra_vic_build on vic_model.h (1-tap, 1:1): the override reaches every pixel's alpha and
+// SOURCE_STREAM keeps the source's.
+TEST(SwitchVICFractionProbe, TheAlphaCasesAreCleanOnTheModel)
+{
+    for (const Case &c : kCases) {
+        if (c.mode != kSourceAlpha && c.mode != kBackgroundAlpha)
+            continue;
+        std::vector<uint8_t> source(kBufferBytes), destination(kBufferBytes, kPoison);
+        fillSource(source.data(), c);
+        VicModel model = {};
+        model.region[0] = {kSrcIova, source.data(), source.size()};
+        model.region[1] = {kDstIova, destination.data(), destination.size()};
+        model.regions = 2;
+        model.flips = VIC_MODEL_FLIP_SURFACE;
+        const TegraVICJob job = built(c);
+        vic_model_run(&model, &job);
+        EXPECT_EQ(model.faults + model.clipped, 0u) << c.mode;
+        const SwitchVICFractionResult r = judge(c, destination);
+        EXPECT_TRUE(clean(r)) << c.mode << ": " << r.wrong[SWITCH_VIC_FRACTION_INTERPOLATED] << " wrong";
     }
 }
 
@@ -121,6 +163,10 @@ TEST(SwitchVICFractionProbe, AnInterpolatingEngineIsCleanAndNamedSo)
         if (c.mode == kFraction && (c.fractionX | c.fractionY)) {
             EXPECT_EQ(r.wrong[SWITCH_VIC_FRACTION_TRUNCATED], (kSize - 1) * (kSize - 1));
         }
+        if (c.mode == kDimension) {
+            EXPECT_GT(r.wrong[SWITCH_VIC_FRACTION_TRUNCATED], (kSize - 1) * (kSize - 1) / 2);
+            EXPECT_GT(r.wrong[SWITCH_VIC_FRACTION_ROUNDED], 0u);
+        }
     }
 }
 
@@ -133,6 +179,18 @@ TEST(SwitchVICFractionProbe, AnEngineThatDropsTheFractionIsNamedTruncating)
     EXPECT_EQ(r.wrong[SWITCH_VIC_FRACTION_ROUNDED], 0u);  // a quarter rounds down too
     EXPECT_EQ(r.maxError, 2u);
     EXPECT_EQ(r.firstGot, answer(c, SWITCH_VIC_FRACTION_TRUNCATED, 0, 0));
+}
+
+TEST(SwitchVICFractionProbe, AnEngineThatDropsAFractionalWidthIsNamedTruncating)
+{
+    for (const Case &c : kCases) {
+        if (c.mode != kDimension)
+            continue;
+        const SwitchVICFractionResult r =
+            judge(c, engine(c, Offsets::Interpolated, Alpha::Programmed, Dimensions::Truncated));
+        EXPECT_FALSE(clean(r)) << c.fractionX << "," << c.fractionY;
+        EXPECT_EQ(r.wrong[SWITCH_VIC_FRACTION_TRUNCATED], 0u) << c.fractionX << "," << c.fractionY;
+    }
 }
 
 TEST(SwitchVICFractionProbe, AnEngineThatRoundsTheOffsetIsNamedRounding)
@@ -165,7 +223,7 @@ TEST(SwitchVICFractionProbe, AStrayWriteIsOutsideAndControlsDecideTheProbe)
     reply.results[2].wrong[0] = 5;
     summarise(&reply);
     EXPECT_EQ(reply.controlsClean, 1u);
-    EXPECT_EQ(reply.cleanCases, 0x3fbu);
+    EXPECT_EQ(reply.cleanCases, 0x1ffbu);
     reply.results[8].status = -5;
     summarise(&reply);
     EXPECT_EQ(reply.controlsClean, 0u);

@@ -7,6 +7,7 @@
 #include <thread>
 #include <vector>
 #include "drivers/TegraGM20B/SwitchGpuSubmitGate.h"
+#include "drivers/TegraGM20B/SwitchGpuGatedMethods.h"
 using namespace std::chrono_literals;
 
 TEST(SubmitGate, MutationDrainsExistingSubmissionsBeforeNewEntries)
@@ -318,4 +319,52 @@ TEST(SubmitGate, CloseDrainsLockFreeSubmissions)
 	IOLockLock(&lock);
 	EXPECT_FALSE(gate.enterSlow(&lock));
 	IOLockUnlock(&lock);
+}
+
+// Boot 21: a BoImport's wiring (3.5-9 ms of the VM's zero-fill on Core Animation's render thread) ran as a gate mutation,
+// and the next SubmitJob slept in enterSlow for all of it. BoAlloc, BoImport, BoFree and VmBind are not gate methods now
+// (BOs and bindings are published); what a job in flight reads in place still is.
+TEST(SubmitGate, ASubmitJobRunsWhileAnImportWires)
+{
+	for (const uint32_t method :
+	     {TegraGM20BMethodBoAlloc, TegraGM20BMethodBoImport, TegraGM20BMethodBoFree,
+	      TegraGM20BMethodVmBind, TegraGM20BMethodSurfaceWrites, TegraGM20BMethodGetInfo,
+	      TegraGM20BMethodGetStatus})
+		EXPECT_FALSE(switch_gpu_method_closes_gate(method)) << method;
+	for (const uint32_t method :
+	     {TegraGM20BMethodChannelCreate, TegraGM20BMethodChannelDestroy, TegraGM20BMethodExec,
+	      TegraGM20BMethodSubmit, TegraGM20BMethodExecSurfaces, TegraGM20BMethodPriority,
+	      TegraGM20BMethodOrder, TegraGM20BMethodNativeSurfaceView})
+		EXPECT_TRUE(switch_gpu_method_closes_gate(method)) << method;
+	IOLock lock;
+	SwitchGpuSubmitGate gate;
+	std::promise<void> wiring, wired;
+	auto import = std::async(std::launch::async, [&] {
+		IOLockLock(&lock);
+		const bool mutation = switch_gpu_method_closes_gate(TegraGM20BMethodBoImport);
+		ASSERT_TRUE(!mutation || gate.beginMutation(&lock));
+		IOLockUnlock(&lock);
+		wiring.set_value();
+		wired.get_future().wait();
+		IOLockLock(&lock);
+		if (mutation)
+			gate.endMutation(&lock);
+		IOLockUnlock(&lock);
+	});
+	wiring.get_future().wait();
+	auto job = std::async(std::launch::async, [&] {
+		bool admitted = gate.enterFast();
+		if (!admitted) {
+			IOLockLock(&lock);
+			admitted = gate.enterSlow(&lock);
+			IOLockUnlock(&lock);
+		}
+		gate.leaveFast(&lock);
+		return admitted;
+	});
+	EXPECT_EQ(job.wait_for(2s), std::future_status::ready)
+		<< "the SubmitJob waited for the import's wiring";
+	wired.set_value();
+	import.get();
+	EXPECT_TRUE(job.get());
 }

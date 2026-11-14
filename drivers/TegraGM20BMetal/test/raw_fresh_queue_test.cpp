@@ -177,6 +177,37 @@ TEST(RawFreshQueue, AnM2vSubmissionAfterRawWorkWaitsForIt)
     EXPECT_EQ(rt.gpu.raw.size(), 2u);
 }
 
+// replaceRegion into a fresh private texture (gpu.upload.replace_region's private cases: boot 19 and 21 read R8's fill,
+// 0xff, over 25492 of its 25641 uploaded texels): the transfer extracts it and writes its fill first, so no later raw
+// submission fills it over the CPU's bytes
+TEST(RawFreshQueue, ACpuTransferWritesItsTexturesFillFirst)
+{
+    Runtime rt;
+    auto a = rt.make("a");
+    auto b = rt.make("b");
+    ASSERT_TRUE(rt.fresh.extract([&](const Entry &e) {
+        return e.texture.lock() == a;
+    }));
+    rt.gpu.submitRaw({"fill:a"});
+    rt.gpu.submitRaw({"write:a"});
+    rt.raw({"draw"});
+    EXPECT_FALSE(rt.gpu.fillMayFollowWrite("a"));
+    EXPECT_EQ(rt.gpu.raw.back().commands, (std::vector<std::string>{"fill:b", "draw"})) << "b stays fresh";
+    EXPECT_FALSE(rt.fresh.extract([&](const Entry &e) {
+        return e.texture.lock() == a;
+    })) << "extracted once";
+}
+
+// Without the extract the next raw submission fills the texture over what the transfer wrote
+TEST(RawFreshQueue, WithoutTheExtractACpuTransferIsOverwritten)
+{
+    Runtime rt;
+    auto a = rt.make("a");
+    rt.gpu.submitRaw({"write:a"});
+    rt.raw({"draw"});
+    EXPECT_TRUE(rt.gpu.fillMayFollowWrite("a"));
+}
+
 TEST(RawFreshQueue, AFailedSubmissionGivesItsTexturesBack)
 {
     raw::FreshQueue<Entry> q;

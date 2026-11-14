@@ -74,8 +74,7 @@ void RenderEncoder::setTessellationFactorScale(float scale)
 bool RenderEncoder::bindPatches(uint32_t controlPoints, const Buffer *patchIndices, uint64_t patchIndexOffset,
                                 const Buffer *pointIndices, uint64_t pointIndexOffset, const char **why)
 {
-    (void)controlPoints;
-    const Pipeline *pl = formFor(pipeline_);
+    const Pipeline *pl = formFor(pipeline_, {icb::kPatchPrimitive, controlPoints, 1, false, false});
     if (!pl || !tessellates(*pl->rec)) {
         *why = "patches drawn with a state of no post-tessellation vertex function";
         return false;

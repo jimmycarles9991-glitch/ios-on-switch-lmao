@@ -11,15 +11,16 @@
 #include <IOKit/IOLib.h>
 #include <stdint.h>
 #include <string.h>
+#include "TegraGM20BLayoutAsk.h"
 #include "TegraGM20BLayoutFit.h"
 #include "TegraGM20BRelayout.h"
 #include "TegraGM20BTiled.h"
 #include "SwitchGpuPathStats.h"
 #include "../../kits/SwitchRefusal/SwitchRefusal.h"
+extern "C" int proc_selfpid(void);
 #if TGM_STATS
 #include <os/log.h>
 extern "C" void proc_selfname(char *buf, int size);
-extern "C" int proc_selfpid(void);
 #endif
 
 namespace
@@ -32,6 +33,7 @@ enum Decision {
 	PitchShared,
 	PitchShape,
 	PitchMoveFailed,
+	PitchCpuMapped,
 	Decisions
 };
 
@@ -44,7 +46,7 @@ void note(Decision d, uint32_t surfaceId, uint32_t width, uint32_t height, uint3
 	static const char *const why[Decisions] = {
 		"block-linear", "pitch: its first GPU import only samples it",
 		"pitch: imported before it asked", "pitch: a shape that does not tile",
-		"pitch: the tiling move failed"};
+		"pitch: the tiling move failed (decided again at a later import's ask)"};
 	__atomic_fetch_add(&gDecisions[d], 1, __ATOMIC_RELAXED);
 	char name[32];
 	proc_selfname(name, sizeof(name));
@@ -64,13 +66,17 @@ void note(Decision, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t)
 }
 #endif
 
+// `samples`: the asker only samples a surface nothing wrote as far as its seed tells (TGM_LAYOUT_ASK_UNWRITTEN). A CPU
+// writer without IOSurfaceLock leaves the seed at 0, so that surface may hold rows: its tiling move is never skipped.
 Decision decide(tgm_coh *c, tgm_tiled &t, uint32_t width, uint32_t height, uint32_t bpp,
-		uint32_t bytesPerRow, bool writes, bool fit)
+		uint32_t bytesPerRow, bool writes, bool samples, bool fit)
 {
-	if (!writes)
+	if (!writes && !samples)
 		return PitchSampledFirst;
 	if (!tgm_coh_unshared(c) || !tgm_coh_pinned(c))
 		return PitchShared;
+	if (tgm_coh_cpu_foreign(c, proc_selfpid()))
+		return PitchCpuMapped;
 	const tgm_relayout_pages pages = tgm_coh_pages(c);
 	const uint64_t bytes = static_cast<uint64_t>(pages.npages) << 12;
 	const bool laid =
@@ -80,7 +86,7 @@ Decision decide(tgm_coh *c, tgm_tiled &t, uint32_t width, uint32_t height, uint3
 	    static_cast<uint64_t>(bytesPerRow) * height > bytes)
 		return PitchShape;
 	t.bytes_per_row = bytesPerRow;
-	if (tgm_coh_fresh(c)) {
+	if (writes && tgm_coh_fresh(c)) {
 		tgm_tiled_count(TGM_RELAYOUT_FRESH);
 		return DecidedTiled;
 	}
@@ -99,14 +105,14 @@ Decision decide(tgm_coh *c, tgm_tiled &t, uint32_t width, uint32_t height, uint3
 	if (!scratched) {
 		switch_refusal(
 			"iosurface-layout", "tile-no-scratch",
-			"IOSurface %u %ux%u x%u bytes: no scratch for its tiling move: it stays "
-			"pitch-linear",
+			"IOSurface %u %ux%u x%u bytes: no scratch for its tiling move: pitch "
+			"until an import that holds it alone asks again",
 			tgm_coh_surface_id(c), width, height, bpp);
 	} else if (ret) {
 		switch_refusal(
 			"iosurface-layout", "tile-move-failed",
-			"IOSurface %u %ux%u x%u bytes: its tiling move failed (%d): it stays "
-			"pitch-linear",
+			"IOSurface %u %ux%u x%u bytes: its tiling move failed (%d): pitch until "
+			"an import that holds it alone asks again",
 			tgm_coh_surface_id(c), width, height, bpp, ret);
 	} else {
 		tgm_tiled_count(TGM_RELAYOUT_MOVED);
@@ -127,13 +133,17 @@ int askLayout(struct tgm_coh *c, uint32_t width, uint32_t height, uint32_t bpp,
 	tgm_tiled **slot = tgm_coh_tiled(c);
 	tgm_tiled *t = __atomic_load_n(slot, __ATOMIC_ACQUIRE);
 	const bool fresh = t == nullptr;
+	const bool again = t && t->retry && !t->tiled && (writes & TGM_LAYOUT_ASK_FIRST) &&
+			   tgm_coh_unshared(c);
 	if (fresh)
 		t = IONew(tgm_tiled, 1);
-	if (fresh && t) {
+	if ((fresh || again) && t) {
 		bzero(t, sizeof(*t));
-		const Decision d =
-			decide(c, *t, width, height, bpp, bytes_per_row, writes != 0, fit);
-		t->tiled = static_cast<int>(d == DecidedTiled);
+		const Decision d = decide(c, *t, width, height, bpp, bytes_per_row,
+					  (writes & TGM_LAYOUT_ASK_WRITES) != 0,
+					  (writes & TGM_LAYOUT_ASK_UNWRITTEN) != 0, fit);
+		t->retry = static_cast<int>(d == PitchMoveFailed);
+		__atomic_store_n(&t->tiled, static_cast<int>(d == DecidedTiled), __ATOMIC_RELEASE);
 		if (t->tiled)
 			__atomic_add_fetch(&gTiledLive, 1, __ATOMIC_ACQ_REL);
 		note(d, tgm_coh_surface_id(c), width, height, bpp, 8u << t->layout.y_log2);
@@ -246,15 +256,17 @@ extern "C" void tgm_tiled_free(struct tgm_tiled *t)
 	IODelete(t, tgm_tiled, 1);
 }
 
-extern "C" void tgm_tiled_take_stats(uint64_t out[9])
+static_assert(Decisions == 6, "tgm_tiled_take_stats' array (TegraGM20BGpu.h)");
+
+extern "C" void tgm_tiled_take_stats(uint64_t out[10])
 {
-	bzero(out, 9 * sizeof(uint64_t));
+	bzero(out, 10 * sizeof(uint64_t));
 #if TGM_STATS
 	for (uint32_t i = 0; i < Decisions; i++)
 		out[i] = __atomic_exchange_n(&gDecisions[i], 0, __ATOMIC_RELAXED);
-	out[5] = __atomic_load_n(&gLive, __ATOMIC_RELAXED);
-	out[6] = __atomic_load_n(&gLiveBytes, __ATOMIC_RELAXED);
-	tgm_scratch_stats(&out[7], &out[8]);
+	out[6] = __atomic_load_n(&gLive, __ATOMIC_RELAXED);
+	out[7] = __atomic_load_n(&gLiveBytes, __ATOMIC_RELAXED);
+	tgm_scratch_stats(&out[8], &out[9]);
 #endif
 }
 

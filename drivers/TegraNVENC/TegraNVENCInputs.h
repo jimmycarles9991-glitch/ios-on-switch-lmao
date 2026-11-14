@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: BSD-2-Clause-Patent
-// What each NVENC job reads that another engine's job wrote: VIC's input picture, or a native picture's NVDEC and VIC
-// producers. The job's stream waits for them by syncpoint, and a producer its engine cancelled reaches its syncpoint
-// all the same (the CPU releases it), so the job's Wait answers with the producer's failure instead of the frame coded
-// from memory nobody wrote. The cancelled job is recorded failed before that release; a semantic failure counts once
+// What each NVENC job reads that another engine's job wrote: VIC's input picture, or a native picture's NVDEC, VIC and
+// GM20B producers. The job's stream waits for them by syncpoint (a GM20B job through the GPU-to-host1x bridge's), and
+// a producer its engine cancelled reaches its syncpoint all the same (the CPU releases it, or the bridge gives up on
+// it), so the job's Wait answers with the producer's failure instead of the frame coded from memory nobody wrote. The cancelled job is recorded failed before that release; a semantic failure counts once
 // it is retired.
 //
 // The same producers decide when NVENC's stall bound counts. NVENC runs its jobs in order, each behind the producers
@@ -30,7 +30,8 @@ public:
     {
         Job job = {fence, 0, {}};
         for (uint32_t i = 0; i < count && job.count < kProducers; ++i)
-            if (producers[i].engine == SWITCH_GPU_ENGINE_VIC || producers[i].engine == SWITCH_GPU_ENGINE_NVDEC)
+            if (producers[i].engine == SWITCH_GPU_ENGINE_VIC || producers[i].engine == SWITCH_GPU_ENGINE_NVDEC ||
+                producers[i].engine == SWITCH_GPU_ENGINE_GM20B)
                 job.producers[job.count++] = producers[i];
         IOLockLock(lock_);
         jobs_[fence % kJobs] = job;

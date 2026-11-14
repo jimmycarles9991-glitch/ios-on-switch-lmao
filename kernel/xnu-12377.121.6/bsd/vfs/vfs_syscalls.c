@@ -153,6 +153,7 @@
 #include <security/mac_framework.h>
 #endif
 #include <switch/identity.h>
+#include <switch/fsctl_diag.h>
 #include <switch/protection.h>
 
 #if CONFIG_FSE
@@ -13813,6 +13814,7 @@ unlock:
 		}
 		/* Invoke the filesystem-specific code */
 		error = VNOP_IOCTL(vp, cmd, data, (int)options, ctx);
+		switch_fsctl_failed(vp, cmd, data, error, ctx);
 	}
 	} /* end switch stmt */
 

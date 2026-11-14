@@ -41,12 +41,11 @@ struct Way {
     Barrier barrier;
 };
 
-// The first is the reference; the third and fourth split the PS barrier's two methods, so a hang names the one it needs
+// The first is the reference; the third splits the PS barrier's two methods, so a hang names the one it needs
 const Way kWays[] = {
     {"WFI barrier", raw::PackForm::Barrier, Barrier::WaitForIdle},
     {"PS barrier + 0x0f74", raw::PackForm::Barrier, Barrier::PixelShader},
     {"PS barrier alone", raw::PackForm::Barrier, Barrier::PixelShaderOnly},
-    {"PS barrier + NO_WFI invalidate", raw::PackForm::Barrier, Barrier::PixelShaderNoWfiInvalidate},
     {"interlock", raw::PackForm::Default, Barrier::PixelShader},
 };
 

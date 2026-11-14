@@ -1700,8 +1700,8 @@ index 2f05a53..22e3964 100644
 +
 +    if (fifo)
 +        stall |= MC_INTR_FIFO;
-+    /* nvgpu takes the channel (nonstall) interrupt from PMC_INTR_1; nouveau's FIFO handler reads it from leaf 0 */
-+    if (fifo & PFIFO_INTR_CHANNEL_INTR)
++    /* PFIFO_INTR_EN_1 (0x2528) enables PFIFO_INTR_0's bits on PMC_INTR_1, as EN_0 does on PMC_INTR_0 (nvgpu gm20b) */
++    if (gm20b_fifo_intr0(s) & GM20B_REG(s, 0x002528))
 +        nonstall |= MC_INTR_FIFO;
 +    if (GM20B_REG(s, PTIMER_INTR_0) & GM20B_REG(s, PTIMER_INTR_EN))
 +        stall |= MC_INTR_TIMER;

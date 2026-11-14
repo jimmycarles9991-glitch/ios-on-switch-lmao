@@ -1,4 +1,5 @@
 import Foundation
+import HWTestCore
 import Metal
 
 /// What the Switch's Metal stack tells a process about its GPU paths (drivers/TegraGM20BMetal/raw/runtime/RawMetal.mm,
@@ -106,7 +107,7 @@ public enum RawFacade {
     }
 
     /// How the facade got a render state's record (debug builds; nil elsewhere): "how" (pack, table, store, compiled,
-    /// joined, stored, here, none), "wait_us" and "qos" (the creating thread's wait for the shader compiler and its
+    /// joined, stored, none), "wait_us" and "qos" (the creating thread's wait for the shader compiler and its
     /// class), "ran_class" (the compiler's band for it, 4 user-interactive).
     public static func compile(of state: MTLRenderPipelineState) -> [String: Any]? {
         ask(state, "switchRawCompile") as? [String: Any]
@@ -118,6 +119,12 @@ public enum RawFacade {
         ask(device, "switchCompilerStore") as? String
     }
 
+    /// What the submit worker encoded of a completed buffer ahead of its commit (debug builds; empty elsewhere):
+    /// "encoders", "pipelined", "abandons", "veto" (RMPipelineVeto bits) and "commit_to_gpu_start_us".
+    public static func pipelined(_ buffer: MTLCommandBuffer) -> [String: NSNumber] {
+        ask(buffer, "switchRawPipelined") as? [String: NSNumber] ?? [:]
+    }
+
     /// The buffer binds every state as the inline copy it was before state segments (debug builds, before its commit).
     public static func inlineStates(in buffer: MTLCommandBuffer) -> Bool {
         (ask(buffer, "switchRawInlineStates") as? NSNumber)?.boolValue ?? false
@@ -127,5 +134,19 @@ public enum RawFacade {
         let selector = NSSelectorFromString(name)
         guard let object = object as? NSObject, object.responds(to: selector) else { return nil }
         return object.perform(selector)?.takeUnretainedValue()
+    }
+}
+
+extension Outcome {
+    /// On the facade, FAIL naming the command buffers `gpu` ran off the raw path (their paths name the refusal), ahead of
+    /// whatever else the test found; unchanged off the facade and when every one ran raw. paths= on the line.
+    public func onRawPath(_ gpu: GPU) -> Outcome {
+        guard RawFacade.kind(of: gpu.device) == "raw" else { return self }
+        var metrics = self.metrics
+        metrics.set("paths", gpu.paths.isEmpty ? "-" : gpu.paths.text)
+        let off = gpu.paths.offRaw
+        guard !off.isEmpty else { return Outcome(verdict, metrics, detail: detail, proof: proof) }
+        let reason = "command buffers off the raw path: \(off.text)"
+        return Outcome(.fail, metrics, detail: detail.isEmpty ? reason : reason + "; " + detail, proof: proof)
     }
 }

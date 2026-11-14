@@ -37,6 +37,12 @@ extern "C" int switch_native_surface_prepare_gpu(OSObject *, uint32_t, void *, u
     return 0;
 }
 
+switch_gpu_backing *switch_vic_surface_backing_held(const TegraVICSurface *, switch_gpu_backing *held)
+{
+    ++held->refs;
+    return held;
+}
+
 switch_gpu_backing *switch_vic_surface_backing(const TegraVICSurface *)
 {
     ++registrations;

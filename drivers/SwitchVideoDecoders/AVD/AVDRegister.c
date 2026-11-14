@@ -20,7 +20,12 @@
 // an app's sandbox reads only the property names its profile lists. A process that decodes itself registers only if
 // TegraNVDEC lets it open a client (a probe connection, closed at once): registering where the sandbox refuses would
 // make VTIsHardwareDecodeSupported answer yes for a decoder that cannot run there.
+//
+// The registry is filled once per process, so a process that fills it before TegraNVDEC publishes (a daemon started
+// early in boot) waits for the service, or for the kernel's word that it will not come, before deciding.
 #include <dlfcn.h>
+#include <stdlib.h>
+#include <time.h>
 #include "AVDDecoder.h"
 
 typedef struct __SecTask *SecTaskRef;
@@ -69,7 +74,17 @@ __attribute__((visibility("default"))) void AVDRegister(void);
 void AVDRegister(void)
 {
     gAVDLog = os_log_create("com.brunostjohn.switch.avd", "decoder");
-    if (!nvdec_service_present())
+#if !defined(SWITCH_DEBUG) || SWITCH_DEBUG
+    const uint64_t began = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
+#endif
+    const bool published = nvdec_service_wait();
+#if !defined(SWITCH_DEBUG) || SWITCH_DEBUG
+    const uint64_t waitedMs = (clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - began) / 1000000;
+    if (waitedMs)
+        os_log(gAVDLog, "AVD: %{public}s waited %llu ms for TegraNVDEC: %{public}s", getprogname(), waitedMs,
+               published ? "published" : "absent");
+#endif
+    if (!published)
         return;  // switch-no-nvdec, or NVDEC did not come up at boot: nothing changes
     uint32_t codecs = 0;
     if (decodesInCodecServer()) {

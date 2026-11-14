@@ -54,7 +54,7 @@ bool finishResume()
     clearUnderflowCounts();
     dc[kDcIntEnable] = savedIntEnable;
     writeIntMask(~0u, savedIntMask);
-    __atomic_store_n(&dcPending, 0u, __ATOMIC_RELAXED);
+    dropFrameEndStatus(kVblankInt | kFrameEndInt | kVpulse2Int);
     planesResume();
     hwSuspended = false;
     scanoutStopped = true;

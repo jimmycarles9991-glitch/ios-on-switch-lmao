@@ -7,7 +7,10 @@ package(default_visibility = ["//visibility:public"])
 
 lint_files()
 
-exports_files(["predicates.tsv"])
+exports_files([
+    "m2v_routes.tsv",
+    "predicates.tsv",
+])
 
 filegroup(
     name = "srcs",

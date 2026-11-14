@@ -29,7 +29,7 @@ final class HandlerValue<T>: @unchecked Sendable {
 }
 
 /// Events: every event the device makes is a kernel event, plain ones too. A command buffer of a signal alone and a
-/// signal after an encoder m2v ran each go to the GPU in a job of no work; a listener on an event made from the first's
+/// signal after an indirect dispatch each go to the GPU in a job of no work, on the raw path; a listener on an event made from the first's
 /// handle hears its GPU signal; a plain event orders another queue's copy after a fill; a command buffer that ends in a
 /// wait completes (where its producer stood then is logged, the two completions being unordered). No signal's value is
 /// set by the CPU.
@@ -159,9 +159,10 @@ struct NativeSharedEventTest: NativeObjectTest {
             encoder.endEncoding()
             commands.encodeSignalEvent(shared, value: 4)
         }
-        metrics.set("after_m2v_path", mixed.path)
+        metrics.set("after_dispatch_path", mixed.path)
+        work.paths.append(mixed.path)
         if !(await Self.reached(shared, 4)) {
-            work.failures.append("a signal after an m2v encoder never reached its value")
+            work.failures.append("a signal after an indirect dispatch never reached its value")
         }
 
         let after = EventJobs.read(device)

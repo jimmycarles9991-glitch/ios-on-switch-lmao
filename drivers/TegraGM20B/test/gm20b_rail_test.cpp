@@ -3,6 +3,7 @@
 // place of lck_mtx and thread_wakeup.
 #include "drivers/TegraGM20B/TegraGM20BRail.h"
 #include "drivers/TegraGM20B/TegraGM20BSleepGate.h"
+#include "drivers/TegraGM20B/test/gm20b_gate_cpus.h"
 
 #include <gtest/gtest.h>
 
@@ -138,6 +139,7 @@ TEST(Gm20bRail, PtimerFollowsKtimeOnceKtimeIsAhead)
 // tgm_gpu.railed. tgm_rail_up_locked runs in whichever caller finds the GPU down, under the tgm_gpu.lock it took itself.
 struct RailKernel {
 	tgm_gate gate = {};
+	GateCpus cpus;
 	std::mutex gateLock, gpuLock;
 	std::condition_variable shutCv, insideCv;
 	std::atomic<int> railed{0};
@@ -172,7 +174,7 @@ struct RailKernel {
 	void enter()  // tgm_gate_enter
 	{
 		tgm_gate_entry entry;
-		while ((entry = tgm_gate_try_enter(&gate)) != TGM_GATE_IN) {
+		while ((entry = cpus.tryEnter(&gate)) != TGM_GATE_IN) {
 			if (railed.load()) {
 				if (entry == TGM_GATE_SHUT_WAKE) {
 					std::lock_guard<std::mutex> hold(gateLock);
@@ -193,7 +195,7 @@ struct RailKernel {
 
 	void leave()  // gate_leave
 	{
-		if (tgm_gate_leave(&gate)) {
+		if (cpus.leave(&gate)) {
 			std::lock_guard<std::mutex> hold(gateLock);
 			insideCv.notify_all();
 		}

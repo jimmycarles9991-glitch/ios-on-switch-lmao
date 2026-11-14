@@ -106,7 +106,7 @@ TEST(TegraVICCompose, BlendFieldsLandWhereVic40PutsThem)
     }
 }
 
-TEST(TegraVICCompose, OneOpaqueSlotIsTheSingleSlotJobPlusItsBlend)
+TEST(TegraVICCompose, OneOpaqueSlotIsTheSingleSlotJobPlusItsBlendUnderCompositedFill)
 {
     const TegraVICImage src = nv12(0x10000000, 640, 360), dst = bgra(0x20000000, 640, 360, 64);
     TegraVICOp op = {};
@@ -121,6 +121,10 @@ TEST(TegraVICCompose, OneOpaqueSlotIsTheSingleSlotJobPlusItsBlend)
     ASSERT_EQ(tegra_vic_compose_build(&s, 1, &dst, &target, &kTegraVICTraits, 0x1000, 0x2000, &composed), nullptr);
     const uint32_t blend = TEGRA_VIC_SLOTS + TEGRA_VIC_SLOT_BLEND;
     memset(composed.config + blend, 0, 16);
+    EXPECT_EQ(TEGRA_VIC_GET(composed.config, TEGRA_VIC_OUTPUT, OUT_ALPHA_FILL_MODE),
+              uint64_t(TEGRA_VIC_ALPHA_COMPOSITED));
+    TEGRA_VIC_SET(composed.config, TEGRA_VIC_OUTPUT, OUT_ALPHA_FILL_MODE,
+                  TEGRA_VIC_GET(single.config, TEGRA_VIC_OUTPUT, OUT_ALPHA_FILL_MODE));
     EXPECT_EQ(memcmp(single.config, composed.config, TEGRA_VIC_CONFIG_BYTES), 0);
     ASSERT_EQ(single.count, composed.count);
     for (uint32_t i = 0; i < single.count; ++i) {
@@ -161,7 +165,7 @@ TEST(TegraVICCompose, TwoSlotsGetTheirOwnSurfacesRectanglesMatricesAndBlends)
     EXPECT_EQ(top.blendingSlotStruct.SrcFactCMatchSelect, uint64_t(TEGRA_VIC_SRC_C_K1));
     EXPECT_EQ(top.blendingSlotStruct.DstFactCMatchSelect, uint64_t(TEGRA_VIC_DST_C_ONE_MINUS_K1_SRC_ALPHA));
     EXPECT_EQ(top.blendingSlotStruct.DstFactAMatchSelect, uint64_t(TEGRA_VIC_DST_A_ONE_MINUS_K1_SRC_ALPHA));
-    EXPECT_EQ(c.outputConfig.AlphaFillMode, uint64_t(TEGRA_VIC_ALPHA_OPAQUE));
+    EXPECT_EQ(c.outputConfig.AlphaFillMode, uint64_t(TEGRA_VIC_ALPHA_COMPOSITED)) << "the blend words apply";
     EXPECT_EQ(c.outputConfig.BackgroundAlpha, 1023u);
     EXPECT_EQ(c.outputConfig.BackgroundR | c.outputConfig.BackgroundG | c.outputConfig.BackgroundB, 0u);
     EXPECT_EQ(c.outputConfig.TargetRectTop, 100u);

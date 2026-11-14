@@ -49,11 +49,7 @@ public enum FetchBlendHeavy {
                 for _ in 0..<draws { encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4) }
                 encoder.endEncoding()
             }
-            var warm = try await gpu.run(tolerateError: true, draw)
-            for _ in 0..<20 where raw && warm.path.hasPrefix("m2v:state") {
-                try await Task.sleep(nanoseconds: 50_000_000)
-                warm = try await gpu.run(tolerateError: true, draw)
-            }
+            let warm = try await gpu.run(tolerateError: true, draw)
             guard !warm.path.hasPrefix("error:"), !raw || warm.path == "raw" else {
                 result.expect(false, "\(label): \(warm.path)")
                 continue

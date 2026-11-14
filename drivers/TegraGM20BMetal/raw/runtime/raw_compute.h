@@ -92,6 +92,12 @@ public:
     // dispatchThreadgroups: `groups` threadgroups of `threads` threads, the shape the kernel's record was made at. False:
     // refused (*why), nothing encoded
     bool dispatch(const uint32_t groups[3], const uint32_t threads[3], const char **why);
+    // dispatchThreadgroupsWithIndirectBuffer: the grid is the three words at `offset` in `arguments` as the GPU reads
+    // them when it reaches the dispatch (raw_icb_compute.cpp). False: refused (*why), nothing encoded
+    bool dispatchIndirect(const Buffer *arguments, uint64_t offset, const char **why);
+    // setStageInRegionWithIndirectBuffer: the dispatches after it take their stage-in origin and size from the six words
+    // at `offset` in `region` as the GPU reads them at each dispatch; null: setStageInRegion:'s words again
+    void setStageInRegionIndirect(const Buffer *region, uint64_t offset);
     bool dispatchRegion(const ComputeRegion &region, const std::array<uint32_t, 3> &grid,
                         const std::array<uint32_t, 3> &nominal, bool first, bool last, const char **why);
     // memoryBarrier...: the dispatches before have written, and their writes are visible to the ones after
@@ -203,6 +209,14 @@ private:
     std::array<uint32_t, 3> grid_{}, base_{};
     std::array<uint32_t, 8> region_{};
     StageIn stageIn_;
+    const Buffer *stageInRegion_ = nullptr;
+    uint64_t stageInRegionOffset_ = 0;
+    // `bytes` at `dst` written by the compute class's inline engine from the same bytes at `src`, which the channel
+    // fetches after the method header as a continuation of the stream (nvk_cmd_compute_indirect_copy)
+    void inlineFrom(uint64_t dst, uint64_t src, uint32_t bytes);
+    // The stage-in region words of the root table at `rootVa` from setStageInRegionWithIndirectBuffer:'s buffer;
+    // `fetched`: the stream already waits for the writes before
+    void stageInFromMemory(const PackKernel &r, uint64_t rootVa, bool fetched = false);
     void bindBuffer(uint32_t slot, const Bound &binding);
     bool prepareDescriptors(const char **why);
     void room(uint32_t words);

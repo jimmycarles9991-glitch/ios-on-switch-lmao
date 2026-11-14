@@ -4,15 +4,15 @@ import HWTestGPU
 import Metal
 
 /// What a Metal object made by the GM20B facade answers about itself in debug runtimes
-/// (drivers/TegraGM20BMetal/raw/runtime/RawMetalObjectProbe.mm): its class and whether an m2v twin of it was ever made.
-/// An object m2v made answers nothing.
+/// (drivers/TegraGM20BMetal/raw/runtime/RawMetalObjectProbe.mm): its class. An object the facade did not make answers
+/// nothing.
 enum NativeObject {
-    static func answer(_ object: AnyObject) -> (name: String, twin: Bool)? {
+    static func name(_ object: AnyObject) -> String? {
         let selector = NSSelectorFromString("switchRawObject")
         guard let object = object as? NSObject, object.responds(to: selector),
             let answer = object.perform(selector)?.takeUnretainedValue() as? [String: Any]
         else { return nil }
-        return (answer["class"] as? String ?? "?", (answer["twin"] as? NSNumber)?.boolValue ?? true)
+        return answer["class"] as? String ?? "?"
     }
 }
 
@@ -25,7 +25,7 @@ struct NativeWork {
 }
 
 /// A Metal object the raw facade makes itself: on the facade, the workload gives the right bytes, every object it made
-/// is the device's own with no m2v twin made, and the command buffers that used them stayed raw.
+/// is the device's own, and the command buffers that used them stayed raw.
 protocol NativeObjectTest: HWTest {
     func exercise(_ gpu: GPU, _ metrics: inout Metrics) async throws -> NativeWork
     /// Why this build's identity has nothing of the feature to test (nil: it has)
@@ -49,14 +49,13 @@ extension NativeObjectTest {
         var work = try await exercise(gpu, &metrics)
         var names: [String] = []
         for object in work.objects {
-            guard let answer = NativeObject.answer(object) else {
+            guard let name = NativeObject.name(object) else {
                 let name = NSStringFromClass(type(of: object))
                 names.append(name)
-                work.failures.append("\(name) is served by m2v")
+                work.failures.append("\(name) is not the facade's own")
                 continue
             }
-            names.append(answer.name)
-            if answer.twin { work.failures.append("\(answer.name) made its m2v twin") }
+            names.append(name)
         }
         metrics.set("objects", names.isEmpty ? "-" : Set(names).sorted().joined(separator: ","))
         metrics.set("paths", work.paths.isEmpty ? "-" : work.paths.joined(separator: ","))

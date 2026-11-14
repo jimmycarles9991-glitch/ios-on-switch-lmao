@@ -4,14 +4,13 @@ import HWTestCore
 import HWTestGPU
 import Metal
 
-/// gpu.raw.xr_two_plane's cells beyond the planes' own bytes, each against the same work on the m2v device: blended
+/// gpu.raw.xr_two_plane's cells beyond the planes' own bytes, each against the CPU model (XRTwoPlaneModel): blended
 /// draws of the app's own state (made on the device, its storage form alone), Core Animation's source-over in the pack
-/// record's storage form and in its barrier twin (raw_probe_forms.h fetch=barrier), a surface whose alpha rows miss a
-/// pitch target's 128 bytes, and samples through the texture's header pair (nvk_switch_xr_planes.h), nearest exact,
-/// linear (Metal's filter, emulated on the m2v device) and gathers of alpha and red against the texels' values.
+/// record's storage form and in its barrier form (raw_probe_forms.h fetch=barrier), each within one code, a surface
+/// whose alpha rows miss a pitch target's 128 bytes, and samples through the texture's header pair
+/// (nvk_switch_xr_planes.h): nearest exact, linear within a half step of Metal's filter, and gathers of alpha and red.
 struct XRTwoPlaneCells {
     let gpu: GPU
-    let reference: GPU
 
     static let blends: [(rect: (Int, Int, Int, Int), color: SIMD4<Float>)] = [
         ((4, 4, 60, 40), SIMD4(0.25, 0.5, -0.125, 0.5)),
@@ -19,46 +18,49 @@ struct XRTwoPlaneCells {
         ((40, 0, 70, 64), SIMD4(0.0, 0.0, 0.0, 0.0)),
     ]
 
-    /// Texels where the planes after the blended draws differ from the m2v device's, and the raw device's interlocked
-    /// draws
-    func blendWrong() async throws -> (wrong: Int, interlocked: Int) {
-        var planes: [[UInt64]] = []
-        var interlocked = 0
-        for (index, g) in [gpu, reference].enumerated() {
-            let (buffer, texture) = try XRTwoPlaneTest.surfaceTexture(g)
-            let draw = try g.render(fragment: "solid_half_fragment", format: XRTwoPlaneTest.format) { d in
-                let a = d.colorAttachments[0]!
-                a.isBlendingEnabled = true
-                a.sourceRGBBlendFactor = .one
-                a.destinationRGBBlendFactor = .oneMinusSourceAlpha
-                a.sourceAlphaBlendFactor = .one
-                a.destinationAlphaBlendFactor = .oneMinusSourceAlpha
-            }
-            let before = RawFacade.counters(of: g.device)["interlock_draws"] ?? 0
-            try await g.run { commands in
-                let pass = MTLRenderPassDescriptor()
-                pass.colorAttachments[0].texture = texture
-                pass.colorAttachments[0].loadAction = .clear
-                let c = XRTwoPlaneTest.clear
-                pass.colorAttachments[0].clearColor = MTLClearColor(
-                    red: Double(c.x), green: Double(c.y), blue: Double(c.z), alpha: Double(c.w))
-                pass.colorAttachments[0].storeAction = .store
-                let encoder = commands.makeRenderCommandEncoder(descriptor: pass)!
-                encoder.setRenderPipelineState(draw)
-                for b in Self.blends {
-                    let r = b.rect
-                    GPU.draw(
-                        encoder,
-                        corners: GPU.pixelQuad(
-                            r.0, r.1, r.2, r.3, width: XRTwoPlaneTest.width, height: XRTwoPlaneTest.height),
-                        color: b.color)
-                }
-                encoder.endEncoding()
-            }
-            if index == 0 { interlocked = (RawFacade.counters(of: g.device)["interlock_draws"] ?? 0) - before }
-            planes.append(XRTwoPlaneTest.planes(buffer))
+    /// The planes after the blended draws against the model (texels beyond one code, and exactly one off), and the
+    /// device's interlocked draws
+    func blendWrong() async throws -> (wrong: Int, offByOne: Int, interlocked: Int) {
+        let (width, height) = (XRTwoPlaneTest.width, XRTwoPlaneTest.height)
+        let (buffer, texture) = try XRTwoPlaneTest.surfaceTexture(gpu)
+        let draw = try gpu.render(fragment: "solid_half_fragment", format: XRTwoPlaneTest.format) { d in
+            let a = d.colorAttachments[0]!
+            a.isBlendingEnabled = true
+            a.sourceRGBBlendFactor = .one
+            a.destinationRGBBlendFactor = .oneMinusSourceAlpha
+            a.sourceAlphaBlendFactor = .one
+            a.destinationAlphaBlendFactor = .oneMinusSourceAlpha
         }
-        return (XRTwoPlaneTest.wrongTexels(planes[0], planes[1]), interlocked)
+        let before = RawFacade.counters(of: gpu.device)["interlock_draws"] ?? 0
+        try await gpu.run { commands in
+            let pass = MTLRenderPassDescriptor()
+            pass.colorAttachments[0].texture = texture
+            pass.colorAttachments[0].loadAction = .clear
+            let c = XRTwoPlaneTest.clear
+            pass.colorAttachments[0].clearColor = MTLClearColor(
+                red: Double(c.x), green: Double(c.y), blue: Double(c.z), alpha: Double(c.w))
+            pass.colorAttachments[0].storeAction = .store
+            let encoder = commands.makeRenderCommandEncoder(descriptor: pass)!
+            encoder.setRenderPipelineState(draw)
+            for b in Self.blends {
+                let r = b.rect
+                GPU.draw(
+                    encoder, corners: GPU.pixelQuad(r.0, r.1, r.2, r.3, width: width, height: height), color: b.color)
+            }
+            encoder.endEncoding()
+        }
+        let interlocked = (RawFacade.counters(of: gpu.device)["interlock_draws"] ?? 0) - before
+        var want = [UInt64](repeating: XRTwoPlaneTest.texel(XRTwoPlaneTest.clear), count: width * height)
+        for b in Self.blends {
+            let half = SIMD4<Float16>(b.color)
+            let source = SIMD4<Double>(Double(half.x), Double(half.y), Double(half.z), Double(half.w))
+            let r = b.rect
+            for y in r.1..<r.3 {
+                for x in r.0..<r.2 { want[y * width + x] = XRTwoPlaneModel.over(source, want[y * width + x]) }
+            }
+        }
+        let (wrong, offByOne) = XRTwoPlaneModel.apart(XRTwoPlaneTest.planes(buffer), want)
+        return (wrong, offByOne, interlocked)
     }
 
     /// Core Animation's untextured source-over fill into 'b3a8' beside its memoryless 550 and R32Float, verbatim from the
@@ -93,57 +95,59 @@ struct XRTwoPlaneCells {
         (0.1, -1, 0.5, 1, SIMD4(0, 0, 0, 0)),
     ]
 
-    /// Texels where the planes after the blended fills differ from the m2v device's; `barrier`: the pack record's barrier
-    /// twin. The raw device's interlocked draws and its barrier form's fetch draws (drawn whole or a
-    /// triangle run at a time).
-    func fetchWrong(barrier: Bool) async throws -> (wrong: Int, interlocked: Int, fetched: Int) {
+    /// The planes after the blended fills against the model (texels beyond one code, and exactly one off); `barrier`:
+    /// the pack record's barrier form. The device's interlocked draws and its barrier form's fetch draws (drawn whole or
+    /// a triangle run at a time).
+    func fetchWrong(barrier: Bool) async throws -> (wrong: Int, offByOne: Int, interlocked: Int, fetched: Int) {
         guard let line = PipelineLine(Self.fetchLine) else {
             throw TestFailure("the fetch state's line does not parse")
         }
-        var planes: [[UInt64]] = []
-        var interlocked = 0, fetched = 0
-        for (index, g) in [gpu, reference].enumerated() {
-            let library = try g.device.makeLibrary(URL: CAState.library)
-            let pipeline = try CAState.pipeline(line, library: library, device: g.device)
-            let (buffer, texture) = try XRTwoPlaneTest.surfaceTexture(g)
-            let scratch = try [XRTwoPlaneTest.format, .r32Float].map {
-                try g.texture(
-                    $0, XRTwoPlaneTest.width, XRTwoPlaneTest.height, usage: [.renderTarget], storage: .memoryless)
-            }
-            let before = RawFacade.counters(of: g.device)
-            try await g.run { commands in
-                if index == 0 && barrier { try Self.forms(commands, "fetch=barrier") }
-                let pass = MTLRenderPassDescriptor()
-                pass.colorAttachments[0].texture = texture
-                pass.colorAttachments[0].loadAction = .clear
-                let c = XRTwoPlaneTest.clear
-                pass.colorAttachments[0].clearColor = MTLClearColor(
-                    red: Double(c.x), green: Double(c.y), blue: Double(c.z), alpha: Double(c.w))
-                pass.colorAttachments[0].storeAction = .store
-                for (index, texture) in scratch.enumerated() {
-                    pass.colorAttachments[index + 1].texture = texture
-                    pass.colorAttachments[index + 1].loadAction = .clear
-                    pass.colorAttachments[index + 1].storeAction = .dontCare
-                }
-                let encoder = commands.makeRenderCommandEncoder(descriptor: pass)!
-                encoder.setRenderPipelineState(pipeline)
-                for f in Self.fetches {
-                    CAState.bind(
-                        encoder, vertices: CAState.rectangle(x0: f.x0, y0: f.y0, x1: f.x1, y1: f.y1, color: f.color),
-                        source: nil)
-                    encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
-                }
-                encoder.endEncoding()
-            }
-            if index == 0 {
-                let after = RawFacade.counters(of: g.device)
-                let moved = { (name: String) in (after[name] ?? 0) - (before[name] ?? 0) }
-                interlocked = moved("interlock_draws")
-                fetched = moved("fetch_whole") + moved("fetch_sequential")
-            }
-            planes.append(XRTwoPlaneTest.planes(buffer))
+        let (width, height) = (XRTwoPlaneTest.width, XRTwoPlaneTest.height)
+        let library = try gpu.device.makeLibrary(URL: CAState.library)
+        let pipeline = try CAState.pipeline(line, library: library, device: gpu.device)
+        let (buffer, texture) = try XRTwoPlaneTest.surfaceTexture(gpu)
+        let scratch = try [XRTwoPlaneTest.format, .r32Float].map {
+            try gpu.texture($0, width, height, usage: [.renderTarget], storage: .memoryless)
         }
-        return (XRTwoPlaneTest.wrongTexels(planes[0], planes[1]), interlocked, fetched)
+        let before = RawFacade.counters(of: gpu.device)
+        try await gpu.run { commands in
+            if barrier { try Self.forms(commands, "fetch=barrier") }
+            let pass = MTLRenderPassDescriptor()
+            pass.colorAttachments[0].texture = texture
+            pass.colorAttachments[0].loadAction = .clear
+            let c = XRTwoPlaneTest.clear
+            pass.colorAttachments[0].clearColor = MTLClearColor(
+                red: Double(c.x), green: Double(c.y), blue: Double(c.z), alpha: Double(c.w))
+            pass.colorAttachments[0].storeAction = .store
+            for (index, texture) in scratch.enumerated() {
+                pass.colorAttachments[index + 1].texture = texture
+                pass.colorAttachments[index + 1].loadAction = .clear
+                pass.colorAttachments[index + 1].storeAction = .dontCare
+            }
+            let encoder = commands.makeRenderCommandEncoder(descriptor: pass)!
+            encoder.setRenderPipelineState(pipeline)
+            for f in Self.fetches {
+                CAState.bind(
+                    encoder, vertices: CAState.rectangle(x0: f.x0, y0: f.y0, x1: f.x1, y1: f.y1, color: f.color),
+                    source: nil)
+                encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
+            }
+            encoder.endEncoding()
+        }
+        let after = RawFacade.counters(of: gpu.device)
+        let moved = { (name: String) in (after[name] ?? 0) - (before[name] ?? 0) }
+        var want = [UInt64](repeating: XRTwoPlaneTest.texel(XRTwoPlaneTest.clear), count: width * height)
+        for f in Self.fetches {
+            let source = SIMD4<Double>(Double(f.color.x), Double(f.color.y), Double(f.color.z), Double(f.color.w))
+            for i in want.indices
+            where XRTwoPlaneModel.covers(
+                i % width, i / width, x0: f.x0, y0: f.y0, x1: f.x1, y1: f.y1, width: width, height: height)
+            {
+                want[i] = XRTwoPlaneModel.over(source, want[i])
+            }
+        }
+        let (wrong, offByOne) = XRTwoPlaneModel.apart(XRTwoPlaneTest.planes(buffer), want)
+        return (wrong, offByOne, moved("interlock_draws"), moved("fetch_whole") + moved("fetch_sequential"))
     }
 
     /// Texels wrong after a clear and a draw into a surface 60 wide: its alpha plane's rows (64 bytes) miss the 128 a
@@ -237,17 +241,6 @@ struct XRTwoPlaneCells {
             }
         }
         return (wrong, paired)
-    }
-
-    /// Lanes apart, and the largest distance between two halves in steps of their bits (both of one sign)
-    static func halfDistance(_ a: [UInt16], _ b: [UInt16]) -> (apart: Int, steps: Int) {
-        var apart = 0, steps = 0
-        for (x, y) in zip(a, b) where x != y {
-            apart += 1
-            let order = { (h: UInt16) in h & 0x8000 != 0 ? -Int(h & 0x7fff) : Int(h) }
-            steps = max(steps, abs(order(x) - order(y)))
-        }
-        return (apart, steps)
     }
 
     /// raw_probe_forms.h: the raw command buffer's barrier forms (debug builds' RawMetalProbe.mm)

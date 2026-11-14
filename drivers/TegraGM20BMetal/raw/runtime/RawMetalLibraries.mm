@@ -20,7 +20,7 @@ static NSData *metallibFile(NSString *path)
                 *error = nil;
             return (id<MTLLibrary>)l;
         }
-    id<MTLDevice> m2v = RM_M2V("a library from a URL raw does not read");
+    id<MTLDevice> m2v = RM_M2V(NeedLibraryUrl);
     return (id<MTLLibrary>)wrapLibrary(self, [m2v newLibraryWithURL:url error:error], url.path);
 }
 
@@ -31,7 +31,7 @@ static NSData *metallibFile(NSString *path)
             *error = nil;
         return (id<MTLLibrary>)l;
     }
-    id<MTLDevice> m2v = RM_M2V("a library from a file raw does not read");
+    id<MTLDevice> m2v = RM_M2V(NeedLibraryFile);
     return (id<MTLLibrary>)wrapLibrary(self, [m2v newLibraryWithFile:path error:error], path);
 }
 
@@ -51,8 +51,7 @@ static NSData *metallibFile(NSString *path)
             *error = nil;
         return (id<MTLLibrary>)l;
     }
-    return (id<MTLLibrary>)wrapLibrary(
-        self, [RM_M2V("a library from data raw does not read") newLibraryWithData:data error:error], nil);
+    return (id<MTLLibrary>)wrapLibrary(self, [RM_M2V(NeedLibraryData) newLibraryWithData:data error:error], nil);
 }
 
 // The library is named as m2v's was (no path for the main bundle's, the bundle's path for another's), so its framework,
@@ -62,8 +61,7 @@ static NSData *metallibFile(NSString *path)
     NSURL *url = [[NSBundle mainBundle] URLForResource:@"default" withExtension:@"metallib"];
     if (RMLibrary *l = readLibrary(self, nil, metallibFile(url.path)))
         return (id<MTLLibrary>)l;
-    return (id<MTLLibrary>)wrapLibrary(
-        self, [RM_M2V("the main bundle's default library raw does not read") newDefaultLibrary], nil);
+    return (id<MTLLibrary>)wrapLibrary(self, [RM_M2V(NeedLibraryMainDefault) newDefaultLibrary], nil);
 }
 
 - (id<MTLLibrary>)newDefaultLibraryWithBundle:(NSBundle *)bundle error:(NSError **)error
@@ -75,13 +73,13 @@ static NSData *metallibFile(NSString *path)
             *error = nil;
         return (id<MTLLibrary>)l;
     }
-    id<MTLDevice> m2v = RM_M2V("a bundle's default library raw does not read");
+    id<MTLDevice> m2v = RM_M2V(NeedLibraryBundleDefault);
     return (id<MTLLibrary>)wrapLibrary(self, [m2v newDefaultLibraryWithBundle:bundle error:error], path);
 }
 
 - (id<MTLLibrary>)newLibraryWithSource:(NSString *)source options:(MTLCompileOptions *)options error:(NSError **)error
 {
-    id<MTLDevice> m2v = RM_M2V("a library from source");
+    id<MTLDevice> m2v = RM_M2V(NeedLibrarySource);
     return (id<MTLLibrary>)wrapLibrary(self, [m2v newLibraryWithSource:source options:options error:error], nil);
 }
 

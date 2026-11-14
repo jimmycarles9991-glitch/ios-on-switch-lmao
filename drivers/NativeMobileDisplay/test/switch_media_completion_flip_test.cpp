@@ -56,7 +56,7 @@ protected:
 
     bool armed(int slot)
     {
-        return d.offer(video(slot), ++seq) && d.mediaFlip.state == SwitchCompletionFlip::kArmed;
+        return d.offer(video(slot), ++seq) && d.mediaFlip.state() == SwitchCompletionFlip::kArmed;
     }
 };
 
@@ -239,7 +239,8 @@ TEST_F(MediaFlip, NotArmedForANewLayout)
     shownByGate(off);
 }
 
-// A completion whose address stores never reach the assembly copy: one line, these flips off, the set from the gate.
+// A completion whose address stores never reach the assembly copy: one line, that set from the gate, and the next set
+// armed as usual.
 TEST_F(MediaFlip, ACompletionThatDoesNotLatchIsWrittenFromTheGate)
 {
     shownByGate(video(1));
@@ -250,13 +251,13 @@ TEST_F(MediaFlip, ACompletionThatDoesNotLatchIsWrittenFromTheGate)
     ASSERT_NO_THROW(frame());
     ASSERT_EQ(gLog.size(), 1u);
     EXPECT_NE(gLog[0].find("SwitchDisplay: windows B and C's completion flip did not latch"), std::string::npos);
-    EXPECT_NE(gLog[0].find("they flip from the display's work loop from here on"), std::string::npos);
-    EXPECT_TRUE(d.mediaFlipsRefused);
+    EXPECT_NE(gLog[0].find("that set flips from the display's work loop"), std::string::npos);
     EXPECT_EQ(d.model.assembly[kStartB], address(2));
     ASSERT_NO_THROW(frame());
     EXPECT_EQ(d.shown.back(), seq);
     EXPECT_EQ(d.model.active[kStartB], address(2));
-    EXPECT_FALSE(armed(3));
+    d.model.completionDropsAddresses = false;
+    EXPECT_TRUE(armed(3)) << "nothing is held after a refused set";
     EXPECT_EQ(gLog.size(), 1u);
 }
 
@@ -435,8 +436,8 @@ TEST(MediaFlipSource, TheDisplayCallsItWhereTheOrderingNeedsIt)
     EXPECT_EQ(fence.find("switch_host1x_token_fence(producers"), std::string::npos);
     const std::string flip = SourceText("../SwitchCompletionFlipDisplay.h");
     const std::string write = Between(flip, "void writeCompletionFlip(int status)", "\n}\n");
-    EXPECT_LT(write.find("IOSimpleLockLockDisableInterrupt(lock)"), write.find("writeMediaFlipLocked(status);"));
-    EXPECT_LT(write.find("writeMediaFlipLocked(status);"), write.find("IOSimpleLockUnlockEnableInterrupt(lock"));
+    EXPECT_LT(write.find("flipInterruptsOff()"), write.find("writeMediaFlip(status);"));
+    EXPECT_LT(write.find("writeMediaFlip(status);"), write.find("flipInterruptsOn(interrupts);"));
     EXPECT_NE(Between(flip, "void takeCompletionFlip()", "\n}\n").find("takeMediaFlip();"), std::string::npos);
     EXPECT_NE(Between(flip, "void suspendCompletionFlip()", "\n}\n").find("mediaFlipFromGate();"), std::string::npos);
     EXPECT_NE(Between(flip, "bool completionFlipOut() const", "\n}\n").find("!mediaFlipIdle()"), std::string::npos);
@@ -483,7 +484,8 @@ TEST(MediaFlipSource, TheLandscapeAndWindowProbeWritersTakeItFirst)
     const std::string post = Between(probe, "int windowProbePost(", "\n}\n");
     EXPECT_LT(post.find("mediaFlipFromGate();"), post.find("planeReserveBandwidth("));
     const std::string may = Between(SourceText("../SwitchMediaCompletionFlipDisplay.h"), "bool mediaFlipMay(", "\n}\n");
-    for (const char *owner : {"p.landscape", "landscapeOn()", "landscapeHoldsKicks()", "windowProbeBusy()"})
+    for (const char *owner :
+         {"p.landscape", "landscapeOn()", "landscapeHoldsKicks()", "windowProbeBusy()", "host1xFlipBusy()"})
         EXPECT_NE(may.find(owner), std::string::npos) << owner;
 }
 

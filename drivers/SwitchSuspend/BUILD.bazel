@@ -36,6 +36,7 @@ kernel_driver(
         "drivers/SwitchBattery",
         "drivers/SwitchBluetooth",
         "drivers/SwitchMotion",
+        "drivers/SwitchPower",
         "drivers/SwitchUSB",
         "drivers/SwitchWLAN",
         "drivers/TegraBPMP",

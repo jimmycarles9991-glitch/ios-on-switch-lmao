@@ -186,7 +186,11 @@ struct Gpu {
     // The words decoded.
     size_t run(const uint32_t *words, size_t count, bool segment = false)
     {
-        for (size_t i = 0; i < count;) {
+        size_t i = 0;
+        // a method's data that ran past the end of the GP entry before goes on in this one (NVK's indirect arguments)
+        for (; carry.left && i < count; --carry.left, ++carry.k)
+            method(carry.subc, carry.mthd + 4 * carry.step(), words[i++]);
+        while (i < count) {
             const uint32_t hdr = words[i++];
             if (!hdr)
                 continue;
@@ -201,13 +205,22 @@ struct Gpu {
                 continue;
             }
             EXPECT_TRUE(op == 1 || op == 3 || op == 5) << "header " << hdr;
-            for (uint32_t k = 0; k < n && i < count; ++k) {
-                const uint32_t step = op == 1 ? k : (op == 5 && k ? 1 : 0);
-                method(subc, mthd + 4 * step, words[i++]);
-            }
+            carry = {op, subc, mthd, n, 0};
+            for (; carry.left && i < count; --carry.left, ++carry.k)
+                method(subc, mthd + 4 * carry.step(), words[i++]);
         }
         return count;
     }
+
+    // The method header whose data words the stream has not reached yet
+    struct Carry {
+        uint32_t op = 0, subc = 0, mthd = 0, left = 0, k = 0;
+
+        uint32_t step() const
+        {
+            return op == 1 ? k : (op == 5 && k ? 1 : 0);
+        }
+    } carry;
 
     void run(const std::vector<uint32_t> &words)
     {

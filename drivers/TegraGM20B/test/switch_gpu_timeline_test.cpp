@@ -16,6 +16,7 @@ namespace
 {
 switch_gpu_backing_engine operations{};
 switch_gpu_backing_visibility visibility{};
+switch_gpu_backing_timeline_refs refs{};
 unsigned promotions;
 std::atomic<unsigned> fenceRefs, notifications;
 std::atomic<unsigned> waits;
@@ -41,6 +42,16 @@ extern "C" int switch_gpu_backing_register_visibility(uint32_t,
 
 extern "C" int switch_gpu_backing_register_semantics(uint32_t, const switch_gpu_backing_semantics *)
 {
+	return 0;
+}
+
+extern "C" int
+switch_gpu_backing_register_timeline_refs(uint32_t engine,
+					  const switch_gpu_backing_timeline_refs *ops)
+{
+	if (engine != SWITCH_GPU_ENGINE_GM20B)
+		return -22;
+	refs = *ops;
 	return 0;
 }
 
@@ -144,6 +155,38 @@ TEST_F(Timeline, FailurePublicationDoesNotBlockOrAllocateInEventContext)
 	EXPECT_EQ(fenceRefs.load(), 1u);
 	EXPECT_EQ(operations.status(&pending), -5);
 	operations.release_token(&pending);
+}
+
+// A job's records take their references many at once, and read their tokens through the timeline's handle with no lock
+// while it has no semantic wait or failure; with one they read what the engine's status reads.
+TEST_F(Timeline, HeldReferencesReadTheEngineStatusWithoutItsLock)
+{
+	volatile uint32_t fence = 3;
+	auto *timeline = switch_gpu_timeline_create(++nextId, &fence);
+	const auto done = token(timeline, 3), pending = token(timeline, 4);
+	const void *handle = nullptr;
+	ASSERT_EQ(refs.retain(&pending, 60, &handle), 0);
+	ASSERT_NE(handle, nullptr);
+	switchTimelineAtomicContext = true;
+	EXPECT_EQ(refs.status(handle, &done), 1);
+	EXPECT_EQ(refs.status(handle, &pending), 0);
+	switchTimelineAtomicContext = false;
+	switch_gpu_event_waits authority{1, 0};
+	switch_gpu_timeline_semantic *node = nullptr;
+	ASSERT_EQ(switch_gpu_timeline_semantic_reserve(&pending, &authority, &node), 0);
+	__atomic_store_n(&fence, 4, __ATOMIC_RELEASE);
+	EXPECT_EQ(refs.status(handle, &pending), operations.status(&pending));
+	EXPECT_EQ(refs.status(handle, &pending), 0);
+	switch_gpu_timeline_semantic_finish(&node, -5);
+	EXPECT_EQ(refs.status(handle, &pending), -5);
+	EXPECT_EQ(refs.status(handle, &done), operations.status(&done));
+	switch_gpu_timeline_close(timeline);
+	refs.release(&pending, 59);
+	EXPECT_EQ(fenceRefs.load(), 1u);
+	EXPECT_EQ(refs.status(handle, &done), 1);
+	refs.release(&done, 1);
+	EXPECT_EQ(fenceRefs.load(), 0u);
+	EXPECT_EQ(operations.status(&done), -19);
 }
 
 TEST_F(Timeline, FirstFailureIncludingZeroCannotBecomeSyntheticSuccess)

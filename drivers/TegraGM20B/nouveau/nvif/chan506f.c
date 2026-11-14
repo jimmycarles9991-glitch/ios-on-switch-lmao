@@ -7,8 +7,10 @@
 void
 nvif_chan506f_gpfifo_kick(struct nvif_chan *chan)
 {
+	/* The kick's one barrier: DSB ST completes the entries, the pushes and the client's write-combined writes
+	 * before GP_PUT, which then needs no publishing barrier of its own. */
 	wmb();
-	nvif_wr32(&chan->userd, 0x8c, chan->gpfifo.cur);
+	writel_relaxed(chan->gpfifo.cur, (u8 __iomem *)chan->userd.map.ptr + 0x8c);
 }
 
 void

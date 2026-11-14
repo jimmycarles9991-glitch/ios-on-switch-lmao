@@ -139,10 +139,10 @@ bool reached_locked(switch_gpu_backing *backing)
 	if (__atomic_load_n(&backing->shared, __ATOMIC_ACQUIRE) &&
 	    !__atomic_load_n(&backing->set, __ATOMIC_ACQUIRE))
 		return false;
-	IOLockLock(backing->lock);
+	const bool claimed = switch_gpu_backing_enter(backing);
 	__atomic_store_n(&backing->shared, true, __ATOMIC_RELEASE);
 	const bool member = backing->set != nullptr;
-	IOLockUnlock(backing->lock);
+	switch_gpu_backing_leave(backing, claimed);
 	return member;
 }
 
@@ -173,7 +173,7 @@ extern "C" switch_gpu_backing *switch_gpu_backing_register(const uint64_t *pages
 		return nullptr;
 	auto *copy = copy_pages(pages, count);
 	IOLock *lock = registry_lock();
-	if (!copy || !lock) {
+	if (!copy || !lock || !switch_gpu_backing_order()) {
 		free_pages(copy);
 		return nullptr;
 	}
@@ -201,7 +201,7 @@ extern "C" switch_gpu_backing *switch_gpu_backing_register(const uint64_t *pages
 	while (found && found->pages->addresses[0] != pages[0])
 		found = found->next;
 	if (found) {
-		IOLockLock(found->lock);
+		const bool claimed = switch_gpu_backing_enter(found);
 		const uint32_t common = count < found->pages->count ? count : found->pages->count;
 		if (memcmp(pages, found->pages->addresses, uint64_t(common) * sizeof(*pages)) ||
 		    (count > found->pages->count &&
@@ -211,7 +211,7 @@ extern "C" switch_gpu_backing *switch_gpu_backing_register(const uint64_t *pages
 		     (found->cpu_readers || found->cpu_writers || found->gpu_admission_readers ||
 		      found->gpu_admission_writers)) ||
 		    (surface_id && found->surface_id && surface_id != found->surface_id)) {
-			IOLockUnlock(found->lock);
+			switch_gpu_backing_leave(found, claimed);
 			IOLockUnlock(lock);
 			free_pages(copy);
 			IOLockFree(made->lock);
@@ -251,7 +251,7 @@ extern "C" switch_gpu_backing *switch_gpu_backing_register(const uint64_t *pages
 			__atomic_store_n(&found->shared, true, __ATOMIC_RELEASE);
 		++found->refs;
 		const bool member = found->set != nullptr;
-		IOLockUnlock(found->lock);
+		switch_gpu_backing_leave(found, claimed);
 		IOLockUnlock(lock);
 		if (member)
 			switch_gpu_set_reached(found, SWITCH_GPU_SET_CAUSE_SHARED);
@@ -366,6 +366,7 @@ extern "C" void switch_gpu_backing_release(switch_gpu_backing *backing)
 extern "C" void switch_gpu_bridge_completed(void) __attribute__((weak));
 extern "C" void switch_gpu_events_completed(void) __attribute__((weak));
 extern "C" void switch_gpu_copy_completed(void) __attribute__((weak));
+extern "C" void switch_gpu_copy_retire(void) __attribute__((weak));
 
 extern "C" void switch_gpu_backing_completed(void)
 {
@@ -383,6 +384,8 @@ extern "C" void switch_gpu_backing_completed(void)
 
 extern "C" void switch_gpu_backing_retire(void)
 {
+	if (switch_gpu_copy_retire)
+		switch_gpu_copy_retire();
 	if (!registry)
 		return;
 	switch_gpu_backing *ready = nullptr;
@@ -395,14 +398,14 @@ extern "C" void switch_gpu_backing_retire(void)
 	     ++scanned) {
 		auto *backing = retire_pop();
 		--scan_remaining;
-		IOLockLock(backing->lock);
+		const bool claimed = switch_gpu_backing_enter(backing);
 		bool pending = false;
 		for (uint32_t i = 0; backing->refs == 1 && i < backing->access_count; ++i)
 			pending |=
 				switch_gpu_backing_token_status(&backing->accesses[i].token) == 0;
 		if (pending) {
 			retire_append(backing);
-			IOLockUnlock(backing->lock);
+			switch_gpu_backing_leave(backing, claimed);
 			continue;
 		}
 		--retirement_count;
@@ -417,7 +420,7 @@ extern "C" void switch_gpu_backing_retire(void)
 			backing->retiring_next = ready;
 			ready = backing;
 		}
-		IOLockUnlock(backing->lock);
+		switch_gpu_backing_leave(backing, claimed);
 	}
 	__atomic_store_n(&retirement_pending, retiring != nullptr, __ATOMIC_RELEASE);
 	const bool again = retiring && (scan_remaining ||
@@ -447,7 +450,7 @@ extern "C" void switch_gpu_backing_expire(void)
 		auto *backing = expiry_first;
 		if (backing->retirement_deadline > now)
 			break;
-		IOLockLock(backing->lock);
+		const bool claimed = switch_gpu_backing_enter(backing);
 		expiry_remove(backing);
 		expiry_append(backing);
 		for (uint32_t i = 0; backing->refs == 1 && i < backing->access_count; ++i) {
@@ -459,7 +462,7 @@ extern "C" void switch_gpu_backing_expire(void)
 				expired = token;
 			break;
 		}
-		IOLockUnlock(backing->lock);
+		switch_gpu_backing_leave(backing, claimed);
 	}
 	arm_expiry_locked();
 	IOLockUnlock(registry);
@@ -476,7 +479,7 @@ extern "C" void switch_gpu_backing_describe(switch_gpu_backing *backing,
 {
 	if (!backing || !info)
 		return;
-	IOLockLock(backing->lock);
+	const bool claimed = switch_gpu_backing_enter(backing);
 	*info = {backing->id,
 		 backing->generation,
 		 backing->content,
@@ -486,7 +489,7 @@ extern "C" void switch_gpu_backing_describe(switch_gpu_backing *backing,
 		 backing->cpu_readers + backing->cpu_writers,
 		 backing->dirty,
 		 backing->layout};
-	IOLockUnlock(backing->lock);
+	switch_gpu_backing_leave(backing, claimed);
 }
 
 extern "C" int switch_gpu_backing_set_layout(switch_gpu_backing *backing,
@@ -496,7 +499,7 @@ extern "C" int switch_gpu_backing_set_layout(switch_gpu_backing *backing,
 		return -22;
 	if (switch_gpu_backing_set(backing))
 		switch_gpu_set_reached(backing, SWITCH_GPU_SET_CAUSE_LAYOUT);
-	IOLockLock(backing->lock);
+	const bool claimed = switch_gpu_backing_enter(backing);
 	int result = 0;
 	const uint64_t bytes = uint64_t(backing->pages->count) << 12;
 	for (uint32_t i = 0; i < layout->plane_count; ++i) {
@@ -522,7 +525,7 @@ extern "C" int switch_gpu_backing_set_layout(switch_gpu_backing *backing,
 		if (!result)
 			backing->layout = *layout;
 	}
-	IOLockUnlock(backing->lock);
+	switch_gpu_backing_leave(backing, claimed);
 	return result;
 }
 

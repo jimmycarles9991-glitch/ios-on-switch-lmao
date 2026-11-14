@@ -5,20 +5,21 @@
 // NV_DISPLAY_CLASS_ID 0x70, T210's heads 0x10000 words apart (:39-41, :1043), with SETPAYLOAD and NONINCR_W (:58-63),
 // opcodes T210's host1x lacks; this stream has SETCLASS, INCR and IMM only, and DC A is head 0.
 //
-// Writing debug.switch_display_dc_host1x_class runs it on the sysctl's thread, on NVJPG's host1x channel (idle while
-// the HW Test runs), with three syncpoints of its own (gate, DC, channel); reading it gives the verdict line. Every
+// Writing debug.switch_display_dc_host1x_class runs it on the sysctl's thread, on the display's own host1x channel,
+// with three syncpoints of its own (gate, DC, channel); reading it gives the verdict line. Every
 // stream is host1x's WAIT_SYNCPT on the gate, its body, then host1x's INCR_SYNCPT on the channel syncpoint, the job's
 // fence. The setup is proven first: the CPU's write of DC_COM_SCRATCH_REGISTER_A (0x325) must read back, and a control
 // stream with no body must wait for the CPU's increment of the gate and then run past. The probe's body is class
 // 0x70's INCR of the scratch word with the complement of its value and IMM of DC_CMD_GENERAL_INCR_SYNCPT (0x000,
 // IMMEDIATE) on the DC syncpoint. Nothing of it may land before the gate (held); after, the channel syncpoint says
 // host1x ran past the class 0x70 words, the DC syncpoint and the scratch word say DC A took them. A channel that
-// stopped is torn down and restarted, which drops its jobs (one of NVJPG's queued meanwhile too); the scratch word gets
-// its value back. Included in the class body after NativeColumnScanDisplay.h.
+// stopped is torn down and restarted, which drops its jobs; the scratch word gets its value back. The channel is the
+// host1x flip trial's too (SwitchHost1xFlipDisplay.h): one of them owns it at a time. Included in the class body after
+// NativeColumnScanDisplay.h.
 
 #if (defined(DEVELOPMENT) && DEVELOPMENT) || (defined(DEBUG) && DEBUG)
-static constexpr uint32_t kDcScratchA = 0x325, kDcGeneralIncrSyncpt = 0x000, kDcHost1xClass = 0x70;
-static constexpr uint32_t kDcClassChannel = TEGRA_HOST1X_CHANNEL_NVJPG, kDcClassHeldUs = 2000, kDcClassRunUs = 50000;
+static constexpr uint32_t kDcScratchA = 0x325, kDcGeneralIncrSyncpt = 0x000, kDcHost1xClass = TEGRA_HOST1X_CLASS_DC;
+static constexpr uint32_t kDcClassChannel = TEGRA_HOST1X_CHANNEL_DISPLAY, kDcClassHeldUs = 2000, kDcClassRunUs = 50000;
 static inline uint32_t dcClassSyncpts[3] = {};  // gate, DC, channel
 static inline bool dcClassSyncptsReady = false, dcClassBusy = false;
 static inline char dcClassLine[320] = "class70=not_run";

@@ -6,15 +6,16 @@
 // transform. Only DC A's volatile registers change: CMU LUT1/LUT2/CSC and DISP_COLOR_CONTROL's CMU_ENABLE. With nothing
 // asked for the CMU is bypassed and the picture is the one hekate set up.
 //
-// The IOMobileFramebuffer calls come from any thread. The tables change at frame ends (the filter) only where
-// TegraDisplayColorSequence.h allows, and the enable bit latches at a frame boundary through GENERAL_ACT_REQ from the
-// work loop (the action).
+// The IOMobileFramebuffer calls come from any thread and serialize on their own lock, which nothing at a frame end takes.
+// The tables change at frame ends (the filter) only where TegraDisplayColorSequence.h allows, and the enable bit latches
+// at a frame boundary through GENERAL_ACT_REQ from the work loop (the action); TegraDisplayColorPublish.h hands the
+// tables to the filter and the state between the three.
 #pragma once
 #include <IOKit/IOLib.h>
 #include <IOKit/IOLocks.h>
 #include <IOKit/IOReturn.h>
 #include "TegraDisplayColorMath.h"
-#include "TegraDisplayColorSequence.h"
+#include "TegraDisplayColorPublish.h"
 #include "TegraDisplayPalette.h"
 #include "../../kits/SwitchMMIO/SwitchMMIOWords.h"
 
@@ -23,7 +24,8 @@ public:
     bool init();
     void free();
 
-    // Under the work-loop gate: DC A mapped, then unmapped.
+    // Under the work-loop gate, with DC A's interrupt not yet attached, then disabled (no filter runs): DC A mapped,
+    // then unmapped.
     void attach(SwitchMMIOWords registers);
     void detach();
 
@@ -40,14 +42,20 @@ public:
     // The family's SetParameter 6 (EDRDisplayFactor.h): the whole output times `factor` from the next frame end.
     void setEdrFactor(float factor);
 
-    // CP_ENABLE once a per-channel gamma table is in the windows' palettes (TegraDisplayPalette.h), else 0.
+    // CP_ENABLE once a per-channel gamma table is in the windows' palettes (TegraDisplayPalette.h), else 0. No lock.
     uint32_t windowOptions();
+
+    // Debug kernels: the setters' lock's takes since init (counted under it), for the display's stats line.
+    uint32_t lockTakes() const
+    {
+        return __atomic_load_n(&takes, __ATOMIC_RELAXED);
+    }
 
     // Under the gate: a blank swap's black, from the next frame on, and its end at the first flip latched after it.
     void setBlank(bool blank);
 
     // DC A's frame end: the filter (primary interrupt context) writes changed tables, the action (work-loop gate) moves
-    // the enable bit. A change holds the frame end (native_legacy_frame_end_hold) until both are done.
+    // the enable bit. Each change holds the frame end (native_legacy_frame_end_hold) until both are done. Neither locks.
     void frameEndFilter();
     void frameEndAction(bool mayRequest);
 
@@ -60,22 +68,26 @@ public:
     static void bypassForPanic(SwitchMMIOWords registers);
 
 private:
-    void commit();
-    void writeTables(const switch_color::Tables &tables, const switch_color::Tables *written);
-    void writeCsc(const switch_color::Tables &tables, const switch_color::Tables &written);
-    void writeEnable(bool enable);
-    void writePalettes();
+    struct Platform {
+        static void hold();
+        static void release();
+        static void deviceWritesDone();
+    };
 
-    IOSimpleLock *lock = nullptr;
+    void commit(bool paletteChanged);
+    template <typename Change> IOReturn change(Change body);
+    void noteLock();
+
+    IOLock *lock = nullptr;  // the setters' (and attach, detach, restoreAfterPowerUp): never at a frame end
+    uint32_t takes = 0;
     SwitchMMIOWords dc;
-    uint32_t colorControl = 0;
-    uint32_t generation = 0;
-    switch_color::Sequence sequence;
-    bool holding = false;    // a frame-end hold out until the change has reached DC A
-    bool announced = false;  // the last enable was logged (a blank alone is not)
+    switch_color::ColourPublication<Platform> unit;
+    bool announced = false;  // the last enable was logged (a blank alone is not); the action's
     switch_color::Inputs inputs;
     uint32_t gammaTable[switch_color::kGammaWords];
     uint32_t palette[switch_color::kPaletteWords];
-    bool paletteOn = false, paletteDirty = false, paletteShown = false;
-    switch_color::Tables pending, active;
+    bool paletteOn = false;
+#if (defined(DEVELOPMENT) && DEVELOPMENT) || (defined(DEBUG) && DEBUG)
+    uint16_t loggedCsc[switch_color::kCscWords];
+#endif
 };

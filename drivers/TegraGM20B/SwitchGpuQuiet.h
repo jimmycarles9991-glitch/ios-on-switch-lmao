@@ -74,6 +74,29 @@ static inline int switch_gpu_quiet_end(int quiet, int semantic_fence, int scanou
 	return quiet && !semantic_fence && !(scanout_writes && closes_group);
 }
 
+/* Why a job with pushes ends with its own interrupt (debug kernels' waits line): 0 when it ends quiet. */
+enum switch_gpu_loud {
+	SWITCH_GPU_LOUD_NONE,
+	SWITCH_GPU_LOUD_UNASKED,  /* the runtime asked for no quiet end */
+	SWITCH_GPU_LOUD_EVENTS,   /* it signals or waits for events */
+	SWITCH_GPU_LOUD_SEMANTIC, /* a semantic fence is bound to it */
+	SWITCH_GPU_LOUD_SCANOUT,  /* it closes the writes of a backing the display scans in place */
+	SWITCH_GPU_LOUD_NO_WAKE,  /* its channel's owner pushes no wake entries */
+	SWITCH_GPU_LOUD_REASONS,
+};
+
+static inline enum switch_gpu_loud switch_gpu_quiet_why(int asked, int events, int semantic_fence,
+							int scanout_writes, int closes_group)
+{
+	if (!asked)
+		return SWITCH_GPU_LOUD_UNASKED;
+	if (events)
+		return SWITCH_GPU_LOUD_EVENTS;
+	if (semantic_fence)
+		return SWITCH_GPU_LOUD_SEMANTIC;
+	return scanout_writes && closes_group ? SWITCH_GPU_LOUD_SCANOUT : SWITCH_GPU_LOUD_NONE;
+}
+
 enum {
 	SWITCH_GPU_QUIET_UNASKED =
 		0, /* nothing at or after the seqno interrupts, and no waiter asked */

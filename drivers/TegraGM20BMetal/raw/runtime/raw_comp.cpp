@@ -99,7 +99,7 @@ uint32_t Device::compKind(const Texture &m, bool blockLinear, bool copied) const
 
 void Device::compAsk(const CompWant &w)
 {
-    if (comp_.asked(w, commits()))
+    if (comp_.asked(w))
         return;
     comp_.wanted.push_back(w);
     compStart();
@@ -217,7 +217,6 @@ void Device::compMake(std::unique_lock<raw::Mutex> &l)
         comp_.wanted.erase(std::find(comp_.wanted.begin(), comp_.wanted.end(), w));
         if (made && (kr = k_.bindCompressed(bo, w.kind)) == KERN_SUCCESS) {
             set_.add(k_, bo, TegraGM20BSurfaceWrite);
-            comp_.made(w);
             comp_.ready.push_back({bo, w.kind, commits(), compClock()});
             backingsChanged();
             RAW_DIAGNOSTIC(stats.compMade++);
@@ -231,17 +230,17 @@ void Device::compMake(std::unique_lock<raw::Mutex> &l)
         if (made)
             k_.free(bo);
         RAW_DIAGNOSTIC(stats.compFailed++);
-        const bool lasting = compLasting(kr);
-        if (comp_.refuse(w, commits(), lasting))
-            os_log_error(compLog(),
-                         "raw: compressed memory %llu KiB kind 0x%x not made (%{public}s, 0x%x): those backings stay "
-                         "uncompressed%{public}s",
+        const bool shortage = compShortage(kr);
+        if (comp_.refuse(w, shortage))
+            os_log_error(compLog(), "raw: compressed memory %llu KiB kind 0x%x not made (%{public}s, 0x%x): %{public}s",
                          (unsigned long long)(w.bytes >> 10), w.kind,
                          !made                        ? "compressible BoAlloc"
                          : kr == kIOReturnNoResources ? "no comptags left"
                          : kr == kIOReturnNoSpace     ? "no GPU VA"
                                                       : "compressed VmBind",
-                         unsigned(kr), lasting ? "" : " until it is made (asked again later)");
+                         unsigned(kr),
+                         shortage ? "those backings stay uncompressed until this process gives compressed memory back"
+                                  : "that backing stays uncompressed");
     }
 }
 
@@ -268,7 +267,7 @@ void Device::compFree(Backing &b)
     comp_.mems.erase(std::find_if(comp_.mems.begin(), comp_.mems.end(), [&](const std::unique_ptr<CompMem> &m) {
         return m.get() == mem;
     }));
-    comp_.freed(commits());
+    comp_.freed();
 }
 
 uint64_t Device::compDeadline() const
@@ -296,7 +295,7 @@ void Device::compTrim(uint64_t now)
             RAW_DIAGNOSTIC(glassMemEvent("compressed memory freed unused", it->bo.bytes));
             k_.free(it->bo);
             it = comp_.ready.erase(it);
-            comp_.freed(commits());
+            comp_.freed();
             continue;
         }
         ++it;

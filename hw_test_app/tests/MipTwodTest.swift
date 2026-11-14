@@ -21,22 +21,6 @@ struct MipTwodTest: HWTest {
     let subsystem = Subsystem.metal
     var timeout: TimeInterval { 240 }
 
-    struct Format {
-        let name: String
-        let pixel: MTLPixelFormat
-        let layout: MipLayout
-    }
-
-    static let twod = [
-        Format(name: "bgra8", pixel: .bgra8Unorm, layout: .unorm([8, 8, 8, 8])),
-        Format(name: "rgba8", pixel: .rgba8Unorm, layout: .unorm([8, 8, 8, 8])),
-        Format(name: "rgba16f", pixel: .rgba16Float, layout: .floats([16, 16, 16, 16])),
-        Format(name: "r8", pixel: .r8Unorm, layout: .unorm([8])),
-        Format(name: "rg8", pixel: .rg8Unorm, layout: .unorm([8, 8])),
-        Format(name: "bgra8srgb", pixel: .bgra8Unorm_srgb, layout: .unorm([8, 8, 8, 8], srgb: true)),
-        Format(name: "rgba8srgb", pixel: .rgba8Unorm_srgb, layout: .unorm([8, 8, 8, 8], srgb: true)),
-    ]
-
     static let sizes = [(512, 512), (776, 24), (255, 129)]
 
     func run(_ context: TestContext) async throws -> Outcome {
@@ -50,7 +34,7 @@ struct MipTwodTest: HWTest {
         var cells: [String] = [], times: [String] = [], srgb: [String] = [], firsts: [String] = []
         let before = RawFacade.counters(of: gpu.device)
         let rounding = MipRounding()
-        for f in Self.twod {
+        for f in MipFormats.twod {
             let chains = MipChains(gpu: gpu, format: f)
             var proven = MipTally(), odd = MipTally(), control = MipTally(), level1 = MipTally()
             var arm3d = "-"

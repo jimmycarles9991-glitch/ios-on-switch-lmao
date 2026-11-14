@@ -17,9 +17,11 @@
 // copy is writing it), held (complete, waiting for a flip; double buffering only). A frame goes only into a buffer in none of them.
 //
 // Replacing a flip still out is the one thing double buffering never does to DC A. Should the controller not take a replaced
-// START_ADDR as modelled (latch() says kInconsistent), recover() turns replacement off for good: from then on a frame finished
-// while a flip is out is held and flipped at that flip's latch, and no frame is written while a flip is out, which is double
-// buffering (with two buffers, when no third could be had, it is that from the start).
+// START_ADDR as modelled (latch() says kInconsistent), recover() turns replacement off: from then on a frame finished while a
+// flip is out is held and flipped at that flip's latch, and no frame is written while a flip is out, which is double
+// buffering (with two buffers, when no third could be had, it is that from the start). That holds for the mismatched flip
+// only: replacement is back at the first plain latch that leaves nothing asked for, replaced or held. A mismatch while
+// double-buffered is the caller's to treat as fatal.
 #pragma once
 
 // Direct scanout: entries kMaxBuffers..kMaxEntries-1 are the compositor's own surfaces, mapped into SMMU slots.
@@ -134,6 +136,8 @@ struct TegraScanoutRing {
                 return kInconsistent;
             front = pending;
             pending = superseded = kNone;
+            if (held == kNone)
+                replace = true;
             return kTaken;
         }
         if (active == pending) {
@@ -151,11 +155,11 @@ struct TegraScanoutRing {
         return active == front ? kWaiting : kInconsistent;
     }
 
-    // After kInconsistent with replacement on: DC A scans active (kNone: none of these buffers). Replacement is off from here. The
-    // buffer to ask for again is returned (the newest complete frame or, when window A scans none of these, the one believed
-    // scanned); the caller points window A at it. A replaced buffer it does not scan stays busy until a frame end shows a plain
-    // latch, and a copy in flight finishes into its own buffer and is held until then: nothing is written into a buffer DC A may
-    // still take.
+    // After kInconsistent with replacement on: DC A scans active (kNone: none of these buffers). Replacement is off until the
+    // next plain latch with nothing held. The buffer to ask for again is returned (the newest complete
+    // frame or, when window A scans none of these, the one believed scanned); the caller points window A at it. A replaced
+    // buffer it does not scan stays busy until a frame end shows a plain latch, and a copy in flight finishes into its own
+    // buffer and is held until then: nothing is written into a buffer DC A may still take.
     int recover(int active)
     {
         replace = false;

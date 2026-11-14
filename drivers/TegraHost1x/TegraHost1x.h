@@ -22,15 +22,26 @@ enum {
     TEGRA_HOST1X_ETIMEDOUT = -60,  // the engine did not reach the threshold in time (its interrupt was not lost)
     TEGRA_HOST1X_ELOST = -5,       // the threshold was reached but its interrupt never came (before strict mode only)
     TEGRA_HOST1X_EAGAIN = -35,     // no command arena room until earlier jobs' fences pass
+    TEGRA_HOST1X_EFALCON = -14,    // the engine's falcon raised an error (tegra_host1x_syncpt_wait_unless)
 };
 
-// Host1x class IDs (Linux include/linux/host1x.h: HOST1X_CLASS_HOST1X, ..._NVENC, ..._VIC, ..._NVJPG, ..._NVDEC).
+// Host1x class IDs (Linux include/linux/host1x.h: HOST1X_CLASS_HOST1X, ..._NVENC, ..._VIC, ..._NVJPG, ..._NVDEC; L4T
+// dc_common.c NV_DISPLAY_CLASS_ID for DC A, whose method offsets are its register indices).
 enum {
     TEGRA_HOST1X_CLASS_HOST1X = 0x01,
     TEGRA_HOST1X_CLASS_NVENC = 0x21,
     TEGRA_HOST1X_CLASS_VIC = 0x5d,
+    TEGRA_HOST1X_CLASS_DC = 0x70,
     TEGRA_HOST1X_CLASS_NVJPG = 0xc0,
     TEGRA_HOST1X_CLASS_NVDEC = 0xf0,
+};
+
+// HOST1X_SYNC_MOD_TEARDOWN bits (Tegra X1 TRM 14.9.14).
+enum {
+    TEGRA_HOST1X_MODULE_VIC = 13,
+    TEGRA_HOST1X_MODULE_NVJPG = 14,
+    TEGRA_HOST1X_MODULE_NVDEC = 18,
+    TEGRA_HOST1X_MODULE_NVENC = 19,
 };
 
 // Syncpoint increment conditions (host1x uclass INCR_SYNCPT bits 15:8).
@@ -90,6 +101,12 @@ uint32_t tegra_host1x_syncpt_read(uint32_t id);
 // Only after the exclusive producer stopped and retained completion records say failed; this never publishes success.
 int tegra_host1x_syncpt_release_failed(uint32_t id, uint32_t threshold, uint32_t max_increments);
 
+#if (defined(DEVELOPMENT) && DEVELOPMENT) || (defined(DEBUG) && DEBUG)
+// One CPU increment of a syncpoint no engine increments (SwitchHost1xCpuIncrement.h), so the stream waiting on it goes
+// on: a HW Test's gate (TegraVIC's SwitchVICGate.h).
+int tegra_host1x_syncpt_cpu_increment(uint32_t id);
+#endif
+
 // A stopped engine's cancelled jobs' increments, done by the CPU up to `threshold` (two at a time, the most
 // tegra_host1x_syncpt_release_failed takes): another engine's stream waiting on one of them goes on, and the engine's
 // queue renumbers from the syncpoint.
@@ -111,17 +128,25 @@ static inline int tegra_host1x_syncpt_release_through(uint32_t id, uint32_t thre
 // proven its engine (tegra_host1x_set_strict); before that it returns TEGRA_HOST1X_ELOST, so a probe that meets a
 // missing interrupt logs its own failure line and leaves its engine unpublished instead of stopping the boot.
 int tegra_host1x_syncpt_wait(uint32_t id, uint32_t threshold, uint32_t timeoutUs);
+// The same, ending at once with TEGRA_HOST1X_EFALCON once *errors is no longer `seen`: an engine whose falcon parked on
+// an error never reaches the threshold. Whoever moves *errors (a release store) then kicks the syncpoint.
+int tegra_host1x_syncpt_wait_unless(uint32_t id, uint32_t threshold, uint32_t timeoutUs, const uint32_t *errors,
+                                    uint32_t seen);
+// Wakes the waiters of syncpoint `id` to look at their `errors` word again; a waiter with nothing new sleeps on.
+void tegra_host1x_syncpt_kick(uint32_t id);
 void tegra_host1x_set_strict(void);
 
 // Command DMA channels, one per engine as mainline gives every client its own (vic.c, nvdec.c, nvjpg.c
 // host1x_channel_request; T210 has 14): a stream that waits for another engine (WAIT_SYNCPT) holds up only its own
-// engine. NVDEC keeps channel 0.
+// engine, and a teardown drops only its own channel's jobs. NVDEC keeps channel 0; the display's class 0x70 streams to
+// DC A have their own.
 enum {
     TEGRA_HOST1X_CHANNEL_DEFAULT = 0,
     TEGRA_HOST1X_CHANNEL_VIC = 1,
     TEGRA_HOST1X_CHANNEL_NVENC = 2,
     TEGRA_HOST1X_CHANNEL_NVJPG = 3,
-    TEGRA_HOST1X_CHANNELS = 4
+    TEGRA_HOST1X_CHANNEL_DISPLAY = 4,
+    TEGRA_HOST1X_CHANNELS = 5
 };
 
 // A job's stream is written in place in its channel's command arena (below 4 GiB) and host1x gathers it from there, so
@@ -155,6 +180,10 @@ int tegra_host1x_submit(const uint32_t *words, uint32_t count);
 // restart resumes it empty at its PUT. The caller holds off its own submits in between.
 void tegra_host1x_channel_teardown(uint32_t channel);
 void tegra_host1x_channel_restart(uint32_t channel);
+// After a module's reset, with its channel empty: host1x forgets which channel owned the module ("Whenever a module is
+// reset, the corresponding teardown bit ... should be written", TRM 14.9.14). The register's other bits write as
+// NO_ACTION, so a write names one module and needs no read-modify-write.
+void tegra_host1x_module_teardown(uint32_t module);
 
 // Sleep (called through tegra_nvdec_suspend/resume below, after NVDEC has quiesced). Suspend saves the
 // handed-out syncpoint values and stops every channel; resume re-adopts the clock, reconfigures the sync unit, restores

@@ -46,19 +46,23 @@ static void seam(RMSubRecorder *s, MTLRenderPassDescriptor *parallel, size_t at,
     pass.continues = at > 0;
 }
 
-// `s`'s objects, setBytes chunks, passes and refusals into `cb`, then its commands as one encoder of `cb`'s
+// `s`'s objects, setBytes chunks and shadow, storage targets to move plain, passes and refusals into `cb`, then its
+// commands as one encoder of `cb`'s
 static void splice(RMCommandBuffer *cb, RMSubRecorder *s, bool refused)
 {
     for (id object : s->_owners)
         [cb retain:object];
-    const size_t chunkBase = cb->_bytes.chunks.size(), passBase = cb->_passes.size();
+    const size_t chunkBase = cb->_bytes.chunks.size(), passBase = cb->_passes.size(), shadowBase = cb->_shadow.size();
+    cb->_shadow.append(s->_shadow.ownData(), s->_shadow.ownData() + s->_shadow.size());
+    cb->_plainForStorage.insert(cb->_plainForStorage.end(), s->_plainForStorage.begin(), s->_plainForStorage.end());
+    cb->_borderSamplers |= s->_borderSamplers;
     if (!s->_bytes.chunks.empty()) {
-        cb->_bytes.chunks.insert(cb->_bytes.chunks.end(), s->_bytes.chunks.begin(), s->_bytes.chunks.end());
+        cb->_bytes.chunks.append(s->_bytes.chunks.ownData(), s->_bytes.chunks.ownData() + s->_bytes.chunks.size());
         cb->_bytes.at = cb->_bytes.chunks.size();  // a later setBytes takes a chunk of its own: these are full
         cb->_bytes.used = 0;
         s->_bytes = {};
     }
-    cb->_passes.insert(cb->_passes.end(), s->_passes.begin(), s->_passes.end());
+    cb->_passes.append(s->_passes.ownData(), s->_passes.ownData() + s->_passes.size());
     cb->_sampledShadows |= s->_sampledShadows;
     cb->_standIns |= s->_standIns;
     cb->_whole |= s->_whole;
@@ -77,8 +81,8 @@ static void splice(RMCommandBuffer *cb, RMSubRecorder *s, bool refused)
     cb->_encOpen = true;
     cb->_encRefused = refused;
     for (const RMSubCommand &r : s->_log) {
-        const Cmd c = raw::spliced(r.cmd, passBase, chunkBase, cb->_extra.size());
-        cb->_extra.insert(cb->_extra.end(), r.extra.begin(), r.extra.end());
+        const Cmd c = raw::spliced(r.cmd, passBase, chunkBase, shadowBase, cb->_extra.size());
+        cb->_extra.append(r.extra.begin(), r.extra.end());
         [cb record:c];
     }
     [cb closeEncoder];
@@ -187,6 +191,7 @@ static void splice(RMCommandBuffer *cb, RMSubRecorder *s, bool refused)
 {
     SWITCH_API(ApiEncoder);
     RMParallelRenderEncoder *e = [RMParallelRenderEncoder new];
+    rmPipelineVeto(self, VetoParallel);
     [self begin:e];
     e->_descriptor = [d copy];
     [self retain:e->_descriptor];

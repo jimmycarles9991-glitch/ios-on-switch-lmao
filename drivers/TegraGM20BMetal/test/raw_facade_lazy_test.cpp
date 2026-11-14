@@ -148,9 +148,15 @@ void foreignSampler()
     compared.compareFunction = MTLCompareFunctionLess;
     EXPECT_TRUE([(id)[device newSamplerStateWithDescriptor:compared] isKindOfClass:NSClassFromString(@"RMSampler")]);
     EXPECT_EQ(gOpens, 0);
+    MTLSamplerDescriptor *white = [MTLSamplerDescriptor new];
+    white.sAddressMode = MTLSamplerAddressModeClampToBorderColor;
+    white.borderColor = MTLSamplerBorderColorOpaqueWhite;
+    EXPECT_TRUE([(id)[device newSamplerStateWithDescriptor:white] isKindOfClass:NSClassFromString(@"RMSampler")])
+        << "an opaque border is the raw sampler's";
+    EXPECT_EQ(gOpens, 0);
     MTLSamplerDescriptor *s = [MTLSamplerDescriptor new];
-    s.sAddressMode = MTLSamplerAddressModeClampToBorderColor;
-    s.borderColor = MTLSamplerBorderColorOpaqueWhite;
+    s.normalizedCoordinates = NO;
+    s.sAddressMode = MTLSamplerAddressModeMirrorClampToEdge;
     (void)[device newSamplerStateWithDescriptor:s];
     expectOpenedFor(device, "a sampler's twin");
 }

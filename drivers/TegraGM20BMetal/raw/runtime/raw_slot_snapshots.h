@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <limits>
 #include <vector>
+#include "raw_grow_list.h"
 
 namespace raw {
 
@@ -126,12 +127,13 @@ public:
         if (captured_ == generation_)
             return index_;
         Header header;
-        const bool first = headers_.empty();
-        for (size_t c = 0; c < kChunks; ++c) {
-            if (!first && !(pending_ & chunkSlots(c))) {
-                header[c] = headers_.back()[c];
-                continue;
-            }
+        uint32_t chunks = (1u << kChunks) - 1;
+        if (!headers_.empty()) {
+            header = headers_.back();
+            chunks = editedChunks(pending_);
+        }
+        for (; chunks; chunks &= chunks - 1) {
+            const size_t c = size_t(__builtin_ctz(chunks));
             header[c] = static_cast<uint32_t>(chunks_.size());
             Chunk &chunk = chunks_.emplace_back();
             for (size_t k = 0; k < K; ++k)
@@ -180,13 +182,25 @@ private:
         return chunk * K >= 32 ? ~0u : uint32_t(((uint64_t(1) << K) - 1) << (chunk * K));
     }
 
+    // the chunks holding a slot of `slots`, visited by the set slots alone
+    static constexpr uint32_t editedChunks(uint32_t slots)
+    {
+        uint32_t chunks = 0;
+        while (slots) {
+            const size_t c = size_t(__builtin_ctz(slots)) / K;
+            chunks |= 1u << c;
+            slots &= ~chunkSlots(c);
+        }
+        return chunks & ((1u << kChunks) - 1);
+    }
+
     Table current_{};
     uint64_t generation_ = 0;
     uint64_t captured_ = std::numeric_limits<uint64_t>::max();
     uint32_t index_ = std::numeric_limits<uint32_t>::max();
-    std::vector<Header> headers_;
-    std::vector<Chunk> chunks_;
-    std::vector<uint32_t> changed_;
+    GrowList<Header> headers_;
+    GrowList<Chunk> chunks_;
+    GrowList<uint32_t> changed_;
     uint32_t pending_ = ~0u;
     uint32_t edited_ = 0;
 };
@@ -276,7 +290,7 @@ public:
 
 private:
     Objects objects_;
-    std::vector<uint32_t> sets_;
+    GrowList<uint32_t> sets_;
     uint32_t set_ = 0;
 };
 

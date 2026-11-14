@@ -3,8 +3,7 @@ import HWTestCore
 import HWTestGPU
 import Metal
 
-/// Dynamic attribute stride where the device answers it (24B119's A13; 21H461's A10X answers NO and refuses the state):
-/// one state of an MTLBufferLayoutStrideDynamic layout draws a full-target quad from the same four corners laid out at
+/// Dynamic attribute stride, which both builds answer (NativeAnswers): one state of an MTLBufferLayoutStrideDynamic layout draws a full-target quad from the same four corners laid out at
 /// three strides, bound by setVertexBuffer:offset:attributeStride:atIndex: at 16 and 32 bytes (junk between the
 /// corners) and by setVertexBytes:length:attributeStride:atIndex: at 8. Each draw covers the target; a stride read
 /// wrong would not.
@@ -52,9 +51,7 @@ struct NativeDynamicStrideTest: NativeObjectTest {
             (device as AnyObject as! NSObject).value(forKey: "supportsDynamicAttributeStride") as? Bool ?? false
         metrics.set("dynamic_stride", dynamic ? "yes" : "no")
         guard dynamic else {
-            if (try? await device.makeRenderPipelineState(descriptor: descriptor)) != nil {
-                work.failures.append("a dynamic-stride state was made where the device answers it NO")
-            }
+            work.failures.append("supportsDynamicAttributeStride answers NO")
             return work
         }
         let pipeline = try await device.makeRenderPipelineState(descriptor: descriptor)

@@ -80,8 +80,8 @@ uint64_t out(const TegraVICJob &j, uint32_t bit, uint32_t width)
 #define OUT_FIELD(j, name) out((j), name##_BIT, name##_WIDTH)
 
 // The refused request: 1920x1080 '420v' (rows on 256 bytes, as everything sized for this display) a quarter turn and
-// 3.6x down into a 300x534 '422v'. The output is described before the transpose: 534x300 of N422R, luma 534 rows of
-// 512, chroma 534 rows of 256 pairs, the siting exchanged.
+// 3.6x down into a 300x534 '422v'. The output is described before the transpose: 534x300 of N422 (its memory as it
+// lies, probe gpu.x1.vic_transpose422), luma 534 rows of 512, chroma 534 rows of 256 pairs, Center across memory rows.
 TEST(Vic422, TheDetachedLayerCopyBuilds)
 {
     const TegraVICSurfaceDesc src = surface(k420v, 1920, 1080, 2048);
@@ -89,15 +89,15 @@ TEST(Vic422, TheDetachedLayerCopyBuilds)
     for (uint32_t transform : {4u, 7u}) {
         const Built b = build(src, dst, detachCopy(transform, 2));
         ASSERT_EQ(b.why, nullptr) << b.why;
-        EXPECT_EQ(OUT_FIELD(b.job, SURF_FORMAT), uint64_t(TEGRA_VIC_T_Y8___U8V8_N422R));
+        EXPECT_EQ(OUT_FIELD(b.job, SURF_FORMAT), uint64_t(TEGRA_VIC_T_Y8___U8V8_N422));
         EXPECT_EQ(OUT_FIELD(b.job, SURF_WIDTH), 533u);
         EXPECT_EQ(OUT_FIELD(b.job, SURF_HEIGHT), 299u);
         EXPECT_EQ(OUT_FIELD(b.job, SURF_LUMA_WIDTH), 533u);
         EXPECT_EQ(OUT_FIELD(b.job, SURF_LUMA_HEIGHT), 511u);
         EXPECT_EQ(OUT_FIELD(b.job, SURF_CHROMA_WIDTH), 533u);
         EXPECT_EQ(OUT_FIELD(b.job, SURF_CHROMA_HEIGHT), 255u);
-        EXPECT_EQ(OUT_FIELD(b.job, SURF_CHROMA_LOC_HORIZ), 0u);
-        EXPECT_EQ(OUT_FIELD(b.job, SURF_CHROMA_LOC_VERT), 1u) << "Center siting across memory is down before it";
+        EXPECT_EQ(OUT_FIELD(b.job, SURF_CHROMA_LOC_HORIZ), 1u) << "Center across memory rows, transposed or not";
+        EXPECT_EQ(OUT_FIELD(b.job, SURF_CHROMA_LOC_VERT), 0u);
         EXPECT_EQ(TEGRA_VIC_GET(b.job.config, TEGRA_VIC_OUTPUT, OUT_TRANSPOSE), 1u);
     }
     const Built flat = build(src, surface(k422v, 534, 300, 768), detachCopy(0, 2));
@@ -109,7 +109,7 @@ TEST(Vic422, TheDetachedLayerCopyBuilds)
     EXPECT_EQ(OUT_FIELD(flat.job, SURF_CHROMA_LOC_VERT), 0u);
 }
 
-// Transposed 4:2:0 output keeps the siting it ran with on the unit; only 4:2:2's is exchanged.
+// Transposed 4:2:0 output keeps the siting it ran with on the unit, as 4:2:2's does.
 TEST(Vic422, Transposed420KeepsItsSiting)
 {
     const TegraVICSurfaceDesc src = surface(kBgra, 720, 1280, 2880 + 192);
@@ -146,7 +146,7 @@ TEST(Vic422, ShapesAndRefusals)
 {
     const TegraVICSurfaceDesc src = surface(k420v, 1920, 1080, 2048);
     EXPECT_EQ(build(src, surface(k422v, 300, 533, 512), detachCopy(4, 1)).why, nullptr) << "odd height";
-    EXPECT_STREQ(build(src, surface(k422v, 301, 534, 512), detachCopy(4, 1)).why, "4:2:2 surface of odd width");
+    EXPECT_EQ(build(src, surface(k422v, 301, 534, 512), detachCopy(4, 1)).why, nullptr) << "odd width, whole pairs";
     TegraVICRequest r = detachCopy(0, 1);
     r.dst_x = 1;
     r.dst_w = 200;
@@ -266,42 +266,54 @@ TEST(Vic422Model, QuarterTurnsOfBgraInto422v)
     }
 }
 
-// The refused shape on the model: one colour in, so the 4:2:0 to 4:2:2 pass-through must give exactly it back on
-// every luma sample and CbCr pair of 300x534, and nothing in the rows' padding or past the planes.
+// The refused shape on the model, and the full-screen landscape video's (720x1280, what a recorded turn's first reader
+// has VIC make when the display leaves landscape: display.x1.landscape_video crc_back): one colour in, so the 4:2:0 to
+// 4:2:2 pass-through must give exactly it back on every luma sample and CbCr pair, and nothing in the rows' padding or
+// past the planes. A pair left unwritten keeps what the destination held before, which a copy into another buffer of
+// the pool does not (boots 19 and 21's N422R description left 640 of the 1280 chroma rows).
 TEST(Vic422Model, TheDetachedLayerCopyCoversItsPlanes)
 {
-    constexpr uint32_t SW = 1920, SH = 1080, SP = 2048, DW = 300, DH = 534, DP = 512;
+    constexpr uint32_t SW = 1920, SH = 1080, SP = 2048;
     constexpr uint8_t Y = 81, CB = 90, CR = 240;
-    const uint64_t sOff = chromaOffset(SP, SH), cOff = chromaOffset(DP, DH);
-    for (uint32_t tr : {4u, 7u}) {
-        Bench b(sOff + size_t(SP) * SH / 2, cOff + size_t(DP) * DH + 4096);
-        memset(b.src.data(), Y, sOff);
-        for (size_t i = sOff; i < b.src.size(); i += 2) {
-            b.src[i] = CB;
-            b.src[i + 1] = CR;
-        }
-        const TegraVICImage src = planes(k420v, SW, SH, SP, kSrcIova);
-        const TegraVICImage dst = planes(k422v, DW, DH, DP, kDstIova);
-        TegraVICOp op = tegra_vic_probe_op(SW, SH, DW, DH, tr);
-        op.nearest = 0;
-        TegraVICJob job;
-        const char *why = tegra_vic_build(&src, &dst, &op, &kTegraVICTraits, kConfig, kFilter, &job);
-        ASSERT_EQ(why, nullptr) << why;
-        vic_model_run(&b.model, &job);
-        EXPECT_EQ(b.model.writes, uint64_t(DW) * DH + uint64_t(DW / 2) * DH);
-        EXPECT_EQ(b.model.clipped + b.model.faults, 0u);
-        uint32_t off = 0, padding = 0;
-        for (uint32_t v = 0; v < DH; v++)
-            for (uint32_t u = 0; u < DP; u++) {
-                const uint8_t l = b.dst[size_t(v) * DP + u], c = b.dst[cOff + size_t(v) * DP + u];
-                if (u < DW) {
-                    off += l != Y || c != (u & 1 ? CR : CB);
-                } else {
-                    padding += l != TEGRA_VIC_POISON_BYTE || c != TEGRA_VIC_POISON_BYTE;
-                }
+
+    struct Shape {
+        uint32_t w, h, pitch;
+    };
+
+    const uint64_t sOff = chromaOffset(SP, SH);
+    for (const Shape shape : {Shape{300, 534, 512}, Shape{720, 1280, 768}}) {
+        const uint32_t DW = shape.w, DH = shape.h, DP = shape.pitch;
+        const uint64_t cOff = chromaOffset(DP, DH);
+        for (uint32_t tr : {4u, 7u}) {
+            Bench b(sOff + size_t(SP) * SH / 2, cOff + size_t(DP) * DH + 4096);
+            memset(b.src.data(), Y, sOff);
+            for (size_t i = sOff; i < b.src.size(); i += 2) {
+                b.src[i] = CB;
+                b.src[i + 1] = CR;
             }
-        EXPECT_EQ(off, 0u) << "transform " << tr;
-        EXPECT_EQ(padding, 0u) << "transform " << tr;
+            const TegraVICImage src = planes(k420v, SW, SH, SP, kSrcIova);
+            const TegraVICImage dst = planes(k422v, DW, DH, DP, kDstIova);
+            TegraVICOp op = tegra_vic_probe_op(SW, SH, DW, DH, tr);
+            op.nearest = 0;
+            TegraVICJob job;
+            const char *why = tegra_vic_build(&src, &dst, &op, &kTegraVICTraits, kConfig, kFilter, &job);
+            ASSERT_EQ(why, nullptr) << why;
+            vic_model_run(&b.model, &job);
+            EXPECT_EQ(b.model.writes, uint64_t(DW) * DH + uint64_t(DW / 2) * DH) << DW << "x" << DH << " " << tr;
+            EXPECT_EQ(b.model.clipped + b.model.faults, 0u) << DW << "x" << DH << " " << tr;
+            uint32_t off = 0, padding = 0;
+            for (uint32_t v = 0; v < DH; v++)
+                for (uint32_t u = 0; u < DP; u++) {
+                    const uint8_t l = b.dst[size_t(v) * DP + u], c = b.dst[cOff + size_t(v) * DP + u];
+                    if (u < DW) {
+                        off += l != Y || c != (u & 1 ? CR : CB);
+                    } else {
+                        padding += l != TEGRA_VIC_POISON_BYTE || c != TEGRA_VIC_POISON_BYTE;
+                    }
+                }
+            EXPECT_EQ(off, 0u) << DW << "x" << DH << " transform " << tr;
+            EXPECT_EQ(padding, 0u) << DW << "x" << DH << " transform " << tr;
+        }
     }
 }
 

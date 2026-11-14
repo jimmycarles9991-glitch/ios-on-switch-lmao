@@ -6,13 +6,17 @@ import Metal
 /// A state that fetches its own colour, by its storage form (the fetch, and the pipeline's blend where it has one, inside
 /// the pixel interlock) against its barrier twin (the colour read through the texture unit behind the fetch barrier, the
 /// ROP blending), both forced through the facade's probe channel (raw_fetch_rungs.h): the twin a triangle at a time
-/// (twin1) and as one draw behind one barrier (twinW). Per state, keyed by its program's size: worst_<arm>_<scene> the
+/// (twin1) and as one draw behind one barrier (twinw). Per state, keyed by its program's size: worst_<arm>_<scene> the
 /// largest difference in codes from the storage form's colour, on convex quads (CAStateSweep's strip and rectangle), a
 /// strip folded back over its first triangle and a quad crossing w = 0 under perspective; us_<arm>_<target>_<quads> one
 /// draw's GPU time from the facade's stamps, `quads` overlapping full-target quads into 64x64 or 1280x720. twins= the
-/// draws the facade counted on a twin. verdict=PASS: twin1 within the bound everywhere and twinW within it on the convex
-/// quads, every forced draw counted; the folded quad's twinW difference is the measurement's proof that it sees a
-/// draw's own triangles out of order (folded_seen). Debug builds only (the probe channel).
+/// draws the facade counted on a twin. verdict=PASS: twin1 within the bound everywhere and twinw within it on the convex
+/// quads, every forced draw counted; the folded quad's twinw difference is the measurement's proof that it sees a
+/// draw's own triangles out of order (folded_seen). The rule arm forces nothing, so rule fetch.twin (raw_twin_rule.h)
+/// picks the form: the scenes again over 64x64 against the storage form there (worst_rule_<scene>), us_rule_* beside
+/// us_storage_*, rule_twins= the draws the facade counted on the twin by that rule and rule_free= those a fetch-free
+/// rung took first (every rule arm draw is a shape and area the twin rule takes), and verdict=PASS also needs those
+/// within the bound, all counted and none slower than the storage form. Debug builds only (the probe channel).
 struct BlendTwinTest: HWTest {
     let id = "gpu.raw.blend_twin"
     let name = "Storage form against barrier twin: codes, ordering and GPU time of Core Animation's fetching states"
@@ -30,11 +34,13 @@ struct BlendTwinTest: HWTest {
         ("PBGRABaddXm_ThrmA2Xhf", "harmony"),
     ]
     static let arms: [(rung: Int, name: String)] = [
-        (BlendTwinScene.twinTriangles, "twin1"), (BlendTwinScene.twinWhole, "twinW"),
+        (BlendTwinScene.twinTriangles, "twin1"), (BlendTwinScene.twinWhole, "twinw"),
     ]
     static let sizes: [(name: String, width: Int, height: Int, quads: [Int])] = [
         ("64", 64, 64, [1, 4, 16]), ("720p", 1280, 720, [1]),
     ]
+    static let rule = 0
+    static let ruleSide = 64
 
     func run(_ context: TestContext) async throws -> Outcome {
         let gpu = try GPU.make()
@@ -50,7 +56,11 @@ struct BlendTwinTest: HWTest {
         var failures: [String] = []
         var unseen: [String] = []
         let before = RawFacade.counters(of: gpu.device)["fetch_blend_twin"] ?? 0
+        let ruleKeys = ["fetch_twin_rule", "fetch_rung2", "fetch_rung3"]
+        let ruleBefore = ruleKeys.map { RawFacade.counters(of: gpu.device)[$0] ?? 0 }
         var forcedDraws = 0
+        var ruleDraws = 0
+        var slower: [String] = []
         for line in lines {
             let key = keys[line.shortLabel]!
             guard let colour = line.colors.sorted(by: { $0.index < $1.index }).firstIndex(where: { $0.writeMask != 0 })
@@ -78,37 +88,72 @@ struct BlendTwinTest: HWTest {
                         unseen.append(key)
                     }
                 }
+                let side = Self.ruleSide
+                let ruled = {
+                    try await BlendTwinScene.bytes(
+                        line, colour: colour, draws: scene.draws, library: library, gpu: gpu, width: side, height: side)
+                }
+                guard let storage64 = try await FetchRungScene.forcing(BlendTwinScene.storage, gpu.device, ruled),
+                    let byRule = try await FetchRungScene.forcing(Self.rule, gpu.device, ruled)
+                else { continue }
+                ruleDraws += scene.draws.count
+                let (worst, differing) = FetchRungScene.difference(storage64.1, byRule.1)
+                metrics.set("worst_rule_\(scene.name)_\(key)", worst)
+                metrics.set("differing_rule_\(scene.name)_\(key)", differing)
+                if worst > Self.bound { failures.append("\(key) rule \(scene.name)") }
             }
             for size in Self.sizes {
                 for quads in size.quads {
-                    for (rung, arm) in [(BlendTwinScene.storage, "storage")] + Self.arms.map({ ($0.rung, $0.name) }) {
+                    var times: [String: Double] = [:]
+                    let arms =
+                        [(BlendTwinScene.storage, "storage")] + Self.arms.map({ ($0.rung, $0.name) }) + [
+                            (Self.rule, "rule")
+                        ]
+                    for (rung, arm) in arms {
                         let us = try await FetchRungScene.forcing(rung, gpu.device) {
                             try await BlendTwinScene.microseconds(
                                 line, quads: quads, width: size.width, height: size.height, library: library, gpu: gpu,
                                 draws: Self.draws, runs: Self.runs)
                         }
-                        if rung != BlendTwinScene.storage { forcedDraws += Self.draws * (Self.runs + 1) }
-                        metrics.set("us_\(arm)_\(size.name)_\(quads)_\(key)", (us ?? nil) ?? 0, digits: 1)
+                        if rung == Self.rule {
+                            ruleDraws += Self.draws * (Self.runs + 1)
+                        } else if rung != BlendTwinScene.storage {
+                            forcedDraws += Self.draws * (Self.runs + 1)
+                        }
+                        times[arm] = (us ?? nil) ?? 0
+                        metrics.set("us_\(arm)_\(size.name)_\(quads)_\(key)", times[arm]!, digits: 1)
+                    }
+                    if !(times["rule"]! > 0 && times["rule"]! < times["storage"]!) {
+                        slower.append("\(size.name)_\(quads)_\(key)")
                     }
                 }
             }
         }
-        let twins = (RawFacade.counters(of: gpu.device)["fetch_blend_twin"] ?? 0) - before
+        let counters = RawFacade.counters(of: gpu.device)
+        let twins = (counters["fetch_blend_twin"] ?? 0) - before
+        let ruleTaken = zip(ruleKeys, ruleBefore).map { (counters[$0.0] ?? 0) - $0.1 }
+        let ruleTwins = ruleTaken[0], ruleFree = ruleTaken[1] + ruleTaken[2]
         metrics.set("twins", twins)
         metrics.set("forced_draws", forcedDraws)
+        metrics.set("rule_twins", ruleTwins)
+        metrics.set("rule_free", ruleFree)
+        metrics.set("rule_draws", ruleDraws)
         metrics.set("states", lines.count)
         metrics.set("folded_seen", unseen.isEmpty ? "all" : "not:" + unseen.joined(separator: ","))
-        let counted = twins >= forcedDraws
-        let verdict = failures.isEmpty && unseen.isEmpty && counted ? "PASS" : "FAIL"
+        let counted = twins >= forcedDraws && ruleTwins + ruleFree >= ruleDraws
+        let verdict = failures.isEmpty && unseen.isEmpty && counted && slower.isEmpty ? "PASS" : "FAIL"
         metrics.set("verdict", verdict)
         if !failures.isEmpty { metrics.set("beyond", failures.joined(separator: ",")) }
+        if !slower.isEmpty { metrics.set("rule_slower", slower.joined(separator: ",")) }
         if verdict == "PASS" { return .pass(metrics, proof: gpu.proof) }
+        let uncounted =
+            "the facade drew \(twins) of \(forcedDraws) forced and \(ruleTwins) of \(ruleDraws) rule draws on a twin"
         let why =
             !failures.isEmpty
             ? "a twin beyond the bound"
             : !unseen.isEmpty
                 ? "the folded quad showed no difference on the whole twin draw"
-                : "the facade drew \(twins) of \(forcedDraws) forced draws on a twin"
+                : !counted ? uncounted : "the rule's form was not faster than the storage form"
         return .fail(why, metrics)
     }
 }

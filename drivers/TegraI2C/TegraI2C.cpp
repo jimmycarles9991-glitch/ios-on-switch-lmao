@@ -51,7 +51,6 @@ constexpr unsigned kBuses = 5;
 constexpr uint32_t kClkM = 19200000;  // CLK_M = 38.4 MHz OSC / 2
 constexpr uint32_t kBusDivide = 48;   // (TLOW 4 + THIGH 2 + 2) * (CLK_DIVISOR std/fast 5 + 1)
 constexpr uint32_t kGraceMs = 50;     // after a timed-out wait, for an interrupt action already under way
-constexpr unsigned kArbRetries = 3;   // multi-master bus: repeats of a transfer that lost arbitration
 constexpr unsigned kFifoWords = 8;    // TX and RX FIFO depth, 32-bit words (hekate i2c_xfer_packet: 32 bytes each)
 constexpr size_t kChainMaxWrite =
     static_cast<size_t>(kFifoWords - 6) * 4;  // a chain's write payload: both headers + it fit the TX FIFO
@@ -152,7 +151,7 @@ struct Bus {
     uint32_t hz;
     bool ready;
     bool owned;        // we reset/clocked it, so error recovery may reset it again
-    bool multiMaster;  // another master shares the pads: lost arbitration is retried, never reset or bus-cleared
+    bool multiMaster;  // another master shares the pads: never reset or bus-cleared
     bool final;        // tegra_i2c_final_transfer() has the bus for the rest of the boot
     // The wait in flight (under irqLock): a packet, a chain (write packet + read packet, ended by doneBit
     // INT_ALL_PACKETS_DONE), or the bus clear. With dmaActive the APB DMA moves the read's words, not serviceFifo, and
@@ -221,9 +220,10 @@ inline uint32_t intid(unsigned bus)
 
 // I2C5 runs in MULTI_MASTER_MODE unless switch-no-dfll: the CPU may go on the DFLL (SwitchThermal's governed
 // default), whose integrated I2C master writes VDD_CPU over the same PWR_I2C pads. L4T sets
-// the bit on every T210 controller (i2c-tegra.c tegra_i2c_init, tegra210_i2c_hw.has_multi_master_mode) and answers
-// arbitration loss with a re-init and -EAGAIN (no bus clear, which would cut into the other master's transfer); here
-// the transfer is simply repeated.
+// the bit on every T210 controller (i2c-tegra.c tegra_i2c_init, tegra210_i2c_hw.has_multi_master_mode). CL-DVFS grants
+// PWR_I2C to one of the two masters at a time, round robin (Tegra X1 TRM 35.4), while it is clocked, which TegraDFLL
+// holds whenever it is out of reset; so a lost arbitration is not expected and is not repeated: one line and that
+// transfer fails, with no bus clear (it would cut into the other master's transfer).
 bool multiMasterBus(unsigned bus)
 {
     unsigned noDfll = 0;
@@ -246,14 +246,17 @@ bool loadConfig(const Bus &b)
     return waitClear(b, CONFIG_LOAD, MSTR_CONFIG_LOAD, 2000);
 }
 
-// hekate clock_enable(): reset, gate, select CLK_M / divider, ungate, release reset.
+// Tegra X1 TRM 5.1.7, "To set up a non-boot device": reset asserted, clock on, the divisor, 2 us, the source (CLK_M,
+// 31:29 = 6, as at reset: 5.2.60), 2 us, reset released, every bit through the CAR's _SET/_CLR registers.
 void clockEnable(const BusInfo &info)
 {
     const uint32_t bit = 1u << info.bit;
+    const uint32_t divisor = info.divider - 1u;
     w32(gCar, info.reset, bit);
-    w32(gCar, info.enable + 4, bit);
-    w32(gCar, info.source, (6u << 29) | (info.divider - 1u));
     w32(gCar, info.enable, bit);
+    w32(gCar, info.source, (r32(gCar, info.source) & ~0xffffu) | divisor);
+    IODelay(2);
+    w32(gCar, info.source, (6u << 29) | divisor);
     IODelay(2);
     w32(gCar, info.reset + 4, bit);
     (void)r32(gCar, info.reset);
@@ -816,9 +819,8 @@ extern "C" int tegra_i2c_transfer(unsigned bus, uint8_t addr, const void *tx, si
     int result = b.ready ? TEGRA_I2C_OK : TEGRA_I2C_ENOTREADY;
     const bool chained = b.chainOn && (txlen != 0u) && (rxlen != 0u) && txlen <= kChainMaxWrite;
     const bool dma = chained && b.dmaOn && rxlen > static_cast<size_t>(kFifoWords) * 4 && rxlen <= b.dmaBuffer.size;
-    if (result == TEGRA_I2C_OK)
+    if (result == TEGRA_I2C_OK) {
         b.transfers = b.transfers + 1;
-    for (unsigned attempt = 0; result == TEGRA_I2C_OK; ++attempt) {
         if (chained) {
             result = chain(bus, b, addr, (const uint8_t *)tx, txlen, (uint8_t *)rx, rxlen, dma);
         } else {
@@ -827,15 +829,12 @@ extern "C" int tegra_i2c_transfer(unsigned bus, uint8_t addr, const void *tx, si
             if (result == TEGRA_I2C_OK && rxlen)
                 result = packet(bus, b, addr, nullptr, (uint8_t *)rx, rxlen, false);
         }
-        if (result == TEGRA_I2C_OK)
-            break;
-        recover(bus, b);
-        if (result != TEGRA_I2C_EARB || !b.multiMaster || attempt == kArbRetries)
-            break;
-        IODelay(100);  // the other master's transfer (a few bytes at 400 kHz) finishes
-        result = TEGRA_I2C_OK;
+        if (result != TEGRA_I2C_OK)
+            recover(bus, b);
     }
     IOLockUnlock(b.lock);
+    if (result == TEGRA_I2C_EARB)
+        IOLog("TegraI2C: I2C%u 0x%02x lost arbitration; the transfer fails\n", bus, addr);
     return result;
 }
 
@@ -916,20 +915,14 @@ extern "C" int tegra_i2c_final_transfer(unsigned bus, uint8_t addr, const void *
     b.active = false;  // a late action for this bus only masks and clears
     w32(b.regs, INT_MASK, 0);
     int result = TEGRA_I2C_OK;
-    for (unsigned attempt = 0;; ++attempt) {
-        if (txlen)
-            result = pollPacket(b, addr, (const uint8_t *)tx, nullptr, txlen, rxlen != 0);
-        if (result == TEGRA_I2C_OK && rxlen)
-            result = pollPacket(b, addr, nullptr, (uint8_t *)rx, rxlen, false);
-        if (result == TEGRA_I2C_OK)
-            break;
+    if (txlen)
+        result = pollPacket(b, addr, (const uint8_t *)tx, nullptr, txlen, rxlen != 0);
+    if (result == TEGRA_I2C_OK && rxlen)
+        result = pollPacket(b, addr, nullptr, (uint8_t *)rx, rxlen, false);
+    if (result != TEGRA_I2C_OK) {
         w32(b.regs, FIFO_CONTROL, r32(b.regs, FIFO_CONTROL) | FIFO_FLUSH);
         (void)waitClear(b, FIFO_CONTROL, FIFO_FLUSH, 2000);
         w32(b.regs, INT_STATUS, r32(b.regs, INT_STATUS));
-        if (result != TEGRA_I2C_EARB || !b.multiMaster || attempt == kArbRetries)
-            break;
-        IODelay(100);  // the other master's transfer (a few bytes at 400 kHz) finishes
-        result = TEGRA_I2C_OK;
     }
     if (irqHeld)
         IOLockUnlock(b.irqLock);

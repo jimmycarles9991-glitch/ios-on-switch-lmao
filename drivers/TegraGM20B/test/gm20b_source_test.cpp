@@ -27,11 +27,13 @@ const std::string &client()
 {
 	static const std::string source = [] {
 		std::string units;
-		for (const char *unit : {"", "Pool", "Bo", "Channel", "Submit", "Dispatch",
-					 "Present", "Job", "JobSubmit"})
+		for (const char *unit : {"", "Pool", "Spares", "Bo", "Import", "Channel", "Submit",
+					 "Dispatch", "Present", "Job", "JobSubmit"})
 			units += SourceText(std::string("../TegraGM20BUserClient") + unit + ".cpp");
-		return units + SourceText("../TegraGM20BUserClientInternal.h") +
-		       SourceText("../SwitchGpuClientRetirement.h");
+		return units + SourceText("../TegraGM20BPushScanRun.cpp") +
+		       SourceText("../TegraGM20BUserClientInternal.h") +
+		       SourceText("../SwitchGpuClientRetirement.h") +
+		       SourceText("../SwitchGpuClientBinds.h");
 	}();
 	return source;
 }
@@ -74,9 +76,11 @@ TEST(GM20BPoolPolicySource, BoAllocNeverRefusesACoherentBoForPoolRoom)
 	EXPECT_TRUE(refusal.Has("tgm_pool::refusal("));
 	EXPECT_TRUE(refusal.Has("compositor);"));  // the compositor keeps nvkm's floor
 	const CodeText alloc = Block(client(), "IOReturn AGXDeviceUserClient::boAlloc(");
-	EXPECT_TRUE(alloc.Has(
-		"refused = control ? nullptr : poolRefusal(in->bytes, pool_bytes_, critical_);"));
-	EXPECT_TRUE(alloc.Has("tgm_pool::coherentSource(refused, bo->pool_va != nullptr)"));
+	EXPECT_TRUE(
+		Block(client(), "AGXDeviceUserClient::BoCharge AGXDeviceUserClient::chargeBo(")
+			.Has("c.refused = control ? nullptr : poolRefusal(in->bytes, pool_bytes_, "
+			     "critical_);"));
+	EXPECT_TRUE(alloc.Has("tgm_pool::coherentSource(charge.refused, bo->pool_va != nullptr)"));
 	// A refusal does not fail the BO: no NoMemory between the tier check and the pool allocation.
 	EXPECT_FALSE(alloc.Between("if (!ret && (in->flags & TegraGM20BBoCoherent)) {",
 				   "if (!ret && bo->pool_va)")
@@ -84,11 +88,13 @@ TEST(GM20BPoolPolicySource, BoAllocNeverRefusesACoherentBoForPoolRoom)
 	EXPECT_FALSE(clientCode().Has("GPU pool BoAlloc of %llu KiB refused"));
 	// A system BO: a write-combined buffer of its own, mapped as itself. A physical view over its managed pages would set
 	// their cache attribute through a device pager whose private pages reset it to cacheable whenever they are freed.
-	EXPECT_TRUE(alloc.Between("} else if (!ret && !compressible) {", "if (!ret && bo->bmd) {")
+	EXPECT_TRUE(alloc.Between("} else if (!ret && !compressible) {",
+				  "if (!ret && bo->buffer.memory) {")
 			    .Has("if (system) options |= kIOMapWriteCombineCache;"));
 	EXPECT_FALSE(alloc.Has(
 		"kIOMemoryTypePhysical64) | kPoolCacheMode, TASK_NULL); IODelete(ranges"));
-	EXPECT_TRUE(alloc.Has("if (!ret && bo->bmd) { bo->view = bo->backing_pages == bo->npages"));
+	EXPECT_TRUE(alloc.Has(
+		"if (!ret && bo->buffer.memory) { bo->view = bo->backing_pages == bo->npages"));
 }
 
 TEST(GM20BPoolPolicySource, SystemBosGoAsCachedBosDo)
@@ -97,13 +103,14 @@ TEST(GM20BPoolPolicySource, SystemBosGoAsCachedBosDo)
 	EXPECT_TRUE(release.Has("if (bo->pool_va && bo->view) orphan = IONew(PoolOrphan, "
 				"1); if (orphan) {"));
 	EXPECT_TRUE(release.Has("!bo->system && !(bo->flags & TegraGM20BBoContiguous) &&"));
-	EXPECT_TRUE(release.Before("spareKeep(", "bo->bmd->release();"));
+	EXPECT_TRUE(release.Before("spareKeep(", "switch_gpu_cached_buffer_free(&bo->buffer);"));
 	EXPECT_FALSE(Block(client(), "void releaseOrphans()").Has("spareKeep"));
 	// The kernel's mapping of a system BO is write-combined as its task's is: pushView reads it as a cached BO's.
 	EXPECT_TRUE(Block(client(), "const uint32_t *AGXDeviceUserClient::pushView(")
 			    .Has("if (hit) { if (hit->bo->pool_va) {"));
 	EXPECT_TRUE(Block(client(), "void AGXDeviceUserClient::scanPushes(")
-			    .Has("pushView(va, bytes, hit)"));
+			    .Has("pushView(pushes[i].va, static_cast<uint64_t>(pushes[i].dwords) * "
+				 "4, hit)"));
 	EXPECT_TRUE(Block(client(), "int AGXDeviceUserClient::hungInterlocks(")
 			    .Has("pushView(va[i], static_cast<uint64_t>(dwords[i]) * 4, hit)"));
 }
@@ -120,15 +127,15 @@ TEST(GM20BPoolPolicySource, SystemBosNeverUseSpares)
 	EXPECT_TRUE(alloc.Has("(in->flags & TegraGM20BBoContiguous) || system ? kClasses : "
 			      "classUp(in->bytes);"));
 	EXPECT_TRUE(alloc.Has("cleanZeros(va, backing);"));
-	EXPECT_TRUE(Block(client(), "Spare *spareMake(uint64_t bytes)")
-			    .Has("cleanZeros(bmd->getBytesNoCopy(), bytes);"));
+	EXPECT_TRUE(Block(client(), "Spare *spareMake(SparePool *p, uint64_t bytes)")
+			    .Has("cleanZeros(buffer.cpu, bytes);"));
 	const CodeText work =
 		Block(client(), "void spareWork(thread_call_param_t param, thread_call_param_t)");
 	EXPECT_TRUE(work.Has("switch_gpu_cached_zero(s->pas"));
-	EXPECT_FALSE(work.Has("cleanZeros(s->bmd"));
+	EXPECT_FALSE(work.Has("cleanZeros(s->buffer"));
 	const CodeText completed = Block(client(), "void spareZeroed(void *context, int result)");
-	EXPECT_TRUE(completed.Before("const bool keep = !result && !memoryPressure();",
-				     "p->ready[c] = s;"));
+	EXPECT_TRUE(
+		completed.Before("const bool keep = !result && spareRoom();", "p->ready[c] = s;"));
 	const CodeText zeros = Block(client(), "void cleanZeros(void *va, uint64_t bytes)");
 	EXPECT_TRUE(zeros.Has("switch_dcache_clean_invalidate(va, bytes);"));
 	EXPECT_FALSE(zeros.Has("bzero"));
@@ -138,10 +145,10 @@ TEST(GM20BPoolPolicySource, SystemBosNeverUseSpares)
 	EXPECT_TRUE(orphans.Before("if (orphan->view->getRetainCount() > 1) {",
 				   "orphan->view->release();"));
 	EXPECT_TRUE(orphans.Has("orphan->zero &&"));
-	EXPECT_TRUE(Block(client(), "bool spareKeep(IOBufferMemoryDescriptor *bmd, "
+	EXPECT_TRUE(Block(client(), "bool spareKeep(const SwitchGpuCachedBuffer &buffer, "
 				    "uint64_t *pas, uint64_t bytes,")
-			    .Has("bmd->getRetainCount() == 1"));
-	const CodeText free = Block(client(), "IOReturn AGXDeviceUserClient::boFree(");
+			    .Has("switch_gpu_cached_buffer_alone(buffer)"));
+	const CodeText free = Block(client(), "IOReturn AGXDeviceUserClient::freeBo(Bo **p)");
 	EXPECT_TRUE(free.Before("unbindOverlaps(binds_[i].va, binds_[i].range, bo);",
 				"queueZombie(bo);"));
 }
@@ -184,8 +191,10 @@ TEST(GM20BPoolPolicySource, CompressibleBosArePoolChunksNoTaskMaps)
 	const CodeText alloc = Block(client(), "IOReturn AGXDeviceUserClient::boAlloc(");
 	const CodeText chunks = alloc.Between("if (!ret && compressible) {",
 					      "if (!ret && (in->flags & TegraGM20BBoCoherent)) {");
-	EXPECT_TRUE(
-		chunks.Has("refused = compressibleRefusal(in->bytes, pool_bytes_, critical_);"));
+	EXPECT_TRUE(chunks.Has("ret = charge.refused ? kIOReturnNoMemory : takeChunks("));
+	EXPECT_TRUE(Block(client(), "AGXDeviceUserClient::BoCharge AGXDeviceUserClient::chargeBo(")
+			    .Has("c.refused = compressibleRefusal(in->bytes, pool_bytes_, "
+				 "critical_);"));
 	EXPECT_TRUE(Block(client(), "const char *compressibleRefusal(uint64_t bytes, "
 				    "uint64_t held, bool compositor)")
 			    .Has("tgm_pool::compressibleRefusal(bytes, held, avail, limits, "
@@ -197,7 +206,7 @@ TEST(GM20BPoolPolicySource, CompressibleBosArePoolChunksNoTaskMaps)
 	const CodeText release = Block(client(), "void AGXDeviceUserClient::releaseBo(Bo *bo)");
 	EXPECT_TRUE(release.Before("tgm_mem_del(&bo->mem);",
 				   "tgm_pool_free_chunks(bo->pas, bo->npages);"));
-	EXPECT_TRUE(Block(client(), "IOReturn AGXDeviceUserClient::clientMemoryForType(")
+	EXPECT_TRUE(Block(client(), "IOReturn AGXDeviceUserClient::memoryForType(")
 			    .Has("bo && bo->view"));
 	EXPECT_TRUE(Block(SourceText("../shim/linux.c"),
 			  "int nvxnu_pool_alloc_chunks(unsigned long count, unsigned "
@@ -283,10 +292,8 @@ TEST(GM20BPoolScrubSource, ScrubberFreesOnlyFromItsFence)
 	EXPECT_TRUE(submit.Has("nvxnu_work_schedule_after(tgm_scrub.deadline, SCRUB_NS)"));
 	EXPECT_FALSE(submit.Has("nvxnu_idle"));  // no CPU wait for the copy engine
 	EXPECT_TRUE(Block(gpu(), "static void scrub_deadline(void *arg)").Has("nvxnu_panic("));
-	EXPECT_TRUE(
-		Block(gpu(),
-		      "static int chan_nonstall(struct nvif_event *event, void *repv, u32 repc)")
-			.Has("chan->kernel == CHAN_SCRUB"));
+	EXPECT_TRUE(Block(gpu(), "static int chan_completion(struct tgm_chan *chan)")
+			    .Has("chan->kernel == CHAN_SCRUB"));
 }
 
 // T-v5a: the scrubber stuck on PBDMA0 with every engine idle went to a last resort that reset only busy or switching
@@ -335,7 +342,7 @@ TEST(GM20BPushScanSource, KernelUsesTheHeader)
 	EXPECT_TRUE(clientCode().Has("#include \"TegraGM20BPushScan.h\""));
 	EXPECT_FALSE(clientCode().Has("void pushMethod("));
 	EXPECT_FALSE(clientCode().Has("void pushParse("));
-	const CodeText scan = Block(client(), "void AGXDeviceUserClient::scanPushes(");
+	const CodeText scan = Block(client(), "void scanRead(");
 	EXPECT_TRUE(scan.Has("scanPush(c, p, whole, nullptr, 0)"));
 	EXPECT_TRUE(scan.Has("prof->cls[i] = cls;"));
 	// A stamp only after a push the profile's rule left a class (switch_gpu_prof_stamped), only on a profiled submission.
@@ -367,18 +374,37 @@ TEST(GM20BPushScanSource, EverySubmissionPathScansItsPushes)
 	EXPECT_TRUE(
 		job.Before("const tgm_prof *profile = scanSubmission(pushes, count, prof, true);",
 			   "switch_gpu_chan_exec_events("));
-	EXPECT_TRUE(job.Has("&seqno, profile, jobVisibility, releases, keptCount);"));
+	EXPECT_TRUE(job.Has("&seqno, profile, jobVisibility, releases, keptCount, &transaction);"));
 	const CodeText exec = Block(
 		client(),
 		"IOReturn AGXDeviceUserClient::exec(uint32_t channel, TegraGM20BAbiPush *input,");
 	EXPECT_TRUE(
 		exec.Before("const tgm_prof *profile = scanSubmission(pushes, count, prof, false);",
 			    "switch_gpu_chan_exec_events("));
-	EXPECT_TRUE(exec.Has("&seqno, profile, jobVisibility, nullptr, 0);"));
+	EXPECT_TRUE(exec.Has("&seqno, profile, jobVisibility, nullptr, 0, &transaction);"));
 	EXPECT_EQ(clientCode().Count("scanPushes(pushes, count,"), 1u);
 	EXPECT_TRUE(Block(client(), "const tgm_prof *AGXDeviceUserClient::scanSubmission(")
 			    .Has("__atomic_fetch_add(&pushSubmits_, 1u, __ATOMIC_RELAXED) % "
 				 "kScanEvery"));
+}
+
+// The render server waits for its submissions' thread (waitUntilScheduled), so only a profiled submission, whose kick
+// stamps what the read classed, is read on it; the others are read on a thread call, and only where their words lie in
+// the pool, whose kernel mapping outlives every BO (boot 21: 36-57 KiB of write-combined reads every 4th compositor job).
+TEST(GM20BPushScanSource, OnlyAProfiledSubmissionIsReadOnItsThread)
+{
+	const CodeText submission =
+		Block(client(), "const tgm_prof *AGXDeviceUserClient::scanSubmission(");
+	EXPECT_TRUE(submission.Before("deferScan(pushes, count, rawMacros);",
+				      "scanPushes(pushes, count, &prof, rawMacros);"));
+	const CodeText defer = Block(client(), "void AGXDeviceUserClient::deferScan(");
+	EXPECT_TRUE(defer.Has("hit->bo->pool_va"));
+	EXPECT_TRUE(defer.Has("thread_call_enter(d->call);"));
+	EXPECT_FALSE(defer.Has("scanRead("));
+	EXPECT_TRUE(
+		Block(client(), "void deferredWork(").Has("scanRead(r->push, r->count, nullptr,"));
+	EXPECT_TRUE(Block(client(), "IOReturn AGXDeviceUserClient::boImport(")
+			    .Has("if (critical) switch_gpu_compositor_import(cost.total_ns);"));
 }
 
 // A copying present flushes the L2 once, before the copy reads the frame; its copy writes around the L2, so its fence
@@ -519,8 +545,7 @@ TEST(GM20BSleepSource, GpuTouchingPathsGoThroughTheGate)
 		EXPECT_TRUE(body.Before("if (!gate_try())", "gate_leave();"));
 	}
 	// the drain's and the wake's fence waits are woken by the scrubber's fences too
-	EXPECT_TRUE(Block(gpu(), "static int chan_nonstall(struct nvif_event *event, "
-				 "void *repv, u32 repc)")
+	EXPECT_TRUE(Block(gpu(), "static int chan_completion(struct tgm_chan *chan)")
 			    .Has("if (tgm_gate_is_shut(&tgm_sc7_gate)) nvxnu_wake();"));
 	// a pass for an interrupt taken before the GPU's power went reads nothing
 	EXPECT_TRUE(Block(SourceText("../shim/xnu_glue.cpp"),
@@ -533,25 +558,25 @@ TEST(GM20BSleepSource, GpuTouchingPathsGoThroughTheGate)
 // left to the kernel's waits.
 TEST(GM20BFenceWakeSource, WaitersWakeByChannel)
 {
-	const CodeText nonstall = Block(
-		gpu(), "static int chan_nonstall(struct nvif_event *event, void *repv, u32 repc)");
-	EXPECT_TRUE(
-		nonstall.Has("} else { chan_wake_waiters(chan); present_watch_fenced(chan, 0); }"));
+	const CodeText nonstall = Block(gpu(), "static int chan_completion(struct tgm_chan *chan)");
+	EXPECT_TRUE(nonstall.Before("WRITE_ONCE(chan->progress_ns, now); chan_wake_waiters(chan);",
+				    "if (chan->kernel == CHAN_SCRUB) {"));
+	EXPECT_TRUE(nonstall.Has("} else { present_watch_fenced(chan, 0); }"));
 	EXPECT_EQ(nonstall.Count("nvxnu_wake();"),
 		  1u);  // the scrubber's, while the sleep gate is shut
 	const CodeText wake = Block(gpu(), "static void chan_wake_waiters(struct tgm_chan *chan)");
 	EXPECT_TRUE(wake.Has("if (done == chan->woken_done) return;"));
 	EXPECT_TRUE(wake.Has("if (switch_gpu_waiter_reached(&chan->wanted, done)) "
-			     "chan_wake_all_waiters(chan);"));
+			     "chan_wake_all_waiters(chan, 1);"));
 	EXPECT_TRUE(Block(gpu(), "int tgm_chan_killed(struct nvif_event *event, void "
 				 "*repv, u32 repc)")
-			    .Has("chan_wake_all_waiters(chan);"));
-	EXPECT_TRUE(
-		Block(gpu(), "void tgm_chan_del(struct tgm_chan **pchan)")
-			.Before("*pchan = NULL;", "nvxnu_word_wake(&tgm_waiter_words[waiter]);"));
+			    .Has("chan_wake_all_waiters(chan, 0);"));
+	EXPECT_TRUE(Block(gpu(), "void tgm_chan_del(struct tgm_chan **pchan)")
+			    .Before("*pchan = NULL;",
+				    "nvxnu_wword_wake(&tgm_waiter_words[waiter], 0);"));
 	EXPECT_TRUE(Block(SourceText("../shim/xnu_glue.cpp"),
 			  "void gpuInterrupt(OSObject *, IOInterruptEventSource *source, int)")
-			    .Has("nvxnu_wake();"));
+			    .Has("wakeAfterPass();"));
 	const CodeText wait = Block(client(), "IOReturn AGXDeviceUserClient::waitFence(");
 	EXPECT_TRUE(
 		wait.Before("seq = tgm_waiter_seq(waiter);", "tgm_chan_want(chan, in->seqno);"));
@@ -585,7 +610,6 @@ TEST(GM20BKillSource, AKilledChannelLeavesItsConnectionWorking)
 		killed.Before("switch_gpu_timeline_failed(", "__atomic_store_n(chan->fence_cpu"));
 	const CodeText freed = Block(gpu(), "static void chan_free(struct tgm_chan *chan)");
 	EXPECT_TRUE(freed.Before("nvif_event_dtor(&chan->kill)", "switch_gpu_timeline_close("));
-	EXPECT_TRUE(freed.Before("nvif_event_dtor(&chan->nonstall)", "switch_gpu_timeline_close("));
 	EXPECT_TRUE(Block(client(), "bool AGXDeviceUserClient::bindingIdle(")
 			    .Has("!tgm_chan_error(chans_[slot])"));
 }
@@ -664,10 +688,11 @@ TEST(GM20BRoomSource, NativePublicationNeverSleepsWithBackingLocksHeld)
 {
 	const CodeText exec = Block(client(), "IOReturn AGXDeviceUserClient::exec(");
 	EXPECT_TRUE(exec.Before("switch_gpu_chan_submit_enter(chan);",
-				"switch_gpu_backing_begin_checked("));
+				"switch_gpu_backing_begin_ordered("));
 	EXPECT_TRUE(exec.Before("switch_gpu_backing_abort(&transaction);",
 				"switch_gpu_chan_wait_submission_room("));
-	EXPECT_TRUE(exec.Before("switch_gpu_backing_commit(&transaction);",
+	EXPECT_FALSE(exec.Has("switch_gpu_backing_commit("));
+	EXPECT_TRUE(exec.Before("if (error) switch_gpu_backing_abort(&transaction);",
 				"switch_gpu_chan_submit_leave();"));
 	const CodeText emit = Block(gpu(), "int chan_exec_body(");
 	EXPECT_TRUE(emit.Has("if (!may_wait && !chan_room(chan, entries, words)) return -EAGAIN;"));
@@ -682,10 +707,11 @@ TEST(GM20BRoomSource, SubmitJobNeverSleepsWithBackingLocksHeld)
 	const CodeText job = Block(client(), "IOReturn AGXDeviceUserClient::runJobUses(");
 	EXPECT_FALSE(job.Has("IOLockLock(lock_)"));
 	EXPECT_TRUE(job.Before("switch_gpu_chan_submit_enter(chan);",
-			       "switch_gpu_backing_begin_checked("));
+			       "switch_gpu_backing_begin_held("));
 	EXPECT_TRUE(job.Before("switch_gpu_backing_abort(&transaction);",
 			       "switch_gpu_chan_wait_submission_room("));
-	EXPECT_TRUE(job.Before("switch_gpu_backing_commit(&transaction);",
+	EXPECT_FALSE(job.Has("switch_gpu_backing_commit("));
+	EXPECT_TRUE(job.Before("if (error) switch_gpu_backing_abort(&transaction);",
 			       "switch_gpu_chan_submit_leave();"));
 	EXPECT_TRUE(job.Before("switch_gpu_set_note_job(set, slot, &completion);",
 			       "switch_gpu_chan_submit_leave();"));
@@ -778,7 +804,7 @@ TEST(GM20BL2Source, InvalidateOnTheGpu)
 				"NVB06F_MEM_OP_D_OPERATION_L2_SYSMEM_INVALIDATE);"));
 	// a pending bind's acquire comes before the TLB invalidate that makes its new PTEs seen
 	EXPECT_TRUE(exec.Before(
-		"bind = !ret && !chan->kernel && bind_pending(chan->vm, &bind_target, &bind_va);",
+		"bind = !chan->kernel && bind_pending(chan->vm, &bind_target, &bind_va);",
 		"tlb = tgm_tlb_take(&chan->tlb, &chan->vm->tlb) || bind;"));
 	EXPECT_TRUE(exec.Before(
 		"NVB06F_MEM_OP_D_OPERATION_L2_SYSMEM_INVALIDATE);",
@@ -797,8 +823,7 @@ TEST(GM20BCoherencySource, ExecNamesTheWriterOnceTheSubmissionHasItsSeqno)
 	EXPECT_TRUE(exec.Before(
 		"error = switch_gpu_chan_exec_events(",
 		"surfaces_.after(listed, importsWritten_, tgm_chan_uid(chan), seqno);"));
-	EXPECT_TRUE(exec.Before("error = switch_gpu_chan_exec_events(",
-				"switch_gpu_backing_commit(&transaction);"));
+	EXPECT_TRUE(exec.Has("jobVisibility, nullptr, 0, &transaction);"));
 	const CodeText after =
 		Block(SourceText("../TegraGM20BExecSurfaces.cpp"), "void ExecSurfaces::after(");
 	EXPECT_TRUE(after.Has("tgm_coherency_wrote(refs_[i].coh, always, uid, seqno);"));
@@ -964,6 +989,27 @@ TEST(GM20BRailSource, GpuLockWakesARailGatedGpu)
 				"nvxnu_wakeup(&tgm_sc7_gate.shut);"));
 }
 
+// PMC_ENABLE's lock (TegraGM20BPmcEnable.h) is in nvkm's mc functions from M1, before nvkm's first init, and the
+// kernel's own code never writes the register past it.
+TEST(GM20BPmcSource, EveryPmcEnableChangeTakesItsLockFromM1)
+{
+	const CodeText m1 = Block(gpu(), "static int m1(char *line, unsigned int len)");
+	EXPECT_TRUE(m1.Before("tgm_gpu.device = device;", "tgm_pmc_own(device);"));
+	EXPECT_TRUE(m1.Before("tgm_pmc_own(device);", "nvkm_subdev_init(device->privring)"));
+	const CodeText own =
+		Block(SourceText("../gpu_pmc.c"), "void tgm_pmc_own(struct nvkm_device *device)");
+	EXPECT_TRUE(own.Has("pmc_device.enable = pmc_enable;"));
+	EXPECT_TRUE(own.Has("pmc_device.disable = pmc_disable;"));
+	EXPECT_TRUE(own.Has("if (mc->func->init == nv50_mc_init)"));
+	EXPECT_FALSE(gpuCode().Has(", 0x000200,"));
+	const CodeText ring =
+		Block(SourceText("../nouveau/nvkm/subdev/privring/gk20a.c"),
+		      "gk20a_privring_init_privring_ring(struct nvkm_subdev *privring)");
+	EXPECT_TRUE(ring.Before("tgm_pmc_change(device, 0x20, 0);",
+				"tgm_pmc_change(device, 0x20, 0x20);"));
+	EXPECT_FALSE(ring.Has("0x000200"));
+}
+
 TEST(GM20BSleepSource, SleepAndWakeOrder)
 {
 	const CodeText sleep = Block(gpu(), "void tgm_sleep(void)").After("case TGM_SLEEP_FULL:");
@@ -977,7 +1023,7 @@ TEST(GM20BSleepSource, SleepAndWakeOrder)
 	EXPECT_TRUE(nvkm.Before("nvkm_wr32(device, 0x07000c, 0x00000001);", "nvkm_ltc_flush("));
 	EXPECT_TRUE(nvkm.Before("nvkm_ltc_flush(", "nvkm_device_fini(device, NVKM_SUSPEND)"));
 	EXPECT_TRUE(Block(gpu(), "static void sleep_power_down(void)")
-			    .Before("nvxnu_irq_suspend();", "regulator_disable("));
+			    .Before("nvxnu_irq_suspend();", "tegra_gm20b_rail_gate("));
 	// the boot's order: the GPCPLL relock (tgm_clk_raise) before ACR, the PMU and GR (tgm_m2_device_init); interrupts on before
 	// nvkm's first init that may wait for one
 	const CodeText wake = Block(gpu(), "void tgm_wake(void)").After("case TGM_SLEEP_FULL:");
@@ -988,7 +1034,7 @@ TEST(GM20BSleepSource, SleepAndWakeOrder)
 	EXPECT_TRUE(wake.Before("wake_nvkm();", "wake_fence();"));
 	EXPECT_TRUE(wake.Before("wake_fence();", "wake_open();"));
 	EXPECT_TRUE(Block(gpu(), "static void wake_power_up(void)")
-			    .Before("power_up(", "nvxnu_irq_resume();"));
+			    .Before("tegra_gm20b_rail_ungate(", "nvxnu_irq_resume();"));
 	EXPECT_TRUE(
 		Block(gpu(), "static void wake_clock(void)").Has("clk_raise(line, sizeof(line))"));
 	EXPECT_TRUE(
@@ -1088,9 +1134,11 @@ TEST(GM20BAcquireSource, EveryChannelIsArmedBeforeItsFirstKickAndReArmedWhenIdle
 	const CodeText create = Block(gpu(), "static int chan_new(");
 	EXPECT_TRUE(create.Before("chan->chid = args.chan.chid;", "tgm_acquire_arm(chan->chid);"));
 	EXPECT_TRUE(create.Before("tgm_acquire_arm(chan->chid);", "PUSH_KICK(push);"));
-	const CodeText due = Block(gpu(), "void tgm_chan_ramfc_due(struct tgm_chan *chan)");
-	EXPECT_TRUE(due.Before("tgm_sched_loaded(tgm_gpu.device, chan->chid)",
-			       "tgm_acquire_arm(chan->chid);"));
+	EXPECT_TRUE(Block(gpu(), "static void ramfc_due_write(void *arg)")
+			    .Has("tgm_acquire_arm(due->chid);"));
+	EXPECT_TRUE(Block(gpu(), "void tgm_chan_ramfc_due(struct tgm_chan *chan)")
+			    .Has("tgm_sched_ramfc(tgm_gpu.device, chan->chid, ramfc_due_write, "
+				 "&due, 0)"));
 	EXPECT_EQ(gpuCode().Count("tgm_chan_ramfc_due(chan);"), 2u);
 }
 
@@ -1138,16 +1186,16 @@ TEST(GM20BShimSource, InterruptPassReportsUsePlainFormats)
 }
 
 // A channel made in a slot continues its predecessor's fence sequence, so every cursor the interrupt pass compares with
-// the completed seqno starts at that fence. From 0, the idle clock would count the predecessor's whole sequence retired,
-// its in-flight count (kicked - retired) would underflow, and the GPU would never drop its clock or rail-gate.
+// the completed seqno starts at that fence, and the idle clock's tgm_busy words for the slot start there too.
 TEST(GM20BChannelSource, SeqnoCursorsStartAtTheSlotsFence)
 {
 	const CodeText create = Block(gpu(), "static int chan_new(");
 	EXPECT_TRUE(create.Has("chan->submitted = READ_ONCE(*fence_cpu);"));
-	for (const char *cursor :
-	     {"stat_done", "woken_done", "gov_done", "progress_done", "seen_done"})
+	for (const char *cursor : {"stat_done", "woken_done", "progress_done", "seen_done"})
 		EXPECT_TRUE(create.Has(std::string("chan->") + cursor + " = chan->submitted;"))
 			<< cursor;
+	EXPECT_TRUE(Block(gpu(), "static int chan_new(")
+			    .Has("switch_gpu_busy_open(&tgm_busy, chan->chid, chan->submitted);"));
 }
 
 // nvkm_chan_error preempts from the interrupt pass with interrupts off under the channel's spinlock: the wrapped preempt
@@ -1191,7 +1239,7 @@ TEST(GM20BRailSource, RailDownStopsTheGpuCallouts)
 				    "tgm_deadline_resume();"));
 	const CodeText power = Block(gpu(), "static void sleep_power_down(void)");
 	EXPECT_TRUE(power.Before("nvxnu_irq_suspend();", "tgm_recover_suspend();"));
-	EXPECT_TRUE(power.Before("tgm_recover_suspend();", "regulator_disable("));
+	EXPECT_TRUE(power.Before("tgm_recover_suspend();", "tegra_gm20b_rail_gate("));
 }
 
 // IOGPUDeviceSetDisplayParams is scalar method 0x21 in iOS 17's IOGPU.framework and IOConnectTrap2 index 8 in iOS 27's;
@@ -1273,7 +1321,7 @@ TEST(GM20BRelayoutSource, KernelCopiesOrderOnTheGpu)
 			.Has("chan = late_writer(uid, seqno, acquired, nacquired, &late); if "
 			     "(chan) verdict = tgm_hang_recover(chan, \"IOSurface lock\", late, "));
 	EXPECT_TRUE(CodeText(relayout).Has(
-		"{\"relayout\", TGM_FENCE_KERNEL_RELAYOUT, 1, kPushVa, 0, 1}"));
+		"{\"relayout\", TGM_FENCE_KERNEL_RELAYOUT, kSlots, kPushVa, 0, 1}"));
 	EXPECT_TRUE(Block(SourceText("../SwitchGpuKqueue.h"), "bool openSpace(")
 			    .Has("tgm_fence_kernel(shape.fenceSlot, &fenceCpu, &fencePage, "
 				 "&fenceOffset)"));
@@ -1352,7 +1400,7 @@ TEST(GM20BPresentSource, AWatchedPresentIsCompletedByItsProducersInterruptPass)
 		Block(SourceText("../shim/xnu_glue.cpp"),
 		      "void gpuInterrupt(OSObject *, IOInterruptEventSource *source, int)");
 	EXPECT_TRUE(pass.Before("nvxnu_poll_irqs();", "tgm_present_pass();"));
-	EXPECT_TRUE(pass.Before("tgm_present_pass();", "nvxnu_wake();"));
+	EXPECT_TRUE(pass.Before("tgm_present_pass();", "wakeAfterPass();"));
 	const CodeText deliver = Block(gpu(), "void tgm_present_pass(void)");
 	EXPECT_TRUE(deliver.Has("switch_gpu_present_watch_take_visible("));
 	// the pass's own thread: nothing may wait for a GPU interrupt
@@ -1428,12 +1476,12 @@ TEST(GM20BPresentSource, ACopyEngineResetRedoesThePresentOnTheGpu)
 	const CodeText fenced = Block(gpu(), "static inline void present_fenced(");
 	EXPECT_TRUE(fenced.Before(
 		"redo = pending; if (__atomic_compare_exchange_n(&tgm_present.redo, &redo, 0,",
-		"nvxnu_work_schedule(tgm_present.completion_work);"));
+		"tgm_present.fenced_due = 1;"));
 	EXPECT_TRUE(
 		fenced.Before("__atomic_load_n(&tgm_present.redoing, __ATOMIC_ACQUIRE)) return;",
 			      "redo = pending; if ("));
 	EXPECT_TRUE(fenced.Before("nvxnu_work_schedule(tgm_present.redo_work); return; }",
-				  "nvxnu_work_schedule(tgm_present.completion_work);"));
+				  "tgm_present.fenced_due = 1;"));
 	const CodeText redo = Block(gpu(), "void tgm_present_redo_work(");
 	EXPECT_TRUE(redo.Before("|| !gate_try()) return;", "tgm_present_push_copy(push);"));
 	EXPECT_TRUE(redo.Before("tgm_present_push_copy(push);", "chan_fence_volatile(chan);"));
@@ -1515,8 +1563,10 @@ TEST(GM20BRecoverSource, ASecondStuckLoadKillsTheClientOrGoesToTheKernelStallRul
 TEST(GM20BPresentSource, TypedProducerValidationAndReleaseNeverRunUnderTheIrqEventLock)
 {
 	const CodeText irq = Block(gpu(), "static inline void present_fenced(");
-	EXPECT_TRUE(irq.Has("nvxnu_work_schedule(tgm_present.completion_work)"));
+	EXPECT_TRUE(irq.Has("tgm_present.fenced_due = 1;"));
 	EXPECT_FALSE(irq.Has("switch_gpu_present_tokens_finish"));
+	EXPECT_TRUE(Block(gpu(), "void tgm_present_pass(void)")
+			    .Has("nvxnu_work_schedule(tgm_present.completion_work);"));
 	const CodeText complete = Block(gpu(), "static void present_typed_complete(");
 	EXPECT_TRUE(complete.Before("mutex_unlock(&tgm_present.lock);",
 				    "switch_gpu_present_tokens_finish_visible("));
@@ -1596,13 +1646,16 @@ TEST(GM20BBoIndexSource, EveryBoListChangeKeepsTheIndex)
 	const CodeText find =
 		Block(client(), "AGXDeviceUserClient::Bo *AGXDeviceUserClient::findBo(");
 	EXPECT_TRUE(find.Has("return boIndex_.find(handle);"));
-	const std::string sources = client() + SourceText("../SwitchGpuNativeImport.h") +
+	const std::string sources = SourceText("../TegraGM20BUserClientBo.cpp") +
+				    SourceText("../TegraGM20BUserClientImport.cpp") +
+				    SourceText("../SwitchGpuNativeImport.h") +
 				    SourceText("../SwitchGpuClientRetirement.h");
 	EXPECT_EQ(CodeText(sources).Count("bos_ = bo;"),
 		  CodeText(sources).Count("boIndex_.insert(bo->handle, bo);"));
-	EXPECT_EQ(CodeText(sources).Count("boIndex_.reserve()"), 3u);
+	EXPECT_EQ(CodeText(sources).Count("boIndex_.reserve()"), 2u)
+		<< "publishBo (BoAlloc, BoImport) and nativeSurfaceView";
 	EXPECT_TRUE(Block(SourceText("../SwitchGpuClientRetirement.h"),
-			  "IOReturn AGXDeviceUserClient::boFree(")
+			  "IOReturn AGXDeviceUserClient::freeBo(Bo **p)")
 			    .Before("*p = bo->next;", "boIndex_.erase(bo->handle);"));
 }
 
@@ -1632,7 +1685,8 @@ TEST(GM20BVisibilitySource, InternalFenceKeepsExecutionOrderAndExternalFencePubl
 	EXPECT_FALSE(internal.Has("defer_kick"));
 	EXPECT_TRUE(internal.Before("RELEASE_SIZE, 4BYTE));", "PUSH_KICK(push);"));
 	EXPECT_TRUE(exec.Before("chan->chan.defer_kick = true;", "last = switch_gpu_job_emit("));
-	EXPECT_TRUE(fence.Before("chan->chan.defer_kick = false;", "PUSH_KICK(push);"));
+	EXPECT_TRUE(fence.Before("chan->chan.defer_kick = true;", "PUSH_KICK(push);"));
+	EXPECT_TRUE(fence.Before("PUSH_KICK(push);", "chan_doorbell(chan);"));
 	EXPECT_TRUE(fence.Before(
 		"job = switch_gpu_jobs_kick(&chan->jobs, first, next, chan->submit_ns, !announce);",
 		"PUSH_KICK(push);"));
@@ -1722,8 +1776,11 @@ TEST(GM20BLayoutSource, LayoutDecisionHoldsNeitherTheConnectionLockNorItsGate)
 	EXPECT_TRUE(info.Before("IOLockUnlock(lock_);", "tgm_coherency_layout(coh,"));
 	EXPECT_TRUE(info.Before("tgm_coh_put_asker(coh);", "IOLockLock(lock_);"));
 	const CodeText run = Block(client(), "IOReturn AGXDeviceUserClient::run(");
-	EXPECT_TRUE(run.Has("method != TegraGM20BMethodSurfaceLayout &&"));
-	EXPECT_TRUE(run.Has("method != TegraGM20BMethodSurfaceLayoutInfo;"));
+	EXPECT_TRUE(run.Has("const bool mutation = switch_gpu_method_closes_gate(method);"));
+	const CodeText gated = Block(SourceText("../SwitchGpuGatedMethods.h"),
+				     "static inline bool switch_gpu_method_closes_gate(");
+	EXPECT_TRUE(gated.Before("case TegraGM20BMethodSurfaceLayout:", "return false;"));
+	EXPECT_TRUE(gated.Before("case TegraGM20BMethodSurfaceLayoutInfo:", "return false;"));
 }
 
 // The asker's hold (gm20b_layout_ask_test) is the only reference the decision does not count as another user: it is

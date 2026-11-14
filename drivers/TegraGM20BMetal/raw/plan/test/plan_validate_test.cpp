@@ -92,12 +92,20 @@ TEST(Validate, ClientErrors)
 TEST(Validate, QueryGated)
 {
     Simple s;
-    s.desc.layers = 2;
+    s.desc.rateMap = true;
     const Recording r = s.one();
     EXPECT_EQ(check(r).verdict, Verdict::QueryGated);
     Answers yes;
-    yes.layeredRendering = true;
+    yes.rateMaps = true;
     EXPECT_TRUE(check(r, yes).plannable());
+}
+
+// Both kinds draw layered passes (raw_device_answers.h): a pass of several layers is the planner's to plan
+TEST(Validate, ALayeredPassIsPlannable)
+{
+    Simple s;
+    s.desc.layers = 4;
+    EXPECT_TRUE(check(s.one()).plannable());
 }
 
 TEST(Validate, RemainingGaps)

@@ -173,3 +173,36 @@ TEST(VsyncPhase, SlowCompositor)
     const Result on = run(slow, true, 60, 5);
     check(on.finalLead == 0 && on.misses == 0, "slow: the phase stays off");
 }
+
+// V_PULSE2 programmed, routed and never seen is one failure per probe; nothing is held: once the next lead programs it
+// again, the next probe runs at once. A V_PULSE2 seen keeps the phase running.
+TEST(VsyncPhaseProbe, ANeverSeenVpulse2FailsThatProbeAndTheNextProbeRunsAtOnce)
+{
+    VsyncPhaseProbe probe;
+    for (unsigned round = 0; round < 3; ++round) {
+        probe.programmed();
+        for (unsigned i = 1; i < VsyncPhaseProbe::kFlips; ++i)
+            EXPECT_EQ(probe.flip(true, true, false), VsyncPhaseProbe::kRun);
+        EXPECT_EQ(probe.flip(true, true, false), VsyncPhaseProbe::kFailed);
+        EXPECT_EQ(probe.flip(false, false, false), VsyncPhaseProbe::kRun);
+    }
+    VsyncPhaseProbe seen;
+    for (unsigned i = 0; i < 100; ++i)
+        EXPECT_EQ(seen.flip(true, true, true), VsyncPhaseProbe::kRun);
+}
+
+// V_PULSE2 masked (no vsync client routes it) cannot reach the CPU: a flip then is no probe sample and never a failed
+// probe, however many there are; it says the precondition is unmet, and a routed probe after it starts from zero.
+TEST(VsyncPhaseProbe, AnUnroutedVpulse2IsAPreconditionNotAFailedProbe)
+{
+    VsyncPhaseProbe probe;
+    probe.programmed();
+    for (unsigned i = 0; i < 3 * VsyncPhaseProbe::kFlips; ++i)
+        EXPECT_EQ(probe.flip(true, false, false), VsyncPhaseProbe::kUnrouted);
+    for (unsigned i = 1; i < VsyncPhaseProbe::kFlips; ++i)
+        EXPECT_EQ(probe.flip(true, true, false), VsyncPhaseProbe::kRun);
+    EXPECT_EQ(probe.flip(true, false, false), VsyncPhaseProbe::kUnrouted);
+    for (unsigned i = 1; i < VsyncPhaseProbe::kFlips; ++i)
+        EXPECT_EQ(probe.flip(true, true, false), VsyncPhaseProbe::kRun) << "counted again from zero";
+    EXPECT_EQ(probe.flip(true, true, false), VsyncPhaseProbe::kFailed);
+}

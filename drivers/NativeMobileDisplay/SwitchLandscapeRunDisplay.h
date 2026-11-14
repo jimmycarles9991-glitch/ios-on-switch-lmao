@@ -10,7 +10,8 @@
 struct LandscapeRunState {
     SwitchDisplayLandscapeReply reply;
     uint32_t want, savedCrc;
-    bool holding, overlayLatched, charging;
+    bool holding, overlayLatched, charging, failNext;
+    uint32_t portraitFrames;  // read in any context (landscapeReady)
     SwitchVICTurnCounters vicAt;
     uint64_t displayTicks;
 };
@@ -27,12 +28,22 @@ IOReturn landscapeRunCall(const SwitchDisplayLandscapeRequest &request, SwitchDi
 {
     if (!getWorkLoop())
         return kIOReturnNotReady;
-    if (request.op != SWITCH_DISPLAY_LANDSCAPE_SAMPLE && request.op != SWITCH_DISPLAY_LANDSCAPE_QUERY)
+    if (request.op != SWITCH_DISPLAY_LANDSCAPE_SAMPLE && request.op != SWITCH_DISPLAY_LANDSCAPE_QUERY &&
+        request.op != SWITCH_DISPLAY_LANDSCAPE_FAIL && request.op != SWITCH_DISPLAY_LANDSCAPE_PORTRAIT)
         return kIOReturnBadArgument;
     windowProbeOnLoop([&] {
+        if (request.op == SWITCH_DISPLAY_LANDSCAPE_FAIL)
+            landscapeRun.failNext = request.value != 0;
+        if (request.op == SWITCH_DISPLAY_LANDSCAPE_PORTRAIT) {
+            const uint32_t frames = request.value < SWITCH_DISPLAY_LANDSCAPE_PORTRAIT_FRAMES
+                                        ? request.value
+                                        : SWITCH_DISPLAY_LANDSCAPE_PORTRAIT_FRAMES;
+            __atomic_store_n(&landscapeRun.portraitFrames, frames, __ATOMIC_RELAXED);
+        }
         const int error = request.op == SWITCH_DISPLAY_LANDSCAPE_SAMPLE ? landscapeRunStart(request.value) : 0;
         reply = landscapeRun.reply;
         reply.error = error ? error : reply.error;
+        reply.failures = landscapeState.failures;
     });
     return kIOReturnSuccess;
 }
@@ -81,6 +92,7 @@ void landscapeRunFinish(int error)
     absolutetime_to_nanoseconds(s.displayTicks, &s.reply.displayNs);
     absolutetime_to_nanoseconds(vic.ticks - s.vicAt.ticks, &s.reply.vicNs);
     s.reply.error = error;
+    s.reply.failures = landscapeState.failures;
     s.reply.state = SWITCH_DISPLAY_LANDSCAPE_DONE;
     if (s.holding) {
         s.holding = false;
@@ -88,10 +100,17 @@ void landscapeRunFinish(int error)
     }
 }
 
+static bool landscapeRunHoldsPortrait()
+{
+    return __atomic_load_n(&landscapeRun.portraitFrames, __ATOMIC_RELAXED) != 0;
+}
+
 // Every DC A frame end, last.
 void landscapeRunFrameEnd()
 {
     LandscapeRunState &s = landscapeRun;
+    if (const uint32_t portrait = __atomic_load_n(&s.portraitFrames, __ATOMIC_RELAXED))
+        __atomic_store_n(&s.portraitFrames, portrait - 1, __ATOMIC_RELAXED);
     if (!landscapeRunSampling())
         return;
     SwitchDisplayLandscapeReply &r = s.reply;
@@ -138,6 +157,15 @@ void landscapeRunLatched(bool overlay, bool modeChanged)
     landscapeRun.reply.switches += modeChanged ? 1 : 0;
 }
 
+// landscapeEnter's forced-failure arm: true once after a FAIL request.
+bool landscapeRunFailsEnter()
+{
+    if (!landscapeRun.failNext)
+        return false;
+    landscapeRun.failNext = false;
+    return true;
+}
+
 // The display's CPU over a sample: a kick made inside a frame end is that frame end's.
 static uint64_t landscapeRunClock()
 {
@@ -156,6 +184,16 @@ void landscapeRunCharge(uint64_t since)
         landscapeRun.displayTicks += mach_absolute_time() - since;
 }
 #else
+static bool landscapeRunFailsEnter()
+{
+    return false;
+}
+
+static bool landscapeRunHoldsPortrait()
+{
+    return false;
+}
+
 void landscapeRunFrameEnd()
 {}
 

@@ -393,8 +393,6 @@ void native_legacy_swap_validation_observed(bool accepted, unsigned reason, cons
         IOLog("SwitchDisplay: first frame accepted\n");
     if (!accepted && displayLogRejected++ < 4)
         IOLog("SwitchDisplay: frame rejected (reason %u)\n", reason);
-    if (accepted)
-        native_legacy_swap_stage(0);
     if (accepted) {
         native_legacy_swap_accepted_count = native_legacy_swap_accepted_count + 1;
     } else {

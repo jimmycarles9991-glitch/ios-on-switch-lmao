@@ -1,6 +1,7 @@
 # What Mesa's own CL and GLSL compilers made for NVK, checked in: this build does not build mesa_clc, vtn_bindgen2 or
-# glslangValidator (LLVM, SPIRV-LLVM-Translator, glslang). inputs.txt names every file they read, by sha256;
-# :inputs_test fails when one changes, and then these must be regenerated with the real tools.
+# glslangValidator (LLVM, SPIRV-LLVM-Translator, glslang). inputs.txt (astc_spv.h's) and inputs_nvk.txt (nvkcl's) name
+# every file they read, by sha256; :inputs_test and :inputs_nvk_test fail when one changes, and then these must be
+# regenerated with the real tools.
 #
 #   nvkcl.spv            mesa_clc of src/nouveau/vulkan/cl/{nvk_query,nvk_copy_indirect}.cl (vtn_bindgen2's input)
 #   nvkcl.cpp, nvkcl.h   vtn_bindgen2 of nvkcl.spv (compiled into libnvk)
@@ -32,7 +33,7 @@ mesa_files(
     platform = "macos",
 )
 
-# Everything inputs.txt names (in the runfiles both the sources and the generated header sit under third_party/mesa).
+# Everything inputs.txt names: astc_spv.h's inputs
 py_test(
     name = "inputs_test",
     size = "small",
@@ -44,8 +45,25 @@ py_test(
     ],
     data = [
         "inputs.txt",
-        ":generated_inputs",
         "//third_party/mesa/src/compiler:glsl/astc_decoder.glsl",
+    ],
+    main = "check_inputs.py",
+)
+
+# Everything inputs_nvk.txt names: nvkcl.*'s inputs (in the runfiles both the sources and the generated header sit under
+# third_party/mesa). m2v: NVK's CL programs, deleted with NVK.
+py_test(
+    name = "inputs_nvk_test",
+    size = "small",
+    srcs = ["check_inputs.py"],
+    args = [
+        "$(rootpath inputs_nvk.txt)",
+        "third_party/mesa",
+        "third_party/mesa",
+    ],
+    data = [
+        "inputs_nvk.txt",
+        ":generated_inputs",
         "//third_party/mesa/src/compiler:libcl/assert.h",
         "//third_party/mesa/src/compiler:libcl/libcl.h",
         "//third_party/mesa/src/compiler:libcl/libcl_vk.h",
@@ -68,4 +86,5 @@ py_test(
         "//third_party/mesa/src/util:macros.h",
     ],
     main = "check_inputs.py",
+    tags = ["m2v"],
 )

@@ -106,6 +106,7 @@ ios_binary(
     ) + [
         "//drivers/TegraNVDEC:headers",
         "//kits/SwitchRefusal:SwitchRefusal.h",
+        "//kits/SwitchServiceWait:SwitchServiceWait.h",
     ],
     copts = [
         "-O2",

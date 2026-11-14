@@ -290,6 +290,17 @@ extern "C" int tegra_gm20b_scanout_copy(const struct TegraScanoutCopy *copy)
 		     : 0;
 }
 
+#if TGM_STATS
+extern "C" void tegra_gm20b_scanout_bypassed(void)
+{
+	if (!presentLock())
+		return;
+	IOLockLock(gPresentLock);
+	tgm_readback_bypassed();
+	IOLockUnlock(gPresentLock);
+}
+#endif
+
 extern "C" int tegra_gm20b_scanout_fence(void *display, uint64_t pa)
 {
 	if (!display || !pa || tgm_stage() < 3)

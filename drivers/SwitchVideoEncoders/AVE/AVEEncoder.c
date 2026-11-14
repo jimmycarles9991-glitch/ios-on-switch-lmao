@@ -30,8 +30,8 @@
 // and the thread sleeps on the syncpoint interrupt; then NVENC's Annex B slice becomes a length-prefixed sample with
 // the format description of this plug-in's own SPS/PPS, and goes out at once unless the session reorders
 // (AVEReorder.h). A P picture predicts from the previous picture's reconstruction (two buffers in turn); a key frame is
-// an IDR. A P picture NVENC refuses (its status says why, one error line) leaves the session intra only, so the stream
-// goes on.
+// an IDR. A P picture NVENC refuses (its status says why, one error line) is coded again as an IDR and the next
+// picture is a P picture as usual.
 //
 // Tile sessions (HEIC grids through VTTileCompressionSession): AVETiles.c, on the same stream setup.
 //
@@ -45,6 +45,7 @@
 #include <pthread.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include "AVEEncoder.h"
 #include "../../../kits/SwitchRefusal/SwitchRefusal.h"
 #pragma clang diagnostic push
@@ -424,24 +425,20 @@ static OSStatus encodePicture(Encoder *e, VTVideoEncoderFrame frame, CVPixelBuff
     // NVENC 5.0's H.264 and H.265 apps put 2 in error_status of every status record they write (nvenc.bin 0x7d29 and
     // 0x1382b, before the record's DMA out); their errors are ucode_error_status.
     if (stat->ucode_error_status || !produced || produced > e->layout.bitstream_bytes) {
-        static int logged;
         const bool bPicture = picture.type == H264ENC_B;
-        if (!__atomic_exchange_n(&logged, 1, __ATOMIC_RELAXED))
-            os_log_error(gLog, "AVE: NVENC %{public}s picture failed: error_status %u ucode %#x, %u bits%{public}s",
-                         key        ? "IDR"
-                         : bPicture ? "B"
-                                    : "P",
-                         stat->error_status, stat->ucode_error_status, stat->total_bit_count,
-                         key        ? ""
-                         : bPicture ? "; this session drops it and codes no more B pictures"
-                                    : "; this session encodes intra only");
+        os_log_error(gLog, "AVE: NVENC %{public}s picture failed: error_status %u ucode %#x, %u bits%{public}s",
+                     key        ? "IDR"
+                     : bPicture ? "B"
+                                : "P",
+                     stat->error_status, stat->ucode_error_status, stat->total_bit_count,
+                     key        ? ""
+                     : bPicture ? "; coded again as an I picture"
+                                : "; coded again as an IDR");
         e->errors++;
         if (!bPicture)
             e->keyPending = true;
         if (key)
             return kVTVideoEncoderMalfunctionErr;
-        if (!bPicture)
-            e->info.p_frames = 0;
         if (plan) {
             plan->refused = true;
             return kVTVideoEncoderMalfunctionErr;
@@ -883,7 +880,18 @@ __attribute__((visibility("default"))) void H264H7EncoderRegister(void);
 void H264H7EncoderRegister(void)
 {
     gLog = os_log_create("com.brunostjohn.switch.ave", "encoder");
-    if (!nvenc_service_present())
+    // The registry is filled once per process: one filled before TegraNVENC publishes waits for it.
+#if !defined(SWITCH_DEBUG) || SWITCH_DEBUG
+    const uint64_t began = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
+#endif
+    const bool published = nvenc_service_wait();
+#if !defined(SWITCH_DEBUG) || SWITCH_DEBUG
+    const uint64_t waitedMs = (clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - began) / 1000000;
+    if (waitedMs)
+        os_log(gLog, "AVE: %{public}s waited %llu ms for TegraNVENC: %{public}s", getprogname(), waitedMs,
+               published ? "published" : "absent");
+#endif
+    if (!published)
         return;  // switch-no-nvdec, or NVENC did not prove itself at boot: nothing changes
     OSStatus status = registerEncoder(kCMVideoCodecType_H264, CFSTR(AVE_ENCODER_ID), CFSTR("Apple H.264 (HW)"));
     if (status)

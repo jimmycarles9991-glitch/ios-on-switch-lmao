@@ -4,8 +4,8 @@
 // then in the system shader compiler's store, and otherwise asked of that compiler (raw_remote.h), which compiles each state
 // once for every process and boot; its record is handed to the raw device, and for a state it refuses m2v draws it. A kernel
 // the same, at the first dispatch of its key (raw_compute_key.h: its threadgroup shape and bindings are the dispatch's).
-// Only a process the kernel serves no compiler (switch-no-bt on iOS 17), or a state the compiler does not take, is made
-// here (RawDirect.h: m2v's translation and NVK's stage compile), each such compile counted and its reason logged once.
+// No state is made in a client: one no pack, seed, store or compiler answers fails its creation by name, as Metal fails a
+// state it cannot compile, debug and release builds alike (a compile's memory belongs to the compiler's process).
 #pragma once
 #include "raw_lock.h"
 #import <Metal/Metal.h>
@@ -18,18 +18,16 @@
 #include <string>
 #include "raw_compiler.h"
 #include "raw_compute_lookup.h"
-#include "raw_cubic.h"
 #include "raw_metallib.h"
 #include "raw_obtained.h"
 #include "raw_remote.h"
-#include "raw_written_textures.h"
+#include "raw_render_variant.h"
 
 struct NmbDirectDispatch;
 
 namespace raw {
 
 class Device;
-class Direct;
 struct ComputeRecord;
 struct ComputeState;
 struct Pipeline;
@@ -49,12 +47,7 @@ public:
         // its functions are not a framework's default library's: no pack names the key, so the record is kept under the
         // key and both functions' AIR (two apps' alike-named functions are not one state)
         bool own = false;
-        // its cubic variant's binds (raw_cubic.h), whose name the key ends with; empty: the state itself
-        CubicBinds cubic;
-        uint8_t fragmentTests = 0;
-        bool twoPlane = false;                // its " | xr2p" variant (raw_xr_pass.h)
-        uint16_t xrSlots = 0;                 // its " | xrs=" variant's sampled two-plane slots (raw_xr_pass.h)
-        std::vector<WrittenTexture> written;  // its " | wtex=" variant's written textures (raw_written_textures.h)
+        RenderVariant variant;  // whose name the key ends with; none: the state itself
         bool resolveDescriptor = false;
         // the descriptor over this facade's own functions, which a compile request names (nil: none can)
         MTLRenderPipelineDescriptor *facade = nil;
@@ -78,20 +71,15 @@ public:
 
     // The kernel of compute key `key` (raw_compute_key.h) for `descriptor` (over m2v's functions) at `dispatch`, placed:
     // this process's, the disk's, or made now on the caller's thread, the dispatch that first needs it. Null: refused (named
-    // once in the raw log), or temporarily unavailable. retryAtUs is the earliest next attempt after a transient failure.
+    // once in the raw log), or not made this time (*retry: the dispatch fails and the next one asks afresh).
     // *gone: no compiler made it and none will (the dispatch fails, as a kernel Metal could not compile)
     const ComputeState *kernel(MTLComputePipelineDescriptor *descriptor, const NmbDirectDispatch &dispatch,
-                               const std::string &key, bool *retry = nullptr, uint64_t *retryAtUs = nullptr,
-                               id facadeFunction = nil, bool *gone = nullptr);
+                               const std::string &key, bool *retry = nullptr, id facadeFunction = nil,
+                               bool *gone = nullptr);
 
     void backgroundKernel(std::function<void()> work);
 
     Compiler::Stats stats() const;
-
-    uint64_t compiledHere() const
-    {
-        return inProcess_.count();
-    }
 
     std::string compilerStore() const
     {
@@ -121,37 +109,22 @@ private:
     Device &device_;
     RecordCache cache_;
     std::unique_ptr<Compiler> compiler_;
-    std::unique_ptr<Direct> direct_;
-    std::once_flag directMade_;  // make() runs on the compile queue and on creating threads at once
     uint64_t stack_;
     dispatch_queue_t queue_, persistenceQueue_;
     dispatch_group_t pending_;
     std::atomic<bool> stopping_{false};
-    raw::Mutex lock_;
-    std::map<uint64_t, Ask> asked_;  // by CacheKey::name, what make() makes
-    raw::Mutex kernelLock_;          // map membership only; each kernel owns its single-flight lock
+    raw::Mutex kernelLock_;  // map membership only; each kernel owns its single-flight lock
     std::map<uint64_t, std::shared_ptr<Kernel>> kernels_;
 
     std::unique_ptr<Remote> remote_;
-    InProcess inProcess_;
 
     bool keyOf(Ask &a, CacheKey &k);
-    Direct &direct();
-    Compiler::Outcome make(const CacheKey &k, RuntimeRecord &record, std::string &why);
 
     // RawCompleteRemote.mm: the system shader compiler's side
-    void compiledHere(InProcess::Why why);
     // `every`: each library's bytes, a system one's too, as a data library
     bool renderRequest(const Ask &a, const CacheKey &k, bool bytes, CompileRequest &r, Digest &name,
                        bool every = false);
     RecordCache::Found fromStore(const Digest &name, const CacheKey &k, RuntimeRecord &record, std::string &why);
-    // A process compiles a state itself only on a debug boot with no compiler at all (switch-no-bt hides iOS 17's
-    // launcher), and host tests: a release client never carries a compile's memory
-#if SWITCH_DEBUG
-    static constexpr bool kCompilesHere = true;
-#else
-    static constexpr bool kCompilesHere = false;
-#endif
     // Why a state's creation fails where no compiler makes it (makeNow's `failure`)
     static constexpr const char kNoCompilerComes[] =
         "no shader compiler comes this boot: it declined, or its launcher stopped starting it";
@@ -161,8 +134,6 @@ private:
     // The state made by the compiler while this thread sleeps; false: the creation fails with `failure`
     bool remoteNow(const Ask &a, const CacheKey &k, Compiler::State &state, RuntimeRecord &record,
                    std::string &failure);
-    // The state made on this thread, a failed compile tried once more
-    Compiler::State madeHere(const CacheKey &k, RuntimeRecord &record, std::string &why);
     // The state asked of the compiler with `done` called once it answers, null where it made none
     bool remoteLater(const Ask &a, const CacheKey &k, std::function<void(const RuntimeRecord *)> done,
                      bool again = false);

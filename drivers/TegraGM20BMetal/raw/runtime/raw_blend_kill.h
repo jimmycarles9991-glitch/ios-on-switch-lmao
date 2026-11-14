@@ -11,8 +11,9 @@
 //    is 0: ZERO, ONE, SRC_*, ONE_MINUS_SRC_*, and on a normalized target, whose texels are finite, DST_*,
 //    ONE_MINUS_DST_* and SRC_ALPHA_SATURATE too. Never the blend constant (any float the encoder sets) or source 1 (a
 //    second output the kill does not look at);
-//  - no depth or stencil attachment (whether a dropped pixel still writes depth is unmeasured), no alpha to coverage or
-//    alpha to one (the source the ROP sees is not the program's), no target the program writes as a storage image.
+//  - no alpha to coverage or alpha to one (the source the ROP sees is not the program's), no target the program writes
+//    as a storage image. A depth or stencil attachment does not keep it off: whether a dropped pixel still writes its
+//    depth and stencil, as Metal's does, is HW Test gpu.raw.blend_kill's zeta arms (zeta_depth_wrong, zeta_stencil_wrong).
 // HW Test gpu.x1.blend_kills (probe d13, PROBELOG): source-over of a zero source onto RGBA16F holding -0, NaN, infinities
 // and denormals and onto BGRA8 changed no bit with it on.
 #pragma once
@@ -94,7 +95,7 @@ inline uint32_t iteratedBlendNoop(const uint32_t *blob, uint32_t dwords, const u
     for (uint32_t j = 1; j < 8; j++)
         if (writes[j] & 0x1111)
             return kNoopNever;
-    if (!(writes[0] & 0x1111) || (storageBits & 1) || !keyString || !strstr(keyString, " ds=0/0 "))
+    if (!(writes[0] & 0x1111) || (storageBits & 1) || !keyString)
         return kNoopNever;
     bool blends = false;
     uint32_t perTarget[6] = {};

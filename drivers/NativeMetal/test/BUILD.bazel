@@ -59,6 +59,8 @@ host_test(
         "//kits/SwitchSeedPack:SwitchSeedPackWriter.h",
     ],
     cxx_std = "c++17",
+    # m2v: the frontend's compute artifacts (bridge/NativeMetalComputeArtifact.h)
+    tags = ["m2v"],
 )
 
 host_test(
@@ -189,4 +191,6 @@ host_test(
         "//drivers/NativeMetal:NativeBridgeMetalFrontend.mm",
         "//drivers/TegraGM20BMetal:raw/runtime/RawMetalStates.mm",
     ],
+    # m2v: the frontend's journal, which goes with it
+    tags = ["m2v"],
 )

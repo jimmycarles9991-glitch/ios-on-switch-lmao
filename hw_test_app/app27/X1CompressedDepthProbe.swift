@@ -6,8 +6,9 @@ import Metal
 /// copy.ce_compressed for zetas (drivers/TegraGM20BMetal/raw/runtime/raw_comp.h): the copy engine copying a compressed
 /// Depth32Float or multisampled Depth32Float_Stencil8 zeta (kinds ZF32_2CZ, ZF32_MS4_2CZ, ZF32_X24S8_MS2/MS4_2CSZV) into the
 /// shader's depth-test images and back, as the facade does around framebuffer-fetching draws that test depth in the
-/// shader. A debug build's switch (switchRawProbeZetaKinds:) gives those memoryless zetas their compressible kinds; the
-/// same pass drawn with it off is the reference. PASS: every round's picture with compressed zetas is the reference's
+/// shader. The one-sample case runs as shipped (ZF32_2CZ is copyEngineReadsCompressed's); a debug build's switch
+/// (switchRawProbeZetaKinds:) gives the multisampled zetas their compressible kinds. The same pass drawn on plain memory
+/// (switchRawProbePlainMemory:) is the reference. PASS: every round's picture with compressed zetas is the reference's
 /// byte for byte and zeta_ce_copies moved; INCONCLUSIVE: no switch, the work left the raw path, or no copy went through
 /// compressed memory (the facade had none made yet).
 ///
@@ -34,7 +35,15 @@ enum X1CompressedDepthProbe {
     ]
 
     static func zetaKinds(_ device: MTLDevice, _ on: Bool) -> Bool {
-        let selector = NSSelectorFromString("switchRawProbeZetaKinds:")
+        flag(device, "switchRawProbeZetaKinds:", on)
+    }
+
+    static func plainMemory(_ device: MTLDevice, _ on: Bool) -> Bool {
+        flag(device, "switchRawProbePlainMemory:", on)
+    }
+
+    static func flag(_ device: MTLDevice, _ name: String, _ on: Bool) -> Bool {
+        let selector = NSSelectorFromString(name)
         guard let object = device as? NSObject, object.responds(to: selector) else { return false }
         _ = object.perform(selector, with: NSNumber(value: on))
         return true
@@ -48,10 +57,12 @@ enum X1CompressedDepthProbe {
     ]
 
     /// One case's reference and compressed rounds: (pictures that differ, rounds through compressed memory)
-    static func rounds(_ gpu: GPU, _ scene: Scene) async throws -> (Int, Int) {
+    static func rounds(_ gpu: GPU, _ scene: Scene, shipped: Bool) async throws -> (Int, Int) {
         _ = zetaKinds(gpu.device, false)
+        _ = plainMemory(gpu.device, true)
         let reference = try await scene.draw()
-        _ = zetaKinds(gpu.device, true)
+        _ = plainMemory(gpu.device, false)
+        _ = zetaKinds(gpu.device, !shipped)
         var bad = 0, compressed = 0
         for _ in 0..<attempts where compressed < rounds {
             let before = RawFacade.compression(of: gpu.device)["zeta_ce_copies"] ?? 0
@@ -68,10 +79,13 @@ enum X1CompressedDepthProbe {
     static func run(_ gpu: GPU) async throws -> ProbeFinding {
         var metrics = Metrics()
         metrics.set("rule", "copy.ce_compressed_depth")
-        guard zetaKinds(gpu.device, false) else {
+        guard zetaKinds(gpu.device, false), plainMemory(gpu.device, false) else {
             return ProbeFinding(.inconclusive, metrics, note: "the facade has no zeta probe switch (a release build)")
         }
-        defer { _ = zetaKinds(gpu.device, false) }
+        defer {
+            _ = zetaKinds(gpu.device, false)
+            _ = plainMemory(gpu.device, false)
+        }
         let journal = ProbeJournal(probe: "gpu.x1.ce_compressed_depth")
         var wrong: [String: Int] = [:]
         var engaged = 0
@@ -88,7 +102,7 @@ enum X1CompressedDepthProbe {
                     continue cases
                 }
                 do {
-                    let (bad, compressed) = try await rounds(gpu, scene)
+                    let (bad, compressed) = try await rounds(gpu, scene, shipped: samples == 1)
                     let emitted = before.isEmpty ? 0 : RawMethods.disarm(gpu.device)
                     if !before.isEmpty && emitted == 0 {
                         metrics.set("\(name)_aa", "\(arm)_not_emitted")
@@ -98,6 +112,7 @@ enum X1CompressedDepthProbe {
                     wrong[name] = bad
                     metrics.set("\(name)_aa", arm)
                     metrics.set("\(name)_compressed_rounds", compressed)
+                    metrics.set("\(name)_route", samples == 1 ? "shipped" : "probe")
                     engaged += compressed
                     continue cases
                 } catch {

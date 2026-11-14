@@ -7,8 +7,6 @@
 namespace {
 constexpr uint64_t kFusePA = 0x7000F800, kApbMiscPA = 0x70000800;
 constexpr uint32_t FUSE_SOC_SPEEDO_0 = 0x134, APB_MISC_HIDREV = 0x004;
-constexpr uint32_t MISC_CLK_ENB = 0x048, CFG_ALL_VISIBLE = 1u << 28;
-constexpr unsigned kFuseClock = 39;  // TEGRA210_CLK_FUSE: CAR bank H bit 7
 
 struct Pll {
     uint32_t base, misc0, misc1, misc2, misc3;
@@ -59,9 +57,7 @@ IOLock *lock()
     return made;
 }
 
-// FUSE_SOC_SPEEDO_0 on a T210B01 (APB_MISC HIDREV chip 0x21, major 2); -1 elsewhere: the table is T210B01's. The fuse
-// cache is made readable each time as SwitchThermal and SwitchSensors make it (the fuse clock and CFG_ALL_VISIBLE,
-// which AppleKeyStore's device-key read may put back off).
+// FUSE_SOC_SPEEDO_0 on a T210B01 (APB_MISC HIDREV chip 0x21, major 2); -1 elsewhere: the table is T210B01's.
 int32_t socSpeedo()
 {
     if (!gFuse) {
@@ -73,9 +69,7 @@ int32_t socSpeedo()
     const uint32_t hidrev = switch_mmio_read32(gApbMisc, APB_MISC_HIDREV);
     if (((hidrev >> 8) & 0xff) != 0x21 || ((hidrev >> 4) & 0xf) != 2)
         return -1;
-    switch_car_clock_enable(kFuseClock);
-    switch_car_rmw(MISC_CLK_ENB, 0, CFG_ALL_VISIBLE);
-    (void)switch_car_read(MISC_CLK_ENB);
+    switch_car_fuse_readable();
     return static_cast<int32_t>(switch_mmio_read32(gFuse, FUSE_SOC_SPEEDO_0));
 }
 

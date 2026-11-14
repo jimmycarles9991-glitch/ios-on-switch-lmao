@@ -33,6 +33,22 @@ inline void expectMethod(uint32_t cls, uint32_t method)
         << "class 0x" << std::hex << cls << " has no method 0x" << method;
 }
 
+constexpr uint32_t kPixelShaderBarrier = 0x0de0, kTextureDataNoWfi = 0x1288;
+
+// The texture invalidate after PIXEL_SHADER_BARRIER is the pixel-ordered one (0x0f74): with 0x1288 there the chip read a
+// pass's samples before the last pass's writes (gpu.x1.pass_pixel_barrier, stack-F-v1)
+struct PixelBarrierOrder {
+    bool afterBarrier = false;
+
+    void method(uint32_t cls, uint32_t m)
+    {
+        if (cls != kMaxwellB)
+            return;
+        EXPECT_FALSE(afterBarrier && m == kTextureDataNoWfi) << "PIXEL_SHADER_BARRIER followed by 0x1288";
+        afterBarrier = m == kPixelShaderBarrier;
+    }
+};
+
 // A method a 3D macro writes, or the state it reads
 inline void expectMaxwellB(uint32_t method)
 {
@@ -69,12 +85,14 @@ struct Scratch {
 inline bool expectSegmentMethods(const uint32_t *words, const uint32_t *segmentWords, size_t segments)
 {
     uint32_t op = 0, subchannel = 0, method = 0, left = 0;
+    PixelBarrierOrder order;
     for (size_t s = 0; s < segments; s++) {
         const uint32_t *w = words, *end = words + segmentWords[s];
         words = end;
         while (w < end) {
             if (left) {
                 expectMethod(subchannelClass(subchannel, method), method);
+                order.method(subchannelClass(subchannel, method), method);
                 w++;
                 left--;
                 if (op != 3)
@@ -92,6 +110,7 @@ inline bool expectSegmentMethods(const uint32_t *words, const uint32_t *segmentW
             method = (header & 0xfff) << 2;
             if (form == 4) {
                 expectMethod(subchannelClass(subchannel, method), method);
+                order.method(subchannelClass(subchannel, method), method);
                 continue;
             }
             if (form != 1 && form != 3 && form != 5)

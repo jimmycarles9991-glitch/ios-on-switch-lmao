@@ -122,6 +122,8 @@ int switch_gpu_vm_map(struct tgm_vm *vm, uint64_t va, uint64_t range, struct tgm
 int switch_gpu_vm_map_volatile(struct tgm_vm *vm, uint64_t va, uint64_t range, struct tgm_mem *mem,
 			       uint64_t offset, uint8_t kind, int read_only, int vol,
 			       struct switch_gpu_mapping **mapping);
+/* Whether a map of `kind` may be volatile: every map path (now, prepared, installed) refuses a compressed one. */
+int switch_gpu_vm_volatile_kind_ok(uint8_t kind, int vol);
 void switch_gpu_vm_unmap(struct tgm_vm *vm, struct switch_gpu_mapping **mapping);
 /* Cuts [va, va + range) out of *mapping, made by switch_gpu_vm_map_volatile or _prepare of mem with kind, and consumes
  * it, changing no PTE. What stays below and above the range comes back as *below and *above, the range's own entries as
@@ -270,8 +272,11 @@ int switch_gpu_chan_exec_job(struct tgm_chan *chan, const struct tgm_push *push,
 			     const struct switch_gpu_sibling_wait *siblings, uint32_t sibling_count,
 			     uint32_t *seqno, const struct tgm_prof *prof, uint32_t visibility,
 			     const struct switch_gpu_release *releases, uint32_t release_count);
-/* switch_gpu_chan_exec_job with acquires on event words as well (SwitchGpuWordWait.h) */
+/* switch_gpu_chan_exec_job with acquires on event words as well (SwitchGpuWordWait.h). `owned`, the job's ownership
+ * transaction (SwitchGpuBacking.h) or NULL, is committed once nothing can fail the job, before its kick: a return of 0
+ * has committed it, an error leaves it for the caller's abort, and the kick holds none of its backings' locks. */
 struct switch_gpu_word_wait;
+struct switch_gpu_backing_transaction;
 int switch_gpu_chan_exec_events(struct tgm_chan *chan, const struct tgm_push *push, uint32_t count,
 				const struct switch_gpu_backing_token *dependencies,
 				uint32_t dependency_count,
@@ -279,7 +284,8 @@ int switch_gpu_chan_exec_events(struct tgm_chan *chan, const struct tgm_push *pu
 				uint32_t sibling_count, const struct switch_gpu_word_wait *words,
 				uint32_t word_count, uint32_t *seqno, const struct tgm_prof *prof,
 				uint32_t visibility, const struct switch_gpu_release *releases,
-				uint32_t release_count);
+				uint32_t release_count,
+				struct switch_gpu_backing_transaction *owned);
 /* The channel's jobs through `seqno` release event signals mid-job: their nonstall interrupts run event retirement. */
 void switch_gpu_chan_event_releases(struct tgm_chan *chan, uint32_t seqno);
 struct TegraGM20BAbiFenceSemantic;
@@ -539,7 +545,9 @@ int tgm_writers_all_done(void);
 void tgm_writers_wait_all(void);
 /* SurfaceLayout (method 16) for the import holding `c`: the surface's layout, decided at the first call with `writes` while
  * `c` is its only import (the surface's contents tiled before it says so); 1 block-linear at this shape, 0 pitch, -1
- * block-linear at another shape. Sleeps on the copy engine's fence interrupt while it tiles. */
+ * block-linear at another shape. Sleeps on the copy engine's fence interrupt while it tiles. `writes` holds the ask's
+ * TegraGM20BLayoutAsk.h flags: a decision whose tiling move failed is made again at the first ask of an import that
+ * holds the surface alone (no import bound it under the failed decision's pitch answer). */
 int tgm_coherency_layout(struct tgm_coh *c, uint32_t width, uint32_t height, uint32_t bpp,
 			 uint32_t bytes_per_row, int writes);
 /* The same for an asker that reads the decided layout's block height (SurfaceLayoutInfo): the decision may lower the block
@@ -550,8 +558,9 @@ int tgm_coherency_layout_fitted(struct tgm_coh *c, uint32_t width, uint32_t heig
 
 /* TegraGM20BTiled.cpp's stats, this window's (debug kernels): layouts decided block-linear, then pitch because the first
  * import only samples, because another import or a CPU lock existed, because the shape does not tile, because the
- * tiling move failed; the live block-linear surfaces and their bytes; the CPU views' scratch bytes held now and at most */
-void tgm_tiled_take_stats(uint64_t out[9]);
+ * tiling move failed, because another process maps it for the CPU; the live block-linear surfaces and their bytes; the
+ * CPU views' scratch bytes held now and at most */
+void tgm_tiled_take_stats(uint64_t out[10]);
 /* The same window's relayouts (TegraGM20BTiled.h tgm_relayout_count): tiling moves skipped because nothing had written
  * the surface, untiles deferred to a CPU lock, deferred untiles a lock made, deferred surfaces gone block-linear, and the
  * moves made */
@@ -612,6 +621,22 @@ void tgm_coherency_tiled_bind(struct tgm_coh *c, int add);
 #else
 #define TGM_STATS 0
 #endif
+/* Debug kernels: waits that used to hold a lock (a queue's, the relayout's, the connection's, a CPU sync's), counted by
+ * where they now run without it, and the stats tick's "unlocked waits" line. */
+enum tgm_unlocked {
+	TGM_UNLOCKED_SYNC_BESIDE, /* a CPU sync that started while another one was in flight */
+	TGM_UNLOCKED_COPY_ROOM, /* a kernel copy's wait for ring room, the copy queue's lock let go */
+	TGM_UNLOCKED_BRIDGE_ROOM, /* a host1x bridge job's wait for ring room, the bridge queue's lock let go */
+	TGM_UNLOCKED_RELAYOUT, /* a relayout move's or flush's GPU wait, the relayout lock let go */
+	TGM_UNLOCKED_RELAYOUT_BESIDE, /* a relayout move kicked while another one waited */
+	TGM_UNLOCKED_IMPORT, /* a BoImport wired and cleaned before lock_ and the submit gate (ns: how long) */
+	TGM_UNLOCKED_PRESENT_ROOM, /* a copy present that found no push room under tgm_present.lock */
+	TGM_UNLOCKED_KINDS
+};
+
+void tgm_stats_unlocked(enum tgm_unlocked kind, uint64_t ns);
+void tgm_stats_unlocked_window(void);
+
 /* Debug kernels: copies a present runs after its frame's copy and before its fence (TegraGM20BReadback.cpp), each into a
  * pitch-linear destination dst_pitch bytes across, width x 4 bytes of height lines, from a pitch source (src_block_log2
  * < 0: src_pitch bytes per row) or a block-linear one (8-line GOBs, blocks one GOB wide and 2^src_block_log2 high,
@@ -632,6 +657,37 @@ int tgm_clkgate_switch(int on);
 
 struct nvkm_device;
 int tgm_gpu_held(void (*fn)(struct nvkm_device *device, void *arg), void *arg);
+
+/* Debug kernels: after a rail-up, the GPU's first job and its GPCPLL (gpu_rail_probe.c, for TegraGM20BRailCycle.cpp's
+ * debug.switch_gpu_rail_cycle). 0 when the fence completed and the GPCPLL is enabled, locked and on the idle clock's VCO
+ * at the PL it last set; -EIO otherwise, -EBUSY before M3. */
+struct tgm_rail_look {
+	int fence; /* 0, -ETIMEDOUT or -ENODEV */
+	uint32_t fence_us, coeff, cfg, pl, expect_pl, wake_coeff;
+	int khz, vco_ok;
+};
+
+int tgm_rail_probe(struct tgm_rail_look *look);
+/* Debug kernels: wakes whose relock left the GPCPLL off the idle clock's VCO or maximum rate's PL, before anything put it
+ * right (gpu_rail_probe.c tgm_rail_wake_seen, from gpu_power.c's wake_clock), since boot. */
+uint32_t tgm_rail_wakes_off_rate(void);
+/* Debug kernels: one rail-gate and rail-up (TegraGM20B.cpp), and debug.switch_gpu_rail_cycle (TegraGM20BRailCycle.cpp). */
+int tgm_rail_cycle_once(void);
+void tgm_rail_cycle_register(void);
+
+/* Debug kernels: every live client channel whose RAMFC timeslice was last written before a job it has completed since,
+ * with RAMFC 0xf8 read back against that value, the first mismatch's channel, value and expected value; then a
+ * timeslice change on the kernel probe channel and back (gpu_ramfc_probe.c, for TegraGM20BRamfcProbe.cpp's
+ * debug.switch_gpu_ramfc). 0, or -EBUSY before M3. */
+struct tgm_ramfc_look {
+	uint32_t channels, checked, high, mismatched, chid, ramfc, expected;
+	/* the kernel probe channel's timeslice written to flip_to and back to flip_from, each read after a job */
+	uint32_t flip_chid, flip_from, flip_to, flip_read, back_read;
+	int flip_ret;
+};
+
+int tgm_ramfc_probe(struct tgm_ramfc_look *look);
+void tgm_ramfc_probe_register(void);
 
 /* Debug kernels: the GM20B registers L4T's capture reads (TegraGM20BRegDump.h, regdump.c), as text into buf; *len its
  * length. 0, -EBUSY before M3, -ENOMEM, -ENOSPC when cap is short of tgm_regdump_bytes(). */
@@ -693,6 +749,10 @@ void tgm_pool_breakdown(uint64_t *client_bytes, uint64_t *orphan_bytes, uint64_t
 			uint64_t *compressible_bytes, uint64_t *compressibles,
 			uint64_t *system_bytes, uint64_t *systems);
 unsigned long tgm_owner_stats(char *out, unsigned long size);
+/* Debug kernels: what each process's GPU connections hold now (TegraGM20BOwnerMemory.cpp, SwitchGpuOwnerMemory.h); 0 when
+ * none holds anything. *imported: the bytes of imports they hold together, which the live imports exceed by those of
+ * connections already gone whose BOs still retire */
+unsigned long tgm_owner_memory(char *out, unsigned long size, uint64_t *imported);
 void tgm_stats_bo_import(uint64_t bytes, int read_only, int skipped, uint64_t ns,
 			 const uint64_t phase_ns[TGM_PHASES]);
 
@@ -735,6 +795,9 @@ void tgm_stats_bind(int map, uint64_t pages, uint64_t ns);
 /* A fence wait that slept on `waiter`, then woke (woken 1) or reached its deadline (0), and found its fence done or
  * not: the "waits" line's wakes, waits woken at their seqno, and wake-to-waiter latency. */
 void tgm_stats_wait(uint32_t waiter, int woken, int done);
+/* Debug kernels, by the channel's submission owner: a job with pushes that ends with its own interrupt, by why
+ * (SwitchGpuQuiet.h enum switch_gpu_loud). */
+void tgm_stats_loud(struct tgm_chan *chan, uint32_t reason);
 
 /* A SubmitAddress by phase (TegraGM20BUserClient.cpp): resolving its uses under the connection lock, owning them
  * (backing locks, dependency scan, room waits), chan_exec, and the commit after it. The "exec by process" line. */

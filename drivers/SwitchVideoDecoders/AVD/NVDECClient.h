@@ -16,7 +16,9 @@ typedef struct NVDECClient NVDECClient;
 // A job's completion: result 0, or the kernel's failure for it; then what NVDEC's status record says.
 typedef void (*NVDECDone)(void *context, uint32_t fence, int result, uint32_t error_status, uint32_t mbs_correct);
 
-bool nvdec_service_present(void);
+// The service is published; a process asking before NVDEC's bring-up has ended waits for it, or for the kernel's word
+// that it will not come (TEGRA_NVDEC_ABSENT_RESOURCE).
+bool nvdec_service_wait(void);
 // The codecs the service says it decodes (TEGRA_NVDEC_DECODES_*), found without opening it: TegraNVDECInfo.codecs'
 // bits for H.264, VP9, HEVC, MPEG-4 Part 2 and MPEG-1/2.
 uint32_t nvdec_service_codecs(void);

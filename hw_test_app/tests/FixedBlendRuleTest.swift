@@ -9,7 +9,10 @@ import Metal
 /// computed here (every layer stored as the nearest code). Sources are 8-bit codes or codes plus sixteenths (a
 /// shader-computed colour), from shaders/FixedBlendRule.metal's hash. The rule's claim: the ROP stays within 2 codes for
 /// 8-bit sources at any depth and for computed sources up to 2 layers; 8 computed layers are reported (x1-units' model
-/// says 4). Then 8 layers over 1280x720 both ways give each route's GPU time.
+/// says 4). Then 8 layers over 1280x720 both ways give each route's GPU time. The format arms draw 8-bit sources through
+/// the ROP into each further target format the rule takes (RGBA16F, BGRA8 sRGB, RGBA8 sRGB) against Metal's blend in
+/// that format: rop_<format>_<layers>_worst in its codes (half-float steps for RGBA16F; sRGB codes blended in linear
+/// light), held to 2 at every depth as BGRA8's 8-bit sources are; <format>_path= where it drew.
 struct FixedBlendRuleTest: HWTest {
     let id = "gpu.raw.fixed_blend_rule"
     let name = "Fixed-function blend against the fetch rung: codes within the rule's bounds, GPU time both ways"
@@ -91,6 +94,27 @@ struct FixedBlendRuleTest: HWTest {
         }
         metrics.set("rop_gpu_ms_8_layers_720p", ropMs / 3, digits: 3)
         metrics.set("fetch_gpu_ms_8_layers_720p", fetchMs / 3, digits: 3)
+        for arm in Self.formatArms {
+            let state = try gpu.render(fragment: "rule_rop_fragment", format: arm.format) { d in
+                let a = d.colorAttachments[0]!
+                a.isBlendingEnabled = true
+                a.sourceRGBBlendFactor = .one
+                a.sourceAlphaBlendFactor = .one
+                a.destinationRGBBlendFactor = .oneMinusSourceAlpha
+                a.destinationAlphaBlendFactor = .oneMinusSourceAlpha
+            }
+            var armPaths: Set<String> = []
+            for layers in [1, 2, 8] {
+                let target = try gpu.texture(arm.format, Self.size, Self.size)
+                armPaths.insert(try await gpu.run(Self.layers(state, target, count: layers, computed: false)).path)
+                let bytes = try await gpu.read(target, bytesPerPixel: arm.format == .rgba16Float ? 8 : 4)
+                let worst = Self.formatWorst(bytes, arm.format, layers: layers)
+                metrics.set("rop_\(arm.label)_\(layers)_worst", worst)
+                if worst > 2 { wrong.append("rop_\(arm.label)_\(layers)") }
+            }
+            metrics.set("\(arm.label)_path", armPaths.sorted().joined(separator: ","))
+            if armPaths != ["raw"] { wrong.append("\(arm.label)_path") }
+        }
         metrics.set("paths", paths.allSatisfy { $0 == "raw" } ? "raw" : paths.joined(separator: ","))
         if paths.contains(where: { $0 != "raw" }) { wrong.append("paths") }
         return wrong.isEmpty ? .pass(metrics) : .fail(wrong.joined(separator: ","), metrics)
@@ -119,6 +143,74 @@ struct FixedBlendRuleTest: HWTest {
             }
             encoder.endEncoding()
         }
+    }
+
+    static let formatArms: [(label: String, format: MTLPixelFormat)] = [
+        ("rgba16f", .rgba16Float), ("bgra8_srgb", .bgra8Unorm_srgb), ("rgba8_srgb", .rgba8Unorm_srgb),
+    ]
+
+    static func srgbToLinear(_ c: Double) -> Double {
+        c <= 0.04045 ? c / 12.92 : pow((c + 0.055) / 1.055, 2.4)
+    }
+
+    static func linearToSrgb(_ l: Double) -> Double {
+        l <= 0.0031308 ? l * 12.92 : 1.055 * pow(l, 1 / 2.4) - 0.055
+    }
+
+    /// A channel's stored code of `value`, and its value, as `format` holds it (sRGB colour channels encoded; RGBA16F as
+    /// the half's bits)
+    static func store(_ value: Double, _ format: MTLPixelFormat, colour: Bool) -> Int {
+        switch format {
+        case .rgba16Float: return Int(Float16(Float(value)).bitPattern)
+        case .bgra8Unorm_srgb, .rgba8Unorm_srgb:
+            let v = min(max(value, 0), 1)
+            return Int(((colour ? linearToSrgb(v) : v) * 255).rounded())
+        default: return Int((min(max(value, 0), 1) * 255).rounded())
+        }
+    }
+
+    static func load(_ code: Int, _ format: MTLPixelFormat, colour: Bool) -> Double {
+        switch format {
+        case .rgba16Float: return Double(Float(Float16(bitPattern: UInt16(code))))
+        case .bgra8Unorm_srgb, .rgba8Unorm_srgb: return colour ? srgbToLinear(Double(code) / 255) : Double(code) / 255
+        default: return Double(code) / 255
+        }
+    }
+
+    /// The RGBA codes a texel of `format` holds
+    static func codes(_ bytes: [UInt8], _ x: Int, _ y: Int, _ format: MTLPixelFormat) -> [Int] {
+        switch format {
+        case .rgba16Float:
+            let at = (y * size + x) * 8
+            return (0..<4).map { Int(bytes[at + 2 * $0]) | Int(bytes[at + 2 * $0 + 1]) << 8 }
+        case .bgra8Unorm_srgb:
+            let t = Array(bytes.pixel(x, y, width: size))
+            return [Int(t[2]), Int(t[1]), Int(t[0]), Int(t[3])]
+        default:
+            let t = Array(bytes.pixel(x, y, width: size))
+            return [Int(t[0]), Int(t[1]), Int(t[2]), Int(t[3])]
+        }
+    }
+
+    /// The largest difference from Metal's blend of `layers` 8-bit source-overs into `format`, in its codes
+    static func formatWorst(_ bytes: [UInt8], _ format: MTLPixelFormat, layers: Int) -> Int {
+        var worst = 0
+        for y in 0..<size {
+            for x in 0..<size {
+                var d = (0..<4).map { c in store(clear[c], format, colour: c < 3) }
+                for layer in 0..<layers {
+                    let s = source(x, y, layer: layer, computed: false)
+                    d = (0..<4).map { c in
+                        store(s[c] + load(d[c], format, colour: c < 3) * (1 - s[3]), format, colour: c < 3)
+                    }
+                }
+                let got = codes(bytes, x, y, format)
+                for c in 0..<4 {
+                    worst = max(worst, abs(got[c] - d[c]))
+                }
+            }
+        }
+        return worst
     }
 
     static func errors(_ bytes: [UInt8], layers: Int, computed: Bool) -> Errors {

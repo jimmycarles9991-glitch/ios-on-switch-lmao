@@ -228,60 +228,6 @@ bool encodeKernelCommands(raw::ComputeEncoder &e, raw::CommandBuffer &rc, RMKern
     return e.executeSlots(run, why);
 }
 
-void replayKernelCommands(id<MTLComputeCommandEncoder> encoder, RMKernelExecute *x, std::set<RMBuffer *> &buffers)
-{
-    RMIndirectComputeBuffer *b = x->_buffer;
-    const auto [from, to] = reach(x);
-    std::lock_guard<raw::Mutex> hold(b->_lock);
-    if (!b->_m2v)
-        b->_m2v = [RM_M2V("an indirect command buffer of dispatches replayed on it")
-            newIndirectCommandBufferWithDescriptor:b->_descriptor
-                                   maxCommandCount:b->_count
-                                           options:0];
-    if (!b->_m2v) {
-        SWITCH_REFUSE("raw", "icb.replay", "m2v made no indirect command buffer of dispatches: none run");
-        return;
-    }
-    for (uint32_t i = from; i < to; i++) {
-        const RMICBDispatch &c = b->_dispatches[i];
-        id<MTLIndirectComputeCommand> t = [b->_m2v indirectComputeCommandAtIndex:i];
-        [t reset];
-        if (!b->_inheritPipeline && c.pipeline)
-            [t setComputePipelineState:twinOf(c.pipeline)];
-        for (uint32_t slot = 0; slot < 31 && !b->_inheritBuffers; slot++)
-            if (RMBuffer *used = c.buffers[slot]) {
-                buffers.insert(used);
-                if (c.strides[slot] == raw::kNoBindStride)
-                    [t setKernelBuffer:twinOf(used) offset:c.offsets[slot] atIndex:slot];
-                else
-                    [t setKernelBuffer:twinOf(used)
-                                 offset:c.offsets[slot]
-                        attributeStride:c.strides[slot]
-                                atIndex:slot];
-            }
-        for (const auto &[index, bytes] : c.memory)
-            [t setThreadgroupMemoryLength:bytes atIndex:index];
-        if (c.stageIn)
-            [t setStageInRegion:c.stageInRegion];
-        if (c.barrier)
-            [t setBarrier];
-        if (!c.dispatched)
-            continue;
-        const MTLSize grid = MTLSizeMake(c.grid[0], c.grid[1], c.grid[2]),
-                      threads = MTLSizeMake(c.threads[0], c.threads[1], c.threads[2]);
-        if (c.perThread)
-            [t concurrentDispatchThreads:grid threadsPerThreadgroup:threads];
-        else
-            [t concurrentDispatchThreadgroups:grid threadsPerThreadgroup:threads];
-    }
-    if (x->_range) {
-        buffers.insert(x->_range);
-        [encoder executeCommandsInBuffer:b->_m2v indirectBuffer:twinOf(x->_range) indirectBufferOffset:x->_rangeOffset];
-    } else {
-        [encoder executeCommandsInBuffer:b->_m2v withRange:NSMakeRange(x->_first, x->_count)];
-    }
-}
-
 void encodeKernelCommandsBlit(raw::BlitEncoder *be, const Cmd &c)
 {
     RMIndirectComputeBuffer *from = (__bridge RMIndirectComputeBuffer *)c.obj;

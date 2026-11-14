@@ -61,7 +61,7 @@ static int gOpens, gSubmits, gRefused, gPresents, gPresentBad, gWaitRanges, gWid
 static uint32_t gLastDstX, gLastDstY;
 static unsigned gNativeExports, gRecycled, gAlphaPresents[2];
 
-bool nvdec_service_present(void)
+bool nvdec_service_wait(void)
 {
     return true;
 }

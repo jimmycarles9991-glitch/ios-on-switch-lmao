@@ -11,6 +11,7 @@
  * (live), the second buffer holds instead what window A scanned for the frame offered before this one (that frame's
  * surface on direct scanout, else the scanout buffer its copy wrote), read at this present, which is the end of that
  * frame's time on screen: compared with that frame's own read-back, any difference was written while it was shown.
+ * Only when window A showed nothing between the two offers (tegra_gm20b_scanout_bypassed): else no Previous flag.
  * State: where the read-back is; Done, each buffer is mapped with method 12 (TegraGM20BAbiMap) by its token, and holds
  * height rows of width * 4 bytes, packed, as window A reads them (B8G8R8A8). Disarm: the buffers go. One read-back
  * system-wide, the arming connection's; it goes with that connection. */

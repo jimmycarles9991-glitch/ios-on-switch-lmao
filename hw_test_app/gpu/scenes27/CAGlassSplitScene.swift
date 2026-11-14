@@ -62,7 +62,11 @@ struct CAGlassSplitScene: GPUScene {
         let before = RawFacade.counters(of: gpu.device)
         let whole = try await draw(gpu, frame, tiles: Self.tiles, wholePrograms: true, &result)
         let split = try await draw(gpu, frame, tiles: 1, wholePrograms: false, &result)
-        result.metrics.set("fetch", RawFacade.fetchRoutes(before: before, after: RawFacade.counters(of: gpu.device)))
+        let after = RawFacade.counters(of: gpu.device)
+        result.metrics.set("fetch", RawFacade.fetchRoutes(before: before, after: after))
+        for key in ["split_room_refusals", "heap_full"] {
+            result.metrics.set(key, (after[key] ?? 0) - (before[key] ?? 0))
+        }
         let reference = TexelFormat.bgra8Unorm.raster(content, width: size, height: size)
         result.metrics.set("pixels_split", size * size)
         result.metrics.set("pixels_tile", (size / Self.tiles) * (size / Self.tiles))

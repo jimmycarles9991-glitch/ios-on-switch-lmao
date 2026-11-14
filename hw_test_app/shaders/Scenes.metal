@@ -256,3 +256,58 @@ fragment float4 ms_depth_fragment(float4 position [[position]], depth2d_ms<float
     const uint2 at = uint2(position.xy);
     return float4(depth.read(uint2(at.x / count, at.y), at.x % count), 0, 0, 1);
 }
+
+/// gpu.compute.simd_group: one word per SIMD-group operation (SimdGroupScene.ops): permute and votes, reduction and
+/// prefix, shift-and-fill (Metal's three SIMD feature rows)
+kernel void simd_group(device const uint *in [[buffer(0)]], device uint *out [[buffer(1)]],
+                       uint id [[thread_position_in_grid]], ushort lane [[thread_index_in_simdgroup]],
+                       ushort width [[threads_per_simdgroup]])
+{
+    const uint x = in[id], low = x & 0xffffu, fill = x ^ 0xa5a5a5a5u;
+    device uint *o = out + id * 24;
+    o[0] = uint(lane) | uint(width) << 16;
+    o[1] = simd_shuffle(x, ushort((uint(lane) * 7u + 3u) % uint(width)));
+    o[2] = simd_broadcast(x, ushort(5));
+    o[3] = simd_shuffle_up(x, ushort(3));
+    o[4] = simd_shuffle_down(x, ushort(3));
+    o[5] = simd_shuffle_xor(x, ushort(5));
+    o[6] = uint(static_cast<simd_vote::vote_t>(simd_ballot((x & 1u) != 0)));
+    o[7] = (simd_all(x != 0) ? 1u : 0u) | (simd_any((x & 0xffu) == 0) ? 2u : 0u);
+    o[8] = simd_sum(low);
+    o[9] = simd_product((x & 3u) + 1u);
+    o[10] = simd_min(x);
+    o[11] = simd_max(x);
+    o[12] = simd_and(x | 0x80000001u);
+    o[13] = simd_or(x & 0x10204080u);
+    o[14] = simd_xor(x);
+    o[15] = simd_prefix_inclusive_sum(low);
+    o[16] = simd_prefix_exclusive_sum(low);
+    o[17] = as_type<uint>(simd_sum(float(x & 0xffu)));
+    o[18] = as_type<uint>(simd_prefix_exclusive_sum(float(x & 0xffu)));
+    o[19] = simd_shuffle_and_fill_up(x, fill, ushort(3));
+    o[20] = simd_shuffle_and_fill_down(x, fill, ushort(3));
+    o[21] = simd_shuffle_and_fill_up(x, fill, ushort(3), ushort(8));
+    o[22] = simd_shuffle_and_fill_down(x, fill, ushort(3), ushort(8));
+    o[23] = id;
+}
+
+struct OrderedVertex {
+    float4 position [[position]];
+    uint instance [[flat]];
+};
+
+/// gpu.raw.raster_order: instance iid's full-target quad (a four-vertex strip)
+vertex OrderedVertex raster_order_vertex(uint vid [[vertex_id]], uint iid [[instance_id]])
+{
+    return OrderedVertex{float4((vid & 1) ? 1.0 : -1.0, (vid & 2) ? -1.0 : 1.0, 0.5, 1), iid};
+}
+
+/// Each covered pixel's word folded with its instance in a step that does not commute: only raster order gives the
+/// CPU's word
+fragment float4 raster_order_fragment(OrderedVertex in [[stage_in]],
+                                      texture2d<uint, access::read_write> words [[texture(0), raster_order_group(0)]])
+{
+    const uint2 p = uint2(in.position.xy);
+    words.write(uint4(words.read(p).x * 3u + in.instance + 1u), p);
+    return float4(0);
+}

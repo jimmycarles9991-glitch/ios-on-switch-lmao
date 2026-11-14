@@ -25,11 +25,20 @@ enum : uint32_t {
     IO_DPD_STATUS = 0x1bc,
     IO_DPD2_REQ = 0x1c0,
     IO_DPD2_STATUS = 0x1c4,
+    SEL_DPD_TIM = 0x1c8,
 };
 
+enum : uint32_t {
+    CLK_SYSTEM_RATE = 0x030,
+    MISC_CLK_ENB = 0x048,
+    CFG_ALL_VISIBLE = 1u << 28,
+};
+
+constexpr unsigned kFuseClock = 39;  // TEGRA210_CLK_FUSE: bank H bit 7
 constexpr uint32_t kToggleStart = 1u << 8;
 constexpr uint32_t kDpdCodeOff = 1u << 30, kDpdCodeOn = 2u << 30;
 constexpr uint32_t kToggleUs = 5000, kDpdUs = 250, kSequenceStepUs = 10;
+constexpr uint32_t kSlowestSclkKHz = 38400;  // CLK_M: SCLK runs from it or from a faster source
 
 volatile uint8_t *gCar, *gPmc;
 IOLock *gLock;
@@ -99,6 +108,17 @@ bool toggle(unsigned partition, bool on)
     return done;
 }
 
+// TRM 12.6.111: IO_DPD_REQ and IO_DPD2_REQ share one state machine, which drops a request written before the previous
+// one finished, SEL_DPD_TIM APB clocks plus five after it was written, and STATUS reads valid only after that. The APB
+// clock is SCLK / (AHB_RATE + 1) / (APB_RATE + 1) (TRM 5.2.11).
+uint32_t dpdSettleUs(const volatile uint8_t *p)
+{
+    const uint32_t rate = switch_mmio_read32(car(), CLK_SYSTEM_RATE);
+    const uint32_t divider = (((rate >> 4) & 3) + 1) * ((rate & 3) + 1);
+    const uint32_t clocks = (switch_mmio_read32(p, SEL_DPD_TIM) & 0x7f) + 5;
+    return (clocks * divider * 1000 + kSlowestSclkKHz - 1) / kSlowestSclkKHz;
+}
+
 bool pad(unsigned dpd, uint32_t code)
 {
     const bool second = dpd >= 32;
@@ -106,6 +126,7 @@ bool pad(unsigned dpd, uint32_t code)
     volatile uint8_t *p = pmc();
     IOLockLock(lock());
     switch_mmio_write32(p, second ? IO_DPD2_REQ : IO_DPD_REQ, code | mask);
+    IODelay(dpdSettleUs(p));
     const bool done =
         switch_mmio_wait32(p, second ? IO_DPD2_STATUS : IO_DPD_STATUS, mask, code == kDpdCodeOn ? mask : 0, kDpdUs);
     IOLockUnlock(lock());
@@ -163,6 +184,13 @@ void switch_car_rmw(uint32_t offset, uint32_t clear, uint32_t set)
 bool switch_car_wait(uint32_t offset, uint32_t mask, uint32_t value, uint32_t timeout_us)
 {
     return switch_mmio_wait32(car(), offset, mask, value, timeout_us);
+}
+
+void switch_car_fuse_readable(void)
+{
+    switch_car_clock_enable(kFuseClock);
+    switch_car_rmw(MISC_CLK_ENB, 0, CFG_ALL_VISIBLE);
+    (void)switch_car_read(MISC_CLK_ENB);
 }
 
 bool switch_pmc_partition_is_on(unsigned partition)

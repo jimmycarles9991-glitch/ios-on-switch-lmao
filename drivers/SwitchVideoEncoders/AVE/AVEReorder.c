@@ -145,7 +145,7 @@ static void codeGroup(Encoder *e, const AVEHeld *anchor)
 {
     AVEReorder *r = &e->reorder;
     const Outcome outcome = code(e, anchor, H264ENC_P);
-    if (outcome == REFUSED) {  // P pictures are off (encodePicture): every frame an IDR, in display order
+    if (outcome == REFUSED) {  // the anchor's P picture refused: every frame of the group an IDR, in display order
         for (unsigned i = 0; i < r->heldCount; i++)
             if (code(e, &r->held[i], H264ENC_IDR) == REFUSED)
                 drop(e, &r->held[i], kVTVideoEncoderMalfunctionErr, true);
@@ -154,10 +154,11 @@ static void codeGroup(Encoder *e, const AVEHeld *anchor)
     } else if (outcome == DROPPED) {
         return;  // the held frames wait for the next anchor
     } else {
+        bool refused = false;
         for (unsigned i = 0; i < r->heldCount; i++) {
-            if (r->bPictures && code(e, &r->held[i], H264ENC_B) != REFUSED)
+            if (!refused && code(e, &r->held[i], H264ENC_B) != REFUSED)
                 continue;
-            r->bPictures = 0;
+            refused = true;
             if (code(e, &r->held[i], H264ENC_I) == REFUSED)
                 drop(e, &r->held[i], kVTVideoEncoderMalfunctionErr, true);
         }

@@ -19,8 +19,12 @@ struct PanicRestore {
     throw std::runtime_error("display panic");
 }
 
+unsigned gLogs = 0;
+
 void IOLog(const char *, ...)
-{}
+{
+    ++gLogs;
+}
 
 struct Display {
     static constexpr const char *kBlockScanName = "portrait";
@@ -557,6 +561,25 @@ TEST(ScanoutStart, LatchedUnderflowAfterTheRotationIsNotedForTheFrame)
     EXPECT_EQ(d.notedUnderflow, Display::kWinAUnderflowInt);
     EXPECT_EQ(d.dc.values[Display::kDcIntStatus], 0u);
     EXPECT_EQ(d.underflowRun, 1u);
+}
+
+// Window A underflowing from a slot is one error line at the third frame in a row, and nothing is held: the next frame
+// may scan a slot again. The panic at kUnderflowFrames in a row stays the backstop.
+TEST(ScanoutStart, AnUnderflowRunFromASlotIsOneLineAndHoldsNothing)
+{
+    Display d;
+    d.presentEntry(Display::kSlot0);
+    d.frameEnd(true);
+    gLogs = 0;
+    for (unsigned i = 0; i < Display::kDirectUnderflowFrames + 2; ++i) {
+        d.dc.values[Display::kDcIntStatus] = Display::kWinAUnderflowInt;
+        d.frameEnd(false);
+    }
+    EXPECT_EQ(gLogs, 1u);
+    EXPECT_TRUE(d.directScanChosen());
+    d.frameEnd(false);
+    EXPECT_EQ(d.underflowRun, 0u);
+    EXPECT_TRUE(d.directScanChosen());
 }
 
 }  // namespace

@@ -4,8 +4,11 @@
 #   smmu_owner_source_test    only TegraSMMU.cpp programs the MC's global SMMU registers (reads every driver's C++)
 #   smmu_attachments_test     the swgroups tegra_smmu_resume programs again after SC7 (TegraSMMUAttachments.h)
 #   smmu_space_test           an engine's IOVA allocation (TegraSMMUSpace.h)
+#   mc_hot_reset_owner_test   tegra_mc_hot_reset is the one writer of the MC's hot-reset registers
+#   mc_hot_reset_request_test a hot-reset bit that does not read back is one line naming the client
+#   mc_errors_test            the MC error interrupt: filter with interrupts off, one line per error, INTMASK
 load("//bazel/lint:defs.bzl", "lint_files")
-load("//bazel/testing:defs.bzl", "host_test")
+load("//bazel/testing:defs.bzl", "host_library", "host_shims", "host_test")
 
 lint_files()
 
@@ -47,5 +50,139 @@ host_test(
         "switch_smmu_restore_test.cpp",
         "//drivers/TegraSMMU:SwitchSmmuRegisters.h",
         "//drivers/TegraSMMU:TegraSMMUAttachments.h",
+    ],
+)
+
+host_shims(
+    name = "mc_kernel",
+    headers = [
+        "IOKit/IOLib.h",
+        "IOKit/IOLocks.h",
+        "kern/clock.h",
+        "libkern/libkern.h",
+    ],
+    stubs = "mc_hot_reset_stubs.h",
+)
+
+host_library(
+    name = "mc_owner",
+    srcs = [
+        "//drivers/SwitchDisplayPort:SwitchDPModes.h",
+        "//drivers/SwitchDisplayPort:TegraDisplayB.cpp",
+        "//drivers/SwitchDisplayPort:TegraDisplayB.h",
+        "//drivers/TegraDisplayFlip:SwitchDisplayPriority.h",
+        "//drivers/TegraGM20B:platform.c",
+        "//drivers/TegraGM20B:shim/include/nvxnu.h",
+        "//drivers/TegraI2C:TegraI2C.h",
+        "//drivers/TegraSMMU:SwitchSmmuRegisters.h",
+        "//drivers/TegraSMMU:TegraMCNames.h",
+        "//drivers/TegraSMMU:TegraSMMU.cpp",
+        "//drivers/TegraSMMU:TegraSMMU.h",
+        "//drivers/TegraSMMU:TegraSMMUAttachments.h",
+        "//kits/SwitchCAR:SwitchCAR.h",
+        "//kits/SwitchCAR:SwitchPMC.h",
+        "//kits/SwitchLinux:SwitchLinux.h",
+        "//kits/SwitchLinux:SwitchLinuxLock.h",
+        "//kits/SwitchMMIO:SwitchMMIO.h",
+        "//kits/SwitchMMIO:SwitchMMIOKernel.h",
+    ],
+    defines = ["SWITCH_MMIO_HOST_MODEL=1"],
+    deps = [":mc_kernel"],
+)
+
+# MC_CLIENT_HOTRESET_CTRL/_1 have one writer, tegra_mc_hot_reset: display B's power-up against VIC's power steps and
+# the GPU's flush and rail-down against NVDEC's and NVJPG's on a register file, and every driver's and kit's source.
+host_test(
+    name = "mc_hot_reset_owner_test",
+    srcs = [
+        "mc_hot_reset_owner_test.cpp",
+        "//drivers/SwitchDisplayPort:SwitchDPModes.h",
+        "//drivers/SwitchDisplayPort:TegraDisplayB.h",
+        "//drivers/TegraGM20B:shim/include/nvxnu.h",
+        "//drivers/TegraI2C:TegraI2C.h",
+        "//drivers/TegraSMMU:TegraSMMU.h",
+        "//kits/SwitchCAR:SwitchCAR.h",
+        "//kits/SwitchCAR:SwitchPMC.h",
+        "//kits/SwitchLinux:SwitchLinux.h",
+        "//kits/SwitchLinux:SwitchLinuxLock.h",
+    ],
+    data = [
+        "//drivers/SwitchDisplayPort:all_files",
+        "//kernel:lint_sources",
+    ],
+    deps = [
+        ":mc_kernel",
+        ":mc_owner",
+    ],
+)
+
+host_library(
+    name = "mc_smmu",
+    srcs = [
+        "//drivers/TegraSMMU:SwitchSmmuRegisters.h",
+        "//drivers/TegraSMMU:TegraMCNames.h",
+        "//drivers/TegraSMMU:TegraSMMU.cpp",
+        "//drivers/TegraSMMU:TegraSMMU.h",
+        "//drivers/TegraSMMU:TegraSMMUAttachments.h",
+        "//kits/SwitchMMIO:SwitchMMIO.h",
+        "//kits/SwitchMMIO:SwitchMMIOKernel.h",
+    ],
+    defines = ["SWITCH_MMIO_HOST_MODEL=1"],
+    deps = [":mc_kernel"],
+)
+
+# tegra_mc_hot_reset reads its request bit back and names the client in one line when it did not take.
+host_test(
+    name = "mc_hot_reset_request_test",
+    srcs = [
+        "mc_hot_reset_request_test.cpp",
+        "//drivers/TegraSMMU:TegraSMMU.h",
+    ],
+    deps = [
+        ":mc_kernel",
+        ":mc_smmu",
+    ],
+)
+
+host_shims(
+    name = "mc_errors_kernel",
+    headers = [
+        "IOKit/IOFilterInterruptEventSource.h",
+        "IOKit/IOLib.h",
+        "IOKit/IOLocks.h",
+        "IOKit/IOWorkLoop.h",
+        "kern/clock.h",
+    ],
+    stubs = "mc_errors_stubs.h",
+)
+
+host_library(
+    name = "mc_errors",
+    srcs = [
+        "//drivers/ArmGIC:SwitchInterrupts.h",
+        "//drivers/TegraSMMU:TegraMCErrors.cpp",
+        "//drivers/TegraSMMU:TegraMCErrors.h",
+        "//drivers/TegraSMMU:TegraMCNames.h",
+        "//drivers/TegraSMMU:TegraSMMU.h",
+        "//kits/SwitchMMIO:SwitchMMIO.h",
+        "//kits/SwitchMMIO:SwitchMMIOKernel.h",
+    ],
+    defines = ["SWITCH_MMIO_HOST_MODEL=1"],
+    deps = [":mc_errors_kernel"],
+)
+
+# The MC error interrupt: its filter, with interrupts off, takes and clears only the error bits and nothing in it
+# locks, logs, sleeps or allocates; its action's line names the kind, client and address.
+host_test(
+    name = "mc_errors_test",
+    srcs = [
+        "mc_errors_test.cpp",
+        "//drivers/TegraSMMU:TegraMCErrors.h",
+        "//drivers/TegraSMMU:TegraMCNames.h",
+        "//drivers/TegraSMMU:TegraSMMU.h",
+    ],
+    deps = [
+        ":mc_errors",
+        ":mc_errors_kernel",
     ],
 )

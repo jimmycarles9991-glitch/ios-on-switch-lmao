@@ -100,8 +100,49 @@ TEST(RawFetchFree, Rung2TakesAnEightBitScreenTargetTwoLayersDeep)
     EXPECT_EQ(raw::fetchFreeTaken(f, {80, false, 1}), raw::fixedBlendProven());
     EXPECT_FALSE(raw::fetchFreeTaken(f, {80, false, 2}));
     EXPECT_FALSE(raw::fetchFreeTaken(f, {80, true, 0}));
-    EXPECT_FALSE(raw::fetchFreeTaken(f, {115, false, 0}));
+    EXPECT_FALSE(raw::fetchFreeTaken(f, {90, false, 0}));
     EXPECT_FALSE(raw::fetchFreeTaken(f, {80, false, 0}, 4));
+}
+
+TEST(RawFetchFree, AFormKnowsTheFragmentTexturesItSamples)
+{
+    raw::PackPipeline pp = formRecord(0, raw::FetchBlend);
+    pp.entries = 3;
+    pp.entry[0] = {0, raw::EntryTexture, 2, 3, 0, 0, 0};
+    pp.entry[1] = {8, raw::EntryTexture, 1, 5, 0, 0, 0};
+    pp.entry[2] = {16, raw::EntryUbo, 2, 0, 0, 0, 0};
+    const raw::FetchFreeForm f = raw::fetchFreeForm(pp, nullptr);
+    EXPECT_EQ(f.sampledSlots, 1u << 3) << "the fragment stage's texture alone";
+}
+
+struct Image {
+    uint32_t format = 0;
+};
+
+TEST(RawFetchFree, EightBitSourcesAreSamplesOfUnorm8ImagesOnly)
+{
+    const Image bgra{80}, rgba{70}, srgb{81}, half{115};
+    const Image *bound[4] = {&bgra, &rgba, &srgb, &half};
+    EXPECT_TRUE(raw::eightBitSamples(0b11u, bound));
+    EXPECT_FALSE(raw::eightBitSamples(0b101u, bound)) << "sRGB samples are decoded off the codes";
+    EXPECT_FALSE(raw::eightBitSamples(0b1001u, bound));
+    EXPECT_FALSE(raw::eightBitSamples(0u, bound)) << "a colour no image gives";
+    const Image *none[1] = {nullptr};
+    EXPECT_FALSE(raw::eightBitSamples(1u, none));
+}
+
+// x1-units UNITS.md: 8-bit sources within 2 codes at any depth, computed colour 2 layers deep; never re-blended frames
+TEST(RawFetchFree, EightBitSourcesTakeRung2AtAnyDepthUnlessTheTargetAccumulates)
+{
+    const raw::FetchFreeForm f = raw::fetchFreeForm(formRecord(0, raw::FetchBlend), nullptr);
+    raw::FetchFreeDraw draw = {80, false, 7};
+    EXPECT_FALSE(raw::fetchFreeTaken(f, draw));
+    draw.eightBitSources = true;
+    EXPECT_EQ(raw::fetchFreeTaken(f, draw), raw::fixedBlendProven());
+    draw.accumulates = true;
+    EXPECT_FALSE(raw::fetchFreeTaken(f, draw));
+    draw.ropLayers = 0;
+    EXPECT_FALSE(raw::fetchFreeTaken(f, draw));
 }
 
 TEST(RawFetchFree, Rung3WaitsForItsPassesToBeProvenUnlessAProbeForcesIt)

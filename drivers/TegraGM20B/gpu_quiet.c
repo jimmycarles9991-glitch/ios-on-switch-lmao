@@ -34,6 +34,19 @@ void tgm_chan_need_uid(uint32_t uid, uint32_t seqno)
 	mutex_unlock(&tgm_live_lock);
 }
 
+/* A kernel wait's seqno on the channel's word (uid: its id's low word, which picks the same word), published before
+ * it tests the fence. A channel gone or failed wakes its word at its teardown or kill. */
+void tgm_chan_wanted(uint32_t uid, uint32_t seqno)
+{
+	struct tgm_chan *chan = NULL;
+
+	mutex_lock(&tgm_live_lock);
+	chan = live_by_uid(uid);
+	if (chan)
+		switch_gpu_waiter_want(&chan->wanted, seqno);
+	mutex_unlock(&tgm_live_lock);
+}
+
 void tgm_chan_need_tokens(const struct switch_gpu_backing_token *tokens, uint32_t count)
 {
 	struct tgm_chan *chan = NULL;
@@ -69,9 +82,6 @@ void tgm_chan_wake_push(struct tgm_chan *chan)
 	PUSH_MTHD(push, NV906F, NON_STALL_INTERRUPT, 0);
 	switch_gpu_quiet_announce(&chan->quiet, chan->submitted);
 	switch_gpu_jobs_announce_newest(&chan->jobs);
-	if (switch_gpu_irq_arm(&chan->irq_state, chan->submitted) &&
-	    nvif_event_allow(&chan->nonstall))
-		nvxnu_panic("SwitchGpu: cannot arm channel completion");
 	if (stats_on())
 		__atomic_fetch_add(&tgm_wstat.pushed, 1, __ATOMIC_RELAXED);
 	PUSH_KICK(push);
@@ -86,8 +96,8 @@ void tgm_chan_quiet_wake(struct tgm_chan *chan)
 	gate_leave();
 }
 
-/* The idle clock's tick found seqnos in flight and no kick for its drop time: what completed is retired from the fence
- * words, and each channel whose newest job is still running asks for its interrupt, as a waiter would. */
+/* The idle clock's tick found work in flight and no kick for its drop time: what completed is settled from the fence
+ * words (tgm_busy), and each channel whose newest job is still running asks for its interrupt, as a waiter would. */
 void tgm_idle_settle(void *arg)
 {
 	struct tgm_chan *chan = NULL;
@@ -96,7 +106,7 @@ void tgm_idle_settle(void *arg)
 	mutex_lock(&tgm_live_lock);
 	list_for_each_entry(chan, &tgm_live_chans, live)
 	{
-		idle_retire(chan, tgm_chan_completed(chan));
+		switch_gpu_busy_settle(&tgm_busy, chan->chid, tgm_chan_completed(chan));
 		tgm_chan_need(chan, READ_ONCE(chan->submitted));
 	}
 	mutex_unlock(&tgm_live_lock);

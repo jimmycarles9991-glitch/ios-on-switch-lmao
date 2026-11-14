@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: MIT
-// Rules resolve.twod and resolve.exact (raw/runtime/raw_resolve_rule.h): where they are taken, and the arithmetic they
-// rest on, exhaustively, against the ROP's unorm store rule (x1-units UNITS.md): u = floor(v * 2^(n+4)), code =
-// (u * (2^n - 1) + 2^(n+3) - 1) >> (n+4); RGBA16F toward zero; the 8-bit blender round((S*Fs + D*Fd) / 255).
-// Each candidate for an exact 2D-engine resolve that fails is held to the counter-example it fails on.
+// Rule resolve.twod (raw/runtime/raw_resolve_rule.h): where it is taken, and the arithmetic it rests on, exhaustively,
+// against the ROP's unorm store rule (x1-units UNITS.md): u = floor(v * 2^(n+4)), code = (u * (2^n - 1) + 2^(n+3) - 1)
+// >> (n+4); RGBA16F toward zero; the 8-bit blender round((S*Fs + D*Fd) / 255); and the 2D engine's reading of a unorm8
+// code at 15 bits. Each candidate for an exact 2D-engine resolve that fails is held to the counter-example it fails on.
 #include <gtest/gtest.h>
 #include <cmath>
 #include <cstdint>
@@ -76,7 +76,7 @@ TEST(ResolveRule, TakenForScreenBoundUnorm8Only)
     EXPECT_TRUE(raw::twodResolveAcceptable(a));
     a.samples = 2;
     EXPECT_TRUE(raw::twodResolveAcceptable(a));
-    a.format = 81;
+    a.format = 91;
     EXPECT_FALSE(raw::twodResolveAcceptable(a));
     a.format = 70;
     a.readable = true;
@@ -92,9 +92,10 @@ TEST(ResolveRule, TakenForScreenBoundUnorm8Only)
     EXPECT_FALSE(raw::twodResolveAcceptable(a)) << "the 2D engine would write a pitch the render hardware refuses";
 }
 
-// A reader that takes the texels as data (the CPU, another process, a blit, a kernel) makes the resolve exact through
-// the complement, the same engine, at 2x and 4x; a screen-bound or pass-sampled target keeps the one-code route
-TEST(ResolveRule, EveryWayTheTexelsCanBeReadAsDataTakesTheComplement)
+// A reader that takes the texels as data (the CPU, another process, a blit, a kernel) gets the pack's resolve pass, at
+// 2x and 4x: Metal's rule on the chip and faster than the complement; a screen-bound or pass-sampled target keeps the
+// one-code route
+TEST(ResolveRule, EveryWayTheTexelsCanBeReadAsDataTakesThePass)
 {
     EXPECT_FALSE(raw::resolveTargetReadable({}));
     const raw::ResolveTarget each[] = {
@@ -107,34 +108,76 @@ TEST(ResolveRule, EveryWayTheTexelsCanBeReadAsDataTakesTheComplement)
             raw::ResolveAsk a = screenBound(samples);
             a.readable = raw::resolveTargetReadable(t);
             EXPECT_FALSE(raw::twodResolveAcceptable(a));
-            EXPECT_TRUE(raw::twodResolveExact(a));
-            EXPECT_EQ(raw::resolveRoute(a), raw::ResolveByComplement);
-            a.compressedSamples = true;
-            EXPECT_EQ(raw::resolveRoute(a), raw::ResolveByPass) << "the complement on compressed samples is unproven";
+            EXPECT_EQ(raw::resolveRoute(a), raw::ResolveByPass);
         }
     for (uint8_t samples : {2, 4})
-        EXPECT_EQ(raw::resolveRoute(screenBound(samples)),
-                  raw::twodResolveComplementProven() && (samples == 2 || raw::twodResolveSingleRounding4x())
-                      ? raw::ResolveByComplement
-                      : raw::ResolveByTwod)
-            << "a screen-bound target keeps the 2D engine's one code until the complement is proven";
+        EXPECT_EQ(raw::resolveRoute(screenBound(samples)), raw::ResolveByTwod);
     raw::ResolveAsk eight = screenBound(8);
     eight.readable = true;
     EXPECT_EQ(raw::resolveRoute(eight), raw::ResolveByPass);
 }
 
-TEST(ResolveRule, TheComplementWaitsOnTheDeviceAndThen4xOnOneRounding)
+raw::ResolveAsk ask(uint16_t format, uint8_t samples, bool readable)
 {
-    const bool proven = raw::twodResolveComplementProven();
-    EXPECT_EQ(raw::twodResolveExact(screenBound(2)), proven);
-    EXPECT_EQ(raw::twodResolveExact(screenBound(4)), proven && raw::twodResolveSingleRounding4x());
-    raw::ResolveAsk a = screenBound(2);
-    a.compressedSamples = true;
-    EXPECT_TRUE(raw::twodResolveAcceptable(a));
-    EXPECT_FALSE(raw::twodResolveExact(a));
-    a = screenBound(2);
-    a.readable = true;
-    EXPECT_TRUE(raw::twodResolveExact(a));
+    raw::ResolveAsk a = screenBound(samples);
+    a.format = format;
+    a.readable = readable;
+    return a;
+}
+
+// gpu.raw.resolve_twod rgba16f_2x (exact, rgba16f_2x_read=twod) and rgba16f_4x (near)
+TEST(ResolveRule, RGBA16FloatTakesTheEngineEverywhereAt2xAndScreenBoundAt4x)
+{
+    EXPECT_EQ(raw::resolveRoute(ask(115, 2, false)), raw::ResolveByTwod);
+    EXPECT_EQ(raw::resolveRoute(ask(115, 2, true)), raw::ResolveByTwod);
+    EXPECT_EQ(raw::resolveRoute(ask(115, 4, false)), raw::ResolveByTwod);
+    EXPECT_EQ(raw::resolveRoute(ask(115, 4, true)), raw::ResolveByPass);
+    EXPECT_FALSE(raw::twodResolveComplementShape(ask(115, 2, false)));
+    EXPECT_TRUE(raw::twodResolveComplementShape(ask(80, 2, true)));
+}
+
+// gpu.raw.resolve_twod bgra8srgb_<n>x and rgba8srgb_<n>x (near)
+TEST(ResolveRule, SRGBResolvesTakeTheEngineScreenBound)
+{
+    for (uint16_t format : {71, 81})
+        for (uint8_t samples : {2, 4}) {
+            EXPECT_EQ(raw::resolveRoute(ask(format, samples, false)), raw::ResolveByTwod);
+            EXPECT_EQ(raw::resolveRoute(ask(format, samples, true)), raw::ResolveByPass);
+            EXPECT_FALSE(raw::twodResolveComplementShape(ask(format, samples, false)));
+        }
+}
+
+// gpu.raw.resolve_twod rgb10a2_<n>x (near)
+TEST(ResolveRule, ScreenBoundRGB10A2TakesTheEngine)
+{
+    for (uint8_t samples : {2, 4}) {
+        EXPECT_EQ(raw::resolveRoute(ask(90, samples, false)), raw::ResolveByTwod);
+        EXPECT_EQ(raw::resolveRoute(ask(90, samples, true)), raw::ResolveByPass);
+    }
+}
+
+// gpu.raw.resolve_twod rg11b10f_<n>x (near)
+TEST(ResolveRule, ScreenBoundRG11B10FloatTakesTheEngine)
+{
+    for (uint8_t samples : {2, 4}) {
+        EXPECT_EQ(raw::resolveRoute(ask(92, samples, false)), raw::ResolveByTwod);
+        EXPECT_EQ(raw::resolveRoute(ask(92, samples, true)), raw::ResolveByPass);
+    }
+}
+
+TEST(ResolveRule, TheComplementIsNoRoute)
+{
+    for (uint16_t format : {70, 80})
+        for (uint8_t samples : {2, 4, 8})
+            for (int bits = 0; bits < 8; bits++) {
+                raw::ResolveAsk a;
+                a.format = format;
+                a.samples = samples;
+                a.readable = bits & 1;
+                a.wholeTarget = bits & 2;
+                a.shadowTarget = bits & 4;
+                EXPECT_NE(raw::resolveRoute(a), raw::ResolveByComplement);
+            }
     EXPECT_EQ(raw::resolveSampleSlot(2), 0u);
     EXPECT_EQ(raw::resolveSampleSlot(4), 1u);
     EXPECT_EQ(raw::resolveSampleSlot(8), 2u);
@@ -228,6 +271,79 @@ TEST(ResolveCandidates, NoEightBitIntermediateOfTwoSamplesIsExactAt4x)
                 apart = metal(p + t, 4) != metal(q + t, 4);
             ASSERT_TRUE(apart) << p << " " << q;
         }
+}
+
+// The 2D engine's 2x box as the chip reads it: each code at 15 bits, nearest, then the store rule of the exact mean
+uint32_t code15(uint32_t c)
+{
+    return (257 * c + 1) >> 1;
+}
+
+uint32_t engineBox(uint32_t a, uint32_t b)
+{
+    const uint32_t u = (code15(a) + code15(b)) >> 4;
+    return (u * 255 + 2047) >> 12;
+}
+
+uint32_t engineComplement(uint32_t a, uint32_t b)
+{
+    return 255 - engineBox(255 - a, 255 - b);
+}
+
+// hw_test_app/shaders/ResolveTwod.metal's sample of pixel (x, y)
+uint32_t sampleHash(uint32_t x, uint32_t y, uint32_t sample)
+{
+    uint32_t h = (x * 73856093u) ^ (y * 19349663u) ^ ((sample + 1) * 83492791u);
+    h ^= h >> 13;
+    h *= 0x5bd1e995u;
+    return h ^ (h >> 15);
+}
+
+TEST(ResolveEngine, CodesAtFifteenBitsGiveTheDevicesCounts)
+{
+    for (uint32_t c = 0; c < 256; c++)
+        ASSERT_EQ(code15(c), uint32_t(std::lround(c * 32768.0 / 255.0))) << c;
+    // gpu.raw.resolve_twod's 720x1280 BGRA8 pass at 2x, boots 19 and 21: 2x_one_off_bgra and 2x_exact_one_off_bgra
+    const uint32_t shift[4] = {16, 8, 0, 24};
+    const uint32_t box[4] = {447364, 448690, 447877, 452349}, complement[4] = {13130, 12545, 13530, 12716};
+    uint32_t boxOff[4] = {}, complementOff[4] = {};
+    for (uint32_t y = 0; y < 1280; y++)
+        for (uint32_t x = 0; x < 720; x++) {
+            const uint32_t h0 = sampleHash(x, y, 0), h1 = sampleHash(x, y, 1);
+            for (int c = 0; c < 4; c++) {
+                const uint32_t a = h0 >> shift[c] & 255, b = h1 >> shift[c] & 255, m = metal(a + b, 2);
+                boxOff[c] += engineBox(a, b) != m;
+                complementOff[c] += engineComplement(a, b) != m;
+            }
+        }
+    for (int c = 0; c < 4; c++) {
+        EXPECT_EQ(boxOff[c], box[c]) << "channel " << c;
+        EXPECT_EQ(complementOff[c], complement[c]) << "channel " << c;
+    }
+}
+
+// Where the box and its complement both land one under Metal, the pair (k, k) gives the same two codes and Metal's k,
+// so no function of the two readings, a ROP3 among them, is Metal's rule
+TEST(ResolveEngine, NoReadingOfTheBoxAndItsComplementIsExact)
+{
+    uint32_t both = 0, complementOff = 0;
+    for (uint32_t a = 0; a < 256; a++)
+        for (uint32_t b = 0; b < 256; b++) {
+            const uint32_t m = metal(a + b, 2), box = engineBox(a, b), complement = engineComplement(a, b);
+            ASSERT_LE(m - box, 1u);
+            ASSERT_LE(m - complement, 1u);
+            complementOff += complement != m;
+            if (box == m || complement == m)
+                continue;
+            both++;
+            const uint32_t k = box;
+            ASSERT_EQ(complement, k);
+            ASSERT_EQ(engineBox(k, k), k);
+            ASSERT_EQ(engineComplement(k, k), k);
+            ASSERT_EQ(metal(2 * k, 2), k);
+        }
+    EXPECT_EQ(both, 896u);
+    EXPECT_EQ(complementOff, 896u) << "every complement miss is a box miss too";
 }
 
 }  // namespace

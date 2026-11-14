@@ -26,6 +26,10 @@ struct idle_core {
     uint64_t wake_at;
     uint64_t lead;
     uint32_t state;
+    /* C7 requests the firmware refused and the last one's PSCI error. Only this core's idle path writes them (the count
+     * last, release); idle_report reads them and keeps its own count of those it has logged (idle_logged). */
+    uint64_t refused;
+    int64_t refused_rc;
 #if DEVELOPMENT || DEBUG
     struct switch_idle_counts counts;
     bool from_c7; /* back from C7 and no idle entry since: the next frame line paid the exit */
@@ -37,22 +41,30 @@ static const struct switch_idle_platform *idle_platform;
 static bool idle_c7;
 static uint64_t idle_frame_at;
 static void (*idle_frames_started)(void);
-static int64_t idle_failure;
-static thread_call_t idle_failure_call;
+static thread_call_t idle_report_call;
+static uint64_t idle_logged[SWITCH_SMP_CORE_COUNT];
 
-static void idle_report_failure(__unused thread_call_param_t p0, __unused thread_call_param_t p1)
+static void idle_report(__unused thread_call_param_t p0, __unused thread_call_param_t p1)
 {
-    os_log_error(OS_LOG_DEFAULT, "SwitchIdle: C7 off for this boot: PSCI CPU_SUSPEND returned %lld",
-                 os_atomic_load(&idle_failure, relaxed));
+    for (uint32_t cpu = 0; cpu < SWITCH_SMP_CORE_COUNT; cpu++) {
+        const struct idle_core *core = &idle_cores[cpu];
+        const uint64_t refused = os_atomic_load(&core->refused, acquire);
+        if (refused != idle_logged[cpu]) {
+            os_log_error(OS_LOG_DEFAULT,
+                         "SwitchIdle: cpu%u: PSCI CPU_SUSPEND to C7 returned %lld, so that idle ran without C7 (%llu "
+                         "refused since the last line); the next idle that chooses C7 asks again",
+                         cpu, os_atomic_load(&core->refused_rc, relaxed), refused - idle_logged[cpu]);
+            idle_logged[cpu] = refused;
+        }
+    }
 }
 
 /* The idle thread, interrupts masked: the line is logged from a thread call. */
-static void idle_fail(int64_t rc)
+static void idle_refused(struct idle_core *core, int64_t rc)
 {
-    if (os_atomic_cmpxchg(&idle_failure, 0, rc, relaxed)) {
-        os_atomic_store(&idle_c7, false, relaxed);
-        thread_call_enter(idle_failure_call);
-    }
+    os_atomic_store(&core->refused_rc, rc, relaxed);
+    os_atomic_store(&core->refused, core->refused + 1, release);
+    thread_call_enter(idle_report_call);
 }
 
 static void idle_exit(struct idle_core *core, uint64_t now)
@@ -87,7 +99,7 @@ void switch_idle_wfi(struct cpu_data *cdp)
         const int64_t rc =
             idle_platform->power_down(cpu, switch_idle_timer_ticks(now, core->wake_at, idle_platform->wake_ticks_max));
         if (rc != 0) {
-            idle_fail(rc);
+            idle_refused(core, rc);
         }
 #if DEVELOPMENT || DEBUG
         else {
@@ -129,8 +141,8 @@ void switch_idle_resumed(struct cpu_data *cdp)
 
 void switch_idle_start(const struct switch_idle_platform *platform)
 {
-    idle_failure_call = thread_call_allocate_with_options(idle_report_failure, NULL, THREAD_CALL_PRIORITY_KERNEL,
-                                                          THREAD_CALL_OPTIONS_ONCE);
+    idle_report_call =
+        thread_call_allocate_with_options(idle_report, NULL, THREAD_CALL_PRIORITY_KERNEL, THREAD_CALL_OPTIONS_ONCE);
     idle_platform = platform;
     for (uint32_t cpu = 0; cpu < SWITCH_SMP_CORE_COUNT; cpu++) {
         idle_cores[cpu].lead = switch_idle_c7_lead(0, 0);
@@ -147,8 +159,11 @@ void switch_idle_note_frame(void)
         idle_cores[cpu].counts.frame_wakes++;
     }
 #endif
+    /* Only the frame core (ArmGIC frameTarget) writes the stamp. While the frame lines move to it (a core coming
+     * online, SC7) two cores may both read an old stamp and both report the start, which started() takes twice. */
     const uint64_t now = mach_absolute_time();
-    const uint64_t before = os_atomic_xchg(&idle_frame_at, now, relaxed);
+    const uint64_t before = os_atomic_load(&idle_frame_at, relaxed);
+    os_atomic_store(&idle_frame_at, now, relaxed);
     if (now - before >= SWITCH_IDLE_FRAME_WINDOW) {
         void (*started)(void) = os_atomic_load(&idle_frames_started, acquire);
         if (started) {

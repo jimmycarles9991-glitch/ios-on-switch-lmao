@@ -2,14 +2,17 @@ import Foundation
 import HWTestCore
 import HWTestGPU
 
-/// L996: whether VIC honours a 16.16 source offset (IOSurfaceAcceleratorCapabilitiesFractionalXYOffsetsSupported) and
-/// AlphaFillMode BACKGROUND (AlphaOverride), from drivers/TegraVIC/SwitchVICFractionProbe.h: 1:1 2-tap copies a quarter,
-/// half and three quarters of a pixel across, down and both, each scored in the kernel against the interpolation, the
-/// truncated and the rounded offset; then a varying-alpha copy with every alpha overridden. <case>_answer names the
-/// answer the engine gave. fractional= decides the capability, alpha_override= the request flag.
+/// L996: whether VIC honours a 16.16 source offset (IOSurfaceAcceleratorCapabilitiesFractionalXYOffsetsSupported),
+/// AlphaFillMode BACKGROUND (AlphaOverride) and a 16.16 source width and height (FractionalDimensions), from
+/// drivers/TegraVIC/SwitchVICFractionProbe.h: 1:1 2-tap copies a quarter, half and three quarters of a pixel across,
+/// down and both, each scored in the kernel against the interpolation, the truncated and the rounded offset; a
+/// varying-alpha copy with every alpha overridden; then sources 24.75 pixels across (w3_0), down (w0_3) and 24.5 both
+/// ways (w2_2) scaled onto 24, against the interpolation at that scale and the width truncated or rounded.
+/// <case>_answer names the answer the engine gave. fractional= judges the offsets, dimensions= the widths,
+/// alpha_override= the request flag.
 enum X1VICFractionProbe {
     static let magic: UInt32 = 0x5646_5241  // 'VFRA'
-    static let cases = 10
+    static let cases = 13
     static let caseWords = 13
     static let replyBytes = 16 + 4 * caseWords * cases
 
@@ -17,12 +20,13 @@ enum X1VICFractionProbe {
         switch r[2] {
         case 1: return "alpha_source"
         case 2: return "alpha_background"
+        case 3: return "w\(r[0] / 0x4000)_\(r[1] / 0x4000)"
         default: return "q\(r[0] / 0x4000)_\(r[1] / 0x4000)"
         }
     }
 
     static func answer(_ r: [UInt32]) -> String {
-        let names = r[2] == 0 ? ["lerp", "trunc", "round"] : ["claim", "source", "opaque"]
+        let names = r[2] == 0 || r[2] == 3 ? ["lerp", "trunc", "round"] : ["claim", "source", "opaque"]
         return (0..<3).first { r[4 + $0] == 0 }.map { names[$0] } ?? "none"
     }
 
@@ -39,6 +43,7 @@ enum X1VICFractionProbe {
         var wrong: [String: Int] = [:]
         var fractional = true
         var alphaOverride = true
+        var dimensions = true
         for i in 0..<min(Int(reply[1]), cases) {
             let r = Array(reply[(4 + caseWords * i)..<(4 + caseWords * (i + 1))])
             let name = caseName(r)
@@ -53,10 +58,12 @@ enum X1VICFractionProbe {
             if !control { wrong[name + "_wrong"] = count }
             if r[2] == 0 && !control && count != 0 { fractional = false }
             if r[2] == 2 && count != 0 { alphaOverride = false }
+            if r[2] == 3 && count != 0 { dimensions = false }
         }
         metrics.set("controls_clean", reply[2] != 0)
         metrics.set("fractional", fractional ? "pass" : "fail")
         metrics.set("alpha_override", alphaOverride ? "pass" : "fail")
+        metrics.set("dimensions", dimensions ? "pass" : "fail")
         let finding = ProbeFinding.counted(wrong, paths: [], metrics: metrics)
         guard reply[2] != 0, Int(reply[1]) == cases else {
             return ProbeFinding(

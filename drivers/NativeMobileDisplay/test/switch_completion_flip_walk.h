@@ -16,6 +16,7 @@ namespace completion_flip_test {
 
 struct Walk {
     unsigned completed = 0, fromCompletions = 0, fromFilters = 0;
+    bool suspends = true;  // SC7 steps among the others
 };
 
 inline uint64_t gRng = 0x9e3779b97f4a7c15ull;
@@ -108,7 +109,7 @@ inline void randomWalk(Display &d, unsigned steps, Walk &walk)
             break;
         }
         case 7:
-            if (d.hwSuspended ? roll(4) == 0 : roll(512) == 0) {
+            if (walk.suspends && (d.hwSuspended ? roll(4) == 0 : roll(512) == 0)) {
                 if (d.hwSuspended) {
                     d.resume();
                 } else {

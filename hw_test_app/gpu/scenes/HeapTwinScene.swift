@@ -2,9 +2,9 @@ import Foundation
 import HWTestCore
 import Metal
 
-// A heap texture drawn after its backing was purged keeps its contents. A white border sampler is one raw refuses
-// (call.sampler) while the facade wraps an m2v device, which then makes the texture's twin; with no m2v device the same
-// draw has to be raw's. Sampling stays inside the texture.
+// A heap texture drawn after its backing was purged keeps its contents, sampled through a white border sampler: the raw
+// path's own (boot 21: it was m2v's, call.sampler "border 2", and the range that bound it failed). Sampling stays inside
+// the texture; a last draw samples past it, its ring the border's white.
 struct HeapTwinScene: GPUScene {
     let id = "gpu.heap.m2v_target"
     let name = "A heap texture drawn by an m2v command buffer, before and after the heap is purged"
@@ -63,12 +63,29 @@ struct HeapTwinScene: GPUScene {
             }
             paths.append(timing.path)
             if RawFacade.kind(of: gpu.device) == "raw" {
-                let route = RawFacade.wrapsM2V(gpu.device) ? "m2v:" : "raw"
-                result.expect(timing.path.hasPrefix(route), "the sampled draw took \(timing.path), not \(route)")
+                result.expect(timing.path == "raw", "the sampled draw took \(timing.path), not raw")
             }
             result.compare(round, try await gpu.raster(target, .bgra8Unorm), want, tolerance: 1.51 / 255)
             heap.setPurgeableState(.nonVolatile)
         }
+        let ring = try gpu.texture(.bgra8Unorm, 64, 64)
+        let timing = try await draw(gpu, sampled, into: ring) { encoder in
+            var corners = GPU.fullScreen
+            var uvs: [SIMD2<Float>] = [SIMD2(-0.5, 1.5), SIMD2(1.5, 1.5), SIMD2(-0.5, -0.5), SIMD2(1.5, -0.5)]
+            encoder.setVertexBytes(&corners, length: MemoryLayout<SIMD4<Float>>.stride * 4, index: 0)
+            encoder.setVertexBytes(&uvs, length: MemoryLayout<SIMD2<Float>>.stride * 4, index: 1)
+            encoder.setFragmentTexture(source, index: 0)
+            encoder.setFragmentSamplerState(sampler, index: 0)
+            encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
+        }
+        paths.append(timing.path)
+        if RawFacade.kind(of: gpu.device) == "raw" {
+            result.expect(timing.path == "raw", "the border draw took \(timing.path), not raw")
+        }
+        let bordered = Raster(width: 64, height: 64, channels: 4) { x, y, c in
+            (16..<48).contains(x) && (16..<48).contains(y) ? Float(Self.color[c]) / 255 : 1
+        }
+        result.compare("border", try await gpu.raster(ring, .bgra8Unorm), bordered, tolerance: 1.51 / 255)
         result.metrics.set("paths", paths.joined(separator: ","))
         return result
     }

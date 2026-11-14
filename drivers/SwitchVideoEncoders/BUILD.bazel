@@ -52,6 +52,7 @@ ios_binary(
         "//drivers/SwitchVideoDecoders:AVD/VTDecoderSPI.h",
         "//drivers/TegraNVENC:headers",
         "//kits/SwitchRefusal:SwitchRefusal.h",
+        "//kits/SwitchServiceWait:SwitchServiceWait.h",
     ],
     copts = [
         "-O2",

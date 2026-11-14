@@ -12,6 +12,8 @@ struct SwitchNativeScanout {
 // turns: a picture TegraVIC recorded turned (SwitchVICTurn.h) too, for window A's column scan; view.turn says which.
 int switch_native_scanout_acquire(OSObject *surface, SwitchNativeScanout *scanout, bool turns = false);
 int switch_native_scanout_pitch(OSObject *surface, SwitchNativeScanout *scanout);
+// The same with the backing the caller already holds for the surface: no IOSurface cache lookup.
+int switch_native_scanout_pitch_held(OSObject *surface, switch_gpu_backing *held, SwitchNativeScanout *scanout);
 // _wait: sleeps for a CPU writer, for an engine reader, which orders behind writer promises on the GPU; _cpu: also until
 // a promised job is submitted, for the CPU's own read (switch_gpu_backing_snapshot_read_cpu).
 int switch_native_scanout_pitch_wait(OSObject *surface, SwitchNativeScanout *scanout);

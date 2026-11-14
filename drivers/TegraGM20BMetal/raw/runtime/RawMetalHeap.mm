@@ -329,7 +329,7 @@ void rmHeapForget(RMHeap *heap, uint64_t va)
     if (arenaKind(d.storageMode, blockLinear) && heapTextureAsk(d, blockLinear, ask) &&
         raw::Device::footprint(ask, bytes, align))
         return {NSUInteger(bytes), NSUInteger(align)};
-    return [RM_M2V("a heap texture's size the raw path does not place") heapTextureSizeAndAlignWithDescriptor:d];
+    return [RM_M2V(NeedHeapTextureSize) heapTextureSizeAndAlignWithDescriptor:d];
 }
 
 - (MTLSizeAndAlign)heapBufferSizeAndAlignWithLength:(NSUInteger)length options:(MTLResourceOptions)options

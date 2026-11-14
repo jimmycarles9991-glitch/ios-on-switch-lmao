@@ -48,7 +48,17 @@ struct Display {
         return p.count;
     }
 
+    unsigned mediaFenced = 0;  // the debug tally of sets that waited for VIC or NVDEC
+
+    void noteMediaFlipTotal(unsigned which, uint32_t n)
+    {
+        if (which == 8)
+            mediaFenced += n;
+    }
+
+#define SWITCH_FRAME_TIMELINE 1
 #include "../SwitchMediaPlaneFence.h"
+#undef SWITCH_FRAME_TIMELINE
 };
 
 constexpr switch_gpu_backing_token kDecode = {0x100000007ULL, 1, SWITCH_GPU_ENGINE_NVDEC, 162};
@@ -74,6 +84,7 @@ TEST_F(MediaPlaneFence, AVideoFrameIsArmedOnItsProducersSyncpointsWithNoCompleti
     EXPECT_EQ(fenced[0].value, kDecode.value);
     EXPECT_EQ(fenced[1].queue, kConvert.queue);
     EXPECT_EQ(completions, 0u);
+    EXPECT_EQ(display.mediaFenced, 1u);
 }
 
 TEST_F(MediaPlaneFence, AGpuProducedSurfaceOrNoProducerStaysOnTheBridge)

@@ -19,6 +19,7 @@
  * thread's own state.
  */
 
+#include <switch/sched.h>
 #include <switch/xnu.h>
 
 #include "stall.h"
@@ -70,6 +71,7 @@ void switch_stall_exec(thread_t thread)
     thread_t old = THREAD_NULL;
     struct stall_snapshot stale = {0};
 
+    switch_sched_busy_exec(thread);
     switch_task_name(get_threadtask(thread), name, sizeof(name));
     for (unsigned int i = 0; i < sizeof(stall_slots) / sizeof(stall_slots[0]); i++) {
         struct stall_slot *slot = &stall_slots[i];
@@ -126,6 +128,7 @@ void switch_stall_tick(uint64_t now)
 {
     bool due = false;
 
+    switch_sched_busy_tick();
     if (os_atomic_load(&stall_call, acquire) == NULL || now - stall_last < stall_check) {
         return;
     }

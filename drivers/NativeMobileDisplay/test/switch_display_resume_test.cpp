@@ -58,7 +58,7 @@ struct Display {
     static constexpr uint32_t kWindowAState[] = {kWinStart, kWinKind, kWinStride, kWinHOffset, kWinOptions};
     static constexpr uint32_t kBlockSurfaceKind = 0x42, kBlockLineStride = 0x3000, kBlockHOffset = 0xb3f;
     static constexpr uint32_t kWindowASelect = 0x10, kGeneralUpdate = 1 << 8, kWinAUpdate = 1 << 9;
-    static constexpr uint32_t kGeneralActReq = 1, kWinAActReq = 2, kVblankInt = 2, kFrameEndInt = 4;
+    static constexpr uint32_t kGeneralActReq = 1, kWinAActReq = 2, kVblankInt = 2, kFrameEndInt = 4, kVpulse2Int = 32;
     static constexpr uint32_t kWinAUnderflowInt = 256;
     static constexpr int kNoBuffer = -1;
 
@@ -117,7 +117,7 @@ struct Display {
     std::array<uint32_t, kCount> dc{};
     uint32_t savedWindow[5] = {0x10000000, 0x7, 0x8, 0x9, 0x40000000};
     uint32_t savedDispWinOptions = 1, savedActControl = 2, savedScratchB = 3, savedIntEnable = 7, savedIntMask = 6;
-    uint32_t dcPending = 9, underflowRun = 3;
+    uint32_t dropped = 0, underflowRun = 3;
     uint64_t frameEnds = 100, rotationRequested = 0;
     bool hwSuspended = true, directAttached = true, directOn = true, planesAttached = true, vpulseProgrammed = true;
     unsigned planesStopped = 0;
@@ -162,6 +162,11 @@ struct Display {
 
     void writeIntMask(uint32_t, uint32_t)
     {}
+
+    void dropFrameEndStatus(uint32_t bits)
+    {
+        dropped |= bits;
+    }
 
     void clearUnderflowCounts()
     {
@@ -224,6 +229,8 @@ TEST(DisplayResume, RestoresCompleteImageBeforeAnyDeferredPresentationOrStart)
 {
     Display d;
     ASSERT_TRUE(d.finishResume());
+    EXPECT_EQ(d.dropped, Display::kVblankInt | Display::kFrameEndInt | Display::kVpulse2Int)
+        << "what the filter took before SC7 is stale";
     EXPECT_EQ(restores, 1u);
     EXPECT_EQ(d.dc[Display::kWinStart], 0x10000000u);
     EXPECT_EQ(d.started, 1u);

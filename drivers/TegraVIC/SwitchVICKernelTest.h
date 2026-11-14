@@ -47,6 +47,7 @@ int switch_vic_packed_probe_run(void *reply);
 int switch_vic_transpose_probe_run(void *reply);
 int switch_vic_large_probe_run(void *reply);
 int switch_vic_compose_probe_run(void *reply);
+int switch_vic_odd_probe_run(void *reply);
 int switch_vic_composite_arm_run(void *reply);
 int switch_vic_composite_report_run(void *reply);
 #endif

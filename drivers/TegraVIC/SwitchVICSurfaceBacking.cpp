@@ -21,6 +21,14 @@ struct CachedSurface {
 CachedSurface gSurfaces[kSurfaceCacheCount];
 IOLock *gLock;
 uint64_t gClock, gBytes;
+uint64_t gLockTakes;  // debug kernels: written under gLock
+
+void noteLock()
+{
+#if (defined(DEVELOPMENT) && DEVELOPMENT) || (defined(DEBUG) && DEBUG)
+    __atomic_store_n(&gLockTakes, __atomic_load_n(&gLockTakes, __ATOMIC_RELAXED) + 1, __ATOMIC_RELAXED);
+#endif
+}
 
 bool initialize()
 {
@@ -93,6 +101,7 @@ switch_gpu_backing *switch_vic_surface_backing(const TegraVICSurface *surface)
     if (!length || length > kSurfaceCacheBytes || !initialize())
         return nullptr;
     IOLockLock(gLock);
+    noteLock();
     auto *backing = cached(surface);
     IOLockUnlock(gLock);
     if (backing)
@@ -119,6 +128,7 @@ switch_gpu_backing *switch_vic_surface_backing(const TegraVICSurface *surface)
         return nullptr;
     }
     IOLockLock(gLock);
+    noteLock();
     auto *existing = cached(surface);
     if (!existing) {
         while (gBytes + ((length + 4095) & ~4095ULL) > kSurfaceCacheBytes) {
@@ -145,3 +155,16 @@ switch_gpu_backing *switch_vic_surface_backing(const TegraVICSurface *surface)
     }
     return adopt(surface, backing);
 }
+
+switch_gpu_backing *switch_vic_surface_backing_held(const TegraVICSurface *surface, switch_gpu_backing *held)
+{
+    switch_gpu_backing_retain(held);
+    return adopt(surface, held);
+}
+
+#if (defined(DEVELOPMENT) && DEVELOPMENT) || (defined(DEBUG) && DEBUG)
+extern "C" uint64_t switch_vic_surface_cache_locks(void)
+{
+    return __atomic_load_n(&gLockTakes, __ATOMIC_RELAXED);
+}
+#endif

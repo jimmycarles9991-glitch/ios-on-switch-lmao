@@ -9,9 +9,9 @@ import Metal
 /// failed, wrong pixels, the scene's own measurements, and paths= (every command buffer's path as the facade reported
 /// it). raw_cbs=, m2v_cbs=, split_cbs= and m2v_why= are the facade's process-wide counters over the run, framework
 /// command buffers included. <prefix>_gpu_clock=host: some of the run's GPU times are the host's window, the facade
-/// having read no GPU stamp for them. While the facade still wraps an m2v device (it answers switchM2VDevice) the scene
-/// also runs there as a measurement that judges nothing: its m2v_ fields, and m2v_same= the pictures it drew in raw's
-/// bytes. Failed comparisons leave got, want and diff PNGs in Documents/gpu/<id>/.
+/// having read no GPU stamp for them. On the facade every command buffer of the scene's own must run on the raw path: one
+/// that did not fails the scene, named by its path. Failed comparisons leave got, want and diff PNGs in
+/// Documents/gpu/<id>/.
 public struct GPUSceneTest: HWTest {
     let scene: any GPUScene
     public let subsystem = Subsystem.metal
@@ -20,7 +20,7 @@ public struct GPUSceneTest: HWTest {
 
     public var id: String { scene.id }
     public var name: String { scene.name }
-    public var timeout: TimeInterval { scene.timeout * 2 }
+    public var timeout: TimeInterval { scene.timeout }
 
     static let goldens: SceneGoldens? = Bundle.main.url(forResource: "scene_goldens", withExtension: "txt")
         .flatMap { try? String(contentsOf: $0, encoding: .utf8) }.map(SceneGoldens.init)
@@ -33,29 +33,18 @@ public struct GPUSceneTest: HWTest {
         var reasons: [String] = []
         var notes: [String] = []
         var saved = 0
-        var pictures: [ScenePicture] = []
         do {
             let result = try await measure(primary, kind, &metrics)
             reasons += result.reasons().map { "\(kind): \($0.prefix(300))" }
             notes += result.notes.map { "\(kind): \($0)" }
             saved += save(result, kind, context.documents)
             reasons += hold(result.pictures, kind, &metrics, context.documents, &saved)
-            pictures = result.pictures
         } catch {
             reasons.append("\(kind): \(error)")
             metrics.set(kind + "_threw", true)
         }
-        if let m2v = RawFacade.m2vDevice(of: primary.device) {
-            do {
-                let result = try await measure(try GPU.make(device: m2v), "m2v", &metrics)
-                let same = pictures.filter { ours in
-                    result.pictures.contains { $0.label == ours.label && $0.signature.hash == ours.signature.hash }
-                }
-                if !pictures.isEmpty { metrics.set("m2v_same", "\(same.count)/\(pictures.count)") }
-            } catch {
-                metrics.set("m2v_threw", true)
-            }
-        }
+        let offRaw = primary.paths.offRaw
+        if kind == "raw" && !offRaw.isEmpty { reasons.append("raw: command buffers off the raw path: \(offRaw.text)") }
         reasons += scene.judge(&metrics)
         if saved > 0 { metrics.set("pngs", saved) }
         if reasons.isEmpty { return .pass(metrics, proof: primary.proof, detail: LogLine.fitted(notes)) }

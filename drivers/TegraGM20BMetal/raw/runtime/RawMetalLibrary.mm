@@ -47,33 +47,33 @@ static bool ownTess(RMFunction *f, switch_metal::FunctionTess &tess)
 
 - (id)rmTwin
 {
-    return RM_FUNCTION_TWIN(self, "a function's twin");
+    return RM_FUNCTION_TWIN(self, NeedFunctionTwin);
 }
 
 - (MTLFunctionType)functionType
 {
-    return _type ? MTLFunctionType(_type) : [(id<MTLFunction>)RM_FUNCTION_TWIN(self, "a function's type") functionType];
+    return _type ? MTLFunctionType(_type) : [(id<MTLFunction>)_twin functionType];
 }
 
 // Reflection: the AIR's, as m2v's function decodes it
 - (NSDictionary<NSString *, MTLFunctionConstant *> *)functionConstantsDictionary
 {
-    return [(id<MTLFunction>)RM_FUNCTION_TWIN(self, "a function's constants") functionConstantsDictionary];
+    return [(id<MTLFunction>)RM_FUNCTION_TWIN(self, NeedFunctionConstants) functionConstantsDictionary];
 }
 
 - (MTLFunctionOptions)options
 {
-    return [(id<MTLFunction>)RM_FUNCTION_TWIN(self, "a function's options") options];
+    return [(id<MTLFunction>)RM_FUNCTION_TWIN(self, NeedFunctionOptions) options];
 }
 
 - (NSArray<MTLVertexAttribute *> *)vertexAttributes
 {
-    return [(id<MTLFunction>)RM_FUNCTION_TWIN(self, "a function's vertex attributes") vertexAttributes];
+    return [(id<MTLFunction>)RM_FUNCTION_TWIN(self, NeedFunctionVertexAttributes) vertexAttributes];
 }
 
 - (NSArray<MTLAttribute *> *)stageInputAttributes
 {
-    return [(id<MTLFunction>)RM_FUNCTION_TWIN(self, "a function's stage input attributes") stageInputAttributes];
+    return [(id<MTLFunction>)RM_FUNCTION_TWIN(self, NeedFunctionStageInputs) stageInputAttributes];
 }
 
 - (MTLPatchType)patchType
@@ -150,7 +150,7 @@ static id functionNotFound(NSString *name, NSError **error)
 
 - (id)rmTwin
 {
-    return RM_LIBRARY_TWIN(self, "a library's twin");
+    return RM_LIBRARY_TWIN(self, NeedLibraryTwin);
 }
 
 - (RMFunction *)wrap:(id<MTLFunction>)twin name:(NSString *)name constants:(MTLFunctionConstantValues *)values
@@ -206,10 +206,10 @@ static id functionNotFound(NSString *name, NSError **error)
         return (id<MTLFunction>)[self function:name as:nil values:nil specialized:false];
     if (![self listsFunction:name])
         return nil;
-    return (id<MTLFunction>)[self wrap:[(id<MTLLibrary>)RM_LIBRARY_TWIN(self, "a function of a kind raw does not list")
-                                           newFunctionWithName:name]
-                                  name:name
-                             constants:nil];
+    return (id<MTLFunction>)[self
+             wrap:[(id<MTLLibrary>)RM_LIBRARY_TWIN(self, NeedLibraryFunctionKind) newFunctionWithName:name]
+             name:name
+        constants:nil];
 }
 
 - (id<MTLFunction>)newFunctionWithName:(NSString *)name
@@ -224,10 +224,9 @@ static id functionNotFound(NSString *name, NSError **error)
     if (![self listsFunction:name])
         return functionNotFound(name, error);
     return (id<MTLFunction>)[self
-             wrap:[(id<MTLLibrary>)RM_LIBRARY_TWIN(self, "a specialized function raw does not list")
-                      newFunctionWithName:name
-                           constantValues:values
-                                    error:error]
+             wrap:[(id<MTLLibrary>)RM_LIBRARY_TWIN(self, NeedLibrarySpecializedFunction) newFunctionWithName:name
+                                                                                              constantValues:values
+                                                                                                       error:error]
              name:name
         constants:values];
 }
@@ -242,7 +241,7 @@ static id functionNotFound(NSString *name, NSError **error)
     }
     RMLibrary *me = self;
     MTLFunctionConstantValues *copy = [values copy];
-    [(id<MTLLibrary>)RM_LIBRARY_TWIN(self, "a specialized function raw does not list")
+    [(id<MTLLibrary>)RM_LIBRARY_TWIN(self, NeedLibrarySpecializedFunction)
         newFunctionWithName:name
              constantValues:values
           completionHandler:^(id<MTLFunction> f, NSError *e) {
@@ -263,11 +262,10 @@ static id functionNotFound(NSString *name, NSError **error)
     }
     if (d.name && ![self listsFunction:d.name])
         return functionNotFound(d.name, error);
-    return (id<MTLFunction>)[self wrap:[(id<MTLLibrary>)RM_LIBRARY_TWIN(self, "a function raw does not list")
-                                           newFunctionWithDescriptor:d
-                                                               error:error]
-                                  name:d.specializedName.length ? d.specializedName : d.name
-                             constants:d.constantValues];
+    return (id<MTLFunction>)[self
+             wrap:[(id<MTLLibrary>)RM_LIBRARY_TWIN(self, NeedLibraryFunction) newFunctionWithDescriptor:d error:error]
+             name:d.specializedName.length ? d.specializedName : d.name
+        constants:d.constantValues];
 }
 
 // Made at once, as m2v's library makes it: through the descriptor, so the function is this library's (its states keyed by
@@ -295,24 +293,24 @@ static id functionNotFound(NSString *name, NSError **error)
 
 - (NSArray<NSString *> *)functionNames
 {
-    return [(id<MTLLibrary>)RM_LIBRARY_TWIN(self, "a library's function names") functionNames];
+    return [(id<MTLLibrary>)RM_LIBRARY_TWIN(self, NeedLibraryFunctionNames) functionNames];
 }
 
 - (NSArray<NSString *> *)externFunctionNames
 {
-    return [RM_LIBRARY_TWIN(self, "a library's extern function names") externFunctionNames];
+    return [RM_LIBRARY_TWIN(self, NeedLibraryExternNames) externFunctionNames];
 }
 
 - (id<MTLFunction>)newExternFunctionWithName:(NSString *)name
 {
-    return (id<MTLFunction>)[self wrap:[RM_LIBRARY_TWIN(self, "an extern function") newExternFunctionWithName:name]
+    return (id<MTLFunction>)[self wrap:[RM_LIBRARY_TWIN(self, NeedLibraryExternFunction) newExternFunctionWithName:name]
                                   name:name
                              constants:nil];
 }
 
 - (MTLLibraryType)type
 {
-    return [(id<MTLLibrary>)RM_LIBRARY_TWIN(self, "a library's type") type];
+    return [(id<MTLLibrary>)RM_LIBRARY_TWIN(self, NeedLibraryType) type];
 }
 
 @end

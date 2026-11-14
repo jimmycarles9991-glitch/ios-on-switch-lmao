@@ -148,6 +148,7 @@ int nvkm_engine_reset(struct nvkm_engine *);
 void tgm_recover_reset_hold(struct nvkm_engine *);
 void tgm_recover_reset_release(struct nvkm_engine *);
 void tgm_recover_preempt_unblock(struct nvkm_runl *);
+void tgm_recover_owed_preempt(struct nvkm_runl *);
 void nvkm_runl_allow(struct nvkm_runl *);
 void nvkm_event_ntfy(struct nvkm_event *, int, int);
 void nvkm_runl_rc(struct nvkm_runl *);

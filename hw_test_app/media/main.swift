@@ -7,11 +7,19 @@ import VideoToolbox
 
 /// The test media's generator, run by hand: the build takes the files pinned in bazel/pinned/hw_test_app/media.
 ///
-///     media_tool <out dir>        writes every clip and image of HWTestCore's tables, and prints their SHA256SUMS lines
-///     media_tool --verify <dir>   decodes every clip there on this Mac's decoders and checks it against the pattern
+///     media_tool <out dir>           writes every clip and image of HWTestCore's tables, and prints their SHA256SUMS
+///                                    lines
+///     media_tool --stills <out dir>  the images only (libjpeg-turbo and ImageIO: no encoder engines)
+///     media_tool --verify <dir>      decodes every clip there on this Mac's decoders and checks it against the pattern
 func run(_ arguments: [String]) async throws {
     if arguments.first == "--verify", arguments.count == 2 {
         try await verify(URL(fileURLWithPath: arguments[1]))
+        return
+    }
+    if arguments.first == "--stills", arguments.count == 2 {
+        let out = URL(fileURLWithPath: arguments[1])
+        try FileManager.default.createDirectory(at: out, withIntermediateDirectories: true)
+        try writeStills(to: out)
         return
     }
     guard arguments.count == 1 else { throw VideoError.message("usage: media_tool <out dir> | --verify <dir>") }
@@ -37,6 +45,10 @@ func run(_ arguments: [String]) async throws {
     let alpha = out.appendingPathComponent(AlphaClip.file)
     try MP4Writer.write(try AlphaVideo.encode(), to: alpha)
     try printPin(alpha)
+    try writeStills(to: out)
+}
+
+func writeStills(to out: URL) throws {
     for image in StillImage.all {
         let url = out.appendingPathComponent(image.file)
         try StillWriter.write(image, to: url)

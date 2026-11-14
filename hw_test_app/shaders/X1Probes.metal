@@ -116,6 +116,14 @@ fragment half4 x1_seeded_half(float4 position [[position]], constant X1Seeded &s
     return as_type<half4>(bits) + half(x1_spin(p, s));
 }
 
+/// The same as floats in [1, 2): 23 bits of the hash a component, each three bits on from the last
+fragment float4 x1_seeded_float(float4 position [[position]], constant X1Seeded &s [[buffer(0)]])
+{
+    const uint2 p = uint2(position.xy);
+    const uint v = x1_hash(p.x, p.y, s.seed);
+    return as_type<float4>(uint4(0x3f800000u) | (uint4(v, v >> 3, v >> 6, v >> 9) & 0x7fffffu)) + x1_spin(p, s);
+}
+
 struct X1Tap {
     int2 base, step, tile, size;
 };

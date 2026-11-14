@@ -85,6 +85,7 @@ struct NativeVertexSamplerTest: NativeObjectTest {
             encoder.endEncoding()
         }
         metrics.set("sampling_path", sampled.path)
+        work.paths.append(sampled.path)
         let wrongSampled = Self.wrong(try await gpu.read(target, bytesPerPixel: 4), size: size, inside: 8, 24)
         metrics.set("wrong_sampled", wrongSampled)
         if wrongSampled > 2 * size { work.failures.append("\(wrongSampled) pixels miss the sampled half-size quad") }

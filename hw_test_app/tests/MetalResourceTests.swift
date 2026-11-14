@@ -69,7 +69,8 @@ struct MetalBlitTest: HWTest {
                 ("texture region copy exact", regionWrong == 0),
                 ("fillBuffer exact, range respected", fillWrong == 0),
                 ("generateMipmaps averages to grey", abs(Int(smallest[0]) - 128) <= 1 && smallest[3] == 255),
-            ], metrics, proof: gpu.proof)
+            ], metrics, proof: gpu.proof
+        ).onRawPath(gpu)
     }
 }
 
@@ -85,7 +86,7 @@ struct MetalTextureViewTest: HWTest {
         let texture = try gpu.texture(.rgba8Unorm, size, size, usage: [.shaderRead, .pixelFormatView])
         try await gpu.upload(bytes, to: texture, bytesPerRow: size * 4)
         guard let asUInt = texture.makeTextureView(pixelFormat: .r32Uint) else {
-            return .fail("r32Uint view returned nil")
+            return .fail("r32Uint view returned nil").onRawPath(gpu)
         }
         let words = try gpu.buffer(size * size * 4)
         let readUInt = try gpu.compute("read_uint_view")
@@ -108,7 +109,7 @@ struct MetalTextureViewTest: HWTest {
         descriptor.usage = [.shaderRead]
         descriptor.storageMode = .private
         guard let array = gpu.device.makeTexture(descriptor: descriptor) else {
-            return .fail("2D array texture returned nil")
+            return .fail("2D array texture returned nil").onRawPath(gpu)
         }
         let level1 = [UInt8](repeating: 0, count: 8 * 8 * 4).enumerated().map {
             UInt8(truncatingIfNeeded: $0.offset * 3)
@@ -118,7 +119,7 @@ struct MetalTextureViewTest: HWTest {
         guard
             let view = array.makeTextureView(
                 pixelFormat: .rgba8Unorm, textureType: .type2D, levels: 1..<2, slices: 1..<2)
-        else { return .fail("level/slice view returned nil") }
+        else { return .fail("level/slice view returned nil").onRawPath(gpu) }
         let floats = try gpu.buffer(8 * 8 * 16)
         let readFloat = try gpu.compute("read_float_texture")
         try await gpu.run { commands in
@@ -141,7 +142,8 @@ struct MetalTextureViewTest: HWTest {
                 ("r32Uint view reads the rgba8 bytes", read == bytes),
                 ("mip 1 / slice 1 view reads its own data", viewWrong == 0),
             ],
-            metrics, proof: gpu.proof)
+            metrics, proof: gpu.proof
+        ).onRawPath(gpu)
     }
 }
 
@@ -158,7 +160,9 @@ struct MetalIOSurfaceTest: HWTest {
         let properties: [IOSurfacePropertyKey: Any] = [
             .width: size, .height: size, .bytesPerElement: 4, .pixelFormat: kCVPixelFormatType_32BGRA,
         ]
-        guard let surface = IOSurface(properties: properties) else { return .fail("IOSurface creation failed") }
+        guard let surface = IOSurface(properties: properties) else {
+            return .fail("IOSurface creation failed").onRawPath(gpu)
+        }
         let descriptor = MTLTextureDescriptor.texture2DDescriptor(
             pixelFormat: .bgra8Unorm, width: size, height: size, mipmapped: false)
         descriptor.usage = [.renderTarget, .shaderRead]
@@ -166,7 +170,7 @@ struct MetalIOSurfaceTest: HWTest {
         guard
             let texture = gpu.device.makeTexture(
                 descriptor: descriptor, iosurface: unsafeBitCast(surface, to: IOSurfaceRef.self), plane: 0)
-        else { return .fail("makeTexture(iosurface:) returned nil") }
+        else { return .fail("makeTexture(iosurface:) returned nil").onRawPath(gpu) }
 
         try await gpu.run { commands in
             let pass = MTLRenderPassDescriptor()
@@ -206,7 +210,8 @@ struct MetalIOSurfaceTest: HWTest {
                 ("GPU clear visible to the CPU", cpuSees == [153, 102, 51, 255]),
                 ("CPU writes visible to the GPU", surfaceWrong == 0),
                 ("NV12 planes through CVMetalTextureCache", nv12Wrong == 0),
-            ], metrics, proof: gpu.proof)
+            ], metrics, proof: gpu.proof
+        ).onRawPath(gpu)
     }
 
     func unorm8(_ texel: SIMD4<Float>) -> [Int] { (0..<4).map { Int((texel[$0] * 255).rounded()) } }

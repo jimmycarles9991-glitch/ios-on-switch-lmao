@@ -33,3 +33,7 @@ struct IOMemoryDescriptor {
 		--refs;
 	}
 };
+
+struct IOMemoryMap {
+	unsigned identity;
+};

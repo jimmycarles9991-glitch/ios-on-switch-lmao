@@ -2,12 +2,10 @@
 // MTLIndirectCommandBuffer of draws that inherit their pipeline and buffers (raw_icb.h): the commands are push words in
 // write-combined GPU memory, written as the CPU encodes each, and a render encoder's executeCommandsInBuffer:withRange:
 // runs the range by reference after one prepare of the state they inherit. Commands that set their own pipeline, buffers or
-// raster state, and mesh draws, have no form here: such a descriptor's creation is nil. Patch commands
-// (RawMetalIndirectPatches.mm) where the device answers supportsIndirectTessellation. A descriptor of dispatches makes a
-// buffer of them (RawMetalIndirectCompute.mm).
+// raster state, and mesh draws, have no form here: such a descriptor's creation is nil. Patch commands are
+// RawMetalIndirectPatches.mm's. A descriptor of dispatches makes a buffer of them (RawMetalIndirectCompute.mm).
 #include "raw_lock.h"
 #import "RawMetalIndirectCompute.h"
-#include "raw_device_answers.h"
 #include "raw_icb.h"
 
 namespace {
@@ -16,17 +14,11 @@ constexpr NSUInteger kDispatchTypes =
     MTLIndirectCommandTypeConcurrentDispatch | MTLIndirectCommandTypeConcurrentDispatchThreads;
 constexpr NSUInteger kPatchTypes = MTLIndirectCommandTypeDrawPatches | MTLIndirectCommandTypeDrawIndexedPatches;
 
-bool indirectTessellation()
-{
-    return raw::answers::thisKindCount("supportsIndirectTessellation") != 0;
-}
-
 const char *unsupportedDescriptor(MTLIndirectCommandBufferDescriptor *d)
 {
-    const NSUInteger patches = indirectTessellation() ? kPatchTypes : 0;
     if (d.commandTypes &
-        ~NSUInteger(MTLIndirectCommandTypeDraw | MTLIndirectCommandTypeDrawIndexed | kDispatchTypes | patches))
-        return "patches or mesh draws";
+        ~NSUInteger(MTLIndirectCommandTypeDraw | MTLIndirectCommandTypeDrawIndexed | kDispatchTypes | kPatchTypes))
+        return "mesh draws";
     if (d.commandTypes & kDispatchTypes)
         return nullptr;
     if (!d.inheritPipelineState || !d.inheritBuffers)
@@ -389,11 +381,6 @@ bool encodeCommands(raw::RenderEncoder *re, raw::CommandBuffer *rc, const RMPlan
 void replayCommands(id<MTLRenderCommandEncoder> encoder, const RMPlanDraw &draw, const std::function<id(void *)> &use)
 {
     RMIndirectCommandBuffer *b = (__bridge RMIndirectCommandBuffer *)draw.arguments;
-    if (draw.indices) {
-        SWITCH_REFUSE("raw", "icb.replay",
-                      "an execute of a range the GPU reads, replayed on m2v: the CPU reads no GPU range, none drawn");
-        return;
-    }
     std::vector<RMICBCommand> commands;
     {
         std::lock_guard<raw::Mutex> hold(b->_lock);

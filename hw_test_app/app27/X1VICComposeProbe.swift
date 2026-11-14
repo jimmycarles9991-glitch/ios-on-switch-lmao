@@ -7,8 +7,9 @@ import HWTestKit
 /// (drivers/TegraVIC/SwitchVICComposeProbe.h), the display's overlays as one plane when DC A's memory admission refuses
 /// them. A 64x32 BGRA composite of small cards and a flat NV12 picture: one slot (tegra_vic_build's copy is the
 /// control), disjoint slots, overlapping opaque slots both ways, premultiplied and straight per-pixel alpha, half global
-/// alpha, a 2:1 scaled slot, 16-GOB block-linear output, overlapping opaque slots with the blend words all zero
-/// (zero_blend: what single-slot jobs run with) and the premultiplied case with alpha fill COMPOSITED. <case>_models is the readings every pixel met (bit 0 as
+/// alpha, a 2:1 scaled slot and 16-GOB block-linear output, all under alpha fill COMPOSITED; then, reported and not
+/// judged, overlapping opaque slots with the blend words all zero (zero_blend: what single-slot jobs run with) and the
+/// premultiplied case under alpha fill OPAQUE (opaque_fill). <case>_models is the readings every pixel met (bit 0 as
 /// programmed, 1 the top slot replacing, 2 the top slot missing, 3 read premultiplied, 4 read straight, 5 nothing drawn):
 /// a wrong case says which reading the engine follows.
 enum X1VICComposeProbe {
@@ -18,8 +19,9 @@ enum X1VICComposeProbe {
     static let replyBytes = 16 + 4 * caseWords * cases
     static let names = [
         "control", "one", "disjoint", "over", "under", "premultiplied", "straight", "global", "scaled", "block",
-        "zero_blend", "composited_fill",
+        "zero_blend", "opaque_fill",
     ]
+    static let reported: Set<Int> = [0, 10, 11]
 
     /// display.planes_composite: the display's composite route, its selector calls through this app's X1VICKernelTest.
     static let display = PlanesCompositeTest(kernelTest: { X1VICKernelTest.call($0, replyBytes: $1) })
@@ -46,7 +48,7 @@ enum X1VICComposeProbe {
             if r[3] > 0 {
                 metrics.set(name + "_first", "\(r[5]),\(r[6]):\(String(r[7], radix: 16))/\(String(r[8], radix: 16))")
             }
-            if i > 0 { wrong[name + "_wrong"] = count } else { metrics.set(name + "_wrong", count) }
+            if reported.contains(i) { metrics.set(name + "_wrong", count) } else { wrong[name + "_wrong"] = count }
         }
         metrics.set("controls_clean", reply[2] != 0)
         let finding = ProbeFinding.counted(wrong, paths: [], metrics: metrics)

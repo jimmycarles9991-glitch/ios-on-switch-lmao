@@ -304,4 +304,61 @@ TEST(RawYcbcrStore, TargetsAreTakenOverTheirOwnChroma)
     EXPECT_FALSE(p.target);
 }
 
+// A Load of a 420v target's planes as the M4 Max's tile held them (raw/test/ycbcrloadoracle.mm's probe of 16 x 8 texels):
+// red Cr, green luma, blue Cb, the chroma between blocks rounded once, half up
+TEST(RawYcbcrStore, ALoadHoldsTheChromaBetweenBlocksRoundedOnce)
+{
+    constexpr uint32_t W = 16, H = 8;
+    std::vector<uint16_t> luma(W * H), chroma(W * H / 2);
+    for (uint32_t y = 0; y < H; y++)
+        for (uint32_t x = 0; x < W; x++)
+            luma[y * W + x] = uint16_t(16 + (x * 13 + y * 29) % 220);
+    for (uint32_t y = 0; y < H / 2; y++)
+        for (uint32_t x = 0; x < W; x++)
+            chroma[y * W + x] = uint16_t(16 + (x * 37 + y * 53) % 224);
+    std::vector<float> tile(W * H * 4);
+    raw::ycbcrLoaded({255, true}, luma.data(), chroma.data(), W, H, tile.data());
+    const auto code = [&](uint32_t x, uint32_t y, int c) {
+        return std::lround(tile[4 * (y * W + x) + c] * 255);
+    };
+    EXPECT_EQ(code(0, 0, 0), 53);  // an edge texel: its block's own Cr
+    EXPECT_EQ(code(1, 0, 0), 72);  // 71.5 across, half up
+    EXPECT_EQ(code(2, 0, 0), 109);
+    EXPECT_EQ(code(5, 0, 0), 164);
+    EXPECT_EQ(code(0, 1, 0), 66);
+    EXPECT_EQ(code(0, 1, 2), 29);
+    EXPECT_EQ(code(1, 1, 0), 85);  // 84.75 over four blocks
+    EXPECT_EQ(code(15, 0, 0), 123);
+    EXPECT_EQ(code(3, 1, 1), 84);
+    EXPECT_EQ(tile[3], 1.0f);
+    EXPECT_EQ(tile[4 * 17 + 0], float(_Float16(85.0f / 255)));
+}
+
+// The same 420v planes loaded and drawn over through write mask green: the chroma the store averages is the loaded mix, so
+// a block reloaded and stored moves (block 0's Cr 53 becomes the mean of 53, 72, 66 and 85 rounded up, 69), and the luma
+// is the drawn green's code
+TEST(RawYcbcrStore, ALumaOnlyDrawOverALoadStoresTheLoadedChromasMean)
+{
+    constexpr uint32_t W = 16, H = 8;
+    std::vector<uint16_t> luma(W * H), chroma(W * H / 2), lumaOut(W * H), chromaOut(W * H / 2);
+    for (uint32_t y = 0; y < H; y++)
+        for (uint32_t x = 0; x < W; x++)
+            luma[y * W + x] = uint16_t(16 + (x * 13 + y * 29) % 220);
+    for (uint32_t y = 0; y < H / 2; y++)
+        for (uint32_t x = 0; x < W; x++)
+            chroma[y * W + x] = uint16_t(16 + (x * 37 + y * 53) % 224);
+    std::vector<float> green(W * H);
+    for (uint32_t x = 0; x < W; x++)
+        for (uint32_t y = 0; y < H; y++)
+            green[y * W + x] = (float(x) + 0.5f) * 0.0123f;
+    ASSERT_TRUE(raw::ycbcrStoreOverLoad({255, true}, luma.data(), chroma.data(), green.data(), W, H, lumaOut.data(),
+                                        chromaOut.data()));
+    EXPECT_EQ(chroma[1], 53u);
+    EXPECT_EQ(chromaOut[1], 69u);
+    EXPECT_EQ(lumaOut[0], uint16_t(std::floor(double(_Float16(0.5f * 0.0123f)) * 255 + 0.5)));
+    EXPECT_EQ(lumaOut[W * H - 1], uint16_t(std::floor(double(_Float16(15.5f * 0.0123f)) * 255 + 0.5)));
+    EXPECT_FALSE(raw::ycbcrStoreOverLoad({255, true}, luma.data(), chroma.data(), green.data(), W - 1, H,
+                                         lumaOut.data(), chromaOut.data()));
+}
+
 }  // namespace

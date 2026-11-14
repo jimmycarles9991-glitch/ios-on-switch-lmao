@@ -103,9 +103,9 @@ TEST(CompileRequest, RoundTripsWhole)
 {
     raw::CompileRequest r = renderRequest();
     r.stages.push_back(stage("fl", "fragment_fn", 0));
-    r.cubic.samplers.push_back({2, 1, 1, 0, 3, true});
-    r.cubic.textures.push_back({2, 80});
-    r.fragmentTests = 3;
+    r.variant.cubic.samplers.push_back({2, 1, 1, 0, 3, true});
+    r.variant.cubic.textures.push_back({2, 80});
+    r.variant.fragmentTests = 3;
     r.key = "a key";
     raw::CompileRequest back;
     ASSERT_TRUE(raw::decodeRequest(raw::encodeRequest(r), back));
@@ -149,10 +149,10 @@ TEST(CompileRequest, ItsPackKeyIsTheFacadesForFrameworkAndOwnLibraries)
     const raw::StageKey v{"vertex_fn", ""}, f{"fragment_fn", "#0:33:05000000"};
     EXPECT_EQ(raw::requestPackKey(r, own), raw::pipelineKey(descriptor(), &v, &f, "", "RenderBox"));
     EXPECT_FALSE(own);
-    r.cubic.samplers.push_back({0, 2, 2, 2, 0, true});
-    r.fragmentTests = 2;
+    r.variant.cubic.samplers.push_back({0, 2, 2, 2, 0, true});
+    r.variant.fragmentTests = 2;
     EXPECT_EQ(raw::requestPackKey(r, own),
-              raw::pipelineKey(descriptor(), &v, &f, "", "RenderBox") + r.cubic.key() + " | tests=2");
+              raw::pipelineKey(descriptor(), &v, &f, "", "RenderBox") + r.variant.cubic.key() + " | tests=2");
     raw::CompileRequest data = renderRequest();
     EXPECT_EQ(raw::requestPackKey(data, own), raw::pipelineKey(descriptor(), &v, &f, "", ""));
     EXPECT_TRUE(own);
@@ -233,6 +233,36 @@ TEST(CompileRequest, AKernelIsKeyedByItsFunctionAndNamedByItsDispatch)
     raw::CompileRequest other = r;
     other.libraries[0] = data(made_metallib::universal({"kernel_fn"}, 0x31));
     EXPECT_FALSE(switch_compiler::prepare(raw::encodeRequest(other), kStack, system, p, why));
+}
+
+// A kernel's store name binds its dispatch as before requests carried a stage input (which its key binds): a store a
+// device kept from an earlier build still names each kernel it holds (the digest is the one format 02's requests made)
+TEST(CompileRequest, AKernelKeepsTheStoreNameItHadBeforeItsRequestCarriedItsStageInput)
+{
+    raw::CompileRequest r;
+    r.stack = kStack;
+    r.kind = raw::RequestKind::Kernel;
+    r.libraries.push_back(data("library bytes"));
+    r.stages = {stage("k", "kernel_fn")};
+    r.kernel.maxThreads = 1024;
+    r.kernel.threads[0] = 64;
+    r.kernel.threads[1] = r.kernel.threads[2] = 1;
+    r.kernel.memory[2] = 4096;
+    NmbDirectBoundTexture t;
+    memset(&t, 0, sizeof t);
+    t.pixelFormat = 80;
+    t.textureType = 2;
+    t.usage = 0x17;
+    t.levels = t.arrayLength = t.samples = 1;
+    r.kernel.textures.push_back(t);
+    const raw::Digest name = raw::storeName(raw::kernelCacheKey(kStack, "a compute key"), r, identities(r));
+    std::string hex;
+    for (uint8_t b : name) {
+        char two[3];
+        snprintf(two, sizeof two, "%02x", b);
+        hex += two;
+    }
+    EXPECT_EQ(hex, "ef9afce2f43ca2e100a94e8bff343b186d9d01edc8efbbb3bdc6b84a8eae1758");
 }
 
 TEST(CompileRequest, TheCompilerRefusesWhatItCannotTrust)

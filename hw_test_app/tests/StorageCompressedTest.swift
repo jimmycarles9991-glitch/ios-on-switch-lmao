@@ -4,13 +4,16 @@ import HWTestGPU
 import Metal
 
 /// Rule storage.compressed (drivers/TegraGM20BMetal/raw/runtime/raw_storage_form.h storageReadsCompressed): whether the
-/// surface unit's loads and stores (SULD/SUST) read and write a compressed C32_2CRA target as its texels. A 256x256
-/// private BGRA8 target, compressed (raw_private_comp.h), cleared to a ZBC value, then four fetching source-over draws
-/// (FixedBlendRule.metal rule_fetch_fragment, which reads [[color(0)]]) three ways: the storage form viewing the compressed
-/// target (switchRawProbeStorageCompressed:), today's fallback to the barrier form, and the same draws on plain memory
-/// (switchRawProbePlainPrivate:). PASS: the storage form ran on compressed memory (no compressed fallback counted, the
-/// target compressed) and its bytes are the plain run's; the barrier form's are too. FAIL with `storage_bytes_differ`: the
-/// unit reads raw bytes, so the rule stays false and compressed targets keep the barrier form.
+/// surface unit's loads and stores (SULD/SUST) read and write a compressed C32_2CRA target as its texels. A 224x224
+/// private BGRA8 target (a shape of its own: a shape a storage form once moved to plain memory is made plain from then
+/// on), compressed (raw_private_comp.h), cleared to a ZBC value, then four fetching source-over draws
+/// (FixedBlendRule.metal rule_fetch_fragment, which reads [[color(0)]]) three ways: the same draws on plain memory
+/// (switchRawProbePlainPrivate:), the storage form viewing the compressed target (switchRawProbeStorageCompressed:), and
+/// the route without that switch (the barrier form, or a move to plain memory where the state has none), last as it
+/// makes the shape plain. `<arm>_made` is the target's comptags when made, `<arm>_compressed` after the draws. PASS: the
+/// storage form ran on compressed memory (no compressed fallback counted, the target compressed before and after) and its
+/// bytes are the plain run's; the barrier arm's are too. FAIL with `storage_bytes_differ`: the unit reads raw bytes, so
+/// the rule stays false and compressed targets keep the barrier form.
 struct StorageCompressedTest: HWTest {
     let id = "gpu.raw.storage_compressed"
     let name = "Surface loads and stores through a compressed target: the storage form against plain memory"
@@ -20,7 +23,7 @@ struct StorageCompressedTest: HWTest {
     static let storageSelector = NSSelectorFromString("switchRawProbeStorageCompressed:")
     static let plainSelector = NSSelectorFromString("switchRawProbePlainPrivate:")
     static let factsSelector = NSSelectorFromString("switchRawProbeFacts:")
-    static let side = 256
+    static let side = 224
 
     func run(_ context: TestContext) async throws -> Outcome {
         let gpu = try GPU.make()
@@ -32,7 +35,7 @@ struct StorageCompressedTest: HWTest {
         let state = try gpu.render(fragment: "rule_fetch_fragment", format: .bgra8Unorm)
         var metrics = Metrics()
         var runs: [String: [UInt8]] = [:]
-        for arm in ["plain", "barrier", "storage"] {
+        for arm in ["plain", "storage", "barrier"] {
             _ = facade.perform(Self.plainSelector, with: NSNumber(value: arm == "plain"))
             _ = facade.perform(Self.storageSelector, with: NSNumber(value: arm == "storage"))
             defer {
@@ -40,6 +43,7 @@ struct StorageCompressedTest: HWTest {
                 _ = facade.perform(Self.storageSelector, with: NSNumber(value: false))
             }
             let target = try await self.target(gpu, facade, plain: arm == "plain")
+            metrics.set("\(arm)_made", comptags(facade, target))
             let before = RawFacade.counters(of: gpu.device)["fetch_fallback.compressed"] ?? 0
             let path = try await gpu.run { commands in
                 let pass = MTLRenderPassDescriptor()
@@ -65,11 +69,15 @@ struct StorageCompressedTest: HWTest {
             metrics.set("\(arm)_compressed_fallbacks", fallbacks)
         }
         var wrong: [String] = []
+        for arm in ["plain", "storage", "barrier"] where metrics["\(arm)_path"] != .text("raw") {
+            wrong.append("\(arm)_off_raw")
+        }
         for arm in ["storage", "barrier"] {
             let differ = zip(runs[arm] ?? [], runs["plain"] ?? []).filter { $0 != $1 }.count
             metrics.set("\(arm)_bytes_differ", differ)
             if differ > 0 { wrong.append("\(arm)_bytes_differ") }
         }
+        if metrics["storage_made"] != .integer(1) { wrong.append("storage_not_made_compressed") }
         if metrics["storage_compressed"] != .integer(1) { wrong.append("storage_not_compressed") }
         if metrics["storage_compressed_fallbacks"] != .integer(0) { wrong.append("storage_fell_back") }
         if metrics["plain_compressed"] == .integer(1) { wrong.append("reference_compressed") }

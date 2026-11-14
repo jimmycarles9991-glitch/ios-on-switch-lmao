@@ -9,6 +9,7 @@
 namespace
 {
 
+using switch_gpu_compiler::declinedAfterAnnounce;
 using switch_gpu_compiler::declinedAfterClose;
 using switch_gpu_compiler::kLosses;
 using switch_gpu_compiler::registeredAfterLosses;
@@ -53,6 +54,25 @@ TEST(CompilerPolicy, ALaunchersLastStartIsADeclineWhenItCloses)
 	EXPECT_FALSE(declinedAfterClose(false, true, losses));
 	registeredAfterLosses(losses);
 	EXPECT_TRUE(declinedAfterClose(false, false, losses));
+}
+
+// KERN-6: three compilers lost in a row before they registered stopped the kernel waiting until one registered; the next
+// start's announce is waited for again, and its own close decides again
+TEST(CompilerPolicy, AGiveUpAfterLossesInARowEndsAtTheNextAnnounce)
+{
+	uint32_t losses = 0;
+	bool declined = false;
+	for (uint32_t i = 0; i < kLosses; ++i)
+		declined = declinedAfterClose(declined, true, losses);
+	EXPECT_TRUE(declined);
+	declined = declinedAfterAnnounce(declined);
+	EXPECT_FALSE(declined);
+	EXPECT_TRUE(declinedAfterClose(declined, true, losses));
+}
+
+TEST(CompilerPolicy, ADeclineEndsWhenANewCompilerAnnouncesItself)
+{
+	EXPECT_FALSE(declinedAfterAnnounce(true));
 }
 
 }  // namespace

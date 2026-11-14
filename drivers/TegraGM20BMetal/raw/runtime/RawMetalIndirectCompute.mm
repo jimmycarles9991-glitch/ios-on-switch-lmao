@@ -49,8 +49,7 @@ std::shared_ptr<RMKernelJob> requestKernel(RMComputeState *state, const raw::Com
             run.result.retry = false;
             return;
         }
-        run.result.state =
-            completion->kernel(state->_direct, ask.dispatch(), key, &run.result.retry, nullptr, state->_function);
+        run.result.state = completion->kernel(state->_direct, ask.dispatch(), key, &run.result.retry, state->_function);
     });
 }
 

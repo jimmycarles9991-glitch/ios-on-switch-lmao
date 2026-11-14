@@ -270,6 +270,80 @@ TEST_F(VmMap, PreparedUncompressedBigViewCannotBecomeIndependentCompressionAutho
 	EXPECT_TRUE(calls.empty());
 }
 
+// MapVolatile of a block-linear kind (uncompressed) maps, in 128 KiB PTEs where its pages allow, each PTE volatile with
+// its kind; was refused for any nonzero kind.
+TEST_F(VmMap, VolatileMapOfAnUncompressedKindMaps)
+{
+	mem_prepare_big_views(&memory);
+	switch_gpu_mapping *mapping = nullptr;
+	ASSERT_EQ(switch_gpu_vm_map_volatile(&a, 0x40000000, memory.bytes, &memory, 0, 0xfe, 0, 1,
+					     &mapping),
+		  0);
+	ASSERT_EQ(mapping->count, 2u);
+	EXPECT_EQ(mapping->entries[0].shift, 17);
+	unsigned maps = 0;
+	for (const auto &call : calls)
+		if (call.operation == 'm') {
+			EXPECT_EQ(call.vol, 1u);
+			EXPECT_EQ(call.kind, 0xfeu);
+			++maps;
+		}
+	EXPECT_EQ(maps, 2u);
+	switch_gpu_vm_unmap(&a, &mapping);
+}
+
+// A compressible kind compresses through the L2, which a volatile map bypasses: refused now and when installed later.
+TEST_F(VmMap, VolatileCompressedKindIsRefusedNowAndAtInstall)
+{
+	memory.page = memory.mem.shift = 17;
+	memory.bytes = memory.mem.bytes = 32 * PAGE_SIZE;
+	memory.npages = 32;
+	tgm_gpu.mmu.kind[0x42] = 0xfe;
+	switch_gpu_mapping *mapping = nullptr;
+	EXPECT_EQ(switch_gpu_vm_map_volatile(&a, 0x40000000, memory.bytes, &memory, 0, 0x42, 0, 1,
+					     &mapping),
+		  -EINVAL);
+	EXPECT_EQ(mapping, nullptr);
+	EXPECT_FALSE(switch_gpu_vm_volatile_kind_ok(0x42, 1));
+	EXPECT_TRUE(switch_gpu_vm_volatile_kind_ok(0x42, 0));
+	EXPECT_TRUE(switch_gpu_vm_volatile_kind_ok(0xfe, 1));
+	ASSERT_EQ(switch_gpu_vm_prepare(&a, 0x40000000, memory.bytes, &memory, 0, 0x42, &mapping),
+		  0);
+	EXPECT_EQ(switch_gpu_vm_install(&a, mapping, &memory, 0x42, 0, 1), -EINVAL);
+	EXPECT_TRUE(switch_gpu_mapping_pending(mapping));
+	EXPECT_TRUE(calls.empty());
+	free(mapping);
+}
+
+// A refilled spare's pages (SwitchGpuSpares.h switch_gpu_spare_layout): 128 KiB units anywhere in memory, each aligned,
+// then a tail of single pages. Each unit maps as one 128 KiB PTE, the tail in 4 KiB ones.
+TEST_F(VmMap, ASparesUnitsMapAsBigPages)
+{
+	pages.clear();
+	const u64 units[] = {0x1a0000000, 0x81000000, 0x123c0000};
+	for (const u64 unit : units)
+		for (unsigned i = 0; i < 32; ++i)
+			pages.push_back(unit + i * PAGE_SIZE);
+	for (unsigned i = 0; i < 16; ++i)
+		pages.push_back(0x70000000 + i * 3 * PAGE_SIZE);
+	memory = {{12, pages.size() * PAGE_SIZE},
+		  pages.size() * PAGE_SIZE,
+		  12,
+		  pages.data(),
+		  u32(pages.size()),
+		  nullptr,
+		  false};
+	mem_prepare_big_views(&memory);
+	switch_gpu_mapping *mapping = nullptr;
+	ASSERT_EQ(map(a, &mapping), 0);
+	u64 big = 0, small = 0;
+	for (u32 i = 0; i < mapping->count; ++i)
+		(mapping->entries[i].shift == 17 ? big : small) += mapping->entries[i].bytes;
+	EXPECT_EQ(big, 3 * (128ULL << 10));
+	EXPECT_EQ(small, 16 * PAGE_SIZE);
+	switch_gpu_vm_unmap(&a, &mapping);
+}
+
 // A sub-range Unmap or Map of one binding takes only that range: PTEs outside it keep their values.
 TEST_F(VmMap, SplitOfA4KRunKeepsEveryPteOutsideTheRange)
 {

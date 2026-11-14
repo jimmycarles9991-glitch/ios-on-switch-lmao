@@ -67,15 +67,17 @@ void CommandBuffer::useAddress(uint64_t va, uint64_t bytes, bool write)
     }
 }
 
-void CommandBuffer::use(const Buffer &buffer, bool write)
+void CommandBuffer::use(const Buffer &buffer, bool write, bool noted)
 {
     RAW_ENCODE_COUNT(Uses);
     // Ahead of the memo: a buffer named once is written again after a release, which then has host-visible data to flush
     publication_.wrote(write && buffer.hostVisible);
+    // ahead of the memo too: a buffer named written by a draw that writes nothing is written by a later one
+    if (write && noted)
+        bufferWrites_.note(buffer.va, buffer.length);
     if (named_.named(&buffer, buffer.va, buffer.length, buffer.import, write))
         return;
     RAW_ENCODE_SPAN(Use);
-    buffersWritten_ |= write;
     externalWrites_ |= write && buffer.hostVisible;
     const bool ranged = dev_->k_.exactJobs() && buffer.length && buffer.length <= UINT32_MAX;
     if (!ranged || !importContains(buffer.import, buffer.va, buffer.length))
@@ -93,8 +95,10 @@ void CommandBuffer::use(const Texture &texture, bool write)
 {
     RAW_ENCODE_COUNT(Uses);
     const auto range = texture.storageRange();
-    if (write)
+    if (write) {
         publication_.wrote(range.hostVisible || (texture.import && !texture.import->id) || texture.callerPages);
+        zcullPlanes_.wrote(range.va ? range.va : texture.va, range.bytes ? range.bytes : 1);
+    }
     if (named_.named(&texture, texture.va, range.bytes, texture.import, write))
         return;
     RAW_ENCODE_SPAN(Use);

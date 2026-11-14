@@ -72,6 +72,9 @@ extern "C" void switch_car_clock_enable(unsigned)
 extern "C" void switch_car_reset_deassert(unsigned)
 {}
 
+extern "C" void tegra_mc_hot_reset(uint32_t, uint32_t, bool)
+{}
+
 // Each channel's push buffer, then its arena.
 bool switch_dma_alloc(switch_dma_buffer *out, size_t size, uint64_t, IOOptionBits)
 {
@@ -187,7 +190,8 @@ TEST_F(Host1xSubmit, EveryEngineRaisesTheMemoryClockBeforeItsDoorbell)
     } engines[] = {{"NVDEC", TEGRA_HOST1X_CHANNEL_DEFAULT},
                    {"VIC", TEGRA_HOST1X_CHANNEL_VIC},
                    {"NVENC", TEGRA_HOST1X_CHANNEL_NVENC},
-                   {"NVJPG", TEGRA_HOST1X_CHANNEL_NVJPG}};
+                   {"NVJPG", TEGRA_HOST1X_CHANNEL_NVJPG},
+                   {"DC", TEGRA_HOST1X_CHANNEL_DISPLAY}};
 
     for (const auto &e : engines) {
         for (const bool copied : {true, false}) {
@@ -320,6 +324,41 @@ TEST_F(Host1xSubmit, AResetOrRestartedChannelFetchesNothingOldAndHoldsNoRoom)
     switch_host1x_job_cancel(channel);
 }
 
+// The display's class 0x70 streams have their own channel: its gathers ring only its doorbell, and its teardown stops
+// and drops only its own jobs, never one an engine has queued.
+TEST_F(Host1xSubmit, TheDisplaysChannelIsItsOwnAndItsTeardownDropsNoEnginesJob)
+{
+    constexpr uint32_t display = TEGRA_HOST1X_CHANNEL_DISPLAY, nvjpg = TEGRA_HOST1X_CHANNEL_NVJPG;
+    syncpoint(170) = 0;
+    uint32_t *words = nullptr;
+    ASSERT_EQ(switch_host1x_job_reserve(nvjpg, SWITCH_HOST1X_ARENA_WORDS, &words), TEGRA_HOST1X_OK);
+    words[0] = tegra_host1x_op_setclass(TEGRA_HOST1X_CLASS_NVJPG, 0, 0);
+    ASSERT_EQ(switch_host1x_job_submit(nvjpg, words, SWITCH_HOST1X_ARENA_WORDS, 170, 5), TEGRA_HOST1X_OK);
+    const uint32_t nvjpgPut = doorbell(nvjpg);
+
+    ASSERT_EQ(switch_host1x_job_reserve(display, SWITCH_HOST1X_ARENA_WORDS, &words), TEGRA_HOST1X_OK);
+    words[0] = tegra_host1x_op_setclass(TEGRA_HOST1X_CLASS_DC, 0, 0);
+    ASSERT_EQ(switch_host1x_job_submit(display, words, SWITCH_HOST1X_ARENA_WORDS, 171, 1), TEGRA_HOST1X_OK);
+    EXPECT_EQ(doorbell(display), 8u);
+    EXPECT_EQ(doorbell(nvjpg), nvjpgPut);
+    EXPECT_EQ(switch_mmio_read32(gHostRegisters, display * kChannelStride + CH_DMASTART),
+              kPushPA + display * 0x100000u);
+    EXPECT_EQ(switch_host1x_job_reserve(display, 1, &words), TEGRA_HOST1X_EAGAIN);
+
+    tegra_host1x_channel_teardown(display);
+    EXPECT_EQ(switch_mmio_read32(gHostRegisters, kSyncOffset + SYNC_CMDPROC_STOP), 1u << display);
+    EXPECT_EQ(switch_mmio_read32(gHostRegisters, kSyncOffset + SYNC_CH_TEARDOWN), 1u << display);
+    EXPECT_EQ(switch_mmio_read32(gHostRegisters, display * kChannelStride + CH_DMACTRL), DMACTRL_STOP);
+    EXPECT_EQ(switch_mmio_read32(gHostRegisters, nvjpg * kChannelStride + CH_DMACTRL), 0u);
+    tegra_host1x_channel_restart(display);
+    EXPECT_EQ(switch_mmio_read32(gHostRegisters, kSyncOffset + SYNC_CMDPROC_STOP), 0u);
+    EXPECT_EQ(doorbell(nvjpg), nvjpgPut);
+    EXPECT_EQ(switch_host1x_job_reserve(nvjpg, 1, &words), TEGRA_HOST1X_EAGAIN) << "NVJPG's job still holds its room";
+    EXPECT_EQ(switch_host1x_job_reserve(display, SWITCH_HOST1X_ARENA_WORDS, &words), TEGRA_HOST1X_OK)
+        << "the display's dropped job gave its room back";
+    switch_host1x_job_cancel(display);
+}
+
 TEST_F(Host1xSubmit, AStreamOutsideItsReservationIsRefusedAndEndsIt)
 {
     uint32_t *words = nullptr;
@@ -336,6 +375,17 @@ TEST_F(Host1xSubmit, AStreamOutsideItsReservationIsRefusedAndEndsIt)
 
 // Each engine's job is built where host1x gathers it: its job path reserves arena room, writes its stream there and
 // submits it with its fence; only its one-off proof of life is copied, with its fence too.
+// MOD_TEARDOWN's other bits write as NO_ACTION (TRM 14.9.14): a module's teardown is its bit alone, no read-modify-write.
+TEST_F(Host1xSubmit, AModuleTeardownWritesThatModulesBitAlone)
+{
+    uint32_t &teardown = *reinterpret_cast<uint32_t *>(gHostRegisters + kSyncOffset + 0xb4);
+    teardown = 0xffffffffu;
+    tegra_host1x_module_teardown(TEGRA_HOST1X_MODULE_NVJPG);
+    EXPECT_EQ(teardown, 1u << 14);
+    tegra_host1x_module_teardown(TEGRA_HOST1X_MODULE_VIC);
+    EXPECT_EQ(teardown, 1u << 13);
+}
+
 TEST(Host1xSubmitShape, EveryEngineBuildsItsJobsInTheArena)
 {
     using switch_ios::test::Body;

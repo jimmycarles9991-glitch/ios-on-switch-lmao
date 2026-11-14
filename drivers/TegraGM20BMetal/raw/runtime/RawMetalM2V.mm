@@ -1,8 +1,10 @@
 // SPDX-License-Identifier: MIT
 // The process's m2v device, opened at its first need (RawM2V): a process that draws only states the pack holds never opens
 // one, and keeps none of its memory (its NVK device, its runtime, its pools). Every way into it is rmM2V, which names the
-// need; the device selectors only m2v's device class has a method for come here through the device class's forwarders.
+// need (RMNeed); the device selectors only m2v's device class has a method for come here through the device class's
+// forwarders.
 #import "RawMetalInternal.h"
+#include <unordered_set>
 
 namespace {
 
@@ -14,7 +16,7 @@ thread_local bool tOpening;
 // The device class and its selectors that open m2v (installM2VForwarders): written before the class is registered, read only
 // after
 Class gDeviceClass;
-std::unordered_map<SEL, std::string> *gForwarded;
+std::unordered_set<SEL> *gForwarded;
 
 #if !defined(SWITCH_DEBUG) || SWITCH_DEBUG
 struct Needs {
@@ -29,6 +31,13 @@ Needs &needs()
     static Needs *n = new Needs;
     return *n;
 }
+
+std::string needName(RMNeed need, SEL selector)
+{
+    if (need == NeedDeviceSelector && selector)
+        return std::string("m2v's -[MTLDevice ") + sel_getName(selector) + "]";
+    return kNeedNames[need];
+}
 #endif
 
 // Inside gOpenLock, before any other thread can see `m2v`: the frontend's surface imports become the raw path's, and each
@@ -37,8 +46,7 @@ void adopt(RawState &r, id<MTLDevice> m2v)
 {
     rawAliasSurfaces(r.raw);
     Class from = object_getClass(m2v);
-    for (const auto &[sel, need] : *gForwarded) {
-        (void)need;
+    for (SEL sel : *gForwarded) {
         const IMP imp = class_getMethodImplementation(from, sel);
         Method forwarder = class_getInstanceMethod(gDeviceClass, sel);
         if (imp && imp != _objc_msgForward && forwarder)
@@ -56,7 +64,7 @@ id<MTLDevice> rmM2VIfOpen()
     return gRM && gRM->m2vOpened.load(std::memory_order_acquire) ? gRM->fallback : nil;
 }
 
-id<MTLDevice> rmM2V(const char *need)
+id<MTLDevice> rmM2V(RMNeed need, SEL selector)
 {
     if (!gRM)
         return nil;
@@ -64,8 +72,11 @@ id<MTLDevice> rmM2V(const char *need)
     {
         Needs &n = needs();
         std::lock_guard<raw::Mutex> l(n.lock);
-        n.counts[need]++;
+        n.counts[needName(need, selector)]++;
     }
+#else
+    (void)need;
+    (void)selector;
 #endif
     if (gRM->m2vOpened.load(std::memory_order_acquire))
         return gRM->fallback;
@@ -91,8 +102,8 @@ id<MTLDevice> rmM2V(const char *need)
     std::lock_guard<raw::Mutex> m(n.lock);
     n.opens++;
     n.openUs = nowUs() - began;
-    n.opener = need;
-    os_log(rawLog(), "raw: %{public}s opened its m2v device for %{public}s in %llu ms", getprogname(), need,
+    n.opener = needName(need, selector);
+    os_log(rawLog(), "raw: %{public}s opened its m2v device for %{public}s in %llu ms", getprogname(), n.opener.c_str(),
            (unsigned long long)(n.openUs / 1000));
 #else
     (void)began;
@@ -110,10 +121,10 @@ std::string rmM2VState()
     return "m2v device opened for " + n.opener + " in " + std::to_string(n.openUs / 1000) + " ms";
 }
 
-id<MTLDevice> rmM2VFor(const char *need, std::atomic<bool> &said)
+id<MTLDevice> rmM2VFor(RMNeed need, std::atomic<bool> &said)
 {
     if (!said.exchange(true, std::memory_order_relaxed))
-        os_log(rawLog(), "raw: %{public}s needs its m2v device for %{public}s", getprogname(), need);
+        os_log(rawLog(), "raw: %{public}s needs its m2v device for %{public}s", getprogname(), kNeedNames[need]);
     return rmM2V(need);
 }
 #endif
@@ -121,7 +132,7 @@ id<MTLDevice> rmM2VFor(const char *need, std::atomic<bool> &said)
 void installM2VForwarders(Class cls, const RawM2V &m2v)
 {
     gDeviceClass = cls;
-    gForwarded = new std::unordered_map<SEL, std::string>;
+    gForwarded = new std::unordered_set<SEL>;
     std::set<SEL> own;
     unsigned count = 0;
     Method *methods = class_copyMethodList(cls, &count);
@@ -133,7 +144,7 @@ void installM2VForwarders(Class cls, const RawM2V &m2v)
             return;
         own.insert(sel);
         class_addMethod(cls, sel, _objc_msgForward, types);
-        gForwarded->emplace(sel, std::string("m2v's -[MTLDevice ") + sel_getName(sel) + "]");
+        gForwarded->insert(sel);
     };
     if (m2v.methods) {
         methods = class_copyMethodList(m2v.methods, &count);
@@ -171,8 +182,7 @@ void installM2VForwarders(Class cls, const RawM2V &m2v)
 {
     const SEL selector = invocation.selector;
     if (gForwarded) {
-        const auto forwarded = gForwarded->find(selector);
-        if (forwarded != gForwarded->end() && rmM2V(forwarded->second.c_str()) &&
+        if (gForwarded->count(selector) && rmM2V(NeedDeviceSelector, selector) &&
             class_getMethodImplementation(object_getClass(self), selector) != _objc_msgForward) {
             [invocation invoke];
             return;

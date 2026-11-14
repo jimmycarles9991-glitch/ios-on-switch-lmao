@@ -48,6 +48,7 @@
 // queue) are bounded reads, as in TegraNVDEC; every completion of work is a host1x syncpoint interrupt.
 #include <IOKit/IOLib.h>
 #include <IOKit/IOBufferMemoryDescriptor.h>
+#include <IOKit/IOService.h>
 #include <kern/clock.h>
 #include <kern/thread.h>
 #include <string.h>
@@ -57,6 +58,7 @@
 #include "TegraNVENC.h"
 #include "TegraNVENCCheck.h"
 #include "TegraNVENCInputs.h"
+#include "../../kits/SwitchFalcon/SwitchFalconInterrupt.h"
 #include "../../kits/SwitchCAR/SwitchCAR.h"
 #include "../../kits/SwitchCAR/SwitchEngineClock.h"
 #include "../../kits/SwitchCAR/SwitchPMC.h"
@@ -124,10 +126,12 @@ constexpr uint32_t kInFlight = 4, kSetupSlots = 8, kSetupSlotBytes = TEGRA_NVENC
 constexpr uint32_t kSinkBytes = TEGRA_NVENC_MAX_MBS * sizeof(nvenc_h264_coloc_mb_s);
 constexpr uint32_t kJobBoundUs = 500000, kWaitBoundUs = kInFlight * kJobBoundUs;
 IOLock *gEngineLock;
+SwitchFalconInterrupt gErrors;  // NVENC General Interrupt: global 68 (TRM ch.3, p.35)
+constexpr uint32_t kErrorIntid = 32 + 68;
 uint32_t gSyncpt, gBase, gIssued;  // job n's fence is gBase + n
 uint32_t gFailedThrough;           // with gFailed: every fence up to this one failed (wrapping compare)
 uint8_t gJobCodec[kSetupSlots];    // by setup slot: the codec of the job using it
-bool gUp, gWedged, gSuspended, gFailed;
+bool gUp, gWedged, gSuspended, gFailed, gAttached = true, gPublished;
 switch_dma_buffer gSetup, gSink;  // setup slots and the scratch buffer, never mapped into a client
 SwitchEngineGate<SwitchEngineGateKernel> gGate;
 TegraNVENCInputs gInputs;
@@ -142,9 +146,21 @@ const char *falconState()
 // The MPE partition and NVENC's memory client in L4T's order (SwitchEnginePower.h), then its clock-gating prod registers
 // (t210/cg_regs.c t21x_msenc_gating_registers). The MBIST workaround (LVL2 bit 29, no slcg clock) runs only on T210
 // before B01, as powergate-t21x.c's.
-const SwitchEnginePower kPower = {kPartition,         kClock,         MC_HOTRESET_CTRL, MC_HOTRESET_STATUS,
-                                  MC_HOTRESET_NVENC,  OVRE_MPE_MBIST, nullptr,          0,
-                                  tegra_mc_hot_reset, tegra_smmu_read};
+const SwitchEnginePower kPower = {
+    .name = "TegraNVENC",
+    .partition = kPartition,
+    .clock = kClock,
+    .hotResetCtrl = MC_HOTRESET_CTRL,
+    .hotResetStatus = MC_HOTRESET_STATUS,
+    .hotResetBit = MC_HOTRESET_NVENC,
+    .lvl2Mask = OVRE_MPE_MBIST,
+    .slcgClocks = nullptr,
+    .slcgCount = 0,
+    .hotReset = tegra_mc_hot_reset,
+    .mcRead = tegra_smmu_read,
+    .host1xModule = TEGRA_HOST1X_MODULE_NVENC,
+    .moduleTeardown = tegra_host1x_module_teardown,
+};
 constexpr SwitchEngineProd kProd[] = {
     {0xe00, 0},            // THI_CLK_OVERRIDE
     {0x88, 0},             // THI_SLCG_OVERRIDE_HIGH_A
@@ -163,9 +179,10 @@ bool powerUp(bool *wasOn)
     IODelay(2);
     if (!switch_engine_power_up(kPower, wasOn)) {
         snprintf(gLine, sizeof(gLine),
-                 "E1 FAIL partition %u did not come up (PWRGATE_STATUS %#x CLAMP_STATUS %#x CLK_OUT_ENB_Y %#x "
-                 "RST_DEVICES_Y %#x)",
-                 kPartition, switch_pmc_read(PWRGATE_STATUS), switch_pmc_read(0x2c), switch_car_read(CLK_OUT_ENB_Y),
+                 "E1 FAIL partition %u did not come up (PWRGATE_STATUS %#x REMOVE_CLAMPING_CMD %#x CLAMP_STATUS %#x "
+                 "CLK_OUT_ENB_Y %#x RST_DEVICES_Y %#x)",
+                 kPartition, switch_pmc_read(PWRGATE_STATUS), switch_pmc_read(switch_engine_power::kPmcRemoveClamping),
+                 switch_pmc_read(switch_engine_power::kPmcClampStatus), switch_car_read(CLK_OUT_ENB_Y),
                  switch_car_read(RST_DEVICES_Y));
         return false;
     }
@@ -276,7 +293,7 @@ bool drained()
 int boundedWait(uint32_t fence)
 {
     return gInputs.wait(tegra_host1x_syncpt_read(gSyncpt), fence, TEGRA_HOST1X_ETIMEDOUT, [fence] {
-        return tegra_host1x_syncpt_wait(gSyncpt, fence, kWaitBoundUs);
+        return tegra_host1x_syncpt_wait_unless(gSyncpt, fence, kWaitBoundUs, gErrors.takenWord(), gErrors.onAt());
     });
 }
 
@@ -295,15 +312,29 @@ void releaseFailed()
     }
 }
 
+void park();
+
+// The falcon's error interrupt: a job's wait wakes at once and the jobs in flight are cancelled with the firmware's
+// reason (stalled()), the engine cleared and reset.
+void falconFailed(const switch_falcon_error &)
+{
+    tegra_host1x_syncpt_kick(gSyncpt);
+}
+
 // A fence past its bound: the engine stopped making progress on a job (a lost interrupt panics in TegraHost1x
 // instead). As L4T's nvhost does on a channel timeout, the job is cancelled, not the engine: channel 2 is torn down so
 // nothing of the stream reaches the engine again, the memory client is flushed, the engine reset and its falcon
 // rebooted and proven, the jobs that were in flight fail (their waiters released with -5) and the next job runs on the
-// rebooted engine. One line per cancellation. gEngineLock held.
+// rebooted engine; one the reset does not bring back is parked, and the gate powers it on at a later encode. One line
+// per cancellation. gEngineLock held.
 int stalled(uint32_t fence)
 {
     if (failedFence(fence))
         return -5;
+    char why[288];
+    if (!gErrors.failed(why, sizeof(why)))
+        snprintf(why, sizeof(why), "not reached in %u ms (GP timer bound passed)", kWaitBoundUs / 1000);
+    gErrors.lostCheckStart();
     char host[200];
     tegra_host1x_describe_channel(TEGRA_HOST1X_CHANNEL_NVENC, host, sizeof(host));
     const uint32_t reached = tegra_host1x_syncpt_read(gSyncpt);
@@ -311,6 +342,9 @@ int stalled(uint32_t fence)
     const char *falcon = tegra_nvenc_falcon_dump(gNvenc);
     tegra_host1x_channel_teardown(TEGRA_HOST1X_CHANNEL_NVENC);
     (void)switch_engine_power::flush(kPower);
+    gErrors.lostCheckEnd();
+    gErrors.off();
+    switch_falcon_error_clear(gNvenc);
     switch_car_reset_assert(kClock);
     IODelay(10);
     bool wasOn = false;
@@ -326,10 +360,16 @@ int stalled(uint32_t fence)
     gBase = tegra_host1x_syncpt_read(gSyncpt);
     __atomic_store_n(&gIssued, 0, __ATOMIC_RELEASE);
     gWedged = !back;
-    IOLog("TegraNVENC: job fence %u not reached in %u ms (syncpoint %u at %u, GP timer bound passed); %s; %s; %s; "
-          "cancelled through fence %u, engine reset: %s%s\n",
-          fence, kWaitBoundUs / 1000, gSyncpt, reached, app, falcon, host, gFailedThrough,
-          back ? "running again" : "it did not come back, NVENC refuses work: ",
+    if (!back) {
+        park();
+        gGate.lost();
+    } else {
+        gErrors.on();
+    }
+    IOLog("TegraNVENC: job fence %u %s (syncpoint %u at %u); %s; %s; %s; cancelled through fence %u, engine reset: "
+          "%s%s\n",
+          fence, why, gSyncpt, reached, app, falcon, host, gFailedThrough,
+          back ? "running again" : "it did not come back, the next encode powers it on again: ",
           back ? ""
                : (gLine[0] ? gLine
                   : stage  ? stage
@@ -340,12 +380,13 @@ int stalled(uint32_t fence)
 // Back to reset with the clock off after a failed bring-up: nothing will use the engine this boot.
 void park()
 {
+    gErrors.off();
     switch_car_reset_assert(kClock);
     IODelay(2);
     switch_car_clock_disable(kClock);
 }
 
-void bringUp(void *, wait_result_t)
+void bringUpStages()
 {
     // A failed bring-up leaves nothing behind: the engine back in reset with its clock off (once it was touched), then
     // its address space and kernel buffers returned.
@@ -401,6 +442,12 @@ void bringUp(void *, wait_result_t)
           id, from, tegra_host1x_syncpt_read(id), us, falconState());
     gSyncpt = id;
     gBase = tegra_host1x_syncpt_read(id);
+    if (!gErrors.start("TegraNVENC", kErrorIntid, gNvenc, falconFailed)) {
+        IOLog("TegraNVENC: E2 FAIL no falcon error interrupt (INTID %u)\n", kErrorIntid);
+        giveUp(true);
+        return;
+    }
+    gErrors.on();
     if (!gGate.start({"TegraNVENC", nullptr, gateOn, gateOff})) {
         IOLog("TegraNVENC: E2 FAIL no idle timer\n");
         giveUp(true);
@@ -410,13 +457,25 @@ void bringUp(void *, wait_result_t)
     tegra_host1x_set_sleep_client(engineSuspend, engineResume);
     if (!tegra_nvenc_engine_start())
         IOLog("TegraNVENC: E2 could not register as a memory engine; native pictures go through VIC\n");
-    tegra_nvenc_publish();
+    gPublished = !tegra_nvenc_publish();
+}
+
+void bringUp(void *, wait_result_t)  // NOLINT(misc-const-correctness): thread_continue_t's signature
+{
+    bringUpStages();
+    if (!gPublished)
+        IOService::publishResource(TEGRA_NVENC_ABSENT_RESOURCE);
 }
 }  // namespace
 
 extern "C" bool tegra_nvenc_ready(void)
 {
-    return gUp && !gWedged;
+    return gUp;
+}
+
+extern "C" bool tegra_nvenc_wedged(void)
+{
+    return __atomic_load_n(&gWedged, __ATOMIC_ACQUIRE);
 }
 
 namespace {
@@ -502,7 +561,7 @@ int run(const TegraNVENCSubmit *s, TegraNVENCResolve resolve, void *context, con
     const uint32_t job = gIssued + 1;
     if (job > kInFlight) {
         int ret = boundedWait(gBase + job - kInFlight);
-        if (ret == TEGRA_HOST1X_ETIMEDOUT)
+        if (ret == TEGRA_HOST1X_ETIMEDOUT || ret == TEGRA_HOST1X_EFALCON)
             ret = stalled(gBase + job - kInFlight);
         if (ret || gWedged) {
             IOLockUnlock(gEngineLock);
@@ -618,7 +677,7 @@ extern "C" int tegra_nvenc_wait(uint32_t fence)
     if ((int32_t)(fence - (gBase + __atomic_load_n(&gIssued, __ATOMIC_ACQUIRE))) > 0)
         return -22;
     int ret = boundedWait(fence);
-    if (ret == TEGRA_HOST1X_ETIMEDOUT) {
+    if (ret == TEGRA_HOST1X_ETIMEDOUT || ret == TEGRA_HOST1X_EFALCON) {
         IOLockLock(gEngineLock);
         ret = stalled(fence);
         IOLockUnlock(gEngineLock);
@@ -638,16 +697,19 @@ namespace {
 // job, on at the next. Jobs run asynchronously and NVENC has no retire thread, so off finds work still queued unless
 // the syncpoint is at the last job's fence (BUSY), and the wait that sees the last fence reached arms the timer again
 // (a client's close waits for its last fence). On is E1 and E2 again on the kept image and address space (an idle
-// power-off does not reset the MC), then the jobs are numbered from the syncpoint. A failed power-on is one line and
-// NVENC refuses work from then on, as a wedged engine does. The MPE partition's MBIST workaround borrows no other
-// engine's clock, so the gate has its own lock.
+// power-off does not reset the MC; a resume that could not attach it attaches it here), then the jobs are numbered
+// from the syncpoint. It also powers on an engine a stall's reset or a resume left off. A failed power-on is one line,
+// parks the engine and fails that encode; the next encode runs the power-on again. The MPE partition's MBIST
+// workaround borrows no other engine's clock, so the gate has its own lock.
 int gateOn(void *)
 {
     IOLockLock(gEngineLock);
     bool wasOn = false;
     bool answered = false;
     gLine[0] = 0;
-    if (!gWedged && powerUp(&wasOn) && bootFalcon()) {
+    if (!gAttached)
+        gAttached = !tegra_nvenc_memory_attach(gLine, sizeof(gLine));
+    if (gAttached && powerUp(&wasOn) && bootFalcon()) {
         const uint32_t from = tegra_host1x_syncpt_read(gSyncpt);
         const char *stage = nullptr;
         const int ret = answer(gSyncpt, from, &stage);
@@ -656,10 +718,13 @@ int gateOn(void *)
             snprintf(gLine, sizeof(gLine), "%s did not answer (%d, syncpoint %u %u->%u); %s", stage, ret, gSyncpt, from,
                      tegra_host1x_syncpt_read(gSyncpt), falconState());
     }
-    if (!answered && !gWedged) {
-        gWedged = true;
+    gWedged = !answered;
+    if (answered) {
+        gErrors.on();
+    } else {
         park();
-        IOLog("TegraNVENC: power-on FAIL %s; NVENC refuses work\n", gLine[0] ? gLine : "E1");
+        IOLog("TegraNVENC: power-on FAIL %s; this encode fails, the next one powers NVENC on again\n",
+              gLine[0] ? gLine : "E1");
     }
     gBase = tegra_host1x_syncpt_read(gSyncpt);
     __atomic_store_n(&gIssued, 0, __ATOMIC_RELEASE);
@@ -676,9 +741,13 @@ int gateOff(void *, bool drain)
         IOLockUnlock(gEngineLock);
         return SWITCH_ENGINE_GATE_BUSY;
     }
-    if (drain && !gWedged && boundedWait(gBase + gIssued) == TEGRA_HOST1X_ETIMEDOUT)
-        stalled(gBase + gIssued);
+    if (drain && !gWedged) {
+        const int ret = boundedWait(gBase + gIssued);
+        if (ret == TEGRA_HOST1X_ETIMEDOUT || ret == TEGRA_HOST1X_EFALCON)
+            stalled(gBase + gIssued);
+    }
     gSuspended = true;
+    gErrors.off();
     const bool off = switch_engine_power_down(kPower);
     IOLockUnlock(gEngineLock);
     return off ? SWITCH_ENGINE_GATE_OFF : -5;
@@ -693,6 +762,7 @@ void engineSuspend()
     gGate.suspend();
     IOLockLock(gEngineLock);
     tegra_nvenc_memory_detach();
+    gAttached = false;
     IOLockUnlock(gEngineLock);
 }
 
@@ -700,15 +770,17 @@ void engineResume()
 {
     gLine[0] = 0;
     const bool attached = !tegra_nvenc_memory_attach(gLine, sizeof(gLine));
+    IOLockLock(gEngineLock);
+    gAttached = attached;
     if (!attached) {
-        IOLockLock(gEngineLock);
         gWedged = true;
         gSuspended = false;
         IOLockWakeup(gEngineLock, &gSuspended, false);
-        IOLockUnlock(gEngineLock);
-        IOLog("TegraNVENC: resume FAIL %s; NVENC refuses work\n", gLine);
     }
-    gGate.resume(attached);
+    IOLockUnlock(gEngineLock);
+    if (!attached)
+        IOLog("TegraNVENC: resume FAIL %s; the next encode tries again\n", gLine);
+    gGate.resume();
 }
 }  // namespace
 
@@ -716,8 +788,10 @@ void engineResume()
 extern "C" int tegra_nvenc_probe(void)
 {
     static volatile int started;
-    if (switch_boot_flag("switch-no-nvdec"))
+    if (switch_boot_flag("switch-no-nvdec")) {
+        IOService::publishResource(TEGRA_NVENC_ABSENT_RESOURCE);
         return 0;
+    }
     if (__atomic_exchange_n(&started, 1, __ATOMIC_SEQ_CST))
         return 0;
     thread_t thread = nullptr;

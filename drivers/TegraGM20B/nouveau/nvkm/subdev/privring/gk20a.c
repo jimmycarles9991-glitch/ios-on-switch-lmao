@@ -22,15 +22,17 @@
 #include <subdev/privring.h>
 #include <subdev/timer.h>
 
+void tgm_pmc_change(struct nvkm_device *, u32 mask, u32 value);
+
 static void
 gk20a_privring_init_privring_ring(struct nvkm_subdev *privring)
 {
 	struct nvkm_device *device = privring->device;
 	nvkm_mask(device, 0x137250, 0x3f, 0);
 
-	nvkm_mask(device, 0x000200, 0x20, 0);
+	tgm_pmc_change(device, 0x20, 0);
 	udelay(20);
-	nvkm_mask(device, 0x000200, 0x20, 0x20);
+	tgm_pmc_change(device, 0x20, 0x20);
 
 	nvkm_wr32(device, 0x12004c, 0x4);
 	nvkm_wr32(device, 0x122204, 0x2);

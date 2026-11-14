@@ -229,6 +229,8 @@ void kickPlaneOnly(const OriginalLegacySwapRequest *request, const PlaneDecision
         PlaneSet p = d.set;
         p.seq = seq;
         if (native_planes::planeRoute(planeFenced(p), false, false) == native_planes::PlaneRoute::kNow) {
+            if (SWITCH_FRAME_TIMELINE && p.on())
+                noteMediaFlipTotal(7, 1);
             planeOut(p);
         } else if (planeFence(p)) {
             transferred = true;  // the next swap waits for the fence's completion
@@ -270,11 +272,11 @@ void retireUnshown(uint64_t seq)
 {
     if (!latchRetire)
         return;
-    if (planeRecovering) {
+    if (planeRecoveryWaits()) {
         planeRecoveryTarget.seq = seq;
-    } else if (planeLatch.requested()) {
+    } else if (!planeRecoveryStuck && planeLatch.requested()) {
         planeSetOf(planeLatch.armed).seq = seq;
-    } else if (planeHeldSet) {
+    } else if (!planeRecoveryStuck && planeHeldSet) {
         planeHeld.seq = seq;
     } else if (ring.held != kNoBuffer) {
         entrySeq[ring.held] = seq;
@@ -292,8 +294,7 @@ void retireUnshown(uint64_t seq)
 // Every DC A frame end, under the gate.
 void planeFrameEnd()
 {
-    if (planeProbeTick() || !planesAttached || planesAbandoned || hwSuspended || scanoutStopped ||
-        gPanicRestore.panicking)
+    if (planeProbeTick() || !planesAttached || hwSuspended || scanoutStopped || gPanicRestore.panicking)
         return;
     if (planeRecoveryFrameEnd())
         return;
@@ -357,7 +358,7 @@ void stopPlanes()
     gPanicRestore.planes = false;
     __atomic_store_n(&planesOn, false, __ATOMIC_RELEASE);
     planeLatch.reset();
-    planeRecovering = false;
+    planeRecovering = planeRecoveryStuck = false;
     planeRecoveryTarget = {};
     planeTarget = {};
     planeHeldSet = planeNextSet = planeBlending = false;

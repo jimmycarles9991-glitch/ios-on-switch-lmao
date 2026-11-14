@@ -76,6 +76,19 @@ inline bool testsHiddenZeta(const DepthStencilDesc &d)
     return d.depthCompare != 7 || !(stencilNoop(d.front) && stencilNoop(d.back));
 }
 
+// Whether a draw of a state made for depth/stencil format `stateFormat` (0: none) under `d` fits a pass that declares
+// `declared` and binds a zeta (`zetaBound`: the declared one, or the hidden one of a pass that declares none)
+inline bool depthStencilFits(uint32_t stateFormat, uint32_t declared, bool zetaBound, const DepthStencilDesc &d)
+{
+    return stateFormat == declared && (zetaBound || !testsHiddenZeta(d));
+}
+
+// The same for a draw as it is recorded: setting a state that tests a hidden zeta gave the pass one (RMPass::testsHiddenZeta)
+inline bool recordedDepthStencilFits(uint32_t stateFormat, uint32_t declared, const DepthStencilDesc &d)
+{
+    return depthStencilFits(stateFormat, declared, declared || testsHiddenZeta(d), d);
+}
+
 // A draw whose depth/stencil tests run in its program (raw_shader_tests.h): the hardware tests nothing, depth only kept on
 inline DepthStencilRegs shaderDepthStencilRegs(bool depth)
 {

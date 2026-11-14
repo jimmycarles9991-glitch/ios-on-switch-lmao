@@ -487,13 +487,9 @@ refresh:
 		if (count || (visibility & TegraGM20BSubmitHasEvents))
 			switch_gpu_chan_job_token(chan, fences, &completion);
 		if (count && !error) {
-			error = leaseCount
-					? switch_gpu_backing_begin_conversion_checked(
-						  job.uses, useTotal, job.leases, leaseCount,
-						  job.guards, guardCount, &completion, &transaction)
-					: switch_gpu_backing_begin_checked(
-						  job.uses, useTotal, job.guards, guardCount,
-						  &completion, &transaction);
+			error = switch_gpu_backing_begin_ordered(job.uses, useTotal, job.leases,
+								 leaseCount, job.guards, guardCount,
+								 &completion, &transaction);
 			ownershipBusy = error == -16;
 			if (!error)
 				error = switch_gpu_backing_write_ranges(&transaction, job.writes,
@@ -534,7 +530,7 @@ refresh:
 			error = switch_gpu_chan_exec_events(
 				chan, pushes, count, job.dependencies, dependencies, nullptr, 0,
 				events->words(), events->wordCount(), &seqno, profile,
-				jobVisibility, nullptr, 0);
+				jobVisibility, nullptr, 0, &transaction);
 			if (scratch)
 				scratch->phases.end(TGM_SUBMIT_EXEC);
 		}
@@ -546,9 +542,7 @@ refresh:
 		if (error)
 			break;
 	}
-	if (count && !error)
-		switch_gpu_backing_commit(&transaction);
-	else
+	if (error)
 		switch_gpu_backing_abort(&transaction);
 	if (!error && events)
 		events->commit();

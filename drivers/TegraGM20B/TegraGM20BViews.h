@@ -13,9 +13,9 @@ extern "C" {
 #endif
 
 /* TegraGM20BSurfaceClient.cpp: the mapping of surface `id` in the task of IOSurfaceRootUserClient `client` (1; 0: none,
- * e.g. a surface over the client's own memory, or one made without CPU access; -1: one that is not of the whole
- * descriptor, which a view cannot put back), and the replacement of that range by `memory` (an IOMemoryDescriptor: a
- * scratch, or the surface's own to put it back). */
+ * for the client's life: no client of that ID, the creator of a surface over its own memory, or an IOSurfaceHostOnly or
+ * protected surface; -1: one that is not of the whole descriptor, which a view cannot put back), and the replacement of
+ * that range by `memory` (an IOMemoryDescriptor: a scratch, or the surface's own to put it back). */
 int tgm_cpu_view_of(void *client, uint32_t id, struct tgm_cpu_view *out);
 int tgm_cpu_view_remap(const struct tgm_cpu_view *view, void *memory, uint64_t offset,
 		       int prefault);

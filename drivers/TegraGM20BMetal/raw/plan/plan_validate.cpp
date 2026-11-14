@@ -39,8 +39,6 @@ Problem targetGap(const ResourceFacts &f)
 Finding checkPass(const Recording &r, const Encoder &e, uint32_t index, const Answers &answers)
 {
     const PassDesc &pass = r.passes[e.pass];
-    if (pass.layers > 1 && !answers.layeredRendering)
-        return found(Verdict::QueryGated, Problem::LayeredRendering, index);
     if (pass.rateMap && !answers.rateMaps)
         return found(Verdict::QueryGated, Problem::RasterizationRateMap, index);
     if (pass.samplePositions && !answers.samplePositions)

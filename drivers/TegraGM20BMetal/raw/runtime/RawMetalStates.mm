@@ -1,6 +1,5 @@
 // SPDX-License-Identifier: MIT
 #import "RawMetalInternal.h"
-#include "raw_blur_twod.h"
 #include "raw_ca_route.h"
 #import "RawRenderKey.h"
 #import "RawMetalBinaryArchive.h"
@@ -37,7 +36,7 @@
         if (_twin)
             return _twin;
     }
-    return twinPublish(self, _twin, [RM_M2V("a sampler's twin") newSamplerStateWithDescriptor:_descriptor]);
+    return twinPublish(self, _twin, [RM_M2V(NeedSamplerTwin) newSamplerStateWithDescriptor:_descriptor]);
 }
 
 @end
@@ -188,12 +187,11 @@ static void markRoute(raw::Pipeline *pl, NSString *label)
     if (!pl || pl->caRoute || ![label hasPrefix:prefix])
         return;
     const char *name = [label substringFromIndex:prefix.length].UTF8String;
-    const uint8_t route = uint8_t(raw::caRouteOf(name)), blur = uint8_t(raw::blurFunctionOf(name));
+    const uint8_t route = uint8_t(raw::caRouteOf(name));
     for (raw::Pipeline *p : {pl, pl->barrierTwin}) {
         if (!p)
             continue;
         p->caRoute = route;
-        p->blurFunction = blur;
     }
 }
 
@@ -304,6 +302,7 @@ RMPipeline *rmPipelineShell(RMDevice *device, MTLRenderPipelineDescriptor *d, MT
     p->_device = device;
     p.label = d.label;
     p->_m2vMissing = rmM2vMissingState(d);
+    p->_alphaControl = raw::alphaControl(d.alphaToCoverageEnabled, d.alphaToOneEnabled);
     RMFunction *vf = [(id)d.vertexFunction isKindOfClass:[RMFunction class]] ? (RMFunction *)d.vertexFunction : nil;
     RMFunction *ff = [(id)d.fragmentFunction isKindOfClass:[RMFunction class]] ? (RMFunction *)d.fragmentFunction : nil;
     // a state linking functions is packed under them too (its key names each), where they are framework libraries' as well
@@ -410,18 +409,18 @@ static id<MTLRenderPipelineState> pipelineTwin(MTLRenderPipelineDescriptor *d, M
                                                NSError **error)
 {
     if (packed && native_bridge_metal_render_pipeline_lazy)
-        return native_bridge_metal_render_pipeline_lazy(RM_M2V("a packed render state's twin"),
+        return native_bridge_metal_render_pipeline_lazy(RM_M2V(NeedPackedRenderStateTwin),
                                                         packedTwinDescriptor(d, true), packedTwinOptions(o, true));
-    return [RM_M2V("a render state's twin") newRenderPipelineStateWithDescriptor:twinDescriptor(d)
-                                                                         options:packedTwinOptions(o, packed)
-                                                                      reflection:nil
-                                                                           error:error];
+    return [RM_M2V(NeedRenderStateTwin) newRenderPipelineStateWithDescriptor:twinDescriptor(d)
+                                                                     options:packedTwinOptions(o, packed)
+                                                                  reflection:nil
+                                                                       error:error];
 }
 
 // The twin of a state raw drew from its creation, made when a command buffer that sets it first goes to m2v
 static id<MTLRenderPipelineState> laterTwin(MTLRenderPipelineDescriptor *d, MTLPipelineOption o)
 {
-    id<MTLDevice> m2v = RM_M2V("a raw state's twin, at its first m2v replay");
+    id<MTLDevice> m2v = RM_M2V(NeedRawStateTwinAtReplay);
     if (native_bridge_metal_render_pipeline_lazy)
         return native_bridge_metal_render_pipeline_lazy(m2v, packedTwinDescriptor(d, true), packedTwinOptions(o, true));
     return [m2v newRenderPipelineStateWithDescriptor:packedTwinDescriptor(d, true)
@@ -445,7 +444,7 @@ id<MTLRenderPipelineState> rmFinishState(RMPipeline *p, MTLRenderPipelineDescrip
         return (id<MTLRenderPipelineState>)p;
     }
     if (reflection) {
-        id<MTLDevice> m2v = RM_M2V("a render state's twin with its reflection");
+        id<MTLDevice> m2v = RM_M2V(NeedRenderStateReflection);
         p->_twin = [m2v newRenderPipelineStateWithDescriptor:packedTwinDescriptor(d, packed)
                                                      options:packedTwinOptions(o, packed)
                                                   reflection:reflection
@@ -534,14 +533,13 @@ static id<MTLRenderPipelineState> makeState(RMDevice *device, MTLRenderPipelineD
                                                             reflection:(MTLAutoreleasedRenderPipelineReflection *)r
                                                                  error:(NSError **)error
 {
-    MTLTileRenderPipelineDescriptor *t = [d copy];
-    t.tileFunction = twinOf(d.tileFunction);
-    if (!rmTileArchiveAnswer(t, d, o, error))
-        return nil;
-    return [self wrapCarried:[RM_M2V("a tile render state") newRenderPipelineStateWithTileDescriptor:t
-                                                                                             options:o
-                                                                                          reflection:r
-                                                                                               error:error]];
+    (void)d, (void)o;
+    if (r)
+        *r = nil;
+    return rmRefuseUnsupported(
+        "a tile render state: tile shaders are Apple4's (Metal feature set tables), a family this "
+        "device does not claim",
+        error);
 }
 
 // The m2v device links these libraries from its own functions' bitcode: the functions here are their twins. Its methods, inherited
@@ -570,7 +568,7 @@ static NSArray *twinFunctions(NSArray *functions, NSError **error)
         return nil;
     MTLStitchedLibraryDescriptor *t = [d copy];
     t.functions = twins;
-    id<MTLDevice> m2v = RM_M2V("a stitched library");
+    id<MTLDevice> m2v = RM_M2V(NeedLibraryStitched);
     return (id<MTLLibrary>)wrapLibrary(self, [m2v newLibraryWithStitchedDescriptor:t error:error], nil);
 }
 
@@ -581,7 +579,7 @@ static NSArray *twinFunctions(NSArray *functions, NSError **error)
     NSArray *twins = twinFunctions(functions, error);
     if (!twins)
         return nil;
-    id<MTLDevice> m2v = RM_M2V("a Core Image filter library");
+    id<MTLDevice> m2v = RM_M2V(NeedLibraryCoreImage);
     return (id<MTLLibrary>)wrapLibrary(self,
                                        [(id<RMImageFilterLinking>)m2v newLibraryWithCIFilters:twins
                                                                       imageFilterFunctionInfo:info

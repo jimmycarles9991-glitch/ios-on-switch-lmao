@@ -12,16 +12,19 @@ import Metal
 /// an early or stale read copies another seed's texels. The atlas is read back in a command buffer of its own, so the
 /// readback's own engine change is not the arm's. Arms: control (today), nowfi, noflush, none, and hazard, the
 /// positive control: pass B taps T straight after pass A with no barrier between (3D to 3D), which the pass barrier
-/// probe saw corrupt at these sizes; a cell judges the switch arms only once hazard differed there. Every arm draws pass
-/// A with the same spins, so the control's race is the arms' race.
+/// probe saw corrupt at these sizes; a cell judges the switch arms only once hazard differed there. Every forced arm
+/// keeps today's pass barrier and job entry; rule forces nothing, so production's rules (raw_barrier_forms.h) pick every barrier, and
+/// rule_switches= counts the engine changes they relaxed. Every arm draws pass A with the same spins, so the control's
+/// race is the arms' race.
 enum X1SwitchDrainProbe {
     static let probe = X1Probe(
         id: "gpu.x1.subchannel_switch_drain", name: "A subchannel change drains the engine left behind",
         probe: "barrier.switch_drain", timeout: 300, body: run)
 
     static let arms = [
-        ("hazard", "pass=none"), ("control", "switch=today"), ("nowfi", "switch=nowfi"),
-        ("noflush", "switch=nowfi_noflush"), ("none", "switch=none"),
+        ("hazard", "pass=none entry=today"), ("control", "switch=today pass=today entry=today"),
+        ("nowfi", "switch=nowfi pass=today entry=today"), ("noflush", "switch=nowfi_noflush pass=today entry=today"),
+        ("none", "switch=none pass=today entry=today"), ("rule", ""),
     ]
     static let batch = 8
 
@@ -107,8 +110,12 @@ enum X1SwitchDrainProbe {
             }
         }
         var finding = ledger.finding(
-            relaxed: ["nowfi", "noflush", "none"], none: "hazard", control: "control",
+            relaxed: ["nowfi", "noflush", "none", "rule"], none: "hazard", control: "control",
             takenKey: "switches", rule: "barrier.switch_drain")
+        if ledger.failed("rule", none: "hazard") > 0 {
+            finding.verdict = .fail
+            finding.note = "production's barriers read other texels than today's"
+        }
         let fired = ledger.cells.filter { !(ledger.tallies[$0]?["hazard"]?.clean ?? true) }
         finding.metrics.set("hazard_cells", fired.count)
         if fired.isEmpty {

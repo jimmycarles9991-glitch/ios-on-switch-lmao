@@ -13,6 +13,7 @@ enum Tests27 {
             UIGlassFirstFrameTest(), UIGlassLiveTest(), UIGlassSidebarTest(), UIGlassSettingsTest(),
             PocketStripTest(), PocketKeylineTest(),
             TrueToneDefaultTest(), GlassPacing.over,
-            GlassPacing.under, NoCameraTest(), FrameProcessorTest(),
+            GlassPacing.under, NoCameraTest(), FocusReload27Test(), FocusReloadNavigation27Test(),
+            FrameProcessorTest(),
         ] + X1Probes.all
 }

@@ -7,8 +7,7 @@
 @implementation RMPipeline (CompileProbe)
 
 // how: pack, table (this process's), store (the shader compiler's, read in place), compiled (the compiler made it for
-// this request), joined (for another request in flight), stored (the compiler found it stored), here (this process),
-// none; wait_us and qos: the creating thread's wait for the compiler and its class; ran_class: the compiler's pool band
+// this request), joined (for another request in flight), stored (the compiler found it stored), none; wait_us and qos: the creating thread's wait for the compiler and its class; ran_class: the compiler's pool band
 // it compiled at (compiler_pool.h Band, 4 user-interactive)
 - (NSDictionary *)switchRawCompile
 {

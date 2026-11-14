@@ -24,6 +24,7 @@ public enum Scenes {
         MemorylessBurstScene(),
         KernelDirectScene(),
         KernelViewScene(),
+        KernelShadowScene(),
         SharedPointerScene(),
         HeapTwinScene(),
         PlacementHeapScene(),
@@ -31,6 +32,8 @@ public enum Scenes {
         ArchiveMissScene(),
         StoredMSAAScene(),
         FreshTextureScene(),
+        SimdGroupScene(),
+        RasterOrderScene(),
     ]
 
     /// QuartzCore 27's Liquid Glass (scenes27), which only iOS 27's app runs.

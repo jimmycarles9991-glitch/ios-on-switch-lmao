@@ -167,9 +167,9 @@ TEST(SwitchFrameInfo, PendingSendsTheShownSwapAndDropsReplacedOnes)
 {
     Pending p;
     Frame f = {};
-    p.take(1, 101, 1000);
+    p.take(1, 101, 1000, true);
     p.take(2, 102, 2000);
-    p.take(3, 103, 3000);
+    p.take(3, 103, 3000, true);
     ASSERT_TRUE(p.shown(2, 2100, f));
     EXPECT_EQ(f.swapId, 102u);
     EXPECT_EQ(f.requested, 2000u);
@@ -180,6 +180,8 @@ TEST(SwitchFrameInfo, PendingSendsTheShownSwapAndDropsReplacedOnes)
     EXPECT_FALSE(p.shown(3, 3200, f));
     p.take(0, 1, 1);
     EXPECT_FALSE(p.shown(0, 1, f));
+    EXPECT_EQ(p.timedShown, 1u);
+    EXPECT_EQ(p.timedUnsent, 1u);
 }
 
 TEST(SwitchFrameInfo, PendingEvictsTheOldestWhenFull)

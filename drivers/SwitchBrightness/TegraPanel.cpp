@@ -117,7 +117,7 @@ struct Command {
 };
 
 Command gCommand;
-uint64_t gFrames;       // frame ends the filter took while a command was out (atomic)
+uint64_t gFrames;       // frame ends the filter took while a command was out (its one writer: one INTID, one core)
 bool gFrameEndsDriven;  // the display calls the filter (atomic)
 timer_call_data_t gStepTimer;
 uint64_t gStepDeadline;  // mach absolute time the step timer was last armed for
@@ -441,7 +441,7 @@ extern "C" void tegra_panel_frame_end_filter(void)
         for (unsigned i = 0; i < gCommand.count; ++i)
             gDsi[DSI_WR_DATA] = gCommand.words[i];
     }
-    __atomic_fetch_add(&gFrames, 1, __ATOMIC_RELEASE);
+    __atomic_store_n(&gFrames, __atomic_load_n(&gFrames, __ATOMIC_RELAXED) + 1, __ATOMIC_RELEASE);
     advance(atFrameEnd(now, gCommand.count));
     thread_wakeup((event_t)&gCommand);
 }

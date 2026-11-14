@@ -129,6 +129,7 @@ struct CommandBuffer {
     std::vector<NativeSurface *> nativeSurfaces_;
     std::vector<const Import *> pitchImports_;
     void requirePitch(const Import *);
+    bool pitchAfterNativeRead() const;
     const Texture *readTexture(const Texture *);
     void invalidateNativeReads();
     void releaseNativeReads();
@@ -253,11 +254,14 @@ TEST_F(RawNativeSurface, WritesAndExplicitPitchAliasesPreventNativeSelection)
     cb.requirePitch(&source);
     EXPECT_EQ(cb.readTexture(&y), &y);
     EXPECT_EQ(device.k_.queries, 0u);
+    EXPECT_FALSE(cb.pitchAfterNativeRead());
     raw::CommandBuffer other;
     other.dev_ = &device;
     ASSERT_NE(other.readTexture(&y), &y);
+    EXPECT_FALSE(other.pitchAfterNativeRead());
     other.requirePitch(&source);
     EXPECT_EQ(other.readTexture(&y), &y);
+    EXPECT_TRUE(other.pitchAfterNativeRead());
 }
 
 TEST_F(RawNativeSurface, ChromaAndSwizzleGetImmutableDistinctHeadersOverOneProxy)

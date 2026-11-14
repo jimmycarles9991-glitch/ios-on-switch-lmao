@@ -313,7 +313,14 @@ IOReturn AGXDeviceUserClient::run(uint32_t method, const void *in, uint32_t inSi
 	if (method == TegraGM20BMethodCpuAcquire || method == TegraGM20BMethodCpuRelease)
 		return cpuAccess(static_cast<const TegraGM20BAbiCpuAccess *>(in),
 				 method == TegraGM20BMethodCpuRelease);
-	// Map and Unmap take lock_ themselves (Map's clientMemoryForType must run without it).
+	// BoAlloc and BoImport make the BO without lock_ (the wiring, zero-fill and clean are the calling thread's own) and
+	// take it to publish the BO. Map and Unmap take lock_ themselves (Map's clientMemoryForType must run without it).
+	if (method == TegraGM20BMethodBoAlloc)
+		return boAlloc(static_cast<const TegraGM20BAbiBoAlloc *>(in),
+			       static_cast<TegraGM20BAbiBoAllocReply *>(out));
+	if (method == TegraGM20BMethodBoImport)
+		return boImport(static_cast<const TegraGM20BAbiBoImport *>(in),
+				static_cast<TegraGM20BAbiBoAllocReply *>(out));
 	if (method == TegraGM20BMethodMap) {
 		return mapToken(static_cast<const TegraGM20BAbiMap *>(in),
 				static_cast<TegraGM20BAbiMapReply *>(out));
@@ -383,10 +390,7 @@ IOReturn AGXDeviceUserClient::run(uint32_t method, const void *in, uint32_t inSi
 #endif
 	IOLockLock(lock_);
 	// A layout decision holds what it uses itself and drops lock_ while the copy engine may move the surface.
-	const bool mutation = method != TegraGM20BMethodGetInfo &&
-			      method != TegraGM20BMethodGetStatus &&
-			      method != TegraGM20BMethodSurfaceLayout &&
-			      method != TegraGM20BMethodSurfaceLayoutInfo;
+	const bool mutation = switch_gpu_method_closes_gate(method);
 	if (submitGate_.closed() || (mutation && !submitGate_.beginMutation(lock_))) {
 		IOLockUnlock(lock_);
 		return kIOReturnNotOpen;
@@ -398,14 +402,6 @@ IOReturn AGXDeviceUserClient::run(uint32_t method, const void *in, uint32_t inSi
 	switch (method) {
 	case TegraGM20BMethodGetInfo:
 		ret = getInfo(static_cast<TegraGM20BAbiInfo *>(out));
-		break;
-	case TegraGM20BMethodBoAlloc:
-		ret = boAlloc(static_cast<const TegraGM20BAbiBoAlloc *>(in),
-			      static_cast<TegraGM20BAbiBoAllocReply *>(out));
-		break;
-	case TegraGM20BMethodBoImport:
-		ret = boImport(static_cast<const TegraGM20BAbiBoImport *>(in),
-			       static_cast<TegraGM20BAbiBoAllocReply *>(out));
 		break;
 	case TegraGM20BMethodNativeSurfaceView:
 		ret = nativeSurfaceView(static_cast<const TegraGM20BAbiNativeSurfaceView *>(in),

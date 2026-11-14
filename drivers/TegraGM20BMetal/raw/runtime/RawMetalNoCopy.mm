@@ -350,7 +350,7 @@ static void wroteThroughLayout(const void *memory)
     raw::fx::MipChain layout;
     const raw::FormatInfo *f = nullptr;
     if (backed || !blockLayout(d, layout, &f)) {
-        id<MTLDevice> m2v = RM_M2V("a texture layout the raw path does not take");
+        id<MTLDevice> m2v = RM_M2V(NeedTextureLayout);
         return ((id (*)(id, SEL, id, BOOL))objc_msgSend)(m2v, _cmd, d, backed);
     }
     RMBlockLayout *l = [RMBlockLayout new];
@@ -369,7 +369,7 @@ static void wroteThroughLayout(const void *memory)
     raw::fx::MipChain layout;
     const raw::FormatInfo *f = nullptr;
     if (!blockLayout(d, layout, &f)) {
-        id<MTLDevice> m2v = RM_M2V("a no-copy texture the raw path does not take");
+        id<MTLDevice> m2v = RM_M2V(NeedNoCopyTexture);
         return ((id (*)(id, SEL, void *, NSUInteger, id, id))objc_msgSend)(m2v, _cmd, bytes, length, d, deallocator);
     }
     RMNoCopyTexture *t = [RMNoCopyTexture new];

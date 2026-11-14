@@ -12,7 +12,6 @@ template <class Expect> void DeviceHarness::computeRetry(Device &device, Expect 
 {
     using Build = ComputeKernelBuild<ComputeRecord, ComputeState>;
     Build build;
-    uint64_t now = 1;
     unsigned produces = 0, placements = 0;
     const ComputeRecord *identity = nullptr;
     const auto produce = [&](ComputeRecord &record) {
@@ -31,42 +30,21 @@ template <class Expect> void DeviceHarness::computeRetry(Device &device, Expect 
     device.heapPlaced_ = device.heapBound_;
     mock_iokit_fail_after(TegraGM20BMethodBoImport, 0, 4, kIOReturnNoMemory);
     const auto imports = mock_iokit_calls(TegraGM20BMethodBoImport);
-    bool retryable = true, throttled = true;
+    bool failedAlone = true;
     for (unsigned i = 0; i < 4; ++i) {
-        const auto failed = build.make(
-            [&] {
-                return now;
-            },
-            produce, place);
-        retryable &= !failed.state && failed.retry && failed.retryAtUs > now;
-        const auto again = build.make(
-            [&] {
-                return now;
-            },
-            produce, place);
-        throttled &= !again.state && again.retry && placements == i + 1;
-        now = failed.retryAtUs;
+        const auto failed = build.make(produce, place);
+        failedAlone &= !failed.state && failed.retry && placements == i + 1;
     }
-    expect(retryable && mock_iokit_calls(TegraGM20BMethodBoImport) - imports == 4,
-           "four real program-backing allocation failures remain transient");
-    expect(throttled, "allocation pressure cannot launch placement again before its retry notification");
-    const auto recovered = build.make(
-        [&] {
-            return now;
-        },
-        produce, place);
+    expect(failedAlone && mock_iokit_calls(TegraGM20BMethodBoImport) - imports == 4,
+           "each make that meets a program-backing allocation failure fails alone and the next places afresh");
+    const auto recovered = build.make(produce, place);
     expect(recovered.state && !recovered.retry && placements == 5,
-           "program placement recovers when backing allocation becomes available");
-    expect(produces == 1 && sameRecord,
-           "allocation retries retain the original compiled record and its placement identity");
+           "program placement succeeds once backing allocation is available");
+    expect(produces == 1 && sameRecord, "a failed placement keeps the compiled record and its placement identity");
     const auto before = mock_iokit_calls(TegraGM20BMethodBoImport);
-    const auto warm = build.make(
-        []() -> uint64_t {
-            std::abort();
-        },
-        produce, place);
+    const auto warm = build.make(produce, place);
     expect(warm.state == recovered.state && placements == 5 && mock_iokit_calls(TegraGM20BMethodBoImport) == before,
-           "ready compute state needs no retry clock, compilation or placement");
+           "a ready compute state needs no compilation or placement");
 
     Build scratch;
     unsigned scratchProduces = 0;
@@ -79,32 +57,21 @@ template <class Expect> void DeviceHarness::computeRetry(Device &device, Expect 
     const auto heapAt = device.heapPlaced_;
     const auto allocations = mock_iokit_calls(TegraGM20BMethodBoAlloc);
     mock_iokit_fail_after(TegraGM20BMethodBoAlloc, 0, 4, kIOReturnNoMemory);
-    bool scratchRetry = true, heapPreserved = true;
+    bool scratchFailed = true, heapPreserved = true;
     for (unsigned i = 0; i < 4; ++i) {
-        const auto result = scratch.make(
-            [&] {
-                return now;
-            },
-            scratchRecord,
-            [&](const ComputeRecord &record) {
-                return placeCompute(device, record);
-            });
-        scratchRetry &= !result.state && result.retry;
-        heapPreserved &= device.heapPlaced_ == heapAt;
-        now = result.retryAtUs;
-    }
-    expect(scratchRetry && mock_iokit_calls(TegraGM20BMethodBoAlloc) - allocations == 4,
-           "four real scratch allocation failures remain transient");
-    expect(heapPreserved, "failed scratch growth never consumes program heap slots");
-    const auto scratchReady = scratch.make(
-        [&] {
-            return now;
-        },
-        scratchRecord,
-        [&](const ComputeRecord &record) {
+        const auto result = scratch.make(scratchRecord, [&](const ComputeRecord &record) {
             return placeCompute(device, record);
         });
+        scratchFailed &= !result.state && result.retry;
+        heapPreserved &= device.heapPlaced_ == heapAt;
+    }
+    expect(scratchFailed && mock_iokit_calls(TegraGM20BMethodBoAlloc) - allocations == 4,
+           "each make that meets a scratch allocation failure fails alone");
+    expect(heapPreserved, "failed scratch growth never consumes program heap slots");
+    const auto scratchReady = scratch.make(scratchRecord, [&](const ComputeRecord &record) {
+        return placeCompute(device, record);
+    });
     expect(scratchReady.state && !scratchReady.retry && scratchProduces == 1 && device.heapPlaced_ > heapAt,
-           "scratch recovery places the retained program once");
+           "a later make places the retained program once");
 }
 }  // namespace raw

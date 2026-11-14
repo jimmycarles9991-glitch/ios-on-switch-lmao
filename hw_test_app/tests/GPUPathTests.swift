@@ -57,11 +57,17 @@ struct GPUPaths {
 
 /// The parts of a GPUPathTest's workload that could not run here, each with why and the counters only it would have
 /// taken: exercise() reports them through `current`, and run() leaves those counters out of its "no X while it ran".
+/// A part that could not run because of the raw path's own failing fails the test.
 final class PathParts: @unchecked Sendable {
     @TaskLocal static var current: PathParts?
     private(set) var skipped: [(why: String, counters: [String])] = []
+    private(set) var failed: [String] = []
 
     func skip(_ why: String, counters: [String]) { skipped.append((why, counters)) }
+    func fail(_ why: String, counters: [String]) {
+        skipped.append((why, counters))
+        failed.append(why)
+    }
 
     /// The route HW Test's own command buffers take, from a blit fill through the test's queue that the path tally
     /// leaves out: a promise test whose maker or reader is this process's own Metal work runs its part only on "raw".
@@ -76,12 +82,13 @@ final class PathParts: @unchecked Sendable {
         return RawFacade.path(of: commands)
     }
 
-    /// Whether this process's own command buffers take the raw path; when not, the part is skipped with the route.
+    /// Whether this process's own command buffers take the raw path; when not, the part does not run and the test fails
+    /// with the route.
     static func ownRouteRaw(_ gpu: GPU, part: String, counters: [String], _ metrics: inout Metrics) -> Bool {
         let route = ownRoute(gpu)
         metrics.set("own_route", route)
         if route == "raw" { return true }
-        current?.skip("\(part): HW Test's own command buffers go \(route)", counters: counters)
+        current?.fail("\(part): HW Test's own command buffers go \(route)", counters: counters)
         return false
     }
 }
@@ -128,6 +135,7 @@ extension GPUPathTest {
         }
         let parts = PathParts()
         failures += try await PathParts.$current.withValue(parts) { try await exercise(gpu, context, &metrics) }
+        failures += parts.failed
         let after: GPUPaths
         if case .counts(let paths) = GPUPaths.read(connection) { after = paths } else { after = before }
         let skippedCounters = Set(parts.skipped.flatMap(\.counters))
@@ -584,7 +592,8 @@ enum GPUPathTests {
         ResourceReadyPathTest(), LockBetweenJobsPathTest(), SubmitJobPathTest(), RelayoutPathTest(),
         QuietJobsPathTest(), PresentPromisePathTest(), PromiseCancelPathTest(), StateSegmentsPathTest(),
         EncodeCostPathTest(), PromiseVICPathTest(), PromiseUnkeptPathTest(), PromiseReleaseOrderPathTest(),
-        SetSurvivesTrimPathTest(),
+        SetSurvivesTrimPathTest(), SurfaceLocksSideBySideTest.blockLinear, SurfaceLocksSideBySideTest.pitchLinear,
+        ImportBesideSubmitsTest(), CommitLatencyPathTest(), FreshSurfaceImportPathTest(),
     ]
 }
 

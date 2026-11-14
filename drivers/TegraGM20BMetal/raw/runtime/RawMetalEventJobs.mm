@@ -93,9 +93,15 @@ static RMEventJob submitJobs(RMCommandBuffer *cb, const std::vector<TegraGM20BAb
         switch (raw::orderAnswer(kr)) {
         case raw::OrderAnswer::ordered:
             break;
-        case raw::OrderAnswer::refused:
-            orderRefused("event job after m2v", kr);
+        case raw::OrderAnswer::refused: {
+            NSString *why = orderRefused("event job after m2v", kr);
+            std::lock_guard<raw::Mutex> lock(cb->_lock);
+            if (!cb->_segError)
+                cb->_segError = [NSError errorWithDomain:MTLCommandBufferErrorDomain
+                                                    code:MTLCommandBufferErrorInternal
+                                                userInfo:@{NSLocalizedDescriptionKey : why}];
             return RMEventJob::Retry;
+        }
         case raw::OrderAnswer::noChannel:
             eventJobFailure(cb, kr);
             return RMEventJob::Retry;

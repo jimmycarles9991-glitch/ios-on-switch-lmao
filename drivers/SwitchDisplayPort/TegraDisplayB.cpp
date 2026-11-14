@@ -14,13 +14,14 @@
 
 #include <IOKit/IOLib.h>
 #include "../TegraDisplayFlip/SwitchDisplayPriority.h"
+#include "../TegraSMMU/TegraSMMU.h"
 
 #include "../../kits/SwitchCAR/SwitchCAR.h"
 #include "../../kits/SwitchCAR/SwitchPMC.h"
 #include "../../kits/SwitchMMIO/SwitchMMIOKernel.h"
 
 namespace {
-constexpr uint64_t kDisplayBPA = 0x54240000, kMcPA = 0x70019000;
+constexpr uint64_t kDisplayBPA = 0x54240000;
 constexpr unsigned kClockDisp2 = 26, kPartitionDisb = 19;
 constexpr uint32_t kMcHotResetControl = 0x200, kMcHotResetDcb = 1u << 3;
 constexpr uint32_t kLvl2ClockGateOverrideA = 0xf8, kOverrideDisb = 1u << 2;
@@ -137,8 +138,7 @@ bool TegraDisplayB::powerUp(char *why, size_t size)
     IODelay(1);
     switch_car_rmw(kLvl2ClockGateOverrideA, kOverrideDisb, 0);
     IODelay(1);
-    volatile uint8_t *mc = switch_mmio_map(kMcPA, 0x1000);
-    switch_mmio_rmw32(mc, kMcHotResetControl, kMcHotResetDcb, 0);
+    tegra_mc_hot_reset(kMcHotResetControl, kMcHotResetDcb, false);
     for (const Reg &reg : kInit) {
         write(reg.index, reg.value);
     }

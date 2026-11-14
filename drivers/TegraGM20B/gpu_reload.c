@@ -168,6 +168,20 @@ int tgm_load_recover_locked(struct tgm_chan *chan, const char *who)
 	return tgm_recover_reload(tgm_gpu.device, (int)chan->chid) > 0;
 }
 
+int tgm_owed_recover_locked(const struct tgm_chan *late, const char *who, u32 seqno, u64 waited_ns)
+{
+	const int chid = tgm_recover_owed(tgm_gpu.device);
+	const struct tgm_chan *owed = chid >= 0 ? live_by(0, chid) : NULL;
+
+	if (chid < 0)
+		return 0;
+	nvxnu_log("tegra-gm20b: GPU hang: %s waited %llu ms for %s fence %u; %s's channel %d, "
+		  "left on its PBDMA through an engine reset while another preempt was in flight, "
+		  "preempted off it, nothing killed\n",
+		  who, waited_ns / 1000000, late->owner, seqno, owed ? owed->owner : "?", chid);
+	return 1;
+}
+
 int tgm_chid_live_client(int chid)
 {
 	const struct tgm_chan *chan = live_by(0, chid);

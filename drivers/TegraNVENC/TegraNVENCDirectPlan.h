@@ -58,16 +58,21 @@ static inline void tegra_nvenc_direct_config(const TegraNVENCDirectPlan *plan, n
     cfg->luma_top_frm_offset = cfg->chroma_top_frm_offset = 0;
 }
 
+#define TEGRA_NVENC_DIRECT_BRIDGE 2
+
 // What a job reading the picture does about one of its producers, `status` that engine's (1 done, 0 still writing,
 // negative failed): 0 nothing (done, or an NVENC job, ordered before it on NVENC's channel); 1 wait on the hardware for
-// syncpoint `queue` to reach the low 32 bits of `value` (NVDEC's and VIC's); -11 when only the GPU's bridge can order
-// the producer, so the picture goes through VIC; the failure itself, which fails the frame as VIC's route does.
+// syncpoint `queue` to reach the low 32 bits of `value` (NVDEC's and VIC's); TEGRA_NVENC_DIRECT_BRIDGE for a
+// GM20B job or a writer promise, which the job waits for through the GPU-to-host1x bridge; -11 for a producer neither
+// orders, so the picture goes through VIC; the failure itself, which fails the frame as VIC's route does.
 static inline int tegra_nvenc_direct_producer(const struct switch_gpu_backing_token *producer, int status)
 {
     if (status < 0)
         return status;
     if (status == 1 || producer->engine == SWITCH_GPU_ENGINE_NVENC)
         return 0;
+    if (producer->engine == SWITCH_GPU_ENGINE_GM20B || producer->engine == SWITCH_GPU_ENGINE_PROMISE)
+        return TEGRA_NVENC_DIRECT_BRIDGE;
     if ((producer->engine != SWITCH_GPU_ENGINE_NVDEC && producer->engine != SWITCH_GPU_ENGINE_VIC) ||
         producer->queue > 0xff)
         return -11;

@@ -98,6 +98,15 @@ void CommandBuffer::requirePitch(const Import *source)
         pitchImports_.push_back(source);
 }
 
+bool CommandBuffer::pitchAfterNativeRead() const
+{
+    for (const auto &[source, view] : nativeReads_)
+        if (view != source &&
+            std::find(pitchImports_.begin(), pitchImports_.end(), source->import) != pitchImports_.end())
+            return true;
+    return false;
+}
+
 const Texture *CommandBuffer::readTexture(const Texture *source)
 {
     if (!source || !source->import || source->nativePlane == ~0u ||

@@ -327,6 +327,11 @@ uint32_t tgm_readback_take(const TegraScanoutCopy *copy, uint64_t source, int32_
 	return kBuffers;
 }
 
+void tgm_readback_bypassed()
+{
+	gShown = {};
+}
+
 void tgm_readback_refused()
 {
 	int inFlight = TegraGM20BReadbackInFlight;

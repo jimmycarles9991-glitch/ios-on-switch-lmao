@@ -9,11 +9,16 @@ import UIKit
 /// debug kernels): completions must have written flips, each ahead of the work loop, with the frames still paced. A
 /// watched present's and a VIC copy's flip comes earlier still, from the producer's primary interrupt filter (filter,
 /// filter_lead_us: how far ahead of its completion); filter_share is their part of window A's flips.
-/// refused is the boot's total: a unit whose window A aperture does not latch the completion's stores turns completion
-/// flips off at the first one (one SwitchDisplay line), so a FAIL with refused=1 and d_completion=0 is that verdict.
+/// refused is the boot's total: a unit whose window A aperture does not latch the completion's stores holds completion
+/// flips off for a run of frames at each one (one SwitchDisplay line each). filter_calls counts the producers' filters
+/// calling the display at all: d_filter_calls 0 says the GPU's nonstall filter never ran the display's callout (its
+/// present view not opened, or not visible there), more with d_filter 0 that it came with no flip armed.
 /// The compositor's own frames behind a writer promise (its command buffer held on a shared event) take the direct
 /// present's promise watch: kern.switch_gpu_promises' direct_* totals count them (direct_promised, direct_kept), and
 /// none may be given up (direct_given_up 0 since boot): a frame is given up only when its writer never runs.
+/// Last, the display writes each word a completion flip writes through window A's own aperture and reads it back through
+/// the WINDOW_HEADER copy, and the other way, then puts it back (SwitchWindowAperture.h): winbuf_alias says the
+/// apertures are the same registers, which the completion flip code takes as a fact.
 struct CompletionFlipTest: HWTest {
     let id = "display.completion_flip"
     let name = "Window A flips written by their producers' completions"
@@ -21,6 +26,7 @@ struct CompletionFlipTest: HWTest {
 
     static let counters = [
         "completion", "gate", "lead_us", "withdrawn", "refused", "filter", "filter_lead_us", "filter_declined",
+        "filter_calls",
     ]
 
     func run(_ context: TestContext) async throws -> Outcome {
@@ -71,13 +77,30 @@ struct CompletionFlipTest: HWTest {
                     promisesAfter.directGivenUp == 0
                 ))
         }
+        let aperture = Self.aperture()
+        metrics.set("winbuf_alias", aperture?.alias ?? false)
+        if let aperture {
+            metrics.set("winbuf_error", Int(aperture.error))
+            metrics.set("winbuf_aliased", String(format: "%x/%x", aperture.aliased, aperture.words))
+            metrics.set("winbuf_restored", String(format: "%x/%x", aperture.restored, aperture.words))
+        }
         return .judged(
             [
                 ("window A latched every completion flip as written (refused = 0)", refused == 0),
+                ("window A's apertures are the WINDOW_HEADER copy's registers (winbuf_alias)", aperture?.alias == true),
                 ("5 s of frames", stamps.count >= 290),
                 ("completions flipped window A (d_completion > 0)", completion > 0),
                 ("ahead of the display's work loop (d_lead_us > 0)", delta("lead_us") > 0),
             ] + promised, metrics)
+    }
+
+    /// The display's window A aperture check through TegraVIC's kernel-test selector, or nil without one.
+    static func aperture() -> DisplayWindowApertureReply? {
+        let request = DisplayWindowProbeReply.request(op: DisplayWindowApertureReply.op, probe: 0)
+        guard case .success(let bytes) = VICKernelTest.call(request, replyBytes: DisplayWindowApertureReply.size) else {
+            return nil
+        }
+        return DisplayWindowApertureReply(bytes)
     }
 
     /// kern.switch_flips_* by name, and the errno of the first that could not be read.

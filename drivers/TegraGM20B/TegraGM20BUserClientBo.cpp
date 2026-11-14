@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-// BO allocation and import, and the allocation policy.
+// BO allocation and its pool policy, and a BO's publication.
 #include "TegraGM20BUserClientInternal.h"
 #include "SwitchGpuAllocatedMemory.h"
 #include "TegraGM20BRecord.h"
@@ -13,32 +13,6 @@ constexpr uint32_t kBoFlags = static_cast<uint32_t>(TegraGM20BBoCoherent) |
 			      static_cast<uint32_t>(TegraGM20BBoCompressible) |
 			      static_cast<uint32_t>(TegraGM20BBoControl);
 
-#if TGM_STATS
-// What `task` maps at `address`, innermost submap's region, for a refused import's line: why IOKit could not wire it
-// (protections, sharing, the allocator's tag, the object) is in these.
-void describeRegion(task_t task, uint64_t address, char *out, size_t size)
-{
-	uint64_t at = address;
-	uint64_t bytes = 0;
-	natural_t depth = 64;
-	vm_region_submap_info_data_64_t info = {};
-	mach_msg_type_number_t count = VM_REGION_SUBMAP_INFO_COUNT_64;
-	const kern_return_t kr =
-		vm_map_region_recurse_64(get_task_map(task), &at, &bytes, &depth, &info, &count);
-	if (kr != KERN_SUCCESS || at > address) {
-		snprintf(out, size, "; nothing mapped there (%d)", kr);
-		return;
-	}
-	snprintf(out, size,
-		 "; region %#llx+%#llx depth %u prot %d/%d share %d tag %u object %#x "
-		 "ref %u shadow %u resident %u wired %u%s%s",
-		 at, bytes, depth, info.protection, info.max_protection, info.share_mode,
-		 info.user_tag, info.object_id, info.ref_count, info.shadow_depth,
-		 info.pages_resident, info.user_wired_count,
-		 info.external_pager ? " file-backed" : "", info.is_submap ? " submap" : "");
-}
-
-#endif
 // The GPU pool for clients other than the compositor. Every coherent BO comes from
 // the pool (NVK's coherent event heap, Metal's Shared storage through m2v), and so do nvkm's own page tables and channels,
 // unpoliced. Tiers, so the compositor is never starved and nobody else is refused while there is room:
@@ -121,32 +95,6 @@ void ownerNote(const char *, uint64_t, uint64_t, bool)
 #endif
 }  // namespace
 
-// The page list of a prepared descriptor: one getPhysicalSegment per physically contiguous run (each call is a walk of the
-// descriptor's DMA state; per 4 KiB page that would be 900 walks for a 1280x720 surface).
-namespace tgm_uc
-{
-IOReturn collectPages(IOMemoryDescriptor *md, uint64_t bytes, uint64_t *pas)
-{
-	for (uint64_t off = 0; off < bytes;) {
-		IOByteCount len = 0;
-		const addr64_t pa = md->getPhysicalSegment(off, &len, kIOMemoryMapperNone);
-		len &= ~0xfffULL;
-		if (!len)
-			len = 4096;  // a run shorter than a page: that page alone
-		if (len > bytes - off)
-			len = bytes - off;
-		// GM20B on Tegra210 addresses 34-bit physical memory (nvgpu platform_gk20a_tegra.c dma_mask DMA_BIT_MASK(34),
-		// nouveau tegra iommu_bit 34): all of the Switch's RAM, including the bank above 4 GiB
-		if (!pa || (pa & 0xfff) || pa + len > (1ULL << 34))
-			return kIOReturnUnsupported;
-		for (uint64_t at = 0; at < len; at += 4096)
-			pas[(off + at) >> 12] = pa + at;
-		off += len;
-	}
-	return kIOReturnSuccess;
-}
-}  // namespace tgm_uc
-
 // The page list of a wired kernel buffer (a cached BO), from its kernel mapping: one address translation per page.
 static IOReturn collectKernelPages(const void *va, uint64_t bytes, uint64_t *pas)
 {
@@ -159,6 +107,110 @@ static IOReturn collectKernelPages(const void *va, uint64_t bytes, uint64_t *pas
 	return kIOReturnSuccess;
 }
 
+// The pool tiers' answer for a BoAlloc and what it charged the connection, under lock_: BoAllocs of one connection made
+// at once each see the others' charge, while the BO itself is made without lock_.
+AGXDeviceUserClient::BoCharge AGXDeviceUserClient::chargeBo(const TegraGM20BAbiBoAlloc *in)
+{
+	BoCharge c = {nullptr, 0, 0, 0, critical_};
+	if (in->flags & TegraGM20BBoCompressible) {
+		c.refused = compressibleRefusal(in->bytes, pool_bytes_, critical_);
+	} else if (in->flags & TegraGM20BBoCoherent) {
+		const uint64_t pages = (in->bytes + PAGE_SIZE - 1) & ~(uint64_t(PAGE_SIZE) - 1);
+		const bool control = tgm_pool::controlReserve(
+			(in->flags & TegraGM20BBoControl) != 0, control_bytes_, pages);
+		c.readyReserve = control ? tgm_pool::KernelReadyBytes : tgm_pool::ControlReadyBytes;
+		c.refused = control ? nullptr : poolRefusal(in->bytes, pool_bytes_, critical_);
+		c.control = !c.refused && (in->flags & TegraGM20BBoControl) ? pages : 0;
+	}
+	if (!c.refused && (in->flags & (TegraGM20BBoCompressible | TegraGM20BBoCoherent)))
+		c.pool = in->bytes;
+	pool_bytes_ += c.pool;
+	control_bytes_ += c.control;
+	return c;
+}
+
+// lock_ held: the BoAlloc's lines, its charge kept for what the BO holds of the pool and given back for the rest, and
+// the BO published; anything but success leaves the caller to release it.
+IOReturn AGXDeviceUserClient::settleBo(const TegraGM20BAbiBoAlloc *in, const BoCharge &charge,
+				       Bo *bo, IOReturn ret, bool chunksRefused, bool system)
+{
+	if (chunksRefused && !compressibleLogged_) {
+		IOLog("tegra-gm20b: %s: compressible BoAlloc of %llu KiB refused: %s "
+		      "(client holds %llu MiB of the pool, %llu MiB free); "
+		      "further ones not logged\n",
+		      owner_, in->bytes >> 10,
+		      charge.refused ? charge.refused : "no free 128 KiB chunks",
+		      (pool_bytes_ - charge.pool) >> 20, tgm_pool_avail() >> 20);
+		compressibleLogged_ = true;
+	}
+	if (system && !systemLogged_) {
+		IOLog("tegra-gm20b: %s: coherent BoAlloc of %llu KiB from system memory, "
+		      "write-combined: %s "
+		      "(client holds %llu MiB of the pool, %llu MiB free); further ones "
+		      "not logged\n",
+		      owner_, in->bytes >> 10,
+		      charge.refused ? charge.refused : "the pool has no room",
+		      (pool_bytes_ - charge.pool) >> 20, tgm_pool_avail() >> 20);
+	}
+	systemLogged_ = systemLogged_ || system;
+	if (!ret) {
+		bo->system = system;
+		bo->compositorPool = bo->pool_va && charge.critical;
+		bo->controlCharge = bo->pool_va ? charge.control : 0;
+		bo->ownerKind = bo->pool_va || bo->chunked ? SWITCH_GPU_OWNER_POOL
+							   : SWITCH_GPU_OWNER_ALLOCATED;
+		ret = publishBo(bo, true);
+	}
+	const bool pooled = !ret && (bo->chunked || bo->pool_va);
+	if (!pooled)
+		pool_bytes_ -= charge.pool;
+	if (ret || !bo->controlCharge)
+		control_bytes_ -= charge.control;
+	if (ret && !quotaLogged_ && bo && (bo->chunked || !(in->flags & TegraGM20BBoCompressible)))
+		IOLog("tegra-gm20b: BoAlloc %llu bytes flags %#x align 2^%u refused: %#x\n",
+		      in->bytes, in->flags, in->align_log2, ret);
+	if (ret)
+		return ret;
+	if (bo->chunked) {
+		__atomic_add_fetch(&gCompressibleBytes, bo->bytes, __ATOMIC_RELAXED);
+		__atomic_add_fetch(&gCompressibles, 1, __ATOMIC_RELAXED);
+	}
+	if (bo->controlCharge)
+		switch_gpu_path_taken(SWITCH_GPU_PATH_CONTROL_BO, 1);
+	if (bo->compositorPool)
+		tgm_stats_compositor_pool(static_cast<int64_t>(bo->bytes));
+	else if (bo->pool_va)
+		__atomic_add_fetch(&gClientPoolBytes, bo->bytes, __ATOMIC_RELAXED);
+	if (system) {
+		__atomic_add_fetch(&gSystemCoherent, 1, __ATOMIC_RELAXED);
+		__atomic_add_fetch(&gSystemCoherentBytes, bo->bytes, __ATOMIC_RELAXED);
+	}
+	return kIOReturnSuccess;
+}
+
+// lock_ held: `bo`, made without it, becomes the connection's: a handle (and a map token), the BO list, the index
+// SubmitJob reads with no lock (SwitchGpuBoIndex.h) and the imports' list. The submit gate stays open: nothing a job in
+// flight reads changes.
+IOReturn AGXDeviceUserClient::publishBo(Bo *bo, bool mapped)
+{
+	if (submitGate_.closed())
+		return kIOReturnNotOpen;
+	if (!boIndex_.reserve() || (bo->coh && !surfaces_.reserve()))
+		return kIOReturnNoMemory;
+	bo->handle = next_handle_++;
+	bo->token = mapped ? next_token_++ : 0;
+	bo->next = bos_;
+	bos_ = bo;
+	boIndex_.insert(bo->handle, bo);
+	if (bo->coh)
+		surfaces_.add(bo->handle, bo->coh, !bo->readOnly);
+	if (SWITCH_GPU_OWNER_COUNTS)
+		ownerMemory_.change(bo->ownerKind, bo->bytes, true);
+	return kIOReturnSuccess;
+}
+
+// No lock_ but chargeBo's and settleBo's: the pool pages, a spare, or a buffer of fresh pages and its clean are this
+// BO's alone until settleBo publishes it.
 IOReturn AGXDeviceUserClient::boAlloc(const TegraGM20BAbiBoAlloc *in,
 				      TegraGM20BAbiBoAllocReply *out)
 {
@@ -169,10 +221,11 @@ IOReturn AGXDeviceUserClient::boAlloc(const TegraGM20BAbiBoAlloc *in,
 	    (compressible &&
 	     (in->flags != TegraGM20BBoCompressible || (in->bytes & (kChunkBytes - 1)))))
 		return kIOReturnBadArgument;
-	if (!boIndex_.reserve())
-		return kIOReturnNoMemory;
 	if (__atomic_load_n(&gPoolOrphans, __ATOMIC_RELAXED))
 		scheduleOrphanRelease();  // not here: releasing a view can wait for another connection (releaseOrphans)
+	IOLockLock(lock_);
+	const BoCharge charge = chargeBo(in);
+	IOLockUnlock(lock_);
 	const uint64_t start = statsNowNs();
 	uint64_t phase[TGM_PHASES] = {};
 	uint64_t mark = start;  // the stats: kernel allocation and wiring, clean, pages, nvkm
@@ -182,61 +235,39 @@ IOReturn AGXDeviceUserClient::boAlloc(const TegraGM20BAbiBoAlloc *in,
 		mark = now;
 	};
 	Bo *bo = IONew(Bo, 1);
-	if (!bo)
-		return kIOReturnNoMemory;
-	bzero(bo, sizeof(*bo));
-	bo->bytes = in->bytes;
-	bo->flags = in->flags;
-	bo->npages = static_cast<uint32_t>(in->bytes >> 12);
-	bo->backing_pages = bo->npages;
-	bo->pas = IONew(uint64_t, bo->npages);
-	IOReturn ret = bo->pas ? kIOReturnSuccess : kIOReturnNoMemory;
+	IOReturn ret = bo ? kIOReturnSuccess : kIOReturnNoMemory;
+	if (bo) {
+		bzero(bo, sizeof(*bo));
+		bo->bytes = in->bytes;
+		bo->flags = in->flags;
+		bo->npages = static_cast<uint32_t>(in->bytes >> 12);
+		bo->backing_pages = bo->npages;
+		bo->pas = IONew(uint64_t, bo->npages);
+		ret = bo->pas ? kIOReturnSuccess : kIOReturnNoMemory;
+	}
 	int kind = TGM_BO_CACHED;
 	Spare *spare = nullptr;
-	const char *refused = nullptr;
+	bool chunksRefused = false;
 	if (!ret && compressible) {
-		refused = compressibleRefusal(in->bytes, pool_bytes_, critical_);
-		ret = refused ? kIOReturnNoMemory : takeChunks(in->bytes, bo->pas);
+		ret = charge.refused ? kIOReturnNoMemory : takeChunks(in->bytes, bo->pas);
 		bo->chunked = ret == kIOReturnSuccess;
-		if (ret && !compressibleLogged_) {
-			IOLog("tegra-gm20b: %s: compressible BoAlloc of %llu KiB refused: %s "
-			      "(client holds %llu MiB of the pool, %llu MiB free); "
-			      "further ones not logged\n",
-			      owner_, in->bytes >> 10, refused ? refused : "no free 128 KiB chunks",
-			      pool_bytes_ >> 20, tgm_pool_avail() >> 20);
-			compressibleLogged_ = true;
-		}
+		chunksRefused = !bo->chunked;
 	}
 	// A coherent BO the pool does not serve (its tiers keep it out, or the pool has no room) is not refused: it is a
 	// write-combined buffer of ordinary pages made below (tgm_pool::FromSystem). A refusal would abort clients such as
 	// VectorKit (on Maps' first 4 MiB buffer).
 	bool system = false;
 	if (!ret && (in->flags & TegraGM20BBoCoherent)) {
-		const bool control = tgm_pool::controlReserve(
-			(in->flags & TegraGM20BBoControl) != 0, control_bytes_,
-			(in->bytes + PAGE_SIZE - 1) & ~(uint64_t(PAGE_SIZE) - 1));
-		const uint64_t readyReserve =
-			control ? tgm_pool::KernelReadyBytes : tgm_pool::ControlReadyBytes;
-		refused = control ? nullptr : poolRefusal(in->bytes, pool_bytes_, critical_);
-		if (!refused) {
+		if (!charge.refused) {
 			uint64_t align =
 				(in->flags & TegraGM20BBoContiguous) ? 1ULL << in->align_log2 : 0;
 			if (in->bytes >= kChunkBytes && align < kChunkBytes)
 				align = kChunkBytes;
-			bo->pool_va =
-				tgm_pool_alloc_ready(in->bytes, align, readyReserve, &bo->pool_pa);
+			bo->pool_va = tgm_pool_alloc_ready(in->bytes, align, charge.readyReserve,
+							   &bo->pool_pa);
 		}
-		system = tgm_pool::coherentSource(refused, bo->pool_va != nullptr) ==
+		system = tgm_pool::coherentSource(charge.refused, bo->pool_va != nullptr) ==
 			 tgm_pool::FromSystem;
-		if (system && !systemLogged_) {
-			IOLog("tegra-gm20b: %s: coherent BoAlloc of %llu KiB from system memory, "
-			      "write-combined: %s "
-			      "(client holds %llu MiB of the pool, %llu MiB free); further ones "
-			      "not logged\n",
-			      owner_, in->bytes >> 10, refused ? refused : "the pool has no room",
-			      pool_bytes_ >> 20, tgm_pool_avail() >> 20);
-		}
-		systemLogged_ = systemLogged_ || system;
 	}
 	if (!ret && !bo->pool_va && !compressible && !system &&
 	    !(in->flags & TegraGM20BBoContiguous))
@@ -258,7 +289,7 @@ IOReturn AGXDeviceUserClient::boAlloc(const TegraGM20BAbiBoAlloc *in,
 		IODelete(bo->pas, uint64_t, bo->npages);
 		bo->pas = spare->pas;
 		bo->backing_pages = static_cast<uint32_t>(spare->bytes >> 12);
-		bo->bmd = spare->bmd;
+		bo->buffer = spare->buffer;
 		bo->cachedMapping = spare->mapping;
 		IODelete(spare, Spare, 1);
 		kind = TGM_BO_SPARE;
@@ -297,21 +328,22 @@ IOReturn AGXDeviceUserClient::boAlloc(const TegraGM20BAbiBoAlloc *in,
 		const uint64_t mask = (in->flags & TegraGM20BBoContiguous)
 					      ? 0x3ffffffffULL & ~((1ULL << in->align_log2) - 1)
 					      : 0x3ffffffffULL;
-		bo->bmd = bo->pas ? IOBufferMemoryDescriptor::inTaskWithPhysicalMask(
-					    kernel_task, options, backing, mask)
-				  : nullptr;
-		if (!bo->bmd || bo->bmd->prepare() != kIOReturnSuccess) {
-			if (bo->bmd)
-				bo->bmd->release();
-			bo->bmd = nullptr;
+		IOBufferMemoryDescriptor *bmd =
+			bo->pas ? IOBufferMemoryDescriptor::inTaskWithPhysicalMask(
+					  kernel_task, options, backing, mask)
+				: nullptr;
+		if (!bmd || bmd->prepare() != kIOReturnSuccess) {
+			if (bmd)
+				bmd->release();
 			ret = kIOReturnNoMemory;
 		} else {
+			bo->buffer = switch_gpu_cached_buffer_of(bmd);
 			lap(0);
 			// The pages come zeroed: the mask makes IOKit allocate with KMA_ZERO (IOKernelAllocateWithPhysicalRestrict),
 			// and vm_page_alloc_list zero-fills each page through the cacheable physical aperture. Clean those zeros to
 			// DRAM and drop the lines, so the GPU and a fresh client view see zeros and no dirty line is written back
 			// later over what the GPU wrote. (A bzero here would be a second pass over the whole buffer.)
-			void *va = bo->bmd->getBytesNoCopy();
+			void *va = bo->buffer.cpu;
 			cleanZeros(va, backing);
 			lap(1);
 			ret = collectKernelPages(va, backing, bo->pas);
@@ -320,13 +352,13 @@ IOReturn AGXDeviceUserClient::boAlloc(const TegraGM20BAbiBoAlloc *in,
 	}
 	// A cached or system BO's view, which its task maps: the descriptor itself, or its first in->bytes when it is a
 	// spare's or a class's larger buffer.
-	if (!ret && bo->bmd) {
+	if (!ret && bo->buffer.memory) {
 		bo->view = bo->backing_pages == bo->npages
-				   ? static_cast<IOMemoryDescriptor *>(bo->bmd)
-				   : IOSubMemoryDescriptor::withSubRange(bo->bmd, 0, in->bytes,
-									 kIODirectionInOut);
-		if (bo->view == bo->bmd) {
-			bo->bmd->retain();
+				   ? bo->buffer.memory
+				   : IOSubMemoryDescriptor::withSubRange(
+					     bo->buffer.memory, 0, in->bytes, kIODirectionInOut);
+		if (bo->view == bo->buffer.memory) {
+			bo->buffer.memory->retain();
 		} else if (!bo->view) {
 			ret = kIOReturnNoMemory;
 		}
@@ -334,15 +366,18 @@ IOReturn AGXDeviceUserClient::boAlloc(const TegraGM20BAbiBoAlloc *in,
 	if (!ret) {
 		if (bo->chunked)
 			bo->backing = switch_gpu_pin_chunks(bo->pas, bo->npages);
-		else if (bo->bmd && !system && !(in->flags & TegraGM20BBoContiguous)) {
+		else if (bo->buffer.memory && !system && !(in->flags & TegraGM20BBoContiguous)) {
 			bo->backing = switch_gpu_pin_cached(bo->pas, bo->backing_pages, bo->npages,
-							    bo->bmd, bo->cachedMapping);
-			if (bo->backing)
+							    bo->buffer, bo->cachedMapping);
+			if (bo->backing) {
 				bo->cachedMapping = nullptr;
+				bo->buffer.map = nullptr;
+			}
 		} else
 			bo->backing = switch_gpu_pin_memory(bo->pas, bo->npages, 0,
-							    bo->bmd ? bo->bmd : bo->view,
-							    bo->bmd != nullptr);
+							    bo->buffer.memory ? bo->buffer.memory
+									      : bo->view,
+							    bo->buffer.memory != nullptr);
 		if (!bo->backing)
 			ret = kIOReturnNoMemory;
 	}
@@ -353,226 +388,26 @@ IOReturn AGXDeviceUserClient::boAlloc(const TegraGM20BAbiBoAlloc *in,
 		bo->backingMemory = ret == kIOReturnSuccess;
 	}
 	lap(3);
+	IOLockLock(lock_);
+	ret = settleBo(in, charge, bo, ret, chunksRefused, system);
+	const uint64_t handle = ret ? 0 : bo->handle;
+	const uint32_t token = ret ? 0 : bo->token;
+	if (!ret && (bo->chunked || bo->pool_va))
+		kind = TGM_BO_POOL;
+	IOLockUnlock(lock_);
 	if (ret) {
-		if (!quotaLogged_ && (bo->chunked || !compressible)) {
-			IOLog("tegra-gm20b: BoAlloc %llu bytes flags %#x align 2^%u refused: %#x\n",
-			      in->bytes, in->flags, in->align_log2, ret);
-		}
-		releaseBo(bo);
+		if (bo)
+			releaseBo(bo);
 		return ret;
 	}
-	if (bo->chunked) {
-		pool_bytes_ += bo->bytes;
-		kind = TGM_BO_POOL;
-		__atomic_add_fetch(&gCompressibleBytes, bo->bytes, __ATOMIC_RELAXED);
-		__atomic_add_fetch(&gCompressibles, 1, __ATOMIC_RELAXED);
-	}
-	if (bo->pool_va) {
-		pool_bytes_ += bo->bytes;
-		if (bo->flags & TegraGM20BBoControl) {
-			bo->controlCharge =
-				(bo->bytes + PAGE_SIZE - 1) & ~(uint64_t(PAGE_SIZE) - 1);
-			control_bytes_ += bo->controlCharge;
-			switch_gpu_path_taken(SWITCH_GPU_PATH_CONTROL_BO, 1);
-		}
-		kind = TGM_BO_POOL;
-		bo->compositorPool = critical_;
-		if (critical_) {
-			tgm_stats_compositor_pool(static_cast<int64_t>(bo->bytes));
-		} else {
-			__atomic_add_fetch(&gClientPoolBytes, bo->bytes, __ATOMIC_RELAXED);
-		}
-	}
-	if (system) {
-		bo->system = true;
-		__atomic_add_fetch(&gSystemCoherent, 1, __ATOMIC_RELAXED);
-		__atomic_add_fetch(&gSystemCoherentBytes, bo->bytes, __ATOMIC_RELAXED);
-	}
-	tgm_stats_bo_alloc(bo->bytes, kind, mark - start, phase, owner_);
-	ownerNote(owner_, bo->bytes, mark - start, kind == TGM_BO_CACHED);
-	bo->handle = next_handle_++;
-	bo->token = next_token_++;
-	bo->next = bos_;
-	bos_ = bo;
-	boIndex_.insert(bo->handle, bo);
-	out->handle = bo->handle;
-	out->map_token = bo->token;
+	tgm_stats_bo_alloc(in->bytes, kind, mark - start, phase, owner_);
+	if (charge.critical)
+		switch_gpu_compositor_alloc(mark - start, kind == TGM_BO_CACHED);
+	ownerNote(owner_, in->bytes, mark - start, kind == TGM_BO_CACHED);
+	out->handle = handle;
+	out->map_token = token;
 	out->reserved = 0;
 	return kIOReturnSuccess;
-}
-
-IOReturn AGXDeviceUserClient::boImport(const TegraGM20BAbiBoImport *in,
-				       TegraGM20BAbiBoAllocReply *out)
-{
-	if (!in->bytes || ((in->address | in->bytes) & 0xfff) || in->bytes > kMaxBoBytes)
-		return kIOReturnBadArgument;
-	if (!surfaces_.reserve() || !boIndex_.reserve())
-		return kIOReturnNoMemory;
-	const uint64_t start = statsNowNs();
-	uint64_t phase[TGM_PHASES] = {};
-	uint64_t mark = start;  // the stats: wiring, pages, nvkm, clean
-	const auto lap = [&](int i) {
-		const uint64_t now = statsNowNs();
-		phase[i] += now - mark;
-		mark = now;
-	};
-	Bo *bo = IONew(Bo, 1);
-	if (!bo)
-		return kIOReturnNoMemory;
-	bzero(bo, sizeof(*bo));
-	bo->bytes = in->bytes;
-	bo->npages = static_cast<uint32_t>(in->bytes >> 12);
-	bo->backing_pages = bo->npages;
-	if (SharedWiring *w = sharedWiringFind(task_, in->address, in->bytes, in->surface_id)) {
-		adoptWiring(bo, w);
-	} else {
-		bo->pas = IONew(uint64_t, bo->npages);
-	}
-	IOReturn ret = bo->pas ? kIOReturnSuccess : kIOReturnNoMemory;
-	IOReturn wire[2] = {kIOReturnNoMemory, kIOReturnNoMemory};
-	tgm_import_cost cost = {};
-	const uint64_t cpuBefore = tgm_stats_cpu_ns();
-	const uint64_t zeroFillsBefore = tgm_stats_zero_fills();
-	if (!ret && !bo->wiring) {
-		// Wired for the GPU to write where the task's mapping allows that, else for it to read only (Core Animation
-		// hands over image bytes it maps read-only); a read-only BO is mapped read-only in the GPU, so a GPU write to
-		// it is an MMU fault (a panic naming it), never a store into memory the task cannot write.
-		const IOOptionBits directions[2] = {kIODirectionInOut, kIODirectionOut};
-		for (int i = 0; i < 2 && !bo->wired; i++) {
-			bo->wired = IOMemoryDescriptor::withAddressRange(in->address, in->bytes,
-									 directions[i], task_);
-			wire[i] = bo->wired ? bo->wired->prepare() : kIOReturnNoMemory;
-			if (wire[i] != kIOReturnSuccess)
-				OSSafeReleaseNULL(bo->wired);
-			bo->readOnly = i == 1;
-		}
-		lap(0);
-		cost.wire_cpu_ns = tgm_stats_cpu_ns() - cpuBefore;
-		cost.zero_fills = tgm_stats_zero_fills() - zeroFillsBefore;
-		ret = bo->wired ? collectPages(bo->wired, in->bytes, bo->pas)
-				: kIOReturnBadArgument;
-		lap(1);
-	}
-	if (!ret && in->surface_id) {
-		bo->surface = switch_gpu_surface_hold(in->surface_id, task_, bo->pas, bo->npages);
-		if (!bo->surface) {
-			ret = kIOReturnBadArgument;
-		} else {
-			bo->unlockedReads = switch_gpu_surface_client_memory(bo->surface) != 0;
-			bo->representation = switch_gpu_surface_generation(bo->surface);
-			if (!bo->representation)
-				ret = kIOReturnNoMemory;
-			// The original imported pages need a checked refresh after representation replacement.
-			bo->representationValue = 1;
-		}
-	}
-	if (!ret && !bo->wiring) {
-		ret = ioreturn(
-			tgm_mem_new_waited(vm_, bo->pas, bo->npages, &bo->mem, &cost.lock_ns));
-		if (!ret && in->surface_id)
-			publishWiring(bo, in);
-	}
-	lap(2);
-	if (ret) {
-		char region[192] = "";
-#if TGM_STATS
-		describeRegion(task_, in->address, region, sizeof(region));
-#endif
-		IOLog("tegra-gm20b: BoImport %llu bytes at %#llx refused: %#x (wiring for GPU "
-		      "writes %#x, reads %#x)%s\n",
-		      in->bytes, in->address, ret, wire[0], wire[1], region);
-		releaseBo(bo);
-		return ret;
-	}
-	// Registered for the coherency every process's IOSurfaceLock/Unlock of the surface drives (TegraGM20BCoherency.cpp):
-	// writable (the GPU may write it) unless the task maps the pages read-only.
-	int covered = 0;
-	tgm_coherency_rows_at(bo->pas[0]);
-	const int gpuWrites =
-		static_cast<int>(!bo->readOnly && (in->flags & TegraGM20BImportGpuReads) == 0u);
-	bo->coh = tgm_coherency_add(bo->pas[0], in->surface_id, bo->pas, bo->npages,
-				    static_cast<int>(!bo->readOnly), gpuWrites, &covered);
-	bo->backing = switch_gpu_pin_memory(bo->pas, bo->npages, in->surface_id, bo->wired, true);
-	if (bo->surface)
-		bo->surface->retain();
-	const int pinned = bo->backing
-				   ? tgm_coherency_pin(bo->coh, bo->backing, bo->surface,
-						       bo->surface ? tgm_memory_release : nullptr)
-				   : -12;
-	if (pinned && bo->surface)
-		bo->surface->release();
-	const int adopted = bo->backing && bo->surface
-				    ? switch_gpu_surface_imported(bo->surface, bo->backing)
-				    : 0;
-	const int tracked = !pinned && !adopted ? switch_gpu_backing_cpu_track(bo->backing) : 0;
-	if (pinned || adopted || tracked) {
-		releaseBo(bo);
-		return ioreturn(pinned ? pinned : adopted ? adopted : tracked);
-	}
-	if (bo->surface) {
-		tgm_record *record = tgm_record_of(bo->surface);
-		const int fresh = record && tgm_record_first_import(record) &&
-				  tgm_surface_unwritten(bo->surface);
-		tgm_coherency_import(bo->coh, record, fresh);
-	}
-	const uint64_t added = TGM_STATS ? statsNowNs() : 0;
-	// The GPU does not snoop the CPU caches: what the task wrote must be in DRAM before the GPU reads it, and no dirty
-	// line (fresh pages are zeroed through the cache) may be written back later over what the GPU wrote.
-	if (!covered) {
-		tgm_cpu_clean_pages(bo->pas, bo->npages);
-		tgm_coherency_cleaned(bo->coh);
-	}
-	lap(3);
-	tgm_stats_import(static_cast<int64_t>(bo->bytes), bo->pas[0]);
-	tgm_stats_bo_import(bo->bytes, static_cast<int>(bo->readOnly), covered, mark - start,
-			    phase);
-	if (TGM_STATS) {
-		cost.bytes = bo->bytes;
-		cost.total_ns = mark - start;
-		cost.wire_ns = phase[0];
-		cost.pages_ns = phase[1];
-		cost.mem_ns = phase[2];
-		cost.coh_ns = added - (mark - phase[3]);
-		cost.clean_ns = mark - added;
-		cost.surface_id = in->surface_id;
-		cost.read_only = static_cast<int>(bo->readOnly);
-		cost.owner = owner_;
-		tgm_stats_import_cost(&cost);
-	}
-	tgm_vm_import_note(
-		vm_, bo->pas[0],
-		1);  // this connection may draw into what it imports (the GPU present asks)
-	bo->handle = next_handle_++;
-	bo->next = bos_;
-	bos_ = bo;
-	boIndex_.insert(bo->handle, bo);
-	if (bo->coh)
-		surfaces_.add(bo->handle, bo->coh, !bo->readOnly);
-	out->handle = bo->handle;
-	out->map_token = 0;
-	out->reserved = 0;
-	return kIOReturnSuccess;
-}
-
-void AGXDeviceUserClient::adoptWiring(Bo *bo, SharedWiring *w)
-{
-	bo->wiring = w;
-	bo->wired = w->wired;
-	bo->pas = w->pas;
-	bo->mem = w->mem;
-	bo->readOnly = w->readOnly;
-}
-
-// The import's own wiring becomes the task's for this range; when another import published one meanwhile, the import
-// takes that one and its own goes.
-void AGXDeviceUserClient::publishWiring(Bo *bo, const TegraGM20BAbiBoImport *in)
-{
-	SharedWiring *made = IONew(SharedWiring, 1);
-	if (!made)
-		return;
-	*made = {nullptr,   task_,   in->address, in->bytes, in->surface_id, 0,
-		 bo->wired, bo->pas, bo->npages,  bo->mem,   bo->readOnly};
-	adoptWiring(bo, sharedWiringPublish(made));
 }
 
 #include "SwitchGpuNativeImport.h"

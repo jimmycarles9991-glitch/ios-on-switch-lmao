@@ -29,5 +29,5 @@ void cancelQueuedPlaneFence()
         return;
     planeFenceQueued = planeFencePending = false;
     gpuDeadline->cancelTimeout();
-    __atomic_store_n(&gpuScanout, false, __ATOMIC_RELEASE);
+    gpuScanout = false;
 }

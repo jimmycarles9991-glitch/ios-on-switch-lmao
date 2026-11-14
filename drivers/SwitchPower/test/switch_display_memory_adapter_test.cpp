@@ -6,6 +6,7 @@
 #include <stdexcept>
 #include <string>
 #include <vector>
+#include "../../NativeMobileDisplay/SwitchDisplayMemoryEnvelope.h"
 #include "../SwitchDisplayBandwidth.h"
 #include "../SwitchDisplayMemoryState.h"
 #include "../SwitchEMCGovernor.h"
@@ -21,10 +22,14 @@ using IOReturn = int;
 constexpr int kIOReturnSuccess = 0, kIOReturnError = -1;
 constexpr int OS_LOG_DEFAULT = 0;
 
-template <class... T> void os_log_error(T...)
-{}
+std::vector<std::string> gLines, gErrors;
 
-std::vector<std::string> gLines;
+template <class... T> void os_log_error(int, const char *format, T... args)
+{
+    char line[256];
+    snprintf(line, sizeof(line), format, args...);
+    gErrors.emplace_back(line);
+}
 
 template <class... T> void os_log(int, const char *format, T... args)
 {
@@ -84,10 +89,10 @@ public:
     unsigned count = 3, cur = 0, starts = 0, watermarks = 0;
     uint64_t residency[3] = {}, since = 0;
     unsigned moves = 0;
-    bool governing = false, refusalLogged = false;
+    bool governing = false, refusalLogged = false, bpmpChangeLogged = false;
     uint64_t floorBytes() const;
     unsigned memoryFloor(unsigned) const;
-    void dropDisplayMemory(const char *);
+    void uncoveredDisplayMemory(uint32_t, const char *);
 
     bool displayMemoryReady() const
     {
@@ -100,6 +105,7 @@ public:
     unsigned reconcileRate(uint32_t, bool = false);
     bool moveTo(unsigned, switch_emc_reason);
     void logMove(unsigned, unsigned, unsigned, switch_emc_reason) const;
+    bool logBpmpChange(unsigned, unsigned, uint32_t, uint32_t);
     int reserveMemory(const switch_display_memory_head &);
     bool useFixedRate(unsigned);
     IOReturn holdFixedRate();
@@ -129,11 +135,14 @@ std::vector<unsigned> requestedRates;
 std::vector<uint64_t> activeDemandsAtSet;
 int getResult;
 unsigned getRate;
+uint32_t bpmpLatencyAllowance;
 }
 
 int tegra_bpmp_emc_set(unsigned requested, unsigned *actual)
 {
     requestedRates.push_back(requested);
+    if (bpmpLatencyAllowance)
+        gEMC->mcRegs.values[0x2e8 / 4] = bpmpLatencyAllowance;
     activeDemandsAtSet.push_back(gEMC->memoryState.owned[0] ? gEMC->memoryState.heads[0].peak_bytes_per_second : 0);
     if (setResults.empty()) {
         *actual = requested;
@@ -183,8 +192,10 @@ protected:
         requestedRates.clear();
         activeDemandsAtSet.clear();
         gLines.clear();
+        gErrors.clear();
         getResult = 0;
         getRate = 204000;
+        bpmpLatencyAllowance = 0;
     }
 
     void TearDown() override
@@ -225,6 +236,30 @@ TEST_F(MemoryAdapter, EachRateMoveLogsOneLine)
     ASSERT_EQ(gLines.size(), 1u);
     EXPECT_EQ(gLines[0], "SwitchEMC: 204000 -> 1331200 kHz, display memory asked 1331200 kHz; display floor 204000 kHz "
                          "for 312 MB/s");
+}
+
+TEST_F(MemoryAdapter, ABpmpRateChangeThatRewritesTheLatencyAllowanceIsLoggedOnce)
+{
+    ASSERT_EQ(emc.reserveMemory(request()), 0);
+    bpmpLatencyAllowance = 0x80;
+    ASSERT_EQ(emc.reserveMemory(request(2000000000)), 0);
+    ASSERT_TRUE(emc.moveTo(2, SWITCH_EMC_REASON_GOVERN));
+    ASSERT_EQ(requestedRates.size(), 2u);
+    unsigned changes = 0;
+    for (const auto &line : gLines)
+        changes += line.find("SwitchEMC: the BPMP rate change asked 1331200 kHz and set 1331200 kHz; MC "
+                             "LATENCY_ALLOWANCE_DC_0") == 0;
+    EXPECT_EQ(changes, 1u);
+    EXPECT_EQ(gLines.size(), 3u);
+}
+
+TEST_F(MemoryAdapter, ABpmpRateChangeThatSetsAnotherRateNamesBoth)
+{
+    ASSERT_EQ(emc.reserveMemory(request()), 0);
+    setResults.push_back({0, 1320000});
+    ASSERT_EQ(emc.reserveMemory(request(2000000000)), 0);
+    ASSERT_FALSE(gLines.empty());
+    EXPECT_EQ(gLines[0].find("SwitchEMC: the BPMP rate change asked 1331200 kHz and set 1320000 kHz;"), 0u);
 }
 
 TEST_F(MemoryAdapter, WarmIdenticalAdmissionDoesNoRegisterOrClockWork)
@@ -285,27 +320,37 @@ TEST_F(MemoryAdapter, UnknownResumeClockReconcilesBeforeActmonStarts)
     EXPECT_TRUE(emc.governing);
 }
 
-TEST_F(MemoryAdapter, UnrecoverableClockTurnsDisplayAdmissionOffInsteadOfPanicking)
+TEST_F(MemoryAdapter, ARateOutsideTheTableThatCarriesThePlanProgramsItThere)
 {
     ASSERT_EQ(emc.reserveMemory(request()), 0);
     getRate = 1300000;
     setResults.push_back({0, 1310000});
     EXPECT_NO_THROW(SwitchEMC::governAction(&emc, nullptr, nullptr, nullptr, nullptr));
-    EXPECT_FALSE(emc.displayMemoryReady());
-    EXPECT_FALSE(emc.memoryState.owned[0] || emc.memoryState.owned[1]);
-    EXPECT_EQ(emc.reserveMemory(request()), -95);
-    EXPECT_EQ(switch_emc_display_memory_ready(), 0);
+    EXPECT_TRUE(emc.displayMemoryReady());
+    EXPECT_TRUE(emc.memoryState.owned[0]);
+    EXPECT_TRUE(gErrors.empty());
+    EXPECT_EQ(emc.reserveMemory(request(400000000)), 0);
+    EXPECT_EQ(switch_emc_display_memory_ready(), 1);
 }
 
-TEST_F(MemoryAdapter, ResumeWhoseBpmpRefusesTheTopRateKeepsRunningWithoutAdmission)
+// The BPMP refuses the top rate at resume: the 2 GB/s head is not covered at 204 MHz (one line), stays held, and the
+// governor's next move plans by where it goes, so it reaches a rate that carries the head and programs it there.
+TEST_F(MemoryAdapter, ResumeWhoseBpmpRefusesTheTopRateKeepsTheHeadAndTheNextMoveCarriesIt)
 {
     ASSERT_EQ(emc.reserveMemory(request(2000000000)), 0);
     EXPECT_EQ(switch_emc_display_memory_ready(), 1);
     getRate = 204000;
     setResults.push_back({-5, 204000});
     EXPECT_NO_THROW(SwitchEMC::governAction(&emc, &emc, nullptr, nullptr, nullptr));
-    EXPECT_FALSE(emc.displayMemoryReady());
-    EXPECT_FALSE(emc.memoryState.owned[0]);
+    ASSERT_EQ(gErrors.size(), 1u);
+    EXPECT_EQ(gErrors[0],
+              "SwitchEMC: display memory plan (heads 0, 2000 MB/s) does not cover 204000 kHz: the BPMP "
+              "did not restore a rate in the table; programmed at the next rate or request that carries it");
+    EXPECT_TRUE(emc.displayMemoryReady());
+    EXPECT_TRUE(emc.memoryState.owned[0]);
+    EXPECT_EQ(emc.khz[emc.cur], 1331200u);
+    EXPECT_EQ(emc.memoryAppliedKhz, 1331200u);
+    EXPECT_TRUE(emc.governing);
 }
 
 TEST_F(MemoryAdapter, FailedResumeReadDoesNotUsePreviousRow)
@@ -355,7 +400,7 @@ TEST_F(MemoryAdapter, T210AdmitsAtTheBootChainsRateAndNeverAsksTheBpmp)
     EXPECT_TRUE(emc.displayMemoryReady());
 }
 
-TEST_F(MemoryAdapter, T210ReplansAtTheRateWarmbootRestores)
+TEST_F(MemoryAdapter, T210KeepsAdmissionAndPlansTheNextRequestAtTheRestoredRate)
 {
     emc.carRate = 1600000;
     ASSERT_TRUE(emc.useFixedRate(emc.carRate));
@@ -364,6 +409,60 @@ TEST_F(MemoryAdapter, T210ReplansAtTheRateWarmbootRestores)
     ASSERT_EQ(SwitchEMC::governAction(&emc, &emc, nullptr, nullptr, nullptr), 0);
     EXPECT_EQ(emc.khz[0], 204000u);
     EXPECT_EQ(emc.count, 1u);
-    EXPECT_FALSE(emc.displayMemoryReady());
     EXPECT_TRUE(requestedRates.empty());
+    EXPECT_TRUE(emc.displayMemoryReady());
+    EXPECT_TRUE(emc.memoryState.owned[0]);
+    ASSERT_EQ(gErrors.size(), 1u);
+    EXPECT_EQ(gErrors[0], "SwitchEMC: display memory plan (heads 0, 2000 MB/s) does not cover 204000 kHz: the rate "
+                          "the warm boot restored; programmed at the next rate or request that carries it");
+    EXPECT_EQ(emc.reserveMemory(request(2000000000)), 0);  // held already: nothing to plan
+    EXPECT_EQ(emc.reserveMemory(request(2100000000)), -28);
+    const unsigned writes = emc.mcRegs.writes;
+    EXPECT_EQ(emc.reserveMemory(request()), 0);
+    EXPECT_GT(emc.mcRegs.writes, writes);
+    EXPECT_EQ(emc.memoryAppliedKhz, 204000u);
+    EXPECT_TRUE(emc.displayMemoryReady());
+    EXPECT_TRUE(requestedRates.empty());
+}
+
+// The display's own envelope (NativeMobileDisplay), which sends no request it already holds: the EMC keeps the head the
+// envelope holds, and the envelope captured again after SC7 is planned at the restored rate, where the overlay is then
+// refused as one request.
+TEST_F(MemoryAdapter, T210HeldHeadMatchesTheDisplaysEnvelopeUntilItsNextRequest)
+{
+    emc.carRate = 1600000;
+    ASSERT_TRUE(emc.useFixedRate(emc.carRate));
+    const auto timing = request();
+    switch_display::MemoryEnvelope display;
+    const auto reserve = [this](const switch_display_memory_head *head) {
+        return emc.reserveMemory(*head);
+    };
+    ASSERT_TRUE(display.configure(timing, 720, 1280, false));
+    ASSERT_TRUE(display.applyUiAlone(reserve));
+    switch_display_memory_window windows[3] = {display.uiWindow(), {}, {}};
+    ASSERT_TRUE(switch_display::memoryWindow(windows[1], 2000000000, 720, 1280, 720, 1280, false, false, false));
+    ASSERT_TRUE(display.armWindows(windows, 2000000000, reserve));
+    emc.carRate = 204000;
+    ASSERT_EQ(SwitchEMC::governAction(&emc, &emc, nullptr, nullptr, nullptr), 0);
+    EXPECT_TRUE(emc.displayMemoryReady());
+    EXPECT_TRUE(display.armWindows(windows, 2000000000, reserve));
+    EXPECT_TRUE(emc.memoryState.same(display.reservation()));
+    ASSERT_TRUE(display.configure(timing, 720, 1280, false));
+    ASSERT_TRUE(display.applyUiAlone(reserve));
+    EXPECT_TRUE(emc.memoryState.same(display.reservation()));
+    EXPECT_EQ(emc.memoryAppliedKhz, 204000u);
+    EXPECT_FALSE(display.armWindows(windows, 2000000000, reserve));
+    EXPECT_TRUE(emc.displayMemoryReady());
+}
+
+TEST_F(MemoryAdapter, T210KeepsTheHeadsTheRestoredRateStillCarries)
+{
+    emc.carRate = 1600000;
+    ASSERT_TRUE(emc.useFixedRate(emc.carRate));
+    ASSERT_EQ(emc.reserveMemory(request()), 0);
+    emc.carRate = 1331200;
+    ASSERT_EQ(SwitchEMC::governAction(&emc, &emc, nullptr, nullptr, nullptr), 0);
+    EXPECT_TRUE(emc.memoryState.owned[0]);
+    EXPECT_EQ(emc.memoryAppliedKhz, 1331200u);
+    EXPECT_TRUE(gErrors.empty());
 }

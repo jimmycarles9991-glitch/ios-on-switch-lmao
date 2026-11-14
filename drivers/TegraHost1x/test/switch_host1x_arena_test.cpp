@@ -185,15 +185,17 @@ TEST(Host1xGatherStats, OneLineAWindowWithGathersCopiesAndTheArenaHighWaterMark)
     stats.submitted(0, false, 1200);
     stats.submitted(0, true, 3);
     stats.submitted(3, false, 34);
+    stats.submitted(4, false, 17);
     stats.waited(1);
     EXPECT_FALSE(stats.line(5999999, line, sizeof(line)));
     ASSERT_TRUE(stats.line(6000000, line, sizeof(line)));
-    EXPECT_STREQ(line, "TegraHost1x: 5s NVDEC/VIC/NVENC/NVJPG gathered=2/0/0/1 copied=1/0/0/0 arena_high=5/0/0/1KB "
-                       "room_waits=0/1/0/0");
+    EXPECT_STREQ(line, "TegraHost1x: 5s NVDEC/VIC/NVENC/NVJPG/DC gathered=2/0/0/1/1 copied=1/0/0/0/0 "
+                       "arena_high=5/0/0/1/1KB room_waits=0/1/0/0/0");
     stats.submitted(2, false, 10);
     EXPECT_FALSE(stats.line(10999999, line, sizeof(line)));
     ASSERT_TRUE(stats.line(11000000, line, sizeof(line)));
-    EXPECT_STREQ(line, "TegraHost1x: 5s NVDEC/VIC/NVENC/NVJPG gathered=0/0/1/0 copied=0/0/0/0 arena_high=0/0/1/0KB "
-                       "room_waits=0/0/0/0");
+    EXPECT_STREQ(line, "TegraHost1x: 5s NVDEC/VIC/NVENC/NVJPG/DC gathered=0/0/1/0/0 copied=0/0/0/0/0 "
+                       "arena_high=0/0/1/0/0KB room_waits=0/0/0/0/0");
 }
+
 }  // namespace

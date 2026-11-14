@@ -5,12 +5,8 @@
 #include "raw_mme.h"
 #include "raw_stamps.h"
 #include "../../../../kits/SwitchGM20B/SwitchGM20B.h"
-#include "../../../../kits/SwitchGM20BEmit/SwitchGM20BEmitRaster.h"
 
 namespace raw {
-
-// a draw's shortcuts around its words (raw_draw_shortcuts.cpp), as raw_gpu.cpp reserves them
-constexpr uint32_t kShortcutWords = 2 * (SWITCH_GM20B_CONSTANT_COLOR_WORDS + SWITCH_GM20B_FILL_VIA_TRIANGLE_WORDS);
 
 uint64_t RenderEncoder::drawUnits(uint32_t instances) const
 {
@@ -55,18 +51,16 @@ bool RenderEncoder::measurePass(bool drained)
 }
 
 void RenderEncoder::emitDraw(bool indexed, uint32_t first, uint32_t count, uint32_t instances, uint32_t root,
-                             uint32_t baseInstance, const Shortcut &cut)
+                             uint32_t baseInstance)
 {
     const auto words = [&](Push &p) {
-        shortcutBegin(cut);
-        mme::draw(p, params_, indexed, first, cut.bbox ? 3 : count, instances, root, baseInstance);
-        shortcutEnd(cut);
+        mme::draw(p, params_, indexed, first, count, instances, root, baseInstance);
     };
     const uint64_t units = drawUnits(instances);
     const uint32_t bands = drawBands(count, instances, units);
     noteCandidate(units);
     if (bands < 2) {
-        if (p_.room() < kBandWords + kShortcutWords)
+        if (p_.room() < kBandWords)
             reserve();
         words(p_);
         finishDraw(count, instances);
@@ -78,7 +72,7 @@ void RenderEncoder::emitDraw(bool indexed, uint32_t first, uint32_t count, uint3
     emitBands(
         p_, rot_, area, drawBox_, bands,
         [&] {
-            if (p_.room() < kBandWords + kShortcutWords)
+            if (p_.room() < kBandWords)
                 reserve();
         },
         words,

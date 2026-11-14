@@ -318,13 +318,32 @@ kernel_driver(
     tags = ["no-lint"],
 )
 
-# kits/SwitchGM20BEmit/SwitchGM20BMacroSlots.h's NVK slots and scratch words against nvk_mme.h's and context.tsv's
+# kits/SwitchGM20BEmit/SwitchGM20BMacroSlots.h's root scratch words against context.tsv's
 py_test(
     name = "macro_slots_test",
     srcs = ["macro_slots_test.py"],
+    args = ["ScratchWords.test_the_context_init_writes_the_root_where_the_patch_macro_reads_it"],
     data = [
         "//kits/SwitchGM20BEmit:SwitchGM20BMacroSlots.h",
         "//kits/SwitchGM20BEmit:context/context.tsv",
+    ],
+    main = "macro_slots_test.py",
+)
+
+# Its NVK slots and scratch words against nvk_mme.h's: they keep NVK's numbers only while NVK shares the channel's
+# macros (tag m2v: deleted with NVK)
+py_test(
+    name = "macro_slots_nvk_test",
+    srcs = ["macro_slots_test.py"],
+    args = [
+        "MacroSlots",
+        "ScratchWords.test_each_nvk_word_is_nvk_mmes",
+        "ScratchWords.test_fecs_mailbox_is_nvks_falcon_words",
+    ],
+    data = [
+        "//kits/SwitchGM20BEmit:SwitchGM20BMacroSlots.h",
         "//third_party/mesa/src/nouveau/vulkan:nvk_mme.h",
     ],
+    main = "macro_slots_test.py",
+    tags = ["m2v"],
 )

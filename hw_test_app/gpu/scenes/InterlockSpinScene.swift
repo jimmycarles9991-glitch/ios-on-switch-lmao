@@ -9,10 +9,7 @@ struct InterlockSpinScene: GPUScene {
     static let width = 1280, height = 720
     static let layers = [1, 4, 16]
     static let runs = 5
-    static let arms = [
-        ("plain", "solid_fragment"), ("atomic", "fetch_blend_atomic_fragment"),
-        ("default", "fetch_blend_fragment"),
-    ]
+    static let arms = [("plain", "solid_fragment"), ("default", "fetch_blend_fragment")]
 
     func run(_ gpu: GPU) async throws -> SceneResult {
         var result = SceneResult()

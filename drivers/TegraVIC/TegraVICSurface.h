@@ -35,4 +35,11 @@ void tegra_vic_surface_written(const TegraVICSurface *s);  // VIC wrote it: the 
 }
 
 switch_gpu_backing *switch_vic_surface_backing(const TegraVICSurface *surface);
+// A backing the caller already holds for this surface (a display slot's, held as scanned since the slot took it):
+// retained and adopted again, without the cache's lookup or its lock.
+switch_gpu_backing *switch_vic_surface_backing_held(const TegraVICSurface *surface, switch_gpu_backing *held);
+#if (defined(DEVELOPMENT) && DEVELOPMENT) || (defined(DEBUG) && DEBUG)
+// Debug kernels: the cache lock's takes since boot.
+extern "C" uint64_t switch_vic_surface_cache_locks(void);
+#endif
 #endif

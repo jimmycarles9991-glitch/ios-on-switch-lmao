@@ -19,6 +19,7 @@
 //    copy (which waits on the GPU for every channel that imports the surface) never runs before the frame's work is submitted.
 #include "raw_lock.h"
 #import "RawMetalIndirect.h"
+#import "RawMetalPassCache.h"
 #include "raw_device_answers.h"
 #include "raw_limits_fill.h"
 
@@ -155,22 +156,28 @@ RawState *gRM;
 
 @end
 
-// raw_metal_prepare's thread and what it made (taken once, by raw_metal_device_open)
+// raw_metal_prepare's thread and what it made (taken once, by raw_metal_device_open; one that did not open is prepared
+// again by the plugin's next open)
 static struct {
     raw::Mutex lock;
     std::thread thread;
     std::string path, err;
     uint64_t stack = 0;
     raw::Device *dev = nullptr;
+    raw::OpenFailure failure = raw::OpenFailure::Structural;
     bool started = false;
 } gPrepared;
 
-static raw::Device *openDevice(const char *packPath, uint64_t stack, raw::Device::Role role, std::string &err)
+static raw::OpenFailure gOpenFailure = raw::OpenFailure::Structural;  // raw_metal_device_open_lazy's last nil
+
+static raw::Device *openDevice(const char *packPath, uint64_t stack, raw::Device::Role role, std::string &err,
+                               raw::OpenFailure &failure)
 {
     raw::Device *dev = new raw::Device;
     dev->indexZeroPastLimit = raw::answers::chipFeature(SWITCH_GM20B_FEATURE_3D_B11);
     dev->heapHolds(rmHeapHolds);
     if (!dev->open(packPath, stack, err, role)) {
+        failure = dev->openFailure();
         delete dev;  // its connection closes: the kernel frees what it held
         return nullptr;
     }
@@ -192,10 +199,13 @@ void raw_metal_prepare(const char *packPath, uint64_t stack)
         pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0);
         pthread_setname_np("com.brunostjohn.switch.raw.open");
         std::string err;
-        raw::Device *dev = openDevice(gPrepared.path.c_str(), gPrepared.stack, raw::Device::Role::RenderServer, err);
+        raw::OpenFailure failure = raw::OpenFailure::Structural;
+        raw::Device *dev =
+            openDevice(gPrepared.path.c_str(), gPrepared.stack, raw::Device::Role::RenderServer, err, failure);
         std::lock_guard<raw::Mutex> m(gPrepared.lock);
         gPrepared.dev = dev;
         gPrepared.err = err;
+        gPrepared.failure = failure;
     });
 }
 
@@ -287,6 +297,11 @@ id<MTLDevice> raw_metal_device_open(const char *packPath, uint64_t stack, id<MTL
     return raw_metal_device_open_lazy(packPath, stack, registryID, m2v, error);
 }
 
+const char *raw_metal_open_failure(void)
+{
+    return raw::openFailureText(gOpenFailure);
+}
+
 id<MTLDevice> raw_metal_device_open_lazy(const char *packPath, uint64_t stack, uint64_t registryID, RawM2V m2v,
                                          NSString **error)
 {
@@ -298,6 +313,7 @@ id<MTLDevice> raw_metal_device_open_lazy(const char *packPath, uint64_t stack, u
     rmPoolCommandBuffers();
     raw::Device *dev = nullptr;
     std::string err;
+    raw::OpenFailure failure = raw::OpenFailure::Structural;
     bool prepared = false;
     {
         std::unique_lock<raw::Mutex> m(gPrepared.lock);
@@ -310,25 +326,30 @@ id<MTLDevice> raw_metal_device_open_lazy(const char *packPath, uint64_t stack, u
             prepared = true;
             dev = gPrepared.dev;
             err = gPrepared.err;
+            failure = gPrepared.failure;
             gPrepared.dev = nullptr;
+            gPrepared.started = dev != nullptr;
         }
     }
     if (!prepared)
-        dev = openDevice(packPath, stack, raw::Device::Role::Client, err);
+        dev = openDevice(packPath, stack, raw::Device::Role::Client, err, failure);
     // m2v's views of the raw path's memory are made in the GPU VM the two drivers share: NVK's connection, whichever opens it
     // first (raw_kernel.h)
     if (dev && m2v.open && !dev->shared()) {
         err = "the kernel connection is not NVK's, so m2v cannot alias the raw path's memory";
+        failure = raw::OpenFailure::Structural;
         delete dev;
         dev = nullptr;
     }
     if (!dev) {
+        gOpenFailure = failure;
         if (error)
             *error = [NSString stringWithUTF8String:err.c_str()];
         return nil;
     }
     Class cls = deviceClass(m2v, error);
     if (!cls) {
+        gOpenFailure = raw::OpenFailure::Structural;
         delete dev;
         return nil;
     }
@@ -369,7 +390,11 @@ id<MTLDevice> raw_metal_device_open_lazy(const char *packPath, uint64_t stack, u
     r->listener = [[MTLSharedEventListener alloc] initWithDispatchQueue:r->handlers];
     gRawRelease.start(
         [](void *) {
-            gRM->raw->trim();
+            gRM->orphanCheck.store(true, std::memory_order_release);
+            gRM->schedule.wake();
+            // the textures only kept pass copies hold go first, so trim gives back the chunks they held
+            const RMPassTrim passes = rmPassTrim();
+            const raw::Device::Trimmed kept = gRM->raw->trim();
             gRM->raw->purgeArenas(gRM->committed);
             gRM->raw->trimArenas(gRM->committed);
             releaseRecordings();
@@ -377,9 +402,11 @@ id<MTLDevice> raw_metal_device_open_lazy(const char *packPath, uint64_t stack, u
             // would have made malloc give back the dirty pages its zones keep free (a compile's working memory)
             const size_t relieved = malloc_zone_pressure_relief(nullptr, 0);
 #if !defined(SWITCH_DEBUG) || SWITCH_DEBUG
-            logGivenBack(relieved);
+            logGivenBack(relieved, passes, kept);
 #else
             (void)relieved;
+            (void)passes;
+            (void)kept;
 #endif
         },
         nullptr, &r->rangesInFlight);

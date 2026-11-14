@@ -35,6 +35,7 @@ kernel_headers()
 kernel_driver(
     name = "TegraSMMU",
     hdr_deps = [
+        "drivers/ArmGIC",
         "kits/SwitchDMA",
         "kits/SwitchMMIO",
     ],

@@ -1,0 +1,21 @@
+# User space: a bounded wait for a kernel service, or for its driver's resource saying it will not come (header-only).
+#
+#   bazel test //kits/SwitchServiceWait/test:all
+load("//bazel/lint:defs.bzl", "lint_files")
+
+package(default_visibility = ["//visibility:public"])
+
+lint_files()
+
+exports_files(glob(
+    ["**"],
+    exclude = ["BUILD.bazel"],
+))
+
+filegroup(
+    name = "all_files",
+    srcs = glob(
+        ["**"],
+        exclude = ["BUILD.bazel"],
+    ),
+)

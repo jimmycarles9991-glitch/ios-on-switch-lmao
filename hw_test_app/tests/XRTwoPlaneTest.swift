@@ -9,7 +9,7 @@ import Metal
 /// draw, a pass that loads it and draws again, and a pass that samples it; then, each after the CPU rewrote part of
 /// both planes, a loading pass, a sampling pass and a blit into a buffer; last a blit from a buffer into it. Every
 /// command buffer must take the raw path, and the planes must hold Metal's bytes (plane 0 the code word, plane 1 the alpha byte, codes as raw_xr.h writeCode stores
-/// them), the samples each code's value as a half, and blits move plane 0's words alone (m2v two_planes.rs); rows of
+/// them), the samples each code's value as a half, and blits move plane 0's words alone; rows of
 /// 128-byte multiples (96 wide) are drawn in place. Then XRTwoPlaneCells.
 struct XRTwoPlaneTest: HWTest {
     let id = "gpu.raw.xr_two_plane"
@@ -62,10 +62,7 @@ struct XRTwoPlaneTest: HWTest {
             (RawFacade.counters(of: gpu.device)[name] ?? 0) - (counted[name] ?? 0)
         }
         let directShadows = moved("xr_plane_shadows")
-        guard let m2v = RawFacade.m2vDevice(of: gpu.device) else {
-            throw TestFailure("the facade hands out no m2v device")
-        }
-        let cells = XRTwoPlaneCells(gpu: gpu, reference: try GPU.make(device: m2v))
+        let cells = XRTwoPlaneCells(gpu: gpu)
         let blend = try await cells.blendWrong()
         let storage = try await cells.fetchWrong(barrier: false)
         let barrier = try await cells.fetchWrong(barrier: true)
@@ -76,12 +73,12 @@ struct XRTwoPlaneTest: HWTest {
         let linear = try await cells.pairSamples(texture, "linear_fragment")
         let gatherAlpha = try await cells.gatherWrong(texture, want, alpha: true)
         let gatherRed = try await cells.gatherWrong(texture, want, alpha: false)
-        let (referenceBuffer, referenceTexture) = try Self.surfaceTexture(cells.reference)
-        Self.copyPlanes(from: buffer, to: referenceBuffer)
-        let referenceLinear = try await XRTwoPlaneCells.samples(cells.reference, referenceTexture, "linear_fragment")
-        let referenceNearest = try await XRTwoPlaneCells.samples(cells.reference, referenceTexture, "nearest_fragment")
-        let nearestApart = XRTwoPlaneCells.halfDistance(nearest.halves, referenceNearest)
-        let linearApart = XRTwoPlaneCells.halfDistance(linear.halves, referenceLinear)
+        let texels = Self.planes(buffer)
+        let nearestApart = XRTwoPlaneModel.nearestApart(nearest.halves, texels)
+        let linearApart = XRTwoPlaneModel.linearApart(
+            linear.halves,
+            exact: XRTwoPlaneModel.bilinear(texels, width: Self.width, height: Self.height, weight: 1.0 / 3),
+            fixed: XRTwoPlaneModel.bilinear(texels, width: Self.width, height: Self.height, weight: 85.0 / 256))
 
         var metrics = Metrics()
         let planePasses = moved("xr_plane_passes")
@@ -91,14 +88,17 @@ struct XRTwoPlaneTest: HWTest {
         metrics.set("narrow_wrong", narrow)
         metrics.set("narrow_shadows", narrowShadows)
         metrics.set("blend_wrong", blend.wrong)
+        metrics.set("blend_off_by_one", blend.offByOne)
         metrics.set("blend_interlocked", blend.interlocked)
         metrics.set("fetch_storage_wrong", storage.wrong)
+        metrics.set("fetch_storage_off_by_one", storage.offByOne)
         metrics.set("fetch_storage_interlocked", storage.interlocked)
         metrics.set("fetch_barrier_wrong", barrier.wrong)
+        metrics.set("fetch_barrier_off_by_one", barrier.offByOne)
         metrics.set("fetch_barrier_interlocked", barrier.interlocked)
         metrics.set("fetch_barrier_drawn", barrier.fetched)
         metrics.set("pair_nearest", nearest.paired ? 1 : 0)
-        metrics.set("pair_nearest_apart", nearestApart.apart)
+        metrics.set("pair_nearest_apart", nearestApart)
         metrics.set("pair_linear", linear.paired ? 1 : 0)
         metrics.set("pair_linear_apart", linearApart.apart)
         metrics.set("pair_linear_steps", linearApart.steps)
@@ -128,42 +128,31 @@ struct XRTwoPlaneTest: HWTest {
                     directShadows == 0 && cellShadows == 0
                 ),
                 ("a surface 60 wide is drawn through shadows", narrow == 0 && narrowShadows > 0),
-                ("blended draws are the m2v device's", blend.wrong == 0 && blend.interlocked > 0),
                 (
-                    "Core Animation's blended fills in the storage form are the m2v device's",
+                    "blended draws are source-over of the codes, within one code",
+                    blend.wrong == 0 && blend.interlocked > 0
+                ),
+                (
+                    "Core Animation's blended fills in the storage form are source-over, within one code",
                     storage.wrong == 0 && storage.interlocked > 0
                 ),
                 (
-                    "Core Animation's blended fills in the barrier form are the m2v device's",
+                    "Core Animation's blended fills in the barrier form are source-over, within one code",
                     barrier.wrong == 0 && barrier.interlocked == 0 && barrier.fetched > 0
                 ),
                 (
-                    "nearest samples through the header pair are the m2v device's",
-                    nearest.paired && nearestApart.apart == 0
+                    "nearest samples through the header pair are the codes' values",
+                    nearest.paired && nearestApart == 0
                 ),
-                ("linear samples through the header pair within a half step", linear.paired && linearApart.steps <= 1),
+                (
+                    "linear samples through the header pair within a half step of Metal's filter",
+                    linear.paired && linearApart.apart == 0
+                ),
                 (
                     "gathers of alpha and red through the header pair are the texels' values",
                     gatherAlpha.paired && gatherRed.paired && gatherAlpha.wrong == 0 && gatherRed.wrong == 0
                 ),
             ], metrics, proof: gpu.proof)
-    }
-
-    /// Both planes of `from` into `to`, two surfaces of one size, under their locks
-    static func copyPlanes(from: CVPixelBuffer, to: CVPixelBuffer) {
-        CVPixelBufferLockBaseAddress(from, .readOnly)
-        CVPixelBufferLockBaseAddress(to, [])
-        defer {
-            CVPixelBufferUnlockBaseAddress(to, [])
-            CVPixelBufferUnlockBaseAddress(from, .readOnly)
-        }
-        for plane in 0..<2 {
-            let rows = CVPixelBufferGetBytesPerRowOfPlane(from, plane)
-            precondition(rows == CVPixelBufferGetBytesPerRowOfPlane(to, plane))
-            memcpy(
-                CVPixelBufferGetBaseAddressOfPlane(to, plane)!, CVPixelBufferGetBaseAddressOfPlane(from, plane)!,
-                rows * CVPixelBufferGetHeightOfPlane(from, plane))
-        }
     }
 
     /// raw_xr.h writeCode: a channel's code, or the alpha byte

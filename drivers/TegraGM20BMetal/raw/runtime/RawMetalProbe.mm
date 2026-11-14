@@ -81,6 +81,16 @@ static raw::ProbeSurface probeSurface(const raw::Texture &t, uint32_t fmt2d)
     return nil;
 }
 
+// `texture` moved off compressed memory now, as an m2v twin moves it (rmTexturePlain): @YES where it was compressed and
+// moved
+- (NSNumber *)switchRawProbeMovePlain:(id<MTLTexture>)texture
+{
+    RMTexture *t = [(id)texture isKindOfClass:[RMTexture class]] ? (RMTexture *)texture : nil;
+    if (!t || !t->_rawOk || !gRM->raw->privateCompressed(t->_raw))
+        return @NO;
+    return @(rmTexturePlain(t) && !gRM->raw->privateCompressed(t->_raw));
+}
+
 // Private textures made while `on` is true stay on plain memory (raw_private_comp.h), for a probe's uncompressed
 // reference
 - (NSString *)switchRawProbePlainPrivate:(NSNumber *)on
@@ -111,7 +121,8 @@ static raw::ProbeSurface probeSurface(const raw::Texture &t, uint32_t fmt2d)
     return nil;
 }
 
-// Resolves resolve.twod takes go through the complement (rule resolve.exact) while set, at any sample count
+// Resolves of resolve.twod's shape, readable or not, go through the grid's complement while set: the engine's reading
+// under ROP3 NOTSRCCOPY, which raw_resolve_rule.h routes nothing through
 - (NSString *)switchRawProbeResolveExact:(NSNumber *)on
 {
     gRM->raw->probeResolveExact.store(on.boolValue, std::memory_order_release);
@@ -129,6 +140,17 @@ static raw::ProbeSurface probeSurface(const raw::Texture &t, uint32_t fmt2d)
         return @"rung is 0, 2, 3, 4, 5 or 6";
     gRM->raw->probeFetchRung.store(uint8_t(value), std::memory_order_release);
     return nil;
+}
+
+// gpu.x1.job_boundary_idle's header cell: [a, b] makes texture a's header describe b's image from the next submission's
+// header invalidate on, [a] gives a its own back; nil, else why not
+- (NSString *)switchRawProbeRetarget:(NSArray *)textures
+{
+    RMTexture *a = textures.count ? rawTexture(textures[0]) : nil;
+    RMTexture *to = textures.count > 1 ? rawTexture(textures[1]) : nil;
+    if (!a || (textures.count > 1 && !to))
+        return @"not raw textures";
+    return gRM->raw->probeRetarget(a->_raw, to ? &to->_raw : nullptr) ? nil : @"a texture with no header";
 }
 
 // What a probe's line says of a texture and the device: "raw=1 comptags=1 block_linear=1 pitch=N tiled_cache=1
@@ -162,6 +184,7 @@ static raw::ProbeSurface probeSurface(const raw::Texture &t, uint32_t fmt2d)
     std::lock_guard<raw::Mutex> lock(_lock);
     if (_committed)
         return @"committed already";
+    rmPipelineVeto(self, VetoProbes);
     _probeForms = f;
     return nil;
 }
@@ -193,6 +216,7 @@ static raw::ProbeSurface probeSurface(const raw::Texture &t, uint32_t fmt2d)
         o.value = uint32_t(number(op, @"value"));
         if (o.method >= 0x8000 || o.method % 4)
             return @"a 3D-class method below 0x8000";
+        rmPipelineVeto(self, VetoProbes);
         _probeOps.push_back({_encAt, o, nil, written});
         return nil;
     }
@@ -223,7 +247,17 @@ static raw::ProbeSurface probeSurface(const raw::Texture &t, uint32_t fmt2d)
         return @"a fill's colour format is its destination's own 2D format, not an sRGB one (probeSolidFill)";
     if (o.dx + o.dw > o.dst.width || o.dy + o.dh > o.dst.height)
         return @"a rectangle outside the written texture";
+    rmPipelineVeto(self, VetoProbes);
     _probeOps.push_back({_encAt, o, read, written});
+    // The blit encoder's uses, as a copy's: a new texture's first contents (RawMetalFresh.mm) then go ahead of this
+    // encoder, not ahead of the next command buffer that names the texture, over what the 2D engine wrote
+    std::vector<raw::ResourceUse> uses = {{(__bridge void *)written, raw::ResourceUse::Write}};
+    [self retain:written];
+    if (read) {
+        uses.push_back({(__bridge void *)read, raw::ResourceUse::Read});
+        [self retain:read];
+    }
+    _plan.addUses(_plan.size() - 1, uses);
     return nil;
 }
 

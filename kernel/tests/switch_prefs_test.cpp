@@ -318,6 +318,26 @@ TEST(SwitchPrefsGuard, NoSetupSetsNeverDim)
         EXPECT_EQ(Count(record, key), 0u) << "the 12377 port record still sets " << key;
 }
 
+// KERN-46: BackBoard's watchdogs on SpringBoard are Apple's. No setup writes BKNoWatchdogs into the managed plist, and
+// the one-time release takes the key earlier kernels wrote out of the user's plist, called from the setup in both trees
+TEST(SwitchPrefsGuard, NoSetupTurnsBackBoardsWatchdogsOff)
+{
+    using switch_ios::test::Body;
+    using switch_ios::test::Count;
+    using switch_ios::test::SourceText;
+    for (const char *path : kKernels) {
+        const std::string source = SourceText(path);
+        EXPECT_EQ(Count(source, "<key>BKNoWatchdogs</key>"), 0u) << path;
+        const std::string body =
+            Body(source, "native_switch_watchdogs_release(proc_t p, user_addr_t scratch, mount_t data_mount)");
+        EXPECT_EQ(Count(body, "\"BKNoWatchdogs\""), 1u) << path;
+        EXPECT_EQ(Count(Body(source, "native_switch_setup_state(proc_t p, user_addr_t scratch, mount_t data_mount)"),
+                        "native_switch_watchdogs_release(p, scratch, data_mount);"),
+                  1u)
+            << path;
+    }
+}
+
 // timed's cache is kept only when it holds the boot session UUID of this clock's last boot, the same in both kernels
 // (drivers/SwitchPower/SwitchMonotonicBase.h): one an older kernel's boot saved would put the time decades ahead.
 TEST(SwitchPrefsGuard, TimedCacheKeptOnlyFromThisClock)

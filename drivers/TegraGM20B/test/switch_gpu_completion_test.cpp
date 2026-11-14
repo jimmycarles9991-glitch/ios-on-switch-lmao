@@ -6,13 +6,10 @@ using u32 = uint32_t;
 using u64 = uint64_t;
 using s32 = int32_t;
 
-struct nvif_event {};
-
 struct tgm_chan {
-	nvif_event nonstall;
-	uint32_t completed = 0, progress_done = 0, high = 0, chid = 1, kernel = 0,
+	uint32_t completed = 0, submitted = 0, progress_done = 0, high = 0, chid = 1, kernel = 0,
 		 event_through = 0;
-	uint64_t progress_held = 0, progress_ns = 0, irq_state = 0;
+	uint64_t progress_held = 0, progress_ns = 0;
 	void (*fenced)(void *) = nullptr;
 	void *fenced_arg = nullptr;
 };
@@ -21,9 +18,9 @@ struct tgm_chan {
 	reinterpret_cast<type *>(reinterpret_cast<char *>(pointer) - offsetof(type, member))
 #define WRITE_ONCE(target, value) ((target) = (value))
 #define READ_ONCE(target) (target)
-constexpr int NVIF_EVENT_KEEP = 0, NVIF_EVENT_DROP = 1, CHAN_SCRUB = 2;
-unsigned highCalls, idleCalls, statsCalls, presentCalls, scrubCalls, wakeCalls, watchCalls,
-	callbacks, timestamps, eventPasses;
+constexpr int CHAN_SCRUB = 2;
+unsigned highCalls, idleCalls, statsCalls, presentCalls, scrubCalls, wakeCalls, channelWakes,
+	watchCalls, callbacks, timestamps, eventPasses;
 int tgm_sc7_gate;
 bool diagnostic, suspended;
 
@@ -85,7 +82,7 @@ void present_fenced(tgm_chan *)
 
 void chan_wake_waiters(tgm_chan *)
 {
-	++wakeCalls;
+	++channelWakes;
 }
 
 void present_watch_fenced(tgm_chan *, int)
@@ -93,7 +90,10 @@ void present_watch_fenced(tgm_chan *, int)
 	++watchCalls;
 }
 
-#include "drivers/TegraGM20B/SwitchGpuActiveIrq.h"
+#include "drivers/TegraGM20B/SwitchGpuBusy.h"
+#include "drivers/TegraGM20B/SwitchGpuChanTable.h"
+switch_gpu_busy tgm_busy;
+switch_gpu_chan_table tgm_chan_table;
 #include "drivers/TegraGM20B/SwitchGpuChannelCompletion.h"
 
 void switch_gpu_events_completed()
@@ -109,7 +109,7 @@ protected:
 	void SetUp() override
 	{
 		highCalls = idleCalls = statsCalls = presentCalls = scrubCalls = wakeCalls =
-			watchCalls = callbacks = timestamps = eventPasses = 0;
+			channelWakes = watchCalls = callbacks = timestamps = eventPasses = 0;
 		diagnostic = suspended = false;
 		channel.fenced = [](void *) {
 			++callbacks;
@@ -118,8 +118,7 @@ protected:
 
 	void interrupt()
 	{
-		switch_gpu_irq_arm(&channel.irq_state, channel.completed + 1);
-		EXPECT_EQ(chan_nonstall(&channel.nonstall, nullptr, 0), NVIF_EVENT_KEEP);
+		chan_completion(&channel);
 	}
 };
 
@@ -129,7 +128,9 @@ TEST_F(Completion, UnrelatedInterruptDoesNotWakeOrScheduleAnyChannelWork)
 	channel.high = 1;
 	interrupt();
 	interrupt();
-	EXPECT_EQ(idleCalls + highCalls + statsCalls + callbacks + wakeCalls + timestamps, 0u);
+	EXPECT_EQ(idleCalls + highCalls + statsCalls + callbacks + wakeCalls + channelWakes +
+			  timestamps,
+		  0u);
 }
 
 TEST_F(Completion, MovingFenceSchedulesAndWakesOnce)
@@ -139,8 +140,10 @@ TEST_F(Completion, MovingFenceSchedulesAndWakesOnce)
 	interrupt();
 	EXPECT_EQ(channel.progress_done, 3u);
 	EXPECT_EQ(callbacks, 1u);
-	EXPECT_EQ(wakeCalls, 1u);
-	EXPECT_EQ(idleCalls, 1u);
+	EXPECT_EQ(channelWakes, 1u);
+	EXPECT_EQ(wakeCalls, 0u);
+	EXPECT_EQ(idleCalls, 0u)
+		<< "the idle clock reads tgm_busy: the pass adds to no counter of its own";
 	EXPECT_EQ(timestamps, 1u);
 	EXPECT_EQ(channel.progress_ns, 42u);
 }
@@ -162,7 +165,7 @@ TEST_F(Completion, SequenceWrapIsStillACompletionTransition)
 	channel.completed = 0;
 	interrupt();
 	EXPECT_EQ(callbacks, 1u);
-	EXPECT_EQ(wakeCalls, 1u);
+	EXPECT_EQ(channelWakes, 1u);
 	EXPECT_EQ(watchCalls, 1u);
 }
 
@@ -180,6 +183,7 @@ TEST_F(Completion, PresentAndHighPolicyRunOnlyForItsOwnProgress)
 	EXPECT_EQ(statsCalls, 1u);
 	EXPECT_EQ(callbacks, 1u);
 	EXPECT_EQ(wakeCalls, 0u);
+	EXPECT_EQ(channelWakes, 1u) << "its own room and teardown waits";
 	EXPECT_EQ(watchCalls, 0u);  // a kernel channel's fence is no user producer
 }
 
@@ -193,6 +197,7 @@ TEST_F(Completion, ScrubProgressWakesSuspendDrainWithoutGenericCallbacks)
 	interrupt();
 	EXPECT_EQ(scrubCalls, 1u);
 	EXPECT_EQ(wakeCalls, 1u);
+	EXPECT_EQ(channelWakes, 1u);
 	EXPECT_EQ(callbacks, 0u);
 }
 
@@ -210,4 +215,44 @@ TEST_F(Completion, MidJobEventReleaseRunsEventRetirementWithoutFenceProgress)
 	EXPECT_EQ(callbacks, 2u);
 	interrupt();
 	EXPECT_EQ(eventPasses, 1u);
+}
+
+// The pass publishes how far each channel's fence got (tgm_busy's done word, written by the pass alone): one short of the
+// newest seqno kicked is work in flight, the newest none.
+TEST_F(Completion, ThePassPublishesTheChannelsDoneSeqno)
+{
+	tgm_busy = {};
+	switch_gpu_busy_level(&tgm_busy, channel.chid, 1);
+	switch_gpu_busy_kick(&tgm_busy, channel.chid, 5);
+	channel.completed = 4;
+	interrupt();
+	EXPECT_TRUE(switch_gpu_busy_chan(&tgm_busy, channel.chid));
+	EXPECT_TRUE(switch_gpu_busy_low(&tgm_busy));
+	channel.completed = 5;
+	interrupt();
+	EXPECT_FALSE(switch_gpu_busy_chan(&tgm_busy, channel.chid));
+	EXPECT_FALSE(switch_gpu_busy_low(&tgm_busy));
+}
+
+// The pass completes the live channels with a kick it has not seen done, from their tgm_chan_table slots: no per-job
+// event to arm, allow, complete or drop. A channel with nothing pending, or no slot, is not touched.
+TEST_F(Completion, ThePassCompletesOnlyChannelsWithWorkPending)
+{
+	tgm_busy = {};
+	tgm_chan_table = {};
+	switch_gpu_busy_open(&tgm_busy, channel.chid, 0);
+	switch_gpu_chan_table_set(&tgm_chan_table, channel.chid, &channel);
+	EXPECT_EQ(chans_completed(), 0u);
+	EXPECT_EQ(timestamps, 0u) << "nothing kicked";
+	switch_gpu_busy_kick(&tgm_busy, channel.chid, 2);
+	channel.completed = 2;
+	EXPECT_EQ(chans_completed(), 1u) << "one channel progressed: a job interrupt";
+	EXPECT_EQ(channel.progress_done, 2u);
+	EXPECT_EQ(callbacks, 1u);
+	EXPECT_EQ(chans_completed(), 0u);
+	EXPECT_EQ(callbacks, 1u) << "seen done: not touched again";
+	switch_gpu_busy_kick(&tgm_busy, channel.chid, 3);
+	switch_gpu_chan_table_set(&tgm_chan_table, channel.chid, nullptr);
+	EXPECT_EQ(chans_completed(), 0u);
+	EXPECT_EQ(callbacks, 1u) << "torn down";
 }

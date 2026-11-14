@@ -35,7 +35,7 @@ inline size_t extraWords(const Cmd &c)
     case OpScissor:
         return c.index > 1 ? 4 * size_t(c.index) : 0;
     case OpDispatch:
-        return 12;
+        return 16;
     case OpBlendColor:
         return 4;
     case OpDepthBias:
@@ -51,16 +51,19 @@ inline size_t extraWords(const Cmd &c)
     }
 }
 
-// A command a sub-encoder's command buffer recorded, as the parallel encoder's records it: its pass, setBytes chunk and extra
-// words where that command buffer holds them (its passes from `passBase`, its chunks from `chunkBase`, the words at
-// `extraAt`). OpDrawIndirect's and OpDrawIndexedIndirect's x is an argument offset and OpExecuteCommands' a command index,
-// not extra words.
-inline Cmd spliced(Cmd c, size_t passBase, size_t chunkBase, size_t extraAt)
+// A command a sub-encoder's command buffer recorded, as the parallel encoder's records it: its pass, setBytes chunk, bytes'
+// shadow and extra words where that command buffer holds them (its passes from `passBase`, its chunks from `chunkBase`,
+// its shadow bytes from `shadowBase`, the words at `extraAt`). OpDrawIndirect's and OpDrawIndexedIndirect's x is an
+// argument offset and OpExecuteCommands' a command index, not extra words.
+inline Cmd spliced(Cmd c, size_t passBase, size_t chunkBase, size_t shadowBase, size_t extraAt)
 {
-    if (c.op == OpRender)
+    if (c.op == OpRender) {
         c.x += passBase;
-    else if (c.op == OpBytes)
+    } else if (c.op == OpBytes) {
         c.c += chunkBase;
+        if (c.shadow)
+            c.shadow += uint32_t(shadowBase);
+    }
     if (extraWords(c))
         c.x = extraAt;
     return c;

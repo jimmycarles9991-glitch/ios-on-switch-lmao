@@ -84,14 +84,19 @@ int SwitchEMC::reserveMemory(const switch_display_memory_head &request)
     return error;
 }
 
-// A plan that no longer covers the running rate turns display memory admission off for the boot: the display shows the
-// UI alone (window A needs no admission) and its overlays are dropped, never a panic.
-void SwitchEMC::dropDisplayMemory(const char *why)
+// A rate change left the held plan uncovered at `runningKhz` (0: not known): that programming fails, one line. The heads
+// stay as the display holds them and admission stays on; the plan is programmed again at the next rate that carries it
+// (MemoryState::transition plans a move away from an uncovered rate by where it goes) or at the next request.
+void SwitchEMC::uncoveredDisplayMemory(uint32_t runningKhz, const char *why)
 {
-    if (__atomic_exchange_n(&memoryQualified, false, __ATOMIC_ACQ_REL))
-        os_log_error(OS_LOG_DEFAULT, "SwitchEMC: display memory admission off: %s", why);
-    memoryState = {};
-    memoryDirty = false;
+    os_log_error(OS_LOG_DEFAULT,
+                 "SwitchEMC: display memory plan (heads %s, %llu MB/s) does not cover %u kHz: %s; programmed at the "
+                 "next rate or request that carries it",
+                 memoryState.owned[0] && memoryState.owned[1] ? "0 and 1"
+                 : memoryState.owned[1]                       ? "1"
+                                                              : "0",
+                 static_cast<unsigned long long>(floorBytes() / 1000000), runningKhz, why);
+    memoryDirty = true;
 }
 
 extern "C" int switch_emc_display_memory_reserve(const switch_display_memory_head *request)

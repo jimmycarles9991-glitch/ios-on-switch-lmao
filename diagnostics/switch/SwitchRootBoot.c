@@ -21,12 +21,13 @@ switch_sensors_start(void);        /* thermalmonitord's HID temperature sensors,
 extern int switch_als_start(void); /* after SwitchTouch, which powers the sensor (LDO6) */
 extern int switch_bluetooth_start(void); /* no-op with switch-no-bt; runs its bring-up on its own thread */
 extern int switch_joycon_start(void);
-extern int switch_wlan_publish(void); /* no-op with switch-no-wlan; runs its bring-up on its own thread */
-extern int tegra_gm20b_probe(void);   /* no-op with switch-no-gpu; runs its bring-up on its own thread */
-extern int tegra_nvdec_probe(void);   /* no-op with switch-no-nvdec; own thread, starts host1x itself */
-extern int tegra_nvenc_probe(void);   /* on with NVDEC (switch-no-nvdec turns both off); own thread */
-extern int tegra_vic_probe(void);     /* on by default; own thread, waits for NVDEC's bring-up to end */
-extern int tegra_nvjpg_probe(void);   /* on by default; own thread, waits for NVDEC's bring-up to end */
+extern int switch_wlan_publish(void);   /* no-op with switch-no-wlan; runs its bring-up on its own thread */
+extern int tegra_mc_errors_start(void); /* the memory controller's error interrupt, before its clients start */
+extern int tegra_gm20b_probe(void);     /* no-op with switch-no-gpu; runs its bring-up on its own thread */
+extern int tegra_nvdec_probe(void);     /* no-op with switch-no-nvdec; own thread, starts host1x itself */
+extern int tegra_nvenc_probe(void);     /* on with NVDEC (switch-no-nvdec turns both off); own thread */
+extern int tegra_vic_probe(void);       /* on by default; own thread, waits for NVDEC's bring-up to end */
+extern int tegra_nvjpg_probe(void);     /* on by default; own thread, waits for NVDEC's bring-up to end */
 extern int
 switch_audio_publish(void); /* null sink with switch-no-audio; the Tegra backend sleeps on I2C1, PZ4 and the GIC */
 extern int switch_suspend_start(void); /* after every board driver it suspends */
@@ -73,6 +74,8 @@ static void switch_board_thread(void *parameter __unused, wait_result_t result _
         printf("Switch: SwitchMotion did not start\n");
     if (switch_wlan_publish())
         printf("Switch: Wi-Fi driver not started\n");
+    if (tegra_mc_errors_start())
+        printf("Switch: the MC error interrupt did not start\n");
     if (tegra_gm20b_probe())
         printf("Switch: TegraGM20B did not start\n");
     if (tegra_nvdec_probe())

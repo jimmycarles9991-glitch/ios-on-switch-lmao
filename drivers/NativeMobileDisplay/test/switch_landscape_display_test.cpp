@@ -149,6 +149,11 @@ struct Display {
         return false;
     }
 
+    static bool host1xFlipBusy()
+    {
+        return false;
+    }
+
     void withdrawCompletionFlip()
     {
         ++withdrawals;
@@ -157,6 +162,15 @@ struct Display {
     void mediaFlipFromGate()
     {
         ++mediaFromGate;
+    }
+
+    bool failEnter = false;
+
+    bool landscapeRunFailsEnter()
+    {
+        const bool fail = failEnter;
+        failEnter = false;
+        return fail;
     }
 
     static bool mediaFlipIdle()
@@ -455,7 +469,7 @@ TEST(LandscapeDisplay, TheUiWindowMustShowTheFrontFrameAtTheLatch)
     EXPECT_THROW(d.boundary(), std::runtime_error);
 }
 
-TEST(LandscapeDisplay, NoQuietFrameEndAbandonsTheChangeForTheBoot)
+TEST(LandscapeDisplay, NoQuietFrameEndAbandonsTheChangeAndHoldsTheModeOff)
 {
     Display d;
     portrait(d);
@@ -466,7 +480,7 @@ TEST(LandscapeDisplay, NoQuietFrameEndAbandonsTheChangeForTheBoot)
         d.landscapeFrameEnd();
     }
     EXPECT_FALSE(d.landscapeState.wanted);
-    EXPECT_TRUE(d.landscapeState.retired);
+    EXPECT_EQ(d.landscapeState.failures, 1u);
     EXPECT_EQ(d.retiredUnshown, 2u);
     EXPECT_FALSE(d.landscapeHoldsKicks());
     EXPECT_FALSE(d.landscapeOn());
@@ -479,7 +493,7 @@ TEST(LandscapeDisplay, AFailedRotatedReservationStaysPortrait)
     ASSERT_FALSE(d.stage(landscapeVideo(2)));
     reserveError = -1;
     d.landscapeFrameEnd();
-    EXPECT_TRUE(d.landscapeState.retired);
+    EXPECT_EQ(d.landscapeState.failures, 1u);
     EXPECT_FALSE(d.landscapeState.switching);
     EXPECT_FALSE(d.planeLatch.requested());
     EXPECT_EQ(d.dc[Display::kWinABase + kOptions], Display::kWinEnable);
@@ -543,7 +557,7 @@ TEST(LandscapeDisplay, AHeldEnterIsDroppedWhenTheScanoutStops)
     d.scanoutStopped = true;
     d.landscapeScanoutStopped();
     EXPECT_FALSE(d.landscapeState.wanted);
-    EXPECT_FALSE(d.landscapeState.retired);
+    EXPECT_EQ(d.landscapeState.failures, 0u);
     EXPECT_EQ(d.retiredUnshown, 2u);
     EXPECT_FALSE(d.landscapeHoldsKicks());
 }
@@ -555,19 +569,38 @@ TEST(LandscapeDisplay, APortraitRecoveryDropsAHeldChangeAndKeepsLandscapeOn)
     ASSERT_FALSE(d.stage(landscapeVideo(2)));
     d.beginPlaneRecovery("test");
     EXPECT_FALSE(d.landscapeState.wanted);
-    EXPECT_FALSE(d.landscapeState.retired);
+    EXPECT_EQ(d.landscapeState.failures, 0u);
 }
 
-TEST(LandscapeDisplay, AnOverlayRecoveryLeavesLandscapeFirstAndForGood)
+TEST(LandscapeDisplay, AnOverlayRecoveryLeavesLandscapeFirst)
 {
     Display d;
     landscape(d);
     d.beginPlaneRecovery("test");
-    EXPECT_TRUE(d.landscapeState.retired);
+    EXPECT_EQ(d.landscapeState.failures, 1u);
     EXPECT_FALSE(d.landscapeOn());
     EXPECT_FALSE(d.planeRecoveryTarget.landscape);
     EXPECT_FALSE(d.planeRecoveryTarget.on());
     EXPECT_EQ(d.dc[Display::kWinABase + kOptions], Display::kWinEnable);
     EXPECT_EQ(d.dc[Display::kWinBBase + kOptions], 0u);
+}
+
+// A change into landscape that fails (FAIL's forced arm: the reservation) drops that change with one line and holds
+// nothing: the next landscape composition goes landscape at once.
+TEST(LandscapeDisplay, AFailedChangeIsDroppedAndTheNextOneGoesLandscape)
+{
+    Display d;
+    portrait(d);
+    d.failEnter = true;
+    ASSERT_FALSE(d.stage(landscapeVideo(2)));
+    d.landscapeFrameEnd();
+    EXPECT_FALSE(d.landscapeOn());
+    EXPECT_FALSE(d.landscapeState.switching);
+    EXPECT_EQ(d.landscapeState.failures, 1u);
+    ASSERT_FALSE(d.stage(landscapeVideo(4)));
+    d.landscapeFrameEnd();
+    EXPECT_TRUE(d.landscapeState.switching);
+    ASSERT_TRUE(d.boundary());
+    EXPECT_TRUE(d.landscapeOn());
 }
 }  // namespace

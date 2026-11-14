@@ -194,7 +194,7 @@ static bool sameSizeLevels(id<MTLTexture> s, id<MTLTexture> d, NSUInteger &sl, N
                             ds,
                             dl,
                             uint64_t(dorg.x) | uint64_t(dorg.y) << 32};
-    _cb->_extra.insert(_cb->_extra.end(), e, e + 11);
+    _cb->_extra.append(e, e + 11);
     _cb->_extra.push_back(dorg.z);
     [_cb record:m];
 }
@@ -358,7 +358,7 @@ static bool sameSizeLevels(id<MTLTexture> s, id<MTLTexture> d, NSUInteger &sl, N
     m.x = _cb->_extra.size();
     const uint64_t e[10] = {
         so, row, image, size.width, size.height, size.depth, ds, dl, uint64_t(dorg.x) | uint64_t(dorg.y) << 32, dorg.z};
-    _cb->_extra.insert(_cb->_extra.end(), e, e + 10);
+    _cb->_extra.append(e, e + 10);
     [_cb record:m];
 }
 
@@ -425,7 +425,7 @@ static bool sameSizeLevels(id<MTLTexture> s, id<MTLTexture> d, NSUInteger &sl, N
     m.x = _cb->_extra.size();
     const uint64_t e[10] = {
         ss, sl, uint64_t(so.x) | uint64_t(so.y) << 32, so.z, size.width, size.height, size.depth, dof, row, image};
-    _cb->_extra.insert(_cb->_extra.end(), e, e + 10);
+    _cb->_extra.append(e, e + 10);
     [_cb record:m];
 }
 
@@ -459,8 +459,7 @@ static bool threeDSteps(const raw::Texture &t)
     }
     uint64_t probe2d = 0;
 #if SWITCH_RAW_DIAGNOSTICS
-    if (x && x->_rawOk && x->_raw.chain && !x->_raw.chain->fmt2d &&
-        gRM->raw->probeMipCandidates.load(std::memory_order_acquire))
+    if (x && x->_rawOk && x->_raw.chain && gRM->raw->probeMipCandidates.load(std::memory_order_acquire))
         probe2d = raw::fx::twodCandidateFormat(x->_raw.format);
 #endif
     setBinding(_cb, OpMipmaps, 0, 0, t, probe2d);
@@ -488,7 +487,8 @@ static bool threeDSteps(const raw::Texture &t)
     m.obj = (__bridge void *)t;
     m.x = _cb->_extra.size();
     const float rgba[4] = {float(color.red), float(color.green), float(color.blue), float(color.alpha)};
-    _cb->_extra.insert(_cb->_extra.end(), {region.origin.x, region.origin.y, region.size.width, region.size.height});
+    const uint64_t r[4] = {region.origin.x, region.origin.y, region.size.width, region.size.height};
+    _cb->_extra.append(r, r + 4);
     for (float v : rgba) {
         uint32_t bits;
         memcpy(&bits, &v, sizeof bits);

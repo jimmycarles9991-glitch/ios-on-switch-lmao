@@ -26,7 +26,8 @@ public:
     // The pack read: what the store is named by
     bool open(uint64_t stack, const EngineInputs &inputs, std::string &why);
     // The compile context opened: what compiles. compile() opens it at the first compile that needs it, so a compiler
-    // that serves its store alone has none
+    // that serves its store alone has none; one that did not open fails that compile alone (Failed), and the next compile
+    // opens afresh
     bool openCompiler(std::string &why);
     // The installed pack's rules (raw_record.h PackRules), as the store is named by them
     raw::Digest rules() const;

@@ -10,8 +10,11 @@
 //   libdrm tests/tegra/vic40.h (NVIDIA, MIT): BlendingSlotStruct's bits (AlphaK1 0..9, AlphaK2 16..25, the four
 //   MatchSelects at 32, 36, 40 and 44).
 //   NVIDIA open-gpu-doc classes/video/vic_ceb6_types.h and the T18x hwinc vic_enums.h (VIC 4.1): out = srcFactC src +
-//   dstFactC dst per slot, dst what the slots below composed, and the select codes below. VIC 4.0 has the same bits;
-//   that it has the same codes is what probe gpu.x1.vic_compose (SwitchVICComposeProbe.h) measures.
+//   dstFactC dst per slot, dst what the slots below composed, and the select codes below. VIC 4.0 has the same bits
+//   and honours them only under AlphaFillMode COMPOSITED, the mode NVIDIA's VIC 5.1 header ties them to: probe
+//   gpu.x1.vic_compose (SwitchVICComposeProbe.h) on boot 21 read a premultiplied slot as straight and a half global
+//   alpha as none under OPAQUE (every slot laid over by its own alpha), and the premultiplied slot exact under
+//   COMPOSITED.
 // The composite is what DC A's windows would have scanned: each slot's Y'CbCr goes to RGB through its own matrix and
 // nothing else, so no transfer or gamut step runs and the slots' transfer and primaries are not compared.
 #ifndef TEGRA_VIC_COMPOSE_H
@@ -149,7 +152,7 @@ static inline void tegra_vic_compose_put_slot(uint8_t *c, uint32_t index, const 
     const uint32_t surf = slot + TEGRA_VIC_SLOT_SURFACE;
     uint32_t inH = 0;
     uint32_t inV = 0;
-    tegra_vic_chroma_loc(sf, src->chromaSite, 0, &inH, &inV);
+    tegra_vic_chroma_loc(sf, src->chromaSite, &inH, &inV);
     const bool bl = src->blockLinear != 0;
     TEGRA_VIC_SET(c, surf, SURF_FORMAT, sf->vic);
     TEGRA_VIC_SET(c, surf, SURF_CHROMA_LOC_HORIZ, inH);
@@ -157,13 +160,7 @@ static inline void tegra_vic_compose_put_slot(uint8_t *c, uint32_t index, const 
     TEGRA_VIC_SET(c, surf, SURF_BLK_KIND, bl ? TEGRA_VIC_BLK_16Bx2 : TEGRA_VIC_BLK_PITCH);
     TEGRA_VIC_SET(c, surf, SURF_BLK_HEIGHT, bl ? src->blockHeightLog2 : 0);
     TEGRA_VIC_SET(c, surf, SURF_CACHE_WIDTH, bl ? TEGRA_VIC_CACHE_32Bx8 : TEGRA_VIC_CACHE_64Bx4);
-    TEGRA_VIC_SET(c, surf, SURF_WIDTH, src->width - 1);
-    TEGRA_VIC_SET(c, surf, SURF_HEIGHT, src->height - 1);
-    TEGRA_VIC_SET(c, surf, SURF_LUMA_WIDTH, src->pitch[0] / sf->bpe[0] - 1);
-    TEGRA_VIC_SET(c, surf, SURF_LUMA_HEIGHT, (bl ? src->rows[0] : src->height) - 1);
-    TEGRA_VIC_SET(c, surf, SURF_CHROMA_WIDTH, sf->planes > 1 ? src->pitch[1] / sf->bpe[1] - 1 : 16383);
-    TEGRA_VIC_SET(c, surf, SURF_CHROMA_HEIGHT,
-                  sf->planes > 1 ? (bl ? src->rows[1] : tegra_vic_plane_rows(sf, src->height, 1)) - 1 : 16383);
+    tegra_vic_slot_surface(c, surf, src);
 
     if (sf->kind != TEGRA_VIC_KIND_RGB) {
         TegraVICMatrix m;
@@ -214,7 +211,7 @@ static inline const char *tegra_vic_compose_build(const TegraVICComposeSlot *slo
     uint8_t *c = job->config;
     TEGRA_VIC_SET(c, TEGRA_VIC_PIPE, PIPE_DOWNSAMPLE_HORIZ, 4);
     TEGRA_VIC_SET(c, TEGRA_VIC_PIPE, PIPE_DOWNSAMPLE_VERT, 4);
-    TEGRA_VIC_SET(c, TEGRA_VIC_OUTPUT, OUT_ALPHA_FILL_MODE, TEGRA_VIC_ALPHA_OPAQUE);
+    TEGRA_VIC_SET(c, TEGRA_VIC_OUTPUT, OUT_ALPHA_FILL_MODE, TEGRA_VIC_ALPHA_COMPOSITED);
     TEGRA_VIC_SET(c, TEGRA_VIC_OUTPUT, OUT_BACKGROUND_ALPHA, 1023);
     TEGRA_VIC_SET(c, TEGRA_VIC_OUTPUT, OUT_TARGET_LEFT, target->x);
     TEGRA_VIC_SET(c, TEGRA_VIC_OUTPUT, OUT_TARGET_RIGHT, target->x + target->width - 1);

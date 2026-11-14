@@ -20,7 +20,7 @@ bool RenderEncoder::measuringInline() const
 
 bool RenderEncoder::bindsBySegment() const
 {
-    return !measuringInline() && cb_->segmentBinds_ < kSegmentBindsPerCommandBuffer;
+    return !measuringInline() && cb_->segmentBinds_ < segmentBindBudget(dev_->k_.maxPushes());
 }
 
 void RenderEncoder::bindState(Push &p, const Pipeline &pl)
@@ -31,6 +31,7 @@ void RenderEncoder::bindState(Push &p, const Pipeline &pl)
         return;
     }
     if (!pl.segment || !bindsBySegment()) {
+        RAW_DIAGNOSTIC(cb_->counts_.segmentCopies += pl.segment && !measuringInline());
         p.raw(pl.methods.data(), uint32_t(pl.methods.size()));
         if (pl.segment && !measuringInline())
             held.bound(pl.segment);

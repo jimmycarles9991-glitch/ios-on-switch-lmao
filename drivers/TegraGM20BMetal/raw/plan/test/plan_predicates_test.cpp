@@ -69,7 +69,7 @@ template <size_t N> bool named(const char *const (&names)[N], const std::string 
 TEST(Predicates, EveryPredicateOnce)
 {
     std::vector<std::string> names = predicateNames();
-    ASSERT_EQ(names.size(), 62u) << "the enum's 61 predicates and PredNone's '-'";
+    ASSERT_EQ(names.size(), 56u) << "the enum's 55 predicates and PredNone's '-'";
     names.erase(names.begin());
     std::set<std::string> tags;
     for (const Row &r : table())

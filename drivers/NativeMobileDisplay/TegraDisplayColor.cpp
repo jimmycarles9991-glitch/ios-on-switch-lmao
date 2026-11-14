@@ -5,13 +5,6 @@
 
 using namespace switch_color;
 
-// DC A word indices (L4T drivers/video/tegra/dc/dc_reg.h). The CMU's LUTs and CSC are written straight to the unit, with
-// no assembly copy (TegraDisplayColorSequence.h). DISP_COLOR_CONTROL is an assembly register. DBG_TIMING bit 15 is
-// DBG_V_BLANK (TegraPanel.cpp reads it the same way).
-static constexpr uint32_t kDcStateControl = 0x041, kDcCmuCsc = 0x32a, kDcCmuLut1 = 0x336, kDcCmuLut2 = 0x337,
-                          kDcDispColorControl = 0x430, kDcDispDbgTiming = 0x4f6;
-static constexpr uint32_t kGeneralActReq = 1u << 0, kGeneralUpdate = 1u << 8, kCmuEnable = 1u << 20,
-                          kDbgVBlank = 1u << 15;
 static constexpr uint32_t kLocationAccessibility = 2, kLocationHarmony = 9;
 
 // NativeLegacyDisplay.cpp: FRAME_END reaches the CPU while a hold is out.
@@ -53,6 +46,34 @@ static void logCsc(const Tables &tables, const Inputs &in)
 }
 #endif
 
+// Under the lock.
+void TegraDisplayColor::noteLock()
+{
+#if DEVELOPMENT || DEBUG
+    __atomic_store_n(&takes, takes + 1, __ATOMIC_RELAXED);
+#endif
+}
+
+void TegraDisplayColor::Platform::hold()
+{
+    native_legacy_frame_end_hold();
+}
+
+void TegraDisplayColor::Platform::release()
+{
+    native_legacy_frame_end_release();
+}
+
+// The action's CMU_ENABLE and GENERAL_ACT_REQ, read back, have reached DC A before the filter may see the bypass.
+void TegraDisplayColor::Platform::deviceWritesDone()
+{
+#if defined(__aarch64__)
+    __asm__ volatile("dsb sy" ::: "memory");
+#else
+    __atomic_thread_fence(__ATOMIC_SEQ_CST);
+#endif
+}
+
 // The object comes zeroed from IOMallocType, its member initializers not run.
 bool TegraDisplayColor::init()
 {
@@ -62,83 +83,59 @@ bool TegraDisplayColor::init()
         for (unsigned channel = 0; channel < 3; ++channel)
             gammaTable[channel * kGammaPoints + point] = gammaIdentity(point);
     }
-    build(inputs, pending);
-    lock = IOSimpleLockAlloc();
+    build(inputs, unit.initial().tables);
+    unit.initialPublished();
+    lock = IOLockAlloc();
     return lock != nullptr;
 }
 
 void TegraDisplayColor::free()
 {
     if (lock)
-        IOSimpleLockFree(lock);
+        IOLockFree(lock);
     lock = nullptr;
 }
 
 void TegraDisplayColor::attach(SwitchMMIOWords registers)
 {
-    colorControl = registers[kDcDispColorControl] & ~kCmuEnable;
-    const IOInterruptState state = IOSimpleLockLockDisableInterrupt(lock);
+    IOLockLock(lock);
+    noteLock();
     dc = registers;
-    sequence = Sequence();
-    sequence.pendingDirty = true;
-    IOSimpleLockUnlockEnableInterrupt(lock, state);
+    unit.reset(registers[kDcDispColorControl] & ~kCmuEnable);
+    IOLockUnlock(lock);
 }
 
 void TegraDisplayColor::detach()
 {
-    const IOInterruptState state = IOSimpleLockLockDisableInterrupt(lock);
-    if (dc && sequence.enableAsked)
-        writeEnable(false);
+    IOLockLock(lock);
+    noteLock();
+    if (dc)
+        unit.stop(dc);
     dc = SwitchMMIOWords();
-    sequence = Sequence();
-    const bool held = holding;
-    holding = false;
-    IOSimpleLockUnlockEnableInterrupt(lock, state);
-    if (held)
-        native_legacy_frame_end_release();
+    IOLockUnlock(lock);
 }
 
-// The tables are built outside the lock from a snapshot; a setter that ran meanwhile builds them again, so the last
-// tables handed to the filter always reflect the last inputs.
-void TegraDisplayColor::commit()
+// Under the lock: the inputs' tables go to the filter as the newest snapshot.
+void TegraDisplayColor::commit(bool paletteChanged)
 {
-    Tables tables;
-    for (;;) {
-        IOInterruptState state = IOSimpleLockLockDisableInterrupt(lock);
-        const Inputs snapshot = inputs;
-        const uint32_t seen = generation;
-        IOSimpleLockUnlockEnableInterrupt(lock, state);
-        build(snapshot, tables);
-        state = IOSimpleLockLockDisableInterrupt(lock);
-        const bool current = seen == generation;
-        const bool hold = current && static_cast<bool>(dc) && !holding;
+    Snapshot &next = unit.spare();
+    build(inputs, next.tables);
+    memcpy(next.palette, palette, sizeof(palette));
 #if DEVELOPMENT || DEBUG
-        const bool cscChanged = current && memcmp(pending.csc, tables.csc, sizeof(tables.csc)) != 0;
-#endif
-        if (current) {
-            pending = tables;
-            sequence.pendingDirty = true;
-            holding = holding || hold;
-        }
-        IOSimpleLockUnlockEnableInterrupt(lock, state);
-        if (hold)
-            native_legacy_frame_end_hold();
-#if DEVELOPMENT || DEBUG
-        if (cscChanged)
-            logCsc(tables, snapshot);
-#endif
-        if (current)
-            return;
+    if (memcmp(loggedCsc, next.tables.csc, sizeof(loggedCsc)) != 0) {
+        memcpy(loggedCsc, next.tables.csc, sizeof(loggedCsc));
+        logCsc(next.tables, inputs);
     }
+#endif
+    unit.publish(paletteOn, paletteChanged, static_cast<bool>(dc));
 }
 
-template <typename Change> static IOReturn change(IOSimpleLock *lock, uint32_t &generation, Change body)
+template <typename Change> IOReturn TegraDisplayColor::change(Change body)
 {
-    const IOInterruptState state = IOSimpleLockLockDisableInterrupt(lock);
+    IOLockLock(lock);
+    noteLock();
     const IOReturn status = body();
-    if (status == kIOReturnSuccess)
-        ++generation;
-    IOSimpleLockUnlockEnableInterrupt(lock, state);
+    IOLockUnlock(lock);
     return status;
 }
 
@@ -146,10 +143,10 @@ IOReturn TegraDisplayColor::getGammaTable(void *table)
 {
     if (!table)
         return kIOReturnBadArgument;
-    const IOInterruptState state = IOSimpleLockLockDisableInterrupt(lock);
-    memcpy(table, gammaTable, sizeof(gammaTable));
-    IOSimpleLockUnlockEnableInterrupt(lock, state);
-    return kIOReturnSuccess;
+    return change([&] {
+        memcpy(table, gammaTable, sizeof(gammaTable));
+        return kIOReturnSuccess;
+    });
 }
 
 static uint32_t gammaWord(const void *table, unsigned index)
@@ -174,28 +171,25 @@ IOReturn TegraDisplayColor::setGammaTable(const void *table)
         for (unsigned i = 0; i < 256; ++i)
             curve[i] = switch_color::gammaByte(gammaWord(table, i));
     }
-    const IOReturn status = change(lock, generation, [&] {
+    return change([&] {
         memcpy(gammaTable, table, sizeof(gammaTable));
         memcpy(inputs.gamma, curve, sizeof(curve));
         if (perChannel)
             memcpy(palette, words, sizeof(palette));
-        paletteDirty = perChannel;
-        paletteShown = paletteShown && perChannel;
         paletteOn = perChannel;
+        commit(perChannel);
         return kIOReturnSuccess;
     });
-    commit();
-    return status;
 }
 
 IOReturn TegraDisplayColor::getMatrix(uint32_t location, void *matrix)
 {
     if (!matrix || (location != kLocationHarmony && location != kLocationAccessibility))
         return kIOReturnBadArgument;
-    const IOInterruptState state = IOSimpleLockLockDisableInterrupt(lock);
-    memcpy(matrix, location == kLocationHarmony ? &inputs.harmony : &inputs.accessibility, sizeof(Matrix));
-    IOSimpleLockUnlockEnableInterrupt(lock, state);
-    return kIOReturnSuccess;
+    return change([&] {
+        memcpy(matrix, location == kLocationHarmony ? &inputs.harmony : &inputs.accessibility, sizeof(Matrix));
+        return kIOReturnSuccess;
+    });
 }
 
 IOReturn TegraDisplayColor::setMatrix(uint32_t location, const void *matrix)
@@ -207,12 +201,11 @@ IOReturn TegraDisplayColor::setMatrix(uint32_t location, const void *matrix)
 #if DEVELOPMENT || DEBUG
     logMatrix("setMatrix", location, value);
 #endif
-    const IOReturn status = change(lock, generation, [&] {
+    return change([&] {
         (location == kLocationHarmony ? inputs.harmony : inputs.accessibility) = value;
+        commit(false);
         return kIOReturnSuccess;
     });
-    commit();
-    return status;
 }
 
 IOReturn TegraDisplayColor::setContrast(const void *contrast)
@@ -224,12 +217,11 @@ IOReturn TegraDisplayColor::setContrast(const void *contrast)
     memcpy(&bits, contrast, sizeof(bits));
     if (!floatToUnity16(bits, &value))
         return kIOReturnBadArgument;
-    const IOReturn status = change(lock, generation, [&] {
+    return change([&] {
         inputs.contrast = value;
+        commit(false);
         return kIOReturnSuccess;
     });
-    commit();
-    return status;
 }
 
 IOReturn TegraDisplayColor::setColorRemapMode(uint32_t mode)
@@ -237,14 +229,14 @@ IOReturn TegraDisplayColor::setColorRemapMode(uint32_t mode)
     if (mode >= kRemapModes)
         return kIOReturnBadArgument;
     uint32_t previous = 0;
-    const IOReturn status = change(lock, generation, [&] {
+    const IOReturn status = change([&] {
         previous = inputs.remapMode;
         inputs.remapMode = mode;
+        commit(false);
         return kIOReturnSuccess;
     });
     if (previous != mode)
         IOLog("SwitchDisplay: colour remap mode %u -> %u\n", previous, mode);
-    commit();
     return status;
 }
 
@@ -252,20 +244,19 @@ IOReturn TegraDisplayColor::getColorRemapMode(uint32_t *mode)
 {
     if (!mode)
         return kIOReturnBadArgument;
-    const IOInterruptState state = IOSimpleLockLockDisableInterrupt(lock);
-    *mode = inputs.remapMode;
-    IOSimpleLockUnlockEnableInterrupt(lock, state);
-    return kIOReturnSuccess;
+    return change([&] {
+        *mode = inputs.remapMode;
+        return kIOReturnSuccess;
+    });
 }
 
 IOReturn TegraDisplayColor::setBrightnessCorrection(uint32_t correction)
 {
-    const IOReturn status = change(lock, generation, [&] {
+    return change([&] {
         inputs.correction = correction;
+        commit(false);
         return kIOReturnSuccess;
     });
-    commit();
-    return status;
 }
 
 // The matrix is pre-offsets, the 3x3, post-offsets (15 S31.32 words); null asks for identity. The CSC has no offsets,
@@ -285,153 +276,75 @@ IOReturn TegraDisplayColor::swapSetColorMatrix(const void *matrix, uint32_t loca
 #if DEVELOPMENT || DEBUG
     logMatrix("swapSetColorMatrix", location, value);
 #endif
-    const IOReturn status = change(lock, generation, [&] {
+    return change([&] {
         inputs.accessibility = value;
+        commit(false);
         return kIOReturnSuccess;
     });
-    commit();
-    return status;
 }
 
 void TegraDisplayColor::setBlank(bool blank)
 {
-    const IOReturn status = change(lock, generation, [&] {
-        if (inputs.blank == blank)
-            return kIOReturnNotReady;
-        inputs.blank = blank;
+    (void)change([&] {
+        if (inputs.blank != blank) {
+            inputs.blank = blank;
+            commit(false);
+        }
         return kIOReturnSuccess;
     });
-    if (status == kIOReturnSuccess)
-        commit();
 }
 
 IOReturn TegraDisplayColor::setAccessibilityScale(uint32_t scale)
 {
-    const IOReturn status = change(lock, generation, [&] {
+    return change([&] {
         inputs.accessibilityScale = scale;
+        commit(false);
         return kIOReturnSuccess;
     });
-    commit();
-    return status;
 }
 
 void TegraDisplayColor::setEdrFactor(float factor)
 {
     const uint32_t scale = switch_edr_display_scale(factor);
-    const IOReturn status = change(lock, generation, [&] {
-        if (inputs.edrScale == scale)
-            return kIOReturnNotReady;
-        inputs.edrScale = scale;
+    (void)change([&] {
+        if (inputs.edrScale != scale) {
+            inputs.edrScale = scale;
+            commit(false);
+        }
         return kIOReturnSuccess;
     });
-    if (status == kIOReturnSuccess)
-        commit();
-}
-
-void TegraDisplayColor::writeTables(const Tables &tables, const Tables *written)
-{
-    for (unsigned i = 0; i < kLut1Entries; ++i) {
-        if (!written || written->lut1[i] != tables.lut1[i])
-            dc[kDcCmuLut1] = i | static_cast<uint32_t>(tables.lut1[i]) << 16;
-    }
-    for (unsigned i = 0; i < kCscWords; ++i) {
-        if (!written || written->csc[i] != tables.csc[i])
-            dc[kDcCmuCsc + i] = tables.csc[i];
-    }
-    for (unsigned k = 0; k < kLut2Entries; ++k) {
-        if (!written || written->lut2[k] != tables.lut2[k])
-            dc[kDcCmuLut2] = k | static_cast<uint32_t>(tables.lut2[k]) << 16;
-    }
-}
-
-void TegraDisplayColor::writeCsc(const Tables &tables, const Tables &written)
-{
-    for (unsigned i = 0; i < kCscWords; ++i) {
-        if (written.csc[i] != tables.csc[i])
-            dc[kDcCmuCsc + i] = tables.csc[i];
-    }
-}
-
-void TegraDisplayColor::writeEnable(bool enable)
-{
-    dc[kDcDispColorControl] = colorControl | (enable ? kCmuEnable : 0);
-    dc[kDcStateControl] = kGeneralUpdate;
-    dc[kDcStateControl] = kGeneralActReq;
 }
 
 void TegraDisplayColor::frameEndFilter()
 {
-    IOSimpleLockLock(lock);
-    if (dc) {
-        const Tables *written = sequence.activeValid ? &active : nullptr;
-        const auto actRequestOut = [this] {
-            return (dc[kDcStateControl] & kGeneralActReq) != 0u;
-        };
-        const auto inBlank = [this] {
-            return (dc[kDcDispDbgTiming] & kDbgVBlank) != 0u;
-        };
-        const Write write = atFrameEnd(sequence, pending, written, actRequestOut, inBlank);
-        if (write == Write::kAll) {
-            writeTables(pending, written);
-        } else if (write == Write::kCsc) {
-            writeCsc(pending, active);
-        }
-        if (write != Write::kNothing)
-            active = pending;
-        if (paletteDirty && inBlank()) {
-            writePalettes();
-            paletteDirty = false;
-            paletteShown = paletteOn;
-        }
-    }
-    IOSimpleLockUnlock(lock);
-}
-
-void TegraDisplayColor::writePalettes()
-{
-    for (const uint32_t base : switch_color::kPaletteBase) {
-        for (uint32_t i = 0; i < switch_color::kPaletteWords; ++i)
-            dc[base + i] = palette[i];
-    }
+    if (dc)
+        unit.frameEnd(dc);
 }
 
 uint32_t TegraDisplayColor::windowOptions()
 {
-    const IOInterruptState state = IOSimpleLockLockDisableInterrupt(lock);
-    const uint32_t options = paletteOn && paletteShown ? switch_color::kCpEnable : 0;
-    IOSimpleLockUnlockEnableInterrupt(lock, state);
-    return options;
+    return unit.windowOptions();
 }
 
 // mayRequest false: a window A request is out, and the flip, rotation and probe checks read GENERAL_ACT_REQ as part of
-// it; the enable waits for a frame end with none out. The decision and the write share the lock with the filter, which
-// must never see a bypass it reads as latched before its GENERAL_ACT_REQ is written.
+// it; the enable waits for a frame end with none out.
 void TegraDisplayColor::frameEndAction(bool mayRequest)
 {
-    const IOInterruptState state = IOSimpleLockLockDisableInterrupt(lock);
-    const bool want = pending.enabled;
-    const uint32_t reasons = pending.reasons;
-    const bool release = holding && settled(sequence, want);
-    holding = holding && !release;
-    const Enable enable = dc ? atFrameEndAction(sequence, want, mayRequest) : Enable::kKeep;
-    if (enable != Enable::kKeep) {
-        writeEnable(enable == Enable::kOn);
-        enableWritten(sequence, enable == Enable::kOn);
-    }
-    IOSimpleLockUnlockEnableInterrupt(lock, state);
-    if (release)
-        native_legacy_frame_end_release();
-    if (enable == Enable::kKeep)
+    if (!dc)
         return;
-    if (enable == Enable::kOff) {
-        if (announced && !want)
+    const auto step = unit.frameEndAction(dc, mayRequest);
+    if (step.enable == Enable::kKeep)
+        return;
+    if (step.enable == Enable::kOff) {
+        if (announced && !step.want)
             IOLog("SwitchDisplay: colour CMU off\n");
-        announced = announced && want;
+        announced = announced && step.want;
         return;
     }
     if (announced)
         return;
-    announced = ((reasons & ~kReasonBlank) != 0u);
+    const uint32_t reasons = step.reasons;
+    announced = (reasons & ~kReasonBlank) != 0u;
     if (!announced)
         return;
     IOLog("SwitchDisplay: colour CMU on:%s%s%s%s%s\n", reasons & kReasonMatrix ? " matrix" : "",
@@ -441,20 +354,11 @@ void TegraDisplayColor::frameEndAction(bool mayRequest)
 
 void TegraDisplayColor::restoreAfterPowerUp()
 {
-    const IOInterruptState state = IOSimpleLockLockDisableInterrupt(lock);
-    sequence = Sequence();
-    if (dc && paletteOn) {
-        writePalettes();
-        paletteDirty = false;
-        paletteShown = true;
-    }
-    if (dc && pending.enabled) {
-        writeTables(pending, nullptr);
-        active = pending;
-        sequence.activeValid = sequence.enableAsked = true;
-        dc[kDcDispColorControl] = colorControl | kCmuEnable;
-    }
-    IOSimpleLockUnlockEnableInterrupt(lock, state);
+    IOLockLock(lock);
+    noteLock();
+    if (dc)
+        unit.restore(dc);
+    IOLockUnlock(lock);
 }
 
 void TegraDisplayColor::bypassForPanic(SwitchMMIOWords registers)

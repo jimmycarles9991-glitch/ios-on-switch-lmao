@@ -3,7 +3,7 @@
 // test/nvkframe.mm (the shipped frontend + m2v + NVK twin) and test/rawframe.cpp (the raw path). Same states (corpus R lines), same
 // resources, passes, draws, bytes, textures, samplers and scissors, so the two decoded streams must describe the same GPU work.
 //
-// Shape (r4-encode's standard CA frame, cabench.mm): `blurPasses` 320x180 passes of one blur draw each, then the 1280x720 main pass
+// Shape (r4-encode's standard CA frame): `blurPasses` 320x180 passes of one blur draw each, then the 1280x720 main pass
 // (target = an IOSurface, second attachment memoryless and never written) of `draws` draws cycling through `mainStates` uber states,
 // each with CA's bindings: vertices (setVertexBytes, the state's vertex slot), uniforms at vertex 2, 3 and fragment 1, 2, 5, 6,
 // fragment textures 3, 4, 9, sampler 1, and a scissor per draw.
@@ -337,7 +337,7 @@ struct Shape {
     uint32_t uniformBytes = getenv("FRAME_UNIFORM_BYTES") ? uint32_t(atoi(getenv("FRAME_UNIFORM_BYTES"))) : 256,
              vertexBytes = 192;
     // FRAME_RING: every payload goes into one shared buffer at 256-aligned offsets, bound with set*Buffer:offset: at a pass's first
-    // draw and set*BufferOffset: after (Core Animation's per-frame ring, cabench mode 16), instead of set*Bytes
+    // draw and set*BufferOffset: after (Core Animation's per-frame ring), instead of set*Bytes
     bool ring = getenv("FRAME_RING") != nullptr;
 };
 

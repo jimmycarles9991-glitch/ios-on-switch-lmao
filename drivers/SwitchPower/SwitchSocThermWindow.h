@@ -17,6 +17,9 @@
 #define SWITCH_SOCTHERM_THERMCTL_INTR_DISABLE 0x8cu
 #define SWITCH_SOCTHERM_SENSOR_TEMP1          0x1c8u
 #define SWITCH_SOCTHERM_SENSOR_TEMP2          0x1ccu
+// Levels 1-3 of every group: the hardware throttle's monitors (SwitchSocThermThrottle.h), whose status bits rise with
+// their interrupts off; left alone, as L4T's TH_INTR_IGNORE_MASK leaves them.
+#define SWITCH_SOCTHERM_INTR_THROTTLE_LEVELS 0xfcfcfcfcu
 
 #define SWITCH_SOCTHERM_GRAIN_MILLIC  500
 #define SWITCH_SOCTHERM_STEP_MILLIC   1000

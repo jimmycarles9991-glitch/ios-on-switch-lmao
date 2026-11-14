@@ -45,7 +45,7 @@ TEST(RawWriterPromiseSource, AHeldCommandBufferPromisesItsWritesBeforeItsWaitRet
 
 TEST(RawWriterPromiseSource, TheLastRangeCarriesThemAndFinishGivesBackTheRest)
 {
-    const std::string encode = SourceText("../raw/runtime/RawMetalEncode.mm");
+    const std::string encode = SourceText("../raw/runtime/RawMetalRangeSeal.mm");
     expectBefore(encode, "rc->promises = cb->_promises;", "if (!rc->commit(seq)) {");
     expectBefore(encode, "if (rc->promisesKept) {", "cb->_promises.clear();");
     const std::string finish = SourceText("../raw/runtime/RawMetalFinish.mm");

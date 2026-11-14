@@ -530,7 +530,7 @@ TEST_F(ResourceSet, TheJobsLineCountsEndedGenerationsByCause)
 		switch_gpu_set_killed(set.set, 0);
 		switch_gpu_job_stale();
 		const uint64_t ns[4] = {1000, 2000, 30000, 4000};
-		switch_gpu_job_submitted(ns, 1, 3, 1);
+		switch_gpu_job_submitted(ns, 1, 3, 2, 1);
 	}
 	switch_gpu_job_window(line, sizeof(line));
 	EXPECT_NE(std::string(line).find(
@@ -543,6 +543,7 @@ TEST_F(ResourceSet, TheJobsLineCountsEndedGenerationsByCause)
 	EXPECT_NE(std::string(line).find("free 0 layout 0 shared 0 kill 1 replace 1"),
 		  std::string::npos)
 		<< line;
+	EXPECT_NE(std::string(line).find("cpu 0, backings 2.0 per job"), std::string::npos) << line;
 	switch_gpu_job_window(line, sizeof(line));
 	EXPECT_EQ(line[0], 0);
 	switch_gpu_backing_release(member);

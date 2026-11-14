@@ -12,21 +12,31 @@
 
 // What a hit hands back: the copy, its facts, and what the encoder took from them
 struct RMPassEntry {
-    MTLRenderPassDescriptor *pass;
-    __unsafe_unretained id visibility;  // its visibility result buffer (the copy holds it)
+    __unsafe_unretained MTLRenderPassDescriptor *pass;  // retained by the cache (CFBridgingRetain), not by ARC
+    __unsafe_unretained id visibility;                  // its visibility result buffer (the copy holds it)
     RMPass facts;
     std::array<uint32_t, 8> formats;
     uint32_t count, zeta, samples;
     uint8_t turn;
-    uint64_t hash = 0, used = 0;
     std::vector<uint8_t> key;
 };
 
 // `d`'s contents, as the key a find and a keep take: false where `d` is not of Metal's own descriptor classes, or a sample
 // buffer attachment names a buffer (counter marks read and clear them on the pass's copy)
 bool rmPassKey(MTLRenderPassDescriptor *d, std::vector<uint8_t> &key, uint64_t &hash);
-// The thread's pass of those contents, null where it has none
+// The thread's pass of those contents, null where it has none; one found stays the caller's to read until rmPassDone()
 RMPassEntry *rmPassFind(const std::vector<uint8_t> &key, uint64_t hash);
+void rmPassDone();
 // The pass just opened from `copy`, kept for the next one of the same contents
 void rmPassKeep(const std::vector<uint8_t> &key, uint64_t hash, MTLRenderPassDescriptor *copy, const RMPass &facts,
                 const RMRenderEncoder *e);
+
+// Every thread's kept passes let go (memory pressure, idle: gRawRelease), with the textures their copies hold, whether or
+// not that thread encodes again: how many, and how many textures they named
+struct RMPassTrim {
+    size_t passes, textures;
+};
+
+RMPassTrim rmPassTrim();
+// What every thread's kept passes hold now, letting none go (debug builds' rates line)
+RMPassTrim rmPassHeld();

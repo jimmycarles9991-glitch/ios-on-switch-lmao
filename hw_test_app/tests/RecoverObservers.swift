@@ -1,35 +1,49 @@
 import Foundation
 import HWTestCore
+import HWTestGPU
 import Metal
 import QuartzCore
 import UIKit
 
-/// Another raw client working while gpu.recover.kill_one kills this process's channel: the bench's raw device, over a
-/// connection and channel of its own, fills a target on the 2D engine back to back on a thread of its own (no program and no
-/// pack record, so nothing of the bench's own draws), reads every texel back against the fill, and keeps its failures and
-/// the longest wait between two finished runs.
+/// Another raw client working while gpu.recover.kill_one or kill_under_compositor kills this process's channel: a bench
+/// raw device over a connection and channel of its own, on a thread of its own, back to back, every texel read back
+/// against the fill (no program and no pack record, so nothing of the bench's own draws). On GR it fills a small target
+/// with the 2D engine; on the copy engine it fills a 512x512 block-linear target whose texels go in and out through
+/// the copy engine around each fill, so a kill most often lands with its copies in flight. A failure names it (`role`)
+/// and the kernel's error; a kill of its channel is also its reopen (the bench opens a fresh device after one).
 final class RecoverBystander: @unchecked Sendable {
+    enum Engine: String {
+        case gr = "the GR bystander's bench channel"
+        case copy = "the copy-engine bystander's bench channel"
+    }
+
     /// The same byte in every channel, whichever order the solid colour's format packs them in
     static let fill = 0x8080_8080
     /// NV902D_SET_RENDER_SOLID_PRIM_COLOR_FORMAT_V_A8B8G8R8: the solid colour as one RGBA8 word
     static let a8b8g8r8 = 0xd5
+    let role: Engine
     private let runner: BenchRunner
     private let experiment: BenchExperiment
+    private let side: Int
     private let lock = NSLock()
     private let ended = DispatchSemaphore(value: 0)
     private var stopping = false, lastNs: UInt64 = 0
-    private(set) var runs = 0, errors = 0, longestNs: UInt64 = 0
+    private(set) var runs = 0, errors = 0, kills = 0, longestNs: UInt64 = 0
     private(set) var firstError = ""
 
-    init(_ runner: BenchRunner) throws {
+    init(_ runner: BenchRunner, on role: Engine = .gr) throws {
         self.runner = runner
+        self.role = role
+        side = role == .gr ? 64 : 512
+        var twod: [String: Any] = ["op": "fill", "colorFormat": Self.a8b8g8r8, "color": [Self.fill, 0, 0, 0]]
+        if role == .copy { twod["tiled"] = true }
         let batch: [String: Any] = [
             "protocol": BenchProtocol.version, "batch": "bystander",
             "experiments": [
                 [
                     "id": "bystander", "kind": "twod", "readback": "full", "repeats": 4,
-                    "target": ["format": "rgba8unorm", "width": 64, "height": 64],
-                    "twod": ["op": "fill", "colorFormat": Self.a8b8g8r8, "color": [Self.fill, 0, 0, 0]],
+                    "target": ["format": "rgba8unorm", "width": side, "height": side],
+                    "twod": twod,
                 ]
             ],
         ]
@@ -40,6 +54,9 @@ final class RecoverBystander: @unchecked Sendable {
         experiment = e
     }
 
+    /// "<role>: <its first failure>", or "" with none
+    var failure: String { firstError.isEmpty ? "" : "\(role.rawValue): \(firstError)" }
+
     func start() {
         lastNs = DispatchTime.now().uptimeNanoseconds
         Thread { [self] in
@@ -48,11 +65,15 @@ final class RecoverBystander: @unchecked Sendable {
                 let now = DispatchTime.now().uptimeNanoseconds
                 self.locked {
                     self.runs += 1
-                    let wrong = outcome.status == "ok" && !(outcome.texels.map(Self.filled) ?? false)
+                    let wrong = outcome.status == "ok" && !(outcome.texels.map(self.filled) ?? false)
+                    if outcome.status == "killed" { self.kills += 1 }
                     if outcome.status != "ok" || wrong {
                         self.errors += 1
                         if self.firstError.isEmpty {
-                            self.firstError = wrong ? "texels:not the fill" : "\(outcome.status):\(outcome.why)"
+                            self.firstError =
+                                wrong
+                                ? "texels:not the fill"
+                                : "\(outcome.status):\(outcome.why) (kernel error \(outcome.lostError))"
                         }
                     }
                     self.longestNs = max(self.longestNs, now - self.lastNs)
@@ -63,8 +84,8 @@ final class RecoverBystander: @unchecked Sendable {
         }.start()
     }
 
-    static func filled(_ texels: Data) -> Bool {
-        texels.count == 64 * 64 * 4 && texels.allSatisfy { $0 == 0x80 }
+    func filled(_ texels: Data) -> Bool {
+        texels.count == side * side * 4 && texels.allSatisfy { $0 == 0x80 }
     }
 
     /// From now on: the runs, failures and waits before (the first, cold run among them) are not counted.
@@ -72,6 +93,7 @@ final class RecoverBystander: @unchecked Sendable {
         locked {
             runs = 0
             errors = 0
+            kills = 0
             longestNs = 0
             firstError = ""
             lastNs = DispatchTime.now().uptimeNanoseconds
@@ -88,6 +110,21 @@ final class RecoverBystander: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
         return body()
+    }
+}
+
+extension RecoverKillOneTest {
+    /// One command buffer on the device, completed: a channel an earlier test left killed is made again here, so the
+    /// counters read after it count this test's reopens alone (boot 21's kill_one counted gpu.raw.fetch_rung3's).
+    static func settle(_ gpu: GPU) throws {
+        let scratch = try gpu.buffer(256)
+        guard let commands = gpu.queue.makeCommandBuffer(), let blit = commands.makeBlitCommandEncoder() else {
+            throw TestFailure("no command buffer")
+        }
+        blit.fill(buffer: scratch, range: 0..<256, value: 0)
+        blit.endEncoding()
+        commands.commit()
+        commands.waitUntilCompleted()
     }
 }
 

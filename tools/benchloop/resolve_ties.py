@@ -32,8 +32,8 @@ ONE = protocol.ONE
 SIXTEENTH = 1 << 28
 SWEEP = {True: range(-8, 9), False: range(17)}
 MODELS = {
-    2: ('up', 'down'),
-    4: ('up', 'down', 'trunc', 'pair_x_down', 'pair_y_down', 'pair_x_up', 'pair_y_up'),
+    2: ('up', 'down', 'q15'),
+    4: ('up', 'down', 'trunc', 'pair_x_down', 'pair_y_down', 'pair_x_up', 'pair_y_up', 'q15'),
 }
 
 
@@ -174,6 +174,9 @@ def write(path: str) -> None:
 
 
 def model(name: str, s: tuple[int, ...]) -> int:
+    if name == 'q15':
+        u = sum((257 * v + 1) >> 1 for v in s) // (8 * len(s))
+        return (u * 255 + 2047) >> 12
     if len(s) == 2:
         return (s[0] + s[1] + (name == 'up')) >> 1
     total = sum(s)

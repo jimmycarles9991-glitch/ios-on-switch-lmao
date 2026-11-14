@@ -34,7 +34,8 @@ struct CADrawThenCopyScene: GPUScene {
         let copy = try gpu.texture(.bgra8Unorm, Self.width, Self.height, usage: [.shaderRead])
         // Core Animation's fill state declares a second colour attachment
         let colour1 = try gpu.texture(
-            .bgra8Unorm, Self.width, Self.height, usage: [.renderTarget], storage: .memoryless)
+            CACorpus.colorFormat(CACorpus.state("PBGRAXm_A2Xhf")!, 1), Self.width, Self.height, usage: [.renderTarget],
+            storage: .memoryless)
         var stale = 0
         for round in 0..<Self.rounds {
             let timing = try await gpu.run(tolerateError: true) { commands in

@@ -39,8 +39,15 @@ public:
     bool transition(uint32_t beforeKhz, uint32_t afterKhz, MemoryPlan out[2]) const
     {
         MemoryPlan before[2], after[2];
-        if (!calculate(beforeKhz, before) || !calculate(afterKhz, after))
+        if (!calculate(afterKhz, after))
             return false;
+        if (!calculate(beforeKhz, before)) {
+            // A rate the plan does not cover (a rate change left it so: SwitchDisplayMemoryEMC.h) has nothing to keep
+            // through the move; the plan where it goes is the whole transition.
+            for (unsigned head = 0; head != 2; ++head)
+                out[head] = after[head];
+            return true;
+        }
         for (unsigned head = 0; head != 2; ++head)
             if (owned[head] && !memoryTransition(before[head], after[head], out[head]))
                 return false;

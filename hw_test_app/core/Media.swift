@@ -93,13 +93,14 @@ public enum StillFormat: String, Sendable {
     case jpeg420 = "jpeg_420"
     case jpeg422 = "jpeg_422"
     case jpeg444 = "jpeg_444"
+    case jpeg444Small = "jpeg_444_small"
     case png
     case heic
     case heicGrid = "heic_grid"
 
     public var fileExtension: String {
         switch self {
-        case .jpeg420, .jpeg422, .jpeg444: return "jpg"
+        case .jpeg420, .jpeg422, .jpeg444, .jpeg444Small: return "jpg"
         case .png: return "png"
         case .heic, .heicGrid: return "heic"
         }
@@ -115,11 +116,17 @@ public struct StillImage: Equatable, Sendable {
     public var pattern: Pattern { Pattern(width: width, height: height, clip: 0x5000 | UInt16(width / 16 & 0xfff)) }
     /// PNG is lossless: every sample block must match exactly (rounding of the mean aside).
     public var tolerance: Double { format == .png ? 0.5 : 12 }
+    /// The thumbnail ImageDecodeTest asks ImageIO for: half size, or the whole picture for the small 4:4:4 file
+    /// (SpringBoard's 205x83 decode into '444f' at 1/1).
+    public var thumbnailSide: Int { format == .jpeg444Small ? max(width, height) : max(width, height) / 2 }
+    /// The thumbnails below half size ImageDecodeTest also asks for, by name and divisor (CMPhoto's 1/4 and 1/8).
+    public var scaledThumbnails: [(String, Int)] { format == .jpeg420 ? [("quarter", 4), ("eighth", 8)] : [] }
 
     public static let all: [StillImage] = [
         StillImage(format: .jpeg420, width: 4032, height: 3024),
         StillImage(format: .jpeg422, width: 2048, height: 1536),
         StillImage(format: .jpeg444, width: 2048, height: 1536),
+        StillImage(format: .jpeg444Small, width: 205, height: 83),
         StillImage(format: .png, width: 1024, height: 768),
         // ImageIO tiles a 1024x768 HEIC into a grid already; at 640x480 it writes a single coded image.
         StillImage(format: .heic, width: 640, height: 480),

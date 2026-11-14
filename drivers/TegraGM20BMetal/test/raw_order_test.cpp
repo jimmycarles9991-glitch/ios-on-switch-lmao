@@ -1,31 +1,11 @@
 // SPDX-License-Identifier: MIT
 #include <IOKit/IOReturn.h>
+#include <gmock/gmock.h>
 #include <gtest/gtest.h>
 #include "../raw/runtime/raw_order.h"
+#include "bazel/testing/source_text.h"
 
 namespace {
-
-// RawMetalSubmit.mm's use: a refusal orders on the CPU, a raw submission after the kernel made the channel again takes
-// GPU order back
-struct DriverOrder {
-    bool gpu;
-    bool canOrder;
-    uint64_t refusedAt = 0;
-
-    void ordered(int kr, uint64_t reopens)
-    {
-        if (raw::orderAnswer(kr) == raw::OrderAnswer::refused) {
-            gpu = false;
-            refusedAt = reopens;
-        }
-    }
-
-    void submitted(uint64_t reopens)
-    {
-        if (raw::orderReturns(gpu, canOrder, reopens, refusedAt))
-            gpu = true;
-    }
-};
 
 TEST(RawOrder, OnlyTheKernelsOwnAnswersAreRefusals)
 {
@@ -37,36 +17,19 @@ TEST(RawOrder, OnlyTheKernelsOwnAnswersAreRefusals)
     EXPECT_NE(raw::kOrderNoChannel, kIOReturnNotResponding);
 }
 
-TEST(RawOrder, AChannelBeingMadeAgainKeepsGpuOrder)
+// A refused Order fails the command buffer that needed it, with one error line; nothing latches CPU order, so the next
+// command buffer is ordered afresh
+TEST(RawOrder, ARefusedOrderFailsItsCommandBufferAndLatchesNothing)
 {
-    DriverOrder order{true, true};
-    order.ordered(raw::kOrderNoChannel, 0);
-    order.ordered(raw::kOrderNoChannel, 1);
-    EXPECT_TRUE(order.gpu);
-    order.ordered(KERN_SUCCESS, 1);
-    EXPECT_TRUE(order.gpu);
-}
-
-TEST(RawOrder, ARefusalLastsUntilTheKernelMakesTheChannelAgain)
-{
-    DriverOrder order{true, true};
-    order.ordered(kIOReturnNoResources, 2);
-    EXPECT_FALSE(order.gpu);
-    order.submitted(2);
-    EXPECT_FALSE(order.gpu);
-    order.submitted(3);
-    EXPECT_TRUE(order.gpu);
-}
-
-TEST(RawOrder, AKernelWithoutOrderStaysCpuOrdered)
-{
-    DriverOrder order{false, false};
-    order.submitted(5);
-    EXPECT_FALSE(order.gpu);
-    DriverOrder refused{true, false};
-    refused.ordered(kIOReturnBadArgument, 0);
-    refused.submitted(1);
-    EXPECT_FALSE(refused.gpu);
+    const std::string submit = switch_ios::test::SourceText("../raw/runtime/RawMetalSubmit.mm");
+    const std::string refused = switch_ios::test::Body(submit, "NSString *orderRefused(const char *what, int kr)");
+    EXPECT_THAT(refused, testing::HasSubstr("os_log_error("));
+    EXPECT_THAT(refused, testing::Not(testing::HasSubstr("gpuOrder")));
+    EXPECT_THAT(submit, testing::HasSubstr("return failSubmission(cb, orderRefused(\"raw after m2v\", kr));"));
+    EXPECT_THAT(submit, testing::HasSubstr("return failSubmission(cb, orderRefused(\"m2v after raw\", kr));"));
+    EXPECT_THAT(submit, testing::Not(testing::HasSubstr("orderReturned")));
+    const std::string jobs = switch_ios::test::SourceText("../raw/runtime/RawMetalEventJobs.mm");
+    EXPECT_THAT(jobs, testing::HasSubstr("NSString *why = orderRefused(\"event job after m2v\", kr);"));
 }
 
 }  // namespace

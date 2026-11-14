@@ -3,6 +3,7 @@
 #import "RawMetalBinaryArchive.h"
 #import "RawMetalComputeState.h"
 #include "NativeBridgeMetalFrontend.h"
+#include "RawCompileRequest.h"
 #include "raw_compute_key.h"
 #include "raw_metallib.h"
 
@@ -24,10 +25,10 @@
         if (!_compatibility) {
             NSError *error = nil;
             _compatibility =
-                [RM_M2V("a compute state's twin") newComputePipelineStateWithDescriptor:twinComputeDescriptor(_direct)
-                                                                                options:MTLPipelineOptionNone
-                                                                             reflection:nil
-                                                                                  error:&error];
+                [RM_M2V(NeedComputeStateTwin) newComputePipelineStateWithDescriptor:twinComputeDescriptor(_direct)
+                                                                            options:MTLPipelineOptionNone
+                                                                         reflection:nil
+                                                                              error:&error];
             if (!_compatibility)
                 once([NSString stringWithFormat:@"a deferred compute pipeline could not be created: %@", error]);
         }
@@ -101,29 +102,6 @@ static bool airOf(id<MTLFunction> function, raw::AirHash &out, NSString *__stron
     return true;
 }
 
-// A stage input descriptor's set attributes and their layouts, as a key names them (a dynamic stride as UINT32_MAX, as
-// RawPipelineKey.h's vertex layouts): "" for none, so a kernel without one keys as before
-static std::string stageInText(MTLStageInputOutputDescriptor *in)
-{
-    std::string text;
-    char b[96];
-    for (NSUInteger i = 0; in && i < 31; i++) {
-        MTLAttributeDescriptor *a = in.attributes[i];
-        if (a.format == MTLAttributeFormatInvalid)
-            continue;
-        MTLBufferLayoutDescriptor *l = in.layouts[a.bufferIndex < 31 ? a.bufferIndex : 0];
-        const unsigned long stride = l.stride == MTLBufferLayoutStrideDynamic ? UINT32_MAX : l.stride;
-        snprintf(b, sizeof b, " a%lu=%lu:%lu:%lu:%lu:%lu:%lu", (unsigned long)i, (unsigned long)a.format,
-                 (unsigned long)a.offset, (unsigned long)a.bufferIndex, stride, (unsigned long)l.stepFunction,
-                 (unsigned long)l.stepRate);
-        text += b;
-    }
-    if (text.empty())
-        return text;
-    snprintf(b, sizeof b, " i=%lu:%lu", (unsigned long)in.indexType, (unsigned long)in.indexBufferIndex);
-    return " | in" + text + b;
-}
-
 // The creations under MTLPipelineOptionFailOnBinaryArchiveMiss lists (this device's, RawMetalBinaryArchive.mm), as
 // Metal's answer: false (and Metal's error) where none holds the state and the pack holds no kernel of it, never compiled.
 // m2v's state goes without the archives or the option either way: it reads none of this device's archives.
@@ -151,8 +129,7 @@ static bool archivesAnswer(RMComputeState *s, RMFunction *f, MTLPipelineOption &
 static bool m2vAnswers(RMComputeState *s, MTLPipelineOption options,
                        MTLAutoreleasedComputePipelineReflection *reflection, NSError **error)
 {
-    id<MTLDevice> m2v =
-        reflection ? RM_M2V("a compute state's reflection") : RM_M2V("a compute state the pack has no facts of");
+    id<MTLDevice> m2v = reflection ? RM_M2V(NeedComputeStateReflection) : RM_M2V(NeedComputeStateUnpacked);
     MTLComputePipelineDescriptor *twin = m2v ? twinComputeDescriptor(s->_direct) : nil;
     if (!twin) {
         if (error)
@@ -184,8 +161,6 @@ static bool m2vAnswers(RMComputeState *s, MTLPipelineOption options,
 id rmComputeState(id device, MTLComputePipelineDescriptor *descriptor, MTLPipelineOption options,
                   MTLAutoreleasedComputePipelineReflection *reflection, NSError **error)
 {
-    if (const char *why = rmUnsupportedComputeState(descriptor))
-        return rmRefuseUnsupported(why, error);
     id<MTLFunction> function = descriptor.computeFunction;
     RMComputeState *s = [RMComputeState new];
     s->_device = device;
@@ -195,7 +170,7 @@ id rmComputeState(id device, MTLComputePipelineDescriptor *descriptor, MTLPipeli
     s->_keyed = f && !descriptor.linkedFunctions.functions.count &&
                 !descriptor.linkedFunctions.privateFunctions.count && airOf(function, s->_air, libraryName);
     s->_libraryName = libraryName;
-    s->_constants = (f ? f->_constants : "") + stageInText(descriptor.stageInputDescriptor);
+    s->_constants = (f ? f->_constants : "") + raw::stageInText(raw::stageInFieldsOf(descriptor.stageInputDescriptor));
     s->_m2vMissing = rmM2vMissingKernel(descriptor);
     s->_maxThreads = uint32_t(descriptor.maxTotalThreadsPerThreadgroup);
     s->_multipleOfWidth = descriptor.threadGroupSizeIsMultipleOfThreadExecutionWidth;

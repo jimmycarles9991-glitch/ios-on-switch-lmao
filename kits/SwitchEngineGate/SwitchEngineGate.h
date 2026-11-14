@@ -6,8 +6,11 @@
 // leaving, or the engine's queue draining, arms a one-shot timer; if it fires with no user and nothing queued, the
 // engine parks its queue and powers off (its `off`). Those two events are the only arms, so nothing polls.
 //
-// A power-on that fails wedges the engine for the boot (`on` logs why; every later use is refused). A power-off the
-// hardware refuses turns gating off for the boot, with one line, and the next use powers the engine on as usual.
+// A power-on that fails fails that use (`on` logs which step and register); the engine stays off and the next use runs
+// the normal power-on. An engine its driver found off outside the gate (lost(): a reset that did not bring it back) is
+// off to the gate too, so its next use powers it on. A power-off the hardware refuses is one line and leaves the engine
+// parked and unpowered; the next use powers it on and the next idle period powers it off as usual. No failure is held
+// for later: nothing is counted, delayed or refused for having failed before.
 // Sleep (SC7) goes through the gate too: suspend parks the engine once its queue drains and powers it off, holding new
 // users until resume, which powers it on only for a user already waiting.
 //
@@ -36,7 +39,7 @@ enum {
 struct SwitchEngineGateOps {
     const char *name;  // the engine's log prefix
     void *engine;
-    int (*on)(void *engine);               // 0, or a negative errno: the engine refuses work from now on
+    int (*on)(void *engine);               // 0, or a negative errno (one line saying why): the engine stays off
     int (*off)(void *engine, bool drain);  // SWITCH_ENGINE_GATE_*, or < 0: the hardware refused (parked, unpowered)
 };
 
@@ -63,19 +66,46 @@ public:
     int use()
     {
         platform_.lock();
-        while (asleep_ && !failed_)
+        while (asleep_)
             platform_.sleep(&asleep_);
-        const int error = failed_ ? -19 : powerOn();
+        const int error = powerOn();
         if (!error)
             users_++;
         platform_.unlock();
         return error;
     }
 
+    // The engine's driver found it off outside the gate (a reset that did not bring it back): the next use powers it
+    // on. Takes no lock: the driver may hold its own, or the gate's, when it finds out.
+    void lost()
+    {
+        setPowered(false);
+    }
+
     void done()
     {
         platform_.lock();
         const bool last = --users_ == 0;
+        platform_.unlock();
+        if (last)
+            platform_.arm(kIdleMs);
+    }
+
+    // The gate's lock held: the engine stays as it is until release(), with no power-on: no idle power-off, and sleep
+    // waits for the release. For a driver's recovery that runs part of its sequence (a falcon's reboot and proof)
+    // without the lock.
+    void holdLocked()
+    {
+        users_++;
+        held_++;
+    }
+
+    void release()
+    {
+        platform_.lock();
+        const bool last = --users_ == 0;
+        if (!--held_)
+            platform_.wake(&held_);
         platform_.unlock();
         if (last)
             platform_.arm(kIdleMs);
@@ -92,15 +122,15 @@ public:
         char line[160];
         line[0] = 0;
         platform_.lock();
-        if (powered_ && gating_ && !users_ && !asleep_ && !failed_) {
+        if (powered_ && !users_ && !asleep_) {
             const int result = ops_.off(ops_.engine, false);
             if (result == SWITCH_ENGINE_GATE_OFF) {
                 setPowered(false);
                 count(line, sizeof(line));
             } else if (result < 0) {
                 setPowered(false);
-                gating_ = false;
-                snprintf(line, sizeof(line), "%s: idle power-off refused by the hardware (%d); powered from here on",
+                snprintf(line, sizeof(line),
+                         "%s: idle power-off refused by the hardware (%d); parked unpowered, the next use powers it on",
                          ops_.name, result);
             }
         }
@@ -113,19 +143,20 @@ public:
     {
         platform_.lock();
         asleep_ = true;
+        while (held_)
+            platform_.sleep(&held_);
         if (powered_)
             (void)ops_.off(ops_.engine, true);
         setPowered(false);
         platform_.unlock();
     }
 
-    // `usable`: the engine's own resume (its address space) came back.
-    void resume(bool usable)
+    // The engine's `on` restores what its own resume could not (its address space).
+    void resume()
     {
         platform_.lock();
         asleep_ = false;
-        failed_ = failed_ || !usable;
-        if (!failed_ && users_)
+        if (users_)
             (void)powerOn();
         platform_.wake(&asleep_);
         platform_.unlock();
@@ -165,11 +196,8 @@ private:
 #if SWITCH_ENGINE_GATE_STATS
         const uint64_t began = platform_.nowUs();
 #endif
-        const int error = ops_.on(ops_.engine);
-        if (error) {
-            failed_ = true;
+        if (const int error = ops_.on(ops_.engine))
             return error;
-        }
         setPowered(true);
 #if SWITCH_ENGINE_GATE_STATS
         const uint64_t us = platform_.nowUs() - began;
@@ -197,6 +225,6 @@ private:
     Platform platform_;
     SwitchEngineGateOps ops_ = {};
     SwitchEngineGateStats stats_ = {};
-    uint32_t users_ = 0;
-    bool powered_ = false, gating_ = true, asleep_ = false, failed_ = false;
+    uint32_t users_ = 0, held_ = 0;
+    bool powered_ = false, asleep_ = false;
 };

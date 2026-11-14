@@ -5,9 +5,10 @@
 // The table is the GPU's, 15 colour and 15 depth entries shared by every process and never emptied: once it is full a
 // value stays an ordinary clear. An entry is the clear's SET_COLOR_CLEAR_VALUE words (what the 3D engine matches) and the
 // texel the L2 hands every reader of a tile cleared to it, so a value goes in only where that texel is exactly what the
-// ROP writes for it: every channel an exact code of BGRA8Unorm or RGBA8Unorm (the ROP rounds a tie unlike Apple: HW Test
-// gpu.x1.rop_conversion), any value of RGBA16Float. Those three packings HW Test gpu.raw.compressed_targets reads back;
-// no other format goes in (sRGB, the 10-bit and 16-bit unorm formats, RGBA32Float beyond the boot table's 0 and 1).
+// ROP writes for it: every unorm channel an exact code (the ROP rounds a tie unlike Apple: HW Test gpu.x1.rop_conversion),
+// every sRGB channel the linear value of an exact code (raw_clear.h hands no other), any value of RGBA16Float. HW Test
+// gpu.raw.compressed_targets reads each packing back (its ZBC arms, CompressedZbcArms.swift, for the formats past the
+// 8-bit unorm ones).
 #pragma once
 #include "raw_lock.h"
 #include <cmath>
@@ -19,10 +20,15 @@
 namespace raw {
 
 enum : uint32_t {
-    kZbcRf16x4 = 0x16,    // FERMI_A_ZBC_COLOR_V0_FMT_RF16_GF16_BF16_AF16
-    kZbcA8R8G8B8 = 0x18,  // BGRA8Unorm's
-    kZbcA8B8G8R8 = 0x28,  // RGBA8Unorm's
-    kZbcDepthFp32 = 1,    // FERMI_A_ZBC_DEPTH_V0_FMT_FP32
+    kZbcRf32x4 = 0x04,       // FERMI_A_ZBC_COLOR_V0_FMT_RF32_GF32_BF32_AF32: RGBA32Float's
+    kZbcR16x4 = 0x08,        // FERMI_A_ZBC_COLOR_V0_FMT_R16_G16_B16_A16: RGBA16Unorm's
+    kZbcRf16x4 = 0x16,       // FERMI_A_ZBC_COLOR_V0_FMT_RF16_GF16_BF16_AF16
+    kZbcA8R8G8B8 = 0x18,     // BGRA8Unorm's
+    kZbcA8Rl8Gl8Bl8 = 0x1c,  // BGRA8Unorm_sRGB's
+    kZbcA2B10G10R10 = 0x20,  // RGB10A2Unorm's
+    kZbcA8B8G8R8 = 0x28,     // RGBA8Unorm's
+    kZbcA8Bl8Gl8Rl8 = 0x2c,  // RGBA8Unorm_sRGB's
+    kZbcDepthFp32 = 1,       // FERMI_A_ZBC_DEPTH_V0_FMT_FP32
 };
 
 inline float zbcFloat(uint32_t bits)
@@ -39,6 +45,19 @@ inline bool zbcUnorm(uint32_t bits, uint32_t max, uint32_t &code)
     if (!(v >= 0 && v <= max) || std::fabs(v - std::nearbyint(v)) > 1e-3)
         return false;
     code = uint32_t(std::nearbyint(v));
+    return true;
+}
+
+// The 8-bit sRGB code whose linear value `bits` is, false where it is not one's
+inline bool zbcSrgb(uint32_t bits, uint32_t &code)
+{
+    const double v = zbcFloat(bits);
+    if (!(v >= 0 && v <= 1))
+        return false;
+    const double s = (v <= 0.0031308 ? 12.92 * v : 1.055 * std::pow(v, 1.0 / 2.4) - 0.055) * 255;
+    if (std::fabs(s - std::nearbyint(s)) > 1e-3)
+        return false;
+    code = uint32_t(std::nearbyint(s));
     return true;
 }
 
@@ -81,6 +100,9 @@ inline bool zbcColorEntry(uint32_t mtl, const uint32_t ds[4], TegraGM20BAbiZbc &
         return zbcUnorm(ds[0], r, c[0]) && zbcUnorm(ds[1], g, c[1]) && zbcUnorm(ds[2], b, c[2]) &&
                zbcUnorm(ds[3], a, c[3]);
     };
+    const auto srgb = [&] {
+        return zbcSrgb(ds[0], c[0]) && zbcSrgb(ds[1], c[1]) && zbcSrgb(ds[2], c[2]) && zbcUnorm(ds[3], 255, c[3]);
+    };
     switch (mtl) {
     case 70:  // RGBA8Unorm
         out.format = kZbcA8B8G8R8;
@@ -94,6 +116,38 @@ inline bool zbcColorEntry(uint32_t mtl, const uint32_t ds[4], TegraGM20BAbiZbc &
             return false;
         out.l2[0] = c[2] | c[1] << 8 | c[0] << 16 | c[3] << 24;
         return true;
+    case 71:  // RGBA8Unorm_sRGB: the encoded codes
+        out.format = kZbcA8Bl8Gl8Rl8;
+        if (!srgb())
+            return false;
+        out.l2[0] = c[0] | c[1] << 8 | c[2] << 16 | c[3] << 24;
+        return true;
+    case 81:  // BGRA8Unorm_sRGB
+        out.format = kZbcA8Rl8Gl8Bl8;
+        if (!srgb())
+            return false;
+        out.l2[0] = c[2] | c[1] << 8 | c[0] << 16 | c[3] << 24;
+        return true;
+    case 90:  // RGB10A2Unorm
+        out.format = kZbcA2B10G10R10;
+        if (!unorm(1023, 1023, 1023, 3))
+            return false;
+        out.l2[0] = c[0] | c[1] << 10 | c[2] << 20 | c[3] << 30;
+        return true;
+    case 110:  // RGBA16Unorm
+        out.format = kZbcR16x4;
+        if (!unorm(65535, 65535, 65535, 65535))
+            return false;
+        out.l2[0] = c[0] | c[1] << 16;
+        out.l2[1] = c[2] | c[3] << 16;
+        return true;
+    case 125:  // RGBA32Float: the words themselves; a NaN's bits are the clear's to choose, so it stays a plain clear
+        out.format = kZbcRf32x4;
+        for (int i = 0; i < 4; i++)
+            if (std::isnan(zbcFloat(ds[i])))
+                return false;
+        memcpy(out.l2, ds, sizeof out.l2);
+        return true;
     case 115:  // RGBA16Float
         out.format = kZbcRf16x4;
         out.l2[0] = zbcHalf(ds[0]) | zbcHalf(ds[1]) << 16;
@@ -104,11 +158,12 @@ inline bool zbcColorEntry(uint32_t mtl, const uint32_t ds[4], TegraGM20BAbiZbc &
     }
 }
 
-// The entry for a depth clear of a 32-bit float depth format (Depth32Float, Depth32Float_Stencil8) to `depth`
+// The entry for a depth clear to `depth`: the table holds 32-bit float depths, which a Depth16Unorm tile cleared to one
+// reads as the ZROP converts its clear (gpu.raw.compressed_targets zbc_depth16)
 inline bool zbcDepthEntry(uint32_t mtl, float depth, TegraGM20BAbiZbc &out)
 {
     out = {};
-    if (mtl != 252 && mtl != 260)
+    if (mtl != 250 && mtl != 252 && mtl != 260)
         return false;
     out.type = TegraGM20BZbcDepth;
     out.format = kZbcDepthFp32;

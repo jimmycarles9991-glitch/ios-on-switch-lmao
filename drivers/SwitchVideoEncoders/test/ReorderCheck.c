@@ -198,7 +198,7 @@ static bool encodeClip(CFDictionaryRef spec, int allowReordering, int maxFrameDe
     return true;
 }
 
-bool reorder_refusal_check(CFDictionaryRef spec, char *line, size_t size)
+bool reorder_refusal_check(CFDictionaryRef spec, int bPictures, int iPictures, char *line, size_t size)
 {
     Emitted e = {0};
     int failed = 0;
@@ -208,17 +208,15 @@ bool reorder_refusal_check(CFDictionaryRef spec, char *line, size_t size)
     }
     H264ParamSets *sets = e.count ? parameterSets(CMSampleBufferGetFormatDescription(e.samples[0])) : NULL;
     int bCount = 0, iCount = 0, unknown = 0, badTiming = 0;
-    CMTime lastDts = kCMTimeNegativeInfinity, lastPts = kCMTimeNegativeInfinity;
+    CMTime lastDts = kCMTimeNegativeInfinity;
     for (int n = 0; n < e.count; n++) {
         const char t = sets ? sampleType(sets, e.samples[n]) : '?';
         bCount += t == 'B';
         iCount += t == 'i';
         unknown += t == '?';
         const CMTime dts = CMSampleBufferGetDecodeTimeStamp(e.samples[n]);
-        const CMTime pts = CMSampleBufferGetPresentationTimeStamp(e.samples[n]);
-        badTiming += CMTimeCompare(dts, lastDts) <= 0 || (n > 3 && CMTimeCompare(pts, lastPts) <= 0);
+        badTiming += CMTimeCompare(dts, CMTimeMake(n, 30)) != 0 || CMTimeCompare(dts, lastDts) <= 0;
         lastDts = dts;
-        lastPts = pts;
     }
     free(sets);
     Displayed d = {0};
@@ -226,8 +224,8 @@ bool reorder_refusal_check(CFDictionaryRef spec, char *line, size_t size)
         decodeBack(&e, &d);
     for (int n = 0; n < e.count; n++)
         CFRelease(e.samples[n]);
-    const bool ok = e.count == FRAMES && !e.errors && !failed && !bCount && iCount == 2 && !unknown && !badTiming &&
-                    d.count == e.count && !d.errors && !d.inexact;
+    const bool ok = e.count == FRAMES && !e.errors && !failed && bCount == bPictures && iCount == iPictures &&
+                    !unknown && !badTiming && d.count == e.count && !d.errors && !d.inexact;
     snprintf(line, size,
              "%s %d out, %d dropped (%d failed to go in), %d B pictures, %d unreferenced I pictures, %d unreadable, %d "
              "with bad times; decoded %d (%d errors, %d inexact)",

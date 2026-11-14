@@ -57,10 +57,16 @@ public:
             if (tag == "v" || tag == "f" || tag == "vl" || tag == "vp" || tag == "fl" || tag == "fp") {
                 if (!stage(r, tag, segment.substr(tag.size()), why))
                     return false;
-            } else if (tag == "cubic" && !probe::cubicBinds(segment, r.cubic)) {
+            } else if (tag == "cubic" && !probe::cubicBinds(segment, r.variant.cubic)) {
                 return why = "a cubic segment it cannot read", false;
             } else if (tag.rfind("tests=", 0) == 0) {
-                r.fragmentTests = uint8_t(atoi(tag.c_str() + 6));
+                r.variant.fragmentTests = uint8_t(atoi(tag.c_str() + 6));
+            } else if (tag == "xr2p") {
+                r.variant.twoPlane = true;
+            } else if (tag.rfind("xrs=", 0) == 0) {
+                r.variant.xrSlots = uint16_t(strtoul(tag.c_str() + 4, nullptr, 10));
+            } else if (tag.rfind("wtex=", 0) == 0 && !raw::parseWritten(tag, r.variant.written)) {
+                return why = "a wtex segment it cannot read", false;
             }
             at = next;
         }
@@ -148,6 +154,8 @@ private:
                 f.samples = strtoul(h.c_str() + 8, nullptr, 10);
             else if (h.rfind("topo=", 0) == 0)
                 f.topology = strtoul(h.c_str() + 5, nullptr, 10);
+            else if (h.rfind("amp=", 0) == 0)
+                f.amplification = strtoul(h.c_str() + 4, nullptr, 10);
             else if (h.rfind("ds=", 0) == 0 && sscanf(h.c_str() + 3, "%u/%u", x, x + 1) == 2) {
                 f.depthFormat = x[0];
                 f.stencilFormat = x[1];

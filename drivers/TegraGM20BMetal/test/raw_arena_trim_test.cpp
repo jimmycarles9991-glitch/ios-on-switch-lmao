@@ -155,6 +155,25 @@ TEST_F(ArenaTrim, TheUnplacedRangesGoBackAndComeBackWithAPlacement)
     EXPECT_EQ(importsIn(base, 4 * kQuarter).size(), 3u);
 }
 
+// An arena trimmed to no part (nothing placed in it) has no BO left: freeing it counts none of its bytes out again
+// (boot 21's rates lines read pool=17592186044256MB in mediaanalysisd, the counter 160 MB below zero)
+TEST_F(ArenaTrim, AnArenaTrimmedToNothingLeavesThePoolCountBalanced)
+{
+    const uint64_t before = dev.stats.poolBytes.load();
+    uint32_t arena = 0;
+    ASSERT_TRUE(dev.createArena(4 * kQuarter, false, arena));
+    raw::Buffer a;
+    ASSERT_TRUE(dev.arenaBuffer(arena, kQuarter, a));
+    uint8_t *base = a.cpu;
+    dev.arenaRelease(a);
+    std::atomic<uint32_t> committed{0};
+    dev.trimArenas(committed);
+    EXPECT_TRUE(importsIn(base, 4 * kQuarter).empty()) << "every range given back";
+    EXPECT_EQ(dev.stats.poolBytes.load(), before);
+    dev.destroyArena(arena);
+    EXPECT_EQ(dev.stats.poolBytes.load(), before);
+}
+
 // A volatile heap's whole arena goes at the purge (raw_arena_purge.h), never trimmed
 TEST_F(ArenaTrim, AVolatileHeapIsPurgedNotTrimmed)
 {

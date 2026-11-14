@@ -27,7 +27,8 @@ constexpr uint64_t kStack = 0x5357495443480005ull;
 class Kernel {
 public:
     uint32_t flags = TegraGM20BCompilerCapable | TegraGM20BCompilerRegistered | TegraGM20BCompilerStore;
-    int called = kIOReturnSuccess, asyncCalled = kIOReturnSuccess;
+    int called = kIOReturnSuccess, asyncCalled = kIOReturnSuccess, infoCalled = kIOReturnSuccess;
+    unsigned infos = 0;
     int32_t answer = TegraGM20BCompileMade;
     uint32_t generation = 1, how = TegraGM20BCompileCompiled | 4u << 8;
     unsigned maps = 0, compiles = 0, asyncAsked = 0;
@@ -74,6 +75,9 @@ public:
             }
             switch (method) {
             case TegraGM20BMethodCompilerInfo:
+                infos++;
+                if (infoCalled != kIOReturnSuccess)
+                    return infoCalled;
                 *static_cast<TegraGM20BAbiCompilerInfoReply *>(out) = {store.mappedBytes(), kStack, flags, generation};
                 return kIOReturnSuccess;
             case TegraGM20BMethodMap:
@@ -221,6 +225,50 @@ TEST_F(RemoteCompile, AProcessStartedBeforeTheCompilerIsServedOnceItRegisters)
     EXPECT_TRUE(remote.serving());
     std::string bytes;
     EXPECT_TRUE(remote.find(name, bytes));
+}
+
+TEST_F(RemoteCompile, AFirstCompilerInfoThatFailedIsAskedAgainByALaterAsk)
+{
+    publish();
+    kernel.infoCalled = kIOReturnNoMemory;
+    raw::Remote remote(kernel.call(), kStack);
+    EXPECT_FALSE(remote.serving());
+    kernel.infoCalled = kIOReturnSuccess;
+    EXPECT_TRUE(remote.serving());
+    std::string bytes;
+    EXPECT_TRUE(remote.find(name, bytes));
+    EXPECT_EQ(remote.compile("a request"), raw::Remote::Answer::Made);
+}
+
+// A failed call fails its own ask: no count, no latch, each later ask calls afresh
+TEST_F(RemoteCompile, EveryAskAfterAFailedCompilerInfoCallsAfresh)
+{
+    kernel.infoCalled = kIOReturnNotResponding;
+    raw::Remote remote(kernel.call(), kStack);
+    for (int i = 0; i < 20; ++i)
+        EXPECT_FALSE(remote.serving());
+    EXPECT_EQ(kernel.infos, 21u);
+    kernel.infoCalled = kIOReturnSuccess;
+    EXPECT_TRUE(remote.serving());
+}
+
+TEST_F(RemoteCompile, AKernelWithoutTheCompilersMethodsIsAskedOnce)
+{
+    for (const int absent : {int(kIOReturnUnsupported), int(kIOReturnNotOpen)}) {
+        kernel.infos = 0;
+        kernel.infoCalled = absent;
+        raw::Remote remote(kernel.call(), kStack);
+        for (int i = 0; i < 4; ++i)
+            EXPECT_FALSE(remote.serving());
+        EXPECT_FALSE(remote.declined());
+        EXPECT_EQ(kernel.infos, 1u) << std::hex << absent;
+    }
+    kernel.infos = 0;
+    kernel.infoCalled = kIOReturnSuccess;
+    kernel.flags = 0;
+    raw::Remote older(kernel.call(), kStack);
+    EXPECT_FALSE(older.serving());
+    EXPECT_EQ(kernel.infos, 1u);
 }
 
 TEST_F(RemoteCompile, AnInterruptedWaitOrAFullQueueIsAFailureALaterAskRetries)
@@ -379,14 +427,6 @@ TEST_F(RemoteCompile, ARemoteThatGoesEndsWhatItWaitsFor)
         ASSERT_TRUE(remote.compileAsync("a request", true, 0x21, waiting.next()));
     }
     EXPECT_EQ(waiting.got, std::vector<raw::Remote::Answer>{raw::Remote::Answer::Unavailable});
-}
-
-TEST(InProcess, ItsReasonIsLoggedOnceAndEveryCompileCounted)
-{
-    raw::InProcess tally;
-    EXPECT_TRUE(tally.compiled(raw::InProcess::NoCompiler));
-    EXPECT_FALSE(tally.compiled(raw::InProcess::NoCompiler));
-    EXPECT_EQ(tally.count(), 2u);
 }
 
 }  // namespace

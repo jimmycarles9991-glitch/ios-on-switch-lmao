@@ -1,14 +1,15 @@
 // SPDX-License-Identifier: MIT
-// Rules resolve.twod and resolve.exact: where an 8-bit unorm MSAA resolve is the 2D engine's 2:1 box of the sample grid
-// (raw_resolve_twod.cpp) instead of the pack's resolve pass.
+// Rule resolve.twod: where an MSAA resolve is the 2D engine's 2:1 box of the sample grid (raw_resolve_twod.cpp) instead
+// of the pack's resolve pass.
 //
-// The engine stores the samples' mean by the ROP's unorm rule (x1-units UNITS.md: cut to n+4 fractional bits, nearest,
-// ties down), where Metal's resolve is (sum + n/2) / n, ties up; no 902d method sets the rounding (cl902d.h). Read
-// directly (resolve.twod) a half-code mean lands one code under Metal's. Read through the complement (resolve.exact:
-// every sample c made 255 - c in place, the box read under ROP3 NOTSRCCOPY) a tie lands on the other side: 255 -
-// down((255n - s) / n) = up(s / n) for every sum s, so one rounding of the mean is Metal's rule exactly. Two rounded
-// 2:1 steps are not (pair sums 1 and 0 give 1 where Metal gives 0): 4x waits on bench resolvetie2's reading of the
-// engine, 2x has one step only. Both wait on the device's reading of the complement's steps.
+// The engine reads each unorm8 code c as round(c * 2^15 / 255) before its box and stores the mean by the ROP's unorm
+// rule (x1-units UNITS.md: cut to n+4 fractional bits, nearest, ties down), where Metal's resolve is (sum + n/2) / n,
+// ties up; no 902d method sets either (cl902d.h). That reading gives gpu.raw.resolve_twod's per-channel 2x counts on
+// boots 19 and 21 exactly (raw_resolve_rule_test.cpp). A half-code mean lands on either side of the tie by the codes'
+// rounding, so the plain box is within one code of Metal and so is its complement (resolve.exact: every sample made
+// 255 - c in place, the box read under ROP3 NOTSRCCOPY): on 896 of the 65,536 sample pairs both land one under Metal,
+// where the pair (k, k) gives the same two codes, so no ROP3 of the two readings is exact either. The complement is
+// therefore no route; it stays the probe's (RawMetalProbe.mm switchRawProbeResolveExact:) as a reading of the engine.
 #pragma once
 #include <cstdint>
 
@@ -33,54 +34,59 @@ constexpr bool resolveTargetReadable(const ResolveTarget &t)
 }
 
 struct ResolveAsk {
-    uint16_t format = 0;             // MTLPixelFormat of the resolve texture
-    uint8_t samples = 0;             // the attachment's
-    bool readable = false;           // resolveTargetReadable
-    bool wholeTarget = false;        // the pass's render area is the resolve texture's whole level 0, slice 0
-    bool shadowTarget = false;       // a pitch target the render hardware does not take (Texture::shadowTarget)
-    bool compressedSamples = false;  // the multisampled image the pass rendered has comptags
+    uint16_t format = 0;        // MTLPixelFormat of the resolve texture
+    uint8_t samples = 0;        // the attachment's
+    bool readable = false;      // resolveTargetReadable
+    bool wholeTarget = false;   // the pass's render area is the resolve texture's whole level 0, slice 0
+    bool shadowTarget = false;  // a pitch target the render hardware does not take (Texture::shadowTarget)
 };
 
-// The 2D engine reads the sample grid at 2:1: unorm8 at 2x or 4x over the whole target, not a shadow target
+// How close the engine's box of a format's grid at 2x or 4x comes to Metal's resolve, as gpu.x1.twod_resolve read it on
+// the chip and gpu.raw.resolve_twod's format arms judge it: exact, within one code, or not read by the engine
+enum class TwodResolveFit : uint8_t {
+    None,
+    Near,
+    Exact,
+};
+
+constexpr TwodResolveFit twodResolveFit(uint16_t format, uint8_t samples)
+{
+    if (samples != 2 && samples != 4)
+        return TwodResolveFit::None;
+    switch (format) {
+    case 70:  // RGBA8Unorm
+    case 80:  // BGRA8Unorm
+    case 71:  // RGBA8Unorm_sRGB: the engine decodes before its box and encodes after (fx::twodFormat)
+    case 81:  // BGRA8Unorm_sRGB
+    case 90:  // RGB10A2Unorm, which the pack has no resolve state for
+    case 92:  // RG11B10Float
+        return TwodResolveFit::Near;
+    case 115:  // RGBA16Float
+        return samples == 2 ? TwodResolveFit::Exact : TwodResolveFit::Near;
+    default:
+        return TwodResolveFit::None;
+    }
+}
+
+// The 2D engine reads the sample grid at 2:1 over the whole target, not a shadow target
 constexpr bool twodResolveShape(const ResolveAsk &a)
 {
-    const bool unorm8 = a.format == 70 || a.format == 80;  // RGBA8Unorm, BGRA8Unorm
-    return unorm8 && (a.samples == 2 || a.samples == 4) && a.wholeTarget && !a.shadowTarget;
+    return twodResolveFit(a.format, a.samples) != TwodResolveFit::None && a.wholeTarget && !a.shadowTarget;
 }
 
-// resolve.twod: within one code of Metal (gpu.x1.twod_resolve on the chip, T-v2: none beyond), so taken where no reader
-// takes the texels as data, as fetch.blend is: a screen-bound target (a drawable, a display-bound surface) or a private
-// intermediate only passes sample. A first readback in a later command buffer sees the one code: the owner's rule for
-// screen-bound unorm targets
+// resolve.twod: taken for every resolve where the box is Metal's rule, and where it is within one code of it only where
+// no reader takes the texels as data, as fetch.blend is: a screen-bound target (a drawable, a display-bound surface) or a
+// private intermediate only passes sample. A first readback in a later command buffer sees the one code: the owner's
+// rule for screen-bound targets
 constexpr bool twodResolveAcceptable(const ResolveAsk &a)
 {
-    return twodResolveShape(a) && !a.readable;
+    return twodResolveShape(a) && (!a.readable || twodResolveFit(a.format, a.samples) == TwodResolveFit::Exact);
 }
 
-// The complement's hardware steps, none of which an open driver runs this way: a ROP3 code after a bilinear scale,
-// DSTINVERT over a multisampled image's grid, and one 2D wait between them. gpu.raw.resolve_twod's 2x_exact_differ=0
-// and kept_differ=0, and resolvetie2's rt-*-2x-sandwich cells at 0 against Metal, flip it
-constexpr bool twodResolveComplementProven()
+// The probe's complement inverts unorm8 codes in place; any other format's bits would not invert to its complement
+constexpr bool twodResolveComplementShape(const ResolveAsk &a)
 {
-    return false;
-}
-
-// 4x read as one rounding of the four samples' mean: resolvetie2's rt-*-4x-prod cells at 0 down-rounding misses and
-// its 4x sandwich cells at 0 against Metal (gpu.raw.resolve_twod's 4x_exact_differ=0) flip it
-constexpr bool twodResolveSingleRounding4x()
-{
-    return false;
-}
-
-// resolve.exact, the same engine through the complement: for every resolve a reader takes as data, now (host-proven;
-// gpu.raw.resolve_twod's read arm and bench resolvetie2 read it on the chip), and for the screen-bound ones too once the
-// device proves it. The complement writes the multisampled image in place: a compressed one is written by the 2D engine
-// through a multisample kind no open driver writes with it, unproven, so those take the pass
-constexpr bool twodResolveExact(const ResolveAsk &a)
-{
-    if (!twodResolveShape(a) || a.compressedSamples)
-        return false;
-    return a.readable || (twodResolveComplementProven() && (a.samples == 2 || twodResolveSingleRounding4x()));
+    return twodResolveShape(a) && (a.format == 70 || a.format == 80);
 }
 
 enum ResolveRoute : uint8_t {
@@ -89,9 +95,11 @@ enum ResolveRoute : uint8_t {
     ResolveByPass
 };
 
+// A resolve a reader takes as data takes the pack's pass: on the chip it is Metal's rule byte for byte and faster than
+// the complement (gpu.raw.resolve_twod, boot 21: 2x 1.871 ms against 2.416, 4x 3.271 against 5.223)
 constexpr ResolveRoute resolveRoute(const ResolveAsk &a)
 {
-    return twodResolveExact(a) ? ResolveByComplement : twodResolveAcceptable(a) ? ResolveByTwod : ResolveByPass;
+    return twodResolveAcceptable(a) ? ResolveByTwod : ResolveByPass;
 }
 
 constexpr uint32_t resolveSampleSlot(uint32_t samples)

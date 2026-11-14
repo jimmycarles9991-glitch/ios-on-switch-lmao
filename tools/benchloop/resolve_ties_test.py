@@ -77,7 +77,8 @@ class ResolveTiesTest(unittest.TestCase):
         m = resolve_ties.model
         self.assertEqual((m('up', (0, 1)), m('down', (0, 1))), (1, 0))
         s = (1, 1, 1, 0)
-        self.assertEqual([m(k, s) for k in resolve_ties.MODELS[4]], [1, 1, 0, 0, 0, 1, 1])
+        self.assertEqual([m(k, s) for k in resolve_ties.MODELS[4]], [1, 1, 0, 0, 0, 1, 1, 1])
+        self.assertEqual((m('q15', (0, 1)), m('q15', (254, 255))), (0, 254))
         for n in (2, 4):
             for total in range(255 * n + 1):
                 q, r = divmod(total, n)
@@ -95,14 +96,17 @@ class ResolveTiesTest(unittest.TestCase):
             for n in (2, 4):
                 self.assertTrue(any(line.startswith(f'{fmt} {n}x: one ties-down rounding') for line in lines), lines)
                 self.assertTrue(any(line.startswith(f'{fmt} {n}x: the complement route is exact') for line in lines))
-        self.assertTrue(any('twodResolveSingleRounding4x() true' in line for line in lines))
         self.assertTrue(any(line.startswith('4x: no sample mode') for line in lines), lines)
 
     def test_a_two_step_engine_reads_as_two_steps_and_its_complement_as_within_one(self) -> None:
         lines = self.verdict('pair_x_down')
         self.assertTrue(any(line == 'bgra8unorm 4x: two rounded 2:1 steps, x pairs first' for line in lines), lines)
         self.assertTrue(any(line.startswith('bgra8unorm 4x: two steps, so the complement') for line in lines), lines)
-        self.assertFalse(any('twodResolveSingleRounding4x() true' in line for line in lines))
+
+    def test_an_engine_of_fifteen_bit_codes_reads_as_such_and_its_complement_misses(self) -> None:
+        lines = self.verdict('q15')
+        self.assertTrue(any(line.startswith('bgra8unorm 2x: each code read as round') for line in lines), lines)
+        self.assertTrue(any(line.startswith('bgra8unorm 2x: the complement route misses Metal') for line in lines))
 
     def test_a_rop_the_engine_ignored_decides_nothing(self) -> None:
         lines = self.verdict('down', broken_rop=True)

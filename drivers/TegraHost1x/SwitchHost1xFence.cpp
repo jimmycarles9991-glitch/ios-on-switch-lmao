@@ -365,6 +365,24 @@ extern "C" bool switch_host1x_filter_cancel(switch_host1x_filter_handle handle)
 // a panic once strict (an engine was proven and published), TEGRA_HOST1X_ELOST while its probe is still running.
 extern "C" int tegra_host1x_syncpt_wait(uint32_t id, uint32_t threshold, uint32_t timeoutUs)
 {
+    return tegra_host1x_syncpt_wait_unless(id, threshold, timeoutUs, nullptr, 0);
+}
+
+extern "C" void tegra_host1x_syncpt_kick(uint32_t id)
+{
+    if (!gLock || id >= SwitchHost1xFenceList<Registers>::kSyncpts)
+        return;
+    IOLockLock(gLock);
+    gList.forEach(id, [](switch_host1x_fence *fence) {
+        if (!fence->signaled)
+            IOLockWakeup(gLock, fence, false);
+    });
+    IOLockUnlock(gLock);
+}
+
+extern "C" int tegra_host1x_syncpt_wait_unless(uint32_t id, uint32_t threshold, uint32_t timeoutUs,
+                                               const uint32_t *errors, uint32_t seen)
+{
     if (!gLock)
         return TEGRA_HOST1X_ENODEV;
     if (id >= SwitchHost1xFenceList<Registers>::kSyncpts)
@@ -382,6 +400,10 @@ extern "C" int tegra_host1x_syncpt_wait(uint32_t id, uint32_t threshold, uint32_
     uint64_t deadline = deadlineIn(timeoutUs);
     int ret = TEGRA_HOST1X_OK;
     for (bool grace = false; waiter.state == SWITCH_HOST1X_FENCE_QUEUED;) {
+        if (errors && __atomic_load_n(errors, __ATOMIC_ACQUIRE) != seen) {
+            ret = TEGRA_HOST1X_EFALCON;
+            break;
+        }
         if (IOLockSleepDeadline(gLock, &waiter, deadline, THREAD_UNINT) != THREAD_TIMED_OUT)
             continue;
         if (waiter.state != SWITCH_HOST1X_FENCE_QUEUED)

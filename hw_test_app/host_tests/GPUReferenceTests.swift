@@ -109,6 +109,13 @@ final class GPUReferenceTests: XCTestCase {
         ["raw", "m2v:state:state.notpack", "raw"].forEach { tally.add($0) }
         XCTAssertEqual(tally.text, "raw/2,m2v:state:state.notpack/1")
         XCTAssertFalse(tally.onlyM2V)
+        XCTAssertEqual(tally.offRaw.text, "m2v:state:state.notpack/1")
+        var raw = PathTally()
+        raw.add("raw")
+        XCTAssertTrue(raw.offRaw.isEmpty)
+        raw.add("split:2+1:enc.storage")
+        raw.add("refused:call.sampler")
+        XCTAssertEqual(raw.offRaw.text, "refused:call.sampler/1,split:2+1:enc.storage/1")
         let metrics = PathTally.counterMetrics(
             before: ["raw": 5, "m2v": 1, "pred.state.notpack": 1],
             after: ["raw": 9, "m2v": 4, "pred.state.notpack": 3, "pred.compute": 1])

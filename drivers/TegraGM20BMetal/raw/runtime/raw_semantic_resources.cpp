@@ -7,8 +7,18 @@ void RMCommandPlan::registerResource(void *object, RMResourceFacts facts)
         resourceFacts_.insert(object, facts);
 }
 
+// An encoder's own range by its begin (what a reader of the tape asks for, which reads no list the writer extends); any
+// other by a look through the live ones
 const RMCommandPlan::Range *RMCommandPlan::findRange(size_t from, size_t to) const
 {
+    if (from < to && isEncoderBegin(operations_[from].op)) {
+        const RMPlanBegin &begin = begins_[operations_[from].payload];
+        if (begin.end == to && begin.range < rangeIndex_.size()) {
+            const Range *own = rangeIndex_[begin.range];
+            if (own->from == from && own->to == to)
+                return own;
+        }
+    }
     for (size_t i = 0; i < rangeCount_; ++i)
         if (ranges_[i].from == from && ranges_[i].to == to)
             return &ranges_[i];
@@ -25,11 +35,11 @@ const RMCommandPlan::Range &RMCommandPlan::rangeAt(size_t from, size_t to) const
 // The range's resources with their facts, ordered by kind (Range::first), in the order of their uses within a kind
 void RMCommandPlan::classifyRange(Range &range)
 {
-    const UseSpan span = useSpan(range.uses);
+    const UseSpan span = ownSpan(range.uses);
     range.resources.clear();
     range.first = {};
     for (uint32_t i = 0; i < span.count; ++i) {
-        const auto &use = uses_[span.begin + i];
+        const auto &use = uses_.own(span.begin + i);
         const RMResourceFacts *found = resourceFacts_.find(use.object);
         const RMResourceFacts facts = found ? *found : RMResourceFacts{};
         range.resources.push_back({use.object, facts, use.access});
@@ -80,9 +90,9 @@ void RMCommandPlan::prepareRange(size_t from, size_t to)
     const size_t end = std::min(to, size());
     // the encoders inside first, so the merge below runs alone on the working lists
     for (size_t at = from; at < end;) {
-        const auto &operation = operations_[at];
+        const auto &operation = operations_.own(at);
         if (operation.op == OpRender || operation.op == OpCompute || operation.op == OpBlit) {
-            const size_t encoderEnd = this->encoderEnd(at);
+            const size_t encoderEnd = begins_.own(operation.payload).end;
             if (encoderEnd > at && encoderEnd <= to && (at != from || encoderEnd != to)) {
                 prepareRange(at, encoderEnd);
                 at = encoderEnd;
@@ -113,13 +123,13 @@ void RMCommandPlan::prepareRange(size_t from, size_t to)
         if (!index || spanMarks_[index] == spanStamp_)
             return;
         spanMarks_[index] = spanStamp_;
-        const UseSpan use = useSpans_[index];
-        mergedUses_.insert(mergedUses_.end(), uses_.begin() + use.begin, uses_.begin() + use.begin + use.count);
+        const UseSpan use = useSpans_.own(index);
+        mergedUses_.insert(mergedUses_.end(), uses_.ownData() + use.begin, uses_.ownData() + use.begin + use.count);
     };
     for (size_t at = from; at < end;) {
-        const auto &operation = operations_[at];
+        const auto &operation = operations_.own(at);
         if (operation.op == OpRender || operation.op == OpCompute || operation.op == OpBlit) {
-            const size_t encoderEnd = this->encoderEnd(at);
+            const size_t encoderEnd = begins_.own(operation.payload).end;
             const Range *cached = encoderEnd > at && encoderEnd <= to && (at != from || encoderEnd != to)
                                       ? findRange(at, encoderEnd)
                                       : nullptr;
@@ -136,12 +146,12 @@ void RMCommandPlan::prepareRange(size_t from, size_t to)
         }
         span(operation.uses);
         if (isPlanDraw(operation.op)) {
-            const auto &state = raster[renderStates[draw(at).state].raster];
+            const auto &state = raster.own(renderStates.own(draws_.own(operation.payload).state).raster);
             pipeline(state.pipeline);
             variant(state.nativeVariant);
-        } else if (operation.op == OpInvocation && control(at).render != raw::kNoSnapshot)
-            pipeline(raster[renderStates[control(at).render].raster].pipeline);
-        else if (operation.op == OpDispatch && dispatch(at).pending)
+        } else if (operation.op == OpInvocation && controls_.own(operation.payload).render != raw::kNoSnapshot)
+            pipeline(raster.own(renderStates.own(controls_.own(operation.payload).render).raster).pipeline);
+        else if (operation.op == OpDispatch && dispatches_.own(operation.payload).pending)
             mergedComputes_.push_back(at);
         ++at;
     }
@@ -157,4 +167,7 @@ void RMCommandPlan::prepareRange(size_t from, size_t to)
     range.computes.assign(mergedComputes_.begin(), mergedComputes_.end());
     range.planarFeedback = nullptr;
     classifyRange(range);
+    rangeIndex_.push_back(&range);
+    if (from < to && isEncoderBegin(operations_.own(from).op) && begins_.own(operations_.own(from).payload).end == to)
+        begins_.own(operations_.own(from).payload).range = uint32_t(rangeIndex_.size() - 1);
 }

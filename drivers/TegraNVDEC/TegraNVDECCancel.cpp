@@ -10,9 +10,13 @@
 //     before the syncpoint is released through it: another engine's stream may be waiting on it;
 //   - the channel is restarted, the falcon booted and proven as at power-on;
 //   - once the cancelled jobs have ended, the queue renumbers from the syncpoint and the next job runs.
-// All under the power lock, as at power-on: NVJPG's power path writes MC_HOTRESET_CTRL_1 too. An engine sleep has
-// already powered off is not touched; its next power-on boots it. An engine the reset does not bring back is parked and
-// NVDEC refuses work. One line per cancellation.
+// The flush, reset and restart run under the power lock, as at power-on: NVJPG's power path writes MC_HOTRESET_CTRL_1
+// too. The falcon's reboot and proof run without it, under a hold of NVDEC's idle gate (no idle power-off, sleep waits
+// for the release), so NVJPG's decodes and power transitions go on meanwhile: they touch NVDEC's clock only through the
+// MBIST workaround, which on T210 before B01 turns on a clock that is off and leaves NVDEC's running one on, and on
+// T210B01 does not run. Parking an engine that did not come back writes its clock and reset, so it takes the lock
+// again. An engine sleep has already powered off is not touched; its next power-on boots it. An engine the reset does
+// not bring back is parked and the idle gate powers it on at a later decode. One line per cancellation.
 #include <IOKit/IOLib.h>
 #include <IOKit/IOLocks.h>
 #include <kern/thread_call.h>
@@ -33,10 +37,12 @@ struct Stall {
 
 void cancel(thread_call_param_t, thread_call_param_t)
 {
-    char host[200], engine[480];
+    char host[200], engine[480], reason[288];
     IOLock *power = tegra_nvdec_power_lock();
     IOLockLock(power);
     const bool powered = switch_nvdec_engine_powered();
+    if (!powered || !switch_nvdec_engine_falcon_failed(reason, sizeof(reason)))
+        snprintf(reason, sizeof(reason), "not reached in %llu ms (%d)", gStall.elapsedUs / 1000, gStall.error);
     const uint32_t syncpt = gStall.syncpt;
     const uint32_t reached = tegra_host1x_syncpt_read(syncpt);
     if (powered)
@@ -50,14 +56,23 @@ void cancel(thread_call_param_t, thread_call_param_t)
     const uint32_t through = switch_nvdec_jobs_cancel(tegra_host1x_syncpt_read(syncpt));
     const int released = tegra_host1x_syncpt_release_through(syncpt, through);
     tegra_host1x_channel_restart(TEGRA_HOST1X_CHANNEL_DEFAULT);
-    const bool back = reset && !released && (!powered || switch_nvdec_engine_boot());
-    const char *why = back ? "" : released ? "its fences were not released" : switch_nvdec_engine_wedge();
+    const bool reboot = powered && reset && !released;
+    if (reboot)
+        switch_nvdec_power_hold_locked();
     IOLockUnlock(power);
-    IOLog("TegraNVDEC: job fence %u not reached in %llu ms (%d; syncpoint %u at %u); %s; %s; cancelled through fence "
-          "%u, memory client %s, engine reset: %s%s\n",
-          gStall.fence, gStall.elapsedUs / 1000, gStall.error, syncpt, reached, engine, host, through,
-          drained ? "drained" : "did not drain in 10 ms",
-          back ? "running again" : "it did not come back, NVDEC refuses work: ", why);
+    const bool back = reset && !released && (!powered || switch_nvdec_engine_boot());
+    const char *why = back ? "" : "its fences were not released";
+    if (!back && !released) {
+        IOLockLock(power);
+        why = switch_nvdec_engine_wedge();
+        IOLockUnlock(power);
+    }
+    if (reboot)
+        switch_nvdec_power_release();
+    IOLog("TegraNVDEC: job fence %u %s (syncpoint %u at %u); %s; %s; cancelled through fence %u, memory client %s, "
+          "engine reset: %s%s\n",
+          gStall.fence, reason, syncpt, reached, engine, host, through, drained ? "drained" : "did not drain in 10 ms",
+          back ? "running again" : "it did not come back, the next decode powers it on again: ", why);
     switch_nvdec_jobs_recovered(back);
 }
 }  // namespace

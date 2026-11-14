@@ -8,6 +8,7 @@
 #include <string>
 #include <vector>
 
+#include <gtest/gtest-spi.h>
 #include <gtest/gtest.h>
 
 #include "../../SwitchGM20B/SwitchGM20B3D.h"
@@ -128,6 +129,21 @@ Scratch channelScratch(uint32_t amplifications, uint32_t layer, uint32_t barrier
     for (uint32_t a = 0; a < SWITCH_GM20B_AMP_MAX; a++)
         s[SWITCH_GM20B_SCRATCH_AMP_MAPS + a] = a | (a % 16) << SWITCH_GM20B_AMP_MAP_VIEWPORT_SHIFT;
     return s;
+}
+
+// A job's words: PIXEL_SHADER_BARRIER then the pixel-ordered invalidate, then the barrier then 0x1288
+TEST(MethodRanges, NoPixelBarrierIsFollowedByTheNoWfiTextureInvalidate)
+{
+    const auto immd = [](uint32_t subchannel, uint32_t method) {
+        return 4u << 29 | subchannel << 13 | method >> 2;
+    };
+    const uint32_t ordered[] = {immd(0, 0x0de0), immd(0, 0x0f74), immd(0, 0x1288)};
+    EXPECT_TRUE(switch_gm20b_test::expectPushMethods(ordered, 3));
+    const uint32_t other[] = {immd(0, 0x0de0), immd(1, 0x1288)};
+    EXPECT_TRUE(switch_gm20b_test::expectPushMethods(other, 2)) << "the compute class's 0x1288 is not the 3D barrier's";
+    const uint32_t refused[] = {immd(0, 0x0de0), immd(0, 0x1288)};
+    EXPECT_NONFATAL_FAILURE(switch_gm20b_test::expectPushMethods(refused, 2),
+                            "PIXEL_SHADER_BARRIER followed by 0x1288");
 }
 
 TEST(MethodRanges, TheTableIsTheFermiMmes)

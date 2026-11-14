@@ -24,7 +24,6 @@ enum class Problem : uint8_t {
     MemorylessAccess,
     CopyTexelSize,
     BufferRange,
-    LayeredRendering,
     RasterizationRateMap,
     SamplePositions,
     NonUniformThreadgroups,
@@ -51,7 +50,6 @@ constexpr const char *kProblemNames[] = {"none",
                                          "memoryless_access",
                                          "copy_texel_size",
                                          "buffer_range",
-                                         "layered_rendering",
                                          "rasterization_rate_map",
                                          "sample_positions",
                                          "non_uniform_threadgroups",
@@ -82,7 +80,7 @@ struct Finding {
 
 // What the device answers for the query-gated features (raw_device_answers.h per kind)
 struct Answers {
-    bool layeredRendering = false, rateMaps = false, samplePositions = false, nonUniformThreadgroups = false;
+    bool rateMaps = false, samplePositions = false, nonUniformThreadgroups = false;
 };
 
 struct ChannelState {

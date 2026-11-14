@@ -20,11 +20,12 @@ using switch_ios::test::SourceText;
 
 namespace {
 
-// NativeLegacyDisplay.cpp with the headers its class body includes for direct scanout.
+// NativeLegacyDisplay.cpp with the headers its class body includes for direct scanout and the frame end.
 std::string Display()
 {
     return SourceText("../NativeLegacyDisplay.cpp") + SourceText("../SwitchScanoutStart.h") +
-           SourceText("../SwitchDirectSlots.h");
+           SourceText("../SwitchDirectSlots.h") + SourceText("../SwitchFlipDeadlineDisplay.h") +
+           SourceText("../SwitchFrameEndDisplay.h");
 }
 
 // The planes' share of the class body.

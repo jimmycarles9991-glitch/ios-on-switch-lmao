@@ -7,10 +7,10 @@ import Metal
 /// one-level texture a level, from the same level 0, and each step compared with MipReference
 final class MipChains {
     let gpu: GPU
-    let format: MipTwodTest.Format
+    let format: MipFormat
     private var drawState: MTLRenderPipelineState?
 
-    init(gpu: GPU, format: MipTwodTest.Format) {
+    init(gpu: GPU, format: MipFormat) {
         self.gpu = gpu
         self.format = format
     }

@@ -67,7 +67,8 @@ IOReturn AGXDeviceUserClient::submitJob(const TegraGM20BAbiSubmitAddress *in,
 	return result;
 }
 
-// Inside the submit gate (channels, BOs, bindings and sets stay as they are) and the channel's submit lock.
+// Inside the submit gate (channels and sets stay as they are) and the channel's submit lock, which keeps every BO and
+// binding table it finds published or not yet freed (retireBatch's passSubmitters).
 IOReturn AGXDeviceUserClient::runJob(const SwitchGpuJobRecord &record, JobScratch &job,
 				     TegraGM20BAbiExecReply *out)
 {
@@ -181,10 +182,8 @@ IOReturn AGXDeviceUserClient::runJobUses(const SwitchGpuJobRecord &record, JobSc
 		    (!bytes && use.reserved))
 			return kIOReturnBadArgument;
 		rangedUses += bytes != 0;
-		const Binding *binding =
-			addressed ? switch_gpu_binding_find(binds_, nbinds_, use.handle,
-							    bytes ? bytes : 1)
-				  : nullptr;
+		const BindingTable::Entry *binding =
+			addressed ? bindTable_.find(use.handle, bytes ? bytes : 1) : nullptr;
 		const Bo *bo = addressed ? (binding ? binding->bo : nullptr) : findBo(use.handle);
 		uint64_t offset = 0;
 		if (!bo || !bo->backing || switch_gpu_backing_set(bo->backing) ||
@@ -225,6 +224,7 @@ IOReturn AGXDeviceUserClient::runJobUses(const SwitchGpuJobRecord &record, JobSc
 							nullptr};
 	}
 	const uint32_t guardCount = surfaceCount + nativeGuardCount;
+	[[maybe_unused]] uint32_t backings = 0;
 	if (admissionContinue && !admission.covers(job.uses, useTotal))
 		return kIOReturnBadArgument;
 	tgm_views_job_writes(job.written, writtenCount);
@@ -253,7 +253,7 @@ IOReturn AGXDeviceUserClient::runJobUses(const SwitchGpuJobRecord &record, JobSc
 	switch_gpu_backing_transaction transaction = {};
 	switch_gpu_backing_token completion = {};
 	uint32_t seqno = 0, dependencies = 0, jobVisibility = 0, leaseCount = 0;
-	bool ownershipBusy = false, ownershipFailed = false;
+	bool ownershipBusy = false, ownershipFailed = false, semanticBound = false;
 refresh:
 	if (admissionContinue) {
 		for (uint32_t i = 0; i < surfaceCount; ++i)
@@ -285,13 +285,10 @@ refresh:
 		if (runs)
 			switch_gpu_chan_job_token(chan, fences, &completion);
 		if (count) {
-			error = leaseCount
-					? switch_gpu_backing_begin_conversion_checked(
-						  job.uses, useTotal, job.leases, leaseCount,
-						  job.guards, guardCount, &completion, &transaction)
-					: switch_gpu_backing_begin_checked(
-						  job.uses, useTotal, job.guards, guardCount,
-						  &completion, &transaction);
+			error = switch_gpu_backing_begin_held(job.uses, useTotal, job.leases,
+							      leaseCount, job.guards, guardCount,
+							      &completion, &transaction);
+			backings = transaction.count;
 			ownershipBusy = error == -16;
 			if (!error)
 				error = switch_gpu_backing_write_ranges(&transaction, job.writes,
@@ -334,7 +331,8 @@ refresh:
 			error = -28;
 		if (!error) {
 			job.phases.end(TGM_SUBMIT_LOCK);
-			const bool quietEnd = switch_gpu_quiet_end(quiet, events->semanticFence(),
+			semanticBound = events->semanticFence();
+			const bool quietEnd = switch_gpu_quiet_end(quiet, semanticBound,
 								   scanoutWrites, closesGroup);
 			jobVisibility =
 				switch_gpu_job_visibility(submit, events->signals(),
@@ -346,7 +344,7 @@ refresh:
 			error = switch_gpu_chan_exec_events(
 				chan, pushes, count, job.dependencies, dependencies, siblings,
 				siblingCount, events->words(), events->wordCount(), &seqno, profile,
-				jobVisibility, releases, keptCount);
+				jobVisibility, releases, keptCount, &transaction);
 			job.phases.end(TGM_SUBMIT_EXEC);
 		}
 		if (error != -11)
@@ -358,9 +356,7 @@ refresh:
 		if (error)
 			break;
 	}
-	if (count && !error)
-		switch_gpu_backing_commit(&transaction);
-	else
+	if (error)
 		switch_gpu_backing_abort(&transaction);
 	if (keptCount && !error)
 		keptPromises(record.promises, slot, completion);
@@ -392,13 +388,21 @@ refresh:
 	}
 	job.phases.end(TGM_SUBMIT_COMMIT);
 #if TGM_STATS
-	switch_gpu_job_submitted(job.phases.ns, set != nullptr, head.shared_count, siblingCount);
+	switch_gpu_job_submitted(job.phases.ns, set != nullptr, head.shared_count, backings,
+				 siblingCount);
 #endif
 	switch_gpu_path_taken(SWITCH_GPU_PATH_SUBMIT_JOB, 1);
 	switch_gpu_path_taken(SWITCH_GPU_PATH_SET_JOB, set ? 1 : 0);
 	switch_gpu_path_taken(SWITCH_GPU_PATH_SHARED_USE, head.shared_count);
 	switch_gpu_path_taken(SWITCH_GPU_PATH_QUIET_JOB,
 			      (jobVisibility & SWITCH_GPU_SUBMIT_QUIET) && count ? 1 : 0);
+#if TGM_STATS
+	if (count)
+		tgm_stats_loud(chan,
+			       switch_gpu_quiet_why((head.flags & TegraGM20BJobQuiet) != 0,
+						    (head.flags & TegraGM20BJobHasEvents) != 0,
+						    semanticBound, scanoutWrites, closesGroup));
+#endif
 	out->seqno = seqno;
 	out->reserved = 0;
 	return kIOReturnSuccess;

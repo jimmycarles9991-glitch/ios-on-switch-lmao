@@ -3,6 +3,7 @@
 #include <IOKit/IOBufferMemoryDescriptor.h>
 #include <IOKit/IOLocks.h>
 #include <kern/task.h>
+#include <kern/thread.h>
 #include <stdint.h>
 #include <string.h>
 #include "TegraGM20BFences.h"
@@ -20,19 +21,59 @@ namespace
 constexpr uint64_t kPage = 4096;
 constexpr uint64_t kPushVa = 1ULL << 20;
 constexpr uint32_t kCheckpointWord = 1023;
-// The push page is GPU-writable: its last word receives the GPU's recovery checkpoint.
-constexpr SwitchGpuKqueueShape kShape = {"relayout", TGM_FENCE_KERNEL_RELAYOUT, 1, kPushVa, 0, 1};
+constexpr uint32_t kSlots = 4;
+// A push page per move in flight, GPU-writable: its last word receives the GPU's recovery checkpoint.
+constexpr SwitchGpuKqueueShape kShape = {"relayout", TGM_FENCE_KERNEL_RELAYOUT, kSlots, kPushVa, 0,
+					 1};
 
+// The lock is never held across a GPU wait: a move claims a push slot, kicks under the lock and waits without it.
 struct Relayout {
 	IOLock *lock;
 	SwitchGpuKqueue space;
 	bool unavailable;  // the last open failed (logged once until one succeeds)
+	// push pages a move still owns: a page is rewritten only once its move was waited for
+	uint32_t slots;
+	// moves and flushes waiting on the channel without the lock: a failed channel is replaced only at 0
+	uint32_t users;
 	SwitchGpuRelayoutCache mappings;
 } gRelayout;
+
+uint32_t claimSlot()
+{
+	Relayout &r = gRelayout;
+	while (r.slots == (1u << kSlots) - 1)
+		IOLockSleep(r.lock, &r.slots, THREAD_UNINT);
+	const uint32_t slot = uint32_t(__builtin_ctz(~r.slots));
+	r.slots |= 1u << slot;
+	return slot;
+}
+
+void releaseSlot(uint32_t slot)
+{
+	gRelayout.slots &= ~(1u << slot);
+	IOLockWakeup(gRelayout.lock, &gRelayout.slots, false);
+}
+
+// gRelayout.lock held on entry and on return, not while `wait` runs; the channel stays until every waiter is back
+template <typename Wait> void waitUnlocked(Wait wait)
+{
+	Relayout &r = gRelayout;
+#if TGM_STATS
+	tgm_stats_unlocked(TGM_UNLOCKED_RELAYOUT, 0);
+#endif
+	++r.users;
+	IOLockUnlock(r.lock);
+	wait();
+	IOLockLock(r.lock);
+	if (!--r.users)
+		IOLockWakeup(r.lock, &r.users, false);
+}
 
 tgm_chan *channel()
 {
 	Relayout &r = gRelayout;
+	while (r.space.channel && tgm_chan_error(r.space.channel) && r.users)
+		IOLockSleep(r.lock, &r.users, THREAD_UNINT);
 	if (r.space.channel && tgm_chan_error(r.space.channel))
 		tgm_chan_del(&r.space.channel);
 	if (!r.space.vm && !r.space.openSpace(kShape, &gRelayout)) {
@@ -67,36 +108,47 @@ bool flushForCpu()
 						      SWITCH_GPU_SUBMIT_FORCE_FENCE);
 		if (ret != -11)
 			break;
-		ret = switch_gpu_chan_wait_submission_room(chan, nullptr, 0, 0, nullptr);
+		waitUnlocked([&] {
+			ret = switch_gpu_chan_wait_submission_room(chan, nullptr, 0, 0, nullptr);
+		});
 		if (ret)
 			break;
 	}
 	switch_gpu_chan_submit_leave();
 	if (ret)
 		return false;
-	tgm_copy_wait(tgm_chan_uid(chan), seqno, nullptr, 0);
+	waitUnlocked([&] {
+		tgm_copy_wait(tgm_chan_uid(chan), seqno, nullptr, 0);
+	});
 	return !tgm_chan_error(chan);
 }
 
+// gRelayout.lock held on entry and on return
 int move(const tgm_relayout_pages &surface, const tgm_relayout_pages &rows, const tgm_layout &l,
 	 uint32_t bytesPerRow, tgm_relayout_op op, const tgm_relayout_writer *writers,
 	 uint32_t nwriters)
 {
-	const Relayout &r = gRelayout;
+	Relayout &r = gRelayout;
 	const uint64_t surfaceBytes = static_cast<uint64_t>(surface.npages) * kPage;
 	const uint64_t rowsBytes = static_cast<uint64_t>(rows.npages) * kPage;
 	const uint64_t rowBytes = static_cast<uint64_t>(bytesPerRow) * l.height;
 	if (l.bytes > surfaceBytes || bytesPerRow < l.width * l.bpp || rowBytes > surfaceBytes ||
 	    rowBytes > rowsBytes)
 		return -22;
+	const uint32_t slot = claimSlot();
 	tgm_chan *chan = channel();
-	if (!chan)
+	if (!chan) {
+		releaseSlot(slot);
 		return -12;
+	}
+	uint32_t *const words = r.space.words + slot * (kPage / 4);
 	tgm_relayout_wait waits[TGM_RELAYOUT_MAX_WAITS];
 	const uint32_t nwaits =
 		tgm_relayout_waits(r.space.vm, tgm_chan_uid(chan), writers, nwriters, waits, 0);
-	if (nwaits == TGM_RELAYOUT_WAIT_FAILED)
+	if (nwaits == TGM_RELAYOUT_WAIT_FAILED) {
+		releaseSlot(slot);
 		return -75;
+	}
 	SwitchGpuRelayoutMapping *surfaceMap = nullptr, *rowsMap = nullptr;
 	bool finish = false;
 	int ret = switch_gpu_relayout_mapping(r.space.vm, &gRelayout.mappings, surface.pas,
@@ -105,29 +157,35 @@ int move(const tgm_relayout_pages &surface, const tgm_relayout_pages &rows, cons
 		ret = switch_gpu_relayout_mapping(r.space.vm, &gRelayout.mappings, rows.pas,
 						  rows.npages, false, &rowsMap);
 	if (!ret) {
-		__atomic_store_n(r.space.words + kCheckpointWord, 0u, __ATOMIC_RELEASE);
+		const uint64_t pushVa = kPushVa + slot * kPage;
+		__atomic_store_n(words + kCheckpointWord, 0u, __ATOMIC_RELEASE);
 		const tgm_relayout_move m = {surfaceMap->tiled,
 					     surfaceMap->pitch,
 					     rowsMap->pitch,
 					     bytesPerRow,
 					     op,
 					     rowsBytes,
-					     kPushVa + uint64_t(kCheckpointWord) * 4};
+					     pushVa + uint64_t(kCheckpointWord) * 4};
 		const tgm_push push = {
-			kPushVa, tgm_relayout_push(r.space.words, &l, &m, waits, nwaits), 0, 0, 0,
-			0};
+			pushVa, tgm_relayout_push(words, &l, &m, waits, nwaits), 0, 0, 0, 0};
 		uint32_t seqno = 0;
+#if TGM_STATS
+		if (r.users)
+			tgm_stats_unlocked(TGM_UNLOCKED_RELAYOUT_BESIDE, 0);
+#endif
 		ret = tgm_chan_exec(chan, &push, 1, &seqno, nullptr);
 		if (!ret) {
 			tgm_relayout_writer acquired[TGM_RELAYOUT_MAX_WAITS];
 			for (uint32_t i = 0; i < nwaits; i++)
 				acquired[i] = {waits[i].uid, waits[i].seqno};
-			tgm_copy_wait(tgm_chan_uid(chan), seqno, acquired, nwaits);
+			waitUnlocked([&] {
+				tgm_copy_wait(tgm_chan_uid(chan), seqno, acquired, nwaits);
+			});
 			ret = tgm_chan_error(chan) ? -5 : 0;
-			finish = ret &&
-				 __atomic_load_n(r.space.words + kCheckpointWord, __ATOMIC_ACQUIRE);
+			finish = ret && __atomic_load_n(words + kCheckpointWord, __ATOMIC_ACQUIRE);
 		}
 	}
+	releaseSlot(slot);
 	switch_gpu_relayout_mapping_put(rowsMap);
 	switch_gpu_relayout_mapping_put(surfaceMap);
 	if (ret && tgm_chan_error(chan)) {

@@ -6,6 +6,7 @@
 // (kits/SwitchGM20B: Mesa's clb197.h, clb1c0.h, clb1c0qmd.h, MIT).
 #include <algorithm>
 #include <cstring>
+#include <os/log.h>
 #include "raw_gpu.h"
 #include "raw_cbuf.h"
 #include "../../../../kits/SwitchGM20B/SwitchGM20B.h"
@@ -87,11 +88,19 @@ bool Device::placeSplitPrograms(const SplitSource &source, PlacedProgram &fs, ui
         prologueDataBytes = std::min(progs[source.rec.prologue].dataBytes, kMaxCbufBytes);
         return true;
     }
-    uint64_t pixel = 0, compute = 0;
-    if (!heapPlace(source.fsSlot.data(), uint32_t(source.fsSlot.size()), pixel) ||
-        !heapPlace(source.prologueSlot.data(), uint32_t(source.prologueSlot.size()), compute))
+    const auto placed = [&](const std::vector<uint8_t> &slot, uint64_t &at) {
+        if (at != ~0ull)
+            return true;
+        uint64_t offset = 0;
+        if (!heapPlace(slot.data(), uint32_t(slot.size()), offset))
+            return false;
+        RAW_DIAGNOSTIC(stats.programsPlaced++);
+        at = offset;
+        return true;
+    };
+    if (!placed(source.fsSlot, source.fsPlaced) || !placed(source.prologueSlot, source.prologuePlaced))
         return false;
-    RAW_DIAGNOSTIC(stats.programsPlaced += 2);
+    const uint64_t pixel = source.fsPlaced, compute = source.prologuePlaced;
     fs.record = &source.fsInfo;
     fs.program = uint32_t(pixel) + source.fsInfo.program;
     fs.data = source.fsInfo.dataBytes ? heap_.va + pixel + source.fsInfo.dataOffset : 0;
@@ -103,8 +112,9 @@ bool Device::placeSplitPrograms(const SplitSource &source, PlacedProgram &fs, ui
 }
 
 // `pl`'s twin, made once, at its first draw that takes it: the pack's states and the runtime's records only offer theirs
-// (offerSplit), so a split no draw is large enough for takes no heap. None where the heap or local memory has no room (the
-// state draws whole from then on).
+// (offerSplit), so a split no draw is large enough for takes no heap. Where the heap or local memory has no room for it,
+// that draw draws whole and the next draw that takes the twin makes it afresh; a twin that does not bind as its state does
+// is never made (the state draws whole from then on).
 SplitState *Device::makeSplit(Pipeline &pl)
 {
     RAW_ENCODE_LOCK(l, lock_);
@@ -119,7 +129,9 @@ SplitState *Device::makeSplit(Pipeline &pl)
     if (!placeSplitPrograms(*source, fs, prologue, prologueData, prologueDataBytes) ||
         !slmNeed(std::max(slmPerWarpOfHeader(fs.header), slmPerWarpOfQmd(source->rec.qmd)))) {
         stats.heapFull++;
-        __atomic_store_n(&pl.splitSource, nullptr, __ATOMIC_RELEASE);
+        RAW_DIAGNOSTIC(stats.splitRoomRefusals++);
+        os_log_error(os_log_create("com.brunostjohn.switch.TegraGM20BMetal", "raw"),
+                     "raw: a split twin found no room in the shader heap or local memory: this draw draws whole");
         return nullptr;
     }
     SplitState &s = splitStates_.emplace_back();
@@ -143,13 +155,19 @@ SplitState *Device::makeSplit(Pipeline &pl)
 
 Pipeline *RenderEncoder::splitTwin(Pipeline *pl, WrittenRegion::Analysis &analysis) const
 {
-#if !defined(SWITCH_DEBUG) || SWITCH_DEBUG
-    if (cb_->forceWholePrograms_)
-        return pl;
-#endif
     const SplitSource *source = __atomic_load_n(&pl->splitSource, __ATOMIC_ACQUIRE);
     if (!source)
         return pl;
+    [[maybe_unused]] const auto whole = [&](SplitWhole why) {
+#if !defined(SWITCH_DEBUG) || SWITCH_DEBUG
+        cb_->counts_.splitWhole[size_t(why)]++;
+#endif
+        return pl;
+    };
+#if !defined(SWITCH_DEBUG) || SWITCH_DEBUG
+    if (cb_->forceWholePrograms_)
+        return whole(SplitWhole::Forced);
+#endif
     // priced by its pixel limit, as the pass's plan admitted its state (RawMetalSplitPlan.h): no vertex is read
     const PixelBox box = analysis.geometry().limit;
     bool forced = false;
@@ -157,20 +175,29 @@ Pipeline *RenderEncoder::splitTwin(Pipeline *pl, WrittenRegion::Analysis &analys
     forced = cb_->splitForced_;
 #endif
     if (box.empty() || (!forced && !splitPlan_.accepts(pl, source->rec, uint64_t(box.x1 - box.x0) * (box.y1 - box.y0))))
-        return pl;
+        return whole(SplitWhole::Box);
     for (uint8_t k = 0; k < source->rec.uboCount; k++) {
         const int entry = pixelUboEntry(*pl, source->rec.uboCbuf[k]);
         if (entry < 0)
-            return pl;
+            return whole(SplitWhole::Unbound);
         const PackEntry &e = pl->rec->entry[entry];
         const Bound &b = bufs_[e.stage][e.slot];
-        if (!b.va || (b.buffer && cb_->buffersWritten_))
-            return pl;
+        if (!b.va)
+            return whole(SplitWhole::Unbound);
+        // the prologue's constant buffer of it (launchSplit): its first kMaxCbufBytes at most
+        if (b.buffer &&
+            cb_->bufferWrites_.meets(b.va, std::min<uint64_t>(b.size ? b.size : kMaxCbufBytes, kMaxCbufBytes)))
+            return whole(SplitWhole::Written);
     }
     SplitState *s = __atomic_load_n(&pl->split, __ATOMIC_ACQUIRE);
     if (!s)
         s = dev_->makeSplit(*pl);
-    return s ? &s->pipeline : pl;
+    if (!s)
+        return whole(SplitWhole::Unmade);
+#if !defined(SWITCH_DEBUG) || SWITCH_DEBUG
+    cb_->counts_.splitTwins++;
+#endif
+    return &s->pipeline;
 }
 
 void RenderEncoder::launchSplit(Push &p, const Pipeline &twin, const uint32_t *set)

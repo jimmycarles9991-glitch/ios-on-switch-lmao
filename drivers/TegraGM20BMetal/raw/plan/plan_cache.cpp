@@ -6,9 +6,9 @@ namespace raw::plan {
 
 const Plan &PlanCache::get(const Recording &r, const Caps &caps, const Answers &answers)
 {
-    const uint64_t key = structuralKey(r, caps) ^
-                         (uint64_t(answers.layeredRendering) << 60 | uint64_t(answers.rateMaps) << 61 |
-                          uint64_t(answers.samplePositions) << 62 | uint64_t(answers.nonUniformThreadgroups) << 63);
+    const uint64_t key =
+        structuralKey(r, caps) ^ (uint64_t(answers.rateMaps) << 61 | uint64_t(answers.samplePositions) << 62 |
+                                  uint64_t(answers.nonUniformThreadgroups) << 63);
     if (const auto found = entries_.find(key); found != entries_.end()) {
         ++hits_;
         lru_.splice(lru_.begin(), lru_, found->second);

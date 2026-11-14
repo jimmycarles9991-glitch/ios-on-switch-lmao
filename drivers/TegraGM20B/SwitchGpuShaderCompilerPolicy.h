@@ -21,6 +21,13 @@ inline bool declinedAfterClose(bool declined, bool restarts, uint32_t &losses)
 	return ++losses >= kLosses;
 }
 
+// A compiler announced itself (its launcher started it again): a decline or a give-up after losses in a row no longer
+// stands, and requests wait for this compiler until its own close decides again (declinedAfterClose)
+inline bool declinedAfterAnnounce(bool)
+{
+	return false;
+}
+
 // A compiler registered: the losses before it were not in a row
 inline void registeredAfterLosses(uint32_t &losses)
 {

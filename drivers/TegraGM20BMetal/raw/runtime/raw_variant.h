@@ -11,40 +11,6 @@
 
 namespace raw {
 
-class RetryDelay {
-public:
-    uint64_t next()
-    {
-        const uint64_t delay = delayUs_;
-        delayUs_ = std::min<uint64_t>(delayUs_ * 4, 1000000);
-        return delay;
-    }
-
-private:
-    uint64_t delayUs_ = 1000;
-};
-
-template <typename T> class VariantPlacement {
-public:
-    template <typename Place, typename Ready> uint64_t attempt(Place place, Ready ready)
-    {
-        if (settled_)
-            return 0;
-        bool retry = false;
-        T *value = place(retry);
-        if (value || !retry) {
-            settled_ = true;
-            ready(value);
-            return 0;
-        }
-        return delay_.next();
-    }
-
-private:
-    RetryDelay delay_;
-    bool settled_ = false;
-};
-
 template <typename T> class Variant {
 public:
     enum class State : uint8_t {

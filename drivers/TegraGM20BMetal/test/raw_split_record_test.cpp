@@ -100,3 +100,120 @@ TEST_F(SplitRecords, EachDrawsPrologueReadsItsOwnResidual)
     uint32_t seqno = 0;
     EXPECT_TRUE(cb->commit(seqno));
 }
+
+// A split prologue runs ahead of all of its command buffer's 3D work, so a draw keeps its whole program only where work
+// before it in the command buffer wrote the uniform memory the prologue reads: a fill of another buffer leaves the twin
+TEST_F(SplitRecords, OnlyAWriteOfTheBoundUniformsKeepsTheWholeProgram)
+{
+    std::string why;
+    raw::RuntimeRecord record = shapeRecord(0x618b45175101cd21ull);
+    record.splitRecord.uboCount = 1;  // its prologue reads the fragment program's uniform buffer, constant buffer 1
+    record.splitRecord.uboCbuf[0] = 1;
+    raw::Pipeline *pl = dev.addRecord(record, false, why);
+    ASSERT_NE(pl, nullptr) << why;
+    raw::Buffer other;
+    ASSERT_TRUE(dev.createBuffer(0x4000, other));
+    raw::CommandBuffer *cb = dev.begin();
+    ASSERT_NE(cb, nullptr);
+    cb->forceSplit(true);
+    const auto drawOnce = [&](uint64_t offset) {
+        raw::PassDesc pass;
+        pass.color[0].texture = &target;
+        pass.color[0].load = raw::ColorAttachment::Clear;
+        pass.count = 1;
+        raw::RenderEncoder *e = cb->render(pass);
+        ASSERT_NE(e, nullptr);
+        e->setViewport(0, 0, 256, 256, 0, 1);
+        e->setScissor(0, 0, 256, 256);
+        e->setPipeline(pl);
+        e->setBuffer(2, 1, &uniforms, offset);
+        const char *refused = nullptr;
+        ASSERT_TRUE(e->draw(kStrip, 0, 4, 1, 0, &refused)) << (refused ? refused : "?");
+        e->end();
+    };
+    raw::BlitEncoder *b = cb->blit();
+    b->fillBytes(other.va, 0x1000, 0x5a);
+    b->end();
+    drawOnce(0x1040);
+    EXPECT_EQ(cb->splitRecords().size(), 1u) << "another buffer's fill";
+    b = cb->blit();
+    b->fillBytes(uniforms.va + 0x1000, 0x100, 0x5a);
+    b->end();
+    drawOnce(0x10c8);
+    EXPECT_EQ(cb->splitRecords().size(), 1u) << "a fill of the bound uniforms' memory";
+    uint32_t seqno = 0;
+    EXPECT_TRUE(cb->commit(seqno));
+}
+
+// A state whose fragment root table holds [[buffer(1)]] (m2v's Psb slot, as Core Animation's states reach its uniform
+// ring), its program `stores` or not (an STG in every instruction slot)
+raw::RuntimeRecord rootSlotRecord(uint64_t key, bool stores)
+{
+    raw::RuntimeRecord r;
+    r.keyString = stores ? "samples=1 c0=115 ds=0/0 slot stores " : "samples=1 c0=115 ds=0/0 slot ";
+    for (raw::CapturedProgram &p : r.programs) {
+        p.image.assign(80 + 64, 0);
+        p.gprs = 8;
+        p.cbufTypes = {raw::CbufRoot, raw::CbufSet};
+    }
+    r.programs[0].id = "root-vs";
+    r.programs[1].id = stores ? "root-fs-stores" : "root-fs";
+    if (stores)
+        for (size_t at = 80; at + 8 <= r.programs[1].image.size(); at += 8)
+            r.programs[1].image[at + 7] = 0xee, r.programs[1].image[at + 6] = 0xd8;
+    r.pipeline.keyHash = key;
+    r.pipeline.rootTableWord[1] = 17;
+    r.pipeline.statusWord[1] = 19;
+    r.pipeline.rootSlots[1] = 1u << 1;
+    r.pipeline.pushMask = 0xF << 16;
+    r.blob = {0x1a00, 0x1111};
+    return r;
+}
+
+// Core Animation's frame: draws whose root tables reach its uniform ring, then the glass state's at a later offset of the
+// same ring. A program that stores nothing writes none of the ring, so the twin's prologue reads it as the draw would: the
+// glass state takes its twin in every frame; after a draw of a program that stores, it draws whole
+TEST_F(SplitRecords, TheGlassStateTakesItsTwinAfterDrawsReachingTheRingThroughTheirRootTables)
+{
+    std::string why;
+    raw::RuntimeRecord glassRecord = shapeRecord(0x4c33d27bde9b894aull);
+    glassRecord.splitRecord.uboCount = 1;
+    glassRecord.splitRecord.uboCbuf[0] = 1;
+    raw::Pipeline *glass = dev.addRecord(glassRecord, false, why);
+    ASSERT_NE(glass, nullptr) << why;
+    raw::Pipeline *reader = dev.addRecord(rootSlotRecord(0xca01, false), false, why);
+    ASSERT_NE(reader, nullptr) << why;
+    raw::Pipeline *writer = dev.addRecord(rootSlotRecord(0xca02, true), false, why);
+    ASSERT_NE(writer, nullptr) << why;
+    EXPECT_FALSE(reader->writesMemory[1]);
+    EXPECT_TRUE(writer->writesMemory[1]);
+    const auto frame = [&](raw::Pipeline *before, uint32_t frame) {
+        raw::CommandBuffer *cb = dev.begin();
+        EXPECT_NE(cb, nullptr);
+        cb->forceSplit(true);
+        raw::PassDesc pass;
+        pass.color[0].texture = &target;
+        pass.color[0].load = raw::ColorAttachment::Clear;
+        pass.count = 1;
+        raw::RenderEncoder *e = cb->render(pass);
+        e->setViewport(0, 0, 256, 256, 0, 1);
+        e->setScissor(0, 0, 256, 256);
+        const char *refused = nullptr;
+        e->setPipeline(before);
+        for (uint64_t d = 0; d < 4; d++) {
+            e->setBuffer(2, 1, &uniforms, 0x100 * d + 0x400 * frame);
+            EXPECT_TRUE(e->draw(kStrip, 0, 4, 1, 0, &refused)) << (refused ? refused : "?");
+        }
+        e->setPipeline(glass);
+        e->setBuffer(2, 1, &uniforms, 0x2000 + 0x40 * frame);
+        EXPECT_TRUE(e->draw(kStrip, 0, 4, 1, 0, &refused)) << (refused ? refused : "?");
+        e->end();
+        const size_t twins = cb->splitRecords().size();
+        uint32_t seqno = 0;
+        EXPECT_TRUE(cb->commit(seqno));
+        return twins;
+    };
+    for (uint32_t f = 0; f < 3; f++)
+        EXPECT_EQ(frame(reader, f), 1u) << "frame " << f;
+    EXPECT_EQ(frame(writer, 3), 0u) << "a program that stores may write the ring";
+}

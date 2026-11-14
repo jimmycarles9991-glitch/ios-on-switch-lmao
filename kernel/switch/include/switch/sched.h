@@ -33,17 +33,45 @@ void switch_sched_render_vsync(uint64_t stamp, uint64_t period);
 void switch_sched_render_submitted(void);
 void switch_sched_render_swapped(void);
 
-/* thread_invoke, under the incoming thread's lock: the scheduler's hot path, so one load while nothing is watched. */
+/* busy.c: SpringBoard's and backboardd's main threads between two waits in their run loops (sched/busy.h). */
+extern uint32_t switch_sched_busy_watching;
+
+void switch_sched_busy_exec(thread_t thread);
+void switch_sched_busy_departed(thread_t thread, uint64_t now);
+void switch_sched_busy_dispatched(thread_t thread, uint64_t now);
+void switch_sched_busy_tick(void);
+
+/* thread_invoke, under the incoming thread's lock: the scheduler's hot path, so two loads while nothing is watched. */
 static inline void switch_sched_on_core(thread_t thread, uint64_t now)
 {
     if (__improbable(os_atomic_load(&switch_sched_watching, relaxed) != 0)) {
         switch_sched_dispatched(thread, now);
+    }
+    if (__improbable(os_atomic_load(&switch_sched_busy_watching, relaxed) != 0)) {
+        switch_sched_busy_dispatched(thread, now);
+    }
+}
+
+/* thread_dispatch, under the departing thread's lock, before its wait or requeue is applied. */
+static inline void switch_sched_off_core(thread_t thread, uint64_t now)
+{
+    if (__improbable(os_atomic_load(&switch_sched_busy_watching, relaxed) != 0)) {
+        switch_sched_busy_departed(thread, now);
     }
 }
 
 #else /* DEVELOPMENT || DEBUG */
 
 static inline void switch_sched_on_core(__unused thread_t thread, __unused uint64_t now)
+{}
+
+static inline void switch_sched_off_core(__unused thread_t thread, __unused uint64_t now)
+{}
+
+static inline void switch_sched_busy_exec(__unused thread_t thread)
+{}
+
+static inline void switch_sched_busy_tick(void)
 {}
 
 static inline void switch_sched_named(__unused thread_t thread, __unused const char *name)

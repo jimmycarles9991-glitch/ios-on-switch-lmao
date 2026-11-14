@@ -92,6 +92,12 @@ extern "C" bool tegra_vic_present_ready()
     return ready;
 }
 
+switch_gpu_backing *switch_vic_surface_backing_held(const TegraVICSurface *, switch_gpu_backing *held)
+{
+    ++held->refs;
+    return held;
+}
+
 switch_gpu_backing *switch_vic_surface_backing(const TegraVICSurface *surface)
 {
     ++registrations;

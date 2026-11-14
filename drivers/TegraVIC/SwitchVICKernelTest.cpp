@@ -11,6 +11,7 @@
 #include "SwitchVICFractionProbe.h"
 #include "SwitchVICLargeProbe.h"
 #include "SwitchVICLayoutProbe.h"
+#include "SwitchVICOddProbe.h"
 #include "SwitchVICPackedProbe.h"
 #include "SwitchVICPitchProbe.h"
 #include "SwitchVICTransposeProbe.h"
@@ -29,6 +30,7 @@ constexpr Probe kProbes[] = {
     {SWITCH_VIC_TRANSPOSE_PROBE_MAGIC, sizeof(SwitchVICTransposeProbeReply), switch_vic_transpose_probe_run},
     {SWITCH_VIC_LARGE_PROBE_MAGIC, sizeof(SwitchVICLargeProbeReply), switch_vic_large_probe_run},
     {SWITCH_VIC_COMPOSE_PROBE_MAGIC, sizeof(SwitchVICComposeProbeReply), switch_vic_compose_probe_run},
+    {SWITCH_VIC_ODD_PROBE_MAGIC, sizeof(SwitchVICOddProbeReply), switch_vic_odd_probe_run},
     {SWITCH_VIC_COMPOSITE_ARM_MAGIC, SWITCH_VIC_COMPOSITE_REPLY_BYTES, switch_vic_composite_arm_run},
     {SWITCH_VIC_COMPOSITE_REPORT_MAGIC, SWITCH_VIC_COMPOSITE_REPLY_BYTES, switch_vic_composite_report_run},
 };

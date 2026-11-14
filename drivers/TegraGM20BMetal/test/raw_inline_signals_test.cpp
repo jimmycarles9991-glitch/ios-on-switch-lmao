@@ -92,9 +92,13 @@ TEST(RawInlineSignals, OnlyHostVisibleWritesSinceTheLastFlushMakeAReleaseFlush)
     EXPECT_FALSE(p.take());
     // Noted ahead of the use memo, which names an object once a command buffer however often it is written
     const std::string use = SourceText("../raw/runtime/raw_job_uses.cpp");
-    EXPECT_THAT(use, HasSubstr("publication_.wrote(write && buffer.hostVisible);\n    if (named_.named(&buffer"));
-    EXPECT_THAT(use, HasSubstr("publication_.wrote(range.hostVisible || (texture.import && !texture.import->id) || "
-                               "texture.callerPages);\n    if (named_.named(&texture"));
+    const size_t bufferWrote = use.find("publication_.wrote(write && buffer.hostVisible);");
+    ASSERT_NE(bufferWrote, std::string::npos);
+    EXPECT_LT(bufferWrote, use.find("if (named_.named(&buffer"));
+    const size_t textureWrote = use.find("publication_.wrote(range.hostVisible || (texture.import && "
+                                         "!texture.import->id) || texture.callerPages);");
+    ASSERT_NE(textureWrote, std::string::npos);
+    EXPECT_LT(textureWrote, use.find("if (named_.named(&texture"));
 }
 
 TEST(RawInlineSignals, PayloadIsTheValueAboveTheBaseInsideTheWindow)
@@ -105,6 +109,17 @@ TEST(RawInlineSignals, PayloadIsTheValueAboveTheBaseInsideTheWindow)
     EXPECT_EQ(eventReleasePayload(10 + (uint64_t(1) << 31), 10, 0), 0u);
     EXPECT_EQ(eventReleasePayload(9 + (uint64_t(1) << 31), 10, 0), 0x7fffffffu);
     EXPECT_EQ(eventReleasePayload(3, ~uint64_t(0) - 4, 0), 8u);
+}
+
+// A refused word fails that signal's mid-job release alone (it signals at its job's end, one error line); nothing
+// latches, so the next signal asks the kernel afresh
+TEST(RawInlineSignals, ARefusedEventWordLatchesNothing)
+{
+    const std::string events = switch_ios::test::SourceText("../raw/runtime/RawMetalSharedEvents.mm");
+    const std::string word = switch_ios::test::Body(events, "bool sharedEventWord(id event,");
+    EXPECT_THAT(word, testing::HasSubstr("gRM->raw->eventWord(b->lease->handle(), address, base, floor)"));
+    EXPECT_THAT(word, testing::Not(testing::HasSubstr("wordRefusals")));
+    EXPECT_THAT(events, testing::Not(testing::HasSubstr("wordSpent")));
 }
 
 }  // namespace

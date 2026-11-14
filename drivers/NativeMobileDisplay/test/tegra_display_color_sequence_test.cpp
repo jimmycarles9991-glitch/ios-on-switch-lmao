@@ -111,11 +111,12 @@ Outcome run(uint32_t seed, int64_t maxFilterLatency)
 {
     std::mt19937 random(seed);
     Dc dc;
-    Sequence s;
+    FilterSequence f;
+    ActionSequence a;
     Tables pending = {}, active = {};
     Inputs in = defaults();
     build(in, pending);
-    s.pendingDirty = true;
+    f.pendingDirty = true;
     int64_t nextFrameStart = kFrameLines;
     unsigned cscDeferred = 0, bypasses = 0;
     constexpr int kFrames = 4000, kQuietFrames = 30;
@@ -124,39 +125,39 @@ Outcome run(uint32_t seed, int64_t maxFilterLatency)
         if (frame < kFrames && random() % 3 == 0) {
             change(in, random);
             build(in, pending);
-            s.pendingDirty = true;
+            f.pendingDirty = true;
         }
         const int64_t filterAt = frameEnd + int64_t(random() % uint32_t(maxFilterLatency + 1));
         latchFramesUpTo(dc, nextFrameStart, filterAt);
         if (frame < kFrames && random() % 4 == 0)
             dc.actRequest = true;
-        const Tables *written = s.activeValid ? &active : nullptr;
-        const bool wasDirty = s.pendingDirty;
+        const Tables *written = f.activeValid ? &active : nullptr;
+        const bool wasDirty = f.pendingDirty;
         const auto actRequestOut = [&] {
             return dc.actRequest;
         };
         const auto filterInBlank = [&] {
             return inBlank(filterAt);
         };
-        const Write write = atFrameEnd(s, pending, written, actRequestOut, filterInBlank);
+        const Write write = atFrameEnd(f, a, pending, written, actRequestOut, filterInBlank);
         if (write != Write::kNothing) {
             writeWords(dc, pending, written, write == Write::kCsc, filterAt);
             active = pending;
-        } else if (wasDirty && pending.enabled && !s.bypassWanted) {
+        } else if (wasDirty && pending.enabled && !f.bypassWanted) {
             ++cscDeferred;
         }
         const int64_t actionAt = filterAt + int64_t(random() % (kFrameLines - kActiveLines / 4));
         latchFramesUpTo(dc, nextFrameStart, actionAt);
-        const Enable enable = atFrameEndAction(s, pending.enabled, random() % 5 != 0 || frame >= kFrames);
+        const Enable enable = atFrameEndAction(f, a, pending.enabled, random() % 5 != 0 || frame >= kFrames);
         if (enable != Enable::kKeep) {
             dc.assemblyEnable = enable == Enable::kOn;
             dc.actRequest = true;
-            enableWritten(s, enable == Enable::kOn);
+            enableWritten(a, enable == Enable::kOn);
             bypasses += enable == Enable::kOff && pending.enabled ? 1 : 0;
         }
     }
     latchFramesUpTo(dc, nextFrameStart, nextFrameStart);
-    bool shows = settled(s, pending.enabled) && dc.latchedEnable == pending.enabled;
+    bool shows = settled(f, a, pending.enabled) && dc.latchedEnable == pending.enabled;
     if (pending.enabled) {
         shows = shows && memcmp(dc.words.lut1, pending.lut1, sizeof(pending.lut1)) == 0 &&
                 memcmp(dc.words.csc, pending.csc, sizeof(pending.csc)) == 0 &&
@@ -191,46 +192,48 @@ TEST(Sequence, LateFiltersDeferTheCscToALaterBlank)
 
 TEST(Sequence, AWhitePointRampIsCscOnlyAndNeverBypasses)
 {
-    Sequence s;
+    FilterSequence f;
+    ActionSequence a;
     Tables pending = {}, active = {};
     Inputs in = defaults();
     in.harmony.m[2][2] = kOne / 2;
     build(in, pending);
-    s.pendingDirty = true;
-    ASSERT_EQ(atFrameEnd(s, pending, nullptr, never, always), Write::kAll);
+    f.pendingDirty = true;
+    ASSERT_EQ(atFrameEnd(f, a, pending, nullptr, never, always), Write::kAll);
     active = pending;
-    ASSERT_EQ(atFrameEndAction(s, true, true), Enable::kOn);
-    enableWritten(s, true);
+    ASSERT_EQ(atFrameEndAction(f, a, true, true), Enable::kOn);
+    enableWritten(a, true);
     for (int step = 0; step < 120; ++step) {
         in.harmony.m[2][2] = kOne / 2 + step * (kOne / 512);
         in.blank = step % 30 == 0;
         build(in, pending);
-        s.pendingDirty = true;
-        EXPECT_EQ(atFrameEnd(s, pending, &active, never, always), Write::kCsc);
+        f.pendingDirty = true;
+        EXPECT_EQ(atFrameEnd(f, a, pending, &active, never, always), Write::kCsc);
         active = pending;
-        EXPECT_EQ(atFrameEndAction(s, true, true), Enable::kKeep) << "step " << step;
+        EXPECT_EQ(atFrameEndAction(f, a, true, true), Enable::kKeep) << "step " << step;
     }
 }
 
 TEST(Sequence, ALutChangeWaitsForTheBypassToLatch)
 {
-    Sequence s;
+    FilterSequence f;
+    ActionSequence a;
     Tables pending = {}, active = {};
     Inputs in = defaults();
     in.harmony.m[0][0] = kOne / 2;
     build(in, pending);
-    s.pendingDirty = true;
-    ASSERT_EQ(atFrameEnd(s, pending, nullptr, never, always), Write::kAll);
+    f.pendingDirty = true;
+    ASSERT_EQ(atFrameEnd(f, a, pending, nullptr, never, always), Write::kAll);
     active = pending;
-    enableWritten(s, true);
+    enableWritten(a, true);
     in.remapMode = kRemapInverted;
     build(in, pending);
-    s.pendingDirty = true;
-    EXPECT_EQ(atFrameEnd(s, pending, &active, never, always), Write::kNothing);
-    EXPECT_EQ(atFrameEndAction(s, true, true), Enable::kOff);
-    enableWritten(s, false);
-    EXPECT_EQ(atFrameEnd(s, pending, &active, always, always), Write::kNothing)
+    f.pendingDirty = true;
+    EXPECT_EQ(atFrameEnd(f, a, pending, &active, never, always), Write::kNothing);
+    EXPECT_EQ(atFrameEndAction(f, a, true, true), Enable::kOff);
+    enableWritten(a, false);
+    EXPECT_EQ(atFrameEnd(f, a, pending, &active, always, always), Write::kNothing)
         << "GENERAL_ACT_REQ still out: the CMU may still scan";
-    EXPECT_EQ(atFrameEnd(s, pending, &active, never, never), Write::kAll) << "latched: any line will do";
-    EXPECT_EQ(atFrameEndAction(s, true, true), Enable::kOn);
+    EXPECT_EQ(atFrameEnd(f, a, pending, &active, never, never), Write::kAll) << "latched: any line will do";
+    EXPECT_EQ(atFrameEndAction(f, a, true, true), Enable::kOn);
 }

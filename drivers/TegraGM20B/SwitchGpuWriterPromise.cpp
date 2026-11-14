@@ -54,20 +54,20 @@ extern "C" int switch_gpu_promise_engine(void)
 extern "C" int switch_gpu_backing_promise_add(switch_gpu_backing *backing,
 					      const switch_gpu_promise_ref *ref)
 {
-	IOLockLock(backing->lock);
+	const bool claimed = switch_gpu_backing_enter(backing);
 	const int result =
 		switch_gpu_promise_ref_add(backing->promises, &backing->promise_count, ref);
-	IOLockUnlock(backing->lock);
+	switch_gpu_backing_leave(backing, claimed);
 	return result;
 }
 
 // Its job was submitted or it was given back: CPU readers asleep on it go on, to the job's fence if it has one.
 extern "C" void switch_gpu_backing_promise_drop(switch_gpu_backing *backing, uint32_t offset)
 {
-	IOLockLock(backing->lock);
+	const bool claimed = switch_gpu_backing_enter(backing);
 	switch_gpu_promise_ref_drop(backing->promises, &backing->promise_count, offset);
 	IOLockWakeup(backing->lock, &backing->cpu_writers, false);
-	IOLockUnlock(backing->lock);
+	switch_gpu_backing_leave(backing, claimed);
 }
 
 extern "C" int switch_gpu_backing_promise_tokens(switch_gpu_backing *backing, uint32_t own_first,
@@ -77,10 +77,10 @@ extern "C" int switch_gpu_backing_promise_tokens(switch_gpu_backing *backing, ui
 	// a promise made later than this read is for a frame its maker had not handed out yet
 	if (!__atomic_load_n(&backing->promise_count, __ATOMIC_RELAXED))
 		return 0;
-	IOLockLock(backing->lock);
+	const bool claimed = switch_gpu_backing_enter(backing);
 	const int pending =
 		switch_gpu_backing_promises_locked(backing, own_first, own_end, tokens, capacity);
-	IOLockUnlock(backing->lock);
+	switch_gpu_backing_leave(backing, claimed);
 	return pending;
 }
 

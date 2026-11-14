@@ -7,9 +7,11 @@ import Metal
 /// blending, a 1280x720 BGRA8 quad), `draws` of them in one command buffer, the median of `runs` once the state is
 /// made: us_per_draw. The same draws with the same shader and blending off (us_per_draw_noblend), and with a shader that
 /// fetches nothing under the same blend (us_per_draw_nofetch). path<variant> is where each was drawn, fetch= how the
-/// raw facade's fetch counters say it kept order, gpu_clock as gpu.ca.hot_states (m2v's timestamps are PTIMER units).
-/// A measurement: it passes once the draws ran, and skips where the device makes no such pipeline or keeps no GPU
-/// timestamps.
+/// raw facade's fetch counters say it kept order, gpu_clock as gpu.ca.hot_states. It passes once the draws ran on the raw
+/// path (on the facade, a variant drawn elsewhere fails, named by its path), and skips where the device makes no such
+/// pipeline or keeps no GPU timestamps. Then FetchBlendHeavy times QuartzCore's full-screen TimgBvcm, TgsaA3 and Xghfc
+/// states (gpu_ms_<state>, us_per_draw_<state>, fetch_<state>), and the case fails where one of them leaves the raw path
+/// or has no GPU timestamp.
 struct FetchBlendCostTest: HWTest {
     let id = "gpu.raw.fetch_blend_cost"
     let name = "Self-blending framebuffer fetch: GPU time per full-screen draw"
@@ -19,7 +21,6 @@ struct FetchBlendCostTest: HWTest {
     static let height = 720
     static let draws = 20
     static let runs = 5
-    static let warmups = 20
 
     struct Variant {
         let suffix: String
@@ -33,7 +34,7 @@ struct FetchBlendCostTest: HWTest {
         let kind = RawFacade.kind(of: gpu.device)
         var metrics = Metrics()
         metrics.set("dev", kind)
-        metrics.set("gpu_clock", kind == "m2v" ? "ptimer" : "ns")
+        metrics.set("gpu_clock", "ns")
         metrics.set("draws", Self.draws)
         let variants: [Variant]
         do {
@@ -54,6 +55,7 @@ struct FetchBlendCostTest: HWTest {
         let points = try gpu.buffer(FetchBlendPipeline.quad)
         let instances = try gpu.buffer(FetchBlendPipeline.unmoved)
         let before = RawFacade.counters(of: gpu.device)
+        var offRaw: [String] = []
         for variant in variants {
             let draw = { (commands: MTLCommandBuffer) in
                 let pass = MTLRenderPassDescriptor()
@@ -71,20 +73,16 @@ struct FetchBlendCostTest: HWTest {
                 }
                 encoder.endEncoding()
             }
-            var warm = 0
-            while kind == "raw", warm < Self.warmups,
-                try await gpu.run(tolerateError: true, draw).path.hasPrefix("m2v:state")
-            {
-                warm += 1
-                try await Task.sleep(nanoseconds: 50_000_000)
-            }
             var timings: [GPU.Timing] = []
             for _ in 0..<Self.runs { timings.append(try await gpu.run(draw)) }
             guard timings.allSatisfy(\.gpuTimed) else { return .skip("no GPU timestamps", metrics) }
             let perDraw = timings.map { $0.gpuMilliseconds * 1000 / Double(Self.draws) }
             metrics.set("us_per_draw" + variant.suffix, Stats.percentile(perDraw, 0.5), digits: 1)
-            metrics.set("path" + variant.suffix, Set(timings.map(\.path)).sorted().joined(separator: ","))
-            if warm > 0 { metrics.set("warm" + variant.suffix, warm) }
+            let paths = Set(timings.map(\.path)).sorted()
+            metrics.set("path" + variant.suffix, paths.joined(separator: ","))
+            if kind == "raw" && paths != ["raw"] {
+                offRaw.append("\(variant.suffix.isEmpty ? "fetch" : variant.suffix): \(paths.joined(separator: ","))")
+            }
         }
         if kind == "raw" {
             metrics.set("fetch", RawFacade.fetchRoutes(before: before, after: RawFacade.counters(of: gpu.device)))
@@ -92,7 +90,8 @@ struct FetchBlendCostTest: HWTest {
         let heavy = try await FetchBlendHeavy.run(gpu, draws: 4, runs: Self.runs)
         metrics.set("heavy_draws", 4)
         metrics.merge(heavy.metrics)
-        if !heavy.passed { return .fail(heavy.reasons().joined(separator: "; "), metrics, proof: gpu.proof) }
+        let reasons = offRaw.map { "off the raw path: \($0)" } + (heavy.passed ? [] : heavy.reasons())
+        if !reasons.isEmpty { return .fail(reasons.joined(separator: "; "), metrics, proof: gpu.proof) }
         return .pass(metrics, proof: gpu.proof)
     }
 }

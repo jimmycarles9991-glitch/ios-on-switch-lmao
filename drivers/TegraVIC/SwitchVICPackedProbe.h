@@ -1,14 +1,15 @@
 // SPDX-License-Identifier: BSD-2-Clause-Patent
-// The packed 4:2:2 probe, debug kernels only (selector 6, SwitchVICKernelTest.h). kTegraVICTraits.packedYcc is 0:
-// nothing says how VIC counts a packed row (one element a pixel, as TegraVICFormats.h assumes, or one a pixel pair),
-// or which byte of a pair NVB0B6_T_U8_Y8__V8_Y8 (59, '2vuy') and NVB0B6_T_Y8_U8__Y8_V8 (57, 'yuvs') put where. Each
-// packed format goes in against NV12 out, NV12 in against it out, and to itself, each under both row readings
-// (LumaWidth + 1 the row's bytes over 2, or over 4); NV12 both ways is proven, and the same range and matrix pass
-// channels through untouched. Then each goes to BGRA under the pixel reading (BT.601 video range, against the engine's
-// arithmetic within kTolerance). Every byte of a packed source lies in a range that names its place in the pair, and
-// every byte of an NV12 source in one that names its role, so roleMap says which byte carried what, whichever way the
-// engine reads them. Chroma is one value over the surface, so no chroma resampling changes it. The NV12 copy is the
-// control. Plain logic, no IOKit: SwitchVICPackedProbe.cpp runs it, test/switch_vic_packed_probe_test.cpp checks it.
+// The packed 4:2:2 probe, debug kernels only (selector 6, SwitchVICKernelTest.h): how VIC counts a packed row (one
+// element a pixel, as TegraVICFormats.h has it, or one a pixel pair) and which byte of a pair the code each row names
+// ('2vuy' NVB0B6_T_V8_Y8__U8_Y8 60, 'yuvs' NVB0B6_T_Y8_V8__Y8_U8 58; boots 19 and 21 read 59 and 57 with Cb and Cr
+// exchanged) puts where. Each packed format goes in against NV12 out, NV12 in against it out, and to itself, each
+// under both row readings (LumaWidth + 1 the row's bytes over 2, or over 4); NV12 both ways is proven, and the same
+// range and matrix pass channels through untouched. Then each goes to BGRA under the pixel reading (BT.601 video range,
+// against the engine's arithmetic within kTolerance). Every byte of a packed source lies in a range that names its
+// place in the pair, and every byte of an NV12 source in one that names its role, so roleMap says which byte carried
+// what, whichever way the engine reads them. Chroma is one value over the surface, so no chroma resampling changes it.
+// The NV12 copy is the control. Plain logic, no IOKit: SwitchVICPackedProbe.cpp runs it,
+// test/switch_vic_packed_probe_test.cpp checks it.
 #pragma once
 #include <stdint.h>
 #include <string.h>
@@ -234,8 +235,6 @@ inline TegraVICImage image(uint32_t fourcc, bool destination, uint64_t address)
 inline const char *build(const Case &c, uint64_t source, uint64_t destination, uint64_t config, uint64_t filter,
                          TegraVICJob *job)
 {
-    TegraVICTraits traits = kTegraVICTraits;
-    traits.packedYcc = 1;
     const TegraVICImage in = image(c.source, false, source), out = image(c.destination, true, destination);
     TegraVICOp op = {};
     op.srcW = uint64_t(kWidth) << 16;
@@ -243,7 +242,7 @@ inline const char *build(const Case &c, uint64_t source, uint64_t destination, u
     op.dstW = kWidth;
     op.dstH = kHeight;
     op.nearest = 1;
-    if (const char *why = tegra_vic_build(&in, &out, &op, &traits, config, filter, job))
+    if (const char *why = tegra_vic_build(&in, &out, &op, &kTegraVICTraits, config, filter, job))
         return why;
     if (c.elementBytes == 4 && packed(c.source))
         TEGRA_VIC_SET(job->config, TEGRA_VIC_SLOTS + TEGRA_VIC_SLOT_SURFACE, SURF_LUMA_WIDTH, in.pitch[0] / 4 - 1);

@@ -8,11 +8,13 @@ import Metal
 /// invalidate (0x0f74) order B's reads after A's writes, with no WAIT_FOR_IDLE or shader-cache flush. Each trial is A
 /// then B in one command buffer, eight a batch; the targets rotate between two, so a read too early, or through a
 /// texture cache still holding the last trial's lines, copies another seed's texels. Arms: control (today's
-/// switch_gm20b_pass_barrier), pixel (the planner's form), pixel_nowfi (0x1288 after the barrier), none (no barrier:
-/// the arm that shows a cell can see the hazard). Cells: format x layout x read shape x size. F-v1 read pixel_nowfi wrong
-/// in every 64 x 64 cell (bgra8_bl_same_s 623 of 1,008 trials); T-v2, with CROP/ZROP counting both L2 slices (regdump
-/// 0x408958 = 0x408850 = 2), read it clean in all 16 held cells on 144 trials at least, so the 64 x 64 cells run four
-/// times as long (the F-v1 count).
+/// switch_gm20b_pass_barrier), pixel (the planner's form), none (no barrier: the arm that shows a cell can see the
+/// hazard), each with today's engine changes and job entry; rule forces nothing, so production's rules pick every barrier
+/// (raw_pass_hazard.h: the pixel barrier only where every dependency is a cell this line held), rule_passes= the passes
+/// it opened with the pixel barrier, and a cell where rule read other texels than control fails the line. Cells: format x
+/// layout x read shape x size. 0x1288 in place of 0x0f74 after the barrier is never sent: F-v1
+/// read it wrong in every 64 x 64 cell (bgra8_bl_same_s 623 of 1,008 trials). The 64 x 64 cells run four times as long
+/// as T-v2's (the F-v1 count).
 enum X1PassBarrierProbe {
     static let probe = X1Probe(
         id: "gpu.x1.pass_pixel_barrier",
@@ -20,8 +22,8 @@ enum X1PassBarrierProbe {
         probe: "barrier.pass_pixel", timeout: 420, body: run)
 
     static let arms = [
-        ("control", "pass=today"), ("pixel", "pass=pixel"), ("pixel_nowfi", "pass=pixel_nowfi"),
-        ("none", "pass=none"),
+        ("control", "pass=today switch=today entry=today"), ("pixel", "pass=pixel switch=today entry=today"),
+        ("none", "pass=none switch=today entry=today"), ("rule", ""),
     ]
     static let batch = 8
     static let seeds = 16
@@ -140,8 +142,12 @@ enum X1PassBarrierProbe {
             }
         }
         var finding = ledger.finding(
-            relaxed: ["pixel", "pixel_nowfi"], none: "none", control: "control",
+            relaxed: ["pixel", "rule"], none: "none", control: "control",
             takenKey: "passes", rule: "barrier.pass_pixel")
+        if ledger.failed("rule", none: "none") > 0 {
+            finding.verdict = .fail
+            finding.note = "production's pass barriers read other texels than today's"
+        }
         finding.metrics.set("control_vs_cpu", controlVsCpu)
         finding.metrics.set("skipped", skipped.isEmpty ? "-" : skipped.joined(separator: ","))
         if controlVsCpu > 0 {

@@ -5,6 +5,8 @@
 
 void switch_gm20b_constant_color(struct nv_push *p, const uint32_t rgba[4])
 {
+    P_IMMD(p, NVB197, SET_PIPELINE_SHADER(NVB197_SET_PIPELINE_SHADER_TYPE_PIXEL),
+           {.enable = ENABLE_FALSE, .type = TYPE_PIXEL});
     P_MTHD(p, NVB197, SET_CONSTANT_COLOR_RENDERING);
     P_NVB197_SET_CONSTANT_COLOR_RENDERING(p, ENABLE_TRUE);
     P_NVB197_SET_CONSTANT_COLOR_RENDERING_RED(p, rgba[0]);
@@ -16,6 +18,8 @@ void switch_gm20b_constant_color(struct nv_push *p, const uint32_t rgba[4])
 void switch_gm20b_constant_color_off(struct nv_push *p)
 {
     P_IMMD(p, NVB197, SET_CONSTANT_COLOR_RENDERING, ENABLE_FALSE);
+    P_IMMD(p, NVB197, SET_PIPELINE_SHADER(NVB197_SET_PIPELINE_SHADER_TYPE_PIXEL),
+           {.enable = ENABLE_TRUE, .type = TYPE_PIXEL});
 }
 
 void switch_gm20b_fill_via_triangle(struct nv_push *p, uint32_t mode)

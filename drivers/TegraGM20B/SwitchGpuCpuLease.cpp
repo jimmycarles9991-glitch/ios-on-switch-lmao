@@ -2,6 +2,18 @@
 #include <kern/thread.h>
 #include "SwitchGpuBackingInternal.h"
 
+namespace
+{
+// A section that may sleep for CPU owners claims the backing: it sleeps on the backing's lock, never in the order.
+bool enter_sleeping(switch_gpu_backing *backing, bool sleeps)
+{
+	if (!sleeps)
+		return switch_gpu_backing_enter(backing);
+	switch_gpu_backing_claim(backing);
+	return true;
+}
+}  // namespace
+
 extern "C" int switch_gpu_backing_cpu_acquire_owned(switch_gpu_backing *backing, uint64_t offset,
 						    uint64_t bytes, uint32_t access,
 						    switch_gpu_cpu_lease **out)
@@ -19,10 +31,10 @@ extern "C" int switch_gpu_backing_cpu_acquire_owned(switch_gpu_backing *backing,
 		IODelete(lease, switch_gpu_cpu_lease, 1);
 		return result;
 	}
-	IOLockLock(backing->lock);
+	const bool claimed = switch_gpu_backing_enter(backing);
 	*lease = {backing->cpu_leases, backing, offset, bytes, access, {}};
 	backing->cpu_leases = lease;
-	IOLockUnlock(backing->lock);
+	switch_gpu_backing_leave(backing, claimed);
 	*out = lease;
 	return 0;
 }
@@ -33,29 +45,24 @@ extern "C" int switch_gpu_backing_cpu_release_owned(switch_gpu_cpu_lease **owned
 		return -22;
 	auto *lease = *owned;
 	auto *backing = lease->backing;
-	IOLockLock(backing->lock);
+	const bool cancels = (lease->access & SWITCH_GPU_BACKING_WRITE) && !wrote;
+	const bool claimed =
+		switch_gpu_backing_enter_releasing(backing, cancels ? 0 : lease->access);
 	auto **at = &backing->cpu_leases;
 	while (*at && *at != lease)
 		at = &(*at)->next;
-	if (!*at) {
-		IOLockUnlock(backing->lock);
-		return -22;
-	}
-	*at = lease->next;
-	IOLockUnlock(backing->lock);
-	if ((lease->access & SWITCH_GPU_BACKING_WRITE) && !wrote) {
-		switch_gpu_backing_cpu_cancel(lease->backing, lease->access);
-	} else {
-		const int result = switch_gpu_backing_cpu_release(lease->backing, lease->offset,
-								  lease->bytes, lease->access);
-		if (result) {
-			IOLockLock(backing->lock);
-			lease->next = backing->cpu_leases;
-			backing->cpu_leases = lease;
-			IOLockUnlock(backing->lock);
-			return result;
-		}
-	}
+	int result = *at ? 0 : -22;
+	if (!result && cancels)
+		switch_gpu_backing_cpu_cancel_locked(backing, lease->access);
+	else if (!result)
+		result = switch_gpu_backing_cpu_release_locked(backing, lease->offset, lease->bytes,
+							       lease->access);
+	if (!result)
+		*at = lease->next;
+	switch_gpu_backing_leave(backing, claimed);
+	if (result)
+		return result;
+	switch_gpu_backing_release(backing);
 	if (lease->producer.engine)
 		switch_gpu_backing_drop_token(lease->producer);
 	*owned = nullptr;
@@ -80,7 +87,7 @@ extern "C" int switch_gpu_backing_cpu_publish_generation(switch_gpu_backing *bac
 	if (!backing || !lease || !generation || (uintptr_t(generation) & 7) || !expected ||
 	    next <= expected)
 		return -22;
-	IOLockLock(backing->lock);
+	const bool claimed = switch_gpu_backing_enter(backing);
 	const auto *held = switch_gpu_backing_find_lease_locked(backing, lease);
 	int result = !held || !(held->access & SWITCH_GPU_BACKING_WRITE) ||
 				     !(held->access & SWITCH_GPU_BACKING_CPU_NO_CACHE) ||
@@ -93,7 +100,7 @@ extern "C" int switch_gpu_backing_cpu_publish_generation(switch_gpu_backing *bac
 	if (!result && !__atomic_compare_exchange_n(generation, &expected, next, false,
 						    __ATOMIC_RELEASE, __ATOMIC_RELAXED))
 		result = SWITCH_GPU_BACKING_STALE;
-	IOLockUnlock(backing->lock);
+	switch_gpu_backing_leave(backing, claimed);
 	return result;
 }
 
@@ -114,7 +121,7 @@ static int snapshot_read(switch_gpu_backing *backing, switch_gpu_backing_token *
 	if (!lease)
 		return -12;
 	switch_gpu_backing_retain(backing);
-	IOLockLock(backing->lock);
+	const bool claimed = enter_sleeping(backing, !avoid);
 	switch_gpu_promise_parked parked = {};
 	while (!avoid && (backing->cpu_writers || backing->gpu_admission_writers ||
 			  (cpu && switch_gpu_backing_promise_pending_locked(backing))))
@@ -159,7 +166,7 @@ static int snapshot_read(switch_gpu_backing *backing, switch_gpu_backing_token *
 			backing->dirty &= ~uint32_t(SWITCH_GPU_BACKING_CPU_DIRTY);
 			backing->initial_clean = true;
 		}
-		++backing->cpu_readers;
+		switch_gpu_backing_cpu_owners_add(backing->cpu_readers, 1);
 		backing->promised_readers += pending > 0;
 		*lease = {backing->cpu_leases,
 			  backing,
@@ -174,7 +181,7 @@ static int snapshot_read(switch_gpu_backing *backing, switch_gpu_backing_token *
 		if (promised)
 			*promised = promises && pending > 0 ? uint32_t(pending) : 0u;
 	}
-	IOLockUnlock(backing->lock);
+	switch_gpu_backing_leave(backing, claimed);
 	if (result) {
 		switch_gpu_backing_release(backing);
 		IODelete(lease, switch_gpu_cpu_lease, 1);
@@ -234,7 +241,7 @@ extern "C" int switch_gpu_backing_conversion_reserve(switch_gpu_backing *backing
 	if (!lease)
 		return -12;
 	switch_gpu_backing_retain(backing);
-	IOLockLock(backing->lock);
+	const bool claimed = enter_sleeping(backing, !avoid);
 	const bool write = access == SWITCH_GPU_BACKING_WRITE;
 	int result = 0;
 	while (backing->cpu_writers || backing->gpu_admission_writers ||
@@ -252,7 +259,7 @@ extern "C" int switch_gpu_backing_conversion_reserve(switch_gpu_backing *backing
 	if (!result && users == UINT32_MAX)
 		result = -75;
 	if (!result) {
-		++users;
+		switch_gpu_backing_cpu_owners_add(users, 1);
 		*lease = {backing->cpu_leases,
 			  backing,
 			  0,
@@ -262,7 +269,7 @@ extern "C" int switch_gpu_backing_conversion_reserve(switch_gpu_backing *backing
 		backing->cpu_leases = lease;
 		*out = lease;
 	}
-	IOLockUnlock(backing->lock);
+	switch_gpu_backing_leave(backing, claimed);
 	if (result) {
 		switch_gpu_backing_release(backing);
 		IODelete(lease, switch_gpu_cpu_lease, 1);

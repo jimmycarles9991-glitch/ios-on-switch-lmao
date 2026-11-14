@@ -113,8 +113,8 @@ TEST(VicFormats, EveryRowDescribesItsMemory)
         {kY420, TEGRA_VIC_T_Y8___U8___V8_N420, 3, TEGRA_VIC_KIND_YCC_VIDEO, 1, 1, 1, 1, 0},
         {TEGRA_VIC_FOURCC('f', '4', '2', '0'), TEGRA_VIC_T_Y8___U8___V8_N420, 3, TEGRA_VIC_KIND_YCC_FULL, 1, 1, 1, 1,
          0},
-        {TEGRA_VIC_FOURCC('2', 'v', 'u', 'y'), TEGRA_VIC_T_U8_Y8__V8_Y8, 1, TEGRA_VIC_KIND_YCC_VIDEO, 2, 0, 1, 0, 1},
-        {TEGRA_VIC_FOURCC('y', 'u', 'v', 's'), TEGRA_VIC_T_Y8_U8__Y8_V8, 1, TEGRA_VIC_KIND_YCC_VIDEO, 2, 0, 1, 0, 1},
+        {TEGRA_VIC_FOURCC('2', 'v', 'u', 'y'), TEGRA_VIC_T_V8_Y8__U8_Y8, 1, TEGRA_VIC_KIND_YCC_VIDEO, 2, 0, 1, 0, 1},
+        {TEGRA_VIC_FOURCC('y', 'u', 'v', 's'), TEGRA_VIC_T_Y8_V8__Y8_U8, 1, TEGRA_VIC_KIND_YCC_VIDEO, 2, 0, 1, 0, 1},
     };
 
     for (const Row &r : rows) {
@@ -180,20 +180,21 @@ TEST(VicFormats, OneAndTwoByteElementsAndFullResolutionChroma)
     EXPECT_EQ(nv24.src.rows[1], 480u);
 }
 
-TEST(VicFormats, PackedYccWaitsForItsProbeAndHasNoTransposedLayout)
+TEST(VicFormats, PackedYccRunsOneElementAPixelAndHasNoTransposedLayout)
 {
     const TegraVICSurfaceDesc yuvs = surface(TEGRA_VIC_FOURCC('y', 'u', 'v', 's'), 640, 480, 1280);
     const TegraVICSurfaceDesc bgra = surface(kBgra, 640, 480, 2560);
-    EXPECT_STREQ(build(yuvs, bgra).why, "packed 4:2:2 this engine has not proven");
-    EXPECT_STREQ(build(bgra, yuvs).why, "packed 4:2:2 this engine has not proven");
-    TegraVICTraits proven = kTegraVICTraits;
-    proven.packedYcc = 1;
-    const Built in = build(yuvs, bgra, proven);
+    const Built in = build(yuvs, bgra);
     ASSERT_EQ(in.why, nullptr) << in.why;
+    EXPECT_EQ(SLOT(in.job, SURF_FORMAT), uint64_t(TEGRA_VIC_T_Y8_V8__Y8_U8));
     EXPECT_EQ(SLOT(in.job, SURF_LUMA_WIDTH), 639u);
     EXPECT_EQ(method(in.job, TEGRA_VIC_M_SURFACE0_SLOT0_CHROMA_U), -1);
+    EXPECT_EQ(build(bgra, yuvs).why, nullptr);
+    TegraVICTraits unproven = kTegraVICTraits;
+    unproven.packedYcc = 0;
+    EXPECT_STREQ(build(yuvs, bgra, unproven).why, "packed 4:2:2 this engine has not proven");
     const TegraVICSurfaceDesc turned = surface(TEGRA_VIC_FOURCC('y', 'u', 'v', 's'), 480, 640, 1024);
-    EXPECT_STREQ(build(bgra, turned, proven, 4).why, "transposed output this format has no layout for");
+    EXPECT_STREQ(build(bgra, turned, kTegraVICTraits, 4).why, "transposed output this format has no layout for");
 }
 
 TEST(VicFormats, BlockLinearOutputIsGeneric16Bx2InWholeBlocks)

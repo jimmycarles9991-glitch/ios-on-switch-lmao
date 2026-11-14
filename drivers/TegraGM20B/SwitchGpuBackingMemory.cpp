@@ -12,21 +12,21 @@ extern "C" int switch_gpu_backing_memory_acquire(switch_gpu_backing *backing, ui
 	*out = nullptr;
 	if (!backing || !count || !create || !destroy)
 		return -22;
-	IOLockLock(backing->lock);
+	bool claimed = switch_gpu_backing_enter(backing);
 	if (count > backing->pages->count ||
 	    (backing->gpu_memory &&
 	     (count > backing->gpu_memory_count || backing->release_gpu_memory != destroy))) {
-		IOLockUnlock(backing->lock);
+		switch_gpu_backing_leave(backing, claimed);
 		return -95;
 	}
 	if (backing->gpu_memory) {
 		*out = backing->gpu_memory;
-		IOLockUnlock(backing->lock);
+		switch_gpu_backing_leave(backing, claimed);
 		return 0;
 	}
 	const uint64_t *pages = backing->pages->addresses;
 	const uint64_t generation = backing->generation;
-	IOLockUnlock(backing->lock);
+	switch_gpu_backing_leave(backing, claimed);
 
 	void *made = nullptr;
 	uint32_t flags = 0;
@@ -34,7 +34,7 @@ extern "C" int switch_gpu_backing_memory_acquire(switch_gpu_backing *backing, ui
 	if (!result && (!made || (flags & ~SWITCH_GPU_BACKING_MEMORY_FIXED)))
 		result = -22;
 	if (!result) {
-		IOLockLock(backing->lock);
+		claimed = switch_gpu_backing_enter(backing);
 		if (backing->generation != generation) {
 			result = SWITCH_GPU_BACKING_STALE;
 		} else if (backing->gpu_memory) {
@@ -54,7 +54,7 @@ extern "C" int switch_gpu_backing_memory_acquire(switch_gpu_backing *backing, ui
 			*out = made;
 			made = nullptr;
 		}
-		IOLockUnlock(backing->lock);
+		switch_gpu_backing_leave(backing, claimed);
 	}
 	if (made)
 		destroy(made);

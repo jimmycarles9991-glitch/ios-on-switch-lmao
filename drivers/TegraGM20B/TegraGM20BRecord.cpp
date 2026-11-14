@@ -7,6 +7,7 @@
 #include "TegraGM20BViews.h"
 
 extern "C" IOMemoryDescriptor *tegra_vic_ios_memory(OSObject *surface);
+extern "C" int proc_selfpid(void);
 
 // NOLINTNEXTLINE(misc-use-internal-linkage): OSDefineMetaClassAndStructors needs the class's external linkage
 class SwitchGpuSurfaceRecord : public OSObject
@@ -16,11 +17,13 @@ class SwitchGpuSurfaceRecord : public OSObject
 public:
 	uint32_t imported;  // atomic
 	tgm_coh *deferred;  // the coherency registry's lock
+	tgm_record_mappers mappers;
 
 	bool init() override
 	{
 		imported = 0;
 		deferred = nullptr;
+		mappers = {};
 		return OSObject::init();
 	}
 
@@ -69,10 +72,33 @@ extern "C" struct tgm_record *tgm_record_of(void *surface)
 	return reinterpret_cast<tgm_record *>(memory ? recordOf(memory) : nullptr);
 }
 
+// Sequentially consistent with tgm_record_imported: an import marks the record, then looks for the prefault's held
+// wiring; the prefault holds its wiring, then reads the mark (TegraGM20BSurfacePrefault.cpp hold).
 extern "C" int tgm_record_first_import(struct tgm_record *record)
 {
 	auto *r = reinterpret_cast<SwitchGpuSurfaceRecord *>(record);
-	return static_cast<int>(__atomic_exchange_n(&r->imported, 1u, __ATOMIC_ACQ_REL) == 0);
+	return static_cast<int>(__atomic_exchange_n(&r->imported, 1u, __ATOMIC_SEQ_CST) == 0);
+}
+
+extern "C" int tgm_record_imported(struct tgm_record *record)
+{
+	auto *r = reinterpret_cast<SwitchGpuSurfaceRecord *>(record);
+	return static_cast<int>(__atomic_load_n(&r->imported, __ATOMIC_SEQ_CST) != 0);
+}
+
+extern "C" struct tgm_record_mappers *tgm_record_mappers_of(struct tgm_record *record)
+{
+	return &reinterpret_cast<SwitchGpuSurfaceRecord *>(record)->mappers;
+}
+
+extern "C" void tgm_surface_mapped(uint32_t id, void *task)
+{
+	OSObject *surface = tgm_surface_lookup(id, task);
+	tgm_record *record = surface ? tgm_record_of(surface) : nullptr;
+	if (record)
+		tgm_record_mappers_note(tgm_record_mappers_of(record), proc_selfpid());
+	if (surface)
+		surface->release();
 }
 
 extern "C" void tgm_record_park(struct tgm_record *record, struct tgm_coh *c)

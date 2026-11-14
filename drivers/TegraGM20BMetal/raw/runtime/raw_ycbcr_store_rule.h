@@ -19,14 +19,21 @@
 //    rounded to nearest even): of the sRGB steps whose D is nearest q, the middle one rounded up, and E[0] = 0
 //    (ycbcrSrgbEncodeTable; every one of the 4097 steps a held half reaches pinned by the measured codes).
 //
-// A Load reloads the chroma between blocks interpolated (a block reloaded and stored again moves), and a DontCare leaves
-// undrawn texels undefined (of a partial draw's, the M4 Max kept 77% of the bytes and stored zeros over the rest): neither has a
-// rule here.
+// A Load of a code format's planes holds each texel's luma code over M, and its chroma the mix of its block's codes and its
+// nearest neighbours' at the texel's centre (3/4 its own, 1/4 the next block's across, and again down at 4:2:0; an edge's
+// block its own neighbour), rounded once, half up, to a code, over M: red Cr, green luma, blue Cb, alpha 1, each a half
+// (ycbcrLoaded; read by framebuffer fetch, every texel of 8- and 10-bit 4:2:0 and 4:2:2 over both ranges; rounding across
+// and then down misses one in five). So a block reloaded and stored again moves. A pass that loads and draws the luma alone
+// (write mask green) stores what the store rule makes of those held halves with its drawn green (ycbcrStoreOverLoad; every
+// texel and block of the same targets). A Load of a converted or sRGB format, and
+// a DontCare's undrawn texels (of a partial draw's, the M4 Max kept 77% of the bytes and stored zeros over the rest), have
+// no rule here.
 #pragma once
 
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <vector>
 
 namespace raw {
 
@@ -234,6 +241,50 @@ inline bool ycbcrStoreConverted(const YcbcrConvertedTarget &t, const uint16_t *e
                 chroma[2 * (y * cw + x) + code - 1] = encoded(code, sum, k);
             }
     return true;
+}
+
+// What Metal's tile holds of a code target's planes after a Load: `rgba` (width x height texels, four halves each as floats)
+// of `luma` (a code a texel) and `chroma` (width / 2 x (height / 2 or height) pairs, Cb then Cr)
+inline void ycbcrLoaded(const YcbcrCodeTarget &t, const uint16_t *luma, const uint16_t *chroma, uint32_t width,
+                        uint32_t height, float *rgba)
+{
+    const int cw = int(width / 2), ch = int(t.halvedDown ? height / 2 : height);
+    const auto code = [&](int bx, int by, int k) {
+        bx = std::clamp(bx, 0, cw - 1);
+        by = std::clamp(by, 0, ch - 1);
+        return uint32_t(chroma[2 * (by * cw + bx) + k]);
+    };
+    const auto held = [&](uint32_t c) {
+        return float(_Float16(float(c) / float(t.max)));
+    };
+    for (uint32_t y = 0; y < height; y++)
+        for (uint32_t x = 0; x < width; x++) {
+            const int bx = int(x / 2), by = t.halvedDown ? int(y / 2) : int(y);
+            const int nx = x & 1 ? bx + 1 : bx - 1, ny = !t.halvedDown ? by : y & 1 ? by + 1 : by - 1;
+            // at sixteenths: 3/4 across by 3/4 down, a block's own row twice where nothing is halved down
+            const uint32_t wy = t.halvedDown ? 3 : 4;
+            float *texel = rgba + 4 * (size_t(y) * width + x);
+            for (int k = 0; k < 2; k++) {
+                const uint32_t mix = 3 * wy * code(bx, by, k) + wy * code(nx, by, k) + 3 * (4 - wy) * code(bx, ny, k) +
+                                     (4 - wy) * code(nx, ny, k);
+                texel[k ? 0 : 2] = held((mix + 8) / 16);
+            }
+            texel[1] = held(luma[size_t(y) * width + x]);
+            texel[3] = 1;
+        }
+}
+
+// Metal's codes after a pass that loads a code target's planes and draws `green` (a float a texel) through write mask green:
+// the store of the loaded halves with green drawn over them. False for a size the chroma blocks do not tile.
+inline bool ycbcrStoreOverLoad(const YcbcrCodeTarget &t, const uint16_t *luma, const uint16_t *chroma,
+                               const float *green, uint32_t width, uint32_t height, uint16_t *lumaOut,
+                               uint16_t *chromaOut)
+{
+    std::vector<float> rgba(size_t(width) * height * 4);
+    ycbcrLoaded(t, luma, chroma, width, height, rgba.data());
+    for (size_t i = 0; i < size_t(width) * height; i++)
+        rgba[4 * i + 1] = green[i];
+    return ycbcrStore(t, rgba.data(), width, height, YcbcrTexelSource::DrawnFloat, lumaOut, chromaOut);
 }
 
 }  // namespace raw

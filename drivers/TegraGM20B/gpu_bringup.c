@@ -68,7 +68,7 @@ int tgm_clkgate_switch(int on)
 	return ret;
 }
 #endif
-volatile u32 tgm_waiter_words[TGM_WAITERS];
+struct switch_gpu_wake_word tgm_waiter_words[TGM_WAITERS];
 #if TGM_STATS
 /* stats: when each word was last woken (ns), and this window's wakes and fence waits (the "waits" line) */
 u64 tgm_waiter_woken_ns[TGM_WAITERS];
@@ -77,17 +77,17 @@ struct wstat_state tgm_wstat;
 #endif
 uint32_t tgm_waiter_seq(uint32_t waiter)
 {
-	return nvxnu_word_seq(&tgm_waiter_words[waiter % TGM_WAITERS]);
+	return switch_gpu_wake_seq(&tgm_waiter_words[waiter % TGM_WAITERS]);
 }
 
 int tgm_waiter_idle(uint32_t waiter, uint32_t seq, uint64_t deadline_ns)
 {
-	return nvxnu_word_idle(&tgm_waiter_words[waiter % TGM_WAITERS], seq, deadline_ns);
+	return nvxnu_wword_idle(&tgm_waiter_words[waiter % TGM_WAITERS], seq, deadline_ns);
 }
 
 void tgm_waiter_unwoken(uint32_t waiter, uint32_t seq, uint32_t seqno)
 {
-	nvxnu_word_wake_due(&tgm_waiter_words[waiter % TGM_WAITERS], seq, "fence", seqno);
+	nvxnu_wword_wake_due(&tgm_waiter_words[waiter % TGM_WAITERS], seq, "fence", seqno);
 }
 
 /* System sleep's gate (TegraGM20BSleepGate.h, "system sleep" below): what touches the GPU outside tgm_gpu.lock goes through it. */
@@ -99,7 +99,7 @@ void tgm_gate_enter(void)
 {
 	enum tgm_gate_entry entry = TGM_GATE_IN;
 
-	while ((entry = tgm_gate_try_enter(&tgm_sc7_gate)) != TGM_GATE_IN) {
+	while ((entry = gate_try_enter()) != TGM_GATE_IN) {
 		if (READ_ONCE(tgm_gpu.railed)) {
 			if (entry == TGM_GATE_SHUT_WAKE)
 				gate_wake_closer();
@@ -109,7 +109,7 @@ void tgm_gate_enter(void)
 		}
 		mutex_lock(&tgm_gate_lock);
 		if (entry == TGM_GATE_SHUT_WAKE)
-			nvxnu_wakeup(&tgm_sc7_gate.inside);
+			nvxnu_wakeup(TGM_GATE_DRAINED);
 		while (tgm_gate_is_shut(&tgm_sc7_gate) && !READ_ONCE(tgm_gpu.railed))
 			nvxnu_mutex_sleep(tgm_gate_lock.lck, &tgm_sc7_gate.shut, ~0ULL);
 		mutex_unlock(&tgm_gate_lock);
@@ -160,6 +160,12 @@ static int m1(char *line, unsigned int len)
 		return ret;
 	}
 	tgm_gpu.device = device;
+	tgm_pmc_own(device);
+	ret = tgm_nonstall_init(device);
+	if (ret) {
+		scnprintf(line, len, "M1 FAIL nonstall tree %d", ret);
+		return ret;
+	}
 	nvxnu_step("tegra-gm20b: M1 step: device constructed, claim GPU interrupts\n");
 	/* nvkm's handler is recorded (request_irq in nvkm_device_ctor) and nothing is armed yet: claim the GPU lines
 	 * before the first nvkm init that may wait */

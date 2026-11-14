@@ -2,13 +2,13 @@
 #include <IOKit/IOLib.h>
 #include <IOKit/IOLocks.h>
 #include <IOKit/IOMemoryDescriptor.h>
-#include <kern/thread_call.h>
 #include "TegraGM20BCopyPush.h"
 #include "TegraGM20BGpu.h"
 #include "TegraGM20BTiled.h"
 #include "SwitchGpuCopyMappings.h"
 #include "SwitchGpuEventClient.h"
 #include "SwitchGpuKqueue.h"
+#include "SwitchGpuSubmitTurn.h"
 
 namespace
 {
@@ -24,12 +24,17 @@ struct Job {
 	tegra_gm20b_ce_done done;
 };
 
+// Its copies retire on the backings' retirement work (switch_gpu_copy_retire), one thread call for both: a copy's end
+// releases its backings' uses, which that work retires next. That work never waits for the lock, which a submission
+// holds across its wait for room: it asks the holder (retireAsked) to bring it back once the lock is let go.
 struct Copier {
 	IOLock *lock;
 	SwitchGpuKqueue space;
-	thread_call_t retirement;
+	SwitchGpuSubmitTurn turn;
 	bool semanticFailed, replaceChannel;
-	uint32_t waitingSources, order;
+	uint32_t waitingSources, order, retireAsked;
+	// written under lock, read without it: a retirement run with none takes no lock
+	uint32_t busyJobs;
 	Job jobs[Jobs];
 	SwitchGpuCopyMappings mappings;
 	SwitchGpuEventChannel authority;
@@ -39,7 +44,7 @@ struct Copier {
 
 void fenced(void *)
 {
-	thread_call_enter(queue.retirement);
+	switch_gpu_backing_schedule_retirement();
 }
 
 void discardSpace()
@@ -121,12 +126,12 @@ void logFailedPush(const Job &job, int result)
 }
 #endif
 
-void retire(thread_call_param_t, thread_call_param_t)
+// queue.lock held: let go here, before the callbacks
+void retire()
 {
 	tegra_gm20b_ce_done callbacks[Jobs];
 	int results[Jobs];
 	uint32_t count = 0;
-	IOLockLock(queue.lock);
 	__atomic_store_n(&queue.waitingSources, 1u, __ATOMIC_RELEASE);
 	bool pending = false;
 	for (auto &job : queue.jobs) {
@@ -146,6 +151,7 @@ void retire(thread_call_param_t, thread_call_param_t)
 		switch_gpu_copy_mapping_put(job.source);
 		switch_gpu_copy_mapping_put(job.destination);
 		switch_gpu_backing_token_release(&job.completion);
+		__atomic_store_n(&queue.busyJobs, queue.busyJobs - 1, __ATOMIC_RELEASE);
 		if (job.done.fn) {
 			callbacks[count] = job.done;
 			results[count++] = result < 0 ? result : 0;
@@ -162,18 +168,9 @@ bool initialize()
 {
 	if (__atomic_load_n(&queue.lock, __ATOMIC_ACQUIRE))
 		return true;
-	auto retirement = thread_call_allocate_with_options(
-		retire, nullptr, THREAD_CALL_PRIORITY_KERNEL, THREAD_CALL_OPTIONS_ONCE);
-	IOLock *lock = retirement ? IOLockAlloc() : nullptr;
-	if (!lock) {
-		if (retirement)
-			thread_call_free(retirement);
+	IOLock *lock = IOLockAlloc();
+	if (!lock)
 		return false;
-	}
-	thread_call_t noCall = nullptr;
-	if (!__atomic_compare_exchange_n(&queue.retirement, &noCall, retirement, false,
-					 __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE))
-		thread_call_free(retirement);
 	IOLock *noLock = nullptr;
 	if (!__atomic_compare_exchange_n(&queue.lock, &noLock, lock, false, __ATOMIC_RELEASE,
 					 __ATOMIC_ACQUIRE))
@@ -229,6 +226,15 @@ int layout(switch_gpu_backing *backing, uint64_t offset, uint32_t rowBytes, uint
 		       : 0;
 }
 
+// After every IOLockUnlock(queue.lock) but retire's own
+void copyUnlocked()
+{
+	__atomic_thread_fence(__ATOMIC_SEQ_CST);
+	if (__atomic_load_n(&queue.retireAsked, __ATOMIC_RELAXED) &&
+	    __atomic_exchange_n(&queue.retireAsked, 0u, __ATOMIC_SEQ_CST))
+		switch_gpu_backing_schedule_retirement();
+}
+
 int submit(Job &job, const tgm_push &push, switch_gpu_backing *source,
 	   switch_gpu_backing *destination, const switch_gpu_copy_ownership *ownership,
 	   const switch_gpu_event_submission *events)
@@ -237,9 +243,10 @@ int submit(Job &job, const tgm_push &push, switch_gpu_backing *source,
 	if (!result)
 		result = queue.events.sequence(queue.authority);
 	switch_gpu_backing_transaction transaction{};
-	switch_gpu_chan_submit_enter(queue.space.channel);
+	tgm_chan *const chan = queue.space.channel;
+	switch_gpu_chan_submit_enter(chan);
 	for (; !result;) {
-		switch_gpu_chan_next_token(queue.space.channel, &job.completion);
+		switch_gpu_chan_next_token(chan, &job.completion);
 		switch_gpu_backing_use uses[] = {{source, SWITCH_GPU_BACKING_READ, 0},
 						 {destination, SWITCH_GPU_BACKING_WRITE, 0}};
 		const auto *guards = ownership ? ownership->guards : nullptr;
@@ -278,8 +285,7 @@ int submit(Job &job, const tgm_push &push, switch_gpu_backing *source,
 		uint32_t sequence = 0;
 		if (!result)
 			result = switch_gpu_chan_exec_visibility(
-				queue.space.channel, &push, 1, queue.dependencies, count, &sequence,
-				nullptr,
+				chan, &push, 1, queue.dependencies, count, &sequence, nullptr,
 				SWITCH_GPU_SUBMIT_VISIBILITY_EXPLICIT |
 					SWITCH_GPU_SUBMIT_EXTERNAL_VISIBILITY |
 					(transaction.host_written ? SWITCH_GPU_SUBMIT_HOST_WRITTEN
@@ -294,8 +300,13 @@ int submit(Job &job, const tgm_push &push, switch_gpu_backing *source,
 		switch_gpu_backing_abort(&transaction);
 		if (result != -11)
 			break;
-		result = switch_gpu_chan_wait_submission_room(queue.space.channel, &push, 1, count,
-							      nullptr);
+		result = queue.turn.waitForRoom(queue.lock, [&] {
+			copyUnlocked();
+#if TGM_STATS
+			tgm_stats_unlocked(TGM_UNLOCKED_COPY_ROOM, 0);
+#endif
+			return switch_gpu_chan_wait_submission_room(chan, &push, 1, count, nullptr);
+		});
 	}
 	switch_gpu_backing_abort(&transaction);
 	queue.events.clear();
@@ -307,7 +318,22 @@ int submit(Job &job, const tgm_push &push, switch_gpu_backing *source,
 extern "C" void switch_gpu_copy_completed(void)
 {
 	if (__atomic_load_n(&queue.waitingSources, __ATOMIC_ACQUIRE))
-		thread_call_enter(queue.retirement);
+		switch_gpu_backing_schedule_retirement();
+}
+
+extern "C" void switch_gpu_copy_retire(void)
+{
+	IOLock *lock = __atomic_load_n(&queue.lock, __ATOMIC_ACQUIRE);
+
+	if (!lock || !__atomic_load_n(&queue.busyJobs, __ATOMIC_ACQUIRE))
+		return;
+	if (!IOLockTryLock(lock)) {
+		__atomic_store_n(&queue.retireAsked, 1u, __ATOMIC_SEQ_CST);
+		__atomic_thread_fence(__ATOMIC_SEQ_CST);
+		if (!IOLockTryLock(lock))
+			return;
+	}
+	retire();
 }
 
 extern "C" int tegra_gm20b_ce_copy_plane_checked(
@@ -326,15 +352,19 @@ extern "C" int tegra_gm20b_ce_copy_plane_checked(
 	if (!initialize())
 		return -12;
 	IOLockLock(queue.lock);
+	queue.turn.enter(queue.lock);
 	uint32_t slot = 0;
 	while (slot < Jobs && queue.jobs[slot].busy)
 		++slot;
 	int result = slot == Jobs ? -16 : channel();
 	if (result) {
 		IOLockUnlock(queue.lock);
+		copyUnlocked();
 		return result;
 	}
 	auto &job = queue.jobs[slot];
+	// counted before its submission: an interrupt for it can come before this returns
+	__atomic_store_n(&queue.busyJobs, queue.busyJobs + 1, __ATOMIC_RELEASE);
 	Layout from, to;
 	result = layout(source, sourceOffset, rowBytes, rows, from);
 	if (!result)
@@ -388,7 +418,9 @@ extern "C" int tegra_gm20b_ce_copy_plane_checked(
 		switch_gpu_copy_mapping_put(job.source);
 		switch_gpu_copy_mapping_put(job.destination);
 		job = {};
+		__atomic_store_n(&queue.busyJobs, queue.busyJobs - 1, __ATOMIC_RELEASE);
 	}
 	IOLockUnlock(queue.lock);
+	copyUnlocked();
 	return result;
 }

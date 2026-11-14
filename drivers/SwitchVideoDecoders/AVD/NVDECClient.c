@@ -8,9 +8,11 @@
 #include <stdlib.h>
 #include <string.h>
 #include "NVDECListener.h"
+#include "../../../kits/SwitchServiceWait/SwitchServiceWait.h"
 
 enum {
-    kBuffers = 64,  // TegraNVDECUserClient's kMaxBuffers
+    kBuffers = 64,           // TegraNVDECUserClient's kMaxBuffers
+    kServiceWaitMs = 20000,  // NVDEC's bring-up ends seconds into boot; only one that never ends waits this out
 };
 
 typedef struct {
@@ -60,12 +62,9 @@ static io_service_t service(void)
     return IOServiceGetMatchingService(kIOMainPortDefault, IOServiceMatching("TegraNVDEC"));
 }
 
-bool nvdec_service_present(void)
+bool nvdec_service_wait(void)
 {
-    const io_service_t s = service();
-    if (s)
-        IOObjectRelease(s);
-    return s != 0;
+    return switch_service_wait("TegraNVDEC", TEGRA_NVDEC_ABSENT_RESOURCE, kServiceWaitMs);
 }
 
 static bool serviceDecodes(const char *property)

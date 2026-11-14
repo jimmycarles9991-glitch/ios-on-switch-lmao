@@ -11,7 +11,7 @@ import notify
 /// by the synchronous form, once by the completion-handler form, and once while the shader compiler dies holding its
 /// request (a debug compiler's com.brunostjohn.switch.debug.compiler-dies-at-next-request, its state this app's pid: the
 /// compiler dies at this app's next request): the creation completes once launchd's next compiler has made it. Nothing goes to m2v (T-v3g: state.making, a returned state still being made) and
-/// nothing compiles in this process.
+/// the synchronous creation's state is the compiler's.
 struct CompileFirstDrawTest: HWTest {
     let id = "gpu.compile.first_draw"
     let name = "A state the pack lacks draws raw from the first command buffer after its creation"
@@ -25,12 +25,16 @@ struct CompileFirstDrawTest: HWTest {
         guard RawFacade.kind(of: gpu.device) == "raw" else {
             return .skip("the default device is not the raw facade")
         }
-        let before = RawFacade.counters(of: gpu.device)
         var metrics = Metrics()
         var checks: [(String, Bool)] = []
         let salt = UInt32.random(in: 1...UInt32.max / 4)
 
         let made = try pipeline(gpu, salt: salt)
+        if let answer = RawFacade.compile(of: made) {
+            let madeHow = answer["how"] as? String ?? "?"
+            metrics.set("created_how", madeHow)
+            checks.append(("created: made by the shader compiler", ["compiled", "joined", "stored"].contains(madeHow)))
+        }
         checks += try await drawn(gpu, made, salt: salt, label: "created", &metrics)
 
         let later = try await gpu.device.makeRenderPipelineState(descriptor: try descriptor(gpu, salt: salt + 1))
@@ -56,10 +60,6 @@ struct CompileFirstDrawTest: HWTest {
         let paths = gpu.paths.paths.keys.sorted()
         metrics.set("paths", paths.joined(separator: ","))
         checks.append(("every command buffer on the raw path", paths == ["raw"]))
-        let after = RawFacade.counters(of: gpu.device)
-        let here = (after["compiled_here"] ?? 0) - (before["compiled_here"] ?? 0)
-        metrics.set("compiled_here", here)
-        checks.append(("nothing compiled in this process", here == 0))
         return .judged(checks, metrics, proof: "salt \(salt)")
     }
 

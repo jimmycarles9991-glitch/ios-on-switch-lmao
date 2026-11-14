@@ -341,6 +341,7 @@ static void ctxsw_work(void *arg)
 		__atomic_fetch_add(&ctxsw.waited, 1, __ATOMIC_RELAXED);
 	if (resume)
 		sched_disable_clear(device, resume);
+	tgm_recover_owed(device);
 }
 
 /* At M2 the FIFO has no user yet, so nvkm makes its runqueues and registers its interrupt handler later, at the first

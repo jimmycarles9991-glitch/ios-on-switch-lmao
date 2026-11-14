@@ -8,15 +8,19 @@ extern "C" {
 #include <IOKit/IOLib.h>
 #include <IOKit/IOLocks.h>
 #include <kern/clock.h>
+#include <kern/cpu_number.h>
 #include <string.h>
 #include <sys/errno.h>
 #include <sys/sysctl.h>
 #include "../../kits/SwitchSysctl/SwitchSysctl.h"
+#include "SwitchGpuCompositorRound.h"
 #include "SwitchGpuCompositorSync.h"
 #include "SwitchGpuPreemptLanding.h"
 #include "SwitchGpuSpanNotes.h"
 
 extern "C" int proc_selfpid(void);
+extern "C" void _disable_preemption(void);  // NOLINT(bugprone-reserved-identifier): XNU's own name
+extern "C" void _enable_preemption(void);   // NOLINT(bugprone-reserved-identifier): XNU's own name
 
 namespace
 {
@@ -32,19 +36,36 @@ const char *const kNames[SWITCH_GPU_PATH_COUNT] = {
 };
 
 // Every path is taken in the syscall or trap of the process it is for, so each process counts its own: a reader of
-// kern.switch_gpu_paths sees what its own work took, which the compositor's frames do not move. The least recently
-// counting process gives up its slot.
-constexpr uint32_t kProcesses = 16;
+// kern.switch_gpu_paths sees what its own work took, which the compositor's frames do not move. A process with a slot
+// counts with no lock: each CPU has its own cells, which only that CPU stores to, with preemption off, and readers sum
+// the CPUs. The lock only hands slots out. The least recently counting process gives up its slot, so a count can land in
+// the slot's next owner only when it races a reuse of a process that had stopped counting.
+constexpr uint32_t kProcesses = 16, kCpus = 4;  // the X1's cores
 
 struct Process {
-	int pid;
+	int pid;  // atomic: published once the slot's counts are zeroed
 	uint64_t last;
-	uint64_t counts[SWITCH_GPU_PATH_COUNT];
+	uint64_t counts[kCpus][SWITCH_GPU_PATH_COUNT];
 };
 
 IOLock *lock;
 Process processes[kProcesses];
-uint64_t window[SWITCH_GPU_PATH_COUNT];
+uint64_t window[kCpus][SWITCH_GPU_PATH_COUNT];
+// the window line's reader alone: the totals it last printed from
+uint64_t windowPrinted[SWITCH_GPU_PATH_COUNT];
+
+void bump(uint64_t &cell, uint32_t count)
+{
+	__atomic_store_n(&cell, __atomic_load_n(&cell, __ATOMIC_RELAXED) + count, __ATOMIC_RELAXED);
+}
+
+uint64_t total(const uint64_t (&cells)[kCpus][SWITCH_GPU_PATH_COUNT], uint32_t path)
+{
+	uint64_t sum = 0;
+	for (const auto &cpu : cells)
+		sum += __atomic_load_n(&cpu[path], __ATOMIC_RELAXED);
+	return sum;
+}
 
 IOLock *processLock()
 {
@@ -60,19 +81,29 @@ IOLock *processLock()
 	return made;
 }
 
-// processLock held
-Process *slot(int pid, bool claim)
+Process *find(int pid)
 {
-	Process *oldest = &processes[0];
-	for (Process &p : processes) {
-		if (p.pid == pid)
+	for (Process &p : processes)
+		if (__atomic_load_n(&p.pid, __ATOMIC_ACQUIRE) == pid)
 			return &p;
-		if (p.last < oldest->last)
+	return nullptr;
+}
+
+// processLock held
+Process *claim(int pid)
+{
+	if (Process *p = find(pid))
+		return p;
+	Process *oldest = &processes[0];
+	for (Process &p : processes)
+		if (__atomic_load_n(&p.last, __ATOMIC_RELAXED) <
+		    __atomic_load_n(&oldest->last, __ATOMIC_RELAXED))
 			oldest = &p;
-	}
-	if (!claim)
-		return nullptr;
-	*oldest = {pid, 0, {}};
+	for (auto &cpu : oldest->counts)
+		for (uint64_t &count : cpu)
+			__atomic_store_n(&count, 0, __ATOMIC_RELAXED);
+	__atomic_store_n(&oldest->last, 0, __ATOMIC_RELAXED);
+	__atomic_store_n(&oldest->pid, pid, __ATOMIC_RELEASE);
 	return oldest;
 }
 
@@ -128,6 +159,8 @@ struct sysctl_oid gPromisesOid;
 switch_gpu_spans::Notes gSpans;
 uint64_t gCompositorJobMax;
 switch_gpu_comp_sync gSyncWindow, gSyncAsked;
+switch_gpu_comp_round gRound;
+constexpr uint64_t kPeriodNs = 16666667;
 }  // namespace
 
 extern "C" void switch_gpu_path_promise_direct(int what)
@@ -154,10 +187,26 @@ extern "C" void switch_gpu_span_note(const char *owner, const char *text)
 
 extern "C" void switch_gpu_compositor_job(uint64_t ns)
 {
+	switch_gpu_comp_round_job(&gRound, ns, kPeriodNs);
 	uint64_t max = __atomic_load_n(&gCompositorJobMax, __ATOMIC_RELAXED);
 	while (ns > max && !__atomic_compare_exchange_n(&gCompositorJobMax, &max, ns, false,
 							__ATOMIC_RELAXED, __ATOMIC_RELAXED))
 		;
+}
+
+extern "C" void switch_gpu_compositor_import(uint64_t ns)
+{
+	switch_gpu_comp_round_import(&gRound, ns);
+}
+
+extern "C" void switch_gpu_compositor_alloc(uint64_t ns, int cold)
+{
+	switch_gpu_comp_round_alloc(&gRound, ns, cold);
+}
+
+extern "C" void switch_gpu_compositor_scanned(uint64_t passes, uint64_t draws)
+{
+	switch_gpu_comp_round_scanned(&gRound, passes, draws);
 }
 
 extern "C" void switch_gpu_compositor_sync(uint32_t syncs, uint64_t ns, int behind)
@@ -185,8 +234,13 @@ extern "C" void switch_gpu_span_line(char *line, size_t size)
 		return;
 	switch_gpu_comp_sync sync = {};
 	switch_gpu_comp_sync_take(&gSyncAsked, &sync);
-	char head[160];
-	switch_gpu_comp_sync_format(head, sizeof(head), &sync);
+	switch_gpu_comp_round round = {};
+	switch_gpu_comp_round_take(&gRound, &round);
+	char head[320];
+	const int put = switch_gpu_comp_round_format(head, sizeof(head), &round);
+	const size_t used =
+		put > 0 && static_cast<size_t>(put) < sizeof(head) ? static_cast<size_t>(put) : 0;
+	switch_gpu_comp_sync_format(head + used, sizeof(head) - used, &sync);
 	IOLockLock(held);
 	switch_gpu_spans::take(gSpans, __atomic_exchange_n(&gCompositorJobMax, 0, __ATOMIC_RELAXED),
 			       head, line, size);
@@ -197,15 +251,22 @@ extern "C" void switch_gpu_path_taken(enum switch_gpu_path path, uint32_t count)
 {
 	if (!count)
 		return;
-	__atomic_fetch_add(&window[path], count, __ATOMIC_RELAXED);
-	IOLock *held = processLock();
-	if (!held)
-		return;
-	IOLockLock(held);
-	Process *p = slot(proc_selfpid(), true);
-	p->last = mach_absolute_time();
-	p->counts[path] += count;
-	IOLockUnlock(held);
+	const int pid = proc_selfpid();
+	Process *p = find(pid);
+	if (!p) {
+		IOLock *held = processLock();
+		if (!held)
+			return;
+		IOLockLock(held);
+		p = claim(pid);
+		IOLockUnlock(held);
+	}
+	_disable_preemption();
+	const uint32_t cpu = static_cast<uint32_t>(cpu_number()) % kCpus;
+	bump(window[cpu][path], count);
+	bump(p->counts[cpu][path], count);
+	_enable_preemption();
+	__atomic_store_n(&p->last, mach_absolute_time(), __ATOMIC_RELAXED);
 }
 
 extern "C" void switch_gpu_path_job(uint32_t visibility, int unlocked_writes, int lean_copy,
@@ -226,8 +287,11 @@ extern "C" void switch_gpu_path_job(uint32_t visibility, int unlocked_writes, in
 extern "C" void switch_gpu_path_window(char *line, size_t size)
 {
 	uint64_t counts[SWITCH_GPU_PATH_COUNT];
-	for (uint32_t i = 0; i < SWITCH_GPU_PATH_COUNT; ++i)
-		counts[i] = __atomic_exchange_n(&window[i], 0, __ATOMIC_RELAXED);
+	for (uint32_t i = 0; i < SWITCH_GPU_PATH_COUNT; ++i) {
+		const uint64_t now = total(window, i);
+		counts[i] = now - windowPrinted[i];
+		windowPrinted[i] = now;
+	}
 	if (size)
 		line[0] = 0;
 	format(line, size, 0, counts);
@@ -239,12 +303,9 @@ extern "C" void switch_gpu_path_line(char *line, size_t size)
 		return;
 	const int pid = proc_selfpid();
 	uint64_t counts[SWITCH_GPU_PATH_COUNT] = {};
-	if (IOLock *held = processLock()) {
-		IOLockLock(held);
-		if (const Process *p = slot(pid, false))
-			memcpy(counts, p->counts, sizeof(counts));
-		IOLockUnlock(held);
-	}
+	if (const Process *p = find(pid))
+		for (uint32_t i = 0; i < SWITCH_GPU_PATH_COUNT; ++i)
+			counts[i] = total(p->counts, i);
 	const int head = snprintf(line, size, "flags=%#x pid=%d", switch_gpu_info_flags(), pid);
 	format(line, size, head > 0 ? static_cast<size_t>(head) : 0, counts);
 	uint32_t preempts = 0;

@@ -79,10 +79,13 @@ protected:
     }
 };
 
-TEST_F(PlaneSurfaceUse, TheSurfaceOnScreenReadsInUseFromItsLatchUntilItsLeaseGoes)
+// From the kick that takes it for window B: a set asked for latches at whatever boundary comes next, and its producer's
+// pool must not write the buffer before then either.
+TEST_F(PlaneSurfaceUse, TheSurfaceReadsInUseFromItsKickUntilItsLeaseGoes)
 {
     map(0, buffers[0]);
-    EXPECT_EQ(buffers[0].uses, 0);
+    EXPECT_EQ(buffers[0].uses, 1);
+    EXPECT_EQ(buffers[0].refs, 3);
     latch(0);
     EXPECT_EQ(buffers[0].uses, 1);
     EXPECT_EQ(buffers[0].refs, 3);
@@ -115,25 +118,44 @@ TEST_F(PlaneSurfaceUse, ThreePoolBuffersGoRoundAndOnlyTheOneShownStaysInUse)
     }
 }
 
-TEST_F(PlaneSurfaceUse, ASetWrittenButNotLatchedHoldsNothing)
+TEST_F(PlaneSurfaceUse, ASetAskedForButNotLatchedHoldsItsSurface)
 {
     map(1, buffers[1]);
     display.sets[0].slot = 1;
     display.planeLatch.active = -1;
     display.planeUseHoldScanned();
-    EXPECT_EQ(buffers[1].uses, 0);
+    EXPECT_EQ(buffers[1].uses, 1);
     display.planeUseRelease(1);
+    EXPECT_EQ(buffers[1].uses, 0);
     EXPECT_EQ(buffers[1].refs, 1);
+}
+
+// The producer takes its next buffer while the frame before is still asked for: the one asked for and the one shown
+// both read in use, and only the latch of the next set gives the shown one back.
+TEST_F(PlaneSurfaceUse, APoolBufferAskedForIsNeverFreeBeforeTheNextLatch)
+{
+    map(0, buffers[0]);
+    latch(0);
+    map(1, buffers[1]);
+    EXPECT_EQ(buffers[0].uses, 1);
+    EXPECT_EQ(buffers[1].uses, 1);
+    latch(1);
+    display.planeUseRelease(0);
+    EXPECT_EQ(buffers[0].uses, 0);
+    EXPECT_EQ(buffers[1].uses, 1);
+    display.planeUseRelease(1);
 }
 
 TEST_F(PlaneSurfaceUse, ASlotRemappedToAnotherAllocationOrWithoutItsLeaseHoldsNothing)
 {
+    natives[0].lease = nullptr;
     map(0, buffers[0]);
+    natives[0].lease = &lease;
     display.planeSlots[0].mappedAllocation = 900;
     latch(0);
     EXPECT_EQ(buffers[0].uses, 0);
-    map(2, buffers[2]);
     natives[2].lease = nullptr;
+    map(2, buffers[2]);
     latch(2);
     EXPECT_EQ(buffers[2].uses, 0);
     display.planeUseRelease(0);

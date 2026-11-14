@@ -111,7 +111,7 @@ bool ComputeEncoder::executeSlots(const IcbExecute &x, const char **why)
         *why = "indirect command buffer bind slots outside its memory";
         return false;
     }
-    cb_.buffersWritten_ = true;
+    cb_.bufferWrites_.anything();
     cb_.use(*x.slots, false);
     if (serial_ && dispatched_)
         barrier();

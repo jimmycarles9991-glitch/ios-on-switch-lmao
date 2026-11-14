@@ -4,6 +4,7 @@
 #import "RawMetalXrPlanes.h"
 #import "RawMetalFresh.h"
 #include "raw_nonfinite.h"
+#include "raw_surface_note.h"
 #include <mach/vm_page_size.h>
 #include "NativeBridgeMetalFrontend.h"
 #import "RawMetalMultisample.h"
@@ -22,8 +23,11 @@
 // line's windows stay its own). Keys: raw, m2v, split, split_m2v, aborted, reopens (channels the kernel killed and this
 // process opened again), reopen_us (the last one's time), set_refusals and set_rebuilds (resource set registrations
 // the kernel refused, and those it took once made again without what it refused), gpu_order (1: the drivers order on
-// the GPU now), cpu_ordered (the Orders the kernel refused, each a CPU-ordered line), m2v.<reason>, pred.<predicate>
-// (nonzero only).
+// the GPU now), cpu_ordered (the Orders the kernel refused, each a CPU-ordered line), pipelined_encoders and
+// sealed_encoders (encoders the worker encoded ahead of their commit, of all it sealed), pipeline_handoffs and
+// pipeline_handoff_wakes (hand-offs to the worker as encoders ended, and those that found it asleep: a wake each),
+// pipeline_abandons.<reason>,
+// m2v.<reason>, pred.<predicate> (nonzero only).
 - (NSDictionary<NSString *, NSNumber *> *)switchRawCounters
 {
     const Stats &s = gRM->stats;
@@ -45,7 +49,19 @@
         d[@"gpu_order"] = @(gRM->gpuOrder ? 1 : 0);
     }
     d[@"cpu_ordered"] = @(s.cpuOrdered.load());
+    d[@"pipelined_encoders"] = @(s.pipelinedEncoders.load());
+    d[@"sealed_encoders"] = @(s.sealedEncoders.load());
+    d[@"pipeline_handoffs"] = @(s.handoffs.load());
+    d[@"pipeline_handoff_wakes"] = @(s.handoffWakes.load());
+    static const char *const vetoes[VetoKinds] = {"whole",    "counters", "shadows",    "storage", "probes",
+                                                  "parallel", "ops",      "refused",    "planar",  "contents",
+                                                  "native",   "failed",   "other_work", "device",  "zcull"};
+    for (uint32_t k = 0; k < VetoKinds; ++k)
+        if (const uint64_t n = s.pipelineAbandons[k].load())
+            d[[NSString stringWithFormat:@"pipeline_abandons.%s", vetoes[k]]] = @(n);
     d[@"split_prologues"] = @(gRM->raw->stats.splitLaunches.load());
+    d[@"split_room_refusals"] = @(gRM->raw->stats.splitRoomRefusals.load());
+    d[@"heap_full"] = @(gRM->raw->stats.heapFull.load());
     d[@"interlock_draws"] = @(gRM->raw->stats.interlockDraws.load());
     d[@"banded_draws"] = @(gRM->raw->stats.bandedDraws.load());
     d[@"bands"] = @(gRM->raw->stats.bands.load());
@@ -58,14 +74,17 @@
     d[@"blend_kill_states"] = @(gRM->raw->stats.blendKillStates.load());
     d[@"blend_kill_binds"] = @(gRM->raw->stats.blendKillBinds.load());
     d[@"resolve_twod"] = @(gRM->raw->stats.resolveTwod.load());
+    d[@"fill_twod"] = @(gRM->raw->stats.fillTwod.load());
     d[@"resolve_exact"] = @(gRM->raw->stats.resolveExact.load());
-    d[@"blur_twod_passes"] = @(gRM->raw->stats.blurTwodPasses.load());
+    d[@"resolve_twod_compressed"] = @(gRM->raw->stats.resolveTwodCompressed.load());
     d[@"zcull_passes"] = @(gRM->raw->stats.zcullPasses.load());
     d[@"zcull_invalidations"] = @(gRM->raw->stats.zcullInvalidations.load());
+    d[@"zcull_loads"] = @(gRM->raw->stats.zcullLoads.load());
     d[@"state_segment_binds"] = @(gRM->raw->stats.segmentBinds.load());
     d[@"state_segment_words"] = @(gRM->raw->stats.segmentWords.load());
     d[@"state_segment_skips"] = @(gRM->raw->stats.segmentSkips.load());
     d[@"state_segment_extras_losses"] = @(gRM->raw->stats.segmentExtrasLosses.load());
+    d[@"state_segment_copies"] = @(gRM->raw->stats.segmentCopies.load());
     {
         const raw::EncodeTotals &encode = gRM->raw->stats.encode;
         const double perUs = raw::encodeTicksPerUs();
@@ -84,7 +103,6 @@
     d[@"mip_3d_levels"] = @(gRM->raw->stats.mip3dLevels.load());
     d[@"private_compressed"] = @(gRM->raw->privateMade());
     d[@"private_moves"] = @(gRM->raw->privateTransitions());
-    d[@"compiled_here"] = @(gRM->completion ? gRM->completion->compiledHere() : 0);
 #if SWITCH_RAW_DIAGNOSTICS
     d[@"loop_continuations"] = @(gRM->stats.loopContinuations.load());
 #endif
@@ -98,6 +116,7 @@
     d[@"fetch_rung2"] = @(fetch.fetchFree[0].load());
     d[@"fetch_rung3"] = @(fetch.fetchFree[1].load());
     d[@"fetch_blend_twin"] = @(fetch.blendTwin.load());
+    d[@"fetch_twin_rule"] = @(fetch.twinRule.load());
     for (size_t r = 1; r < raw::kFetchRefusals; r++) {
         if (const uint64_t n = fetch.refusedAtRecord[r].load())
             d[[NSString stringWithFormat:@"fetch_record.%s", raw::kFetchRefusalNames[r]]] = @(n);
@@ -176,7 +195,7 @@
 // The m2v device this one wraps (the one TEGRA_RAW_METAL=0 gives the process): hw_test_app draws each scene on both
 - (id<MTLDevice>)switchM2VDevice
 {
-    return RM_M2V("HW Test's m2v device");
+    return RM_M2V(NeedHwTestDevice);
 }
 #endif
 
@@ -241,17 +260,10 @@
             logPred(PredCallBufForeign, 0, n, @"(made: the pool had no room)");
         RMTwinObject *t = [RMTwinObject new];
         t->_device = self;
-        t->_twin = [RM_M2V("a buffer the pool had no room for") newBufferWithLength:n options:o];
+        t->_twin = [RM_M2V(NeedBufferPoolFull) newBufferWithLength:n options:o];
         return t->_twin ? (id<MTLBuffer>)t : nil;
     }
     b->_raw.hostVisible = (o & MTLResourceStorageModeMask) != MTLResourceStorageModePrivate;
-#if !defined(SWITCH_DEBUG) || SWITCH_DEBUG
-    if (rmZeroNewBuffers() && b->_raw.cpu) {
-        memset(b->_raw.cpu, 0, b->_raw.length);
-        if (!b->_raw.wc)
-            cacheLines(b->_raw.cpu, b->_raw.length, false);
-    }
-#endif
     return (id<MTLBuffer>)b;
 }
 
@@ -263,7 +275,7 @@
         return b;
     if (![(id)b isKindOfClass:[RMBuffer class]]) {  // the pool had no room: m2v's buffer, made with the bytes
         RMTwinObject *t = (RMTwinObject *)b;
-        t->_twin = [RM_M2V("a buffer the pool had no room for") newBufferWithBytes:p length:n options:o];
+        t->_twin = [RM_M2V(NeedBufferPoolFull) newBufferWithBytes:p length:n options:o];
         return t->_twin ? b : nil;
     }
     RMBuffer *buffer = (RMBuffer *)b;
@@ -290,7 +302,7 @@
             logPred(PredCallBufForeign, uintptr_t(p) & 0xfff, n, @"(made: a no-copy buffer the raw path refused)");
         RMTwinObject *t = [RMTwinObject new];
         t->_device = self;
-        id<MTLDevice> m2v = RM_M2V("a no-copy buffer the raw path refused");
+        id<MTLDevice> m2v = RM_M2V(NeedNoCopyBuffer);
         t->_twin = [m2v newBufferWithBytesNoCopy:p length:n options:o deallocator:deallocator];
         return t->_twin ? (id<MTLBuffer>)t : nil;
     }
@@ -319,7 +331,7 @@
             return nil;
         RMTwinObject *t = [RMTwinObject new];
         t->_device = self;
-        id<RMDeviceSPI> m2v = (id<RMDeviceSPI>)RM_M2V("a buffer over an IOSurface the kernel would not import");
+        id<RMDeviceSPI> m2v = (id<RMDeviceSPI>)RM_M2V(NeedSurfaceBuffer);
         t->_twin = [m2v newBufferWithIOSurface:s];
         return t->_twin ? (id<MTLBuffer>)t : nil;
     }
@@ -342,11 +354,18 @@
     return (id<MTLTexture>)t;
 }
 
-// A private texture the CPU never touches is block-linear (TegraGM20BLayout.h), as NVK lays out an optimal image and m2v's
-// view of it is (texture_tiled_in_place).
+// A private or shared texture of its own memory is block-linear (TegraGM20BLayout.h), as NVK lays out an optimal image and
+// m2v's view of it is (texture_tiled_in_place). The CPU reaches a shared one only through replaceRegion and getBytes,
+// which go through the copy engine (transferTexture) or swizzle (cpuTiled); textures over buffers, IOSurfaces and
+// caller pages stay pitch, as another binding names those bytes.
 - (id<MTLTexture>)newTextureWithDescriptor:(MTLTextureDescriptor *)d
 {
-    return swizzled([self rmNewTexture:d tiled:d.storageMode == MTLStorageModePrivate], d.swizzle);
+#if SWITCH_FRAME_TIMELINE
+    noteCompositorTarget(d, __builtin_frame_address(0));
+#endif
+    return swizzled([self rmNewTexture:d
+                                 tiled:d.storageMode == MTLStorageModePrivate || d.storageMode == MTLStorageModeShared],
+                    d.swizzle);
 }
 
 #if SWITCH_RAW_DIAGNOSTICS
@@ -381,8 +400,9 @@ static void reportNonFiniteStart(RMTexture *t, MTLTextureDescriptor *d)
         t->_device = self;
         t->_descriptor = [d copy];
         t->_kind = RMTexturePool;
-        t->_rawOk = gRM->raw->createMipTexture(uint32_t(d.width), uint32_t(d.height), uint32_t(d.pixelFormat),
-                                               uint32_t(d.mipmapLevelCount), t->_raw);
+        t->_rawOk =
+            gRM->raw->createMipTexture(uint32_t(d.width), uint32_t(d.height), uint32_t(d.pixelFormat),
+                                       uint32_t(d.mipmapLevelCount), t->_raw, nullptr, privateCompressedKind(d));
         if (t->_rawOk) {
 #if SWITCH_RAW_DIAGNOSTICS
             reportNonFiniteStart(t, d);
@@ -407,7 +427,7 @@ static void reportNonFiniteStart(RMTexture *t, MTLTextureDescriptor *d)
             uint8_t(array ? raw::fx::kTexTwoDArray : raw::fx::kTexTwoD), t->_raw);
         if (t->_rawOk)
             return (id<MTLTexture>)t;
-        id<MTLDevice> m2v = RM_M2V("a texture the raw path made no memory for");
+        id<MTLDevice> m2v = RM_M2V(NeedTextureNoMemory);
         RMTexture *w = (RMTexture *)[self wrapTwin:[m2v newTextureWithDescriptor:d] descriptor:d];
         if (w)
             refuseTexture(w, PredTexPoolAlloc, d.width, d.height, @"twin-only (pool)", nil);
@@ -418,7 +438,7 @@ static void reportNonFiniteStart(RMTexture *t, MTLTextureDescriptor *d)
     const RMStoredSamples stored = storedMultisampleKind(d);
     if (!rawShape(d) && !zetaDescriptor(d) && !line && !volume && !array && !multisampled && !transientLayers &&
         stored == RMStoredSamples::None) {
-        id<MTLDevice> m2v = RM_M2V("a texture of a shape the raw path does not take");
+        id<MTLDevice> m2v = RM_M2V(NeedTextureShape);
         RMTexture *w = (RMTexture *)[self wrapTwin:[m2v newTextureWithDescriptor:d] descriptor:d];
         if (w)
             refuseTexture(w, PredTexShape, rawShapeTerm(d), d.pixelFormat, @"twin-only", nil);
@@ -443,7 +463,8 @@ static void reportNonFiniteStart(RMTexture *t, MTLTextureDescriptor *d)
         t->_rawOk = gRM->raw->createArray(
             uint32_t(d.width), uint32_t(d.height),
             raw::textureLayers(uint32_t(d.textureType), uint32_t(std::min<NSUInteger>(d.arrayLength, 2048))),
-            uint32_t(d.pixelFormat), array, t->_raw, uint32_t(std::max<NSUInteger>(d.mipmapLevelCount, 1)));
+            uint32_t(d.pixelFormat), array, t->_raw, uint32_t(std::max<NSUInteger>(d.mipmapLevelCount, 1)), nullptr,
+            privateCompressedKind(d));
     } else if (d.storageMode != MTLStorageModeMemoryless && zetaDescriptor(d)) {
         t->_kind = RMTexturePool;
         t->_rawOk = makeStoredZeta(d, t->_raw);
@@ -456,7 +477,8 @@ static void reportNonFiniteStart(RMTexture *t, MTLTextureDescriptor *d)
             t->_rawOk = gRM->raw->createXrMemoryless(t->_raw);
     } else {
         t->_kind = RMTexturePool;
-        // a shared texture (the CPU writes it: replaceRegion) in write-combined memory: its rows need no clean after
+        // a shared texture of a shape that does not tile (the CPU writes it: replaceRegion) in write-combined memory: its
+        // rows need no clean after
         const uint32_t kind = tiled ? privateCompressedKind(d) : 0;
         t->_rawOk = (kind && gRM->raw->createCompressedTexture(uint32_t(d.width), uint32_t(d.height),
                                                                uint32_t(d.pixelFormat), kind, t->_raw)) ||
@@ -470,7 +492,7 @@ static void reportNonFiniteStart(RMTexture *t, MTLTextureDescriptor *d)
 #endif
     }
     if (!t->_rawOk) {
-        id twin = t->_twin ?: [RM_M2V("a texture the raw path made no memory for") newTextureWithDescriptor:d];
+        id twin = t->_twin ?: [RM_M2V(NeedTextureNoMemory) newTextureWithDescriptor:d];
         RMTexture *w = (RMTexture *)[self wrapTwin:twin descriptor:d];
         if (w)
             refuseTexture(w, PredTexPoolAlloc, d.width, d.height, @"twin-only (pool)", nil);
@@ -548,6 +570,28 @@ static bool producesTexture(MTLTextureDescriptor *d)
     return d.usage & (MTLTextureUsageRenderTarget | MTLTextureUsageShaderWrite);
 }
 
+#if SWITCH_FRAME_TIMELINE
+static void noteCompositorSurface(MTLTextureDescriptor *d, IOSurfaceRef s, const void *frame)
+{
+    constexpr size_t kHalfScreen = 1280 * 720 / 2;
+    if (!producesTexture(d) || IOSurfaceGetWidth(s) * IOSurfaceGetHeight(s) < kHalfScreen || !gRM || !gRM->raw ||
+        gRM->raw->role() != raw::Device::Role::RenderServer || !raw::noteAllowed())
+        return;
+    raw::postSurfaceNote(s, frame);
+}
+
+static void noteCompositorTarget(MTLTextureDescriptor *d, const void *frame)
+{
+    constexpr NSUInteger kPanel = 1280 * 720;
+    if (!(d.usage & MTLTextureUsageRenderTarget) || d.width * d.height <= kPanel || !gRM || !gRM->raw ||
+        gRM->raw->role() != raw::Device::Role::RenderServer || !raw::noteAllowed())
+        return;
+    raw::postTargetNote({uint32_t(d.width), uint32_t(d.height), uint32_t(d.pixelFormat), uint32_t(d.usage),
+                         uint32_t(d.storageMode), uint32_t(d.sampleCount), uint32_t(d.textureType),
+                         switch_frame::callers(frame)});
+}
+#endif
+
 - (id<MTLTexture>)newTextureWithDescriptor:(MTLTextureDescriptor *)d iosurface:(IOSurfaceRef)s plane:(NSUInteger)plane
 {
     return swizzled([self rmSurfaceTexture:d iosurface:s plane:plane], d.swizzle);
@@ -560,6 +604,7 @@ static bool producesTexture(MTLTextureDescriptor *d)
         return nil;
 #if SWITCH_FRAME_TIMELINE
     gSurfaceTextures.fetch_add(1, std::memory_order_relaxed);
+    noteCompositorSurface(d, s, __builtin_frame_address(0));
 #endif
     RMTexture *t = [RMTexture new];
     t->_device = self;

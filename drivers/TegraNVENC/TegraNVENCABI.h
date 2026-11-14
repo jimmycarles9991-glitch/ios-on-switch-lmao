@@ -41,6 +41,10 @@
 #define TEGRA_NVENC_TUNNEL_MAGIC 0x4e45544eu  // 'NETN'
 #define TEGRA_NVENC_TUNNEL_PROBE 0xffffffffu
 
+// An IOResources resource (IOResourceMatch), published when NVENC's bring-up ended without the service (it failed, or
+// switch-no-nvdec): a process that waits for the service (kits/SwitchServiceWait) stops waiting.
+#define TEGRA_NVENC_ABSENT_RESOURCE "TegraNVENCAbsent"
+
 enum TegraNVENCMethod {
     TegraNVENCMethodGetInfo = 1,      // -> TegraNVENCInfo
     TegraNVENCMethodBufferAlloc = 2,  // TegraNVENCBufferAlloc -> TegraNVENCBufferReply

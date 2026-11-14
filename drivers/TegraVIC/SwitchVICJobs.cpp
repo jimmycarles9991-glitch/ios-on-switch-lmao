@@ -86,11 +86,14 @@ struct Completed {
 };
 
 // The cancelled jobs have all ended: the queue goes on from the syncpoint the engine's restart left, or refuses work
-// when the engine did not come back.
+// until the gate powers the engine that did not come back on again. Only now is the engine handed to the gate: a
+// power-on before the last cancelled job ended would rebase a queue that still holds jobs.
 void renumberLocked()
 {
     const bool resumed = gRecoveredReady && gQueue.rebase(tegra_host1x_syncpt_read(gSyncpt));
     __atomic_store_n(&gFailed, !resumed, __ATOMIC_RELEASE);
+    if (!resumed)
+        switch_vic_power_lost();
     __atomic_store_n(&gCompleted, gQueue.completed, __ATOMIC_RELEASE);
     gRecovered = false;
     __atomic_store_n(&gCancelling, false, __ATOMIC_RELEASE);
@@ -566,6 +569,21 @@ void switch_vic_jobs_resume(bool ready, uint32_t completed)
     IOLockUnlock(gLock);
     switch_vic_semantics_physical(gQueue.completed);
     switch_gpu_backing_completed();
+}
+
+bool switch_vic_jobs_falcon_failed()
+{
+    uint64_t fence = 0, submittedUs = 0;
+    IOLockLock(gLock);
+    if (gQueue.count) {
+        fence = gQueue.jobs[gQueue.head].fence;
+        submittedUs = gQueue.jobs[gQueue.head].submittedUs;
+    }
+    IOLockUnlock(gLock);
+    if (__atomic_exchange_n(&gCancelling, true, __ATOMIC_ACQ_REL))
+        return false;
+    switch_vic_job_stalled(fence, TEGRA_HOST1X_EFALCON, submittedUs ? switch_now_us() - submittedUs : 0, 0);
+    return true;
 }
 
 uint32_t switch_vic_jobs_cancel(uint32_t reached)

@@ -16,6 +16,7 @@ py_library(
     srcs = [
         "app_journal.py",
         "deployed.py",
+        "icon_cache.py",
         "joycon_pairing.py",
         "mkarchive.py",
         "poster_snapshots.py",
@@ -50,6 +51,16 @@ py_test(
 py_test(
     name = "deploy_test",
     srcs = ["deploy_test.py"],
+    deps = [
+        ":deploy",
+        ":lib",
+    ],
+)
+
+py_test(
+    name = "icon_cache_test",
+    size = "small",
+    srcs = ["icon_cache_test.py"],
     deps = [
         ":deploy",
         ":lib",

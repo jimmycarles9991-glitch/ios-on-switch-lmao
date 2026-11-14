@@ -77,7 +77,7 @@ static RMBuffer *ownBuffer(RMCommandBuffer *cb, id<MTLBuffer> buffer)
     words[PatchControlPoints] = controlPoints;
     words[PatchScale] = scaleBits;
     m.x = _cb->_extra.size();
-    _cb->_extra.insert(_cb->_extra.end(), words, words + PatchExtraWords);
+    _cb->_extra.append(words, words + PatchExtraWords);
     [_cb record:m];
 }
 

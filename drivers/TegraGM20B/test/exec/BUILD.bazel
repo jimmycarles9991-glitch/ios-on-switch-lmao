@@ -1,0 +1,123 @@
+# gpu_exec.c itself on the host: built with the kernel's flags against the real shim, nvkm and nvif headers, on a real
+# nvif 906f channel in host memory and the real backing layer. What it links from the rest of the driver is in
+# switch_gpu_exec_driver.c (taken from `nm -u` of its object).
+#
+#   bazel test //drivers/TegraGM20B/test/exec:all
+load("@rules_python//python:py_binary.bzl", "py_binary")
+load("//bazel/lint:defs.bzl", "lint_files")
+load("//bazel/testing:defs.bzl", "host_library", "host_test")
+load("//kernel/rules:driver_flags.bzl", "GPU_C_FLAGS", "LINUX_RELAXATIONS")
+
+lint_files()
+
+# -nostdlibinc as the kernel's freestanding C recipe: the shim's os.h is the whole C library, and the host's
+# <sys/cdefs.h> redefines its __cold.
+GPU_HOST_COPTS = [flag.replace("{tree}/", "") for flag in GPU_C_FLAGS] + [
+    "-nostdlibinc",
+    "-fno-builtin",
+    "-fno-common",
+    "-DDEVELOPMENT=1",
+    "-I",
+    "drivers/TegraGM20B",
+]
+
+GPU_HEADERS = [
+    "//drivers/SwitchSuspend:headers",
+    "//drivers/TegraDisplayFlip:headers",
+    "//drivers/TegraGM20B:headers",
+    "//kits/SwitchIdle:headers",
+    "//kits/SwitchLinux:headers",
+    "//kits/SwitchMMIO:headers",
+]
+
+host_library(
+    name = "nvif_chan",
+    srcs = [
+        "//drivers/TegraGM20B:nouveau/nvif/chan.c",
+        "//drivers/TegraGM20B:nouveau/nvif/chan506f.c",
+        "//drivers/TegraGM20B:nouveau/nvif/chan906f.c",
+    ] + GPU_HEADERS,
+    c_std = "gnu11",
+    copts = GPU_HOST_COPTS + LINUX_RELAXATIONS,
+)
+
+host_library(
+    name = "exec_driver",
+    srcs = [
+        "switch_gpu_exec_channel.c",
+        "switch_gpu_exec_driver.c",
+        "switch_gpu_exec_fixture.h",
+    ] + GPU_HEADERS,
+    c_std = "gnu11",
+    copts = GPU_HOST_COPTS,
+)
+
+# Its MMIO through the harness's model (switch_gpu_exec_channel.c), which sees the doorbell's GP_PUT write to USERD
+host_library(
+    name = "gpu_exec",
+    srcs = ["//drivers/TegraGM20B:gpu_exec.c"] + GPU_HEADERS,
+    c_std = "gnu11",
+    copts = GPU_HOST_COPTS + ["-DSWITCH_MMIO_HOST_MODEL"],
+)
+
+EXEC_TEST_SRCS = [
+    "switch_gpu_exec_backing.cpp",
+    "switch_gpu_exec_backing.h",
+    "switch_gpu_exec_commit_test.cpp",
+    "switch_gpu_exec_fixture.h",
+    "switch_gpu_exec_kernel.cpp",
+]
+
+EXEC_TEST_DEPS = [
+    ":exec_driver",
+    ":nvif_chan",
+    "//drivers/TegraGM20B/test:backing",
+    "//drivers/TegraGM20B/test:coherency_kernel",
+]
+
+host_test(
+    name = "switch_gpu_exec_commit_test",
+    srcs = EXEC_TEST_SRCS,
+    deps = [":gpu_exec"] + EXEC_TEST_DEPS,
+)
+
+# The same test against gpu_exec.c with its commit moved (switch_gpu_exec_mutant.py): each of these is expected to
+# FAIL, which shows what the test catches. Manual: never part of //...
+MUTANTS = [
+    "after_first_kick",
+    "after_doorbell",
+    "before_checks",
+    "no_empty_commit",
+]
+
+py_binary(
+    name = "mutate",
+    testonly = True,
+    srcs = ["switch_gpu_exec_mutant.py"],
+    main = "switch_gpu_exec_mutant.py",
+)
+
+[genrule(
+    name = "gpu_exec_%s_source" % mutant,
+    testonly = True,
+    srcs = ["//drivers/TegraGM20B:gpu_exec.c"],
+    outs = ["gpu_exec_%s.c" % mutant],
+    cmd = "$(execpath :mutate) %s $< $@" % mutant,
+    tags = ["manual"],
+    tools = [":mutate"],
+) for mutant in MUTANTS]
+
+[host_library(
+    name = "gpu_exec_%s" % mutant,
+    srcs = [":gpu_exec_%s_source" % mutant] + GPU_HEADERS,
+    c_std = "gnu11",
+    copts = GPU_HOST_COPTS,
+    tags = ["manual"],
+) for mutant in MUTANTS]
+
+[host_test(
+    name = "switch_gpu_exec_commit_%s_test" % mutant,
+    srcs = EXEC_TEST_SRCS,
+    tags = ["manual"],
+    deps = [":gpu_exec_%s" % mutant] + EXEC_TEST_DEPS,
+) for mutant in MUTANTS]

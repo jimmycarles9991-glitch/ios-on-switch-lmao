@@ -31,20 +31,7 @@ uint32_t gov_counter(const struct switch_gov *g, unsigned which);
 void gov_run(struct switch_gov *g, const uint64_t *times, const uint32_t *busy, unsigned n, unsigned *out);
 unsigned gov_cpu_table(const uint32_t *khz, const uint32_t *mv, unsigned rows, uint32_t max_khz, uint32_t vmin_mv,
                        uint32_t *khz_out, uint32_t *mv_out, unsigned cap);
-int gov_over_step(uint32_t measured, uint32_t asked, uint32_t step);
 unsigned gov_index_at_mv(const uint32_t *mv, unsigned count, uint32_t limit_mv);
-
-// Rows held down (switch_gov_rows, opaque here: rows_size bytes).
-struct switch_gov_rows;
-size_t rows_size(void);
-void rows_init(struct switch_gov_rows *r, uint32_t held);
-unsigned rows_ceiling(const struct switch_gov_rows *r, unsigned hi);
-uint32_t rows_hold(struct switch_gov_rows *r, unsigned row);
-int rows_landed(struct switch_gov_rows *r, unsigned row);
-void rows_tick(struct switch_gov_rows *r);
-uint32_t rows_retry(struct switch_gov_rows *r, unsigned hi);
-uint32_t rows_held(const struct switch_gov_rows *r);
-uint32_t rows_trial(const struct switch_gov_rows *r);
 
 #ifdef __cplusplus
 }

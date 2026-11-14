@@ -55,7 +55,7 @@ struct CoherenceRewriteTest: HWTest {
             checks.append(("\(tally.arm): the CPU read what the GPU wrote", tally.cpuStale == 0))
         }
         checks.append(("no command buffer failed", gpu.commandBufferErrors.isEmpty))
-        return .judged(checks, metrics)
+        return .judged(checks, metrics).onRawPath(gpu)
     }
 
     /// The GPU clears the texture to `gpuBytes(round)`, the CPU reads that and writes `cpuBytes(round)`, and the blended

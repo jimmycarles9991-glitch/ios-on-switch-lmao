@@ -3,22 +3,25 @@ import HWTestCore
 import HWTestGPU
 import Metal
 
-/// Quad patches through the hardware tessellator. A kernel writes each patch's factors in the same command buffer (patch 0
-/// level 4 everywhere, patch 1 an edge factor 0, which culls it); the post-tessellation vertex function marks each domain
-/// point it runs at in a 17x17 grid of sixteenths. Integer partitioning at level 4 runs exactly the 5x5 points on
-/// multiples of 4/16, and the drawn pixels are patch 0's half of the target. A patch index buffer of {1, 0} draws patch
-/// 1's control points with patch 0's factors (Metal's patch index addresses control points, the position the factors),
-/// so the other half is drawn. Where the device answers supportsIndirectTessellation, an indirect draw of the same patch
-/// from GPU-written arguments draws patch 0's half again, and so do the two forms as an indirect command buffer's patch
-/// commands, each with its own factor buffer and patch index buffer, each executed alone by its range under the inherited
-/// state, then both in one execute, which paints the whole target. Every command buffer stays raw.
+/// Quad patches through the hardware tessellator, under the device's maxTessellationFactor (64 on both builds,
+/// NativeAnswers). A kernel writes each patch's factors in the same command buffer (patch 0 level 4 everywhere, patch 1
+/// an edge factor 0, which culls it); the post-tessellation vertex function marks each domain point it runs at in a
+/// 65x65 grid of sixty-fourths. Integer partitioning at level 4 runs exactly the 5x5 points on multiples of 16/64, and
+/// the drawn pixels are patch 0's half of the target; at level 32, past the A10X's 16, the 33x33 points on multiples of
+/// 2/64. A patch index buffer of {1, 0} draws patch 1's control points with patch 0's factors (Metal's patch index
+/// addresses control points, the position the factors), so the other half is drawn. supportsIndirectTessellation is YES
+/// on both builds: an indirect draw of the same patch from GPU-written arguments draws patch 0's half again, and so do
+/// the two forms as an indirect command buffer's patch commands, each with its own factor buffer and patch index
+/// buffer, each executed alone by its range under the inherited state, then both in one execute, which paints the whole
+/// target. Every command buffer stays raw.
 struct NativeTessellationTest: NativeObjectTest {
     let id = "metal.native.tessellation"
     let name = "Quad patches tessellated in hardware from GPU-written factors, exact to Metal's integer partitioning"
 
     static let size = 32
-    static let grid = 17
+    static let grid = 65
     static let level: Float = 4
+    static let deepLevel: Float = 32
 
     static let source = """
         #include <metal_stdlib>
@@ -40,8 +43,8 @@ struct NativeTessellationTest: NativeObjectTest {
         struct QuadPatch { patch_control_point<ControlPoint> points; };
         [[patch(quad, 4)]] vertex float4 quad_post(QuadPatch patch [[stage_in]], float2 uv [[position_in_patch]],
                                                    device atomic_uint *seen [[buffer(1)]]) {
-            const uint u = uint(round(uv.x * 16)), v = uint(round(uv.y * 16));
-            atomic_store_explicit(&seen[v * 17 + u], 1, memory_order_relaxed);
+            const uint u = uint(round(uv.x * 64)), v = uint(round(uv.y * 64));
+            atomic_store_explicit(&seen[v * 65 + u], 1, memory_order_relaxed);
             const float4 low = mix(patch.points[0].position, patch.points[1].position, uv.x);
             const float4 high = mix(patch.points[3].position, patch.points[2].position, uv.x);
             return mix(low, high, uv.y);
@@ -65,9 +68,9 @@ struct NativeTessellationTest: NativeObjectTest {
     }
 
     /// Grid cells marked other than integer partitioning's points at `level`: missing ones and extra ones
-    static func wrongPoints(_ seen: MTLBuffer) -> Int {
+    static func wrongPoints(_ seen: MTLBuffer, level: Float) -> Int {
         let marks = seen.contents().bindMemory(to: UInt32.self, capacity: grid * grid)
-        let step = Int(16 / level)
+        let step = Int(64 / level)
         return (0..<grid * grid).filter { i in
             let expected = (i % grid) % step == 0 && (i / grid) % step == 0
             return (marks[i] != 0) != expected
@@ -94,7 +97,7 @@ struct NativeTessellationTest: NativeObjectTest {
         descriptor.vertexDescriptor = vertices
         descriptor.tessellationPartitionMode = .integer
         descriptor.tessellationFactorStepFunction = .perPatch
-        descriptor.maxTessellationFactor = 16
+        descriptor.maxTessellationFactor = NativeAnswers.tessellationFactor
         descriptor.supportIndirectCommandBuffers = true
         let pipeline = try await device.makeRenderPipelineState(descriptor: descriptor)
         let factorState = try await device.makeComputePipelineState(function: factorsKernel)
@@ -106,21 +109,30 @@ struct NativeTessellationTest: NativeObjectTest {
             let arguments = device.makeBuffer(length: 16, options: .storageModePrivate)
         else { throw TestFailure("no private factor or argument buffer") }
         let patchOrder = try gpu.buffer([UInt32](arrayLiteral: 1, 0))
-        let indirect =
-            (device as AnyObject as! NSObject).value(forKey: "supportsIndirectTessellation") as? Bool ?? false
+        let indirect = NativeAnswers.answer(device, "supportsIndirectTessellation") == 1
         metrics.set("indirect", indirect ? "yes" : "no")
+        if !indirect { work.failures.append("supportsIndirectTessellation answers NO") }
+        if let wrong = NativeAnswers.check(
+            device, "maxTessellationFactor", NativeAnswers.tessellationFactor, field: "max_tessellation_factor",
+            &metrics)
+        {
+            work.failures.append(wrong)
+        }
 
         let patchCommands = indirect ? try Self.commands(device, factors, patchOrder) : nil
         if let patchCommands { work.objects.append(patchCommands) }
-        for form in ["direct", "indexed"] + (indirect ? ["indirect", "icb", "icb_indexed", "icb_both"] : []) {
+        for form in ["direct", "indexed", "factor32"]
+            + (indirect ? ["indirect", "icb", "icb_indexed", "icb_both"] : [])
+        {
+            let level = form == "factor32" ? Self.deepLevel : Self.level
             let target = try gpu.texture(.rgba8Unorm, Self.size, Self.size)
             let seen = try gpu.buffer([UInt32](repeating: 0, count: Self.grid * Self.grid))
             let timing = try await gpu.run { commands in
                 let compute = commands.makeComputeCommandEncoder()!
                 compute.setComputePipelineState(factorState)
                 compute.setBuffer(factors, offset: 0, index: 0)
-                var level = Self.level
-                compute.setBytes(&level, length: 4, index: 1)
+                var written = level
+                compute.setBytes(&written, length: 4, index: 1)
                 compute.dispatchThreadgroups(
                     MTLSize(width: 2, height: 1, depth: 1),
                     threadsPerThreadgroup: MTLSize(width: 1, height: 1, depth: 1))
@@ -141,7 +153,7 @@ struct NativeTessellationTest: NativeObjectTest {
                 encoder.setVertexBuffer(seen, offset: 0, index: 1)
                 encoder.setTessellationFactorBuffer(factors, offset: 0, instanceStride: 0)
                 switch form {
-                case "direct":
+                case "direct", "factor32":
                     encoder.drawPatches(
                         numberOfPatchControlPoints: 4, patchStart: 0, patchCount: 2, patchIndexBuffer: nil,
                         patchIndexBufferOffset: 0, instanceCount: 1, baseInstance: 0)
@@ -165,11 +177,13 @@ struct NativeTessellationTest: NativeObjectTest {
             let wrongPixels = Self.wrong(
                 try await gpu.read(target, bytesPerPixel: 4), left: !form.hasSuffix("indexed"), both: form == "icb_both"
             )
-            let wrongPoints = Self.wrongPoints(seen)
+            let wrongPoints = Self.wrongPoints(seen, level: level)
             metrics.set("\(form)_wrong_pixels", wrongPixels)
             metrics.set("\(form)_wrong_points", wrongPoints)
             if wrongPixels != 0 { work.failures.append("\(form): \(wrongPixels) pixels wrong") }
-            if wrongPoints != 0 { work.failures.append("\(form): \(wrongPoints) domain points wrong at level 4") }
+            if wrongPoints != 0 {
+                work.failures.append("\(form): \(wrongPoints) domain points wrong at level \(Int(level))")
+            }
         }
         return work
     }

@@ -4,7 +4,7 @@
 // for the state an execute inherits. Each of AGXA13FamilyIndirectRenderCommand's four forms (0x18c1940ac, 0x18c194028,
 // 0x18c1940ec, 0x18c194064): a form without a factor scale draws at 1, as m2v's command records it. The control points
 // are the inherited state's, whatever the call names (m2v's measurement of Metal's execution). On a buffer whose
-// descriptor has no patch commands, or a device that answers supportsIndirectTessellation NO, there is no such buffer.
+// descriptor has no patch commands there is no such buffer.
 #import "RawMetalIndirect.h"
 
 namespace {

@@ -241,7 +241,10 @@ void drain(tgm_coh *c, tgm_tiled &t)
 }
 
 // Every refusal comes before anything is held, so a refused lock leaves the surface as it found it, and a lock that goes
-// on always shows its task rows
+// on always shows its task rows. A lock through an IOSurfaceClient that maps nothing has no CPU address to show rows at,
+// then or later: IOSurfaceClient::mapInTask runs once, from the client's init at create or lookup (21H461
+// 0xfffffff005ba59b4, 24B119 0xfffffff009af7df0), and maps nothing for good for an IOSurfaceHostOnly or protected
+// surface; its unlock is the same no-op.
 int lock(tgm_coh *c, tgm_tiled &t, void *client, uint32_t id, uint32_t options, bool &held)
 {
 	tgm_cpu_view v;
@@ -252,8 +255,10 @@ int lock(tgm_coh *c, tgm_tiled &t, void *client, uint32_t id, uint32_t options, 
 			       id);
 		return 1;
 	}
-	int i = mapped ? findView(t, v) : -1;
-	if (mapped && i < 0 && t.nviews == TGM_VIEWS) {
+	if (!mapped)
+		return 0;
+	int i = findView(t, v);
+	if (i < 0 && t.nviews == TGM_VIEWS) {
 		switch_refusal(
 			"iosurface-layout", "too-many-tasks",
 			"IOSurface %u: more than %u tasks lock it at once: the lock is refused", id,
@@ -264,7 +269,7 @@ int lock(tgm_coh *c, tgm_tiled &t, void *client, uint32_t id, uint32_t options, 
 		if (const int refused = fill(c, t, options))
 			return refused;
 	}
-	if (mapped && (i < 0 || !t.views[i].locks)) {
+	if (i < 0 || !t.views[i].locks) {
 		if (const int ret = tgm_cpu_view_remap(&v, tgm_scratch_memory(t.scratch), 0, 1)) {
 			switch_refusal("iosurface-layout", "remap-failed",
 				       "IOSurface %u: a task's mapping could not show its rows "
@@ -282,8 +287,6 @@ int lock(tgm_coh *c, tgm_tiled &t, void *client, uint32_t id, uint32_t options, 
 	if ((options & kLockReadOnly) == 0)
 		t.wrote = 1;
 	noteBusy(t, id);
-	if (!mapped)
-		return 0;
 	if (i < 0) {
 		i = static_cast<int>(t.nviews++);
 		t.views[i].view = v;
@@ -296,12 +299,12 @@ int lock(tgm_coh *c, tgm_tiled &t, void *client, uint32_t id, uint32_t options, 
 
 void unlock(tgm_coh *c, tgm_tiled &t, void *client, uint32_t id, uint32_t options, bool &released)
 {
-	if (!t.locks)
+	tgm_cpu_view v;
+	if (!t.locks || tgm_cpu_view_of(client, id, &v) <= 0)
 		return;
 	if (!(options & kLockReadOnly))
 		t.wrote = 1;
-	tgm_cpu_view v;
-	const int i = tgm_cpu_view_of(client, id, &v) > 0 ? findView(t, v) : -1;
+	const int i = findView(t, v);
 	if (i >= 0 && !--t.views[i].locks) {
 		void *own = tgm_surface_memory(client, id);
 		const int ret = own ? tgm_cpu_view_remap(&v, own, v.offset, 0) : -2;

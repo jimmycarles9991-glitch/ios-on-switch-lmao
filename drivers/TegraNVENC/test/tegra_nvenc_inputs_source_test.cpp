@@ -48,6 +48,8 @@ TEST(NVENCInputsWiring, EveryBoundedWaitCountsFromTheInputs)
     EXPECT_THAT(Body(source, "int run("), HasSubstr("boundedWait(gBase + job - kInFlight)"));
     EXPECT_THAT(Body(source, "extern \"C\" int tegra_nvenc_wait("), HasSubstr("boundedWait(fence)"));
     EXPECT_THAT(Body(source, "int gateOff(void *, bool drain)"), HasSubstr("boundedWait(gBase + gIssued)"));
-    EXPECT_EQ(switch_ios::test::Count(source, "tegra_host1x_syncpt_wait(gSyncpt"), 1u) << "only boundedWait's own";
+    EXPECT_EQ(switch_ios::test::Count(source, "tegra_host1x_syncpt_wait(gSyncpt"), 0u);
+    EXPECT_EQ(switch_ios::test::Count(source, "tegra_host1x_syncpt_wait_unless(gSyncpt"), 1u)
+        << "only boundedWait's own";
 }
 }  // namespace

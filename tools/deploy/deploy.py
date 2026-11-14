@@ -29,9 +29,12 @@ Steps:
                    plugin's stager, which copies only the files whose sha256 the card does not already hold and
                    reads nothing more when the card's list matches the build (its CDHashes must be in the same
                    build's kernel window: deploy the boot package built with that bundle); --remove-gpu removes it
-  4a AWDL           --awdl on|off: creates or removes <Data>/Switch/awdl-enable, the empty file SwitchWLAN's AWDL
+  4a icon cache    where the staged GPU build (the stager's list digest) is not the one <Data>/Switch/icon-cache-gpu
+                   names, removes ProductBuildVersion from IconServices' __cache_info__ so iconservicesagent empties its
+                   rendered icons at its next launch, as after an OS update (icon_cache.py), then records the digest
+  4b AWDL          --awdl on|off: creates or removes <Data>/Switch/awdl-enable, the empty file SwitchWLAN's AWDL
                    (AirDrop's Wi-Fi link) is off without (read once per boot, after Data mounts)
-  4b gallery tiles --reset-gallery-snapshots BUNDLE...: removes those poster extensions' gallery tiles from
+  4c gallery tiles --reset-gallery-snapshots BUNDLE...: removes those poster extensions' gallery tiles from
                    PosterBoard's data store (poster_snapshots.py), so the next "Add New Wallpaper" renders them again
   5 launchd check  --launchd-check LABEL...: read-only, the jobs Data's launchd database disables (exit 1 if a label
                    is not among them; the kernel rewrites that database at every boot)
@@ -53,6 +56,7 @@ from tools.common import paths
 from tools.deploy import (
     app_journal,
     deployed,
+    icon_cache,
     joycon_pairing,
     poster_snapshots,
     pull_logs,
@@ -182,6 +186,7 @@ def _plan(args: argparse.Namespace, changes: list, removed: list, pairing: dict 
         controllers = f'stage {len(pairing["controllers"])} controller(s) for host {pairing["host"]}' if pairing else ''
         steps.append('Joy-Con pairing: ' + (controllers or 'remove any staged dump'))
     steps.append('remove the GPU bundle' if args.remove_gpu else 'GPU bundle: stage what changed')
+    steps.append('icon cache: let IconServices re-render where the GPU build changed')
     steps += [f'AWDL {args.awdl} (<Data>/Switch/awdl-enable)'] if args.awdl else []
     steps += ['run the data migration again on the next boot'] if args.rerun_migration else []
     gallery = args.reset_gallery_snapshots
@@ -254,6 +259,7 @@ def _write(args: argparse.Namespace, data_root: Path, volumes: Volumes, pairing:
     if not args.no_joycon_pairing:
         joycon_pairing.stage(data_root, pairing, log)
     _stage_gpu(args, data_root, log)
+    icon_cache.present(data_root, log)
     if args.awdl:
         set_awdl(data_root, args.awdl == 'on', log)
     if args.reset_gallery_snapshots:

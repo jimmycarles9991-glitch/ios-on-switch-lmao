@@ -55,7 +55,9 @@ static inline id twinPublish(id object, __strong id &slot, id made)
 // ---- the common base: an m2v twin and the selectors this facade does not answer itself ----
 @interface RMObject : NSObject {
 @public
-    __weak id _device;
+    // the raw device, which gRM holds for the life of the process (raw_metal_device_open_lazy: one per process): no weak
+    // reference, whose side-table lock every object's creation, dealloc and encoder begin took
+    __unsafe_unretained id _device;
     id _twin;  // the m2v object over the same memory (made on first need)
 }
 @property (nonatomic, copy) NSString *label;
@@ -206,6 +208,8 @@ enum class RMShareable : uint8_t {
     bool _completable;  // both its functions are this device's (the runtime makes its record if the pack has none)
     bool _archived;     // an archive its creation listed declares it: its twin is made as a packed one's
     bool _caTransform;
+    // its alpha to coverage and alpha to one (raw_alpha_control.h), which its key does not hold
+    uint32_t _alphaControl;
     std::string _failure;  // why its creation failed (Completion::makeNow), as Metal's would
     std::string _key;      // its pack key (completable states')
     MTLRenderPipelineDescriptor
@@ -215,6 +219,8 @@ enum class RMShareable : uint8_t {
     bool _twinLater;                 // replay (rmTwin), with these options
     raw::Mutex _variantLock;
     std::map<std::string, std::shared_ptr<raw::Variant<raw::Pipeline>>> _variants;
+    // a failed variant asked afresh by a later draw: the one it replaced stays alive for the plans that name it
+    std::vector<std::shared_ptr<raw::Variant<raw::Pipeline>>> _replacedVariants;
     raw::Obtained _obtained;  // debug builds: how its creation got its record
 }
 @end
@@ -292,9 +298,9 @@ struct RMPass {
 // (m2v's replay reads them back), each copy 256-byte aligned and zero to the next 256 bytes as an upload chunk is. The chunks go
 // with the recording (giveRecording), so they outlive every submission that reads them.
 struct RMBytes {
-    std::vector<raw::Buffer> chunks;  // va 0: heap memory (the GPU pool had none; the command buffer is m2v's)
-    size_t at = 0;                    // the chunk being filled
-    uint32_t used = 0;                // its bytes taken
+    raw::GrowList<raw::Buffer> chunks;  // va 0: heap memory (the GPU pool had none; the command buffer is m2v's)
+    size_t at = 0;                      // the chunk being filled
+    uint32_t used = 0;                  // its bytes taken
 };
 
 // A command buffer's first error, set under its lock; whether it has one is readable with no lock
@@ -372,7 +378,7 @@ struct RMSharedEventWait {
     bool _encOpen, _encRefused, _whole;
     raw::PredicateRecords _predicates;
 #if !defined(SWITCH_DEBUG) || SWITCH_DEBUG
-    bool _forceWholePrograms, _inlineStates;
+    std::atomic<bool> _forceWholePrograms, _inlineStates;
     // hw_test_app's probes (RawMetalProbe.mm): its barriers' forms, where they took effect, and its 2D-engine work, each
     // at the blit encoder whose first command is at `at`
     raw::ProbeForms _probeForms;
@@ -419,11 +425,13 @@ struct RMSharedEventWait {
     // variant for them (raw_xr_pass.h): only these of that format get their stand-in drawn
     std::set<RMTexture *> _xrStandIns;
     RMCommandPlan _plan;
-    std::vector<RMPass> _passes;  // OpRender's (Cmd::x)
-    uint32_t _recordedPass;       // the OpRender the draws being recorded belong to
+    raw::GrowList<RMPass> _passes;  // OpRender's (Cmd::x)
+    uint32_t _recordedPass;         // the OpRender the draws being recorded belong to
     // compressed attachments a recorded draw binds as storage images with no barrier form: plain before the raw encode
     std::vector<RMTexture *> _plainForStorage;
-    bool _scanStorageTargets;                  // a pipeline bound in such a pass was a variant still being made
+    bool _scanStorageTargets;  // a pipeline bound in such a pass was a variant still being made
+    bool
+        _borderSamplers;  // a sampler of an opaque border was bound: its headers for the range's textures before the encode
     std::vector<RMCounterMark> _counterMarks;  // in tape order
     RMBytes _bytes;                            // OpBytes': chunk Cmd::c, offset Cmd::a, length Cmd::b
     // each submitted range's written resources, for its completion (captureWrittenRange): the first _retired of them
@@ -431,8 +439,8 @@ struct RMSharedEventWait {
     size_t _retired;
     // a pass's vertex setBytes before its first draw, again in cached memory (Cmd::x: offset + 1): the draw's geometry
     // the encode reads (the first draw's cover test) is not read from the write-combined chunk
-    std::vector<uint8_t> _shadow;
-    std::vector<uint64_t> _extra;
+    raw::GrowList<uint8_t> _shadow;
+    raw::GrowList<uint64_t> _extra;
     std::vector<id> _owners;
     raw::PointerMap<bool> _ownerKeys;  // everything the tape names, retained until completion
     RMReason _reason;
@@ -463,6 +471,23 @@ struct RMSharedEventWait {
     // its queue's head waits on a shared event Metal's GPU would wait for: waitUntilScheduled returns, its scheduled
     // handlers still wait for its submission (raw_scheduled_wait.h)
     std::atomic<bool> _held;
+    // What the submit worker may encode before the commit (RawMetalPipeline.mm). `_published`: where the worker may encode
+    // up to (the first command of the encoder ended before the last one: an encoder's end looks at the two encoders after
+    // it) << 32 | the tape's length, stored as each encoder ends; everything of the tape before that length is written for
+    // good. `_pipelineVeto`: why it is encoded at its commit instead (RMPipelineVeto), set as the reason is recorded.
+    // `_endedAt`: the last ended encoder's first command; `_handedCommands`: commands since the worker was last handed it.
+    std::atomic<uint64_t> _published;
+    std::atomic<uint32_t> _pipelineVeto;
+    size_t _endedAt;
+    uint32_t _handedCommands;
+    bool _handedOnce;  // the worker was handed it (its one RMScheduleChange::Encoded)
+    // the worker's (the caller reads it): it gave up encoding this one ahead; and how many of its encoders it encoded so
+    // (of how many)
+    std::atomic<bool> _pipelineDeclined;
+    uint32_t _pipelinedEncoders, _pipelineEncoders, _pipelineAbandons, _pipelineGivenBack;
+#if SWITCH_RAW_DIAGNOSTICS
+    uint64_t _committedTicks;  // mach_absolute_time as its commit began
+#endif
 #if !defined(SWITCH_DEBUG) || SWITCH_DEBUG
     std::atomic<uint64_t> _heldReturnUs;  // when waitUntilScheduled returned for it held, until it was submitted
 #endif
@@ -492,7 +517,8 @@ struct RMSharedEventWait {
 #if !defined(SWITCH_DEBUG) || SWITCH_DEBUG
     bool _gpuStamped;  // GPUStartTime/GPUEndTime are its submission's GPU stamps, not the host's window
 #endif
-    __weak id _active;        // the encoder being recorded (weak: it holds the command buffer, its caller holds it)
+    // the encoder being recorded: its end, its drop (endDropped) and this command buffer's drop clear it
+    __unsafe_unretained id _active;
     uint64_t _preds;          // every refusal predicate it hit (1 << RMPred)
     uint64_t _predA, _predB;  // the first one's values
     uint8_t _pred0;           // the first one
@@ -505,12 +531,15 @@ struct RMSharedEventWait {
 - (void)closeEncoder __attribute__((objc_direct));
 // direct (no message): every recorded command and every object a command names goes through them
 - (void)record:(const Cmd &)cmd __attribute__((objc_direct));
-- (void)retain:(id)object __attribute__((objc_direct));
+- (void)retain:(__unsafe_unretained id)object __attribute__((objc_direct));
+// record: of a binding or raster command no other duty of record: concerns (a buffer, bytes, texture, sampler,
+// depth/stencil state or one scissor; not a render state, whose pass may note storage targets)
+- (void)recordBinding:(const Cmd &)cmd __attribute__((objc_direct));
 @end
 
 // A refusal predicate hit while recording (or encoding) `cb`: into its mask; the first one's values kept; the process's first hit
 // of `p` logged with them
-static inline void hit(RMCommandBuffer *cb, RMPred p, uint64_t a = 0, uint64_t b = 0)
+static inline void hit(__unsafe_unretained RMCommandBuffer *cb, RMPred p, uint64_t a = 0, uint64_t b = 0)
 {
     cb->_preds |= 1ull << p;
     if (!cb->_pred0) {
@@ -522,10 +551,39 @@ static inline void hit(RMCommandBuffer *cb, RMPred p, uint64_t a = 0, uint64_t b
         logPred(p, a, b, nil);
 }
 
+// Why a command buffer's tape is encoded at its commit, not as its encoders end (RMCommandBuffer::_pipelineVeto, and the
+// worker's own findings): what the encode reads that the recording may still change, or work it is not built for
+enum RMPipelineVeto : uint32_t {
+    VetoWhole = 1u << 0,       // a refusal outside any encoder: all of it goes to m2v
+    VetoCounters = 1u << 1,    // counter samples
+    VetoShadows = 1u << 2,     // a texture sampled through a pool image, an extended-range stand-in
+    VetoStorage = 1u << 3,     // compressed attachments bound as storage images (raw_private_comp.h)
+    VetoProbes = 1u << 4,      // HW Test's probes
+    VetoParallel = 1u << 5,    // a parallel render encoder's sub-encoders
+    VetoOps = 1u << 6,         // an event, a compute encoder, an indirect command buffer, patches, an invocation
+    VetoRefused = 1u << 7,     // an encoder that goes to m2v
+    VetoPlanar = 1u << 8,      // a planar texture converted for its draws
+    VetoContents = 1u << 9,    // the encode read buffer contents the CPU may write until the commit
+    VetoNative = 1u << 10,     // a surface read through its native image before a later encoder wrote it
+    VetoFailed = 1u << 11,     // its encode failed ahead (the commit's encode meets the failure again, as before)
+    VetoOtherWork = 1u << 12,  // the worker needed the device for another command buffer
+    VetoDevice = 1u << 13,     // a purge, a texture's memory moved or a channel made again since it began
+    VetoZcull = 1u << 14,      // a pass loads a depth an earlier pass stored (raw_zcull_planes.h)
+    VetoKinds = 15
+};
+
+static inline void rmPipelineVeto(RMCommandBuffer *cb, uint32_t reason)
+{
+    if (!(cb->_pipelineVeto.load(std::memory_order_relaxed) & reason))
+        cb->_pipelineVeto.fetch_or(reason, std::memory_order_release);
+}
+
 // ---- encoders: they record ----
 @interface RMEncoder : RMObject {
 @public
-    RMCommandBuffer *_cb;
+    // its command buffer's caller holds it while it records (Metal); a command buffer dropped first clears it
+    // (commandBufferDropped)
+    __unsafe_unretained RMCommandBuffer *_cb;
     bool _ended;
     uint64_t _traceId;
     std::vector<RMCounterMark> _counterPending;  // its descriptor's samples not yet placed on the tape
@@ -541,14 +599,24 @@ uint64_t nextTraceId();
 // reason then, so encodeRaw never meets it (a fallback costs no encoding).
 @interface RMRenderEncoder : RMEncoder {
 @public
-    RMPipeline *_pipe;
+    // Unretained, as the bound objects below: the command buffer retains each (setBinding), so a bind stores no
+    // reference count and a pooled encoder's end releases none of its 172 slots
+    __unsafe_unretained RMPipeline *_pipe;
     uint64_t _bufVa[3]
                    [31];  // stage 1 vertex, 2 fragment: the bound buffer's address plus offset (setBytes: 0, aligned)
-    RMBuffer *_buf[3][31];
-    RMTexture *_tex[2][raw::kStageTextures];  // vertex, fragment textures (unretained: the command buffer retains them)
-    RMSampler *_samp[16];  // fragment samplers, alike; `_cubicMask`: the slots of those that are cubic (raw_cubic.h)
+    __unsafe_unretained RMBuffer *_buf[3][31];
+    __unsafe_unretained RMTexture *_tex[2][raw::kStageTextures];  // vertex, fragment textures
+    // fragment samplers; `_cubicMask`: the slots of those that are cubic (raw_cubic.h)
+    __unsafe_unretained RMSampler *_samp[16];
     uint16_t _cubicMask;
-    uint64_t _checkedGeneration;
+    // `_samp` slots whose sampler the plan holds bound since `_sampEpoch` (RMCommandPlan::stateEpoch): binding the same
+    // one again records nothing
+    uint16_t _sampRecorded;
+    uint64_t _sampEpoch;
+    // moves with each bind that can change what checkDraw decides (setBytes and a plain texture's or sampler's cannot);
+    // checkDraw's last full check was at `_checkedEligibility`, `_checkedEpoch` and `_checkedPipeline`
+    uint32_t _eligibility, _checkedEligibility;
+    uint64_t _checkedEpoch;
     const raw::Pipeline *_checkedPipeline;
     raw::Pipeline *_drawn;
     raw::Variant<raw::Pipeline> *_drawnVariant;
@@ -584,6 +652,9 @@ uint64_t nextTraceId();
     // 0x21c90e51c); every other End answers YES, since MPSGraph aborts on a NO (CSCBSuccess, 0x1810c10a4)
     bool _predicateWithoutBuffer;
     MTLRegion _stageIn;  // setStageInRegion:, which each dispatch records (a stage-in kernel's [[stage_in]] grid)
+    // setStageInRegionWithIndirectBuffer:'s buffer and offset (nil: _stageIn), which each dispatch records
+    RMBuffer *_stageInBuffer;
+    NSUInteger _stageInOffset;
 }
 @end
 
@@ -595,20 +666,25 @@ id rmComputeState(id device, MTLComputePipelineDescriptor *descriptor, MTLPipeli
 // encode where it refuses one (*why)
 bool isKernelCommand(Op op);
 // OpBytes and OpKernelBytes (`m`): the bytes into the command buffer's RMBytes, m.a/b/c set (RawMetalBindings.mm)
-void recordBytes(RMCommandBuffer *cb, Cmd m, const void *bytes, NSUInteger length, bool shadow = false);
+void recordBytes(__unsafe_unretained RMCommandBuffer *cb, Cmd m, const void *bytes, NSUInteger length,
+                 bool shadow = false);
 void replayKernel(id encoder, RMCommandBuffer *cb, const Cmd &c, std::set<RMBuffer *> &buffers);
 // `at`: the command's tape index, a loop's tag (raw_loop_ranges.h)
 bool encodeKernel(raw::ComputeEncoder &e, raw::CommandBuffer &rc, RMCommandBuffer *cb, const Cmd &c, size_t at,
                   const char **why);
 
-static inline void setBinding(RMCommandBuffer *cb, Op op, int stage, NSUInteger index, id object, uint64_t c)
+static inline void setBinding(__unsafe_unretained RMCommandBuffer *cb, Op op, int stage, NSUInteger index,
+                              __unsafe_unretained id object, uint64_t c)
 {
     if (object)
         [cb retain:object];
     Cmd m = cmd(op, uint8_t(stage), uint16_t(index));
     m.obj = (__bridge void *)object;
     m.c = c;
-    [cb record:m];
+    if (op == OpBuffer || op == OpBufferOffset || op == OpTexture || op == OpSampler || op == OpDepthStencil)
+        [cb recordBinding:m];
+    else
+        [cb record:m];
 }
 
 // The encoder `e` records into this command buffer from now on, the one before it ended (RawMetalEncoder.mm)
@@ -633,10 +709,12 @@ id<MTLSamplerState> clampedSampler(id<MTLSamplerState> s, float lodMin, float lo
 // RawMetalEncoder.mm: the encoder's own copy of its pass, where it shares the thread's, before it changes it
 void rmOwnPass(RMRenderEncoder *e);
 
-@interface RMRenderEncoder (Bindings)
-- (void)texture:(int)stage object:(id<MTLTexture>)t index:(NSUInteger)index;
-- (void)sampler:(int)stage object:(id<MTLSamplerState>)s index:(NSUInteger)index;
-@end
+// A texture or sampler bound at slot `index` of stage `stage` (1 vertex, 2 fragment), as its setter binds it
+// (RawMetalBindings.mm)
+void rmBindTexture(__unsafe_unretained RMRenderEncoder *e, int stage, __unsafe_unretained id<MTLTexture> t,
+                   NSUInteger index);
+void rmBindSampler(__unsafe_unretained RMRenderEncoder *e, int stage, __unsafe_unretained id<MTLSamplerState> s,
+                   NSUInteger index);
 
 @interface RMRenderEncoder (Cubic)
 - (const raw::Pipeline *)drawnRecord __attribute__((objc_direct));  // (RawMetalCubic.mm)

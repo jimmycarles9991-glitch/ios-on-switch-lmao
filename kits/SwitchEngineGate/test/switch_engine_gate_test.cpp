@@ -163,30 +163,67 @@ TEST(SwitchEngineGate, QueuedWorkKeepsItOnUntilTheQueueDrains)
     EXPECT_FALSE(f.gate.powered());
 }
 
-TEST(SwitchEngineGate, AFailedPowerOnWedgesTheEngineForTheBoot)
+// A failed power-on fails that use and holds nothing: every later use runs the normal power-on, with no wait, count or
+// refusal for having failed before.
+TEST(SwitchEngineGate, AFailedPowerOnFailsThatUseAndTheNextUsePowersOnAsUsual)
 {
     Fixture f;
     f.model().fire();
     f.engine.onResult = -19;
     EXPECT_EQ(f.gate.use(), -19);
+    EXPECT_FALSE(f.gate.powered());
     EXPECT_EQ(f.gate.use(), -19);
-    EXPECT_EQ(f.engine.ons, 1u) << "a wedged engine is not tried again";
+    EXPECT_EQ(f.engine.ons, 2u) << "the next use powered on at once, as any use of an engine that is off";
+    f.engine.onResult = 0;
+    ASSERT_EQ(f.gate.use(), 0);
+    EXPECT_EQ(f.engine.ons, 3u);
+    EXPECT_TRUE(f.gate.powered());
+    EXPECT_TRUE(f.model().lines.empty() || f.model().lines.back().find("again") == std::string::npos)
+        << "no recovery line: the engine's on logs its own failures";
+    f.gate.done();
+    f.model().fire();
+    EXPECT_FALSE(f.gate.powered()) << "gating goes on as before";
 }
 
-TEST(SwitchEngineGate, APowerOffTheHardwareRefusesTurnsGatingOff)
+TEST(SwitchEngineGate, AnEngineItsDriverLostIsPoweredOnByTheNextUse)
+{
+    Fixture f;
+    ASSERT_EQ(f.gate.use(), 0);
+    f.gate.lost();
+    EXPECT_FALSE(f.gate.powered());
+    f.gate.done();
+    f.model().fire();
+    EXPECT_EQ(f.engine.offs, 0u) << "a lost engine is already off";
+    ASSERT_EQ(f.gate.use(), 0);
+    EXPECT_EQ(f.engine.ons, 1u);
+    EXPECT_TRUE(f.gate.powered());
+}
+
+// Each refused power-off is its own line; the engine is parked unpowered, the next use powers it on and the next idle
+// period powers it off as usual. Nothing counts the refusals.
+TEST(SwitchEngineGate, ARefusedPowerOffIsOneLineAndTheNextIdlePeriodPowersOffAsUsual)
 {
     Fixture f;
     f.engine.offResult = -5;
     f.model().fire();
     EXPECT_FALSE(f.gate.powered());
     ASSERT_EQ(f.model().lines.size(), 1u);
-    EXPECT_EQ(f.model().lines[0], "TegraTest: idle power-off refused by the hardware (-5); powered from here on");
+    EXPECT_EQ(f.model().lines[0],
+              "TegraTest: idle power-off refused by the hardware (-5); parked unpowered, the next use powers it on");
+    for (uint32_t i = 2; i <= 3; i++) {
+        ASSERT_EQ(f.gate.use(), 0);
+        EXPECT_EQ(f.engine.ons, i - 1);
+        f.gate.done();
+        f.model().fire();
+        EXPECT_EQ(f.engine.offs, i) << "each idle period powers off as usual";
+    }
+    EXPECT_EQ(f.model().lines.size(), 3u) << "one line for each refusal";
+    f.engine.offResult = SWITCH_ENGINE_GATE_OFF;
     ASSERT_EQ(f.gate.use(), 0);
-    EXPECT_EQ(f.engine.ons, 1u);
     f.gate.done();
     f.model().fire();
-    EXPECT_EQ(f.engine.offs, 1u);
-    EXPECT_TRUE(f.gate.powered());
+    EXPECT_FALSE(f.gate.powered());
+    EXPECT_EQ(f.model().lines.back().find("again"), std::string::npos);
 }
 
 TEST(SwitchEngineGate, SleepDrainsAndPowersOffAndResumeLeavesItOffWithoutAUser)
@@ -197,7 +234,7 @@ TEST(SwitchEngineGate, SleepDrainsAndPowersOffAndResumeLeavesItOffWithoutAUser)
     EXPECT_FALSE(f.gate.powered());
     f.model().fire();
     EXPECT_EQ(f.engine.offs, 1u) << "nothing to do while asleep";
-    f.gate.resume(true);
+    f.gate.resume();
     EXPECT_EQ(f.engine.ons, 0u);
     EXPECT_EQ(f.model().wakes, 1u);
     ASSERT_EQ(f.gate.use(), 0);
@@ -209,7 +246,7 @@ TEST(SwitchEngineGate, AUserHeldAcrossSleepGetsTheEngineBackAtResume)
     Fixture f;
     ASSERT_EQ(f.gate.use(), 0);
     f.gate.suspend();
-    f.gate.resume(true);
+    f.gate.resume();
     EXPECT_EQ(f.engine.ons, 1u);
     EXPECT_TRUE(f.gate.powered());
 }
@@ -219,14 +256,51 @@ TEST(SwitchEngineGate, AUseDuringSleepWaitsForResume)
     Fixture f;
     f.gate.suspend();
     f.model().meanwhile = [&f] {
-        f.gate.resume(true);
+        f.gate.resume();
     };
     ASSERT_EQ(f.gate.use(), 0);
     EXPECT_EQ(f.engine.ons, 1u);
     f.gate.suspend();
     f.model().meanwhile = [&f] {
-        f.gate.resume(false);
+        f.gate.resume();
     };
     f.gate.done();
+    f.engine.onResult = -19;
     EXPECT_EQ(f.gate.use(), -19) << "an engine that did not come back from sleep";
+    EXPECT_EQ(f.engine.ons, 2u) << "its use runs the normal power-on, which restores what the resume could not";
+    f.engine.onResult = 0;
+    ASSERT_EQ(f.gate.use(), 0);
+    EXPECT_EQ(f.engine.ons, 3u) << "and the next one again, with no wait";
+}
+
+TEST(SwitchEngineGate, AHeldEngineIsNotPoweredOffWhenIdleUntilItsRelease)
+{
+    Fixture f;
+    f.model().lock();
+    f.gate.holdLocked();
+    f.model().unlock();
+    f.model().fire();
+    EXPECT_EQ(f.engine.offs, 0u);
+    EXPECT_EQ(f.engine.ons, 0u) << "a hold powers nothing on";
+    f.gate.release();
+    EXPECT_EQ(f.model().armedMs, SwitchEngineGate<Model>::kIdleMs);
+    f.model().fire();
+    EXPECT_EQ(f.engine.offs, 1u);
+}
+
+TEST(SwitchEngineGate, SleepWaitsForAHoldsReleaseBeforeItPowersOff)
+{
+    Fixture f;
+    f.model().lock();
+    f.gate.holdLocked();
+    f.model().unlock();
+    uint32_t offsBeforeRelease = 99;
+    f.model().meanwhile = [&f, &offsBeforeRelease] {
+        offsBeforeRelease = f.engine.offs;
+        f.gate.release();
+    };
+    f.gate.suspend();
+    EXPECT_EQ(offsBeforeRelease, 0u);
+    EXPECT_EQ(f.engine.drains, 1u);
+    EXPECT_FALSE(f.gate.powered());
 }

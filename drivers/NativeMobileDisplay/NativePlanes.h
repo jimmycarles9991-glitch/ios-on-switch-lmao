@@ -37,10 +37,12 @@
 //    is bytes x lines, SIZE and POSITION pixels. LINE_STRIDE holds the luma stride in bits 15:0 and the chroma stride in 31:16.
 //  - [V] lower depth is in front; premultiplied "over" is BLEND_LAYER 0x00ffff00 | depth with MATCH/NOMATCH 0x262 (L4T
 //    window.c), opaque is bypass (bit 24) | depth.
-//  - [V] window, winbuf and display registers are triple-buffered (assembly, then ARM on *_UPDATE, then active on *_ACT_REQ at
-//    the frame boundary: mainline dc.c tegra_dc_commit's comment, L4T "assemby -> arm -> active"): one UPDATE write and one
-//    ACT_REQ write for several windows latch them at one boundary, never half-written. The CSC and filter registers (0x500-
-//    0x638) are not shadowed (hekate di.h): written only while the window is off.
+//  - [M: TRM 24.5.4, p.1910-1912] only DC_WINBUF (the surface addresses, 0x800) is triple-buffered: assembly, ARM on
+//    *_UPDATE, active at the boundary that takes *_ACT_REQ. DC_WIN (0x700: geometry, options, blend) and DC_DISP are
+//    double-buffered: the assembly copy itself latches at the boundary that takes a pending ACT_REQ. So one request for
+//    several windows latches them at one boundary only if no request is out while their DC_WIN words are written
+//    (SwitchOverlayRegisters.h planeKeepsGeometry). The CSC and filter registers (0x500-0x638) are not shadowed (hekate
+//    di.h): written only while the window is off.
 //  - [V] YCbCr 4:2:0 semi-planar with Cb first (NV12, IOSurface '420v'/'420f') is COLOR_DEPTH 43 (mainline plane.c and
 //    hekate di.h; L4T's tegra_dc_ext.h agrees once its names are read from the word's top, SwitchWindowCaps.h; HW Test
 //    display.x1.window_formats shows it on the panel); 4:2:2 semi-planar with Cb first (NV16, '422v'/'422f',

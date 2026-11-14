@@ -3,6 +3,7 @@
 #import "RawMetalEventJobs.h"
 #include "raw_scheduled_wait.h"
 #include "TegraGM20BJobABI.h"
+#import "RawMetalPipeline.h"
 
 void wakeSubmit(void *queue, uint32_t dependencies)
 {
@@ -119,6 +120,10 @@ void commitBuffer(RMCommandBuffer *cb)
 static void applyChange(RawState &r, const RMScheduleChange &change)
 {
     RMCommandBuffer *cb = change.buffer;
+    if (change.kind == RMScheduleChange::Encoded) {
+        rmPipelineHanded(cb);
+        return;
+    }
     // a commit on one thread can hand over before the enqueue another thread made of the same command buffer
     if (change.kind != RMScheduleChange::Wake && !cb->_reserved) {
         cb->_reservation = r.waiting.reserve((__bridge void *)cb->_queue, cb);
@@ -141,6 +146,8 @@ static void applyChange(RawState &r, const RMScheduleChange &change)
         if (change.queue)
             r.waiting.wake(change.queue);
         r.waiting.wakeDependencies(change.dependencies);
+        break;
+    case RMScheduleChange::Encoded:
         break;
     }
 }
@@ -266,6 +273,12 @@ void submitLoop()
                     break;
                 }
                 closePromise();
+                if (r.orphanCheck.load(std::memory_order_relaxed) &&
+                    r.orphanCheck.exchange(false, std::memory_order_acquire))
+                    rmPipelineOrphans();
+                // nothing to submit: what the command buffer being recorded has published, encoded ahead of its commit
+                if (rmPipelineStep())
+                    continue;
                 r.progress.idle(r.waiting.parked() != 0);
                 const auto due = r.waiting.deadline();
                 dispatch_time_t until = DISPATCH_TIME_FOREVER;
@@ -275,7 +288,13 @@ void submitLoop()
                         DISPATCH_TIME_NOW,
                         std::max<int64_t>(0, std::chrono::duration_cast<std::chrono::nanoseconds>(left).count()));
                 }
+                r.submitAsleep.store(true, std::memory_order_seq_cst);
+                if (rmPipelinePublished()) {
+                    r.submitAsleep.store(false, std::memory_order_relaxed);
+                    continue;
+                }
                 r.schedule.sleep(until);
+                r.submitAsleep.store(false, std::memory_order_relaxed);
             }
             const uint64_t judged = r.progress.visit();
             RMCommandBuffer *cb = ticket.value;

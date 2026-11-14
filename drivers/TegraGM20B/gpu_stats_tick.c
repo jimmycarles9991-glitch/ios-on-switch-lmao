@@ -438,6 +438,16 @@ void tgm_stats_tick(void)
 		lfm / 1000, lfree);
 	nvxnu_stats("tegra-gm20b: stats2 %s", line);
 	{
+		uint64_t held = 0;
+		const unsigned long written = tgm_owner_memory(line, sizeof(line), &held);
+		const s64 live = __atomic_load_n(&tgm_stats.live_bytes, __ATOMIC_RELAXED);
+
+		if (written || live)
+			nvxnu_stats("tegra-gm20b: memory by process: %s; imports no connection "
+				    "holds %lld KiB",
+				    written ? line : "none", (long long)(live - (s64)held) / 1024);
+	}
+	{
 		const u64 small = __atomic_exchange_n(&tgm_stats.map_small, 0, __ATOMIC_RELAXED);
 		const u64 big = __atomic_exchange_n(&tgm_stats.map_big, 0, __ATOMIC_RELAXED);
 		const u64 could = __atomic_exchange_n(&tgm_stats.map_could, 0, __ATOMIC_RELAXED);
@@ -458,6 +468,7 @@ void tgm_stats_tick(void)
 	stats_exec_owners(line, sizeof(line), rate);
 	tgm_stats_mem(ms);
 	tgm_stats_waits(ms);
+	tgm_stats_unlocked_window();
 	/* The IOSurface lock/unlock traps' cache maintenance this window (TegraGM20BCoherency.cpp): GPU-written imports
 	 * invalidated at a CPU lock, CPU-written imports cleaned at an unlock. */
 	{
@@ -474,16 +485,17 @@ void tgm_stats_tick(void)
 	/* IOSurface layouts decided this window (TegraGM20BTiled.cpp), the block-linear ones live, and the CPU views'
 	 * scratch: what tiling costs in memory */
 	{
-		uint64_t t[9];
+		uint64_t t[10];
 		tgm_tiled_take_stats(t);
-		if (t[0] || t[1] || t[2] || t[3] || t[4] || t[5] || t[7]) {
+		if (t[0] || t[1] || t[2] || t[3] || t[4] || t[5] || t[6] || t[8]) {
 			nvxnu_log("tegra-gm20b: layouts %llu block-linear, pitch %llu sampled "
 				  "first, %llu shared, "
-				  "%llu by shape, %llu failed tiling; %llu block-linear live (%llu "
-				  "KiB), CPU views' "
+				  "%llu by shape, %llu failed tiling, %llu mapped by another "
+				  "process; "
+				  "%llu block-linear live (%llu KiB), CPU views' "
 				  "scratch %llu KiB (peak %llu KiB)\n",
-				  t[0], t[1], t[2], t[3], t[4], t[5], t[6] >> 10, t[7] >> 10,
-				  t[8] >> 10);
+				  t[0], t[1], t[2], t[3], t[4], t[5], t[6], t[7] >> 10, t[8] >> 10,
+				  t[9] >> 10);
 		}
 		uint64_t r[5];
 		tgm_tiled_take_relayouts(r);

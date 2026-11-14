@@ -95,7 +95,8 @@ const char *landscapeBusy()
         return "a UI flip is out";
     if (planeLatch.requested() || planeHeldSet || planeRecovering || !mediaFlipIdle())
         return "an overlay change is out";
-    if (probeRequest || probe.active() || planeProbe.active() || columnScanBusy() || windowProbeHolds())
+    if (probeRequest || probe.active() || planeProbe.active() || columnScanBusy() || windowProbeHolds() ||
+        host1xFlipBusy())
         return "a display experiment runs";
     if (tapeAttached || tapeSettle)
         return "the console tape is on";
@@ -112,9 +113,10 @@ void landscapeFrameEnd()
     if (const char *busy = landscapeBusy()) {
         if (frameEnds - landscapeState.wantedAt < kLandscapeQuietFrames)
             return;
-        IOLog("SwitchDisplay: no quiet frame end for a landscape change in %u frames (%s): landscape off this boot\n",
-              kLandscapeQuietFrames, busy);
-        landscapeState.retired = true;
+        ++landscapeState.failures;
+        IOLog("SwitchDisplay: no quiet frame end for a landscape change in %u frames (%s; STATE_CONTROL %#x): that "
+              "change is dropped\n",
+              kLandscapeQuietFrames, busy, static_cast<uint32_t>(dc[kDcStateControl]));
         const bool leave = landscapeOn();
         landscapeAbandonWant();
         if (leave)
@@ -191,9 +193,10 @@ void landscapeRequest()
 void landscapeEnter(PlaneSet p)
 {
     mediaFlipFromGate();
-    if (!planeReserveBandwidth(p)) {
-        IOLog("SwitchDisplay: window A's rotated reservation could not be armed: landscape off this boot\n");
-        landscapeState.retired = true;
+    if (landscapeRunFailsEnter() || !planeReserveBandwidth(p)) {
+        ++landscapeState.failures;
+        IOLog("SwitchDisplay: window A's rotated reservation could not be armed: that change into landscape is "
+              "dropped\n");
         planeTarget = planeSetOf(planeLatch.active);
         retireUnshown(p.seq);
         if (kickDeferred) {

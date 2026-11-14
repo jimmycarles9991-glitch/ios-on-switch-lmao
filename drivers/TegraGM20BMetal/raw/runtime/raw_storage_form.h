@@ -1,13 +1,13 @@
 // SPDX-License-Identifier: MIT
 // A state's storage (interlocked) form binds the colors it fetches as storage images, which a pass's attachment can be
-// viewed as only where its texel size and samples are the form's and its memory is not compressed, until rule
-// storage.compressed holds: whether the GM20B's surface loads and stores (SULD/SUST) go through the L2's compression tags
-// like every other client, or read a compressible kind's raw bytes, is unmeasured (nouveau's nvc0 and NVK never give a
-// shader image a compressed kind). gpu.raw.storage_compressed decides it: a fetching draw's storage form over a ZBC-cleared
-// C32_2CRA target (switchRawProbeStorageCompressed:) against the same draws on plain memory. Where an attachment does not
-// fit, the draw takes the state's barrier form (its twin in the pack, resolved with the state), which orders its fetches
-// with barriers instead. Metal's lossless-compression flag (Texture::compressed) is only how m2v clears and filters such a
-// texture: the memory is compressed only where Texture::comptags says so.
+// viewed as only where its texel size and samples are the form's. Rule storage.compressed: its memory may be compressed,
+// as the GM20B's surface loads and stores (SULD/SUST) reach memory through the binding's kind like every other client, so
+// the L2 decompresses for them (raw_comp.h). Shipped on unread (nouveau's nvc0 and NVK never give a shader image a
+// compressed kind): gpu.raw.storage_compressed judges it, a fetching draw's storage form over a ZBC-cleared C32_2CRA
+// target against the same draws on plain memory. Where an attachment does not fit, the draw takes the state's barrier
+// form (its twin in the pack, resolved with the state), which orders its fetches with barriers instead. Metal's
+// lossless-compression flag (Texture::compressed) is only how m2v clears and filters such a texture: the memory is
+// compressed only where Texture::comptags says so.
 #pragma once
 #include <cstdint>
 
@@ -15,7 +15,7 @@ namespace raw {
 
 constexpr bool storageReadsCompressed()
 {
-    return false;
+    return true;
 }
 
 enum class StorageFallback : uint8_t {

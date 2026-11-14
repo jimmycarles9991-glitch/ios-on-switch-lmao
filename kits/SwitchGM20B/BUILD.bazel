@@ -92,6 +92,7 @@ py_binary(
         "//drivers/TegraGM20BMetal:raw/runtime/raw_device_answers.h",
         "//drivers/TegraGM20BMetal:raw/runtime/raw_gpu.cpp",
         "//drivers/TegraGM20BMetal:raw/runtime/raw_zeta.h",
+        "//kits/SwitchGM20BEmit:SwitchGM20BMacroSlots.h",
     ],
     main = "caps/caps_report.py",
     deps = [":caps_lib"],

@@ -372,6 +372,51 @@ TEST(Deadline, HeldTimeNeverCountsTowardAStall)
 
 // nvkm_chan_error's preempt runs in the interrupt pass with interrupts off: with another preempt in flight it never waits
 // (up to the FIFO's 10 s channel timeout with interrupts masked), the channel's group goes to nvkm's recovery instead.
+// sched_update's two runlist halves against a host that reads the half it was last given until its submit finishes: a
+// submit that stays pending (the host wedged) fails every update after it, so no half the host may read is rewritten.
+struct RunlistHost {
+	unsigned next = 0;
+	unsigned reading = 0; /* the halves a host whose submits have not finished may still read */
+	bool finishes = true;
+	std::vector<unsigned> written;
+
+	bool update()
+	{
+		unsigned segment = 0;
+		if (!tgm_runlist_segment(&next, reading != 0, &segment))
+			return false;
+		EXPECT_EQ(reading & (1u << segment), 0u)
+			<< "rewrote half " << segment << ", which the host may still read";
+		written.push_back(segment);
+		if (!finishes)
+			reading |= 1u << segment;
+		return true;
+	}
+};
+
+TEST(RunlistSegment, UpdatesAlternateHalvesWhileTheHostKeepsUp)
+{
+	RunlistHost host;
+	for (int i = 0; i < 4; ++i)
+		EXPECT_TRUE(host.update());
+	EXPECT_EQ(host.written, (std::vector<unsigned>{0, 1, 0, 1}));
+}
+
+TEST(RunlistSegment, ASubmitStillPendingFailsEveryUpdateAfterIt)
+{
+	RunlistHost host;
+	host.finishes = false;
+	EXPECT_TRUE(host.update());
+	EXPECT_FALSE(host.update());
+	EXPECT_FALSE(host.update());
+	EXPECT_EQ(host.written, std::vector<unsigned>{0});
+	EXPECT_EQ(host.next, 1u);
+	host.reading = 0;
+	host.finishes = true;
+	EXPECT_TRUE(host.update());
+	EXPECT_EQ(host.written, (std::vector<unsigned>{0, 1}));
+}
+
 TEST(Preempt, NothingInFlightGoesOutAtOnce)
 {
 	EXPECT_EQ(tgm_preempt_how(0, 0), TGM_PREEMPT_NOW);

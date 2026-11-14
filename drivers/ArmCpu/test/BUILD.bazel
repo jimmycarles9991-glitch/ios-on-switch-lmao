@@ -1,4 +1,6 @@
-# ArmCpuTmr.h on the host: C7's wake count against the clock TMR10-13 count.
+# ArmCpuTmr.h on the host: C7's wake count against the clock TMR10-13 count. SwitchGicV2.h (switch_gic_barrier_test):
+# the barriers of ArmCpu's acknowledge loop per interrupt class, of an SGI send and of ArmGIC's SPI vector run, and that
+# vector run against IOKit's disableInterrupt on another thread (switch_gic_barrier_tsan_test under TSAN).
 #
 #   bazel test //drivers/ArmCpu/test:all
 load("//bazel/lint:defs.bzl", "lint_files")
@@ -13,4 +15,25 @@ host_test(
         "//drivers/ArmCpu:ArmCpuTmr.h",
         "//kits/SwitchIdle:switch_idle_governor.h",
     ],
+)
+
+host_test(
+    name = "switch_gic_barrier_test",
+    srcs = [
+        "switch_gic_barrier_test.cpp",
+        "//drivers/ArmGIC:SwitchGicV2.h",
+    ],
+    defines = ["SWITCH_GIC_HOST_MODEL"],
+)
+
+host_test(
+    name = "switch_gic_barrier_tsan_test",
+    srcs = [
+        "switch_gic_barrier_test.cpp",
+        "//drivers/ArmGIC:SwitchGicV2.h",
+    ],
+    copts = ["-fsanitize=thread"],
+    defines = ["SWITCH_GIC_HOST_MODEL"],
+    linkopts = ["-fsanitize=thread"],
+    sanitize = False,
 )

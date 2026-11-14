@@ -66,6 +66,7 @@ host_test(
     name = "switch_vic_fraction_probe_test",
     srcs = [
         "switch_vic_fraction_probe_test.cpp",
+        "vic_model.h",
         "//drivers/TegraVIC:SwitchVICFractionProbe.h",
         "//drivers/TegraVIC:TegraVICConfig.h",
         "//drivers/TegraVIC:TegraVICFormats.h",
@@ -100,6 +101,17 @@ host_test(
         "switch_vic_transpose_probe_test.cpp",
         "vic_model.h",
         "//drivers/TegraVIC:SwitchVICTransposeProbe.h",
+        "//drivers/TegraVIC:TegraVICConfig.h",
+        "//drivers/TegraVIC:TegraVICFormats.h",
+    ],
+)
+
+host_test(
+    name = "switch_vic_odd_probe_test",
+    srcs = [
+        "switch_vic_odd_probe_test.cpp",
+        "vic_model.h",
+        "//drivers/TegraVIC:SwitchVICOddProbe.h",
         "//drivers/TegraVIC:TegraVICConfig.h",
         "//drivers/TegraVIC:TegraVICFormats.h",
     ],
@@ -144,6 +156,19 @@ host_test(
     name = "tegra_vic_test",
     srcs = ["tegra_vic_test.cpp"],
     deps = [":vic_host"],
+)
+
+host_test(
+    name = "tegra_vic_odd_test",
+    srcs = [
+        "tegra_vic_odd_test.cpp",
+        "vic_model.h",
+        "//drivers/TegraVIC:TegraVICBounce.h",
+        "//drivers/TegraVIC:TegraVICConfig.h",
+        "//drivers/TegraVIC:TegraVICFormats.h",
+        "//drivers/TegraVIC:TegraVICRequest.h",
+        "//drivers/TegraVIC:SwitchSurfaceColor.h",
+    ],
 )
 
 host_test(
@@ -448,6 +473,42 @@ host_test(
     deps = [":backing_kernel"],
 )
 
+host_shims(
+    name = "gate_kernel",
+    headers = [
+        "IOKit/IOLib.h",
+        "IOKit/IOTypes.h",
+        "IOKit/IOUserClient.h",
+        "kern/task.h",
+    ],
+    stubs = "switch_vic_gate_stubs.h",
+)
+
+# display.media_completion_flip_gated's gate (SwitchVICGate.cpp): a whole copy queued behind a syncpoint only the CPU
+# moves, released by the arming connection or its close, one at a time, refused without a job when VIC cannot copy the
+# surfaces as they are.
+host_test(
+    name = "switch_vic_gate_test",
+    srcs = [
+        "switch_vic_gate_test.cpp",
+        "//drivers/TegraHost1x:TegraHost1x.h",
+        "//drivers/TegraVIC:SwitchSurfaceColor.h",
+        "//drivers/TegraVIC:SwitchVICGate.h",
+        "//drivers/TegraVIC:SwitchVICGateABI.h",
+        "//drivers/TegraVIC:SwitchVICTransform.h",
+        "//drivers/TegraVIC:TegraVIC.h",
+        "//drivers/TegraVIC:TegraVICBounce.h",
+        "//drivers/TegraVIC:TegraVICConfig.h",
+        "//drivers/TegraVIC:TegraVICFormats.h",
+        "//drivers/TegraVIC:TegraVICRequest.h",
+        "//drivers/TegraVIC:TegraVICSurface.h",
+        "//kits/SwitchDMA:SwitchDcache.h",
+    ],
+    additional_compiler_inputs = ["//drivers/TegraVIC:SwitchVICGate.cpp"],
+    defines = ["DEVELOPMENT=1"],
+    deps = [":gate_kernel"],
+)
+
 # An encoder's input picture written by VIC (SwitchVICEncodeInput.cpp): block-linear output at the buffer's planes, the
 # region 1:1 at the origin, a checked read and a recorded write, after the encoder's last job; rows off VIC's grid
 # through the copy engine's bounce first.
@@ -481,6 +542,40 @@ host_test(
         "//kits/SwitchDMA:SwitchDcache.h",
     ],
     additional_compiler_inputs = ["//drivers/TegraVIC:SwitchVICEncodeInput.cpp"],
+    deps = [":backing_kernel"],
+)
+
+# NVJPG's planar 4:2:2 and 4:4:4 decodes re-packed into a client's '422f' or '444f' surface, after the decoder.
+host_test(
+    name = "switch_vic_decode_output_test",
+    srcs = [
+        "switch_vic_decode_output_test.cpp",
+        "//drivers/TegraVIC:SwitchVICDecodeOutput.h",
+        "//drivers/TegraVIC:SwitchVICBouncePool.h",
+        "//drivers/TegraVIC:TegraVICBounce.h",
+        "//drivers/TegraGM20B:TegraGM20BCopy.h",
+        "//drivers/TegraVIC:SwitchVICTransform.h",
+        "//drivers/TegraVIC:SwitchVICSurfaceAccess.h",
+        "//drivers/TegraVIC:SwitchNativeSurface.h",
+        "//drivers/TegraVIC:SwitchNativePicture.h",
+        "//drivers/TegraVIC:SwitchNativeVICImage.h",
+        "//drivers/TegraVIC:SwitchVICPicture.h",
+        "//drivers/TegraVIC:SwitchVICJobs.h",
+        "//drivers/TegraVIC:SwitchVICEvents.h",
+        "//drivers/TegraVIC:SwitchVICSemantics.h",
+        "//drivers/TegraVIC:TegraVICRequest.h",
+        "//drivers/TegraVIC:SwitchSurfaceColor.h",
+        "//drivers/TegraGM20B:SwitchGpuSharedEvent.h",
+        "//drivers/TegraVIC:SwitchVICQueue.h",
+        "//drivers/TegraVIC:SwitchVICMapping.h",
+        "//drivers/TegraVIC:TegraVIC.h",
+        "//drivers/TegraVIC:TegraVICSurface.h",
+        "//drivers/TegraVIC:TegraVICConfig.h",
+        "//drivers/TegraVIC:TegraVICFormats.h",
+        "//drivers/TegraGM20B:SwitchGpuBacking.h",
+        "//kits/SwitchDMA:SwitchDcache.h",
+    ],
+    additional_compiler_inputs = ["//drivers/TegraVIC:SwitchVICDecodeOutput.cpp"],
     deps = [":backing_kernel"],
 )
 
@@ -728,6 +823,21 @@ host_test(
         "TegraVICProbe.h",
         "//drivers/TegraVIC:TegraVICConfig.h",
         "//drivers/TegraVIC:TegraVICFormats.h",
+    ],
+)
+
+host_test(
+    name = "switch_vic_capabilities_source_test",
+    srcs = ["switch_vic_capabilities_source_test.cpp"],
+    data = ["//drivers/TegraVIC:TegraVICUserClient.cpp"],
+)
+
+host_test(
+    name = "tegra_vic_recover_source_test",
+    srcs = ["tegra_vic_recover_source_test.cpp"],
+    data = [
+        "//drivers/TegraVIC:SwitchVICJobs.cpp",
+        "//drivers/TegraVIC:TegraVIC.cpp",
     ],
 )
 

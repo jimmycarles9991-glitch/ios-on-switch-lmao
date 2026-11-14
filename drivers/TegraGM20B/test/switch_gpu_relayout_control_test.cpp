@@ -1,5 +1,8 @@
 // SPDX-License-Identifier: MIT
 #include <gtest/gtest.h>
+#include <atomic>
+#include <functional>
+#include <future>
 #include "switch_gpu_relayout_control_stubs.h"
 #include "drivers/TegraGM20B/TegraGM20BRelayout.cpp"
 #include "gm20b_ce_model.h"
@@ -14,7 +17,7 @@ struct switch_gpu_mapping {};
 
 namespace
 {
-std::vector<uint8_t> pushBytes(4096);
+std::vector<uint8_t> pushBytes(kSlots * 4096);
 Memory memory;
 tgm_vm space;
 tgm_mem pushMemory, fenceMemory;
@@ -27,7 +30,9 @@ switch_gpu_mapping pushWindow;
 constexpr uint64_t kSurfacePa = 0x10000000, kRowsPa = 0x20000000, kSurfaceGpuVa = 0x40000000;
 tgm_chan channels[4];
 unsigned channelsMade, channelsDeleted, flushJobs, cpuReads, cpuReadsBehindL2;
-bool channelsOpen, faultMoves, beforeCheckpoint;
+bool channelsOpen, faultMoves, beforeCheckpoint, pipelined;
+std::atomic<unsigned> movesKicked;
+std::function<void()> copyWait;
 tgm_chan *faulted, *flushedOn;
 uint32_t flushVisibility;
 std::vector<uint8_t> surfaceBytes(16 * 4096), rowsBytes(16 * 4096);
@@ -57,6 +62,10 @@ extern "C" int tgm_vm_new(tgm_vm **out)
 	}
 	*out = &space;
 	return 0;
+}
+
+extern "C" void tgm_stats_unlocked(enum tgm_unlocked, uint64_t)
+{
 }
 
 extern "C" void tgm_vm_del(tgm_vm **out)
@@ -151,6 +160,10 @@ extern "C" uint32_t tgm_chan_uid(tgm_chan *)
 extern "C" int tgm_chan_exec(tgm_chan *chan, const tgm_push *, uint32_t, uint32_t *seqno,
 			     const tgm_prof *)
 {
+	if (pipelined) {
+		*seqno = ++movesKicked;
+		return 0;
+	}
 	if (faultMoves) {
 		const std::vector<uint8_t> partial(512, 0xc5);
 		EXPECT_TRUE(memory.store(kSurfaceGpuVa + 4096, partial.data(), partial.size()));
@@ -164,6 +177,8 @@ extern "C" int tgm_chan_exec(tgm_chan *chan, const tgm_push *, uint32_t, uint32_
 
 extern "C" void tgm_copy_wait(uint32_t, uint32_t, const tgm_relayout_writer *, uint32_t)
 {
+	if (copyWait)
+		copyWait();
 }
 
 extern "C" int tgm_writer_done(uint32_t, uint32_t)
@@ -242,7 +257,7 @@ switch_gpu_backing *switch_gpu_pin_memory(const uint64_t *, uint32_t, uint32_t,
 int switch_gpu_relayout_mapping(tgm_vm *, SwitchGpuRelayoutCache *, const uint64_t *, uint32_t,
 				bool surface, SwitchGpuRelayoutMapping **out)
 {
-	if (faultMoves) {
+	if (faultMoves || pipelined) {
 		*out = surface ? &surfaceMap : &rowsMap;
 		return 0;
 	}
@@ -287,6 +302,7 @@ class RelayoutControl : public testing::Test
 	void SetUp() override
 	{
 		gRelayout = {};
+		ASSERT_EQ(tgm_relayout_init(), 0);
 		memory = {};
 		madeMemory = 0;
 		std::fill(pushBytes.begin(), pushBytes.end(), 0);
@@ -379,7 +395,8 @@ TEST_F(RelayoutControl, AFaultedMoveFlushesTheL2BeforeTheCpuFinishesIt)
 	const tgm_relayout_pages surface = {surfacePas.data(), uint32_t(surfacePas.size())};
 	const tgm_relayout_pages rows = {rowsPas.data(), uint32_t(rowsPas.size())};
 	ASSERT_LE(l.bytes, surfaceBytes.size());
-	EXPECT_EQ(move(surface, rows, l, 256, TGM_RELAYOUT_TILE_IN_PLACE, nullptr, 0), 0);
+	EXPECT_EQ(tgm_relayout(&surface, &rows, &l, 256, TGM_RELAYOUT_TILE_IN_PLACE, nullptr, 0),
+		  0);
 	EXPECT_EQ(flushJobs, 1u);
 	EXPECT_NE(flushedOn, nullptr);
 	EXPECT_NE(flushedOn, faulted);
@@ -410,12 +427,58 @@ TEST_F(RelayoutControl, AFaultBeforeTheCheckpointFlushesTheL2ForTheCallersCpuMov
 	}
 	const tgm_relayout_pages surface = {surfacePas.data(), uint32_t(surfacePas.size())};
 	const tgm_relayout_pages rows = {rowsPas.data(), uint32_t(rowsPas.size())};
-	EXPECT_EQ(move(surface, rows, l, 256, TGM_RELAYOUT_TO_ROWS, nullptr, 0), -5);
+	EXPECT_EQ(tgm_relayout(&surface, &rows, &l, 256, TGM_RELAYOUT_TO_ROWS, nullptr, 0), -5);
 	EXPECT_EQ(flushJobs, 1u);
 	EXPECT_NE(flushedOn, faulted);
 	EXPECT_TRUE(memory.dirty.empty());
 	EXPECT_EQ(cpuReads, 0u);
 	channelsOpen = faultMoves = beforeCheckpoint = false;
 	faulted = flushedOn = nullptr;
+}
+}  // namespace
+
+namespace
+{
+// A move waits for the GPU without the relayout lock, in its own push slot: the next move is kicked meanwhile.
+TEST_F(RelayoutControl, ASecondMoveIsKickedWhileTheFirstWaitsForTheGpu)
+{
+	using namespace std::chrono_literals;
+	channelsOpen = pipelined = true;
+	movesKicked = 0;
+	tgm_layout l = {};
+	ASSERT_TRUE(tgm_layout_tiled(64, 64, 4, &l));
+	std::vector<uint64_t> surfacePas, rowsPas;
+	for (uint64_t at = 0; at < surfaceBytes.size(); at += 4096) {
+		surfacePas.push_back(kSurfacePa + at);
+		rowsPas.push_back(kRowsPa + at);
+	}
+	const tgm_relayout_pages surface = {surfacePas.data(), uint32_t(surfacePas.size())};
+	const tgm_relayout_pages rows = {rowsPas.data(), uint32_t(rowsPas.size())};
+	std::promise<void> waiting, gpuDone;
+	std::shared_future<void> done = gpuDone.get_future().share();
+	std::atomic<int> waits{0};
+	copyWait = [&] {
+		if (waits++ == 0) {
+			waiting.set_value();
+			done.wait();
+		}
+	};
+	const auto moveRows = [&] {
+		return tgm_relayout(&surface, &rows, &l, 256, TGM_RELAYOUT_TO_ROWS, nullptr, 0);
+	};
+	auto first = std::async(std::launch::async, moveRows);
+	waiting.get_future().wait();
+	auto second = std::async(std::launch::async, moveRows);
+	// base 0: the second move waited for the relayout lock until the first one's GPU wait ended
+	const unsigned kickedMeanwhile =
+		second.wait_for(500ms) == std::future_status::ready ? movesKicked - 1 : 0;
+	gpuDone.set_value();
+	EXPECT_EQ(first.get(), 0);
+	EXPECT_EQ(second.get(), 0);
+	EXPECT_EQ(kickedMeanwhile, 1u);
+	EXPECT_EQ(gRelayout.slots, 0u);
+	EXPECT_EQ(gRelayout.users, 0u);
+	copyWait = nullptr;
+	channelsOpen = pipelined = false;
 }
 }  // namespace

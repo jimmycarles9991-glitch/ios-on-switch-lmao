@@ -14,6 +14,12 @@ py_binary(
     srcs = ["xcode_run.py"],
 )
 
+# A binary linked without m2v and the symbols it still needs from it (gpu/defs.bzl plugin_m2v_edges)
+py_binary(
+    name = "m2v_link_edges",
+    srcs = ["m2v_link_edges.py"],
+)
+
 py_binary(
     name = "bundle",
     srcs = ["bundle.py"],

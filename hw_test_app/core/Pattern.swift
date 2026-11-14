@@ -18,8 +18,9 @@ public struct Pattern: Equatable, Sendable {
     public let height: Int
     public let clip: UInt16
 
+    /// Odd sizes are for the RGB stills only (the 205x83 JPEG): the video writers sample chroma in 2x2 blocks.
     public init(width: Int, height: Int, clip: UInt16) {
-        precondition(width >= 64 && height >= 64 && width % 2 == 0 && height % 2 == 0)
+        precondition(width >= 64 && height >= 64)
         self.width = width
         self.height = height
         self.clip = clip

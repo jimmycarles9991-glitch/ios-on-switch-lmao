@@ -81,6 +81,13 @@ kernel void read_float_texture(texture2d<float, access::read> texture [[texture(
         out[id.y * texture.get_width() + id.x] = texture.read(id);
 }
 
+kernel void read_texture_buffer(texture_buffer<float> texels [[texture(0)]], device float4 *out [[buffer(0)]],
+                                uint id [[thread_position_in_grid]])
+{
+    if (id < texels.get_width())
+        out[id] = texels.read(id);
+}
+
 /// Samples at texel centres with nearest filtering: the only way to read a block-compressed texture back.
 kernel void sample_texture(texture2d<float> texture [[texture(0)]], device float4 *out [[buffer(0)]],
                            uint2 id [[thread_position_in_grid]])
@@ -89,6 +96,20 @@ kernel void sample_texture(texture2d<float> texture [[texture(0)]], device float
     const float2 size = float2(texture.get_width(), texture.get_height());
     if (id.x < texture.get_width() && id.y < texture.get_height())
         out[id.y * texture.get_width() + id.x] = texture.sample(nearest, (float2(id) + 0.5f) / size, level(0));
+}
+
+/// mediaanalysisd's Core Image 4:2:0 conversion on boot 21: luma (slot 0) and chroma (slot 2) written from an RGBA
+/// texture sampled at slot 1, every texture's rows 16 bytes off 32 (gpu.raw.kernel_shadow)
+kernel void shadow_planes(texture2d<float, access::write> luma [[texture(0)]], texture2d<float> rgba [[texture(1)]],
+                          texture2d<float, access::write> chroma [[texture(2)]], sampler linear [[sampler(0)]],
+                          uint2 id [[thread_position_in_grid]])
+{
+    if (id.x >= luma.get_width() || id.y >= luma.get_height())
+        return;
+    const float4 p = rgba.sample(linear, (float2(id) + 0.5f) / float2(rgba.get_width(), rgba.get_height()));
+    luma.write(float4(p.g), id);
+    if (!(id.x & 1) && !(id.y & 1))
+        chroma.write(float4(p.b, p.r, 0, 0), id / 2);
 }
 
 /// m2v writes a half-float texture through its unsigned integer twin, converting each texel in the shader: the raw path

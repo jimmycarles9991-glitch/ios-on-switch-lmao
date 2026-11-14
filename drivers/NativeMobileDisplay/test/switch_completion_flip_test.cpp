@@ -2,8 +2,8 @@
 // SwitchCompletionFlipDisplay.h: a direct frame's completion writes window A's flip itself, through window A's own
 // aperture and nothing the gate's reads switch, and the gate's ring, latch check and SC7 path see that flip at the
 // boundary that took it, whatever order the completion, its own pass, the frame boundaries and the frame-end action
-// run in (switch_completion_flip_harness.h has the model). Window A's aperture is taken as proven here, as it is
-// after the first completion flip latched as written; switch_completion_flip_proof_test has the unit that refuses.
+// run in (switch_completion_flip_harness.h has the model). Window A's apertures alias the WINDOW_HEADER copy (TRM
+// 24.10-24.11); switch_completion_flip_proof_test has a model that refuses, for the latch check that remains.
 #include <gtest/gtest.h>
 
 #include <algorithm>
@@ -32,7 +32,6 @@ protected:
     {
         gOffer = nullptr;
         gLog.clear();
-        d.completionFlipsProven = true;
     }
 
     void TearDown() override
@@ -50,7 +49,7 @@ protected:
 TEST_F(CompletionFlip, TheCompletionWritesWindowAThroughItsOwnApertureOnly)
 {
     ASSERT_EQ(d.offer(kSlot), 0);
-    EXPECT_EQ(d.completionFlip.state, SwitchCompletionFlip::kArmed);
+    EXPECT_EQ(d.completionFlip.state(), SwitchCompletionFlip::kArmed);
     const unsigned selectors = d.model.selectorWrites;
     d.model.written.clear();
     d.complete(0);
@@ -72,8 +71,8 @@ TEST_F(CompletionFlip, TheCompletionWritesWindowAThroughItsOwnApertureOnly)
     EXPECT_EQ(d.flipRequested, d.completionFlip.requestedAt);
     EXPECT_EQ(d.marks[kSlot].ready, d.completionFlip.writtenAt);
     EXPECT_EQ(d.entrySeq[kSlot], d.flipRequest);
-    EXPECT_EQ(d.deadlineArms, 1u);
-    EXPECT_EQ(d.completionFlip.state, SwitchCompletionFlip::kIdle);
+    EXPECT_EQ(d.flipTimerStore.arms, 1u);
+    EXPECT_EQ(d.completionFlip.state(), SwitchCompletionFlip::kIdle);
     EXPECT_FALSE(d.transferred);
 
     frame();
@@ -129,7 +128,7 @@ TEST_F(CompletionFlip, ACopyIntoAScanBufferIsFlippedByItsCompletion)
     ASSERT_EQ(d.offerCopy(), 0);
     const int target = d.ring.drawing;
     ASSERT_NE(target, Display::kNoBuffer);
-    EXPECT_EQ(d.completionFlip.state, SwitchCompletionFlip::kArmed);
+    EXPECT_EQ(d.completionFlip.state(), SwitchCompletionFlip::kArmed);
     d.complete(0);
     EXPECT_EQ(d.model.armed[Display::kWinbufStartAddr], d.surfaceAddress(target));
     EXPECT_EQ(d.model.armed[Display::kWinbufSurfaceKind], Display::kBlockSurfaceKind);
@@ -146,7 +145,7 @@ TEST_F(CompletionFlip, AFailedFrameWritesNothingAndFlipsNothing)
     d.model.written.clear();
     d.complete(-5);
     EXPECT_TRUE(d.model.written.empty());
-    EXPECT_EQ(d.completionFlip.state, SwitchCompletionFlip::kIdle);
+    EXPECT_EQ(d.completionFlip.state(), SwitchCompletionFlip::kIdle);
     d.donePass();
     EXPECT_EQ(d.ring.pending, Display::kNoBuffer);
     EXPECT_FALSE(d.transferred);
@@ -158,7 +157,7 @@ TEST_F(CompletionFlip, ARefusedOfferWithdrawsItsFlip)
         return -16;
     };
     EXPECT_EQ(d.offer(kSlot), -16);
-    EXPECT_EQ(d.completionFlip.state, SwitchCompletionFlip::kIdle);
+    EXPECT_EQ(d.completionFlip.state(), SwitchCompletionFlip::kIdle);
     d.model.written.clear();
     d.complete(0);
     EXPECT_TRUE(d.model.written.empty());
@@ -206,7 +205,7 @@ TEST_F(CompletionFlip, AGateFlipWithdrawsAnArmedFlipBeforeItsFirstWrite)
     };
     d.writeFlip(kSlot);
     EXPECT_EQ(completionWrites, 0u);
-    EXPECT_EQ(d.completionFlip.state, SwitchCompletionFlip::kIdle);
+    EXPECT_EQ(d.completionFlip.state(), SwitchCompletionFlip::kIdle);
     EXPECT_EQ(d.model.assembly[Display::kWinbufStartAddr], d.surfaceAddress(kSlot));
 }
 
@@ -217,7 +216,7 @@ TEST_F(CompletionFlip, NotArmedWhenTheFrameWouldBeHeldOrCarriesWindowB)
     d.donePass();
     ASSERT_EQ(d.ring.pending, kSlot + 3);
     ASSERT_EQ(d.offer(kSlot), 0);
-    EXPECT_EQ(d.completionFlip.state, SwitchCompletionFlip::kIdle) << "a pitch frame replacing a tiled one";
+    EXPECT_EQ(d.completionFlip.state(), SwitchCompletionFlip::kIdle) << "a pitch frame replacing a tiled one";
     d.complete(0);
     d.donePass();
     EXPECT_EQ(d.ring.held, kSlot);
@@ -228,7 +227,7 @@ TEST_F(CompletionFlip, NotArmedWhenTheFrameWouldBeHeldOrCarriesWindowB)
 
     d.planeNextSet = true;
     ASSERT_EQ(d.offer(kSlot + 1), 0);
-    EXPECT_EQ(d.completionFlip.state, SwitchCompletionFlip::kIdle);
+    EXPECT_EQ(d.completionFlip.state(), SwitchCompletionFlip::kIdle);
 }
 
 // SC7: a written flip goes in the ring before the controller is saved, an armed one is withdrawn, and nothing writes
@@ -244,7 +243,7 @@ TEST_F(CompletionFlip, SuspendPutsAWrittenFlipInTheRingAndWithdrawsAnArmedOne)
 
     ASSERT_EQ(d.offer(kSlot + 1), 0);
     d.suspend();
-    EXPECT_EQ(d.completionFlip.state, SwitchCompletionFlip::kIdle);
+    EXPECT_EQ(d.completionFlip.state(), SwitchCompletionFlip::kIdle);
     EXPECT_NO_THROW(d.complete(0));
     d.donePass();
     EXPECT_TRUE(d.deferred);
@@ -297,7 +296,6 @@ TEST_F(CompletionFlip, RandomOrdersNeverLoseOrDelayALatch)
     EXPECT_GT(walk.fromCompletions, 2000u) << walk.fromCompletions;
     EXPECT_GT(walk.fromFilters, 2000u) << walk.fromFilters;
     EXPECT_GT(d.shown.size(), 5000u) << d.shown.size();
-    EXPECT_FALSE(d.completionFilterOff);
     EXPECT_TRUE(gLog.empty());
 }
 
@@ -307,14 +305,14 @@ TEST_F(CompletionFlip, RandomOrdersNeverLoseOrDelayALatch)
 TEST(CompletionFlipSource, TheDisplayCallsItWhereTheOrderingNeedsIt)
 {
     const std::string display = SourceText("../NativeLegacyDisplay.cpp");
-    const CodeText complete = Block(display, "void gpuComplete(int status)");
+    const CodeText complete = Block(SourceText("../SwitchGpuDoneDisplay.h"), "void gpuComplete(int status)");
     EXPECT_TRUE(
         complete.Before("__atomic_store_n(&gpuDonePending, true, __ATOMIC_RELEASE);", "writeCompletionFlip(status);"));
     EXPECT_TRUE(complete.Before("writeCompletionFlip(status);", "gpuDoneSource->interruptOccurred("));
-    EXPECT_TRUE(Block(display, "void vblankTick()").StartsWith("takeCompletionFlip();"));
+    EXPECT_TRUE(Block(display, "void vblankTick()").StartsWith("drainVerdicts(); takeCompletionFlip();"));
     EXPECT_TRUE(Block(display, "void quiesceForSuspend()").StartsWith("suspendCompletionFlip();"));
     EXPECT_TRUE(Block(display, "void stopRotation()").StartsWith("withdrawCompletionFlip();"));
-    EXPECT_TRUE(Block(display, "void settleStopped()").StartsWith("flipUnverifiedFromGate();"));
+    EXPECT_FALSE(Block(display, "void settleStopped()").Has("flipUnverifiedFromGate"));
     const CodeText check = Block(display, "void checkFlip(bool atFrameEnd)");
     EXPECT_TRUE(check.Has("const auto [control, start] = latchState();"));
     EXPECT_FALSE(check.Has("windowActive("));
@@ -351,7 +349,8 @@ TEST(CompletionFlipSource, WindowAsOtherWritersWithdrawFirst)
                     .Has("if (w == switch_landscape::kA) withdrawCompletionFlip();"));
     const std::string flips = SourceText("../SwitchCompletionFlipDisplay.h");
     const CodeText may = Block(flips, "bool completionFlipMay(");
-    for (const char *owner : {"columnScanBusy()", "windowProbeBusy()", "landscapeOn()", "landscapeHoldsKicks()"})
+    for (const char *owner :
+         {"columnScanBusy()", "windowProbeBusy()", "host1xFlipBusy()", "landscapeOn()", "landscapeHoldsKicks()"})
         EXPECT_TRUE(may.Has(owner));
     EXPECT_FALSE(Block(flips, "LatchState latchState()").Has("windowActive("));
 }

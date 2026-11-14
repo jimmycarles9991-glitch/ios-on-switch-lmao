@@ -8,16 +8,20 @@ import UIKit
 /// afterwards (drivers/NativeMobileDisplay/SwitchMediaCompletionFlipDisplay.h). Plays the 1080p H.264 clip in a
 /// visible AVPlayerLayer, as playback.h264_1080p does, and reads the kernel's counters around it
 /// (kern.switch_media_flips_*, debug kernels): completions must have written the sets armed for them, each ahead of
-/// the work loop, and none may have failed to latch as written (refused is the boot's total; a refusing unit turns
-/// these flips off at the first one, with one SwitchDisplay line). A set whose producers finished before its swap goes
-/// out at once from the kick and is never armed; with none armed the test is skipped, armed=0 says why. filter_share
+/// the work loop, and none may have failed to latch as written (refused is the boot's total; a refusing unit holds
+/// these flips off for a run of sets at each one, with one SwitchDisplay line). A set whose producers finished before
+/// its swap goes out at once from the kick and is never armed (d_done_at_swap); one that waited for VIC or NVDEC is
+/// d_fenced, and of those d_declined were not armed. With none armed the test is skipped and says which. filter_share
 /// is the part host1x's syncpoint filter wrote earlier still.
 struct MediaCompletionFlipTest: HWTest {
     let id = "display.media_completion_flip"
     let name = "Video sets on windows B and C written by their producers' completions"
     let subsystem = Subsystem.display
 
-    static let counters = ["completion", "withdrawn", "refused", "lead_us", "armed", "filter", "filter_declined"]
+    static let counters = [
+        "completion", "withdrawn", "refused", "lead_us", "armed", "filter", "filter_declined", "done_at_swap", "fenced",
+        "declined",
+    ]
 
     func run(_ context: TestContext) async throws -> Outcome {
         let (before, unread) = Self.totals()
@@ -64,7 +68,11 @@ struct MediaCompletionFlipTest: HWTest {
         metrics.set("filter_share", completion > 0 ? Double(delta("filter")) / Double(completion) : 0, digits: 3)
         metrics.set("dropped", dropped)
         if armed == 0 && refused == 0 {
-            return .skip("no video set waited for its producers at its swap", metrics)
+            let why =
+                delta("fenced") == 0
+                ? "every video set's producers were done at its swap (d_done_at_swap)"
+                : "the video sets that waited for their producers were declined (d_declined)"
+            return .skip(why, metrics)
         }
         return .judged(
             [

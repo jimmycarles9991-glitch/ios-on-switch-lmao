@@ -1187,3 +1187,30 @@ TEST_F(Backing, PendingNamesTheEnginesAUseWouldFollowAndTheCpuOwners)
 	ASSERT_EQ(switch_gpu_backing_cpu_release(allocation, 0, 4096, SWITCH_GPU_BACKING_READ), 0);
 	switch_gpu_backing_release(allocation);
 }
+
+// A frame written by two channels: the display's snapshot names the later writer alone (the token its present or
+// watch waits for), and that writer's own job acquires the earlier one on the GPU, so its completion stands for both;
+// the flip can never come between them.
+TEST_F(Backing, TheDisplaysProducerIsTheLastWriterAndFollowsEveryEarlierOne)
+{
+	auto *allocation = backing();
+	const auto first = token(85, 4), last = token(86, 6);
+	ASSERT_EQ(publish(allocation, SWITCH_GPU_BACKING_WRITE, first), 0);
+	switch_gpu_backing_use use = {allocation, SWITCH_GPU_BACKING_WRITE, 0};
+	switch_gpu_backing_transaction transaction = {};
+	ASSERT_EQ(switch_gpu_backing_begin(&use, 1, &last, &transaction), 0);
+	switch_gpu_backing_token dependency = {};
+	uint32_t needed = 0;
+	EXPECT_EQ(switch_gpu_backing_dependencies(&transaction, &dependency, 1, &needed), 0);
+	ASSERT_EQ(needed, 1u);
+	EXPECT_EQ(dependency.queue, first.queue);
+	EXPECT_EQ(dependency.value, first.value);
+	switch_gpu_backing_commit(&transaction);
+	switch_gpu_cpu_lease *lease = nullptr;
+	switch_gpu_backing_token producer = {};
+	ASSERT_EQ(switch_gpu_backing_snapshot_read(allocation, &producer, &lease), 0);
+	EXPECT_EQ(producer.queue, last.queue);
+	EXPECT_EQ(producer.value, last.value);
+	ASSERT_EQ(switch_gpu_backing_cpu_release_owned(&lease, 0), 0);
+	switch_gpu_backing_release(allocation);
+}

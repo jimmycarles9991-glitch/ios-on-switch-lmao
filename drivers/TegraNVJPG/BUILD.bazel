@@ -34,10 +34,13 @@ kernel_driver(
     name = "TegraNVJPG",
     srcs = [
         "TegraNVJPG.cpp",
+        "TegraNVJPGRepack.cpp",
+        "TegraNVJPGStats.cpp",
         "TegraNVJPGUserClient.cpp",
         "firmware.S",
     ],
     hdr_deps = [
+        "drivers/TegraGM20B",
         "drivers/TegraHost1x",
         "drivers/TegraSMMU",
         "drivers/TegraVIC",

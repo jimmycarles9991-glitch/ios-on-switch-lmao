@@ -214,3 +214,62 @@ host_test(
     ],
     deps = ["//drivers/TegraGM20B/test:event_kernel"],
 )
+
+# A wedged engine goes back to the idle gate, which powers it on at a later decode (TegraNVDEC.cpp builds in no host
+# test; switch_nvdec_submit_test drives the queue through it).
+host_test(
+    name = "tegra_nvdec_layout_source_test",
+    srcs = ["tegra_nvdec_layout_source_test.cpp"],
+    data = [
+        "//drivers/TegraNVDEC:SwitchNVDECJobs.cpp",
+        "//drivers/TegraNVDEC:SwitchNVDECOutput.cpp",
+        "//drivers/TegraNVDEC:TegraNVDEC.cpp",
+        "//drivers/TegraNVDEC:TegraNVDECUserClient.cpp",
+    ],
+)
+
+host_test(
+    name = "tegra_nvdec_recover_source_test",
+    srcs = ["tegra_nvdec_recover_source_test.cpp"],
+    data = [
+        "//drivers/TegraNVDEC:SwitchNVDECJobs.cpp",
+        "//drivers/TegraNVDEC:TegraNVDEC.cpp",
+        "//drivers/TegraNVDEC:TegraNVDECUserClient.cpp",
+    ],
+)
+
+# TegraNVDECCancel.cpp on threads: NVJPG's gate takes the shared power lock while NVDEC's falcon reboots and proves
+# itself after a cancellation, under a hold of NVDEC's gate; parking an engine that did not come back takes the lock.
+host_shims(
+    name = "cancel_kernel",
+    headers = [
+        "IOKit/IOLib.h",
+        "IOKit/IOLocks.h",
+        "kern/thread_call.h",
+    ],
+    stubs = "switch_nvdec_cancel_stubs.h",
+)
+
+CANCEL_INPUTS = [
+    "//drivers/TegraNVDEC:TegraNVDECCancel.cpp",
+    "//drivers/TegraNVDEC:TegraNVDECEngine.h",
+    "//drivers/TegraNVDEC:SwitchNVDECJobs.h",
+    "//drivers/TegraHost1x:TegraHost1x.h",
+]
+
+host_test(
+    name = "switch_nvdec_cancel_test",
+    srcs = ["switch_nvdec_cancel_test.cpp"],
+    additional_compiler_inputs = CANCEL_INPUTS,
+    deps = [":cancel_kernel"],
+)
+
+host_test(
+    name = "switch_nvdec_cancel_tsan_test",
+    srcs = ["switch_nvdec_cancel_test.cpp"],
+    additional_compiler_inputs = CANCEL_INPUTS,
+    copts = ["-fsanitize=thread"],
+    linkopts = ["-fsanitize=thread"],
+    sanitize = False,
+    deps = [":cancel_kernel"],
+)

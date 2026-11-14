@@ -212,26 +212,6 @@ nvkm_event_ntfy(struct nvkm_event *event, int id, u32 bits)
 }
 
 void
-nvkm_event_ntfy_active(struct nvkm_event *event, int id, u32 bits)
-{
-    struct nvkm_event_ntfy *ntfy, *next;
-    unsigned long flags;
-    if (!event->refs || WARN_ON(id >= event->index_nr))
-        return;
-    write_lock_irqsave(&event->list_lock, flags);
-    list_for_each_entry_safe(ntfy, next, &event->ntfy, head) {
-        if (ntfy->id != id || !(ntfy->bits & bits) || !atomic_read(&ntfy->allowed))
-            continue;
-        if (ntfy->func(ntfy, ntfy->bits & bits) == NVKM_EVENT_DROP && ntfy->wait) {
-            atomic_set(&ntfy->allowed, 0);
-            nvkm_event_ntfy_state(ntfy);
-            list_del_init(&ntfy->head);
-        }
-    }
-    write_unlock_irqrestore(&event->list_lock, flags);
-}
-
-void
 nvkm_event_fini(struct nvkm_event *event)
 {
 	if (event->refs) {

@@ -191,6 +191,18 @@ static inline unsigned tgm_interleave(const uint8_t *level, const uint16_t *entr
 	return n;
 }
 
+/* sched_update's half of its runlist memory: the one the host is not reading. While the previous submit is still pending
+ * (PFIFO_RUNLIST_SUBMIT_INFO bit 20 set past nvkm's wait) the host may be reading either half, so the update is not
+ * written: 0, `next` left as it was. Else 1, *segment the half to write, `next` the other. */
+static inline int tgm_runlist_segment(unsigned *next, int pending, unsigned *segment)
+{
+	if (pending)
+		return 0;
+	*segment = *next;
+	*next ^= 1;
+	return 1;
+}
+
 /* The deadline: the display's vsyncs to Core Animation give the vblank each frame aims for and the interval. */
 #define TGM_INTERVAL_MAX_NS (100ull * 1000 * 1000)
 
@@ -225,6 +237,14 @@ static inline uint64_t tgm_hold_time(uint64_t vblank, uint64_t interval, uint64_
 	if (vblank + interval > now + lead)
 		return vblank + interval - lead;
 	return now;
+}
+
+/* Where tgm_hold_time's first case ends: before it, whether the channel is on the GPU makes no difference. */
+static inline uint64_t tgm_hold_lead_start(uint64_t vblank, uint64_t expected, uint64_t preempt)
+{
+	const uint64_t lead = expected + preempt;
+
+	return vblank > lead ? vblank - lead : 0;
 }
 
 /* PTIMER counts at its own rate (deploy logs: 1.627 ns a unit): the kernel clock's nanoseconds per PTIMER unit in 16.16

@@ -63,7 +63,6 @@ struct nvkm_event_ntfy {
 };
 
 void nvkm_event_ntfy(struct nvkm_event *, int id, u32 bits);
-void nvkm_event_ntfy_active(struct nvkm_event *, int id, u32 bits);
 bool nvkm_event_ntfy_valid(struct nvkm_event *, int id, u32 bits);
 void nvkm_event_ntfy_add(struct nvkm_event *, int id, u32 bits, bool wait, nvkm_event_func,
 			 struct nvkm_event_ntfy *);

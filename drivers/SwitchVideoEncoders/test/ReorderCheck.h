@@ -15,9 +15,9 @@
 // `bPictures`: the B pictures between anchors the session should code (0: none).
 bool reorder_check(CFDictionaryRef spec, int allowReordering, int maxFrameDelay, int bPictures, char *line,
                    size_t size);
-// The same clip with reordering unset over an engine that refuses every B picture: the first group's two frames come
-// out as unreferenced I pictures after their anchor, every later one as an IDR or P picture in display order, and all
-// decode back exact.
-bool reorder_refusal_check(CFDictionaryRef spec, char *line, size_t size);
+// The same clip with reordering unset over an engine that refuses some B pictures: a refused group's frames come out as
+// unreferenced I pictures after their anchor, `bPictures` B and `iPictures` such I pictures in all, every frame in
+// decode order with its time, and all decode back exact.
+bool reorder_refusal_check(CFDictionaryRef spec, int bPictures, int iPictures, char *line, size_t size);
 
 #endif

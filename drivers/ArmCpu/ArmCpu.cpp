@@ -11,6 +11,7 @@
 #include <libkern/kernel_mach_header.h>
 #include <arm64/switch_smp.h>
 #include "../ArmGIC/ArmGIC.h"
+#include "../ArmGIC/SwitchGicV2.h"
 #include "../../kits/SwitchDMA/SwitchDcache.h"
 #include "../../kits/SwitchDMA/SwitchHwPage.h"
 #include "../../kits/SwitchDT/SwitchDTProperty.h"
@@ -70,6 +71,9 @@ volatile uint64_t armcpu_ipi_selftest_sent = 0;
 volatile uint32_t armcpu_gic_boot[8];
 volatile uint32_t armcpu_core_timer[8],
     armcpu_core_sgi[8];  // per logical core: architectural timer interrupts and SGI 0 taken
+#if DEVELOPMENT || DEBUG
+volatile uint32_t armcpu_core_spi[8];  // per logical core: SPIs taken (SwitchPowerStats' 10 s line)
+#endif
 // Secondary startup timer probe: bits 1/2 virtual deadline passed / PPI 27 pending, 4/8 the same for the physical
 // timer (PPI 30); diag = virtual ticks, physical ticks, (CNTV_CTL << 8 | CNTP_CTL), spins, (IGROUPR0 << 32 | ISENABLER0).
 volatile uint32_t armcpu_timer_probe[8];
@@ -137,6 +141,9 @@ class ArmCpu : public IOCPU {
     static void observeAllThread(void *, wait_result_t);
     void enableGic() const;
     void interrupt();
+    void timerInterrupt() const;
+    void ipiInterrupt() const;
+    static void otherInterrupt(uintptr_t distributor, uint32_t intid);
     static void dispatch(void *target, void *, void *, int);
 
 public:
@@ -273,9 +280,9 @@ static uint8_t gicV2TargetMask(uint32_t bankedTargets)
 
 static void gicV2Send(uint32_t target)
 {
-    __asm__ volatile("dsb ishst" ::: "memory");
-    write32(gDist, 0xf00, target << 16);  // TargetListFilter=0, SGI 0.
-    __asm__ volatile("dsb sy\nisb" ::: "memory");
+    switchgic::sendSgi([target] {
+        write32(gDist, 0xf00, target << 16);  // TargetListFilter=0, SGI 0.
+    });
 }
 
 // Set once every secondary core passed its startup self- and cross-IPI qualification (observeThread): from then on
@@ -1111,54 +1118,90 @@ void ArmCpu::dispatch(void *target, void *, void *, int)
 // its slot, with interrupts masked), not exclusive-monitor read-modify-writes.
 void ArmCpu::interrupt()
 {
+    if (gicV2) {
+        struct CpuInterface {
+            const ArmCpu *cpu;
+            uintptr_t registers;
+            uintptr_t distributor;
+
+            uint32_t acknowledge() const
+            {
+                return read32(registers, 0xc);
+            }
+
+            // The whole acknowledge: an SGI's source CPU bits [12:10] go back with its INTID.
+            void end(uint32_t acknowledge) const
+            {
+                write32(registers, 0x10, acknowledge);
+            }
+
+            void timer() const
+            {
+                cpu->timerInterrupt();
+            }
+
+            void ipi(uint32_t acknowledge) const
+            {
+                cpu->ipiInterrupt();
+                if (!__atomic_load_n(&gIpiQualified, __ATOMIC_RELAXED))
+                    gicV2IpiObserved(cpu->logicalId, acknowledge);
+            }
+
+            void other(uint32_t intid) const
+            {
+#if DEVELOPMENT || DEBUG
+                countOwn(armcpu_core_spi[cpu->logicalId]);
+#endif
+                ArmCpu::otherInterrupt(distributor, intid);
+            }
+        } cpuInterface{this, gV2CpuIf, gDist};
+
+        switchgic::acknowledgeLoop(cpuInterface);
+        return;
+    }
     for (;;) {
         uint64_t id = 0;
-        uint32_t v2Acknowledge = 0;
-        if (gicV2) {
-            v2Acknowledge = read32(gV2CpuIf, 0xc);
-            id = v2Acknowledge & 0x3ffU;
-            // Pair with the sender's store barrier before consuming IPI state.
-            __asm__ volatile("dmb ish" ::: "memory");
-        } else {
-            __asm__ volatile("mrs %0, icc_iar1_el1" : "=r"(id));
-        }
-        if ((id & 0xffffff) >= 1020) {
+        __asm__ volatile("mrs %0, icc_iar1_el1" : "=r"(id));
+        const uint32_t intid = static_cast<uint32_t>(id & 0xffffff);
+        if (intid >= switchgic::kSpurious)
             break;
-        }
-        if ((id & 0xffffff) == 27) {
-            rtclock_intr(0);
-            countOwn(armcpu_core_timer[logicalId]);
-        } else if ((id & 0xffffff) == 0) {
-            if (ipi_handler != nullptr) {
-                ipi_handler();
-            }
-            countOwn(armcpu_core_sgi[logicalId]);
-            if (gicV2 && !__atomic_load_n(&gIpiQualified, __ATOMIC_RELAXED)) {
-                gicV2IpiObserved(logicalId, v2Acknowledge);
-            }
+        if (intid == switchgic::kTimerPpi) {
+            timerInterrupt();
+        } else if (intid == switchgic::kIpiSgi) {
+            ipiInterrupt();
         } else {
-            const uint32_t intid = static_cast<uint32_t>(id & 0xffffff);
-            if (intid >= 32 && switch_gic_dispatch(intid)) {
-                // A driver's vector ran (or masked its soft-disabled line); the EOI below is still the only one.
-            } else if (intid >= 32 && gDist != 0) {
-                armcpu_spi_unhandled = armcpu_spi_unhandled + 1;
-                armcpu_spi_unhandled_id = intid;
-                write32(gDist, 0x180 + (intid / 32) * 4, 1U << (intid % 32));
-            } else {
-                panic("ArmCpu: unexpected architectural IRQ %llu", id);
-            }
+            otherInterrupt(gDist, intid);
         }
-        if (gicV2) {
-            // Preserve source-CPU bits [12:10] for SGIs, not only the 10-bit INTID. The barrier lets a driver's
-            // status-clear reach its device before the EOI, so a level line is not taken again. None after (Linux
-            // has none either): the next GICC_IAR read goes to the same Device-nGnRnE peripheral, so the EOI arrives
-            // before it, and the exception return synchronizes.
-            __asm__ volatile("dsb sy" ::: "memory");
-            write32(gV2CpuIf, 0x10, v2Acknowledge);
-        } else {
-            __asm__ volatile("msr icc_eoir1_el1, %0\nisb" ::"r"(id) : "memory");
-        }
+        __asm__ volatile("msr icc_eoir1_el1, %0\nisb" ::"r"(id) : "memory");
     }
+}
+
+void ArmCpu::timerInterrupt() const
+{
+    rtclock_intr(0);
+    countOwn(armcpu_core_timer[logicalId]);
+}
+
+void ArmCpu::ipiInterrupt() const
+{
+    if (ipi_handler != nullptr) {
+        ipi_handler();
+    }
+    countOwn(armcpu_core_sgi[logicalId]);
+}
+
+// An SPI goes to its driver's vector; one no driver owns is disabled at `distributor` and counted.
+void ArmCpu::otherInterrupt(uintptr_t distributor, uint32_t intid)
+{
+    if (intid >= 32 && switch_gic_dispatch(intid))
+        return;
+    if (intid >= 32 && distributor != 0) {
+        armcpu_spi_unhandled = armcpu_spi_unhandled + 1;
+        armcpu_spi_unhandled_id = intid;
+        write32(distributor, 0x180 + (intid / 32) * 4, 1U << (intid % 32));
+        return;
+    }
+    panic("ArmCpu: unexpected architectural IRQ %u", intid);
 }
 
 // This core's GICv2 CPU interface, for a lost-interrupt panic (ArmGIC::describe). An SPI pending and enabled for this
@@ -1186,9 +1229,9 @@ void ArmCpu::signalCPU(IOCPU *target)
             panic("ArmCpu: mixed GIC CPU signal target");
         }
         if (peer == this) {
-            __asm__ volatile("dsb ishst" ::: "memory");
-            write32(dist, 0xf00, 2U << 24);  // Requesting CPU, SGI 0.
-            __asm__ volatile("dsb sy\nisb" ::: "memory");
+            switchgic::sendSgi([this] {
+                write32(dist, 0xf00, 2U << 24);  // Requesting CPU, SGI 0.
+            });
         } else {
             const uint32_t targetMask = __atomic_load_n(&armcpu_gic_targets[peer->logicalId], __ATOMIC_ACQUIRE);
             if (!gNativeSmp || !targetMask || (targetMask & (targetMask - 1))) {
@@ -1367,9 +1410,9 @@ extern "C" void armcpu_ipi_selftest(uint64_t aff)
             return;
         }
         __atomic_fetch_add(&armcpu_ipi_selftest_sent, UINT64_C(1), __ATOMIC_RELAXED);
-        __asm__ volatile("dsb ishst" ::: "memory");
-        write32(gDist, 0xf00, 2U << 24);
-        __asm__ volatile("dsb sy\nisb" ::: "memory");
+        switchgic::sendSgi([] {
+            write32(gDist, 0xf00, 2U << 24);
+        });
         return;
     }
     const uint64_t sgi =

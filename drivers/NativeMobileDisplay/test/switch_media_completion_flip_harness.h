@@ -20,6 +20,7 @@
 #include "../../TegraGM20B/SwitchGpuBacking.h"
 #include "../../TegraHost1x/SwitchHost1xFence.h"
 #include "../SwitchCompletionFlip.h"
+#include "display_filter_context.h"
 #include "../SwitchDisplayComposition.h"
 #include "../SwitchDisplayRetirement.h"
 #include "../SwitchDisplayMemoryEnvelope.h"
@@ -52,12 +53,13 @@ inline std::set<uint64_t> gUncertain, gDoneAtArm;  // producers' fences: still r
     throw std::runtime_error(text);
 }
 
-// Interrupts or preemption off: completionFlipLock held, or host1x's syncpoint filter running. Nothing that blocks or
+// Interrupts or preemption off: a simple lock held, or host1x's syncpoint filter running. Nothing that blocks or
 // logs may run then (XNU panics on a mutex with preemption disabled); IOLog throws here.
 inline int gPreemptionOff = 0;
 
 __attribute__((format(printf, 1, 2))) inline void IOLog(const char *format, ...)
 {
+    filterMayNot("IOLog");
     if (gPreemptionOff)
         throw std::runtime_error(std::string("IOLog with preemption disabled: ") + format);
     char text[512];
@@ -86,6 +88,7 @@ using IOInterruptState = int;
 
 inline IOInterruptState IOSimpleLockLockDisableInterrupt(IOSimpleLock *lock)
 {
+    filterMayNot("IOSimpleLock");
     if (lock->held)
         throw std::runtime_error("completionFlipLock taken while held");
     lock->held = true;
@@ -273,7 +276,7 @@ struct Display {
     uint64_t planeRequestedAt = 0, frameEnds = 10;
     unsigned stPlaneFlips = 0, stPlaneDropped = 0, deadlines = 0, releases = 0, planeUnderflowRun = 0;
     unsigned notShown = 0;
-    IOSimpleLock lock, *completionFlipLock = nullptr;
+    bool flipStarted = false;
     std::vector<uint64_t> shown;  // the take sequence of every set the latch saw taken
     std::function<void()> midFrameEnd;
 
@@ -282,7 +285,6 @@ struct Display {
         gPreemptionOff = 0;
         landscapeState = {};
         mediaFlip = {};
-        mediaFlipsRefused = mediaFilterOff = false;
         mediaFlipUnverified = PlaneCommits::kNone;
         mediaFlipRequestedSeq = 0;
         planeLatch.values = sets;
@@ -319,6 +321,11 @@ struct Display {
         return false;
     }
 
+    static bool host1xFlipBusy()
+    {
+        return false;
+    }
+
     void getDisplayDimensions(uint32_t *width, uint32_t *height)
     {
         *width = 720;
@@ -350,7 +357,12 @@ struct Display {
 
     void startCompletionFlip()
     {
-        completionFlipLock = &lock;
+        flipStarted = true;
+    }
+
+    bool completionFlipStarted() const
+    {
+        return flipStarted;
     }
 
     static bool completionFlipIdle()
@@ -392,6 +404,7 @@ struct Display {
     // completion's do.
     void filter(uint64_t threshold = 0)
     {
+        const FilterContext context;
         model.completing = true;
         ++gPreemptionOff;
         for (const auto &waiter : gWaiters)
@@ -409,9 +422,7 @@ struct Display {
         gpuStatus = status;
         gpuDonePending = true;
         model.completing = true;
-        const IOInterruptState state = IOSimpleLockLockDisableInterrupt(completionFlipLock);
-        writeMediaFlipLocked(status);
-        IOSimpleLockUnlockEnableInterrupt(completionFlipLock, state);
+        writeMediaFlip(status);
         model.completing = false;
     }
 
@@ -480,16 +491,21 @@ struct Display {
     }
 
     // NativePlanesDisplay.h retireUnshown: carried by the set still out, or retired now.
+    void retireUnshown(uint64_t seq)
+    {
+        if (planeLatch.requested())
+            planeSetOf(planeLatch.armed).seq = seq;
+        else if (planeHeldSet)
+            planeHeld.seq = seq;
+        else
+            retireThrough(seq, mach_absolute_time());
+    }
+
     void planeNotShown()
     {
         ++notShown;
         planeTarget = planeSetOf(planeLatch.requested() ? planeLatch.armed : planeLatch.active);
-        if (planeLatch.requested())
-            planeSetOf(planeLatch.armed).seq = planeFencing.seq;
-        else if (planeHeldSet)
-            planeHeld.seq = planeFencing.seq;
-        else
-            retireThrough(planeFencing.seq, mach_absolute_time());
+        retireUnshown(planeFencing.seq);
     }
 
     void planeOut(const PlaneSet &p)

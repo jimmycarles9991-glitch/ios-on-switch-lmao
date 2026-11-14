@@ -1,8 +1,7 @@
 // SPDX-License-Identifier: MIT
 #import "RawMetalInternal.h"
 #include "raw_fragment_tests.h"
-#include "raw_written_textures.h"
-#include "raw_xr_pass.h"
+#include "raw_render_variant.h"
 
 raw::CubicBinds cubicBinds(const raw::Pipeline &pl, RMSampler *const samplers[16],
                            RMTexture *const textures[raw::kStageTextures])
@@ -82,22 +81,23 @@ static raw::Pipeline *unpackedVariant(RMPipeline *p, const std::string &suffix, 
 // draw that first needs it, the only place they are known (the texture unit has no cubic filter for another record to
 // stand in with). Until it is, a sampled variant's draws sample those textures' stand-ins, and a command buffer with any
 // other variant's draws waits at its queue's head (RawMetalSchedule.mm variantReadiness); one no compiler makes fails
-// that command buffer, as a pipeline Metal could not compile. Its record is kept on disk, so a later boot draws it raw
-// from its first draw. A RenderBox state's compile takes seconds on the device, which no encoding thread may wait for.
+// that command buffer, as a pipeline Metal could not compile, and the next draw that needs it asks afresh. Its record is
+// kept on disk, so a later boot draws it raw from its first draw. A RenderBox state's compile takes seconds on the device, which no encoding thread may wait for.
 static raw::Variant<raw::Pipeline> *renderVariant(RMPipeline *p, const raw::CubicBinds &binds, uint8_t tests,
                                                   bool planes, uint16_t xrSlots,
                                                   const std::vector<raw::WrittenTexture> &written)
 {
-    const std::string cubic = binds.empty() ? std::string() : binds.key();
-    const std::string forms = (planes ? std::string(raw::kXrPlanesVariant) : std::string()) +
-                              (xrSlots ? raw::xrSampledVariant(xrSlots) : std::string()) + raw::writtenVariant(written);
-    const std::string suffix = cubic + forms;
-    const std::string name = cubic + (tests ? " | tests=" + std::to_string(tests) : std::string()) + forms;
+    const raw::RenderVariant forms = {binds, tests, planes, xrSlots, written};
+    const std::string suffix = forms.untested().name(), name = forms.name();
     std::shared_ptr<raw::Variant<raw::Pipeline>> variant;
     {
         std::lock_guard<raw::Mutex> lock(p->_variantLock);
-        if (const auto found = p->_variants.find(name); found != p->_variants.end())
-            return found->second.get();
+        if (const auto found = p->_variants.find(name); found != p->_variants.end()) {
+            if (found->second->state() != raw::Variant<raw::Pipeline>::State::Failed || !gRM->completion)
+                return found->second.get();
+            p->_replacedVariants.push_back(std::move(found->second));
+            p->_variants.erase(found);
+        }
         variant = std::make_shared<raw::Variant<raw::Pipeline>>();
         p->_variants.emplace(name, variant);
     }
@@ -111,11 +111,7 @@ static raw::Variant<raw::Pipeline> *renderVariant(RMPipeline *p, const raw::Cubi
     request.key = p->_key + name;
     request.caTransform = p->_caTransform;
     request.own = !p->_packable;
-    request.cubic = binds;
-    request.fragmentTests = tests;
-    request.twoPlane = planes;
-    request.xrSlots = xrSlots;
-    request.written = written;
+    request.variant = forms;
     request.resolveDescriptor = true;
     // the state's own record draws a test class's draws it could not be made for, never a cubic, two-plane or written
     // variant's
@@ -127,7 +123,7 @@ static raw::Variant<raw::Pipeline> *renderVariant(RMPipeline *p, const raw::Cubi
     }
     raw::Completion::Ask fallback = request;
     fallback.key = p->_key + suffix;
-    fallback.fragmentTests = 0;
+    fallback.variant = forms.untested();
     completion->askVariant(std::move(request), [variant, base, fallback, tests,
                                                 completion](raw::Pipeline *made, const std::string &failure) {
         if (!made && !failure.empty()) {
@@ -197,6 +193,8 @@ static std::array<uint32_t, 2> xrSampledSlots(const raw::Pipeline &pl,
         else
             standIns[1] |= xrSlots;
     }
+    if (standIns[0] | standIns[1])
+        rmPipelineVeto(_cb, VetoShadows);
     for (uint32_t stage = 0; stage < 2; stage++)
         for (uint32_t slots = standIns[stage]; slots; slots &= slots - 1)
             _cb->_xrStandIns.insert(_tex[stage][__builtin_ctz(slots)]);

@@ -17,8 +17,9 @@
 // -[CIContext initWithOptions:] in 21H461 has Metal or GLES and no CPU renderer; without Metal it makes a GLES context that does
 // not exist and crashes at once, and launchd's respawns hang Settings) and, by default, every other process (the kernel's
 // grant admits them too; TEGRA_GPU_ALL_CLIENTS=0 limits it to those named here). A process left out gets nil from here and
-// keeps rendering on the CPU, as does one whose device does not open (the kernel refuses it, the GPU pool is full). Every process but the render server compiles the
-// Metal source and stitched libraries Core Image makes (NMB_SYSTEM_COMPILER, the frontend's in-process MTLCompiler).
+// keeps rendering on the CPU, as does one whose device does not open (raw_device_open.h: one error line naming the cause's
+// class); Metal's next ask opens afresh. Every process but the render server compiles the Metal source and stitched
+// libraries Core Image makes (NMB_SYSTEM_COMPILER, the frontend's in-process MTLCompiler).
 //
 // Knobs, environment variables of the process (none is a boot-arg):
 //   TEGRA_GPU_ALL_CLIENTS=0   only the processes named above get a device (default: every process)
@@ -73,6 +74,7 @@
 #include "NativeBridgeMetalFrontend.h"
 #include "RawMetal.h"
 #include "SwitchRefusal.h"
+#include "raw_device_open.h"
 #include "bridge/NativeMetalObjects.h"
 
 // The build's stack key (build-tegra-gm20b-metal.py); 0 takes a pack of any build (never shipped so).
@@ -621,6 +623,8 @@ void startRates()
             os_log(logger(), "TegraGM20BMetal: %{public}s %{public}s", processWord(), line);
         if (gRaw && raw_metal_fetch_rates(line, sizeof line))
             os_log(logger(), "TegraGM20BMetal: %{public}s %{public}s", processWord(), line);
+        if (gRaw && raw_metal_split_rates(line, sizeof line))
+            os_log(logger(), "TegraGM20BMetal: %{public}s %{public}s", processWord(), line);
         if (gRaw && raw_metal_encode_rates(line, sizeof line))
             os_log(logger(), "TegraGM20BMetal: %{public}s %{public}s", processWord(), line);
         if (gRaw && raw_metal_fetch_keys(line, sizeof line))
@@ -782,14 +786,12 @@ private:
     id opened_ = nil;
 };
 
-id openDevice(unsigned port)
+// One open of the process's device; nil with what it met in `failure` (raw_device_open.h)
+id openOnce(unsigned port, raw::OpenFailure &failure)
 {
-    static id device;
-    static bool tried;
-    @synchronized([TegraGM20BMetalDevice class]) {
-        if (tried)
-            return device;
-        tried = true;
+    id device = nil;
+    failure = raw::OpenFailure::Structural;
+    {
         const bool renderServer = strcmp(getprogname(), "backboardd") == 0;
         // ScreenshotServicesService: PencilKit in the screenshot thumbnail aborts the process without a device (TegraGM20B.cpp).
         if (!renderServer && strcmp(getprogname(), "iconservicesagent") != 0 &&
@@ -881,15 +883,20 @@ id openDevice(unsigned port)
                 raw_metal_complete_states(m2v.cacheDir(),
                                           rawNativeSeed(pack, nativeSeed, sizeof nativeSeed) ? nativeSeed : nullptr);
             } else {
-                os_log_error(logger(),
-                             "TegraGM20BMetal: raw GM20B path off in %{public}s (%{public}@): m2v device kept",
-                             getprogname(), why);
+                os_log_error(
+                    logger(),
+                    "TegraGM20BMetal: raw GM20B path off in %{public}s (%{public}@, %{public}s): m2v device kept",
+                    getprogname(), why, raw_metal_open_failure());
             }
         }
         if (!device)
             device = m2v.device();
-        if (!device)
+        if (!device) {
+            // the bridge's own device opened but not its Metal object (the IPSW kind's device class): every open meets it
+            uint64_t memory[3];
+            failure = native_bridge_metal_memory(memory) ? raw::OpenFailure::Structural : raw::OpenFailure::Transient;
             return nil;
+        }
         const uint64_t openNs = clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - openBegan;
         os_log(logger(), "TegraGM20BMetal: device %{public}s ready in %{public}s, open %llu ms%{public}s",
                [[(id<MTLDevice>)device name] UTF8String], getprogname(), (unsigned long long)(openNs / 1000000),
@@ -897,6 +904,21 @@ id openDevice(unsigned port)
 #if SWITCH_DEBUG
         startRates();
 #endif
+        return device;
+    }
+}
+
+id openDevice(unsigned port)
+{
+    static id device;
+    @synchronized([TegraGM20BMetalDevice class]) {
+        if (device)
+            return device;
+        raw::OpenFailure failure = raw::OpenFailure::Structural;
+        device = openOnce(port, failure);
+        if (!device)
+            os_log_error(logger(), "TegraGM20BMetal: no device in %{public}s (%{public}s)", getprogname(),
+                         raw::openFailureText(failure));
         return device;
     }
 }

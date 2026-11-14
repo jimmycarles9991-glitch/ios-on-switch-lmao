@@ -193,11 +193,17 @@ TEST(BlendKill, DestinationFactorsOnlyOnNormalizedTargets)
     EXPECT_EQ(decide(under), raw::kNoopSourceRgba0000);
 }
 
+TEST(BlendKill, OnBesideADepthOrStencilAttachment)
+{
+    for (const char *ds : {"252/0", "0/253", "260/260"}) {
+        State zeta;
+        zeta.ds = ds;
+        EXPECT_EQ(decide(zeta), raw::kNoopSourceRgba0000) << ds;
+    }
+}
+
 TEST(BlendKill, OffForEveryOtherShapeOfState)
 {
-    State depth;
-    depth.ds = "252/0";
-    EXPECT_EQ(decide(depth), raw::kNoopNever);
     State coverage;
     coverage.alphaControl = 1;
     EXPECT_EQ(decide(coverage), raw::kNoopNever);

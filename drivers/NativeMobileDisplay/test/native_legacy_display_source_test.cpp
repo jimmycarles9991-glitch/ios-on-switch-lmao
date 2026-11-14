@@ -16,12 +16,14 @@ using switch_ios::test::SourceText;
 using testing::HasSubstr;
 
 namespace {
-// NativeLegacyDisplay.cpp with the headers its class body includes for scanout, retirement and resume.
+// NativeLegacyDisplay.cpp with the headers its class body includes for scanout, retirement, resume and the frame end.
 const std::string &display()
 {
-    static const std::string source = SourceText("../NativeLegacyDisplay.cpp") + SourceText("../SwitchScanoutStart.h") +
-                                      SourceText("../SwitchDirectSlots.h") + SourceText("../SwitchRetireDisplay.h") +
-                                      SourceText("../SwitchDisplayResume.h");
+    static const std::string source =
+        SourceText("../NativeLegacyDisplay.cpp") + SourceText("../SwitchScanoutStart.h") +
+        SourceText("../SwitchDirectSlots.h") + SourceText("../SwitchRetireDisplay.h") +
+        SourceText("../SwitchDisplayResume.h") + SourceText("../SwitchFrameEndDisplay.h") +
+        SourceText("../SwitchGpuDoneDisplay.h") + SourceText("../SwitchFlipDeadlineDisplay.h");
     return source;
 }
 
@@ -95,8 +97,8 @@ TEST(DirectScanoutSource, NoEarlyRetireOrCollapseOnceRetiringAtTheLatch)
 // frame whose rendering was lost is neither flipped to nor copied on the CPU.
 TEST(DirectScanoutSource, LateOffersAreTheDriversAndLostFramesAreNotShown)
 {
-    const CodeText deadline = method("static void gpuDeadlineFired(");
-    EXPECT_TRUE(deadline.Before("tegra_gm20b_scanout_outstanding(self)", "panic("));
+    const CodeText deadline = method("void gpuDeadlineCheck()");
+    EXPECT_TRUE(deadline.Before("tegra_gm20b_scanout_outstanding(this)", "panic("));
     EXPECT_TRUE(deadline.Has("fence only, direct slot"));
     EXPECT_TRUE(method("void finishGpuCopy(int status)")
                     .Before("if (status == TEGRA_SCANOUT_SOURCE_LOST) {", "gpuBypass = true;"));
@@ -204,13 +206,45 @@ TEST(VsyncPhaseSource, OneVsyncAFrame)
                             "if (status & kFrameEndInt) frameEnds = frameEnds + 1;"));
 }
 
+// A failed change of mode, a refused completion flip or an underflow run holds no route off: whether landscape, direct
+// scanout and completion flips are tried reads no failure state.
+TEST(DisplayRoutesSource, NoFailureHoldsARouteOff)
+{
+    const CodeText selection(SourceText("../SwitchLandscapeSelection.h"));
+    EXPECT_TRUE(selection.Has("return planesReady() && directAttached && !landscapeRunHoldsPortrait();"));
+    EXPECT_TRUE(
+        CodeText(SourceText("../SwitchScanoutStart.h")).Has("bool directScanChosen() const { return directOn; }"));
+    EXPECT_FALSE(code().Has("Hold.on()"));
+}
+
 TEST(VsyncPhaseSource, NeverFiringVpulse2CostsOneLine)
 {
     const CodeText present = method("void notePhasePresent(uint64_t stamp, const FrameMark &mark)");
-    EXPECT_TRUE(present.Has("phaseFailed = true;"));
+    EXPECT_TRUE(present.Has("if (vpulseProgrammed && !vpulseSeen && dc && !hwSuspended) {"))
+        << "DC A read only while probing, and never powered down";
+    EXPECT_TRUE(present.Has("phaseProbe.flip(true, vpulse2Routed(), false)"));
+    EXPECT_TRUE(present.Has("phaseProbeEnded(step);"));
     EXPECT_FALSE(present.Has("panic(")) << "a V_PULSE2 that never fired costs one line, not the boot";
-    EXPECT_TRUE(present.Has("IOLog(\"SwitchDisplay: vsync phase off for this boot"));
+    const CodeText ended = method("void phaseProbeEnded(VsyncPhaseProbe::Step step)");
+    EXPECT_TRUE(ended.Has("vsync at V_BLANK"));
+    EXPECT_TRUE(ended.Has("dropVpulse2();"));
+    EXPECT_TRUE(method("void dropVpulse2()").Has("vpulseProgrammed = false;"));
     EXPECT_TRUE(method("unsigned noteLong(uint32_t frames, const FrameMark &mark)").Has("kLongRate"));
+}
+
+// The probe asks whether V_PULSE2 reaches the CPU, so it only counts flips with V_PULSE2 routed (enabled and unmasked):
+// V_PULSE2 is programmed only with a vsync client and unmasked in the same step, and goes with the last client, so a
+// masked V_PULSE2 never fails a probe.
+TEST(VsyncPhaseSource, Vpulse2IsProbedOnlyWhileRouted)
+{
+    const CodeText program = method("void programPhase(uint32_t leadUs)");
+    EXPECT_TRUE(program.Has("(!vpulseProgrammed && !vsyncArmed)"));
+    EXPECT_TRUE(program.Before("dc[kDcIntEnable] = dc[kDcIntEnable] | kVpulse2Int;", "writeIntMask(0, kVpulse2Int);"));
+    EXPECT_FALSE(program.Has("else armVsync unmasks it"));
+    EXPECT_TRUE(method("bool vpulse2Routed()").Has("dc[kDcIntEnable] & dc[kDcIntMask] & kVpulse2Int"));
+    const CodeText notify = method("void vblankNotify()");
+    EXPECT_TRUE(notify.Before("writeIntMask(kVblankInt, 0);", "dropVpulse2();"));
+    EXPECT_TRUE(method("bool phaseDelivering() const").Has("vpulseProgrammed"));
 }
 
 TEST(VsyncPhaseSource, ReplacementsAndResume)
@@ -241,7 +275,7 @@ TEST(DisplayProbeSource, Wiring)
 
 TEST(DisplayProbeSource, AcceptedSwapTableNeverDropsThePendingHead)
 {
-    const CodeText add = method("bool addValidated(");
+    const CodeText add = method("int addValidated(");
     EXPECT_FALSE(add.Has("if (slot == 8) slot = 0;"));
     EXPECT_TRUE(add.Has("validatedAt[i] < validatedAt[slot]"));
     EXPECT_TRUE(method("void kickOnce()").Has("pruneValidated();"));
@@ -287,22 +321,63 @@ TEST(DisplayStatsSource, QuietDisplayWindowsAreLogged)
 
 // An idle display wakes no core: FRAME_END reaches the CPU only while something waits for a frame end. Holders outside the
 // gate (TegraPanel, the colour unit) write INT_MASK too, so every INT_MASK write is one of the three under its lock; a kick
-// unmasks it before any work that waits for a frame end; the last frame end with nothing waiting masks it.
+// unmasks it before any work that waits for a frame end, through the lock only when the gate's shadow says masked; the
+// last frame end with nothing waiting masks it.
 TEST(FrameEndSource, MaskedWhileNothingWaits)
 {
     EXPECT_EQ(code().Count("dc[kDcIntMask] ="), 3u);
     for (const char *helper :
          {"void writeIntMask(uint32_t clear, uint32_t set)", "void unmaskFrameEnd()", "void maskIdleFrameEnd()"})
         EXPECT_TRUE(method(helper).Has("IOSimpleLockLockDisableInterrupt(intMaskLock)")) << helper;
-    EXPECT_TRUE(method("void kickSwapQueue() override").StartsWith("unmaskFrameEnd();"));
+    EXPECT_TRUE(method("void kickSwapQueue() override").StartsWith("if (primary) kickUnmaskFrameEnd();"));
     EXPECT_TRUE(method("void vblankTick()")
-                    .EndsWith("if ((status & kFrameEndInt) && !frameEndNeeded() && tegra_panel_holds_frame_end()) "
-                              "maskIdleFrameEnd();"));
+                    .EndsWith("if ((status & kFrameEndInt) && !frameEndNeeded() && tegra_panel_holds_frame_end()) { "
+                              "maskIdleFrameEnd(); idleFlipDeadline(); }"));
     EXPECT_TRUE(method("void maskIdleFrameEnd()").Has("if (!__atomic_load_n(&gFrameEndHolds"));
+    // The kick's shadow: set with the lock held, cleared only by the gate.
+    EXPECT_TRUE(method("void kickUnmaskFrameEnd()")
+                    .Has("if (!__atomic_load_n(&frameEndUnmasked, __ATOMIC_RELAXED)) unmaskFrameEnd();"));
+    EXPECT_EQ(code().Count("__atomic_store_n(&frameEndUnmasked, false"), 2u);
+    EXPECT_EQ(code().Count("noteFrameEndMask("), 2u);
 }
 
 // A blank swap blacks the head through the colour unit only while no flip is out, and the first flip latched after it
 // ends the black: an older flip's latch must never show a frame the blank swap replaced.
+// The start's 250 ms check only proves frame ends arrive: INT_ENABLE has no writer outside the display's own start,
+// stop, resume and the routes it enables (TegraPanel's DSI steps read it), so nothing re-applies it.
+TEST(FrameEndSource, TheStartCheckWritesNoInterruptEnable)
+{
+    EXPECT_FALSE(method("void vsyncTick()").Has("dc[kDcIntEnable] ="));
+    EXPECT_TRUE(method("void vsyncTick()").Has("no DC A frame end in 250 ms"));
+    const CodeText panel(SourceText("../../SwitchBrightness/TegraPanel.cpp"));
+    EXPECT_TRUE(panel.Has("gDc[DC_CMD_INT_ENABLE]"));
+    EXPECT_FALSE(panel.Has("gDc[DC_CMD_INT_ENABLE] ="));
+}
+
+// SC7 powers DC A down once its STOP is in force: the active DISPLAY_COMMAND reads mode 0 (TRM 24.6.16), waited for on
+// the last frame's FRAME_END and bounded by two frame periods with one error line, in place of a 20 ms sleep. The DSI
+// pads are calibrated once and waited for by MIPI_CAL's status (TegraMipiCal.h), in place of two back-to-back starts and a
+// 10 ms sleep.
+TEST(Sc7Source, StatusReadsNotFixedSleeps)
+{
+    EXPECT_FALSE(Block(display(), "extern \"C\" void tegra_display_suspend(void)").Has("IOSleep"));
+    EXPECT_TRUE(method("void quiesceForSuspend()").Before("setScanout(false);", "waitScanoutHalted();"));
+    EXPECT_TRUE(method("void quiesceForSuspend()").Before("waitScanoutHalted();", "vblankSource->disable();"));
+    const std::string halt = SourceText("../SwitchScanoutHalt.h");
+    const CodeText halted = Block(halt, "void waitScanoutHalted()");
+    EXPECT_TRUE(Block(halt, "bool scanoutHalted()").Has("kReadMuxActive"));
+    EXPECT_TRUE(halted.Has("assert_wait_deadline(reinterpret_cast<event_t>(&scanoutStopFrames)"));
+    EXPECT_TRUE(halted.Has("2 * period"));
+    EXPECT_TRUE(halted.Has("IOLog("));
+    EXPECT_FALSE(halted.Has("panic("));
+    const std::string power = SourceText("../TegraDisplayPower.cpp");
+    const CodeText up = Block(power, "extern \"C\" void tegra_display_power_up(void)");
+    EXPECT_FALSE(up.Has("for (unsigned pass"));
+    EXPECT_EQ(CodeText(power).Count("0x2A000001"), 0u);
+    EXPECT_TRUE(up.Before("write(gMipiCal, kMipiDsiCal);", "tegra_mipi_cal::calibrate(gMipiCal"));
+    EXPECT_TRUE(up.Before("tegra_mipi_cal::calibrate(gMipiCal", "write(gDc, kDcTimings);"));
+}
+
 TEST(BlankSource, ColourBlankEndsAtTheNextLatch)
 {
     EXPECT_TRUE(code().Has("rotated && rotationLatched && doubleBuffer && ring.pending == kNoBuffer &&"));
@@ -371,4 +446,126 @@ TEST(DisplayResumeSource, RestoreRunsOnTheFamilyGateBeforeCompletionCallbacks)
     EXPECT_TRUE(resume.Before("planesResume();", "setScanout(true)"));
     EXPECT_TRUE(resume.Before("planesResume();", "presentCopied()"));
     EXPECT_TRUE(resume.Before("planesResume();", "presentGpuCopy()"));
+}
+
+// retireScanoutStorage sleeps up to kFlipDeadlineMS with the family's gate held, woken by the DC A filter (which needs no
+// gate): only the display's teardown (stop, free, through stopVsync's gated stopVblank) may reach it, never a swap, a
+// frame end or SC7.
+TEST(ScanoutRetirementSource, OnlyTheDisplaysTeardownWaitsUnderTheGate)
+{
+    EXPECT_EQ(code().Count("retireScanoutStorage();"), 1u);
+    EXPECT_TRUE(method("void stopRotation()").Has("retireScanoutStorage();"));
+    EXPECT_EQ(code().Count("stopRotation();"), 1u);
+    EXPECT_TRUE(method("void stopVblank()").Has("stopRotation();"));
+    EXPECT_EQ(code().Count("->stopVblank();"), 1u);
+    EXPECT_TRUE(method("void stopVsync()").Has("->stopVblank();"));
+    EXPECT_EQ(code().Count("stopVsync();"), 2u);
+    EXPECT_TRUE(method("void stop(IOService *provider) override").Has("stopVsync();"));
+    EXPECT_TRUE(method("void free() override").Has("stopVsync();"));
+    const CodeText wait(SourceText("../SwitchScanoutRetirement.h"));
+    EXPECT_TRUE(wait.Before("assert_wait_deadline(", "if (scanoutStorageRetired() ||"));
+    EXPECT_TRUE(code().Has("thread_wakeup(reinterpret_cast<event_t>(&self->scanoutStopFrames));"));
+}
+
+// A release kernel's swap path counts no client surfaces: noteSurface and its two volatile increments are debug-only.
+TEST(ReleaseSource, NoSurfaceCensusOnAReleaseSwap)
+{
+    const char *const debug = "#if (defined(DEVELOPMENT) && DEVELOPMENT) || (defined(DEBUG) && DEBUG)";
+    EXPECT_TRUE(code().Has(std::string(debug) + " noteSurface(surface, memory); #endif"));
+    EXPECT_TRUE(
+        code().Has(std::string(debug) + " static void noteSurface(OSObject *surface, IOMemoryDescriptor *memory)"));
+    EXPECT_EQ(code().Count("noteSurface("), 2u);
+}
+
+// The DC A filter hands the action per-cause counts only it writes: no read-modify-write on the filter's side or the
+// action's, and every reader of what is pending goes through frameEndPending.
+TEST(FrameEndSource, TheFilterHandsOffWithoutReadModifyWrites)
+{
+    const CodeText filter = method("template <class Self> static bool vblankFilter(");
+    for (const char *rmw : {"__atomic_fetch_", "__atomic_exchange", "__atomic_compare_exchange"})
+        EXPECT_FALSE(filter.Has(rmw)) << rmw;
+    EXPECT_FALSE(method("uint32_t takeFrameEndStatus()").Has("__atomic_exchange"));
+    EXPECT_FALSE(code().Has("dcPending"));
+    EXPECT_TRUE(method("int waitTapeFrame()").Has("frameEndPending(kVblankInt | kFrameEndInt | kVpulse2Int)"));
+    EXPECT_TRUE(method("void checkFlipDeadline()").Has("frameEndPending(kFrameEndInt)"));
+}
+
+// One gate pass a period: a completion that wrote window A's flip leaves its pass to the frame end's takeCompletionFlip
+// unless the gate wants it now; one deadline while anything is out, never armed or cancelled per flip or per offer.
+TEST(FrameEndSource, OnePassAndOneDeadlineAPeriod)
+{
+    const CodeText complete = method("void gpuComplete(int status)");
+    EXPECT_TRUE(complete.Before("writeCompletionFlip(status);", "if (!completionFlipCarries() ||"));
+    EXPECT_TRUE(method("void kickSwapQueue() override").Has("kickCompletionPass("));
+    EXPECT_TRUE(method("bool setScanout(bool on)").Before("scanoutStopped = !on;", "publishCompletionPass();"));
+    EXPECT_FALSE(method("void flipLatched()").Has("cancelTimeout"));
+    EXPECT_FALSE(method("void cancelGpuDeadline()").Has("cancelTimeout"));
+    EXPECT_TRUE(method("void armDeadlineTimer()").StartsWith("if (flipDeadlineArmed || !flipTimer) return;"));
+    EXPECT_TRUE(method("void checkFlipDeadline()")
+                    .Has("if (frameEnds != flipDeadlineFrames || frameEndPending(kFrameEndInt))"));
+    EXPECT_TRUE(method("bool frameEndNeeded()").Has("(offerAged && gpuScanout)"));
+    EXPECT_FALSE(code().Has("__atomic_store_n(&gpuScanout"));
+    EXPECT_FALSE(code().Has("__atomic_exchange_n(&gpuDonePending"));
+    EXPECT_FALSE(code().Has("__atomic_exchange_n(&self->gpuDonePending"));
+}
+
+// validateSwap runs off the family's gate (21H461 and 24B119 swap_submit call it between their gated actions): it
+// touches no table, its verdict goes through the ring, and the gate drains the ring before it reads the table.
+TEST(FrameEndSource, VerdictsReachTheTableThroughTheGate)
+{
+    const CodeText validate = method("bool validateSwap(const OriginalLegacySwapRequest *request) override");
+    EXPECT_TRUE(validate.Has("publishVerdict(verdict);"));
+    for (const char *table : {"noteSubmitted(", "removeValidated(", "addValidated(", "validated["})
+        EXPECT_FALSE(validate.Has(table)) << table;
+    EXPECT_FALSE(method("void publishVerdict(").Has("validated["));
+    EXPECT_TRUE(method("void kickSwapQueue() override").Before("drainVerdicts();", "kickOnce();"));
+    EXPECT_TRUE(method("void vblankTick()").StartsWith("drainVerdicts();"));
+    EXPECT_FALSE(code().Has("__atomic_fetch_add(&validatedEvicted"));
+    EXPECT_FALSE(code().Has("__atomic_exchange_n(&validatedEvicted"));
+}
+
+// Debug kernels log the frame path's locks per 100 frame ends by lock, and the work-loop passes, with the 5 s stats; a
+// release kernel counts nothing (stats is SWITCH_FRAME_TIMELINE: DEVELOPMENT || DEBUG).
+TEST(DisplayStatsSource, LocksPerFrameEndLine)
+{
+    const CodeText window = method("void noteLocksWindow()");
+    EXPECT_TRUE(window.StartsWith("if (!stats) return;"));
+    EXPECT_TRUE(window.Has("os_log(OS_LOG_DEFAULT, \"SwitchDisplay locks: %s\", line);"));
+    for (const char *count : {"color->lockTakes()", "intMaskTakes", "switch_vic_surface_cache_locks()", "flipClaims()"})
+        EXPECT_TRUE(window.Has(count)) << count;
+    EXPECT_TRUE(method("void noteStatsWindow()").Has("noteLocksWindow();"));
+    EXPECT_TRUE(method("void notePass()").StartsWith("if (stats) ++stPasses;"));
+}
+
+// validateSwap runs on the client's thread: it decides and observes, and everything the gate owns (the overlay's
+// bandwidth admission, the rejection stats, the swap timeline's first stage) happens where the gate drains its verdict.
+TEST(FrameEndSource, ValidateSwapTouchesNoGateState)
+{
+    const CodeText validate = method("bool validateSwap(const OriginalLegacySwapRequest *request) override");
+    for (const char *gate : {"admitPlaneBandwidth(", "stRejected", "stRejectReason", "native_legacy_swap_stage("})
+        EXPECT_FALSE(validate.Has(gate)) << gate;
+    EXPECT_TRUE(validate.Has("verdict.admit = true;"));
+    const CodeText drain = method("void drainVerdicts()");
+    EXPECT_TRUE(drain.Before("admitPlaneBandwidth(verdict.present, verdict.layers, verdict.width, verdict.height);",
+                             "noteSubmitted(verdict.request, verdict.at, verdict.tl);"));
+    EXPECT_TRUE(drain.Has("native_legacy_swap_stage(0);"));
+    EXPECT_TRUE(drain.Has("++stRejected;"));
+    const CodeText observed =
+        Block(SourceText("../../../kits/qemu/LegacyDisplayProbe.cpp"), "void native_legacy_swap_validation_observed(");
+    EXPECT_FALSE(observed.Has("native_legacy_swap_stage("));
+}
+
+// Core Animation never arms the vsync (its frame clock is its own), so the frame end stands in for the frame timeline as it
+// does for the GPU deadline: each swap's timeline then carries the vsync before it, the slow-frame line its phase, and
+// render.c a frame begin for SwitchFrameRender (boot 21 had none, and every SwitchFrame line read "origin swap").
+TEST(FrameTimelineSource, TheFrameEndStandsInForAnUnarmedVsync)
+{
+    const CodeText tick = method("void vblankTick()");
+    EXPECT_TRUE(tick.Before("tegra_gm20b_compositor_vsync(frameEnd, 0, refreshTicks());",
+                            "noteTimelineVsync(frameEnd, refreshTicks());"));
+    EXPECT_TRUE(method("void deliverVsync(").Has("noteTimelineVsync(stamp, interval);"));
+    const CodeText note = method("void noteTimelineVsync(");
+    EXPECT_TRUE(note.Has("if (!SWITCH_FRAME_TIMELINE) return;"));
+    EXPECT_TRUE(note.Has("switch_sched_render_vsync(stamp, interval);"));
+    EXPECT_TRUE(method("FrameTimeline swapTimeline(uint64_t at)").Has("tl.vsyncUs = timelineVsyncUs(at);"));
 }

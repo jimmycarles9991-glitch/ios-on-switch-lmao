@@ -361,7 +361,7 @@ TEST(RawPredicateLoops, EveryEmitterStaysInsideTheRoomItsCallerReserves)
 // so the overflow word is read with the stamp of the range that laid the loops, carried on its retirement
 TEST(RawPredicateLoops, EachRawRangeThatLaidLoopsCarriesItsOwnStampToTheCompletion)
 {
-    const std::string encode = SourceText("../raw/runtime/RawMetalEncode.mm");
+    const std::string encode = SourceText("../raw/runtime/RawMetalRangeSeal.mm");
     EXPECT_THAT(encode, HasSubstr("cb->_rangeLoopStamp = rc->loopsLaid ? rc->stamp : 0;"));
     const std::string finish = SourceText("../raw/runtime/RawMetalFinish.mm");
     EXPECT_THAT(finish, HasSubstr("std::exchange(cb->_rangeLoopStamp, 0u)"));

@@ -76,6 +76,7 @@ kernel_driver(
         "drivers/ArmGIC",
         "drivers/TegraDisplayFlip",
         "drivers/TegraI2C",
+        "drivers/TegraSMMU",
         "kits/SwitchCAR",
         "kits/SwitchMMIO",
     ],

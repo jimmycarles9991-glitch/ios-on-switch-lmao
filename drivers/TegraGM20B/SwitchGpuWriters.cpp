@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-#include "SwitchGpuBackingInternal.h"
+#include "SwitchGpuOwnershipInternal.h"
 
 namespace
 {
@@ -104,7 +104,7 @@ extern "C" int switch_gpu_backing_cpu_track(switch_gpu_backing *backing)
 {
 	if (!backing)
 		return -22;
-	IOLockLock(backing->lock);
+	switch_gpu_backing_claim(backing);
 	int result = 0;
 	if (!backing->cpu_tracking) {
 		if (!reserve_next(backing, 16))
@@ -133,13 +133,14 @@ extern "C" int switch_gpu_backing_cpu_track(switch_gpu_backing *backing)
 		    (backing->writer_count || !(backing->dirty & SWITCH_GPU_BACKING_GPU_DIRTY)))
 			backing->cpu_tracking = true;
 	}
-	IOLockUnlock(backing->lock);
+	switch_gpu_backing_unclaim(backing);
 	return result;
 }
 
 int switch_gpu_backing_writer_prepare_locked(switch_gpu_backing *backing,
 					     const switch_gpu_backing_token &producer)
 {
+	switch_gpu_backing_assert_held(backing);
 	if (!backing->cpu_tracking)
 		return 0;
 	if (backing->writers_pending || !reserve_next(backing, 1))
@@ -221,7 +222,7 @@ extern "C" int switch_gpu_backing_write_ranges(switch_gpu_backing_transaction *t
 					       switch_gpu_backing_write_range *ranges,
 					       uint32_t count)
 {
-	if (!transaction || transaction->locked != transaction->count ||
+	if (!transaction || !switch_gpu_ownership::holds(transaction) ||
 	    transaction->prepared != transaction->count || (count && !ranges))
 		return -22;
 	for (uint32_t i = 0; i < count; ++i) {

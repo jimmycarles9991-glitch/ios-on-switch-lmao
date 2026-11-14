@@ -45,6 +45,7 @@
 #include "../ArmGIC/SwitchInterrupts.h"
 #include "../TegraI2C/TegraI2C.h"
 #include "../TegraGPIO/TegraGPIO.h"
+#include "../../kits/SwitchCAR/SwitchPMC.h"
 #include "../../kits/SwitchDMA/SwitchDcache.h"
 #include "../../kits/SwitchDMA/SwitchDMABuffer.h"
 #include "../../kits/SwitchMMIO/SwitchMMIOKernel.h"
@@ -76,7 +77,7 @@ constexpr uint64_t kControllerPA = 0x700B0000;  // SDMMC1
 constexpr uint64_t kMemoryControllerPA = 0x70019000;
 // What the SDR104 bring-up touches besides the controller (hekate bdk/soc/t210.h:47/58/64): the
 // clock and reset controller, APB_MISC (pinmux at +0x3000) and the PMC's page (PMC is at 0x7000E400).
-constexpr uint64_t kCarPA = 0x60006000, kApbMiscPA = 0x70000000, kPmcPagePA = 0x7000E000;
+constexpr uint64_t kCarPA = 0x60006000, kApbMiscPA = 0x70000000;
 // SDMMC1's interrupt: GIC_SPI 14, level-high (mainline tegra210.dtsi mmc@700b0000; Atmosphere uses 46 too).
 constexpr uint32_t kInterrupt = 46;
 // Longest single interrupt wait before the worker checks STATUS for a lost interrupt (see command()).
@@ -304,9 +305,9 @@ enum : uint32_t {
     APB_SDMMC1_PAD_CONFIG = 0xa98,
     PINMUX_SDMMC1 = 0x3000,
     PINMUX_SCHMITT = 1u << 12,  // CLK, CMD, DAT3, DAT2, DAT1, DAT0 at +0..+0x14
-    PMC_PWR_DET_VAL = 0x400 + 0xe4,
+    PMC_PWR_DET_VAL = 0xe4,     // kits/SwitchCAR's PMC offsets
     PMC_SDMMC1_3V3 = 1u << 12,
-    PMC_NO_IOPOWER = 0x400 + 0x44,
+    PMC_NO_IOPOWER = 0x44,
     PMC_SDMMC1_NO_POWER = 1u << 12,
 };
 
@@ -580,8 +581,8 @@ public:
 class NativeSwitchBlock : public IOService {
     // NOLINTNEXTLINE(misc-explicit-constructor): IOKit's structors macro declares the metaclass constructor
     OSDeclareDefaultStructors(NativeSwitchBlock) volatile uint8_t *regs = nullptr;
-    volatile uint8_t *car = nullptr, *apb = nullptr, *pmc = nullptr;  // SDR104 bring-up only
-    volatile uint8_t *mc = nullptr;                                   // memory controller (SMMU state for SDMMC1)
+    volatile uint8_t *car = nullptr, *apb = nullptr;  // SDR104 bring-up only
+    volatile uint8_t *mc = nullptr;                   // memory controller (SMMU state for SDMMC1)
     switch_dma_buffer bounceMemory = {};
     uint8_t *bounce = nullptr;
     uint64_t bouncePA = 0;
@@ -3513,8 +3514,8 @@ bool NativeSwitchBlock::switchTo1V8(uint8_t ldo2)
               error, check);
     }
     IODelay(1000 + 150);  // regulator ramp (hekate set_voltage) + settle (enable_low_voltage)
-    switch_mmio_write32(pmc, PMC_PWR_DET_VAL, switch_mmio_read32(pmc, PMC_PWR_DET_VAL) & ~PMC_SDMMC1_3V3);
-    (void)switch_mmio_read32(pmc, PMC_PWR_DET_VAL);
+    switch_pmc_rmw(PMC_PWR_DET_VAL, PMC_SDMMC1_3V3, 0);
+    (void)switch_pmc_read(PMC_PWR_DET_VAL);
     for (uint32_t pad = 0; pad < 6; ++pad) {
         switch_mmio_write32(apb, PINMUX_SDMMC1 + pad * 4,
                             switch_mmio_read32(apb, PINMUX_SDMMC1 + pad * 4) | PINMUX_SCHMITT);
@@ -3651,8 +3652,8 @@ void NativeSwitchBlock::retune(bool slower)
 // the step (power off clears the card; with switch-no-sd-uhs none of this runs).
 bool NativeSwitchBlock::raiseBusSpeed()
 {
-    if (!car || !apb || !pmc) {
-        IOLog("SwitchSD: SDR104 skipped (CAR/APB/PMC not mapped); inherited bus kept\n");
+    if (!car || !apb) {
+        IOLog("SwitchSD: SDR104 skipped (CAR/APB not mapped); inherited bus kept\n");
         return false;
     }
     const uint32_t source = switch_mmio_read32(car, CAR_CLK_SOURCE_SDMMC1);
@@ -3864,9 +3865,9 @@ void NativeSwitchBlock::powerOffCard()
     if (tegra_gpio_output(kCardPowerGpio, 0))
         panic("SwitchSD: cannot switch the card supply (GPIO PE4) off");
     IOSleep(10);
-    switch_mmio_write32(pmc, PMC_NO_IOPOWER, switch_mmio_read32(pmc, PMC_NO_IOPOWER) | PMC_SDMMC1_NO_POWER);
-    switch_mmio_write32(pmc, PMC_PWR_DET_VAL, switch_mmio_read32(pmc, PMC_PWR_DET_VAL) | PMC_SDMMC1_3V3);
-    (void)switch_mmio_read32(pmc, PMC_PWR_DET_VAL);
+    switch_pmc_rmw(PMC_NO_IOPOWER, 0, PMC_SDMMC1_NO_POWER);
+    switch_pmc_rmw(PMC_PWR_DET_VAL, 0, PMC_SDMMC1_3V3);
+    (void)switch_pmc_read(PMC_PWR_DET_VAL);
 }
 
 // After SC7: SDMMC1 clocked from PLLP at U-Boot's 48 MHz and out of reset, pads and card powered at 3.3 V (hekate
@@ -3881,12 +3882,12 @@ void NativeSwitchBlock::powerOnController()
     IODelay(2);
     switch_mmio_write32(car, CAR_RST_DEV_L_CLR, CAR_SDMMC1);
     (void)switch_mmio_read32(car, CAR_RST_DEVICES_L);
-    switch_mmio_write32(pmc, PMC_NO_IOPOWER, switch_mmio_read32(pmc, PMC_NO_IOPOWER) & ~PMC_SDMMC1_NO_POWER);
-    (void)switch_mmio_read32(pmc, PMC_NO_IOPOWER);
+    switch_pmc_rmw(PMC_NO_IOPOWER, PMC_SDMMC1_NO_POWER, 0);
+    (void)switch_pmc_read(PMC_NO_IOPOWER);
     if (tegra_gpio_output(kCardPowerGpio, 1))
         panic("SwitchSD: cannot switch the card supply (GPIO PE4) on");
     IOSleep(10);
-    switch_mmio_write32(pmc, PMC_PWR_DET_VAL, switch_mmio_read32(pmc, PMC_PWR_DET_VAL) | PMC_SDMMC1_3V3);
+    switch_pmc_rmw(PMC_PWR_DET_VAL, 0, PMC_SDMMC1_3V3);
     const uint8_t on = static_cast<uint8_t>(0xc0 | kLdo3V3);  // power mode normal, 3.3 V
     const int error = tegra_i2c_write(kPmicBus, kPmicAddress, kPmicLdo2, &on, 1);
     if (error)
@@ -4401,10 +4402,9 @@ bool NativeSwitchBlock::setup()
 {
     regs = switch_mmio_map(kControllerPA, 0x1000);
     mc = switch_mmio_map(kMemoryControllerPA, 0x1000);
-    // CAR, APB_MISC/pinmux and PMC serve the SDR104 bring-up only; without them it is skipped.
+    // CAR and APB_MISC/pinmux serve the SDR104 bring-up only; without them it is skipped.
     car = switch_mmio_map(kCarPA, 0x1000);
     apb = switch_mmio_map(kApbMiscPA, 0x4000);
-    pmc = switch_mmio_map(kPmcPagePA, 0x1000);
     queueLock = IOLockAlloc();
     if (!regs || !mc || !queueLock) {
         IOLog("SwitchSD: map/alloc failed\n");

@@ -35,6 +35,12 @@ int switch_soctherm_listen(switch_soctherm_moved moved, void *ctx);
 // it is going down (nullptr: SC7 resets it, reads fail until the wake's bring-up arms it again).
 void switch_soctherm_armed(volatile unsigned char *regs);
 
+#if DEVELOPMENT || DEBUG
+// THROTTLECTL_GPU_PSKIP_STATUS now (THROTTLE_DEPTH 22:20: the GPU throttle vector SOC_THERM drives), for the GPU's clock
+// count; ~0 while SOC_THERM is not up. Any context.
+unsigned int switch_soctherm_gpu_throttle_status(void);
+#endif
+
 #ifdef __cplusplus
 }
 #endif

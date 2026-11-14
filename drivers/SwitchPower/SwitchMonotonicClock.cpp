@@ -7,11 +7,12 @@
 // BackgroundTaskAgent read the others.
 //
 // The source is the Tegra RTC at the start of the PMC page (Linux rtc-tegra.c): a millisecond counter in the always-on
-// partition that keeps counting through SC7 and that nothing writes. Reading MILLI_SECONDS latches SECONDS into
-// SHADOW_SECONDS, so the two reads are one critical section. Its registers need the APB clock (CAR L4), checked before
-// every read so a read never fails once the clock is registered. Where it starts each boot: SwitchMonotonicBase.h.
+// partition that keeps counting through SC7 and that nothing writes, read through SwitchTegraRTC.h under gLatch. Its
+// registers need the APB clock (CAR L4), checked before every read so a read never fails once the clock is registered.
+// Where it starts each boot: SwitchMonotonicBase.h.
 #include "SwitchMonotonicClock.h"
 #include "SwitchMonotonicBase.h"
+#include "SwitchTegraRTC.h"
 #include <IOKit/IOLib.h>
 #include <kern/clock.h>
 #include "../../kits/SwitchCAR/SwitchCAR.h"
@@ -20,11 +21,6 @@
 #include "../../kits/SwitchSysctl/SwitchSysctl.h"
 
 namespace {
-enum : uint32_t {
-    RTC_SHADOW_SECONDS = 0x00c,
-    RTC_MILLI_SECONDS = 0x010,
-};
-
 constexpr unsigned kRtcClock = 4;  // TEGRA210_CLK_RTC: CAR L bit 4
 constexpr uint64_t kRateUsec = 1000;
 constexpr uint64_t kUsecPerSec = 1000000;
@@ -43,11 +39,10 @@ LatchedTime latch()
     if (!switch_car_clock_enabled(kRtcClock))
         switch_car_clock_enable(kRtcClock);
     const IOInterruptState state = IOSimpleLockLockDisableInterrupt(gLatch);
-    const uint32_t millis = switch_mmio_read32(gRtc, RTC_MILLI_SECONDS);
-    const uint32_t seconds = switch_mmio_read32(gRtc, RTC_SHADOW_SECONDS);
+    const switch_tegra_rtc_reading rtc = switch_tegra_rtc_read(gRtc);
     const uint64_t now = mach_absolute_time();
     IOSimpleLockUnlockEnableInterrupt(gLatch, state);
-    return {(static_cast<uint64_t>(seconds) * 1000 + millis) * 1000 + gBaseUsec, now};
+    return {(static_cast<uint64_t>(rtc.seconds) * 1000 + rtc.millis) * 1000 + gBaseUsec, now};
 }
 
 bool calendarOffsetUsec(const LatchedTime &t, int64_t *offset)

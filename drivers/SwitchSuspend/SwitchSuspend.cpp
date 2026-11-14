@@ -32,6 +32,7 @@
 #include "../TegraSMMU/TegraSMMU.h"
 #include "../../diagnostics/switch/SwitchPowerTrail.h"
 #include "../../kits/SwitchMMIO/SwitchMMIOKernel.h"
+#include "../SwitchPower/SwitchTegraRTC.h"
 #include "SwitchSleepDevices.h"
 #include "SwitchSleepSteps.h"
 #include "SwitchSuspend.h"
@@ -71,8 +72,6 @@ enum : uint32_t {
 enum : uint32_t {
     RTC_BUSY = 0x004,
     RTC_SECONDS = 0x008,
-    RTC_SHADOW_SECONDS = 0x00c,
-    RTC_MILLI_SECONDS = 0x010,
     RTC_SECONDS_ALARM0 = 0x014,
     RTC_INTR_MASK = 0x028,
     RTC_INTR_STATUS = 0x02c,
@@ -179,8 +178,8 @@ class SwitchSuspend : public IOService {
 
     uint64_t rtcMS() const
     {
-        const uint32_t millis = rd(RTC_MILLI_SECONDS);
-        return switch_sleep_rtc_ms(rd(RTC_SHADOW_SECONDS), millis);
+        const switch_tegra_rtc_reading rtc = switch_tegra_rtc_read(pmc);
+        return switch_sleep_rtc_ms(rtc.seconds, rtc.millis);
     }
 
     bool rtcClockOn(bool log);

@@ -73,11 +73,13 @@ struct Retirement;
 using Stages = SwitchHost1xStages<Retirement, SwitchNVDECQueue::kSlots>;
 
 // The cancelled jobs have all ended: the queue goes on from the syncpoint the engine's restart left, or refuses work
-// when the engine did not come back.
+// until the gate powers the engine that did not come back on again.
 void renumberLocked()
 {
     const bool resumed = gRecoveredReady && gQueue.rebase(tegra_host1x_syncpt_read(gSyncpt));
     __atomic_store_n(&gFailed, !resumed, __ATOMIC_RELEASE);
+    if (!resumed)
+        switch_nvdec_power_lost();
     __atomic_store_n(&gCompleted, gQueue.completed, __ATOMIC_RELEASE);
     gRecovered = false;
     __atomic_store_n(&gCancelling, false, __ATOMIC_RELEASE);
@@ -563,6 +565,22 @@ void switch_nvdec_jobs_resume(bool ready, uint32_t completed)
     IOLockWakeup(gLock, &gQueue.completed, false);
     IOLockUnlock(gLock);
     switch_gpu_backing_completed();
+}
+
+bool switch_nvdec_jobs_falcon_failed()
+{
+    uint32_t fence = 0;
+    uint64_t submittedUs = 0;
+    IOLockLock(gLock);
+    if (gQueue.count) {
+        fence = static_cast<uint32_t>(gQueue.jobs[gQueue.head].sequence);
+        submittedUs = gQueue.jobs[gQueue.head].submittedUs;
+    }
+    IOLockUnlock(gLock);
+    if (__atomic_exchange_n(&gCancelling, true, __ATOMIC_ACQ_REL))
+        return false;
+    switch_nvdec_job_stalled(fence, TEGRA_HOST1X_EFALCON, submittedUs ? switch_now_us() - submittedUs : 0);
+    return true;
 }
 
 uint32_t switch_nvdec_jobs_cancel(uint32_t reached)

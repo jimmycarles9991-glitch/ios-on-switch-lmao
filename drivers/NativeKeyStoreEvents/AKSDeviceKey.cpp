@@ -6,8 +6,8 @@
 // fuse-tegra30.c reads as FUSE_BEGIN 0x100 + 0x100..0x118 for its randomness, and switchroot U-Boot's lot0 at +0x208 in
 // board/nintendo/switch/nintendo-switch.c:111-120). The fuse registers answer only while the FUSE clock runs and the controller is
 // out of reset (CLK_OUT_ENB_H 0x14 / RST_DEVICES_H 0x8 bit CLK_H_FUSE = 7: hekate bdk/soc/clock.h:26,29,510) and while CAR
-// MISC_CLK_ENB (0x48, clock.h:36) bit 28 makes them visible (bdk/soc/clock.c:199-203); the clock state is checked and left alone,
-// the visibility bit restored after the read.
+// MISC_CLK_ENB (0x48, clock.h:36) bit 28 makes them visible (bdk/soc/clock.c:199-203). The CAR kit turns both on
+// (switch_car_fuse_readable) and nothing turns them off: the state is then checked, never restored.
 // The same chip always yields the same key, so a key wrapped in one boot unwraps in every later one, and only on this console.
 //
 // What it is not: the chip ID is not secret (any kernel code can read it, and it is exposed elsewhere), so this keeps the keychain
@@ -21,6 +21,7 @@
 #include <libkern/crypto/aes.h>
 #include <libkern/crypto/sha2.h>
 #include "AKSKeyWrap.h"
+#include "../../kits/SwitchCAR/SwitchCAR.h"
 #include "../../kits/SwitchMMIO/SwitchMMIO.h"
 
 extern "C" void proc_selfname(char *buf, int size);
@@ -33,9 +34,8 @@ extern "C" const void *g_crypto_funcs;
 
 namespace {
 constexpr uint64_t kCarPA = 0x60006000, kFusePagePA = 0x7000F000;
-constexpr uint32_t kCarRstDevicesH = 0x008, kCarClkOutEnbH = 0x014, kCarMiscClkEnb = 0x048;
+constexpr uint32_t kCarRstDevicesH = 0x008, kCarClkOutEnbH = 0x014;
 constexpr uint32_t kFuseClockBit = 1u << 7;  // CLK_H_FUSE (hekate bdk/soc/clock.h:510)
-constexpr uint32_t kFuseVisible = 1u << 28;  // MISC_CLK_ENB CFG_ALL_VISIBLE
 constexpr uint32_t kFuseBase = 0x800;        // 0x7000F800 within the mapped page
 constexpr uint32_t kFuseUid[] = {0x200, 0x204, 0x208, 0x20C, 0x210, 0x214, 0x218};
 
@@ -114,26 +114,20 @@ extern "C" void native_aks_device_key_start(void)
         return;
     IOMemoryMap *carMap = nullptr;
     IOMemoryMap *fuseMap = nullptr;
-    volatile uint8_t *car = mapRegisters(kCarPA, &carMap);
+    const volatile uint8_t *car = mapRegisters(kCarPA, &carMap);
     const volatile uint8_t *fuse = mapRegisters(kFusePagePA, &fuseMap);
     if (!car || !fuse)
         panic("AppleKeyStore: cannot map CAR/FUSE for the device key");
+    switch_car_fuse_readable();
     const uint32_t clocks = switch_mmio_read32(car, kCarClkOutEnbH);
     const uint32_t resets = switch_mmio_read32(car, kCarRstDevicesH);
     if (!(clocks & kFuseClockBit) || (resets & kFuseClockBit)) {
         panic("AppleKeyStore: FUSE clock off or in reset (CLK_OUT_ENB_H %#x RST_DEVICES_H %#x), no device key", clocks,
               resets);
     }
-    const uint32_t misc = switch_mmio_read32(car, kCarMiscClkEnb);
-    if (!(misc & kFuseVisible)) {
-        switch_mmio_write32(car, kCarMiscClkEnb, misc | kFuseVisible);
-        (void)switch_mmio_read32(car, kCarMiscClkEnb);
-    }
     uint32_t uid[sizeof kFuseUid / sizeof kFuseUid[0]];
     for (size_t i = 0; i < sizeof uid / sizeof uid[0]; ++i)
         uid[i] = switch_mmio_read32(fuse, kFuseBase + kFuseUid[i]);
-    if (!(misc & kFuseVisible))
-        switch_mmio_write32(car, kCarMiscClkEnb, misc);
     OSSafeReleaseNULL(fuseMap);
     OSSafeReleaseNULL(carMap);
     // lot code 0 (uid[2]) is what U-Boot already builds MACs from; zero or all ones means the fuses did not answer.

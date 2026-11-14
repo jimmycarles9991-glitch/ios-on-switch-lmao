@@ -1,7 +1,10 @@
 """Normalise one driver's nvdec log of a frame into the draws and clears eq compares.
 
 Every submission's events are one frame (a command buffer the raw path submits in segments is several submissions,
-NVK's one), and each draw's fields drop what two drivers compile or lay out their own way:
+NVK's one), a draw raw drew a triangle at a time folded back into one wherever its runs fall (eqcheck.fold_runs, here
+across submissions too and past what each run sets of its own: its first vertex in the root words NVDEC_ROOTWORDS shows,
+and an odd strip triangle's reversed front face, raw_overlap.h), and each draw's fields drop what two drivers compile or
+lay out their own way:
 
   draw, vb*, ib, tsc*/tic*, rt*/zt   the draw's parameters, vertex bytes, header-0 samplers and targets, the targets
                                      named in order of first appearance in draws' target lines
@@ -18,6 +21,12 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / 'raw/pack'))
 import eqcheck
+
+# What a run sets of its own beyond eqcheck.run_state's: the root words' first vertex, the register hash, and
+# OGL_SET_FRONT_FACE, which an odd triangle of a strip drawn alone reverses
+RUN_LINES = ('rootwords', 'regs=')
+FRONT_FACE = '191c'
+EQCHECK_RUN_STATE = eqcheck.run_state
 
 # SET_PIPELINE_REGISTER_COUNT(i) and SET_BINDLESS_TEXTURE: each driver's compiler decides them
 PROGRAM_DERIVED = {f'{0x200C + 0x40 * i:x}' for i in range(6)} | {'2608'}
@@ -105,9 +114,30 @@ class Frame:
     clears: list[str]  # the others
 
 
+def run_state(lines: list[str]) -> list[str]:
+    out = []
+    for line in EQCHECK_RUN_STATE(lines):
+        if line.startswith(RUN_LINES):
+            continue
+        kept = line
+        if line.startswith('R '):
+            kept = 'R ' + ' '.join(t for t in line[2:].split() if not t.startswith(FRONT_FACE + '='))
+        out.append(kept)
+    return out
+
+
+def fold_runs(events: list[dict]) -> list[dict]:
+    """Give the events with each run eqcheck.fold_runs left apart folded into the draw before it (run_state)."""
+    eqcheck.run_state = run_state
+    try:
+        return eqcheck.fold_runs(events)
+    finally:
+        eqcheck.run_state = EQCHECK_RUN_STATE
+
+
 def frame(log: str) -> Frame:
     """Read the log's draws and clears, every submission's as one frame."""
-    events = [e for submission in eqcheck.frames(log) for e in submission]
+    events = fold_runs([e for submission in eqcheck.frames(log) for e in submission])
     names = target_names(events)
     out, early, clears, cleared = Frame([], [], []), [], [], True
     for e in events:

@@ -13,8 +13,9 @@
 // The buffers: three reconstructions, each with its colocated motion (64 bytes a macroblock), as the driver allocates
 // maxNumRefFrames + 1. A picture is coded into the one no reference slot holds; anchor n since the IDR goes in slot
 // n & 1. A B picture NVENC refuses is coded again as an I picture nothing predicts from, as are the rest of its group,
-// and the session codes anchors only from then on; a refused anchor leaves the session intra only, as without
-// reordering. Every frame is answered asynchronously (kVTEncodeInfo_Asynchronous), as Apple's encoder answers them.
+// and the next group has B pictures as usual. A refused anchor is coded again as an IDR with the frames held before
+// it, and the next group has P pictures as usual (AVEEncoder.c). Every frame is answered asynchronously
+// (kVTEncodeInfo_Asynchronous), as Apple's encoder answers them.
 #ifndef AVE_REORDER_H
 #define AVE_REORDER_H
 #include <CoreMedia/CoreMedia.h>
@@ -38,7 +39,7 @@ typedef struct {
 
 typedef struct {
     bool on;            // the stream has B pictures (its SPS says so)
-    uint8_t bPictures;  // B pictures between anchors now: 0 once NVENC refused one
+    uint8_t bPictures;  // B pictures between anchors
     uint32_t recon[AVE_REORDER_FRAMES], coloc[AVE_REORDER_FRAMES];
     int8_t slot[2];             // the frame each reference slot holds, -1 none
     uint32_t anchors;           // anchors since the IDR (the IDR is 0)

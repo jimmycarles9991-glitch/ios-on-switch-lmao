@@ -12,7 +12,6 @@ class Direction(unittest.TestCase):
         self.assertEqual(metrics.direction('raw_ms_radius2'), -1)
         self.assertEqual(metrics.direction('link_missed'), -1)
         self.assertEqual(metrics.direction('throttle_pct'), -1)
-        self.assertEqual(metrics.direction('m2v_pct'), -1)
         self.assertEqual(metrics.direction('clear_submit_us_p99'), -1)
 
     def test_rates_go_up(self):

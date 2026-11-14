@@ -5,6 +5,9 @@
 // SwitchRetireDisplay.h; under the gate.
 
 static constexpr uint64_t kTimedPresentHorizonNs = 1000000000ULL;
+// The swap the gate holds, for frame info's count of timed swaps. Static: the instance is at the 16 KiB a kalloc_type
+// class may have.
+static inline const OriginalLegacySwapRequest *timedHeldRequest = nullptr;
 #if (defined(DEVELOPMENT) && DEVELOPMENT) || (defined(DEBUG) && DEBUG)
 bool timedHoldLogged = false;
 #endif
@@ -34,6 +37,42 @@ bool presentNotDue(const OriginalLegacySwapRequest *request)
               ahead / 1000);
     }
 #endif
+    timedHeldRequest = request;
     kickDeferred = true;
     return true;
 }
+
+// display.present_at_time's view of frame info (debug kernels): kern.switch_frame_info_shown and _unsent, the swaps the
+// gate held for their presentation time whose frame info went out, and those replaced before any frame showed them.
+#if SWITCH_FRAME_TIMELINE
+static inline struct sysctl_oid frameInfoTimedOids[2] = {};
+
+static int frameInfoTimedSysctl(struct sysctl_oid *, void *, int which, struct sysctl_req *req)
+{
+    int value = 0;
+    const NativeLegacyDisplay *display = __atomic_load_n(&primaryDisplay, __ATOMIC_ACQUIRE);
+    if (display && display->frameInfo) {
+        const auto &pending = display->frameInfo->pending;
+        value = static_cast<int>(which ? __atomic_load_n(&pending.timedUnsent, __ATOMIC_RELAXED)
+                                       : __atomic_load_n(&pending.timedShown, __ATOMIC_RELAXED));
+    }
+    return SYSCTL_OUT(req, &value, sizeof(value));
+}
+
+static void frameInfoTimedRegister()
+{
+    static const char *const names[2] = {"switch_frame_info_shown", "switch_frame_info_unsent"};
+    for (unsigned i = 0; i < 2; ++i) {
+        if (frameInfoTimedOids[i].oid_name)
+            continue;
+        switch_sysctl_oid(&frameInfoTimedOids[i], &sysctl__kern_children, names[i],
+                          static_cast<int>(CTLTYPE_INT | CTLFLAG_RD | CTLFLAG_LOCKED), frameInfoTimedSysctl, "I",
+                          "swaps held for their presentation time since boot: frame info sent, replaced unsent");
+        frameInfoTimedOids[i].oid_arg2 = static_cast<int>(i);
+        sysctl_register_oid(&frameInfoTimedOids[i]);
+    }
+}
+#else
+static void frameInfoTimedRegister()
+{}
+#endif

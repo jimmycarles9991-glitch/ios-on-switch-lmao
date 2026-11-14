@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 #pragma once
 #include "raw_dispatch_regions.h"
+#include "raw_grow_list.h"
 #include "RawMetalArguments.h"
 #include "raw_pointer_map.h"
 #include "raw_semantic_state.h"
@@ -26,6 +27,7 @@ struct RMPlanBegin {
     bool refused = false;
     size_t end = 0;
     uint32_t rasterBegin = 0, rasterCount = 0;
+    uint32_t range = raw::kNoSnapshot;  // its own prepared range (RMCommandPlan::rangeIndex_), once it ended
 };
 
 struct RMPlanRasterGroup {
@@ -62,6 +64,10 @@ struct RMPlanDispatch {
     std::array<uint64_t, 3> grid{}, groups{};
     std::array<uint32_t, 3> threads{};
     std::array<uint32_t, 6> stageIn{};  // setStageInRegion:'s origin and size
+    // dispatchThreadgroupsWithIndirectBuffer:'s buffer (null: a grid of the CPU's) and setStageInRegionWithIndirectBuffer:'s
+    // (null: stageIn), each an RMBuffer, and their offsets
+    void *arguments = nullptr, *stageInBuffer = nullptr;
+    uint64_t argumentsOffset = 0, stageInOffset = 0;
     bool perThread = false;
     raw::ComputeDispatch regions;
 };
@@ -126,20 +132,20 @@ class RMCommandPlan {
         uint32_t begin = 0, count = 0;
     };
 
-    std::vector<RMPlanOperation> operations_;
-    std::vector<RMPlanBegin> begins_;
-    std::vector<RMPlanDraw> draws_;
-    std::vector<RMPlanRasterGroup> rasterGroups_;
+    raw::GrowList<RMPlanOperation> operations_;
+    raw::GrowList<RMPlanBegin> begins_;
+    raw::GrowList<RMPlanDraw> draws_;
+    raw::GrowList<RMPlanRasterGroup> rasterGroups_;
     uint32_t lastRasterGroup_ = raw::kNoSnapshot;
-    std::vector<RMPlanDispatch> dispatches_;
-    std::vector<RMPlanPatches> patches_;
-    std::vector<RMPlanTransfer> transfers_;
-    std::vector<RMPlanControl> controls_;
-    std::vector<RMPlanEvent> events_;
-    std::vector<raw::ResourceUse> uses_;
+    raw::GrowList<RMPlanDispatch> dispatches_;
+    raw::GrowList<RMPlanPatches> patches_;
+    raw::GrowList<RMPlanTransfer> transfers_;
+    raw::GrowList<RMPlanControl> controls_;
+    raw::GrowList<RMPlanEvent> events_;
+    raw::GrowList<raw::ResourceUse> uses_;
     // [0] the empty span, which the first saveUses makes: a constructed plan allocates nothing (a command buffer's
     // own is replaced by the recording pool's)
-    std::vector<UseSpan> useSpans_;
+    raw::GrowList<UseSpan> useSpans_;
     uint64_t renderGeneration_ = 0, kernelGeneration_ = 0, stateEpoch_ = 0;
     uint64_t eligibilityGeneration_ = 0;
     uint64_t savedRender_ = UINT64_MAX, savedKernel_ = UINT64_MAX;
@@ -164,6 +170,9 @@ class RMCommandPlan {
     // the next command buffer's
     std::deque<Range> ranges_;
     size_t rangeCount_ = 0;
+    // the live ranges, which a reader of the tape finds by their encoder's begin (RMPlanBegin::range) while the writer
+    // prepares more
+    raw::GrowList<const Range *> rangeIndex_;
     raw::PointerMap<RMResourceFacts> resourceFacts_;
     // prepareRange's and saveUses' working lists, kept from one call to the next
     std::vector<uint32_t> spanMarks_;
@@ -178,42 +187,67 @@ class RMCommandPlan {
         return index ? useSpans_[index] : UseSpan{};
     }
 
+    // The writer's (or the one thread that has the plan after its commit)
+    UseSpan ownSpan(uint32_t index)
+    {
+        return index ? useSpans_.own(index) : UseSpan{};
+    }
+
     const Range *findRange(size_t from, size_t to) const;
     const Range &rangeAt(size_t from, size_t to) const;
     void classifyRange(Range &range);
     size_t rangeStorageBytes() const;
     raw::StampMap<std::tuple<uint32_t, uintptr_t, uintptr_t>, uint32_t, raw::WordsHash> drawUseSpans_;
     using ResourceKey = std::pair<uint64_t, uintptr_t>;
-    raw::StampMap<ResourceKey, uint32_t, raw::WordsHash> renderUseSpans_, kernelUseSpans_;
+    raw::StampMap<ResourceKey, uint32_t, raw::WordsHash> kernelUseSpans_;
     // the use lists merged or built before saveUses takes them, and the recording's own (recordUses), kept from one
     // command buffer to the next
     std::vector<raw::ResourceUse> mergeUses_, buildUses_, recordUses_;
-    ResourceKey lastRenderUseKey_{UINT64_MAX, 0};
-    uint32_t lastRenderUses_ = 0;
+    // The render use lists resolved last, by resource revision and pipeline: a revision moves with every bind of
+    // another resource, so only draws close together share one (a state switched back to over the same resources)
+    static constexpr uint32_t kRecentRenderUses = 4;
+    std::array<ResourceKey, kRecentRenderUses> recentRenderKeys_{};
+    std::array<uint32_t, kRecentRenderUses> recentRenderUses_{};
+    uint32_t recentRenderAt_ = 0;
     uint32_t drawUses(uint32_t base, void *indices, void *arguments);
-    uint32_t captureRender();
+    uint32_t captureRender(bool bindingUses = true);
+    void forgetRecentRenderUses();
     uint32_t captureKernel();
     uint32_t saveUses(const std::vector<raw::ResourceUse> &uses);
     void applyRenderUses(uint32_t state, uint32_t span);
-    bool setter(const Cmd &c, const std::vector<uint64_t> &extra);
+    bool setter(const Cmd &c, const uint64_t *extra);
 
 public:
+    static bool isEncoderBegin(Op op)
+    {
+        return op == OpRender || op == OpCompute || op == OpBlit;
+    }
+
     raw::BufferSnapshots buffers[3];
     raw::TextureSnapshots textures[3];
     raw::SamplerSnapshots samplers[3];
     raw::StateSnapshots<raw::RasterState> raster;
     raw::StateSnapshots<raw::KernelState> kernel;
-    std::vector<raw::RenderStateRef> renderStates;
-    std::vector<raw::KernelStateRef> kernelStates;
-    std::vector<uint64_t> viewArrays;  // raw::RasterState's viewport and scissor arrays
+    raw::GrowList<raw::RenderStateRef> renderStates;
+    raw::GrowList<raw::KernelStateRef> kernelStates;
+    raw::GrowList<uint64_t> viewArrays;  // raw::RasterState's viewport and scissor arrays
 
-    bool record(const Cmd &c, const std::vector<uint64_t> &extra);
+    // `extraWords`: how many words `extra` holds (a dispatch's indirect words are read only where its record has them).
+    // `resolvesUses`: a draw's caller resolves its uses (resolveRenderUses) right after, so its state's uses of every
+    // bound resource are not listed
+    bool record(const Cmd &c, const uint64_t *extra, size_t extraWords = 0, bool resolvesUses = false);
+
+    // A binding or raster command (record's setters, one that takes no operation), as record takes it
+    void bind(const Cmd &c, const uint64_t *extra)
+    {
+        setter(c, extra);
+    }
 
     // `build` fills the list it is handed with the dispatch's uses, where the kernel and resource revision are new
     template <typename Build> void setKernelUses(size_t at, const void *nativeKernel, Build build)
     {
-        auto &operation = operations_[at];
-        const auto &state = kernelStates[dispatches_[operation.payload].state];
+        auto &operation = operations_.own(at);
+        const auto &state = kernelStates.own(dispatches_.own(operation.payload).state);
         const auto key = std::make_pair(state.resourceRevision, reinterpret_cast<uintptr_t>(nativeKernel));
         auto [found, inserted] = kernelUseSpans_.insert(key, 0);
         if (inserted) {
@@ -227,18 +261,18 @@ public:
     // `build` fills the list it is handed with the draw's uses, where the pipeline and resource revision are new
     template <typename Build> void resolveRenderUses(uint32_t state, const void *nativePipeline, Build build)
     {
-        const ResourceKey key{renderStates[state].resourceRevision, reinterpret_cast<uintptr_t>(nativePipeline)};
-        if (key != lastRenderUseKey_) {
-            auto [found, inserted] = renderUseSpans_.insert(key, 0);
-            if (inserted) {
-                buildUses_.clear();
-                build(buildUses_);
-                *found = saveUses(buildUses_);
-            }
-            lastRenderUseKey_ = key;
-            lastRenderUses_ = *found;
-        }
-        applyRenderUses(state, lastRenderUses_);
+        const ResourceKey key{renderStates.own(state).resourceRevision, reinterpret_cast<uintptr_t>(nativePipeline)};
+        for (uint32_t i = 0, at = recentRenderAt_; i < kRecentRenderUses;
+             ++i, at = (at + kRecentRenderUses - 1) % kRecentRenderUses)
+            if (recentRenderKeys_[at] == key)
+                return applyRenderUses(state, recentRenderUses_[at]);
+        buildUses_.clear();
+        build(buildUses_);
+        const uint32_t uses = saveUses(buildUses_);
+        recentRenderAt_ = (recentRenderAt_ + 1) % kRecentRenderUses;
+        recentRenderKeys_[recentRenderAt_] = key;
+        recentRenderUses_[recentRenderAt_] = uses;
+        applyRenderUses(state, uses);
     }
 
     // An empty list for the recording's uses of one command, its capacity the largest one's so far
@@ -246,6 +280,12 @@ public:
     {
         recordUses_.clear();
         return recordUses_;
+    }
+
+    // whether a draw recorded now captures a new render state (a binding or the raster state moved since the last)
+    bool capturesRender() const
+    {
+        return savedRender_ != renderGeneration_;
     }
 
     size_t size() const
@@ -285,6 +325,12 @@ public:
         return draws_[operations_[at].payload];
     }
 
+    // The writer's (as the draw is recorded)
+    const RMPlanDraw &ownDraw(size_t at)
+    {
+        return draws_.own(operations_.own(at).payload);
+    }
+
     const RMPlanPatches &patches(size_t at) const
     {
         return patches_[draw(at).patches];
@@ -315,6 +361,7 @@ public:
     void invalidateUses()
     {
         rangeCount_ = 0;
+        rangeIndex_.clear();
     }
 
     const RMPlanControl &control(size_t at) const
@@ -322,7 +369,7 @@ public:
         return controls_[operations_[at].payload];
     }
 
-    const std::vector<RMPlanEvent> &events() const
+    const raw::GrowList<RMPlanEvent> &events() const
     {
         return events_;
     }
@@ -385,6 +432,12 @@ public:
     uint64_t eligibilityGeneration() const
     {
         return eligibilityGeneration_;
+    }
+
+    // moves where the encoder's bindings start over: a new encoder, an opaque call
+    uint64_t stateEpoch() const
+    {
+        return stateEpoch_;
     }
 
     const std::vector<void *> &renderPipelines(size_t from, size_t to) const

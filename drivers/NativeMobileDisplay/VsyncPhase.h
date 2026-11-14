@@ -255,3 +255,41 @@ private:
         }
     }
 };
+
+// The V_PULSE2 probe (NativeLegacyDisplay): programmed and routed to the CPU (enabled and unmasked, TRM 24.6.20-21), it
+// has to reach the CPU within kFlips flips latched with a vsync client. When it does not, that probe failed (one line,
+// V_PULSE2 unprogrammed, the vsync at V_BLANK); the next lead programs it again and starts a new probe. A flip with
+// V_PULSE2 programmed but not routed proves nothing either way: the probe's precondition is unmet (kUnrouted).
+class VsyncPhaseProbe {
+public:
+    static constexpr unsigned kFlips = 5;
+
+    enum Step {
+        kRun,       // the phase runs
+        kFailed,    // programmed and routed, not seen in kFlips flips: unprogram it
+        kUnrouted,  // programmed, not routed to the CPU: unprogram it
+    };
+
+    // A flip latched with a vsync client.
+    Step flip(bool programmed, bool routed, bool seen)
+    {
+        if (!programmed || seen)
+            return kRun;
+        if (!routed) {
+            flips = 0;
+            return kUnrouted;
+        }
+        if (++flips < kFlips)
+            return kRun;
+        flips = 0;
+        return kFailed;
+    }
+
+    void programmed()
+    {
+        flips = 0;
+    }
+
+private:
+    unsigned flips = 0;
+};

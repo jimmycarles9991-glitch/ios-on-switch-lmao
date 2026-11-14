@@ -8,6 +8,7 @@
 #include <vector>
 
 #include "../raw/fx/fx_image.h"
+#include "../raw/fx/fx_mip_probe.h"
 #include "../raw/fx/fx_mip_route.h"
 #include "../raw/fx/test/twod_sim.h"
 #include "../raw/runtime/raw_mip.h"
@@ -109,6 +110,31 @@ TEST(MipRoute, TwoDFormatsAndTheirThreeDStates)
         EXPECT_EQ(raw::fx::twodFormat(mtl), 0u) << mtl;
         EXPECT_NE(raw::mipState(mtl), nullptr) << mtl;
     }
+}
+
+// The pack's mip state formats whose proven 2D steps read within one code (gpu.raw.mip_twod_candidates, boots 19 and 21)
+// chain on the 2D engine there and on their state at every other step
+TEST(MipRoute, ChainFormatsHalveOnTheTwoDEngineAtProvenStepsOnly)
+{
+    const struct {
+        uint32_t mtl, fmt2d;
+    } formats[] = {{80, 0xcf}, {70, 0xd5}, {115, 0xca}, {10, 0xf3},  {30, 0xea},  {81, 0xd0},  {71, 0xd6},
+                   {1, 0xf7},  {20, 0xee}, {25, 0xf2},  {40, 0xe8},  {55, 0xe5},  {60, 0xda},  {65, 0xde},
+                   {90, 0xd1}, {92, 0xe0}, {94, 0xdf},  {105, 0xcb}, {110, 0xc6}, {125, 0xc0}, {43, 0xe9}};
+
+    for (const auto &f : formats)
+        EXPECT_EQ(raw::fx::twodChainFormat(f.mtl), f.fmt2d) << f.mtl;
+
+    const MipChain c = chain(255, 129, 4);
+    const std::vector<MipRun> r = runs(c, raw::fx::twodChainFormat(55) != 0, raw::mipState(55) != nullptr);  // R32Float
+    ASSERT_FALSE(r.empty());
+    EXPECT_EQ(r[0].engine, MipEngine::ThreeD) << "255 -> 127 and 129 -> 64 are unproven";
+    bool twod = false;
+    for (const MipRun &run : r) {
+        EXPECT_EQ(run.unproven, 0u);
+        twod |= run.engine == MipEngine::TwoD;
+    }
+    EXPECT_TRUE(twod) << "15 -> 7 ... 3 -> 1 are proven";
 }
 
 TEST(MipRoute, PowerOfTwoChainsAreOneTwoDRun)

@@ -23,6 +23,9 @@
 #                            a release kernel compiles every hook to nothing
 #   xnu_sched_render_test    kernel/switch/sched/render.h: the display thread's dispatches split its time from a vsync
 #                            to its swap into running, blocked and waiting for a core
+#   xnu_sched_busy_test      kernel/switch/sched/busy.h: a UI main thread's stretch between two run-loop waits split into
+#                            running, blocked by kind and waiting for a core, its longest waits and its line; both trees'
+#                            thread_dispatch feed it under the thread's lock, with nothing there that locks or logs
 #   xnu_ui_scale_test        bsd/vm/switch_ui_scale.h's scales (whole-point screens, exact floats, boot-arg values)
 #                            and the cache text they write, against the assembler and the bytes the 1.6-only sites
 #                            shipped; the status bar battery's fill in whole pixels with equal gaps at 1.25; the
@@ -43,6 +46,9 @@
 #                            scale keeping the shipped calls and exit; both copies of WidgetKit's placeholder deadline;
 #                            WidgetKit's archived image limit at 2x; the scroll edge keyline's two ladders sending every
 #                            scale but 3 to the 2x row; only the grid and WidgetKit's two applied at scale 1
+#   xnu_ui_scale_page_test   both trees' switch_ui_scale_page over 24B119's table focus site: the shipped bytes take
+#                            both edits and nothing else; a difference anywhere in either checked window leaves the
+#                            chunk as read and logs one line; a chunk without the edits is copied as read
 #   xnu_page_ratio_test      16 KiB VM pages over the 4 KiB granule: pmap.c's write_pte_fast (both trees) writes a
 #                            VM page as four consecutive 4 KiB frames, repeats empty and compressed entries, refuses an
 #                            unaligned PTE
@@ -50,6 +56,9 @@
 #                            and the shared region in the 16k kernel, and 4 KiB everywhere in the 4k one
 #   switch_pmap_test         <switch/pmap.h>: arm_clear_fast_fault skips the TLB invalidate only for a PTE whose one
 #                            change is setting the Access flag
+#   switch_fsctl_diag_test   <switch/fsctl_diag.h>: a refused APFS fsctl's file described by its first bytes (an Apple
+#                            texture's format, size and internal LZFSE, a KTX's format and size), and both trees'
+#                            fsctl_internal reporting each filesystem fsctl after its answer, nothing in release
 #   switch_protection_test   <switch/protection_rules.h>: an unlabelled vnode reads as D before the epoch and as a new one
 #                            after it, a new one is labelled only when it would read otherwise, listxattr loses only
 #                            the label; 12377's hooks label after authorization and the MAC check, a failed label fails
@@ -276,6 +285,36 @@ host_test(
     includes = ["."],
 )
 
+# --- kernel/switch/sched/busy.h -------------------------------------------------------------------------------------------
+copy_file(
+    name = "switch_sched_busy",
+    src = "//kernel/switch:sched/busy.h",
+    out = "sched/busy.h",
+)
+
+copy_file(
+    name = "switch_sched_busy_stall",
+    src = "//kernel/switch:diag/stall.h",
+    out = "diag/stall.h",
+)
+
+host_test(
+    name = "xnu_sched_busy_test",
+    srcs = [
+        "diag/stall.h",
+        "sched/busy.h",
+        "xnu_sched_busy_test.cpp",
+    ],
+    data = [
+        "//kernel/switch:include/switch/sched.h",
+        "//kernel/switch:sched/busy.c",
+        "//kernel/switch:sched/busy.h",
+        "//kernel/xnu-10063.141.1/osfmk:kern/sched_prim.c",
+        "//kernel/xnu-12377.121.6/osfmk:kern/sched_prim.c",
+    ],
+    includes = ["."],
+)
+
 # --- kernel/switch/diag/frames.h ----------------------------------------------------------------------------------------
 copy_file(
     name = "switch_frames",
@@ -407,6 +446,44 @@ host_test(
     includes = ["."],
 )
 
+# switch_ui_scale_page_<tree>.h: vm_unix.c from "static int\nswitch_ui_scale_page(" through its closing brace.
+[
+    genrule(
+        name = "switch_ui_scale_page_" + tree,
+        srcs = ["//kernel/xnu-{}/bsd:vm/vm_unix.c".format(version)],
+        outs = ["switch_ui_scale_page_{}.h".format(tree)],
+        cmd = """awk '
+            prev == "static int" && $$0 ~ /^switch_ui_scale_page\\(/ { on = 1; print prev }
+            on { print }
+            on && $$0 == "}" { done = 1; exit }
+            { prev = $$0 }
+            END { if (!done) exit 1 }
+        ' $< > $@""",
+    )
+    for tree, version in [
+        ("10063", "10063.141.1"),
+        ("12377", "12377.121.6"),
+    ]
+]
+
+host_library(
+    name = "ui_scale_page",
+    srcs = _UI_SCALE_SITES_HDRS + [
+        "switch_ui_scale_page_10063.h",
+        "switch_ui_scale_page_12377.h",
+        "xnu_ui_scale_page_harness.c",
+    ],
+    hdrs = ["xnu_ui_scale_page_harness.h"],
+    includes = ["."],
+)
+
+host_test(
+    name = "xnu_ui_scale_page_test",
+    srcs = _UI_SCALE_SITES_HDRS + ["xnu_ui_scale_page_test.cpp"],
+    includes = ["."],
+    deps = [":ui_scale_page"],
+)
+
 # --- 16 KiB VM pages over the 4 KiB granule -------------------------------------------------------------------------
 # write_pte_fast_<tree>.h: pmap.c from "static void\nwrite_pte_fast(" through its closing brace.
 [
@@ -513,6 +590,27 @@ host_test(
     srcs = [
         "switch/pmap.h",
         "switch_pmap_test.cpp",
+    ],
+    includes = ["."],
+)
+
+copy_file(
+    name = "switch_fsctl_diag",
+    src = "//kernel/switch:include/switch/fsctl_diag.h",
+    out = "switch/fsctl_diag.h",
+)
+
+host_test(
+    name = "switch_fsctl_diag_test",
+    srcs = [
+        "switch/fsctl_diag.h",
+        "switch_fsctl_diag_test.cpp",
+    ],
+    data = [
+        "//kernel/switch:include/switch/fsctl_diag.h",
+        "//kernel/switch:vfs/fsctl_diag.c",
+        "//kernel/xnu-10063.141.1/bsd:vfs/vfs_syscalls.c",
+        "//kernel/xnu-12377.121.6/bsd:vfs/vfs_syscalls.c",
     ],
     includes = ["."],
 )

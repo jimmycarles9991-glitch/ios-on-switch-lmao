@@ -17,19 +17,20 @@
  *               idle-override, align-offset-uv, dfll-override-*.
  *   CAR 0x60006000 (hekate t210.h): CL-DVFS gate = periph clock 155 = bank W bit 27 (L4T clk-tegra-periph.c:723-724),
  *               CLK_OUT_ENB_W 0x364 / SET 0x448, RST_DEVICES_W 0x35c / CLR 0x43c (L4T clk.c:38-72);
- *               CLK_SOURCE_DFLL_REF 0x62c, _SOC 0x630: parent bits 31:30 (0 pll_p, 3 clk_m), 7.1 divider 7:0 (L4T
- *               clk-tegra-periph.c:109-110,147-152,340-345); both 51 MHz from PLL_P and left enabled by L4T's init
- *               table (clk-tegra210.c:3746-3747), the rate clk-dfll.c insists on (REF_CLOCK_RATE).
+ *               CLK_SOURCE_DFLL_REF 0x62c, _SOC 0x630 (TRM CLK_SOURCE_DVFS_REF/_SOC, 5.2.245-246): source 31:29
+ *               (0 pll_p, 6 clk_m), bit 28 reserved and reset 1, 7.1 divider 7:0; reset 0xd0000000 = clk_m /1.
+ *               Both 51 MHz from PLL_P and left enabled by L4T's init table (clk-tegra210.c:3746-3747), the rate
+ *               clk-dfll.c insists on (REF_CLOCK_RATE).
  *               RST_DFLL_DVCO 0x2f4 bit 0 (clk-tegra210.c:266-267,4232-4256).
- *               CLK_SOURCE_I2C5 0x128: parent bits 31:30 as above, 16-bit integer divider (clk-tegra-periph.c:229-234,
- *               659); I2C5 = bank H bit 15 (hekate clock.h:516), CLK_OUT_ENB_H 0x14, RST_DEVICES_H 0x8.
+ *               CLK_SOURCE_I2C5 0x128: source 31:29 as above (TRM 5.2.60), 16-bit integer divider
+ *               (clk-tegra-periph.c:229-234,659); I2C5 = bank H bit 15 (hekate clock.h:516), CLK_OUT_ENB_H 0x14,
+ *               RST_DEVICES_H 0x8.
  *               CCLKG_BURST_POLICY 0x368 is the register L4T's cclk_g mux drives (clk-tegra-super-gen4.c:33,85-89,
  *               203-208: gen5 parents, 4-bit sources, RUN source bits 7:4); hekate and SwitchThermal use the
  *               CCLK_BURST_POLICY alias at 0x20, so the two are compared before anything is switched.
  *               PLLX_BASE 0xe0 / OSC_CTRL 0x50 / SPARE_REG0 0x55c decode as drivers/SwitchPower/SwitchClocks.h does.
  *   FUSE 0x7000f800 (hekate t210.h:65): L4T offsets are relative to +0x100 (fuse-tegra30.c:32,45-48); spare bits at
- *               0x280 (fuse-tegra30.c:195-200); fuse clock CLK_ENB_H_SET bit 7 + MISC_CLK_ENB 0x48 bit 28, as Linux
- *               tegra_enable_fuse_clk (fuse-tegra.c) and hekate hw_init leave them.
+ *               0x280 (fuse-tegra30.c:195-200); readable once switch_car_fuse_readable (kits/SwitchCAR) ran.
  *   HIDREV 0x70000804 (APB_MISC 0x70000800 + 4: tegra-apbmisc.c:58-80,287); T210B01 = chip 0x21 major 2 minor 1
  *               (tegra-apbmisc.c:180-190).
  *   MAX77812 on I2C5: 0x31 if !(FUSE_RESERVED_ODM28_B01 (hekate 0x240) & 1) else 0x33 (hekate max7762x.c:98-109);
@@ -48,6 +49,7 @@
 #include <soc/tegra/fuse.h>
 #include "linux/drivers/soc/tegra/fuse/fuse.h"
 #include "../TegraI2C/TegraI2C.h"
+#include "../../kits/SwitchCAR/SwitchCAR.h"
 #include "../../kits/SwitchMMIO/SwitchMMIO.h"
 
 #define CAR_PA 0x60006000ULL
@@ -60,12 +62,10 @@
 #define CLK_OUT_ENB_H 0x014
 #define CCLK_BURST_POLICY 0x020
 #define SUPER_CCLK_DIVIDER 0x024
-#define MISC_CLK_ENB 0x048
 #define OSC_CTRL 0x050
 #define PLLX_BASE 0x0e0
 #define CLK_SOURCE_I2C5 0x128
 #define RST_DFLL_DVCO 0x2f4
-#define CLK_ENB_H_SET 0x328
 #define RST_DEVICES_W 0x35c
 #define CLK_OUT_ENB_W 0x364
 #define CCLKG_BURST_POLICY 0x368
@@ -74,16 +74,17 @@
 #define SPARE_REG0 0x55c
 #define CLK_SOURCE_DFLL_REF 0x62c
 #define CLK_SOURCE_DFLL_SOC 0x630
-#define H_FUSE BIT(7)
 #define H_I2C5 BIT(15)
 #define W_DVFS BIT(27)
-#define MISC_FUSE_VISIBLE BIT(28)
 #define DVCO_RESET BIT(0)
 #define PLL_ENABLE BIT(30)
 #define PLL_BYPASS BIT(31)
 #define PLL_LOCK BIT(27)
-#define SRC_PLLP 0u        /* mux_pllp_clkm_idx[0] in bits 31:30 */
-#define SRC_CLKM 3u        /* mux_pllp_clkm_idx[1] */
+#define CLK_SRC_SHIFT 29 /* a CLK_SOURCE register's source field, 31:29 (TRM 5.2.60, 5.2.245-246) */
+#define SRC_PLLP 0u      /* mux_pllp_clkm_idx[0] */
+#define SRC_CLKM 6u      /* mux_pllp_clkm_idx[1] */
+#define DVFS_MASTER_CLKEN BIT(28) /* reserved, reset 1: written as reset (TRM 1.4) */
+#define DVFS_DIVISOR 0xffu
 #define DFLL_SRC_51MHZ 14u /* 7.1 divider: 408 MHz * 2 / (14 + 2) = 51 MHz */
 #define PLLP_RATE \
 	408000000UL /* hekate pll_p, the fixed 408 MHz everything on the APB hangs off (SwitchClocks.h) */
@@ -106,7 +107,7 @@
 #define MAX77812_M4_VOUT 0x26
 
 static volatile u8 *car, *fuse, *apbmisc, *i2c5, *dfll;
-static int init_err = 1; /* 1: not tried yet */
+static int init_err = 1; /* 1: not done yet, the next call runs it */
 static char init_why[96];
 static u32 hidrev;
 
@@ -236,14 +237,11 @@ u8 tdfll_platform_pmic_address(void)
 	return (u8)vdd_cpu.client.addr;
 }
 
-/* I2C5 is shared with the DFLL's own master: an arbitration loss is expected now and then, so one retry */
 int tdfll_platform_vout_read(u8 *code)
 {
 	int err = tegra_i2c_init(PMIC_BUS);
 
 	if (!err)
-		err = tegra_i2c_read(PMIC_BUS, (u8)vdd_cpu.client.addr, MAX77812_M4_VOUT, code, 1);
-	if (err == TEGRA_I2C_EARB)
 		err = tegra_i2c_read(PMIC_BUS, (u8)vdd_cpu.client.addr, MAX77812_M4_VOUT, code, 1);
 	return err;
 }
@@ -253,10 +251,6 @@ int tdfll_platform_vout_write(u8 code)
 	u8 check = 0;
 	int err = tegra_i2c_write(PMIC_BUS, (u8)vdd_cpu.client.addr, MAX77812_M4_VOUT, &code, 1);
 
-	if (err == TEGRA_I2C_EARB) {
-		err = tegra_i2c_write(PMIC_BUS, (u8)vdd_cpu.client.addr, MAX77812_M4_VOUT, &code,
-				      1);
-	}
 	if (!err)
 		err = tdfll_platform_vout_read(&check);
 	if (!err && check != code)
@@ -431,30 +425,69 @@ struct cl_dvfs_clk {
 
 static unsigned int cl_dvfs_gate_refcnt;
 
-static int cl_dvfs_enable(struct clk_hw *hw)
+static void cl_dvfs_gate_on(void)
 {
-	/* L4T clk-periph-gate.c clk_periph_enable (64-99): gate on, then release the reset if it is held */
-	if (cl_dvfs_gate_refcnt++)
-		return 0;
 	switch_mmio_write32_flush(car, CLK_ENB_W_SET, W_DVFS);
 	udelay(2);
-	if (switch_mmio_read32(car, RST_DEVICES_W) & W_DVFS) {
-		udelay(5);
-		switch_mmio_write32_flush(car, RST_DEV_W_CLR, W_DVFS);
+}
+
+/* Both sources to PLL_P / 8, divisor first, each step 2 us (TRM 5.1.7, "Method 2": from the reset value's clk_m / 1 a
+ * source-first move would run the module at PLL_P / 1 in between). */
+static void cl_dvfs_sources(void)
+{
+	static const u32 sources[] = {CLK_SOURCE_DFLL_SOC, CLK_SOURCE_DFLL_REF};
+	unsigned int i = 0;
+
+	for (i = 0; i < ARRAY_SIZE(sources); i++) {
+		u32 v = switch_mmio_read32(car, sources[i]);
+
+		switch_mmio_write32_flush(car, sources[i], (v & ~DVFS_DIVISOR) | DFLL_SRC_51MHZ);
+		udelay(2);
+		switch_mmio_write32_flush(car, sources[i],
+					  (SRC_PLLP << CLK_SRC_SHIFT) | DVFS_MASTER_CLKEN |
+						  DFLL_SRC_51MHZ);
 		udelay(2);
 	}
+}
+
+/* The CL-DVFS module (bank W bit 27) up with both sources at 51 MHz, as TRM 5.1.7 sets up a device: in reset, its
+ * clock on, the sources, then out of reset. TRM 35.4: CL-DVFS arbitrates PWR_I2C between its own master and I2C5, and
+ * I2C5 hangs while CL-DVFS is out of reset with its clock stopped, so the clock goes on before anything else and
+ * nothing here stops it. -EBUSY for a module already out of reset whose DFLL runs (its sources change only while it
+ * is idle). */
+static int cl_dvfs_bring_up(char *why, size_t len)
+{
+	cl_dvfs_gate_on();
+	if (switch_mmio_read32(car, RST_DEVICES_W) & W_DVFS) {
+		cl_dvfs_sources();
+		switch_mmio_write32_flush(car, RST_DEV_W_CLR, W_DVFS);
+		udelay(2);
+		return 0;
+	}
+	if (switch_mmio_read32(dfll, 0x00) & 3) {
+		return fail(why, len, -EBUSY, "the DFLL is already running (DFLL_CTRL %#x)",
+			    switch_mmio_read32(dfll, 0x00));
+	}
+	cl_dvfs_sources();
 	return 0;
 }
 
-/* Never gated: L4T's init table holds a reference on both for good (clk-tegra210.c:3746-3747) and hekate enables
- * CL-DVFS "to avoid issues with I2C5 sharing" (hw_init.c:413-414), so the count only ever returns to that one. */
+/* Counts only: the gate went on in cl_dvfs_bring_up, before the clock tree exists, and L4T's init table holds a
+ * reference on both for good (clk-tegra210.c:3746-3747). Never gated either, so CL-DVFS is never out of reset with its
+ * clock stopped (TRM 35.4); hekate enables it "to avoid issues with I2C5 sharing" (hw_init.c:413-414). */
+static int cl_dvfs_enable(struct clk_hw *hw)
+{
+	cl_dvfs_gate_refcnt++;
+	return 0;
+}
+
 static void cl_dvfs_disable(struct clk_hw *hw)
 {
 	if (!WARN_ON(cl_dvfs_gate_refcnt == 0))
 		cl_dvfs_gate_refcnt--;
 }
 
-/* The rate of a PLLP/CLK_M mux's selection (bits 31:30); 0 for the inputs we do not use. */
+/* The rate of a PLLP/CLK_M source field (31:29); 0 for the inputs we do not use. */
 static unsigned long pllp_clkm_rate(u32 src)
 {
 	if (src == SRC_PLLP)
@@ -465,7 +498,7 @@ static unsigned long pllp_clkm_rate(u32 src)
 static unsigned long cl_dvfs_recalc(struct clk_hw *hw, unsigned long parent_rate)
 {
 	u32 v = switch_mmio_read32(car, container_of(hw, struct cl_dvfs_clk, hw)->source);
-	u32 src = v >> 30;
+	u32 src = v >> CLK_SRC_SHIFT;
 	unsigned long parent = pllp_clkm_rate(src);
 
 	return (unsigned long)((u64)parent * 2 / ((v & 0xff) + 2));
@@ -503,7 +536,7 @@ static int i2c5_enable(struct clk_hw *hw)
 static unsigned long i2c5_recalc(struct clk_hw *hw, unsigned long parent_rate)
 {
 	u32 v = switch_mmio_read32(car, CLK_SOURCE_I2C5);
-	u32 src = v >> 30;
+	u32 src = v >> CLK_SRC_SHIFT;
 	unsigned long parent = pllp_clkm_rate(src);
 
 	return parent / ((v & 0xffff) + 1);
@@ -600,27 +633,63 @@ u32 tdfll_platform_dfll_readl(u32 offset)
 	return switch_mmio_read32(dfll, offset);
 }
 
-/* bring-up: no CPU clock or VDD_CPU change */
-static int platform_init(char *why, size_t len)
+static int map_blocks(char *why, size_t len)
+{
+	if (!car)
+		car = (volatile u8 *)switch_linux_ioremap(CAR_PA, 0x1000, 0);
+	if (!fuse)
+		fuse = (volatile u8 *)switch_linux_ioremap(FUSE_PA, 0x400, 0);
+	if (!apbmisc)
+		apbmisc = (volatile u8 *)switch_linux_ioremap(APBMISC_PA, 0x100, 0);
+	if (!i2c5)
+		i2c5 = (volatile u8 *)switch_linux_ioremap(I2C5_PA, 0x100, 0);
+	if (!dfll)
+		dfll = (volatile u8 *)switch_linux_ioremap(DFLL_PA, 0x400, 0);
+	if (!car || !fuse || !apbmisc || !i2c5 || !dfll)
+		return fail(why, len, -ENOMEM, "cannot map CAR/FUSE/APB_MISC/I2C5/DFLL");
+	return 0;
+}
+
+/* L4T's clock init table, once: the clock tree registered, dfll_soc/dfll_ref and cclk_g held for good. */
+static int register_clocks(char *why, size_t len)
 {
 	struct clk_hw *hws[] = {&pllp_hw,         &pllx_hw, &dfll_soc_clk.hw,
 				&dfll_ref_clk.hw, &i2c5_hw, &cclk_g_hw};
+	static bool held;
 	unsigned int i = 0;
-	u8 vout = 0;
-	int err = 0;
 
-	car = (volatile u8 *)switch_linux_ioremap(CAR_PA, 0x1000, 0);
-	fuse = (volatile u8 *)switch_linux_ioremap(FUSE_PA, 0x400, 0);
-	apbmisc = (volatile u8 *)switch_linux_ioremap(APBMISC_PA, 0x100, 0);
-	i2c5 = (volatile u8 *)switch_linux_ioremap(I2C5_PA, 0x100, 0);
-	dfll = (volatile u8 *)switch_linux_ioremap(DFLL_PA, 0x400, 0);
-	if (!car || !fuse || !apbmisc || !i2c5 || !dfll)
-		return fail(why, len, -ENOMEM, "cannot map CAR/FUSE/APB_MISC/I2C5/DFLL");
+	for (i = 0; i < ARRAY_SIZE(hws); i++) {
+		if (!hws[i]->clk && IS_ERR(clk_register(NULL, hws[i]))) {
+			return fail(why, len, -ENOMEM, "cannot register clock %s",
+				    hws[i]->init->name);
+		}
+	}
+	if (held)
+		return 0;
+	/* the init-table references: cl_dvfs's taken in platform_init (counted once more for dfll_ref), cclk_g running */
+	if (clk_prepare_enable(cclk_g_hw.clk)) {
+		return fail(why, len, -EAGAIN,
+			    "cclk_g could not be enabled (CCLKG_BURST_POLICY %#x)",
+			    switch_mmio_read32(car, CCLKG_BURST_POLICY));
+	}
+	cl_dvfs_gate_refcnt++;
+	held = true;
+	return 0;
+}
+
+/* Bring-up: no CPU clock or VDD_CPU change. -ENODEV only for what no retry changes: this chip's revision and its CPU
+ * speedo fuses. Every other failure leaves what it did in place for the next call to go on from. */
+static int platform_init(char *why, size_t len)
+{
+	static bool gate_held;
+	u8 vout = 0;
+	int err = map_blocks(why, len);
+
+	if (err)
+		return err;
 
 	/* fuses: identity, speedo (vendored speedo-tegra210.c, as fuse-tegra30.c tegra30_fuse_init runs it) */
-	switch_mmio_write32_flush(car, CLK_ENB_H_SET, H_FUSE);
-	switch_mmio_write32_flush(car, MISC_CLK_ENB,
-				  switch_mmio_read32(car, MISC_CLK_ENB) | MISC_FUSE_VISIBLE);
+	switch_car_fuse_readable();
 	init_revision();
 	if (tegra_sku_info.id_and_rev != TEGRA210B01_REVISION_A01)
 		return fail(why, len, -ENODEV, "not a T210B01 A01 (HIDREV %#x)", hidrev);
@@ -632,32 +701,30 @@ static int platform_init(char *why, size_t len)
 	vdd_cpu.client.addr = (switch_mmio_read32(fuse, FUSE_ODM28_B01) & 1) ? MAX77812_PHASE211
 									     : MAX77812_PHASE31;
 
+	/* L4T init table: dfll_soc and dfll_ref from PLL_P at 51 MHz, enabled for good, before the first I2C5 transfer
+	 * here (TRM 35.4). The table's reference is taken once; the module is brought up on every call, as an SC7 since the
+	 * last one reset it. */
+	err = cl_dvfs_bring_up(why, len);
+	if (err)
+		return err;
+	if (!gate_held)
+		cl_dvfs_gate_refcnt++;
+	gate_held = true;
+
 	/* VDD_CPU's PMIC must answer where the fuse says it is: the DFLL will address it blindly. Nothing above has
-	 * changed any state, so a transient failure (lost arbitration, timeout) is -EAGAIN and the next init retries. */
+	 * changed any state the next call does not set again. */
 	err = tdfll_platform_vout_read(&vout);
 	if (err) {
-		return fail(why, len, err == TEGRA_I2C_ENACK ? -ENODEV : -EAGAIN,
-			    "MAX77812 at I2C5 %#x does not answer (TegraI2C %d)",
+		return fail(why, len, -EAGAIN, "MAX77812 at I2C5 %#x does not answer (TegraI2C %d)",
 			    vdd_cpu.client.addr, err);
 	}
 
 	/* the DFLL's I2C master divides I2C5's clock: dfll_init_i2c_if BUG()s on a zero divisor */
 	if (!i2c5_running() || !i2c5_recalc(&i2c5_hw, 0)) {
-		return fail(why, len, -ENODEV,
+		return fail(why, len, -EAGAIN,
 			    "I2C5 clock is off or unreadable (CLK_SOURCE_I2C5 %#x)",
 			    switch_mmio_read32(car, CLK_SOURCE_I2C5));
 	}
-
-	/* L4T init table: dfll_soc and dfll_ref from PLL_P at 51 MHz, enabled for good. Only change the dividers of an
-	 * idle DFLL (CTRL mode 0 = disabled), and read it only once its clock runs. */
-	cl_dvfs_enable(&dfll_soc_clk.hw);
-	if (switch_mmio_read32(dfll, 0x00) & 3) {
-		return fail(why, len, -EBUSY, "the DFLL is already running (DFLL_CTRL %#x)",
-			    switch_mmio_read32(dfll, 0x00));
-	}
-	switch_mmio_write32_flush(car, CLK_SOURCE_DFLL_SOC, (SRC_PLLP << 30) | DFLL_SRC_51MHZ);
-	switch_mmio_write32_flush(car, CLK_SOURCE_DFLL_REF, (SRC_PLLP << 30) | DFLL_SRC_51MHZ);
-	udelay(2);
 
 	/* L4T's cclk_g mux BUG()s on a super clock state other than RUN or IDLE: refuse here instead of panicking */
 	if ((switch_mmio_read32(car, CCLKG_BURST_POLICY) & (0xfu << 28)) != SUPER_STATE_RUN_BIT &&
@@ -666,38 +733,21 @@ static int platform_init(char *why, size_t len)
 			    "CCLKG_BURST_POLICY %#x is in neither RUN nor IDLE state",
 			    switch_mmio_read32(car, CCLKG_BURST_POLICY));
 	}
-	for (i = 0; i < ARRAY_SIZE(hws); i++) {
-		if (IS_ERR(clk_register(NULL, hws[i]))) {
-			return fail(why, len, -ENOMEM, "cannot register clock %s",
-				    hws[i]->init->name);
-		}
-	}
-	/* the init-table references: cl_dvfs's taken above (counted once more for dfll_ref), cclk_g running */
-	cl_dvfs_gate_refcnt++;
-	if (clk_prepare_enable(cclk_g_hw.clk)) {
-		return fail(why, len, -ENODEV,
-			    "cclk_g could not be enabled (CCLKG_BURST_POLICY %#x)",
-			    switch_mmio_read32(car, CCLKG_BURST_POLICY));
-	}
-	return 0;
+	return register_clocks(why, len);
 }
 
-/* SC7 reset the CAR: the DFLL's gate, its reset and its two 51 MHz sources come back at their reset values while the
- * clock tree's counts still say they are on. I2C5 must be running again (TegraI2C's resume) before this. */
+/* SC7 reset the CAR: the DFLL's gate, its reset and its two 51 MHz sources come back at their reset values (clock off,
+ * in reset, clk_m / 1) while the clock tree's counts still say they are on. I2C5 must be running again (TegraI2C's
+ * resume) before this. */
 int tdfll_platform_resume(char *why, size_t len)
 {
+	int err = 0;
+
 	if (init_err)
 		return 0;
-	switch_mmio_write32_flush(car, CLK_ENB_W_SET, W_DVFS);
-	udelay(2);
-	if (switch_mmio_read32(car, RST_DEVICES_W) & W_DVFS) {
-		udelay(5);
-		switch_mmio_write32_flush(car, RST_DEV_W_CLR, W_DVFS);
-		udelay(2);
-	}
-	switch_mmio_write32_flush(car, CLK_SOURCE_DFLL_SOC, (SRC_PLLP << 30) | DFLL_SRC_51MHZ);
-	switch_mmio_write32_flush(car, CLK_SOURCE_DFLL_REF, (SRC_PLLP << 30) | DFLL_SRC_51MHZ);
-	udelay(2);
+	err = cl_dvfs_bring_up(why, len);
+	if (err)
+		return err;
 	if (!i2c5_running() || !i2c5_recalc(&i2c5_hw, 0)) {
 		return fail(
 			why, len, -ENODEV,
@@ -713,12 +763,14 @@ int tdfll_platform_init(char *why, size_t len)
 	int err = init_err;
 
 	if (err == 1) {
+		static char printed[sizeof(init_why)];
+
 		err = platform_init(init_why, sizeof(init_why));
-		if (err)
+		if (err && strcmp(init_why, printed)) {
 			printk("%s\n", init_why);
-		init_err = err == -EAGAIN
-				   ? 1
-				   : err; /* only a transient PMIC probe failure is retried */
+			memcpy(printed, init_why, sizeof(printed));
+		}
+		init_err = err && err != -ENODEV ? 1 : err;
 	}
 	if (err)
 		fail(why, len, err, "%s", init_why);

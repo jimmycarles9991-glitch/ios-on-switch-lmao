@@ -63,6 +63,8 @@
 #include "SwitchVICStats.h"
 #include "SwitchVICTurn.h"
 #include "SwitchVICTurnRun.h"
+#include "SwitchVICGate.h"
+#include "SwitchVICGateABI.h"
 #include "../NativeMobileDisplay/SwitchLandscapeRunABI.h"
 #include "../TegraGM20B/TegraGM20BLayout.h"
 
@@ -622,6 +624,8 @@ static IOReturn kernelTest(const Conn *conn, const IOExternalMethodArguments *a)
         memcpy(&magic, a->structureInput, sizeof(magic));
     if (magic == SWITCH_DISPLAY_LANDSCAPE_RUN_MAGIC)
         return switch_vic_landscape_call(conn, a);
+    if (magic == SWITCH_VIC_GATE_MAGIC)
+        return switch_vic_gate_call(conn, a);
     if (magic == SWITCH_DISPLAY_WINDOW_PROBE_MAGIC)
         return switch_display_window_probe_call ? switch_display_window_probe_call(a) : kIOReturnUnsupported;
     return switch_vic_kernel_test_call(a);
@@ -698,6 +702,7 @@ IOReturn tegra_vic_client_close(IOUserClient *self)
     if (Conn *conn = connOf(self)) {
 #if TEGRA_VIC_STATS
         switch_display_traits_release(conn);
+        switch_vic_gate_close(conn);
 #endif
         __atomic_store_n(&conn->closing, true, __ATOMIC_RELEASE);
         IOLockLock(gQueueLock);
@@ -842,9 +847,10 @@ OSDictionary *capabilities(const TegraVICTraits *t)
     // VideoToolbox gates 420f<->420v pairs on it: range conversion reads 4:2:0 through the slot matrix.
     putNumber(d, "IOSurfaceAcceleratorCapabilitiesIdentityCSC", (t->yccIn & TEGRA_VIC_YCC_IN_RGB) ? 1 : 0);
     putNumber(d, "IOSurfaceAcceleratorCapabilitiesTiling", 0);
-    // gpu.x1.vic_fractional (SwitchVICFractionProbe.h) decides it: quarter-pixel offsets against the interpolation.
+    // gpu.x1.vic_fractional (SwitchVICFractionProbe.h) judges both: quarter-pixel offsets and 24.75-pixel widths and
+    // heights against the interpolation (tegra_vic_build hands 16.16 rectangles through).
     putNumber(d, "IOSurfaceAcceleratorCapabilitiesFractionalXYOffsetsSupported", 1);
-    putNumber(d, "IOSurfaceAcceleratorCapabilitiesFractionalDimensions", 0);
+    putNumber(d, "IOSurfaceAcceleratorCapabilitiesFractionalDimensions", 1);
     putNumber(d, "IOSurfaceAcceleratorCapabilitiesDirectionalScaling", 0);
     putNumber(d, "IOSurfaceAcceleratorCapabilitiesHDR", 0);
     putNumber(d, "IOSurfaceAcceleratorCapabilitiesEnhancement", 0);

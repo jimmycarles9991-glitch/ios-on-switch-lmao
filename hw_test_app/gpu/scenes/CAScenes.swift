@@ -37,7 +37,9 @@ struct FirstTiledSurfaceScene: GPUScene {
                 pipeline == nil
                 ? nil
                 : try gpu.texture(
-                    .bgra8Unorm, Self.width, Self.height, usage: [.renderTarget], storage: .memoryless)
+                    CACorpus.colorFormat(CACorpus.state("PBGRAXm_A2Xhf")!, 1), Self.width, Self.height,
+                    usage: [.renderTarget],
+                    storage: .memoryless)
             let timing = try await gpu.run(tolerateError: true) { commands in
                 let encoder = commands.makeRenderCommandEncoder(descriptor: Self.pass(target.texture, colour1))!
                 if let pipeline {

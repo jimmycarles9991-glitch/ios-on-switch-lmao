@@ -149,6 +149,13 @@ static struct nvif_mem *mem_mapping_view(struct tgm_mem *mem,
 	return &mem->mem;
 }
 
+/* A volatile map keeps none of its lines in the GPU's L2, and a compressible kind compresses through the L2
+ * (TegraGM20BABI.h "Compression"): any uncompressed kind, pitch or block-linear, maps volatile. */
+int switch_gpu_vm_volatile_kind_ok(u8 kind, int vol)
+{
+	return !vol || tgm_gpu.mmu.kind[kind] == kind;
+}
+
 int switch_gpu_vm_map_volatile(struct tgm_vm *vm, u64 va, u64 range, struct tgm_mem *mem,
 			       u64 offset, u8 kind, int read_only, int vol,
 			       struct switch_gpu_mapping **mapping)
@@ -168,7 +175,8 @@ int switch_gpu_vm_map_volatile(struct tgm_vm *vm, u64 va, u64 range, struct tgm_
 		return -EINVAL;
 	*mapping = NULL;
 	compressed = tgm_gpu.mmu.kind[kind] != kind;
-	if ((vol && kind) || (compressed && !tgm_comp_bind_ok(va, offset, range, mem->page)))
+	if (!switch_gpu_vm_volatile_kind_ok(kind, vol) ||
+	    (compressed && !tgm_comp_bind_ok(va, offset, range, mem->page)))
 		return -EINVAL;
 	while (at < range) {
 		if (compressed)
@@ -406,6 +414,8 @@ int switch_gpu_vm_install(struct tgm_vm *vm, struct switch_gpu_mapping *mapping,
 		.version = 0, .vol = !!vol || !l2_on(), .ro = !!read_only, .kind = kind};
 	u32 i, ordered_scope, failed = 0;
 	int ret = 0;
+	if (!switch_gpu_vm_volatile_kind_ok(kind, vol))
+		return -EINVAL;
 	if (!switch_gpu_mapping_pending(mapping))
 		return 0;
 	mem_prepare_big_views(mem);

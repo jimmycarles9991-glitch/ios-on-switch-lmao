@@ -169,6 +169,12 @@ public:
         return r.read(kSyncpt + 4 * id);
     }
 
+    template <class Visit> void forEach(uint32_t id, Visit visit) const
+    {
+        for (auto *fence = head[id]; fence; fence = fence->next)
+            visit(fence);
+    }
+
 private:
     enum : uint32_t {
         kIntStatus = 0xe80,

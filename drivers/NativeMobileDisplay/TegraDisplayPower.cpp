@@ -11,6 +11,7 @@
 #include <IOKit/IOLib.h>
 #include "../TegraDisplayFlip/SwitchDisplayPriority.h"
 #include "TegraDisplayPower.h"
+#include "TegraMipiCal.h"
 #include "../SwitchSuspend/SwitchSleepSteps.h"
 #include "../TegraGPIO/TegraGPIO.h"
 #include "../../kits/SwitchCAR/SwitchCAR.h"
@@ -147,7 +148,6 @@ constexpr uint32_t kDsiPadsDown =
 
 // MIPI pad calibration (words).
 enum : uint32_t {
-    MIPI_CAL_CTRL = 0x00,
     MIPI_CAL_CIL_STATUS = 0x02,
     MIPI_CAL_BIAS_PAD_CFG0 = 0x16,
     MIPI_CAL_BIAS_PAD_CFG1 = 0x17,
@@ -507,15 +507,30 @@ extern "C" void tegra_display_power_up(void)
     gDc[DC_DISP_DISP_CLOCK_CONTROL] = 4;  // PIXEL_CLK_DIVIDER_PCD1 | SHIFT_CLK_DIVIDER(4)
     write(gDsi, kDsiHostMode);
     IOSleep(10);
-    // Pad calibration, twice: on T210B01 the clock lane termination code does not load in one pass (hekate's note).
+    // hekate starts the calibration twice on T210B01 ("the clock lane termination code does not load in one pass"), with
+    // nothing read between. Here one runs and its status says whether the clock lane finished (TegraMipiCal.h).
     write(gMipiCal, kMipiPadCal);
-    for (unsigned pass = 0; pass < 2; ++pass) {
-        gMipiCal[MIPI_CAL_BIAS_PAD_CFG2] = 0x10010;
-        gMipiCal[MIPI_CAL_BIAS_PAD_CFG1] = 0;
-        write(gDsi, kDsiPadCal);
-        write(gMipiCal, kMipiDsiCal);
-        gMipiCal[MIPI_CAL_CTRL] = 0x2A000001;
+    gMipiCal[MIPI_CAL_BIAS_PAD_CFG2] = 0x10010;
+    gMipiCal[MIPI_CAL_BIAS_PAD_CFG1] = 0;
+    write(gDsi, kDsiPadCal);
+    write(gMipiCal, kMipiDsiCal);
+    const auto sleepMs = [] {
+        IOSleep(1);
+    };
+    unsigned waited = 0;
+    const bool calibrated = tegra_mipi_cal::calibrate(gMipiCal, sleepMs, waited);
+    const uint32_t status = gMipiCal[tegra_mipi_cal::kStatus], status2 = gMipiCal[tegra_mipi_cal::kStatus2];
+    if (!calibrated) {
+        IOLog("TegraDisplay: DSI pad calibration not done in %u ms (CIL_MIPI_CAL_STATUS %#x STATUS_2 %#x): the panel "
+              "link runs on what it reached\n",
+              waited, status, status2);
     }
-    IOSleep(10);
+#if (defined(DEVELOPMENT) && DEVELOPMENT) || (defined(DEBUG) && DEBUG)
+    else {
+        IOLog("TegraDisplay: DSI pads calibrated in %u ms: TERMADJ %u DRIV_UP %u DRIV_DN %u (CIL_MIPI_CAL_STATUS %#x "
+              "STATUS_2 %#x)\n",
+              waited, (status >> 4) & 0xf, (status >> 8) & 0xf, (status >> 12) & 0xf, status, status2);
+    }
+#endif
     write(gDc, kDcTimings);
 }

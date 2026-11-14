@@ -4,11 +4,12 @@ import HWTestGPU
 import Metal
 
 /// Private render targets on compressed memory (drivers/TegraGM20BMetal/raw/runtime/raw_private_comp.h): a glass-like
-/// chain (a 512x512 BGRA8 pattern, a 256x256 RGBA16Float and a 128x128 BGRA8 2:1 reduction of it), each pass cleared to a
-/// ZBC value first, drawn on compressed memory and again with compression held off (switchRawProbePlainPrivate:): every
-/// byte the same. Mid-chain one command buffer that samples the first target also writes a Boolean visibility result,
+/// chain (a 512x512 BGRA8 pattern, a 256x256 RGBA16Float and a 128x128 BGRA8 2:1 reduction of it) and a 256x256
+/// RGBA32Float pattern (C128), each pass cleared to a ZBC value first, drawn on compressed memory and again with
+/// compression held off (switchRawProbePlainPrivate:): every byte the same, every target compressed. Mid-chain one command buffer that samples the first target also writes a Boolean visibility result,
 /// and stays raw (moves counts the targets that left compressed memory meanwhile). Then 16 clear-only passes of the
-/// 512x512 target, compressed and plain, give the GPU time a ZBC clear saves.
+/// 512x512 target, compressed and plain, give the GPU time a ZBC clear saves. The shape arms follow
+/// (PrivateCompressionShapes.swift).
 struct PrivateCompressionTest: HWTest {
     let id = "gpu.raw.private_compression"
     let name = "Private targets on compressed memory: same bytes, ZBC clears, a Boolean visibility pass kept raw"
@@ -38,7 +39,7 @@ struct PrivateCompressionTest: HWTest {
         let plain = try await chain(gpu, facade, plain: true)
         var metrics = Metrics()
         var wrong: [String] = []
-        let names = ["pattern", "half", "quarter", "after_boolean"]
+        let names = ["pattern", "half", "quarter", "after_boolean", "wide"]
         for (i, name) in names.enumerated() {
             let differing = zip(compressed.bytes[i], plain.bytes[i]).filter { $0 != $1 }.count
             metrics.set("\(name)_bytes_differ", differing)
@@ -55,8 +56,10 @@ struct PrivateCompressionTest: HWTest {
         metrics.set("clear16_compressed_gpu_ms", compressed.clearMs, digits: 3)
         metrics.set("clear16_plain_gpu_ms", plain.clearMs, digits: 3)
         if compressed.compressed.first != 1 { wrong.append("not_compressed") }
+        if compressed.compressed.last != 1 { wrong.append("wide_not_compressed") }
         if plain.compressed.contains(1) { wrong.append("reference_compressed") }
         if compressed.booleanPath != "raw" { wrong.append("boolean_path") }
+        try await shapeArms(gpu, facade, &metrics, &wrong)
         return wrong.isEmpty ? .pass(metrics) : .fail(wrong.joined(separator: ","), metrics)
     }
 
@@ -87,11 +90,13 @@ struct PrivateCompressionTest: HWTest {
         let half = try await target(gpu, facade, .rgba16Float, 256, plain: plain)
         let quarter = try await target(gpu, facade, .bgra8Unorm, 128, plain: plain)
         let again = try await target(gpu, facade, .bgra8Unorm, 256, plain: plain)
+        let wide = try await target(gpu, facade, .rgba32Float, 256, plain: plain)
         var out = Chain()
-        out.compressed = [first, half, quarter, again].map { comptags(facade, $0) }
+        out.compressed = [first, half, quarter, again, wide].map { comptags(facade, $0) }
         let pattern = try gpu.render(fragment: "comp_pattern_fragment", format: .bgra8Unorm)
         let reduceHalf = try gpu.render(fragment: "comp_reduce_fragment", format: .rgba16Float)
         let reduce = try gpu.render(fragment: "comp_reduce_fragment", format: .bgra8Unorm)
+        let patternWide = try gpu.render(fragment: "comp_pattern_fragment", format: .rgba32Float)
         func pass(
             _ target: MTLTexture, _ state: MTLRenderPipelineState, source: MTLTexture?, clear: MTLClearColor
         )
@@ -134,8 +139,10 @@ struct PrivateCompressionTest: HWTest {
         }.path
         try await gpu.run(pass(quarter, reduce, source: half, clear: zero))
         try await gpu.run(pass(again, reduce, source: first, clear: zero))
-        for texture in [first, half, quarter, again] {
-            out.bytes.append(try await gpu.read(texture, bytesPerPixel: texture.pixelFormat == .rgba16Float ? 8 : 4))
+        try await gpu.run(pass(wide, patternWide, source: nil, clear: zero))
+        for texture in [first, half, quarter, again, wide] {
+            let bytes = texture.pixelFormat == .rgba32Float ? 16 : texture.pixelFormat == .rgba16Float ? 8 : 4
+            out.bytes.append(try await gpu.read(texture, bytesPerPixel: bytes))
         }
         let clears = try await target(gpu, facade, .bgra8Unorm, 512, plain: plain)
         let clearOnly: (MTLCommandBuffer) -> Void = { commands in

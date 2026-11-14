@@ -33,9 +33,18 @@ TEST(RawFetchRungs, ComputedColourTakesItTwoLayersDeep)
     EXPECT_FALSE(raw::fixedBlendAcceptable(a)) << "4 codes off by eight layers (UNITS.md stack table)";
 }
 
+TEST(RawFetchRungs, EachFormatTheFormatArmsJudgeTakesTheRop)
+{
+    for (uint16_t format : {uint16_t(115), uint16_t(81), uint16_t(71)}) {
+        raw::FixedBlendAsk a = screenLayer();
+        a.format = format;
+        EXPECT_EQ(raw::fixedBlendAcceptable(a), raw::fixedBlendProven()) << format;
+    }
+}
+
 TEST(RawFetchRungs, DataTargetsKeepTheExactBlend)
 {
-    for (uint16_t format : {uint16_t(90), uint16_t(115), uint16_t(110), uint16_t(71)}) {
+    for (uint16_t format : {uint16_t(90), uint16_t(110), uint16_t(72), uint16_t(550), uint16_t(552), uint16_t(554)}) {
         raw::FixedBlendAsk a = screenLayer();
         a.format = format;
         EXPECT_FALSE(raw::fixedBlendAcceptable(a)) << format;

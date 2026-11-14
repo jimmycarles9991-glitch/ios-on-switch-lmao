@@ -4,7 +4,8 @@
 #include "SwitchNativeSurface.h"
 #include "../TegraGM20B/TegraGM20BViews.h"
 
-int switch_vic_surface_access(const TegraVICSurface *surface, bool write, SwitchVICSurfaceAccess *access, bool avoid)
+int switch_vic_surface_access(const TegraVICSurface *surface, bool write, SwitchVICSurfaceAccess *access, bool avoid,
+                              switch_gpu_backing *held)
 {
     if (!surface || !surface->surface || !surface->memory || !access)
         return -22;
@@ -19,7 +20,8 @@ int switch_vic_surface_access(const TegraVICSurface *surface, bool write, Switch
         if (access->backing)
             access->offset = surface->baseOffset;
         else
-            access->backing = switch_vic_surface_backing(surface);
+            access->backing =
+                held ? switch_vic_surface_backing_held(surface, held) : switch_vic_surface_backing(surface);
         auto *generation = SwitchMemoryAttachment::generation(surface->memory);
         if (!access->backing || !generation)
             error = -12;

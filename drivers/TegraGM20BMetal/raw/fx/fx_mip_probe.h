@@ -1,10 +1,11 @@
 // SPDX-License-Identifier: MIT
-// The 2D engine's surface format for a chain format no probe has covered yet (twodFormat 0, a pack mip state of its own):
-// what HW Test gpu.raw.mip_twod's probe cells run on the 2D engine in a debug build (switchRawProbeMipCandidates:) to compare
-// with that format's 3D passes. A format joins twodFormat once its cells are within one code; 0 here: no 2D format.
+// The 2D engine's surface format for a chain format the pack's mip state also makes (twodFormat 0): its proven steps'
+// (twodChainFormat), and every step of it in a debug build's probe (switchRawProbeMipCandidates:, HW Test
+// gpu.raw.mip_twod_candidates); 0 here: no 2D format.
 #pragma once
 #include <cstdint>
 #include "../../../../kits/SwitchGM20B/SwitchGM20B.h"
+#include "fx_mip.h"
 
 namespace raw {
 namespace fx {
@@ -43,6 +44,16 @@ inline uint32_t twodCandidateFormat(uint32_t mtl)
     default:
         return 0;
     }
+}
+
+// The 2D engine's surface format for a mip chain's steps: twodFormat's, and the formats whose 2D steps are within one code
+// of Metal's at the proven steps only (gpu.raw.mip_twod_candidates), whose other steps are their mip state's
+// (fx_mip_route.h)
+inline uint32_t twodChainFormat(uint32_t mtl)
+{
+    if (const uint32_t f = twodFormat(mtl))
+        return f;
+    return twodCandidateFormat(mtl);
 }
 
 }  // namespace fx

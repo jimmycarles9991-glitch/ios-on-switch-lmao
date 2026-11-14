@@ -1,10 +1,11 @@
 // SPDX-License-Identifier: MIT
 // A compile request, as a GPU client hands it to the system's shader compiler (drivers/TegraGM20BMetal/compiler) through the
-// kernel: a render state's descriptor fields, or a kernel's limits and dispatch, each stage's function and the library it
-// comes from, and the variant. It carries the key the client made, which the compiler checks against the key it makes itself
-// from the rest (RawCompileRequest.mm), and no record. A record is filed under a store name that binds that key to the exact
-// libraries it was compiled from: a system volume's library by its path (the compiler reads it there), any other by the
-// SHA-256 of its bytes (which the request carries). A client only ever finds a record made from what it holds itself.
+// kernel: a render state's descriptor fields, or a kernel's limits, stage input and dispatch, each stage's function and the
+// library it comes from, and the variant. It carries the key the client made, which the compiler checks against the key it
+// makes itself from the rest (RawCompileRequest.mm), and no record. A record is filed under a store name that binds that key
+// to the exact libraries it was compiled from: a system volume's library by its path (the compiler reads it there), any
+// other by the SHA-256 of its bytes (which the request carries). A client only ever finds a record made from what it holds
+// itself.
 #pragma once
 #include <array>
 #include <cstdint>
@@ -12,8 +13,8 @@
 #include <vector>
 #include "bridge/NativeMetalDirect.h"
 #include "raw_cache.h"
-#include "raw_cubic.h"
 #include "raw_pipeline_fields.h"
+#include "raw_render_variant.h"
 
 namespace raw {
 
@@ -53,7 +54,7 @@ struct RequestStage {
     uint32_t library = 0;
 };
 
-// A kernel at one dispatch shape and its bindings (RawDirect.h KernelDispatch)
+// A kernel at one dispatch shape and its bindings (RawDirect.h KernelDispatch), and its descriptor's stage input
 struct KernelRequest {
     uint32_t maxThreads = 0;
     bool multipleOfWidth = false, regionMode = false;
@@ -61,6 +62,7 @@ struct KernelRequest {
     uint32_t memory[kRequestBindLimit] = {};
     std::vector<NmbDirectBoundTexture> textures;
     std::vector<NmbDirectBoundSampler> samplers;
+    StageInFields stageIn;
 
     NmbDirectDispatch dispatch() const;
 };
@@ -72,8 +74,7 @@ struct CompileRequest {
     PipelineFields fields;
     std::vector<RequestStage> stages;
     std::vector<RequestLibrary> libraries;
-    CubicBinds cubic;
-    uint8_t fragmentTests = 0;
+    RenderVariant variant;
     KernelRequest kernel;
     std::string key;  // the CacheKey text the client made (a kernel's starts "kernel | ")
 };

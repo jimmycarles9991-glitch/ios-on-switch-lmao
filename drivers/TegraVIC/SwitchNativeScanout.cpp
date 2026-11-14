@@ -63,7 +63,8 @@ enum class SnapshotWait {
     cpuReader
 };
 
-static int pitchSnapshot(OSObject *object, SwitchNativeScanout *scanout, SnapshotWait how)
+static int pitchSnapshot(OSObject *object, SwitchNativeScanout *scanout, SnapshotWait how,
+                         switch_gpu_backing *held = nullptr)
 {
     const bool wait = how != SnapshotWait::none;
     if (!scanout)
@@ -73,7 +74,7 @@ static int pitchSnapshot(OSObject *object, SwitchNativeScanout *scanout, Snapsho
     if (switch_vic_surface_from_object(object, 0, &surface))
         return -22;
     SwitchVICSurfaceAccess access;
-    int error = switch_vic_surface_access(&surface, false, &access, !wait);
+    int error = switch_vic_surface_access(&surface, false, &access, !wait, held);
     switch_gpu_backing_info before = {};
     if (!error) {
         switch_gpu_backing_describe(access.backing, &before);
@@ -104,6 +105,11 @@ static int pitchSnapshot(OSObject *object, SwitchNativeScanout *scanout, Snapsho
 int switch_native_scanout_pitch(OSObject *object, SwitchNativeScanout *scanout)
 {
     return pitchSnapshot(object, scanout, SnapshotWait::none);
+}
+
+int switch_native_scanout_pitch_held(OSObject *object, switch_gpu_backing *held, SwitchNativeScanout *scanout)
+{
+    return pitchSnapshot(object, scanout, SnapshotWait::none, held);
 }
 
 int switch_native_scanout_pitch_wait(OSObject *object, SwitchNativeScanout *scanout)

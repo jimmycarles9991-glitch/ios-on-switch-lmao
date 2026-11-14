@@ -23,6 +23,8 @@ TEST(DcHost1xClassProbe, ItIsDebugOnlyAndUsesTheJobApi)
     EXPECT_EQ(Between(probe, "#else\n", "#endif"), "static void dcClassRegister()\n{}\n");
     EXPECT_NE(probe.find("switch_host1x_job_copy(kDcClassChannel, words, n, dcClassSyncpts[2], s.channelAt)"),
               std::string::npos);
+    EXPECT_NE(probe.find("kDcClassChannel = TEGRA_HOST1X_CHANNEL_DISPLAY"), std::string::npos)
+        << "a torn-down NVJPG channel drops NVJPG's queued jobs";
     const std::string run = Between(probe, "void dcClassProbe()", "\n}\n");
     EXPECT_LT(run.find("dcClassScratchHolds(before, marker)"), run.find("dcClassSubmit(nullptr, 0, control)"));
     EXPECT_LT(run.find("dcClassSubmit(nullptr, 0, control)"), run.find("dcClassSubmit(body,"));

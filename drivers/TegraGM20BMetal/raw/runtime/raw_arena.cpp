@@ -107,9 +107,11 @@ bool Device::bindArenaPart(Arena &a, uint64_t offset, uint64_t bytes)
 
 void Device::unbindArena(Arena &a)
 {
-    if (a.parts.empty()) {
+    if (a.parts.empty()) {  // whole, or trimmed to no part at all: then its BO is already gone and counted out
+        if (a.bo.handle) {
+            RAW_DIAGNOSTIC(stats.poolBytes -= a.bytes);
+        }
         k_.free(a.bo);
-        RAW_DIAGNOSTIC(stats.poolBytes -= a.bytes);
         return;
     }
     for (auto &[offset, part] : a.parts) {

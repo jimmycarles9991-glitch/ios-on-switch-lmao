@@ -10,14 +10,33 @@
 #   switch_sensors_hid_source_test   the HID descriptor and IOHIDFamily vtable slots the sensors are published through
 #   switch_emc_governor_test         SwitchEMCGovernor.h: the EMC rates used, ACTMON's watermarks and the governor's moves
 #   switch_soctherm_window_test      SwitchSocThermWindow.h: SOC_THERM's one-degree LVL0 window and the groups' registers
+#   switch_soctherm_throttle_test    SwitchSocThermThrottle.h: L4T's T210B01 hardware throttle on a model of SOC_THERM,
+#                                    its state line, and the GPU clock count's thermal sample
 #   switch_thermal_shutdown_test     software shutdown below the hardware trip, its RTC record, the reset cause decoding
 #   switch_monotonic_base_test       SwitchMonotonicBase.h: kern.monotonicclock never reads below the previous boot's
+#   switch_thermal_dfll_test         SwitchThermalDfll.h against a stand-in SwitchThermal: a DFLL failure fails that
+#                                    raise and the next raise runs the same path; only -ENODEV ends the DFLL mode; no
+#                                    sleep in SwitchThermal.cpp where governor signals or ALERT wait
+#   switch_pllx_start_test           SwitchPllxStart.h: PLLX started again in the TRM's order (5.1.5: IDDQ, dividers,
+#                                    lock detection, enable, lock)
+#   switch_tegra_rtc_test            SwitchTegraRTC.h: the RTC's latched seconds and milliseconds, its one reader and
+#                                    that reader's two callers
+#   switch_emc_hold_test             SwitchEMCHold.h played out over a frame burst: the EMC loop's hold-timer arms and
+#                                    wake-ups per burst, the hold's end within a tick of the frames' or the hint's
+#   switch_perf_hint_source_test     the touch filter's GPU and EMC hints as their sources stand: no lock, no
+#                                    read-modify-write, no sequentially consistent access
+#   switch_cpu_load_test             SwitchCpuLoad.h: a CPU's busy time from its context-switch callout, exact read
+#                                    alone, off by one interval per racing switch at most (also under TSAN)
+#   switch_perf_governor_callouts_test SwitchPerfGovernor.cpp itself over stand-ins for XNU: the locks, read-modify-
+#                                    writes and fences of a context switch, a tick and a touch interrupt, none of which
+#                                    may lock; a touch and the thermal limits still reach the clock at once; every
+#                                    context on its own thread at once (also under TSAN: ..._callouts_tsan_test)
 # The headers are C: each is compiled as C11 with -Wconversion -Wsign-conversion in a harness (its static inline
 # functions as exported ones) and driven by a GoogleTest test.
 #
 #   bazel test //drivers/SwitchPower/test:all
 load("//bazel/lint:defs.bzl", "lint_files")
-load("//bazel/testing:defs.bzl", "host_library", "host_test")
+load("//bazel/testing:defs.bzl", "host_library", "host_shims", "host_test")
 
 lint_files()
 
@@ -106,6 +125,23 @@ host_test(
 )
 
 host_test(
+    name = "switch_soctherm_throttle_test",
+    srcs = [
+        "switch_soctherm_throttle_test.cpp",
+        "//drivers/SwitchPower:SwitchSocThermThrottle.h",
+        "//drivers/SwitchPower:SwitchSocThermWindow.h",
+        "//drivers/SwitchPower:SwitchThermalLimits.h",
+        "//kits/SwitchMMIO:SwitchMMIO.h",
+    ],
+    data = [
+        "//drivers/SwitchPower:SwitchSensors.cpp",
+        "//drivers/SwitchPower:SwitchSocTherm.cpp",
+        "//drivers/TegraGM20B:gpu_stats_clock.c",
+    ],
+    defines = ["SWITCH_MMIO_HOST_MODEL=1"],
+)
+
+host_test(
     name = "switch_thermal_shutdown_test",
     srcs = [
         "switch_thermal_shutdown_test.cpp",
@@ -147,6 +183,7 @@ host_test(
     name = "switch_display_memory_adapter_test",
     srcs = [
         "switch_display_memory_adapter_test.cpp",
+        "//drivers/NativeMobileDisplay:SwitchDisplayMemoryEnvelope.h",
         "//drivers/SwitchPower:SwitchDisplayBandwidth.h",
         "//drivers/SwitchPower:SwitchDisplayMemory.h",
         "//drivers/SwitchPower:SwitchDisplayMemoryMath.h",
@@ -158,4 +195,150 @@ host_test(
         "//drivers/SwitchPower:SwitchEMCFixed.h",
     ],
     defines = ["DEVELOPMENT=1"],
+)
+
+host_test(
+    name = "switch_thermal_dfll_test",
+    srcs = [
+        "switch_thermal_dfll_test.cpp",
+        "//drivers/SwitchPower:SwitchThermalDfll.h",
+        "//drivers/TegraDFLL:TegraDFLL.h",
+    ],
+    data = [
+        "//drivers/SwitchPower:SwitchThermal.cpp",
+        "//drivers/SwitchPower:SwitchThermalDfllLanding.h",
+    ],
+)
+
+host_test(
+    name = "switch_pllx_start_test",
+    srcs = [
+        "switch_pllx_start_test.cpp",
+        "//drivers/SwitchPower:SwitchPllxStart.h",
+    ],
+)
+
+host_test(
+    name = "switch_tegra_rtc_test",
+    srcs = [
+        "switch_tegra_rtc_test.cpp",
+        "//drivers/SwitchPower:SwitchTegraRTC.h",
+        "//kits/SwitchMMIO:SwitchMMIO.h",
+    ],
+    data = ["//kernel:lint_sources"],
+    defines = ["SWITCH_MMIO_HOST_MODEL=1"],
+)
+
+host_shims(
+    name = "perf_kernel",
+    headers = [
+        "IOKit/IOLib.h",
+        "kern/clock.h",
+        "kern/cpu_number.h",
+        "machine/machine_routines.h",
+        "os/log.h",
+    ],
+    stubs = "switch_perf_governor_kernel_stubs.h",
+)
+
+PERF_GOVERNOR_SRCS = [
+    "//drivers/NativeSwitchBlock:SwitchCryptex.h",
+    "//drivers/SwitchBattery:SwitchBattery.h",
+    "//drivers/SwitchPower:SwitchCpuLoad.h",
+    "//drivers/SwitchPower:SwitchEMC.h",
+    "//drivers/SwitchPower:SwitchGovernor.h",
+    "//drivers/SwitchPower:SwitchPerfGovernor.cpp",
+    "//drivers/SwitchPower:SwitchPerfGovernor.h",
+    "//drivers/SwitchPower:SwitchPerfGovernorLimits.cpp",
+    "//drivers/SwitchPower:SwitchPerfGovernorLine.cpp",
+    "//drivers/SwitchPower:SwitchPerfGovernorLine.h",
+    "//drivers/SwitchPower:SwitchPerfGovernorState.h",
+    "//drivers/SwitchPower:SwitchPower.h",
+    "//drivers/TegraDFLL:TegraDFLL.h",
+    "//drivers/TegraGM20B:TegraGM20BGpu.h",
+]
+
+# Its read-modify-writes and fences counted (switch_perf_governor_counting.h).
+host_library(
+    name = "perf_governor",
+    srcs = PERF_GOVERNOR_SRCS,
+    defines = ["DEVELOPMENT=1"],
+    force_includes = ["switch_perf_governor_counting.h"],
+    deps = [":perf_kernel"],
+)
+
+host_test(
+    name = "switch_perf_governor_callouts_test",
+    srcs = [
+        "switch_perf_governor_callouts_test.cpp",
+        "//drivers/SwitchPower:SwitchPerfGovernor.h",
+        "//drivers/SwitchPower:SwitchPower.h",
+    ],
+    deps = [
+        ":perf_governor",
+        ":perf_kernel",
+    ],
+)
+
+host_library(
+    name = "perf_governor_tsan",
+    srcs = PERF_GOVERNOR_SRCS,
+    copts = ["-fsanitize=thread"],
+    defines = ["DEVELOPMENT=1"],
+    force_includes = ["switch_perf_governor_counting.h"],
+    sanitize = False,
+    deps = [":perf_kernel"],
+)
+
+host_test(
+    name = "switch_perf_governor_callouts_tsan_test",
+    srcs = [
+        "switch_perf_governor_callouts_test.cpp",
+        "//drivers/SwitchPower:SwitchPerfGovernor.h",
+        "//drivers/SwitchPower:SwitchPower.h",
+    ],
+    copts = ["-fsanitize=thread"],
+    linkopts = ["-fsanitize=thread"],
+    sanitize = False,
+    deps = [
+        ":perf_governor_tsan",
+        ":perf_kernel",
+    ],
+)
+
+host_test(
+    name = "switch_cpu_load_test",
+    srcs = [
+        "switch_cpu_load_test.cpp",
+        "//drivers/SwitchPower:SwitchCpuLoad.h",
+    ],
+)
+
+host_test(
+    name = "switch_cpu_load_tsan_test",
+    srcs = [
+        "switch_cpu_load_test.cpp",
+        "//drivers/SwitchPower:SwitchCpuLoad.h",
+    ],
+    copts = ["-fsanitize=thread"],
+    linkopts = ["-fsanitize=thread"],
+    sanitize = False,
+)
+
+host_test(
+    name = "switch_emc_hold_test",
+    srcs = [
+        "switch_emc_hold_test.cpp",
+        "//drivers/SwitchPower:SwitchEMCHold.h",
+    ],
+)
+
+host_test(
+    name = "switch_perf_hint_source_test",
+    srcs = ["switch_perf_hint_source_test.cpp"],
+    data = [
+        "//drivers/SwitchPower:SwitchEMC.cpp",
+        "//drivers/SwitchPower:SwitchEMCHints.h",
+        "//drivers/TegraGM20B:gpu_clock.c",
+    ],
 )

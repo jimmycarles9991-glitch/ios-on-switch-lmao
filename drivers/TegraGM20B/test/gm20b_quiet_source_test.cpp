@@ -40,9 +40,11 @@ TEST(GM20BQuietSource, TheFenceInterruptsOnlyWhenItAnnounces)
 	// a semantic fence bound to the job (its own, or one a dependency passed on) resolves at a published completion, and
 	// a watched present's producer writes a backing the display scans in place
 	EXPECT_TRUE(job.Before("error = events->bind(&completion);",
-			       "switch_gpu_quiet_end(quiet, events->semanticFence(),"));
+			       "semanticBound = events->semanticFence();"));
+	EXPECT_TRUE(job.Before("semanticBound = events->semanticFence();",
+			       "switch_gpu_quiet_end(quiet, semanticBound,"));
 	EXPECT_TRUE(job.Before("scanoutWrites |= switch_gpu_backing_scanned(bo->backing) != 0;",
-			       "switch_gpu_quiet_end(quiet, events->semanticFence(),"));
+			       "switch_gpu_quiet_end(quiet, semanticBound,"));
 	EXPECT_TRUE(job.Has("scanoutWrites, closesGroup);"));
 	EXPECT_TRUE(job.Has("!(head.flags & TegraGM20BJobAdmission) || (head.flags & "
 			    "TegraGM20BJobAdmissionEnd);"));
@@ -57,12 +59,15 @@ TEST(GM20BQuietSource, EverySleepOnAUserChannelAsksFirst)
 			  power = unit("gpu_power.c");
 	EXPECT_TRUE(Block(chan, "void tgm_chan_want(")
 			    .Before("switch_gpu_waiter_want(", "tgm_chan_need(chan, seqno);"));
-	EXPECT_TRUE(Block(chan, "void tgm_chan_del(")
-			    .Before("tgm_chan_quiet_wake(chan);", "nvxnu_idle(seq, end)"));
+	EXPECT_TRUE(
+		Block(chan, "void tgm_chan_del(")
+			.Before("tgm_chan_quiet_wake(chan);", "tgm_waiter_idle(waiter, seq, end)"));
 	EXPECT_TRUE(Block(sync, "static int sync_wait(")
-			    .Before("tgm_chan_need_id(id, seqno);", "nvxnu_idle(seq, end)"));
+			    .Before("tgm_chan_need_id(id, seqno);",
+				    "tgm_waiter_idle(waiter, seq, end)"));
 	EXPECT_TRUE(Block(sync, "static void writer_wait(")
-			    .Before("tgm_chan_need_uid(uid, seqno);", "nvxnu_idle(seq, end)"));
+			    .Before("tgm_chan_need_uid(uid, seqno);",
+				    "tgm_waiter_idle(waiter, seq, end)"));
 	EXPECT_TRUE(Block(power, "static void sleep_fences(")
 			    .Before("tgm_chan_wake_push(chan);", "nvxnu_idle(seq, end)"));
 	const CodeText room = Block(unit("gpu_exec.c"), "int tgm_chan_wait_ready(");
@@ -99,7 +104,7 @@ TEST(GM20BQuietSource, LostWakePanicsWaitForTheAnnouncingInterrupt)
 	const std::string chan = unit("gpu_chan.c"), sync = unit("gpu_sync.c"),
 			  power = unit("gpu_power.c");
 	EXPECT_TRUE(Block(chan, "void tgm_chan_del(")
-			    .Has("tgm_chan_announced(chan, chan->submitted)) nvxnu_wake_due("));
+			    .Has("tgm_chan_announced(chan, chan->submitted)) tgm_waiter_unwoken("));
 	EXPECT_TRUE(Block(sync, "static int sync_wait(").Has("tgm_chan_announced_id(id, seqno))"));
 	EXPECT_TRUE(
 		Block(sync, "static void writer_wait(").Has("tgm_chan_announced_uid(uid, seqno))"));
@@ -112,7 +117,8 @@ TEST(GM20BQuietSource, LostWakePanicsWaitForTheAnnouncingInterrupt)
 	for (const char *name :
 	     {"gpu_bringup.c", "gpu_chan.c", "gpu_sync.c", "gpu_power.c", "gpu_exec.c",
 	      "gpu_present.c", "gpu_scrub.c", "gpu_hang.c", "gpu_quiet.c"})
-		panics += CodeText(unit(name)).Count("nvxnu_wake_due(");
+		panics += CodeText(unit(name)).Count("nvxnu_wake_due(") +
+			  CodeText(unit(name)).Count("tgm_waiter_unwoken(waiter,");
 	EXPECT_EQ(panics, 6u) << "a new fence wait: ask for its interrupt and key its panic to it";
 	EXPECT_TRUE(Block(power, "static void wake_fence(")
 			    .Has("tgm_scrub.chan ? tgm_scrub.chan : tgm_present.chan"));
@@ -131,7 +137,6 @@ TEST(GM20BQuietSource, WakeEntriesKeepTheSubmissionOrder)
 			    .Before("tgm_gate_enter();", "tgm_chan_wake_push(chan);"));
 	const CodeText push = Block(quiet, "void tgm_chan_wake_push(");
 	EXPECT_TRUE(push.Before("NON_STALL_INTERRUPT", "PUSH_KICK(push);"));
-	EXPECT_TRUE(push.Before("switch_gpu_irq_arm(", "PUSH_KICK(push);"));
 	EXPECT_TRUE(push.Has("nvxnu_panic("));
 	EXPECT_TRUE(Block(unit("TegraGM20BUserClientChannel.cpp"),
 			  "IOReturn AGXDeviceUserClient::channelCreate(")
@@ -149,8 +154,9 @@ TEST(GM20BQuietSource, TheIdleClockSettlesQuietEnds)
 			    .Before("if (idle_in_flight()) {",
 				    "nvxnu_work_schedule(tgm_idle.settle_w);"));
 	const CodeText settle = Block(unit("gpu_quiet.c"), "void tgm_idle_settle(void *arg)");
-	EXPECT_TRUE(settle.Before("idle_retire(chan, tgm_chan_completed(chan));",
-				  "tgm_chan_need(chan, READ_ONCE(chan->submitted));"));
+	EXPECT_TRUE(settle.Before(
+		"switch_gpu_busy_settle(&tgm_busy, chan->chid, tgm_chan_completed(chan));",
+		"tgm_chan_need(chan, READ_ONCE(chan->submitted));"));
 	EXPECT_FALSE(settle.Has("nvxnu_idle("));
 }
 
@@ -175,21 +181,21 @@ TEST(GM20BPromiseSource, PresentsAndJobsOrderBehindWriterPromises)
 	// between begin and commit the transaction holds every use's backing lock: a promise read that takes one again
 	// (switch_gpu_backing_promise_tokens) never returns on XNU
 	EXPECT_FALSE(job.Has("switch_gpu_backing_promise_tokens("));
-	EXPECT_TRUE(job.Before("switch_gpu_backing_commit(&transaction);",
+	EXPECT_TRUE(job.Before("jobVisibility, releases, keptCount, &transaction);",
 			       "keptPromises(record.promises, slot, completion);"));
 	const std::string exec = unit("gpu_exec.c");
 	EXPECT_TRUE(Block(exec, "static u32 chan_fence_job(")
 			    .Before("lower_32_bits(chan->fence_gpu)", "releases[s].value"));
 	// A GPU reader parks on a pending promise once its acquires are kicked, never while they can still be rolled back:
 	// a give-up armed for a push that was not submitted would drop a later frame whose writes did arrive.
-	const CodeText acquire = Block(exec, "int tgm_backing_dependencies(");
+	const CodeText acquire = Block(exec, "static int backing_dependency(");
 	EXPECT_TRUE(acquire.Has("token->engine == SWITCH_GPU_ENGINE_PROMISE"));
 	EXPECT_FALSE(acquire.Has("tgm_chan_note_promise("));
 	const CodeText kick =
 		Block(exec, "static inline __attribute__((always_inline)) int chan_exec_body(");
-	EXPECT_TRUE(kick.Before(
-		"ret = tgm_backing_dependencies(chan, dependencies, dependency_count, 1);",
-		"PUSH_KICK(&chan->chan.push);"));
+	EXPECT_TRUE(
+		kick.Before("tgm_backing_dependencies(chan, dependencies, dependency_count, 1);",
+			    "PUSH_KICK(&chan->chan.push);"));
 	EXPECT_TRUE(kick.Before("PUSH_KICK(&chan->chan.push);",
 				"tgm_chan_park_promises(chan, dependencies, dependency_count);"));
 	const CodeText copy = Block(unit("gpu_present.c"), "static int present_copy(");
@@ -242,8 +248,9 @@ TEST(GM20BPromiseSource, PresentsAndJobsOrderBehindWriterPromises)
 				    "memset(tgm_fence_pages.made[i], 0, "
 				    "sizeof(tgm_fence_pages.made[i]));"));
 	// the call's look at the end of every GPU interrupt pass, after the present's
-	EXPECT_TRUE(CodeText(unit("shim/xnu_glue.cpp"))
-			    .Before("tgm_present_pass(); tgm_promise_pass();", "nvxnu_wake();"));
+	EXPECT_TRUE(Block(unit("shim/xnu_glue.cpp"),
+			  "void gpuInterrupt(OSObject *, IOInterruptEventSource *source, int)")
+			    .Before("tgm_present_pass(); tgm_promise_pass();", "wakeAfterPass();"));
 	// The give-up is the promise's one cadence: a present's deadline and a wait's hang checks keep their own period
 	// whatever the waited channel acquires, and nothing in the hang rule reads a promise.
 	EXPECT_TRUE(copy.Before(

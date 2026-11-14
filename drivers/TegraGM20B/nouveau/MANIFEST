@@ -9,8 +9,17 @@ nvkm/engine/gr/gf100.c takes a trap with TEX exceptions alone as nvgpu does (gf1
 reported with dev_warn, the ESR written back, no TRAP error and so no channel kill.
 nvkm/engine/gr/gk20a.c floorsweeps (gf100_grctx_generate_floorsweep: SM ids, PD/DS TPC counts, ROP mapping) at every GR
 init, as nvgpu's gk20a_init_gr_setup_hw calls init_fs_state at every power-on, not only for the golden context.
+nvkm/engine/fifo/gk104.c routes the channel (nonstall) interrupt, PFIFO_INTR_0 bit 31, to PMC tree 1 at every FIFO init
+(PFIFO_INTR_EN_1 0x2528, as nvgpu's gm20b fifo reset does; ../../SwitchGpuNonstall.h) and only acknowledges it in its
+handler: the kext completes the channels with work in flight at each interrupt pass, with no nonstall event.
+nvif/chan506f.c writes GPFIFO entries with plain stores into the write-combined ring, and its kick writes GP_PUT
+after one store barrier (DSB ST) with no publishing barrier of its own.
 nvkm/engine/gr/gf100.c tells the kext of each channel error gf100_gr_intr reports, before acknowledging it
 (tgm_gr_fault, ../../TegraGM20BGrFault.h), so the kill names the job GR stopped in.
+nvkm/engine/device/tegra.c powers the GPU up and down with ../../platform.c's rail ungate and gate, the Tegra X1 TRM's
+GM20b sequence (12.2.7.17), in place of mainline's clock, reset and clamp calls.
+nvkm/subdev/privring/gk20a.c resets the PRI ring (PMC_ENABLE bit 5, at init and from its interrupt) through
+../../gpu_pmc.c's tgm_pmc_change, PMC_ENABLE's one lock, in place of its own read-modify-writes.
 
 include/nvfw/acr.h
 include/nvfw/flcn.h

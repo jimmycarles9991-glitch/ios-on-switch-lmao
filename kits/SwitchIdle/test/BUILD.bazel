@@ -1,8 +1,11 @@
-# kits/SwitchIdle's state choice over a 19.2 MHz model clock, and its hooks in both XNU trees.
+# kits/SwitchIdle's state choice over a 19.2 MHz model clock, and its hooks in both XNU trees; kernel/switch/idle/idle.c
+# itself (switch_idle_c7_refusal_test) over stand-ins for its XNU surroundings that catch a lock, sleep, allocation or log
+# while the idle path runs masked; its frame stamp written by the frame core without a read-modify-write and read by
+# other cores (switch_idle_frame_stamp_test, and under TSAN switch_idle_frame_stamp_tsan_test).
 #
 #   bazel test //kits/SwitchIdle/test:all
 load("//bazel/lint:defs.bzl", "lint_files")
-load("//bazel/testing:defs.bzl", "host_test")
+load("//bazel/testing:defs.bzl", "host_library", "host_shims", "host_test")
 
 lint_files()
 
@@ -23,5 +26,80 @@ host_test(
         'INIT_10063=\\"$(rootpath //kernel/xnu-10063.141.1/osfmk:arm/arm_init.c)\\"',
         'CPU_12377=\\"$(rootpath //kernel/xnu-12377.121.6/osfmk:arm64/cpu.c)\\"',
         'INIT_12377=\\"$(rootpath //kernel/xnu-12377.121.6/osfmk:arm/arm_init.c)\\"',
+    ],
+)
+
+host_shims(
+    name = "kernel",
+    headers = [
+        "arm/cpu_data_internal.h",
+        "arm/rtclock.h",
+        "arm64/switch_smp.h",
+        "kern/clock.h",
+        "kern/thread_call.h",
+        "os/atomic_private.h",
+        "os/log.h",
+    ],
+    stubs = "switch_idle_kernel_stubs.h",
+)
+
+IDLE_HEADERS = [
+    "//kernel/switch:include/switch/idle.h",
+    "//kits/SwitchIdle:switch_idle.h",
+    "//kits/SwitchIdle:switch_idle_governor.h",
+]
+
+host_library(
+    name = "idle",
+    srcs = ["//kernel/switch:idle/idle.c"] + IDLE_HEADERS,
+    copts = ["-Ikernel/switch/include"],
+    defines = ["DEVELOPMENT=1"],
+    deps = [":kernel"],
+)
+
+host_test(
+    name = "switch_idle_c7_refusal_test",
+    srcs = ["switch_idle_c7_refusal_test.cpp"] + IDLE_HEADERS,
+    copts = ["-Ikernel/switch/include"],
+    deps = [
+        ":idle",
+        ":kernel",
+    ],
+)
+
+host_test(
+    name = "switch_idle_frame_stamp_test",
+    srcs = ["switch_idle_frame_stamp_test.cpp"] + IDLE_HEADERS,
+    copts = ["-Ikernel/switch/include"],
+    deps = [
+        ":idle",
+        ":kernel",
+    ],
+)
+
+host_library(
+    name = "idle_tsan",
+    srcs = ["//kernel/switch:idle/idle.c"] + IDLE_HEADERS,
+    copts = [
+        "-Ikernel/switch/include",
+        "-fsanitize=thread",
+    ],
+    defines = ["DEVELOPMENT=1"],
+    sanitize = False,
+    deps = [":kernel"],
+)
+
+host_test(
+    name = "switch_idle_frame_stamp_tsan_test",
+    srcs = ["switch_idle_frame_stamp_test.cpp"] + IDLE_HEADERS,
+    copts = [
+        "-Ikernel/switch/include",
+        "-fsanitize=thread",
+    ],
+    linkopts = ["-fsanitize=thread"],
+    sanitize = False,
+    deps = [
+        ":idle_tsan",
+        ":kernel",
     ],
 )

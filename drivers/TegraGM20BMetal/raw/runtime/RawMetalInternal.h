@@ -26,6 +26,7 @@
 #include <vector>
 #include "GpuMemoryRelease.h"
 #include "LimitsTable.h"
+#include "raw_kernel_shadow.h"
 #include "raw_submit_gate.h"
 #include "raw_invocation.h"
 #include "SwitchFrameTimeline.h"
@@ -38,6 +39,7 @@
 #include "raw_progress_gate.h"
 #include "TegraGM20BLayout.h"
 #include "../../../../kits/SwitchRefusal/SwitchRefusal.h"
+#include "RawMetalNeeds.h"
 #include "RawMetalObjects.h"
 #include "raw_retirement.h"
 
@@ -118,6 +120,11 @@ struct Stats {
     // waitUntilScheduled / waitUntilCompleted calls that blocked, and the time they blocked: CPU waits on the caller's thread
     // (Core Animation's render thread flushes with waitUntilScheduled every frame)
     std::atomic<uint64_t> scheduledWaits{0}, scheduledWaitUs{0}, completedWaits{0}, completedWaitUs{0};
+    // encoders the worker encoded before their command buffer's commit (RawMetalPipeline.mm), of the encoders of the raw
+    // command buffers it sealed; encodes ahead given back, by the first reason (RMPipelineVeto's bit)
+    std::atomic<uint64_t> pipelinedEncoders{0}, sealedEncoders{0}, pipelineAbandons[15]{};
+    // command buffers handed to the worker as encoders ended, and those hand-offs that found it asleep (woken by them)
+    std::atomic<uint64_t> handoffs{0}, handoffWakes{0};
 #if SWITCH_FRAME_TIMELINE
     // the m2v replay's parts (noteReplay)
     std::atomic<uint64_t> replaySlotUs{0}, replayTwinUs{0}, replayCommitUs{0}, replayMaxUs{0};
@@ -189,10 +196,11 @@ struct RMScheduleChange {
     enum Kind : uint8_t {
         Enqueue,
         Commit,
-        Wake
+        Wake,
+        Encoded  // more of its tape is final (rmPublishEncoder)
     } kind = Wake;
 
-    RMCommandBuffer *buffer = nil;  // Enqueue, Commit
+    RMCommandBuffer *buffer = nil;  // Enqueue, Commit, Encoded
     void *queue = nullptr;          // Wake: the queue whose head it wakes (null: none)
     uint32_t dependencies = 0;      // Wake: the progress it reports (RMReadyDependency)
 };
@@ -221,7 +229,6 @@ struct RawState {
     // The two drivers' order (stored under m2vLock): on the GPU when the kernel has Order (TegraGM20BInfoOrder), else on
     // the CPU (the m2v work before a raw command buffer completes first, and the raw work before an m2v one).
     std::atomic<bool> gpuOrder{false};
-    uint64_t orderRefusedAt = 0;  // raw::Device::Stats::reopens when the kernel last refused an Order (raw_order.h)
     bool rawSinceM2v =
         false;  // raw work submitted since the last m2v commit: the next m2v one waits for it (BeforeTask)
     bool m2vSinceRaw =
@@ -239,6 +246,12 @@ struct RawState {
     dispatch_queue_t handlers;           // where scheduled handlers run (in order, never inside commit)
     raw::ProgressGate progress;          // whether a completion wakes the submit worker (raw_progress_gate.h)
     std::atomic<uint32_t> committed{0};  // command buffers committed and not finished (the arenas' purge)
+    std::atomic<uint64_t> moves{0};      // texture memory moves other threads made (rmExcludingSubmissions)
+    std::atomic<bool> orphanCheck{
+        false};  // the device idled: an encode ahead no one can commit goes (rmPipelineOrphans)
+    // the submit worker is about to wait or waits for a change: a command buffer's hand-offs after its first wake it only
+    // then (rmPublishEncoder; with its _published, a store then a load on each side, both sequentially consistent)
+    std::atomic<bool> submitAsleep{false};
     // ranges handed to the kernel or m2v and not completed (rmRangeHandedOff): gRawRelease's drain and its idle rule's
     // in-flight count, which a command buffer parked on an event the CPU has not signalled holds no part of
     std::atomic<uint32_t> rangesInFlight{0};
@@ -248,15 +261,15 @@ struct RawState {
 
 extern RawState *gRM;
 
-// RawMetalM2V.mm: the m2v device, for something the raw path has no own for (`need`, a string literal), opened now if this is
-// the process's first need (nil: none can be had). Debug builds name each need once a process and keep their count
-// (switchRawM2V): what made its m2v device open.
-id<MTLDevice> rmM2V(const char *need);
+// RawMetalM2V.mm: the m2v device, for something the raw path has no own for (`need`; `selector` names a forwarded
+// device selector's), opened now if this is the process's first need (nil: none can be had). Debug builds name each
+// need once a process and keep their count (switchRawM2V): what made its m2v device open.
+id<MTLDevice> rmM2V(RMNeed need, SEL selector = nullptr);
 // The m2v device if something opened it already, else nil: what holds no need of its own (a twin made already, the
 // counters)
 id<MTLDevice> rmM2VIfOpen();
 #if !defined(SWITCH_DEBUG) || SWITCH_DEBUG
-id<MTLDevice> rmM2VFor(const char *need, std::atomic<bool> &said);
+id<MTLDevice> rmM2VFor(RMNeed need, std::atomic<bool> &said);
 // "m2v device never opened", or what opened it and in how long: the give-back line's
 std::string rmM2VState();
 #define RM_M2V(need)                          \
@@ -400,7 +413,6 @@ const char *ycbcrPlan(MTLTextureDescriptor *d, IOSurfaceRef s, NSUInteger plane,
 // RawMetalUnsupported.mm: why the device has no form of a state of `d` (null: it has), and that refusal as a creation answers
 // it (nil, its error)
 const char *rmUnsupportedRenderState(MTLRenderPipelineDescriptor *d);
-const char *rmUnsupportedComputeState(MTLComputePipelineDescriptor *d);
 id rmRefuseUnsupported(const char *why, NSError **error);
 
 // RawMetalStates.mm: the state of `d` as the pack and the archives it lists answer, nil where it is Metal's binary archive
@@ -518,7 +530,30 @@ bool rmInSubmission();
 // `move` with no submission running: at once on the submit worker inside its own submission
 template <typename Move> auto rmExcludingSubmissions(Move &&move) -> decltype(move())
 {
-    return rmInSubmission() ? move() : rmSubmitGate().exclude(move);
+    if (rmInSubmission())
+        return move();
+    return rmSubmitGate().exclude([&] {
+        // a texture's memory may move: an encode ahead that named it goes again (RawMetalPipeline.mm)
+        gRM->moves.fetch_add(1, std::memory_order_release);
+        return move();
+    });
+}
+
+void rmMarkSubmission(bool submitting);
+
+// `run` on the submit worker as a submission of its own (moves excluded): an encode ahead's step
+template <typename Run> auto rmSubmission(Run &&run) -> decltype(run())
+{
+    rmMarkSubmission(true);
+
+    struct Unmark {
+        ~Unmark()
+        {
+            rmMarkSubmission(false);
+        }
+    } unmark;
+
+    return rmSubmitGate().submit(run);
 }
 
 extern thread_local bool tRawEncoding;
@@ -529,6 +564,11 @@ void rmRangePlain(RMCommandBuffer *cb, size_t from, size_t to);
 // as storage images with no barrier form to take (raw_private_comp.h storageSlotsToPlain) join the command buffer's
 // _plainForStorage; a variant still being made marks the command buffer for a look at its draws before the encode
 void rmNoteStorageTargets(RMCommandBuffer *cb, const RMPass &pass, const Cmd &binding);
+// A draw of shape `draw` recorded in `pass`, which has compressed attachments, of `pl` (or of `variant`, the variant of it
+// the draw takes): the attachments its state binds as storage images join _plainForStorage where its barrier form cannot
+// draw that shape
+void rmNoteStorageDraw(RMCommandBuffer *cb, const RMPass &pass, raw::Pipeline *pl, raw::Variant<raw::Pipeline> *variant,
+                       const raw::FetchDraw &draw);
 // Before a raw range encodes, which may not ask for a move: those move to plain memory, and their shape is made plain
 // from then on
 void rmStorageTargetsPlain(RMCommandBuffer *cb, size_t from, size_t to);
@@ -598,16 +638,20 @@ void queuePriorityAdd(RMQueue *queue);
 void queuePriorityRemove(RMQueue *queue);
 
 // RawMetalSubmit.mm
-void orderRefused(const char *what, int kr);
+NSString *orderRefused(const char *what, int kr);
 void commitBuffer(RMCommandBuffer *cb);
 void submitLoop();
 bool admitComputeDispatch(RMCommandBuffer *cb, size_t at, const raw::ComputeKernelSet<raw::ComputeState> *kernels,
                           const char **why);
 int computeReadiness(RMCommandBuffer *cb, const RMSegment &range);
+// RawMetalComputeAdmission.mm: an admitted dispatch's textures and buffers, and the encoder's resources it may reach
+void kernelUses(RMCommandBuffer *cb, size_t at, std::vector<raw::KernelUse> &uses);
 
-// RawMetalFootprint.mm: the idle give-back's line, `relieved` the bytes malloc gave back
+// RawMetalFootprint.mm: the idle give-back's line, `relieved` the bytes malloc gave back, `passes` and `kept` what the
+// passes' copies and the kept surface imports held until then
 #if !defined(SWITCH_DEBUG) || SWITCH_DEBUG
-void logGivenBack(size_t relieved);
+struct RMPassTrim;
+void logGivenBack(size_t relieved, const RMPassTrim &passes, const raw::Device::Trimmed &kept);
 #endif
 
 // RawMetalRates.mm
@@ -618,8 +662,5 @@ void watchKeylineProbe();
 // RawMetalGlassProbe.mm
 void watchGlassProbe(raw::Device *dev);
 void glassProbeCommitted(RMCommandBuffer *cb);
-bool rmWholePrograms();
-bool rmZeroNewBuffers();
-bool rmHalfViewRefused();
 void splitCaptureCommitted(raw::CommandBuffer &rc);
 #endif

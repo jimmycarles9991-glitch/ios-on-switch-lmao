@@ -279,4 +279,26 @@ TEST(DepthStencilState, HiddenZetaForEveryCompareButAlwaysAndForStencilTests)
     EXPECT_FALSE(raw::testsHiddenZeta(failOnly));
 }
 
+// Boot 21 metal.native.hidden_depth: a draw recorded with a depth test in a pass of no depth attachment was refused
+// (enc.ds a=0 b=0x100000000) though the encode binds the pass's hidden zeta for it
+TEST(DepthStencilState, ADrawThatTestsAHiddenZetaFitsAsRecordedAndAsEncoded)
+{
+    DepthStencilDesc less;
+    less.depthCompare = 1;
+    DepthStencilDesc stencil;
+    stencil.front.compare = 5;
+    for (const DepthStencilDesc &d : {less, stencil}) {
+        EXPECT_TRUE(raw::recordedDepthStencilFits(0, 0, d));
+        EXPECT_TRUE(raw::depthStencilFits(0, 0, true, d)) << "the hidden zeta bound";
+        EXPECT_FALSE(raw::depthStencilFits(0, 0, false, d)) << "no zeta to test against";
+    }
+    const DepthStencilDesc always{};
+    EXPECT_TRUE(raw::depthStencilFits(0, 0, false, always)) << "Always with no stencil test tests nothing";
+    for (const DepthStencilDesc &d : {less, always}) {
+        EXPECT_FALSE(raw::recordedDepthStencilFits(0, 252, d)) << "a state made for no attachment in a pass with one";
+        EXPECT_FALSE(raw::recordedDepthStencilFits(260, 252, d));
+        EXPECT_TRUE(raw::recordedDepthStencilFits(252, 252, d));
+    }
+}
+
 }  // namespace

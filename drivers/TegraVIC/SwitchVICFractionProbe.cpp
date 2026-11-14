@@ -31,8 +31,6 @@ int runCase(uint32_t index, const SwitchVICProbeBuffers &buffers, SwitchVICFract
         r->status = -95;
         return 0;
     }
-    if (c.mode == kBackgroundAlpha)
-        overrideAlpha(&job, kOverride);
     if (!error)
         error = switch_vic_probe_submit(buffers, job, SWITCH_VIC_FRACTION_PROBE_MAGIC, index);
     if (!error)

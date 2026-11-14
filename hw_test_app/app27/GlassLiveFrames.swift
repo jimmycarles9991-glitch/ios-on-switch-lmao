@@ -116,6 +116,8 @@ struct LiveSummary {
     var black: [LiveFrame] { frames.filter { $0.atPresent == "black" || $0.endVerdict == "black" } }
     var partial: Int { frames.filter { $0.atPresent == "partial" || $0.endVerdict == "partial" }.count }
     var changedOnScreen: Int { frames.filter { $0.changedOnScreen == true }.count }
+    /// Frames read again at the end of their time on screen and compared
+    var compared: Int { frames.filter { $0.changedOnScreen != nil }.count }
 
     /// "frames/black/partial/changed": the result line's field
     var field: String { "\(frames.count)/\(black.count)/\(partial)/\(changedOnScreen)" }

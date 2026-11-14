@@ -76,10 +76,11 @@ public enum BlendTwinScene {
 
     /// The blended colour's bytes after `draws` (each a triangle list) over CAStateSweep's pattern, and the path drawn
     public static func bytes(
-        _ line: PipelineLine, colour: Int, draws: [[CAState.Vertex]], library: MTLLibrary, gpu: GPU
+        _ line: PipelineLine, colour: Int, draws: [[CAState.Vertex]], library: MTLLibrary, gpu: GPU,
+        width: Int = CAStateSweep.width, height: Int = CAStateSweep.height
     ) async throws -> (String, [UInt8]) {
         let pipeline = try CAState.pipeline(line, library: library, device: gpu.device)
-        let targets = try targets(line, gpu, CAStateSweep.width, CAStateSweep.height)
+        let targets = try targets(line, gpu, width, height)
         let source = try CAStateSweep.patternTexture(gpu, premultiplied: true)
         let sampler = try CAStateSweep.linearSampler(gpu.device)
         let timing = try await gpu.run(tolerateError: true) { commands in

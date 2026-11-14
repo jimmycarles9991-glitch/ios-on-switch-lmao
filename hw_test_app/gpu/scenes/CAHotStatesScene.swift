@@ -18,8 +18,8 @@ import Metal
 ///   as the pass with no draw (pass_us_<label>, its clears and setup), which InterlockBound takes out of both.
 /// - gpu_clock_<label>=host (raw, debug builds): a timed run's GPU time (the interlock's bands and pass included) was the
 ///   host's window, for want of a GPU stamp.
-/// On the raw facade a state the pack lacks is drawn by m2v until the runtime makes its record: the scene waits for it
-/// (warm_<label> runs) and leaves out a state that never reaches the raw path, naming its path.
+/// On the raw facade a state's command buffers must take the raw path: one that does not fails the scene, naming its
+/// path (warm_<label>: the runs before it was timed).
 /// On the process's default device the wide blur (narrow_blur_27) also draws `dumpBuffers` untimed command buffers
 /// back to back, and a debug kernel dumps the GPU's registers into its log while the first runs (gpu/RegDump.swift):
 /// the regdump metrics.
@@ -116,7 +116,7 @@ struct CAHotStatesScene: GPUScene {
             let named = paths.sorted().joined(separator: ",")
             result.expect(!paths.contains { $0.hasPrefix("error:") }, "\(line.shortLabel): \(named)")
             if kind == "raw" && paths != ["raw"] {
-                result.notes.append("\(line.shortLabel) left out: drawn on \(named) after \(warm) runs")
+                result.expect(false, "\(line.shortLabel): drawn off the raw path, on \(named), after \(warm) runs")
                 continue
             }
             timed += 1

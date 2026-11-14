@@ -19,8 +19,3 @@ uint64_t rmArchiveKey(const std::string &key);
 bool rmPackHoldsKernels(const std::string &stateKey);
 // The pack's answers for the compute state of `stateKey` (raw_compute_key.h computeStateKey): null where it has none
 const raw::PackComputeFacts *rmPackComputeFacts(const std::string &stateKey);
-
-// A tile creation's answer: false, with Metal's error, where it Missed. m2v's state is made without the archives or the
-// option either way: it reads none of this device's archives
-bool rmTileArchiveAnswer(MTLTileRenderPipelineDescriptor *twin, MTLTileRenderPipelineDescriptor *descriptor,
-                         MTLPipelineOption &options, NSError **error);

@@ -78,7 +78,7 @@ IOReturn windowProbeCall(const SwitchDisplayWindowProbeRequest &request, SwitchD
     const char *why = nullptr;
     int error = 0;
     windowProbeOnLoop([&] {
-        if (windowProbeBusy() || columnScanBusy()) {
+        if (windowProbeBusy() || columnScanBusy() || host1xFlipBusy()) {
             why = "a display experiment is running";
             error = EBUSY;
         } else {

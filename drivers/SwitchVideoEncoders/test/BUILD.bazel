@@ -209,3 +209,15 @@ host_test(
     srcs = ["ave_host_test.cpp"],
     deps = [":ave_host"],
 )
+
+# H264H7EncoderRegister waits for TegraNVENC or the kernel's TegraNVENCAbsent resource before deciding, and the kernel
+# publishes that resource whenever its bring-up ends without the service.
+host_test(
+    name = "ave_service_wait_source_test",
+    srcs = ["ave_service_wait_source_test.cpp"],
+    data = [
+        "//drivers/SwitchVideoEncoders:AVE/AVEEncoder.c",
+        "//drivers/SwitchVideoEncoders:AVE/NVENCClient.c",
+        "//drivers/TegraNVENC:TegraNVENC.cpp",
+    ],
+)

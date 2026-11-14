@@ -39,6 +39,7 @@ class Checks(unittest.TestCase):
             'AND subsystem CONTAINS "a.b" AND messageType == error)',
         )
         self.assertIn('BEGINSWITH "SwitchFrame"', devicerun.predicate([check]))
+        self.assertIn('messageType == error', devicerun.clause(Check('l', 'o', 'x', level='Error')))
 
 
 class Rules(unittest.TestCase):

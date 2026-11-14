@@ -51,15 +51,18 @@ extern "C" switch_gpu_backing *switch_gpu_backing_register(const uint64_t *, uin
 	return &backing;
 }
 
-extern "C" void switch_gpu_cached_retire(IOMemoryDescriptor *memory, uint64_t *pages,
-					 uint32_t count, switch_gpu_cached_mapping *mapping)
+IOMemoryMap *returnedMap;
+
+void switch_gpu_cached_retire(SwitchGpuCachedBuffer buffer, uint64_t *pages, uint32_t count,
+			      switch_gpu_cached_mapping *mapping)
 {
 	EXPECT_EQ(count, 4u);
 	EXPECT_EQ(pages[3], 0x4000u);
 	++retired;
 	returned = mapping;
-	memory->complete();
-	memory->release();
+	returnedMap = buffer.map;
+	buffer.memory->complete();
+	buffer.memory->release();
 	IODelete(pages, uint64_t, count);
 }
 
@@ -75,7 +78,8 @@ TEST_F(CachedPin, PersistentMappingTravelsWithLastBackingOwner)
 {
 	IOMemoryDescriptor memory;
 	switch_gpu_cached_mapping mapping{9};
-	ASSERT_EQ(switch_gpu_pin_cached(pages.data(), 4, 2, &memory, &mapping), &backing);
+	ASSERT_EQ(switch_gpu_pin_cached(pages.data(), 4, 2, {&memory, nullptr, nullptr}, &mapping),
+		  &backing);
 	EXPECT_EQ(retired, 0u);
 	EXPECT_EQ(memory.refs, 2u);
 	EXPECT_EQ(memory.prepared, 1u);
@@ -87,12 +91,29 @@ TEST_F(CachedPin, PersistentMappingTravelsWithLastBackingOwner)
 	EXPECT_EQ(memory.prepared, 0u);
 }
 
+// A spare made of 128 KiB units is mapped at one kernel address by its own IOMemoryMap: the backing's last owner hands
+// that map on with the buffer, so the buffer goes back to the spares whole.
+TEST_F(CachedPin, AUnitsBuffersKernelMapTravelsWithTheBuffer)
+{
+	IOMemoryDescriptor memory;
+	IOMemoryMap map{7};
+	switch_gpu_cached_mapping mapping{9};
+	returnedMap = nullptr;
+	ASSERT_EQ(switch_gpu_pin_cached(pages.data(), 4, 2, {&memory, &map, &map}, &mapping),
+		  &backing);
+	releaseOwner(owner);
+	owner = nullptr;
+	EXPECT_EQ(returnedMap, &map);
+	EXPECT_EQ(memory.refs, 1u);
+}
+
 TEST_F(CachedPin, RefusedRegistrationReturnsMappingOwnershipToCaller)
 {
 	IOMemoryDescriptor memory;
 	switch_gpu_cached_mapping mapping{9};
 	rejected = true;
-	EXPECT_EQ(switch_gpu_pin_cached(pages.data(), 4, 2, &memory, &mapping), nullptr);
+	EXPECT_EQ(switch_gpu_pin_cached(pages.data(), 4, 2, {&memory, nullptr, nullptr}, &mapping),
+		  nullptr);
 	EXPECT_EQ(retired, 0u);
 	EXPECT_EQ(memory.refs, 1u);
 	EXPECT_EQ(memory.prepared, 0u);
@@ -103,7 +124,8 @@ TEST_F(CachedPin, ExistingAuthorityDisposesOnlyTheExtraMappingOwner)
 	IOMemoryDescriptor memory;
 	switch_gpu_cached_mapping mapping{9};
 	existing = true;
-	EXPECT_EQ(switch_gpu_pin_cached(pages.data(), 4, 2, &memory, &mapping), &backing);
+	EXPECT_EQ(switch_gpu_pin_cached(pages.data(), 4, 2, {&memory, nullptr, nullptr}, &mapping),
+		  &backing);
 	EXPECT_EQ(retired, 1u);
 	EXPECT_EQ(returned, &mapping);
 	EXPECT_EQ(memory.refs, 1u);
@@ -115,7 +137,8 @@ TEST_F(CachedPin, FailedPrepareDoesNotConsumeMapping)
 	IOMemoryDescriptor memory;
 	switch_gpu_cached_mapping mapping{9};
 	memory.refuse = true;
-	EXPECT_EQ(switch_gpu_pin_cached(pages.data(), 4, 2, &memory, &mapping), nullptr);
+	EXPECT_EQ(switch_gpu_pin_cached(pages.data(), 4, 2, {&memory, nullptr, nullptr}, &mapping),
+		  nullptr);
 	EXPECT_EQ(retired, 0u);
 	EXPECT_EQ(memory.refs, 1u);
 	EXPECT_EQ(memory.prepared, 0u);

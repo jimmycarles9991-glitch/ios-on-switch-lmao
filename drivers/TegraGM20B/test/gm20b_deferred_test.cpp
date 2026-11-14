@@ -5,6 +5,7 @@
 // leaves a block-linear surface on its memory's record, whose first CPU lock, next import or other engine moves its
 // texels back to rows, and whose memory going ends it unmoved.
 #include <gtest/gtest.h>
+#include "drivers/TegraGM20B/TegraGM20BLayoutAsk.h"
 #include "drivers/TegraGM20B/TegraGM20BGpu.h"
 #include "drivers/TegraGM20B/TegraGM20BRelayout.h"
 #include "drivers/TegraGM20B/TegraGM20BTiled.h"
@@ -135,6 +136,73 @@ TEST_F(Deferred, AnyWriteBeforeTheDecisionBringsTheTilingMoveBack)
 	}
 }
 
+// KERN-28: a sampler's first ask of a surface whose seed never moved still moves its contents into the tiled layout,
+// since a CPU writer without IOSurfaceLock leaves rows there and no seed; only a writer's ask skips that move
+TEST_F(Deferred, ASamplerOfAFreshSurfaceTilesWhatItHolds)
+{
+	gSurfaceUnwritten = true;
+	gBackingContent = 0;
+	const auto p = pages(0xd0f00000);
+	tgm_record record{nullptr, 303};
+	tgm_coh *c = import(p, 303, record, 1);
+	tgm_coh_hold_asker(c);
+	EXPECT_EQ(tgm_coherency_layout(c, kW, kH, kBpp, kRow, TGM_LAYOUT_ASK_UNWRITTEN), 1);
+	tgm_coh_put_asker(c);
+	EXPECT_EQ(movesOf(TGM_RELAYOUT_TILE_IN_PLACE), 1);
+	tgm_coherency_put(c);
+	tgm_coherency_record_gone(&record);
+}
+
+// An unlocked CPU read of a block-linear surface sees texels, and no lock shows a reader in another process rows unless it
+// takes one: a surface another process maps when its first writer or sampler asks (made by one process and rendered by
+// another, the way a render server fills a client's snapshot) stays pitch. The asking process's own mapping does not
+// count (this host's process is 1).
+TEST_F(Deferred, ASurfaceAnotherProcessMapsForTheCpuStaysPitch)
+{
+	struct Case {
+		const char *what;
+		int32_t mappers[2];
+		int layout;
+	};
+
+	const Case cases[] = {
+		{"mapped by the asker alone", {1, 0}, 1},
+		{"made by another process", {7, 0}, 0},
+		{"made by the asker, looked up by another", {1, 7}, 0},
+		{"mapped by no process (IOSurfaceHostOnly)", {0, 0}, 1},
+	};
+	uint64_t first = 0xd0e00000;
+	for (const Case &k : cases) {
+		gMoves.clear();
+		const auto p = pages(first += 0x10000);
+		tgm_record record{nullptr, 306};
+		for (const int32_t pid : k.mappers)
+			if (pid)
+				tgm_record_mappers_note(&record.mappers, pid);
+		tgm_coh *c = import(p, 306, record, 1);
+		EXPECT_EQ(ask(c), k.layout) << k.what;
+		EXPECT_EQ(tegra_gm20b_surface_tiled(p[0]), k.layout) << k.what;
+		if (!k.layout)
+			EXPECT_TRUE(gMoves.empty()) << k.what;
+		tgm_coherency_put(c);
+		tgm_coherency_record_gone(&record);
+	}
+}
+
+TEST(RecordMappers, TheFirstMapperIsKeptAndAnyOtherIsSeen)
+{
+	tgm_record_mappers m{};
+	EXPECT_FALSE(tgm_record_mappers_other(&m, 5));
+	tgm_record_mappers_note(&m, 5);
+	tgm_record_mappers_note(&m, 5);
+	EXPECT_FALSE(tgm_record_mappers_other(&m, 5));
+	EXPECT_TRUE(tgm_record_mappers_other(&m, 6));
+	tgm_record_mappers_note(&m, 6);
+	EXPECT_EQ(m.first, 5);
+	EXPECT_TRUE(tgm_record_mappers_other(&m, 5));
+	EXPECT_TRUE(tgm_record_mappers_other(&m, 6));
+}
+
 TEST_F(Deferred, ALastImportLeavesTheSurfaceBlockLinearOnItsRecord)
 {
 	const auto p = pages(0xd1000000);
@@ -228,6 +296,7 @@ TEST_F(Deferred, ALockWhileTheDisplayHoldsTheSurfaceReadsItThroughAView)
 	void *hold = tegra_gm20b_surface_hold(p[0], &tiled);
 	ASSERT_EQ(tiled, 1);
 	void *client = reinterpret_cast<void *>(0x20);
+	gViews.mappings[{client, 307}] = {client, client, 0x40000, kPages * 4096, 0, 0};
 	EXPECT_EQ(tgm_views_trap(client, kLock, 307, kReadOnly), 0);
 	EXPECT_EQ(movesOf(TGM_RELAYOUT_UNTILE_IN_PLACE), 0);
 	EXPECT_EQ(movesOf(TGM_RELAYOUT_TO_ROWS), 1);
@@ -273,7 +342,9 @@ TEST_F(Deferred, AnAvoidSyncLockBehindRunningWritersIsRefusedAndMovesNothing)
 	gGpu.completed[11] = 4;
 	tgm_coherency_put(c);
 	ASSERT_EQ(record.deferred, c);
-	EXPECT_NE(tgm_views_trap(reinterpret_cast<void *>(0x30), kLock, 309, kReadOnly | 2), 0);
+	void *client = reinterpret_cast<void *>(0x30);
+	gViews.mappings[{client, 309}] = {client, client, 0x50000, kPages * 4096, 0, 0};
+	EXPECT_NE(tgm_views_trap(client, kLock, 309, kReadOnly | 2), 0);
 	EXPECT_TRUE(gMoves.empty());
 	EXPECT_EQ(record.deferred, c);
 	gGpu.completed[11] = 5;

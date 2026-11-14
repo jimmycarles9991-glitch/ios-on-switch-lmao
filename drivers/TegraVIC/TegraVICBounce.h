@@ -16,10 +16,9 @@ static inline uint64_t tegra_vic_bounce_round(uint64_t v, uint64_t a)
     return (v + a - 1) / a * a;
 }
 
-// The bytes of a row of plane p that hold pixels.
 static inline uint32_t tegra_vic_bounce_row_bytes(const TegraVICFormat *f, uint32_t width, uint32_t p)
 {
-    return tegra_vic_plane_width(f, width, p) * f->bpe[p];
+    return tegra_vic_row_bytes(f, width, p);
 }
 
 // 1: VIC addresses every plane as it is (its pitch a multiple of `align`, tegra_vic_pitch_align's for the surface's

@@ -42,7 +42,7 @@ static const uint32_t kCodecs = 1u << TEGRA_NVDEC_CODEC_H264 | 1u << TEGRA_NVDEC
                                 1u << TEGRA_NVDEC_CODEC_HEVC | 1u << TEGRA_NVDEC_CODEC_MPEG4 |
                                 1u << TEGRA_NVDEC_CODEC_MPEG12;
 
-bool nvdec_service_present(void)
+bool nvdec_service_wait(void)
 {
     return true;
 }

@@ -17,14 +17,16 @@ struct BarrierKit {
     let tap: MTLRenderPipelineState
     let box: MTLRenderPipelineState
 
-    var bytesPerTexel: Int { format == .rgba16Float ? 8 : 4 }
-    var name: String { format == .rgba16Float ? "rgba16f" : "bgra8" }
+    var bytesPerTexel: Int { format == .rgba32Float ? 16 : format == .rgba16Float ? 8 : 4 }
+    var name: String { format == .rgba32Float ? "rgba32f" : format == .rgba16Float ? "rgba16f" : "bgra8" }
 
+    /// BGRA8Unorm, RGBA16Float or RGBA32Float (whose tap and box are the unorm ones: they return float4)
     init(_ gpu: GPU, _ format: MTLPixelFormat) throws {
         self.gpu = gpu
         self.format = format
         let half = format == .rgba16Float
-        seeded = try gpu.render(fragment: half ? "x1_seeded_half" : "x1_seeded_unorm", format: format)
+        let seed = format == .rgba32Float ? "x1_seeded_float" : half ? "x1_seeded_half" : "x1_seeded_unorm"
+        seeded = try gpu.render(fragment: seed, format: format)
         tap = try gpu.render(fragment: half ? "x1_tap_half" : "x1_tap_unorm", format: format)
         box = try gpu.render(fragment: half ? "x1_box_half" : "x1_box_unorm", format: format)
     }
@@ -35,12 +37,20 @@ struct BarrierKit {
         case compressed = "comp"
     }
 
-    /// A render target the facade lays out as `layout`; compressed answers nil where the device made it plain.
+    /// A render target the facade lays out as `layout` (pitch: over a shared buffer's 256-byte rows, as a shared texture
+    /// of its own memory is block-linear); compressed answers nil where the device made it plain.
     func target(_ width: Int, _ height: Int, _ layout: Layout) throws -> MTLTexture? {
+        if layout == .pitch {
+            let rowBytes = (width * bytesPerTexel + 255) / 256 * 256
+            let descriptor = MTLTextureDescriptor.texture2DDescriptor(
+                pixelFormat: format, width: width, height: height, mipmapped: false)
+            descriptor.usage = [.renderTarget, .shaderRead]
+            descriptor.storageMode = .shared
+            return try gpu.buffer(rowBytes * height).makeTexture(
+                descriptor: descriptor, offset: 0, bytesPerRow: rowBytes)
+        }
         if layout == .compressed { try RawProbe.compressNext(gpu.device) }
-        let texture = try gpu.texture(
-            format, width, height, usage: [.renderTarget, .shaderRead],
-            storage: layout == .pitch ? .shared : .private)
+        let texture = try gpu.texture(format, width, height, usage: [.renderTarget, .shaderRead])
         if layout == .compressed, try RawProbe.facts(gpu.device, texture)["comptags"] != 1 { return nil }
         return texture
     }
@@ -143,9 +153,16 @@ struct BarrierKit {
         UnsafeRawBufferPointer(start: buffer.contents() + index * tileBytes, count: tileBytes)
     }
 
-    /// The bytes pass A's seed puts at (x, y) in memory (BGRA8: blue, green, red, alpha; RGBA16F: four halves)
+    /// The bytes pass A's seed puts at (x, y) in memory (BGRA8: blue, green, red, alpha; RGBA16F: four halves; RGBA32F:
+    /// four floats)
     func texel(_ x: Int, _ y: Int, seed: Int) -> [UInt8] {
         let v = probeHash(UInt32(x), UInt32(y), UInt32(seed))
+        if format == .rgba32Float {
+            return [v, v >> 3, v >> 6, v >> 9].flatMap { (word: UInt32) -> [UInt8] in
+                let bits = 0x3f80_0000 | (word & 0x7f_ffff)
+                return [UInt8(bits & 255), UInt8((bits >> 8) & 255), UInt8((bits >> 16) & 255), UInt8(bits >> 24)]
+            }
+        }
         if format == .rgba16Float {
             let halves = [v & 0x3ff, (v >> 10) & 0x3ff, (v >> 20) & 0x3ff, (v >> 22) & 0x3ff].map {
                 UInt16(0x3c00 | $0)

@@ -6,6 +6,7 @@
 #pragma once
 #import <Metal/Metal.h>
 #include <string>
+#include "RawDirect.h"
 #include "raw_compile_request.h"
 
 namespace raw {
@@ -16,8 +17,15 @@ MTLFunctionConstantValues *constantValuesOf(const std::string &text);
 PipelineFields fieldsOf(MTLRenderPipelineDescriptor *d);
 void applyFields(const PipelineFields &f, MTLRenderPipelineDescriptor *d);
 
-// The pack key `r`'s stages and fields make, with its variant's suffix, and whether the state is its libraries' own (no
+// The pack key `r`'s stages and fields make, with its variant's name, and whether the state is its libraries' own (no
 // framework's default library: RawMetalStates.mm rmPipelineFor's _packable, negated)
 std::string requestPackKey(const CompileRequest &r, bool &own);
+
+StageInFields stageInFieldsOf(MTLStageInputOutputDescriptor *in);
+// nil for no stage input
+MTLStageInputOutputDescriptor *stageInOf(const StageInFields &f);
+
+// What a variant's record is compiled with, by the client (RawComplete.mm) and the shader compiler alike
+ProbeTextures probeTexturesOf(const RenderVariant &v);
 
 }  // namespace raw

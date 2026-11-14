@@ -88,12 +88,16 @@ struct NativeViewportsTest: NativeObjectTest {
 struct NativeViewportIndexTest: NativeObjectTest {
     let id = "metal.native.viewport_index"
     let name = "A vertex function chooses among 16 viewports and scissors, each tile its instance's"
-    var unavailable: String? { Layering.a13 ? nil : "the A10X's Metal has no [[viewport_array_index]] (Apple5)" }
 
     func exercise(_ gpu: GPU, _ metrics: inout Metrics) async throws -> NativeWork {
         let t = try ViewportTiles.target(gpu)
         let pipeline = try gpu.render(vertex: "viewport_vertex", fragment: "flat_color_fragment", format: .rgba8Unorm)
         var work = NativeWork(objects: [t])
+        if let wrong = NativeAnswers.check(
+            gpu.device, "maxViewportCount", NativeAnswers.viewports, field: "max_viewports", &metrics)
+        {
+            work.failures.append(wrong)
+        }
         let timing = try await gpu.run { commands in
             let e = commands.makeRenderCommandEncoder(descriptor: ViewportTiles.pass(t))!
             e.setRenderPipelineState(pipeline)

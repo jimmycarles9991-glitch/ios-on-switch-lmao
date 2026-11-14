@@ -1,0 +1,4 @@
+# The kernel model plays the GPU: it writes the fence page the device reads with plain loads, as hardware writes it
+race:kernel_model::Model::run
+# A dispatch timer source's invocations, which libdispatch runs one at a time on whichever global-queue thread
+race:rawStallTick

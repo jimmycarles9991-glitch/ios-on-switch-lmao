@@ -160,7 +160,8 @@ How each is read, on thermalmonitord's own 5 s cadence (it calls in; no timer of
   CPU, GPU and PLLX groups (THERMCTL_INTR, INTID 80). Past L4T's software limits (SoC diode 92.5 C, PLLX 94.5 C,
   SwitchThermalLimits.h) SwitchThermal shuts the console down in order with a record in the RTC that the next boot files
   (SwitchResetCause.h); THERMTRIP with the PMC's reset (PLLX 96 C, CPU and GPU 127 C) is only the backstop above that.
-  No hardware throttle is programmed.
+  The hardware throttle is L4T's for T210B01 (`SwitchSocThermThrottle.h`): a heavy indicator at PLLX 94.5 C with no
+  CPU or GPU depth, no light or OC throttle, so SOC_THERM never slows the GPU.
 - **TMP451**: SwitchThermal's last good reading, taken on every ALERT (the window around the fan levels and the DFLL's
   limits) and every time a SOC_THERM group moves a degree; it fails only once SwitchThermal has lost the sensor.
   SwitchThermal stays the chip's only reader.

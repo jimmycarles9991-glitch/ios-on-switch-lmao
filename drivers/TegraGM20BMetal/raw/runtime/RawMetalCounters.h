@@ -47,6 +47,11 @@ void rmCounterMarksDropped(RMCommandBuffer *cb, size_t from, size_t to);
 class RMCounterEmit {
 public:
     RMCounterEmit(RMCommandBuffer *cb, size_t from, size_t to, raw::CommandBuffer &rc);
+
+    // None: an encode ahead's (a command buffer with samples is encoded at its commit)
+    explicit RMCounterEmit(raw::CommandBuffer &rc) : rc_(rc)
+    {}
+
     bool at(size_t position) const;
     void started(size_t position, raw::RenderEncoder &e);
     void started(size_t position, raw::ComputeEncoder &e);

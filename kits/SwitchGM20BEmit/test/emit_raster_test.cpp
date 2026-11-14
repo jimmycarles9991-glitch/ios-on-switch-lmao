@@ -27,7 +27,7 @@ template <typename F> std::vector<uint32_t> emitted(uint32_t bound, F emit)
     return words;
 }
 
-TEST(EmitRaster, ConstantColourIsTheEnableThenFourWords)
+TEST(EmitRaster, ConstantColourIsThePixelStageOffThenTheEnableThenFourWords)
 {
     const uint32_t rgba[4] = {0x3f4ccccd, 0x3dcccccd, 0x3e99999a, 0x3f800000};
     const auto w = emitted(SWITCH_GM20B_CONSTANT_COLOR_WORDS, [&](nv_push *p) {
@@ -36,6 +36,8 @@ TEST(EmitRaster, ConstantColourIsTheEnableThenFourWords)
     EXPECT_EQ(w.size(), SWITCH_GM20B_CONSTANT_COLOR_WORDS);
     EXPECT_EQ(Methods(w),
               (std::vector<Method>{
+                  {k3D, NVB197_SET_PIPELINE_SHADER(NVB197_SET_PIPELINE_SHADER_TYPE_PIXEL),
+                   NVB197_SET_PIPELINE_SHADER_TYPE_PIXEL << 4},
                   {k3D, NVB197_SET_CONSTANT_COLOR_RENDERING, NVB197_SET_CONSTANT_COLOR_RENDERING_ENABLE_TRUE},
                   {k3D, NVB197_SET_CONSTANT_COLOR_RENDERING_RED, rgba[0]},
                   {k3D, NVB197_SET_CONSTANT_COLOR_RENDERING_GREEN, rgba[1]},
@@ -44,10 +46,14 @@ TEST(EmitRaster, ConstantColourIsTheEnableThenFourWords)
               }));
 }
 
-TEST(EmitRaster, ConstantColourOffIsOneWord)
+TEST(EmitRaster, ConstantColourOffTurnsThePixelStageBackOn)
 {
-    const auto w = emitted(1, switch_gm20b_constant_color_off);
-    EXPECT_EQ(Methods(w), (std::vector<Method>{{k3D, NVB197_SET_CONSTANT_COLOR_RENDERING, 0}}));
+    const auto w = emitted(2, switch_gm20b_constant_color_off);
+    EXPECT_EQ(Methods(w), (std::vector<Method>{
+                              {k3D, NVB197_SET_CONSTANT_COLOR_RENDERING, 0},
+                              {k3D, NVB197_SET_PIPELINE_SHADER(NVB197_SET_PIPELINE_SHADER_TYPE_PIXEL),
+                               1 | NVB197_SET_PIPELINE_SHADER_TYPE_PIXEL << 4},
+                          }));
 }
 
 TEST(EmitRaster, FillViaTriangleIsOneImmediateWord)

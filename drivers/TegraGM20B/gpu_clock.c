@@ -192,11 +192,10 @@ int tgm_clk_raise(char *line, unsigned int len)
  * gm20b.c gm20b_pllg_program_mnp's pdiv_only path, whose sequence this is: VCO divider 1:2 around it, an interim PL
  * sharing a bit with both ends). No NDIV slide, no relock, no bypass, no VDD_GPU write (the rail stays at tgm_clk_raise's
  * 800 mV): a few register writes and two 2 us delays, timed on every raise and logged (raise mean/max).
- * Before first use, gov_start runs one drop and raise at stage 3 (no client yet) and logs both times. Any failure
- * (the divider not reading back, the PLL not locked, the clock not at the rate) logs one line and leaves the GPU at
- * 768 MHz for the boot. */
+ * Before first use, gov_start runs one drop and raise at stage 3 (no client yet) and logs both times. A failure (the
+ * divider not reading back, the PLL not locked, the clock not at the rate) logs the PLL's registers, puts the run rate
+ * back and leaves the idle clock in use for the next idle period (SwitchGpuClockControl.h idle_fail). */
 #define IDLE_DROP_NS (500ULL * 1000000ULL)
-#define GPCPLL_CFG_R 0x137000  /* 0 enable, 17 lock */
 #define GPC2CLK_OUT_R 0x137250 /* VCO divider 13:8: 0 = 1:1, 2 = 1:2 */
 #define SEL_VCO_R 0x137100     /* 0 = GPU on bypass, 1 = on GPCPLL */
 #define PLL_REF_KHZ 38400
@@ -251,27 +250,6 @@ static int pl_switch(u32 pl)
 		       : -EIO;
 }
 
-/* Under tgm_idle.clk: a divider change failed. One line, then 768 MHz for the boot (the divider, else nouveau's full
- * reprogram of the rate), the idle clock off. */
-static void idle_fail(const char *what, u32 pl)
-{
-	struct nvkm_device *device = tgm_gpu.device;
-	int back = 0;
-
-	WRITE_ONCE(tgm_idle.on, 0);
-	WRITE_ONCE(tgm_idle.clock_available, 0);
-	back = pl_switch(tgm_idle.run_pl);
-	if (back)
-		back = clk_prog_khz(device, tgm_idle.run_khz);
-	WRITE_ONCE(tgm_idle.low, 0);
-	nvxnu_log("tegra-gm20b: idle clock off: %s to PL %u did not take (GPCPLL_CFG %08x COEFF "
-		  "%08x SEL_VCO %x "
-		  "GPC2CLK_OUT %08x); %d kHz now (%d), for this boot\n",
-		  what, pl, nvkm_rd32(device, GPCPLL_CFG_R), nvkm_rd32(device, GPCPLL_COEFF_R),
-		  nvkm_rd32(device, SEL_VCO_R), nvkm_rd32(device, GPC2CLK_OUT_R),
-		  nvkm_clk_read(device->clk, nv_clk_src_gpc), back);
-}
-
 #include "SwitchGpuClockControl.h"
 
 /* Up to the run rate if the idle divider is in force; returns the ns it took (0: nothing to do). Thread context. */
@@ -312,7 +290,8 @@ static void idle_drop(void *arg)
 	    now >= __atomic_load_n(&tgm_idle.service_until, __ATOMIC_SEQ_CST) &&
 	    now - __atomic_load_n(&tgm_idle.last_busy, __ATOMIC_SEQ_CST) >= IDLE_DROP_NS &&
 	    now - native_display_last_swap_ns() >= IDLE_DROP_NS) {
-		if (pl_switch(tgm_idle.idle_pl)) {
+		if ((nvkm_rd32(tgm_gpu.device, GPCPLL_COEFF_R) & 0xffff) != tgm_idle.vco_coeff ||
+		    pl_switch(tgm_idle.idle_pl)) {
 			idle_fail("drop", tgm_idle.idle_pl);
 		} else {
 			WRITE_ONCE(tgm_idle.low, 1);
@@ -363,12 +342,14 @@ int tgm_gpu_held(void (*fn)(struct nvkm_device *device, void *arg), void *arg)
 }
 
 #endif
-/* drivers/SwitchPower switch_perf_hint (touch, missed frame, launch): busy now, and back up at once if low. */
+/* drivers/SwitchPower switch_perf_hint (touch, missed frame, launch): busy now, and back up at once if low. last_busy
+ * is a time its readers only compare with their clock (idle_drop, SwitchGpuIdleDeadline.h); it publishes nothing else.
+ * A drop that read the time just before this store is undone by the synchronous raise before the next kick. */
 void tegra_gm20b_perf_hint(unsigned int hint)
 {
 	if (!READ_ONCE(tgm_idle.on) || hint < 1 || hint > 3)
 		return;
-	__atomic_store_n(&tgm_idle.last_busy, nvxnu_nanotime(), __ATOMIC_SEQ_CST);
+	__atomic_store_n(&tgm_idle.last_busy, nvxnu_nanotime(), __ATOMIC_RELAXED);
 	if (READ_ONCE(tgm_idle.low))
 		nvxnu_work_schedule(tgm_idle.raise_w);
 }
@@ -454,23 +435,19 @@ void tgm_idle_start(void)
 	if (pl_switch(tgm_idle.idle_pl) ||
 	    nvkm_clk_read(device->clk, nv_clk_src_gpc) != (int)best) {
 		idle_fail("test drop", tgm_idle.idle_pl);
-		nvxnu_mutex_unlock(tgm_idle.clk);
-		return;
-	}
+	} else {
 #if DEVELOPMENT || DEBUG
-	down = nvxnu_nanotime() - t0;
-	at_idle = gpc_counted_khz();
-	t0 = nvxnu_nanotime();
+		down = nvxnu_nanotime() - t0;
+		at_idle = gpc_counted_khz();
+		t0 = nvxnu_nanotime();
 #endif
-	if (pl_switch(tgm_idle.run_pl) || nvkm_clk_read(device->clk, nv_clk_src_gpc) != run) {
-		idle_fail("test raise", tgm_idle.run_pl);
-		nvxnu_mutex_unlock(tgm_idle.clk);
-		return;
-	}
+		if (pl_switch(tgm_idle.run_pl) || nvkm_clk_read(device->clk, nv_clk_src_gpc) != run)
+			idle_fail("test raise", tgm_idle.run_pl);
 #if DEVELOPMENT || DEBUG
-	up = nvxnu_nanotime() - t0;
-	at_run = gpc_counted_khz();
+		up = nvxnu_nanotime() - t0;
+		at_run = gpc_counted_khz();
 #endif
+	}
 	tgm_idle.log_start = nvxnu_nanotime();
 	__atomic_store_n(&tgm_idle.last_busy, tgm_idle.log_start, __ATOMIC_SEQ_CST);
 	WRITE_ONCE(tgm_idle.clock_available, 1);

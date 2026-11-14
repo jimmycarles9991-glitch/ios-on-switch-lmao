@@ -896,6 +896,16 @@ extern "C" int tgm_coh_fresh(const struct tgm_coh *c)
 				tgm_surface_unwritten(c->surface));
 }
 
+extern "C" int tgm_coh_cpu_foreign(struct tgm_coh *c, int32_t pid)
+{
+	IOLockLock(gRegistryLock);
+	tgm_record *record = c->surface ? c->record : nullptr;
+	const int foreign =
+		record ? tgm_record_mappers_other(tgm_record_mappers_of(record), pid) : 0;
+	IOLockUnlock(gRegistryLock);
+	return foreign;
+}
+
 extern "C" int tgm_coh_deferred_for(struct tgm_coh *c, uint32_t id)
 {
 	IOLockLock(gRegistryLock);

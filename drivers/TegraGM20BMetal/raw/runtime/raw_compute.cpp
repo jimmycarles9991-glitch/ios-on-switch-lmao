@@ -12,6 +12,7 @@
 #include "raw_stamps.h"
 #include "raw_icb_compute.h"
 #include "raw_residual.h"
+#include <os/log.h>
 #include "raw_slm.h"
 #include "raw_view.h"
 
@@ -123,7 +124,8 @@ const ComputeState *placeCompute(Device &dev, const ComputeRecord &r)
 
 // What a kernel's reads through argument buffers take of every dispatch, as bindArguments for a state: its root table
 // address (a kernel whose root table holds buffer slots takes its own per dispatch) and ExecutionStatus address words,
-// and its set 1. Its dispatches are refused where the device has no memory for them.
+// and its set 1. Where the device has no memory for them its dispatches are refused until one binds them
+// (rebindKernelArguments); the flag is published last.
 void Device::bindKernelArguments(ComputeState &c, const PackKernel &k)
 {
     const PackKernelEntry *end = k.entry + std::min<uint32_t>(k.entries, kKernelEntries);
@@ -133,21 +135,35 @@ void Device::bindKernelArguments(ComputeState &c, const PackKernel &k)
     if (!k.rootTableWord && !k.statusWord && !k.heapArrays && !tables)
         return;
     std::lock_guard<raw::Mutex> l(lock_);
-    if (!heapMemory()) {
-        c.heapMissing = true;
-        return;
+    const HeapSet *set = nullptr;
+    const bool bound = heapMemory() && (!k.heapArrays || (set = heapSet(heapLayout(k))));
+    if (bound) {
+        const auto address = [&](uint8_t word, uint64_t va) {
+            if (!word || word > 31)
+                return;
+            c.argumentPush[word - 1] = uint32_t(va);
+            c.argumentPush[word] = uint32_t(va >> 32);
+            c.argumentMask |= 3u << (word - 1);
+        };
+        address(k.rootTableWord, k.rootSlots ? 0 : heapTables_.rootTableVa());
+        address(k.statusWord, heapTables_.statusVa());
+        c.heapSet = set;
     }
-    const auto address = [&](uint8_t word, uint64_t va) {
-        if (!word || word > 31)
-            return;
-        c.argumentPush[word - 1] = uint32_t(va);
-        c.argumentPush[word] = uint32_t(va >> 32);
-        c.argumentMask |= 3u << (word - 1);
-    };
-    address(k.rootTableWord, k.rootSlots ? 0 : heapTables_.rootTableVa());
-    address(k.statusWord, heapTables_.statusVa());
-    if (k.heapArrays && !(c.heapSet = heapSet(heapLayout(k))))
-        c.heapMissing = true;
+    __atomic_store_n(&c.heapMissing, !bound, __ATOMIC_RELEASE);
+}
+
+// A placed kernel is never moved (gStates' node), and only this binds its argument words after its placement
+bool Device::rebindKernelArguments(const ComputeState &placed)
+{
+    auto &c = const_cast<ComputeState &>(placed);
+    if (!c.rec)
+        return false;
+    bindKernelArguments(c, *c.rec);
+    const bool bound = !__atomic_load_n(&c.heapMissing, __ATOMIC_ACQUIRE);
+    if (!bound)
+        os_log_error(os_log_create("com.brunostjohn.switch.TegraGM20BMetal", "raw"),
+                     "raw: no memory for a kernel's argument tables: this dispatch is refused");
+    return bound;
 }
 
 ComputeEncoder::ComputeEncoder(CommandBuffer &cb, Device &dev) : cb_(cb), dev_(dev)
@@ -157,12 +173,12 @@ ComputeEncoder::ComputeEncoder(CommandBuffer &cb, Device &dev) : cb_(cb), dev_(d
     start_ = reinterpret_cast<uint32_t *>(dev_.alloc(dev_.push_, kEncoderWords * 4, 256, va));
     p_ = Push{start_, start_ + kEncoderWords};
     cb_.loops_.openSegment(stream());
-#if !defined(SWITCH_DEBUG) || SWITCH_DEBUG
-    probeComputeOpening(p_, cb.forms_, cb.lastEngine_, cb.taken_);
-    cb.lastEngine_ = ProbeEngine::Compute;
-#else
-    computeOpening(p_);
-#endif
+    const BarrierForms forms = cb.barrierForms();
+    [[maybe_unused]] const Opened opened =
+        computeEncoderOpening(p_, switchFormFor(forms.switchForm, cb.lastEngine_, BarrierEngine::Compute),
+                              entryFormFor(forms.entry), cb.lastEngine_);
+    cb.lastEngine_ = BarrierEngine::Compute;
+    RAW_DIAGNOSTIC(cb.taken_.count(opened));
 }
 
 void ComputeEncoder::room(uint32_t words)
@@ -313,6 +329,12 @@ bool ComputeEncoder::prepareDescriptors(const char **why)
         *why = "an argument table whose words the kernel's record does not hold";
         return false;
     }
+    // a planar or YCbCr texture's address map: its samplers' headers with the map applied, as a draw's handle takes them
+    // (admission keeps a kernel here only where every texture it binds is under one map, or the map changes no sampler)
+    uint8_t map = 0;
+    for (uint32_t i = 0; i < r.entries; i++)
+        if (r.entry[i].kind == KernelTexture && r.entry[i].slot < 31 && textures_[r.entry[i].slot])
+            map = std::max(map, textures_[r.entry[i].slot]->addressMap);
     for (uint32_t i = 0; i < r.entries; i++) {
         const PackKernelEntry &e = r.entry[i];
         const bool writes = kernelEntryWrites(r, i);
@@ -342,9 +364,18 @@ bool ComputeEncoder::prepareDescriptors(const char **why)
             at[3] = 0;
         } else if (e.kind == KernelTexture) {
             const Texture *t = writes ? textures_[e.slot] : cb_.readTexture(textures_[e.slot]);
-            if (t && !t->tic) {
-                *why = "a texture the raw path cannot sample";
-                return false;
+            if (t && !t->tic) {  // memoryless, or depth without ShaderRead: a load reads header 0's zeros
+                if (writes) {
+                    *why = "a kernel stores a texture with no memory a shader can address";
+                    return false;
+                }
+                continue;
+            }
+            if (t && !writes && t->standIn) {
+                const FormatInfo *s = formatInfo(t->standIn->format);
+                if (s && slotView(e.window, s->tic0, swizzledWord0(s->tic0, t->standIn->swizzle), s->bpp,
+                                  blockCompressed(s)) == SlotView::Own)
+                    t = t->standIn;
             }
             if (t) {
                 cb_.use(*t, writes);
@@ -384,7 +415,17 @@ bool ComputeEncoder::prepareDescriptors(const char **why)
             at[0] |= dev_.constexprTsc_[index] << 20;
         } else {
             const Sampler *s = e.slot < 16 ? samplers_[e.slot] : nullptr;
-            at[0] |= (s ? s->tsc : dev_.neutralTsc_) << 20;
+            const Texture *sampled = nullptr;
+            for (uint32_t j = 0; s && s->desc.border && j < r.entries; j++)
+                if (r.entry[j].kind == KernelTexture && r.entry[j].offset == e.offset && r.entry[j].slot < 31)
+                    sampled = textures_[r.entry[j].slot];
+            const uint32_t mapped = s && map ? s->mapped[map] : 0;
+            const uint32_t tsc = s ? (mapped ? mapped : borderedTsc(*s, sampled)) : dev_.neutralTsc_;
+            if (!tsc) {
+                *why = "a kernel's sampler without its opaque border's header for the texture";
+                return false;
+            }
+            at[0] |= tsc << 20;
         }
     }
     if (r.spillEntry && r.spillEntry <= r.entries) {
@@ -517,7 +558,7 @@ bool ComputeEncoder::dispatchRegion(const ComputeRegion &part, const std::array<
 {
     const auto *groups = part.groups.data();
     const auto *threads = part.local.data();
-    cb_.buffersWritten_ = true;
+    cb_.bufferWrites_.anything();
     if (!state_) {
         *why = "a dispatch without a kernel";
         return false;
@@ -534,7 +575,7 @@ bool ComputeEncoder::dispatchRegion(const ComputeRegion &part, const std::array<
         *why = "a threadgroup m2v's dispatch region cannot name";
         return false;
     }
-    if (state_->heapMissing) {
+    if (__atomic_load_n(&state_->heapMissing, __ATOMIC_ACQUIRE) && !dev_.rebindKernelArguments(*state_)) {
         *why = "no memory for the tables a kernel reads argument buffers through";
         return false;
     }
@@ -589,7 +630,7 @@ bool ComputeEncoder::launch(const std::array<uint32_t, 3> &grid, const DispatchP
                             const std::array<uint32_t, 8> &region, const char **why)
 {
     const PackKernel &r = *state_->rec;
-    if (!rootVa_ || grid_ != grid || base_ != piece.base || region_ != region) {
+    if (!rootVa_ || stageInRegion_ || grid_ != grid || base_ != piece.base || region_ != region) {
         uint32_t root[kRootBytes / 4] = {};
         rootWords(r, piece.base.data(), grid.data(), setVa_, residualMask_, residuals_, region.data(), root);
         argumentRoot(r, root);
@@ -600,6 +641,7 @@ bool ComputeEncoder::launch(const std::array<uint32_t, 3> &grid, const DispatchP
         base_ = piece.base;
         region_ = region;
         RAW_DIAGNOSTIC(dev_.stats.uploadBytes += kRootBytes);
+        stageInFromMemory(r, rootVa_);
     }
     uint64_t qmdVa = 0;
     uint32_t qmd[kQmdWords];

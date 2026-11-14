@@ -65,6 +65,7 @@
 #include "../../kits/SwitchEngineGate/SwitchEngineGateKernel.h"
 #include "../../kits/SwitchEngineGate/SwitchEnginePower.h"
 #include "../../kits/SwitchFalcon/SwitchFalcon.h"
+#include "../../kits/SwitchFalcon/SwitchFalconInterrupt.h"
 #include "../../kits/SwitchMath/SwitchMath.h"
 #include "../../kits/SwitchMMIO/SwitchMMIOKernel.h"
 #include "../../kits/SwitchTime/SwitchTime.h"
@@ -100,9 +101,6 @@ enum : uint32_t {
 };
 
 enum : uint32_t {  // the SMMU's own registers are TegraSMMU.h's
-    MC_INTSTATUS = 0x0,
-    MC_ERR_STATUS = 0x8,
-    MC_ERR_ADR = 0xc,
     MC_HOTRESET_CTRL = 0x200,
     MC_HOTRESET_STATUS = 0x204,
     MC_HOTRESET_VIC = 1u << 18,
@@ -144,9 +142,11 @@ TegraVICBuffer gTailPage;
 uint64_t gTailPages[kTailPages];
 
 SwitchEngineGate<SwitchEngineGateKernel> gGate;
-IOLock *gPowerLock;  // the gate's, which the cancellation of a stalled job holds too
+IOLock *gPowerLock;             // the gate's, which the cancellation of a stalled job holds too
+SwitchFalconInterrupt gErrors;  // VIC General Interrupt: global 72 (TRM ch.3, p.35)
+constexpr uint32_t kErrorIntid = 32 + 72;
 uint32_t gSyncpt;
-bool gUp, gWedged;
+bool gUp, gAttached = true;
 TegraVICBuffer gConfig, gFilter;
 
 const char *falconState()
@@ -242,12 +242,28 @@ void smmuDetach()
 
 // --- Power, clock, falcon ----------------------------------------------------------------------------------------
 // VIC's partition and memory client in L4T's order (SwitchEnginePower.h). VIC needs no clock-gating prod registers
-// (L4T's first VIC power-on loads none). On T210 before B01 only, tegra210_vic_mbist_war: VIC's override bit set with
-// THI SLCG overridden for the pulse (it needs host1x's clock, which the boot chain left on), then the module reset
-// again, as the kit's own workaround would. A partition the boot chain left on keeps its state; the engine is still
+// (L4T's first VIC power-on loads none). On T210 before B01 only, tegra210_vic_mbist_war in place of the kit's LVL2
+// pulse: VIC's override bit set with THI SLCG overridden for the pulse (it needs host1x's clock, which the boot chain
+// left on); the kit's module reset follows it. A partition the boot chain left on keeps its state; the engine is still
 // reset so the falcon starts from scratch.
-const SwitchEnginePower kPower = {kPartition, kClock, MC_HOTRESET_CTRL,   MC_HOTRESET_STATUS, MC_HOTRESET_VIC, 0,
-                                  nullptr,    0,      tegra_mc_hot_reset, tegra_smmu_read};
+void mbistWorkaround();
+
+const SwitchEnginePower kPower = {
+    .name = "TegraVIC",
+    .partition = kPartition,
+    .clock = kClock,
+    .hotResetCtrl = MC_HOTRESET_CTRL,
+    .hotResetStatus = MC_HOTRESET_STATUS,
+    .hotResetBit = MC_HOTRESET_VIC,
+    .lvl2Mask = 0,
+    .slcgClocks = nullptr,
+    .slcgCount = 0,
+    .hotReset = tegra_mc_hot_reset,
+    .mcRead = tegra_smmu_read,
+    .mbist = mbistWorkaround,
+    .host1xModule = TEGRA_HOST1X_MODULE_VIC,
+    .moduleTeardown = tegra_host1x_module_teardown,
+};
 
 void mbistWorkaround()
 {
@@ -262,7 +278,6 @@ void mbistWorkaround()
     if (!overridden)
         switch_car_rmw(LVL2_CLK_GATE_OVRE, OVRE_VIC_MBIST, 0);
     IODelay(1);
-    switch_engine_power::moduleReset(kPower);
 }
 
 bool powerUp(bool *wasOn)
@@ -271,15 +286,14 @@ bool powerUp(bool *wasOn)
     IODelay(2);
     if (!switch_engine_power_up(kPower, wasOn)) {
         snprintf(gLine, sizeof(gLine),
-                 "V1 FAIL partition %u did not come up (PWRGATE_TOGGLE %#x STATUS %#x CLAMP_STATUS %#x "
-                 "CLK_OUT_ENB_X %#x RST_DEVICES_X %#x)",
+                 "V1 FAIL partition %u did not come up (PWRGATE_TOGGLE %#x STATUS %#x REMOVE_CLAMPING_CMD %#x "
+                 "CLAMP_STATUS %#x CLK_OUT_ENB_X %#x RST_DEVICES_X %#x)",
                  kPartition, switch_pmc_read(PWRGATE_TOGGLE), switch_pmc_read(PWRGATE_STATUS),
+                 switch_pmc_read(switch_engine_power::kPmcRemoveClamping),
                  switch_pmc_read(switch_engine_power::kPmcClampStatus), switch_car_read(CLK_OUT_ENB_X),
                  switch_car_read(RST_DEVICES_X));
         return false;
     }
-    if (!switch_engine_power::b01())
-        mbistWorkaround();
     return true;
 }
 
@@ -350,6 +364,7 @@ bool proven()
 // Back to bypass, reset and clock off after a failed bring-up: nothing will use the engine this boot.
 void park()
 {
+    gErrors.off();
     smmuDetach();
     switch_car_reset_assert(kClock);
     IODelay(2);
@@ -360,6 +375,17 @@ void engineSuspend();
 void engineResume();
 int gateOn(void *);
 int gateOff(void *, bool drain);
+
+// The falcon's error interrupt: the cancellation runs at once (TegraVICCancel.cpp) and its line carries the reason;
+// one already under way clears and resets the engine anyway, so this error is only named.
+void falconFailed(const switch_falcon_error &error)
+{
+    if (switch_vic_jobs_falcon_failed())
+        return;
+    char why[256];
+    IOLog("TegraVIC: %s, during a cancellation already under way\n",
+          switch_falcon_error_describe(&error, why, sizeof(why)));
+}
 
 bool allocate()
 {
@@ -456,6 +482,13 @@ void bringUp(void *, wait_result_t)
         "us; %s\n",
         gFceSize, id, from, tegra_host1x_syncpt_read(id), switch_now_us() - start, falconState());
     gSyncpt = id;
+    if (!gErrors.start("TegraVIC", kErrorIntid, gVic, falconFailed)) {
+        IOLog("TegraVIC: V2 FAIL no falcon error interrupt (INTID %u)\n", kErrorIntid);
+        park();
+        giveBack();
+        return;
+    }
+    gErrors.on();
     gPowerLock = IOLockAlloc();
     if (!gPowerLock || !switch_vic_jobs_start(gConfig, id, tegra_host1x_syncpt_read(id)) ||
         !switch_vic_cancel_start(id) || !gGate.start({"TegraVIC", nullptr, gateOn, gateOff}, gPowerLock)) {
@@ -483,7 +516,7 @@ extern "C" void tegra_vic_describe(char *buffer, size_t size)
 
 extern "C" bool tegra_vic_ready(void)
 {
-    return gUp && !gWedged;
+    return gUp;
 }
 
 extern "C" const TegraVICTraits *tegra_vic_traits(void)
@@ -562,17 +595,22 @@ extern "C" uint32_t tegra_vic_syncpt(void)
 // Idle power gating (SwitchEngineGate.h), as mainline's runtime PM: off 500 ms after the last job, on at the next. On
 // is SC7's resume minus the SMMU domain, which an idle power-off keeps (the MC is not reset): partition, clock, reset,
 // the falcon reloaded from the kept image and proven with V2's stream, the queue rebased on the syncpoint that stream
-// moved. A failure there is one line and VIC refuses work from then on. Off parks the queue and powers the partition
-// down; the host1x channel is left as it is, idle at the end of its last job's stream.
+// moved. It also powers on an engine a cancellation's reset or a resume left off (a resume that could not attach the
+// SMMU domain attaches it here). A failure there is one line, parks the engine and fails that job; the next job runs
+// the power-on again. Off parks the queue and powers the partition down; the host1x channel is left as it is, idle at
+// the end of its last job's stream.
 namespace {
 int gateOn(void *)
 {
     bool wasOn = false;
     gLine[0] = 0;
-    const bool answered = powerUp(&wasOn) && switch_vic_engine_boot();
+    if (!gAttached)
+        gAttached = smmuAttach();
+    const bool answered = gAttached && powerUp(&wasOn) && switch_vic_engine_boot();
     if (!answered) {
-        gWedged = true;
-        IOLog("TegraVIC: power-on FAIL %s; VIC refuses work\n", gLine[0] ? gLine : "V1");
+        IOLog("TegraVIC: power-on FAIL %s; this job fails, the next one powers VIC on again\n",
+              gLine[0] ? gLine : "V1");
+        gErrors.off();
         switch_car_reset_assert(kClock);
         IODelay(2);
         switch_car_clock_disable(kClock);
@@ -585,6 +623,7 @@ int gateOff(void *, bool drain)
 {
     if (!switch_vic_jobs_park(drain))
         return SWITCH_ENGINE_GATE_BUSY;
+    gErrors.off();
     return switch_engine_power_down(kPower) ? SWITCH_ENGINE_GATE_OFF : -5;
 }
 
@@ -597,18 +636,19 @@ void engineSuspend()
     gGate.suspend();
     switch_vic_jobs_settle();
     smmuDetach();
+    gAttached = false;
 }
 
 void engineResume()
 {
     gLine[0] = 0;
     const bool attached = smmuAttach();
+    gAttached = attached;
     if (!attached) {
-        gWedged = true;
-        IOLog("TegraVIC: resume FAIL %s; VIC refuses work\n", gLine);
+        IOLog("TegraVIC: resume FAIL %s; the next job tries again\n", gLine);
         switch_vic_jobs_resume(false, tegra_host1x_syncpt_read(gSyncpt));
     }
-    gGate.resume(attached);
+    gGate.resume();
 }
 }  // namespace
 
@@ -625,16 +665,26 @@ bool switch_vic_engine_powered()
 void switch_vic_engine_describe(char *text, size_t size)
 {
     char falcon[400];
-    snprintf(text, size, "%s; MC INTSTATUS %#x ERR_STATUS %#x ERR_ADR %#x",
-             switch_falcon_stall(gVic, falcon, sizeof(falcon)), switch_mmio_read32(gMc, MC_INTSTATUS),
-             switch_mmio_read32(gMc, MC_ERR_STATUS), switch_mmio_read32(gMc, MC_ERR_ADR));
+    uint32_t status = 0, error = 0, address = 0;
+    const uint32_t errors = tegra_mc_error_latest(&status, &error, &address);
+    snprintf(text, size, "%s; MC errors %u, latest INTSTATUS %#x ERR_STATUS %#x ERR_ADR %#x",
+             switch_falcon_stall(gVic, falcon, sizeof(falcon)), errors, status, error, address);
 }
 
 // The memory controller stops taking VIC's requests and drains those in flight (tegra_mc_flush), so the reset cannot
 // cut a transfer in half; powerUp releases the flush once the engine is out of reset again.
+bool switch_vic_engine_falcon_failed(char *text, size_t size)
+{
+    return gErrors.failed(text, size);
+}
+
 bool switch_vic_engine_reset(bool *drained)
 {
+    gErrors.lostCheckStart();
     *drained = switch_engine_power::flush(kPower);
+    gErrors.lostCheckEnd();
+    gErrors.off();
+    switch_falcon_error_clear(gVic);
     switch_car_reset_assert(kClock);
     IODelay(10);
     bool wasOn = false;
@@ -644,12 +694,15 @@ bool switch_vic_engine_reset(bool *drained)
 
 bool switch_vic_engine_boot()
 {
-    return bootFalcon() && proven();
+    const bool booted = bootFalcon() && proven();
+    if (booted)
+        gErrors.on();
+    return booted;
 }
 
 const char *switch_vic_engine_wedge()
 {
-    gWedged = true;
+    gErrors.off();
     switch_car_reset_assert(kClock);
     IODelay(2);
     switch_car_clock_disable(kClock);
@@ -669,6 +722,11 @@ extern "C" void switch_vic_power_done(void)
 extern "C" void switch_vic_power_idle(void)
 {
     gGate.idle();
+}
+
+extern "C" void switch_vic_power_lost(void)
+{
+    gGate.lost();
 }
 
 // On by default (no boot-arg): VIC is the scaler Core Animation needs to clone the display (Screen Recording).

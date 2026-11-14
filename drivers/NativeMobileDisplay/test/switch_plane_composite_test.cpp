@@ -273,6 +273,9 @@ struct NativeLegacyDisplay : OSObject {
         return sets[id >= 0 ? id : Commits::kSlots];
     }
 
+    void retireUnshown(uint64_t)
+    {}
+
     void armFlipDeadline()
     {
         ++deadlines;

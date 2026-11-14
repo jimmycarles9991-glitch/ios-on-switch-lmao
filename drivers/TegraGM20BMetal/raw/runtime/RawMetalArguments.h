@@ -94,6 +94,9 @@ struct Cmd {
     uint8_t stage;
     uint16_t index;
     uint32_t a, b;
+    // OpBytes: its bytes' copy in RMCommandBuffer::_shadow + 1 (0: none). A binding command's x holds the stride forms'
+    // attributeStride, which a shadow must never be read as.
+    uint32_t shadow;
     uint64_t c, x;
     void *obj, *obj2;
 };

@@ -4,7 +4,8 @@
 //     it (CONTRACT.md), and SwitchThermal's fan curve and DFLL limits below 90 C;
 //   * software thermal shutdown, orderly through reboot(2)'s path with a record the next boot files: the SoC diode at
 //     L4T's Tdiode_tegra critical trip (gpu_shutdown, 92.5 C), or SOC_THERM's PLLX group at its PLL-therm "hot" trip
-//     (cpu_heavy, 94.5 C, where L4T would start hardware throttling);
+//     (cpu_heavy, 94.5 C), where SOC_THERM's heavy throttle also engages (SwitchSocThermThrottle.h: on T210B01 it
+//     slows neither the CPU nor the GPU);
 //   * hardware THERMTRIP, the PMC's reset, only above that: PLLX at the DT's nvidia,thermtrips (96 C), CPU and GPU at L4T's
 //     127 C default (SwitchSocThermWindow.h).
 #ifndef SWITCH_THERMAL_LIMITS_H
@@ -12,6 +13,7 @@
 
 #define SWITCH_THERMAL_SHUTDOWN_DIODE_MILLIC 92500
 #define SWITCH_THERMAL_SHUTDOWN_PLLX_MILLIC  94500
+#define SWITCH_THERMAL_HEAVY_PLLX_MILLIC     94500
 #define SWITCH_THERMAL_THERMTRIP_PLLX_MILLIC 96000
 #define SWITCH_THERMAL_THERMTRIP_CPU_MILLIC  127000
 #define SWITCH_THERMAL_THERMTRIP_GPU_MILLIC  127000

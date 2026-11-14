@@ -4,14 +4,18 @@ import HWTestGPU
 import Metal
 
 /// The features the device has no form of are NO wherever Metal lets a caller ask, and every creation past a NO fails:
-/// no predication, and on 21H461's A10X one view of amplification and no dynamic attribute stride (render or compute
-/// stage-in), which 24B119's A13 answers YES (metal.native.amplification, metal.native.dynamic_stride). A
-/// post-tessellation vertex function reads as one, and a state of a maximum tessellation factor past the device's is
-/// refused (metal.native.tessellation draws patches). Linear textures align to the pitch texture header's 32 bytes. The
-/// amplification count Metal defaults to, 1, draws on the raw path.
+/// an amplification count past the amplify macro's 8 mapping words. What both builds answer YES is made: a state of
+/// amplification 8, one of a dynamic attribute stride (render and compute stage-in) and a post-tessellation state at
+/// the device's maxTessellationFactor, 64 (metal.native.amplification, metal.native.dynamic_stride and
+/// metal.native.tessellation draw them). Predicated loops nest as deep as the raw path lays them down
+/// (raw_loop_copies.h LoopCopies::kMaxDepth, 8; gpu.raw.predication runs them). Linear textures align to the pitch
+/// texture header's 32 bytes. The amplification count Metal defaults to, 1, draws on the raw path.
 struct NativeUnsupportedTest: NativeObjectTest {
     let id = "metal.native.unsupported"
     let name = "Features the device has no form of answer NO and refuse their creations; amplification 1 draws raw"
+
+    /// raw_loop_copies.h LoopCopies::kMaxDepth
+    static let loopDepth = 8
 
     static let patchSource = """
         #include <metal_stdlib>
@@ -46,27 +50,24 @@ struct NativeUnsupportedTest: NativeObjectTest {
     func exercise(_ gpu: GPU, _ metrics: inout Metrics) async throws -> NativeWork {
         let device = gpu.device
         var work = NativeWork()
-        // 24B119's A13 amplifies (supportsVertexAmplificationCount: 0 to 8, maxVertexAmplificationCount 2) and binds
-        // dynamic strides; 21H461's A10X does neither
-        let a13 = device.name.contains("A13")
-        metrics.set("identity", a13 ? "A13" : "A10X")
-        let zeroes =
-            ["maxPredicatedNestingDepth"]
-            + (a13 ? [] : ["supportsDynamicAttributeStride"])
-        for selector in zeroes where Self.answer(device, selector) != 0 {
-            work.failures.append("\(selector) answers \(Self.answer(device, selector).map(String.init) ?? "nothing")")
+        let nesting = Self.answer(device, "maxPredicatedNestingDepth")
+        metrics.set("predicated_nesting", nesting ?? -1)
+        if nesting != Self.loopDepth {
+            work.failures.append("maxPredicatedNestingDepth is not the raw path's loop depth")
         }
-        if a13 && Self.answer(device, "supportsDynamicAttributeStride") != 1 {
-            work.failures.append("supportsDynamicAttributeStride is not the A13's YES")
+        for (selector, want, field) in [
+            ("supportsDynamicAttributeStride", 1, "dynamic_stride"),
+            ("maxVertexAmplificationCount", NativeAnswers.amplificationCount, "max_amplification_count"),
+            ("maxTessellationFactor", NativeAnswers.tessellationFactor, "max_tessellation_factor"),
+        ] {
+            if let wrong = NativeAnswers.check(device, selector, want, field: field, &metrics) {
+                work.failures.append(wrong)
+            }
         }
-        if Self.answer(device, "maxVertexAmplificationCount") != (a13 ? 2 : 1) {
-            work.failures.append("maxVertexAmplificationCount is not the target's")
-        }
-        let amplifiesAbove1 = (2...8).contains(where: device.supportsVertexAmplificationCount)
-        if !device.supportsVertexAmplificationCount(1) || amplifiesAbove1 != a13
-            || device.supportsVertexAmplificationCount(9)
-        {
-            work.failures.append("supportsVertexAmplificationCount: is not the target's")
+        let largest = NativeAnswers.largestAmplification(device)
+        metrics.set("amplifications", largest)
+        if largest != NativeAnswers.amplifications || !device.supportsVertexAmplificationCount(1) {
+            work.failures.append("supportsVertexAmplificationCount: answers YES up to \(largest)")
         }
         let patchLibrary = try await device.makeLibrary(source: Self.patchSource, options: nil)
         guard let post = patchLibrary.makeFunction(name: "tri_post") else { throw TestFailure("no tri_post") }
@@ -78,31 +79,37 @@ struct NativeUnsupportedTest: NativeObjectTest {
         tessellated.vertexFunction = post
         tessellated.fragmentFunction = patchLibrary.makeFunction(name: "tri_fragment")
         tessellated.colorAttachments[0].pixelFormat = .rgba8Unorm
-        tessellated.maxTessellationFactor = 64
-        let pastFactor = (Self.answer(device, "maxTessellationFactor") ?? 0) < 64
-        metrics.set("max_tessellation_factor", Self.answer(device, "maxTessellationFactor") ?? -1)
+        tessellated.maxTessellationFactor = NativeAnswers.tessellationFactor
         let amplified = MTLRenderPipelineDescriptor()
         amplified.vertexFunction = gpu.library.makeFunction(name: "quad_vertex")
         amplified.fragmentFunction = gpu.library.makeFunction(name: "solid_fragment")
         amplified.colorAttachments[0].pixelFormat = .rgba8Unorm
         let strided = amplified.copy() as! MTLRenderPipelineDescriptor
-        amplified.maxVertexAmplificationCount = 2
+        let pastMacro = amplified.copy() as! MTLRenderPipelineDescriptor
+        amplified.maxVertexAmplificationCount = NativeAnswers.amplifications
+        pastMacro.maxVertexAmplificationCount = NativeAnswers.amplifications + 1
         let vertices = MTLVertexDescriptor()
         vertices.attributes[0].format = .float4
         vertices.attributes[0].bufferIndex = 1
         vertices.layouts[1].stride = Int(bitPattern: UInt.max)  // MTLBufferLayoutStrideDynamic
         strided.vertexDescriptor = vertices
-        var refusals: [String] = []
-        let refusable =
-            (pastFactor ? [("tessellation", tessellated)] : [])
-            + (a13 ? [] : [("amplification", amplified), ("stride", strided)])
-        for (what, descriptor) in refusable {
-            if let error = Self.refused({ _ = try device.makeRenderPipelineState(descriptor: descriptor) }) {
-                refusals.append(what)
-                metrics.set("\(what)_error", error)
+        var made: [String] = []
+        for (what, descriptor) in [("tessellation64", tessellated), ("amplification8", amplified), ("stride", strided)]
+        {
+            if let error = Self.refused({
+                work.objects.append(try device.makeRenderPipelineState(descriptor: descriptor))
+            }) {
+                work.failures.append("the \(what) state was refused: \(error)")
             } else {
-                work.failures.append("a \(what) state was made")
+                made.append(what)
             }
+        }
+        var refusals: [String] = []
+        if let error = Self.refused({ _ = try device.makeRenderPipelineState(descriptor: pastMacro) }) {
+            refusals.append("amplification9")
+            metrics.set("amplification9_error", error)
+        } else {
+            work.failures.append("a state of amplification 9 was made")
         }
         let compute = MTLComputePipelineDescriptor()
         compute.computeFunction = gpu.library.makeFunction(name: "fma_loop")
@@ -111,13 +118,12 @@ struct NativeUnsupportedTest: NativeObjectTest {
         stageIn.attributes[0].bufferIndex = 2
         stageIn.layouts[2].stride = Int(bitPattern: UInt.max)
         compute.stageInputDescriptor = stageIn
-        if !a13, let error = Self.refused({ _ = try device.makeComputePipelineState(descriptor: compute, options: []) })
-        {
-            refusals.append("stage_in")
-            metrics.set("stage_in_error", error)
-        } else if !a13 {
-            work.failures.append("a dynamic-stride stage-in state was made")
+        if let error = Self.refused({ _ = try device.makeComputePipelineState(descriptor: compute, options: []) }) {
+            work.failures.append("the dynamic-stride stage-in state was refused: \(error)")
+        } else {
+            made.append("stage_in")
         }
+        metrics.set("made", made.joined(separator: ","))
         metrics.set("refused", refusals.joined(separator: ","))
         let alignments = [MTLPixelFormat.r8Unorm, .rgba8Unorm, .bgra8Unorm, .rgba16Float].map {
             device.minimumLinearTextureAlignment(for: $0)

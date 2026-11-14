@@ -102,6 +102,12 @@ public:
 		return closed_;
 	}
 
+	// A method that closed the gate is running (it may have dropped the lock); its end wakes sleepers on this gate
+	bool mutating() const
+	{
+		return mutating_;
+	}
+
 private:
 	void block()
 	{

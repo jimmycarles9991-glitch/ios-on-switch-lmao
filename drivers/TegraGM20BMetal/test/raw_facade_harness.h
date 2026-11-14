@@ -117,9 +117,9 @@ inline std::vector<uint8_t> slot(uint32_t k)
 
 // A pack of this build's version holding the state of `key`: vertex program slot 0, fragment slot 1, each kSlot bytes in
 // the heap section at kHeap, so a page-multiple slot of the pack's own pages; `kernels`, each with a program slot of its
-// own after those (its `program` set here); `facts`: its compute states' answers
+// own after those (its `program` set here); `facts`: its compute states' answers; `entries`: the state's set-0 entries
 inline std::string writePack(const std::string &key, std::vector<raw::PackKernel> kernels = {},
-                             std::vector<raw::PackComputeFacts> facts = {})
+                             std::vector<raw::PackComputeFacts> facts = {}, std::vector<raw::PackEntry> entries = {})
 {
     constexpr uint64_t kPrograms = 0x180, kPipelines = 0x800, kComputeStates = 0xc00, kStrings = 0xe00,
                        kKernels = 0x2000;
@@ -169,6 +169,8 @@ inline std::string writePack(const std::string &key, std::vector<raw::PackKernel
     pp.keyString = 1;
     pp.vs = 0;
     pp.fs = 1;
+    pp.entries = uint8_t(std::min<size_t>(entries.size(), raw::kPackEntries));
+    std::copy_n(entries.begin(), pp.entries, pp.entry);
     memcpy(file.data() + kPipelines, &pp, sizeof pp);
     memcpy(file.data() + kStrings, strings.data(), strings.size());
     const std::string path = dir() + "/pack.bin";

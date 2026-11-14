@@ -243,6 +243,36 @@ TEST(Gm20bGrFault, EngResetIsAcknowledgedOnlyOnceTheEngineIsBack)
 		<< "every engine reset of recover.c goes through tgm_engine_reset_locked";
 }
 
+// A hold that found another channel's preempt in flight left the PBDMA's live channel on it through the reset: if the
+// reset raised ENG_RESET, that channel is owed a preempt, asked at the release once ENG_RESET is acknowledged (a
+// stalled PBDMA swaps nothing out), or at the end of a context-switch timeout's work, or before a hang check blames
+// anyone.
+TEST(Gm20bGrFault, ALiveChannelLeftOnThePbdmaThroughAResetIsPreemptedNotKilled)
+{
+	const auto before = [](const std::string &body, const char *first, const char *then) {
+		const size_t a = body.find(first);
+		const size_t b = body.find(then);
+		EXPECT_NE(a, std::string::npos) << first;
+		EXPECT_NE(b, std::string::npos) << then;
+		EXPECT_LT(a, b) << first << " before " << then;
+	};
+	const std::string engine = Text(RECOVER_ENGINE_C);
+	before(Body(engine, "static void hold_pbdmas("),
+	       "const int owed = tgm_reset_owed(was, preempt, (int)chid);", "rst.owed = owed;");
+	const std::string release =
+		Body(engine, "void tgm_recover_reset_release(struct nvkm_engine *engine)\n{");
+	before(release, "eng_reset_ack(device, runq, ", "owed = owed_preempt(device);");
+	before(release, "if (note.owed != TGM_OWED_NONE && !raised)",
+	       "owed = owed_preempt(device);");
+	before(release, "owed = owed_preempt(device);",
+	       "spin_unlock_irqrestore(&device->intr.lock, flags);");
+	before(Body(Text(RECOVER_C), "static void ctxsw_work(void *arg)\n{"),
+	       "ctxsw.nvkm(ctxsw.fifo, stuck);", "tgm_recover_owed(device);");
+	before(Body(Text(GPU_HANG_C), "enum tgm_hang tgm_hang_recover("),
+	       "if (tgm_owed_recover_locked(late, who, seqno, waited_ns))",
+	       "resident = tgm_recover_suspects(");
+}
+
 // A context-switch timeout tick on an engine stuck loading a live channel's context resets the engine and kills no one,
 // and a late wait behind one does the same instead of blaming the PBDMA's channel.
 TEST(Gm20bGrFault, AStuckLoadIsResetNeverKilled)

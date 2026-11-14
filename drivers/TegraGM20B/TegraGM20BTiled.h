@@ -24,7 +24,8 @@ struct tgm_cpu_view {
 #define TGM_VIEWS 8
 
 struct tgm_tiled {
-	int tiled; /* else pitch, for good */
+	int tiled; /* else pitch, for good unless retry */
+	int retry; /* pitch because the tiling move failed: decided again (TGM_LAYOUT_ASK_FIRST) */
 	struct tgm_layout layout;
 	uint32_t bytes_per_row;
 	/* CPU locks (TegraGM20BViews.cpp; entry lock): the scratch holding the texels as rows while any is held, the locks,
@@ -116,6 +117,9 @@ int tgm_tiled_untile_deferred(struct tgm_coh *c);
  * and whether nothing wrote it before this, the first GPU import of it (the entry's first decision may then skip the
  * tiling move: no rows to move) */
 void tgm_coherency_import(struct tgm_coh *c, struct tgm_record *record, int fresh);
+/* Whether a process other than `pid` holds a CPU mapping of the surface (its record's tgm_record_mappers); 0 for an entry
+ * without a surface or record */
+int tgm_coh_cpu_foreign(struct tgm_coh *c, int32_t pid);
 /* Entry lock held: whether the first decision moves nothing (tgm_coherency_import's fresh, still no write: no submission,
  * no backing write, the surface's seed unmoved) */
 int tgm_coh_fresh(const struct tgm_coh *c);

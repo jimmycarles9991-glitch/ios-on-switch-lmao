@@ -35,7 +35,8 @@ struct FetchFreeForm {
     uint8_t rung = FetchNone;  // FetchBlend or FetchIteratedBlend; FetchNone: not a fetch-free form
     uint8_t colour = 0;        // the colour it blends
     uint8_t programWords = 0, constants = 0;
-    uint64_t program = 0;  // the iterated blend program's name (PackIteratedBlend::name)
+    uint64_t program = 0;       // the iterated blend program's name (PackIteratedBlend::name)
+    uint32_t sampledSlots = 0;  // the fragment texture slots its program samples
     // a colour matrix form's: the fragment buffer the matrix is in, its bytes from the bind offset and its words there,
     // which each draw's macro call reads (kNoUniform: the program is the record's)
     uint8_t matrixSlot = kNoUniform;
@@ -63,6 +64,11 @@ inline FetchFreeForm fetchFreeForm(const PackPipeline &pp, const PackIteratedBle
             return f;
         f.rung = rung;
         f.colour = c;
+        for (uint32_t k = 0; k < pp.entries && k < kPackEntries; k++) {
+            const PackEntry &e = pp.entry[k];
+            if ((e.kind == EntryTexture || e.kind == EntryTexture3d) && handleStage(e) == 1 && e.slot < kStageTextures)
+                f.sampledSlots |= 1u << e.slot;
+        }
         f.program = rung == FetchIteratedBlend ? iterated->name : 0;
         f.programWords = rung != FetchIteratedBlend ? 0 : matrix ? kMatrixProgramWords : iterated->count;
         f.constants = rung != FetchIteratedBlend ? 0 : matrix ? kMatrixConstants : iterated->constants;
@@ -120,10 +126,32 @@ inline uint32_t targetSelect(uint32_t count)
 
 // The draw's facts a form's rule reads
 struct FetchFreeDraw {
-    uint32_t format = 0;    // the blended colour's MTLPixelFormat in the pass
-    bool readable = false;  // the target is CPU-visible memory the client may read as data
-    uint8_t ropLayers = 0;  // ROP blends of rung-2 forms already over this target in the pass
+    uint32_t format = 0;           // the blended colour's MTLPixelFormat in the pass
+    bool readable = false;         // the target is CPU-visible memory the client may read as data
+    uint8_t ropLayers = 0;         // ROP blends of rung-2 forms already over this target in the pass
+    bool eightBitSources = false;  // every image the form samples holds unorm8 codes (eightBitSamples)
+    bool accumulates = false;      // the pass loads the target over rung-2 blends of an earlier command buffer
 };
+
+// MTLPixelFormats of 8-bit unorm codes, read as they are stored (no sRGB decode)
+constexpr bool unorm8Image(uint32_t format)
+{
+    return format == 1 || format == 10 || format == 30 || format == 70 || format == 80;
+}
+
+// Whether the textures bound at `slots` are all images of unorm8 codes: what blends is 8-bit content, texture samples of
+// unorm8 images (x1-units UNITS.md's 8-bit sources), within one code of Metal at any depth; false where it samples none
+template <class Texture> bool eightBitSamples(uint32_t slots, const Texture *const bound[])
+{
+    if (!slots)
+        return false;
+    for (; slots; slots &= slots - 1) {
+        const Texture *t = bound[__builtin_ctz(slots)];
+        if (!t || !unorm8Image(t->format))
+            return false;
+    }
+    return true;
+}
 
 // Whether the device showed the form's program worth its passes (kIteratedProven)
 inline bool iteratedPassesProven(const FetchFreeForm &f)
@@ -150,6 +178,8 @@ inline bool fetchFreeTaken(const FetchFreeForm &f, const FetchFreeDraw &draw, ui
         ask.format = uint16_t(draw.format);
         ask.readable = draw.readable;
         ask.standardFactors = true;
+        ask.eightBitSources = draw.eightBitSources;
+        ask.accumulates = draw.accumulates;
         ask.computedLayers = uint8_t(draw.ropLayers + 1);
         return fixedBlendAcceptable(ask);
     }

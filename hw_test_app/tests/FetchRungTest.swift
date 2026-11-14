@@ -15,7 +15,11 @@ import Metal
 /// Animation's clear (clr, clr_m1 with its memoryless image) loads no colour, so it has no storage or fetch-free form
 /// and draws plain: fetched_<blend> the fetching draws the facade counted over its draws (0), path_<blend> its path.
 /// verdict=PASS: every state within the bound and faster on its fetch-free form, with every forced draw counted, and
-/// every plain state drawn raw with no fetch.
+/// every plain state drawn raw with no fetch. Rung 2 also stacks 4 layers of each state over one target with no rung
+/// forced, so rule fetch.blend decides: the pattern is an 8-bit image, so every layer takes the ROP's blend (it did only
+/// two before eightBitSources), and a second command buffer that loads the target and blends again takes none (a target
+/// re-blended across frames, `accumulates`): stack_r2_<blend>=<first>/<second> (4/0), worst_stack_<blend> its codes
+/// against the same stack on the storage form.
 /// proven= the programs every state of which was within the bound and faster, the list raw_chip_facts.h
 /// kIteratedProven takes for rung 3: a program is taken by its own measured cost, not by its pass count. A state this
 /// IPSW's QuartzCore lacks is skipped. Rung 3 programs a unit no other driver here drives: a wrong setup kills the channel
@@ -28,6 +32,7 @@ struct FetchRungTest: HWTest {
     var timeout: TimeInterval { 300 }
 
     static let bound = 2
+    static let stackLayers = 4
     static let draws = 10
     static let runs = 5
 
@@ -79,6 +84,7 @@ struct FetchRungTest: HWTest {
         var beyond: [String] = []
         var slower: [String] = []
         var outcomes: [(program: String, ok: Bool)] = []
+        var unstacked: [String] = []
         let key = "fetch_rung\(rung)"
         let before = RawFacade.counters(of: gpu.device)[key] ?? 0
         var forcedDraws = 0
@@ -117,6 +123,21 @@ struct FetchRungTest: HWTest {
             if passes > 0 { metrics.set("us_pass_\(label)", us[1] / Double(passes), digits: 2) }
             outcomes.append((Self.program(label), within && faster))
             forcedDraws += Self.draws * (Self.runs + 1)
+            if rung == 2 {
+                let stack = {
+                    try await FetchRungScene.stack(
+                        line, layers: Self.stackLayers, frames: 2, library: library, gpu: gpu)
+                }
+                if let ruled = try await FetchRungScene.forcing(0, gpu.device, stack),
+                    let stored = try await FetchRungScene.forcing(4, gpu.device, stack)
+                {
+                    let (worst, _) = FetchRungScene.difference(stored.bytes, ruled.bytes)
+                    metrics.set("worst_stack_\(label)", worst)
+                    metrics.set("stack_r2_\(label)", ruled.rung2.map(String.init).joined(separator: "/"))
+                    if worst > Self.bound { beyond.append("stack_" + line.shortLabel) }
+                    if ruled.rung2 != [Self.stackLayers, 0] { unstacked.append(label) }
+                }
+            }
         }
         var fetching: [String] = []
         let fetchedDraws = {
@@ -140,18 +161,22 @@ struct FetchRungTest: HWTest {
         let proven = Set(outcomes.map(\.program)).subtracting(failing).sorted()
         metrics.set("proven", proven.isEmpty ? "-" : proven.joined(separator: ","))
         let counted = taken >= forcedDraws
-        let verdict = beyond.isEmpty && slower.isEmpty && counted && fetching.isEmpty ? "PASS" : "FAIL"
+        let verdict =
+            beyond.isEmpty && slower.isEmpty && counted && fetching.isEmpty && unstacked.isEmpty ? "PASS" : "FAIL"
         metrics.set("verdict", verdict)
         if !beyond.isEmpty { metrics.set("beyond", beyond.joined(separator: ",")) }
         if !fetching.isEmpty { metrics.set("fetching", fetching.joined(separator: ",")) }
         if !slower.isEmpty { metrics.set("slower", slower.joined(separator: ",")) }
+        if !unstacked.isEmpty { metrics.set("unstacked", unstacked.joined(separator: ",")) }
         if verdict == "PASS" { return .pass(metrics, proof: gpu.proof) }
         let why =
             !beyond.isEmpty
             ? "beyond the bound"
             : !counted
                 ? "the facade drew \(taken) of the forced draws on rung \(rung)"
-                : !fetching.isEmpty ? "a state that loads no colour fetched" : "slower than the storage form"
+                : !fetching.isEmpty
+                    ? "a state that loads no colour fetched"
+                    : !unstacked.isEmpty ? "rule fetch.blend's stack counts" : "slower than the storage form"
         return .fail(why, metrics)
     }
 }

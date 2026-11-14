@@ -13,7 +13,6 @@ import Metal
 struct NativeLayeredFetchTest: NativeObjectTest {
     let id = "metal.native.layered_fetch"
     let name = "A fragment function fetches the colour of the layer its vertex function chose in a layered pass"
-    var unavailable: String? { Layering.a13 ? nil : "21H461's A10X has no layered rendering" }
 
     static let source = """
         #include <metal_stdlib>

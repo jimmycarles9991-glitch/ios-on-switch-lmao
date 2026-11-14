@@ -10,6 +10,7 @@
 // (com.brunostjohn.switch.texpeer.plist), which the app sends the endpoint to. Either way it then connects to the app and
 // serves that one connection.
 #import <Foundation/Foundation.h>
+#import <IOSurface/IOSurfaceObjC.h>
 #import <Metal/Metal.h>
 #include <mach/mach.h>
 #include <os/log.h>
@@ -27,6 +28,14 @@ extern "C" xpc_connection_t texpeer_mach_service(const char *name, dispatch_queu
 
 @protocol SharedTexturePeer
 - (void)write:(MTLSharedTextureHandle *)handle reply:(void (^)(NSString *))reply;
+// gpu.iosurface.cross_process: render the pattern (texpeer_pattern.h) into an IOSurface the app made, or into one made here
+// and sent back; `keep` holds the texture (its GPU import) until dropSurfaces
+- (void)renderSurface:(IOSurface *)surface keep:(BOOL)keep reply:(void (^)(NSString *))reply;
+- (void)makeSurfaceWidth:(NSInteger)width
+                  height:(NSInteger)height
+                    keep:(BOOL)keep
+                   reply:(void (^)(IOSurface *, NSString *))reply;
+- (void)dropSurfaces:(void (^)(NSString *))reply;
 @end
 
 // The app's side: an NSXPC connection reaches the listener only with its first message
@@ -131,6 +140,7 @@ NSString *footprint()
 @interface TexturePeer : NSObject <SharedTexturePeer>
 @property (nonatomic, strong) id<MTLDevice> device;
 @property (nonatomic, strong) id<MTLCommandQueue> queue;
+@property (nonatomic, strong) NSMutableArray<id<MTLTexture>> *kept;
 @end
 
 @implementation TexturePeer
@@ -164,6 +174,77 @@ NSString *footprint()
                                      footprint()]);
 }
 
+// The pattern into every texel of `surface` through a texture over it that renders (its first GPU import writes it), by a
+// blit from a buffer of the pattern; "ok ..." once that work completed
+- (NSString *)render:(IOSurface *)surface keep:(BOOL)keep
+{
+    const NSUInteger w = (NSUInteger)surface.width, h = (NSUInteger)surface.height;
+    MTLTextureDescriptor *d = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatBGRA8Unorm
+                                                                                 width:w
+                                                                                height:h
+                                                                             mipmapped:NO];
+    d.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
+    d.storageMode = MTLStorageModeShared;
+    id<MTLTexture> t = [self.device newTextureWithDescriptor:d iosurface:(__bridge IOSurfaceRef)surface plane:0];
+    NSMutableData *bytes = [NSMutableData dataWithLength:w * h * 4];
+    uint8_t *at = static_cast<uint8_t *>(bytes.mutableBytes);
+    for (NSUInteger y = 0; y < h; y++)
+        for (NSUInteger x = 0; x < w; x++)
+            for (uint32_t c = 0; c < 4; c++)
+                *at++ = switch_texpeer_surface_byte(uint32_t(x), uint32_t(y), c);
+    id<MTLBuffer> from = [self.device newBufferWithBytes:bytes.bytes length:bytes.length options:0];
+    if (!t || !from)
+        return [NSString stringWithFormat:@"fail=no_texture pid=%d", getpid()];
+    id<MTLCommandBuffer> cb = [self.queue commandBuffer];
+    id<MTLBlitCommandEncoder> blit = [cb blitCommandEncoder];
+    [blit copyFromBuffer:from
+               sourceOffset:0
+          sourceBytesPerRow:w * 4
+        sourceBytesPerImage:0
+                 sourceSize:MTLSizeMake(w, h, 1)
+                  toTexture:t
+           destinationSlice:0
+           destinationLevel:0
+          destinationOrigin:MTLOriginMake(0, 0, 0)];
+    [blit endEncoding];
+    [cb commit];
+    [cb waitUntilCompleted];
+    if (keep)
+        [self.kept addObject:t];
+    const SEL path = NSSelectorFromString(@"switchRawPath");
+    NSString *taken = [(id)cb respondsToSelector:path] ? [(id)cb valueForKey:@"switchRawPath"] : @"device";
+    return [NSString stringWithFormat:@"%@ pid=%d id=%u path=%@",
+                                      cb.status == MTLCommandBufferStatusCompleted ? @"ok" : @"fail=not_completed",
+                                      getpid(), IOSurfaceGetID((__bridge IOSurfaceRef)surface), taken];
+}
+
+- (void)renderSurface:(IOSurface *)surface keep:(BOOL)keep reply:(void (^)(NSString *))reply
+{
+    reply(surface ? [self render:surface keep:keep] : [NSString stringWithFormat:@"fail=no_surface pid=%d", getpid()]);
+}
+
+- (void)makeSurfaceWidth:(NSInteger)width
+                  height:(NSInteger)height
+                    keep:(BOOL)keep
+                   reply:(void (^)(IOSurface *, NSString *))reply
+{
+    IOSurface *surface = [[IOSurface alloc] initWithProperties:@{
+        IOSurfacePropertyKeyWidth : @(width),
+        IOSurfacePropertyKeyHeight : @(height),
+        IOSurfacePropertyKeyBytesPerElement : @4,
+        IOSurfacePropertyKeyPixelFormat : @((uint32_t)'BGRA'),
+    }];
+    reply(surface,
+          surface ? [self render:surface keep:keep] : [NSString stringWithFormat:@"fail=no_surface pid=%d", getpid()]);
+}
+
+- (void)dropSurfaces:(void (^)(NSString *))reply
+{
+    const NSUInteger n = self.kept.count;
+    [self.kept removeAllObjects];
+    reply([NSString stringWithFormat:@"ok pid=%d dropped=%lu", getpid(), (unsigned long)n]);
+}
+
 @end
 
 static TexturePeer *gPeer;
@@ -182,6 +263,14 @@ static void serve(xpc_object_t endpoint)
               forSelector:@selector(write:reply:)
             argumentIndex:0
                   ofReply:NO];
+    [interface setClasses:[NSSet setWithObject:[IOSurface class]]
+              forSelector:@selector(renderSurface:keep:reply:)
+            argumentIndex:0
+                  ofReply:NO];
+    [interface setClasses:[NSSet setWithObject:[IOSurface class]]
+              forSelector:@selector(makeSurfaceWidth:height:keep:reply:)
+            argumentIndex:0
+                  ofReply:YES];
     gConnection.exportedInterface = interface;
     gConnection.exportedObject = gPeer;
     gConnection.remoteObjectInterface = [NSXPCInterface interfaceWithProtocol:@protocol(SharedTexturePeerHost)];
@@ -200,6 +289,7 @@ int main(void)
 {
     @autoreleasepool {
         gPeer = [TexturePeer new];
+        gPeer.kept = [NSMutableArray array];
         gPeer.device = MTLCreateSystemDefaultDevice();
         gPeer.queue = [gPeer.device newCommandQueue];
         if (!gPeer.queue) {

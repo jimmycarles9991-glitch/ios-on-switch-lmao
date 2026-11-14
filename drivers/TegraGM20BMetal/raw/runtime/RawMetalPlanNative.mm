@@ -92,6 +92,7 @@ struct NativePlanSink {
                                 : next.nativePipeline ? static_cast<raw::Pipeline *>(next.nativePipeline)
                                 : pipeline            ? pipeline->_raw
                                                       : nullptr);
+            render->setAlphaControl(pipeline ? pipeline->_alphaControl : 0);
         }
         if (rasterChanged(next, previous, R::DepthStencil, &R::depthStencil)) {
             __unsafe_unretained RMDepthStencil *depth = (__bridge RMDepthStencil *)next.depthStencil;

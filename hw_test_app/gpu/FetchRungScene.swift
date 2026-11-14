@@ -66,6 +66,54 @@ public enum FetchRungScene {
         return (Stats.percentile(perDraw, 0.5), Set(timings.map(\.path)).sorted().joined(separator: ","))
     }
 
+    /// `layers` draws of a rectangle over the whole of a CAStateSweep-sized target per command buffer, `frames`
+    /// command buffers into the same target (the first clears it, the rest load it, as a feedback target is
+    /// re-blended frame after frame): the first attachment's bytes, the draws the facade counted on rung 2 in each
+    /// command buffer, and the paths drawn.
+    public static func stack(
+        _ line: PipelineLine, layers: Int, frames: Int, library: MTLLibrary, gpu: GPU
+    ) async throws -> (bytes: [UInt8], rung2: [Int], paths: String) {
+        let pipeline = try CAState.pipeline(line, library: library, device: gpu.device)
+        var targets: [MTLTexture] = []
+        for color in line.colors.sorted(by: { $0.index < $1.index }) {
+            guard let format = MTLPixelFormat(rawValue: color.format) else {
+                throw TestFailure("attachment format \(color.format)")
+            }
+            targets.append(try gpu.texture(format, CAStateSweep.width, CAStateSweep.height))
+        }
+        let source = try CAStateSweep.patternTexture(gpu, premultiplied: true)
+        let sampler = try CAStateSweep.linearSampler(gpu.device)
+        let layer = CAState.rectangle(x0: -1, y0: -1, x1: 1, y1: 1, color: SIMD4(0.45, 0.1, 0.3, 0.5))
+        var counts: [Int] = []
+        var paths: Set<String> = []
+        for frame in 0..<frames {
+            let before = RawFacade.counters(of: gpu.device)["fetch_rung2"] ?? 0
+            let timing = try await gpu.run { commands in
+                let pass = MTLRenderPassDescriptor()
+                for (index, target) in targets.enumerated() {
+                    pass.colorAttachments[index].texture = target
+                    pass.colorAttachments[index].loadAction = frame == 0 ? .clear : .load
+                    pass.colorAttachments[index].clearColor = CAStateSweep.premultipliedClear
+                    pass.colorAttachments[index].storeAction = .store
+                }
+                let encoder = commands.makeRenderCommandEncoder(descriptor: pass)!
+                encoder.setRenderPipelineState(pipeline)
+                CAStateSweep.bind(encoder, source: source, sampler: sampler)
+                var vertices = layer.map(CAStateSweep.premultiply)
+                encoder.setVertexBytes(
+                    &vertices, length: MemoryLayout<CAState.Vertex>.stride * vertices.count, index: 1)
+                for _ in 0..<layers { encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4) }
+                encoder.endEncoding()
+            }
+            paths.insert(timing.path)
+            counts.append((RawFacade.counters(of: gpu.device)["fetch_rung2"] ?? 0) - before)
+        }
+        let format = UInt(targets[0].pixelFormat.rawValue)
+        guard let bytes = CAStateSweep.bytesPerTexel(format) else { throw TestFailure("attachment format \(format)") }
+        let read = try await CAStateSweep.readBack(targets[0], bytesPerPixel: bytes, gpu: gpu)
+        return (read, counts, paths.sorted().joined(separator: ","))
+    }
+
     /// The largest difference in codes between two images of one format's bytes, and how many bytes differ.
     public static func difference(_ a: [UInt8], _ b: [UInt8]) -> (worst: Int, differing: Int) {
         guard a.count == b.count else { return (Int.max, max(a.count, b.count)) }

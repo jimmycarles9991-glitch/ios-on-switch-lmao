@@ -6,10 +6,14 @@
 // engine_headers/vic04.h (NVIDIA, MIT) for A8R8G8B8 32 and Y8___U8V8_N420 67; averne's FFmpeg nvtegra
 // libavutil/clb0b6.h for the rest of the table (the values NVIDIA's open-gpu-doc vic_ceb6_types.h also gives VIC 5.1),
 // and its hwcontext_nvtegra.c av_nvtegra_pixfmt_to_vic for the formats it runs on T210 (L8, NV12, YUV420P, R5G6B5 and
-// the 32-bit RGB orders). N422 halves chroma across. That N422R ("rotated") halves it down is inferred from the name,
-// weakly backed by L4T's T21x display bandwidth code (t21x/bandwidth.c), which gives a rotated 422R window the line
-// count of an unrotated 422 one. A row counts elements: one per pixel in every packed format (averne: OutLumaWidth =
-// linesize / step - 1), one CbCr pair in a semi-planar chroma plane.
+// the 32-bit RGB orders). N422 halves chroma across a memory row even when VIC writes the output transposed: probe
+// gpu.x1.vic_transpose422 (L998) turned a '422v' exactly as N422 sited by ChromaLocHoriz, and as N422R misplaced every
+// CbCr pair (boots 19 and 21). A row counts elements: one per pixel in every packed format (averne: OutLumaWidth =
+// linesize / step - 1; probe gpu.x1.vic_packed422 (L1000) copied '2vuy' and 'yuvs' onto themselves exactly that way and
+// not as one a pixel pair), one CbCr pair in a semi-planar chroma plane. A packed format's U and V name the other
+// chroma byte than a semi-planar one's on this unit: the same probe read '2vuy' (Cb Y0 Cr Y1) through U8_Y8__V8_Y8 and
+// 'yuvs' (Y0 Cb Y1 Cr) through Y8_U8__Y8_V8 with Cb and Cr exchanged, both ways and against NV12 and BGRA, luma in
+// place, so each is described by the code that names its chroma bytes the other way round.
 #ifndef TEGRA_VIC_FORMATS_H
 #define TEGRA_VIC_FORMATS_H
 #include <stddef.h>
@@ -160,7 +164,7 @@ static inline const TegraVICFormat *tegra_vic_format(uint32_t fourcc)
          {1, 2, 0},
          1,
          0,
-         TEGRA_VIC_T_Y8___U8V8_N422R,
+         TEGRA_VIC_T_Y8___U8V8_N422,
          0},
         {TEGRA_VIC_FOURCC('4', '2', '2', 'f'),
          TEGRA_VIC_T_Y8___U8V8_N422,
@@ -170,7 +174,7 @@ static inline const TegraVICFormat *tegra_vic_format(uint32_t fourcc)
          {1, 2, 0},
          1,
          0,
-         TEGRA_VIC_T_Y8___U8V8_N422R,
+         TEGRA_VIC_T_Y8___U8V8_N422,
          0},
         {TEGRA_VIC_FOURCC('4', '4', '4', 'v'),
          TEGRA_VIC_T_Y8___U8V8_N444,
@@ -213,7 +217,7 @@ static inline const TegraVICFormat *tegra_vic_format(uint32_t fourcc)
          TEGRA_VIC_T_Y8___U8___V8_N420,
          0},
         {TEGRA_VIC_FOURCC('2', 'v', 'u', 'y'),
-         TEGRA_VIC_T_U8_Y8__V8_Y8,
+         TEGRA_VIC_T_V8_Y8__U8_Y8,
          1,
          TEGRA_VIC_KIND_YCC_VIDEO,
          0,
@@ -223,7 +227,7 @@ static inline const TegraVICFormat *tegra_vic_format(uint32_t fourcc)
          0,
          1},
         {TEGRA_VIC_FOURCC('y', 'u', 'v', 's'),
-         TEGRA_VIC_T_Y8_U8__Y8_V8,
+         TEGRA_VIC_T_Y8_V8__Y8_U8,
          1,
          TEGRA_VIC_KIND_YCC_VIDEO,
          0,
@@ -250,6 +254,27 @@ static inline uint32_t tegra_vic_plane_rows(const TegraVICFormat *f, uint32_t he
     return plane && f->subY ? height / 2 : height;
 }
 
+// VIC addresses whole chroma pairs, so a subsampled surface is described to it one pixel wider (4:2:0: and taller) when
+// its size is odd, the extra column and row inside its planes' padding, its rectangles left as they are.
+static inline uint32_t tegra_vic_padded_width(const TegraVICFormat *f, uint32_t width)
+{
+    return f->subX ? (width + 1) & ~1u : width;
+}
+
+static inline uint32_t tegra_vic_padded_height(const TegraVICFormat *f, uint32_t height)
+{
+    return f->subY ? (height + 1) & ~1u : height;
+}
+
+// The bytes of a row of plane p of a surface `width` pixels wide that hold pixels: an odd width's last chroma pair (of
+// a packed row, its last pixel pair) whole.
+static inline uint32_t tegra_vic_row_bytes(const TegraVICFormat *f, uint32_t width, uint32_t plane)
+{
+    const uint32_t elements =
+        plane || f->packed ? tegra_vic_plane_width(f, tegra_vic_padded_width(f, width), plane) : width;
+    return elements * f->bpe[plane];
+}
+
 // IOSurfaceAccelerator's siting codes 1 Left, 2 Center, 3 TopLeft, 4 Top, 5 BottomLeft, 6 Bottom (0 unspecified: Left)
 // as VIC's ChromaLocHoriz/Vert (0 on the even sample, 1 between, 2 on the odd one), for an axis that is subsampled.
 static inline uint32_t tegra_vic_chroma_horiz(uint32_t site)
@@ -266,17 +291,12 @@ static inline uint32_t tegra_vic_chroma_vert(uint32_t site)
     return 1;
 }
 
-// ChromaLocHoriz and ChromaLocVert of a surface of format `f` sited `site` (0 on an axis it does not subsample). A
-// transposed 4:2:2 output's are its memory's exchanged, like the rest of its description; transposed 4:2:0 keeps the
-// siting its jobs ran with on the unit.
-static inline void tegra_vic_chroma_loc(const TegraVICFormat *f, uint32_t site, int transposed, uint32_t *horiz,
-                                        uint32_t *vert)
+// ChromaLocHoriz and ChromaLocVert of a surface of format `f` sited `site` (0 on an axis it does not subsample): the
+// siting of its memory, transposed output too (a turned 4:2:2's pairs sit across memory rows by ChromaLocHoriz).
+static inline void tegra_vic_chroma_loc(const TegraVICFormat *f, uint32_t site, uint32_t *horiz, uint32_t *vert)
 {
-    const uint32_t across = f->subX ? tegra_vic_chroma_horiz(site) : 0;
-    const uint32_t down = f->subY ? tegra_vic_chroma_vert(site) : 0;
-    const int exchange = transposed && f->subX != f->subY;
-    *horiz = exchange ? down : across;
-    *vert = exchange ? across : down;
+    *horiz = f->subX ? tegra_vic_chroma_horiz(site) : 0;
+    *vert = f->subY ? tegra_vic_chroma_vert(site) : 0;
 }
 
 #ifdef __cplusplus

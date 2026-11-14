@@ -3,7 +3,7 @@ import HWTestCore
 import HWTestGPU
 import Metal
 
-/// Vertex amplification where the device answers it (24B119's A13; 21H461's A10X answers NO and refuses the state): a
+/// Vertex amplification, which both builds answer (NativeAnswers): a
 /// state of maxVertexAmplificationCount 2 whose vertex function moves its quad right by [[amplification_id]] halves and
 /// colours it by the id. A draw at count 2 paints the left half red and the right half green, one amplification after
 /// the other; the same state at count 1 paints the left half alone. Each count again as an execute of an indirect command
@@ -51,9 +51,7 @@ struct NativeAmplificationTest: NativeObjectTest {
         let amplifies = device.supportsVertexAmplificationCount(2)
         metrics.set("amplification", amplifies ? "yes" : "no")
         guard amplifies else {
-            if (try? await device.makeRenderPipelineState(descriptor: descriptor)) != nil {
-                work.failures.append("a state of amplification 2 was made where the device answers it NO")
-            }
+            work.failures.append("supportsVertexAmplificationCount: answers NO for 2")
             return work
         }
         let pipeline = try await device.makeRenderPipelineState(descriptor: descriptor)

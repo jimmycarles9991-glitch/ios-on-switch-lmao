@@ -61,7 +61,8 @@ int switch_nvdec_run_display_probe(const TegraNVDECSubmit *submit, TegraNVDECRes
 // Sleeps until the fence is reached (syncpoint interrupt), bounded by the engine's own GP timer per queued job. Past
 // that bound the job is cancelled with one line and its wait returns -5 (TegraNVDECCancel.cpp).
 int tegra_nvdec_wait(uint32_t fence);
-bool tegra_nvdec_ready(void);
+bool tegra_nvdec_ready(void);   // published: a job may be submitted (a wedged engine is powered on again by it)
+bool tegra_nvdec_wedged(void);  // parked after a failed reset or power-on: it touches no memory until powered on
 // The bring-up has ended: 1 when NVDEC decodes (N3 published), 0 when it does not or `timeoutMs` passed first.
 int tegra_nvdec_await(uint32_t timeoutMs);
 

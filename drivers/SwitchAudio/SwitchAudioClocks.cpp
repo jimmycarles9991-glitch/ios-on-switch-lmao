@@ -68,12 +68,12 @@ void SwitchAudio::tegraClocksAndPads()
     // DAP1 is on the audio-hv rail, AUD_MCLK on audio; both are vdd-1v8 (MAX77620 SD3), DTB iopad-defaults 1.8 V.
     // mainline tegra_io_pad_set_voltage: write-enable the bit in PWR_DET, then clear it in PWR_DET_VALUE.
     if (switch_mmio_read32(pmc, PWR_DET_VAL) & kPad33V) {
-        switch_mmio_write32(pmc, PWR_DET, switch_mmio_read32(pmc, PWR_DET) | kPad33V);
-        switch_mmio_write32(pmc, PWR_DET_VAL, switch_mmio_read32(pmc, PWR_DET_VAL) & ~kPad33V);
+        switch_pmc_rmw(PWR_DET, 0, kPad33V);
+        switch_pmc_rmw(PWR_DET_VAL, kPad33V, 0);
         IODelay(250);
     }
     if (switch_mmio_read32(pmc, NO_IOPOWER) & kNoIoPowerAudioHv)
-        switch_mmio_write32(pmc, NO_IOPOWER, switch_mmio_read32(pmc, NO_IOPOWER) & ~kNoIoPowerAudioHv);
+        switch_pmc_rmw(NO_IOPOWER, kNoIoPowerAudioHv, 0);
 
     startClocks();
     switch_mmio_write32(car, CLK_SOURCE_APE, kApeSource);

@@ -54,6 +54,12 @@ struct TegraNVJPGJob {
     uint32_t selector, target;  // the AppleJPEGDriver selector it came through, its destination's format code
 };
 
+// Work queued behind a decode before the CPU sleeps on it: `queue` gets NVJPG's syncpoint and the decode's fence.
+struct TegraNVJPGFollow {
+    void (*queue)(void *context, uint32_t syncpt, uint32_t fence);
+    void *context;
+};
+
 extern "C" {
 // Engine (TegraNVJPG.cpp).
 bool tegra_nvjpg_ready(void);
@@ -65,10 +71,12 @@ void tegra_nvjpg_unlock(void);
 // if they do not fit. `writable` false maps them read-only for the engine. Job lock held.
 uint64_t tegra_nvjpg_window_map(uint32_t window, const uint64_t *pages, uint32_t count, bool writable);
 void tegra_nvjpg_window_clear(uint32_t window);
-// Copies the setup to the kernel's slot, queues the job's methods on host1x channel 0 behind an OP_DONE increment of
-// NVJPG's syncpoint and sleeps until that increment's interrupt (bounded: past the bound a one-line panic). Fills the
-// firmware's status. Job lock held.
-int tegra_nvjpg_run(const TegraNVJPGJob *job, nvjpg_dec_status *status, uint64_t *busyUs);
+// Copies the setup to the kernel's slot, queues the job's methods on host1x channel 3 behind an OP_DONE increment of
+// NVJPG's syncpoint, runs `follow` (another engine's job queued to wait for that increment on the hardware) and sleeps
+// until the increment's interrupt (bounded: past the bound the job is cancelled, -5). Fills the firmware's status. Job
+// lock held.
+int tegra_nvjpg_run(const TegraNVJPGJob *job, nvjpg_dec_status *status, uint64_t *busyUs,
+                    const TegraNVJPGFollow *follow = nullptr);
 
 // Service (TegraNVJPGUserClient.cpp): J3.
 int tegra_nvjpg_publish(void);

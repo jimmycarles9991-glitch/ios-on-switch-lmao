@@ -6,6 +6,7 @@
 #include <limits>
 #include <vector>
 
+#include "raw_grow_list.h"
 #include "raw_slot_snapshots.h"
 
 namespace raw {
@@ -17,9 +18,9 @@ template <typename T> class StateSnapshots {
     uint64_t generation_ = 0;
     uint64_t captured_ = std::numeric_limits<uint64_t>::max();
     uint32_t index_ = kNoSnapshot;
-    std::vector<T> values_;
-    std::vector<uint32_t> changed_;  // each value's slots that may differ from the value before it
-    uint32_t pending_ = ~0u;         // the slots edited since the last capture
+    GrowList<T> values_;
+    GrowList<uint32_t> changed_;  // each value's slots that may differ from the value before it
+    uint32_t pending_ = ~0u;      // the slots edited since the last capture
 
 public:
     const T &current() const
@@ -30,6 +31,12 @@ public:
     const T &operator[](uint32_t index) const
     {
         return values_[index];
+    }
+
+    // The writer's
+    const T &own(uint32_t index)
+    {
+        return values_.own(index);
     }
 
     uint64_t generation() const

@@ -7,6 +7,7 @@
 #include <stdio.h>
 #include <string.h>
 #include "../TegraNVJPGRequest.h"
+#include "../../TegraGM20B/TegraGM20BLayoutFit.h"
 
 static int failures;
 #define CHECK(cond, ...)         \
@@ -144,7 +145,7 @@ int main(void)
     expect("ARGB", &r, &img, &d, &kAll, TEGRA_NVJPG_PLAN_OK, NULL, &p);
     TegraNVJPGAbility noArgb = kAll;
     noArgb.formats &= ~(1u << TEGRA_NVJPG_OUT_ARGB);
-    expect("ARGB unproven", &r, &img, &d, &noArgb, TEGRA_NVJPG_PLAN_UNSUPPORTED, "format not proven", &p);
+    expect("ARGB unproven", &r, &img, &d, &noArgb, TEGRA_NVJPG_PLAN_UNSUPPORTED, "does not write", &p);
 
     img = image(1600, 1200, TEGRA_NVJPG_CHROMA_422H);
     r = request(1600, 1200, TEGRA_NVJPG_SUB_422, 0);
@@ -167,23 +168,56 @@ int main(void)
     CHECK(p.target.format == TEGRA_NVJPG_OUT_YUY2 && p.planes == 1 && p.extent.rowBytes[0] == 3200 &&
               p.extent.rows[0] == 1200 && p.target.pitch[0] == 3200,
           "422 to yuvf: plan");
+    // '422f' and '444f': three planes at the file's own sampling into the service's buffer, rows and planes on 256
+    // bytes, which VIC re-packs into the destination at the request's place (semi-planar output above 4:2:0 never
+    // completed on this unit). The jobs that hung (boots 19 and 21) are among them: SpringBoard's 205x83 4:4:4 file at
+    // 1/1 and image.jpeg_422/444's 1/2 thumbnails.
     d = surface(TEGRA_NVJPG_FOURCC('4', '2', '2', 'f'), 1600, 1200);
     expect("422 to 422f", &r, &img, &d, &kAll, TEGRA_NVJPG_PLAN_OK, NULL, &p);
-    CHECK(p.target.format == TEGRA_NVJPG_OUT_NV16 && p.planes == 2 && p.extent.rows[1] == 1200 &&
-              p.extent.rowBytes[1] == 1600 && p.planeStart[1] == d.planeOffset[1],
-          "422 to 422f: plan");
-    img = image(1600, 1200, TEGRA_NVJPG_CHROMA_444);
-    r = request(1600, 1200, TEGRA_NVJPG_SUB_444, 0);
-    d = surface(TEGRA_NVJPG_FOURCC('4', '4', '4', 'f'), 1600, 1200);
-    expect("444 to 444f", &r, &img, &d, &kAll, TEGRA_NVJPG_PLAN_OK, NULL, &p);
-    CHECK(p.target.format == TEGRA_NVJPG_OUT_NV24 && p.planes == 2 && p.extent.rows[1] == 1200 &&
-              p.extent.rowBytes[1] == 3200 && p.target.pitch[1] == 3200,
-          "444 to 444f: plan");
-    r.x_offset = 256, r.y_offset = 2;
-    d = surface(TEGRA_NVJPG_FOURCC('4', '4', '4', 'f'), 2048, 1600);
-    expect("444f offset", &r, &img, &d, &kAll, TEGRA_NVJPG_PLAN_OK, NULL, &p);
-    CHECK(p.planeStart[0] == 2 * 2048 + 256 && p.planeStart[1] == d.planeOffset[1] + 2 * 4096 + 512,
-          "444f offset: starts");
+    CHECK(p.repack && p.target.format == TEGRA_NVJPG_OUT_NV16 && p.planes == 3 && p.target.pitch[0] == 1792 &&
+              p.target.pitch[1] == 1024 && p.target.pitch[2] == 1024 && p.extent.rows[1] == 1200 &&
+              p.planeStart[0] == 0 && p.planeStart[1] == 1792ull * 1200 &&
+              p.planeStart[2] == 1792ull * 1200 + 1024ull * 1200 && p.writeEnd == p.planeStart[2] + 1024ull * 1200 &&
+              p.repackBytes == 4608000,
+          "422 to 422f: plan (pitches %u %u, buffer %llu)", p.target.pitch[0], p.target.pitch[1],
+          (unsigned long long)p.repackBytes);
+    img = image(2048, 1536, TEGRA_NVJPG_CHROMA_422H);
+    r = request(2048, 1536, TEGRA_NVJPG_SUB_422, 1);
+    d = surface(TEGRA_NVJPG_FOURCC('4', '2', '2', 'f'), 1024, 768);
+    expect("422 thumbnail to 422f", &r, &img, &d, &kAll, TEGRA_NVJPG_PLAN_OK, NULL, &p);
+    CHECK(p.repack && p.target.scale == 1 && p.target.pitch[0] == 1024 && p.target.pitch[1] == 512 &&
+              p.extent.rows[0] == 768,
+          "422 thumbnail to 422f: plan");
+    img = image(2048, 1536, TEGRA_NVJPG_CHROMA_444);
+    r = request(2048, 1536, TEGRA_NVJPG_SUB_444, 1);
+    d = surface(TEGRA_NVJPG_FOURCC('4', '4', '4', 'f'), 1024, 768);
+    expect("444 thumbnail to 444f", &r, &img, &d, &kAll, TEGRA_NVJPG_PLAN_OK, NULL, &p);
+    CHECK(p.repack && p.target.format == TEGRA_NVJPG_OUT_NV24 && p.target.pitch[1] == 1024, "444 thumbnail: plan");
+    img = image(205, 83, TEGRA_NVJPG_CHROMA_444);
+    r = request(205, 83, TEGRA_NVJPG_SUB_444, 0);
+    d = surface(TEGRA_NVJPG_FOURCC('4', '4', '4', 'f'), 205, 83);
+    expect("SpringBoard's 205x83 444 to 444f", &r, &img, &d, &kAll, TEGRA_NVJPG_PLAN_OK, NULL, &p);
+    CHECK(p.repack && p.target.pitch[0] == 256 && p.target.pitch[1] == 256 && p.extent.rows[0] == 88 &&
+              p.extent.rows[2] == 88,
+          "SpringBoard's 205x83 444 to 444f: whole MCUs into the buffer");
+    {
+        TegraNVJPGImage four20 = image(1600, 1200, TEGRA_NVJPG_CHROMA_420);
+        TegraNVJPGDecodeRequest r420 = request(1600, 1200, TEGRA_NVJPG_SUB_420, 0);
+        TegraNVJPGSurface d422 = surface(TEGRA_NVJPG_FOURCC('4', '2', '2', 'f'), 1600, 1200);
+        expect("420 to 422f", &r420, &four20, &d422, &kAll, TEGRA_NVJPG_PLAN_UNSUPPORTED, "sampled otherwise", &p);
+        TegraNVJPGImage four22 = image(1600, 1200, TEGRA_NVJPG_CHROMA_422H);
+        TegraNVJPGDecodeRequest odd = request(1600, 1200, TEGRA_NVJPG_SUB_422, 0);
+        odd.x_offset = 1;
+        d422 = surface(TEGRA_NVJPG_FOURCC('4', '2', '2', 'f'), 1602, 1200);
+        expect("odd offset into 422f", &odd, &four22, &d422, &kAll, TEGRA_NVJPG_PLAN_UNSUPPORTED,
+               "odd offset into 4:2:2", &p);
+    }
+    TegraNVJPGAbility shipped = kAll;  // VIC not up: the service drops the formats VIC re-packs
+    shipped.formats &= ~(1u << TEGRA_NVJPG_OUT_NV16 | 1u << TEGRA_NVJPG_OUT_NV24);
+    expect("SpringBoard's 205x83 444 to 444f, VIC down", &r, &img, &d, &shipped, TEGRA_NVJPG_PLAN_UNSUPPORTED,
+           "does not write", &p);
+    d = surface(TEGRA_NVJPG_FOURCC('B', 'G', 'R', 'A'), 205, 83);
+    expect("SpringBoard's 205x83 444 to BGRA", &r, &img, &d, &shipped, TEGRA_NVJPG_PLAN_OK, NULL, &p);
     img = image(1600, 1200, TEGRA_NVJPG_CHROMA_422H);
     r = request(1600, 1200, TEGRA_NVJPG_SUB_422, 0);
     r.x_offset = 1;
@@ -274,6 +308,75 @@ int main(void)
                   !tegra_nvjpg_setup_output(&photo, &p7.target, true, &s7, &e7),
               "selector photo setups refused");
         CHECK(memcmp(&s1, &s7, sizeof(s1)) == 0, "selector 7's picture setup differs from selector 1's");
+    }
+
+    // BGRA destinations GM20B laid out block-linear (a sampler asked first), in the layouts its decision gives them
+    // (tgm_layout_tiled_within over the surface's allocation): HW Test gpu.iosurface.cross_process's 256x256 keeps
+    // NIL's 16-GOB blocks, its 260x260 fits only 1-GOB blocks. Written as their blocks: a row of GOBs the stride, the
+    // plane's start and the block rows the padded rows reach the extent, the setup's tiling the layout's.
+    for (uint32_t size = 256; size <= 260; size += 4) {
+        TegraNVJPGImage tile = image(size, size, TEGRA_NVJPG_CHROMA_420);
+        TegraNVJPGDecodeRequest rt = request(size, size, TEGRA_NVJPG_SUB_420, 0);
+        TegraNVJPGSurface dt = surface(bgra, size, size);
+        struct tgm_layout l;
+        CHECK(tgm_layout_tiled_within(size, size, 4, dt.length, &l), "%u BGRA: tiles within its surface", size);
+        CHECK(l.y_log2 == (size == 256 ? 4 : 0) && l.row_bytes == (size == 256 ? 1024 : 1088),
+              "%u BGRA: layout y_log2 %u row_bytes %u", size, l.y_log2, l.row_bytes);
+        const uint64_t blockRowBytes = (uint64_t)l.row_bytes * (8u << l.y_log2);
+        expect("tiled BGRA", &rt, &tile, &dt, &kAll, TEGRA_NVJPG_PLAN_OK, NULL, &p);
+        nvjpg_dec_drv_pic_setup_s st;
+        memset(&st, 0, sizeof(st));
+        TegraNVJPGExtent et;
+        CHECK(!tegra_nvjpg_setup_output(&tile, &p.target, true, &st, &et) && st.tile_mode == 0, "%u BGRA: rows", size);
+        const char *why = tegra_nvjpg_plan_block_linear(&rt, dt.length, kSink, l.row_bytes, l.y_log2, &p, &st);
+        CHECK(!why, "%u BGRA block linear refused: %s", size, why);
+        const uint64_t paddedRows = size == 256 ? 256 : 272;
+        CHECK(p.target.blockLinear && p.target.blockHeightLog2 == l.y_log2 && p.target.pitch[0] == l.row_bytes &&
+                  p.planeStart[0] == 0 &&
+                  p.writeEnd == (paddedRows + (8u << l.y_log2) - 1) / (8u << l.y_log2) * blockRowBytes,
+              "%u BGRA block linear: plan (start %llu, end %llu)", size, (unsigned long long)p.planeStart[0],
+              (unsigned long long)p.writeEnd);
+        CHECK(p.writeEnd <= dt.length + kSink, "%u BGRA block linear: the padding past the blocks lands in the sink",
+              size);
+        CHECK(st.tile_mode == TEGRA_NVJPG_TILE_TEGRA_BLOCK_LINEAR && st.block_linear_height == (int)l.y_log2 &&
+                  st.output_stride_luma == (int)l.row_bytes,
+              "%u BGRA block linear: setup tile_mode %d height %d stride %d", size, st.tile_mode,
+              st.block_linear_height, st.output_stride_luma);
+        nvjpg_dec_drv_pic_setup_s again;
+        memset(&again, 0, sizeof(again));
+        CHECK(!tegra_nvjpg_setup_output(&tile, &p.target, true, &again, &et) && again.tile_mode == st.tile_mode &&
+                  again.block_linear_height == st.block_linear_height &&
+                  again.output_stride_luma == st.output_stride_luma,
+              "%u BGRA block linear: the output setup of the planned target agrees", size);
+        why = tegra_nvjpg_plan_block_linear(&rt, dt.length - blockRowBytes, kSink, l.row_bytes, l.y_log2, &p, &st);
+        CHECK(why && strstr(why, "runs past"), "%u BGRA, a block row short: %s", size, why ? why : "ok");
+    }
+
+    // Placed one 16-GOB block down and four GOBs in: the plane starts on that block. Off a GOB, or off a block's rows,
+    // it cannot start; a two-plane target is never block linear.
+    {
+        TegraNVJPGSurface dt = surface(bgra, 256, 256);
+        TegraNVJPGDecodeRequest placed = request(64, 64, TEGRA_NVJPG_SUB_420, 0);
+        TegraNVJPGImage small = image(64, 64, TEGRA_NVJPG_CHROMA_420);
+        nvjpg_dec_drv_pic_setup_s st;
+        memset(&st, 0, sizeof(st));
+        placed.x_offset = 64, placed.y_offset = 128;
+        expect("placed BGRA", &placed, &small, &dt, &kAll, TEGRA_NVJPG_PLAN_OK, NULL, &p);
+        const char *why = tegra_nvjpg_plan_block_linear(&placed, dt.length, kSink, 1024, 4, &p, &st);
+        CHECK(!why && p.planeStart[0] == 1024ull * 128 + 4ull * (512 << 4), "placed BGRA block linear: start %llu (%s)",
+              (unsigned long long)p.planeStart[0], why ? why : "ok");
+        placed.x_offset = 8;
+        why = tegra_nvjpg_plan_block_linear(&placed, dt.length, kSink, 1024, 4, &p, &st);
+        CHECK(why && strstr(why, "off the destination's blocks"), "off-GOB BGRA: %s", why ? why : "ok");
+        placed.x_offset = 64, placed.y_offset = 8;
+        why = tegra_nvjpg_plan_block_linear(&placed, dt.length, kSink, 1024, 4, &p, &st);
+        CHECK(why && strstr(why, "off the destination's blocks"), "off-block BGRA: %s", why ? why : "ok");
+        TegraNVJPGSurface nv = surface(f420, 256, 256);
+        TegraNVJPGDecodeRequest r420 = request(256, 256, TEGRA_NVJPG_SUB_420, 0);
+        TegraNVJPGImage i420 = image(256, 256, TEGRA_NVJPG_CHROMA_420);
+        expect("420f", &r420, &i420, &nv, &kAll, TEGRA_NVJPG_PLAN_OK, NULL, &p);
+        why = tegra_nvjpg_plan_block_linear(&r420, nv.length, kSink, 256, 4, &p, &st);
+        CHECK(why && strstr(why, "more than one plane"), "420f block linear: %s", why ? why : "ok");
     }
 
     if (failures) {

@@ -48,7 +48,7 @@ struct SurfaceTiledDefaultTest: HWTest {
             checks.append(("\(label) the clear reads back as rows", seen == Self.clearSeen))
             withExtendedLifetime(texture) {}
         }
-        return .judged(checks, metrics, proof: gpu.proof)
+        return .judged(checks, metrics, proof: gpu.proof).onRawPath(gpu)
     }
 
     static func target(_ gpu: GPU, _ width: Int, _ height: Int, _ rowBytes: Int) throws -> (IOSurface, MTLTexture) {

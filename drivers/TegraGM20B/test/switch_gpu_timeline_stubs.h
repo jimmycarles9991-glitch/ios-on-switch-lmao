@@ -4,6 +4,12 @@
 #include <mutex>
 
 inline thread_local bool switchTimelineAtomicContext;
+inline thread_local int switchCpu;  // cpu_number(): the CPU a test thread stands for
+
+inline int cpu_number()
+{
+	return switchCpu;
+}
 
 inline void switchTimelineMayBlock()
 {
@@ -56,8 +62,11 @@ inline void IOSimpleLockFree(IOSimpleLock *lock)
 	delete lock;
 }
 
+inline unsigned switchSimpleLocks;
+
 inline void IOSimpleLockLock(IOSimpleLock *lock) __attribute__((no_thread_safety_analysis))
 {
+	++switchSimpleLocks;
 	lock->mutex.lock();
 	switchTimelineAtomicContext = true;
 }

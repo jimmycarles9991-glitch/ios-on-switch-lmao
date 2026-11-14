@@ -6,6 +6,7 @@
 // IOConnectUnmapMemory64 finds the same descriptor. GPU work goes through gpu_*.c (TegraGM20BGpu.h). Fence waits sleep
 // until the GPU's nonstall interrupt wakes them; a fence found complete without that wake panics (no polled mode), and
 // so does one that never completes.
+#include <IOKit/IOKitKeys.h>
 #include "TegraGM20BUserClientInternal.h"
 #include "SwitchGpuShaderCompiler.h"
 #include "TegraGM20BCompilerABI.h"
@@ -31,11 +32,16 @@ OSDefineMetaClassAndStructors(AGXDeviceUserClient, IOUserClient)
 {
 	task_ = task;
 	proc_selfname(owner_, sizeof(owner_));
+	ownerPid_ = proc_selfpid();
 
 	lock_ = IOLockAlloc();
 	unmapLock_ = IOLockAlloc();
-	if (!lock_ || !unmapLock_ || !events_.initialize() || !resources_.initialize())
+	if (!lock_ || !unmapLock_ || !methods_.initialize() || !events_.initialize() ||
+	    !resources_.initialize())
 		return false;
+	// IOKit's default locking takes this connection's read lock around every method (callExternalMethod) and its write
+	// lock around the map calls; methods_ stands in. is_io_service_open_extended reads the key once this returns.
+	setProperty(kIOUserClientDefaultLockingKey, kOSBooleanFalse);
 	for (auto &submitLock : submitLocks_)
 		if (!(submitLock = IOLockAlloc()))
 			return false;
@@ -46,7 +52,9 @@ OSDefineMetaClassAndStructors(AGXDeviceUserClient, IOUserClient)
 		retirementWork, this, THREAD_CALL_PRIORITY_KERNEL, THREAD_CALL_OPTIONS_ONCE);
 	wakeCall_ = thread_call_allocate_with_options(wakeWork, this, THREAD_CALL_PRIORITY_KERNEL,
 						      THREAD_CALL_OPTIONS_ONCE);
-	if (!retireCall_ || !wakeCall_)
+	releaseCall_ = thread_call_allocate_with_options(
+		releaseWork, this, THREAD_CALL_PRIORITY_KERNEL, THREAD_CALL_OPTIONS_ONCE);
+	if (!retireCall_ || !wakeCall_ || !releaseCall_)
 		return false;
 	if (tgm_vm_new(&vm_))
 		return false;
@@ -70,6 +78,9 @@ OSDefineMetaClassAndStructors(AGXDeviceUserClient, IOUserClient)
 
 IOReturn AGXDeviceUserClient::clientClose()
 {
+	IOLockLock(lock_);
+	methods_.close(lock_);
+	IOLockUnlock(lock_);
 	switch_gpu_compiler_close(this);
 	drainResources();
 	terminate();
@@ -84,12 +95,15 @@ void AGXDeviceUserClient::free()
 			thread_call_free(retireCall_);
 		if (wakeCall_)
 			thread_call_free(wakeCall_);
+		if (releaseCall_)
+			thread_call_free(releaseCall_);
 		if (binds_)
 			IODelete(binds_, Binding, cap_binds_);
 		freeJob(job_);
 		for (auto &job : channelJobs_)
 			freeJob(job);
 		boIndex_.destroy();
+		bindTable_.destroy();
 		for (auto &submitLock : submitLocks_)
 			if (submitLock)
 				IOLockFree(submitLock);
@@ -114,6 +128,7 @@ void AGXDeviceUserClient::free()
 		if (history)
 			IOFree(history, sizeof(*history));
 #endif
+	methods_.destroy();
 	if (counted_)
 		__atomic_sub_fetch(&gConnections, 1, __ATOMIC_SEQ_CST);
 	IOUserClient::free();
@@ -179,18 +194,16 @@ void AGXDeviceUserClient::releaseBo(Bo *bo)
 		    !(bo->handle && poolZeroLater(bo->pool_va, bo->pool_pa, bo->bytes)))
 			tgm_pool_free(bo->pool_va, bo->bytes, bo->pool_pa);
 	}
-	if (bo->bmd && bo->handle && !bo->system && !(bo->flags & TegraGM20BBoContiguous) &&
-	    spareKeep(bo->bmd, bo->pas, static_cast<uint64_t>(bo->backing_pages) << 12,
+	if (bo->buffer.memory && bo->handle && !bo->system &&
+	    !(bo->flags & TegraGM20BBoContiguous) &&
+	    spareKeep(bo->buffer, bo->pas, static_cast<uint64_t>(bo->backing_pages) << 12,
 		      bo->cachedMapping)) {
-		bo->bmd = nullptr;
+		bo->buffer = {};
 		bo->pas = nullptr;
 		bo->cachedMapping = nullptr;
 	}
 	switch_gpu_cached_mapping_drop(&bo->cachedMapping);
-	if (bo->bmd) {
-		bo->bmd->complete();
-		bo->bmd->release();
-	}
+	switch_gpu_cached_buffer_free(&bo->buffer);
 	if (bo->wired) {
 		if (bo->handle) {
 			tgm_stats_import(-static_cast<int64_t>(bo->bytes), bo->pas[0]);
@@ -463,7 +476,12 @@ IOReturn AGXDeviceUserClient::externalMethod(uint32_t selector,
 	(void)target;
 	(void)reference;
 	SwitchGpuAsyncReference asyncReference(arguments);
-	return asyncReference.settle(externalCall(selector, arguments, asyncReference));
+	IOReturn ret = kIOReturnNotOpen;
+	if (methods_.enter(lock_)) {
+		ret = externalCall(selector, arguments, asyncReference);
+		methods_.leave(lock_);
+	}
+	return asyncReference.settle(ret);
 }
 
 IOReturn AGXDeviceUserClient::externalCall(uint32_t selector, IOExternalMethodArguments *arguments,
@@ -528,6 +546,16 @@ IOReturn AGXDeviceUserClient::externalCall(uint32_t selector, IOExternalMethodAr
 IOReturn AGXDeviceUserClient::clientMemoryForType(UInt32 type, IOOptionBits *options,
 						  IOMemoryDescriptor **memory)
 {
+	if (!methods_.enter(lock_))
+		return kIOReturnNotOpen;
+	const IOReturn ret = memoryForType(type, options, memory);
+	methods_.leave(lock_);
+	return ret;
+}
+
+IOReturn AGXDeviceUserClient::memoryForType(UInt32 type, IOOptionBits *options,
+					    IOMemoryDescriptor **memory)
+{
 #if TGM_STATS
 	if (IOMemoryDescriptor *readback = tgm_readback_memory(this, type)) {
 		*memory = readback;
@@ -558,7 +586,7 @@ IOReturn AGXDeviceUserClient::clientMemoryForType(UInt32 type, IOOptionBits *opt
 		// (populateDevicePager), but enters them in the pmap only for kernel_map, so a task's first CPU touch of each
 		// 4 KiB still faults (the "device" class on the kprof faults line), and IOKit drops kIOMapPrefault for device
 		// pager memory. A cached BO's buffer is prepared (BoAlloc), which kIOMapPrefault requires.
-		if (bo->bmd && bo->view == bo->bmd && !bo->system &&
+		if (bo->buffer.memory && bo->view == bo->buffer.memory && !bo->system &&
 		    bo->bytes <= kPrefaultMaxBytes) {
 			*options |= kIOMapPrefault;
 			tgm_stats_prefault(bo->bytes);
@@ -610,6 +638,7 @@ extern "C" IOReturn tegra_gm20b_new_user_client(IOService *provider, task_t task
 		client->release();
 		return kIOReturnError;
 	}
+	tgm_owner_memory_provider(provider);
 	*handler = client;
 	static volatile int opened;
 	if (!__atomic_exchange_n(&opened, 1,

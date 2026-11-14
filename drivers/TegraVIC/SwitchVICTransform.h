@@ -4,10 +4,12 @@
 #include "TegraVICSurface.h"
 
 struct SwitchVICEvents;
+struct TegraVICAcquire;
 
 // The backing holds `extent` bytes laid out pitch linear (its layout, or the GPU's legacy record of its first page).
 bool switch_vic_pitch_backing(switch_gpu_backing *backing, uint64_t extent);
 
+// acquire: a syncpoint threshold VIC's channel waits for before the jobs run.
 int switch_vic_transform(const TegraVICSurface *source, const TegraVICSurface *destination, const TegraVICPlan *plan,
                          uint32_t chromaSite, void (*completion)(void *, int), void *context,
-                         SwitchVICEvents *events = nullptr);
+                         SwitchVICEvents *events = nullptr, const TegraVICAcquire *acquire = nullptr);

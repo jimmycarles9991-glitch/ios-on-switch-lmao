@@ -9,9 +9,6 @@ import UIKit
 /// into mip levels (Core Animation regenerated the backdrop pyramid) and B when they render none (it reused the last
 /// one). Arms:
 ///   nudge   the stripes move a point just before the snapshot: does B become A and the glass good?
-///   zero    every new buffer in every process starts zeroed (debug switch zero-new-buffers): state left in reused
-///           memory?
-///   whole   the render server draws whole programs, no split prologue (debug switch whole-programs)
 ///   wfi     the render server's fetch barrier waits for idle (debug switch fetch-barrier-wfi)
 ///   dirty   the render server first renders and drops a screen of glass and blur over noise, leaving float
 ///           intermediates' memory behind in its pool
@@ -29,7 +26,7 @@ struct UIGlassABTest: HWTest {
     static let rounds = 3
 
     enum Arm: String, CaseIterable {
-        case nudge, zero, whole, wfi, dirty
+        case nudge, wfi, dirty
     }
 
     struct Entry: Encodable {
@@ -101,8 +98,6 @@ struct UIGlassABTest: HWTest {
             return await GlassRound.run(context, lines: true) { stage in
                 stage.stripes.transform = CGAffineTransform(translationX: 1, y: 0)
             }
-        case .zero: return await switched("zero-new-buffers", context)
-        case .whole: return await switched("whole-programs", context)
         case .wfi:
             GlassProbe.post("fetch-barrier-wfi")
             let round = await GlassRound.run(context, lines: true)
@@ -112,13 +107,6 @@ struct UIGlassABTest: HWTest {
             await GlassDirt.render(context)
             return await GlassRound.run(context, lines: true)
         }
-    }
-
-    static func switched(_ name: String, _ context: TestContext) async -> GlassRound {
-        GlassProbe.post(name + "-on")
-        let round = await GlassRound.run(context, lines: true)
-        GlassProbe.post(name + "-off")
-        return round
     }
 }
 

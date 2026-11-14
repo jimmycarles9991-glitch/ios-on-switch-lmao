@@ -121,6 +121,144 @@ protected:
     }
 };
 
+// A state made while the kernel had no control memory for the handle tables: the draw that meets it binds its argument
+// reads again, and draws once they are bound; every draw that meets them still missing binds them afresh
+class DeviceArgumentsWithoutMemory : public harness::DeviceTest {
+protected:
+    raw::Texture target;
+
+    void SetUp() override
+    {
+        DeviceTest::SetUp();
+        ASSERT_TRUE(dev.createTexture(64, 64, kRGBA8, target));
+    }
+
+    // `reads`: a state reading argument buffers (its root table and ExecutionStatus words), else one reading none
+    raw::Pipeline *made(bool reads = true)
+    {
+        raw::RuntimeRecord r;
+        r.keyString = "samples=1 c0=70 ds=0/0 ";
+        for (raw::CapturedProgram &p : r.programs) {
+            p.image.assign(80 + 64, 0);
+            p.gprs = 8;
+            p.cbufTypes = {raw::CbufRoot, raw::CbufSet};
+        }
+        r.pipeline.keyHash = reads ? 0xad : 0xaf;
+        if (reads) {
+            r.pipeline.rootTableWord[1] = 17;
+            r.pipeline.statusWord[1] = 19;
+            r.pipeline.pushMask = 0xF << 16;
+        }
+        r.blob = {0x1a00, 0x1111};
+        std::string why;
+        raw::Pipeline *made = dev.addRecord(r, false, why);
+        EXPECT_NE(made, nullptr) << why;
+        return made;
+    }
+
+    std::string draw(raw::Pipeline *state)
+    {
+        raw::CommandBuffer *cb = dev.begin();
+        if (!cb)
+            return "no command buffer";
+        raw::PassDesc pass;
+        pass.color[0].texture = &target;
+        pass.count = 1;
+        raw::RenderEncoder *e = cb->render(pass);
+        if (!e) {
+            cb->abandon();
+            return "no pass";
+        }
+        e->setPipeline(state);
+        const char *why = nullptr;
+        const bool ok = e->draw(kTriangle, 0, 3, 1, 0, &why);
+        e->end();
+        uint32_t seqno = 0;
+        if (!ok || !cb->commit(seqno)) {
+            cb->abandon();
+            return why ? why : "not committed";
+        }
+        return "";
+    }
+};
+
+TEST_F(DeviceArgumentsWithoutMemory, TheDrawThatMeetsAStateWithoutItsTablesBindsThem)
+{
+    kernel_model::model.refuseControl = true;
+    raw::Pipeline *pl = made();
+    ASSERT_NE(pl, nullptr);
+    EXPECT_TRUE(pl->heapMissing);
+    kernel_model::model.refuseControl = false;
+    EXPECT_EQ(draw(pl), "");
+    EXPECT_FALSE(pl->heapMissing);
+    const uint64_t root = uint64_t(pl->push[17]) << 32 | pl->push[16];
+    EXPECT_EQ(dev.vaOwner(root).rfind("the argument buffers' root table", 0), 0u) << dev.vaOwner(root);
+    EXPECT_EQ(pl->pushMask & 0xF0000u, 0xF0000u);
+}
+
+// A kernel placed while the kernel had no control memory for the handle tables: the dispatch that meets it binds them
+// afresh
+TEST_F(DeviceArgumentsWithoutMemory, TheDispatchThatMeetsAKernelWithoutItsTablesBindsThem)
+{
+    ASSERT_EQ(draw(made(false)), "") << "the command buffers' own control memory, made before the refusals";
+    raw::ComputeRecord r;
+    r.code.assign(64, 0);
+    r.keyString = "argument kernel without memory";
+    r.kernel.keyHash = 0xce;
+    r.kernel.rootTableWord = 9;
+    r.kernel.statusWord = 11;
+    r.cbufs = 1;
+    r.cbufType[0] = raw::CbufRoot;
+    kernel_model::model.refuseControl = true;
+    const raw::ComputeState *k = raw::placeCompute(dev, r);
+    ASSERT_NE(k, nullptr);
+    EXPECT_TRUE(k->heapMissing);
+    const auto dispatch = [&] {
+        raw::CommandBuffer *cb = dev.begin();
+        if (!cb)
+            return std::string("no command buffer");
+        cb->internalCompletion();
+        std::string failed;
+        {
+            raw::ComputeEncoder e(*cb, dev);
+            e.setState(k);
+            const uint32_t groups[3] = {1, 1, 1}, threads[3] = {1, 1, 1};
+            const char *why = nullptr;
+            if (!e.dispatch(groups, threads, &why))
+                failed = why ? why : "?";
+            e.end();
+        }
+        uint32_t seqno = 0;
+        if (!failed.empty() || !cb->commit(seqno)) {
+            cb->abandon();
+            return failed.empty() ? std::string("not committed") : failed;
+        }
+        return std::string();
+    };
+    const unsigned atPlacement = kernel_model::model.controlAllocs;
+    EXPECT_EQ(dispatch(), "no memory for the tables a kernel reads argument buffers through");
+    EXPECT_EQ(kernel_model::model.controlAllocs - atPlacement, 1u);
+    kernel_model::model.refuseControl = false;
+    EXPECT_EQ(dispatch(), "");
+    EXPECT_FALSE(k->heapMissing);
+    EXPECT_EQ(uint64_t(k->argumentPush[9]) << 32 | k->argumentPush[8], raw::DeviceHarness::tables(dev).rootTableVa());
+}
+
+// Every draw that meets the missing tables binds them afresh: no count, no latch
+TEST_F(DeviceArgumentsWithoutMemory, EveryDrawThatMeetsMissingTablesBindsThemAfresh)
+{
+    ASSERT_EQ(draw(made(false)), "") << "the command buffers' own control memory, made before the refusals";
+    kernel_model::model.refuseControl = true;
+    raw::Pipeline *pl = made();
+    ASSERT_NE(pl, nullptr);
+    const unsigned atCreation = kernel_model::model.controlAllocs;
+    for (int i = 0; i < 6; ++i)
+        EXPECT_EQ(draw(pl), "no memory for the tables a state reads argument buffers through") << i;
+    EXPECT_EQ(kernel_model::model.controlAllocs - atCreation, 6u);
+    kernel_model::model.refuseControl = false;
+    EXPECT_EQ(draw(pl), "");
+}
+
 TEST_F(DeviceArguments, AStatesAddressWordsAreTheDevicesRootTableAndStatus)
 {
     ASSERT_NE(pl->heapSet, nullptr);

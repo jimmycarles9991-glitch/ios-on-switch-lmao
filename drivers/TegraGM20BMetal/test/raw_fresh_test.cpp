@@ -124,6 +124,19 @@ TEST(RawFresh, ATexelOfThreeWordsHasNoFill)
     EXPECT_FALSE(raw::copyFillOf(three, 12, fill));
 }
 
+// A pass that sets no renderTargetWidth or renderTargetHeight renders over its smallest attachment whole: a new target it
+// clears and stores needs no fill first
+TEST(RawFresh, ARenderAreaNotSetIsTheSmallestAttachmentsWhole)
+{
+    EXPECT_EQ(raw::renderAreaSide(0, 640), 640u);
+    EXPECT_EQ(raw::renderAreaSide(50, 640), 50u);
+    EXPECT_EQ(raw::renderAreaSide(800, 640), 640u);
+    EXPECT_TRUE(raw::firstPassWritesAll(1280, 720, 1, 1, true, true, false, raw::renderAreaSide(0, 1280),
+                                        raw::renderAreaSide(0, 720)));
+    EXPECT_FALSE(raw::firstPassWritesAll(1280, 720, 1, 1, true, true, false, raw::renderAreaSide(0, 1280),
+                                         raw::renderAreaSide(0, 360)));
+}
+
 // Core Animation's backdrop capture: a 640 x 64 texture cleared over a 640 x 50 render area (the hard edge effect's trace,
 // x1-edgeline/cat/hard6.txt), which Metal's clear reaches to 64 rows
 TEST(RawFresh, AFirstClearReachingWholeTilesWritesEverything)

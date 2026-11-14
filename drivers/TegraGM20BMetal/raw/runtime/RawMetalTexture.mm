@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MIT
 #import "RawMetalInternal.h"
+#import "RawMetalFresh.h"
 #import "RawMetalMultisample.h"
 #include "raw_texture_cpu_range.h"
 
@@ -61,7 +62,8 @@ private:
 // then, so a CPU lock of a surface the GPU never writes invalidates nothing.
 void declareGpuWrites(RMTexture *t)
 {
-    if (!t->_surface || t->_gpuWrites.exchange(true))
+    // every pass over a surface target asks: only the first may exchange
+    if (!t->_surface || t->_gpuWrites.load(std::memory_order_acquire) || t->_gpuWrites.exchange(true))
         return;
     if (gRM && gRM->raw && gRM->raw->surfaceGpuWrites(IOSurfaceGetID(t->_surface)))
         return;
@@ -130,7 +132,7 @@ void traceSurfaceImage(RMTexture *t, const char *what, uint32_t seed)
         if (_twin)
             return _twin;
     }
-    id<MTLDevice> m2v = RM_M2V("a texture's twin");
+    id<MTLDevice> m2v = RM_M2V(NeedTextureTwin);
     id made = nil;  // outside this object's lock (twinPublish)
     const char *why = "m2v made none";
     {
@@ -421,6 +423,7 @@ void traceSurfaceImage(RMTexture *t, const char *what, uint32_t seed)
 #endif
     if (_surfaceWrites)
         noteSurfaceWrite(_surfaceWrites);
+    freshBeforeTransfer(self);
     if (transferTexture(self, r, level, slice, const_cast<void *>(bytes), row, image, true))
         return;
     if (_rawOk && _raw.blockW * _raw.blockH > 1 && _raw.blockLinear) {
@@ -481,6 +484,7 @@ void traceSurfaceImage(RMTexture *t, const char *what, uint32_t seed)
 {
     if (!r.size.width || !r.size.height || !r.size.depth)
         return;
+    freshBeforeTransfer(self);
     if (transferTexture(self, r, level, slice, bytes, row, image, false))
         return;
     if (_rawOk && _raw.blockW * _raw.blockH > 1 && _raw.blockLinear) {
@@ -597,7 +601,6 @@ static int viewHeaderType(MTLTextureType type)
     v->_viewLevels = levels;
     v->_viewSlices = slices;
     const int header = viewHeaderType(type);
-    rmTexturePlain(self);
     if (_rawOk && header >= 0 && raw::formatInfo(uint32_t(format)))
         v->_rawOk = gRM->raw->createPartView(_raw, uint32_t(format), uint32_t(header), uint32_t(levels.location),
                                              uint32_t(levels.length), uint32_t(slices.location),
@@ -641,7 +644,6 @@ static int viewHeaderType(MTLTextureType type)
     v->_descriptor.pixelFormat = format;
     v->_kind = RMTextureView;
     v->_parent = self;
-    rmTexturePlain(self);
     if (_rawOk && !_raw.memoryless && raw::formatInfo(uint32_t(format)))
         v->_rawOk = gRM->raw->createView(_raw, uint32_t(format), v->_raw);
     if (!v->_rawOk)

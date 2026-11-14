@@ -30,13 +30,16 @@ kernel_headers()
 
 # SwitchThermal: fan curve, CPU operating point; SwitchPerfGovernor: the CPU's on-demand governor (perfcontrol callouts);
 # SwitchEMC: the EMC clock on demand (ACTMON); SwitchSensors: SOC_THERM and thermalmonitord's HID temperature sensors
-# (drivers/SwitchPower/CONTRACT.md); SwitchSocTherm: SOC_THERM's die groups and their threshold interrupt.
+# (drivers/SwitchPower/CONTRACT.md); SwitchSocTherm: SOC_THERM's die groups and their threshold interrupt, THERMTRIP and
+# L4T's hardware throttle.
 kernel_driver(
     name = "SwitchThermal",
     srcs = [
         "SwitchThermal.cpp",
         "SwitchEMC.cpp",
         "SwitchPerfGovernor.cpp",
+        "SwitchPerfGovernorLimits.cpp",
+        "SwitchPerfGovernorLine.cpp",
         "SwitchPowerStats.cpp",
         "SwitchSensors.cpp",
         "SwitchSocTherm.cpp",
@@ -61,6 +64,7 @@ kernel_driver(
         "kits/SwitchIdle",
         "kits/SwitchMMIO",
         "kits/SwitchRefusal",
+        "kits/SwitchSysctl",
     ],
 )
 

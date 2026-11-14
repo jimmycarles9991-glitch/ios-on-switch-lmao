@@ -46,7 +46,8 @@ void environment()
 }
 
 // The sample: every corpus state linking functions, a few of each other kind, a stride through the rest, a RenderBox
-// state's cubic and test-class variants as the device asked for them, multisampled VectorKit ground states, kernels at
+// state's cubic and test-class variants as the device asked for them, the written-format variants the corpus names, Core
+// Animation states into b3a8 drawn in its two planes and one amplified, multisampled VectorKit ground states, kernels at
 // an edge of their grid, Core Animation states that may fetch their attachment over a depth attachment and multisampled
 // (their storage forms), and a state of the function the build's libraries refuse (SWITCH_REFUSED_FRAGMENT_FUNCTION).
 // Each kind is drawn from lines both crawls' libraries hold, but for the private linked functions, which only iOS 27's
@@ -104,6 +105,14 @@ std::vector<std::string> sample()
             l.find("ds=260/260") != std::string::npos) {
             take("cubic", l + " | cubic s0:0000n t0:80", 1);
             take("tests", l + " | tests=3", 1);
+        }
+        if (l[0] == 'R' && l.find(" | wtex=") != std::string::npos)
+            take("written", l, 2);
+        if (l[0] == 'R' && l.find(" c0=550:") != std::string::npos && l.find("QuartzCore") != std::string::npos) {
+            take("two planes", l + " | xr2p", 2);
+            const std::string amplified =
+                std::regex_replace(l, std::regex(" \\| v "), " amp=2 | v ", std::regex_constants::format_first_only);
+            take("amplified", amplified, 1);
         }
     }
     return out;
@@ -225,8 +234,11 @@ TEST(CompilerCompileOnly, ItsRecordsAreTheDevicesByteForByte)
         covered["render"]++;
         covered["constexpr samplers"] += !record.samplers.empty();
         covered["storage form"] += (record.pipeline.flags & raw::PipelineStorageMetadata) != 0;
-        covered["cubic"] += !r.cubic.empty();
-        covered["test class"] += r.fragmentTests != 0;
+        covered["cubic"] += !r.variant.cubic.empty();
+        covered["test class"] += r.variant.fragmentTests != 0;
+        covered["two planes"] += r.variant.twoPlane;
+        covered["written"] += !r.variant.written.empty();
+        covered["amplified"] += r.fields.amplification > 1;
         covered["multisampled"] += r.fields.samples > 1;
         covered["specialized"] += std::any_of(r.stages.begin(), r.stages.end(), [](const raw::RequestStage &s) {
             return !s.constants.empty();
@@ -235,8 +247,9 @@ TEST(CompilerCompileOnly, ItsRecordsAreTheDevicesByteForByte)
             return s.tag == "fp" || s.tag == "vp";
         });
     }
-    for (const char *kind : {"render", "constexpr samplers", "storage form", "cubic", "test class", "multisampled",
-                             "specialized", "kernel", "kernel with textures and samplers", "region kernel"})
+    for (const char *kind :
+         {"render", "constexpr samplers", "storage form", "cubic", "test class", "two planes", "written",
+          "multisampled", "specialized", "kernel", "kernel with textures and samplers", "region kernel"})
         EXPECT_GT(covered[kind], 0u) << "the sample made no " << kind << " record";
 #if SWITCH_LIBRARIES_LINK_PRIVATE_FUNCTIONS
     EXPECT_GT(covered["private linked"], 0u) << "the sample made no private linked record";

@@ -18,7 +18,7 @@ struct StateSegmentsPathTest: HWTest {
     let id = "gpu.path.state_segments"
     let name = "Pipeline binds run GPU-resident state segments, and a held one is not bound again"
     var subsystem: Subsystem { .metal }
-    static let frames = 8, width = 16, height = 16, switches = 128, batches = 4, perBatch = 6
+    static let frames = 8, width = 16, height = 16, switches = 300, batches = 4, perBatch = 6
 
     static func opaque(_ frame: Int) -> [UInt8] { [UInt8(10 + frame), 40, UInt8(100 - frame), 255] }
     static let added: [UInt8] = [20, 30, 40, 0]
@@ -103,6 +103,7 @@ struct StateSegmentsPathTest: HWTest {
         async throws -> [String]
     {
         var encodeUs = [0.0, 0.0], gpuUs = [0.0, 0.0], execUs = [0.0, 0.0], encodes = [0, 0], pushes = [0, 0]
+        var copies = [0, 0]
         var images: [[UInt8]] = [[], []]
         for batch in 0..<Self.batches {
             let arm = batch % 2
@@ -132,6 +133,7 @@ struct StateSegmentsPathTest: HWTest {
             encodes[arm] += (after["encodes"] ?? 0) - (before["encodes"] ?? 0)
             execUs[arm] += Double((after["exec_us"] ?? 0) - (before["exec_us"] ?? 0))
             pushes[arm] += (after["exec_pushes"] ?? 0) - (before["exec_pushes"] ?? 0)
+            copies[arm] += (after["state_segment_copies"] ?? 0) - (before["state_segment_copies"] ?? 0)
             gpuUs[arm] += buffers.map { max(0, $0.gpuEndTime - $0.gpuStartTime) * 1e6 }.reduce(0, +)
             if images[arm].isEmpty, let target { images[arm] = try await gpu.read(target, bytesPerPixel: 4) }
         }
@@ -151,11 +153,14 @@ struct StateSegmentsPathTest: HWTest {
         metrics.set(
             "submit_ns_per_extra_push",
             extraPushes > 0 ? String(format: "%.0f", (perCb(execUs, 1) - perCb(execUs, 0)) * 1000 / extraPushes) : "-")
+        metrics.set("segment_copied_binds", copies[1])
         metrics.set("inline_gpu_us", String(format: "%.0f", gpuUs[0] / buffers))
         metrics.set("segment_gpu_us", String(format: "%.0f", gpuUs[1] / buffers))
         let differ = Self.wrong(images[1], images[0])
         metrics.set("arms_differ_bytes", differ)
-        return differ == 0 ? [] : ["\(differ) bytes differ between the inline and the segment binds"]
+        var failures = differ == 0 ? [] : ["\(differ) bytes differ between the inline and the segment binds"]
+        if copies[1] != 0 { failures.append("\(copies[1]) binds copied into the push ring in the segment arm") }
+        return failures
     }
 
     static func wrong(_ got: [UInt8], _ want: [UInt8]) -> Int {

@@ -7,8 +7,9 @@
 #include <vector>
 
 namespace {
-constexpr uint32_t kSyncpt = 170;
+constexpr uint32_t kSyncpt = 170, kBridgeSyncpt = 190;
 std::vector<switch_host1x_fence *> gRetirements;
+int gBridgesLive, gBridgesSubmitted;
 
 int nvencStatus(const switch_gpu_backing_token *token)
 {
@@ -122,6 +123,50 @@ int switch_host1x_fence_add(switch_host1x_fence *fence, uint32_t)
 }
 }
 
+// The GPU-to-host1x bridge (SwitchGpuBridge.h, its own test in TegraGM20B/test): covers the tokens it was given, and
+// increments kBridgeSyncpt to its threshold once they have all completed.
+struct switch_gpu_bridge {
+    std::vector<switch_gpu_backing_token> tokens;
+    uint32_t threshold;
+};
+
+extern "C" {
+int switch_gpu_bridge_submit(const switch_gpu_backing_token *tokens, uint32_t count, switch_gpu_bridge **bridge)
+{
+    *bridge = new switch_gpu_bridge{{tokens, tokens + count}, 1000u + static_cast<uint32_t>(gBridgesSubmitted++)};
+    gBridgesLive++;
+    return 0;
+}
+
+int switch_gpu_bridge_wait_room(void)
+{
+    return 0;
+}
+
+int switch_gpu_bridge_covers(const switch_gpu_bridge *bridge, const switch_gpu_backing_token *token)
+{
+    for (const auto &held : bridge->tokens)
+        if (held.engine == token->engine && held.queue == token->queue && held.value == token->value)
+            return 1;
+    return 0;
+}
+
+void switch_gpu_bridge_syncpoint(const switch_gpu_bridge *bridge, uint32_t *syncpoint, uint32_t *threshold)
+{
+    *syncpoint = kBridgeSyncpt;
+    *threshold = bridge->threshold;
+}
+
+void switch_gpu_bridge_release(switch_gpu_bridge **bridge)
+{
+    if (!*bridge)
+        return;
+    delete *bridge;
+    *bridge = nullptr;
+    gBridgesLive--;
+}
+}
+
 switch_gpu_backing_token tegra_nvenc_token(uint32_t fence)
 {
     return {fence, 1, SWITCH_GPU_ENGINE_NVENC, kSyncpt};
@@ -193,4 +238,49 @@ TEST_F(NVENCDirect, APendingDecodeIsWaitedForAndTheReadStillCommits)
     const auto waitsFor = writerWaits(picture.native);
     ASSERT_EQ(waitsFor.size(), 1u);
     EXPECT_EQ(waitsFor[0].engine, uint32_t(SWITCH_GPU_ENGINE_NVENC));
+}
+
+// A picture a GM20B job still writes (a GPU-rendered frame) is read in place behind the GPU-to-host1x bridge: prepare's
+// pass submits the bridge for the writer, the job's stream waits on the bridge's syncpoint with the writer as its
+// input's producer, and the bridge goes with the job's fence.
+TEST_F(NVENCDirect, AGpuWriterIsOrderedOnTheBridge)
+{
+    Picture picture;
+    const auto render = token(9, 21, SWITCH_GPU_ENGINE_GM20B);
+    ASSERT_EQ(publish(picture.native, SWITCH_GPU_BACKING_WRITE, render), 0);
+    auto d = picture.direct();
+    ASSERT_EQ(bridgeGpuWriters(&d), 0);
+    ASSERT_NE(d.bridge, nullptr);
+    TegraNVENCAfter waits[TEGRA_NVENC_ORDER_WAITS] = {};
+    uint32_t count = 0;
+    ASSERT_EQ(begin(&d, 44, waits, &count), 0);
+    ASSERT_EQ(count, 1u);
+    EXPECT_EQ(waits[0].syncpt, kBridgeSyncpt);
+    EXPECT_EQ(waits[0].threshold, d.bridge->threshold);
+    EXPECT_EQ(waits[0].producer.engine, uint32_t(SWITCH_GPU_ENGINE_GM20B)) << "a failed render fails the frame";
+    runBetweenBeginAndEnd();
+    end(&d, 44, true);
+    EXPECT_EQ(d.bridge, nullptr);
+    EXPECT_EQ(gBridgesLive, 1) << "held until NVENC's job retires";
+    ASSERT_EQ(gRetirements.size(), 1u);
+    gRetirements[0]->signaled(gRetirements[0], 0);
+    gRetirements.clear();
+    EXPECT_EQ(gBridgesLive, 0);
+    complete(render);
+}
+
+// A GPU writer that came after prepare's pass is not covered: the picture goes through VIC.
+TEST_F(NVENCDirect, AGpuWriterTheBridgeDoesNotCoverSendsThePictureThroughVIC)
+{
+    Picture picture;
+    auto d = picture.direct();
+    ASSERT_EQ(bridgeGpuWriters(&d), 0);
+    EXPECT_EQ(d.bridge, nullptr) << "nothing to bridge";
+    const auto render = token(9, 22, SWITCH_GPU_ENGINE_GM20B);
+    ASSERT_EQ(publish(picture.native, SWITCH_GPU_BACKING_WRITE, render), 0);
+    TegraNVENCAfter waits[TEGRA_NVENC_ORDER_WAITS] = {};
+    uint32_t count = 0;
+    EXPECT_EQ(begin(&d, 45, waits, &count), -11);
+    EXPECT_TRUE(writerWaits(picture.logical).empty()) << "the transaction was given up";
+    complete(render);
 }

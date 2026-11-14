@@ -1,0 +1,24 @@
+# What the pinned nvkcl.* were generated from by mesa_clc + vtn_bindgen2, which this build does not build: <tool>
+# <sha256>  <path>, paths in third_party/mesa or build/<path> for a file the build generates.
+# //third_party/mesa/bazel/pinned:inputs_nvk_test fails when any of them differs.
+mesa_clc e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  src/compiler/libcl/stddef.h
+mesa_clc 6d15a2272b942fde922c35b4369dde168410fa8f0b3a40d56429fe202fba205d  src/nouveau/vulkan/cl/nvk_copy_indirect.cl
+mesa_clc e8f16b9384018e5445832480b8213aae5fb543753c8a17a2850c96c28142297e  src/nouveau/headers/nv_push.h
+mesa_clc 89500829f9c2ae9dd64624124d58ea991700387b692e7fbd249fc537be91e49b  src/nouveau/vulkan/cl/nvk_query.cl
+mesa_clc d345a6cbd8350cac0c48069449f8cc1c22a78694c72e4fc8db45296a7fed90fd  src/compiler/libcl/stdint.h
+mesa_clc e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  src/compiler/libcl/stdbool.h
+mesa_clc e62e12d80d2e1e583fde036a3d23a986d0c27ad9cdd5546705d0ca7ea096d959  src/compiler/libcl/stdio.h
+mesa_clc 5ec30877b88ecac7b85995c1338c627ee768e29ab92478676d3f6df3c9404f2a  src/compiler/libcl/string.h
+mesa_clc f4e0bc228e7a871352463c23efc20263423b093aef0aa90e2413edd0a8a80d9f  src/nouveau/headers/drf.h
+mesa_clc e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  src/compiler/libcl/stdalign.h
+mesa_clc d7c9f4cfa10b989b85dbadda3da6c73dc25c258fedf13c7eb6d840c3b54f8386  src/nouveau/headers/nvidia/classes/cl90b5.h
+mesa_clc 85dced14fe9802e67efbf4f122aa0f3c7ec40a8d89cf816e971f1274ef96f2a7  src/compiler/libcl/libcl.h
+mesa_clc b6be17c9beccb86ea8b0c759b0c8129d6ee79334e73991d568d24baa09593aff  src/nouveau/headers/nvtypes.h
+mesa_clc e271b4976c6344a3e4c7393498efd4b362a1293ca21ebb01303464f6d0d7906b  src/compiler/libcl/stdlib.h
+mesa_clc 7871deb2e841be41f7e5d2c1ddba274b81721e77c9addfc9d998b3d0323dde0e  src/nouveau/vulkan/cl/nvk_copy_indirect.h
+mesa_clc b990d3acb221dd1c60de5b600bfa426bc44dd8358645afedfa4cd619e1e9897c  src/nouveau/headers/nvidia/classes/cl906f.h
+mesa_clc 67f545e6288dfcfd0016164c86cf9c8807d1bd4373dbd5039a2f08caa45e5ffd  src/compiler/libcl/libcl_vk.h
+mesa_clc ef0469619e8383aab2c4f03f16f72dceb991a28ba608faf13ee782e4ca504816  src/compiler/libcl/assert.h
+mesa_clc 4ebc9a6d62b5be17b0fa5a51230541d867d7f6e304aaa48b105799b37d9dbb7b  src/nouveau/vulkan/cl/nvk_query.h
+mesa_clc f965ee46d99dcd390d49c86aa9df63bc62ad706ab13d8e3e2ae1b4db57afb238  src/util/macros.h
+mesa_clc 74e300bd7093388c0a83ee6fbb4a3964998e4e32233f9dcdd0a6d6ded352fb41  build/src/nouveau/headers/nv_push_cl90b5.h

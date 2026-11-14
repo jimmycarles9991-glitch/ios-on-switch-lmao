@@ -19,9 +19,19 @@ void initializeScanout()
     if (!primary || !doubleBuffer || !probeTables.memory || !SWITCH_PORTRAIT_NATIVE)
         return;
     if (otherWindowEnabled()) {
-        IOLog("SwitchDisplay: scanout domain refused: firmware left another window active\n");
+#if SWITCH_FRAME_TIMELINE
+        IOLog("SwitchDisplay: firmware left window B or C on: turned off, the scanout domain attaches once both read "
+              "off\n");
+#endif
+        scanoutAttachWaits = true;
+        stopFirmwareWindows();
         return;
     }
+    attachScanoutDomain();
+}
+
+void attachScanoutDomain()
+{
     bool ready = probeDomain.init(probeTables.va, probeTables.pa, kProbeTables);
     for (unsigned i = 0; ready && i < ring.buffers; ++i)
         ready = probeDomain.identity(surfaceAddress(static_cast<int>(i)), kNativeBlockBytes, false);

@@ -22,4 +22,6 @@ uint32_t tgm_readback_take(const TegraScanoutCopy *copy, uint64_t source, int32_
 			   uint64_t target, tgm_present_read (&reads)[TGM_PRESENT_READS]);
 void tgm_readback_refused();
 void tgm_readback_done(void *display, int status);
+// The display showed a frame no offer carried: the next present has no frame before it to re-read.
+void tgm_readback_bypassed();
 #endif

@@ -60,6 +60,21 @@ void tgm_ramfc_write(u32 chid, u32 offset, u32 value)
 	nvkm_done(inst);
 }
 
+#if TGM_STATS
+u32 tgm_ramfc_read(u32 chid, u32 offset)
+{
+	struct nvkm_gpuobj *inst = chan_inst(chid);
+	u32 value = 0;
+
+	if (!inst)
+		return 0;
+	nvkm_kmap(inst);
+	value = nvkm_ro32(inst, offset);
+	nvkm_done(inst);
+	return value;
+}
+#endif
+
 /* RAMFC SEMAPHOREA..D and SYNCPOINTA/B under one map (each map flushes the L2) */
 static int ramfc_read_waits(u32 chid, u32 sem[4], u32 sync[2])
 {

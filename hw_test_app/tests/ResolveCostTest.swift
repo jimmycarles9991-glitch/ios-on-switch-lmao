@@ -48,6 +48,8 @@ struct ResolveCostTest: HWTest {
     func run(_ context: TestContext) async throws -> Outcome {
         let gpu = try GPU.make()
         guard gpu.device.supportsTextureSampleCount(4) else { return .fail("4x MSAA unsupported") }
+        let facade = RawFacade.kind(of: gpu.device) == "raw"
+        var posterJudged = false
         var metrics = Metrics()
         var checks: [(String, Bool)] = []
         for variant in Self.variants {
@@ -69,14 +71,19 @@ struct ResolveCostTest: HWTest {
             metrics.set("\(variant.label)_clock", with.clocks.union(without.clocks).sorted().joined(separator: ","))
             metrics.set("\(variant.label)_paths", with.paths.union(without.paths).sorted().joined(separator: ","))
             checks.append(("\(variant.label) resolved the clear colour", texel == variant.texel))
+            if facade {
+                let paths = with.paths.union(without.paths).sorted().joined(separator: ",")
+                checks.append(("\(variant.label) on the raw path (\(paths))", raw))
+            }
             if variant.label == "rgba8_4x_memoryless" && raw && gpuClocked {
+                posterJudged = true
                 checks.append(
                     ("the poster's 720x1280 4x resolve within \(Self.budgetMs) ms", resolveMs <= Self.budgetMs))
             }
         }
         try await ResolveArms.measure(gpu, into: &metrics)
-        if checks.count == Self.variants.count && checks.allSatisfy(\.1) {
-            return .skip("the poster's form did not run on the raw path with GPU stamps", metrics)
+        if !posterJudged && checks.allSatisfy(\.1) {
+            return .skip("the poster's form ran with no GPU stamps", metrics)
         }
         return .judged(checks, metrics, proof: gpu.proof)
     }

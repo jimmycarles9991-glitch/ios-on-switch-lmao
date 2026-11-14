@@ -321,6 +321,28 @@ TEST_F(Views, LocksThatCouldShowTexelsAreRefused)
 	tgm_coherency_put(s.coh);
 }
 
+// IOSurfaceClient maps the surface at its creation or never (TegraGM20BViews.cpp lock): a lock through a client with no
+// mapping has no CPU address to read texels at, so it moves nothing, holds nothing and leaves another task's view as it
+// was; a write lock among them writes nothing back
+TEST_F(Views, ALockThroughAClientThatMapsNothingMovesNothing)
+{
+	Tiled s(0xa0a00000, 90);
+	gMoves.clear();
+	EXPECT_EQ(tegra_gm20b_iosurface_view(client(4), kLock, s.id, 0), 0);
+	EXPECT_TRUE(gMoves.empty());
+	EXPECT_TRUE(gRefusals.empty());
+	map(1, s.id, 0xd0000);
+	ASSERT_EQ(tegra_gm20b_iosurface_view(client(1), kLock, s.id, kReadOnly), 0);
+	EXPECT_EQ(gMoves.size(), 1u);
+	EXPECT_EQ(tegra_gm20b_iosurface_view(client(4), kUnlock, s.id, 0), 0);
+	EXPECT_TRUE(s.rowsAre(s.seen(task(1), 0xd0000), s.rows));
+	ASSERT_EQ(tegra_gm20b_iosurface_view(client(1), kUnlock, s.id, kReadOnly), 0);
+	EXPECT_EQ(gMoves.size(), 1u);
+	EXPECT_EQ((gViews.mapped[{task(1), 0xd0000}]), ViewModel::surface(s.id));
+	EXPECT_TRUE(gRefusals.empty());
+	tgm_coherency_put(s.coh);
+}
+
 // A mapping that cannot be given its surface back keeps the scratch, so that scratch is never handed to another surface
 TEST_F(Views, AScratchATaskStillMapsIsNeverReused)
 {

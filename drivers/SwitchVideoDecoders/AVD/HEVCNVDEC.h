@@ -31,9 +31,20 @@ const HEVCSPS *hevc_decoder_sps(const HEVCDecoder *decoder);
 int hevc_decoder_configure(HEVCDecoder *decoder);
 // Whether Main 10 pictures are decoded (TEGRA_NVDEC_HEVC_MAIN10); 8-bit only when false.
 void hevc_decoder_allow_10bit(HEVCDecoder *decoder, bool allow);
-// Main 10 pictures go out as the 8-bit NV12 NVDEC writes into a display buffer in the same job (disp_output_mode 2: the
-// samples truncated to 8 bits, HW Test decode.display_buffer; Rec.709 only), the references staying 16-bit.
-void hevc_decoder_display_8bit(HEVCDecoder *decoder, bool on);
+// Main 10 pictures go out as the 8-bit NV12 NVDEC writes into a display buffer in the same job, the references staying
+// 16-bit: `mode` 2 (the samples truncated to 8 bits) or 3 (NVDEC's Rec.2020 10 -> 8 bit path), 0 for none.
+void hevc_decoder_display_mode(HEVCDecoder *decoder, uint32_t mode);
+
+// The display buffer for a 10-bit stream into a client that takes 8 bits: mode 2 for Rec.709 (and untagged) SDR, mode
+// 3 for Rec.2020 SDR, which NVDEC writes converted to Rec.709 (nvdec_drv.h "Rec.2020 10 bit -> 8 bit"; mode 3's luma
+// is several codes off the truncation on every boot, HW Test decode.display_buffer, whose mode3_*_max fields name the
+// conversion), so those pictures go out tagged Rec.709. PQ and HLG pictures stay 10-bit for whoever maps their range.
+static inline uint32_t hevc_display_mode_for(uint32_t bitDepth, bool rec2020, bool hdr, bool clientWantsEightBit)
+{
+    if (bitDepth != 10 || hdr || !clientWantsEightBit)
+        return 0;
+    return rec2020 ? 3 : 2;
+}
 #if !defined(SWITCH_DEBUG) || SWITCH_DEBUG
 // HEVCDisplayProbe.h on the session's first Main 10 IDR picture; false until it has run.
 void hevc_decoder_want_display_probe(HEVCDecoder *decoder);

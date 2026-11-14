@@ -110,7 +110,7 @@ int tgm_chan_killed(struct nvif_event *event, void *repv, u32 repc)
 	nvxnu_log("tegra-gm20b: GPU error in %s (channel %u): channel killed, GPU running: %s\n",
 		  chan->owner, chan->chid, report);
 	nvxnu_wake();
-	chan_wake_all_waiters(chan);
+	chan_wake_all_waiters(chan, 0);
 	if (READ_ONCE(chan->fenced))
 		chan->fenced(chan->fenced_arg);
 	return NVIF_EVENT_DROP;
@@ -435,6 +435,8 @@ enum tgm_hang tgm_hang_recover(struct tgm_chan *late, const char *who, u32 seqno
 
 	if (tgm_gpu.stage < 3 || !tgm_iso.deadline)
 		return TGM_HANG_STUCK;
+	if (tgm_owed_recover_locked(late, who, seqno, waited_ns))
+		return TGM_HANG_RECOVERING;
 	resident = tgm_recover_suspects(tgm_gpu.device, suspects, ARRAY_SIZE(suspects));
 	for (n = 0; n < resident; n++)
 		chans[n] = live_by(0, suspects[n]);

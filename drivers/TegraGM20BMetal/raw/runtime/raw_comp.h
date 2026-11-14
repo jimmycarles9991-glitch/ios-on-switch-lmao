@@ -36,6 +36,8 @@ enum : uint32_t {
     kCompKindC64 = 0xe9,   // NV_MMU_PTE_KIND_C64_2CRA
     kCompKindC128 = 0xf5,  // NV_MMU_PTE_KIND_C128_2CR
     kCompKindZeta = 0xce,  // NV_MMU_PTE_KIND_ZF32_X24S8_2CSZV
+    kCompKindZF32 = 0x86,  // NV_MMU_PTE_KIND_ZF32_2CZ
+    kCompKindZ16 = 0x02,   // NV_MMU_PTE_KIND_Z16_2C
 };
 
 // Whether the copy engine reads and writes kind `kind`'s texels through that binding as plain ones. Proven for one-sample
@@ -43,14 +45,31 @@ enum : uint32_t {
 // RGBA16Float at 256x256, 320x180 and 1280x720, 24 repeats, every case exact: rendered tiles, ZBC and other full clears and
 // clear-plus-half-draw tiles read by it; its whole and half-height writes over rendered and ZBC-cleared tiles read by it and
 // the texture unit; copies both ways between a compressed and a plain target. Its rectangles started at the origin, as a
-// shadow's do. Not asked: C128, the multisampled colour kinds and every zeta kind (gpu.x1.ce_compressed_depth's cells).
-// Rule flip pending: a stored one-sample depth/stencil texture (Device::createOwnedZeta) stays on plain zeta memory, as
-// its readback and aspect copies are the copy engine's, until HW Test gpu.raw.stored_depth reads
-// compressed_readback_wrong=0 with compressed_readback_facts comptags=1 (T-v3g's gpu.x1.ce_compressed_depth ran no
-// one-sample compressed round: d32f_1x_compressed_rounds=0).
+// shadow's do. One-sample ZF32_2CZ by gpu.x1.ce_compressed_depth (boot 19 and boot 21, the context as shipped: d32f_1x=0
+// over 16 compressed rounds of shader-test copies both ways). One-sample Z16_2C and ZF32_X24S8_2CSZV (its depth and stencil
+// aspect copies too) ship on unread: gpu.raw.stored_depth's d16_compressed and d32fs8_compressed arms judge them; so does
+// one-sample C128_2CR, which gpu.x1.ce_compressed's RGBA32Float cases judge, and the 2x and 4x colour kinds, whose sample
+// grid the copy engine copies when a stored multisampled target moves to plain memory (gpu.x1.ce_compressed's ms cases).
+// Not asked: the multisampled zeta kinds (which read exact only under anti-alias words no context row writes).
 constexpr bool copyEngineReadsCompressed(uint32_t kind)
 {
-    return kind == kCompKindC32 || kind == kCompKindC64;
+    switch (kind) {
+    case kCompKindC32:
+    case kCompKindC64:
+    case kCompKindC128:
+    case 0xcc:  // C32_MS2_2CRA
+    case 0xe2:  // C32_MS4_2CRA
+    case 0xcd:  // C64_MS2_2CRA
+    case 0xf0:  // C64_MS4_2CRA
+    case 0xf7:  // C128_MS2_2CR
+    case 0xf9:  // C128_MS4_2CR
+    case kCompKindZF32:
+    case kCompKindZ16:
+    case kCompKindZeta:
+        return true;
+    default:
+        return false;
+    }
 }
 
 // The compressible kind of a block-linear colour target of `bpp`-byte texels at `samples` samples, or of the depth/stencil
@@ -89,6 +108,16 @@ inline uint32_t compressedKind(uint32_t bpp, uint32_t zeta, uint32_t samples = 1
     }
 }
 
+// The compressible kind a stored depth/stencil texture of Metal format `zeta` binds (Device::createOwnedZeta), or 0: one
+// sample and one layer, where the copy engine reads that kind as plain texels, as its readback and aspect copies are the
+// copy engine's. Depth32Float: gpu.raw.stored_depth read compressed_readback_wrong=0 with comptags=1 on boot 19 and 21;
+// Depth16Unorm and Depth32Float_Stencil8: its d16_compressed and d32fs8_compressed arms.
+inline uint32_t storedZetaKind(bool compression, uint32_t zeta, uint32_t samples, uint32_t layers)
+{
+    const uint32_t kind = compression && samples == 1 && layers == 1 ? compressedKind(0, zeta) : 0;
+    return copyEngineReadsCompressed(kind) ? kind : 0;
+}
+
 // The kind gm200_mmu_kind demotes a compressible one to: the zeta format's plain kind (raw_zeta.h kZetaFormatInfo), else
 // block-linear colour's
 inline uint32_t demotedKind(uint32_t kind)
@@ -124,22 +153,12 @@ inline uint32_t backingKind(bool compression, bool blockLinear, uint32_t zeta, u
     return (copied || shaderTestCopied) && !copyEngineReadsCompressed(kind) ? 0 : kind;
 }
 
-// A refusal of compressed memory (the BoAlloc's or the VmBind's kern_return_t, kIOReturnNoSpace for no VA) that asking
-// again cannot pass: anything but the pool, the comptags or the VA running short, all of which come back as memory is freed.
-inline bool compLasting(int kr)
+// A refusal of compressed memory (the BoAlloc's or the VmBind's kern_return_t, kIOReturnNoSpace for no VA) for want of
+// memory: the kernel's pool (its floor, or this client's share), the comptags or the VA. Only memory given back changes
+// that answer. Any other refusal is the request's own fault and has never fired (boot 19 and 21 logged none).
+inline bool compShortage(int kr)
 {
-    return kr != kIOReturnNoMemory && kr != kIOReturnNoResources && kr != kIOReturnNoSpace;
-}
-
-constexpr uint64_t kCompRetryCommits = 30, kCompRetryMaxCommits = 600;
-
-// Command buffers from the `refusals`-th refusal of a want to its next ask: half a second of frames, doubling to ten
-inline uint64_t compRetryAfter(uint32_t refusals)
-{
-    uint64_t after = kCompRetryCommits;
-    for (uint32_t i = 1; i < refusals && after < kCompRetryMaxCommits; i++)
-        after *= 2;
-    return std::min(after, kCompRetryMaxCommits);
+    return kr == kIOReturnNoMemory || kr == kIOReturnNoResources || kr == kIOReturnNoSpace;
 }
 
 // A colour clear's SET_COLOR_CLEAR_VALUE words (clearWords) for a target of Metal format `mtl`: one of the boot ZBC table's
@@ -243,37 +262,29 @@ struct CompMem {
     uint32_t views = 0;
 };
 
-struct CompRefusal {
-    CompWant want;
-    uint64_t retryAt = 0;  // the commit count from which it is asked again
-    uint32_t refusals = 0;
-    bool lasting = false;  // never asked again
-};
-
-// Times are Device::commitCount_
 struct CompQueue {
-    std::vector<CompWant> wanted;      // asked for, not made yet
-    std::vector<CompBo> ready;         // made and bound, no backing took it yet
-    std::vector<CompRefusal> refused;  // the kernel's last answer to it was no
+    std::vector<CompWant> wanted;  // asked for, not made yet
+    std::vector<CompBo> ready;     // made and bound, no backing took it yet
+    // refused for a shortage since this process last gave compressed memory back, which alone may change the answer
+    std::vector<CompWant> refused;
     std::vector<std::unique_ptr<CompMem>> mems;
     bool loggedOn = false;
 
-    // Not to be asked for at `now`: asked already or made at least as large, or refused and not due again
-    bool asked(const CompWant &w, uint64_t now) const
+    // Not to be asked for: asked already or made at least as large, or refused for a shortage nothing has eased since
+    bool asked(const CompWant &w) const
     {
         const auto covers = [&](uint64_t bytes, uint32_t kind) {
             return kind == w.kind && bytes >= w.bytes;
         };
-        if (std::any_of(wanted.begin(), wanted.end(),
-                        [&](const CompWant &x) {
-                            return covers(x.bytes, x.kind);
-                        }) ||
-            std::any_of(ready.begin(), ready.end(), [&](const CompBo &b) {
-                return covers(b.bo.bytes, b.kind);
-            }))
-            return true;
-        auto r = find(w);
-        return r != refused.end() && (r->lasting || now < r->retryAt);
+        return std::any_of(wanted.begin(), wanted.end(),
+                           [&](const CompWant &x) {
+                               return covers(x.bytes, x.kind);
+                           }) ||
+               std::any_of(ready.begin(), ready.end(),
+                           [&](const CompBo &b) {
+                               return covers(b.bo.bytes, b.kind);
+                           }) ||
+               std::find(refused.begin(), refused.end(), w) != refused.end();
     }
 
     // The memory new backings of `tag` and `kind` go on: the largest of them; null with none
@@ -296,45 +307,22 @@ struct CompQueue {
         return best;
     }
 
-    // The kernel refused `w` at `now`: true at its first refusal since it was last made
-    bool refuse(const CompWant &w, uint64_t now, bool lasting)
+    // The kernel refused `w`: a shortage's want waits for memory given back; any other is forgotten, its backing plain
+    // and the next want of it a new ask. True: the refusal to log (a shortage's first since memory came back)
+    bool refuse(const CompWant &w, bool shortage)
     {
-        auto r = find(w);
-        const bool first = r == refused.end();
-        if (first)
-            r = refused.insert(refused.end(), CompRefusal{w});
-        r->refusals++;
-        r->retryAt = now + compRetryAfter(r->refusals);
-        r->lasting = r->lasting || lasting;
-        return first;
+        if (!shortage)
+            return true;
+        if (std::find(refused.begin(), refused.end(), w) != refused.end())
+            return false;
+        refused.push_back(w);
+        return true;
     }
 
-    void made(const CompWant &w)
+    // This process gave compressed memory back: the wants refused for a shortage may be asked again
+    void freed()
     {
-        if (auto r = find(w); r != refused.end())
-            refused.erase(r);
-    }
-
-    // Compressed memory went back to the kernel at `now`: every refusal that asking again can pass is due
-    void freed(uint64_t now)
-    {
-        for (CompRefusal &r : refused)
-            r.retryAt = std::min(r.retryAt, now);
-    }
-
-private:
-    std::vector<CompRefusal>::iterator find(const CompWant &w)
-    {
-        return std::find_if(refused.begin(), refused.end(), [&](const CompRefusal &r) {
-            return r.want == w;
-        });
-    }
-
-    std::vector<CompRefusal>::const_iterator find(const CompWant &w) const
-    {
-        return std::find_if(refused.begin(), refused.end(), [&](const CompRefusal &r) {
-            return r.want == w;
-        });
+        refused.clear();
     }
 };
 

@@ -76,6 +76,7 @@ bool gRunning;
 uint32_t gFilterStuck;  // channels whose gather filter stayed on when cleared
 #if SWITCH_HOST1X_STATS
 SwitchHost1xGatherStats gGatherStats;
+static_assert(SwitchHost1xGatherStats::kChannels == TEGRA_HOST1X_CHANNELS);
 #endif
 
 uint32_t channelRead(uint32_t channel, uint32_t reg)

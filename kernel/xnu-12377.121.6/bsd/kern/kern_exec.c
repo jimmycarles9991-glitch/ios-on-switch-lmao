@@ -8979,11 +8979,10 @@ native_switch_rotation_lock_release(proc_t p, user_addr_t scratch, mount_t data_
  * Then the marker. Before cfprefsd runs (launchd's exec). An I/O failure or a plist this cannot edit is logged, and
  * without the marker the next boot tries again. */
 static void
-native_switch_never_dim_release(proc_t p, user_addr_t scratch, mount_t data_mount)
+native_switch_springboard_keys_release(proc_t p, user_addr_t scratch, mount_t data_mount, const char *marker,
+    const char *const *keys, size_t count, const char *what)
 {
-	static const char plist[] = "/private/var/mobile/Library/Preferences/com.apple.springboard.plist",
-	    marker[] = "/private/var/Switch/never-dim-released";
-	static const char *const keys[] = {"SBDisableAutoDim", "SBDontDimOrLockOnAC"};
+	static const char plist[] = "/private/var/mobile/Library/Preferences/com.apple.springboard.plist";
 	static const char *const results[] = {"none there", "removed", "removed with the file", "plist unreadable"};
 	vnode_t vp = NULLVP;
 	if (!vnode_lookup(marker, 0, &vp, vfs_context_current())) {
@@ -8994,7 +8993,7 @@ native_switch_never_dim_release(proc_t p, user_addr_t scratch, mount_t data_moun
 	int length = 0, error = native_switch_read_data_file(p, plist, data_mount, &bytes, &length);
 	size_t edited = (size_t)length;
 	enum switch_prefs_result result = SWITCH_PREFS_UNCHANGED;
-	if (bytes) result = switch_prefs_drop_keys((uint8_t *)bytes, &edited, keys, sizeof(keys) / sizeof(keys[0]));
+	if (bytes) result = switch_prefs_drop_keys((uint8_t *)bytes, &edited, keys, count);
 	if (result == SWITCH_PREFS_DROPPED) {
 		error = native_switch_watchdog_file(p, scratch, plist, bytes, (int)edited, data_mount, 501, 501, 0600);
 	} else if (result == SWITCH_PREFS_EMPTY) {
@@ -9009,7 +9008,26 @@ native_switch_never_dim_release(proc_t p, user_addr_t scratch, mount_t data_moun
 		error = native_switch_mkdir(p, scratch, "/private/var/Switch", 0, 0755);
 		if (!error) error = native_switch_watchdog_file(p, scratch, marker, "", 0, data_mount, 0, 0, 0644);
 	}
-	printf("SwitchRawBoot: never-dim keys of earlier builds: %s (%d)\n", results[result], error);
+	printf("SwitchRawBoot: %s keys of earlier builds: %s (%d)\n", what, results[result], error);
+}
+
+static void
+native_switch_never_dim_release(proc_t p, user_addr_t scratch, mount_t data_mount)
+{
+	static const char *const keys[] = {"SBDisableAutoDim", "SBDontDimOrLockOnAC"};
+	native_switch_springboard_keys_release(p, scratch, data_mount, "/private/var/Switch/never-dim-released", keys,
+	    sizeof(keys) / sizeof(keys[0]), "never-dim");
+}
+
+/* BackBoard's watchdogs on SpringBoard are Apple's: an unresponsive SpringBoard is killed and relaunched, as on an iPad.
+ * The managed plist no longer turns them off; earlier kernels also wrote BKNoWatchdogs into the user's plist, which
+ * comes out of it once the same way. */
+static void
+native_switch_watchdogs_release(proc_t p, user_addr_t scratch, mount_t data_mount)
+{
+	static const char *const keys[] = {"BKNoWatchdogs"};
+	native_switch_springboard_keys_release(p, scratch, data_mount, "/private/var/Switch/watchdogs-released", keys,
+	    sizeof(keys) / sizeof(keys[0]), "watchdog");
 }
 
 /* True Tone starts off, as Settings' switch leaves it: -[CBColorModuleShared CAEnabledPropertyHandler:] saves
@@ -9380,8 +9398,7 @@ native_switch_setup_state(proc_t p, user_addr_t scratch, mount_t data_mount)
  * here: no iPad without a home button has a screen as small as this one's, so the screen type falls back to the iPad
  * mini 6. In orientation 4 that swap turns Vol- into Vol+. With it off, Vol+ (PX6) raises the volume in every
  * interface orientation the Switch rotates to. */
-#define SWITCH_SPRINGBOARD "<key>BKNoWatchdogs</key><true/>" \
-	"<key>FBLaunchWatchdogExceptions</key><dict><key>com.apple.purplebuddy</key><real>100</real></dict>" \
+#define SWITCH_SPRINGBOARD "<key>FBLaunchWatchdogExceptions</key><dict><key>com.apple.purplebuddy</key><real>100</real></dict>" \
 	"<key>MCForceShowCloudConfigurationUI</key><false/><key>SBDisableIdleSleep</key><false/>" \
 	"<key>SBDisableNaturalVolumeButtonArrangement</key><true/>"
 	static const struct {
@@ -9473,6 +9490,7 @@ native_switch_setup_state(proc_t p, user_addr_t scratch, mount_t data_mount)
 		native_switch_portrait_cache(p, scratch, data_mount);
 		native_switch_rotation_lock_release(p, scratch, data_mount);
 		native_switch_never_dim_release(p, scratch, data_mount);
+		native_switch_watchdogs_release(p, scratch, data_mount);
 		native_switch_true_tone_default(p, scratch, data_mount);
 		native_switch_gamut_cache(p, scratch, data_mount);
 		native_switch_identity_cache(p, scratch, data_mount);

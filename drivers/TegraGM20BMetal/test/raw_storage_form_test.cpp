@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: MIT
 #include <gtest/gtest.h>
+#include <string>
+#include "bazel/testing/source_text.h"
 #include <thread>
 #include <vector>
 #include "../raw/runtime/raw_key_tally.h"
@@ -23,11 +25,15 @@ TEST(StorageForm, AnXrTargetMetalCallsCompressedTakesItsStorageView)
     EXPECT_EQ(raw::storageViewMismatch(8, 1, xr), raw::StorageFallback::None);
 }
 
-TEST(StorageForm, MemoryWithCompressionTagsTakesTheBarrierForm)
+// Rule storage.compressed: surface loads and stores go through the binding's kind, so compressed memory takes the storage
+// view; the probe's own false still names the fallback
+TEST(StorageForm, MemoryWithCompressionTagsTakesItsStorageView)
 {
     Attachment backing;
     backing.comptags = true;
-    EXPECT_EQ(raw::storageViewMismatch(8, 1, backing), raw::StorageFallback::Compressed);
+    EXPECT_TRUE(raw::storageReadsCompressed());
+    EXPECT_EQ(raw::storageViewMismatch(8, 1, backing), raw::StorageFallback::None);
+    EXPECT_EQ(raw::storageViewMismatch(8, 1, backing, false), raw::StorageFallback::Compressed);
 }
 
 TEST(StorageForm, AnotherTexelSizeOrSampleCountTakesTheBarrierForm)
@@ -105,6 +111,14 @@ TEST(KeyTally, AFullTableCountsTheRestAsOverflow)
     for (uint64_t key = 1; key <= raw::KeyTally::kSlots + 3; key++)
         tally.note(key);
     EXPECT_EQ(tally.overflow.load(), 3u);
+}
+
+// Rule storage.compressed: a shadow a storage form views, like a memoryless backing it views, takes compressed memory
+TEST(StorageForm, StorageBoundBackingsAndShadowsCompressUnderTheRule)
+{
+    const std::string encoder = switch_ios::test::SourceText("../raw/runtime/raw_gpu.cpp");
+    EXPECT_EQ(switch_ios::test::Count(encoder, "dev_->storageCompressedOk() || !(pass.storageMask >> j & 1)"), 2u)
+        << "the shadow's backing and the memoryless one's";
 }
 
 }  // namespace

@@ -32,6 +32,12 @@ void switch_car_rmw(uint32_t offset, uint32_t clear, uint32_t set);
 // A CAR handshake with no interrupt (a PLL's lock bit): switch_mmio_wait32 on the CAR.
 bool switch_car_wait(uint32_t offset, uint32_t mask, uint32_t value, uint32_t timeout_us);
 
+// The fuse cache readable from here on: the FUSE clock on (CLK_ENB_H_SET bit 7) and MISC_CLK_ENB's CFG_ALL_VISIBLE
+// (bit 28) set. MISC_CLK_ENB has no set/clear form (TRM 5.2.13), so the kit is its one writer, under its lock. Nothing
+// turns either off again: every fuse reader (DFLL speedo, SOC_THERM calibration, GPU fuses, the device key) relies on
+// both staying on, and one reader putting them back would zero another's reads.
+void switch_car_fuse_readable(void);
+
 #ifdef __cplusplus
 }
 #endif

@@ -3,7 +3,7 @@ import HWTestCore
 import HWTestGPU
 import Metal
 
-/// [[amplification_count]] per draw where the device answers amplification (24B119's A13; 21H461's A10X answers NO):
+/// [[amplification_count]] per draw, which both builds answer (NativeAnswers):
 /// one state of maxVertexAmplificationCount 2 whose vertex function splits the target into as many columns as the
 /// draw's count and puts each amplification in its own, coloured by the count and the id. At count 2 the left half is red
 /// and the right green; at count 1 the whole target is blue. Each count drawn directly and through indirect arguments,
@@ -38,7 +38,10 @@ struct NativeAmplificationCountTest: NativeObjectTest {
         var work = NativeWork()
         let amplifies = device.supportsVertexAmplificationCount(2)
         metrics.set("amplification", amplifies ? "yes" : "no")
-        guard amplifies else { return work }
+        guard amplifies else {
+            work.failures.append("supportsVertexAmplificationCount: answers NO for 2")
+            return work
+        }
         let library = try await device.makeLibrary(source: Self.source, options: nil)
         let descriptor = MTLRenderPipelineDescriptor()
         descriptor.vertexFunction = library.makeFunction(name: "counted_quad")

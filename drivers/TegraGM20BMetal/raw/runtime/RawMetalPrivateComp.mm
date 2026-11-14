@@ -29,6 +29,11 @@ bool submitRangeExclusive(RMCommandBuffer *cb, bool followed)
     return submitted;
 }
 
+void rmMarkSubmission(bool submitting)
+{
+    tSubmitting = submitting;
+}
+
 raw::SubmitGate &rmSubmitGate()
 {
     return gSubmitGate;
@@ -44,11 +49,15 @@ uint32_t privateCompressedKind(MTLTextureDescriptor *d)
     const raw::FormatInfo *f = raw::formatInfo(uint32_t(d.pixelFormat));
     raw::PrivateTextureFacts facts;
     facts.privateStorage = d.storageMode == MTLStorageModePrivate;
-    facts.oneLevel = d.mipmapLevelCount == 1;
-    facts.oneSample = d.sampleCount <= 1;
-    facts.twoD = d.textureType == MTLTextureType2D;
-    facts.renderedAndSampledOnly = d.usage != MTLTextureUsageUnknown &&
-                                   !(d.usage & ~NSUInteger(MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead));
+    facts.levels = uint32_t(d.mipmapLevelCount);
+    facts.samples = uint32_t(std::max<NSUInteger>(d.sampleCount, 1));
+    facts.shape = d.textureType == MTLTextureType2D              ? raw::PrivateShape2D::Plain
+                  : d.textureType == MTLTextureType2DArray       ? raw::PrivateShape2D::Array
+                  : d.textureType == MTLTextureType2DMultisample ? raw::PrivateShape2D::Multisample
+                                                                 : raw::PrivateShape2D::Other;
+    facts.compressibleUsage =
+        d.usage != MTLTextureUsageUnknown &&
+        !(d.usage & ~NSUInteger(MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead | MTLTextureUsageShaderWrite));
     facts.plainColour =
         f && f->rt && !raw::blockCompressed(f) && raw::xrForm(uint32_t(d.pixelFormat)) == raw::XrForm::None;
     facts.bpp = f ? f->bpp : 0;
@@ -131,20 +140,35 @@ static bool fitsOncePlain(const raw::Pipeline &pl, uint32_t slot, const raw::Tex
                                     PlainView{t.bpp, t.samples}) == raw::StorageFallback::None;
 }
 
-static void notePipeline(RMCommandBuffer *cb, const RMPass &pass, const raw::Pipeline *pl, bool pending)
+// `draw`: the shape of a draw of `pl` the pass holds, null where none is known yet (its binding)
+static void notePipeline(RMCommandBuffer *cb, const RMPass &pass, const raw::Pipeline *pl, bool pending,
+                         const raw::FetchDraw *draw)
 {
     if (pending) {
+        rmPipelineVeto(cb, VetoStorage);
         cb->_scanStorageTargets = true;
         return;
     }
     if (!pl || !pl->rec)
         return;
-    const uint8_t slots = raw::storageSlotsToPlain(pl->storageBits, pl->barrierTwin != nullptr) & pass.compressed;
+    const raw::Pipeline *twin = pl->barrierTwin;
+    // an iterated-blend form the device proved draws the state whatever its target (RenderEncoder::formFor), which
+    // then needs neither the storage form nor the barrier form
+    const raw::FetchFreeForm *free = pl->fetchFree ? &pl->fetchFree->freeForm : nullptr;
+    const bool fetchFree = free && free->rung == raw::FetchIteratedBlend && raw::fetchFreeTaken(*free, {});
+    const bool twinDraws =
+        !twin || !draw || fetchFree ||
+        raw::barrierFormDraws(twin->fetchBits, twin->writeBits, twin->storageBits, twin->primitiveId, *draw);
+    const uint8_t slots =
+        raw::storageSlotsToPlain(pl->storageBits, twin != nullptr, twinDraws, gRM->raw->storageCompressedOk()) &
+        pass.compressed;
     for (uint32_t slot = 0; slots >> slot; ++slot) {
         RMTexture *t = (RMTexture *)pass.color[slot].texture;
         if ((slots >> slot & 1) && fitsOncePlain(*pl, slot, t->_raw) &&
-            std::find(cb->_plainForStorage.begin(), cb->_plainForStorage.end(), t) == cb->_plainForStorage.end())
+            std::find(cb->_plainForStorage.begin(), cb->_plainForStorage.end(), t) == cb->_plainForStorage.end()) {
+            rmPipelineVeto(cb, VetoStorage);
             cb->_plainForStorage.push_back(t);
+        }
     }
 }
 
@@ -153,7 +177,15 @@ void rmNoteStorageTargets(RMCommandBuffer *cb, const RMPass &pass, const Cmd &bi
     bool pending;
     const raw::Pipeline *pl =
         boundPipeline(binding.obj, reinterpret_cast<void *>(uintptr_t(binding.c)), binding.obj2, pending);
-    notePipeline(cb, pass, pl, pending);
+    notePipeline(cb, pass, pl, pending, nullptr);
+}
+
+void rmNoteStorageDraw(RMCommandBuffer *cb, const RMPass &pass, raw::Pipeline *pl, raw::Variant<raw::Pipeline> *variant,
+                       const raw::FetchDraw &draw)
+{
+    bool pending;
+    const raw::Pipeline *drawn = boundPipeline(nullptr, pl, variant, pending);
+    notePipeline(cb, pass, drawn, pending, &draw);
 }
 
 // The draws of [from, to) whose pipeline binding was a variant still being made where it was recorded: ready now, as the
@@ -169,10 +201,13 @@ static void noteRangeDraws(RMCommandBuffer *cb, size_t from, size_t to)
             pass = nullptr;
         if (!pass || !pass->compressed || !isPlanDraw(c.op))
             continue;
-        const raw::RasterState &raster = cb->_plan.raster[cb->_plan.renderStates[cb->_plan.draw(at).state].raster];
+        const RMPlanDraw &d = cb->_plan.draw(at);
+        const raw::RasterState &raster = cb->_plan.raster[cb->_plan.renderStates[d.state].raster];
+        const raw::FetchDraw shape = {d.primitive, d.count, d.instances, c.op != OpDraw && c.op != OpDrawIndexed,
+                                      d.indices != nullptr};
         bool pending;
         notePipeline(cb, *pass, boundPipeline(raster.pipeline, raster.nativePipeline, raster.nativeVariant, pending),
-                     false);
+                     false, &shape);
     }
 }
 

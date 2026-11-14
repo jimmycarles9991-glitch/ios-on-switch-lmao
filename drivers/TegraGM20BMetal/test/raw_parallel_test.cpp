@@ -27,30 +27,46 @@ TEST(RawParallel, CommandsTakeTheParallelCommandBuffersPassesChunksAndWords)
 {
     Cmd render = cmd(OpRender);
     render.x = 0;
-    EXPECT_EQ(raw::spliced(render, 5, 2, 40).x, 5u);
+    EXPECT_EQ(raw::spliced(render, 5, 2, 0, 40).x, 5u);
     Cmd bytes = cmd(OpBytes, 1, 0);
     bytes.a = 256;
     bytes.c = 1;
-    const Cmd b = raw::spliced(bytes, 5, 2, 40);
+    const Cmd b = raw::spliced(bytes, 5, 2, 0, 40);
     EXPECT_EQ(b.c, 3u);
     EXPECT_EQ(b.a, 256u) << "the offset in its chunk";
     for (Op op : {OpViewport, OpBlendColor, OpDepthBias, OpDrawIndexed}) {
         Cmd c = cmd(op);
         c.x = 7;
-        EXPECT_EQ(raw::spliced(c, 5, 2, 40).x, 40u) << int(op);
+        EXPECT_EQ(raw::spliced(c, 5, 2, 0, 40).x, 40u) << int(op);
     }
     Cmd indirect = cmd(OpDrawIndirect);
     indirect.x = 64;
-    EXPECT_EQ(raw::spliced(indirect, 5, 2, 40).x, 64u) << "an argument offset";
+    EXPECT_EQ(raw::spliced(indirect, 5, 2, 0, 40).x, 64u) << "an argument offset";
     Cmd buffer = cmd(OpBuffer, 1, 3);
     buffer.c = 128;
-    EXPECT_EQ(raw::spliced(buffer, 5, 2, 40).c, 128u) << "a buffer offset";
+    EXPECT_EQ(raw::spliced(buffer, 5, 2, 0, 40).c, 128u) << "a buffer offset";
+}
+
+// A sub-encoder's vertex bytes before its first draw keep a copy in its own command buffer's shadow, which the parallel
+// encoder's command buffer holds past its own; the stride form's word is not moved with it
+TEST(RawParallel, ShadowedBytesNameTheirCopyInTheParallelCommandBuffer)
+{
+    Cmd shadowed = cmd(OpBytes, 1, 0);
+    shadowed.shadow = 17;
+    const Cmd s = raw::spliced(shadowed, 5, 2, 300, 40);
+    EXPECT_EQ(s.shadow, 317u);
+    EXPECT_EQ(s.x, 0u) << "no attributeStride";
+    Cmd plain = cmd(OpBytes, 1, 0);
+    plain.x = 33;
+    const Cmd p = raw::spliced(plain, 5, 2, 300, 40);
+    EXPECT_EQ(p.shadow, 0u) << "bytes with no shadow name none";
+    EXPECT_EQ(p.x, 33u) << "the stride form's stride + 1";
 }
 
 TEST(RawParallel, ExtraWordsAreTheRecordedOnes)
 {
     EXPECT_EQ(raw::extraWords(cmd(OpViewport)), 6u);
-    EXPECT_EQ(raw::extraWords(cmd(OpDispatch)), 12u);
+    EXPECT_EQ(raw::extraWords(cmd(OpDispatch)), 16u);
     EXPECT_EQ(raw::extraWords(cmd(OpBlendColor)), 4u);
     EXPECT_EQ(raw::extraWords(cmd(OpDepthBias)), 3u);
     EXPECT_EQ(raw::extraWords(cmd(OpDrawIndexed)), 3u);
@@ -66,7 +82,7 @@ TEST(RawParallel, ViewportAndScissorArraysTakeTheirWords)
     EXPECT_EQ(raw::extraWords(cmd(OpScissor, 0, 16)), 64u);
     Cmd scissors = cmd(OpScissor, 0, 3);
     scissors.x = 7;
-    EXPECT_EQ(raw::spliced(scissors, 5, 2, 40).x, 40u);
+    EXPECT_EQ(raw::spliced(scissors, 5, 2, 0, 40).x, 40u);
 }
 
 }  // namespace

@@ -4,7 +4,7 @@ import HWTestGPU
 import Metal
 
 /// The raw encode's CPU cost of a command buffer shaped as Core Animation's (raw_encode_profile.h, debug builds):
-/// `passes` passes of Core Animation's untextured fill (PBGRAXm_A2Xhf, BGRA8 beside its memoryless colour 1), each draw
+/// `passes` passes of Core Animation's untextured fill (PBGRAXm_A2Xhf, BGRA8 beside its memoryless colour 1 in the line's format), each draw
 /// binding its vertices, transform and zero uniforms by setBytes with a scissor of its own, `buffers` command buffers
 /// at each of two draw counts, each after as many at that count (whose recording storage they reuse, as a steady frame
 /// does). Per command buffer at each count: the encode's wall time and its parts (us_<part>, and
@@ -65,7 +65,7 @@ struct EncodeCostPathTest: HWTest {
         let pipeline = try CAState.pipeline(line, library: library, device: gpu.device)
         let target = try gpu.texture(.bgra8Unorm, Self.width, Self.height)
         let scratch = try gpu.texture(
-            .bgra8Unorm, Self.width, Self.height, usage: [.renderTarget], storage: .memoryless)
+            CACorpus.colorFormat(line, 1), Self.width, Self.height, usage: [.renderTarget], storage: .memoryless)
         let encode = { (commands: MTLCommandBuffer, draws: Int) in
             for pass in 0..<Self.passes {
                 let descriptor = MTLRenderPassDescriptor()

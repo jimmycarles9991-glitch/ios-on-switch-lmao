@@ -42,6 +42,7 @@ struct HEVCDecoder {
     HEVCParams params;
     int first_sps;
     bool allow10, display8;
+    uint8_t display_mode;  // with display8: disp_output_mode 2 (Rec.709 truncated) or 3 (Rec.2020 to Rec.709)
     Entry dpb[SLOTS];
     uint32_t width, height, pitch, rows, luma_bytes, surface_bytes;  // the surfaces' geometry (pitch in bytes)
     uint32_t sample_bytes;                                           // 2 for Main 10: 16-bit samples

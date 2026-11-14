@@ -1,4 +1,5 @@
 import Foundation
+import HWTestGPU
 
 /// What an sRGB chain's proven steps followed: Metal's linear-light step (MipReference) or the step of the codes taken as
 /// unorm, and the first field more than one code from Metal's with the codes it came from. Both GM20B routes (the 2D

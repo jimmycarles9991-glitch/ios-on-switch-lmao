@@ -157,7 +157,7 @@ bool offerVicCopy(const OriginalLegacySwapRequest *request, OSObject *surface, u
     gpuOfferedAt = mach_absolute_time();
     gpuRequest = request;
     gpuLength = uint64_t(width) * height * 4;
-    __atomic_store_n(&gpuScanout, true, __ATOMIC_RELEASE);
+    gpuScanout = true;
     vicScanout = true;
     vicDeadlines = 0;
     gpuDeadline->setTimeoutMS(kGpuCopyDeadlineMS);
@@ -275,7 +275,7 @@ bool finishVicCopy(int status)
     vicScanout = false;
     const OriginalLegacySwapRequest *request = gpuRequest;
     gpuDeadline->cancelTimeout();
-    __atomic_store_n(&gpuScanout, false, __ATOMIC_RELEASE);
+    gpuScanout = false;
     gpuRequest = nullptr;
     releaseVicJob();
     if (status && __atomic_load_n(&copyStopping, __ATOMIC_ACQUIRE)) {
@@ -366,7 +366,7 @@ void stopVicCopy()
         releaseVicJob();
         ring.release();
         gpuDeadline->cancelTimeout();
-        __atomic_store_n(&gpuScanout, false, __ATOMIC_RELEASE);
+        gpuScanout = false;
         gpuRequest = nullptr;
         vicScanout = transferred = false;
     }

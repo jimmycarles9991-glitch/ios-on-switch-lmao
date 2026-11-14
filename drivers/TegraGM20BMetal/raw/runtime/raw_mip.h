@@ -5,9 +5,9 @@
 namespace raw {
 
 // The pack's state that draws a chain level of MTLPixelFormat `format` from the level above (pack/mip.metal), keyed
-// "raw.mip.<fragment function>": the generateMipmapsForTexture: steps of a format the 2D engine has no filtering for that
-// matches Metal's (fx::twodFormat 0: packed, 16- and 32-bit channels), and an sRGB chain's steps no probe covered on the 2D
-// engine (fx_mip_route.h); null for a format it has none for
+// "raw.mip.<fragment function>": the generateMipmapsForTexture: steps the 2D engine is not proven within one code of Metal's
+// for (fx_mip_route.h; fx::twodChainFormat 0, or a step the 2D engine has not been proven at); null for a format it has none
+// for
 inline const char *mipState(uint32_t format)
 {
     switch (format) {

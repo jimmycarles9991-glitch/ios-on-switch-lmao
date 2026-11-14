@@ -2,6 +2,7 @@
 // See HEVCDisplayProbe.h.
 #include "HEVCDisplayProbe.h"
 #if !defined(SWITCH_DEBUG) || SWITCH_DEBUG
+#include <math.h>
 #include <stdlib.h>
 #include <string.h>
 #include "BlockLinear.h"
@@ -47,8 +48,64 @@ static Score score(const uint8_t *eight, const uint16_t *ten, size_t samples)
     return s;
 }
 
-void hevc_display_probe_compare(const uint8_t *display, uint64_t displayBytes, const uint8_t *ref16, uint32_t pitch16,
-                                uint32_t rows, uint32_t width, uint32_t height, HEVCDisplayProbeResult *out)
+// ITU-R BT.2087's Rec.2020 -> Rec.709 primaries matrix (rows R, G, B).
+static const double kToRec709[3][3] = {
+    {1.6605, -0.5876, -0.0728},
+    {-0.1246, 1.1329, -0.0083},
+    {-0.0182, -0.1006, 1.1187},
+};
+
+static double clamp01(double v)
+{
+    return v < 0 ? 0 : v > 1 ? 1 : v;
+}
+
+uint8_t hevc_display_model_luma(uint32_t model, uint32_t y10, uint32_t cb10, uint32_t cr10)
+{
+    const double kr = 0.2627, kb = 0.0593;  // Rec.2020 in
+    const double y = (y10 - 64.0) / 876.0, pb = (cb10 - 512.0) / 896.0, pr = (cr10 - 512.0) / 896.0;
+    double rgb[3] = {y + 2 * (1 - kr) * pr, 0, y + 2 * (1 - kb) * pb};
+    rgb[1] = (y - kr * rgb[0] - kb * rgb[2]) / (1 - kr - kb);
+    double out[3] = {rgb[0], rgb[1], rgb[2]};
+    if (model != HEVC_DISPLAY_MODEL_MATRIX) {
+        double in[3];
+        for (int c = 0; c < 3; c++)
+            in[c] = model == HEVC_DISPLAY_MODEL_LINEAR ? pow(clamp01(rgb[c]), 2.4) : rgb[c];
+        for (int c = 0; c < 3; c++) {
+            const double v = kToRec709[c][0] * in[0] + kToRec709[c][1] * in[1] + kToRec709[c][2] * in[2];
+            out[c] = model == HEVC_DISPLAY_MODEL_LINEAR ? pow(clamp01(v), 1 / 2.4) : v;
+        }
+    }
+    const double luma = 0.2126 * clamp01(out[0]) + 0.7152 * clamp01(out[1]) + 0.0722 * clamp01(out[2]);  // Rec.709
+    return (uint8_t)floor(16 + 219 * luma + 0.5);
+}
+
+// The best reading against each conversion model, the chroma taken at each luma sample's 4:2:0 site.
+static void scoreModels(const uint8_t *eight, const uint16_t *ten, const uint16_t *chroma, uint32_t width,
+                        uint32_t height, HEVCDisplayProbeResult *out)
+{
+    const size_t samples = (size_t)width * height;
+    for (uint32_t m = 0; m < HEVC_DISPLAY_MODELS; m++) {
+        uint64_t sum = 0;
+        uint32_t max = 0;
+        for (uint32_t y = 0; y < height; y++)
+            for (uint32_t x = 0; x < width; x++) {
+                const size_t c = (size_t)(y / 2) * width + (x & ~1u);
+                const uint32_t want =
+                    hevc_display_model_luma(m, ten[(size_t)y * width + x] >> 6, chroma[c] >> 6, chroma[c + 1] >> 6);
+                const uint8_t got = eight[(size_t)y * width + x];
+                const uint32_t diff = got > want ? got - want : want - got;
+                sum += diff;
+                max = diff > max ? diff : max;
+            }
+        out->model_max[m] = max;
+        out->model_mean_milli[m] = (uint32_t)(sum * 1000 / samples);
+    }
+}
+
+void hevc_display_probe_compare(const uint8_t *display, uint64_t displayBytes, const uint8_t *ref16,
+                                const uint8_t *chroma16, uint32_t pitch16, uint32_t rows, uint32_t width,
+                                uint32_t height, HEVCDisplayProbeResult *out)
 {
     const int status = out->status;
     memset(out, 0, sizeof(*out));
@@ -58,10 +115,14 @@ void hevc_display_probe_compare(const uint8_t *display, uint64_t displayBytes, c
     for (uint64_t i = 0; i < lumaBytes && i < displayBytes && !written; i++)
         written = display[i] != HEVC_DISPLAY_POISON;
     const size_t samples = (size_t)width * height;
+    const uint32_t chromaRows = (height + 1) / 2;
     uint16_t *ten = written ? malloc(samples * 2) : NULL;
+    uint16_t *chroma = written ? malloc((size_t)width * chromaRows * 2) : NULL;
     uint8_t *eight = written ? malloc(samples) : NULL;
-    if (ten && eight) {
+    uint8_t *best8 = written ? malloc(samples) : NULL;
+    if (ten && chroma && eight && best8) {
         block_linear_copy((uint8_t *)ten, (size_t)width * 2, ref16, pitch16, 0, 0, width * 2, height);
+        block_linear_copy((uint8_t *)chroma, (size_t)width * 2, chroma16, pitch16, 0, 0, width * 2, chromaRows);
         uint64_t best = UINT64_MAX;
         for (uint32_t layout = HEVC_DISPLAY_BLOCK_8; layout < HEVC_DISPLAY_LAYOUTS; layout++) {
             if (!readLayout(layout, display, displayBytes, pitch16, rows, width, height, eight))
@@ -75,10 +136,15 @@ void hevc_display_probe_compare(const uint8_t *display, uint64_t displayBytes, c
             out->mean_milli = (uint32_t)(s.sum * 1000 / samples);
             out->trunc_milli = (uint32_t)(s.trunc * 1000 / samples);
             out->round_milli = (uint32_t)(s.round * 1000 / samples);
+            memcpy(best8, eight, samples);
         }
+        if (out->layout)
+            scoreModels(best8, ten, chroma, width, height, out);
     }
     free(ten);
+    free(chroma);
     free(eight);
+    free(best8);
 }
 
 static void add(TegraNVDECSubmit *s, uint16_t method, uint16_t kind, uint32_t value, uint32_t offset)
@@ -124,8 +190,8 @@ void hevc_display_probe_run(const H264Backend *b, const TegraNVDECSubmit *job, c
     w.invalidate[w.invalidate_count++] = (TegraNVDECRange){handle, 0, (uint32_t)bytes, 0};
     out->status = b->submit(b->ctx, &s, &w.fence) ? -2 : b->wait(b->ctx, &w) ? -2 : 0;
     if (!out->status)
-        hevc_display_probe_compare((const uint8_t *)va + surfaceBytes, surfaceBytes, ref16, pitch16, rows, width,
-                                   height, out);
+        hevc_display_probe_compare((const uint8_t *)va + surfaceBytes, surfaceBytes, ref16, ref16 + lumaBytes, pitch16,
+                                   rows, width, height, out);
     b->free(b->ctx, handle);
 }
 #endif

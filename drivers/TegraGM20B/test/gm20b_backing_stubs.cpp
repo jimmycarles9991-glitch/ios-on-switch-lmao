@@ -18,6 +18,11 @@ extern "C" tgm_coh *tgm_record_take(tgm_record *record)
 	return c;
 }
 
+extern "C" tgm_record_mappers *tgm_record_mappers_of(tgm_record *record)
+{
+	return &record->mappers;
+}
+
 extern "C" int tgm_record_is_surface(const tgm_record *record, uint32_t id)
 {
 	return static_cast<int>(record->id == id);

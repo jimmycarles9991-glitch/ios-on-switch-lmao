@@ -5,9 +5,11 @@
 #include <IOKit/IOLib.h>
 #include <IOKit/IOBufferMemoryDescriptor.h>
 #include <IOKit/IOMemoryDescriptor.h>
+#include <IOKit/IOCommandGate.h>
 #include <IOKit/IOFilterInterruptEventSource.h>
 #include <IOKit/IOWorkLoop.h>
 #include <kern/clock.h>
+#include <kern/cpu_number.h>
 #include <kern/sched_prim.h>
 #include <kern/counter.h>
 #include <kern/host_statistics.h>
@@ -18,7 +20,9 @@
 #include <sys/kdebug.h>
 #include "include/nvxnu.h"
 #include "../SwitchGpuBacking.h"
+#include "../SwitchGpuNonstall.h"
 #include "../SwitchGpuOrdered.h"
+#include "../SwitchGpuWakeWord.h"
 #include "../../../kits/SwitchDMA/SwitchDcache.h"
 #include "../../../kits/SwitchDMA/SwitchDMABuffer.h"
 #include "../../../kits/SwitchDMA/SwitchHwPage.h"
@@ -36,15 +40,16 @@ void pmap_set_cache_attributes(ppnum_t pn, unsigned int cacheattr);
 void IOLogv(const char *format, va_list ap);
 // NOLINTNEXTLINE(readability-redundant-declaration): not every kernel configuration's headers declare it
 int vsnprintf(char *, size_t, const char *, va_list);
-void tgm_present_pass(void);    // gpu_present.c
-void tgm_present_filter(void);  // SwitchGpuPresentFilter.cpp
-void tgm_promise_pass(void);    // gpu_promise_giveup.c
+void tgm_present_pass(void);         // gpu_present.c
+unsigned tgm_chans_completed(void);  // gpu_chan.c
+void tgm_present_filter(void);       // SwitchGpuPresentFilter.cpp
+void tgm_promise_pass(void);         // gpu_promise_giveup.c
 }
 
 #if DEVELOPMENT || DEBUG
 extern "C" void nvxnu_stats(const char *fmt, ...)
 {
-	char line[768];
+	char line[1024];
 	va_list ap;  // NOLINT(cppcoreguidelines-init-variables): va_start initializes it
 	va_start(ap, fmt);
 	vsnprintf(line, sizeof(line), fmt, ap);
@@ -188,23 +193,34 @@ nvxnu_poll_irqs(void);  // shim/linux.c: the nvkm handler's irqreturn_t, -1 if n
 
 namespace
 {
-constexpr uint32_t kGpuIntids[2] = {32 + 157,
-				    32 + 158};  // "stall", "nonstall" (Linux tegra210.dtsi:427-428)
+// GPU_STALL and GPU_NONSTALL: global interrupts 157 and 158 (Tegra X1 TRM table 11; Linux tegra210.dtsi:427-428)
+constexpr uint32_t kGpuIntids[2] = {32 + 157, 32 + 158};
+constexpr const char *kLines[2] = {"stall", "nonstall"};
+constexpr int kJobLine = 1;  // the job interrupts' (SwitchGpuNonstall.h)
 constexpr uint64_t kGpuBar0 = 0x57000000;
 constexpr uint32_t PMC_INTR_0 = 0x100, PMC_INTR_1 = 0x104, PMC_INTR_EN_0 = 0x140,
 		   PMC_INTR_EN_1 = 0x144;
 constexpr uint64_t kCheckNs = 1000000000;  // a quiet wait looks at PMC this often
 constexpr uint64_t kGraceNs = 50000000;    // for a wake already under way
 constexpr uint32_t kStorm = 1000;          // consecutive interrupts nvkm did not handle
-volatile uint32_t gWakeSeq, gIrqRuns;
+volatile uint32_t gIrqRuns;
+switch_gpu_wake_word gWake;
+void wakeAfterPass();
 #if DEVELOPMENT || DEBUG
 uint64_t gIrqPasses[2];  // by line: stall, nonstall
+uint64_t gJobPasses
+	[2];  // by line, the passes that found a channel's fence moved: the work loop thread's alone
+// passes and filters by the CPU that ran them: each written by the pass's work loop thread, or by the filter on the
+// frame CPU the lines are routed to, alone
+uint64_t gIrqCpus[4], gFilterCpus[4];
+uint64_t gGlobalWakeups;  // threads woken on the global word
 #endif
 volatile int gIrqActive, gGpuOff;
 uint32_t gUnhandled;
 volatile uint8_t *gPmc;
 IOWorkLoop *gIrqLoop;
 IOInterruptEventSource *gIrqSources[2];
+IOCommandGate *gPassGate;  // nvxnu_pass_try's way to try the work loop's gate
 
 uint32_t pmc(uint32_t offset)
 {
@@ -231,73 +247,166 @@ bool pmcPending()
 		      "down for system sleep: %s | %s",
 		      why, what, value, kGpuIntids[0], kGpuIntids[1], stall, nonstall);
 	}
-	panic("tegra-gm20b: GPU interrupt %s (%s %u, INTID %u/%u): PMC INTR %#x/%#x EN %#x/%#x, %s "
-	      "| %s",
-	      why, what, value, kGpuIntids[0], kGpuIntids[1], pmc(PMC_INTR_0), pmc(PMC_INTR_1),
-	      pmc(PMC_INTR_EN_0), pmc(PMC_INTR_EN_1), stall, nonstall);
+	panic("tegra-gm20b: GPU interrupt %s (%s %u; job interrupts on the %s line, INTID %u; "
+	      "stall/nonstall "
+	      "INTID %u/%u): PMC INTR %#x/%#x EN %#x/%#x MASK %#x/%#x, PFIFO INTR %#x EN %#x/%#x, "
+	      "%s | %s",
+	      why, what, value, kLines[kJobLine], kGpuIntids[kJobLine], kGpuIntids[0],
+	      kGpuIntids[1], pmc(PMC_INTR_0), pmc(PMC_INTR_1), pmc(PMC_INTR_EN_0),
+	      pmc(PMC_INTR_EN_1), pmc(SWITCH_GPU_PMC_INTR_MASK_0), pmc(SWITCH_GPU_PMC_INTR_MASK_1),
+	      pmc(SWITCH_GPU_PFIFO_INTR_0), pmc(SWITCH_GPU_PFIFO_INTR_EN_0),
+	      pmc(SWITCH_GPU_PFIFO_INTR_EN_1), stall, nonstall);
 }
 
-// Work loop action for either GPU line (level; the GIC masks it while this runs). nvkm_intr unarms the GPU's
-// top-level interrupt enables, runs the subdev handlers and rearms, so the line is quiet on return. A line nvkm
-// keeps finding nothing on is stuck: panic rather than spin. Errors nvkm reported in the pass panic (nvxnu_error).
+// Work loop action for either GPU line (level; the GIC masks it while this runs). On the stall line nvkm_intr unarms
+// the GPU's top-level interrupt enables, runs the subdev handlers and rearms; on the nonstall line the channel bit is
+// acknowledged (SwitchGpuNonstall.h); either way the line is quiet on return and the channels are scanned. A line that
+// keeps finding nothing is stuck: panic rather than spin. Errors nvkm reported in the pass panic (nvxnu_error).
 // NOLINTNEXTLINE(misc-const-correctness): IOInterruptEventSource::Action's signature
 void gpuInterrupt(OSObject *, IOInterruptEventSource *source, int)
 {
 	// a line taken before nvxnu_irq_suspend() whose pass runs after it: the GPU is off now
 	if (__atomic_load_n(&gGpuOff, __ATOMIC_ACQUIRE))
 		return;
-	__atomic_fetch_add(&gIrqRuns, 1, __ATOMIC_RELAXED);
+	// the work loop's runs never overlap: its counts are a load and a store
+	__atomic_store_n(&gIrqRuns, __atomic_load_n(&gIrqRuns, __ATOMIC_RELAXED) + 1,
+			 __ATOMIC_RELAXED);
 #if DEVELOPMENT || DEBUG
-	__atomic_fetch_add(&gIrqPasses[source == gIrqSources[1]], 1, __ATOMIC_RELAXED);
+	uint64_t &passes = gIrqPasses[source == gIrqSources[1]];
+	__atomic_store_n(&passes, __atomic_load_n(&passes, __ATOMIC_RELAXED) + 1, __ATOMIC_RELAXED);
+	const unsigned cpu = static_cast<unsigned>(cpu_number()) % 4;
+	__atomic_store_n(&gIrqCpus[cpu], __atomic_load_n(&gIrqCpus[cpu], __ATOMIC_RELAXED) + 1,
+			 __ATOMIC_RELAXED);
 #else
 	(void)source;
 #endif
+	const int line = source == gIrqSources[1] ? 1 : 0;
 	gIrqErrorsLen = 0;
 	gIrqErrors[0] = 0;
 	__atomic_store_n(&gIrqThread, current_thread(), __ATOMIC_RELAXED);
-	const int handled = nvxnu_poll_irqs();
+	// the nonstall line carries the job interrupts alone: no nvkm pass, its lock or its tree reads
+	const int handled = line ? switch_gpu_nonstall_ack(gPmc) : nvxnu_poll_irqs();
+	const unsigned moved = tgm_chans_completed();
 	__atomic_store_n(&gIrqThread, static_cast<thread_t>(nullptr), __ATOMIC_RELAXED);
+#if DEVELOPMENT || DEBUG
+	if (moved)
+		__atomic_store_n(&gJobPasses[line],
+				 __atomic_load_n(&gJobPasses[line], __ATOMIC_RELAXED) + 1,
+				 __ATOMIC_RELAXED);
+#else
+	(void)moved;
+#endif
 	if (gIrqErrorsLen && __atomic_load_n(&gErrorsFatal, __ATOMIC_ACQUIRE) &&
 	    !(gErrorsContained && gErrorsContained(gIrqErrors)))
 		panic("tegra-gm20b: GPU error: %s", gIrqErrors);
 	if (handled == 1) {
 		gUnhandled = 0;
 	} else if (++gUnhandled >= kStorm) {
-		gpuPanic("storm", "unhandled", gUnhandled);
+		gpuPanic("storm",
+			 line ? "channel bit still set after its acknowledgement" : "unhandled",
+			 gUnhandled);
 	}
 	tgm_present_pass();
 	tgm_promise_pass();
-	nvxnu_wake();
+	wakeAfterPass();
 	switch_gpu_backing_completed();
 }
 
-// The nonstall line's primary filter: the present watch's producer, read from memory alone (the GPU may be powered
-// down); true, as the plain event source on a level line does, masks the line until the work loop's pass has run nvkm,
-// which alone quiets it.
+// Both lines' primary filter: the present watch's producer, read from memory alone (the GPU may be powered down); true,
+// as the plain event source on a level line does, masks the line until the work loop's pass has quieted it. The job
+// interrupts come on the nonstall line (SwitchGpuNonstall.h); a stall pass also completes jobs whose channel bit it
+// found pending on both trees (gpu_nonstall.c), so the stall line keeps the filter too.
 // NOLINTNEXTLINE(misc-const-correctness): IOFilterInterruptEventSource::Filter's signature
-bool gpuNonstallFilter(OSObject *, IOFilterInterruptEventSource *)
+bool gpuFilter(OSObject *, IOFilterInterruptEventSource *)
 {
+#if DEVELOPMENT || DEBUG
+	const unsigned cpu = static_cast<unsigned>(cpu_number()) % 4;
+	__atomic_store_n(&gFilterCpus[cpu],
+			 __atomic_load_n(&gFilterCpus[cpu], __ATOMIC_RELAXED) + 1,
+			 __ATOMIC_RELAXED);
+#endif
 	tgm_present_filter();
 	return true;
 }
 
-// Mach's assert-then-check: a wake between the caller's condition test and this sleep moves the word, and one
-// after assert_wait_deadline() clears the wait, so neither is lost. Returns true if woken, false at `until`.
-bool sleepUntil(const volatile uint32_t *word, nvxnu_u32 seq, uint64_t until_ns)
+// Mach's assert-then-check: a wake between the caller's condition test and this sleep moves the sequence `current`
+// reads, and one after assert_wait_deadline() clears the wait, so neither is lost. Returns true if woken, false at
+// `until`.
+template <typename Current>
+bool sleepUntil(event_t event, Current current, nvxnu_u32 seq, uint64_t until_ns)
 {
 	const uint64_t now = nvxnu_nanotime();
 	if (until_ns <= now)
 		return false;
 	uint64_t interval = 0;
 	nanoseconds_to_absolutetime(until_ns - now, &interval);
-	// NOLINTNEXTLINE(cppcoreguidelines-pro-type-const-cast): the wait event is the word's address
-	assert_wait_deadline(reinterpret_cast<event_t>(const_cast<uint32_t *>(word)), THREAD_UNINT,
-			     mach_absolute_time() + interval);
-	if (__atomic_load_n(word, __ATOMIC_ACQUIRE) != seq) {
+	assert_wait_deadline(event, THREAD_UNINT, mach_absolute_time() + interval);
+	if (current() != seq) {
 		clear_wait(current_thread(), THREAD_AWAKENED);
 		return true;
 	}
 	return thread_block(THREAD_CONTINUE_NULL) != THREAD_TIMED_OUT;
+}
+
+// Sleeps until woken or the deadline. Every quiet second it looks at PMC: a GPU interrupt pending and enabled at two
+// checks in a row with no interrupt taken in between never reached the CPU.
+template <typename Current>
+int idleOn(event_t event, Current current, nvxnu_u32 seq, nvxnu_u64 deadline_ns)
+{
+	if (!__atomic_load_n(&gIrqActive, __ATOMIC_ACQUIRE)) {
+		panic("tegra-gm20b: GPU wait before its interrupts are attached (INTID %u/%u)",
+		      kGpuIntids[0], kGpuIntids[1]);
+	}
+	bool pendingSeen = false;
+	uint32_t runsAtPending = 0;
+	for (;;) {
+		const uint64_t now = nvxnu_nanotime();
+		if (now >= deadline_ns)
+			return 0;
+		if (sleepUntil(event, current, seq,
+			       deadline_ns - now < kCheckNs ? deadline_ns : now + kCheckNs))
+			return 1;
+		const uint32_t runs = __atomic_load_n(&gIrqRuns, __ATOMIC_RELAXED);
+		const bool pending = pmcPending();
+		if (pending && pendingSeen && runs == runsAtPending)
+			gpuPanic("lost", "wait", seq);
+		pendingSeen = pending;
+		runsAtPending = runs;
+	}
+}
+
+template <typename Current>
+void wakeDueOn(event_t event, Current current, nvxnu_u32 seq, const char *what, nvxnu_u32 value)
+{
+	if (current() != seq || sleepUntil(event, current, seq, nvxnu_nanotime() + kGraceNs))
+		return;
+	gpuPanic("lost", what, value);
+}
+
+event_t wordEvent(const volatile nvxnu_u32 *word)
+{
+	// NOLINTNEXTLINE(cppcoreguidelines-pro-type-const-cast): the wait event is the word's address
+	return reinterpret_cast<event_t>(const_cast<uint32_t *>(word));
+}
+
+uint32_t globalSeq()
+{
+	return switch_gpu_wake_seq(&gWake);
+}
+
+void wakeGlobal()
+{
+#if DEVELOPMENT || DEBUG
+	__atomic_fetch_add(&gGlobalWakeups, 1, __ATOMIC_RELAXED);
+#endif
+	thread_wakeup(reinterpret_cast<event_t>(&gWake.pass));
+}
+
+// The pass's end: its own sequence, which no other thread writes
+void wakeAfterPass()
+{
+	if (switch_gpu_wake_pass(&gWake))
+		wakeGlobal();
 }
 }
 
@@ -313,39 +422,25 @@ extern "C" void nvxnu_word_wake(volatile nvxnu_u32 *word)
 	thread_wakeup(reinterpret_cast<event_t>(const_cast<uint32_t *>(word)));
 }
 
-// Sleeps until woken or the deadline. Every quiet second it looks at PMC: a GPU interrupt pending and enabled at two
-// checks in a row with no interrupt taken in between never reached the CPU.
 extern "C" int nvxnu_word_idle(const volatile nvxnu_u32 *word, nvxnu_u32 seq, nvxnu_u64 deadline_ns)
 {
-	if (!__atomic_load_n(&gIrqActive, __ATOMIC_ACQUIRE)) {
-		panic("tegra-gm20b: GPU wait before its interrupts are attached (INTID %u/%u)",
-		      kGpuIntids[0], kGpuIntids[1]);
-	}
-	bool pendingSeen = false;
-	uint32_t runsAtPending = 0;
-	for (;;) {
-		const uint64_t now = nvxnu_nanotime();
-		if (now >= deadline_ns)
-			return 0;
-		if (sleepUntil(word, seq,
-			       deadline_ns - now < kCheckNs ? deadline_ns : now + kCheckNs))
-			return 1;
-		const uint32_t runs = __atomic_load_n(&gIrqRuns, __ATOMIC_RELAXED);
-		const bool pending = pmcPending();
-		if (pending && pendingSeen && runs == runsAtPending)
-			gpuPanic("lost", "wait", seq);
-		pendingSeen = pending;
-		runsAtPending = runs;
-	}
+	return idleOn(
+		wordEvent(word),
+		[word] {
+			return __atomic_load_n(word, __ATOMIC_ACQUIRE);
+		},
+		seq, deadline_ns);
 }
 
 extern "C" void nvxnu_word_wake_due(const volatile nvxnu_u32 *word, nvxnu_u32 seq, const char *what,
 				    nvxnu_u32 value)
 {
-	if (__atomic_load_n(word, __ATOMIC_ACQUIRE) != seq ||
-	    sleepUntil(word, seq, nvxnu_nanotime() + kGraceNs))
-		return;
-	gpuPanic("lost", what, value);
+	wakeDueOn(
+		wordEvent(word),
+		[word] {
+			return __atomic_load_n(word, __ATOMIC_ACQUIRE);
+		},
+		seq, what, value);
 }
 
 extern "C" void nvxnu_kdebug(nvxnu_u32 code, nvxnu_u64 a, nvxnu_u64 b, nvxnu_u64 c)
@@ -367,24 +462,77 @@ extern "C" void nvxnu_irq_passes(nvxnu_u64 *stall, nvxnu_u64 *nonstall)
 #endif
 }
 
+#if DEVELOPMENT || DEBUG
+extern "C" void nvxnu_irq_job_passes(nvxnu_u64 *stall, nvxnu_u64 *nonstall)
+{
+	*stall = __atomic_load_n(&gJobPasses[0], __ATOMIC_RELAXED);
+	*nonstall = __atomic_load_n(&gJobPasses[1], __ATOMIC_RELAXED);
+}
+#endif
+
+#if DEVELOPMENT || DEBUG
+extern "C" void nvxnu_irq_cpus(nvxnu_u64 passes[4], nvxnu_u64 filters[4], nvxnu_u64 *global_wakeups)
+{
+	for (int cpu = 0; cpu < 4; cpu++) {
+		passes[cpu] = __atomic_load_n(&gIrqCpus[cpu], __ATOMIC_RELAXED);
+		filters[cpu] = __atomic_load_n(&gFilterCpus[cpu], __ATOMIC_RELAXED);
+	}
+	*global_wakeups = __atomic_load_n(&gGlobalWakeups, __ATOMIC_RELAXED);
+}
+#endif
+
 extern "C" nvxnu_u32 nvxnu_wake_seq(void)
 {
-	return nvxnu_word_seq(&gWakeSeq);
+	return globalSeq();
 }
 
 extern "C" void nvxnu_wake(void)
 {
-	nvxnu_word_wake(&gWakeSeq);
+	if (switch_gpu_wake_other(&gWake))
+		wakeGlobal();
+}
+
+extern "C" void nvxnu_wword_wake(struct switch_gpu_wake_word *word, int pass)
+{
+	if (pass ? switch_gpu_wake_pass(word) : switch_gpu_wake_other(word))
+		thread_wakeup(reinterpret_cast<event_t>(&word->pass));
+}
+
+extern "C" int nvxnu_wword_idle(struct switch_gpu_wake_word *word, nvxnu_u32 seq,
+				nvxnu_u64 deadline_ns)
+{
+	switch_gpu_wake_sleep(word, 1);
+	const int woken = idleOn(
+		reinterpret_cast<event_t>(&word->pass),
+		[word] {
+			return switch_gpu_wake_seq(word);
+		},
+		seq, deadline_ns);
+	switch_gpu_wake_sleep(word, 0);
+	return woken;
+}
+
+extern "C" void nvxnu_wword_wake_due(struct switch_gpu_wake_word *word, nvxnu_u32 seq,
+				     const char *what, nvxnu_u32 value)
+{
+	switch_gpu_wake_sleep(word, 1);
+	wakeDueOn(
+		reinterpret_cast<event_t>(&word->pass),
+		[word] {
+			return switch_gpu_wake_seq(word);
+		},
+		seq, what, value);
+	switch_gpu_wake_sleep(word, 0);
 }
 
 extern "C" int nvxnu_idle(nvxnu_u32 seq, nvxnu_u64 deadline_ns)
 {
-	return nvxnu_word_idle(&gWakeSeq, seq, deadline_ns);
+	return nvxnu_wword_idle(&gWake, seq, deadline_ns);
 }
 
 extern "C" void nvxnu_wake_due(nvxnu_u32 seq, const char *what, nvxnu_u32 value)
 {
-	nvxnu_word_wake_due(&gWakeSeq, seq, what, value);
+	nvxnu_wword_wake_due(&gWake, seq, what, value);
 }
 
 // Claims both GPU lines on a work loop (switch_interrupt_nub sleeps until the GIC is up). Called at the end of M1:
@@ -394,24 +542,23 @@ extern "C" void nvxnu_irq_start(void)
 {
 	if (__atomic_load_n(&gIrqActive, __ATOMIC_ACQUIRE))
 		return;
-	gPmc = switch_mmio_map(kGpuBar0, 0x1000);
+	gPmc = switch_mmio_map(kGpuBar0, 0x3000);
 	gIrqLoop = IOWorkLoop::workLoop();
 	for (int i = 0; i < 2; i++) {
 		IOService *nub = switch_interrupt_nub(kGpuIntids[i], false);
-		if (!gIrqLoop)
-			gIrqSources[i] = nullptr;
-		else if (i)
-			gIrqSources[i] = IOFilterInterruptEventSource::filterInterruptEventSource(
-				gIrqLoop, gpuInterrupt, gpuNonstallFilter, nub, 0);
-		else
-			gIrqSources[i] = IOInterruptEventSource::interruptEventSource(
-				gIrqLoop, gpuInterrupt, nub, 0);
+		gIrqSources[i] = gIrqLoop
+					 ? IOFilterInterruptEventSource::filterInterruptEventSource(
+						   gIrqLoop, gpuInterrupt, gpuFilter, nub, 0)
+					 : nullptr;
 		if (!gPmc || !gIrqSources[i] ||
 		    gIrqLoop->addEventSource(gIrqSources[i]) != kIOReturnSuccess) {
 			panic("tegra-gm20b: cannot attach the GPU %s interrupt (INTID %u)",
 			      i ? "nonstall" : "stall", kGpuIntids[i]);
 		}
 	}
+	gPassGate = IOCommandGate::commandGate(gIrqLoop);
+	if (!gPassGate || gIrqLoop->addEventSource(gPassGate) != kIOReturnSuccess)
+		panic("tegra-gm20b: cannot add a command gate to the GPU interrupt work loop");
 	__atomic_store_n(&gIrqActive, 1, __ATOMIC_RELEASE);
 	for (auto *source : gIrqSources)
 		source->enable();
@@ -432,6 +579,55 @@ extern "C" void nvxnu_irq_suspend(void)
 			return kIOReturnSuccess;
 		},
 		nullptr);
+}
+
+// A channel's teardown, after it cleared its slot of tgm_chan_table: an empty action on the pass's work loop, which runs
+// once any pass that may hold the channel has ended. On the work loop itself it runs at once.
+extern "C" void nvxnu_pass_barrier(void)
+{
+	if (!__atomic_load_n(&gIrqActive, __ATOMIC_ACQUIRE))
+		return;
+	gIrqLoop->runAction(
+		[](OSObject *, void *, void *, void *, void *) -> IOReturn {
+			return kIOReturnSuccess;
+		},
+		nullptr);
+}
+
+namespace
+{
+struct PassCall {
+	void (*fn)(void *);
+	void *arg;
+};
+
+IOReturn passCall(OSObject *, void *call, void *, void *, void *)
+{
+	const auto *pass = static_cast<const PassCall *>(call);
+	pass->fn(pass->arg);
+	return kIOReturnSuccess;
+}
+}  // namespace
+
+// Before the interrupts are attached there is no pass and no channel: nothing to run beside.
+extern "C" void nvxnu_pass_run(void (*fn)(void *), void *arg)
+{
+	PassCall call{fn, arg};
+	if (!__atomic_load_n(&gIrqActive, __ATOMIC_ACQUIRE)) {
+		fn(arg);
+		return;
+	}
+	gIrqLoop->runAction(passCall, nullptr, &call);
+}
+
+extern "C" int nvxnu_pass_try(void (*fn)(void *), void *arg)
+{
+	PassCall call{fn, arg};
+	if (!__atomic_load_n(&gIrqActive, __ATOMIC_ACQUIRE)) {
+		fn(arg);
+		return 1;
+	}
+	return gPassGate->attemptAction(passCall, &call) == kIOReturnSuccess ? 1 : 0;
 }
 
 // After the power-up, before nvkm arms anything (as nvxnu_irq_start() at the end of M1): the PMC enables are at reset.

@@ -3,9 +3,9 @@ import HWTestCore
 import HWTestGPU
 import Metal
 
-/// gpu.raw.resolve_twod's read arm: a resolve whose target a blit copies out later in the same command buffer, which the
-/// rules see when the tape is encoded and send through the complement (resolve.exact, raw_resolve_rule.h), against
-/// Metal's rule computed here from the samples resolve_twod_fragment shades: (sum + n/2) / n per channel.
+/// gpu.raw.resolve_twod's read arm: a resolve whose target a blit copies out later in the same command buffer, which
+/// the rules see when the tape is encoded and send to the pack's resolve pass (raw_resolve_rule.h), against Metal's
+/// rule computed here from the samples resolve_twod_fragment shades: (sum + n/2) / n per channel.
 extension ResolveTwodTest {
     static func sampleHash(_ x: Int, _ y: Int, _ sample: Int) -> UInt32 {
         var h = (UInt32(x) &* 73_856_093) ^ (UInt32(y) &* 19_349_663) ^ (UInt32(sample + 1) &* 83_492_791)
@@ -41,11 +41,31 @@ extension ResolveTwodTest {
         return out
     }
 
+    /// The 2D engine's 2x box of the pattern and its complement as raw_resolve_rule.h reads the chip, BGRA8 rows
+    static func engineReading() -> (box: [UInt8], complement: [UInt8]) {
+        var box = [UInt8](repeating: 0, count: width * height * 4), complement = box
+        let shift: [UInt32] = [16, 8, 0, 24]
+        for y in 0..<height {
+            for x in 0..<width {
+                let h0 = sampleHash(x, y, 0), h1 = sampleHash(x, y, 1)
+                for c in 0..<4 {
+                    let a = (h0 >> shift[c]) & 255, b = (h1 >> shift[c]) & 255
+                    box[(y * width + x) * 4 + c] = UInt8(X1TwodResolveReading.box(a, b))
+                    complement[(y * width + x) * 4 + c] = UInt8(X1TwodResolveReading.complement(a, b))
+                }
+            }
+        }
+        return (box, complement)
+    }
+
     /// The pass and its resolve, then a blit of the resolve target into a buffer, in one command buffer
-    func readInCommandBuffer(_ gpu: GPU, _ state: MTLRenderPipelineState, samples: Int) async throws -> Resolved {
-        let ms = try gpu.texture(.bgra8Unorm, Self.width, Self.height, usage: [.renderTarget], samples: samples)
-        let into = try gpu.texture(.bgra8Unorm, Self.width, Self.height, usage: [.renderTarget, .shaderRead])
-        let row = Self.width * 4
+    func readInCommandBuffer(
+        _ gpu: GPU, _ state: MTLRenderPipelineState, samples: Int, format: MTLPixelFormat = .bgra8Unorm,
+        bytesPerTexel: Int = 4
+    ) async throws -> Resolved {
+        let ms = try gpu.texture(format, Self.width, Self.height, usage: [.renderTarget], samples: samples)
+        let into = try gpu.texture(format, Self.width, Self.height, usage: [.renderTarget, .shaderRead])
+        let row = Self.width * bytesPerTexel
         let out = try gpu.buffer(row * Self.height)
         let before = RawFacade.counters(of: gpu.device)
         let timing = try await gpu.run { commands in

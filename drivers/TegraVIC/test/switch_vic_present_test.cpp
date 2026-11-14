@@ -96,7 +96,8 @@ extern "C" void switch_gpu_backing_describe(switch_gpu_backing *, switch_gpu_bac
     info->page_count = 1024;
 }
 
-int switch_vic_surface_access(const TegraVICSurface *surface, bool write, SwitchVICSurfaceAccess *access, bool)
+int switch_vic_surface_access(const TegraVICSurface *surface, bool write, SwitchVICSurfaceAccess *access, bool,
+                              switch_gpu_backing *)
 {
     static volatile uint64_t generation = 1;
     EXPECT_TRUE(write);

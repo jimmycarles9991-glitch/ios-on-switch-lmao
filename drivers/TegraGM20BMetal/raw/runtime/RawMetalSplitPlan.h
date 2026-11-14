@@ -33,7 +33,7 @@ __attribute__((objc_externally_retained)) inline void planSplitPrograms(RMComman
     RAW_ENCODE_SPAN(SplitPlan);
     encoder.beginSplitPlan();
 #if !defined(SWITCH_DEBUG) || SWITCH_DEBUG
-    if (cb->_forceWholePrograms || rmWholePrograms())
+    if (cb->_forceWholePrograms)
         return;
 #endif
     cb->_plan.forEachRasterGroup(begin, [&](const raw::RasterState &state, uint32_t draws) {

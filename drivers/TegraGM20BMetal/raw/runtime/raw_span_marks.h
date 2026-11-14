@@ -12,6 +12,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <iterator>
 #include <memory>
 #include <mutex>
 #include <vector>
@@ -42,17 +43,37 @@ enum class SpanKind : uint8_t {
     Tail
 };
 
+// Which program of its state a draw ran: its whole program, a variant of it, its split twin, an interlocked storage form
+// (reads and writes a colour inside the pixel interlock), a fetch-free form (the colour by fixed-function or iterated blend)
+enum class SpanForm : uint8_t {
+    Unknown,
+    Whole,
+    Variant,
+    Twin,
+    Interlock,
+    FetchFree
+};
+
+// The GM20B's issue rate the span's estimate divides by: 2 SMs of 128 lanes at 768 MHz, one instruction a lane a clock
+constexpr double kLaneInstructionsPerNs = 256 * 0.768;
+
 struct SpanLabel {
     uint64_t key = 0;
     uint32_t instructions = 0;
     uint16_t kpx = 0;  // the pass's colour target 0 in thousands of samples
     uint8_t samples = 1;
     SpanKind kind = SpanKind::Draws;
+    SpanForm form = SpanForm::Unknown;
+    uint32_t pixels = 0;  // the draw's box (its scissor within its viewport, its geometry's bound where known)
+    // its colour target 0: format, size, block-linear, compressed
+    uint32_t format = 0;
+    uint16_t width = 0, height = 0;
+    bool blockLinear = false, compressed = false;
     char name[40] = {};
 
     bool sameState(const SpanLabel &o) const
     {
-        return kind == o.kind && key == o.key && kpx == o.kpx && !strncmp(name, o.name, sizeof name);
+        return kind == o.kind && key == o.key && kpx == o.kpx && form == o.form && !strncmp(name, o.name, sizeof name);
     }
 };
 
@@ -60,6 +81,7 @@ struct StateSpan {
     SpanLabel label;
     uint32_t marks = 0;
     uint64_t ns = 0;
+    uint64_t pixels = 0;  // its draws' boxes added up
 };
 
 inline uint64_t spanSlotOffset(uint32_t stamp)
@@ -86,8 +108,9 @@ inline std::vector<StateSpan> spansOf(const volatile SpanMark *marks, const Span
         if (!out.empty() && out.back().label.sameState(label)) {
             out.back().ns += ns;
             out.back().marks++;
+            out.back().pixels += label.pixels;
         } else {
-            out.push_back({label, 1, ns});
+            out.push_back({label, 1, ns, label.pixels});
         }
     };
     for (uint32_t i = 0; i < std::min(count, kSpanMarksPerBuffer); i++) {
@@ -199,13 +222,29 @@ inline const char *spanKindName(SpanKind kind)
     return kind == SpanKind::Prologue ? "pass prologue" : kind == SpanKind::Tail ? "after the last draw" : "draws";
 }
 
-// "<us> us <name> k<key> <instructions> instr x<marks> <kpx>k[m]": one span for the log and the kernel's note
+inline const char *spanFormName(SpanForm form)
+{
+    constexpr const char *names[] = {"-", "whole", "variant", "twin", "interlock", "fetchfree"};
+    return names[size_t(form) < std::size(names) ? size_t(form) : 0];
+}
+
+// "<us> us <name> k<key> <instructions> instr x<marks> <kpx>k[m]", and for draws whose boxes are known
+// " <form> <shaded>kpx e<executed instructions a pixel> c0 <format>/<w>x<h>[/bl][+comp]": the executed estimate is the span's
+// time at kLaneInstructionsPerNs over the pixels its draws' boxes hold (where it is the static count, the program ran at
+// the chip's full issue rate). One span for the log and the kernel's note, whose text the target is the end of
 inline int formatSpan(char *out, size_t size, const StateSpan &s)
 {
     const SpanLabel &l = s.label;
-    return snprintf(out, size, "%llu us %s k%016llx %u instr x%u %uk%s", (unsigned long long)(s.ns / 1000),
-                    l.name[0] ? l.name : spanKindName(l.kind), (unsigned long long)l.key, l.instructions, s.marks,
-                    l.kpx, l.samples > 1 ? "m" : "");
+    int at = snprintf(out, size, "%llu us %s k%016llx %u instr x%u %uk%s", (unsigned long long)(s.ns / 1000),
+                      l.name[0] ? l.name : spanKindName(l.kind), (unsigned long long)l.key, l.instructions, s.marks,
+                      l.kpx, l.samples > 1 ? "m" : "");
+    if (l.kind != SpanKind::Draws || !s.pixels || at < 0 || size_t(at) >= size)
+        return at;
+    const double executed = double(s.ns) * kLaneInstructionsPerNs / double(s.pixels);
+    at += snprintf(out + at, size - size_t(at), " %s %llukpx e%.0f c0 %u/%ux%u%s%s", spanFormName(l.form),
+                   (unsigned long long)(s.pixels / 1000), executed, l.format, l.width, l.height,
+                   l.blockLinear ? "/bl" : "", l.compressed ? "+comp" : "");
+    return at;
 }
 
 }  // namespace raw

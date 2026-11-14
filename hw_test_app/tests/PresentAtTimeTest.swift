@@ -5,8 +5,10 @@ import UIKit
 
 /// presentDrawable:atTime: three periods past the display link's next frame, every fourth frame for three seconds, on a
 /// full-screen CAMetalLayer: each drawable has to be on screen no earlier than half a period before its target
-/// (presentedTime). early= counts those shown sooner, timed= those with a presentedTime at all; offset_* is presentedTime
-/// minus the target.
+/// (presentedTime). early= counts those shown sooner, timed= those with a presentedTime at all, handled= the presented
+/// handlers Metal called (with a time or 0); offset_* is presentedTime minus the target. d_frame_info_shown and
+/// d_frame_info_unsent (debug kernels) count the swaps the display held for their presentation time whose frame info it
+/// sent to Core Animation, and those replaced before any frame showed them: where a presentedTime is lost.
 @MainActor
 final class PresentAtTimeRun: NSObject {
     let layer = CAMetalLayer()
@@ -29,6 +31,7 @@ final class PresentAtTimeRun: NSObject {
     }
 
     var offsets: [Double] { shown.offsets }
+    var handled: Int { shown.handled }
 
     func start() {
         let link = CADisplayLink(target: self, selector: #selector(tick))
@@ -69,11 +72,20 @@ final class TargetTimes: @unchecked Sendable {
     private let lock = NSLock()
     private var values: [Double] = []
 
+    private var calls = 0
+
     func add(_ presented: Double, target: Double) {
-        guard presented > 0 else { return }
         lock.lock()
         defer { lock.unlock() }
+        calls += 1
+        guard presented > 0 else { return }
         values.append((presented - target) * 1000)
+    }
+
+    var handled: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return calls
     }
 
     var offsets: [Double] {
@@ -89,6 +101,7 @@ struct PresentAtTimeTest: HWTest {
     let subsystem = Subsystem.compositor
 
     func run(_ context: TestContext) async throws -> Outcome {
+        let frameInfoBefore = Self.frameInfo()
         let done = Waiter<Bool>()
         let run = await context.onStage(fullScreen: true) { stage -> PresentAtTimeRun in
             let run = PresentAtTimeRun(done: done)
@@ -100,13 +113,19 @@ struct PresentAtTimeTest: HWTest {
         await MainActor.run { run.start() }
         _ = await done.wait(timeout: 10)
         try await Task.sleep(nanoseconds: 300_000_000)
-        let (submitted, offsets) = await MainActor.run { (run.submitted, run.offsets) }
+        let (submitted, offsets, handled) = await MainActor.run { (run.submitted, run.offsets, run.handled) }
+        let frameInfoAfter = Self.frameInfo()
         let half = PresentAtTimeRun.period * 1000 / 2
         let early = offsets.filter { $0 < -half }
 
         var metrics = Metrics()
         metrics.set("submitted", submitted)
         metrics.set("timed", offsets.count)
+        metrics.set("handled", handled)
+        if let before = frameInfoBefore, let after = frameInfoAfter {
+            metrics.set("d_frame_info_shown", after.shown - before.shown)
+            metrics.set("d_frame_info_unsent", after.unsent - before.unsent)
+        }
         metrics.set("early", early.count)
         metrics.set("offset_min_ms", offsets.min() ?? 0, digits: 2)
         metrics.set("offset_p50_ms", Stats.percentile(offsets, 0.5), digits: 2)
@@ -116,5 +135,13 @@ struct PresentAtTimeTest: HWTest {
                 ("drawables presented with a time", submitted > 20 && offsets.count >= submitted / 2),
                 ("none shown more than half a period before its time (early 0)", early.isEmpty),
             ], metrics)
+    }
+
+    /// kern.switch_frame_info_shown and _unsent (debug kernels), nil when either cannot be read.
+    static func frameInfo() -> (shown: Int, unsent: Int)? {
+        guard case .value(let shown) = KernelSysctl.integer("kern.switch_frame_info_shown", as: Int32.self),
+            case .value(let unsent) = KernelSysctl.integer("kern.switch_frame_info_unsent", as: Int32.self)
+        else { return nil }
+        return (Int(shown), Int(unsent))
     }
 }

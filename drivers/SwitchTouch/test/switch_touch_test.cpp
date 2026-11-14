@@ -5,7 +5,8 @@
 //     headers parsed from the TX FIFO (generic header, payload size, I2C header with READ / REPEAT_START / IE), bytes on
 //     the wire at 400 kHz (9 bit times each, 10 for (repeated) START + address), a write stalls on an empty TX FIFO and
 //     a read on a full RX FIFO, PACKET_DONE for a packet with IE, ALL_PACKETS_DONE when a packet ends with the TX FIFO
-//     empty, NO_ACK for an absent address (the controller stops until its FIFOs are flushed), RX/TX requests as levels
+//     empty, NO_ACK for an absent address and ARB_LOST for a packet another master took the bus from (the controller
+//     stops until its FIFOs are flushed), RX/TX requests as levels
 //     from the FIFO_CONTROL triggers, write-1-to-clear INT_STATUS, self-clearing flush and config load, the bus clear.
 //     A line (INT_STATUS & INT_MASK) reaches its work-loop action gWorkLoopNs later, as IOInterruptEventSource does.
 //   * APB DMA channel 4 (TegraAPBDMA.h's API): while enabled on request 23 it moves one word per request from I2C3's RX
@@ -35,6 +36,7 @@
 #include "../SwitchTouch.h"
 #include "../../TegraAPBDMA/TegraAPBDMA.h"
 #include "../../TegraGPIO/TegraGPIO.h"
+#include "../../TegraI2C/TegraI2C.h"
 
 // Every check is a GoogleTest expectation; its message says what was expected.
 #define check(ok, what) EXPECT_TRUE(ok) << (what)
@@ -228,6 +230,7 @@ enum : uint32_t {
 enum : uint32_t {
     INT_RX_REQ = 1u << 0,
     INT_TX_REQ = 1u << 1,
+    INT_ARB_LOST = 1u << 2,
     INT_NO_ACK = 1u << 3,
     INT_ALL_PACKETS = 1u << 6,
     INT_PACKET_DONE = 1u << 7,
@@ -259,6 +262,7 @@ struct Controller {
     IOInterruptEventSource *source = nullptr;
     bool deliveryPending = false;
     unsigned packets = 0, actionsSeen = 0;
+    unsigned arbLosses = 0;  // packets that lose the bus to another master at their START (I2C5's CL-DVFS master)
     std::vector<std::string> trace;  // per submission: "W3+R2 chained" etc.
 
     unsigned rxTrigger() const
@@ -319,6 +323,14 @@ struct Controller {
 
     void addressed(uint8_t addr)
     {
+        if (arbLosses) {
+            --arbLosses;
+            latched |= INT_ARB_LOST;
+            regs[PACKET_TRANSFER_STATUS / 4] = 1u << 1;  // ARB_LOST
+            failed = true;
+            busy = held = false;
+            return;
+        }
         auto it = devices.find(addr);
         if (it == devices.end()) {
             latched |= INT_NO_ACK;
@@ -1151,6 +1163,26 @@ static void scenarioNack()
     check(gResetLine == 1 && gFtm4.intEnabled && gFtm4.sensing, "NACK: up again at the next display power-on");
 }
 
+// The DFLL's I2C master takes PWR_I2C from a MAX77620 read: CL-DVFS grants the pads to one master at a time (Tegra X1
+// TRM 35.4), so the loss is a fault: the read fails with TEGRA_I2C_EARB after its one attempt, one line, and the next
+// transfer goes through.
+static void scenarioArbitrationLost()
+{
+    bringUp();
+    Controller &pwr = gControllers[5];
+    const size_t attempts = pwr.trace.size();
+    const uint8_t reg = 0x2f;
+    uint8_t value = 0;
+    pwr.arbLosses = 1;
+    const int lost = tegra_i2c_transfer(5, 0x3c, &reg, 1, &value, 1);
+    check(lost == TEGRA_I2C_EARB, format("lost arbitration: TEGRA_I2C_EARB (got %d)", lost));
+    check(pwr.trace.size() == attempts + 1,
+          format("lost arbitration: one packet on the wire, not repeated (%zu)", pwr.trace.size() - attempts));
+    check(logged("IOLog: TegraI2C: I2C5 0x3c lost arbitration; the transfer fails"), "lost arbitration: one line");
+    check(tegra_i2c_transfer(5, 0x3c, &reg, 1, &value, 1) == TEGRA_I2C_OK && value == gPmic.regs[0x2f],
+          "lost arbitration: the next transfer goes through");
+}
+
 // No FTM4 answers at all: one line, the panel's interrupt never enabled, no watchdog, no panic. LDO6 stays on for the
 // ALS that shares it.
 static void scenarioAbsent()
@@ -1553,6 +1585,11 @@ TEST(SwitchTouch, Nack)
 TEST(SwitchTouch, Absent)
 {
     run(scenarioAbsent);
+}
+
+TEST(SwitchTouch, ArbitrationLost)
+{
+    run(scenarioArbitrationLost);
 }
 
 TEST(SwitchTouch, DmaFirstEndOfCountLost)

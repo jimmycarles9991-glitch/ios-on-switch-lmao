@@ -182,7 +182,7 @@ static inline void tegra_vic_rgb_fill(TegraVICOp *op, uint32_t r8, uint32_t g8, 
 }
 
 // A fill of a subsampled surface covers whole chroma samples: its rectangle widened to even coordinates on each
-// subsampled axis (Apple's driver rounds a border fill the same way), within the surface.
+// subsampled axis (Apple's driver rounds a border fill the same way), within the surface, whose odd edge it may end on.
 static inline void tegra_vic_even_rect(const TegraVICFormat *f, const TegraVICSurfaceDesc *d, TegraVICOp *o)
 {
     if (!f->subX && !f->subY)
@@ -194,9 +194,9 @@ static inline void tegra_vic_even_rect(const TegraVICFormat *f, const TegraVICSu
     uint32_t x1 = (o->dstX + o->dstW + (f->subX ? 1 : 0)) & mx;
     uint32_t y1 = (o->dstY + o->dstH + (f->subY ? 1 : 0)) & my;
     if (x1 > d->width)
-        x1 = d->width & mx;
+        x1 = d->width;
     if (y1 > d->height)
-        y1 = d->height & my;
+        y1 = d->height;
     o->dstX = x0;
     o->dstY = y0;
     o->dstW = x1 > x0 ? x1 - x0 : 0;
@@ -225,8 +225,6 @@ static inline const char *tegra_vic_plan(const TegraVICRequest *r, const TegraVI
     const bool writeOnly = (f & TEGRA_VIC_REQ_WRITE_ONLY) != 0;
     if (!df || (!writeOnly && !tegra_vic_format(src->fourcc)))
         return "pixel format the scaler does not take";
-    if ((f & TEGRA_VIC_REQ_ALPHA_OVERRIDE) && df->alpha)
-        return "alpha override into a surface with alpha";
     // Apple's driver answers kIOReturnUnsupported here too.
     if (!writeOnly && (src->protection & ~dst->protection))
         return "protected source into a less protected destination";
@@ -277,6 +275,8 @@ static inline const char *tegra_vic_plan(const TegraVICRequest *r, const TegraVI
         }
         o->transform = (uint32_t)(f & TEGRA_VIC_REQ_TRANSFORM);
         o->nearest = (f & TEGRA_VIC_REQ_NEAREST) ? 1 : 0;
+        o->alphaOverride = (f & TEGRA_VIC_REQ_ALPHA_OVERRIDE) ? 1 : 0;
+        o->alphaOverride8 = r->alpha_override;
         plan->readsSource = 1;
     }
     plan->callback = (r->cb_fn != 0 && (f & TEGRA_VIC_REQ_SKIP_CALLBACK) == 0) ? 1 : 0;

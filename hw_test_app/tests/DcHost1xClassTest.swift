@@ -2,11 +2,12 @@ import Darwin
 import HWTestCore
 
 /// Whether host1x routes a class 0x70 stream to DC A, and whether a WAIT_SYNCPT ahead of it holds the DC writes
-/// (drivers/NativeMobileDisplay/SwitchDcHost1xClassProbe.h, debug kernels): the kernel submits it on NVJPG's channel,
-/// increments the gate syncpoint itself, and reports what landed. A finding, not a judgement of the driver:
-/// class70=routes with held=1 means a producer's syncpoint could latch a flip with no CPU (the next build step);
-/// ignored means host1x ran past the words and DC A took none; faults means the channel stopped at them (CBSTAT's
-/// class and offset say where). Runs after every other shared test: it may stop a host1x channel for 50 ms.
+/// (drivers/NativeMobileDisplay/SwitchDcHost1xClassProbe.h, debug kernels): the kernel submits it on the display's own
+/// host1x channel, increments the gate syncpoint itself, and reports what landed. A finding, not a judgement of the
+/// driver: class70=routes with held=1 means a producer's syncpoint could latch a flip with no CPU
+/// (display.x1.host1x_flip runs that); ignored means host1x ran past the words and DC A took none; faults means the
+/// channel stopped at them (CBSTAT's class and offset say where). Runs after every other shared test: it may stop the
+/// display's host1x channel for 50 ms.
 struct DcHost1xClassTest: HWTest {
     let id = "gpu.x1.dc_host1x_class"
     let name = "host1x class 0x70 stream to DC A behind a WAIT_SYNCPT"

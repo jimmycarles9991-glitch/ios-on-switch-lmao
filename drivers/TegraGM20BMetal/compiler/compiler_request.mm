@@ -4,6 +4,7 @@
 
 #include <limits.h>
 #include <stdlib.h>
+#include "compiler_key_difference.h"
 #include "../raw/runtime/RawCompileRequest.h"
 #include "../raw/runtime/raw_compute_key.h"
 #include "../raw/runtime/raw_render_key.h"
@@ -49,8 +50,8 @@ bool renderKey(Prepared &p, const std::vector<std::map<std::string, raw::AirHash
     return true;
 }
 
-// The compute key's own part (its function's AIR, constants, limits and shape) is the compiler's; the bound textures',
-// samplers' and memory's text past it is the client's, and the store name binds the dispatch they describe
+// The compute key's own part (its function's AIR, constants and stage input, limits and shape) is the compiler's; the bound
+// textures', samplers' and memory's text past it is the client's, and the store name binds the dispatch they describe
 bool kernelKey(Prepared &p, const std::vector<std::map<std::string, raw::AirHash>> &air, uint64_t stack,
                std::string &why)
 {
@@ -61,15 +62,18 @@ bool kernelKey(Prepared &p, const std::vector<std::map<std::string, raw::AirHash
     const raw::KernelRequest &k = r.kernel;
     char shape[64];
     snprintf(shape, sizeof shape, " | tg=%u,%u,%u | tgmem=", k.threads[0], k.threads[1], k.threads[2]);
+    const std::string constants = r.stages[0].constants + raw::stageInText(k.stageIn);
     const std::string own =
-        kKernelPrefix + raw::computeStateKey(hash, r.stages[0].constants, k.maxThreads, k.multipleOfWidth) + shape;
+        kKernelPrefix + raw::computeStateKey(hash, constants, k.maxThreads, k.multipleOfWidth) + shape;
     if (r.key.compare(0, own.size(), own))
-        return why = "a kernel request whose key is not its function's", false;
+        return why = "a kernel request whose key is not its function's: " + keyDifference(r.key, own), false;
     const std::string region = " | region=1";
     const bool regionKey =
         r.key.size() > region.size() && !r.key.compare(r.key.size() - region.size(), region.size(), region);
     if (k.regionMode != regionKey)
-        return why = "a kernel request whose key names another dispatch mode", false;
+        return why = std::string("a kernel request whose key names another dispatch mode than its dispatch's (") +
+                     (k.regionMode ? "regions" : "one grid") + "): its key " + key_difference::excerpt(r.key, 0),
+               false;
     p.packKey = r.key.substr(sizeof kKernelPrefix - 1);
     p.key = raw::kernelCacheKey(stack, p.packKey);
     return true;
@@ -136,7 +140,8 @@ bool prepare(const std::string &bytes, uint64_t stack, SystemLibraries &system, 
     if (!(kernel ? kernelKey(p, air, stack, why) : renderKey(p, air, stack, why)))
         return false;
     if (p.key.key != p.request.key)
-        return why = "a request whose fields give another key than its own: " + p.key.key.substr(0, 300), false;
+        return why = "a request whose fields give another key than its own: " + keyDifference(p.request.key, p.key.key),
+               false;
     p.name = raw::storeName(p.key, p.request, identities);
     out = std::move(p);
     return true;

@@ -2,13 +2,17 @@ import Darwin
 import Foundation
 import HWTestCore
 
-/// How many JPEG decodes NVJPG finished for this process, and the output formats they wrote (debug kernels): selector 7
-/// of AppleJPEGDriverUserClient, the one CMPhoto's own decodes use, with 0x5050 at +0xcac and no source surface
-/// (drivers/TegraNVJPG/CONTRACT.md).
+/// How many JPEG decodes NVJPG finished, failed and refused for this process, the output formats it wrote and the ones
+/// asked for (debug kernels): selector 7 of AppleJPEGDriverUserClient, the one CMPhoto's own decodes use, with 0x5050
+/// at +0xcac and no source surface (drivers/TegraNVJPG/TegraNVJPGStats.h).
 enum JPEGRoute {
     struct Counts {
         let decodes: UInt64
         let formats: UInt64
+        let failed: UInt64
+        let refused: UInt64
+        /// Requests per TEGRA_NVJPG_OUT_* (formatNames' order), refused and failed ones too.
+        let asked: [UInt64]
     }
 
     /// TegraNVJPGJpeg.h's TEGRA_NVJPG_OUT_* order.
@@ -16,6 +20,15 @@ enum JPEGRoute {
 
     static func names(_ formats: UInt64) -> String {
         let named = formatNames.enumerated().filter { formats >> UInt64($0.offset) & 1 != 0 }.map(\.element)
+        return named.isEmpty ? "-" : named.joined(separator: ",")
+    }
+
+    /// The formats asked for between two reads, with their counts: "444f:1,BGRA:1".
+    static func asked(from first: Counts, to last: Counts) -> String {
+        let named = formatNames.indices.compactMap { index -> String? in
+            let count = Int(truncatingIfNeeded: last.asked[index] &- first.asked[index])
+            return count > 0 ? "\(formatNames[index]):\(count)" : nil
+        }
         return named.isEmpty ? "-" : named.joined(separator: ",")
     }
 
@@ -64,8 +77,12 @@ enum JPEGRoute {
             return .failure(TestFailure("selector 7 \(String(UInt32(bitPattern: kr), radix: 16)) size \(size)"))
         }
         return .success(
-            reply.withUnsafeBytes {
-                Counts(decodes: $0.load(as: UInt64.self), formats: $0.load(fromByteOffset: 8, as: UInt64.self))
+            reply.withUnsafeBytes { words in
+                Counts(
+                    decodes: words.load(as: UInt64.self), formats: words.load(fromByteOffset: 8, as: UInt64.self),
+                    failed: words.load(fromByteOffset: 16, as: UInt64.self),
+                    refused: words.load(fromByteOffset: 24, as: UInt64.self),
+                    asked: formatNames.indices.map { words.load(fromByteOffset: 32 + 8 * $0, as: UInt64.self) })
             })
     }
 }

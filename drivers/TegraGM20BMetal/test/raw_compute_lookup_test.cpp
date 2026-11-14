@@ -258,7 +258,7 @@ TEST(RawComputeLookup, RetryReplacementDoesNotInvalidateAnEarlierCommandBuffer)
     auto retry = cache.request(key, [](auto) {});
     ASSERT_NE(first, retry);
     EXPECT_TRUE(first->retryable());
-    EXPECT_EQ(first->state(), raw::ComputeKernelJob<int>::State::Refused);
+    EXPECT_EQ(first->state(), raw::ComputeKernelJob<int>::State::Failed);
     EXPECT_EQ(retry->state(), raw::ComputeKernelJob<int>::State::Pending);
     int value = 7;
     retry->publish({&value, false});
@@ -391,7 +391,7 @@ TEST(RawComputeLookup, RegionSetCannotAdmitPartialCompilationOrEraseRefusal)
     group.jobs[0]->publish({&first, false});
     EXPECT_EQ(group.state(), Set::State::Pending);
     group.jobs[1]->publish({nullptr, true});
-    EXPECT_EQ(group.state(), Set::State::Refused);
+    EXPECT_EQ(group.state(), Set::State::Failed);
     EXPECT_TRUE(group.retryable());
     EXPECT_EQ(wakes, 2u);
 }
@@ -441,21 +441,17 @@ TEST(RawComputeLookup, InvalidNominalThreadCountIsRefusedBeforePlanningEvenWhenT
     EXPECT_EQ(raw::computeDispatch({1, 1, 1}, {1, 1, 1}, true, 0).reason, raw::ComputeDispatch::Edge);
 }
 
-TEST(RawComputeLookup, TransientBuildFailuresStayRetryableBeyondThreeAttempts)
+// A build that failed (its compile could not run, or no room to place it) fails that make alone: the next make tries
+// afresh at once, with no delay and no count, and keeps the record it already made
+TEST(RawComputeLookup, AFailedBuildTriesAfreshAtTheNextMakeAndKeepsItsRecord)
 {
     using Build = raw::ComputeKernelBuild<int, int>;
     Build build;
-    uint64_t now = 100, clocks = 0;
     unsigned produces = 0, places = 0;
     int state = 7;
-    const auto clock = [&] {
-        ++clocks;
-        return now;
-    };
     const auto produce = [&](int &record) {
         record = 42;
         ++produces;
-        now += 2000000;
         return produces < 8 ? Build::Outcome::Failed : Build::Outcome::Made;
     };
     const auto place = [&](const int &record) {
@@ -464,38 +460,41 @@ TEST(RawComputeLookup, TransientBuildFailuresStayRetryableBeyondThreeAttempts)
         return &state;
     };
     for (unsigned i = 0; i < 7; ++i) {
-        const auto failed = build.make(clock, produce, place);
+        const auto failed = build.make(produce, place);
         EXPECT_EQ(failed.state, nullptr);
-        ASSERT_TRUE(failed.retry);
-        EXPECT_GT(failed.retryAtUs, now);
-        EXPECT_LE(failed.retryAtUs - now, 1000000u);
-        const auto stillWaiting = build.make(clock, produce, place);
-        EXPECT_TRUE(stillWaiting.retry);
+        EXPECT_TRUE(failed.retry);
         EXPECT_EQ(produces, i + 1);
-        now = failed.retryAtUs;
     }
-    EXPECT_EQ(build.make(clock, produce, place).state, &state);
+    EXPECT_EQ(build.make(produce, place).state, &state);
     EXPECT_EQ(produces, 8u);
     EXPECT_EQ(places, 1u);
-    const auto before = clocks;
     for (unsigned i = 0; i < 10000; ++i)
-        EXPECT_EQ(build.make(clock, produce, place).state, &state);
-    EXPECT_EQ(clocks, before);
+        EXPECT_EQ(build.make(produce, place).state, &state);
     EXPECT_EQ(produces, 8u);
     EXPECT_EQ(places, 1u);
+
+    Build unplaced;
+    unsigned tries = 0;
+    const auto made = [&](int &record) {
+        record = 42;
+        return Build::Outcome::Made;
+    };
+    const auto room = [&](const int &) -> const int * {
+        return ++tries < 4 ? nullptr : &state;
+    };
+    for (unsigned i = 0; i < 3; ++i)
+        EXPECT_TRUE(unplaced.make(made, room).retry);
+    EXPECT_EQ(unplaced.make(made, room).state, &state);
+    EXPECT_EQ(tries, 4u);
 }
 
 TEST(RawComputeLookup, SemanticBuildRefusalNeverRetriesOrAttemptsPlacement)
 {
     using Build = raw::ComputeKernelBuild<int, int>;
     Build build;
-    unsigned produces = 0, places = 0, clocks = 0;
+    unsigned produces = 0, places = 0;
     for (unsigned i = 0; i < 8; ++i) {
         const auto result = build.make(
-            [&] {
-                ++clocks;
-                return UINT64_MAX;
-            },
             [&](int &) {
                 ++produces;
                 return Build::Outcome::Refused;
@@ -506,40 +505,32 @@ TEST(RawComputeLookup, SemanticBuildRefusalNeverRetriesOrAttemptsPlacement)
             });
         EXPECT_EQ(result.state, nullptr);
         EXPECT_FALSE(result.retry);
-        EXPECT_EQ(result.retryAtUs, 0u);
     }
     EXPECT_EQ(produces, 1u);
     EXPECT_EQ(places, 0u);
-    EXPECT_EQ(clocks, 0u);
 }
 
-TEST(RawComputeLookup, RetryNotificationPreventsWarmDispatchFromStartingRepeatedFailedJobs)
+// A failed job fails the command buffer that needed it; the next dispatch of its key starts another job at once
+TEST(RawComputeLookup, AFailedJobFailsItsDispatchAndTheNextDispatchStartsAnother)
 {
     raw::ComputeKernelCache<int> cache;
     raw::ComputeSpecialization key;
     unsigned starts = 0;
     auto start = [&](auto job) {
         ++starts;
-        job->publish({nullptr, true, true});
+        job->publish({nullptr, true});
     };
     auto failed = cache.request(key, start);
-    for (unsigned i = 0; i < 10000; ++i) {
-        EXPECT_EQ(cache.request(key, start), failed);
-        EXPECT_FALSE(failed->retryable());
-    }
-    EXPECT_EQ(starts, 1u);
-    failed->allowRetry();
+    EXPECT_EQ(failed->state(), raw::ComputeKernelJob<int>::State::Failed);
+    EXPECT_TRUE(failed->retryable());
     auto next = cache.request(key, start);
     EXPECT_NE(next, failed);
     EXPECT_EQ(starts, 2u);
-    EXPECT_FALSE(next->retryable());
-}
-
-TEST(RawComputeLookup, RetryNotificationBeforeFailurePublicationIsNotLost)
-{
-    raw::ComputeKernelJob<int> job;
-    job.allowRetry();
-    EXPECT_FALSE(job.retryable());
-    job.publish({nullptr, true, true});
-    EXPECT_TRUE(job.retryable());
+    int value = 3;
+    auto made = cache.request(key, [&](auto job) {
+        job->publish({&value, false});
+    });
+    EXPECT_EQ(made->value(), &value);
+    EXPECT_EQ(cache.request(key, start), made);
+    EXPECT_EQ(starts, 2u);
 }

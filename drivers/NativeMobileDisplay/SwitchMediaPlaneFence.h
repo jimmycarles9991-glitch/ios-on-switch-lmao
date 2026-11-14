@@ -21,6 +21,8 @@ bool planeMediaFence(const PlaneSet &p)
     for (unsigned i = 0; i < count; ++i)
         if (producers[i].engine != SWITCH_GPU_ENGINE_VIC && producers[i].engine != SWITCH_GPU_ENGINE_NVDEC)
             return false;
+    if (SWITCH_FRAME_TIMELINE)
+        noteMediaFlipTotal(8, 1);
     const int error = planeFenceWithMediaFlip(p, producers, count);
     if (error == -22 || error == -16)
         return false;

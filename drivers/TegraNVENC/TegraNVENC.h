@@ -83,7 +83,8 @@ uint32_t tegra_nvenc_syncpt(void);  // the job fences' syncpoint
 int tegra_nvenc_wait(uint32_t fence);
 // Once tegra_nvenc_wait(fence) succeeded: 0, or the failure of a job that wrote what the job read.
 int tegra_nvenc_input_failure(uint32_t fence);
-bool tegra_nvenc_ready(void);
+bool tegra_nvenc_ready(void);   // published: a job may be submitted (a wedged engine is powered on again by it)
+bool tegra_nvenc_wedged(void);  // parked after a failed reset or power-on: it touches no memory until powered on
 
 // A stalled job's line (TegraNVENCDump.cpp): the falcon's state, and where the app the job runs is stuck.
 const char *tegra_nvenc_falcon_dump(volatile uint8_t *nvenc);

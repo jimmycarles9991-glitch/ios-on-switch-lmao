@@ -7,6 +7,7 @@
 #include "../raw/runtime/raw_pass_writes.h"
 #include "../raw/runtime/raw_state_segment.h"
 #include "../raw/runtime/raw_zcull.h"
+#include "TegraGM20BABI.h"
 #include "../../../kits/SwitchGM20BEmit/SwitchGM20BPushDecode.h"
 #include <cstring>
 #include <map>
@@ -217,6 +218,14 @@ TEST(RawStateSegment, AColourMatrixCallReadsItsUniformUnprefetchedAndItsClampPai
             EXPECT_EQ(fetched[at + 10], 0u);
         }
     }
+}
+
+TEST(RawStateSegment, ACommandBuffersSegmentBindsFitOneJobsPushBudget)
+{
+    EXPECT_EQ(raw::segmentBindBudget(TegraGM20BMaxJobPushes), 384u);
+    EXPECT_EQ(raw::segmentBindBudget(TegraGM20BMaxPushes), 95u);
+    for (const uint32_t pushes : {uint32_t(TegraGM20BMaxJobPushes), uint32_t(TegraGM20BMaxPushes)})
+        EXPECT_LE(2 * raw::segmentBindBudget(pushes), pushes * 3 / 4) << pushes;
 }
 
 TEST(RawStateSegment, TheHeapCopiesEachStreamOnceAndNeverMovesIt)

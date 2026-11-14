@@ -22,7 +22,7 @@ enum StillWriter {
         switch image.format {
         case .jpeg420: try writeJPEG(pixels, pattern, subsampling: TJSAMP_420, to: url)
         case .jpeg422: try writeJPEG(pixels, pattern, subsampling: TJSAMP_422, to: url)
-        case .jpeg444: try writeJPEG(pixels, pattern, subsampling: TJSAMP_444, to: url)
+        case .jpeg444, .jpeg444Small: try writeJPEG(pixels, pattern, subsampling: TJSAMP_444, to: url)
         case .png: try writeImageIO(pixels, pattern, type: .png, to: url)
         case .heic, .heicGrid:
             try writeImageIO(pixels, pattern, type: .heic, to: url)

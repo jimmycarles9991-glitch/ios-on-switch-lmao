@@ -20,7 +20,10 @@ struct SamplerDesc {                                      // the MTLSamplerDescr
     // a min or mag filter Cubic (MTLSamplerMinMagFilterCubic): the header filters nearest, a placeholder no filtered read
     // takes, and a state samples through it on its cubic variant (raw_cubic.h), which emulates Metal's bicubic filter
     bool cubic = false;
+    uint8_t border = 0;  // a border axis's opaque colour: kBorderOpaqueBlack or kBorderOpaqueWhite, 0 transparent black
 };
+
+constexpr uint8_t kBorderOpaqueBlack = 1, kBorderOpaqueWhite = 2;  // MTLSamplerBorderColor
 
 // The MTLSamplerDescriptor's properties, as Metal answers them
 struct MetalSamplerFields {
@@ -68,10 +71,10 @@ inline uint8_t metalAnisotropy(uint64_t value)
     return uint8_t(p);
 }
 
-// False where m2v's sampler is one the header does not express: a comparison, NaN clamps (m2v refuses where they are used), a
-// border axis whose border is not transparent black (Metal's ClampToZero reads the descriptor's border colour too, and an
-// opaque border depends on the view's swizzle), or pixel coordinates mirrored once on s or t (which Metal mirrors by texel
-// index; the texture unit's unnormalized addressing takes only clamps, as Vulkan's unnormalized samplers do).
+// False where m2v's sampler is one the header does not express: a comparison, NaN clamps (m2v refuses where they are used), or
+// pixel coordinates mirrored once on s or t (which Metal mirrors by texel index; the texture unit's unnormalized addressing
+// takes only clamps, as Vulkan's unnormalized samplers do). A border axis (Metal's ClampToZero reads the descriptor's border
+// colour too) reads the colour's texel for the texture it samples (borderTexel), which its header holds.
 // Pixel coordinates are the texture unit's (samplerCoordinateBits): the sampler Metal samples them with is plain Metal's
 // (metal2vulkan-runtime sampler.rs taken_descriptor): its wrapping axes clamped to the edge, level 0 alone, no anisotropy.
 // lodAverage changes nothing m2v hands NVK.
@@ -82,6 +85,71 @@ inline uint8_t metalAnisotropy(uint64_t value)
 inline void compareHeader(uint32_t w[8], uint8_t function)
 {
     w[0] = (w[0] & ~0x1E00u) | 1u << 9 | uint32_t(function & 7) << 10;
+}
+
+// The texel Metal reads at a border of colour `border` (SamplerDesc::border) of a texture whose header word 0 before its
+// swizzle is `tic0` and whose MTLTextureSwizzle is `swizzle` (m2v metal/sampler.rs border_texel, measured on an M4): the
+// colour in each channel the format has, a missing red, green or blue 0 and alpha 1, A8Unorm's alpha the colour's red,
+// then the swizzle. Bit c: lane c reads one; kBorderInteger: an integer format's ones.
+constexpr uint8_t kBorderInteger = 0x10;
+
+inline uint8_t borderTexel(uint32_t tic0, const uint8_t swizzle[4], bool a8, uint8_t border)
+{
+    if (!border)
+        return 0;
+    const bool white = border == kBorderOpaqueWhite;
+    bool v[4];
+    for (uint32_t c = 0; c < 4; c++) {
+        const uint32_t source = tic0 >> (19 + 3 * c) & 7;
+        const bool present = source >= 2 && source <= 5;
+        v[c] = c < 3 ? present && white : !present || !a8 || white;
+    }
+    uint8_t texel = 0;
+    for (uint32_t lane = 0; lane < 4; lane++) {
+        const uint8_t s = swizzle[lane];
+        if (s == 1 || (s >= 2 && s <= 5 && v[s - 2]))
+            texel |= uint8_t(1u << lane);
+    }
+    const uint32_t type = tic0 >> 7 & 7;
+    return texel | (type == 3 || type == 4 ? kBorderInteger : 0);
+}
+
+// The texel an identity view of a float format of four channels reads, which a sampler's own header holds
+inline uint8_t ownBorderTexel(uint8_t border)
+{
+    return border == kBorderOpaqueWhite ? 0xF : border == kBorderOpaqueBlack ? 0x8 : 0;
+}
+
+// Header `w`'s border words reading `texel`: TEXSAMP4..7 BORDER_COLOR_R..A (a float or integer one, by kBorderInteger)
+// and the sRGB border TEXSAMP2 S_R_G_B_BORDER_COLOR_R (31:24) and TEXSAMP3 _G (19:12) and _B (27:20), as NVK writes
+// them for the colour it is given
+inline void borderHeader(uint32_t w[8], uint8_t texel)
+{
+    const uint32_t one = texel & kBorderInteger ? 1u : 0x3f800000u;
+    for (uint32_t c = 0; c < 4; c++)
+        w[4 + c] = texel >> c & 1 ? one : 0;
+    const auto srgb = [&](uint32_t c) {
+        return !(texel & kBorderInteger) && (texel >> c & 1) ? 255u : 0u;
+    };
+    w[2] = (w[2] & 0x00ffffffu) | srgb(0) << 24;
+    w[3] = (w[3] & ~0x0ffff000u) | srgb(1) << 12 | srgb(2) << 20;
+}
+
+// TEXSAMP0 ADDRESS_U, ADDRESS_V and ADDRESS_P values (bits 2:0, 5:3, 8:6) samplerHeader and NVK write
+constexpr uint32_t kTscWrap = 0, kTscMirror = 1, kTscClampToEdge = 2, kTscBorder = 3, kTscMirrorOnceClampToEdge = 5;
+
+// Sampler header `w` under a planar texture's address map `map` (Texture::addressMap): 1 sends the wrapping modes to the
+// edge, 2 the clamps to zero and to the border, 3 both. On the header's own fields, so a constexpr sampler's header,
+// which has no descriptor, takes the map as a sampler state's does (Device::samplerVariant).
+inline void mapSamplerAddresses(uint32_t w[8], uint8_t map)
+{
+    const bool wrapped = map == 1 || map == 3, clamps = map == 2 || map == 3;
+    for (uint32_t shift : {0u, 3u, 6u}) {
+        const uint32_t mode = w[0] >> shift & 7;
+        const bool wraps = mode == kTscWrap || mode == kTscMirror || mode == kTscMirrorOnceClampToEdge;
+        if ((wrapped && wraps) || (clamps && mode == kTscBorder))
+            w[0] = (w[0] & ~(7u << shift)) | kTscClampToEdge << shift;
+    }
 }
 
 inline bool takeSampler(const MetalSamplerFields &m, SamplerDesc &s)
@@ -99,8 +167,6 @@ inline bool takeSampler(const MetalSamplerFields &m, SamplerDesc &s)
     const bool border =
         m.sAddress >= kAddressClampToZero || m.tAddress >= kAddressClampToZero || m.rAddress >= kAddressClampToZero;
     const uint64_t borderColor = m.borderColor & 3;
-    if (border && borderColor != 0 && borderColor != 3)
-        return false;
     if (m.minFilter > kFilterCubic || m.magFilter > kFilterCubic || m.mipFilter > 2 ||
         m.sAddress > kAddressClampToBorderColor || m.tAddress > kAddressClampToBorderColor ||
         m.rAddress > kAddressClampToBorderColor)
@@ -117,6 +183,7 @@ inline bool takeSampler(const MetalSamplerFields &m, SamplerDesc &s)
     s.lodMin = m.lodMin > m.lodMax ? m.lodMax : m.lodMin;
     s.pixel = !m.normalizedCoordinates;
     s.compare = uint8_t(m.compareFunction);
+    s.border = border && borderColor != 3 ? uint8_t(borderColor) : 0;
     if (s.pixel) {
         for (uint8_t *axis : {&s.sAddress, &s.tAddress, &s.rAddress})
             if (*axis == kAddressRepeat || *axis == kAddressMirrorRepeat ||

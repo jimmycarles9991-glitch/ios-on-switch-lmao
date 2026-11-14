@@ -44,8 +44,7 @@ a test that only the other version's app has as N/A. Tapping a test in the list 
 `cpu.clock` and `cpu.sustained` read each core's clock from a chain of dependent ADDs (`cpu/switch_cpu_clock.c`, one
 cycle each on the A57) divided by the thread's own CPU time, so preemption doesn't lower the reading. `cpu.sustained`
 keeps every core busy for 20 s and compares the last two seconds with the first. `gpu.latency` times 120 small
-command buffers on each device: the CPU's encode, and commit to completed handler. `gpu.raw_share` runs last and
-reads the facade's process-wide counters: how many command buffers went to raw, to m2v or split, and why.
+command buffers on each device: the CPU's encode, and commit to completed handler.
 
 ## GPU, compositor and pacing scenes
 

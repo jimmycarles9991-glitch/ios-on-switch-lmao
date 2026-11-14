@@ -4,18 +4,25 @@ import HWTestGPU
 import Metal
 
 /// LIMITS 3D-G13: SET_CONSTANT_COLOR_RENDERING (0x0f40, colour words 0x0f44-0x0f50), the ROP writing one colour for
-/// every covered sample without the pixel program's output; no open driver sets it on GM20B. Arms, one command buffer
-/// each, the program drawing (0.2, 0.4, 0.6, 1) while the constant names (0.8, 0.1, 0.3, 1):
+/// every covered sample without the pixel program's output; no open driver sets it on GM20B. Boot 19 read every covered
+/// texel at the program's colour with the pixel stage on, so the arms that judge turn the stage off for the draw
+/// (SET_PIPELINE_SHADER(PIXEL) 0x2140, kits/SwitchGM20BEmit's form). Arms, one command buffer each, the program drawing
+/// (0.2, 0.4, 0.6, 1) while the constant names (0.8, 0.1, 0.3, 1):
 /// - shader: the method off, the program's colour (the reference route);
-/// - float: the constant as float bits, as the 3D clear takes them for unorm targets;
-/// - packed: the constant as one unorm8 code a word;
-/// - blend: float bits with alpha 0.5 under source-over over the clear colour (whether the blend unit sees it).
-/// The claim: the float arm's covered pixels read the constant exactly and its uncovered ones the clear. Then 32
-/// full-target 1280x720 draws with the constant on against off give the pixel program's share of a solid fill.
-/// gv100 names the draw-time class error CONSTANT_COLOR_RENDERING_WITHOUT_PRE_PS_COVERAGE (0x138): a refused arm is
-/// recorded, not judged.
+/// - float: the constant as float bits with the pixel stage on (boot 19's form, reported);
+/// - float_nops: the constant as float bits, the pixel stage off (the production form);
+/// - packed_nops: the constant as one unorm8 code a word, the stage off;
+/// - blend_nops: float bits with alpha 0.5 under source-over over the clear colour, the stage off;
+/// - nops_only: the stage off and the method off (what the ROP writes with neither).
+/// The claim: the float_nops arm's covered pixels read the constant exactly and its uncovered ones the clear. Then 32
+/// full-target 1280x720 draws in the production form against the program give the pixel program's share of a solid
+/// fill. gv100 names the draw-time class error CONSTANT_COLOR_RENDERING_WITHOUT_PRE_PS_COVERAGE (0x138), which the
+/// context's SET_POST_PS_INITIAL_COVERAGE 1 answers: a refused arm is recorded, not judged.
 enum X1ConstantColourProbe {
     static let setConstantColour: UInt32 = 0x0f40
+    static let pixelStage: UInt32 = 0x2140
+    static let stageOff: [(UInt32, UInt32)] = [(pixelStage, 0x50)]
+    static let stageOn: [(UInt32, UInt32)] = [(pixelStage, 0x51)]
     static let size = 64
     static let program = SIMD4<Float>(0.2, 0.4, 0.6, 1)
     static let constant: [Float] = [0.8, 0.1, 0.3, 1]
@@ -56,17 +63,29 @@ enum X1ConstantColourProbe {
     struct Arm {
         let name: String
         let words: [(UInt32, UInt32)]
+        let after: [(UInt32, UInt32)]
         let blend: Bool
         let expected: [UInt8]
+        let judged: Bool
     }
 
+    static let floatWords = words(constant.map(\.bitPattern))
+
     static let arms: [Arm] = [
-        Arm(name: "shader", words: [], blend: false, expected: bgra([0.2, 0.4, 0.6, 1])),
-        Arm(name: "float", words: words(constant.map(\.bitPattern)), blend: false, expected: bgra(constant)),
-        Arm(name: "packed", words: words(constant.map { UInt32(code($0)) }), blend: false, expected: bgra(constant)),
+        Arm(name: "shader", words: [], after: [], blend: false, expected: bgra([0.2, 0.4, 0.6, 1]), judged: true),
+        Arm(name: "float", words: floatWords, after: off, blend: false, expected: bgra(constant), judged: false),
         Arm(
-            name: "blend", words: words([0.4, 0.05, 0.15, 0.5].map { Float($0).bitPattern }), blend: true,
-            expected: bgra([0.4, 0.05, 0.15, 0.5 + 0.5])),
+            name: "float_nops", words: stageOff + floatWords, after: off + stageOn, blend: false,
+            expected: bgra(constant), judged: true),
+        Arm(
+            name: "packed_nops", words: stageOff + words(constant.map { UInt32(code($0)) }), after: off + stageOn,
+            blend: false, expected: bgra(constant), judged: false),
+        Arm(
+            name: "blend_nops", words: stageOff + words([0.4, 0.05, 0.15, 0.5].map { Float($0).bitPattern }),
+            after: off + stageOn, blend: true, expected: bgra([0.4, 0.05, 0.15, 0.5 + 0.5]), judged: false),
+        Arm(
+            name: "nops_only", words: stageOff, after: stageOn, blend: false, expected: bgra(constant),
+            judged: false),
     ]
 
     static let probe = X1Probe(
@@ -88,7 +107,7 @@ enum X1ConstantColourProbe {
                     paths.append(try await gpu.run(draw(state, target, quad: quad, count: 1)).path)
                 } else {
                     let drawn = try await RawMethods.draw(
-                        gpu, before: arm.words, after: off, draw(state, target, quad: quad, count: 1))
+                        gpu, before: arm.words, after: arm.after, draw(state, target, quad: quad, count: 1))
                     paths.append(drawn.path)
                     emitted += drawn.emitted
                 }
@@ -110,7 +129,7 @@ enum X1ConstantColourProbe {
             let centre = Array(bytes.pixel(16, 16, width: size)).map { String($0) }
             metrics.set("\(arm.name)_texel", centre.joined(separator: "/"))
             metrics.set("\(arm.name)_outside_wrong", outside)
-            if arm.name == "float" || arm.name == "shader" {
+            if arm.judged {
                 wrong["\(arm.name)_covered_wrong"] = covered
             } else {
                 metrics.set("\(arm.name)_covered_wrong", covered)
@@ -122,7 +141,7 @@ enum X1ConstantColourProbe {
         for _ in 0..<3 {
             offMs += try await gpu.run(draw(state, big, quad: GPU.fullScreen, count: 32)).gpuMilliseconds
             if let on = try? await RawMethods.draw(
-                gpu, before: words(constant.map(\.bitPattern)), after: off,
+                gpu, before: stageOff + floatWords, after: off + stageOn,
                 draw(state, big, quad: GPU.fullScreen, count: 32))
             {
                 onMs += on.gpuMilliseconds

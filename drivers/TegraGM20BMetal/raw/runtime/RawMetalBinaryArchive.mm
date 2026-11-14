@@ -104,8 +104,6 @@ static RMFunction *own(id<MTLFunction> function)
     RMFunction *f = own(d.computeFunction);
     if (!f)
         return failed(error, MTLBinaryArchiveErrorUnexpectedElement, @"a function of another device");
-    if (const char *why = rmUnsupportedComputeState(d))
-        return failed(error, MTLBinaryArchiveErrorCompilationFailure, @(why));
     return [self add:rmArchiveKey(computeKey(d, f))];
 }
 
@@ -202,15 +200,6 @@ NSError *rmArchiveMissError(NSString *function, const char *pipeline)
                            userInfo:@{NSLocalizedDescriptionKey : text}];
 }
 
-static bool missed(raw::ArchiveAnswer answer, NSString *function, const char *pipeline, NSError **error)
-{
-    if (answer != raw::ArchiveAnswer::Missed)
-        return false;
-    if (error)
-        *error = rmArchiveMissError(function, pipeline);
-    return true;
-}
-
 bool rmPackHoldsKernels(const std::string &stateKey)
 {
     const raw::Pack &pack = gRM->raw->pack();
@@ -221,15 +210,4 @@ bool rmPackHoldsKernels(const std::string &stateKey)
 const raw::PackComputeFacts *rmPackComputeFacts(const std::string &stateKey)
 {
     return gRM->raw->pack().computeFacts(raw::Pack::fnv(stateKey.data(), stateKey.size()));
-}
-
-bool rmTileArchiveAnswer(MTLTileRenderPipelineDescriptor *twin, MTLTileRenderPipelineDescriptor *d,
-                         MTLPipelineOption &options, NSError **error)
-{
-    RMFunction *f = own(d.tileFunction);
-    const raw::ArchiveAnswer answer =
-        f ? rmArchiveAnswer(d.binaryArchives, options, rmArchiveKey(tileKey(d, f))) : raw::ArchiveAnswer::NotAsked;
-    twin.binaryArchives = nil;
-    options &= ~MTLPipelineOptionFailOnBinaryArchiveMiss;
-    return !missed(answer, f.name, "tile", error);
 }

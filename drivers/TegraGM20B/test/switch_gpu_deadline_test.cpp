@@ -2,16 +2,10 @@
 #include <gtest/gtest.h>
 #include <cstdint>
 #include <vector>
+#include "drivers/TegraGM20B/SwitchGpuBusy.h"
 #include "drivers/TegraGM20B/SwitchGpuJobFences.h"
 
-struct tgm_chan {
-	uint32_t gov_done, completed;
-};
-
-extern "C" uint32_t tgm_chan_completed(tgm_chan *chan)
-{
-	return chan->completed;
-}
+switch_gpu_busy tgm_busy;
 
 namespace
 {
@@ -23,7 +17,6 @@ constexpr u64 IDLE_DROP_NS = 500ull * 1000 * 1000;
 struct {
 	int on, low, dropping;
 	uint64_t service_until, last_busy;
-	u64 kicked, retired;
 	void *drop_w, *raise_w, *settle_w;
 	int settling;
 } tgm_idle;
@@ -55,6 +48,7 @@ protected:
 	void SetUp() override
 	{
 		tgm_idle = {};
+		tgm_busy = {};
 		tgm_idle.on = 1;
 		now = 1000000000;
 		last_swap = 0;
@@ -94,13 +88,15 @@ TEST_F(GpuDeadline, ExpiredAndDisabledRequestsDoNothing)
 }
 
 // One SubmitAddress carrying `batches` work batches, kicked as tgm_chan_fence_job kicks it: every seqno it releases.
+constexpr u32 kChid = 9;
+
 u32 kick(u32 submitted, u32 batches)
 {
 	std::vector<tgm_push> pushes(batches, tgm_push{0x100000, 16, 0, 0, 1, 0});
 	pushes.back().fence = 0;
 	const switch_gpu_job_emitter emitter = {nullptr, [](void *, u32) {}, [](void *, u32) {}};
 	const u32 last = switch_gpu_job_emit(pushes.data(), batches, submitted, &emitter);
-	idle_kicked(submitted + 1, last);
+	switch_gpu_busy_kick(&tgm_busy, kChid, last);
 	return last;
 }
 
@@ -112,14 +108,13 @@ void idleFor(u64 ns)
 
 TEST_F(GpuDeadline, AJobsInternalFencesAllRetireAndTheClockDropsOnce)
 {
-	tgm_chan chan = {40, 40};
+	switch_gpu_busy_open(&tgm_busy, kChid, 40);
 	const u32 last = kick(40, 4);
 	ASSERT_EQ(last, 44u);
-	EXPECT_EQ(idle_in_flight(), 4u);
+	EXPECT_EQ(idle_in_flight(), 1);
 	for (u32 seqno = 41; seqno <= last; ++seqno) {
-		chan.completed = seqno;
-		idle_fenced(&chan);
-		EXPECT_EQ(idle_in_flight(), u64(last - seqno)) << seqno;
+		switch_gpu_busy_done(&tgm_busy, kChid, seqno);
+		EXPECT_EQ(idle_in_flight(), seqno == last ? 0 : 1) << seqno;
 	}
 	idleFor(IDLE_DROP_NS);
 	tegra_gm20b_idle_tick();
@@ -131,12 +126,11 @@ TEST_F(GpuDeadline, AJobsInternalFencesAllRetireAndTheClockDropsOnce)
 
 TEST_F(GpuDeadline, ACompletionSeenOnlyAtTheJobsEndRetiresEveryFence)
 {
-	tgm_chan chan = {7, 7};
+	switch_gpu_busy_open(&tgm_busy, kChid, 7);
 	kick(7, 3);
 	const u32 last = kick(10, 28);
-	chan.completed = last;
-	idle_fenced(&chan);
-	EXPECT_EQ(idle_in_flight(), 0u);
+	switch_gpu_busy_done(&tgm_busy, kChid, last);
+	EXPECT_EQ(idle_in_flight(), 0);
 	idleFor(IDLE_DROP_NS);
 	tegra_gm20b_idle_tick();
 	EXPECT_EQ(scheduled, 1u);
@@ -146,10 +140,9 @@ TEST_F(GpuDeadline, ACompletionSeenOnlyAtTheJobsEndRetiresEveryFence)
 // raised no interrupt to count it), and drops nothing.
 TEST_F(GpuDeadline, WorkInFlightOrARecentSwapKeepsTheRunClock)
 {
-	tgm_chan chan = {0, 0};
+	switch_gpu_busy_open(&tgm_busy, kChid, 0);
 	kick(0, 3);
-	chan.completed = 2;
-	idle_fenced(&chan);
+	switch_gpu_busy_done(&tgm_busy, kChid, 2);
 	idleFor(IDLE_DROP_NS / 2);
 	tegra_gm20b_idle_tick();
 	EXPECT_EQ(scheduled, 0u);
@@ -159,38 +152,34 @@ TEST_F(GpuDeadline, WorkInFlightOrARecentSwapKeepsTheRunClock)
 	EXPECT_EQ(scheduled, 1u);
 	EXPECT_EQ(tgm_idle.settling, 1);
 	EXPECT_EQ(tgm_idle.dropping, 0);
-	chan.completed = 3;
-	idle_fenced(&chan);
+	switch_gpu_busy_settle(&tgm_busy, kChid,
+			       3);  // the settle read the quiet job's end from its fence
 	last_swap = now - IDLE_DROP_NS / 2;
 	tegra_gm20b_idle_tick();
 	EXPECT_EQ(scheduled, 1u);
 }
 
-TEST_F(GpuDeadline, TeardownAndALatePassRetireADeadChannelOnce)
+// A torn-down channel counts no more, whatever its fence; a late pass of it changes nothing.
+TEST_F(GpuDeadline, TeardownForgetsADeadChannel)
 {
-	tgm_chan chan = {100, 100};
-	const u32 last = kick(100, 5);
-	chan.completed = 102;
-	idle_fenced(&chan);
-	idle_retire(&chan, last);
-	EXPECT_EQ(idle_in_flight(), 0u);
-	chan.completed = last;  // tgm_chan_killed releases the whole sequence
-	idle_fenced(&chan);
-	idle_retire(&chan, last);
-	EXPECT_EQ(idle_in_flight(), 0u);
-	EXPECT_EQ(tgm_idle.retired, 5u);
+	switch_gpu_busy_open(&tgm_busy, kChid, 100);
+	kick(100, 5);
+	switch_gpu_busy_done(&tgm_busy, kChid, 102);
+	EXPECT_EQ(idle_in_flight(), 1);
+	switch_gpu_busy_close(&tgm_busy, kChid);
+	EXPECT_EQ(idle_in_flight(), 0);
+	switch_gpu_busy_done(&tgm_busy, kChid, 103);
+	EXPECT_EQ(idle_in_flight(), 0);
 }
 
-TEST_F(GpuDeadline, TheSequenceWrapsWithoutLosingCount)
+TEST_F(GpuDeadline, TheSequenceWraps)
 {
-	tgm_chan chan = {UINT32_MAX - 1, UINT32_MAX - 1};
+	switch_gpu_busy_open(&tgm_busy, kChid, UINT32_MAX - 1);
 	const u32 last = kick(UINT32_MAX - 1, 4);
 	EXPECT_EQ(last, 2u);
-	chan.completed = 0;
-	idle_fenced(&chan);
-	EXPECT_EQ(idle_in_flight(), 2u);
-	chan.completed = last;
-	idle_fenced(&chan);
-	EXPECT_EQ(idle_in_flight(), 0u);
+	switch_gpu_busy_done(&tgm_busy, kChid, 0);
+	EXPECT_EQ(idle_in_flight(), 1);
+	switch_gpu_busy_done(&tgm_busy, kChid, last);
+	EXPECT_EQ(idle_in_flight(), 0);
 }
 }  // namespace

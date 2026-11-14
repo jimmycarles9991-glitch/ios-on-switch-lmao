@@ -13,18 +13,20 @@
 #include <vector>
 
 #include "../TegraGM20BSleepGate.h"
+#include "gm20b_gate_cpus.h"
 
 namespace
 {
 TEST(GM20BSleepGate, OpenLetsCallersInAndOut)
 {
 	tgm_gate g = {};
-	EXPECT_EQ(tgm_gate_try_enter(&g), TGM_GATE_IN);
-	EXPECT_EQ(tgm_gate_try_enter(&g), TGM_GATE_IN);
-	EXPECT_EQ(g.inside, 2u);
-	EXPECT_FALSE(tgm_gate_leave(&g)) << "an open gate has no closer to wake";
-	EXPECT_FALSE(tgm_gate_leave(&g));
-	EXPECT_EQ(g.inside, 0u);
+	EXPECT_EQ(tgm_gate_try_enter(&g, 0), TGM_GATE_IN);
+	EXPECT_EQ(tgm_gate_try_enter(&g, 1), TGM_GATE_IN);
+	EXPECT_EQ(tgm_gate_inside(&g), 2u);
+	EXPECT_FALSE(tgm_gate_leave(&g, 3)) << "an open gate has no closer to wake";
+	EXPECT_FALSE(tgm_gate_leave(&g, 0));
+	EXPECT_EQ(tgm_gate_inside(&g), 0u)
+		<< "callers that left on other CPUs than they entered on";
 	EXPECT_FALSE(tgm_gate_drained(&g)) << "drained means shut and empty";
 }
 
@@ -34,20 +36,20 @@ TEST(GM20BSleepGate, CloseWithNobodyInsideIsDrainedAtOnce)
 	tgm_gate_close(&g);
 	EXPECT_TRUE(tgm_gate_is_shut(&g));
 	EXPECT_TRUE(tgm_gate_drained(&g));
-	EXPECT_EQ(tgm_gate_try_enter(&g), TGM_GATE_SHUT);
-	EXPECT_EQ(g.inside, 0u) << "a caller turned back is not counted";
+	EXPECT_EQ(tgm_gate_try_enter(&g, 2), TGM_GATE_SHUT);
+	EXPECT_EQ(tgm_gate_inside(&g), 0u) << "a caller turned back is not counted";
 }
 
 TEST(GM20BSleepGate, LastLeaveWakesTheCloser)
 {
 	tgm_gate g = {};
-	ASSERT_EQ(tgm_gate_try_enter(&g), TGM_GATE_IN);
-	ASSERT_EQ(tgm_gate_try_enter(&g), TGM_GATE_IN);
+	ASSERT_EQ(tgm_gate_try_enter(&g, 0), TGM_GATE_IN);
+	ASSERT_EQ(tgm_gate_try_enter(&g, 0), TGM_GATE_IN);
 	tgm_gate_close(&g);
 	EXPECT_FALSE(tgm_gate_drained(&g));
-	EXPECT_FALSE(tgm_gate_leave(&g)) << "one is still inside";
+	EXPECT_FALSE(tgm_gate_leave(&g, 1)) << "one is still inside";
 	EXPECT_FALSE(tgm_gate_drained(&g));
-	EXPECT_TRUE(tgm_gate_leave(&g)) << "the last one out wakes the closer";
+	EXPECT_TRUE(tgm_gate_leave(&g, 2)) << "the last one out wakes the closer";
 	EXPECT_TRUE(tgm_gate_drained(&g));
 }
 
@@ -56,19 +58,19 @@ TEST(GM20BSleepGate, ABackedOutEnterThatDrainsTheGateWakesTheCloser)
 	// The race try_enter covers: a caller that counted itself in, then saw the gate shut. Replayed by hand: the closer
 	// shuts the gate between the caller's first check and its add.
 	tgm_gate g = {};
-	__atomic_add_fetch(&g.inside, 1, __ATOMIC_SEQ_CST);
+	g.cells[1].enters = 1;
 	tgm_gate_close(&g);
 	EXPECT_FALSE(tgm_gate_drained(&g)) << "the closer sees the caller and must wait for it";
-	const bool wake = __atomic_sub_fetch(&g.inside, 1, __ATOMIC_SEQ_CST) == 0;
-	EXPECT_TRUE(wake);
+	g.cells[1].leaves = 1;
+	EXPECT_EQ(tgm_gate_inside(&g), 0u) << "the back-out drains the gate: it wakes the closer";
 	EXPECT_TRUE(tgm_gate_drained(&g));
 	// Through the function: a shut gate with one caller inside turns a second back without counting it.
 	tgm_gate h = {};
-	ASSERT_EQ(tgm_gate_try_enter(&h), TGM_GATE_IN);
+	ASSERT_EQ(tgm_gate_try_enter(&h, 0), TGM_GATE_IN);
 	tgm_gate_close(&h);
-	EXPECT_EQ(tgm_gate_try_enter(&h), TGM_GATE_SHUT);
-	EXPECT_EQ(h.inside, 1u);
-	EXPECT_TRUE(tgm_gate_leave(&h));
+	EXPECT_EQ(tgm_gate_try_enter(&h, 1), TGM_GATE_SHUT);
+	EXPECT_EQ(tgm_gate_inside(&h), 1u);
+	EXPECT_TRUE(tgm_gate_leave(&h, 1));
 }
 
 TEST(GM20BSleepGate, OpenAgainAfterTheWake)
@@ -78,16 +80,17 @@ TEST(GM20BSleepGate, OpenAgainAfterTheWake)
 	ASSERT_TRUE(tgm_gate_drained(&g));
 	tgm_gate_open(&g);
 	EXPECT_FALSE(tgm_gate_is_shut(&g));
-	EXPECT_EQ(tgm_gate_try_enter(&g), TGM_GATE_IN);
-	EXPECT_FALSE(tgm_gate_leave(&g));
+	EXPECT_EQ(tgm_gate_try_enter(&g, 3), TGM_GATE_IN);
+	EXPECT_FALSE(tgm_gate_leave(&g, 3));
 	tgm_gate_close(&g);  // the next sleep
 	EXPECT_TRUE(tgm_gate_drained(&g));
 }
 
 // gpu_bringup.c's protocol on host primitives: one mutex, `shutCv` for callers waiting for the open (event &gate.shut), `insideCv`
-// for the closer (event &gate.inside). Every wake is under the mutex, as gate_wake_closer and wake_open take tgm_gate_lock.
+// for the closer (event TGM_GATE_DRAINED). Every wake is under the mutex, as gate_wake_closer and wake_open take tgm_gate_lock.
 struct Kernel {
 	tgm_gate gate = {};
+	GateCpus cpus;
 	std::mutex lock;
 	std::condition_variable shutCv, insideCv;
 
@@ -100,7 +103,7 @@ struct Kernel {
 	void enter()  // tgm_gate_enter
 	{
 		tgm_gate_entry entry;
-		while ((entry = tgm_gate_try_enter(&gate)) != TGM_GATE_IN) {
+		while ((entry = cpus.tryEnter(&gate)) != TGM_GATE_IN) {
 			std::unique_lock<std::mutex> hold(lock);
 			if (entry == TGM_GATE_SHUT_WAKE)
 				insideCv.notify_all();
@@ -112,7 +115,7 @@ struct Kernel {
 
 	bool tryEnter()  // gate_try
 	{
-		const tgm_gate_entry entry = tgm_gate_try_enter(&gate);
+		const tgm_gate_entry entry = cpus.tryEnter(&gate);
 		if (entry == TGM_GATE_SHUT_WAKE)
 			wakeCloser();
 		return entry == TGM_GATE_IN;
@@ -120,7 +123,7 @@ struct Kernel {
 
 	void leave()  // gate_leave
 	{
-		if (tgm_gate_leave(&gate))
+		if (cpus.leave(&gate))
 			wakeCloser();
 	}
 
@@ -210,7 +213,7 @@ TEST(GM20BSleepGate, ASubmitterWaitingAtTheGateGoesOnAtTheWake)
 	});
 	std::this_thread::sleep_for(std::chrono::milliseconds(20));
 	EXPECT_FALSE(done.load()) << "a submission ran while the GPU slept";
-	EXPECT_EQ(k.gate.inside, 0u) << "a waiting submitter is not counted";
+	EXPECT_EQ(tgm_gate_inside(&k.gate), 0u) << "a waiting submitter is not counted";
 	k.open();
 	submitter.join();
 	EXPECT_TRUE(done.load())

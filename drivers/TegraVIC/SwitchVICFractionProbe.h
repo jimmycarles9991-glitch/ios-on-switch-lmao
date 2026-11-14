@@ -1,24 +1,27 @@
 // SPDX-License-Identifier: BSD-2-Clause-Patent
 // The fractional source offset and alpha override probe, debug kernels only (selector 6, SwitchVICKernelTest.h).
 // IOSurfaceAccelerator's request carries the source rectangle in 16.16 (TransferSurface sends quarter pixels:
-// CONTRACT.md section 4) and VIC's SourceRectLeft/Top are 16.16, which tegra_vic_build hands through, yet the capability
-// says FractionalXYOffsetsSupported 0. VIC copies a gradient card 1:1 with the 2-tap filter, its source rectangle a
+// CONTRACT.md section 4) and VIC's SourceRectLeft/Top are 16.16, which tegra_vic_build hands through
+// (FractionalXYOffsetsSupported 1). VIC copies a gradient card 1:1 with the 2-tap filter, its source rectangle a
 // quarter, half and three quarters of a pixel across, down and both, and every output pixel is scored against three
 // answers: the linear interpolation at the offset (the claim), the offset truncated and the offset rounded. B steps 8
 // codes a column and G 8 a row, so a quarter pixel is 2 codes and the answers are further apart than the tolerance (1
 // code a channel, for the 10-bit pipeline's truncation). The last column and row are edges (VIC may clamp its second
-// tap at the source rectangle) and are counted apart. Then AlphaFillMode BACKGROUND (NVB0B6_DXVAHD_ALPHA_FILL_MODE_
-// BACKGROUND 1, averne's clb0b6.h), which AlphaOverride needs and TegraVICRequest.h refuses today: a BGRA copy whose
-// source alpha varies must come out with every alpha the background's, after the same copy in SOURCE_STREAM, which
-// keeps the source's. The integer-offset copy and the SOURCE_STREAM copy are the controls. Plain logic, no IOKit:
-// SwitchVICFractionProbe.cpp runs it, test/switch_vic_fraction_probe_test.cpp checks it.
+// tap at the source rectangle) and are counted apart. Then AlphaOverride as tegra_vic_build programs it (AlphaFillMode
+// BACKGROUND, NVB0B6_DXVAHD_ALPHA_FILL_MODE_BACKGROUND 1, averne's clb0b6.h): a BGRA copy whose source alpha varies
+// must come out with every alpha the override's, after the same copy in SOURCE_STREAM, which keeps the source's. Last,
+// a source rectangle 24 and three quarters of a pixel across, down, and 24 and a half both ways scaled onto 24
+// (FractionalDimensions: tegra_vic_build hands 16.16 widths through as it does offsets), scored against the
+// interpolation at that scale, the width truncated and the width rounded. The integer-offset copy and the SOURCE_STREAM
+// copy are the controls. Plain logic, no IOKit: SwitchVICFractionProbe.cpp runs it,
+// test/switch_vic_fraction_probe_test.cpp checks it.
 #pragma once
 #include <stdint.h>
 #include <string.h>
 #include "TegraVICConfig.h"
 
 #define SWITCH_VIC_FRACTION_PROBE_MAGIC 0x56465241u  // 'VFRA'
-#define SWITCH_VIC_FRACTION_PROBE_CASES 10u
+#define SWITCH_VIC_FRACTION_PROBE_CASES 13u
 
 enum {
     SWITCH_VIC_FRACTION_INTERPOLATED = 0,  // answers; for the alpha cases: the claim, source alpha, opaque
@@ -51,6 +54,7 @@ enum Mode : uint32_t {
     kFraction = 0,
     kSourceAlpha = 1,
     kBackgroundAlpha = 2,
+    kDimension = 3,  // fractionX/fractionY: the source rectangle's width/height past kSize, 16.16
 };
 
 struct Case {
@@ -59,9 +63,19 @@ struct Case {
 };
 
 constexpr Case kCases[SWITCH_VIC_FRACTION_PROBE_CASES] = {
-    {0, 0, kFraction},      {0x4000, 0, kFraction},   {0x8000, 0, kFraction}, {0xc000, 0, kFraction},
-    {0, 0x4000, kFraction}, {0, 0x8000, kFraction},   {0, 0xc000, kFraction}, {0x8000, 0x8000, kFraction},
-    {0, 0, kSourceAlpha},   {0, 0, kBackgroundAlpha},
+    {0, 0, kFraction},
+    {0x4000, 0, kFraction},
+    {0x8000, 0, kFraction},
+    {0xc000, 0, kFraction},
+    {0, 0x4000, kFraction},
+    {0, 0x8000, kFraction},
+    {0, 0xc000, kFraction},
+    {0x8000, 0x8000, kFraction},
+    {0, 0, kSourceAlpha},
+    {0, 0, kBackgroundAlpha},
+    {0xc000, 0, kDimension},
+    {0, 0xc000, kDimension},
+    {0x8000, 0x8000, kDimension},
 };
 constexpr uint32_t kControlMask = (1u << 0) | (1u << 8);
 
@@ -73,13 +87,31 @@ constexpr uint8_t kPoison = 0xab, kSourcePad = 0x5a;
 inline uint32_t sourcePixel(const Case &c, uint32_t x, uint32_t y)
 {
     const uint32_t b = kStep * x < 255 ? kStep * x : 255, g = kStep * y < 255 ? kStep * y : 255;
-    const uint32_t a = c.mode == kFraction ? 0xff : 0x10 + (x * 5 + y * 3) % 0xe0;
+    const bool alpha = c.mode == kSourceAlpha || c.mode == kBackgroundAlpha;
+    const uint32_t a = alpha ? 0x10 + (x * 5 + y * 3) % 0xe0 : 0xff;
     return a << 24 | kRed << 16 | g << 8 | b;
+}
+
+// The source position output pixel `at` samples, 16.16, with the rectangle `extra` past kSize wide: its centre scaled
+// into the rectangle.
+inline uint64_t scaledPosition(uint32_t at, uint64_t extra)
+{
+    const uint64_t width = (uint64_t(kSize) << 16) + extra;
+    return (uint64_t(kOrigin) << 16) + ((2 * at + 1) * width - (uint64_t(kSize) << 16)) / (2 * kSize);
 }
 
 // What output pixel (x, y) holds under answer `which`, as a BGRA word.
 inline uint32_t answer(const Case &c, uint32_t which, uint32_t x, uint32_t y)
 {
+    if (c.mode == kDimension) {
+        const auto along = [which](uint32_t at, uint32_t fraction) {
+            uint64_t extra = which == SWITCH_VIC_FRACTION_INTERPOLATED ? fraction : 0;
+            if (which == SWITCH_VIC_FRACTION_ROUNDED && fraction >= 0x8000)
+                extra = 0x10000;
+            return uint32_t(kStep * scaledPosition(at, extra) >> 16);
+        };
+        return 0xffu << 24 | kRed << 16 | along(y, c.fractionY) << 8 | along(x, c.fractionX);
+    }
     if (c.mode != kFraction) {
         const uint32_t source = sourcePixel(c, kOrigin + x, kOrigin + y);
         uint32_t alpha = which == SWITCH_VIC_FRACTION_ROUNDED ? 0xff : source >> 24;
@@ -131,21 +163,17 @@ inline TegraVICImage image(uint64_t address, bool destination)
 
 inline TegraVICOp operation(const Case &c)
 {
+    const bool dimension = c.mode == kDimension;
     TegraVICOp op = {};
-    op.srcX = (uint64_t(kOrigin) << 16) + c.fractionX;
-    op.srcY = (uint64_t(kOrigin) << 16) + c.fractionY;
-    op.srcW = uint64_t(kSize) << 16;
-    op.srcH = uint64_t(kSize) << 16;
+    op.srcX = (uint64_t(kOrigin) << 16) + (dimension ? 0 : c.fractionX);
+    op.srcY = (uint64_t(kOrigin) << 16) + (dimension ? 0 : c.fractionY);
+    op.srcW = (uint64_t(kSize) << 16) + (dimension ? c.fractionX : 0);
+    op.srcH = (uint64_t(kSize) << 16) + (dimension ? c.fractionY : 0);
     op.dstW = op.dstH = kSize;
-    op.nearest = c.mode != kFraction;
+    op.nearest = c.mode == kSourceAlpha || c.mode == kBackgroundAlpha;
+    op.alphaOverride = c.mode == kBackgroundAlpha;
+    op.alphaOverride8 = kOverride;
     return op;
-}
-
-// What AlphaOverride would program: every pixel's alpha the background's.
-inline void overrideAlpha(TegraVICJob *job, uint32_t alpha8)
-{
-    TEGRA_VIC_SET(job->config, TEGRA_VIC_OUTPUT, OUT_ALPHA_FILL_MODE, TEGRA_VIC_ALPHA_BACKGROUND);
-    TEGRA_VIC_SET(job->config, TEGRA_VIC_OUTPUT, OUT_BACKGROUND_ALPHA, alpha8 << 2 | alpha8 >> 6);
 }
 
 inline void compare(const uint8_t *bytes, const Case &c, SwitchVICFractionResult *r)

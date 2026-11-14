@@ -7,7 +7,7 @@
 //   J1  NVJPG's SMMU domain (ASID 125 for the "nvjpg" swgroup, through TegraSMMU: the kernel buffers 1:1, two empty
 //       windows), power partition 26, clock (PLLC2 at 422.4 MHz on this unit, or PLLP's 408 MHz), reset, the MBIST
 //       workaround, falcon firmware loaded and started
-//   J2  proof of life through host1x channel 0 in NVJPG's class: an IMMEDIATE syncpoint increment (the engine's host
+//   J2  proof of life through host1x channel 3 in NVJPG's class: an IMMEDIATE syncpoint increment (the engine's host
 //       interface) then an OP_DONE one (the falcon firmware), each completed by interrupt
 //   J3  the AppleJPEGDriver service and its AppleJPEGDriverUserClient published (TegraNVJPGUserClient.cpp)
 // One line per stage ("TegraNVJPG: J1 ok ..."), or the failing stage's FAIL line and nothing after it. Until J3
@@ -20,8 +20,11 @@
 // What the engine does (kTraits) is what the unit measured on every boot of 11-05 and 11-06 (23 boots), decoding
 // libjpeg-turbo's JPEGs through the SMMU windows with their pages out of order: NV12, I420, BGRA, RGBA, ARGB and grey
 // within a few steps of libjpeg-turbo, 4:2:0, 4:2:2, 4:4:4 and grey input, grey to BGRA, 1/2 scaling, whole MCUs
-// written past the picture. 1/4 and 1/8 scaling missed libjpeg-turbo's BGRA by up to 7 and 15 steps on every one of
-// those boots and stay off. '422f', '444f' and 'yuvf' are the 4:2:0 path's other chroma and memory modes.
+// written past the picture. 1/4 and 1/8 scaling decode too, up to 7 and 15 steps off libjpeg-turbo's BGRA at their
+// worst sample (its scaled IDCT and chroma upsampling are not NVJPG's), so they are judged as CMPhoto's thumbnails
+// are used, by their mean against ImageIO's software decode (image.jpeg_420). 'yuvf' is the 4:2:0 path's packed memory
+// mode; '422f' and '444f' are planar YUV that VIC re-packs (TegraNVJPGJpeg.h: semi-planar output above 4:2:0 never
+// completed on this unit).
 //
 // Why the SMMU: a decode's destination is another process's IOSurface (scattered pages, half of the Switch's RAM above
 // the 32-bit boundary) and NVJPG has no scatter-gather, so each job maps the destination page by page into a window of
@@ -35,7 +38,9 @@
 //
 // Sources (Linux's drivers are GPL-2.0-only and oss-nvjpg GPL-3.0, so this follows them without copying):
 //   tegra210.dtsi nvjpg@54380000 (0x40000; clock and reset TEGRA210_CLK_NVJPG 195 = CAR Y bank bit 3, power domain
-//   nvjpg; no interrupt line: completions are host1x syncpoints), include/soc/tegra/pmc.h TEGRA_POWERGATE_NVJPG 26,
+//   nvjpg; completions are host1x syncpoints), include/soc/tegra/pmc.h TEGRA_POWERGATE_NVJPG 26,
+//   the Tegra X1 TRM's interrupt table (ch.3, p.33: NVJPEG is global 8, INTID 40) for the falcon's error line, which
+//   mainline's dtsi leaves out,
 //   clk-tegra-periph.c "nvjpg" (CLK_SOURCE_NVJPG 0x69c, mux pllc2/c/c3/pllp/...: PLLP is code 4, as NVDEC),
 //   L4T r32.7.4 powergate-t21x.c (partition 26, its MC client flush and release, the MBIST workaround on T210 before
 //   B01 only) and t210/cg_regs.c (the prod registers), through SwitchEnginePower.h,
@@ -57,6 +62,7 @@
 #include "../TegraSMMU/TegraSMMU.h"
 #include "../TegraSMMU/TegraSMMUDomain.h"
 #include "TegraNVJPG.h"
+#include "TegraNVJPGStats.h"
 #include "nvidia/cle7d0.h"
 #include "../../kits/SwitchCAR/SwitchCAR.h"
 #include "../../kits/SwitchCAR/SwitchEngineClock.h"
@@ -67,6 +73,7 @@
 #include "../../kits/SwitchEngineGate/SwitchEngineGateKernel.h"
 #include "../../kits/SwitchEngineGate/SwitchEnginePower.h"
 #include "../../kits/SwitchFalcon/SwitchFalcon.h"
+#include "../../kits/SwitchFalcon/SwitchFalconInterrupt.h"
 #include "../../kits/SwitchMath/SwitchMath.h"
 #include "../../kits/SwitchMMIO/SwitchMMIOKernel.h"
 #include "../../kits/SwitchTime/SwitchTime.h"
@@ -89,6 +96,7 @@ constexpr unsigned kNvdecClock = 194;                         // TEGRA210_CLK_NV
 constexpr uint64_t kArenaBytes = 3ULL * SWITCH_HW_PAGE_SIZE;  // the setup slot, the status slot, the service's sink
 constexpr uint32_t kNvdecWaitMs = 20000;
 constexpr uint32_t kAsid = TEGRA_SMMU_ASID_NVJPG;  // 125 (VIC 127, the display 126)
+constexpr uint32_t kErrorIntid = 32 + 8;
 uint32_t gClockKHz;
 
 enum : uint32_t {  // clock and reset controller
@@ -106,9 +114,6 @@ enum : uint32_t {
 
 enum : uint32_t {                                 // the SMMU's own registers are TegraSMMU.h's
     TRANSLATION_NVJPG = (1u << 30) | (1u << 31),  // nvjpgsrd, nvjpgswr (MC_SMMU_TRANSLATION_ENABLE_3)
-    MC_INTSTATUS = 0x0,
-    MC_ERR_STATUS = 0x8,
-    MC_ERR_ADR = 0xc,
     MC_HOTRESET_CTRL_1 = 0x970,
     MC_HOTRESET_STATUS_1 = 0x974,
     MC_HOTRESET_NVJPG = 1u << 8,
@@ -130,32 +135,38 @@ constexpr uint32_t kTables = 1 + kWindowTables[0] + kWindowTables[1] + kIdentity
 TegraSMMUDomain gDomain;  // directory = page 0, the windows' tables pages 1.., then the identity tables
 uint32_t gWindowMapped[TEGRA_NVJPG_WINDOWS];  // pages mapped from each window's start
 
-// The job engine. A job's wait is bounded by kQueueUs (NVJPG shares host1x channel 0 with NVDEC, NVENC and VIC, whose
-// queued jobs may run first: up to 2 s by their own bounds) plus one microsecond per 16 pixels of the MCU grid (NVJPG
-// does several pixels per clock at 408 MHz or more; the firmware's GP timer, on for every job, ends a picture it cannot finish
-// with an error status), at most kMaxBoundUs: only a hung engine gets there.
-constexpr uint64_t kQueueUs = 2000000, kMaxBoundUs = 30000000;
+// The job engine. NVJPG has host1x channel 3 to itself and runs one job at a time (gJobLock), so nothing queues ahead
+// of a job: its wait is bounded by kMarginUs (the falcon switching to its decoder app, the completion interrupt) plus
+// one microsecond per 16 pixels of the MCU grid (16 Mpixel/s; healthy decodes run at 175 to 500), at most kMaxBoundUs.
+// Only a hung engine gets there; the firmware's GP timer, on for every job, ends a picture it cannot finish with an
+// error status.
+constexpr uint64_t kMarginUs = 50000, kMaxBoundUs = 30000000;
 
 inline uint32_t jobBoundUs(uint64_t pixels)
 {
-    const uint64_t us = kQueueUs + pixels / 16;
+    const uint64_t us = kMarginUs + pixels / 16;
     return static_cast<uint32_t>(us < kMaxBoundUs ? us : kMaxBoundUs);
 }
 
+SwitchFalconInterrupt gErrors;
 IOLock *gJobLock;    // one job at a time: map, run, unmap
 IOLock *gStateLock;  // power transitions against jobs
+#if TEGRA_NVJPG_STATS
+// Written by jobs and under gStateLock, taken by the decode line's caller holding neither (relaxed).
+uint64_t gWaitsUnlocked, gStateWaitMaxUs;
+#endif
 SwitchEngineGate<SwitchEngineGateKernel> gGate;
 uint32_t gSyncpt, gNext, gPicture;
 uint32_t gPowerOns;     // by the idle gate, since boot
 uint64_t gPoweredAtUs;  // the last of them
-bool gUp, gWedged, gSuspended;
+bool gUp, gWedged, gSuspended, gAttached;
 TegraNVJPGBuffer gSetup, gStatus;
 const TegraNVJPGTraits kTraits = {
     .clipped = false,
     .formats = (1u << TEGRA_NVJPG_OUT_COUNT) - 1,
     .chroma = 1u << TEGRA_NVJPG_CHROMA_MONO | 1u << TEGRA_NVJPG_CHROMA_420 | 1u << TEGRA_NVJPG_CHROMA_422H |
               1u << TEGRA_NVJPG_CHROMA_444,
-    .scales = 0x3,
+    .scales = 0xf,
     .greyRgb = true,
 };
 
@@ -165,6 +176,20 @@ const char *falconState()
     if (gUp && !gGate.powered())
         return "falcon powered off (idle)";
     return switch_falcon_state(gJpg, text, sizeof(text));
+}
+
+// A cancellation's or an idle gate call's gStateLock; debug kernels keep the longest wait for it.
+void lockState()
+{
+#if TEGRA_NVJPG_STATS
+    const uint64_t asked = switch_now_us();
+    IOLockLock(gStateLock);
+    const uint64_t waited = switch_now_us() - asked;
+    if (waited > __atomic_load_n(&gStateWaitMaxUs, __ATOMIC_RELAXED))
+        __atomic_store_n(&gStateWaitMaxUs, waited, __ATOMIC_RELAXED);
+#else
+    IOLockLock(gStateLock);
+#endif
 }
 
 // One physically contiguous buffer below 4 GiB, zeroed and clean in the caches.
@@ -228,6 +253,7 @@ bool smmuAttach()
         snprintf(gLine, sizeof(gLine), "J1 FAIL nvjpg swgroup: %s", why);
         return false;
     }
+    gAttached = true;
     return true;
 }
 
@@ -236,16 +262,33 @@ void smmuDetach()
     if (!gMc)
         return;
     tegra_smmu_detach(kAsid, TEGRA_SMMU_NVJPG_ASID);
+    gAttached = false;
 }
 
 // NVJPG's partition and memory client in L4T's order (SwitchEnginePower.h), then its clock-gating prod registers
-// (t210/cg_regs.c t21x_nvjpg_gating_registers). The MBIST workaround (LVL2 bits 9 and 31 with NVDEC's clock, NVJPG's
-// slcg clock) runs only on T210 before B01, as powergate-t21x.c's. NVDEC's partition (25) needs NVJPG's (26) on
+// (t210/cg_regs.c t21x_nvjpg_gating_registers). Ungating the partition pulses NVDEC's clock before the clamps go, as the
+// TRM's NVJPG procedure does (12.2.7.10 steps 3-4), on every revision: L4T's T210B01 code differs only in skipping the
+// slcg clocks and MBIST pulse (powergate-t21x.c __tegra1xx_unpowergate, "if (!tegra210b01)"). That MBIST workaround
+// (LVL2 bits 9 and 31 with NVDEC's clock, NVJPG's slcg clock) therefore runs only on T210 before B01. NVDEC's partition (25) needs NVJPG's (26) on
 // (powergate-t21x.c powers 26 before 25 and keeps it while 25 is on): an idle power-off leaves 26 on while 25 is.
-constexpr unsigned kSlcgClocks[] = {kNvdecClock};
-const SwitchEnginePower kPower = {kPartition,         kClock,           MC_HOTRESET_CTRL_1, MC_HOTRESET_STATUS_1,
-                                  MC_HOTRESET_NVJPG,  OVRE_NVJPG_MBIST, kSlcgClocks,        1,
-                                  tegra_mc_hot_reset, tegra_smmu_read};
+constexpr unsigned kSlcgClocks[] = {kNvdecClock}, kUngateClocks[] = {kNvdecClock};
+const SwitchEnginePower kPower = {
+    .name = "TegraNVJPG",
+    .partition = kPartition,
+    .clock = kClock,
+    .hotResetCtrl = MC_HOTRESET_CTRL_1,
+    .hotResetStatus = MC_HOTRESET_STATUS_1,
+    .hotResetBit = MC_HOTRESET_NVJPG,
+    .lvl2Mask = OVRE_NVJPG_MBIST,
+    .slcgClocks = kSlcgClocks,
+    .slcgCount = 1,
+    .hotReset = tegra_mc_hot_reset,
+    .mcRead = tegra_smmu_read,
+    .ungateClocks = kUngateClocks,
+    .ungateCount = 1,
+    .host1xModule = TEGRA_HOST1X_MODULE_NVJPG,
+    .moduleTeardown = tegra_host1x_module_teardown,
+};
 constexpr SwitchEngineProd kProd[] = {
     {0xe00, 0},         // THI_CLK_OVERRIDE
     {0x88, 0},          // THI_SLCG_OVERRIDE_HIGH_A
@@ -262,9 +305,10 @@ bool powerUp(bool *wasOn)
     IODelay(2);
     if (!switch_engine_power_up(kPower, wasOn)) {
         snprintf(gLine, sizeof(gLine),
-                 "J1 FAIL partition %u did not come up (PWRGATE_STATUS %#x CLAMP_STATUS %#x CLK_OUT_ENB_Y %#x "
-                 "RST_DEVICES_Y %#x)",
-                 kPartition, switch_pmc_read(PWRGATE_STATUS), switch_pmc_read(0x2c), switch_car_read(CLK_OUT_ENB_Y),
+                 "J1 FAIL partition %u did not come up (PWRGATE_STATUS %#x REMOVE_CLAMPING_CMD %#x CLAMP_STATUS %#x "
+                 "CLK_OUT_ENB_Y %#x RST_DEVICES_Y %#x)",
+                 kPartition, switch_pmc_read(PWRGATE_STATUS), switch_pmc_read(switch_engine_power::kPmcRemoveClamping),
+                 switch_pmc_read(switch_engine_power::kPmcClampStatus), switch_car_read(CLK_OUT_ENB_Y),
                  switch_car_read(RST_DEVICES_Y));
         return false;
     }
@@ -317,6 +361,7 @@ int answer(uint32_t id, uint32_t from, const char **stage)
 
 void engineOff()
 {
+    gErrors.off();
     switch_car_reset_assert(kClock);
     IODelay(2);
     switch_car_clock_disable(kClock);
@@ -333,34 +378,43 @@ void park()
 // As L4T's nvhost does on a channel timeout, the job is cancelled, not the engine: channel 3 is torn down so nothing of
 // the stream reaches the engine again, the memory client is flushed (tegra_mc_flush), the engine reset with its
 // partition kept on and brought up again as at J1 (powerUp releases the flush once the reset is), the falcon rebooted
-// and proven as at J2, and the job fails; the next one runs. One line per cancellation, with what the
-// falcon and the memory controller held. gStateLock held, and gJobLock (the caller's): no NVJPG power transition can
-// be waiting for gStateLock while this takes the power lock (gateOn runs only in a job, gateOff only with no user, and
-// suspend first takes gJobLock).
+// and proven as at J2, and the job fails; the next one runs. An engine the reset does not bring back is turned off and
+// handed back to the idle gate, which powers it on at a later decode. One line per cancellation, with what the
+// falcon and the memory controller held. gJobLock held (the caller's) and the job's use of the gate, so no NVJPG power
+// transition runs meanwhile (gateOn runs only in a job, gateOff only with no user, and suspend first takes gJobLock).
+// The power lock and gStateLock are taken one after the other, never one inside the other: the gate calls gateOn and
+// gateOff with the power lock held, and they take gStateLock.
 int cancelled(const TegraNVJPGJob *job, uint32_t fence, uint64_t us)
 {
     char host[200];
     char falcon[400];
     char what[200];
+    char why[288];
+    if (!gErrors.failed(why, sizeof(why)))
+        snprintf(why, sizeof(why), "not reached in %llu ms", us / 1000);
+    gErrors.lostCheckStart();
     const nvjpg_dec_drv_pic_setup_s &s = job->setup;
     snprintf(
         what, sizeof(what),
-        "selector %u, %dx%d (MCU %dx%d), stream chroma %d to chroma %d pixel format %d memory mode %d block height "
-        "%d, %d bitstream bytes, %u planes, target format %u",
-        job->selector, s.frame_width, s.frame_height, s.mcu_width, s.mcu_height, s.stream_chroma_mode,
-        s.output_chroma_mode, s.output_pixel_format, s.memory_mode, s.block_linear_height, s.bitstream_size,
-        job->planes, job->target);
+        "selector %u, %dx%d (MCU %dx%d) at 1/%u, stream chroma %d to chroma %d pixel format %d memory mode %d block "
+        "height %d, %d bitstream bytes, %u planes, target format %u",
+        job->selector, s.frame_width, s.frame_height, s.mcu_width, s.mcu_height, 1u << (s.power2_downscale & 3),
+        s.stream_chroma_mode, s.output_chroma_mode, s.output_pixel_format, s.memory_mode, s.block_linear_height,
+        s.bitstream_size, job->planes, job->target);
     tegra_host1x_describe_channel(TEGRA_HOST1X_CHANNEL_NVJPG, host, sizeof(host));
     const uint32_t reached = tegra_host1x_syncpt_read(gSyncpt);
     switch_falcon_stall(gJpg, falcon, sizeof(falcon));
-    const uint32_t mcStatus = switch_mmio_read32(gMc, MC_INTSTATUS), mcError = switch_mmio_read32(gMc, MC_ERR_STATUS),
-                   mcAddress = switch_mmio_read32(gMc, MC_ERR_ADR);
+    uint32_t mcStatus = 0, mcError = 0, mcAddress = 0;
+    const uint32_t mcErrors = tegra_mc_error_latest(&mcStatus, &mcError, &mcAddress);
     tegra_host1x_channel_teardown(TEGRA_HOST1X_CHANNEL_NVJPG);
     IOLock *power = tegra_nvdec_power_lock();
     IOLockLock(power);
     gLine[0] = 0;
     bool wasOn = false;
     const bool drained = switch_engine_power::flush(kPower);
+    gErrors.lostCheckEnd();
+    gErrors.off();
+    switch_falcon_error_clear(gJpg);
     switch_car_reset_assert(kClock);
     IODelay(10);
     const bool reset = powerUp(&wasOn);
@@ -368,18 +422,26 @@ int cancelled(const TegraNVJPGJob *job, uint32_t fence, uint64_t us)
     const uint32_t from = tegra_host1x_syncpt_read(gSyncpt);
     const char *stage = nullptr;
     const bool back = reset && bootFalcon() && !answer(gSyncpt, from, &stage);
+    if (back)
+        gErrors.on();
     IOLockUnlock(power);
-    gNext = tegra_host1x_syncpt_read(gSyncpt);
+    const uint32_t next = tegra_host1x_syncpt_read(gSyncpt);
+    lockState();
+    gNext = next;
     gWedged = !back;
-    if (!back)
+    IOLockUnlock(gStateLock);
+    if (!back) {
         engineOff();
-    IOLog("TegraNVJPG: job fence %u not reached in %llu ms (syncpoint %u at %u; powered on by the idle gate %u times, "
-          "the last %llu ms ago); job %s; %s; MC INTSTATUS %#x ERR_STATUS %#x ERR_ADR %#x; %s; job cancelled, memory "
+        gGate.lost();
+    }
+    IOLog("TegraNVJPG: job fence %u %s (syncpoint %u at %u; powered on by the idle gate %u times, "
+          "the last %llu ms ago); job %s; %s; MC errors %u, latest INTSTATUS %#x ERR_STATUS %#x ERR_ADR %#x; %s; job "
+          "cancelled, memory "
           "client %s, engine reset: %s%s\n",
-          fence, us / 1000, gSyncpt, reached, gPowerOns,
+          fence, why, gSyncpt, reached, gPowerOns,
           gPowerOns ? static_cast<unsigned long long>((switch_now_us() - gPoweredAtUs) / 1000) : 0ULL, what, falcon,
-          mcStatus, mcError, mcAddress, host, drained ? "drained" : "did not drain in 10 ms",
-          back ? "running again" : "it did not come back, NVJPG refuses work (decodes go to the CPU): ",
+          mcErrors, mcStatus, mcError, mcAddress, host, drained ? "drained" : "did not drain in 10 ms",
+          back ? "running again" : "it did not come back, the next decode powers it on again: ",
           back ? ""
                : (gLine[0] ? gLine
                   : stage  ? stage
@@ -391,6 +453,13 @@ void engineSuspend();
 void engineResume();
 int gateOn(void *);
 int gateOff(void *, bool);
+
+// The falcon's error interrupt: the decode in flight (one at a time) wakes from its wait and is cancelled with the
+// firmware's reason (cancelled()), the engine cleared and reset.
+void falconFailed(const switch_falcon_error &)
+{
+    tegra_host1x_syncpt_kick(gSyncpt);
+}
 
 bool allocate()
 {
@@ -491,6 +560,13 @@ void bringUp(void *, wait_result_t)
           id, from, tegra_host1x_syncpt_read(id), switch_now_us() - start, falconState());
     gSyncpt = id;
     gNext = tegra_host1x_syncpt_read(id);
+    if (!gErrors.start("TegraNVJPG", kErrorIntid, gJpg, falconFailed)) {
+        IOLog("TegraNVJPG: J2 FAIL no falcon error interrupt (INTID %u)\n", kErrorIntid);
+        park();
+        giveBack();
+        return;
+    }
+    gErrors.on();
     if (!gGate.start({"TegraNVJPG", nullptr, gateOn, gateOff}, power)) {
         IOLog("TegraNVJPG: J2 FAIL no idle timer\n");
         park();
@@ -506,7 +582,7 @@ void bringUp(void *, wait_result_t)
 
 extern "C" bool tegra_nvjpg_ready(void)
 {
-    return gUp && !gWedged;
+    return gUp;
 }
 
 extern "C" const TegraNVJPGTraits *tegra_nvjpg_traits(void)
@@ -535,6 +611,14 @@ extern "C" void tegra_nvjpg_unlock(void)
 {
     IOLockUnlock(gJobLock);
 }
+
+#if TEGRA_NVJPG_STATS
+void tegra_nvjpg_lock_counts(uint64_t *waitsUnlocked, uint64_t *stateWaitMaxUs)
+{
+    *waitsUnlocked = __atomic_exchange_n(&gWaitsUnlocked, 0, __ATOMIC_RELAXED);
+    *stateWaitMaxUs = __atomic_exchange_n(&gStateWaitMaxUs, 0, __ATOMIC_RELAXED);
+}
+#endif
 
 // Job lock held. The window's tables are fixed; pages past `count` are left (or made) unmapped, so an access beyond
 // the job's memory faults in the SMMU instead of reaching memory.
@@ -568,7 +652,8 @@ extern "C" void tegra_nvjpg_window_clear(uint32_t window)
 // decoder's methods through THI METHOD0/METHOD1 in averne's order (application, control with the GP timer on, picture
 // index, setup, bitstream, status, output planes, EXECUTE with AWAKEN), then an OP_DONE increment of NVJPG's
 // syncpoint, waited for by interrupt.
-extern "C" int tegra_nvjpg_run(const TegraNVJPGJob *job, nvjpg_dec_status *status, uint64_t *busyUs)
+extern "C" int tegra_nvjpg_run(const TegraNVJPGJob *job, nvjpg_dec_status *status, uint64_t *busyUs,
+                               const TegraNVJPGFollow *follow)
 {
     if (!gUp || !job->planes || job->planes > 3)
         return -19;
@@ -577,11 +662,13 @@ extern "C" int tegra_nvjpg_run(const TegraNVJPGJob *job, nvjpg_dec_status *statu
         return -22;
     if (const int error = gGate.use())
         return error;
+    // The job's use of the gate keeps the engine as this finds it until done(): no lock is held across its wait.
     IOLockLock(gStateLock);
     while (gSuspended)
         IOLockSleep(gStateLock, &gSuspended, THREAD_UNINT);
-    if (gWedged) {
-        IOLockUnlock(gStateLock);
+    const bool wedged = gWedged;
+    IOLockUnlock(gStateLock);
+    if (wedged) {
         gGate.done();
         return -19;
     }
@@ -591,7 +678,6 @@ extern "C" int tegra_nvjpg_run(const TegraNVJPGJob *job, nvjpg_dec_status *statu
     switch_dcache_clean_invalidate(gStatus.va, sizeof(nvjpg_dec_status));
     uint32_t *words = nullptr;
     if (const int error = switch_host1x_job_begin(TEGRA_HOST1X_CHANNEL_NVJPG, 1 + 3 * 11 + 1, &words)) {
-        IOLockUnlock(gStateLock);
         gGate.done();
         return error;
     }
@@ -620,33 +706,39 @@ extern "C" int tegra_nvjpg_run(const TegraNVJPGJob *job, nvjpg_dec_status *statu
     int ret = switch_host1x_job_submit(TEGRA_HOST1X_CHANNEL_NVJPG, words, n, gSyncpt, fence);
     if (!ret) {
         gNext = fence;
-        ret = tegra_host1x_syncpt_wait(gSyncpt, fence, jobBoundUs(job->pixels));
-        if (ret == TEGRA_HOST1X_ETIMEDOUT)
+        if (follow)
+            follow->queue(follow->context, gSyncpt, fence);
+        ret = tegra_host1x_syncpt_wait_unless(gSyncpt, fence, jobBoundUs(job->pixels), gErrors.takenWord(),
+                                              gErrors.onAt());
+#if TEGRA_NVJPG_STATS
+        __atomic_fetch_add(&gWaitsUnlocked, 1, __ATOMIC_RELAXED);
+#endif
+        if (ret == TEGRA_HOST1X_ETIMEDOUT || ret == TEGRA_HOST1X_EFALCON)
             ret = cancelled(job, fence, switch_now_us() - start);
     }
     if (busyUs)
         *busyUs = switch_now_us() - start;
     switch_dcache_clean_invalidate(gStatus.va, sizeof(nvjpg_dec_status));
     memcpy(status, gStatus.va, sizeof(*status));
-    IOLockUnlock(gStateLock);
     gGate.done();
     return ret;
 }
 
 // Idle power gating (SwitchEngineGate.h), as mainline's runtime PM does for VIC and NVDEC: off 500 ms after the last
 // decode, on at the next. On is J1 and J2 again on the kept image and SMMU domain (an idle power-off does not reset the
-// MC): partition, clock, reset and the MBIST workaround, the falcon reloaded and proven with J2's stream. A failure
-// there is one line and NVJPG refuses work (decodes go to the CPU). Off waits for no job (a decode holds the gate) and
-// powers the partition down. NVDEC's gate shares the lock (tegra_nvdec_power_lock): each one's power-up borrows the
-// other's clock for its MBIST workaround.
+// MC; a resume that could not attach the domain attaches it here): partition, clock, reset and the MBIST workaround,
+// the falcon reloaded and proven with J2's stream. It also powers on an engine a cancellation's reset left off. A
+// failure there is one line and that decode goes to the CPU; the next decode runs the power-on again. Off waits for no
+// job (a decode holds the gate) and powers the partition down. NVDEC's gate shares the lock (tegra_nvdec_power_lock):
+// each one's power-up borrows the other's clock for its MBIST workaround.
 namespace {
 int gateOn(void *)
 {
-    IOLockLock(gStateLock);
+    lockState();
     bool wasOn = false;
     bool answered = false;
     gLine[0] = 0;
-    if (powerUp(&wasOn) && bootFalcon()) {
+    if ((gAttached || smmuAttach()) && powerUp(&wasOn) && bootFalcon()) {
         const uint32_t from = tegra_host1x_syncpt_read(gSyncpt);
         const char *stage = nullptr;
         const int ret = answer(gSyncpt, from, &stage);
@@ -657,10 +749,13 @@ int gateOn(void *)
                      tegra_host1x_syncpt_read(gSyncpt), switch_falcon_state(gJpg, state, sizeof(state)));
         }
     }
-    if (!answered) {
-        gWedged = true;
+    gWedged = !answered;
+    if (answered) {
+        gErrors.on();
+    } else {
         engineOff();
-        IOLog("TegraNVJPG: power-on FAIL %s; NVJPG refuses work (decodes go to the CPU)\n", gLine[0] ? gLine : "J1");
+        IOLog("TegraNVJPG: power-on FAIL %s; this decode goes to the CPU, the next one powers NVJPG on again\n",
+              gLine[0] ? gLine : "J1");
     }
     gPowerOns++;
     gPoweredAtUs = switch_now_us();
@@ -673,8 +768,9 @@ int gateOn(void *)
 
 int gateOff(void *, bool)
 {
-    IOLockLock(gStateLock);
+    lockState();
     gSuspended = true;
+    gErrors.off();
     const bool off =
         switch_pmc_partition_is_on(kNvdecPartition) ? switch_engine_quiesce(kPower) : switch_engine_power_down(kPower);
     IOLockUnlock(gStateLock);
@@ -703,9 +799,9 @@ void engineResume()
         gSuspended = false;
         IOLockWakeup(gStateLock, &gSuspended, false);
         IOLockUnlock(gStateLock);
-        IOLog("TegraNVJPG: resume FAIL %s; NVJPG refuses work (decodes go to the CPU)\n", gLine);
+        IOLog("TegraNVJPG: resume FAIL %s; the next decode tries again\n", gLine);
     }
-    gGate.resume(attached);
+    gGate.resume();
 }
 }  // namespace
 

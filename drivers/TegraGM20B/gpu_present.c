@@ -12,6 +12,7 @@ static void present_typed_complete(void *unused)
 	void *arg;
 	int status;
 	(void)unused;
+	tgm_present_filter_detach();
 	mutex_lock(&tgm_present.lock);
 	done = tgm_present.done;
 	arg = tgm_present.arg;
@@ -60,7 +61,7 @@ static void present_watch_complete(int status, int from_pass)
 #endif
 
 	nvxnu_work_cancel(tgm_present.deadline_work);
-	tgm_deadline_presented(tgm_present.queued);
+	tgm_deadline_presented(tgm_present.queued, from_pass);
 	switch_gpu_present_watch_reset(&tgm_present.watch);
 	__atomic_store_n(&tgm_present.typed_pending, 0, __ATOMIC_RELEASE);
 #if TGM_STATS
@@ -127,14 +128,20 @@ static void present_watch_work(void *unused)
 	present_watch_complete(status, 0);
 }
 
-/* The end of every GPU interrupt pass (shim/xnu_glue.cpp gpuInterrupt), nvkm's locks released: a watch the pass made due
- * is delivered here when its producer's writes are in DRAM; anything else goes to the watch work item. Nothing here may
+/* The end of every GPU interrupt pass (shim/xnu_glue.cpp gpuInterrupt), nvkm's locks released and every channel's GPU time
+ * of the pass added: a present job the scan completed is learned and handed to its completion work item, and a watch the
+ * pass made due is delivered here when its producer's writes are in DRAM; anything else goes to the watch work item. Nothing here may
  * wait for the GPU, as no GPU interrupt is taken until this returns: the tokens finish without waiting, the snapshot's
  * leases (SwitchGpuScanoutSnapshot::complete) release under their backings' locks, and done only signals. The
  * nonstall line's filter may already have run the display's callout for it (SwitchGpuPresentFilter.cpp); each claim
  * detaches the filter's view first. */
 void tgm_present_pass(void)
 {
+	if (tgm_present.fenced_due) {
+		tgm_present.fenced_due = 0;
+		tgm_deadline_presented(tgm_present.fenced_queued, 1);
+		nvxnu_work_schedule(tgm_present.completion_work);
+	}
 	if (__atomic_load_n(&tgm_present.watch.state, __ATOMIC_ACQUIRE) !=
 	    SWITCH_GPU_PRESENT_WATCH_DUE)
 		return;
@@ -265,6 +272,7 @@ static int present_copy(uint64_t src_va, uint64_t stride, int32_t src_block_log2
 	struct tgm_chan *chan = tgm_present.chan;
 	struct nvif_push *push = NULL;
 	u32 *push_start = NULL;
+	u32 words = 0;
 	int ret = 0;
 	int cut = 0;
 
@@ -295,11 +303,14 @@ static int present_copy(uint64_t src_va, uint64_t stride, int32_t src_block_log2
 	cut = dst_va && tgm_copy_reset_armed();
 #endif
 	push = &chan->chan.push;
-	ret = chan_push_wait(
-		chan, dependency_count * 5 + 57 + nreads * TGM_COPY_RECT_DWORDS +
-			      cut * (TegraGM20BCopyResetCopies * TGM_PRESENT_COPY_DWORDS + 2) +
-			      CHAN_FENCE_DWORDS); /* acquires, a start stamp, the copy, the
-								  read-backs, the fence */
+	/* acquires, a start stamp, the copy, the read-backs, the fence */
+	words = dependency_count * 5 + 57 + nreads * TGM_COPY_RECT_DWORDS +
+		cut * (TegraGM20BCopyResetCopies * TGM_PRESENT_COPY_DWORDS + 2) + CHAN_FENCE_DWORDS;
+#if TGM_STATS
+	if (push->cur + words > push->end && !tgm_chan_room(chan, 1, words))
+		tgm_stats_unlocked(TGM_UNLOCKED_PRESENT_ROOM, 0);
+#endif
+	ret = chan_push_wait(chan, words);
 	if (ret == -ETIMEDOUT) {
 		tgm_chan_stalled(chan, "present: push buffer still full after 1 s", chan->submitted,
 				 NSEC_PER_SEC);
@@ -356,6 +367,15 @@ static int present_copy(uint64_t src_va, uint64_t stride, int32_t src_block_log2
 	/* before the kick, so the completion cancels it */
 	nvxnu_work_schedule_after(tgm_present.deadline_work, tgm_present.recheck);
 	tgm_chan_park_promises(chan, tgm_present.tokens.tokens, dependency_count);
+	/* The present job's own fence, on this kernel channel whose completion is its visibility: the nonstall filter runs
+	 * the display's callout as it passes, ahead of the completion work item. A direct present of a producer that ended
+	 * without external visibility (a compositor job's) comes here through present_watch_flush, so this is the filter's
+	 * only chance at that frame. Before the kick: its nonstall interrupt can come before chan_fence returns. */
+	{
+		struct switch_gpu_backing_token own = {0};
+		switch_gpu_chan_next_token(chan, &own);
+		tgm_present_filter_attach(&own);
+	}
 	/* A copy's flush above put the frame's source in DRAM, and the copy and its read-backs write through the present's
 	 * volatile PTEs (tgm_present_map); a fence-only present is direct scanout of a surface the GPU drew through the L2. */
 	if (dst_va)

@@ -6,8 +6,7 @@
 struct LandscapeState {
     PlaneSet held = {};  // the composition that changes the mode, waiting for a quiet frame end (newest wins)
     bool wanted = false, switching = false;
-    bool retired =
-        false;  // the mode failed once (a reservation, no quiet frame end, an overlay recovery): off this boot
+    uint32_t failures = 0;  // changes of mode that failed since boot (a reservation, no quiet frame end, a recovery)
     uint64_t wantedAt = 0;
     int csc[2] = {-1, -1};  // window A's CSC (matrix, full range) as planeCsc keeps B's and C's
     bool filtersWritten = false;

@@ -15,13 +15,25 @@
 
 namespace switch_color {
 
-struct Sequence {
-    bool pendingDirty = false;    // the pending tables are not all in DC A yet
-    bool activeValid = false;     // the written tables are what DC A holds
-    bool enableAsked = false;     // the CMU_ENABLE last written
-    bool bypassLatching = false;  // CMU_ENABLE cleared, its GENERAL_ACT_REQ still out
-    bool bypassWanted = false;    // LUT words to change while the CMU may be scanning them
+// The filter's own: what it adopted and has written.
+struct FilterSequence {
+    bool pendingDirty = false;  // the adopted tables are not all in DC A yet
+    bool activeValid = false;   // the written tables are what DC A holds
+    bool bypassWanted = false;  // LUT words to change while the CMU may be scanning them
+    uint16_t latchedEpoch = 0;  // the last bypass whose GENERAL_ACT_REQ the filter saw taken
 };
+
+// The action's own: the CMU_ENABLE it wrote.
+struct ActionSequence {
+    bool enableAsked = false;  // the CMU_ENABLE last written
+    uint16_t bypassEpoch = 0;  // one more for each CMU_ENABLE clear written
+};
+
+// CMU_ENABLE cleared, its GENERAL_ACT_REQ not yet seen taken.
+inline bool bypassLatching(const FilterSequence &f, const ActionSequence &a)
+{
+    return a.bypassEpoch != f.latchedEpoch;
+}
 
 enum class Write : uint8_t {
     kNothing,
@@ -42,55 +54,56 @@ inline bool lutsDiffer(const Tables &a, const Tables &b)
 // The filter at a frame end: which of the pending words go to DC A now. `written` is what DC A holds (null when
 // unknown); actRequestOut(): STATE_CONTROL's GENERAL_ACT_REQ reads set; inBlank(): DBG_TIMING's V_BLANK reads set.
 template <typename ActRequestOut, typename InBlank>
-inline Write atFrameEnd(Sequence &s, const Tables &pending, const Tables *written, ActRequestOut actRequestOut,
-                        InBlank inBlank)
+inline Write atFrameEnd(FilterSequence &f, const ActionSequence &a, const Tables &pending, const Tables *written,
+                        ActRequestOut actRequestOut, InBlank inBlank)
 {
-    if (s.bypassLatching && !actRequestOut())
-        s.bypassLatching = false;
-    if (!s.pendingDirty)
+    if (bypassLatching(f, a) && !actRequestOut())
+        f.latchedEpoch = a.bypassEpoch;
+    if (!f.pendingDirty)
         return Write::kNothing;
     // A disabled CMU's tables are never written: the ones it scans stay until the disable latches.
     if (!pending.enabled) {
-        s.pendingDirty = false;
-        s.bypassWanted = false;
+        f.pendingDirty = false;
+        f.bypassWanted = false;
         return Write::kNothing;
     }
-    if (!s.enableAsked && !s.bypassLatching) {
-        s.pendingDirty = false;
-        s.bypassWanted = false;
-        s.activeValid = true;
+    if (!a.enableAsked && !bypassLatching(f, a)) {
+        f.pendingDirty = false;
+        f.bypassWanted = false;
+        f.activeValid = true;
         return Write::kAll;
     }
-    s.bypassWanted = written == nullptr || lutsDiffer(pending, *written);
-    if (s.bypassWanted || !inBlank())
+    f.bypassWanted = written == nullptr || lutsDiffer(pending, *written);
+    if (f.bypassWanted || !inBlank())
         return Write::kNothing;
-    s.pendingDirty = false;
+    f.pendingDirty = false;
     return Write::kCsc;
 }
 
 // The action at a frame end, once the filter has run: the CMU_ENABLE to write, with its GENERAL_ACT_REQ. mayRequest
 // false: another request is out and owns GENERAL_ACT_REQ for now.
-inline Enable atFrameEndAction(const Sequence &s, bool want, bool mayRequest)
+inline Enable atFrameEndAction(const FilterSequence &f, const ActionSequence &a, bool want, bool mayRequest)
 {
-    const bool target = want && !s.bypassWanted;
-    if (!mayRequest || target == s.enableAsked)
+    const bool target = want && !f.bypassWanted;
+    if (!mayRequest || target == a.enableAsked)
         return Enable::kKeep;
-    if (target && (s.pendingDirty || !s.activeValid))
+    if (target && (f.pendingDirty || !f.activeValid))
         return Enable::kKeep;
     return target ? Enable::kOn : Enable::kOff;
 }
 
 // After the action wrote CMU_ENABLE and its GENERAL_ACT_REQ (in that order: the filter reads the request's bit to
 // know when the bypass has latched).
-inline void enableWritten(Sequence &s, bool on)
+inline void enableWritten(ActionSequence &a, bool on)
 {
-    s.enableAsked = on;
-    s.bypassLatching = !on;
+    a.enableAsked = on;
+    if (!on)
+        a.bypassEpoch = static_cast<uint16_t>(a.bypassEpoch + 1);
 }
 
-inline bool settled(const Sequence &s, bool want)
+inline bool settled(const FilterSequence &f, const ActionSequence &a, bool want)
 {
-    return !s.pendingDirty && !s.bypassWanted && want == s.enableAsked;
+    return !f.pendingDirty && !f.bypassWanted && want == a.enableAsked;
 }
 
 }  // namespace switch_color

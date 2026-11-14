@@ -33,9 +33,13 @@ struct StateSegment {
 // What a segment bind adds to a job: two push records of 16 bytes. A stream no longer than this goes inline.
 constexpr uint32_t kSegmentBindWords = 8;
 
-// The segment binds a command buffer takes before it binds inline. Each adds two GPFIFO entries: past
-// TegraGM20BMaxJobPushes a command buffer becomes several jobs, each with its own fence.
-constexpr uint32_t kSegmentBindsPerCommandBuffer = 128;
+// The segment binds a command buffer takes before it binds inline: each adds two pushes, within three quarters of one
+// job's (Kernel::maxPushes: TegraGM20BMaxJobPushes with addressed jobs, TegraGM20BMaxPushes without), the rest left to its
+// passes' own pushes, so its binds alone never make it several jobs, each with its own fence
+constexpr uint32_t segmentBindBudget(uint32_t maxPushes)
+{
+    return maxPushes * 3 / 8;
+}
 
 struct SegmentChunk {
     uint8_t *cpu = nullptr;

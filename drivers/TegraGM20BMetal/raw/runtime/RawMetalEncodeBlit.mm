@@ -192,6 +192,7 @@ bool fillTexturePass(RMCommandBuffer *cb, const Cmd &c, raw::CommandBuffer *rc)
         raw::BlitEncoder *b = rc->blit();
         b->fillTwod(t->_raw, x0, y0, x1, y1, raw::twodFillWord(t->_raw.format, rgba));
         b->end();
+        RAW_DIAGNOSTIC(gRM->raw->stats.fillTwod++);
         return true;
     }
     raw::PassDesc p;
@@ -248,8 +249,8 @@ bool mipPasses(raw::CommandBuffer *rc, RMTexture *t, uint32_t first, uint32_t la
 }
 
 // generateMipmapsForTexture: each run of the chain's steps on its engine (fx_mip_route.h, decided at record), the blit
-// encoder ended around 3D runs and `be` the one encoding goes on with. `probe2d`: a debug build's probe of a format no probe
-// covered yet, every step on the 2D engine as that surface format (fx_mip_probe.h)
+// encoder ended around 3D runs and `be` the one encoding goes on with. `probe2d`: a debug build's probe of a format the pack's
+// mip state also makes, every step on the 2D engine as that surface format (fx_mip_probe.h)
 bool encodeMipmaps(raw::CommandBuffer *rc, RMTexture *t, uint32_t probe2d, raw::BlitEncoder *&be, const char **why)
 {
     const raw::Texture::Chain &chain = *t->_raw.chain;

@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: BSD-2-Clause-Patent
 // The transposed 4:2:2 probe (L998), debug kernels only (selector 6, SwitchVICKernelTest.h). tegra_vic_build describes
-// a transposed '422v' output before the transpose as N422R, chroma halved down the composed picture, with its siting
-// exchanged (TegraVICFormats.h, tegra_vic_chroma_loc): both inferred from the name and the 4:2:0 measurements, never run.
-// A 16x16 '422v' goes through a quarter turn as built, with each of those two readings changed (N422 for N422R, the
-// siting left unexchanged), beside the proven transposed '420v' copy and the untransposed '422v' copy.
+// a transposed '422v' output as N422 sited as its memory lies (TegraVICFormats.h): boots 19 and 21 read that as exact
+// and the earlier N422R, chroma halved down the composed picture with its siting exchanged, as wrong. A 16x16 '422v'
+// goes through a quarter turn as built (Center, Left, transform 4), as built with Center's siting exchanged, and as
+// N422R both ways, beside the proven transposed '420v' copy and the untransposed '422v' copy.
 //
 // Luma is unique per pixel. Chroma is one value across each source row and a ramp down the rows (Cb rising, Cr falling,
 // kStep a row), so an output CbCr pair names the source row position it was sampled at whatever filter took it:
@@ -47,14 +47,14 @@ constexpr uint8_t kPoison = 0xab;
 constexpr uint32_t kSiteLeft = 1, kSiteCenter = 2;
 
 enum Variant : uint32_t {
-    kCopy420Turned,  // control: '420v' turned, the transposed copy the unit has run
-    kCopy422,        // control: '422v' untransposed
-    kShipped,        // '422v' turned as tegra_vic_build makes it, sited Center
-    kShippedLeft,    // the same sited Left
-    kSitingKept,     // N422R, Center's siting not exchanged
-    kN422,           // described as N422, siting as built
-    kN422Kept,       // N422, siting not exchanged
-    kShippedTurn4,   // transform 4 (a quarter turn with its flip), as built, Center
+    kCopy420Turned,    // control: '420v' turned, the transposed copy the unit has run
+    kCopy422,          // control: '422v' untransposed
+    kShipped,          // '422v' turned as tegra_vic_build makes it, sited Center
+    kShippedLeft,      // the same sited Left
+    kSitingExchanged,  // as built, Center's siting exchanged onto ChromaLocVert
+    kN422R,            // described as N422R, Center's siting exchanged
+    kN422RKept,        // N422R, siting not exchanged
+    kShippedTurn4,     // transform 4 (a quarter turn with its flip), as built, Center
 };
 
 struct Case {
@@ -69,9 +69,9 @@ constexpr Case kCases[SWITCH_VIC_TRANSPOSE_PROBE_CASES] = {
     {kCopy422, k422v, 0, kSiteLeft, -1, -1, -1},
     {kShipped, k422v, 6, kSiteCenter, -1, -1, -1},
     {kShippedLeft, k422v, 6, kSiteLeft, -1, -1, -1},
-    {kSitingKept, k422v, 6, kSiteCenter, -1, 1, 0},
-    {kN422, k422v, 6, kSiteCenter, TEGRA_VIC_T_Y8___U8V8_N422, -1, -1},
-    {kN422Kept, k422v, 6, kSiteCenter, TEGRA_VIC_T_Y8___U8V8_N422, 1, 0},
+    {kSitingExchanged, k422v, 6, kSiteCenter, -1, 0, 1},
+    {kN422R, k422v, 6, kSiteCenter, TEGRA_VIC_T_Y8___U8V8_N422R, 0, 1},
+    {kN422RKept, k422v, 6, kSiteCenter, TEGRA_VIC_T_Y8___U8V8_N422R, 1, 0},
     {kShippedTurn4, k422v, 4, kSiteCenter, -1, -1, -1},
 };
 
@@ -175,20 +175,22 @@ inline const char *build(const Case &c, uint64_t source, uint64_t destination, u
     return nullptr;
 }
 
-// The siting each reading predicts along the output's halved axis, as half columns: N422R halves the composed picture
-// down, so its vertical code; N422 would describe the memory as it lies, so its horizontal code. The copies' chroma is
-// one value across a pair.
+// The siting each description predicts along the output's halved axis, as half columns: N422 describes the memory as
+// it lies, so its horizontal code; N422R would halve the composed picture down, so its vertical code. The copies'
+// chroma is one value across a pair.
 inline uint32_t expectedHalves(const Case &c)
 {
     if (control(c))
         return 0;
+    const TegraVICFormat *f = tegra_vic_format(c.source);
     uint32_t horiz = 0, vert = 0;
-    tegra_vic_chroma_loc(tegra_vic_format(c.source), c.site, c.transform & TEGRA_VIC_ROT90, &horiz, &vert);
+    tegra_vic_chroma_loc(f, c.site, &horiz, &vert);
     if (c.locHoriz >= 0)
         horiz = uint32_t(c.locHoriz);
     if (c.locVert >= 0)
         vert = uint32_t(c.locVert);
-    return c.format == TEGRA_VIC_T_Y8___U8V8_N422 ? horiz : vert;
+    const uint32_t format = c.format >= 0 ? uint32_t(c.format) : f->vicTransposed;
+    return format == TEGRA_VIC_T_Y8___U8V8_N422R ? vert : horiz;
 }
 
 // The CbCr pair output columns 2k and 2k + 1 of row v hold when sampled `halves` half columns past 2k.

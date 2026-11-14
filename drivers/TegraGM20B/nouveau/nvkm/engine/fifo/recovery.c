@@ -30,6 +30,7 @@
 void tgm_recover_reset_hold(struct nvkm_engine *);
 void tgm_recover_reset_release(struct nvkm_engine *);
 void tgm_recover_preempt_unblock(struct nvkm_runl *);
+void tgm_recover_owed_preempt(struct nvkm_runl *);
 
 struct nvkm_cgrp *
 nvkm_engn_cgrp_get(struct nvkm_engn *engn, unsigned long *pirqflags)
@@ -135,6 +136,7 @@ nvkm_runl_rc(struct nvkm_runl *runl)
 				break;
 		) < 0);
 	}
+	tgm_recover_owed_preempt(runl);
 
 	/* Removed channels remain in chid until their destructor takes runl->mutex.
 	 * ERRORED releases external memory leases, so publish only after quiescence. */

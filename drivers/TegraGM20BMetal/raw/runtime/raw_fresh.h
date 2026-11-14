@@ -6,6 +6,7 @@
 // before writing them, so a read that does is the runtime's bug: the pattern makes it visible (opaque magenta in an 8-bit
 // colour format, NaN in a float one) where stale memory would hide it.
 #pragma once
+#include <algorithm>
 #include <cstdint>
 #include <cstring>
 
@@ -168,6 +169,13 @@ inline bool copyFillOf(const uint8_t *texel, uint8_t size, CopyFill &out)
     }
     out = copyFillRemap(a, b, dst, 4, count);
     return true;
+}
+
+// A pass's render area along one side: its renderTargetWidth or renderTargetHeight where it set one (0: none), within the
+// smallest attachment's side, as the raw encoder takes it (RenderEncoder's areaW_, areaH_)
+inline uint32_t renderAreaSide(uint32_t set, uint32_t smallestAttachment)
+{
+    return set ? std::min(set, smallestAttachment) : smallestAttachment;
 }
 
 // Whether the first pass that touches a new texture writes every texel of it before anything reads it: a stored attachment of

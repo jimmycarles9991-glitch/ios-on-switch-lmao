@@ -11,14 +11,25 @@ static inline int badf(u32 v)
 static inline void gate_wake_closer(void)
 {
 	mutex_lock(&tgm_gate_lock);
-	nvxnu_wakeup(&tgm_sc7_gate.inside);
+	nvxnu_wakeup(TGM_GATE_DRAINED);
 	mutex_unlock(&tgm_gate_lock);
+}
+
+/* The gate counts on this CPU's cell, so the caller stays on it until the count is in (TegraGM20BSleepGate.h). */
+static inline enum tgm_gate_entry gate_try_enter(void)
+{
+	enum tgm_gate_entry entry = TGM_GATE_IN;
+
+	_disable_preemption();
+	entry = tgm_gate_try_enter(&tgm_sc7_gate, (unsigned int)cpu_number());
+	_enable_preemption();
+	return entry;
 }
 
 /* In (1), or refused while the gate is shut (0). */
 static inline int gate_try(void)
 {
-	enum tgm_gate_entry entry = tgm_gate_try_enter(&tgm_sc7_gate);
+	enum tgm_gate_entry entry = gate_try_enter();
 
 	if (entry == TGM_GATE_SHUT_WAKE)
 		gate_wake_closer();
@@ -27,7 +38,12 @@ static inline int gate_try(void)
 
 static inline void gate_leave(void)
 {
-	if (tgm_gate_leave(&tgm_sc7_gate))
+	int wake = 0;
+
+	_disable_preemption();
+	wake = tgm_gate_leave(&tgm_sc7_gate, (unsigned int)cpu_number());
+	_enable_preemption();
+	if (wake)
 		gate_wake_closer();
 }
 
@@ -89,7 +105,8 @@ extern inline __attribute__((gnu_inline)) uint32_t tgm_chan_waiter(struct tgm_ch
 	return (uint32_t)(chan->id % TGM_WAITERS);
 }
 
-static inline void chan_wake_all_waiters(struct tgm_chan *chan)
+/* pass: the interrupt pass, the one writer of the words' pass sequences (SwitchGpuWakeWord.h) */
+static inline void chan_wake_all_waiters(struct tgm_chan *chan, int pass)
 {
 	u32 waiter = tgm_chan_waiter(chan);
 
@@ -97,7 +114,7 @@ static inline void chan_wake_all_waiters(struct tgm_chan *chan)
 		__atomic_store_n(&tgm_waiter_woken_ns[waiter], nvxnu_nanotime(), __ATOMIC_RELAXED);
 		__atomic_fetch_add(&tgm_wstat.wakes, 1, __ATOMIC_RELAXED);
 	}
-	nvxnu_word_wake(&tgm_waiter_words[waiter]);
+	nvxnu_wword_wake(&tgm_waiter_words[waiter], pass);
 }
 
 /* tgm_live_lock held; by id, else (id 0) by hardware channel */
@@ -189,7 +206,7 @@ static inline void idle_stats(void)
 	nvxnu_mutex_unlock(tgm_idle.clk);
 	nvxnu_stats("tegra-gm20b: idle clock %llu ms: %llu.%llu%% at %u kHz, %u drops, %u raises "
 		    "(%u by a hint), "
-		    "raise mean %llu ns max %llu ns; %llu in flight; now %d kHz",
+		    "raise mean %llu ns max %llu ns; work in flight %d; now %d kHz",
 		    span / 1000000, low * 100 / span, low * 1000 / span % 10, tgm_idle.idle_khz,
 		    drops, raises, hinted, raises ? sum / raises : 0, max, idle_in_flight(),
 		    nvkm_clk_read(tgm_gpu.device->clk, nv_clk_src_gpc));

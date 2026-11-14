@@ -2,6 +2,7 @@
 // TegraNVENCDirect.cpp: a submit whose source surface holds a native NVDEC picture NVENC reads in place.
 #pragma once
 #include "TegraNVENC.h"
+#include "../TegraGM20B/SwitchGpuBridge.h"
 #include "../TegraVIC/SwitchNativeSurface.h"
 
 enum : uint32_t {
@@ -16,7 +17,8 @@ struct TegraNVENCDirect {
     switch_gpu_backing_token token;
     switch_gpu_backing_use uses[2];  // the transaction's: it reads them again at commit or abort, after begin returned
     switch_gpu_backing_transaction transaction;
-    TegraNVENCOrder order;  // for tegra_nvenc_run
+    switch_gpu_bridge *bridge;  // the picture's GM20B writers and writer promises, acquired on host1x's side
+    TegraNVENCOrder order;      // for tegra_nvenc_run
 };
 
 // 0 with `patched` the submit reading the native picture (TEGRA_NVENC_DIRECT_HANDLE) and `direct` holding it; -95 when

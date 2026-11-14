@@ -62,10 +62,10 @@ struct PlanesTest: HWTest {
     }
 
     /// kern.switch_planes_* by name, and the errno of the first that could not be read.
-    static func totals() -> (values: [String: Int], unread: Int32) {
+    static func totals(_ names: [String] = counters) -> (values: [String: Int], unread: Int32) {
         var values: [String: Int] = [:]
         var unread: Int32 = 0
-        for name in counters {
+        for name in names {
             switch KernelSysctl.integer("kern.switch_planes_" + name, as: Int32.self) {
             case .value(let value): values[name] = Int(value)
             case .failed(let error): if unread == 0 { unread = error }

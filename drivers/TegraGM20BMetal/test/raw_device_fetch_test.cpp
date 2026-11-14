@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MIT
 #include "raw_device_harness.h"
+#include "../raw/runtime/raw_depth_stencil_state.h"
 #include "../raw/runtime/raw_record.h"
 
 namespace {
@@ -38,13 +39,15 @@ raw::RuntimeRecord fetchingRecord(uint64_t key, bool storage)
 
 class DeviceFetch : public harness::DeviceTest {
 protected:
-    raw::Texture target;
+    raw::Texture target, small;
+    raw::Texture *into = &target;
     raw::Buffer indices, arguments;
 
     void SetUp() override
     {
         DeviceTest::SetUp();
         ASSERT_TRUE(dev.createTexture(64, 64, kRGBA8, target));
+        ASSERT_TRUE(dev.createTexture(32, 32, kRGBA8, small));
         ASSERT_TRUE(dev.createBuffer(4096, indices));
         ASSERT_TRUE(dev.createBuffer(256, arguments));
         const uint16_t strip[] = {0, 1, 2, 3, 0xffff, 4, 5, 6, 7};
@@ -70,7 +73,7 @@ protected:
         std::string why;
     };
 
-    template <class Draw> Drawn drawOnce(raw::Pipeline *pl, Draw draw)
+    template <class Draw> Drawn drawOnce(raw::Pipeline *pl, Draw draw, const raw::DepthStencilState *state = nullptr)
     {
         Drawn d;
         const raw::FetchCounts &k = dev.stats.fetch;
@@ -79,10 +82,11 @@ protected:
         if (!cb)
             return d;
         raw::PassDesc pass;
-        pass.color[0].texture = &target;
+        pass.color[0].texture = into;
         pass.color[0].load = raw::ColorAttachment::Load;
         pass.count = 1;
         pass.storageMask = pl->storageBits;
+        pass.hiddenZeta = state != nullptr;
         raw::RenderEncoder *e = cb->render(pass);
         if (!e) {
             d.why = "no pass";
@@ -90,6 +94,8 @@ protected:
             return d;
         }
         e->setPipeline(pl);
+        if (state)
+            e->setDepthStencil(state);
         const char *why = nullptr;
         d.ok = draw(*e, &why);
         d.why = why ? why : "";
@@ -116,11 +122,23 @@ protected:
         });
     }
 
-    Drawn restart(raw::Pipeline *pl)
+    Drawn restart(raw::Pipeline *pl, uint8_t cull = 0)
     {
-        return drawOnce(pl, [this](raw::RenderEncoder &e, const char **why) {
+        return drawOnce(pl, [this, cull](raw::RenderEncoder &e, const char **why) {
+            e.setCullMode(cull);
             return e.drawIndexed(kStrip, 9, 2, &indices, 0, 1, 0, 0, why);
         });
+    }
+
+    // RenderBox's quad: an indexed strip of four, under `state` over a Depth32Float_Stencil8 attachment where given
+    Drawn quad(raw::Pipeline *pl, const raw::DepthStencilState *state = nullptr)
+    {
+        return drawOnce(
+            pl,
+            [this](raw::RenderEncoder &e, const char **why) {
+                return e.drawIndexed(kStrip, 4, 2, &indices, 0, 1, 0, 0, why);
+            },
+            state);
     }
 
     Drawn instanced(raw::Pipeline *pl)
@@ -175,11 +193,99 @@ TEST_F(DeviceFetch, TheBarrierFormDrawsAStripATriangleAtATime)
     EXPECT_EQ(s.triangles, 8u);
 }
 
+// Rule fetch.twin (raw_twin_rule.h): a storage form's strip over a measured render area is drawn by its barrier twin a
+// triangle at a time; every shape the twin's draw would refuse, and a smaller area, stay whole inside the interlock
+TEST_F(DeviceFetch, TheTwinRuleTakesTheTwinOnlyWhereItsDrawKeepsEveryShape)
+{
+    raw::Pipeline *pl = pipeline(true), *twin = pipeline(false);
+    ASSERT_NE(pl, nullptr);
+    ASSERT_NE(twin, nullptr);
+    pl->barrierTwin = twin;
+    const std::atomic<uint64_t> &taken = dev.stats.fetch.twinRule;
+    const uint64_t before = taken;
+    const Drawn s = strip(pl);
+    EXPECT_TRUE(s.ok) << s.why;
+    EXPECT_EQ(s.interlocked, 0u);
+    EXPECT_EQ(s.split, 1u);
+    EXPECT_EQ(s.triangles, 8u);
+    EXPECT_EQ(taken - before, 1u);
+    const uint32_t args[5] = {9, 1, 0, 0, 0};
+    memcpy(static_cast<uint8_t *>(arguments.cpu) + 16, args, sizeof args);
+    for (const auto &[name, drawn] :
+         {std::pair{"restart", restart(pl)}, std::pair{"instanced", instanced(pl)}, std::pair{"indirect", indirect(pl)},
+          std::pair{"indexed indirect", indexedIndirect(pl)}}) {
+        EXPECT_TRUE(drawn.ok) << name << ": " << drawn.why;
+        EXPECT_EQ(drawn.interlocked, 1u) << name;
+        EXPECT_EQ(drawn.split, 0u) << name;
+    }
+    into = &small;
+    const Drawn below = strip(pl);
+    EXPECT_TRUE(below.ok) << below.why;
+    EXPECT_EQ(below.interlocked, 1u) << "32x32 is under the smallest area measured";
+    EXPECT_EQ(taken - before, 1u);
+}
+
+// Rule fetch.blend's accumulates: a pass that clears its target, or does not care, drops the mark of the command buffer
+// whose rung-2 forms last blended into it; one that loads it keeps the mark
+TEST_F(DeviceFetch, APassThatDoesNotLoadItsTargetForgetsItsRung2Blends)
+{
+    for (const auto load : {raw::ColorAttachment::Clear, raw::ColorAttachment::DontCare, raw::ColorAttachment::Load}) {
+        target.ropBlendSerial = 5;
+        raw::CommandBuffer *cb = dev.begin();
+        ASSERT_NE(cb, nullptr);
+        raw::PassDesc pass;
+        pass.color[0].texture = &target;
+        pass.color[0].load = load;
+        pass.count = 1;
+        cb->render(pass)->end();
+        cb->abandon();
+        EXPECT_EQ(target.ropBlendSerial, load == raw::ColorAttachment::Load ? 5u : 0u) << int(load);
+    }
+}
+
+// An indexed strip's runs are index ranges: the hardware's restart draws nothing in the runs holding 0xffff, as the
+// whole strip draws no triangle there
+TEST_F(DeviceFetch, TheBarrierFormDrawsAnIndexedStripATriangleAtATime)
+{
+    raw::Pipeline *pl = pipeline(false);
+    ASSERT_NE(pl, nullptr);
+    const Drawn q = quad(pl);
+    EXPECT_TRUE(q.ok) << q.why;
+    EXPECT_EQ(q.interlocked, 0u);
+    EXPECT_EQ(q.split, 1u);
+    EXPECT_EQ(q.triangles, 2u);
+    const Drawn r = restart(pl);
+    EXPECT_TRUE(r.ok) << r.why;
+    EXPECT_EQ(r.split, 1u);
+    EXPECT_EQ(r.triangles, 7u);
+}
+
+// RenderBox's icon draw binds depth GreaterEqual with writes and an untouched stencil (traced on a Mac): its faces decide
+// nothing; a stencil whose back face alone increments would make them decide
+TEST_F(DeviceFetch, AnIndexedStripOverAStencilAttachmentIsRefusedOnlyWhereItsFacesDiffer)
+{
+    raw::Pipeline *pl = pipeline(false);
+    ASSERT_NE(pl, nullptr);
+    raw::DepthStencilDesc renderBox;
+    renderBox.depthCompare = 6;
+    renderBox.depthWrite = true;
+    const raw::DepthStencilState untouched(renderBox);
+    const Drawn q = quad(pl, &untouched);
+    EXPECT_TRUE(q.ok) << q.why;
+    EXPECT_EQ(q.triangles, 2u);
+    raw::DepthStencilDesc winding = renderBox;
+    winding.back.pass = 6;
+    const raw::DepthStencilState twoSided(winding);
+    EXPECT_FALSE(quad(pl, &twoSided).ok);
+}
+
 TEST_F(DeviceFetch, TheBarrierFormRefusesWhatOneTriangleADrawCannotKeep)
 {
     raw::Pipeline *pl = pipeline(false);
     ASSERT_NE(pl, nullptr);
-    EXPECT_FALSE(restart(pl).ok);
+    const Drawn culled = restart(pl, 1);
+    EXPECT_FALSE(culled.ok);
+    EXPECT_EQ(culled.why, "framebuffer-fetch ordering requires an interlocked program or available bounded geometry");
     EXPECT_FALSE(instanced(pl).ok);
     EXPECT_FALSE(indirect(pl).ok);
 }

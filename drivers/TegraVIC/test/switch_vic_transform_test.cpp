@@ -20,6 +20,7 @@ int admission = 0, mappings = 0, gates = 0, pitchInputs = 0, notifications = 0;
 void (*pending)(void *, int);
 void *pendingContext;
 TegraVICJob submittedJob;
+TegraVICAcquire submittedAcquire;
 std::vector<switch_gpu_backing_use> declaredUses;
 std::vector<switch_gpu_backing_guard> declaredGuards;
 }
@@ -52,7 +53,8 @@ extern "C" void switch_gpu_backing_describe(switch_gpu_backing *, switch_gpu_bac
     info->page_count = 1024;
 }
 
-int switch_vic_surface_access(const TegraVICSurface *surface, bool write, SwitchVICSurfaceAccess *access, bool)
+int switch_vic_surface_access(const TegraVICSurface *surface, bool write, SwitchVICSurfaceAccess *access, bool,
+                              switch_gpu_backing *)
 {
     ++gates;
     pitchInputs += !write;
@@ -130,12 +132,13 @@ uint64_t switch_vic_mapping_address(const SwitchVICMapping *mapping)
     return mapping->address;
 }
 
-int switch_vic_submit_checked(const TegraVICJob *jobs, uint32_t count, const TegraVICAcquire *,
+int switch_vic_submit_checked(const TegraVICJob *jobs, uint32_t count, const TegraVICAcquire *acquire,
                               const SwitchVICOwnership &ownership, void (*completion)(void *, int), void *context,
                               uint32_t *, SwitchVICEvents *)
 {
     EXPECT_EQ(count, 1u);
-    EXPECT_GT(gates, 0);
+    submittedAcquire = acquire ? *acquire : TegraVICAcquire{};
+    EXPECT_TRUE(gates > 0 || ownership.leaseCount > 0) << "a submission holds its surfaces";
     submittedJob = jobs[0];
     declaredUses.assign(ownership.uses, ownership.uses + ownership.useCount);
     declaredGuards.assign(ownership.guards, ownership.guards + ownership.guardCount);
@@ -168,7 +171,8 @@ int switch_native_surface_publish_turned(const TegraVICSurface *, const SwitchNa
 
 switch_gpu_backing *switch_vic_surface_backing(const TegraVICSurface *)
 {
-    return nullptr;
+    ++outputPitch.refs;
+    return &outputPitch;
 }
 
 extern "C" void switch_gpu_backing_retain(switch_gpu_backing *backing)
@@ -344,9 +348,21 @@ TEST_F(SwitchVICTransformTest, DetachedVideoCopyInto422vRunsDirect)
     ASSERT_EQ(submit(), 1);
     EXPECT_EQ(notifications, 1);
     EXPECT_EQ(TEGRA_VIC_GET(submittedJob.config, TEGRA_VIC_OUTPUT_SURFACE, SURF_FORMAT),
-              uint64_t(TEGRA_VIC_T_Y8___U8V8_N422R));
+              uint64_t(TEGRA_VIC_T_Y8___U8V8_N422));
     EXPECT_EQ(TEGRA_VIC_GET(submittedJob.config, TEGRA_VIC_OUTPUT_SURFACE, SURF_CHROMA_WIDTH), 533u);
     EXPECT_EQ(TEGRA_VIC_GET(submittedJob.config, TEGRA_VIC_OUTPUT, OUT_TRANSPOSE), 1u);
+}
+
+// A copy held behind a syncpoint (display.media_completion_flip_gated's gate): VIC's channel waits for it first.
+TEST_F(SwitchVICTransformTest, AnAcquireIsTheJobsFirstWait)
+{
+    immediate = true;
+    const TegraVICAcquire gate = {172, 9};
+    EXPECT_EQ(switch_vic_transform(&source, &destination, &plan, 0, done, nullptr, nullptr, &gate), 1);
+    EXPECT_EQ(submittedAcquire.syncpt, 172u);
+    EXPECT_EQ(submittedAcquire.threshold, 9u);
+    EXPECT_EQ(submit(), 1);
+    EXPECT_EQ(submittedAcquire.syncpt, 0u);
 }
 
 TEST_F(SwitchVICTransformTest, OverlappingDescriptorFallsBackBeforeTakingReservations)
@@ -396,9 +412,9 @@ TEST_F(TurnDefer, AProvenTurnIsRecordedAndNothingIsSubmitted)
     EXPECT_EQ(pending, nullptr);
 }
 
-TEST_F(TurnDefer, BeforeV3PassesEveryTurnIsCopied)
+TEST_F(TurnDefer, WithoutTheColumnScanTraitEveryTurnIsCopied)
 {
-    EXPECT_EQ(defer(nullptr, kSwitchDisplayTraits), 0);
+    EXPECT_EQ(defer(nullptr, SwitchDisplayTraits{}), 0);
     EXPECT_EQ(publishedTurns, 0u);
 }
 
@@ -434,5 +450,42 @@ TEST_F(TurnDefer, APitchSourcePartOfTheDestinationOrNoTurnIsCopied)
     plan.op[0].transform = 0;
     EXPECT_EQ(defer(nullptr), 0);
     EXPECT_EQ(publishedTurns, 0u);
+}
+
+// Leaving landscape (display.x1.landscape_video crc_back): the portrait route's first read of a destination TegraVIC
+// recorded as a turn has VIC make its rows (SwitchNativeSurface.cpp prepare), with the very job a copy of that request
+// would have run, so window B shows the copy route's picture again. iPadOS 27's full-screen shape: a quarter turn into a
+// 720x1280 '422v'.
+TEST_F(TurnDefer, ARecordedTurnsRowsAreMadeByTheCopysJob)
+{
+    auto &d = destination.desc;
+    d.fourcc = TEGRA_VIC_FOURCC('4', '2', '2', 'v');
+    d.planeHeight[1] = 1280;
+    d.length = 768 * 1280 * 2;
+    constexpr uint32_t site = 2;
+    ASSERT_EQ(switch_vic_transform(&source, &destination, &plan, site, done, nullptr), 1);
+    const TegraVICJob copy = submittedJob;
+    ASSERT_NE(pending, nullptr);
+    pending(pendingContext, 0);
+    pending = nullptr;
+
+    SwitchNativeSurfaceView picture = {};
+    ASSERT_EQ(switch_native_surface_acquire(&source, &picture, false, true), 0);
+    auto *lease = reinterpret_cast<switch_gpu_cpu_lease *>(0x1ea5e);
+    const char *why = "not run";
+    ASSERT_EQ(switch_vic_turn_surface(picture, plan.op[0], site, &destination, lease, true, &why), 0) << why;
+    switch_native_surface_release(&picture);
+    const TegraVICJob turn = submittedJob;
+    ASSERT_NE(pending, nullptr);
+    pending(pendingContext, 0);
+
+    EXPECT_EQ(TEGRA_VIC_GET(turn.config, TEGRA_VIC_OUTPUT_SURFACE, SURF_FORMAT), uint64_t(TEGRA_VIC_T_Y8___U8V8_N422));
+    EXPECT_EQ(memcmp(copy.config, turn.config, sizeof(copy.config)), 0);
+    ASSERT_EQ(copy.count, turn.count);
+    for (uint32_t i = 0; i < copy.count; ++i) {
+        EXPECT_EQ(copy.method[i], turn.method[i]) << i;
+        EXPECT_EQ(copy.value[i], turn.value[i]) << i;
+    }
+    EXPECT_EQ(copy.pixels, turn.pixels);
 }
 }  // namespace

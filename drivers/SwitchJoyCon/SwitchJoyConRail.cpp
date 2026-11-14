@@ -641,11 +641,6 @@ OSDefineMetaClassAndStructors(SwitchJoyConPairing, IOService)
         return switch_mmio_read32(pinmux, reg);
     }
 
-    void pmcWrite(uint32_t reg, uint32_t value)
-    {
-        switch_mmio_write32(pmc, reg, value);
-    }
-
     uint32_t pmcRead(uint32_t reg)
     {
         return switch_mmio_read32(pmc, reg);
@@ -2352,7 +2347,7 @@ void SwitchJoyConRail::preparePads(const char *when)
                 sizeof(fixed));
     }
     if (pmcRead(PMC_NO_IOPOWER) & kPadUartPower) {
-        pmcWrite(PMC_NO_IOPOWER, pmcRead(PMC_NO_IOPOWER) & ~kPadUartPower);
+        switch_pmc_rmw(PMC_NO_IOPOWER - 0x400, kPadUartPower, 0);
         (void)pmcRead(PMC_NO_IOPOWER);
         strlcat(fixed, " IO power on,", sizeof(fixed));
     }

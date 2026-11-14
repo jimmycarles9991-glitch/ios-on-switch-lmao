@@ -12,9 +12,7 @@
 //   * down with hysteresis: a lower target must persist for down_hold before the clock follows, and then it goes to
 //     the highest target seen during the hold, so a dip shorter than the hold never costs a frame;
 //   * boosts (touch, a missed frame, an app launch, the boot): a floor until a deadline, applied at once;
-//   * limits [lo, hi]: the thermal ceiling and the cold floor, applied at once in either direction;
-//   * rows held down (switch_gov_rows): a ceiling row the DFLL ran high at is skipped as the ceiling until it is
-//     measured right again, from below, a line or a few later.
+//   * limits [lo, hi]: the thermal ceiling and the cold floor, applied at once in either direction.
 // Nothing here can pick a point outside the table or outside [lo, hi]; the table itself is built from the L4T CVB/DVFS
 // rows by the caller and never goes above Nintendo's own Mariko maximum (switch_gov_cpu_table below: 1785 MHz).
 #ifndef SWITCH_GOVERNOR_H
@@ -218,9 +216,7 @@ static inline unsigned switch_gov_index_at_fraction(const uint32_t *khz, unsigne
 // voltages floored at the CVB Vmin): every row up to max_khz (Nintendo's 1785 MHz boost clock), starting at the
 // highest row whose voltage is at or below vmin_mv. Rows under that one share its voltage: the DFLL runs them at the
 // same DVCO rate and voltage with its output skipper (clk-dfll.c dfll_calculate_rate_request), so they save next to
-// nothing; the governor's lowest point is that row. At it (the DVCO's minimum itself) L4T's Vmin calibration
-// (dfll_calibrate, a 40 ms timer) still runs until it has measured that minimum for the thermal floor in force, then
-// stops; below it, it would run again after every change. Returns the rows written to khz_out/mv_out (at most cap).
+// nothing; the governor's lowest point is that row. Returns the rows written to khz_out/mv_out (at most cap).
 static inline unsigned switch_gov_cpu_table(const uint32_t *khz, const uint32_t *mv, unsigned rows, uint32_t max_khz,
                                             uint32_t vmin_mv, uint32_t *khz_out, uint32_t *mv_out, unsigned cap)
 {
@@ -238,104 +234,6 @@ static inline unsigned switch_gov_cpu_table(const uint32_t *khz, const uint32_t 
         mv_out[n] = mv[i];
     }
     return n;
-}
-
-// A clock measured over the one asked for by half a DFLL step or more (the DFLL runs whole steps of 25.5 MHz, so a
-// rate one step high reads 1.4 % over; a probe reads within 0.3 % of the truth). SwitchThermal checks the DFLL's top
-// with it: 1785 MHz is kept only while it measures at or under 1785 + half a step.
-static inline int switch_gov_over_step(uint32_t measured_khz, uint32_t asked_khz, uint32_t step_khz)
-{
-    return measured_khz > asked_khz + step_khz / 2 ? 1 : 0;
-}
-
-// Rows held down: a ceiling row that measured high with the clock on it (switch_gov_over_step, even when re-asked
-// from the row below; SwitchThermal dfllOverCeiling) may not be the ceiling for a while. Only that row: the ceiling
-// is the highest row under the thermal limits that is not held, so the rows around it stay in use. The caller's
-// periodic line drives the waits: switch_gov_rows_tick as it starts, its measurement of the ceiling, then
-// switch_gov_rows_retry, which puts each held row whose wait is over back on trial: as the ceiling like any other row,
-// so the governor gets there from below and the caller measures it there. The wait is one line for a row held by a
-// measurement (the next line), then 2, 4 and 8 for each trial that measured high again; a row held from the start
-// (switch_gov_rows_init) is tried at the first line. Measured right on it, a row on trial is restored and its wait
-// starts over. A row above the thermal limits stays held until they allow it. (11-05 r8a: one 0.75-step reading,
-// 1702 MHz at 1683, cost the whole boot a row.)
-#define SWITCH_GOV_HOLD_MAX_MISSES 3u  // waits 1, 2, 4, 8 lines
-
-struct switch_gov_rows {
-    uint32_t held;                        // bit per row: not the ceiling now
-    uint32_t trial;                       // bit per row: let back after a hold, not yet measured right as the ceiling
-    uint32_t window;                      // lines counted (switch_gov_rows_tick)
-    uint32_t due[SWITCH_GOV_MAX_OPPS];    // a held row goes on trial at the line that counts this
-    uint8_t misses[SWITCH_GOV_MAX_OPPS];  // trials that measured high since the row last measured right
-};
-
-// `held` rows held from the start (the top the DFLL did not measure right at enable): on trial at the first line.
-static inline void switch_gov_rows_init(struct switch_gov_rows *r, uint32_t held)
-{
-    unsigned i = 0;
-    r->held = held;
-    r->trial = 0;
-    r->window = 0;
-    for (i = 0; i < SWITCH_GOV_MAX_OPPS; ++i) {
-        r->due[i] = 1;
-        r->misses[i] = 0;
-    }
-}
-
-// The ceiling: the highest row at or below `hi` (the thermal limits' ceiling) that is not held; 0 if every one is.
-static inline unsigned switch_gov_rows_ceiling(const struct switch_gov_rows *r, unsigned hi)
-{
-    if (hi >= SWITCH_GOV_MAX_OPPS)
-        hi = SWITCH_GOV_MAX_OPPS - 1;
-    while (hi && (r->held >> hi & 1u))
-        --hi;
-    return hi;
-}
-
-// `row`, the ceiling with the clock on it, measured high even when re-asked: held. Returns the lines until its next
-// trial (1 for a row that was not on trial, else twice the last wait, at most 8).
-static inline uint32_t switch_gov_rows_hold(struct switch_gov_rows *r, unsigned row)
-{
-    uint32_t wait = 0;
-    if (row >= SWITCH_GOV_MAX_OPPS)
-        return 0;
-    if ((r->trial >> row & 1u) && r->misses[row] < SWITCH_GOV_HOLD_MAX_MISSES)
-        ++r->misses[row];
-    wait = 1u << r->misses[row];
-    r->trial &= ~(1u << row);
-    r->held |= 1u << row;
-    r->due[row] = r->window + wait;
-    return wait;
-}
-
-// `row`, the ceiling with the clock on it, measured right: a row on trial is restored. 1 if it was on trial.
-static inline int switch_gov_rows_landed(struct switch_gov_rows *r, unsigned row)
-{
-    if (row >= SWITCH_GOV_MAX_OPPS || !(r->trial >> row & 1u))
-        return 0;
-    r->trial &= ~(1u << row);
-    r->misses[row] = 0;
-    return 1;
-}
-
-// The caller's periodic line starts: one more line counts toward every held row's wait.
-static inline void switch_gov_rows_tick(struct switch_gov_rows *r)
-{
-    ++r->window;
-}
-
-// After the line's measurement: every held row at or below `hi` (the thermal limits' ceiling) whose wait is over goes
-// on trial. Returns those rows (bits).
-static inline uint32_t switch_gov_rows_retry(struct switch_gov_rows *r, unsigned hi)
-{
-    uint32_t back = 0;
-    unsigned i = 0;
-    for (i = 0; i <= hi && i < SWITCH_GOV_MAX_OPPS; ++i) {
-        if ((r->held >> i & 1u) && (int32_t)(r->window - r->due[i]) >= 0)
-            back |= 1u << i;
-    }
-    r->held &= ~back;
-    r->trial |= back;
-    return back;
 }
 
 #ifdef __cplusplus

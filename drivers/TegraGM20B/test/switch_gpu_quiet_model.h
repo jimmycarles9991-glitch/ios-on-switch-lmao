@@ -7,7 +7,7 @@
 #include <cstdint>
 #include <deque>
 #include <functional>
-#include "../SwitchGpuActiveIrq.h"
+#include "../SwitchGpuFenceWaiter.h"
 #include "../SwitchGpuJobFences.h"
 #include "../SwitchGpuQuiet.h"
 

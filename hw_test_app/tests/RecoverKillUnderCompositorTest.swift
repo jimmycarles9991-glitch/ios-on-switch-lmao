@@ -6,10 +6,12 @@ import QuartzCore
 import UIKit
 
 /// gpu.recover.kill_one's kill again and again while the compositor presents every frame (a probe layer a bench raw
-/// device fills, RecoverCompositorProbe). Each GR error resets GR, and
-/// with the compositor drawing every frame the PBDMA is often on its channel when that reset comes: a reset that leaves
-/// the compositor's context load stuck shows as a frame waiting a context-switch timeout tick or more. Each kill fails
-/// only its own command buffer, the raw channel comes back each time, and no frame waits past the bound.
+/// device fills, RecoverCompositorProbe) and another bench raw device keeps the copy engine busy (RecoverBystander on
+/// the copy engine), so kills land with its copies in flight. Each GR error resets GR, and with the compositor drawing
+/// every frame the PBDMA is often on its channel when that reset comes: a reset that leaves the compositor's context
+/// load stuck shows as a frame waiting a context-switch timeout tick or more. Each kill fails only its own command
+/// buffer, the raw channel comes back once each time, the copy-engine bystander sees no error or kill, and no frame
+/// waits past the bound.
 struct RecoverKillUnderCompositorTest: HWTest {
     let id = "gpu.recover.kill_under_compositor"
     let name = "Raw channel kills while the compositor presents every frame: each fails only itself, no frame waits"
@@ -24,13 +26,16 @@ struct RecoverKillUnderCompositorTest: HWTest {
         guard RawFacade.kind(of: gpu.device) == "raw" else {
             return .skip("the default device is not the raw facade (\(RawFacade.kind(of: gpu.device)))")
         }
+        try RecoverKillOneTest.settle(gpu)
         let start = RawFacade.counters(of: gpu.device)
         guard start["gpu_order"] != nil else { return .skip("the facade has no recovery counters (a release build)") }
         let probeBench: BenchRunner
+        let copier: RecoverBystander
         do {
             probeBench = try BenchRunner.open()
+            copier = try RecoverBystander(try BenchRunner.open(), on: .copy)
         } catch {
-            return .fail("the compositor probe's bench raw device did not open: \(error)")
+            return .fail("a bench raw device did not open: \(error)")
         }
         let compositor = await context.onStage { stage -> RecoverCompositorProbe in
             let probe = RecoverCompositorProbe(device: gpu.device, bench: probeBench)
@@ -39,8 +44,10 @@ struct RecoverKillUnderCompositorTest: HWTest {
             stage.layer.addSublayer(probe.probe)
             return probe
         }
+        copier.start()
         await MainActor.run { compositor.start() }
         try await Task.sleep(nanoseconds: 500_000_000)
+        copier.measure()
         await MainActor.run { compositor.measure() }
 
         let kill = RecoverKillOneTest()
@@ -63,6 +70,7 @@ struct RecoverKillUnderCompositorTest: HWTest {
         let last = try kill.fill(gpu, ring, slot: 2 * Self.rounds - 1, ends)
         allEnded = await ends.wait([last], seconds: 10) && allEnded
         try await Task.sleep(nanoseconds: 300_000_000)
+        let copierStopped = copier.stop(seconds: 5)
         await MainActor.run { compositor.stop() }
         let presented = await MainActor.run { compositor.presented }
         let (fillErrors, firstFillError) = await MainActor.run { (compositor.fillErrors, compositor.firstFillError) }
@@ -91,6 +99,11 @@ struct RecoverKillUnderCompositorTest: HWTest {
         metrics.set("gap_bound_ms", Self.gapBoundMs, digits: 0)
         metrics.set("present_frames", shown.frames)
         metrics.set("probe_fill_errors", fillErrors)
+        metrics.set("ce_bystander_errors", copier.errors)
+        metrics.set("ce_bystander_kills", copier.kills)
+        metrics.set("ce_bystander_runs", copier.runs)
+        metrics.set("ce_bystander_gap_ms", Double(copier.longestNs) / 1e6, digits: 1)
+        if !copier.firstError.isEmpty { metrics.set("ce_bystander_first", String(copier.firstError.prefix(80))) }
         if !firstFillError.isEmpty { metrics.set("probe_fill_first", String(firstFillError.prefix(80))) }
         if let refusal { return .fail("the illegal method was refused: \(refusal)", metrics) }
         return .judged(
@@ -98,13 +111,22 @@ struct RecoverKillUnderCompositorTest: HWTest {
                 ("every command buffer ended (none hung)", allEnded),
                 ("every poisoned command buffer ran raw and failed", killed == Self.rounds),
                 ("every fill completed with its bytes", fillsOK == Self.rounds + 1 && kept == Self.rounds),
-                ("each kill made one reopen", delta("reopens") == Self.rounds),
+                ("each kill made one reopen of this channel (\(delta("reopens")))", delta("reopens") == Self.rounds),
+                (
+                    copier.failure.isEmpty ? "\(copier.role.rawValue) ran with no error" : copier.failure,
+                    copierStopped && copier.runs > 0 && copier.errors == 0
+                ),
                 ("no CPU-ordered fallback; GPU order on", delta("cpu_ordered") == 0 && end["gpu_order"] == 1),
                 (
                     "the compositor kept presenting within the bound",
                     shown.frames > 0 && presentGapMs <= Self.gapBoundMs
                 ),
-                ("the probe's own raw device filled every frame", fillErrors == 0),
+                (
+                    fillErrors == 0
+                        ? "the compositor probe's bench channel filled every frame"
+                        : "the compositor probe's bench channel: \(firstFillError)",
+                    fillErrors == 0
+                ),
             ], metrics)
     }
 }

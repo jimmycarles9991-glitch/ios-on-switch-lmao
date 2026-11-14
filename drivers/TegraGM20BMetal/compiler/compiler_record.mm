@@ -78,6 +78,8 @@ MTLRenderPipelineDescriptor *descriptor(const Prepared &p, const Libraries &libr
     raw::applyFields(r.fields, d);
     d.vertexFunction = made[0];
     d.fragmentFunction = made[1];
+    if (uint64_t(made[0].patchType) != r.fields.patchType)
+        return why = "a vertex function of another patch type than its request names", nil;
     NSMutableDictionary<NSString *, NSMutableArray *> *linked = [NSMutableDictionary dictionary];
     for (size_t i = 2; i < r.stages.size(); ++i) {
         NSString *tag = @(r.stages[i].tag.c_str());
@@ -105,11 +107,8 @@ int32_t render(const Prepared &p, const Libraries &libraries, raw::Direct &direc
     MTLRenderPipelineDescriptor *d = descriptor(p, libraries, stack, why);
     if (!d)
         return TegraGM20BCompileUnavailable;
-    raw::ProbeTextures textures;
-    textures.cubic = p.request.cubic;
-    textures.fragmentTests = p.request.fragmentTests;
     raw::RuntimeRecord record;
-    const raw::CompileOutcome outcome = direct.make(d, p.packKey, record, why, textures);
+    const raw::CompileOutcome outcome = direct.make(d, p.packKey, record, why, raw::probeTexturesOf(p.request.variant));
     if (outcome != raw::CompileOutcome::Failed)
         entry = raw::encodeEntry(p.key, outcome == raw::CompileOutcome::Made ? &record : nullptr, why);
     return resultOf(outcome);
@@ -124,6 +123,7 @@ int32_t kernel(const Prepared &p, const Libraries &libraries, raw::Direct &direc
     d.computeFunction = made[0];
     d.maxTotalThreadsPerThreadgroup = p.request.kernel.maxThreads;
     d.threadGroupSizeIsMultipleOfThreadExecutionWidth = p.request.kernel.multipleOfWidth;
+    d.stageInputDescriptor = raw::stageInOf(p.request.kernel.stageIn);
     const NmbDirectDispatch dispatch = p.request.kernel.dispatch();
     raw::ComputeRecord record;
     const raw::CompileOutcome outcome = direct.kernel(d, dispatch, p.packKey, record, why);

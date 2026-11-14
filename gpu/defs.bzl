@@ -90,15 +90,17 @@ _PLUGIN_CFLAGS = [
     if TREE_ROOT != OLD_TREE
 ]
 
-def _metal_plugin_impl(ctx):
+def _plugin_objects(ctx, name, stack):
+    """Each unit of the plugin compiled on its own (objects in link order), with `stack` as the raw stack key's file."""
+
     # -I in the old build's order (NativeMetal, raw/runtime, TegraGM20B), and the raw path's stack key as a define.
     includes = []
     for marker in ctx.files.include_markers:
         includes += ["-I", marker.dirname]
     defines = [switch_debug_define(ctx)]
-    if ctx.file.stack:
-        defines.append("-DTEGRA_RAW_STACK=0x@FILE:%s@ull" % ctx.file.stack.path)
-    headers = ctx.files.hdrs + ctx.files.include_markers + ctx.files.stack
+    if stack:
+        defines.append("-DTEGRA_RAW_STACK=0x@FILE:%s@ull" % stack.path)
+    headers = ctx.files.hdrs + ctx.files.include_markers + ([stack] if stack else [])
     objects = []
     for language, sources in (("objective-c++", ctx.files.srcs), ("c++", ctx.files.cc_srcs), ("c", ctx.files.c_srcs)):
         # Plain C++ sends no Objective-C messages (clang calls the flag unused there, an error under -Werror); C takes
@@ -111,7 +113,7 @@ def _metal_plugin_impl(ctx):
             cflags = [f for f in cflags if f not in ("-std=c++17", "-fobjc-arc")] + ["-std=c11", "-DNDEBUG"]
             compiler = "clang"
         for src in sources:
-            obj = ctx.actions.declare_file("%s_objs/%s.o" % (ctx.attr.name, src.basename))
+            obj = ctx.actions.declare_file("%s_objs/%s.o" % (name, src.basename))
             _xcode_run(
                 ctx,
                 "ObjcxxCompile",
@@ -121,10 +123,18 @@ def _metal_plugin_impl(ctx):
                 [obj],
             )
             objects.append(obj)
-    out = ctx.actions.declare_file(ctx.attr.name + "/TegraGM20BMetal")
+    return objects
+
+def _frameworks(ctx):
     frameworks = []
     for framework in ctx.attr.frameworks:
         frameworks += ["-framework", framework]
+    return frameworks
+
+def _metal_plugin_impl(ctx):
+    objects = _plugin_objects(ctx, ctx.attr.name, ctx.file.stack)
+    out = ctx.actions.declare_file(ctx.attr.name + "/TegraGM20BMetal")
+    frameworks = _frameworks(ctx)
     _xcode_run(
         ctx,
         "MetalPluginLink",
@@ -150,19 +160,59 @@ def _metal_plugin_impl(ctx):
         OutputGroupInfo(debug = depset([dsym]), objects = depset(objects)),
     ]
 
+_PLUGIN_ATTRS = _XCODE | PROFILE_ATTR | {
+    "srcs": attr.label_list(mandatory = True, allow_files = [".mm"], doc = "Objective-C++ units, in link order"),
+    "cc_srcs": attr.label_list(allow_files = [".cpp"], doc = "C++ units, linked after srcs"),
+    "c_srcs": attr.label_list(allow_files = [".c"], doc = "C units, linked after cc_srcs"),
+    "hdrs": attr.label_list(allow_files = True),
+    "include_markers": attr.label_list(allow_files = True, doc = "one file per -I directory, in order"),
+    "frameworks": attr.string_list(default = ["Foundation", "Metal", "IOSurface"]),
+    "linkopts": attr.string_list(doc = "added to the link"),
+    "_xcode_run": attr.label(default = "//tools/gpu:xcode_run", executable = True, cfg = "exec"),
+}
+
 metal_plugin = rule(
     implementation = _metal_plugin_impl,
-    attrs = _XCODE | PROFILE_ATTR | {
-        "srcs": attr.label_list(mandatory = True, allow_files = [".mm"], doc = "Objective-C++ units, in link order"),
-        "cc_srcs": attr.label_list(allow_files = [".cpp"], doc = "C++ units, linked after srcs"),
-        "c_srcs": attr.label_list(allow_files = [".c"], doc = "C units, linked after cc_srcs"),
-        "hdrs": attr.label_list(allow_files = True),
-        "include_markers": attr.label_list(allow_files = True, doc = "one file per -I directory, in order"),
+    attrs = _PLUGIN_ATTRS | {
         "stack": attr.label(allow_single_file = True, doc = "the raw path's stack key (TEGRA_RAW_STACK)"),
-        "frameworks": attr.string_list(default = ["Foundation", "Metal", "IOSurface"]),
-        "linkopts": attr.string_list(doc = "added to the link"),
         "bridge": attr.label(mandatory = True, allow_single_file = True),
-        "_xcode_run": attr.label(default = "//tools/gpu:xcode_run", executable = True, cfg = "exec"),
+    },
+)
+
+# --- The plugin linked without m2v --------------------------------------------------------------------------------
+
+def _plugin_m2v_edges_impl(ctx):
+    # A stand-in stack key: a constant changes no symbol either unit references.
+    stack = ctx.actions.declare_file(ctx.attr.name + "/stack.txt")
+    ctx.actions.write(stack, "0\n")
+    objects = _plugin_objects(ctx, ctx.attr.name, stack)
+    linked = ctx.actions.declare_file(ctx.attr.name + "/TegraGM20BMetal")
+    edges = ctx.actions.declare_file(ctx.attr.name + ".txt")
+    args = ctx.actions.args()
+    args.add(ctx.file._xcode_env)
+    args.add("--")
+    args.add_all([ctx.executable._edges, "--out", edges, "--binary", linked, "--", "clang++"])
+    args.add_all(_IOS + _PLUGIN_CFLAGS + ["-bundle"])
+    args.add_all(objects)
+    args.add_all(["-Wl,-dead_strip", "-lobjc"] + _frameworks(ctx) + ctx.attr.linkopts)
+    ctx.actions.run(
+        executable = ctx.executable._xcode_run,
+        arguments = [args],
+        inputs = depset(objects + [ctx.file._xcode_env, ctx.file._xcode_identity]),
+        tools = [ctx.attr._edges[DefaultInfo].files_to_run],
+        outputs = [edges, linked],
+        mnemonic = "PluginM2vEdges",
+        progress_message = "Linking the plugin without m2v",
+    )
+    return [DefaultInfo(files = depset([edges]))]
+
+plugin_m2v_edges = rule(
+    implementation = _plugin_m2v_edges_impl,
+    doc = """The plugin's units linked as the plugin is, without the Metal bridge (m2v's runtime crate and the bridge's
+    exports): the symbols left undefined, each with the units that reference them (tools/gpu/m2v_link_edges.py). Empty:
+    nothing of the plugin needs m2v. Nothing here reaches a package --config=nom2v deletes.""",
+    attrs = _PLUGIN_ATTRS | {
+        "_edges": attr.label(default = "//tools/gpu:m2v_link_edges", executable = True, cfg = "exec"),
     },
 )
 

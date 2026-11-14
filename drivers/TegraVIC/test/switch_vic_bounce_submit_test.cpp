@@ -19,7 +19,7 @@ SwitchVICMapping sourceMap{0x10000000}, destinationMap{0x20000000}, scratchMaps[
 SwitchVICBounceSlot pool;
 std::vector<std::string> stages;
 std::vector<uint32_t> guardCounts;
-std::vector<std::pair<uint32_t, uint32_t>> copybackPlanes;  // bytes a row, rows
+std::vector<std::pair<uint32_t, uint32_t>> copybackPlanes, sourcePlanes;  // bytes a row, rows
 bool immediate = false;
 int failStage = -1, gates = 0, callbacks = 0, result = 0, unreservesAtCallback = -1;
 
@@ -78,6 +78,7 @@ protected:
         stages.clear();
         guardCounts.clear();
         copybackPlanes.clear();
+        sourcePlanes.clear();
         failStage = -1;
         immediate = false;
         gates = callbacks = result = 0;
@@ -138,7 +139,7 @@ extern "C" void switch_gpu_backing_describe(switch_gpu_backing *, switch_gpu_bac
     info->page_count = 1;
 }
 
-int switch_vic_surface_access(const TegraVICSurface *s, bool, SwitchVICSurfaceAccess *a, bool)
+int switch_vic_surface_access(const TegraVICSurface *s, bool, SwitchVICSurfaceAccess *a, bool, switch_gpu_backing *)
 {
     ++gates;
     const bool source = s->memory == &sourceMemory;
@@ -235,6 +236,8 @@ extern "C" int tegra_gm20b_ce_copy_plane_checked(const tegra_gm20b_ce_plane *, c
     stages.push_back(src == &scratchBacking[1] ? "copyback" : dst == &scratchBacking[1] ? "preserve" : "source");
     if (src == &scratchBacking[1])
         copybackPlanes.emplace_back(rowBytes, rows);
+    if (dst == &scratchBacking[0])
+        sourcePlanes.emplace_back(rowBytes, rows);
     guardCounts.push_back(ownership->guard_count);
     for (uint32_t i = 0; i < ownership->guard_count; ++i)
         EXPECT_TRUE(ownership->guards[i].backing == src || ownership->guards[i].backing == dst);
@@ -447,6 +450,51 @@ TEST_F(Bounce, DetachedVideoCopyInto422vComesBackWithEveryChromaRow)
     EXPECT_EQ(stages, (std::vector<std::string>{"vic", "copyback", "copyback"}));
     EXPECT_EQ(copybackPlanes, (std::vector<std::pair<uint32_t, uint32_t>>{{300, 534}, {300, 534}}));
     EXPECT_EQ(pool.buffers[1].desc.planeBytesPerRow[1], 512u);
+    finish();
+    EXPECT_EQ(callbacks, 1);
+    EXPECT_EQ(result, 0);
+}
+
+// Odd sizes on CoreVideo's 16-byte rows: assetsd's '422f' 333x74 source (boot 19) and a '420v' 333x75 destination are
+// bounced with every chroma plane's last pair and, 4:2:0, its last pair row whole.
+TEST_F(Bounce, OddSurfacesBounceTheirLastChromaPairAndRow)
+{
+    TegraVICSurface src = {};
+    src.surface = &sourceObject;
+    src.memory = &sourceMemory;
+    auto &s = src.desc;
+    s.fourcc = TEGRA_VIC_FOURCC('4', '2', '2', 'f');
+    s.width = 333;
+    s.height = 74;
+    s.planes = 2;
+    s.planeBytesPerRow[0] = s.planeBytesPerRow[1] = 336;
+    s.planeHeight[0] = s.planeHeight[1] = 74;
+    s.planeOffset[1] = 336 * 80;
+    s.length = 336 * 80 * 2;
+    TegraVICSurface dst = {};
+    dst.surface = &destinationObject;
+    dst.memory = &destinationMemory;
+    auto &d = dst.desc;
+    d.fourcc = TEGRA_VIC_FOURCC('4', '2', '0', 'v');
+    d.width = 333;
+    d.height = 75;
+    d.planes = 2;
+    d.planeBytesPerRow[0] = d.planeBytesPerRow[1] = 336;
+    d.planeHeight[0] = 75;
+    d.planeHeight[1] = 38;
+    d.planeOffset[1] = 336 * 80;
+    d.length = 336 * 80 * 2;
+    TegraVICPlan p = {};
+    p.count = 1;
+    p.readsSource = 1;
+    p.op[0].srcW = 333ull << 16;
+    p.op[0].srcH = 74ull << 16;
+    p.op[0].dstW = 333;
+    p.op[0].dstH = 75;
+    ASSERT_EQ(switch_vic_bounce_submit(&src, &dst, &p, 1, notify, nullptr, nullptr), 1);
+    EXPECT_EQ(stages, (std::vector<std::string>{"source", "source", "vic", "copyback", "copyback"}));
+    EXPECT_EQ(sourcePlanes, (std::vector<std::pair<uint32_t, uint32_t>>{{333, 74}, {334, 74}}));
+    EXPECT_EQ(copybackPlanes, (std::vector<std::pair<uint32_t, uint32_t>>{{333, 75}, {334, 38}}));
     finish();
     EXPECT_EQ(callbacks, 1);
     EXPECT_EQ(result, 0);

@@ -7,6 +7,7 @@
 #include "raw_loop_ranges.h"
 #include "raw_order.h"
 #include "raw_completion_source.h"
+#import "RawMetalPipeline.h"
 
 // ---- commit: order between the two drivers ----
 // With the kernel's Order (TegraGM20BABI.h method 14), the two drivers' command buffers are ordered on the GPU: before a raw
@@ -25,25 +26,26 @@ bool m2vClear()
     return gRM->gpuOrder ? gRM->m2vUnscheduled == 0 : gRM->m2vPending == 0;
 }
 
-// The kernel refused an Order: the drivers are ordered on the CPU until the kernel makes the raw channel again (one line).
-void orderRefused(const char *what, int kr)
+// The kernel refused an Order: the command buffer that needed it fails with this (one error line); the next command buffer
+// is ordered afresh
+NSString *orderRefused(const char *what, int kr)
 {
-    once([NSString stringWithFormat:@"CPU-ordered: the kernel refused Order (%s, 0x%x)", what, kr]);
+    os_log_error(rawLog(), "raw: the kernel refused Order (%{public}s, 0x%x): its command buffer fails", what, kr);
     RAW_DIAGNOSTIC(gRM->stats.cpuOrdered++);
-    std::lock_guard<raw::Mutex> m(gRM->m2vLock);
-    gRM->gpuOrder = false;
-    gRM->orderRefusedAt = gRM->raw->stats.reopens.load(std::memory_order_relaxed);
+    return [NSString stringWithFormat:@"The kernel refused to order the work of two drivers (%s, 0x%x)", what, kr];
 }
 
-// A raw submission went through on a channel the kernel made since it refused an Order: GPU order again
-static void orderReturned()
+// `cb` failed for `reason`, finished: what a submission that cannot go on returns
+static bool failSubmission(RMCommandBuffer *cb, NSString *reason)
 {
-    RawState &r = *gRM;
-    if (!raw::orderReturns(r.gpuOrder, r.raw->canOrder(), r.raw->stats.reopens.load(std::memory_order_relaxed),
-                           r.orderRefusedAt))
-        return;
-    std::lock_guard<raw::Mutex> m(r.m2vLock);
-    r.gpuOrder = true;
+    failCommandBuffer(cb, reason);
+    NSError *error = nil;
+    {
+        std::lock_guard<raw::Mutex> l(cb->_lock);
+        error = cb->_segError;
+    }
+    finish(cb, error);
+    return true;
 }
 
 static void countDriver(int driver)
@@ -235,6 +237,11 @@ bool submitRange(RMCommandBuffer *cb, bool followed)
     }
     // a present is added before its command buffer is committed, a completed handler's flag before it is added
     const bool observed = cb->_hasCompletedHandlers.load() || cb->_presents;
+    {
+        const bool more = !priorError && cb->_segNext < cb->_segs.size();
+        const RMSegment *next = more ? &cb->_segs[cb->_segNext] : nullptr;
+        rmPipelineYield(cb, next ? next->from : SIZE_MAX, next && next->raw && !next->event && !next->held);
+    }
     if (priorError) {
         finish(cb, priorError);
         return true;
@@ -310,10 +317,8 @@ bool submitRange(RMCommandBuffer *cb, bool followed)
                 cb->_why = @"the raw channel is being made again";
                 return false;
             }
-            if (answer == raw::OrderAnswer::refused) {
-                orderRefused("raw after m2v", kr);
-                return false;
-            }
+            if (answer == raw::OrderAnswer::refused)
+                return failSubmission(cb, orderRefused("raw after m2v", kr));
             r.m2vSinceRaw = false;
             RAW_DIAGNOSTIC(r.stats.acquires += waits);
         }
@@ -378,14 +383,14 @@ bool submitRange(RMCommandBuffer *cb, bool followed)
         }
         RAW_DIAGNOSTIC(r.stats.raw++);
         r.rawSinceM2v = true;
-        if (!r.gpuOrder)
-            orderReturned();
         countDriver(1);
         {
             RAW_ENCODE_SPAN(Retire);
-            retireRawRange(cb, range.from, range.to);
+            // Core Animation's waitUntilScheduled returns before the retirement's bookkeeping: a waitUntilCompleted that
+            // follows finds its range in flight or wakes the completion thread for it (retireRawRange)
             if (last)
                 scheduled(cb);
+            retireRawRange(cb, range.from, range.to);
         }
 #if SWITCH_FRAME_TIMELINE
         folded();
@@ -403,10 +408,8 @@ bool submitRange(RMCommandBuffer *cb, bool followed)
         if (r.gpuOrder && r.rawSinceM2v) {
             uint32_t waits = 0;
             const int kr = r.raw->orderOthersAfter(waits);
-            if (kr != KERN_SUCCESS) {
-                orderRefused("m2v after raw", kr);
-                return false;
-            }
+            if (kr != KERN_SUCCESS)
+                return failSubmission(cb, orderRefused("m2v after raw", kr));
             RAW_DIAGNOSTIC(r.stats.acquires += waits);
         }
 #if SWITCH_FRAME_TIMELINE
@@ -414,8 +417,7 @@ bool submitRange(RMCommandBuffer *cb, bool followed)
         cb->_frame.mark(switch_frame::ReplayStart);
         tTwinTicks = 0;
 #endif
-        id<MTLCommandBuffer> m =
-            RM_M2V("a command buffer replayed on m2v") ? replay(cb, range.from, range.to, true) : nil;
+        id<MTLCommandBuffer> m = RM_M2V(NeedReplay) ? replay(cb, range.from, range.to, true) : nil;
 #if SWITCH_FRAME_TIMELINE
         cb->_frame.mark(switch_frame::ReplayEnd);
         cb->_frame.set(switch_frame::Twins, tTwinTicks);

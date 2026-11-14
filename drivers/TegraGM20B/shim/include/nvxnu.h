@@ -189,7 +189,8 @@ int nvxnu_firmware_find(const char *name, const void **data, unsigned long *size
 /*
  * GPU interrupts, no polled mode. nvxnu_irq_start() claims the GPU's stall and nonstall GIC SPIs (157/158 = INTID
  * 189/190, Linux tegra210.dtsi:427-428) on a work loop whose action runs nvxnu_poll_irqs() (nvkm_intr reads every
- * MC leaf, so both lines share it) and then nvxnu_wake(); it panics if it cannot. Waiters take nvxnu_wake_seq(),
+ * MC leaf, so both lines share it) and then nvxnu_wake(), which wakes a thread only while one sleeps in nvxnu_idle()
+ * or nvxnu_wake_due(); it panics if it cannot. Waiters take nvxnu_wake_seq(),
  * test their condition and call nvxnu_idle(), which sleeps until the sequence moves (1) or the deadline passes (0),
  * and panics when a GPU interrupt stays pending at PMC without being taken, or when called before nvxnu_irq_start().
  * nvxnu_wake() is safe with spinlocks held. nvxnu_wake_due(): `what` (a fence, say) is done although nothing woke
@@ -199,11 +200,29 @@ void nvxnu_irq_start(void);
 /* System sleep: nvxnu_irq_suspend() before the GPU's power goes (both lines masked, no pass reads the GPU from then on,
  * nvxnu_idle() no longer looks at PMC); nvxnu_irq_resume() once it is back, before nvkm arms its interrupts. */
 void nvxnu_irq_suspend(void);
+/* Returns once no interrupt pass that began before the call is still running. Thread context, no lock the pass takes. */
+void nvxnu_pass_barrier(void);
+/* fn(arg) inside the interrupt work loop's gate, so never beside a pass or another such call; on the work loop itself at
+ * once. nvxnu_pass_run waits for the gate (thread context, no lock the pass takes); nvxnu_pass_try never waits and
+ * returns 0, fn not run, while a pass or another call holds it. */
+void nvxnu_pass_run(void (*fn)(void *), void *arg);
+int nvxnu_pass_try(void (*fn)(void *), void *arg);
 void nvxnu_irq_resume(void);
 /* A frame timeline kdebug tracepoint (SwitchFrameTimeline.h): debug kernels only, free while tracing is off. */
 void nvxnu_kdebug(nvxnu_u32 code, nvxnu_u64 a, nvxnu_u64 b, nvxnu_u64 c);
 /* The interrupt passes run so far, by line. */
 void nvxnu_irq_passes(nvxnu_u64 *stall, nvxnu_u64 *nonstall);
+/* Debug kernels: the passes by line that found a channel's fence moved (job interrupts). */
+void nvxnu_irq_job_passes(nvxnu_u64 *stall, nvxnu_u64 *nonstall);
+/* Debug kernels: the passes and the nonstall line's filters so far by the CPU that ran them, and the threads the passes
+ * woke on the global word. */
+void nvxnu_irq_cpus(nvxnu_u64 passes[4], nvxnu_u64 filters[4], nvxnu_u64 *global_wakeups);
+/* A wake word with the interrupt pass's own sequence (SwitchGpuWakeWord.h): pass 1 only on the pass's thread. */
+struct switch_gpu_wake_word;
+void nvxnu_wword_wake(struct switch_gpu_wake_word *word, int pass);
+int nvxnu_wword_idle(struct switch_gpu_wake_word *word, nvxnu_u32 seq, nvxnu_u64 deadline_ns);
+void nvxnu_wword_wake_due(struct switch_gpu_wake_word *word, nvxnu_u32 seq, const char *what,
+			  nvxnu_u32 value);
 nvxnu_u32 nvxnu_wake_seq(void);
 void nvxnu_wake(void);
 int nvxnu_idle(nvxnu_u32 seq, nvxnu_u64 deadline_ns);
@@ -216,7 +235,7 @@ int nvxnu_word_idle(const volatile nvxnu_u32 *word, nvxnu_u32 seq, nvxnu_u64 dea
 void nvxnu_word_wake_due(const volatile nvxnu_u32 *word, nvxnu_u32 seq, const char *what,
 			 nvxnu_u32 value);
 
-/* Tegra210 platform pieces (platform.c), used by the clk/regulator/reset/pmc shims */
+/* Tegra210 platform pieces (platform.c), used by the clk/regulator shims, tegra.c and gpu_power.c */
 int tegra_gm20b_platform_map(void);
 int tegra_gm20b_rail_enable(int on);
 int tegra_gm20b_rail_get_uv(int *uv);
@@ -225,15 +244,16 @@ int tegra_gm20b_rail_max_uv(void);
 nvxnu_u32 tegra_gm20b_dvfs_khz(int row); /* L4T B01 GPU rate of table row, 0 past the end */
 int tegra_gm20b_dvfs_na_uv(
 	nvxnu_u32 khz, int speedo); /* its NAPLL voltage, worst over temperature; -22 off-table */
-int tegra_gm20b_clk_enable(int id, int on);
 unsigned long tegra_gm20b_clk_get_rate(int id);
 int tegra_gm20b_clk_set_rate(int id, unsigned long rate);
-void tegra_gm20b_reset(int assert);
-int tegra_gm20b_unclamp(void);
 int tegra_gm20b_mc_flush(int flush);
+/* Tegra X1 TRM 12.2.7.17, step for step. The ungate brings VDD_GPU up first and returns 0 or the PMIC's error. The gate
+ * returns 0 or the MC drain's -110 and puts the PMIC's result in *vdd. */
+int tegra_gm20b_rail_ungate(void);
+int tegra_gm20b_rail_gate(int *vdd);
 nvxnu_u32 tegra_gm20b_fuse_read(nvxnu_u32 offset); /* Linux tegra_fuse_readl() offsets */
-/* MC_INTSTATUS (cleared after the read), MC_ERR_STATUS, MC_ERR_ADR (Linux drivers/memory/tegra/mc.h): what the memory
- * controller refused since the previous call */
+/* The memory controller's latest refused access as its error interrupt took it (MC_INTSTATUS bits, MC_ERR_STATUS,
+ * MC_ERR_ADR; TegraSMMU's tegra_mc_error_latest), zeros when none came since the previous call */
 void tegra_gm20b_mc_errors(nvxnu_u32 *intstatus, nvxnu_u32 *status, nvxnu_u32 *addr);
 /* The MC's carveout 2, the GPU's WPR1: CFG0, BOM, SIZE_128KB, CLIENT_ACCESS2, CLIENT_ACCESS4 */
 void tegra_gm20b_mc_gpu_wpr(nvxnu_u32 v[5]);

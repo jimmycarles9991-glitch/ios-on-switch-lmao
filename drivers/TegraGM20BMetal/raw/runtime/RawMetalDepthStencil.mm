@@ -33,7 +33,7 @@ static bool faceWritesStencil(const raw::StencilFace &f)
         if (_twin)
             return _twin;
     }
-    id<MTLDevice> m2v = RM_M2V("a depth/stencil state's twin");
+    id<MTLDevice> m2v = RM_M2V(NeedDepthStencilTwin);
     return twinPublish(self, _twin, [m2v newDepthStencilStateWithDescriptor:_descriptor]);
 }
 

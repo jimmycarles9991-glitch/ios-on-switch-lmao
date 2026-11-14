@@ -2,6 +2,8 @@
 # cache, and golden graphs of recorded frames with their barrier counts against today's unconditional prologue.
 #
 #   bazel test --config=agent --config=ios17 //drivers/TegraGM20BMetal/raw/plan/test/...
+load("@rules_python//python:py_library.bzl", "py_library")
+load("@rules_python//python:py_test.bzl", "py_test")
 load("//bazel/lint:defs.bzl", "lint_files")
 load("//bazel/testing:defs.bzl", "host_library", "host_test")
 
@@ -86,4 +88,22 @@ host_test(
     ],
     tags = ["m2v"],
     deps = [":plan"],
+)
+
+py_library(
+    name = "m2v_routes_scan",
+    srcs = ["m2v_routes_scan.py"],
+    data = [
+        "//drivers/TegraGM20B:all_files",
+        "//drivers/TegraGM20BMetal:m2v_route_sources",
+    ],
+    imports = ["."],
+)
+
+# raw/plan/m2v_routes.tsv against the plugin's sources: every way into m2v has its row, and the open rows only fall
+py_test(
+    name = "m2v_routes_test",
+    srcs = ["m2v_routes_test.py"],
+    data = ["//drivers/TegraGM20BMetal/raw/plan:m2v_routes.tsv"],
+    deps = [":m2v_routes_scan"],
 )

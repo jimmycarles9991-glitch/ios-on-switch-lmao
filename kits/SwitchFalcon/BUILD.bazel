@@ -25,6 +25,12 @@ kernel_headers()
 
 kernel_driver(
     name = "SwitchFalcon",
-    srcs = ["SwitchFalcon.cpp"],
-    hdr_deps = ["kits/SwitchMMIO"],
+    srcs = [
+        "SwitchFalcon.cpp",
+        "SwitchFalconInterrupt.cpp",
+    ],
+    hdr_deps = [
+        "drivers/ArmGIC",
+        "kits/SwitchMMIO",
+    ],
 )

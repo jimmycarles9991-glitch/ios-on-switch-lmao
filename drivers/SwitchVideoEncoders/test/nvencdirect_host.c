@@ -123,7 +123,8 @@ static const char *h265(uint32_t width, uint32_t height, const Native *n)
 }
 
 // The decoder's picture is still being written when NVENC's job is queued: NVDEC's and VIC's writes become waits on
-// their syncpoints in the job's stream; a GPU producer sends the picture through VIC; a failed one fails the frame.
+// their syncpoints in the job's stream; a GPU producer or a writer promise is waited for through the GPU-to-host1x
+// bridge; a failed one fails the frame.
 static void producers(void)
 {
     struct switch_gpu_backing_token nvdec = {0x100000005ull, 1, SWITCH_GPU_ENGINE_NVDEC, 21};
@@ -135,8 +136,13 @@ static void producers(void)
     struct switch_gpu_backing_token own = {7, 1, SWITCH_GPU_ENGINE_NVENC, 23};
     CHECK(tegra_nvenc_direct_producer(&own, 0) == 0, "an earlier NVENC job is ordered on NVENC's channel");
     struct switch_gpu_backing_token gpu = {3, 2, SWITCH_GPU_ENGINE_GM20B, 5};
-    CHECK(tegra_nvenc_direct_producer(&gpu, 0) == -11, "a GPU producer goes through VIC");
+    CHECK(tegra_nvenc_direct_producer(&gpu, 0) == TEGRA_NVENC_DIRECT_BRIDGE,
+          "a GPU producer is waited for on the bridge");
     CHECK(tegra_nvenc_direct_producer(&gpu, 1) == 0, "a GPU producer done needs nothing");
+    CHECK(tegra_nvenc_direct_producer(&gpu, -5) == -5, "a GPU producer failed fails the frame");
+    struct switch_gpu_backing_token promise = {4, 1, SWITCH_GPU_ENGINE_PROMISE, 6};
+    CHECK(tegra_nvenc_direct_producer(&promise, 0) == TEGRA_NVENC_DIRECT_BRIDGE,
+          "a writer promise is waited for on the bridge");
     struct switch_gpu_backing_token display = {3, 1, SWITCH_GPU_ENGINE_DISPLAY, 24};
     CHECK(tegra_nvenc_direct_producer(&display, 0) == -11, "another engine goes through VIC");
     struct switch_gpu_backing_token wide = {3, 1, SWITCH_GPU_ENGINE_NVDEC, 0x100};

@@ -458,10 +458,19 @@ static inline void tegra_nvjpg_setup_image(const TegraNVJPGImage *img, uint32_t 
 }
 
 // Targets NVJPG writes (output_pixel_format, output_chroma_mode, memory_mode): semi-planar YUV (a luma plane and an
-// interleaved CbCr plane) at 4:2:0, 4:2:2 or 4:4:4 whatever the file's sampling, planar YUV 4:2:0 (three planes),
-// packed 4:2:2 (YUY2: Y0 Cb Y1 Cr, CoreVideo's 'yuvf' order), and 32-bit RGB in its byte orders (planar memory mode,
-// as oss-nvjpg drives RGB surfaces), each optionally downscaled by 2, 4 or 8 (DCT scaling, power2_downscale). Pitch linear only (the T210's NVJPG has no tiled output, averne's FFmpeg note). Strides are
-// 64-byte multiples and plane addresses 256-byte multiples (the methods take address >> 8).
+// interleaved CbCr plane) at 4:2:0 whatever the file's sampling, planar YUV 4:2:0 (three planes), packed 4:2:2 (YUY2:
+// Y0 Cb Y1 Cr, CoreVideo's 'yuvf' order), and 32-bit RGB in its byte orders (planar memory mode, as oss-nvjpg drives
+// RGB surfaces), each optionally downscaled by 2, 4 or 8 (DCT scaling, power2_downscale). Pitch linear, or block linear
+// for a destination GM20B laid out so (TegraGM20BLayout.h): the T210 firmware writes tile_mode and block_linear_height
+// unchanged into PDMA_PIC_INFO1's tiling_mode (bits 15-16) and blklinear_gob (bits 17-19), nvjpg.bin 0x136c-0x1390.
+// Strides are 64-byte multiples and plane addresses 256-byte multiples (the methods take address >> 8).
+//
+// A '422f' or '444f' destination is decoded as planar YUV at the file's own 4:2:2 or 4:4:4 (three planes, memory_mode
+// 3, as oss-nvjpg writes them and NVIDIA's Orin path decodes them) into a buffer of the service's, and VIC re-packs the
+// planes into the destination (SwitchVICDecodeOutput.h). Semi-planar output is set up at 4:2:0 only: memory_mode 0 is
+// nvjpg_drv.h's "semi planar nv12", which the firmware writes unchanged into PDMA_PIC_INFO1 (nvjpg.bin 0x1378-0x1390),
+// and every job of memory_mode 0 at output_chroma_mode 2 or 4 ever submitted hung until cancelled (25 of 25, boots of
+// 8-13 Nov, the falcon parked waiting for the decoder's done).
 enum {
     TEGRA_NVJPG_OUT_NV12 = 0,  // '420f': Y plane, CbCr plane (Cb first)
     TEGRA_NVJPG_OUT_I420 = 1,  // 'y420': Y, Cb, Cr planes
@@ -469,8 +478,8 @@ enum {
     TEGRA_NVJPG_OUT_RGBA = 3,  // bytes R, G, B, A ('RGBA')
     TEGRA_NVJPG_OUT_ARGB = 4,  // bytes A, R, G, B ('ARGB')
     TEGRA_NVJPG_OUT_GREY = 5,  // Y plane only ('L008'), grey files only
-    TEGRA_NVJPG_OUT_NV16 = 6,  // '422f': Y plane, CbCr plane at half width, full height
-    TEGRA_NVJPG_OUT_NV24 = 7,  // '444f': Y plane, CbCr plane at full width and height
+    TEGRA_NVJPG_OUT_NV16 = 6,  // '422f': the engine writes Y, Cb, Cr planes at 4:2:2; VIC re-packs them
+    TEGRA_NVJPG_OUT_NV24 = 7,  // '444f': the engine writes Y, Cb, Cr planes at 4:4:4; VIC re-packs them
     TEGRA_NVJPG_OUT_YUY2 = 8,  // 'yuvf': one plane, Y0 Cb Y1 Cr
     TEGRA_NVJPG_OUT_COUNT = 9,
 };
@@ -489,11 +498,24 @@ enum {
     TEGRA_NVJPG_MEMORY_PLANAR = 3
 };
 
+// nvjpg_drv.h tile_mode (0 pitch, 1 "gpu block linear", 2 "tegra block linear"). 2 is taken for the arrangement every
+// Tegra X1 client shares, NV_MMU_PTE_KIND_GENERIC_16Bx2 with Tegra sector ordering (TRM chapter 20, Tables 83 and 86:
+// clients sharing surfaces must support it), which NVDEC writes as tileFormat 0 "TBL" and VIC reads as GENERIC_16Bx2.
+// blklinear_gob is the GOBs a block as log2, the encoding "all Tegra X1 clients use" (TRM 20.2, Table 85; NVDEC's
+// falcon setup codes 2 GOBs as 0 for itself, but NVJPG's firmware passes the field to the hardware unchanged). The TRM
+// has no NVJPG chapter: HW Test gpu.iosurface.cross_process nvjpg<size> judges both readings and names the layout a
+// wrong read matches.
+enum {
+    TEGRA_NVJPG_TILE_PITCH = 0,
+    TEGRA_NVJPG_TILE_TEGRA_BLOCK_LINEAR = 2
+};
+
 typedef struct {
     uint32_t format;    // TEGRA_NVJPG_OUT_*
     uint32_t scale;     // log2 of the downscale: 0..3
     uint32_t pitch[3];  // bytes per row of each plane (one plane for RGB and grey; NV12 two; I420 three)
     uint32_t alpha;     // the A byte of RGB outputs
+    uint32_t blockLinear, blockHeightLog2;  // one plane, Tegra block linear: pitch is a row of GOBs
 } TegraNVJPGTarget;
 
 // What a decode writes: the visible picture, and per plane the rows and bytes per row the engine may touch. `padded`:
@@ -509,10 +531,10 @@ static inline uint32_t tegra_nvjpg_planes(uint32_t format)
 {
     switch (format) {
     case TEGRA_NVJPG_OUT_NV12:
-    case TEGRA_NVJPG_OUT_NV16:
-    case TEGRA_NVJPG_OUT_NV24:
         return 2;
     case TEGRA_NVJPG_OUT_I420:
+    case TEGRA_NVJPG_OUT_NV16:
+    case TEGRA_NVJPG_OUT_NV24:
         return 3;
     default:
         return 1;
@@ -544,6 +566,9 @@ static inline const char *tegra_nvjpg_setup_output(const TegraNVJPGImage *img, c
         return "output format";
     if (t->scale > 3)
         return "scale";
+    if ((t->format == TEGRA_NVJPG_OUT_NV16 && img->chroma != TEGRA_NVJPG_CHROMA_422H) ||
+        (t->format == TEGRA_NVJPG_OUT_NV24 && img->chroma != TEGRA_NVJPG_CHROMA_444))
+        return "4:2:2 or 4:4:4 destination of a file sampled otherwise";
     if (t->format == TEGRA_NVJPG_OUT_GREY && img->components != 1)
         return "grey output from a colour file";
     if (img->components == 1 && tegra_nvjpg_is_yuv(t->format))
@@ -568,12 +593,10 @@ static inline const char *tegra_nvjpg_setup_output(const TegraNVJPGImage *img, c
         e->rowBytes[1] = e->rowBytes[2] = cw;
         break;
     case TEGRA_NVJPG_OUT_NV16:
-        e->rows[0] = e->rows[1] = h;
-        e->rowBytes[0] = w, e->rowBytes[1] = 2 * cw;
-        break;
     case TEGRA_NVJPG_OUT_NV24:
-        e->rows[0] = e->rows[1] = h;
-        e->rowBytes[0] = w, e->rowBytes[1] = 2 * w;
+        e->rows[0] = e->rows[1] = e->rows[2] = h;
+        e->rowBytes[0] = w;
+        e->rowBytes[1] = e->rowBytes[2] = t->format == TEGRA_NVJPG_OUT_NV16 ? cw : w;
         break;
     case TEGRA_NVJPG_OUT_YUY2:
         e->rows[0] = h, e->rowBytes[0] = 4 * cw;
@@ -595,10 +618,13 @@ static inline const char *tegra_nvjpg_setup_output(const TegraNVJPGImage *img, c
     }
     if (e->planes == 3 && t->pitch[1] != t->pitch[2])
         return "chroma strides differ";
+    if (t->blockLinear && (e->planes != 1 || t->blockHeightLog2 > 5))
+        return "block-linear output of more than one plane, or blocks over 32 GOBs";
     s->output_stride_luma = (int)t->pitch[0];
     s->output_stride_chroma = e->planes > 1 ? (int)t->pitch[1] : 0;
     s->power2_downscale = (int)t->scale;
-    s->tile_mode = 0;
+    s->tile_mode = t->blockLinear ? TEGRA_NVJPG_TILE_TEGRA_BLOCK_LINEAR : TEGRA_NVJPG_TILE_PITCH;
+    s->block_linear_height = t->blockLinear ? (int)t->blockHeightLog2 : 0;
     s->motion_jpeg_type = 0;
     switch (t->format) {
     case TEGRA_NVJPG_OUT_NV12:
@@ -607,16 +633,16 @@ static inline const char *tegra_nvjpg_setup_output(const TegraNVJPGImage *img, c
         s->output_chroma_mode = TEGRA_NVJPG_CHROMA_420;
         s->memory_mode = t->format == TEGRA_NVJPG_OUT_NV12 ? TEGRA_NVJPG_MEMORY_NV12 : TEGRA_NVJPG_MEMORY_PLANAR;
         break;
-    case TEGRA_NVJPG_OUT_NV16:
     case TEGRA_NVJPG_OUT_YUY2:
         s->output_pixel_format = TEGRA_NVJPG_PIXEL_YUV;
         s->output_chroma_mode = TEGRA_NVJPG_CHROMA_422H;
-        s->memory_mode = t->format == TEGRA_NVJPG_OUT_NV16 ? TEGRA_NVJPG_MEMORY_NV12 : TEGRA_NVJPG_MEMORY_YUY2;
+        s->memory_mode = TEGRA_NVJPG_MEMORY_YUY2;
         break;
+    case TEGRA_NVJPG_OUT_NV16:
     case TEGRA_NVJPG_OUT_NV24:
         s->output_pixel_format = TEGRA_NVJPG_PIXEL_YUV;
-        s->output_chroma_mode = TEGRA_NVJPG_CHROMA_444;
-        s->memory_mode = TEGRA_NVJPG_MEMORY_NV12;
+        s->output_chroma_mode = (int)img->chroma;
+        s->memory_mode = TEGRA_NVJPG_MEMORY_PLANAR;
         break;
     case TEGRA_NVJPG_OUT_GREY:
         s->output_pixel_format = TEGRA_NVJPG_PIXEL_YUV;

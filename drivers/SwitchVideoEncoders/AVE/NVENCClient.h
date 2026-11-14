@@ -9,7 +9,9 @@
 
 typedef struct NVENCClient NVENCClient;
 
-bool nvenc_service_present(void);
+// The service is published; a process asking before NVENC's bring-up has ended waits for it, or for the kernel's word
+// that it will not come (TEGRA_NVENC_ABSENT_RESOURCE).
+bool nvenc_service_wait(void);
 NVENCClient *nvenc_open(int *error);  // NULL with the IOReturn when the service is absent or refuses this process
 void nvenc_close(NVENCClient *client);
 

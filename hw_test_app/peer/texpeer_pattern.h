@@ -23,3 +23,19 @@ static inline bool switch_texpeer_rendered(uint32_t type, uint32_t levels, uint3
 {
     return type == 2 && levels > 1 && level == 1;
 }
+
+// Byte `c` of texel (x, y) of the BGRA IOSurfaces the peer renders for gpu.iosurface.cross_process: every byte of a
+// 64x8-texel GOB differs from its neighbours', so rows that are really texels (or the reverse) show at once
+static inline uint8_t switch_texpeer_surface_byte(uint32_t x, uint32_t y, uint32_t c)
+{
+    switch (c) {
+    case 0:
+        return (uint8_t)x;
+    case 1:
+        return (uint8_t)y;
+    case 2:
+        return (uint8_t)((x >> 8) | ((y >> 8) << 4) | 0x80);
+    default:
+        return (uint8_t)((x * 7 + y * 13) | 1);
+    }
+}

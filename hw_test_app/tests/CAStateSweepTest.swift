@@ -6,8 +6,8 @@ import Metal
 /// Core Animation's states, one per class of the raw pack's corpus (gpu/CAStateSweep.swift), each drawn by the raw
 /// facade and compared with the same state drawn by this IPSW's QuartzCore on a Mac's GPU (core/CAGoldens.swift,
 /// hw_test_app/goldens). exact= drew the Mac's bytes; close= every 8x8 block's mean within a few steps of the Mac's
-/// (another GPU's filtering and rounding); wrong= anything else. A state whose command buffer the facade sent to m2v
-/// proves nothing about raw and is counted apart (on_m2v=), as is one the reference lacks (no_golden=: run
+/// (another GPU's filtering and rounding); wrong= anything else. A state whose command buffer left the raw path failed
+/// (failed=, its path in states.txt); one the reference lacks is counted apart (no_golden=: run
 /// //hw_test_app:ca_goldens after a harvest). The wrong states' PNGs and every verdict land in
 /// Documents/gpu/gpu.ca.sweep/. HWTEST_SWEEP_ALL=1 in the app's environment draws every corpus state.
 public struct CAStateSweepTest: HWTest {
@@ -49,7 +49,7 @@ public struct CAStateSweepTest: HWTest {
         try? listing.write(to: directory.appendingPathComponent("states.txt"), atomically: true, encoding: .utf8)
         var metrics = Metrics()
         metrics.set("states", states.count)
-        for key in ["exact", "close", "wrong", "on_m2v", "no_golden", "skipped", "failed"] {
+        for key in ["exact", "close", "wrong", "no_golden", "skipped", "failed"] {
             metrics.set(key, counts[key] ?? 0)
         }
         metrics.set("golden_states", goldens.states.count)
@@ -65,14 +65,14 @@ public struct CAStateSweepTest: HWTest {
         return .pass(metrics, proof: proof)
     }
 
-    /// One state's verdict line: exact, close, wrong[: why], "on_m2v <path>", no_golden, "skipped <why>" or
-    /// "failed <why>".
+    /// One state's verdict line: exact, close, wrong[: why], no_golden, "skipped <why>" or "failed <why>" (a command
+    /// buffer off the raw path among them).
     func judge(
         _ line: PipelineLine, library: MTLLibrary, gpu: GPU, goldens: CAGoldens, directory: URL
     ) async -> String {
         do {
             let drawn = try await CAStateSweep.draw(line, library: library, gpu: gpu)
-            if drawn.path != "raw" { return "on_m2v \(drawn.path)" }
+            if drawn.path != "raw" { return "failed off the raw path: \(drawn.path)" }
             let (width, height) = (CAStateSweep.width, CAStateSweep.height)
             for (color, bytes) in zip(line.colors.sorted(by: { $0.index < $1.index }), drawn.attachments)
             where !Signature.padUntouched(

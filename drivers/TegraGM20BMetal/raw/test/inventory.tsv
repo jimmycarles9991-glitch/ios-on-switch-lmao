@@ -1,7 +1,7 @@
 # raw's API inventory, written by raw/test/selcover (SELCOVER_WRITE=1; selcover_inventory.h says what each
 # column holds): container, item, selector, m2v, sent by, raw
-# m2v's items: base 3 m2v 3 none 32 raw 341 read 354 refused 163 unread 139 zero 22
-# sent selectors: base 78 m2v 10 none 7 raw 556 refused 56 zero 108
+# m2v's items: base 3 m2v 1 none 32 raw 343 read 358 refused 163 unread 135 zero 22
+# sent selectors: base 77 m2v 7 none 7 raw 559 refused 56 zero 109
 MTLArgument	access	access	I	-	read
 MTLArgument	active	isActive	I	-	read
 MTLArgument	arrayLength	arrayLength	I	-	read
@@ -302,7 +302,7 @@ MTLComputeCommandEncoder	-	setLabel:	-	21H461,24B119	raw
 MTLComputeCommandEncoder	-	useResidencySet:	-	24B119	raw
 MTLComputeCommandEncoder	-	useResidencySets:count:	-	24B119	raw
 MTLComputeCommandEncoder	dispatchThreadgroups:threadsPerThreadgroup:	dispatchThreadgroups:threadsPerThreadgroup:	I	21H461,24B119	raw
-MTLComputeCommandEncoder	dispatchThreadgroupsWithIndirectBuffer:indirectBufferOffset:threadsPerThreadgroup:	dispatchThreadgroupsWithIndirectBuffer:indirectBufferOffset:threadsPerThreadgroup:	I	21H461,24B119	m2v
+MTLComputeCommandEncoder	dispatchThreadgroupsWithIndirectBuffer:indirectBufferOffset:threadsPerThreadgroup:	dispatchThreadgroupsWithIndirectBuffer:indirectBufferOffset:threadsPerThreadgroup:	I	21H461,24B119	raw
 MTLComputeCommandEncoder	dispatchThreads:threadsPerThreadgroup:	dispatchThreads:threadsPerThreadgroup:	I	21H461,24B119	raw
 MTLComputeCommandEncoder	dispatchType	dispatchType	I	24B119	raw
 MTLComputeCommandEncoder	executeCommandsInBuffer:indirectBuffer:indirectBufferOffset:	executeCommandsInBuffer:indirectBuffer:indirectBufferOffset:	I	24B119	raw
@@ -324,7 +324,7 @@ MTLComputeCommandEncoder	setSamplerState:lodMinClamp:lodMaxClamp:atIndex:	setSam
 MTLComputeCommandEncoder	setSamplerStates:lodMinClamps:lodMaxClamps:withRange:	setSamplerStates:lodMinClamps:lodMaxClamps:withRange:	I	21H461,24B119	raw
 MTLComputeCommandEncoder	setSamplerStates:withRange:	setSamplerStates:withRange:	I	21H461,24B119	raw
 MTLComputeCommandEncoder	setStageInRegion:	setStageInRegion:	I	21H461,24B119	raw
-MTLComputeCommandEncoder	setStageInRegionWithIndirectBuffer:indirectBufferOffset:	setStageInRegionWithIndirectBuffer:indirectBufferOffset:	I	24B119	m2v
+MTLComputeCommandEncoder	setStageInRegionWithIndirectBuffer:indirectBufferOffset:	setStageInRegionWithIndirectBuffer:indirectBufferOffset:	I	24B119	raw
 MTLComputeCommandEncoder	setTexture:atIndex:	setTexture:atIndex:	I	21H461,24B119	raw
 MTLComputeCommandEncoder	setTextures:withRange:	setTextures:withRange:	I	21H461,24B119	raw
 MTLComputeCommandEncoder	setThreadgroupMemoryLength:atIndex:	setThreadgroupMemoryLength:atIndex:	I	21H461,24B119	raw
@@ -541,7 +541,7 @@ MTLDevice	-	supportsNativeHardwareFP16	-	21H461,24B119	raw
 MTLDevice	-	supportsNonUniformThreadgroupSize	-	21H461,24B119	base
 MTLDevice	-	supportsNorm16BCubicFiltering	-	21H461,24B119	base
 MTLDevice	-	supportsPackUnpackSmallInteger	-	24B119	base
-MTLDevice	-	supportsProgrammableBlending	-	21H461,24B119	base
+MTLDevice	-	supportsProgrammableBlending	-	21H461,24B119	raw
 MTLDevice	-	supportsPullModelInterpolation	-	21H461,24B119	base
 MTLDevice	-	supportsQuadShufflesAndBroadcast	-	21H461,24B119	base
 MTLDevice	-	supportsRasterOrderGroups	-	21H461,24B119	raw
@@ -899,7 +899,7 @@ MTLRasterizationRateMapDescriptor	setLayer:atIndex:	setLayer:atIndex:	I	-	unread
 MTLRasterizationRateSampleArray	objectAtIndexedSubscript:	objectAtIndexedSubscript:	I	-	unread
 MTLRasterizationRateSampleArray	setObject:atIndexedSubscript:	setObject:atIndexedSubscript:	I	-	unread
 MTLRenderCommandEncoder	-	device	-	21H461,24B119	raw
-MTLRenderCommandEncoder	-	dispatchThreadsPerTile:inRegion:	-	21H461,24B119	m2v
+MTLRenderCommandEncoder	-	dispatchThreadsPerTile:inRegion:	-	21H461,24B119	zero
 MTLRenderCommandEncoder	-	dispatchThreadsPerTile:inRegion:withRenderTargetArrayIndex:	-	24B119	zero
 MTLRenderCommandEncoder	-	endEncoding	-	21H461,24B119	raw
 MTLRenderCommandEncoder	-	endEncodingAndRetrieveProgramAddressTable	-	24B119	zero
@@ -1132,10 +1132,10 @@ MTLRenderPipelineColorAttachmentDescriptor	writeMask	setWriteMask:	I	-	read
 MTLRenderPipelineColorAttachmentDescriptor	writeMask	writeMask	I	-	read
 MTLRenderPipelineColorAttachmentDescriptorArray	objectAtIndexedSubscript:	objectAtIndexedSubscript:	I	-	unread
 MTLRenderPipelineColorAttachmentDescriptorArray	setObject:atIndexedSubscript:	setObject:atIndexedSubscript:	I	-	unread
-MTLRenderPipelineDescriptor	alphaToCoverageEnabled	isAlphaToCoverageEnabled	I	-	unread
-MTLRenderPipelineDescriptor	alphaToCoverageEnabled	setAlphaToCoverageEnabled:	I	-	unread
-MTLRenderPipelineDescriptor	alphaToOneEnabled	isAlphaToOneEnabled	I	-	unread
-MTLRenderPipelineDescriptor	alphaToOneEnabled	setAlphaToOneEnabled:	I	-	unread
+MTLRenderPipelineDescriptor	alphaToCoverageEnabled	isAlphaToCoverageEnabled	I	-	read
+MTLRenderPipelineDescriptor	alphaToCoverageEnabled	setAlphaToCoverageEnabled:	I	-	read
+MTLRenderPipelineDescriptor	alphaToOneEnabled	isAlphaToOneEnabled	I	-	read
+MTLRenderPipelineDescriptor	alphaToOneEnabled	setAlphaToOneEnabled:	I	-	read
 MTLRenderPipelineDescriptor	binaryArchives	binaryArchives	I	-	read
 MTLRenderPipelineDescriptor	binaryArchives	setBinaryArchives:	I	-	read
 MTLRenderPipelineDescriptor	colorAttachments	colorAttachments	I	-	read

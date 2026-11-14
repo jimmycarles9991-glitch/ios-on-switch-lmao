@@ -35,7 +35,7 @@ def clause(check: Check) -> str:
     if check.subsystem:
         parts.append(f'subsystem CONTAINS {quote(check.subsystem)}')
     if check.level:
-        parts.append(f'messageType == {check.level}')
+        parts.append(f'messageType == {check.level.lower()}')
     return '(' + ' AND '.join(parts) + ')'
 
 

@@ -109,6 +109,7 @@ Pipeline *Device::reachTwin(Pipeline &pl, const char **why)
     t.colorFormats[0] = kReachFormat;
     t.restore = pl.restore;
     t.restore.insert(t.restore.end(), reachRestore_.begin(), reachRestore_.end());
+    t.namesAlphaControl = t.ownsAlphaControl = true;
     __atomic_store_n(&pl.reachTwin, &t, __ATOMIC_RELEASE);
     return &t;
 }

@@ -395,11 +395,14 @@ static void testDecode(void)
             for (uint32_t k = 0; k < small.entry_count; k++)  // the current slot's chroma plane sized for 8 bits
                 if (small.entries[k].method == NVC5B0_SET_PICTURE_CHROMA_OFFSET0 + 4 * q->curr_pic_idx)
                     small.entries[k].offset = (uint32_t)(f.bytes[small.entries[k].value] - columns * rows / 2);
+            TegraNVDECSubmit converted = good;
             ((nvdec_hevc_pic_s *)eight.setup)->disp_output_mode = 2;
+            ((nvdec_hevc_pic_s *)converted.setup)->disp_output_mode = 3;
             ((nvdec_hevc_pic_s *)deblock.setup)->HevcSaoBufferOffset = 480 * rows / 256;
             CHECK(fakeCheck(&f, &narrow) && fakeCheck(&f, &bytes) && fakeCheck(&f, &small) && fakeCheck(&f, &deblock),
                   "clip %c: the checker took a Main 10 submit the engine would write past", clip->name);
             CHECK(!fakeCheck(&f, &eight), "clip %c: mode 2 into 16-bit-sized pictures refused", clip->name);
+            CHECK(!fakeCheck(&f, &converted), "clip %c: mode 3 into 16-bit-sized pictures refused", clip->name);
             printf("checker: Main 10 at %u samples a row (%u bytes); byte strides, 8-bit-sized planes and filter rows "
                    "refused\n",
                    columns, 2 * columns);
@@ -467,28 +470,79 @@ static void testDisplayProbeCompare(void)
         PITCH16 = 128
     };
 
-    static uint8_t ref[PITCH16 * H], display[PITCH16 * H * 3 / 2];
+    static uint8_t ref[PITCH16 * H], chroma[PITCH16 * H / 2], display[PITCH16 * H * 3 / 2];
     for (uint32_t y = 0; y < H; y++)
         for (uint32_t x = 0; x < W; x++) {
             const uint16_t sample = (uint16_t)(((x * 7 + y * 13) % 1024) << 6);
             ref[gobOffset(2 * x, y, PITCH16)] = (uint8_t)sample;
             ref[gobOffset(2 * x + 1, y, PITCH16)] = (uint8_t)(sample >> 8);
         }
+    // Saturated chroma: Cb rising across, Cr falling down (10-bit, 16 bits a sample, Cb first).
+    for (uint32_t y = 0; y < H / 2; y++)
+        for (uint32_t x = 0; x < W / 2; x++) {
+            const uint16_t cb = (uint16_t)((64 + x * 896 / (W / 2)) << 6);
+            const uint16_t cr = (uint16_t)((960 - y * 896 / (H / 2)) << 6);
+            chroma[gobOffset(4 * x, y, PITCH16)] = (uint8_t)cb;
+            chroma[gobOffset(4 * x + 1, y, PITCH16)] = (uint8_t)(cb >> 8);
+            chroma[gobOffset(4 * x + 2, y, PITCH16)] = (uint8_t)cr;
+            chroma[gobOffset(4 * x + 3, y, PITCH16)] = (uint8_t)(cr >> 8);
+        }
     HEVCDisplayProbeResult r = {0};
     memset(display, HEVC_DISPLAY_POISON, sizeof(display));
-    hevc_display_probe_compare(display, sizeof(display), ref, PITCH16, H, W, H, &r);
+    hevc_display_probe_compare(display, sizeof(display), ref, chroma, PITCH16, H, W, H, &r);
     CHECK(r.layout == HEVC_DISPLAY_NOT_WRITTEN, "display probe: a poisoned buffer read as layout %u", r.layout);
     for (uint32_t y = 0; y < H; y++)
         for (uint32_t x = 0; x < W; x++)
             display[y * (PITCH16 / 2) + x] = (uint8_t)(((x * 7 + y * 13) % 1024) >> 2);
-    hevc_display_probe_compare(display, sizeof(display), ref, PITCH16, H, W, H, &r);
+    hevc_display_probe_compare(display, sizeof(display), ref, chroma, PITCH16, H, W, H, &r);
     CHECK(r.layout == HEVC_DISPLAY_PITCH_8 && r.max_diff == 0 && r.trunc_milli == 1000,
           "display probe: layout %u max %u trunc %u", r.layout, r.max_diff, r.trunc_milli);
+    // A buffer written as one of the Rec.2020 -> Rec.709 models (mode 3's reading) scores exact against that model
+    // alone, with the chroma taken at each luma sample's 4:2:0 site.
+    for (uint32_t model = 0; model < HEVC_DISPLAY_MODELS; model++) {
+        for (uint32_t y = 0; y < H; y++)
+            for (uint32_t x = 0; x < W; x++) {
+                const uint32_t cb = 64 + (x / 2) * 896 / (W / 2), cr = 960 - (y / 2) * 896 / (H / 2);
+                display[y * (PITCH16 / 2) + x] = hevc_display_model_luma(model, (x * 7 + y * 13) % 1024, cb, cr);
+            }
+        hevc_display_probe_compare(display, sizeof(display), ref, chroma, PITCH16, H, W, H, &r);
+        CHECK(r.layout == HEVC_DISPLAY_PITCH_8 && r.model_max[model] == 0 && r.max_diff > 1,
+              "display probe: model %u read as layout %u, its max %u, truncation's %u", model, r.layout,
+              r.model_max[model], r.max_diff);
+        for (uint32_t other = 0; other < HEVC_DISPLAY_MODELS; other++)
+            CHECK(other == model || r.model_max[other] > 0, "display probe: model %u also exact as model %u", model,
+                  other);
+    }
+    // Neutral chroma: every model leaves grey alone (one white point), within a code of the 8-bit luma.
+    for (uint32_t model = 0; model < HEVC_DISPLAY_MODELS; model++) {
+        const uint32_t grey[] = {64, 300, 502, 940};
+        for (uint32_t i = 0; i < 4; i++) {
+            const int got = hevc_display_model_luma(model, grey[i], 512, 512);
+            const int want = (int)((grey[i] + 2) >> 2);
+            CHECK(got - want <= 1 && want - got <= 1, "display model %u: grey %u to %d, want %d", model, grey[i], got,
+                  want);
+        }
+    }
+}
+
+// Which display buffer a 10-bit stream gets: Rec.2020 SDR through mode 3 (NVDEC's Rec.2020 -> Rec.709), other SDR
+// through mode 2, PQ/HLG and 16-bit clients none.
+static void testDisplayModeChoice(void)
+{
+    CHECK(hevc_display_mode_for(10, true, false, true) == 3, "Rec.2020 SDR into 8 bits: mode %u",
+          hevc_display_mode_for(10, true, false, true));
+    CHECK(hevc_display_mode_for(10, false, false, true) == 2, "Rec.709 SDR into 8 bits: mode %u",
+          hevc_display_mode_for(10, false, false, true));
+    CHECK(hevc_display_mode_for(10, true, true, true) == 0 && hevc_display_mode_for(10, false, true, true) == 0,
+          "PQ/HLG stay 16-bit");
+    CHECK(hevc_display_mode_for(10, true, false, false) == 0 && hevc_display_mode_for(8, true, false, true) == 0,
+          "a 16-bit client, or an 8-bit stream, has no display buffer");
 }
 
 int main(int argc, char **argv)
 {
     (void)argc, (void)argv;
+    testDisplayModeChoice();
     testSyntax();
     testDecode();
     testDecodeOrder();

@@ -74,13 +74,13 @@ int adopt_locked(switch_gpu_backing *backing, const switch_gpu_resource_set *set
 // Setup only (the set's submissions excluded): a member the set lets go keeps the set's pending jobs as its users.
 void leave(switch_gpu_backing *backing, const switch_gpu_resource_set *set)
 {
-	IOLockLock(backing->lock);
+	switch_gpu_backing_claim(backing);
 	if (backing->set == set) {
 		adopt_locked(backing, set);
 		backing->set = nullptr;
 		backing->set_access = 0;
 	}
-	IOLockUnlock(backing->lock);
+	switch_gpu_backing_unclaim(backing);
 }
 
 void wait_inside(switch_gpu_resource_set *set)
@@ -98,12 +98,12 @@ void wait_inside(switch_gpu_resource_set *set)
 // Leaves the member list as it is: replace and destroy release what it holds.
 void detach(switch_gpu_backing *backing, const switch_gpu_resource_set *set)
 {
-	IOLockLock(backing->lock);
+	const bool claimed = switch_gpu_backing_enter(backing);
 	if (backing->set == set) {
 		backing->set = nullptr;
 		backing->set_access = 0;
 	}
-	IOLockUnlock(backing->lock);
+	switch_gpu_backing_leave(backing, claimed);
 }
 
 // members: sorted by allocation id, one entry per backing
@@ -212,7 +212,7 @@ extern "C" int switch_gpu_set_attach(switch_gpu_resource_set *set,
 	uint32_t attached = 0;
 	for (; !result && attached < unique; ++attached) {
 		auto *backing = uses[attached].backing;
-		IOLockLock(backing->lock);
+		const bool claimed = switch_gpu_backing_enter(backing);
 		if (backing->set && backing->set != set) {
 			result = -16;
 		} else if (backing->shared || backing->surface_id || backing->cpu_reached) {
@@ -221,7 +221,7 @@ extern "C" int switch_gpu_set_attach(switch_gpu_resource_set *set,
 			backing->set = set;
 			backing->set_access = uses[attached].access;
 		}
-		IOLockUnlock(backing->lock);
+		switch_gpu_backing_leave(backing, claimed);
 		if (result) {
 			if (refused)
 				*refused = backing;
@@ -241,10 +241,10 @@ extern "C" int switch_gpu_set_attach(switch_gpu_resource_set *set,
 		return result;
 	}
 	for (uint32_t i = 0; i < unique; ++i) {
-		IOLockLock(kept[i].backing->lock);
+		const bool claimed = switch_gpu_backing_enter(kept[i].backing);
 		if (kept[i].backing->set == set)
 			kept[i].backing->set_access = kept[i].access;
-		IOLockUnlock(kept[i].backing->lock);
+		switch_gpu_backing_leave(kept[i].backing, claimed);
 	}
 	for (uint32_t i = 0; i < set->count; ++i) {
 		if (!listed(kept, unique, set->members[i].backing))
@@ -373,27 +373,27 @@ extern "C" void switch_gpu_backing_member_cpu(switch_gpu_backing *backing)
 {
 	if (!backing)
 		return;
-	IOLockLock(backing->lock);
+	const bool claimed = switch_gpu_backing_enter(backing);
 	backing->cpu_reached = true;
 	const bool member = backing->set != nullptr;
-	IOLockUnlock(backing->lock);
+	switch_gpu_backing_leave(backing, claimed);
 	if (member)
 		switch_gpu_set_reached(backing, SWITCH_GPU_SET_CAUSE_CPU);
 }
 
 void switch_gpu_set_reached(switch_gpu_backing *backing, uint32_t cause)
 {
-	IOLockLock(backing->lock);
+	const bool claimed = switch_gpu_backing_enter(backing);
 	auto *set = backing->set;
 	if (set) {
 		__atomic_add_fetch(&set->refs, 1u, __ATOMIC_ACQ_REL);
 		switch_gpu_set_invalidate(set, cause);
 	}
-	IOLockUnlock(backing->lock);
+	switch_gpu_backing_leave(backing, claimed);
 	if (!set)
 		return;
 	wait_inside(set);
-	IOLockLock(backing->lock);
+	switch_gpu_backing_claim(backing);
 	if (backing->set == set) {
 		// A member that cannot take its users is left in the set: its generation already ended.
 		if (!adopt_locked(backing, set)) {
@@ -401,7 +401,7 @@ void switch_gpu_set_reached(switch_gpu_backing *backing, uint32_t cause)
 			backing->set_access = 0;
 		}
 	}
-	IOLockUnlock(backing->lock);
+	switch_gpu_backing_unclaim(backing);
 	put(set);
 }
 
@@ -413,9 +413,9 @@ extern "C" void switch_gpu_backing_member_freed(switch_gpu_backing *backing)
 	switch_gpu_set_reached(backing, SWITCH_GPU_SET_CAUSE_FREE);
 	// A member that could not take the set's jobs as its users is still the set's: it stays listed and held until a
 	// replace or the set's destroy lets it go, or its set pointer would outlive the set.
-	IOLockLock(backing->lock);
+	const bool claimed = switch_gpu_backing_enter(backing);
 	const bool kept = backing->set == set;
-	IOLockUnlock(backing->lock);
+	switch_gpu_backing_leave(backing, claimed);
 	if (kept)
 		return;
 	uint32_t at = 0;

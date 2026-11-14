@@ -13,6 +13,7 @@ enum RawProbe {
     static let engineSelector = NSSelectorFromString("switchRawProbeEngine:")
     static let compressSelector = NSSelectorFromString("switchRawProbeCompressNext")
     static let factsSelector = NSSelectorFromString("switchRawProbeFacts:")
+    static let retargetSelector = NSSelectorFromString("switchRawProbeRetarget:")
 
     static func call(_ object: AnyObject, _ selector: Selector, _ argument: Any? = nil) throws -> String? {
         guard let object = object as? NSObject, object.responds(to: selector) else {
@@ -41,6 +42,13 @@ enum RawProbe {
     /// The next private render target `device` makes binds compressible memory of its own.
     static func compressNext(_ device: MTLDevice) throws {
         _ = try call(device, compressSelector)
+    }
+
+    /// `texture`'s header describes `to`'s image from the next submission's header invalidate on (nil: its own again).
+    static func retarget(_ device: MTLDevice, _ texture: MTLTexture, to: MTLTexture?) throws {
+        if let refusal = try call(device, retargetSelector, [texture] + (to.map { [$0] } ?? []) as NSArray) {
+            throw TestFailure(refusal)
+        }
     }
 
     /// raw, comptags, block_linear, pitch of `texture`; tiled_cache and compression of the device.
@@ -120,6 +128,14 @@ struct ProbeLedger {
         tallies[cell, default: [:]][arm] = t
         for (key, value) in batch.taken { taken[arm, default: [:]][key, default: 0] += value }
         if batch.path != "raw" && !offPath.contains(batch.path) { offPath.append(batch.path) }
+    }
+
+    /// The cells where `arm` read other texels than the control, whatever the unguarded arm read
+    func failed(_ arm: String, none: String?) -> Int {
+        cells.filter { cell in
+            tallies[cell]?[arm].map { CellVerdict.of(relaxed: $0, unguarded: none.flatMap { tallies[cell]?[$0] }) }
+                == .fails
+        }.count
     }
 
     /// The fields for relaxed arms `relaxed` against the unguarded arm `none`, prefixed by each arm's name; the verdict

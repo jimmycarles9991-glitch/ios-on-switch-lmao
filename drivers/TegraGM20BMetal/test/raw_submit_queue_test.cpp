@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: MIT
 #include <gtest/gtest.h>
+#include <array>
+#include <map>
 #include <memory>
 #include <vector>
 #include "../raw/runtime/raw_submit_queue.h"
@@ -340,6 +342,80 @@ TEST(EventDeadline, ExplicitTimeoutRetainsItsRequestedDuration)
     raw::EventDeadline wait(start, 30000);
     EXPECT_EQ(wait.state(false, start + 10s), raw::EventReadiness::blocked);
     EXPECT_EQ(wait.state(false, start + 30s), raw::EventReadiness::ready);
+}
+
+// A publishes E then waits F; B (queued later) waits E then publishes F. Preflighting all of A's waits deadlocked for ten
+// seconds: each job's steps go through the per-queue reservation and yield.
+TEST(SubmitQueue, InteriorWaitDoesNotPreventItsOwnEarlierSignalFromReleasingTheProducer)
+{
+    enum class Step {
+        work,
+        signal,
+        wait
+    };
+    const std::array<std::vector<Step>, 3> plans{
+        {{}, {Step::work, Step::signal, Step::wait, Step::work}, {Step::wait, Step::work, Step::signal}}};
+    std::array<size_t, 3> cursors{};
+    std::array<unsigned, 3> pending{};
+    std::map<unsigned, bool> signals;
+    raw::SubmitQueue<int, int> queue;
+    for (int job : {1, 2}) {
+        const auto reservation = queue.reserve(job, job);
+        queue.commit(job, job, reservation);
+    }
+    std::vector<int> submitted;
+    for (unsigned step = 0; queue.size() && step < 40; ++step) {
+        const auto ticket = queue.next();
+        if (!ticket) {
+            pending = {};
+            queue.wake(1);
+            queue.wake(2);
+            continue;
+        }
+        const int job = ticket.value;
+        const auto kind = plans[job][cursors[job]];
+        if ((kind == Step::wait && !signals[job == 1 ? 2 : 1]) || (kind == Step::signal && pending[job])) {
+            queue.park(ticket);
+            continue;
+        }
+        if (kind == Step::signal) {
+            signals[job] = true;
+            queue.wake(job == 1 ? 2 : 1);
+        } else if (kind != Step::wait) {
+            ++pending[job];
+            submitted.push_back(job);
+        }
+        if (++cursors[job] == plans[job].size())
+            ASSERT_TRUE(queue.retire(ticket));
+        else
+            queue.yield(ticket);
+    }
+    EXPECT_EQ(queue.size(), 0u);
+    EXPECT_EQ(submitted, (std::vector<int>{1, 2, 1}));
+    EXPECT_TRUE(signals[1]);
+    EXPECT_TRUE(signals[2]);
+}
+
+TEST(SubmitQueue, PartialSubmissionYieldsWithoutReleasingItsReservation)
+{
+    raw::SubmitQueue<int, int> queue;
+    for (int job : {11, 12, 21}) {
+        const auto reservation = queue.reserve(job / 10, job);
+        queue.commit(job / 10, job, reservation);
+    }
+    auto first = queue.next();
+    ASSERT_EQ(first.value, 11);
+    queue.yield(first);
+    auto second = queue.next();
+    ASSERT_EQ(second.value, 21);
+    auto resumed = queue.next();
+    ASSERT_EQ(resumed.value, 11);
+    EXPECT_FALSE(queue.next());
+    EXPECT_EQ(queue.size(), 3u);
+    queue.retire(resumed);
+    auto next = queue.next();
+    ASSERT_EQ(next.value, 12);
+    EXPECT_FALSE(queue.retire(first));
 }
 
 }  // namespace

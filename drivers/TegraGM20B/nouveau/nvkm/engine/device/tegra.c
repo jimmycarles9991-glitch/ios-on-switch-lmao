@@ -30,72 +30,16 @@
 static int
 nvkm_device_tegra_power_up(struct nvkm_device_tegra *tdev)
 {
-	int ret;
-
-	if (tdev->vdd) {
-		ret = regulator_enable(tdev->vdd);
-		if (ret)
-			goto err_power;
-	}
-
-	ret = clk_prepare_enable(tdev->clk);
-	if (ret)
-		goto err_clk;
-	ret = clk_prepare_enable(tdev->clk_ref);
-	if (ret)
-		goto err_clk_ref;
-	ret = clk_prepare_enable(tdev->clk_pwr);
-	if (ret)
-		goto err_clk_pwr;
-	clk_set_rate(tdev->clk_pwr, 204000000);
-	udelay(10);
-
-	if (!tdev->pdev->dev.pm_domain) {
-		reset_control_assert(tdev->rst);
-		udelay(10);
-
-		ret = tegra_pmc_powergate_remove_clamping(tdev->pmc,
-							  TEGRA_POWERGATE_3D);
-		if (ret)
-			goto err_clamp;
-		udelay(10);
-
-		reset_control_deassert(tdev->rst);
-		udelay(10);
-	}
-
-	return 0;
-
-err_clamp:
-	clk_disable_unprepare(tdev->clk_pwr);
-err_clk_pwr:
-	clk_disable_unprepare(tdev->clk_ref);
-err_clk_ref:
-	clk_disable_unprepare(tdev->clk);
-err_clk:
-	if (tdev->vdd)
-		regulator_disable(tdev->vdd);
-err_power:
-	return ret;
+	return tegra_gm20b_rail_ungate();
 }
 
 static int
 nvkm_device_tegra_power_down(struct nvkm_device_tegra *tdev)
 {
-	int ret;
+	int vdd = 0;
+	int ret = tegra_gm20b_rail_gate(&vdd);
 
-	clk_disable_unprepare(tdev->clk_pwr);
-	clk_disable_unprepare(tdev->clk_ref);
-	clk_disable_unprepare(tdev->clk);
-	udelay(10);
-
-	if (tdev->vdd) {
-		ret = regulator_disable(tdev->vdd);
-		if (ret)
-			return ret;
-	}
-
-	return 0;
+	return ret ? ret : vdd;
 }
 
 static void

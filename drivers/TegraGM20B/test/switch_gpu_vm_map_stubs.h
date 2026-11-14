@@ -228,6 +228,7 @@ struct Call {
 	u8 shift;
 	bool deferred;
 	nvif_mem *memory;
+	unsigned vol, kind;
 };
 
 std::vector<Call> calls;
@@ -250,10 +251,15 @@ int nvif_vmm_raw_get(nvif_vmm *vm, u64 va, u64 bytes, u8 shift)
 	return getCount++ == failGet ? -12 : 0;
 }
 
-int nvif_vmm_raw_map(nvif_vmm *vm, u64 va, u64 bytes, u8 shift, void *, size_t, nvif_mem *memory,
-		     u64 offset)
+int nvif_vmm_raw_map(nvif_vmm *vm, u64 va, u64 bytes, u8 shift, void *args, size_t,
+		     nvif_mem *memory, u64 offset)
 {
 	record(vm, 'm', va, bytes, shift, offset, memory);
+	{
+		std::lock_guard held(callsMutex);
+		calls.back().vol = static_cast<gf100_vmm_map_v0 *>(args)->vol;
+		calls.back().kind = static_cast<gf100_vmm_map_v0 *>(args)->kind;
+	}
 	EXPECT_GE(memory->shift, shift);
 	if (mapHook)
 		mapHook(vm->id);

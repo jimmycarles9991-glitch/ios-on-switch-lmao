@@ -11,7 +11,8 @@ struct SwitchVICSurfaceAccess {
     uint64_t offset = 0;
 };
 
+// held: the backing the caller holds for this surface, used in place of the IOSurface cache's.
 int switch_vic_surface_access(const TegraVICSurface *surface, bool write, SwitchVICSurfaceAccess *access,
-                              bool avoid = false);
+                              bool avoid = false, switch_gpu_backing *held = nullptr);
 void switch_vic_surface_unreserve(SwitchVICSurfaceAccess *access);
 void switch_vic_surface_release_access(SwitchVICSurfaceAccess *access);

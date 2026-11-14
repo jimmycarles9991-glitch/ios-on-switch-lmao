@@ -7,11 +7,12 @@ import UIKit
 
 /// One client's raw channel killed while other clients render: this process's channel runs a deliberately illegal
 /// method in a scratch command buffer, committed right behind eight others and ahead of eight committed once it failed,
-/// all on one queue. The bench's raw device (a connection and channel of its own) fills on the 2D engine throughout, read
-/// back against the fill (RecoverBystander), and a probe layer another bench raw device fills shows that the compositor
-/// kept presenting. Exactly the poisoned command buffer fails, the eight before
-/// it keep their completion and bytes, the eight after it complete on the channel made again, the bystander sees no
-/// error and no gap past the bound, one reopen, and the drivers stay ordered on the GPU (no CPU-ordered line).
+/// all on one queue. Two bench raw devices (each a connection and channel of its own) work throughout, read back against
+/// their fill (RecoverBystander): one on the 2D engine, one through the copy engine. A probe layer another bench raw
+/// device fills shows that the compositor kept presenting. Exactly the poisoned command buffer fails, the eight before
+/// it keep their completion and bytes, the eight after it complete on the channel made again, neither bystander sees an
+/// error or a kill (its reopen), the GR one no gap past the bound, this channel one reopen, and the drivers stay ordered
+/// on the GPU (no CPU-ordered line).
 struct RecoverKillOneTest: HWTest {
     let id = "gpu.recover.kill_one"
     let name = "A killed raw channel: others render on, raw comes back, only the poisoned command buffer fails"
@@ -29,12 +30,15 @@ struct RecoverKillOneTest: HWTest {
         guard RawFacade.kind(of: gpu.device) == "raw" else {
             return .skip("the default device is not the raw facade (\(RawFacade.kind(of: gpu.device)))")
         }
+        try Self.settle(gpu)
         let start = RawFacade.counters(of: gpu.device)
         guard start["gpu_order"] != nil else { return .skip("the facade has no recovery counters (a release build)") }
         let bystander: RecoverBystander
+        let copier: RecoverBystander
         let probeBench: BenchRunner
         do {
             bystander = try RecoverBystander(try BenchRunner.open())
+            copier = try RecoverBystander(try BenchRunner.open(), on: .copy)
             probeBench = try BenchRunner.open()
         } catch {
             return .fail("a bench raw device did not open: \(error)")
@@ -47,9 +51,11 @@ struct RecoverKillOneTest: HWTest {
             return probe
         }
         bystander.start()
+        copier.start()
         await MainActor.run { compositor.start() }
         try await Task.sleep(nanoseconds: 500_000_000)
         bystander.measure()
+        copier.measure()
         await MainActor.run { compositor.measure() }
 
         let ring = try gpu.buffer((2 * Self.around + 1) * Self.slice)
@@ -63,6 +69,7 @@ struct RecoverKillOneTest: HWTest {
         try await Task.sleep(nanoseconds: 300_000_000)
 
         let bystanderStopped = bystander.stop(seconds: 5)
+        let copierStopped = copier.stop(seconds: 5)
         await MainActor.run { compositor.stop() }
         let presented = await MainActor.run { compositor.presented }
         let (fillErrors, firstFillError) = await MainActor.run { (compositor.fillErrors, compositor.firstFillError) }
@@ -92,7 +99,12 @@ struct RecoverKillOneTest: HWTest {
         metrics.set("before_ok", "\(beforeOK)/\(Self.around)")
         metrics.set("after_ok", "\(afterOK)/\(Self.around)")
         metrics.set("bystander_errors", bystander.errors)
+        metrics.set("bystander_kills", bystander.kills)
         metrics.set("bystander_gap_ms", bystanderGapMs, digits: 1)
+        metrics.set("ce_bystander_errors", copier.errors)
+        metrics.set("ce_bystander_kills", copier.kills)
+        metrics.set("ce_bystander_runs", copier.runs)
+        metrics.set("ce_bystander_gap_ms", Double(copier.longestNs) / 1e6, digits: 1)
         metrics.set("present_gap_ms", presentGapMs, digits: 1)
         metrics.set("gap_bound_ms", Self.gapBoundMs, digits: 0)
         metrics.set("reopens", delta("reopens"))
@@ -110,6 +122,7 @@ struct RecoverKillOneTest: HWTest {
         metrics.set("probe_fill_errors", fillErrors)
         if !firstFillError.isEmpty { metrics.set("probe_fill_first", String(firstFillError.prefix(80))) }
         if !bystander.firstError.isEmpty { metrics.set("bystander_first", String(bystander.firstError.prefix(80))) }
+        if !copier.firstError.isEmpty { metrics.set("ce_bystander_first", String(copier.firstError.prefix(80))) }
         if let refusal { return .fail("the illegal method was refused: \(refusal)", metrics) }
         if poisoned.status == .completed && delta("reopens") == 0 {
             return .fail("the illegal method did not kill the channel: b197 0x02dc completed, no reopen", metrics)
@@ -126,15 +139,27 @@ struct RecoverKillOneTest: HWTest {
                     "the ones after it completed raw",
                     afterOK == Self.around && afterKept == Self.around && paths == ["raw"]
                 ),
-                ("the kernel's kill made one reopen", delta("reopens") == 1),
+                ("the kernel's kill made one reopen of this channel (\(delta("reopens")))", delta("reopens") == 1),
                 ("no CPU-ordered fallback; GPU order on", delta("cpu_ordered") == 0 && end["gpu_order"] == 1),
-                ("the bystander ran with no error", bystanderStopped && bystander.runs > 0 && bystander.errors == 0),
-                ("the bystander never waited past the bound", bystanderGapMs <= Self.gapBoundMs),
+                (
+                    bystander.failure.isEmpty ? "\(bystander.role.rawValue) ran with no error" : bystander.failure,
+                    bystanderStopped && bystander.runs > 0 && bystander.errors == 0
+                ),
+                (
+                    copier.failure.isEmpty ? "\(copier.role.rawValue) ran with no error" : copier.failure,
+                    copierStopped && copier.runs > 0 && copier.errors == 0
+                ),
+                ("\(bystander.role.rawValue) never waited past the bound", bystanderGapMs <= Self.gapBoundMs),
                 (
                     "the compositor kept presenting within the bound",
                     shown.frames > 0 && presentGapMs <= Self.gapBoundMs
                 ),
-                ("the probe's own raw device filled every frame", fillErrors == 0),
+                (
+                    fillErrors == 0
+                        ? "the compositor probe's bench channel filled every frame"
+                        : "the compositor probe's bench channel: \(firstFillError)",
+                    fillErrors == 0
+                ),
             ], metrics)
     }
 

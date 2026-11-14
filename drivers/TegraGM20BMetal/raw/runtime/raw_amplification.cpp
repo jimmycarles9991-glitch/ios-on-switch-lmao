@@ -94,7 +94,7 @@ void RenderEncoder::icbAmplification(uint32_t a)
 
 bool RenderEncoder::runsPerAmplification(uint32_t primitive, uint32_t count, uint32_t instances, bool indexed)
 {
-    const Pipeline *pl = pipeline_ ? formFor(pipeline_) : nullptr;
+    const Pipeline *pl = pipeline_ ? formFor(pipeline_, {primitive, count, instances, false, indexed}) : nullptr;
     return pl && fetchesOwnColor(pl->fetchBits, pl->writeBits, pl->storageBits) &&
            !singlePrimitive({primitive, count, instances, false, indexed});
 }

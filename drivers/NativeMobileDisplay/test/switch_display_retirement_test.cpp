@@ -73,7 +73,13 @@ struct Display {
         ++kicks;
     }
 
-    bool planeRecovering = false, planesAbandoned = false;
+    bool planeRecovering = false, planeRecoveryStuck = false;
+
+    bool planeRecoveryWaits() const
+    {
+        return planeRecovering && !planeRecoveryStuck;
+    }
+
     PlaneSet planeRecoveryTarget = {};
 
     struct Probe {
@@ -95,7 +101,7 @@ struct Display {
 #include "../SwitchRetireDisplay.h"
 };
 
-TEST(DisplayRetirement, AbandonedOverlaySetsNoLongerHoldRetirement)
+TEST(DisplayRetirement, AStuckRecoverysOverlaySetsNoLongerHoldRetirement)
 {
     Display display;
     display.queue = {{1}, {2}};
@@ -103,7 +109,7 @@ TEST(DisplayRetirement, AbandonedOverlaySetsNoLongerHoldRetirement)
     display.planes[0] = {1, 1};
     display.retireThrough(2, 100);
     EXPECT_TRUE(display.retired.empty());
-    display.planesAbandoned = true;
+    display.planeRecovering = display.planeRecoveryStuck = true;
     display.retireThrough(2, 110);
     EXPECT_EQ(display.retired, (std::vector<uint64_t>{1, 2}));
 }

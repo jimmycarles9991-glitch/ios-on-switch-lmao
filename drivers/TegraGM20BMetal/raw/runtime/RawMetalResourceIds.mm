@@ -63,7 +63,6 @@ void rmHeapForgetSampler(RMSampler *s)
 
 - (MTLResourceID)gpuResourceID
 {
-    rmTexturePlain(self);
     const uint64_t word = raw::textureResourceId(_raw.tic);
     if (word && gRM && !_idNamed.exchange(true, std::memory_order_acq_rel)) {
         const raw::HeapTextureFacts facts = heapFacts(self);

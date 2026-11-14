@@ -167,6 +167,12 @@ int switch_gpu_backing_promise_tokens(switch_gpu_backing *, uint32_t, uint32_t, 
     return int(promised.size());
 }
 
+// A debug kernel's traits with no HW Test forcing any: the shipped ones (TegraVIC's SwitchVICTurn.cpp).
+extern "C" SwitchDisplayTraits switch_display_traits(void)
+{
+    return kSwitchDisplayTraits;
+}
+
 void switch_native_scanout_deliver(SwitchNativeScanout *value)
 {
     if (value->lease)
@@ -346,9 +352,25 @@ TEST_F(NativeScanoutMapping, EvictedMappingIsUnmappedAndNewPagesAreMappedAgain)
     EXPECT_EQ(display->probeDomain.maps, 5u);
 }
 
-TEST_F(NativeScanoutMapping, UnsupportedCropUsesQueuedPitchAllocationAndAliasOffset)
+// A decoder crop scans the decoder's own block-linear picture through window B's offsets: no pitch representation, no
+// VIC copy for the frame.
+TEST_F(NativeScanoutMapping, ACropIsScannedInTheDecodersPictureWithNoPitchRepresentation)
 {
     nextNative.view.crop.x = 2;
+    nextNative.view.crop.y = 4;
+    ASSERT_EQ(admit(), 0);
+    EXPECT_EQ(pitchAcquisitions, 0u);
+    EXPECT_EQ(leases, 1u);
+    EXPECT_EQ(image.surfaceKind, 0x12u);
+    EXPECT_EQ(image.hOffset, 2u);
+    EXPECT_EQ(image.vOffset, 4u);
+    EXPECT_EQ(display->stPlaneNative, 1u);
+    EXPECT_EQ(display->planeSlots[0].native->view.producer.engine, uint32_t(SWITCH_GPU_ENGINE_NVDEC));
+}
+
+TEST_F(NativeScanoutMapping, ACropPastThePlanesUsesQueuedPitchAllocationAndAliasOffset)
+{
+    nextNative.view.crop.x = 1536 - 1280 + 2;
     nextPitch.pitchOffset = 4096;
     ASSERT_EQ(admit(), 0);
     EXPECT_EQ(pitchAcquisitions, 1u);

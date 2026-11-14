@@ -5,10 +5,13 @@
 #if TGM_STATS
 /* Read right after a count starts, inside its 21 us: GPCPLL_COEFF (M 7:0, N 15:8, PL 21:16), GPC2CLK_OUT (VCO divider
  * 13:8, bypass divider 5:0), CLK_SLOWDOWN_0 (THERM's slowdown factor 21:16) and THERM_GATE_CTRL(0) (GR's ELCG mode 1:0).
- * A count at a fraction of the PLL's rate names its divider or slowdown here, or neither. */
+ * A count at a fraction of the PLL's rate names its divider or slowdown here, or neither. SOC_THERM_GPU is the thermal
+ * side: the GPU throttle SOC_THERM drives into THERM's EXT_THERM inputs (drivers/SwitchPower/SwitchSocTherm.h). */
 struct clk_at_count {
-	u32 coeff, out, slow, gate;
+	u32 coeff, out, slow, gate, therm;
 };
+
+unsigned int switch_soctherm_gpu_throttle_status(void);
 
 static void clk_sample(struct nvkm_device *device, struct clk_at_count *at)
 {
@@ -16,6 +19,7 @@ static void clk_sample(struct nvkm_device *device, struct clk_at_count *at)
 	at->out = nvkm_rd32(device, 0x137250);
 	at->slow = nvkm_rd32(device, 0x020160);
 	at->gate = nvkm_rd32(device, 0x020200);
+	at->therm = switch_soctherm_gpu_throttle_status();
 }
 
 void tgm_clk_measure(char *buf, unsigned int len)
@@ -47,9 +51,10 @@ void tgm_clk_measure(char *buf, unsigned int len)
 	if (started) {
 		nvxnu_stats(
 			"tegra-gm20b: clock count %u in %u reference cycles (%s), at its start "
-			"GPCPLL_COEFF %08x GPC2CLK_OUT %08x CLK_SLOWDOWN_0 %08x GATE_CTRL_0 %08x",
+			"GPCPLL_COEFF %08x GPC2CLK_OUT %08x CLK_SLOWDOWN_0 %08x GATE_CTRL_0 %08x "
+			"SOC_THERM_GPU %08x",
 			cnt & 0xfffff, NCGPCCLK_CYCLES, meas, counted.coeff, counted.out,
-			counted.slow, counted.gate);
+			counted.slow, counted.gate, counted.therm);
 	}
 	counted = next;
 	started = 1;

@@ -38,7 +38,7 @@
         _raw.import ? NSUInteger(_raw.length) : (NSUInteger(_raw.length) + page - 1) & ~(page - 1);
     raw::Alias a;
     return twinPublish(self, _twin,
-                       RM_M2V("a buffer's twin") && heapResident(_heap) && gRM->raw->alias(_raw, a)
+                       RM_M2V(NeedBufferTwin) && heapResident(_heap) && gRM->raw->alias(_raw, a)
                            ? rawAliasBuffer(a, _raw.cpu, length, options)
                            : nil);
 }

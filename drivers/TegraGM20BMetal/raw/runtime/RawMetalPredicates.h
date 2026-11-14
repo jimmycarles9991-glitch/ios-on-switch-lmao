@@ -29,21 +29,17 @@ enum RMPred : uint8_t {
     // passes
     PredPassAttFormat,  // a color attachment not kept or not renderable: a = format, b = attachment index | kind << 8
     PredPassAttLevel,   // slice, depth plane or resolve, or a level of a texture with no chain
-    PredPassRTSize,     // a = renderTargetWidth << 16 | renderTargetHeight, b = attachment width << 16 | height
     PredPassDepthStencil,  // a = depth format, b = stencil format
-    PredPassOther,  // a = renderTargetArrayLength (layered) | its own sample positions << 32, b = a rasterization rate map
+    PredPassOther,         // a = its own sample positions, b = a rasterization rate map
     // states and calls
     PredStateForeign,
     PredStateNotPackable,  // a state whose functions are not this device's (neither in the pack nor made by the runtime)
     PredStateNotInPack,
-    PredStateBeingMade,  // a state the pack lacks whose record the runtime is making (its first uses: RawComplete.h)
     PredCallVisibility,
     PredCallBufForeign,      // a = stage << 8 | index (0xffff: an index buffer)
     PredCallSamplerForeign,  // a sampler the raw path does not express (its reason logged when it was made)
     PredCallVertexSampler,
-    PredCallDepthBias,     // a = bias, b = slope (float bits)
-    PredCallInvocation,    // an encoder selector recorded as an invocation (each selector logged once)
-    PredCallCBInvocation,  // a command buffer selector recorded as an invocation
+    PredCallDepthBias,  // a = bias, b = slope (float bits)
     PredCallBlitOptions,
     PredCallBufCopyRange,
     PredBlitTexCopy,
@@ -55,8 +51,6 @@ enum RMPred : uint8_t {
     PredComputeOff16,      // a buffer off 16 bytes where the kernel's record names no residual word: a = slot
     PredComputeKernel,     // no pack kernel at the dispatch's shape, memory, textures and samplers
     PredComputeImage,      // a texture sampled through an image of its own: a = slot
-    PredComputeView,       // a texture where m2v binds a view of another texel size: a = slot
-    PredComputeEdge,       // dispatchThreads: of a grid with an edge threadgroup: a = the grid's edge
     PredComputePredicate,  // predication raw cannot run (a misused record, a word outside a raw buffer): the command buffer fails; a = kind or offset
     PredMipmaps,
     PredMipmapsFormat,  // a mipmapped texture's generateMipmaps in a format neither the 2D engine nor a mip state filters: a = format
@@ -97,20 +91,16 @@ static constexpr const char *kPredNames[] = {"-",
                                              "tex.foreign",
                                              "pass.fmt",
                                              "pass.level",
-                                             "pass.rtsize",
                                              "pass.ds",
                                              "pass.other",
                                              "state.foreign",
                                              "state.notpack",
                                              "state.pack",
-                                             "state.making",
                                              "call.vis",
                                              "call.buf",
                                              "call.sampler",
                                              "call.vsampler",
                                              "call.dbias",
-                                             "call.inv",
-                                             "call.cbinv",
                                              "call.blitopt",
                                              "call.bufcopy",
                                              "blit.tex",
@@ -122,8 +112,6 @@ static constexpr const char *kPredNames[] = {"-",
                                              "compute.off16",
                                              "compute.nokernel",
                                              "compute.image",
-                                             "compute.view",
-                                             "compute.edge",
                                              "compute.predicate",
                                              "mipmaps",
                                              "mipmaps.fmt",

@@ -11,7 +11,7 @@ uint64_t oldestPendingFrame() const
         if (entry != kNoBuffer)
             include(entryPendingSeq[entry] ? entryPendingSeq[entry] : entrySeq[entry]);
     const auto plane = [this, &include](const PlaneSet &set) {
-        if (!planesAbandoned)
+        if (!planeRecoveryStuck)
             include(set.pendingSeq ? set.pendingSeq : set.seq);
     };
     if (planeRecovering)
@@ -35,7 +35,7 @@ uint64_t oldestPendingFrame() const
 void kickAtIdleFrameEnd()
 {
     if (!kickDeferred || ring.pending != kNoBuffer || planeLatch.requested() || tapeSettle || probeRequest ||
-        probe.active() || planeProbe.active() || planeRecovering || hwSuspended || scanoutStopped)
+        probe.active() || planeProbe.active() || planeRecoveryWaits() || hwSuspended || scanoutStopped)
         return;
     kickDeferred = false;
     kickSwapQueue();

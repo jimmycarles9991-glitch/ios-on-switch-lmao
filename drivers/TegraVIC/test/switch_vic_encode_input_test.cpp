@@ -155,7 +155,8 @@ void switch_native_surface_release(SwitchNativeSurfaceView *view)
     *view = {};
 }
 
-int switch_vic_surface_access(const TegraVICSurface *surface, bool write, SwitchVICSurfaceAccess *access, bool)
+int switch_vic_surface_access(const TegraVICSurface *surface, bool write, SwitchVICSurfaceAccess *access, bool,
+                              switch_gpu_backing *)
 {
     EXPECT_FALSE(write);
     ++accesses;

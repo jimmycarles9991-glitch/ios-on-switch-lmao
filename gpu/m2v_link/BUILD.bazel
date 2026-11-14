@@ -1,0 +1,87 @@
+# The cut's gate: what each binary that ships or builds the pack still takes from m2v. The cut deletes m2v once every
+# list here is empty (and raw/plan/m2v_routes.tsv has no open product row).
+#
+#   plugin_<kind>.txt  the plugin linked without the bridge (//gpu:plugin_m2v_edges): each symbol it still needs from
+#                      m2v, with the units that reference it, per IPSW kind
+#   deps_<binary>.txt  the m2v rules in the binary's build graph and the m2v frontend and bridge files it compiles (a
+#                      genquery, every select() branch)
+#   pack_refused_<kind>.txt  the states the raw pack refuses (pack_refusals_test, over a report given to it)
+#
+# A list changes only with the code: rewrite one from the failing test's output (bazel-bin/gpu/m2v_link/<name>.txt).
+load("@rules_python//python:py_test.bzl", "py_test")
+load("//bazel/lint:defs.bzl", "lint_files")
+
+lint_files()
+
+# m2v's runtime crate, NVK (Mesa's Vulkan driver and //gpu/nvk), the Metal bridge and its frontend
+M2V = (
+    "^//(third_party/m2v/crates/metal2vulkan-runtime|third_party/mesa/src/nouveau/vulkan|gpu/nvk)[:/]" +
+    "|^//gpu:bridge|^//drivers/NativeMetal:(bridge/|NativeBridgeMetalFrontend)"
+)
+
+BINARIES = {
+    "bundle": "//gpu:base",
+    "hwtest17": "//hw_test_app:SwitchHWTest17",
+    "hwtest27": "//hw_test_app:SwitchHWTest27",
+    "hwtest27e": "//hw_test_app:SwitchHWTest27e",
+    "pack_tools": "//gpu/seed:local_tools",
+    "plugin": "//gpu:plugin",
+    "shader_compiler": "//drivers/TegraGM20BMetal:SwitchShaderCompiler",
+    "texpeer": "//hw_test_app:switch-texpeer",
+}
+
+# The m2v rules in the binary's graph, and the frontend's and bridge's own files it compiles
+[genquery(
+    name = "deps_" + name,
+    expression = 'kind(rule, filter("{m2v}", deps({b}))) + filter("^//drivers/NativeMetal:", filter("{m2v}", deps({b})))'.format(
+        b = label,
+        m2v = M2V,
+    ),
+    scope = [label],
+) for name, label in BINARIES.items()]
+
+alias(
+    name = "plugin_pin",
+    actual = select({
+        "//ipsw:21H461": "plugin_21H461.txt",
+        "//ipsw:24B119": "plugin_24B119.txt",
+    }),
+)
+
+py_test(
+    name = "m2v_link_test",
+    srcs = ["m2v_link_test.py"],
+    args = ["$(rootpath //gpu:plugin_m2v_edges)=$(rootpath :plugin_pin)"] + [
+        "$(rootpath :deps_%s)=$(rootpath deps_%s.txt)" % (name, name)
+        for name in BINARIES
+    ],
+    data = [
+        ":plugin_pin",
+        "//gpu:plugin_m2v_edges",
+    ] + [":deps_" + name for name in BINARIES] + ["deps_%s.txt" % name for name in BINARIES],
+    # m2v: the plugin's, the bundle's and the pack tools' genqueries reach the packages --config=nom2v deletes until the
+    # cut; the cut drops the tag
+    tags = ["m2v"],
+)
+
+# The raw pack's refused states for the configured IPSW kind, against a pack report built elsewhere (the pack is too
+# large to build here): bazel test --config=ios27 //gpu/m2v_link:pack_refusals_test --test_arg=<pack>/report.txt.
+# Re-pin from a report: grep -E '^  (refused \(|skipped kernel )' report.txt | sed 's/^  //' | sort
+alias(
+    name = "pack_pin",
+    actual = select({
+        "//ipsw:21H461": "pack_refused_21H461.txt",
+        "//ipsw:24B119": "pack_refused_24B119.txt",
+    }),
+)
+
+py_test(
+    name = "pack_refusals_test",
+    srcs = ["pack_refusals_test.py"],
+    args = ["$(rootpath :pack_pin)"],
+    data = [":pack_pin"],
+    tags = [
+        "manual",
+        "pack",
+    ],
+)

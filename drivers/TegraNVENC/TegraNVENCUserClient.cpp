@@ -126,8 +126,8 @@ bool AppleAVE2UserClient::resolveDirect(void *context, uint32_t handle, TegraNVE
     return true;
 }
 
-// The source as its native NVDEC picture, read in place: 0, or -95 when NVENC cannot (VIC takes it), -11 when the
-// picture's producers are not ones NVENC's stream can wait for, else the job's error.
+// The source as its native picture, read in place: 0, or -95 when NVENC cannot (VIC takes it), -11 when the picture's
+// producers are not ones NVENC's stream can wait for, else the job's error.
 int AppleAVE2UserClient::submitDirect(const TegraNVENCSubmit *submit, uint32_t *fence, const char **why)
 {
     if (!tegra_nvenc_engine_ready())
@@ -143,13 +143,13 @@ int AppleAVE2UserClient::submitDirect(const TegraNVENCSubmit *submit, uint32_t *
 }
 
 // The connection's jobs are done, or were cancelled (-5: the engine was reset and its memory client flushed before the
-// failure was published), or the engine is wedged and will never touch memory again before a resume resets it.
+// failure was published), or the engine is wedged: parked, it touches no memory until a later job powers it on.
 bool AppleAVE2UserClient::quiesce() const
 {
     if (!submitted_)
         return true;
     const int ret = tegra_nvenc_wait(lastFence_);
-    return ret == 0 || ret == -5 || !tegra_nvenc_ready();
+    return ret == 0 || ret == -5 || tegra_nvenc_wedged();
 }
 
 // The client's mappings of the buffer are revoked before its pages can go to anyone else. A buffer a wedged job may
@@ -330,8 +330,8 @@ IOReturn AppleAVE2UserClient::run(uint32_t method, const void *in, uint32_t inSi
             else if (direct == -11)
                 switch_refusal(
                     "TegraNVENC", "native picture not orderable",
-                    "the native picture goes through VIC: a GPU job still writes it, it changed since it was "
-                    "looked up, or more than %u engines wrote it",
+                    "the native picture goes through VIC: a GPU job the bridge does not cover still writes it, it "
+                    "changed since it was looked up, or more than %u engines wrote it",
                     static_cast<unsigned>(TEGRA_NVENC_ORDER_WAITS));
             const int err = tegra_nvenc_source(submit, resolve, this, current_task(),
                                                submitted_ ? &lastFence_ : nullptr, &after, &route, &why);

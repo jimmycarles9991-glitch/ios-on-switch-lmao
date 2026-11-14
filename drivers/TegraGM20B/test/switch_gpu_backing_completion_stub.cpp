@@ -14,6 +14,10 @@ extern "C" void switch_gpu_copy_completed(void)
 {
 }
 
+extern "C" void switch_gpu_copy_retire(void)
+{
+}
+
 extern "C" void switch_gpu_admission_changed(void)
 {
 }

@@ -6,7 +6,11 @@ import Metal
 /// The ROP's zero-source pixel kill (drivers/TegraGM20BMetal/raw/runtime/raw_blend_kill.h): a source-over state draws
 /// a zero colour over RGBA16F holding -0, NaN, infinities and denormals and over BGRA8, and no bit changes; the same
 /// state still blends a non-zero colour as source-over says; the facade counts the state made with the kill and its
-/// binds; and the same draws with the kill forced off through the probe channel give the GPU time it saves.
+/// binds; and the same draws with the kill forced off through the probe channel give the GPU time it saves. The zeta
+/// arms draw zero-source pixels of a source-over state that writes depth (always, 0.5) or stencil (replace with 0x5a,
+/// always) over a zeta cleared to 1.0 or 0: Metal writes the zeta at every pixel and keeps the colour, kill or not
+/// (zeta_<depth|stencil>_wrong= texels other than Metal's, zeta_<...>_colour_changed_bytes=, zeta_<...>_kill_binds= the
+/// binds the facade made with the kill on).
 struct BlendKillTest: HWTest {
     let id = "gpu.raw.blend_kill"
     let name = "Zero-source pixels are dropped by the ROP, bits kept, blending unchanged"
@@ -114,9 +118,94 @@ struct BlendKillTest: HWTest {
         metrics.set("on_gpu_ms", onMs, digits: 3)
         metrics.set("off_gpu_ms", offMs, digits: 3)
         metrics.set("off_emitted", emitted)
+        for stencil in [false, true] {
+            let label = stencil ? "zeta_stencil" : "zeta_depth"
+            let binds = RawFacade.counters(of: gpu.device)["blend_kill_binds"] ?? 0
+            let arm = try await Self.zetaArm(gpu, stencil: stencil)
+            metrics.set("\(label)_wrong", arm.wrong)
+            metrics.set("\(label)_colour_changed_bytes", arm.colourChanged)
+            metrics.set("\(label)_kill_binds", (RawFacade.counters(of: gpu.device)["blend_kill_binds"] ?? 0) - binds)
+            paths.append(contentsOf: arm.paths)
+            if arm.wrong != 0 { wrong.append("\(label)_wrong") }
+            if arm.colourChanged != 0 { wrong.append("\(label)_colour_changed_bytes") }
+        }
         metrics.set("paths", paths.filter { $0 != "raw" }.isEmpty ? "raw" : paths.joined(separator: ","))
         if paths.contains(where: { $0 != "raw" }) { wrong.append("paths") }
         return wrong.isEmpty ? .pass(metrics) : .fail(wrong.joined(separator: ","), metrics)
+    }
+
+    static let zetaSide = 128
+    static let zetaClear: [Double] = [0.2, 0.4, 0.6, 0.6]
+
+    /// One pass of zero-source draws writing depth or stencil: the zeta texels other than Metal's, the colour bytes
+    /// changed from the clear's, and the paths drawn
+    static func zetaArm(_ gpu: GPU, stencil: Bool) async throws -> (wrong: Int, colourChanged: Int, paths: [String]) {
+        let side = zetaSide
+        let zetaFormat: MTLPixelFormat = stencil ? .stencil8 : .depth32Float
+        let state = try gpu.render(
+            fragment: "exact_fragment", format: .bgra8Unorm, depth: stencil ? .invalid : zetaFormat,
+            stencil: stencil ? zetaFormat : .invalid, configure: sourceOver)
+        let zetaState = MTLDepthStencilDescriptor()
+        zetaState.depthCompareFunction = .always
+        zetaState.isDepthWriteEnabled = !stencil
+        if stencil {
+            let face = MTLStencilDescriptor()
+            face.stencilCompareFunction = .always
+            face.depthStencilPassOperation = .replace
+            face.writeMask = 0xff
+            zetaState.frontFaceStencil = face
+            zetaState.backFaceStencil = face
+        }
+        guard let zetaTest = gpu.device.makeDepthStencilState(descriptor: zetaState) else {
+            throw TestFailure("makeDepthStencilState returned nil")
+        }
+        let colour = try gpu.texture(.bgra8Unorm, side, side, usage: [.renderTarget, .shaderRead])
+        let zeta = try gpu.texture(zetaFormat, side, side, usage: [.renderTarget])
+        let pass = MTLRenderPassDescriptor()
+        pass.colorAttachments[0].texture = colour
+        pass.colorAttachments[0].loadAction = .clear
+        pass.colorAttachments[0].clearColor = MTLClearColor(
+            red: zetaClear[0], green: zetaClear[1], blue: zetaClear[2], alpha: zetaClear[3])
+        pass.colorAttachments[0].storeAction = .store
+        if stencil {
+            pass.stencilAttachment.texture = zeta
+            pass.stencilAttachment.loadAction = .clear
+            pass.stencilAttachment.clearStencil = 0
+            pass.stencilAttachment.storeAction = .store
+        } else {
+            pass.depthAttachment.texture = zeta
+            pass.depthAttachment.loadAction = .clear
+            pass.depthAttachment.clearDepth = 1
+            pass.depthAttachment.storeAction = .store
+        }
+        let drawn = try await gpu.run { commands in
+            let encoder = commands.makeRenderCommandEncoder(descriptor: pass)!
+            encoder.setRenderPipelineState(state)
+            encoder.setDepthStencilState(zetaTest)
+            encoder.setStencilReferenceValue(0x5a)
+            var corners = GPU.fullScreen
+            var value = SIMD4<Float>.zero
+            encoder.setVertexBytes(&corners, length: MemoryLayout<SIMD4<Float>>.stride * 4, index: 0)
+            encoder.setFragmentBytes(&value, length: 16, index: 0)
+            for _ in 0..<4 { encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4) }
+            encoder.endEncoding()
+        }
+        let texels = try await gpu.read(zeta, bytesPerPixel: stencil ? 1 : 4)
+        var wrong = 0
+        if stencil {
+            wrong = texels.filter { $0 != 0x5a }.count
+        } else {
+            texels.withUnsafeBytes { raw in
+                for depth in raw.bindMemory(to: Float.self) where depth != 0.5 { wrong += 1 }
+            }
+        }
+        let cleared = [UInt8](
+            (0..<side * side).flatMap { _ in
+                [2, 1, 0, 3].map { UInt8((zetaClear[$0] * 255).rounded()) }
+            })
+        let bytes = try await gpu.read(colour, bytesPerPixel: 4)
+        let changed = zip(bytes, cleared).filter { $0 != $1 }.count
+        return (wrong, changed, [drawn.path])
     }
 
     /// The largest difference from source-over of (0.5, 0.25, 0.125, 0.5) on the clear colour: codes for BGRA8, values

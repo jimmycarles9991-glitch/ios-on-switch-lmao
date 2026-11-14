@@ -6,6 +6,7 @@
 #include "TegraSMMU.h"
 #include "TegraSMMUAttachments.h"
 #include "SwitchSmmuRegisters.h"
+#include "TegraMCNames.h"
 #include "../../kits/SwitchMMIO/SwitchMMIOKernel.h"
 
 namespace {
@@ -149,17 +150,19 @@ extern "C" uint32_t tegra_smmu_read(uint32_t offset)
     return ready() ? r32(offset) : 0;
 }
 
-// One register holds the hot-reset bits of clients different drivers power (NVDEC, NVJPG and the GPU share
-// MC_CLIENT_HOTRESET_CTRL_1; VIC and NVENC CTRL): each read-modify-write is under the MC's lock.
 extern "C" void tegra_mc_hot_reset(uint32_t ctrl, uint32_t bit, bool on)
 {
     if (!ready())
         return;
     IOSimpleLockLock(gLock);
     const uint32_t value = r32(ctrl);
-    w32(ctrl, on ? value | bit : value & ~bit);
-    (void)r32(ctrl);
+    const uint32_t wrote = on ? value | bit : value & ~bit;
+    w32(ctrl, wrote);
+    const uint32_t now = r32(ctrl);
     IOSimpleLockUnlock(gLock);
+    if ((now ^ wrote) & bit)
+        IOLog("TegraSMMU: MC hot reset %s of %s did not take: MC %#x reads %#x after %#x was written\n",
+              on ? "request" : "release", switch_mc::hotResetClient(ctrl, bit), ctrl, now, wrote);
 }
 
 extern "C" int tegra_smmu_resume(void)
@@ -182,5 +185,6 @@ extern "C" int tegra_smmu_resume(void)
     }
     if (full)
         IOLog("TegraSMMU: resume: over %u swgroups were attached; one was not restored\n", TEGRA_SMMU_ATTACHMENTS);
+    switch_mc_errors_resume();
     return bad;
 }

@@ -178,6 +178,11 @@ void tgm_recover_preempt_unblock(nvkm_runl *)
 	calls.emplace_back("unblock");
 }
 
+void tgm_recover_owed_preempt(nvkm_runl *)
+{
+	calls.emplace_back("owed");
+}
+
 int nvkm_engine_reset(nvkm_engine *)
 {
 	EXPECT_EQ(notifications, 0);
@@ -202,10 +207,10 @@ void nvkm_event_ntfy(nvkm_event *, int, int type)
 TEST_F(Recovery, RemovedChannelsPublishOnlyAfterQuiescence)
 {
 	nvkm_runl_rc(&run);
-	EXPECT_EQ(calls,
-		  (std::vector<std::string>{"disable", "remove", "disable", "remove", "idle",
-					    "hold", "reset", "release", "update", "clear", "allow",
-					    "wait", "unblock", "preempt", "terminal", "terminal"}));
+	EXPECT_EQ(calls, (std::vector<std::string>{"disable", "remove", "disable", "remove", "idle",
+						   "hold", "reset", "release", "update", "clear",
+						   "allow", "wait", "unblock", "preempt", "owed",
+						   "terminal", "terminal"}));
 	EXPECT_EQ(notifications, 2);
 	EXPECT_EQ(locks, 0);
 	EXPECT_EQ(run.cgrps, nullptr);

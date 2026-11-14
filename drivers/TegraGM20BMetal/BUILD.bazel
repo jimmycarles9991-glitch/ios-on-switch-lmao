@@ -222,6 +222,20 @@ filegroup(
     ],
 )
 
+# The plugin's own sources and the selector inventory: what raw/plan/test/m2v_routes_test.py reads every way into m2v from
+filegroup(
+    name = "m2v_route_sources",
+    srcs = glob([
+        "raw/runtime/*",
+        "raw/fx/*.cpp",
+        "raw/fx/*.h",
+        "compiler/*",
+    ]) + [
+        "TegraGM20BMetalPlugin.mm",
+        "raw/test/inventory.tsv",
+    ],
+)
+
 # Every file below raw/: what raw_stack_test.py looks the generator's file names up in
 filegroup(
     name = "raw_tree",
@@ -252,7 +266,6 @@ ios_binary(
         "raw/runtime/raw_private_comp.cpp",
         "raw/runtime/raw_draw_bands.cpp",
         "raw/runtime/raw_job_uses.cpp",
-        "raw/runtime/raw_draw_shortcuts.cpp",
         "raw/runtime/raw_resolve_twod.cpp",
         "raw/runtime/raw_tessellation.cpp",
         "raw/runtime/raw_transfer.cpp",
@@ -544,20 +557,6 @@ py_binary(
         "//tools/gpu/maxwell:interp",
         "//tools/gpu/maxwell:isa",
     ],
-)
-
-py_binary(
-    name = "ordercheck",
-    srcs = ["raw/test/ordercheck.py"],
-    main = "raw/test/ordercheck.py",
-)
-
-# The raw path's target check against the pack (it reads it with the pack generator's modules).
-py_binary(
-    name = "targetcheck",
-    srcs = ["raw/test/targetcheck.py"],
-    main = "raw/test/targetcheck.py",
-    deps = [":raw_pack"],
 )
 
 py_binary(

@@ -99,6 +99,37 @@ TEST(RawSpanMarks, ConsecutiveDrawsOfOneStateAreOneSpanAndTheTailEndsAtTheEndSta
     EXPECT_EQ(std::string(line), "2000 us pass prologue k0000000000000000 0 instr x1 3686km");
 }
 
+// Boot 21's glass state on an app open: two draws of its split twin over the whole 722 x 1282 target in 5.125 ms. The line
+// says how many pixels the draws shaded and what that time comes to a pixel at the chip's issue rate (544 against the
+// twin's static 560: the program ran at full rate), so a span that is long for its pixels and one that is long for its
+// program read apart
+TEST(RawSpanMarks, ASpanOfDrawsSaysItsFormPixelsExecutedRateAndTarget)
+{
+    SpanLabel glass;
+    glass.key = 0x4c33d27bde9b894aull;
+    glass.instructions = 560;
+    glass.kpx = 925;
+    glass.form = SpanForm::Twin;
+    glass.pixels = 722 * 1282;
+    glass.format = 80;
+    glass.width = 722;
+    glass.height = 1282;
+    glass.blockLinear = true;
+    strlcpy(glass.name, "PBGRAXm_TimgA2Xhf_IxrgN3Oc3mtc4nlnlnl", sizeof glass.name);
+    StateSpan s{glass, 2, 5'125'000, 2ull * 722 * 1282};
+    char line[192];
+    formatSpan(line, sizeof line, s);
+    EXPECT_EQ(std::string(line),
+              "5125 us PBGRAXm_TimgA2Xhf_IxrgN3Oc3mtc4nlnlnl k4c33d27bde9b894a 560 instr x2 925k twin "
+              "1851kpx e544 c0 80/722x1282/bl");
+    SpanLabel prologue;
+    prologue.kind = SpanKind::Prologue;
+    prologue.pixels = 1000;
+    StateSpan p{prologue, 1, 2'000'000, 1000};
+    formatSpan(line, sizeof line, p);
+    EXPECT_EQ(std::string(line), "2000 us pass prologue k0000000000000000 0 instr x1 0k") << "a prologue has no draws";
+}
+
 TEST(RawSpanMarks, AMarkTheGpuNeverWroteGivesItsTimeToTheNextAndALaterBufferTakesTheSlot)
 {
     SpanMarks marks;

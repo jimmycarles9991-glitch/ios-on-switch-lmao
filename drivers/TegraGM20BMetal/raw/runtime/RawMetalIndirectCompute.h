@@ -64,7 +64,6 @@ struct RMICBVariant {
     // every command's bindSlots, alignedSlots and strideSlots, made again at an execute after a command changed
     uint32_t _bindSlots, _alignedSlots, _strideSlots;
     bool _bindsChanged;
-    id<MTLIndirectCommandBuffer> _m2v;  // m2v's buffer, into which its replay encodes the commands again
 }
 @end
 
@@ -118,8 +117,7 @@ std::shared_ptr<RMICBVariant> rmPipelineVariant(RMIndirectComputeBuffer *b, RMCo
 - (RMComputeState *)rmState;
 @end
 
-// RawMetalIndirectExecute.mm: the raw encode of OpExecuteKernels, m2v's replay of it (the commands encoded again into m2v's
-// buffer, which executes them), and a blit's reset or copy of a buffer of dispatches (be null: m2v's replay)
+// RawMetalIndirectExecute.mm: the raw encode of OpExecuteKernels, and a blit's reset or copy of a buffer of dispatches
+// (be null: m2v's replay)
 bool encodeKernelCommands(raw::ComputeEncoder &e, raw::CommandBuffer &rc, RMKernelExecute *x, const char **why);
-void replayKernelCommands(id<MTLComputeCommandEncoder> encoder, RMKernelExecute *x, std::set<RMBuffer *> &buffers);
 void encodeKernelCommandsBlit(raw::BlitEncoder *be, const Cmd &c);

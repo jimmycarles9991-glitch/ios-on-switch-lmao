@@ -7,6 +7,7 @@
 #include <dispatch/dispatch.h>
 #include <pthread/qos.h>
 #include <cstdio>
+#include <os/log.h>
 #include <cstring>
 #include "TegraGM20BABI.h"
 #include "TegraGM20BCompilerABI.h"
@@ -24,11 +25,25 @@ Remote::Remote(const KernelTransport &transport, uint64_t stack) : Remote(transp
 
 Remote::Remote(Call kernel, uint64_t stack) : call_(std::move(kernel)), stack_(stack)
 {
+    capable();
+}
+
+bool Remote::capable()
+{
+    const CompilerMethods known = methods_.load(std::memory_order_acquire);
+    if (known != CompilerMethods::Unknown)
+        return known == CompilerMethods::Present;
     TegraGM20BAbiCompilerInfoReply info = {};
-    capable_ = call(TegraGM20BMethodCompilerInfo, nullptr, 0, &info, sizeof info) == kIOReturnSuccess &&
-               (info.flags & TegraGM20BCompilerCapable);
-    if (capable_)
+    const int called = call(TegraGM20BMethodCompilerInfo, nullptr, 0, &info, sizeof info);
+    const CompilerMethods methods = compilerMethods(called, info.flags);
+    if (methods == CompilerMethods::Present)
         refresh(info);
+    if (methods != CompilerMethods::Unknown)
+        methods_.store(methods, std::memory_order_release);
+    else
+        os_log_error(OS_LOG_DEFAULT, "raw: the kernel's CompilerInfo failed (0x%x): this ask has no shader compiler",
+                     called);
+    return methods == CompilerMethods::Present;
 }
 
 void Remote::refresh(const TegraGM20BAbiCompilerInfoReply &info)
@@ -60,7 +75,7 @@ bool Remote::taking()
 
 bool Remote::serving()
 {
-    if (!capable_)
+    if (!capable())
         return false;
     TegraGM20BAbiCompilerInfoReply info = {};
     if (!expected_.load(std::memory_order_acquire) &&
@@ -72,7 +87,7 @@ bool Remote::serving()
 bool Remote::declined()
 {
     TegraGM20BAbiCompilerInfoReply info = {};
-    if (capable_ && call(TegraGM20BMethodCompilerInfo, nullptr, 0, &info, sizeof info) == kIOReturnSuccess)
+    if (capable() && call(TegraGM20BMethodCompilerInfo, nullptr, 0, &info, sizeof info) == kIOReturnSuccess)
         refresh(info);
     return declined_.load(std::memory_order_acquire);
 }
@@ -287,15 +302,6 @@ bool Remote::ask(Held &&held)
         return false;
     held_.push_back(std::move(held));
     return true;
-}
-
-const char *InProcess::text(Why why)
-{
-    switch (why) {
-    case NoCompiler:
-        return "no shader compiler runs this boot";
-    }
-    return "?";
 }
 
 void Remote::delivered(void *refcon, int result, void *cookie, void *word)

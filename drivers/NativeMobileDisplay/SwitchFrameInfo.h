@@ -176,12 +176,14 @@ private:
 
 // Swaps between the kick taking them and the screen showing them, by take sequence. A present names the sequence of the
 // swap it shows: that swap's frame comes out, and older ones go unsent (replaced before a frame showed them; Core
-// Animation drops its frame info for every swap id up to the one it gets).
+// Animation drops its frame info for every swap id up to the one it gets). timedShown and timedUnsent count the swaps
+// the timed-present gate held for their presentation time (presentDrawable:atTime:'s) by which way they went.
 class Pending {
 public:
     static constexpr unsigned kMax = 16;
+    uint32_t timedShown = 0, timedUnsent = 0;
 
-    void take(uint64_t seq, uint32_t swapId, uint64_t requested)
+    void take(uint64_t seq, uint32_t swapId, uint64_t requested, bool timed = false)
     {
         if (!seq)
             return;
@@ -194,7 +196,7 @@ public:
             if (s.seq < slot->seq)
                 slot = &s;
         }
-        *slot = {seq, swapId, requested};
+        *slot = {seq, swapId, requested, timed};
     }
 
     bool shown(uint64_t seq, uint64_t presented, Frame &frame)
@@ -207,6 +209,8 @@ public:
                 frame = {presented, s.requested, s.swapId};
                 found = true;
             }
+            if (s.timed)
+                ++(s.seq == seq ? timedShown : timedUnsent);
             s = {};
         }
         return found;
@@ -217,6 +221,7 @@ private:
         uint64_t seq;
         uint32_t swapId;
         uint64_t requested;
+        bool timed;
     };
 
     Swap swaps[kMax] = {};

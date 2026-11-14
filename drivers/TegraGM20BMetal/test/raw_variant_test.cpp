@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: MIT
+#include <gmock/gmock.h>
 #include <gtest/gtest.h>
 #include "../raw/runtime/raw_variant.h"
+#include "bazel/testing/source_text.h"
 #include <memory>
 #include <thread>
 
@@ -81,6 +83,17 @@ TEST(Variant, PendingProducerRetainsCellAfterRecordingOwnerReleasesIt)
     EXPECT_EQ(wakes, 1u);
     complete = {};
     EXPECT_TRUE(weak.expired());
+}
+
+// A variant no compiler made fails that draw's command buffer alone; the next draw that needs it asks afresh: no count
+TEST(VariantAsks, TheDrawThatMeetsAFailedVariantAsksItAfresh)
+{
+    const std::string cubic = switch_ios::test::SourceText("../raw/runtime/RawMetalCubic.mm");
+    const std::string made = switch_ios::test::Body(cubic, "static raw::Variant<raw::Pipeline> *renderVariant(");
+    EXPECT_THAT(made, testing::HasSubstr("found->second->state() != raw::Variant<raw::Pipeline>::State::Failed"));
+    EXPECT_THAT(made, testing::Not(testing::HasSubstr("_variantAsks")));
+    EXPECT_THAT(made, testing::HasSubstr("p->_replacedVariants.push_back(std::move(found->second));"));
+    EXPECT_THAT(made, testing::HasSubstr("completion->askVariant("));
 }
 
 }  // namespace

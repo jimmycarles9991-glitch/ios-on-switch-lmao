@@ -25,7 +25,8 @@ enum X1IndexLimitProbe {
         guard let line = CACorpus.state("PBGRAXm_A2Xhf") else { throw TestFailure("CACorpus has no PBGRAXm_A2Xhf") }
         let pipeline = try CAState.pipeline(line, library: library, device: gpu.device)
         let target = try gpu.texture(.bgra8Unorm, size, size)
-        let scratch = try gpu.texture(.bgra8Unorm, size, size, usage: [.renderTarget], storage: .memoryless)
+        let scratch = try gpu.texture(
+            CACorpus.colorFormat(line, 1), size, size, usage: [.renderTarget], storage: .memoryless)
         let white = SIMD4<Float16>(1, 1, 1, 1)
         let corners: [(Float, Float)] = [(1, 1), (-1, -1), (0, -1), (-1, 0), (0, 0), (1, -1)]
         let vertices = corners.map { CAState.Vertex($0.0, $0.1, u: 0, v: 0, color: white) }

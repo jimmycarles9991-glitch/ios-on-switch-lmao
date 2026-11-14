@@ -70,6 +70,10 @@ enum TegraNVDECMethod {
 #define TEGRA_NVDEC_DECODES_MPEG4 "TegraNVDECDecodesMPEG4"
 #define TEGRA_NVDEC_DECODES_MPEG2 "TegraNVDECDecodesMPEG2"  // MPEG-1 too
 
+// An IOResources resource (IOResourceMatch), published when NVDEC's bring-up ended without the service (it failed, or
+// switch-no-nvdec): a process that waits for the service (kits/SwitchServiceWait) stops waiting.
+#define TEGRA_NVDEC_ABSENT_RESOURCE "TegraNVDECAbsent"
+
 // NVDEC application ids (clc5b0.h NVC5B0_SET_APPLICATION_ID_ID_*). TegraNVDECInfo.codecs has bit n set for each
 // codec NVDEC decodes; Submit refuses the others.
 enum {

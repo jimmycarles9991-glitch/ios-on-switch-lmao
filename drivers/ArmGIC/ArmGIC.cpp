@@ -34,6 +34,7 @@
 #include <libkern/c++/OSSymbol.h>
 #include "ArmGIC.h"
 #include "SwitchInterrupts.h"
+#include "SwitchGicV2.h"
 #include "../../kits/SwitchDT/SwitchDTProperty.h"
 #include "../../kits/SwitchIdle/switch_idle.h"
 #include "../../kits/SwitchMMIO/SwitchMMIO.h"
@@ -262,6 +263,7 @@ class ArmGIC : public IOInterruptController {
 
     bool mapDistributor(uint64_t *physical);
     const char *setup();
+    void maskLine(uint32_t intid);
     IOService *makeNub(uint32_t intid);
 
 public:
@@ -488,24 +490,21 @@ IOReturn ArmGIC::handleInterrupt(void *, IOService *, int source)
     __atomic_store_n(&fired[intid], __atomic_load_n(&fired[intid], __ATOMIC_RELAXED) + 1U, __ATOMIC_RELAXED);
     if (isFrame(intid))
         switch_idle_note_frame();
-    vector->interruptActive = 1;
-    OSMemoryBarrier();
-    if (!vector->interruptDisabledSoft) {
-        const bool trace = (static_cast<uint64_t>(gIOKitTrace) & kIOTraceInterrupts) != 0;
-        if (trace)
-            timeStampInterruptHandlerStart(static_cast<IOInterruptVectorNumber>(intid), vector);
-        vector->handler(vector->target, vector->refCon, vector->nub, vector->source);
-        if (trace)
-            timeStampInterruptHandlerEnd(static_cast<IOInterruptVectorNumber>(intid), vector);
-    }
-    // Soft disabled before it fired, or by its own handler (a level IOInterruptEventSource): mask it now, before
-    // the EOI, rather than taking a still-asserted line once more to find that out. enableInterrupt() undoes it.
-    if (vector->interruptDisabledSoft && !vector->interruptDisabledHard) {
-        vector->interruptDisabledHard = 1;
-        disableVectorHard(static_cast<IOInterruptVectorNumber>(intid), vector);
-    }
-    OSMemoryBarrier();
-    vector->interruptActive = 0;
+    // Soft disabled before it fired, or by its own handler (a level IOInterruptEventSource): masked before the EOI,
+    // rather than taking a still-asserted line once more to find that out. enableInterrupt() undoes it.
+    switchgic::runVector(
+        *vector,
+        [this, vector, intid] {
+            const bool trace = (static_cast<uint64_t>(gIOKitTrace) & kIOTraceInterrupts) != 0;
+            if (trace)
+                timeStampInterruptHandlerStart(static_cast<IOInterruptVectorNumber>(intid), vector);
+            vector->handler(vector->target, vector->refCon, vector->nub, vector->source);
+            if (trace)
+                timeStampInterruptHandlerEnd(static_cast<IOInterruptVectorNumber>(intid), vector);
+        },
+        [this, intid] {
+            maskLine(intid);
+        });
     return kIOReturnSuccess;
 }
 
@@ -536,13 +535,18 @@ int ArmGIC::getVectorType(IOInterruptVectorNumber vectorNumber, IOInterruptVecto
     return isEdge(static_cast<uint32_t>(vectorNumber)) ? kIOInterruptTypeEdge : kIOInterruptTypeLevel;
 }
 
-void ArmGIC::disableVectorHard(IOInterruptVectorNumber vectorNumber, IOInterruptVector *)
+void ArmGIC::maskLine(uint32_t intid)
 {
-    const uint32_t intid = static_cast<uint32_t>(vectorNumber);
     writeBit(GICD_ICENABLER, intid);
     if (licCovers(intid))
         licWrite(licBank(intid), ICTLR_CPU_IER_CLR, 1U << (intid % 32));
-    OSSynchronizeIO();
+}
+
+void ArmGIC::disableVectorHard(IOInterruptVectorNumber vectorNumber, IOInterruptVector *)
+{
+    switchgic::maskFromThread([this, vectorNumber] {
+        maskLine(static_cast<uint32_t>(vectorNumber));
+    });
 }
 
 void ArmGIC::enableVector(IOInterruptVectorNumber vectorNumber, IOInterruptVector *)
@@ -556,10 +560,11 @@ void ArmGIC::enableVector(IOInterruptVectorNumber vectorNumber, IOInterruptVecto
             __atomic_fetch_and(&steerPending[intid / 32], ~bit, __ATOMIC_RELAXED);
         }
     }
-    if (licCovers(intid))
-        licWrite(licBank(intid), ICTLR_CPU_IER_SET, 1U << (intid % 32));
-    writeBit(GICD_ISENABLER, intid);
-    OSSynchronizeIO();
+    switchgic::unmask([this, intid] {
+        if (licCovers(intid))
+            licWrite(licBank(intid), ICTLR_CPU_IER_SET, 1U << (intid % 32));
+        writeBit(GICD_ISENABLER, intid);
+    });
 }
 
 void ArmGIC::causeVector(IOInterruptVectorNumber vectorNumber, IOInterruptVector *)

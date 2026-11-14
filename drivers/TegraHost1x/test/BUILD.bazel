@@ -11,6 +11,14 @@ host_test(
     ],
 )
 
+host_test(
+    name = "switch_host1x_cpu_increment_test",
+    srcs = [
+        "switch_host1x_cpu_increment_test.cpp",
+        "//drivers/TegraHost1x:SwitchHost1xCpuIncrement.h",
+    ],
+)
+
 host_shims(
     name = "results_kernel",
     headers = [
@@ -88,10 +96,12 @@ host_test(
         "//drivers/TegraHost1x:SwitchHost1xArena.h",
         "//drivers/TegraHost1x:SwitchHost1xChannels.h",
         "//drivers/TegraHost1x:SwitchHost1xGatherStats.h",
+        "//drivers/TegraHost1x:SwitchHost1xCpuIncrement.h",
         "//drivers/TegraHost1x:SwitchHost1xFailureRelease.h",
         "//drivers/TegraHost1x:SwitchHost1xFence.h",
         "//drivers/TegraHost1x:SwitchHost1xIntr.h",
         "//drivers/TegraHost1x:TegraHost1x.h",
+        "//drivers/TegraSMMU:TegraSMMU.h",
         "//kits/SwitchCAR:SwitchCAR.h",
         "//kits/SwitchDMA:SwitchDMABuffer.h",
         "//kits/SwitchDMA:SwitchDcache.h",
@@ -150,11 +160,13 @@ host_test(
         "//drivers/TegraHost1x:SwitchHost1xArena.h",
         "//drivers/TegraHost1x:SwitchHost1xChannels.h",
         "//drivers/TegraHost1x:SwitchHost1xGatherStats.h",
+        "//drivers/TegraHost1x:SwitchHost1xCpuIncrement.h",
         "//drivers/TegraHost1x:SwitchHost1xFailureRelease.h",
         "//drivers/TegraHost1x:SwitchHost1xFence.h",
         "//drivers/TegraHost1x:SwitchHost1xFenceList.h",
         "//drivers/TegraHost1x:SwitchHost1xIntr.h",
         "//drivers/TegraHost1x:TegraHost1x.h",
+        "//drivers/TegraSMMU:TegraSMMU.h",
         "//kits/SwitchCAR:SwitchCAR.h",
         "//kits/SwitchDMA:SwitchDMABuffer.h",
         "//kits/SwitchDMA:SwitchDcache.h",

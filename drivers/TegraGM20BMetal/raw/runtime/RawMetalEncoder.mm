@@ -5,7 +5,6 @@
 #import "RawMetalPassCache.h"
 #import "RawMetalRotated.h"
 #import "RawMetalTargetViews.h"
-#include "raw_device_answers.h"
 
 // One count for every kind, as IOAccelDeviceGetNextGlobalTraceID is the device's
 uint64_t nextTraceId()
@@ -37,9 +36,8 @@ uint64_t nextTraceId()
     return c && [c instancesRespondToSelector:selector];
 }
 
-// A selector this encoder does not record itself (one the m2v encoder implements, or some MTL protocol declares): recorded as an
-// invocation (objects mapped to twins at replay) and the command buffer goes to m2v; answered zero here when the m2v encoder
-// has no method for it either (its answer is zero too).
+// A selector no method of this encoder answers: the signature its caller expects, so the invocation reaches
+// forwardInvocation: and is answered zero there
 - (NSMethodSignature *)methodSignatureForSelector:(SEL)selector
 {
     if (NSMethodSignature *s = [super methodSignatureForSelector:selector])
@@ -57,31 +55,31 @@ uint64_t nextTraceId()
     return nil;
 }
 
+// Tile shading and imageblocks (tile dispatches, tile bindings, imageblock sizes) are Apple4's (Metal feature set tables),
+// a family the device does not claim (raw_device_answers.h supportsFamily:, raw/test/refused.txt); every other Metal
+// selector of the claimed families is a method of the encoder. One that reaches here is the caller's error past a NO:
+// answered zero, as m2v's encoder answered it, with an error line
+static bool tileShading(const char *selector)
+{
+    for (const char *prefix :
+         {"dispatchThreadsPerTile", "setTile", "setImageblockWidth", "setThreadgroupMemoryLength:offset:"})
+        if (!strncmp(selector, prefix, strlen(prefix)))
+            return true;
+    return false;
+}
+
 - (void)forwardInvocation:(NSInvocation *)inv
 {
-    if (!twinAnswers([[self class] twinClass], inv.selector)) {
-        answerZero(self, inv);
-        return;
-    }
-    [inv retainArguments];
-    if (!raw::keepPointedArguments(inv))
-        SWITCH_REFUSE_DETAIL("raw", "call.pointer", uintptr_t(inv.selector),
-                             "-[%s %s] recorded with a pointer argument of no known extent",
-                             class_getName(object_getClass(self)), sel_getName(inv.selector));
-    [_cb retain:inv];
-    Cmd c = cmd(OpInvocation);
-    c.obj = (__bridge void *)inv;
-    [_cb record:c];
-    [_cb takeReason:WhyCall why:@"an encoder call recorded as an invocation"];
-    hit(_cb, PredCallInvocation, uintptr_t(inv.selector));
-    SWITCH_REFUSE_DETAIL("raw", "call.invocation", uintptr_t(inv.selector), "-[%s %s] recorded as an invocation",
-                         class_getName(object_getClass(self)), sel_getName(inv.selector));
-    const NSUInteger n = inv.methodSignature.methodReturnLength;
-    if (n) {
-        void *zero = calloc(1, n);
-        [inv setReturnValue:zero];
-        free(zero);
-    }
+    const char *selector = sel_getName(inv.selector);
+    if (tileShading(selector))
+        SWITCH_REFUSE_DETAIL("raw", "call.tile", uintptr_t(inv.selector),
+                             "-[%s %s]: tile shading is Apple4's, a family this device does not claim: answered zero",
+                             class_getName(object_getClass(self)), selector);
+    else
+        SWITCH_REFUSE_DETAIL("raw", "call.invocation", uintptr_t(inv.selector),
+                             "-[%s %s]: no method of this device's encoder: answered zero",
+                             class_getName(object_getClass(self)), selector);
+    answerZero(self, inv);
 }
 
 + (Class)twinClass
@@ -106,7 +104,7 @@ static void endDropped(void *object)
 - (void)endEncoding
 {
     SWITCH_API(ApiEncoder);
-    if (_ended)
+    if (_ended || !_cb)
         return;
     _ended = true;
     if (!_counterPending.empty())
@@ -209,6 +207,20 @@ static bool rawStencilResolve(MTLRenderPassDescriptor *pass, RMTexture *from)
            gRM->raw->stencilBitsPipeline(from->_raw.format, from->_raw.samples, stencilPick(pass));
 }
 
+// A Depth32Float texture and a Stencil8 texture as the depth and stencil attachments, of one extent and sample count, whole
+// and not turned: the pass renders a Depth32Float_Stencil8 backing of theirs (raw::PassDesc::separate). GM20B's zeta formats
+// pair stencil only with a 24-bit or 32-bit float depth (SET_ZT_FORMAT), so a Depth16Unorm beside a Stencil8 has none.
+static bool separateZeta(MTLRenderPassDescriptor *pass)
+{
+    RMTexture *d = (RMTexture *)pass.depthAttachment.texture, *s = (RMTexture *)pass.stencilAttachment.texture;
+    if (!d || !s || d == s || ![(id)d isKindOfClass:[RMTexture class]] || ![(id)s isKindOfClass:[RMTexture class]] ||
+        !d->_rawOk || !s->_rawOk)
+        return false;
+    const raw::Texture &x = d->_raw, &y = s->_raw;
+    return x.zeta && y.zeta && x.format == 252 && y.format == 253 && x.width == y.width && x.height == y.height &&
+           x.samples == y.samples && x.layers <= 1 && y.layers <= 1 && !x.rotation && !y.rotation;
+}
+
 static bool rawDepthStencil(MTLRenderPassDescriptor *pass)
 {
     MTLRenderPassDepthAttachmentDescriptor *d = pass.depthAttachment;
@@ -216,9 +228,14 @@ static bool rawDepthStencil(MTLRenderPassDescriptor *pass)
     RMTexture *t = (RMTexture *)zetaAttachment(pass);
     if (!t || ![(id)t isKindOfClass:[RMTexture class]] || !t->_rawOk || !t->_raw.zeta)
         return false;
-    const bool depth = raw::zetaHasDepth(t->_raw.format), stencil = raw::zetaHasStencil(t->_raw.format);
-    if ((RMTexture *)d.texture != (depth ? t : nil) || (RMTexture *)s.texture != (stencil ? t : nil) ||
-        (depth && std::isnan(d.clearDepth)))
+    const bool separate = separateZeta(pass);
+    const bool depth = separate || raw::zetaHasDepth(t->_raw.format),
+               stencil = separate || raw::zetaHasStencil(t->_raw.format);
+    if (!separate && ((RMTexture *)d.texture != (depth ? t : nil) || (RMTexture *)s.texture != (stencil ? t : nil)))
+        return false;
+    if (depth && std::isnan(d.clearDepth))
+        return false;
+    if (separate && (d.resolveTexture || s.resolveTexture || resolves(d.storeAction) || resolves(s.storeAction)))
         return false;
     if (depth && (d.resolveTexture || resolves(d.storeAction)) && !rawDepthResolve(d, t))
         return false;
@@ -227,11 +244,13 @@ static bool rawDepthStencil(MTLRenderPassDescriptor *pass)
     MTLRenderPassAttachmentDescriptor *aspects[2] = {depth ? d : nil, stencil ? s : nil};
     const NSUInteger slice = depth ? d.slice : s.slice;
     for (MTLRenderPassAttachmentDescriptor *a : aspects) {
+        RMTexture *own = separate ? (RMTexture *)a.texture : t;
         const MTLStoreAction kept = keptStore(a.storeAction);
-        if (a && (a.level || a.slice != slice || slice >= std::max(t->_raw.layers, 1u) || a.depthPlane ||
-                  (t->_raw.memoryless && (kept != MTLStoreActionDontCare || (a.loadAction != MTLLoadActionClear &&
-                                                                             a.loadAction != MTLLoadActionDontCare))) ||
-                  (kept != MTLStoreActionDontCare && kept != MTLStoreActionStore)))
+        if (a &&
+            (a.level || a.slice != slice || slice >= std::max(own->_raw.layers, 1u) || a.depthPlane ||
+             (own->_raw.memoryless && (kept != MTLStoreActionDontCare || (a.loadAction != MTLLoadActionClear &&
+                                                                          a.loadAction != MTLLoadActionDontCare))) ||
+             (kept != MTLStoreActionDontCare && kept != MTLStoreActionStore)))
             return false;
     }
     return true;
@@ -382,8 +401,11 @@ void rmPoolEncoders()
     uint64_t hash = 0;
     const bool keyed = !rmCounterBuffersMade() && rmPassKey(d, key, hash);
     if (keyed)
-        if (const RMPassEntry *kept = rmPassFind(key, hash))
-            return openKeptPass(self, e, *kept);
+        if (const RMPassEntry *kept = rmPassFind(key, hash)) {
+            id<MTLRenderCommandEncoder> opened = openKeptPass(self, e, *kept);
+            rmPassDone();
+            return opened;
+        }
     MTLRenderPassDescriptor *pass = [d copy];
     [self retain:pass];
     e->_pass = pass;
@@ -487,8 +509,8 @@ void rmPoolEncoders()
     if (pass.depthAttachment.texture || pass.stencilAttachment.texture) {
         [self retain:pass.depthAttachment.texture];
         [self retain:pass.stencilAttachment.texture];
-        if (rawDepthStencil(pass)) {
-            e->_zeta = ((RMTexture *)facts.depth)->_raw.format;
+        if (rawDepthStencil(pass) && !(e->_turn && separateZeta(pass))) {
+            e->_zeta = separateZeta(pass) ? raw::kZetaFormat : ((RMTexture *)facts.depth)->_raw.format;
             if (!e->_count)
                 e->_samples = ((RMTexture *)facts.depth)->_raw.samples;
         } else {
@@ -504,10 +526,10 @@ void rmPoolEncoders()
     [self retain:e->_visibility];
     const NSUInteger positions = [pass getSamplePositions:nullptr count:0];
     facts.layers = uint32_t(std::clamp<NSUInteger>(pass.renderTargetArrayLength, 1, 2048));
-    if ((facts.layers > 1 && !raw::answers::kThisKind.layeredRendering) || pass.rasterizationRateMap ||
+    if (pass.rasterizationRateMap ||
         (positions && !passSamplePositions(pass, positions, e->_samples, facts.positions))) {
-        [self takeReason:WhyPass why:@"layers, a rate map or sample positions of its own"];
-        hit(self, PredPassOther, pass.renderTargetArrayLength | positions << 32, pass.rasterizationRateMap != nil);
+        [self takeReason:WhyPass why:@"a rate map or sample positions of its own"];
+        hit(self, PredPassOther, positions, pass.rasterizationRateMap != nil);
     }
     e->_renderAt = _plan.size();
     Cmd m = cmd(OpRender);

@@ -25,6 +25,14 @@ public struct PathTally: Equatable, Sendable {
     /// Whether there were command buffers and every one went to m2v whole.
     public var onlyM2V: Bool { !paths.isEmpty && paths.keys.allSatisfy { $0.hasPrefix("m2v:") } }
 
+    /// The command buffers the facade did not run whole on the raw path, each under its path, which names the refusal
+    /// that took it off raw.
+    public var offRaw: PathTally {
+        var off = PathTally()
+        for (path, count) in paths where path != "raw" { off.paths[path] = count }
+        return off
+    }
+
     /// Counter deltas (the facade's switchRawCounters) as log fields: raw_cbs, m2v_cbs, split_cbs and the predicates
     /// that sent work to m2v, most hit first.
     public static func counterMetrics(before: [String: Int], after: [String: Int]) -> Metrics {

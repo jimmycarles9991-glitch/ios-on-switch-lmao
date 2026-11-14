@@ -12,7 +12,10 @@ bool switch_nvdec_cancel_start(uint32_t syncpt);
 bool switch_nvdec_engine_powered();
 // The falcon (switch_falcon_stall) and the memory controller's error capture.
 void switch_nvdec_engine_describe(char *text, size_t size);
-// NVDEC's memory client flushed (drained: within the flush's bound), then the engine reset with its partition kept on.
+// The falcon's error taken since the engine was last booted, if one was (the cancellation's line).
+bool switch_nvdec_engine_falcon_failed(char *text, size_t size);
+// NVDEC's memory client flushed (drained: within the flush's bound), the falcon's error line checked for a lost
+// interrupt, turned off and its error cleared, then the engine reset with its partition kept on.
 bool switch_nvdec_engine_reset(bool *drained);
 // The falcon booted again from the kept image and proven by an IMMEDIATE and an OP_DONE increment, as at power-on.
 bool switch_nvdec_engine_boot();

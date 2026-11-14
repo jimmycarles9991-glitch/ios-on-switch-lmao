@@ -7,7 +7,7 @@ import Metal
 /// render state and a kernel no pack or store holds yet. Two threads that create the state at once get it from one
 /// compile; the state the previous run salted comes from the store with no request at all (that run was another process,
 /// maybe another boot, of the same store); a creation on the main thread sleeps while the compiler compiles it, its worker
-/// at the main thread's class; and nothing compiles in this process (the counters' compiled_here).
+/// at the main thread's class.
 struct CompileSharedTest: HWTest {
     let id = "gpu.compile.shared"
     let name = "States the pack lacks compiled once for every process and boot, never on a UI thread"
@@ -29,7 +29,6 @@ struct CompileSharedTest: HWTest {
         guard RawFacade.kind(of: gpu.device) == "raw" else {
             return .skip("the default device is not the raw facade")
         }
-        let before = RawFacade.counters(of: gpu.device)
         var metrics = Metrics()
         var checks: [(String, Bool)] = []
 
@@ -68,11 +67,7 @@ struct CompileSharedTest: HWTest {
         metrics.set("kernel_wrong", wrong)
         checks.append(("the salted kernel's every element exact", wrong == 0))
 
-        let after = RawFacade.counters(of: gpu.device)
-        let here = (after["compiled_here"] ?? 0) - (before["compiled_here"] ?? 0)
-        metrics.set("compiled_here", here)
-        checks.append(("nothing compiled in this process", here == 0))
-        return .judged(checks, metrics, proof: "salt \(salt)")
+        return .judged(checks, metrics, proof: "salt \(salt)").onRawPath(gpu)
     }
 
     func pipeline(_ gpu: GPU, salt: UInt32) throws -> MTLRenderPipelineState {

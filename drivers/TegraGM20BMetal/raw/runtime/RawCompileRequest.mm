@@ -44,6 +44,15 @@ PipelineFields fieldsOf(MTLRenderPipelineDescriptor *d)
     f.depthFormat = d.depthAttachmentPixelFormat;
     f.stencilFormat = d.stencilAttachmentPixelFormat;
     f.rasterization = d.rasterizationEnabled ? 1 : 0;
+    f.amplification = d.maxVertexAmplificationCount;
+    f.patchType = d.vertexFunction.patchType;
+    f.tessellation = {d.tessellationPartitionMode,
+                      d.tessellationFactorFormat,
+                      d.tessellationFactorStepFunction,
+                      d.tessellationOutputWindingOrder,
+                      d.tessellationControlPointIndexType,
+                      d.maxTessellationFactor,
+                      d.tessellationFactorScaleEnabled ? 1u : 0u};
     for (unsigned i = 0; i < 8; i++) {
         MTLRenderPipelineColorAttachmentDescriptor *a = d.colorAttachments[i];
         f.color[i] = {a.pixelFormat,
@@ -74,6 +83,15 @@ void applyFields(const PipelineFields &f, MTLRenderPipelineDescriptor *d)
     d.depthAttachmentPixelFormat = MTLPixelFormat(f.depthFormat);
     d.stencilAttachmentPixelFormat = MTLPixelFormat(f.stencilFormat);
     d.rasterizationEnabled = f.rasterization != 0;
+    d.maxVertexAmplificationCount = f.amplification;
+    const TessellationFields &t = f.tessellation;
+    d.tessellationPartitionMode = MTLTessellationPartitionMode(t.partition);
+    d.tessellationFactorFormat = MTLTessellationFactorFormat(t.factorFormat);
+    d.tessellationFactorStepFunction = MTLTessellationFactorStepFunction(t.factorStep);
+    d.tessellationOutputWindingOrder = MTLWinding(t.winding);
+    d.tessellationControlPointIndexType = MTLTessellationControlPointIndexType(t.controlPointIndex);
+    d.maxTessellationFactor = t.maxFactor;
+    d.tessellationFactorScaleEnabled = t.factorScale != 0;
     for (unsigned i = 0; i < 8; i++) {
         const ColorFields &c = f.color[i];
         MTLRenderPipelineColorAttachmentDescriptor *a = d.colorAttachments[i];
@@ -123,12 +141,57 @@ std::string requestPackKey(const CompileRequest &r, bool &own)
     const StageKey v{vertex.function, vertex.constants}, f{fragment.function, fragment.constants};
     MTLRenderPipelineDescriptor *d = [MTLRenderPipelineDescriptor new];
     applyFields(r.fields, d);
-    std::string key = pipelineKey(d, &v, &f, linked, framework);
-    if (!r.cubic.empty())
-        key += r.cubic.key();
-    if (r.fragmentTests)
-        key += " | tests=" + std::to_string(r.fragmentTests);
-    return key;
+    return pipelineKey(d, &v, &f, linked, framework) + r.variant.name();
+}
+
+StageInFields stageInFieldsOf(MTLStageInputOutputDescriptor *in)
+{
+    StageInFields f;
+    for (unsigned i = 0; in && i < 31; i++) {
+        MTLAttributeDescriptor *a = in.attributes[i];
+        if (a.format == MTLAttributeFormatInvalid)
+            continue;
+        MTLBufferLayoutDescriptor *l = in.layouts[a.bufferIndex < 31 ? a.bufferIndex : 0];
+        f.attributes[i] = {a.format, a.offset, a.bufferIndex, l.stride, l.stepFunction, l.stepRate};
+    }
+    if (in) {
+        f.indexType = in.indexType;
+        f.indexBuffer = in.indexBufferIndex;
+    }
+    return f;
+}
+
+MTLStageInputOutputDescriptor *stageInOf(const StageInFields &f)
+{
+    if (stageInText(f).empty())
+        return nil;
+    MTLStageInputOutputDescriptor *in = [MTLStageInputOutputDescriptor stageInputOutputDescriptor];
+    for (unsigned i = 0; i < 31; i++) {
+        const AttributeFields &a = f.attributes[i];
+        if (!a.format)
+            continue;
+        in.attributes[i].format = MTLAttributeFormat(a.format);
+        in.attributes[i].offset = a.offset;
+        in.attributes[i].bufferIndex = a.buffer;
+        MTLBufferLayoutDescriptor *l = in.layouts[a.buffer < 31 ? a.buffer : 0];
+        l.stride = a.stride;
+        l.stepFunction = MTLStepFunction(a.step);
+        l.stepRate = a.rate;
+    }
+    in.indexType = MTLIndexType(f.indexType);
+    in.indexBufferIndex = f.indexBuffer;
+    return in;
+}
+
+ProbeTextures probeTexturesOf(const RenderVariant &v)
+{
+    ProbeTextures t;
+    t.cubic = v.cubic;
+    t.fragmentTests = v.fragmentTests;
+    t.twoPlane = v.twoPlane;
+    t.xrSlots = v.xrSlots;
+    t.written = v.written;
+    return t;
 }
 
 }  // namespace raw

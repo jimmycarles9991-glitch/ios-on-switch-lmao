@@ -264,6 +264,7 @@ IOReturn announce(const void *owner, task_t task, const TegraGM20BAbiCompilerAnn
 	if (gBroker.compiler != owner) {
 		gBroker.announced = owner;
 		gBroker.restarts = in->flags & TegraGM20BCompilerRestarts;
+		gBroker.declined = declinedAfterAnnounce(gBroker.declined);
 	}
 	IOLockUnlock(gBroker.lock);
 	return kIOReturnSuccess;

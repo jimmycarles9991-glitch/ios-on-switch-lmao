@@ -150,6 +150,19 @@ void planeBlendA(bool over, uint32_t &update, uint32_t &request)
     request |= kGeneralActReq | kWinAActReq;
 }
 
+// With an overlay request out, a set may only replace its addresses: DC_WIN's words are double-buffered, so a boundary
+// taking that request inside the stores would latch new geometry with the request's old DC_WINBUF addresses (TRM
+// 24.5.4). A set that changes a window's geometry waits for that latch and goes out after it, geometry and addresses in
+// one request.
+bool planeKeepsGeometry(const PlaneSet &p) const
+{
+    if (!planeLatch.requested())
+        return true;
+    const PlaneSet &now = planeSetOf(planeLatch.armed != planeLatch.kNone ? planeLatch.armed : planeLatch.active);
+    return p.landscape == now.landscape && switch_display::sameGeometry(p.window[0], now.window[0]) &&
+           switch_display::sameGeometry(p.window[1], now.window[1]);
+}
+
 // A set waits only for an overlay latch that is coming (its frame end restages it); with none coming, waiting would
 // hold every later swap's retirement for good, so the overlays that keep it from going out are dropped instead.
 bool planeHoldForLatch(const PlaneSet &p)
@@ -176,8 +189,6 @@ void planeDropOverlays(PlaneSet &p, unsigned windows)
 bool planeStage(PlaneSet p, uint32_t &update, uint32_t &request)
 {
     mediaFlipFromGate();
-    if (planesAbandoned)
-        return false;
     if (planeRecovering) {
         holdPlaneRecovery(p);
         return false;
@@ -207,6 +218,8 @@ bool planeStage(PlaneSet p, uint32_t &update, uint32_t &request)
         planeHeldSet = true;
         return false;
     }
+    if (!planeKeepsGeometry(p) && planeHoldForLatch(p))
+        return false;
     if (!planeReserveBandwidth(p)) {
         if (planeHoldForLatch(p))
             return false;

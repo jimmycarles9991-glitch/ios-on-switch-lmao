@@ -13,7 +13,6 @@ raw_gpu.cpp	kHeapCopiesWindow	policy	the program window after the pack's region 
 raw_gpu.cpp	kClientFirstShare	policy	allocation policy
 raw_gpu.cpp	kClientHeapFirstShare	policy	allocation policy
 raw_gpu.cpp	kInstanceWords	policy	push words per instance
-raw_gpu.cpp	kShortcutWords	policy	push words a draw's ROP shortcuts add around its BEGIN/END (raw_draw_shortcuts.cpp)
 raw_gpu.cpp	kSampleWords	policy	push words of a sample layout
 raw_gpu.cpp	kFillConstA	policy	NVB0B5_SET_REMAP_COMPONENTS DST_X..W CONST_A (NVK nvk_cmd_fill_memory_ce)
 raw_gpu.cpp	kFillMaxDim	policy	the copy engine's line length and count per launch NVK fills with

@@ -2,6 +2,7 @@
 #include <gtest/gtest.h>
 #include <array>
 #include <stdexcept>
+#include <vector>
 #include "../SwitchDisplayComposition.h"
 #include "../SwitchDisplayMemoryEnvelope.h"
 #include "../SwitchLandscapeWindows.h"
@@ -72,6 +73,13 @@ struct Display {
     void planeReleaseIdle()
     {
         ++releases;
+    }
+
+    std::vector<uint64_t> unshown;
+
+    void retireUnshown(uint64_t seq)
+    {
+        unshown.push_back(seq);
     }
 
     Display()
@@ -230,6 +238,44 @@ TEST(OverlayRegisters, BothWindowLatchesAndIdentityAreRequiredBeforeOldMappingRe
     display.latch();
     EXPECT_FALSE(display.planeLatch.uses(1));
     EXPECT_TRUE(display.planeLatch.uses(2));
+}
+
+// DC_WIN is double-buffered (TRM 24.5.4, p.1910-1912): with window B's request out, a set that moves or resizes the
+// overlay writes no word of window B (a boundary taking that request inside the stores would latch the new geometry
+// with the old DC_WINBUF addresses); it waits for that latch and goes out after it, geometry and addresses in one
+// request. A set with the same geometry still replaces the pending request's addresses at once.
+TEST(OverlayRegisters, AGeometryChangeWaitsForThePendingLatch)
+{
+    Display display;
+    ASSERT_TRUE(display.stage(video(native_planes::kBt709, 1)));
+    ASSERT_TRUE(display.planeLatch.requested());
+    auto moved = video(native_planes::kBt709, 2);
+    moved.seq = 2;
+    moved.window[0].image.position = (100u << 16) | 40;
+    moved.window[0].image.size = (640u << 16) | 360;
+    const auto before = display.registers;
+    EXPECT_FALSE(display.stage(moved));
+    EXPECT_TRUE(display.planeHeldSet);
+    for (uint32_t word = Display::kWinBBase; word < Display::kWinBBase + 0x70; ++word)
+        EXPECT_EQ(display.registers[word], before[word]) << "window B word " << std::hex << word;
+
+    display.latch();
+    ASSERT_TRUE(display.planeHeldSet);
+    display.planeHeldSet = false;
+    ASSERT_TRUE(display.stage(display.planeHeld)) << "planeFrameEnd's restage after the latch";
+    EXPECT_EQ(display.dc[Display::kWinBBase + native_planes::kPosition], (100u << 16) | 40);
+    EXPECT_EQ(display.dc[Display::kWinBBase + native_planes::kSize], (640u << 16) | 360);
+}
+
+TEST(OverlayRegisters, ANewAddressWithTheSameGeometryReplacesThePendingRequest)
+{
+    Display display;
+    ASSERT_TRUE(display.stage(video(native_planes::kBt709, 1)));
+    auto next = video(native_planes::kBt709, 2);
+    next.seq = 2;
+    EXPECT_TRUE(display.stage(next));
+    EXPECT_FALSE(display.planeHeldSet);
+    EXPECT_EQ(display.planeSetOf(display.planeLatch.armed).window[0].slot, 2);
 }
 
 // The video column-scanned on window A behind the UI on B (SwitchLandscape.h): 1920x1080 turned onto the 720x1280 panel.
@@ -594,22 +640,47 @@ TEST(OverlayRecovery, LateOlderReadyCompositionCannotReplaceNewerOne)
     EXPECT_EQ(d.planeRecoveryTarget.pendingSeq, 4u);
 }
 
-TEST(OverlayRecovery, NeverDisabledHardwareTurnsOverlaysOffForTheBootAndKeepsTheirMemory)
+// Windows B and C that do not read off within the readback's bound keep their memory, with one line and no request
+// written again; the swaps their sets carried and the ones staged meanwhile retire unshown; once a frame end reads both
+// off, the slots go back and overlays are on again.
+TEST(OverlayRecovery, WindowsThatDoNotReadOffAreOneLineAndOverlaysResumeOnceTheyDo)
 {
     Display d;
     ASSERT_TRUE(d.stage(video(native_planes::kBt601)));
     d.latch();
+    auto held = video(native_planes::kBt709, 2);
+    held.seq = 5;
+    ASSERT_TRUE(d.stage(held));
     d.beginPlaneRecovery("test");
     d.frameEnds += Display::kLatchFrames;
-    EXPECT_NO_THROW(d.planeRecoveryFrameEnd());
-    EXPECT_TRUE(d.planesAbandoned);
+    EXPECT_TRUE(d.planeRecoveryFrameEnd());
     EXPECT_FALSE(d.planesOn);
-    EXPECT_FALSE(d.planeRecovering);
+    EXPECT_TRUE(d.planeRecovering);
     EXPECT_TRUE(d.planeLatch.uses(1));
     EXPECT_EQ(d.releases, 0u);
+    EXPECT_EQ(d.unshown, (std::vector<uint64_t>{5}));
+    auto staged = video(native_planes::kBt709, 3);
+    staged.seq = 6;
     const auto before = d.registers;
-    EXPECT_FALSE(d.stage(video(native_planes::kBt709, 2)));
+    EXPECT_FALSE(d.stage(staged));
     EXPECT_EQ(d.registers, before);
+    EXPECT_EQ(d.unshown, (std::vector<uint64_t>{5, 6}));
+    d.frameEnds += Display::kLatchFrames;
+    d.dc[Display::kWinBBase + native_planes::kOptions] = native_planes::kWinEnable;
+    EXPECT_TRUE(d.planeRecoveryFrameEnd());
+    EXPECT_EQ(d.dc[Display::kWinBBase + native_planes::kOptions], native_planes::kWinEnable)
+        << "no off request is written again";
+    d.dc[Display::kWinBBase + native_planes::kOptions] = 0;
+    d.dc[Display::kDcStateControl] = 0;
+    EXPECT_TRUE(d.planeRecoveryFrameEnd());
+    EXPECT_FALSE(d.planeRecovering);
+    EXPECT_TRUE(d.planesOn);
+    EXPECT_FALSE(d.planeLatch.uses(1));
+    EXPECT_EQ(d.releases, 1u);
+    EXPECT_FALSE(d.stage(video(native_planes::kBt601, 4))) << "another matrix waits for the restored set's latch";
+    d.latch();
+    d.planeHeldSet = false;
+    EXPECT_TRUE(d.stage(d.planeHeld));
 }
 
 TEST(OverlayRecovery, UnderflowOnTheFirstOverlayRecoversItAndKeepsOverlaysOn)

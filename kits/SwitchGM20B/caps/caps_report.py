@@ -19,13 +19,24 @@ import gen_caps
 
 ORDER = ['over-claim', 'wrong value', 'under-claim', 'lowered']
 RAW = 'drivers/TegraGM20BMetal/raw/runtime/'
+MACRO_SLOTS = 'kits/SwitchGM20BEmit/SwitchGM20BMacroSlots.h'
 
 
-def answers(text: str, chip_features: dict | None = None) -> dict:
-    """The answers per kind; an answer given as chipFeature(SWITCH_GM20B_FEATURE_<id>) reads `chip_features`."""
+def answers(text: str, chip_features: dict | None = None, names: dict | None = None) -> dict:
+    """The answers per kind; an answer given as chipFeature(SWITCH_GM20B_FEATURE_<id>) reads `chip_features`, one given
+    by name (a caps limit, the amplify macro's count, the framebuffer bits) reads `names`."""
+    names = names or {}
+    value = r'(\d+|[A-Za-z_]\w*)'
+
+    def number(token: str) -> int | None:
+        return int(token) if token.isdigit() else names.get(token)
+
     kinds = {}
     for m in re.finditer(r'kCounts(\w+)\[\] = \{(.*?)\};', text, re.DOTALL):
-        counts = {s: int(v) for s, v in re.findall(r'\{"([\w:]+)", (\d+), (?:true|false)\}', m.group(2))}
+        counts = {}
+        for s, v in re.findall(r'\{"([\w:]+)", ' + value + r', (?:true|false)\}', m.group(2)):
+            if number(v) is not None:
+                counts[s] = number(v)
         for s, row in re.findall(
             r'\{"([\w:]+)", chipFeature\(SWITCH_GM20B_FEATURE_(\w+)\), (?:true|false)\}', m.group(2)
         ):
@@ -33,11 +44,27 @@ def answers(text: str, chip_features: dict | None = None) -> dict:
         kinds.setdefault(m.group(1), {})['counts'] = counts
     for m in re.finditer(r'kArgs(\w+)\[\] = \{(.*?)\};', text, re.DOTALL):
         ranges = [
-            (s, int(a), int(b), int(v))
-            for s, a, b, v in re.findall(r'\{"([\w:]+)", (?:true|false), (\d+), (\d+), (\d+)\}', m.group(2))
+            (s, number(a), number(b), number(v))
+            for s, a, b, v in re.findall(
+                r'\{"([\w:]+)", (?:true|false), ' + value + ', ' + value + ', ' + value + r'\}', m.group(2)
+            )
         ]
-        kinds.setdefault(m.group(1), {})['args'] = ranges
+        kinds.setdefault(m.group(1), {})['args'] = [r for r in ranges if None not in r]
     return kinds
+
+
+def answer_names(table: caps.Caps, rows: list[dict], macro_slots: str) -> dict:
+    """What raw_device_answers.h's named answers stand for: SWITCH_GM20B_LIMIT_<name> of each limit row, the amplify
+    macro's SWITCH_GM20B_AMP_MAX and kFramebufferBits (every colour target at the widest format rendered)."""
+    out = {
+        f'SWITCH_GM20B_LIMIT_{gen_caps.ident(r.cols["name"])}': int(r.cols['value'])
+        for r in table.limits
+        if r.cols['value'].isdigit()
+    }
+    out['SWITCH_GM20B_AMP_MAX'] = int(re.search(r'SWITCH_GM20B_AMP_MAX = (\d+)', macro_slots).group(1))
+    widest = max(8 * r['bytes'] for r in rows if 'render' in r['flags'] and r['block_w'] == r['block_h'] == 1)
+    out['kFramebufferBits'] = out['SWITCH_GM20B_LIMIT_COLOR_TARGETS'] * widest
+    return out
 
 
 def chip_feature_answers(table: caps.Caps) -> dict:
@@ -253,8 +280,8 @@ def main() -> None:
         table, rows = gen_caps.build(args)
     except caps.CapsError as e:
         caps.fail(e)
-    with open(RAW + 'raw_device_answers.h', encoding='utf-8') as f:
-        kinds = answers(f.read(), chip_feature_answers(table))
+    with open(RAW + 'raw_device_answers.h', encoding='utf-8') as f, open(MACRO_SLOTS, encoding='utf-8') as m:
+        kinds = answers(f.read(), chip_feature_answers(table), answer_names(table, rows, m.read()))
     with open(RAW + 'raw_gpu.cpp', encoding='utf-8') as f, open(RAW + 'raw_zeta.h', encoding='utf-8') as z:
         raw = raw_formats(f.read(), z.read())
     found = []

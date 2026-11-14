@@ -71,8 +71,9 @@ int tegra_gm20b_surface_layout(uint64_t, tgm_layout *)
 
 namespace {
 SwitchNativeScanout next;
-unsigned leases;
-int error;
+unsigned leases, lookups, heldSnapshots;
+int error, heldError;
+switch_gpu_backing *heldSeen;
 
 struct Domain {
     unsigned maps = 0, unmaps = 0;
@@ -116,11 +117,18 @@ struct Display {
     void cleanDomain()
     {}
 
-    void holdScanoutBacking(unsigned)
-    {}
+    // SwitchDirectVisibleDisplay.h's: the slot's backing held scanned from its mapping to its drop.
+    switch_gpu_backing *scanoutHeld[kSlots] = {};
 
-    void releaseScanoutBacking(unsigned)
-    {}
+    void holdScanoutBacking(unsigned k)
+    {
+        scanoutHeld[k] = reinterpret_cast<switch_gpu_backing *>(0x1000 + k);
+    }
+
+    void releaseScanoutBacking(unsigned k)
+    {
+        scanoutHeld[k] = nullptr;
+    }
 
     Display()
     {
@@ -139,8 +147,19 @@ struct Display {
 };
 }
 
+int switch_native_scanout_pitch_held(OSObject *, switch_gpu_backing *held, SwitchNativeScanout *out)
+{
+    ++heldSnapshots;
+    heldSeen = held;
+    *out = heldError ? SwitchNativeScanout{} : next;
+    if (out->lease)
+        ++leases;
+    return heldError;
+}
+
 int switch_native_scanout_pitch(OSObject *, SwitchNativeScanout *out)
 {
+    ++lookups;
     *out = error ? SwitchNativeScanout{} : next;
     if (out->lease)
         ++leases;
@@ -175,8 +194,9 @@ protected:
         next.allocation.allocation_id = 1;
         next.allocation.allocation_generation = 1;
         next.allocation.content_generation = 1;
-        error = 0;
-        leases = 0;
+        error = heldError = 0;
+        leases = lookups = heldSnapshots = 0;
+        heldSeen = nullptr;
         display = new Display;
     }
 
@@ -269,4 +289,24 @@ TEST_F(DirectSlots, AliasedOffsetMapsActualPagesAndRejectsOutOfRange)
     EXPECT_EQ(offer(), -1);
     EXPECT_EQ(leases, 1u);
 }
+}
+
+// A surface a slot holds is snapshotted through the backing the slot holds scanned, swap after swap: no IOSurface cache
+// lookup (SwitchVICSurfaceBacking's lock) past the first. A snapshot through it that fails looks the surface up again.
+TEST_F(DirectSlots, ARepeatSwapOfASlotsSurfaceTakesNoCacheLookup)
+{
+    ASSERT_EQ(offer(), 3);
+    EXPECT_EQ(lookups, 1u);
+    display->releaseIdleDirectReads();
+    for (int swap = 0; swap < 4; ++swap) {
+        ASSERT_EQ(offer(), 3);
+        display->releaseIdleDirectReads();
+    }
+    EXPECT_EQ(lookups, 1u) << "the slot's surface looked up in the cache again";
+    EXPECT_EQ(heldSnapshots, 4u);
+    EXPECT_EQ(heldSeen, display->scanoutHeld[0]);
+    heldError = -12;
+    ASSERT_EQ(offer(), 3);
+    EXPECT_EQ(lookups, 2u);
+    display->releaseIdleDirectReads();
 }

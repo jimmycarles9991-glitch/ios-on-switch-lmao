@@ -5,8 +5,10 @@
 #include "raw_attachment_lifetime.h"
 
 // The pass's attachments and resources from what its recording kept (RMPass, the plan's range facts): no message to
-// its descriptor or its objects, and nothing retained
-__attribute__((objc_externally_retained)) inline raw::FusionPass fusionPass(RMCommandBuffer *cb, size_t begin)
+// its descriptor or its objects, and nothing retained. `shadows`: the command buffer binds a texture sampled through a pool
+// image or a stand-in (as of the encode)
+__attribute__((objc_externally_retained)) inline raw::FusionPass fusionPass(RMCommandBuffer *cb, size_t begin,
+                                                                            bool shadows)
 {
     RAW_ENCODE_SPAN(Fusion);
     const Cmd command = cb->_plan.legacy(begin);
@@ -16,8 +18,7 @@ __attribute__((objc_externally_retained)) inline raw::FusionPass fusionPass(RMCo
     result.height = pass.height;
     result.layers = pass.layers;
     // a fused pass's draws take the first pass's sample layout; each Metal pass's hidden depth starts at 1.0
-    result.bodySafe =
-        !cb->_sampledShadows && !cb->_standIns && !pass.positions.count && (pass.depth || !pass.testsHiddenZeta);
+    result.bodySafe = !shadows && !pass.positions.count && (pass.depth || !pass.testsHiddenZeta);
     std::array<__unsafe_unretained RMTexture *, 10> targets{};
     auto attachment = [&](size_t slot, __unsafe_unretained id object, NSUInteger level, NSUInteger slice,
                           MTLLoadAction load, MTLStoreAction store, bool resolve) {

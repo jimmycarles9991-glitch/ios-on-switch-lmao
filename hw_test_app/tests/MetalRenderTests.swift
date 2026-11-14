@@ -38,7 +38,8 @@ struct MetalColorPassTest: HWTest {
         metrics.set("gpu_ms", timing.gpuMilliseconds, digits: 3)
         return .judged(
             [("every pixel exact (corner reads \(Array(pixels.pixel(0, 0, width: size))))", wrong == 0)], metrics,
-            proof: gpu.proof)
+            proof: gpu.proof
+        ).onRawPath(gpu)
     }
 }
 
@@ -121,7 +122,8 @@ struct MetalDepthStencilTest: HWTest {
             [
                 ("colour exact", wrongColor == 0), ("depth exact (0.5 | 0.7)", wrongDepth == 0),
                 ("stencil exact (1 | 0)", wrongStencil == 0),
-            ], metrics, proof: gpu.proof)
+            ], metrics, proof: gpu.proof
+        ).onRawPath(gpu)
     }
 }
 
@@ -132,7 +134,7 @@ struct MetalMSAATest: HWTest {
 
     func run(_ context: TestContext) async throws -> Outcome {
         let gpu = try GPU.make()
-        guard gpu.device.supportsTextureSampleCount(4) else { return .fail("4x MSAA unsupported") }
+        guard gpu.device.supportsTextureSampleCount(4) else { return .fail("4x MSAA unsupported").onRawPath(gpu) }
         let size = 64
         let samples = try gpu.texture(.rgba8Unorm, size, size, usage: [.renderTarget], samples: 4)
         let resolved = try gpu.texture(.rgba8Unorm, size, size)
@@ -178,6 +180,7 @@ struct MetalMSAATest: HWTest {
                 ("interior and exterior exact", wrong == 0 && inside > 0 && outside > 0),
                 ("edge pixels resolve to a blend", edge >= size / 2),
             ],
-            metrics, proof: gpu.proof)
+            metrics, proof: gpu.proof
+        ).onRawPath(gpu)
     }
 }

@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: BSD-2-Clause-Patent
-// Display routes a window probe (DisplayWindowProbe.h) has to prove on the device before the display takes them. Each is
-// false until its probe's HW Test reports claim_verdict=PASS; the same on every iOS version (the controller is T210's).
+// Display routes a window probe (DisplayWindowProbe.h) proves on the device: each is on once its probe's HW Test has
+// reported claim_verdict=PASS; the same on every iOS version (the controller is T210's). V5a, V5c and V3 passed on
+// boots 19 and 21.
 #pragma once
 
 struct SwitchDisplayTraits {
@@ -15,7 +16,7 @@ struct SwitchDisplayTraits {
     bool offsetCrop;
 };
 
-constexpr SwitchDisplayTraits kSwitchDisplayTraits = {false, false, false};
+constexpr SwitchDisplayTraits kSwitchDisplayTraits = {true, true, true};
 
 // The traits the kernel runs with: kSwitchDisplayTraits, and on debug kernels those a HW Test run forces for itself
 // through TegraVIC's kernel-test selector until its connection closes (SwitchVICTurn.cpp).

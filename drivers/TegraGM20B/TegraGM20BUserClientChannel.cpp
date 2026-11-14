@@ -1,108 +1,120 @@
 // SPDX-License-Identifier: MIT
-// VM binds, surface layouts, channels, and the push scan with its hung interlocks.
+// VM binds, surface layouts, channels, and the hung submission's interlocks (the push scan: TegraGM20BPushScanRun.cpp).
 #include "TegraGM20BUserClientInternal.h"
+#include "TegraGM20BLayoutAsk.h"
+#include "TegraGM20BRecord.h"
 
-namespace
-{
-constexpr uint64_t kScanMaxBytes = 512 << 10, kScanWindowNs = 5000000000ULL;
-
-struct PushOwner {
-	char name[17];
-	PushCounts c;
-};
-
-PushOwner gPushOwners[kPushOwners];
-uint64_t gPushSince;
-IOLock *gPushLock;
-switch_gpu_peaks::Peak gTargetPeaks[switch_gpu_peaks::kOwners];
-}  // namespace
-
-#if TGM_STATS
-void tgm_uc::tgm_target_peaks_line(char *line, size_t size)
-{
-	if (size)
-		line[0] = 0;
-	IOLock *held = __atomic_load_n(&gPushLock, __ATOMIC_ACQUIRE);
-	if (!held)
-		return;
-	IOLockLock(held);
-	switch_gpu_peaks::line(gTargetPeaks, line, size);
-	IOLockUnlock(held);
-}
-#endif
-
+// lock_ held. A Map into VA no binding holds publishes its binding with the submit gate open: no job in flight can have
+// resolved that VA. A cut (an Unmap, or a Map over a live binding) closes the gate first: its retirement snapshot and the
+// bind epoch it publishes must have no kick between them (tgm_vm_bind_wait), which a job inside the gate could make.
 IOReturn AGXDeviceUserClient::vmBind(const TegraGM20BAbiVmBind *in, uint32_t count)
+{
+	const bool cuts = bindCuts(in, count);
+	if (cuts && !submitGate_.beginMutation(lock_))
+		return kIOReturnNotOpen;
+	BindingTable::Snapshot *snapshot = BindingTable::prepare(nbinds_ + 2 * count);
+	IOReturn ret = snapshot ? kIOReturnSuccess : kIOReturnNoMemory;
+	bool changed = false;
+	for (uint32_t i = 0; !ret && i < count; i++)
+		ret = bindOp(in->ops[i], changed);
+	if (changed)
+		publishBindings(snapshot);
+	else
+		BindingTable::discard(snapshot);
+	if (cuts)
+		submitGate_.endMutation(lock_);
+	return ret;
+}
+
+// lock_ held: whether an op would take VA from a live binding (one that is the same binding again changes nothing).
+bool AGXDeviceUserClient::bindCuts(const TegraGM20BAbiVmBind *in, uint32_t count)
 {
 	for (uint32_t i = 0; i < count; i++) {
 		const TegraGM20BAbiBindOp &op = in->ops[i];
-		if (((op.va | op.range | op.bo_offset) & 0xfff) || !op.range ||
-		    op.va < TGM_USER_VA_START || op.range > TGM_KERNEL_VA ||
-		    op.va > TGM_KERNEL_VA - op.range || op.kind > 0xff)
-			return kIOReturnBadArgument;
-		if (op.op == TegraGM20BBindMapSparse)
-			return kIOReturnUnsupported;  // InfoSparse is not advertised in v1
-		const uint64_t start = statsNowNs();
-		const bool unmap = op.op == TegraGM20BBindUnmap;
-		if (!unmap && op.op != TegraGM20BBindMap && op.op != TegraGM20BBindMapVolatile)
-			return kIOReturnBadArgument;
-		Bo *bo = unmap ? nullptr : findBo(op.handle);
-		if (!unmap &&
-		    (!bo || op.bo_offset > bo->bytes || op.range > bo->bytes - op.bo_offset)) {
-			noteBind(TGM_BIND_REFUSED, op.va, op.range, bo, op.bo_offset,
-				 uint8_t(op.kind));
-			return kIOReturnBadArgument;
-		}
-		const Binding *same = switch_gpu_binding_find(binds_, nbinds_, op.va, op.range);
-		if (!unmap && same && same->va == op.va && same->range == op.range &&
-		    same->bo == bo && same->bo_offset == op.bo_offset &&
-		    same->retirement->kind == op.kind &&
-		    same->retirement->vol == (op.op == TegraGM20BBindMapVolatile))
+		if (!op.range || op.va > UINT64_MAX - op.range)
 			continue;
-		// Everything a cut and the new binding need, before any binding changes.
-		if (nbinds_ + 2 > cap_binds_) {
-			uint32_t cap = cap_binds_ ? cap_binds_ * 2 : 64;
-			while (cap < nbinds_ + 2)
-				cap *= 2;
-			Binding *grown = IONew(Binding, cap);
-			if (!grown)
-				return kIOReturnNoMemory;
-			if (binds_) {
-				memcpy(grown, binds_, sizeof(Binding) * nbinds_);
-				IODelete(binds_, Binding, cap_binds_);
-			}
-			binds_ = grown;
-			cap_binds_ = cap;
-		}
-		RetiredBinding *spare[2] = {IONew(RetiredBinding, 1), IONew(RetiredBinding, 1)};
-		auto *record = unmap ? nullptr : IONew(RetiredBinding, 1);
-		const auto freeSpare = [&] {
-			for (auto *each : spare)
-				if (each)
-					IODelete(each, RetiredBinding, 1);
-		};
-		IOReturn cut = !spare[0] || !spare[1] || (!unmap && !record) ? kIOReturnNoMemory
-									     : kIOReturnSuccess;
-		// Work queued now may still use what the range held: its PTEs stay until that work completes, and a Map's
-		// new PTEs wait for retirement behind the bind epoch. With none queued, both happen here.
-		const bool queued = workQueued(op.va, op.range);
-		if (!cut)
-			cut = cutOverlaps(op.va, op.range, !queued, !unmap, spare);
-		freeSpare();
-		if (unmap || cut) {
-			if (record)
-				IODelete(record, RetiredBinding, 1);
-			if (unmap && !cut)
-				tgm_stats_bind(0, op.range >> 12, statsNowNs() - start);
-			if (cut)
-				return cut;
+		const uint32_t after =
+			switch_gpu_binding_upper(binds_, nbinds_, op.va + op.range - 1);
+		const Binding *b = after ? &binds_[after - 1] : nullptr;
+		if (!b || b->va + b->range <= op.va)
 			continue;
-		}
-		if (const IOReturn mapped = mapRange(op, bo, record, queued))
-			return mapped;
-		switch_gpu_path_taken(SWITCH_GPU_PATH_VOLATILE_BIND,
-				      op.op == TegraGM20BBindMapVolatile ? 1 : 0);
-		tgm_stats_bind(1, op.range >> 12, statsNowNs() - start);
+		const bool same = op.op != TegraGM20BBindUnmap && b->va == op.va &&
+				  b->range == op.range && b->bo == findBo(op.handle) &&
+				  b->bo_offset == op.bo_offset && b->retirement->kind == op.kind &&
+				  b->retirement->vol == (op.op == TegraGM20BBindMapVolatile);
+		if (!same)
+			return true;
 	}
+	return false;
+}
+
+IOReturn AGXDeviceUserClient::bindOp(const TegraGM20BAbiBindOp &op, bool &changed)
+{
+	if (((op.va | op.range | op.bo_offset) & 0xfff) || !op.range || op.va < TGM_USER_VA_START ||
+	    op.range > TGM_KERNEL_VA || op.va > TGM_KERNEL_VA - op.range || op.kind > 0xff)
+		return kIOReturnBadArgument;
+	if (op.op == TegraGM20BBindMapSparse)
+		return kIOReturnUnsupported;  // InfoSparse is not advertised in v1
+	const uint64_t start = statsNowNs();
+	const bool unmap = op.op == TegraGM20BBindUnmap;
+	if (!unmap && op.op != TegraGM20BBindMap && op.op != TegraGM20BBindMapVolatile)
+		return kIOReturnBadArgument;
+	Bo *bo = unmap ? nullptr : findBo(op.handle);
+	if (!unmap && (!bo || op.bo_offset > bo->bytes || op.range > bo->bytes - op.bo_offset)) {
+		noteBind(TGM_BIND_REFUSED, op.va, op.range, bo, op.bo_offset, uint8_t(op.kind));
+		return kIOReturnBadArgument;
+	}
+	const Binding *same = switch_gpu_binding_find(binds_, nbinds_, op.va, op.range);
+	if (!unmap && same && same->va == op.va && same->range == op.range && same->bo == bo &&
+	    same->bo_offset == op.bo_offset && same->retirement->kind == op.kind &&
+	    same->retirement->vol == (op.op == TegraGM20BBindMapVolatile))
+		return kIOReturnSuccess;
+	// Everything a cut and the new binding need, before any binding changes.
+	if (nbinds_ + 2 > cap_binds_) {
+		uint32_t cap = cap_binds_ ? cap_binds_ * 2 : 64;
+		while (cap < nbinds_ + 2)
+			cap *= 2;
+		Binding *grown = IONew(Binding, cap);
+		if (!grown)
+			return kIOReturnNoMemory;
+		if (binds_) {
+			memcpy(grown, binds_, sizeof(Binding) * nbinds_);
+			IODelete(binds_, Binding, cap_binds_);
+		}
+		binds_ = grown;
+		cap_binds_ = cap;
+	}
+	RetiredBinding *spare[2] = {IONew(RetiredBinding, 1), IONew(RetiredBinding, 1)};
+	auto *record = unmap ? nullptr : IONew(RetiredBinding, 1);
+	const auto freeSpare = [&] {
+		for (auto *each : spare)
+			if (each)
+				IODelete(each, RetiredBinding, 1);
+	};
+	IOReturn cut = !spare[0] || !spare[1] || (!unmap && !record) ? kIOReturnNoMemory
+								     : kIOReturnSuccess;
+	// Work queued now may still use what the range held: its PTEs stay until that work completes, and a Map's
+	// new PTEs wait for retirement behind the bind epoch. With none queued, both happen here.
+	const bool queued = workQueued(op.va, op.range);
+	const uint32_t after = switch_gpu_binding_upper(binds_, nbinds_, op.va + op.range - 1);
+	changed = changed ||
+		  (!cut && after && binds_[after - 1].va + binds_[after - 1].range > op.va);
+	if (!cut)
+		cut = cutOverlaps(op.va, op.range, !queued, !unmap, spare);
+	freeSpare();
+	if (unmap || cut) {
+		if (record)
+			IODelete(record, RetiredBinding, 1);
+		if (unmap && !cut)
+			tgm_stats_bind(0, op.range >> 12, statsNowNs() - start);
+		return cut;
+	}
+	if (const IOReturn mapped = mapRange(op, bo, record, queued))
+		return mapped;
+	changed = true;
+	switch_gpu_path_taken(SWITCH_GPU_PATH_VOLATILE_BIND,
+			      op.op == TegraGM20BBindMapVolatile ? 1 : 0);
+	tgm_stats_bind(1, op.range >> 12, statsNowNs() - start);
 	return kIOReturnSuccess;
 }
 
@@ -121,9 +133,11 @@ IOReturn AGXDeviceUserClient::surfaceLayout(const TegraGM20BAbiSurfaceLayout *in
 IOReturn AGXDeviceUserClient::surfaceLayoutInfo(const TegraGM20BAbiSurfaceLayout *in,
 						TegraGM20BAbiSurfaceLayoutInfo *out, bool canonical)
 {
-	const Bo *bo = findBo(in->handle);
+	Bo *bo = findBo(in->handle);
 	if (!bo || !bo->wired || !bo->coh)
 		return kIOReturnBadArgument;
+	const bool firstAsk = !bo->layoutAsked;
+	bo->layoutAsked = true;
 	SwitchGpuSurfaceGeometry surface = {};
 	if (switch_gpu_surface_geometry(tgm_coh_surface_id(bo->coh), task_, bo->pas, bo->npages,
 					&surface))
@@ -139,8 +153,9 @@ IOReturn AGXDeviceUserClient::surfaceLayoutInfo(const TegraGM20BAbiSurfaceLayout
 	const bool same = switch_gpu_surface_shape_matches(surface, in->width, in->height, in->bpp,
 							   in->bytes_per_row);
 	const bool exclusive = switch_gpu_surface_layout_exclusive(object, true) == 0;
-	const bool writes = exclusive && packed && !surface.client_memory && (canonical || same) &&
-			    (in->flags & TegraGM20BLayoutWrites);
+	const int writes = tgm_layout_ask_flags(
+		exclusive, packed, surface.client_memory, canonical || same,
+		(in->flags & TegraGM20BLayoutWrites) != 0, tgm_surface_unwritten(object), firstAsk);
 	const uint32_t width = uint32_t(surface.width), height = uint32_t(surface.height),
 		       pitch = uint32_t(surface.pitch);
 	const int layout =
@@ -295,18 +310,18 @@ IOReturn AGXDeviceUserClient::channelDestroy(const TegraGM20BAbiChannel *in)
 
 // The kernel's view of the push at [va, va + bytes) through the binding that holds it (`hit`: the last one found, tried
 // first): pool BOs write-combined, cached and system BOs their kernel mapping. Null for a host import (no kernel mapping).
-// lock_ held.
+// lock_ held, or a channel's submit lock: it reads the published bindings.
 const uint32_t *AGXDeviceUserClient::pushView(uint64_t va, uint64_t bytes,
-					      const Binding *&hit) const
+					      const BindingTable::Entry *&hit) const
 {
 	if (!hit || !switch_gpu_binding_contains(*hit, va, bytes))
-		hit = switch_gpu_binding_find(binds_, nbinds_, va, bytes);
+		hit = bindTable_.find(va, bytes);
 	const void *base = nullptr;
 	if (hit) {
 		if (hit->bo->pool_va) {
 			base = hit->bo->pool_va;
-		} else if (hit->bo->bmd) {
-			base = hit->bo->bmd->getBytesNoCopy();
+		} else {
+			base = hit->bo->buffer.cpu;
 		}
 	}
 	return base ? reinterpret_cast<const uint32_t *>(static_cast<const uint8_t *>(base) +
@@ -325,7 +340,7 @@ int AGXDeviceUserClient::hungInterlocks(const uint64_t *va, const uint32_t *dwor
 		return -1;
 	PushCounts c = {};
 	PushParse p = {};
-	const Binding *hit = nullptr;
+	const BindingTable::Entry *hit = nullptr;
 	int read = 0;
 	for (uint32_t i = 0; i < n; i++) {
 		const uint32_t *words = pushView(va[i], static_cast<uint64_t>(dwords[i]) * 4, hit);
@@ -349,155 +364,4 @@ extern "C" int tgm_client_interlocks(const void *client, const uint64_t *va, con
 	// NOLINTNEXTLINE(cppcoreguidelines-pro-type-const-cast): the C caller holds the client as const void *
 	return static_cast<AGXDeviceUserClient *>(const_cast<void *>(client))
 		->hungInterlocks(va, dwords, n, interlocks, last_engine);
-}
-
-// The stats' read of a submission before its kick, by every submission path (exec, SubmitJob): every kScanEvery-th one
-// is scanned (scanPushes: its counts and its process's target peak), every kProfileEvery-th scan also profiled, whose
-// profile the kick stamps. Channels of one connection submit at once with no connection lock: the counts are atomic.
-const tgm_prof *AGXDeviceUserClient::scanSubmission(const tgm_push *pushes, uint32_t count,
-						    tgm_prof &prof, bool rawMacros)
-{
-	if (!TGM_STATS || !count ||
-	    __atomic_fetch_add(&pushSubmits_, 1u, __ATOMIC_RELAXED) % kScanEvery)
-		return nullptr;
-	const bool profiled =
-		count <= TGM_PROF_MAX &&
-		__atomic_fetch_add(&pushScans_, 1u, __ATOMIC_RELAXED) % kProfileEvery == 0;
-	scanPushes(pushes, count, profiled ? &prof : nullptr, rawMacros);
-	return profiled ? &prof : nullptr;
-}
-
-// The stats: count what this submission's pushes ask of the GPU, through the kernel's view of the BOs they lie in (pool
-// BOs write-combined, cached BOs their kernel mapping); every 5 s the window's line. `rawMacros`: a job's (only the raw
-// path submits jobs), whose macro slots are the raw path's.
-void AGXDeviceUserClient::scanPushes(const tgm_push *pushes, uint32_t count, tgm_prof *prof,
-				     bool rawMacros)
-{
-	if (!TGM_STATS)
-		return;
-	PushCounts c = {};
-	PushParse p = {};
-	p.rawMacros = rawMacros;
-	const Binding *hit = nullptr;
-	uint64_t budget = kScanMaxBytes;
-	bool whole = true;
-	tgm_scan::TargetImage largest = {};
-	for (uint32_t i = 0; i < count; i++) {
-		if (prof && i < TGM_PROF_MAX) {
-			prof->cls[i] = TGM_PC_SKIP;
-			prof->draws[i] = prof->sampleDraws[i] = prof->kpx[i] = 0;
-			prof->interlocks[i] = 0;
-		}
-		const uint64_t va = pushes[i].va;
-		const uint64_t bytes = static_cast<uint64_t>(pushes[i].dwords) * 4;
-		c.bytes += bytes;
-		const uint32_t *words = pushView(va, bytes, hit);
-		if (!words || bytes > budget) {
-			scanPush(c, p, whole, nullptr, 0);  // not read: no later push is stamped
-			continue;
-		}
-		budget -= bytes;
-		c.readBytes += bytes;
-		const uint64_t drawsBefore = c.draws;
-		const uint64_t clearsBefore = c.clears;
-		const uint64_t sampleBefore = c.sampleDraws;
-		const uint64_t interlocksBefore = c.interlocks;
-		const uint8_t cls = scanPush(c, p, whole, words, bytes / 4);
-		if (c.draws > drawsBefore || c.clears > clearsBefore) {
-			const tgm_scan::TargetImage drawn = tgm_scan::targetImage(p);
-			if (static_cast<uint64_t>(drawn.width) * drawn.height >
-			    static_cast<uint64_t>(largest.width) * largest.height)
-				largest = drawn;
-		}
-		if (prof && i < TGM_PROF_MAX) {
-			prof->cls[i] = cls;
-			const uint64_t draws = c.draws - drawsBefore;
-			const uint64_t sample = c.sampleDraws - sampleBefore;
-			prof->draws[i] = static_cast<uint16_t>(draws > 0xffff ? 0xffff : draws);
-			prof->sampleDraws[i] =
-				static_cast<uint16_t>(sample > 0xffff ? 0xffff : sample);
-			const uint64_t kpx = tgm_scan::targetPixels(p) / 1000;
-			const uint64_t interlocks = c.interlocks - interlocksBefore;
-			prof->kpx[i] = static_cast<uint16_t>(kpx > 0xffff ? 0xffff : kpx);
-			prof->interlocks[i] =
-				static_cast<uint8_t>(interlocks > 0xff ? 0xff : interlocks);
-		}
-	}
-	c.scanned = 1;
-	c.submits = kScanEvery;  // this connection's submissions since its last one read
-	if (!gPushLock) {
-		IOLock *fresh = IOLockAlloc();
-		// NOLINTNEXTLINE(misc-const-correctness): the compare-and-swap writes the current value back into it
-		IOLock *expected = nullptr;
-		if (!__atomic_compare_exchange_n(&gPushLock, &expected, fresh, false,
-						 __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE))
-			IOLockFree(fresh);
-		if (!gPushLock)
-			return;
-	}
-	const uint64_t now = nowNs();
-	// static: only the submission that ends a window (one per 5 s, chosen under the lock) logs from them
-	static PushOwner window[kPushOwners];
-	static char line[700];
-	bool log = false;
-	IOLockLock(gPushLock);
-	PushOwner *o = nullptr;
-	for (uint32_t i = 0; i < kPushOwners - 1 && !o; i++) {
-		if (!gPushOwners[i].c.scanned ||
-		    !strncmp(gPushOwners[i].name, owner_, sizeof(gPushOwners[i].name) - 1))
-			o = &gPushOwners[i];
-	}
-	if (!o) {  // more processes than lines this window: the last line takes the rest
-		o = &gPushOwners[kPushOwners - 1];
-		strlcpy(o->name, "(others)", sizeof(o->name));
-	} else if (!o->c.scanned) {
-		strlcpy(o->name, owner_, sizeof(o->name));
-	}
-	for (size_t k = 0; k < sizeof(c) / sizeof(uint64_t); k++)
-		reinterpret_cast<uint64_t *>(&o->c)[k] += reinterpret_cast<const uint64_t *>(&c)[k];
-	switch_gpu_peaks::note(gTargetPeaks, owner_, largest.width, largest.height,
-			       largest.samples);
-	if (!gPushSince) {
-		gPushSince = now;
-	} else if (now - gPushSince >= kScanWindowNs) {
-		gPushSince = now;
-		memcpy(window, gPushOwners, sizeof(window));
-		bzero(gPushOwners, sizeof(gPushOwners));
-		log = true;
-	}
-	IOLockUnlock(gPushLock);
-	if (!log)
-		return;
-	for (auto &i : window) {
-		const PushCounts &w = i.c;
-		if (!w.scanned)
-			continue;
-		const uint64_t n = w.scanned;
-		const uint64_t per[] = {w.bytes >> 10, w.passes,           w.depthPasses,
-					w.msaaPasses,  w.targets,          w.linearTargets,
-					w.draws,       w.clears,           w.wfi,
-					w.shaderInval, w.shaderInvalNoWfi, w.texInval,
-					w.setRef,      w.l2Inval,          w.hostWfi,
-					w.ceCopies,    w.ceBytes >> 10,    w.ceWfi,
-					w.blits,       w.dispatches,       w.acquires,
-					w.psBarriers,  w.interlocks};
-		constexpr size_t kFields = sizeof(per) / sizeof(per[0]);
-		char v[kFields][24];
-		for (size_t k = 0; k < kFields; k++)
-			snprintf(v[k], sizeof(v[k]), "%llu.%llu", per[k] / n, per[k] * 10 / n % 10);
-		// one string argument: os_log drops a message whose scalar arguments outgrow its buffer (gpu_stats_tick.c tgm_stats_tick)
-		snprintf(line, sizeof(line),
-			 "%s: %llu of %llu submits read, %s KiB each (%llu%% readable); per "
-			 "submit: %s passes "
-			 "(%s depth, %s MSAA), %s RTs (%s pitch), %s draws, %s clears; %s WFI, %s "
-			 "shinv+WFI, %s "
-			 "shinv, %s texinv, %s setref, %s L2 inv, %s host WFI; %s CE (%s KiB), %s "
-			 "CE WFI, %s 2D, "
-			 "%s disp, %s acq; %s PS barrier, %s interlock; %llu bad",
-			 i.name, w.scanned, w.submits, v[0],
-			 w.bytes ? w.readBytes * 100 / w.bytes : 0, v[1], v[2], v[3], v[4], v[5],
-			 v[6], v[7], v[8], v[9], v[10], v[11], v[12], v[13], v[14], v[15], v[16],
-			 v[17], v[18], v[19], v[20], v[21], v[22], w.unparsed);
-		os_log(OS_LOG_DEFAULT, "tegra-gm20b: push %s", line); /* log only */
-	}
 }

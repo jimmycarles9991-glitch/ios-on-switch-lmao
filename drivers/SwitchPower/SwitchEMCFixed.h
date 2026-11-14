@@ -26,6 +26,6 @@ IOReturn SwitchEMC::holdFixedRate()
     cur = 0;
     __atomic_store_n(&gTopHeld, true, __ATOMIC_RELEASE);
     if (!programMemory(now, now, true))
-        dropDisplayMemory("its plan does not cover the rate the boot chain left");
+        uncoveredDisplayMemory(now, "the rate the warm boot restored");
     return kIOReturnSuccess;
 }

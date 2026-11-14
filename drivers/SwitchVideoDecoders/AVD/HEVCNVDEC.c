@@ -89,9 +89,10 @@ void hevc_decoder_allow_10bit(HEVCDecoder *d, bool allow)
     d->allow10 = allow;
 }
 
-void hevc_decoder_display_8bit(HEVCDecoder *d, bool on)
+void hevc_decoder_display_mode(HEVCDecoder *d, uint32_t mode)
 {
-    d->display8 = on;
+    d->display8 = mode != 0;
+    d->display_mode = (uint8_t)mode;
 }
 
 // The 8-bit picture at framestride bytes a row: luma, then chroma at half the 16-bit luma's size. The kernel bounds a
@@ -467,7 +468,7 @@ static int decodePicture(HEVCDecoder *d, const Span *seg, int count, const HEVCS
 #if !defined(SWITCH_DEBUG) || SWITCH_DEBUG
     if (d->probe_wanted && !d->probe_ran && idr && d->sample_bytes == 2 && decodedCleanly(d, input, fence)) {
         TegraNVDECWait probeWait = {.invalidate_count = 1};
-        probeWait.invalidate[0] = (TegraNVDECRange){e->handle, 0, d->luma_bytes, 0};
+        probeWait.invalidate[0] = (TegraNVDECRange){e->handle, 0, d->luma_bytes + d->luma_bytes / 2, 0};
         for (uint32_t mode = 2; mode <= 3; mode++)
             hevc_display_probe_run(&d->b, &submit, &probeWait, d->surface_bytes, d->luma_bytes, e->va, d->pitch,
                                    d->rows, sps->width, sps->height, mode, &d->probe[mode - 2]);

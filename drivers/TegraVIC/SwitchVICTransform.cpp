@@ -57,7 +57,8 @@ bool switch_vic_pitch_backing(switch_gpu_backing *backing, uint64_t extent)
 }
 
 int switch_vic_transform(const TegraVICSurface *source, const TegraVICSurface *destination, const TegraVICPlan *plan,
-                         uint32_t chromaSite, void (*completion)(void *, int), void *context, SwitchVICEvents *events)
+                         uint32_t chromaSite, void (*completion)(void *, int), void *context, SwitchVICEvents *events,
+                         const TegraVICAcquire *acquire)
 {
     if (!completion || !destination || !plan || !plan->count || plan->count > 3 || (plan->readsSource && !source))
         return -22;
@@ -147,7 +148,7 @@ int switch_vic_transform(const TegraVICSurface *source, const TegraVICSurface *d
     const SwitchVICOwnership ownership = {
         uses, work->native.owner ? 3u : plan->readsSource ? 2u : 1u, guards, guardCount, leases, leaseCount};
     __atomic_add_fetch(&work->refs, 1, __ATOMIC_RELAXED);
-    error = switch_vic_submit_checked(work->jobs, plan->count, nullptr, ownership, completed, work, nullptr, events);
+    error = switch_vic_submit_checked(work->jobs, plan->count, acquire, ownership, completed, work, nullptr, events);
     for (auto &access : work->access)
         switch_vic_surface_unreserve(&access);
     if (error)

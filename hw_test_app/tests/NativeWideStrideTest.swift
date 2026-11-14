@@ -6,8 +6,8 @@ import Metal
 /// Vertex layout strides past what a fixed-function vertex stream fetches (SET_VERTEX_STREAM_A_FORMAT's 12 bits), which
 /// Metal takes on both identities (the AGX drivers keep a bind's stride as 32 bits and check no layout's). One state
 /// reads its positions 2052 bytes apart and its colours 4100 bytes apart, both pulled in the shader, and a tint 16 bytes
-/// apart that fixed-function input fetches after them: two quads, each half its own colour. Where the device answers
-/// dynamic attribute stride (24B119), a state of a dynamic position layout draws the left half at a bind stride of 16
+/// apart that fixed-function input fetches after them: two quads, each half its own colour. Both builds answer dynamic
+/// attribute stride (NativeAnswers): a state of a dynamic position layout draws the left half at a bind stride of 16
 /// and the right half at 4112 in one pass, the second from its stride twin. Every texel exact.
 struct NativeWideStrideTest: NativeObjectTest {
     let id = "metal.native.wide_stride"
@@ -57,7 +57,11 @@ struct NativeWideStrideTest: NativeObjectTest {
         let dynamic =
             (device as AnyObject as! NSObject).value(forKey: "supportsDynamicAttributeStride") as? Bool ?? false
         metrics.set("dynamic_stride", dynamic ? "yes" : "no")
-        if dynamic { try await drawDynamic(gpu, library, &work, &metrics) }
+        if dynamic {
+            try await drawDynamic(gpu, library, &work, &metrics)
+        } else {
+            work.failures.append("supportsDynamicAttributeStride answers NO")
+        }
         return work
     }
 

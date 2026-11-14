@@ -31,6 +31,7 @@ static void pend(RMCommandBuffer *cb, RMEncoder *e, RMCounterSampleBuffer *b, NS
         break;
     }
     [cb retain:b];
+    rmPipelineVeto(cb, VetoCounters);
     e->_counterPending.push_back({0, point, uint32_t(index), b});
 }
 

@@ -1,6 +1,7 @@
 # kits/SwitchFalcon on the host: the image parser, and the boot sequence against a model falcon.
 #
 #   bazel test //kits/SwitchFalcon/test:all
+load("@rules_cc//cc:cc_library.bzl", "cc_library")
 load("//bazel/lint:defs.bzl", "lint_files")
 load("//bazel/testing:defs.bzl", "host_library", "host_shims", "host_test")
 
@@ -34,4 +35,40 @@ host_test(
         ":falcon",
         ":kernel",
     ],
+)
+
+host_shims(
+    name = "interrupt_kernel",
+    headers = [
+        "IOKit/IOFilterInterruptEventSource.h",
+        "IOKit/IOLib.h",
+        "IOKit/IOLocks.h",
+        "IOKit/IOWorkLoop.h",
+        "kern/clock.h",
+    ],
+    stubs = "switch_falcon_interrupt_test_stubs.h",
+    deps = [":switch_falcon_interrupt_stubs"],
+)
+
+cc_library(
+    name = "switch_falcon_interrupt_stubs",
+    testonly = True,
+    hdrs = ["switch_falcon_interrupt_stubs.h"],
+    visibility = ["//visibility:public"],
+)
+
+# The falcon error line: its filter reads the parked error with interrupts off and nothing in it locks, logs, sleeps or
+# allocates; the action turns the line off; the cancellation clears as nvhost does; a pending error never taken panics.
+host_test(
+    name = "switch_falcon_interrupt_test",
+    srcs = [
+        "switch_falcon_interrupt_test.cpp",
+        "//drivers/ArmGIC:SwitchInterrupts.h",
+        "//kits/SwitchFalcon:SwitchFalconError.h",
+        "//kits/SwitchFalcon:SwitchFalconInterrupt.h",
+        "//kits/SwitchMMIO:SwitchMMIO.h",
+    ],
+    additional_compiler_inputs = ["//kits/SwitchFalcon:SwitchFalconInterrupt.cpp"],
+    copts = ["-DSWITCH_MMIO_HOST_MODEL=1"],
+    deps = [":interrupt_kernel"],
 )

@@ -20,7 +20,6 @@ namespace {
 
 using raw::EntryForm;
 using raw::PassForm;
-using raw::ProbeEngine;
 using raw::ProbeForms;
 using raw::ProbeTaken;
 using raw::SwitchForm;
@@ -66,14 +65,48 @@ bool idles(const std::vector<Method> &m)
     });
 }
 
-ProbeForms forms(PassForm pass, EntryForm entry, SwitchForm switchForm)
+using raw::BarrierEngine;
+using raw::Opened;
+
+constexpr BarrierEngine kEngines[] = {BarrierEngine::None, BarrierEngine::ThreeD, BarrierEngine::Copy,
+                                      BarrierEngine::Compute};
+
+std::vector<Method> passWords(PassForm pass, SwitchForm s, EntryForm e, BarrierEngine before, Opened *opened = nullptr)
 {
-    ProbeForms f;
-    f.pass = pass;
-    f.entry = entry;
-    f.switchForm = switchForm;
-    return f;
+    return words([&](raw::Push &p) {
+        const Opened o = raw::passOpening(p, pass, s, e, before);
+        if (opened)
+            *opened = o;
+    });
 }
+
+std::vector<Method> blitWords(SwitchForm s, EntryForm e, BarrierEngine before, Opened *opened = nullptr)
+{
+    return words([&](raw::Push &p) {
+        const Opened o = raw::blitOpening(p, s, e, before);
+        if (opened)
+            *opened = o;
+    });
+}
+
+std::vector<Method> computeWords(SwitchForm s, EntryForm e, BarrierEngine before, Opened *opened = nullptr)
+{
+    return words([&](raw::Push &p) {
+        const Opened o = raw::computeEncoderOpening(p, s, e, before);
+        if (opened)
+            *opened = o;
+    });
+}
+
+const std::vector<Method> kComputeToday = {
+    {1, kShaderCaches,
+     NVDEF(NVB1C0, INVALIDATE_SHADER_CACHES, DATA, TRUE) | NVDEF(NVB1C0, INVALIDATE_SHADER_CACHES, FLUSH_DATA, TRUE) |
+         NVDEF(NVB1C0, INVALIDATE_SHADER_CACHES, CONSTANT, TRUE)},
+    {1, kTextureDataNoWfi, 0},
+    {1, NVB1C0_INVALIDATE_SKED_CACHES, 0},
+    {1, NVB1C0_INVALIDATE_SAMPLER_CACHE_NO_WFI, 0},
+    {1, NVB1C0_INVALIDATE_TEXTURE_HEADER_CACHE_NO_WFI, 0},
+};
 
 TEST(ProbeForms, ParsesEveryFormAndNothingElse)
 {
@@ -83,13 +116,20 @@ TEST(ProbeForms, ParsesEveryFormAndNothingElse)
     EXPECT_EQ(f.entry, EntryForm::Planner);
     EXPECT_EQ(f.switchForm, SwitchForm::NoWfiNoFlush);
     EXPECT_TRUE(f.resolveTwoD);
-    EXPECT_FALSE(f.keepsTiledFlush());
+    EXPECT_FALSE(raw::keepsTiledFlush(f.switchForm));
     ASSERT_TRUE(raw::parseProbeForms("", f));
     EXPECT_FALSE(f.any());
-    ASSERT_TRUE(raw::parseProbeForms("pass=pixel_nowfi  entry=bare switch=none", f));
-    EXPECT_EQ(f.pass, PassForm::PixelNoWfi);
+    EXPECT_EQ(f.pass, PassForm::Rule) << "no form named: production's rule";
+    ASSERT_TRUE(raw::parseProbeForms("pass=today switch=today entry=today", f));
+    EXPECT_TRUE(f.any()) << "today's drain forced";
+    EXPECT_EQ(f.switchForm, SwitchForm::Today);
+    ASSERT_TRUE(raw::parseProbeForms("entry=none", f));
+    EXPECT_EQ(f.entry, EntryForm::None);
+    ASSERT_TRUE(raw::parseProbeForms("pass=none  entry=bare switch=none", f));
+    EXPECT_EQ(f.pass, PassForm::None);
     EXPECT_EQ(f.entry, EntryForm::Bare);
     EXPECT_EQ(f.switchForm, SwitchForm::None);
+    EXPECT_FALSE(raw::parseProbeForms("pass=pixel_nowfi", f)) << "0x1288 after the pixel barrier failed on the chip";
     EXPECT_FALSE(raw::parseProbeForms("pass=wfi", f));
     EXPECT_FALSE(raw::parseProbeForms("pass", f));
     EXPECT_FALSE(raw::parseProbeForms("barrier=none", f));
@@ -103,71 +143,91 @@ TEST(ProbeForms, ParsesEveryFormAndNothingElse)
 
 TEST(ProbeForms, TodayIsWhatTheRuntimeEmittedBefore)
 {
-    const ProbeForms today;
-    for (ProbeEngine before : {ProbeEngine::None, ProbeEngine::ThreeD, ProbeEngine::Copy, ProbeEngine::Compute}) {
-        ProbeTaken taken;
-        EXPECT_EQ(words([&](raw::Push &p) {
-                      raw::probePassPrologue(p, today, before, taken);
-                  }),
+    for (BarrierEngine before : kEngines) {
+        Opened opened[3];
+        EXPECT_EQ(passWords(PassForm::Today, SwitchForm::Today, EntryForm::Today, before, &opened[0]),
                   words([](raw::Push &p) {
-                      raw::probe_forms_detail::barrier(p, switch_gm20b_pass_barrier, false);
+                      raw::barrier_forms_detail::barrier(p, switch_gm20b_pass_barrier, false);
                   }));
-        EXPECT_EQ(words([&](raw::Push &p) {
-                      raw::probeBlitOpening(p, today, before, taken);
-                  }),
+        EXPECT_EQ(blitWords(SwitchForm::Today, EntryForm::Today, before, &opened[1]),
                   (std::vector<Method>{{0, kWfi, 0}}));
-        const std::vector<Method> compute = {
-            {1, kShaderCaches,
-             NVDEF(NVB1C0, INVALIDATE_SHADER_CACHES, DATA, TRUE) |
-                 NVDEF(NVB1C0, INVALIDATE_SHADER_CACHES, FLUSH_DATA, TRUE) |
-                 NVDEF(NVB1C0, INVALIDATE_SHADER_CACHES, CONSTANT, TRUE)},
-            {1, kTextureDataNoWfi, 0},
-            {1, NVB1C0_INVALIDATE_SKED_CACHES, 0},
-            {1, NVB1C0_INVALIDATE_SAMPLER_CACHE_NO_WFI, 0},
-            {1, NVB1C0_INVALIDATE_TEXTURE_HEADER_CACHE_NO_WFI, 0},
-        };
-        EXPECT_EQ(words([&](raw::Push &p) {
-                      raw::probeComputeOpening(p, today, before, taken);
-                  }),
-                  compute);
-        EXPECT_EQ(taken.passes + taken.entries + taken.firsts + taken.switches, 0u);
+        EXPECT_EQ(computeWords(SwitchForm::Today, EntryForm::Today, before, &opened[2]), kComputeToday);
+        for (Opened o : opened)
+            EXPECT_EQ(o, Opened::Today);
     }
+}
+
+// Rule barrier.switch_drain: 3D to copy or 2D, copy or 2D to 3D, 3D to compute, each held in gpu.x1.subchannel_switch_
+// drain's cells; every other change and every pass after a pass is today's drain
+TEST(BarrierForms, TheSwitchRuleRelaxesOnlyTheProbedEngineChanges)
+{
+    using E = BarrierEngine;
+    for (E before : kEngines) {
+        const SwitchForm into3d = raw::switchFormFor(SwitchForm::Rule, before, E::ThreeD),
+                         intoCopy = raw::switchFormFor(SwitchForm::Rule, before, E::Copy),
+                         intoCompute = raw::switchFormFor(SwitchForm::Rule, before, E::Compute);
+        EXPECT_EQ(into3d == SwitchForm::NoWfi, before == E::Copy);
+        EXPECT_EQ(intoCopy == SwitchForm::NoWfi, before == E::ThreeD);
+        EXPECT_EQ(intoCompute == SwitchForm::NoWfi, before == E::ThreeD);
+        Opened o;
+        const auto pass = passWords(PassForm::Today, into3d, EntryForm::Rule, before, &o);
+        EXPECT_EQ(idles(pass), before != E::Copy) << int(before);
+        EXPECT_EQ(o == Opened::Switch, before == E::Copy);
+        const auto blit = blitWords(intoCopy, EntryForm::Rule, before, &o);
+        EXPECT_EQ(blit.empty(), before == E::ThreeD);
+        EXPECT_EQ(o == Opened::Switch, before == E::ThreeD);
+        const auto compute = computeWords(intoCompute, EntryForm::Rule, before, &o);
+        EXPECT_EQ(idles(compute), before != E::ThreeD);
+        EXPECT_EQ(o == Opened::Switch, before == E::ThreeD);
+    }
+    EXPECT_EQ(raw::switchFormFor(SwitchForm::Today, BarrierEngine::Copy, BarrierEngine::ThreeD), SwitchForm::Today)
+        << "a probe's forced drain";
+    EXPECT_EQ(raw::entryFormFor(EntryForm::Rule), EntryForm::Planner);
+    EXPECT_EQ(raw::entryFormFor(EntryForm::Today), EntryForm::Today) << "a probe's forced drain";
+    EXPECT_EQ(raw::entryFormFor(EntryForm::None), EntryForm::None);
+    EXPECT_TRUE(raw::keepsTiledFlush(SwitchForm::Rule));
+    EXPECT_TRUE(raw::keepsTiledFlush(SwitchForm::NoWfi));
 }
 
 TEST(ProbeForms, RelaxedPassBarriersAreThePlannersAndNeverIdle)
 {
     const auto pass = [](PassForm f) {
-        ProbeTaken taken;
-        auto m = words([&](raw::Push &p) {
-            raw::probePassPrologue(p, forms(f, EntryForm::Today, SwitchForm::Today), ProbeEngine::ThreeD, taken);
-        });
-        EXPECT_EQ(taken.passes, 1u);
+        Opened o;
+        auto m = passWords(f, SwitchForm::Today, EntryForm::Today, BarrierEngine::ThreeD, &o);
+        EXPECT_EQ(o, Opened::Pass);
         return m;
     };
     EXPECT_EQ(pass(PassForm::PixelOrdered), (std::vector<Method>{{0, kPixelBarrier, 0}, {0, kPixelOrdered, 0}}));
-    EXPECT_EQ(pass(PassForm::PixelNoWfi), (std::vector<Method>{{0, kPixelBarrier, 0}, {0, kTextureDataNoWfi, 0}}));
     EXPECT_TRUE(pass(PassForm::None).empty());
-    ProbeTaken taken;
-    const ProbeForms pixel = forms(PassForm::PixelOrdered, EntryForm::Today, SwitchForm::Today);
-    EXPECT_TRUE(idles(words([&](raw::Push &p) {
-        raw::probePassPrologue(p, pixel, ProbeEngine::Copy, taken);
-    })));
+    EXPECT_TRUE(idles(passWords(PassForm::PixelOrdered, SwitchForm::Today, EntryForm::Today, BarrierEngine::Copy)));
+}
+
+// The pixel-ordered invalidate (0x0f74) follows the barrier in every form; 0x1288 there failed on the chip
+TEST(ProbeForms, NoFormFollowsThePixelBarrierWithTheNoWfiInvalidate)
+{
+    for (PassForm pass : {PassForm::Rule, PassForm::Today, PassForm::PixelOrdered, PassForm::None})
+        for (SwitchForm s :
+             {SwitchForm::Rule, SwitchForm::Today, SwitchForm::NoWfi, SwitchForm::NoWfiNoFlush, SwitchForm::None})
+            for (EntryForm e :
+                 {EntryForm::Rule, EntryForm::Today, EntryForm::Planner, EntryForm::Bare, EntryForm::None})
+                for (BarrierEngine before : kEngines) {
+                    const auto m = passWords(pass, s, e, before);
+                    for (size_t i = 0; i + 1 < m.size(); i++)
+                        EXPECT_FALSE(std::get<1>(m[i]) == kPixelBarrier && std::get<1>(m[i + 1]) == kTextureDataNoWfi);
+                }
 }
 
 TEST(ProbeForms, RelaxedEngineChangesKeepTheInvalidatesAndNeverIdle)
 {
     for (SwitchForm f : {SwitchForm::NoWfi, SwitchForm::NoWfiNoFlush, SwitchForm::None}) {
-        const ProbeForms relaxed = forms(PassForm::Today, EntryForm::Today, f);
         ProbeTaken taken;
-        const auto into3d = words([&](raw::Push &p) {
-            raw::probePassPrologue(p, relaxed, ProbeEngine::Copy, taken);
-        });
-        const auto blit = words([&](raw::Push &p) {
-            raw::probeBlitOpening(p, relaxed, ProbeEngine::ThreeD, taken);
-        });
-        const auto compute = words([&](raw::Push &p) {
-            raw::probeComputeOpening(p, relaxed, ProbeEngine::ThreeD, taken);
-        });
+        Opened o;
+        const auto into3d = passWords(PassForm::Today, f, EntryForm::Today, BarrierEngine::Copy, &o);
+        taken.count(o);
+        const auto blit = blitWords(f, EntryForm::Today, BarrierEngine::ThreeD, &o);
+        taken.count(o);
+        const auto compute = computeWords(f, EntryForm::Today, BarrierEngine::ThreeD, &o);
+        taken.count(o);
         EXPECT_EQ(taken.switches, 3u);
         EXPECT_FALSE(idles(into3d) || idles(blit) || idles(compute));
         EXPECT_TRUE(blit.empty());
@@ -179,38 +239,36 @@ TEST(ProbeForms, RelaxedEngineChangesKeepTheInvalidatesAndNeverIdle)
             EXPECT_EQ(into3d[1], (Method{0, kTextureDataNoWfi, 0}));
         }
         // a pass after a pass is the pass form's, today's here
-        EXPECT_TRUE(idles(words([&](raw::Push &p) {
-            raw::probePassPrologue(p, relaxed, ProbeEngine::ThreeD, taken);
-        })));
+        EXPECT_TRUE(idles(passWords(PassForm::Today, f, EntryForm::Today, BarrierEngine::ThreeD)));
     }
 }
 
 TEST(ProbeForms, RelaxedEntriesInvalidateWhatTheJobReadsAndNeverIdle)
 {
-    for (EntryForm f : {EntryForm::Planner, EntryForm::Bare}) {
+    for (EntryForm f : {EntryForm::Planner, EntryForm::Bare, EntryForm::None}) {
         uint32_t buffer[64];
         raw::Push p{buffer, buffer + 64};
         ProbeTaken taken;
-        uint32_t *word = raw::probeEntry(p, f, taken);
+        uint32_t *word = raw::entryOpening(p, f);
         const auto m = decode(buffer, p.at);
         EXPECT_FALSE(idles(m));
-        EXPECT_EQ(taken.entries, 1u);
         const uint32_t expect = f == EntryForm::Planner
                                     ? NVDEF(NVB197, INVALIDATE_SHADER_CACHES_NO_WFI, GLOBAL_DATA, TRUE) |
                                           NVDEF(NVB197, INVALIDATE_SHADER_CACHES_NO_WFI, CONSTANT, TRUE)
                                     : 0u;
-        EXPECT_EQ(*word, expect);
-        EXPECT_EQ(m.size(), f == EntryForm::Planner ? 4u : 3u);
+        EXPECT_EQ(*word, expect) << "the word commit gives the INSTRUCTION bit where the heap grew";
+        EXPECT_EQ(m.size(), f == EntryForm::Planner ? 4u : f == EntryForm::Bare ? 3u : 1u);
+        const bool headers =
+            std::find(m.begin(), m.end(), Method{0, NVB197_INVALIDATE_TEXTURE_HEADER_CACHE_NO_WFI, 0}) != m.end();
+        EXPECT_EQ(headers, f != EntryForm::None) << "entry_none: every cache but the instructions keeps job 0's lines";
         const bool texture = std::find(m.begin(), m.end(), Method{0, kTextureDataNoWfi, 0}) != m.end();
         EXPECT_EQ(texture, f == EntryForm::Planner);
         // the first encoder of a relaxed job opens with nothing
-        const ProbeForms entry = forms(PassForm::Today, f, SwitchForm::Today);
-        EXPECT_TRUE(words([&](raw::Push &q) {
-                        raw::probePassPrologue(q, entry, ProbeEngine::None, taken);
-                    }).empty());
-        EXPECT_TRUE(words([&](raw::Push &q) {
-                        raw::probeBlitOpening(q, entry, ProbeEngine::None, taken);
-                    }).empty());
+        Opened o;
+        EXPECT_TRUE(passWords(PassForm::Today, SwitchForm::Today, f, BarrierEngine::None, &o).empty());
+        taken.count(o);
+        EXPECT_TRUE(blitWords(SwitchForm::Today, f, BarrierEngine::None, &o).empty());
+        taken.count(o);
         EXPECT_EQ(taken.firsts, 2u);
     }
 }

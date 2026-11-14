@@ -8,8 +8,6 @@ import statistics
 LOWER = re.compile(r'^(?:ms|us|ns|t|latency|missed|dropped|stall|jank|throttle)\d*$')
 HIGHER = re.compile(r'^(?:fps|gflops|gbps|mbps|iops|hz|mhz|gpix|mpix|mops|speedup)\d*$')
 RATE_SUFFIXES = ('_per_s', '_mb_s', '_gb_s')
-# The share of command buffers that fell off raw (gpu.raw_share).
-LOWER_SUFFIXES = ('_m2v_pct',)
 # A change smaller than either is noise: 10 %, or twice the spread of the earlier runs.
 RELATIVE_BAND = 0.10
 SIGMAS = 2.0
@@ -23,7 +21,7 @@ def direction(key: str) -> int:
     tokens = key.split('_')
     if any(HIGHER.match(token) for token in tokens) or ('_' + key).endswith(RATE_SUFFIXES):
         return 1
-    if any(LOWER.match(token) for token in tokens) or ('_' + key).endswith(LOWER_SUFFIXES):
+    if any(LOWER.match(token) for token in tokens):
         return -1
     return 0
 

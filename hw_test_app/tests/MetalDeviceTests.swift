@@ -83,7 +83,8 @@ struct MetalComputeTest: HWTest {
                 ("every element exact (first wrong \(wrong.first.map(String.init) ?? "-"))", wrong.isEmpty),
                 ("one atomic increment per thread", atomics == UInt32(count)),
                 ("GPU timestamps advance", timing.gpuTimed),
-            ], metrics, proof: gpu.proof)
+            ], metrics, proof: gpu.proof
+        ).onRawPath(gpu)
     }
 }
 
@@ -105,7 +106,9 @@ struct MetalRuntimeCompileTest: HWTest {
         let start = CFAbsoluteTimeGetCurrent()
         let library = try await gpu.device.makeLibrary(source: Self.source, options: nil)
         let compileMs = (CFAbsoluteTimeGetCurrent() - start) * 1000
-        guard let function = library.makeFunction(name: "square") else { return .fail("no square function") }
+        guard let function = library.makeFunction(name: "square") else {
+            return .fail("no square function").onRawPath(gpu)
+        }
         let pipeline = try await gpu.device.makeComputePipelineState(function: function)
         let count = 4096
         let data = try gpu.buffer(count * 4)
@@ -123,7 +126,7 @@ struct MetalRuntimeCompileTest: HWTest {
         var metrics = Metrics()
         metrics.set("compile_ms", compileMs, digits: 1)
         metrics.set("wrong", wrong)
-        return .judged([("every element exact", wrong == 0)], metrics, proof: gpu.proof)
+        return .judged([("every element exact", wrong == 0)], metrics, proof: gpu.proof).onRawPath(gpu)
     }
 }
 
@@ -186,6 +189,7 @@ struct MetalBenchmarkTest: HWTest {
         metrics.set("fill_ms", fill.gpuMilliseconds, digits: 2)
         return .judged(
             [("GPU timestamps advance in all three passes", alu.gpuTimed && copy.gpuTimed && fill.gpuTimed)], metrics,
-            proof: gpu.proof)
+            proof: gpu.proof
+        ).onRawPath(gpu)
     }
 }

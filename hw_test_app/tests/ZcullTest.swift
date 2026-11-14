@@ -8,6 +8,7 @@ import Metal
 /// half keeps the near colour, the right the far one, with LESS and with reversed depth (GREATER from a 0 clear); a
 /// GREATER draw after LESS ones invalidates the region and still draws where it passes. The facade counts the regions
 /// and the invalidation; the same far quads with the region invalidated before every draw give the GPU time zcull saves.
+/// Then the multisampled, layered and loaded arms (ZcullArms.swift).
 struct ZcullTest: HWTest {
     let id = "gpu.raw.zcull"
     let name = "Zcull rejects hidden quads; a direction flip invalidates it; pixels exact"
@@ -115,6 +116,8 @@ struct ZcullTest: HWTest {
         metrics.set("zcull_invalidations", invalidations)
         if passes < 3 { wrong.append("zcull_passes") }
         if invalidations < 1 { wrong.append("zcull_invalidations") }
+        await arms(
+            ArmContext(gpu: gpu, target: target, width: w, height: h, state: { state($0) }), &metrics, &wrong, &paths)
         var onMs = 0.0, offMs = 0.0, emitted = 0
         for _ in 0..<Self.rounds {
             let on = try await gpu.run(less)

@@ -11,6 +11,23 @@ struct Overlay {
     unsigned depth = 2;
 };
 
+// Everything a window scans an overlay with but its surface addresses: what DC_WIN (double-buffered, latched from the
+// assembly copy at the boundary that takes a pending ACT_REQ: TRM 24.5.4, p.1910-1912) and DC_WINBUF's offsets and kind
+// hold. Two overlays equal here differ only in what DC_WINBUF's triple-buffered addresses latch.
+inline bool sameGeometry(const Overlay &a, const Overlay &b)
+{
+    if (a.on != b.on)
+        return false;
+    if (!a.on)
+        return true;
+    const native_planes::Image &x = a.image, &y = b.image;
+    return a.depth == b.depth && x.surfaceKind == y.surfaceKind && x.vOffset == y.vOffset &&
+           x.colorDepth == y.colorDepth && x.position == y.position && x.size == y.size && x.prescaled == y.prescaled &&
+           x.dda == y.dda && x.lineStride == y.lineStride && x.hOffset == y.hOffset && x.options == y.options &&
+           x.hInitial == y.hInitial && x.vInitial == y.vInitial && x.yuv == y.yuv && x.matrix == y.matrix &&
+           x.fullRange == y.fullRange && x.byteSwap == y.byteSwap;
+}
+
 struct Composition {
     Overlay window[2] = {};
     uint64_t seq = 0, pendingSeq = 0;

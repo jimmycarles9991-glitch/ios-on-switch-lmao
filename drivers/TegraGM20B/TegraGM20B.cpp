@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 // TegraGM20B entry point. tegra_gm20b_probe() brings the GPU up through every stage (kStage), unless boot-arg
 // switch-no-gpu is set (then SwitchAccelStub stands in, and Core Animation renders on the CPU):
-//   1  M1: VDD_GPU on, clocks/reset/clamp/MC flush (nvgpu gm20b_tegra_unrailgate order), BOOT_0, PRIV ring, GPCPLL lock
+//   1  M1: VDD_GPU on, clocks/clamp/reset/MC flush (Tegra X1 TRM 12.2.7.17's rail ungate), BOOT_0, PRIV ring, GPCPLL lock
 //   2  M2: + nvkm device init (ACR HS boot, LS PMU), GR (FECS/GPCCS through ACR, golden context)
 //   3  M3: + GPU self-test (VM, GPFIFO channel, copy-engine fill, semaphore fence)
 //   4  M4: + publish AGXAccelerator : IOAcceleratorES (MetalPluginName TegraGM20BMetal) for the NVK userland
@@ -216,6 +216,8 @@ void registerClkgateSysctl()
 		static_cast<int>(CTLTYPE_STRING | CTLFLAG_RD | CTLFLAG_KERN | CTLFLAG_LOCKED),
 		regdumpSysctl, "A", "GM20B registers for the L4T diff");
 	sysctl_register_oid(&gRegdumpOid);
+	tgm_rail_cycle_register();
+	tgm_ramfc_probe_register();
 }
 #endif
 
@@ -394,6 +396,28 @@ extern "C" void tegra_gm20b_display_expected(void)
 	__atomic_store_n(&gRailExpected, 1, __ATOMIC_RELEASE);
 	thread_call_enter(gRailCall);
 }
+
+#if TGM_STATS
+// TegraGM20BRailCycle.cpp's one rail-gate and rail-up, each made under gRailLock as the rail worker makes it. 0, or
+// tgm_rail_down's -EBUSY, also while system sleep holds the GPU.
+extern "C" int tgm_rail_cycle_once(void)
+{
+	int down = -EBUSY;
+	IOLockLock(gRailLock);
+	if (!__atomic_load_n(&gSleeping, __ATOMIC_ACQUIRE)) {
+		__atomic_add_fetch(&gRailMoving, 1, __ATOMIC_ACQ_REL);
+		down = tgm_rail_down();
+		__atomic_sub_fetch(&gRailMoving, 1, __ATOMIC_ACQ_REL);
+		__atomic_store_n(&gRailMoved, 1, __ATOMIC_RELEASE);
+	}
+	if (!down)
+		tgm_rail_up();
+	IOLockUnlock(gRailLock);
+	if (__atomic_exchange_n(&gRailMoved, 0, __ATOMIC_ACQ_REL))
+		switch_thermal_gpu_ready();
+	return down;
+}
+#endif
 
 extern "C" void tgm_rail_moving(void)
 {

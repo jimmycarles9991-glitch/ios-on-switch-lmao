@@ -134,51 +134,45 @@ public:
         Gone
     };
 
+    // retry: this make failed (its compile could not run, or its placement found no room); the next make tries afresh
     struct Result {
         const T *state = nullptr;
         bool retry = false;
-        uint64_t retryAtUs = 0;
         bool gone = false;
     };
 
-    template <typename Clock, typename Produce, typename Place> Result make(Clock now, Produce produce, Place place)
+    template <typename Produce, typename Place> Result make(Produce produce, Place place)
     {
         if (state_ || refused_ || gone_)
-            return {state_, false, 0, gone_};
-        if (retryAtUs_ && now() < retryAtUs_)
-            return {nullptr, true, retryAtUs_};
+            return {state_, false, gone_};
         if (!record_) {
             auto record = std::make_unique<Record>();
             const auto outcome = produce(*record);
             if (outcome == Outcome::Refused || outcome == Outcome::Gone) {
                 (outcome == Outcome::Gone ? gone_ : refused_) = true;
-                return {nullptr, false, 0, gone_};
+                return {nullptr, false, gone_};
             }
             if (outcome == Outcome::Made)
                 record_ = std::move(record);
         }
         if (record_ && (state_ = place(*record_)))
-            return {state_, false, 0};
-        const uint64_t failedUs = now();
-        const uint64_t delayUs = delay_.next();
-        retryAtUs_ = failedUs > UINT64_MAX - delayUs ? UINT64_MAX : failedUs + delayUs;
-        return {nullptr, true, retryAtUs_};
+            return {state_, false};
+        return {nullptr, true};
     }
 
 private:
-    // placeCompute keys placed programs by this record's address, including across placement retries.
+    // placeCompute keys placed programs by this record's address, the same record at every placement.
     std::unique_ptr<Record> record_;
     const T *state_ = nullptr;
-    uint64_t retryAtUs_ = 0;
-    RetryDelay delay_;
     bool refused_ = false, gone_ = false;
 };
 
+// retry: this job failed, and so does the command buffer that needs it; the next dispatch of its key starts another job.
+// gone: no compiler made it, and none will (the command buffers that need it fail)
 template <typename T> struct ComputeKernelResult {
     const T *state = nullptr;
     bool retry = false;
-    bool deferredRetry = false;
-    bool gone = false;  // no compiler made it: the command buffer that needs it fails
+    bool gone = false;
 };
 
 template <typename T> class ComputeKernelJob {
@@ -188,7 +182,10 @@ public:
     State state() const
     {
         const auto *result = ready_.value();
-        return !result ? State::Pending : result->state ? State::Ready : result->gone ? State::Failed : State::Refused;
+        return !result                         ? State::Pending
+               : result->state                 ? State::Ready
+               : result->gone || result->retry ? State::Failed
+                                               : State::Refused;
     }
 
     const T *value() const
@@ -200,12 +197,7 @@ public:
     bool retryable() const
     {
         const auto *result = ready_.value();
-        return result && result->retry && (!result->deferredRetry || retryReady_.load(std::memory_order_acquire));
-    }
-
-    void allowRetry()
-    {
-        retryReady_.store(true, std::memory_order_release);
+        return result && result->retry;
     }
 
     State observe(std::function<void()> observer)
@@ -234,7 +226,6 @@ public:
 
 private:
     ComputeKernelResult<T> result_;
-    std::atomic<bool> retryReady_{false};
     Variant<ComputeKernelResult<T>> ready_;
     std::atomic_flag claimed_ = ATOMIC_FLAG_INIT;
 };

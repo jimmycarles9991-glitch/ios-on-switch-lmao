@@ -21,21 +21,17 @@ tex.view	create	layer	L3	views of another texel size or of a part of a 3D textur
 tex.foreign	record	m2v	-	m2v's own texture
 pass.fmt	record	gap	rotated_target,stored_multisample,two_plane_extended_range,planar_target	R1 (~1,400 HW Test cbs), R2, R3, R4 as tex.shape
 pass.level	record	layer	L3	levels, slices and depth planes of the textures the raw path keeps, and levels of format views of mipmapped ones, are attachment targets (raw_attachment_target.h), for attachments and resolves alike; left: a resolve into a texture the raw path does not keep or render, a planar or YCbCr one, or a format with no resolve state, a resolve from a part of a texture, and what Metal's validation refuses (past the texture, a slice of a 3D texture or a plane of an array)
-pass.rtsize	record	client	render_target_size	-
 pass.ds	record	gap	stored_multisample	a stored depth/stencil attachment (zetaDescriptor keeps one-sample depth only)
-pass.other	record	query	layered_rendering,rasterization_rate_map,sample_positions	the device answers no for all three at the claimed family
+pass.other	record	query	rasterization_rate_map,sample_positions	the device answers no for both at the claimed family
 pass.rotated	record	gap	rotated_target	a turned attachment beside one of another rotation or size or a loaded or stored one not turned, a rotation-4 Load, and at encode a state whose turned variant could not be made (PipelineTurnRefused)
 state.foreign	record	m2v	-	an m2v pipeline state
 state.notpack	record	m2v	-	functions from another device's library: with one backend every function is this device's
 state.pack	record	layer	L4	a state the pack lacks: made at creation (compiler daemon) or the archive-miss error FailOnBinaryArchiveMiss asks for
-state.making	record	growth	-	the record completes before the command buffer's first job runs: the GPU work waits, never the CPU
 call.vis	record	gap	-	Counting and Boolean results on the copy engine (raw_visibility.h); accumulated results (MTLVisibilityResultTypeAccumulate): REPORT_SEMAPHORE with reduction ADD (probe gpu.x1.visibility, d17), no planner node yet
 call.buf	record	m2v	-	an m2v buffer
-call.sampler	record	gap	sampler_address_mode	mirror-clamp-to-edge and opaque borders: an address-lowering program variant (L4)
+call.sampler	record	gap	sampler_address_mode	pixel coordinates mirrored once on s or t, and a cubic filter with a mip filter, anisotropy or a mirror-clamp axis: an address-lowering program variant (L4); opaque borders are headers per sampled texture (Sampler::bordered)
 call.vsampler	record	layer	L4	a cubic vertex sampler, which m2v filters in the shader: a vertex-stage cubic variant (raw records bind every other vertex sampler)
 call.dbias	record	layer	L4	an infinite or NaN depth bias: the state program's viewport Z offset, as m2v's render_state.rs does
-call.inv	record	layer	L6	an encoder selector raw does not implement: implemented, or failed at creation per Metal
-call.cbinv	record	layer	L6	a command buffer selector raw does not implement: as call.inv
 call.blitopt	record	rule	copy.ce	depth or stencil of a combined format: copy-engine remap of the aspect
 call.bufcopy	record	client	buffer_range	a copy or fill past the buffer
 blit.tex	record	rule	copy.ce	levels, slices and 3D planes: one copy rectangle per layer; texel sizes that differ are client error copy_texel_size
@@ -47,14 +43,12 @@ compute	record	m2v	-	a kernel's buffer, texture or sampler from m2v
 compute.off16	record	layer	L4	a kernel buffer off 16 bytes with no residual word: the binding ABI's residual words for kernels
 compute.nokernel	record	layer	L4	no pack kernel at the dispatch's shape: a kernel record per shape
 compute.image	record	rule	compute.shadow_load,compute.shadow_store	a texture sampled through an image of its own; the cropped-surface-view alias case is not tested
-compute.view	record	layer	L3	a view of another texel size at a kernel's texture slot: a shadow in the kernel's format L3 makes, then compute.shadow_load and compute.shadow_store
-compute.edge	record	query	non_uniform_threadgroups	dispatchThreads: with an edge threadgroup at the claimed family
 compute.predicate	record	cb-error	-	predication raw cannot run fails the command buffer, since m2v's encoders take no records (NativeBridgeMetalFrontend.mm withholds supportsCommandBufferJump): a misused record, a loop open where its unit ends, or records in a command buffer with refused work; If/Else/End and loops run on render enable (raw_predication.h, raw_loop_copies.h)
 mipmaps	record	layer	L3	a mipmapped texture made with no chain: every mipmapped texture gets NIL's chain
 mipmaps.fmt	record	rule	mip.twod,mip.twod_probed,mip.draw	formats with neither engine nor a pack mip state stay gap mip_format
 event	record	rule	recorded	MTLEvent waits and signals: Wait and Signal nodes (GPU semaphore acquire, release)
 enc.planarcopy	record	gap	-	copies to or from a planar texture move its planes' bytes: copy.ce per plane, not built
-enc.planarclamp	encode	gap	sampler_address_mode	a sampler header under a planar texture's address map
+enc.planarclamp	encode	layer	L3	a sampler state's header under a planar texture's address map with no header entry left (a constexpr sampler's are placed with it, Device::constexprMapped_)
 enc.planarrt	encode	rule	planar.standin_load,planar.standin_store	a planar target through its stand-in; sampled and rendered in one command buffer: its codes converted again after the store (edges order it)
 enc.pass	encode	rule	resolve.draw,ycbcr.image,xr.standin	a pass raw could not begin: resolve, YCbCr and extended-range targets are nodes with their rule decided before emission
 enc.kernel	encode	cb-error	-	the kernel refused the submission: a commit-time outcome, the command buffer's error (MTLCommandBufferErrorInternal)
