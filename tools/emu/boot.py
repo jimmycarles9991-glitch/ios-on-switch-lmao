@@ -50,8 +50,8 @@ def build_package(kind: str, flags: list[str]) -> tuple[Path, Path]:
     base = output_base()
     options = [f'--//ipsw:kind={KINDS[kind]}', *flags]
     # The kernel is a top-level target too: Bazel takes only those out of the disk cache, so with //:boot alone a cache
-    # hit leaves no kernel file at the path cquery names.
-    bazel(base, 'build', *options, '//:boot', '//kernel:prelinked')
+    # hit leaves no kernel file at the path cquery names. A Mac on the remote host downloads nothing by default.
+    bazel(base, 'build', *options, '--remote_download_toplevel', '//:boot', '//kernel:prelinked')
     root = Path(bazel(base, 'info', *options, 'execution_root'))
     package, kernel = (bazel(base, 'cquery', *options, '--output=files', t) for t in ('//:boot', '//kernel:prelinked'))
     return root / package, root / kernel

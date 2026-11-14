@@ -3,6 +3,7 @@
 import argparse
 import hashlib
 import json
+import os
 import plistlib
 import re
 import shutil
@@ -63,10 +64,23 @@ def embedded(header: Path, out: Path) -> dict:
     return put_library(out, 'data/' + digest + '.metallib', data)
 
 
+def copy_tree(source: Path, out: Path) -> None:
+    """Copy the files under `source` into `out`, their bytes alone.
+
+    copytree's copystat of a directory fails on an output directory a remote worker made (Errno 13), and the crawl's
+    read-only modes would refuse the application's writes after it.
+    """
+    for root, _, files in os.walk(source, followlinks=True):
+        target = out / Path(root).relative_to(source)
+        target.mkdir(parents=True, exist_ok=True)
+        for name in files:
+            shutil.copyfile(Path(root) / name, target / name)
+
+
 def prepare(crawl: Path, applications: list[Path], headers: list[Path], major: str, out: Path) -> dict:
     if not (crawl / 'root').is_dir() or not (crawl / 'data').is_dir():
         raise ValueError('shader crawl must contain root/ and data/')
-    shutil.copytree(crawl, out, copy_function=shutil.copyfile, dirs_exist_ok=True)
+    copy_tree(crawl, out)
     return {
         'applications': [application(archive, out, major) for archive in applications],
         'embedded': [embedded(header, out) for header in headers],

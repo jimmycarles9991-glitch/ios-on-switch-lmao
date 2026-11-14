@@ -1,0 +1,76 @@
+#!/bin/sh
+# One Buildbarn service of a build host, as its LaunchDaemon starts it: `switch-buildbarn storage|scheduler|runner|worker`.
+# The runner and the worker advertise the Xcode at /Applications/Xcode.app, the path every client's actions name.
+set -eu
+
+here=$(cd "$(dirname "$0")" && pwd)
+xcode=/Applications/Xcode.app
+
+# launchd restarts a job that exits; the pause keeps a refusal from becoming a restart loop.
+refuse() {
+    echo "switch-buildbarn: $*" >&2
+    sleep 300
+    exit 1
+}
+
+# The worker's build directory: SWITCH_BB_WORKER_DIR, or SWITCH_BB_WORKER_FALLBACK_DIR when that is missing. On an
+# instance store only bb_worker and bb_runner may write (their Full Disk Access), so nothing here can make the
+# directories again after a stop/start empties the store: setup-volume.sh over SSH does. Until then both use the
+# fallback, decided the same way by both. A store that is not mounted yet (boot) stops the job cleanly; launchd starts
+# it again when the store mounts (StartOnMount).
+worker_dirs() {
+    dir=${SWITCH_BB_WORKER_DIR:?}
+    case $dir in
+        /Volumes/*)
+            volume=/Volumes/$(echo "${dir#/Volumes/}" | cut -d/ -f1)
+            if ! /sbin/mount | grep -q " on $volume ("; then
+                echo "switch-buildbarn: $volume is not mounted yet" >&2
+                exit 0
+            fi
+            ;;
+    esac
+    if [ ! -d "$dir/build" ] || [ ! -d "$dir/cache" ]; then
+        echo "switch-buildbarn: no $dir/build or $dir/cache: run setup-volume.sh; using ${SWITCH_BB_WORKER_FALLBACK_DIR:?}" >&2
+        dir=$SWITCH_BB_WORKER_FALLBACK_DIR
+        mkdir -p "$dir/build" "$dir/cache"
+    fi
+    SWITCH_BB_WORKER_DIR=$dir
+    export SWITCH_BB_WORKER_DIR
+}
+
+xcode_env() {
+    plist=$xcode/Contents/version.plist
+    build=$(/usr/libexec/PlistBuddy -c 'Print :ProductBuildVersion' "$plist" 2>/dev/null) || refuse "no $plist"
+    version=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$plist")
+    selected=$(/usr/bin/xcode-select -p)
+    [ "$selected" = "$xcode/Contents/Developer" ] || refuse "xcode-select points at $selected, not $xcode"
+    # Bazel's XCODE_VERSION_OVERRIDE spelling: major.minor.patch.build.
+    case $version in
+        *.*.*) ;;
+        *.*) version=$version.0 ;;
+        *) version=$version.0.0 ;;
+    esac
+    SWITCH_WORKER_XCODE_BUILD=$build
+    SWITCH_WORKER_XCODE_VERSION=$version.$build
+    export SWITCH_WORKER_XCODE_BUILD SWITCH_WORKER_XCODE_VERSION
+}
+
+# exec, so that launchd stops the process it started.
+case ${1:-} in
+    storage) exec "$here/bb_storage" "$here/storage.jsonnet" ;;
+    scheduler) exec "$here/bb_scheduler" "$here/scheduler.jsonnet" ;;
+    runner)
+        worker_dirs
+        xcode_env
+        exec "$here/bb_runner" "$here/runner.jsonnet"
+        ;;
+    worker)
+        worker_dirs
+        xcode_env
+        exec "$here/bb_worker" "$here/worker.jsonnet"
+        ;;
+    *)
+        echo "usage: switch-buildbarn storage|scheduler|runner|worker" >&2
+        exit 2
+        ;;
+esac

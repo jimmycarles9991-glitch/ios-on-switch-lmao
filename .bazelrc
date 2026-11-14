@@ -120,6 +120,8 @@ build:reproducible-check --noremote_accept_cached
 build:reproducible-check --disk_cache=
 build:reproducible-check --noremote_upload_local_results
 build:reproducible-check --execution_log_compact_file=repro-exec.log.zst
+# The checker hashes the top-level outputs on disk, which a Mac on the remote host otherwise leaves there.
+build:reproducible-check --remote_download_toplevel
 # remote: a shared remote cache (bazel-remote, BuildBuddy, ...): the URL is per-user, so
 # put `build:remote --remote_cache=grpcs://host:port` (and credentials: --remote_header=... or --credential_helper=...) in user.bazelrc, then use --config=remote.
 build:remote --remote_upload_local_results=true

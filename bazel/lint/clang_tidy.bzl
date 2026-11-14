@@ -64,8 +64,16 @@ EXTRA_ARGS = [
 # succeeds, so the test lists every finding at once. The report is a function of the inputs: paths relative to the
 # workspace (sed, not bash 3.2's quadratic ${out//pattern/}), each finding (its line and the notes and source lines
 # under it, joined by awk) once and sorted, then the exit status.
+# The Apple toolchain's flags name the SDK and Xcode by placeholders that its compiler wrapper resolves. clang-tidy has
+# no wrapper, so they are resolved here from SDKROOT and DEVELOPER_DIR, which the executor sets from the action's Xcode
+# environment on whichever Mac runs it.
 _RUN = """\
 report="$1"; unit="$2"; shift 2
+for arg in "$@"; do
+    arg="${arg//__BAZEL_XCODE_SDKROOT__/${SDKROOT:-}}"
+    set -- "$@" "${arg//__BAZEL_XCODE_DEVELOPER_DIR__/${DEVELOPER_DIR:-}}"
+    shift
+done
 log="$(mktemp)"
 if "$@" > "$log" 2>&1; then
     : > "$report"
