@@ -15,10 +15,13 @@ TEST(TwodFill, WordsInTheUnormViewsPacking)
     EXPECT_EQ(raw::twodFillWord(80, out), 0xffff0000u);
 }
 
-TEST(TwodFill, NoFormatHoldsBeforeTheChipsCells)
+TEST(TwodFill, TheChipsExactFormatsHoldOnPlainMemoryOnly)
 {
-    for (uint32_t f : {70u, 71u, 80u, 81u, 115u})
-        EXPECT_FALSE(raw::twodFillHolds(f)) << f;
+    for (uint32_t f : {70u, 71u, 80u, 81u}) {
+        EXPECT_TRUE(raw::twodFillHolds(f, false)) << f;
+        EXPECT_FALSE(raw::twodFillHolds(f, true)) << f;
+    }
+    EXPECT_FALSE(raw::twodFillHolds(115u, false));
 }
 
 }  // namespace

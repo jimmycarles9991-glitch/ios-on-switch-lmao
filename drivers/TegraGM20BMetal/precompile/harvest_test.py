@@ -57,7 +57,45 @@ class Lines(unittest.TestCase):
             self.assertEqual(lines, [old, journal.replace(' | form', ' os=24B119 | form', 1)])
 
 
+# Where the plugin's "ready in <process>, cache <directory>" lines put each process's cache on 24B119, below the Data
+# volume (/private/var); the system containers' as container() makes them.
+BOOT_CACHES = {
+    'assetsd': 'tmp/m2v-assetsd',
+    'iconservicesagent': 'tmp/m2v-iconservicesagent',
+    'cameracaptured': 'mobile/tmp/com.apple.cameracaptured/m2v',
+    'mediaplaybackd': 'mobile/tmp/com.apple.mediaplaybackd/m2v',
+    'photoanalysisd': 'mobile/tmp/com.apple.photoanalysisd/m2v',
+    'SwitchHWTest': 'mobile/Containers/Data/Application/5D11DCAB-A17F-4F4C-931F-7363A518CD9D/Library/Caches/'
+    'm2v-SwitchHWTest',
+    'WidgetRenderer_Default': 'mobile/Containers/Data/Application/A9DE58A1-8235-4C90-B907-F9C626DF9F8D/Library/'
+    'Caches/m2v-WidgetRenderer_Default',
+    'MercuryPosterExtension': 'mobile/Containers/Data/PluginKitPlugin/7424FFDF-0627-4481-ABBA-A177819B5983/Library/'
+    'Caches/m2v-MercuryPosterExtension',
+}
+BOOT_SYSTEM_CACHES = {
+    'backboardd': ('CE929FE0-E622-45FA-8423-A8020D7412A1', 'com.apple.backboardd'),
+    'SpringBoard': ('1809AE07-0E79-4BDD-9C39-FCED2631C2D3', 'com.apple.springboard'),
+    'PosterBoard': ('516BF64A-046D-4364-A803-DBA413E0000E', 'com.apple.PosterBoard'),
+}
+
+
 class Caches(unittest.TestCase):
+    def test_every_cache_a_boot_reported_is_found(self):
+        with tempfile.TemporaryDirectory() as d:
+            volume = Path(d)
+            for where in BOOT_CACHES.values():
+                (volume / where).mkdir(parents=True)
+            closed = [container(volume, uuid, identifier) for uuid, identifier in BOOT_SYSTEM_CACHES.values()]
+            try:
+                found, skipped = harvest.caches(volume, set(harvest.SYSTEM_CACHES), False, print)
+                expected = {volume / where for where in BOOT_CACHES.values()}
+                expected |= {root / 'Library/Caches/m2v' for root in closed}
+                self.assertEqual({m2v for _, m2v, _ in found}, expected)
+                self.assertEqual(skipped, [])
+            finally:
+                for root in closed:
+                    (root / 'Library').chmod(0o755)
+
     def test_a_closed_system_container_is_opened_by_its_identifier(self):
         with tempfile.TemporaryDirectory() as d:
             volume = Path(d)
@@ -73,6 +111,33 @@ class Caches(unittest.TestCase):
             finally:
                 for root in (backboardd, other):
                     (root / 'Library').chmod(0o755)
+
+
+RENDERBOX = '/System/Library/PrivateFrameworks/RenderBox.framework/default.metallib'
+TARGETS = 'samples=1 topo=0 ds=260/260'
+COLORS = 'c0=80:0:0:1:0:0:1:0:0 c1=105:0:0:1:0:0:1:0:0 c2=80:15:1:1:5:0:1:5:0'
+STATE_ID = '#0:36:470010400080020050f8000000000000'
+STAGES = (
+    f' | v primitive_image_vertex lib={RENDERBOX} as=vhea3baea3ica4fipa4 {STATE_ID}'
+    f' | f primitive_image_fragment lib={RENDERBOX} as=fhea3baea3ica4fipa4 {STATE_ID}'
+)
+
+
+def raw_made(t: int, tid: int, callers: str) -> str:
+    """Return a raw-made state's line as native_bridge_metal_journal_render writes it: no cost, no options."""
+    return f'R t={t} tid={tid} main=0 us=0 ok=1 {TARGETS} label=primitive_image {COLORS}{STAGES} | {callers}'
+
+
+class Journal(unittest.TestCase):
+    def test_a_raw_made_state_merges_once_in_its_corpus_form(self):
+        with tempfile.TemporaryDirectory() as d:
+            corpus = Path(d) / 'corpus.log'
+            first = raw_made(10, 4403, 'RB::Device::render')
+            refused = first.replace(' ok=1 ', ' ok=0 ')
+            again = raw_made(93011, 5120, 'RB::Surface::draw')
+            journals = [('iconservicesagent', f'{first}\n{refused}'), ('SpringBoard', again)]
+            lines = harvest.merge(corpus, journals, '24B119')
+            self.assertEqual(lines, [f'R ok=1 label=primitive_image os=24B119 {TARGETS} {COLORS}{STAGES} | '])
 
 
 class Replies(unittest.TestCase):

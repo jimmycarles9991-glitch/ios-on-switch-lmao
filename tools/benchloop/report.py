@@ -9,7 +9,19 @@ import statistics
 import struct
 from pathlib import Path
 
-from tools.benchloop import blend, cbufsize, floatadd, qmdchain, rop, sweeps, twod, units
+from tools.benchloop import (
+    blend,
+    cbufsize,
+    families,
+    floatadd,
+    interlock_section,
+    qmdchain,
+    resolve_ties,
+    rop,
+    sweeps,
+    twod,
+    units,
+)
 
 
 def per_draw(result: dict) -> tuple[float | None, float | None, float | None]:
@@ -55,7 +67,20 @@ def rows(planned: list[dict], results: dict[str, dict]) -> list[list[str]]:
     return out
 
 
+def _run(planned: list[dict], results: dict[str, dict]) -> dict:
+    """Give a `run`'s analysis by the batch its experiments came from."""
+    if any(e['id'].startswith('interlock_section.') for e in planned):
+        return {'interlock_section': interlock_section.analyse(planned, results)}
+    if any((e.get('meta') or {}).get('family') == 'resolvetie2' for e in planned):
+        return {'resolveties': resolve_ties.analyse(planned, results)}
+    if families.asked(planned):
+        return families.analyse(planned, results)
+    return {}
+
+
 def analysis(command: str, planned: list[dict], results: dict[str, dict], inputs: list[Path]) -> dict:
+    if command == 'run':
+        return _run(planned, results)
     if command == 'latency':
         from tools.benchloop.sm53 import fit  # noqa: PLC0415  the fit pulls in the interpreter
 
@@ -75,10 +100,12 @@ def analysis(command: str, planned: list[dict], results: dict[str, dict], inputs
         'precision': sweeps.analyse_precision,
         'iterated': sweeps.analyse_iterated,
         'twod': twod.analyse,
+        'resolveties': resolve_ties.analyse,
         'compressed': units.analyse_compressed,
         'cstall': units.analyse_cstall,
         'qmdchain': qmdchain.analyse,
         'cbufsize': cbufsize.analyse,
+        'interlock_section': interlock_section.analyse,
     }
     return {command: sweep[command](planned, results)} if command in sweep else {}
 
@@ -94,4 +121,8 @@ def write(command: str, planned: list[dict], results: dict[str, dict], out: Path
     for row in table[1:]:
         statuses[row[2]] = statuses.get(row[2], 0) + 1
     wrong = sum(row[6].startswith('wrong') for row in table[1:])
-    return f'{command}: {len(planned)} experiments, {statuses}, {wrong} with wrong texels'
+    summary = f'{command}: {len(planned)} experiments, {statuses}, {wrong} with wrong texels'
+    if 'interlock_section' in found:
+        failed = sum(not row['passed'] for row in found['interlock_section']['cells'].values())
+        summary += f', {failed} interlock cells failed'
+    return '\n'.join([summary, *found.get('summary', [])])

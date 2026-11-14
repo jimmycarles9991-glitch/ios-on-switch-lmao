@@ -27,6 +27,11 @@ XCODE_PINS = {
         "Toolchains/XcodeDefault.xctoolchain/usr/bin/clang": "24E6E74C-3725-35DC-98F2-E2D5A986D10C",
         "Toolchains/XcodeDefault.xctoolchain/usr/bin/ld": "ACFD815E-3031-3E2F-98DF-6759C331775D",
     },
+    # Xcode's separately installed Metal toolchain (Settings > Components, ~/Library/Developer/DVTDownloads): its
+    # frontend version is in every function of a metallib it makes, and no action key holds it. Checked, not part of
+    # identity: a Mac with another version is refused instead of filling the caches with other bytes under the same
+    # keys. A Mac without it builds what needs no Metal compiler.
+    "metal": "Apple metal version 32023.922 (metalfe-32023.922.4)",
 }
 
 _BUILD = """\
@@ -113,6 +118,20 @@ def _macho_uuid(rctx, toolchain, path):
             return line.split(" ")[1]
     fail("{} has no arm64 UUID".format(path))
 
+def _metal_version(rctx, developer):
+    """The selected Metal toolchain's `metal --version` line, or None where no Metal toolchain is installed."""
+    env = {"DEVELOPER_DIR": developer}
+    found = rctx.execute(["/usr/bin/xcrun", "--sdk", "iphoneos", "--find", "metal"], environment = env, quiet = True)
+    if found.return_code:
+        return None
+    rctx.watch(found.stdout.strip())
+    version = rctx.execute(
+        ["/usr/bin/xcrun", "--sdk", "iphoneos", "metal", "--version"],
+        environment = env,
+        quiet = True,
+    )
+    return version.stdout.splitlines()[0] if not version.return_code and version.stdout else None
+
 def _xcode_host_impl(rctx):
     developer, reason = _developer_dir(rctx)
     if not developer:
@@ -142,6 +161,7 @@ def _xcode_host_impl(rctx):
     pinned_digests = {k: digests[k] for k in XCODE_PINS["sha256"]}
     uuids = {k: _macho_uuid(rctx, toolchain, developer + "/" + k) for k in sorted(XCODE_PINS["uuid"])}
     found = {"version": version, "build": build, "clang": clang, "ld": ld, "sha256": pinned_digests, "uuid": uuids}
+    found["metal"] = _metal_version(rctx, developer) or XCODE_PINS["metal"]
     mismatches = [k for k in found if found[k] != XCODE_PINS[k]]
     pins = json.encode_indent(found, indent = "    ")
     if mismatches and rctx.getenv("SWITCH_ALLOW_UNPINNED_XCODE") != "1":

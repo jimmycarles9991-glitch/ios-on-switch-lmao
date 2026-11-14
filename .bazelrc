@@ -24,11 +24,13 @@ common --incompatible_default_to_explicit_init_py
 # The cap the least recently used entries are deleted above, once Bazel has been idle for gc_idle_delay. One full
 # working set is ~8 GB: //:boot //:gpu and the tests ~4.5 GB, //gpu:bundle's seed buckets 1.7 GB and the raw pack's
 # probe runs. Each agent branch adds 0.3-1 GB of its own (an XNU object root, a kernel, a package). 8G evicted the
-# seed and the raw pack between two deploys, so a raw/ or NVK edit recompiled them from nothing; 24G holds main and
-# about a dozen branches. The IPSW's images no longer count: the daily graph reads only its crawl (gpu/seed/crawl.bzl).
-common --experimental_disk_cache_gc_max_size=24G
+# seed and the raw pack between two deploys, so a raw/ or NVK edit recompiled them from nothing. 24G was more than this
+# laptop has free (10-20 GB): under agent load the cache grew about 10 GB an hour and was emptied by hand several times
+# a day. With the remote cache on, build:remote caps it lower. The IPSW's images no longer count: the daily graph reads
+# only its crawl (gpu/seed/crawl.bzl).
+common --experimental_disk_cache_gc_max_size=16G
 common --experimental_disk_cache_gc_max_age=30d
-common --experimental_disk_cache_gc_idle_delay=2m
+common --experimental_disk_cache_gc_idle_delay=1m
 
 # --- Hermeticity -------------------------------------------------------------------------------------------------
 # Actions see a fixed PATH and none of the shell's environment.
@@ -36,12 +38,7 @@ common --incompatible_strict_action_env
 # Every action runs sandboxed (darwin-sandbox: read-only declared inputs, declared outputs only). No action needs an
 # unsandboxed fallback, so there is none: a new one that tries to read undeclared inputs fails instead of passing.
 build --spawn_strategy=sandboxed
-# One exception, debug only and off by default (--//bazel/rust:incremental): crates compiled incrementally
-# (bazel/rust/defs.bzl, INCREMENTAL_CRATES) keep rustc's sessions below the output base, so their two Rust actions are
-# tagged no-sandbox and run here unsandboxed; every other Rust action (and every action of release) stays sandboxed.
-build:debug --strategy=Rustc=sandboxed,local
-build:debug --strategy=RustcMetadata=sandboxed,local
-# The other exception: iOS 27's translation attaches and mounts disk images (hdiutil, diskutil), which no sandbox
+# One exception: iOS 27's translation attaches and mounts disk images (hdiutil, diskutil), which no sandbox
 # allows, so its two actions (install/translated.bzl) run here.
 build --strategy=Pretranslate=local
 build --strategy=TranslatedCryptex=local
@@ -129,13 +126,14 @@ build:remote --remote_upload_local_results=true
 build:remote --remote_timeout=120s
 build:remote --remote_cache_compression
 build:remote --experimental_remote_cache_eviction_retries=5
+# What this disk cache evicts the remote cache still holds: a hit there, and without the bytes only top-level outputs
+# come back. Every remote hit and local result is otherwise stored here a second time.
+build:remote --experimental_disk_cache_gc_max_size=8G
 build:remote --config=rbe
 # rbe: actions run on the remote workers behind that cache (tools/remote), and only top-level outputs come back here.
 # The per-user file names the executor (`build:rbe --remote_executor=grpc://host:port`); without one the remote
 # strategy is skipped and actions build here.
 build:rbe --spawn_strategy=remote,sandboxed
-build:rbe --strategy=Rustc=remote,sandboxed,local
-build:rbe --strategy=RustcMetadata=remote,sandboxed,local
 # A worker that is gone, or a scheduler with none left, costs one failed request per action, then it builds here.
 # Bazel runs that fallback unsandboxed and has no flag to sandbox it; tools/remote/README.md keeps its results out of
 # the shared cache on the Macs that name an executor (every cache user expands rbe through remote, executor or not).

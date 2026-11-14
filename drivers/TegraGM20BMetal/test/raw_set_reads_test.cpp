@@ -1,8 +1,10 @@
 // SPDX-License-Identifier: MIT
 #include "../raw/runtime/raw_set_reads.h"
+#include "../raw/runtime/raw_descriptors.h"
 
 #include <gtest/gtest.h>
 
+#include <cstring>
 #include <vector>
 
 namespace {
@@ -84,6 +86,80 @@ TEST(RawSetReads, BoundTexturesReadEveryHandleOfTheSet)
     EXPECT_EQ(raw::programSetReads(bytes.data(), bytes.size(), cbufs, 4, 4, pp), 1u << 1 | 1u << 2);
     EXPECT_EQ(raw::programSetReads(bytes.data(), bytes.size(), cbufs, 4, 0, pp), 0u);
     EXPECT_EQ(raw::programSetReads(bytes.data(), bytes.size(), cbufs, 4, 3, pp), 0u);
+}
+
+// A program as the heap holds it (PackProgram): its slot, the shader program header at 0x30, the code at 0x80
+struct PlacedProgram {
+    std::vector<uint8_t> slot;
+    raw::PackProgram record{};
+};
+
+PlacedProgram placed(const std::vector<uint64_t> &instructions, const std::vector<uint8_t> &cbufTypes)
+{
+    PlacedProgram p;
+    const std::vector<uint8_t> body = code(instructions);
+    p.slot.assign(0x80 + body.size(), 0);
+    memcpy(p.slot.data() + 0x80, body.data(), body.size());
+    p.record.bytes = uint32_t(p.slot.size());
+    p.record.cbufs = uint8_t(cbufTypes.size());
+    memcpy(p.record.cbufType, cbufTypes.data(), cbufTypes.size());
+    return p;
+}
+
+// What a state's draws upload of set 0 when entry `entry` moves (PreparedDescriptors::resolve): 1 or 0 uploads
+size_t uploadsWhenMoved(uint32_t memoryEntries, uint32_t entry)
+{
+    raw::PreparedDescriptors descriptors;
+    size_t uploads = 0;
+    const auto build = [](raw::PreparedDescriptorWords &words, uint32_t moved) {
+        words.words[0] += moved;
+        return true;
+    };
+    const auto upload = [&](const raw::DescriptorWords &) {
+        return uint64_t(0x1000 * ++uploads);
+    };
+    const int pipeline = 0;
+    descriptors.resolve(&pipeline, ~0u, memoryEntries, build, upload);
+    uploads = 0;
+    descriptors.resolve(&pipeline, 1u << entry, memoryEntries, build, upload);
+    return uploads;
+}
+
+// No pack state reads set 0 at an offset it computes or through the root table's address of the set (directpack over the
+// HW Test and precompile corpora): synthetic states do, through the heap program's code and the draws' set uploads
+TEST(RawSetReads, ASyntheticStateThatComputesItsSetOffsetUploadsTheSetForEveryMovedEntry)
+{
+    const raw::PackPipeline pp = record();
+    const std::vector<uint8_t> types = {raw::CbufRoot, raw::CbufShaderData, raw::CbufUbo, raw::CbufSet};
+    const PlacedProgram computed = placed({movCbuf(3, 0), ldc(3, 0, 2)}, types);
+    const uint32_t memory = raw::placedSetReads(computed.slot.data() + 0x30, computed.record, pp);
+    EXPECT_EQ(memory, 7u);
+    for (uint32_t entry = 0; entry < pp.entries; entry++)
+        EXPECT_EQ(uploadsWhenMoved(memory, entry), 1u) << entry;
+}
+
+TEST(RawSetReads, ASyntheticStateThatReadsTheRootsSetAddressUploadsTheSetForEveryMovedEntry)
+{
+    const raw::PackPipeline pp = record();
+    const std::vector<uint8_t> types = {raw::CbufRoot, raw::CbufShaderData};
+    const PlacedProgram root = placed({movCbuf(1, 0), movCbuf(0, 0x3c)}, types);
+    const uint32_t memory = raw::placedSetReads(root.slot.data() + 0x30, root.record, pp);
+    EXPECT_EQ(memory, 7u);
+    for (uint32_t entry = 0; entry < pp.entries; entry++)
+        EXPECT_EQ(uploadsWhenMoved(memory, entry), 1u) << entry;
+}
+
+// Beside them, a state reading its uniform buffer's descriptor alone uploads the set only where that entry moves
+TEST(RawSetReads, ASyntheticStateThatReadsOneEntryUploadsTheSetWhereThatEntryMoves)
+{
+    const raw::PackPipeline pp = record();
+    const std::vector<uint8_t> types = {raw::CbufRoot, raw::CbufShaderData, raw::CbufUbo, raw::CbufSet};
+    const PlacedProgram one = placed({movCbuf(3, 4), movCbuf(0, 0x700)}, types);
+    const uint32_t memory = raw::placedSetReads(one.slot.data() + 0x30, one.record, pp);
+    EXPECT_EQ(memory, 1u);
+    EXPECT_EQ(uploadsWhenMoved(memory, 0), 1u);
+    EXPECT_EQ(uploadsWhenMoved(memory, 1), 0u);
+    EXPECT_EQ(uploadsWhenMoved(memory, 2), 0u);
 }
 
 }  // namespace

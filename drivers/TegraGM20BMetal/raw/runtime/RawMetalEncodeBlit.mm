@@ -174,7 +174,7 @@ void encodeBlit(RMCommandBuffer *cb, const Cmd &c, raw::CommandBuffer *rc, raw::
 }
 
 // fillTexture:level:slice:region:color: (OpFillTexture): the 2D engine's solid rectangle where rule clear.twod holds for the
-// format (raw_twod_fill.h), else CLEAR_SURFACE over the region in a pass of its own that loads the rest
+// format and memory (raw_twod_fill.h), else CLEAR_SURFACE over the region in a pass of its own that loads the rest
 bool fillTexturePass(RMCommandBuffer *cb, const Cmd &c, raw::CommandBuffer *rc)
 {
     RMTexture *t = (__bridge RMTexture *)c.obj;
@@ -188,7 +188,7 @@ bool fillTexturePass(RMCommandBuffer *cb, const Cmd &c, raw::CommandBuffer *rc)
     useTexture(rc, t, true);
     if (x0 >= x1 || y0 >= y1)
         return true;
-    if (raw::twodFillHolds(t->_raw.format)) {
+    if (raw::twodFillHolds(t->_raw.format, t->_raw.comptags)) {
         raw::BlitEncoder *b = rc->blit();
         b->fillTwod(t->_raw, x0, y0, x1, y1, raw::twodFillWord(t->_raw.format, rgba));
         b->end();

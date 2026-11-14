@@ -485,14 +485,61 @@ TEST(XnuUiScaleSites24B119, ScrollEdgeKeylineTakesThe2xRowAtEveryScaleBut3)
     }
 }
 
-TEST(XnuUiScaleSites24B119, OnlyTheGridWidgetKitAndTheTimebaseApplyAtScaleOne)
+TEST(XnuUiScaleSites24B119, TableReloadUsesEffectiveFocusAndKeepsItsResetAndDragCalls)
+{
+    const switch_us_site *site = Named("UIKitCore table reload focus request only when effective focus is allowed");
+    ASSERT_NE(site, nullptr);
+    EXPECT_TRUE(site->every_scale);
+    ASSERT_EQ(site->edits, 2u);
+    EXPECT_EQ(site->slot, 3u);
+    EXPECT_EQ(switch_ui_scale_sites::TextSlots("../xnu-12377.121.6/osfmk/vm/vm_shared_region.c"), 4u);
+    EXPECT_EQ(switch_ui_scale_sites::TextSlots("../xnu-10063.141.1/osfmk/vm/vm_shared_region.c"), 3u);
+    const switch_us_edit &first = site->edit[0], &second = site->edit[1];
+    EXPECT_EQ(AddressOf(*site, first, 0), 0x184c56508u);
+    EXPECT_EQ(AddressOf(*site, second, 0), AddressOf(*site, first, 32));
+    for (const switch_us_edit *edit : {&first, &second}) {
+        EXPECT_EQ(edit->length, 32u);
+        EXPECT_EQ(edit->at, 0u);
+        EXPECT_EQ(edit->kind, SWITCH_US_FIXED);
+    }
+    ASSERT_EQ(first.size, 32u);
+    ASSERT_EQ(second.size, 16u);
+    EXPECT_EQ(Word(first.patched), 0xaa1303e0u);  // mov x0, x19 (table)
+    EXPECT_EQ(BranchTarget(AddressOf(*site, first, 4), Word(first.patched + 4)), 0x188022d50u);
+    EXPECT_EQ(Word(first.patched + 8), 0x34000060u);  // cbz w0: only the focus request is skipped
+    EXPECT_EQ(BranchTarget(AddressOf(*site, first, 8), Word(first.patched + 8)), AddressOf(*site, first, 20));
+    EXPECT_EQ(Word(first.patched + 12), Word(first.patched));
+    EXPECT_EQ(BranchTarget(AddressOf(*site, first, 16), Word(first.patched + 16)),
+              BranchTarget(AddressOf(*site, first, 4), Word(first.stock + 4)));
+    EXPECT_EQ(BranchTarget(AddressOf(*site, first, 16), Word(first.patched + 16)), 0x1880e55c0u);
+    EXPECT_EQ(Word(first.patched + 20), Word(first.stock + 8));
+    EXPECT_EQ(Word(first.patched + 24), Word(first.stock + 12));
+    EXPECT_EQ(Word(first.patched + 28), 0x694056c8u);  // ldpsw x8, x21, [x22]
+    EXPECT_EQ(Word(first.stock + 16), 0xb98002c8u);    // ldrsw x8, [x22]
+    EXPECT_EQ(Word(second.stock), 0xb98006c8u);        // ldrsw x8, [x22, #4]
+    EXPECT_EQ(Word(second.patched), 0xf8686a60u);      // ldr x0, [x19, x8]
+    EXPECT_EQ(Word(second.patched + 8), 0xf8756a60u);  // ldr x0, [x19, x21]
+    EXPECT_EQ(BranchTarget(AddressOf(*site, second, 4), Word(second.patched + 4)),
+              BranchTarget(AddressOf(*site, first, 28), Word(first.stock + 28)));
+    EXPECT_EQ(BranchTarget(AddressOf(*site, second, 4), Word(second.patched + 4)), 0x18809cbc0u);
+    EXPECT_EQ(Word(second.patched + 12), Word(second.stock + 12));
+    EXPECT_EQ(BranchTarget(AddressOf(*site, second, 12), Word(second.patched + 12)), 0x188080c70u);
+    // The retained drag token and the subsequent table reset still start at the stock continuation.
+    EXPECT_EQ(BranchTarget(AddressOf(*site, second, 16), Word(second.stock + 16)), 0x188143850u);
+    EXPECT_EQ(Word(second.stock + 20), 0xaa0003f4u);
+    EXPECT_EQ(Word(second.stock + 24), 0xaa1303e0u);
+    EXPECT_EQ(BranchTarget(AddressOf(*site, second, 28), Word(second.stock + 28)), 0x188053c80u);
+}
+
+TEST(XnuUiScaleSites24B119, OnlyTheGridWidgetKitTimebaseAndTableFocusApplyAtScaleOne)
 {
     for (size_t i = 0; i < kCache.count; i++) {
         const std::string name = switch_ui_scale_sites::NameOf(kCache.sites[i]);
         const bool every_scale = name == "SpringBoardHome home screen grid 3x5" ||
                                  name == "WidgetKit placeholder batch deadline (n + 10) x 5 s" ||
                                  name == "WidgetKit archived image limit of a 2x screen" ||
-                                 name == "SampleAnalysis mach timebase of a 19.2 MHz counter";
+                                 name == "SampleAnalysis mach timebase of a 19.2 MHz counter" ||
+                                 name == "UIKitCore table reload focus request only when effective focus is allowed";
         EXPECT_EQ(kCache.sites[i].every_scale, every_scale) << name;
     }
 }

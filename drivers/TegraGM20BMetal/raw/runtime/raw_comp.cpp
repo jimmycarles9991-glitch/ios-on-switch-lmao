@@ -138,7 +138,7 @@ void Device::compPrearm(const Texture &m)
     if (m.samples < 2)
         return;
     std::lock_guard<raw::Mutex> l(lock_);
-    const uint32_t kind = compKind(m, kMemorylessTag, true);
+    const uint32_t kind = compKind(m, true, false);
     Texture t;
     fx::MipChain c;
     uint64_t bytes = 0;

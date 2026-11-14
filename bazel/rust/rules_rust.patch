@@ -20,7 +20,7 @@ index ed3c5d2..6dcb853 100644
      rust_lib_name = determine_lib_name(
          crate_name,
 diff --git a/rust/private/rustc.bzl b/rust/private/rustc.bzl
-index 72d776f..bcaf261 100644
+index 72d776f..3e8d935 100644
 --- a/rust/private/rustc.bzl
 +++ b/rust/private/rustc.bzl
 @@ -53,6 +53,7 @@ load(
@@ -31,81 +31,7 @@ index 72d776f..bcaf261 100644
      "parse_env_strings",
      "relativize",
  )
-@@ -1019,6 +1020,73 @@ def dlltool_path_from_linker_path(linker_path):
-     suffix = linker_path[-4:].lower()
-     return "{}dlltool{}".format(linker_path[:sep + 1], suffix if suffix == ".exe" else "")
- 
-+_INCREMENTAL = "-Cincremental="
-+
-+def incremental_base(flags):
-+    """The base directory of an `-Cincremental=<base>` among a crate's extra rustc flags, or None (ios-on-switch-lmao).
-+
-+    rustc's incremental compilation for a crate a per-crate rustc flag opts in (bazel/rust/defs.bzl: the debug profile's
-+    first-party crates). rustc keeps one session directory per crate below the base; this makes the base one per
-+    configuration, so two configurations never share a session. A crate's two pipelined actions do share one: their
-+    rustc command lines are the same, the full action finalizes its session, and the metadata action (stopped once the
-+    .rmeta is written, so it never finalizes its own) starts from the last finalized one.
-+
-+    Args:
-+        flags (list): The crate's extra rustc flags.
-+
-+    Returns:
-+        str: The base, or None.
-+    """
-+    for flag in flags:
-+        if type(flag) == "string" and flag.startswith(_INCREMENTAL):
-+            return flag[len(_INCREMENTAL):]
-+    return None
-+
-+def incremental_dir(ctx, base):
-+    """The session base of a crate's actions: <base>/<configuration's bin directory> (ios-on-switch-lmao)."""
-+    return "{}/{}".format(base, ctx.bin_dir.path)
-+
-+_PWD = "${pwd}/"
-+
-+def _incremental_metadata_emit(ctx, toolchain, crate_info, emit, build_metadata, process_wrapper_flags):
-+    """`emit` with an incremental crate's .rmeta written below its session base (ios-on-switch-lmao).
-+
-+    The crate's two pipelined actions run unsandboxed (_incremental_requirements) and both emit metadata (rustc takes the
-+    .rmeta only from a command line like the rlib's), so the rlib action's .rmeta would land on the metadata action's
-+    declared output, read-only once that action ran or came from a cache. Both write it below the session base instead, at
-+    one path (an --emit path that differs makes rustc discard the other action's session), and the metadata action copies
-+    it into its output. rustc moves a finished .rmeta into place by rename, so neither ever sees a partial one there.
-+
-+    Args:
-+        ctx (ctx): The rule's context object.
-+        toolchain (rust_toolchain): The current target's `rust_toolchain`.
-+        crate_info (CrateInfo): The crate being compiled.
-+        emit (list): The rustc output kinds.
-+        build_metadata (bool): Whether these are the metadata action's arguments.
-+        process_wrapper_flags (Args): The process wrapper's own arguments.
-+
-+    Returns:
-+        list: `emit`, its `metadata` given its path where the crate compiles incrementally.
-+    """
-+    if not crate_info.metadata or "metadata" not in emit:
-+        return emit
-+    base = incremental_base(collect_extra_rustc_flags(ctx, toolchain, crate_info.root, crate_info.type))
-+    if not base:
-+        return emit
-+    rmeta = "{}/{}".format(incremental_dir(ctx, base), crate_info.metadata.basename)
-+    if build_metadata:
-+        process_wrapper_flags.add("--copy-output", rmeta[len(_PWD):] if rmeta.startswith(_PWD) else rmeta)
-+        process_wrapper_flags.add("--copy-output", crate_info.metadata)
-+    return [kind for kind in emit if kind != "metadata"] + [("metadata", rmeta)]
-+
-+def _incremental_requirements(ctx, toolchain, crate_info, requirements):
-+    """`requirements` plus no-sandbox when the crate compiles incrementally (ios-on-switch-lmao): rustc writes its session below
-+    the output base, outside the sandbox. The rlib is still a declared output (cached, path-independent); only the
-+    session directory is outside Bazel."""
-+    if not incremental_base(collect_extra_rustc_flags(ctx, toolchain, crate_info.root, crate_info.type)):
-+        return requirements
-+    return dict(requirements or {}) | {"no-sandbox": "1"}
-+
- def construct_arguments(
-         *,
-         ctx,
-@@ -1311,8 +1379,11 @@ def construct_arguments(
+@@ -1311,8 +1312,11 @@ def construct_arguments(
      # rust_binary, rust_static_library and rust_shared_library, output_hash
      # is None and these flags are not added.
      if output_hash:
@@ -119,47 +45,8 @@ index 72d776f..bcaf261 100644
  
      if output_dir:
          # Emit `--out-dir=<place-to-put-outputs>`. Semantics depend on whether
-@@ -1348,6 +1419,7 @@ def construct_arguments(
-         rustc_flags.add("--remap-path-prefix=${{pwd}}={}".format(remap_path_prefix))
-         rustc_flags.add("--remap-path-prefix=${{exec_root}}={}".format(remap_path_prefix))
- 
-+    emit = _incremental_metadata_emit(ctx, toolchain, crate_info, emit, build_metadata, process_wrapper_flags)
-     emit_without_paths = []
-     for kind in emit:
-         if kind == "link" and crate_info.type == "bin":
-@@ -1586,7 +1658,12 @@ def construct_arguments(
-         # require_explicit_unstable_features makes no sense when all features are allowed anyway
-         if require_explicit_unstable_features:
-             process_wrapper_flags.add("--require-explicit-unstable-features", "true")
-+    incremental = incremental_base(extra_rustc_flags)
-+    if incremental:
-+        extra_rustc_flags = [f for f in extra_rustc_flags if not f.startswith(_INCREMENTAL)]
-     rustc_flags.add_all(extra_rustc_flags, map_each = map_flag)
-+    if incremental:
-+        rustc_flags.add(incremental_dir(ctx, incremental), format = _INCREMENTAL + "%s")
- 
-     if is_no_std(ctx, toolchain, crate_info.is_test):
-         rustc_flags.add('--cfg=feature="no_std"')
-@@ -2058,7 +2135,7 @@ def rustc_compile_action(
-             ),
-             toolchain = "@rules_rust//rust:toolchain_type",
-             resource_set = get_rustc_resource_set(toolchain),
--            execution_requirements = {"supports-path-mapping": ""} if args.supports_path_mapping else None,
-+            execution_requirements = _incremental_requirements(ctx, toolchain, crate_info, {"supports-path-mapping": ""} if args.supports_path_mapping else None),
-         )
-         if args_metadata:
-             ctx.actions.run(
-@@ -2076,7 +2153,7 @@ def rustc_compile_action(
-                     "" if len(srcs) == 1 else "s",
-                 ),
-                 toolchain = "@rules_rust//rust:toolchain_type",
--                execution_requirements = {"supports-path-mapping": ""} if args_metadata.supports_path_mapping else None,
-+                execution_requirements = _incremental_requirements(ctx, toolchain, crate_info, {"supports-path-mapping": ""} if args_metadata.supports_path_mapping else None),
-             )
-     elif hasattr(ctx.executable, "_bootstrap_process_wrapper"):
-         # Run without process_wrapper
 diff --git a/rust/private/utils.bzl b/rust/private/utils.bzl
-index 476651a..591fce8 100644
+index 476651a..9e09f7f 100644
 --- a/rust/private/utils.bzl
 +++ b/rust/private/utils.bzl
 @@ -211,6 +211,40 @@ def get_lib_name_for_windows(lib):

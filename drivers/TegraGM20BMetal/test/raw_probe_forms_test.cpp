@@ -378,4 +378,48 @@ TEST(ProbeOps, AClipRectangleBracketsTheOperationItClips)
               0);
 }
 
+TEST(ProbeOps, ARopIsSetBeforeTheLaunchWithTheDdxsPatternAndSrccopyComesBackAfter)
+{
+    for (const raw::ProbeOpKind kind : {raw::ProbeOpKind::Fill, raw::ProbeOpKind::Scale}) {
+        raw::ProbeOp op;
+        op.kind = kind;
+        op.src = {0x100000, 0xcf, 256, 64, 32, false, 0};
+        op.dst = {0x300000, 0xcf, 256, 64, 32, false, 0};
+        op.dw = 64, op.dh = 32;
+        op.colorFormat = 0xcf;
+        op.clip[0] = 8, op.clip[1] = 4, op.clip[2] = 16, op.clip[3] = 10;
+        op.rop = kind == raw::ProbeOpKind::Fill ? 0x55 : 0x33;
+        uint32_t buffer[128];
+        raw::Push p{buffer, buffer + 128};
+        raw::emitProbeOp(p, op);
+        EXPECT_LE(size_t(p.at - buffer), raw::probeOpWords(op));
+        const auto m = words([&](raw::Push &q) {
+            raw::emitProbeOp(q, op);
+        });
+        const auto at = [&](Method x) {
+            return size_t(std::find(m.begin(), m.end(), x) - m.begin());
+        };
+        const size_t launch = kind == raw::ProbeOpKind::Fill ? at({3, NV902D_RENDER_SOLID_PRIM_POINT_SET_X(0), 0})
+                                                             : at({3, NV902D_SET_PIXELS_FROM_MEMORY_SRC_X0_FRAC, 0});
+        ASSERT_LT(launch, m.size());
+        EXPECT_LT(at({3, NV902D_SET_OPERATION, NV902D_SET_OPERATION_V_ROP}), launch);
+        EXPECT_LT(at({3, NV902D_SET_ROP, op.rop}), launch);
+        EXPECT_LT(
+            at({3, NV902D_SET_MONOCHROME_PATTERN_COLOR_FORMAT, NV902D_SET_MONOCHROME_PATTERN_COLOR_FORMAT_V_A8R8G8B8}),
+            launch);
+        EXPECT_LT(at({3, NV902D_SET_MONOCHROME_PATTERN1, ~0u}), launch);
+        EXPECT_EQ(m.back(), (Method{3, NV902D_SET_OPERATION, NV902D_SET_OPERATION_V_SRCCOPY}));
+    }
+    raw::ProbeOp plain;
+    plain.kind = raw::ProbeOpKind::Scale;
+    const auto m = words([&](raw::Push &q) {
+        raw::emitProbeOp(q, plain);
+    });
+    EXPECT_EQ(std::count_if(m.begin(), m.end(),
+                            [](const Method &x) {
+                                return std::get<1>(x) == NV902D_SET_OPERATION;
+                            }),
+              0);
+}
+
 }  // namespace

@@ -1,0 +1,2483 @@
+{
+  "protocol": "benchloop/6",
+  "batch": "interlock-spin",
+  "experiments": [
+    {
+      "id": "interlock.warm",
+      "kind": "fragment",
+      "target": {
+        "format": "rgba32float",
+        "width": 256,
+        "height": 128
+      },
+      "rect": [
+        0,
+        0,
+        256,
+        128
+      ],
+      "draws": [
+        64
+      ],
+      "repeats": 8,
+      "warmup": 0,
+      "clear": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "readback": "summary",
+      "program": {
+        "code": "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",
+        "data": "AAAAQAAAgD8AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+        "gprs": 69,
+        "sph": "YlQCAAAAAAAAAAAAAAAAAAAAAAAAAACAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAADwAAAAAAAAA="
+      },
+      "meta": {
+        "family": "warm",
+        "op": "FFMA",
+        "k": 512
+      },
+      "expect": {
+        "texel": [
+          1065353216,
+          1065373568,
+          1065353216,
+          1065373568
+        ],
+        "outside": [
+          0,
+          0,
+          0,
+          0
+        ],
+        "exact": true
+      }
+    },
+    {
+      "id": "interlock.atom.64x64.check",
+      "kind": "readback",
+      "target": {
+        "format": "rgba32float",
+        "width": 64,
+        "height": 64
+      },
+      "program": {
+        "sph": "YlQCAAAAAAAAAAAAAAAAAAAAAAAAAACwAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAADwAAAAQAAAA=",
+        "code": "Agcg4AGIHAAE//cPh/8D4AQKRwCAAbBcBf/3T4f/A+AiF+D9P7wfAAUKVwCAAbBcAA8HAAAAsFAGBWcAAABIOO8H4P0AvB8ABgZHAAAAEFwGBicAAABIOAgGBwAEgBBM7wdA5AC0XwAJ/xcABAgQTAsANwEAAMjwBwv3D4ADZFsCB+D9AIgcAAoABwAAAMjwDAAHAADg2VAMAMcAAAAwXO0fIOAAiBwADwrHAAAAZFsNAMcBAADI8A4A9wAAAMjw7//h/QC8HwAADwcAAACwUA0N9w8AAAAEDw73DwAAAATvB+D9ALwfAA0NhwAAAEg4DQ33AAAAEFwNDScAAABIOO8H4P0AvB8AEA4H4A8AAAQQEAcgAAAAHBEOBwEAACg47wfg/QC8HwAV8AcAAAAAARINhwkAgBBME/+XCQAIEEwCB8D8AbQfABQSUQEAAAHtFBQHAQAAKDgXFBcBgABkW+0HoP0ACBwA/wAHAABh2VAPAAv9/w9A4hYIAAAAYNTu5g8gPAC8HwAWFhcAAAAAHBYIAAAAINzuAAEHAAAAmO8CB8D8AbQfABQSUQEAAAHtFBQHAQAAKDgXFBcBgABkW+0HoP0AiAsA/wAHAABh2VAPAAv9/w9A4hASAQAAAPnr7/8h/ACEHwAADwcAAACwUAAW9/8PAAAEARYHAQAAKDjhB+D9AIQfAAIW9/8PAAAEAxYHAQAAKDgAAAcAAPgjBOEHIPwAvB8AAQEHAAD4IwQCAgcAAPgjBAMDBwAA+CME7f9B/ACEHwAPAAcAAAAA4wAPBwAAALBQAA8HAAAAsFA=",
+        "data": "AAAAAAAAAAAAAAAAAAAAAA==",
+        "gprs": 32
+      },
+      "draws": [
+        64
+      ],
+      "repeats": 1,
+      "warmup": 0,
+      "readback": "none",
+      "methods": [
+        [
+          4644,
+          2
+        ]
+      ],
+      "restore": [
+        [
+          4644,
+          0
+        ]
+      ],
+      "storage": {
+        "bytes": 16384,
+        "va_at": 0,
+        "readback": "summary"
+      },
+      "meta": {
+        "family": "interlock",
+        "form": "atom",
+        "size": [
+          64,
+          64
+        ],
+        "stride": 64,
+        "expect": 64,
+        "compete": false
+      }
+    },
+    {
+      "id": "interlock.ldcg.64x64.check",
+      "kind": "readback",
+      "target": {
+        "format": "rgba32float",
+        "width": 64,
+        "height": 64
+      },
+      "program": {
+        "sph": "YlQCAAAAAAAAAAAAAAAAAAAAAAAAAACwAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAADwAAAAQAAAA=",
+        "code": "Agcg4AGIHAAE//cPh/8D4AQKRwCAAbBcBf/3T4f/A+AiF+D9P7wfAAUKVwCAAbBcAA8HAAAAsFAGBWcAAABIOO8H4P0AvB8ABgZHAAAAEFwGBicAAABIOAgGBwAEgBBM7wdA5AC0XwAJ/xcABAgQTAsANwEAAMjwBwv3D4ADZFsCB+D9AIgcAAoABwAAAMjwDAAHAADg2VAMAMcAAAAwXO0fIOAAiBwADwrHAAAAZFsNAMcBAADI8A4A9wAAAMjw7//h/QC8HwAADwcAAACwUA0N9w8AAAAEDw73DwAAAATvB+D9ALwfAA0NhwAAAEg4DQ33AAAAEFwNDScAAABIOO8H4P0AvB8AEA4H4A8AAAQQEAcgAAAAHBEOBwEAACg47wfg/QC8HwAV8AcAAAAAARINhwkAgBBME/+XCQAIEEwCB8D8AbQfABQSAQAAYNTuFBQHAQAAKDgXFBcBgABkW+0HoP0ACBwA/wAHAABh2VAPAAv9/w9A4hYIAAAAYNTu5g8gPAC8HwAWFhcAAAAAHBYIAAAAINzuAAEHAAAAmO8CB8D8AbQfABQSAQAAYNTuFBQHAQAAKDgXFBcBgABkW+0HoP0AiAsA/wAHAABh2VAPAAv9/w9A4hASAQAAAPnr7/8h/ACEHwAADwcAAACwUAAW9/8PAAAEARYHAQAAKDjhB+D9AIQfAAIW9/8PAAAEAxYHAQAAKDgAAAcAAPgjBOEHIPwAvB8AAQEHAAD4IwQCAgcAAPgjBAMDBwAA+CME7f9B/ACEHwAPAAcAAAAA4wAPBwAAALBQAA8HAAAAsFA=",
+        "data": "AAAAAAAAAAAAAAAAAAAAAA==",
+        "gprs": 32
+      },
+      "draws": [
+        64
+      ],
+      "repeats": 1,
+      "warmup": 0,
+      "readback": "none",
+      "methods": [
+        [
+          4644,
+          2
+        ]
+      ],
+      "restore": [
+        [
+          4644,
+          0
+        ]
+      ],
+      "storage": {
+        "bytes": 16384,
+        "va_at": 0,
+        "readback": "summary"
+      },
+      "meta": {
+        "family": "interlock",
+        "form": "ldcg",
+        "size": [
+          64,
+          64
+        ],
+        "stride": 64,
+        "expect": 64,
+        "compete": false
+      }
+    },
+    {
+      "id": "interlock.ldcv.64x64.check",
+      "kind": "readback",
+      "target": {
+        "format": "rgba32float",
+        "width": 64,
+        "height": 64
+      },
+      "program": {
+        "sph": "YlQCAAAAAAAAAAAAAAAAAAAAAAAAAACwAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAADwAAAAQAAAA=",
+        "code": "Agcg4AGIHAAE//cPh/8D4AQKRwCAAbBcBf/3T4f/A+AiF+D9P7wfAAUKVwCAAbBcAA8HAAAAsFAGBWcAAABIOO8H4P0AvB8ABgZHAAAAEFwGBicAAABIOAgGBwAEgBBM7wdA5AC0XwAJ/xcABAgQTAsANwEAAMjwBwv3D4ADZFsCB+D9AIgcAAoABwAAAMjwDAAHAADg2VAMAMcAAAAwXO0fIOAAiBwADwrHAAAAZFsNAMcBAADI8A4A9wAAAMjw7//h/QC8HwAADwcAAACwUA0N9w8AAAAEDw73DwAAAATvB+D9ALwfAA0NhwAAAEg4DQ33AAAAEFwNDScAAABIOO8H4P0AvB8AEA4H4A8AAAQQEAcgAAAAHBEOBwEAACg47wfg/QC8HwAV8AcAAAAAARINhwkAgBBME/+XCQAIEEwCB8D8AbQfABQSAQAA4NTuFBQHAQAAKDgXFBcBgABkW+0HoP0ACBwA/wAHAABh2VAPAAv9/w9A4hYIAAAAYNTu5g8gPAC8HwAWFhcAAAAAHBYIAAAAINzuAAEHAAAAmO8CB8D8AbQfABQSAQAA4NTuFBQHAQAAKDgXFBcBgABkW+0HoP0AiAsA/wAHAABh2VAPAAv9/w9A4hASAQAAAPnr7/8h/ACEHwAADwcAAACwUAAW9/8PAAAEARYHAQAAKDjhB+D9AIQfAAIW9/8PAAAEAxYHAQAAKDgAAAcAAPgjBOEHIPwAvB8AAQEHAAD4IwQCAgcAAPgjBAMDBwAA+CME7f9B/ACEHwAPAAcAAAAA4wAPBwAAALBQAA8HAAAAsFA=",
+        "data": "AAAAAAAAAAAAAAAAAAAAAA==",
+        "gprs": 32
+      },
+      "draws": [
+        64
+      ],
+      "repeats": 1,
+      "warmup": 0,
+      "readback": "none",
+      "methods": [
+        [
+          4644,
+          2
+        ]
+      ],
+      "restore": [
+        [
+          4644,
+          0
+        ]
+      ],
+      "storage": {
+        "bytes": 16384,
+        "va_at": 0,
+        "readback": "summary"
+      },
+      "meta": {
+        "family": "interlock",
+        "form": "ldcv",
+        "size": [
+          64,
+          64
+        ],
+        "stride": 64,
+        "expect": 64,
+        "compete": false
+      }
+    },
+    {
+      "id": "interlock.none.64x64.check",
+      "kind": "readback",
+      "target": {
+        "format": "rgba32float",
+        "width": 64,
+        "height": 64
+      },
+      "program": {
+        "sph": "YlQCAAAAAAAAAAAAAAAAAAAAAAAAAACwAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAADwAAAAAAAAA=",
+        "code": "Agcg4AGIHAAE//cPh/8D4AQKRwCAAbBcBf/3T4f/A+AiF+D9P7wfAAUKVwCAAbBcAA8HAAAAsFAGBWcAAABIOO8H4P0AvB8ABgZHAAAAEFwGBicAAABIOAgGBwAEgBBM7wdA5AC0XwAJ/xcABAgQTAsANwEAAMjwBwv3D4ADZFsCB8D8AYQHABYIAAAAYNTuFhYXAAAAABwWCAAAACDc7u8H4P0/hB8AAAEHAAAAmO8ADwcAAACwUAAW9/8PAAAE4Qcg/AC8HwABFgcBAAAoOAIW9/8PAAAEAxYHAQAAKDjhByD8AIQfAAAABwAA+CMEAQEHAAD4IwQCAgcAAPgjBO8HoP0/iB8AAwMHAAD4IwQPAAcAAAAA4wAPBwAAALBQ",
+        "data": "AAAAAAAAAAAAAAAAAAAAAA==",
+        "gprs": 32
+      },
+      "draws": [
+        64
+      ],
+      "repeats": 1,
+      "warmup": 0,
+      "readback": "none",
+      "methods": [
+        [
+          4644,
+          0
+        ]
+      ],
+      "restore": [
+        [
+          4644,
+          0
+        ]
+      ],
+      "storage": {
+        "bytes": 16384,
+        "va_at": 0,
+        "readback": "summary"
+      },
+      "meta": {
+        "family": "interlock",
+        "form": "none",
+        "size": [
+          64,
+          64
+        ],
+        "stride": 64,
+        "expect": 64,
+        "compete": false
+      }
+    },
+    {
+      "id": "interlock.atom.64x64.timed",
+      "kind": "readback",
+      "target": {
+        "format": "rgba32float",
+        "width": 64,
+        "height": 64
+      },
+      "program": {
+        "sph": "YlQCAAAAAAAAAAAAAAAAAAAAAAAAAACwAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAADwAAAAQAAAA=",
+        "code": "Agcg4AGIHAAE//cPh/8D4AQKRwCAAbBcBf/3T4f/A+AiF+D9P7wfAAUKVwCAAbBcAA8HAAAAsFAGBWcAAABIOO8H4P0AvB8ABgZHAAAAEFwGBicAAABIOAgGBwAEgBBM7wdA5AC0XwAJ/xcABAgQTAsANwEAAMjwBwv3D4ADZFsCB+D9AIgcAAoABwAAAMjwDAAHAADg2VAMAMcAAAAwXO0fIOAAiBwADwrHAAAAZFsNAMcBAADI8A4A9wAAAMjw7//h/QC8HwAADwcAAACwUA0N9w8AAAAEDw73DwAAAATvB+D9ALwfAA0NhwAAAEg4DQ33AAAAEFwNDScAAABIOO8H4P0AvB8AEA4H4A8AAAQQEAcgAAAAHBEOBwEAACg47wfg/QC8HwAV8AcAAAAAARINhwkAgBBME/+XCQAIEEwCB8D8AbQfABQSUQEAAAHtFBQHAQAAKDgXFBcBgABkW+0HoP0ACBwA/wAHAABh2VAPAAv9/w9A4hYIAAAAYNTu5g8gPAC8HwAWFhcAAAAAHBYIAAAAINzuAAEHAAAAmO8CB8D8AbQfABQSUQEAAAHtFBQHAQAAKDgXFBcBgABkW+0HoP0AiAsA/wAHAABh2VAPAAv9/w9A4hASAQAAAPnr7/8h/ACEHwAADwcAAACwUAAW9/8PAAAEARYHAQAAKDjhB+D9AIQfAAIW9/8PAAAEAxYHAQAAKDgAAAcAAPgjBOEHIPwAvB8AAQEHAAD4IwQCAgcAAPgjBAMDBwAA+CME7f9B/ACEHwAPAAcAAAAA4wAPBwAAALBQAA8HAAAAsFA=",
+        "data": "AAAAAAAAAAAAAAAAAAAAAA==",
+        "gprs": 32
+      },
+      "draws": [
+        16,
+        32,
+        64
+      ],
+      "repeats": 3,
+      "warmup": 1,
+      "readback": "none",
+      "methods": [
+        [
+          4644,
+          2
+        ]
+      ],
+      "restore": [
+        [
+          4644,
+          0
+        ]
+      ],
+      "storage": {
+        "bytes": 16384,
+        "va_at": 0,
+        "readback": "summary"
+      },
+      "meta": {
+        "family": "interlock",
+        "form": "atom",
+        "size": [
+          64,
+          64
+        ],
+        "stride": 64,
+        "expect": 448,
+        "compete": false
+      }
+    },
+    {
+      "id": "interlock.ldcg.64x64.timed",
+      "kind": "readback",
+      "target": {
+        "format": "rgba32float",
+        "width": 64,
+        "height": 64
+      },
+      "program": {
+        "sph": "YlQCAAAAAAAAAAAAAAAAAAAAAAAAAACwAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAADwAAAAQAAAA=",
+        "code": "Agcg4AGIHAAE//cPh/8D4AQKRwCAAbBcBf/3T4f/A+AiF+D9P7wfAAUKVwCAAbBcAA8HAAAAsFAGBWcAAABIOO8H4P0AvB8ABgZHAAAAEFwGBicAAABIOAgGBwAEgBBM7wdA5AC0XwAJ/xcABAgQTAsANwEAAMjwBwv3D4ADZFsCB+D9AIgcAAoABwAAAMjwDAAHAADg2VAMAMcAAAAwXO0fIOAAiBwADwrHAAAAZFsNAMcBAADI8A4A9wAAAMjw7//h/QC8HwAADwcAAACwUA0N9w8AAAAEDw73DwAAAATvB+D9ALwfAA0NhwAAAEg4DQ33AAAAEFwNDScAAABIOO8H4P0AvB8AEA4H4A8AAAQQEAcgAAAAHBEOBwEAACg47wfg/QC8HwAV8AcAAAAAARINhwkAgBBME/+XCQAIEEwCB8D8AbQfABQSAQAAYNTuFBQHAQAAKDgXFBcBgABkW+0HoP0ACBwA/wAHAABh2VAPAAv9/w9A4hYIAAAAYNTu5g8gPAC8HwAWFhcAAAAAHBYIAAAAINzuAAEHAAAAmO8CB8D8AbQfABQSAQAAYNTuFBQHAQAAKDgXFBcBgABkW+0HoP0AiAsA/wAHAABh2VAPAAv9/w9A4hASAQAAAPnr7/8h/ACEHwAADwcAAACwUAAW9/8PAAAEARYHAQAAKDjhB+D9AIQfAAIW9/8PAAAEAxYHAQAAKDgAAAcAAPgjBOEHIPwAvB8AAQEHAAD4IwQCAgcAAPgjBAMDBwAA+CME7f9B/ACEHwAPAAcAAAAA4wAPBwAAALBQAA8HAAAAsFA=",
+        "data": "AAAAAAAAAAAAAAAAAAAAAA==",
+        "gprs": 32
+      },
+      "draws": [
+        16,
+        32,
+        64
+      ],
+      "repeats": 3,
+      "warmup": 1,
+      "readback": "none",
+      "methods": [
+        [
+          4644,
+          2
+        ]
+      ],
+      "restore": [
+        [
+          4644,
+          0
+        ]
+      ],
+      "storage": {
+        "bytes": 16384,
+        "va_at": 0,
+        "readback": "summary"
+      },
+      "meta": {
+        "family": "interlock",
+        "form": "ldcg",
+        "size": [
+          64,
+          64
+        ],
+        "stride": 64,
+        "expect": 448,
+        "compete": false
+      }
+    },
+    {
+      "id": "interlock.ldcv.64x64.timed",
+      "kind": "readback",
+      "target": {
+        "format": "rgba32float",
+        "width": 64,
+        "height": 64
+      },
+      "program": {
+        "sph": "YlQCAAAAAAAAAAAAAAAAAAAAAAAAAACwAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAADwAAAAQAAAA=",
+        "code": "Agcg4AGIHAAE//cPh/8D4AQKRwCAAbBcBf/3T4f/A+AiF+D9P7wfAAUKVwCAAbBcAA8HAAAAsFAGBWcAAABIOO8H4P0AvB8ABgZHAAAAEFwGBicAAABIOAgGBwAEgBBM7wdA5AC0XwAJ/xcABAgQTAsANwEAAMjwBwv3D4ADZFsCB+D9AIgcAAoABwAAAMjwDAAHAADg2VAMAMcAAAAwXO0fIOAAiBwADwrHAAAAZFsNAMcBAADI8A4A9wAAAMjw7//h/QC8HwAADwcAAACwUA0N9w8AAAAEDw73DwAAAATvB+D9ALwfAA0NhwAAAEg4DQ33AAAAEFwNDScAAABIOO8H4P0AvB8AEA4H4A8AAAQQEAcgAAAAHBEOBwEAACg47wfg/QC8HwAV8AcAAAAAARINhwkAgBBME/+XCQAIEEwCB8D8AbQfABQSAQAA4NTuFBQHAQAAKDgXFBcBgABkW+0HoP0ACBwA/wAHAABh2VAPAAv9/w9A4hYIAAAAYNTu5g8gPAC8HwAWFhcAAAAAHBYIAAAAINzuAAEHAAAAmO8CB8D8AbQfABQSAQAA4NTuFBQHAQAAKDgXFBcBgABkW+0HoP0AiAsA/wAHAABh2VAPAAv9/w9A4hASAQAAAPnr7/8h/ACEHwAADwcAAACwUAAW9/8PAAAEARYHAQAAKDjhB+D9AIQfAAIW9/8PAAAEAxYHAQAAKDgAAAcAAPgjBOEHIPwAvB8AAQEHAAD4IwQCAgcAAPgjBAMDBwAA+CME7f9B/ACEHwAPAAcAAAAA4wAPBwAAALBQAA8HAAAAsFA=",
+        "data": "AAAAAAAAAAAAAAAAAAAAAA==",
+        "gprs": 32
+      },
+      "draws": [
+        16,
+        32,
+        64
+      ],
+      "repeats": 3,
+      "warmup": 1,
+      "readback": "none",
+      "methods": [
+        [
+          4644,
+          2
+        ]
+      ],
+      "restore": [
+        [
+          4644,
+          0
+        ]
+      ],
+      "storage": {
+        "bytes": 16384,
+        "va_at": 0,
+        "readback": "summary"
+      },
+      "meta": {
+        "family": "interlock",
+        "form": "ldcv",
+        "size": [
+          64,
+          64
+        ],
+        "stride": 64,
+        "expect": 448,
+        "compete": false
+      }
+    },
+    {
+      "id": "interlock.none.64x64.timed",
+      "kind": "readback",
+      "target": {
+        "format": "rgba32float",
+        "width": 64,
+        "height": 64
+      },
+      "program": {
+        "sph": "YlQCAAAAAAAAAAAAAAAAAAAAAAAAAACwAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAADwAAAAAAAAA=",
+        "code": "Agcg4AGIHAAE//cPh/8D4AQKRwCAAbBcBf/3T4f/A+AiF+D9P7wfAAUKVwCAAbBcAA8HAAAAsFAGBWcAAABIOO8H4P0AvB8ABgZHAAAAEFwGBicAAABIOAgGBwAEgBBM7wdA5AC0XwAJ/xcABAgQTAsANwEAAMjwBwv3D4ADZFsCB8D8AYQHABYIAAAAYNTuFhYXAAAAABwWCAAAACDc7u8H4P0/hB8AAAEHAAAAmO8ADwcAAACwUAAW9/8PAAAE4Qcg/AC8HwABFgcBAAAoOAIW9/8PAAAEAxYHAQAAKDjhByD8AIQfAAAABwAA+CMEAQEHAAD4IwQCAgcAAPgjBO8HoP0/iB8AAwMHAAD4IwQPAAcAAAAA4wAPBwAAALBQ",
+        "data": "AAAAAAAAAAAAAAAAAAAAAA==",
+        "gprs": 32
+      },
+      "draws": [
+        16,
+        32,
+        64
+      ],
+      "repeats": 3,
+      "warmup": 1,
+      "readback": "none",
+      "methods": [
+        [
+          4644,
+          0
+        ]
+      ],
+      "restore": [
+        [
+          4644,
+          0
+        ]
+      ],
+      "storage": {
+        "bytes": 16384,
+        "va_at": 0,
+        "readback": "summary"
+      },
+      "meta": {
+        "family": "interlock",
+        "form": "none",
+        "size": [
+          64,
+          64
+        ],
+        "stride": 64,
+        "expect": 448,
+        "compete": false
+      }
+    },
+    {
+      "id": "interlock.atom.64x64.check-compete",
+      "kind": "readback",
+      "target": {
+        "format": "rgba32float",
+        "width": 64,
+        "height": 64
+      },
+      "program": {
+        "sph": "YlQCAAAAAAAAAAAAAAAAAAAAAAAAAACwAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAADwAAAAQAAAA=",
+        "code": "Agcg4AGIHAAE//cPh/8D4AQKRwCAAbBcBf/3T4f/A+AiF+D9P7wfAAUKVwCAAbBcAA8HAAAAsFAGBWcAAABIOO8H4P0AvB8ABgZHAAAAEFwGBicAAABIOAgGBwAEgBBM7wdA5AC0XwAJ/xcABAgQTAsANwEAAMjwBwv3D4ADZFsCB+D9AIgcAAoABwAAAMjwDAAHAADg2VAMAMcAAAAwXO0fIOAAiBwADwrHAAAAZFsNAMcBAADI8A4A9wAAAMjw7//h/QC8HwAADwcAAACwUA0N9w8AAAAEDw73DwAAAATvB+D9ALwfAA0NhwAAAEg4DQ33AAAAEFwNDScAAABIOO8H4P0AvB8AEA4H4A8AAAQQEAcgAAAAHBEOBwEAACg47wfg/QC8HwAV8AcAAAAAARINhwkAgBBME/+XCQAIEEwCB8D8AbQfABQSUQEAAAHtFBQHAQAAKDgXFBcBgABkW+0HoP0ACBwA/wAHAABh2VAPAAv9/w9A4hYIAAAAYNTu5g8gPAC8HwAWFhcAAAAAHBYIAAAAINzuAAEHAAAAmO8CB8D8AbQfABQSUQEAAAHtFBQHAQAAKDgXFBcBgABkW+0HoP0AiAsA/wAHAABh2VAPAAv9/w9A4hASAQAAAPnr7/8h/ACEHwAADwcAAACwUAAW9/8PAAAEARYHAQAAKDjhB+D9AIQfAAIW9/8PAAAEAxYHAQAAKDgAAAcAAPgjBOEHIPwAvB8AAQEHAAD4IwQCAgcAAPgjBAMDBwAA+CME7f9B/ACEHwAPAAcAAAAA4wAPBwAAALBQAA8HAAAAsFA=",
+        "data": "AAAAAAAAAAAAAAAAAAAAAA==",
+        "gprs": 32
+      },
+      "draws": [
+        64
+      ],
+      "repeats": 1,
+      "warmup": 0,
+      "readback": "none",
+      "methods": [
+        [
+          4644,
+          2
+        ]
+      ],
+      "restore": [
+        [
+          4644,
+          0
+        ]
+      ],
+      "storage": {
+        "bytes": 16384,
+        "va_at": 0,
+        "readback": "summary"
+      },
+      "meta": {
+        "family": "interlock",
+        "form": "atom",
+        "size": [
+          64,
+          64
+        ],
+        "stride": 64,
+        "expect": 64,
+        "compete": true
+      },
+      "compete": true
+    },
+    {
+      "id": "interlock.ldcg.64x64.check-compete",
+      "kind": "readback",
+      "target": {
+        "format": "rgba32float",
+        "width": 64,
+        "height": 64
+      },
+      "program": {
+        "sph": "YlQCAAAAAAAAAAAAAAAAAAAAAAAAAACwAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAADwAAAAQAAAA=",
+        "code": "Agcg4AGIHAAE//cPh/8D4AQKRwCAAbBcBf/3T4f/A+AiF+D9P7wfAAUKVwCAAbBcAA8HAAAAsFAGBWcAAABIOO8H4P0AvB8ABgZHAAAAEFwGBicAAABIOAgGBwAEgBBM7wdA5AC0XwAJ/xcABAgQTAsANwEAAMjwBwv3D4ADZFsCB+D9AIgcAAoABwAAAMjwDAAHAADg2VAMAMcAAAAwXO0fIOAAiBwADwrHAAAAZFsNAMcBAADI8A4A9wAAAMjw7//h/QC8HwAADwcAAACwUA0N9w8AAAAEDw73DwAAAATvB+D9ALwfAA0NhwAAAEg4DQ33AAAAEFwNDScAAABIOO8H4P0AvB8AEA4H4A8AAAQQEAcgAAAAHBEOBwEAACg47wfg/QC8HwAV8AcAAAAAARINhwkAgBBME/+XCQAIEEwCB8D8AbQfABQSAQAAYNTuFBQHAQAAKDgXFBcBgABkW+0HoP0ACBwA/wAHAABh2VAPAAv9/w9A4hYIAAAAYNTu5g8gPAC8HwAWFhcAAAAAHBYIAAAAINzuAAEHAAAAmO8CB8D8AbQfABQSAQAAYNTuFBQHAQAAKDgXFBcBgABkW+0HoP0AiAsA/wAHAABh2VAPAAv9/w9A4hASAQAAAPnr7/8h/ACEHwAADwcAAACwUAAW9/8PAAAEARYHAQAAKDjhB+D9AIQfAAIW9/8PAAAEAxYHAQAAKDgAAAcAAPgjBOEHIPwAvB8AAQEHAAD4IwQCAgcAAPgjBAMDBwAA+CME7f9B/ACEHwAPAAcAAAAA4wAPBwAAALBQAA8HAAAAsFA=",
+        "data": "AAAAAAAAAAAAAAAAAAAAAA==",
+        "gprs": 32
+      },
+      "draws": [
+        64
+      ],
+      "repeats": 1,
+      "warmup": 0,
+      "readback": "none",
+      "methods": [
+        [
+          4644,
+          2
+        ]
+      ],
+      "restore": [
+        [
+          4644,
+          0
+        ]
+      ],
+      "storage": {
+        "bytes": 16384,
+        "va_at": 0,
+        "readback": "summary"
+      },
+      "meta": {
+        "family": "interlock",
+        "form": "ldcg",
+        "size": [
+          64,
+          64
+        ],
+        "stride": 64,
+        "expect": 64,
+        "compete": true
+      },
+      "compete": true
+    },
+    {
+      "id": "interlock.ldcv.64x64.check-compete",
+      "kind": "readback",
+      "target": {
+        "format": "rgba32float",
+        "width": 64,
+        "height": 64
+      },
+      "program": {
+        "sph": "YlQCAAAAAAAAAAAAAAAAAAAAAAAAAACwAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAADwAAAAQAAAA=",
+        "code": "Agcg4AGIHAAE//cPh/8D4AQKRwCAAbBcBf/3T4f/A+AiF+D9P7wfAAUKVwCAAbBcAA8HAAAAsFAGBWcAAABIOO8H4P0AvB8ABgZHAAAAEFwGBicAAABIOAgGBwAEgBBM7wdA5AC0XwAJ/xcABAgQTAsANwEAAMjwBwv3D4ADZFsCB+D9AIgcAAoABwAAAMjwDAAHAADg2VAMAMcAAAAwXO0fIOAAiBwADwrHAAAAZFsNAMcBAADI8A4A9wAAAMjw7//h/QC8HwAADwcAAACwUA0N9w8AAAAEDw73DwAAAATvB+D9ALwfAA0NhwAAAEg4DQ33AAAAEFwNDScAAABIOO8H4P0AvB8AEA4H4A8AAAQQEAcgAAAAHBEOBwEAACg47wfg/QC8HwAV8AcAAAAAARINhwkAgBBME/+XCQAIEEwCB8D8AbQfABQSAQAA4NTuFBQHAQAAKDgXFBcBgABkW+0HoP0ACBwA/wAHAABh2VAPAAv9/w9A4hYIAAAAYNTu5g8gPAC8HwAWFhcAAAAAHBYIAAAAINzuAAEHAAAAmO8CB8D8AbQfABQSAQAA4NTuFBQHAQAAKDgXFBcBgABkW+0HoP0AiAsA/wAHAABh2VAPAAv9/w9A4hASAQAAAPnr7/8h/ACEHwAADwcAAACwUAAW9/8PAAAEARYHAQAAKDjhB+D9AIQfAAIW9/8PAAAEAxYHAQAAKDgAAAcAAPgjBOEHIPwAvB8AAQEHAAD4IwQCAgcAAPgjBAMDBwAA+CME7f9B/ACEHwAPAAcAAAAA4wAPBwAAALBQAA8HAAAAsFA=",
+        "data": "AAAAAAAAAAAAAAAAAAAAAA==",
+        "gprs": 32
+      },
+      "draws": [
+        64
+      ],
+      "repeats": 1,
+      "warmup": 0,
+      "readback": "none",
+      "methods": [
+        [
+          4644,
+          2
+        ]
+      ],
+      "restore": [
+        [
+          4644,
+          0
+        ]
+      ],
+      "storage": {
+        "bytes": 16384,
+        "va_at": 0,
+        "readback": "summary"
+      },
+      "meta": {
+        "family": "interlock",
+        "form": "ldcv",
+        "size": [
+          64,
+          64
+        ],
+        "stride": 64,
+        "expect": 64,
+        "compete": true
+      },
+      "compete": true
+    },
+    {
+      "id": "interlock.none.64x64.check-compete",
+      "kind": "readback",
+      "target": {
+        "format": "rgba32float",
+        "width": 64,
+        "height": 64
+      },
+      "program": {
+        "sph": "YlQCAAAAAAAAAAAAAAAAAAAAAAAAAACwAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAADwAAAAAAAAA=",
+        "code": "Agcg4AGIHAAE//cPh/8D4AQKRwCAAbBcBf/3T4f/A+AiF+D9P7wfAAUKVwCAAbBcAA8HAAAAsFAGBWcAAABIOO8H4P0AvB8ABgZHAAAAEFwGBicAAABIOAgGBwAEgBBM7wdA5AC0XwAJ/xcABAgQTAsANwEAAMjwBwv3D4ADZFsCB8D8AYQHABYIAAAAYNTuFhYXAAAAABwWCAAAACDc7u8H4P0/hB8AAAEHAAAAmO8ADwcAAACwUAAW9/8PAAAE4Qcg/AC8HwABFgcBAAAoOAIW9/8PAAAEAxYHAQAAKDjhByD8AIQfAAAABwAA+CMEAQEHAAD4IwQCAgcAAPgjBO8HoP0/iB8AAwMHAAD4IwQPAAcAAAAA4wAPBwAAALBQ",
+        "data": "AAAAAAAAAAAAAAAAAAAAAA==",
+        "gprs": 32
+      },
+      "draws": [
+        64
+      ],
+      "repeats": 1,
+      "warmup": 0,
+      "readback": "none",
+      "methods": [
+        [
+          4644,
+          0
+        ]
+      ],
+      "restore": [
+        [
+          4644,
+          0
+        ]
+      ],
+      "storage": {
+        "bytes": 16384,
+        "va_at": 0,
+        "readback": "summary"
+      },
+      "meta": {
+        "family": "interlock",
+        "form": "none",
+        "size": [
+          64,
+          64
+        ],
+        "stride": 64,
+        "expect": 64,
+        "compete": true
+      },
+      "compete": true
+    },
+    {
+      "id": "interlock.atom.64x64.timed-compete",
+      "kind": "readback",
+      "target": {
+        "format": "rgba32float",
+        "width": 64,
+        "height": 64
+      },
+      "program": {
+        "sph": "YlQCAAAAAAAAAAAAAAAAAAAAAAAAAACwAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAADwAAAAQAAAA=",
+        "code": "Agcg4AGIHAAE//cPh/8D4AQKRwCAAbBcBf/3T4f/A+AiF+D9P7wfAAUKVwCAAbBcAA8HAAAAsFAGBWcAAABIOO8H4P0AvB8ABgZHAAAAEFwGBicAAABIOAgGBwAEgBBM7wdA5AC0XwAJ/xcABAgQTAsANwEAAMjwBwv3D4ADZFsCB+D9AIgcAAoABwAAAMjwDAAHAADg2VAMAMcAAAAwXO0fIOAAiBwADwrHAAAAZFsNAMcBAADI8A4A9wAAAMjw7//h/QC8HwAADwcAAACwUA0N9w8AAAAEDw73DwAAAATvB+D9ALwfAA0NhwAAAEg4DQ33AAAAEFwNDScAAABIOO8H4P0AvB8AEA4H4A8AAAQQEAcgAAAAHBEOBwEAACg47wfg/QC8HwAV8AcAAAAAARINhwkAgBBME/+XCQAIEEwCB8D8AbQfABQSUQEAAAHtFBQHAQAAKDgXFBcBgABkW+0HoP0ACBwA/wAHAABh2VAPAAv9/w9A4hYIAAAAYNTu5g8gPAC8HwAWFhcAAAAAHBYIAAAAINzuAAEHAAAAmO8CB8D8AbQfABQSUQEAAAHtFBQHAQAAKDgXFBcBgABkW+0HoP0AiAsA/wAHAABh2VAPAAv9/w9A4hASAQAAAPnr7/8h/ACEHwAADwcAAACwUAAW9/8PAAAEARYHAQAAKDjhB+D9AIQfAAIW9/8PAAAEAxYHAQAAKDgAAAcAAPgjBOEHIPwAvB8AAQEHAAD4IwQCAgcAAPgjBAMDBwAA+CME7f9B/ACEHwAPAAcAAAAA4wAPBwAAALBQAA8HAAAAsFA=",
+        "data": "AAAAAAAAAAAAAAAAAAAAAA==",
+        "gprs": 32
+      },
+      "draws": [
+        16,
+        32,
+        64
+      ],
+      "repeats": 3,
+      "warmup": 1,
+      "readback": "none",
+      "methods": [
+        [
+          4644,
+          2
+        ]
+      ],
+      "restore": [
+        [
+          4644,
+          0
+        ]
+      ],
+      "storage": {
+        "bytes": 16384,
+        "va_at": 0,
+        "readback": "summary"
+      },
+      "meta": {
+        "family": "interlock",
+        "form": "atom",
+        "size": [
+          64,
+          64
+        ],
+        "stride": 64,
+        "expect": 448,
+        "compete": true
+      },
+      "compete": true
+    },
+    {
+      "id": "interlock.ldcg.64x64.timed-compete",
+      "kind": "readback",
+      "target": {
+        "format": "rgba32float",
+        "width": 64,
+        "height": 64
+      },
+      "program": {
+        "sph": "YlQCAAAAAAAAAAAAAAAAAAAAAAAAAACwAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAADwAAAAQAAAA=",
+        "code": "Agcg4AGIHAAE//cPh/8D4AQKRwCAAbBcBf/3T4f/A+AiF+D9P7wfAAUKVwCAAbBcAA8HAAAAsFAGBWcAAABIOO8H4P0AvB8ABgZHAAAAEFwGBicAAABIOAgGBwAEgBBM7wdA5AC0XwAJ/xcABAgQTAsANwEAAMjwBwv3D4ADZFsCB+D9AIgcAAoABwAAAMjwDAAHAADg2VAMAMcAAAAwXO0fIOAAiBwADwrHAAAAZFsNAMcBAADI8A4A9wAAAMjw7//h/QC8HwAADwcAAACwUA0N9w8AAAAEDw73DwAAAATvB+D9ALwfAA0NhwAAAEg4DQ33AAAAEFwNDScAAABIOO8H4P0AvB8AEA4H4A8AAAQQEAcgAAAAHBEOBwEAACg47wfg/QC8HwAV8AcAAAAAARINhwkAgBBME/+XCQAIEEwCB8D8AbQfABQSAQAAYNTuFBQHAQAAKDgXFBcBgABkW+0HoP0ACBwA/wAHAABh2VAPAAv9/w9A4hYIAAAAYNTu5g8gPAC8HwAWFhcAAAAAHBYIAAAAINzuAAEHAAAAmO8CB8D8AbQfABQSAQAAYNTuFBQHAQAAKDgXFBcBgABkW+0HoP0AiAsA/wAHAABh2VAPAAv9/w9A4hASAQAAAPnr7/8h/ACEHwAADwcAAACwUAAW9/8PAAAEARYHAQAAKDjhB+D9AIQfAAIW9/8PAAAEAxYHAQAAKDgAAAcAAPgjBOEHIPwAvB8AAQEHAAD4IwQCAgcAAPgjBAMDBwAA+CME7f9B/ACEHwAPAAcAAAAA4wAPBwAAALBQAA8HAAAAsFA=",
+        "data": "AAAAAAAAAAAAAAAAAAAAAA==",
+        "gprs": 32
+      },
+      "draws": [
+        16,
+        32,
+        64
+      ],
+      "repeats": 3,
+      "warmup": 1,
+      "readback": "none",
+      "methods": [
+        [
+          4644,
+          2
+        ]
+      ],
+      "restore": [
+        [
+          4644,
+          0
+        ]
+      ],
+      "storage": {
+        "bytes": 16384,
+        "va_at": 0,
+        "readback": "summary"
+      },
+      "meta": {
+        "family": "interlock",
+        "form": "ldcg",
+        "size": [
+          64,
+          64
+        ],
+        "stride": 64,
+        "expect": 448,
+        "compete": true
+      },
+      "compete": true
+    },
+    {
+      "id": "interlock.ldcv.64x64.timed-compete",
+      "kind": "readback",
+      "target": {
+        "format": "rgba32float",
+        "width": 64,
+        "height": 64
+      },
+      "program": {
+        "sph": "YlQCAAAAAAAAAAAAAAAAAAAAAAAAAACwAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAADwAAAAQAAAA=",
+        "code": "Agcg4AGIHAAE//cPh/8D4AQKRwCAAbBcBf/3T4f/A+AiF+D9P7wfAAUKVwCAAbBcAA8HAAAAsFAGBWcAAABIOO8H4P0AvB8ABgZHAAAAEFwGBicAAABIOAgGBwAEgBBM7wdA5AC0XwAJ/xcABAgQTAsANwEAAMjwBwv3D4ADZFsCB+D9AIgcAAoABwAAAMjwDAAHAADg2VAMAMcAAAAwXO0fIOAAiBwADwrHAAAAZFsNAMcBAADI8A4A9wAAAMjw7//h/QC8HwAADwcAAACwUA0N9w8AAAAEDw73DwAAAATvB+D9ALwfAA0NhwAAAEg4DQ33AAAAEFwNDScAAABIOO8H4P0AvB8AEA4H4A8AAAQQEAcgAAAAHBEOBwEAACg47wfg/QC8HwAV8AcAAAAAARINhwkAgBBME/+XCQAIEEwCB8D8AbQfABQSAQAA4NTuFBQHAQAAKDgXFBcBgABkW+0HoP0ACBwA/wAHAABh2VAPAAv9/w9A4hYIAAAAYNTu5g8gPAC8HwAWFhcAAAAAHBYIAAAAINzuAAEHAAAAmO8CB8D8AbQfABQSAQAA4NTuFBQHAQAAKDgXFBcBgABkW+0HoP0AiAsA/wAHAABh2VAPAAv9/w9A4hASAQAAAPnr7/8h/ACEHwAADwcAAACwUAAW9/8PAAAEARYHAQAAKDjhB+D9AIQfAAIW9/8PAAAEAxYHAQAAKDgAAAcAAPgjBOEHIPwAvB8AAQEHAAD4IwQCAgcAAPgjBAMDBwAA+CME7f9B/ACEHwAPAAcAAAAA4wAPBwAAALBQAA8HAAAAsFA=",
+        "data": "AAAAAAAAAAAAAAAAAAAAAA==",
+        "gprs": 32
+      },
+      "draws": [
+        16,
+        32,
+        64
+      ],
+      "repeats": 3,
+      "warmup": 1,
+      "readback": "none",
+      "methods": [
+        [
+          4644,
+          2
+        ]
+      ],
+      "restore": [
+        [
+          4644,
+          0
+        ]
+      ],
+      "storage": {
+        "bytes": 16384,
+        "va_at": 0,
+        "readback": "summary"
+      },
+      "meta": {
+        "family": "interlock",
+        "form": "ldcv",
+        "size": [
+          64,
+          64
+        ],
+        "stride": 64,
+        "expect": 448,
+        "compete": true
+      },
+      "compete": true
+    },
+    {
+      "id": "interlock.none.64x64.timed-compete",
+      "kind": "readback",
+      "target": {
+        "format": "rgba32float",
+        "width": 64,
+        "height": 64
+      },
+      "program": {
+        "sph": "YlQCAAAAAAAAAAAAAAAAAAAAAAAAAACwAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAADwAAAAAAAAA=",
+        "code": "Agcg4AGIHAAE//cPh/8D4AQKRwCAAbBcBf/3T4f/A+AiF+D9P7wfAAUKVwCAAbBcAA8HAAAAsFAGBWcAAABIOO8H4P0AvB8ABgZHAAAAEFwGBicAAABIOAgGBwAEgBBM7wdA5AC0XwAJ/xcABAgQTAsANwEAAMjwBwv3D4ADZFsCB8D8AYQHABYIAAAAYNTuFhYXAAAAABwWCAAAACDc7u8H4P0/hB8AAAEHAAAAmO8ADwcAAACwUAAW9/8PAAAE4Qcg/AC8HwABFgcBAAAoOAIW9/8PAAAEAxYHAQAAKDjhByD8AIQfAAAABwAA+CMEAQEHAAD4IwQCAgcAAPgjBO8HoP0/iB8AAwMHAAD4IwQPAAcAAAAA4wAPBwAAALBQ",
+        "data": "AAAAAAAAAAAAAAAAAAAAAA==",
+        "gprs": 32
+      },
+      "draws": [
+        16,
+        32,
+        64
+      ],
+      "repeats": 3,
+      "warmup": 1,
+      "readback": "none",
+      "methods": [
+        [
+          4644,
+          0
+        ]
+      ],
+      "restore": [
+        [
+          4644,
+          0
+        ]
+      ],
+      "storage": {
+        "bytes": 16384,
+        "va_at": 0,
+        "readback": "summary"
+      },
+      "meta": {
+        "family": "interlock",
+        "form": "none",
+        "size": [
+          64,
+          64
+        ],
+        "stride": 64,
+        "expect": 448,
+        "compete": true
+      },
+      "compete": true
+    },
+    {
+      "id": "interlock.atom.256x256.check",
+      "kind": "readback",
+      "target": {
+        "format": "rgba32float",
+        "width": 256,
+        "height": 256
+      },
+      "program": {
+        "sph": "YlQCAAAAAAAAAAAAAAAAAAAAAAAAAACwAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAADwAAAAQAAAA=",
+        "code": "Agcg4AGIHAAE//cPh/8D4AQKRwCAAbBcBf/3T4f/A+AiF+D9P7wfAAUKVwCAAbBcAA8HAAAAsFAGBYcAAABIOO8H4P0AvB8ABgZHAAAAEFwGBicAAABIOAgGBwAEgBBM7wdA5AC0XwAJ/xcABAgQTAsANwEAAMjwBwv3D4ADZFsCB+D9AIgcAAoABwAAAMjwDAAHAADg2VAMAMcAAAAwXO0fIOAAiBwADwrHAAAAZFsNAMcBAADI8A4A9wAAAMjw7//h/QC8HwAADwcAAACwUA0N9w8AAAAEDw73DwAAAATvB+D9ALwfAA0NhwAAAEg4DQ33AAAAEFwNDScAAABIOO8H4P0AvB8AEA4H4A8AAAQQEAcgAAAAHBEOBwEAACg47wfg/QC8HwAV8AcAAAAAARINhwkAgBBME/+XCQAIEEwCB8D8AbQfABQSUQEAAAHtFBQHAQAAKDgXFBcBgABkW+0HoP0ACBwA/wAHAABh2VAPAAv9/w9A4hYIAAAAYNTu5g8gPAC8HwAWFhcAAAAAHBYIAAAAINzuAAEHAAAAmO8CB8D8AbQfABQSUQEAAAHtFBQHAQAAKDgXFBcBgABkW+0HoP0AiAsA/wAHAABh2VAPAAv9/w9A4hASAQAAAPnr7/8h/ACEHwAADwcAAACwUAAW9/8PAAAEARYHAQAAKDjhB+D9AIQfAAIW9/8PAAAEAxYHAQAAKDgAAAcAAPgjBOEHIPwAvB8AAQEHAAD4IwQCAgcAAPgjBAMDBwAA+CME7f9B/ACEHwAPAAcAAAAA4wAPBwAAALBQAA8HAAAAsFA=",
+        "data": "AAAAAAAAAAAAAAAAAAAAAA==",
+        "gprs": 32
+      },
+      "draws": [
+        64
+      ],
+      "repeats": 1,
+      "warmup": 0,
+      "readback": "none",
+      "methods": [
+        [
+          4644,
+          2
+        ]
+      ],
+      "restore": [
+        [
+          4644,
+          0
+        ]
+      ],
+      "storage": {
+        "bytes": 262144,
+        "va_at": 0,
+        "readback": "summary"
+      },
+      "meta": {
+        "family": "interlock",
+        "form": "atom",
+        "size": [
+          256,
+          256
+        ],
+        "stride": 256,
+        "expect": 64,
+        "compete": false
+      }
+    },
+    {
+      "id": "interlock.ldcg.256x256.check",
+      "kind": "readback",
+      "target": {
+        "format": "rgba32float",
+        "width": 256,
+        "height": 256
+      },
+      "program": {
+        "sph": "YlQCAAAAAAAAAAAAAAAAAAAAAAAAAACwAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAADwAAAAQAAAA=",
+        "code": "Agcg4AGIHAAE//cPh/8D4AQKRwCAAbBcBf/3T4f/A+AiF+D9P7wfAAUKVwCAAbBcAA8HAAAAsFAGBYcAAABIOO8H4P0AvB8ABgZHAAAAEFwGBicAAABIOAgGBwAEgBBM7wdA5AC0XwAJ/xcABAgQTAsANwEAAMjwBwv3D4ADZFsCB+D9AIgcAAoABwAAAMjwDAAHAADg2VAMAMcAAAAwXO0fIOAAiBwADwrHAAAAZFsNAMcBAADI8A4A9wAAAMjw7//h/QC8HwAADwcAAACwUA0N9w8AAAAEDw73DwAAAATvB+D9ALwfAA0NhwAAAEg4DQ33AAAAEFwNDScAAABIOO8H4P0AvB8AEA4H4A8AAAQQEAcgAAAAHBEOBwEAACg47wfg/QC8HwAV8AcAAAAAARINhwkAgBBME/+XCQAIEEwCB8D8AbQfABQSAQAAYNTuFBQHAQAAKDgXFBcBgABkW+0HoP0ACBwA/wAHAABh2VAPAAv9/w9A4hYIAAAAYNTu5g8gPAC8HwAWFhcAAAAAHBYIAAAAINzuAAEHAAAAmO8CB8D8AbQfABQSAQAAYNTuFBQHAQAAKDgXFBcBgABkW+0HoP0AiAsA/wAHAABh2VAPAAv9/w9A4hASAQAAAPnr7/8h/ACEHwAADwcAAACwUAAW9/8PAAAEARYHAQAAKDjhB+D9AIQfAAIW9/8PAAAEAxYHAQAAKDgAAAcAAPgjBOEHIPwAvB8AAQEHAAD4IwQCAgcAAPgjBAMDBwAA+CME7f9B/ACEHwAPAAcAAAAA4wAPBwAAALBQAA8HAAAAsFA=",
+        "data": "AAAAAAAAAAAAAAAAAAAAAA==",
+        "gprs": 32
+      },
+      "draws": [
+        64
+      ],
+      "repeats": 1,
+      "warmup": 0,
+      "readback": "none",
+      "methods": [
+        [
+          4644,
+          2
+        ]
+      ],
+      "restore": [
+        [
+          4644,
+          0
+        ]
+      ],
+      "storage": {
+        "bytes": 262144,
+        "va_at": 0,
+        "readback": "summary"
+      },
+      "meta": {
+        "family": "interlock",
+        "form": "ldcg",
+        "size": [
+          256,
+          256
+        ],
+        "stride": 256,
+        "expect": 64,
+        "compete": false
+      }
+    },
+    {
+      "id": "interlock.ldcv.256x256.check",
+      "kind": "readback",
+      "target": {
+        "format": "rgba32float",
+        "width": 256,
+        "height": 256
+      },
+      "program": {
+        "sph": "YlQCAAAAAAAAAAAAAAAAAAAAAAAAAACwAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAADwAAAAQAAAA=",
+        "code": "Agcg4AGIHAAE//cPh/8D4AQKRwCAAbBcBf/3T4f/A+AiF+D9P7wfAAUKVwCAAbBcAA8HAAAAsFAGBYcAAABIOO8H4P0AvB8ABgZHAAAAEFwGBicAAABIOAgGBwAEgBBM7wdA5AC0XwAJ/xcABAgQTAsANwEAAMjwBwv3D4ADZFsCB+D9AIgcAAoABwAAAMjwDAAHAADg2VAMAMcAAAAwXO0fIOAAiBwADwrHAAAAZFsNAMcBAADI8A4A9wAAAMjw7//h/QC8HwAADwcAAACwUA0N9w8AAAAEDw73DwAAAATvB+D9ALwfAA0NhwAAAEg4DQ33AAAAEFwNDScAAABIOO8H4P0AvB8AEA4H4A8AAAQQEAcgAAAAHBEOBwEAACg47wfg/QC8HwAV8AcAAAAAARINhwkAgBBME/+XCQAIEEwCB8D8AbQfABQSAQAA4NTuFBQHAQAAKDgXFBcBgABkW+0HoP0ACBwA/wAHAABh2VAPAAv9/w9A4hYIAAAAYNTu5g8gPAC8HwAWFhcAAAAAHBYIAAAAINzuAAEHAAAAmO8CB8D8AbQfABQSAQAA4NTuFBQHAQAAKDgXFBcBgABkW+0HoP0AiAsA/wAHAABh2VAPAAv9/w9A4hASAQAAAPnr7/8h/ACEHwAADwcAAACwUAAW9/8PAAAEARYHAQAAKDjhB+D9AIQfAAIW9/8PAAAEAxYHAQAAKDgAAAcAAPgjBOEHIPwAvB8AAQEHAAD4IwQCAgcAAPgjBAMDBwAA+CME7f9B/ACEHwAPAAcAAAAA4wAPBwAAALBQAA8HAAAAsFA=",
+        "data": "AAAAAAAAAAAAAAAAAAAAAA==",
+        "gprs": 32
+      },
+      "draws": [
+        64
+      ],
+      "repeats": 1,
+      "warmup": 0,
+      "readback": "none",
+      "methods": [
+        [
+          4644,
+          2
+        ]
+      ],
+      "restore": [
+        [
+          4644,
+          0
+        ]
+      ],
+      "storage": {
+        "bytes": 262144,
+        "va_at": 0,
+        "readback": "summary"
+      },
+      "meta": {
+        "family": "interlock",
+        "form": "ldcv",
+        "size": [
+          256,
+          256
+        ],
+        "stride": 256,
+        "expect": 64,
+        "compete": false
+      }
+    },
+    {
+      "id": "interlock.none.256x256.check",
+      "kind": "readback",
+      "target": {
+        "format": "rgba32float",
+        "width": 256,
+        "height": 256
+      },
+      "program": {
+        "sph": "YlQCAAAAAAAAAAAAAAAAAAAAAAAAAACwAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAADwAAAAAAAAA=",
+        "code": "Agcg4AGIHAAE//cPh/8D4AQKRwCAAbBcBf/3T4f/A+AiF+D9P7wfAAUKVwCAAbBcAA8HAAAAsFAGBYcAAABIOO8H4P0AvB8ABgZHAAAAEFwGBicAAABIOAgGBwAEgBBM7wdA5AC0XwAJ/xcABAgQTAsANwEAAMjwBwv3D4ADZFsCB8D8AYQHABYIAAAAYNTuFhYXAAAAABwWCAAAACDc7u8H4P0/hB8AAAEHAAAAmO8ADwcAAACwUAAW9/8PAAAE4Qcg/AC8HwABFgcBAAAoOAIW9/8PAAAEAxYHAQAAKDjhByD8AIQfAAAABwAA+CMEAQEHAAD4IwQCAgcAAPgjBO8HoP0/iB8AAwMHAAD4IwQPAAcAAAAA4wAPBwAAALBQ",
+        "data": "AAAAAAAAAAAAAAAAAAAAAA==",
+        "gprs": 32
+      },
+      "draws": [
+        64
+      ],
+      "repeats": 1,
+      "warmup": 0,
+      "readback": "none",
+      "methods": [
+        [
+          4644,
+          0
+        ]
+      ],
+      "restore": [
+        [
+          4644,
+          0
+        ]
+      ],
+      "storage": {
+        "bytes": 262144,
+        "va_at": 0,
+        "readback": "summary"
+      },
+      "meta": {
+        "family": "interlock",
+        "form": "none",
+        "size": [
+          256,
+          256
+        ],
+        "stride": 256,
+        "expect": 64,
+        "compete": false
+      }
+    },
+    {
+      "id": "interlock.atom.256x256.timed",
+      "kind": "readback",
+      "target": {
+        "format": "rgba32float",
+        "width": 256,
+        "height": 256
+      },
+      "program": {
+        "sph": "YlQCAAAAAAAAAAAAAAAAAAAAAAAAAACwAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAADwAAAAQAAAA=",
+        "code": "Agcg4AGIHAAE//cPh/8D4AQKRwCAAbBcBf/3T4f/A+AiF+D9P7wfAAUKVwCAAbBcAA8HAAAAsFAGBYcAAABIOO8H4P0AvB8ABgZHAAAAEFwGBicAAABIOAgGBwAEgBBM7wdA5AC0XwAJ/xcABAgQTAsANwEAAMjwBwv3D4ADZFsCB+D9AIgcAAoABwAAAMjwDAAHAADg2VAMAMcAAAAwXO0fIOAAiBwADwrHAAAAZFsNAMcBAADI8A4A9wAAAMjw7//h/QC8HwAADwcAAACwUA0N9w8AAAAEDw73DwAAAATvB+D9ALwfAA0NhwAAAEg4DQ33AAAAEFwNDScAAABIOO8H4P0AvB8AEA4H4A8AAAQQEAcgAAAAHBEOBwEAACg47wfg/QC8HwAV8AcAAAAAARINhwkAgBBME/+XCQAIEEwCB8D8AbQfABQSUQEAAAHtFBQHAQAAKDgXFBcBgABkW+0HoP0ACBwA/wAHAABh2VAPAAv9/w9A4hYIAAAAYNTu5g8gPAC8HwAWFhcAAAAAHBYIAAAAINzuAAEHAAAAmO8CB8D8AbQfABQSUQEAAAHtFBQHAQAAKDgXFBcBgABkW+0HoP0AiAsA/wAHAABh2VAPAAv9/w9A4hASAQAAAPnr7/8h/ACEHwAADwcAAACwUAAW9/8PAAAEARYHAQAAKDjhB+D9AIQfAAIW9/8PAAAEAxYHAQAAKDgAAAcAAPgjBOEHIPwAvB8AAQEHAAD4IwQCAgcAAPgjBAMDBwAA+CME7f9B/ACEHwAPAAcAAAAA4wAPBwAAALBQAA8HAAAAsFA=",
+        "data": "AAAAAAAAAAAAAAAAAAAAAA==",
+        "gprs": 32
+      },
+      "draws": [
+        16,
+        32,
+        64
+      ],
+      "repeats": 3,
+      "warmup": 1,
+      "readback": "none",
+      "methods": [
+        [
+          4644,
+          2
+        ]
+      ],
+      "restore": [
+        [
+          4644,
+          0
+        ]
+      ],
+      "storage": {
+        "bytes": 262144,
+        "va_at": 0,
+        "readback": "summary"
+      },
+      "meta": {
+        "family": "interlock",
+        "form": "atom",
+        "size": [
+          256,
+          256
+        ],
+        "stride": 256,
+        "expect": 448,
+        "compete": false
+      }
+    },
+    {
+      "id": "interlock.ldcg.256x256.timed",
+      "kind": "readback",
+      "target": {
+        "format": "rgba32float",
+        "width": 256,
+        "height": 256
+      },
+      "program": {
+        "sph": "YlQCAAAAAAAAAAAAAAAAAAAAAAAAAACwAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAADwAAAAQAAAA=",
+        "code": "Agcg4AGIHAAE//cPh/8D4AQKRwCAAbBcBf/3T4f/A+AiF+D9P7wfAAUKVwCAAbBcAA8HAAAAsFAGBYcAAABIOO8H4P0AvB8ABgZHAAAAEFwGBicAAABIOAgGBwAEgBBM7wdA5AC0XwAJ/xcABAgQTAsANwEAAMjwBwv3D4ADZFsCB+D9AIgcAAoABwAAAMjwDAAHAADg2VAMAMcAAAAwXO0fIOAAiBwADwrHAAAAZFsNAMcBAADI8A4A9wAAAMjw7//h/QC8HwAADwcAAACwUA0N9w8AAAAEDw73DwAAAATvB+D9ALwfAA0NhwAAAEg4DQ33AAAAEFwNDScAAABIOO8H4P0AvB8AEA4H4A8AAAQQEAcgAAAAHBEOBwEAACg47wfg/QC8HwAV8AcAAAAAARINhwkAgBBME/+XCQAIEEwCB8D8AbQfABQSAQAAYNTuFBQHAQAAKDgXFBcBgABkW+0HoP0ACBwA/wAHAABh2VAPAAv9/w9A4hYIAAAAYNTu5g8gPAC8HwAWFhcAAAAAHBYIAAAAINzuAAEHAAAAmO8CB8D8AbQfABQSAQAAYNTuFBQHAQAAKDgXFBcBgABkW+0HoP0AiAsA/wAHAABh2VAPAAv9/w9A4hASAQAAAPnr7/8h/ACEHwAADwcAAACwUAAW9/8PAAAEARYHAQAAKDjhB+D9AIQfAAIW9/8PAAAEAxYHAQAAKDgAAAcAAPgjBOEHIPwAvB8AAQEHAAD4IwQCAgcAAPgjBAMDBwAA+CME7f9B/ACEHwAPAAcAAAAA4wAPBwAAALBQAA8HAAAAsFA=",
+        "data": "AAAAAAAAAAAAAAAAAAAAAA==",
+        "gprs": 32
+      },
+      "draws": [
+        16,
+        32,
+        64
+      ],
+      "repeats": 3,
+      "warmup": 1,
+      "readback": "none",
+      "methods": [
+        [
+          4644,
+          2
+        ]
+      ],
+      "restore": [
+        [
+          4644,
+          0
+        ]
+      ],
+      "storage": {
+        "bytes": 262144,
+        "va_at": 0,
+        "readback": "summary"
+      },
+      "meta": {
+        "family": "interlock",
+        "form": "ldcg",
+        "size": [
+          256,
+          256
+        ],
+        "stride": 256,
+        "expect": 448,
+        "compete": false
+      }
+    },
+    {
+      "id": "interlock.ldcv.256x256.timed",
+      "kind": "readback",
+      "target": {
+        "format": "rgba32float",
+        "width": 256,
+        "height": 256
+      },
+      "program": {
+        "sph": "YlQCAAAAAAAAAAAAAAAAAAAAAAAAAACwAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAADwAAAAQAAAA=",
+        "code": "Agcg4AGIHAAE//cPh/8D4AQKRwCAAbBcBf/3T4f/A+AiF+D9P7wfAAUKVwCAAbBcAA8HAAAAsFAGBYcAAABIOO8H4P0AvB8ABgZHAAAAEFwGBicAAABIOAgGBwAEgBBM7wdA5AC0XwAJ/xcABAgQTAsANwEAAMjwBwv3D4ADZFsCB+D9AIgcAAoABwAAAMjwDAAHAADg2VAMAMcAAAAwXO0fIOAAiBwADwrHAAAAZFsNAMcBAADI8A4A9wAAAMjw7//h/QC8HwAADwcAAACwUA0N9w8AAAAEDw73DwAAAATvB+D9ALwfAA0NhwAAAEg4DQ33AAAAEFwNDScAAABIOO8H4P0AvB8AEA4H4A8AAAQQEAcgAAAAHBEOBwEAACg47wfg/QC8HwAV8AcAAAAAARINhwkAgBBME/+XCQAIEEwCB8D8AbQfABQSAQAA4NTuFBQHAQAAKDgXFBcBgABkW+0HoP0ACBwA/wAHAABh2VAPAAv9/w9A4hYIAAAAYNTu5g8gPAC8HwAWFhcAAAAAHBYIAAAAINzuAAEHAAAAmO8CB8D8AbQfABQSAQAA4NTuFBQHAQAAKDgXFBcBgABkW+0HoP0AiAsA/wAHAABh2VAPAAv9/w9A4hASAQAAAPnr7/8h/ACEHwAADwcAAACwUAAW9/8PAAAEARYHAQAAKDjhB+D9AIQfAAIW9/8PAAAEAxYHAQAAKDgAAAcAAPgjBOEHIPwAvB8AAQEHAAD4IwQCAgcAAPgjBAMDBwAA+CME7f9B/ACEHwAPAAcAAAAA4wAPBwAAALBQAA8HAAAAsFA=",
+        "data": "AAAAAAAAAAAAAAAAAAAAAA==",
+        "gprs": 32
+      },
+      "draws": [
+        16,
+        32,
+        64
+      ],
+      "repeats": 3,
+      "warmup": 1,
+      "readback": "none",
+      "methods": [
+        [
+          4644,
+          2
+        ]
+      ],
+      "restore": [
+        [
+          4644,
+          0
+        ]
+      ],
+      "storage": {
+        "bytes": 262144,
+        "va_at": 0,
+        "readback": "summary"
+      },
+      "meta": {
+        "family": "interlock",
+        "form": "ldcv",
+        "size": [
+          256,
+          256
+        ],
+        "stride": 256,
+        "expect": 448,
+        "compete": false
+      }
+    },
+    {
+      "id": "interlock.none.256x256.timed",
+      "kind": "readback",
+      "target": {
+        "format": "rgba32float",
+        "width": 256,
+        "height": 256
+      },
+      "program": {
+        "sph": "YlQCAAAAAAAAAAAAAAAAAAAAAAAAAACwAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAADwAAAAAAAAA=",
+        "code": "Agcg4AGIHAAE//cPh/8D4AQKRwCAAbBcBf/3T4f/A+AiF+D9P7wfAAUKVwCAAbBcAA8HAAAAsFAGBYcAAABIOO8H4P0AvB8ABgZHAAAAEFwGBicAAABIOAgGBwAEgBBM7wdA5AC0XwAJ/xcABAgQTAsANwEAAMjwBwv3D4ADZFsCB8D8AYQHABYIAAAAYNTuFhYXAAAAABwWCAAAACDc7u8H4P0/hB8AAAEHAAAAmO8ADwcAAACwUAAW9/8PAAAE4Qcg/AC8HwABFgcBAAAoOAIW9/8PAAAEAxYHAQAAKDjhByD8AIQfAAAABwAA+CMEAQEHAAD4IwQCAgcAAPgjBO8HoP0/iB8AAwMHAAD4IwQPAAcAAAAA4wAPBwAAALBQ",
+        "data": "AAAAAAAAAAAAAAAAAAAAAA==",
+        "gprs": 32
+      },
+      "draws": [
+        16,
+        32,
+        64
+      ],
+      "repeats": 3,
+      "warmup": 1,
+      "readback": "none",
+      "methods": [
+        [
+          4644,
+          0
+        ]
+      ],
+      "restore": [
+        [
+          4644,
+          0
+        ]
+      ],
+      "storage": {
+        "bytes": 262144,
+        "va_at": 0,
+        "readback": "summary"
+      },
+      "meta": {
+        "family": "interlock",
+        "form": "none",
+        "size": [
+          256,
+          256
+        ],
+        "stride": 256,
+        "expect": 448,
+        "compete": false
+      }
+    },
+    {
+      "id": "interlock.atom.256x256.check-compete",
+      "kind": "readback",
+      "target": {
+        "format": "rgba32float",
+        "width": 256,
+        "height": 256
+      },
+      "program": {
+        "sph": "YlQCAAAAAAAAAAAAAAAAAAAAAAAAAACwAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAADwAAAAQAAAA=",
+        "code": "Agcg4AGIHAAE//cPh/8D4AQKRwCAAbBcBf/3T4f/A+AiF+D9P7wfAAUKVwCAAbBcAA8HAAAAsFAGBYcAAABIOO8H4P0AvB8ABgZHAAAAEFwGBicAAABIOAgGBwAEgBBM7wdA5AC0XwAJ/xcABAgQTAsANwEAAMjwBwv3D4ADZFsCB+D9AIgcAAoABwAAAMjwDAAHAADg2VAMAMcAAAAwXO0fIOAAiBwADwrHAAAAZFsNAMcBAADI8A4A9wAAAMjw7//h/QC8HwAADwcAAACwUA0N9w8AAAAEDw73DwAAAATvB+D9ALwfAA0NhwAAAEg4DQ33AAAAEFwNDScAAABIOO8H4P0AvB8AEA4H4A8AAAQQEAcgAAAAHBEOBwEAACg47wfg/QC8HwAV8AcAAAAAARINhwkAgBBME/+XCQAIEEwCB8D8AbQfABQSUQEAAAHtFBQHAQAAKDgXFBcBgABkW+0HoP0ACBwA/wAHAABh2VAPAAv9/w9A4hYIAAAAYNTu5g8gPAC8HwAWFhcAAAAAHBYIAAAAINzuAAEHAAAAmO8CB8D8AbQfABQSUQEAAAHtFBQHAQAAKDgXFBcBgABkW+0HoP0AiAsA/wAHAABh2VAPAAv9/w9A4hASAQAAAPnr7/8h/ACEHwAADwcAAACwUAAW9/8PAAAEARYHAQAAKDjhB+D9AIQfAAIW9/8PAAAEAxYHAQAAKDgAAAcAAPgjBOEHIPwAvB8AAQEHAAD4IwQCAgcAAPgjBAMDBwAA+CME7f9B/ACEHwAPAAcAAAAA4wAPBwAAALBQAA8HAAAAsFA=",
+        "data": "AAAAAAAAAAAAAAAAAAAAAA==",
+        "gprs": 32
+      },
+      "draws": [
+        64
+      ],
+      "repeats": 1,
+      "warmup": 0,
+      "readback": "none",
+      "methods": [
+        [
+          4644,
+          2
+        ]
+      ],
+      "restore": [
+        [
+          4644,
+          0
+        ]
+      ],
+      "storage": {
+        "bytes": 262144,
+        "va_at": 0,
+        "readback": "summary"
+      },
+      "meta": {
+        "family": "interlock",
+        "form": "atom",
+        "size": [
+          256,
+          256
+        ],
+        "stride": 256,
+        "expect": 64,
+        "compete": true
+      },
+      "compete": true
+    },
+    {
+      "id": "interlock.ldcg.256x256.check-compete",
+      "kind": "readback",
+      "target": {
+        "format": "rgba32float",
+        "width": 256,
+        "height": 256
+      },
+      "program": {
+        "sph": "YlQCAAAAAAAAAAAAAAAAAAAAAAAAAACwAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAADwAAAAQAAAA=",
+        "code": "Agcg4AGIHAAE//cPh/8D4AQKRwCAAbBcBf/3T4f/A+AiF+D9P7wfAAUKVwCAAbBcAA8HAAAAsFAGBYcAAABIOO8H4P0AvB8ABgZHAAAAEFwGBicAAABIOAgGBwAEgBBM7wdA5AC0XwAJ/xcABAgQTAsANwEAAMjwBwv3D4ADZFsCB+D9AIgcAAoABwAAAMjwDAAHAADg2VAMAMcAAAAwXO0fIOAAiBwADwrHAAAAZFsNAMcBAADI8A4A9wAAAMjw7//h/QC8HwAADwcAAACwUA0N9w8AAAAEDw73DwAAAATvB+D9ALwfAA0NhwAAAEg4DQ33AAAAEFwNDScAAABIOO8H4P0AvB8AEA4H4A8AAAQQEAcgAAAAHBEOBwEAACg47wfg/QC8HwAV8AcAAAAAARINhwkAgBBME/+XCQAIEEwCB8D8AbQfABQSAQAAYNTuFBQHAQAAKDgXFBcBgABkW+0HoP0ACBwA/wAHAABh2VAPAAv9/w9A4hYIAAAAYNTu5g8gPAC8HwAWFhcAAAAAHBYIAAAAINzuAAEHAAAAmO8CB8D8AbQfABQSAQAAYNTuFBQHAQAAKDgXFBcBgABkW+0HoP0AiAsA/wAHAABh2VAPAAv9/w9A4hASAQAAAPnr7/8h/ACEHwAADwcAAACwUAAW9/8PAAAEARYHAQAAKDjhB+D9AIQfAAIW9/8PAAAEAxYHAQAAKDgAAAcAAPgjBOEHIPwAvB8AAQEHAAD4IwQCAgcAAPgjBAMDBwAA+CME7f9B/ACEHwAPAAcAAAAA4wAPBwAAALBQAA8HAAAAsFA=",
+        "data": "AAAAAAAAAAAAAAAAAAAAAA==",
+        "gprs": 32
+      },
+      "draws": [
+        64
+      ],
+      "repeats": 1,
+      "warmup": 0,
+      "readback": "none",
+      "methods": [
+        [
+          4644,
+          2
+        ]
+      ],
+      "restore": [
+        [
+          4644,
+          0
+        ]
+      ],
+      "storage": {
+        "bytes": 262144,
+        "va_at": 0,
+        "readback": "summary"
+      },
+      "meta": {
+        "family": "interlock",
+        "form": "ldcg",
+        "size": [
+          256,
+          256
+        ],
+        "stride": 256,
+        "expect": 64,
+        "compete": true
+      },
+      "compete": true
+    },
+    {
+      "id": "interlock.ldcv.256x256.check-compete",
+      "kind": "readback",
+      "target": {
+        "format": "rgba32float",
+        "width": 256,
+        "height": 256
+      },
+      "program": {
+        "sph": "YlQCAAAAAAAAAAAAAAAAAAAAAAAAAACwAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAADwAAAAQAAAA=",
+        "code": "Agcg4AGIHAAE//cPh/8D4AQKRwCAAbBcBf/3T4f/A+AiF+D9P7wfAAUKVwCAAbBcAA8HAAAAsFAGBYcAAABIOO8H4P0AvB8ABgZHAAAAEFwGBicAAABIOAgGBwAEgBBM7wdA5AC0XwAJ/xcABAgQTAsANwEAAMjwBwv3D4ADZFsCB+D9AIgcAAoABwAAAMjwDAAHAADg2VAMAMcAAAAwXO0fIOAAiBwADwrHAAAAZFsNAMcBAADI8A4A9wAAAMjw7//h/QC8HwAADwcAAACwUA0N9w8AAAAEDw73DwAAAATvB+D9ALwfAA0NhwAAAEg4DQ33AAAAEFwNDScAAABIOO8H4P0AvB8AEA4H4A8AAAQQEAcgAAAAHBEOBwEAACg47wfg/QC8HwAV8AcAAAAAARINhwkAgBBME/+XCQAIEEwCB8D8AbQfABQSAQAA4NTuFBQHAQAAKDgXFBcBgABkW+0HoP0ACBwA/wAHAABh2VAPAAv9/w9A4hYIAAAAYNTu5g8gPAC8HwAWFhcAAAAAHBYIAAAAINzuAAEHAAAAmO8CB8D8AbQfABQSAQAA4NTuFBQHAQAAKDgXFBcBgABkW+0HoP0AiAsA/wAHAABh2VAPAAv9/w9A4hASAQAAAPnr7/8h/ACEHwAADwcAAACwUAAW9/8PAAAEARYHAQAAKDjhB+D9AIQfAAIW9/8PAAAEAxYHAQAAKDgAAAcAAPgjBOEHIPwAvB8AAQEHAAD4IwQCAgcAAPgjBAMDBwAA+CME7f9B/ACEHwAPAAcAAAAA4wAPBwAAALBQAA8HAAAAsFA=",
+        "data": "AAAAAAAAAAAAAAAAAAAAAA==",
+        "gprs": 32
+      },
+      "draws": [
+        64
+      ],
+      "repeats": 1,
+      "warmup": 0,
+      "readback": "none",
+      "methods": [
+        [
+          4644,
+          2
+        ]
+      ],
+      "restore": [
+        [
+          4644,
+          0
+        ]
+      ],
+      "storage": {
+        "bytes": 262144,
+        "va_at": 0,
+        "readback": "summary"
+      },
+      "meta": {
+        "family": "interlock",
+        "form": "ldcv",
+        "size": [
+          256,
+          256
+        ],
+        "stride": 256,
+        "expect": 64,
+        "compete": true
+      },
+      "compete": true
+    },
+    {
+      "id": "interlock.none.256x256.check-compete",
+      "kind": "readback",
+      "target": {
+        "format": "rgba32float",
+        "width": 256,
+        "height": 256
+      },
+      "program": {
+        "sph": "YlQCAAAAAAAAAAAAAAAAAAAAAAAAAACwAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAADwAAAAAAAAA=",
+        "code": "Agcg4AGIHAAE//cPh/8D4AQKRwCAAbBcBf/3T4f/A+AiF+D9P7wfAAUKVwCAAbBcAA8HAAAAsFAGBYcAAABIOO8H4P0AvB8ABgZHAAAAEFwGBicAAABIOAgGBwAEgBBM7wdA5AC0XwAJ/xcABAgQTAsANwEAAMjwBwv3D4ADZFsCB8D8AYQHABYIAAAAYNTuFhYXAAAAABwWCAAAACDc7u8H4P0/hB8AAAEHAAAAmO8ADwcAAACwUAAW9/8PAAAE4Qcg/AC8HwABFgcBAAAoOAIW9/8PAAAEAxYHAQAAKDjhByD8AIQfAAAABwAA+CMEAQEHAAD4IwQCAgcAAPgjBO8HoP0/iB8AAwMHAAD4IwQPAAcAAAAA4wAPBwAAALBQ",
+        "data": "AAAAAAAAAAAAAAAAAAAAAA==",
+        "gprs": 32
+      },
+      "draws": [
+        64
+      ],
+      "repeats": 1,
+      "warmup": 0,
+      "readback": "none",
+      "methods": [
+        [
+          4644,
+          0
+        ]
+      ],
+      "restore": [
+        [
+          4644,
+          0
+        ]
+      ],
+      "storage": {
+        "bytes": 262144,
+        "va_at": 0,
+        "readback": "summary"
+      },
+      "meta": {
+        "family": "interlock",
+        "form": "none",
+        "size": [
+          256,
+          256
+        ],
+        "stride": 256,
+        "expect": 64,
+        "compete": true
+      },
+      "compete": true
+    },
+    {
+      "id": "interlock.atom.256x256.timed-compete",
+      "kind": "readback",
+      "target": {
+        "format": "rgba32float",
+        "width": 256,
+        "height": 256
+      },
+      "program": {
+        "sph": "YlQCAAAAAAAAAAAAAAAAAAAAAAAAAACwAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAADwAAAAQAAAA=",
+        "code": "Agcg4AGIHAAE//cPh/8D4AQKRwCAAbBcBf/3T4f/A+AiF+D9P7wfAAUKVwCAAbBcAA8HAAAAsFAGBYcAAABIOO8H4P0AvB8ABgZHAAAAEFwGBicAAABIOAgGBwAEgBBM7wdA5AC0XwAJ/xcABAgQTAsANwEAAMjwBwv3D4ADZFsCB+D9AIgcAAoABwAAAMjwDAAHAADg2VAMAMcAAAAwXO0fIOAAiBwADwrHAAAAZFsNAMcBAADI8A4A9wAAAMjw7//h/QC8HwAADwcAAACwUA0N9w8AAAAEDw73DwAAAATvB+D9ALwfAA0NhwAAAEg4DQ33AAAAEFwNDScAAABIOO8H4P0AvB8AEA4H4A8AAAQQEAcgAAAAHBEOBwEAACg47wfg/QC8HwAV8AcAAAAAARINhwkAgBBME/+XCQAIEEwCB8D8AbQfABQSUQEAAAHtFBQHAQAAKDgXFBcBgABkW+0HoP0ACBwA/wAHAABh2VAPAAv9/w9A4hYIAAAAYNTu5g8gPAC8HwAWFhcAAAAAHBYIAAAAINzuAAEHAAAAmO8CB8D8AbQfABQSUQEAAAHtFBQHAQAAKDgXFBcBgABkW+0HoP0AiAsA/wAHAABh2VAPAAv9/w9A4hASAQAAAPnr7/8h/ACEHwAADwcAAACwUAAW9/8PAAAEARYHAQAAKDjhB+D9AIQfAAIW9/8PAAAEAxYHAQAAKDgAAAcAAPgjBOEHIPwAvB8AAQEHAAD4IwQCAgcAAPgjBAMDBwAA+CME7f9B/ACEHwAPAAcAAAAA4wAPBwAAALBQAA8HAAAAsFA=",
+        "data": "AAAAAAAAAAAAAAAAAAAAAA==",
+        "gprs": 32
+      },
+      "draws": [
+        16,
+        32,
+        64
+      ],
+      "repeats": 3,
+      "warmup": 1,
+      "readback": "none",
+      "methods": [
+        [
+          4644,
+          2
+        ]
+      ],
+      "restore": [
+        [
+          4644,
+          0
+        ]
+      ],
+      "storage": {
+        "bytes": 262144,
+        "va_at": 0,
+        "readback": "summary"
+      },
+      "meta": {
+        "family": "interlock",
+        "form": "atom",
+        "size": [
+          256,
+          256
+        ],
+        "stride": 256,
+        "expect": 448,
+        "compete": true
+      },
+      "compete": true
+    },
+    {
+      "id": "interlock.ldcg.256x256.timed-compete",
+      "kind": "readback",
+      "target": {
+        "format": "rgba32float",
+        "width": 256,
+        "height": 256
+      },
+      "program": {
+        "sph": "YlQCAAAAAAAAAAAAAAAAAAAAAAAAAACwAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAADwAAAAQAAAA=",
+        "code": "Agcg4AGIHAAE//cPh/8D4AQKRwCAAbBcBf/3T4f/A+AiF+D9P7wfAAUKVwCAAbBcAA8HAAAAsFAGBYcAAABIOO8H4P0AvB8ABgZHAAAAEFwGBicAAABIOAgGBwAEgBBM7wdA5AC0XwAJ/xcABAgQTAsANwEAAMjwBwv3D4ADZFsCB+D9AIgcAAoABwAAAMjwDAAHAADg2VAMAMcAAAAwXO0fIOAAiBwADwrHAAAAZFsNAMcBAADI8A4A9wAAAMjw7//h/QC8HwAADwcAAACwUA0N9w8AAAAEDw73DwAAAATvB+D9ALwfAA0NhwAAAEg4DQ33AAAAEFwNDScAAABIOO8H4P0AvB8AEA4H4A8AAAQQEAcgAAAAHBEOBwEAACg47wfg/QC8HwAV8AcAAAAAARINhwkAgBBME/+XCQAIEEwCB8D8AbQfABQSAQAAYNTuFBQHAQAAKDgXFBcBgABkW+0HoP0ACBwA/wAHAABh2VAPAAv9/w9A4hYIAAAAYNTu5g8gPAC8HwAWFhcAAAAAHBYIAAAAINzuAAEHAAAAmO8CB8D8AbQfABQSAQAAYNTuFBQHAQAAKDgXFBcBgABkW+0HoP0AiAsA/wAHAABh2VAPAAv9/w9A4hASAQAAAPnr7/8h/ACEHwAADwcAAACwUAAW9/8PAAAEARYHAQAAKDjhB+D9AIQfAAIW9/8PAAAEAxYHAQAAKDgAAAcAAPgjBOEHIPwAvB8AAQEHAAD4IwQCAgcAAPgjBAMDBwAA+CME7f9B/ACEHwAPAAcAAAAA4wAPBwAAALBQAA8HAAAAsFA=",
+        "data": "AAAAAAAAAAAAAAAAAAAAAA==",
+        "gprs": 32
+      },
+      "draws": [
+        16,
+        32,
+        64
+      ],
+      "repeats": 3,
+      "warmup": 1,
+      "readback": "none",
+      "methods": [
+        [
+          4644,
+          2
+        ]
+      ],
+      "restore": [
+        [
+          4644,
+          0
+        ]
+      ],
+      "storage": {
+        "bytes": 262144,
+        "va_at": 0,
+        "readback": "summary"
+      },
+      "meta": {
+        "family": "interlock",
+        "form": "ldcg",
+        "size": [
+          256,
+          256
+        ],
+        "stride": 256,
+        "expect": 448,
+        "compete": true
+      },
+      "compete": true
+    },
+    {
+      "id": "interlock.ldcv.256x256.timed-compete",
+      "kind": "readback",
+      "target": {
+        "format": "rgba32float",
+        "width": 256,
+        "height": 256
+      },
+      "program": {
+        "sph": "YlQCAAAAAAAAAAAAAAAAAAAAAAAAAACwAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAADwAAAAQAAAA=",
+        "code": "Agcg4AGIHAAE//cPh/8D4AQKRwCAAbBcBf/3T4f/A+AiF+D9P7wfAAUKVwCAAbBcAA8HAAAAsFAGBYcAAABIOO8H4P0AvB8ABgZHAAAAEFwGBicAAABIOAgGBwAEgBBM7wdA5AC0XwAJ/xcABAgQTAsANwEAAMjwBwv3D4ADZFsCB+D9AIgcAAoABwAAAMjwDAAHAADg2VAMAMcAAAAwXO0fIOAAiBwADwrHAAAAZFsNAMcBAADI8A4A9wAAAMjw7//h/QC8HwAADwcAAACwUA0N9w8AAAAEDw73DwAAAATvB+D9ALwfAA0NhwAAAEg4DQ33AAAAEFwNDScAAABIOO8H4P0AvB8AEA4H4A8AAAQQEAcgAAAAHBEOBwEAACg47wfg/QC8HwAV8AcAAAAAARINhwkAgBBME/+XCQAIEEwCB8D8AbQfABQSAQAA4NTuFBQHAQAAKDgXFBcBgABkW+0HoP0ACBwA/wAHAABh2VAPAAv9/w9A4hYIAAAAYNTu5g8gPAC8HwAWFhcAAAAAHBYIAAAAINzuAAEHAAAAmO8CB8D8AbQfABQSAQAA4NTuFBQHAQAAKDgXFBcBgABkW+0HoP0AiAsA/wAHAABh2VAPAAv9/w9A4hASAQAAAPnr7/8h/ACEHwAADwcAAACwUAAW9/8PAAAEARYHAQAAKDjhB+D9AIQfAAIW9/8PAAAEAxYHAQAAKDgAAAcAAPgjBOEHIPwAvB8AAQEHAAD4IwQCAgcAAPgjBAMDBwAA+CME7f9B/ACEHwAPAAcAAAAA4wAPBwAAALBQAA8HAAAAsFA=",
+        "data": "AAAAAAAAAAAAAAAAAAAAAA==",
+        "gprs": 32
+      },
+      "draws": [
+        16,
+        32,
+        64
+      ],
+      "repeats": 3,
+      "warmup": 1,
+      "readback": "none",
+      "methods": [
+        [
+          4644,
+          2
+        ]
+      ],
+      "restore": [
+        [
+          4644,
+          0
+        ]
+      ],
+      "storage": {
+        "bytes": 262144,
+        "va_at": 0,
+        "readback": "summary"
+      },
+      "meta": {
+        "family": "interlock",
+        "form": "ldcv",
+        "size": [
+          256,
+          256
+        ],
+        "stride": 256,
+        "expect": 448,
+        "compete": true
+      },
+      "compete": true
+    },
+    {
+      "id": "interlock.none.256x256.timed-compete",
+      "kind": "readback",
+      "target": {
+        "format": "rgba32float",
+        "width": 256,
+        "height": 256
+      },
+      "program": {
+        "sph": "YlQCAAAAAAAAAAAAAAAAAAAAAAAAAACwAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAADwAAAAAAAAA=",
+        "code": "Agcg4AGIHAAE//cPh/8D4AQKRwCAAbBcBf/3T4f/A+AiF+D9P7wfAAUKVwCAAbBcAA8HAAAAsFAGBYcAAABIOO8H4P0AvB8ABgZHAAAAEFwGBicAAABIOAgGBwAEgBBM7wdA5AC0XwAJ/xcABAgQTAsANwEAAMjwBwv3D4ADZFsCB8D8AYQHABYIAAAAYNTuFhYXAAAAABwWCAAAACDc7u8H4P0/hB8AAAEHAAAAmO8ADwcAAACwUAAW9/8PAAAE4Qcg/AC8HwABFgcBAAAoOAIW9/8PAAAEAxYHAQAAKDjhByD8AIQfAAAABwAA+CMEAQEHAAD4IwQCAgcAAPgjBO8HoP0/iB8AAwMHAAD4IwQPAAcAAAAA4wAPBwAAALBQ",
+        "data": "AAAAAAAAAAAAAAAAAAAAAA==",
+        "gprs": 32
+      },
+      "draws": [
+        16,
+        32,
+        64
+      ],
+      "repeats": 3,
+      "warmup": 1,
+      "readback": "none",
+      "methods": [
+        [
+          4644,
+          0
+        ]
+      ],
+      "restore": [
+        [
+          4644,
+          0
+        ]
+      ],
+      "storage": {
+        "bytes": 262144,
+        "va_at": 0,
+        "readback": "summary"
+      },
+      "meta": {
+        "family": "interlock",
+        "form": "none",
+        "size": [
+          256,
+          256
+        ],
+        "stride": 256,
+        "expect": 448,
+        "compete": true
+      },
+      "compete": true
+    },
+    {
+      "id": "interlock.atom.1280x720.check",
+      "kind": "readback",
+      "target": {
+        "format": "rgba32float",
+        "width": 1280,
+        "height": 720
+      },
+      "program": {
+        "sph": "YlQCAAAAAAAAAAAAAAAAAAAAAAAAAACwAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAADwAAAAQAAAA=",
+        "code": "Agcg4AGIHAAE//cPh/8D4AQKRwCAAbBcBf/3T4f/A+AiF+D9P7wfAAUKVwCAAbBcAA8HAAAAsFAGBbcAAABIOO8H4P0AvB8ABgZHAAAAEFwGBicAAABIOAgGBwAEgBBM7wdA5AC0XwAJ/xcABAgQTAsANwEAAMjwBwv3D4ADZFsCB+D9AIgcAAoABwAAAMjwDAAHAADg2VAMAMcAAAAwXO0fIOAAiBwADwrHAAAAZFsNAMcBAADI8A4A9wAAAMjw7//h/QC8HwAADwcAAACwUA0N9w8AAAAEDw73DwAAAATvB+D9ALwfAA0NhwAAAEg4DQ33AAAAEFwNDScAAABIOO8H4P0AvB8AEA4H4A8AAAQQEAcgAAAAHBEOBwEAACg47wfg/QC8HwAV8AcAAAAAARINhwkAgBBME/+XCQAIEEwCB8D8AbQfABQSUQEAAAHtFBQHAQAAKDgXFBcBgABkW+0HoP0ACBwA/wAHAABh2VAPAAv9/w9A4hYIAAAAYNTu5g8gPAC8HwAWFhcAAAAAHBYIAAAAINzuAAEHAAAAmO8CB8D8AbQfABQSUQEAAAHtFBQHAQAAKDgXFBcBgABkW+0HoP0AiAsA/wAHAABh2VAPAAv9/w9A4hASAQAAAPnr7/8h/ACEHwAADwcAAACwUAAW9/8PAAAEARYHAQAAKDjhB+D9AIQfAAIW9/8PAAAEAxYHAQAAKDgAAAcAAPgjBOEHIPwAvB8AAQEHAAD4IwQCAgcAAPgjBAMDBwAA+CME7f9B/ACEHwAPAAcAAAAA4wAPBwAAALBQAA8HAAAAsFA=",
+        "data": "AAAAAAAAAAAAAAAAAAAAAA==",
+        "gprs": 32
+      },
+      "draws": [
+        64
+      ],
+      "repeats": 1,
+      "warmup": 0,
+      "readback": "none",
+      "methods": [
+        [
+          4644,
+          2
+        ]
+      ],
+      "restore": [
+        [
+          4644,
+          0
+        ]
+      ],
+      "storage": {
+        "bytes": 5898240,
+        "va_at": 0,
+        "readback": "summary"
+      },
+      "meta": {
+        "family": "interlock",
+        "form": "atom",
+        "size": [
+          1280,
+          720
+        ],
+        "stride": 2048,
+        "expect": 64,
+        "compete": false
+      }
+    },
+    {
+      "id": "interlock.ldcg.1280x720.check",
+      "kind": "readback",
+      "target": {
+        "format": "rgba32float",
+        "width": 1280,
+        "height": 720
+      },
+      "program": {
+        "sph": "YlQCAAAAAAAAAAAAAAAAAAAAAAAAAACwAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAADwAAAAQAAAA=",
+        "code": "Agcg4AGIHAAE//cPh/8D4AQKRwCAAbBcBf/3T4f/A+AiF+D9P7wfAAUKVwCAAbBcAA8HAAAAsFAGBbcAAABIOO8H4P0AvB8ABgZHAAAAEFwGBicAAABIOAgGBwAEgBBM7wdA5AC0XwAJ/xcABAgQTAsANwEAAMjwBwv3D4ADZFsCB+D9AIgcAAoABwAAAMjwDAAHAADg2VAMAMcAAAAwXO0fIOAAiBwADwrHAAAAZFsNAMcBAADI8A4A9wAAAMjw7//h/QC8HwAADwcAAACwUA0N9w8AAAAEDw73DwAAAATvB+D9ALwfAA0NhwAAAEg4DQ33AAAAEFwNDScAAABIOO8H4P0AvB8AEA4H4A8AAAQQEAcgAAAAHBEOBwEAACg47wfg/QC8HwAV8AcAAAAAARINhwkAgBBME/+XCQAIEEwCB8D8AbQfABQSAQAAYNTuFBQHAQAAKDgXFBcBgABkW+0HoP0ACBwA/wAHAABh2VAPAAv9/w9A4hYIAAAAYNTu5g8gPAC8HwAWFhcAAAAAHBYIAAAAINzuAAEHAAAAmO8CB8D8AbQfABQSAQAAYNTuFBQHAQAAKDgXFBcBgABkW+0HoP0AiAsA/wAHAABh2VAPAAv9/w9A4hASAQAAAPnr7/8h/ACEHwAADwcAAACwUAAW9/8PAAAEARYHAQAAKDjhB+D9AIQfAAIW9/8PAAAEAxYHAQAAKDgAAAcAAPgjBOEHIPwAvB8AAQEHAAD4IwQCAgcAAPgjBAMDBwAA+CME7f9B/ACEHwAPAAcAAAAA4wAPBwAAALBQAA8HAAAAsFA=",
+        "data": "AAAAAAAAAAAAAAAAAAAAAA==",
+        "gprs": 32
+      },
+      "draws": [
+        64
+      ],
+      "repeats": 1,
+      "warmup": 0,
+      "readback": "none",
+      "methods": [
+        [
+          4644,
+          2
+        ]
+      ],
+      "restore": [
+        [
+          4644,
+          0
+        ]
+      ],
+      "storage": {
+        "bytes": 5898240,
+        "va_at": 0,
+        "readback": "summary"
+      },
+      "meta": {
+        "family": "interlock",
+        "form": "ldcg",
+        "size": [
+          1280,
+          720
+        ],
+        "stride": 2048,
+        "expect": 64,
+        "compete": false
+      }
+    },
+    {
+      "id": "interlock.ldcv.1280x720.check",
+      "kind": "readback",
+      "target": {
+        "format": "rgba32float",
+        "width": 1280,
+        "height": 720
+      },
+      "program": {
+        "sph": "YlQCAAAAAAAAAAAAAAAAAAAAAAAAAACwAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAADwAAAAQAAAA=",
+        "code": "Agcg4AGIHAAE//cPh/8D4AQKRwCAAbBcBf/3T4f/A+AiF+D9P7wfAAUKVwCAAbBcAA8HAAAAsFAGBbcAAABIOO8H4P0AvB8ABgZHAAAAEFwGBicAAABIOAgGBwAEgBBM7wdA5AC0XwAJ/xcABAgQTAsANwEAAMjwBwv3D4ADZFsCB+D9AIgcAAoABwAAAMjwDAAHAADg2VAMAMcAAAAwXO0fIOAAiBwADwrHAAAAZFsNAMcBAADI8A4A9wAAAMjw7//h/QC8HwAADwcAAACwUA0N9w8AAAAEDw73DwAAAATvB+D9ALwfAA0NhwAAAEg4DQ33AAAAEFwNDScAAABIOO8H4P0AvB8AEA4H4A8AAAQQEAcgAAAAHBEOBwEAACg47wfg/QC8HwAV8AcAAAAAARINhwkAgBBME/+XCQAIEEwCB8D8AbQfABQSAQAA4NTuFBQHAQAAKDgXFBcBgABkW+0HoP0ACBwA/wAHAABh2VAPAAv9/w9A4hYIAAAAYNTu5g8gPAC8HwAWFhcAAAAAHBYIAAAAINzuAAEHAAAAmO8CB8D8AbQfABQSAQAA4NTuFBQHAQAAKDgXFBcBgABkW+0HoP0AiAsA/wAHAABh2VAPAAv9/w9A4hASAQAAAPnr7/8h/ACEHwAADwcAAACwUAAW9/8PAAAEARYHAQAAKDjhB+D9AIQfAAIW9/8PAAAEAxYHAQAAKDgAAAcAAPgjBOEHIPwAvB8AAQEHAAD4IwQCAgcAAPgjBAMDBwAA+CME7f9B/ACEHwAPAAcAAAAA4wAPBwAAALBQAA8HAAAAsFA=",
+        "data": "AAAAAAAAAAAAAAAAAAAAAA==",
+        "gprs": 32
+      },
+      "draws": [
+        64
+      ],
+      "repeats": 1,
+      "warmup": 0,
+      "readback": "none",
+      "methods": [
+        [
+          4644,
+          2
+        ]
+      ],
+      "restore": [
+        [
+          4644,
+          0
+        ]
+      ],
+      "storage": {
+        "bytes": 5898240,
+        "va_at": 0,
+        "readback": "summary"
+      },
+      "meta": {
+        "family": "interlock",
+        "form": "ldcv",
+        "size": [
+          1280,
+          720
+        ],
+        "stride": 2048,
+        "expect": 64,
+        "compete": false
+      }
+    },
+    {
+      "id": "interlock.none.1280x720.check",
+      "kind": "readback",
+      "target": {
+        "format": "rgba32float",
+        "width": 1280,
+        "height": 720
+      },
+      "program": {
+        "sph": "YlQCAAAAAAAAAAAAAAAAAAAAAAAAAACwAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAADwAAAAAAAAA=",
+        "code": "Agcg4AGIHAAE//cPh/8D4AQKRwCAAbBcBf/3T4f/A+AiF+D9P7wfAAUKVwCAAbBcAA8HAAAAsFAGBbcAAABIOO8H4P0AvB8ABgZHAAAAEFwGBicAAABIOAgGBwAEgBBM7wdA5AC0XwAJ/xcABAgQTAsANwEAAMjwBwv3D4ADZFsCB8D8AYQHABYIAAAAYNTuFhYXAAAAABwWCAAAACDc7u8H4P0/hB8AAAEHAAAAmO8ADwcAAACwUAAW9/8PAAAE4Qcg/AC8HwABFgcBAAAoOAIW9/8PAAAEAxYHAQAAKDjhByD8AIQfAAAABwAA+CMEAQEHAAD4IwQCAgcAAPgjBO8HoP0/iB8AAwMHAAD4IwQPAAcAAAAA4wAPBwAAALBQ",
+        "data": "AAAAAAAAAAAAAAAAAAAAAA==",
+        "gprs": 32
+      },
+      "draws": [
+        64
+      ],
+      "repeats": 1,
+      "warmup": 0,
+      "readback": "none",
+      "methods": [
+        [
+          4644,
+          0
+        ]
+      ],
+      "restore": [
+        [
+          4644,
+          0
+        ]
+      ],
+      "storage": {
+        "bytes": 5898240,
+        "va_at": 0,
+        "readback": "summary"
+      },
+      "meta": {
+        "family": "interlock",
+        "form": "none",
+        "size": [
+          1280,
+          720
+        ],
+        "stride": 2048,
+        "expect": 64,
+        "compete": false
+      }
+    },
+    {
+      "id": "interlock.atom.1280x720.timed",
+      "kind": "readback",
+      "target": {
+        "format": "rgba32float",
+        "width": 1280,
+        "height": 720
+      },
+      "program": {
+        "sph": "YlQCAAAAAAAAAAAAAAAAAAAAAAAAAACwAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAADwAAAAQAAAA=",
+        "code": "Agcg4AGIHAAE//cPh/8D4AQKRwCAAbBcBf/3T4f/A+AiF+D9P7wfAAUKVwCAAbBcAA8HAAAAsFAGBbcAAABIOO8H4P0AvB8ABgZHAAAAEFwGBicAAABIOAgGBwAEgBBM7wdA5AC0XwAJ/xcABAgQTAsANwEAAMjwBwv3D4ADZFsCB+D9AIgcAAoABwAAAMjwDAAHAADg2VAMAMcAAAAwXO0fIOAAiBwADwrHAAAAZFsNAMcBAADI8A4A9wAAAMjw7//h/QC8HwAADwcAAACwUA0N9w8AAAAEDw73DwAAAATvB+D9ALwfAA0NhwAAAEg4DQ33AAAAEFwNDScAAABIOO8H4P0AvB8AEA4H4A8AAAQQEAcgAAAAHBEOBwEAACg47wfg/QC8HwAV8AcAAAAAARINhwkAgBBME/+XCQAIEEwCB8D8AbQfABQSUQEAAAHtFBQHAQAAKDgXFBcBgABkW+0HoP0ACBwA/wAHAABh2VAPAAv9/w9A4hYIAAAAYNTu5g8gPAC8HwAWFhcAAAAAHBYIAAAAINzuAAEHAAAAmO8CB8D8AbQfABQSUQEAAAHtFBQHAQAAKDgXFBcBgABkW+0HoP0AiAsA/wAHAABh2VAPAAv9/w9A4hASAQAAAPnr7/8h/ACEHwAADwcAAACwUAAW9/8PAAAEARYHAQAAKDjhB+D9AIQfAAIW9/8PAAAEAxYHAQAAKDgAAAcAAPgjBOEHIPwAvB8AAQEHAAD4IwQCAgcAAPgjBAMDBwAA+CME7f9B/ACEHwAPAAcAAAAA4wAPBwAAALBQAA8HAAAAsFA=",
+        "data": "AAAAAAAAAAAAAAAAAAAAAA==",
+        "gprs": 32
+      },
+      "draws": [
+        16,
+        32,
+        64
+      ],
+      "repeats": 3,
+      "warmup": 1,
+      "readback": "none",
+      "methods": [
+        [
+          4644,
+          2
+        ]
+      ],
+      "restore": [
+        [
+          4644,
+          0
+        ]
+      ],
+      "storage": {
+        "bytes": 5898240,
+        "va_at": 0,
+        "readback": "summary"
+      },
+      "meta": {
+        "family": "interlock",
+        "form": "atom",
+        "size": [
+          1280,
+          720
+        ],
+        "stride": 2048,
+        "expect": 448,
+        "compete": false
+      }
+    },
+    {
+      "id": "interlock.ldcg.1280x720.timed",
+      "kind": "readback",
+      "target": {
+        "format": "rgba32float",
+        "width": 1280,
+        "height": 720
+      },
+      "program": {
+        "sph": "YlQCAAAAAAAAAAAAAAAAAAAAAAAAAACwAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAADwAAAAQAAAA=",
+        "code": "Agcg4AGIHAAE//cPh/8D4AQKRwCAAbBcBf/3T4f/A+AiF+D9P7wfAAUKVwCAAbBcAA8HAAAAsFAGBbcAAABIOO8H4P0AvB8ABgZHAAAAEFwGBicAAABIOAgGBwAEgBBM7wdA5AC0XwAJ/xcABAgQTAsANwEAAMjwBwv3D4ADZFsCB+D9AIgcAAoABwAAAMjwDAAHAADg2VAMAMcAAAAwXO0fIOAAiBwADwrHAAAAZFsNAMcBAADI8A4A9wAAAMjw7//h/QC8HwAADwcAAACwUA0N9w8AAAAEDw73DwAAAATvB+D9ALwfAA0NhwAAAEg4DQ33AAAAEFwNDScAAABIOO8H4P0AvB8AEA4H4A8AAAQQEAcgAAAAHBEOBwEAACg47wfg/QC8HwAV8AcAAAAAARINhwkAgBBME/+XCQAIEEwCB8D8AbQfABQSAQAAYNTuFBQHAQAAKDgXFBcBgABkW+0HoP0ACBwA/wAHAABh2VAPAAv9/w9A4hYIAAAAYNTu5g8gPAC8HwAWFhcAAAAAHBYIAAAAINzuAAEHAAAAmO8CB8D8AbQfABQSAQAAYNTuFBQHAQAAKDgXFBcBgABkW+0HoP0AiAsA/wAHAABh2VAPAAv9/w9A4hASAQAAAPnr7/8h/ACEHwAADwcAAACwUAAW9/8PAAAEARYHAQAAKDjhB+D9AIQfAAIW9/8PAAAEAxYHAQAAKDgAAAcAAPgjBOEHIPwAvB8AAQEHAAD4IwQCAgcAAPgjBAMDBwAA+CME7f9B/ACEHwAPAAcAAAAA4wAPBwAAALBQAA8HAAAAsFA=",
+        "data": "AAAAAAAAAAAAAAAAAAAAAA==",
+        "gprs": 32
+      },
+      "draws": [
+        16,
+        32,
+        64
+      ],
+      "repeats": 3,
+      "warmup": 1,
+      "readback": "none",
+      "methods": [
+        [
+          4644,
+          2
+        ]
+      ],
+      "restore": [
+        [
+          4644,
+          0
+        ]
+      ],
+      "storage": {
+        "bytes": 5898240,
+        "va_at": 0,
+        "readback": "summary"
+      },
+      "meta": {
+        "family": "interlock",
+        "form": "ldcg",
+        "size": [
+          1280,
+          720
+        ],
+        "stride": 2048,
+        "expect": 448,
+        "compete": false
+      }
+    },
+    {
+      "id": "interlock.ldcv.1280x720.timed",
+      "kind": "readback",
+      "target": {
+        "format": "rgba32float",
+        "width": 1280,
+        "height": 720
+      },
+      "program": {
+        "sph": "YlQCAAAAAAAAAAAAAAAAAAAAAAAAAACwAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAADwAAAAQAAAA=",
+        "code": "Agcg4AGIHAAE//cPh/8D4AQKRwCAAbBcBf/3T4f/A+AiF+D9P7wfAAUKVwCAAbBcAA8HAAAAsFAGBbcAAABIOO8H4P0AvB8ABgZHAAAAEFwGBicAAABIOAgGBwAEgBBM7wdA5AC0XwAJ/xcABAgQTAsANwEAAMjwBwv3D4ADZFsCB+D9AIgcAAoABwAAAMjwDAAHAADg2VAMAMcAAAAwXO0fIOAAiBwADwrHAAAAZFsNAMcBAADI8A4A9wAAAMjw7//h/QC8HwAADwcAAACwUA0N9w8AAAAEDw73DwAAAATvB+D9ALwfAA0NhwAAAEg4DQ33AAAAEFwNDScAAABIOO8H4P0AvB8AEA4H4A8AAAQQEAcgAAAAHBEOBwEAACg47wfg/QC8HwAV8AcAAAAAARINhwkAgBBME/+XCQAIEEwCB8D8AbQfABQSAQAA4NTuFBQHAQAAKDgXFBcBgABkW+0HoP0ACBwA/wAHAABh2VAPAAv9/w9A4hYIAAAAYNTu5g8gPAC8HwAWFhcAAAAAHBYIAAAAINzuAAEHAAAAmO8CB8D8AbQfABQSAQAA4NTuFBQHAQAAKDgXFBcBgABkW+0HoP0AiAsA/wAHAABh2VAPAAv9/w9A4hASAQAAAPnr7/8h/ACEHwAADwcAAACwUAAW9/8PAAAEARYHAQAAKDjhB+D9AIQfAAIW9/8PAAAEAxYHAQAAKDgAAAcAAPgjBOEHIPwAvB8AAQEHAAD4IwQCAgcAAPgjBAMDBwAA+CME7f9B/ACEHwAPAAcAAAAA4wAPBwAAALBQAA8HAAAAsFA=",
+        "data": "AAAAAAAAAAAAAAAAAAAAAA==",
+        "gprs": 32
+      },
+      "draws": [
+        16,
+        32,
+        64
+      ],
+      "repeats": 3,
+      "warmup": 1,
+      "readback": "none",
+      "methods": [
+        [
+          4644,
+          2
+        ]
+      ],
+      "restore": [
+        [
+          4644,
+          0
+        ]
+      ],
+      "storage": {
+        "bytes": 5898240,
+        "va_at": 0,
+        "readback": "summary"
+      },
+      "meta": {
+        "family": "interlock",
+        "form": "ldcv",
+        "size": [
+          1280,
+          720
+        ],
+        "stride": 2048,
+        "expect": 448,
+        "compete": false
+      }
+    },
+    {
+      "id": "interlock.none.1280x720.timed",
+      "kind": "readback",
+      "target": {
+        "format": "rgba32float",
+        "width": 1280,
+        "height": 720
+      },
+      "program": {
+        "sph": "YlQCAAAAAAAAAAAAAAAAAAAAAAAAAACwAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAADwAAAAAAAAA=",
+        "code": "Agcg4AGIHAAE//cPh/8D4AQKRwCAAbBcBf/3T4f/A+AiF+D9P7wfAAUKVwCAAbBcAA8HAAAAsFAGBbcAAABIOO8H4P0AvB8ABgZHAAAAEFwGBicAAABIOAgGBwAEgBBM7wdA5AC0XwAJ/xcABAgQTAsANwEAAMjwBwv3D4ADZFsCB8D8AYQHABYIAAAAYNTuFhYXAAAAABwWCAAAACDc7u8H4P0/hB8AAAEHAAAAmO8ADwcAAACwUAAW9/8PAAAE4Qcg/AC8HwABFgcBAAAoOAIW9/8PAAAEAxYHAQAAKDjhByD8AIQfAAAABwAA+CMEAQEHAAD4IwQCAgcAAPgjBO8HoP0/iB8AAwMHAAD4IwQPAAcAAAAA4wAPBwAAALBQ",
+        "data": "AAAAAAAAAAAAAAAAAAAAAA==",
+        "gprs": 32
+      },
+      "draws": [
+        16,
+        32,
+        64
+      ],
+      "repeats": 3,
+      "warmup": 1,
+      "readback": "none",
+      "methods": [
+        [
+          4644,
+          0
+        ]
+      ],
+      "restore": [
+        [
+          4644,
+          0
+        ]
+      ],
+      "storage": {
+        "bytes": 5898240,
+        "va_at": 0,
+        "readback": "summary"
+      },
+      "meta": {
+        "family": "interlock",
+        "form": "none",
+        "size": [
+          1280,
+          720
+        ],
+        "stride": 2048,
+        "expect": 448,
+        "compete": false
+      }
+    },
+    {
+      "id": "interlock.atom.1280x720.check-compete",
+      "kind": "readback",
+      "target": {
+        "format": "rgba32float",
+        "width": 1280,
+        "height": 720
+      },
+      "program": {
+        "sph": "YlQCAAAAAAAAAAAAAAAAAAAAAAAAAACwAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAADwAAAAQAAAA=",
+        "code": "Agcg4AGIHAAE//cPh/8D4AQKRwCAAbBcBf/3T4f/A+AiF+D9P7wfAAUKVwCAAbBcAA8HAAAAsFAGBbcAAABIOO8H4P0AvB8ABgZHAAAAEFwGBicAAABIOAgGBwAEgBBM7wdA5AC0XwAJ/xcABAgQTAsANwEAAMjwBwv3D4ADZFsCB+D9AIgcAAoABwAAAMjwDAAHAADg2VAMAMcAAAAwXO0fIOAAiBwADwrHAAAAZFsNAMcBAADI8A4A9wAAAMjw7//h/QC8HwAADwcAAACwUA0N9w8AAAAEDw73DwAAAATvB+D9ALwfAA0NhwAAAEg4DQ33AAAAEFwNDScAAABIOO8H4P0AvB8AEA4H4A8AAAQQEAcgAAAAHBEOBwEAACg47wfg/QC8HwAV8AcAAAAAARINhwkAgBBME/+XCQAIEEwCB8D8AbQfABQSUQEAAAHtFBQHAQAAKDgXFBcBgABkW+0HoP0ACBwA/wAHAABh2VAPAAv9/w9A4hYIAAAAYNTu5g8gPAC8HwAWFhcAAAAAHBYIAAAAINzuAAEHAAAAmO8CB8D8AbQfABQSUQEAAAHtFBQHAQAAKDgXFBcBgABkW+0HoP0AiAsA/wAHAABh2VAPAAv9/w9A4hASAQAAAPnr7/8h/ACEHwAADwcAAACwUAAW9/8PAAAEARYHAQAAKDjhB+D9AIQfAAIW9/8PAAAEAxYHAQAAKDgAAAcAAPgjBOEHIPwAvB8AAQEHAAD4IwQCAgcAAPgjBAMDBwAA+CME7f9B/ACEHwAPAAcAAAAA4wAPBwAAALBQAA8HAAAAsFA=",
+        "data": "AAAAAAAAAAAAAAAAAAAAAA==",
+        "gprs": 32
+      },
+      "draws": [
+        64
+      ],
+      "repeats": 1,
+      "warmup": 0,
+      "readback": "none",
+      "methods": [
+        [
+          4644,
+          2
+        ]
+      ],
+      "restore": [
+        [
+          4644,
+          0
+        ]
+      ],
+      "storage": {
+        "bytes": 5898240,
+        "va_at": 0,
+        "readback": "summary"
+      },
+      "meta": {
+        "family": "interlock",
+        "form": "atom",
+        "size": [
+          1280,
+          720
+        ],
+        "stride": 2048,
+        "expect": 64,
+        "compete": true
+      },
+      "compete": true
+    },
+    {
+      "id": "interlock.ldcg.1280x720.check-compete",
+      "kind": "readback",
+      "target": {
+        "format": "rgba32float",
+        "width": 1280,
+        "height": 720
+      },
+      "program": {
+        "sph": "YlQCAAAAAAAAAAAAAAAAAAAAAAAAAACwAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAADwAAAAQAAAA=",
+        "code": "Agcg4AGIHAAE//cPh/8D4AQKRwCAAbBcBf/3T4f/A+AiF+D9P7wfAAUKVwCAAbBcAA8HAAAAsFAGBbcAAABIOO8H4P0AvB8ABgZHAAAAEFwGBicAAABIOAgGBwAEgBBM7wdA5AC0XwAJ/xcABAgQTAsANwEAAMjwBwv3D4ADZFsCB+D9AIgcAAoABwAAAMjwDAAHAADg2VAMAMcAAAAwXO0fIOAAiBwADwrHAAAAZFsNAMcBAADI8A4A9wAAAMjw7//h/QC8HwAADwcAAACwUA0N9w8AAAAEDw73DwAAAATvB+D9ALwfAA0NhwAAAEg4DQ33AAAAEFwNDScAAABIOO8H4P0AvB8AEA4H4A8AAAQQEAcgAAAAHBEOBwEAACg47wfg/QC8HwAV8AcAAAAAARINhwkAgBBME/+XCQAIEEwCB8D8AbQfABQSAQAAYNTuFBQHAQAAKDgXFBcBgABkW+0HoP0ACBwA/wAHAABh2VAPAAv9/w9A4hYIAAAAYNTu5g8gPAC8HwAWFhcAAAAAHBYIAAAAINzuAAEHAAAAmO8CB8D8AbQfABQSAQAAYNTuFBQHAQAAKDgXFBcBgABkW+0HoP0AiAsA/wAHAABh2VAPAAv9/w9A4hASAQAAAPnr7/8h/ACEHwAADwcAAACwUAAW9/8PAAAEARYHAQAAKDjhB+D9AIQfAAIW9/8PAAAEAxYHAQAAKDgAAAcAAPgjBOEHIPwAvB8AAQEHAAD4IwQCAgcAAPgjBAMDBwAA+CME7f9B/ACEHwAPAAcAAAAA4wAPBwAAALBQAA8HAAAAsFA=",
+        "data": "AAAAAAAAAAAAAAAAAAAAAA==",
+        "gprs": 32
+      },
+      "draws": [
+        64
+      ],
+      "repeats": 1,
+      "warmup": 0,
+      "readback": "none",
+      "methods": [
+        [
+          4644,
+          2
+        ]
+      ],
+      "restore": [
+        [
+          4644,
+          0
+        ]
+      ],
+      "storage": {
+        "bytes": 5898240,
+        "va_at": 0,
+        "readback": "summary"
+      },
+      "meta": {
+        "family": "interlock",
+        "form": "ldcg",
+        "size": [
+          1280,
+          720
+        ],
+        "stride": 2048,
+        "expect": 64,
+        "compete": true
+      },
+      "compete": true
+    },
+    {
+      "id": "interlock.ldcv.1280x720.check-compete",
+      "kind": "readback",
+      "target": {
+        "format": "rgba32float",
+        "width": 1280,
+        "height": 720
+      },
+      "program": {
+        "sph": "YlQCAAAAAAAAAAAAAAAAAAAAAAAAAACwAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAADwAAAAQAAAA=",
+        "code": "Agcg4AGIHAAE//cPh/8D4AQKRwCAAbBcBf/3T4f/A+AiF+D9P7wfAAUKVwCAAbBcAA8HAAAAsFAGBbcAAABIOO8H4P0AvB8ABgZHAAAAEFwGBicAAABIOAgGBwAEgBBM7wdA5AC0XwAJ/xcABAgQTAsANwEAAMjwBwv3D4ADZFsCB+D9AIgcAAoABwAAAMjwDAAHAADg2VAMAMcAAAAwXO0fIOAAiBwADwrHAAAAZFsNAMcBAADI8A4A9wAAAMjw7//h/QC8HwAADwcAAACwUA0N9w8AAAAEDw73DwAAAATvB+D9ALwfAA0NhwAAAEg4DQ33AAAAEFwNDScAAABIOO8H4P0AvB8AEA4H4A8AAAQQEAcgAAAAHBEOBwEAACg47wfg/QC8HwAV8AcAAAAAARINhwkAgBBME/+XCQAIEEwCB8D8AbQfABQSAQAA4NTuFBQHAQAAKDgXFBcBgABkW+0HoP0ACBwA/wAHAABh2VAPAAv9/w9A4hYIAAAAYNTu5g8gPAC8HwAWFhcAAAAAHBYIAAAAINzuAAEHAAAAmO8CB8D8AbQfABQSAQAA4NTuFBQHAQAAKDgXFBcBgABkW+0HoP0AiAsA/wAHAABh2VAPAAv9/w9A4hASAQAAAPnr7/8h/ACEHwAADwcAAACwUAAW9/8PAAAEARYHAQAAKDjhB+D9AIQfAAIW9/8PAAAEAxYHAQAAKDgAAAcAAPgjBOEHIPwAvB8AAQEHAAD4IwQCAgcAAPgjBAMDBwAA+CME7f9B/ACEHwAPAAcAAAAA4wAPBwAAALBQAA8HAAAAsFA=",
+        "data": "AAAAAAAAAAAAAAAAAAAAAA==",
+        "gprs": 32
+      },
+      "draws": [
+        64
+      ],
+      "repeats": 1,
+      "warmup": 0,
+      "readback": "none",
+      "methods": [
+        [
+          4644,
+          2
+        ]
+      ],
+      "restore": [
+        [
+          4644,
+          0
+        ]
+      ],
+      "storage": {
+        "bytes": 5898240,
+        "va_at": 0,
+        "readback": "summary"
+      },
+      "meta": {
+        "family": "interlock",
+        "form": "ldcv",
+        "size": [
+          1280,
+          720
+        ],
+        "stride": 2048,
+        "expect": 64,
+        "compete": true
+      },
+      "compete": true
+    },
+    {
+      "id": "interlock.none.1280x720.check-compete",
+      "kind": "readback",
+      "target": {
+        "format": "rgba32float",
+        "width": 1280,
+        "height": 720
+      },
+      "program": {
+        "sph": "YlQCAAAAAAAAAAAAAAAAAAAAAAAAAACwAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAADwAAAAAAAAA=",
+        "code": "Agcg4AGIHAAE//cPh/8D4AQKRwCAAbBcBf/3T4f/A+AiF+D9P7wfAAUKVwCAAbBcAA8HAAAAsFAGBbcAAABIOO8H4P0AvB8ABgZHAAAAEFwGBicAAABIOAgGBwAEgBBM7wdA5AC0XwAJ/xcABAgQTAsANwEAAMjwBwv3D4ADZFsCB8D8AYQHABYIAAAAYNTuFhYXAAAAABwWCAAAACDc7u8H4P0/hB8AAAEHAAAAmO8ADwcAAACwUAAW9/8PAAAE4Qcg/AC8HwABFgcBAAAoOAIW9/8PAAAEAxYHAQAAKDjhByD8AIQfAAAABwAA+CMEAQEHAAD4IwQCAgcAAPgjBO8HoP0/iB8AAwMHAAD4IwQPAAcAAAAA4wAPBwAAALBQ",
+        "data": "AAAAAAAAAAAAAAAAAAAAAA==",
+        "gprs": 32
+      },
+      "draws": [
+        64
+      ],
+      "repeats": 1,
+      "warmup": 0,
+      "readback": "none",
+      "methods": [
+        [
+          4644,
+          0
+        ]
+      ],
+      "restore": [
+        [
+          4644,
+          0
+        ]
+      ],
+      "storage": {
+        "bytes": 5898240,
+        "va_at": 0,
+        "readback": "summary"
+      },
+      "meta": {
+        "family": "interlock",
+        "form": "none",
+        "size": [
+          1280,
+          720
+        ],
+        "stride": 2048,
+        "expect": 64,
+        "compete": true
+      },
+      "compete": true
+    },
+    {
+      "id": "interlock.atom.1280x720.timed-compete",
+      "kind": "readback",
+      "target": {
+        "format": "rgba32float",
+        "width": 1280,
+        "height": 720
+      },
+      "program": {
+        "sph": "YlQCAAAAAAAAAAAAAAAAAAAAAAAAAACwAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAADwAAAAQAAAA=",
+        "code": "Agcg4AGIHAAE//cPh/8D4AQKRwCAAbBcBf/3T4f/A+AiF+D9P7wfAAUKVwCAAbBcAA8HAAAAsFAGBbcAAABIOO8H4P0AvB8ABgZHAAAAEFwGBicAAABIOAgGBwAEgBBM7wdA5AC0XwAJ/xcABAgQTAsANwEAAMjwBwv3D4ADZFsCB+D9AIgcAAoABwAAAMjwDAAHAADg2VAMAMcAAAAwXO0fIOAAiBwADwrHAAAAZFsNAMcBAADI8A4A9wAAAMjw7//h/QC8HwAADwcAAACwUA0N9w8AAAAEDw73DwAAAATvB+D9ALwfAA0NhwAAAEg4DQ33AAAAEFwNDScAAABIOO8H4P0AvB8AEA4H4A8AAAQQEAcgAAAAHBEOBwEAACg47wfg/QC8HwAV8AcAAAAAARINhwkAgBBME/+XCQAIEEwCB8D8AbQfABQSUQEAAAHtFBQHAQAAKDgXFBcBgABkW+0HoP0ACBwA/wAHAABh2VAPAAv9/w9A4hYIAAAAYNTu5g8gPAC8HwAWFhcAAAAAHBYIAAAAINzuAAEHAAAAmO8CB8D8AbQfABQSUQEAAAHtFBQHAQAAKDgXFBcBgABkW+0HoP0AiAsA/wAHAABh2VAPAAv9/w9A4hASAQAAAPnr7/8h/ACEHwAADwcAAACwUAAW9/8PAAAEARYHAQAAKDjhB+D9AIQfAAIW9/8PAAAEAxYHAQAAKDgAAAcAAPgjBOEHIPwAvB8AAQEHAAD4IwQCAgcAAPgjBAMDBwAA+CME7f9B/ACEHwAPAAcAAAAA4wAPBwAAALBQAA8HAAAAsFA=",
+        "data": "AAAAAAAAAAAAAAAAAAAAAA==",
+        "gprs": 32
+      },
+      "draws": [
+        16,
+        32,
+        64
+      ],
+      "repeats": 3,
+      "warmup": 1,
+      "readback": "none",
+      "methods": [
+        [
+          4644,
+          2
+        ]
+      ],
+      "restore": [
+        [
+          4644,
+          0
+        ]
+      ],
+      "storage": {
+        "bytes": 5898240,
+        "va_at": 0,
+        "readback": "summary"
+      },
+      "meta": {
+        "family": "interlock",
+        "form": "atom",
+        "size": [
+          1280,
+          720
+        ],
+        "stride": 2048,
+        "expect": 448,
+        "compete": true
+      },
+      "compete": true
+    },
+    {
+      "id": "interlock.ldcg.1280x720.timed-compete",
+      "kind": "readback",
+      "target": {
+        "format": "rgba32float",
+        "width": 1280,
+        "height": 720
+      },
+      "program": {
+        "sph": "YlQCAAAAAAAAAAAAAAAAAAAAAAAAAACwAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAADwAAAAQAAAA=",
+        "code": "Agcg4AGIHAAE//cPh/8D4AQKRwCAAbBcBf/3T4f/A+AiF+D9P7wfAAUKVwCAAbBcAA8HAAAAsFAGBbcAAABIOO8H4P0AvB8ABgZHAAAAEFwGBicAAABIOAgGBwAEgBBM7wdA5AC0XwAJ/xcABAgQTAsANwEAAMjwBwv3D4ADZFsCB+D9AIgcAAoABwAAAMjwDAAHAADg2VAMAMcAAAAwXO0fIOAAiBwADwrHAAAAZFsNAMcBAADI8A4A9wAAAMjw7//h/QC8HwAADwcAAACwUA0N9w8AAAAEDw73DwAAAATvB+D9ALwfAA0NhwAAAEg4DQ33AAAAEFwNDScAAABIOO8H4P0AvB8AEA4H4A8AAAQQEAcgAAAAHBEOBwEAACg47wfg/QC8HwAV8AcAAAAAARINhwkAgBBME/+XCQAIEEwCB8D8AbQfABQSAQAAYNTuFBQHAQAAKDgXFBcBgABkW+0HoP0ACBwA/wAHAABh2VAPAAv9/w9A4hYIAAAAYNTu5g8gPAC8HwAWFhcAAAAAHBYIAAAAINzuAAEHAAAAmO8CB8D8AbQfABQSAQAAYNTuFBQHAQAAKDgXFBcBgABkW+0HoP0AiAsA/wAHAABh2VAPAAv9/w9A4hASAQAAAPnr7/8h/ACEHwAADwcAAACwUAAW9/8PAAAEARYHAQAAKDjhB+D9AIQfAAIW9/8PAAAEAxYHAQAAKDgAAAcAAPgjBOEHIPwAvB8AAQEHAAD4IwQCAgcAAPgjBAMDBwAA+CME7f9B/ACEHwAPAAcAAAAA4wAPBwAAALBQAA8HAAAAsFA=",
+        "data": "AAAAAAAAAAAAAAAAAAAAAA==",
+        "gprs": 32
+      },
+      "draws": [
+        16,
+        32,
+        64
+      ],
+      "repeats": 3,
+      "warmup": 1,
+      "readback": "none",
+      "methods": [
+        [
+          4644,
+          2
+        ]
+      ],
+      "restore": [
+        [
+          4644,
+          0
+        ]
+      ],
+      "storage": {
+        "bytes": 5898240,
+        "va_at": 0,
+        "readback": "summary"
+      },
+      "meta": {
+        "family": "interlock",
+        "form": "ldcg",
+        "size": [
+          1280,
+          720
+        ],
+        "stride": 2048,
+        "expect": 448,
+        "compete": true
+      },
+      "compete": true
+    },
+    {
+      "id": "interlock.ldcv.1280x720.timed-compete",
+      "kind": "readback",
+      "target": {
+        "format": "rgba32float",
+        "width": 1280,
+        "height": 720
+      },
+      "program": {
+        "sph": "YlQCAAAAAAAAAAAAAAAAAAAAAAAAAACwAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAADwAAAAQAAAA=",
+        "code": "Agcg4AGIHAAE//cPh/8D4AQKRwCAAbBcBf/3T4f/A+AiF+D9P7wfAAUKVwCAAbBcAA8HAAAAsFAGBbcAAABIOO8H4P0AvB8ABgZHAAAAEFwGBicAAABIOAgGBwAEgBBM7wdA5AC0XwAJ/xcABAgQTAsANwEAAMjwBwv3D4ADZFsCB+D9AIgcAAoABwAAAMjwDAAHAADg2VAMAMcAAAAwXO0fIOAAiBwADwrHAAAAZFsNAMcBAADI8A4A9wAAAMjw7//h/QC8HwAADwcAAACwUA0N9w8AAAAEDw73DwAAAATvB+D9ALwfAA0NhwAAAEg4DQ33AAAAEFwNDScAAABIOO8H4P0AvB8AEA4H4A8AAAQQEAcgAAAAHBEOBwEAACg47wfg/QC8HwAV8AcAAAAAARINhwkAgBBME/+XCQAIEEwCB8D8AbQfABQSAQAA4NTuFBQHAQAAKDgXFBcBgABkW+0HoP0ACBwA/wAHAABh2VAPAAv9/w9A4hYIAAAAYNTu5g8gPAC8HwAWFhcAAAAAHBYIAAAAINzuAAEHAAAAmO8CB8D8AbQfABQSAQAA4NTuFBQHAQAAKDgXFBcBgABkW+0HoP0AiAsA/wAHAABh2VAPAAv9/w9A4hASAQAAAPnr7/8h/ACEHwAADwcAAACwUAAW9/8PAAAEARYHAQAAKDjhB+D9AIQfAAIW9/8PAAAEAxYHAQAAKDgAAAcAAPgjBOEHIPwAvB8AAQEHAAD4IwQCAgcAAPgjBAMDBwAA+CME7f9B/ACEHwAPAAcAAAAA4wAPBwAAALBQAA8HAAAAsFA=",
+        "data": "AAAAAAAAAAAAAAAAAAAAAA==",
+        "gprs": 32
+      },
+      "draws": [
+        16,
+        32,
+        64
+      ],
+      "repeats": 3,
+      "warmup": 1,
+      "readback": "none",
+      "methods": [
+        [
+          4644,
+          2
+        ]
+      ],
+      "restore": [
+        [
+          4644,
+          0
+        ]
+      ],
+      "storage": {
+        "bytes": 5898240,
+        "va_at": 0,
+        "readback": "summary"
+      },
+      "meta": {
+        "family": "interlock",
+        "form": "ldcv",
+        "size": [
+          1280,
+          720
+        ],
+        "stride": 2048,
+        "expect": 448,
+        "compete": true
+      },
+      "compete": true
+    },
+    {
+      "id": "interlock.none.1280x720.timed-compete",
+      "kind": "readback",
+      "target": {
+        "format": "rgba32float",
+        "width": 1280,
+        "height": 720
+      },
+      "program": {
+        "sph": "YlQCAAAAAAAAAAAAAAAAAAAAAAAAAACwAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAADwAAAAAAAAA=",
+        "code": "Agcg4AGIHAAE//cPh/8D4AQKRwCAAbBcBf/3T4f/A+AiF+D9P7wfAAUKVwCAAbBcAA8HAAAAsFAGBbcAAABIOO8H4P0AvB8ABgZHAAAAEFwGBicAAABIOAgGBwAEgBBM7wdA5AC0XwAJ/xcABAgQTAsANwEAAMjwBwv3D4ADZFsCB8D8AYQHABYIAAAAYNTuFhYXAAAAABwWCAAAACDc7u8H4P0/hB8AAAEHAAAAmO8ADwcAAACwUAAW9/8PAAAE4Qcg/AC8HwABFgcBAAAoOAIW9/8PAAAEAxYHAQAAKDjhByD8AIQfAAAABwAA+CMEAQEHAAD4IwQCAgcAAPgjBO8HoP0/iB8AAwMHAAD4IwQPAAcAAAAA4wAPBwAAALBQ",
+        "data": "AAAAAAAAAAAAAAAAAAAAAA==",
+        "gprs": 32
+      },
+      "draws": [
+        16,
+        32,
+        64
+      ],
+      "repeats": 3,
+      "warmup": 1,
+      "readback": "none",
+      "methods": [
+        [
+          4644,
+          0
+        ]
+      ],
+      "restore": [
+        [
+          4644,
+          0
+        ]
+      ],
+      "storage": {
+        "bytes": 5898240,
+        "va_at": 0,
+        "readback": "summary"
+      },
+      "meta": {
+        "family": "interlock",
+        "form": "none",
+        "size": [
+          1280,
+          720
+        ],
+        "stride": 2048,
+        "expect": 448,
+        "compete": true
+      },
+      "compete": true
+    }
+  ]
+}

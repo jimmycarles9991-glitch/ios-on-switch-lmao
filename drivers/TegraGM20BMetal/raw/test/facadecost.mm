@@ -454,7 +454,7 @@ int main(int argc, char **argv)
             }
             counted[a]["profile facade_locks"] = facadeLocks;
             counted[a]["encodes"] = encodes / buffers;
-            for (NSString *key : {@"locks", @"sends", @"use_adds", @"geometry_vertices"})
+            for (NSString *key : {@"locks", @"sends", @"use_adds", @"geometry_vertices", @"descriptor_uploads"})
                 counted[a][std::string("profile ") + key.UTF8String] = per(key, encodes);
             counted[a]["profile mallocs"] = per(@"mallocs", mallocEncodes);
             counted[a]["profile frees"] = per(@"frees", mallocEncodes);

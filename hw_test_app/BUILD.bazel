@@ -1,4 +1,5 @@
 # The hardware test app (README.md): SwiftUI on iOS 17 and 27, its test media made at build time on the Mac.
+load("@bazel_skylib//rules:common_settings.bzl", "bool_flag")
 load("@rules_apple//apple:macos.bzl", "macos_command_line_application")
 load("@rules_apple//apple:resources.bzl", "apple_resource_group")
 load("@rules_cc//cc:cc_library.bzl", "cc_library")
@@ -10,7 +11,7 @@ load("@rules_swift//swift:swift_test.bzl", "swift_test")
 load("//bazel/lint:defs.bzl", "lint_files")
 load("//bazel/testing:defs.bzl", "host_test")
 load("//kernel/rules:package.bzl", "ios_binary")
-load(":apps.bzl", "hwtest_app", "ios_arm64e")
+load(":apps.bzl", "hwtest_app", "ios_arm64e", "reproducible_apps")
 
 package(default_visibility = ["//visibility:public"])
 
@@ -733,4 +734,28 @@ hwtest_app(
 ios_arm64e(
     name = "SwitchHWTest27e",
     app = ":SwitchHWTest27e_app",
+)
+
+# A second configuration of the app, which nothing but its twin sets: the twin's actions run again instead of being
+# its cache hits.
+bool_flag(
+    name = "twin",
+    build_setting_default = False,
+)
+
+reproducible_apps(
+    name = "reproducible_apps",
+    apps = [
+        ":SwitchHWTest17",
+        ":SwitchHWTest27",
+        ":SwitchHWTest27e",
+    ],
+    twin = ":SwitchHWTest27",
+)
+
+py_test(
+    name = "reproducible_test",
+    srcs = ["reproducible_test.py"],
+    data = [":reproducible_apps"],
+    env = {"APPS": "$(rootpaths :reproducible_apps)"},
 )

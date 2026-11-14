@@ -49,7 +49,7 @@ compute.nokernel	record	layer	L4	no pack kernel at the dispatch's shape: a kerne
 compute.image	record	rule	compute.shadow_load,compute.shadow_store	a texture sampled through an image of its own; the cropped-surface-view alias case is not tested
 compute.view	record	layer	L3	a view of another texel size at a kernel's texture slot: a shadow in the kernel's format L3 makes, then compute.shadow_load and compute.shadow_store
 compute.edge	record	query	non_uniform_threadgroups	dispatchThreads: with an edge threadgroup at the claimed family
-compute.predicate	record	cb-error	-	predication raw cannot run fails the command buffer, since m2v's encoders take no records (NativeBridgeMetalFrontend.mm withholds supportsCommandBufferJump): a loop (While, DoWhile), a misused record, or records in a command buffer with refused work; If/Else/End run on render enable (raw_predication.h)
+compute.predicate	record	cb-error	-	predication raw cannot run fails the command buffer, since m2v's encoders take no records (NativeBridgeMetalFrontend.mm withholds supportsCommandBufferJump): a misused record, a loop open where its unit ends, or records in a command buffer with refused work; If/Else/End and loops run on render enable (raw_predication.h, raw_loop_copies.h)
 mipmaps	record	layer	L3	a mipmapped texture made with no chain: every mipmapped texture gets NIL's chain
 mipmaps.fmt	record	rule	mip.twod,mip.twod_probed,mip.draw	formats with neither engine nor a pack mip state stay gap mip_format
 event	record	rule	recorded	MTLEvent waits and signals: Wait and Signal nodes (GPU semaphore acquire, release)

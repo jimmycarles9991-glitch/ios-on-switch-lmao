@@ -232,6 +232,45 @@ final class BenchFormsTests: XCTestCase {
         XCTAssertNotNil(why(entries[2]))
     }
 
+    func testARopAndAGridInvertAreTakenWhereTheyMeanSomething() throws {
+        let sandwich: [String: Any] = [
+            "op": "resolve", "samples": 4, "byScale": true, "du": 1 << 33, "dv": 1 << 33, "sx": 1 << 32, "sy": 1 << 32,
+            "bilinear": true, "corner": true, "rop": 0x33, "invertGrid": true,
+        ]
+        let entries = try decode([
+            ["id": "sandwich", "kind": "twod", "target": target("bgra8unorm", 32, 32), "twod": sandwich],
+            [
+                "id": "not-1to1", "kind": "twod", "target": target("bgra8unorm", 16, 16),
+                "twod": ["op": "scale", "rop": 0x33],
+            ],
+            [
+                "id": "driver-rop", "kind": "twod", "target": target("bgra8unorm", 32, 32),
+                "twod": ["op": "resolve", "samples": 4, "rop": 0x33],
+            ],
+            [
+                "id": "scale-invert", "kind": "twod", "target": target("bgra8unorm", 16, 16),
+                "twod": ["op": "scale", "invertGrid": true],
+            ],
+            [
+                "id": "rop-range", "kind": "twod", "target": target("bgra8unorm", 16, 16),
+                "twod": ["op": "fill", "colorFormat": 0xCF, "rop": 256],
+            ],
+            ["id": "srgb-invert", "kind": "twod", "target": target("bgra8unorm_srgb", 32, 32), "twod": sandwich],
+        ])
+        guard case .experiment(let resolve) = entries[0], let t = resolve.twod else {
+            return XCTFail(why(entries[0]) ?? "")
+        }
+        XCTAssertEqual(t.rop, 0x33)
+        XCTAssertTrue(t.invertGrid && t.byScale)
+        guard case .experiment(let copy) = entries[1], let c = copy.twod else { return XCTFail(why(entries[1]) ?? "") }
+        XCTAssertEqual(c.rop, 0x33)
+        XCTAssertFalse(c.invertGrid)
+        XCTAssertTrue(why(entries[2])?.contains("twod.rop") == true)
+        XCTAssertTrue(why(entries[3])?.contains("twod.invertGrid") == true)
+        XCTAssertTrue(why(entries[4])?.contains("twod.rop") == true)
+        XCTAssertTrue(why(entries[5])?.contains("solid fill") == true)
+    }
+
     func testTheHistogramCountsEachTexelsLargestChannelDifference() {
         let a = Data([10, 20, 30, 40, 0, 0, 0, 0, 255, 255, 255, 255])
         let b = Data([10, 21, 30, 38, 0, 0, 0, 0, 0, 255, 255, 255])

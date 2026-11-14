@@ -10,6 +10,9 @@ public struct BenchOutcome: Sendable {
     public var texels: Data?
     /// The experiment's storage buffer after its last command buffer
     public var storage: Data?
+    /// A `compete` experiment's other channel: the command buffers it finished meanwhile, and why it stopped early
+    public var competitorBuffers = 0
+    public var competitorWhy = ""
     public var lostError: UInt32 = 0
     public var faultVA: UInt64 = 0
     public var templateKey: UInt64 = 0
@@ -74,6 +77,9 @@ public enum BenchResult {
                         "crc32": hex(UInt64(crc32(split.frontier)), digits: 8),
                         "frontier": split.frontier.base64EncodedString(),
                     ] as [String: Any]
+            }
+            if e.compete {
+                top["competitor"] = ["buffers": outcome.competitorBuffers, "why": outcome.competitorWhy]
             }
         case .invalid(_, let kind, _):
             top["kind"] = kind

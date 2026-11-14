@@ -4,9 +4,10 @@ import Foundation
 /// tools/benchloop/protocol.py's batch as the bench loop decodes it: every limit and allowed method range is the
 /// same (tools/benchloop/agreement_test.py compares them), so the host's and the app's checks agree.
 public enum BenchProtocol {
-    public static let version = "benchloop/5"
-    /// benchloop/3 is benchloop/4 without storage and the interlock control
-    public static let versions = ["benchloop/3", "benchloop/4", version]
+    public static let version = "benchloop/6"
+    /// benchloop/3 is benchloop/4 without storage and the interlock control; benchloop/5 is benchloop/6 without
+    /// compete, code past 64 KiB, rop and invertGrid
+    public static let versions = ["benchloop/3", "benchloop/4", "benchloop/5", version]
     public static let maxExperiments = 256
     public static let maxSide = 2048
     public static let maxDrawCounts = 16
@@ -14,7 +15,7 @@ public enum BenchProtocol {
     public static let maxRepeats = 64
     public static let maxWarmup = 16
     public static let maxCommandBuffers = 1024
-    public static let maxCode = 64 * 1024
+    public static let maxCode = 128 * 1024
     public static let maxData = 64 * 1024
     public static let maxMethodPairs = 1024
     public static let maxStorage = 16 * 1024 * 1024
@@ -63,6 +64,7 @@ public enum BenchProtocol {
         "id", "kind", "target", "rect", "draws", "repeats", "warmup", "clear", "readback", "template", "fill",
         "program",
         "compute", "twod", "methods", "restore", "targets", "source", "compare", "compressed", "pack", "storage",
+        "compete",
     ]
     public static let targetKeys: Set<String> = ["format", "width", "height"]
     public static let programKeys: Set<String> = ["code", "data", "sph", "gprs", "dataBound"]
@@ -73,7 +75,7 @@ public enum BenchProtocol {
     public static let maxChain = 3
     public static let twodKeys: Set<String> = [
         "op", "fmt2d", "colorFormat", "color", "du", "dv", "sx", "sy", "bilinear", "corner", "reference", "bracketed",
-        "samples", "clip", "clearFirst", "tiled", "byScale",
+        "samples", "clip", "clearFirst", "tiled", "byScale", "rop", "invertGrid",
     ]
     public static let sourceKeys: Set<String> = ["format", "width", "height", "data"]
     /// Target formats the 2D engine names a surface format for (raw_probe_ops.h probeTwodFormat)
@@ -145,6 +147,10 @@ public struct BenchTwod: Equatable, Sendable {
     public let tiled: Bool
     /// A resolve read by a scale of the sample grid with this operation's du, dv, sx, sy, bilinear and corner
     public let byScale: Bool
+    /// A ROP3 code on the destination's codes (raw_probe_ops.h ProbeOp::rop), 0 SRCCOPY; `invertGrid`: a by-scale
+    /// resolve's sample grid complemented in place first
+    public let rop: UInt32
+    public let invertGrid: Bool
 }
 
 /// What a scale, resolve or copy reads: texels the experiment gives, else the app's own picture
@@ -219,6 +225,8 @@ public struct BenchExperiment: Equatable, Sendable {
     /// A pack experiment's form and quads (its state is templateKey)
     public var pack: BenchPack?
     public var storage: BenchStorage? = nil
+    /// A second bench device draws on its own channel while this experiment runs (kit/BenchCompetition.swift)
+    public var compete = false
 
     public var commandBuffers: Int { draws.count * Int(repeats + warmup) }
 }

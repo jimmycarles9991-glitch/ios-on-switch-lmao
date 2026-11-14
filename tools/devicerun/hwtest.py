@@ -48,6 +48,7 @@ TESTS: dict[str, bool] = {
             'gpu.raw.framebuffer_fetch',
             'gpu.raw.framebuffer_fetch_depth',
             'gpu.raw.fetch_blend_order',
+            'gpu.raw.interlock_spin',
             'gpu.raw.pass_fusion',
             'gpu.upload.glyph_atlas',
             'gpu.upload.replace_region',

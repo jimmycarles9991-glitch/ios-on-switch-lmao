@@ -89,6 +89,10 @@ struct FetchBlendCostTest: HWTest {
         if kind == "raw" {
             metrics.set("fetch", RawFacade.fetchRoutes(before: before, after: RawFacade.counters(of: gpu.device)))
         }
+        let heavy = try await FetchBlendHeavy.run(gpu, draws: 4, runs: Self.runs)
+        metrics.set("heavy_draws", 4)
+        metrics.merge(heavy.metrics)
+        if !heavy.passed { return .fail(heavy.reasons().joined(separator: "; "), metrics, proof: gpu.proof) }
         return .pass(metrics, proof: gpu.proof)
     }
 }

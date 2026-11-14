@@ -15,11 +15,12 @@ Profiles (//bazel:profile, r17-bazel's one switch):
            byte the one cargo built (each crate keeps cargo's -C metadata/extra-filename: crates.MODULE.bazel and the
            m2v crates' BUILD files; the source paths are remapped to the ones cargo's build named).
   debug    the default, for edit-build cycles: every crate its own action, no LTO of any kind (not even rustc's
-           thin-local LTO between a crate's codegen units), many codegen units, line tables, and our own crates
-           (INCREMENTAL_CRATES) compiled incrementally. opt-level 3 with debug assertions and overflow checks off, as in
-           release: the device runs this bridge for every app's Metal, and m2v's debug assertions re-derive and compare
-           whole bind states on every draw (a CA-shaped frame took 2.7x the CPU of the release bridge at opt-level 1
-           with them on).
+           thin-local LTO between a crate's codegen units), many codegen units, line tables. opt-level 3 with debug
+           assertions and overflow checks off, as in release: the device runs this bridge for every app's Metal, and
+           m2v's debug assertions re-derive and compare whole bind states on every draw (a CA-shaped frame took 2.7x the
+           CPU of the release bridge at opt-level 1 with them on). Never rustc's -C incremental: a session lives in one
+           output base and the rlib's bytes depend on it, so two worktrees of one commit compiled m2v to different bytes
+           under one action key, and every shader seed bucket keyed on the tools built from m2v ran again in each.
 
 Nothing here is global: the flags reach rules_rust through its own build settings, set by the transition on this
 rule's `crate` only, so other Rust in the build (NVK's NAK, r18-mesa) keeps its own flags.
@@ -29,7 +30,6 @@ IOS_PLATFORM = "//bazel/platforms:ios_arm64"
 
 _PLATFORMS = "//command_line_option:platforms"
 _PROFILE = "//bazel:profile"
-_INCREMENTAL = "//bazel/rust:incremental"
 _EXTRA_FLAGS = "@rules_rust//rust/settings:extra_rustc_flags"
 _EXTRA_ENV = "@rules_rust//rust/settings:extra_rustc_env"
 _PER_CRATE = "@rules_rust//rust/settings:per_crate_rustc_flag"
@@ -96,23 +96,6 @@ _ROOT_FLAGS = {
 }
 _ROOT_FLAGS[("device_mac", "release")] = _ROOT_FLAGS[("device", "release")]
 
-# The debug profile compiles the crates we edit incrementally (rustc's -C incremental; bazel/rust/rules_rust.patch): an
-# edit recompiles what it reaches in that crate and in its dependents, not all of them. The sessions live below the output
-# base (one per configuration and action kind), outside Bazel's caches; the rlibs are declared outputs as ever. The
-# crates.io crates never change and keep the sandbox. 256 codegen units: rustc's own for incremental work (a small unit
-# is reused unless an edit reaches it). Release never compiles incrementally.
-INCREMENTAL_CRATES = [
-    "//third_party/m2v/",
-    "//gpu:bridge",
-    "//drivers/TegraGM20BMetal/corpus/runner:",
-]
-
-_INCREMENTAL_FLAGS = [
-    # Below the output base (the action runs unsandboxed, in the execroot <output base>/execroot/_main).
-    "-Cincremental=${pwd}/../../rust_incremental",
-    "-Ccodegen-units=256",
-]
-
 def _filter(label):
     """A rules_rust per-crate filter for exactly `label`'s crate (its label without the repository's @s)."""
     text = str(label)
@@ -128,9 +111,7 @@ def _rust_transition_impl(settings, attr):
         # Strip nothing whatever the compilation mode (rules_rust strips debug info under -c opt, cargo did not).
         _EXTRA_FLAGS: REMAP_FLAGS + _CRATE_FLAGS[key] + ["-Cstrip=none"],
         _EXTRA_ENV: _DEPLOYMENT_ENV,
-        _PER_CRATE: ["{}@{}".format(_filter(attr.crate), flag) for flag in _ROOT_FLAGS.get(key, [])] + (
-            ["{}@{}".format(crate, flag) for crate in INCREMENTAL_CRATES for flag in _INCREMENTAL_FLAGS] if settings[_PROFILE] == "debug" and settings[_INCREMENTAL] else []
-        ),
+        _PER_CRATE: ["{}@{}".format(_filter(attr.crate), flag) for flag in _ROOT_FLAGS.get(key, [])],
         # Each crate's LTO form is the flags' above; rules_rust adds none of its own.
         _LTO: "manual",
         # A crate's dependents start on its metadata (.rmeta) while its code is still being generated.
@@ -139,7 +120,7 @@ def _rust_transition_impl(settings, attr):
 
 _rust_transition = transition(
     implementation = _rust_transition_impl,
-    inputs = [_PLATFORMS, _PROFILE, _INCREMENTAL],
+    inputs = [_PLATFORMS, _PROFILE],
     outputs = [_PLATFORMS, _EXTRA_FLAGS, _EXTRA_ENV, _PER_CRATE, _LTO, _PIPELINED],
 )
 

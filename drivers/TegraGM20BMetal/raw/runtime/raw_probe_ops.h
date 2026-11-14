@@ -47,6 +47,9 @@ struct ProbeOp {
     // none (the reference fill's surface clip stays)
     uint32_t clip[4] = {};
     uint32_t method = 0, value = 0;
+    // Fill and Scale: 0 SRCCOPY; else a ROP3 code on the destination's codes (SET_OPERATION ROP, xf86-video-nouveau's
+    // NVC0EXASetROP form, the pattern held at all ones), SRCCOPY set again after
+    uint8_t rop = 0;
 };
 
 constexpr uint32_t kProbeBracketWords = 2 + 2 + 2 + 2 + 2;
@@ -65,6 +68,25 @@ namespace probe_ops_detail {
 constexpr uint32_t kSurfaceWords = 1 + 4 + 2 + 1 + 4;
 constexpr uint32_t kReferenceFillWords = 2 + 2 + 2 + 5 + 2 + 2;
 constexpr uint32_t kClipWords = 5 + 2 + 2;
+constexpr uint32_t kRopWords = 2 + 2 + 7 + 2;
+
+inline void ropOn(Push &p, const ProbeOp &op)
+{
+    if (!op.rop)
+        return;
+    p.m(NV902D_SET_OPERATION, NV902D_SET_OPERATION_V_ROP, SUBC_2D);
+    p.m(NV902D_SET_ROP, op.rop, SUBC_2D);
+    p.inc(NV902D_SET_MONOCHROME_PATTERN_COLOR_FORMAT,
+          {NV902D_SET_MONOCHROME_PATTERN_COLOR_FORMAT_V_A8R8G8B8, NV902D_SET_MONOCHROME_PATTERN_FORMAT_V_LE_M1, ~0u,
+           ~0u, ~0u, ~0u},
+          SUBC_2D);
+}
+
+inline void ropOff(Push &p, const ProbeOp &op)
+{
+    if (op.rop)
+        p.m(NV902D_SET_OPERATION, NV902D_SET_OPERATION_V_SRCCOPY, SUBC_2D);
+}
 
 inline void clipOn(Push &p, const ProbeOp &op)
 {
@@ -172,8 +194,9 @@ inline size_t probeOpWords(const ProbeOp &op)
         return 2;
     if (op.kind == ProbeOpKind::Fill)
         return 2 + probe_ops_detail::kSurfaceWords + 2 + 5 + 4 + 5 + probe_ops_detail::kReferenceFillWords +
-               probe_ops_detail::kClipWords;
-    return 2 + 2 * probe_ops_detail::kSurfaceWords + 2 + 2 + 3 * 5 + probe_ops_detail::kClipWords;
+               probe_ops_detail::kClipWords + probe_ops_detail::kRopWords;
+    return 2 + 2 * probe_ops_detail::kSurfaceWords + 2 + 2 + 3 * 5 + probe_ops_detail::kClipWords +
+           probe_ops_detail::kRopWords;
 }
 
 inline void emitProbeOp(Push &p, const ProbeOp &op)
@@ -193,6 +216,7 @@ inline void emitProbeOp(Push &p, const ProbeOp &op)
             p.m(NV902D_SET_CLIP_ENABLE, NV902D_SET_CLIP_ENABLE_V_TRUE, SUBC_2D);
         }
         probe_ops_detail::clipOn(p, op);
+        probe_ops_detail::ropOn(p, op);
         if (op.colorFormat == kTwodColorF32x4) {
             // SET_RENDER_SOLID_PRIM_COLOR (0x588) lands in COLOR0: written after the four floats it stored red 0 on chip
             p.inc(NV902D_RENDER_SOLID_PRIM_MODE, {NV902D_RENDER_SOLID_PRIM_MODE_V_RECTS, op.colorFormat}, SUBC_2D);
@@ -204,6 +228,7 @@ inline void emitProbeOp(Push &p, const ProbeOp &op)
         p.inc(NV902D_RENDER_SOLID_PRIM_POINT_SET_X(0), {op.dx, op.dy, op.dx + op.dw, op.dy + op.dh}, SUBC_2D);
         if (op.referenceFill || op.clip[2])
             p.m(NV902D_SET_CLIP_ENABLE, NV902D_SET_CLIP_ENABLE_V_FALSE, SUBC_2D);
+        probe_ops_detail::ropOff(p, op);
         return;
     }
     probe_ops_detail::surface(p, NV902D_SET_SRC_FORMAT, op.src);
@@ -218,10 +243,12 @@ inline void emitProbeOp(Push &p, const ProbeOp &op)
     p.inc(NV902D_SET_PIXELS_FROM_MEMORY_DU_DX_FRAC,
           {uint32_t(op.du), uint32_t(op.du >> 32), uint32_t(op.dv), uint32_t(op.dv >> 32)}, SUBC_2D);
     probe_ops_detail::clipOn(p, op);
+    probe_ops_detail::ropOn(p, op);
     p.inc(NV902D_SET_PIXELS_FROM_MEMORY_SRC_X0_FRAC,
           {uint32_t(op.sx), uint32_t(op.sx >> 32), uint32_t(op.sy), uint32_t(op.sy >> 32)}, SUBC_2D);
     if (op.clip[2])
         p.m(NV902D_SET_CLIP_ENABLE, NV902D_SET_CLIP_ENABLE_V_FALSE, SUBC_2D);
+    probe_ops_detail::ropOff(p, op);
 }
 
 }  // namespace raw

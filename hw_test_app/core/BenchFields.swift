@@ -91,6 +91,7 @@ struct BenchFields {
             singleTarget: targets == 1, templateKey: templateKey, twod: forms.twod, source: forms.source,
             compare: forms.compare, compressed: forms.compressed, outputBytes: outputBytes, storage: storage)
         (experiment.chain, experiment.chainSchedule) = chain
+        experiment.compete = try compete(fields["compete"], kind: kind)
         if kind == .pack {
             guard templateKey != 0 else { throw BenchInvalid("pack: the state's key hash in template") }
             guard draws == [1] else {
@@ -121,7 +122,7 @@ struct BenchFields {
         try Self.keys(p, sph ? BenchProtocol.programKeys : BenchProtocol.computeKeys, field)
         let code = try bytes(p["code"] ?? ("" as Any), "\(field).code")
         guard !code.isEmpty, code.count <= BenchProtocol.maxCode, code.count % 32 == 0 else {
-            throw BenchInvalid("\(field).code: whole 32-byte bundles, at most 64 KiB")
+            throw BenchInvalid("\(field).code: whole 32-byte bundles, at most 128 KiB")
         }
         let data = try bytes(p["data"] ?? ("" as Any), "\(field).data")
         guard data.count <= BenchProtocol.maxData, data.count % 16 == 0 else {
@@ -204,6 +205,14 @@ struct BenchFields {
             throw BenchInvalid("storage.readback is summary or full")
         }
         return BenchStorage(bytes: UInt32(bytes), vaAt: UInt32(vaAt), readback: readback)
+    }
+
+    private func compete(_ value: Any?, kind: BenchKind) throws -> Bool {
+        guard let value else { return false }
+        guard kind == .fragment || kind == .readback, let flag = value as? NSNumber,
+            CFGetTypeID(flag) == CFBooleanGetTypeID()
+        else { throw BenchInvalid("compete is true or false, for fragment and readback") }
+        return flag.boolValue
     }
 
     func bytes(_ value: Any, _ field: String) throws -> Data {

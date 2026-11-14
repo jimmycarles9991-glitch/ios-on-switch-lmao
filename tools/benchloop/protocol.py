@@ -1,4 +1,4 @@
-"""The batch and result files the host and HW Test's bench loop exchange (benchloop/5).
+"""The batch and result files the host and HW Test's bench loop exchange (benchloop/6).
 
 A batch is one JSON object; each experiment in it is validated here before it is written, and again by the app
 (hw_test_app/bench) before it runs. Byte strings travel as base64. Limits keep every command buffer far below the
@@ -12,7 +12,7 @@ from dataclasses import dataclass
 
 from tools.benchloop import ibprogram, ticket
 
-PROTOCOL = 'benchloop/5'
+PROTOCOL = 'benchloop/6'
 NAME = re.compile(r'^[a-z0-9][a-z0-9_.-]{0,63}$')
 KINDS = ('noop', 'known', 'fragment', 'compute', 'readback', 'twod', 'pack')
 TEMPLATE = re.compile(r'^[0-9a-f]{16}$')
@@ -25,7 +25,7 @@ MAX_DRAWS = 256
 MAX_REPEATS = 64
 MAX_WARMUP = 16
 MAX_COMMAND_BUFFERS = 1024
-MAX_CODE = 64 * 1024
+MAX_CODE = 128 * 1024
 MAX_DATA = 64 * 1024
 MAX_METHOD_PAIRS = 1024
 # A draw's zeroed storage buffer (its address written into the shader data), at most
@@ -113,13 +113,13 @@ EXPERIMENT_KEYS = {
 }
 EXPERIMENT_KEYS |= {'program', 'compute', 'twod', 'methods', 'restore', 'targets', 'source', 'compare', 'compressed'}
 EXPERIMENT_KEYS |= {'pack'}
-EXPERIMENT_KEYS |= {'storage'}
+EXPERIMENT_KEYS |= {'storage', 'compete'}
 EXPERIMENT_KEYS |= {'meta', 'expect'}
 TARGET_KEYS = {'format', 'width', 'height'}
 PROGRAM_KEYS = {'code', 'data', 'sph', 'gprs', 'dataBound'}
 COMPUTE_KEYS = {'code', 'data', 'gprs', 'threads', 'groups', 'output', 'chain', 'schedule'}
 TWOD_KEYS = {'op', 'fmt2d', 'colorFormat', 'color', 'du', 'dv', 'sx', 'sy', 'bilinear', 'corner'}
-TWOD_KEYS |= {'reference', 'bracketed', 'samples', 'clip', 'clearFirst', 'tiled', 'byScale'}
+TWOD_KEYS |= {'reference', 'bracketed', 'samples', 'clip', 'clearFirst', 'tiled', 'byScale', 'rop', 'invertGrid'}
 SOURCE_KEYS = {'format', 'width', 'height', 'data'}
 TWOD_OPS = ('fill', 'scale', 'resolve')
 # Target formats the 2D engine names a surface format for (raw_probe_ops.h probeTwodFormat), by MTLPixelFormat
@@ -271,7 +271,7 @@ def _program(program: object, field: str) -> None:
     _require(isinstance(program, dict), f'{field} is an object')
     _keys(program, COMPUTE_KEYS if field == 'compute' else PROGRAM_KEYS, field)
     code = unb64(program.get('code', ''))
-    _require(0 < len(code) <= MAX_CODE and len(code) % 32 == 0, f'{field}.code: whole 32-byte bundles, at most 64 KiB')
+    _require(0 < len(code) <= MAX_CODE and len(code) % 32 == 0, f'{field}.code: whole 32-byte bundles, at most 128 KiB')
     data = unb64(program.get('data', ''))
     _require(len(data) <= MAX_DATA and len(data) % 16 == 0, f'{field}.data: 16-byte multiples, at most 64 KiB')
     _count(program.get('gprs'), 1, 255, f'{field}.gprs')
@@ -315,14 +315,21 @@ def _twod(e: dict, target: Target) -> None:
     _require(isinstance(color, list) and len(color) == 4, 'twod.color is four words')
     for c in color:
         _count(c, 0, 0xFFFFFFFF, 'twod.color')
-    for field in ('fmt2d', 'colorFormat'):
+    for field in ('fmt2d', 'colorFormat', 'rop'):
         _count(t.get(field, 0), 0, 255, f'twod.{field}')
     for field in ('du', 'dv', 'sx', 'sy'):
         _count(t.get(field, 0), 0, (1 << 63) - 1, f'twod.{field}')
-    for field in ('bilinear', 'corner', 'bracketed', 'reference', 'clearFirst', 'tiled', 'byScale'):
+    for field in ('bilinear', 'corner', 'bracketed', 'reference', 'clearFirst', 'tiled', 'byScale', 'invertGrid'):
         _flag(t.get(field, False), f'twod.{field}')
     _require(not t.get('reference') or op == 'fill', 'twod.reference is the reference fill: fill only')
     _require(op == 'resolve' or 'byScale' not in t, "twod.byScale: a resolve's")
+    by_scale = op == 'resolve' and t.get('byScale')
+    _require(not t.get('rop') or op != 'resolve' or by_scale, "twod.rop: a fill's, a scale's or a by-scale resolve's")
+    _require(not t.get('invertGrid') or by_scale, "twod.invertGrid: a by-scale resolve's")
+    _require(
+        not t.get('invertGrid') or TWOD_DESTINATION.get(FORMATS[target.format][0]) in SOLID_FILL_FORMATS,
+        'twod.invertGrid: the grid is inverted by a fill in its own 2D format, one a solid fill writes',
+    )
     _require(op != 'resolve' or not ({'clip', 'clearFirst', 'tiled'} & set(t)), 'a resolve: no clip, clear or tiling')
     if 'clip' in t:
         clip = t['clip']
@@ -474,6 +481,9 @@ def _forms(e: dict, target: Target) -> None:
         _require('source' not in e, 'only twod experiments read a source')
     if 'storage' in e:
         _storage(e)
+    if 'compete' in e:
+        _require(e['kind'] in ('fragment', 'readback'), 'compete: for draws')
+        _flag(e['compete'], 'compete')
     if 'compressed' in e:
         _require(e['kind'] == 'readback' and _flag(e['compressed'], 'compressed'), 'compressed: a readback target')
     if 'compare' in e:

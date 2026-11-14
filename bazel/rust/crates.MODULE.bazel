@@ -94,9 +94,11 @@ crate.annotation(
 )
 
 # sha2-asm's build script compiles its one .S with the cc crate: Xcode's clang and SDKs (the declared host input,
-# bazel/host), found through DEVELOPER_DIR.
+# bazel/host), found through DEVELOPER_DIR. With debug info on (the device's debug profile) clang records the sandbox's
+# absolute path as the object's compilation directory, so every run made other bytes under one action key.
 crate.annotation(
     build_script_env = {
+        "CFLAGS": "-ffile-compilation-dir=.",
         "IPHONEOS_DEPLOYMENT_TARGET": "17.0",
         "MACOSX_DEPLOYMENT_TARGET": "14.0",
     },

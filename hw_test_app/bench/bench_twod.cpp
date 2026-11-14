@@ -13,6 +13,7 @@ namespace {
 constexpr uint32_t kTriangleStrip = 4;
 constexpr uint32_t kA8b8g8r8 = 0xd5;  // NV902D_SET_RENDER_SOLID_PRIM_COLOR_FORMAT_V_A8B8G8R8
 constexpr uint64_t kOne = 1ull << 32;
+constexpr uint8_t kDstInvert = 0x55;
 
 raw::ProbeSurface surface(const raw::Texture &t, uint32_t fmt2d, uint32_t width, uint32_t height)
 {
@@ -89,6 +90,7 @@ raw::ProbeOp operation(const switch_bench_experiment &x, const raw::Texture &tar
     memcpy(op.color, w.color, sizeof op.color);
     op.referenceFill = w.reference != 0;
     op.bracketed = w.bracketed != 0;
+    op.rop = uint8_t(w.rop);
     if (w.clip[2]) {
         op.clip[0] = w.clip[0];
         op.clip[1] = w.clip[1];
@@ -134,6 +136,21 @@ raw::ProbeOp gridScale(const switch_bench_experiment &x, const raw::Texture &ms,
     op.sy = w.sy;
     op.bilinear = w.bilinear != 0;
     op.corner = w.corner != 0;
+    op.rop = uint8_t(w.rop);
+    return op;
+}
+
+// The whole sample grid complemented in place: a fill under ROP3 DSTINVERT, whose colour it never writes, in the grid's
+// own 2D format (runTwod holds that to probeSolidFill)
+raw::ProbeOp gridInvert(const raw::Texture &ms, const raw::fx::MipChain &grid)
+{
+    raw::ProbeOp op;
+    op.kind = raw::ProbeOpKind::Fill;
+    op.dst = surface(ms, 0, ms.width << grid.sxLog2, ms.height << grid.syLog2);
+    op.dw = op.dst.width;
+    op.dh = op.dst.height;
+    op.colorFormat = op.dst.fmt2d;
+    op.rop = kDstInvert;
     return op;
 }
 
@@ -291,6 +308,9 @@ void runTwod(switch_bench &b, const switch_bench_experiment &x, switch_bench_res
         return fail(r, SWITCH_BENCH_INVALID, "a format the 2D engine names none of");
     if (w.op == SWITCH_BENCH_TWOD_FILL && !raw::probeSolidFill(fmt2d, w.color_format))
         return fail(r, SWITCH_BENCH_INVALID, "a fill's colour format is its destination's own, not sRGB");
+    const uint32_t gridFormat = raw::probeTwodFormat(x.format);
+    if (w.invert_grid && !raw::probeSolidFill(gridFormat, gridFormat))
+        return fail(r, SWITCH_BENCH_INVALID, "a grid inverted by a fill: a format a solid fill writes, not sRGB");
     Source source(b, x);
     const raw::Texture *read = w.op == SWITCH_BENCH_TWOD_FILL ? nullptr : source.texture(x);
     if (w.op != SWITCH_BENCH_TWOD_FILL && !read)
@@ -323,7 +343,9 @@ void runTwod(switch_bench &b, const switch_bench_experiment &x, switch_bench_res
               w.reference,
               resolving ? ms.samples : 1u,
               w.clip[2] != 0,
-              w.clear_first};
+              w.clear_first,
+              w.rop,
+              resolving && w.resolve_by_scale && w.invert_grid};
     const raw::ProbeOp op = operation(x, t, read);
     const uint32_t bpp = raw::formatInfo(x.format)->bpp;
     Submission s(b, x, r);
@@ -355,6 +377,8 @@ void runTwod(switch_bench &b, const switch_bench_experiment &x, switch_bench_res
                                      raw::BlitEncoder *e = cb.blit();
                                      if (!e)
                                          return s.refused("the raw path opened no blit encoder");
+                                     if (w.invert_grid)
+                                         e->probe(gridInvert(ms, grid), nullptr, ms);
                                      e->probe(gridScale(x, ms, t, grid), &ms, t);
                                      e->end();
                                      return true;

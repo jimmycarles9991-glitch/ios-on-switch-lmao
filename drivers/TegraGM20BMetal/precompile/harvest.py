@@ -20,10 +20,10 @@ usage: harvest.py <corpus.log> --build <IPSW build> <pipelines.log>...
           Library/Caches/m2v, Library/Caches/m2v-<process> or tmp/m2v, tmp/m2v-<process>, a daemon's user cache or
           temp directory), its pipelines.log and pipelines.log.old. Read only, but for one write: a system container's
           Library and Library/Caches are mode 000, so for a container named by --open (default: backboardd's,
-          SpringBoard's, Preferences' and Spotlight's, by SYSTEM_CACHES' UUIDs or by their container manager
-          identifiers, SYSTEM_IDENTIFIERS) or every one with --open-all, each closed directory on the
-          way is made u+rx for the read and given its mode back at once (and checked); other closed containers are
-          skipped and counted.
+          SpringBoard's, PosterBoard's, Preferences' and Spotlight's, by SYSTEM_CACHES' UUIDs or by their container
+          manager identifiers, SYSTEM_IDENTIFIERS) or every one with --open-all, each closed directory on the way is
+          made u+rx for the read and given its mode back at once (and checked); other closed containers are skipped
+          and counted.
 --save    also copy each m2v cache found, whole (v1/, msl/, libs/, the journals, makings.log), to <dir>/<where it was>,
           e.g. the boot's log folder. makings.log (m2v 0118, the plugin turns it on in every cache): one line per driver
           record the process wrote (a compile), its name and the making's description; a precompile run with
@@ -87,7 +87,13 @@ SYSTEM_CACHES = {
     '5BDBB9F1-C07A-4290-9D80-EA49A6BA2D68': 'Preferences',
     'AA90E4B6-B0E4-4776-8E70-A4444E65642F': 'Spotlight',
 }
-SYSTEM_IDENTIFIERS = {'com.apple.backboardd', 'com.apple.springboard', 'com.apple.Preferences', 'com.apple.Spotlight'}
+SYSTEM_IDENTIFIERS = {
+    'com.apple.backboardd',
+    'com.apple.springboard',
+    'com.apple.PosterBoard',
+    'com.apple.Preferences',
+    'com.apple.Spotlight',
+}
 CONTAINER_METADATA = '.com.apple.mobile_container_manager.metadata.plist'
 JOURNALS = ('pipelines.log.old', 'pipelines.log')  # oldest first: the frontend renames the journal past 2 MiB
 CONTENT = (
@@ -125,8 +131,9 @@ def normal(line: str, build: str | None = None) -> tuple[str | None, str | None]
 def _with_build(line: str, build: str) -> str:
     head, sep, rest = line.partition(' | ')
     if line.startswith('R '):
+        # first among the state's descriptors, where every corpus line has it, whatever the journal put before label=
         tokens = head.split(' ')
-        at = next((i + 1 for i, t in enumerate(tokens) if t.startswith('label=')), 2)
+        at = next((i for i, t in enumerate(tokens) if DESCRIPTOR.match(t)), len(tokens))
         return ' '.join([*tokens[:at], f'os={build}', *tokens[at:]]) + sep + rest
     return f'{head} os={build}{sep}{rest}'
 

@@ -13,11 +13,13 @@ from tools.gpu.maxwell.isa import field as bits
 SLOT_FIELDS = (8, 20, 39)
 READS_A = {'FADD', 'FMUL', 'FFMA', 'FMNMX', 'FSETP', 'HADD2', 'HMUL2', 'HFMA2', 'MUFU', 'IADD', 'IADD32I', 'IMUL'}
 READS_A |= {'LOP', 'LOP32I', 'SHL', 'SHR', 'IMNMX', 'BFE', 'SEL', 'PRMT', 'ISETP', 'IPA'}
-READS_C = {'FFMA', 'HFMA2', 'PRMT', 'IPA'}
-WRITES_PRED = {'FSETP', 'ISETP'}
-NO_DESTINATION = {'NOP', 'EXIT'}
+READS_A |= {'XMAD', 'LOP3', 'IADD3', 'ISCADD', 'ATOM', 'RED', 'LDG', 'STG', 'HSETP2'}
+READS_C = {'FFMA', 'HFMA2', 'PRMT', 'IPA', 'XMAD', 'LOP3', 'IADD3'}
+WRITES_PRED = {'FSETP', 'ISETP', 'HSETP2'}
+NO_DESTINATION = {'NOP', 'EXIT', 'RED', 'STG'}
 # ir.rs has_fixed_latency for SM5x: these finish whenever they finish and use a scoreboard; the rest do not
-VARIABLE = {'MUFU', 'RRO', 'F2F', 'F2I', 'I2F', 'I2I', 'IMUL', 'FLO', 'POPC', 'BREV', 'IPA', 'LDC'}
+VARIABLE = {'MUFU', 'RRO', 'F2F', 'F2I', 'I2F', 'I2I', 'IMUL', 'FLO', 'POPC', 'BREV', 'IPA', 'LDC', 'S2R'}
+VARIABLE |= {'ATOM', 'RED', 'LDG', 'STG'}
 MUFU_FUNCS = {0: 'COS', 1: 'SIN', 2: 'EX2', 3: 'LG2', 4: 'RCP', 5: 'RSQ', 8: 'SQRT'}
 
 

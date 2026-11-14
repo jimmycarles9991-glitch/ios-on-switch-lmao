@@ -83,9 +83,10 @@ bool valid(const switch_bench_experiment &x, switch_bench_result &r)
     const bool programmed = x.kind == SWITCH_BENCH_FRAGMENT || x.kind == SWITCH_BENCH_READBACK ||
                             x.kind == SWITCH_BENCH_COMPUTE || x.compare == SWITCH_BENCH_COMPARE_PROGRAM;
     if (why.empty() && programmed &&
-        (!p.code || !p.code_bytes || p.code_bytes % 32 || p.code_bytes > 0x10000 || p.data_bytes % 16 ||
+        (!p.code || !p.code_bytes || p.code_bytes % 32 || p.code_bytes > 0x20000 || p.data_bytes % 16 ||
          p.data_bytes > 0x10000 || !p.gprs || p.gprs > 255 || (x.kind != SWITCH_BENCH_COMPUTE && !p.sph)))
-        why = "program: code in whole bundles, data in 16-byte steps, both at most 64 KiB, 1..255 registers, an SPH";
+        why = "program: code in whole bundles at most 128 KiB, data in 16-byte steps at most 64 KiB, 1..255 registers, "
+              "an SPH";
     else if (why.empty() && programmed && x.kind != SWITCH_BENCH_COMPUTE && !readsPositionW(p.sph))
         why = "program.sph: a pixel header must read position W (bit 191), or the GPU traps it";
     else if (why.empty() && programmed && p.data_bound && p.data_bound > ((p.data_bytes + 0xff) & ~size_t(0xff)))

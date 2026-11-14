@@ -157,6 +157,18 @@ extension BenchFields {
             }
             clip = c.map(UInt32.init)
         }
+        let scale = try byScale(op, t)
+        let rop = UInt32(try count(t["rop"] ?? (0 as Any), 0...255, "twod.rop"))
+        guard rop == 0 || op != .resolve || scale else {
+            throw BenchInvalid("twod.rop: a fill's, a scale's or a by-scale resolve's")
+        }
+        let invertGrid = try flag("invertGrid", false)
+        guard !invertGrid || scale else { throw BenchInvalid("twod.invertGrid: a by-scale resolve's") }
+        let grid = BenchProtocol.twodDestination[BenchProtocol.formats[format]!.raw] ?? 0
+        guard !invertGrid || BenchProtocol.solidFillFormats.contains(grid) else {
+            throw BenchInvalid(
+                "twod.invertGrid: the grid is inverted by a fill in its own 2D format, one a solid fill writes")
+        }
         return BenchTwod(
             op: op, fmt2d: fmt2d,
             colorFormat: colorFormat,
@@ -164,6 +176,6 @@ extension BenchFields {
             sx: try wide("sx", 0), sy: try wide("sy", 0), bilinear: try flag("bilinear", false),
             corner: try flag("corner", false), reference: reference, bracketed: try flag("bracketed", true),
             samples: UInt32(samples), clip: clip, clearFirst: try flag("clearFirst", false),
-            tiled: try flag("tiled", false), byScale: try byScale(op, t))
+            tiled: try flag("tiled", false), byScale: scale, rop: rop, invertGrid: invertGrid)
     }
 }

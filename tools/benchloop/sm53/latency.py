@@ -27,6 +27,7 @@ from tools.benchloop.sm53.ops import (
     K2,
     PAIR_FORMS,
     PAIRS,
+    RECIPES,
     SRC,
     VARIABLE_OPS,
     Recipe,
@@ -90,6 +91,12 @@ def experiment(eid: str, prog: Program, rect: list[int], meta: dict, exact: bool
     }
     protocol.validate_experiment(out)
     return out
+
+
+def warm_up(eid: str) -> dict:
+    """Give ~40 ms of whole-target FFMA streams: the GPU idles at 76.8 MHz, so the first timed buffers run slow."""
+    x = experiment(eid, _streams(RECIPES['FFMA'], 512), WHOLE, {'family': 'warm', 'op': 'FFMA', 'k': 512})
+    return x | {'draws': [64], 'repeats': 8, 'warmup': 0}
 
 
 def ladder() -> list[dict]:

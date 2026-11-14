@@ -88,6 +88,9 @@ struct switch_bench_twod {
     // a resolve read by a scale of the sample grid with this operation's du, dv, sx, sy, bilinear and corner, in place
     // of the driver's resolve (raw_probe_ops.h probeResolveOp)
     uint32_t resolve_by_scale;
+    uint32_t rop;  // fill, scale, a by-scale resolve: a ROP3 code on the destination's codes (ProbeOp::rop); 0 SRCCOPY
+    // a by-scale resolve: the sample grid complemented in place (a fill under ROP3 DSTINVERT) before the scale reads it
+    uint32_t invert_grid;
 };
 
 // What a scale, resolve or copy reads: rows packed (null: the bench's own 64x64 BGRA8 picture)
@@ -153,6 +156,7 @@ struct switch_bench_form {
     uint32_t comptags, block_linear;  // the written target's
     uint32_t bracketed, reference, samples;
     uint32_t clipped, clear_first;
+    uint32_t rop, invert_grid;
 };
 
 struct switch_bench_result {

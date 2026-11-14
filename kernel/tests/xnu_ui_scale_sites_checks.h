@@ -52,14 +52,14 @@ inline uint32_t Word(const uint8_t *bytes)
            static_cast<uint32_t>(bytes[2]) << 16 | static_cast<uint32_t>(bytes[3]) << 24;
 }
 
-// A branch's target from its address: b's and bl's imm26, b.cond's imm19 or tbz/tbnz's imm14, in words.
+// A branch's target from its address: b's and bl's imm26, b.cond/cbz/cbnz's imm19 or tbz/tbnz's imm14, in words.
 inline uint64_t BranchTarget(uint64_t address, uint32_t insn)
 {
     if ((insn & 0x7c000000u) == 0x14000000u) {
         const int64_t imm26 = static_cast<int64_t>(insn & 0x3ffffffu);
         return address + static_cast<uint64_t>((imm26 >= 0x2000000 ? imm26 - 0x4000000 : imm26) * 4);
     }
-    if ((insn & 0xff000010u) == 0x54000000u) {
+    if ((insn & 0xff000010u) == 0x54000000u || (insn & 0x7e000000u) == 0x34000000u) {
         const int64_t imm19 = static_cast<int64_t>((insn >> 5) & 0x7ffff);
         return address + static_cast<uint64_t>((imm19 >= 0x40000 ? imm19 - 0x80000 : imm19) * 4);
     }
@@ -130,8 +130,9 @@ inline void ExpectEveryEditInItsSitesChunk(const switch_us_cache &cache, const s
 // its own mapping, on a slot no other pager answers in that mapping.
 inline void ExpectEachSiteTheOneSiteOfItsSlot(const switch_us_cache &cache, const std::vector<TextMapping> &mappings)
 {
-    const unsigned slots = TextSlots("../xnu-10063.141.1/osfmk/vm/vm_shared_region.c");
-    EXPECT_EQ(TextSlots("../xnu-12377.121.6/osfmk/vm/vm_shared_region.c"), slots);
+    const unsigned slots =
+        TextSlots(std::string(cache.build) == "24B119" ? "../xnu-12377.121.6/osfmk/vm/vm_shared_region.c"
+                                                       : "../xnu-10063.141.1/osfmk/vm/vm_shared_region.c");
     std::vector<unsigned> found(cache.count, 0);
     for (const TextMapping &mapping : mappings) {
         for (unsigned slot = 0; slot < slots; slot++) {

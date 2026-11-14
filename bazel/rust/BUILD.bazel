@@ -4,7 +4,7 @@
 #                                    its config_setting below): 1.98.0 for m2v and the Metal bridge, 1.96.1 for NVK's
 #                                    Rust (NAK and NIL), which Mesa's own build compiled with. A target transitions to the
 #                                    version it was written for; nothing sets it on the command line.
-load("@bazel_skylib//rules:common_settings.bzl", "bool_flag", "string_flag")
+load("@bazel_skylib//rules:common_settings.bzl", "string_flag")
 load("//bazel/lint:defs.bzl", "lint_files")
 
 package(default_visibility = ["//visibility:public"])
@@ -36,15 +36,6 @@ config_setting(
 config_setting(
     name = "toolchain_1.96.1",
     flag_values = {":toolchain_version": "1.96.1"},
-)
-
-# The debug profile's incremental crates (defs.bzl INCREMENTAL_CRATES), off unless asked for. A session lives in one
-# output base and the rlib's bytes depend on it: two worktrees of one commit compiled m2v to different bytes under one
-# action key, so neither the cache nor a remote worker could share them, and every shader seed bucket keyed on the tools
-# built from m2v ran again in each fresh worktree. Turning it on for a local edit loop changes those crates' keys.
-bool_flag(
-    name = "incremental",
-    build_setting_default = False,
 )
 
 # Xcode's DEVELOPER_DIR and SDK paths (the declared host input, bazel/host), for build scripts that run the C compiler

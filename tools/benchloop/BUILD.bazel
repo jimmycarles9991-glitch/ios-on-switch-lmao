@@ -36,29 +36,46 @@ py_library(
 )
 
 py_library(
+    name = "columns",
+    srcs = ["columns.py"],
+    deps = [
+        ":protocol",
+        "//tools/benchloop/sm53:encode",
+        "//tools/benchloop/sm53:program",
+        "//tools/benchloop/sm53:sph",
+        "//tools/gpu/maxwell:interp",
+    ],
+)
+
+py_library(
     name = "lib",
     srcs = [
         "blend.py",
         "blend_models.py",
         "capture.py",
         "cbufsize.py",
-        "columns.py",
         "doctor.py",
         "fakeblend.py",
         "fakedevice.py",
         "fakegpu.py",
+        "families.py",
         "floatadd.py",
         "formula.py",
         "generators.py",
         "golden.py",
         "gr_errors.py",
+        "interlock_section.py",
         "known.py",
         "loop.py",
+        "nakbatches.py",
         "qmdchain.py",
         "report.py",
+        "resolve_ties.py",
+        "resolve_verdict.py",
         "rop.py",
         "sampling.py",
         "session.py",
+        "store2fma.py",
         "sweeps.py",
         "texels.py",
         "transport.py",
@@ -67,9 +84,12 @@ py_library(
     ],
     data = ["gr_class_errors.txt"],
     deps = [
+        ":columns",
         ":protocol",
         "//tools/benchloop/sm53:encode",
+        "//tools/benchloop/sm53:families",
         "//tools/benchloop/sm53:fit",
+        "//tools/benchloop/sm53:interlock",
         "//tools/benchloop/sm53:latency",
         "//tools/benchloop/sm53:program",
         "//tools/benchloop/sm53:sph",
@@ -93,6 +113,13 @@ py_binary(
     deps = [":lib"],
 )
 
+# bazel run //tools/benchloop:nakbatches -- "$PWD/tools/benchloop/batches" rewrites the NAK question batches
+py_binary(
+    name = "nakbatches",
+    srcs = ["nakbatches.py"],
+    deps = [":lib"],
+)
+
 py_binary(
     name = "emit_batches",
     srcs = ["emit_batches.py"],
@@ -108,6 +135,14 @@ genrule(
     visibility = ["//hw_test_app:__pkg__"],
 )
 
+# Three fake engines run over the whole batch, every sample pair and sum of it
+py_test(
+    name = "resolve_ties_test",
+    size = "medium",
+    srcs = ["resolve_ties_test.py"],
+    deps = [":lib"],
+)
+
 # The app's side of the format: its decoder's limits (Swift), its GPU side's method ranges (C++), its known program
 APP_SOURCES = [
     "//hw_test_app:bench/bench_known.h",
@@ -118,9 +153,12 @@ APP_SOURCES = [
 [
     py_test(
         name = name,
-        size = "small",
+        size = "medium" if name in ("families_test", "store2fma_test") else "small",
         srcs = [name + ".py"],
-        data = APP_SOURCES + glob(["testdata/*"]),
+        data = APP_SOURCES + glob([
+            "testdata/*",
+            "batches/*.json",
+        ]),
         deps = [
             ":lib",
             "//tools/gpu/maxwell:interp",
@@ -133,16 +171,20 @@ APP_SOURCES = [
         "blend_test",
         "capture_test",
         "cbufsize_test",
+        "families_test",
         "floatadd_test",
         "golden_test",
         "gr_errors_test",
         "ibprogram_test",
+        "interlock_section_test",
         "known_test",
         "loop_test",
         "pack_test",
+        "protocol_test",
         "qmdchain_test",
         "rop_test",
         "sampling_test",
+        "store2fma_test",
         "sweeps_test",
         "ticket_test",
         "transport_test",

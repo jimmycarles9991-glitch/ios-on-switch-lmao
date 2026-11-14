@@ -101,18 +101,26 @@ def unorm(v: float, bits: int, rounding: str = 'nearest') -> int:
     return min(top, ROUNDING[rounding](f32(v), top))
 
 
+def _unorm_texel(codes: list[int], fmt: str) -> bytes:
+    if fmt == 'bgra8unorm':
+        return bytes([codes[2], codes[1], codes[0], codes[3]])
+    bits = UNORM_BITS[fmt]
+    if bits[0] == 8:
+        return bytes(codes)
+    if bits[0] == 16:
+        return struct.pack(f'<{len(codes)}H', *codes)
+    if fmt == 'bgr10a2unorm':
+        return struct.pack('<I', codes[2] | codes[1] << 10 | codes[0] << 20 | codes[3] << 30)
+    return struct.pack('<I', codes[0] | codes[1] << 10 | codes[2] << 20 | codes[3] << 30)
+
+
 def encode(colour: Colour, fmt: str, rounding: str = 'nearest') -> bytes:
     if fmt in UNORM_BITS:
         bits = UNORM_BITS[fmt]
-        codes = [unorm(c, n, rounding) for c, n in zip(colour[: len(bits)], bits, strict=True)]
-        if fmt == 'bgra8unorm':
-            return bytes([codes[2], codes[1], codes[0], codes[3]])
-        if fmt in ('rgba8unorm', 'r8unorm', 'rg8unorm'):
-            return bytes(codes)
-        if bits[0] == 16:
-            return struct.pack(f'<{len(codes)}H', *codes)
-        return struct.pack('<I', codes[0] | codes[1] << 10 | codes[2] << 20 | codes[3] << 30)
+        return _unorm_texel([unorm(c, n, rounding) for c, n in zip(colour[: len(bits)], bits, strict=True)], fmt)
     lanes, layout = FLOATS[fmt]
+    if layout.endswith('e'):
+        return struct.pack(f'<{lanes}H', *(half_bits(c, 'rtz') for c in colour[:lanes]))
     return struct.pack(layout, *colour[:lanes])
 
 

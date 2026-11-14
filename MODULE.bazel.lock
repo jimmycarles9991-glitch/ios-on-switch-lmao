@@ -260,7 +260,7 @@
   "moduleExtensions": {
     "//install:release.bzl%release": {
       "general": {
-        "bzlTransitiveDigest": "3WCrgtL1+Hus3zT3Re3resFK54STMaq56ZUWgtkrPY8=",
+        "bzlTransitiveDigest": "FvsKiQMWY6Kps+AOaSRmxuXZGsKCsCGzwnpiTPnfmEI=",
         "usagesDigest": "kz4Bx3yrUSQachzleMrWfwpEYNS1LXH8mdZTjqB7yg4=",
         "recordedInputs": [],
         "generatedRepoSpecs": {
@@ -409,7 +409,7 @@
     },
     "@@rules_rust+//crate_universe/private:internal_extensions.bzl%cu_nr": {
       "general": {
-        "bzlTransitiveDigest": "GTYUbXxamVRO7niC20wwYCCRKkHZJWAkqQSERVUijGs=",
+        "bzlTransitiveDigest": "YgIWwK5VolZuJDHB7Jay8ZftqVvo7MumdRY4MOEu3r8=",
         "usagesDigest": "/bGmDj4Nr856OGWTjcSOPnxG0gSTFtYse380wG1a98A=",
         "recordedInputs": [
           "REPO_MAPPING:apple_support+,bazel_skylib bazel_skylib+",

@@ -8,6 +8,7 @@
     precision                  the store and fixed-function blend under every ROP option set the other way (sweeps.py)
     iterated [microcode.tsv]   the iterated blend unit with colour 0 bound alone; the table's programs after the setups
     twod                       the 2D engine's fills, scaled copies and resolves, with their 3D and copy-engine compares
+    resolveties                batch resolvetie2: the 2D resolve's rounding and its complement route (resolve_ties.py)
     store16                    the ROP's float to unorm16 rounding (R16, RGBA16)
     compressed                 draws into compressible memory through the copy engine, against a plain target
     cstall                     the stall family as kernels storing their results (latency by correctness)

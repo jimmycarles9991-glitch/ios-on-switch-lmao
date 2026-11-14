@@ -1,5 +1,5 @@
 {
-  "checksum": "306ac81464edc63b7e15a3d5037b492119148b4d69f5e598e76134bcb28494ff",
+  "checksum": "418721c51af239ad95b11dbffc52ab33f74af3429c7678c5d82161168ae3a88b",
   "conditions": {
     "aarch64-apple-darwin": [
       "aarch64-apple-darwin"
@@ -1053,6 +1053,7 @@
     "sha2-asm 0.6.4": {
       "build_script_attrs": {
         "build_script_env": {
+          "CFLAGS": "-ffile-compilation-dir=.",
           "IPHONEOS_DEPLOYMENT_TARGET": "17.0",
           "MACOSX_DEPLOYMENT_TARGET": "14.0"
         },

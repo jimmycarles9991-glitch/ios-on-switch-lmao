@@ -80,10 +80,8 @@ arm_none_eabi(name = "arm_none_eabi")
 
 bazel_dep(name = "rules_rust", version = "0.75.0")
 
-# Two changes to rules_rust (bazel/rust/rules_rust.patch): a crate whose rustc_flags carry its own -Cmetadata keeps that
-# value alone, as its output hash too, so m2v's crates keep cargo's symbol names and NAK's meson's; and a crate given
-# -Cincremental=<base> (bazel/rust/defs.bzl, the debug profile) compiles incrementally, unsandboxed, one session per
-# configuration.
+# One change to rules_rust (bazel/rust/rules_rust.patch): a crate whose rustc_flags carry its own -Cmetadata keeps that
+# value alone, as its output hash too, so m2v's crates keep cargo's symbol names and NAK's meson's.
 single_version_override(
     module_name = "rules_rust",
     patch_strip = 1,
@@ -267,6 +265,15 @@ use_repo(release, "switch_release")
 # --- hw_test_app: the debug images' hardware test app (rules_apple + rules_swift); libvpx only for its media generator
 bazel_dep(name = "rules_swift", version = "4.2.2")
 bazel_dep(name = "rules_apple", version = "5.4.0")
+
+# hw_test_app/rules_apple.patch: the environment plist rules_apple merges into an app's Info.plist leaves out
+# BuildMachineOSBuild (sw_vers), which no action key holds: the app's bytes, and its CDHash in the boot package's trust
+# cache, came from whichever Mac (or macOS build) ran that action first.
+single_version_override(
+    module_name = "rules_apple",
+    patch_strip = 1,
+    patches = ["//hw_test_app:rules_apple.patch"],
+)
 
 bazel_dep(name = "libvpx", version = "1.16.0.bcr.beta.3", dev_dependency = True)
 

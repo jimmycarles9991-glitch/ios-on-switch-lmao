@@ -1,26 +1,28 @@
 // SPDX-License-Identifier: MIT
 // Rule clear.twod: a fill outside a pass (fillTexture:level:slice:region:color:) by the 2D engine's solid rectangle
 // (kits/SwitchGM20BEmit/SwitchGM20BEmit2D.h, the EXA form; an sRGB target through its UNORM view with the colour encoded),
-// per format, once gpu.x1.twod_clear's cell of that format holds on the chip (no cell has completed yet: T-v2 died on
-// class error 0x4a before its sRGB fix). Until then a fill is the 3D engine's CLEAR_SURFACE over the region in a pass of
-// its own (RenderEncoder::clearRegion), with the ZBC table's value on a compressed target.
+// per format, where gpu.x1.twod_clear's cells of that format read exact on the chip (RGBA8, BGRA8, their sRGB forms).
+// Those cells filled plain memory only, so a target with comptags keeps the 3D engine's CLEAR_SURFACE over the region
+// in a pass of its own (RenderEncoder::clearRegion), with the ZBC table's value; so does every other format.
 #pragma once
 #include <cmath>
 #include <cstdint>
 
 namespace raw {
 
-constexpr bool twodFillHolds(uint32_t format)
+constexpr bool twodFillHolds(uint32_t format, bool comptags)
 {
+    if (comptags)
+        return false;
     switch (format) {
     case 70:  // RGBA8Unorm
-        return false;
+        return true;
     case 71:  // RGBA8Unorm_sRGB
-        return false;
+        return true;
     case 80:  // BGRA8Unorm
-        return false;
+        return true;
     case 81:  // BGRA8Unorm_sRGB
-        return false;
+        return true;
     default:
         return false;
     }

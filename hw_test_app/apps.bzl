@@ -3,6 +3,8 @@
     hwtest_app(name, minimum_os_version, ...)   one iOS version's app: ad hoc signed, iPad, the shaders as its library
     ios_arm64e(name, app)                        an ios_application's .ipa built for arm64e alone, whatever
                                                  --ios_multi_cpus says (.bazelrc: arm64)
+    reproducible_apps(name, apps, twin)          the apps' .ipa files, and twin's built again in a configuration of
+                                                 its own (reproducible_test)
 
 rules_apple takes an app's architectures from --ios_multi_cpus only, so a per-app arm64e build needs ios_arm64e's
 outgoing transition.
@@ -65,4 +67,42 @@ ios_arm64e = rule(
         ),
     },
     doc = "An ios_application's .ipa, built for arm64e alone.",
+)
+
+def _twin_transition_impl(_settings, _attr):
+    return {"//hw_test_app:twin": True}
+
+_twin_transition = transition(
+    implementation = _twin_transition_impl,
+    inputs = [],
+    outputs = ["//hw_test_app:twin"],
+)
+
+def _ipa(app):
+    ipa = [f for f in app[DefaultInfo].files.to_list() if f.extension == "ipa"]
+    if len(ipa) != 1:
+        fail("{} builds no single .ipa".format(app.label))
+    return ipa[0]
+
+def _reproducible_apps_impl(ctx):
+    # Links of their own names: an app's .ipa and its twin's share one path, which a runfiles tree holds once.
+    twin = ctx.attr.twin[0]
+    links = []
+    for app, suffix in [(app, ".ipa") for app in ctx.attr.apps] + [(twin, ".twin.ipa")]:
+        link = ctx.actions.declare_file("{}/{}{}".format(ctx.label.name, app.label.name, suffix))
+        ctx.actions.symlink(output = link, target_file = _ipa(app))
+        links.append(link)
+    return [DefaultInfo(files = depset(links))]
+
+reproducible_apps = rule(
+    implementation = _reproducible_apps_impl,
+    attrs = {
+        "apps": attr.label_list(mandatory = True, doc = "the apps whose .ipa the test reads"),
+        "twin": attr.label(
+            cfg = _twin_transition,
+            mandatory = True,
+            doc = "an app to build a second time, under //hw_test_app:twin",
+        ),
+    },
+    doc = "<name>/<app>.ipa for each app, and <name>/<twin>.twin.ipa: the twin's app with every action run again.",
 )

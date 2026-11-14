@@ -127,8 +127,14 @@ class AppSources(unittest.TestCase):
                 self.assertRegex(test_id, PARAMETERIZED)
 
     def test_each_versions_own_tests_are_its_table(self):
+        shared = self.declared(SHARED)
         for ios, directories in BY_IOS.items():
             declared = self.declared(directories)
+            # A version's own form of a shared test keeps the shared id and row; its app leaves the shared one out
+            sources = ''.join(path.read_text() for directory in directories for path in directory.glob('*.swift'))
+            for test_id in set(declared) & set(shared):
+                self.assertEqual(declared.pop(test_id), shared[test_id], test_id)
+                self.assertIn(f'$0.id != "{test_id}"', sources, test_id)
             self.assertEqual(declared, hwtest.BY_IOS.get(ios, {}), ios)
             self.assertFalse(set(declared) & set(hwtest.TESTS), ios)
 

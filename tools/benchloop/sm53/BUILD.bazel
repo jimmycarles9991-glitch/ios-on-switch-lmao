@@ -12,6 +12,9 @@ py_library(
     name = "encode",
     srcs = [
         "encode.py",
+        "halfops.py",
+        "intops.py",
+        "memops.py",
         "operands.py",
     ],
     deps = ["//tools/gpu/maxwell:isa"],
@@ -30,6 +33,15 @@ py_library(
         ":sph",
         "//tools/benchloop:protocol",
         "//tools/gpu/maxwell:interp",
+    ],
+)
+
+py_library(
+    name = "interlock",
+    srcs = ["interlock.py"],
+    deps = [
+        ":encode",
+        ":program",
     ],
 )
 
@@ -71,6 +83,57 @@ py_library(
         "//tools/benchloop:protocol",
     ],
 )
+
+# The NAK question batches (tools/benchloop/batches/README.md)
+py_library(
+    name = "families",
+    srcs = [
+        "affinity.py",
+        "hsetp2.py",
+        "icache.py",
+        "int3.py",
+        "interlock_spin.py",
+        "overlap.py",
+    ],
+    deps = [
+        ":encode",
+        ":fit",
+        ":interlock",
+        ":latency",
+        ":program",
+        ":sph",
+        "//tools/benchloop:columns",
+        "//tools/benchloop:protocol",
+    ],
+)
+
+[
+    py_test(
+        name = name,
+        size = "medium" if name == "hsetp2_test" else "small",
+        srcs = [name + ".py"],
+        deps = [
+            ":encode",
+            ":families",
+            ":interlock",
+            ":latency",
+            ":program",
+            ":timing_sim",
+            "//tools/benchloop:protocol",
+            "//tools/gpu/maxwell:interp",
+            "//tools/gpu/maxwell:isa",
+        ],
+    )
+    for name in [
+        "affinity_test",
+        "hsetp2_test",
+        "icache_test",
+        "int3_test",
+        "interlock_spin_test",
+        "intops_test",
+        "overlap_test",
+    ]
+]
 
 py_test(
     name = "encode_test",

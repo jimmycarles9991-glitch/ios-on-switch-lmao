@@ -57,7 +57,7 @@ enum RMPred : uint8_t {
     PredComputeImage,      // a texture sampled through an image of its own: a = slot
     PredComputeView,       // a texture where m2v binds a view of another texel size: a = slot
     PredComputeEdge,       // dispatchThreads: of a grid with an edge threadgroup: a = the grid's edge
-    PredComputePredicate,  // predication raw cannot run (a loop, a misused record, a word outside a raw buffer): the command buffer fails; a = kind or offset
+    PredComputePredicate,  // predication raw cannot run (a misused record, a word outside a raw buffer): the command buffer fails; a = kind or offset
     PredMipmaps,
     PredMipmapsFormat,  // a mipmapped texture's generateMipmaps in a format neither the 2D engine nor a mip state filters: a = format
     PredEvent,

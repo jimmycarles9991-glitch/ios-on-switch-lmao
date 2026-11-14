@@ -80,6 +80,15 @@ fragment float4 fetch_blend_fragment(FetchBlendVertex v [[stage_in]], float4 fet
     return fetch_blend_step(fetched, v.tag, scale);
 }
 
+fragment float4 fetch_blend_atomic_fragment(FetchBlendVertex v [[stage_in]], float4 fetched [[color(0)]],
+                                            constant float &scale [[buffer(0)]])
+{
+    // NAK's debug-only atomic-wait marker must survive constant folding; the test's tags are 0..3.
+    if (v.tag == 0x7fa54c54u)
+        discard_fragment();
+    return fetch_blend_step(fetched, v.tag, scale);
+}
+
 // a rectangle's two triangles share primitive_id >> 1, so the pixels on its diagonal take the same step either way
 fragment float4 fetch_blend_primitive_fragment(FetchBlendVertex v [[stage_in]], uint primitive [[primitive_id]],
                                                float4 fetched [[color(0)]], constant float &scale [[buffer(0)]])

@@ -8,7 +8,7 @@ public enum Scenes {
     public static let all: [any GPUScene] = [
         firstSurface, CABlurChainScene(), CAVariableBlurChainScene(), CADrawThenCopyScene(), CAHotStatesScene(),
         CAGenericStateScene(), FramebufferFetchScene(), FramebufferFetchDepthScene(), FetchBlendOrderScene(),
-        PassFusionScene(),
+        InterlockSpinScene(), PassFusionScene(),
         GlyphAtlasScene(), ReplaceRegionScene(), BlitUploadScene(), SurfaceLockScene(), ClearFormatsScene(),
         ClearThenDrawScene(), InstancedDrawScene(), DepthBiasScene(), RenderThenSampleScene(), UnormBlendScene(),
         ExtendedBlendScene(), MipmapScene(), MSAAResolveScene(), MPSBlurScene(), CoreImageBlurScene(),
