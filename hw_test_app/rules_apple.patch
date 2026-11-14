@@ -18,3 +18,47 @@ index 1dca56d..309376b 100755
      "$PLIST" > /dev/null
  
  plutil -convert binary1 -o "${OUTPUT}" -s  -- "${PLIST}"
+diff --git a/apple/internal/resource_actions/metals.bzl b/apple/internal/resource_actions/metals.bzl
+index db2b9fb..356d885 100644
+--- a/apple/internal/resource_actions/metals.bzl
++++ b/apple/internal/resource_actions/metals.bzl
+@@ -23,6 +23,16 @@ load(
+     "paths",
+ )
+ 
++# The Metal frontend records the resolved path of a source file it opens (air.source_file_name): the sandbox's
++# checkout or the worker's directory. Read from stdin, the source is named only by -main-file-name (the module's
++# source_filename, which the metallib keeps) and #line (diagnostics, __FILE__), both its execroot-relative path.
++_COMPILE_FROM_STDIN = """\
++set -o pipefail
++src=$1
++shift
++{ printf '#line 1 "%s"\\n' "$src"; cat "$src"; } | /usr/bin/xcrun "$@" -x metal -
++"""
++
+ def _metal_apple_target_triple(platform_prerequisites):
+     """Returns a Metal target triple string for an Apple platform.
+ 
+@@ -82,17 +92,19 @@ def compile_metals(*, actions, mac_exec_group, input_files, output_file, platfor
+         air_files.append(air_file)
+ 
+         args = actions.args()
++        args.add(input_metal)
+         args.add("metal")
+         args.add("-c")
+         args.add("-target", target)
+         args.add("-ffast-math")
+         args.add("-o", air_file)
+-        args.add(input_metal)
++        args.add_all(["-Xclang", "-main-file-name", "-Xclang", input_metal])
++        args.add("-iquote", input_metal.dirname)
+ 
+-        apple_support.run(
++        apple_support.run_shell(
+             actions = actions,
+             exec_group = mac_exec_group,
+-            executable = "/usr/bin/xcrun",
++            command = _COMPILE_FROM_STDIN,
+             inputs = [input_metal] + hdrs,
+             outputs = [air_file],
+             arguments = [args],

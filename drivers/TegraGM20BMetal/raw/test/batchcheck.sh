@@ -13,7 +13,7 @@ TREE=$(cd "$HERE/../../../.." && pwd)
 METAL_ABI=${METAL_ABI:-$TREE/bazel-bin/drivers/NativeMetal/abi}
 # the push headers (bazel build //kits/SwitchGM20BEmit:push_headers, or PUSH_HEADERS=<their directory>)
 PUSH_HEADERS=${PUSH_HEADERS:-$TREE/bazel-bin/kits/SwitchGM20BEmit/gen}
-FLAGS=(-O1 -g -Wall -Wextra -std=c++17 -DSWITCH_RAW_HARNESS_MARKS -fsanitize=address,undefined -fno-sanitize-recover=all
+FLAGS=(-O1 -g -Wall -Wextra -std=c++17 -DSWITCH_RAW_HARNESS_MARKS '-fsanitize=address,undefined' -fno-sanitize-recover=all
     -I "$TREE/kits/SwitchGM20BEmit/mesa" -I "$PUSH_HEADERS" -I "$TREE/third_party/mesa/src/nouveau/headers")
 for source in mme_fermi mme_fermi_sim; do
     xcrun clang -O1 -std=c11 -w -I "$RAW/pack/mesa" -c "$RAW/pack/mesa/$source.c" -o "$OUT/$source.o"

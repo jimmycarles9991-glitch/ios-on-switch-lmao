@@ -33,7 +33,14 @@ reads `bazel-bin` adds `--remote_download_toplevel` (tools/emu does; the repro c
 
 A restarted bb_scheduler forgets its operations, and Bazel fails every action it had in flight with `NOT_FOUND:
 Operation with name ... not found` instead of sending it again. Restart the scheduler and storage only while the
-queue is empty. A worker drains on SIGTERM (`launchctl bootout`): it takes no new work and finishes what runs.
+queue is empty.
+
+A worker that has not checked in with the scheduler for a minute fails each action it was running with
+`UNAVAILABLE: Worker ... disappeared`. One that comes back sooner under the same host and thread gets the same actions
+again. bb_worker drains on SIGTERM: it takes no new work, finishes and reports what it is running, then exits. Send
+it with `sudo kill -TERM <pid>`. launchd starts the worker again on the config on disk, so a changed
+`host.libsonnet` takes effect without losing an action. `launchctl bootout` kills the worker after the plist's
+ExitTimeOut, which install-host.sh sets to an hour; a worker plist without one is killed within seconds.
 
 Repository rules (IPSW members, toolchains) still run on the Mac, and an action's inputs reach the host from the Mac
 that first needs them, over the home uplink. The host's own client (`~/src/switch-ios`, `~/.bazelrc` pointing at
@@ -58,7 +65,7 @@ finds no Xcode.
    a separate file that takes no space. Then `bb_worker-slots.diff`: each executor keeps its input tree between
    actions and fetches only what changed; a file an action wrote, chmodded or replaced is fetched again. The trees
    sit outside the cache's size limit.
-2. Run `tools/remote/host/install-host.sh <dir with the four binaries> <name> <concurrent actions>`. It installs four
+2. Run `tools/remote/host/install-host.sh <dir with the four binaries> <name> auto`. It installs four
    LaunchDaemons that run as the invoking user (`com.brunostjohn.switch.bb-storage`, `-scheduler`, `-runner`,
    `-worker`) and starts them. Everything listens on 127.0.0.1 only: clients come in through SSH. The CAS (400 GiB)
    and the action cache (16 GiB) are block files under `~/Library/Caches/switch-ios-buildbarn/storage`, kept across
@@ -80,6 +87,9 @@ What sets the host's speed, measured on 14 Nov (10-core M4, 16 executors):
   stay the same files: a third of the scans, worker and fseventsd time, and 40-58% more actions a second.
 - Developer Tools. XProtect still scans each new executable with Gatekeeper off; bb_runner in Privacy & Security >
   Developer Tools exempts the actions it starts.
+- Executors. At 16 the first host's load average sat near 30, with 30% of its CPU in the kernel. At 12 it did the
+  same 3.3 actions a second, and its CppCompile and SwiftCompile times fell by about a third. `auto` gives one
+  executor per 2 GiB of memory: 12 on the 24 GiB M4s, 8 on the 16 GiB M1.
 
 Full Disk Access and Developer Tools are granted to the binaries' code hashes: a rebuilt bb_worker or bb_runner needs
 both again.
@@ -98,11 +108,18 @@ keep the same tar.
 An extra host runs only the worker and the runner against the first host's storage and scheduler over the private
 network: reinstall the first host with `SWITCH_BB_PRIVATE_IP=<its private IP>` in the environment, so its storage (8980)
 and the scheduler's worker port (8983) also listen there, and run
-`install-host.sh <bins> <name> <actions> <first host's private IP>` on the new one. The security group then needs TCP
-8980-8983 from itself. Those ports take no credentials. macOS keeps a non-Apple binary in a user's LaunchDaemon off the
-local network ("no route to host"), so the extra host's worker talks to 127.0.0.1, where launchd hands each connection
-to `/usr/bin/nc` (exempt) relaying to the first host. Running the worker as root instead would make the output
-directories root's, and actions that chmod their own output directory (the native seed) fail.
+`install-host.sh <bins> <name> auto <first host's private IP>` on the new one. The security group then needs TCP
+8980-8983 from itself. Those ports take no credentials.
+
+macOS keeps a non-Apple binary in a user's LaunchDaemon off the local network ("no route to host"), and a worker
+running as root would make the output directories root's, so actions that chmod their own output directory (the
+native seed) fail. The extra host's worker therefore talks to 127.0.0.1. Its CAS and action cache go to a bb_storage
+running as root on 8981 (`proxy.jsonnet`), which passes everything through to the first host. Its scheduler port 8983
+is `/usr/bin/nc` (exempt), started by launchd for each connection, which is enough for Synchronize. nc is too slow for
+the CAS: one nc carries all of a worker's CAS traffic over a single connection, 2 KB per read. Reading the same 1.26
+GiB blob on the M4s on 14 Nov took 21-31 MiB/s through nc, 188-348 MiB/s through the proxy and 584 MiB/s directly.
+Four such reads at once came to 689 MiB/s through the proxy and 616 MiB/s directly. The proxy fetches one blob's
+chunks one after another, and a worker reads many blobs at once.
 
 ## The cluster cache (until 14 Nov)
 

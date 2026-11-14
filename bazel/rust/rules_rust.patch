@@ -90,3 +90,84 @@ index 476651a..9e09f7f 100644
  def determine_output_hash(crate_root, label):
      """Generates a hash of the crate root file's path.
  
+diff --git a/util/process_wrapper/BUILD.bazel b/util/process_wrapper/BUILD.bazel
+index d8ea9e0..9f3c4ef 100644
+--- a/util/process_wrapper/BUILD.bazel
++++ b/util/process_wrapper/BUILD.bazel
+@@ -12,12 +12,18 @@ rust_binary_without_process_wrapper(
+     edition = "2018",
+     # To ensure the process wrapper is produced deterministically
+     # debug info, which is known to sometimes have host specific
+-    # paths embedded in this section, is stripped out. On macOS,
+-    # full symbol stripping is needed to also remove N_OSO stab
+-    # entries whose timestamps vary between builds.
++    # paths embedded in this section, is stripped out. On macOS the
++    # linker leaves out the N_OSO stab entries (whose paths and
++    # timestamps vary between builds) and the local symbols: rustc
++    # would strip with the sysroot's rust-objcopy, which a toolchain
++    # need not declare, so a remote worker may not have it.
+     rustc_flags = select({
+         "@platforms//os:linux": ["-Cstrip=debuginfo"],
+-        "@platforms//os:macos": ["-Cstrip=symbols"],
++        "@platforms//os:macos": [
++            "-Cstrip=none",
++            "-Clink-arg=-Wl,-S",
++            "-Clink-arg=-Wl,-x",
++        ],
+         "@platforms//os:windows": ["-Cstrip=debuginfo"],
+         "//conditions:default": [],
+     }),
+diff --git a/util/process_wrapper/private/process_wrapper.sh b/util/process_wrapper/private/process_wrapper.sh
+index f0ea720..2dc31ab 100755
+--- a/util/process_wrapper/private/process_wrapper.sh
++++ b/util/process_wrapper/private/process_wrapper.sh
+@@ -18,7 +18,7 @@ fi
+ workspace_name="${phys_pwd##*/}"
+ exec_root="${output_base}/execroot/${workspace_name}"
+ 
+-for arg in "$@"; do
++substitute() {
+     case "$arg" in
+         *'${pwd}'*)
+             prefix="${arg%%\$\{pwd\}*}"
+@@ -40,8 +40,39 @@ for arg in "$@"; do
+             arg="${prefix}${exec_root}${suffix}"
+             ;;
+     esac
++}
++
++# Bazel moves a long command line into a params file (multiline: one
++# argument per line), which rustc reads itself: its placeholders are
++# expanded into a copy, or --remap-path-prefix and -oso_prefix would
++# reach rustc unexpanded and the outputs would name the sandbox.
++params_dir=""
++params_count=0
++for arg in "$@"; do
++    case "$arg" in
++        @*)
++            params="${arg#@}"
++            [ -n "$params_dir" ] || params_dir=$(mktemp -d)
++            params_count=$((params_count + 1))
++            expanded="${params_dir}/${params_count}.params"
++            while IFS= read -r arg || [ -n "$arg" ]; do
++                substitute
++                printf '%s\n' "$arg"
++            done < "$params" > "$expanded"
++            arg="@${expanded}"
++            ;;
++        *)
++            substitute
++            ;;
++    esac
+     set -- "$@" "$arg"
+     shift
+ done
+ 
+-exec "$@"
++if [ -z "$params_dir" ]; then
++    exec "$@"
++fi
++status=0
++"$@" || status=$?
++rm -rf "$params_dir"
++exit "$status"

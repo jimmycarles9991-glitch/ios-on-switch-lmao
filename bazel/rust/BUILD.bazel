@@ -5,7 +5,9 @@
 #                                    Rust (NAK and NIL), which Mesa's own build compiled with. A target transitions to the
 #                                    version it was written for; nothing sets it on the command line.
 load("@bazel_skylib//rules:common_settings.bzl", "string_flag")
+load("@rules_python//python:py_test.bzl", "py_test")
 load("//bazel/lint:defs.bzl", "lint_files")
+load(":bootstrap.bzl", "nvk_bootstrap_rlibs")
 
 package(default_visibility = ["//visibility:public"])
 
@@ -43,4 +45,17 @@ config_setting(
 alias(
     name = "xcode_env",
     actual = "@xcode//:xcode.env",
+)
+
+nvk_bootstrap_rlibs(
+    name = "nvk_bootstrap_rlibs",
+    testonly = True,
+    crate = "@rules_rust//util/process_wrapper",
+)
+
+py_test(
+    name = "bootstrap_remap_test",
+    srcs = ["bootstrap_remap_test.py"],
+    data = [":nvk_bootstrap_rlibs"],
+    env = {"RLIBS": "$(rootpaths :nvk_bootstrap_rlibs)"},
 )

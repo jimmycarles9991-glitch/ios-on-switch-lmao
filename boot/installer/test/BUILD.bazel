@@ -42,6 +42,8 @@ run_binary(
 
 host_test(
     name = "installer_test",
+    # The stream cases hash and copy whole images: 60 s on a loaded build host.
+    size = "medium",
     srcs = [
         "installer_test.cpp",
         "vectors.h",

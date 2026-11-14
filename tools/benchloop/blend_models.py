@@ -13,12 +13,25 @@ import math
 import struct
 from collections.abc import Callable
 from fractions import Fraction
+from typing import NamedTuple
+
+
+class Blend(NamedTuple):
+    """One channel: source value `s` with source alpha `sa`, destination code `dst` with alpha code `da`, factors."""
+
+    s: float
+    sa: float
+    dst: int
+    da: int
+    fs: str
+    fd: str
+
 
 FACTORS = ('zero', 'one', 'src_alpha', 'one_minus_src_alpha', 'dst_alpha', 'one_minus_dst_alpha')
 
 
 def store(v: float, bits: int = 8) -> int:
-    """The ROP's float -> unorm store: v truncated to bits + 4 fractional bits, then nearest with ties down."""
+    """Give the ROP's float -> unorm store: v truncated to bits + 4 fractional bits, then nearest with ties down."""
     top = (1 << bits) - 1
     if math.isnan(v) or v <= 0:
         return 0
@@ -62,50 +75,50 @@ def _value_factor(name: str, sa: Fraction, da: Fraction, one_minus: Callable[[Fr
     }[name]
 
 
-def chip(s: float, sa: float, dst: int, da: int, fs: str, fd: str, quantise: Callable[[float], int] = store) -> int:
-    """One channel: source value `s` with source alpha `sa`, destination code `dst` with destination alpha code `da`."""
-    s8, sa8 = quantise(s), quantise(sa)
-    t = s8 * _code_factor(fs, sa8, da) + dst * _code_factor(fd, sa8, da)
+def chip(b: Blend, quantise: Callable[[float], int] = store) -> int:
+    """Give the chip's 8-bit blend of one channel."""
+    s8, sa8 = quantise(b.s), quantise(b.sa)
+    t = s8 * _code_factor(b.fs, sa8, b.da) + b.dst * _code_factor(b.fd, sa8, b.da)
     return min(255, math.floor(Fraction(t, 255) + Fraction(1, 2)))
 
 
-def per_product(s: float, sa: float, dst: int, da: int, fs: str, fd: str) -> int:
-    s8, sa8 = store(s), store(sa)
+def per_product(b: Blend) -> int:
+    s8, sa8 = store(b.s), store(b.sa)
 
     def mul(a: int, b: int) -> int:
         return math.floor(Fraction(a * b, 255) + Fraction(1, 2))
 
-    return min(255, mul(s8, _code_factor(fs, sa8, da)) + mul(dst, _code_factor(fd, sa8, da)))
+    return min(255, mul(s8, _code_factor(b.fs, sa8, b.da)) + mul(b.dst, _code_factor(b.fd, sa8, b.da)))
 
 
-def real(s: float, sa: float, dst: int, da: int, fs: str, fd: str) -> int:
-    """The exact result of the inputs as given, rounded once by Metal's rule."""
-    sa_, da_ = Fraction(sa), Fraction(da, 255)
-    f1 = _value_factor(fs, sa_, da_, lambda x: 1 - x)
-    f2 = _value_factor(fd, sa_, da_, lambda x: 1 - x)
-    return nearest(Fraction(s) * f1 + Fraction(dst, 255) * f2)
+def real(b: Blend) -> int:
+    """Give the exact result of the inputs as given, rounded once by Metal's rule."""
+    sa_, da_ = Fraction(b.sa), Fraction(b.da, 255)
+    f1 = _value_factor(b.fs, sa_, da_, lambda x: 1 - x)
+    f2 = _value_factor(b.fd, sa_, da_, lambda x: 1 - x)
+    return nearest(Fraction(b.s) * f1 + Fraction(b.dst, 255) * f2)
 
 
-def apple(s: float, sa: float, dst: int, da: int, fs: str, fd: str, fused: bool = False) -> int:
-    """Metal on Apple GPUs (X1Reference.halfSeparate / halfFMA): codes read as halves, 1 - x and each product in half."""
-    sa_, da_ = Fraction(sa), Fraction(half(Fraction(da, 255)))
-    f1 = _value_factor(fs, sa_, da_, lambda x: Fraction(half(1 - x)))
-    f2 = _value_factor(fd, sa_, da_, lambda x: Fraction(half(1 - x)))
-    d = Fraction(half(Fraction(dst, 255)))
+def apple(b: Blend, fused: bool = False) -> int:
+    """Run Metal on Apple GPUs (X1Reference.halfSeparate / halfFMA): codes as halves, 1 - x and products in half."""
+    sa_, da_ = Fraction(b.sa), Fraction(half(Fraction(b.da, 255)))
+    f1 = _value_factor(b.fs, sa_, da_, lambda x: Fraction(half(1 - x)))
+    f2 = _value_factor(b.fd, sa_, da_, lambda x: Fraction(half(1 - x)))
+    d = Fraction(half(Fraction(b.dst, 255)))
     second = Fraction(half(d * f2))
-    first = Fraction(s) * f1 if fused else Fraction(half(Fraction(s) * f1))
+    first = Fraction(b.s) * f1 if fused else Fraction(half(Fraction(b.s) * f1))
     return nearest(Fraction(half(first + second)))
 
 
-MODELS: dict[str, Callable[[float, float, int, int, str, str], int]] = {
+MODELS: dict[str, Callable[[Blend], int]] = {
     'chip': chip,
     'per_product': per_product,
     'real': real,
     'apple': apple,
-    'apple_fma': lambda s, sa, dst, da, fs, fd: apple(s, sa, dst, da, fs, fd, fused=True),
+    'apple_fma': lambda b: apple(b, fused=True),
 }
 
 
 def fit(readings: list[tuple[float, float, int, int, str, str, int]]) -> dict[str, int]:
     """Per model, the readings it reproduces: each is (s, sa, dst, da, fs, fd, code the chip wrote)."""
-    return {name: sum(model(*r[:6]) == r[6] for r in readings) for name, model in MODELS.items()}
+    return {name: sum(model(Blend(*r[:6])) == r[6] for r in readings) for name, model in MODELS.items()}

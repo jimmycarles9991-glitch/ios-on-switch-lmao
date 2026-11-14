@@ -97,7 +97,9 @@ def region_signatures(line: str) -> dict[int, tuple[list[int], bool]] | None:
         return None
     values = list(map(int, match.groups()))
     local, edge = values[:3], values[3:6]
-    if any(not 0 < n <= 1024 or not 0 <= e < n for n, e in zip(local, edge)) or (not values[6] and any(edge)):
+    if any(not 0 < n <= 1024 or not 0 <= e < n for n, e in zip(local, edge, strict=True)) or (
+        not values[6] and any(edge)
+    ):
         return None
     return {
         mask: ([edge[i] if mask & (1 << i) else local[i] for i in range(3)], any(edge))
@@ -106,7 +108,7 @@ def region_signatures(line: str) -> dict[int, tuple[list[int], bool]] | None:
     }
 
 
-def operation_rows(records: list[dict]) -> list[tuple[dict, str]]:
+def _operation_groups(records: list[dict]) -> list[list[dict]]:
     groups = {}
     for index, row in enumerate(records):
         identity = (
@@ -115,49 +117,61 @@ def operation_rows(records: list[dict]) -> list[tuple[dict, str]]:
             else ('legacy', index)
         )
         groups.setdefault(identity, []).append(row)
+    return list(groups.values())
+
+
+def _check_compute_regions(rows: list[dict], signatures: dict[int, tuple[list[int], bool]]) -> None:
+    actual = {}
+    for row in rows:
+        mask = row.get('region')
+        if type(mask) is not int or mask not in signatures or mask in actual:
+            raise ValueError('missing, duplicate or unexpected compute region')
+        shape, mode = signatures[mask]
+        if row.get('local') != shape or row.get('regionMode') is not mode:
+            raise ValueError('compute region shape differs from the original dispatch')
+        key = row.get('key')
+        if key is not None and (
+            f' | tg={shape[0]},{shape[1]},{shape[2]} |' not in key or key.endswith(' | region=1') != mode
+        ):
+            raise ValueError('compute artifact key differs from its region specialization')
+        actual[mask] = row
+    if actual.keys() != signatures.keys():
+        raise ValueError('native dispatch lacks an expected region')
+
+
+def _check_provenance(rows: list[dict], kind: str) -> None:
+    first = rows[0]
+    if kind != 'compute':
+        if len(rows) != 1:
+            raise ValueError('duplicate native operation')
+        return
+    signatures = region_signatures(first.get('input', ''))
+    whole_refusal = len(rows) == 1 and first['status'] != 'made' and 'region' not in first
+    if signatures is not None and not whole_refusal:
+        _check_compute_regions(rows, signatures)
+    elif len(rows) != 1 or ('input' in first and first['status'] == 'made'):
+        raise ValueError('invalid native dispatch provenance')
+
+
+def _operation_status(rows: list[dict]) -> str:
+    statuses = {row['status'] for row in rows}
+    if statuses == {'made'}:
+        return 'made'
+    for value in ('failed', 'missing-library', 'missing-function', 'refused'):
+        if value in statuses:
+            return value
+    raise ValueError('invalid native operation status')
+
+
+def operation_rows(records: list[dict]) -> list[tuple[dict, str]]:
     operations = []
-    for rows in groups.values():
+    for rows in _operation_groups(records):
         first = rows[0]
         kind = first.get('kind', 'render')
         if any(row.get('kind', 'render') != kind for row in rows):
             raise ValueError('native operation has inconsistent record kinds')
-        if kind != 'compute':
-            if len(rows) != 1:
-                raise ValueError('duplicate native operation')
-        else:
-            signatures = region_signatures(first.get('input', ''))
-            whole_refusal = len(rows) == 1 and first['status'] != 'made' and 'region' not in first
-            if signatures is not None and not whole_refusal:
-                actual = {}
-                for row in rows:
-                    mask = row.get('region')
-                    if type(mask) is not int or mask not in signatures or mask in actual:
-                        raise ValueError('missing, duplicate or unexpected compute region')
-                    shape, mode = signatures[mask]
-                    if row.get('local') != shape or row.get('regionMode') is not mode:
-                        raise ValueError('compute region shape differs from the original dispatch')
-                    key = row.get('key')
-                    if key is not None and (
-                        f' | tg={shape[0]},{shape[1]},{shape[2]} |' not in key or key.endswith(' | region=1') != mode
-                    ):
-                        raise ValueError('compute artifact key differs from its region specialization')
-                    actual[mask] = row
-                if actual.keys() != signatures.keys():
-                    raise ValueError('native dispatch lacks an expected region')
-            elif len(rows) != 1 or ('input' in first and first['status'] == 'made'):
-                raise ValueError('invalid native dispatch provenance')
-        statuses = {row['status'] for row in rows}
-        status = (
-            'made'
-            if statuses == {'made'}
-            else next(
-                (value for value in ('failed', 'missing-library', 'missing-function', 'refused') if value in statuses),
-                None,
-            )
-        )
-        if status is None:
-            raise ValueError('invalid native operation status')
-        operations.append((first, status))
+        _check_provenance(rows, kind)
+        operations.append((first, _operation_status(rows)))
     return operations
 
 
@@ -300,7 +314,7 @@ def pack_lists(manifest: dict) -> tuple[dict[str, tuple[int, str]], dict[str, tu
             table, named = analyses, [(entry['name'][:64], entry['path']) for entry in row['analysis']]
         else:
             slots = [(slot['name'], slot['path']) for slot in row.get('slots', [])]
-            table, named = records, [(row['name'], row['artifact'])] + slots
+            table, named = records, [(row['name'], row['artifact']), *slots]
         for name, path in named:
             tier, known = int(bool(row['derived'])), table.get(name)
             if known and known[1] != path:

@@ -23,8 +23,11 @@ MACRO_SLOTS = 'kits/SwitchGM20BEmit/SwitchGM20BMacroSlots.h'
 
 
 def answers(text: str, chip_features: dict | None = None, names: dict | None = None) -> dict:
-    """The answers per kind; an answer given as chipFeature(SWITCH_GM20B_FEATURE_<id>) reads `chip_features`, one given
-    by name (a caps limit, the amplify macro's count, the framebuffer bits) reads `names`."""
+    """Give the answers per kind.
+
+    An answer given as chipFeature(SWITCH_GM20B_FEATURE_<id>) reads `chip_features`; one given by name (a caps limit,
+    the amplify macro's count, the framebuffer bits) reads `names`.
+    """
     names = names or {}
     value = r'(\d+|[A-Za-z_]\w*)'
 
@@ -54,8 +57,11 @@ def answers(text: str, chip_features: dict | None = None, names: dict | None = N
 
 
 def answer_names(table: caps.Caps, rows: list[dict], macro_slots: str) -> dict:
-    """What raw_device_answers.h's named answers stand for: SWITCH_GM20B_LIMIT_<name> of each limit row, the amplify
-    macro's SWITCH_GM20B_AMP_MAX and kFramebufferBits (every colour target at the widest format rendered)."""
+    """Give what raw_device_answers.h's named answers stand for.
+
+    They are SWITCH_GM20B_LIMIT_<name> of each limit row, the amplify macro's SWITCH_GM20B_AMP_MAX and kFramebufferBits
+    (every colour target at the widest format rendered).
+    """
     out = {
         f'SWITCH_GM20B_LIMIT_{gen_caps.ident(r.cols["name"])}': int(r.cols['value'])
         for r in table.limits

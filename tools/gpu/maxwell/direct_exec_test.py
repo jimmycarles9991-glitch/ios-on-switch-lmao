@@ -21,7 +21,9 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from collections.abc import Callable
 from pathlib import Path
+from typing import ClassVar
 
 from tools.gpu.maxwell import direct_records as dr
 from tools.gpu.maxwell.interp import Inputs, UnsupportedError
@@ -176,7 +178,7 @@ class Amplification(Records):
     NAME, COUNT = 'amplification', 2
     # (layer offset, layers, viewport offset, viewports) of each amplification tested: amplification 1's layer past the
     # pass's length renders layer 0
-    MAPPINGS = {0: (1, 2, 3, 4), 1: (5, 2, 1, 4)}
+    MAPPINGS: ClassVar[dict[int, tuple[int, int, int, int]]] = {0: (1, 2, 3, 4), 1: (5, 2, 1, 4)}
 
     def test_each_amplifications_vertices(self):
         record = self.state(self.NAME)
@@ -214,7 +216,11 @@ class Amplification8(Amplification):
     """maxVertexAmplificationCount 8, every count the amplify macro keeps a mapping word for (SWITCH_GM20B_AMP_MAX)."""
 
     NAME, COUNT = 'amplification8', 8
-    MAPPINGS = {0: (1, 8, 3, 16), 5: (6, 8, 15, 16), 7: (7, 8, 16, 16)}
+    MAPPINGS: ClassVar[dict[int, tuple[int, int, int, int]]] = {
+        0: (1, 8, 3, 16),
+        5: (6, 8, 15, 16),
+        7: (7, 8, 16, 16),
+    }
 
 
 class LayeredFetch(Records):
@@ -382,8 +388,10 @@ class WideStride(Records):
 
 
 class Interpolants(Records):
-    """32 float4 varyings, GM20B's 128 interpolated components: the vertex program stores each at its generic
-    attribute, and the fragment program interpolates all of them."""
+    """Run 32 float4 varyings, GM20B's 128 interpolated components.
+
+    The vertex program stores each at its generic attribute, and the fragment program interpolates all of them.
+    """
 
     COUNT = 32
 
@@ -419,7 +427,7 @@ class Interpolants(Records):
                 raise UnsupportedError(f'IPA {address:#x}, an input the test gave no word for')
             return words[address]
 
-        lanes = [Inputs(attribute, banks.cbuf, lambda key: [0, 0, 0, 0]) for _ in range(4)]
+        lanes = [Inputs(attribute, banks.cbuf, lambda _: [0, 0, 0, 0]) for _ in range(4)]
         want = [sum(self.varying(i, vid)[c] * (i + 1) for i in range(self.COUNT)) for c in range(4)]
         for colour, killed, _ in run_quad(dr.code(program), lanes, 4):
             self.assertFalse(killed)
@@ -427,11 +435,12 @@ class Interpolants(Records):
 
 
 class ArgumentBuffers(Records):
-    """A fragment function's textures and sampler by ID in a tier-2 argument buffer, read through the device's handle
-    tables (raw/runtime/raw_heap_tables.h, as raw/test/argcheck.py models them for the pack's records).
+    """Read a fragment function's textures and sampler by ID in a tier-2 argument buffer.
 
-    The draw's root table holds the handle tables' root and ExecutionStatus words, set 0 the argument buffer and the
-    texture and sampler tables, set 1 header i at element i of each array; an ID is 1 << 32 | TIC or 1 << 32 | TSC << 20.
+    They are read through the device's handle tables (raw/runtime/raw_heap_tables.h, as raw/test/argcheck.py models
+    them for the pack's records). The draw's root table holds the handle tables' root and ExecutionStatus words, set 0
+    the argument buffer and the texture and sampler tables, set 1 header i at element i of each array; an ID is
+    1 << 32 | TIC or 1 << 32 | TSC << 20.
     A fetch answers its handle, so each check is the texture and sampler headers the fetches name: the sample through
     the ID's sampler, and every fetch of the ID's texture.
     """
@@ -442,7 +451,7 @@ class ArgumentBuffers(Records):
     CBUF_UBO, CBUF_HEAP_SET = 5, 3 | 1 << 3
 
     def memory(self, record: dict, textures: dict[int, int], samplers: dict[int, int]) -> dict[int, int]:
-        """The device's memory once the IDs of `textures` and `samplers` (header: entry flags) were asked for."""
+        """Give the device's memory once the IDs of `textures` and `samplers` (header: entry flags) were asked for."""
         words: dict[int, int] = {}
 
         def put(va: int, data: bytes) -> None:
@@ -463,6 +472,25 @@ class ArgumentBuffers(Records):
 
     def fetches(self, record: dict, words: dict[int, int], pixel: tuple[int, int]) -> list[tuple[int, int]]:
         """Run the fragment program at `pixel`; give the (texture, sampler) header of each fetch."""
+        program = record['programs'][1]
+        fetched: list[tuple[int, int]] = []
+        cbuf = self.constant_buffers(record, program, words)
+        texture = self.fetch_answers(words, fetched)
+
+        position = {ATTR_POSITION: pixel[0] + 0.5, ATTR_POSITION + 4: pixel[1] + 0.5}
+        position.update({ATTR_POSITION + 8: 0.5, ATTR_POSITION + 12: 1.0})
+
+        def attribute(address: int) -> int:
+            if address not in position:
+                raise UnsupportedError(f'IPA {address:#x}, an input the test gave no word for')
+            return dr.f32(position[address])
+
+        lanes = [Inputs(attribute, cbuf, texture, -1) for _ in range(4)]
+        run_quad(dr.code(program), lanes, 4)
+        return fetched
+
+    def root_push(self, record: dict) -> dict[int, int]:
+        """Give the draw's push words with the handle tables' root and ExecutionStatus addresses set."""
         arguments = record['arguments']
         push = dr.record_push(record)
         for stage in range(2):
@@ -472,6 +500,10 @@ class ArgumentBuffers(Records):
             ):
                 if word:
                     push[word - 1], push[word] = va & 0xFFFFFFFF, va >> 32
+        return push
+
+    def set_zero(self, record: dict) -> dict[int, list[int]]:
+        """Give set 0: the argument buffer and the texture and sampler tables, by the offset the entries name."""
         set0 = {}
         for offset, kind, _stage, slot, *_ in record['entries']:
             if kind == self.ENTRY_UBO and slot == 0:
@@ -480,8 +512,13 @@ class ArgumentBuffers(Records):
                 set0[offset] = [self.TABLES, 0, 16 * self.TICS, 0]
             elif kind == self.ENTRY_SAMPLER_TABLE:
                 set0[offset] = [self.TABLES + 16 * self.TICS, 0, 16 * self.TSCS, 0]
-        program = record['programs'][1]
-        fetched = []
+        return set0
+
+    def constant_buffers(self, record: dict, program: dict, words: dict[int, int]) -> Callable[[int, int], int]:
+        """Give the fragment program's constant buffer reads over the device's memory `words`."""
+        arguments = record['arguments']
+        push = self.root_push(record)
+        set0 = self.set_zero(record)
 
         def cbuf(bank: int, offset: int) -> int:
             kind = program['cbufs'][bank] if bank < len(program['cbufs']) else 0
@@ -499,6 +536,12 @@ class ArgumentBuffers(Records):
                 return words.get((base[0] | base[1] << 32) + offset, 0)
             raise UnsupportedError(f'a constant buffer of type {kind} at bank {bank}')
 
+        return cbuf
+
+    @staticmethod
+    def fetch_answers(words: dict[int, int], fetched: list[tuple[int, int]]) -> Callable[[tuple], list[int]]:
+        """Give the fetch answers: a global load reads `words`; a texture fetch is appended to `fetched`."""
+
         def texture(key: tuple) -> list[int]:
             if key[0] == 'ldg':
                 (lo, hi), off = key[1], key[2]
@@ -511,17 +554,7 @@ class ArgumentBuffers(Records):
                 return [4, 4, 1, 1]
             raise UnsupportedError(f'a fetch {key[0]}')
 
-        position = {ATTR_POSITION: pixel[0] + 0.5, ATTR_POSITION + 4: pixel[1] + 0.5}
-        position.update({ATTR_POSITION + 8: 0.5, ATTR_POSITION + 12: 1.0})
-
-        def attribute(address: int) -> int:
-            if address not in position:
-                raise UnsupportedError(f'IPA {address:#x}, an input the test gave no word for')
-            return dr.f32(position[address])
-
-        lanes = [Inputs(attribute, cbuf, texture, -1) for _ in range(4)]
-        run_quad(dr.code(program), lanes, 4)
-        return fetched
+        return texture
 
     def test_the_record_reads_the_handle_tables_and_set_1(self):
         record = self.state('argument_textures')

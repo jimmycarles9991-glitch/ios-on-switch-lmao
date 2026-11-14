@@ -80,8 +80,11 @@ arm_none_eabi(name = "arm_none_eabi")
 
 bazel_dep(name = "rules_rust", version = "0.75.0")
 
-# One change to rules_rust (bazel/rust/rules_rust.patch): a crate whose rustc_flags carry its own -Cmetadata keeps that
-# value alone, as its output hash too, so m2v's crates keep cargo's symbol names and NAK's meson's.
+# Our changes to rules_rust (bazel/rust/rules_rust.patch): a crate whose rustc_flags carry its own -Cmetadata keeps that
+# value alone, as its output hash too, so m2v's crates keep cargo's symbol names and NAK's meson's. The compiles of
+# process_wrapper itself (the bootstrap) expand ${pwd} in the params file a long command line spills into, as they do
+# on the command line, and strip on macOS in the linker, not with the sysroot's rust-objcopy that NVK's toolchain does
+# not declare: their bytes are the same in any sandbox or on a worker.
 single_version_override(
     module_name = "rules_rust",
     patch_strip = 1,
@@ -268,7 +271,9 @@ bazel_dep(name = "rules_apple", version = "5.4.0")
 
 # hw_test_app/rules_apple.patch: the environment plist rules_apple merges into an app's Info.plist leaves out
 # BuildMachineOSBuild (sw_vers), which no action key holds: the app's bytes, and its CDHash in the boot package's trust
-# cache, came from whichever Mac (or macOS build) ran that action first.
+# cache, came from whichever Mac (or macOS build) ran that action first. And MetalCompile reads each shader from stdin:
+# the Metal frontend records the resolved path of a file it opens, so every .air named the checkout or the worker's
+# directory it compiled in, and the metallib link had another action key on each machine.
 single_version_override(
     module_name = "rules_apple",
     patch_strip = 1,

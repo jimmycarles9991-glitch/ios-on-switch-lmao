@@ -45,7 +45,7 @@ class QmdChain(unittest.TestCase):
     def test_analyse_tells_the_steered_outcome_from_the_cpus(self):
         steer = qmdchain.generate()[-1]
 
-        def result(ran):
+        def result(ran: list[int]) -> dict:
             return {'status': 'ok', 'output': {'data': protocol.b64(struct.pack('<16I', *qmdchain.expected(ran)))}}
 
         rows = qmdchain.analyse([steer], {steer['id']: result([0, 1, 3])})['rows']

@@ -49,8 +49,8 @@ DISPATCH = [
         show=('pc', 'lr'),
         source='kernel/switch/diag/crash.c',
         note=(
-            'a thread over its CPU limit, where its loop runs; slice KU (11-10): locationd thread 0x624, 50% for 3 min, '
-            'before this line existed'
+            'a thread over its CPU limit, where its loop runs; slice KU (11-10): locationd thread 0x624, 50% for 3 '
+            'min, before this line existed'
         ),
     ),
 ]

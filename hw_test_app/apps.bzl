@@ -5,6 +5,8 @@
                                                  --ios_multi_cpus says (.bazelrc: arm64)
     reproducible_apps(name, apps, twin)          the apps' .ipa files, and twin's built again in a configuration of
                                                  its own (reproducible_test)
+    metal_airs(name, apps)                       the .air files the apps' shaders compile to, which their
+                                                 default.metallib is linked from (reproducible_test)
 
 rules_apple takes an app's architectures from --ios_multi_cpus only, so a per-app arm64e build needs ios_arm64e's
 outgoing transition.
@@ -105,4 +107,23 @@ reproducible_apps = rule(
         ),
     },
     doc = "<name>/<app>.ipa for each app, and <name>/<twin>.twin.ipa: the twin's app with every action run again.",
+)
+
+_MetalAirInfo = provider(doc = "An app's .air files.", fields = ["airs"])
+
+def _metal_air_aspect_impl(target, _ctx):
+    airs = [air for action in target.actions if action.mnemonic == "MetalCompile" for air in action.outputs.to_list()]
+    return [_MetalAirInfo(airs = depset(airs))]
+
+_metal_air_aspect = aspect(implementation = _metal_air_aspect_impl)
+
+def _metal_airs_impl(ctx):
+    return [DefaultInfo(files = depset(transitive = [app[_MetalAirInfo].airs for app in ctx.attr.apps]))]
+
+metal_airs = rule(
+    implementation = _metal_airs_impl,
+    attrs = {
+        "apps": attr.label_list(mandatory = True, aspects = [_metal_air_aspect], doc = "the ios_application targets"),
+    },
+    doc = "The .air files rules_apple's MetalCompile actions write for the apps' shaders.",
 )

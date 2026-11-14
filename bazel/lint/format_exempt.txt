@@ -8,7 +8,6 @@ drivers/NativeMetal/NativeComputeArtifactStorage.h
 drivers/NativeMetal/NativeMetalArtifactCache.h
 drivers/TegraGM20B/TegraGM20BABI.h
 drivers/TegraGM20BMetal/precompile/PrecompileCompute.h
-drivers/TegraGM20BMetal/raw/pack/ca/caspec27_test.py
 drivers/TegraGM20BMetal/raw/pack/mock_iokit.c
 drivers/TegraGM20BMetal/raw/pack/mock_submission.h
 drivers/TegraGM20BMetal/raw/pack/native_seed.mm

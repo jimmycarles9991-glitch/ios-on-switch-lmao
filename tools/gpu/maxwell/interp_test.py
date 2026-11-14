@@ -187,13 +187,13 @@ class TextureTest(unittest.TestCase):
 
     # TLD_b r4, r0 (x, y), r2 (the handle) .2d rgba, level zero; TLDS r8:r10, r0 (x), r1 (y) .2d level zero at bound
     # index 16
-    TLD_B = 0xDD38 << 48 | 0xF << 31 | 2 << 28 | 2 << 20 | 0 << 8 | 4
-    TLDS = 0xD << 60 | 1 << 59 | 1 << 57 | 2 << 53 | 4 << 50 | 16 << 36 | 10 << 28 | 1 << 20 | 0 << 8 | 8
+    TLD_B_LZ = 0xDD38 << 48 | 0xF << 31 | 2 << 28 | 2 << 20 | 0 << 8 | 4
+    TLDS_LZ = 0xD << 60 | 1 << 59 | 1 << 57 | 2 << 53 | 4 << 50 | 16 << 36 | 10 << 28 | 1 << 20 | 0 << 8 | 8
 
     def test_bound_scalar_and_bindless_loads_read_the_same_texel(self):
         inputs, lane = self.lanes()
-        texture.tld('TLD_b', self.TLD_B, lane, inputs, 4)
-        texture.tlds(self.TLDS, lane, inputs)
+        texture.tld('TLD_b', self.TLD_B_LZ, lane, inputs, 4)
+        texture.tlds(self.TLDS_LZ, lane, inputs)
         self.assertEqual([lane.r(r) for r in (4, 5, 6, 7)], [lane.r(r) for r in (8, 9, 10, 11)])
 
     # TXD_b r4, r0 (the handle r0, x r1, y r2), r8 (dx/dy of x, of y) .2d rgba; TXD r12 the same at bound index 16
@@ -216,7 +216,7 @@ class TextureTest(unittest.TestCase):
 
     def test_a_load_and_a_sample_of_one_texel_are_different_keys(self):
         inputs, lane = self.lanes()
-        texture.tld('TLD_b', self.TLD_B, lane, inputs, 4)
+        texture.tld('TLD_b', self.TLD_B_LZ, lane, inputs, 4)
         texture.tex('TEX_b', self.TEX_B, lane, inputs, 12)
         self.assertNotEqual([lane.r(r) for r in (4, 5, 6, 7)], [lane.r(r) for r in (12, 13, 14, 15)])
 
@@ -237,7 +237,7 @@ class TextureTest(unittest.TestCase):
         self.assertNotEqual([lane.r(r) for r in (8, 9, 10, 11)], first)
 
 
-class AttributeTest(unittest.TestCase):
+class VertexAttributeTest(unittest.TestCase):
     # ALD.64 r4, a[0x80]; AST.64 a[0x90], r4; ALD.O r8, a[0x94] (the output AST wrote); RZ as offset and vertex
     ALD = 0xEFD8 << 48 | 1 << 47 | 0xFF << 39 | 0x80 << 20 | 0xFF << 8 | 4
     AST = 0xEFF0 << 48 | 1 << 47 | 0xFF << 39 | 1 << 32 | 0x90 << 20 | 0xFF << 8 | 4

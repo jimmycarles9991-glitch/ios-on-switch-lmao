@@ -35,8 +35,10 @@ def containers(data: Path) -> dict[str, Path]:
 
 
 def copy_gpu_files(container: Path, out: Path, identifier: str) -> None:
-    """Copy the GPU scenes' failed readbacks (got, want and diff PNGs, the CA sweep's states.txt) and the UI tests'
-    failed pictures (Documents/ui) to out."""
+    """Copy the GPU scenes' failed readbacks and the UI tests' failed pictures to out.
+
+    The readbacks are got, want and diff PNGs and the CA sweep's states.txt; the pictures are in Documents/ui.
+    """
     for folder, kind in (('gpu', 'hwtest-gpu'), ('ui', 'hwtest-ui')):
         files = container / 'Documents' / folder
         if files.is_dir():

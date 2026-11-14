@@ -10,6 +10,8 @@ local storage = { grpc: { client: { address: '127.0.0.1:8980' } } };
     listenAddresses: [a + ':8983' for a in host.listenAddresses],
     authenticationPolicy: allow,
   }],
+  // Drains and the worker and operation lists, for whoever is on the host.
+  buildQueueStateGrpcServers: [{ listenAddresses: ['127.0.0.1:8984'], authenticationPolicy: allow }],
   maximumMessageSizeBytes: 16 * 1024 * 1024,
   global: {
     diagnosticsHttpServer: {
@@ -31,7 +33,7 @@ local storage = { grpc: { client: { address: '127.0.0.1:8980' } } };
     simple: {
       platformKeyExtractor: { action: {} },
       invocationKeyExtractors: [{ correlatedInvocationsId: {} }, { toolInvocationId: {} }],
-      initialSizeClassAnalyzer: { defaultExecutionTimeout: '1800s', maximumExecutionTimeout: '7200s' },
+      initialSizeClassAnalyzer: { defaultExecutionTimeout: '3600s', maximumExecutionTimeout: '7200s' },
     },
   },
   // With no worker of a platform left, Execute fails soon and Bazel builds those actions locally

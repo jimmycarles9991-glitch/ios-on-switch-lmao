@@ -11,7 +11,7 @@ load("@rules_swift//swift:swift_test.bzl", "swift_test")
 load("//bazel/lint:defs.bzl", "lint_files")
 load("//bazel/testing:defs.bzl", "host_test")
 load("//kernel/rules:package.bzl", "ios_binary")
-load(":apps.bzl", "hwtest_app", "ios_arm64e", "reproducible_apps")
+load(":apps.bzl", "hwtest_app", "ios_arm64e", "metal_airs", "reproducible_apps")
 
 package(default_visibility = ["//visibility:public"])
 
@@ -374,6 +374,15 @@ filegroup(
     ]),
 )
 
+# tools/devicerun:hwtest_test walks every Swift file outside host_*; a worker's runfiles hold only what is listed.
+filegroup(
+    name = "swift_sources",
+    srcs = glob(
+        ["**/*.swift"],
+        exclude = ["host_*/**"],
+    ),
+)
+
 swift_interop_hint(
     name = "cpu_clock_module",
     module_name = "SwitchCPUClock",
@@ -420,6 +429,8 @@ cc_library(
 )
 
 exports_files([
+    "SwitchHWTest.entitlements",
+    "SwitchHWTest27.entitlements",
     "cpu/switch_ipi_probe.c",
     "cpu/switch_ipi_probe.h",
     "cpu/switch_workloop_probe.c",
@@ -773,9 +784,23 @@ reproducible_apps(
     twin = ":SwitchHWTest27",
 )
 
+metal_airs(
+    name = "metal_airs",
+    apps = [
+        ":SwitchHWTest17",
+        ":SwitchHWTest27",
+    ],
+)
+
 py_test(
     name = "reproducible_test",
     srcs = ["reproducible_test.py"],
-    data = [":reproducible_apps"],
-    env = {"APPS": "$(rootpaths :reproducible_apps)"},
+    data = [
+        ":metal_airs",
+        ":reproducible_apps",
+    ],
+    env = {
+        "AIRS": "$(rootpaths :metal_airs)",
+        "APPS": "$(rootpaths :reproducible_apps)",
+    },
 )

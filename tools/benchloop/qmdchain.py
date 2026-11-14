@@ -47,8 +47,10 @@ def steered_pointer(to: int) -> list[Instr]:
 
 
 def kernel(index: int, steer: tuple[int, int] | None = None) -> Program:
-    """QMD `index`'s kernel: its marker into output word `index`; with `steer` (QMD a, QMD b), QMD a's dependent
-    pointer rewritten to name QMD b."""
+    """Give QMD `index`'s kernel: its marker into output word `index`.
+
+    With `steer` (QMD a, QMD b), QMD a's dependent pointer is rewritten to name QMD b.
+    """
     body = [*_addresses(), encode.mov32i(MARKER, MARKERS[index]).sched(delay=SAFE_DELAY)]
     if steer:
         body += steered_pointer(steer[1])

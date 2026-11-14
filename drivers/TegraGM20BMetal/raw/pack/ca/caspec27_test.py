@@ -30,22 +30,21 @@ DOWNSAMPLE = (
 )
 
 
-def fetched_attachments(tables, s) -> set[int]:
-    """The colours QuartzCore's uber shader reads as framebuffer fetch inputs (its has_dest_k): with the 'f' flag, every one
-    a generic state has, else its destination run, its memoryless image sources and bcm's backdrop."""
+def fetched_attachments(tables: caspec27.Tables27, s: caspec27.Spec) -> set[int]:
+    """Give the colours QuartzCore's uber shader reads as framebuffer fetch inputs (its has_dest_k).
+
+    With the 'f' flag, that is every one a generic state has, else its destination run, its memoryless image sources
+    and bcm's backdrop.
+    """
     if not s.flag('f'):
         return set()
     images = {img.M for img in s.images[: s.decoded] if img.M >= 0}
     dest = caspec27._reads_dest(tables, s)
     bcm = tables.dec['BlendFunction']['bcm']
-    return {
-        k
-        for k in range(s.A)
-        if s.flag('g') or s.S <= k < s.S + dest or k in images or (k == 1 and s.fragB == bcm)
-    }
+    return {k for k in range(s.A) if s.flag('g') or s.S <= k < s.S + dest or k in images or (k == 1 and s.fragB == bcm)}
 
 
-def written_attachments(tables, s) -> set[int]:
+def written_attachments(tables: caspec27.Tables27, s: caspec27.Spec) -> set[int]:
     atts, _ = caspec27.color_attachments(tables, s)
     return {k for k, a in enumerate(atts) if a[1]}
 
@@ -69,8 +68,11 @@ class States27(unittest.TestCase):
         cls.tables = caspec.Tables(os.path.join(HERE, 'qc-24B119.json'))
 
     def test_read_only_fetchers(self):
-        """The iOS 27 states whose fetches read only colours they never write: the raw path draws their barrier form
-        (raw_storage_form.h fetchesOnlyUnwritten). Every other fetching state writes a colour it fetches."""
+        """Check the iOS 27 states whose fetches read only colours they never write.
+
+        The raw path draws their barrier form (raw_storage_form.h fetchesOnlyUnwritten). Every other fetching state
+        writes a colour it fetches.
+        """
         tables = caspec.Tables(os.path.join(HERE, 'qc-24B119.json')).v27
         with open(os.path.join(HERE, '../../../precompile/ca-names/24B119.txt')) as f:
             names = [line.strip() for line in f if line.strip()]

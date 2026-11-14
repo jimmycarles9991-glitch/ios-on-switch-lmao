@@ -431,7 +431,7 @@ GROUPS: dict[str, list[Check]] = {
             ),
             show=('engine', 'gates', 'ungates', 'resume', 'max'),
             source='kits/SwitchEngineGate/SwitchEngineGate.h',
-            note='DEVELOPMENT kernels: VIC, NVDEC, NVJPG and NVENC idle power-off cycles and the power-on latency (L968)',
+            note='DEVELOPMENT kernels: VIC, NVDEC, NVJPG and NVENC idle power-off cycles and power-on latency (L968)',
         ),
         Check(
             'media.idle-power-failures',

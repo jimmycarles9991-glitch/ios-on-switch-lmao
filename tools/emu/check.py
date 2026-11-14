@@ -47,7 +47,7 @@ class Watch:
     run: Path
     kernel: Path | None
     reach: Finder
-    fail: Finder = lambda log: None
+    fail: Finder = lambda _: None
     panic: str | None = None
     reached: str | None = None
     failed: str | None = None

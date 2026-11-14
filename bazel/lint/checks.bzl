@@ -228,7 +228,7 @@ def _lint_test_impl(ctx):
     files = [f for f in ctx.files.srcs if f.is_source]
     ctx_files = struct(
         clang_format_configs = [f for f in files if f.basename == ".clang-format"],
-        rust = [f for f in files if _is_rs(f)],
+        rust = [f for f in files if _is_rs(f)] + ctx.files.rust_modules,
         github_yaml = [f for f in files if _is_github_yaml(f)],
     )
     reports = []
@@ -292,6 +292,7 @@ lint_test = rule(
     attrs = dict(_TOOL_ATTRS, **{
         "checks": attr.string_list(mandatory = True, doc = "names from CHECKS"),
         "exempt": attr.label(allow_single_file = True, doc = "workspace paths, one a line, whose checks must fail"),
+        "rust_modules": attr.label_list(allow_files = [".rs"], doc = "files outside srcs that a Rust file of srcs declares as a module, which rustfmt reads but does not check"),
         "srcs": attr.label_list(allow_files = True, mandatory = True, doc = "lint_files() groups"),
     }),
     test = True,

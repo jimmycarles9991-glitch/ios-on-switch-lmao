@@ -1,5 +1,8 @@
 """The HW Test apps hold nothing of the Mac that built them, and the iOS 27 app built twice is the same bytes.
 
+Their shaders' .air files (the default.metallib's inputs) name no directory a compile ran in: rules_apple.patch has the
+Metal frontend read each source from stdin, so the action's output is the same in every sandbox and on every worker.
+
 The twin is the app in a configuration of its own (apps.bzl reproducible_apps), so each of its actions ran again, in
 other sandboxes and output directories: what differs between them is what an app rebuilt anywhere could differ by, and
 a rebuilt app whose CDHash is not the boot package's trust cache entry does not launch.
@@ -15,6 +18,8 @@ from pathlib import Path
 HOST_KEYS = {'BuildMachineOSBuild'}
 APPS = os.environ['APPS'].split()
 TWINS = [path for path in APPS if path.endswith('.twin.ipa')]
+AIRS = os.environ['AIRS'].split()
+SHADERS = b'hw_test_app/shaders/'
 
 
 def members(ipa: str) -> dict[str, bytes]:
@@ -38,6 +43,15 @@ class Reproducible(unittest.TestCase):
                 if name.endswith('.app/Info.plist'):
                     with self.subTest(app=name):
                         self.assertEqual(HOST_KEYS & set(plistlib.loads(data)), set())
+
+    def test_no_shader_names_the_directory_it_compiled_in(self):
+        self.assertGreater(len(AIRS), 0)
+        for air in AIRS:
+            data = Path(air).read_bytes()
+            with self.subTest(air=air):
+                self.assertTrue(SHADERS in data, 'no execroot-relative source name')
+                at = data.find(b'/' + SHADERS)
+                self.assertEqual(data[max(0, at - 80) : at + 40] if at >= 0 else b'', b'')
 
 
 if __name__ == '__main__':

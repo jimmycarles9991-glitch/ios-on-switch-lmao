@@ -13,8 +13,8 @@ import sys
 import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'raw', 'pack'))
-import kernels
 import directlink
+import kernels
 import layouts
 import mkpack
 import packfile
@@ -26,32 +26,32 @@ def handle(tex: tuple | None) -> dict:
 
 class RecordsTest(unittest.TestCase):
     def test_dynamic_blend_metadata_round_trip(self):
-        rec = dict(
-            key='samples=1 c0=554:15:1:11:0:0:1:0:0',
-            vs=0,
-            fs=1,
-            blob=[],
-            entries=[],
-            push=[(0x700 + 4 * i, i) for i in range(32)],
-            vbs=[],
-            set_size=0,
-            fetch=True,
-            form='barrier',
-            push_metadata=True,
-            blend_color_word=5,
-            half_blend_color_word=29,
-        )
+        rec = {
+            'key': 'samples=1 c0=554:15:1:11:0:0:1:0:0',
+            'vs': 0,
+            'fs': 1,
+            'blob': [],
+            'entries': [],
+            'push': [(0x700 + 4 * i, i) for i in range(32)],
+            'vbs': [],
+            'set_size': 0,
+            'fetch': True,
+            'form': 'barrier',
+            'push_metadata': True,
+            'blend_color_word': 5,
+            'half_blend_color_word': 29,
+        }
         data = packfile.pipeline_bytes(rec, 0, 0)
         self.assertEqual(len(data), directlink.PIPELINE_BYTES)
-        programs = [dict(image=bytes([i]), data=b'', cbufs=[]) for i in range(2)]
+        programs = [{'image': bytes([i]), 'data': b'', 'cbufs': []} for i in range(2)]
         ids = {directlink.program_id(p): i for i, p in enumerate(programs)}
-        record = dict(
-            pipeline=data,
-            key=rec['key'],
-            programs=programs,
-            samplers=[],
-            probe=dict(index=0, form='barrier', targets=1, records=[dict(regs={})]),
-        )
+        record = {
+            'pipeline': data,
+            'key': rec['key'],
+            'programs': programs,
+            'samplers': [],
+            'probe': {'index': 0, 'form': 'barrier', 'targets': 1, 'records': [{'regs': {}}]},
+        }
         back = directlink.pipeline_of(record, [], ids, [])
         self.assertEqual(packfile.pipeline_bytes(back, 0, 0), data)
         self.assertTrue(back['push_metadata'])
@@ -61,30 +61,35 @@ class RecordsTest(unittest.TestCase):
             directlink.pipeline_of(record, [], ids, [])
 
     def test_vertex_streams_past_stream_0_round_trip_and_a_bind_stride_is_refused(self):
-        rec = dict(
-            key='samples=1 c0=80:15:0 a0=30:0:1:12:1:1 a1=31:0:4:16:1:1',
-            vs=0,
-            fs=1,
-            blob=[],
-            entries=[],
-            push=[],
-            vbs=[{'stream': 0, 'slot': 1, 'stride': 12}],
-            set_size=0,
-            fetch=False,
-            vertex_streams=[5],
-        )
+        rec = {
+            'key': 'samples=1 c0=80:15:0 a0=30:0:1:12:1:1 a1=31:0:4:16:1:1',
+            'vs': 0,
+            'fs': 1,
+            'blob': [],
+            'entries': [],
+            'push': [],
+            'vbs': [{'stream': 0, 'slot': 1, 'stride': 12}],
+            'set_size': 0,
+            'fetch': False,
+            'vertex_streams': [5],
+        }
         data = packfile.pipeline_bytes(rec, 0, 0)
         v21 = len(data) - packfile.PIPELINE_V22.size - packfile.PIPELINE_V21.size
         self.assertEqual(data[v21 : v21 + packfile.PIPELINE_V21.size], bytes(16) + bytes([5]) + bytes(7))
-        programs = [dict(image=bytes([i]), data=b'', cbufs=[]) for i in range(2)]
+        programs = [{'image': bytes([i]), 'data': b'', 'cbufs': []} for i in range(2)]
         ids = {directlink.program_id(p): i for i, p in enumerate(programs)}
-        record = dict(
-            pipeline=data,
-            key=rec['key'],
-            programs=programs,
-            samplers=[],
-            probe=dict(index=0, form='', targets=1, records=[dict(regs={0x1C00: 0x1000 | 12, 0x1C10: 0x1000 | 16})]),
-        )
+        record = {
+            'pipeline': data,
+            'key': rec['key'],
+            'programs': programs,
+            'samplers': [],
+            'probe': {
+                'index': 0,
+                'form': '',
+                'targets': 1,
+                'records': [{'regs': {0x1C00: 0x1000 | 12, 0x1C10: 0x1000 | 16}}],
+            },
+        }
         back = directlink.pipeline_of(record, [], ids, [])
         self.assertEqual(back['vertex_streams'], [5])
         self.assertEqual(packfile.pipeline_bytes(back, 0, 0), data)
@@ -102,60 +107,63 @@ class RecordsTest(unittest.TestCase):
         self.assertEqual(packfile.pipeline_bytes(back, 0, 0), record['pipeline'])
 
     def test_a_two_plane_record_keeps_its_sampled_slots_and_flags(self):
-        rec = dict(
-            key='samples=1 c0=550:15:0',
-            vs=0,
-            fs=1,
-            blob=[],
-            entries=[],
-            push=[],
-            vbs=[],
-            set_size=0,
-            fetch=False,
-            turn_refused=True,
-            two_plane=True,
-            xr_slots=0x8001,
-        )
+        rec = {
+            'key': 'samples=1 c0=550:15:0',
+            'vs': 0,
+            'fs': 1,
+            'blob': [],
+            'entries': [],
+            'push': [],
+            'vbs': [],
+            'set_size': 0,
+            'fetch': False,
+            'turn_refused': True,
+            'two_plane': True,
+            'xr_slots': 0x8001,
+        }
         data = packfile.pipeline_bytes(rec, 0, 0)
         self.assertEqual(data[-4:], struct.pack('<HH', 0x8001, 0))
         self.assertEqual(directlink.PIPELINE.unpack_from(data)[-1] & 0xE0, 0xC0)
-        programs = [dict(image=bytes([i]), data=b'', cbufs=[]) for i in range(2)]
+        programs = [{'image': bytes([i]), 'data': b'', 'cbufs': []} for i in range(2)]
         ids = {directlink.program_id(p): i for i, p in enumerate(programs)}
-        record = dict(
-            pipeline=data,
-            key=rec['key'],
-            programs=programs,
-            samplers=[],
-            probe=dict(index=0, form='', targets=0b11, records=[dict(regs={})]),
-        )
+        record = {
+            'pipeline': data,
+            'key': rec['key'],
+            'programs': programs,
+            'samplers': [],
+            'probe': {'index': 0, 'form': '', 'targets': 0b11, 'records': [{'regs': {}}]},
+        }
         back = directlink.pipeline_of(record, [], ids, [])
         self.assertEqual((back['turn_refused'], back['two_plane'], back['xr_slots']), (True, True, 0x8001))
         self.assertEqual(packfile.pipeline_bytes(back, 0, 0), data)
 
     def test_a_vertex_stream_fetches_at_its_layouts_stride_alone(self):
-        rec = dict(
-            key='samples=1 c0=80:15:0 a0=30:0:1:12:1:1 a1=31:0:4:4100:1:1',
-            vs=0,
-            fs=1,
-            blob=[],
-            entries=[],
-            push=[],
-            vbs=[{'stream': 0, 'slot': 1, 'stride': 12}],
-            set_size=0,
-            fetch=False,
-            vertex_streams=[5],
-        )
-        programs = [dict(image=bytes([i]), data=b'', cbufs=[]) for i in range(2)]
+        rec = {
+            'key': 'samples=1 c0=80:15:0 a0=30:0:1:12:1:1 a1=31:0:4:4100:1:1',
+            'vs': 0,
+            'fs': 1,
+            'blob': [],
+            'entries': [],
+            'push': [],
+            'vbs': [{'stream': 0, 'slot': 1, 'stride': 12}],
+            'set_size': 0,
+            'fetch': False,
+            'vertex_streams': [5],
+        }
+        programs = [{'image': bytes([i]), 'data': b'', 'cbufs': []} for i in range(2)]
         ids = {directlink.program_id(p): i for i, p in enumerate(programs)}
-        record = dict(
-            pipeline=packfile.pipeline_bytes(rec, 0, 0),
-            key=rec['key'],
-            programs=programs,
-            samplers=[],
-            probe=dict(
-                index=0, form='', targets=1, records=[dict(regs={0x1C00: 0x1000 | 12, 0x1C10: 0x1000 | (4100 & 0xFFF)})]
-            ),
-        )
+        record = {
+            'pipeline': packfile.pipeline_bytes(rec, 0, 0),
+            'key': rec['key'],
+            'programs': programs,
+            'samplers': [],
+            'probe': {
+                'index': 0,
+                'form': '',
+                'targets': 1,
+                'records': [{'regs': {0x1C00: 0x1000 | 12, 0x1C10: 0x1000 | (4100 & 0xFFF)}}],
+            },
+        }
         with self.assertRaisesRegex(ValueError, 'vertex stream 1 of buffer 4'):
             directlink.pipeline_of(record, [], ids, [])
         record['pipeline'] = packfile.pipeline_bytes(dict(rec, vertex_streams=[]), 0, 0)
@@ -166,34 +174,34 @@ class RecordsTest(unittest.TestCase):
 
     def test_record_v15_tail_round_trip(self):
         uniform = bytes([0, 1, 2, 9]) + b'\xff\x00\x00\x00' * 7
-        rec = dict(
-            key='samples=1 c0=80:15:0',
-            vs=0,
-            fs=1,
-            blob=[],
-            entries=[handle(('fetch', 0))],
-            push=[],
-            vbs=[],
-            set_size=256,
-            fetch=True,
-            bound_entries=1,
-            uniform=uniform,
-            fetch_rung=[1, 0, 0, 0, 0, 0, 0, 0],
-        )
-        programs = [dict(image=bytes([i]), data=b'', cbufs=[], gprs=24, bound_textures=0) for i in range(3)]
+        rec = {
+            'key': 'samples=1 c0=80:15:0',
+            'vs': 0,
+            'fs': 1,
+            'blob': [],
+            'entries': [handle(('fetch', 0))],
+            'push': [],
+            'vbs': [],
+            'set_size': 256,
+            'fetch': True,
+            'bound_entries': 1,
+            'uniform': uniform,
+            'fetch_rung': [1, 0, 0, 0, 0, 0, 0, 0],
+        }
+        programs = [{'image': bytes([i]), 'data': b'', 'cbufs': [], 'gprs': 24, 'bound_textures': 0} for i in range(3)]
         ids = {directlink.program_id(p): i for i, p in enumerate(programs)}
-        data = packfile.pipeline_bytes(dict(rec, variants=[dict(stage=1, assume=1, program=2)]), 0, 0, 5)
+        data = packfile.pipeline_bytes(dict(rec, variants=[{'stage': 1, 'assume': 1, 'program': 2}]), 0, 0, 5)
         self.assertEqual(len(data), directlink.PIPELINE_BYTES)
-        record = dict(
-            pipeline=data,
-            key=rec['key'],
-            programs=programs[:2],
-            samplers=[],
-            variants=[dict(assume=1, program=programs[2])],
-            probe=dict(index=0, form='', targets=1, records=[dict(regs={})]),
-        )
+        record = {
+            'pipeline': data,
+            'key': rec['key'],
+            'programs': programs[:2],
+            'samplers': [],
+            'variants': [{'assume': 1, 'program': programs[2]}],
+            'probe': {'index': 0, 'form': '', 'targets': 1, 'records': [{'regs': {}}]},
+        }
         back = directlink.pipeline_of(record, [], ids, [])
-        self.assertEqual(back['variants'], [dict(stage=1, assume=1, program=2)])
+        self.assertEqual(back['variants'], [{'stage': 1, 'assume': 1, 'program': 2}])
         self.assertEqual((back['bound_entries'], back['uniform'], back['fetch_rung']), (1, uniform, rec['fetch_rung']))
         self.assertEqual(back['memory_entries'], packfile.ALL_ENTRIES)
         self.assertEqual(
@@ -291,28 +299,28 @@ class RecordsTest(unittest.TestCase):
         self.assertEqual((tails[0][24:], tails[1][24:]), ((1, 2, 2, 4, 2), (0, 0, 0, 0, 0)))
 
     def test_record_v22_written_formats_round_trip(self):
-        rec = dict(
-            key='samples=1 c0=80:15:0 | v a | f b | wtex=1:23',
-            vs=0,
-            fs=1,
-            blob=[],
-            entries=[handle(('slot', 1))],
-            push=[],
-            vbs=[],
-            set_size=256,
-            fetch=False,
-            written_format=[0, 23] + [0] * 14,
-        )
-        programs = [dict(image=bytes([i]), data=b'', cbufs=[], gprs=24, bound_textures=0) for i in range(2)]
+        rec = {
+            'key': 'samples=1 c0=80:15:0 | v a | f b | wtex=1:23',
+            'vs': 0,
+            'fs': 1,
+            'blob': [],
+            'entries': [handle(('slot', 1))],
+            'push': [],
+            'vbs': [],
+            'set_size': 256,
+            'fetch': False,
+            'written_format': [0, 23] + [0] * 14,
+        }
+        programs = [{'image': bytes([i]), 'data': b'', 'cbufs': [], 'gprs': 24, 'bound_textures': 0} for i in range(2)]
         ids = {directlink.program_id(p): i for i, p in enumerate(programs)}
         data = packfile.pipeline_bytes(rec, 0, 0)
-        record = dict(
-            pipeline=data,
-            key=rec['key'],
-            programs=programs,
-            samplers=[],
-            probe=dict(index=0, form='', targets=1, records=[dict(regs={})]),
-        )
+        record = {
+            'pipeline': data,
+            'key': rec['key'],
+            'programs': programs,
+            'samplers': [],
+            'probe': {'index': 0, 'form': '', 'targets': 1, 'records': [{'regs': {}}]},
+        }
         back = directlink.pipeline_of(record, [], ids, [])
         self.assertEqual(back['written_format'], rec['written_format'])
         self.assertEqual(packfile.pipeline_bytes(back, 0, 0), data)
@@ -369,34 +377,39 @@ class RecordsTest(unittest.TestCase):
         self.assertEqual(strings[name:].split(b'\0')[0], b' | tests=3')
 
     def test_ordered_storage_metadata_round_trip_and_explicit_registers(self):
-        rec = dict(
-            key='samples=1 c0=81:15:0:1:0:0:1:0:0',
-            vs=0,
-            fs=1,
-            blob=[],
-            entries=[handle(('fetch', 0))],
-            push=[],
-            vbs=[],
-            set_size=256,
-            fetch=True,
-            storage_mask=1,
-            storage_write_mask=1,
-            storage_samples=1,
-            storage_tests=2,
-            storage_tic=[0x24912] + [0] * 7,
-            storage_blend_mask=1,
-            storage_blend_model=71,
-        )
+        rec = {
+            'key': 'samples=1 c0=81:15:0:1:0:0:1:0:0',
+            'vs': 0,
+            'fs': 1,
+            'blob': [],
+            'entries': [handle(('fetch', 0))],
+            'push': [],
+            'vbs': [],
+            'set_size': 256,
+            'fetch': True,
+            'storage_mask': 1,
+            'storage_write_mask': 1,
+            'storage_samples': 1,
+            'storage_tests': 2,
+            'storage_tic': [0x24912] + [0] * 7,
+            'storage_blend_mask': 1,
+            'storage_blend_model': 71,
+        }
         data = packfile.pipeline_bytes(rec, 0, 0)
-        programs = [dict(image=bytes([i]), data=b'', cbufs=[]) for i in range(2)]
+        programs = [{'image': bytes([i]), 'data': b'', 'cbufs': []} for i in range(2)]
         ids = {directlink.program_id(p): i for i, p in enumerate(programs)}
-        record = dict(
-            pipeline=data,
-            key=rec['key'],
-            programs=programs,
-            samplers=[],
-            probe=dict(index=0, form='', targets=1, records=[dict(regs={0x0210: 1, 0x0754: 1, 0x1224: 2, 0x1A00: 0})]),
-        )
+        record = {
+            'pipeline': data,
+            'key': rec['key'],
+            'programs': programs,
+            'samplers': [],
+            'probe': {
+                'index': 0,
+                'form': '',
+                'targets': 1,
+                'records': [{'regs': {0x0210: 1, 0x0754: 1, 0x1224: 2, 0x1A00: 0}}],
+            },
+        }
         back = directlink.pipeline_of(record, [], ids, [])
         self.assertEqual(back['storage_mask'], 1)
         self.assertEqual(back['storage_write_mask'], 1)
@@ -408,7 +421,17 @@ class RecordsTest(unittest.TestCase):
         self.assertEqual(directlink.PIPELINE.unpack_from(packfile.pipeline_bytes(back, 0, 0))[-1] & 8, 8)
 
     def test_legacy_records_do_not_claim_push_metadata(self):
-        rec = dict(key='samples=1', vs=0, fs=1, blob=[], entries=[], push=[], vbs=[], set_size=0, fetch=False)
+        rec = {
+            'key': 'samples=1',
+            'vs': 0,
+            'fs': 1,
+            'blob': [],
+            'entries': [],
+            'push': [],
+            'vbs': [],
+            'set_size': 0,
+            'fetch': False,
+        }
         data = packfile.pipeline_bytes(rec, 0, 0)
         self.assertEqual(directlink.PIPELINE.unpack_from(data)[-1] & 4, 0)
         v21 = len(data) - packfile.PIPELINE_V22.size - packfile.PIPELINE_V21.size
@@ -418,38 +441,38 @@ class RecordsTest(unittest.TestCase):
         self.assertEqual(data[v21:], bytes(packfile.PIPELINE_V21.size + packfile.PIPELINE_V22.size))
 
     def test_shader_test_views_and_push_placements_round_trip(self):
-        rec = dict(
-            key='samples=4 ds=260/260 c0=80:15:0',
-            vs=0,
-            fs=1,
-            blob=[],
-            entries=[handle(('fetch', 0)), handle(('depth_test', 0)), handle(('stencil_test', 0))],
-            push=[(0x700 + 4 * i, i) for i in range(8)],
-            vbs=[],
-            set_size=256,
-            fetch=True,
-            push_metadata=True,
-            storage_mask=1,
-            storage_write_mask=1,
-            storage_samples=4,
-            storage_tests=4,
-            storage_tic=[0x24912] + [0] * 7,
-            depth_test_word=1,
-            stencil_test_word=5,
-            test_flags=3,
-            depth_tic=100,
-            stencil_tic=13,
-        )
+        rec = {
+            'key': 'samples=4 ds=260/260 c0=80:15:0',
+            'vs': 0,
+            'fs': 1,
+            'blob': [],
+            'entries': [handle(('fetch', 0)), handle(('depth_test', 0)), handle(('stencil_test', 0))],
+            'push': [(0x700 + 4 * i, i) for i in range(8)],
+            'vbs': [],
+            'set_size': 256,
+            'fetch': True,
+            'push_metadata': True,
+            'storage_mask': 1,
+            'storage_write_mask': 1,
+            'storage_samples': 4,
+            'storage_tests': 4,
+            'storage_tic': [0x24912] + [0] * 7,
+            'depth_test_word': 1,
+            'stencil_test_word': 5,
+            'test_flags': 3,
+            'depth_tic': 100,
+            'stencil_tic': 13,
+        }
         data = packfile.pipeline_bytes(rec, 0, 0)
-        programs = [dict(image=bytes([i]), data=b'', cbufs=[]) for i in range(2)]
+        programs = [{'image': bytes([i]), 'data': b'', 'cbufs': []} for i in range(2)]
         ids = {directlink.program_id(p): i for i, p in enumerate(programs)}
-        record = dict(
-            pipeline=data,
-            key=rec['key'],
-            programs=programs,
-            samplers=[],
-            probe=dict(index=0, form='', targets=1, records=[dict(regs={0x0754: 20, 0x1224: 2})]),
-        )
+        record = {
+            'pipeline': data,
+            'key': rec['key'],
+            'programs': programs,
+            'samplers': [],
+            'probe': {'index': 0, 'form': '', 'targets': 1, 'records': [{'regs': {0x0754: 20, 0x1224: 2}}]},
+        }
         back = directlink.pipeline_of(record, [], ids, [])
         self.assertEqual(
             [entry['tex'] for entry in back['entries']], [('fetch', 0), ('depth_test', 0), ('stencil_test', 0)]

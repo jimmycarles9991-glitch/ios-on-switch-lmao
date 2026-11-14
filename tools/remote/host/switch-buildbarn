@@ -1,5 +1,6 @@
 #!/bin/sh
-# One Buildbarn service of a build host, as its LaunchDaemon starts it: `switch-buildbarn storage|scheduler|runner|worker`.
+# One Buildbarn service of a build host, as its LaunchDaemon starts it:
+# `switch-buildbarn storage|proxy|scheduler|runner|worker`.
 # The runner and the worker advertise the Xcode at /Applications/Xcode.app, the path every client's actions name.
 set -eu
 
@@ -58,6 +59,7 @@ xcode_env() {
 # exec, so that launchd stops the process it started.
 case ${1:-} in
     storage) exec "$here/bb_storage" "$here/storage.jsonnet" ;;
+    proxy) exec "$here/bb_storage" "$here/proxy.jsonnet" ;;
     scheduler) exec "$here/bb_scheduler" "$here/scheduler.jsonnet" ;;
     runner)
         worker_dirs
@@ -70,7 +72,7 @@ case ${1:-} in
         exec "$here/bb_worker" "$here/worker.jsonnet"
         ;;
     *)
-        echo "usage: switch-buildbarn storage|scheduler|runner|worker" >&2
+        echo "usage: switch-buildbarn storage|proxy|scheduler|runner|worker" >&2
         exit 2
         ;;
 esac

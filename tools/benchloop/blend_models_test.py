@@ -14,13 +14,13 @@ PAIRS = {
 CASES = [(s, a) for a in range(256) for s in range(a + 1)]
 
 
-def probe_channel(pixel: int, channel: int, pair: str) -> tuple[float, float, int, int, str, str]:
+def probe_channel(pixel: int, channel: int, pair: str) -> bm.Blend:
     """X1BlendProbes' inputs at pixel.channel: halves nearest k / 255, destination (255 - d, 7d + 3, d, d)."""
     si, ai = CASES[pixel >> 8]
     d = pixel & 255
     dst = (255 - d, (d * 7 + 3) & 255, d, d)[channel]
     s, sa = bm.half(si / 255), bm.half(ai / 255)
-    return (sa if channel == 3 else s), sa, dst, d, *PAIRS[pair]
+    return bm.Blend(sa if channel == 3 else s, sa, dst, d, *PAIRS[pair])
 
 
 class BlendModelsTest(unittest.TestCase):
@@ -39,18 +39,18 @@ class BlendModelsTest(unittest.TestCase):
             ('din', 34824, 0, 15, 16),
         ):
             args = probe_channel(pixel, channel, pair)
-            self.assertEqual(bm.chip(*args), device, pair)
-            self.assertEqual(bm.apple(*args), apple, pair)
+            self.assertEqual(bm.chip(args), device, pair)
+            self.assertEqual(bm.apple(args), apple, pair)
 
     def test_add_is_exact(self) -> None:
         for pixel in range(0, 8_421_376, 9_973):
             for channel in range(4):
                 args = probe_channel(pixel, channel, 'add')
-                self.assertEqual(bm.chip(*args), bm.apple(*args))
+                self.assertEqual(bm.chip(args), bm.apple(args))
 
     def test_one_rounding_of_the_sum(self) -> None:
-        args = (bm.half(1 / 255), bm.half(200 / 255), 183, 12, 'dst_alpha', 'one_minus_src_alpha')
-        self.assertEqual((bm.chip(*args), bm.per_product(*args)), (40, 39))
+        args = bm.Blend(bm.half(1 / 255), bm.half(200 / 255), 183, 12, 'dst_alpha', 'one_minus_src_alpha')
+        self.assertEqual((bm.chip(args), bm.per_product(args)), (40, 39))
 
     def test_fit_counts_readings(self) -> None:
         reading = (*probe_channel(347, 1, 'sov'), 127)

@@ -38,10 +38,12 @@ def rounding(fmt: str, n: int, prod: list[dict]) -> str:
         return f'{fmt} {n}x: one ties-down rounding of the mean, the store rule' + (
             ' (4x: one rounding, not two 2:1 steps)' if n == 4 else ''
         )
-    if _zero(prod, 'up'):
-        return f"{fmt} {n}x: already Metal's rule"
-    if _zero(prod, 'q15'):
-        return f'{fmt} {n}x: each code read as round(c * 2^15 / 255), then one ties-down rounding of the mean'
+    for model, reading in (
+        ('up', "already Metal's rule"),
+        ('q15', 'each code read as round(c * 2^15 / 255), then one ties-down rounding of the mean'),
+    ):
+        if _zero(prod, model):
+            return f'{fmt} {n}x: {reading}'
     for pairing in ('x', 'y'):
         if n == 4 and _zero(prod, f'pair_{pairing}_down'):
             return f'{fmt} 4x: two rounded 2:1 steps, {pairing} pairs first'

@@ -21,3 +21,5 @@ reflow = true
 # The agents' rules (CLAUDE.md links to it): each rule is a top-level section, with no title above them. A glob: rumdl
 # resolves CLAUDE.md, and every file in the checks' sandbox, to its real path.
 "**/AGENTS.md" = ["MD041"]
+# CLAUDE.md is the symlink to it; a check action sees the link's own path, so the glob above does not match.
+"CLAUDE.md" = ["MD041"]

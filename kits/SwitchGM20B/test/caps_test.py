@@ -41,7 +41,7 @@ class CapsTest(unittest.TestCase):
     def broken(self, table: str, old: str, new: str):
         scratch = tempfile.mkdtemp(dir=os.environ.get('TEST_TMPDIR'))
         for name in ('formats', 'limits', 'features', 'methods'):
-            shutil.copy(os.path.join(self.args.tables, name + '.tsv'), scratch)
+            shutil.copyfile(os.path.join(self.args.tables, name + '.tsv'), os.path.join(scratch, name + '.tsv'))
         path = os.path.join(scratch, table + '.tsv')
         with open(path, encoding='utf-8') as f:
             text = f.read()

@@ -418,7 +418,7 @@ def _compute(c: object) -> None:
 
 
 def _chain(c: dict) -> None:
-    """Check a QMD chain: the kernels after the experiment's own, and per QMD before the last whether it schedules it."""
+    """Check a QMD chain: the kernels after the experiment's own, and per QMD before the last if it schedules it."""
     chain = c.get('chain')
     _require(isinstance(chain, list) and 1 <= len(chain) <= MAX_CHAIN, f'compute.chain: 1..{MAX_CHAIN} kernels')
     _require('output' in c, "compute.chain: an output buffer for the QMDs' releases")

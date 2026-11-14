@@ -4,10 +4,10 @@ import random
 import struct
 from pathlib import Path
 
-from semantic_execution import MASK, TARGET, execute, program
+from semantic_execution import MASK, TARGET, Dispatch, Extras, execute, program
 
 
-def run(root, log):
+def run(root: Path, log: Path) -> None:
     before = random.Random(256).randbytes(4096)
     expected = [(i * 73 + 19) ^ (i * i * 11) for i in range(256)]
     checks = 0
@@ -24,12 +24,13 @@ def run(root, log):
                     at = offset + index * 4
                     if at + 4 <= length:
                         struct.pack_into('<I', want, at, expected[index & 255])
-                    got = execute(code, index, b'', before, 0, offset, 0, length, constant_words=cb)
+                    got = execute(code, Dispatch(index, b'', before, 0, offset, 0, length), Extras(cb))
                     assert got == want, (route, index, offset, length)
                     checks += 1
         cb[(1, 0)] ^= 1
-        bad = execute(code, 0, b'', before, 0, offset, 0, length, constant_words=cb)
-        assert bad != execute(code, 0, b'', before, 0, offset, 0, length, constant_words=cb | {(1, 0): expected[0]})
+        whole = Dispatch(0, b'', before, 0, offset, 0, length)
+        bad = execute(code, whole, Extras(cb))
+        assert bad != execute(code, whole, Extras(cb | {(1, 0): expected[0]}))
     print(f'PASS {checks} constant-table register executions and two data controls')
 
 

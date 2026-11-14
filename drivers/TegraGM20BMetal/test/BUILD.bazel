@@ -5151,7 +5151,7 @@ py_binary(
 genrule(
     name = "wide_index",
     outs = ["wide_index.bin"],
-    cmd = "$(location :wide_index_pack) $@",
+    cmd = "$(execpath :wide_index_pack) $@",
     tools = [":wide_index_pack"],
 )
 

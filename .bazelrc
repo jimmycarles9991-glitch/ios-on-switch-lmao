@@ -141,11 +141,6 @@ build:rbe --spawn_strategy=remote,sandboxed
 # the shared cache on the Macs that name an executor (every cache user expands rbe through remote, executor or not).
 build:rbe --remote_local_fallback
 build:rbe --remote_download_outputs=toplevel
-# rules_rust's process_wrapper is stripped (-Cstrip=symbols) with rust-objcopy from the toolchain's sysroot, and NVK's
-# 1.96.1 toolchain (third_party/mesa/bazel/repos.bzl) does not declare it: a worker has no such file, while the
-# sandbox's links lead into the repository that does. Declaring it there would change NVK's compiler identity, so that
-# one small compile stays here.
-build:rbe "--strategy_regexp=^Compiling Rust .without process_wrapper=sandboxed"
 
 # nom2v: the m2v deletion's dry run. Bazel loads m2v's runtime crate, Mesa's NVK and its dylibs (//gpu/nvk) as deleted
 # packages, and leaves out the tests tagged m2v (they test the fallback itself, or still need it). With --keep_going,
